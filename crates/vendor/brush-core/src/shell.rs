@@ -412,7 +412,9 @@ impl<SE: extensions::ShellExtensions> Shell<SE> {
 	/// before expansion: a quoted word is never an alias, and no word is one
 	/// while `expand_aliases` is off.
 	pub fn command_word_alias(&self, word: &str) -> Option<&str> {
-		if !self.options.expand_aliases || crate::alias_expansion::is_quoted(word) {
+		if !self.options.expand_aliases
+			|| crate::alias_expansion::is_quoted(word, self.options.extended_globbing)
+		{
 			return None;
 		}
 		self.aliases.get(word).map(String::as_str)

@@ -589,72 +589,190 @@ pub fn parse_brace_expansions(
 }
 
 /// Whether `word`, as written, is quoted the way Bash's reader counts it for
-/// aliases: it holds a backslash (not before a newline), a single- or
-/// double-quoted string, `$'...'` or `$"..."` outside every substitution and
-/// expansion. Quotes inside `$(...)`, backquotes, `${...}`, `$((...))`,
-/// `$[...]` or a process substitution do not count, nor does a backquoted
-/// string itself.
-pub fn is_quoted_for_alias(word: &str) -> bool {
+/// aliases (`quoted` in `read_token_word` in Bash's `parse.y`): it holds a
+/// backslash (not before a newline), a single- or double-quoted string,
+/// `$'...'` or `$"..."` outside every substitution and expansion.
+///
+/// Bash reads backquotes, `$(...)`, `<(...)`, `>(...)`, `${...}`, `$[...]`
+/// and, with `extended_globbing`, an extended pattern such as `@(...)` as one
+/// piece each, with their own nested quoting, so nothing inside them counts.
+pub fn is_quoted_for_alias(word: &str, extended_globbing: bool) -> bool {
     let chars: Vec<char> = word.chars().collect();
-    // The closing characters of the substitutions and expansions open here.
-    let mut closers: Vec<char> = Vec::new();
     let mut index = 0;
     while index < chars.len() {
-        let c = chars[index];
         let next = chars.get(index + 1).copied();
-        let top_level = closers.is_empty();
-        match c {
-            '\\' => {
-                if top_level && next.is_some_and(|next| next != '\n') {
-                    return true;
-                }
-                index += 2;
-                continue;
+        index = match (chars[index], next) {
+            ('\\', Some('\n')) => index + 2,
+            ('\\', Some(_)) | ('\'' | '"', _) | ('$', Some('\'' | '"')) => return true,
+            ('`', _) => skip_backquoted(&chars, index + 1),
+            ('$' | '<' | '>', Some('(')) => skip_command_text(&chars, index + 2),
+            ('$', Some('{')) => skip_braced(&chars, index + 2),
+            ('$', Some('[')) => skip_matched(&chars, index + 2, '[', ']'),
+            ('@' | '!' | '?' | '+' | '*', Some('(')) if extended_globbing => {
+                skip_matched(&chars, index + 2, '(', ')')
             }
-            '\'' | '"' if top_level => return true,
-            '\'' => {
-                index += 1;
-                while index < chars.len() && chars[index] != '\'' {
-                    index += 1;
-                }
+            _ => index + 1,
+        };
+    }
+    false
+}
+
+/// Skips a construct that can appear inside another one, starting at `index`;
+/// returns the index after it, or `None` when `chars[index]` begins none.
+fn skip_nested(chars: &[char], index: usize) -> Option<usize> {
+    let next = chars.get(index + 1).copied();
+    Some(match (chars[index], next) {
+        ('\\', _) => index + 2,
+        ('\'', _) => skip_until(chars, index + 1, '\''),
+        ('"', _) => skip_double_quoted(chars, index + 1),
+        ('`', _) => skip_backquoted(chars, index + 1),
+        ('$', Some('\'')) => skip_ansi_c_quoted(chars, index + 2),
+        ('$', Some('"')) => skip_double_quoted(chars, index + 2),
+        ('$', Some('(')) => skip_command_text(chars, index + 2),
+        ('$', Some('{')) => skip_braced(chars, index + 2),
+        ('$', Some('[')) => skip_matched(chars, index + 2, '[', ']'),
+        _ => return None,
+    })
+}
+
+/// Skips to just after the next `close`, starting at `index`.
+fn skip_until(chars: &[char], mut index: usize, close: char) -> usize {
+    while index < chars.len() && chars[index] != close {
+        index += 1;
+    }
+    index + 1
+}
+
+/// Skips the rest of a `$'...'` string: a backslash escapes the next character.
+fn skip_ansi_c_quoted(chars: &[char], mut index: usize) -> usize {
+    while index < chars.len() && chars[index] != '\'' {
+        index += if chars[index] == '\\' { 2 } else { 1 };
+    }
+    index + 1
+}
+
+/// Skips the rest of a backquoted string: a backslash escapes the next
+/// character.
+fn skip_backquoted(chars: &[char], mut index: usize) -> usize {
+    while index < chars.len() && chars[index] != '`' {
+        index += if chars[index] == '\\' { 2 } else { 1 };
+    }
+    index + 1
+}
+
+/// Skips the rest of a double-quoted string, with the substitutions in it.
+fn skip_double_quoted(chars: &[char], mut index: usize) -> usize {
+    while index < chars.len() && chars[index] != '"' {
+        index = match (chars[index], chars.get(index + 1).copied()) {
+            ('\\', _) => index + 2,
+            ('`', _) => skip_backquoted(chars, index + 1),
+            ('$', Some('(')) => skip_command_text(chars, index + 2),
+            ('$', Some('{')) => skip_braced(chars, index + 2),
+            ('$', Some('[')) => skip_matched(chars, index + 2, '[', ']'),
+            _ => index + 1,
+        };
+    }
+    index + 1
+}
+
+/// Skips the rest of a `${...}` expansion: only braces nest in it.
+fn skip_braced(chars: &[char], index: usize) -> usize {
+    skip_matched(chars, index, '{', '}')
+}
+
+/// Skips to just after the `close` that matches an `open` already read.
+fn skip_matched(chars: &[char], mut index: usize, open: char, close: char) -> usize {
+    let mut depth = 1;
+    while index < chars.len() {
+        if let Some(after) = skip_nested(chars, index) {
+            index = after;
+            continue;
+        }
+        if chars[index] == open {
+            depth += 1;
+        } else if chars[index] == close {
+            depth -= 1;
+            if depth == 0 {
+                return index + 1;
             }
-            '"' => {
-                index += 1;
-                while index < chars.len() && chars[index] != '"' {
-                    if chars[index] == '\\' {
-                        index += 1;
-                    }
-                    index += 1;
-                }
-            }
-            '`' => {
-                if closers.last() == Some(&'`') {
-                    closers.pop();
-                } else {
-                    closers.push('`');
-                }
-            }
-            '$' | '<' | '>' if next == Some('(') => {
-                closers.push(')');
-                index += 1;
-            }
-            '$' if next == Some('{') => {
-                closers.push('}');
-                index += 1;
-            }
-            '$' if next == Some('[') => {
-                closers.push(']');
-                index += 1;
-            }
-            '(' if !top_level => closers.push(')'),
-            ')' | '}' | ']' if closers.last() == Some(&c) => {
-                closers.pop();
-            }
-            _ => (),
         }
         index += 1;
     }
-    false
+    index
+}
+
+/// Skips the rest of the commands in a `$(...)`, `<(...)` or `>(...)`: quotes
+/// and substitutions nest, a comment runs to the end of its line, and a `case`
+/// pattern's closing `)` does not close the substitution.
+fn skip_command_text(chars: &[char], mut index: usize) -> usize {
+    let mut depth = 1;
+    // Open `case` commands, and whether a pattern is being read in the
+    // innermost one.
+    let mut cases = 0;
+    let mut in_pattern = false;
+    let mut case_word_read = false;
+    let mut word_start = true;
+    while index < chars.len() {
+        let c = chars[index];
+        if word_start && c.is_ascii_alphabetic() {
+            let end = chars[index..]
+                .iter()
+                .position(|c| !c.is_ascii_alphanumeric() && *c != '_')
+                .map_or(chars.len(), |len| index + len);
+            let word: String = chars[index..end].iter().collect();
+            match word.as_str() {
+                "case" if !in_pattern => case_word_read = true,
+                "in" if case_word_read => {
+                    case_word_read = false;
+                    cases += 1;
+                    in_pattern = true;
+                }
+                "esac" if cases > 0 => {
+                    cases -= 1;
+                    in_pattern = false;
+                }
+                _ => (),
+            }
+            index = end;
+            word_start = false;
+            continue;
+        }
+        if word_start && c == '#' {
+            index = skip_until(chars, index, '\n');
+            continue;
+        }
+        if let Some(after) = skip_nested(chars, index) {
+            index = after;
+            word_start = false;
+            continue;
+        }
+        match c {
+            '(' if in_pattern => (),
+            '(' => depth += 1,
+            ')' if in_pattern => in_pattern = false,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return index + 1;
+                }
+            }
+            ';' if cases > 0 && chars.get(index + 1) == Some(&';') => {
+                in_pattern = true;
+                index += 1;
+                if chars.get(index + 1) == Some(&'&') {
+                    index += 1;
+                }
+            }
+            ';' if cases > 0 && chars.get(index + 1) == Some(&'&') => {
+                in_pattern = true;
+                index += 1;
+            }
+            _ => (),
+        }
+        word_start = matches!(c, ' ' | '\t' | '\n' | ';' | '&' | '|' | '(' | ')');
+        index += 1;
+    }
+    index
 }
 
 /// Parses `word` as a scalar assignment (`name=value`, `name+=value`,
@@ -1279,10 +1397,25 @@ mod tests {
         })
     }
 
+    /// Each case is a word whose quoting Bash 5.2.21's reader was measured on:
+    /// a quoted word keeps the check for an alias after a blank-ending alias.
     #[test]
     fn quoted_for_alias_counts_only_outer_quoting() {
-        for word in [r"'p'", r#""p""#, r"\p", r"$'x'", r#"$"x""#, r"x='one'", r#""$(printf p)""#] {
-            assert!(is_quoted_for_alias(word), "{word}");
+        for word in [
+            r"'p'",
+            r#""p""#,
+            r"\p",
+            r"$'x'",
+            r#"$"x""#,
+            r"x='one'",
+            r#""$(printf p)""#,
+            r#"${v:-(}"""#,
+            r#"${v:-'p'}"""#,
+            r#"$((1 + 2))"""#,
+            r#""a"$(echo b)"#,
+            r"$(echo b)'a'",
+        ] {
+            assert!(is_quoted_for_alias(word, true), "{word}");
         }
         for word in [
             "p",
@@ -1291,13 +1424,26 @@ mod tests {
             r#"$(printf "plain")"#,
             r"`printf 'plain'`",
             r"${v:-'plain'}",
+            r#"${v:-"plain"}"#,
             r"$((1 + 2))",
             r"$(echo \x)",
             r"x=$(printf 'one')",
             "a\\\nb",
+            r#"$(printf "%s" "$(printf ")")")"#,
+            r"$(printf %s $'a\')b')",
+            r#"@(plain|"other")"#,
+            r"$(case x in x) echo 'p';; esac)",
+            r"$(case x in (x) echo 'p';; esac)",
+            r#"`echo "a"`"#,
+            r"`echo \`echo 'a'\``",
+            r"${v:-$(echo 'x')}",
+            r#"${v:-${u:-"y"}}"#,
+            r"$[1+2]",
         ] {
-            assert!(!is_quoted_for_alias(word), "{word}");
+            assert!(!is_quoted_for_alias(word, true), "{word}");
         }
+        // Without extended globbing, `@(` is not a pattern and its quotes count.
+        assert!(is_quoted_for_alias(r#"@(plain|"other")"#, false));
     }
 
     #[test]
