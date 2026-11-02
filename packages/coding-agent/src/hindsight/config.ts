@@ -22,6 +22,7 @@ import {
 	cfgHindsightRecallBudget,
 	cfgHindsightRecallContextTurns,
 	cfgHindsightRecallMaxQueryChars,
+	cfgHindsightRecallMaxQueryTokens,
 	cfgHindsightRecallMaxTokens,
 	cfgHindsightRecallTimeoutMs,
 	cfgHindsightRecallTypes,
@@ -63,6 +64,7 @@ export interface HindsightConfig {
 	recallTypes: string[];
 	recallContextTurns: number;
 	recallMaxQueryChars: number;
+	recallMaxQueryTokens: number;
 	recallPromptPreamble: string;
 
 	debug: boolean;
@@ -114,6 +116,7 @@ export function loadHindsightConfig(settings: Settings): HindsightConfig {
 		recallTypes: [...cfgHindsightRecallTypes.get(settings)],
 		recallContextTurns: cfgHindsightRecallContextTurns.get(settings),
 		recallMaxQueryChars: cfgHindsightRecallMaxQueryChars.get(settings),
+		recallMaxQueryTokens: cfgHindsightRecallMaxQueryTokens.get(settings),
 		recallPromptPreamble: DEFAULT_PREAMBLE,
 
 		debug: cfgHindsightDebug.get(settings),

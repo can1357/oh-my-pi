@@ -214,6 +214,13 @@ export const cfgHindsightRecallMaxQueryChars = register({
 	default: 800,
 });
 
+export const cfgHindsightRecallMaxQueryTokens = register({
+	id: "hindsight.recallMaxQueryTokens",
+	env: { name: "HINDSIGHT_RECALL_MAX_QUERY_TOKENS", parse: parseEnvInteger },
+	type: "number",
+	default: 500,
+});
+
 export const cfgHindsightRecallTypes = register({
 	id: "hindsight.recallTypes",
 	type: "array",

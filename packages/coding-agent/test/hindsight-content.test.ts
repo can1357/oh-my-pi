@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { countTokens, Encoding } from "@oh-my-pi/pi-natives";
 import {
 	composeRecallQuery,
 	formatCurrentTime,
@@ -12,6 +13,7 @@ import {
 	stripMemoryTags,
 	stripRetentionProtocolMarkers,
 	truncateRecallQuery,
+	truncateRecallQueryTokens,
 } from "@oh-my-pi/pi-coding-agent/hindsight/content";
 
 describe("stripMemoryTags", () => {
@@ -136,6 +138,11 @@ describe("truncateRecallQuery", () => {
 		expect(truncateRecallQuery(long, long, 50)).toBe(long.slice(0, 50));
 	});
 
+	it("does not leave a dangling surrogate when the character cap cuts an emoji", () => {
+		const prompt = `${"a".repeat(799)}😀`;
+		expect(truncateRecallQuery(prompt, prompt, 800)).toBe("a".repeat(799));
+	});
+
 	it("drops oldest context lines first", () => {
 		const latest = "ZZ";
 		const composed = `Prior context:\n\nuser: AAAA\nuser: BBBB\nuser: CCCC\n\n${latest}`;
@@ -162,6 +169,38 @@ describe("truncateRecallQuery", () => {
 		expect(out).not.toContain("Note: check config");
 		expect(out).not.toContain("port: 8080");
 		expect(out).not.toContain("quoted line");
+	});
+});
+
+describe("truncateRecallQueryTokens", () => {
+	const tokens = (text: string) => countTokens(text, Encoding.O200kBase);
+
+	it("bounds an 800-character Chinese prompt without splitting a surrogate pair", () => {
+		const prompt = `${"中".repeat(499)}😀${"中".repeat(299)}`;
+		const out = truncateRecallQueryTokens(truncateRecallQuery(prompt, prompt, 800), prompt, 500);
+		expect(tokens(out)).toBeLessThanOrEqual(500);
+		expect(out.endsWith("\ud83d")).toBe(false);
+		expect(out).toBe("中".repeat(499) + "😀");
+	});
+
+	it("drops oldest prior messages before reducing the latest prompt", () => {
+		const latest = "部署策略".repeat(100);
+		const messages: HindsightMessage[] = [
+			{ role: "user", content: "old decision ".repeat(20).trim() },
+			{ role: "assistant", content: "new decision ".repeat(20).trim() },
+			{ role: "user", content: latest },
+		];
+		const query = composeRecallQuery(latest, messages, 3);
+		const budget = tokens(`Prior context:\n\nassistant: ${messages[1].content}\n\n${latest}`);
+		const out = truncateRecallQueryTokens(query, latest, budget);
+		expect(out).toBe(`Prior context:\n\nassistant: ${messages[1].content}\n\n${latest}`);
+		expect(tokens(out)).toBeLessThanOrEqual(budget);
+	});
+
+	it("keeps a query exactly at the server's limit", () => {
+		const prompt = "中".repeat(500);
+		expect(tokens(prompt)).toBe(500);
+		expect(truncateRecallQueryTokens(prompt, prompt, 500)).toBe(prompt);
 	});
 });
 

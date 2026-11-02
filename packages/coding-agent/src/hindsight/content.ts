@@ -5,9 +5,11 @@
  * (vectorize-io/hindsight @ hindsight-integrations/opencode/src/content.ts):
  *   - tag stripping for anti-feedback (a recalled <memories> block must
  *     never end up retained as a new memory)
- *   - recall query composition + truncation under a character budget
+ *   - recall query composition + truncation under character and token budgets
  *   - retention transcript framing
  */
+
+import { countTokens, Encoding } from "@oh-my-pi/pi-natives";
 
 export interface HindsightMessage {
 	role: string;
@@ -146,17 +148,40 @@ export function composeRecallQuery(
 	return ["Prior context:", contextLines.join("\n"), latest].join("\n\n");
 }
 
-/**
- * Truncate a composed recall query to `maxChars`.
- *
- * Always preserves the latest user message. Drops oldest context lines first
- * and degrades gracefully when even the latest message exceeds the budget.
- */
-export function truncateRecallQuery(query: string, latestQuery: string, maxChars: number): string {
-	if (maxChars <= 0 || query.length <= maxChars) return query;
+const recallChars = (text: string): number => text.length;
+const recallTokens = (text: string): number => countTokens(text, Encoding.O200kBase);
 
+function charPrefix(text: string, maxChars: number): string {
+	const last = text.charCodeAt(maxChars - 1);
+	return text.slice(0, last >= 0xd800 && last <= 0xdbff ? maxChars - 1 : maxChars);
+}
+
+function tokenPrefix(text: string, maxTokens: number): string {
+	if (recallTokens(text) <= maxTokens) return text;
+	let lo = 0;
+	let hi = text.length;
+	while (hi - lo > 1) {
+		let mid = (lo + hi) >>> 1;
+		if (mid > 0 && mid < text.length) {
+			const preceding = text.charCodeAt(mid - 1);
+			const following = text.charCodeAt(mid);
+			if (preceding >= 0xd800 && preceding <= 0xdbff && following >= 0xdc00 && following <= 0xdfff) mid++;
+		}
+		if (recallTokens(text.slice(0, mid)) <= maxTokens) lo = mid;
+		else hi = mid;
+	}
+	return text.slice(0, lo);
+}
+
+function trimRecallQuery(
+	query: string,
+	latestQuery: string,
+	limit: number,
+	size: (text: string) => number,
+	prefix: (text: string, limit: number) => string,
+): string {
 	const latest = latestQuery.trim();
-	const latestOnly = latest.length > maxChars ? latest.slice(0, maxChars) : latest;
+	const latestOnly = size(latest) > limit ? prefix(latest, limit) : latest;
 
 	if (!query.includes("Prior context:")) return latestOnly;
 
@@ -167,7 +192,7 @@ export function truncateRecallQuery(query: string, latestQuery: string, maxChars
 	const suffix = `\n\n${latest}`;
 	const suffixIndex = query.lastIndexOf(suffix);
 	if (suffixIndex === -1) return latestOnly;
-	if (suffix.length >= maxChars) return latestOnly;
+	if (size(suffix) >= limit) return latestOnly;
 
 	const contextBody = query.slice(markerIndex + contextMarker.length, suffixIndex);
 	const contextEntries = contextBody.split(/\n(?=(?:user|assistant|system|tool): )/).filter(Boolean);
@@ -176,7 +201,7 @@ export function truncateRecallQuery(query: string, latestQuery: string, maxChars
 	for (let i = contextEntries.length - 1; i >= 0; i--) {
 		kept.unshift(contextEntries[i]);
 		const candidate = `${contextMarker}${kept.join("\n")}${suffix}`;
-		if (candidate.length > maxChars) {
+		if (size(candidate) > limit) {
 			kept.shift();
 			break;
 		}
@@ -184,6 +209,23 @@ export function truncateRecallQuery(query: string, latestQuery: string, maxChars
 
 	if (kept.length > 0) return `${contextMarker}${kept.join("\n")}${suffix}`;
 	return latestOnly;
+}
+
+/**
+ * Truncate a composed recall query to `maxChars`.
+ *
+ * Always preserves the latest user message. Drops oldest context lines first
+ * and degrades gracefully when even the latest message exceeds the budget.
+ */
+export function truncateRecallQuery(query: string, latestQuery: string, maxChars: number): string {
+	if (maxChars <= 0 || query.length <= maxChars) return query;
+	return trimRecallQuery(query, latestQuery, maxChars, recallChars, charPrefix);
+}
+
+/** Bound a character-truncated Hindsight query by the server's o200k_base token limit. */
+export function truncateRecallQueryTokens(query: string, latestQuery: string, maxTokens: number): string {
+	if (maxTokens <= 0 || recallTokens(query) <= maxTokens) return query;
+	return trimRecallQuery(query, latestQuery, maxTokens, recallTokens, tokenPrefix);
 }
 
 export interface RetentionTranscript {

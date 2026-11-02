@@ -38,6 +38,7 @@ function makeConfig(overrides: Partial<HindsightConfig> = {}): HindsightConfig {
 		recallTypes: [],
 		recallContextTurns: 1,
 		recallMaxQueryChars: 800,
+		recallMaxQueryTokens: 500,
 		recallPromptPreamble: "preamble",
 		debug: false,
 		requestTimeoutMs: 30_000,

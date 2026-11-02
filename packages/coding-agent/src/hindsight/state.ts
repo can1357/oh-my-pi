@@ -13,6 +13,7 @@ import {
 	prepareRetentionTranscript,
 	sliceLastTurnsByUserBoundary,
 	truncateRecallQuery,
+	truncateRecallQueryTokens,
 } from "./content";
 import {
 	ensureMentalModels,
@@ -539,7 +540,8 @@ export class HindsightSessionState {
 		const queryMessages = [...history, { role: "user" as const, content: latestPrompt }];
 		const query = composeRecallQuery(latestPrompt, queryMessages, this.config.recallContextTurns);
 		const truncated = truncateRecallQuery(query, latestPrompt, this.config.recallMaxQueryChars);
-		const { context, ok } = await this.recallForContext(truncated, signal);
+		const bounded = truncateRecallQueryTokens(truncated, latestPrompt, this.config.recallMaxQueryTokens);
+		const { context, ok } = await this.recallForContext(bounded, signal);
 		if (!ok) return undefined;
 
 		return {
@@ -578,7 +580,8 @@ export class HindsightSessionState {
 
 		const query = composeRecallQuery(lastUser.content, messages, this.config.recallContextTurns);
 		const truncated = truncateRecallQuery(query, lastUser.content, this.config.recallMaxQueryChars);
-		const { context } = await this.recallForContext(truncated, signal);
+		const bounded = truncateRecallQueryTokens(truncated, lastUser.content, this.config.recallMaxQueryTokens);
+		const { context } = await this.recallForContext(bounded, signal);
 		return context ?? undefined;
 	}
 
