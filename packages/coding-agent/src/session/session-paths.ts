@@ -14,6 +14,7 @@ import {
 } from "@oh-my-pi/pi-utils/dirs";
 import { isEnoent } from "@oh-my-pi/pi-utils/fs-error";
 import * as logger from "@oh-my-pi/pi-utils/logger";
+import { registerSessionsRoot } from "@oh-my-pi/pi-utils/session-roots";
 import type { SessionStorage } from "./session-storage";
 
 const migratedSessionRoots = new Set<string>();
@@ -292,6 +293,10 @@ function managedWorktreeSessionDirs(primaryRoot: string, prefix: string, session
  * Compute the default session directory for a cwd.
  * Classifies cwd by canonical location so symlink/alias paths resolve to the
  * same home-relative or temp-root directory names as their real targets.
+ *
+ * A bucket made under the process's own sessions root records that root (see
+ * `registerSessionsRoot`), so gc and stats still read it after
+ * `OMP_SESSIONS_DIR` changes.
  */
 export function computeDefaultSessionDir(
 	cwd: string,
@@ -307,6 +312,7 @@ export function computeDefaultSessionDir(
 	if (shadowedHomeHashedDirName) migrateNamedSessionDir(shadowedHomeHashedDirName, sessionDir, sessionsRoot);
 	migrateHashedSessionDir(hashedDirName, sessionDir, sessionsRoot);
 	storage.ensureDirSync(sessionDir);
+	if (sessionsRoot === getSessionsDir()) registerSessionsRoot();
 	return sessionDir;
 }
 
@@ -432,7 +438,11 @@ function recordCustomSessionFile(cwd: string, sessionFile: string, scope: Custom
 	if (scope?.remoteStorage) return;
 	try {
 		const resolvedSessionFile = path.resolve(cwd, sessionFile);
-		if (resolvedSessionFile.endsWith(".jsonl") && pathIsWithin(getSessionsDir(), resolvedSessionFile)) return;
+		if (resolvedSessionFile.endsWith(".jsonl") && pathIsWithin(getSessionsDir(), resolvedSessionFile)) {
+			// The root scan reads it once the root is recorded, whatever `OMP_SESSIONS_DIR` names later.
+			registerSessionsRoot();
+			return;
+		}
 		writeIfChangedSync(path.join(getCustomSessionFilesDir(), hashPath(resolvedSessionFile)), resolvedSessionFile);
 	} catch (err) {
 		if (!isEnoent(err)) logger.debug("Custom session file record failed", { err });

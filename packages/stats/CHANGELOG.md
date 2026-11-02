@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Stats read every sessions root omp has recorded, not only the one `OMP_SESSIONS_DIR` names now: sessions left in an earlier root keep being counted, keep their folder and agent type, and stay in the Traces list ([#17753](https://github.com/can1357/oh-my-pi/pull/17753) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.14.2] - 2026-10-31
 
 ### Added

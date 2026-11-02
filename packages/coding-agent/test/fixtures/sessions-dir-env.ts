@@ -4,9 +4,13 @@
  * `OMP_SESSIONS_DIR` resolve at module load, as they do for a real omp launch.
  *
  * argv: <resultFile> sessions <cwd>... | <resultFile> gc <cwd> | <resultFile> resolve <otherAgentDir> <value>...
+ *     | <resultFile> image <cwd> <fill> | <resultFile> lifetime <cwd> <laterValue>
+ *     | <resultFile> append <sessionFile> | <resultFile> trace <sessionFile>
  */
 import * as fs from "node:fs/promises";
+import * as path from "node:path";
 import { classifyAgentType, extractFolderFromPath } from "@oh-my-pi/omp-stats/parser";
+import { buildSessionTrace, listSessionSummaries } from "@oh-my-pi/omp-stats/trace";
 import {
 	getAgentDbPath,
 	getAgentDir,
@@ -14,6 +18,7 @@ import {
 	getHistoryDbPath,
 	getModelDbPath,
 	getSessionsDir,
+	refreshDirsFromEnv,
 } from "@oh-my-pi/pi-utils";
 import { runGcCommand } from "../../src/cli/gc-cli";
 import { findSessionFiles } from "../../src/session/session-listing";
@@ -22,9 +27,11 @@ import { makeAssistantMessage } from "../session-manager/helpers";
 
 const [resultFile, mode, ...args] = process.argv.slice(2);
 
-async function answeredSession(cwd: string) {
+type UserContent = string | Array<{ type: "image"; data: string; mimeType: string }>;
+
+async function answeredSession(cwd: string, content: UserContent = `work in ${cwd}`) {
 	const session = SessionManager.create(cwd);
-	session.appendMessage({ role: "user", content: `work in ${cwd}`, timestamp: Date.now() });
+	session.appendMessage({ role: "user", content, timestamp: Date.now() });
 	session.appendMessage(makeAssistantMessage());
 	await session.flush();
 	const record = {
@@ -69,10 +76,12 @@ if (mode === "sessions") {
 	});
 	await Bun.write(resultFile, JSON.stringify({ session, archive: result.archive }));
 } else if (mode === "resolve") {
-	// `OMP_SESSIONS_DIR` is read on every lookup, so one process can try each spelling in turn.
+	// The resolver reads `OMP_SESSIONS_DIR` when it is built: at module load and
+	// again after omp applies its `.env` files. Rebuild it to try each spelling.
 	const [otherAgentDir, ...values] = args;
 	const rows = values.map(value => {
 		process.env.OMP_SESSIONS_DIR = value;
+		refreshDirsFromEnv();
 		return {
 			value,
 			// Most callers: SessionManager, the picker, resume by id, stats.
@@ -83,6 +92,48 @@ if (mode === "sessions") {
 		};
 	});
 	await Bun.write(resultFile, JSON.stringify({ agentDir: getAgentDir(), rows }));
+} else if (mode === "image") {
+	// A session whose image lands in the shared blob store, then a later
+	// image-free one, so the terminal's record of its last session (when the
+	// test runner has a terminal) names the later one. `fill` makes each
+	// image, and so each blob, distinct. Blobs are aged past gc's write grace.
+	const [cwd, fill] = args;
+	const data = Buffer.alloc(1500, Number(fill)).toString("base64");
+	const session = await answeredSession(cwd, [{ type: "image", data, mimeType: "image/png" }]);
+	await answeredSession(cwd);
+	if (!session.file) throw new Error("the session was not persisted");
+	const hash = (await Bun.file(session.file).text()).match(/blob:sha256:([a-f0-9]{64})/)?.[1];
+	if (!hash) throw new Error("the image was not stored as a blob");
+	const old = new Date(Date.now() - 3 * 86_400_000);
+	for (const name of await fs.readdir(getBlobsDir())) await fs.utimes(path.join(getBlobsDir(), name), old, old);
+	await Bun.write(resultFile, JSON.stringify({ session, blob: path.join(getBlobsDir(), hash) }));
+} else if (mode === "lifetime") {
+	// The variable changes while the process runs, as an SDK host or a test can change it.
+	const [cwd, laterValue] = args;
+	const before = await answeredSession(cwd);
+	process.env.OMP_SESSIONS_DIR = laterValue;
+	const after = await answeredSession(cwd);
+	await Bun.write(resultFile, JSON.stringify({ before, after, sessionsDir: getSessionsDir() }));
+} else if (mode === "append") {
+	// What `--resume <path>` and `--continue` do with a transcript in a previous root: append to it in place.
+	const [file] = args;
+	const session = await SessionManager.open(file);
+	session.appendMessage({ role: "user", content: "continued", timestamp: Date.now() });
+	session.appendMessage(makeAssistantMessage());
+	await session.flush();
+	await session.close();
+	await Bun.write(resultFile, JSON.stringify({ file: session.getSessionFile() }));
+} else if (mode === "trace") {
+	// The dashboard's Traces list and its trace view for one transcript.
+	const [file] = args;
+	const summaries = (await listSessionSummaries()).map(summary => summary.file);
+	let trace: string;
+	try {
+		trace = (await buildSessionTrace(file)).file;
+	} catch (error) {
+		trace = `error: ${error instanceof Error ? error.message : String(error)}`;
+	}
+	await Bun.write(resultFile, JSON.stringify({ summaries, trace }));
 } else {
 	throw new Error(`unknown mode: ${mode}`);
 }

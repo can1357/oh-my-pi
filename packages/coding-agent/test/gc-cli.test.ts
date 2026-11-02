@@ -22,6 +22,7 @@ import {
 	getBlobsDir,
 	getCustomSessionFilesDir,
 	getHistoryDbPath,
+	getSessionRootsDir,
 	getSessionsDir,
 	getTerminalSessionsDir,
 	hashPath,
@@ -357,6 +358,34 @@ describe("runGcCommand blob sweep", () => {
 		expect(result.blobs?.deleted).toBe(1);
 		expect(await Bun.file(referenced).exists()).toBe(true);
 		expect(await Bun.file(orphan).exists()).toBe(false);
+	});
+
+	test("--apply keeps a blob referenced only by a subagent transcript beside a registered session file", async () => {
+		const referencedHash = hashFor("custom-subagent-reference");
+		const referenced = await writeBlob(root, referencedHash, "referenced");
+		await agePath(referenced);
+		// A `--session-dir` transcript outside the managed roots; its subagent's
+		// transcript sits in the artifacts directory beside it and holds the only reference.
+		const externalFile = path.join(root, "external-sessions", "work.jsonl");
+		await Bun.write(
+			externalFile,
+			`${JSON.stringify({ type: "session", version: 3, id: "work", timestamp: "2026-01-01T00:00:00.000Z" })}\n`,
+		);
+		await Bun.write(
+			path.join(root, "external-sessions", "work", "0-Explore.jsonl"),
+			[
+				JSON.stringify({ type: "session", version: 3, id: "explore", timestamp: "2026-01-01T00:00:00.000Z" }),
+				JSON.stringify({ type: "message", message: { role: "user", content: `blob:sha256:${referencedHash}` } }),
+				"",
+			].join("\n"),
+		);
+		await Bun.write(path.join(getCustomSessionFilesDir(root), "session-1"), externalFile);
+
+		const result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+
+		expect(result.blobs?.referenced).toBe(1);
+		expect(result.blobs?.deleted).toBe(0);
+		expect(await Bun.file(referenced).exists()).toBe(true);
 	});
 
 	test("--apply keeps a blob referenced only by a session under another agent dir's managed root", async () => {
@@ -1465,6 +1494,77 @@ describe("runGcCommand cold-session archive", () => {
 		expect(secondOffsets).toEqual([
 			{ session_file: sibling, offset: siblingStat.size, last_modified: siblingStat.mtimeMs },
 		]);
+	});
+
+	test("transfers an archived session's shared stats to a fork kept in an earlier sessions root", async () => {
+		// The fork was written while `OMP_SESSIONS_DIR` named another root, which the registry recorded.
+		const earlierRoot = path.join(root, "earlier-sessions");
+		await Bun.write(path.join(getSessionRootsDir(root), "earlier"), earlierRoot);
+		const parent = path.join(getSessionsDir(root), "project", "20260626_parent-session.jsonl");
+		const fork = path.join(earlierRoot, "project", "20260726_fork-session.jsonl");
+		const timestamp = "2026-06-26T12:00:00.000Z";
+		const timestampMs = Date.parse(timestamp);
+		const header = (id: string, parentSession?: string) =>
+			JSON.stringify({ type: "session", version: 3, id, timestamp, cwd: "/tmp", parentSession });
+		const sharedUser = JSON.stringify({
+			type: "message",
+			id: "shared-user",
+			parentId: null,
+			timestamp,
+			message: { role: "user", content: "shared" },
+		});
+		const sharedAssistant = JSON.stringify({
+			type: "message",
+			id: "shared-assistant",
+			parentId: "shared-user",
+			timestamp,
+			message: { role: "assistant", model: "test-model", provider: "test-provider", content: [] },
+		});
+		const parentOnlyAssistant = JSON.stringify({
+			type: "message",
+			id: "parent-only-assistant",
+			parentId: "shared-assistant",
+			timestamp,
+			message: { role: "assistant", content: [] },
+		});
+		await Bun.write(
+			parent,
+			[header("parent-session"), sharedUser, sharedAssistant, parentOnlyAssistant, ""].join("\n"),
+		);
+		await agePath(parent, 90);
+		await Bun.write(fork, [header("fork-session", parent), sharedUser, sharedAssistant, ""].join("\n"));
+
+		const statsDbPath = path.join(root, "stats.db");
+		const db = new Database(statsDbPath);
+		db.run(
+			"CREATE TABLE messages (session_file TEXT NOT NULL, entry_id TEXT NOT NULL, timestamp INTEGER NOT NULL, UNIQUE(session_file, entry_id))",
+		);
+		db.run(
+			"CREATE TABLE file_offsets (session_file TEXT PRIMARY KEY, offset INTEGER NOT NULL, last_modified INTEGER NOT NULL)",
+		);
+		// Stats owns a copied entry once, under the transcript it read first: the parent.
+		const insert = db.query("INSERT INTO messages (session_file, entry_id, timestamp) VALUES (?, ?, ?)");
+		insert.run(parent, "shared-assistant", timestampMs);
+		insert.run(parent, "parent-only-assistant", timestampMs);
+		db.close();
+
+		const result = await runGcCommand({
+			flags: {
+				agentDir: root,
+				archive: true,
+				coldArchiveAfterDays: 30,
+				retainNewestGlobal: 0,
+				retainNewestPerCwd: 0,
+				apply: true,
+			},
+		});
+
+		const check = new Database(statsDbPath);
+		const messages = check.query("SELECT session_file, entry_id FROM messages").all();
+		check.close();
+		expect(result.archive).toMatchObject({ archived: 1, errors: [] });
+		expect(await Bun.file(fork).exists()).toBe(true);
+		expect(messages).toEqual([{ session_file: fork, entry_id: "shared-assistant" }]);
 	});
 
 	test("scopes incompatible retained-entry deletion decisions to each cleanup plan", async () => {

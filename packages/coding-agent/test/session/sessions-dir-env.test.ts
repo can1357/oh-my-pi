@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -29,15 +30,42 @@ interface ResolveResult {
 	rows: Array<{ value: string; implicit: string; explicitDefault: string; explicitOther: string }>;
 }
 
+interface ImageResult {
+	session: SessionRecord;
+	blob: string;
+}
+
+interface LifetimeResult {
+	before: SessionRecord;
+	after: SessionRecord;
+	sessionsDir: string;
+}
+
+interface TraceResult {
+	summaries: string[];
+	trace: string;
+}
+
+interface BlobGcReport {
+	referenced: number;
+	deleted: number;
+	errors: string[];
+}
+
 const FIXTURE = path.join(import.meta.dir, "../fixtures/sessions-dir-env.ts");
+const CLI = path.join(import.meta.dir, "../../src/cli.ts");
 
 /**
- * Runs the fixture as a fresh omp process: a temp HOME, so the default agent
- * directory is `<home>/.omp/agent`, and only the variables in `env` set.
+ * Runs `argv` under Bun as a fresh omp process: a temp HOME, so the default
+ * agent directory is `<home>/.omp/agent`, and only the variables in `env` set
+ * (an `undefined` value removes the variable).
  */
-async function runFixture(home: string, env: Record<string, string>, args: string[]): Promise<unknown> {
-	const resultFile = path.join(home, "result.json");
-	const child = Bun.spawn([process.execPath, FIXTURE, resultFile, ...args], {
+async function spawnInHome(
+	home: string,
+	env: Record<string, string | undefined>,
+	argv: string[],
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+	const child = Bun.spawn([process.execPath, ...argv], {
 		cwd: home,
 		env: {
 			...process.env,
@@ -60,13 +88,26 @@ async function runFixture(home: string, env: Record<string, string>, args: strin
 		stdout: "pipe",
 		stderr: "pipe",
 	});
-	const [, stderr, exitCode] = await Promise.all([
+	const [stdout, stderr, exitCode] = await Promise.all([
 		new Response(child.stdout).text(),
 		new Response(child.stderr).text(),
 		child.exited,
 	]);
+	return { stdout, stderr, exitCode };
+}
+
+async function runFixture(home: string, env: Record<string, string | undefined>, args: string[]): Promise<unknown> {
+	const resultFile = path.join(home, "result.json");
+	const { stderr, exitCode } = await spawnInHome(home, env, [FIXTURE, resultFile, ...args]);
 	expect({ exitCode, stderr }).toEqual({ exitCode: 0, stderr: "" });
 	return Bun.file(resultFile).json();
+}
+
+/** Runs the real `omp` command line and returns its stdout; its stderr shows only on failure. */
+async function runOmp(home: string, env: Record<string, string | undefined>, args: string[]): Promise<string> {
+	const { stdout, stderr, exitCode } = await spawnInHome(home, env, [CLI, ...args]);
+	expect({ exitCode, stderr }).toMatchObject({ exitCode: 0 });
+	return stdout;
 }
 
 function makeHome(temp: TempDir, ...projects: string[]): { home: string; cwds: string[] } {
@@ -235,4 +276,139 @@ describe("OMP_SESSIONS_DIR", () => {
 		// The archive must not land beside the relocated root, in a directory nobody chose.
 		expect(fs.existsSync(path.join(path.dirname(relocated), "archive"))).toBe(false);
 	}, 60_000);
+
+	it("keeps the sessions root a process started with when the variable changes while it runs", async () => {
+		using temp = TempDir.createSync("@omp-sessions-dir-lifetime-");
+		const { home, cwds } = makeHome(temp, "alpha");
+		const initial = path.join(temp.path(), "initial-sessions");
+		const later = path.join(temp.path(), "later-sessions");
+
+		const result = (await runFixture(home, { OMP_SESSIONS_DIR: initial }, [
+			"lifetime",
+			cwds[0],
+			later,
+		])) as LifetimeResult;
+
+		expect(result.sessionsDir).toBe(initial);
+		expectBucketedUnder(initial, [result.before]);
+		expectBucketedUnder(initial, [result.after]);
+		expect(fs.existsSync(later)).toBe(false);
+	}, 60_000);
+
+	it("takes the variable from the agent directory's .env file, like the other directory variables", async () => {
+		using temp = TempDir.createSync("@omp-sessions-dir-dotenv-");
+		const { home, cwds } = makeHome(temp, "alpha");
+		const relocated = path.join(temp.path(), "durable", "omp-sessions");
+		const agentDir = path.join(home, ".omp", "agent");
+		fs.mkdirSync(agentDir, { recursive: true });
+		fs.writeFileSync(path.join(agentDir, ".env"), `OMP_SESSIONS_DIR=${relocated}\n`);
+
+		const result = (await runFixture(home, {}, ["sessions", ...cwds])) as SessionsResult;
+
+		expectBucketedUnder(relocated, result.sessions);
+		expect(result.stores.sessions).toBe(relocated);
+	}, 60_000);
+});
+
+describe("omp gc after the sessions root moves", () => {
+	// A transcript stays in the root it was written to while its images sit in
+	// the agent directory's one blob store, so gc must keep those blobs however
+	// `OMP_SESSIONS_DIR` was set when each session was written and when gc runs.
+	// `undefined` is the agent directory's own `sessions`.
+	const rows: Array<{ label: string; written: Array<string | undefined>; gc: string | undefined }> = [
+		{
+			label: "the variable is set after sessions were written to the default root",
+			written: [undefined],
+			gc: "first",
+		},
+		{ label: "the variable is removed after sessions were written under it", written: ["first"], gc: undefined },
+		{ label: "the variable moved twice since sessions were written", written: ["first", "second"], gc: "third" },
+	];
+	it.each(rows)(
+		"keeps every image blob a retained session references when $label",
+		async row => {
+			using temp = TempDir.createSync("@omp-sessions-dir-blobs-");
+			const { home, cwds } = makeHome(temp, "alpha");
+			const rootFor = (name: string | undefined) =>
+				name === undefined ? undefined : path.join(temp.path(), `${name}-sessions`);
+			const written: ImageResult[] = [];
+			for (const [index, name] of row.written.entries()) {
+				written.push(
+					(await runFixture(home, { OMP_SESSIONS_DIR: rootFor(name) }, [
+						"image",
+						cwds[0],
+						String(index + 1),
+					])) as ImageResult,
+				);
+			}
+			// An old blob nothing references: a run that deletes nothing would prove nothing.
+			const orphan = path.join(home, ".omp", "agent", "blobs", new Bun.SHA256().update("orphan").digest("hex"));
+			fs.writeFileSync(orphan, "orphan");
+			const old = new Date(Date.now() - 3 * 86_400_000);
+			fs.utimesSync(orphan, old, old);
+
+			const report = JSON.parse(
+				await runOmp(home, { OMP_SESSIONS_DIR: rootFor(row.gc) }, ["gc", "--blobs", "--apply", "--json"]),
+			) as { blobs: BlobGcReport };
+
+			expect(report.blobs).toMatchObject({ referenced: written.length, deleted: 1, errors: [] });
+			for (const { session, blob } of written) {
+				expect(fs.existsSync(session.file)).toBe(true);
+				expect(fs.existsSync(blob)).toBe(true);
+			}
+			expect(fs.existsSync(orphan)).toBe(false);
+		},
+		120_000,
+	);
+
+	it("keeps the blobs of sessions moved by hand into a root an earlier omp gc ran under", async () => {
+		using temp = TempDir.createSync("@omp-sessions-dir-moved-");
+		const { home, cwds } = makeHome(temp, "alpha");
+		const relocated = path.join(temp.path(), "durable-sessions");
+		const { session, blob } = (await runFixture(home, {}, ["image", cwds[0], "1"])) as ImageResult;
+		// The finished sessions move to the new root, and gc runs there before any new session does.
+		const bucket = path.dirname(session.file);
+		const movedBucket = path.join(relocated, path.basename(bucket));
+		fs.mkdirSync(relocated, { recursive: true });
+		fs.renameSync(bucket, movedBucket);
+		await runOmp(home, { OMP_SESSIONS_DIR: relocated }, ["gc", "--json"]);
+
+		// A later run without the variable (another shell, a service) must still read that root.
+		const report = JSON.parse(await runOmp(home, {}, ["gc", "--blobs", "--apply", "--json"])) as {
+			blobs: BlobGcReport;
+		};
+
+		expect(report.blobs).toMatchObject({ referenced: 1, deleted: 0, errors: [] });
+		expect(fs.existsSync(path.join(movedBucket, path.basename(session.file)))).toBe(true);
+		expect(fs.existsSync(blob)).toBe(true);
+	}, 120_000);
+});
+
+describe("omp stats after the sessions root moves", () => {
+	it("counts, classifies and traces a session continued in a previous sessions root", async () => {
+		using temp = TempDir.createSync("@omp-sessions-dir-stats-");
+		const { home, cwds } = makeHome(temp, "alpha");
+		const first = path.join(temp.path(), "first-sessions");
+		const second = path.join(temp.path(), "second-sessions");
+		const {
+			sessions: [session],
+		} = (await runFixture(home, { OMP_SESSIONS_DIR: first }, ["sessions", cwds[0]])) as SessionsResult;
+		// After the move, `--resume <path>` or `--continue` appends to the transcript where it is.
+		await runFixture(home, { OMP_SESSIONS_DIR: second }, ["append", session.file]);
+
+		await runOmp(home, { OMP_SESSIONS_DIR: second }, ["stats", "--json"]);
+
+		const folder = path.basename(path.dirname(session.file));
+		const db = new Database(path.join(home, ".omp", "stats.db"), { readonly: true });
+		try {
+			expect(db.query("SELECT folder, agent_type FROM messages WHERE session_file = ?").all(session.file)).toEqual([
+				{ folder, agent_type: "main" },
+				{ folder, agent_type: "main" },
+			]);
+		} finally {
+			db.close();
+		}
+		const traced = (await runFixture(home, { OMP_SESSIONS_DIR: second }, ["trace", session.file])) as TraceResult;
+		expect(traced).toEqual({ summaries: [session.file], trace: session.file });
+	}, 120_000);
 });

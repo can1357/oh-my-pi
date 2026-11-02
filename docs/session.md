@@ -44,7 +44,9 @@ Default file-session location:
 
 `<encoded-cwd>` is derived from the canonicalized cwd (so symlink aliases share a bucket): `-<relative>` for directories under home, `-tmp-<relative>` for directories under the temp root, and `--<encoded-absolute>--` for anything else, with path separators replaced by `-`.
 
-`OMP_SESSIONS_DIR` replaces `~/.omp/agent/sessions` with another directory for the default profile and agent directory. The `<encoded-cwd>` buckets, the artifact directories beside each transcript, and the per-cwd picker scope stay the same; `agent.db`, `history.db`, `models.db`, the blob store and the `omp gc` archive stay in the agent directory (see [environment-variables.md](environment-variables.md)). `--session-dir` and `PI_CODING_AGENT_SESSION_DIR` still take precedence. A running process keeps the root it started with. Sessions already in the old root are not moved, so the picker and `--resume <id>` stop listing them; `--resume <path>` still opens them.
+`OMP_SESSIONS_DIR` replaces `~/.omp/agent/sessions` with another directory for the default profile and agent directory. The `<encoded-cwd>` buckets, the artifact directories beside each transcript, and the per-cwd picker scope stay the same; `agent.db`, `history.db`, `models.db`, the blob store and the `omp gc` archive stay in the agent directory (see [environment-variables.md](environment-variables.md)). `--session-dir` and `PI_CODING_AGENT_SESSION_DIR` still take precedence. omp reads the variable once, after it loads its `.env` files; a process keeps that root even if the variable later changes in its environment.
+
+Changing the variable moves only where new sessions go. Sessions already written are not moved: the picker and `--resume <id>` stop listing them, while `--resume <path>` and `--continue` (through the terminal's record of its last session) still open them and append to them where they are, beside their artifacts. Every process records the root it uses in the agent directory's `sessions-roots/`, and `omp gc` and `omp stats` read each recorded root as well as `~/.omp/agent/sessions`, so a session in an earlier root keeps its blobs and its stats. A recorded root that does not exist reads as empty, so `omp gc --blobs --apply` run while the disk holding a root is unmounted deletes the blobs only that root's sessions use.
 
 On access, buckets written by the short-lived hashed scheme (`<scope>-<project-basename>-<sha256(canonical-cwd)>`, used in 17.2.5-17.2.8 and reverted in 17.2.9 by #7397) are migrated back into the path-encoded names best-effort, along with older `--<home-encoded>-*--` spellings of home-relative buckets.
 
@@ -597,6 +599,8 @@ Implementations and adapters:
 ### Manual storage maintenance
 
 `omp gc` previews maintenance by default; `--apply` is required to sweep unreferenced blobs, archive eligible cold sessions, checkpoint database WALs, or prune stale state. Storage maintenance is separate from model-context compaction.
+
+The blob phase keeps every blob a transcript still references. It reads every sessions root the agent directory has used (the one in use, `~/.omp/agent/sessions`, and each root recorded in `sessions-roots/`), the archive, and each session file recorded outside them (`custom-session-files` markers and terminal breadcrumbs) together with the subagent transcripts in that file's artifact directory. Archiving, compression and the temp sweep act on the sessions root in use only, but when archiving reconciles stats it counts a session in any of those roots as retained.
 
 The sessions phase also removes transcript rewrite temps (`.<name>.jsonl.<snowflake>.tmp`, and the same pattern beside registered `--session` files) once they are past the 5-minute write grace. A live rewrite renames its temp into place within milliseconds, so an older one was left by a killed or crashed writer.
 

@@ -17,12 +17,14 @@ import {
 	getModelDbPath,
 	getReportsDir,
 	getSessionsDir,
+	getSessionsRoots,
 	getStatsDbPath,
 	getTerminalSessionsDir,
 	hashPath,
 	isPidAlive,
 	normalizePathForComparison,
 	readLines,
+	registerSessionsRoot,
 	type FileLockHandle,
 } from "@oh-my-pi/pi-utils";
 import { Settings } from "../config/settings";
@@ -406,13 +408,19 @@ async function scanSessionLinesIfPresent(file: string, onLine: (line: Uint8Array
 	}
 }
 
+/** A tree scan's root that is missing or not a directory holds no transcripts. */
+function isAbsentTree(error: unknown): boolean {
+	const code = codeOf(error);
+	return code === "ENOENT" || code === "ENOTDIR";
+}
+
 async function collectJsonlFiles(root: string): Promise<string[]> {
 	try {
 		const files = await Array.fromAsync(JSONL_GLOB.scan(root), name => path.join(root, name));
 		files.sort();
 		return files;
 	} catch (error) {
-		if (codeOf(error) === "ENOENT") return [];
+		if (isAbsentTree(error)) return [];
 		throw error;
 	}
 }
@@ -423,7 +431,7 @@ async function collectCompressedJsonlFiles(root: string): Promise<string[]> {
 		files.sort();
 		return files;
 	} catch (error) {
-		if (codeOf(error) === "ENOENT") return [];
+		if (isAbsentTree(error)) return [];
 		throw error;
 	}
 }
@@ -434,15 +442,20 @@ async function collectBackupJsonlFiles(root: string): Promise<string[]> {
 		files.sort();
 		return files;
 	} catch (error) {
-		if (codeOf(error) === "ENOENT") return [];
+		if (isAbsentTree(error)) return [];
 		throw error;
 	}
 }
 
+/**
+ * Blob hashes referenced by every transcript under `sessionRoots` and by each
+ * of `exactSessionFiles` together with the transcripts in its artifact
+ * directory (subagents a `--session-dir` session ran keep their own files there).
+ */
 async function collectReferencedBlobHashes(sessionRoots: string[], exactSessionFiles: string[]): Promise<Set<string>> {
 	const files = new Map<string, string>();
 	const decoder = new TextDecoder();
-	for (const root of sessionRoots) {
+	const addTree = async (root: string) => {
 		for (const file of [
 			...(await collectJsonlFiles(root)),
 			...(await collectCompressedJsonlFiles(root)),
@@ -450,9 +463,11 @@ async function collectReferencedBlobHashes(sessionRoots: string[], exactSessionF
 		]) {
 			files.set(normalizePathForComparison(file), file);
 		}
-	}
+	};
+	for (const root of sessionRoots) await addTree(root);
 	for (const file of exactSessionFiles) {
 		files.set(normalizePathForComparison(file), file);
+		if (file.endsWith(SESSION_SUFFIX)) await addTree(sessionArtifactsPath(file));
 	}
 
 	const hashes = new Set<string>();
@@ -617,8 +632,9 @@ async function restoreReusedBlob(moved: string, canonical: string, result: BlobG
 
 async function runBlobGc(options: ResolvedGcOptions, archiveSessionsRoot: string): Promise<BlobGcResult> {
 	const blobDir = getBlobsDir(options.agentDir);
-	const sessionsRoot = getSessionsDir(options.agentDir);
-	const defaultRoots = [sessionsRoot, archiveSessionsRoot];
+	// Every root this agent directory's sessions were written to, not only the one
+	// `OMP_SESSIONS_DIR` names now: their transcripts share this blob store.
+	const defaultRoots = [...getSessionsRoots(options.agentDir), archiveSessionsRoot];
 	const exactSessionFiles = new Map<string, string>();
 	for (const file of await collectRegisteredSessionPaths(getCustomSessionFilesDir(options.agentDir))) {
 		if (!(await statIfPresent(file))?.isFile()) continue;
@@ -1692,7 +1708,10 @@ async function cleanupStatsRowsForArchivedSessions(
 		});
 	}
 
-	let retainedSessions: SessionInfo[];
+	// Archiving touches only the root in use, but a session kept in any root
+	// this agent directory used (a fork written while `OMP_SESSIONS_DIR` named
+	// another root) is retained and takes the rows it shares with the archived one.
+	const retainedSessions = new Map<string, { session: SessionInfo; root: string }>();
 	try {
 		for (const session of await collectArchivedStatsSessions(archiveRoot, sessionsRoot, (file, error) => {
 			result.errors.push(`stats cleanup scan ${file}: ${errorMessage(error)}`);
@@ -1703,7 +1722,12 @@ async function cleanupStatsRowsForArchivedSessions(
 		result.errors.push(`stats cleanup scan: ${errorMessage(error)}`);
 	}
 	try {
-		retainedSessions = await listActiveSessions(sessionsRoot);
+		for (const root of getSessionsRoots(options.agentDir)) {
+			for (const session of await listActiveSessions(root)) {
+				const key = path.resolve(session.path);
+				if (!retainedSessions.has(key)) retainedSessions.set(key, { session, root });
+			}
+		}
 	} catch (error) {
 		result.errors.push(`stats cleanup scan: ${errorMessage(error)}`);
 		return;
@@ -1712,7 +1736,7 @@ async function cleanupStatsRowsForArchivedSessions(
 	try {
 		await withStatsSyncLock(dbPath, async () => {
 			const retainedStatsSessions = await Promise.all(
-				retainedSessions.map(async session => {
+				[...retainedSessions.values()].map(async ({ session, root }) => {
 					const header = await readSessionLineageHeader(session.path);
 					if (!header || header.id !== session.id) {
 						throw new Error(`session header changed during stats cleanup: ${session.path}`);
@@ -1721,7 +1745,7 @@ async function cleanupStatsRowsForArchivedSessions(
 						path: session.path,
 						id: session.id,
 						parentSession: header.parentSession,
-						historicalPaths: managedHistoricalSessionPaths(header, session.path, sessionsRoot),
+						historicalPaths: managedHistoricalSessionPaths(header, session.path, root),
 						identities: createStatsIdentities(),
 					};
 				}),
@@ -2325,6 +2349,8 @@ export async function runGcCommand(args: GcCommandArgs): Promise<GcResult> {
 	const archiveRoot = getArchivedSessionsDir(options.agentDir);
 	const result = await withGcLock(options.agentDir, async lockPath => {
 		const next: GcResult = { agentDir: options.agentDir, apply: options.apply, lockPath };
+		// Sessions moved into this root by hand stay found by later runs under another root.
+		registerSessionsRoot(options.agentDir);
 		// Stale cleanup may prune a missing first-save target's registry marker.
 		const registeredSessionPaths = options.runArchive
 			? await collectRegisteredSessionPaths(getCustomSessionFilesDir(options.agentDir))

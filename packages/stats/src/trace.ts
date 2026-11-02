@@ -13,7 +13,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { pricingPeerFor } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { getBundledModel, type GeneratedProvider } from "@oh-my-pi/pi-catalog/models";
-import { getSessionsDir, isEnoent } from "@oh-my-pi/pi-utils";
+import { findSessionsRoot, getSessionsDir, getSessionsRoots, isEnoent } from "@oh-my-pi/pi-utils";
 import { initDb, isScheduledCatalogModel } from "./db";
 import { extractFolderFromPath, parseAllSessionEntries, resolveUsageTotal } from "./parser";
 import { getSessionRollups } from "./rollup";
@@ -154,11 +154,13 @@ interface TrackScan {
 // ---------------------------------------------------------------------------
 // Path containment + transcript IO
 
-/** Resolve a client-supplied transcript path, enforcing sessions-root containment. */
+/**
+ * Resolve a client-supplied transcript path, enforcing containment in a
+ * sessions root: the one in use or one an earlier `OMP_SESSIONS_DIR` named.
+ */
 function resolveSessionPath(fileParam: string): string {
 	const resolved = path.resolve(fileParam);
-	const rel = path.relative(getSessionsDir(), resolved);
-	if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) {
+	if (!findSessionsRoot(resolved)) {
 		throw new TracePathError(`Path is outside the sessions directory: ${fileParam}`);
 	}
 	const base = path.basename(resolved);
@@ -1229,13 +1231,14 @@ async function scanDiskRoots(limit: number): Promise<Array<{ file: string; mtime
 export async function listSessionSummaries(limit = 100, q?: string): Promise<SessionSummary[]> {
 	// The Traces page may be the first thing a dashboard serves.
 	await initDb();
-	const sessionsDir = getSessionsDir();
+	// Rows from a root an earlier `OMP_SESSIONS_DIR` named stay listed.
+	const roots = getSessionsRoots();
 	const byRoot = new Map<string, SummaryFold>();
 
 	for (const row of getSessionRollups()) {
-		const rel = path.relative(sessionsDir, row.sessionFile);
-		if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) continue;
-		const segments = rel.split(path.sep);
+		const sessionsDir = findSessionsRoot(row.sessionFile, roots);
+		if (!sessionsDir) continue;
+		const segments = path.relative(sessionsDir, row.sessionFile).split(path.sep);
 		if (segments.length < 2) continue;
 		const isChild = segments.length > 2;
 		const rootFile = isChild ? path.join(sessionsDir, segments[0], `${segments[1]}.jsonl`) : row.sessionFile;
@@ -1244,7 +1247,7 @@ export async function listSessionSummaries(limit = 100, q?: string): Promise<Ses
 		if (!fold) {
 			fold = {
 				file: rootFile,
-				folder: extractFolderFromPath(rootFile),
+				folder: extractFolderFromPath(rootFile, roots),
 				title: null,
 				startedAt: row.startedAt,
 				endedAt: row.endedAt,
@@ -1285,7 +1288,7 @@ export async function listSessionSummaries(limit = 100, q?: string): Promise<Ses
 		}
 		byRoot.set(root.file, {
 			file: root.file,
-			folder: extractFolderFromPath(root.file),
+			folder: extractFolderFromPath(root.file, roots),
 			title: null,
 			startedAt: root.startedAt,
 			endedAt: root.mtimeMs,
@@ -1305,7 +1308,7 @@ export async function listSessionSummaries(limit = 100, q?: string): Promise<Ses
 		folds.map(async fold => {
 			const metadata = await readSessionMetadata(fold.file);
 			fold.title = metadata.title;
-			fold.folder = metadata.cwd ?? extractFolderFromPath(fold.file);
+			fold.folder = metadata.cwd ?? extractFolderFromPath(fold.file, roots);
 			fold.models = [...fold.modelSet].sort();
 		}),
 	);

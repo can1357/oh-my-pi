@@ -10,7 +10,7 @@ import {
 	hasRecurringTariff,
 } from "@oh-my-pi/pi-catalog/models";
 import type { ModelCost } from "@oh-my-pi/pi-catalog/types";
-import { getConfigRootDir, getStatsDbPath, VERSION } from "@oh-my-pi/pi-utils";
+import { getConfigRootDir, getSessionsRoots, getStatsDbPath, VERSION } from "@oh-my-pi/pi-utils";
 import { ChunkedInsert } from "./chunked-insert";
 import { classifyAgentType, type ParseSessionResult, type SessionParserState } from "./parser";
 import { ensureRollupSchema, getDailyActivityFromRollup } from "./rollup";
@@ -1261,9 +1261,10 @@ function backfillAgentType(database: Database): void {
 	}[];
 	const update = database.query("UPDATE messages SET agent_type = ? WHERE session_file = ?");
 	const markComplete = database.query("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)");
+	const roots = getSessionsRoots();
 	const apply = database.transaction(() => {
 		for (const { session_file } of sessionFiles) {
-			const agentType = classifyAgentType(session_file);
+			const agentType = classifyAgentType(session_file, roots);
 			// Rows already default to 'main'; only the nested transcripts move.
 			if (agentType !== "main") update.run(agentType, session_file);
 		}
