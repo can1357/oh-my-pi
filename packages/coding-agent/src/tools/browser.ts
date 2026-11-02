@@ -40,7 +40,7 @@ import {
 	type TernTabSession,
 	ternBlocksTaken,
 } from "./browser/tab-supervisor";
-import { renderTabCall } from "./browser/tab-call";
+import { renderTabCall, tabCallBudgetSeconds } from "./browser/tab-call";
 import { resolveToCwd } from "./path-utils";
 import { renderCallChain, renderFunctionRun } from "./run-code";
 import { ToolAbortError, throwIfAborted } from "./tool-errors";
@@ -143,7 +143,9 @@ const browserSchema = type({
 	"timeout?": type("number").describe("timeout in seconds"),
 	"all?": type("boolean").describe("release every managed tab"),
 	"kill?": type("boolean").describe("also kill spawned-app browsers"),
-	"persist?": type("boolean").describe("keep tab live across turn settle and idle close"),
+	"persist?": type("boolean").describe(
+		"keep tab live across turn settle and idle close; on a relay tab omp opened, keep it open after the session ends",
+	),
 });
 
 type BrowserParams = typeof browserSchema.infer;
@@ -329,7 +331,8 @@ async function invokeBrowser(
 
 	try {
 		throwIfAborted(context.signal);
-		const timeoutSeconds = clampTimeout("browser", parsed.timeout, cfgToolsMaxTimeout.get(session.settings));
+		const requested = parsed.timeout ?? (parsed.action === "call" ? tabCallBudgetSeconds(parsed.chain) : undefined);
+		const timeoutSeconds = clampTimeout("browser", requested, cfgToolsMaxTimeout.get(session.settings));
 		const timeoutMs = timeoutSeconds * 1000;
 		const name = parsed.name ?? DEFAULT_TAB_NAME;
 		const details: BrowserPreludeDetails = { action: parsed.action, name };

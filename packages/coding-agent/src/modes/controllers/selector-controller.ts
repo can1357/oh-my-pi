@@ -114,6 +114,7 @@ import { ExtensionDashboard } from "@oh-my-pi/pi-tui/overlays/extensions/extensi
 import { listLiveToolRecords, liveToolRecordFromSession } from "@oh-my-pi/pi-tui/overlays/extensions/live-tool-session";
 import { createExtensionDashboardRuntime } from "../components/extensions/dashboard-runtime";
 import { HistorySearchComponent } from "@oh-my-pi/pi-tui/overlays/history-search";
+import { HookEditorComponent } from "@oh-my-pi/pi-tui/overlays/hook-editor";
 import { ModelHubComponent, type ModelRoleSelectionScope } from "@oh-my-pi/pi-tui/overlays/model-hub";
 import { createModelBrowserSource } from "../model-browser-source";
 import { formatSessionContinuationNotice } from "../persistence-failure";
@@ -575,13 +576,17 @@ export class SelectorController {
 	showHistorySearch(): void {
 		const historyStorage = this.ctx.historyStorage;
 		if (!historyStorage) return;
+		// Ctrl+R also opens over hook/ask prompts that replace the composer in the
+		// editor slot; the pick belongs to that prompt, not the hidden composer.
+		const focused = this.ctx.ui.getFocused();
+		const target = focused instanceof HookEditorComponent ? focused : this.ctx.editor;
 
 		this.showSelector(done => {
 			const component = new HistorySearchComponent(
 				historyStorage,
 				prompt => {
 					done();
-					this.ctx.editor.setText(prompt);
+					target.setText(prompt);
 					this.ctx.ui.requestRender();
 				},
 				() => {
@@ -1806,7 +1811,7 @@ export class SelectorController {
 				showCwd: true,
 			};
 		} else {
-			const [loadedSessions, pinnedIds] = await Promise.all([
+			const [listing, pinnedIds] = await Promise.all([
 				SessionManager.listForPicker(
 					this.ctx.sessionManager.getCwd(),
 					this.ctx.sessionManager.getSessionDir(),
@@ -1815,7 +1820,7 @@ export class SelectorController {
 				),
 				loadPinnedSessionIds(),
 			]);
-			sessions = loadedSessions;
+			sessions = listing.sessions;
 			const historyStorage = this.ctx.historyStorage;
 			const historyMatcher = historyStorage
 				? (query: string) => historyStorage.matchingSessionIds(query)
@@ -1881,6 +1886,7 @@ export class SelectorController {
 							showCwd: true,
 						}),
 				historyMatcher,
+				completeSessions: listing.complete,
 				loadAllSessions: () => SessionManager.listAllForPicker(),
 				pinnedIds,
 				// Live getter so detach/newSession stays accurate; tolerant of partial

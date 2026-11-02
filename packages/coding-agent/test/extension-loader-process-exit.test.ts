@@ -69,6 +69,7 @@ describe("extension/hook loader process.exit guard (#3680)", () => {
 		return runProbe(`
 import { postmortem } from "@oh-my-pi/pi-utils";
 import { withHostGuard } from "@oh-my-pi/pi-coding-agent/extensibility/utils";
+postmortem.installProcessHandlers();
 
 postmortem.register("probe-cleanup", reason => {
 	process.stdout.write(\`cleanup:\${reason}\\n\`);
@@ -242,13 +243,9 @@ void withHostGuard(async () => {
 	it.skipIf(process.platform === "win32")(
 		"exits cleanly on host SIGHUP when postmortem initialized inside a guard window (#7393)",
 		async () => {
-			// Mirror the shipped bundle: postmortem's exit primitive is first resolved
-			// while withHostGuard has replaced process.reallyExit with a throwing stub.
-			// A preload swaps reallyExit before the entry's static postmortem import
-			// evaluates; the entry then restores it (as the guard's finally does) and
-			// self-SIGHUPs (the TUI terminal-disconnect path). A lazily resolved exit
-			// primitive must pick up the restored native reallyExit and exit 129
-			// instead of looping on ExtensionExitError.
+			// Mirror the shipped bundle: install handlers while the preload guards
+			// process.reallyExit, then restore it before the SIGHUP exit path resolves
+			// the native primitive.
 			const preload = writeModule(
 				"guard-init-preload.ts",
 				"globalThis.__ompNativeReallyExit = process.reallyExit;\n" +
@@ -257,6 +254,7 @@ void withHostGuard(async () => {
 			const { exitCode, stdout, stderr } = await runProbe(
 				`
 import { postmortem } from "@oh-my-pi/pi-utils";
+postmortem.installProcessHandlers();
 postmortem.register("probe", reason => process.stdout.write(\`cleanup:\${reason}\\n\`));
 process.reallyExit = globalThis.__ompNativeReallyExit;
 process.stdout.write("armed\\n");
