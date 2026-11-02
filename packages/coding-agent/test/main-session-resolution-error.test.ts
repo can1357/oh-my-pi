@@ -93,13 +93,16 @@ describe("writeStartupNotice", () => {
 		}
 	});
 
-	it("keeps JSON mode stdout clean by writing notices to stderr", () => {
-		const capture = captureProcessOutput();
-		try {
-			writeStartupNotice({ mode: "json" }, "hello\n");
-			expect(capture.read()).toEqual({ stdout: "", stderr: "hello\n" });
-		} finally {
-			capture.restore();
+	it("keeps protocol stdout clean for recovery notices", () => {
+		for (const mode of ["json", "rpc", "rpc-ui", "acp"] as const) {
+			const capture = captureProcessOutput();
+			try {
+				const notice = "Recovered session directory from /gone to /workspace.\n";
+				writeStartupNotice({ mode }, notice);
+				expect(capture.read()).toEqual({ stdout: "", stderr: notice });
+			} finally {
+				capture.restore();
+			}
 		}
 	});
 });
@@ -463,7 +466,6 @@ describe("createSessionManager — missing session (#2084)", () => {
 			{ ...buildResumeArgs("019ea530"), noSession: true },
 			"/current/project",
 			stubSettings,
-			async () => "unavailable",
 			{ nativeFlagOwnership: "preliminary" },
 		);
 
