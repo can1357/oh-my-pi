@@ -223,7 +223,14 @@ class RelaxedJson {
 			}
 			const value = this.#value(true);
 			if (value === INCOMPLETE) return out;
-			out[key] = value;
+			// A decoded __proto__ key must become an own property, not invoke
+			// the legacy prototype setter on the result object (same guard as
+			// schema/normalize.ts and validation.ts).
+			if (key === "__proto__") {
+				Object.defineProperty(out, key, { value, enumerable: true, writable: true, configurable: true });
+			} else {
+				out[key] = value;
+			}
 			lex.ws();
 			const d = lex.peek();
 			if (d === COMMA) {
