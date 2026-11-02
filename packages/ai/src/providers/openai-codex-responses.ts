@@ -1799,7 +1799,7 @@ async function openCodexWebSocketTransport(
 	requestBodyForState: RequestBody;
 	transport: CodexTransport;
 }> {
-	const canAppendBeforeRequest = websocketState.canAppend === true;
+	let canAppendBeforeRequest = websocketState.canAppend === true;
 	let chainedBody = buildCodexChainedRequestBody(requestContext.transformedBody, websocketState);
 	const websocketHeaders = createCodexHeaders(
 		requestContext.requestHeaders,
@@ -1835,6 +1835,12 @@ async function openCodexWebSocketTransport(
 		model.provider,
 		requestSetup.requestSignal,
 	);
+	// Reconnecting (closed socket, idle eviction, token refresh, or routing-hint
+	// change) resets `canAppend`; discard any delta built against the old socket.
+	if (!websocketState.canAppend) {
+		canAppendBeforeRequest = false;
+		chainedBody = requestContext.transformedBody;
+	}
 	const timeouts: CodexWebSocketRequestTimeouts = {
 		idleTimeoutMs: requestSetup.websocketIdleTimeoutMs,
 		firstEventTimeoutMs: requestSetup.websocketFirstEventTimeoutMs,
@@ -1871,6 +1877,7 @@ async function openCodexWebSocketTransport(
 			websocketConnection.close("steering-discard");
 			websocketState.connection = undefined;
 			resetCodexWebSocketAppendState(websocketState);
+			canAppendBeforeRequest = false;
 			chainedBody = requestContext.transformedBody;
 			websocketConnection = await getOrCreateCodexWebSocketConnection(
 				websocketState,
@@ -1893,14 +1900,21 @@ async function openCodexWebSocketTransport(
 	if (requestContext.turnState.value) {
 		websocketClientMetadata[X_CODEX_TURN_STATE_HEADER] = requestContext.turnState.value;
 	}
-	let websocketRequest = {
+	let websocketRequest: RequestBody = {
 		type: "response.create",
 		...chainedBody,
 		client_metadata: websocketClientMetadata,
 	};
 	const replacementWebsocketRequest = await options?.onPayload?.(websocketRequest, model);
 	if (replacementWebsocketRequest !== undefined) {
-		websocketRequest = replacementWebsocketRequest as typeof websocketRequest;
+		websocketRequest = replacementWebsocketRequest as RequestBody;
+	}
+	if (
+		!websocketRequest.previous_response_id &&
+		chainedBody.input !== requestContext.transformedBody.input &&
+		Bun.deepEquals(websocketRequest.input, chainedBody.input)
+	) {
+		websocketRequest.input = requestContext.transformedBody.input;
 	}
 	recordCodexTurnRequestDiagnostics(websocketState, websocketRequest, "websocket", canAppendBeforeRequest);
 	const requestBodyForState = cloneJsonTree(requestContext.transformedBody);
@@ -3447,6 +3461,12 @@ export async function prewarmOpenAICodexResponses(
 		attestation,
 		routedRequest,
 	);
+	if (
+		state.connection?.isBusy() ||
+		(state.acceptedSteering !== undefined && state.acceptedSteering.connection === state.connection)
+	) {
+		return;
+	}
 	await logger.time(
 		"prewarmCodex:establishWs",
 		getOrCreateCodexWebSocketConnection,
@@ -3793,7 +3813,7 @@ function buildCodexChainedRequestBody(
 	if (appendInput && appendInput.length > 0 && state?.lastResponseId) {
 		return { ...requestBody, previous_response_id: state.lastResponseId, input: appendInput };
 	}
-	if (chainable && state) {
+	if (state?.canAppend) {
 		// Chaining was eligible but the prefix/options check failed: history
 		// mutated or options changed — break the chain.
 		CODEX_DEBUG &&
@@ -3936,6 +3956,10 @@ class CodexWebSocketConnection {
 
 	matchesAuth(headers: Record<string, string>): boolean {
 		return this.#headers.authorization === headers.authorization;
+	}
+
+	matchesRoutingHint(headers: Record<string, string>): boolean {
+		return this.#headers[OPENAI_HEADERS.ROUTING_HINT] === headers[OPENAI_HEADERS.ROUTING_HINT];
 	}
 
 	close(reason = "done"): void {
@@ -4596,9 +4620,15 @@ async function getOrCreateCodexWebSocketConnection(
 			// (state.connection may have been replaced or cleared).
 		}
 	}
+	if (state.connection?.hasActiveRequest()) {
+		throw new CodexWebSocketBusyError("websocket request already in progress");
+	}
 	if (state.connection?.isOpen()) {
 		if (!state.connection.matchesAuth(headerRecord)) {
 			state.connection.close("token-refresh");
+			resetCodexWebSocketAppendState(state);
+		} else if (!state.canAppend && !state.connection.matchesRoutingHint(headerRecord)) {
+			state.connection.close("routing-change");
 			resetCodexWebSocketAppendState(state);
 		} else if (state.connection.isHealthyForReuse()) {
 			logger.time("codexWs:reuseOpenSocket");

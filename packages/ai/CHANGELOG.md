@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Codex WebSocket turns sending a delta `input` after a pooled socket reconnected (closed, idle eviction, token refresh, or prewarm routing-hint change) or when `onPayload` deleted `previous_response_id`, and skipped late prewarm while a socket is busy or holding accepted steering ([#17809](https://github.com/can1357/oh-my-pi/pull/17809) by [@xiangnan0811](https://github.com/xiangnan0811)).
+
 ## [18.16.0] - 2026-11-02
 
 ### Added
