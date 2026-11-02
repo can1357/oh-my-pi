@@ -5,7 +5,7 @@ import type { ToolSession } from "../tools";
 import { ToolAbortError } from "../tools/tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { withBridgeTimeoutPause } from "./bridge-timeout";
-import { getCompletionHandle, type CompletionHandleEntry } from "./completion-bridge";
+import { getCompletionHandle, type CompletionHandleEntry, type EvalCompletionMetadata } from "./completion-bridge";
 import type { JsStatusEvent } from "./js/shared/types";
 
 /** Synthetic bridge name reserved for waiting on eval handles. */
@@ -30,6 +30,7 @@ export interface EvalHandleSnapshot extends EvalHandleRef {
 	text?: string;
 	data?: unknown;
 	error?: string;
+	metadata?: EvalCompletionMetadata;
 }
 
 interface EvalHandleBridgeOptions {
@@ -41,6 +42,13 @@ interface EvalHandleBridgeOptions {
 type ResolvedHandle =
 	| { ref: EvalHandleRef; job: AsyncJob; manager: AsyncJobManager }
 	| { ref: EvalHandleRef; completion: CompletionHandleEntry };
+
+function cloneCompletionMetadata(metadata: EvalCompletionMetadata): EvalCompletionMetadata {
+	return {
+		...metadata,
+		attempts: metadata.attempts.map(attempt => ({ ...attempt })),
+	};
+}
 
 function parseRef(value: unknown): EvalHandleRef {
 	if (!isRecord(value)) throw new ToolError("handle must be an object with kind and id");
@@ -103,24 +111,36 @@ function agentSnapshot(ref: EvalHandleRef, job: AsyncJob): EvalHandleSnapshot {
 	return snapshot;
 }
 
-function completionSnapshot(ref: EvalHandleRef, entry: CompletionHandleEntry): EvalHandleSnapshot {
-	if (!entry.settled) return { ...ref, status: "running" };
+function completionSnapshot(
+	ref: EvalHandleRef,
+	entry: CompletionHandleEntry,
+	includeMetadata = false,
+): EvalHandleSnapshot {
+	if (!entry.settled) {
+		return {
+			...ref,
+			status: "running",
+			...(includeMetadata ? { metadata: cloneCompletionMetadata(entry.metadata) } : {}),
+		};
+	}
 	if (entry.error) {
 		return {
 			...ref,
 			status: entry.controller.signal.aborted ? "cancelled" : "failed",
 			error: entry.error,
+			...(includeMetadata ? { metadata: cloneCompletionMetadata(entry.metadata) } : {}),
 		};
 	}
 	const snapshot: EvalHandleSnapshot = { ...ref, status: "completed", text: entry.result?.text ?? "" };
+	if (includeMetadata) snapshot.metadata = cloneCompletionMetadata(entry.metadata);
 	if (entry.result && Object.hasOwn(entry.result, "data")) snapshot.data = entry.result.data;
 	return snapshot;
 }
 
-function snapshot(resolved: ResolvedHandle): EvalHandleSnapshot {
+function snapshot(resolved: ResolvedHandle, includeMetadata = false): EvalHandleSnapshot {
 	return "job" in resolved
 		? agentSnapshot(resolved.ref, resolved.job)
-		: completionSnapshot(resolved.ref, resolved.completion);
+		: completionSnapshot(resolved.ref, resolved.completion, includeMetadata);
 }
 
 function cancelResolved(resolved: ResolvedHandle, reason?: unknown): boolean {
@@ -248,7 +268,7 @@ export async function runEvalWait(
 				);
 				throw new ToolAbortError(undefined, { cause: options.signal?.reason });
 			}
-			const snapshots = resolved.map(snapshot);
+			const snapshots = resolved.map(handle => snapshot(handle));
 			const settledAgentIds = resolved
 				.filter(handle => "job" in handle && handle.job.status !== "running")
 				.map(handle => handle.ref.id);
@@ -262,7 +282,7 @@ export async function runEvalWait(
 
 /** Return one handle's current state without waiting or consuming it. */
 export function runEvalStatus(args: unknown, options: EvalHandleBridgeOptions): EvalHandleSnapshot {
-	return snapshot(resolveHandle(parseSingleRef(args), options));
+	return snapshot(resolveHandle(parseSingleRef(args), options), true);
 }
 
 /** Cancel one running eval handle owned by this session. */

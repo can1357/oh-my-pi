@@ -293,6 +293,13 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 			super("completion", id, schema);
 		}
 
+		async metadata() {
+			const snapshot = await globalThis.__omp_call_tool__("__status__", {
+				item: { kind: this.kind, id: this.id },
+			});
+			return snapshot?.metadata ?? null;
+		}
+
 		toString() {
 			return `<completion ${this.id}>`;
 		}
@@ -324,6 +331,10 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 
 		async status() {
 			return (await this._promise).status();
+		}
+
+		async metadata() {
+			return (await this._promise).metadata();
 		}
 
 		async done() {

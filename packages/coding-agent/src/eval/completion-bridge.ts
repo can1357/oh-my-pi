@@ -86,6 +86,24 @@ export interface EvalCompletionResult {
 	details: { model: string; tier?: CompletionTier; structured: boolean };
 }
 
+/** Provider-interface routing metadata retained for one completion handle. */
+export interface EvalCompletionMetadata {
+	requestedRole: CompletionTier;
+	configuredSelector: string;
+	configuredEffort: ConfiguredThinkingLevel | null;
+	finalModel: string | null;
+	requestEffort: Effort | null;
+	reasoningDisabled: boolean | null;
+	fallbackUsed: boolean;
+	attempts: Array<{
+		candidateIndex: number;
+		model: string;
+		requestEffort: Effort | null;
+		reasoningDisabled: boolean | null;
+		outcome: "skipped-no-credentials" | "running" | "succeeded" | "failed" | "cancelled";
+	}>;
+}
+
 /** Handle returned immediately after an eval completion starts. */
 export interface EvalCompletionHandleResult {
 	id: string;
@@ -99,6 +117,7 @@ export interface CompletionHandleEntry {
 	settled: boolean;
 	result?: EvalCompletionResult;
 	error?: string;
+	metadata: EvalCompletionMetadata;
 	evictionTimer?: NodeJS.Timeout;
 }
 
@@ -232,6 +251,24 @@ function appendFallbackCandidates(
 	}
 }
 
+function extractConfiguredSelectorEffort(
+	selector: string,
+	available: readonly Model<Api>[],
+	settings: Settings | undefined,
+): ConfiguredThinkingLevel | undefined {
+	return extractExplicitThinkingSelector(selector, settings, {
+		isLiteralModelId: (provider, id) => {
+			const normalizedProvider = provider?.trim().toLowerCase();
+			const normalizedId = id.trim().toLowerCase();
+			return available.some(
+				candidate =>
+					(normalizedProvider === undefined || candidate.provider.trim().toLowerCase() === normalizedProvider) &&
+					candidate.id.trim().toLowerCase() === normalizedId,
+			);
+		},
+	});
+}
+
 /**
  * Resolve a tier to its primary model and configured retry-fallback candidates.
  * `default` prefers the session's active model before the `@default` role.
@@ -251,20 +288,7 @@ function resolveTierCandidates(tier: CompletionTier, session: ToolSession): Comp
 		const model = resolveModelFromString(selector, available, matchPreferences);
 		if (!model) return undefined;
 		const configuredEffort =
-			tier === "slow"
-				? extractExplicitThinkingSelector(selector, session.settings, {
-						isLiteralModelId: (provider, id) => {
-							const normalizedProvider = provider?.trim().toLowerCase();
-							const normalizedId = id.trim().toLowerCase();
-							return available.some(
-								candidate =>
-									(normalizedProvider === undefined ||
-										candidate.provider.trim().toLowerCase() === normalizedProvider) &&
-									candidate.id.trim().toLowerCase() === normalizedId,
-							);
-						},
-					})
-				: undefined;
+			tier === "slow" ? extractConfiguredSelectorEffort(selector, available, session.settings) : undefined;
 		return { model, selector, configuredEffort };
 	};
 	const primary =
@@ -329,6 +353,7 @@ async function executeCompletion(
 	candidates: CompletionCandidate[],
 	session: ToolSession,
 	signal: AbortSignal,
+	metadata: EvalCompletionMetadata,
 ): Promise<EvalCompletionResult> {
 	const registry = session.modelRegistry;
 	if (!registry) throw new ToolError("completion() has no model registry.");
@@ -354,23 +379,40 @@ async function executeCompletion(
 	let lastError: unknown;
 	let retriesUsed = 0;
 	let completed = false;
+	let attempt: EvalCompletionMetadata["attempts"][number] | undefined;
 	for (const [index, candidate] of candidates.entries()) {
 		if (index > 0 && retriesUsed >= maxRetries) break;
 		model = candidate.model;
 		// The session's cost cap covers completions a cell makes, attempt by attempt.
 		const refusal = session.costGate?.check();
 		if (refusal) throw new ToolError(refusal.message);
+		attempt = {
+			candidateIndex: index,
+			model: formatModelStringWithRouting(candidate.model),
+			requestEffort: null,
+			reasoningDisabled: null,
+			outcome: "running",
+		};
+		metadata.attempts.push(attempt);
 		try {
 			// Forward the session id so session-sticky OAuth credentials
 			// resolve (see #5325); without it a usable fallback looks keyless.
 			const apiKey = await registry.getApiKey(model, session.getSessionId?.() ?? undefined, { signal });
 			if (!apiKey) {
+				attempt.outcome = "skipped-no-credentials";
 				lastError = new ToolError(
 					`completion() has no API key for ${formatModelString(model)}. Configure credentials for this provider or choose another tier.`,
 				);
 				continue;
 			}
 			if (index > 0) retriesUsed += 1;
+			const requestEffort = candidate.reasoning ?? null;
+			attempt.requestEffort = requestEffort;
+			attempt.reasoningDisabled = candidate.disableReasoning;
+			metadata.finalModel = formatModelStringWithRouting(model);
+			metadata.requestEffort = requestEffort;
+			metadata.reasoningDisabled = candidate.disableReasoning;
+			if (index > 0) metadata.fallbackUsed = true;
 			response = await instrumentedCompleteSimple(
 				model,
 				{
@@ -389,14 +431,17 @@ async function executeCompletion(
 			);
 			session.costGate?.record(response.usage.cost.total);
 		} catch (error) {
+			attempt.outcome = signal.aborted ? "cancelled" : "failed";
 			lastError = error;
 			if (signal.aborted || index === candidates.length - 1) throw error;
 			continue;
 		}
 		if (response.stopReason === "aborted") {
+			attempt.outcome = "cancelled";
 			throw new ToolError("completion() request aborted.");
 		}
 		if (response.stopReason === "error") {
+			attempt.outcome = signal.aborted ? "cancelled" : "failed";
 			lastError = new ToolError(response.errorMessage ?? "completion() request failed.");
 			if (!signal.aborted && index < candidates.length - 1) continue;
 			throw lastError;
@@ -404,7 +449,7 @@ async function executeCompletion(
 		completed = true;
 		break;
 	}
-	if (!completed || !response || !model) {
+	if (!completed || !response || !model || !attempt) {
 		if (lastError instanceof Error) throw lastError;
 		throw new ToolError("completion() request failed.");
 	}
@@ -417,18 +462,26 @@ async function executeCompletion(
 			value = call.arguments;
 		} else {
 			const text = extractTextContent(response);
-			if (!text) throw new ToolError("completion() returned no structured response.");
+			if (!text) {
+				attempt.outcome = signal.aborted ? "cancelled" : "failed";
+				throw new ToolError("completion() returned no structured response.");
+			}
 			try {
 				value = parseJsonPayload(text);
 			} catch {
+				attempt.outcome = signal.aborted ? "cancelled" : "failed";
 				throw new ToolError("completion() did not return a structured response matching the schema.");
 			}
 		}
 		resultText = JSON.stringify(value);
 	} else {
 		resultText = extractTextContent(response);
-		if (!resultText) throw new ToolError("completion() returned no text output.");
+		if (!resultText) {
+			attempt.outcome = signal.aborted ? "cancelled" : "failed";
+			throw new ToolError("completion() returned no text output.");
+		}
 	}
+	attempt.outcome = "succeeded";
 
 	return {
 		text: resultText,
@@ -454,8 +507,23 @@ export async function runEvalCompletion(
 		);
 	}
 
-	return retainCompletionHandle("cmp", options, signal =>
-		executeCompletion(prompt, finalTier, system, schema, candidates, options.session, signal),
+	const primary = candidates[0]!;
+	const available = options.session.modelRegistry?.getAvailable() ?? [];
+	const metadata: EvalCompletionMetadata = {
+		requestedRole: finalTier,
+		configuredSelector: primary.selector,
+		configuredEffort: extractConfiguredSelectorEffort(primary.selector, available, options.session.settings) ?? null,
+		finalModel: null,
+		requestEffort: null,
+		reasoningDisabled: null,
+		fallbackUsed: false,
+		attempts: [],
+	};
+	return retainCompletionHandle(
+		"cmp",
+		options,
+		signal => executeCompletion(prompt, finalTier, system, schema, candidates, options.session, signal, metadata),
+		metadata,
 	);
 }
 
@@ -469,6 +537,7 @@ export function retainCompletionHandle(
 	prefix: string,
 	options: EvalCompletionBridgeOptions,
 	execute: (signal: AbortSignal) => Promise<EvalCompletionResult>,
+	metadata: EvalCompletionMetadata,
 ): EvalCompletionHandleResult {
 	const id = `${prefix}-${Snowflake.next()}`;
 	const ownerId = options.session.getAgentId?.() ?? MAIN_AGENT_ID;
@@ -479,6 +548,7 @@ export function retainCompletionHandle(
 		controller,
 		promise: Promise.resolve(),
 		settled: false,
+		metadata,
 	};
 	completionHandles.set(id, entry);
 	const run = async (): Promise<EvalCompletionResult> => {
