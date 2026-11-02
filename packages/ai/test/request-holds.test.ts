@@ -3,7 +3,7 @@ import { EventEmitter } from "node:events";
 import {
 	afterRequestHolds,
 	captureRequestHolds,
-	requestHoldsApply,
+	exemptFromRequestHolds,
 	type RequestHoldView,
 	type RequestHolds,
 	type RequestHoldContext,
@@ -354,15 +354,19 @@ describe("openRequestHolds", () => {
 		ownView.release();
 	});
 
-	it("reports whether a holds applies in the current context, an exemption included", () => {
+	it("leaves out a holds the context is exempt from, even given as the request's own; else counts it, in the context or not", () => {
 		const holds = new TestHolds();
-		expect(requestHoldsApply(holds)).toBe(false);
+		const view = holds.open();
+		// Outside any context the own holds still counts.
+		expect(exemptFromRequestHolds(holds)).toBe(false);
+		expect(openRequestHolds({ holds, view }).check()).toBeDefined();
 		runWithRequestHolds(holds, () => {
-			expect(requestHoldsApply(holds)).toBe(true);
 			runOutsideRequestHolds(holds, () => {
-				expect(runWithRequestHolds(holds, () => requestHoldsApply(holds))).toBe(false);
+				expect(runWithRequestHolds(holds, () => exemptFromRequestHolds(holds))).toBe(true);
+				expect(openRequestHolds({ holds, view }).check()).toBeUndefined();
 			});
 		});
+		view.release();
 	});
 
 	it("checks every holds of the context, the carried view included, and releases only the views it opened", async () => {
