@@ -3,7 +3,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { connect } from "@stencil-hq/vibemon";
-import { GATEWAY_TOKEN_INPUT_ENV } from "../gateway-models";
+import { GATEWAY_TOKEN_INPUT_ENV, NO_AUTH_TOKEN, refuseGatewayTokenInEnv } from "../gateway-models";
 import { setOwn } from "../own-property";
 import { prepareAgentBinaries } from "./agent";
 import { loadTasks, resolveDataset } from "./dataset";
@@ -106,7 +106,7 @@ export function parseArgs(argv: string[]): Config {
 		agent: { tools: [...DEFAULT_TOOLS], env: {} },
 		jobsDir: path.join(REPO_ROOT, "runs", "tb"),
 		gatewayUrl: "http://127.0.0.1:4000",
-		gatewayToken: process.env[GATEWAY_TOKEN_INPUT_ENV] || "no-auth",
+		gatewayToken: process.env[GATEWAY_TOKEN_INPUT_ENV] || NO_AUTH_TOKEN,
 		openrouterVariant: "floor",
 		rebuildAgent: false,
 		vmonUrl: "http://xeon.internal:17970",
@@ -238,6 +238,7 @@ export function parseArgs(argv: string[]): Config {
 		throw new Error("--budget must be a non-negative number");
 	}
 	if (config.agent.tools.length === 0) throw new Error("--tools must name at least one tool");
+	refuseGatewayTokenInEnv(config.agent.env, config.gatewayToken);
 	return config;
 }
 

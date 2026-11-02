@@ -7,6 +7,30 @@ import { stringifyYamlConfig } from "@oh-my-pi/pi-utils/yaml-config";
  */
 export const GATEWAY_TOKEN_INPUT_ENV = "METAHARNESS_GATEWAY_TOKEN";
 
+/** The gateway token value that means the gateway runs open (`--no-auth`). */
+export const NO_AUTH_TOKEN = "no-auth";
+
+/** Variables the gateway token travels in on the host; none may reach omp's own environment. */
+const GATEWAY_TOKEN_VARS = new Set([GATEWAY_TOKEN_INPUT_ENV, "OMP_BENCH_GATEWAY_TOKEN"]);
+
+/**
+ * Refuse an environment meant for the omp process (`--env` entries and forwarded
+ * `PI_*` variables) that names a gateway token variable or holds the token. omp
+ * reads the token from its private file; in its environment every process omp
+ * starts, the model's own tool calls included, would inherit it, and the container
+ * runtime would get it on its command line.
+ */
+export function refuseGatewayTokenInEnv(env: Record<string, string>, token: string): void {
+	for (const [name, value] of Object.entries(env)) {
+		if (GATEWAY_TOKEN_VARS.has(name) || (token !== NO_AUTH_TOKEN && token.length > 0 && value.includes(token))) {
+			throw new Error(
+				`${name} ${GATEWAY_TOKEN_VARS.has(name) ? "names" : "holds"} the gateway token, which must not reach omp's environment ` +
+					"(omp reads it from its private file); drop the --env entry or unset the host variable",
+			);
+		}
+	}
+}
+
 /**
  * Where the guest omp finds the gateway bearer: this path under `$HOME`, mode 0600,
  * written from data (stdin or a file upload), never from shell text.
@@ -24,24 +48,16 @@ export const GATEWAY_TOKEN_FILE = ".omp/agent/gateway-token";
 const GATEWAY_TOKEN_API_KEY = `!cat "$HOME/${GATEWAY_TOKEN_FILE}"`;
 
 /**
- * What a gateway provider id may be. Every catalog provider id fits. The YAML
- * serializer keeps any key literal, but Bun's YAML reader treats a `<<` key as a
- * merge key even when quoted, so a non-identifier id could still change what omp
- * reads; such an id names no provider anyway.
- */
-const PROVIDER_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
-
-/**
  * Render a `models.yml` that routes each provider at the host auth gateway.
- * Every value goes through the YAML serializer, so the URL stays data; a provider
- * id that is not an identifier is refused.
+ * Every key and value goes through the YAML serializer, so provider ids and the URL
+ * stay data. The one key that cannot is `<<`: Bun's YAML reader, which omp uses,
+ * expands it as a merge key even when quoted, so that provider id is refused.
+ * Every other key, checked over YAML and JSON syntax characters, reads back unchanged.
  */
 export function gatewayModelsYaml(providers: Iterable<string>, gatewayUrl: string): string {
 	const ids = [...new Set(providers)];
-	for (const id of ids) {
-		if (!PROVIDER_ID.test(id)) {
-			throw new Error(`gateway provider id ${JSON.stringify(id)} is not an identifier (${PROVIDER_ID.source})`);
-		}
+	if (ids.includes("<<")) {
+		throw new Error('gateway provider id "<<" is the YAML merge key, which omp cannot read as a provider id');
 	}
 	const entries = Object.fromEntries(
 		ids.map(provider => [

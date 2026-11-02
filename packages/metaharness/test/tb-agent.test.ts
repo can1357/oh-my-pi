@@ -71,6 +71,18 @@ const hostileGateways: Array<{
 	},
 	{ name: "a gateway URL that adds a command header", gateway: m => ({ url: hostileValues(m).urlWithHeader }) },
 	{
+		name: "a provider id that gives another provider a command apiKey",
+		gateway: m => ({ providers: [hostileValues(m).providerWithApiKey] }),
+	},
+	{
+		name: "a provider id that ends a heredoc",
+		gateway: m => ({ providers: [hostileValues(m).heredoc("openrouter", "OMP_MODELS_EOF")] }),
+	},
+	{
+		name: "custom provider ids holding +, @ and :",
+		gateway: () => ({ providers: ["tenant+prod", "my@team", "tenant:prod"] }),
+	},
+	{
 		name: "an --env entry that names a gateway token variable",
 		gateway: () => ({ token: "intended-token" }),
 		env: { METAHARNESS_GATEWAY_TOKEN: "other-token" },
@@ -113,24 +125,18 @@ describe("writeAgentConfig", () => {
 		60_000,
 	);
 
-	it.each([
-		{ name: "gives another provider a command apiKey", id: (m: string) => hostileValues(m).providerWithApiKey },
-		{ name: "ends a heredoc", id: (m: string) => hostileValues(m).heredoc("openrouter", "OMP_MODELS_EOF") },
-		{ name: "is the YAML merge key <<", id: () => "<<" },
-	])("refuses a provider id that $name and writes nothing", async ({ id }) => {
+	it("refuses the provider id <<, which omp's YAML reader takes as a merge key, and writes nothing", async () => {
 		const home = await fs.mkdtemp(path.join(os.tmpdir(), "omp-tb-agent-"));
 		scratchDirs.push(home);
-		const marker = path.join(home, "marker");
 		const gateway: GatewayConfig = {
 			url: "http://gateway.test",
 			token: "no-auth",
-			providers: ["openrouter", id(marker)],
+			providers: ["openrouter", "<<"],
 			openrouterVariant: "floor",
 		};
 		const vm = new TrialVm(localSandbox(home), "local", "x64", "/", {});
 
-		await expect(writeAgentConfig(vm, gateway, { tools: ["read"], env: {} })).rejects.toThrow(/provider id/);
-		expect(await Bun.file(marker).exists()).toBe(false);
+		await expect(writeAgentConfig(vm, gateway, { tools: ["read"], env: {} })).rejects.toThrow(/merge key/);
 		expect(await Bun.file(path.join(home, ".omp", "agent", "models.yml")).exists()).toBe(false);
 	});
 });

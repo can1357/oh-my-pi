@@ -67,6 +67,9 @@ bun run serve --port 4700
    `benchmark` is `harbor`, `edit`, or `snapcompact`. Harbor uses `dataset`,
    `include`, `timeoutMultiplier`, and `prewalk`; edit uses `include` as task IDs;
    SnapCompact uses `conditions` and treats `tasks` as the passage limit.
+   A harbor run's gateway token goes in `gatewayToken`, which reaches the runner
+   in its environment and is never stored; `extraArgs` are stored with the run,
+   so a launch whose `extraArgs` carry the token is refused.
 
 - `GET /api/runs/:name` — `{ run, traces }` (syncs native artifacts on read).
 - `POST /api/runs/:name/cancel` — cancel a manager-launched run.
@@ -79,7 +82,10 @@ bun run serve --port 4700
   overrides the retry set, which defaults to every exception type in the job's
   `result.json`). The runner recovers the original launch flags from
   `_bench/<name>/runner-config.json` (snapshotted at launch) or the run's
-  `manager.json` — nothing needs re-specifying.
+  `manager.json` — nothing needs re-specifying except the gateway token, which
+  is never recorded: it is the body's `gatewayToken`, else the one this manager
+  launched the run with, else the manager's own `METAHARNESS_GATEWAY_TOKEN`. A
+  run whose record does not say it ran without a token is refused until one is given.
 - `GET /api/runs/:name/traces/:trace[?raw=1]` — normalized or native trace.
 - `GET /api/events` — SSE stream of run-list snapshots (sent on change).
 

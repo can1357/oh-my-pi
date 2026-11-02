@@ -26,8 +26,9 @@ import * as path from "node:path";
 import type { Server, Subprocess } from "bun";
 import { BENCHMARK_DEFINITIONS } from "./benchmarks";
 import { buildExperiments, experimentDetail, experimentOf } from "./experiments";
-import { GATEWAY_TOKEN_INPUT_ENV } from "./gateway-models";
+import { GATEWAY_TOKEN_INPUT_ENV, NO_AUTH_TOKEN, refuseGatewayTokenInEnv } from "./gateway-models";
 import { defaultJobName, harborRunnerArgs, type LaunchRequest } from "./launch-args";
+import { parseArgs } from "./runner";
 import { type LaunchRecord, type RunRole, type RunRow, RunStore } from "./store";
 
 /** PUT /api/experiments/:id body — goal and per-run role/note/label metadata. */
@@ -316,8 +317,8 @@ export class ManagerServer {
 				return Response.json(runs);
 			}
 			if (p === "/api/runs" && request.method === "POST") {
-				const body = (await request.json()) as LaunchRequest;
-				return Response.json(this.launch(body), { status: 201 });
+				const { gatewayToken, ...launch } = (await request.json()) as LaunchRequest & { gatewayToken?: string };
+				return Response.json(this.launch(launch, gatewayToken), { status: 201 });
 			}
 			const resumeMatch = p.match(/^\/api\/runs\/([^/]+)\/resume$/);
 			if (resumeMatch && request.method === "POST") {
@@ -384,12 +385,16 @@ export class ManagerServer {
 
 	/**
 	 * Launch any supported benchmark and register it in the uniform run store.
-	 * A `--gateway-token` in `extraArgs` is taken out before anything is stored or
-	 * spawned and reaches the runner in its environment instead: the launch record
-	 * (SQLite, `manager.json`), the runs API and the process list never hold it.
+	 * `gatewayToken` reaches the runner in its environment only: the launch record
+	 * (SQLite, `manager.json`), the runs API and the process list never hold it. A
+	 * token anywhere in `extraArgs`, which are stored with the run, is refused.
 	 */
-	launch(input: LaunchRequest): { jobName: string; pid: number } {
-		const { request, gatewayToken } = withoutGatewayToken(input);
+	launch(request: LaunchRequest, gatewayToken?: string): { jobName: string; pid: number } {
+		if (request.extraArgs?.some(arg => arg === "--gateway-token" || arg.startsWith("--gateway-token="))) {
+			throw new Error(
+				"extraArgs are stored with the run, so they must not carry --gateway-token; send the token as gatewayToken",
+			);
+		}
 		if (!request.model) throw new Error("model is required");
 		const benchmark = request.benchmark ?? "harbor";
 		if (benchmark !== "harbor" && benchmark !== "edit" && benchmark !== "snapcompact") {
@@ -422,7 +427,14 @@ export class ManagerServer {
 			if (request.conditions?.length) argv.push("--conditions", request.conditions.join(","));
 		} else {
 			cwd = PKG_DIR;
-			argv = ["bun", "src/runner.ts", ...harborRunnerArgs(request, { jobsDir: this.jobsDir, jobName, dataset })];
+			const runnerArgs = harborRunnerArgs(request, { jobsDir: this.jobsDir, jobName, dataset });
+			// The runner's own parser decides what each extra argument means, so an `--env`
+			// entry carrying the token is refused here, before the request is stored.
+			refuseGatewayTokenInEnv(
+				parseArgs(runnerArgs).env,
+				gatewayToken ?? (process.env[GATEWAY_TOKEN_INPUT_ENV] || NO_AUTH_TOKEN),
+			);
+			argv = ["bun", "src/runner.ts", ...runnerArgs];
 		}
 		if (benchmark !== "harbor") argv.push(...(request.extraArgs ?? []));
 
@@ -442,7 +454,9 @@ export class ManagerServer {
 			},
 			gatewayToken === undefined ? {} : { [GATEWAY_TOKEN_INPUT_ENV]: gatewayToken },
 		);
-		if (gatewayToken !== undefined) this.#gatewayTokens.set(jobName, gatewayToken);
+		// A reused job name must not resume with an earlier launch's token.
+		if (gatewayToken === undefined) this.#gatewayTokens.delete(jobName);
+		else this.#gatewayTokens.set(jobName, gatewayToken);
 		if (request.goal) this.#store.setExperimentGoal(experimentOf(jobName), request.goal);
 		return { jobName, pid };
 	}
@@ -818,34 +832,4 @@ if (import.meta.main) {
 			throw err; // preserve fail-fast for real bugs
 		});
 	}
-}
-
-/**
- * Split every gateway token out of a launch request's extra runner arguments, in both
- * forms the runner's parser accepts (`--gateway-token <value>` and `--gateway-token=<value>`).
- * The runner keeps the last one, so the last value is returned. Arguments after `--` are
- * Harbor's, not the runner's, and stay as they are.
- */
-function withoutGatewayToken(input: LaunchRequest): { request: LaunchRequest; gatewayToken: string | undefined } {
-	const args = input.extraArgs ?? [];
-	const extraArgs: string[] = [];
-	let gatewayToken: string | undefined;
-	for (let i = 0; i < args.length; i++) {
-		const arg = args[i];
-		if (arg === "--") {
-			extraArgs.push(...args.slice(i));
-			break;
-		}
-		if (arg === "--gateway-token" && i + 1 < args.length) {
-			gatewayToken = args[++i];
-			continue;
-		}
-		if (arg.startsWith("--gateway-token=")) {
-			gatewayToken = arg.slice("--gateway-token=".length);
-			continue;
-		}
-		extraArgs.push(arg);
-	}
-	if (gatewayToken === undefined) return { request: input, gatewayToken };
-	return { request: { ...input, extraArgs }, gatewayToken };
 }

@@ -38,7 +38,7 @@ from harbor.agents.installed.base import BaseInstalledAgent, with_prompt_templat
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 
-from omp_local import _Usage, _env, _loads, _place_file
+from omp_local import _Usage, _env, _loads, _place_file, _refuse_gateway_token_in_env
 
 _OUTPUT_FILENAME = "pi.txt"
 _MODELS_DST = "/tmp/pi-models.json"
@@ -76,6 +76,7 @@ class PiUpstream(BaseInstalledAgent):
         self._agent_args = [str(a) for a in json.loads(raw_args)] if raw_args else []
         raw_env = _env("OMP_BENCH_FORWARD_ENV")
         self._forward_env = {str(k): str(v) for k, v in json.loads(raw_env).items()} if raw_env else {}
+        _refuse_gateway_token_in_env(self._forward_env, self._gateway_token)
         self._home = "/root"
         self._node_dir = "/root/.pi-bench/node"
         self._app_dir = "/root/.pi-bench/app"

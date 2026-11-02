@@ -21,7 +21,7 @@ import { type GeneratedProvider, getBundledModel } from "@oh-my-pi/pi-catalog/mo
  */
 import type { Server } from "bun";
 import { stringifyYamlConfig } from "@oh-my-pi/pi-utils/yaml-config";
-import { GATEWAY_TOKEN_INPUT_ENV, gatewayModelsYaml } from "./gateway-models";
+import { GATEWAY_TOKEN_INPUT_ENV, gatewayModelsYaml, NO_AUTH_TOKEN, refuseGatewayTokenInEnv } from "./gateway-models";
 import { setOwn } from "./own-property";
 import { defaultJobName, harborRunnerArgs, type LaunchRequest } from "./launch-args";
 
@@ -46,8 +46,6 @@ const SOURCE_BIN_MOUNT = "/opt/omp/bin";
 const VMNET_HOST_IP = "192.168.64.1";
 const DOCKER_GATEWAY_URL = "http://host.docker.internal:4000";
 const VMNET_GATEWAY_URL = `http://${VMNET_HOST_IP}:4000`;
-/** The gateway token that means the gateway runs open (`--no-auth`). */
-const NO_AUTH_TOKEN = "no-auth";
 /**
  * Resolver injected into Apple Container runs (OMP_BENCH_CONTAINER_DNS overrides).
  * The vmnet gateway resolver (192.168.64.1:53) is unreachable when VPN/DNS
@@ -82,6 +80,8 @@ export interface Config {
 	jobName: string | null;
 	gatewayUrl: string;
 	gatewayToken: string;
+	/** Whether the gateway token was given (`--gateway-token` or `METAHARNESS_GATEWAY_TOKEN`), not defaulted. */
+	gatewayTokenGiven: boolean;
 	providers: string[];
 	gateway: boolean;
 	webSearch: boolean;
@@ -127,6 +127,7 @@ function defaultConfig(): Config {
 		jobName: null,
 		gatewayUrl: DOCKER_GATEWAY_URL,
 		gatewayToken: process.env[GATEWAY_TOKEN_INPUT_ENV] || NO_AUTH_TOKEN,
+		gatewayTokenGiven: Boolean(process.env[GATEWAY_TOKEN_INPUT_ENV]),
 		providers: [],
 		gateway: true,
 		webSearch: false,
@@ -324,6 +325,7 @@ export function parseArgs(argv: string[]): Config {
 				break;
 			case "--gateway-token":
 				cfg.gatewayToken = take(arg);
+				cfg.gatewayTokenGiven = true;
 				break;
 			case "--providers":
 				cfg.providers.push(
@@ -409,6 +411,7 @@ export function parseArgs(argv: string[]): Config {
 		// host.docker.internal doesn't exist on vmnet; containers reach the host at the bridge address.
 		if (cfg.gatewayUrl === DOCKER_GATEWAY_URL) cfg.gatewayUrl = VMNET_GATEWAY_URL;
 	}
+	refuseGatewayTokenInEnv(cfg.env, cfg.gatewayToken);
 	return cfg;
 }
 
@@ -439,10 +442,10 @@ export function resolveResumeConfig(cli: Config): Config {
 
 	let cfg: Config | null = null;
 	const saved = readJson(path.join(jobsDir, "_bench", jobName, "runner-config.json"));
-	let tokenRequired = false;
+	let recordedTokenRequired: unknown;
 	if (saved && typeof saved === "object") {
 		const { gatewayTokenRequired, ...recorded } = saved as Partial<Config> & { gatewayTokenRequired?: unknown };
-		tokenRequired = gatewayTokenRequired === true;
+		recordedTokenRequired = gatewayTokenRequired;
 		cfg = { ...defaultConfig(), ...recorded };
 	} else {
 		const manager = readJson(path.join(jobDir, "manager.json")) as ManagerRecord | null;
@@ -473,14 +476,24 @@ export function resolveResumeConfig(cli: Config): Config {
 	}
 	// Knobs owned by the resume invocation, not the original launch.
 	cfg.filterErrorTypes = cli.filterErrorTypes;
-	// The recorded config never holds the gateway token (see runBenchmark).
-	if (tokenRequired && cli.gatewayToken === NO_AUTH_TOKEN) {
+	// The recorded config never holds the gateway token (see runBenchmark). A run
+	// recorded as using one must get one again; a run whose record does not say
+	// (a snapshot older than that field, or the manager.json fallback) must be told
+	// which, so a tokened run never silently resumes as "no-auth".
+	const tokenMissing =
+		recordedTokenRequired === true
+			? cli.gatewayToken === NO_AUTH_TOKEN
+			: recordedTokenRequired !== false && !cli.gatewayTokenGiven;
+	if (cfg.gateway && tokenMissing) {
 		throw new Error(
-			`--resume: ${jobName} was launched with a gateway token, which is not recorded; ` +
-				`give it again in ${GATEWAY_TOKEN_INPUT_ENV} or with --gateway-token`,
+			`--resume: ${jobName} ${recordedTokenRequired === true ? "was launched with" : "may have been launched with"} ` +
+				`a gateway token, which is not recorded; give it again in ${GATEWAY_TOKEN_INPUT_ENV} or with ` +
+				"--gateway-token (--gateway-token no-auth if the run used none)",
 		);
 	}
 	cfg.gatewayToken = cli.gatewayToken;
+	cfg.gatewayTokenGiven = cli.gatewayTokenGiven;
+	refuseGatewayTokenInEnv(cfg.env, cfg.gatewayToken);
 	cfg.passthrough = cli.passthrough;
 	cfg.dryRun = cli.dryRun;
 	cfg.cleanup = cli.cleanup;
@@ -1491,6 +1504,7 @@ export function collectForwardEnv(cfg: Config): Record<string, string> {
 		setOwn(out, k, v);
 	}
 	for (const [k, v] of Object.entries(cfg.env)) setOwn(out, k, v);
+	refuseGatewayTokenInEnv(out, cfg.gatewayToken);
 	return out;
 }
 
@@ -1686,6 +1700,7 @@ async function runBenchmark(cfg: Config): Promise<BenchmarkRun> {
 		const recorded = {
 			...cfg,
 			gatewayToken: undefined,
+			gatewayTokenGiven: undefined,
 			gatewayTokenRequired: cfg.gateway && cfg.gatewayToken !== NO_AUTH_TOKEN,
 			jobName,
 		};

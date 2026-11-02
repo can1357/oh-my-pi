@@ -141,10 +141,21 @@ _GATEWAY_TOKEN_FILE = ".omp/agent/gateway-token"
 _GATEWAY_TOKEN_API_KEY = '!cat "$HOME/.omp/agent/gateway-token"'
 _TOKEN_DST = "/tmp/omp-gateway-token"
 
-# What a gateway provider id may be; every catalog provider id fits. Bun's YAML
-# reader treats a `<<` key as a merge key even when quoted, so a non-identifier id
-# could change what omp reads. Must match `PROVIDER_ID` in `src/gateway-models.ts`.
-_PROVIDER_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+# Variables the gateway token travels in on the host; none may reach the agent's
+# own environment. Must match `refuseGatewayTokenInEnv` in `src/gateway-models.ts`.
+_GATEWAY_TOKEN_VARS = ("METAHARNESS_GATEWAY_TOKEN", "OMP_BENCH_GATEWAY_TOKEN")
+
+
+def _refuse_gateway_token_in_env(env: dict[str, str], token: str) -> None:
+    """Refuse forwarded env for the agent run that names or holds the gateway token.
+
+    The agent reads the token from its private file; in its environment every process
+    the agent starts, the model's own tool calls included, would inherit it.
+    """
+    for name, value in env.items():
+        holds = token not in ("", "no-auth", "no-auth-dummy") and token in value
+        if name in _GATEWAY_TOKEN_VARS or holds:
+            raise ValueError(f"{name} names or holds the gateway token, which must not reach the agent's environment")
 
 # Provider → host env vars used in --no-gateway (direct-auth) mode only.
 _PROVIDER_KEYS: dict[str, list[str]] = {
@@ -190,22 +201,27 @@ def _yaml_document(comment: str, tree: dict) -> str:
 async def _place_file(agent, environment: BaseEnvironment, content: str, staging: str, home_relative: str) -> None:
     """Put `content` at `$HOME/<home_relative>` for the agent user, mode 0600.
 
-    The upload lands at an unpredictable staging name, mode 0600, owned by whatever
-    user Harbor uploads as. Root only hands that one file to the agent user
-    (`chown -h`, which never follows a link, on a name nobody could create first);
-    the agent user then copies it into its own home and removes it. Root never
-    writes into a path the agent user controls, the content never becomes shell
-    text, and no other container user can read any copy. The staging copy is
-    removed on every path, as the agent user or, failing that, as root.
+    The agent user makes a private staging directory (`mktemp -d`, mode 0700) and the
+    upload lands in it under an unpredictable name, mode 0600, owned by whatever user
+    Harbor uploads as; no other container user can reach it. Root only hands that one
+    file to the agent user (`chown -h`, which never follows a link); the agent user
+    copies it into its own home and replaces the target by rename. The content never
+    becomes shell text, and root never writes to an existing path. The agent user owns
+    the staging directory, so it removes it with everything in it on every path, also
+    when nothing can run as root; root removes it only if the agent user cannot.
     """
-    staged_path = f"{staging}-{secrets.token_hex(8)}"
+    made = await agent.exec_as_agent(environment, command=f"mktemp -d {shlex.quote(staging)}-XXXXXXXXXX")
+    stage_dir = (made.stdout or "").strip()
+    if not re.fullmatch(re.escape(staging) + r"-[A-Za-z0-9]{10}", stage_dir):
+        raise RuntimeError(f"mktemp gave an unexpected staging directory: {stage_dir!r}")
+    staged_path = f"{stage_dir}/{secrets.token_hex(8)}"
     staged = shlex.quote(staged_path)
-    owner = (await agent.exec_as_agent(environment, command='printf %s:%s "$(id -u)" "$(id -g)"')).stdout.strip()
-    if not re.fullmatch(r"\d+:\d+", owner):
-        raise RuntimeError(f"could not read the agent user's uid:gid (got {owner!r})")
     target = f'"$HOME/{home_relative}"'
     partial = f'"$HOME/{home_relative}.partial"'
     try:
+        owner = (await agent.exec_as_agent(environment, command='printf %s:%s "$(id -u)" "$(id -g)"')).stdout.strip()
+        if not re.fullmatch(r"\d+:\d+", owner):
+            raise RuntimeError(f"could not read the agent user's uid:gid (got {owner!r})")
         with tempfile.TemporaryDirectory(prefix="omp-bench-") as tmp:
             source = Path(tmp) / "content"
             source.write_text(content, encoding="utf-8")
@@ -222,7 +238,7 @@ async def _place_file(agent, environment: BaseEnvironment, content: str, staging
     finally:
         for run in (agent.exec_as_agent, agent.exec_as_root):
             try:
-                await run(environment, command=f"rm -f {staged}")
+                await run(environment, command=f"rm -rf {shlex.quote(stage_dir)}")
             except Exception:  # noqa: BLE001 - best-effort cleanup; the first error is the one to report
                 continue
             break
@@ -307,6 +323,7 @@ class OmpLocal(BaseInstalledAgent):
         # Extra env (PI_* dialect knobs, explicit --env) the runner forwards into
         # the in-container omp run, JSON-encoded in OMP_BENCH_FORWARD_ENV.
         self._forward_env = self._parse_forward_env()
+        _refuse_gateway_token_in_env(self._forward_env, self._gateway_token)
         # Source-mount paths (defaults must match the runner's compose overlay).
         self._source_dir = _env("OMP_BENCH_SOURCE_DIR", "/opt/omp/src")
         self._source_bun = _env("OMP_BENCH_SOURCE_BUN", "/opt/omp/bin/bun")
@@ -527,11 +544,10 @@ class OmpLocal(BaseInstalledAgent):
         await _place_file(self, environment, self._gateway_token, _TOKEN_DST, _GATEWAY_TOKEN_FILE)
 
     def _generate_models_yaml(self) -> str:
-        for provider in self._gateway_providers:
-            if not _PROVIDER_ID.fullmatch(provider):
-                raise ValueError(
-                    f"gateway provider id {provider!r} is not an identifier ({_PROVIDER_ID.pattern})"
-                )
+        # Bun's YAML reader, which omp uses, expands a `<<` key as a merge key even
+        # when quoted; every other key reads back unchanged. Must match `src/gateway-models.ts`.
+        if "<<" in self._gateway_providers:
+            raise ValueError('gateway provider id "<<" is the YAML merge key, which omp cannot read as a provider id')
         providers = {
             provider: {
                 "baseUrl": self._gateway_url,

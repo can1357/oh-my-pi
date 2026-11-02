@@ -1,9 +1,9 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { $which } from "@oh-my-pi/pi-utils";
-import { buildHarborEnv, parseArgs, writeModelsYaml } from "../src/runner";
+import { buildHarborEnv, collectForwardEnv, parseArgs, writeModelsYaml } from "../src/runner";
 import { ManagerServer } from "../src/server";
 import type { ConsumerResult } from "./fixtures/omp-config-consumer";
 import { consumeOmpConfig, hostileValues } from "./fixtures/omp-config";
@@ -58,8 +58,6 @@ interface GatewayInputs {
 	url?: string;
 	/** A `--setting` / `OMP_BENCH_SETTINGS` key, set to `"value"`. */
 	settingKey?: string;
-	/** `--env` entries (`OMP_BENCH_FORWARD_ENV`) for the omp run. */
-	forwardEnv?: Record<string, string>;
 }
 
 const hostileInputs: Array<{ name: string; inputs: (marker: string) => GatewayInputs }> = [
@@ -72,12 +70,20 @@ const hostileInputs: Array<{ name: string; inputs: (marker: string) => GatewayIn
 	},
 	{ name: "a gateway URL that adds a command header", inputs: m => ({ url: hostileValues(m).urlWithHeader }) },
 	{
-		name: "a setting key that ends the config.yml heredoc",
-		inputs: m => ({ settingKey: hostileValues(m).heredoc("harmless", "OMP_CONFIG_EOF") }),
+		name: "a provider id that gives another provider a command apiKey",
+		inputs: m => ({ providers: [hostileValues(m).providerWithApiKey] }),
 	},
 	{
-		name: "an --env entry that names a gateway token variable",
-		inputs: () => ({ token: "intended-token", forwardEnv: { METAHARNESS_GATEWAY_TOKEN: "other-token" } }),
+		name: "a provider id that ends the models.yml heredoc",
+		inputs: m => ({ providers: [hostileValues(m).heredoc("openrouter", "OMP_MODELS_EOF")] }),
+	},
+	{
+		name: "custom provider ids holding +, @ and :",
+		inputs: () => ({ providers: ["tenant+prod", "my@team", "tenant:prod"] }),
+	},
+	{
+		name: "a setting key that ends the config.yml heredoc",
+		inputs: m => ({ settingKey: hostileValues(m).heredoc("harmless", "OMP_CONFIG_EOF") }),
 	},
 ];
 
@@ -130,7 +136,6 @@ describe("omp_local", () => {
 				...(inputs.providers === undefined ? [] : ["--providers", inputs.providers.join(",")]),
 				...(inputs.url === undefined ? [] : ["--gateway-url", inputs.url]),
 				...(inputs.settingKey === undefined ? [] : ["--setting", `${inputs.settingKey}=value`]),
-				...Object.entries(inputs.forwardEnv ?? {}).flatMap(([key, value]) => ["--env", `${key}=${value}`]),
 			]);
 			const harborEnv = buildHarborEnv(cfg, writeModelsYaml(root, cfg), null, "test");
 			const agentEnv = Object.fromEntries(Object.entries(harborEnv).filter(([key]) => key.startsWith("OMP_BENCH_")));
@@ -161,7 +166,6 @@ describe("omp_local", () => {
 			if (inputs.settingKey !== undefined) {
 				agentEnv.OMP_BENCH_SETTINGS = JSON.stringify({ [inputs.settingKey]: "value" });
 			}
-			if (inputs.forwardEnv !== undefined) agentEnv.OMP_BENCH_FORWARD_ENV = JSON.stringify(inputs.forwardEnv);
 
 			const { runEnv } = await runHarborAgent("omp_local", root, root, agentEnv);
 			const config = await consumeOmpConfig(root, [...new Set([...providers, "openrouter"])], runEnv);
@@ -186,37 +190,63 @@ describe("omp_local", () => {
 		CASE_TIMEOUT_MS,
 	);
 
-	const hostileProviderIds = [
-		{ name: "gives another provider a command apiKey", id: (m: string) => hostileValues(m).providerWithApiKey },
+	it.each([
+		{ name: "names the token variable", argv: ["--env", "METAHARNESS_GATEWAY_TOKEN"], hostEnv: {} },
+		{ name: "holds the token", argv: ["--env", "PI_ALIAS=same-env-secret"], hostEnv: {} },
 		{
-			name: "ends the models.yml heredoc",
-			id: (m: string) => hostileValues(m).heredoc("openrouter", "OMP_MODELS_EOF"),
+			name: "is a forwarded host PI_* variable holding the token",
+			argv: [],
+			hostEnv: { PI_TEST_ALIAS: "same-env-secret" },
 		},
-		{ name: "is the YAML merge key <<", id: () => "<<" },
-	];
-
-	it.each(hostileProviderIds)("refuses a provider id that $name in the runner's models.yml", async ({ id }) => {
-		const { root, marker } = await scratch("omp-harbor-provider-");
-		const cfg = parseArgs(["--model", "openrouter/test-model", "--providers", `openrouter,${id(marker)}`]);
-
-		expect(() => writeModelsYaml(root, cfg)).toThrow(/provider id/);
-		expect(await Bun.file(path.join(root, "models.yml")).exists()).toBe(false);
-		expect(await Bun.file(marker).exists()).toBe(false);
+	])("refuses an environment for omp that $name", ({ argv, hostEnv }) => {
+		const saved = { ...process.env };
+		Object.assign(process.env, { METAHARNESS_GATEWAY_TOKEN: "same-env-secret" }, hostEnv);
+		try {
+			// The runner's parser checks --env entries; the forwarding step checks host PI_* too.
+			const build = () => collectForwardEnv(parseArgs(["--model", "openrouter/test-model", ...argv]));
+			expect(build).toThrow(/gateway token/);
+		} finally {
+			for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
+			Object.assign(process.env, saved);
+		}
 	});
 
-	it.each(hostileProviderIds)(
-		"refuses a provider id that $name in its own models.yml",
-		async ({ id }) => {
-			const { root, marker } = await scratch("omp-harbor-provider-fallback-");
+	it.each(["omp_local", "pi_upstream"] as const)(
+		"%s refuses forwarded env that holds the gateway token",
+		async agent => {
+			const { root } = await scratch("harbor-forward-token-");
+
+			const install = runHarborAgent(agent, root, root, {
+				OMP_BENCH_GATEWAY_TOKEN: "same-env-secret",
+				OMP_BENCH_FORWARD_ENV: JSON.stringify({ PI_ALIAS: "Bearer same-env-secret" }),
+				OMP_BENCH_PI_MODELS: "[]",
+			});
+
+			await expect(install).rejects.toThrow(/PI_ALIAS names or holds the gateway token/);
+		},
+		CASE_TIMEOUT_MS,
+	);
+
+	it("refuses the provider id <<, which omp's YAML reader takes as a merge key, in the runner's models.yml", async () => {
+		const { root } = await scratch("omp-harbor-provider-");
+		const cfg = parseArgs(["--model", "openrouter/test-model", "--providers", "openrouter,<<"]);
+
+		expect(() => writeModelsYaml(root, cfg)).toThrow(/merge key/);
+		expect(await Bun.file(path.join(root, "models.yml")).exists()).toBe(false);
+	});
+
+	it(
+		"refuses the provider id <<, which omp's YAML reader takes as a merge key, in its own models.yml",
+		async () => {
+			const { root } = await scratch("omp-harbor-provider-fallback-");
 
 			const install = runHarborAgent("omp_local", root, root, {
 				OMP_BENCH_GATEWAY_URL: "http://gateway.test",
-				OMP_BENCH_GATEWAY_PROVIDERS: `openrouter,${id(marker)}`,
+				OMP_BENCH_GATEWAY_PROVIDERS: "openrouter,<<",
 			});
 
-			await expect(install).rejects.toThrow(/provider id/);
+			await expect(install).rejects.toThrow(/merge key/);
 			expect(await Bun.file(path.join(root, ".omp", "agent", "models.yml")).exists()).toBe(false);
-			expect(await Bun.file(marker).exists()).toBe(false);
 		},
 		CASE_TIMEOUT_MS,
 	);
@@ -416,55 +446,124 @@ describe("runner", () => {
 
 describe("manager", () => {
 	const token = "review-manager-bearer";
-	it.each([
-		{ form: "--gateway-token <value>", args: ["--gateway-token", token] },
-		{ form: "--gateway-token=<value>", args: [`--gateway-token=${token}`] },
-	])(
-		"keeps a launch's $form out of its stored record, the runs API and the runner's output",
-		async ({ args }) => {
+
+	/** A real manager with one launch POSTed and run to completion, and every place it records the run. */
+	async function launchThroughManager(
+		root: string,
+		port: number,
+		body: Record<string, unknown>,
+	): Promise<{ status: number; responses: string; recorded: Buffer }> {
+		const launched = await fetch(`http://127.0.0.1:${port}/api/runs`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				model: "openrouter/test-model",
+				jobName: "token-probe",
+				environment: "docker",
+				...body,
+				extraArgs: [
+					...((body.extraArgs as string[] | undefined) ?? []),
+					"--dry-run",
+					"--binary",
+					path.join(root, "omp-linux-x64"),
+					"--gateway-url",
+					"http://127.0.0.1:1",
+				],
+			}),
+		});
+		const launchText = await launched.text();
+		// The runner is a real detached process; the manager exposes no completion
+		// promise, so poll the runs API until it has exited and its log is complete.
+		let runs = "";
+		for (let attempt = 0; attempt < 200; attempt++) {
+			runs = await fetch(`http://127.0.0.1:${port}/api/runs`).then(response => response.text());
+			if (!runs.includes('"status":"running"')) break;
+			await Bun.sleep(100);
+		}
+		const files = [
+			"token-probe/manager.json",
+			"_manager/metaharness.sqlite",
+			"_manager/metaharness.sqlite-wal",
+			"_manager/logs/token-probe.log",
+		];
+		const recorded = Buffer.concat(
+			await Promise.all(files.map(file => fs.readFile(path.join(root, file)).catch(() => Buffer.alloc(0)))),
+		);
+		return { status: launched.status, responses: launchText + runs, recorded };
+	}
+
+	it(
+		"keeps a launch's gatewayToken out of its stored record, the runs API and the runner's output",
+		async () => {
 			const { root } = await scratch("manager-token-");
 			const manager = new ManagerServer(root);
 			const server = manager.start(0);
 			try {
-				const launched = await fetch(`http://127.0.0.1:${server.port}/api/runs`, {
-					method: "POST",
-					headers: { "content-type": "application/json" },
-					body: JSON.stringify({
-						model: "openrouter/test-model",
-						jobName: "token-probe",
-						environment: "docker",
-						extraArgs: [
-							...args,
-							"--dry-run",
-							"--binary",
-							path.join(root, "omp-linux-x64"),
-							"--gateway-url",
-							"http://127.0.0.1:1",
-						],
-					}),
-				});
-				expect(launched.status).toBe(201);
-				expect(await launched.text()).not.toContain(token);
-				// The runner is a real detached process; the manager exposes no completion
-				// promise, so poll the runs API until it has exited and its log is complete.
-				let runs = "";
-				for (let attempt = 0; attempt < 200; attempt++) {
-					runs = await fetch(`http://127.0.0.1:${server.port}/api/runs`).then(response => response.text());
-					if (!runs.includes('"status":"running"')) break;
-					await Bun.sleep(100);
-				}
+				const result = await launchThroughManager(root, server.port ?? 0, { gatewayToken: token });
 
-				expect(runs).not.toContain(token);
-				for (const file of [
-					"token-probe/manager.json",
-					"_manager/metaharness.sqlite",
-					"_manager/metaharness.sqlite-wal",
-					"_manager/logs/token-probe.log",
-				]) {
-					const bytes = await fs.readFile(path.join(root, file)).catch(() => Buffer.alloc(0));
-					expect(bytes.includes(Buffer.from(token))).toBe(false);
-				}
+				expect(result.status).toBe(201);
+				expect(result.responses).not.toContain(token);
+				expect(result.recorded.includes(Buffer.from(token))).toBe(false);
 			} finally {
+				await manager.stop();
+			}
+		},
+		CASE_TIMEOUT_MS,
+	);
+
+	it.each([
+		{ form: "--gateway-token <value>", extraArgs: ["--gateway-token", token] },
+		{ form: "--gateway-token=<value>", extraArgs: [`--gateway-token=${token}`] },
+		{
+			form: "--gateway-token=<value> after a flag whose value is --",
+			extraArgs: ["--include", "--", `--gateway-token=${token}`],
+		},
+		{
+			form: "--gateway-token <value> after a flag whose value is --gateway-token",
+			extraArgs: ["--agent-arg", "--gateway-token", "--gateway-token", token],
+		},
+		{ form: "--env naming the token variable", extraArgs: ["--env", `METAHARNESS_GATEWAY_TOKEN=${token}`] },
+		{ form: "--env holding the token", extraArgs: ["--env", `PI_ALIAS=${token}`], gatewayToken: token },
+	])(
+		"refuses a launch whose extraArgs carry the token as $form and records nothing",
+		async ({ extraArgs, gatewayToken }) => {
+			const { root } = await scratch("manager-token-refused-");
+			const manager = new ManagerServer(root);
+			const server = manager.start(0);
+			try {
+				const result = await launchThroughManager(root, server.port ?? 0, { extraArgs, gatewayToken });
+
+				expect(result.status).toBe(400);
+				expect(result.responses).not.toContain(token);
+				expect(result.recorded.includes(Buffer.from(token))).toBe(false);
+			} finally {
+				await manager.stop();
+			}
+		},
+		CASE_TIMEOUT_MS,
+	);
+
+	it(
+		"does not resume a reused job name with an earlier launch's token",
+		async () => {
+			const { root } = await scratch("manager-token-reuse-");
+			const manager = new ManagerServer(root);
+			const server = manager.start(0);
+			const spawn = spyOn(Bun, "spawn");
+			try {
+				await launchThroughManager(root, server.port ?? 0, { gatewayToken: "stale-token" });
+				await launchThroughManager(root, server.port ?? 0, {});
+				await Bun.write(path.join(root, "token-probe", "config.json"), '{"environment":{"type":"docker"}}');
+
+				const resumed = await fetch(`http://127.0.0.1:${server.port}/api/runs/token-probe/resume`, {
+					method: "POST",
+				});
+
+				expect(resumed.status).toBe(201);
+				const env = spawn.mock.calls.at(-1)?.[1]?.env;
+				expect(env?.METAHARNESS_GATEWAY_TOKEN).not.toBe("stale-token");
+			} finally {
+				spawn.mockRestore();
 				await manager.stop();
 			}
 		},
