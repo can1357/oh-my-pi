@@ -552,10 +552,21 @@ async function scanSessionLinesIfPresent(file: string, onLine: (line: Uint8Array
 		for await (const line of readLines(stream)) onLine(line);
 	};
 	try {
+		// Compressed or not by what the file holds, not by its name: a `.leaving`
+		// copy of a `.leaving` copy of an archived transcript ends in neither
+		// suffix, and a review swept the blob only its gzip bytes referenced.
 		// Read through a descriptor that holds a regular file: a transcript's
 		// name standing for a FIFO is refused, never waited on or drained.
+		const head = await openRegularFile(file);
+		if (!head) return;
+		const magic = Buffer.alloc(2);
+		try {
+			await head.read(magic, 0, 2, 0);
+		} finally {
+			await head.close();
+		}
 		const stream = Readable.toWeb(Readable.from(bytesOfRegularFile(file))) as ReadableStream<Uint8Array>;
-		if (file.endsWith(COMPRESSED_SESSION_SUFFIX) || COMPRESSED_LEAVING_RE.test(file)) {
+		if (file.endsWith(COMPRESSED_SESSION_SUFFIX) || (magic[0] === 0x1f && magic[1] === 0x8b)) {
 			const gunzip = createGunzip();
 			await pipeline(stream, gunzip, async (source: NodeJS.ReadableStream) => {
 				// Match the native stream's byte budget, not one arbitrary chunk or
@@ -611,9 +622,6 @@ async function collectJsonlFiles(root: string): Promise<string[]> {
 const BLOB_REFERENCE_GLOBS = ["**/*.jsonl", "**/*.jsonl.gz", "**/*.jsonl.*.bak", "**/*.jsonl.*.leaving"].map(
 	pattern => new Bun.Glob(pattern),
 );
-
-/** A `.leaving` name that came from an archived, compressed transcript. */
-const COMPRESSED_LEAVING_RE = /\.jsonl\.gz\.[0-9a-f]{16}\.leaving$/;
 
 async function collectReferencedBlobHashes(sessionRoots: string[], exactSessionFiles: string[]): Promise<Set<string>> {
 	const files = new Map<string, string>();
@@ -2551,7 +2559,13 @@ async function proveLiveTreeIsArchived(
  * directory held open since this began — see {@link removeHeldDirectory}. An
  * entry only the archive holds, the archived transcript and anything at a
  * reclaimed name are never touched. What is left is the one system call
- * between that last look and the `unlink`, which POSIX cannot close.
+ * between that last look and the `unlink`, which POSIX cannot close, and a
+ * process that opens a copy by the private name it was moved to — a name
+ * only one watching gc's moves can know — while it is freed: its open waits
+ * on the copy's lease, the check after the `unlink` writes the copy's bytes
+ * back to its name, and what that process writes afterwards goes into the
+ * unlinked file. Such a process ignores this run's lease on a name that is
+ * this run's alone; it is outside what this guards.
  *
  * Returns what went and, for each copy kept, why and where it is: a copy kept
  * costs space, never an original.
@@ -3749,6 +3763,7 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 	const proven: ProvenTree = { files: [], directories: [], live: new Set() };
 	const leased: LeasedFile[] = [];
 	let containerHeld: HeldFile | undefined;
+	let containerMade = false;
 	try {
 		// Proved under the leases, so what was read is what no writer holding
 		// one can change while this runs.
@@ -3827,15 +3842,20 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 		// The session's own directory under `archive/reclaimed`, made by this
 		// run — or found empty, which a reclaim killed before its first move
 		// leaves — and held open from here, so no other directory put at its
-		// name is taken for it, and removed in the end only while it is that
-		// one and empty: when nothing stayed in it.
+		// name is taken for it. Only one this run made is removed in the end,
+		// and only while it is that one and empty: an empty directory found
+		// there, whoever made it, has its own owner, mode and attributes, and a
+		// review planted one with an attribute and saw it go.
 		let containerFailure: string | undefined;
 		try {
 			await fs.mkdir(path.dirname(container), { recursive: true, mode: 0o700 });
 			const standing = await lstatIfPresent(container);
-			containerHeld = standing?.isDirectory()
-				? await holdSeenDirectory(container, standing)
-				: await makeHeldDirectory(container, 0o700);
+			if (standing?.isDirectory()) {
+				containerHeld = await holdSeenDirectory(container, standing);
+			} else {
+				containerHeld = await makeHeldDirectory(container, 0o700);
+				containerMade = true;
+			}
 			if (!containerHeld) containerFailure = `${container} changed while this run looked at it`;
 		} catch (error) {
 			containerFailure = `${container} could not be made (${errorMessage(error)})`;
@@ -3933,8 +3953,8 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 		for (const file of leased) await file.handle.close().catch(() => undefined);
 		await releaseProvenTree(proven);
 		if (containerHeld) {
-			// Empty only when nothing stayed moved; a directory gone or full is left as it is.
-			await removeHeldDirectory(container, containerHeld).catch(() => undefined);
+			// Only the one this run made, and only empty: when nothing stayed moved.
+			if (containerMade) await removeHeldDirectory(container, containerHeld).catch(() => undefined);
 			await containerHeld.handle.close().catch(() => undefined);
 		}
 		for (const held of tree.leases) held.release();

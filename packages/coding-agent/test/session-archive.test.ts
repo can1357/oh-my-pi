@@ -8322,23 +8322,28 @@ test("a reclaim writes a freed copy back when the original is truncated in the c
 	expect(await Bun.file(copy).text()).toBe("ORIGINAL");
 }, 120_000);
 
-for (const compressed of [false, true]) {
-	test(`the blob sweep keeps a blob only a killed run's ${compressed ? "compressed " : ""}.leaving transcript references`, async () => {
+for (const shape of ["plain", "compressed", "compressed, moved aside twice"] as const) {
+	test(`the blob sweep keeps a blob only a killed run's ${shape} .leaving transcript references`, async () => {
 		const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
 		await Bun.write(path.join(liveArtifacts, "child.jsonl"), "{}\n");
 		expect((await archiveOnly()).archive).toMatchObject({ archived: 1, errors: [] });
-		const hash = new Bun.SHA256().update(`only in a leaving copy ${compressed}`).digest("hex");
+		const hash = new Bun.SHA256().update(`only in a leaving copy ${shape}`).digest("hex");
 		const blob = path.join(getBlobsDir(root), hash);
 		await Bun.write(blob, "BLOB");
 		const old = new Date(Date.now() - 30 * 86_400_000);
 		await fs.utimes(blob, old, old);
-		// What a run killed while it moved a copy aside leaves beside it, which a restore carries home.
+		// What a run killed while it moved a copy aside leaves beside it, which a
+		// restore carries home — and, re-archived and killed again, the same
+		// name moved aside once more, which ends in neither suffix.
 		const copyDir = archiveFile.slice(0, -".jsonl.gz".length);
 		const reference = `{"type":"message","note":"blob:sha256:${hash}"}\n`;
-		const leaving = compressed
-			? path.join(path.dirname(archiveFile), `.${path.basename(archiveFile)}.0123456789abcdef.leaving`)
-			: path.join(copyDir, ".child.jsonl.0123456789abcdef.leaving");
-		await Bun.write(leaving, compressed ? gzipSync(reference) : reference);
+		const leaving =
+			shape === "plain"
+				? path.join(copyDir, ".child.jsonl.0123456789abcdef.leaving")
+				: shape === "compressed"
+					? path.join(path.dirname(archiveFile), `.${path.basename(archiveFile)}.0123456789abcdef.leaving`)
+					: path.join(copyDir, "..child.jsonl.gz.0123456789abcdef.leaving.fedcba9876543210.leaving");
+		await Bun.write(leaving, shape === "plain" ? reference : gzipSync(reference));
 
 		const result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true, json: true } });
 
@@ -8417,6 +8422,62 @@ test.skipIf(!sudoForSticky)(
 			expect(applied.reclaim?.reclaimed).toBe(0);
 			expect(await Bun.file(sessionFile).exists()).toBe(true);
 			expect(await Bun.file(path.join(liveArtifacts, "a.log")).text()).toBe("ORIGINAL");
+		} finally {
+			asRoot("chown", "-R", String(process.getuid?.() ?? ""), bucket);
+			asRoot("chmod", "0755", bucket);
+		}
+	},
+	60_000,
+);
+
+test("an empty directory somebody put at the session's reclaimed directory keeps its inode and attribute through reclaim and restore", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	await Bun.write(path.join(liveArtifacts, "a.log"), "ORIGINAL");
+	expect((await archiveOnly()).archive).toMatchObject({ archived: 1, errors: [] });
+	const container = path.dirname(reclaimedNames().transcript);
+	await fs.mkdir(container, { recursive: true, mode: 0o700 });
+	setXattr(container, "user.review", "ORIGINAL DIRECTORY ATTRIBUTE");
+	const held = await fs.open(container, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY);
+	try {
+		const reclaimed = await runGcCommand({ flags: reclaimApply() });
+		const restored = await runGcCommand({ flags: restoreApply() });
+
+		expect(reclaimed.reclaim).toMatchObject({ reclaimed: 1, errors: [] });
+		expect(restored.restore?.errors).toEqual([]);
+		expect((await held.stat()).nlink).toBeGreaterThan(0);
+		expect((await fs.stat(container)).ino).toBe((await held.stat()).ino);
+		expect(getXattr(container, "user.review")).toBe("ORIGINAL DIRECTORY ATTRIBUTE");
+		expect(await Bun.file(path.join(liveArtifacts, "a.log")).text()).toBe("ORIGINAL");
+	} finally {
+		await held.close();
+	}
+}, 60_000);
+
+test.skipIf(!sudoForSticky)(
+	"(needs sudo -n) a restore preview says it leaves another user's record in a sticky bucket, as applying does",
+	async () => {
+		const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+		await Bun.write(path.join(liveArtifacts, "a.log"), "FIRST");
+		await archiveEverything();
+		const record = restoreRecordPath(archiveFile);
+		await Bun.write(record, "omp gc --restore <id> --apply\n");
+		const bucket = path.dirname(record);
+		const asRoot = (...args: string[]): void => {
+			const run = Bun.spawnSync(["sudo", "-n", ...args], { stdout: "pipe", stderr: "pipe" });
+			if (run.exitCode !== 0) throw new Error(`sudo ${args.join(" ")}: ${run.stderr.toString()}`);
+		};
+		asRoot("chown", "nobody", record);
+		asRoot("chown", "root", bucket);
+		asRoot("chmod", "1777", bucket);
+		try {
+			const preview = await runGcCommand({ flags: restoreApply(false) });
+			const applied = await runGcCommand({ flags: restoreApply() });
+
+			expect(preview.restore?.setAsideRecord).toBeUndefined();
+			expect(preview.restore?.errors).toEqual([restoreRecordLeftNote(record)]);
+			expect(applied.restore?.setAsideRecord).toBeUndefined();
+			expect(applied.restore?.errors).toEqual([restoreRecordLeftNote(record)]);
+			expect(await Bun.file(record).text()).toBe("omp gc --restore <id> --apply\n");
 		} finally {
 			asRoot("chown", "-R", String(process.getuid?.() ?? ""), bucket);
 			asRoot("chmod", "0755", bucket);
