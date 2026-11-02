@@ -11039,7 +11039,9 @@ export class AgentSession implements SettingsScope {
 				// name the current one.
 				if (this.sessionManager.getSessionId() !== sessionId) return;
 				if (!title || this.sessionName) return;
-				const named = this.#cardsAutoTitles() ? await this.#cardTitle(title) : title;
+				const named = this.#cardsAutoTitles() ? await this.#cardTitle(title, signal) : title;
+				// An interrupt during the title or its card request cancels the title.
+				if (signal.aborted) return;
 				if (this.sessionManager.getSessionId() !== sessionId || this.sessionName) return;
 				await this.sessionManager.setSessionName(named, "auto");
 			})
@@ -11224,6 +11226,7 @@ export class AgentSession implements SettingsScope {
 	 */
 	async #refreshTitle(sessionId: string, trigger: SessionNameTrigger, plan?: readonly TodoPhase[]): Promise<void> {
 		const generation = this.#titleRefreshGeneration;
+		const signal = this.#titleGenerationAbortController.signal;
 		// A fitting title, one no judge could rate, or a session renamed or switched meanwhile keeps its title.
 		if (trigger === "drift" && !((await this.#titleDrifted()) && this.#titleRefreshable(sessionId, trigger))) return;
 		const context = this.#buildReplanTitleContext(plan);
@@ -11231,9 +11234,9 @@ export class AgentSession implements SettingsScope {
 		const retitled = await this.#retitle(context);
 		if (!retitled) return;
 		// A session first named without a card (a subagent, a title-model title) gets one here.
-		const title = this.#cardsAutoTitles() ? await this.#cardTitle(retitled) : retitled;
-		// A plan written meanwhile supersedes this reply; its own refresh names the session.
-		if (generation !== this.#titleRefreshGeneration) return;
+		const title = this.#cardsAutoTitles() ? await this.#cardTitle(retitled, signal) : retitled;
+		// An interrupt during the refresh cancels it; a plan written meanwhile supersedes this reply.
+		if (signal.aborted || generation !== this.#titleRefreshGeneration) return;
 		if (!this.#titleRefreshable(sessionId, trigger) || title === this.sessionName) return;
 		const setSessionName = this.sessionManager.setSessionName as SetSessionNameWithTrigger;
 		await setSessionName.call(this.sessionManager, title, "auto", trigger);

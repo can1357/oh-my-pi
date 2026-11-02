@@ -415,5 +415,59 @@ describe("AgentSession title fork", () => {
 			expect(model.requests).toHaveLength(1);
 			expect(model.requests[0]).not.toContain("<plan>");
 		});
+
+		/** The title model answers `replies` in order; the request at `holdAt` (0-based) waits for `release()`. */
+		function heldTitleModel(replies: string[], holdAt: number) {
+			const requests: string[] = [];
+			const held = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			vi.spyOn(ai, "completeSimple").mockImplementation(async (_model, context) => {
+				const index = requests.push(titleRequestInput(context)) - 1;
+				if (index === holdAt) {
+					held.resolve();
+					await release.promise;
+				}
+				return createAssistantMessage(replies[index] ?? "<title/>");
+			});
+			return { requests, held: held.promise, release: () => release.resolve() };
+		}
+
+		it("drops the title-model title when an interrupt lands during its card request", async () => {
+			// The fork declines, so the title model names the session and a card request follows.
+			const main = createMockModel({ responses: [{ content: ["Reading the park tests first."] }] });
+			const target = await createSession(main, createMockModel({ handler: { content: ["<title/>"] } }));
+			const model = heldTitleModel(["<title>Fix flaky park tests</title>", "<title>🧪 FLAKY</title>"], 1);
+
+			await target.prompt(FIRST_MESSAGE);
+			await model.held;
+			await target.abort({ reason: USER_INTERRUPT_LABEL });
+			model.release();
+			await settleTitles();
+
+			expect(target.sessionName).toBeUndefined();
+			expect(model.requests).toHaveLength(2);
+		});
+
+		it("keeps the title when an interrupt lands during a replan retitle's card request", async () => {
+			const main = createMockModel({ responses: [todoInit("Prove eta rule"), planWritten], handler: planWritten });
+			const target = await createSession(
+				main,
+				createMockModel({ handler: { content: [CARD_REPLY] } }),
+				{ "title.generator": "fork", "title.refreshOnReplan": true, "todo.enabled": true },
+				{ todo: true },
+			);
+			await target.setSessionName("Fix flaky park tests", "auto");
+			// The retitle names the plan plainly, so a card request follows it.
+			const model = heldTitleModel(["<title>Prove eta rule</title>", "<title>🧪 ETA</title>"], 1);
+
+			await target.prompt("now prove the eta rule");
+			await model.held;
+			await target.abort({ reason: USER_INTERRUPT_LABEL });
+			model.release();
+			await settleTitles();
+
+			expect(target.sessionName).toBe("Fix flaky park tests");
+			expect(model.requests).toHaveLength(2);
+		});
 	});
 });
