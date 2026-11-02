@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
@@ -6187,6 +6187,72 @@ describe("lsp regressions", () => {
 		} finally {
 			tempDir.removeSync();
 		}
+	});
+
+	// A plugin can put a language server's binary on PATH, or another one ahead of it, after the
+	// session's first LSP call. The per-cwd config resolves its servers under the PATH of that call;
+	// a later PATH must resolve them again without `reload *`.
+	describe("config across PATH changes", () => {
+		/** A cwd whose project config names `omp-path-lsp`, and directories that can each hold one. */
+		async function pathLspWorkspace(prefix: string) {
+			const tempDir = TempDir.createSync(prefix);
+			const savedPath = process.env.PATH;
+			onTestFinished(async () => {
+				restoreEnvValue("PATH", savedPath);
+				await lspClient.shutdownAll();
+				configCache.delete(tempDir.path());
+				tempDir.removeSync();
+			});
+			await Bun.write(
+				path.join(tempDir.path(), ".omp", "lsp.json"),
+				JSON.stringify({
+					servers: { "omp-path-lsp": { command: "omp-path-lsp", fileTypes: [".xyz"], rootMarkers: [".omp"] } },
+				}),
+			);
+			const binDir = async (name: string) => {
+				const dir = path.join(tempDir.path(), name);
+				await Bun.write(path.join(dir, "omp-path-lsp"), "#!/bin/sh\n");
+				await fsp.chmod(path.join(dir, "omp-path-lsp"), 0o755);
+				return dir;
+			};
+			return { cwd: tempDir.path(), binDir };
+		}
+
+		it("finds a server whose binary a later PATH adds, without reload", async () => {
+			const { cwd, binDir } = await pathLspWorkspace("@omp-lsp-config-path-add-");
+			process.env.PATH = "/usr/bin:/bin";
+			expect(lspConfig.getConfig(cwd).servers["omp-path-lsp"]).toBeUndefined();
+
+			const bin = await binDir("plugin-bin");
+			process.env.PATH = `${bin}:/usr/bin:/bin`;
+			expect(lspConfig.getConfig(cwd).servers["omp-path-lsp"]?.resolvedCommand).toBe(path.join(bin, "omp-path-lsp"));
+		});
+
+		it("shuts down the client of a server a later PATH resolves to another binary", async () => {
+			const { cwd, binDir } = await pathLspWorkspace("@omp-lsp-config-path-move-");
+			const first = await binDir("first-bin");
+			const ahead = await binDir("ahead-bin");
+			process.env.PATH = `${first}:/usr/bin:/bin`;
+			const oldConfig = lspConfig.getConfig(cwd).servers["omp-path-lsp"];
+			if (!oldConfig) throw new Error("omp-path-lsp was not resolved");
+			const oldServer = installHandshakeLsp();
+			const oldClient = await lspClient.getOrCreateClient(oldConfig, cwd, 1_000);
+
+			process.env.PATH = `${ahead}:${first}:/usr/bin:/bin`;
+			const newConfig = lspConfig.getConfig(cwd).servers["omp-path-lsp"];
+			if (!newConfig) throw new Error("omp-path-lsp was not resolved after the PATH change");
+			expect(newConfig.resolvedCommand).toBe(path.join(ahead, "omp-path-lsp"));
+			const newServer = installHandshakeLsp();
+			// Creation waits for the superseded client's teardown, as after `reload *`.
+			const newClient = await lspClient.getOrCreateClient(newConfig, cwd, 1_000);
+
+			expect(newClient).not.toBe(oldClient);
+			expect(oldServer.received.map(message => message.method)).toEqual(
+				expect.arrayContaining(["shutdown", "exit"]),
+			);
+			expect(newServer.received.map(message => message.method)).toContain("initialize");
+			expect(await lspClient.getActiveOrPendingClient(oldConfig, cwd)).toBeUndefined();
+		});
 	});
 
 	describe("reload and truthful teardown", () => {

@@ -6,7 +6,7 @@ import { encodeMessageFrame, MessageFramer } from "../jsonrpc/message-framing";
 import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
 import { resolveSyscallTarget } from "../tools/path-utils";
 import { findRepoRoot } from "../capability/fs";
-import { getConfig } from "./config";
+import { getConfig, setConfigPathRefreshListener } from "./config";
 import { applyWorkspaceEdit, type ExecutedWorkspaceChange } from "./edits";
 import { getLspmuxCommand, isLspmuxSupported } from "./lspmux";
 import { connectSharedLspTransport } from "./mux/daemon";
@@ -1273,6 +1273,17 @@ export function shutdownStaleClients(
 	);
 	return cleanup;
 }
+
+// A change of `PATH` reloads a cwd's config (see `getConfig`). A server the new config resolves to
+// another binary gets a fresh client, so the process the old one spawned is shut down here, as
+// `reload *` does, instead of staying registered and running (#8384). Client creation for the cwd
+// waits behind the same reload barrier until that teardown ends.
+setConfigPathRefreshListener((cwd, config) => {
+	queueMicrotask(reconcileIdleChecker);
+	shutdownStaleClients(cwd, Object.values(config.servers)).catch(error => {
+		logger.warn("LSP: could not stop servers superseded by a PATH change", { cwd, error: String(error) });
+	});
+});
 
 /** Allow an explicit user reload to retry a matching initialization failure immediately. */
 export function clearInitializationFailure(config: ServerConfig, cwd: string): void {
