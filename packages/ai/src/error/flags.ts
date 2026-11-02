@@ -17,6 +17,7 @@ import {
 	matchesUsageLimitText,
 	parseRateLimitReason,
 } from "./rate-limit";
+import { getHeadersFromError, getRetryAfterMsFromHeaders } from "../utils/retry-after";
 
 export const Flag = {
 	Class: 0x1000,
@@ -672,7 +673,7 @@ function classifyText(
 
 		const isLimitStatus = isUsageLimitStatus(statusClean);
 		const reason = parseRateLimitReason(cleanMessage, headerRetryAfterMs);
-		const is402BillingCap = statusClean === 402 && is402BillingCapBody(cleanMessage);
+		const is402BillingCap = statusClean === 402 && is402BillingCapBody(cleanMessage, headerRetryAfterMs);
 		// Concurrency caps (e.g. Vertex "Online prediction concurrent requests
 		// quota exceeded") are shed-and-backoff, not credential-rotatable —
 		// exclude them even when the quota-worded phrasing matches the generic
@@ -809,12 +810,14 @@ export function classify(error: unknown, api?: Api): number {
 		} else if (link instanceof ProviderHttpError) {
 			let linkKinds = 0;
 			const { status: codeStatus, code } = link;
+			// The response's retry headers size a quota window like the body's own hints.
+			const linkRetryAfterMs = getRetryAfterMsFromHeaders(getHeadersFromError(link));
 			if (
 				code === "usage_limit_reached" ||
 				(code === "insufficient_quota" && !isDashScopeTokenLimitText(link.message)) ||
 				(codeStatus === 402 &&
-					(is402BillingCapBody(link.message) ||
-						(code !== undefined && !isOpaqueStatusBody(code) && is402BillingCapBody(code))))
+					(is402BillingCapBody(link.message, linkRetryAfterMs) ||
+						(code !== undefined && !isOpaqueStatusBody(code) && is402BillingCapBody(code, linkRetryAfterMs))))
 			) {
 				linkKinds |= Flag.UsageLimit;
 			}
@@ -830,7 +833,7 @@ export function classify(error: unknown, api?: Api): number {
 			}
 			if (
 				(codeStatus === 401 || codeStatus === 403) &&
-				!(codeStatus === 403 && parseRateLimitReason(link.message) === "CONCURRENT_LIMIT")
+				!(codeStatus === 403 && parseRateLimitReason(link.message, linkRetryAfterMs) === "CONCURRENT_LIMIT")
 			) {
 				linkKinds |= Flag.AuthFailed;
 			} else if (codeStatus === 429) {

@@ -4937,7 +4937,8 @@ export class AgentSession implements SettingsScope {
 			// token is valid, and wiping it hides the provider from `/model` (#11275).
 			if (msg.stopReason === "error" && msg.provider === "github-copilot") {
 				const errorId = AIError.classifyMessage(msg);
-				const isConcurrencyCap = AIError.parseRateLimitReason(msg.errorMessage ?? "") === "CONCURRENT_LIMIT";
+				const isConcurrencyCap =
+					AIError.parseRateLimitReason(msg.errorMessage ?? "", msg.errorRetryAfterMs) === "CONCURRENT_LIMIT";
 				if (
 					AIError.is(errorId, AIError.Flag.AuthFailed) &&
 					!AIError.is(errorId, AIError.Flag.UsageLimit) &&

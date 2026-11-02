@@ -474,10 +474,10 @@ export function isUsageLimitStatus(status: number | undefined): boolean {
 const STATUS_402_QUOTA_PATTERN =
 	/\b(?:payment(?:\s+is)?[-_.\s]*required|deactivated_workspace|insufficient.?(?:balance|account.?funds))\b/i;
 
-export function is402BillingCapBody(message: string | undefined): boolean {
+export function is402BillingCapBody(message: string | undefined, headerRetryAfterMs?: number): boolean {
 	if (message === undefined || isOpaqueStatusBody(message)) return true;
 	if (STATUS_402_QUOTA_PATTERN.test(message)) return true;
-	const reason = parseRateLimitReason(message);
+	const reason = parseRateLimitReason(message, headerRetryAfterMs);
 	return isQuotaExhaustedReason(reason) || reason === "CONCURRENT_LIMIT";
 }
 
@@ -508,7 +508,7 @@ export function isUsageLimitOutcome(
 ): boolean {
 	const structuredReason = message ? parseGoogleRpcRateLimitReason(message, headerRetryAfterMs) : undefined;
 	if (structuredReason !== undefined) return isQuotaExhaustedReason(structuredReason);
-	if (isConcurrencyCapExclusion(status, message)) return false;
+	if (isConcurrencyCapExclusion(status, message, headerRetryAfterMs)) return false;
 	if (message && matchesUsageLimitText(message, headerRetryAfterMs)) return true;
 	// A 403 is normally an auth failure, but several providers deliver an
 	// account-scoped cap with it (Devin/Codeium Connect `permission_denied`,
@@ -517,7 +517,7 @@ export function isUsageLimitOutcome(
 	// accept an undefined status too — but only when the body names a cap that
 	// resets, never on a bare 403, which stays an auth failure.
 	if ((status === 403 || status === undefined) && message && isAccountScopedCapText(message)) return true;
-	if (status === 402 && is402BillingCapBody(message)) return true;
+	if (status === 402 && is402BillingCapBody(message, headerRetryAfterMs)) return true;
 	if (!isUsageLimitStatus(status)) return false;
 	if (!message || isOpaqueStatusBody(message)) return true;
 	const reason = parseRateLimitReason(message, headerRetryAfterMs);
@@ -599,7 +599,16 @@ export function isAccountScopedCapText(message: string): boolean {
  * A concurrency cap on a non-billing status is shed-and-backoff, not
  * credential-rotatable. This mirrors the exclusion in {@link isUsageLimitOutcome}
  * for the 403 auth-retry entry points. A 402 remains an account-billing cap.
+ * `headerRetryAfterMs` is the failed response's header delay.
  */
-export function isConcurrencyCapExclusion(status: number | undefined, message: string | undefined): boolean {
-	return message !== undefined && parseRateLimitReason(message) === "CONCURRENT_LIMIT" && status !== 402;
+export function isConcurrencyCapExclusion(
+	status: number | undefined,
+	message: string | undefined,
+	headerRetryAfterMs?: number,
+): boolean {
+	return (
+		message !== undefined &&
+		parseRateLimitReason(message, headerRetryAfterMs) === "CONCURRENT_LIMIT" &&
+		status !== 402
+	);
 }

@@ -59,7 +59,7 @@ export function isAuthRetryableError(error: unknown): boolean {
 	}
 	const embeddedStatus = message ? extractHttpStatusFromError({ message }) : undefined;
 	const status = httpStatus ?? embeddedStatus;
-	if (isConcurrencyCapExclusion(status, message)) return false;
+	if (isConcurrencyCapExclusion(status, message, headerRetryAfterMs)) return false;
 	// A Cline surface-gate 403 is per-model client policy, not a credential
 	// problem: sibling keys fail identically, so rotation only burns them.
 	if (isClinePassSurfaceGateMessage(message)) return false;

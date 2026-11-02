@@ -15,7 +15,7 @@
 
 - `/login mistral` signs in through the browser like the Mistral Vibe CLI and stores the minted API key, whose usage counts against the plan's Vibe Code quota instead of pay-as-you-go API credits; `MISTRAL_API_KEY` still works ([#13875](https://github.com/can1357/oh-my-pi/pull/13875) by [@Gauthier-Huguenin](https://github.com/Gauthier-Huguenin), continued in [#17672](https://github.com/can1357/oh-my-pi/pull/17672) by [@abilliontokens](https://github.com/abilliontokens))
 - Added `isCreditBalanceTooLow` and `calculateCreditBalanceBackoffMs` for Anthropic's empty-prepaid-balance rejection, and `parseHttpErrorBody` and `httpErrorReason` for reading a provider's `<status> <JSON body>` error ([#17656](https://github.com/can1357/oh-my-pi/pull/17656) by [@sjawhar](https://github.com/sjawhar))
-- Added `errorDisplayText`, `editErrorText`, `clearErrorText` and `errorRetryHeaders` for the split error fields, an optional header retry delay on `extractProviderRetryHint`, `parseRateLimitReason`, `matchesUsageLimitText` and `isUsageLimitOutcome`, and `retryAfterMs` on `RotateCredentialOptions` ([#17656](https://github.com/can1357/oh-my-pi/pull/17656) by [@sjawhar](https://github.com/sjawhar))
+- Added `errorDisplayText`, `editErrorText`, `clearErrorText` and `errorRetryHeaders` for the split error fields, an optional header retry delay on `extractProviderRetryHint`, `parseRateLimitReason`, `matchesUsageLimitText`, `isUsageLimitOutcome`, `is402BillingCapBody` and `isConcurrencyCapExclusion`, and `retryAfterMs` on `RotateCredentialOptions` ([#17656](https://github.com/can1357/oh-my-pi/pull/17656) by [@sjawhar](https://github.com/sjawhar))
 
 ### Fixed
 
