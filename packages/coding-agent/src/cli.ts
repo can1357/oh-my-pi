@@ -34,6 +34,7 @@ import {
 	BLOB_BROKER_WORKER_ARG,
 	COMPUTER_WORKER_ARG,
 	DAEMON_BROKER_WORKER_ARG,
+	EXIT_CONTEXT_WORKER_ARG,
 	IDA_HOST_WORKER_ARG,
 	LSP_MUX_WORKER_ARG,
 	MNEMOPI_EMBED_SERVER_WORKER_ARG,
@@ -156,6 +157,7 @@ async function runSmokeTest(): Promise<void> {
 	const { smokeTestBlobBroker } = await import("./blob-broker/daemon");
 	const { smokeTestTerminalOutputWorker } = await import("./launch/terminal-output-worker-client");
 	const { smokeTestTextPredictDaemon } = await import("./predict/client");
+	const { smokeTestExitContextWorker } = await import("./session/exit-context");
 	await smokeTestSyncWorker();
 	await smokeTestStatsActivityWorker();
 
@@ -184,6 +186,7 @@ async function runSmokeTest(): Promise<void> {
 	await smokeTestBlobBroker();
 	await smokeTestTerminalOutputWorker();
 	await smokeTestTextPredictDaemon();
+	smokeTestExitContextWorker();
 	process.stdout.write("smoke-test: ok\n");
 }
 
@@ -299,6 +302,13 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 		const parentPort = getWorkerParentPort();
 		if (parentPort) installWorkerInbox(parentPort);
 		await import("./subprocess/parent-watchdog-worker");
+		return true;
+	}
+	if (arg === EXIT_CONTEXT_WORKER_ARG) {
+		const parentPort = getWorkerParentPort();
+		if (parentPort) installWorkerInbox(parentPort);
+		// The worker body registers its message handler at evaluation; only this thread may load it.
+		await import("./session/exit-context-worker");
 		return true;
 	}
 	if (arg === DAEMON_BROKER_WORKER_ARG) {

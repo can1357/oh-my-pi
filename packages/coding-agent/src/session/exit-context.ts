@@ -10,21 +10,29 @@
  * - `intent`: the word a sender left in `<exit-intent dir>/<pid>` before it
  *   signalled (`omp session exit-intent <pid> <word>`).
  *
- * The reads run on exit paths, signal teardown included, so they are
- * synchronous, never throw, and are bounded: each source is one non-blocking
- * open of a regular file (a FIFO or other special file is refused, not waited
- * on) and at most {@link SOURCE_READ_LIMIT_BYTES} read. They touch the same
- * local state tree the session's own synchronous exit flush writes to.
+ * These are read on exit paths, signal teardown included, so reading never
+ * throws and never waits on a filesystem: `pid` and `pane` need no I/O, and the
+ * file reads run on a reader thread (`./exit-context-worker`) that the exiting
+ * thread waits on for at most {@link EXIT_CONTEXT_IO_TIMEOUT_MS}. Sessions start
+ * the thread early ({@link startExitContextReader}) so an exit does not wait for
+ * it to load. A read that misses the deadline leaves `oomKills` and `intent`
+ * absent; while it stays stuck, later exits skip the reads instead of waiting
+ * again, and once it answers, the next exit records the intent it claimed.
  */
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { getExitIntentDir } from "@oh-my-pi/pi-utils/dirs";
+import { workerHostEntry } from "@oh-my-pi/pi-utils/worker-host";
+import { EXIT_CONTEXT_WORKER_ARG } from "../cli/worker-selectors";
+import {
+	EXIT_CONTEXT_RESULT_OFFSET,
+	type ExitContextIoRequest,
+	type ExitContextIoResult,
+} from "./exit-context-protocol";
 
-/** Most bytes read from any one source. */
-const SOURCE_READ_LIMIT_BYTES = 4096;
-
-/** Longest intent recorded; a longer word is cut to this many characters. */
-export const EXIT_INTENT_MAX_CHARS = 64;
+/** Longest the exiting thread waits for the reader thread's answer. */
+export const EXIT_CONTEXT_IO_TIMEOUT_MS = 1_500;
 
 /** The intents `omp session exit-intent` writes. Readers record any word as given. */
 export const EXIT_INTENTS = ["move", "restart", "stop"] as const;
@@ -39,18 +47,11 @@ export interface ExitContext {
 }
 
 /** Where {@link readExitContext} reads from; tests point these at fakes. */
-export interface ExitContextSources {
-	pid: number;
+export interface ExitContextSources extends Omit<ExitContextIoRequest, "readIntent" | "state"> {
 	pane: string | undefined;
-	/** `/proc/self/cgroup`: the `0::<path>` line names this process's cgroup v2. */
-	cgroupFile: string;
-	/** cgroup v2 mount point, `/sys/fs/cgroup`. */
-	cgroupRoot: string;
-	/** Directory of `<pid>` intent files. */
-	intentDir: string;
-	/** Epoch ms this process started; an intent file older than this was left for an earlier process with the same pid. */
-	processStartMs: number;
 }
+
+const EXIT_CONTEXT_RESULT_BYTES = 1024;
 
 /** The live sources of this process. */
 export function defaultExitContextSources(): ExitContextSources {
@@ -73,86 +74,105 @@ export function defaultExitContextSources(): ExitContextSources {
  */
 const consumedIntents = new Map<string, string>();
 
-const OPEN_FLAGS = fs.constants.O_RDONLY | fs.constants.O_NONBLOCK | fs.constants.O_NOFOLLOW;
+/** The reader thread, idle between requests; `undefined` before the first start or after it died. */
+let reader: Worker | undefined;
 
-interface SmallFile {
-	text: string;
-	mtimeMs: number;
-}
+/** A request that missed its deadline: the reader is still on it, and a later exit takes its answer once it has one. */
+let lateRead: { intentPath: string; state: SharedArrayBuffer } | undefined;
 
-/** A regular file's first {@link SOURCE_READ_LIMIT_BYTES}, or `undefined` when it is missing, unreadable or not a regular file. */
-function readSmallFile(filePath: string): SmallFile | undefined {
-	let fd: number | undefined;
+/**
+ * Start the reader thread if it is not running, so a later exit only waits for
+ * its file reads. Never throws; without a thread, exits record `pid` and `pane`.
+ */
+export function startExitContextReader(): Worker | undefined {
+	if (reader) return reader;
 	try {
-		fd = fs.openSync(filePath, OPEN_FLAGS);
-		const stat = fs.fstatSync(fd);
-		if (!stat.isFile()) return undefined;
-		const buffer = Buffer.allocUnsafe(SOURCE_READ_LIMIT_BYTES);
-		let length = 0;
-		while (length < buffer.length) {
-			const read = fs.readSync(fd, buffer, length, buffer.length - length, null);
-			if (read === 0) break;
-			length += read;
-		}
-		return { text: buffer.toString("utf8", 0, length), mtimeMs: stat.mtimeMs };
+		const hostEntry = workerHostEntry();
+		const worker = hostEntry
+			? new Worker(hostEntry, { type: "module", argv: [EXIT_CONTEXT_WORKER_ARG] })
+			: new Worker(new URL("./exit-context-worker.ts", import.meta.url).href, { type: "module" });
+		// An idle reader, or one stuck in a hung read, must not keep the process alive.
+		worker.unref();
+		worker.addEventListener("close", () => {
+			if (reader === worker) reader = undefined;
+		});
+		reader = worker;
 	} catch {
-		return undefined;
-	} finally {
-		if (fd !== undefined) {
-			try {
-				fs.closeSync(fd);
-			} catch {}
-		}
+		reader = undefined;
 	}
+	return reader;
 }
 
-/** `oom_kill` from the `memory.events` of the cgroup v2 `cgroupFile` names, or `undefined`. */
-function readOomKills(sources: ExitContextSources): number | undefined {
-	const membership = readSmallFile(sources.cgroupFile)?.text;
-	if (!membership) return undefined;
-	const line = membership.split("\n").find(entry => entry.startsWith("0::/"));
-	if (!line) return undefined;
-	const eventsPath = path.join(sources.cgroupRoot, line.slice("0::".length), "memory.events");
-	const events = readSmallFile(eventsPath)?.text;
-	if (!events) return undefined;
-	for (const entry of events.split("\n")) {
-		const [key, value] = entry.split(" ");
-		if (key !== "oom_kill" || value === undefined || !/^\d+$/.test(value)) continue;
-		const count = Number(value);
-		return Number.isSafeInteger(count) ? count : undefined;
-	}
-	return undefined;
-}
-
-function removeQuietly(filePath: string): void {
+/** The answer in `state`, or `undefined` while the reader has not written one. */
+function takeAnswer(state: SharedArrayBuffer): ExitContextIoResult | undefined {
+	const header = new Int32Array(state, 0, 2);
+	if (Atomics.load(header, 0) !== 1) return undefined;
 	try {
-		fs.unlinkSync(filePath);
-	} catch {}
+		const bytes = new Uint8Array(state, EXIT_CONTEXT_RESULT_OFFSET, Atomics.load(header, 1));
+		const result: unknown = JSON.parse(new TextDecoder().decode(bytes));
+		if (typeof result !== "object" || result === null) return {};
+		const { oomKills, intent } = result as Record<string, unknown>;
+		const answer: ExitContextIoResult = {};
+		if (typeof oomKills === "number") answer.oomKills = oomKills;
+		if (typeof intent === "string") answer.intent = intent;
+		return answer;
+	} catch {
+		return {};
+	}
 }
 
-/** The word left for this process, consumed: the file is deleted after the read. */
-function consumeExitIntent(sources: ExitContextSources): string | undefined {
-	const filePath = path.join(sources.intentDir, String(sources.pid));
-	const consumed = consumedIntents.get(filePath);
-	if (consumed !== undefined) return consumed;
-	const file = readSmallFile(filePath);
-	if (!file) return undefined;
-	removeQuietly(filePath);
-	// Left for an earlier process that had this pid and died without reading it.
-	if (file.mtimeMs < sources.processStartMs) return undefined;
-	const word = file.text.trim().slice(0, EXIT_INTENT_MAX_CHARS);
-	if (!word) return undefined;
-	consumedIntents.set(filePath, word);
-	return word;
+function rememberIntent(intentPath: string, intent: string | undefined): void {
+	if (intent !== undefined && !consumedIntents.has(intentPath)) consumedIntents.set(intentPath, intent);
 }
 
-/** Read this process's exit context. Never throws; an unreadable source leaves its field absent. */
-export function readExitContext(sources: ExitContextSources = defaultExitContextSources()): ExitContext {
+/**
+ * Read this process's exit context. Never throws, and never waits longer than
+ * `timeoutMs` on the file reads; a source that is missing, unreadable or too
+ * slow leaves its field absent.
+ */
+export function readExitContext(
+	sources: ExitContextSources = defaultExitContextSources(),
+	timeoutMs: number = EXIT_CONTEXT_IO_TIMEOUT_MS,
+): ExitContext {
 	const context: ExitContext = { pid: sources.pid };
 	if (sources.pane) context.pane = sources.pane;
-	const oomKills = readOomKills(sources);
-	if (oomKills !== undefined) context.oomKills = oomKills;
-	const intent = consumeExitIntent(sources);
+	const intentPath = path.join(sources.intentDir, String(sources.pid));
+	const late = lateRead && takeAnswer(lateRead.state);
+	if (lateRead && late === undefined) {
+		// The reader is still stuck on an earlier request: record what needs no I/O.
+		const consumed = consumedIntents.get(intentPath);
+		if (consumed !== undefined) context.intent = consumed;
+		return context;
+	}
+	if (lateRead) {
+		rememberIntent(lateRead.intentPath, late?.intent);
+		lateRead = undefined;
+	}
+	const worker = startExitContextReader();
+	if (worker) {
+		const state = new SharedArrayBuffer(EXIT_CONTEXT_RESULT_OFFSET + EXIT_CONTEXT_RESULT_BYTES);
+		const request: ExitContextIoRequest = {
+			pid: sources.pid,
+			cgroupFile: sources.cgroupFile,
+			cgroupRoot: sources.cgroupRoot,
+			intentDir: sources.intentDir,
+			processStartMs: sources.processStartMs,
+			readIntent: !consumedIntents.has(intentPath),
+			state,
+		};
+		try {
+			worker.postMessage(request);
+			Atomics.wait(new Int32Array(state, 0, 2), 0, 0, timeoutMs);
+			const result = takeAnswer(state);
+			if (result === undefined) {
+				lateRead = { intentPath, state };
+			} else {
+				if (result.oomKills !== undefined) context.oomKills = result.oomKills;
+				rememberIntent(intentPath, result.intent);
+			}
+		} catch {}
+	}
+	const intent = consumedIntents.get(intentPath);
 	if (intent !== undefined) context.intent = intent;
 	return context;
 }
@@ -171,8 +191,34 @@ export function writeExitIntent(pid: number, intent: ExitIntent, intentDir: stri
 		fs.writeFileSync(staging, `${intent}\n`, { mode: 0o600, flag: "wx" });
 		fs.renameSync(staging, target);
 	} catch (error) {
-		removeQuietly(staging);
+		try {
+			fs.unlinkSync(staging);
+		} catch {}
 		throw error;
 	}
 	return target;
+}
+
+/** Distribution smoke for source, npm-bundle, and compiled worker routing. */
+export function smokeTestExitContextWorker(): void {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-exit-context-smoke-"));
+	try {
+		const pid = 2_147_483_000;
+		writeExitIntent(pid, "stop", dir);
+		const context = readExitContext(
+			{
+				pid,
+				pane: undefined,
+				cgroupFile: path.join(dir, "cgroup"),
+				cgroupRoot: dir,
+				intentDir: dir,
+				processStartMs: 0,
+			},
+			// A cold start loads the reader thread first; sessions start it early.
+			30_000,
+		);
+		if (context.intent !== "stop") throw new Error("exit context worker smoke mismatch");
+	} finally {
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
 }

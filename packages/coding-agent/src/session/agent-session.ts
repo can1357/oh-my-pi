@@ -370,7 +370,7 @@ import { COST_GATE_NOTICE_SOURCE, type CostCapRefusal, CostGate } from "./cost-g
 import { recordCredentialPin, seedCredentialPins } from "./credential-pin";
 import { isDateCwdReminderControl } from "./date-cwd-reminder";
 import { EvalRunner, type EvalRunnerHost } from "./eval-runner";
-import { readExitContext } from "./exit-context";
+import { readExitContext, startExitContextReader } from "./exit-context";
 import {
 	collectPendingToolCalls,
 	createInterruptedToolResults,
@@ -1958,6 +1958,8 @@ export class AgentSession implements SettingsScope {
 	readonly tokenRate: TokenRateMeter;
 
 	constructor(config: AgentSessionConfig) {
+		// Loaded now so the exit record only waits for its file reads, not a thread start.
+		startExitContextReader();
 		this.agent = config.agent;
 		this.tokenRate = new TokenRateMeter(text => this.agent.tokenizer.countTokens(text));
 		this.#reseedTokenRate();

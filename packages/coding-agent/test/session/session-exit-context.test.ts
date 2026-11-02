@@ -1,14 +1,35 @@
-import { describe, expect, it } from "bun:test";
+import { beforeAll, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import {
-	EXIT_INTENT_MAX_CHARS,
 	type ExitContextSources,
 	readExitContext,
+	startExitContextReader,
 	writeExitIntent,
 } from "@oh-my-pi/pi-coding-agent/session/exit-context";
+import { EXIT_INTENT_MAX_CHARS } from "@oh-my-pi/pi-coding-agent/session/exit-context-protocol";
 import { SESSION_EXIT_CUSTOM_TYPE } from "@oh-my-pi/pi-coding-agent/session/exit-diagnostics";
 import { TempDir } from "@oh-my-pi/pi-utils";
+
+// Sessions start the reader thread when they are created; do the same, and wait
+// once for it to load, so no assertion below depends on how fast a thread starts.
+beforeAll(() => {
+	expect(startExitContextReader()).toBeDefined();
+	using tempDir = TempDir.createSync("@omp-exit-context-warm-");
+	writeExitIntent(1, "stop", tempDir.path());
+	const warm = readExitContext(
+		{
+			pid: 1,
+			pane: undefined,
+			cgroupFile: tempDir.join("none"),
+			cgroupRoot: tempDir.path(),
+			intentDir: tempDir.path(),
+			processStartMs: 0,
+		},
+		60_000,
+	);
+	expect(warm.intent).toBe("stop");
+});
 
 const CLI = path.join(import.meta.dir, "../../src/cli.ts");
 const CHILD = path.join(import.meta.dir, "../fixtures/session-exit-context-child.ts");
@@ -114,6 +135,48 @@ describe("readExitContext", () => {
 		// Another session of the same process exiting at the same signal sees the same word.
 		expect(readExitContext(sources).intent).toBe("restart");
 		expect(fs.existsSync(intentPath(sources))).toBe(false);
+		// The claimed copy is gone too.
+		expect(fs.readdirSync(sources.intentDir)).toEqual([]);
+	});
+
+	it("does not wait past its deadline, and a later exit records what the late read claimed", () => {
+		using tempDir = TempDir.createSync("@omp-exit-context-deadline-");
+		const sources = fakeSources(tempDir);
+		fs.writeFileSync(intentPath(sources), "restart\n");
+		const started = performance.now();
+		expect(readExitContext(sources, 0)).toEqual({ pid: sources.pid, pane: "%7" });
+		expect(performance.now() - started).toBeLessThan(1_000);
+
+		// The late worker goes on, claims the file, and answers into shared memory.
+		const deadline = Date.now() + 20_000;
+		while (fs.readdirSync(sources.intentDir).length > 0 && Date.now() < deadline) Bun.sleepSync(20);
+		expect(fs.readdirSync(sources.intentDir)).toEqual([]);
+		Bun.sleepSync(200);
+
+		expect(readExitContext(sources)).toEqual({ pid: sources.pid, pane: "%7", oomKills: 3, intent: "restart" });
+	});
+
+	it("records a fresh intent written after a stale one was dropped", () => {
+		using tempDir = TempDir.createSync("@omp-exit-context-stale-fresh-");
+		const sources = fakeSources(tempDir, { processStartMs: Date.now() - 1_000 });
+		fs.writeFileSync(intentPath(sources), "move\n");
+		const past = new Date(Date.now() - 3_600_000);
+		fs.utimesSync(intentPath(sources), past, past);
+		expect(readExitContext(sources).intent).toBeUndefined();
+
+		writeExitIntent(sources.pid, "restart", sources.intentDir);
+		expect(readExitContext(sources).intent).toBe("restart");
+		expect(fs.readdirSync(sources.intentDir)).toEqual([]);
+	});
+
+	it("keeps the first word for the process and leaves a later intent file untouched", () => {
+		using tempDir = TempDir.createSync("@omp-exit-context-rewrite-");
+		const sources = fakeSources(tempDir);
+		writeExitIntent(sources.pid, "restart", sources.intentDir);
+		expect(readExitContext(sources).intent).toBe("restart");
+		writeExitIntent(sources.pid, "stop", sources.intentDir);
+		expect(readExitContext(sources).intent).toBe("restart");
+		expect(fs.readFileSync(intentPath(sources), "utf8")).toBe("stop\n");
 	});
 
 	it("leaves each field absent when its source is missing", () => {
