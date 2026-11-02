@@ -435,6 +435,40 @@ function containsUserInputText(input: unknown[] | undefined, text: string): bool
 }
 
 describe("OpenAI responses history payload", () => {
+	it("replays frozen native computer calls without writing to stored history", async () => {
+		const model = { ...createCodexModel("gpt-5.5"), supportsComputerUse: true };
+		const computer = Object.freeze({
+			type: "computer_call",
+			id: "cu_stored",
+			call_id: "call_stored",
+			action: { type: "screenshot" },
+			pending_safety_checks: [],
+		});
+		const context: Context = {
+			messages: [
+				makeAssistantMessage(
+					[
+						computer,
+						{
+							type: "computer_call_output",
+							call_id: "call_stored",
+							output: { type: "computer_screenshot", image_url: "data:image/png;base64,AAEC" },
+						},
+					],
+					true,
+					"openai-codex",
+				),
+				{ role: "user", content: "Continue", timestamp: Date.now() },
+			],
+		};
+		const payload = await buildTransformedCodexRequestBody(model, context, undefined);
+		expect(findResponsesInputItem(payload.input, "computer_call")).toMatchObject({
+			id: "cu_stored",
+			call_id: "call_stored",
+		});
+		expect(computer.call_id).toBe("call_stored");
+	});
+
 	it.each([
 		{ provider: "openai", snapshot: false },
 		{ provider: "openai", snapshot: true },
