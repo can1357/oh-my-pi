@@ -407,7 +407,19 @@ interface ExpiredArtifact {
 	path: string;
 	size: number;
 	mtime: Date;
+	/** Identity the walk saw, so a removal can refuse a file replaced since. */
+	dev: number;
+	ino: number;
 }
+
+/**
+ * A tool artifact's file name: `<id>.<tool>.log`, as `ArtifactManager`
+ * allocates it (the tool segment is sanitized to `[A-Za-z0-9_-]`). Nothing
+ * else in a session's artifacts tree is a cache: transcripts and their
+ * sidecars, `/btw` conversations, the unsent prompt draft and annotation
+ * drafts are user data.
+ */
+const TOOL_ARTIFACT_NAME = /^\d+\.[A-Za-z0-9_-]+\.log$/;
 
 /** Entries of `dir`, or none when it is missing or unreadable. */
 async function readEntries(dir: string): Promise<Dirent[]> {
@@ -419,42 +431,66 @@ async function readEntries(dir: string): Promise<Dirent[]> {
 }
 
 /**
- * Visit every tool artifact under the sessions root last modified before
- * `cutoff`: a regular file inside a session's artifacts tree
- * (`<sessions>/<project>/<session>/…`, at any depth), reached without
- * following a symlink.
- *
- * Never a transcript or a transcript sidecar: `*.jsonl` and `*.jsonl.*`
- * (backups, staging files, gc archives, kill tombstones) are skipped at every
- * depth. Never a file directly in the sessions root or in a project directory:
- * under `session.storage: file` the project directories hold the session
- * transcripts themselves; under `sql` they hold only artifact trees.
+ * A real directory (not a symlink, not replaced by one) that resolves to the
+ * place the walk expects: `expected` is the real sessions root joined with the
+ * path below it, so a directory swapped for a symlink after the walk read it
+ * resolves elsewhere and is refused.
+ */
+async function isExpectedDirectory(dir: string, expected: string): Promise<boolean> {
+	try {
+		const stat = await fs.lstat(dir);
+		return stat.isDirectory() && (await fs.realpath(dir)) === expected;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Visit every tool artifact ({@link TOOL_ARTIFACT_NAME}) under the sessions
+ * root last modified before `cutoff`: a regular file inside a session's
+ * artifacts tree (`<sessions>/<project>/<session>/…`, at any depth), reached
+ * without following a symlink. Never a file directly in the sessions root or
+ * in a project directory: under `session.storage: file` the project
+ * directories hold the session transcripts themselves.
  */
 async function visitExpiredArtifacts(
 	sessionsDir: string,
 	cutoff: Date,
-	visit: (artifact: ExpiredArtifact) => Promise<void> | void,
+	visit: (artifact: ExpiredArtifact, expectedDir: string) => Promise<void> | void,
 ): Promise<void> {
+	let realRoot: string;
+	try {
+		realRoot = await fs.realpath(sessionsDir);
+	} catch {
+		return;
+	}
+	const expectedOf = (dir: string): string => path.join(realRoot, path.relative(sessionsDir, dir));
 	const walk = async (dir: string): Promise<void> => {
+		if (!(await isExpectedDirectory(dir, expectedOf(dir)))) return;
 		for (const entry of await readEntries(dir)) {
 			const entryPath = path.join(dir, entry.name);
 			if (entry.isDirectory()) {
 				await walk(entryPath);
 				continue;
 			}
-			if (!entry.isFile() || entry.name.endsWith(".jsonl") || entry.name.includes(".jsonl.")) continue;
+			if (!entry.isFile() || !TOOL_ARTIFACT_NAME.test(entry.name)) continue;
 			let stat: Stats;
 			try {
 				stat = await fs.lstat(entryPath);
 			} catch {
 				continue;
 			}
-			if (stat.isFile() && stat.mtime < cutoff) await visit({ path: entryPath, size: stat.size, mtime: stat.mtime });
+			if (!stat.isFile() || stat.mtime >= cutoff) continue;
+			await visit(
+				{ path: entryPath, size: stat.size, mtime: stat.mtime, dev: stat.dev, ino: stat.ino },
+				expectedOf(dir),
+			);
 		}
 	};
 	for (const project of await readEntries(sessionsDir)) {
 		if (!project.isDirectory()) continue;
 		const projectDir = path.join(sessionsDir, project.name);
+		if (!(await isExpectedDirectory(projectDir, expectedOf(projectDir)))) continue;
 		for (const session of await readEntries(projectDir)) {
 			if (session.isDirectory()) await walk(path.join(projectDir, session.name));
 		}
@@ -482,17 +518,29 @@ export async function getArtifactCacheStats(
 /**
  * Remove the tool artifacts last modified more than `daysOld` days ago (see
  * {@link visitExpiredArtifacts}), then the directories inside a session's
- * artifacts tree that the removal left empty. Transcripts, their sidecars, and
- * the session and project directories are never removed, whatever
- * `session.storage` holds the transcripts. Returns the number of files removed.
+ * artifacts tree that the removal left empty. Nothing but `<id>.<tool>.log`
+ * files is removed, and never a session or project directory, whatever
+ * `session.storage` holds the transcripts.
+ *
+ * Right before each removal the file's directory must still resolve to where
+ * the walk found it and the file must still be the one it saw (same device,
+ * inode and mtime, still older than the cutoff), so a directory swapped for a
+ * symlink or a file replaced since the walk is left alone. Node offers no
+ * `unlinkat`, so the check and the removal remain two calls; the window
+ * between them is what is left. Returns the number of files removed.
  */
 export async function clearArtifactCache(sessionsDir: string, daysOld: number): Promise<{ removed: number }> {
 	const cutoff = new Date();
 	cutoff.setDate(cutoff.getDate() - daysOld);
 	let removed = 0;
-	const emptied = new Set<string>();
-	await visitExpiredArtifacts(sessionsDir, cutoff, async artifact => {
+	const emptied = new Map<string, string>();
+	await visitExpiredArtifacts(sessionsDir, cutoff, async (artifact, expectedDir) => {
+		const dir = path.dirname(artifact.path);
 		try {
+			if (!(await isExpectedDirectory(dir, expectedDir))) return;
+			const now = await fs.lstat(artifact.path);
+			const same = now.isFile() && now.dev === artifact.dev && now.ino === artifact.ino;
+			if (!same || now.mtime.getTime() !== artifact.mtime.getTime() || now.mtime >= cutoff) return;
 			await fs.unlink(artifact.path);
 		} catch {
 			return; // Removed or replaced since the walk listed it.
@@ -500,16 +548,18 @@ export async function clearArtifactCache(sessionsDir: string, daysOld: number): 
 		removed++;
 		// Ancestors below the session's own artifacts directory, which a live
 		// session keeps writing into: `<sessions>/<project>/<session>/<dir>…`.
-		let dir = path.dirname(artifact.path);
-		while (path.relative(sessionsDir, dir).split(path.sep).length > 2) {
-			emptied.add(dir);
-			dir = path.dirname(dir);
+		let ancestor = dir;
+		let expected = expectedDir;
+		while (path.relative(sessionsDir, ancestor).split(path.sep).length > 2) {
+			emptied.set(ancestor, expected);
+			ancestor = path.dirname(ancestor);
+			expected = path.dirname(expected);
 		}
 	});
 	// Deepest first, so a parent is tried after its emptied children.
-	for (const dir of [...emptied].sort((a, b) => b.length - a.length)) {
+	for (const [dir, expected] of [...emptied].sort(([a], [b]) => b.length - a.length)) {
 		try {
-			await fs.rmdir(dir);
+			if (await isExpectedDirectory(dir, expected)) await fs.rmdir(dir);
 		} catch {
 			// Not empty (it holds a transcript or a newer artifact), or already gone.
 		}

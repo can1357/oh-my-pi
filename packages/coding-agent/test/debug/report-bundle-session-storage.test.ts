@@ -137,7 +137,7 @@ describe("debug report bundle over the session storage", () => {
 			for (const sidecar of sidecars) await Bun.write(sidecar, "sidecar");
 			const oldArtifacts = [
 				path.join(artifactsDir, "1.bash.log"),
-				path.join(artifactsDir, "Sub", "2.read.md"),
+				path.join(artifactsDir, "Sub", "2.read.log"),
 				path.join(artifactsDir, "gone", "3.bash.log"),
 			];
 			for (const artifact of oldArtifacts) await Bun.write(artifact, "old tool output");
@@ -146,7 +146,7 @@ describe("debug report bundle over the session storage", () => {
 			for (const entry of await fs.readdir(sessionsDir, { recursive: true })) {
 				await fs.utimes(path.join(sessionsDir, entry), fortyDaysAgo, fortyDaysAgo);
 			}
-			const recentArtifact = path.join(artifactsDir, "4.edit.patch");
+			const recentArtifact = path.join(artifactsDir, "4.edit.log");
 			await Bun.write(recentArtifact, "recent tool output");
 
 			const stats = await getArtifactCacheStats(sessionsDir, 30);

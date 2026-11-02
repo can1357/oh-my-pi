@@ -2735,10 +2735,17 @@ export class SessionManager {
 							artifactsRenamed =
 								(await relocateArtifactsDirectory(oldArtifactsDir, newArtifactsDir)) === "renamed";
 						}
-						// Subagent transcripts the directory move did not carry: under
-						// `session.storage: sql` they are rows keyed under the old
-						// directory, whatever the disk holds.
-						movedTranscripts = await moveTranscriptTree(this.#storage, oldArtifactsDir, newArtifactsDir);
+						// What the directory move did not carry: under `session.storage:
+						// sql` the subagent transcripts and the unsent draft are rows keyed
+						// under the old directory, whatever the disk holds. Under file
+						// storage the directory move placed everything but transcripts
+						// whose name was taken, and it decides which tool artifacts stay.
+						movedTranscripts = await moveTranscriptTree(
+							this.#storage,
+							oldArtifactsDir,
+							newArtifactsDir,
+							this.#storage instanceof FileSessionStorage ? "*.jsonl" : "*",
+						);
 					}
 				} catch (err) {
 					if (movedTranscripts.length > 0) {
