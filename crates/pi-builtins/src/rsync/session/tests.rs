@@ -464,8 +464,8 @@ fn a_wedged_conversion_open_does_not_delay_closing_another() {
 	const FIFO: &str = "OMP_RSYNC_TEST_FIFO_MODULE";
 	if let Ok(fifo) = std::env::var(FIFO) {
 		// A converter opened while the configuration is readable.
-		let open = MsgCharset::for_locale("ISO-8859-1", &AtomicBool::new(false));
-		assert!(matches!(open, Ok(MsgCharset::Other(_))), "{open:?}");
+		let open = MsgCharset::for_locale("ISO-8859-1", &AtomicBool::new(false)).expect("the conversion opens");
+		assert!(matches!(open, MsgCharset::Other(_)), "the locale charset needs a conversion check");
 		// A load of the FIFO module, which holds libc's conversion lock.
 		std::thread::spawn(|| {
 			let _ = Iconv::with_locale(b"REVIEW", false, None, &AtomicBool::new(false));
