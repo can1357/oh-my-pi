@@ -156,11 +156,11 @@ describe("CfgProtocolHandler", () => {
 			persistentSettings: Settings.isolated(),
 		});
 		const previous = Bun.env.PI_EDIT_FUZZY;
-		Bun.env.PI_EDIT_FUZZY = "1";
 		onTestFinished(() => {
 			if (previous === undefined) delete Bun.env.PI_EDIT_FUZZY;
 			else Bun.env.PI_EDIT_FUZZY = previous;
 		});
+		Bun.env.PI_EDIT_FUZZY = "1";
 		await expect(write("cfg://edit/fuzzyMatch", "false", settings)).rejects.toThrow("PI_EDIT_FUZZY");
 		expect(asked).toEqual([]);
 		expect(cfgEditFuzzyMatch.provenance(settings)).toBe("env");
@@ -176,11 +176,11 @@ describe("CfgProtocolHandler", () => {
 			persistentSettings: settings,
 		});
 		const previous = Bun.env.SEARXNG_ENDPOINT;
-		Bun.env.SEARXNG_ENDPOINT = "http://env.example";
 		onTestFinished(() => {
 			if (previous === undefined) delete Bun.env.SEARXNG_ENDPOINT;
 			else Bun.env.SEARXNG_ENDPOINT = previous;
 		});
+		Bun.env.SEARXNG_ENDPOINT = "http://env.example";
 		const session = await write("cfg://searxng/endpoint", '"http://session.example"', settings);
 		expect(session.details?.cfg).toMatchObject({ outcome: "applied" });
 		expect(cfgSearxngEndpoint.get(settings)).toBe("http://session.example");

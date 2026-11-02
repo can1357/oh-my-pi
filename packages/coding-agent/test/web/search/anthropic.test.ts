@@ -258,11 +258,11 @@ describe("Anthropic search request body", () => {
 	it("sends API version 2026-10-21 without temperature when opted in on the official API", async () => {
 		const fixture = createFixture("claude-haiku-4-5", "https://api.anthropic.com");
 		const previous = Bun.env.PI_ANTHROPIC_API_VERSION;
-		Bun.env.PI_ANTHROPIC_API_VERSION = "2026-10-21";
 		onTestFinished(() => {
 			if (previous === undefined) delete Bun.env.PI_ANTHROPIC_API_VERSION;
 			else Bun.env.PI_ANTHROPIC_API_VERSION = previous;
 		});
+		Bun.env.PI_ANTHROPIC_API_VERSION = "2026-10-21";
 		try {
 			const cap = makeCaptureFetch();
 			await searchAnthropic({

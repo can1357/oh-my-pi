@@ -48,8 +48,8 @@ import {
 	stripPendingSecretPlaceholderSuffix,
 } from "@oh-my-pi/pi-coding-agent/secrets/placeholder";
 import { compileSecretRegex } from "@oh-my-pi/pi-coding-agent/secrets/regex";
-import { once } from "@oh-my-pi/pi-utils";
-import { getActiveProfile, getAgentDir, setProfile } from "@oh-my-pi/pi-utils/dirs";
+import { __resetDirsFromEnvForTests, getAgentDir, setProfile } from "@oh-my-pi/pi-utils/dirs";
+import { testLifetime } from "../../utils/test/helpers/mock-restores";
 
 afterEach(() => {
 	vi.restoreAllMocks();
@@ -502,33 +502,38 @@ describe("getSecretPlaceholderKey", () => {
 	// through the SAME `getAgentDir()` the runtime uses (see getSecretPlaceholderKey's
 	// docstring) rather than the unrelated `getConfigRootDir()`.
 	async function withTempAgentHome(run: () => Promise<void>): Promise<void> {
-		const originalProfile = getActiveProfile();
 		const originalHome = process.env.HOME;
-		// setProfile() writes OMP_PROFILE, PI_PROFILE and PI_CODING_AGENT_DIR.
-		// once: a timed-out body's late finally must not overwrite the next test's value.
-		const restoreProfileAndHome = once(() => {
-			setProfile(originalProfile);
-			if (originalHome === undefined) {
-				delete process.env.HOME;
-			} else {
-				process.env.HOME = originalHome;
-			}
+		const originalOmpProfile = process.env.OMP_PROFILE;
+		const originalPiProfile = process.env.PI_PROFILE;
+		const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
+		const life = testLifetime();
+		// Runs after afterEach restores the homedir spy, so the resolver rebuilds from the real home.
+		onTestFinished(() => {
+			if (originalHome === undefined) delete process.env.HOME;
+			else process.env.HOME = originalHome;
+			if (originalOmpProfile === undefined) delete process.env.OMP_PROFILE;
+			else process.env.OMP_PROFILE = originalOmpProfile;
+			if (originalPiProfile === undefined) delete process.env.PI_PROFILE;
+			else process.env.PI_PROFILE = originalPiProfile;
+			if (originalAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+			else process.env.PI_CODING_AGENT_DIR = originalAgentDir;
+			__resetDirsFromEnvForTests();
 		});
-		onTestFinished(restoreProfileAndHome);
-		const tempHomeDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-secret-key-"));
-		process.env.HOME = tempHomeDir;
-		const homedirSpy = spyOn(os, "homedir").mockReturnValue(tempHomeDir);
+		let tempHomeDir: string | undefined;
 		try {
+			tempHomeDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-secret-key-"));
+			life.assertLive();
+			process.env.HOME = tempHomeDir;
+			spyOn(os, "homedir").mockReturnValue(tempHomeDir);
 			setProfile(undefined);
 			await run();
 		} finally {
-			restoreProfileAndHome();
-			homedirSpy.mockRestore();
-			await fs.rm(tempHomeDir, { recursive: true, force: true });
+			if (tempHomeDir) await fs.rm(tempHomeDir, { recursive: true, force: true });
 		}
 	}
 
 	it("caches placeholder keys per profile agent dir", async () => {
+		const life = testLifetime();
 		await withTempAgentHome(async () => {
 			const alphaKey = "A".repeat(43);
 			const betaKey = "B".repeat(43);
@@ -537,6 +542,7 @@ describe("getSecretPlaceholderKey", () => {
 			await fs.writeFile(path.join(getAgentDir(), "secret-placeholder.key"), alphaKey);
 			expect(await getSecretPlaceholderKey()).toBe(alphaKey);
 
+			life.assertLive();
 			setProfile("beta");
 			await fs.mkdir(getAgentDir(), { recursive: true });
 			await fs.writeFile(path.join(getAgentDir(), "secret-placeholder.key"), betaKey);

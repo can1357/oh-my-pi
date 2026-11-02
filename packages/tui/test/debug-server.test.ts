@@ -85,6 +85,10 @@ async function paintedText(client: DebugClient): Promise<DebugReply> {
 
 test("OMP_TUI_DEBUG drives and inspects a live TUI", async () => {
 	const previousDebugPath = process.env.OMP_TUI_DEBUG;
+	onTestFinished(() => {
+		if (previousDebugPath === undefined) delete process.env.OMP_TUI_DEBUG;
+		else process.env.OMP_TUI_DEBUG = previousDebugPath;
+	});
 	const socketPath = ipcEndpoint(os.tmpdir(), `pi-tui-${process.pid}-${Bun.randomUUIDv7().slice(0, 8)}`);
 	process.env.OMP_TUI_DEBUG = socketPath;
 	const terminal = new VirtualTerminal(50, 12);
@@ -101,10 +105,6 @@ test("OMP_TUI_DEBUG drives and inspects a live TUI", async () => {
 	tui.setFocus(input);
 
 	let client: DebugClient | undefined;
-	onTestFinished(() => {
-		if (previousDebugPath === undefined) delete process.env.OMP_TUI_DEBUG;
-		else process.env.OMP_TUI_DEBUG = previousDebugPath;
-	});
 	try {
 		tui.start();
 		client = await connectDebugSocket(socketPath);

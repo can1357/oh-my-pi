@@ -23,6 +23,7 @@ import { cfgBrowserEnabled, cfgBrowserHeadless } from "@oh-my-pi/pi-coding-agent
 import { cfgExtendedContext } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 import { cfgMemoryBackend } from "@oh-my-pi/pi-coding-agent/memory-backend/settings";
 import { cfgWorktreeCleanSource } from "@oh-my-pi/pi-coding-agent/task/settings";
+import { testLifetime } from "../../utils/test/helpers/mock-restores";
 
 afterEach(() => {
 	vi.restoreAllMocks();
@@ -1157,12 +1158,18 @@ describe("wave 3 commands", () => {
 	});
 
 	it("/wt: creates a worktree carrying uncommitted changes and relocates the session into it", async () => {
+		const life = testLifetime();
+		const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
+		onTestFinished(() => {
+			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
+			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
+		});
 		const { output, runtime, fakeSessionManager } = createRuntime();
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-wt-"));
 		const repoDir = path.join(root, "repo");
 		const worktreeBase = path.join(root, "wt");
 		const originalProjectDir = process.cwd();
-		const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
+		life.assertLive();
 		process.env.OMP_WORKTREE_DIR = worktreeBase;
 		const git = async (...args: string[]) => {
 			const proc = Bun.spawn(["git", ...args], { cwd: repoDir, stdout: "pipe", stderr: "pipe" });
@@ -1170,10 +1177,6 @@ describe("wave 3 commands", () => {
 			expect(code).toBe(0);
 			return stdout.trim();
 		};
-		onTestFinished(() => {
-			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
-			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
-		});
 		try {
 			await fs.mkdir(repoDir, { recursive: true });
 			await git("init", "-q", "-b", "main");
@@ -1211,13 +1214,19 @@ describe("wave 3 commands", () => {
 	});
 
 	it("/wt: with worktree.cleanSource=true, cleans the source checkout while preserving the worktree", async () => {
+		const life = testLifetime();
+		const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
+		onTestFinished(() => {
+			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
+			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
+		});
 		const { output, runtime, fakeSessionManager } = createRuntime();
 		cfgWorktreeCleanSource.override(runtime.settings, true);
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-wt-clean-"));
 		const repoDir = path.join(root, "repo");
 		const worktreeBase = path.join(root, "wt");
 		const originalProjectDir = process.cwd();
-		const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
+		life.assertLive();
 		process.env.OMP_WORKTREE_DIR = worktreeBase;
 		const git = async (...args: string[]) => {
 			const proc = Bun.spawn(["git", ...args], { cwd: repoDir, stdout: "pipe", stderr: "pipe" });
@@ -1225,10 +1234,6 @@ describe("wave 3 commands", () => {
 			expect(code).toBe(0);
 			return stdout.trim();
 		};
-		onTestFinished(() => {
-			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
-			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
-		});
 		try {
 			await fs.mkdir(repoDir, { recursive: true });
 			await git("init", "-q", "-b", "main");
@@ -1271,13 +1276,19 @@ describe("wave 3 commands", () => {
 	});
 
 	it("/wt: aborts and leaves source checkout untouched when settings flush fails", async () => {
+		const life = testLifetime();
+		const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
+		onTestFinished(() => {
+			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
+			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
+		});
 		const { output, runtime, fakeSessionManager } = createRuntime();
 		spyOn(runtime.settings, "flush").mockRejectedValue(new Error("disk full"));
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-wt-flush-fail-"));
 		const repoDir = path.join(root, "repo");
 		const worktreeBase = path.join(root, "wt");
 		const originalProjectDir = process.cwd();
-		const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
+		life.assertLive();
 		process.env.OMP_WORKTREE_DIR = worktreeBase;
 		const git = async (...args: string[]) => {
 			const proc = Bun.spawn(["git", ...args], { cwd: repoDir, stdout: "pipe", stderr: "pipe" });
@@ -1285,10 +1296,6 @@ describe("wave 3 commands", () => {
 			expect(code).toBe(0);
 			return stdout.trim();
 		};
-		onTestFinished(() => {
-			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
-			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
-		});
 		try {
 			await fs.mkdir(repoDir, { recursive: true });
 			await git("init", "-q", "-b", "main");

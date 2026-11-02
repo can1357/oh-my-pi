@@ -31,6 +31,7 @@ import type { VcsGitRepo, VcsRepo } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
+import { testLifetime } from "../../../../utils/test/helpers/mock-restores";
 
 const SAMPLE_JJ_DIFF = `diff --git a/src/workspace.ts b/src/workspace.ts
 --- a/src/workspace.ts
@@ -323,22 +324,24 @@ describe("ReviewCommand", () => {
 	});
 
 	it("does not retain a review snapshot when the GitHub cache is disabled", async () => {
+		const life = testLifetime();
 		const dir = createTempDir();
 		const previousToken = process.env.GH_TOKEN;
 		const previousCacheDb = process.env.OMP_GITHUB_CACHE_DB;
-		const cacheDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-review-cache-off-"));
-		process.env.GH_TOKEN = "review-cache-disabled";
-		process.env.OMP_GITHUB_CACHE_DB = path.join(cacheDir, "github-cache.db");
-		resetCacheForTests();
-		const settings = Settings.isolated({ "github.cache.enabled": false });
-		spyOn(github, "text").mockResolvedValue(SAMPLE_PR_DIFF);
-		const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
 		onTestFinished(() => {
 			if (previousToken === undefined) delete process.env.GH_TOKEN;
 			else process.env.GH_TOKEN = previousToken;
 			if (previousCacheDb === undefined) delete process.env.OMP_GITHUB_CACHE_DB;
 			else process.env.OMP_GITHUB_CACHE_DB = previousCacheDb;
 		});
+		const cacheDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-review-cache-off-"));
+		life.assertLive();
+		process.env.GH_TOKEN = "review-cache-disabled";
+		process.env.OMP_GITHUB_CACHE_DB = path.join(cacheDir, "github-cache.db");
+		resetCacheForTests();
+		const settings = Settings.isolated({ "github.cache.enabled": false });
+		spyOn(github, "text").mockResolvedValue(SAMPLE_PR_DIFF);
+		const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
 		try {
 			const result = await withActiveSettings(settings, () =>
 				command.execute(["https://github.com/owner/repo/pull/123"], {
@@ -362,19 +365,21 @@ describe("ReviewCommand", () => {
 	])(
 		"links each PR file to its actual diff slice with $fileCount reviewable files",
 		async ({ fileCount, lastIndex }) => {
+			const life = testLifetime();
 			const previousCacheDb = process.env.OMP_GITHUB_CACHE_DB;
 			const previousGhToken = process.env.GH_TOKEN;
-			const cacheDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-review-cache-"));
-			process.env.OMP_GITHUB_CACHE_DB = path.join(cacheDir, "github-cache.db");
-			process.env.GH_TOKEN = "review-test-token";
-			retainGeneration.mockRestore();
-			resetCacheForTests();
 			onTestFinished(() => {
 				if (previousCacheDb === undefined) delete process.env.OMP_GITHUB_CACHE_DB;
 				else process.env.OMP_GITHUB_CACHE_DB = previousCacheDb;
 				if (previousGhToken === undefined) delete process.env.GH_TOKEN;
 				else process.env.GH_TOKEN = previousGhToken;
 			});
+			const cacheDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-review-cache-"));
+			life.assertLive();
+			process.env.OMP_GITHUB_CACHE_DB = path.join(cacheDir, "github-cache.db");
+			process.env.GH_TOKEN = "review-test-token";
+			retainGeneration.mockRestore();
+			resetCacheForTests();
 			try {
 				const paths = [
 					"bun.lock",

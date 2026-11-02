@@ -114,8 +114,6 @@ describe("ModelRegistry LM Studio Fixes", () => {
 
 	test("LM_STUDIO_BASE_URL can target any local OpenAI-compatible /v1 server", async () => {
 		const originalBaseUrl = Bun.env.LM_STUDIO_BASE_URL;
-		Bun.env.LM_STUDIO_BASE_URL = "http://127.0.0.1:11434/v1";
-		let requestedUrl = "";
 		onTestFinished(() => {
 			if (originalBaseUrl === undefined) {
 				delete Bun.env.LM_STUDIO_BASE_URL;
@@ -123,6 +121,8 @@ describe("ModelRegistry LM Studio Fixes", () => {
 				Bun.env.LM_STUDIO_BASE_URL = originalBaseUrl;
 			}
 		});
+		Bun.env.LM_STUDIO_BASE_URL = "http://127.0.0.1:11434/v1";
+		let requestedUrl = "";
 		const fetchMock: FetchImpl = input => {
 			const url = String(input);
 			if (url.includes(":11434/v1/models")) {

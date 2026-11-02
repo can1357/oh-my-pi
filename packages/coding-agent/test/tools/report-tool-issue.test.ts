@@ -645,13 +645,13 @@ describe("dispatchReportIssueDevice", () => {
 	it("writes nothing while consent is unresolved", async () => {
 		Bun.env.PI_AUTO_QA = "1";
 		const originalPush = Bun.env.PI_AUTO_QA_PUSH;
-		delete Bun.env.PI_AUTO_QA_PUSH;
-		const db = openTempDb();
-		const openSpy = vi.spyOn(reportIssue, "openAutoQaDb").mockReturnValue(db);
 		onTestFinished(() => {
 			if (originalPush === undefined) delete Bun.env.PI_AUTO_QA_PUSH;
 			else Bun.env.PI_AUTO_QA_PUSH = originalPush;
 		});
+		delete Bun.env.PI_AUTO_QA_PUSH;
+		const db = openTempDb();
+		const openSpy = vi.spyOn(reportIssue, "openAutoQaDb").mockReturnValue(db);
 		try {
 			// Consent unset and no UI handler registered → resolves to false.
 			const session = { settings: Settings.isolated({ "dev.autoqa": true }) } as ToolSession;

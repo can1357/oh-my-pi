@@ -468,11 +468,11 @@ describe("read tool URL handling", () => {
 
 	it("prefers Firecrawl scrape first when providers.fetch is set to firecrawl", async () => {
 		const originalApiKey = process.env.FIRECRAWL_API_KEY;
-		process.env.FIRECRAWL_API_KEY = "test-firecrawl-key";
 		onTestFinished(() => {
 			if (originalApiKey === undefined) delete process.env.FIRECRAWL_API_KEY;
 			else process.env.FIRECRAWL_API_KEY = originalApiKey;
 		});
+		process.env.FIRECRAWL_API_KEY = "test-firecrawl-key";
 		const session = createSession({ "providers.fetch": "firecrawl" });
 		const tool = new ReadTool(session);
 		const pageUrl = "https://example.com/firecrawl-page";
@@ -536,11 +536,11 @@ describe("read tool URL handling", () => {
 
 	it("retries a retryable Firecrawl response before falling through", async () => {
 		const originalApiKey = process.env.FIRECRAWL_API_KEY;
-		process.env.FIRECRAWL_API_KEY = "test-firecrawl-key";
 		onTestFinished(() => {
 			if (originalApiKey === undefined) delete process.env.FIRECRAWL_API_KEY;
 			else process.env.FIRECRAWL_API_KEY = originalApiKey;
 		});
+		process.env.FIRECRAWL_API_KEY = "test-firecrawl-key";
 		const session = createSession({ "providers.fetch": "firecrawl" });
 		const tool = new ReadTool(session);
 		const pageUrl = "https://example.com/firecrawl-retry";

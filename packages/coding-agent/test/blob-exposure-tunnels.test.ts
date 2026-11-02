@@ -375,10 +375,10 @@ describe("startExposure tunnel adapters", () => {
 	it("reports absent adapter binaries without invoking the network", async () => {
 		const emptyPath = fs.mkdtempSync(path.join(os.tmpdir(), "omp-no-tunnel-bin-"));
 		const fakePath = process.env.PATH;
-		process.env.PATH = emptyPath;
 		onTestFinished(() => {
 			process.env.PATH = fakePath;
 		});
+		process.env.PATH = emptyPath;
 		try {
 			const cases: Array<[ExposureConfig, string]> = [
 				[exposure("localhost-run"), "ssh binary"],

@@ -173,11 +173,11 @@ describe("AgentSession bash session ownership", () => {
 			prefix: undefined,
 		});
 		const previousMirror = process.env.OMP_USER_SHELL_MIRROR;
-		process.env.OMP_USER_SHELL_MIRROR = "mirrored-value";
 		onTestFinished(() => {
 			if (previousMirror === undefined) delete process.env.OMP_USER_SHELL_MIRROR;
 			else process.env.OMP_USER_SHELL_MIRROR = previousMirror;
 		});
+		process.env.OMP_USER_SHELL_MIRROR = "mirrored-value";
 		const spawnHook = vi.fn(spawn => ({
 			...spawn,
 			env: { ...spawn.env, OMP_USER_SHELL_MIRROR: "mirrored-value" },

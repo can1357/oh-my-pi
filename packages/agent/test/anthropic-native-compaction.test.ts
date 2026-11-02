@@ -176,11 +176,11 @@ describe("shouldUseAnthropicNativeCompaction", () => {
 
 	test("resolves the endpoint the way the transport does, so an ANTHROPIC_BASE_URL reroute is excluded", async () => {
 		const previous = Bun.env.ANTHROPIC_BASE_URL;
-		Bun.env.ANTHROPIC_BASE_URL = "https://gateway.example.com";
 		onTestFinished(() => {
 			if (previous === undefined) delete Bun.env.ANTHROPIC_BASE_URL;
 			else Bun.env.ANTHROPIC_BASE_URL = previous;
 		});
+		Bun.env.ANTHROPIC_BASE_URL = "https://gateway.example.com";
 		expect(shouldUseAnthropicNativeCompaction(makeAnthropicModel())).toBe(false);
 		expect(shouldUseAnthropicNativeCompaction(makeAnthropicModel({ remoteCompaction: { enabled: true } }))).toBe(
 			false,

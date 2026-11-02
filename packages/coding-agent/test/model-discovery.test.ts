@@ -884,7 +884,6 @@ describe("ModelRegistry runtime discovery", () => {
 
 	test("auto-updates zenmux models keylessly and caches to models.db", async () => {
 		const originalKey = Bun.env.ZENMUX_API_KEY;
-		delete Bun.env.ZENMUX_API_KEY;
 		onTestFinished(() => {
 			if (originalKey === undefined) {
 				delete Bun.env.ZENMUX_API_KEY;
@@ -892,6 +891,7 @@ describe("ModelRegistry runtime discovery", () => {
 				Bun.env.ZENMUX_API_KEY = originalKey;
 			}
 		});
+		delete Bun.env.ZENMUX_API_KEY;
 		// Phase 1: Online keyless discovery
 		let capturedHeaders: RequestInit["headers"];
 		const fetchMock: FetchImpl = async (input, init) => {

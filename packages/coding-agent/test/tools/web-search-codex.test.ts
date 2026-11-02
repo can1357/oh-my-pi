@@ -349,11 +349,11 @@ describe("searchCodex model selection", () => {
 		// Nothing is stored here on purpose — that is the setup from the issue.
 		const envAuthStorage = createAuthStorage();
 		const previous = process.env.OPENAI_CODEX_OAUTH_TOKEN;
-		process.env.OPENAI_CODEX_OAUTH_TOKEN = "env-bearer-token";
 		onTestFinished(() => {
 			if (previous === undefined) delete process.env.OPENAI_CODEX_OAUTH_TOKEN;
 			else process.env.OPENAI_CODEX_OAUTH_TOKEN = previous;
 		});
+		process.env.OPENAI_CODEX_OAUTH_TOKEN = "env-bearer-token";
 		const result = await searchCodex({
 			...makeSearchParams("env bearer codex search", mockCodexFetch("gpt-5.6-luna"), selectedCodexModel),
 			authStorage: envAuthStorage,

@@ -13,7 +13,8 @@ import type { CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { logger, once, postmortem, TempDir } from "@oh-my-pi/pi-utils";
+import { logger, postmortem, TempDir } from "@oh-my-pi/pi-utils";
+import { testLifetime } from "../../utils/test/helpers/mock-restores";
 
 const tempDirs: TempDir[] = [];
 
@@ -43,6 +44,13 @@ function headlessArgs(argv: string[], sessionDir: string): Args {
 
 describe("startup timing after a headless runner starts", () => {
 	it("stops recording before print mode runs the prompt", async () => {
+		const life = testLifetime();
+		// Print mode intentionally keeps recording under PI_TIMING; this case covers the default.
+		const savedTiming = process.env.PI_TIMING;
+		onTestFinished(() => {
+			if (savedTiming !== undefined) process.env.PI_TIMING = savedTiming;
+			else delete process.env.PI_TIMING;
+		});
 		const dir = TempDir.createSync("@pi-headless-timing-");
 		tempDirs.push(dir);
 		const authStorage = await AuthStorage.create(":memory:");
@@ -69,14 +77,7 @@ describe("startup timing after a headless runner starts", () => {
 			dispose: () => manager.close(),
 		} as unknown as AgentSession;
 		const quitSpy = spyOn(postmortem, "quit").mockImplementation(async () => {});
-		// Print mode intentionally keeps recording under PI_TIMING; this case covers the default.
-		const savedTiming = process.env.PI_TIMING;
-		// once: a timed-out body's late finally must not overwrite the next test's value.
-		const restoreTiming = once(() => {
-			if (savedTiming !== undefined) process.env.PI_TIMING = savedTiming;
-			else delete process.env.PI_TIMING;
-		});
-		onTestFinished(restoreTiming);
+		life.assertLive();
 		delete process.env.PI_TIMING;
 		try {
 			await runRootCommand(headlessArgs(["--print", "hello"], dir.path()), ["--print", "hello"], {
@@ -85,7 +86,6 @@ describe("startup timing after a headless runner starts", () => {
 				createAgentSession: async () => ({ session }) as unknown as CreateAgentSessionResult,
 			});
 		} finally {
-			restoreTiming();
 			logger.endTiming();
 			quitSpy.mockRestore();
 			authStorage.close();

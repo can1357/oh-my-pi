@@ -432,7 +432,6 @@ describe("streamPiNative event flow", () => {
 
 	it("uses PI_STREAM_FIRST_EVENT_TIMEOUT_MS for silent pi-native streams", async () => {
 		const previous = Bun.env.PI_STREAM_FIRST_EVENT_TIMEOUT_MS;
-		Bun.env.PI_STREAM_FIRST_EVENT_TIMEOUT_MS = "20";
 		onTestFinished(() => {
 			if (previous === undefined) {
 				delete Bun.env.PI_STREAM_FIRST_EVENT_TIMEOUT_MS;
@@ -440,6 +439,7 @@ describe("streamPiNative event flow", () => {
 				Bun.env.PI_STREAM_FIRST_EVENT_TIMEOUT_MS = previous;
 			}
 		});
+		Bun.env.PI_STREAM_FIRST_EVENT_TIMEOUT_MS = "20";
 		const fetchImpl: FetchImpl = (async () =>
 			new Response(stalledBody(), {
 				status: 200,

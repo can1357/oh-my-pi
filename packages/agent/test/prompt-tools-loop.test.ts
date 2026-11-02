@@ -221,11 +221,11 @@ describe("agentLoop with owned in-band tool calls", () => {
 
 	it("uses PI_DIALECT=minimax when config.dialect is unset", async () => {
 		const before = Bun.env.PI_DIALECT;
-		Bun.env.PI_DIALECT = "minimax";
 		onTestFinished(() => {
 			if (before === undefined) delete Bun.env.PI_DIALECT;
 			else Bun.env.PI_DIALECT = before;
 		});
+		Bun.env.PI_DIALECT = "minimax";
 		const echoArgs: Array<{ msg: string }> = [];
 		const toolSchema = type({ msg: "string" });
 		const echoTool: AgentTool<typeof toolSchema, { msg: string }> = {

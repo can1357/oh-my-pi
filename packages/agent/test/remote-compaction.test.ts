@@ -3615,12 +3615,14 @@ describe("Amazon Bedrock OpenAI routes", () => {
 	] as const;
 
 	async function withAwsEnv<T>(env: Partial<Record<(typeof AWS_ENV_KEYS)[number], string>>, run: () => Promise<T>) {
-		const previous = new Map(AWS_ENV_KEYS.map(key => [key, Bun.env[key]]));
+		const previous: Record<string, string> = {};
+		for (const key of AWS_ENV_KEYS) {
+			const value = Bun.env[key];
+			if (value !== undefined) previous[key] = value;
+		}
 		onTestFinished(() => {
-			for (const [key, value] of previous) {
-				if (value === undefined) delete Bun.env[key];
-				else Bun.env[key] = value;
-			}
+			for (const key of AWS_ENV_KEYS) delete Bun.env[key];
+			Object.assign(Bun.env, previous);
 			clearAwsCredentialCache();
 		});
 		for (const key of AWS_ENV_KEYS) {

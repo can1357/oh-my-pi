@@ -8,6 +8,7 @@ import { computeDefaultSessionDir } from "@oh-my-pi/pi-coding-agent/session/sess
 import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
 import { getConfigRootDir, refreshDirsFromEnv, setAgentDir } from "@oh-my-pi/pi-utils";
+import { testLifetime } from "../../../utils/test/helpers/mock-restores";
 
 let tempDir: string;
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -235,10 +236,12 @@ describe("/resume slash command", () => {
 	});
 
 	it.skipIf(process.platform === "win32")("lists and resumes sessions stored in XDG_DATA_HOME", async () => {
+		const life = testLifetime();
 		const xdgDataDir = path.join(tempDir, "xdg-data");
 		const xdgOmpDir = path.join(xdgDataDir, "omp");
 		await fs.mkdir(xdgOmpDir, { recursive: true });
 
+		life.assertLive();
 		// The afterEach hook puts both variables back and rebuilds the directory resolver from them.
 		delete process.env.PI_CODING_AGENT_DIR;
 		process.env.XDG_DATA_HOME = xdgDataDir;

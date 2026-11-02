@@ -40,11 +40,11 @@ function reply(requestControls?: AssistantMessage["requestControls"]): Assistant
 describe("Agent — inactive tool definitions", () => {
 	it("re-supplies a withdrawn tool the latest request declared, as the main loop last sent it", async () => {
 		const previousDialect = Bun.env.PI_DIALECT;
-		delete Bun.env.PI_DIALECT;
 		onTestFinished(() => {
 			if (previousDialect === undefined) delete Bun.env.PI_DIALECT;
 			else Bun.env.PI_DIALECT = previousDialect;
 		});
+		delete Bun.env.PI_DIALECT;
 		const contexts: Context[] = [];
 		// What the provider transform (where the request-size clamp runs) sees.
 		const transformed: Context[] = [];

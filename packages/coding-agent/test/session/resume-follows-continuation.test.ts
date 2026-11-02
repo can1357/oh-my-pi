@@ -13,6 +13,7 @@ import { SessionManager, type SessionPersistenceNotice } from "@oh-my-pi/pi-codi
 import { writeTerminalBreadcrumb } from "@oh-my-pi/pi-coding-agent/session/session-paths";
 import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { __resetDirsFromEnvForTests, getTerminalSessionsDir, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
+import { testLifetime } from "../../../utils/test/helpers/mock-restores";
 
 const SESSION_MANAGER_MODULE = path.join(import.meta.dir, "../../src/session/session-manager.ts");
 const EXIT_DIAGNOSTICS_MODULE = path.join(import.meta.dir, "../../src/session/exit-diagnostics.ts");
@@ -383,16 +384,18 @@ describe("--resume of a session that continued in a sibling file", () => {
 	}, 30_000);
 
 	it("keeps the terminal's own last session when both copies went on, even if the other copy has the newest turn", async () => {
-		using tempDir = TempDir.createSync("@omp-resume-continuation-");
-		const { continuation } = await divergedWithContinuationWrittenLast(tempDir);
-		// This terminal's record of its last session names the continuation; a
-		// terminal id is needed to keep one, so give this test its own.
+		const life = testLifetime();
 		const pane = process.env.TMUX_PANE;
-		process.env.TMUX_PANE = "%resume-continuation-test";
 		onTestFinished(() => {
 			if (pane === undefined) delete process.env.TMUX_PANE;
 			else process.env.TMUX_PANE = pane;
 		});
+		using tempDir = TempDir.createSync("@omp-resume-continuation-");
+		const { continuation } = await divergedWithContinuationWrittenLast(tempDir);
+		// This terminal's record of its last session names the continuation; a
+		// terminal id is needed to keep one, so give this test its own.
+		life.assertLive();
+		process.env.TMUX_PANE = "%resume-continuation-test";
 		await fs.rm(getTerminalSessionsDir(), { recursive: true, force: true });
 		writeTerminalBreadcrumb(tempDir.path(), continuation);
 		const manager = await createSessionManager(continueArgs(tempDir.path()), tempDir.path(), stubSettings);

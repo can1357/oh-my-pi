@@ -9,7 +9,7 @@ import {
 	revalidateLocalEditorEntry,
 } from "@oh-my-pi/pi-coding-agent/modes/local-file-editor";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
-import { once, TempDir } from "@oh-my-pi/pi-utils";
+import { TempDir } from "@oh-my-pi/pi-utils";
 import { vi } from "bun:test";
 
 describe("resolveLocalEditorTarget", () => {
@@ -85,23 +85,17 @@ describe("resolveLocalEditorTarget", () => {
 	it("strips control bytes from errors shown for missing control-byte names", async () => {
 		using tmp = TempDir.createSync("@omp-local-editor-");
 		const editorBackup = process.env.EDITOR;
-		// once: a timed-out body's late finally must not overwrite the next test's value.
-		const restoreEditor = once(() => {
+		onTestFinished(() => {
 			if (editorBackup === undefined) delete process.env.EDITOR;
 			else process.env.EDITOR = editorBackup;
 		});
-		onTestFinished(restoreEditor);
 		process.env.EDITOR = "true";
 		const showError = vi.fn();
 		const ctx = {
 			sessionManager: { getArtifactsDir: () => tmp.path(), getSessionId: () => "s" },
 			showError,
 		} as unknown as InteractiveModeContext;
-		try {
-			await openLocalFileInEditor(ctx, "no\x1bpe.md");
-		} finally {
-			restoreEditor();
-		}
+		await openLocalFileInEditor(ctx, "no\x1bpe.md");
 
 		expect(showError).toHaveBeenCalledTimes(1);
 		const shown = showError.mock.calls[0]![0] as string;

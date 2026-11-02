@@ -22,6 +22,7 @@ import { withoutTerminalMultiplexer } from "./helpers/terminal-multiplexer";
 import { ManualScheduler, TspHarness, TspTestTerminal } from "./native/tsp-harness";
 import { VirtualRenderScheduler } from "./virtual-render-scheduler";
 import { VirtualTerminal } from "./virtual-terminal";
+import { testLifetime } from "../../utils/test/helpers/mock-restores";
 
 afterEach(() => {
 	vi.restoreAllMocks();
@@ -466,6 +467,7 @@ describe("terminal background SIXEL repaint", () => {
 		});
 
 		it("does not repaint duplicate reports or changes overridden by COLORFGBG", async () => {
+			const life = testLifetime();
 			const { terminal, scheduler, tui } = await startFallbackImage();
 			try {
 				terminal.writes.length = 0;
@@ -473,6 +475,7 @@ describe("terminal background SIXEL repaint", () => {
 				await scheduler.settle(terminal);
 				expect(terminal.writes).toEqual([]);
 
+				life.assertLive();
 				Bun.env.COLORFGBG = "15;0";
 				reportAppearance(MacOSAppearance.Light);
 				await scheduler.settle(terminal);

@@ -276,9 +276,6 @@ describe("Firecrawl web search provider", () => {
 		const originalApiKey = process.env.FIRECRAWL_API_KEY;
 		const originalBaseUrl = process.env.FIRECRAWL_BASE_URL;
 		const originalApiUrl = process.env.FIRECRAWL_API_URL;
-		delete process.env.FIRECRAWL_API_KEY;
-		delete process.env.FIRECRAWL_BASE_URL;
-		delete process.env.FIRECRAWL_API_URL;
 		onTestFinished(() => {
 			if (originalApiKey === undefined) delete process.env.FIRECRAWL_API_KEY;
 			else process.env.FIRECRAWL_API_KEY = originalApiKey;
@@ -287,17 +284,20 @@ describe("Firecrawl web search provider", () => {
 			if (originalApiUrl === undefined) delete process.env.FIRECRAWL_API_URL;
 			else process.env.FIRECRAWL_API_URL = originalApiUrl;
 		});
+		delete process.env.FIRECRAWL_API_KEY;
+		delete process.env.FIRECRAWL_BASE_URL;
+		delete process.env.FIRECRAWL_API_URL;
 		expect(new FirecrawlProvider().isAvailable(keylessAuthStorage)).toBe(true);
 	});
 
 	it("uses a self-hosted endpoint and accepts Firecrawl v1 array responses", async () => {
 		const originalBaseUrl = process.env.FIRECRAWL_BASE_URL;
-		process.env.FIRECRAWL_BASE_URL = "http://localhost:3002/v1/";
-		let requestUrl = "";
 		onTestFinished(() => {
 			if (originalBaseUrl === undefined) delete process.env.FIRECRAWL_BASE_URL;
 			else process.env.FIRECRAWL_BASE_URL = originalBaseUrl;
 		});
+		process.env.FIRECRAWL_BASE_URL = "http://localhost:3002/v1/";
+		let requestUrl = "";
 		const fetchMock: FetchImpl = async input => {
 			requestUrl = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
 			return new Response(

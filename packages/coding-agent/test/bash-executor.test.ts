@@ -450,11 +450,18 @@ exit 64
 	});
 
 	it("uses executable SHELL for user-shell shortcut commands", async () => {
+		const originalShell = Bun.env.SHELL;
+		onTestFinished(() => {
+			if (originalShell === undefined) {
+				delete Bun.env.SHELL;
+			} else {
+				Bun.env.SHELL = originalShell;
+			}
+		});
 		if (process.platform === "win32") {
 			return;
 		}
 
-		const originalShell = Bun.env.SHELL;
 		const shellDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-env-shell-"));
 		const marker = path.join(shellDir, "env-shell-ran");
 		const markerEscaped = marker.replace(/'/g, "'\\''");
@@ -487,13 +494,6 @@ exit 64
 			prefix: undefined,
 		});
 
-		onTestFinished(() => {
-			if (originalShell === undefined) {
-				delete Bun.env.SHELL;
-			} else {
-				Bun.env.SHELL = originalShell;
-			}
-		});
 		try {
 			const result = await executeBash("printf 'env-shell-ok\\n'", {
 				cwd: tempDir,

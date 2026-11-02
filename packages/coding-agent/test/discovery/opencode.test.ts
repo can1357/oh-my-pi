@@ -6,6 +6,7 @@ import { type MCPServer, mcpCapability } from "@oh-my-pi/pi-coding-agent/capabil
 import { type Settings, settingsCapability } from "@oh-my-pi/pi-coding-agent/capability/settings";
 import { loadCapability } from "@oh-my-pi/pi-coding-agent/discovery";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { testLifetime } from "../../../utils/test/helpers/mock-restores";
 
 async function loadOpenCodeMcpConfig(cwd: string): Promise<MCPServer[]> {
 	const result = await loadCapability<MCPServer>(mcpCapability.id, {
@@ -323,6 +324,11 @@ describe("OpenCode MCP discovery", () => {
 	});
 
 	test("expands OpenCode {env:VAR} and {file:path} substitutions", async () => {
+		const life = testLifetime();
+		onTestFinished(() => {
+			delete Bun.env.OMP_TEST_MCP_KEY;
+			delete Bun.env.OMP_TEST_MCP_PATH;
+		});
 		const secretFile = path.join(tempDir, "mcp-key.txt");
 		await fs.writeFile(secretFile, "file-token\n");
 		await fs.writeFile(
@@ -348,13 +354,10 @@ describe("OpenCode MCP discovery", () => {
 			}),
 		);
 
+		life.assertLive();
 		delete Bun.env.OMP_TEST_MCP_ABSENT;
 		Bun.env.OMP_TEST_MCP_KEY = "secret-token";
 		Bun.env.OMP_TEST_MCP_PATH = "mcp/server";
-		onTestFinished(() => {
-			delete Bun.env.OMP_TEST_MCP_KEY;
-			delete Bun.env.OMP_TEST_MCP_PATH;
-		});
 		const servers = await loadOpenCodeMcpConfig(tempDir);
 		const byName = Object.fromEntries(servers.map(server => [server.name, server]));
 

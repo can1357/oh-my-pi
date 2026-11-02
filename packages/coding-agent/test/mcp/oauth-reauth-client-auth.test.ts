@@ -22,7 +22,7 @@ import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import * as mcpClient from "@oh-my-pi/pi-coding-agent/mcp/client";
 import { clearMcpClientAuthSurface, reconnectMcpManagerServer } from "@oh-my-pi/pi-coding-agent/mcp/oauth-reauth";
 import type { MCPAuthConfig, MCPServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
-import { once, removeWithRetries } from "@oh-my-pi/pi-utils";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const staleAuth: MCPAuthConfig = {
 	type: "oauth",
@@ -164,23 +164,17 @@ describe("reconnectMcpManagerServer", () => {
 		// full suite becomes order-dependent.
 		const originalBunHost = Bun.env.MCP_HOST;
 		const originalProcessHost = process.env.MCP_HOST;
-		// once: a timed-out body's late finally must not overwrite the next test's value.
-		const restoreHost = once(() => {
+		onTestFinished(() => {
 			if (originalBunHost === undefined) delete Bun.env.MCP_HOST;
 			else Bun.env.MCP_HOST = originalBunHost;
 			if (originalProcessHost === undefined) delete process.env.MCP_HOST;
 			else process.env.MCP_HOST = originalProcessHost;
 		});
-		onTestFinished(restoreHost);
 		Bun.env.MCP_HOST = "mcp.example.com";
 		process.env.MCP_HOST = "mcp.example.com";
-		try {
-			expect(await reconnectMcpManagerServer(manager as unknown as MCPManager, "env-server", selected)).toBe(
-				"connected",
-			);
-		} finally {
-			restoreHost();
-		}
+		expect(await reconnectMcpManagerServer(manager as unknown as MCPManager, "env-server", selected)).toBe(
+			"connected",
+		);
 		// No manager at all (RPC/print hosts without one): nothing to do.
 		expect(await reconnectMcpManagerServer(undefined, "env-server", selected)).toBeUndefined();
 	});

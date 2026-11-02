@@ -32,6 +32,7 @@ import { AUTO_THINKING } from "@oh-my-pi/pi-tui/thinking";
 import * as clipboard from "@oh-my-pi/pi-coding-agent/utils/clipboard";
 import { setKeybindings } from "@oh-my-pi/pi-tui";
 import { formatNumber, TempDir } from "@oh-my-pi/pi-utils";
+import { testLifetime } from "../../utils/test/helpers/mock-restores";
 
 import { cfgPlanAutosave, cfgPlanAutosaveDir } from "@oh-my-pi/pi-coding-agent/plan-mode/settings";
 
@@ -1135,6 +1136,7 @@ describe("InteractiveMode plan review rendering", () => {
 	});
 
 	it("opens the annotation external editor from the real plan review overlay", async () => {
+		const life = testLifetime();
 		// A Bun script instead of a `#!/bin/sh` file: Windows launches $EDITOR through cmd.exe, which cannot run sh scripts.
 		const editorScriptPath = path.join(tempDir.path(), "annotation-editor.ts");
 		await Bun.write(
@@ -1166,6 +1168,7 @@ describe("InteractiveMode plan review rendering", () => {
 			if (previousVisual === undefined) delete Bun.env.VISUAL;
 			else Bun.env.VISUAL = previousVisual;
 		});
+		life.assertLive();
 		Bun.env.EDITOR = editorPath;
 		delete Bun.env.VISUAL;
 		const choice = mode.showPlanReview(

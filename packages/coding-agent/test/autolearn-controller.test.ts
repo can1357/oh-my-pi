@@ -21,7 +21,6 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createAutoLearnCaptureRunner } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
-import { once } from "@oh-my-pi/pi-utils";
 
 import { cfgAutolearnEnabled } from "@oh-my-pi/pi-coding-agent/autolearn/settings";
 
@@ -587,21 +586,12 @@ describe("isolated auto-learn capture", () => {
 					}),
 			});
 			const previousOpenRouterResponses = Bun.env.PI_OPENROUTER_RESPONSES;
-			// once: a timed-out body's late finally must not overwrite the next test's value.
-			const restore = once(() => {
-				if (previousOpenRouterResponses === undefined) {
-					delete Bun.env.PI_OPENROUTER_RESPONSES;
-				} else {
-					Bun.env.PI_OPENROUTER_RESPONSES = previousOpenRouterResponses;
-				}
+			onTestFinished(() => {
+				if (previousOpenRouterResponses === undefined) delete Bun.env.PI_OPENROUTER_RESPONSES;
+				else Bun.env.PI_OPENROUTER_RESPONSES = previousOpenRouterResponses;
 			});
-			onTestFinished(restore);
 			if (api === "openrouter") Bun.env.PI_OPENROUTER_RESPONSES = "1";
-			try {
-				await runCapture("Record the lesson");
-			} finally {
-				restore();
-			}
+			await runCapture("Record the lesson");
 			expect(requests).toHaveLength(2);
 			const [first, second] = requests;
 			expect(second.input.slice(0, first.input.length)).toEqual(first.input);

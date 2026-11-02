@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, onTestFinished, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { testLifetime } from "../../utils/test/helpers/mock-restores";
 import { checkPythonSetup } from "../src/cli/setup-cli";
 import { Settings } from "../src/config/settings";
 import { restoreEnvValue } from "./helpers/settings-test-state";
@@ -130,18 +131,20 @@ describe("omp setup python", () => {
 		}
 	});
 	it.skipIf(process.platform === "win32")("does not let the global probe bypass skip setup validation", async () => {
+		const life = testLifetime();
+		const previousSkipCheck = process.env.PI_PYTHON_SKIP_CHECK;
+		onTestFinished(() => {
+			if (previousSkipCheck === undefined) delete process.env.PI_PYTHON_SKIP_CHECK;
+			else process.env.PI_PYTHON_SKIP_CHECK = previousSkipCheck;
+		});
 		projectDir = TempDir.createSync("@omp-setup-python-");
 		const cwd = projectDir.path();
 		const interpreter = path.join(cwd, "configured-python");
 		await Bun.write(interpreter, "#!/bin/sh\nexit 23\n");
 		await fs.chmod(interpreter, 0o755);
 
-		const previousSkipCheck = process.env.PI_PYTHON_SKIP_CHECK;
+		life.assertLive();
 		process.env.PI_PYTHON_SKIP_CHECK = "1";
-		onTestFinished(() => {
-			if (previousSkipCheck === undefined) delete process.env.PI_PYTHON_SKIP_CHECK;
-			else process.env.PI_PYTHON_SKIP_CHECK = previousSkipCheck;
-		});
 		const result = await checkPythonSetup(cwd, interpreter);
 		expect(result).toMatchObject({
 			available: false,

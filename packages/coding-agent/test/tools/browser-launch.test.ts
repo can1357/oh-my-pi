@@ -70,11 +70,11 @@ describe("browser launch stealth defaults", () => {
 describe("shared browser launch", () => {
 	it("suppresses the broker-owned blank startup window", async () => {
 		const previousExecutable = process.env.PUPPETEER_EXECUTABLE_PATH;
-		process.env.PUPPETEER_EXECUTABLE_PATH = "/test/chrome";
 		onTestFinished(() => {
 			if (previousExecutable === undefined) delete process.env.PUPPETEER_EXECUTABLE_PATH;
 			else process.env.PUPPETEER_EXECUTABLE_PATH = previousExecutable;
 		});
+		process.env.PUPPETEER_EXECUTABLE_PATH = "/test/chrome";
 		const launch = await resolveSharedBrowserLaunchSpec({
 			headless: true,
 			userDataDir: "/test/profile",

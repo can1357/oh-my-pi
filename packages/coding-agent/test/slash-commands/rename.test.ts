@@ -492,6 +492,10 @@ it.each(["TUI", "headless"] as const)(
 	async mode => {
 		const { session, sessionManager, execute } = createRuntime(mode);
 		const previousNoTitle = Bun.env.PI_NO_TITLE;
+		onTestFinished(() => {
+			if (previousNoTitle === undefined) delete Bun.env.PI_NO_TITLE;
+			else Bun.env.PI_NO_TITLE = previousNoTitle;
+		});
 		delete Bun.env.PI_NO_TITLE;
 		const automatic = Promise.withResolvers<string | null>();
 		const manual = Promise.withResolvers<string | null>();
@@ -502,10 +506,6 @@ it.each(["TUI", "headless"] as const)(
 			.mockImplementationOnce(() => automatic.promise)
 			.mockImplementationOnce(() => manual.promise);
 		let pending: Promise<unknown> | undefined;
-		onTestFinished(() => {
-			if (previousNoTitle === undefined) delete Bun.env.PI_NO_TITLE;
-			else Bun.env.PI_NO_TITLE = previousNoTitle;
-		});
 		try {
 			// A TITLE_SYSTEM.md override keeps the automatic title on the title model
 			// (no reply fork), so both titles race through `generate`.

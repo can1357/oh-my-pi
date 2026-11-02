@@ -7,7 +7,7 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { CURRENT_SESSION_VERSION } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { sessionDirForCwd } from "@oh-my-pi/pi-coding-agent/session/session-paths";
 import { resolveSeanceSource, restoreSeanceSession } from "@oh-my-pi/pi-coding-agent/task/seance";
-import { getAgentDir, getSessionsDir, once, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
+import { getAgentDir, getSessionsDir, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 
 function sessionHeader(id: string, cwd: string) {
 	return {
@@ -59,12 +59,11 @@ async function writeSession(file: string, id: string, cwd: string, entries: unkn
 	await Bun.write(file, `${[sessionHeader(id, cwd), ...entries].map(entry => JSON.stringify(entry)).join("\n")}\n`);
 }
 
-/** Point the agent dir (and so every project's session bucket) at a temp root for one test. */
+/** Point the agent dir (and so every project's session bucket) at a temp root for the rest of the test. */
 async function withAgentDir<T>(agentDir: string, fn: () => Promise<T>): Promise<T> {
 	const originalAgentDir = getAgentDir();
 	const originalAgentDirOverride = process.env.PI_CODING_AGENT_DIR;
-	// once: a timed-out body's late finally must not overwrite the next test's value.
-	const restoreAgentDir = once(() => {
+	onTestFinished(() => {
 		if (originalAgentDirOverride !== undefined) {
 			setAgentDir(originalAgentDirOverride);
 		} else {
@@ -72,13 +71,8 @@ async function withAgentDir<T>(agentDir: string, fn: () => Promise<T>): Promise<
 			delete process.env.PI_CODING_AGENT_DIR;
 		}
 	});
-	onTestFinished(restoreAgentDir);
 	setAgentDir(agentDir);
-	try {
-		return await fn();
-	} finally {
-		restoreAgentDir();
-	}
+	return await fn();
 }
 
 afterEach(() => {

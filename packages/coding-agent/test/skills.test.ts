@@ -15,7 +15,8 @@ import {
 import { parseInternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls/parse";
 import { SkillProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/skill-protocol";
 import { CombinedAutocompleteProvider } from "@oh-my-pi/pi-tui/autocomplete";
-import { __resetDirsFromEnvForTests, once, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
+import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
+import { testLifetime } from "../../utils/test/helpers/mock-restores";
 import { restoreEnvValue } from "./helpers/settings-test-state";
 
 afterEach(() => {
@@ -164,9 +165,9 @@ describe("skills", () => {
 
 		it("should keep user Claude skills when project .claude/skills is missing", async () => {
 			const originalClaudeConfigDir = process.env.CLAUDE_CONFIG_DIR;
-			// once: a timed-out body's late finally must not overwrite the next test's value.
-			const restoreClaudeConfigDir = once(() => restoreEnvValue("CLAUDE_CONFIG_DIR", originalClaudeConfigDir));
-			onTestFinished(restoreClaudeConfigDir);
+			onTestFinished(() => {
+				restoreEnvValue("CLAUDE_CONFIG_DIR", originalClaudeConfigDir);
+			});
 			delete process.env.CLAUDE_CONFIG_DIR;
 			delete Bun.env.CLAUDE_CONFIG_DIR;
 			const tempHomeDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-claude-home-"));
@@ -197,7 +198,6 @@ describe("skills", () => {
 				expect(result.items.some(skill => skill.name === "user-only-skill" && skill.level === "user")).toBe(true);
 			} finally {
 				disableUserSource("claude");
-				restoreClaudeConfigDir();
 				await removeWithRetries(tempProjectDir);
 				await removeWithRetries(tempHomeDir);
 			}
@@ -240,14 +240,7 @@ describe("skills", () => {
 		it.skipIf(process.platform === "win32")(
 			"should load Windows host ~/.agents/skills when running under WSL (#3779)",
 			async () => {
-				const tempHostHome = await fs.mkdtemp(path.join(os.tmpdir(), "pi-agents-wsl-host-"));
-				const tempCwd = await fs.mkdtemp(path.join(os.tmpdir(), "pi-agents-wsl-cwd-"));
-				const skillDir = path.join(tempHostHome, ".agents", "skills", "wsl-host-skill");
-				await fs.mkdir(skillDir, { recursive: true });
-				await fs.writeFile(
-					path.join(skillDir, "SKILL.md"),
-					["---", "description: Loaded from WSL host USERPROFILE", "---", "", "# wsl-host-skill"].join("\n"),
-				);
+				const life = testLifetime();
 				const previousWslDistroName = process.env.WSL_DISTRO_NAME;
 				const previousWslInterop = process.env.WSL_INTEROP;
 				const previousUserProfile = process.env.USERPROFILE;
@@ -263,6 +256,15 @@ describe("skills", () => {
 					if (previousUserProfile === undefined) delete process.env.USERPROFILE;
 					else process.env.USERPROFILE = previousUserProfile;
 				});
+				const tempHostHome = await fs.mkdtemp(path.join(os.tmpdir(), "pi-agents-wsl-host-"));
+				const tempCwd = await fs.mkdtemp(path.join(os.tmpdir(), "pi-agents-wsl-cwd-"));
+				const skillDir = path.join(tempHostHome, ".agents", "skills", "wsl-host-skill");
+				await fs.mkdir(skillDir, { recursive: true });
+				await fs.writeFile(
+					path.join(skillDir, "SKILL.md"),
+					["---", "description: Loaded from WSL host USERPROFILE", "---", "", "# wsl-host-skill"].join("\n"),
+				);
+				life.assertLive();
 				Object.defineProperty(process, "platform", { value: "linux" });
 				process.env.WSL_DISTRO_NAME = "Ubuntu";
 				delete process.env.WSL_INTEROP;

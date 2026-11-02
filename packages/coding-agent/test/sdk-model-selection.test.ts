@@ -1131,16 +1131,16 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "alias-fallback-models.yml"));
 		const originalXaiApiKey = Bun.env.XAI_API_KEY;
 		const originalXaiOauthToken = Bun.env.XAI_OAUTH_TOKEN;
-		// XAI_API_KEY authenticates `xai-oauth` requests through an alias, but
-		// default availability ignores that alias and offers `xai` instead.
-		Bun.env.XAI_API_KEY = "xai-env-key";
-		delete Bun.env.XAI_OAUTH_TOKEN;
 		onTestFinished(() => {
 			if (originalXaiApiKey === undefined) delete Bun.env.XAI_API_KEY;
 			else Bun.env.XAI_API_KEY = originalXaiApiKey;
 			if (originalXaiOauthToken === undefined) delete Bun.env.XAI_OAUTH_TOKEN;
 			else Bun.env.XAI_OAUTH_TOKEN = originalXaiOauthToken;
 		});
+		// XAI_API_KEY authenticates `xai-oauth` requests through an alias, but
+		// default availability ignores that alias and offers `xai` instead.
+		Bun.env.XAI_API_KEY = "xai-env-key";
+		delete Bun.env.XAI_OAUTH_TOKEN;
 		const { session, modelFallbackMessage } = await createAgentSession({
 			cwd: tempDir,
 			agentDir: tempDir,

@@ -5,6 +5,7 @@ import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { Loader } from "@oh-my-pi/pi-tui";
 import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
+import { testLifetime } from "../../../../utils/test/helpers/mock-restores";
 
 import { cfgTerminalShowProgress } from "@oh-my-pi/pi-coding-agent/modes/settings";
 
@@ -321,6 +322,7 @@ describe("EventController loader recovery after overflow maintenance", () => {
 	});
 
 	it("reports OSC 9;4 activity to Tern even when the setting is off", async () => {
+		const life = testLifetime();
 		const program = Bun.env.TERM_PROGRAM;
 		onTestFinished(() => {
 			if (program === undefined) delete Bun.env.TERM_PROGRAM;
@@ -331,6 +333,7 @@ describe("EventController loader recovery after overflow maintenance", () => {
 		await new EventController(outside.ctx).handleEvent(AGENT_START);
 		expect(outside.setProgress).not.toHaveBeenCalled();
 
+		life.assertLive();
 		Bun.env.TERM_PROGRAM = "tern";
 		const { ctx, setProgress } = createContext();
 		const controller = new EventController(ctx);

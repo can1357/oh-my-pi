@@ -517,11 +517,11 @@ describe("ModelRegistry", () => {
 
 		test("apiKey-only override supplies fallback auth for built-in models", async () => {
 			const originalOpenAiKey = Bun.env.OPENAI_API_KEY;
-			delete Bun.env.OPENAI_API_KEY;
 			onTestFinished(() => {
 				if (originalOpenAiKey === undefined) delete Bun.env.OPENAI_API_KEY;
 				else Bun.env.OPENAI_API_KEY = originalOpenAiKey;
 			});
+			delete Bun.env.OPENAI_API_KEY;
 			writeRawModelsJson({
 				openai: {
 					apiKey: "issue-typed-key",

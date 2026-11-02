@@ -100,11 +100,11 @@ describe("renderHtmlToText: jina stall does not starve local fallbacks (#1449)",
 describe("renderHtmlToText: Jina response validation", () => {
 	it("sends JINA_API_KEY as optional bearer authentication", async () => {
 		const originalApiKey = process.env.JINA_API_KEY;
-		process.env.JINA_API_KEY = "env-jina-key";
 		onTestFinished(() => {
 			if (originalApiKey === undefined) delete process.env.JINA_API_KEY;
 			else process.env.JINA_API_KEY = originalApiKey;
 		});
+		process.env.JINA_API_KEY = "env-jina-key";
 		const settings = Settings.isolated({ "providers.fetch": "jina" });
 		let requestHeaders: Headers | undefined;
 		const markdown = `# Authenticated article\n\n${"Substantive reader content. ".repeat(8)}`.trim();
@@ -129,12 +129,12 @@ describe("renderHtmlToText: Jina response validation", () => {
 
 	it("uses a stored Jina credential when the environment key is absent", async () => {
 		const originalApiKey = process.env.JINA_API_KEY;
-		delete process.env.JINA_API_KEY;
-		const tempDir = TempDir.createSync("@omp-jina-reader-auth-");
 		onTestFinished(() => {
 			if (originalApiKey === undefined) delete process.env.JINA_API_KEY;
 			else process.env.JINA_API_KEY = originalApiKey;
 		});
+		delete process.env.JINA_API_KEY;
+		const tempDir = TempDir.createSync("@omp-jina-reader-auth-");
 		try {
 			const storage = await AgentStorage.open(path.join(tempDir.path(), "agent.db"));
 			await storage.replaceAuthCredentials("jina", [{ type: "api_key", key: "stored-jina-key" }]);

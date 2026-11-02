@@ -26,7 +26,6 @@ import {
 	withMnemopiRuntimeOptions,
 } from "@oh-my-pi/pi-mnemopi/core/runtime-options";
 import { withBeam } from "@oh-my-pi/pi-mnemopi/mcp";
-import { once } from "@oh-my-pi/pi-utils";
 
 interface EmbeddingRow {
 	readonly memory_id: string;
@@ -319,31 +318,25 @@ describe("issue #1832 — embedding write/read coverage", () => {
 		};
 
 		const originalDataDir = process.env.MNEMOPI_DATA_DIR;
-		// once: a timed-out body's late finally must not overwrite the next test's value.
-		const restoreDataDir = once(() => {
+		onTestFinished(() => {
 			if (originalDataDir === undefined) {
 				delete process.env.MNEMOPI_DATA_DIR;
 			} else {
 				process.env.MNEMOPI_DATA_DIR = originalDataDir;
 			}
 		});
-		onTestFinished(restoreDataDir);
 		process.env.MNEMOPI_DATA_DIR = dataDir;
 		let thrown: unknown;
-		try {
-			await withMnemopiRuntimeOptions(runtimeOptions, async () => {
-				try {
-					await withBeam({ bank: "default" }, async beam => {
-						beam.remember("alpha throw-path regression", { source: "test", importance: 0.5 });
-						throw new Error("simulated handler failure");
-					});
-				} catch (error) {
-					thrown = error;
-				}
-			});
-		} finally {
-			restoreDataDir();
-		}
+		await withMnemopiRuntimeOptions(runtimeOptions, async () => {
+			try {
+				await withBeam({ bank: "default" }, async beam => {
+					beam.remember("alpha throw-path regression", { source: "test", importance: 0.5 });
+					throw new Error("simulated handler failure");
+				});
+			} catch (error) {
+				thrown = error;
+			}
+		});
 		// MCP reports handler failures to the client through isError, which depends
 		// on withBeam PROPAGATING the rejection. Assert that first: without it a
 		// wrapper that swallows the failure still passes the persistence check.

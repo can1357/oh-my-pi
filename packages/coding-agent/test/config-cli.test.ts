@@ -4,6 +4,7 @@ import { runConfigCommand } from "@oh-my-pi/pi-coding-agent/cli/config-cli";
 import { resetSettingsForTest } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { getConfigRootDir, getProjectDir, setAgentDir, setProjectDir, TempDir } from "@oh-my-pi/pi-utils";
+import { testLifetime } from "../../utils/test/helpers/mock-restores";
 
 let testAgentDir: TempDir | undefined;
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -219,15 +220,17 @@ describe("config CLI schema coverage", () => {
 		expect(parsed).toMatchObject({ modelRoles: { type: "record" } });
 	});
 	it("reports the value written to config.yml and the layer that still overrides it", async () => {
-		if (!testAgentDir) throw new Error("Test agent directory was not initialized");
-		const overlayPath = path.join(testAgentDir.path(), "overlay.yml");
-		await Bun.write(overlayPath, "compaction:\n  enabled: false\n");
+		const life = testLifetime();
 		const previousConfigFiles = process.env.PI_CONFIG_FILES;
-		process.env.PI_CONFIG_FILES = overlayPath;
 		onTestFinished(() => {
 			if (previousConfigFiles === undefined) delete process.env.PI_CONFIG_FILES;
 			else process.env.PI_CONFIG_FILES = previousConfigFiles;
 		});
+		if (!testAgentDir) throw new Error("Test agent directory was not initialized");
+		const overlayPath = path.join(testAgentDir.path(), "overlay.yml");
+		await Bun.write(overlayPath, "compaction:\n  enabled: false\n");
+		life.assertLive();
+		process.env.PI_CONFIG_FILES = overlayPath;
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 		await runConfigCommand({ action: "set", key: "compaction.enabled", value: "true", flags: { json: true } });
 		expect(JSON.parse(String(logSpy.mock.calls.at(-1)?.[0]))).toEqual({

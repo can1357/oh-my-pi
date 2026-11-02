@@ -392,7 +392,6 @@ describe("pr:// protocol handler", () => {
 		});
 
 		const saved = process.env.GH_HOST;
-		process.env.GH_HOST = "ghe.example.com";
 		onTestFinished(() => {
 			if (saved === undefined) {
 				delete process.env.GH_HOST;
@@ -400,6 +399,7 @@ describe("pr:// protocol handler", () => {
 				process.env.GH_HOST = saved;
 			}
 		});
+		process.env.GH_HOST = "ghe.example.com";
 		const router = InternalUrlRouter.instance();
 		await router.resolve("pr://owner/example/81");
 		// The bare form above belongs to ghe.example.com, so github.com's #81
