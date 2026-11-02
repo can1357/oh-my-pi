@@ -2329,12 +2329,12 @@ describe("runGcCommand session compression", () => {
 			// Round 3's review: a write to the original by its name between gc's
 			// last look and the rename was lost; round 5's, that a writer opening
 			// the name while the original was moved aside made a new file there.
-			// The names are exchanged in one call, so a writer gets the original
-			// or the copy, and one that opened the original keeps it in place.
-			test("a writer that opens the file by its name as the copy goes in place gets the original, which keeps its place", async () => {
+			// The names are exchanged in one call, so the writer's open meets the
+			// original or the copy, whichever the name holds when it tries again,
+			// and its bytes land after the session's whole history either way.
+			test("a writer that opens the file by its name as the copy goes in place appends after the whole history", async () => {
 				await metadataDitto(true);
 				const { file, candidate } = await privateZeros();
-				const before = await fs.stat(file);
 				let writer: DescriptorWriter | undefined;
 				beforePublish(file, async () => {
 					writer = await descriptorWriter(file, "ONLY ORIGINAL WRITER BYTES", true);
@@ -2344,11 +2344,9 @@ describe("runGcCommand session compression", () => {
 				const state = await writer!.append();
 
 				expect(state.nlink).toBe(1);
-				expect((await fs.stat(file)).ino).toBe(before.ino);
 				const bytes = await fs.readFile(file);
-				expect(bytes.length).toBe(1024 * 1024 + 26);
-				expect(bytes.subarray(-26).toString()).toBe("ONLY ORIGINAL WRITER BYTES");
-				expect(result.compressed).toBe(0);
+				expect(bytes.subarray(0, 1024 * 1024)).toEqual(Buffer.alloc(1024 * 1024));
+				expect(bytes.subarray(1024 * 1024).toString()).toBe("ONLY ORIGINAL WRITER BYTES");
 				expect(result.errors.join("\n")).toContain(`${file} was opened by another process as it was compressed`);
 			});
 
@@ -2408,7 +2406,9 @@ describe("runGcCommand session compression", () => {
 					Buffer.concat([Buffer.alloc(1024 * 1024), Buffer.from("REAL_STORAGE_APPEND\n")]),
 				);
 				expect(result.compressed).toBe(0);
-			});
+				// The writer is a fresh process that loads omp's session storage
+				// from source, which takes seconds on a loaded machine.
+			}, 30_000);
 
 			// Round 5's review: gc removed the copy's scratch name once it was in
 			// place, and a writer had by then left that name the copy's last. The
@@ -2458,8 +2458,7 @@ describe("runGcCommand session compression", () => {
 
 			// Round 3's review: a copy whose mode changed after its byte proof
 			// was swapped in, `0600` becoming `0644`. What a file carries is part
-			// of the proof, read again at the last look and once more after the
-			// copy is in place, which takes it back off the name.
+			// of the proof, read again at the last look before the exchange.
 			const changes = [
 				{
 					what: "mode",
@@ -2478,26 +2477,48 @@ describe("runGcCommand session compression", () => {
 				},
 			];
 			for (const { what, change, read } of changes) {
-				for (const [when, hook] of [
-					["at gc's last look", (_file: string, act: (copy: string) => void) => onCopyLeaseCheck(act)],
-					["as it goes in place", beforePublish],
-				] as const) {
-					test(`a copy whose ${what} changes ${when} leaves the original in place`, async () => {
-						await metadataDitto(true);
-						const { file, candidate } = await privateZeros();
-						setXattr(file, "user.omp-test", "ORIGINAL");
-						const before = await fs.stat(file);
-						const carried = await read(file);
-						hook(file, change);
+				test(`a copy whose ${what} changes at gc's last look leaves the original in place`, async () => {
+					await metadataDitto(true);
+					const { file, candidate } = await privateZeros();
+					setXattr(file, "user.omp-test", "ORIGINAL");
+					const before = await fs.stat(file);
+					const carried = await read(file);
+					onCopyLeaseCheck(change);
 
-						const result = await gcCompress.compressFilesInPlace([candidate], "apfs", new Set());
+					const result = await gcCompress.compressFilesInPlace([candidate], "apfs", new Set());
 
-						expect(await read(file)).toEqual(carried);
-						expect((await fs.stat(file)).ino).toBe(before.ino);
-						expect(result.compressed).toBe(0);
-						expect(result.errors.join("\n")).toContain(`the compressed copy of ${file}`);
+					expect(await read(file)).toEqual(carried);
+					expect((await fs.stat(file)).ino).toBe(before.ino);
+					expect(result.compressed).toBe(0);
+					expect(result.errors.join("\n")).toContain(`the compressed copy of ${file}`);
+				});
+
+				// Round 6's review: a change made through the session file's name
+				// just after the exchange reached the copy, gc gave the original its
+				// name back, and cleanup removed the changed copy. Once the names are
+				// exchanged the name is the users', and what reaches it stays.
+				test(`a change to the session file's ${what} by its name just after the copy goes in place is kept`, async () => {
+					await metadataDitto(true);
+					const { file, candidate } = await privateZeros();
+					setXattr(file, "user.omp-test", "ORIGINAL");
+					const before = await fs.stat(file);
+					let changed: unknown;
+					aroundPublish(file, {
+						after: async () => {
+							change(file);
+							changed = await read(file);
+						},
 					});
-				}
+
+					const result = await gcCompress.compressFilesInPlace([candidate], "apfs", new Set());
+
+					expect(changed).toBeDefined();
+					expect(await read(file)).toEqual(changed);
+					expect((await fs.stat(file)).ino).not.toBe(before.ino);
+					expect(await fs.readFile(file)).toEqual(Buffer.alloc(1024 * 1024));
+					expect(result.compressed).toBe(1);
+					expect(await scratchIn(path.dirname(file))).toEqual([]);
+				});
 			}
 
 			/** Every regular file under `dir`, at any depth, with its bytes. */
@@ -2596,29 +2617,133 @@ describe("runGcCommand session compression", () => {
 
 			// Round 4's review: a writer that waited out the copy's lease wrote
 			// through the session file's name, and taking the copy back off that
-			// name unlinked it. An exchange back removes nothing, and the copy
-			// goes later only under its lease.
-			test("putting the original back keeps the copy, with what a writer put in it, while another process holds it", async () => {
+			// name unlinked it. A process that opens the name after the exchange
+			// reaches the copy and waits on its lease, so the copy keeps the name,
+			// with a `chmod` made by the name too, and the write lands in it once
+			// gc lets go.
+			test("a writer that opens the session file by its name just after the copy goes in place appends to the copy, which keeps the name", async () => {
 				await metadataDitto(true);
 				const { file, candidate } = await privateZeros();
 				const before = await fs.stat(file);
+				let writer: DescriptorWriter | undefined;
+				aroundPublish(file, {
+					after: async () => {
+						writer = await descriptorWriter(file, "ONLY NEW WRITER BYTES");
+						fsSync.chmodSync(file, 0o644);
+					},
+				});
+
+				const result = await gcCompress.compressFilesInPlace([candidate], "apfs", new Set([file]));
+				expect(writer!.first).toBe("busy");
+				const state = await writer!.append();
+
+				expect(state.nlink).toBe(1);
+				const after = await fs.stat(file);
+				expect(after.ino).not.toBe(before.ino);
+				expect(after.mode & 0o7777).toBe(0o644);
+				expect(await fs.readFile(file)).toEqual(
+					Buffer.concat([Buffer.alloc(1024 * 1024), Buffer.from("ONLY NEW WRITER BYTES")]),
+				);
+				expect(result.compressed).toBe(1);
+				expect(await scratchIn(path.dirname(file))).toEqual([]);
+				// The writer is a fresh process, started and then retrying while gc
+				// holds the copy's lease, which takes seconds on a loaded machine.
+			}, 30_000);
+
+			// Round 6's review: a file another process renamed onto the session
+			// file's name just after the exchange was sent into the scratch
+			// directory by an exchange back. It keeps the name.
+			test("a file renamed onto the session file's name just after the copy goes in place keeps the name", async () => {
+				await metadataDitto(true);
+				const { file, candidate } = await privateZeros();
 				aroundPublish(file, {
 					after: () => {
-						breakLease(fdOf(file));
-						fsSync.appendFileSync(file, "ONLY NEW WRITER BYTES");
-						fsSync.chmodSync(file, 0o644);
+						const fresh = path.join(path.dirname(file), "fresh.tmp");
+						fsSync.writeFileSync(fresh, "ONLY NEW PUBLISHED SESSION");
+						fsSync.renameSync(fresh, file);
 					},
 				});
 
 				const result = await gcCompress.compressFilesInPlace([candidate], "apfs", new Set());
 
-				expect((await fs.stat(file)).ino).toBe(before.ino);
-				expect(await fs.readFile(file)).toEqual(Buffer.alloc(1024 * 1024));
-				const written = (await filesUnder(root)).filter(({ bytes }) =>
-					bytes.subarray(-21).toString().includes("ONLY NEW WRITER BYTES"),
-				);
-				expect(written.length).toBeGreaterThan(0);
+				expect(await Bun.file(file).text()).toBe("ONLY NEW PUBLISHED SESSION");
 				expect(result.compressed).toBe(0);
+				expect(result.errors.join("\n")).toContain(`another process put a file at ${file} as it was compressed`);
+				expect(await scratchIn(path.dirname(file))).toEqual([]);
+			});
+
+			// The same, between gc's last look after the exchange and the exchange
+			// back: the file sent to the scratch name is given the name again.
+			test("a file renamed onto the session file's name as the original is given back keeps the name", async () => {
+				await metadataDitto(true);
+				const { file, candidate } = await privateZeros();
+				const exchange = libc.renameExchange;
+				let calls = 0;
+				spyOn(libc, "renameExchange").mockImplementation(async (a, b) => {
+					calls += 1;
+					// Before the first: a change by name the original must keep.
+					if (calls === 1) fsSync.chmodSync(file, 0o400);
+					// Before the exchange back: another process's file at the name.
+					if (calls === 2) {
+						const fresh = path.join(path.dirname(file), "fresh.tmp");
+						fsSync.writeFileSync(fresh, "ONLY NEW PUBLISHED SESSION");
+						fsSync.renameSync(fresh, file);
+					}
+					return await exchange(a, b);
+				});
+
+				const result = await gcCompress.compressFilesInPlace([candidate], "apfs", new Set());
+
+				expect(calls).toBe(3);
+				expect(await Bun.file(file).text()).toBe("ONLY NEW PUBLISHED SESSION");
+				expect(result.compressed).toBe(0);
+				expect(result.errors.join("\n")).toContain(`another process put a file at ${file} as it was given back`);
+			});
+
+			// Round 6's review: a `link` of the session file made just before the
+			// exchange left the lease standing, and the session and its new name
+			// were split. The original keeps the name, and both names hold it.
+			test("a link to the session file made just before the copy goes in place keeps both names on the original", async () => {
+				await metadataDitto(true);
+				const { file, candidate } = await privateZeros();
+				const before = await fs.stat(file);
+				const alias = path.join(root, "alias.log");
+				beforePublish(file, () => fsSync.linkSync(file, alias));
+
+				const result = await gcCompress.compressFilesInPlace([candidate], "apfs", new Set());
+
+				expect((await fs.stat(file)).ino).toBe(before.ino);
+				expect((await fs.stat(alias)).ino).toBe(before.ino);
+				expect(result.compressed).toBe(0);
+				expect(result.errors.join("\n")).toContain(`${file} was given another name as it was compressed`);
+			});
+
+			// Round 6's review: a failure to look at a name after the exchange was
+			// reported as another process's file there. What the names hold is not
+			// known then, so neither is touched again, and the reason is said.
+			test("a failure to look at the names after the exchange leaves both files and says so", async () => {
+				await metadataDitto(true);
+				const { file, candidate } = await privateZeros();
+				let exchanged = false;
+				aroundPublish(file, {
+					after: () => {
+						exchanged = true;
+					},
+				});
+				const lstat = fs.lstat;
+				spyOn(fs, "lstat").mockImplementation((async (target: string, ...rest: unknown[]) => {
+					if (exchanged && String(target) === file)
+						throw Object.assign(new Error("EIO: injected"), { code: "EIO" });
+					return await (lstat as (...args: unknown[]) => Promise<unknown>)(target, ...rest);
+				}) as typeof fs.lstat);
+
+				const result = await gcCompress.compressFilesInPlace([candidate], "apfs", new Set());
+
+				expect(await fs.readFile(file)).toEqual(Buffer.alloc(1024 * 1024));
+				expect(result.compressed).toBe(0);
+				const said = result.errors.join("\n");
+				expect(said).toContain(`${file} could not be checked (EIO: injected) after it was exchanged`);
+				expect(said).not.toContain("another process put a file");
 			});
 
 			// Round 4's review: an error reading the moved original left it at its
