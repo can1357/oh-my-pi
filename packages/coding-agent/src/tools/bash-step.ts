@@ -28,8 +28,12 @@ interface Word {
 	quoted: boolean;
 }
 
-/** Parameter names whose value exists only inside the running shell, never in the agent's context. */
-const RUNTIME_NAMES = /^(?:RANDOM|SRANDOM|SECONDS|EPOCHSECONDS|EPOCHREALTIME|BASHPID|PPID|LINENO|BASH_COMMAND)$/u;
+/**
+ * Variables whose value the agent knows without asking the shell (its own home, working
+ * directory and user). Any other parameter (`$OUT`, `$PIPESTATUS`, `$BASH_REMATCH`, `$?`) may
+ * hold anything, so a word that expands it is computed.
+ */
+const KNOWN_NAMES: Record<string, true> = { HOME: true, PWD: true, USER: true, LOGNAME: true };
 /** A `$name` or special-parameter expansion without braces. */
 const PLAIN_PARAMETER = /^\$(?:[?!$#@*0-9-]|[A-Za-z_][A-Za-z0-9_]*)/u;
 
@@ -102,7 +106,7 @@ function skipSubstitution(text: string, start: number): number {
 
 const WORD_END = /[ \t\n;&|<>()]/u;
 
-/** Decodes the body of an ANSI-C `$'…'` string the way bash does for the escapes agents write. */
+/** Decodes the body of an ANSI-C `$'…'` string as bash does. */
 function decodeAnsiC(body: string): string {
 	const simple: Record<string, string> = {
 		n: "\n",
@@ -119,20 +123,30 @@ function decodeAnsiC(body: string): string {
 		'"': '"',
 		"?": "?",
 	};
-	return body.replace(/\\(x[0-9A-Fa-f]{1,2}|[0-7]{1,3}|.)/gsu, (_, esc: string) => {
-		if (esc[0] === "x") return String.fromCharCode(Number.parseInt(esc.slice(1), 16));
-		if (/^[0-7]/u.test(esc)) return String.fromCharCode(Number.parseInt(esc, 8));
-		return own(simple, esc) ?? `\\${esc}`;
-	});
+	return body.replace(
+		/\\(x[0-9A-Fa-f]{1,2}|u[0-9A-Fa-f]{1,4}|U[0-9A-Fa-f]{1,8}|c.|[0-7]{1,3}|.)/gsu,
+		(_, esc: string) => {
+			if (esc[0] === "x" || esc[0] === "u" || esc[0] === "U") {
+				const code = Number.parseInt(esc.slice(1), 16);
+				return code <= 0x10ffff ? String.fromCodePoint(code) : "";
+			}
+			if (esc[0] === "c") return String.fromCharCode(esc.charCodeAt(1) & 0x1f);
+			if (/^[0-7]/u.test(esc)) return String.fromCharCode(Number.parseInt(esc, 8));
+			return own(simple, esc) ?? `\\${esc}`;
+		},
+	);
 }
 
-/** Whether the expansion text `$…` (a parameter, `${…}` or `$((…))`) has a value the agent cannot write down itself. */
+/**
+ * Whether the expansion text `$…` (a parameter, `${…}` or `$((…))`) has a value the agent cannot
+ * write down itself. Only a plain `$NAME`/`${NAME}` for a variable whose value the agent knows
+ * is literal text to it; every other parameter, operator, indirection and length is computed, as
+ * is arithmetic over anything but numbers.
+ */
 function expansionIsComputed(expansion: string): boolean {
-	if (expansion.startsWith("$((")) return /[A-Za-z_$`]/u.test(expansion.slice(3, -2));
+	if (expansion.startsWith("$((")) return /[^\d\s+\-*/%()<>=!&|^~?:,]/u.test(expansion.slice(3, -2));
 	const name = expansion.startsWith("${") ? expansion.slice(2, -1) : expansion.slice(1);
-	// Only a plain named parameter (`$HOME`, `${PWD}`) is text the agent knows; operators,
-	// indirection, lengths and the shell's own parameters are not.
-	return !/^[A-Za-z_][A-Za-z0-9_]*$/u.test(name) || RUNTIME_NAMES.test(name);
+	return !own(KNOWN_NAMES, name);
 }
 
 /** Reads one word at `start`; returns it and the index after it, or undefined on unbalanced syntax. */
@@ -213,9 +227,11 @@ function readWord(text: string, start: number): { word: Word; end: number } | un
 		}
 		if (ch === "\\") {
 			if (i + 1 >= text.length) return undefined;
-			quoted = true;
-			// A backslash-newline joins lines; it contributes nothing to the word.
-			if (text[i + 1] !== "\n") value += text[i + 1];
+			// A backslash-newline joins lines: it contributes nothing and quotes nothing.
+			if (text[i + 1] !== "\n") {
+				quoted = true;
+				value += text[i + 1];
+			}
 			i += 2;
 			continue;
 		}
@@ -328,14 +344,17 @@ function heredocBodies(
 	afterLine: string,
 ): Array<{ body: string; expands: boolean }> | undefined {
 	const bodies: Array<{ body: string; expands: boolean }> = [];
-	let lines = afterLine.split("\n");
+	const lines = afterLine.split("\n");
+	let next = 0;
 	for (const { op, target } of command.redirects) {
 		if (op !== "<<" && op !== "<<-") continue;
 		if (!target) return undefined;
-		const end = lines.findIndex(line => (op === "<<-" ? line.replace(/^\t+/u, "") : line) === target.value);
-		if (end < 0) return undefined;
-		bodies.push({ body: lines.slice(0, end).join("\n"), expands: !target.quoted });
-		lines = lines.slice(end + 1);
+		let end = next;
+		while (end < lines.length && (op === "<<-" ? lines[end].replace(/^\t+/u, "") : lines[end]) !== target.value)
+			end++;
+		if (end >= lines.length) return undefined;
+		bodies.push({ body: lines.slice(next, end).join("\n"), expands: !target.quoted });
+		next = end + 1;
 	}
 	return bodies;
 }
@@ -345,66 +364,105 @@ function own<T>(table: Record<string, T>, key: string): T | undefined {
 	return Object.hasOwn(table, key) ? table[key] : undefined;
 }
 
-/** Where a file descriptor of one simple command points after its redirections. */
-type FdTarget = "agent" | "pipe" | "null" | "file" | "input" | "closed";
-
-/** The target a redirection to the file named `target` gives, given the descriptors as they are so far. */
-function fileTarget(target: Word | undefined, fds: Map<string, FdTarget>): FdTarget {
-	const path = target?.value ?? "";
-	if (!target || target.computed || target.glob) return "file";
-	if (path === "/dev/null") return "null";
-	if (path === "/dev/tty") return "agent";
-	if (path === "/dev/stdout") return fds.get("1") ?? "closed";
-	if (path === "/dev/stderr") return fds.get("2") ?? "closed";
-	const fdPath = /^\/dev\/fd\/(\d+)$/u.exec(path);
-	if (fdPath) return fds.get(fdPath[1]) ?? "closed";
-	return "file";
+/** A descriptor number as the shell reads it (`01` is `1`); undefined for a non-numeric word. */
+function fdNumber(text: string): string | undefined {
+	return /^\d+$/u.test(text) ? String(Number(text)) : undefined;
 }
 
 /**
- * Where stdout of `command` ends up, applying its redirections in order as the shell does:
- * `n>f`, `n>>f`, `n>|f`, `n<>f`, `&>f`, `>&f`, `n>&m`, `n<&m`, `n>&-` and input redirections.
- * `initial` is where stdout starts: the next stage's pipe, or the agent for the last stage.
- * `stdin` reports whether stdin still comes from the previous stage.
+ * Where a file descriptor of one simple command points after its redirections: the agent, the
+ * next stage's pipe, a discard, input, nothing, or a file (with the redirection that opened it).
  */
-function stdoutTarget(command: SimpleCommand, initial: FdTarget): { stdout: FdTarget; stdinFromPipe: boolean } {
+type FdTarget =
+	| { kind: "agent" | "pipe" | "null" | "input" | "closed" }
+	| { kind: "file"; redirect: Redirect; viaDuplicate: boolean };
+
+/** Paths that name a descriptor or device rather than a file the step creates. */
+const DEVICE_PATHS = /^\/dev\/(?:null|tty|stdout|stderr|stdin|fd\/\d+)$/u;
+
+/** The target a redirection opening the file named by `redirect` gives, given the descriptors so far. */
+function fileTarget(redirect: Redirect, fds: Map<string, FdTarget>): FdTarget {
+	const path = redirect.target?.value ?? "";
+	if (redirect.target && !redirect.target.computed && !redirect.target.glob) {
+		if (path === "/dev/null") return { kind: "null" };
+		if (path === "/dev/tty") return { kind: "agent" };
+		if (path === "/dev/stdout") return fds.get("1") ?? { kind: "closed" };
+		if (path === "/dev/stderr") return fds.get("2") ?? { kind: "closed" };
+		const fdPath = /^\/dev\/fd\/(\d+)$/u.exec(path);
+		if (fdPath) return fds.get(String(Number(fdPath[1]))) ?? { kind: "closed" };
+	}
+	return { kind: "file", redirect, viaDuplicate: false };
+}
+
+/** What one simple command's redirections do, applied in order as the shell applies them. */
+interface RedirectEffect {
+	/** Where stdout ends up. */
+	stdout: FdTarget;
+	/** Whether stdin still comes from the previous stage (or the shell's own stdin). */
+	stdinFromPipe: boolean;
+	/** Every redirection that opens a file for writing (not a device or descriptor), in order. */
+	opened: Redirect[];
+}
+
+/**
+ * Applies `command`'s redirections in order: `n>f`, `n>>f`, `n>|f`, `n<>f`, `&>f`, `&>>f`,
+ * `>&f`, `n>&m`, `n<&m`, `n>&-` and input redirections. `initial` is where stdout starts: the
+ * next stage's pipe, or the agent for the last stage.
+ */
+function redirectEffect(command: SimpleCommand, initial: FdTarget): RedirectEffect {
 	const fds = new Map<string, FdTarget>([
-		["0", "pipe"],
+		["0", { kind: "pipe" }],
 		["1", initial],
-		["2", "agent"],
+		["2", { kind: "agent" }],
 	]);
-	for (const { fd, op, target } of command.redirects) {
+	const opened: Redirect[] = [];
+	const open = (redirect: Redirect): FdTarget => {
+		const to = fileTarget(redirect, fds);
+		if (to.kind === "file") opened.push(redirect);
+		return to;
+	};
+	for (const redirect of command.redirects) {
+		const { fd, op, target } = redirect;
 		const value = target?.value ?? "";
+		const n = fdNumber(fd);
 		if (op === ">&" || op === "<&") {
-			const n = fd === "" ? (op === ">&" ? "1" : "0") : fd;
-			if (value === "-") fds.set(n, "closed");
-			else if (/^\d+$/u.test(value)) fds.set(n, fds.get(value) ?? "closed");
-			else if (op === ">&" && fd === "") {
+			const into = n ?? (op === ">&" ? "1" : "0");
+			const from = fdNumber(value);
+			if (value === "-") fds.set(into, { kind: "closed" });
+			else if (from !== undefined) {
+				const source = fds.get(from) ?? { kind: "closed" };
+				fds.set(into, source.kind === "file" ? { ...source, viaDuplicate: true } : source);
+			} else if (op === ">&" && fd === "") {
 				// `>&name` sends stdout and stderr to the file `name`.
-				const to = fileTarget(target, fds);
+				const to = open(redirect);
 				fds.set("1", to);
 				fds.set("2", to);
-			} else fds.set(n, "closed");
+			} else fds.set(into, { kind: "closed" });
 			continue;
 		}
 		if (fd === "&") {
-			const to = fileTarget(target, fds);
+			const to = open(redirect);
 			fds.set("1", to);
 			fds.set("2", to);
 			continue;
 		}
 		if (op === ">" || op === ">>" || op === ">|") {
-			fds.set(fd === "" ? "1" : fd, fileTarget(target, fds));
+			fds.set(n ?? "1", open(redirect));
 			continue;
 		}
 		if (op === "<>") {
-			fds.set(fd === "" ? "0" : fd, "file");
+			const into = n ?? "0";
+			if (DEVICE_PATHS.test(value) && target && !target.computed) fds.set(into, { kind: "input" });
+			else {
+				opened.push(redirect);
+				fds.set(into, { kind: "file", redirect, viaDuplicate: false });
+			}
 			continue;
 		}
 		// `<`, `<<`, `<<-`, `<<<`: the descriptor (stdin unless named) now reads input.
-		fds.set(fd === "" ? "0" : fd, "input");
+		fds.set(n ?? "0", { kind: "input" });
 	}
-	return { stdout: fds.get("1") ?? "closed", stdinFromPipe: fds.get("0") === "pipe" };
+	return { stdout: fds.get("1") ?? { kind: "closed" }, stdinFromPipe: fds.get("0")?.kind === "pipe", opened };
 }
 
 function commandName(command: SimpleCommand): string {
@@ -412,53 +470,104 @@ function commandName(command: SimpleCommand): string {
 	return first.slice(first.lastIndexOf("/") + 1);
 }
 
+/** One pass-through filter: its option letters without a value, those with one, its long options, and its operands. */
+interface FilterSpec {
+	flags: string;
+	valued: string;
+	/** Long options by exact name: `true` takes a value, `false` does not. */
+	long: Record<string, boolean>;
+	operands?: "any" | "pattern" | "sed";
+}
+
+const GREP_FILTER: FilterSpec = {
+	flags: "EFGPiywxnHhsIlqTcvoLb",
+	valued: "eABCm",
+	long: {
+		regexp: true,
+		"after-context": true,
+		"before-context": true,
+		context: true,
+		"max-count": true,
+		"extended-regexp": false,
+		"fixed-strings": false,
+		"ignore-case": false,
+		"invert-match": false,
+		"only-matching": false,
+		count: false,
+		"line-number": false,
+		"word-regexp": false,
+		"line-regexp": false,
+	},
+	operands: "pattern",
+};
+
 /**
- * Later pipeline stages that only reshape the text they read and print it: each entry lists the
- * short options that take a value and the long options that take one. Anything else in a later
- * stage (a writer such as `tee` or `sort -o`, a stream consumer such as `xargs` or `while read`, a
- * wrapper such as `env tee`) means the first command's output does not simply reach the agent.
+ * Later pipeline stages that only reshape the text they read and print it, with every option
+ * they may carry. Anything else in a later stage (a writer such as `tee` or `sort -o`, an
+ * option that reads or runs something such as `--files0-from` or `--compress-program`, a stream
+ * consumer such as `xargs` or `while read`, a wrapper such as `env tee`) means the first
+ * command's output does not simply reach the agent. Long options must be spelled out: GNU's
+ * abbreviations (`--out` for `--output`) are not accepted.
  */
-const FILTERS: Record<string, { valued: string; long: string[]; operands?: "any" | "pattern" | "sed" }> = {
-	head: { valued: "nc", long: ["lines", "bytes"] },
-	tail: { valued: "nc", long: ["lines", "bytes"] },
-	cut: { valued: "dfcb", long: ["delimiter", "fields", "characters", "bytes", "output-delimiter"] },
-	sort: { valued: "ktS", long: ["key", "field-separator", "buffer-size"] },
-	uniq: { valued: "fsw", long: ["skip-fields", "skip-chars", "check-chars"] },
-	wc: { valued: "", long: [] },
-	tr: { valued: "", long: [], operands: "any" },
-	nl: { valued: "bdfhilnsvw", long: [] },
-	column: { valued: "scoNRlW", long: [] },
-	fold: { valued: "w", long: ["width"] },
-	rev: { valued: "", long: [] },
-	tac: { valued: "s", long: ["separator"] },
-	cat: { valued: "", long: [] },
-	grep: {
-		valued: "eABCm",
-		long: ["regexp", "after-context", "before-context", "context", "max-count"],
-		operands: "pattern",
+const FILTERS: Record<string, FilterSpec> = {
+	head: { flags: "qv", valued: "nc", long: { lines: true, bytes: true, quiet: false, silent: false } },
+	tail: { flags: "qvr", valued: "nc", long: { lines: true, bytes: true, quiet: false, silent: false } },
+	cut: {
+		flags: "sz",
+		valued: "dfcb",
+		long: {
+			delimiter: true,
+			fields: true,
+			characters: true,
+			bytes: true,
+			"output-delimiter": true,
+			complement: false,
+		},
 	},
-	egrep: {
-		valued: "eABCm",
-		long: ["regexp", "after-context", "before-context", "context", "max-count"],
-		operands: "pattern",
+	sort: {
+		flags: "bdfghinMRruVs",
+		valued: "kt",
+		long: {
+			key: true,
+			"field-separator": true,
+			numeric: false,
+			"numeric-sort": false,
+			"human-numeric-sort": false,
+			reverse: false,
+			unique: false,
+			"version-sort": false,
+			"ignore-case": false,
+			stable: false,
+		},
 	},
-	fgrep: {
-		valued: "eABCm",
-		long: ["regexp", "after-context", "before-context", "context", "max-count"],
-		operands: "pattern",
+	uniq: {
+		flags: "cdDiuz",
+		valued: "fsw",
+		long: { count: false, repeated: false, unique: false, "ignore-case": false },
 	},
-	rg: {
-		valued: "eABCm",
-		long: ["regexp", "after-context", "before-context", "context", "max-count"],
-		operands: "pattern",
+	wc: { flags: "lwcmL", valued: "", long: { lines: false, words: false, bytes: false, chars: false } },
+	tr: { flags: "cdsCt", valued: "", long: {}, operands: "any" },
+	nl: { flags: "p", valued: "bdfhilnsvw", long: {} },
+	column: { flags: "tnex", valued: "scoNRlW", long: {} },
+	fold: { flags: "bs", valued: "w", long: { width: true } },
+	rev: { flags: "", valued: "", long: {} },
+	tac: { flags: "br", valued: "s", long: { separator: true } },
+	cat: { flags: "nbsAEvT", valued: "", long: {} },
+	grep: GREP_FILTER,
+	egrep: GREP_FILTER,
+	fgrep: GREP_FILTER,
+	rg: GREP_FILTER,
+	sed: {
+		flags: "nEr",
+		valued: "e",
+		long: { expression: true, quiet: false, silent: false, "regexp-extended": false },
+		operands: "sed",
 	},
-	sed: { valued: "e", long: ["expression"], operands: "sed" },
 };
 
 /** Whether a later pipeline stage only reshapes its input and prints the result. */
 function isPassThroughFilter(stage: SimpleCommand): boolean {
-	const name = commandName(stage);
-	const filter = own(FILTERS, name);
+	const filter = own(FILTERS, commandName(stage));
 	if (!filter) return false;
 	const operands: Word[] = [];
 	const scripts: string[] = [];
@@ -473,28 +582,21 @@ function isPassThroughFilter(stage: SimpleCommand): boolean {
 		}
 		if (text.startsWith("--")) {
 			const eq = text.indexOf("=");
-			const long = text.slice(2, eq < 0 ? undefined : eq);
-			// A file-writing, file-reading or following option makes the stage more than a filter.
-			if (/^(?:output|in-place|files0-from|file|follow|recursive|dereference-recursive)$/u.test(long)) return false;
-			if (filter.long.includes(long) && eq < 0) {
+			const name = text.slice(2, eq < 0 ? undefined : eq);
+			const takesValue = own(filter.long, name);
+			if (takesValue === undefined || (!takesValue && eq >= 0)) return false;
+			let value: string | undefined = eq >= 0 ? text.slice(eq + 1) : undefined;
+			if (takesValue && value === undefined) {
 				const next = words[++i];
 				if (!next || next.computed) return false;
-				if (long === "regexp" || long === "expression") scripts.push(next.value);
-			} else if (long === "regexp" || long === "expression") scripts.push(text.slice(eq + 1));
+				value = next.value;
+			}
+			if (name === "regexp" || name === "expression") scripts.push(value ?? "");
 			continue;
 		}
 		if (/^-\d+$/u.test(text)) continue;
 		for (let j = 1; j < text.length; j++) {
 			const letter = text[j];
-			if (name === "sort" && letter === "o") return false;
-			if (
-				(name === "tail" && (letter === "f" || letter === "F")) ||
-				(name === "sed" && (letter === "i" || letter === "f" || letter === "s"))
-			) {
-				return false;
-			}
-			if ((filter.operands === "pattern" && (letter === "f" || letter === "r" || letter === "R")) || letter === "z")
-				return false;
 			if (filter.valued.includes(letter)) {
 				let value = text.slice(j + 1);
 				if (value === "") {
@@ -505,6 +607,7 @@ function isPassThroughFilter(stage: SimpleCommand): boolean {
 				if (letter === "e") scripts.push(value);
 				break;
 			}
+			if (!filter.flags.includes(letter)) return false;
 		}
 	}
 	if (filter.operands === "any") return true;
@@ -519,16 +622,16 @@ function isPassThroughFilter(stage: SimpleCommand): boolean {
 }
 
 /**
- * Whether what the pipeline's first command prints reaches the agent: every stage's stdout goes
- * on down the pipe (and the last one's to the agent), and every later stage is a pass-through
- * filter that still reads the pipe.
+ * Whether what the pipeline's first command prints reaches the agent and nothing else happens:
+ * no stage opens a file for writing, every stage's stdout goes on down the pipe (the last one's
+ * to the agent), and every later stage is a pass-through filter that still reads the pipe.
  */
 function outputReachesAgent(pipeline: SimpleCommand[]): boolean {
 	for (let i = 0; i < pipeline.length; i++) {
 		const last = i === pipeline.length - 1;
-		const { stdout, stdinFromPipe } = stdoutTarget(pipeline[i], last ? "agent" : "pipe");
-		if (stdout !== (last ? "agent" : "pipe")) return false;
-		if (i > 0 && (!stdinFromPipe || !isPassThroughFilter(pipeline[i]))) return false;
+		const effect = redirectEffect(pipeline[i], { kind: last ? "agent" : "pipe" });
+		if (effect.opened.length > 0 || effect.stdout.kind !== (last ? "agent" : "pipe")) return false;
+		if (i > 0 && (!effect.stdinFromPipe || !isPassThroughFilter(pipeline[i]))) return false;
 	}
 	return true;
 }
@@ -717,9 +820,7 @@ const READ_SPECS: Record<string, OptionSpec> = {
 function readCanPerform(spec: OptionSpec, command: SimpleCommand): boolean {
 	const operands = expressibleOperands(command.words.slice(1), spec);
 	if (!operands || !operands.every(namesOneFile)) return false;
-	const stdin = command.redirects.filter(
-		r => (r.fd === "" || r.fd === "0") && (r.op.startsWith("<") || r.op === "<>"),
-	);
+	const stdin = command.redirects.filter(r => (fdNumber(r.fd) ?? "0") === "0" && r.fd !== "&" && r.op.startsWith("<"));
 	if (stdin.some(r => r.op !== "<" || !r.target || !namesOneFile(r.target))) return false;
 	return operands.length > 0 || stdin.length > 0;
 }
@@ -869,9 +970,7 @@ function grepCanPerform(spec: OptionSpec, command: SimpleCommand): boolean {
 	const options = command.words.slice(1);
 	const operands = expressibleOperands(options, spec);
 	if (!operands) return false;
-	const stdin = command.redirects.filter(
-		r => (r.fd === "" || r.fd === "0") && (r.op.startsWith("<") || r.op === "<>"),
-	);
+	const stdin = command.redirects.filter(r => (fdNumber(r.fd) ?? "0") === "0" && r.fd !== "&" && r.op.startsWith("<"));
 	if (stdin.some(r => r.op !== "<" || !r.target || !namesOneFile(r.target))) return false;
 	const patternGiven = options.some(word => /^(?:-[^-]*e|--regexp)/u.test(word.value));
 	const paths = patternGiven ? operands : operands.slice(1);
@@ -884,9 +983,12 @@ function grepCanPerform(spec: OptionSpec, command: SimpleCommand): boolean {
 
 // ── glob: find, fd ───────────────────────────────────────────────────────────
 
-const FIND_FILE_TYPES = /^[fd](?:,[fd])*$/u;
-/** `find` primaries the glob tool expresses through its path patterns, each with its argument count. */
-const FIND_PRIMARIES: Record<string, number> = { "-name": 1, "-path": 1, "-wholename": 1, "-type": 1, "-print": 0 };
+/**
+ * `find` primaries the glob tool expresses through its path patterns, each with its argument
+ * count. `-type` is not among them: glob lists symlinks to files as files and cannot leave out
+ * directories or symlinks, so `-type f`/`-type d` are not expressible.
+ */
+const FIND_PRIMARIES: Record<string, number> = { "-name": 1, "-path": 1, "-wholename": 1, "-print": 0 };
 const FIND_OPERATORS: Record<string, true> = {
 	"(": true,
 	")": true,
@@ -899,11 +1001,10 @@ const FIND_OPERATORS: Record<string, true> = {
 const PRUNED_BY_GLOB = /^(?:\.\/|\*\/)?(?:\.git|node_modules)(?:\/\*?)?$|^\*\/(?:\.git|node_modules)\/\*$/u;
 
 /**
- * The glob tool matches path patterns under one or more roots and lists files and directories,
- * marking directories with a trailing `/` (so `-type f`/`-type d` are readable from its output).
- * It never descends into `.git`, and into `node_modules` only for a pattern that names it. It has
- * no depth limit, case-insensitive match, size, time, permission or symlink-type test, negation
- * or pruning of other paths, or action (`-exec`, `-delete`, `-printf`).
+ * The glob tool matches path patterns under one or more roots and lists files, directories and
+ * symlinks alike. It never descends into `.git`, and into `node_modules` only for a pattern
+ * that names it. It has no depth limit, type, case-insensitive, size, time or permission test,
+ * negation or pruning of other paths, or action (`-exec`, `-delete`, `-printf`).
  */
 function findCanPerform(command: SimpleCommand): boolean {
 	const words = command.words.slice(1);
@@ -933,8 +1034,7 @@ function findCanPerform(command: SimpleCommand): boolean {
 		if (arity === undefined) return false;
 		const arg = arity === 1 ? words[++i] : undefined;
 		if (arity === 1 && !arg) return false;
-		if (value === "-type" && !FIND_FILE_TYPES.test(arg?.value ?? "")) return false;
-		prunedTest = value !== "-type" && value !== "-print" && PRUNED_BY_GLOB.test(arg?.value ?? "");
+		prunedTest = value !== "-print" && PRUNED_BY_GLOB.test(arg?.value ?? "");
 		if (negated && !prunedTest) return false;
 		// The glob tool never lists `.git`, so a search for it is not expressible unless it is pruned.
 		if (!negated && prunedTest && arg?.value.includes(".git") && words[i + 1]?.value !== "-prune") return false;
@@ -944,9 +1044,9 @@ function findCanPerform(command: SimpleCommand): boolean {
 }
 
 const FD: OptionSpec = {
-	// Not `-S` (`--size`, a value the glob tool cannot test) or `-L` (follows symlinks).
+	// Not `-S` (`--size`), `-t` (`--type`: glob has no type filter) or `-L` (follows symlinks).
 	flags: "HIusga1",
-	valued: { t: value => /^(?:f|d|file|dir|directory)$/u.test(value), e: ANY, j: COUNT, c: ANY },
+	valued: { e: ANY, j: COUNT, c: ANY },
 	long: {
 		"absolute-path": "flag",
 		"case-sensitive": "flag",
@@ -958,7 +1058,6 @@ const FD: OptionSpec = {
 		"no-ignore": "flag",
 		"no-ignore-vcs": "flag",
 		threads: COUNT,
-		type: value => /^(?:f|d|file|dir|directory)$/u.test(value),
 		unrestricted: "flag",
 	},
 };
@@ -985,33 +1084,34 @@ function fdCanPerform(command: SimpleCommand): boolean {
 const HEREDOC_EXPANSION = /(?:^|[^\\])(?:\\\\)*[$`]/u;
 
 /**
- * The write tool writes text the agent supplies to a path the agent names; to append, the write
- * rule's message points at `edit`. It cannot copy or concatenate files (`cat a b > f`), write a
- * command's output or anything else only the running shell knows (`$(date)`, `$?`, `$RANDOM`,
- * `${v:-…}`, `$((…))` over names, `printf '%(…)T'`, a heredoc body that expands), expand a file
- * name glob, or write to a path the shell computes.
+ * The write tool writes text the agent supplies to one path the agent names; to append, the
+ * write rule's message points at `edit`. It cannot copy or concatenate files (`cat a b > f`),
+ * write a command's output or anything else only the running shell knows (`$(date)`, `$?`,
+ * `$OUT`, `${v:-…}`, `$((…))` over names, `printf '%(…)T'`, a heredoc body that expands), expand
+ * a glob, write to a path the shell computes, or create a second file (`2>err.log`).
  */
 function writeCanPerform(name: string, step: ParsedStep, availableTools: readonly string[]): boolean {
 	if (name !== "echo" && name !== "printf" && name !== "cat") return true;
 	if (step.pipeline.length > 1) return false;
 	const command = step.pipeline[0];
-	if (stdoutTarget(command, "agent").stdout !== "file") return false;
-	for (const { fd, op, target } of command.redirects) {
-		const toStdout = fd === "" || fd === "1" || fd === "&";
-		if (!toStdout || !(op === ">" || op === ">>" || op === ">|" || (op === ">&" && fd === ""))) continue;
-		if (!target || target.computed || target.glob) return false;
-		if (op === ">>" && !availableTools.includes("edit")) return false;
-	}
+	const { stdout, opened } = redirectEffect(command, { kind: "agent" });
+	// Stdout must be a file its own redirection opened, and no other file may be opened.
+	if (stdout.kind !== "file" || stdout.viaDuplicate || opened.length !== 1 || opened[0] !== stdout.redirect)
+		return false;
+	const { op, target } = stdout.redirect;
+	if (!target || target.computed || target.glob) return false;
+	// `<>` writes over the file without truncating it, which the write tool cannot do.
+	if (op === "<>" || (op === ">>" && !availableTools.includes("edit"))) return false;
 	const args = command.words.slice(1);
 	if (args.some(word => word.computed || word.glob)) return false;
 	if (name === "printf" && args.find(word => !word.value.startsWith("-"))?.value.includes("%(")) return false;
 	if (name !== "cat") return true;
 	// cat writes only what its heredoc or here-string holds; file operands or `<` make it a copy.
 	if (!args.every(word => word.value.startsWith("-") && word.value !== "-")) return false;
-	for (const { fd, op, target } of command.redirects) {
-		if (fd !== "" && fd !== "0") continue;
-		if (op === "<" || op === "<>" || op === "<&") return false;
-		if (op === "<<<" && (!target || target.computed)) return false;
+	for (const redirect of command.redirects) {
+		if (fdNumber(redirect.fd) !== undefined && fdNumber(redirect.fd) !== "0") continue;
+		if (redirect.op === "<" || redirect.op === "<&") return false;
+		if (redirect.op === "<<<" && (!redirect.target || redirect.target.computed)) return false;
 	}
 	const bodies = heredocBodies(command, step.afterLine);
 	return bodies !== undefined && bodies.every(({ body, expands }) => !expands || !HEREDOC_EXPANSION.test(body));
@@ -1080,9 +1180,17 @@ function sedEditIsExpressible(words: Word[]): boolean {
 	);
 }
 
-/** One perl `s///` or `tr///`/`y///` with no code in its replacement (no `e` flag, `@{…}`, `${\…}`). */
+/** One perl `s///` or `tr///`/`y///` (no bracketing delimiters); its parts are checked for code below. */
 const PERL_SUBSTITUTION =
 	/^\s*(?:s([^\w\s({[<])((?:\\.|(?!\1)[^\\])*)\1((?:\\.|(?!\1)[^\\])*)\1[gimsxr]*|(?:tr|y)([^\w\s({[<])(?:\\.|(?!\4)[^\\])*\4(?:\\.|(?!\4)[^\\])*\4[cdsr]*)\s*;?\s*$/su;
+
+/**
+ * Perl runs code inside a pattern or replacement through interpolation (`$x`, `@x`, `${…}`,
+ * `@{…}`) and regex code blocks (`(?{…})`, `(??{…})`, `(*{…})`). A `$` that ends the pattern or
+ * precedes `)` or `|` is an anchor; `$1`-style captures in a replacement are text.
+ */
+const PERL_PATTERN_CODE = /\(\?\??\{|\(\*\{|@[\w{:$]|\$(?![)|]|$)/u;
+const PERL_REPLACEMENT_CODE = /\(\?\??\{|\(\*\{|@[\w{:$]|\$(?!\d|&)/u;
 
 /** `perl -pi -e 's/…/…/' files` the edit tool can do: in place without a backup suffix, substitutions only. */
 function perlEditIsExpressible(words: Word[]): boolean {
@@ -1120,7 +1228,12 @@ function perlEditIsExpressible(words: Word[]): boolean {
 	if (!print || !inPlace || scripts.length === 0 || files.length === 0 || !files.every(namesOneFile)) return false;
 	return scripts.every(script => {
 		const match = PERL_SUBSTITUTION.exec(script);
-		return match !== null && !/@\{|\$\{\\/u.test(match[3] ?? "");
+		if (!match) return false;
+		if (match[1] === undefined) return true;
+		// With `'` as delimiter perl interpolates nothing.
+		return (
+			match[1] === "'" || (!PERL_PATTERN_CODE.test(match[2] ?? "") && !PERL_REPLACEMENT_CODE.test(match[3] ?? ""))
+		);
 	});
 }
 
@@ -1131,6 +1244,8 @@ function perlEditIsExpressible(words: Word[]): boolean {
  */
 function editCanPerform(name: string, command: SimpleCommand): boolean {
 	const words = command.words.slice(1);
+	// The edit tool changes the files it names and nothing else: no file a redirection opens.
+	if (redirectEffect(command, { kind: "agent" }).opened.length > 0) return false;
 	if (name === "sed") return sedEditIsExpressible(words);
 	if (name === "perl") return perlEditIsExpressible(words);
 	if (name === "awk" || name === "gawk") return false;
@@ -1150,6 +1265,16 @@ export function dedicatedToolCanPerformStep(tool: string, text: string, availabl
 	const step = parseLeadingPipeline(text);
 	if (!step) return false;
 	const { pipeline } = step;
+	// A redirection whose target the shell computes (`2>"$(…)"`) runs code no tool reproduces.
+	if (
+		pipeline.some(stage =>
+			stage.redirects.some(
+				({ op, target }) => !target || (op !== "<<" && op !== "<<-" && (target.computed || target.glob)),
+			),
+		)
+	) {
+		return false;
+	}
 	const command = pipeline[0];
 	const name = commandName(command);
 	switch (tool) {

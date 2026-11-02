@@ -175,9 +175,11 @@ describe("default echo/printf redirect rule", () => {
 		expect(checkBashInterception("echo hi > out.txt", ["write"], DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(true);
 	});
 
-	it("blocks clobber and variable-target redirects", () => {
+	it("blocks clobber redirects and leaves writes to a path in an unknown variable to the shell", () => {
 		expect(checkBashInterception("echo hi >| out.txt", tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(true);
-		expect(checkBashInterception("echo hi > $OUT", tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(true);
+		// `$OUT` may name any path; the agent cannot pass it to write.
+		expect(checkBashInterception("echo hi > $OUT", tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(false);
+		expect(checkBashInterception("echo hi > $HOME/out.txt", tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(true);
 	});
 
 	it("does not block /dev device sink redirects", () => {
@@ -230,8 +232,10 @@ describe("default echo/printf redirect rule", () => {
 		expect(checkBashInterception("ls; echo hi > out.txt", tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(true);
 		expect(checkBashInterception("echo hi 1> out.txt", tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(true);
 		expect(checkBashInterception("echo hi &> out.txt", tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(true);
-		for (const command of ["echo hi 2>err.txt > out.txt", "echo hi 2>|err.txt > out.txt", "echo hi 2>&1 > out.txt"]) {
-			expect(checkBashInterception(command, tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(true);
+		expect(checkBashInterception("echo hi 2>&1 > out.txt", tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(true);
+		// A second file opened for stderr is a write the write tool does not make.
+		for (const command of ["echo hi 2>err.txt > out.txt", "echo hi 2>|err.txt > out.txt"]) {
+			expect(checkBashInterception(command, tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(false);
 		}
 	});
 
@@ -303,7 +307,7 @@ describe("default echo/printf redirect rule", () => {
 			DEFAULT_BASH_INTERCEPTOR_RULES,
 		);
 		const cat = checkBashInterception(
-			`cat${" 2>>/dev/null 2>|e.log".repeat(20)} file.txt`,
+			`cat${" 2>>/dev/null 2>|/dev/null".repeat(20)} file.txt`,
 			["write", "read"],
 			DEFAULT_BASH_INTERCEPTOR_RULES,
 		);
@@ -341,21 +345,18 @@ describe("default echo/printf redirect rule", () => {
 		const tools = ["write", "read", "edit"];
 		for (const command of [
 			"cat 2>/dev/null file.txt",
-			"cat 2>err.log file.txt",
 			"cat 2>&1 file.txt",
 			"cat >&2 file.txt",
 			"cat 1>&2 file.txt",
 		]) {
 			expect(checkBashInterception(command, tools, DEFAULT_BASH_INTERCEPTOR_RULES).suggestedTool).toBe("read");
 		}
-		for (const command of [
-			"cat 2>err.log > out.txt",
-			"cat 2> err.log >> out.txt",
-			"cat 2>/dev/null 1>out.txt",
-			"cat &>out.txt",
-			"cat 2>&1 1>out.txt",
-		]) {
+		for (const command of ["cat 2>/dev/null 1>out.txt", "cat &>out.txt", "cat 2>&1 1>out.txt"]) {
 			expect(checkBashInterception(command, tools, DEFAULT_BASH_INTERCEPTOR_RULES).suggestedTool).toBe("write");
+		}
+		// Stderr into a file is a file neither read nor write creates.
+		for (const command of ["cat 2>err.log file.txt", "cat 2>err.log > out.txt", "cat 2> err.log >> out.txt"]) {
+			expect(checkBashInterception(command, tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(false);
 		}
 		expect(
 			checkBashInterception("cat 2>/dev/null <<'EOF'\nx\nEOF", tools, DEFAULT_BASH_INTERCEPTOR_RULES).block,
@@ -534,24 +535,28 @@ describe("dedicated tool capability", () => {
 		"find . -name x -exec rm {} +",
 		"find . -name x -printf '%s %p\\n'",
 		"find . -type l -name x",
+		// glob lists symlinks to files as files and cannot leave out directories.
+		"find a b -type f -name '*.v' | head -20",
+		"find . -type d -name x",
 		"find . -name x ! -path './build/*'",
 		"find . -name .git",
 		"find . -name '*.o' | xargs rm",
 		"locate foo -name",
-		"fd --type f foo",
-		"fd --type f 'a.*b'",
+		"fd --type f Foo",
+		"fd foo",
+		"fd 'a.*b'",
 	])("does not refuse %s as a glob", command => {
 		expect(decide(command)).toBeUndefined();
 	});
 
 	it.each([
 		"find . -name '*.v'",
-		"find a b -type f -name '*.v' | head -20",
+		"find a b -name '*.v' | head -20",
 		"find . \\( -name 'thermonuclear*' -o -name reviewer.md \\)",
 		"find . -name '*.v' -not -path '*/.git/*'",
 		"find . -path ./node_modules -prune -o -name '*.ts' -print",
-		"fd --type f Foo",
-		"fd --type f -s foo",
+		"fd --glob 'Foo*'",
+		"fd --glob -s 'foo*'",
 	])("refuses %s as a glob", command => {
 		expect(decide(command)).toBe("glob");
 	});
@@ -637,7 +642,45 @@ describe("dedicated tool capability", () => {
 		// A filename after `--` is not a follow flag.
 		["tail -c 4 -- -f", undefined],
 		["tail -n 4 -- -f", "read"],
+		// Round 2: descriptor numbers with leading zeros, Unicode escapes, continued delimiters.
+		["cat f 01>out", undefined],
+		["cat < f 00<<< computed", undefined],
+		["head $'\\u002d\\u0063' 2 f", undefined],
+		["head $'\\U0000002dc' 2 f", undefined],
+		["cat >out <<EO\\\nF\n$(printf computed)\nEOF", undefined],
+		["cat >out <<'EO'F\n$(printf literal)\nEOF", "write"],
 	])("decides %s as %s", (command, tool) => {
+		expect(decide(command)).toBe(tool);
+	});
+
+	it.each([
+		// Round 2: options that write, read or run something make a later stage more than a filter.
+		"cat f | sort --out=out",
+		"cat f | wc --files0-fr=names",
+		"cat f | sort -S1 --compress-program=./compress.sh",
+		// Perl code in a pattern or replacement.
+		'perl -pi -e \'s/(?{open my $fh, ">", "marker"})a/b/\' f',
+		"perl -pi -e 's/@{[do { 1 }]}/b/' f",
+		"perl -pi -e 's/a/$x/' f",
+		// Descriptor duplication into a computed or appended target.
+		'echo hi >unused 2>"$(printf out)" 1>&2',
+		"echo hi >unused 3>>out 1>&3",
+		// Computed redirections around read and edit commands.
+		'cat f 2>"$(printf ran >marker; printf err)"',
+		"sed -i 's/a/b/' f >\"$(printf unused)\"",
+		"sed -i 's/a/b/' f > log",
+		// Shell state only the running shell knows.
+		'echo "$PIPESTATUS $BASH_REMATCH $EUID $UID" >out',
+	])("does not refuse %s", command => {
+		expect(decide(command)).toBeUndefined();
+	});
+
+	it.each([
+		["perl -pi -e 's/a$/b/g' f", "edit"],
+		["perl -pi -e 's/(\\w+)/[$1]/' f", "edit"],
+		["cat f | sort -n -k2 | uniq -c", "read"],
+		['echo "$HOME is ${PWD}" > out.txt', "write"],
+	])("still refuses %s as %s", (command, tool) => {
 		expect(decide(command)).toBe(tool);
 	});
 
