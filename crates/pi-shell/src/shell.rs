@@ -6436,10 +6436,10 @@ mod tests {
 		);
 	}
 
-	/// A deferred duplication reads the descriptor this process holds, so the
-	/// null device that stands in for a deferred descriptor must not take its
-	/// place: `>f 1>&3 3>/dev/null` sent the output to the null device, the
-	/// move `>f 1>&4-` lost it, and so did the swap idiom.
+	/// A deferred duplication reads the descriptor this process holds, not a
+	/// stand-in for it: while the null device stood in for a deferred
+	/// descriptor, `>f 1>&3 3>/dev/null` sent the output to the null device,
+	/// the move `>f 1>&4-` lost it, and so did the swap idiom.
 	#[cfg(unix)]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn deferred_duplications_read_the_descriptors_the_parent_holds() {
@@ -6462,6 +6462,228 @@ mod tests {
 		.expect("the shell goes on while a background command waits for its FIFO");
 
 		assert_eq!((result.exit_code, output.as_str()), (Some(0), "dup3\nmoved4\nsw\n"));
+	}
+
+	/// A descriptor path that names a descriptor a deferred FIFO redirection
+	/// sets (`>f 2>/dev/stdout`, `3>f &>/dev/fd/3`) is the child's duplication
+	/// of it, made after the FIFO's open, as in Bash: the command's standard
+	/// error reaches the FIFO. The shell opened the path itself, at what it
+	/// held at that descriptor, and the command's standard error went there,
+	/// not into the FIFO.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn descriptor_paths_to_a_deferred_descriptor_stay_in_the_child() {
+		let root = tempfile::tempdir().expect("scratch directory");
+		pi_vfs::BlockingFs::native()
+			.make_node(root.path().join("f"), pi_vfs::NodeKind::Fifo, 0o600)
+			.expect("create FIFO");
+		let (result, output) = run_command_capture_within(
+			Duration::from_secs(10),
+			concat!(
+				"/bin/sh -c 'echo out1; echo err1 >&2' >f 2>/dev/stdout & /bin/cat <f >got1; wait\n",
+				"/bin/sh -c 'echo out3; echo err3 >&2' 3>f &>/dev/fd/3 & /bin/cat <f >got3; wait\n",
+				"/bin/cat got1 got3",
+			),
+			Some(root.path()),
+			None,
+			CancelToken::default(),
+		)
+		.await
+		.expect("the shell goes on while a background command waits for its FIFO");
+
+		assert_eq!((result.exit_code, output.as_str()), (Some(0), "out1\nerr1\nout3\nerr3\n"));
+	}
+
+	/// Where a row of [`background_diagnostics_reach_a_deferred_standard_error`]
+	/// finds its one diagnostic.
+	#[cfg(unix)]
+	#[derive(Clone, Copy)]
+	enum DiagnosticIn {
+		/// In this file, which nothing else writes; the shell's output holds only
+		/// the job's status line.
+		File(&'static str),
+		/// On the shell's own output, and the FIFO's reader writes nothing.
+		Shell,
+	}
+
+	/// A background external command whose standard error its child sets
+	/// itself (a FIFO, or a descriptor a later redirection points at the
+	/// FIFO's) reports the error that ends it before it runs through that
+	/// standard error, as Bash 5.2.21 does: one diagnostic, in what the FIFO's
+	/// reader copies to `err` (or in `err2`, opened over the FIFO), none on
+	/// the shell's own output, and Bash's status. The shell wrote it to the
+	/// null device that stood in for the descriptor, so it appeared nowhere.
+	///
+	/// The first twelve rows are the review probes
+	/// `fifo-check/{plain,eval,source}/{open,expansion,badfd,ambiguous}`; the
+	/// probes `fifo/{open,expansion,badfd,ambiguous}` are the plain ones without
+	/// the check of the reader's pid. The rest are the other ways the child is
+	/// left to set the standard error, a command that cannot be found, a
+	/// pipeline stage, and two redirections the child itself fails to make.
+	/// `/bin/sh` reports those in its own words, on the standard error in
+	/// effect there (the FIFO, or the shell's own). It exited with its own
+	/// status, 2, where Bash's is 1, and one of its reports went to the
+	/// stand-in.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn background_diagnostics_reach_a_deferred_standard_error() {
+		use DiagnosticIn::{File, Shell};
+		let status_line = "printf \"S=%s\\n\" \"$?\"";
+		struct Row {
+			name:       String,
+			/// Run after the FIFO's reader starts as job 1.
+			body:       String,
+			/// What `source.sh` holds, if the body sources it.
+			source:     Option<String>,
+			/// Bash's status.
+			status:     i32,
+			diagnostic: DiagnosticIn,
+			/// Text the diagnostic holds.
+			text:       &'static str,
+		}
+		let mut rows = Vec::new();
+		for (failure, redirect, text) in [
+			("open", "</nonexistent/BOOM", "/nonexistent/BOOM"),
+			("expansion", "<\"${missing:?BOOM}\"", "BOOM"),
+			("badfd", "<&9", "bad file descriptor"),
+			("ambiguous", ">$a", "invalid redirection"),
+		] {
+			let body = format!("/bin/true 2>pipe {redirect} & wait %2; {status_line}");
+			let row = |context: &str, body: String, source: Option<String>| Row {
+				name: format!("{context}/{failure}"),
+				body,
+				source,
+				status: 1,
+				diagnostic: File("err"),
+				text,
+			};
+			rows.push(row("plain", body.clone(), None));
+			rows.push(row("eval", format!("eval '{body}'"), None));
+			rows.push(row("source", ". ./source.sh".into(), Some(body)));
+		}
+		for (name, command, status, diagnostic, text) in [
+			(
+				"duplicated from the FIFO's descriptor",
+				"/bin/true >pipe 2>&1 </nonexistent/BOOM",
+				1,
+				File("err"),
+				"BOOM",
+			),
+			(
+				"moved from the FIFO's descriptor",
+				"/bin/true 3>pipe 2>&3- </nonexistent/BOOM",
+				1,
+				File("err"),
+				"BOOM",
+			),
+			("both outputs", "/bin/true &>pipe </nonexistent/BOOM", 1, File("err"), "BOOM"),
+			(
+				"descriptor path",
+				"/bin/true >pipe 2>/dev/stdout </nonexistent/BOOM",
+				1,
+				File("err"),
+				"BOOM",
+			),
+			(
+				"file opened over the FIFO",
+				"/bin/true 2>pipe 2>err2 </nonexistent/BOOM",
+				1,
+				File("err2"),
+				"BOOM",
+			),
+			("command not found", "nosuch_cmd_17684 2>pipe", 127, File("err"), "nosuch_cmd_17684"),
+			(
+				"pipeline stage",
+				"/bin/true 2>pipe </nonexistent/BOOM | /bin/cat",
+				0,
+				File("err"),
+				"BOOM",
+			),
+			(
+				"duplication the child fails to make",
+				"/bin/true 2>pipe 2>&7",
+				1,
+				File("err"),
+				"Bad file descriptor",
+			),
+		] {
+			rows.push(Row {
+				name: name.into(),
+				body: format!("{command} & wait %2; {status_line}"),
+				source: None,
+				status,
+				diagnostic,
+				text,
+			});
+		}
+		rows.push(Row {
+			name:       "redirection the child fails to make".into(),
+			body:       format!("/bin/true >pipe 1>&7 2>&1 & wait %2; {status_line}"),
+			source:     None,
+			status:     1,
+			diagnostic: Shell,
+			text:       "Bad file descriptor",
+		});
+
+		let mut failures = Vec::new();
+		for Row { name: row, body, source, status, diagnostic, text } in rows {
+			let root = tempfile::tempdir().expect("scratch directory");
+			pi_vfs::BlockingFs::native()
+				.make_node(root.path().join("pipe"), pi_vfs::NodeKind::Fifo, 0o600)
+				.expect("create FIFO");
+			if let Some(source) = &source {
+				std::fs::write(root.path().join("source.sh"), source).expect("write source.sh");
+			}
+			// The reader copies what reaches the FIFO to `err`; wait up to 5 s for
+			// it, then stop a reader that never saw a writer.
+			let wait_for_reader = match diagnostic {
+				File("err") => {
+					"i=0; until [ -s err ] || [ \"$i\" -ge 100 ]; do /bin/sleep 0.05; i=$((i + 1)); \
+					 done; "
+				},
+				_ => "",
+			};
+			let command = format!(
+				"a='x y'; /bin/cat pipe >err & reader=$!\n{body}\n{wait_for_reader}kill \"$reader\" \
+				 2>/dev/null; wait \"$reader\" 2>/dev/null; :"
+			);
+			let outcome = run_command_capture_within(
+				Duration::from_secs(30),
+				&command,
+				Some(root.path()),
+				None,
+				CancelToken::default(),
+			)
+			.await;
+			let Ok((result, output)) = outcome else {
+				failures.push(format!("{row}: did not finish within 30 s"));
+				continue;
+			};
+			let held = |name: &str| std::fs::read_to_string(root.path().join(name)).ok();
+			let once = |found: &str| found.lines().count() == 1 && found.matches(text).count() == 1;
+			let status_only = format!("S={status}\n");
+			let reported = match diagnostic {
+				File(name) => {
+					output == status_only
+						&& held(name).is_some_and(|found| once(&found))
+						&& (name == "err" || held("err").as_deref() == Some(""))
+				},
+				Shell => {
+					once(&output.replace(&status_only, ""))
+						&& output.contains(&status_only)
+						&& held("err").as_deref() == Some("")
+				},
+			};
+			if result.exit_code != Some(0) || !reported {
+				failures.push(format!(
+					"{row}: exit {:?}, output {output:?}, err {:?}, err2 {:?}",
+					result.exit_code,
+					held("err"),
+					held("err2")
+				));
+			}
+		}
+		assert!(failures.is_empty(), "rows differ from Bash 5.2.21:\n{}", failures.join("\n"));
 	}
 
 	/// On macOS `poll` and kqueue report a FIFO's data but never its EOF, so
