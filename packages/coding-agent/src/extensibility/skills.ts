@@ -8,6 +8,7 @@ import {
 	prompt,
 	relativePathWithinNormalizedRoot,
 } from "@oh-my-pi/pi-utils";
+import { absentFile, readRegularFileText, withoutByteOrderMark } from "@oh-my-pi/pi-utils/regular-file";
 import {
 	isValidManagedSkillName,
 	MANAGED_SKILLS_PROVIDER_ID,
@@ -839,10 +840,19 @@ export type SkillPromptInput = Pick<ParsedSkillInvocation, "args"> & Partial<Pic
 
 /** Read a skill's instruction body before rendering user-provided arguments. */
 export async function loadSkillPromptBody(skill: Pick<Skill, "filePath">): Promise<string> {
-	const content = await Bun.file(skill.filePath).text();
+	// Read only when a regular file stands there: anything else throws
+	// `NotARegularFile`, which names it; a missing file throws ENOENT, which
+	// lets `loadSkillPrompt` look for the skill's replacement.
+	const content = await readRegularFileText(skill.filePath);
+	if (content === undefined) throw absentFile(skill.filePath);
 	// Only the body is used: keep HTML comments (`repair: false`) and leave YAML
-	// diagnostics to the loader, which already parsed this frontmatter.
-	return parseFrontmatter(content, { source: skill.filePath, repair: false, level: "off" }).body.trim();
+	// diagnostics to the loader, which already parsed this frontmatter. No
+	// leading byte order mark, as `Bun.file().text()` read it.
+	return parseFrontmatter(withoutByteOrderMark(content), {
+		source: skill.filePath,
+		repair: false,
+		level: "off",
+	}).body.trim();
 }
 
 /** A skill's instruction body and the skill it was read from. */

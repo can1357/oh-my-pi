@@ -15,7 +15,13 @@ import {
 	logger,
 	normalizePathForComparison,
 } from "@oh-my-pi/pi-utils";
-import { readOptionalFileText } from "@oh-my-pi/pi-utils/regular-file";
+import {
+	NotARegularFile,
+	readOptionalFileText,
+	readRegularFileText,
+	reportSkippedFile,
+	withoutByteOrderMark,
+} from "@oh-my-pi/pi-utils/regular-file";
 import { getConfigDirPaths } from "../../config";
 import { registerPluginCacheInvalidator, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import { findExtensionDirectoryIndex, resolveExtensionDirectory } from "../extensions/directory-resolution";
@@ -59,7 +65,7 @@ async function loadRuntimeConfig(home?: string): Promise<PluginRuntimeConfig> {
 	// Judged a regular file before a byte is read: a FIFO here is reported and
 	// passed over like a missing lock, never waited on or drained.
 	const text = await readOptionalFileText(lockPath);
-	return normalizePluginRuntimeConfig(text === undefined ? {} : JSON.parse(text));
+	return normalizePluginRuntimeConfig(text === undefined ? {} : JSON.parse(withoutByteOrderMark(text)));
 }
 
 /**
@@ -72,7 +78,7 @@ async function loadProjectOverrides(cwd: string): Promise<ProjectPluginOverrides
 			// reported and passed over, never waited on or drained.
 			const text = await readOptionalFileText(overridesPath);
 			if (text === undefined) continue;
-			return JSON.parse(text);
+			return JSON.parse(withoutByteOrderMark(text));
 		} catch (err) {
 			// Malformed or unreadable overrides would otherwise silently act
 			// as {} — project-disabled plugins re-enable and project settings
@@ -116,24 +122,35 @@ async function collectPluginsAtRoot(
 	let hasPackageManifest = false;
 	const pkgJsonPath = path.join(root, "package.json");
 	try {
-		const pkg: { dependencies?: Record<string, string> } = await Bun.file(pkgJsonPath).json();
-		depsKeys = Object.keys(pkg.dependencies ?? {});
-		hasPackageManifest = true;
-	} catch (err) {
+		// Judged a regular file before a byte is read: a FIFO here is never
+		// waited on or drained.
+		const text = await readRegularFileText(pkgJsonPath);
 		// Linked-only setups may have no `<root>/package.json` yet — that's
 		// fine, the lockfile still records the link.
+		if (text !== undefined) {
+			const pkg: { dependencies?: Record<string, string> } = JSON.parse(withoutByteOrderMark(text));
+			depsKeys = Object.keys(pkg.dependencies ?? {});
+			hasPackageManifest = true;
+		}
+	} catch (err) {
+		// Something other than a regular file at the manifest's name was not
+		// read: say so once, and skip the root as an unreadable one.
+		if (err instanceof NotARegularFile) {
+			reportSkippedFile(err);
+			return [];
+		}
 		if (isUnreadableRoot(err)) {
 			logger.warn("plugins: skipping unreadable plugin root", { root, path: pkgJsonPath });
 			return [];
 		}
-		if (!isEnoent(err)) throw err;
+		throw err;
 	}
 
 	const lockPath = path.join(root, "omp-plugins.lock.json");
 	let runtimeConfig: PluginRuntimeConfig;
 	try {
 		const text = await readOptionalFileText(lockPath);
-		runtimeConfig = normalizePluginRuntimeConfig(text === undefined ? {} : JSON.parse(text));
+		runtimeConfig = normalizePluginRuntimeConfig(text === undefined ? {} : JSON.parse(withoutByteOrderMark(text)));
 	} catch (err) {
 		if (isUnreadableRoot(err)) {
 			logger.warn("plugins: skipping unreadable plugin root", { root, path: lockPath });
@@ -179,14 +196,20 @@ async function collectPluginsAtRoot(
 		const pluginPkgPath = path.join(nodeModulesPath, name, "package.json");
 		let pluginPkg: { version: string; omp?: PluginManifest; pi?: PluginManifest };
 		try {
-			pluginPkg = await Bun.file(pluginPkgPath).json();
-		} catch (err) {
+			const text = await readRegularFileText(pluginPkgPath);
 			// Lockfile entry without a corresponding node_modules tree means the
 			// link was deleted out from under us; skip silently.
-			if (isEnoent(err)) continue;
+			if (text === undefined) continue;
+			pluginPkg = JSON.parse(withoutByteOrderMark(text));
+		} catch (err) {
 			// One unreadable plugin does not invalidate its siblings, so skip
 			// just this one — loudly, because unlike a deleted link it is a
-			// plugin the user still expects to load.
+			// plugin the user still expects to load. Something other than a
+			// regular file at the name was not read, and is reported once.
+			if (err instanceof NotARegularFile) {
+				reportSkippedFile(err);
+				continue;
+			}
 			if (isUnreadableRoot(err)) {
 				logger.warn("plugins: skipping unreadable plugin", { name, root, path: pluginPkgPath });
 				continue;

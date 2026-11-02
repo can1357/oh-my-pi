@@ -1,5 +1,6 @@
 import * as path from "node:path";
 import { isRecord } from "@oh-my-pi/pi-utils";
+import { readOptionalFileText, withoutByteOrderMark } from "@oh-my-pi/pi-utils/regular-file";
 
 const RUST_FRAMEWORKS: readonly (readonly [string, string])[] = [
 	["axum", "Axum"],
@@ -180,9 +181,11 @@ async function detectGo(root: string): Promise<RepositoryContext | null> {
 	};
 }
 
+/** A project manifest's text, or null; anything but a regular file at the name is reported and passed over unopened. */
 async function optionalText(filePath: string): Promise<string | null> {
 	try {
-		return await Bun.file(filePath).text();
+		const text = await readOptionalFileText(filePath);
+		return text === undefined ? null : withoutByteOrderMark(text);
 	} catch {
 		return null;
 	}

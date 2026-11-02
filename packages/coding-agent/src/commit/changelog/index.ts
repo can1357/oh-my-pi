@@ -3,6 +3,7 @@ import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Api, ApiKey, Model } from "@oh-my-pi/pi-ai";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { logger } from "@oh-my-pi/pi-utils";
+import { absentFile, readRegularFileText, withoutByteOrderMark } from "@oh-my-pi/pi-utils/regular-file";
 import { CHANGELOG_CATEGORIES } from "../../commit/types";
 import { renderStat } from "../utils";
 import { detectChangelogBoundaries } from "./detect";
@@ -62,7 +63,10 @@ export async function runChangelogFlow({
 		if (!diff.trim()) continue;
 		const stat = renderStat(await repo.numstat({ cached: true, files: boundary.files }));
 		const diffForPrompt = truncateDiff(diff, maxDiffChars ?? DEFAULT_MAX_DIFF_CHARS);
-		const changelogContent = await Bun.file(boundary.changelogPath).text();
+		// A FIFO or other non-regular file at the name throws unopened, as an unreadable file does.
+		const changelogText = await readRegularFileText(boundary.changelogPath);
+		if (changelogText === undefined) throw absentFile(boundary.changelogPath);
+		const changelogContent = withoutByteOrderMark(changelogText);
 		let unreleased: { startLine: number; endLine: number; entries: Record<string, string[]> };
 		try {
 			unreleased = parseUnreleasedSection(changelogContent);
@@ -114,12 +118,13 @@ export async function applyChangelogProposals({
 		)
 			continue;
 		onProgress?.(`Applying entries for ${proposal.path}…`);
-		const exists = await Bun.file(proposal.path).exists();
-		if (!exists) {
+		// A FIFO or other non-regular file at the name throws unopened, as an unreadable file does.
+		const changelogText = await readRegularFileText(proposal.path);
+		if (changelogText === undefined) {
 			logger.warn("commit changelog path missing", { path: proposal.path });
 			continue;
 		}
-		const changelogContent = await Bun.file(proposal.path).text();
+		const changelogContent = withoutByteOrderMark(changelogText);
 		let unreleased: { startLine: number; endLine: number; entries: Record<string, string[]> };
 		try {
 			unreleased = parseUnreleasedSection(changelogContent);

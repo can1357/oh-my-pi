@@ -9,6 +9,7 @@ import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import * as zod from "@oh-my-pi/omptype/zod";
 import { getAgentDir, getProjectDir, isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { regularFileExists } from "@oh-my-pi/pi-utils/regular-file";
 import { getConfigDirs } from "../../config";
 
 import { execCommand } from "../../exec/exec";
@@ -37,6 +38,9 @@ async function loadCommandModule(
 	sharedApi: CustomCommandAPI,
 ): Promise<{ commands: CustomCommand[] | null; error: string | null }> {
 	try {
+		// Only a regular file is imported: anything else at the command's name
+		// fails its load here, naming it.
+		await regularFileExists(commandPath);
 		const module = await import(commandPath);
 		const factory = (module.default ?? module) as CustomCommandFactory;
 

@@ -1,31 +1,47 @@
 /**
- * Reading a file that a user, or any other process, can put something else at:
- * the `.env` and settings files every command reads, and the config files a
- * session reads when it starts.
+ * Reading a file that a user names, by convention or in configuration, and
+ * that omp reads on its own, at startup or at any later time: `.env` and
+ * settings files, credentials, rules, prompts, themes, extension and plugin
+ * files, other tools' config. A user, or any other process, can put something
+ * else at such a name.
  *
  * Anything can stand at such a name, directly or through a link: a FIFO, a
  * socket, a device, a directory. Reading one is not safe. A FIFO with no
  * writer, or a device nobody drives, waits for ever; a FIFO that is being
  * written to hands over bytes that were meant for someone else, and once read
- * they are gone from it. An open with `O_NONBLOCK` alone does not make it
- * safe: the open returns at once, and the read after it reads the FIFO like
- * any stream. So every open here is non-blocking, and the descriptor's own
- * `fstat` — not a look at the name, which can change after it — decides
- * whether what was opened is a regular file before a byte is read. Anything
- * else throws {@link NotARegularFile}, which the caller reports or turns into
- * its own error; nothing is skipped without a decision at the call.
+ * they are gone from it. Even an open that reads nothing is not safe: an open
+ * of a FIFO, with `O_NONBLOCK` or not, wakes a writer that waits in its own
+ * open for a reader, as a mount that serves a file through a pipe does, and
+ * that writer then does its work for a reader that is gone. So what the name
+ * stands for is looked at first (`stat`, following links), and nothing but a
+ * regular file is opened. The open is non-blocking, and the descriptor's own
+ * `fstat` judges again before a byte is read, because the name can change
+ * between the look and the open: a FIFO put there in that moment is opened,
+ * which wakes its writer, but it is neither waited on nor read. Anything else
+ * throws {@link NotARegularFile}, which the caller reports or turns into its
+ * own error; nothing is skipped without a decision at the call.
  *
  * The one exception is a file that a tool serves through a pipe on purpose:
  * 1Password mounts `.env` files that way. {@link readRegularFileOrPipeTextSync}
- * reads such a pipe until its writer closes it, within a bound. A pipe does
- * not say why its writer closed it: a writer that dies part way through the
- * file closes it too, so what was read up to then can be part of the file.
+ * reads such a pipe until its writer closes it, within a bound, once at
+ * startup. A pipe does not say why its writer closed it: a writer that dies
+ * part way through the file closes it too, so what was read up to then can be
+ * part of the file.
  *
  * `env.ts` imports this module at the very start of every command, before the
  * logger exists, so it depends on nothing but `fs-error`.
  */
 import * as fs from "node:fs/promises";
-import { closeSync, constants as fsConstants, fstatSync, openSync, readFileSync, readSync, type Stats } from "node:fs";
+import {
+	closeSync,
+	constants as fsConstants,
+	fstatSync,
+	openSync,
+	readFileSync,
+	readSync,
+	type Stats,
+	statSync,
+} from "node:fs";
 import { isEnoent } from "./fs-error";
 
 /** What a name stands for when it is not a regular file, in a reader's words: "a FIFO", "a socket", "a device". */
@@ -71,12 +87,60 @@ function refusedOpen(file: string, error: unknown): never {
 }
 
 /**
+ * What `file` stands for, itself or through a link, found without opening it;
+ * undefined when nothing is there.
+ */
+async function lookAtName(file: string): Promise<Stats | undefined> {
+	try {
+		return await fs.stat(file);
+	} catch (error) {
+		if (isEnoent(error)) return undefined;
+		throw error;
+	}
+}
+
+/** {@link lookAtName} for a caller that cannot wait. */
+function lookAtNameSync(file: string): Stats | undefined {
+	try {
+		return statSync(file);
+	} catch (error) {
+		if (isEnoent(error)) return undefined;
+		throw error;
+	}
+}
+
+/**
+ * Whether a regular file is at `file`, by a look at the name that opens
+ * nothing: false when nothing is there, {@link NotARegularFile} when anything
+ * else is. For a reader that cannot read through a descriptor this module
+ * judged — `import()` of a module, a child process given the path — and so
+ * checks the name just before it hands the path on. Unlike a read through
+ * {@link openRegularFile}, the name can change between this look and that
+ * reader's own open.
+ */
+export async function regularFileExists(file: string): Promise<boolean> {
+	const named = await lookAtName(file);
+	if (!named) return false;
+	if (!named.isFile()) throw new NotARegularFile(file, kindOf(named));
+	return true;
+}
+
+/** {@link regularFileExists} for a caller that cannot wait. */
+export function regularFileExistsSync(file: string): boolean {
+	const named = lookAtNameSync(file);
+	if (!named) return false;
+	if (!named.isFile()) throw new NotARegularFile(file, kindOf(named));
+	return true;
+}
+
+/**
  * A descriptor on `file` only when what it opens is a regular file: undefined
  * when nothing is at the name, {@link NotARegularFile} when anything else is,
  * and any other error as it came. Links are followed; what they lead to is
- * judged.
+ * judged. Nothing but a regular file is opened (see the module comment).
  */
 export async function openRegularFile(file: string): Promise<fs.FileHandle | undefined> {
+	if (!(await regularFileExists(file))) return undefined;
 	let handle: fs.FileHandle;
 	try {
 		handle = await fs.open(file, OPEN_FLAGS);
@@ -98,6 +162,16 @@ export async function openRegularFile(file: string): Promise<fs.FileHandle | und
 
 /** {@link openRegularFile} for a caller that cannot wait: a descriptor number, which the caller closes. */
 export function openRegularFileSync(file: string): number | undefined {
+	if (!regularFileExistsSync(file)) return undefined;
+	return openJudgedSync(file, false)?.fd;
+}
+
+/**
+ * Open `file`, which a look at its name found to be a regular file (or a FIFO,
+ * when `allowFifo`), and judge the descriptor again: the name can have changed
+ * since. Undefined when nothing is there any more.
+ */
+function openJudgedSync(file: string, allowFifo: boolean): { fd: number; stat: Stats } | undefined {
 	let fd: number;
 	try {
 		fd = openSync(file, OPEN_FLAGS);
@@ -112,15 +186,27 @@ export function openRegularFileSync(file: string): number | undefined {
 		closeSync(fd);
 		throw error;
 	}
-	if (stat.isFile()) return fd;
+	if (stat.isFile() || (allowFifo && stat.isFIFO())) return { fd, stat };
 	closeSync(fd);
 	throw new NotARegularFile(file, kindOf(stat));
 }
 
 /**
+ * `text` as `Bun.file().text()` decodes a file, which most readers of these
+ * files used before: one leading byte-order mark dropped. Node's `"utf8"`
+ * decoding keeps it, and it then breaks `JSON.parse` and front matter.
+ */
+export function withoutByteOrderMark(text: string): string {
+	return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+}
+
+/**
  * The text of the regular file at `file`, read through the one descriptor
  * {@link openRegularFile} judged: undefined when nothing is there,
- * {@link NotARegularFile} when anything else is.
+ * {@link NotARegularFile} when anything else is. The text is decoded as
+ * `node:fs` does, a leading byte-order mark kept; a caller that parses the
+ * text, or that replaced a `Bun.file().text()` read, drops one with
+ * {@link withoutByteOrderMark}.
  */
 export async function readRegularFileText(file: string): Promise<string | undefined> {
 	const handle = await openRegularFile(file);
@@ -252,9 +338,9 @@ function detachStopListeners(): (() => void) | undefined {
  * to write; nothing here can tell. `pipe.onWait` runs once when the pipe is
  * still open after `pipe.noticeAfterMs`, told whether any of it has come and
  * whether a stop signal ends the wait at once. Undefined when nothing is at
- * the name; {@link NotARegularFile} for a socket, device or directory;
- * {@link PipeNotAnswered} when the pipe is not closed within the bounds,
- * including when it closes only after the deadline.
+ * the name; {@link NotARegularFile} for a socket, device or directory, which
+ * is not opened; {@link PipeNotAnswered} when the pipe is not closed within the
+ * bounds, including when it closes only after the deadline.
  *
  * The wait polls with `Bun.sleepSync`, so nothing else on the event loop runs
  * during it, timers and signal listeners included. For the wait, SIGINT and
@@ -271,18 +357,15 @@ export function readRegularFileOrPipeTextSync(
 		onWait(started: boolean, stoppable: boolean): void;
 	},
 ): string | undefined {
-	let fd: number;
-	try {
-		fd = openSync(file, OPEN_FLAGS);
-	} catch (error) {
-		if (isEnoent(error)) return undefined;
-		refusedOpen(file, error);
-	}
+	const named = lookAtNameSync(file);
+	if (!named) return undefined;
+	if (!named.isFile() && !named.isFIFO()) throw new NotARegularFile(file, kindOf(named));
+	const judged = openJudgedSync(file, true);
+	if (!judged) return undefined;
+	const { fd } = judged;
 	let stopListeners: { reattach: (() => void) | undefined } | undefined;
 	try {
-		const stat = fstatSync(fd);
-		if (stat.isFile()) return readFileSync(fd, "utf8");
-		if (!stat.isFIFO()) throw new NotARegularFile(file, kindOf(stat));
+		if (judged.stat.isFile()) return readFileSync(fd, "utf8");
 		const opened = Date.now();
 		const buffer = Buffer.alloc(64 * 1024);
 		const chunks: Buffer[] = [];

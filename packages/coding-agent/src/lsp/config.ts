@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { $which, isRecord, logger, pathIsWithin, type WhichOptions } from "@oh-my-pi/pi-utils";
+import { readOptionalFileTextSync } from "@oh-my-pi/pi-utils/regular-file";
 import { YAML } from "bun";
 import type { ClaudePluginRoot } from "../discovery/helpers";
 import {
@@ -377,7 +378,10 @@ function readMarketplaceLspConfig(root: ClaudePluginRoot): NormalizedConfig | nu
 
 	for (const catalogPath of catalogPaths) {
 		try {
-			const catalog = JSON.parse(fs.readFileSync(catalogPath, "utf-8")) as unknown;
+			// A FIFO or other non-regular catalog is reported and passed over, never opened.
+			const text = readOptionalFileTextSync(catalogPath);
+			if (text === undefined) continue;
+			const catalog = JSON.parse(text) as unknown;
 			if (!isRecord(catalog) || !Array.isArray(catalog.plugins)) continue;
 
 			for (const plugin of catalog.plugins) {

@@ -17,7 +17,7 @@
 import * as fs from "node:fs";
 import * as tls from "node:tls";
 import { $env } from "./env";
-import { isEnoent } from "./fs-error";
+import { readRegularFileTextSync } from "./regular-file";
 
 /**
  * `fetch`-compatible function. Accepts any callable matching the standard
@@ -74,7 +74,8 @@ let cacheValue: string | undefined;
  *   shell exports.
  * - File path. Anything that does not contain a PEM header is treated as a
  *   path, matching Node's "extensionless filename is still a path" contract.
- *   `ENOENT` becomes {@link ExtraCaError}; other I/O errors bubble.
+ *   A missing file becomes {@link ExtraCaError}; a FIFO or other special file
+ *   throws `NotARegularFile` without being opened; other I/O errors bubble.
  */
 export function resolveExtraCa(): string | undefined {
 	const raw = $env.NODE_EXTRA_CA_CERTS?.trim();
@@ -95,14 +96,11 @@ export function resolveExtraCa(): string | undefined {
 	if (raw.includes("-----BEGIN")) {
 		cacheValue = raw.replace(/\\n/g, "\n");
 	} else {
-		try {
-			cacheValue = fs.readFileSync(raw, "utf8");
-		} catch (error) {
-			if (isEnoent(error)) {
-				throw new ExtraCaError(`NODE_EXTRA_CA_CERTS path does not exist: ${raw}`);
-			}
-			throw error;
+		const pem = readRegularFileTextSync(raw);
+		if (pem === undefined) {
+			throw new ExtraCaError(`NODE_EXTRA_CA_CERTS path does not exist: ${raw}`);
 		}
+		cacheValue = pem;
 	}
 	cacheKey = key;
 	return cacheValue;

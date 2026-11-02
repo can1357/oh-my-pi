@@ -8,6 +8,12 @@ import {
 	parseFrontmatter,
 	prompt,
 } from "@oh-my-pi/pi-utils";
+import {
+	NotARegularFile,
+	readRegularFileText,
+	reportSkippedFile,
+	withoutByteOrderMark,
+} from "@oh-my-pi/pi-utils/regular-file";
 import { jtdToTypeScript } from "../tools/jtd-to-typescript";
 import { parseCommandArgs, substituteArgs } from "../utils/command-args";
 
@@ -92,15 +98,23 @@ async function loadTemplatesFromDir(
 
 		for (const entry of entries) {
 			const fullPath = path.join(dir, entry);
-			const file = Bun.file(fullPath);
 
 			try {
-				const stat = await file.exists();
-				if (!stat) continue;
-
 				if (entry.endsWith(".md")) {
-					const rawContent = await file.text();
-					const { frontmatter, body } = parseFrontmatter(rawContent, { source: fullPath });
+					// Judged a regular file before a byte is read. A directory named
+					// like a template was always passed over unread; anything else at
+					// the name (a FIFO, through a link) is reported once and passed over.
+					let rawContent: string | undefined;
+					try {
+						rawContent = await readRegularFileText(fullPath);
+					} catch (error) {
+						if (!(error instanceof NotARegularFile)) throw error;
+						if (error.kind !== "a directory") reportSkippedFile(error);
+						continue;
+					}
+					if (rawContent === undefined) continue;
+					// Without a leading byte order mark, as `Bun.file().text()` read it.
+					const { frontmatter, body } = parseFrontmatter(withoutByteOrderMark(rawContent), { source: fullPath });
 
 					const name = entry.split("/").pop()!.slice(0, -3); // Remove .md extension
 

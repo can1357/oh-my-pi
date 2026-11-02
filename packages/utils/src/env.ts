@@ -290,7 +290,7 @@ export const ENV_PIPE_DEADLINE_MS = 10_000;
 export const ENV_PIPE_TERMINAL_DEADLINE_MS = 60_000;
 
 /** The most a `.env` pipe may send: far more than any `.env` holds, and a bound on what a writer that never stops can make omp hold. */
-const ENV_PIPE_MAX_BYTES = 1024 * 1024;
+export const ENV_PIPE_MAX_BYTES = 1024 * 1024;
 
 /** How long a `.env` pipe may stay silent before omp says it is waiting: a mount that answers at once needs no note. */
 const ENV_PIPE_NOTICE_AFTER_MS = 500;
@@ -383,8 +383,10 @@ function readStartupEnvFile(filePath: string): string | undefined {
 
 /**
  * A `.env` read again while omp runs, to build a child shell's environment or
- * the redactor's list: never waited on. A named pipe gives what startup read
- * from it, or is refused like any other file that is not a regular file.
+ * the redactor's list: never waited on, and a named pipe is not even opened —
+ * an open would wake a writer waiting for a reader, as a 1Password mount does.
+ * A named pipe gives what startup read from it, or is refused like any other
+ * file that is not a regular file.
  */
 function runtimeEnvFileText(filePath: string): string | undefined {
 	try {

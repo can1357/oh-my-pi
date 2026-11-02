@@ -9,6 +9,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { readRegularFileText, withoutByteOrderMark } from "@oh-my-pi/pi-utils/regular-file";
 
 import {
 	isValidNameSegment,
@@ -232,13 +233,10 @@ async function readMarketplaceCatalog(
 		const catalogPath = path.join(root, ...rel.split("/"));
 		const displayPath = options.relativeDisplayPaths ? rel : catalogPath;
 		tried.push(displayPath);
-		try {
-			const content = await Bun.file(catalogPath).text();
-			return { catalogPath, displayPath, content };
-		} catch (err) {
-			if (isEnoent(err)) continue;
-			throw err;
-		}
+		// Judged a regular file before a byte is read: anything else at the
+		// catalog's name throws `NotARegularFile`, which names it.
+		const content = await readRegularFileText(catalogPath);
+		if (content !== undefined) return { catalogPath, displayPath, content: withoutByteOrderMark(content) };
 	}
 	throw new Error(
 		`Marketplace catalog not found at ${tried.map(p => `"${p}"`).join(" or ")}. ` +

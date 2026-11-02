@@ -8,6 +8,10 @@
 - Added `singleLine` and `finiteWidth` to `utils` for row-confined text and cell widths
 - `Editor.onPredictionAccepted` and `Editor.onPredictionShown` report when Tab or Right inserts the rest of the composer prediction and when a frame paints it (at least one cell in the terminal, or the ghost on a native editor node) ([#17739](https://github.com/can1357/oh-my-pi/pull/17739) by [@wolfiesch](https://github.com/wolfiesch))
 
+### Fixed
+
+- A custom theme (`~/.omp/agent/themes/<name>.json`) or a keybindings file (`~/.omp/agent/keybindings.yml`/`.yaml`/`.json`) that is a FIFO, socket or device is no longer opened or waited on; omp says so once and falls back to the dark theme or the default keybindings ([#17638](https://github.com/can1357/oh-my-pi/pull/17638) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.15.0] - 2026-11-01
 
 ### Breaking Changes

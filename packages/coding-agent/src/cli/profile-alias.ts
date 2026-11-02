@@ -1,6 +1,7 @@
 import * as os from "node:os";
 import * as path from "node:path";
 import { normalizeProfileName } from "@oh-my-pi/pi-utils/dirs";
+import { absentFile, readRegularFileText, withoutByteOrderMark } from "@oh-my-pi/pi-utils/regular-file";
 import { quotePosixArgument } from "../utils/shell-quote";
 
 export type ProfileAliasShell = "bash" | "zsh" | "fish" | "powershell" | "pwsh";
@@ -323,8 +324,14 @@ function upsertBlock(content: string, aliasName: string, block: string): string 
 	return `${trimmed}${trimmed ? "\n\n" : ""}${block}\n`;
 }
 
-function readAliasConfigText(filePath: string): Promise<string> {
-	return Bun.file(filePath).text();
+/**
+ * The shell config's text, a leading byte-order mark dropped as `Bun.file().text()` did. A FIFO,
+ * socket or device at the name throws `NotARegularFile` unopened, so the alias is never written over it.
+ */
+async function readAliasConfigText(filePath: string): Promise<string> {
+	const text = await readRegularFileText(filePath);
+	if (text === undefined) throw absentFile(filePath);
+	return withoutByteOrderMark(text);
 }
 
 export async function readProfileAliasConfigFile(

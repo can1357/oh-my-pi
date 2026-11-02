@@ -2,9 +2,9 @@
  * Default tab width (display / tab expansion) and per-file width from `.editorconfig`.
  * Mirrors former `pi-natives` `indent` + `text` default-tab-width behavior (no N-API).
  */
-import * as fs from "node:fs";
 import * as path from "node:path";
 import { isFsError } from "./fs-error";
+import { readOptionalFileTextSync } from "./regular-file";
 
 export const MIN_TAB_WIDTH = 1;
 export const MAX_TAB_WIDTH = 16;
@@ -14,7 +14,7 @@ export const DEFAULT_TAB_WIDTH = 3;
  * Per-component path length cap on common filesystems (`NAME_MAX = 255` on
  * Linux ext4 / macOS APFS / Windows NTFS). Paths with components longer than
  * this cannot be opened at all, so editorconfig discovery short-circuits to
- * the default instead of running into `ENAMETOOLONG` from `readFileSync`.
+ * the default instead of running into `ENAMETOOLONG` from the read.
  */
 const NAME_MAX_BYTES = 255;
 
@@ -153,17 +153,19 @@ function parseCachedEditorConfig(configPath: string): ParsedEditorConfig | undef
 		return hit ?? undefined;
 	}
 
-	let content: string;
+	let content: string | undefined;
 	try {
-		content = fs.readFileSync(key, "utf8");
+		// A FIFO or other special file at `.editorconfig` is noted once and never opened.
+		content = readOptionalFileTextSync(key);
 	} catch (err) {
 		// editorconfig discovery is best-effort. Any filesystem error
-		// (`ENOENT`, `ENAMETOOLONG`, `ENOTDIR`, `EACCES`, `ELOOP`, `EINVAL`,
-		// …) means "no usable config at this path" — never a fatal condition
+		// (`ENAMETOOLONG`, `ENOTDIR`, `EACCES`, `ELOOP`, `EINVAL`, …) means
+		// "no usable config at this path" — never a fatal condition
 		// for callers like the edit renderer that hand us arbitrary strings.
 		if (isFsError(err)) return undefined;
 		throw err;
 	}
+	if (content === undefined) return undefined;
 	const parsed = parseEditorConfigFile(content);
 	editorConfigCache.set(key, parsed);
 	return parsed;

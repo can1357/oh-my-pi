@@ -2,6 +2,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { $which, isRecord, ptree, sanitizeText } from "@oh-my-pi/pi-utils";
+import { readOptionalFileText, withoutByteOrderMark } from "@oh-my-pi/pi-utils/regular-file";
 import { CLEANSE_PARSER_KINDS, CleanseStreamParser, type CleanseParserKind, parseCleanseDiagnostics } from "./parsers";
 import type { CleanseCheckResult, CleanseDiagnostic, CleanseDiagnosticReport, SkippedCleanseCheck } from "./types";
 
@@ -613,12 +614,9 @@ async function discoverPython(state: DiscoveryState): Promise<void> {
 	const pyprojectContent = new Map<string, string>();
 	for (const root of pyprojectRoots) {
 		const file = root === "." ? "pyproject.toml" : `${root}/pyproject.toml`;
-		pyprojectContent.set(
-			root,
-			await Bun.file(path.resolve(state.projectCwd, file))
-				.text()
-				.catch(() => ""),
-		);
+		// A FIFO or other non-regular file at a listed name is reported and passed over, never opened.
+		const text = await readOptionalFileText(path.resolve(state.projectCwd, file)).catch(() => undefined);
+		pyprojectContent.set(root, text === undefined ? "" : withoutByteOrderMark(text));
 	}
 	const withSection = (section: string): string[] =>
 		pyprojectRoots.filter(root => pyprojectContent.get(root)?.includes(section) === true);
@@ -753,7 +751,10 @@ async function discoverPackageTests(state: DiscoveryState): Promise<void> {
 		if (path.posix.basename(file) !== "package.json") continue;
 		let manifest: unknown;
 		try {
-			manifest = await Bun.file(path.resolve(state.projectCwd, file)).json();
+			// A FIFO or other non-regular file at a listed name is reported and passed over, never opened.
+			const text = await readOptionalFileText(path.resolve(state.projectCwd, file));
+			if (text === undefined) continue;
+			manifest = JSON.parse(withoutByteOrderMark(text));
 		} catch {
 			continue;
 		}

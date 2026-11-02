@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getAgentDir, getProjectDir } from "@oh-my-pi/pi-utils";
+import { readRegularFileText, regularFileExists, withoutByteOrderMark } from "@oh-my-pi/pi-utils/regular-file";
 import { runBunCli } from "./bun-cli";
 import { linkPluginDirectory } from "./directory-link";
 import { extractPackageName } from "./parser";
@@ -39,11 +40,11 @@ export async function installPlugin(packageName: string): Promise<InstalledPlugi
 	// Ensure plugins directory exists
 	await ensurePluginsDir();
 
-	// Initialize package.json if it doesn't exist
+	// Initialize package.json if it doesn't exist. `bun install` reads it next,
+	// so anything other than a regular file there is refused before it runs.
 	const pkgJsonPath = path.join(PLUGINS_DIR, "package.json");
-	const pkgJson = Bun.file(pkgJsonPath);
-	if (!(await pkgJson.exists())) {
-		await pkgJson.write(JSON.stringify({ name: "omp-plugins", private: true, dependencies: {} }, null, 2));
+	if (!(await regularFileExists(pkgJsonPath))) {
+		await Bun.write(pkgJsonPath, JSON.stringify({ name: "omp-plugins", private: true, dependencies: {} }, null, 2));
 	}
 
 	// Run npm install in plugins directory
@@ -57,12 +58,12 @@ export async function installPlugin(packageName: string): Promise<InstalledPlugi
 
 	// Read the installed package's package.json
 	const pkgPath = path.join(PLUGINS_DIR, "node_modules", actualName, "package.json");
-	const pkgFile = Bun.file(pkgPath);
-	if (!(await pkgFile.exists())) {
+	const pkgText = await readRegularFileText(pkgPath);
+	if (pkgText === undefined) {
 		throw new Error(`Package installed but package.json not found at ${pkgPath}`);
 	}
 
-	const pkg = await pkgFile.json();
+	const pkg = JSON.parse(withoutByteOrderMark(pkgText));
 
 	return {
 		name: pkg.name,
@@ -87,20 +88,20 @@ export async function uninstallPlugin(name: string): Promise<void> {
 }
 
 export async function listPlugins(): Promise<InstalledPlugin[]> {
-	const pkgJsonPath = Bun.file(path.join(PLUGINS_DIR, "package.json"));
-	if (!(await pkgJsonPath.exists())) {
+	const pkgText = await readRegularFileText(path.join(PLUGINS_DIR, "package.json"));
+	if (pkgText === undefined) {
 		return [];
 	}
 
-	const pkg = await pkgJsonPath.json();
+	const pkg = JSON.parse(withoutByteOrderMark(pkgText));
 	const deps = pkg.dependencies || {};
 
 	const plugins: InstalledPlugin[] = [];
 	for (const [name, _version] of Object.entries(deps)) {
 		const pluginPath = path.join(PLUGINS_DIR, "node_modules", name);
-		const fpkg = Bun.file(path.join(pluginPath, "package.json"));
-		if (await fpkg.exists()) {
-			const pkg = await fpkg.json();
+		const pluginPkgText = await readRegularFileText(path.join(pluginPath, "package.json"));
+		if (pluginPkgText !== undefined) {
+			const pkg = JSON.parse(withoutByteOrderMark(pluginPkgText));
 			plugins.push({
 				name,
 				version: pkg.version,
@@ -126,17 +127,17 @@ export async function linkPlugin(localPath: string): Promise<void> {
 		throw new Error(`Invalid path: ${localPath} resolves outside working directory`);
 	}
 
-	// Validate package.json exists
-	const pkgFile = Bun.file(path.join(absolutePath, "package.json"));
-	if (!(await pkgFile.exists())) {
-		throw new Error(`package.json not found at ${absolutePath}`);
-	}
-
-	let pkg: { name?: string };
+	let pkg: { name?: string } | undefined;
 	try {
-		pkg = await pkgFile.json();
+		const text = await readRegularFileText(path.join(absolutePath, "package.json"));
+		pkg = text === undefined ? undefined : JSON.parse(withoutByteOrderMark(text));
 	} catch (err) {
 		throw new Error(`Invalid package.json at ${absolutePath}: ${err}`);
+	}
+
+	// Validate package.json exists
+	if (pkg === undefined) {
+		throw new Error(`package.json not found at ${absolutePath}`);
 	}
 
 	if (!pkg.name || typeof pkg.name !== "string") {

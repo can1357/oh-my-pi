@@ -4,6 +4,7 @@ import { type } from "@oh-my-pi/omptype";
 import { completeSimple, Effort, retryTransientCompletion } from "@oh-my-pi/pi-ai";
 import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
 import { prompt, withFileLock } from "@oh-my-pi/pi-utils";
+import { readOptionalFileText } from "@oh-my-pi/pi-utils/regular-file";
 
 import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
@@ -222,9 +223,8 @@ async function readCurrentMemoryFiles(agentDir: string, cwd: string): Promise<Re
 async function readProjectDocs(cwd: string): Promise<string> {
 	const blocks: string[] = [];
 	for (const name of ["AGENTS.md", "CLAUDE.md"]) {
-		const content = await Bun.file(path.join(cwd, name))
-			.text()
-			.catch(() => "");
+		// A FIFO or other non-regular file at the name is reported and passed over, never opened.
+		const content = (await readOptionalFileText(path.join(cwd, name)).catch(() => undefined)) ?? "";
 		if (content.trim()) blocks.push(`--- ${name} ---\n${content.trim()}`);
 	}
 	return truncateApproxTokens(blocks.join("\n\n"), PROJECT_DOC_TOKEN_LIMIT);

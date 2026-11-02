@@ -2,6 +2,7 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { getSecretPlaceholderKeyPath, isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { readOptionalFileText, withoutByteOrderMark } from "@oh-my-pi/pi-utils/regular-file";
 import { YAML } from "bun";
 import { type SecretEntry, SecretObfuscator } from "./obfuscator";
 import { CREDENTIAL_PATTERNS } from "./patterns";
@@ -294,8 +295,10 @@ export async function buildSecretObfuscator(
 
 async function loadSecretsFile(filePath: string): Promise<SecretEntry[]> {
 	try {
-		const text = await Bun.file(filePath).text();
-		const raw = YAML.parse(text);
+		// A FIFO or other non-regular file at the name is reported and passed over, never opened.
+		const text = await readOptionalFileText(filePath);
+		if (text === undefined) return [];
+		const raw = YAML.parse(withoutByteOrderMark(text));
 		if (!Array.isArray(raw)) {
 			logger.warn("secrets.yml must be a YAML array", { path: filePath });
 			return [];

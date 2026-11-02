@@ -16,6 +16,15 @@ import {
 	logger,
 	stripWindowsExtendedLengthPathPrefix,
 } from "@oh-my-pi/pi-utils";
+import {
+	absentFile,
+	NotARegularFile,
+	readOptionalFileText,
+	readRegularFileText,
+	readRegularFileTextSync,
+	regularFileExists,
+	withoutByteOrderMark,
+} from "@oh-my-pi/pi-utils/regular-file";
 import { registerPluginCacheInvalidator } from "../../discovery/helpers";
 
 const USE_BUNDLED_PI_MODULES = isCompiledBinary() || Boolean(process.env.PI_BUNDLED);
@@ -1349,7 +1358,9 @@ async function readPackageImports(packageRoot: string): Promise<Record<string, u
 
 	let imports: Record<string, unknown> | null = null;
 	try {
-		const pkg = await Bun.file(path.join(packageRoot, "package.json")).json();
+		// Anything but a regular file at the manifest's name is reported once and taken as no manifest.
+		const text = await readOptionalFileText(path.join(packageRoot, "package.json"));
+		const pkg: unknown = text === undefined ? undefined : JSON.parse(withoutByteOrderMark(text));
 		if (isRecord(pkg) && isRecord(pkg.imports)) {
 			imports = pkg.imports;
 		}
@@ -1589,11 +1600,32 @@ async function readPackageManifest(packageRoot: string): Promise<Record<string, 
 
 async function readPackageManifestUncached(packageRoot: string): Promise<Record<string, unknown> | null> {
 	try {
-		const manifest = await Bun.file(path.join(packageRoot, "package.json")).json();
+		// Anything but a regular file at the manifest's name is reported once and taken as no manifest.
+		const text = await readOptionalFileText(path.join(packageRoot, "package.json"));
+		if (text === undefined) return null;
+		const manifest: unknown = JSON.parse(withoutByteOrderMark(text));
 		return isRecord(manifest) ? manifest : null;
 	} catch {
 		return null;
 	}
+}
+
+/**
+ * The source of an extension module, read only when a regular file stands at
+ * its name: {@link NotARegularFile} for anything else, which fails the load and
+ * names the file, and the read's own ENOENT when nothing is there.
+ */
+async function readModuleSource(modulePath: string): Promise<string> {
+	const source = await readRegularFileText(modulePath);
+	if (source === undefined) throw absentFile(modulePath);
+	return source;
+}
+
+/** {@link readModuleSource} for the synchronous CommonJS evaluator. */
+function readModuleSourceSync(modulePath: string): string {
+	const source = readRegularFileTextSync(modulePath);
+	if (source === undefined) throw absentFile(modulePath);
+	return source;
 }
 
 type ExtensionModuleKind = "commonjs" | "esm";
@@ -1622,7 +1654,7 @@ class ExtensionGraphSources {
 	read(modulePath: string): Promise<string> {
 		let source = this.#sources.get(modulePath);
 		if (!source) {
-			source = Bun.file(modulePath).text();
+			source = readModuleSource(modulePath);
 			this.#sources.set(modulePath, source);
 		}
 		return source;
@@ -2042,8 +2074,9 @@ async function moduleRequiresNativeAddon(modulePath: string): Promise<boolean> {
 async function moduleRequiresNativeAddonUncached(modulePath: string): Promise<boolean> {
 	let source: string;
 	try {
-		source = await Bun.file(modulePath).text();
-	} catch {
+		source = await readModuleSource(modulePath);
+	} catch (error) {
+		if (error instanceof NotARegularFile) throw error;
 		return false;
 	}
 	for (const reference of getExtensionSourceAnalysis(source, modulePath).references) {
@@ -2122,7 +2155,7 @@ function evaluateGraphCommonJs(modulePath: string): unknown {
 	let definition = commonJsModuleDefinitions.get(modulePath);
 	if (!definition && commonJsGraphModulePaths.has(modulePath)) {
 		const targetPath = commonJsFallbackModulePaths.get(modulePath) ?? modulePath;
-		const source = rewriteExtensionSpecifiersFromCache(fs.readFileSync(targetPath, "utf8"), modulePath);
+		const source = rewriteExtensionSpecifiersFromCache(readModuleSourceSync(targetPath), modulePath);
 		prepareGraphCommonJsDefinition(modulePath, source, targetPath);
 		definition = commonJsModuleDefinitions.get(modulePath);
 	}
@@ -2269,7 +2302,10 @@ async function collectExtensionModules(entryRealPath: string): Promise<Extension
 		let source: string;
 		try {
 			source = await sources.read(file);
-		} catch {
+		} catch (error) {
+			// Something other than a regular file fails the load, naming it; any
+			// other unreadable module is left to Bun's own import.
+			if (error instanceof NotARegularFile) throw error;
 			continue;
 		}
 		modules.set(file, source);
@@ -2439,8 +2475,10 @@ async function collectExtensionModules(entryRealPath: string): Promise<Extension
 						});
 					}
 				}
-			} catch {
-				// Unresolvable import (e.g. a type-only path); skip it.
+			} catch (error) {
+				// Unresolvable import (e.g. a type-only path); skip it. A module that
+				// is not a regular file fails the load instead, naming it.
+				if (error instanceof NotARegularFile) throw error;
 			}
 		}
 	}
@@ -2514,7 +2552,7 @@ async function prepareGraphCommonJsModule(modulePath: string, source: string): P
 	if (packageRoot && manifest?.name === "linkedom" && packageRelativePath === "commonjs/canvas.cjs") {
 		targetPath = path.join(packageRoot, "commonjs", "canvas-shim.cjs");
 		commonJsFallbackModulePaths.set(modulePath, targetPath);
-		executableSource = await Bun.file(targetPath).text();
+		executableSource = await readModuleSource(targetPath);
 	}
 	prepareGraphCommonJsDefinition(modulePath, executableSource, targetPath);
 }
@@ -2570,7 +2608,7 @@ async function installExtensionGraphHook(
 							asyncModules.delete(sourcePath);
 							raw = cached;
 						} else {
-							raw = await Bun.file(sourcePath).text();
+							raw = await readModuleSource(sourcePath);
 						}
 						return {
 							contents: await rewriteLegacyExtensionSource(raw, sourcePath, mtimeTag, resolvedImportMtimeTag),
@@ -2733,11 +2771,16 @@ async function ensureExtensionGraphHook(entryRealPath: string): Promise<{ clear(
  * every importer shares them, as a native `import()` would.
  */
 export async function loadLegacyPiModule(resolvedPath: string, options: { reload?: boolean } = {}): Promise<unknown> {
+	// The walk below reads the entry, and only a regular file is read: anything
+	// else at the name the caller gave, itself or through a link, fails the load
+	// here, naming it.
+	const entryPath = path.resolve(resolvedPath);
+	await regularFileExists(entryPath);
 	// Bun reports the realpath of a loaded module to `onLoad` and exposes it as
 	// `import.meta.url`. Resolve symlinks here too (macOS `/var`→`/private/var`,
 	// `bun link`/pnpm installs) so the rewrite filter matches the path Bun
 	// actually hands the hook.
-	const entryRealPath = await realpathOrSelf(path.resolve(resolvedPath));
+	const entryRealPath = await realpathOrSelf(entryPath);
 	await ensureLegacyPiOverridesReady();
 	const pendingSources = await ensureExtensionGraphHook(entryRealPath);
 	try {

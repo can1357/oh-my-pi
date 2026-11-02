@@ -2,8 +2,9 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { getLastChangelogVersionPath, TempDir } from "@oh-my-pi/pi-utils";
+import { namedAsFifo } from "./fifo-harness";
 
-// Every settings read opens its file non-blocking and requires a regular file. A FIFO at a
+// Every settings read looks at the name first and opens only a regular file, non-blocking. A FIFO at a
 // settings path — or a link to one — blocked the open until a writer came, at startup, for every
 // command; a synchronous read blocked the whole event loop, so no timer in the same process could
 // ever report it. Each case therefore runs in a child process that is killed if it hangs, and a
@@ -104,8 +105,10 @@ describe.skipIf(process.platform === "win32")("a FIFO at a settings path is refu
 		);
 
 		expect(run.outcome).toBe("finished");
-		// The overlay loader treats an unreadable overlay as the hard error it is.
-		expect(run.stdout).toContain("Failed to read config overlay");
+		// The overlay loader treats an unreadable overlay as the hard error it is, and the error names
+		// the overlay as a FIFO.
+		expect(run.stdout).toContain("FINISHED WITH");
+		expect(namedAsFifo(run.stdout, overlay)).toBeGreaterThan(0);
 	}, 60_000);
 
 	it("the legacy settings.json a first start migrates", async () => {

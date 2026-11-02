@@ -18,7 +18,12 @@ import {
 	logger,
 	prompt,
 } from "@oh-my-pi/pi-utils";
-import { readOptionalFileText } from "@oh-my-pi/pi-utils/regular-file";
+import {
+	absentFile,
+	readOptionalFileText,
+	readRegularFileText,
+	withoutByteOrderMark,
+} from "@oh-my-pi/pi-utils/regular-file";
 import { contextFileCapability } from "./capability/context-file";
 import { systemPromptCapability } from "./capability/system-prompt";
 import { findConfigFile } from "./config";
@@ -290,7 +295,12 @@ export async function discoverSystemPromptOverride(cwd?: string): Promise<System
 
 /** Unlike literal prompt inputs, explicit template paths never fall back to inline text. */
 export async function loadSystemPromptTemplateFile(filePath: string): Promise<string> {
-	const text = await Bun.file(filePath).text();
+	// Read only when a regular file stands there: anything else throws
+	// `NotARegularFile`, which names it. No leading byte order mark, as
+	// `Bun.file().text()` read it.
+	const read = await readRegularFileText(filePath);
+	if (read === undefined) throw absentFile(filePath);
+	const text = withoutByteOrderMark(read);
 	if (!text.trim()) {
 		throw new Error(`System prompt template must not be empty: ${filePath}`);
 	}
@@ -306,7 +316,11 @@ export async function resolvePromptInput(input: string | undefined, description:
 	}
 
 	try {
-		return await Bun.file(input).text();
+		// Only a regular file at the name is read as the file: anything else
+		// there is reported once, and the input is taken as text, as for a
+		// file that cannot be read.
+		const text = await readOptionalFileText(input);
+		return text === undefined ? input : withoutByteOrderMark(text);
 	} catch (error) {
 		if (!hasFsCode(error, "ENAMETOOLONG") && !isEnoent(error)) {
 			logger.warn(`Could not read ${description} file`, { path: input, error: String(error) });

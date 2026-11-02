@@ -2,7 +2,8 @@ import * as path from "node:path";
 import { createInterface } from "node:readline/promises";
 import type { VcsGitRepo } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { $env, getProjectDir, isEnoent, prompt } from "@oh-my-pi/pi-utils";
+import { $env, getProjectDir, prompt } from "@oh-my-pi/pi-utils";
+import { readRegularFileText, withoutByteOrderMark } from "@oh-my-pi/pi-utils/regular-file";
 import { applyChangelogProposals } from "../../commit/changelog";
 import { detectChangelogBoundaries } from "../../commit/changelog/detect";
 import { parseUnreleasedSection } from "../../commit/changelog/parse";
@@ -392,16 +393,17 @@ function formatFileChangeSummary(path: string, change: FileChange): string {
 	return `${path} (lines ${change.start}-${change.end})`;
 }
 
-async function loadExistingChangelogEntries(paths: string[]): Promise<ExistingChangelogEntries[]> {
+/**
+ * The `[Unreleased]` entries already in each changelog the commit agent will
+ * edit; a missing changelog contributes none. Exported for tests.
+ */
+export async function loadExistingChangelogEntries(paths: string[]): Promise<ExistingChangelogEntries[]> {
 	const entries = await Promise.all(
 		paths.map(async path => {
-			let content: string;
-			try {
-				content = await Bun.file(path).text();
-			} catch (err) {
-				if (isEnoent(err)) return null;
-				throw err;
-			}
+			// A FIFO or other non-regular file at the name throws unopened, as an unreadable file does.
+			const text = await readRegularFileText(path);
+			if (text === undefined) return null;
+			const content = withoutByteOrderMark(text);
 			try {
 				const unreleased = parseUnreleasedSection(content);
 				const sections = Object.entries(unreleased.entries)

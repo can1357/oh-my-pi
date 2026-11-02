@@ -1,7 +1,8 @@
 import * as fs from "node:fs";
 import * as tls from "node:tls";
 import { isOfficialAnthropicApiUrl } from "@oh-my-pi/pi-catalog/compat/anthropic";
-import { $env, isEnoent } from "@oh-my-pi/pi-utils";
+import { $env } from "@oh-my-pi/pi-utils";
+import { readRegularFileTextSync } from "@oh-my-pi/pi-utils/regular-file";
 import * as AIError from "../error";
 import type { Api, Model } from "../types";
 import { isFoundryEnabled } from "../utils/foundry";
@@ -66,14 +67,12 @@ function resolvePemValue(value: string | undefined, name: string): string | unde
 	}
 
 	if (looksLikeFilePath(trimmed)) {
-		try {
-			return fs.readFileSync(trimmed, "utf8");
-		} catch (error) {
-			if (isEnoent(error)) {
-				throw new AIError.ValidationError(`${name} path does not exist: ${trimmed}`);
-			}
-			throw error;
+		// A FIFO or other special file throws `NotARegularFile` without being opened.
+		const pem = readRegularFileTextSync(trimmed);
+		if (pem === undefined) {
+			throw new AIError.ValidationError(`${name} path does not exist: ${trimmed}`);
 		}
+		return pem;
 	}
 
 	return inline;

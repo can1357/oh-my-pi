@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { readOptionalFileText } from "@oh-my-pi/pi-utils/regular-file";
+import { readOptionalFileText, withoutByteOrderMark } from "@oh-my-pi/pi-utils/regular-file";
 
 const contentCache = new Map<string, string | null>();
 const dirCache = new Map<string, fs.Dirent[]>();
@@ -23,7 +23,10 @@ export async function readFile(filePath: string): Promise<string | null> {
 		// to it. A look at the name first and a read by name after it left a
 		// FIFO put there in between to be read. The open follows links, so
 		// symlinked context files (CLAUDE.md -> AGENTS.md) still resolve.
-		const content = (await readOptionalFileText(abs)) ?? null;
+		// `Bun.file().text()` dropped a leading byte-order mark, which this read replaced;
+		// keep that so a consumer that parses the text (a BOM breaks `JSON.parse`) is unchanged.
+		const text = await readOptionalFileText(abs);
+		const content = text === undefined ? null : withoutByteOrderMark(text);
 		contentCache.set(abs, content);
 		return content;
 	} catch {

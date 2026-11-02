@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import * as zod from "@oh-my-pi/omptype/zod";
 import { logger } from "@oh-my-pi/pi-utils";
+import { regularFileExists } from "@oh-my-pi/pi-utils/regular-file";
 import { hookCapability } from "../../capability/hook";
 import type { Hook } from "../../discovery";
 import { loadCapability } from "../../discovery";
@@ -148,7 +149,9 @@ async function loadHook(hookPath: string, cwd: string): Promise<{ hook: LoadedHo
 	const resolvedPath = resolvePath(hookPath, cwd);
 
 	try {
-		// Import the module using native Bun import
+		// Only a regular file is imported: anything else at the hook's name fails
+		// its load here, naming it.
+		await regularFileExists(resolvedPath);
 		const module = await withHostGuard(() => import(resolvedPath));
 		const factory = module.default as HookFactory;
 

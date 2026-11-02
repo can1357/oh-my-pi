@@ -1,6 +1,6 @@
-import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { readOptionalFileTextSync } from "@oh-my-pi/pi-utils/regular-file";
 import { getConfigDirPaths } from "../config";
 import { type ClaudePluginRoot, getPreloadedPluginRoots } from "../discovery/helpers";
 
@@ -16,11 +16,14 @@ export interface ConfigFileSource<T> {
  * Read one JSON/YAML config file through `adapt`. Reading, parsing and rejecting
  * all happen inside one guard so an unreadable, malformed, or irrelevant file is
  * skipped instead of thrown. `adapt` receives the raw content because the YAML/JSON
- * split lives with the config files that consume this walk, not here.
+ * split lives with the config files that consume this walk, not here. Anything
+ * but a regular file at the name (a FIFO, a socket, a device) is reported and
+ * skipped without being opened.
  */
 export function readConfigFile<T>(filePath: string, adapt: ConfigFileAdapter<T>): T | null {
 	try {
-		const content = fs.readFileSync(filePath, "utf-8");
+		const content = readOptionalFileTextSync(filePath);
+		if (content === undefined) return null;
 		return adapt(content, filePath);
 	} catch {
 		return null;

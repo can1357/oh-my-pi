@@ -5,7 +5,7 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { isEnoent } from "@oh-my-pi/pi-utils";
+import { readRegularFileText } from "@oh-my-pi/pi-utils/regular-file";
 
 export interface SSHHostConfig {
 	host: string;
@@ -22,18 +22,17 @@ export interface SSHConfigFile {
 
 /**
  * Read an SSH config file.
- * Returns empty config if file doesn't exist.
+ * Returns empty config if file doesn't exist. Anything but a regular file at
+ * the name (a FIFO, a socket, a device) throws `NotARegularFile` without being
+ * opened, as an unreadable file throws.
  */
 export async function readSSHConfigFile(filePath: string): Promise<SSHConfigFile> {
+	const content = await readRegularFileText(filePath);
+	// File doesn't exist, return empty config
+	if (content === undefined) return { hosts: {} };
 	try {
-		const content = await fs.promises.readFile(filePath, "utf-8");
-		const parsed = JSON.parse(content) as SSHConfigFile;
-		return parsed;
+		return JSON.parse(content) as SSHConfigFile;
 	} catch (error) {
-		if (isEnoent(error)) {
-			// File doesn't exist, return empty config
-			return { hosts: {} };
-		}
 		if (error instanceof SyntaxError) {
 			throw new Error(`Failed to parse SSH config file ${filePath}: ${error.message}`);
 		}

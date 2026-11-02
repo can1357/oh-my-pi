@@ -15,6 +15,7 @@ import {
 	pathIsWithin,
 	tryParseJson,
 } from "@oh-my-pi/pi-utils";
+import { readOptionalFileText, withoutByteOrderMark } from "@oh-my-pi/pi-utils/regular-file";
 import { isUserSourceEnabled } from "../capability";
 import type { ContextFile } from "../capability/context-file";
 import type { ExtensionModule } from "../capability/extension-module";
@@ -1633,7 +1634,11 @@ export async function injectPluginDirRoots(home: string, dirs: string[], cwd?: s
 				const contained = await resolveContainedPath(realRoot, manifestPath);
 				if (contained.status !== "ok") continue;
 				try {
-					const manifest = await Bun.file(contained.realPath).json();
+					// Judged a regular file before a byte is read: anything else there
+					// is reported once and passed over, like an invalid manifest.
+					const text = await readOptionalFileText(contained.realPath);
+					if (text === undefined) continue;
+					const manifest = JSON.parse(withoutByteOrderMark(text));
 					if (typeof manifest?.name === "string" && manifest.name) {
 						pluginName = manifest.name;
 						break;

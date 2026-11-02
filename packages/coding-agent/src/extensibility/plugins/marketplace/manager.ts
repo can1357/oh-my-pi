@@ -11,6 +11,12 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { isEnoent, logger, pathIsWithin } from "@oh-my-pi/pi-utils";
+import {
+	absentFile,
+	readOptionalFileText,
+	readRegularFileText,
+	withoutByteOrderMark,
+} from "@oh-my-pi/pi-utils/regular-file";
 import { expandTilde } from "../../../tools/path-utils";
 import { linkPluginDirectory } from "../directory-link";
 import { normalizePluginRuntimeConfig, writePluginRuntimeConfig } from "../runtime-config";
@@ -563,8 +569,11 @@ export class MarketplaceManager {
 			if (!pathIsWithin(cachePath, sourcePath)) {
 				throw new Error(`Plugin "${entry.name}" lspServers path escapes the plugin directory`);
 			}
-			const content = await Bun.file(sourcePath).text();
-			await Bun.write(targetPath, content);
+			// The cache copies a plugin's links as links, so this can lead to a file
+			// the plugin's author placed: only a regular file there is read.
+			const content = await readRegularFileText(sourcePath);
+			if (content === undefined) throw absentFile(sourcePath);
+			await Bun.write(targetPath, withoutByteOrderMark(content));
 			return;
 		}
 
@@ -583,8 +592,10 @@ export class MarketplaceManager {
 			const extension = path.extname(sourcePath).toLowerCase();
 			const targetFilename = extension === ".yaml" || extension === ".yml" ? `.dap${extension}` : ".dap.json";
 			const targetPath = path.join(cachePath, targetFilename);
-			const content = await Bun.file(sourcePath).text();
-			await Bun.write(targetPath, content);
+			// Only a regular file is read, as for `lspServers` above.
+			const content = await readRegularFileText(sourcePath);
+			if (content === undefined) throw absentFile(sourcePath);
+			await Bun.write(targetPath, withoutByteOrderMark(content));
 			return;
 		}
 
@@ -613,7 +624,11 @@ export class MarketplaceManager {
 		if (!pluginDir) return undefined;
 		const readVersion = async (file: string): Promise<string | undefined> => {
 			try {
-				const content = await Bun.file(path.join(pluginDir, file)).json();
+				// Judged a regular file before a byte is read: anything else there
+				// is reported once and passed over.
+				const text = await readOptionalFileText(path.join(pluginDir, file));
+				if (text === undefined) return undefined;
+				const content = JSON.parse(withoutByteOrderMark(text));
 				return typeof content?.version === "string" && content.version ? content.version : undefined;
 			} catch {
 				// Missing or invalid — try next source
@@ -1024,9 +1039,11 @@ export class MarketplaceManager {
 
 	async #loadRuntimeConfig(scope: "user" | "project"): Promise<PluginRuntimeConfig> {
 		try {
-			return normalizePluginRuntimeConfig(await Bun.file(this.#runtimeLockPath(scope)).json());
+			// Judged a regular file before a byte is read: a FIFO here is reported
+			// and passed over like a missing lock, as the plugin loader does.
+			const text = await readOptionalFileText(this.#runtimeLockPath(scope));
+			return normalizePluginRuntimeConfig(text === undefined ? {} : JSON.parse(withoutByteOrderMark(text)));
 		} catch (err) {
-			if (isEnoent(err)) return normalizePluginRuntimeConfig({});
 			logger.warn("Failed to load marketplace plugin runtime config", {
 				path: this.#runtimeLockPath(scope),
 				error: String(err),
@@ -1040,14 +1057,13 @@ export class MarketplaceManager {
 	}
 
 	async #resolvePluginPackageName(installPath: string, fallbackName: string): Promise<string> {
-		try {
-			const pkg: { name?: unknown } = await Bun.file(path.join(installPath, "package.json")).json();
-			const name = typeof pkg.name === "string" && pkg.name.length > 0 ? pkg.name : fallbackName;
-			return assertRuntimePackageName(name);
-		} catch (err) {
-			if (isEnoent(err)) return assertRuntimePackageName(fallbackName);
-			throw err;
-		}
+		// Read only when a regular file stands there: anything else throws
+		// `NotARegularFile`, which names it.
+		const text = await readRegularFileText(path.join(installPath, "package.json"));
+		if (text === undefined) return assertRuntimePackageName(fallbackName);
+		const pkg: { name?: unknown } = JSON.parse(withoutByteOrderMark(text));
+		const name = typeof pkg.name === "string" && pkg.name.length > 0 ? pkg.name : fallbackName;
+		return assertRuntimePackageName(name);
 	}
 
 	#runtimePackagePath(scope: "user" | "project", packageName: string): string {
@@ -1138,15 +1154,13 @@ export class MarketplaceManager {
 
 	async #readRuntimeDependencyNames(scope: "user" | "project"): Promise<Set<string>> {
 		const names = new Set<string>();
-		try {
-			const pkg: { dependencies?: Record<string, unknown> } = await Bun.file(
-				path.join(this.#runtimeRoot(scope), "package.json"),
-			).json();
+		// Read only when a regular file stands there, as in `#resolvePluginPackageName`.
+		const text = await readRegularFileText(path.join(this.#runtimeRoot(scope), "package.json"));
+		if (text !== undefined) {
+			const pkg: { dependencies?: Record<string, unknown> } = JSON.parse(withoutByteOrderMark(text));
 			if (pkg.dependencies && typeof pkg.dependencies === "object") {
 				for (const dep in pkg.dependencies) names.add(dep);
 			}
-		} catch (err) {
-			if (!isEnoent(err)) throw err;
 		}
 		return names;
 	}

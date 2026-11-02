@@ -7,6 +7,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { getAgentDir } from "@oh-my-pi/pi-utils";
+import { regularFileExists } from "@oh-my-pi/pi-utils/regular-file";
 
 export interface CustomShareResult {
 	/** URL to display/open (optional - script may handle everything itself) */
@@ -50,6 +51,9 @@ export async function loadCustomShare(): Promise<LoadedCustomShare | null> {
 	}
 
 	try {
+		// Only a regular file is imported: anything else at the script's name
+		// fails the load here, naming it.
+		await regularFileExists(scriptPath);
 		const module = await import(scriptPath);
 		const fn = module.default;
 
