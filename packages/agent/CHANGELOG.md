@@ -6,6 +6,8 @@
 
 - Tools now receive `toolCall.wakeSignal`, raised by delivered steering, peer IRC, asides and background completions, and `toolCall.messageSignal`, raised by the same messages except background completions, so a blocking tool can return while its work continues as a job ([#17843](https://github.com/can1357/oh-my-pi/pull/17843) by [@sjawhar](https://github.com/sjawhar))
 
+## [18.16.0] - 2026-11-02
+
 ### Changed
 
 - Deprecated `createFileOps`, `computeFileLists`, `formatFileOperations`, `upsertFileOperations`, `isUrlSchemePath` and `FileOperations` in `@oh-my-pi/pi-agent-core/compaction`; they now re-export `@oh-my-pi/snapcompact`, which callers should import directly
