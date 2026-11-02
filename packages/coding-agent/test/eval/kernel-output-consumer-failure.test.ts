@@ -15,7 +15,7 @@ import { disposeAllKernelSessions, executePython } from "@oh-my-pi/pi-coding-age
 import { PythonKernel } from "@oh-my-pi/pi-coding-agent/eval/py/kernel";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import type { JsStatusEvent } from "@oh-my-pi/pi-coding-agent/eval/js/shared/types";
-import { logger, TempDir } from "@oh-my-pi/pi-utils";
+import { describeError, logger, TempDir } from "@oh-my-pi/pi-utils";
 
 type Language = "py" | "js";
 const LANGUAGES = ["py", "js"] as const;
@@ -1414,7 +1414,7 @@ describe("a value read once, and a failure after its cell finished", () => {
 	);
 });
 
-describe("the executor's cancellation checks read a thrown value or abort reason only through describeError", () => {
+describe("cancellation checks and descriptions read a thrown value or abort reason only through describeError", () => {
 	class Cancelled extends Error {
 		constructor(readonly timedOut: boolean) {
 			super("cancelled");
@@ -1446,5 +1446,61 @@ describe("the executor's cancellation checks read a thrown value or abort reason
 		const timeout = new DOMException("late", "TimeoutError");
 		expect(isCancellationError(timeout, Cancelled)).toBe(true);
 		expect(isTimedOutCancellation(new Error("other"), Cancelled, aborted(timeout))).toBe(true);
+	});
+
+	const SLEEPING_CELL: Record<Language, string> = {
+		py: "import time\nkept = 42\nprint('started', flush=True)\ntime.sleep(30)\nprint('after')",
+		js: "globalThis.kept = 42;\nprint('started');\nawait new Promise(resolve => setTimeout(resolve, 30_000));\nprint('after');",
+	};
+
+	for (const language of LANGUAGES) {
+		it.skipIf(skipped(language))(
+			`${language}: a cell aborted mid-run with a Proxy reason whose traps throw comes back cancelled, and the runtime keeps serving`,
+			async () => {
+				const session = makeSession(`hostile-abort-${language}-${crypto.randomUUID()}`);
+				const interrupt = new AbortController();
+				const cell = await run(session, language, SLEEPING_CELL[language], {
+					onChunk: chunk => {
+						if (printsLine(chunk, "started")) interrupt.abort(hostileProxy());
+					},
+					signal: interrupt.signal,
+				});
+				const after = await run(session, language, "print('next', 1 + 1)");
+
+				expect(cell.cancelled).toBe(true);
+				expect(printsLine(cell.output, "after")).toBe(false);
+				expect(after.exitCode).toBe(0);
+				expect(after.output).toContain("next 2");
+				if (language === "py") expect((await run(session, "py", READ_KEPT.py)).output).toContain("kept 42");
+			},
+			120_000,
+		);
+
+		it.skipIf(skipped(language))(
+			`${language}: a call whose signal was already aborted with such a Proxy returns a cancelled result instead of rejecting`,
+			async () => {
+				const session = makeSession(`hostile-preabort-${language}-${crypto.randomUUID()}`);
+				const cell = await run(session, language, "print('ran')", { signal: aborted(hostileProxy()) });
+				expect(cell.cancelled).toBe(true);
+				expect(printsLine(cell.output, "ran")).toBe(false);
+			},
+			120_000,
+		);
+	}
+
+	it("describes an error whose message getter returns the error itself with one read of that getter", () => {
+		// `Error.prototype.toString` on such a message reads the getter again, until the stack overflows.
+		let reads = 0;
+		const error = new TypeError("unused");
+		Object.defineProperty(error, "message", {
+			get() {
+				reads += 1;
+				return error;
+			},
+		});
+		const description = describeError(error);
+		expect(reads).toBe(1);
+		expect(description.message).toBe("[object Error]");
+		expect(description.name).toBe("TypeError");
 	});
 });

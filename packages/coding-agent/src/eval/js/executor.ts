@@ -8,6 +8,7 @@ import {
 } from "../../tools/output-meta";
 import { isEvalTimeoutControlEvent, withBridgeTimeoutPause } from "../bridge-timeout";
 import { DisplayOutputCollector, OutputConsumerGuard } from "../executor-base";
+import { isAbortOrTimeout, isTimeoutReason } from "../kernel-base";
 import type { EvalDisplayOutput } from "../types";
 import { executeInVmContext, type VmRunState } from "./context-manager";
 import { installJsPackages } from "./package-installer";
@@ -70,20 +71,6 @@ function getExecutionTimeoutMs(options: Pick<JsExecutorOptions, "deadlineMs" | "
 		return Math.max(1, options.deadlineMs - Date.now());
 	}
 	return options.timeoutMs;
-}
-
-function isAbortError(error: unknown): boolean {
-	return (
-		(error instanceof DOMException && (error.name === "AbortError" || error.name === "TimeoutError")) ||
-		(error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError"))
-	);
-}
-
-function isTimeoutReason(reason: unknown): boolean {
-	return (
-		(reason instanceof DOMException && reason.name === "TimeoutError") ||
-		(reason instanceof Error && reason.name === "TimeoutError")
-	);
 }
 
 const JS_PACKAGE_INSTALL_TIMEOUT_MS = 10 * 60_000;
@@ -213,7 +200,7 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 		};
 	} catch (error) {
 		const activeSignal = packageWorkComplete ? signal : packageSignal;
-		if (activeSignal?.aborted || isAbortError(error)) {
+		if (activeSignal?.aborted || isAbortOrTimeout(error)) {
 			const timedOut = packageWorkComplete
 				? Boolean(timeoutSignal?.aborted) || isTimeoutReason(options.signal?.reason)
 				: isTimeoutReason(packageSignal?.reason);

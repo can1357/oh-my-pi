@@ -1,6 +1,7 @@
 /**
  * Host-side handler for the eval `agent()` helper.
  */
+import { describeError, inheritsFrom } from "@oh-my-pi/pi-utils";
 import { type } from "@oh-my-pi/omptype";
 import type { Settings } from "../config/settings";
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
@@ -247,7 +248,8 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 					});
 					return result.text;
 				} catch (error) {
-					if (error instanceof StructuredSubagentError) throw new ToolError(error.message);
+					if (inheritsFrom(error, StructuredSubagentError.prototype))
+						throw new ToolError(describeError(error).message);
 					throw error;
 				}
 			},
@@ -255,7 +257,7 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 		);
 		return { id, agent: policy.agentName };
 	} catch (error) {
-		if (error instanceof StructuredSubagentError) throw new ToolError(error.message);
+		if (inheritsFrom(error, StructuredSubagentError.prototype)) throw new ToolError(describeError(error).message);
 		throw error;
 	}
 }

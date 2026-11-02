@@ -332,11 +332,8 @@ function createBridgeAbortShield(source: AbortSignal | undefined): BridgeAbortSh
 
 	const requestAbort = (reason: unknown): void => {
 		shield.abortRequested = true;
-		shield.timedOut =
-			shield.timedOut ||
-			(typeof DOMException !== "undefined" && reason instanceof DOMException
-				? reason.name === "TimeoutError"
-				: reason instanceof Error && reason.name === "TimeoutError");
+		// The caller's abort reason can be a Proxy whose traps throw; describeError() never throws.
+		shield.timedOut = shield.timedOut || describeError(reason).name === "TimeoutError";
 		abortReason = reason;
 		if (pauseDepth > 0 || controller.signal.aborted) return;
 		controller.abort(reason);

@@ -1,5 +1,13 @@
 import * as path from "node:path";
-import { describeError, inheritsFrom, isRecord, logger, Snowflake, workerHostEntry } from "@oh-my-pi/pi-utils";
+import {
+	describeError,
+	inheritsFrom,
+	isErrorValue,
+	isRecord,
+	logger,
+	Snowflake,
+	workerHostEntry,
+} from "@oh-my-pi/pi-utils";
 import {
 	createWorkerHandle,
 	createWorkerSubprocess,
@@ -397,7 +405,8 @@ export async function runIfSnapshotMatches(options: {
 	try {
 		return await runOnce(session, options);
 	} catch (error) {
-		if (error instanceof ToolError && error.message === "JS shadow snapshot changed") return null;
+		if (inheritsFrom(error, ToolError.prototype) && describeError(error).message === "JS shadow snapshot changed")
+			return null;
 		throw error;
 	}
 }
@@ -976,8 +985,9 @@ function safeSend(session: JsSession, msg: WorkerInbound): void {
 	}
 }
 
+/** The caller's abort reason as an error; it can be a Proxy whose traps throw, so only isErrorValue() inspects it. */
 function reasonToError(reason: unknown, fallback: string): Error {
-	if (reason instanceof Error) return reason;
+	if (isErrorValue(reason)) return reason;
 	if (typeof reason === "string") return new ToolAbortError(reason);
 	return new ToolAbortError(fallback);
 }
@@ -1141,7 +1151,7 @@ function wrapBunWorker(worker: Worker): JsEvalWorkerHandle {
 }
 
 function errorFromWorkerEvent(event: ErrorEvent): Error {
-	if (event.error instanceof Error) return event.error;
+	if (isErrorValue(event.error)) return event.error;
 	if (event.message) return new Error(event.message);
 	return new Error("Unknown JS eval worker error");
 }

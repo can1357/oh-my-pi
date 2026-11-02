@@ -118,6 +118,16 @@ export function errorClassOf(value: unknown): ErrorClassName | undefined {
 	return found;
 }
 
+/**
+ * Whether `value`'s prototype chain leads to a built-in error class, as
+ * `value instanceof Error` decides, bounded like {@link inheritsFrom} and never
+ * throwing. It proves only the prototype: a Proxy passes and can still throw on
+ * any read, so read such a value through {@link describeError}.
+ */
+export function isErrorValue(value: unknown): value is Error {
+	return errorClassOf(value) !== undefined;
+}
+
 /** The first prototype on `value`'s chain that `matches`, within the depth limit. */
 function walkPrototypes(value: unknown, matches: (proto: object) => boolean): object | undefined {
 	if (value === null || (typeof value !== "object" && typeof value !== "function")) return undefined;
@@ -183,8 +193,11 @@ function fallbackText(value: unknown, errorClass: ErrorClassName | undefined): s
 /**
  * Describes any thrown or rejected value, and never throws. An error (a value
  * whose prototype chain leads to a built-in error class) has its `message`,
- * `name`, `stack`, `code` and `syscall` read once each; a `message` that is not
- * text is converted with `String()` once. Any other value is converted with
+ * `name`, `stack`, `code` and `syscall` read once each; a `message` that is a
+ * primitive other than text is converted with `String()`, and one that is an
+ * object or a function is not converted at all: converting it runs its code,
+ * and `Error.prototype.toString` on a message that is the error itself reads
+ * the `message` getter again without end. Any other value is converted with
  * `String()` once. Each string kept is at most {@link DESCRIBED_TEXT_LIMIT}
  * characters.
  */
@@ -199,7 +212,9 @@ export function describeError(value: unknown): DescribedError {
 		const error = value as object;
 		try {
 			const field: unknown = reflectGet(error, "message");
-			message = typeof field === "string" ? bounded(field, DESCRIBED_TEXT_LIMIT) : convertedText(field);
+			if (typeof field === "string") message = bounded(field, DESCRIBED_TEXT_LIMIT);
+			else if (field === null || (typeof field !== "object" && typeof field !== "function"))
+				message = convertedText(field);
 		} catch {
 			// The message getter or a Proxy trap threw.
 		}

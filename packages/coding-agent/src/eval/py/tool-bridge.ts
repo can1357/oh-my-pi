@@ -7,7 +7,7 @@
  * current execution and forwards to the same `callSessionTool` implementation
  * the JavaScript bridge uses.
  */
-import { describeError, logger, postmortem } from "@oh-my-pi/pi-utils";
+import { describeError, isErrorValue, logger, postmortem } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "../../tools";
 import type { RuntimeCallIdentity } from "../js/shared/runtime";
 import { bridgeValueFromToolResult, callSessionTool, describeToolFailure, type JsStatusEvent } from "../js/tool-bridge";
@@ -49,11 +49,9 @@ const registrations = new Map<string, PyToolBridgeEntry>();
 let serverPromise: Promise<BridgeServer> | null = null;
 
 function markExpectedBridgeShutdownError(error: unknown): error is Error {
-	if (!(error instanceof Error)) return false;
-	const expected =
-		error.name === "AbortError" ||
-		("code" in error &&
-			(error.code === "ERR_SOCKET_CLOSED" || error.code === "ECONNRESET" || error.code === "EPIPE"));
+	if (!isErrorValue(error)) return false;
+	const { name, code } = describeError(error);
+	const expected = name === "AbortError" || code === "ERR_SOCKET_CLOSED" || code === "ECONNRESET" || code === "EPIPE";
 	if (expected) postmortem.markExpectedCleanupError(error);
 	return expected;
 }
@@ -218,7 +216,7 @@ async function startServer(): Promise<BridgeServer> {
 		},
 		error(err) {
 			if (markExpectedBridgeShutdownError(err)) {
-				logger.debug("Python tool bridge connection closed during shutdown", { error: err.message });
+				logger.debug("Python tool bridge connection closed during shutdown", { error: describeError(err).message });
 			} else {
 				logger.error("Python tool bridge request failed", { error: err });
 			}
@@ -241,7 +239,7 @@ async function startServer(): Promise<BridgeServer> {
 			stopPromise ??= Promise.try(() => server.stop(true)).catch(error => {
 				if (!markExpectedBridgeShutdownError(error)) throw error;
 				logger.debug("Python tool bridge stopped after its socket closed", {
-					error: error.message,
+					error: describeError(error).message,
 				});
 			});
 			return stopPromise;

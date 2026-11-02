@@ -1,5 +1,5 @@
 import type { EvalStatusEvent, EvalView } from "@oh-my-pi/pi-tui/tools/eval";
-import { describeError, isRecord, logger, readLines, Snowflake } from "@oh-my-pi/pi-utils";
+import { describeError, isErrorValue, isRecord, logger, readLines, Snowflake } from "@oh-my-pi/pi-utils";
 import type { Subprocess } from "bun";
 import { settled } from "../utils/ipc";
 import type { ShadowBarrier, ShadowControlNode, ShadowOperation } from "./speculation/types";
@@ -206,17 +206,24 @@ export function createAbortError(name: "AbortError" | "TimeoutError", message: s
 	return err;
 }
 
+// An abort reason is whatever the caller passed to `abort()`, so it can be a Proxy whose traps throw:
+// these read it only through isErrorValue() and describeError(), which never throw. DOMException's
+// prototype chain leads to Error.prototype, so it is described as an error and its `name` is read.
 export function throwIfAborted(signal: AbortSignal | undefined, fallbackReason: string): void {
 	if (!signal?.aborted) return;
 	const reason = signal.reason;
-	if (reason instanceof Error) throw reason;
+	if (isErrorValue(reason)) throw reason;
 	throw createAbortError("AbortError", typeof reason === "string" ? reason : fallbackReason);
 }
 
 export function isTimeoutReason(reason: unknown): boolean {
-	if (reason instanceof DOMException) return reason.name === "TimeoutError";
-	if (reason instanceof Error) return reason.name === "TimeoutError";
-	return false;
+	return describeError(reason).name === "TimeoutError";
+}
+
+/** Whether a thrown value or abort reason is an abort or a timeout, by its error `name`. Never throws. */
+export function isAbortOrTimeout(value: unknown): boolean {
+	const { name } = describeError(value);
+	return name === "AbortError" || name === "TimeoutError";
 }
 
 /**

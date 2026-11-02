@@ -427,7 +427,11 @@ function pyMember(rng: Rng, member: string, cls: string): string {
  * `withTraceback` leaves out a `__traceback__` member: asyncio reads that of a
  * task's exception itself, outside any description.
  */
-function pyCase(rng: Rng, caseTag: string, withTraceback = true): { define: string; make: string } {
+function pyCase(
+	rng: Rng,
+	caseTag: string,
+	withTraceback = true,
+): { define: string; make: string; reportedNames: string[] } {
 	const cls = `Hostile_${caseTag.replace(/\W/g, "_")}`;
 	const base = rng.pick([
 		"Exception",
@@ -450,7 +454,10 @@ function pyCase(rng: Rng, caseTag: string, withTraceback = true): { define: stri
 		// Not `__qualname__`: a class body may only bind that name to text.
 		"    @property\n    def __module__(cls):\n        _hostile_count(f'{_hostile_case}:__module__')\n        return 42\n";
 	const str = rng.pick([`raise ${rng.pick(PY_RAISES)}`, "return 'x' * 1000000", "return 'fine'", "return 42"]);
-	let body = `class ${cls}(${base}${rng.chance(0.2) ? ", metaclass=_HostileMeta" : ""}):\n`;
+	// A metaclass that makes `__name__` raise leaves the traceback its `__qualname__`, except where the runner
+	// falls back to `<unnamed exception>` (for example after the traceback is cut), so either names the class.
+	const namelessClass = rng.chance(0.2);
+	let body = `class ${cls}(${base}${namelessClass ? ", metaclass=_HostileMeta" : ""}):\n`;
 	body += `    def __str__(self):\n        _hostile_count(f'{_hostile_case}:__str__:{id(self)}')\n        ${str}\n`;
 	for (const member of members) if (rng.chance(0.5)) body += pyMember(rng, member, cls);
 	const make =
@@ -459,7 +466,11 @@ function pyCase(rng: Rng, caseTag: string, withTraceback = true): { define: stri
 			: base === "AttributeError"
 				? `${cls}('no attribute', name='apend', obj=[])`
 				: `${cls}('hostile')`;
-	return { define: `${meta}${body}`, make };
+	return {
+		define: `${meta}${body}`,
+		make,
+		reportedNames: namelessClass ? [cls, "<unnamed exception>"] : [cls],
+	};
 }
 
 function pyCheck(caseTag: string): string {
@@ -483,7 +494,7 @@ describe("the Python kernel survives hostile exceptions", () => {
 				const first = parseCheck(await run(session, "py", `${PY_COUNTER}kept = 'yes'\n${pyCheck("none")}`));
 				for (let index = 0; index < CASES; index++) {
 					const caseTag = `raised-${seed}-${index}`;
-					const { define, make } = pyCase(rng, caseTag);
+					const { define, make, reportedNames } = pyCase(rng, caseTag);
 					const code = `_hostile_case = ${JSON.stringify(caseTag)}\n${define}\nraise ${make}`;
 					// No timeout of its own: describing the exception must end by itself.
 					const failed = await run(session, "py", code, undefined, undefined);
@@ -491,8 +502,11 @@ describe("the Python kernel survives hostile exceptions", () => {
 					const context = `seed ${seed} case ${index}:\n${code}`;
 					expect(failed.cancelled, context).toBe(false);
 					expect(failed.exitCode, context).toBe(1);
-					// The class's own name, so the cell failed on the hostile exception, not while defining it.
-					expect(failed.output, context).toContain(`Hostile_${caseTag.replace(/\W/g, "_")}`);
+					// The name the runner can read, so the cell failed on the hostile exception, not while defining it.
+					expect(
+						reportedNames.some(name => failed.output.includes(name)),
+						`${context}\n--- output ---\n${failed.output.slice(0, 2000)}`,
+					).toBe(true);
 					expect(check.pid, context).toBe(first.pid);
 					expect(check.kept, context).toBe("yes");
 					expect(
