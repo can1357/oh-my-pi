@@ -759,20 +759,31 @@ impl Scanner {
 
 	fn readlink(&self, at: At<'_>, name: &[u8]) -> io::Result<Vec<u8>> {
 		let target = match at {
-			At::Dir(tree, leaf) => tree.read_link(&bytes_path(leaf)?)?,
+			At::Dir(tree, leaf) => tree.read_link_entry(&bytes_path(leaf)?)?,
 			At::Path => {
 				if self.access == Access::FilesFrom {
 					let (tree, leaf) = self.locate(self.cur_base, name)?;
-					tree.read_link(&leaf)?
+					tree.read_link_entry(&leaf)?
 				} else {
 					let path = join_name(&self.base().abs, name)?;
 					let fake = FakeLinks::for_run(self.ctx.opts.am_root, true) != FakeLinks::Off;
 					if fake && !self.ctx.fs.symlink_metadata(&path)?.is_symlink() {
-						// A stored symlink: its contents are the target (upstream
-						// do_readlink with am_root < 0); a real one reads as itself.
-						let mut target = vec![0u8; MAXPATHLEN];
-						let len = self.ctx.fs.open(&path)?.read(&mut target)?;
+						// A stored symlink: its contents are the target, as
+						// upstream's do_readlink with am_root < 0 reads them (at
+						// most MAXPATHLEN - 1 bytes, up to a NUL); a real one
+						// reads as itself.
+						let mut target = vec![0u8; MAXPATHLEN - 1];
+						let mut file = self.ctx.fs.open(&path)?;
+						let len = loop {
+							match file.read(&mut target) {
+								Err(err) if err.kind() == io::ErrorKind::Interrupted => {},
+								read => break read?,
+							}
+						};
 						target.truncate(len);
+						if let Some(nul) = target.iter().position(|&b| b == 0) {
+							target.truncate(nul);
+						}
 						return Ok(target);
 					}
 					self.ctx.fs.read_link(path)?

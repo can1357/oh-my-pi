@@ -606,15 +606,17 @@ impl Tree {
 			.collect()
 	}
 
-	/// The target of the symlink `rel`. Under [`FakeLinks`] a regular file's
-	/// contents are its target (upstream do_readlink: one read of up to
-	/// `MAXPATHLEN` bytes), and a real symlink reads as itself when sending
-	/// and as an empty target when receiving.
-	pub(crate) fn read_link(&self, rel: &Path) -> io::Result<PathBuf> {
+	/// The target of the symlink entry `rel`, as upstream's do_readlink reads
+	/// it for the file list, a comparison or a backup. Under [`FakeLinks`] a
+	/// regular file's contents are its target: one read of at most
+	/// `MAXPATHLEN - 1` bytes, up to the first NUL (upstream keeps it as a C
+	/// string); a real symlink reads as itself when sending and as an empty
+	/// target when receiving. Walks of a path use [`Tree::read_link`].
+	pub(crate) fn read_link_entry(&self, rel: &Path) -> io::Result<PathBuf> {
 		if self.inner.opts.fake_links != FakeLinks::Off {
 			match self.open_read(rel, false) {
 				Ok(mut file) => {
-					let mut target = vec![0u8; MAXPATHLEN];
+					let mut target = vec![0u8; MAXPATHLEN - 1];
 					let len = loop {
 						match file.read(&mut target) {
 							Err(err) if err.kind() == io::ErrorKind::Interrupted => {},
@@ -622,6 +624,9 @@ impl Tree {
 						}
 					};
 					target.truncate(len);
+					if let Some(nul) = target.iter().position(|&b| b == 0) {
+						target.truncate(nul);
+					}
 					return paths::bytes_path(&target).map(Path::to_path_buf);
 				},
 				Err(err) if err::is_looped(&err) => {
@@ -632,6 +637,12 @@ impl Tree {
 				Err(err) => return Err(err),
 			}
 		}
+		self.read_link(rel)
+	}
+
+	/// The target of the symlink `rel` (readlink(2)), whatever `--fake-super`
+	/// stores: what a walk of a path through it follows.
+	pub(crate) fn read_link(&self, rel: &Path) -> io::Result<PathBuf> {
 		#[cfg(unix)]
 		if let Some(root) = self.native_root() {
 			use std::os::unix::ffi::OsStringExt;
@@ -1730,6 +1741,27 @@ mod tests {
 			assert_eq!(err.raw_os_error(), Some(libc::ELOOP));
 			tree.mknod(Path::new("plain"), NodeKind::Regular, 0o644).unwrap();
 			assert!(base.join("plain").is_file());
+		}
+
+		/// A stored `--fake-super` symlink is read as upstream's do_readlink
+		/// reads it: at most `MAXPATHLEN - 1` bytes (rsync 3.5.1 copies a
+		/// 4096-byte stored target as its first 4095 bytes), up to the first
+		/// NUL. A real symlink still reads as itself when sending, as an empty
+		/// target when receiving, and as itself through `read_link` either way.
+		#[test]
+		fn fake_links_read_like_do_readlink() {
+			let (_guard, base) = tempdir();
+			std::fs::write(base.join("long"), vec![b'a'; MAXPATHLEN]).unwrap();
+			std::fs::write(base.join("nul"), b"first\0ignored").unwrap();
+			symlink("real-target", base.join("real")).unwrap();
+			let sending = open_tree(&base, &TreeOpts { fake_links: FakeLinks::Sending, ..TreeOpts::default() });
+			let read = |tree: &Tree, name: &str| paths::path_bytes(&tree.read_link_entry(Path::new(name)).unwrap()).into_owned();
+			assert_eq!(read(&sending, "long"), vec![b'a'; MAXPATHLEN - 1]);
+			assert_eq!(read(&sending, "nul"), b"first");
+			assert_eq!(read(&sending, "real"), b"real-target");
+			let receiving = open_tree(&base, &TreeOpts { fake_links: FakeLinks::Receiving, ..TreeOpts::default() });
+			assert_eq!(read(&receiving, "real"), b"");
+			assert_eq!(receiving.read_link(Path::new("real")).unwrap(), Path::new("real-target"));
 		}
 
 		/// B18: a top-level socket under a root whose full path exceeds

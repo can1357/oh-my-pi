@@ -1072,7 +1072,7 @@ impl Gen<'_> {
 				meta::same_mtime(file, st, &self.meta)
 			},
 			Ftype::Dir => true,
-			Ftype::Symlink => match loc.tree.read_link(&loc.rel) {
+			Ftype::Symlink => match loc.tree.read_link_entry(&loc.rel) {
 				Ok(target) => {
 					let target = crate::rsync::paths::path_bytes(&target);
 					!target.is_empty() && *target == *file.link.as_deref().unwrap_or_default()
