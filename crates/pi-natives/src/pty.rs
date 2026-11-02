@@ -9,7 +9,7 @@ use std::{
 	io::{Read, Write},
 	sync::{
 		Arc,
-		atomic::{AtomicBool, AtomicU64, Ordering},
+		atomic::{AtomicU64, Ordering},
 	},
 	time::{Duration, Instant},
 };
@@ -28,8 +28,8 @@ use crate::{
 	js::into_string,
 	ps,
 	shell::{
-		BRIDGE_QUEUE_CHUNKS, BridgeItem, FORWARD_STALL_TIMEOUT, PumpEnd, forwarding_stalled_error,
-		pump_chunks,
+		BRIDGE_QUEUE_CHUNKS, BridgeItem, FORWARD_STALL_TIMEOUT, PumpEnd, pump_chunks,
+		undelivered_output_error,
 	},
 	task,
 };
@@ -451,12 +451,15 @@ fn run_pty_sync(
 	let (reader_tx, reader_rx) = flume::bounded::<ReaderEvent>(BRIDGE_QUEUE_CHUNKS);
 	let queued = reader_tx.clone();
 	let progress = Arc::new(ReaderProgress::default());
+	// Shared with the drain, which flushes a partial character the terminal
+	// will not complete before it leaves a terminal a daemon holds open.
+	let decoder = Arc::new(Mutex::new(OutputDecoder::new()));
 	let reader_thread = std::thread::spawn({
 		let progress = Arc::clone(&progress);
+		let decoder = Arc::clone(&decoder);
 		move || {
 			const BUF: usize = 65536;
 			let mut buf = vec![0u8; BUF];
-			let mut decoder = OutputDecoder::new();
 			// Once the pump is gone (JS failed, or a wedged `on_chunk` hit the
 			// stall timeout) keep reading and discard: the child must not block
 			// on a full PTY buffer that nothing drains (#12657).
@@ -468,16 +471,19 @@ fn run_pty_sync(
 				};
 				progress.read.fetch_add(n as u64, Ordering::AcqRel);
 				if forwarding {
+					// Held across the send, so the drain's flush of the decoder
+					// queues its text after every chunk decoded before it.
+					let mut decoder = decoder.lock();
 					let text = decoder.push(&buf[..n]);
-					forwarding = text.is_empty() || reader_tx.send(ReaderEvent::Chunk(text)).is_ok();
+					forwarding = text.is_empty() || progress.hand(&reader_tx, text);
 				}
 				progress.handed.fetch_add(n as u64, Ordering::AcqRel);
 			}
 			if !forwarding {
 				return;
 			}
-			let rest = decoder.finish();
-			if !rest.is_empty() && reader_tx.send(ReaderEvent::Chunk(rest)).is_err() {
+			let rest = decoder.lock().finish();
+			if !rest.is_empty() && !progress.hand(&reader_tx, rest) {
 				return;
 			}
 			let _ = reader_tx.send(ReaderEvent::Done);
@@ -512,26 +518,21 @@ fn run_pty_sync(
 		let timed_out = matches!(ct.wait().await, task::AbortReason::Timeout);
 		let _ = cancel_tx.send(ControlMessage::Cancelled { timed_out });
 	});
-	let in_js = Arc::new(AtomicBool::new(false));
 	let (pump_done_tx, pump_done_rx) = flume::bounded::<PumpEnd>(1);
 	let pump_task = {
-		let in_js = Arc::clone(&in_js);
+		let progress = Arc::clone(&progress);
 		napi::tokio::spawn(async move {
-			let end = pump_chunks(
-				reader_rx,
-				FORWARD_STALL_TIMEOUT,
-				Some(in_js.as_ref()),
-				async move |payload| {
-					let Some(callback) = on_chunk.as_ref() else {
-						return true;
-					};
-					let ok = callback.call_async(Ok(payload)).await.is_ok();
-					if !ok {
-						let _ = control_tx.send(ControlMessage::JsGone);
-					}
-					ok
-				},
-			)
+			let end = pump_chunks(reader_rx, FORWARD_STALL_TIMEOUT, async move |payload| {
+				let len = payload.len() as u64;
+				if let Some(callback) = on_chunk.as_ref()
+					&& callback.call_async(Ok(payload)).await.is_err()
+				{
+					let _ = control_tx.send(ControlMessage::JsGone);
+					return false;
+				}
+				progress.forwarded_text.fetch_add(len, Ordering::AcqRel);
+				true
+			})
 			.await;
 			let _ = pump_done_tx.send(end);
 		})
@@ -622,9 +623,9 @@ fn run_pty_sync(
 	// drain JS. Successful finite runs wait until every accepted chunk has
 	// reached `on_chunk` (#7421). A reader parked on backpressure is not
 	// aborted. A descendant holding the slave open is the existing no-join
-	// case and is the only path that may skip an unbounded wait, once the
-	// reader has handed over what the terminal held when the child had gone.
-	// A second handle on the master counts that output.
+	// case and is the only path that may skip an unbounded wait, once what the
+	// terminal held when the child had gone has reached `on_chunk`. A second
+	// handle on the master counts that output.
 	#[cfg(unix)]
 	let unread_probe = master.as_raw_fd().and_then(|fd| {
 		// SAFETY: `fd` is the master's descriptor, open while `master` lives;
@@ -655,29 +656,50 @@ fn run_pty_sync(
 		pump_done_rx,
 		reader_thread,
 		queued,
-		&in_js,
 		&progress,
+		&decoder,
 		unread,
 		cancelled || timed_out,
 		|| abort_pump.abort(),
 	);
 	drop(pump_task);
-	// The pump dropped queued output after a callback stalled: the run must
+	// The pump dropped output after a callback stalled or failed: the run must
 	// not resolve as if all of it had arrived.
-	if pump_end == Some(PumpEnd::Stalled) && !(cancelled || timed_out) {
-		return Err(forwarding_stalled_error());
+	if !(cancelled || timed_out)
+		&& let Some(error) = pump_end.and_then(undelivered_output_error)
+	{
+		return Err(error);
 	}
 	Ok(PtyRunResult { exit_code, cancelled, timed_out })
 }
 
-/// Bytes the PTY reader thread has read, and how many of those it has handed
-/// to the queue (or dropped once the pump is gone). The drain compares them
-/// with what the terminal held when the child had gone, to tell a reader that
-/// is still draining from a slave a daemon holds open.
+/// How far the PTY reader thread and the pump have got. The drain compares
+/// them with what the terminal held when the child had gone, to tell a reader
+/// or a callback that is still delivering that output from a slave a daemon
+/// holds open.
 #[derive(Default)]
 struct ReaderProgress {
-	read:   AtomicU64,
-	handed: AtomicU64,
+	/// Bytes read from the terminal.
+	read:           AtomicU64,
+	/// Of those, bytes decoded (a partial character the decoder holds
+	/// included) and their text queued, or dropped once the pump is gone.
+	handed:         AtomicU64,
+	/// Text queued for the pump.
+	handed_text:    AtomicU64,
+	/// Text the pump has delivered to `on_chunk`.
+	forwarded_text: AtomicU64,
+}
+
+impl ReaderProgress {
+	/// Queues `text` for the pump; `false` once the pump is gone.
+	fn hand(&self, queue: &flume::Sender<ReaderEvent>, text: String) -> bool {
+		let len = text.len() as u64;
+		let sent = queue.send(ReaderEvent::Chunk(text)).is_ok();
+		if sent {
+			self.handed_text.fetch_add(len, Ordering::AcqRel);
+		}
+		sent
+	}
 }
 
 /// Bytes the terminal holds that its master has not read yet; `0` when the
@@ -699,45 +721,48 @@ fn pty_unread_bytes(master: &std::os::fd::OwnedFd) -> u64 {
 /// Wait for the JS pump after the child has exited and the master is dropped;
 /// the pump's end when it ended on its own, `None` when this stopped it.
 ///
-/// `queued` is a clone of the reader sender, used only to see whether the
-/// bridge still holds bytes (backpressure vs open slave). It is dropped as
-/// soon as the reader has exited so the pump is not left parked on `recv`.
+/// `queued` is a clone of the reader sender. It is dropped as soon as the
+/// reader has exited so the pump is not left parked on `recv`.
 ///
 /// Cancel/timeout must not pin the promise on a slow callback. A successful
 /// finite run must not resolve until accepted output reached `on_chunk`
-/// (#7421). After reader EOF, wait for the pump with no idle timeout. A
-/// reader parked on a full bridge is backpressure, not a hang. Only a
-/// permanently open slave may skip the unbounded wait: EOF never arrives,
-/// the queue is empty, no callback is in flight, and the reader has handed
-/// over every byte it had read and the terminal held (`unread`) when this
-/// started. A reader the scheduler starved is still owed those bytes, so it
-/// is not cut off; a daemon that keeps writing has been handed past them
-/// soon, so it does not keep the run open. `stop_pump` is invoked on every
-/// abandonment path, then this waits up to `POST_CANCEL_DRAIN_TIMEOUT` for
-/// the pump task to observe abort so `start()` does not resolve while
-/// `call_async` is still in Rust. An already-queued napi callback can still
-/// run once; TSFN work lives on the JS thread.
+/// (#7421). After reader EOF, wait for the pump with no idle timeout. Only a
+/// permanently open slave may skip the unbounded wait, and only after what
+/// the terminal held when this started has reached `on_chunk`: every idle
+/// window, once the reader has handed over every byte it had read and the
+/// terminal held (`unread`) then, this flushes a partial character the
+/// decoder holds (the terminal will not complete it), waits for the text
+/// handed so far to be delivered, and stops the pump. A reader the scheduler
+/// starved is still owed those bytes, so it is not cut off; a daemon that
+/// keeps writing, however slowly `on_chunk` takes its output, cannot keep the
+/// run open past them. `stop_pump` is invoked on every abandonment path, then
+/// this waits up to `POST_CANCEL_DRAIN_TIMEOUT` for the pump task to observe
+/// abort so `start()` does not resolve while `call_async` is still in Rust.
+/// An already-queued napi callback can still run once; TSFN work lives on
+/// the JS thread.
 fn await_pty_output_drain(
 	pump_done_rx: flume::Receiver<PumpEnd>,
 	reader_thread: std::thread::JoinHandle<()>,
 	queued: flume::Sender<ReaderEvent>,
-	in_js: &AtomicBool,
 	progress: &ReaderProgress,
+	decoder: &Mutex<OutputDecoder>,
 	unread: impl Fn() -> u64,
 	abandon_slow_js: bool,
 	stop_pump: impl FnOnce(),
 ) -> Option<PumpEnd> {
-	let mut stop_pump = Some(stop_pump);
+	/// How often the final wait looks at the pump's progress.
+	const DELIVERY_POLL: Duration = Duration::from_millis(10);
 
-	if abandon_slow_js {
-		if let Some(stop_pump) = stop_pump.take() {
-			stop_pump();
-		}
-		drop(queued);
-		let end = pump_done_rx.recv_timeout(POST_CANCEL_DRAIN_TIMEOUT).ok();
+	let finish = |reader_thread: std::thread::JoinHandle<()>| {
 		if reader_thread.is_finished() {
 			let _ = reader_thread.join();
 		}
+	};
+	if abandon_slow_js {
+		stop_pump();
+		drop(queued);
+		let end = pump_done_rx.recv_timeout(POST_CANCEL_DRAIN_TIMEOUT).ok();
+		finish(reader_thread);
 		return end;
 	}
 
@@ -756,34 +781,55 @@ fn await_pty_output_drain(
 
 		match pump_done_rx.recv_timeout(STUCK_SLAVE_IDLE) {
 			Ok(end) => {
-				if reader_thread.is_finished() {
-					let _ = reader_thread.join();
-				}
+				finish(reader_thread);
 				return Some(end);
 			},
 			Err(flume::RecvTimeoutError::Disconnected) => {
-				if reader_thread.is_finished() {
-					let _ = reader_thread.join();
-				}
+				finish(reader_thread);
 				return None;
 			},
 			Err(flume::RecvTimeoutError::Timeout) => {
-				if reader_thread.is_finished() {
+				if reader_thread.is_finished() || progress.handed.load(Ordering::Acquire) < owed {
 					continue;
-				}
-				if queued.is_empty()
-					&& !in_js.load(Ordering::Acquire)
-					&& progress.handed.load(Ordering::Acquire) >= owed
-				{
-					if let Some(stop_pump) = stop_pump.take() {
-						stop_pump();
-					}
-					drop(queued);
-					let _ = pump_done_rx.recv_timeout(POST_CANCEL_DRAIN_TIMEOUT);
-					return None;
 				}
 			},
 		}
+
+		// The reader owes nothing more. The reader holds the decoder while it
+		// decodes and queues, so its text is all counted and queued here, and
+		// the flushed rest goes after it.
+		let delivered = {
+			let mut decoder = decoder.lock();
+			let rest = decoder.finish();
+			let handed = progress.handed_text.load(Ordering::Acquire);
+			if rest.is_empty() {
+				handed
+			} else {
+				let len = rest.len() as u64;
+				if queued.send(ReaderEvent::Chunk(rest)).is_err() {
+					handed
+				} else {
+					handed + len
+				}
+			}
+		};
+		while progress.forwarded_text.load(Ordering::Acquire) < delivered {
+			match pump_done_rx.recv_timeout(DELIVERY_POLL) {
+				Ok(end) => {
+					finish(reader_thread);
+					return Some(end);
+				},
+				Err(flume::RecvTimeoutError::Disconnected) => {
+					finish(reader_thread);
+					return None;
+				},
+				Err(flume::RecvTimeoutError::Timeout) => {},
+			}
+		}
+		stop_pump();
+		drop(queued);
+		let _ = pump_done_rx.recv_timeout(POST_CANCEL_DRAIN_TIMEOUT);
+		return None;
 	}
 }
 
@@ -797,32 +843,59 @@ mod reader_queue_tests {
 		time::{Duration, Instant},
 	};
 
+	use parking_lot::Mutex;
+	use pi_shell::output_decode::OutputDecoder;
+
 	use super::{
 		BRIDGE_QUEUE_CHUNKS, POST_CANCEL_DRAIN_TIMEOUT, PumpEnd, ReaderEvent, ReaderProgress,
 		STUCK_SLAVE_IDLE, await_pty_output_drain,
 	};
 
-	/// The drain with a reader that reports no reads and a terminal that holds
-	/// nothing unread.
+	/// The drain with an empty decoder and a terminal that holds nothing
+	/// unread.
 	fn drain(
 		pump_done_rx: flume::Receiver<PumpEnd>,
 		reader_thread: std::thread::JoinHandle<()>,
 		queued: flume::Sender<ReaderEvent>,
-		in_js: &AtomicBool,
+		progress: &ReaderProgress,
 		abandon_slow_js: bool,
 		stop_pump: impl FnOnce(),
 	) -> Option<PumpEnd> {
-		let progress = ReaderProgress::default();
+		let decoder = Mutex::new(OutputDecoder::new());
 		await_pty_output_drain(
 			pump_done_rx,
 			reader_thread,
 			queued,
-			in_js,
-			&progress,
+			progress,
+			&decoder,
 			|| 0,
 			abandon_slow_js,
 			stop_pump,
 		)
+	}
+
+	/// A pump that forwards each queued chunk after `delay`, counting it, until
+	/// `stopped`; it returns what it forwarded.
+	fn fake_pump(
+		rx: flume::Receiver<ReaderEvent>,
+		progress: Arc<ReaderProgress>,
+		stopped: Arc<AtomicBool>,
+		delay: Duration,
+	) -> std::thread::JoinHandle<String> {
+		std::thread::spawn(move || {
+			let mut forwarded = String::new();
+			while !stopped.load(Ordering::Acquire) {
+				let Ok(ReaderEvent::Chunk(text)) = rx.recv_timeout(Duration::from_millis(10)) else {
+					continue;
+				};
+				std::thread::sleep(delay);
+				progress
+					.forwarded_text
+					.fetch_add(text.len() as u64, Ordering::AcqRel);
+				forwarded.push_str(&text);
+			}
+			forwarded
+		})
 	}
 
 	#[test]
@@ -830,13 +903,12 @@ mod reader_queue_tests {
 		let (pump_tx, pump_rx) = flume::bounded(1);
 		let reader = std::thread::spawn(|| {});
 		let (queued, _) = flume::bounded::<ReaderEvent>(BRIDGE_QUEUE_CHUNKS);
-		let in_js = AtomicBool::new(false);
 		std::thread::spawn(move || {
 			std::thread::sleep(Duration::from_millis(2500));
 			let _ = pump_tx.send(PumpEnd::Drained);
 		});
 		let start = Instant::now();
-		let end = drain(pump_rx, reader, queued, &in_js, false, || {});
+		let end = drain(pump_rx, reader, queued, &ReaderProgress::default(), false, || {});
 		assert!(
 			start.elapsed() >= Duration::from_millis(2400),
 			"must not time out a slow callback after reader EOF",
@@ -860,9 +932,8 @@ mod reader_queue_tests {
 			std::thread::sleep(Duration::from_millis(1));
 		}
 		assert!(reader.is_finished(), "reader fixture must have exited");
-		let in_js = AtomicBool::new(false);
 		let start = Instant::now();
-		drain(pump_rx, reader, queued, &in_js, false, || {});
+		drain(pump_rx, reader, queued, &ReaderProgress::default(), false, || {});
 		assert!(
 			start.elapsed() < STUCK_SLAVE_IDLE,
 			"holding the sender clone after EOF parks the pump until idle timeout",
@@ -876,10 +947,9 @@ mod reader_queue_tests {
 			std::thread::park();
 		});
 		let (queued, _) = flume::bounded::<ReaderEvent>(BRIDGE_QUEUE_CHUNKS);
-		let in_js = AtomicBool::new(false);
 		let stopped = AtomicBool::new(false);
 		let start = Instant::now();
-		drain(pump_rx, reader, queued, &in_js, false, || {
+		drain(pump_rx, reader, queued, &ReaderProgress::default(), false, || {
 			stopped.store(true, Ordering::Release);
 		});
 		let elapsed = start.elapsed();
@@ -908,15 +978,15 @@ mod reader_queue_tests {
 			}
 		});
 		let (queued, _) = flume::bounded::<ReaderEvent>(BRIDGE_QUEUE_CHUNKS);
-		let in_js = AtomicBool::new(false);
+		let decoder = Mutex::new(OutputDecoder::new());
 		let stopped_at = OnceLock::new();
 		let start = Instant::now();
 		await_pty_output_drain(
 			pump_rx,
 			reader,
 			queued,
-			&in_js,
 			&progress,
+			&decoder,
 			|| 5,
 			false,
 			|| {
@@ -931,45 +1001,100 @@ mod reader_queue_tests {
 		assert!(stopped_at < late + STUCK_SLAVE_IDLE + Duration::from_secs(2));
 	}
 
-	/// A daemon that holds the slave open and writes without end: the reader
-	/// keeps reading and the terminal is never empty, yet the drain must stop
-	/// once the reader is past what the terminal held when the child had gone.
+	/// A daemon that holds the slave open and writes without end, into a
+	/// callback that takes 50 ms per chunk: the queue is never empty and a
+	/// callback is nearly always in flight, so the drain waited for ever. It
+	/// must stop once what was queued when the reader owed nothing more has
+	/// been delivered.
 	#[test]
 	fn drain_stops_for_a_daemon_that_writes_forever() {
+		let (reader_tx, reader_rx) = flume::bounded::<ReaderEvent>(BRIDGE_QUEUE_CHUNKS);
+		let queued = reader_tx.clone();
 		let (_pump_tx, pump_rx) = flume::bounded::<PumpEnd>(1);
 		let progress = Arc::new(ReaderProgress::default());
-		let done = Arc::new(AtomicBool::new(false));
+		let pump_stopped = Arc::new(AtomicBool::new(false));
+		let pump = fake_pump(
+			reader_rx,
+			Arc::clone(&progress),
+			Arc::clone(&pump_stopped),
+			Duration::from_millis(50),
+		);
 		let reader = std::thread::spawn({
 			let progress = Arc::clone(&progress);
-			let done = Arc::clone(&done);
 			move || {
-				while !done.load(Ordering::Acquire) {
+				loop {
 					progress.read.fetch_add(100, Ordering::AcqRel);
+					if !progress.hand(&reader_tx, "y".repeat(100)) {
+						return;
+					}
 					progress.handed.fetch_add(100, Ordering::AcqRel);
-					std::thread::sleep(Duration::from_millis(10));
 				}
 			}
 		});
-		let (queued, _) = flume::bounded::<ReaderEvent>(BRIDGE_QUEUE_CHUNKS);
-		let in_js = AtomicBool::new(false);
-		let stopped = AtomicBool::new(false);
+		let (done_tx, done_rx) = flume::bounded(1);
 		let start = Instant::now();
+		std::thread::spawn({
+			let progress = Arc::clone(&progress);
+			let pump_stopped = Arc::clone(&pump_stopped);
+			move || {
+				let decoder = Mutex::new(OutputDecoder::new());
+				await_pty_output_drain(
+					pump_rx,
+					reader,
+					queued,
+					&progress,
+					&decoder,
+					|| 100,
+					false,
+					|| {
+						pump_stopped.store(true, Ordering::Release);
+					},
+				);
+				let _ = done_tx.send(());
+			}
+		});
+		let ended = done_rx.recv_timeout(STUCK_SLAVE_IDLE + Duration::from_secs(20));
+		pump_stopped.store(true, Ordering::Release);
+		assert!(ended.is_ok(), "the drain waited for the daemon for {:?}", start.elapsed());
+		assert!(!pump.join().expect("pump fixture").is_empty());
+	}
+
+	/// A command that writes the first two bytes of a three-byte character,
+	/// leaving a descendant that holds the terminal open: the decoder held the
+	/// two bytes, and the drain left the slave without them. It must flush
+	/// them, as the reader does at EOF, and deliver the replacement character.
+	#[test]
+	fn drain_flushes_a_partial_character_before_leaving_an_open_slave() {
+		let (reader_tx, reader_rx) = flume::bounded::<ReaderEvent>(BRIDGE_QUEUE_CHUNKS);
+		let queued = reader_tx.clone();
+		let (_pump_tx, pump_rx) = flume::bounded::<PumpEnd>(1);
+		let progress = Arc::new(ReaderProgress::default());
+		let decoder = Mutex::new(OutputDecoder::new());
+		assert_eq!(decoder.lock().push(&[0xe2, 0x82]), "", "the decoder holds a partial character");
+		progress.read.fetch_add(2, Ordering::AcqRel);
+		progress.handed.fetch_add(2, Ordering::AcqRel);
+		let pump_stopped = Arc::new(AtomicBool::new(false));
+		let pump =
+			fake_pump(reader_rx, Arc::clone(&progress), Arc::clone(&pump_stopped), Duration::ZERO);
+		let reader = std::thread::spawn(move || {
+			let _reader_tx = reader_tx;
+			// The slave stays open.
+			std::thread::park();
+		});
 		await_pty_output_drain(
 			pump_rx,
 			reader,
 			queued,
-			&in_js,
 			&progress,
-			|| 100,
+			&decoder,
+			|| 0,
 			false,
 			|| {
-				stopped.store(true, Ordering::Release);
+				pump_stopped.store(true, Ordering::Release);
 			},
 		);
-		let elapsed = start.elapsed();
-		done.store(true, Ordering::Release);
-		assert!(elapsed < STUCK_SLAVE_IDLE + Duration::from_secs(2), "held open for {elapsed:?}");
-		assert!(stopped.load(Ordering::Acquire), "the open slave must stop the pump");
+		pump_stopped.store(true, Ordering::Release);
+		assert_eq!(pump.join().expect("pump fixture"), "\u{FFFD}");
 	}
 
 	#[test]
@@ -977,16 +1102,14 @@ mod reader_queue_tests {
 		let (pump_tx, pump_rx) = flume::bounded(1);
 		let reader = std::thread::spawn(std::thread::park);
 		let (queued, _rx) = flume::bounded::<ReaderEvent>(BRIDGE_QUEUE_CHUNKS);
-		queued
-			.send(ReaderEvent::Chunk("x".into()))
-			.expect("queue accepts a chunk");
-		let in_js = AtomicBool::new(false);
+		let progress = ReaderProgress::default();
+		assert!(progress.hand(&queued, "x".into()), "queue accepts a chunk");
 		std::thread::spawn(move || {
 			std::thread::sleep(Duration::from_millis(2500));
 			let _ = pump_tx.send(PumpEnd::Drained);
 		});
 		let start = Instant::now();
-		drain(pump_rx, reader, queued, &in_js, false, || {});
+		drain(pump_rx, reader, queued, &progress, false, || {});
 		assert!(
 			start.elapsed() >= Duration::from_millis(2400),
 			"queued output is backpressure, not a stuck slave",
@@ -998,15 +1121,19 @@ mod reader_queue_tests {
 		let (pump_tx, pump_rx) = flume::bounded(1);
 		let reader = std::thread::spawn(std::thread::park);
 		let (queued, _) = flume::bounded::<ReaderEvent>(BRIDGE_QUEUE_CHUNKS);
-		let in_js = Arc::new(AtomicBool::new(true));
-		let in_js_flag = Arc::clone(&in_js);
-		std::thread::spawn(move || {
-			std::thread::sleep(Duration::from_millis(2500));
-			in_js_flag.store(false, Ordering::Release);
-			let _ = pump_tx.send(PumpEnd::Drained);
+		let progress = Arc::new(ReaderProgress::default());
+		// One chunk taken by the pump and not yet back from `on_chunk`.
+		progress.handed_text.fetch_add(1, Ordering::AcqRel);
+		std::thread::spawn({
+			let progress = Arc::clone(&progress);
+			move || {
+				std::thread::sleep(Duration::from_millis(2500));
+				progress.forwarded_text.fetch_add(1, Ordering::AcqRel);
+				let _ = pump_tx.send(PumpEnd::Drained);
+			}
 		});
 		let start = Instant::now();
-		drain(pump_rx, reader, queued, &in_js, false, || {});
+		drain(pump_rx, reader, queued, &progress, false, || {});
 		assert!(
 			start.elapsed() >= Duration::from_millis(2400),
 			"an in-flight on_chunk is slow JS, not a stuck slave",
@@ -1018,9 +1145,11 @@ mod reader_queue_tests {
 		let (pump_tx, pump_rx) = flume::bounded(1);
 		let reader = std::thread::spawn(|| {});
 		let (queued, _) = flume::bounded::<ReaderEvent>(BRIDGE_QUEUE_CHUNKS);
-		let in_js = AtomicBool::new(false);
 		pump_tx.send(PumpEnd::Stalled).expect("pump end");
-		assert_eq!(drain(pump_rx, reader, queued, &in_js, false, || {}), Some(PumpEnd::Stalled));
+		assert_eq!(
+			drain(pump_rx, reader, queued, &ReaderProgress::default(), false, || {}),
+			Some(PumpEnd::Stalled)
+		);
 	}
 
 	#[test]
@@ -1028,10 +1157,9 @@ mod reader_queue_tests {
 		let (_pump_tx, pump_rx) = flume::bounded::<PumpEnd>(1);
 		let reader = std::thread::spawn(std::thread::park);
 		let (queued, _) = flume::bounded::<ReaderEvent>(BRIDGE_QUEUE_CHUNKS);
-		let in_js = AtomicBool::new(true);
 		let stopped = AtomicBool::new(false);
 		let start = Instant::now();
-		drain(pump_rx, reader, queued, &in_js, true, || {
+		drain(pump_rx, reader, queued, &ReaderProgress::default(), true, || {
 			stopped.store(true, Ordering::Release);
 		});
 		assert!(
@@ -1047,9 +1175,8 @@ mod reader_queue_tests {
 		let (pump_tx, pump_rx) = flume::bounded::<PumpEnd>(1);
 		let reader = std::thread::spawn(std::thread::park);
 		let (queued, _) = flume::bounded::<ReaderEvent>(BRIDGE_QUEUE_CHUNKS);
-		let in_js = AtomicBool::new(true);
 		let start = Instant::now();
-		drain(pump_rx, reader, queued, &in_js, true, move || {
+		drain(pump_rx, reader, queued, &ReaderProgress::default(), true, move || {
 			drop(pump_tx);
 		});
 		assert!(

@@ -2,14 +2,7 @@
 
 pub mod vfs;
 
-use std::{
-	collections::HashMap,
-	sync::{
-		Arc,
-		atomic::{AtomicBool, Ordering},
-	},
-	time::Duration,
-};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use napi::{
 	Env, Result,
@@ -461,18 +454,14 @@ fn bridge_chunks(
 		return (None, None);
 	};
 	let (tx, rx) = flume::bounded::<String>(BRIDGE_QUEUE_CHUNKS);
-	let handle = napi::tokio::spawn(pump_chunks(
-		rx,
-		FORWARD_STALL_TIMEOUT,
-		None,
-		async move |payload: String| {
+	let handle =
+		napi::tokio::spawn(pump_chunks(rx, FORWARD_STALL_TIMEOUT, async move |payload: String| {
 			// `call_async` resolves only after the JS callback ran, so at most
 			// one batch sits in the napi queue at a time and the JS event loop's
 			// actual consumption rate backpressures the whole pipeline. An error
-			// means the JS side is gone (env teardown) — stop forwarding.
+			// means the callback threw or the JS side is gone — stop forwarding.
 			on_chunk.call_async(Ok(payload)).await.is_ok()
-		},
-	));
+		}));
 	(Some(tx), Some(handle))
 }
 
@@ -481,7 +470,8 @@ fn bridge_chunks(
 pub(crate) enum PumpEnd {
 	/// Every queued chunk was forwarded.
 	Drained,
-	/// `forward` reported the consumer gone; nothing is left to deliver to.
+	/// `forward` failed (the callback threw, or the JS side is gone); the
+	/// chunks still queued were dropped.
 	ConsumerGone,
 	/// A single `forward` took longer than the stall timeout; the chunks still
 	/// queued were dropped.
@@ -492,7 +482,7 @@ pub(crate) enum PumpEnd {
 pub(crate) trait BridgeItem {
 	/// The output text, or `None` for an explicit end-of-output marker. The
 	/// marker ends the pump even while a sender clone is still alive (the PTY
-	/// keeps one to inspect queue depth).
+	/// drain keeps one to queue a flushed partial character).
 	fn into_text(self) -> Option<String>;
 }
 
@@ -505,19 +495,13 @@ impl BridgeItem for String {
 /// Drain `rx`, greedily coalescing queued chunks into ≤64 KiB batches, and
 /// feed each batch to `forward`, awaiting its completion before pulling more.
 /// Returns when `rx` disconnects (all senders dropped), on an end-of-output
-/// item, when `forward` reports the consumer is gone, or when a single
-/// `forward` stalls past `stall_timeout` (a wedged JS consumer), and says
-/// which. In every case dropping `rx` disconnects the channel so
-/// parked/future senders fail fast and the readers keep draining the child
-/// instead of wedging it (#12657).
-///
-/// `busy` is held from the moment a chunk is taken until its batch has been
-/// forwarded, so an empty queue with `busy` clear really means no output is
-/// in transit (the PTY's stuck-open-slave check).
+/// item, when `forward` fails, or when a single `forward` stalls past
+/// `stall_timeout` (a wedged JS consumer), and says which. In every case
+/// dropping `rx` disconnects the channel so parked/future senders fail fast
+/// and the readers keep draining the child instead of wedging it (#12657).
 pub(crate) async fn pump_chunks<T: BridgeItem + Send>(
 	rx: flume::Receiver<T>,
 	stall_timeout: Duration,
-	busy: Option<&AtomicBool>,
 	mut forward: impl AsyncFnMut(String) -> bool,
 ) -> PumpEnd {
 	// Hard cap on one coalesced batch so the JS main thread never sees a
@@ -527,18 +511,12 @@ pub(crate) async fn pump_chunks<T: BridgeItem + Send>(
 	// Initial capacity sized for typical bursty pipe output. Re-allocated
 	// each batch because `String` ownership is moved into the napi call.
 	const INITIAL_BATCH_CAP: usize = 8 * 1024;
-	let set_busy = |value: bool| {
-		if let Some(busy) = busy {
-			busy.store(value, Ordering::Release);
-		}
-	};
 	let mut batch = String::with_capacity(INITIAL_BATCH_CAP);
 	let mut ended = false;
 	while !ended
 		&& let Ok(first) = rx.recv_async().await
 		&& let Some(first) = first.into_text()
 	{
-		set_busy(true);
 		batch.push_str(&first);
 		// Greedily drain everything already queued. Child processes that
 		// write byte-at-a-time (printf-style progress, llama-cli token
@@ -564,7 +542,6 @@ pub(crate) async fn pump_chunks<T: BridgeItem + Send>(
 		// unblocking the reader and child. The deadline resets per forward, so a
 		// slow-but-progressing consumer still drains losslessly.
 		let forwarded = napi::tokio::time::timeout(stall_timeout, forward(payload)).await;
-		set_busy(false);
 		match forwarded {
 			Ok(true) => {},
 			Ok(false) => return PumpEnd::ConsumerGone,
@@ -582,22 +559,27 @@ pub(crate) async fn pump_chunks<T: BridgeItem + Send>(
 /// accepted by the bridge reaches JavaScript before the result resolves.
 const INTERRUPTED_DRAIN_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// The error of a run whose output the pump dropped after a stalled callback.
-pub(crate) fn forwarding_stalled_error() -> Error {
-	Error::from_reason(format!(
-		"Command output was not all delivered: the output callback did not return for {} s",
-		FORWARD_STALL_TIMEOUT.as_secs()
-	))
+/// The error of a run whose output the pump dropped: a callback stalled or
+/// failed. `None` when the pump forwarded everything.
+pub(crate) fn undelivered_output_error(end: PumpEnd) -> Option<Error> {
+	let reason = match end {
+		PumpEnd::Drained => return None,
+		PumpEnd::ConsumerGone => "the output callback failed".to_owned(),
+		PumpEnd::Stalled => {
+			format!("the output callback did not return for {} s", FORWARD_STALL_TIMEOUT.as_secs())
+		},
+	};
+	Some(Error::from_reason(format!("Command output was not all delivered: {reason}")))
 }
 
 /// Finish forwarding accepted output after a native shell run resolves.
 ///
 /// Normal completion and errors drain without a deadline to preserve every
 /// accepted chunk, and a run whose pump dropped output because a callback
-/// stalled, or whose pump panicked, fails rather than resolve as if its
-/// output had all arrived. Cancellation and timeout are bounded because an
-/// orphaned pipe reader can otherwise keep a sender alive forever; aborting
-/// the pump drops its `flume::Receiver`, disconnecting that reader.
+/// stalled or failed, or whose pump panicked, fails rather than resolve as if
+/// its output had all arrived. Cancellation and timeout are bounded because
+/// an orphaned pipe reader can otherwise keep a sender alive forever;
+/// aborting the pump drops its `flume::Receiver`, disconnecting that reader.
 async fn await_drain(
 	handle: Option<napi::tokio::task::JoinHandle<PumpEnd>>,
 	result: Result<ShellRunResult>,
@@ -607,8 +589,10 @@ async fn await_drain(
 	};
 	if !matches!(&result, Ok(result) if result.cancelled || result.timed_out) {
 		return match handle.await {
-			Ok(PumpEnd::Drained | PumpEnd::ConsumerGone) => result,
-			Ok(PumpEnd::Stalled) => result.and(Err(forwarding_stalled_error())),
+			Ok(end) => match undelivered_output_error(end) {
+				Some(error) => result.and(Err(error)),
+				None => result,
+			},
 			Err(err) => result.and(Err(Error::from_reason(format!(
 				"Command output was not all delivered: the output pump failed: {err}"
 			)))),
@@ -675,7 +659,7 @@ mod tests {
 		let mut received = String::with_capacity(CHUNKS * CHUNK_BYTES);
 		let end = time::timeout(
 			Duration::from_secs(30),
-			pump_chunks(rx, FORWARD_STALL_TIMEOUT, None, async |payload: String| {
+			pump_chunks(rx, FORWARD_STALL_TIMEOUT, async |payload: String| {
 				received.push_str(&payload);
 				// Emulate a busy JS event loop: each napi callback takes a while.
 				time::sleep(Duration::from_micros(500)).await;
@@ -703,7 +687,7 @@ mod tests {
 	async fn bridge_pump_death_disconnects_channel_without_blocking_senders() {
 		let (tx, rx) = flume::bounded::<String>(4);
 		let pump =
-			tokio::spawn(pump_chunks(rx, FORWARD_STALL_TIMEOUT, None, async |_payload: String| false));
+			tokio::spawn(pump_chunks(rx, FORWARD_STALL_TIMEOUT, async |_payload: String| false));
 		let producer = tokio::spawn(async move {
 			let mut disconnected = 0usize;
 			for _ in 0..64 {
@@ -736,7 +720,6 @@ mod tests {
 		let handle = napi::tokio::spawn(pump_chunks(
 			rx,
 			FORWARD_STALL_TIMEOUT,
-			None,
 			async move |_payload: String| {
 				time::sleep(INTERRUPTED_DRAIN_SHUTDOWN_TIMEOUT + Duration::from_millis(100)).await;
 				observed.store(true, Ordering::Release);
@@ -776,12 +759,8 @@ mod tests {
 	async fn await_drain_returns_when_a_reader_orphans_a_sender_after_timeout() {
 		let (tx, rx) = flume::bounded::<String>(BRIDGE_QUEUE_CHUNKS);
 		let orphan = tx.clone();
-		let handle = napi::tokio::spawn(pump_chunks(
-			rx,
-			FORWARD_STALL_TIMEOUT,
-			None,
-			async |_payload: String| true,
-		));
+		let handle =
+			napi::tokio::spawn(pump_chunks(rx, FORWARD_STALL_TIMEOUT, async |_payload: String| true));
 		drop(tx);
 		let result = Ok(ShellRunResult {
 			exit_code:   None,
@@ -823,7 +802,7 @@ mod tests {
 		// Prime one chunk so the pump enters `forward`, which then wedges.
 		tx.send("first".to_string()).expect("send primes the pump");
 		let started = time::Instant::now();
-		let pump = napi::tokio::spawn(pump_chunks(rx, STALL, None, async |_payload: String| {
+		let pump = napi::tokio::spawn(pump_chunks(rx, STALL, async |_payload: String| {
 			std::future::pending::<bool>().await
 		}));
 		let end = time::timeout(STALL + Duration::from_secs(5), pump)
@@ -854,7 +833,7 @@ mod tests {
 		tx.send("dropped".to_string())
 			.expect("queue holds the rest");
 		drop(tx);
-		let handle = napi::tokio::spawn(pump_chunks(rx, STALL, None, async |_payload: String| {
+		let handle = napi::tokio::spawn(pump_chunks(rx, STALL, async |_payload: String| {
 			std::future::pending::<bool>().await
 		}));
 		let result = Ok(ShellRunResult {
@@ -870,6 +849,31 @@ mod tests {
 			.err()
 			.expect("a run whose output was dropped must not succeed");
 		assert!(err.reason.contains("not all delivered"), "{}", err.reason);
+	}
+
+	/// A callback that throws on the last chunk, after the command has exited:
+	/// the pump stops with that chunk undelivered, and the run resolved as a
+	/// success. It must fail.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn await_drain_fails_a_successful_run_whose_callback_failed() {
+		let (tx, rx) = flume::bounded::<String>(BRIDGE_QUEUE_CHUNKS);
+		tx.send("last".to_string()).expect("queue holds the chunk");
+		drop(tx);
+		let handle =
+			napi::tokio::spawn(pump_chunks(rx, FORWARD_STALL_TIMEOUT, async |_payload: String| false));
+		let result = Ok(ShellRunResult {
+			exit_code:   Some(0),
+			cancelled:   false,
+			timed_out:   false,
+			minimized:   None,
+			working_dir: None,
+		});
+		let err = time::timeout(Duration::from_secs(5), await_drain(Some(handle), result))
+			.await
+			.expect("await_drain returns once the pump stops")
+			.err()
+			.expect("a run whose callback failed must not succeed");
+		assert!(err.reason.contains("the output callback failed"), "{}", err.reason);
 	}
 
 	mod child_session_action_tests {
