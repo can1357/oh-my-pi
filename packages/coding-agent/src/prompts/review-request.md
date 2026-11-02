@@ -3,6 +3,12 @@
 ### Mode
 
 {{mode}}
+{{#if repository}}
+
+### Repository
+
+`{{repository}}` — not the session cwd. File paths are relative to it; reviewers MUST run `git` there and resolve `read` paths against it.
+{{/if}}
 
 ### Changed Files ({{len files}} files, +{{totalAdded}}/-{{totalRemoved}} lines)
 

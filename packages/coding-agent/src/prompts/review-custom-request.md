@@ -1,6 +1,10 @@
 ## Code Review Request
 
 Mode: custom instructions.
+{{#if repository}}
+
+Repository: `{{repository}}` — not the session cwd; the reviewer MUST run `git` there and resolve `read` paths against it.
+{{/if}}
 
 ## Distribution
 

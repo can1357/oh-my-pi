@@ -1,3 +1,6 @@
+import * as fs from "node:fs";
+import * as path from "node:path";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { replaceTabs, TRUNCATE_LENGTHS, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
 import { isRecord, prompt } from "@oh-my-pi/pi-utils";
 import { findScopedSettings } from "../../../../config/settings";
@@ -9,6 +12,7 @@ import reviewCustomRequestTemplate from "../../../../prompts/review-custom-reque
 import reviewHeadlessRequestTemplate from "../../../../prompts/review-headless-request.md" with { type: "text" };
 import * as gh from "../../../../tools/gh";
 import * as glab from "../../../../tools/glab-mr";
+import { resolveToCwd } from "../../../../tools/path-utils";
 import { github } from "../../../../utils/github";
 import { gitlab } from "../../../../utils/gitlab";
 import { buildReviewPrompt } from "./prompt";
@@ -20,9 +24,13 @@ import {
 	type ResolvedReviewTarget,
 	readUncommittedReviewTarget,
 	resolveLocalReviewTarget,
+	reviewRepository,
 } from "./target";
 
-interface ParsedReviewArgs {
+/** `/review [<dir>] [<ref> | #N | !N] [instructions]` after resolution. */
+export interface ReviewRequest {
+	/** Leading `<dir>` when given, else the session cwd. */
+	cwd: string;
 	prRef: ReviewPrRef | undefined;
 	extraInstructions: string;
 }
@@ -35,7 +43,7 @@ export interface ReviewPrRef {
 	/** PR number or MR iid. */
 	number: number;
 	raw: string;
-	kind: "github-url" | "pr-url" | "gitlab-url" | "mr-url";
+	kind: "github-url" | "pr-url" | "github-ref" | "gitlab-url" | "mr-url";
 }
 
 /** A diff the reviewer can target: a detected PR/MR or one local diff kind. */
@@ -50,6 +58,11 @@ const PICK_PR_CHOICE_LABEL = "4. Review a specific PR/MR";
 /** `gh pr list` / `glab mr list` page size. 100 is the per-page maximum of both forges. */
 const PR_PICKER_LIMIT = 100;
 const REPO_SEGMENT_PATTERN = /^[A-Za-z0-9_.-]+$/;
+const GITHUB_REF_PATTERN = /^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)#([1-9]\d*)$/;
+/** `#N` (GitHub PR) or `!N` (GitLab MR) in the review checkout's repository. */
+const CHANGE_NUMBER_PATTERN = /^([#!])([1-9]\d*)$/;
+/** `.`, `..`, `~` (alone or followed by a separator), an absolute path, or a drive path. */
+const DIR_ARG_PATTERN = /^(?:\.{1,2}(?:[\\/]|$)|~(?:[\\/]|$)|[\\/]|[A-Za-z]:[\\/])/;
 const PR_SCHEME_PATTERN =
 	/^pr:\/\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/([1-9]\d*)(?:\/diff(?:\/(?:all|[1-9]\d*))?)?(?:\?at=\d+)?$/;
 const PR_REF_TEXT_PATTERN =
@@ -95,6 +108,16 @@ function parsePrSchemeRef(text: string): ReviewPrRef | undefined {
 	return { forge: "github", repo: `${owner}/${repo}`, number, raw: text, kind: "pr-url" };
 }
 
+/** GitHub `owner/repo#N` shorthand. */
+function parseGithubRef(text: string): ReviewPrRef | undefined {
+	const match = GITHUB_REF_PATTERN.exec(text);
+	if (!match) return undefined;
+	const [, owner, repo, numberPart] = match;
+	const number = parsePositivePrNumber(numberPart);
+	if (number === undefined) return undefined;
+	return { forge: "github", repo: `${owner}/${repo}`, number, raw: text, kind: "github-ref" };
+}
+
 /** `https://<host>/<group…>/<project>/-/merge_requests/<iid>[/…]` */
 function parseGitlabMrUrl(text: string): ReviewPrRef | undefined {
 	let url: URL;
@@ -130,6 +153,7 @@ export function parseReviewPrRef(text: string): ReviewPrRef | undefined {
 	return (
 		parseGithubPrUrl(candidate) ??
 		parsePrSchemeRef(candidate) ??
+		parseGithubRef(candidate) ??
 		parseGitlabMrUrl(candidate) ??
 		parseMrSchemeRef(candidate)
 	);
@@ -140,20 +164,40 @@ export function formatReviewRefLabel(ref: ReviewPrRef): string {
 	return ref.forge === "gitlab" ? `MR ${ref.repo}!${ref.number}` : `PR ${ref.repo}#${ref.number}`;
 }
 
-export function extractReviewPrRefFromArgs(args: string[]): ParsedReviewArgs {
-	let prRef: ReviewPrRef | undefined;
-	let prRefIndex = -1;
-	for (const [index, arg] of args.entries()) {
-		const parsed = parseReviewPrRef(arg);
-		if (!parsed) continue;
-		prRef = parsed;
-		prRefIndex = index;
-		break;
+/**
+ * Only a leading path-shaped argument names the checkout, and only the next
+ * argument may be a `#N`/`!N` number, so instructions never change meaning
+ * with what exists on disk. Throws on a missing directory or an unresolvable
+ * number.
+ */
+export async function resolveReviewRequest(args: string[], sessionCwd: string): Promise<ReviewRequest> {
+	const rest = [...args];
+	let cwd = sessionCwd;
+	if (rest[0] !== undefined && DIR_ARG_PATTERN.test(rest[0])) {
+		cwd = resolveToCwd(rest[0], sessionCwd);
+		if (!fs.statSync(cwd, { throwIfNoEntry: false })?.isDirectory()) throw new Error(`Not a directory: ${rest[0]}`);
+		rest.shift();
 	}
-	return {
-		prRef,
-		extraInstructions: args.filter((_, index) => index !== prRefIndex).join(" "),
-	};
+	let prRef: ReviewPrRef | undefined;
+	const numberMatch = rest[0] !== undefined ? CHANGE_NUMBER_PATTERN.exec(rest[0]) : null;
+	const number = numberMatch ? parsePositivePrNumber(numberMatch[2]) : undefined;
+	if (numberMatch && number !== undefined) {
+		rest.shift();
+		try {
+			prRef =
+				numberMatch[1] === "!"
+					? mrNumberRef(await glab.resolveDefaultGitlabProjectMemoized(cwd), number)
+					: prNumberRef(await gh.resolveDefaultRepoMemoized(cwd), number);
+		} catch (error) {
+			throw new Error(
+				`Cannot resolve ${numberMatch[0]} in ${cwd}: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+	} else {
+		const index = rest.findIndex(arg => parseReviewPrRef(arg) !== undefined);
+		if (index >= 0) prRef = parseReviewPrRef(rest.splice(index, 1)[0]!);
+	}
+	return { cwd, prRef, extraInstructions: rest.join(" ") };
 }
 
 function extractReviewPrRefsFromText(text: string): ReviewPrRef[] {
@@ -459,22 +503,52 @@ async function selectPullRequestRef(cwd: string, ctx: HookCommandContext): Promi
 
 type ReviewMenuChoice = ReviewChoice | { label: string; kind: "pick-pr" };
 
+/** A menu pick plus the checkout it reads. */
+export interface ReviewSelection<Choice extends ReviewChoice = ReviewChoice> {
+	choice: Choice;
+	cwd: string;
+}
+
+/**
+ * `cwd` when it lies in a repository; otherwise a picked direct-child
+ * repository, so `/review` from a folder of checkouts still reaches one.
+ */
+async function selectCheckout(ctx: HookCommandContext, cwd: string): Promise<string | undefined> {
+	if (vcs.repo(cwd)) return cwd;
+	const entries = await fs.promises.readdir(cwd, { withFileTypes: true }).catch(() => []);
+	// `cwd` is outside any repository, so a child that resolves one is that repository's root.
+	const names = entries.filter(entry => entry.isDirectory() && vcs.repo(path.join(cwd, entry.name))).map(e => e.name);
+	if (names.length === 0) {
+		ctx.ui.notify(
+			`No repository at ${cwd} or in its subdirectories; use /review <dir> or /review owner/repo#N`,
+			"error",
+		);
+		return undefined;
+	}
+	const picked = await ctx.ui.select(`Select repository in ${cwd}`, names);
+	return picked ? path.join(cwd, picked) : undefined;
+}
+
 /**
  * Review target menu shared by `/review` and `/annotate code-review`. Picking
  * "Review a specific PR/MR" opens the open-PR/MR picker and resolves to a `pr`
- * choice, so callers never see the picker step.
+ * choice, so callers never see the picker step. Local and picker choices
+ * outside a repository first pick a child checkout.
  */
-export async function selectReviewChoice(ctx: HookCommandContext, cwd: string): Promise<ReviewTargetChoice | undefined>;
+export async function selectReviewChoice(
+	ctx: HookCommandContext,
+	cwd: string,
+): Promise<ReviewSelection<ReviewTargetChoice> | undefined>;
 export async function selectReviewChoice(
 	ctx: HookCommandContext,
 	cwd: string,
 	options: { includeCustom: boolean },
-): Promise<ReviewChoice | undefined>;
+): Promise<ReviewSelection | undefined>;
 export async function selectReviewChoice(
 	ctx: HookCommandContext,
 	cwd: string,
 	options: { includeCustom: boolean } = { includeCustom: false },
-): Promise<ReviewChoice | undefined> {
+): Promise<ReviewSelection | undefined> {
 	const choices: ReviewMenuChoice[] = [
 		...findRecentPrRefs(ctx, REVIEW_CONTEXT_PR_LIMIT).map(ref => ({
 			label: `Review ${formatReviewRefLabel(ref)} from conversation`,
@@ -490,9 +564,15 @@ export async function selectReviewChoice(
 		choices.map(choice => choice.label),
 	);
 	const choice = choices.find(candidate => candidate.label === selected);
-	if (choice?.kind !== "pick-pr") return choice;
-	const ref = await selectPullRequestRef(cwd, ctx);
-	return ref ? { label: `Review ${formatReviewRefLabel(ref)}`, kind: "pr", ref } : undefined;
+	if (!choice) return undefined;
+	if (choice.kind === "pr" || choice.kind === "custom") return { choice, cwd };
+	const checkout = await selectCheckout(ctx, cwd);
+	if (!checkout) return undefined;
+	if (choice.kind !== "pick-pr") return { choice, cwd: checkout };
+	const ref = await selectPullRequestRef(checkout, ctx);
+	return ref
+		? { choice: { label: `Review ${formatReviewRefLabel(ref)}`, kind: "pr", ref }, cwd: checkout }
+		: undefined;
 }
 
 function reviewTargetPrompt(
@@ -508,8 +588,8 @@ function reviewTargetPrompt(
 	return buildReviewPrompt(target, instructions);
 }
 
-function buildHeadlessReviewPrompt(focus?: string): string {
-	return prompt.render(reviewHeadlessRequestTemplate, { focus });
+function buildHeadlessReviewPrompt(focus: string | undefined, repository: string | undefined): string {
+	return prompt.render(reviewHeadlessRequestTemplate, { focus, repository });
 }
 
 /**
@@ -520,8 +600,8 @@ export function liveCommandCwd(api: CustomCommandAPI, ctx: HookCommandContext): 
 	return ctx.sessionManager?.getCwd?.() || api.cwd;
 }
 
-function buildCustomReviewPrompt(instructions: string): string {
-	return prompt.render(reviewCustomRequestTemplate, { instructions });
+function buildCustomReviewPrompt(instructions: string, repository: string | undefined): string {
+	return prompt.render(reviewCustomRequestTemplate, { instructions, repository });
 }
 
 export class ReviewCommand implements CustomCommand {
@@ -531,33 +611,42 @@ export class ReviewCommand implements CustomCommand {
 	constructor(private readonly api: CustomCommandAPI) {}
 
 	async execute(args: string[], ctx: HookCommandContext): Promise<string | undefined> {
-		const cwd = liveCommandCwd(this.api, ctx);
-		const parsedArgs = extractReviewPrRefFromArgs(args);
-		if (parsedArgs.prRef) {
+		const sessionCwd = liveCommandCwd(this.api, ctx);
+		let request: ReviewRequest;
+		try {
+			request = await resolveReviewRequest(args, sessionCwd);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			if (!ctx.hasUI) return message;
+			ctx.ui.notify(message, "error");
+			return undefined;
+		}
+		const { prRef } = request;
+		const extraInstructions = request.extraInstructions || undefined;
+		if (prRef) {
 			try {
-				const target = await resolvePrReviewTarget(cwd, ctx, parsedArgs.prRef);
-				const result = target
-					? reviewTargetPrompt(ctx, target, parsedArgs.extraInstructions || undefined)
-					: undefined;
+				const target = await resolvePrReviewTarget(request.cwd, ctx, prRef);
+				const result = target ? reviewTargetPrompt(ctx, target, extraInstructions) : undefined;
 				return (
 					result ??
-					(ctx.hasUI
-						? undefined
-						: `Unable to review ${formatReviewRefLabel(parsedArgs.prRef)}: no diff content available.`)
+					(ctx.hasUI ? undefined : `Unable to review ${formatReviewRefLabel(prRef)}: no diff content available.`)
 				);
 			} catch (error) {
 				return error instanceof Error ? error.message : String(error);
 			}
 		}
-		const extraInstructions = parsedArgs.extraInstructions || undefined;
-		if (!ctx.hasUI) return buildHeadlessReviewPrompt(extraInstructions);
-		const selectedChoice = await selectReviewChoice(ctx, cwd, { includeCustom: !extraInstructions });
-		if (!selectedChoice) return undefined;
-		if (selectedChoice.kind === "pr") {
-			const target = await resolvePrReviewTarget(cwd, ctx, selectedChoice.ref);
+		if (!ctx.hasUI) {
+			return buildHeadlessReviewPrompt(extraInstructions, reviewRepository(request.cwd, sessionCwd));
+		}
+		const selection = await selectReviewChoice(ctx, request.cwd, { includeCustom: !extraInstructions });
+		if (!selection) return undefined;
+		const { choice, cwd } = selection;
+		const repository = reviewRepository(cwd, sessionCwd);
+		if (choice.kind === "pr") {
+			const target = await resolvePrReviewTarget(cwd, ctx, choice.ref);
 			return target ? reviewTargetPrompt(ctx, target, extraInstructions) : undefined;
 		}
-		if (selectedChoice.kind === "custom") {
+		if (choice.kind === "custom") {
 			const instructions = await ctx.ui.editor(
 				"Enter custom review instructions",
 				"Review the following:\n\n",
@@ -568,14 +657,14 @@ export class ReviewCommand implements CustomCommand {
 			const target = await readUncommittedReviewTarget(cwd).catch(() => undefined);
 			if (target?.rawDiff.trim()) {
 				return buildReviewPrompt(
-					{ ...target, mode: `Custom review: ${instructions.split("\n")[0].slice(0, 60)}…` },
+					{ ...target, mode: `Custom review: ${instructions.split("\n")[0].slice(0, 60)}…`, repository },
 					instructions,
 				);
 			}
-			return buildCustomReviewPrompt(instructions);
+			return buildCustomReviewPrompt(instructions, repository);
 		}
-		const target = await resolveLocalReviewTarget(selectedChoice.kind, cwd, ctx.ui);
-		return target ? reviewTargetPrompt(ctx, target, extraInstructions) : undefined;
+		const target = await resolveLocalReviewTarget(choice.kind, cwd, ctx.ui);
+		return target ? reviewTargetPrompt(ctx, { ...target, repository }, extraInstructions) : undefined;
 	}
 }
 
