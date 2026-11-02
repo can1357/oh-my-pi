@@ -10,7 +10,7 @@ import * as fs from "node:fs";
 import { APP_NAME } from "./dirs";
 import * as logger from "./logger";
 import { restoreTerminalStderr } from "./stderr-guard";
-import { toError } from "./type-guards";
+import { describeThrown, thrownStack, toError } from "./type-guards";
 
 // Cleanup reasons, in order of priority/meaning.
 export enum Reason {
@@ -316,12 +316,18 @@ export type BrokenPipeSource = "ipc-send" | "stdio-write";
 
 /**
  * Classify EPIPE errors from worker IPC and stdio without treating unrelated
- * broken pipes as globally recoverable.
+ * broken pipes as globally recoverable. Never throws: the error can come from
+ * any code, and reading its fields can run a getter or a Proxy trap that throws.
  */
 export function classifyBrokenPipe(err: Error): BrokenPipeSource | undefined {
-	if (!("code" in err) || err.code !== "EPIPE" || !("syscall" in err)) return undefined;
-	if (err.syscall === "send") return "ipc-send";
-	if (err.syscall === "write") return "stdio-write";
+	try {
+		if (!("code" in err) || err.code !== "EPIPE" || !("syscall" in err)) return undefined;
+		const syscall = err.syscall;
+		if (syscall === "send") return "ipc-send";
+		if (syscall === "write") return "stdio-write";
+	} catch {
+		// Reading a field threw: not a broken pipe the runtime raised.
+	}
 	return undefined;
 }
 
@@ -343,8 +349,13 @@ export function isIpcSendEpipe(err: Error): boolean {
  * through application code keeps the fatal path.
  */
 export function isInternalSocketClosedError(err: unknown): boolean {
-	if (!(err instanceof Error) || !("code" in err) || err.code !== "ERR_SOCKET_CLOSED") return false;
-	const frames = (err.stack ?? "").split("\n").slice(1);
+	try {
+		if (!(err instanceof Error) || !("code" in err) || err.code !== "ERR_SOCKET_CLOSED") return false;
+	} catch {
+		// Reading a field threw: not an error the runtime raised.
+		return false;
+	}
+	const frames = (thrownStack(err) ?? "").split("\n").slice(1);
 	if (frames.length === 0) return false;
 	let hasNetFrame = false;
 	const internal = frames.every(frame => {
@@ -378,13 +389,18 @@ export function isInternalSocketClosedError(err: unknown): boolean {
  * (#2997, #9158).
  */
 export function isWorkerIpcDeserializeError(err: unknown): boolean {
-	return (
-		err instanceof TypeError &&
-		err.message === "Unable to deserialize data." &&
-		!err.stack &&
-		!("code" in err) &&
-		!("syscall" in err)
-	);
+	try {
+		return (
+			err instanceof TypeError &&
+			err.message === "Unable to deserialize data." &&
+			!err.stack &&
+			!("code" in err) &&
+			!("syscall" in err)
+		);
+	} catch {
+		// Reading a field threw: not an error the runtime raised.
+		return false;
+	}
 }
 
 /** Recycle callbacks for the active advanced-serialization worker IPC channels. */
@@ -640,12 +656,21 @@ function formatFatalRecoveryHints(providers: Iterable<FatalRecoveryHintProvider>
 }
 
 function formatFatalError(label: string, err: Error): string {
-	const name = err.name || "Error";
-	const message = err.message || "(no message)";
-	const stack = err.stack || "";
-	const stackLines = stack.split("\n").slice(1);
+	// Each field is read once, inside a try: the error can come from any code, and a
+	// getter or a Proxy trap can throw or return something other than text.
+	let name: unknown;
+	let message: unknown;
+	try {
+		name = err.name;
+		message = err.message;
+	} catch {
+		// What was read before the throw stands; the error is described below.
+	}
+	const title = typeof name === "string" && name !== "" ? name : "Error";
+	const text = typeof message === "string" && message !== "" ? message : describeThrown(err) || "(no message)";
+	const stackLines = (thrownStack(err) ?? "").split("\n").slice(1);
 	const formattedStack = stackLines.length > 0 ? `\n${stackLines.join("\n")}` : "";
-	return `\n[${label}] ${name}: ${message}${formattedStack}\n`;
+	return `\n[${label}] ${title}: ${text}${formattedStack}\n`;
 }
 
 /** Write a final report to stderr once terminal owners have handed the terminal back. */

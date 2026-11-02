@@ -868,6 +868,37 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 		}
 	});
 
+	it.skipIf(!HAS_MATPLOTLIB)(
+		"skips an open figure whose drawing raises SystemExit, and the kernel keeps its variables",
+		async () => {
+			const kernel = await PythonKernel.start({ cwd: MATPLOTLIB_TEST_CWD });
+			try {
+				// The figure is drawn after the cell's code ends, when the kernel flushes the figures it left open.
+				const result = await executePythonWithKernel(
+					kernel,
+					[
+						"import matplotlib.pyplot as plt",
+						"from matplotlib.artist import Artist",
+						"class Refuses(Artist):",
+						"    def draw(self, renderer):",
+						"        raise SystemExit(3)",
+						"fig = plt.figure()",
+						"fig.add_artist(Refuses())",
+						"kept = 42",
+					].join("\n"),
+				);
+				const after = await executePythonWithKernel(kernel, "print('kept', kept)");
+
+				expect(result.exitCode).toBe(0);
+				expect(result.displayOutputs.filter(output => output.type === "image")).toHaveLength(0);
+				expect(kernel.isAlive()).toBe(true);
+				expect(after.output).toContain("kept 42");
+			} finally {
+				await kernel.shutdown();
+			}
+		},
+	);
+
 	it("translates %pwd magic to the user namespace", async () => {
 		using tempDir = TempDir.createSync("@python-runner-magic-");
 		const kernel = await PythonKernel.start({ cwd: tempDir.path() });

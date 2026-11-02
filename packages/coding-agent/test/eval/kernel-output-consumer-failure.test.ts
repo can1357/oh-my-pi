@@ -18,6 +18,14 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 type Language = "py" | "js";
 const LANGUAGES = ["py", "js"] as const;
 
+// Real Python kernels only under PI_PYTHON_INTEGRATION=1, like the other real-kernel suites.
+const PYTHON_INTEGRATION = Bun.env.PI_PYTHON_INTEGRATION === "1";
+
+/** Whether a row in `language` is skipped: Python rows need a real interpreter, which only an opted-in host has. */
+function skipped(language: Language): boolean {
+	return language === "py" && !PYTHON_INTEGRATION;
+}
+
 function makeSession(evalSessionId: string, tool?: AgentTool): ToolSession {
 	return {
 		cwd: process.cwd(),
@@ -275,9 +283,35 @@ function revokedProxy(): object {
 }
 
 /**
- * Values whose description throws: converting them to text, reading their
- * message or testing their prototype fails. `make` builds one in the test
- * process, for a tool to throw; `source` builds the same value inside a
+ * An error whose `stack` getter returns text on its first read and a null-prototype
+ * object on the next: code that checks the stack's type and then reads it again
+ * gets an object it cannot search.
+ */
+function errorWithUnstableStack(): Error {
+	let reads = 0;
+	const error = new Error("unstable stack");
+	Object.defineProperty(error, "stack", {
+		get() {
+			reads += 1;
+			return reads % 2 === 1 ? "Error: unstable stack" : Object.create(null);
+		},
+	});
+	return error;
+}
+
+/** An error behind a Proxy whose `get` and `has` traps throw: `instanceof Error` holds, yet reading any property fails. */
+function errorProxy(): Error {
+	const refuse = (): never => {
+		throw new Error("the error proxy refuses every read");
+	};
+	return new Proxy(new Error("unused"), { get: refuse, has: refuse });
+}
+
+/**
+ * Values whose description is a hazard: converting them to text, reading their
+ * message, stack or any property, or testing their prototype fails, or a second
+ * read of the stack answers differently from the first. `make` builds one in the
+ * test process, for a tool to throw; `source` builds the same value inside a
  * JavaScript cell. `described` is how the result names each.
  */
 const UNDESCRIBABLE_VALUES: ReadonlyArray<{ label: string; make: () => unknown; source: string; described: string }> = [
@@ -311,6 +345,20 @@ const UNDESCRIBABLE_VALUES: ReadonlyArray<{ label: string; make: () => unknown; 
 		label: "a value whose conversion replaces Object.prototype.toString",
 		make: retargetingToString,
 		source: RETARGETING_TO_STRING_SOURCE,
+		described: "a thrown object that cannot be converted to text",
+	},
+	{
+		label: "an error whose stack is text on one read and an object on the next",
+		make: errorWithUnstableStack,
+		source:
+			'(() => { let reads = 0; const error = new Error("unstable stack"); Object.defineProperty(error, "stack", { get() { reads += 1; return reads % 2 === 1 ? "Error: unstable stack" : Object.create(null); } }); return error; })()',
+		described: "unstable stack",
+	},
+	{
+		label: "an error proxy that refuses every read",
+		make: errorProxy,
+		source:
+			'new Proxy(new Error("unused"), { get() { throw new Error("the error proxy refuses every read"); }, has() { throw new Error("the error proxy refuses every read"); } })',
 		described: "a thrown object that cannot be converted to text",
 	},
 ];
@@ -350,9 +398,124 @@ const CALL_REFUSING_TOOL: Record<Language, string> = {
 	js: "try { await tool.mcp__fixture_refuse({}); print('returned'); } catch (error) { print('caught', error.message); }",
 };
 
-/** Raises a Python exception whose own `__str__` raises. */
-const RAISES_UNPRINTABLE =
-	"class Unprintable(Exception):\n    def __str__(self):\n        raise RuntimeError('str refused')\n\nraise Unprintable()";
+/**
+ * What a Python exception's own code can raise while the kernel describes the
+ * exception. Uncaught, each leaves by its own path: a `RuntimeError` or a
+ * `GeneratorExit` ends the request without its `done` frame, so the cell waits
+ * for its timeout; a `KeyboardInterrupt` or a `SystemExit` ends the kernel's
+ * event loop, and with it the kernel.
+ */
+const DESCRIPTION_RAISES = ["RuntimeError", "KeyboardInterrupt", "SystemExit", "GeneratorExit"] as const;
+
+/**
+ * Places where describing a Python exception runs the exception's own code.
+ * `code` raises an exception named `Unprintable` whose code at that place
+ * raises `raised`.
+ */
+const DESCRIPTION_SITES: ReadonlyArray<{ label: string; code: (raised: string) => string }> = [
+	{
+		label: "an exception whose __str__ raises",
+		code: raised =>
+			`class Unprintable(Exception):\n    def __str__(self):\n        raise ${raised}()\n\nraise Unprintable()`,
+	},
+	{
+		label: "an exception whose __notes__ raises",
+		code: raised =>
+			`class Unprintable(Exception):\n    @property\n    def __notes__(self):\n        raise ${raised}()\n\nraise Unprintable()`,
+	},
+	{
+		label: "an exception whose class name raises",
+		code: raised =>
+			`class Nameless(type):\n    @property\n    def __name__(cls):\n        raise ${raised}()\n\n` +
+			"class Unprintable(Exception, metaclass=Nameless):\n    pass\n\nraise Unprintable()",
+	},
+	{
+		label: "a SyntaxError whose filename raises",
+		code: raised =>
+			`class Unprintable(SyntaxError):\n    @property\n    def filename(self):\n        raise ${raised}()\n\nraise Unprintable()`,
+	},
+	{
+		label: "a ModuleNotFoundError whose name raises",
+		code: raised =>
+			`class Unprintable(ModuleNotFoundError):\n    @property\n    def name(self):\n        raise ${raised}()\n\nraise Unprintable()`,
+	},
+];
+
+/**
+ * Cells whose output the kernel renders by running a printed value's own code,
+ * which raises `SystemExit`. Each prints `after` once that output is done.
+ */
+const RENDERING_REFUSALS: ReadonlyArray<{ label: string; code: string }> = [
+	{
+		label: "printed value's Markdown probe",
+		code:
+			"class Refuses:\n    def __str__(self):\n        return 'plain refuses'\n    def _repr_markdown_(self):\n        raise SystemExit(3)\n\n" +
+			"print(Refuses())\nprint('after')",
+	},
+	{
+		label: "printed list's JSON view",
+		code:
+			"class Opaque:\n    def __repr__(self):\n        return 'opaque'\n    def __str__(self):\n        raise SystemExit(3)\n\n" +
+			"print([Opaque()] * 40)\nprint('after')",
+	},
+	{
+		label: "printed dict's image probe",
+		code:
+			"class Refuses(dict):\n    def get(self, key, default=None):\n        raise SystemExit(3)\n\n" +
+			"print(Refuses(a=1))\nprint('after')",
+	},
+	{
+		label: "status event",
+		code:
+			"class Unrepresentable:\n    def __repr__(self):\n        raise SystemExit(3)\n\n" +
+			"__omp_emit_status('probe', value=Unrepresentable())\nprint('after')",
+	},
+];
+
+/**
+ * Prints a value whose Markdown probe announces itself, then sleeps: an
+ * interrupt sent on the announcement lands inside the probe.
+ */
+const SLOW_PROBE =
+	"import time\n\nclass Slow:\n    def _repr_markdown_(self):\n        print('probing', flush=True)\n        time.sleep(30)\n        return 'never'\n\n" +
+	"print(Slow())\nprint('after')";
+
+/** Kernel tools whose failure or result the kernel describes by running the tool's own values' code. */
+const DESCRIBED_KERNEL_TOOLS = [
+	"@tool",
+	"def refuses() -> str:",
+	'    """Raises an exception that cannot describe itself."""',
+	"    class Unprintable(Exception):",
+	"        def __str__(self):",
+	"            raise KeyboardInterrupt()",
+	"    raise Unprintable()",
+	"",
+	"@tool",
+	"def unrepresentable() -> str:",
+	'    """Returns a value whose repr raises."""',
+	"    class Unrepresentable:",
+	"        def __repr__(self):",
+	"            raise SystemExit(3)",
+	"    return Unrepresentable()",
+].join("\n");
+
+/**
+ * A consumer result whose `then` getter returns a method that rejects with
+ * `reason` on its first read, and nothing on later reads: a caller that tests
+ * for a thenable and then reads `then` again finds no method to call.
+ */
+function thenableOnFirstRead(reason: unknown): PromiseLike<void> {
+	let reads = 0;
+	const thenable = {
+		// oxlint-disable-next-line unicorn/no-thenable -- the consumer result under test is a thenable on purpose
+		get then() {
+			reads += 1;
+			if (reads > 1) return undefined;
+			return (_onFulfilled: unknown, onRejected?: (reason: unknown) => void) => onRejected?.(reason);
+		},
+	};
+	return thenable as unknown as PromiseLike<void>;
+}
 
 describe("eval output consumer failure", () => {
 	afterEach(async () => {
@@ -360,194 +523,243 @@ describe("eval output consumer failure", () => {
 	});
 
 	for (const language of LANGUAGES) {
-		it(`${language}: a consumer that throws mid-cell leaves the cell, the runtime and its variables intact, and is reported`, async () => {
-			const session = makeSession(`consumer-failure-${language}-${crypto.randomUUID()}`);
-			const before = await run(session, language, PID_CELL[language]);
+		it.skipIf(skipped(language))(
+			`${language}: a consumer that throws mid-cell leaves the cell, the runtime and its variables intact, and is reported`,
+			async () => {
+				const session = makeSession(`consumer-failure-${language}-${crypto.randomUUID()}`);
+				const before = await run(session, language, PID_CELL[language]);
 
-			const delivered: string[] = [];
-			const failed = await run(session, language, TWO_LINES[language], {
-				onChunk: chunk => {
-					if (printsLine(chunk, "one")) throw new Error("consumer refused a chunk");
-					delivered.push(chunk);
-				},
-			});
-			const after = await run(session, language, `${PID_CELL[language]}\n${READ_KEPT[language]}`);
+				const delivered: string[] = [];
+				const failed = await run(session, language, TWO_LINES[language], {
+					onChunk: chunk => {
+						if (printsLine(chunk, "one")) throw new Error("consumer refused a chunk");
+						delivered.push(chunk);
+					},
+				});
+				const after = await run(session, language, `${PID_CELL[language]}\n${READ_KEPT[language]}`);
 
-			// The cell ran to completion instead of hanging until its timeout killed the runtime.
-			expect(failed.cancelled).toBe(false);
-			expect(failed.exitCode).toBe(0);
-			// The result holds the whole output, including what arrived after the consumer threw.
-			// It opens with the cell's own output, so a line the runtime leads with keeps its place.
-			expect(failed.output.startsWith("one\ntwo\n")).toBe(true);
-			// The consumer kept receiving the cell's later output.
-			expect(delivered.join("")).toContain("two");
-			// The failure reaches the caller when the cell is done, naming the consumer and the risk.
-			expectConsumerFailure(failed, "stream", "consumer refused a chunk");
-			expect(failed.output).toContain("this result holds all of its output");
-			expect(failed.output).toContain("output shown while it ran may be incomplete");
-			// Same process, state intact.
-			expect(pidOf(after)).toBe(pidOf(before));
-			expect(after.output).toContain("kept 42");
-		}, 120_000);
+				// The cell ran to completion instead of hanging until its timeout killed the runtime.
+				expect(failed.cancelled).toBe(false);
+				expect(failed.exitCode).toBe(0);
+				// The result holds the whole output, including what arrived after the consumer threw.
+				// It opens with the cell's own output, so a line the runtime leads with keeps its place.
+				expect(failed.output.startsWith("one\ntwo\n")).toBe(true);
+				// The consumer kept receiving the cell's later output.
+				expect(delivered.join("")).toContain("two");
+				// The failure reaches the caller when the cell is done, naming the consumer and the risk.
+				expectConsumerFailure(failed, "stream", "consumer refused a chunk");
+				expect(failed.output).toContain("this result holds all of its output");
+				expect(failed.output).toContain("output shown while it ran may be incomplete");
+				// Same process, state intact.
+				expect(pidOf(after)).toBe(pidOf(before));
+				expect(after.output).toContain("kept 42");
+			},
+			120_000,
+		);
 
-		it(`${language}: an async consumer that rejects after an await leaves the cell, the runtime and its variables intact, and is reported`, async () => {
-			const session = makeSession(`consumer-async-${language}-${crypto.randomUUID()}`);
-			const before = await run(session, language, PID_CELL[language]);
+		it.skipIf(skipped(language))(
+			`${language}: an async consumer that rejects after an await leaves the cell, the runtime and its variables intact, and is reported`,
+			async () => {
+				const session = makeSession(`consumer-async-${language}-${crypto.randomUUID()}`);
+				const before = await run(session, language, PID_CELL[language]);
 
-			const failed = await run(session, language, TWO_LINES[language], {
-				onChunk: async chunk => {
-					await Promise.resolve();
-					if (printsLine(chunk, "one")) throw new Error("async consumer refused a chunk");
-				},
-			});
-			const after = await run(session, language, `${PID_CELL[language]}\n${READ_KEPT[language]}`);
+				const failed = await run(session, language, TWO_LINES[language], {
+					onChunk: async chunk => {
+						await Promise.resolve();
+						if (printsLine(chunk, "one")) throw new Error("async consumer refused a chunk");
+					},
+				});
+				const after = await run(session, language, `${PID_CELL[language]}\n${READ_KEPT[language]}`);
 
-			expect(failed.cancelled).toBe(false);
-			expect(failed.exitCode).toBe(0);
-			expect(failed.output).toContain("one\n");
-			expect(failed.output).toContain("two\n");
-			expectConsumerFailure(failed, "stream", "async consumer refused a chunk");
-			expect(pidOf(after)).toBe(pidOf(before));
-			expect(after.output).toContain("kept 42");
-		}, 120_000);
+				expect(failed.cancelled).toBe(false);
+				expect(failed.exitCode).toBe(0);
+				expect(failed.output).toContain("one\n");
+				expect(failed.output).toContain("two\n");
+				expectConsumerFailure(failed, "stream", "async consumer refused a chunk");
+				expect(pidOf(after)).toBe(pidOf(before));
+				expect(after.output).toContain("kept 42");
+			},
+			120_000,
+		);
 
-		it(`${language}: a consumer that throws on the final newline the result adds is reported, and the cell still succeeds`, async () => {
-			const session = makeSession(`consumer-flush-${language}-${crypto.randomUUID()}`);
-			let refused = 0;
-			const cell = await run(session, language, ENDS_ON_CARRIAGE_RETURN[language], {
-				onChunk: chunk => {
-					if (chunk !== "\n") return;
-					refused += 1;
-					throw new Error("consumer refused the final newline");
-				},
-			});
+		it.skipIf(skipped(language))(
+			`${language}: a consumer that throws on the final newline the result adds is reported, and the cell still succeeds`,
+			async () => {
+				const session = makeSession(`consumer-flush-${language}-${crypto.randomUUID()}`);
+				let refused = 0;
+				const cell = await run(session, language, ENDS_ON_CARRIAGE_RETURN[language], {
+					onChunk: chunk => {
+						if (chunk !== "\n") return;
+						refused += 1;
+						throw new Error("consumer refused the final newline");
+					},
+				});
 
-			expect(refused).toBe(1);
-			expect(cell.cancelled).toBe(false);
-			expect(cell.exitCode).toBe(0);
-			expect(cell.output).toContain("done\nend\n");
-			// The consumer's own error is reported once, not appended as if the cell had printed it.
-			expect(cell.output).not.toContain("    at ");
-			expectConsumerFailure(cell, "stream", "consumer refused the final newline");
-		}, 120_000);
+				expect(refused).toBe(1);
+				expect(cell.cancelled).toBe(false);
+				expect(cell.exitCode).toBe(0);
+				expect(cell.output).toContain("done\nend\n");
+				// The consumer's own error is reported once, not appended as if the cell had printed it.
+				expect(cell.output).not.toContain("    at ");
+				expectConsumerFailure(cell, "stream", "consumer refused the final newline");
+			},
+			120_000,
+		);
 
-		it(`${language}: a consumer that throws on every chunk of a failing cell still gets a result with the cell's error`, async () => {
-			const session = makeSession(`consumer-every-${language}-${crypto.randomUUID()}`);
-			const before = await run(
-				session,
-				language,
-				`${PID_CELL[language]}\n${language === "py" ? "kept = 42" : "var kept = 42;"}`,
-			);
+		it.skipIf(skipped(language))(
+			`${language}: a consumer that throws on every chunk of a failing cell still gets a result with the cell's error`,
+			async () => {
+				const session = makeSession(`consumer-every-${language}-${crypto.randomUUID()}`);
+				const before = await run(
+					session,
+					language,
+					`${PID_CELL[language]}\n${language === "py" ? "kept = 42" : "var kept = 42;"}`,
+				);
 
-			const failed = await run(session, language, FAILING_CELL[language], {
-				onChunk: () => {
-					throw new Error("consumer is broken");
-				},
-			});
-			const after = await run(session, language, `${PID_CELL[language]}\n${READ_KEPT[language]}`);
+				const failed = await run(session, language, FAILING_CELL[language], {
+					onChunk: () => {
+						throw new Error("consumer is broken");
+					},
+				});
+				const after = await run(session, language, `${PID_CELL[language]}\n${READ_KEPT[language]}`);
 
-			expect(failed.cancelled).toBe(false);
-			expect(failed.exitCode).toBe(1);
-			expect(failed.output).toContain("cell failed");
-			expectConsumerFailure(failed, "stream", "consumer is broken");
-			expect(pidOf(after)).toBe(pidOf(before));
-			expect(after.output).toContain("kept 42");
-		}, 120_000);
+				expect(failed.cancelled).toBe(false);
+				expect(failed.exitCode).toBe(1);
+				expect(failed.output).toContain("cell failed");
+				expectConsumerFailure(failed, "stream", "consumer is broken");
+				expect(pidOf(after)).toBe(pidOf(before));
+				expect(after.output).toContain("kept 42");
+			},
+			120_000,
+		);
 
-		it(`${language}: a truncated result does not claim to hold all of the output, and names the artifact when one was saved`, async () => {
-			using artifacts = TempDir.createSync("@consumer-failure-artifact-");
-			const session = makeSession(`consumer-truncated-${language}-${crypto.randomUUID()}`);
-			const refuseFirst = (): ((chunk: string) => void) => {
-				let refused = false;
-				return () => {
-					if (refused) return;
-					refused = true;
-					throw new Error("consumer refused a chunk");
+		it.skipIf(skipped(language))(
+			`${language}: a truncated result does not claim to hold all of the output, and names the artifact when one was saved`,
+			async () => {
+				using artifacts = TempDir.createSync("@consumer-failure-artifact-");
+				const session = makeSession(`consumer-truncated-${language}-${crypto.randomUUID()}`);
+				const refuseFirst = (): ((chunk: string) => void) => {
+					let refused = false;
+					return () => {
+						if (refused) return;
+						refused = true;
+						throw new Error("consumer refused a chunk");
+					};
 				};
-			};
 
-			const unsaved = await run(session, language, LARGE_OUTPUT[language], { onChunk: refuseFirst() });
-			expect(unsaved.truncated).toBe(true);
-			expect(unsaved.artifactId).toBeUndefined();
-			expectConsumerFailure(unsaved, "stream", "consumer refused a chunk");
-			expect(unsaved.output).not.toContain("holds all of its output");
-			expect(unsaved.output).toContain("usual truncation");
+				const unsaved = await run(session, language, LARGE_OUTPUT[language], { onChunk: refuseFirst() });
+				expect(unsaved.truncated).toBe(true);
+				expect(unsaved.artifactId).toBeUndefined();
+				expectConsumerFailure(unsaved, "stream", "consumer refused a chunk");
+				expect(unsaved.output).not.toContain("holds all of its output");
+				expect(unsaved.output).toContain("usual truncation");
 
-			const saved = await run(session, language, LARGE_OUTPUT[language], {
-				onChunk: refuseFirst(),
-				artifactPath: path.join(artifacts.path(), "cell.log"),
-				artifactId: "consumer-cell",
-			});
-			expect(saved.truncated).toBe(true);
-			expect(saved.artifactId).toBe("consumer-cell");
-			expectConsumerFailure(saved, "stream", "consumer refused a chunk");
-			expect(saved.output).not.toContain("holds all of its output");
-			expect(saved.output).toContain("artifact://consumer-cell");
-		}, 120_000);
+				const saved = await run(session, language, LARGE_OUTPUT[language], {
+					onChunk: refuseFirst(),
+					artifactPath: path.join(artifacts.path(), "cell.log"),
+					artifactId: "consumer-cell",
+				});
+				expect(saved.truncated).toBe(true);
+				expect(saved.artifactId).toBe("consumer-cell");
+				expectConsumerFailure(saved, "stream", "consumer refused a chunk");
+				expect(saved.output).not.toContain("holds all of its output");
+				expect(saved.output).toContain("artifact://consumer-cell");
+			},
+			120_000,
+		);
 
-		it(`${language}: a status consumer that throws during a bridged tool's progress leaves the tool call and the cell intact, and is reported`, async () => {
-			const session = makeSession(`consumer-progress-${language}-${crypto.randomUUID()}`, progressTool());
-			const progress: string[] = [];
-			const cell = await run(session, language, CALL_PROGRESS_TOOL[language], {
-				onStatus: event => {
-					if (event.op !== "mcp_progress") return;
-					progress.push(event.op);
-					throw new Error("status consumer refused progress");
-				},
-			});
+		it.skipIf(skipped(language))(
+			`${language}: a status consumer that throws during a bridged tool's progress leaves the tool call and the cell intact, and is reported`,
+			async () => {
+				const session = makeSession(`consumer-progress-${language}-${crypto.randomUUID()}`, progressTool());
+				const progress: string[] = [];
+				const cell = await run(session, language, CALL_PROGRESS_TOOL[language], {
+					onStatus: event => {
+						if (event.op !== "mcp_progress") return;
+						progress.push(event.op);
+						throw new Error("status consumer refused progress");
+					},
+				});
 
-			expect(progress).toContain("mcp_progress");
-			expect(cell.cancelled).toBe(false);
-			expect(cell.exitCode).toBe(0);
-			expect(cell.output).toContain("tool-complete");
-			expectConsumerFailure(cell, "display", "status consumer refused progress");
-		}, 120_000);
+				expect(progress).toContain("mcp_progress");
+				expect(cell.cancelled).toBe(false);
+				expect(cell.exitCode).toBe(0);
+				expect(cell.output).toContain("tool-complete");
+				expectConsumerFailure(cell, "display", "status consumer refused progress");
+			},
+			120_000,
+		);
 
-		it(`${language}: a cell whose consumer does not throw is unchanged`, async () => {
-			const session = makeSession(`consumer-ok-${language}-${crypto.randomUUID()}`);
-			const delivered: string[] = [];
-			const cell = await run(session, language, TWO_LINES[language], {
-				onChunk: chunk => {
-					delivered.push(chunk);
-				},
-			});
+		it.skipIf(skipped(language))(
+			`${language}: a cell whose consumer does not throw is unchanged`,
+			async () => {
+				const session = makeSession(`consumer-ok-${language}-${crypto.randomUUID()}`);
+				const delivered: string[] = [];
+				const cell = await run(session, language, TWO_LINES[language], {
+					onChunk: chunk => {
+						delivered.push(chunk);
+					},
+				});
 
-			expect(cell.cancelled).toBe(false);
-			expect(cell.exitCode).toBe(0);
-			expect(cell.output).toBe("one\ntwo\n");
-			expect(delivered.join("")).toBe("one\ntwo\n");
-		}, 120_000);
+				expect(cell.cancelled).toBe(false);
+				expect(cell.exitCode).toBe(0);
+				expect(cell.output).toBe("one\ntwo\n");
+				expect(delivered.join("")).toBe("one\ntwo\n");
+			},
+			120_000,
+		);
 
-		it(`${language}: a cell that times out after its consumer refused a printed line reports the failure without claiming the cell ran on`, async () => {
-			const session = makeSession(`consumer-timeout-${language}-${crypto.randomUUID()}`);
-			// Start the runtime first, so a slow kernel or worker start cannot delay the printed line.
-			const warm = await run(session, language, PID_CELL[language]);
-			expect(warm.exitCode).toBe(0);
-			const timeout = new AbortController();
-			let refusedLine = false;
-			const cell = await run(session, language, OUTLIVES_TIMEOUT[language], {
-				onChunk: chunk => {
-					// The timeout notice the executor streams must not count as the cell's line.
-					if (!printsLine(chunk, "one")) return;
-					refusedLine = true;
-					// The cell times out only after its consumer failed on the line, whatever the scheduling.
-					queueMicrotask(() => timeout.abort(new DOMException("The cell timed out", "TimeoutError")));
-					throw new Error("consumer refused a chunk");
-				},
-				signal: timeout.signal,
-				// No wall-clock timeout of the cell's own: only the refused line times it out, and the
-				// cell prints that line before its 30-second sleep, so it is always seen first.
-				timeoutMs: undefined,
-			});
+		it.skipIf(skipped(language))(
+			`${language}: a consumer that returns a thenable whose then getter answers once is reported with the thenable's own rejection`,
+			async () => {
+				const session = makeSession(`consumer-thenable-${language}-${crypto.randomUUID()}`);
+				const cell = await run(session, language, TWO_LINES[language], {
+					onChunk: chunk =>
+						printsLine(chunk, "one") ? thenableOnFirstRead(new Error("consumer refused a chunk")) : undefined,
+				});
 
-			expect(refusedLine).toBe(true);
-			expect(cell.cancelled).toBe(true);
-			// The executor took its timeout path, not a plain cancellation.
-			expect(cell.output).toContain("timed out");
-			expectConsumerFailure(cell, "stream", "consumer refused a chunk");
-			expect(cell.output).not.toContain("kept running");
-			expect(cell.output).not.toContain("holds all of its output");
-		}, 120_000);
+				expect(cell.cancelled).toBe(false);
+				expect(cell.exitCode).toBe(0);
+				// The failure is the thenable's own rejection, not the error of calling a `then` read a second time.
+				expectConsumerFailure(cell, "stream", "consumer refused a chunk");
+			},
+			120_000,
+		);
+
+		it.skipIf(skipped(language))(
+			`${language}: a cell that times out after its consumer refused a printed line reports the failure without claiming the cell ran on`,
+			async () => {
+				const session = makeSession(`consumer-timeout-${language}-${crypto.randomUUID()}`);
+				// Start the runtime first, so a slow kernel or worker start cannot delay the printed line.
+				const warm = await run(session, language, PID_CELL[language]);
+				expect(warm.exitCode).toBe(0);
+				const timeout = new AbortController();
+				let refusedLine = false;
+				const cell = await run(session, language, OUTLIVES_TIMEOUT[language], {
+					onChunk: chunk => {
+						// The timeout notice the executor streams must not count as the cell's line.
+						if (!printsLine(chunk, "one")) return;
+						refusedLine = true;
+						// The cell times out only after its consumer failed on the line, whatever the scheduling.
+						queueMicrotask(() => timeout.abort(new DOMException("The cell timed out", "TimeoutError")));
+						throw new Error("consumer refused a chunk");
+					},
+					signal: timeout.signal,
+					// No wall-clock timeout of the cell's own: only the refused line times it out, and the
+					// cell prints that line before its 30-second sleep, so it is always seen first.
+					timeoutMs: undefined,
+				});
+
+				expect(refusedLine).toBe(true);
+				expect(cell.cancelled).toBe(true);
+				// The executor took its timeout path, not a plain cancellation.
+				expect(cell.output).toContain("timed out");
+				expectConsumerFailure(cell, "stream", "consumer refused a chunk");
+				expect(cell.output).not.toContain("kept running");
+				expect(cell.output).not.toContain("holds all of its output");
+			},
+			120_000,
+		);
 	}
 });
 
@@ -556,51 +768,65 @@ describe("runtime output callback failure", () => {
 		await disposeAllVmContexts();
 	});
 
-	it("py: the kernel reports an async output callback that rejects, and finishes the execution", async () => {
-		const kernel = await PythonKernel.start({ cwd: process.cwd() });
-		try {
-			const chunks: string[] = [];
-			const result = await kernel.execute(TWO_LINES.py, {
-				onChunk: async text => {
-					chunks.push(text);
-					await Promise.resolve();
-					if (printsLine(text, "one")) throw new Error("callback rejected");
-				},
-			});
+	it.skipIf(!PYTHON_INTEGRATION)(
+		"py: the kernel reports an async output callback that rejects, and finishes the execution",
+		async () => {
+			const kernel = await PythonKernel.start({ cwd: process.cwd() });
+			try {
+				const chunks: string[] = [];
+				const result = await kernel.execute(TWO_LINES.py, {
+					onChunk: async text => {
+						chunks.push(text);
+						await Promise.resolve();
+						if (printsLine(text, "one")) throw new Error("callback rejected");
+					},
+				});
 
-			expect(result.cancelled).toBe(false);
-			expect(result.status).toBe("ok");
-			expect(chunks.join("")).toBe("one\ntwo\n");
-			expect(result.consumerFailure).toEqual({ callback: "onChunk", message: "callback rejected" });
-			expect(kernel.isAlive()).toBe(true);
-		} finally {
-			await kernel.shutdown();
-		}
-	}, 120_000);
+				expect(result.cancelled).toBe(false);
+				expect(result.status).toBe("ok");
+				expect(chunks.join("")).toBe("one\ntwo\n");
+				expect(result.consumerFailure).toEqual({ callback: "onChunk", message: "callback rejected" });
+				expect(kernel.isAlive()).toBe(true);
+			} finally {
+				await kernel.shutdown();
+			}
+		},
+		120_000,
+	);
 
-	it("py: the kernel reports an async output callback that rejects its exit message", async () => {
-		const kernel = await PythonKernel.start({ cwd: process.cwd() });
-		try {
-			const result = await kernel.execute("import os, time\nprint('pid', os.getpid(), flush=True)\ntime.sleep(30)", {
-				onChunk: async text => {
-					const pid = /pid (\d+)/.exec(text);
-					if (pid) {
-						if (Number(pid[1]) === process.pid) throw new Error("the kernel runs in the test process");
-						process.kill(Number(pid[1]), "SIGKILL");
-						return;
-					}
-					await Promise.resolve();
-					if (text.startsWith("[kernel]")) throw new Error("callback rejected the exit message");
-				},
-			});
+	it.skipIf(!PYTHON_INTEGRATION)(
+		"py: the kernel reports an async output callback that rejects its exit message",
+		async () => {
+			const kernel = await PythonKernel.start({ cwd: process.cwd() });
+			try {
+				const result = await kernel.execute(
+					"import os, time\nprint('pid', os.getpid(), flush=True)\ntime.sleep(30)",
+					{
+						onChunk: async text => {
+							const pid = /pid (\d+)/.exec(text);
+							if (pid) {
+								if (Number(pid[1]) === process.pid) throw new Error("the kernel runs in the test process");
+								process.kill(Number(pid[1]), "SIGKILL");
+								return;
+							}
+							await Promise.resolve();
+							if (text.startsWith("[kernel]")) throw new Error("callback rejected the exit message");
+						},
+					},
+				);
 
-			expect(result.cancelled).toBe(true);
-			expect(result.kernelKilled).toBe(true);
-			expect(result.consumerFailure).toEqual({ callback: "onChunk", message: "callback rejected the exit message" });
-		} finally {
-			await kernel.shutdown();
-		}
-	}, 120_000);
+				expect(result.cancelled).toBe(true);
+				expect(result.kernelKilled).toBe(true);
+				expect(result.consumerFailure).toEqual({
+					callback: "onChunk",
+					message: "callback rejected the exit message",
+				});
+			} finally {
+				await kernel.shutdown();
+			}
+		},
+		120_000,
+	);
 
 	it("js: the context manager reports an async output callback that rejects, and finishes the run", async () => {
 		const session = makeSession(`runtime-async-js-${crypto.randomUUID()}`);
@@ -629,6 +855,31 @@ describe("runtime output callback failure", () => {
 		expect(chunks.join("")).toBe("one\ntwo\n");
 		expect(runState.consumerFailure).toEqual({ callback: "onChunk", message: "callback rejected" });
 	}, 120_000);
+
+	it("js: the context manager reports the rejection of a thenable whose then getter answers once", async () => {
+		const session = makeSession(`runtime-thenable-js-${crypto.randomUUID()}`);
+		const sessionId = session.getEvalSessionId?.() ?? "missing";
+		const runState: VmRunState = {
+			// The run state's callback type returns void; a callback that returns a thenable must be accepted all the same.
+			onText: (text =>
+				printsLine(text, "one") ? thenableOnFirstRead(new Error("callback refused")) : undefined) as (
+				text: string,
+			) => void,
+		};
+
+		await executeInVmContext({
+			sessionKey: sessionId,
+			sessionId,
+			cwd: session.cwd,
+			session,
+			code: TWO_LINES.js,
+			filename: "runtime-thenable.js",
+			timeoutMs: 20_000,
+			runState,
+		});
+
+		expect(runState.consumerFailure).toEqual({ callback: "onChunk", message: "callback refused" });
+	}, 120_000);
 });
 
 describe("output consumer failure with an arbitrary thrown value", () => {
@@ -640,25 +891,29 @@ describe("output consumer failure with an arbitrary thrown value", () => {
 	for (const thrown of THROWN_VALUES) {
 		for (const language of LANGUAGES) {
 			for (const mode of ["throws", "rejects with"] as const) {
-				it(`${language}: a consumer that ${mode} ${thrown.label} leaves the cell, the runtime and its variables intact, and is reported`, async () => {
-					const session = makeSession(`consumer-thrown-${language}-${crypto.randomUUID()}`);
-					const before = await run(session, language, PID_CELL[language]);
+				it.skipIf(skipped(language))(
+					`${language}: a consumer that ${mode} ${thrown.label} leaves the cell, the runtime and its variables intact, and is reported`,
+					async () => {
+						const session = makeSession(`consumer-thrown-${language}-${crypto.randomUUID()}`);
+						const before = await run(session, language, PID_CELL[language]);
 
-					const failed = await run(session, language, TWO_LINES[language], {
-						onChunk: refusingLineOne(mode, thrown.make),
-					});
-					const after = await run(session, language, `${PID_CELL[language]}\n${READ_KEPT[language]}`);
+						const failed = await run(session, language, TWO_LINES[language], {
+							onChunk: refusingLineOne(mode, thrown.make),
+						});
+						const after = await run(session, language, `${PID_CELL[language]}\n${READ_KEPT[language]}`);
 
-					expect(failed.cancelled).toBe(false);
-					expect(failed.exitCode).toBe(0);
-					expect(failed.output).toContain("one\n");
-					expect(failed.output).toContain("two\n");
-					expectConsumerFailure(failed, "stream", thrown.described);
-					// Reported as the consumer's failure, not as a delivery failure that may have lost output.
-					expect(failed.output).toContain("this result holds all of its output");
-					expect(pidOf(after)).toBe(pidOf(before));
-					expect(after.output).toContain("kept 42");
-				}, 120_000);
+						expect(failed.cancelled).toBe(false);
+						expect(failed.exitCode).toBe(0);
+						expect(failed.output).toContain("one\n");
+						expect(failed.output).toContain("two\n");
+						expectConsumerFailure(failed, "stream", thrown.described);
+						// Reported as the consumer's failure, not as a delivery failure that may have lost output.
+						expect(failed.output).toContain("this result holds all of its output");
+						expect(pidOf(after)).toBe(pidOf(before));
+						expect(after.output).toContain("kept 42");
+					},
+					120_000,
+				);
 			}
 		}
 	}
@@ -671,26 +926,30 @@ describe("runtime output callback failure with an arbitrary thrown value", () =>
 	});
 
 	for (const thrown of THROWN_VALUES) {
-		it(`py: the kernel reports an output callback that rejects with ${thrown.label}, and keeps serving`, async () => {
-			const kernel = await PythonKernel.start({ cwd: process.cwd() });
-			try {
-				const result = await kernel.execute(TWO_LINES.py, {
-					onChunk: refusingLineOne("rejects with", thrown.make) as (text: string) => Promise<void>,
-					// Bounds the red case, where the failed report ends the reader and the execution never settles.
-					timeoutMs: 20_000,
-				});
-				const chunks: string[] = [];
-				await kernel.execute(READ_KEPT.py, { onChunk: text => void chunks.push(text) });
+		it.skipIf(!PYTHON_INTEGRATION)(
+			`py: the kernel reports an output callback that rejects with ${thrown.label}, and keeps serving`,
+			async () => {
+				const kernel = await PythonKernel.start({ cwd: process.cwd() });
+				try {
+					const result = await kernel.execute(TWO_LINES.py, {
+						onChunk: refusingLineOne("rejects with", thrown.make) as (text: string) => Promise<void>,
+						// Bounds the red case, where the failed report ends the reader and the execution never settles.
+						timeoutMs: 20_000,
+					});
+					const chunks: string[] = [];
+					await kernel.execute(READ_KEPT.py, { onChunk: text => void chunks.push(text) });
 
-				expect(result.cancelled).toBe(false);
-				expect(result.status).toBe("ok");
-				expect(result.consumerFailure).toEqual({ callback: "onChunk", message: thrown.described });
-				expect(kernel.isAlive()).toBe(true);
-				expect(chunks.join("")).toBe("kept 42\n");
-			} finally {
-				await kernel.shutdown();
-			}
-		}, 120_000);
+					expect(result.cancelled).toBe(false);
+					expect(result.status).toBe("ok");
+					expect(result.consumerFailure).toEqual({ callback: "onChunk", message: thrown.described });
+					expect(kernel.isAlive()).toBe(true);
+					expect(chunks.join("")).toBe("kept 42\n");
+				} finally {
+					await kernel.shutdown();
+				}
+			},
+			120_000,
+		);
 
 		for (const mode of ["throws", "rejects with"] as const) {
 			it(`js: the context manager reports an output callback that ${mode} ${thrown.label}, and finishes the run`, async () => {
@@ -745,39 +1004,141 @@ describe("a cell or tool failing with a value that cannot be described", () => {
 		}
 
 		for (const language of LANGUAGES) {
-			it(`${language}: a tool that throws ${value.label} fails the call with a description, and the runtime keeps its variables`, async () => {
-				const session = makeSession(`tool-thrown-${language}-${crypto.randomUUID()}`, refusingTool(value.make));
-				const before = await run(
-					session,
-					language,
-					`${PID_CELL[language]}\n${language === "py" ? "kept = 42" : "var kept = 42;"}`,
-				);
+			it.skipIf(skipped(language))(
+				`${language}: a tool that throws ${value.label} fails the call with a description, and the runtime keeps its variables`,
+				async () => {
+					const session = makeSession(`tool-thrown-${language}-${crypto.randomUUID()}`, refusingTool(value.make));
+					const before = await run(
+						session,
+						language,
+						`${PID_CELL[language]}\n${language === "py" ? "kept = 42" : "var kept = 42;"}`,
+					);
 
-				const cell = await run(session, language, CALL_REFUSING_TOOL[language]);
-				const after = await run(session, language, `${PID_CELL[language]}\n${READ_KEPT[language]}`);
+					const cell = await run(session, language, CALL_REFUSING_TOOL[language]);
+					const after = await run(session, language, `${PID_CELL[language]}\n${READ_KEPT[language]}`);
 
-				expect(cell.cancelled).toBe(false);
-				expect(cell.exitCode).toBe(0);
-				expect(cell.output).toContain("caught");
-				expect(cell.output).toContain(value.described);
-				expect(pidOf(after)).toBe(pidOf(before));
-				expect(after.output).toContain("kept 42");
-			}, 120_000);
+					expect(cell.cancelled).toBe(false);
+					expect(cell.exitCode).toBe(0);
+					expect(cell.output).toContain("caught");
+					expect(cell.output).toContain(value.described);
+					expect(pidOf(after)).toBe(pidOf(before));
+					expect(after.output).toContain("kept 42");
+				},
+				120_000,
+			);
 		}
 	}
 
-	it("py: a cell that raises an exception whose __str__ raises fails at once, and the kernel keeps its variables", async () => {
-		const session = makeSession(`cell-unprintable-py-${crypto.randomUUID()}`);
-		const before = await run(session, "py", `${PID_CELL.py}\nkept = 42`);
+	for (const site of DESCRIPTION_SITES) {
+		for (const raised of DESCRIPTION_RAISES) {
+			it.skipIf(!PYTHON_INTEGRATION)(
+				`py: a cell that raises ${site.label} ${raised} fails at once, and the kernel keeps its variables`,
+				async () => {
+					const session = makeSession(`cell-unprintable-py-${crypto.randomUUID()}`);
+					const before = await run(session, "py", `${PID_CELL.py}\nkept = 42`);
 
-		const failed = await run(session, "py", RAISES_UNPRINTABLE);
-		const after = await run(session, "py", `${PID_CELL.py}\n${READ_KEPT.py}`);
+					const failed = await run(session, "py", site.code(raised));
+					const after = await run(session, "py", `${PID_CELL.py}\n${READ_KEPT.py}`);
 
-		// The cell failed by itself, instead of waiting for its timeout to interrupt or kill the kernel.
-		expect(failed.cancelled).toBe(false);
-		expect(failed.exitCode).toBe(1);
-		expect(failed.output).toContain("Unprintable");
-		expect(pidOf(after)).toBe(pidOf(before));
-		expect(after.output).toContain("kept 42");
-	}, 120_000);
+					// The cell failed by itself, instead of waiting for its timeout to interrupt or kill the kernel.
+					expect(failed.cancelled).toBe(false);
+					expect(failed.exitCode).toBe(1);
+					expect(failed.output).toContain("Unprintable");
+					expect(pidOf(after)).toBe(pidOf(before));
+					expect(after.output).toContain("kept 42");
+				},
+				120_000,
+			);
+		}
+	}
+
+	for (const refusal of RENDERING_REFUSALS) {
+		it.skipIf(!PYTHON_INTEGRATION)(
+			`py: a cell whose ${refusal.label} raises SystemExit runs on, and the kernel keeps its variables`,
+			async () => {
+				const session = makeSession(`rendering-refusal-py-${crypto.randomUUID()}`);
+				const before = await run(session, "py", `${PID_CELL.py}\nkept = 42`);
+
+				const cell = await run(session, "py", refusal.code);
+				const after = await run(session, "py", `${PID_CELL.py}\n${READ_KEPT.py}`);
+
+				expect(cell.cancelled).toBe(false);
+				expect(cell.exitCode).toBe(0);
+				expect(printsLine(cell.output, "after")).toBe(true);
+				expect(pidOf(after)).toBe(pidOf(before));
+				expect(after.output).toContain("kept 42");
+			},
+			120_000,
+		);
+	}
+
+	it.skipIf(!PYTHON_INTEGRATION)(
+		"py: an interrupt that lands while print inspects a value stops the cell, and the kernel keeps its variables",
+		async () => {
+			const session = makeSession(`probe-interrupt-py-${crypto.randomUUID()}`);
+			const before = await run(session, "py", `${PID_CELL.py}\nkept = 42`);
+
+			const interrupt = new AbortController();
+			const cell = await run(session, "py", SLOW_PROBE, {
+				onChunk: chunk => {
+					if (printsLine(chunk, "probing")) interrupt.abort();
+				},
+				signal: interrupt.signal,
+			});
+			const after = await run(session, "py", `${PID_CELL.py}\n${READ_KEPT.py}`);
+
+			expect(cell.cancelled).toBe(true);
+			// The interrupt stopped the cell inside the probe; a probe that kept it would let the cell print on.
+			expect(printsLine(cell.output, "after")).toBe(false);
+			expect(pidOf(after)).toBe(pidOf(before));
+			expect(after.output).toContain("kept 42");
+		},
+		120_000,
+	);
+
+	it.skipIf(!PYTHON_INTEGRATION)(
+		"py: a kernel tool that raises an exception whose __str__ raises KeyboardInterrupt fails with that exception's name, and the kernel keeps serving",
+		async () => {
+			const kernel = await PythonKernel.start({ cwd: process.cwd() });
+			try {
+				const defined = await kernel.execute(DESCRIBED_KERNEL_TOOLS);
+				expect(defined.status).toBe("ok");
+
+				const failed = await kernel.invokeTool({ op: "call", name: "refuses", args: {} });
+				const chunks: string[] = [];
+				await kernel.execute("kept = 42\nprint('kept', kept)", { onChunk: text => void chunks.push(text) });
+
+				expect(failed.status).toBe("error");
+				expect(failed.error?.name).toBe("Unprintable");
+				expect(kernel.isAlive()).toBe(true);
+				expect(chunks.join("")).toBe("kept 42\n");
+			} finally {
+				await kernel.shutdown();
+			}
+		},
+		120_000,
+	);
+
+	it.skipIf(!PYTHON_INTEGRATION)(
+		"py: a kernel tool that returns a value whose repr raises SystemExit returns a placeholder, and the kernel keeps serving",
+		async () => {
+			const kernel = await PythonKernel.start({ cwd: process.cwd() });
+			try {
+				const defined = await kernel.execute(DESCRIBED_KERNEL_TOOLS);
+				expect(defined.status).toBe("ok");
+
+				const result = await kernel.invokeTool({ op: "call", name: "unrepresentable", args: {} });
+				const chunks: string[] = [];
+				await kernel.execute("kept = 42\nprint('kept', kept)", { onChunk: text => void chunks.push(text) });
+
+				expect(result.status).toBe("ok");
+				expect(result.reply).toEqual({ ok: true, value: "<unrepr Unrepresentable>" });
+				expect(kernel.isAlive()).toBe(true);
+				expect(chunks.join("")).toBe("kept 42\n");
+			} finally {
+				await kernel.shutdown();
+			}
+		},
+		120_000,
+	);
 });

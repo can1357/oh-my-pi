@@ -101,11 +101,42 @@ except (AttributeError, OSError, ValueError, io.UnsupportedOperation):
     _CONTROL_IN = sys.__stdin__
 
 
-def _json_default(o: Any) -> Any:
+def _interrupting(exc: BaseException) -> bool:
+    """Whether ``exc`` may be the host's interrupt rather than a value's own.
+
+    The host interrupts a cell with SIGINT, whose handler raises
+    ``KeyboardInterrupt`` on the main thread only; the cell's ``except
+    KeyboardInterrupt`` then reports the cell cancelled. A ``KeyboardInterrupt``
+    on any other thread was raised by a value's own code.
+    """
+    return isinstance(exc, KeyboardInterrupt) and threading.current_thread() is threading.main_thread()
+
+
+def _user_text(value: Any, convert: Callable[[Any], str], placeholder: str) -> str:
+    """``convert(value)``, or ``<placeholder TypeName>`` when the value's own code raises.
+
+    The kernel converts values user code made for its own frames, views and
+    tool replies. A value's ``__str__`` or ``__repr__`` may raise anything,
+    ``SystemExit`` and ``GeneratorExit`` included; such a value gets the
+    placeholder. Only a possible interrupt (``_interrupting``) propagates, so a
+    real interrupt still stops the cell.
+    """
     try:
-        return repr(o)
-    except Exception:
-        return f"<unrepr {type(o).__name__}>"
+        return convert(value)
+    except BaseException as exc:  # noqa: BLE001 - see the docstring
+        if _interrupting(exc):
+            raise
+    try:
+        name = type(value).__name__
+    except BaseException as exc:  # noqa: BLE001 - a metaclass can make the name raise
+        if _interrupting(exc):
+            raise
+        name = None
+    return f"<{placeholder} {name}>" if type(name) is str else f"<{placeholder} object>"
+
+
+def _json_default(o: Any) -> Any:
+    return _user_text(o, repr, "unrepr")
 
 
 def _emit(frame: dict) -> None:
@@ -1900,14 +1931,11 @@ def _json_safe(value: Any, active: set[int] | None = None) -> Any:
         active.add(marker)
         try:
             if isinstance(value, dict):
-                return {str(key): _json_safe(item, active) for key, item in value.items()}
+                return {_user_text(key, str, "unprintable"): _json_safe(item, active) for key, item in value.items()}
             return [_json_safe(item, active) for item in value]
         finally:
             active.discard(marker)
-    try:
-        return str(value)
-    except Exception:
-        return f"<unprintable {type(value).__name__}>"
+    return _user_text(value, str, "unprintable")
 
 
 def _json_view(value: Any, text: str) -> dict | None:
@@ -2196,10 +2224,17 @@ def _data_view(value: Any, text: str) -> dict | None:
 
 
 def _guarded(fn: Callable[..., Any], *args: Any) -> Any:
-    """Classification never breaks a print: a failing probe means "not rich"."""
+    """Classification never breaks a print: a failing probe means "not rich".
+
+    A probe runs the value's own code, which may raise anything, ``SystemExit``
+    and ``GeneratorExit`` included. Only a possible interrupt
+    (``_interrupting``) propagates, so a real interrupt still stops the cell.
+    """
     try:
         return fn(*args)
-    except Exception:
+    except BaseException as exc:  # noqa: BLE001 - see the docstring
+        if _interrupting(exc):
+            raise
         return None
 
 
@@ -2211,7 +2246,7 @@ def _rich_value(value: Any, to_text: Callable[[Any], str]) -> tuple[str, list[tu
         return text, [] if view is None else [("view", view)]
     if type(value) in _PLAIN_TEXT_TYPES:
         return to_text(value), []
-    image = _omp_image(value)
+    image = _guarded(_omp_image, value)
     if image is not None:
         return f"<image {image['mimeType']}>", [("image", image)]
     if not isinstance(value, type):
@@ -2277,12 +2312,20 @@ def _echo_value(value: Any) -> None:
 
 
 def _flush_matplotlib_figures() -> None:
+    """Emit each figure the cell left open, then close it.
+
+    It runs in the request's cleanup, after the cell's code. Rendering runs the
+    figure's own code (artists, formatters), which may raise anything,
+    ``KeyboardInterrupt`` and ``SystemExit`` included; a raise here would end
+    the request without its ``done`` frame, or end the event loop and with it
+    the kernel, so a figure that fails is skipped.
+    """
     plt = sys.modules.get("matplotlib.pyplot")
     if plt is None:
         return
     try:
         fignums = list(plt.get_fignums())
-    except Exception:
+    except BaseException:  # noqa: BLE001 - see the docstring
         return
     for num in fignums:
         try:
@@ -2294,7 +2337,7 @@ def _flush_matplotlib_figures() -> None:
                 _png_payload(lambda buf: fig.savefig(buf, format="png", bbox_inches="tight"))
             )
             plt.close(fig)
-        except Exception:
+        except BaseException:  # noqa: BLE001 - see the docstring
             continue
 
 
@@ -2631,10 +2674,10 @@ def _jsonable(value: Any) -> Any:
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     if isinstance(value, dict):
-        return {str(key): _jsonable(item) for key, item in value.items()}
+        return {_user_text(key, str, "unprintable"): _jsonable(item) for key, item in value.items()}
     if isinstance(value, (list, tuple, set)):
         return [_jsonable(item) for item in value]
-    return repr(value)
+    return _user_text(value, repr, "unrepr")
 
 
 def _handle_tool_request(req: dict) -> None:
@@ -2762,10 +2805,7 @@ async def _handle_request_async(req: dict) -> None:
             _emit_error(rid, exc, source_filename=filename)
         finally:
             _end_exec_sigint()
-            try:
-                _flush_matplotlib_figures()
-            except Exception:
-                pass
+            _flush_matplotlib_figures()
 
         _flush_stream_proxies(rid)
         _emit(
@@ -2788,44 +2828,80 @@ async def _handle_request_async(req: dict) -> None:
 
 
 def _emit_error(rid: str, exc: BaseException, source_filename: str = "<cell>") -> None:
-    if isinstance(exc, SyntaxError) and exc.filename in ("<cell>", source_filename):
-        # Syntax error in the executed source itself: every stack frame is
-        # runner machinery, so emit only the caret display, like a REPL.
-        tb_lines = traceback.format_exception_only(type(exc), exc)
-    else:
-        # Magics execute between the cell and loaded script. Omit runner
-        # frames throughout that chain, not just before the first user frame.
-        # Internal-only failures retain their full traceback for diagnosis.
-        formatted = traceback.TracebackException.from_exception(exc)
-        user_frames = [frame for frame in formatted.stack if frame.filename != __file__]
-        if user_frames:
-            formatted.stack = traceback.StackSummary.from_list(user_frames)
-        tb_lines = list(formatted.format())
-    if isinstance(exc, ModuleNotFoundError) and exc.name:
-        tb_lines.append(
-            f"Install the distribution that provides module {exc.name!r} with "
-            "`%pip install <distribution-name>` in eval. "
-            "Distribution names can differ from import names."
-        )
+    """Send ``exc`` as the request's ``error`` frame.
+
+    Describing an exception runs its own code: ``__str__``, its class's name,
+    and what the traceback reads from it (``__notes__``, a SyntaxError's
+    ``filename``, a ModuleNotFoundError's ``name``). That code may raise
+    anything, ``KeyboardInterrupt``, ``SystemExit`` and ``GeneratorExit``
+    included, and a raise here would leave the request without its ``done``
+    frame, or end the event loop and with it the kernel. So each part falls back
+    to fixed text, and nothing propagates, not even a ``KeyboardInterrupt``: the
+    code that failed has already ended, a real interrupt that lands here only
+    stops the exception's own code, and the host marked the request cancelled
+    when it sent the interrupt.
+    """
     _emit(
         {
             "type": "error",
             "id": rid,
-            "ename": type(exc).__name__,
+            "ename": _exception_name(exc),
             "evalue": _exception_text(exc),
-            "traceback": [line.rstrip("\n") for line in tb_lines],
+            "traceback": _traceback_lines(exc, source_filename),
         }
     )
 
 
+def _exception_name(exc: BaseException) -> str:
+    """The exception's class name; a metaclass can make reading it raise (see ``_emit_error``)."""
+    try:
+        name = type(exc).__name__
+    except BaseException:  # noqa: BLE001 - see _emit_error
+        return "<unnamed exception>"
+    return name if type(name) is str else "<unnamed exception>"
+
+
 def _exception_text(exc: BaseException) -> str:
     """``str(exc)``, or the placeholder ``traceback`` itself prints when the
-    exception's own ``__str__`` raises. A raise here would leave the request
-    without its ``done`` frame, so the cell would wait for its timeout."""
+    exception's own ``__str__`` raises (see ``_emit_error``)."""
     try:
         return str(exc)
-    except Exception:  # noqa: BLE001 - a user exception's __str__ may raise anything
+    except BaseException:  # noqa: BLE001 - see _emit_error
         return "<exception str() failed>"
+
+
+def _traceback_lines(exc: BaseException, source_filename: str) -> list[str]:
+    """The traceback of ``exc`` without runner frames, then an install hint for
+    a missing module. ``[]`` when formatting raises (see ``_emit_error``); the
+    host then shows the name and text alone."""
+    try:
+        if isinstance(exc, SyntaxError) and exc.filename in ("<cell>", source_filename):
+            # Syntax error in the executed source itself: every stack frame is
+            # runner machinery, so emit only the caret display, like a REPL.
+            lines = traceback.format_exception_only(type(exc), exc)
+        else:
+            # Magics execute between the cell and loaded script. Omit runner
+            # frames throughout that chain, not just before the first user frame.
+            # Internal-only failures retain their full traceback for diagnosis.
+            formatted = traceback.TracebackException.from_exception(exc)
+            user_frames = [frame for frame in formatted.stack if frame.filename != __file__]
+            if user_frames:
+                formatted.stack = traceback.StackSummary.from_list(user_frames)
+            lines = list(formatted.format())
+        lines = [line.rstrip("\n") for line in lines]
+    except BaseException:  # noqa: BLE001 - see _emit_error
+        return []
+    try:
+        missing = exc.name if isinstance(exc, ModuleNotFoundError) else None
+        if missing:
+            lines.append(
+                f"Install the distribution that provides module {missing!r} with "
+                "`%pip install <distribution-name>` in eval. "
+                "Distribution names can differ from import names."
+            )
+    except BaseException:  # noqa: BLE001 - see _emit_error
+        pass
+    return lines
 
 
 def _admit_shadow_run(req: dict) -> bool:

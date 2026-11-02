@@ -3,7 +3,7 @@ import { Settings } from "../config/settings";
 import { type OutputArtifactError, OutputSink } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { statusEventKey } from "@oh-my-pi/pi-tui/tools/eval";
 import type { ToolSession } from "../tools";
-import { isThenable } from "../utils/ipc";
+import { catchRejection } from "../utils/ipc";
 import {
 	resolveOutputMaxColumns,
 	resolveOutputSinkArtifactMaxBytes,
@@ -157,8 +157,7 @@ export class OutputConsumerGuard {
 		};
 		return value => {
 			try {
-				const returned = consumer(value);
-				if (isThenable(returned)) returned.then(undefined, record);
+				catchRejection(consumer(value), record);
 			} catch (err) {
 				record(err);
 			}

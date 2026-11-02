@@ -1,5 +1,5 @@
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import { describeThrown } from "@oh-my-pi/pi-utils/type-guards";
+import { describeThrown, thrownStack } from "@oh-my-pi/pi-utils/type-guards";
 import { JsRuntime, type RuntimeCallIdentity, type RuntimeHooks, shadowSnapshotDigest } from "./shared/runtime";
 import {
 	type RunErrorPayload,
@@ -151,12 +151,8 @@ export class WorkerCore {
 	 * cell activity and must keep the default fatal path.
 	 */
 	#consumeRejection(reason: unknown): boolean {
-		let stack: string | undefined;
-		try {
-			stack = reason instanceof Error && typeof reason.stack === "string" ? reason.stack : undefined;
-		} catch {
-			// A Proxy's traps threw: the reason has no stack that names a cell.
-		}
+		// One read: a getter can return text to a type check and an object to a second read.
+		const stack = thrownStack(reason);
 		if (stack) {
 			// The stack can name several cells (helper defined by an earlier cell,
 			// called from the live one); the outermost matching frame is the caller

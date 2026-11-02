@@ -1,4 +1,5 @@
 import { DEFAULT_MAX_BYTES, type OutputArtifactError, OutputSink } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import { describeThrown, thrownStack } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "../../tools";
 import {
 	resolveOutputMaxColumns,
@@ -240,7 +241,7 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 				displayOutputs,
 			};
 		}
-		const message = error instanceof Error ? (error.stack ?? error.message) : String(error);
+		const message = thrownStack(error) ?? describeThrown(error);
 		outputSink.push(message);
 		const summary = await outputSink.dump();
 		return {

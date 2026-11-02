@@ -2,10 +2,11 @@ import { describe, expect, it } from "bun:test";
 import { postmortem } from "@oh-my-pi/pi-utils";
 
 // The global fatal handlers the CLI installs turn what they caught into an Error
-// before anything else. A value whose conversion to text throws must not make
-// that step throw: the handler would then reject on its own, and the interceptors
-// would see the conversion's TypeError instead of the value a caller registered
-// to consume.
+// before anything else, then read its code, syscall, name, message and stack to
+// classify and report it. A value whose conversion to text throws, or an error
+// whose properties throw or are not text when read, must not make those steps
+// throw: the handler would then reject on its own, and the interceptors would
+// see that TypeError instead of the value a caller registered to consume.
 
 const rejectFlag = "--undescribable-reject-child";
 const throwFlag = "--undescribable-throw-child";
@@ -21,6 +22,20 @@ function undescribable(kind: string): unknown {
 			};
 			return new Proxy({}, new Proxy({}, { get: () => refuse }));
 		}
+		case "error-proxy": {
+			const refuse = (): never => {
+				throw new Error("the error proxy refuses every read");
+			};
+			return new Proxy(new Error("unused"), { get: refuse, has: refuse });
+		}
+		case "throwing-code-getter":
+			return Object.defineProperty(new Error("the code is unreadable"), "code", {
+				get() {
+					throw new Error("the code getter failed");
+				},
+			});
+		case "non-text-stack":
+			return Object.defineProperty(new Error("the stack is not text"), "stack", { value: { frames: [] } });
 		default: {
 			const revocable = Proxy.revocable({}, {});
 			revocable.revoke();
@@ -74,17 +89,21 @@ const KINDS: ReadonlyArray<{ kind: string; described: string }> = [
 	{ kind: "null-prototype", described: "[object Object]" },
 	{ kind: "hostile-proxy", described: "a thrown object that cannot be converted to text" },
 	{ kind: "revoked-proxy", described: "a thrown object that cannot be converted to text" },
+	{ kind: "error-proxy", described: "a thrown object that cannot be converted to text" },
+	{ kind: "throwing-code-getter", described: "the code is unreadable" },
+	{ kind: "non-text-stack", described: "the stack is not text" },
 ];
 
 if (!process.argv.includes(rejectFlag) && !process.argv.includes(throwFlag)) {
 	describe("postmortem with a value whose conversion to text throws", () => {
+		// Each row starts a child process; under load that alone can outlast the 5-second default.
 		for (const { kind, described } of KINDS) {
 			it(`hands an unhandled rejection with a ${kind} value to the interceptors`, async () => {
 				const { exitCode, stdout, stderr } = await runChild(rejectFlag, kind);
 				expect(stdout).toBe("intercepted the value itself\n");
 				expect(stderr).not.toContain("[Unhandled Rejection]");
 				expect(exitCode).toBe(0);
-			});
+			}, 30_000);
 
 			it(`reports an uncaught ${kind} exception as itself`, async () => {
 				const { exitCode, stderr } = await runChild(throwFlag, kind);
@@ -92,7 +111,7 @@ if (!process.argv.includes(rejectFlag) && !process.argv.includes(throwFlag)) {
 				expect(stderr).toContain(described);
 				expect(stderr).not.toContain("[Unhandled Rejection]");
 				expect(exitCode).toBe(1);
-			});
+			}, 30_000);
 		}
 	});
 }

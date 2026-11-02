@@ -9,7 +9,7 @@ import {
 import type { ToolSession } from "../../tools";
 import { ToolAbortError } from "../../tools/tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import { isThenable, safeSend as safeSendIpc } from "../../utils/ipc";
+import { catchRejection, safeSend as safeSendIpc } from "../../utils/ipc";
 import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP } from "../bridge-timeout";
 import { getEnabledEvalPreludes } from "../preludes";
 import {
@@ -776,8 +776,7 @@ function deliverRunOutput(
 		logger.warn("JS eval output callback failed", { callback, error: runState.consumerFailure.message });
 	};
 	try {
-		const returned = deliver();
-		if (isThenable(returned)) returned.then(undefined, record);
+		catchRejection(deliver(), record);
 	} catch (err) {
 		record(err);
 	}

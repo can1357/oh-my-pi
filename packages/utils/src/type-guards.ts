@@ -39,6 +39,22 @@ export function describeThrown(value: unknown): string {
 	return `a thrown ${typeof value} that cannot be converted to text`;
 }
 
+/**
+ * An `Error`'s `stack` when it is text, else `undefined`. Never throws. The
+ * stack is read once: reading it can run a getter or a Proxy trap, and a getter
+ * can return text to one read and an object to the next, so a caller must use
+ * this result rather than read the stack again.
+ */
+export function thrownStack(value: unknown): string | undefined {
+	try {
+		if (!(value instanceof Error)) return undefined;
+		const stack: unknown = value.stack;
+		return typeof stack === "string" ? stack : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
 /** `value` itself when it is an `Error`, otherwise an `Error` that describes it. Never throws. */
 export function toError(value: unknown): Error {
 	try {

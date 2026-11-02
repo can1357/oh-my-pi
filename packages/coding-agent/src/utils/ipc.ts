@@ -1,12 +1,14 @@
 import { logger } from "@oh-my-pi/pi-utils";
 
-/** Narrow a value to a thenable so a rejection handler can be attached. */
-export function isThenable(value: unknown): value is PromiseLike<unknown> {
-	return (
-		value != null &&
-		(typeof value === "object" || typeof value === "function") &&
-		typeof (value as { then?: unknown }).then === "function"
-	);
+/**
+ * Attach `onRejected` to `value` when it is a thenable. `then` is read once: the
+ * value can come from any code, and a getter can return a method to one read and
+ * anything else to the next. A `then` getter that throws throws here.
+ */
+export function catchRejection(value: unknown, onRejected: (reason: unknown) => void): void {
+	if (value == null || (typeof value !== "object" && typeof value !== "function")) return;
+	const then: unknown = Reflect.get(value, "then");
+	if (typeof then === "function") then.call(value, undefined, onRejected);
 }
 
 /**
@@ -22,8 +24,7 @@ export function isThenable(value: unknown): value is PromiseLike<unknown> {
  */
 export function safeSend(proc: { send(message: unknown): unknown }, message: unknown, label: string): void {
 	try {
-		const result = proc.send(message);
-		if (isThenable(result)) result.then(undefined, () => {});
+		catchRejection(proc.send(message), () => {});
 	} catch (error) {
 		logger.debug(`${label}: send to subprocess failed`, {
 			error: error instanceof Error ? error.message : String(error),
