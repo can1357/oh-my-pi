@@ -1573,7 +1573,12 @@ export function collectKnownCallIds(messages: ResponseInput): Set<string> {
 	return knownCallIds;
 }
 
-/** Recover executable tool-call blocks omitted from a turn's stored native Responses items. */
+/**
+ * Recover executable tool-call blocks omitted from a turn's stored native Responses items.
+ *
+ * Only calls in the final pairing window count as recorded: `call_id` is not unique across a
+ * `dt: false` snapshot, so an earlier round that reused the id must not hide this turn's cut call.
+ */
 export function pickUnrecordedResponsesToolCalls(
 	assistantMsg: AssistantMessage,
 	historyItems: readonly Record<string, unknown>[],
@@ -1586,7 +1591,13 @@ export function pickUnrecordedResponsesToolCalls(
 	}
 	if (!hasToolCalls) return [];
 	const recordedIds = new Set<string>();
-	for (const item of historyItems) {
+	for (let index = historyItems.length - 1; index >= 0; index--) {
+		const item = historyItems[index];
+		if (responsesToolOutputKind(item.type) !== undefined) break;
+		const role = item.role;
+		if ((item.type === "message" || item.type === undefined) && typeof role === "string" && role !== "assistant") {
+			break;
+		}
 		if (responsesToolCallKind(item.type) === undefined || typeof item.call_id !== "string") continue;
 		recordedIds.add(sanitizeCodexCallId(item.call_id));
 	}
