@@ -4170,6 +4170,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// the telemetry config and session id the agent is constructed with.
 			// Once it exists, each is the session's work and waits for its holds.
 			compress: {
+				modelKey: () => skillDescriptionCompressor.modelKey(),
 				compress: (name, description, request) =>
 					agent
 						? agent.runInRequestContext(() => skillDescriptionCompressor.compress(name, description, request))

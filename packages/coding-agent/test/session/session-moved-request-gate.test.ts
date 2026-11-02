@@ -360,6 +360,7 @@ describe("a session's move hold holds every model request its tree starts", () =
 			authStorage: parts.auth,
 			sessionId: session.sessionId,
 			instructions: "live",
+			voice: "alloy",
 			sdpOffer: "v=0",
 			requestHolds: session.runInRequestContext(captureRequestHolds),
 			callbacks: { onEvent: () => {}, onOutputLevel: () => {} },
