@@ -958,9 +958,9 @@ export class Editor implements Component, Focusable {
 	 *  buffer is a strict prefix of is painted as ghost text after the cursor while the cursor sits at
 	 *  its end and no autocomplete is open. A shown prediction replaces the {@link placeholder}; Tab or
 	 *  Right inserts the rest without submitting. Once the buffer equals one of two or more
-	 *  predictions, Tab opens a list of all of them that swaps the whole line, also without
-	 *  submitting. Each must be a single line. Re-evaluated on every render, so hosts can derive them
-	 *  from live state. */
+	 *  predictions, no ghost extends it to a longer one; Tab instead opens a list of all of them that
+	 *  swaps the whole line, also without submitting. Each must be a single line. Re-evaluated on every
+	 *  render, so hosts can derive them from live state. */
 	predictions?: () => readonly string[] | undefined;
 	/** Called with the prediction's index in {@link predictions} after Tab or Right inserts the rest of
 	 *  a shown prediction, or the alternatives list puts one in the buffer. */
@@ -5491,7 +5491,8 @@ export class Editor implements Component, Focusable {
 	}
 	/**
 	 * The prediction painted as ghost text: the first one the single-line buffer is a strict prefix of,
-	 * with the cursor at its end and no autocomplete open.
+	 * with the cursor at its end and no autocomplete open. None while the buffer equals one of two or
+	 * more predictions, so Tab opens their list rather than extending to a longer one.
 	 */
 	#getShownPrediction(): { index: number; suffix: string } | null {
 		if (this.#autocompleteState) return null;
@@ -5501,6 +5502,7 @@ export class Editor implements Component, Focusable {
 		if (lines.length !== 1) return null;
 		const typed = lines[0] ?? "";
 		if (cursorCol !== typed.length) return null;
+		if (predictions.length > 1 && predictions.includes(typed)) return null;
 		const index = predictions.findIndex(
 			prediction => typed.length < prediction.length && prediction.startsWith(typed),
 		);
@@ -5508,7 +5510,7 @@ export class Editor implements Component, Focusable {
 	}
 	/**
 	 * Two or more predictions, and which one the single-line buffer equals with the cursor at its end:
-	 * Tab then opens the list of all of them. `null` while a prediction is still shown as ghost text.
+	 * Tab then opens the list of all of them.
 	 */
 	#getPredictionAlternatives(): { choices: readonly string[]; index: number } | null {
 		if (this.#autocompleteState) return null;
@@ -5517,7 +5519,7 @@ export class Editor implements Component, Focusable {
 		const { lines, cursorCol } = this.#state;
 		if (lines.length !== 1) return null;
 		const typed = lines[0] ?? "";
-		if (cursorCol !== typed.length || this.#getShownPrediction()) return null;
+		if (cursorCol !== typed.length) return null;
 		const index = choices.indexOf(typed);
 		return index < 0 ? null : { choices, index };
 	}

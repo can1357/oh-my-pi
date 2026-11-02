@@ -381,6 +381,28 @@ describe("Editor prediction", () => {
 		expect(accepted).toEqual([0, 1]);
 	});
 
+	it("opens the list over an inserted prediction that prefixes a longer one instead of extending it", () => {
+		const editor = new Editor(defaultEditorTheme);
+		const accepted: number[] = [];
+		editor.onPredictionAccepted = index => accepted.push(index);
+		editor.predictions = () => ["run the tests", "run the tests and fix failures", "ship it"];
+
+		editor.handleInput("\t");
+		expect(editor.getText()).toBe("run the tests");
+		const frame = editor.render(60).join("\n");
+		expect(frame).toContain("2 more");
+		expect(frame).not.toContain("fix failures");
+
+		editor.handleInput("\t");
+		expect(editor.isAutocompleteActive()).toBeTrue();
+		expect(editor.getText()).toBe("run the tests");
+		editor.handleInput("\x1b[B");
+		editor.handleInput("\r");
+
+		expect(editor.getText()).toBe("run the tests and fix failures");
+		expect(accepted).toEqual([0, 1]);
+	});
+
 	it("keeps the line when the alternatives list is dismissed or typed over", () => {
 		const editor = new Editor(defaultEditorTheme);
 		const accepted: number[] = [];
