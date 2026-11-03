@@ -764,48 +764,59 @@ return await tab.evaluate(() => {
 		});
 	}, 30_000);
 
-	test.each(["calls", "tab"] as const)("keeps a popup's %s print hold after its opener changes origin", async scope => {
-		await withUserBrowser(async cdpUrl => {
-			const user = await puppeteer.connect({ browserURL: cdpUrl, defaultViewport: null });
-			try {
-				const page = await user.newPage();
-				await page.goto(`${baseUrl}/print`);
-				// A clock retained by the popup can advance even after the opener becomes inaccessible.
-				await page.mainFrame().mainRealm().evaluate(`{
+	test.each(["calls", "tab"] as const)(
+		"keeps a popup's %s print hold after its opener changes origin",
+		async scope => {
+			await withUserBrowser(async cdpUrl => {
+				const user = await puppeteer.connect({ browserURL: cdpUrl, defaultViewport: null });
+				try {
+					const page = await user.newPage();
+					await page.goto(`${baseUrl}/print`);
+					// A clock retained by the popup can advance even after the opener becomes inaccessible.
+					await page.mainFrame().mainRealm().evaluate(`{
 					const real = Date.now;
 					let elapsed = 0;
 					${PRINT_HOLD_CLOCK} = () => real() + elapsed;
 					globalThis.advanceClock = () => { elapsed += 60_000; };
 				}`);
-				const hold = await PrintHold.install(page, scope);
-				try {
-					await hold.beginCall(30_000);
-					const popupTarget = user.waitForTarget(target => target.opener() === page.target());
-					await page.mainFrame().mainRealm().evaluate('const receipt = open(""); receipt.advanceClock = advanceClock');
-					const popup = await (await popupTarget).page();
-					if (!popup) throw new Error("Expected the receipt popup");
+					const hold = await PrintHold.install(page, scope);
 					try {
-						await popup.mainFrame().mainRealm().evaluate(
-							'globalThis.log = []; addEventListener("afterprint", () => log.push("afterprint"));',
-						);
-						await page.goto(baseUrl.replace("127.0.0.1", "localhost"));
-						const print = 'log.length = 0; print(); log.push("print returned"); log';
-						expect(await popup.mainFrame().mainRealm().evaluate(print)).toEqual(["afterprint", "print returned"]);
-						await popup.mainFrame().mainRealm().evaluate("advanceClock()");
-						expect(await popup.mainFrame().mainRealm().evaluate(print)).toEqual(
-							scope === "calls" ? ["print returned"] : ["afterprint", "print returned"],
-						);
+						await hold.beginCall(30_000);
+						const popupTarget = user.waitForTarget(target => target.opener() === page.target());
+						await page
+							.mainFrame()
+							.mainRealm()
+							.evaluate('const receipt = open(""); receipt.advanceClock = advanceClock');
+						const popup = await (await popupTarget).page();
+						if (!popup) throw new Error("Expected the receipt popup");
+						try {
+							await popup
+								.mainFrame()
+								.mainRealm()
+								.evaluate('globalThis.log = []; addEventListener("afterprint", () => log.push("afterprint"));');
+							await page.goto(baseUrl.replace("127.0.0.1", "localhost"));
+							const print = 'log.length = 0; print(); log.push("print returned"); log';
+							expect(await popup.mainFrame().mainRealm().evaluate(print)).toEqual([
+								"afterprint",
+								"print returned",
+							]);
+							await popup.mainFrame().mainRealm().evaluate("advanceClock()");
+							expect(await popup.mainFrame().mainRealm().evaluate(print)).toEqual(
+								scope === "calls" ? ["print returned"] : ["afterprint", "print returned"],
+							);
+						} finally {
+							await popup.close();
+						}
 					} finally {
-						await popup.close();
+						await hold.dispose();
 					}
 				} finally {
-					await hold.dispose();
+					await user.disconnect();
 				}
-			} finally {
-				await user.disconnect();
-			}
-		});
-	}, 30_000);
+			});
+		},
+		30_000,
+	);
 
 	test("holds print() in the page a window the page opens to a URL loads", async () => {
 		await withUserBrowser(async cdpUrl => {
