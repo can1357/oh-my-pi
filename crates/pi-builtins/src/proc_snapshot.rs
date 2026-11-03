@@ -192,9 +192,22 @@ pub mod sys {
 		stat_field(pid, 1)
 	}
 
-	/// The process group (`pgrp`, field 5).
+	/// The process group. `getpgid` is one syscall, against the open, read and
+	/// parse of `/proc/<pid>/stat`: scanning a thousand processes costs about
+	/// one millisecond instead of fifteen, which a shell pays on the reap of
+	/// every external command. It reports a group for a process `/proc` hides
+	/// too. A security module may refuse it (`EPERM`), so the stat line stays
+	/// as the fallback; `ESRCH` means nobody holds the pid.
 	pub fn process_group(pid: i32) -> Option<i32> {
-		stat_field(pid, 2)
+		// SAFETY: `getpgid` takes a scalar pid and reads no caller-owned memory.
+		let pgid = unsafe { libc::getpgid(pid) };
+		if pgid > 0 {
+			return Some(pgid);
+		}
+		match std::io::Error::last_os_error().raw_os_error() {
+			Some(libc::EPERM) => stat_field(pid, 2),
+			_ => None,
+		}
 	}
 
 	/// The argument vector from `/proc/<pid>/cmdline`; `None` when unreadable.

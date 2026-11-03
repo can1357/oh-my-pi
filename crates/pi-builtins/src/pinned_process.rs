@@ -145,6 +145,12 @@ mod platform {
 					self.push_validated_child(child_pid, &mut seen, &mut out);
 				}
 			}
+			// The children were read and checked by pid number. They are this
+			// process's only if it still runs now: a running process held its
+			// pid for the whole walk, so no other process could have taken it.
+			if !self.live_identity() {
+				return Vec::new();
+			}
 			out
 		}
 
@@ -257,6 +263,12 @@ mod platform {
 		/// The caller guarantees the child is not reaped before this returns,
 		/// so its pid holds the group's number and every member is the
 		/// operand's.
+		///
+		/// This is the only moment a member that leaves the group later — a
+		/// process that calls `setsid` to detach, for one — can be reached, so
+		/// the scan runs on the reap of every external command. It reads each
+		/// pid's group with one `getpgid` syscall, about a millisecond for a
+		/// thousand processes.
 		pub fn members_before_reap(&self) -> Vec<Self> {
 			if sys::process_group(self.pid) != Some(self.pid) {
 				return Vec::new();
@@ -409,7 +421,7 @@ mod platform {
 			// same approach we already use for `find_by_path` and that the
 			// Windows implementation uses via Toolhelp snapshots.
 			let tree = build_process_tree();
-			Self::children_from_tree(self.pid, &tree)
+			self.children_from_tree(&tree)
 		}
 
 		pub fn parent_pid(&self) -> Option<i32> {
@@ -505,40 +517,49 @@ mod platform {
 			let mut out = Vec::new();
 			let mut visited = HashSet::new();
 			visited.insert(self.pid);
-			Self::collect_descendants_from_tree(self.pid, &tree, &mut visited, &mut out);
+			self.collect_descendants_from_tree(&tree, &mut visited, &mut out);
 			out
 		}
 
-		fn children_from_tree(parent: i32, tree: &HashMap<i32, Vec<i32>>) -> Vec<Self> {
-			let Some(child_pids) = tree.get(&parent) else {
+		/// The running process `child_pid`, when it is still a child of
+		/// `self`. The snapshot names it by pid, so it is pinned first; its
+		/// parent pid is then read through that pin, and `self` must still
+		/// run afterwards, so neither pid can have passed to another process.
+		fn child(&self, child_pid: i32) -> Option<Self> {
+			let child = Self::from_pid(child_pid)?;
+			(child.parent_pid() == Some(self.pid) && self.status() == ProcessStatus::Running)
+				.then_some(child)
+		}
+
+		fn children_from_tree(&self, tree: &HashMap<i32, Vec<i32>>) -> Vec<Self> {
+			let Some(child_pids) = tree.get(&self.pid) else {
 				return Vec::new();
 			};
 			child_pids
 				.iter()
-				.copied()
-				.filter_map(Self::from_pid)
+				.filter_map(|&child_pid| self.child(child_pid))
 				.collect()
 		}
 
 		fn collect_descendants_from_tree(
-			parent: i32,
+			&self,
 			tree: &HashMap<i32, Vec<i32>>,
 			visited: &mut HashSet<i32>,
 			out: &mut Vec<Self>,
 		) {
-			let Some(child_pids) = tree.get(&parent) else {
+			let Some(child_pids) = tree.get(&self.pid) else {
 				return;
 			};
 			for &child_pid in child_pids {
 				if !visited.insert(child_pid) {
 					continue;
 				}
-				let Some(child) = Self::from_pid(child_pid) else {
+				let Some(child) = self.child(child_pid) else {
 					continue;
 				};
 				// Post-order: grandchildren first, so leaf processes get signalled
 				// before their parents during tree termination.
-				Self::collect_descendants_from_tree(child_pid, tree, visited, out);
+				child.collect_descendants_from_tree(tree, visited, out);
 				out.push(child);
 			}
 		}
@@ -1108,15 +1129,16 @@ impl SignalWave {
 /// succeeds for a group of zombies, so the running members are counted too;
 /// while the probe succeeds the group's number names that group, so reading
 /// the process table by number is exact here. Reading only: nothing is
-/// signalled by number.
+/// signalled by number. `table` holds the process table across the entries
+/// of one sweep, which would otherwise read it once per entry.
+fn kernel_group_runs_in(leader: &PinnedProcess, table: &mut Option<GroupTable>) -> bool {
+	leader.signal_group(0) && !list_group(table, leader.pid()).is_empty()
+}
+
+/// [`kernel_group_runs_in`] for a single leader.
 #[must_use]
 pub fn kernel_group_runs(leader: &PinnedProcess) -> bool {
-	if !leader.signal_group(0) {
-		return false;
-	}
-	let table = PinnedProcess::process_groups();
-	let group = leader.pid();
-	!PinnedProcess::members_among(group, table.get(&group).map_or(&[], SmallVec::as_slice)).is_empty()
+	kernel_group_runs_in(leader, &mut None)
 }
 
 /// Pins the running members of `group`, reading the process table once per
@@ -1195,8 +1217,9 @@ impl SpawnEntry {
 
 	/// Whether this entry can still reach a process: its own, on Windows the
 	/// process's descendants, or the group it leads through the kernel's
-	/// group probe (Linux 6.9 and later).
-	fn reaches_anything(&self) -> bool {
+	/// group probe (Linux 6.9 and later). `table` holds the process table
+	/// across the entries of one sweep.
+	fn reaches_anything(&self, table: &mut Option<GroupTable>) -> bool {
 		if self.process.status() == ProcessStatus::Running {
 			return true;
 		}
@@ -1204,13 +1227,13 @@ impl SpawnEntry {
 		if !self.process.descendants().is_empty() {
 			return true;
 		}
-		self.leads() && kernel_group_runs(&self.process)
+		self.leads() && kernel_group_runs_in(&self.process, table)
 	}
 
 	/// Whether the ledger must keep this entry. A child the shell has not yet
 	/// reported stays, so that its report can pin its group's members.
-	fn is_live(&self) -> bool {
-		self.reap == Reap::Pending || self.reaches_anything()
+	fn is_live(&self, table: &mut Option<GroupTable>) -> bool {
+		self.reap == Reap::Pending || self.reaches_anything(table)
 	}
 }
 
@@ -1331,13 +1354,19 @@ impl SpawnLedger {
 	pub fn plan_wave(&self, signal: i32, groups: bool) -> LedgerWave<'_> {
 		let protected = host_protected_pids();
 		let mut wave = SignalWave::new(signal);
+		let mut walked: Vec<PinnedProcess> = Vec::new();
 		for entry in &self.entries {
 			if groups && entry.leads() {
 				wave.group(&entry.process, entry.proof());
 			}
 			wave.process(&entry.process);
+			// A recorded process found under an earlier one was walked with it.
+			if walked.iter().any(|seen| seen.same_identity(&entry.process)) {
+				continue;
+			}
 			for descendant in signalable_descendants(&entry.process, &protected) {
 				wave.process(&descendant);
+				walked.push(descendant);
 			}
 		}
 		LedgerWave { _ledger: self, wave }
@@ -1373,7 +1402,8 @@ impl SpawnLedger {
 	/// remain: comparing against the post-sweep size, not the pre-sweep one,
 	/// keeps a large surviving set from being swept on every record.
 	pub fn prune(&mut self) {
-		self.entries.retain(SpawnEntry::is_live);
+		let mut table: Option<GroupTable> = None;
+		self.entries.retain(|entry| entry.is_live(&mut table));
 		self.next_sweep_at = self.entries.len() + Self::PRUNE_THRESHOLD;
 	}
 
@@ -1384,7 +1414,7 @@ impl SpawnLedger {
 	pub fn reaches_anything(&self) -> bool {
 		let mut table: Option<GroupTable> = None;
 		self.entries.iter().any(|entry| {
-			entry.reaches_anything()
+			entry.reaches_anything(&mut table)
 				|| (entry.reap == Reap::Pending
 					&& entry.leads()
 					&& !list_group(&mut table, entry.process.pid()).is_empty())
@@ -1465,14 +1495,15 @@ pub(crate) mod tests {
 	/// group of a leader the test has not reaped (the unreaped leader holds the
 	/// group's number), every pinned process it holds, then the leader. These
 	/// tests start processes that trap TERM and loop forever, so a failed
-	/// assertion must not leave them running.
-	#[cfg(unix)]
+	/// assertion must not leave them running. Only the Linux tests start such
+	/// processes.
+	#[cfg(target_os = "linux")]
 	pub(crate) struct ProcessGuard {
 		leader: std::process::Child,
 		pins:   Vec<PinnedProcess>,
 	}
 
-	#[cfg(unix)]
+	#[cfg(target_os = "linux")]
 	impl ProcessGuard {
 		pub(crate) const fn new(leader: std::process::Child) -> Self {
 			Self { leader, pins: Vec::new() }
@@ -1483,14 +1514,13 @@ pub(crate) mod tests {
 			self.pins.push(process.clone());
 		}
 
-		/// The leader, for a test that reaps it itself (Linux-only tests).
-		#[cfg(target_os = "linux")]
+		/// The leader, for a test that reaps it itself.
 		pub(crate) const fn leader(&mut self) -> &mut std::process::Child {
 			&mut self.leader
 		}
 	}
 
-	#[cfg(unix)]
+	#[cfg(target_os = "linux")]
 	impl Drop for ProcessGuard {
 		fn drop(&mut self) {
 			if let Ok(group) = i32::try_from(self.leader.id())
@@ -1511,7 +1541,7 @@ pub(crate) mod tests {
 	/// Whether `pid`, a child of this process, is not reaped yet (it runs or
 	/// waits as a zombie), checked without reaping it: `try_wait` would reap a
 	/// zombie leader and free its group's number before the group is killed.
-	#[cfg(unix)]
+	#[cfg(target_os = "linux")]
 	pub(crate) fn unreaped_child(pid: i32) -> bool {
 		// SAFETY: an all-zero `siginfo_t` is valid; `waitid` writes only into it.
 		let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
