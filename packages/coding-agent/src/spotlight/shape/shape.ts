@@ -610,7 +610,7 @@ export async function shapeResult(
 		if (capped) {
 			bump(run, "plainCapped");
 			steps.push("plain-cap");
-		} else if (!holdout) commit(run);
+		}
 	} else if (text !== input.text) {
 		// Shaping that saves too few tokens is dropped: the agent sees the result whole, so nothing was cut or folded.
 		bump(run, "reverted");
@@ -624,6 +624,8 @@ export async function shapeResult(
 		outTokens = countTokens(text);
 	}
 	const applied = text !== input.text && !holdout && !capped;
+	// What the cut hid and folded joins the session only now: a failed save above throws before the state changes.
+	if (applied) commit(run);
 	noteShown(state, applied ? text : (plain?.text ?? input.text), input.toolCallId);
 	stats.charsOut = text.length;
 	const outcome: ShapeOutcome = { text, steps: steps.length ? steps : ["none"], stats, inTokens, outTokens };

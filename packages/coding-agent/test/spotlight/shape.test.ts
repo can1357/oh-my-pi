@@ -401,6 +401,24 @@ describe("spotlight shaping", () => {
 		expect(out.text.length).toBeLessThan(3_600);
 	});
 
+	it("leaves the session's shaping state as it was when a cut's saved copy cannot be written", async () => {
+		const state = newShapeState();
+		const lines = Array.from({ length: 150 }, (_, i) => `row ${String(i).padStart(4, "0")} value=${"x".repeat(40)}`);
+		const input = bash("./dump.sh", lines.join("\n"));
+		const failing: ShapeSink = {
+			async save() {
+				throw new Error("session released");
+			},
+		};
+		await expect(shapeResult(input, context(), scorer(null), state, failing)).rejects.toThrow("session released");
+
+		// Had the failed cut recorded what it hid, the same output would now read as a re-ask and come back whole.
+		const out = await shapeResult(input, context(), scorer(null), state, sink());
+
+		expect(out.steps).toContain("window");
+		expect(out.stats.reasks).toBeUndefined();
+	});
+
 	it("drops a reshape that saves fewer than MIN_SAVED_TOKENS: a short run of lines seen before stays whole", async () => {
 		const state = newShapeState();
 		const first = migrations(5);
