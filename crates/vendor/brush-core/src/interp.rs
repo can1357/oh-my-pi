@@ -331,6 +331,11 @@ impl ExecutionParameters {
 				))
 			};
 			let bad = |fd: ShellFd| error::Error::from(error::ErrorKind::BadFileDescriptor(fd));
+			// The file this process holds already for a step whose descriptor
+			// copies one that is here: the stub's copy of it is the same open
+			// file, so it is dropped and this one shared, and the copies of a
+			// source each target names hold one descriptor here, not one each.
+			let mut shared = None;
 			let made = match &redirect {
 				DeferredRedirect::Open { fd, mode, path, .. } => {
 					stub.open(*fd, *mode, path).await.map_err(|failure| match failure {
@@ -346,16 +351,26 @@ impl ExecutionParameters {
 					}
 					self.carried_fds.retain(|spare| spare != from);
 					let file = self.open_files.remove_fd(*from);
-					match file.as_ref().map(OpenFile::try_borrow_as_fd) {
+					let made = match file.as_ref().map(OpenFile::try_borrow_as_fd) {
 						Some(Ok(borrowed)) => stub.place(*fd, borrowed.as_raw_fd()).await.map_err(|failure| {
 							if matches!(failure, StepFailure::Gone) { gone() } else { bad(*fd) }
 						}),
 						_ => Err(bad(*fd)),
-					}
+					};
+					shared = file;
+					made
 				},
-				DeferredRedirect::Duplicate { fd, from } => stub.duplicate(*fd, *from).await.map_err(|failure| {
-					if matches!(failure, StepFailure::Gone) { gone() } else { bad(*from) }
-				}),
+				DeferredRedirect::Duplicate { fd, from } => {
+					let made = stub.duplicate(*fd, *from).await.map_err(|failure| {
+						if matches!(failure, StepFailure::Gone) { gone() } else { bad(*from) }
+					});
+					shared = self
+						.open_files
+						.try_fd(*from)
+						.filter(|file| file.try_borrow_as_fd().is_ok())
+						.and_then(|file| file.try_clone().ok());
+					made
+				},
 				DeferredRedirect::Close { fd } => stub.close(*fd).await.map(|()| None).map_err(|_| gone()),
 				DeferredRedirect::Truncate { fd, path } => {
 					stub.truncate(*fd).await.map(|()| None).map_err(|failure| match failure {
@@ -373,14 +388,15 @@ impl ExecutionParameters {
 					return Err(error);
 				},
 			};
-			match (&redirect, descriptor) {
-				(DeferredRedirect::Close { fd }, _) => drop(self.open_files.remove_fd(*fd)),
-				(_, Some(descriptor)) => drop(
+			match (&redirect, descriptor, shared) {
+				(DeferredRedirect::Close { fd }, ..) => drop(self.open_files.remove_fd(*fd)),
+				(_, Some(_), Some(file)) => drop(self.open_files.set_fd(redirect.fd(), file)),
+				(_, Some(descriptor), None) => drop(
 					self
 						.open_files
 						.set_fd(redirect.fd(), OpenFile::from(std::fs::File::from(descriptor))),
 				),
-				(_, None) => {},
+				(_, None, _) => {},
 			}
 			self.stub_fds.push(redirect.fd());
 		}

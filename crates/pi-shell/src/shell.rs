@@ -6373,6 +6373,69 @@ mod tests {
 		assert_eq!((result.exit_code, output.as_str()), (Some(0), "S=0\nhas602\n"));
 	}
 
+	/// Every descriptor that names one of this process's standard streams is
+	/// given to a child through one copy of that stream, not one per
+	/// descriptor: 56 copies of stdout reached the open-file limit of 64,
+	/// where Bash runs each command below and every status is 0.
+	#[cfg(target_os = "linux")]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn aliases_of_a_standard_stream_share_one_copy() {
+		use std::fmt::Write as _;
+
+		// nextest runs each test in a process of its own, whose limit this is.
+		let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+		// SAFETY: plain calls on a structure this function owns.
+		unsafe {
+			assert_eq!(libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut limit), 0);
+			limit.rlim_cur = limit.rlim_max.min(64);
+			assert_eq!(libc::setrlimit(libc::RLIMIT_NOFILE, &raw const limit), 0);
+		}
+		let aliases = |to: &str| {
+			(3..59).fold(String::new(), |mut words, fd| {
+				let _ = write!(words, "{fd}{to} ");
+				words
+			})
+		};
+		let (out, err, inp) = (aliases(">&1"), aliases(">&2"), aliases("<&0"));
+		let mixed = (3..59).fold(String::new(), |mut words, fd| {
+			let _ = write!(words, "{fd}{} ", ["<&0", ">&1", ">&2", ">&-"][fd % 4]);
+			words
+		});
+		let rows = [
+			("stdout", format!("/bin/true {out}")),
+			("stderr", format!("/bin/true {err}")),
+			("stdin", format!("/bin/true {inp}")),
+			("mixed", format!("/bin/true {mixed}")),
+			("background", format!("/bin/true {out}& wait $!")),
+			("pipeline", format!("/bin/true {out}| /bin/cat")),
+			("subshell", format!("( /bin/true {err})")),
+			("function", format!("f() {{ /bin/true; }}; f {out}")),
+			("group", format!("{{ /bin/true; }} {err}")),
+			("here-string", format!("/bin/true <<<x {inp}")),
+		];
+		let script = rows
+			.iter()
+			.fold(String::new(), |mut script, (name, command)| {
+				let _ = writeln!(script, "{command}; echo \"{name}=$?\"");
+				script
+			});
+		let expected = rows.iter().fold(String::new(), |mut expected, (name, _)| {
+			let _ = writeln!(expected, "{name}=0");
+			expected
+		});
+		let root = tempfile::tempdir().expect("scratch directory");
+		let (result, output) = run_command_capture_within(
+			Duration::from_secs(60),
+			&script,
+			Some(root.path()),
+			None,
+			CancelToken::default(),
+		)
+		.await
+		.expect("the commands finish");
+		assert_eq!((result.exit_code, output.as_str()), (Some(0), expected.as_str()));
+	}
+
 	/// To choose between spawning a background command and running it in a
 	/// task, the shell expanded its command word, then the chosen path
 	/// expanded it again, so a substitution there ran twice. `log` gets one

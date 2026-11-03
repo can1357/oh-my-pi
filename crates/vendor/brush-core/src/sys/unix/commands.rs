@@ -32,20 +32,22 @@ impl CommandFdInjectionExt for std::process::Command {
 		// descriptors to reached the open-file limit the command itself is
 		// given. The child takes each at its number by `dup2` alone. A file at
 		// 0, 1 or 2 is the one exception: the child's standard streams are put
-		// there before the descriptors are, so it is duplicated here, at most
-		// three of them.
+		// there before the descriptors are, so it is duplicated here once per
+		// standard number, and every descriptor naming that number reads the
+		// one copy, at most three of them however many name them.
 		let mut held = Vec::new();
-		let mut standard = Vec::new();
+		let mut standard: [Option<std::os::fd::OwnedFd>; 3] = [None, None, None];
 		let mut mappings = Vec::new();
 		for (child_fd, open_file) in open_files {
 			let borrowed = open_file.try_borrow_as_fd()?;
-			let parent_fd = if borrowed.as_raw_fd() <= 2 {
-				let owned = borrowed.try_clone_to_owned()?;
-				let raw = owned.as_raw_fd();
-				standard.push(owned);
-				raw
+			let raw = borrowed.as_raw_fd();
+			let parent_fd = if let Some(copy) = usize::try_from(raw).ok().and_then(|n| standard.get_mut(n)) {
+				match copy {
+					Some(owned) => owned.as_raw_fd(),
+					None => copy.insert(borrowed.try_clone_to_owned()?).as_raw_fd(),
+				}
 			} else {
-				borrowed.as_raw_fd()
+				raw
 			};
 			if mappings.iter().any(|&(_, child)| child == child_fd) {
 				return Err(error::ErrorKind::ChildCreationFailure.into());
@@ -325,5 +327,35 @@ mod tests {
 			.expect("injected");
 		assert!(command.status().expect("ran").success());
 		assert_eq!(std::fs::read_to_string(&redirected).expect("read"), "");
+	}
+
+	/// 56 descriptors naming one standard stream are given to a child through
+	/// one copy of it, not one each: with 40 descriptors open here, a copy per
+	/// descriptor reached the open-file limit of 64 before the child started.
+	#[test]
+	fn aliases_of_a_standard_stream_share_one_copy() {
+		// nextest runs each test in a process of its own, whose limit this is.
+		let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+		// SAFETY: plain calls on a structure this function owns.
+		unsafe {
+			assert_eq!(libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut limit), 0);
+			limit.rlim_cur = limit.rlim_max.min(64);
+			assert_eq!(libc::setrlimit(libc::RLIMIT_NOFILE, &raw const limit), 0);
+		}
+		let mut fillers = Vec::new();
+		while open_count() < 40 {
+			fillers.push(std::fs::File::open("/dev/null").expect("filler"));
+		}
+		let streams: [(&str, fn() -> openfiles::OpenFile); 3] = [
+			("stdin", || std::io::stdin().into()),
+			("stdout", || std::io::stdout().into()),
+			("stderr", || std::io::stderr().into()),
+		];
+		for (name, stream) in streams {
+			let mut command = std::process::Command::new("/bin/true");
+			command.inject_fds((3..59).map(|fd| (fd, stream()))).expect("injected");
+			let status = command.status().unwrap_or_else(|e| panic!("{name}: {e}"));
+			assert!(status.success(), "{name}: {status}");
+		}
 	}
 }
