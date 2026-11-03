@@ -9,7 +9,6 @@ import {
 	type Test,
 } from "bun:test";
 import * as fs from "node:fs";
-import * as path from "node:path";
 import { types } from "node:util";
 
 /**
@@ -63,10 +62,14 @@ function refuseAfterTimeout(): void {
 }
 
 /**
- * The process's default timeout of tests and hooks: `bun test --timeout <ms>`, read from the
- * process's own command line since Bun leaves its test flags out of `Bun.argv`; else `[test]
- * timeout` in the working directory's `bunfig.toml`; else Bun's 5000. Undefined where the command
- * line cannot be read. A file changes its own default with the tracked {@link TestLifetime.setDefaultTimeout}.
+ * The process's default timeout of tests and hooks: the last `bun test --timeout <ms>` of the
+ * process's own command line, which is the one Bun applies; Bun leaves its test flags out of
+ * `Bun.argv`, so the command line is read directly. Else Bun's own 5000. Undefined where the
+ * command line cannot be read, which leaves default-timeout bodies to the phase checks alone.
+ *
+ * `bunfig.toml`'s `[test] timeout` is deliberately not read: Bun 1.4.4 does not apply it (measured:
+ * a 400 ms test passes under `[test] timeout=100`), so honouring it here would refuse healthy tests.
+ * A file changes its own default with the tracked {@link TestLifetime.setDefaultTimeout}.
  */
 const processDefaultTimeoutMs: number | undefined = (() => {
 	let argv: string[];
@@ -75,19 +78,13 @@ const processDefaultTimeoutMs: number | undefined = (() => {
 	} catch {
 		return undefined;
 	}
+	let timeout = 5000;
 	for (const [index, arg] of argv.entries()) {
 		const value = arg === "--timeout" ? argv[index + 1] : arg.startsWith("--timeout=") ? arg.slice(10) : undefined;
-		if (value !== undefined) return Number(value);
+		// Bun takes the last of repeated flags (measured), so keep looking.
+		if (value !== undefined && Number.isFinite(Number(value))) timeout = Number(value);
 	}
-	try {
-		const config = Bun.TOML.parse(fs.readFileSync(path.join(process.cwd(), "bunfig.toml"), "utf8")) as {
-			test?: { timeout?: unknown };
-		};
-		if (typeof config.test?.timeout === "number") return config.test.timeout;
-	} catch {
-		// No bunfig.toml, or not one Bun could read either.
-	}
-	return 5000;
+	return timeout;
 })();
 
 /** The timeout Bun applies to a test or hook declared with `options` while its file's default is `fileDefault`. */
@@ -100,23 +97,12 @@ function timeoutOf(options: unknown, fileDefault: number | undefined): number | 
 }
 
 /**
- * A cell no one ever notifies: `Atomics.waitAsync` on it is a wait that only real time ends. Bun's
- * fake timers move `setTimeout` and `Bun.sleep` deadlines, so they cannot keep a deadline.
+ * A cell no one ever notifies: `Atomics.waitAsync` on it ends only when the real time it was given
+ * has passed. Every clock a test can read — `Bun.nanoseconds`, `performance.now`, `Date.now`,
+ * `process.hrtime`, `process.uptime` — moves with Bun's fake timers (measured), so a deadline must
+ * be a wait of a fixed length, never a difference between two clock readings.
  */
 const neverNotified = new Int32Array(new SharedArrayBuffer(4));
-
-/** Note `promise` as timed out if it is still pending at `deadlineNs` (`Bun.nanoseconds`, real time). */
-function checkAtDeadline(promise: Promise<unknown>, name: string, deadlineNs: number): void {
-	const remainingMs = Math.ceil((deadlineNs - Bun.nanoseconds()) / 1e6);
-	if (remainingMs > 0) {
-		const wait = Atomics.waitAsync(neverNotified, 0, 0, remainingMs);
-		// Re-checked against the real clock: the wait cannot end early, but a deadline is not taken on trust.
-		if (wait.async) void wait.value.then(() => checkAtDeadline(promise, name, deadlineNs));
-		else checkAtDeadline(promise, name, deadlineNs);
-		return;
-	}
-	if (timedOut === undefined && Bun.peek.status(promise) === "pending") timedOut = name;
-}
 
 /**
  * Run a test or hook body, and keep the promise it returns in {@link running}. Any native promise
@@ -124,19 +110,22 @@ function checkAtDeadline(promise: Promise<unknown>, name: string, deadlineNs: nu
  *
  * A body still pending at its deadline has timed out, whatever runs next: Bun gives up on it then,
  * and it may settle before any later tracked test or hook starts (during the next file's module
- * setup, say), where a pending check would no longer see it. The deadline runs from the body's
- * entry, as Bun's does, so synchronous work before its first `await` counts.
+ * setup, say), where a pending check would no longer see it. The wait starts as the body is
+ * entered, as Bun's deadline does, so synchronous work before its first `await` counts.
  */
 function runTracked<T>(name: string, fn: (...args: unknown[]) => T, args: unknown[], timeoutMs?: number): T {
-	const startNs = Bun.nanoseconds();
+	const armed = timeoutMs !== undefined && Number.isFinite(timeoutMs) && timeoutMs > 0;
+	// Armed before the body runs, and just past Bun's own deadline for it.
+	const deadline = armed ? Atomics.waitAsync(neverNotified, 0, 0, (timeoutMs as number) + 1) : undefined;
 	const result = fn(...args);
 	if (types.isPromise(result)) {
 		const promise = result as Promise<unknown>;
 		running.set(promise, name);
-		if (timeoutMs !== undefined && Number.isFinite(timeoutMs) && timeoutMs > 0) {
-			// Just past Bun's own deadline for the same body.
-			checkAtDeadline(promise, name, startNs + (timeoutMs + 1) * 1e6);
-		}
+		const noteIfPending = (): void => {
+			if (timedOut === undefined && Bun.peek.status(promise) === "pending") timedOut = name;
+		};
+		if (deadline?.async) void deadline.value.then(noteIfPending);
+		else if (deadline) noteIfPending();
 	}
 	return result;
 }
@@ -174,6 +163,9 @@ function rowArity(row: unknown): number {
  */
 function trackTest(base: AnyTest, fileDefault: () => number | undefined, rows?: readonly unknown[]): AnyTest {
 	const tracked = ((label: string, fn: TestBody | undefined, options?: number) => {
+		// Registration happens as a file is evaluated: a tracked body of an earlier file that is
+		// still running then has outlived its phase, and no later phase has started to see it.
+		noteTimeout();
 		// A bodyless `.todo` or `.skip` declares a test that never runs.
 		if (typeof fn !== "function") return base(label, fn as never, options);
 		const params = rows === undefined ? 0 : Math.min(...rows.map(rowArity));
@@ -274,6 +266,7 @@ export function trackTestLifetime(): TestLifetime {
 	const hook =
 		(register: Hook, name: string, atStart: () => void): Hook =>
 		(fn, options) => {
+			noteTimeout();
 			refuseDoneCallback(name.replace(/^an? /, ""), fn as (...args: never[]) => unknown);
 			const timeoutMs = timeoutOf(options, fileDefaultMs);
 			return register(() => {
@@ -282,6 +275,7 @@ export function trackTestLifetime(): TestLifetime {
 			}, options);
 		};
 	const onTestFinished: typeof bunOnTestFinished = (fn, options) => {
+		noteTimeout();
 		refuseDoneCallback("onTestFinished callback", fn as (...args: never[]) => unknown);
 		const timeoutMs = timeoutOf(options, fileDefaultMs);
 		return bunOnTestFinished(() => {
