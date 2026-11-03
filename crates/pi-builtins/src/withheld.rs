@@ -39,7 +39,9 @@ pub fn withheld_builtin<SE: ShellExtensions>() -> builtins::Registration<SE> {
 /// would replace the host process, but keeps `exec`'s other form: with no
 /// command, the redirections given to `exec` change the shell's own
 /// descriptors for every later command, as in Bash (`exec 2>/dev/null`,
-/// `exec 3>file`, `exec 2>&3`, `exec 3>&-`).
+/// `exec 3>file`, `exec 2>&3`, `exec 3>&-`). The shell's dispatch makes them
+/// the shell's before this runs (see [`exec_names_no_command`]); this checks
+/// `exec`'s options and refuses a command.
 #[derive(Parser)]
 #[clap(disable_help_flag = true, disable_version_flag = true)]
 pub(crate) struct RedirectionOnlyExec {
@@ -72,15 +74,35 @@ impl builtins::Command for RedirectionOnlyExec {
 			writeln!(context.stderr(), "{}: not available in this shell", context.command_name)?;
 			return Ok(ExecutionResult::general_error());
 		}
-		// As Bash does for `exec` with no command, the descriptors this
-		// command sees, its own redirections included, become the shell's.
-		let fds: Vec<_> = context.iter_fds().collect();
-		context.shell.replace_open_files(fds.into_iter());
 		Ok(ExecutionResult::success())
 	}
 }
 
 /// Registration of [`RedirectionOnlyExec`], a special builtin as `exec` is.
 pub fn redirection_only_exec_builtin<SE: ShellExtensions>() -> builtins::Registration<SE> {
-	builtins::builtin::<RedirectionOnlyExec, SE>().special()
+	builtins::builtin::<RedirectionOnlyExec, SE>()
+		.special()
+		.keeps_redirections(exec_names_no_command)
+}
+
+/// Whether `exec`'s arguments (after its name) name no command to run, so
+/// the simple command that runs `exec` leaves its redirections in the
+/// shell, as Bash's dispatch does for `exec` (see
+/// [`builtins::Registration::keeps_redirections`]). Bash keeps them before
+/// `exec` parses its options, so an invalid option (`exec -z 2>/dev/null`)
+/// still keeps them. A command `exec` would replace the shell with is one
+/// this shell refuses, and the refusal changes no descriptor.
+pub(crate) fn exec_names_no_command(args: &[brush_core::CommandArg]) -> bool {
+	let mut words = args.iter().map(ToString::to_string);
+	while let Some(word) = words.next() {
+		match word.as_str() {
+			"--" => return words.next().is_none(),
+			"-a" => {
+				words.next();
+			},
+			option if option.starts_with('-') && option.len() > 1 => {},
+			_ => return false,
+		}
+	}
+	true
 }

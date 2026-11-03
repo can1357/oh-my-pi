@@ -327,9 +327,11 @@ pub struct JobManager {
 	/// command, a subshell, a command not found).
 	foreground_child: bool,
 
-	/// The foreground jobs a signal ended while the job table was frozen,
-	/// which the next notify point reports; see [`JobManager::defer_report`].
-	deferred_reports: Vec<ForegroundJob>,
+	/// The job numbers taken for `lastpipe` pipelines whose last command
+	/// still runs, as Bash's pipeline job takes its number before the last
+	/// command runs (`stop_pipeline` in `execute_pipeline`); see
+	/// [`JobManager::reserve_job_id`].
+	reserved_ids: Vec<usize>,
 }
 
 /// Represents a task that is part of a job.
@@ -490,7 +492,10 @@ impl JobOrigin {
 /// A foreground command that just ended, with its processes in pipeline
 /// order. Bash holds it in its job table until the end of its wait reports
 /// it (`wait_for`); the shell here reports it the same way, after the jobs in
-/// the table.
+/// the table, and while the table is frozen keeps it there (see
+/// [`JobManager::keep_foreground`]). A process the shell ran itself, where
+/// Bash forks, has no pid yet: it takes a shell-only one once the job is
+/// reported or kept, as Bash's forked child has one.
 #[derive(Clone)]
 pub(crate) struct ForegroundJob {
 	processes: Vec<JobProcess>,
@@ -508,10 +513,16 @@ impl ForegroundJob {
 
 	/// The jobs Bash keeps for a pipeline whose last command ran in the shell
 	/// (`lastpipe`): the pipeline job, whose last process is the shell itself,
-	/// `shell_pid`, with the status the last command returned
-	/// (`append_process` in `execute_pipeline`), and the job of the child the
-	/// last command forked, when it forked one.
-	pub(crate) fn split_lastpipe(mut self, shell_pid: sys::process::ProcessId) -> (Self, Option<Self>) {
+	/// `shell_pid`, with the status the last command returned and the text
+	/// of the last command the shell started, `printed_command`
+	/// (`append_process` in `execute_pipeline`), and, when the last command
+	/// was one Bash forks (`last_forked`), that child's job.
+	pub(crate) fn split_lastpipe(
+		mut self,
+		shell_pid: sys::process::ProcessId,
+		printed_command: String,
+		last_forked: bool,
+	) -> (Self, Option<Self>) {
 		let Some(last) = self.processes.pop() else {
 			return (self, None);
 		};
@@ -522,8 +533,8 @@ impl ForegroundJob {
 		};
 		self
 			.processes
-			.push(JobProcess::ended(Some(shell_pid), last.command.clone(), ProcessStatus::Exited(returned)));
-		let last_child = last.pid.is_some().then(|| Self::new(vec![last], false));
+			.push(JobProcess::ended(Some(shell_pid), printed_command, ProcessStatus::Exited(returned)));
+		let last_child = last_forked.then(|| Self::new(vec![last], false));
 		(self, last_child)
 	}
 
@@ -535,18 +546,30 @@ impl ForegroundJob {
 		if self.processes.iter().any(|process| process.status == ProcessStatus::Running) {
 			return;
 		}
+		let raw = self.raw_status();
+		if raw.signal().is_none() {
+			return;
+		}
 		let rows: Vec<_> = self
 			.processes
 			.iter()
 			.map(|process| ProcessRow {
-				pid:         process.pid,
+				pid:         process.pid.or_else(shell_only_pid),
 				command:     &process.command,
 				status:      process.status,
 				stop_signal: None,
 			})
 			.collect();
-		report_foreground(notice, &rows, self.raw_status(), None);
+		report_foreground(notice, &rows, raw, None);
 	}
+}
+
+/// A pid for a process the shell ran itself where Bash forks a child, which
+/// a listing or a report shows as Bash shows the child's. No live job holds
+/// it, so `kill` of it fails as for a process that ended. `None` once the
+/// ids are spent (see [`allocate_in_process_pid_from`]).
+fn shell_only_pid() -> Option<sys::process::ProcessId> {
+	allocate_in_process_pid_from(&NEXT_IN_PROCESS_PID).ok()
 }
 
 /// Bash's report of a foreground job a signal ended, whose status is `raw`:
@@ -957,8 +980,7 @@ impl JobManager {
 			}
 		}
 
-		let id = self.jobs.iter().map(|j| j.id).max().unwrap_or(0) + 1;
-		job.id = id;
+		job.id = self.next_job_id();
 		job.annotation = JobAnnotation::Current;
 		job.started_with_job_control = job_control;
 		// A pid this job's processes now hold no longer names the job that
@@ -970,6 +992,68 @@ impl JobManager {
 
 		#[allow(clippy::unwrap_used, reason = "we just pushed an element")]
 		self.jobs.last().unwrap()
+	}
+
+	/// The number after the highest one a job holds or a `lastpipe`
+	/// pipeline took (see [`Self::reserve_job_id`]), which Bash gives a new
+	/// job (`stop_pipeline` takes the slot after the last one in use).
+	fn next_job_id(&self) -> usize {
+		self.jobs
+			.iter()
+			.map(|job| job.id)
+			.chain(self.reserved_ids.iter().copied())
+			.max()
+			.unwrap_or(0)
+			+ 1
+	}
+
+	/// Takes the number of the job of a `lastpipe` pipeline, whose last
+	/// command is about to run in the shell: Bash installs that job, the
+	/// pipeline's other processes, before the last command runs (`stop_pipeline`
+	/// in `execute_pipeline`), so the jobs the last command starts number
+	/// after it. [`Self::keep_foreground`] installs it once the pipeline has
+	/// ended; [`Self::release_job_id`] gives the number back otherwise.
+	pub(crate) fn reserve_job_id(&mut self) -> usize {
+		let id = self.next_job_id();
+		self.reserved_ids.push(id);
+		id
+	}
+
+	/// Gives back a number [`Self::reserve_job_id`] took.
+	pub(crate) fn release_job_id(&mut self, id: usize) {
+		self.reserved_ids.retain(|&reserved| reserved != id);
+	}
+
+	/// Keeps `job`, a foreground job that ended while the job table was
+	/// frozen, in the table, as Bash's job stays there unnotified until the
+	/// next notify point: `jobs` lists it, `wait` returns its status, and the
+	/// notify point reports it as a foreground job and forgets it. It takes
+	/// the number `reserved` names (see [`Self::reserve_job_id`]), or the
+	/// next one; `origin` is the shell it started in.
+	pub(crate) fn keep_foreground(
+		&mut self,
+		job: ForegroundJob,
+		origin: JobOrigin,
+		reserved: Option<usize>,
+	) {
+		let id = match reserved {
+			Some(id) => {
+				self.release_job_id(id);
+				id
+			},
+			None => self.next_job_id(),
+		};
+		let mut job = Job::ended_foreground(job, origin);
+		job.id = id;
+		for pid in job.completed_process_ids.clone() {
+			self.forget_reported(pid);
+		}
+		let index = self
+			.jobs
+			.iter()
+			.position(|other| other.id > id)
+			.unwrap_or(self.jobs.len());
+		self.jobs.insert(index, job);
 	}
 
 	/// Returns the current job, if there is one.
@@ -1480,25 +1564,18 @@ impl JobManager {
 		std::mem::take(&mut self.foreground_child)
 	}
 
-	/// Keeps `job`, a foreground job that ended while the job table was
-	/// frozen, for the next notify point to report, as Bash keeps it in its
-	/// table unnotified. A job no signal ended reports nothing and is not
-	/// kept.
-	pub(crate) fn defer_report(&mut self, job: ForegroundJob) {
-		if job.raw_status().signal().is_some() {
-			self.deferred_reports.push(job);
-		}
-	}
-
 	/// Reports the jobs that ended and then forgets the reported ones, as
 	/// Bash's `notify_and_cleanup` does: nothing happens while the job table
 	/// is frozen. Each job no listing has shown since it ended is reported —
 	/// a job a signal ended by its processes' lines on the shell's standard
 	/// error, unless the signal is SIGINT, SIGTERM or SIGPIPE or the shell
-	/// traps it — and is then forgotten, while a job that exited stays for
-	/// `wait`. `foreground` is the command that just ended, which Bash holds
-	/// in its table until this point. In a command substitution nothing is
-	/// printed and every ended job but `$!`'s is forgotten.
+	/// traps it — and is then forgotten, while a background job that exited
+	/// stays for `wait`. A foreground job the table kept (see
+	/// [`Self::keep_foreground`]) is reported by the foreground rule and
+	/// forgotten however it ended. `foreground` is the command that just
+	/// ended, which Bash holds in its table until this point. In a command
+	/// substitution nothing is printed and every ended job but `$!`'s is
+	/// forgotten.
 	pub(crate) fn notify_and_cleanup(
 		&mut self,
 		notice: &mut JobNotice<'_>,
@@ -1525,10 +1602,10 @@ impl JobManager {
 			if job.listed || !job.is_done() {
 				continue;
 			}
-			let signaled = job.raw_status().signal().is_some();
 			// POSIX keeps the status of a background job that exited for a
-			// later `wait`; only a job a signal ended is reported here.
-			if !signaled {
+			// later `wait`; only a job a signal ended is reported here. Bash
+			// notifies of a foreground job however it ended.
+			if !job.foreground && job.raw_status().signal().is_none() {
 				continue;
 			}
 			match self.reporting {
@@ -1537,21 +1614,20 @@ impl JobManager {
 						job.listed = true;
 					}
 				},
+				JobReporting::Script if job.foreground => {
+					job.report_as_foreground(notice);
+					job.listed = true;
+				},
 				JobReporting::Script => {
 					job.report(notice);
 					job.listed = true;
 				},
 			}
 		}
-		if matches!(self.reporting, JobReporting::Script) {
-			for deferred in std::mem::take(&mut self.deferred_reports) {
-				deferred.report(notice);
-			}
-			if let Some(foreground) = foreground {
-				foreground.report(notice);
-			}
-		} else {
-			self.deferred_reports.clear();
+		if matches!(self.reporting, JobReporting::Script)
+			&& let Some(foreground) = foreground
+		{
+			foreground.report(notice);
 		}
 	}
 
@@ -1681,9 +1757,10 @@ impl JobManager {
 	}
 
 	/// Keeps `status` for the job's last pid (its `$!`), so a later `wait` on
-	/// that pid returns it again, as in Bash.
+	/// that pid returns it again, as in Bash. A foreground job keeps none:
+	/// Bash keeps a status only for an asynchronous job (`delete_job`).
 	fn report(&mut self, job: &Job, status: u8) {
-		let Some(pid) = job.last_pid() else {
+		let Some(pid) = job.last_pid().filter(|_| !job.foreground) else {
 			return;
 		};
 		self.reported.retain(|&(reported, _)| reported != pid);
@@ -1833,6 +1910,12 @@ pub struct Job {
 
 	/// What the job recorded of the shell that started it.
 	origin: JobOrigin,
+
+	/// Whether this is a foreground job the table kept because it ended
+	/// while the table was frozen (see [`JobManager::keep_foreground`]): it
+	/// is reported as a foreground job, whatever ended it, and its pid keeps
+	/// no status once it leaves.
+	foreground: bool,
 }
 
 /// The job as `jobs` lists it (Bash's `print_pipeline`), as the notice of a
@@ -1904,7 +1987,42 @@ impl Job {
 			stages: Vec::new(),
 			processes,
 			origin,
+			foreground: false,
 		}
+	}
+
+	/// The table's entry for `job`, a foreground job that ended while the
+	/// table was frozen (see [`JobManager::keep_foreground`]), started in
+	/// `origin`: its processes, each process the shell ran itself given a
+	/// shell-only pid (see [`shell_only_pid`]), and the status Bash's
+	/// `job_exit_status` takes for it.
+	fn ended_foreground(job: ForegroundJob, origin: JobOrigin) -> Self {
+		let processes: Vec<_> = job
+			.processes
+			.into_iter()
+			.map(|mut process| {
+				process.pid = process.pid.or_else(shell_only_pid);
+				process
+			})
+			.collect();
+		let command_line = processes
+			.iter()
+			.map(|process| process.command.as_str())
+			.collect::<Vec<_>>()
+			.join(" | ");
+		let status = match raw_status(processes.iter().map(|process| process.status), origin.pipefail) {
+			ProcessStatus::Signaled { signal, .. } => 128_u8.saturating_add(signal),
+			ProcessStatus::Exited(status) => status,
+			ProcessStatus::Running => 0,
+		};
+		let mut ended = Self::new(std::iter::empty(), command_line, JobState::Done, origin);
+		ended.completed_process_ids = processes.iter().filter_map(|process| process.pid).collect();
+		ended.representative_process_id = ended.completed_process_ids.first().copied();
+		ended.last_process_id = ended.completed_process_ids.last().copied();
+		ended.completed_result = Some(Ok(ExecutionResult::new(status)));
+		ended.processes = processes;
+		ended.foreground = true;
+		ended
 	}
 
 	/// Returns a job that runs `body` inside the shell process. It takes a

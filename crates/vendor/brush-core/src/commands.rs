@@ -81,9 +81,13 @@ impl<SE: ShellExtensions> ExecutionContext<'_, SE> {
 		self.params.stdout(self.shell)
 	}
 
-	/// Returns the standard error file; usable with `write!` et al.
+	/// Returns the standard error file for the command's diagnostics; usable
+	/// with `write!` et al. A write that fails is dropped, as Bash's
+	/// `fprintf (stderr, …)` drops a diagnostic it cannot print, so a
+	/// builtin whose standard error is closed or full still returns the
+	/// status its error gives.
 	pub fn stderr(&self) -> impl std::io::Write + 'static {
-		self.params.stderr(self.shell)
+		ioutils::Diagnostics(self.params.stderr(self.shell))
 	}
 
 	/// Returns the cancellation token, if one is configured.
@@ -510,6 +514,17 @@ pub struct SimpleCommand<'a, SE: extensions::ShellExtensions> {
 	/// spawned process. When `None`, `command_name` is used.
 	pub argv0: Option<String>,
 
+	/// Whether this is the dispatch of the command a simple command of the
+	/// script names, as the interpreter runs it, rather than of one a
+	/// builtin runs on its behalf (`builtin`, `env`, …). `command` passes its
+	/// own on, as Bash strips `command [-p] [--]` before it dispatches
+	/// (`check_command_builtin` in `execute_simple_command`): `command exec`
+	/// leaves its redirections in the shell, `builtin exec` and `builtin
+	/// command exec` do not (see [`builtins::Registration::keeps_redirections`]).
+	/// A builtin this runs sees it as
+	/// [`ExecutionParameters::dispatches_simple_command`].
+	pub dispatches_simple_command: bool,
+
 	/// Optionally provides a function that can run after execution occurs. Note
 	/// that it is *not* invoked if the shell is discarded during the execution
 	/// process.
@@ -542,6 +557,7 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 			process_group_id: None,
 			in_pipeline: false,
 			argv0: None,
+			dispatches_simple_command: false,
 			post_execute: None,
 		}
 	}
@@ -652,6 +668,18 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 	) -> Result<ExecutionSpawnResult, error::Error> {
 		// Only an external command's child can make deferred redirections.
 		interp::materialize_deferred_redirects(&self.shell, &mut self.params).await?;
+		self.params.set_dispatches_simple_command(self.dispatches_simple_command);
+		// Bash makes the redirections of a simple command that runs `exec`
+		// the shell's own before `exec` runs (`execute_builtin_or_function`),
+		// so they stay however `exec` then ends.
+		if self.dispatches_simple_command
+			&& builtin
+				.keeps_redirections
+				.is_some_and(|keeps| keeps(self.args.get(1..).unwrap_or_default()))
+		{
+			let fds: Vec<_> = self.params.iter_fds(&self.shell).collect();
+			self.shell.replace_open_files(fds.into_iter());
+		}
 		match self.shell {
 			ShellForCommand::OwnedShell { target, .. } => {
 				Ok(Self::execute_via_builtin_in_owned_shell(
@@ -1161,20 +1189,22 @@ pub(crate) async fn invoke_shell_function(
 
 	// Handle control-flow.
 	match result.next_control_flow {
+		// As Bash's `fprintf (stderr, …)`, a diagnostic that cannot be
+		// written is dropped.
 		ExecutionControlFlow::BreakLoop { .. } => {
-			context
+			let _ = context
 				.params
 				.stderr(context.shell)
 				.write_all_async(b"break: only meaningful in a `for', `while', or `until' loop\n")
-				.await?;
+				.await;
 			result.next_control_flow = ExecutionControlFlow::Normal;
 		},
 		ExecutionControlFlow::ContinueLoop { .. } => {
-			context
+			let _ = context
 				.params
 				.stderr(context.shell)
 				.write_all_async(b"continue: only meaningful in a `for', `while', or `until' loop\n")
-				.await?;
+				.await;
 			result.next_control_flow = ExecutionControlFlow::Normal;
 		},
 		ExecutionControlFlow::ReturnFromFunctionOrScript => {

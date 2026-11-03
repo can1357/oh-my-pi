@@ -145,6 +145,10 @@ pub struct ExecutionParameters {
 	/// The command of the subshell this context runs that Bash would run in
 	/// place of the subshell; see [`ExecInPlace`].
 	exec_in_place:            Option<ExecInPlace>,
+	/// Whether the builtin that runs with these parameters is the one a
+	/// simple command of the script dispatches; see
+	/// [`commands::SimpleCommand::dispatches_simple_command`].
+	dispatches_simple_command: bool,
 }
 
 /// The pipeline of a subshell's body that Bash runs in place of the subshell
@@ -157,27 +161,41 @@ pub(crate) struct ExecInPlace {
 	pipeline: usize,
 	/// Where the stage that runs the subshell records its process.
 	slot:     Arc<Mutex<Option<StandInProcess>>>,
-	/// For the last command of a `;`, `&&` or `||` list, the traps the
-	/// subshell inherited: Bash runs that command in place only when the
-	/// subshell traps no signal, `EXIT` or `ERR` as it starts the command
-	/// (`optimize_connection_fork`), and a subshell resets the traps it
-	/// inherits except the ignored ones. `None` for the body's only command,
+	/// Whether the pipeline is the last command of a `;`, `&&` or `||` list,
+	/// which Bash runs in place only when nothing blocks it as the command
+	/// starts (see [`Self::applies`]), rather than the body's only command,
 	/// which Bash runs in place whatever is trapped.
-	inherited_traps: Option<Arc<[(TrapSignal, String)]>>,
+	last_of_list: bool,
+	/// Whether a trap handler ran in the shell that started the subshell,
+	/// which the subshell inherits (Bash's `running_trap` survives its fork).
+	in_trap:      bool,
 }
 
 impl ExecInPlace {
-	/// Whether Bash runs the command in place now, as `shell` traps signals.
+	/// Whether Bash runs the command in place now, in `shell`, the
+	/// subshell: `should_optimize_fork`, which `optimize_connection_fork`
+	/// asks as the last command of a list starts, holds only while no trap
+	/// handler runs, no `EXIT` or `ERR` trap is set, even an ignored one
+	/// (`signal_is_trapped`), and no signal is trapped with a command
+	/// (`any_signals_trapped` passes over an ignored signal, and over
+	/// `DEBUG` and `RETURN`). The subshell started with the traps it
+	/// inherited reset, but for ignored signals, and for `ERR` with
+	/// `errtrace` (`reset_signal_handlers`), so only a trap it set itself
+	/// counts otherwise.
 	fn applies(&self, shell: &Shell<impl extensions::ShellExtensions>) -> bool {
-		let Some(inherited) = &self.inherited_traps else {
+		if !self.last_of_list {
 			return true;
-		};
-		!shell.traps().iter_handlers().any(|(signal, handler)| {
-			!matches!(signal, TrapSignal::Debug)
-				&& (handler.command.is_empty()
-					|| !inherited
-						.iter()
-						.any(|(kept, command)| *kept == signal && *command == handler.command))
+		}
+		if self.in_trap || shell.call_stack().running_trap() {
+			return false;
+		}
+		let traps = shell.traps();
+		let errtrace = shell.options().shell_functions_inherit_err_trap;
+		!traps.iter_handlers().any(|(signal, handler)| match signal {
+			TrapSignal::Exit => traps.set_in_subshell(signal),
+			TrapSignal::Err => errtrace || traps.set_in_subshell(signal),
+			TrapSignal::Debug | TrapSignal::Return => false,
+			TrapSignal::Signal(_) => !handler.command.is_empty() && traps.set_in_subshell(signal),
 		})
 	}
 }
@@ -287,6 +305,21 @@ impl ExecutionParameters {
 	/// Assigns a cancellation token for this execution.
 	pub fn set_cancel_token(&mut self, token: CancellationToken) {
 		self.cancel_token = Some(token);
+	}
+
+	/// Whether the builtin that runs with these parameters is the one a
+	/// simple command of the script dispatches, rather than one `builtin` (or
+	/// another builtin) runs on its behalf; `command` passes it on to the
+	/// command it runs (see
+	/// [`commands::SimpleCommand::dispatches_simple_command`]).
+	pub const fn dispatches_simple_command(&self) -> bool {
+		self.dispatches_simple_command
+	}
+
+	/// Sets [`Self::dispatches_simple_command`]; `builtin` clears it for the
+	/// builtin it runs.
+	pub const fn set_dispatches_simple_command(&mut self, dispatches: bool) {
+		self.dispatches_simple_command = dispatches;
 	}
 
 	/// Returns the cancellation token, if present.
@@ -643,7 +676,7 @@ impl Execute for ast::Program {
 					Err(err) => {
 						// Display the error and convert to an execution result.
 						if params.reports_errors() {
-							let _ = shell.display_error(&mut params.stderr(shell), &err).await;
+							shell.display_error(&mut params.stderr(shell), &err).await;
 						}
 						result = err.into_result(shell);
 					},
@@ -687,10 +720,10 @@ impl Execute for ast::CompoundList {
 				let job_formatted = job.to_pid_style_string();
 
 				if shell.options().interactive && !shell.is_subshell() {
-					params
+					let _ = params
 						.stderr(shell)
 						.write_all_async(format!("{job_formatted}\n").as_bytes())
-						.await?;
+						.await;
 				}
 
 				result = ExecutionResult::success();
@@ -1096,6 +1129,12 @@ impl Execute for ast::Pipeline {
 		// pipeline: Bash forks each of its stages.
 		let frozen_before = (role.stages.is_none() && runs_last_command_in_shell(self, shell))
 			.then(|| shell.jobs_mut().freeze());
+		// Bash installs the job of such a pipeline, its processes but the
+		// last, before the last command runs (`stop_pipeline`): it takes its
+		// number then, and records the shell's directory and `pipefail`.
+		let lastpipe_job = frozen_before
+			.is_some()
+			.then(|| (shell.jobs_mut().reserve_job_id(), jobs::JobOrigin::of(shell)));
 
 		// Spawn all the processes required for the pipeline, connecting outputs/inputs
 		// with pipes as needed, then wait for them. Waiting also has a side
@@ -1117,7 +1156,9 @@ impl Execute for ast::Pipeline {
 		// for, nor the pipeline of an in-process background job, whose stages
 		// Bash forks from the shell that started the job, nor a `lastpipe`
 		// pipeline, which Bash waits for with its job list frozen: the jobs
-		// that ended then wait for the next point.
+		// that ended then wait for the next point. For a `lastpipe` pipeline
+		// this records whether its last command was one Bash forks (see
+		// `spawn_pipeline_processes`).
 		let started_child = shell.jobs_mut().take_child_started();
 		let notifies = started_child
 			&& role.replaces_subshell.is_none()
@@ -1126,6 +1167,9 @@ impl Execute for ast::Pipeline {
 		let (mut result, foreground) = match waited {
 			Ok((result, foreground)) => (result, foreground),
 			Err(error) => {
+				if let Some((id, _)) = lastpipe_job {
+					shell.jobs_mut().release_job_id(id);
+				}
 				if notifies {
 					shell.notify_and_cleanup_jobs(&params).await;
 				}
@@ -1134,15 +1178,20 @@ impl Execute for ast::Pipeline {
 		};
 		if notifies {
 			shell.notify_and_cleanup_jobs_with(&params, Some(&foreground)).await;
-		} else if frozen_before.is_some() && role.replaces_subshell.is_none() {
+		} else if let Some((id, origin)) = lastpipe_job {
 			// Bash's pipeline job holds the last command as the shell itself,
-			// with the status that command returned (`append_process` with
-			// `$$`), and the child that command forked is a job of its own.
+			// with the status that command returned and the text of the last
+			// command the shell started (`append_process` with `$$`), and the
+			// child the last command forked is a job of its own. Both stay in
+			// the table for the next notify point, `jobs` and `wait`.
 			let shell_pid = sys::process::ProcessId::try_from(std::process::id()).unwrap_or_default();
-			let (pipeline_job, last_child) = foreground.split_lastpipe(shell_pid);
-			shell.jobs_mut().defer_report(pipeline_job);
+			let printed_command = shell.printed_command().to_owned();
+			let (pipeline_job, last_child) =
+				foreground.split_lastpipe(shell_pid, printed_command, started_child);
+			shell.jobs_mut().keep_foreground(pipeline_job, origin, Some(id));
 			if let Some(last_child) = last_child {
-				shell.jobs_mut().defer_report(last_child);
+				let origin = jobs::JobOrigin::of(shell);
+				shell.jobs_mut().keep_foreground(last_child, origin, None);
 			}
 		}
 
@@ -1151,7 +1200,7 @@ impl Execute for ast::Pipeline {
 		// committed contents, and so a failed commit fails this pipeline.
 		if let Err(close_error) = shell.filesystem().drain_closes().await {
 			let close_error = error::Error::from(close_error);
-			let _ = shell.display_error(&mut params.stderr(shell), &close_error).await;
+			shell.display_error(&mut params.stderr(shell), &close_error).await;
 			result.exit_code = ExecutionExitCode::GeneralError;
 		}
 
@@ -1200,7 +1249,9 @@ impl Execute for ast::Pipeline {
 					timing::format_duration_non_posixly(&timing.system),
 				)
 			};
-			stderr.write_all_async(report.as_bytes()).await?;
+			// As Bash's `fprintf (stderr, …)`, a report that cannot be
+			// written is dropped.
+			let _ = stderr.write_all_async(report.as_bytes()).await;
 		}
 
 		Ok(result)
@@ -1212,6 +1263,58 @@ impl Execute for ast::Pipeline {
 struct SpawnedStage {
 	spawn:    ExecutionSpawnResult,
 	stand_in: Arc<Mutex<Option<StandInProcess>>>,
+	/// How the stage's task failed, once [`record_stage_end`] saw it end so.
+	failed:   Option<error::Error>,
+}
+
+impl SpawnedStage {
+	const fn new(spawn: ExecutionSpawnResult, stand_in: Arc<Mutex<Option<StandInProcess>>>) -> Self {
+		Self { spawn, stand_in, failed: None }
+	}
+}
+
+/// How a stage that ran `result` ended, as Bash's job holds the child it
+/// forked for it: the external process a builtin ran in place of the
+/// command, when one did, else the status the command returned.
+fn stage_status(
+	stand_in: &Mutex<Option<StandInProcess>>,
+	result: &ExecutionResult,
+) -> processes::ProcessStatus {
+	stand_in
+		.lock()
+		.unwrap_or_else(PoisonError::into_inner)
+		.map_or(processes::ProcessStatus::Exited(result.exit_code.into()), |(_, status)| status)
+}
+
+/// Records how `stage`, a stage of an in-process background job, ended as
+/// soon as it ends, whatever stage before it the pipeline still waits for,
+/// as Bash's `SIGCHLD` handler marks a process of a job dead when it exits:
+/// `kill` of its pid then fails, a listing shows it ended, and no report
+/// gives it a signal that came later. A task that ended leaves its result
+/// (or its failure) for the pipeline's ordered wait.
+async fn record_stage_end(stage: &mut SpawnedStage, job_stage: &jobs::InProcessStage) {
+	let status = match &mut stage.spawn {
+		ExecutionSpawnResult::StartedProcess(child) => child.collect_exit().await,
+		ExecutionSpawnResult::Completed(result) => Some(stage_status(&stage.stand_in, result)),
+		ExecutionSpawnResult::StartedTask(handle) => {
+			let joined = handle.await;
+			match joined.map_err(error::Error::from).and_then(std::convert::identity) {
+				Ok(result) => {
+					let status = stage_status(&stage.stand_in, &result);
+					stage.spawn = ExecutionSpawnResult::Completed(result);
+					Some(status)
+				},
+				Err(error) => {
+					stage.failed = Some(error);
+					stage.spawn = ExecutionSpawnResult::Completed(ExecutionResult::general_error());
+					None
+				},
+			}
+		},
+	};
+	if let Some(status) = status {
+		job_stage.finish(status);
+	}
 }
 
 /// What a pipeline stands for besides itself.
@@ -1278,6 +1381,13 @@ async fn spawn_pipeline_processes(
 
 		let run_in_current_shell = pipeline_len == 1
 			|| (current_pipeline_index == pipeline_len - 1 && runs_last_command_in_shell(pipeline, shell));
+		// What the last command of a `lastpipe` pipeline starts tells, at the
+		// pipeline's end, whether it was a command Bash forks (an external
+		// command, found or not, a builtin that stands in for one, a
+		// subshell): that child is a job of its own (see `Pipeline::execute`).
+		if run_in_current_shell && pipeline_len > 1 {
+			shell.jobs_mut().take_child_started();
+		}
 
 		// Set up parameters appropriate for this command.
 		let mut cmd_params = params.clone();
@@ -1351,7 +1461,7 @@ async fn spawn_pipeline_processes(
 			}
 		}
 
-		spawn_results.push_back(SpawnedStage { spawn: spawn_result, stand_in });
+		spawn_results.push_back(SpawnedStage::new(spawn_result, stand_in));
 	}
 
 	Ok(spawn_results)
@@ -1452,7 +1562,7 @@ async fn wait_for_pipeline_processes_and_update_status(
 			.map_or_else(|| command_text::pipeline(pipeline), command_text::command);
 		let job_stage = role.stages.and_then(|stages| stages.get(index));
 		let pid = external_pid(&stage);
-		let SpawnedStage { spawn, stand_in } = stage;
+		let SpawnedStage { spawn, stand_in, failed } = stage;
 		// The stage's own stop signal, when it stopped rather than still ran.
 		// When the shell itself got SIGTSTP, no stage reported a stop and all
 		// of them stopped.
@@ -1474,7 +1584,30 @@ async fn wait_for_pipeline_processes_and_update_status(
 				// signal as its status, however it unwound.
 				let token =
 					job_stage.map_or_else(|| params.cancel_token(), |stage| Some(stage.cancellation()));
-				let waited = spawn.wait_with_status(token).await;
+				let waited = match (failed, role.stages) {
+					(Some(error), _) => Err(error),
+					// Each later stage of such a job records its end as it comes
+					// while this one is waited for.
+					(None, Some(stages)) => {
+						let wait = spawn.wait_with_status(token);
+						tokio::pin!(wait);
+						let later = futures::future::join_all(
+							process_spawn_results
+								.iter_mut()
+								.zip(stages.iter().skip(index + 1))
+								.map(|(later, later_stage)| record_stage_end(later, later_stage)),
+						);
+						let first = match futures::future::select(wait.as_mut(), Box::pin(later)).await {
+							futures::future::Either::Left((waited, _)) => Some(waited),
+							futures::future::Either::Right(_) => None,
+						};
+						match first {
+							Some(waited) => waited,
+							None => wait.await,
+						}
+					},
+					(None, None) => spawn.wait_with_status(token).await,
+				};
 				match (job_stage.and_then(jobs::InProcessStage::killed_by), waited) {
 					(Some(signal), _) => Ok((
 						ExecutionWaitResult::Completed(ExecutionResult::new(128_u8.saturating_add(signal))),
@@ -1494,7 +1627,10 @@ async fn wait_for_pipeline_processes_and_update_status(
 				}
 			},
 			(Some(_), ExecutionSpawnResult::StartedProcess(child)) => Err(child),
-			(Some(_), spawn) => Ok((spawn.poll().await?, WaitedStatus::default())),
+			(Some(_), spawn) => match failed {
+				Some(error) => return Err(error),
+				None => Ok((spawn.poll().await?, WaitedStatus::default())),
+			},
 		};
 		let (wait_result, waited_status, own_stop) = match waited {
 			Ok((wait_result, waited_status)) => (wait_result, waited_status, None),
@@ -1615,11 +1751,12 @@ async fn wait_for_pipeline_processes_and_update_status(
 		if interactive {
 			let formatted = job.to_string();
 
-			// N.B. We use the '\r' to overwrite any ^Z output.
-			params
+			// N.B. We use the '\r' to overwrite any ^Z output. A notice that
+			// cannot be written is dropped, as Bash drops it.
+			let _ = params
 				.stderr(shell)
 				.write_all_async(format!("\r{formatted}\n").as_bytes())
-				.await?;
+				.await;
 		}
 	}
 
@@ -1702,6 +1839,7 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::Command {
 					}
 				}
 
+				pipeline_context.shell.note_printed_command(command_text::CondCommand(e));
 				// Evaluate the extended test expression.
 				let result = if extendedtests::eval_extended_test_expr(
 					&e.expr,
@@ -1761,6 +1899,7 @@ impl Execute for ast::CompoundCommand {
 				// Clone off a new subshell, and run the body of the subshell there.
 				// TODO(source-info): Do we need to reset the line number?
 				let mut subshell = shell.clone();
+				subshell.traps_mut().start_subshell();
 
 				// The command Bash runs in place of the subshell reports through
 				// the stage that runs the subshell (see `ExecInPlace`).
@@ -1769,15 +1908,10 @@ impl Execute for ast::CompoundCommand {
 					(Some((pipeline, last_of_list)), Some(slot)) => {
 						let mut body = params.clone();
 						body.exec_in_place = Some(ExecInPlace {
-							pipeline:        std::ptr::from_ref(pipeline).addr(),
-							slot:            Arc::clone(slot),
-							inherited_traps: last_of_list.then(|| {
-								subshell
-									.traps()
-									.iter_handlers()
-									.map(|(signal, handler)| (signal, handler.command.clone()))
-									.collect()
-							}),
+							pipeline: std::ptr::from_ref(pipeline).addr(),
+							slot: Arc::clone(slot),
+							last_of_list,
+							in_trap: shell.call_stack().running_trap(),
 						});
 						in_place_params = body;
 						&in_place_params
@@ -1793,7 +1927,7 @@ impl Execute for ast::CompoundCommand {
 						// Display the error to stderr, but prevent fatal error propagation
 						if params.reports_errors() {
 							let mut stderr = params.stderr(shell);
-							let _ = shell.display_error(&mut stderr, &error).await;
+							shell.display_error(&mut stderr, &error).await;
 						}
 
 						// Convert error to result in subshell context
@@ -1891,10 +2025,10 @@ impl Execute for ast::CoprocessCommand {
 			.map_or_else(|| "COPROC".to_string(), |w| w.to_string());
 
 		if !valid_variable_name(&name) {
-			params
+			let _ = params
 				.stderr(shell)
 				.write_all_async(format!("coproc {name}: not a valid identifier\n").as_bytes())
-				.await?;
+				.await;
 			return Ok(ExecutionExitCode::GeneralError.into());
 		}
 
@@ -2009,6 +2143,8 @@ impl Execute for ast::ForClauseCommand {
 
 		for value in expanded_values {
 			ensure_not_cancelled(params)?;
+			// Bash records the loop's head as each pass starts.
+			shell.note_printed_command(command_text::ForHead(self));
 			if shell.options().print_commands_and_arguments {
 				if let Some(unexpanded_values) = &self.values {
 					shell
@@ -2067,6 +2203,7 @@ impl Execute for ast::CaseClauseCommand {
 		params: &ExecutionParameters,
 	) -> Result<ExecutionResult, error::Error> {
 		ensure_not_cancelled(params)?;
+		shell.note_printed_command(command_text::CaseHead(self));
 		// N.B. One would think it makes sense to trace the expanded value being
 		// switched on, but that's not it.
 		if shell.options().print_commands_and_arguments {
@@ -2256,6 +2393,7 @@ impl Execute for ast::ArithmeticCommand {
 		params: &ExecutionParameters,
 	) -> Result<ExecutionResult, error::Error> {
 		ensure_not_cancelled(params)?;
+		shell.note_printed_command(self);
 		let value = self.expr.eval(shell, params, true).await?;
 		let result = if value != 0 {
 			ExecutionResult::success()
@@ -2369,6 +2507,12 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 		mut params: ExecutionParameters,
 	) -> Result<ExecutionSpawnResult, error::Error> {
 		ensure_not_cancelled(&params)?;
+		// Bash records the command's text in the shell that starts it, before
+		// it forks a pipeline stage (`execute_simple_command`).
+		match &mut context.shell {
+			commands::ShellForCommand::ParentShell(shell) => shell.note_printed_command(self),
+			commands::ShellForCommand::OwnedShell { parent, .. } => parent.note_printed_command(self),
+		}
 		let prefix_iter = self.prefix.as_ref().map(|s| s.0.iter()).unwrap_or_default();
 		let suffix_iter = self.suffix.as_ref().map(|s| s.0.iter()).unwrap_or_default();
 		let cmd_name_items = self
@@ -2469,7 +2613,7 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 					let _ = context.shell.env_mut().pop_scope(EnvironmentScope::Command);
 					let err = if special_builtin { err.into_fatal() } else { err };
 					let mut stderr = params.stderr(&context.shell);
-					let _ = context.shell.display_error(&mut stderr, &err).await;
+					context.shell.display_error(&mut stderr, &err).await;
 					return Ok(err.into_result(&context.shell).into());
 				}
 			}
@@ -2540,7 +2684,7 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 				Ok(result) => Ok(result),
 				Err(err) => {
 					if !quiet_token.as_ref().is_some_and(CancellationToken::is_cancelled) {
-						let _ = parent_shell.display_error(&mut stderr, &err).await;
+						parent_shell.display_error(&mut stderr, &err).await;
 					}
 
 					let result = err.into_result(parent_shell);
@@ -2636,7 +2780,7 @@ async fn fail_simple_command_redirect(
 		shell.jobs_mut().note_child_started();
 	}
 	let mut stderr = params.stderr(shell);
-	shell.display_error(&mut stderr, error).await?;
+	shell.display_error(&mut stderr, error).await;
 	let mut result = ExecutionResult::general_error();
 	if shell.options().posix_mode
 		&& !shell.options().interactive
@@ -2705,7 +2849,7 @@ async fn apply_temporary_assignment(
 			return Err(error);
 		}
 		let mut stderr = params.stderr(shell);
-		shell.display_error(&mut stderr, &error).await?;
+		shell.display_error(&mut stderr, &error).await;
 		return Ok(());
 	}
 	// Ensure it's tagged as exported and created in the command scope.
@@ -2770,6 +2914,7 @@ async fn execute_command<SE: extensions::ShellExtensions>(
 	let mut cmd = commands::SimpleCommand::new(context.shell, params, cmd_name, args);
 	cmd.process_group_id = context.process_group_id;
 	cmd.in_pipeline = context.in_pipeline;
+	cmd.dispatches_simple_command = true;
 
 	// Arrange to pop off that ephemeral environment scope.
 	let post_execute: fn(&mut Shell<SE>) -> Result<(), error::Error> = if merge {

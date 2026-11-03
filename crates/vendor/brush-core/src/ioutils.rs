@@ -83,3 +83,24 @@ impl From<FailingReaderWriter> for openfiles::OpenFile {
 		Self::Stream(Box::new(frw))
 	}
 }
+
+/// The shell's standard error as its diagnostics write to it, as Bash's
+/// `fprintf (stderr, …)` does: a write that fails, the descriptor being
+/// closed or the device full, is dropped, so a diagnostic that cannot be
+/// printed never fails the command that prints it.
+pub(crate) struct Diagnostics<W>(pub W);
+
+impl<W: std::io::Write> std::io::Write for Diagnostics<W> {
+	fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+		match self.0.write(buf) {
+			Ok(written) if written > 0 || buf.is_empty() => Ok(written),
+			Err(error) if error.kind() == std::io::ErrorKind::Interrupted => Err(error),
+			Ok(_) | Err(_) => Ok(buf.len()),
+		}
+	}
+
+	fn flush(&mut self) -> std::io::Result<()> {
+		let _ = self.0.flush();
+		Ok(())
+	}
+}

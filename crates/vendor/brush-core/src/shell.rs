@@ -170,6 +170,13 @@ pub struct Shell<SE: extensions::ShellExtensions = extensions::DefaultShellExten
 	/// through the shell's filesystem (see [`Shell::set_umask`]).
 	#[cfg_attr(feature = "serde", serde(skip))]
 	umask: Option<u32>,
+
+	/// The text of the last simple command (or `for`, `case`, `((`, `[[`
+	/// head) this shell started outside a trap, as Bash's
+	/// `the_printed_command_except_trap` holds it: the last process of a
+	/// `lastpipe` pipeline's job, the shell itself, shows it.
+	#[cfg_attr(feature = "serde", serde(skip))]
+	printed_command: String,
 }
 
 impl<SE: extensions::ShellExtensions> Clone for Shell<SE> {
@@ -212,6 +219,7 @@ impl<SE: extensions::ShellExtensions> Clone for Shell<SE> {
 			history: self.history.clone(),
 			resource_limits: self.resource_limits.clone(),
 			umask: self.umask,
+			printed_command: self.printed_command.clone(),
 			depth: self.depth + 1,
 		}
 	}

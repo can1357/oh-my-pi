@@ -178,6 +178,17 @@ pub struct Registration<SE: extensions::ShellExtensions> {
 	/// child, the shell forgets the ended jobs a listing reported before it
 	/// runs the builtin (see [`crate::jobs::JobManager::remove_reported_jobs`]).
 	pub stands_in_for_external_command: bool,
+
+	/// For `exec`: given the arguments after the command name, whether a
+	/// simple command that runs this builtin leaves its redirections in the
+	/// shell, as Bash's `execute_builtin_or_function` does when the command
+	/// it dispatches is `exec` ("calling the exec builtin changes
+	/// redirections forever"). Bash decides this before the builtin parses
+	/// its options, so the redirections stay however it then fails. Only the
+	/// simple command's own dispatch does this: `builtin exec` and a
+	/// `command exec` that `builtin` runs do not (see
+	/// [`crate::commands::SimpleCommand::dispatches_simple_command`]).
+	pub keeps_redirections: Option<fn(&[CommandArg]) -> bool>,
 }
 
 impl<SE: extensions::ShellExtensions> Registration<SE> {
@@ -207,6 +218,14 @@ impl<SE: extensions::ShellExtensions> Registration<SE> {
 	#[must_use]
 	pub const fn stands_in_for_external_command(self) -> Self {
 		Self { stands_in_for_external_command: true, ..self }
+	}
+
+	/// Marks this builtin as one whose simple command leaves its
+	/// redirections in the shell when `when` holds for its arguments (see
+	/// [`Registration::keeps_redirections`]).
+	#[must_use]
+	pub const fn keeps_redirections(self, when: fn(&[CommandArg]) -> bool) -> Self {
+		Self { keeps_redirections: Some(when), ..self }
 	}
 }
 
@@ -549,6 +568,7 @@ pub fn simple_builtin<B: SimpleCommand + Send + Sync, SE: extensions::ShellExten
 		transparent_background_wrapper: false,
 		async_io:            false,
 		stands_in_for_external_command: false,
+		keeps_redirections: None,
 	}
 }
 
@@ -564,6 +584,7 @@ pub fn builtin<B: Command + Send + Sync, SE: extensions::ShellExtensions>() -> R
 		transparent_background_wrapper: false,
 		async_io:            false,
 		stands_in_for_external_command: false,
+		keeps_redirections: None,
 	}
 }
 
@@ -581,6 +602,7 @@ pub fn decl_builtin<B: DeclarationCommand + Send + Sync, SE: extensions::ShellEx
 		transparent_background_wrapper: false,
 		async_io:            false,
 		stands_in_for_external_command: false,
+		keeps_redirections: None,
 	}
 }
 
@@ -606,6 +628,7 @@ pub fn raw_arg_builtin<
 		transparent_background_wrapper: false,
 		async_io:            false,
 		stands_in_for_external_command: false,
+		keeps_redirections: None,
 	}
 }
 

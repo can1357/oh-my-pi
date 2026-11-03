@@ -133,11 +133,12 @@ impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
 				);
 				let formatted = job.to_string();
 
-				// N.B. We use the '\r' to overwrite any ^Z output.
-				params
+				// N.B. We use the '\r' to overwrite any ^Z output. A notice
+				// that cannot be written is dropped, as Bash drops it.
+				let _ = params
 					.stderr(self)
 					.write_all_async(format!("\r{formatted}\n").as_bytes())
-					.await?;
+					.await;
 
 				Ok(result.exit_code.into())
 			},

@@ -307,7 +307,7 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 			Ok(result) => Ok(result),
 			Err(err) => {
 				if params.reports_errors() {
-					let _ = self.display_error(&mut params.stderr(self), &err).await;
+					self.display_error(&mut params.stderr(self), &err).await;
 				}
 
 				let result = err.into_result(self);

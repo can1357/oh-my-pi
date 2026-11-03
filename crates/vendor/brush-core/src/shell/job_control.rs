@@ -5,7 +5,7 @@ use std::io::Write;
 use crate::{
 	error, extensions,
 	interp::ExecutionParameters,
-	jobs::{ForegroundJob, JobNotice, JobSelector, ListingContext, WaitedJob},
+	jobs::{ForegroundJob, JobNotice, JobOrigin, JobSelector, ListingContext, WaitedJob},
 	results::ExecutionResult,
 };
 
@@ -32,6 +32,26 @@ impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
 		}
 	}
 
+	/// Records `command` as the one this shell last started, as Bash's
+	/// `the_printed_command_except_trap` does for each simple command and
+	/// each `for`, `case`, `((` and `[[` head it starts outside a trap
+	/// handler. The last process of a `lastpipe` pipeline's job, the shell
+	/// itself, shows it.
+	pub(crate) fn note_printed_command(&mut self, command: impl std::fmt::Display) {
+		use std::fmt::Write as _;
+		if self.call_stack.running_trap() {
+			return;
+		}
+		self.printed_command.clear();
+		let _ = write!(self.printed_command, "{command}");
+	}
+
+	/// The command this shell last started; see
+	/// [`Self::note_printed_command`].
+	pub(crate) fn printed_command(&self) -> &str {
+		&self.printed_command
+	}
+
 	/// Reports the jobs that ended and forgets the reported ones, as Bash's
 	/// `notify_and_cleanup` does at each of its cleanup points: a job a
 	/// signal ended prints its processes on standard error as `params` sees
@@ -45,8 +65,9 @@ impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
 	/// Like [`Self::notify_and_cleanup_jobs`], and also reports `foreground`,
 	/// the command that just ended, which Bash holds in its job table until
 	/// the end of the wait for it (`wait_for`). While the job table is frozen
-	/// nothing is reported or forgotten, and `foreground` waits for the next
-	/// notify point, as Bash keeps it in its table unnotified.
+	/// nothing is reported or forgotten, and `foreground` stays in the table
+	/// unnotified, as Bash keeps it (see
+	/// [`crate::jobs::JobManager::keep_foreground`]).
 	pub(crate) async fn notify_and_cleanup_jobs_with(
 		&mut self,
 		params: &ExecutionParameters,
@@ -54,7 +75,8 @@ impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
 	) {
 		if self.jobs.is_frozen() {
 			if let Some(foreground) = foreground {
-				self.jobs.defer_report(foreground.clone());
+				let origin = JobOrigin::of(self);
+				self.jobs.keep_foreground(foreground.clone(), origin, None);
 			}
 			return;
 		}

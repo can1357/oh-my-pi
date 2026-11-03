@@ -5,9 +5,52 @@
 //! by ` | `, `( … )` for a subshell and `{ …; }` for a group. A simple command
 //! and any other compound command keep the parser's text.
 
-use std::fmt::Write as _;
+use std::fmt::{self, Display, Write as _};
 
 use brush_parser::ast;
+
+/// The text Bash records for a `for` loop as each pass starts
+/// (`print_for_command_head`): `for NAME in WORDS`, with `"$@"` for a loop
+/// with no `in`.
+pub(crate) struct ForHead<'a>(pub &'a ast::ForClauseCommand);
+
+impl Display for ForHead<'_> {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		write!(f, "for {} in ", self.0.variable_name)?;
+		match &self.0.values {
+			Some(values) => {
+				for (index, value) in values.iter().enumerate() {
+					if index > 0 {
+						f.write_str(" ")?;
+					}
+					write!(f, "{value}")?;
+				}
+				Ok(())
+			},
+			None => f.write_str("\"$@\""),
+		}
+	}
+}
+
+/// The text Bash records for a `case` as it starts
+/// (`print_case_command_head`): `case WORD in `.
+pub(crate) struct CaseHead<'a>(pub &'a ast::CaseClauseCommand);
+
+impl Display for CaseHead<'_> {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		write!(f, "case {} in ", self.0.value)
+	}
+}
+
+/// The text Bash records for a `[[ … ]]` as it starts
+/// (`print_cond_command`).
+pub(crate) struct CondCommand<'a>(pub &'a ast::ExtendedTestExprCommand);
+
+impl Display for CondCommand<'_> {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		write!(f, "[[ {} ]]", self.0.expr)
+	}
+}
 
 /// The text Bash prints for `command`.
 pub(crate) fn command(command: &ast::Command) -> String {

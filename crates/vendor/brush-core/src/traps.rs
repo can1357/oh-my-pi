@@ -239,11 +239,20 @@ pub struct TrapHandlerConfig {
 	/// the job.
 	#[cfg_attr(feature = "serde", serde(skip))]
 	job_signals: Option<Arc<JobSignals>>,
+
+	/// The traps set or reset since this table became a subshell's (see
+	/// [`Self::start_subshell`]); `None` outside a subshell.
+	#[cfg_attr(feature = "serde", serde(skip))]
+	subshell_changes: Option<HashSet<TrapSignal>>,
 }
 
 impl Clone for TrapHandlerConfig {
 	fn clone(&self) -> Self {
-		Self { handlers: self.handlers.clone(), job_signals: None }
+		Self {
+			handlers:         self.handlers.clone(),
+			job_signals:      None,
+			subshell_changes: self.subshell_changes.clone(),
+		}
 	}
 }
 
@@ -289,6 +298,9 @@ impl TrapHandlerConfig {
 		if let Some(job_signals) = &self.job_signals {
 			job_signals.set_trapped(signal_type, true);
 		}
+		if let Some(changes) = &mut self.subshell_changes {
+			changes.insert(signal_type);
+		}
 	}
 
 	/// Removes handlers for a trap signal.
@@ -301,6 +313,27 @@ impl TrapHandlerConfig {
 		if let Some(job_signals) = &self.job_signals {
 			job_signals.set_trapped(signal_type, false);
 		}
+		if let Some(changes) = &mut self.subshell_changes {
+			changes.insert(signal_type);
+		}
+	}
+
+	/// Makes this the trap table of a subshell (`( … )`). Bash resets a
+	/// subshell's traps as it starts, all but the ignored signals
+	/// (`reset_signal_handlers`), and keeps `ERR`, `DEBUG` and `RETURN` only
+	/// with `errtrace` or `functrace`; from now on [`Self::set_in_subshell`]
+	/// tells a trap the subshell set from one it inherited.
+	pub(crate) fn start_subshell(&mut self) {
+		self.subshell_changes = Some(HashSet::new());
+	}
+
+	/// Whether the subshell whose table this is set or reset the trap for
+	/// `signal` itself; outside a subshell every trap is the shell's own.
+	pub(crate) fn set_in_subshell(&self, signal: TrapSignal) -> bool {
+		self
+			.subshell_changes
+			.as_ref()
+			.is_none_or(|changes| changes.contains(&signal))
 	}
 
 	/// Makes this the trap table of a background job that runs inside the

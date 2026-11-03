@@ -1367,7 +1367,7 @@ async fn dispatch<SE: ShellExtensions>(
 		// command, and hand back the status it would put in `$?`.
 		Err(error) => {
 			let mut stderr = base.stderr(shell);
-			let _ = shell.display_error(&mut stderr, &error).await;
+			shell.display_error(&mut stderr, &error).await;
 			return Ok(CommandStatus::Exited(ExecutionExitCode::from(&error).into()));
 		},
 	};

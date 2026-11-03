@@ -45,7 +45,12 @@ pub fn default_builtins<SE: brush_core::ShellExtensions>(
 	#[cfg(feature = "builtin.eval")]
 	m.insert("eval".into(), builtin::<eval::EvalCommand, SE>().special());
 	#[cfg(all(feature = "builtin.exec", unix))]
-	m.insert("exec".into(), builtin::<exec::ExecCommand, SE>().special());
+	m.insert(
+		"exec".into(),
+		builtin::<exec::ExecCommand, SE>()
+			.special()
+			.keeps_redirections(crate::withheld::exec_names_no_command),
+	);
 	#[cfg(feature = "builtin.exit")]
 	m.insert("exit".into(), builtin::<exit::ExitCommand, SE>().special());
 	#[cfg(feature = "builtin.export")]

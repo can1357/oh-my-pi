@@ -11,12 +11,14 @@ impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
 		})
 	}
 
-	/// Returns a value that can be used to write to the shell's currently
-	/// configured standard error stream using `write!` et al.
+	/// Returns a value that can be used to write the shell's diagnostics to
+	/// its currently configured standard error stream using `write!` et al.
+	/// A write that fails is dropped, as Bash's `fprintf (stderr, …)` drops a
+	/// diagnostic it cannot print.
 	pub fn stderr(&self) -> impl std::io::Write + 'static {
-		self.open_files.try_stderr().cloned().unwrap_or_else(|| {
+		ioutils::Diagnostics(self.open_files.try_stderr().cloned().unwrap_or_else(|| {
 			ioutils::FailingReaderWriter::new("standard error not available").into()
-		})
+		}))
 	}
 
 	/// Outputs `set -x` style trace output for a command. Intentionally does not
@@ -71,24 +73,20 @@ impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
 
 	/// Displays the given error to the user, using the shell's error display
 	/// mechanisms. An error caused by running out of file descriptors is
-	/// shown with the process's open-file limit.
+	/// shown with the process's open-file limit. As Bash's `fprintf (stderr,
+	/// …)` does, a write that fails (`file` closed, or a full device) is
+	/// dropped: the command whose error it is goes on as it would have.
 	///
 	/// # Arguments
 	///
 	/// * `file` - The file to write the error to.
 	/// * `err` - The error to display.
-	pub async fn display_error(
-		&self,
-		file: &mut openfiles::OpenFile,
-		err: &error::Error,
-	) -> Result<(), error::Error> {
+	pub async fn display_error(&self, file: &mut openfiles::OpenFile, err: &error::Error) {
 		use crate::extensions::ErrorFormatter as _;
 		let restated = err.with_open_file_limit();
 		let str = self
 			.error_formatter
 			.format_error(restated.as_ref().unwrap_or(err), self);
-		file.write_all_async(str.as_bytes()).await?;
-
-		Ok(())
+		let _ = file.write_all_async(str.as_bytes()).await;
 	}
 }

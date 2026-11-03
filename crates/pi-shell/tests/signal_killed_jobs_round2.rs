@@ -363,16 +363,18 @@ async fn a_here_document_that_reads_text_reports_as_bash_does() {
 /// `kill -0` on a background process a signal killed fails once the process
 /// has ended, as Bash's `SIGCHLD` handler has collected it, also in a loop
 /// that reaches no point that reports jobs; the job is reported at the next
-/// such point (here the end of the script). The shell collected a child only
-/// at such a point, so the loop ran out its 500 rounds.
+/// such point (here `rm`, after the loop). The shell collected a child only
+/// at such a point, so the loop ran out its 500 rounds. The loop waits on a
+/// FIFO, not a `<(...)`, which would be a point that reports jobs: how many
+/// rounds it runs depends on how fast the process dies.
 #[tokio::test(flavor = "multi_thread")]
 async fn kill_zero_sees_a_killed_process_gone() {
 	assert_all_bash(vec![(
 		"builtin-loop".to_owned(),
 		format!(
-			"{STARTED}/bin/sleep 30 & p=$!; started $p; kill -s HUP $p; n=0; while kill -0 $p \
-			 2>/dev/null && ((n++ < 500)); do read -t 0.01 -u 9 9< <(:); done; echo \"ended=$((n < \
-			 500))\"; echo next"
+			"{STARTED}/bin/sleep 30 & p=$!; started $p; d=$(mktemp -d); mkfifo $d/f; exec 9<>$d/f; \
+			 kill -s HUP $p; n=0; while kill -0 $p 2>/dev/null && ((n++ < 500)); do read -t 0.01 -u \
+			 9; done; echo \"ended=$((n < 500))\"; exec 9>&-; rm -rf $d; echo next"
 		),
 	)])
 	.await;

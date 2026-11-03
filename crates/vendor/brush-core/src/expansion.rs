@@ -1011,12 +1011,13 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 				};
 
 				// Strips null bytes from command substitution output for compatibility.
+				// A warning that cannot be written is dropped, as Bash drops it.
 				if cmd_output.contains('\0') {
-					self
+					let _ = self
 						.params
 						.stderr(self.shell)
 						.write_all_async(b"warning: command substitution: ignored null byte in input\n")
-						.await?;
+						.await;
 					cmd_output.retain(|c| c != '\0');
 				}
 

@@ -157,6 +157,11 @@ impl CommandCommand {
 		// The process `command` runs is the child Bash forks for the command,
 		// so the pipeline stage that ran `command` reports how it ended.
 		let params = context.params.clone();
+		// Bash strips `command [-p] [--]` before it dispatches the command, so
+		// the command `command` runs is its simple command's own when
+		// `command` is: `command exec` keeps its redirections, `builtin
+		// command exec` does not.
+		let dispatches_simple_command = params.dispatches_simple_command();
 		let mut cmd = commands::SimpleCommand::new(
 			commands::ShellForCommand::ParentShell(context.shell),
 			context.params,
@@ -165,6 +170,7 @@ impl CommandCommand {
 		);
 		cmd.use_functions = false;
 		cmd.path_dirs = path_dirs;
+		cmd.dispatches_simple_command = dispatches_simple_command;
 
 		let spawn_result = cmd.execute().await?;
 		let pid = match &spawn_result {

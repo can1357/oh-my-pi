@@ -305,6 +305,26 @@ impl ChildProcess {
 		self.reaped = true;
 		self.settled = Some(output);
 	}
+
+	/// Waits for the process to exit, without looking for stops, and keeps
+	/// its exit for the next [`Self::wait`] or [`Self::poll`], as Bash's
+	/// `SIGCHLD` handler records a process's end whenever it comes. Returns
+	/// how the process ended, or `None` when its wait failed or an earlier
+	/// wait took its exit.
+	pub(crate) async fn collect_exit(&mut self) -> Option<ProcessStatus> {
+		if !self.reaped && self.settled.is_none() {
+			let output = (&mut self.exec_future).await;
+			if let Ok(output) = &output {
+				self.write_completion_marker(completion_exit_code(&output.status));
+			}
+			self.reaped = true;
+			self.settled = Some(output);
+		}
+		match &self.settled {
+			Some(Ok(output)) => Some(ProcessStatus::from_exit_status(&output.status)),
+			_ => None,
+		}
+	}
 }
 
 impl Drop for ChildProcess {
