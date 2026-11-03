@@ -5910,7 +5910,7 @@ export class AgentSession implements SettingsScope {
 
 	/**
 	 * Current prompt-cache warming state, for hosts that surface it. Undefined
-	 * when the session has no warmer (side-channels, subagents, older hosts).
+	 * when the session has no warmer (side-channels, one-shot sessions, older hosts).
 	 */
 	get cacheWarmingStatus(): CacheWarmingStatus | undefined {
 		return this.#cacheWarmer?.status;
@@ -5938,7 +5938,10 @@ export class AgentSession implements SettingsScope {
 		const retentionSetting = cfgProvidersCacheRetention.get(this.settings);
 		const warmingOptions = {
 			...options,
-			cacheRetention: options.cacheRetention ?? (retentionSetting === "auto" ? undefined : retentionSetting),
+			cacheRetention:
+				options.cacheRetention ??
+				model.cacheRetention ??
+				(retentionSetting === "auto" ? undefined : retentionSetting),
 		};
 		const armShape = this.#cacheWarmingShape(model);
 		warmer.start({ model, context, options: warmingOptions }, () => {

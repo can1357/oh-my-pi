@@ -200,6 +200,25 @@ describe("createSettingsAwareStreamFn", () => {
 		expect(long.calls[1]?.options?.cacheRetention).toBe("none");
 	});
 
+	it("lets a model's own cache retention outrank the session setting, and callers outrank both", () => {
+		const providerLong = { cacheRetention: "long" } as unknown as Model;
+		const providerShort = { cacheRetention: "short" } as unknown as Model;
+
+		const auto = captureBase();
+		createSettingsAwareStreamFn(Settings.isolated({}), auto.fn)(providerLong, stubContext, undefined);
+		expect(auto.calls[0]?.options?.cacheRetention).toBe("long");
+
+		const global = captureBase();
+		const wrapped = createSettingsAwareStreamFn(Settings.isolated({ "providers.cacheRetention": "long" }), global.fn);
+		wrapped(providerShort, stubContext, undefined);
+		expect(global.calls[0]?.options?.cacheRetention).toBe("short");
+		// A model without its own retention still takes the session setting.
+		wrapped(stubModel, stubContext, undefined);
+		expect(global.calls[1]?.options?.cacheRetention).toBe("long");
+		wrapped(providerShort, stubContext, { cacheRetention: "none" });
+		expect(global.calls[2]?.options?.cacheRetention).toBe("none");
+	});
+
 	it("lets caller-supplied options override the session settings", () => {
 		const settings = Settings.isolated({
 			"providers.openrouterVariant": "floor",

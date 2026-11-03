@@ -177,16 +177,18 @@ const ADDITIVE_MODELS_DEV_CATALOG_PROVIDER_ID_LOOKUP: Readonly<Record<string, tr
 );
 
 /**
- * Bedrock provider-scoped fields to spread onto a model spec, dropping keys
- * that a provider override left unset so an override never clobbers an
- * existing value with `undefined`.
+ * Provider-scoped model fields (Bedrock guardrails and request metadata, and
+ * prompt-cache retention) to spread onto a model spec, dropping keys that a
+ * provider override left unset so an override never clobbers an existing value
+ * with `undefined`.
  */
-function bedrockProviderFields(override: ProviderOverride): Partial<ModelSpec<Api>> {
+function providerModelFields(override: ProviderOverride): Partial<ModelSpec<Api>> {
 	const fields: Partial<ModelSpec<Api>> = {};
 	if (override.guardrailIdentifier !== undefined) fields.guardrailIdentifier = override.guardrailIdentifier;
 	if (override.guardrailVersion !== undefined) fields.guardrailVersion = override.guardrailVersion;
 	if (override.guardrailTrace !== undefined) fields.guardrailTrace = override.guardrailTrace;
 	if (override.requestMetadata !== undefined) fields.requestMetadata = override.requestMetadata;
+	if (override.cacheRetention !== undefined) fields.cacheRetention = override.cacheRetention;
 	return fields;
 }
 
@@ -1240,8 +1242,8 @@ export class ModelRegistry {
 			selectProviderModels(this.#runtimeModelOverlays, providerFilter),
 		);
 		const withModelOverrides = this.#applyModelOverrides(collapseBuiltVariants(combined), this.#modelOverrides);
-		const withProviderBedrock = this.#applyProviderBedrockOverrides(withModelOverrides);
-		return this.#applyDiscoveryPolicies(this.#applyRuntimeProviderOverrides(withProviderBedrock));
+		const withProviderFields = this.#applyProviderModelFields(withModelOverrides);
+		return this.#applyDiscoveryPolicies(this.#applyRuntimeProviderOverrides(withProviderFields));
 	}
 
 	#composeStaticModels(providerFilter?: ReadonlySet<string>): Model<Api>[] {
@@ -1820,6 +1822,7 @@ export class ModelRegistry {
 				providerConfig.guardrailIdentifier ||
 				providerConfig.requestMetadata ||
 				providerConfig.remoteCompaction ||
+				providerConfig.cacheRetention ||
 				providerConfig.transport
 			) {
 				const disableStrictCompat = providerConfig.disableStrictTools ? { disableStrictTools: true } : undefined;
@@ -1842,6 +1845,7 @@ export class ModelRegistry {
 					guardrailVersion: providerConfig.guardrailVersion,
 					guardrailTrace: providerConfig.guardrailTrace,
 					requestMetadata: providerConfig.requestMetadata,
+					cacheRetention: providerConfig.cacheRetention,
 				});
 			}
 
@@ -2736,21 +2740,14 @@ export class ModelRegistry {
 		return buildModel(this.#applyProviderTransportOverride(toModelSpec(model), override));
 	}
 
-	#applyProviderBedrockOverrides(models: Model<Api>[]): Model<Api>[] {
+	#applyProviderModelFields(models: Model<Api>[]): Model<Api>[] {
 		if (this.#providerOverrides.size === 0) return models;
 		return models.map(model => {
 			const override = this.#providerOverrides.get(model.provider);
 			if (!override) return model;
-			const bedrockFields = bedrockProviderFields(override);
-			if (
-				bedrockFields.guardrailIdentifier === undefined &&
-				bedrockFields.guardrailVersion === undefined &&
-				bedrockFields.guardrailTrace === undefined &&
-				bedrockFields.requestMetadata === undefined
-			) {
-				return model;
-			}
-			return buildModel({ ...toModelSpec(model), ...bedrockFields } as ModelSpec<Api>);
+			const fields = providerModelFields(override);
+			if (Object.keys(fields).length === 0) return model;
+			return buildModel({ ...toModelSpec(model), ...fields } as ModelSpec<Api>);
 		});
 	}
 
@@ -3708,7 +3705,7 @@ export class ModelRegistry {
 						return this.#applyProviderTransportOverrideToModel(model, runtimeTransportOverride);
 					})
 				: nextModels;
-			this.#unprojectedModels = this.#applyProviderBedrockOverrides(nextModelsWithTransport);
+			this.#unprojectedModels = this.#applyProviderModelFields(nextModelsWithTransport);
 
 			this.#models = this.#finalizeModels(this.#applyRuntimeModelModifiers(this.#unprojectedModels));
 			this.#invalidateProviderModelCache(providerName);

@@ -59,6 +59,7 @@ import {
 	sanitizeOpenAIResponsesAssistantFallbackItemsForReplay,
 	sanitizeOpenAIResponsesAssistantHistoryItemsForReplay,
 	stripOpenAIResponsesComputerLinkedReasoningIdsForReplay,
+	withModelCacheRetention,
 } from "../utils";
 import { clearStreamingPartialJson, kStreamingLastParseLen, kStreamingPartialJson } from "../utils/block-symbols";
 import { hasVisibleAssistantContent } from "../utils/empty-completion-retry";
@@ -1502,7 +1503,7 @@ export async function buildTransformedCodexRequestBody(
 	model: Model<"openai-codex-responses">,
 	context: Context,
 	options: OpenAICodexResponsesOptions | undefined,
-	promptCacheKey = getOpenAIPromptCacheKey(options),
+	promptCacheKey = getOpenAIPromptCacheKey(withModelCacheRetention(model, options)),
 	inputPrefix?: InputItem[],
 ): Promise<RequestBody> {
 	const input = convertMessages(model, context);
@@ -3321,8 +3322,9 @@ class CodexStreamProcessor {
 export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"> = (
 	model: Model<"openai-codex-responses">,
 	context: Context,
-	options?: OpenAICodexResponsesOptions,
+	rawOptions?: OpenAICodexResponsesOptions,
 ): AssistantMessageEventStream => {
+	const options = withModelCacheRetention(model, rawOptions);
 	const stream = new AssistantMessageEventStream();
 
 	(async () => {

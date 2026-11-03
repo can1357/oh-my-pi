@@ -8,6 +8,7 @@ import {
 	AssignModelRequestSchema,
 	AssignModelResponseSchema,
 	ChatMessageSource,
+	CacheControlType,
 	type GetChatMessageRequest,
 	GetChatMessageRequestSchema,
 	GetChatMessageResponseSchema,
@@ -475,5 +476,27 @@ describe("streamDevin router assignment", () => {
 			topP: Math.fround(0.8),
 			stopPatterns: ["END"],
 		});
+	});
+});
+
+describe("streamDevin prompt-cache retention", () => {
+	it("asks for the ephemeral system-prompt cache unless the request or the model chose `none`", async () => {
+		const cacheOptionsFor = async (modelRetention?: "none" | "long", requestRetention?: "none" | "short") => {
+			const { fetch: fetchImpl, recorded } = fakeDevin({});
+			const model = buildModel({
+				...devinModel({}, "claude-sonnet-4-5"),
+				...(modelRetention ? { cacheRetention: modelRetention } : {}),
+			}) as Model<"devin-agent">;
+			await streamDevin(model, context, {
+				apiKey: "header.payload.signature",
+				fetch: fetchImpl,
+				...(requestRetention ? { cacheRetention: requestRetention } : {}),
+			}).result();
+			return recorded.chat?.systemPromptCacheOptions;
+		};
+		expect((await cacheOptionsFor())?.type).toBe(CacheControlType.EPHEMERAL);
+		expect(await cacheOptionsFor("none")).toBeUndefined();
+		expect(await cacheOptionsFor("long", "none")).toBeUndefined();
+		expect((await cacheOptionsFor("none", "short"))?.type).toBe(CacheControlType.EPHEMERAL);
 	});
 });

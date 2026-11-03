@@ -507,6 +507,25 @@ describe("persisted subagent revival", () => {
 		expect(activeToolNames).toEqual([["read", "yield"]]);
 	});
 
+	it("cold-revives with the fresh spawn's streaming-only cache warming", async () => {
+		const cwd = makeTempDir("@pi-revive-warming-");
+		const sessionFile = await createPersistedSession(cwd);
+		const activeToolNames: string[][] = [];
+		let capturedOptions: CreateAgentSessionOptions | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			capturedOptions = options;
+			return { session: createRevivedSession(activeToolNames).session } as CreateAgentSessionResult;
+		});
+
+		const ref = createRef(sessionFile);
+		const reviver = await createFactory(cwd)(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+
+		// A revived subagent settles back into the parked state; it must not idle-warm there.
+		expect(capturedOptions?.cacheWarming).toBe("streaming");
+	});
+
 	it("preserves explicitly writable cold-revival contracts", async () => {
 		const cwd = makeTempDir("@pi-write-revive-");
 		const sessionFile = await createPersistedSession(cwd, undefined, undefined, undefined, {

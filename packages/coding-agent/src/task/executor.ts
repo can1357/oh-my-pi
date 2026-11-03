@@ -4785,8 +4785,11 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 							}
 						: {}),
 					thinkingLevelCeiling: spawnEffortCeiling,
-					// Subagents are short-lived; never schedule background warm requests.
-					cacheWarming: false,
+					// A subagent waits on its own subagents, jobs and long commands, often past a
+					// 5-minute cache lifetime; keep its prefix warm while its run is active. A
+					// settled subagent stays parked for follow-ups that rarely come, so it is
+					// not warmed.
+					cacheWarming: "streaming",
 					toolNames,
 					outputSchema,
 					outputSchemaMode: options.outputSchemaMode,

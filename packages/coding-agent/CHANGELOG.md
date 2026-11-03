@@ -7,6 +7,11 @@
 - Pinned sessions show a pin beside their title in the status line and the band composer's title, and `/unpin [session id]` unpins a session ([#17848](https://github.com/can1357/oh-my-pi/pull/17848) by [@SuperUserA](https://github.com/SuperUserA))
 - Added a fullscreen extension link browser for picking links already in terminal scrollback: press Alt+O again (or Page Up) while link tags are shown, or Alt+O with no extension link on screen ([#16476](https://github.com/can1357/oh-my-pi/pull/16476) by [@materemias](https://github.com/materemias))
 - Added a `:level` suffix to `^` model tags, such as `^openai-codex/gpt-6-astra:high`, that sets the tagged subagent's initial effort. Typing `:` after a mention lists the model's supported levels. The task tool's `effort` hint and `task.maxEffort` do not override the tagged level, and a per-call `model` for that agent fails as a conflict ([#17574](https://github.com/can1357/oh-my-pi/pull/17574) by [@a-glapinski](https://github.com/a-glapinski))
+- Added `cacheRetention` (`short`, `long`, `none`) to provider entries in `models.yml`. It sets the prompt-cache retention of every request under that provider that names none, and outranks the session-wide `providers.cacheRetention` setting and `PI_CACHE_RETENTION`, so an Anthropic API-key or gateway provider can write 1-hour entries without the global `long` also moving OpenAI GPT-5.6+ requests to 12-hour entries at 2.5x write price ([#17964](https://github.com/can1357/oh-my-pi/pull/17964) by [@sjawhar](https://github.com/sjawhar))
+
+### Changed
+
+- Task subagents now warm their prompt cache while their run is active (`providers.cacheWarming`, capped at `streaming`). A subagent that waited past the cache lifetime on its own subagents, a job or a long command wrote its whole context again on the next turn; a finished subagent is still not warmed ([#17964](https://github.com/can1357/oh-my-pi/pull/17964) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.16.0] - 2026-11-02
 

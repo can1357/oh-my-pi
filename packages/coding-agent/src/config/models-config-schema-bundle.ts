@@ -402,6 +402,13 @@ export const getModelsConfigSchemaBundle = once(() => {
 		 */
 		"requestMetadata?": { "[string]": "string" },
 		/**
+		 * Prompt-cache retention for every request under this provider that names
+		 * none: `short`, `long` or `none`. Outranks the session-wide
+		 * `providers.cacheRetention` setting and `PI_CACHE_RETENTION`, so one
+		 * provider can take 1-hour Anthropic entries without changing another's.
+		 */
+		"cacheRetention?": '"short" | "long" | "none"',
+		/**
 		 * Streaming transport override. When set to `"pi-native"`, omp dispatches
 		 * every model under this provider via the auth-gateway's
 		 * `POST /v1/pi/stream` endpoint instead of the per-provider SDK. The

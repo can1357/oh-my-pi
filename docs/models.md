@@ -240,6 +240,7 @@ Must define at least one of:
 - `disableStrictTools: true`
 - `guardrailIdentifier`
 - `requestMetadata`
+- `cacheRetention`
 - non-empty `modelOverrides`
 - `discovery`
 - `remoteCompaction`
@@ -391,6 +392,30 @@ including Nova and GPT, are not enabled for warming. A model without a lifetime 
 retention tier actually used is never warmed; custom models and `modelOverrides` can opt in
 with `promptCache` once the backing cache behavior is known. See `providers.cacheWarming` in
 [Settings](./settings.md).
+
+### Retention per provider
+
+A provider entry may set `cacheRetention: short | long | none`. It applies to every request under
+that provider that names no retention, and it outranks the session-wide `providers.cacheRetention`
+setting and `PI_CACHE_RETENTION`. `long` buys a different lifetime at a different write price on each
+provider (Anthropic and Bedrock 1 h entries at 2x input; OpenAI GPT-5.6+ Responses 12 h at 2.5x), so
+the global setting cannot choose 1 h Anthropic entries without also changing OpenAI requests. A proxy
+in front of Anthropic also needs `compat.supportsLongCacheRetention: true`, or omp sends it no 1 h marker:
+
+```yaml
+providers:
+  my-claude-gateway:
+    baseUrl: https://gateway.example.com
+    apiKey: GATEWAY_KEY
+    api: anthropic-messages
+    cacheRetention: long
+    compat:
+      supportsLongCacheRetention: true
+```
+
+Task subagents warm their cache entries while their run is active (`providers.cacheWarming`, capped at
+`streaming`): a subagent that waits on its own subagents, jobs or long commands keeps its prefix past
+the 5 min lifetime. A finished subagent is not warmed.
 
 ## Usage costs and time-based pricing
 

@@ -324,6 +324,7 @@ function resolveBedrockInferenceProfileModelId(
 		...(template.guardrailVersion !== undefined ? { guardrailVersion: template.guardrailVersion } : {}),
 		...(template.guardrailTrace !== undefined ? { guardrailTrace: template.guardrailTrace } : {}),
 		...(template.requestMetadata !== undefined ? { requestMetadata: template.requestMetadata } : {}),
+		...(template.cacheRetention !== undefined ? { cacheRetention: template.cacheRetention } : {}),
 	});
 }
 

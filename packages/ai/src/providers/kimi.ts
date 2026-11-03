@@ -42,7 +42,7 @@ export function streamKimi(
 		anthropicBaseUrl: model.baseUrl.replace(/\/v1\/?$/, ""),
 		defaultFormat,
 		anthropicThinkingMode: model.compat.thinkingFormat === "kimi" ? "anthropic-adaptive" : undefined,
-		forwardCacheOptions: true,
+		forwardRequestMetadata: true,
 		extraHeaders: getKimiCommonHeaders,
 	});
 }

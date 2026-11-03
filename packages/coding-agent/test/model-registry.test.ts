@@ -2974,6 +2974,59 @@ describe("ModelRegistry", () => {
 		});
 	});
 
+	describe("provider cacheRetention", () => {
+		let retentionOverride: ModelRegistry;
+		beforeAll(() => {
+			retentionOverride = readonlyRegistry({
+				providers: {
+					// Override-only: the field alone is a valid provider entry.
+					anthropic: { cacheRetention: "long" },
+					"claude-gateway": {
+						baseUrl: "https://gateway.example.com",
+						apiKey: "TEST_KEY",
+						api: "anthropic-messages",
+						cacheRetention: "long",
+						compat: { supportsLongCacheRetention: true },
+						models: [
+							{
+								id: "claude-gateway-model",
+								name: "Claude Gateway Model",
+								reasoning: false,
+								input: ["text"],
+								cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+								contextWindow: 200000,
+								maxTokens: 8192,
+							},
+						],
+					},
+				},
+			});
+		});
+
+		test("applies to every built-in model of an override-only provider", () => {
+			const models = getModelsForProvider(retentionOverride, "anthropic");
+			expect(models.length).toBeGreaterThan(0);
+			for (const model of models) expect(model.cacheRetention).toBe("long");
+		});
+
+		test("applies to a custom provider's models and leaves other providers alone", () => {
+			const model = retentionOverride.find("claude-gateway", "claude-gateway-model");
+			expect(model?.cacheRetention).toBe("long");
+			expect(
+				(model?.compat as { supportsLongCacheRetention?: boolean } | undefined)?.supportsLongCacheRetention,
+			).toBe(true);
+			for (const other of getModelsForProvider(retentionOverride, "openai")) {
+				expect(other.cacheRetention).toBeUndefined();
+			}
+		});
+
+		test("is absent without the provider field", () => {
+			for (const model of getModelsForProvider(sharedBuiltin, "anthropic")) {
+				expect(model.cacheRetention).toBeUndefined();
+			}
+		});
+	});
+
 	describe("amazon-bedrock guardrails", () => {
 		let guardrailOverride: ModelRegistry;
 		beforeAll(() => {

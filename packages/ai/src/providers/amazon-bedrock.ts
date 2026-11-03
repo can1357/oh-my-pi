@@ -36,7 +36,13 @@ import type {
 	ToolCall,
 	ToolResultMessage,
 } from "../types";
-import { isRecord, normalizeSystemPrompts, normalizeToolCallId, resolveCacheRetention } from "../utils";
+import {
+	isRecord,
+	normalizeSystemPrompts,
+	normalizeToolCallId,
+	resolveCacheRetention,
+	withModelCacheRetention,
+} from "../utils";
 import { resolveAwsAmbientRegion } from "../utils/aws-profile";
 import {
 	clearStreamingPartialJson,
@@ -755,8 +761,9 @@ function createBedrockAnthropicCompactionClient(
 export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 	model: Model<"bedrock-converse-stream">,
 	context: Context,
-	options: BedrockOptions,
+	rawOptions: BedrockOptions,
 ): AssistantMessageEventStream => {
+	const options = withModelCacheRetention(model, rawOptions);
 	if (options.anthropicCompaction !== undefined && supportsBedrockConverseCompaction(model)) {
 		let requestLocation: { region: string; base: URL } | undefined;
 		const getRequestLocation = (): { region: string; base: URL } => {

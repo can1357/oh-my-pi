@@ -50,7 +50,7 @@ import type {
 	ToolCall,
 	UserMessage,
 } from "../types";
-import { normalizeSystemPrompts } from "../utils";
+import { normalizeSystemPrompts, resolveCacheRetention } from "../utils";
 import { isDemotedThinking } from "../utils/block-symbols";
 import { deterministicUuid } from "../utils/deterministic-id";
 import { AssistantMessageEventStream } from "../utils/event-stream";
@@ -694,7 +694,10 @@ function buildDevinChatRequest(
 		requestType: ChatMessageRequestType.CASCADE,
 		plannerMode: ConversationalPlannerMode.DEFAULT,
 		toolChoice: create(ChatToolChoiceSchema, { choice: { case: "optionName", value: "auto" } }),
-		systemPromptCacheOptions: create(PromptCacheOptionsSchema, { type: CacheControlType.EPHEMERAL }),
+		// `none` (the request's, else the model's, else PI_CACHE_RETENTION) turns prompt caching off.
+		...(resolveCacheRetention(options?.cacheRetention ?? model.cacheRetention) === "none"
+			? undefined
+			: { systemPromptCacheOptions: create(PromptCacheOptionsSchema, { type: CacheControlType.EPHEMERAL }) }),
 		disableParallelToolCalls: !model.compat.supportsParallelToolCalls,
 		cascadeId: turn.cascadeId,
 		executionId: crypto.randomUUID(),

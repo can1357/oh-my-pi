@@ -130,8 +130,7 @@ afterEach(() => {
 });
 
 describe("OpenAI/Anthropic compatibility shim cache affinity", () => {
-	it("forwards an explicit cache key through its OpenAI-compatible transport", async () => {
-		const cacheKey = "shared-shim-cache-key";
+	async function shimHeaders(cacheRetention: "short" | "none"): Promise<Headers | undefined> {
 		const cacheModel = buildModel({
 			id: "shim-cache-model",
 			name: "Shim Cache Model",
@@ -152,8 +151,8 @@ describe("OpenAI/Anthropic compatibility shim cache affinity", () => {
 			{
 				apiKey: "test-key",
 				format: "openai",
-				cacheRetention: "none",
-				promptCacheKey: cacheKey,
+				cacheRetention,
+				promptCacheKey: "shared-shim-cache-key",
 				fetch: async (_input, init) => {
 					requestHeaders = new Headers(init?.headers);
 					return new Response(JSON.stringify({ error: { message: "stop after header capture" } }), {
@@ -167,10 +166,16 @@ describe("OpenAI/Anthropic compatibility shim cache affinity", () => {
 				defaultFormat: "openai",
 			},
 		);
-
 		await stream.result();
+		return requestHeaders;
+	}
 
-		expect(requestHeaders?.get("x-grok-conv-id")).toBe(cacheKey);
+	it("forwards an explicit cache key through its OpenAI-compatible transport", async () => {
+		expect((await shimHeaders("short"))?.get("x-grok-conv-id")).toBe("shared-shim-cache-key");
+	});
+
+	it("forwards a retention of `none`, so the transport sends no cache-affinity header", async () => {
+		expect((await shimHeaders("none"))?.get("x-grok-conv-id")).toBeNull();
 	});
 });
 

@@ -1851,6 +1851,14 @@ export interface Model<TApi extends Api = Api> {
 	 * transport reads it directly and validates it against AWS's limits.
 	 */
 	requestMetadata?: Record<string, string>;
+	/**
+	 * Prompt-cache retention for this model's requests when the request names
+	 * none. Set from `providers.<provider>.cacheRetention`. It outranks the
+	 * session-wide `providers.cacheRetention` setting and `PI_CACHE_RETENTION`,
+	 * because `long` buys a different lifetime at a different write price on each
+	 * provider (Anthropic 1h entries at 2x input, OpenAI GPT-5.6+ 12h at 2.5x).
+	 */
+	cacheRetention?: "none" | "short" | "long";
 }
 
 /**

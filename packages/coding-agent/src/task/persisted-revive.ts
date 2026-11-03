@@ -408,6 +408,9 @@ export function createPersistedSubagentReviverFactory(
 					// createAgentSession default to wildcard ("*").
 					spawns: init.spawns ?? "",
 					hasUI: false,
+					// Same policy as a fresh spawn (buildSubagentSessionOptions): warm while the
+					// revived run is active, never after it settles back into the parked state.
+					cacheWarming: "streaming",
 					enableLsp: restrictToolNames ? false : ctx.enableLsp,
 					...(restrictToolNames
 						? {

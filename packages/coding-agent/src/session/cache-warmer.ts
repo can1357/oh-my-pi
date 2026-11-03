@@ -36,6 +36,15 @@ export type { CacheWarmingDecisionEvent, CacheWarmingDecisionEventResult };
 export type CacheWarmingMode = "off" | "streaming" | "idle";
 export const CACHE_WARMING_MODES = ["off", "streaming", "idle"] as const;
 
+/**
+ * `providers.cacheWarming` for a session that is warmed only while a run is
+ * active (task subagents): `idle` becomes `streaming`, so a settled session
+ * schedules nothing; `off` and `streaming` stay as set.
+ */
+export function streamingOnlyWarmingMode(mode: CacheWarmingMode): CacheWarmingMode {
+	return mode === "idle" ? "streaming" : mode;
+}
+
 /** Identity of a refresh actually sent to the provider. */
 export interface CacheWarmingRefreshStart {
 	phase: "streaming" | "idle";
@@ -106,10 +115,11 @@ function supportsLongCacheRetention(model: Model<Api>): boolean {
 /**
  * Retention tier a request writes under, or undefined when caching is off.
  *
- * Mirrors the Anthropic provider's retention default (`getCacheControl`):
- * OAuth subscriber seats write 1h entries where the model supports them.
- * `resolveCacheRetention` keeps an explicit option or `PI_CACHE_RETENTION`
- * ahead of that fallback.
+ * Mirrors the provider layer: an explicit option, then the model's configured
+ * retention (`providers.<id>.cacheRetention`, which the stream layer applies to
+ * a request that names none), then `PI_CACHE_RETENTION`, then the Anthropic
+ * provider's default (`getCacheControl`): OAuth subscriber seats write 1h
+ * entries where the model supports them.
  */
 export function resolvePromptCacheTier(
 	model: Model<Api>,
@@ -117,7 +127,10 @@ export function resolvePromptCacheTier(
 	isOAuthToken = false,
 ): PromptCacheTier | undefined {
 	const longByDefault = isOAuthToken && model.api === "anthropic-messages" && supportsLongCacheRetention(model);
-	const retention = resolveCacheRetention(options?.cacheRetention, longByDefault ? "long" : "short");
+	const retention = resolveCacheRetention(
+		options?.cacheRetention ?? model.cacheRetention,
+		longByDefault ? "long" : "short",
+	);
 	if (retention === "none") return undefined;
 	return retention === "long" && !supportsLongCacheRetention(model) ? "short" : retention;
 }

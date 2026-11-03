@@ -2,8 +2,18 @@
 
 ## [Unreleased]
 
+### Added
+
+- A model's `cacheRetention` (set from `providers.<id>.cacheRetention` in models.yml) now fills a request that names no retention, ahead of `PI_CACHE_RETENTION`, at the shared stream entries and at each provider's exported stream function ([#17964](https://github.com/can1357/oh-my-pi/pull/17964) by [@sjawhar](https://github.com/sjawhar))
+
+### Changed
+
+- Synthetic now receives the request's prompt-cache retention (else the model's) like Kimi Code; the shim option that used to gate it is now `forwardRequestMetadata` and gates only request metadata ([#17964](https://github.com/can1357/oh-my-pi/pull/17964) by [@sjawhar](https://github.com/sjawhar))
+
 ### Fixed
 
+- Fixed `cacheRetention: "none"` being overridden downstream: Factory Droid's Responses route still sent `prompt_cache_key` and `prompt_cache_retention`, an OAuth Anthropic request still put a cache breakpoint on the Claude Code identity block, Chat Completions routes with an Anthropic cache format (OpenRouter, Vercel AI Gateway, Cline) still added a `cache_control` breakpoint, and Devin still asked for the ephemeral system-prompt cache ([#17964](https://github.com/can1357/oh-my-pi/pull/17964) by [@sjawhar](https://github.com/sjawhar))
+- Fixed prompt-cache tiers not following the chosen retention: Factory Droid's Responses route asked for a 24h entry under `short` (it still does when nothing chose a retention, as the native client does), and Chat Completions routes with an Anthropic cache format sent the 5-minute marker under `long` instead of `ttl: "1h"` ([#17964](https://github.com/can1357/oh-my-pi/pull/17964) by [@sjawhar](https://github.com/sjawhar))
 - Fixed Codex WebSocket turns sending a delta `input` after a pooled socket reconnected (closed, idle eviction, token refresh, or prewarm routing-hint change) or when `onPayload` deleted `previous_response_id` (including when it also rewrote the input), and skipped late prewarm while a socket is busy or holding accepted steering ([#17809](https://github.com/can1357/oh-my-pi/pull/17809) by [@xiangnan0811](https://github.com/xiangnan0811)).
 
 ### Changed

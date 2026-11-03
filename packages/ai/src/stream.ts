@@ -68,7 +68,7 @@ import type {
 	ThinkingBudgets,
 	ToolChoice,
 } from "./types";
-import { getHeaderCaseInsensitive, resolveCacheRetention } from "./utils";
+import { getHeaderCaseInsensitive, resolveCacheRetention, withModelCacheRetention } from "./utils";
 import { AssistantMessageEventStream } from "./utils/event-stream";
 import { applyGlyphCodec } from "./utils/glyph-codec";
 import { wrapLeakedThinkingStream } from "./utils/leaked-thinking-stream";
@@ -845,7 +845,7 @@ function streamDispatch<TApi extends Api>(
 ): AssistantMessageEventStream {
 	const requestOptions = withSupportedSamplingParams(
 		model,
-		withTransportFetch(model, (options || {}) as StreamOptions),
+		withTransportFetch(model, withModelCacheRetention(model, (options || {}) as StreamOptions)),
 	) as OptionsForApi<TApi>;
 	assertExplicitOpenAIResponsesPromptCacheSupport(model, requestOptions);
 
@@ -1159,7 +1159,7 @@ export function streamSimple<TApi extends Api>(
 	context: Context,
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {
-	const sessionOptions = withInferenceSessionId(options);
+	const sessionOptions = withModelCacheRetention(model, withInferenceSessionId(options));
 	// Unverified thinking is opt-in: without a requested effort the request is
 	// byte-identical to a non-reasoning model's.
 	const effortRequested =
