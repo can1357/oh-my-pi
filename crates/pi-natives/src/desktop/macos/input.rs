@@ -34,7 +34,7 @@ use super::{
 	capture::{self, MacCapture},
 	keymap::{Keymap, Keystroke},
 	process::{self, RemoteScreen},
-	release::Route,
+	release::{self, Route},
 	release_guard, route, skylight,
 };
 
@@ -3287,14 +3287,20 @@ fn post_bare_keys(
 	gap: Duration,
 	guard: impl FnMut() -> CoreResult<()>,
 ) -> CoreResult<()> {
-	post_transitions(transitions, gap, guard, post_bare)
+	let mut held = BareModifiers::default();
+	post_transitions(transitions, gap, guard, |code, down| post_bare(code, down, &mut held))
 }
 
-/// Posts one bare key transition at the HID tap: a null source and no flag
-/// or Unicode overrides, so `CoreGraphics` derives modifier state from the
-/// transitions exactly as for a hardware keyboard. Only a press can be
-/// cancelled; a release always goes out.
-fn post_bare(code: u16, down: bool) -> CoreResult<()> {
+/// Posts one bare key transition at the HID tap: a null source and no
+/// Unicode override, so the target reads the key as a hardware keyboard's.
+/// Only a press can be cancelled; a release always goes out.
+///
+/// `CoreGraphics` gives a null-source event the HID system state's flags
+/// plus the key's own marks (Fn, Help, keypad), and posting it at the HID
+/// tap makes its flags the state, so one Delete, arrow or function key left
+/// Fn held for every later key. Each event therefore carries only the
+/// modifier keys its own run holds ([`BareModifiers`]).
+fn post_bare(code: u16, down: bool, held: &mut BareModifiers) -> CoreResult<()> {
 	if down {
 		control::check()?;
 	}
@@ -3306,7 +3312,50 @@ fn post_bare(code: u16, down: bool) -> CoreResult<()> {
 	// SAFETY: `raw` is a non-null create-rule event whose ownership moves
 	// here.
 	let event = unsafe { CGEvent::from_ptr(raw) };
+	let flags = held.flags(code, down, event.get_flags().bits());
+	event.set_flags(CGEventFlags::from_bits_retain(flags));
 	post_global(&event)
+}
+
+/// The modifier keys a run of bare transitions holds, as the device bits a
+/// hardware keyboard reports for each (left and right apart).
+#[derive(Clone, Copy, Debug, Default)]
+struct BareModifiers(u64);
+
+impl BareModifiers {
+	/// Modifier state bits a posted event's flags carry: Shift, Control,
+	/// Option, Command, the Fn, Help and keypad marks, and the per-side
+	/// device bits. Caps Lock and the rest of `derived` pass through.
+	const STATE: u64 = CGEventFlags::CGEventFlagShift.bits()
+		| CGEventFlags::CGEventFlagControl.bits()
+		| CGEventFlags::CGEventFlagAlternate.bits()
+		| CGEventFlags::CGEventFlagCommand.bits()
+		| CGEventFlags::CGEventFlagSecondaryFn.bits()
+		| CGEventFlags::CGEventFlagHelp.bits()
+		| CGEventFlags::CGEventFlagNumericPad.bits()
+		| release::DEVICE_FLAGS;
+
+	/// Flags for transition `(code, down)`, whose event `CoreGraphics`
+	/// created with `derived`: its modifier bits replaced by those of the
+	/// keys held once the transition is posted.
+	fn flags(&mut self, code: u16, down: bool, derived: u64) -> u64 {
+		let side = release::MODIFIERS
+			.iter()
+			.flat_map(|(_, sides)| sides)
+			.find(|&&(side, _)| side == code);
+		if let Some(&(_, device)) = side {
+			if down {
+				self.0 |= device;
+			} else {
+				self.0 &= !device;
+			}
+		}
+		let held = release::MODIFIERS
+			.iter()
+			.filter(|(_, sides)| sides.iter().any(|&(_, device)| self.0 & device != 0))
+			.fold(self.0, |held, (flag, _)| held | flag);
+		(derived & !Self::STATE) | held
+	}
 }
 
 /// Presses the chord `keys` as bare transitions ([`post_bare`]), running
@@ -3319,7 +3368,8 @@ fn press_bare_chord(
 	if keys.is_empty() {
 		return Err(empty_chord());
 	}
-	hold_transitions(keys, gap, guard, || Ok(()), post_bare)
+	let mut held = BareModifiers::default();
+	hold_transitions(keys, gap, guard, || Ok(()), |code, down| post_bare(code, down, &mut held))
 }
 
 /// Holds `keys` as bare transitions ([`post_bare`]) while `body` runs,
@@ -3330,7 +3380,8 @@ fn hold_bare_keys(
 	guard: impl FnMut() -> CoreResult<()>,
 	body: impl FnOnce() -> CoreResult<()>,
 ) -> CoreResult<()> {
-	hold_transitions(keys, gap, guard, body, post_bare)
+	let mut held = BareModifiers::default();
+	hold_transitions(keys, gap, guard, body, |code, down| post_bare(code, down, &mut held))
 }
 
 /// Presses `keys` in order through `post`, each once `guard` passes, runs
@@ -4893,6 +4944,71 @@ mod tests {
 			(56, false),
 			(11, false)
 		]);
+	}
+
+	#[test]
+	fn bare_keys_carry_only_the_modifiers_they_hold() {
+		const FN: u64 = CGEventFlags::CGEventFlagSecondaryFn.bits();
+		const HELP: u64 = CGEventFlags::CGEventFlagHelp.bits();
+		const SHIFT: u64 = CGEventFlags::CGEventFlagShift.bits() | 0x2;
+		const CAPS: u64 = CGEventFlags::CGEventFlagAlphaShift.bits();
+		// An unlisted bit `CoreGraphics` sets on posted events passes through.
+		const MARK: u64 = 0x2000_0000;
+		// As `CoreGraphics` does at the HID tap: a null-source event gets the
+		// HID state's flags, updated by a Shift transition, plus Fn for Delete
+		// and Fn and Help for Insert; posting it makes its flags the state.
+		let state = std::cell::Cell::new(0);
+		let posted = std::cell::RefCell::new(Vec::new());
+		let post = |held: &mut BareModifiers, code: u16, down: bool| {
+			let derived = match (code, down) {
+				(56, true) => state.get() | SHIFT,
+				(56, false) => state.get() & !SHIFT,
+				(117, _) => state.get() | FN,
+				(114, _) => state.get() | FN | HELP,
+				_ => state.get(),
+			};
+			state.set(held.flags(code, down, derived | MARK));
+			posted.borrow_mut().push((code, down, state.get()));
+			Ok(())
+		};
+		// A takeover Delete, then Insert, then "Ba", each its own call.
+		for (name, code) in [(KeyName::Delete, 117), (KeyName::Insert, 114)] {
+			let mut held = BareModifiers::default();
+			let chord = [KeyPress { name, code }];
+			let post = |code, down| post(&mut held, code, down);
+			hold_transitions(&chord, Duration::ZERO, || Ok(()), || Ok(()), post).unwrap();
+		}
+		let mut held = BareModifiers::default();
+		let transitions = bare_transitions(&us_keys("Ba").unwrap());
+		let post_typed = |code, down| {
+			// Other input posted after Shift replaced the HID state.
+			if (code, down) == (11, true) {
+				state.set(0);
+			}
+			post(&mut held, code, down)
+		};
+		post_transitions(&transitions, Duration::ZERO, || Ok(()), post_typed).unwrap();
+		assert_eq!(posted.into_inner(), [
+			(117, true, MARK),
+			(117, false, MARK),
+			(114, true, MARK),
+			(114, false, MARK),
+			(56, true, MARK | SHIFT),
+			(11, true, MARK | SHIFT),
+			(11, false, MARK | SHIFT),
+			(56, false, MARK),
+			(0, true, MARK),
+			(0, false, MARK),
+		]);
+		assert_eq!(state.get(), MARK);
+		// Right-side keys keep their own device bit, releasing one side leaves
+		// the other's modifier held, and Caps Lock passes through.
+		let mut held = BareModifiers::default();
+		held.flags(56, true, 0);
+		let shift = CGEventFlags::CGEventFlagShift.bits();
+		assert_eq!(held.flags(60, true, 0), shift | 0x6);
+		assert_eq!(held.flags(56, false, 0), shift | 0x4);
+		assert_eq!(held.flags(60, false, CAPS | shift | 0x4), CAPS);
 	}
 
 	/// What a test's keyboard-layout read returns.
