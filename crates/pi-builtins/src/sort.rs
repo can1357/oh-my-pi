@@ -4963,10 +4963,16 @@ pub(crate) enum Collation {
 
 impl Collation {
 	/// Compares two keys as the locale orders them, in NUL-separated pieces
-	/// as GNU's `memcoll0` does ([`crate::locale::memcoll_pieces`]).
+	/// as GNU's `memcoll0` does ([`crate::locale::memcoll_pieces`]). ICU finds
+	/// strings equal that glibc's `strcoll` tells apart (characters it ignores,
+	/// such as controls, and canonically equivalent spellings such as `É` and
+	/// `E` with a combining accent), so where ICU finds two keys equal their
+	/// bytes decide, and only identical keys are equal, as under `strcoll`.
 	fn compare(&self, a: &[u8], b: &[u8]) -> Ordering {
 		match self {
-			Self::Icu(collator) => crate::locale::memcoll_pieces(a, b, |a, b| collator.compare_utf8(a, b)),
+			Self::Icu(collator) => {
+				crate::locale::memcoll_pieces(a, b, |a, b| collator.compare_utf8(a, b)).then_with(|| a.cmp(b))
+			},
 			#[cfg(unix)]
 			Self::Libc(collator) => collator.compare(a, b),
 		}
@@ -6509,10 +6515,11 @@ fn compare_by<'a>(
 		};
 	}
 
-		if global_settings.precomputed.fast_locale_collation {
+	if global_settings.precomputed.fast_locale_collation {
 		let a_key = a_line_data.collation_key(a.index);
 		let b_key = b_line_data.collation_key(b.index);
-		let cmp = a_key.cmp(b_key);
+		// Lines ICU finds equal are told apart by bytes, as `Collation::compare` does.
+		let cmp = a_key.cmp(b_key).then_with(|| a.line.cmp(b.line));
 		return if global_settings.reverse {
 			cmp.reverse()
 		} else {
@@ -6581,6 +6588,14 @@ fn compare_by<'a>(
 				) == Ordering::Equal
 				{
 					Ordering::Equal
+				} else if settings.ignore_case || settings.dictionary_order || settings.ignore_non_printing {
+					// GNU hashes the key as `-f`, `-d` and `-i` leave it, so keys
+					// they make equal hash equal and sort together (for `-u`).
+					FILTERED_KEYS.with_borrow_mut(|(a_key, b_key)| {
+						filtered_key(a_key, a_str, &global_settings.ctype, settings);
+						filtered_key(b_key, b_str, &global_settings.ctype, settings);
+						random_shuffle(a_key, b_key, &global_settings.salt.unwrap())
+					})
 				} else {
 					// Only if they are not equal compare by the hash
 					random_shuffle(a_str, b_str, &global_settings.salt.unwrap())
@@ -7284,6 +7299,60 @@ mod tests {
 			let (code, out, err) = sort_in_locale("LC_ALL", "en_US.UTF-8", args, input);
 			assert_eq!((code, err.as_str()), (0, ""), "{args:?} {input:?}");
 			assert_eq!(out, expected, "{args:?} {input:?}");
+		}
+	}
+
+	/// Keys ICU finds equal but glibc's `strcoll` tells apart stay apart, in
+	/// byte order: a control character ICU ignores (`a<U+0001>b` and `ab`)
+	/// and canonically equivalent spellings (`É` and `E` with a combining
+	/// accent). ICU alone made them equal, so `sort -fu` dropped one. Each
+	/// case is GNU `sort` 9.4's output in `en_US.UTF-8` (the same in
+	/// `fr_FR.UTF-8` and `C`).
+	#[test]
+	fn keys_icu_finds_equal_stay_apart_as_strcoll_keeps_them() {
+		if !locale_installed("en_US.UTF-8") {
+			eprintln!("skipping: en_US.UTF-8 not installed");
+			return;
+		}
+		let decomposed = "E\u{301}\n\u{c9}\n";
+		for (args, input, expected) in [
+			(&["-fu"][..], "a\u{1}b\nab\n", "a\u{1}b\nab\n"),
+			(&["-fu"][..], "ab\na\u{1}b\n", "a\u{1}b\nab\n"),
+			(&["-u"][..], "a\u{1}b\nab\n", "a\u{1}b\nab\n"),
+			(&[][..], "ab\na\u{1}b\n", "a\u{1}b\nab\n"),
+			(&["-k1,1f", "-u"][..], "a\u{1}b\nab\n", "a\u{1}b\nab\n"),
+			(&["-cfu"][..], "a\u{1}b\nab\n", ""),
+			(&["-fu"][..], "\u{c9}\nE\u{301}\n", decomposed),
+			(&["-fu"][..], decomposed, decomposed),
+			(&["-u"][..], "\u{c9}\nE\u{301}\n", decomposed),
+			(&[][..], "\u{c9}\nE\u{301}\n", decomposed),
+		] {
+			let (code, out, err) = sort_in_locale("LC_ALL", "en_US.UTF-8", args, input);
+			assert_eq!((code, err.as_str()), (0, ""), "{args:?} {input:?}");
+			assert_eq!(out, expected, "{args:?} {input:?}");
+		}
+	}
+
+	/// `-R` with `-f`, `-d` or `-i` hashes the key as they leave it, as GNU
+	/// does, so keys they make equal sort together and `-u` keeps one of each:
+	/// GNU `sort` 9.4 prints two lines for `-Rfu` on `a A b B a A` and one for
+	/// `-Rdu` on `a-b ab a-b`, in C and UTF-8 locales. Hashing the raw line
+	/// left equal keys apart, so `-u` kept several (also on `main`).
+	#[test]
+	fn random_sort_groups_the_keys_its_options_make_equal() {
+		let locales: &[&str] = if locale_installed("en_US.UTF-8") { &["C", "en_US.UTF-8"] } else { &["C"] };
+		for &locale in locales {
+			for _ in 0..20 {
+				let (code, out, _) = sort_in_locale("LC_ALL", locale, &["-Rfu"], "a\nA\nb\nB\na\nA\n");
+				assert_eq!(code, 0);
+				let mut folded: Vec<String> = out.lines().map(str::to_ascii_lowercase).collect();
+				folded.sort();
+				assert_eq!(folded, ["a", "b"], "{locale}: -Rfu printed {out:?}");
+				let (_, out, _) = sort_in_locale("LC_ALL", locale, &["-Rdu"], "a-b\nab\na-b\n");
+				assert_eq!(out.lines().count(), 1, "{locale}: -Rdu printed {out:?}");
+				let (_, out, _) = sort_in_locale("LC_ALL", locale, &["-Ru"], "a\nA\nb\nB\na\nA\n");
+				assert_eq!(out.lines().count(), 4, "{locale}: -Ru printed {out:?}");
+			}
 		}
 	}
 
