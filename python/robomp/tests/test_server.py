@@ -2909,3 +2909,85 @@ def test_webhook_pr_conversation_does_not_cancel_pending_closure(settings: Setti
     assert row is not None
     assert row.state == "pending"
     close_database()
+
+
+# ---------- PR-review queued commit status ----------
+
+
+def _post_pr_opened(
+    client: TestClient,
+    *,
+    delivery: str,
+    user: str,
+    number: int,
+    sha: str,
+    draft: bool = False,
+    secret: str = "test-webhook-secret",
+):
+    payload = {
+        "action": "opened",
+        "pull_request": {
+            "number": number,
+            "state": "open",
+            "draft": draft,
+            "user": {"login": user},
+            "head": {"sha": sha},
+        },
+        "repository": {"full_name": "octo/widget"},
+    }
+    body = json.dumps(payload).encode()
+    return client.post(
+        "/webhook/github",
+        content=body,
+        headers=_signed_headers(secret, body, event="pull_request", delivery=delivery),
+    )
+
+
+def _status_recording_transport(captured: list[httpx.Request]) -> httpx.MockTransport:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/repos/octo/widget/statuses/deadbeef":
+            captured.append(request)
+            return httpx.Response(201, json={})
+        return httpx.Response(200, json={})
+
+    return httpx.MockTransport(handler)
+
+
+def test_webhook_queued_pr_review_posts_pending_status(settings: Settings) -> None:
+    captured: list[httpx.Request] = []
+    app = _create_app(settings)
+    with TestClient(app) as client:
+        _install_github_mock(app, _status_recording_transport(captured))
+        resp = _post_pr_opened(client, delivery="pr-1", user="alice", number=7, sha="deadbeef")
+    close_database()
+    assert resp.status_code == 202
+    assert resp.json()["state"] == "queued"
+    assert len(captured) == 1
+    body = json.loads(captured[0].content)
+    assert body["state"] == "pending"
+    assert body["context"] == "robomp/pr-review"
+
+
+def test_webhook_duplicate_pr_delivery_posts_no_second_status(settings: Settings) -> None:
+    captured: list[httpx.Request] = []
+    app = _create_app(settings)
+    with TestClient(app) as client:
+        _install_github_mock(app, _status_recording_transport(captured))
+        first = _post_pr_opened(client, delivery="pr-1", user="alice", number=7, sha="deadbeef")
+        second = _post_pr_opened(client, delivery="pr-1", user="alice", number=7, sha="deadbeef")
+    close_database()
+    assert first.status_code == 202
+    assert second.status_code == 202
+    assert len(captured) == 1
+
+
+def test_webhook_skipped_draft_pr_posts_no_status(settings: Settings) -> None:
+    captured: list[httpx.Request] = []
+    app = _create_app(settings)
+    with TestClient(app) as client:
+        _install_github_mock(app, _status_recording_transport(captured))
+        resp = _post_pr_opened(client, delivery="pr-3", user="alice", number=7, sha="deadbeef", draft=True)
+    close_database()
+    assert resp.status_code == 202
+    assert resp.json()["state"] == "skipped"
+    assert captured == []

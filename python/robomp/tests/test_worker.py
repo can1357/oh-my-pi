@@ -16,8 +16,9 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from omp_rpc import ToolExecutionStartEvent
 
-from robomp import worker
+from robomp import pr_status, worker
 from robomp.config import Settings
 from robomp.git_ops import DirtyState
 
@@ -57,6 +58,10 @@ class _FakeRpcClient:
 
     def on_host_tool_completed(self, cb) -> None:
         self.host_tool_completed_listeners.append(cb)
+
+    def on_tool_execution_start(self, cb) -> None:
+        self._tool_start_callbacks = getattr(self, "_tool_start_callbacks", [])
+        self._tool_start_callbacks.append(cb)
 
     def on_message_update(self, _cb) -> None:
         pass
@@ -161,6 +166,7 @@ def _make_inputs(
         repo=repo,
         issue=issue,
         issue_key=f"{repo.full_name}#{issue.number}",
+        github=github,
         abort=None,
     )
     return inputs, bindings
@@ -172,9 +178,28 @@ def _reset_fake() -> None:
 
 
 @pytest.fixture(autouse=True)
+def _reset_pr_status_guard() -> None:
+    # `pr_status` keeps a module-level ladder + asyncio.Lock; swap in a fresh
+    # unbound lock so the cross-thread publish in these tests uses the test loop.
+    pr_status._last_rank.clear()
+    pr_status._locks.clear()
+    pr_status._guard = asyncio.Lock()
+    yield
+    pr_status._last_rank.clear()
+    pr_status._locks.clear()
+
+
+@pytest.fixture(autouse=True)
 def _patch_worker(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr("robomp.worker.RpcClient", _FakeRpcClient)
     monkeypatch.setattr("robomp.worker._AGENT_HOME_STAGE", tmp_path / "missing-agent-home-stage")
+
+    def _no_threadsafe(coro, loop=None, context=None):
+        # These tests close their event loops before the scheduled coroutine
+        # would run; close it so it is neither executed nor garbage-warned.
+        coro.close()
+
+    monkeypatch.setattr(worker.asyncio, "run_coroutine_threadsafe", _no_threadsafe)
     monkeypatch.setattr("robomp.worker.host_tools.build", lambda _b: ())
     monkeypatch.setattr(
         "robomp.worker.persona.system_append",
@@ -1090,6 +1115,96 @@ def test_release_prompt_routes_fresh_and_resumed_sessions(
     }
     assert worker._build_prompt("handle_release_ci", inputs, resuming=False, **kwargs) == "fresh"
     assert worker._build_prompt("handle_release_ci", inputs, resuming=True, **kwargs) == "resumed"
+
+
+def _capture_threadsafe(monkeypatch: pytest.MonkeyPatch) -> list:
+    """Replace `asyncio.run_coroutine_threadsafe` with a scheduler that records
+    the coroutine instead of running it on (a soon-closed) side loop. Tests
+    then `await` the captured coroutines on the real test loop, which also
+    keeps `pr_status`'s loop-bound lock happy."""
+    scheduled: list = []
+
+    def _fake_run(coro, loop=None, context=None):
+        scheduled.append(coro)
+
+        class _Pending:
+            def done(self):
+                return False
+
+            def result(self):
+                return None
+
+        return _Pending()
+
+    monkeypatch.setattr(worker.asyncio, "run_coroutine_threadsafe", _fake_run)
+    return scheduled
+
+
+@pytest.mark.asyncio
+async def test_on_tool_start_publishes_publishing_only_for_review_submit(
+    tmp_path: Path, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    inputs, bindings = _make_inputs(tmp_path, settings, session_has_jsonl=False)
+    inputs.pr_head_sha = "deadbeef"
+    calls: list[tuple] = []
+
+    async def _record(repo, sha, *, state, context, description="", target_url=None):
+        calls.append((repo, sha, state, description))
+
+    inputs.github.create_commit_status = _record
+    bindings.github = inputs.github
+
+    scheduled = _capture_threadsafe(monkeypatch)
+    loop = asyncio.new_event_loop()
+    try:
+        worker._run_rpc_blocking(
+            inputs,
+            task_kind="review_pr",
+            prompt="kickoff",
+            loop=loop,
+            bindings=bindings,  # type: ignore[arg-type]
+        )
+    finally:
+        loop.close()
+
+    fake = _FakeRpcClient.instances[0]
+    assert len(fake._tool_start_callbacks) == 1
+    on_start = fake._tool_start_callbacks[0]
+
+    # The `reviewing` phase is scheduled before the turn starts.
+    assert len(scheduled) == 1
+    await scheduled[0]
+    assert calls == [("acme/widgets", "deadbeef", "pending", "Reviewing the changed code")]
+
+    # The submit tool's start marks `publishing` — with `inputs.pr_head_sha`.
+    on_start(ToolExecutionStartEvent(tool_call_id="1", tool_name="submit_pr_review", args={}))
+    assert len(scheduled) == 2
+    await scheduled[1]
+    assert calls[1] == ("acme/widgets", "deadbeef", "pending", "Publishing review findings")
+
+    # Any other tool schedules nothing.
+    on_start(ToolExecutionStartEvent(tool_call_id="2", tool_name="read", args={}))
+    assert len(scheduled) == 2
+
+    # A non-review task kind schedules nothing even for the submit tool.
+    scheduled.clear()
+    second_root = tmp_path / "second"
+    second_root.mkdir()
+    inputs2, bindings2 = _make_inputs(second_root, settings, session_has_jsonl=True)
+    loop2 = asyncio.new_event_loop()
+    try:
+        worker._run_rpc_blocking(
+            inputs2,
+            task_kind="triage_issue",
+            prompt="kickoff",
+            loop=loop2,
+            bindings=bindings2,  # type: ignore[arg-type]
+        )
+    finally:
+        loop2.close()
+    on_start2 = _FakeRpcClient.instances[1]._tool_start_callbacks[0]
+    on_start2(ToolExecutionStartEvent(tool_call_id="3", tool_name="submit_pr_review", args={}))
+    assert scheduled == []
 
 
 @pytest.mark.asyncio

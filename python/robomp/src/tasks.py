@@ -7,7 +7,9 @@ import logging
 from collections.abc import Callable, Mapping
 from typing import Any, TypeVar
 
-from robomp import persona
+import httpx
+
+from robomp import persona, pr_status
 from robomp.config import Settings
 from robomp.db import Database, IssueRow, IssueState, issue_key
 from robomp.git_ops import rev_parse_head
@@ -578,13 +580,50 @@ async def review_pr(
         pr = await github.get_pull_request(repo_full, pr_number)
     except GitHubError as exc:
         log.warning("review_pr fetch failed", extra={"repo": repo_full, "pr": pr_number, "err": str(exc)})
+        # This path returns without re-raising, so the queue marks the row done
+        # and never retries — the status must be terminal, not "will retry".
+        await pr_status.publish_pr_status(
+            github,
+            settings=settings,
+            repo=repo_full,
+            sha=pr_status.head_sha_from_payload(payload),
+            phase="error",
+            detail=type(exc).__name__,
+        )
         return
+    except asyncio.CancelledError:
+        await pr_status.publish_pr_status(
+            github,
+            settings=settings,
+            repo=repo_full,
+            sha=pr_status.head_sha_from_payload(payload),
+            phase="retrying",
+            detail="interrupted",
+        )
+        raise
+    except (httpx.ConnectError, httpx.TimeoutException) as exc:
+        # Transport failures re-raise, so the queue's retry predicate still
+        # applies; mirror it instead of leaving the ladder stuck at `queued`.
+        await pr_status.publish_pr_status(
+            github,
+            settings=settings,
+            repo=repo_full,
+            sha=pr_status.head_sha_from_payload(payload),
+            phase=pr_status.phase_for_failed_attempt(attempts, settings.event_max_retries),
+            detail=type(exc).__name__,
+        )
+        raise
 
     labels = {label.lower() for label in issue.labels}
     key = issue_key(repo.full_name, pr_number)
     review_labeled = "triaged" in labels or any(label.startswith("review:") for label in labels)
     if db.has_successful_tool_call(key, "submit_pr_review"):
         log.info("skip: PR review already submitted", extra={"repo": repo_full, "pr": pr_number})
+        # The review IS complete — resolve the pending status rather than
+        # leaving the context stuck at `queued`.
+        await pr_status.publish_pr_status(
+            github, settings=settings, repo=repo.full_name, sha=pr.head_sha, phase="success", detail="already reviewed"
+        )
         return
     if review_labeled:
         log.info(
@@ -592,43 +631,72 @@ async def review_pr(
             extra={"repo": repo_full, "pr": pr_number, "labels": sorted(labels)},
         )
 
-    db.upsert_issue(key=key, repo=repo.full_name, number=pr_number, state="reviewing", pr_number=pr_number)
-    workspace = await _run_workspace_op(
-        sandbox.ensure_workspace,
-        repo=repo.full_name,
-        number=pr_number,
-        title=issue.title,
-        clone_url=repo.clone_url,
-        default_branch=repo.default_branch,
-        pr_head=pr_number,
-        author_name=settings.resolved_author_name,
-        author_email=settings.git_author_email,
-        slot_uid=slot_uid,
+    # attempts is incremented at claim, so attempts > 1 means this is a retry:
+    # restart the phase ladder rather than resuming at a stale rank.
+    retrying_attempt = attempts > 1
+    pr_sha = pr.head_sha
+    try:
+        await pr_status.publish_pr_status(
+            github, settings=settings, repo=repo.full_name, sha=pr_sha, phase="preparing", reset=retrying_attempt
+        )
+        db.upsert_issue(key=key, repo=repo.full_name, number=pr_number, state="reviewing", pr_number=pr_number)
+        workspace = await _run_workspace_op(
+            sandbox.ensure_workspace,
+            repo=repo.full_name,
+            number=pr_number,
+            title=issue.title,
+            clone_url=repo.clone_url,
+            default_branch=repo.default_branch,
+            pr_head=pr_number,
+            author_name=settings.resolved_author_name,
+            author_email=settings.git_author_email,
+            slot_uid=slot_uid,
+        )
+        db.upsert_issue(
+            key=key,
+            repo=repo.full_name,
+            number=pr_number,
+            state="reviewing",
+            branch=workspace.branch,
+            session_dir=str(workspace.session_dir),
+            pr_number=pr_number,
+        )
+        inputs = TaskInputs(
+            settings=settings,
+            db=db,
+            github=github,
+            git_transport=git_transport,
+            repo=repo,
+            issue=issue,
+            workspace=workspace,
+            delivery_id=delivery_id,
+            attempts=attempts,
+            slot_uid=slot_uid,
+            natives_cache=sandbox.natives_cache,
+            pr_head_sha=pr_sha,
+        )
+        await run_task(task_kind="review_pr", inputs=inputs, pr_number=pr_number, pr=pr)
+    except asyncio.CancelledError:
+        # Operator cancel or shutdown drain. Shutdown leaves the row `running`
+        # for a `--continue` resume, so a terminal status would be a lie.
+        await pr_status.publish_pr_status(
+            github, settings=settings, repo=repo.full_name, sha=pr_sha, phase="retrying", detail="interrupted"
+        )
+        raise
+    except Exception as exc:
+        await pr_status.publish_pr_status(
+            github,
+            settings=settings,
+            repo=repo.full_name,
+            sha=pr_sha,
+            phase=pr_status.phase_for_failed_attempt(attempts, settings.event_max_retries),
+            detail=type(exc).__name__,
+        )
+        raise
+    submitted = db.has_successful_tool_call(key, "submit_pr_review")
+    await pr_status.publish_pr_status(
+        github, settings=settings, repo=repo.full_name, sha=pr_sha, phase="success" if submitted else "failure"
     )
-    db.upsert_issue(
-        key=key,
-        repo=repo.full_name,
-        number=pr_number,
-        state="reviewing",
-        branch=workspace.branch,
-        session_dir=str(workspace.session_dir),
-        pr_number=pr_number,
-    )
-    inputs = TaskInputs(
-        settings=settings,
-        db=db,
-        github=github,
-        git_transport=git_transport,
-        repo=repo,
-        issue=issue,
-        workspace=workspace,
-        delivery_id=delivery_id,
-        attempts=attempts,
-        slot_uid=slot_uid,
-        natives_cache=sandbox.natives_cache,
-    )
-    await run_task(task_kind="review_pr", inputs=inputs, pr_number=pr_number, pr=pr)
-    return
 
 
 async def handle_comment(

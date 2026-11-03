@@ -795,6 +795,32 @@ class GitHubClient:
         data = await self.request("GET", "/user")
         return str(data["login"])
 
+    async def create_commit_status(
+        self,
+        repo: str,
+        sha: str,
+        *,
+        state: str,
+        context: str,
+        description: str = "",
+        target_url: str | None = None,
+    ) -> None:
+        """Post a commit status (`pending`/`success`/`failure`/`error`) for `sha`.
+
+        The commit-statuses API, not check runs: check-run writes are GitHub
+        App-only and RoboMP holds a PAT. Each call CREATES a new status record;
+        GitHub's *combined* status for a SHA reflects the most recent record per
+        `context`, which is what the PR checks UI shows.
+        """
+        payload: dict[str, Any] = {
+            "state": state,
+            "context": context,
+            "description": description[:140],
+        }
+        if target_url:
+            payload["target_url"] = target_url
+        await self.request("POST", f"/repos/{repo}/statuses/{sha}", json=payload)
+
 
 def _workflow_run_from_payload(data: Mapping[str, Any]) -> WorkflowRunInfo:
     return WorkflowRunInfo(

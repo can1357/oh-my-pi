@@ -377,6 +377,12 @@ def round_trip_app(proxy_settings: Settings):
             return httpx.Response(200, json={})
         if path == "/repos/octo/widget/issues/1/assignees":
             return httpx.Response(201, json={})
+        if path == "/repos/octo/widget/statuses/deadbeef":
+            body = json.loads(req.content)
+            assert body["state"] == "success"
+            assert body["context"] == "robomp/pr-review"
+            assert body["description"] == "done"
+            return httpx.Response(201, json={})
         return httpx.Response(404, json={"message": f"unrouted {req.method} {path}"})
 
     _attach_gh(app, gh)
@@ -452,6 +458,13 @@ async def test_round_trip_all_endpoints(round_trip_app) -> None:
     assert labels == ("triage",)
 
     assert await client.add_assignees("octo/widget", 1, ["alice"]) is None
+
+    assert (
+        await client.create_commit_status(
+            "octo/widget", "deadbeef", state="success", context="robomp/pr-review", description="done"
+        )
+        is None
+    )
 
 
 async def test_list_comment_reactions_round_trip(proxy_settings: Settings) -> None:

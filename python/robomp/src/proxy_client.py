@@ -416,6 +416,23 @@ class GitHubProxyClient:
             json_body={"repo": repo, "number": number, "reason": reason},
         )
 
+    async def create_commit_status(
+        self,
+        repo: str,
+        sha: str,
+        *,
+        state: str,
+        context: str,
+        description: str = "",
+        target_url: str | None = None,
+    ) -> None:
+        body: dict[str, Any] = {"repo": repo, "sha": sha, "state": state, "context": context}
+        if description:
+            body["description"] = description
+        if target_url:
+            body["target_url"] = target_url
+        await self._request("POST", "/gh/v1/commit_status", json_body=body)
+
 
 # ---------- ProxyGitTransport ----------
 
