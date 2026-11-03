@@ -4,8 +4,6 @@ import * as path from "node:path";
 import { IpcConnection } from "@oh-my-pi/pi-natives";
 import { getGlobalDaemonRuntimeDir, isEexist, isEnoent, logger, postmortem, toError } from "@oh-my-pi/pi-utils";
 import { resolveWorkerSpawnCmd, workerEnvFromParent } from "../subprocess/worker-client";
-import type { Subprocess } from "bun";
-import { BROKER_SCOPE_LAUNCH_GRACE_MS, brokerScopeCommand, scopeLaunchFailed } from "./broker-launch";
 import { canonicalProjectDir, daemonBrokerEndpoint, daemonRuntimeDir } from "./paths";
 import {
 	DAEMON_BROKER_WORKER_ARG,
@@ -38,15 +36,6 @@ interface PendingRequest {
 	reject: (error: Error) => void;
 	timer: NodeJS.Timeout;
 	removeAbort?: () => void;
-}
-
-/** One spawned broker candidate. */
-interface BrokerLaunch {
-	child: Subprocess;
-	/** Started through `systemd-run --user --scope`. */
-	scoped: boolean;
-	/** Resolved path of the broker executable the scoped launcher execs into. */
-	executable: string;
 }
 
 /** Broker location and lifecycle overrides used by smoke tests and isolated consumers. */
@@ -295,9 +284,8 @@ class SocketDaemonClient implements DaemonBrokerClient {
 			// process-owned lease selects one winner before any candidate touches
 			// the socket.
 		}
-		let launch = await this.#spawnBroker(true);
-		const scopeGraceEnd = Date.now() + BROKER_SCOPE_LAUNCH_GRACE_MS;
-		let deadline = Date.now() + CONNECT_TIMEOUT_MS;
+		this.#spawnBroker();
+		const deadline = Date.now() + CONNECT_TIMEOUT_MS;
 		let lastError: Error | undefined;
 		while (Date.now() < deadline) {
 			try {
@@ -305,18 +293,8 @@ class SocketDaemonClient implements DaemonBrokerClient {
 				return;
 			} catch (error) {
 				lastError = toError(error);
+				await Bun.sleep(CONNECT_RETRY_MS);
 			}
-			if (launch.scoped && (await scopeLaunchFailed(launch.child, launch.executable, Date.now() >= scopeGraceEnd))) {
-				logger.warn("Daemon broker could not start in a systemd scope of its own; starting it without one", {
-					runtimeDir: this.#runtimeDir,
-					exitCode: launch.child.exitCode,
-					signalCode: launch.child.signalCode,
-				});
-				launch = await this.#spawnBroker(false);
-				deadline = Date.now() + CONNECT_TIMEOUT_MS;
-				continue;
-			}
-			await Bun.sleep(CONNECT_RETRY_MS);
 		}
 		throw new Error(
 			`Failed to start daemon broker at ${this.#endpoint} after ${CONNECT_TIMEOUT_MS / 1000}s: ` +
@@ -325,31 +303,22 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		);
 	}
 
-	/**
-	 * Start a broker candidate. With `inScope`, it runs in a transient systemd
-	 * user scope of its own when one can be requested (see `broker-launch.ts`),
-	 * so it never lives in the cgroup of the session that started it.
-	 */
-	async #spawnBroker(inScope: boolean): Promise<BrokerLaunch> {
+	#spawnBroker(): void {
 		const spawn = resolveWorkerSpawnCmd(DAEMON_BROKER_WORKER_ARG);
 		const overlay: Record<string, string> = {
 			[DAEMON_PROJECT_DIR_ENV]: this.projectDir,
 			[DAEMON_RUNTIME_DIR_ENV]: this.#runtimeDir,
 		};
 		if (this.#idleGraceMs !== undefined) overlay[DAEMON_IDLE_GRACE_ENV] = String(this.#idleGraceMs);
-		const env = workerEnvFromParent(overlay);
-		const scopedCmd = inScope ? brokerScopeCommand(spawn.cmd, env) : undefined;
-		const child = Bun.spawn(scopedCmd ?? spawn.cmd, {
+		const child = Bun.spawn(spawn.cmd, {
 			cwd: spawn.cwd,
-			env,
+			env: workerEnvFromParent(overlay),
 			stdin: "ignore",
 			stdout: "ignore",
 			stderr: "ignore",
 			...BROKER_SPAWN_OPTIONS,
 		});
 		child.unref();
-		if (!scopedCmd) return { child, scoped: false, executable: spawn.cmd[0] };
-		return { child, scoped: true, executable: await fs.realpath(spawn.cmd[0]).catch(() => spawn.cmd[0]) };
 	}
 
 	#bindSocket(socket: IpcConnection): void {

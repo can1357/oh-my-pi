@@ -1,28 +1,23 @@
 // Integration test — real processes and real timers are required (ts-no-test-timers exception): the
-// client spawns the real broker through the CLI worker entry, optionally through `systemd-run`, and
-// the behaviour under test is which cgroup that process lands in and how the client recovers when
-// the scope launcher fails or stalls. Fake timers cannot drive the OS process exit or the socket
-// connect the client polls.
+// client spawns the real broker through the CLI worker entry, and the behaviour under test is which
+// cgroup that process and its daemons end up in, moved by the real systemd user manager, and that a
+// stalled `busctl` is not left behind. Fake timers cannot drive the OS processes or the manager.
 import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import { BROKER_SCOPE_UNIT_PREFIX, brokerScopeCommand, scopeLaunchFailed } from "../../src/launch/broker-launch";
-import { createDaemonBrokerClient } from "../../src/launch/client";
+import { BROKER_SCOPE_UNIT_PREFIX, cgroupOf, startScopeArgs, userManagerBusctl } from "../../src/launch/broker-scope";
+import { createDaemonBrokerClient, type DaemonBrokerClient } from "../../src/launch/client";
 
-const BROKER_CMD = ["/opt/omp/bin/omp", "__omp_worker_daemon_broker"];
 const isLinux = process.platform === "linux";
+const realBusctl = isLinux ? Bun.which("busctl") : null;
 
-async function fakeLauncher(dir: string, script: string): Promise<string> {
+async function fakeBusctl(dir: string, script: string): Promise<string> {
 	await fs.mkdir(dir, { recursive: true });
-	const file = path.join(dir, "systemd-run");
+	const file = path.join(dir, "busctl");
 	await Bun.write(file, `#!/bin/sh\n${script}\n`);
 	await fs.chmod(file, 0o755);
 	return dir;
-}
-
-function cgroupOf(pid: number | "self"): Promise<string> {
-	return fs.readFile(`/proc/${pid}/cgroup`, "utf8").then(text => text.trim().replace(/^0::/, ""));
 }
 
 async function brokerPid(runtimeDir: string): Promise<number> {
@@ -30,7 +25,25 @@ async function brokerPid(runtimeDir: string): Promise<number> {
 	return lease.pid;
 }
 
-/** Run `body` with `PATH` (and `XDG_RUNTIME_DIR`) overridden for the broker the client spawns. */
+function alive(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+async function until(check: () => Promise<boolean>, timeoutMs: number): Promise<boolean> {
+	const deadline = Date.now() + timeoutMs;
+	while (Date.now() < deadline) {
+		if (await check()) return true;
+		await Bun.sleep(100);
+	}
+	return check();
+}
+
+/** Run `body` with environment overrides inherited by the broker the client spawns. */
 async function withEnv(overrides: Record<string, string>, body: () => Promise<void>): Promise<void> {
 	const previous = Object.fromEntries(Object.keys(overrides).map(key => [key, process.env[key]]));
 	Object.assign(process.env, overrides);
@@ -44,129 +57,167 @@ async function withEnv(overrides: Record<string, string>, body: () => Promise<vo
 	}
 }
 
-/** Start a broker through the real client, run `check` on its pid, then shut it down. */
-async function withSpawnedBroker(
-	check: (pid: number, runtimeDir: string, projectDir: string) => Promise<void>,
-): Promise<void> {
+interface SpawnedBroker {
+	client: DaemonBrokerClient;
+	pid: number;
+	projectDir: string;
+}
+
+/** Start a real broker process through the real client, run `check`, then shut it down. */
+async function withSpawnedBroker(check: (broker: SpawnedBroker) => Promise<void>): Promise<void> {
 	using tempDir = TempDir.createSync("@omp-broker-scope-");
 	const projectDir = path.join(tempDir.path(), "project");
 	const runtimeDir = path.join(tempDir.path(), "runtime");
 	await fs.mkdir(projectDir);
 	const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
 	try {
-		const ping = await client.request({ op: "ping" });
-		expect(ping).toEqual({ op: "ping", projectDir: client.projectDir });
-		await check(await brokerPid(runtimeDir), runtimeDir, projectDir);
+		expect(await client.request({ op: "ping" })).toEqual({ op: "ping", projectDir: client.projectDir });
+		await check({ client, pid: await brokerPid(runtimeDir), projectDir });
 		await client.request({ op: "shutdown" });
 	} finally {
 		client.close();
 	}
 }
 
-function userScopeAvailable(): boolean {
-	if (!isLinux || !process.env.XDG_RUNTIME_DIR || !Bun.which("systemd-run")) return false;
-	return Bun.spawnSync(["systemd-run", "--user", "--scope", "--quiet", "--collect", "--", "true"]).exitCode === 0;
+async function startSleeper(broker: SpawnedBroker): Promise<number> {
+	const started = await broker.client.request({
+		op: "start",
+		spec: {
+			name: "sleeper",
+			application: "/bin/sh",
+			args: ["-c", "sleep 60"],
+			env: {},
+			cwd: broker.projectDir,
+			pty: false,
+			restart: "no",
+			persist: false,
+			detached: false,
+		},
+	});
+	if (started.op !== "start" || started.daemon.pid === undefined) throw new Error("daemon did not start");
+	return started.daemon.pid;
 }
 
-describe("brokerScopeCommand", () => {
-	it("starts the broker in a transient user scope of its own on Linux with a user manager", async () => {
+function userManagerAnswers(): boolean {
+	const prefix = userManagerBusctl(process.env);
+	if (!prefix) return false;
+	return Bun.spawnSync([...prefix.slice(0, 3), "status"], { stdout: "ignore", stderr: "ignore" }).exitCode === 0;
+}
+
+describe("userManagerBusctl", () => {
+	it("calls the user manager through busctl only on Linux with a user bus and busctl", async () => {
 		using tempDir = TempDir.createSync("@omp-broker-scope-cmd-");
-		const bin = await fakeLauncher(tempDir.path(), "exit 0");
-		const env = { XDG_RUNTIME_DIR: "/run/user/1000", PATH: bin };
-		const first = brokerScopeCommand(BROKER_CMD, env, "linux");
-		const second = brokerScopeCommand(BROKER_CMD, env, "linux");
-		expect(first?.slice(0, 5)).toEqual([path.join(bin, "systemd-run"), "--user", "--scope", "--quiet", "--collect"]);
-		expect(first).toContain("--property=OOMPolicy=continue");
-		expect(first?.slice(-3)).toEqual(["--", ...BROKER_CMD]);
-		const unit = first?.find(arg => arg.startsWith("--unit="));
-		expect(unit?.startsWith(`--unit=${BROKER_SCOPE_UNIT_PREFIX}`)).toBe(true);
-		// A detached daemon keeps an earlier broker's scope alive, so every launch needs a fresh name.
-		expect(second?.find(arg => arg.startsWith("--unit="))).not.toBe(unit);
+		const bin = await fakeBusctl(path.join(tempDir.path(), "bin"), "exit 0");
+		await Bun.write(path.join(tempDir.path(), "bus"), "");
+		const env = { XDG_RUNTIME_DIR: tempDir.path(), PATH: bin };
+		expect(userManagerBusctl(env, "linux")?.slice(0, 3)).toEqual([
+			path.join(bin, "busctl"),
+			"--user",
+			"--timeout=25",
+		]);
+		expect(userManagerBusctl({ DBUS_SESSION_BUS_ADDRESS: "unix:path=/x", PATH: bin }, "linux")).toBeDefined();
+		expect(userManagerBusctl(env, "darwin")).toBeUndefined();
+		expect(userManagerBusctl(env, "win32")).toBeUndefined();
+		expect(userManagerBusctl({ XDG_RUNTIME_DIR: bin, PATH: bin }, "linux")).toBeUndefined();
+		expect(userManagerBusctl({ ...env, PATH: path.join(bin, "none") }, "linux")).toBeUndefined();
 	});
 
-	it("leaves the command alone where no user manager can be asked", async () => {
-		using tempDir = TempDir.createSync("@omp-broker-scope-cmd-");
-		const bin = await fakeLauncher(tempDir.path(), "exit 0");
-		expect(
-			brokerScopeCommand(BROKER_CMD, { XDG_RUNTIME_DIR: "/run/user/1000", PATH: bin }, "darwin"),
-		).toBeUndefined();
-		expect(brokerScopeCommand(BROKER_CMD, { XDG_RUNTIME_DIR: "/run/user/1000", PATH: bin }, "win32")).toBeUndefined();
-		expect(brokerScopeCommand(BROKER_CMD, { PATH: bin }, "linux")).toBeUndefined();
-		expect(
-			brokerScopeCommand(BROKER_CMD, { XDG_RUNTIME_DIR: "/run/user/1000", PATH: path.join(bin, "none") }, "linux"),
-		).toBeUndefined();
+	it("asks for a scope that holds the broker and survives one daemon's OOM kill", () => {
+		expect(startScopeArgs("omp-daemon-broker-1-a.scope", 42, true)).toEqual([
+			"StartTransientUnit",
+			"ssa(sv)a(sa(sv))",
+			"omp-daemon-broker-1-a.scope",
+			"fail",
+			"5",
+			"PIDs",
+			"au",
+			"1",
+			"42",
+			"Description",
+			"s",
+			"omp daemon broker",
+			"CollectMode",
+			"s",
+			"inactive-or-failed",
+			"Delegate",
+			"b",
+			"true",
+			"OOMPolicy",
+			"s",
+			"continue",
+			"0",
+		]);
+		expect(startScopeArgs("u", 42, false)).not.toContain("OOMPolicy");
 	});
 });
 
-describe("scopeLaunchFailed", () => {
-	it("treats a non-zero or signalled launcher as failed and a zero exit as a lease loser", async () => {
-		const launcher = { pid: 1, signalCode: null };
-		expect(await scopeLaunchFailed({ ...launcher, exitCode: 1 }, "/bin/omp", false)).toBe(true);
-		expect(await scopeLaunchFailed({ ...launcher, exitCode: 0 }, "/bin/omp", true)).toBe(false);
-		expect(await scopeLaunchFailed({ pid: 1, exitCode: null, signalCode: "SIGKILL" }, "/bin/omp", false)).toBe(true);
-		expect(await scopeLaunchFailed({ ...launcher, exitCode: null }, "/bin/omp", false)).toBe(false);
-	});
-});
-
-describe.skipIf(!isLinux)("daemon broker launch", () => {
-	it("starts a broker without a scope when systemd-run refuses", async () => {
-		using tempDir = TempDir.createSync("@omp-broker-scope-refuse-");
-		const bin = await fakeLauncher(tempDir.path(), "echo 'Failed to connect to bus' >&2; exit 1");
-		await withEnv({ PATH: `${bin}:${process.env.PATH ?? ""}`, XDG_RUNTIME_DIR: tempDir.path() }, () =>
-			withSpawnedBroker(async pid => {
-				expect(await cgroupOf(pid)).toBe(await cgroupOf("self"));
-			}),
-		);
-	}, 30_000);
-
-	it("stops waiting for a stalled systemd-run and starts a broker without a scope", async () => {
+describe.skipIf(!isLinux)("daemon broker scope", () => {
+	it("does not leave a stalled busctl behind when the broker exits", async () => {
 		using tempDir = TempDir.createSync("@omp-broker-scope-stall-");
-		const pidFile = path.join(tempDir.path(), "launcher.pid");
-		const bin = await fakeLauncher(path.join(tempDir.path(), "bin"), `echo $$ > '${pidFile}'; exec sleep 600`);
+		const pids = path.join(tempDir.path(), "busctl.pids");
+		const bin = await fakeBusctl(path.join(tempDir.path(), "bin"), `echo $$ >> '${pids}'; exec sleep 600`);
+		await Bun.write(path.join(tempDir.path(), "bus"), "");
+		let stalled: number[] = [];
 		try {
 			await withEnv({ PATH: `${bin}:${process.env.PATH ?? ""}`, XDG_RUNTIME_DIR: tempDir.path() }, () =>
-				withSpawnedBroker(async pid => {
-					const launcher = Number((await fs.readFile(pidFile, "utf8")).trim());
-					expect(pid).not.toBe(launcher);
-					expect(await cgroupOf(pid)).toBe(await cgroupOf("self"));
+				withSpawnedBroker(async broker => {
+					stalled = (await fs.readFile(pids, "utf8")).trim().split("\n").map(Number);
+					expect(stalled.length).toBe(1);
+					expect(alive(stalled[0])).toBe(true);
+					// The broker serves while its move is pending.
+					expect(alive(await startSleeper(broker))).toBe(true);
 				}),
 			);
+			expect(await until(async () => !alive(stalled[0]), 10_000)).toBe(true);
 		} finally {
-			const launcher = Number((await fs.readFile(pidFile, "utf8").catch(() => "0")).trim());
-			if (launcher > 0) process.kill(launcher, "SIGKILL");
+			for (const pid of stalled) if (alive(pid)) process.kill(pid, "SIGKILL");
 		}
 	}, 30_000);
 
-	it.skipIf(!userScopeAvailable())(
-		"runs the broker and its daemons in a systemd scope of its own, not the starting session's",
+	it.skipIf(!userManagerAnswers())(
+		"moves the broker into a systemd scope of its own, where its daemons start",
 		async () => {
-			await withSpawnedBroker(async (pid, runtimeDir, projectDir) => {
-				const brokerCgroup = await cgroupOf(pid);
-				expect(path.basename(brokerCgroup)).toStartWith(BROKER_SCOPE_UNIT_PREFIX);
-				expect(brokerCgroup).not.toBe(await cgroupOf("self"));
-				const client = await createDaemonBrokerClient(projectDir, { runtimeDir });
-				try {
-					const started = await client.request({
-						op: "start",
-						spec: {
-							name: "scoped-child",
-							application: "/bin/sh",
-							args: ["-c", "sleep 30"],
-							env: {},
-							cwd: projectDir,
-							pty: false,
-							restart: "no",
-							persist: false,
-							detached: false,
-						},
-					});
-					if (started.op !== "start" || started.daemon.pid === undefined) throw new Error("daemon did not start");
-					expect(await cgroupOf(started.daemon.pid)).toBe(brokerCgroup);
-				} finally {
-					client.close();
-				}
+			await withSpawnedBroker(async broker => {
+				// Normally moved before it listens; under load the first attempt may outlast the 2 s wait.
+				const moved = await until(
+					async () => path.basename((await cgroupOf(broker.pid)) ?? "").startsWith(BROKER_SCOPE_UNIT_PREFIX),
+					20_000,
+				);
+				expect(moved).toBe(true);
+				const brokerCgroup = await cgroupOf(broker.pid);
+				expect(brokerCgroup).not.toBe(await cgroupOf(process.pid));
+				expect(await cgroupOf(await startSleeper(broker))).toBe(brokerCgroup);
 			});
 		},
 		30_000,
+	);
+
+	it.skipIf(!userManagerAnswers() || !realBusctl)(
+		"retries a failed move and takes the daemons started meanwhile with it",
+		async () => {
+			using tempDir = TempDir.createSync("@omp-broker-scope-retry-");
+			const count = path.join(tempDir.path(), "calls");
+			// The first call fails as a timed-out manager would; later calls reach the real one.
+			const bin = await fakeBusctl(
+				path.join(tempDir.path(), "bin"),
+				`echo x >> '${count}'; [ "$(wc -l < '${count}')" -gt 1 ] && exec '${realBusctl}' "$@"; echo 'Connection timed out' >&2; exit 1`,
+			);
+			await withEnv({ PATH: `${bin}:${process.env.PATH ?? ""}` }, () =>
+				withSpawnedBroker(async broker => {
+					const own = await cgroupOf(process.pid);
+					expect(await cgroupOf(broker.pid)).toBe(own);
+					const sleeper = await startSleeper(broker);
+					expect(await cgroupOf(sleeper)).toBe(own);
+					const moved = await until(
+						async () => path.basename((await cgroupOf(broker.pid)) ?? "").startsWith(BROKER_SCOPE_UNIT_PREFIX),
+						20_000,
+					);
+					expect(moved).toBe(true);
+					const brokerCgroup = await cgroupOf(broker.pid);
+					expect(await until(async () => (await cgroupOf(sleeper)) === brokerCgroup, 5_000)).toBe(true);
+				}),
+			);
+		},
+		40_000,
 	);
 });
