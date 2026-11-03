@@ -503,12 +503,13 @@ mod tests {
 
 	fn backend_without_services() -> WaylandBackend {
 		WaylandBackend {
-			display:        DisplaySelector::All,
-			ax:             None,
-			ax_error:       None,
-			input:          None,
-			displays:       Vec::new(),
-			compositor_pid: None,
+			display:           DisplaySelector::All,
+			ax:                None,
+			ax_error:          None,
+			input:             None,
+			input_unavailable: Some(None),
+			displays:          Vec::new(),
+			compositor_pid:    None,
 		}
 	}
 	fn with_fake_libei(action: impl FnOnce(&mut WaylandBackend)) -> bool {
@@ -559,6 +560,23 @@ mod tests {
 		let capabilities = capabilities.expect("Wayland capabilities");
 		assert!(capabilities.input);
 		assert_eq!(capabilities.input_permission, "prompt-or-granted");
+	}
+
+	#[test]
+	fn a_desktop_without_a_remote_desktop_portal_reports_and_refuses_input() {
+		let mut backend = backend_without_services();
+		backend.input_unavailable = Some(Some("no RemoteDesktop portal".to_owned()));
+		let capabilities = backend.capabilities();
+		assert!(!capabilities.input);
+		assert!(!capabilities.held_input);
+		assert_eq!(capabilities.input_permission, "unavailable");
+		let source = control::CancellationSource::default();
+		let error = backend
+			.type_text(&Target::Desktop, "x", DeliveryMode::Foreground, &source.token())
+			.unwrap_err();
+		assert_eq!(error.code.as_str(), "PermissionDenied");
+		assert!(error.message.contains("no RemoteDesktop portal"), "{}", error.message);
+		assert!(backend.input.is_none());
 	}
 
 	#[test]
