@@ -328,14 +328,22 @@ interface ObjectReceiver<out t, out i> {
 	readonly inferIn: i;
 }
 
+/**
+ * `keyof()`'s result for a receiver, distributed over a union of schemas so each member keeps its own
+ * keys: `(typeof a | typeof b).keyof()` gives `FluentType<"a"> | FluentType<"b">`, as it did when the
+ * method was typed from `t`.
+ */
+type KeyofResult<receiver> =
+	receiver extends ObjectReceiver<infer self, infer selfIn>
+		? FluentType<Extract<keyof self, PropertyKey>, Extract<keyof InputObject<selfIn>, PropertyKey>>
+		: never;
+
 interface ObjectMethods<out t extends object, out i> {
 	readonly props: readonly TypeProperty[];
 	map(
 		mapper: (property: TypeProperty) => TypeProperty | readonly TypeProperty[],
 	): FluentType<Record<PropertyKey, unknown>>;
-	keyof<self extends object, selfIn>(
-		this: ObjectReceiver<self, selfIn>,
-	): FluentType<Extract<keyof self, PropertyKey>, Extract<keyof InputObject<selfIn>, PropertyKey>>;
+	keyof<receiver extends ObjectReceiver<object, unknown>>(this: receiver): KeyofResult<receiver>;
 	/** Called detached (`bind`, `call`), where TypeScript does not pass the receiver's type. */
 	keyof(): FluentType<PropertyKey>;
 	get<const path extends readonly PropertyKey[]>(...path: path): FluentType<unknown>;

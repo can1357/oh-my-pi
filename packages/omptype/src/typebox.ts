@@ -56,11 +56,10 @@ interface LegacyTypeBoxCompat<T> {
  * Erased schema surface accepted anywhere this facade takes a schema, native
  * omptype schemas included (those carry no legacy compat members).
  *
- * Members use method syntax so parameter positions stay bivariant: the typed
- * {@link TTyped} form is invariant in its static type (its `in`/`out`
- * validators are), so a concrete `TString` is not assignable to
- * `TTyped<unknown>`. Erasing here is what keeps `TString`, `TObject<…>` and
- * friends assignable to a plain schema annotation.
+ * Members use method syntax so parameter positions stay bivariant. Erasing
+ * here keeps `TString`, `TObject<…>` and friends, and native schemas with
+ * any static type, assignable to a plain schema annotation without relating
+ * their full typed surfaces.
  */
 export interface AnySchema extends EmbeddableSchema {
 	(data: unknown): unknown;

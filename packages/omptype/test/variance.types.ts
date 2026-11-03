@@ -49,17 +49,29 @@ const boundOmit = user.omit.bind(user);
 const boundOmitted: true = exactly<{ id: number; nick?: string }>()(boundOmit("name").infer);
 const boundKeys: true = exactly<PropertyKey>()(user.keyof.bind(user)().infer);
 const calledKeys: true = exactly<PropertyKey>()(user.keyof.call(user).infer);
+// Called on a union of schemas, `keyof()` gives each member's own keys, as on main.
+const left = type({ a: "number" });
+const right = type({ b: "string" });
+const overlapping = type({ a: "number", c: "boolean" });
+declare const either: typeof left | typeof right;
+declare const overlap: typeof left | typeof overlapping;
+const eitherKey: "a" | "b" = either.keyof().assert("a");
+const eitherKeys: true = exactly<"a" | "b">()(either.keyof().infer);
+const overlapKeys: true = exactly<"a" | "c">()(overlap.keyof().infer);
 
 export {
 	boundKeys,
 	boundOmitted,
 	boundPicked,
 	calledKeys,
+	eitherKey,
+	eitherKeys,
 	fluentObject,
 	fluentPrimitive,
 	keys,
 	narrower,
 	omitted,
+	overlapKeys,
 	picked,
 	plainPrimitive,
 	sameInput,
