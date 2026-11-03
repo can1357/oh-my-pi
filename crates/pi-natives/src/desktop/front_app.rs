@@ -22,9 +22,10 @@ impl MacosFrontApp {
 	/// after the app was read, the app came from a launcher or Spotlight panel,
 	/// or a different app comes forward: that is the user picking an app.
 	/// Typing does not end it, and a hand-back macOS refuses for a key typed
-	/// meanwhile is asked again. With `browserPid`, the app expected to take
-	/// the front, the keys the user types while it holds the keyboard go to
-	/// this app instead (when omp may tap keys: Accessibility). Holds nothing
+	/// meanwhile is asked again. Extends the read's key reroute watch through
+	/// the hold: with `browserPid` passed to `macOSFrontApp()`, the keys the
+	/// user types while that browser holds the keyboard go to this app
+	/// instead (when omp may tap keys: Accessibility). Holds nothing
 	/// when called over a second after the latest read, as picks made since
 	/// then went unwatched. Owns desktop input/focus control only for each
 	/// hand-back, and rejects if another operation owns it then. Resolves how
@@ -34,22 +35,21 @@ impl MacosFrontApp {
 		not(target_os = "macos"),
 		allow(clippy::unused_self, reason = "only macOS holds an app to put back")
 	)]
-	pub fn keep_in_front(&self, duration_ms: u32, browser_pid: Option<u32>) -> task::Promise<u32> {
+	pub fn keep_in_front(&self, duration_ms: u32) -> task::Promise<u32> {
 		#[cfg(target_os = "macos")]
 		{
 			let app = self.app;
-			let browser = browser_pid.and_then(|pid| libc::pid_t::try_from(pid).ok());
 			// From the call, not from when the worker pool gets to it.
 			let deadline =
 				std::time::Instant::now() + std::time::Duration::from_millis(duration_ms.into());
 			app.extend_pick_watch(deadline);
 			task::blocking("desktop.keepInFront", (), move |_| {
-				app.keep_in_front(deadline, browser).map_err(Into::into)
+				app.keep_in_front(deadline).map_err(Into::into)
 			})
 		}
 		#[cfg(not(target_os = "macos"))]
 		{
-			let _ = (duration_ms, browser_pid);
+			let _ = duration_ms;
 			task::blocking("desktop.keepInFront", (), |_| Ok(0))
 		}
 	}

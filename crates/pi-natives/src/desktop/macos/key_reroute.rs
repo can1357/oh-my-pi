@@ -737,15 +737,21 @@ impl Armed {
 }
 
 impl KeyReroute {
+	#[cfg(test)]
+	pub(super) fn unwatched_for_test() -> (Self, Arc<AtomicBool>) {
+		let ended = Arc::new(AtomicBool::new(false));
+		(
+			Self {
+				ended: Arc::clone(&ended),
+				armed: Armed { user: 100, target: 200, generation: 0, buttons: [0; 6] },
+			},
+			ended,
+		)
+	}
+
 	fn now(user: pid_t, target: pid_t) -> Armed {
 		let generation = REGISTRY.lock().latest.0;
 		Armed { user, target, generation, buttons: mouse_buttons() }
-	}
-
-	/// Whether this reroute is still the latest action's, between `user` and
-	/// `target`: an action can carry on with it.
-	pub(super) fn serves(&self, user: pid_t, target: pid_t) -> bool {
-		self.armed.serves(Self::now(user, target))
 	}
 
 	/// What it was armed with.
