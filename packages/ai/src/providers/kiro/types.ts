@@ -97,4 +97,6 @@ export type KiroNormalizedEvent =
 	  }
 	| { type: "contextUsage"; percentage: number }
 	| { type: "usage"; usage: KiroUsageMetrics }
+	/** The request was billed (`meteringEvent`); a billed stream is never replayed. */
+	| { type: "metering" }
 	| { type: "ignored" };

@@ -18,9 +18,9 @@ const METRIC_ALIASES: Readonly<Record<keyof KiroUsageMetrics, readonly string[]>
 };
 
 // `meteringEvent` is the live billing frame (`{ unit, unitPlural, usage }`, where
-// `usage` is fractional credits, not tokens). It carries no token counts, so it is
-// recognized here only to keep it out of the unknown-event path; token metrics still
-// come from the `metricsEvent`/`usage` envelopes below.
+// `usage` is fractional credits, not tokens). It carries no token counts; it is
+// surfaced as `metering` so the stream knows the request was billed and never
+// replays it. Token metrics come from the `metricsEvent`/`usage` envelopes below.
 const METRIC_EVENT_TYPES: Readonly<Record<string, true>> = {
 	metricsEvent: true,
 	usageEvent: true,
@@ -134,6 +134,7 @@ export function normalizeKiroFrame(message: EventStreamMessage): KiroNormalizedE
 		}
 		return { type: "contextUsage", percentage: payload.contextUsagePercentage };
 	}
+	if (eventType === "meteringEvent") return { type: "metering" };
 	const merged: KiroUsageMetrics = {};
 	for (const key of ["usage", "metricsEvent", "metrics", "usageEvent"] as const) {
 		const usage = normalizeMetrics(payload[key]);

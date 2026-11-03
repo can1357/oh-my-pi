@@ -320,15 +320,19 @@ describe("Kiro stream transport", () => {
 		expect(result.errorMessage).toContain("malformed JSON input");
 	});
 
-	test("does not leak lifecycle events from a discarded metadata-only attempt", async () => {
-		let attempts = 0;
+	test("replays a frame truncated before output once, numbering attempts, without leaking it", async () => {
+		const sdkRequests: (string | null)[] = [];
 		const stream = streamKiro(createModel(), TEST_CONTEXT, {
 			apiKey: TEST_API_KEY,
-			fetch: async () => {
-				attempts++;
-				return attempts === 1
-					? responseForEvents([["metadataEvent", { requestId: "discarded" }]])
-					: responseForEvents([["assistantResponseEvent", { content: "recovered" }]]);
+			fetch: async (_input, init) => {
+				sdkRequests.push(new Headers(init?.headers).get("amz-sdk-request"));
+				if (sdkRequests.length > 1)
+					return responseForEvents([["assistantResponseEvent", { content: "recovered" }]]);
+				const body = concatFrames([
+					encodeEventFrame("metadataEvent", { requestId: "discarded" }),
+					new Uint8Array([0, 0, 0, 20]),
+				]);
+				return new Response(streamFrom([body]), { status: 200 });
 			},
 			providerRetryWait: async () => {},
 		});
@@ -336,7 +340,7 @@ describe("Kiro stream transport", () => {
 		for await (const event of stream) emitted.push(event);
 		const result = await stream.result();
 
-		expect(attempts).toBe(2);
+		expect(sdkRequests).toEqual(["attempt=1; max=2", "attempt=2; max=2"]);
 		expect(emitted.filter(event => event.type === "start")).toHaveLength(1);
 		expect(result.responseId).toBeUndefined();
 		expect(result.content).toEqual([{ type: "text", text: "recovered" }]);
@@ -711,48 +715,64 @@ describe("Kiro stream transport", () => {
 		blockedBody.resolve();
 	});
 
-	test("retries once after a clean no-output response before visible output", async () => {
+	test("does not replay a clean stream that ended without output", async () => {
 		let attempts = 0;
 		const waits: number[] = [];
-		const fetch: FetchImpl = async () => {
-			attempts += 1;
-			return attempts === 1
-				? responseForEvents([["initial-response", { requestId: "no-output" }]])
-				: responseForEvents([["assistantResponseEvent", { content: "recovered" }]]);
-		};
 		const result = await streamKiro(createModel(), TEST_CONTEXT, {
 			apiKey: TEST_API_KEY,
-			fetch,
+			fetch: async () => {
+				attempts += 1;
+				return responseForEvents([["initial-response", { requestId: "no-output" }]]);
+			},
 			providerRetryWait: async delay => {
 				waits.push(delay);
 			},
 		}).result();
 
-		expect(attempts).toBe(2);
-		expect(waits).toEqual([500]);
-		expect(result.stopReason).toBe("stop");
-		expect(result.content).toContainEqual({ type: "text", text: "recovered" });
-	});
-
-	test("caps clean no-output recovery after one retry", async () => {
-		let attempts = 0;
-		const waits: number[] = [];
-		const fetch: FetchImpl = async () => {
-			attempts += 1;
-			return responseForEvents([["initial-response", { requestId: `no-output-${attempts}` }]]);
-		};
-		const result = await streamKiro(createModel(), TEST_CONTEXT, {
-			apiKey: TEST_API_KEY,
-			fetch,
-			providerRetryWait: async delay => {
-				waits.push(delay);
-			},
-		}).result();
-
-		expect(attempts).toBe(2);
-		expect(waits).toEqual([500]);
+		expect(attempts).toBe(1);
+		expect(waits).toEqual([]);
 		expect(result.stopReason).toBe("error");
 		expect(result.errorMessage).toContain("ended without visible output");
+	});
+
+	test("never replays a stream the service already billed", async () => {
+		const metering: [string, unknown] = ["meteringEvent", { unit: "credit", unitPlural: "credits", usage: 0.02 }];
+		const bodies = [
+			// Billed, then nothing visible.
+			() => responseForEvents([metering]),
+			// Billed, then a frame cut off before any output.
+			() =>
+				new Response(streamFrom([concatFrames([encodeEventFrame(...metering), new Uint8Array([0, 0, 0, 20])])]), {
+					status: 200,
+				}),
+		];
+		for (const body of bodies) {
+			let attempts = 0;
+			const result = await streamKiro(createModel(), TEST_CONTEXT, {
+				apiKey: TEST_API_KEY,
+				fetch: async () => {
+					attempts += 1;
+					return body();
+				},
+				providerRetryWait: async () => {},
+			}).result();
+
+			expect(attempts).toBe(1);
+			expect(result.stopReason).toBe("error");
+		}
+	});
+
+	test("reports only service-sent token usage, and zero when none arrives", async () => {
+		const result = await streamKiro(createModel(), TEST_CONTEXT, {
+			apiKey: TEST_API_KEY,
+			fetch: async () =>
+				responseForEvents([
+					["contextUsageEvent", { contextUsagePercentage: 50 }],
+					["assistantResponseEvent", { content: "a reply long enough to have been estimated" }],
+				]),
+		}).result();
+
+		expect(result.usage).toMatchObject({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 });
 	});
 
 	test("classifies a reasoning-only terminal response without replaying it", async () => {
@@ -886,9 +906,9 @@ describe("Kiro stream transport", () => {
 		const result = await stream.result();
 
 		expect(result.stopReason).toBe("length");
-		// The truncated call is finalized so the transcript shows the intent, but
-		// its half-parsed arguments must never be presented as executable.
-		expect(result.content.find(block => block.type === "toolCall")).toMatchObject({ arguments: {} });
+		// The cut-off call is dropped: neither its half-parsed arguments nor a
+		// placeholder `{}` may reach the agent loop as an executable call.
+		expect(result.content).toEqual([{ type: "text", text: "working" }]);
 	});
 
 	test("still reports malformed tool input as an error without truncation", async () => {

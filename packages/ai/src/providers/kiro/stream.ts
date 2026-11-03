@@ -36,7 +36,8 @@ import type { KiroNormalizedEvent, KiroOptions, KiroUsageMetrics } from "./types
 
 const KIRO_RUNTIME_TARGET = "KiroRuntimeService.GenerateAssistantResponse";
 const KIRO_USER_AGENT = "oh-my-pi/kiro-api";
-const MAX_PRE_OUTPUT_RECOVERY_ATTEMPTS = 1;
+/** Requests per call: the first plus at most one pre-output retry. */
+const MAX_ATTEMPTS = 2;
 
 function mergeHeaders(...headerSources: (Record<string, string> | undefined)[]): Record<string, string> {
 	const merged: Record<string, string> = {};
@@ -74,7 +75,8 @@ interface AttemptState {
 	inlineClose?: string;
 	pendingThinkingSignature?: string;
 	usage: KiroUsageMetrics;
-	contextUsagePercentage?: number;
+	/** The service sent `meteringEvent`: this request was billed and must not be replayed. */
+	metered: boolean;
 	stopReason?: string;
 	semanticEvents: number;
 	toolAssembler: KiroToolAssembler;
@@ -220,10 +222,34 @@ function hasVisibleInlineText(value: string): boolean {
 	return value.trim().length > 0;
 }
 
-function isInlineContentProgress(state: AttemptState, chunk: string): boolean {
-	if (!hasVisibleInlineText(chunk)) return false;
-	if (state.nativeReasoning || state.inlineMode === "text") return true;
+/** What one content chunk does to the inline-thinking parser, without emitting it. */
+interface InlineStep {
+	mode: AttemptState["inlineMode"];
+	close?: string;
+	/** Unemitted tail kept for the next chunk (a partial tag). */
+	buffer: string;
+	thinking: string;
+	closesThinking: boolean;
+	text: string;
+}
 
+/**
+ * The single inline-tag parser. Models without native reasoning may open their
+ * answer with `<thinking>`-style tags; this decides which part of a chunk is
+ * thinking, which is text, and what stays buffered. The progress probe and the
+ * emitter both run it, so they can never disagree.
+ */
+function stepInlineContent(state: AttemptState, chunk: string): InlineStep {
+	if (state.nativeReasoning || state.inlineMode === "text") {
+		return {
+			mode: state.inlineMode,
+			close: state.inlineClose,
+			buffer: state.inlineBuffer,
+			thinking: "",
+			closesThinking: true,
+			text: chunk,
+		};
+	}
 	let buffer = state.inlineBuffer + chunk;
 	let close = state.inlineClose;
 	if (state.inlineMode === "undecided") {
@@ -232,59 +258,47 @@ function isInlineContentProgress(state: AttemptState, chunk: string): boolean {
 			close = match[1];
 			buffer = buffer.slice(match[0].length);
 		} else if (INLINE_THINKING_TAGS.some(([open]) => open.startsWith(buffer))) {
-			return false;
+			return { mode: "undecided", buffer, thinking: "", closesThinking: false, text: "" };
 		} else {
-			return true;
+			return { mode: "text", buffer: "", thinking: "", closesThinking: false, text: buffer };
 		}
 	}
-
-	if (!close) return true;
+	if (!close) return { mode: "thinking", buffer, thinking: "", closesThinking: false, text: "" };
 	const end = buffer.indexOf(close);
 	if (end < 0) {
 		const safeLength = Math.max(0, buffer.length - close.length + 1);
-		return hasVisibleInlineText(buffer.slice(0, safeLength));
+		return {
+			mode: "thinking",
+			close,
+			buffer: buffer.slice(safeLength),
+			thinking: buffer.slice(0, safeLength),
+			closesThinking: false,
+			text: "",
+		};
 	}
-	const remainder = buffer.slice(end + close.length).replace(/^\n\n/, "");
-	return hasVisibleInlineText(buffer.slice(0, end)) || hasVisibleInlineText(remainder);
+	return {
+		mode: "text",
+		buffer: "",
+		thinking: buffer.slice(0, end),
+		closesThinking: true,
+		text: buffer.slice(end + close.length).replace(/^\n\n/, ""),
+	};
+}
+
+function isInlineContentProgress(state: AttemptState, chunk: string): boolean {
+	if (!hasVisibleInlineText(chunk)) return false;
+	const step = stepInlineContent(state, chunk);
+	return hasVisibleInlineText(step.thinking) || hasVisibleInlineText(step.text);
 }
 
 function processInlineContent(state: AttemptState, stream: AssistantMessageEventStream, chunk: string): void {
-	if (state.nativeReasoning || state.inlineMode === "text") {
-		closeThinking(state, stream);
-		emitText(state, stream, chunk);
-		return;
-	}
-	state.inlineBuffer += chunk;
-	if (state.inlineMode === "undecided") {
-		const match = INLINE_THINKING_TAGS.find(([open]) => state.inlineBuffer.startsWith(open));
-		if (match) {
-			state.inlineMode = "thinking";
-			state.inlineClose = match[1];
-			state.inlineBuffer = state.inlineBuffer.slice(match[0].length);
-		} else if (INLINE_THINKING_TAGS.some(([open]) => open.startsWith(state.inlineBuffer))) {
-			return;
-		} else {
-			state.inlineMode = "text";
-			const buffered = state.inlineBuffer;
-			state.inlineBuffer = "";
-			emitText(state, stream, buffered);
-			return;
-		}
-	}
-	if (state.inlineMode !== "thinking" || !state.inlineClose) return;
-	const end = state.inlineBuffer.indexOf(state.inlineClose);
-	if (end < 0) {
-		const safeLength = Math.max(0, state.inlineBuffer.length - state.inlineClose.length + 1);
-		emitThinking(state, stream, state.inlineBuffer.slice(0, safeLength));
-		state.inlineBuffer = state.inlineBuffer.slice(safeLength);
-		return;
-	}
-	emitThinking(state, stream, state.inlineBuffer.slice(0, end));
-	closeThinking(state, stream);
-	const remainder = state.inlineBuffer.slice(end + state.inlineClose.length).replace(/^\n\n/, "");
-	state.inlineBuffer = "";
-	state.inlineMode = "text";
-	emitText(state, stream, remainder);
+	const step = stepInlineContent(state, chunk);
+	state.inlineMode = step.mode;
+	state.inlineClose = step.close;
+	state.inlineBuffer = step.buffer;
+	emitThinking(state, stream, step.thinking);
+	if (step.closesThinking) closeThinking(state, stream);
+	emitText(state, stream, step.text);
 }
 
 function finalizeInline(state: AttemptState, stream: AssistantMessageEventStream): void {
@@ -297,21 +311,11 @@ function finalizeInline(state: AttemptState, stream: AssistantMessageEventStream
 	closeText(state, stream);
 }
 
-function estimateOutputTokens(output: AssistantMessage): number {
-	let bytes = 0;
-	for (const block of output.content) {
-		if (block.type === "text") bytes += Buffer.byteLength(block.text);
-		else if (block.type === "thinking") bytes += Buffer.byteLength(block.thinking);
-		else if (block.type === "toolCall") bytes += Buffer.byteLength(JSON.stringify(block.arguments));
-	}
-	return (bytes + 3) >> 2;
-}
-
+/** Usage from the service's token metrics only; a stream that reports none counts 0. */
 function finalizeUsage(state: AttemptState, model: Model): void {
 	const usage = state.output.usage;
-	usage.input =
-		state.usage.inputTokens ?? Math.round(((state.contextUsagePercentage ?? 0) / 100) * (model.contextWindow ?? 0));
-	usage.output = state.usage.outputTokens ?? estimateOutputTokens(state.output);
+	usage.input = state.usage.inputTokens ?? 0;
+	usage.output = state.usage.outputTokens ?? 0;
 	usage.cacheRead = state.usage.cacheReadTokens ?? 0;
 	usage.cacheWrite = state.usage.cacheWriteTokens ?? 0;
 	usage.totalTokens = usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
@@ -323,6 +327,12 @@ function finalizeUsage(state: AttemptState, model: Model): void {
 
 function createAttempt(model: Model, stream: AssistantMessageEventStream, timestamp: number): AttemptState {
 	const output = emptyOutput(model, timestamp);
+	// The callback runs only once a tool event arrives, after `state` exists.
+	const toolAssembler = new KiroToolAssembler(output, stream, () => {
+		markVisible(state, stream);
+		closeThinking(state, stream);
+		closeText(state, stream);
+	});
 	const state: AttemptState = {
 		output,
 		visible: false,
@@ -331,14 +341,10 @@ function createAttempt(model: Model, stream: AssistantMessageEventStream, timest
 		inlineMode: "undecided",
 		inlineBuffer: "",
 		usage: {},
+		metered: false,
 		semanticEvents: 0,
-		toolAssembler: undefined as unknown as KiroToolAssembler,
+		toolAssembler,
 	};
-	state.toolAssembler = new KiroToolAssembler(output, stream, () => {
-		markVisible(state, stream);
-		closeThinking(state, stream);
-		closeText(state, stream);
-	});
 	return state;
 }
 
@@ -365,7 +371,7 @@ async function waitBeforeRecovery(options: KiroOptions | undefined, signal: Abor
 	}
 }
 
-function isRecoverablePreOutputStreamFailure(error: unknown): boolean {
+function isTruncatedFrame(error: unknown): boolean {
 	return error instanceof AIError.EventStreamFrameError && error.message.includes("truncated message");
 }
 
@@ -380,7 +386,7 @@ export function streamKiro(model: Model, context: Context, options: KiroOptions 
 		try {
 			const credential = parseCredential(typeof options.apiKey === "string" ? options.apiKey : undefined);
 			const runtimeBaseUrl = resolveKiroRuntimeBaseUrl(model, credential);
-			let recoveryAttempt = 0;
+			let attempt = 1;
 			// Resolved once per request: caller option → environment override → shared helper default.
 			const idleTimeoutMs = options.streamIdleTimeoutMs ?? getStreamIdleTimeoutMs();
 			const firstEventTimeoutMs = options.streamFirstEventTimeoutMs ?? getStreamFirstEventTimeoutMs(idleTimeoutMs);
@@ -408,7 +414,7 @@ export function streamKiro(model: Model, context: Context, options: KiroOptions 
 							"x-amz-target": KIRO_RUNTIME_TARGET,
 							"x-amzn-codewhisperer-optout": "true",
 							"amz-sdk-invocation-id": crypto.randomUUID(),
-							"amz-sdk-request": "attempt=1; max=1",
+							"amz-sdk-request": `attempt=${attempt}; max=${MAX_ATTEMPTS}`,
 							"user-agent": KIRO_USER_AGENT,
 						}),
 						body: JSON.stringify(payload),
@@ -428,12 +434,9 @@ export function streamKiro(model: Model, context: Context, options: KiroOptions 
 				if (!response.ok) {
 					try {
 						const error = await kiroHttpError(response, watchdog.signal);
-						if (
-							(isKiroCapacityError(error) || isKiroTransientToolFormatError(error)) &&
-							recoveryAttempt < MAX_PRE_OUTPUT_RECOVERY_ATTEMPTS &&
-							!state.visible
-						) {
-							recoveryAttempt++;
+						// An HTTP rejection has produced no output and no bill.
+						if ((isKiroCapacityError(error) || isKiroTransientToolFormatError(error)) && attempt < MAX_ATTEMPTS) {
+							attempt++;
 							await waitBeforeRecovery(options, options.signal);
 							continue;
 						}
@@ -497,8 +500,10 @@ export function streamKiro(model: Model, context: Context, options: KiroOptions 
 							case "tool":
 								state.toolAssembler.update(event);
 								break;
+							case "metering":
+								state.metered = true;
+								break;
 							case "contextUsage":
-								state.contextUsagePercentage = event.percentage;
 								break;
 							case "usage":
 								mergeKiroUsage(state.usage, event.usage);
@@ -508,25 +513,18 @@ export function streamKiro(model: Model, context: Context, options: KiroOptions 
 						}
 					}
 				} catch (error) {
-					if (
-						!state.visible &&
-						recoveryAttempt < MAX_PRE_OUTPUT_RECOVERY_ATTEMPTS &&
-						isRecoverablePreOutputStreamFailure(error)
-					) {
-						recoveryAttempt++;
+					// A frame cut off before any output is replayed once, unless the
+					// service already billed the request.
+					if (isTruncatedFrame(error) && !state.visible && !state.metered && attempt < MAX_ATTEMPTS) {
+						attempt++;
 						await waitBeforeRecovery(options, options.signal);
 						continue;
 					}
 					throw error;
 				}
-				state.toolAssembler.finishAll(state.stopReason === "MAX_TOKENS" || state.stopReason === "LENGTH");
 				finalizeInline(state, stream);
+				state.toolAssembler.finishAll(state.stopReason === "MAX_TOKENS" || state.stopReason === "LENGTH");
 				if (!state.visible) {
-					if (recoveryAttempt < MAX_PRE_OUTPUT_RECOVERY_ATTEMPTS) {
-						recoveryAttempt++;
-						await waitBeforeRecovery(options, options.signal);
-						continue;
-					}
 					throw new KiroStreamError("Kiro stream ended without visible output", {
 						code: "EMPTY_STREAM",
 						kind: "incomplete-stream",

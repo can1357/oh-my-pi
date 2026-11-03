@@ -46,19 +46,29 @@ export class KiroToolAssembler {
 				partial: this.output,
 			});
 		}
-		if (event.stop) this.#finish(state, false);
+		if (event.stop) this.#finish(state);
 	}
 
 	/**
 	 * Finalize every tool that never received `stop`. A truncated response
-	 * (`truncated: true`) carries cut-off arguments, so those tools finalize
-	 * on a best-effort `{}` instead of throwing: the caller reports `length`,
-	 * and the agent loop then skips them rather than executing partial input.
+	 * carries cut-off arguments, so those tools are dropped from the message
+	 * instead of finalized: the caller reports `length`, and no partial call
+	 * reaches the agent loop. Without truncation an unfinished tool must still
+	 * parse as a complete JSON object.
 	 */
 	finishAll(truncated: boolean): void {
+		const dropped: number[] = [];
 		for (const state of this.#states.values()) {
-			if (!state.completed) this.#finish(state, truncated);
+			if (state.completed) continue;
+			if (truncated) {
+				if (state.contentIndex !== undefined) dropped.push(state.contentIndex);
+				state.completed = true;
+				continue;
+			}
+			this.#finish(state);
 		}
+		// Splice from the end so earlier indices stay valid.
+		for (const index of dropped.sort((left, right) => right - left)) this.output.content.splice(index, 1);
 	}
 
 	#start(state: ToolState): void {
@@ -72,7 +82,7 @@ export class KiroToolAssembler {
 		this.stream.push({ type: "toolcall_start", contentIndex: state.contentIndex, partial: this.output });
 	}
 
-	#finish(state: ToolState, truncated: boolean): void {
+	#finish(state: ToolState): void {
 		this.#start(state);
 		let args = state.snapshot;
 		let delta = state.fragments;
@@ -85,14 +95,11 @@ export class KiroToolAssembler {
 				}
 				args = parsed as Record<string, unknown>;
 			} catch (cause) {
-				if (!truncated) {
-					throw new KiroStreamError(`Tool ${state.id} completed with malformed JSON input`, {
-						code: "MALFORMED_TOOL_INPUT",
-						kind: "output",
-						cause,
-					});
-				}
-				args = {};
+				throw new KiroStreamError(`Tool ${state.id} completed with malformed JSON input`, {
+					code: "MALFORMED_TOOL_INPUT",
+					kind: "output",
+					cause,
+				});
 			}
 		}
 		const block = this.output.content[state.contentIndex!] as ToolCall;
