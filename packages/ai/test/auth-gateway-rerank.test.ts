@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
 import type { AuthGatewayServerHandle } from "@oh-my-pi/pi-ai/auth-gateway/types";
 import { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
+import { rerankOpenRouter } from "@oh-my-pi/pi-ai/rerank";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { Api, FetchImpl, Model, ModelSpec } from "@oh-my-pi/pi-catalog/types";
 
@@ -193,5 +194,24 @@ describe("auth-gateway POST /v1/rerank", () => {
 		expect(response.status).toBe(413);
 		expect(await response.json()).toMatchObject({ error: { code: 413, type: "invalid_request_error" } });
 		expect(harness.upstream).toHaveLength(0);
+	});
+});
+
+describe("rerankOpenRouter", () => {
+	it("reports the requested model when the answer carries no model field", async () => {
+		const fetchImpl: FetchImpl = async () =>
+			Response.json({
+				id: "rerank-1",
+				results: [{ index: 1, relevance_score: 0.9 }],
+				meta: { billed_units: { search_units: 1 } },
+			});
+		const model = rerankModel("cohere", "rerank-v3.5");
+		const result = await rerankOpenRouter(
+			model,
+			{ query: "q", documents: ["a", "b"] },
+			{ apiKey: "key", fetch: fetchImpl },
+		);
+		expect(result.model).toBe("rerank-v3.5");
+		expect(result.results).toEqual([{ index: 1, relevanceScore: 0.9 }]);
 	});
 });
