@@ -2841,6 +2841,49 @@ mod tests {
 		assert_eq!(total, before + info_len);
 	}
 
+	/// The same through the writer Windows gives a remote shell's stdin,
+	/// which cannot be polled ([`crate::rsync::transport::fed_writer`], here
+	/// over a sink that takes nothing until released): its buffer full, the
+	/// message read meanwhile counts. When that writer blocked in `write`
+	/// with no probe, the mark came first (5 where 14 was due, in review).
+	#[test]
+	fn stats_read_total_counts_input_read_while_a_fed_pipe_is_full() {
+		let counters = IoCounters::default();
+		let cancel = Arc::new(AtomicBool::new(false));
+		let open = Arc::new(AtomicBool::new(false));
+		let sink = GatedSink { open: Arc::clone(&open) };
+		let (mut inner, writable) =
+			crate::rsync::transport::fed_writer(sink, &cancel, &crate::rsync::transport::ConnCtl::default()).unwrap();
+		// The feed takes what it can and waits in the sink; the buffer fills.
+		// One write per pass: it takes what fits, as a socket's does.
+		while writable(Duration::from_millis(50)) {
+			let taken = inner.write(&[0u8; 4096]).unwrap();
+			assert!(taken > 0, "the probe reported room the writer did not take");
+		}
+		let cfg = WriteConfig { writable: Some(writable), ..WriteConfig::default() };
+		let mut w = MuxWriter::new(inner, counters.clone(), cfg);
+		w.start_multiplex().unwrap();
+		let (_r, tx, _) = linked_reader(&counters, &w, &cancel);
+		let before = counters.total_read();
+		let info = frame(MSG_INFO, b"note\n");
+		let info_len = info.len() as u64;
+		let read = counters.clone();
+		let feeder = thread::spawn(move || {
+			thread::sleep(Duration::from_millis(100));
+			tx.send(info).unwrap();
+			let deadline = Instant::now() + Duration::from_secs(10);
+			while read.total_read() < before + info_len && Instant::now() < deadline {
+				thread::sleep(Duration::from_millis(5));
+			}
+			open.store(true, Ordering::Relaxed);
+			tx
+		});
+		w.write_all(&[0]).unwrap();
+		let total = w.flush_for_stats().unwrap();
+		let _tx = feeder.join().unwrap();
+		assert_eq!(total, before + info_len);
+	}
+
 	/// `--timeout` ends the stats flush when the connection takes nothing, and
 	/// the peer's messages are dispatched while it waits, as in the ordinary
 	/// flush: whether the connection's probe reports it full (each pass ends
