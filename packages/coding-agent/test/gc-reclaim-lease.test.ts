@@ -163,6 +163,116 @@ for (const [code, advice] of [
 	});
 }
 
+// A lease asked about again and not answered is a failure to check, not an
+// open by another process: a review made `fcntl(F_GETLEASE)` fail with `EIO`
+// at each point a reclaim asks, and every report blamed a process that did
+// not exist. Each point now says it could not check, and does what not
+// knowing calls for: move the session back, keep the copy, or write the copy
+// back.
+for (const point of ["after the moves", "while judging a copy", "after a copy's unlink"] as const) {
+	test.skipIf(!leasesGranted)(`a lease query that fails ${point} is reported as a failure to check`, async () => {
+		const real = libcModule.libc();
+		let failGetLease = false;
+		let failed = false;
+		spyOn(libcModule, "libc").mockReturnValue({
+			...real,
+			fcntl: (fd, cmd, arg) => {
+				if (cmd === 1025 && failGetLease) {
+					failed = true;
+					return -1;
+				}
+				return real.fcntl?.(fd, cmd, arg) ?? -1;
+			},
+			errno: () => {
+				if (!failed) return real.errno();
+				failed = false;
+				return os.constants.errno.EIO;
+			},
+		});
+		const liveArtifacts = path.dirname(artifact);
+		const copyDir = archiveFile.slice(0, -".jsonl.gz".length);
+		const realRename = libcModule.renameNoReplace;
+		spyOn(libcModule, "renameNoReplace").mockImplementation(async (from, to) => {
+			const moved = await realRename(from, to);
+			if (point === "after the moves" && from === liveArtifacts) failGetLease = true;
+			if (point === "while judging a copy" && path.dirname(from) === copyDir && to.endsWith(".leaving")) {
+				failGetLease = true;
+			}
+			return moved;
+		});
+		const realUnlink = fs.unlink;
+		spyOn(fs, "unlink").mockImplementation(async file => {
+			const name = String(file);
+			if (point === "after a copy's unlink" && path.dirname(name) === copyDir && name.endsWith(".leaving")) {
+				failGetLease = true;
+			}
+			return await realUnlink(file);
+		});
+
+		const result = await reclaim(true);
+		mock.restore();
+
+		const said = result.reclaim?.errors.join("\n") ?? "";
+		expect(said).not.toContain("was opened by another process");
+		expect(said).not.toContain("another process opened");
+		expect(said).not.toMatch(/another process holds \S+ open \(/);
+		if (point === "after the moves") {
+			expect(result.reclaim?.reclaimed).toBe(0);
+			expect(said).toContain("could not be checked");
+			expect(said).toContain("whether its lease still stands could not be read (EIO)");
+			expect(await Bun.file(sessionFile).exists()).toBe(true);
+			expect(await Bun.file(artifact).text()).toBe("FIRST");
+		} else {
+			expect(result.reclaim?.reclaimed).toBe(1);
+			const kept = result.reclaim?.keptCopies?.join("\n") ?? "";
+			if (point === "while judging a copy") {
+				expect(kept).toContain("could not be told");
+				expect(kept).toContain("F_GETLEASE");
+				expect(kept).toContain("EIO");
+			} else {
+				expect(kept).toContain("whether its lease still stands could not be read (EIO)");
+				expect(kept).toContain("written back");
+			}
+			expect(await Bun.file(path.join(copyDir, "a.log")).text()).toBe("FIRST");
+		}
+	});
+}
+
+// The kernel refuses a lease while any other open of the file exists, this
+// process's own included. A review held a read-only descriptor on a live
+// artifact, and in turn on its archived copy, in the omp process itself, and
+// each report named an invisible "another process". The report now names
+// this process when it is the holder.
+for (const held of ["the live artifact", "its archived copy"] as const) {
+	test.skipIf(!leasesGranted || process.platform !== "linux")(
+		`a reclaim says this process holds ${held} when it does, not another process`,
+		async () => {
+			const target =
+				held === "the live artifact" ? artifact : path.join(archiveFile.slice(0, -".jsonl.gz".length), "a.log");
+			const own = await fs.open(target, "r");
+			try {
+				const result = await reclaim(true);
+				const said = result.reclaim?.errors.join("\n") ?? "";
+
+				expect(said).toContain(`this omp process (${process.pid}) itself holds`);
+				expect(said).toContain("1 other descriptor");
+				expect(said).not.toContain("is open elsewhere");
+				expect(said).not.toMatch(/another open of \S+ exists/);
+				if (held === "the live artifact") {
+					expect(result.reclaim?.reclaimed).toBe(0);
+					expect(await Bun.file(artifact).text()).toBe("FIRST");
+				} else {
+					expect(result.reclaim?.reclaimed).toBe(1);
+					expect(result.reclaim?.keptCopies?.join("\n")).toContain(target);
+					expect(await Bun.file(target).text()).toBe("FIRST");
+				}
+			} finally {
+				await own.close();
+			}
+		},
+	);
+}
+
 /** Whether this user may run a command as root without a password: setting a `security.*` attribute needs root. */
 const sudoWorks = Bun.spawnSync(["sudo", "-n", "true"], { stdout: "ignore", stderr: "ignore" }).exitCode === 0;
 

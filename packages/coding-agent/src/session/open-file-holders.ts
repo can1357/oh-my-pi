@@ -24,7 +24,7 @@
  * share one by `fork` or by a socket, and a mapping keeps its description
  * alive; the kernel counts them, so nothing is listed and nothing can be
  * missed. While the lease stands, an open of the file by any other process —
- * or a `truncate` — first breaks it, which {@link soleOpenLeaseIntact} sees.
+ * or a `truncate` — first breaks it, which {@link soleOpenLeaseStands} sees.
  * Such an opener waits until this run lets go, or for at most the kernel's
  * `fs.lease-break-time` (45 seconds by default), after which the kernel
  * takes the lease away and lets the open through; it is never held longer.
@@ -71,7 +71,7 @@ export type SoleOpenLease =
  * Take a write lease on the regular file open at `fd`, which must be this
  * run's only descriptor on it, opened read-only: proof, from the kernel,
  * that no other process holds the file open — see the module comment. The
- * lease lasts until `fd` is closed; {@link soleOpenLeaseIntact} says whether
+ * lease lasts until `fd` is closed; {@link soleOpenLeaseStands} says whether
  * it still stands unbroken.
  *
  * A lease break sends its holder `SIGIO`, whose default action ends the
@@ -168,16 +168,9 @@ function unproved(call: string, code: number): SoleOpenLease {
 /**
  * Whether the lease {@link takeSoleOpenLease} took on `fd` still stands
  * unbroken: no process has opened or truncated the file since. A break that
- * is pending, or that the kernel has already forced, reads as false.
- */
-export function soleOpenLeaseIntact(fd: number): boolean {
-	return libc().fcntl?.(fd, F_GETLEASE, 0) === F_WRLCK;
-}
-
-/**
- * {@link soleOpenLeaseIntact}, except that a failure to ask is not taken for
- * a broken lease: it throws, saying why. For a caller that must not read
- * "could not look" as "another process opened it".
+ * is pending, or that the kernel has already forced, reads as false. A
+ * failure to ask is not taken for a broken lease: it throws, saying why, so
+ * no caller reads "could not look" as "another process opened it".
  */
 export function soleOpenLeaseStands(fd: number): boolean {
 	const lib = libc();
@@ -209,6 +202,29 @@ export async function openFileHolders(files: readonly string[]): Promise<OpenFil
 /** How a holder reads in a sentence: "process 4242 (python3), holding /a/b". */
 export function describeOpenFileHolder(holder: OpenFileHolder): string {
 	return `process ${holder.pid}${holder.command ? ` (${holder.command})` : ""}, holding ${holder.file}`;
+}
+
+/**
+ * How many descriptors this process holds on the file `identity` names, by
+ * `/proc/self/fd`; undefined where that cannot be read. A lease is refused
+ * while any other open of the file exists — this process's own included —
+ * so a caller holding one descriptor of its own, and asking why the kernel
+ * refused, reads more than one as this process holding the file elsewhere.
+ */
+export async function ownDescriptorCount(identity: { dev: number; ino: number }): Promise<number | undefined> {
+	if (process.platform !== "linux") return undefined;
+	let descriptors: string[];
+	try {
+		descriptors = await fs.readdir("/proc/self/fd");
+	} catch {
+		return undefined;
+	}
+	let count = 0;
+	for (const descriptor of descriptors) {
+		const held = await fs.stat(`/proc/self/fd/${descriptor}`).catch(() => undefined);
+		if (held && held.dev === identity.dev && held.ino === identity.ino) count++;
+	}
+	return count;
 }
 
 async function linuxHolders(files: readonly string[]): Promise<OpenFileHolders> {

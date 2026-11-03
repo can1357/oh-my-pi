@@ -83,8 +83,9 @@ import {
 	describeOpenFileHolder,
 	type OpenFileHolders,
 	openFileHolders,
+	ownDescriptorCount,
 	type SoleOpenLease,
-	soleOpenLeaseIntact,
+	soleOpenLeaseStands,
 	takeSoleOpenLease,
 } from "../session/open-file-holders";
 import {
@@ -240,6 +241,13 @@ export interface ReclaimGcResult {
 	freedCopies?: string[];
 	/** Archived copies this run kept beside a moved original, each with why and where; also in `errors`. */
 	keptCopies?: string[];
+	/**
+	 * Archived copies this run unlinked and then could not write back whole —
+	 * the original changed in the call before the unlink, and the disk or a
+	 * file size limit stopped the write-back — each saying how many bytes the
+	 * written-back file holds; also in `errors`.
+	 */
+	lostCopies?: string[];
 	/** The live artifact tree a refused reclaim left where it was, with the reason in `errors`. */
 	keptArtifactTree?: string;
 	errors: string[];
@@ -2149,39 +2157,62 @@ async function archivedAliasesRefusal(proven: ProvenTree): Promise<string | unde
 }
 
 /**
- * Who else holds `file` open as the process list shows it, for a refusal to
- * name, reported under `named`. Asked only once the kernel has refused a
- * lease — see {@link takeSoleOpenLease} — since the list proves nothing and
- * costs a look at every descriptor of every process: 0.7 to 1.4 seconds a
- * read on a machine running 3,300 processes, which, read on every reclaim
- * and preview, was most of the time several tests took. This run's own
- * descriptors are left out.
+ * Who else holds `file` open — the file open at `handle`, this run's one
+ * descriptor on it — as the process list shows it, for a refusal to name.
+ * Asked only once the kernel has refused a lease — see
+ * {@link takeSoleOpenLease} — since the list proves nothing and costs a look
+ * at every descriptor of every process: 0.7 to 1.4 seconds a read on a
+ * machine running 3,300 processes, which, read on every reclaim and preview,
+ * was most of the time several tests took. Other processes are listed; this
+ * process is counted apart, by the descriptors it holds on the file besides
+ * `handle`: the kernel refuses a lease to an open of its own as to anyone's.
  */
-async function otherHolders(file: string, named: string): Promise<OpenFileHolders> {
+async function holdersOf(
+	handle: fs.FileHandle,
+	file: string,
+): Promise<{ listed: OpenFileHolders; ownOthers: number | undefined }> {
 	const listed: OpenFileHolders = await openFileHolders([file]).catch((error: unknown) => ({
 		unknown: errorMessage(error),
 	}));
-	if (!("holders" in listed)) return listed;
+	const own = await ownDescriptorCount(await handle.stat()).catch(() => undefined);
+	const ownOthers = own === undefined ? undefined : Math.max(0, own - 1);
+	if (!("holders" in listed)) return { listed, ownOthers };
 	return {
-		holders: listed.holders.filter(holder => holder.pid !== process.pid).map(holder => ({ ...holder, file: named })),
+		listed: {
+			holders: listed.holders.filter(holder => holder.pid !== process.pid).map(holder => ({ ...holder, file })),
+		},
+		ownOthers,
 	};
 }
 
 /**
  * Why a file was kept when the kernel would not lease it — see
  * {@link takeSoleOpenLease} — said so a reader can act on it: which file, what
- * the kernel answered, who the process list found, and what to do.
+ * the kernel answered, who holds it as far as can be seen, and what to do.
+ * The kernel refuses while any other open of the file exists, in another
+ * process or in this one, so another process is named only when one is seen.
  */
 function leaseRefusal(
 	file: string,
 	lease: Exclude<SoleOpenLease, { outcome: "held" }>,
-	listed: OpenFileHolders,
+	{ listed, ownOthers }: { listed: OpenFileHolders; ownOthers: number | undefined },
 ): string {
+	const own =
+		ownOthers !== undefined && ownOthers > 0
+			? `this omp process (${process.pid}) itself holds ${file} open through ${ownOthers} other ` +
+				`${ownOthers === 1 ? "descriptor" : "descriptors"}`
+			: undefined;
 	if ("holders" in listed && listed.holders.length > 0) {
 		return (
-			`${listed.holders.map(describeOpenFileHolder).join("; ")} open (${lease.evidence}): it is using the session, ` +
-			`and what it writes through that descriptor once the file moved would land in the archive beside a copy that ` +
-			`does not hold it, so nothing was moved — let it finish, or close it, and reclaim again`
+			`${listed.holders.map(describeOpenFileHolder).join("; ")}${own ? `; and ${own}` : ""} open (${lease.evidence}): ` +
+			`it is using the session, and what it writes through that descriptor once the file moved would land in the ` +
+			`archive beside a copy that does not hold it, so nothing was moved — let it finish, or close it, and reclaim again`
+		);
+	}
+	if (own) {
+		return (
+			`${own}, so the kernel would not lease it (${lease.evidence}), and no other process this run can list holds ` +
+			`it; nothing was moved. Close what has it open in this process and reclaim again`
 		);
 	}
 	const list =
@@ -2190,12 +2221,13 @@ function leaseRefusal(
 			: "no process this run can list holds it";
 	if (lease.outcome === "open-elsewhere") {
 		return (
-			`${file} is open in another process: the kernel refused this run a lease on it (${lease.evidence}), which it ` +
-			`does only while another process holds the file open or maps it, and ${list} — so the holder is one a ` +
-			`process list does not show: a child that inherited the descriptor, a process it was handed to, one that ` +
-			`maps the file, or another user's or another container's. It is using the session, so nothing was moved. ` +
-			`Find it with \`fuser -v ${shellQuote(file)}\` or \`lsof ${shellQuote(file)}\` (as root for another ` +
-			`user's), let it finish or close it, and reclaim again`
+			`${file} is open elsewhere: the kernel refused this run a lease on it (${lease.evidence}), which it does ` +
+			`only while another open of the file exists or it is mapped, and ${list}` +
+			`${ownOthers === 0 ? ", nor does this process through another descriptor" : ""} — so the holder is one a ` +
+			`process list does not show: a child that inherited the ` +
+			`descriptor, a process it was handed to, one that maps the file, or another user's or another container's. ` +
+			`It is using the session, so nothing was moved. Find it with \`fuser -v ${shellQuote(file)}\` or ` +
+			`\`lsof ${shellQuote(file)}\` (as root for another user's), let it finish or close it, and reclaim again`
 		);
 	}
 	return (
@@ -2249,7 +2281,7 @@ async function leaseLiveFiles(
 		if (!handle) return `${file.path} is no longer the file this run proved`;
 		leased.push({ ...file, handle });
 		const lease = takeSoleOpenLease(handle.fd);
-		if (lease.outcome !== "held") return leaseRefusal(file.path, lease, await otherHolders(file.path, file.path));
+		if (lease.outcome !== "held") return leaseRefusal(file.path, lease, await holdersOf(handle, file.path));
 		const now = await handle.stat();
 		if (!now.isFile() || !sameIdentity(identityFrom(now), file.proved)) {
 			return `${file.path} is no longer the file this run proved`;
@@ -2258,9 +2290,13 @@ async function leaseLiveFiles(
 	return undefined;
 }
 
-/** Why a leased file shows the session in use now that the moves are made — another process opened it meanwhile — or undefined. */
+/**
+ * Why a leased file shows the session in use now that the moves are made —
+ * another process opened it meanwhile — or undefined. Throws when a lease
+ * cannot be asked about: that is a failure to check, not an open.
+ */
 function brokenLease(leased: readonly LeasedFile[]): string | undefined {
-	const opened = leased.find(file => !soleOpenLeaseIntact(file.handle.fd));
+	const opened = leased.find(file => !soleOpenLeaseStands(file.handle.fd));
 	if (!opened) return undefined;
 	return (
 		`${opened.path} was opened by another process while this run moved it into the archive — the kernel broke ` +
@@ -2711,17 +2747,19 @@ async function proveLiveTreeIsArchived(
  * unlinked file. Such a process ignores this run's lease on a name that is
  * this run's alone; it is outside what this guards.
  *
- * Returns what went and, for each copy kept, why and where it is: a copy kept
- * costs space, never an original.
+ * Returns what went; for each copy kept, why and where it is — a copy kept
+ * costs space, never an original — and, apart, each copy unlinked whose
+ * write-back could not finish, with how much of it is left.
  */
 async function freeArchivedCopies(
 	proven: ProvenTree,
 	liveArtifacts: string,
 	reclaimedTree: string,
 	leased: readonly LeasedFile[],
-): Promise<{ freed: string[]; kept: string[] }> {
+): Promise<{ freed: string[]; kept: string[]; lost: string[] }> {
 	const freed: string[] = [];
 	const kept: string[] = [];
+	const lost: string[] = [];
 	const held: { path: string; held: HeldFile }[] = [];
 	try {
 		for (const directory of proven.directories) {
@@ -2740,7 +2778,8 @@ async function freeArchivedCopies(
 			// name: an open by name, this process's own included, breaks the
 			// lease that proves nothing else opened or truncated it.
 			const redundant = async (handle: fs.FileHandle): Promise<string | undefined> => {
-				if (!originalLease || !soleOpenLeaseIntact(originalLease.handle.fd)) {
+				if (!originalLease) return `${original} is not one this run leased, so what it holds was not checked`;
+				if (!soleOpenLeaseStands(originalLease.handle.fd)) {
 					return `${original} was opened or truncated by another process after it moved, so it may no longer hold what ${copy} holds`;
 				}
 				if (await handleBeginsWith(originalLease.handle, handle)) return undefined;
@@ -2752,8 +2791,19 @@ async function freeArchivedCopies(
 				judge: async (moved, handle) => {
 					if (!isCopy(moved)) return `${copy} is no longer the archived copy this run proved`;
 					if (!handle) return `${copy} could not be read where it was moved`;
-					if (takeSoleOpenLease(handle.fd).outcome !== "held") {
-						return `another process may hold ${copy} open, and could write to it after it went`;
+					const lease = takeSoleOpenLease(handle.fd);
+					if (lease.outcome === "open-elsewhere") {
+						// The kernel refuses for any other open, this process's own
+						// included, so another process is not named unless shown.
+						const own = await ownDescriptorCount(moved).catch(() => undefined);
+						return own !== undefined && own > 1
+							? `this omp process (${process.pid}) itself holds ${copy} open through ${own - 1} other ` +
+									`${own === 2 ? "descriptor" : "descriptors"} (${lease.evidence}), and could write to it after it went`
+							: `another open of ${copy} exists (${lease.evidence})${own === 1 ? ", not in this process" : ""}, ` +
+									`and whoever holds it could write to it after it went`;
+					}
+					if (lease.outcome === "unproved") {
+						return `whether another process holds ${copy} open could not be told (${lease.evidence}: ${lease.meaning})`;
 					}
 					return await redundant(handle);
 				},
@@ -2762,12 +2812,12 @@ async function freeArchivedCopies(
 				// of either file blocks on its lease and shows here — writes the
 				// copy's bytes back rather than losing them.
 				confirm: async handle => {
-					if (!soleOpenLeaseIntact(handle.fd)) return `another process opened ${copy} as it went`;
+					if (!soleOpenLeaseStands(handle.fd)) return `another process opened ${copy} as it went`;
 					return await redundant(handle);
 				},
 			});
 			if (removal.outcome === "removed") freed.push(copy);
-			else if (removal.outcome === "kept") kept.push(removal.note);
+			else if (removal.outcome === "kept") (removal.lost ? lost : kept).push(removal.note);
 		}
 		for (const directory of held) {
 			let removal: HeldDirectoryRemoval;
@@ -2784,7 +2834,7 @@ async function freeArchivedCopies(
 	} finally {
 		for (const directory of held) await directory.held.handle.close().catch(() => undefined);
 	}
-	return { freed, kept };
+	return { freed, kept, lost };
 }
 
 /**
@@ -3484,6 +3534,9 @@ export function renderText(result: GcResult): string {
 			if (freed > 0)
 				lines.push(`reclaim freed ${freed} archived ${freed === 1 ? "copy" : "copies"} the originals hold`);
 			for (const note of reclaim.keptCopies ?? []) lines.push(`reclaim kept an archived copy: ${note}`);
+			for (const note of reclaim.lostCopies ?? []) {
+				lines.push(`reclaim could not write back all of an archived copy: ${note}`);
+			}
 		} else if (moved.length > 0) {
 			// Neither "moved nothing" nor "kept the tree" is true once an
 			// original is at a reclaimed name: one line, saying where.
@@ -3825,7 +3878,7 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 			handle = await openRegularFile(file).catch(notRegularAsAbsent);
 			if (!handle) return undefined;
 			const lease = takeSoleOpenLease(handle.fd);
-			return lease.outcome === "held" ? undefined : leaseRefusal(file, lease, await otherHolders(file, file));
+			return lease.outcome === "held" ? undefined : leaseRefusal(file, lease, await holdersOf(handle, file));
 		} catch (error) {
 			return `whether another process holds ${file} open could not be asked (${errorMessage(error)})`;
 		} finally {
@@ -4207,9 +4260,14 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 			if (freed.kept.length > 0) {
 				result.keptCopies = freed.kept;
 				// Said as errors, as the archive phase says what it left: space
-				// not given back is worth a look, though every original is safe.
+				// not given back is worth a look, though the original is not
+				// touched by keeping a copy.
+				result.errors.push(...freed.kept.map(note => `an archived copy was kept: ${note}`));
+			}
+			if (freed.lost.length > 0) {
+				result.lostCopies = freed.lost;
 				result.errors.push(
-					...freed.kept.map(note => `an archived copy was kept, and its original is safe: ${note}`),
+					...freed.lost.map(note => `an archived copy could not be written back whole after it went: ${note}`),
 				);
 			}
 		}

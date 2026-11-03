@@ -2397,7 +2397,7 @@ describe("runGcCommand session compression", () => {
 					// original, which it breaks and then waits on, so the lease's state
 					// is polled, for at most 10 s.
 					const deadline = Date.now() + 10_000;
-					while (openFileHolders.soleOpenLeaseIntact(fdOf(file)) && Date.now() < deadline) await Bun.sleep(20);
+					while (openFileHolders.soleOpenLeaseStands(fdOf(file)) && Date.now() < deadline) await Bun.sleep(20);
 				});
 
 				const result = await gcCompress.compressFilesInPlace([candidate], "apfs", new Set([file]));
@@ -2766,7 +2766,7 @@ describe("runGcCommand session compression", () => {
 						// No event says the open has reached gc's lease on the copy, which
 						// it breaks and then waits on, so the lease is polled, for at most 10 s.
 						const deadline = Date.now() + 10_000;
-						while (openFileHolders.soleOpenLeaseIntact(fdOf(file)) && Date.now() < deadline) await Bun.sleep(20);
+						while (openFileHolders.soleOpenLeaseStands(fdOf(file)) && Date.now() < deadline) await Bun.sleep(20);
 					},
 					said: "the compressed copy was opened, or an open of it was tried, by another process as it was given back",
 					kept: async (): Promise<boolean> => {
