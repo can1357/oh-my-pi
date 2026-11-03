@@ -23,6 +23,7 @@ import type {
 	ActiveRepoContext,
 	StatusAccountIdentity as OAuthAccountIdentity,
 	StatusLineHost,
+	PromptCacheStatus,
 	StatusLineSession,
 } from "./host";
 import type { Editor } from "../components/editor";
@@ -39,9 +40,10 @@ import { canReuseCachedPr, createPrCacheContext, isSamePrCacheContext, type PrCa
 import { summarizeUsageResetCredits } from "../overlays/usage-display";
 import { getPreset } from "./presets";
 import { describeSegment, renderSegment, type SegmentContext } from "./segments";
+import { promptCacheBrief } from "./prompt-cache";
 import type { TspMeterMark, TspProps } from "@oh-my-pi/pi-wire";
 import type { NativeNode, NativeUiEvent } from "../native/node";
-import { col, node, span } from "../native/describe";
+import { col, node, propNode, span, text } from "../native/describe";
 import { getContextMeterThresholds } from "../chrome/context-thresholds";
 import { isNativeRendering, onNativeRenderingChange } from "../native/state";
 import { getSeparator } from "./separators";
@@ -64,9 +66,15 @@ import type {
 const JOBS_SEGMENT_SPARK_CELLS = 8;
 
 /** What a click on a native status segment asks omp to open. */
-export type StatusLineNativeAction = "status.model" | "status.context" | "status.git" | "status.cost" | "status.path";
+export type StatusLineNativeAction =
+	| "status.model"
+	| "status.context"
+	| "status.git"
+	| "status.cost"
+	| "status.path"
+	| "status.cache";
 
-/** Click action per native segment: quick model picker, `/context`, `/git`, `/usage`, the project directory. */
+/** Click action per native segment: quick model picker, `/context`, `/git`, `/usage`, the project directory, `/session`. */
 const NATIVE_SEGMENT_ACTIONS: Partial<Record<string, StatusLineNativeAction>> = {
 	model: "status.model",
 	context_pct: "status.context",
@@ -74,6 +82,7 @@ const NATIVE_SEGMENT_ACTIONS: Partial<Record<string, StatusLineNativeAction>> = 
 	git: "status.git",
 	cost: "status.cost",
 	path: "status.path",
+	cache: "status.cache",
 };
 
 /** Segments that outlast every other one as the native bar narrows (model, context, git branch). */
@@ -142,6 +151,26 @@ function describeSeg(key: string, props: TspProps<"seg">, view: SegmentView, dim
 	if (view.tone !== undefined) props.tone = view.tone;
 	if (view.title !== undefined) props.title = view.title;
 	return node("seg", props, view.motion, key);
+}
+
+/**
+ * The `cache` fact's own props: it sits at the facts' right end, beside the
+ * usage, names its glyph by the card's first line, and its hover card says
+ * until when the next message reads the cache (or why not) and what it sends,
+ * in absolute times, since the terminal shows the card later without repainting.
+ */
+function promptCacheFactProps(status: PromptCacheStatus, nowMs: number): TspProps<"seg"> {
+	const [head, next] = promptCacheBrief(status, nowMs);
+	const card = col([text(status.state === "cold" ? [span(head, "warning")] : head), text([span(next, "muted")])], {
+		role: "omp.composer.cache.card",
+	});
+	return {
+		role: "omp.composer.cache",
+		side: "right",
+		aria: head,
+		title: `${head}\n${next}`,
+		hovercard: propNode(card),
+	};
 }
 
 /**
@@ -718,6 +747,9 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	#pricingTimer: NodeJS.Timeout | undefined;
 	#pricingTimerCost: ModelCost | undefined;
 	#pricingTransition: number | undefined;
+	/** One wall-clock wakeup when the warm prompt-cache entry expires, so the marker turns without ticking. */
+	#promptCacheTimer: NodeJS.Timeout | undefined;
+	#promptCacheWakeAt: number | undefined;
 	#hookStatuses: Map<string, string> = new Map();
 	#sortedHookStatuses: readonly string[] = [];
 	#subagentCount: number = 0;
@@ -1327,6 +1359,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		this.#stopBrandFadeTimer();
 		this.#stopActiveWindowRepaint();
 		this.#stopPricingTimer();
+		this.#stopPromptCacheTimer();
 		this.#clearUsageStartTimer();
 		this.#unwatchNativeRendering?.();
 		this.#unwatchNativeRendering = undefined;
@@ -1504,6 +1537,36 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			this.#onBranchChange?.();
 		}, transition - now);
 		this.#pricingTimer = timer;
+		timer.unref();
+	}
+
+	#stopPromptCacheTimer(): void {
+		clearTimeout(this.#promptCacheTimer);
+		this.#promptCacheTimer = undefined;
+		this.#promptCacheWakeAt = undefined;
+	}
+
+	/**
+	 * One wakeup when the warm prompt cache lapses, so the marker turns without
+	 * ticking; a warm refresh moves the expiry and re-arms it on the next build.
+	 */
+	#syncPromptCacheTimer(status: PromptCacheStatus | undefined, now: number): void {
+		const wakeAt =
+			status?.state === "warm" && status.ttlMs !== undefined ? status.touchedAt + status.ttlMs : undefined;
+		if (this.#disposed || !this.#onBranchChange || wakeAt === undefined || wakeAt <= now) {
+			this.#stopPromptCacheTimer();
+			return;
+		}
+		if (this.#promptCacheWakeAt === wakeAt) return;
+		this.#stopPromptCacheTimer();
+		this.#promptCacheWakeAt = wakeAt;
+		const timer = setTimeout(() => {
+			if (this.#disposed || this.#promptCacheTimer !== timer) return;
+			this.#stopPromptCacheTimer();
+			this.invalidate();
+			this.#onBranchChange?.();
+		}, wakeAt - now);
+		this.#promptCacheTimer = timer;
 		timer.unref();
 	}
 
@@ -2610,6 +2673,11 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		const sessionAccentEnabled = settings.sessionAccent !== false;
 		const brandVisible = settings.leftSegments.includes("pi") || settings.rightSegments.includes("pi");
 		const turnElapsedMs = this.getTurnElapsedMs();
+		const promptCache =
+			settings.leftSegments.includes("cache") || settings.rightSegments.includes("cache")
+				? this.session.getPromptCacheStatus?.(nowMs, breakdown.usedTokens)
+				: undefined;
+		this.#syncPromptCacheTimer(promptCache, nowMs);
 		return {
 			session: this.session,
 			focusedAgentId: this.#focusedAgentId,
@@ -2656,6 +2724,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			},
 			worktree: activeRepoCache.worktree,
 			usage: this.#cachedUsage,
+			promptCache,
 		};
 	}
 
@@ -3700,6 +3769,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 				};
 				const action = NATIVE_SEGMENT_ACTIONS[id];
 				if (action) props.actions = { click: action };
+				if (id === "cache" && ctx.promptCache) Object.assign(props, promptCacheFactProps(ctx.promptCache, nowMs));
 				facts.push(describeSeg(id, props, view, dim));
 			});
 		};

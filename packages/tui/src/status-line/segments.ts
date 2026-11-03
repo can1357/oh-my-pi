@@ -12,6 +12,7 @@ import {
 	relativePathWithinNormalizedRoot,
 } from "@oh-my-pi/pi-utils";
 import { type SymbolKey, type Theme, type ThemeColor, theme } from "../theme";
+import { SYMBOL_PRESETS } from "../theme/symbols";
 import { shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../render/render-utils";
 import { fileHyperlink } from "../render/hyperlink";
 import { getSessionAccentAnsi, getSessionAccentHex } from "../theme/session-color";
@@ -1030,6 +1031,31 @@ const cacheHitSegment: StatusLineSegment = {
 	},
 };
 
+/**
+ * One glyph, no words: the cache icon dim while cached, the same icon struck
+ * through in the warning colour once the next message re-sends the prefix.
+ * Tern draws the Nerd Font pair whatever the symbol preset, as it draws named
+ * icons; its icon slot takes no tone in the composer facts, so the glyph rides
+ * as a span.
+ */
+const cacheSegment: StatusLineSegment = {
+	id: "cache",
+	render(ctx) {
+		const status = ctx.promptCache;
+		if (!status) return { content: "", visible: false };
+		const content =
+			status.state === "warm" ? theme.fg("dim", theme.icon.cacheWarm) : theme.fg("warning", theme.icon.cacheCold);
+		return { content, visible: true };
+	},
+	describe(ctx) {
+		const status = ctx.promptCache;
+		if (!status) return null;
+		return status.state === "warm"
+			? segView([span(SYMBOL_PRESETS.nerd["icon.cacheWarm"])])
+			: segView([span(SYMBOL_PRESETS.nerd["icon.cacheCold"], "warning")], undefined, "warning");
+	},
+};
+
 const sessionNameSegment: StatusLineSegment = {
 	id: "session_name",
 	render(ctx) {
@@ -1322,6 +1348,7 @@ export const SEGMENTS: Record<StatusLineSegmentId, StatusLineSegment> = {
 	cache_read: cacheReadSegment,
 	cache_write: cacheWriteSegment,
 	cache_hit: cacheHitSegment,
+	cache: cacheSegment,
 	session_name: sessionNameSegment,
 	usage: usageSegment,
 	collab: collabSegment,
