@@ -1311,18 +1311,40 @@ async fn run_shell_command_segmented_chain(
 	let mut last_result = None;
 	let max_capture_bytes = config.max_capture_bytes as usize;
 	// The shell reads a whole input line before it runs any of it, so every
-	// segment of a line is read with the aliases its line began with.
+	// segment of a line is read with the aliases its line began with. A line
+	// in which a command begins with an alias runs as one text instead: the
+	// alias's value can hold syntax (a comment, a newline, an operator) that
+	// changes how the rest of the line reads, which separate segments cannot
+	// keep. Its output is not minimized.
 	let mut line_aliases = brush_core::AliasesAtRead::default();
-	for segment in segments {
+	let mut index = 0;
+	while let Some(segment) = segments.get(index) {
+		let mut whole_line = None;
 		if segment.starts_line {
 			line_aliases = brush_core::AliasesAtRead::of(&session.shell);
+			let line_end = segments[index + 1..]
+				.iter()
+				.position(|next| next.starts_line)
+				.map_or(segments.len(), |offset| index + 1 + offset);
+			let line = &segments[index..line_end];
+			if line
+				.iter()
+				.flat_map(|next| &next.command_words)
+				.any(|word| session.shell.command_word_alias(word).is_some())
+			{
+				whole_line = Some((segments_line_text(line), line_end));
+			}
 		}
-		if segment.run_if_previous_succeeded && !previous_succeeded {
+		let next_index = whole_line
+			.as_ref()
+			.map_or(index + 1, |(_, line_end)| *line_end);
+		if whole_line.is_none() && segment.run_if_previous_succeeded && !previous_succeeded {
+			index = next_index;
 			continue;
 		}
 
 		let mut segment_params = params.clone();
-		segment_params.suppress_errexit = segment.suppress_errexit;
+		segment_params.suppress_errexit = whole_line.is_none() && segment.suppress_errexit;
 		segment_params.set_aliases_at_read(line_aliases.clone());
 		let capture_mode = if aggregate.is_some() {
 			CommandCaptureMode::Buffered { max_capture_bytes }
@@ -1330,9 +1352,12 @@ async fn run_shell_command_segmented_chain(
 			CommandCaptureMode::Streaming
 		};
 
+		let command = whole_line
+			.as_ref()
+			.map_or_else(|| segment.command.clone(), |(text, _)| text.clone());
 		let command_run = run_shell_command_once(
 			session,
-			segment.command.clone(),
+			command,
 			segment_params,
 			on_chunk.clone(),
 			cancel_token.clone(),
@@ -1355,7 +1380,7 @@ async fn run_shell_command_segmented_chain(
 				if next_input_bytes > max_capture_bytes {
 					aggregate = None;
 				} else {
-					let minimized = if command_run.reported_error {
+					let minimized = if command_run.reported_error || whole_line.is_some() {
 						minimizer::MinimizerOutput::passthrough(&buffered.text)
 					} else {
 						minimizer::apply(&segment.command, &buffered.text, exit, config)
@@ -1377,6 +1402,7 @@ async fn run_shell_command_segmented_chain(
 		if !keep_running {
 			break;
 		}
+		index = next_index;
 	}
 
 	let Some(result) = last_result else {
@@ -1409,6 +1435,23 @@ async fn run_shell_command_segmented_chain(
 	// empty `text` was emitted, a footgun for consumers keying off presence.)
 
 	Ok((result, minimized_out))
+}
+
+/// The text of one input line's segments, joined with the operators between
+/// them (`&&`, or `;`).
+fn segments_line_text(line: &[minimizer::plan::ChainSegment]) -> String {
+	let mut text = String::new();
+	for (index, segment) in line.iter().enumerate() {
+		if index > 0 {
+			text.push_str(if segment.run_if_previous_succeeded {
+				" && "
+			} else {
+				"; "
+			});
+		}
+		text.push_str(&segment.command);
+	}
+	text
 }
 
 async fn run_shell_command_once(

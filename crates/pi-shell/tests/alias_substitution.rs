@@ -204,15 +204,10 @@ async fn alias_listing_quotes_values() {
 	);
 }
 
-/// E11, E12, E16: `BASH_ALIASES` reads and defines aliases.
+/// E11: `BASH_ALIASES` reads the alias table.
 #[tokio::test]
-async fn bash_aliases_reads_and_defines_aliases() {
+async fn bash_aliases_reads_the_alias_table() {
 	assert_eq!(run("alias q='echo x'; echo \"${BASH_ALIASES[q]}\"").await, "echo x\n");
-	assert_eq!(
-		run("shopt -s expand_aliases\nBASH_ALIASES[q]='echo via-array'\nq; alias").await,
-		"via-array\nalias q='echo via-array'\n"
-	);
-	assert_eq!(run("BASH_ALIASES=(); alias q=x; echo \"${#BASH_ALIASES[@]}\"").await, "1\n");
 }
 
 /// E13, E15: unsetting an element or the array leaves the aliases.
@@ -354,6 +349,22 @@ async fn process_substitution_here_documents_survive_reading_again() {
 	);
 }
 
+/// G43, G44: a subshell ending with a here-document, in a process substitution
+/// read again with aliases and in `declare -f`, puts its `)` after the
+/// delimiter.
+#[tokio::test]
+async fn subshell_here_document_reads_back() {
+	assert_eq!(
+		run(
+			"shopt -s expand_aliases\nalias unused=:\ncat <(if true; then (cat <<EOF\nBODY\nEOF\n); \
+			 fi\n)"
+		)
+		.await,
+		"BODY\n"
+	);
+	assert_eq!(run("f() { (cat <<EOF\nsb\nEOF\n); }\neval \"$(declare -f f)\"; f").await, "sb\n");
+}
+
 /// G14: `declare -f` writes a here-document so that reading it back works.
 #[tokio::test]
 async fn declare_f_here_document_reads_back() {
@@ -475,97 +486,24 @@ async fn here_document_body_comes_from_the_input() {
 	);
 }
 
-// --- BASH_ALIASES assignment ---
-
-/// G15, G16, G17: a list without subscripts alternates names and values; a
-/// last name without a value gets the empty value.
+/// G45, G46, G47: a body begins on the input line after the one the alias
+/// stood on, also when the alias's value ends at the redirection's newline;
+/// the rest of that input line is read after the value. A second
+/// here-document in the value takes the next input lines.
 #[tokio::test]
-async fn bash_aliases_list_of_names_and_values() {
+async fn here_document_body_begins_on_the_next_input_line() {
+	assert_eq!(with_aliases("q=$'cat <<EOF\\n'", "q\nBODY\nEOF\necho DONE").await, "BODY\nDONE\n");
 	assert_eq!(
-		run("shopt -s expand_aliases\nBASH_ALIASES=(q 'echo one' r 'echo two')\nq; r; alias").await,
-		"one\ntwo\nalias q='echo one'\nalias r='echo two'\n"
+		with_aliases("q=$'cat <<EOF\\n'", "q #COMMENT\nBODY\nEOF\necho DONE").await,
+		"BODY\nDONE\n"
 	);
 	assert_eq!(
-		run("alias q='echo old'; BASH_ALIASES+=(r 'echo two' s 'echo three'); alias").await,
-		"alias q='echo old'\nalias r='echo two'\nalias s='echo three'\n"
-	);
-	assert_eq!(
-		run("BASH_ALIASES=(q 'echo one' r); alias").await,
-		"alias q='echo one'\nalias r=''\n"
-	);
-}
-
-/// G18, G19, G20, G21, G22: `BASH_ALIASES` rejects the names `alias` rejects
-/// and empty names, and still defines the other elements of a list.
-#[tokio::test]
-async fn bash_aliases_rejects_invalid_names() {
-	assert_eq!(
-		run(
-			"shopt -s expand_aliases\n{ BASH_ALIASES['/bin/echo']='echo BAD'; } 2>/dev/null; echo \
-			 \"st=$?\"\n/bin/echo expected; alias"
+		with_aliases(
+			"q=$'cat <<A\\ncat <<B\\necho AFTER'",
+			"q; echo SUFFIX\nONE\nA\nTWO\nB\necho DONE"
 		)
 		.await,
-		"st=0\nexpected\n"
-	);
-	assert!(
-		run("{ BASH_ALIASES['a/b']=x; } 2>&1")
-			.await
-			.contains("`a/b': invalid alias name"),
-		"diagnostic"
-	);
-	assert_eq!(
-		run("{ BASH_ALIASES=([a/b]=x [ok]=y [c\\;d]=z); } 2>/dev/null; echo \"st=$?\"; alias").await,
-		"st=0\nalias ok='y'\n"
-	);
-	assert_eq!(
-		run("{ BASH_ALIASES=(a/b x ok y); } 2>/dev/null; echo \"st=$?\"; alias").await,
-		"st=0\nalias ok='y'\n"
-	);
-	// Bash drops the rest of a line after an assignment error, so the status
-	// is read on the next line.
-	assert_eq!(
-		without_error_reports(
-			&run("exec 2>/dev/null\nBASH_ALIASES[\"\"]=x\necho \"st=$?\"; alias").await
-		),
-		"st=1\n"
-	);
-	assert_eq!(
-		run("{ BASH_ALIASES=([\"\"]=x [ok]=y); } 2>/dev/null; echo \"st=$?\"; alias").await,
-		"st=0\nalias ok='y'\n"
-	);
-}
-
-/// G23: a readonly `BASH_ALIASES` cannot be assigned; `alias` still works.
-#[tokio::test]
-async fn readonly_bash_aliases_is_not_assigned() {
-	assert_eq!(
-		without_error_reports(
-			&run(
-				"exec 2>/dev/null\nreadonly BASH_ALIASES\nBASH_ALIASES[q]='echo BAD'\necho \
-				 \"st=$?\"\nBASH_ALIASES=([q]=x)\necho \"st=$?\"\nBASH_ALIASES=x\necho \
-				 \"st=$?\"\nalias; alias q=x; alias"
-			)
-			.await
-		),
-		"st=1\nst=1\nst=1\nalias q='x'\n"
-	);
-}
-
-/// G24, G25: `declare` assigns to `BASH_ALIASES` as an assignment does;
-/// `local` makes a new variable.
-#[tokio::test]
-async fn declare_assigns_bash_aliases() {
-	assert_eq!(
-		run(
-			"shopt -s expand_aliases\ndeclare -A BASH_ALIASES=([q]='echo one')\ndeclare \
-			 BASH_ALIASES=([r]='echo two')\ndeclare -A BASH_ALIASES=(s 'echo three')\nq; r; s; alias"
-		)
-		.await,
-		"one\ntwo\nthree\nalias q='echo one'\nalias r='echo two'\nalias s='echo three'\n"
-	);
-	assert_eq!(
-		run("f() { local BASH_ALIASES=([q]=x); alias; }; f; alias; echo \"st=$?\"").await,
-		"st=0\n"
+		"ONE\nTWO\nAFTER\nSUFFIX\nDONE\n"
 	);
 }
 
@@ -575,36 +513,5 @@ async fn alias_p_lists_then_defines() {
 	assert_eq!(
 		run("alias a=1; alias -p x=new; echo \"st=$?\"; alias").await,
 		"alias a='1'\nst=0\nalias a='1'\nalias x='new'\n"
-	);
-}
-
-/// G43 to G50: `+=` to `BASH_ALIASES` appends where Bash appends: an element
-/// (`[q]+=`), and a scalar through `declare`; a list, and a scalar assignment,
-/// replace.
-#[tokio::test]
-async fn bash_aliases_append_as_bash_does() {
-	assert_eq!(run("alias q=old; BASH_ALIASES+=([q]=new); alias q").await, "alias q='new'\n");
-	assert_eq!(run("alias q=old; BASH_ALIASES[q]+=new; alias q").await, "alias q='oldnew'\n");
-	assert_eq!(run("alias 0=old; BASH_ALIASES+=new; alias 0").await, "alias 0='new'\n");
-	assert_eq!(run("alias q=old; BASH_ALIASES+=(q new); alias q").await, "alias q='new'\n");
-	assert_eq!(
-		run("alias q=old; declare BASH_ALIASES[q]+=new; alias q").await,
-		"alias q='oldnew'\n"
-	);
-	assert_eq!(run("alias 0=old; declare BASH_ALIASES+=new; alias 0").await, "alias 0='oldnew'\n");
-	assert_eq!(
-		run("alias q=old; declare BASH_ALIASES+=([q]=new); alias q").await,
-		"alias q='new'\n"
-	);
-	assert_eq!(run("BASH_ALIASES[q]+=new; alias q").await, "alias q='new'\n");
-}
-
-/// G51: an assignment to `BASH_ALIASES` before a command is the command's own
-/// variable, and defines no alias.
-#[tokio::test]
-async fn assignment_before_a_command_defines_no_alias() {
-	assert_eq!(
-		run("alias 0=old; BASH_ALIASES=new true; BASH_ALIASES=([q]=x) true; alias").await,
-		"alias 0='old'\n"
 	);
 }

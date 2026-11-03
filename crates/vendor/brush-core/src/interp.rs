@@ -2116,22 +2116,6 @@ async fn apply_assignment(
 		}
 	}
 
-	// While BASH_ALIASES is the view of the alias table, an assignment statement
-	// to it defines aliases (see `Shell::assign_to_alias_table`); the variable
-	// stays the view. As in Bash, an assignment before a command (`required_scope`)
-	// is the command's own variable and defines none.
-	if required_scope.is_none() && variable_name == "BASH_ALIASES" && shell.bash_aliases_is_alias_table()
-	{
-		// As in Bash, only an element assignment (`BASH_ALIASES[q]+=v`) appends.
-		let append = assignment.append && array_index.is_some();
-		let skipped = shell.assign_to_alias_table(array_index, new_value, append)?;
-		for error in &skipped {
-			let mut stderr = params.stderr(shell);
-			let _ = shell.display_error(&mut stderr, error).await;
-		}
-		return Ok(());
-	}
-
 	// Read option before taking mutable borrow on env.
 	let export_variables_on_modification = shell.options().export_variables_on_modification;
 

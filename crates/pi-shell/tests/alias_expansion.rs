@@ -742,7 +742,8 @@ async fn minimized_input_reads_each_line_with_its_own_aliases() {
 
 /// A newline inside an alias's value ends a command within the line: what is
 /// read after it, in that command and in the rest of the line, is read with
-/// the aliases as they are then, as Bash does, with or without the minimizer.
+/// the aliases as they are then, and a comment it begins takes the rest of
+/// the line, as Bash does, with or without the minimizer.
 #[tokio::test]
 async fn line_reads_after_a_newline_in_an_alias_with_the_aliases_then() {
 	let snapshot =
@@ -763,5 +764,15 @@ async fn line_reads_after_a_newline_in_an_alias_with_the_aliases_then() {
 		})
 		.await;
 		assert_eq!(out, "LATE\n", "minimizer {minimizer}");
+	}
+	let snapshot = "shopt -s expand_aliases\nalias -- r='echo OLD'\nalias -- q=$'alias r=\"echo \
+	                NEW\"\\n#COMMENT'\n";
+	for minimizer in [false, true] {
+		let out = run_with("git status --short 2>/dev/null; q; r", Setup {
+			snapshot: Some(snapshot),
+			minimizer,
+		})
+		.await;
+		assert_eq!(out, "", "minimizer {minimizer}");
 	}
 }

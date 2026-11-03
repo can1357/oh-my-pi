@@ -259,9 +259,13 @@ pub(crate) struct Tokenizer<I: Iterator<Item = std::io::Result<char>>> {
     char_reader: std::iter::Peekable<I>,
     /// Alias values being read in place of their names, innermost last.
     pushed: Vec<PushedAlias>,
-    /// Whether the rest of an input line is held while the here-documents
-    /// now being read take their bodies from the input.
-    line_held: bool,
+    /// Whether the input itself (not an alias's value) was last read to the
+    /// end of a line, so that a here-document's body starting now begins
+    /// where the input is (see `hold_rest_of_line`).
+    input_at_line_start: bool,
+    /// Whether the bodies of the here-documents now being read have begun
+    /// (and the rest of the input line been held, if it had to be).
+    here_bodies_begun: bool,
     cross_state: CrossTokenParseState,
     options: TokenizerOptions,
 }
@@ -743,7 +747,8 @@ impl<I: Iterator<Item = std::io::Result<char>>> Tokenizer<I> {
             options: options.clone(),
             char_reader: chars.peekable(),
             pushed: vec![],
-            line_held: false,
+            input_at_line_start: true,
+            here_bodies_begun: false,
             cross_state: CrossTokenParseState {
                 cursor: SourcePosition {
                     index: 0,
@@ -829,19 +834,25 @@ impl<I: Iterator<Item = std::io::Result<char>>> Tokenizer<I> {
     /// after it (see `hold_rest_of_line`).
     fn reading_alias_value(&mut self) -> Result<bool, TokenizerError> {
         if matches!(self.cross_state.here_state, HereState::InHereDocs) {
-            if !self.line_held && self.pushed.iter().any(PushedAlias::unread) {
-                self.hold_rest_of_line()?;
+            if !self.here_bodies_begun {
+                self.here_bodies_begun = true;
+                if !self.input_at_line_start {
+                    self.hold_rest_of_line()?;
+                }
             }
             return Ok(false);
         }
-        self.line_held = false;
+        self.here_bodies_begun = false;
         self.pop_finished_aliases();
         Ok(!self.pushed.is_empty())
     }
 
     /// Reads the rest of the current input line, and holds it to be read
-    /// after the alias values now pending. Its chars move the cursor now, as
-    /// input; read again, they move it no further.
+    /// after the alias values now pending: a body that starts while the input
+    /// is in the middle of a line (its redirection's line ended inside an
+    /// alias's value) begins on the next input line, as in Bash. The held
+    /// chars move the cursor now, as input; read again, they move it no
+    /// further.
     fn hold_rest_of_line(&mut self) -> Result<(), TokenizerError> {
         let mut chars = vec![];
         while let Some(c) = self
@@ -857,7 +868,7 @@ impl<I: Iterator<Item = std::io::Result<char>>> Tokenizer<I> {
             }
         }
         self.pushed.insert(0, PushedAlias::held_line(chars));
-        self.line_held = true;
+        self.input_at_line_start = true;
         Ok(())
     }
 
@@ -896,6 +907,7 @@ impl<I: Iterator<Item = std::io::Result<char>>> Tokenizer<I> {
             // ones (`2 >`).
             if !from_alias {
                 self.advance_cursor(ch);
+                self.input_at_line_start = ch == '\n';
             }
             self.cross_state.cursor.index += 1;
         }

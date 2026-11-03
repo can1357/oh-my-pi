@@ -255,10 +255,11 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 
 	/// Reads `input` one complete command at a time and runs each, as Bash
 	/// does: a complete command is read with the aliases as the commands
-	/// before it left them, or with the aliases its caller read the line with
-	/// ([`ExecutionParameters::set_aliases_at_read`]) until a newline inside an
-	/// alias's value ends a command within that line. A syntax error is
-	/// reported, and nothing after it is read.
+	/// before it left them. The first is read with the aliases its caller read
+	/// the line with, when it gave them
+	/// ([`ExecutionParameters::set_aliases_at_read`]); a command after it in
+	/// the same input follows a newline inside an alias's value. A syntax
+	/// error is reported, and nothing after it is read.
 	pub(crate) async fn read_and_run(
 		&mut self,
 		input: String,
@@ -282,9 +283,6 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 					return Ok(self.report_parse_error(parse_err, source_info, &params).await);
 				},
 			};
-			if !first && let Some(at_read) = &aliases_at_read {
-				at_read.end_line();
-			}
 			first = false;
 			result = match interp::execute_program(program, self, &params).await {
 				Ok(result) => result,

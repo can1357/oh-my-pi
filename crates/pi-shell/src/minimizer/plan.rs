@@ -37,6 +37,9 @@ use brush_parser::{
 pub struct ChainSegment {
 	pub command:                   String,
 	pub program:                   String,
+	/// The command word of each stage of the segment's pipeline, as written:
+	/// the words the shell looks up as aliases.
+	pub command_words:             Vec<String>,
 	pub run_if_previous_succeeded: bool,
 	pub suppress_errexit:          bool,
 	/// Whether this segment begins an input line (a complete command). The
@@ -167,6 +170,14 @@ fn classify_chain(program: &Program) -> Option<CommandPlan> {
 			segments.push(ChainSegment {
 				command,
 				program,
+				command_words: pipeline
+					.seq
+					.iter()
+					.filter_map(|stage| match stage {
+						Command::Simple(simple) => simple.word_or_name.as_ref().map(ToString::to_string),
+						_ => None,
+					})
+					.collect(),
 				run_if_previous_succeeded,
 				suppress_errexit,
 				starts_line,
@@ -409,6 +420,7 @@ mod tests {
 				ChainSegment {
 					command:                   "git diff --stat".to_string(),
 					program:                   "git".to_string(),
+					command_words:             vec!["git".to_string()],
 					run_if_previous_succeeded: false,
 					suppress_errexit:          true,
 					starts_line:               true,
@@ -416,6 +428,7 @@ mod tests {
 				ChainSegment {
 					command:                   "git diff --name-only".to_string(),
 					program:                   "git".to_string(),
+					command_words:             vec!["git".to_string()],
 					run_if_previous_succeeded: true,
 					suppress_errexit:          false,
 					starts_line:               false,
@@ -433,6 +446,7 @@ mod tests {
 				ChainSegment {
 					command:                   "git status".to_string(),
 					program:                   "git".to_string(),
+					command_words:             vec!["git".to_string()],
 					run_if_previous_succeeded: false,
 					suppress_errexit:          false,
 					starts_line:               true,
@@ -440,6 +454,7 @@ mod tests {
 				ChainSegment {
 					command:                   "bun test".to_string(),
 					program:                   "bun".to_string(),
+					command_words:             vec!["bun".to_string()],
 					run_if_previous_succeeded: false,
 					suppress_errexit:          false,
 					starts_line:               false,
@@ -457,6 +472,7 @@ mod tests {
 				ChainSegment {
 					command:                   "false".to_string(),
 					program:                   "false".to_string(),
+					command_words:             vec!["false".to_string()],
 					run_if_previous_succeeded: false,
 					suppress_errexit:          true,
 					starts_line:               true,
@@ -464,6 +480,7 @@ mod tests {
 				ChainSegment {
 					command:                   "echo no".to_string(),
 					program:                   "echo".to_string(),
+					command_words:             vec!["echo".to_string()],
 					run_if_previous_succeeded: true,
 					suppress_errexit:          false,
 					starts_line:               false,
@@ -471,6 +488,7 @@ mod tests {
 				ChainSegment {
 					command:                   "echo yes".to_string(),
 					program:                   "echo".to_string(),
+					command_words:             vec!["echo".to_string()],
 					run_if_previous_succeeded: false,
 					suppress_errexit:          false,
 					starts_line:               false,
@@ -490,6 +508,7 @@ mod tests {
 		let segments = chain_of(plan).expect("expected Chain");
 		assert_eq!(segments.len(), 2);
 		assert_eq!(segments[0].program, "ls");
+		assert_eq!(segments[0].command_words, ["ls", "head"]);
 		assert_eq!(segments[1].program, "git");
 	}
 

@@ -421,10 +421,10 @@ impl<SE: extensions::ShellExtensions> Shell<SE> {
 		self.aliases.get(word).map(String::as_str)
 	}
 
-	/// Whether `BASH_ALIASES` is still the view of the alias table, where an
-	/// element assignment defines an alias. Unsetting the variable ends that,
-	/// as in Bash.
-	pub fn bash_aliases_is_alias_table(&self) -> bool {
+	/// Whether `BASH_ALIASES` is still the view of the alias table, whose
+	/// elements are read by alias name. Unsetting the variable ends that, as
+	/// in Bash.
+	pub(crate) fn bash_aliases_is_alias_table(&self) -> bool {
 		self.env
 			.get("BASH_ALIASES")
 			.is_some_and(|(_, var)| matches!(var.value(), crate::ShellValue::Dynamic { .. }))

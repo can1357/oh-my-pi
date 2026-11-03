@@ -682,7 +682,13 @@ impl Display for SubshellCommand {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "( ")?;
         write!(f, "{}", self.list)?;
-        write!(f, " )")
+        // A `)` after a here-document goes on a line of its own, after the
+        // delimiter.
+        if self.list.0.last().is_some_and(|item| item.0.has_here_document()) {
+            write!(f, "\n)")
+        } else {
+            write!(f, " )")
+        }
     }
 }
 

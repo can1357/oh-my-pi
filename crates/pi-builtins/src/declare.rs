@@ -259,42 +259,6 @@ impl DeclareCommand {
 			return Ok(false);
 		}
 
-		// While BASH_ALIASES is the view of the alias table, a declaration that
-		// assigns to it defines aliases, as an assignment does, and the variable
-		// stays the view. A local declaration makes a new variable instead.
-		let defines_aliases = name == "BASH_ALIASES"
-			&& !create_var_local
-			&& !self.make_indexed_array.is_some()
-			&& context.shell.bash_aliases_is_alias_table();
-		let initial_value = match initial_value {
-			Some(value) if defines_aliases => {
-				// As in Bash, `declare BASH_ALIASES[q]+=v` and `declare BASH_ALIASES+=v`
-				// append; a list replaces the values it gives, `+=` or not.
-				let (index, value, append) = match declaration {
-					brush_core::CommandArg::Assignment(assignment) => {
-						match (&assignment.name, &assignment.value) {
-							(
-								ast::AssignmentName::ArrayElementName(_, index),
-								ast::AssignmentValue::Scalar(word),
-							) => (
-								Some(index.clone()),
-								ShellValueLiteral::Scalar(word.value.clone()),
-								assignment.append,
-							),
-							(_, ast::AssignmentValue::Scalar(_)) => (None, value, assignment.append),
-							(_, ast::AssignmentValue::Array(_)) => (None, value, false),
-						}
-					},
-					brush_core::CommandArg::String(_) => (None, value, false),
-				};
-				for error in context.shell.assign_to_alias_table(index, value, append)? {
-					writeln!(context.stderr(), "{}: {error}", context.command_name)?;
-				}
-				None
-			},
-			value => value,
-		};
-
 		// Figure out where we should look.
 		let lookup = if create_var_local {
 			EnvironmentLookup::OnlyInCurrentLocal
@@ -308,7 +272,7 @@ impl DeclareCommand {
 			.env_mut()
 			.get_mut_using_policy(name.as_str(), lookup)
 		{
-			if self.make_associative_array.is_some() && !defines_aliases {
+			if self.make_associative_array.is_some() {
 				var.convert_to_associative_array()?;
 			}
 			if self.make_indexed_array.is_some() {
