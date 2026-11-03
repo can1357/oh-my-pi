@@ -525,44 +525,36 @@ describe("worktree clear task-isolation ownership", () => {
 		}
 	}, 240_000);
 
-	it("serialises two processes on one sandbox's lock, so their sections never overlap", async () => {
+	it("refuses one sandbox's lock to a second process while the first holds it", async () => {
 		// The race above shows cooperating processes lose nothing, but it would
 		// pass with no lock at all, because each act also decides again on the
-		// directory itself. This test is what the lock alone answers for: two
-		// real processes reach one sandbox's lock together, and inside it each
-		// waits for the other to have entered before it leaves. Under the lock
-		// the other cannot enter, so each section runs alone; a lock that did
-		// not exclude across processes would let both inside at once, and the
-		// log would interleave however the two were scheduled.
+		// directory itself. This test is what the lock alone answers for, and it
+		// asks the lock, not the schedule. One real process takes the sandbox
+		// lock as omp does and keeps it; a second, once the first is inside,
+		// asks for the same lock once without waiting. A lock that excludes
+		// across processes is busy. One that did not would hand it over — and an
+		// earlier version of this test, which watched two sections for overlap,
+		// could not tell the difference when one process was paused while the
+		// other ran.
 		const repo = await fs.mkdtemp(path.join(os.tmpdir(), "omp-wt-mutex-repo-"));
 		temporary.push(repo);
-		const scratch = await fs.mkdtemp(path.join(os.tmpdir(), "omp-wt-mutex-"));
-		temporary.push(scratch);
+		const signals = await fs.mkdtemp(path.join(os.tmpdir(), "omp-wt-mutex-"));
+		temporary.push(signals);
 		const dir = path.join(base, "tmutex015");
-		const barrier = path.join(scratch, "barrier");
-		const log = path.join(scratch, "log");
 		await fs.mkdir(dir, { recursive: true });
-		await fs.mkdir(barrier);
-		const first = spawnCaller(repo, "mutex-a", base);
-		const second = spawnCaller(repo, "mutex-b", base);
+		const holder = spawnCaller(repo, "mutex-holder", base);
+		const prober = spawnCaller(repo, "mutex-prober", base);
 		try {
-			const command = `race-lock ${dir} ${barrier} ${log}`;
-			const [one, two] = await Promise.all([first.ask(command), second.ask(command)]);
-			expect(one).toMatchObject({ ok: true });
-			expect(two).toMatchObject({ ok: true });
+			const [held, probed] = await Promise.all([
+				holder.ask(`hold-lock ${dir} ${signals}`),
+				prober.ask(`probe-lock ${dir} ${signals}`),
+			]);
 
-			const lines = (await fs.readFile(log, "utf8")).trim().split("\n");
-			// Four lines: each process entered and left once, and every entry is
-			// followed at once by the same process leaving.
-			expect(lines).toHaveLength(4);
-			for (let index = 0; index < lines.length; index += 2) {
-				const [entered, owner] = lines[index]?.split(" ") ?? [];
-				expect(entered).toBe("in");
-				expect(lines[index + 1]).toBe(`out ${owner}`);
-			}
+			expect(held).toMatchObject({ ok: true });
+			expect(probed).toMatchObject({ ok: true, answer: "busy" });
 		} finally {
-			first.close();
-			second.close();
+			holder.close();
+			prober.close();
 		}
 	}, 120_000);
 });

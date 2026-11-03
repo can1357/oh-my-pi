@@ -6,7 +6,7 @@
  * answers each command on stdin with one `@@`-prefixed JSON line on stdout.
  *
  * Usage: `isolation-caller.ts <repo> <task id>`; commands `make <n>`, `check <n>`,
- * `teardown`, `clear`, and `race-lock <dir> <barrier> <log>`.
+ * `teardown`, `clear`, `hold-lock <dir> <signals>` and `probe-lock <dir> <signals>`.
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
@@ -14,6 +14,14 @@ import { clearWorktrees } from "@oh-my-pi/pi-coding-agent/cli/worktree-cli";
 import { withSandboxLock } from "@oh-my-pi/pi-coding-agent/task/isolation-ownership";
 import { cleanupIsolation, ensureIsolation, type IsolationHandle } from "@oh-my-pi/pi-coding-agent/task/worktree";
 import * as natives from "@oh-my-pi/pi-natives";
+import { acquireFileLock } from "@oh-my-pi/pi-utils";
+
+/** Wait, by real I/O rather than a timer, until `name` exists in `signals`. */
+async function awaitSignal(signals: string, name: string): Promise<void> {
+	while (!(await fs.readdir(signals)).includes(name)) {
+		// Waiting on the other process.
+	}
+}
 
 const repo = process.argv[2];
 const id = process.argv[3];
@@ -51,32 +59,38 @@ for await (const line of console) {
 			printed = "";
 			const result = await clearWorktrees({ all: false, dryRun: false, json: true });
 			reply({ ok: true, ...result, report: printed === "" ? null : JSON.parse(printed) });
-		} else if (command === "race-lock") {
-			// Two of these, in two processes, contend for one sandbox's lock. Each
-			// announces itself at a barrier and waits there for the other, so both
-			// reach the lock together. Inside, each logs its entry and then waits,
-			// for a bounded number of looks at the log, for the other to have
-			// entered too, before it logs its exit. Under the lock the other cannot
-			// enter, so the looks run out and each section runs alone; without the
-			// lock the other does enter, so both are inside at once and the log
-			// interleaves whatever order the scheduler runs them in. Each look is
-			// real I/O, so neither wait needs a timer.
-			const [barrier, log] = rest;
-			if (!argument || !barrier || !log) throw new Error("race-lock needs a dir, a barrier and a log");
-			await fs.writeFile(path.join(barrier, `ready-${process.pid}`), "");
-			while ((await fs.readdir(barrier)).filter(name => name.startsWith("ready-")).length < 2) {
-				// Waiting on the sibling.
-			}
-			const mine = `in ${process.pid}`;
-			await withSandboxLock(argument, "race", async () => {
-				await fs.appendFile(log, `${mine}\n`);
-				for (let look = 0; look < 5_000; look += 1) {
-					const lines = (await fs.readFile(log, "utf8")).split("\n");
-					if (lines.some(line => line.startsWith("in ") && line !== mine)) break;
+		} else if (command === "hold-lock" || command === "probe-lock") {
+			// The two halves of one check of the sandbox lock across processes. The
+			// holder takes the lock the way omp does and keeps it until the prober
+			// has looked; the prober waits until the holder is inside, then asks
+			// for the same lock once, without waiting for it. A lock that excludes
+			// across processes answers busy. One that does not lets the prober
+			// take it. The answer depends on whether the holder holds the lock and
+			// on nothing else: a stopped holder keeps its lock, and the prober never
+			// waits on the holder, so no schedule can make either answer the other.
+			const [signals] = rest;
+			if (!argument || !signals) throw new Error(`${command} needs a dir and a signals dir`);
+			if (command === "hold-lock") {
+				await withSandboxLock(argument, "hold", async () => {
+					await fs.writeFile(path.join(signals, "held"), "");
+					await awaitSignal(signals, "probed");
+				});
+				reply({ ok: true });
+			} else {
+				await awaitSignal(signals, "held");
+				let answer: "busy" | "acquired";
+				try {
+					(await acquireFileLock(argument, { retries: 1 })).release();
+					answer = "acquired";
+				} catch (error) {
+					// Only contention is "busy". Any other failure is not evidence that
+					// the holder holds the lock, and must not pass as it.
+					if (!(error instanceof Error) || !error.message.startsWith("Failed to acquire lock")) throw error;
+					answer = "busy";
 				}
-				await fs.appendFile(log, `out ${process.pid}\n`);
-			});
-			reply({ ok: true });
+				await fs.writeFile(path.join(signals, "probed"), "");
+				reply({ ok: true, answer });
+			}
 		} else {
 			reply({ ok: false, error: `unknown command ${command}` });
 		}
