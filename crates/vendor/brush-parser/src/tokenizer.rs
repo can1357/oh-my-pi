@@ -141,9 +141,10 @@ pub enum TokenizerError {
     #[error("failed to read input")]
     ReadError(#[from] std::io::Error),
 
-    /// A `${...}` word inside `((` or `$((` text opens more parentheses than it closes. Bash
-    /// counts them toward that text, so it would end past the parenthesis tokens the parser sees.
-    #[error("unbalanced parentheses in a parameter expansion inside `((` text")]
+    /// A `${...}` word in the header of an arithmetic `for` loop opens more parentheses than it
+    /// closes. Bash counts them toward the header, so it would end past the parenthesis tokens
+    /// the parser sees.
+    #[error("unbalanced parentheses in a parameter expansion inside an arithmetic `for` header")]
     UnbalancedParameterWordInArithmetic,
 }
 
@@ -227,75 +228,37 @@ struct CrossTokenParseState {
     /// While a bare `((` is read as arithmetic: how many parentheses are open, counting its second
     /// `(`. The tokenizer reads arithmetic text until that parenthesis closes.
     arithmetic_command_depth: Option<u32>,
+    /// Is that bare `((` the header of an arithmetic `for` loop? Only such a header is read with
+    /// the rules of arithmetic text (no comments, no extended globs, `${...}` word parentheses
+    /// counted and balanced): any other `((` may group conditions inside `[[ ... ]]`, which the
+    /// tokenizer cannot tell apart, so it is read as before.
+    arithmetic_for_header: bool,
     /// Are we scanning the word of a `${...}` parameter expansion? A `((` there is text: it does
     /// not start arithmetic text, and `<<` there does not start a here-document.
     in_parameter_word: bool,
     /// The parentheses opened minus those closed so far in the outermost `${...}` word being
     /// scanned, nested words included and command substitutions excluded.
     parameter_word_parens: i32,
-    /// Are we in the text of a `$((...))` arithmetic expansion (not a `$[...]` one)?
-    in_dollar_arithmetic: bool,
-    /// Are we inside a `[[ ... ]]` conditional? A `((` there groups conditions; it is not
-    /// arithmetic text.
-    in_conditional: bool,
-    /// Could the next word start a command (so a `[[` there opens a conditional)?
-    at_command_start: bool,
-    /// Was the last word a `time` that started a command (so a `-p` keeps the command start)?
-    after_time_keyword: bool,
+    /// Was the last word `for` (so a `((` right after it opens an arithmetic `for` header)?
+    after_for_word: bool,
 }
 
 impl CrossTokenParseState {
-    /// Notes a completed token for `[[ ... ]]` tracking: a `[[` word that can start a command
-    /// opens a conditional, and `]]` or a separator a conditional cannot contain closes it. A
-    /// conditional may span lines, so a newline does not close it. A reserved word or prefix keeps
-    /// the command start only where it starts a command itself (`echo time [[` opens nothing).
-    /// Arithmetic text and parameter words hold no commands and are not tracked. Scans that keep
-    /// blanks in their tokens (the body of a command substitution) yield words with blanks around
-    /// them, and blank-only words; neither changes what the next word is.
-    fn note_token_for_conditional(&mut self, token: &Token) {
-        if self.in_parameter_word || self.arithmetic_expansion {
+    /// Notes a completed token: remembers whether it was the word `for`. Scans that keep blanks
+    /// in their tokens (the body of a command substitution) yield words with blanks around them,
+    /// and blank-only words, which are not words here. Tokens inside a parameter word are text.
+    fn note_token(&mut self, token: &Token) {
+        if self.in_parameter_word {
             return;
         }
-        let after_time = std::mem::take(&mut self.after_time_keyword);
         match token {
             Token::Word(word, _) => {
                 let word = word.trim_matches(|c| c == ' ' || c == '\t');
-                if word.is_empty() {
-                    self.after_time_keyword = after_time;
-                    return;
+                if !word.is_empty() {
+                    self.after_for_word = word == "for";
                 }
-                let at_start = self.at_command_start;
-                if word == "[[" && at_start {
-                    self.in_conditional = true;
-                } else if word == "]]" {
-                    self.in_conditional = false;
-                }
-                self.at_command_start = (at_start
-                    && matches!(
-                        word,
-                        "if" | "then"
-                            | "else"
-                            | "elif"
-                            | "do"
-                            | "while"
-                            | "until"
-                            | "!"
-                            | "{"
-                            | "time"
-                            | "coproc"
-                    ))
-                    || (after_time && word == "-p");
-                self.after_time_keyword = at_start && word == "time";
             }
-            Token::Operator(op, _) => {
-                if matches!(op.as_str(), ";" | ";;" | ";&" | ";;&" | "&" | "|" | "|&") {
-                    self.in_conditional = false;
-                }
-                self.at_command_start = !matches!(
-                    op.as_str(),
-                    "<" | ">" | ">>" | "<<" | "<<-" | "<<<" | "<&" | ">&" | "<>" | ">|" | "&>" | "&>>"
-                );
-            }
+            Token::Operator(..) => self.after_for_word = false,
         }
     }
 }
@@ -542,7 +505,7 @@ impl TokenParseState {
         }
 
         let token = self.pop(&cross_token_state.cursor);
-        cross_token_state.note_token_for_conditional(&token);
+        cross_token_state.note_token(&token);
         let result = TokenizeResult {
             reason,
             token: Some(token),
@@ -653,12 +616,10 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                 queued_tokens: vec![],
                 arithmetic_expansion: false,
                 arithmetic_command_depth: None,
+                arithmetic_for_header: false,
                 in_parameter_word: false,
                 parameter_word_parens: 0,
-                in_dollar_arithmetic: false,
-                in_conditional: false,
-                at_command_start: true,
-                after_time_keyword: false,
+                after_for_word: false,
             },
         }
     }
@@ -712,14 +673,20 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
             }
             Some(_) => {
                 self.cross_state.arithmetic_command_depth = None;
+                self.cross_state.arithmetic_for_header = false;
                 self.cross_state.arithmetic_expansion = false;
             }
             None => (),
         }
     }
 
-    /// Counts a `(` or `)` operator token toward the arithmetic text of a bare `((`, if any.
+    /// Counts a `(` or `)` operator token toward the arithmetic text of a bare `((`, if any. The
+    /// parentheses of a `${...}` word count only toward an arithmetic `for` header, as Bash
+    /// counts them; elsewhere the `((` may group conditions, where they must not.
     fn note_arithmetic_command_paren(&mut self, token: &TokenParseState) {
+        if self.cross_state.in_parameter_word && !self.cross_state.arithmetic_for_header {
+            return;
+        }
         if let Some(depth) = self.cross_state.arithmetic_command_depth {
             if token.is_specific_operator("(") {
                 self.cross_state.arithmetic_command_depth = Some(depth + 1);
@@ -870,8 +837,9 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                 if state.in_escape {
                     return Err(TokenizerError::UnterminatedEscapeSequence);
                 }
-                // Like Bash, the text of a bare `((` must reach the parenthesis that closes it.
-                if self.cross_state.arithmetic_command_depth.is_some() {
+                // Like Bash, the header of an arithmetic `for` loop must reach the parenthesis
+                // that closes it.
+                if self.cross_state.arithmetic_for_header {
                     return Err(TokenizerError::UnterminatedExpansion);
                 }
                 match state.quote_mode {
@@ -952,7 +920,7 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                     TokenEndReason::SpecifiedTerminatingChar
                 };
                 // A `(` or `)` ended by the terminating char is still a parenthesis of any
-                // arithmetic text around it.
+                // arithmetic `for` header or parameter word around it.
                 if state.in_operator() {
                     self.note_arithmetic_command_paren(&state);
                     self.note_parameter_word_paren(&state);
@@ -1006,10 +974,10 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                     } else if state.is_specific_operator("(")
                         && c == '('
                         && !self.cross_state.in_parameter_word
-                        && !self.cross_state.in_conditional
                     {
                         self.cross_state.arithmetic_expansion = true;
                         self.cross_state.arithmetic_command_depth = Some(0);
+                        self.cross_state.arithmetic_for_header = self.cross_state.after_for_word;
                     }
 
                     let reason = if state.current_token() == "\n" {
@@ -1109,22 +1077,17 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                                     (1, false)
                                 };
 
-                            // A command substitution is shell text even inside a bare `((`, a
-                            // parameter word or a conditional, and its first word starts a
-                            // command. An arithmetic expansion is not shell text. Both restore the
+                            // A command substitution is shell text even inside an arithmetic
+                            // `for` header or a parameter word. An arithmetic expansion is not
+                            // shell text, but it is not a `for` header either. Both restore the
                             // outer state afterward.
                             let outer_state = (
                                 self.cross_state.arithmetic_expansion,
                                 self.cross_state.arithmetic_command_depth.take(),
+                                std::mem::take(&mut self.cross_state.arithmetic_for_header),
                                 std::mem::take(&mut self.cross_state.in_parameter_word),
                                 std::mem::take(&mut self.cross_state.parameter_word_parens),
-                                std::mem::replace(
-                                    &mut self.cross_state.in_dollar_arithmetic,
-                                    is_arithmetic,
-                                ),
-                                std::mem::take(&mut self.cross_state.in_conditional),
-                                std::mem::replace(&mut self.cross_state.at_command_start, true),
-                                std::mem::take(&mut self.cross_state.after_time_keyword),
+                                std::mem::take(&mut self.cross_state.after_for_word),
                             );
                             self.cross_state.arithmetic_expansion = is_arithmetic;
 
@@ -1133,12 +1096,10 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                             (
                                 self.cross_state.arithmetic_expansion,
                                 self.cross_state.arithmetic_command_depth,
+                                self.cross_state.arithmetic_for_header,
                                 self.cross_state.in_parameter_word,
                                 self.cross_state.parameter_word_parens,
-                                self.cross_state.in_dollar_arithmetic,
-                                self.cross_state.in_conditional,
-                                self.cross_state.at_command_start,
-                                self.cross_state.after_time_keyword,
+                                self.cross_state.after_for_word,
                             ) = outer_state;
                         }
 
@@ -1154,7 +1115,7 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                             let outer_arithmetic = (
                                 self.cross_state.arithmetic_expansion,
                                 self.cross_state.arithmetic_command_depth.take(),
-                                std::mem::take(&mut self.cross_state.in_dollar_arithmetic),
+                                std::mem::take(&mut self.cross_state.arithmetic_for_header),
                             );
                             self.cross_state.arithmetic_expansion = true;
 
@@ -1163,7 +1124,7 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                             (
                                 self.cross_state.arithmetic_expansion,
                                 self.cross_state.arithmetic_command_depth,
-                                self.cross_state.in_dollar_arithmetic,
+                                self.cross_state.arithmetic_for_header,
                             ) = outer_arithmetic;
                         }
 
@@ -1242,21 +1203,20 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                                 }
                             }
                             self.cross_state.in_parameter_word = outer_parameter_word;
-                            // Bash counts the parentheses of a `${...}` word toward the text of
-                            // `((` or `$((` around it, but the parser balances that text by its
-                            // parenthesis tokens and cannot see into the word. A word that opens
-                            // more than it closes makes Bash end the text past the tokens the
-                            // parser would stop at; Bash then reports a syntax error or reads text
-                            // the parser cannot. (A word that closes more is left to the parser,
-                            // as on main.) Nested words count as part of the outermost one.
+                            // Bash counts the parentheses of a `${...}` word toward the header
+                            // of an arithmetic `for` loop around it, but the parser balances the
+                            // header by its parenthesis tokens and cannot see into the word. A
+                            // word that opens more than it closes makes Bash end the header past
+                            // the tokens the parser would stop at; Bash then reports a syntax
+                            // error or reads text the parser cannot. (A word that closes more is
+                            // left to the parser, as on main.) Nested words count as part of the
+                            // outermost one.
                             if let Some(saved) = outer_word_parens {
                                 let net = std::mem::replace(
                                     &mut self.cross_state.parameter_word_parens,
                                     saved,
                                 );
-                                let in_counted_arithmetic = self.cross_state.in_dollar_arithmetic
-                                    || self.cross_state.arithmetic_command_depth.is_some();
-                                if net > 0 && in_counted_arithmetic {
+                                if net > 0 && self.cross_state.arithmetic_for_header {
                                     return Err(TokenizerError::UnbalancedParameterWordInArithmetic);
                                 }
                             }
@@ -1307,10 +1267,10 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
             // If extended globbing is enabled, the last consumed character is an
             // unquoted start of an extglob pattern, *and* if the current character
             // is an open parenthesis, then this begins an extglob pattern.
-            // Arithmetic text has no extended globs: `*(` there is multiplication.
+            // An arithmetic `for` header has no extended globs: `*(` there is multiplication.
             else if c == '('
                 && self.options.enable_extended_globbing
-                && !self.cross_state.arithmetic_expansion
+                && !self.cross_state.arithmetic_for_header
                 && state.unquoted()
                 && !state.in_operator()
                 && state
@@ -1385,9 +1345,9 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
             {
                 self.consume_char()?;
                 state.append_char(c);
-            } else if c == '#' && !self.cross_state.arithmetic_expansion {
-                // Arithmetic text has no comments: Bash reads a `#` there as part of the
-                // expression.
+            } else if c == '#' && !self.cross_state.arithmetic_for_header {
+                // An arithmetic `for` header has no comments: Bash reads a `#` there as part of
+                // its expressions.
                 // Consume the '#'.
                 self.consume_char()?;
 

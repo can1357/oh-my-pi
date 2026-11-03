@@ -17,18 +17,17 @@ The workspace `Cargo.toml` routes the registry dependency here through
 - `src/tokenizer.rs`: a newline token cut short by a construct's terminating
   char (`)` in `$(...)`) is delimited as a newline, not as the terminator, so
   a here-document body starting with `)` no longer closes the substitution.
-- `src/parser/peg.rs`, `src/tokenizer.rs`, `src/arithmetic.rs`: text after an
-  arithmetic `((` is read as arithmetic, without comments or extended globs,
-  and `( (` and `) )` are nested subshells. An arithmetic `for` header is
-  split into its three expressions at every `;`, including each `;` of the
-  `;;`, `;;&` and `;&` operators the tokenizer forms, so `for ((;;))` parses;
-  an arithmetic command keeps its semicolons as arithmetic text. The tokenizer
-  leaves arithmetic while it scans a nested command substitution and after the
-  parenthesis that closes the bare `((`, and `((` text that never reaches that
-  parenthesis is an error; a `((` in a `${...}` word is text, while the word's
-  parentheses count toward `((` text around it. An expression of only spaces,
-  tabs and newlines is 0. The upstream `;;` fix is
-  [reubeno/brush#1418](https://github.com/reubeno/brush/pull/1418).
+- `src/parser/peg.rs`, `src/tokenizer.rs`, `src/arithmetic.rs`: an arithmetic
+  `for` header is split into its three expressions at every `;`, including
+  each `;` of the `;;`, `;;&` and `;&` operators the tokenizer forms, so
+  `for ((;;))` parses, and the tokenizer reads the header without comments or
+  extended globs, counts the parentheses of its `${...}` words, and requires
+  it to close. An arithmetic command keeps its semicolons as arithmetic text,
+  and `( (` and `) )` are nested subshells. The tokenizer leaves the text of a
+  bare `((` where the parenthesis after `((` closes, and leaves arithmetic
+  while it scans a nested command substitution; a `((` in a `${...}` word is
+  text. An expression of only spaces, tabs and newlines is 0. The upstream
+  `;;` fix is [reubeno/brush#1418](https://github.com/reubeno/brush/pull/1418).
 - `Cargo.toml`: `publish = false`; the `miette`/`serde` examples, the
   `criterion` bench, and the dev-dependencies only they used (`criterion`,
   `miette`, `serde_yaml`, insta's `glob`/`yaml` features) are dropped.

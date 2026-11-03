@@ -132,29 +132,29 @@ async fn arithmetic_state_ends_with_its_text() {
 	assert_eq!(out.stdout, "x=4\n4\nhello ) here\n");
 }
 
-/// Arithmetic text has no comments and no extended globs: Bash reads `#c` and
-/// `*(` as part of the expression.
+/// The header of an arithmetic `for` loop has no comments and no extended
+/// globs: Bash reads `#c` and `*(` as part of its expressions, so a bad header
+/// fails at run time instead of being silently shortened.
 #[tokio::test]
-async fn arithmetic_text_has_no_comments_or_extended_globs() {
+async fn arithmetic_for_header_has_no_comments_or_extended_globs() {
 	let out = run(concat!(
 		"for ((i=0; #c\n",
 		";i++)); do echo never; done\n",
 		"echo \"rc=$?\"\n",
-		"(( x=1 #c\n",
-		"))\n",
-		"echo \"x=$x rc=$?\"\n",
 		"for ((i=0*(;1);)); do echo never; done\n",
 		"echo \"rc=$?\"\n",
 	))
 	.await;
-	assert_eq!(out.stdout, "rc=1\nx= rc=1\nrc=1\n", "stderr: {}", out.stderr);
+	assert_eq!(out.stdout, "rc=1\nrc=1\n", "stderr: {}", out.stderr);
 	assert!(out.stderr.contains("#c"), "the `#c` expression must be reported: {}", out.stderr);
 	assert!(out.stderr.contains("i=0*("), "the `i=0*(` expression must be reported: {}", out.stderr);
 }
 
-/// Bash counts the parentheses of a `${...}` word toward the `((` text around
-/// it; a `${...}` word is text, so outside `((` text a `((` in it keeps the
-/// rest of the line's comments and a `<<` in it is not a here-document.
+/// Bash counts the parentheses of a `${...}` word toward the header of an
+/// arithmetic `for` loop around it, so a word that opens more than it closes
+/// is a syntax error there. A `${...}` word is text everywhere: a `((` in it
+/// keeps the rest of the line's comments, and a `<<` in it is not a
+/// here-document.
 #[tokio::test]
 async fn parameter_word_parentheses_follow_bash() {
 	let out = run(concat!(
@@ -171,19 +171,18 @@ async fn parameter_word_parentheses_follow_bash() {
 		"v=\n",
 		"((x=${v:-(1)}))\n",
 		"echo \"x=$x\"\n",
+		"for ((i=${v:-(0)};i<1;i++)); do echo \"i=$i\"; done\n",
 		"v=1\n",
 		"((y=${v:-${w:-(1})}))\n",
 		"echo \"y=$y $(( ${v:-${w:-(2})} ))\"\n",
 	))
 	.await;
 	assert_eq!(out.stderr, "");
-	assert_eq!(out.stdout, "x=1\ny=1 1\n");
+	assert_eq!(out.stdout, "x=1\ni=0\ny=1 1\n");
 
 	for script in [
-		"v=1\n((x=${v:-((}))\necho after\n",
-		"v=1\n((x=${v:+((}))\necho after\n",
 		"v=1\nfor ((x=${v:?(};0;)); do :; done\necho after\n",
-		"v=1\necho \"$(( ${v:?(} ))\"\necho after\n",
+		"v=1\nfor ((x=${v:-(};0;)); do :; done\necho after\n",
 	] {
 		let out = run(script).await;
 		assert_eq!(out.stdout, "", "{script:?} ran; stderr: {}", out.stderr);
@@ -191,11 +190,12 @@ async fn parameter_word_parentheses_follow_bash() {
 	}
 }
 
-/// Inside `[[ ... ]]`, `((` groups conditions and is not arithmetic text: its
-/// words keep extended globs and are not balanced against it, also in a command
-/// substitution, in one a here-document runs, and after the `time -p` prefix.
-/// A `[[` that is only an argument, even after an argument spelled like a
-/// reserved word, or that sits in arithmetic text, opens no conditional.
+/// Only the header of an arithmetic `for` loop is read with the rules of
+/// arithmetic text. Any other `((` may group conditions inside `[[ ... ]]`, so
+/// its words keep extended globs and are not balanced against it, wherever the
+/// conditional stands (a function body, after a regular expression, inside a
+/// command substitution or a here-document), and no `[[` changes how a later
+/// line is read.
 #[tokio::test]
 async fn conditional_groups_are_not_arithmetic_text() {
 	let out = run(concat!(
@@ -205,24 +205,26 @@ async fn conditional_groups_are_not_arithmetic_text() {
 		"[[ (( a == @(a) )) &&\n",
 		"(( b == b )) ]]\n",
 		"echo \"rc=$?\"\n",
+		"[[ \"a|b\" =~ (a|b) && (( b == @(b) )) ]]\n",
+		"echo \"rc=$?\"\n",
+		"function f { [[ (( a == @(a) )) ]]; }\n",
+		"f\n",
+		"echo \"rc=$?\"\n",
 		"echo \"$( [[ (( ${v:-(} )) ]] && echo sub )\"\n",
 		"cat <<EOF\n",
 		"$( [[ (( ${v:-(} )) ]] && printf doc )\n",
 		"EOF\n",
 		"echo [[ ; for ((;;)); do echo in; break; done\n",
 		"echo time [[\n",
+		"case x in x|[[)\n",
 		"(( x=2 << 1 ))\n",
+		";;\n",
+		"esac\n",
 		"echo \"x=$x\"\n",
 	))
 	.await;
 	assert_eq!(out.stderr, "");
-	assert_eq!(out.stdout, "rc=0\nrc=0\nsub\ndoc\n[[\nin\ntime [[\nx=4\n");
-
-	let out = run("(( [[ ))\n(( y=2 << 1 ))\necho \"y=$y\"\n").await;
-	assert_eq!(out.stdout, "y=4\n", "stderr: {}", out.stderr);
-
-	let out = run("time -p [[ (( a == @(a) )) ]]\necho \"rc=$?\"\n").await;
-	assert_eq!(out.stdout, "rc=0\n", "stderr: {}", out.stderr);
+	assert_eq!(out.stdout, "rc=0\nrc=0\nrc=0\nrc=0\nsub\ndoc\n[[\nin\ntime [[\nx=4\n");
 }
 
 /// An arithmetic expression of only blanks and newlines is 0, as in Bash; a

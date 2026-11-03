@@ -133,12 +133,11 @@ fn arithmetic_for_header_splits_at_every_semicolon() -> Result<()> {
 
 #[test]
 fn double_parentheses_bound_arithmetic_only_without_inner_space() -> Result<()> {
-    // As in Bash, a `;` or `#` between `((` and `))` is part of the arithmetic text, and `( (` or
-    // `) )` opens or closes nested subshells rather than arithmetic.
+    // As in Bash, a `;` between `((` and `))` is part of the arithmetic text, and `( (` or `) )`
+    // opens or closes nested subshells rather than arithmetic.
     for (input, arithmetic) in [
         ("((1;2))", Some("1;2")),
         ("(( (1;2) ))", Some("(1;2)")),
-        ("((x=1 #c\n))", Some("x=1 #c\n")),
         ("( (1+2))", None),
         ("((1+2) )", None),
         ("((echo a;) )", None),
@@ -156,15 +155,15 @@ fn double_parentheses_bound_arithmetic_only_without_inner_space() -> Result<()> 
 
 #[test]
 fn parameter_word_parentheses_follow_bash() -> Result<()> {
-    // Bash counts the parentheses of a `${...}` word, nested words included, toward the `((` or
-    // `$((` text around it, so an outermost word that opens more parentheses than it closes moves
-    // the text's end and does not parse here. A `${...}` word is text: outside `((` text a `((` in
-    // it does not make the rest of the line arithmetic, and a `<<` in it does not start a
+    // Bash counts the parentheses of a `${...}` word, nested words included, toward the header of
+    // an arithmetic `for` loop around it, so an outermost word that opens more parentheses than it
+    // closes moves the header's end and does not parse here. Any other `((` may group conditions
+    // inside `[[ ... ]]`, so its words are not balanced against it. A `${...}` word is text: a
+    // `((` in it does not make the rest of the line arithmetic, and a `<<` in it does not start a
     // here-document.
     for input in [
-        "((x=${v:-((}))",
         "for ((x=${v:?(};0;)); do :; done",
-        "echo $(( ${v:?(} ))",
+        "for ((x=${v:-(};0;)); do :; done",
     ] {
         anyhow::ensure!(test_with_snapshot(input).is_err(), "{input:?} parsed");
     }
@@ -178,9 +177,8 @@ fn parameter_word_parentheses_follow_bash() -> Result<()> {
             other => anyhow::bail!("{input:?} parsed as {other:?}"),
         }
     }
+    test_with_snapshot("for ((i=${v:-(0)};i<1;i++)); do :; done")?;
     test_with_snapshot("echo $(( ${v:-${w:-(1})} ))")?;
-    // Inside `[[ ... ]]`, `((` groups conditions: it is not `((` text, so its words are not
-    // balanced against it.
     test_with_snapshot("[[ (( ${v:-(} )) ]]")?;
     for (input, expected) in [
         ("echo ${v:-((x} #c\n", &["echo", "${v:-((x}", "\n"][..]),
