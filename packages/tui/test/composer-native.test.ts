@@ -165,6 +165,56 @@ describe("native composer", () => {
 		expect(accept()).toBeUndefined();
 	});
 
+	it("holds Accept back until typing pauses, while the ghost text stays immediate", () => {
+		vi.useFakeTimers();
+		try {
+			setNativeRendering(true);
+			const editor = composer({ running: false });
+			const repaint = vi.fn();
+			editor.setShimmerRepaintHandler(repaint);
+			editor.predictions = () => ["run the tests"];
+			const root = () => editor.describe(cx);
+			const accept = () => byRole(root(), "omp.composer.accept");
+			const type = (text: string) => {
+				const len = editor.getText().length;
+				editor.handleNativeEvent({
+					type: "edit",
+					key: "line/input",
+					from: len,
+					to: len,
+					text,
+					cursor: len + text.length,
+					len,
+				});
+			};
+			// Nothing typed yet: a shown prediction offers Accept at once.
+			expect(accept()).toBeDefined();
+
+			type("r");
+			expect(nodes(root()).find(n => n.k === "editor")?.p).toMatchObject({ ghost: "un the tests" });
+			expect(accept()).toBeUndefined();
+			vi.advanceTimersByTime(CustomEditor.ACCEPT_SETTLE_MS - 1);
+			type("u");
+			vi.advanceTimersByTime(CustomEditor.ACCEPT_SETTLE_MS - 1);
+			expect(accept()).toBeUndefined();
+			expect(repaint).not.toHaveBeenCalled();
+
+			vi.advanceTimersByTime(1);
+			expect(repaint).toHaveBeenCalledTimes(1);
+			expect(accept()).toBeDefined();
+
+			// A caret move is not typing.
+			editor.handleNativeEvent({ type: "edit", key: "line/input", from: 2, to: 2, text: "", cursor: 2, len: 2 });
+			expect(accept()).toBeDefined();
+			// Typing off the prediction leaves nothing to accept once the pause ends.
+			type("x");
+			vi.advanceTimersByTime(CustomEditor.ACCEPT_SETTLE_MS);
+			expect(accept()).toBeUndefined();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	it("offers `N more` over an accepted prediction, opening the alternatives list a tap picks from", () => {
 		const editor = composer({ running: false });
 		editor.predictions = () => ["run the tests", "run the linter", "commit it"];
