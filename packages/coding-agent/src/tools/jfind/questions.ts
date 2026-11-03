@@ -3,12 +3,16 @@
  * one noul question per entry. Nouls give absolute probabilities, so entries
  * are thresholded independently and batches are comparable with each other.
  *
- * State objects are built with alphabetically ordered keys so the wire bytes
- * match the reference implementation (which serializes through sorted maps);
- * judgment quality was benchmarked against that exact layout.
+ * State objects are built with alphabetically ordered keys, so the wire bytes
+ * are deterministic.
  */
 import { type JsonValue, judgeQuestions, type NoulQuestion, renderQuestion } from "@oh-my-pi/pi-ai";
+import { prompt } from "@oh-my-pi/pi-utils";
 import questionFile from "../../prompts/judge/find.json" with { type: "json" };
+import spotlightProbe from "../../prompts/tools/find-spotlight-probe.md" with { type: "text" };
+import spotlightTask from "../../prompts/tools/find-spotlight-task.md" with { type: "text" };
+import type { SpotlightRequest } from "../../spotlight/client";
+import type { SpotlightThinking } from "../../spotlight/types";
 import { type Passage, plainContent } from "./passages";
 import { type FileEntry, renderTree } from "./tree";
 
@@ -84,6 +88,23 @@ export function nameBatch(project: string, query: string, entries: readonly File
 			tree: renderTree(entries, entryKey),
 		},
 		questions,
+	};
+}
+
+/** Question id of the single Spotlight question in {@link spotlightNames}. */
+export const SPOTLIGHT_FILES = "files";
+
+/**
+ * Spotlight's filename ranking: the candidate paths as a `git ls-files`
+ * listing, each scored in one request for its relevance to the query.
+ */
+export function spotlightNames(query: string, paths: readonly string[], thinking: SpotlightThinking): SpotlightRequest {
+	return {
+		state: { task: prompt.render(spotlightTask, { query }), intent: query },
+		source: "git ls-files",
+		items: paths,
+		questions: { [SPOTLIGHT_FILES]: spotlightProbe },
+		thinking,
 	};
 }
 
