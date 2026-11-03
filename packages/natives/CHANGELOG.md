@@ -2,12 +2,66 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Made the bash tool's shell faster on string appends (`s+=x`), sourcing files full of function definitions (each body compiles on first call), quoted `"$var"`/`"$1"` arguments and file redirections
+
 ### Fixed
 
-- Fixed the bash tool's `wait "$!"` failing with `no such job` instead of waiting when the backgrounded command was a function, subshell or brace group: `$!` now holds an id for a job the shell runs itself, `jobs -p` and `jobs -l` in that shell show it, and `wait`, `kill` and the newly implemented `disown` accept it; it is not an operating-system process id, so `ps`, `/proc` and `kill` from another process will not find it ([#17678](https://github.com/can1357/oh-my-pi/pull/17678) by [@sjawhar](https://github.com/sjawhar))
-- Fixed the bash tool's `jobs` showing a background job that had already ended as `Running`, listing it again on later calls, and leaving it for `wait -n` after reporting it; as in Bash, `jobs` now reports an ended job once and the shell forgets it where Bash does — at each line it reads of a command, an `eval` string, a sourced file, a compound array assignment or the text of a `$(...)` its expansion of a word reaches, at each child it starts (a command `command` wraps, and a null command reading standard input, included), after each pass or test of a loop, and in `wait` and `jobs` — `wait %N` returns the job's status again until then, `wait` with no operand keeps the `$!` job, `kill %N` makes the job one no listing has shown and succeeds for a job that has ended, a `lastpipe` pipeline forgets nothing, `jobs -n` lists every job that changed state, the last of `-l`, `-n` and `-p` (and of `-r` and `-s`) decides the listing, options may repeat, and `wait` no longer prints the jobs it collects under `set -m`; with `set -m`, a job that stops or continues counts as changed, `wait` on a stopped job returns at once with Bash's status (256 included), a foreground pipeline that stops returns Bash's status (up to 383), leaves `PIPESTATUS` as it was and prints no `Stopped` line in a script, nor does `fg` for a job that stops again, `wait -p` names a pipeline's last process, and `fg`, `bg` and `kill -CONT` continue every process group of a stopped pipeline, also that of a stage that has exited, and a stopped job stays stopped while one of its processes is; `kill` follows Bash's `kill_pid`: a job spec, or the negative pid of a job's process, signals a job started with job control through all its groups and continues a stopped one after SIGTERM or SIGHUP through the same groups, signals a job started without it in each live process by pid, and a plain pid gets the signal alone; `fg` and `bg` refuse without job control, `fg` waits for a running job and forgets it, `bg` leaves a running job as it is; a simple command expands its words, then each prefix assignment once (a `+=` one appending to the variable's value, an integer's by addition), before its redirections, which do not see the prefix assignments, and a failed redirection no longer expands words past an expansion error; `command export x=$v` and `builtin export x=$v` split `x=$v` as other words (POSIX mode keeps `command export` a declaration), and the declaration builtins assign a `name=value` word they receive; in POSIX mode the assignments before a special builtin stay and its failed redirection ends the shell, and an assignment error before any other command abandons the command being run, the callers of a function included, up to the line, `eval` string, sourced file or trap handler it was read from, as an assignment statement to a readonly variable does in any mode (a non-interactive POSIX-mode shell exits instead unless under `command`); `exit`, `return`, `break` and `continue` in a pipeline stage end only that stage; `${x#pattern}` and the other pattern and substring operators no longer expand their operands for an unset parameter, translate `$'...'` in a here-document as Bash does, and the word of `${x:-word}` in double quotes or a here-document keeps its single quotes as literal text, with a `$'...'` translated only at the word's own level, so one inside a nested quoted string is no longer run as a command ([#17712](https://github.com/can1357/oh-my-pi/pull/17712) by [@sjawhar](https://github.com/sjawhar))
-- Fixed the bash tool saying nothing when a signal killed a background job or a command: as in Bash, the job's line (such as `12345 Killed                  sleep 30`, or `Terminated` alone for a foreground SIGTERM) now appears on standard error where Bash reports it — at the next point Bash reports at, and not at all after `exit`, `set -e` or a fatal error ends the script — SIGINT, SIGPIPE, background SIGTERM and trapped signals stay silent, the reported job is forgotten so `wait %1` no longer returns its status, and `jobs` shows Bash's status text (`Exit 3`, `Killed`, one line per process with its pid for `jobs -l`) and Bash's `+` and `-` marks; each stage of a pipeline the shell runs itself now has its own pid, status and command text, a stage counts as ended once its command ends, whatever ended it, and `kill` of one stage's pid ends that stage alone or fails once it has ended; an error that ends a pipeline stage (`${x?}`, `$((1/0))`, `set -u`) is printed and ends that stage with status 1, as in Bash, instead of the whole script; a `lastpipe` pipeline's other processes are a job from the moment its last command starts, which that command's `jobs` lists, `wait %N` waits for and `kill %N` signals, and which no `disown`, `wait` or cleanup there takes out of the table before the pipeline has waited for it; that job and each child the last command starts stay in the table until Bash would report them; a command substitution forgets each job it started that ended, but `$!`'s; a subshell whose last command a signal killed is reported once, with the subshell's text, also after `trap '' SIG`; `kill -0 $!` fails once the background process has ended, as Bash's does; and `( ( cmd ) )` is a subshell in a subshell, not an arithmetic command ([#17845](https://github.com/can1357/oh-my-pi/pull/17845) by [@sjawhar](https://github.com/sjawhar))
-- Fixed the bash tool's `exec` with only redirections (`exec 2>/dev/null`, `exec 3>file`, `exec 2>&3`) failing as a command that is not found: as in Bash, the redirections now apply to every later command of the same call, an `exec` inside a redirected group, function, `eval` or loop changes the descriptors that command redirects only until it ends, `command exec` keeps its redirections while `builtin exec`, `builtin command exec` and `builtin -- exec` keep none and still check `exec`'s options and whether `enable -n` disabled it, `exec` reads its options as Bash does (`-cl`, `-ca name`, `-aname`, `--`; an invalid option or a missing argument returns 2 and keeps the redirections), and `exec` with a command is still refused; a chain the output minimizer would run a command at a time now runs whole when one of its commands may change the shell for the next — `exec`, `eval`, `source` or `trap` in any spelling (quoted, through `command` or `builtin`, brace-expanded), a function or an alias defined in an earlier call, or any trap set — so a function that runs `exec >file` sends the rest of the chain to the file, as in Bash; a diagnostic that cannot be written, after `exec 2>&-` or to a full device, no longer stops the script ([#17845](https://github.com/can1357/oh-my-pi/pull/17845) by [@sjawhar](https://github.com/sjawhar))
+- Fixed associative arrays slowing down quadratically as they grow: 100,000 inserts and lookups took about 90 seconds and now take about a tenth of a second
+### Fixed
+
+- Fixed `el.type` and `el.press(keys)` on Wayland moving focus inside the element's app (GNOME showed "… is ready") before refusing the call: they are now refused before anything reaches the app ([#17915](https://github.com/can1357/oh-my-pi/pull/17915) by [@will-bogusz](https://github.com/will-bogusz))
+### Fixed
+
+- Fixed Windows background drags in Tk apps (Python's tkinter, IDLE) reporting success while nothing happened; they now follow `computer.backgroundFallback` ([#17913](https://github.com/can1357/oh-my-pi/pull/17913) by [@will-bogusz](https://github.com/will-bogusz))
+### Fixed
+
+- The bash tool's built-in `rsync` now reports a `--log-file` it cannot open as rsync 3.5.1 does: its client names itself `[client]` and a remote server `[server]` in `failed to open log-file …`, and an empty `--log-file=` sends the log to syslog with no message instead of failing on the current directory ([#17980](https://github.com/can1357/oh-my-pi/pull/17980) by [@sjawhar](https://github.com/sjawhar))
+### Fixed
+
+- Fixed X11 takeover and `raise()` failing on a window that background typing had targeted, under window managers such as Openbox ([#17910](https://github.com/can1357/oh-my-pi/pull/17910) by [@will-bogusz](https://github.com/will-bogusz))
+### Fixed
+
+- Fixed X11 background typing, shortcuts and keys held during drags into Qt 5/6 apps reporting success while the app received no keys; the `computer` tool now runs them in takeover, or refuses them when `computer.backgroundFallback` is `refuse` ([#17911](https://github.com/can1357/oh-my-pi/pull/17911) by [@will-bogusz](https://github.com/will-bogusz))
+### Fixed
+
+- Fixed Wayland double and triple clicks (`doubleClick`, `click` with `count`) landing as a single click in Qt apps on KDE Plasma, such as Kate ([#17903](https://github.com/can1357/oh-my-pi/pull/17903) by [@will-bogusz](https://github.com/will-bogusz))
+### Fixed
+
+- Fixed `press()`, `perform()` and `menu.select()` refusing on Linux in Firefox, Chromium, VS Code and LibreOffice, and in apps under a non-English locale, with "AT-SPI action 'press' is unavailable"; `actions()` now lists the actions' untranslated names (`press`, `click`) instead of empty or translated labels, and `press()` toggles toggle buttons and selects radio buttons as it does checkboxes ([#17936](https://github.com/can1357/oh-my-pi/pull/17936) by [@will-bogusz](https://github.com/will-bogusz))
+### Fixed
+
+- Fixed `computer.focusedWindow()` on GNOME and KDE Wayland always naming a shell surface (gnome-shell's "Main stage", an untitled plasma-keyboard frame) instead of the application window that has focus; desktop and display `ax()` and `observe()` now read that application too ([#17922](https://github.com/can1357/oh-my-pi/pull/17922) by [@will-bogusz](https://github.com/will-bogusz))
+### Fixed
+
+- Fixed takeover keys into iPhone Mirroring and Screen Sharing keeping Fn (Globe) held after a Delete, arrow or function key, which dropped Shift and lost later letters ([#17909](https://github.com/can1357/oh-my-pi/pull/17909) by [@will-bogusz](https://github.com/will-bogusz))
+### Fixed
+
+- Fixed a Wayland `computer` run timing out without a reason when the RemoteDesktop permission dialog went unanswered (GNOME can open it behind other windows): the input call now fails with `Timeout` naming the dialog shortly before the run's deadline, and nothing is sent ([#17932](https://github.com/can1357/oh-my-pi/pull/17932) by [@will-bogusz](https://github.com/will-bogusz))
+### Fixed
+
+- Fixed X11 takeover typing and shortcuts stopping with `Cancelled` partway through whenever you had last typed on your own keyboard ([#17912](https://github.com/can1357/oh-my-pi/pull/17912) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed pressing Escape during X11 takeover input ending only that call, so the agent went on, instead of stopping computer use for the rest of the turn ([#17912](https://github.com/can1357/oh-my-pi/pull/17912) by [@will-bogusz](https://github.com/will-bogusz))
+### Fixed
+
+- Fixed X11 background `el.type` and `el.press` bringing the element's window to the front and taking your keyboard; an element that does not already hold a GTK 3 window's focus now runs in takeover instead ([#17921](https://github.com/can1357/oh-my-pi/pull/17921) by [@will-bogusz](https://github.com/will-bogusz))
+
+## [18.16.0] - 2026-11-02
+
+### Added
+
+- Added `macOSFrontApp()`, which reads the app macOS has in front and can put it back in front for a while (`keepInFront`) without stopping for the user's typing ([#16284](https://github.com/can1357/oh-my-pi/pull/16284) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Changed
+
+- Replaced the embedded shell interpreter behind `Shell` and `executeShell` with pi's own bash engine, now part of `pi-shell`: bash 5.3 semantics, including alias bodies with pipes, subshells and separators
+
+### Fixed
+
+- Fixed iPhone Mirroring clicks, scrolls and keys reporting success while the mirror showed a connection screen such as "iPhone in Use" instead of the phone; they now fail and quote that screen ([#17755](https://github.com/can1357/oh-my-pi/pull/17755) by [@will-bogusz](https://github.com/will-bogusz))
+- `parseKey`/`matchesKey` now recognize the parameterless `CSI P`/`CSI Q`/`CSI S` (and `CSI 1 <letter>`) forms that kitty-protocol terminals such as Ghostty send for unmodified F1/F2/F4, and modified F2–F9 no longer match other keys (e.g. Ctrl+PageDown as Ctrl+F8) ([#17812](https://github.com/can1357/oh-my-pi/issues/17812)).
+- Added `installSqliteLockShim()` (Linux), which moves Bun's SQLite record locks onto open-file-description locks that no other close of the file releases, and `heldFileKind(path)`, which reports a file this process holds open and locked. Both are also on `@oh-my-pi/pi-natives/sqlite-locks`, which loads the addon on first call ([#15586](https://github.com/can1357/oh-my-pi/issues/15586))
 
 ## [18.15.0] - 2026-11-01
 

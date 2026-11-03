@@ -9,12 +9,11 @@ use std::{
 	path::Path,
 };
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::ValueParser};
 use pi_vfs::Metadata;
 use uucore::{display::Quotable, fs::display_permissions_unix, mode};
 
-use crate::host::{Host, Utility, format_usage, matches_parser, strip_errno, util};
+use crate::host::{Host, Utility, format_usage, matches_parser, strip_errno};
 
 /// Hidden long option carrying mode strings spelled as options (`-w`).
 /// The leading control character keeps it out of long-option abbreviation.
@@ -692,10 +691,6 @@ fn mode_changed(
 		}
 	}
 	(old_mode ^ new_mode) & MODE_BITS != 0
-}
-
-pub(crate) fn chmod_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Chmod, SE>()
 }
 
 #[cfg(test)]

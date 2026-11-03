@@ -9,11 +9,11 @@ import { prompt } from "@oh-my-pi/pi-utils";
 import { IrcBus } from "../irc/bus";
 import waitDescription from "../prompts/tools/wait.md" with { type: "text" };
 import type { ToolSession } from ".";
-import type { AsyncJob, AsyncJobManager } from "../async/job-manager";
+import type { AsyncJob, AsyncJobManagerApi } from "../async/job-manager";
 import { buildJobResult, snapshotJobs, undeliveredJobs } from "../async/job-control";
 import { hasLiveOwnedService, listServicesTolerant, waitForOwnedServiceCompletion } from "../launch/services";
 import { drainPendingInbox, messageResult } from "../irc/messaging";
-import type { AgentRegistry } from "../registry/agent-registry";
+import type { AgentRegistryApi } from "../registry/agent-registry";
 import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import type { CoordinationDetails } from "@oh-my-pi/pi-tui/tools/wait";
 import { throwIfAborted } from "./tool-errors";
@@ -25,7 +25,7 @@ const WAIT_MAX_MS = 30 * 60_000;
 const PROGRESS_INTERVAL_MS = 500;
 
 interface WaitMessaging {
-	registry: AgentRegistry;
+	registry: AgentRegistryApi;
 	senderId: string;
 }
 
@@ -167,7 +167,7 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 	 */
 	async #blockUntilWake(args: {
 		jobs: AsyncJob[];
-		manager: AsyncJobManager | undefined;
+		manager: AsyncJobManagerApi | undefined;
 		messaging: WaitMessaging | undefined;
 		serviceRunning: boolean;
 		signal: AbortSignal | undefined;

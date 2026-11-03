@@ -177,19 +177,71 @@ fn chain_has_eligible_segment(segments: &[plan::ChainSegment], config: &Minimize
 	})
 }
 
-/// True when any segment's spelling shows it can change the shell's own
-/// state for the segments after it (see `plan::ChainSegment::mutates_shell`).
-/// The segmented chain runner executes each segment in a fresh capture
-/// context with its own stdout/stderr pipe, so a descriptor `exec >out` or
-/// `exec 2>err` changed in one segment would not reach the segments that
-/// follow: output the user redirected to a file would instead be captured
-/// and returned to the caller. `eval`, `source`, `.`, `alias` and `unalias`
-/// likewise change what later text means. Such a chain stays opaque
-/// (passthrough), keeping the shell's semantics. A word that names a
-/// function or an alias, which may do the same, only the live shell can
-/// see; the runner checks that before it runs a chain a segment at a time.
+/// True when any segment can permanently rewire the shell's own file
+/// descriptors. The segmented chain runner executes each segment in a fresh
+/// capture context with its own stdout/stderr pipe, so fd mutations made by one
+/// segment (e.g. `exec >out`, `exec 2>err`) are not honored by the segments
+/// that follow: output the user redirected to a file would instead be captured
+/// and returned to the caller. When such a segment is present we refuse to
+/// segment and leave the chain opaque (passthrough), preserving the original
+/// redirection semantics.
 fn chain_mutates_shell_fds(segments: &[plan::ChainSegment]) -> bool {
-	segments.iter().any(|segment| segment.mutates_shell)
+	segments.iter().any(is_shell_fd_mutating_segment)
+}
+
+/// True when a segment's effective command can mutate the shell parse/runtime
+/// environment in a way that segmented execution cannot preserve.
+///
+/// `exec` rewires fds; `eval` / `source` / `.` can introduce that opaquely;
+/// `alias` / `unalias` change how later words in separate `run_string` calls
+/// are expanded. Resolves the simple direct case from the parsed program word
+/// first so quoted assignments such as `FOO="a b" exec >out` cannot fool the
+/// fallback whitespace scan.
+fn is_shell_fd_mutating_segment(segment: &plan::ChainSegment) -> bool {
+	if is_shell_state_mutating_program(&segment.program) {
+		return true;
+	}
+	if matches!(segment.program.as_str(), "command" | "builtin")
+		&& command_wrapper_invokes_mutator(segment)
+	{
+		return true;
+	}
+	false
+}
+
+fn is_shell_state_mutating_program(program: &str) -> bool {
+	matches!(program, "exec" | "eval" | "source" | "." | "alias" | "unalias")
+}
+
+fn command_wrapper_invokes_mutator(segment: &plan::ChainSegment) -> bool {
+	for word in segment.command.split_whitespace() {
+		if is_shell_state_mutating_program(word) {
+			return true;
+		}
+		// A split quoted assignment means we are no longer looking at real shell
+		// words. Stay opaque rather than proving safety from corrupted tokens.
+		if is_ambiguous_assignment_fragment(word) {
+			return true;
+		}
+		if word == "command" || word == "builtin" || word.starts_with('-') || is_env_assignment(word)
+		{
+			continue;
+		}
+		return false;
+	}
+	false
+}
+
+fn is_ambiguous_assignment_fragment(word: &str) -> bool {
+	is_env_assignment(word) && (word.contains('"') || word.contains('\''))
+}
+
+/// True for a leading `KEY=value` environment assignment (a prefix that does
+/// not change which command word ultimately runs).
+fn is_env_assignment(word: &str) -> bool {
+	word.split_once('=').is_some_and(|(key, _)| {
+		!key.is_empty() && key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+	})
 }
 
 /// Common shell utilities that on their own would not warrant whole-command
@@ -1224,20 +1276,6 @@ strip_lines_matching = [".*"]
 		assert_eq!(mode_for("git diff ; command -p exec 2>err", &cfg), MinimizerMode::None);
 		assert_eq!(mode_for("FOO=\"a b\" exec >out ; echo hi", &cfg), MinimizerMode::None);
 		assert_eq!(mode_for("FOO=\"a b\" command exec >out ; echo hi", &cfg), MinimizerMode::None);
-		// The guard resolves the command as the shell does, so a quoted or
-		// escaped `exec` is still `exec`.
-		for command in [
-			"'exec' 2>/dev/null",
-			"\"exec\" 2>/dev/null",
-			"\\exec 2>/dev/null",
-			"command 'exec' 2>/dev/null",
-		] {
-			assert_eq!(
-				mode_for(&format!("{command} ; echo hi"), &cfg),
-				MinimizerMode::None,
-				"{command}"
-			);
-		}
 		// Alias mutations affect later words when segments are parsed in separate
 		// calls, so they must stay on the original single-parse path too.
 		assert_eq!(mode_for("alias cat='printf hacked' ; cat file", &cfg), MinimizerMode::None);

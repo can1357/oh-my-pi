@@ -11,8 +11,8 @@
 
 import { type IrcDeliveryReceipt, type IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import { logger, Snowflake } from "@oh-my-pi/pi-utils";
-import { AgentLifecycleManager } from "../registry/agent-lifecycle";
-import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { type AgentLifecycleApi, AgentLifecycleManager } from "../registry/agent-lifecycle";
+import { AgentRegistry, type AgentRegistryApi, MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { CustomMessage } from "../session/messages";
 
 interface IrcWaiter {
@@ -30,14 +30,44 @@ interface SendMark {
 /** Mailbox cap per agent; oldest messages are dropped beyond it. */
 const MAILBOX_CAP = 100;
 
-export class IrcBus {
-	static #global: IrcBus | undefined;
+/** Public surface of the process-global IRC bus, implemented locally on main and by a proxy in workers. */
+export interface IrcBusApi {
+	/** Fire-and-forget delivery; the receipt reports how the message reached the recipient. */
+	send(msg: Omit<IrcMessage, "id" | "ts">, opts?: { suppressRelay?: boolean }): Promise<IrcDeliveryReceipt>;
+	/** Whether `from` successfully sent `to` anything, progress included, at or after `sinceTs`. */
+	sentSince(from: string, to: string, sinceTs: number): boolean;
+	/** Agents `from` messaged directly at or after `sinceTs` that have not answered since. */
+	unansweredSends(from: string, sinceTs: number): Array<{ to: string; sentAt: number; promised: boolean }>;
+	/** Block until a message for `agentId` arrives; null on timeout. */
+	wait(
+		agentId: string,
+		filter: { from?: string },
+		timeoutMs: number,
+		signal?: AbortSignal,
+		options?: { drainPending?: boolean },
+	): Promise<IrcMessage | null>;
+	/** Consume the oldest pending message for `agentId` (optionally from `from`). */
+	take(agentId: string, from?: string): IrcMessage | undefined;
+	/** Unread count for the local Agent Hub overlay. */
+	unreadCount(agentId: string): number;
+	/** Count a settled job of agent `from` owned by `to` as `from`'s reply to `to`. */
+	recordReply(from: string, to: string): void;
+}
 
-	static global(): IrcBus {
+export class IrcBus implements IrcBusApi {
+	static #global: IrcBusApi | undefined;
+
+	/** The installed bus; lazily a local {@link IrcBus} unless a worker installed a proxy. */
+	static global(): IrcBusApi {
 		if (!IrcBus.#global) {
 			IrcBus.#global = new IrcBus();
 		}
 		return IrcBus.#global;
+	}
+
+	/** Install the process-global bus. Worker bootstrap only. */
+	static installGlobal(api: IrcBusApi): void {
+		IrcBus.#global = api;
 	}
 
 	/** Reset the global bus. Test-only. */
@@ -52,12 +82,11 @@ export class IrcBus {
 	 * message was ever sent, so there is nothing to answer.
 	 */
 	static recordReply(from: string, to: string): void {
-		const bus = IrcBus.#global;
-		if (bus) bus.#recordReply(from, to);
+		IrcBus.#global?.recordReply(from, to);
 	}
 
-	readonly #registry: AgentRegistry;
-	readonly #lifecycle: () => AgentLifecycleManager;
+	readonly #registry: AgentRegistryApi;
+	readonly #lifecycle: () => AgentLifecycleApi;
 	readonly #mailboxes = new Map<string, IrcMessage[]>();
 	readonly #waiters = new Map<string, IrcWaiter[]>();
 	/** The latest successful non-progress send per `from` → `to`; see {@link sentSince}. */
@@ -71,7 +100,7 @@ export class IrcBus {
 	/** Last {@link SendMark.seq} handed out, taken when a send starts. */
 	#sendSeq = 0;
 
-	constructor(registry: AgentRegistry = AgentRegistry.global(), lifecycle?: AgentLifecycleManager) {
+	constructor(registry: AgentRegistryApi = AgentRegistry.global(), lifecycle?: AgentLifecycleApi) {
 		this.#registry = registry;
 		// Lazy: the lifecycle global self-constructs against the global registry,
 		// so only touch it when a parked recipient actually needs reviving.
@@ -123,7 +152,8 @@ export class IrcBus {
 		if ((sent.get(to)?.seq ?? 0) < mark.seq) sent.set(to, mark);
 	}
 
-	#recordReply(from: string, to: string): void {
+	/** Instance half of {@link IrcBus.recordReply}: records the job-carried reply on this bus. */
+	recordReply(from: string, to: string): void {
 		this.#record(this.#lastJobReply, from, to, { ts: Date.now(), seq: ++this.#sendSeq });
 	}
 

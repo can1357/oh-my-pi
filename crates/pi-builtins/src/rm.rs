@@ -19,12 +19,12 @@ use clap::{
 };
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle, TermLike};
 use parking_lot::Mutex;
-use brush_core::{ShellExtensions, builtins::Registration, openfiles::OpenFile};
+use crate::openfile::OpenFile;
 use pi_vfs::{Metadata, child_path, is_virtual_path, normalize_lexically, parent_path};
 use thiserror::Error;
 use uucore::{display::Quotable, parser::shortcut_value_parser::ShortcutValueParser};
 
-use crate::host::{Host, Utility, format_usage, matches_parser, os_bytes, util};
+use crate::host::{Host, Utility, format_usage, matches_parser, os_bytes};
 
 macro_rules! show_error {
 	($host:expr, $($args:tt)+) => {{
@@ -1127,11 +1127,6 @@ pub fn uu_app() -> Command {
 				.value_hint(clap::ValueHint::AnyPath),
 		)
 }
-/// Creates the `rm` builtin registration.
-pub(crate) fn rm_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Rm, SE>()
-}
-
 
 /// Terminal adapter that directs progress rendering to the builtin's stderr.
 struct HostTerm(Mutex<OpenFile>);
@@ -1911,7 +1906,7 @@ mod tests {
 		let cwd = tempdir().unwrap();
 		let process_cwd = std::env::current_dir().unwrap();
 		let process_file = Builder::new()
-			.prefix("brush-rm-relative-")
+			.prefix("pi-rm-relative-")
 			.tempfile_in(process_cwd)
 			.unwrap();
 		let name = process_file.path().file_name().unwrap().to_str().unwrap();
@@ -2109,21 +2104,7 @@ mod tests {
 		}
 	}
 
-	impl brush_core::openfiles::Stream for DeleteThenYes {
-		fn clone_box(&self) -> Box<dyn brush_core::openfiles::Stream> {
-			Box::new(self.clone())
-		}
-
-		#[cfg(unix)]
-		fn try_clone_to_owned(&self) -> Result<std::os::fd::OwnedFd, brush_core::Error> {
-			Err(brush_core::error::ErrorKind::CannotConvertToNativeFd.into())
-		}
-
-		#[cfg(unix)]
-		fn try_borrow_as_fd(&self) -> Result<std::os::fd::BorrowedFd<'_>, brush_core::Error> {
-			Err(brush_core::error::ErrorKind::CannotConvertToNativeFd.into())
-		}
-	}
+	impl crate::openfile::Stream for DeleteThenYes {}
 
 	#[test]
 	fn interactive_after_force_still_reports_a_vanished_file() {

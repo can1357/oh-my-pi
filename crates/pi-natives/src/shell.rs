@@ -1,4 +1,4 @@
-//! Brush-based shell execution exported via N-API.
+//! Embedded bash engine (pi-shell) shell execution exported via N-API.
 
 pub mod vfs;
 
@@ -230,7 +230,8 @@ impl PipeStreams {
 	}
 }
 
-/// Options for executing a shell command via brush-core.
+/// Options for executing a shell command via the embedded bash engine
+/// (pi-shell).
 #[napi(object, object_to_js = false)]
 pub struct ShellExecuteOptions<'env> {
 	/// Command string to execute in the shell.
@@ -320,7 +321,7 @@ impl From<CoreShellRunResult> for ShellRunResult {
 	}
 }
 
-/// Persistent brush-core shell session.
+/// Persistent embedded bash engine (pi-shell) shell session.
 #[napi]
 pub struct Shell {
 	inner: Arc<CoreShell>,
@@ -380,12 +381,10 @@ impl Shell {
 		Ok(())
 	}
 
-	/// Count unfinished background jobs on this session: external `&`/`nohup`
-	/// children and jobs the shell runs itself (a function, subshell or group
-	/// put in the background), `disown`ed ones included. Completed jobs are
-	/// reaped first. The host uses this to retain a per-call shell whose
-	/// background jobs still run instead of dropping it, which would kill
-	/// external children and stop the shell's own jobs.
+	/// Count live background jobs (`&`/`nohup` children still running) on this
+	/// session. Completed jobs are reaped first. The host uses this to retain a
+	/// per-call shell whose background processes are still running instead of
+	/// dropping it (which would SIGKILL them via kill-on-drop).
 	#[napi]
 	pub async fn live_background_job_count(&self) -> u32 {
 		self.inner.live_background_job_count().await
@@ -403,7 +402,7 @@ impl Shell {
 	}
 }
 
-/// Execute a brush shell command.
+/// Execute a command in the embedded bash engine (pi-shell).
 ///
 /// Creates a fresh session for each call. The `on_chunk` callback receives
 /// streamed stdout/stderr output. Returns the exit code when the command
