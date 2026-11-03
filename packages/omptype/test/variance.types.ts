@@ -41,7 +41,20 @@ user.pick("email");
 // @ts-expect-error a string schema has no object methods
 type("string").partial();
 
+// Detached key methods type-check as on main; `pick` and `omit` stay exact. A detached `keyof()`
+// cannot see its receiver's type, so it gives any property key.
+const boundPick = user.pick.bind(user);
+const boundPicked: true = exactly<{ id: number }>()(boundPick("id").infer);
+const boundOmit = user.omit.bind(user);
+const boundOmitted: true = exactly<{ id: number; nick?: string }>()(boundOmit("name").infer);
+const boundKeys: true = exactly<PropertyKey>()(user.keyof.bind(user)().infer);
+const calledKeys: true = exactly<PropertyKey>()(user.keyof.call(user).infer);
+
 export {
+	boundKeys,
+	boundOmitted,
+	boundPicked,
+	calledKeys,
 	fluentObject,
 	fluentPrimitive,
 	keys,

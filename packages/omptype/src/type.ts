@@ -317,20 +317,17 @@ interface PipeMethod<out t, out i> {
 
 type InputObject<i> = i extends object ? i : object;
 
-/** The receiver an object schema's key methods read their keys from. */
+/**
+ * The receiver `keyof()` reads its keys from. A schema's key list is contravariant in its
+ * output, so stating it through `t` would make no object schema covariant (nor `Type`, whose
+ * `in`/`out` are object schemas too), and TypeScript would decide `Type<{ id: number }>` against
+ * `Type<unknown>` member by member, passing or failing by its depth limit.
+ */
 interface ObjectReceiver<out t, out i> {
 	readonly infer: t;
 	readonly inferIn: i;
 }
 
-/**
- * Object-only fluent methods. `keyof`, `pick` and `omit` read the keys from the
- * schema they are called on (`this`) rather than from `t` and `i`: a key list is
- * contravariant in the object, so stating it through `t` would make an object
- * schema not assignable to the schema of a supertype, and TypeScript would then
- * decide `Type<{ id: number }>` against `Type<unknown>` member by member, which
- * passes or fails depending on its depth limit.
- */
 interface ObjectMethods<out t extends object, out i> {
 	readonly props: readonly TypeProperty[];
 	map(
@@ -339,15 +336,15 @@ interface ObjectMethods<out t extends object, out i> {
 	keyof<self extends object, selfIn>(
 		this: ObjectReceiver<self, selfIn>,
 	): FluentType<Extract<keyof self, PropertyKey>, Extract<keyof InputObject<selfIn>, PropertyKey>>;
+	/** Called detached (`bind`, `call`), where TypeScript does not pass the receiver's type. */
+	keyof(): FluentType<PropertyKey>;
 	get<const path extends readonly PropertyKey[]>(...path: path): FluentType<unknown>;
-	pick<self extends object, selfIn, const keys extends readonly (keyof self)[]>(
-		this: ObjectReceiver<self, selfIn>,
+	pick<const keys extends readonly (keyof t)[]>(
 		...keys: keys
-	): FluentType<Pick<self, keys[number]>, Pick<InputObject<selfIn>, Extract<keys[number], keyof InputObject<selfIn>>>>;
-	omit<self extends object, selfIn, const keys extends readonly (keyof self)[]>(
-		this: ObjectReceiver<self, selfIn>,
+	): FluentType<Pick<t, keys[number]>, Pick<InputObject<i>, Extract<keys[number], keyof InputObject<i>>>>;
+	omit<const keys extends readonly (keyof t)[]>(
 		...keys: keys
-	): FluentType<Omit<self, keys[number]>, Omit<InputObject<selfIn>, Extract<keys[number], keyof InputObject<selfIn>>>>;
+	): FluentType<Omit<t, keys[number]>, Omit<InputObject<i>, Extract<keys[number], keyof InputObject<i>>>>;
 	partial(): FluentType<Partial<t>, Partial<InputObject<i>>>;
 	required(): FluentType<Required<t>, Required<InputObject<i>>>;
 	merge<r, ri>(def: SchemaInference<r, ri>): FluentType<MergeTypes<t, r>, MergeTypes<i, ri>>;
