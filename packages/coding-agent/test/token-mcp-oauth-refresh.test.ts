@@ -140,13 +140,16 @@ test("token refreshes and persists a rotating local MCP OAuth grant", async () =
 	}
 }, 30_000);
 
-// PR #17795 review, round 7: `omp --no-mcp token` refreshed an MCP credential,
-// contacting the server's token endpoint.
-for (const { name, args, noMcp } of [
-	{ name: "PI_NO_MCP=1", args: [], noMcp: "1" },
-	{ name: "--no-mcp", args: ["--no-mcp"], noMcp: "" },
-]) {
-	test(`token refreshes no MCP credential under ${name}`, async () => {
+// PR #17795 review, rounds 7 and 8: `omp --no-mcp token` refreshed an MCP
+// credential, contacting the server's token endpoint, and printed a stored one.
+for (const { name, args, noMcp, stored, lead } of [
+	{ name: "PI_NO_MCP=1", args: ["--force-refresh"], noMcp: "1", stored: "expired" },
+	{ name: "--no-mcp", args: ["--force-refresh"], noMcp: "", stored: "expired", lead: ["--no-mcp"] },
+	{ name: "PI_NO_MCP=1, a valid stored token", args: [], noMcp: "1", stored: "valid" },
+	{ name: "--no-mcp, a valid stored token", args: [], noMcp: "", stored: "valid", lead: ["--no-mcp"] },
+	{ name: "PI_NO_MCP=1, --account 1", args: ["--account", "1"], noMcp: "1", stored: "valid" },
+] as Array<{ name: string; args: string[]; noMcp: string; stored: "expired" | "valid"; lead?: string[] }>) {
+	test(`token resolves no MCP credential under ${name}`, async () => {
 		using tempDir = TempDir.createSync("@omp-token-mcp-oauth-off-");
 		const provider = "mcp_oauth:profile:default:https://mcp.example.test/MCP";
 		let requests = 0;
@@ -165,13 +168,13 @@ for (const { name, args, noMcp } of [
 				type: "oauth",
 				access: "access-0",
 				refresh: "refresh-0",
-				expires: Date.now() - 60_000,
+				expires: stored === "valid" ? Date.now() + 3_600_000 : Date.now() - 60_000,
 				tokenUrl: `http://127.0.0.1:${tokenServer.port}/token`,
 			};
 			await authStorage.credentials.set(provider, credential);
 			authStorage.close();
 
-			const proc = Bun.spawn([process.execPath, cliEntry, ...args, "token", provider, "--force-refresh"], {
+			const proc = Bun.spawn([process.execPath, cliEntry, ...(lead ?? []), "token", provider, ...args], {
 				cwd: path.resolve(import.meta.dir, "../../.."),
 				env: {
 					...process.env,
@@ -187,7 +190,7 @@ for (const { name, args, noMcp } of [
 			const [exitCode, stdout] = await Promise.all([proc.exited, new Response(proc.stdout).text()]);
 
 			expect(requests).toBe(0);
-			expect(stdout).not.toContain("access-1");
+			expect(stdout).not.toContain("access-");
 			expect(exitCode).not.toBe(0);
 		} finally {
 			tokenServer.stop(true);
@@ -221,6 +224,8 @@ test("token refuses a managed MCP id scoped to another profile", async () => {
 			OMP_PROFILE: undefined,
 			PI_PROFILE: undefined,
 			PI_CODING_AGENT_DIR: tempDir.path(),
+			// The test runner exports PI_NO_MCP=1, which refuses MCP credentials before the profile check.
+			PI_NO_MCP: "",
 		},
 		stdout: "pipe",
 		stderr: "pipe",

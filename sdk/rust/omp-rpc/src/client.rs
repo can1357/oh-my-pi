@@ -730,6 +730,15 @@ pub struct Client {
 	registration:     Mutex<()>,
 }
 
+/// Whether this host has MCP off: `PI_NO_MCP` is a value omp reads as true
+/// (pi-utils `parseFlag`).
+fn host_has_mcp_off() -> bool {
+	matches!(
+		std::env::var("PI_NO_MCP").as_deref(),
+		Ok("1" | "Y" | "y" | "TRUE" | "true" | "YES" | "yes" | "ON" | "on")
+	)
+}
+
 /// Builds the command frame `{"id", "type", ...params}`.
 pub fn encode_command<C: Command>(id: &str, command: &C) -> Result<Value, serde_json::Error> {
 	let mut frame = serde_json::to_value(command)?;
@@ -753,6 +762,11 @@ impl Client {
 	) -> Result<(Self, Receiver<Event>), Error> {
 		#[cfg(unix)]
 		std::os::unix::process::CommandExt::process_group(&mut process, 0);
+		// A host with MCP off starts a server with MCP off: an explicit
+		// `.env("PI_NO_MCP", ...)` on `process` cannot turn it back on.
+		if host_has_mcp_off() {
+			process.env("PI_NO_MCP", "1");
+		}
 		let mut child = process
 			.stdin(Stdio::piped())
 			.stdout(Stdio::piped())

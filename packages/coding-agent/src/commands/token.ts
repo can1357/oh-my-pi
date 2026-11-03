@@ -10,6 +10,7 @@ import { tokenHelp as commandHelp } from "../cli/command-help";
 import { isAuthenticated, ModelRegistry } from "../config/model-registry";
 import { refreshStoredManagedMcpOAuthCredential } from "../mcp/oauth-credentials";
 import { isManagedMCPOAuthCredentialId, mcpOAuthCredentialProfile } from "../mcp/oauth-flow";
+import { isMCPDisabled } from "../mcp/policy";
 import { discoverAuthStorage } from "../sdk";
 import type { AuthStorage } from "../session/auth-storage";
 import { getAvailableAuthMethods } from "../web/search/providers/perplexity-auth";
@@ -92,6 +93,14 @@ export default class Token extends Command {
 		// snapshot carries `mcp_oauth:profile:*` rows for every profile, so refuse
 		// to read/refresh another profile's row from this one (mirrors
 		// removeManagedMcpOAuthCredential). Legacy unscoped ids have no profile.
+		if (managedMcpOAuth && isMCPDisabled()) {
+			// `--no-mcp` / `PI_NO_MCP=1` resolves no MCP credential, stored or refreshed.
+			process.stderr.write(
+				`${chalk.red(`MCP credential "${providerName}" was not read: MCP is disabled (--no-mcp or PI_NO_MCP=1).`)}\n`,
+			);
+			process.exitCode = 1;
+			return;
+		}
 		if (managedMcpOAuth) {
 			const scopedProfile = mcpOAuthCredentialProfile(provider);
 			if (scopedProfile !== undefined && scopedProfile !== (getActiveProfile() ?? "default")) {

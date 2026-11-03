@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 )
 
@@ -39,6 +40,7 @@ func startProcess(cmd *exec.Cmd) (*process, io.WriteCloser, error) {
 		return nil, nil, err
 	}
 	cmd.Stdin, cmd.Stdout = stdinR, stdoutW
+	keepMCPOff(cmd)
 	prepareCommand(cmd)
 	if cmd.WaitDelay == 0 {
 		// Bounds Wait when a descendant keeps a Stderr pipe open.
@@ -92,4 +94,26 @@ func (p *process) stop(drained <-chan struct{}) error {
 	_ = p.stdout.Close()
 	<-drained
 	return err
+}
+
+// truthyFlagValues are the values omp reads as true for a boolean environment
+// flag (pi-utils parseFlag).
+var truthyFlagValues = map[string]bool{
+	"1": true, "Y": true, "y": true, "TRUE": true, "true": true, "YES": true, "yes": true, "ON": true, "on": true,
+}
+
+// keepMCPOff keeps MCP off for the server while this host has it off
+// (PI_NO_MCP set to a value omp reads as true): an explicit cmd.Env cannot turn
+// it back on. A cmd without Env inherits the host's value already.
+func keepMCPOff(cmd *exec.Cmd) {
+	if cmd.Env == nil || !truthyFlagValues[os.Getenv("PI_NO_MCP")] {
+		return
+	}
+	env := make([]string, 0, len(cmd.Env)+1)
+	for _, entry := range cmd.Env {
+		if !strings.HasPrefix(entry, "PI_NO_MCP=") {
+			env = append(env, entry)
+		}
+	}
+	cmd.Env = append(env, "PI_NO_MCP=1")
 }
