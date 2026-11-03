@@ -2127,20 +2127,32 @@ export class Agent {
 
 	appendMessage(m: AgentMessage) {
 		this.#state.messages.push(m);
-		this.#recordTakenSteering(m);
-		const live = this.#liveSteered.findIndex(entry => entry.message === m);
+		// The transcript records the occurrence the model read: live steering the provider accepted, then input
+		// put into a request, then any other holder, so an undelivered copy of the same message object keeps
+		// its own state (its promotion, its place in the agent-steering wait).
+		const rank = (delivered: { accepted?: true; committed?: true }): number =>
+			delivered.accepted ? 0 : delivered.committed ? 1 : 2;
+		let live = -1;
+		for (let i = 0; i < this.#liveSteered.length; i++) {
+			const entry = this.#liveSteered[i];
+			if (entry.message !== m) continue;
+			if (live < 0 || rank(entry) < rank(this.#liveSteered[live])) live = i;
+		}
 		if (live >= 0) {
-			this.#liveSteered.splice(live, 1);
+			const [entry] = this.#liveSteered.splice(live, 1);
+			this.#recordTakenSteering(m, entry.unit);
 			// The message landed in the transcript, so it stops counting as
 			// queued pending input; snapshots shrink and listeners must hear it.
 			this.#emitQueueChanged();
 			return;
 		}
+		let recorded: QueuedMessageDelivery | undefined;
 		for (const delivery of this.#queuedMessageDeliveries) {
 			if (delivery.messages[delivery.next] !== m) continue;
-			if (++delivery.next === delivery.messages.length) this.#queuedMessageDeliveries.delete(delivery);
-			break;
+			if (!recorded || rank(delivery) < rank(recorded)) recorded = delivery;
 		}
+		this.#recordTakenSteering(m, recorded?.unit);
+		if (recorded && ++recorded.next === recorded.messages.length) this.#queuedMessageDeliveries.delete(recorded);
 	}
 
 	popMessage(): AgentMessage | undefined {
@@ -2458,21 +2470,23 @@ export class Agent {
 		if (at >= 0) units.splice(at, 1);
 	}
 
-	/** The transcript recorded `m`: a taken steering unit it completes keeps its place for good. */
-	#recordTakenSteering(m: AgentMessage): void {
+	/**
+	 * The transcript recorded `m`, held in `held` when the holder knows its unit: a taken steering unit it
+	 * completes keeps its place for good. Without a known unit, the first unit expecting `m` records it.
+	 */
+	#recordTakenSteering(m: AgentMessage, held?: TakenSteeringUnit): void {
 		const units = this.#takenSteeringUnits;
-		for (let i = 0; i < units.length; i++) {
-			const unit = units[i];
-			if (unit.messages[unit.next] !== m) continue;
-			if (++unit.next < unit.messages.length) return;
-			units.splice(i, 1);
-			const { agentUnit, wait } = unit.allowance;
-			// A recorded agent unit can no longer give its place back, so what was taken before it stops mattering.
-			if (agentUnit && wait) {
-				const at = wait.units.indexOf(unit.allowance);
-				if (at >= 0) wait.units.splice(0, at + 1);
-			}
-			return;
+		const i =
+			held && held.messages[held.next] === m ? units.indexOf(held) : units.findIndex(u => u.messages[u.next] === m);
+		if (i < 0) return;
+		const unit = units[i];
+		if (++unit.next < unit.messages.length) return;
+		units.splice(i, 1);
+		const { agentUnit, wait } = unit.allowance;
+		// A recorded agent unit can no longer give its place back, so what was taken before it stops mattering.
+		if (agentUnit && wait) {
+			const at = wait.units.indexOf(unit.allowance);
+			if (at >= 0) wait.units.splice(0, at + 1);
 		}
 	}
 
