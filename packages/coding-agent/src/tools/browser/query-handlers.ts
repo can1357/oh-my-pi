@@ -303,8 +303,13 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 				else if (label) text += shown ? label : "";
 				else if (tag === "img" || tag === "area" || inputType === "image") {
 					text += shown ? (childElement.getAttribute("alt") ?? "") : "";
-				} else if (inputButton) text += shown ? (control.value ?? "") : "";
-				else if (tag !== "input") walk(childElement, visibility === "any" ? "any" : style.visibility);
+				} else if (inputButton) {
+					// Without a value, a submit or reset button shows the browser's default caption.
+					const caption =
+						normalizeSpace(control.value ?? "") ||
+						(inputType === "submit" ? "Submit" : inputType === "reset" ? "Reset" : "");
+					text += shown ? caption : "";
+				} else if (tag !== "input") walk(childElement, visibility === "any" ? "any" : style.visibility);
 				text += gap;
 			}
 		};
