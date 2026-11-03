@@ -58,7 +58,6 @@ describe("parseArgs — --max-time flag", () => {
 		onTestFinished(() => {
 			process.exitCode = previousExitCode ?? 0;
 		});
-		let observedExitCode: string | number | null | undefined;
 		const captured: string[] = [];
 		vi.spyOn(process.stderr, "write").mockImplementation((chunk: string | Uint8Array) => {
 			captured.push(typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk));
@@ -66,7 +65,7 @@ describe("parseArgs — --max-time flag", () => {
 		});
 
 		await runCli(["--max-time", "5d", "--print", "hello"]);
-		observedExitCode = process.exitCode;
+		const observedExitCode = process.exitCode;
 
 		const stderr = captured.join("");
 		expect(observedExitCode).toBe(2);

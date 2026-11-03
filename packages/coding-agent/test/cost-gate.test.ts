@@ -235,14 +235,13 @@ describe("--warn-cost / --max-cost", () => {
 		onTestFinished(() => {
 			process.exitCode = previousExitCode ?? 0;
 		});
-		let observedExitCode: string | number | null | undefined;
 		const captured: string[] = [];
 		vi.spyOn(process.stderr, "write").mockImplementation((chunk: string | Uint8Array) => {
 			captured.push(typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk));
 			return true;
 		});
 		await runCli(["--warn-cost", "abc", "--print", "hello"]);
-		observedExitCode = process.exitCode;
+		const observedExitCode = process.exitCode;
 		expect(observedExitCode).toBe(2);
 		expect(captured.join("")).toContain("Invalid --warn-cost value");
 	});
