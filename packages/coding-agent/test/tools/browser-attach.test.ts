@@ -684,7 +684,7 @@ describe("pickElectronTarget", () => {
 		async () => {
 			const launched = sharedHeadless;
 			if (!launched || !("browser" in launched)) throw new Error("Expected a shared Puppeteer browser");
-			const endpoint = new URL(launched.browser.wsEndpoint());
+			const endpoint = new URL(launched.wsEndpoint);
 			const session = makeSession();
 			const prelude = createBrowserPrelude(session);
 			const invokeBrowser = (parameters: unknown) =>
@@ -729,7 +729,7 @@ describe("pickElectronTarget", () => {
 			// navigate again and read 2.
 			const launched = sharedHeadless;
 			if (!launched || !("browser" in launched)) throw new Error("Expected a shared Puppeteer browser");
-			const endpoint = new URL(launched.browser.wsEndpoint());
+			const endpoint = new URL(launched.wsEndpoint);
 			const targetPage = (await launched.browser.pages())[0];
 			if (!targetPage) throw new Error("Expected the launched browser to expose a page target");
 
