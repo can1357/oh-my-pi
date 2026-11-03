@@ -250,6 +250,8 @@ export interface CacheWarmingStatus {
 	/** Why nothing is scheduled. */
 	reason?: string;
 	nextWarmAt?: number;
+	/** While refreshing: when the provider sent the refresh. */
+	sentAt?: number;
 	/** When warming gives up while scheduled or refreshing: the run's streaming or idle safety window ends. */
 	stopsAt?: number;
 	/** The pending decision, or the decision that stopped warming. */
@@ -400,10 +402,12 @@ export class CacheWarmer {
 		if (!decision.economicsAvailable && !refreshing) {
 			return { state: "inactive", reason: "cache economics unavailable" };
 		}
+		const sentAt = refreshing ? run.refreshSentAt : undefined;
 		return {
 			// A refresh still queued for a provider slot holds nothing off: the entry can lapse before it goes out.
-			state: refreshing && run.refreshSentAt !== undefined ? "refreshing" : "scheduled",
+			state: sentAt !== undefined ? "refreshing" : "scheduled",
 			nextWarmAt: run.nextWarmAt,
+			...(sentAt !== undefined ? { sentAt } : {}),
 			stopsAt: run.startedAt + (run.phase === "idle" ? MAX_IDLE_WARMING_AGE_MS : MAX_WARMING_AGE_MS),
 			decision,
 			extensionOverride: run.extensionOverride,
@@ -565,6 +569,14 @@ export class CacheWarmer {
 			: "30-minute idle safety limit reached";
 	}
 
+	/** A refresh sent at `sentAt` left the run's entry in the cache: its lifetime restarts then, at the replay's size. */
+	#touch(run: ActiveRun, sentAt: number, usage: Usage): void {
+		run.entry.touchedAt = sentAt;
+		run.entry.promptTokens = promptTokensOf(usage);
+		this.#entry = run.entry;
+		if (this.#pendingEntry === run.entry) this.#pendingEntry = undefined;
+	}
+
 	#clearRun(): void {
 		const run = this.#run;
 		if (!run) return;
@@ -681,17 +693,16 @@ export class CacheWarmer {
 			// refreshes would each pay a full write.
 			if (message.usage.cacheRead <= 0 || message.usage.cacheWrite > 0) {
 				outcome = "miss";
-				run.entry.refreshMissed = true;
+				// What it wrote, though, the next request reads: a new lifetime from the replay's send.
+				if (message.usage.cacheWrite > 0) this.#touch(run, sentAt, message.usage);
+				else run.entry.refreshMissed = true;
 				this.#stop("refresh missed the cache");
 				return;
 			}
 			outcome = "hit";
 			// A hit proves the run's entry exists even before its own response
 			// confirmed it, and restarts its lifetime.
-			run.entry.touchedAt = sentAt;
-			run.entry.promptTokens = promptTokensOf(message.usage);
-			this.#entry = run.entry;
-			if (this.#pendingEntry === run.entry) this.#pendingEntry = undefined;
+			this.#touch(run, sentAt, message.usage);
 			if (!this.#validateRun(run)) return;
 			this.#schedule(run);
 		} finally {

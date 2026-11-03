@@ -28,8 +28,8 @@ export interface PromptCacheStatusInputs {
  * for the tier and the provider does not keep entries forever. A lapsed
  * lifetime is the reason whenever it holds: it is certain, and a change in the
  * next request only matters while the entry would otherwise still be live. A
- * refresh in flight holds expiry off: it was sent before the entry lapsed and
- * moves the touch once it hits.
+ * refresh in flight that the provider sent before the entry lapsed holds expiry
+ * off: it moves the touch once it hits. One sent after it cannot revive it.
  */
 export function promptCacheStatus(
 	entry: ObservedPromptCacheEntry,
@@ -40,9 +40,10 @@ export function promptCacheStatus(
 	if (!persistent && ttlMs === undefined) return undefined;
 	const warming = persistent ? undefined : inputs.warming;
 	let reason: PromptCacheColdReason | undefined;
-	if (ttlMs !== undefined && warming?.state !== "refreshing") {
+	if (ttlMs !== undefined) {
 		const expiresAt = entry.touchedAt + ttlMs;
-		if (inputs.nowMs >= expiresAt) reason = { kind: "expired", at: expiresAt };
+		const heldOff = warming?.state === "refreshing" && warming.sentAt !== undefined && warming.sentAt < expiresAt;
+		if (inputs.nowMs >= expiresAt && !heldOff) reason = { kind: "expired", at: expiresAt };
 	}
 	reason ??= entry.change ?? (entry.refreshMissed ? { kind: "refresh-missed" } : undefined);
 	return {

@@ -585,7 +585,7 @@ describe("cache warmer lifecycle", () => {
 		expect(kept.warmer.cacheEntry).toEqual({ touchedAt: confirmedAt, tier: "short", ttlMs: 300_000 });
 	});
 
-	test("a refresh that hits the cache confirms and extends the entry; a miss does not", async () => {
+	test("a refresh that hits the cache confirms and extends the entry; a rewrite extends it and stops; a miss does not", async () => {
 		const h = harness();
 		start(h);
 		const firstTouch = Date.now();
@@ -593,8 +593,19 @@ describe("cache warmer lifecycle", () => {
 		await advance(SHORT_DELAY_MS);
 		expect(h.warmer.cacheEntry).toEqual({ touchedAt: firstTouch + SHORT_DELAY_MS, tier: "short", ttlMs: 300_000 });
 
+		// A replay that had to write the prefix again left it cached from its send, but warming stops.
+		const rewritten = harness();
+		rewritten.script = { kind: "generate", usage: makeUsage({ cacheWrite: PROMPT_TOKENS }) };
+		start(rewritten);
+		const rewrittenAt = Date.now() + SHORT_DELAY_MS;
+		rewritten.warmer.onResponse(makeMessage(makeUsage({ cacheWrite: 500 })));
+		await advance(SHORT_DELAY_MS);
+		expect(rewritten.warmer.status.reason).toBe("refresh missed the cache");
+		expect(rewritten.warmer.cacheEntry?.touchedAt).toBe(rewrittenAt);
+
+		// One that read nothing and wrote nothing no longer reaches the entry.
 		const missed = harness();
-		missed.script = { kind: "generate", usage: makeUsage({ cacheWrite: PROMPT_TOKENS }) };
+		missed.script = { kind: "generate", usage: makeUsage({}) };
 		start(missed);
 		const missedTouch = Date.now();
 		missed.warmer.onResponse(makeMessage(makeUsage({ cacheWrite: 500 })));
