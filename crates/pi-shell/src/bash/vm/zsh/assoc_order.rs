@@ -1,0 +1,196 @@
+//! zsh's associative-array iteration order: the order of
+//! zsh's parameter hash tables (`hashtable.c`), kept by every zsh-dialect
+//! writer in the stored `Vec` so that `${(k)h}`, `${(kv)h}` and `typeset
+//! -p` list entries as zsh 5.9 does.
+//!
+//! A table starts with 17 buckets (`newparamtable(17, …)`); a key goes to
+//! bucket `hasher(key) % hsize`; a new key is linked at the front of its
+//! bucket's chain, a known one replaced in place; when the count reaches
+//! twice the buckets the table grows fourfold, re-adding every node
+//! bucket by bucket, chain front to back (`expandhashtable`). Iteration
+//! walks buckets in order, each chain front to back (`scanhashtable`).
+//!
+//! The stored `Vec` *is* that iteration order, and the bucket count is
+//! recorded in the variable's base field ([`Attrs::base`]: the table has
+//! `17 · 4^base` buckets), so the table is rebuilt exactly from the
+//! stored value: an entry's bucket is its key's hash, and entries of one
+//! bucket appear in chain order.
+//!
+//! Ported from zsh 5.9 (MIT-style licence, Copyright (c) 1992-1997 Paul
+//! Falstad and the zsh development group).
+
+use bstr::BString;
+
+use crate::bash::{store::Attrs, syntax::zsh::tok::metafy};
+
+/// Initial buckets of a parameter hash table (zsh `newparamtable(17, …)`).
+const INITIAL_BUCKETS: usize = 17;
+
+/// zsh `hasher`: `h += (h << 5) + c` over the (metafied) key.
+fn hasher(key: &[u8]) -> u32 {
+	let mut h: u32 = 0;
+	for &c in key {
+		h = h.wrapping_add((h << 5).wrapping_add(u32::from(c)));
+	}
+	h
+}
+
+/// The bucket of `key` (raw bytes, metafied for hashing as zsh stores
+/// parameter names) in a table of `hsize` buckets.
+fn bucket(key: &[u8], hsize: usize) -> usize {
+	let h = if key
+		.iter()
+		.any(|&c| crate::bash::syntax::zsh::tok::is_meta(c))
+	{
+		hasher(&metafy(key))
+	} else {
+		hasher(key)
+	};
+	(h as usize).checked_rem(hsize).unwrap_or(0)
+}
+
+/// A zsh parameter hash table rebuilt from a stored associative array.
+#[derive(Clone, Debug)]
+pub struct ZHash {
+	/// Chains, front first.
+	buckets: Vec<Vec<(BString, BString)>>,
+	/// Entries (zsh `ct`).
+	count:   usize,
+	/// Growth steps since creation (`hsize = 17 · 4^grown`).
+	grown:   u8,
+}
+
+impl Default for ZHash {
+	fn default() -> Self {
+		Self::new()
+	}
+}
+
+impl ZHash {
+	/// An empty table of 17 buckets (zsh `newparamtable(17, …)`).
+	pub fn new() -> Self {
+		Self { buckets: vec![Vec::new(); INITIAL_BUCKETS], count: 0, grown: 0 }
+	}
+
+	/// The table a stored associative array stands for: `items` in zsh
+	/// iteration order, the bucket count from `attrs` ([`Attrs::base`]).
+	pub fn from_stored(items: &[(BString, BString)], attrs: Attrs) -> Self {
+		let grown = attrs.base().min(8);
+		let hsize = INITIAL_BUCKETS << (2 * u32::from(grown));
+		let mut buckets = vec![Vec::new(); hsize];
+		for (k, v) in items {
+			if let Some(chain) = buckets.get_mut(bucket(k, hsize)) {
+				chain.push((k.clone(), v.clone()));
+			}
+		}
+		Self { buckets, count: items.len(), grown }
+	}
+
+	/// zsh `addhashnode2`: replace the value of a known key in place, link
+	/// a new one at the front of its chain (and grow the table when the
+	/// count reaches twice the buckets).
+	pub fn insert(&mut self, key: BString, value: BString) {
+		let hsize = self.buckets.len();
+		let Some(chain) = self.buckets.get_mut(bucket(&key, hsize)) else {
+			return;
+		};
+		if let Some(e) = chain.iter_mut().find(|e| e.0 == key) {
+			e.1 = value;
+			return;
+		}
+		chain.insert(0, (key, value));
+		self.count += 1;
+		if self.count >= hsize * 2 {
+			self.expand();
+		}
+	}
+
+	/// zsh `expandhashtable`: four times the buckets, every node re-added
+	/// bucket by bucket, chain front to back.
+	fn expand(&mut self) {
+		let hsize = self.buckets.len() * 4;
+		let old = std::mem::replace(&mut self.buckets, vec![Vec::new(); hsize]);
+		for chain in old {
+			for (k, v) in chain {
+				let b = bucket(&k, hsize);
+				if let Some(chain) = self.buckets.get_mut(b) {
+					chain.insert(0, (k, v));
+				}
+			}
+		}
+		self.grown = self.grown.saturating_add(1);
+	}
+
+	/// zsh `removehashnode`: unlink `key`; its value.
+	pub fn remove(&mut self, key: &[u8]) -> Option<BString> {
+		let hsize = self.buckets.len();
+		let chain = self.buckets.get_mut(bucket(key, hsize))?;
+		let at = chain.iter().position(|e| e.0.as_slice() == key)?;
+		self.count -= 1;
+		Some(chain.remove(at).1)
+	}
+
+	/// The value of `key`.
+	pub fn get(&self, key: &[u8]) -> Option<&BString> {
+		let hsize = self.buckets.len();
+		self
+			.buckets
+			.get(bucket(key, hsize))?
+			.iter()
+			.find(|e| e.0.as_slice() == key)
+			.map(|e| &e.1)
+	}
+
+	/// The entries in zsh iteration order, and `attrs` with the bucket
+	/// count recorded: what the store keeps.
+	pub fn into_stored(self, attrs: Attrs) -> (Vec<(BString, BString)>, Attrs) {
+		let mut out = Vec::with_capacity(self.count);
+		for chain in self.buckets {
+			out.extend(chain);
+		}
+		(out, attrs.with_base(self.grown))
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn order(keys: &[&str]) -> Vec<String> {
+		let mut h = ZHash::new();
+		for k in keys {
+			h.insert(BString::from(*k), BString::from("v"));
+		}
+		let (items, _) = h.into_stored(Attrs::NONE);
+		items.into_iter().map(|(k, _)| k.to_string()).collect()
+	}
+
+	#[test]
+	fn keys_iterate_in_zsh_bucket_order() {
+		// zsh -f -c 'typeset -A h; h=(a 1 b 2 c 3 d 4); print -r ${(k)h}'
+		assert_eq!(order(&["a", "b", "c", "d"]), ["a", "b", "c", "d"]);
+		// zsh -f -c 'typeset -A h; h=(one 1 two 2 three 3); print -r ${(k)h}'
+		// (buckets 0, 6, 7 of 17)
+		assert_eq!(order(&["one", "two", "three"]), ["one", "two", "three"]);
+		// zsh -f -c 'typeset -A h; h=(zz 1 y 2); print -r ${(k)h}'
+		// (buckets 0, 2 of 17: insertion order is irrelevant)
+		assert_eq!(order(&["y", "zz"]), ["zz", "y"]);
+	}
+
+	#[test]
+	fn rebuilding_from_the_stored_order_keeps_it() {
+		let keys: Vec<String> = (0..60).map(|i| format!("key{i}")).collect();
+		let mut h = ZHash::new();
+		for k in &keys {
+			h.insert(BString::from(k.as_str()), BString::from("x"));
+		}
+		let (items, attrs) = h.into_stored(Attrs::NONE);
+		assert_eq!(attrs.base(), 1, "60 entries grow 17 buckets once");
+		let mut again = ZHash::from_stored(&items, attrs);
+		again.insert(BString::from("key5"), BString::from("y"));
+		let (items2, _) = again.into_stored(attrs);
+		let k1: Vec<_> = items.iter().map(|e| &e.0).collect();
+		let k2: Vec<_> = items2.iter().map(|e| &e.0).collect();
+		assert_eq!(k1, k2, "replacing a value keeps the order");
+	}
+}

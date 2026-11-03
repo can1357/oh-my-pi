@@ -4,11 +4,10 @@
 
 use std::{borrow::Cow, ffi::OsString, io::Write};
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use uucore::{display::Quotable, line_ending::LineEnding};
 
-use crate::host::{Host, Utility, format_usage, matches_parser, os_bytes, util};
+use crate::host::{Host, Utility, format_usage, matches_parser, os_bytes};
 
 mod options {
 	pub const ZERO: &str = "zero";
@@ -169,11 +168,6 @@ fn app() -> Command {
 				.value_hint(clap::ValueHint::AnyPath)
 				.value_parser(clap::value_parser!(OsString)),
 		)
-}
-
-/// Creates the `dirname` builtin registration.
-pub(crate) fn dirname_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Dirname, SE>()
 }
 
 #[cfg(test)]

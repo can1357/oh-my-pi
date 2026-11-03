@@ -5,6 +5,21 @@
 ### Fixed
 
 - A schema of a specific type is now always assignable to the schema of a supertype (`Type<{ id: number }>` to `Type<unknown>`, so to `TSchema` and through `Static`). Before, whether TypeScript accepted it depended on the order it met the comparisons, so the same code type-checked in one program and failed in another. `keyof()` now reads its keys from the schema it is called on; called detached (`bind`, `call`) it gives any property key instead of the exact keys ([#17898](https://github.com/can1357/oh-my-pi/pull/17898) by [@sjawhar](https://github.com/sjawhar))
+### Breaking Changes
+
+- `fromJsonSchema` returns an opaque validator for the whole document: object-shape methods (`.pick()`, `.props`, …) no longer apply to imported schemas, `format` is an annotation unless `formats` supplies a check, and malformed or unresolvable `$ref`s throw `invalid $ref`/`unresolved $ref`
+
+### Added
+
+- Added `fromJsonSchema(schema, { draft, schemas, formats })`, which passes every draft 2020-12 and draft 7 core test of the JSON-Schema-Test-Suite, including `$dynamicRef`, `unevaluatedProperties`/`unevaluatedItems`, `$id`/`$anchor` and remote references, and meta-schema vocabularies
+
+### Changed
+
+- Sped up `fromJsonSchema` validation several-fold: hot schemas run generated code with tag-dispatched unions and compiled patterns, and `$ref`-heavy schemas no longer fall back to the interpreter
+
+### Fixed
+
+- Fixed schemas throwing `EvalError` on first use where code generation from strings is forbidden; they now validate through the interpreter
 
 ## [18.13.3] - 2026-10-28
 
