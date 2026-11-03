@@ -29,7 +29,7 @@ function update(message: InteractionUpdate["message"]): Buffer {
 	return out;
 }
 
-function startRunSseServer() {
+function startRunSseServer(options: { runSseStatus?: number } = {}) {
 	const streams = new Map<string, PromiseWithResolvers<ReadableStreamDefaultController<Uint8Array>>>();
 	const streamFor = (requestId: string) => {
 		let entry = streams.get(requestId);
@@ -48,6 +48,7 @@ function startRunSseServer() {
 			const body = new Uint8Array(await request.arrayBuffer());
 			if (url.pathname === "/agent.v1.AgentService/RunSSE") {
 				runSseOpens++;
+				if (options.runSseStatus !== undefined) return new Response(null, { status: options.runSseStatus });
 				const { requestId } = fromBinary(BidiRequestIdSchema, body.subarray(5));
 				return new Response(
 					new ReadableStream<Uint8Array>({
@@ -160,8 +161,9 @@ afterEach(() => {
 it(
 	"falls back to RunSSE behind a proxy that drops HTTP/2, and starts the next ten minutes of turns there",
 	async () => {
-		let now = Date.UTC(2026, 0, 1);
-		vi.spyOn(Date, "now").mockImplementation(() => now);
+		const realNow = performance.now.bind(performance);
+		let skew = 0;
+		vi.spyOn(performance, "now").mockImplementation(() => realNow() + skew);
 		const runSse = startRunSseServer();
 		const proxy = await interceptHttp2();
 		try {
@@ -179,10 +181,38 @@ it(
 			expect((await turn()).stopReason).toBe("stop");
 			expect(proxy.connections).toBe(dropped);
 
-			now += 10 * 60_000;
+			skew += 10 * 60_000 + 1;
 			expect((await turn()).stopReason).toBe("stop");
 			expect(proxy.connections).toBeGreaterThan(dropped);
 			expect(runSse.runSseOpens).toBe(3);
+		} finally {
+			proxy.close();
+			runSse.server.stop(true);
+		}
+	},
+	SETTLE_TIMEOUT_MS,
+);
+
+it(
+	"keeps trying HTTP/2 on the next turn when the RunSSE fallback after a TLS reset fails",
+	async () => {
+		const runSse = startRunSseServer({ runSseStatus: 403 });
+		const proxy = await interceptHttp2();
+		try {
+			const model = makeModel(runSse.server.url.toString());
+			const turn = () =>
+				streamCursor(model, context, {
+					apiKey: "test-token",
+					providerRetryWait: async () => {},
+				}).result();
+
+			expect((await turn()).stopReason).toBe("error");
+			const dropped = proxy.connections;
+			expect(dropped).toBeGreaterThan(0);
+			expect(runSse.runSseOpens).toBeGreaterThan(0);
+
+			expect((await turn()).stopReason).toBe("error");
+			expect(proxy.connections).toBeGreaterThan(dropped);
 		} finally {
 			proxy.close();
 			runSse.server.stop(true);
