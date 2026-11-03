@@ -571,15 +571,15 @@ impl AsyncUtility for FdCli {
 	const USAGE_ERROR: u8 = 2;
 	/// fd writes standard output through an 8 KiB `BufWriter`.
 	const STDOUT_BUFFER: usize = 8 * 1024;
+	/// fd, a Rust program, ignores SIGPIPE: it ends with status 1 once its
+	/// output finds the reader gone (its final flush fails), and an error
+	/// message it cannot write panics `eprintln!` (status 101); its argument
+	/// parser ignores a failed usage message; it never checks its streams at
+	/// exit.
+	const IGNORES_SIGPIPE: bool = true;
+	const STDERR_EXIT: Option<i32> = Some(101);
 
 	async fn run(mut self, host: &mut Host) -> i32 {
-		// fd, a Rust program, ignores SIGPIPE: it ends with status 1 once its
-		// output finds the reader gone (its final flush fails), and an error
-		// message it cannot write panics `eprintln!` (status 101); it never
-		// checks its streams at exit.
-		host.ignore_sigpipe();
-		host.checks_own_output();
-		host.exit_at_broken_stderr(101);
 		let quiet = self.quiet;
 		let base_dir = self
 			.base_directory

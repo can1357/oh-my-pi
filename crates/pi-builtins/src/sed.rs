@@ -7782,16 +7782,21 @@ impl NamedWriter {
 	/// Write a line to the file with a newline, returning descriptive errors.
 	///
 	/// `output` is sed's current output: stdout, or the temporary file under
-	/// `-i`, in which case `/dev/stdout` still means the real stdout.
+	/// `-i`, in which case `/dev/stdout` still means the real stdout. Under
+	/// `-u` (`unbuffered`) a file is flushed after each line, as GNU sed's
+	/// `flush_output` does.
 	pub fn write_line(
 		&mut self,
 		line: &str,
 		output: &mut OutputBuffer,
 		in_place: bool,
+		unbuffered: bool,
 		host: &mut Host,
 	) -> SedResult<()> {
 		let result = match &mut self.target {
-			Target::File(writer) => writeln!(writer, "{line}"),
+			Target::File(writer) => {
+				writeln!(writer, "{line}").and_then(|()| if unbuffered { writer.flush() } else { Ok(()) })
+			},
 			Target::Stdout if in_place => writeln!(host.stdout, "{line}"),
 			Target::Stdout => output.write_str(format!("{line}\n")),
 			Target::Stderr => writeln!(host.stderr, "{line}"),
@@ -8240,7 +8245,7 @@ fn substitute(
 
 		// Write to file if needed.
 		if let Some(writer) = &sub.write_file {
-			writer.borrow_mut().write_line(pattern.as_str()?, output, context.in_place, host)?;
+			writer.borrow_mut().write_line(pattern.as_str()?, output, context.in_place, context.unbuffered, host)?;
 		}
 		context.substitution_made = true;
 	}
@@ -8575,7 +8580,7 @@ fn process_file(
 				'w' => {
 					// Append the pattern space to the specified file.
 					let writer = extract_variant!(command, NamedWriter);
-					writer.borrow_mut().write_line(pattern.as_str()?, output, context.in_place, host)?;
+					writer.borrow_mut().write_line(pattern.as_str()?, output, context.in_place, context.unbuffered, host)?;
 				},
 				'x' => {
 					// Exchange the contents of the pattern and hold spaces.

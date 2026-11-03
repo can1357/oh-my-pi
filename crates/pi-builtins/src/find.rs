@@ -1607,9 +1607,9 @@ pub mod matchers {
 		use std::io::Write;
 
 		use chrono::DateTime;
-		use pi_vfs::{File, Metadata};
+		use pi_vfs::Metadata;
 
-		use super::{Matcher, MatcherIO, WalkEntry, write_output};
+		use super::{Matcher, MatcherIO, OutputFile, WalkEntry, write_output};
 
 		/// Formats mode bits as `-ls` does: directory/regular/other type marker
 		/// followed by the nine rwx permission bits.
@@ -1710,11 +1710,11 @@ pub mod matchers {
 		}
 
 		pub struct Ls {
-			output_file: Option<File>,
+			output_file: Option<OutputFile>,
 		}
 
 		impl Ls {
-			pub fn new(output_file: Option<File>) -> Self {
+			pub fn new(output_file: Option<OutputFile>) -> Self {
 				Self { output_file }
 			}
 
@@ -2037,9 +2037,7 @@ pub mod matchers {
 
 		use std::io::Write;
 
-		use pi_vfs::File;
-
-		use super::{Matcher, MatcherIO, WalkEntry, write_output};
+		use super::{Matcher, MatcherIO, OutputFile, WalkEntry, write_output};
 
 		pub enum PrintDelimiter {
 			Newline,
@@ -2058,11 +2056,11 @@ pub mod matchers {
 		/// This matcher just prints the name of the file to stdout.
 		pub struct Printer {
 			delimiter:   PrintDelimiter,
-			output_file: Option<File>,
+			output_file: Option<OutputFile>,
 		}
 
 		impl Printer {
-			pub fn new(delimiter: PrintDelimiter, output_file: Option<File>) -> Self {
+			pub fn new(delimiter: PrintDelimiter, output_file: Option<OutputFile>) -> Self {
 				Self { delimiter, output_file }
 			}
 
@@ -2114,9 +2112,9 @@ pub mod matchers {
 		};
 
 		use chrono::{DateTime, Local, format::StrftimeItems};
-		use pi_vfs::{File, Metadata};
+		use pi_vfs::Metadata;
 
-		use super::{FileType, Matcher, MatcherIO, WalkEntry, WalkError, fs, write_output};
+		use super::{FileType, Matcher, MatcherIO, OutputFile, WalkEntry, WalkError, fs, write_output};
 
 		/// A directive failure that can cross `.await` points.
 		type DynError = Box<dyn Error + Send + Sync>;
@@ -2685,7 +2683,7 @@ pub mod matchers {
 		/// find's printf syntax.
 		pub struct Printf {
 			format:      FormatString,
-			output_file: Option<File>,
+			output_file: Option<OutputFile>,
 			fs_cache:    fs::Cache,
 		}
 
@@ -2704,7 +2702,7 @@ pub mod matchers {
 		}
 
 		impl Printf {
-			pub fn new(format: &str, output_file: Option<File>) -> Result<Self, Box<dyn Error>> {
+			pub fn new(format: &str, output_file: Option<OutputFile>) -> Result<Self, Box<dyn Error>> {
 				Ok(Self { format: FormatString::parse(format)?, output_file, fs_cache: fs::Cache::default() })
 			}
 
@@ -3781,7 +3779,7 @@ pub mod matchers {
 		io::{self, Write},
 		path::Path,
 		str::FromStr,
-		sync::PoisonError,
+		sync::{Arc, Mutex, PoisonError},
 		time::SystemTime,
 	};
 
@@ -4031,22 +4029,73 @@ pub mod matchers {
 		}
 	}
 
+	/// stdio's buffer for an output file: one block.
+	const OUTPUT_BLOCK: usize = 4096;
+
+	/// An `-fprint`/`-fprintf`/`-fprint0`/`-fls` output file, buffered as GNU
+	/// find's stdio buffers it: written once a write overflows its block, at
+	/// `\c`, and when the search ends (see [`OutputFile::close`]), so a pipe
+	/// with no reader there raises SIGPIPE where it does for find.
+	#[derive(Clone)]
+	pub struct OutputFile(Arc<OutputFileInner>);
+
+	struct OutputFileInner {
+		file:   File,
+		buffer: Mutex<Vec<u8>>,
+	}
+
+	impl OutputFile {
+		pub fn new(file: File) -> Self {
+			Self(Arc::new(OutputFileInner { file, buffer: Mutex::new(Vec::new()) }))
+		}
+
+		/// Buffers `bytes`; a write that overflows the block writes the block
+		/// and then the whole blocks of the rest, keeping the remainder, as
+		/// glibc does; `flush` writes everything.
+		async fn write(&self, bytes: &[u8], flush: bool) -> io::Result<()> {
+			let out: Vec<u8> = {
+				let mut buffer = self.0.buffer.lock().unwrap_or_else(PoisonError::into_inner);
+				buffer.extend_from_slice(bytes);
+				let total = buffer.len();
+				let len = if flush {
+					total
+				} else if total > OUTPUT_BLOCK {
+					total - (total - OUTPUT_BLOCK) % OUTPUT_BLOCK
+				} else {
+					0
+				};
+				buffer.drain(..len).collect()
+			};
+			if !out.is_empty() {
+				self.0.file.write_all_async(&out).await?;
+			}
+			if flush {
+				self.0.file.flush_async().await?;
+			}
+			Ok(())
+		}
+
+		/// Writes out the buffer and closes the file, once no other handle
+		/// shares it.
+		pub async fn close(self) -> io::Result<()> {
+			self.write(&[], true).await?;
+			match Arc::try_unwrap(self.0) {
+				Ok(inner) => inner.file.close_async().await,
+				Err(_) => Ok(()),
+			}
+		}
+	}
+
 	/// Writes `bytes` to `file`, or to find's shared stdout when there is no file;
 	/// `flush` flushes the destination afterwards.
 	async fn write_output(
 		deps: &dyn Dependencies,
-		file: Option<&File>,
+		file: Option<&OutputFile>,
 		bytes: &[u8],
 		flush: bool,
 	) -> io::Result<()> {
 		match file {
-			Some(file) => {
-				file.write_all_async(bytes).await?;
-				if flush {
-					file.flush_async().await?;
-				}
-				Ok(())
-			},
+			Some(file) => file.write(bytes, flush).await,
 			None => {
 				let mut out = deps.get_output().lock().unwrap_or_else(PoisonError::into_inner);
 				out.write_all(bytes)?;
@@ -4270,9 +4319,9 @@ pub mod matchers {
 		path: &str,
 		config: &mut Config,
 		host: &Host,
-	) -> Result<File, Box<dyn Error>> {
-		let file = host.vfs().create(host.resolve(path)).await?;
-		config.output_files.push((path.to_string(), file.try_clone()?));
+	) -> Result<OutputFile, Box<dyn Error>> {
+		let file = OutputFile::new(host.vfs().create(host.resolve(path)).await?);
+		config.output_files.push((path.to_string(), file.clone()));
 		Ok(file)
 	}
 
@@ -4873,7 +4922,7 @@ pub struct Config {
 	new_paths:         Option<Vec<String>>,
 	files0_argument:   Option<String>,
 	/// `-fprint`/`-fprintf`/`-fprint0`/`-fls` outputs, closed after the search.
-	output_files:      Vec<(String, pi_vfs::File)>,
+	output_files:      Vec<(String, matchers::OutputFile)>,
 }
 
 impl Default for Config {
@@ -5188,7 +5237,7 @@ async fn do_find(
 	// closing the kept clone closes the file and reports write-back errors.
 	drop(matcher);
 	for (name, file) in config.output_files.drain(..) {
-		if let Err(error) = file.close_async().await {
+		if let Err(error) = file.close().await {
 			let _ = writeln!(host.stderr, "find: {name}: {error}");
 			let _ = host.flush_output().await;
 			ret = 1;

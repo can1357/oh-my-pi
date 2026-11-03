@@ -35,7 +35,7 @@ impl Compressor {
 		stdin: impl Into<Stdio>,
 		stdout: impl Into<Stdio>,
 		decompress: bool,
-	) -> SortResult<(Child, thread::JoinHandle<()>)> {
+	) -> SortResult<(Child, Option<thread::JoinHandle<()>>)> {
 		let mut command = self.env.command(&self.prog)
 			.map_err(|error| SortError::CompressProgExecutionFailed {
 				prog: self.prog.clone(),
@@ -51,9 +51,9 @@ impl Compressor {
 				prog:  self.prog.clone(),
 				error: err,
 			})?;
-		// Piped by `ChildEnv::command`, so this is always present.
-		let stderr = child.stderr.take().expect("compressor stderr is piped");
-		let forwarder = self.env.forward_stderr(stderr);
+		// Piped by `ChildEnv::command` only when the command's standard error
+		// is not a descriptor the child can write itself.
+		let forwarder = child.stderr.take().map(|stderr| self.env.forward_stderr(stderr));
 		Ok((child, forwarder))
 	}
 }
@@ -2707,7 +2707,7 @@ pub struct WriteableCompressedTmpFile {
 	child_stdin: BufWriter<ChildStdin>,
 	/// Drains the compressor's stderr onto the command's; joined once the child
 	/// has exited so its diagnostics land before we report a result.
-	forwarder:   thread::JoinHandle<()>,
+	forwarder:   Option<thread::JoinHandle<()>>,
 	/// Copies compressor output into a temporary file without a host
 	/// descriptor; `None` when the compressor writes the file directly.
 	pump:        Option<Pump>,
@@ -2723,7 +2723,7 @@ pub struct CompressedTmpMergeInput {
 	compress:     Compressor,
 	child:        Child,
 	child_stdout: ChildStdout,
-	forwarder:    thread::JoinHandle<()>,
+	forwarder:    Option<thread::JoinHandle<()>>,
 	/// Feeds a temporary file without a host descriptor to the decompressor;
 	/// `None` when the decompressor reads the file directly.
 	pump:         Option<Pump>,
@@ -2766,7 +2766,9 @@ impl WriteableTmpFile for WriteableCompressedTmpFile {
 	fn finished_writing(self) -> SortResult<Self::Closed> {
 		drop(self.child_stdin);
 		let result = check_child_success(self.child, &self.compress.prog);
-		let _ = self.forwarder.join();
+		if let Some(forwarder) = self.forwarder {
+			let _ = forwarder.join();
+		}
 		let copied = self.pump.map_or(Ok(()), Pump::join);
 		result?;
 		copied.map_err(|error| SortError::WriteFailed {
@@ -2833,7 +2835,9 @@ impl MergeInput for CompressedTmpMergeInput {
 		#[allow(clippy::drop_non_drop)]
 		drop(self.child_stdout);
 		let result = check_child_success(self.child, &self.compress.prog);
-		let _ = self.forwarder.join();
+		if let Some(forwarder) = self.forwarder {
+			let _ = forwarder.join();
+		}
 		let copied = self.pump.map_or(Ok(()), Pump::join);
 		result?;
 		copied.map_err(|error| SortError::ReadFailed { path: self.path.clone(), error })?;

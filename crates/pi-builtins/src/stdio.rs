@@ -264,10 +264,12 @@ impl Shared {
 
 	/// Appends the bytes of a write; one the utility made to standard output
 	/// is `counted` toward its output buffer (see `OutputGate::wrote`). A
-	/// counted write that fills the program's buffer is owed (see
-	/// [`AsyncOut::owes_delivery`]): the program writes its buffer then.
+	/// counted write that overflows the program's buffer is the program's own
+	/// write to the descriptor, owed at once (see
+	/// [`AsyncOut::owes_delivery`]).
 	fn append(&self, buf: &[u8], counted: bool) -> io::Result<()> {
 		if counted && self.gate.wrote(buf.len()) {
+			self.at_once.store(true, Ordering::Release);
 			self.owed.store(true, Ordering::Release);
 		}
 		if self.gate.discards() {
@@ -338,18 +340,18 @@ impl Shared {
 
 	/// Notes how a delivery ended, returning its result as the utility sees
 	/// it. One the program made `at_once` (an unbuffered standard-error write,
-	/// an explicit flush) failed at once, killing the utility even on a
-	/// destination its other stream shares (`2>&1`). A standard-output
-	/// delivery of a batch the utility wrote after `before` bytes fails where
-	/// its buffer would be written (a full buffer); short of that SIGPIPE's
-	/// death is deferred and the delivery succeeds, as the program's write
-	/// into its buffer does.
-	fn delivered(&self, result: io::Result<()>, at_once: bool, before: usize) -> io::Result<()> {
+	/// an overflowing standard-output buffer, an explicit flush) failed at
+	/// once, killing the utility even on a destination its other stream
+	/// shares (`2>&1`). Any other standard-output delivery only marks the
+	/// pipe broken: SIGPIPE's death waits for the program's next write to the
+	/// descriptor, and the delivery succeeds, as the program's write into its
+	/// buffer does.
+	fn delivered(&self, result: io::Result<()>, at_once: bool) -> io::Result<()> {
 		if let Err(error) = &result {
 			if at_once {
 				self.gate.record_unbuffered(error);
 			} else {
-				self.gate.record_since(error, before);
+				self.gate.record(error);
 			}
 			if self.gate.discards() {
 				return Ok(());
@@ -362,7 +364,7 @@ impl Shared {
 		let _order = order.lock().await;
 		self.owed.store(false, Ordering::Release);
 		let at_once = self.at_once.swap(false, Ordering::AcqRel);
-		let (bytes, before) = self.take_pending();
+		let bytes = std::mem::take(&mut *self.pending.lock());
 		let Some(file) = self.handle.as_vfs() else {
 			return Ok(());
 		};
@@ -376,14 +378,14 @@ impl Shared {
 		}
 		.await;
 		self.recycle(bytes);
-		self.delivered(result, at_once, before)
+		self.delivered(result, at_once)
 	}
 
 	async fn drain_native(&self, native: &tokio::sync::Mutex<Native>) -> io::Result<()> {
 		let mut native = native.lock().await;
 		self.owed.store(false, Ordering::Release);
 		let at_once = self.at_once.swap(false, Ordering::AcqRel);
-		let (bytes, before) = self.take_pending();
+		let bytes = std::mem::take(&mut *self.pending.lock());
 		if bytes.is_empty() {
 			return Ok(());
 		}
@@ -396,15 +398,7 @@ impl Shared {
 		}
 		let (bytes, result) = native.write_all(bytes).await;
 		self.recycle(bytes);
-		self.delivered(result, at_once, before)
-	}
-
-	/// Takes the pending bytes, and how many bytes the utility had written to
-	/// standard output before them.
-	fn take_pending(&self) -> (Vec<u8>, usize) {
-		let bytes = std::mem::take(&mut *self.pending.lock());
-		let before = self.gate.stdout_written().saturating_sub(bytes.len());
-		(bytes, before)
+		self.delivered(result, at_once)
 	}
 }
 
@@ -436,16 +430,16 @@ impl Write for AsyncOut {
 
 impl AsyncOut {
 	/// The program's explicit flush (`find -printf '\c'`, fd's final flush):
-	/// its buffer is written at once, so once its output finds the pipe's
-	/// reader gone, SIGPIPE kills the utility there, or, SIGPIPE ignored, the
-	/// flush and every later write fail (see [`AsyncOut::fails`]).
+	/// its buffer is written to the descriptor now and starts empty again, so
+	/// once its output finds the pipe's reader gone, SIGPIPE kills the
+	/// utility there, or, SIGPIPE ignored, the flush and every later write
+	/// fail (see [`AsyncOut::fails`]). Pending bytes are delivered at once.
 	pub(crate) fn flush_now(&self) {
-		if self.shared.pending.lock().is_empty() {
-			self.shared.gate.flushed();
-			return;
+		self.shared.gate.flushed();
+		if !self.shared.pending.lock().is_empty() {
+			self.shared.at_once.store(true, Ordering::Release);
+			self.shared.owed.store(true, Ordering::Release);
 		}
-		self.shared.at_once.store(true, Ordering::Release);
-		self.shared.owed.store(true, Ordering::Release);
 	}
 
 	/// Whether writes to this stream fail (see `OutputGate::fails`).

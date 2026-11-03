@@ -914,6 +914,16 @@ async fn run_on_provider_streams(
 ) -> (u8, tempfile::TempDir) {
 	use brush_core::openfiles::OpenFiles;
 
+	run_on_provider_fds(script, vec![(OpenFiles::STDOUT_FD, stdout), (OpenFiles::STDERR_FD, stderr)])
+		.await
+}
+
+/// Runs `script` in a fresh directory with the descriptors `fds` set;
+/// returns the status and the directory.
+async fn run_on_provider_fds(
+	script: &str,
+	fds: Vec<(brush_core::ShellFd, brush_core::openfiles::OpenFile)>,
+) -> (u8, tempfile::TempDir) {
 	let dir = tempfile::tempdir().expect("tempdir");
 	let mut shell = brush_core::Shell::builder()
 		.profile(brush_core::ProfileLoadBehavior::Skip)
@@ -926,14 +936,69 @@ async fn run_on_provider_streams(
 		shell.register_builtin(name, builtin);
 	}
 	let mut params = shell.default_exec_params();
-	params.set_fd(OpenFiles::STDOUT_FD, stdout);
-	params.set_fd(OpenFiles::STDERR_FD, stderr);
+	for (fd, file) in fds {
+		params.set_fd(fd, file);
+	}
 	let source = brush_core::SourceInfo::from("broken-pipe-provider");
 	let result = shell
 		.run_string(format!("cd '{}' && {script}", dir.path().display()), &source, &params)
 		.await
 		.expect("script");
 	(u8::from(result.exit_code), dir)
+}
+
+/// Runs `tee /dev/fd/3 copy` with descriptor 3 a provider-backed file over a
+/// pipe with no reader; returns the status and the bytes `copy` got.
+async fn tee_to_a_provider_pipe() -> (u8, usize) {
+	use brush_core::openfiles::{OpenFile, OpenFiles};
+
+	let (code, dir) =
+		run_on_provider_fds("printf abc > input && tee /dev/fd/3 copy < input > /dev/null", vec![
+			(OpenFiles::STDOUT_FD, OpenFile::from(tempfile::tempfile().expect("stdout"))),
+			(OpenFiles::STDERR_FD, OpenFile::from(tempfile::tempfile().expect("stderr"))),
+			(3, OpenFile::from(dead_provider_pipe())),
+		])
+		.await;
+	let copy = std::fs::read(dir.path().join("copy")).map_or(0, |bytes| bytes.len());
+	(code, copy)
+}
+
+/// A file operand that is a provider-backed descriptor over a pipe with no
+/// reader raises SIGPIPE as a native one does: `tee` dies before it writes
+/// its other files. Measured against Bash 5.2.21 on a plain pipe: status
+/// 141, `copy` empty. Regression: the mounted descriptor's file took no
+/// write hook, and `tee` wrote `copy` and ended with 0.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_provider_file_operand_with_no_reader_raises_sigpipe() {
+	assert_eq!(tee_to_a_provider_pipe().await, (141, 0));
+}
+
+/// The same on a current-thread runtime.
+#[tokio::test(flavor = "current_thread")]
+async fn a_provider_file_operand_with_no_reader_raises_sigpipe_on_a_current_thread_runtime() {
+	assert_eq!(tee_to_a_provider_pipe().await, (141, 0));
+}
+
+/// An async utility that starts a command with a provider-backed standard
+/// output that works, on a current-thread runtime, runs it and goes on:
+/// `find victim -exec true \; -delete` deletes `victim`. Regression: the
+/// command's launch flushed the provider synchronously, which panics on a
+/// current-thread runtime, and `find` failed with an internal error.
+#[tokio::test(flavor = "current_thread")]
+async fn an_async_utility_starts_a_command_with_a_provider_stdout_on_a_current_thread_runtime() {
+	use brush_core::openfiles::OpenFile;
+
+	let log = tempfile::NamedTempFile::new().expect("log");
+	let file = std::fs::OpenOptions::new()
+		.write(true)
+		.open(log.path())
+		.expect("open log");
+	let stdout = OpenFile::from(pi_vfs::File::from_handle(ProviderFile(pi_vfs::File::from(file))));
+	let stderr = OpenFile::from(tempfile::tempfile().expect("stderr"));
+	let (code, dir) =
+		run_on_provider_streams(r": > victim && find victim -exec true \; -delete", stdout, stderr)
+			.await;
+	assert_eq!((code, dir.path().join("victim").exists()), (0, false));
 }
 
 /// Runs `find victim -printf 'x\c' -delete` with standard output a
@@ -1539,4 +1604,190 @@ async fn rg_and_fd_end_at_a_dead_pipe_as_ripgrep_and_fd_do() {
 	let per_disposition =
 		"0 0 1 0 0 0 0 0 0 0 0 0 0 0 0 0 1 0 0 0 2 0 2 0 1 0 1 0 1 0 fd-message=101\n";
 	assert_eq!(output, per_disposition.repeat(2));
+}
+
+/// A buffered utility writes its output buffer to the descriptor when a
+/// write overflows it, as glibc does (one that only fills it writes nothing),
+/// and its flush empties it: SIGPIPE kills it at that write, before its next
+/// action. Measured against Bash 5.2.21. Regression: `find` died once its
+/// output reached a block boundary, also counting bytes an earlier flush had
+/// already written, and skipped `-delete`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_utility_writes_its_buffer_when_a_write_overflows_it() {
+	let (exit_code, output) = run_in_tempdir(&[
+		r#"made() { [ -e "$1" ] && echo yes || echo no; }"#,
+		r#": > v1; ( fill; find v1 -printf '%4096s' -delete >&3; echo "find-4096=$? $(made v1)" ) 3> >(true)"#,
+		r#": > v2; ( fill; find v2 -printf '%4097s' -delete >&3; echo "find-4097=$? $(made v2)" ) 3> >(true)"#,
+		r#": > v3; ( fill; find v3 -printf '%4095s' -delete >&3; echo "find-4095=$? $(made v3)" ) 3> >(true)"#,
+		r#": > v4; ( fill; find v4 -printf '%8192s' -delete >&3; echo "find-8192=$? $(made v4)" ) 3> >(true)"#,
+		r#"mkdir fl; : > fl/a; : > fl/b"#,
+		r#"( find fl/a fl/b -name a -printf 'abc\c' -exec sh -c 'while [ ! -e gone ]; do sleep 0.05; done' \; -o -name b -printf '%4093s' -delete >&3; echo "find-flush-then=$? $(made fl/b)" ) 3> >(head -c 3 > /dev/null; touch gone)"#,
+	])
+	.await;
+	assert_eq!(exit_code, Some(0), "{output}");
+	assert_eq!(
+		output,
+		concat!(
+			"find-4096=141 no\n",
+			"find-4097=141 yes\n",
+			"find-4095=141 no\n",
+			"find-8192=141 yes\n",
+			"find-flush-then=141 no\n",
+		)
+	);
+}
+
+/// `find`'s output files are buffered as GNU find's stdio buffers them, so
+/// one that is a pipe with no reader kills `find` when it writes its buffer
+/// (here at exit), after its other actions. Measured against Bash 5.2.21.
+/// Regression: `find` wrote each entry at once and died before `-delete`.
+#[tokio::test(flavor = "multi_thread")]
+async fn find_output_files_are_buffered() {
+	let (exit_code, output) = run_in_tempdir(&[
+		r#"made() { [ -e "$1" ] && echo yes || echo no; }"#,
+		r#"for act in "-fprint /dev/fd/3" "-fprint0 /dev/fd/3" "-fprintf /dev/fd/3 %p" "-fls /dev/fd/3" "-fprintf /dev/fd/3 x\\c"; do"#,
+		r#"	: > victim; ( fill; eval "find victim $act -delete"; echo "find $act = $? $(made victim)" ) 3> >(true) 2>/dev/null"#,
+		r#"done"#,
+	])
+	.await;
+	assert_eq!(exit_code, Some(0), "{output}");
+	assert_eq!(
+		output,
+		concat!(
+			"find -fprint /dev/fd/3 = 141 no\n",
+			"find -fprint0 /dev/fd/3 = 141 no\n",
+			"find -fprintf /dev/fd/3 %p = 141 no\n",
+			"find -fls /dev/fd/3 = 141 no\n",
+			"find -fprintf /dev/fd/3 x\\c = 141 no\n",
+		)
+	);
+}
+
+/// `sed -u` writes its `w` files unbuffered too, as GNU sed flushes each
+/// output then, so a `w` file keeps the lines written before a later write
+/// killed `sed`, and a `w` file with no reader fails `sed` at once when
+/// SIGPIPE is ignored. Measured against Bash 5.2.21. Regression: `-u` left
+/// the `w` files block-buffered.
+#[tokio::test(flavor = "multi_thread")]
+async fn sed_u_writes_w_files_unbuffered() {
+	let (exit_code, output) = run_in_tempdir(&[
+		r#"printf 'a\nb\nc\n' > input"#,
+		r#"rm -f copy; ( fill; sed -un $'w copy\np' input >&3; echo "sed-u=$? bytes=$(wc -c < copy)" ) 3> >(true) 2>/dev/null"#,
+		r#"rm -f copy; ( fill; sed -n $'w copy\np' input >&3; echo "sed=$? bytes=$(wc -c < copy)" ) 3> >(true) 2>/dev/null"#,
+		r#"rm -f copy; ( trap '' PIPE; fill; sed -un $'w /dev/fd/3\nw copy' input; echo "sed-u-ignored-w=$? bytes=$(wc -c < copy)" ) 3> >(true) 2>/dev/null"#,
+	])
+	.await;
+	assert_eq!(exit_code, Some(0), "{output}");
+	assert_eq!(output, "sed-u=141 bytes=2\nsed=141 bytes=6\nsed-u-ignored-w=4 bytes=0\n");
+}
+
+/// `rg` and `fd` ignore SIGPIPE from their start, also for their help,
+/// version and usage messages: help and version end with 0 at a dead
+/// standard output; a usage error at a dead standard error ends `rg` with 0
+/// (its message macro) and `fd` with 2 (its argument parser ignores the
+/// failed write). Measured against ripgrep 15.2.0 and fd 10.5.0 under Bash
+/// 5.2.21. Regression: they died of SIGPIPE (141) or reported a write error.
+#[tokio::test(flavor = "multi_thread")]
+async fn rg_and_fd_usage_messages_ignore_sigpipe() {
+	let (exit_code, output) = run_in_tempdir(&[
+		r#"for disp in default ignored; do"#,
+		r#"	for cmd in "rg --version" "rg --help" "fd --version" "fd --help"; do"#,
+		r#"		( [ "$disp" = ignored ] && trap '' PIPE; fill; eval "$cmd" >&3 2>/dev/null; printf '%s ' "$?" ) 3> >(true) 2>/dev/null"#,
+		r#"	done"#,
+		r#"	for cmd in "rg --badoption x" "fd --badoption"; do"#,
+		r#"		( [ "$disp" = ignored ] && trap '' PIPE; fill; eval "$cmd" 2>&3 >/dev/null; printf '%s ' "$?" ) 3> >(true) 2>/dev/null"#,
+		r#"	done; echo"#,
+		r#"done"#,
+	])
+	.await;
+	assert_eq!(exit_code, Some(0), "{output}");
+	assert_eq!(output, "0 0 0 0 0 2 \n0 0 0 0 0 2 \n");
+}
+
+/// A process writes its standard error unbuffered, also to a regular file,
+/// so a diagnostic written before standard output's death reaches the file.
+/// Measured against Bash 5.2.21: `err` holds the 40-byte diagnostic.
+/// Regression: the diagnostic stayed in a block buffer the death discarded.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_diagnostic_to_a_file_survives_a_later_death() {
+	let (exit_code, output) = run_in_tempdir(&[
+		r#"printf 'in\n' > in1"#,
+		r#"( fill; cat missing in1 >&3 2>err; echo "cat=$? errbytes=$(wc -c < err)" ) 3> >(true)"#,
+	])
+	.await;
+	assert_eq!(exit_code, Some(0), "{output}");
+	assert_eq!(output, "cat=141 errbytes=40\n");
+}
+
+/// `rsync` ignores SIGPIPE only once it parsed its options, as rsync does:
+/// its help, version and option errors before that die of SIGPIPE (141); a
+/// diagnostic it cannot write with SIGPIPE ignored ends it with 13
+/// (RERR_MESSAGEIO), also an option error and a failing `--write-batch`.
+/// Measured against rsync 3.5.1 under Bash 5.2.21. Regression: it ignored
+/// SIGPIPE from the start (0, 1) and kept a failing step's own status (3).
+#[tokio::test(flavor = "multi_thread")]
+async fn rsync_ignores_sigpipe_once_its_options_parse() {
+	let (exit_code, output) = run_in_tempdir(&[
+		r#"for disp in default ignored; do"#,
+		r#"	for cmd in "rsync --version" "rsync --help"; do"#,
+		r#"		( [ "$disp" = ignored ] && trap '' PIPE; fill; eval "$cmd" >&3 2>/dev/null; printf '%s ' "$?" ) 3> >(true) 2>/dev/null"#,
+		r#"	done"#,
+		r#"	( [ "$disp" = ignored ] && trap '' PIPE; fill; rsync --badoption 2>&3 >/dev/null; printf '%s ' "$?" ) 3> >(true) 2>/dev/null"#,
+		r#"done; echo"#,
+		r#"mkdir -p src; for i in $(seq 1 40); do printf 'x\n' > "src/f$i"; done"#,
+		r#"for disp in default ignored; do"#,
+		r#"	( [ "$disp" = ignored ] && trap '' PIPE; fill; rsync -a --write-batch=/dev/fd/3 src/ bdst/ >&3 2>&3; printf '%s ' "$?" ) 3> >(true) 2>/dev/null"#,
+		r#"	rm -rf bdst bdst.sh"#,
+		r#"done; echo"#,
+	])
+	.await;
+	assert_eq!(exit_code, Some(0), "{output}");
+	assert_eq!(output, "141 141 141 0 0 13 \n13 13 \n");
+}
+
+/// An `rsync` pull through a remote shell whose diagnostics find standard
+/// error's reader gone ends with 13 before any transfer, as rsync does: the
+/// remote-shell child writes to the command's own standard error and fails
+/// there. A dead standard output leaves the transfer alone. Measured
+/// against rsync 3.5.1 under Bash 5.2.21; the server side is the `rsync` on
+/// `PATH`, so the test needs one. Regression: the child's standard error was
+/// a pipe the builtin drained, its failure was dropped, and the pull
+/// finished with 23.
+#[tokio::test(flavor = "multi_thread")]
+async fn rsync_pulls_end_at_a_dead_stderr_as_rsync_does() {
+	if !std::env::var_os("PATH")
+		.is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join("rsync").is_file()))
+	{
+		eprintln!("skipped: the server side of the pull needs an rsync on PATH");
+		return;
+	}
+	let (exit_code, output) = run_in_tempdir(&[
+		r#"d=$PWD; mkdir -p src; for i in $(seq 1 40); do printf 'x\n' > "src/f$i"; done"#,
+		r#"printf '#!/bin/sh\nshift\nexec "$@"\n' > rsh.sh; chmod +x rsh.sh"#,
+		r#"for disp in default ignored; do"#,
+		r#"	for stream in err both out; do"#,
+		r#"		rm -rf dst; mkdir dst"#,
+		r#"		( [ "$disp" = ignored ] && trap '' PIPE; fill"#,
+		r#"		  case $stream in"#,
+		r#"		  err) rsync -a -e "$d/rsh.sh" "localhost:$d/src/" "localhost:$d/nosuch" dst/ 2>&3 >/dev/null ;;"#,
+		r#"		  both) rsync -a -e "$d/rsh.sh" "localhost:$d/src/" "localhost:$d/nosuch" dst/ >&3 2>&3 ;;"#,
+		r#"		  out) rsync -av -e "$d/rsh.sh" "localhost:$d/src/" dst/ >&3 2>/dev/null ;;"#,
+		r#"		  esac"#,
+		r#"		  echo "$disp $stream rsync-pull=$? copied=$(ls dst | wc -l)" ) 3> >(true) 2>/dev/null"#,
+		r#"	done"#,
+		r#"done"#,
+	])
+	.await;
+	assert_eq!(exit_code, Some(0), "{output}");
+	assert_eq!(
+		output,
+		concat!(
+			"default err rsync-pull=13 copied=0\n",
+			"default both rsync-pull=13 copied=0\n",
+			"default out rsync-pull=0 copied=40\n",
+			"ignored err rsync-pull=13 copied=0\n",
+			"ignored both rsync-pull=13 copied=0\n",
+			"ignored out rsync-pull=0 copied=40\n",
+		)
+	);
 }

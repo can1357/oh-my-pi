@@ -2219,15 +2219,15 @@ impl AsyncUtility for Rg {
 	const CHECKS_STDOUT_PATH: bool = true;
 	/// ripgrep writes standard output through an 8 KiB `BufWriter`.
 	const STDOUT_BUFFER: usize = 8 * 1024;
+	/// ripgrep, a Rust program, ignores SIGPIPE: a write that finds standard
+	/// output's reader gone stops its search with its usual status, and one
+	/// to standard error (its message macro, argument errors too) exits 0 at
+	/// once; it never checks its streams at exit.
+	const IGNORES_SIGPIPE: bool = true;
+	const STDERR_EXIT: Option<i32> = Some(0);
+	const USAGE_STDERR_EXIT: Option<i32> = Some(0);
 
 	async fn run(self, host: &mut Host) -> i32 {
-		// ripgrep, a Rust program, ignores SIGPIPE: a write that finds
-		// standard output's reader gone stops its search with its usual
-		// status, and one to standard error exits 0 at once (its message
-		// macro); it never checks its streams at exit.
-		host.ignore_sigpipe();
-		host.checks_own_output();
-		host.exit_at_broken_stderr(0);
 		let cli = self;
 	let mut opts = search_options(&cli);
 	match parse_path_separator(cli.path_separator.as_deref()) {

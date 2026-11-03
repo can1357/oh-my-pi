@@ -127,6 +127,16 @@ impl Scope {
 				.unwrap_or_else(|| Err(cancelled())),
 		}
 	}
+
+	/// Tells the scope's write-error hook (see [`crate::Fs::with_write_errors`])
+	/// of a write through the facade that failed without a [`crate::File`] of
+	/// its own (a whole-file write).
+	pub(crate) fn wrote<T>(&self, result: io::Result<T>) -> io::Result<T> {
+		if let (Err(error), Some(write_errors)) = (&result, &self.write_errors) {
+			write_errors.report(error);
+		}
+		result
+	}
 }
 
 /// Counts background closes of dropped virtual files and remembers the first

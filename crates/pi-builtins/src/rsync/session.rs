@@ -549,6 +549,9 @@ pub(crate) fn run(host: &mut Host, argv: Vec<OsString>) -> i32 {
 			err.code
 		}
 		Ok(Parsed::Run(opts)) => {
+			// Upstream ignores SIGPIPE only now, after parse_arguments: its
+			// help, version and option errors before this die of it.
+			host.ignore_sigpipe();
 			if opts.am_server {
 				server_main(&io, *opts, None)
 			} else {
