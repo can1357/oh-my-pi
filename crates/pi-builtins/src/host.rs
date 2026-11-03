@@ -1940,6 +1940,26 @@ pub(crate) fn quote_arg(arg: &str) -> String {
 	format!("'{escaped}'")
 }
 
+/// Rebuilds the command a utility such as `timeout` or `nohup` runs, for the
+/// shell to re-read.
+///
+/// The real utility executes its operand as a program, so the shell must take
+/// the first word as the command name only: always quoting it keeps it from
+/// being read as an alias or a reserved word.
+pub(crate) fn operand_command_line(command: &[String]) -> String {
+	let mut command_line = String::new();
+	for (idx, arg) in command.iter().enumerate() {
+		if idx == 0 {
+			let escaped = arg.replace('\'', "'\"'\"'");
+			command_line.push_str(&format!("'{escaped}'"));
+		} else {
+			command_line.push(' ');
+			command_line.push_str(&quote_arg(arg));
+		}
+	}
+	command_line
+}
+
 /// Reads a boolean "disable" flag for the uutils builtins from the session
 /// environment (preferred) then the process environment, mirroring the nohup
 /// builtin gate. Truthy = present and not "", "0", or "false".

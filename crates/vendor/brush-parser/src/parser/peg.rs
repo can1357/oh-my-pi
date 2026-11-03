@@ -140,7 +140,7 @@ peg::parser! {
         rule subshell() -> ast::SubshellCommand =
             start:specific_operator("(") list:compound_list() end:specific_operator(")") {
                 let loc = SourceSpan::within(start.location(), end.location());
-                ast::SubshellCommand { list, loc }
+                ast::SubshellCommand { list, loc, line_starts: vec![] }
             }
 
         rule compound_list() -> ast::CompoundList =
@@ -358,7 +358,7 @@ peg::parser! {
         rule if_clause() -> ast::IfClauseCommand =
             s:specific_word("if") condition:compound_list() specific_word("then") then:compound_list() elses:else_part()? e:specific_word("fi") {
                 let start = s.location();
-                let end = s.location();
+                let end = e.location();
                 let loc = SourceSpan::within(start, end);
 
                 ast::IfClauseCommand {
@@ -584,8 +584,34 @@ peg::parser! {
             word()
 
         rule process_substitution() -> (ast::ProcessSubstitutionKind, ast::SubshellCommand) =
-            specific_operator("<") s:subshell() { (ast::ProcessSubstitutionKind::Read, s) } /
-            specific_operator(">") s:subshell() { (ast::ProcessSubstitutionKind::Write, s) }
+            specific_operator("<") s:process_substitution_body() { (ast::ProcessSubstitutionKind::Read, s) } /
+            specific_operator(">") s:process_substitution_body() { (ast::ProcessSubstitutionKind::Write, s) }
+
+        // N.B. Bash reads a process substitution's commands when it runs them,
+        // one input line at a time (see `process_substitution_lines`). The
+        // index of each item that begins a later line is kept, so the shell can
+        // read the lines in turn and the body prints with the same lines.
+        rule process_substitution_body() -> ast::SubshellCommand =
+            start:specific_operator("(") linebreak() lines:(process_substitution_line() ** newline_list()) linebreak() end:specific_operator(")") {
+                let loc = SourceSpan::within(start.location(), end.location());
+                let (list, line_starts) = process_substitution_lines(lines);
+                ast::SubshellCommand { list, loc, line_starts }
+            }
+
+        // One source line of a process substitution, and whether it ended with
+        // an explicit `;` or `&`.
+        rule process_substitution_line() -> (ast::CompoundList, bool) =
+            first:and_or() remainder:(s:separator_op() l:and_or() { (s, l) })* last_sep:separator_op()? {
+                let explicit_end = last_sep.is_some();
+                let mut items = vec![];
+                let mut pending = first;
+                for (sep, ao) in remainder {
+                    items.push(ast::CompoundListItem(pending, sep));
+                    pending = ao;
+                }
+                items.push(ast::CompoundListItem(pending, last_sep.unwrap_or(SeparatorOperator::Sequence)));
+                (ast::CompoundList(items), explicit_end)
+            }
 
         rule newline_list() -> () =
             newline()+ {}
@@ -707,6 +733,72 @@ peg::parser! {
         rule non_posix_extensions_enabled() -> () =
             &[_] {? if !parser_options.sh_mode { Ok(()) } else { Err("posix") } }
     }
+}
+
+/// Joins a process substitution's source lines into one list, and returns the
+/// index of each item that begins a line Bash reads on its own.
+///
+/// Bash keeps a process substitution as the text it prints for the parsed
+/// commands, and reads that text again, one line at a time, when it runs it.
+/// That printed text keeps the source lines, except that a line ending with
+/// `;` or `&` runs on into the next one, and the body of a here-document is
+/// printed right after the command that carries it, which ends that line.
+fn process_substitution_lines(lines: Vec<(ast::CompoundList, bool)>) -> (ast::CompoundList, Vec<usize>) {
+    let mut items: Vec<ast::CompoundListItem> = vec![];
+    let mut line_starts = vec![];
+    let mut runs_on = false;
+    for (line, explicit_end) in lines {
+        for (index, item) in line.0.into_iter().enumerate() {
+            let starts_line = (index == 0 && !runs_on)
+                || items
+                    .last()
+                    .is_some_and(|previous| item_has_here_document(&previous.0));
+            if starts_line && !items.is_empty() {
+                line_starts.push(items.len());
+            }
+            items.push(item);
+        }
+        runs_on = explicit_end;
+    }
+    (ast::CompoundList(items), line_starts)
+}
+
+/// Whether a command of `and_or` carries a here-document redirection.
+fn item_has_here_document(and_or: &ast::AndOrList) -> bool {
+    fn redirects_have_here_document(redirects: Option<&ast::RedirectList>) -> bool {
+        redirects.is_some_and(|list| {
+            list.0
+                .iter()
+                .any(|redirect| matches!(redirect, ast::IoRedirect::HereDocument(..)))
+        })
+    }
+
+    fn command_has_here_document(command: &ast::Command) -> bool {
+        match command {
+            ast::Command::Simple(simple) => simple
+                .prefix
+                .iter()
+                .flat_map(|prefix| prefix.0.iter())
+                .chain(simple.suffix.iter().flat_map(|suffix| suffix.0.iter()))
+                .any(|item| {
+                    matches!(
+                        item,
+                        ast::CommandPrefixOrSuffixItem::IoRedirect(ast::IoRedirect::HereDocument(..))
+                    )
+                }),
+            ast::Command::Compound(_, redirects) | ast::Command::ExtendedTest(_, redirects) => {
+                redirects_have_here_document(redirects.as_ref())
+            }
+            ast::Command::Function(function) => redirects_have_here_document(function.body.1.as_ref()),
+        }
+    }
+
+    std::iter::once(&and_or.first)
+        .chain(and_or.additional.iter().map(|next| match next {
+            ast::AndOr::And(pipeline) | ast::AndOr::Or(pipeline) => pipeline,
+        }))
+        .flat_map(|pipeline| pipeline.seq.iter())
+        .any(command_has_here_document)
 }
 
 // add `2>&1` to the command if the pipeline is `|&`

@@ -1310,13 +1310,20 @@ async fn run_shell_command_segmented_chain(
 	let mut previous_succeeded = true;
 	let mut last_result = None;
 	let max_capture_bytes = config.max_capture_bytes as usize;
+	// The shell reads a whole input line before it runs any of it, so every
+	// segment of a line is read with the aliases its line began with.
+	let mut line_aliases = brush_core::AliasesAtRead::default();
 	for segment in segments {
+		if segment.starts_line {
+			line_aliases = brush_core::AliasesAtRead::of(&session.shell);
+		}
 		if segment.run_if_previous_succeeded && !previous_succeeded {
 			continue;
 		}
 
 		let mut segment_params = params.clone();
 		segment_params.suppress_errexit = segment.suppress_errexit;
+		segment_params.set_aliases_at_read(line_aliases.clone());
 		let capture_mode = if aggregate.is_some() {
 			CommandCaptureMode::Buffered { max_capture_bytes }
 		} else {

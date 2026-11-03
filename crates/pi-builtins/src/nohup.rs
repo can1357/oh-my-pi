@@ -13,7 +13,7 @@ use brush_core::{
 };
 use clap::Parser;
 
-use crate::host::quote_arg;
+use crate::host::operand_command_line;
 
 /// Runs an operand with the process-group policy required by `nohup`.
 #[derive(Parser)]
@@ -99,7 +99,7 @@ impl builtins::Command for NohupCommand {
 			// operand directly with session reparenting, double-forking it out of the
 			// shell's descendant tree. Like coreutils, we run the operand here; we only
 			// differ by not masking SIGHUP.
-			let command_line = rebuild_command_line(&command);
+			let command_line = operand_command_line(&command);
 
 			let mut params = context.params.clone();
 			params.process_group_policy = ProcessGroupPolicy::NewProcessGroup;
@@ -126,20 +126,9 @@ fn report_missing_operand(mut stderr: impl Write) -> ExecutionResult {
 	ExecutionResult::new(125)
 }
 
-fn rebuild_command_line(command: &[String]) -> String {
-	let mut command_line = String::new();
-	for (idx, arg) in command.iter().enumerate() {
-		if idx > 0 {
-			command_line.push(' ');
-		}
-		command_line.push_str(&quote_arg(arg));
-	}
-	command_line
-}
-
 #[cfg(test)]
 mod tests {
-	use super::{NohupCommand, rebuild_command_line, report_missing_operand};
+	use super::{NohupCommand, operand_command_line, report_missing_operand};
 
 	fn parsed(argv: &[&str]) -> NohupCommand {
 		NohupCommand::from_argv(argv.iter().map(ToString::to_string).collect())
@@ -211,8 +200,8 @@ mod tests {
 		];
 
 		assert_eq!(
-			rebuild_command_line(&command),
-			"printf '%s %s' 'two words' 'it'\"'\"'s' ''"
+			operand_command_line(&command),
+			"'printf' '%s %s' 'two words' 'it'\"'\"'s' ''"
 		);
 	}
 }

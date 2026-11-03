@@ -39,6 +39,10 @@ pub struct ChainSegment {
 	pub program:                   String,
 	pub run_if_previous_succeeded: bool,
 	pub suppress_errexit:          bool,
+	/// Whether this segment begins an input line (a complete command). The
+	/// shell reads a whole line before it runs any of it, so every segment of
+	/// a line is read with the aliases as they were when its line began.
+	pub starts_line:               bool,
 }
 
 /// Outcome of analyzing a raw command string.
@@ -126,10 +130,15 @@ fn classify(program: &Program) -> CommandPlan {
 }
 
 fn classify_chain(program: &Program) -> Option<CommandPlan> {
-	let items: Vec<&CompoundListItem> = program
+	let items: Vec<(bool, &CompoundListItem)> = program
 		.complete_commands
 		.iter()
-		.flat_map(|cl| cl.0.iter())
+		.flat_map(|cl| {
+			cl.0
+				.iter()
+				.enumerate()
+				.map(|(index, item)| (index == 0, item))
+		})
 		.collect();
 
 	if items.is_empty() {
@@ -139,7 +148,7 @@ fn classify_chain(program: &Program) -> Option<CommandPlan> {
 	let mut segments = Vec::new();
 	let mut run_if_previous_succeeded = false;
 
-	for (item_index, item) in items.iter().enumerate() {
+	for (item_index, &(item_starts_line, item)) in items.iter().enumerate() {
 		if matches!(item.1, SeparatorOperator::Async) {
 			return None;
 		}
@@ -147,6 +156,7 @@ fn classify_chain(program: &Program) -> Option<CommandPlan> {
 		let is_last_item = item_index + 1 == items.len();
 		let mut pipeline = &item.0.first;
 		let mut additional = item.0.additional.iter().peekable();
+		let mut starts_line = item_starts_line;
 
 		loop {
 			let (command, program) = simple_segment(pipeline)?;
@@ -159,7 +169,9 @@ fn classify_chain(program: &Program) -> Option<CommandPlan> {
 				program,
 				run_if_previous_succeeded,
 				suppress_errexit,
+				starts_line,
 			});
+			starts_line = false;
 
 			let Some(and_or) = additional.next() else {
 				run_if_previous_succeeded = false;
@@ -400,12 +412,14 @@ mod tests {
 					program:                   "git".to_string(),
 					run_if_previous_succeeded: false,
 					suppress_errexit:          true,
+					starts_line:               true,
 				},
 				ChainSegment {
 					command:                   "git diff --name-only".to_string(),
 					program:                   "git".to_string(),
 					run_if_previous_succeeded: true,
 					suppress_errexit:          false,
+					starts_line:               false,
 				},
 			])
 		);
@@ -422,12 +436,14 @@ mod tests {
 					program:                   "git".to_string(),
 					run_if_previous_succeeded: false,
 					suppress_errexit:          false,
+					starts_line:               true,
 				},
 				ChainSegment {
 					command:                   "bun test".to_string(),
 					program:                   "bun".to_string(),
 					run_if_previous_succeeded: false,
 					suppress_errexit:          false,
+					starts_line:               false,
 				},
 			])
 		);
@@ -444,18 +460,21 @@ mod tests {
 					program:                   "false".to_string(),
 					run_if_previous_succeeded: false,
 					suppress_errexit:          true,
+					starts_line:               true,
 				},
 				ChainSegment {
 					command:                   "echo no".to_string(),
 					program:                   "echo".to_string(),
 					run_if_previous_succeeded: true,
 					suppress_errexit:          false,
+					starts_line:               false,
 				},
 				ChainSegment {
 					command:                   "echo yes".to_string(),
 					program:                   "echo".to_string(),
 					run_if_previous_succeeded: false,
 					suppress_errexit:          false,
+					starts_line:               false,
 				},
 			])
 		);
@@ -473,6 +492,14 @@ mod tests {
 		assert_eq!(segments.len(), 2);
 		assert_eq!(segments[0].program, "ls");
 		assert_eq!(segments[1].program, "git");
+	}
+
+	#[test]
+	fn segments_record_where_input_lines_begin() {
+		let segments =
+			chain_of(analyze("git status; bun test\ngit diff && echo done")).expect("expected Chain");
+		let starts: Vec<bool> = segments.iter().map(|segment| segment.starts_line).collect();
+		assert_eq!(starts, [true, false, true, false]);
 	}
 
 	#[test]

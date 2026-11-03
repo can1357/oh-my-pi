@@ -538,6 +538,16 @@ pub struct SubshellCommand {
     pub list: CompoundList,
     /// Location of the subshell
     pub loc: SourceSpan,
+    /// For a process substitution, the indexes in `list` of the commands that
+    /// begin a later line. Bash reads a process substitution's commands one
+    /// line at a time when it runs them; a line ending with `;` or `&` runs on
+    /// into the next, and a here-document ends its line. Empty for a subshell,
+    /// and for a process substitution of one line.
+    #[cfg_attr(
+        any(test, feature = "serde"),
+        serde(skip_serializing_if = "Vec::is_empty", default)
+    )]
+    pub line_starts: Vec<usize>,
 }
 
 impl Node for SubshellCommand {}
@@ -553,6 +563,37 @@ impl Display for SubshellCommand {
         write!(f, "( ")?;
         write!(f, "{}", self.list)?;
         write!(f, " )")
+    }
+}
+
+impl SubshellCommand {
+    /// Writes this command as a process substitution (`<(...)` or `>(...)`),
+    /// one line per line the shell reads (`line_starts`), so that reading the
+    /// text again yields the same lines.
+    fn fmt_process_substitution(
+        &self,
+        kind: &ProcessSubstitutionKind,
+        f: &mut std::fmt::Formatter<'_>,
+    ) -> std::fmt::Result {
+        write!(f, "{kind}(")?;
+        let items = &self.list.0;
+        for (index, CompoundListItem(and_or, separator)) in items.iter().enumerate() {
+            if index > 0 {
+                if self.line_starts.contains(&index) {
+                    writeln!(f)?;
+                } else {
+                    write!(f, " ")?;
+                }
+            }
+            write!(f, "{and_or}")?;
+            let ends_line = index + 1 == items.len() || self.line_starts.contains(&(index + 1));
+            match separator {
+                SeparatorOperator::Async => write!(f, " &")?,
+                SeparatorOperator::Sequence if !ends_line => write!(f, ";")?,
+                SeparatorOperator::Sequence => (),
+            }
+        }
+        write!(f, ")")
     }
 }
 
@@ -1341,7 +1382,7 @@ impl Display for CommandPrefixOrSuffixItem {
             Self::Word(word) => write!(f, "{word}"),
             Self::AssignmentWord(_assignment, word) => write!(f, "{word}"),
             Self::ProcessSubstitution(kind, subshell_command) => {
-                write!(f, "{kind}({subshell_command})")
+                subshell_command.fmt_process_substitution(kind, f)
             }
         }
     }
@@ -1623,7 +1664,7 @@ impl Display for IoFileRedirectTarget {
             Self::Filename(word) => write!(f, "{word}"),
             Self::Fd(fd) => write!(f, "{fd}"),
             Self::ProcessSubstitution(kind, subshell_command) => {
-                write!(f, "{kind}{subshell_command}")
+                subshell_command.fmt_process_substitution(kind, f)
             }
             Self::Duplicate(word) => write!(f, "{word}"),
         }

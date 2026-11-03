@@ -588,7 +588,22 @@ pub fn parse_brace_expansions(
         .map_err(|err| error::WordParseError::BraceExpansion(word.to_owned(), err.into()))
 }
 
-pub(crate) fn parse_assignment_word(
+/// Whether `word`, as written, is quoted the way Bash's reader counts it for
+/// aliases (`quoted` in `read_token_word` in Bash's `parse.y`): it has a
+/// backslash (not before a newline), a single- or double-quoted string,
+/// `$'...'` or `$"..."` outside every substitution, expansion and extended
+/// pattern in it.
+///
+/// The tokenizer answers it as it reads `word`: it reads each substitution,
+/// expansion and extended pattern with a state of its own, so their quoting
+/// does not count, the same way it decides where they end.
+pub fn is_quoted_for_alias(word: &str, options: &crate::TokenizerOptions) -> bool {
+    crate::tokenizer::word_is_quoted(word, options)
+}
+
+/// Parses `word` as a scalar assignment (`name=value`, `name+=value`,
+/// `name[index]=value`).
+pub fn parse_assignment_word(
     word: &str,
 ) -> Result<ast::Assignment, peg::error::ParseError<peg::str::LineCol>> {
     expansion_parser::name_equals_scalar_value(word, &ParserOptions::default())
@@ -1206,6 +1221,57 @@ mod tests {
             input: word,
             result: parsed,
         })
+    }
+
+    /// Each case is a word whose quoting Bash 5.2.21's reader was measured on:
+    /// a quoted word keeps the check for an alias after a blank-ending alias.
+    #[test]
+    fn quoted_for_alias_counts_only_outer_quoting() {
+        let extglob = crate::TokenizerOptions::default();
+        for word in [
+            r"'p'",
+            r#""p""#,
+            r"\p",
+            r"$'x'",
+            r#"$"x""#,
+            r"x='one'",
+            r#""$(printf p)""#,
+            r#"${v:-(}"""#,
+            r#"${v:-{}"""#,
+            r#"${v:-'p'}"""#,
+            r#"$((1 + 2))"""#,
+            r#""a"$(echo b)"#,
+            r"$(echo b)'a'",
+            r#"$(echo case in)"""#,
+        ] {
+            assert!(is_quoted_for_alias(word, &extglob), "{word}");
+        }
+        for word in [
+            "p",
+            "x=one",
+            r"$(printf 'plain')",
+            r#"$(printf "plain")"#,
+            r"`printf 'plain'`",
+            r"${v:-'plain'}",
+            r#"${v:-"plain"}"#,
+            r"$((1 + 2))",
+            r"$(echo \x)",
+            r"x=$(printf 'one')",
+            "a\\\nb",
+            r#"$(printf "%s" "$(printf ")")")"#,
+            r"$(printf %s $'a\')b')",
+            r#"@(plain|"other")"#,
+            r"$(case x in (x) echo 'p';; esac)",
+            r#"$(case a in (@(a|b)) echo "ok";; esac)"#,
+            "$(cat <<'EOF'\n) \"\nEOF\n)",
+            r#"`echo "a"`"#,
+            r"`echo \`echo 'a'\``",
+            r"${v:-$(echo 'x')}",
+            r#"${v:-${u:-"y"}}"#,
+            r"$[1+2]",
+        ] {
+            assert!(!is_quoted_for_alias(word, &extglob), "{word}");
+        }
     }
 
     #[test]

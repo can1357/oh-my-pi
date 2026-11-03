@@ -15,7 +15,7 @@ use crate::{
 	arithmetic::{self, ExpandAndEvaluate},
 	commands::{self, CommandArg},
 	env::{EnvironmentLookup, EnvironmentScope, valid_variable_name},
-	error, expansion, extendedtests, extensions, ioutils, jobs, openfiles,
+	alias_expansion, error, expansion, extendedtests, extensions, ioutils, jobs, openfiles,
 	openfiles::{OpenFile, OpenFiles},
 	pipetap::{self, PipeTap},
 	results::{ExecutionExitCode, ExecutionResult, ExecutionSpawnResult, ExecutionWaitResult},
@@ -121,6 +121,9 @@ pub struct ExecutionParameters {
 	/// Whether this context's own cancellation goes unreported; see
 	/// [`ExecutionParameters::set_quiet_cancellation`].
 	quiet_cancellation:       bool,
+	/// The aliases the program run with these parameters was read with, when
+	/// its caller read it; see [`ExecutionParameters::set_aliases_at_read`].
+	aliases_at_read:          Option<alias_expansion::AliasesAtRead>,
 }
 
 /// A redirection a background external command's child makes itself, after
@@ -212,6 +215,17 @@ impl ExecutionParameters {
 	/// status reports the timeout.
 	pub fn set_quiet_cancellation(&mut self, quiet: bool) {
 		self.quiet_cancellation = quiet;
+	}
+
+	/// Reads the program run with these parameters with `aliases`, the aliases
+	/// its input line began with, instead of the shell's aliases when it runs.
+	/// Commands it runs later (`eval`, `source`, substitutions, traps) read
+	/// their own input as usual. A host that runs the commands of one input
+	/// line one at a time uses this: Bash reads the whole line before it runs
+	/// any of it, so a command that changes the aliases does not change how
+	/// the rest of its line is read.
+	pub fn set_aliases_at_read(&mut self, aliases: alias_expansion::AliasesAtRead) {
+		self.aliases_at_read = Some(aliases);
 	}
 
 	/// Whether an error that ends a command in this context is printed: not
@@ -460,43 +474,64 @@ trait ExecuteInPipeline<SE: extensions::ShellExtensions> {
 	) -> Result<ExecutionSpawnResult, error::Error>;
 }
 
-#[async_trait::async_trait]
-impl Execute for ast::Program {
-	async fn execute(
-		&self,
-		shell: &mut Shell<impl extensions::ShellExtensions>,
-		params: &ExecutionParameters,
-	) -> Result<ExecutionResult, error::Error> {
+/// Runs a parsed program one complete command at a time.
+///
+/// Bash substitutes aliases as it reads each complete command, after the
+/// commands before it have run, so a command that turns on `expand_aliases`
+/// or defines an alias only affects the complete commands after it.
+pub(crate) async fn execute_program(
+	program: ast::Program,
+	shell: &mut Shell<impl extensions::ShellExtensions>,
+	params: &ExecutionParameters,
+) -> Result<ExecutionResult, error::Error> {
+	ensure_not_cancelled(params)?;
+	let mut result = ExecutionResult::success();
+
+	// The aliases a caller read the program with cover its own complete
+	// commands only; what they run later reads its own input.
+	let aliases_at_read = params.aliases_at_read.clone();
+	let cleared;
+	let params = if aliases_at_read.is_some() {
+		let mut copy = params.clone();
+		copy.aliases_at_read = None;
+		cleared = copy;
+		&cleared
+	} else {
+		params
+	};
+
+	for mut command in program.complete_commands {
 		ensure_not_cancelled(params)?;
-		let mut result = ExecutionResult::success();
+		let aliases = match &aliases_at_read {
+			Some(at_read) => at_read.table(),
+			None => alias_expansion::live_aliases(shell),
+		};
+		alias_expansion::expand_complete_command(shell, aliases, &mut command);
 
-		for command in &self.complete_commands {
-			ensure_not_cancelled(params)?;
-			// Execute the command and handle any errors without immediately propagating
-			// them. This allows interactive shells to continue executing subsequent
-			// commands even after errors.
-			match command.execute(shell, params).await {
-				Ok(exec_result) => result = exec_result,
-				Err(err) => {
-					// Display the error and convert to an execution result.
-					if params.reports_errors() {
-						let _ = shell.display_error(&mut params.stderr(shell), &err).await;
-					}
-					result = err.into_result(shell);
-				},
-			}
-
-			// Update status
-			shell.set_last_exit_status(result.exit_code.into());
-
-			// Check if we should stop executing subsequent commands
-			if !result.is_normal_flow() {
-				break;
-			}
+		// Execute the command and handle any errors without immediately propagating
+		// them. This allows interactive shells to continue executing subsequent
+		// commands even after errors.
+		match command.execute(shell, params).await {
+			Ok(exec_result) => result = exec_result,
+			Err(err) => {
+				// Display the error and convert to an execution result.
+				if params.reports_errors() {
+					let _ = shell.display_error(&mut params.stderr(shell), &err).await;
+				}
+				result = err.into_result(shell);
+			},
 		}
 
-		Ok(result)
+		// Update status
+		shell.set_last_exit_status(result.exit_code.into());
+
+		// Check if we should stop executing subsequent commands
+		if !result.is_normal_flow() {
+			break;
+		}
 	}
+
+	Ok(result)
 }
 
 #[async_trait::async_trait]
@@ -634,7 +669,6 @@ async fn classify_background_process_pipeline<SE: extensions::ShellExtensions>(
 			let name = word.value.as_str();
 			if name.is_empty()
 				|| !name.chars().all(|c| c.is_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | '+'))
-				|| shell.aliases().contains_key(name)
 				|| shell.builtins().get(name).is_some_and(|registration| !registration.disabled)
 				|| shell.funcs().get(name).is_some()
 			{
@@ -656,9 +690,6 @@ async fn classify_background_process_pipeline<SE: extensions::ShellExtensions>(
 		return Ok(BackgroundProcessPipeline::Internal);
 	};
 
-	if shell.aliases().contains_key(command_name) {
-		return Ok(BackgroundProcessPipeline::Internal);
-	}
 	if let Some(registration) = shell.builtins().get(command_name.as_str())
 		&& !registration.disabled
 	{
@@ -1800,40 +1831,20 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 					}
 				},
 				CommandPrefixOrSuffixItem::Word(arg) => {
-					let mut next_args =
+					let next_args =
 						expansion::full_expand_and_split_word(&mut context.shell, &params, arg).await?;
 
-					if args.is_empty() {
-						if let Some(cmd_name) = next_args.first() {
-							if let Some(alias_value) = context.shell.aliases().get(cmd_name.as_str()) {
-								//
-								// TODO(#57): This is a total hack; aliases are supposed to be
-								// handled much earlier in the process.
-								//
-								let mut alias_pieces: Vec<_> = alias_value
-									.split_ascii_whitespace()
-									.map(|i| i.to_owned())
-									.collect();
-
-								next_args.remove(0);
-								alias_pieces.append(&mut next_args);
-
-								next_args = alias_pieces;
-							}
-
-							let first_arg = next_args[0].as_str();
-
-							// Check if we're going to be invoking a special declaration builtin.
-							// That will change how we parse and process args.
-							if context
-								.shell
-								.builtins()
-								.get(first_arg)
-								.is_some_and(|r| !r.disabled && r.declaration_builtin)
-							{
-								command_takes_assignments = true;
-							}
-						}
+					if args.is_empty()
+						&& let Some(first_arg) = next_args.first()
+						// Check if we're going to be invoking a special declaration builtin.
+						// That will change how we parse and process args.
+						&& context
+							.shell
+							.builtins()
+							.get(first_arg)
+							.is_some_and(|r| !r.disabled && r.declaration_builtin)
+					{
+						command_takes_assignments = true;
 					}
 
 					let mut next_args = next_args.into_iter().map(CommandArg::String).collect();
@@ -2738,14 +2749,20 @@ fn setup_process_substitution(
 	};
 
 	// Asynchronously spawn off the subshell; we intentionally don't block on its
-	// completion.
-	let subshell_cmd = subshell_cmd.to_owned();
+	// completion. Bash reads a process substitution's commands when it runs
+	// them, one line at a time, so each line gets the aliases of the subshell
+	// as the lines before it left it.
+	let units = alias_expansion::split_into_read_units(subshell_cmd);
 	tokio::spawn(async move {
 		// Intentionally ignore the result of the subshell command.
-		let _ = subshell_cmd
-			.list
-			.execute(&mut subshell, &child_params)
-			.await;
+		for mut unit in units {
+			let aliases = alias_expansion::live_aliases(&subshell);
+			alias_expansion::expand_complete_command(&subshell, aliases, &mut unit);
+			match unit.execute(&mut subshell, &child_params).await {
+				Ok(result) if result.is_normal_flow() => {},
+				_ => break,
+			}
+		}
 	});
 
 

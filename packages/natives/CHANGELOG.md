@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the bash tool's shell expanding aliases while `expand_aliases` is off, and on the same line that defines or enables them; as in Bash, an alias now takes effect from the next line, and aliases from your shell snapshot still expand ([#17825](https://github.com/can1357/oh-my-pi/pull/17825) by [@sjawhar](https://github.com/sjawhar))
+- Fixed the bash tool's shell crashing on an alias whose value is empty ([#17825](https://github.com/can1357/oh-my-pi/pull/17825) by [@sjawhar](https://github.com/sjawhar))
+- Fixed the bash tool's shell rejecting an empty process substitution (`<()`), and `declare -f` printing a process substitution so that the printed function did not read back the same ([#17825](https://github.com/can1357/oh-my-pi/pull/17825) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.16.0] - 2026-11-02
 
 ### Added

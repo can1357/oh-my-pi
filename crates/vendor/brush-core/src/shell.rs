@@ -406,6 +406,20 @@ impl<SE: extensions::ShellExtensions> Shell<SE> {
 		}
 	}
 
+	/// Returns the alias value the shell substitutes, as it reads a command,
+	/// for `word` written where Bash looks for an alias (a command name, or the
+	/// word after an alias whose value ends in a blank). `word` is as written,
+	/// before expansion: a quoted word is never an alias, and no word is one
+	/// while `expand_aliases` is off.
+	pub fn command_word_alias(&self, word: &str) -> Option<&str> {
+		if !self.options.expand_aliases
+			|| crate::alias_expansion::is_quoted(word, &self.parser_options().tokenizer_options())
+		{
+			return None;
+		}
+		self.aliases.get(word).map(String::as_str)
+	}
+
 	pub(crate) const fn last_exit_status_change_count(&self) -> usize {
 		self.last_exit_status_change_count
 	}
