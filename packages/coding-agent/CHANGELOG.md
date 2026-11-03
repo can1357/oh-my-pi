@@ -194,6 +194,10 @@
 - DeepSeek-style `*** End` and `*** End Patch` markers are no longer written into files or truncate later edits
 - Composer prediction ghost text no longer vanishes when advisor messages arrive
 
+### Fixed
+
+- On Linux under X11, a browser agent asked to keep your app in front no longer clicks in the Chrome tab you can see, which raised Chrome and sent your typing into the page
+
 ## [18.16.0] - 2026-11-02
 
 ### Added
