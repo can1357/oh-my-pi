@@ -1095,6 +1095,17 @@ export class Settings {
 	}
 
 	/**
+	 * Whether a runtime override — a CLI flag, a session-only write, an SDK override — sets `setting`
+	 * here or on an overlay parent. Such an override outranks the setting's environment variable; a
+	 * soft-pinned protocol default does not.
+	 */
+	hasRuntimeOverride(setting: AnySetting): boolean {
+		const own = getByPath(this.#overrides, setting.segments);
+		if (own !== undefined && own !== null) return !this.#softPins.has(setting);
+		return this.#parent?.hasRuntimeOverride(setting) ?? false;
+	}
+
+	/**
 	 * Registry plumbing behind `Setting.set` / `Setting.override`: writes `value` for `setting` to the
 	 * global layer (persisted in the background; releases a soft pin, see {@link pinDefaultValue}) or
 	 * the runtime-override layer, then notifies change listeners (process-wide effects apply

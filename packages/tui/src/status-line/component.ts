@@ -14,7 +14,10 @@ import {
 	type ComposerStyle,
 	claudeComposerStyle,
 	padding,
-	SPINNER_ADVANCE_MS,
+	motionEffectsEnabled,
+	spinnerAnimated,
+	spinnerInterval,
+	spinnerTickDelay,
 	truncateToWidth,
 	visibleWidth,
 } from "../index";
@@ -187,10 +190,13 @@ const WATCHER_FAILURE_POLL_TTL_MS = 5000;
 const BRAND_FADE_MS = 450;
 /** Repaint cadence while the brand fade is in flight (rust omp's `FADE_FRAME`). */
 const BRAND_FADE_FRAME_MS = 40;
-/** Repaint cadence while a turn's active-processing window is open: keeps the
+/** Shortest repaint cadence while a turn's active-processing window is open: keeps the
  * status bar's clock-driven readouts (pi spinner, turn timer) animating when
- * no other component is requesting renders. */
+ * no other component is requesting renders. The armed period is this rounded up to a
+ * whole number of spinner frames, so the ticker lands on the working row's own ticks. */
 const ACTIVE_WINDOW_REPAINT_MS = 250;
+/** Turn-window repaint cadence under a static spinner: only the one-second timers still move. */
+const STATIC_SPINNER_REPAINT_MS = 1_000;
 
 /**
  * Providers whose subscription quota is a single monthly bucket, so their
@@ -1376,8 +1382,9 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	 * the first render after speculation leaves the running state.
 	 */
 	#syncSpeculationBlink(state: "idle" | "running" | "armed"): void {
-		// A TSP terminal pulses the icon itself (`fx: "pulse"`).
-		if (state === "running" && !this.#disposed && !isNativeRendering()) {
+		// A TSP terminal pulses the icon itself (`fx: "pulse"`, dropped by `quietMotion` when effects are
+		// off); here `tui.motion` switches the JS blink off.
+		if (state === "running" && !this.#disposed && !isNativeRendering() && motionEffectsEnabled()) {
 			this.#speculationBlinkTimer ??= setInterval(() => {
 				this.#speculationBlinkOn = !this.#speculationBlinkOn;
 				this.invalidate();
@@ -1411,14 +1418,19 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		const now = Date.now();
 		if (working !== this.#brandWorking) {
 			const previousTargetHex = this.#brandWorking ? workingHex : idleHex;
-			this.#brandFade = {
-				fromHex: this.#sampleBrandHex(previousTargetHex, now),
-				toHex: working ? workingHex : idleHex,
-				startedAt: now,
-			};
 			this.#brandWorking = working;
-			// Only a visible `pi` segment needs fade frames; other bars stay quiet.
-			if (brandVisible) this.#startBrandFadeTimer();
+			// With decorative motion off the brand snaps to its settled color; otherwise it eases over.
+			if (motionEffectsEnabled()) {
+				this.#brandFade = {
+					fromHex: this.#sampleBrandHex(previousTargetHex, now),
+					toHex: working ? workingHex : idleHex,
+					startedAt: now,
+				};
+				// Only a visible `pi` segment needs fade frames; other bars stay quiet.
+				if (brandVisible) this.#startBrandFadeTimer();
+			} else {
+				this.#brandFade = null;
+			}
 		}
 		const hex = this.#sampleBrandHex(working ? workingHex : idleHex, now);
 		return getSessionAccentAnsi(hex) ?? theme.getFgAnsi(working ? "accent" : "dim");
@@ -1470,7 +1482,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	 * Keep the status bar repainting while a turn's active-processing window
 	 * is open. The `pi` segment's spinner and turn timer are painted from the
 	 * wall clock at render time, so they only animate when frames flow; during
-	 * a quiet turn the working-row loader's 80 ms tick is normally the sole
+	 * a quiet turn the working-row loader's tick is normally the sole
 	 * repaint source, and paths that stop or bypass that loader mid-turn (an
 	 * error banner, a stale retry/compaction loader reference) froze the
 	 * spinner until the next keystroke. The status line owns the active
@@ -1482,21 +1494,33 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			this.#stopActiveWindowRepaint();
 			return;
 		}
-		if (this.#activeWindowRepaintTimer) return;
-		const timer = setInterval(() => {
-			if (this.#disposed || isNativeRendering() || this.getTurnElapsedMs() === null) {
-				this.#stopActiveWindowRepaint();
-				return;
-			}
+		if (!this.#activeWindowRepaintTimer) this.#armActiveWindowRepaint();
+	}
+
+	/**
+	 * One tick on the shared clock's next boundary (see {@link spinnerTickDelay}); re-arms itself,
+	 * re-reading the period. The period is a whole number of spinner frames no shorter than the
+	 * 250 ms safety net, so every tick coincides with one of the working row's own and the two cost
+	 * one frame; with static spinners it is the turn timer's 1 s.
+	 */
+	#armActiveWindowRepaint(): void {
+		const frameMs = spinnerInterval();
+		const periodMs = spinnerAnimated()
+			? Math.ceil(ACTIVE_WINDOW_REPAINT_MS / frameMs - 1e-6) * frameMs
+			: STATIC_SPINNER_REPAINT_MS;
+		const timer = setTimeout(() => {
+			this.#activeWindowRepaintTimer = undefined;
+			if (this.#disposed || isNativeRendering() || this.getTurnElapsedMs() === null) return;
 			this.#onBranchChange?.();
-		}, ACTIVE_WINDOW_REPAINT_MS);
+			this.#armActiveWindowRepaint();
+		}, spinnerTickDelay(periodMs));
 		timer.unref?.();
 		this.#activeWindowRepaintTimer = timer;
 	}
 
 	#stopActiveWindowRepaint(): void {
 		if (!this.#activeWindowRepaintTimer) return;
-		clearInterval(this.#activeWindowRepaintTimer);
+		clearTimeout(this.#activeWindowRepaintTimer);
 		this.#activeWindowRepaintTimer = undefined;
 	}
 
@@ -2970,7 +2994,10 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			this.#focusedAgentId === undefined &&
 			(leftSegments.includes("pi") || rightSegments.includes("pi"))
 		) {
-			return Math.floor(nowMs / SPINNER_ADVANCE_MS);
+			// The brand spinner follows the shared clock. With a static spinner the brand's elapsed
+			// timer still advances once a second, and a brand fade repaints on its own frame cadence.
+			if (spinnerAnimated()) return Math.floor(nowMs / spinnerInterval());
+			return this.#brandFade !== null ? Math.floor(nowMs / BRAND_FADE_FRAME_MS) : Math.floor(nowMs / 1_000);
 		}
 		const includesTime = leftSegments.includes("time") || rightSegments.includes("time");
 		if (

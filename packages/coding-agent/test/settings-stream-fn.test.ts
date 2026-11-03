@@ -22,6 +22,13 @@ import {
 	resolveWebsocketPreference,
 } from "@oh-my-pi/pi-coding-agent/session/settings-stream-fn";
 
+/** Settings whose global (persisted) layer holds `storeResponses`; a runtime override would outrank the env var. */
+function persistedStore(value: boolean | undefined): Settings {
+	const settings = Settings.isolated();
+	if (value !== undefined) cfgProvidersMuseCodeStoreResponses.set(settings, value);
+	return settings;
+}
+
 function captureBase(): { fn: StreamFn; calls: Array<{ options?: SimpleStreamOptions }> } {
 	const calls: Array<{ options?: SimpleStreamOptions }> = [];
 	const fn: StreamFn = (_model, _context, options) => {
@@ -529,16 +536,11 @@ describe("createSettingsAwareStreamFn", () => {
 		};
 
 		it.each([
-			["stays off by default", {}, undefined, false],
-			["stores when the setting is on", { "providers.muse-code.storeResponses": true }, undefined, true],
-			[
-				"lets PI_MUSE_STORE_RESPONSES=1 override the setting",
-				{ "providers.muse-code.storeResponses": false },
-				"1",
-				true,
-			],
-		] as const)("%s", async (_label, values, env, expected) => {
-			expect(await wireStore(env, viaSession(Settings.isolated(values), museModel))).toBe(expected);
+			["stays off by default", undefined, undefined, false],
+			["stores when the setting is on", true, undefined, true],
+			["lets PI_MUSE_STORE_RESPONSES=1 override the setting", false, "1", true],
+		] as const)("%s", async (_label, stored, env, expected) => {
+			expect(await wireStore(env, viaSession(persistedStore(stored), museModel))).toBe(expected);
 		});
 
 		it("does not opt other storing hosts into retention", async () => {
