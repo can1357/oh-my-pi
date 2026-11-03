@@ -21,6 +21,7 @@ import type { SessionEntry, SessionMessageEntry } from "@oh-my-pi/pi-coding-agen
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { getTestModel } from "./helpers/model-fixtures";
+import { UnleasedSessionStorage } from "./helpers/unleased-session-storage";
 
 const openaiModel = getTestModel("openai", model => model.api === "openai-responses" && model.reasoning);
 const alternateOpenaiModel = getTestModel(
@@ -548,7 +549,8 @@ describe("AgentSession OpenAI Responses replay boundaries", () => {
 		const closeSpy = vi.fn();
 		session.providerSessionState.set("openai-codex-responses", { close: closeSpy } satisfies ProviderSessionState);
 
-		const mutatedSessionManager = await SessionManager.open(sessionFile, tempDir);
+		// Another process appends to the file this session has open.
+		const mutatedSessionManager = await SessionManager.open(sessionFile, tempDir, new UnleasedSessionStorage());
 		mutatedSessionManager.appendMessage({
 			role: "user",
 			content: "Externally appended follow-up",
@@ -587,7 +589,7 @@ describe("AgentSession OpenAI Responses replay boundaries", () => {
 		const closeSpy = vi.fn();
 		session.providerSessionState.set("openai-codex-responses", { close: closeSpy } satisfies ProviderSessionState);
 
-		const mutatedSessionManager = await SessionManager.open(sessionFile, tempDir);
+		const mutatedSessionManager = await SessionManager.open(sessionFile, tempDir, new UnleasedSessionStorage());
 		mutatedSessionManager.appendModelChange(modelSelector(openaiModel));
 		await mutatedSessionManager.flush();
 		expect(mutatedSessionManager.buildSessionContext().models.default).toBe(modelSelector(openaiModel));
@@ -619,7 +621,7 @@ describe("AgentSession OpenAI Responses replay boundaries", () => {
 		const closeSpy = vi.fn();
 		session.providerSessionState.set("openai-responses:openai", { close: closeSpy } satisfies ProviderSessionState);
 
-		const mutatedSessionManager = await SessionManager.open(sessionFile, tempDir);
+		const mutatedSessionManager = await SessionManager.open(sessionFile, tempDir, new UnleasedSessionStorage());
 		mutatedSessionManager.appendModelChange(modelSelector(alternateOpenaiModel));
 		await mutatedSessionManager.flush();
 		expect(mutatedSessionManager.buildSessionContext().models.default).toBe(modelSelector(alternateOpenaiModel));

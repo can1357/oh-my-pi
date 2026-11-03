@@ -28,11 +28,14 @@ describe("session runtime identity", () => {
 		await original.ensureOnDisk();
 		const file = original.getSessionFile();
 		if (!file) throw new Error("Expected a persisted session file");
+		// That build's process is gone before the next one resumes the session.
+		await original.close();
 
 		runAs(BUILD_B);
 		const resumed = await SessionManager.open(file, tempDir.path());
 		resumed.appendMessage({ role: "user", content: "second", timestamp: 2 });
 		await resumed.flush();
+		await resumed.close();
 
 		const reloaded = await SessionManager.open(file, tempDir.path());
 		expect(writers(reloaded.getEntries())).toEqual(["will/a", "beef"]);
