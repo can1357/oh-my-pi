@@ -1,5 +1,6 @@
 import type { GlobToolDetails } from "@oh-my-pi/pi-tui/tools/glob";
 import * as fs from "node:fs";
+import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import * as natives from "@oh-my-pi/pi-natives";
@@ -317,7 +318,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 			const timeoutSignal = AbortSignal.timeout(timeoutMs);
 			const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
 			const formatMatchPath = (matchPath: string, base: string, fileType?: natives.FileType): string => {
-				const hadTrailingSlash = matchPath.endsWith("/") || matchPath.endsWith("\\");
+				const hadTrailingSlash = matchPath.endsWith("/") || (path.sep === "\\" && matchPath.endsWith("\\"));
 				return formatPathRelativeToCwd(resolveSearchResultPath(base, matchPath), this.session.cwd, {
 					trailingSlash: fileType === natives.FileType.Dir || hadTrailingSlash,
 				});
@@ -357,15 +358,24 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 				const limited = listLimit.items;
 				const limitMeta = listLimit.meta;
 				if (limited.length === 0) {
-					const text = `No more files (skip=${skipCount} is past the end of ${files.length})`;
+					// A scan cut short has not found the end: say how far it got, not that the page is past it.
+					const parts = [
+						opts?.timedOut
+							? `No files after skip=${skipCount} among the ${files.length} found before the scan stopped`
+							: `No more files (skip=${skipCount} is past the end of ${files.length})`,
+					];
+					if (notice) parts.push(notice);
+					if (missingPathsNote) parts.push(missingPathsNote);
 					const empty: GlobToolDetails = {
 						scopePath,
 						fileCount: 0,
 						files: [],
-						truncated: false,
+						truncated: forceTruncated,
+						timedOut: opts?.timedOut || undefined,
 						cwd: this.session.cwd,
+						missingPaths: missingPaths.length > 0 ? missingPaths : undefined,
 					};
-					return toolResult(empty).text(text).useless().done();
+					return toolResult(empty).text(parts.join("\n")).useless().done();
 				}
 				const baseOutput = formatGroupedPaths(limited);
 				const trailingNotes: string[] = [];

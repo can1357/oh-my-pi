@@ -1061,22 +1061,42 @@ export interface GlobArgs {
 const GLOB_DEPTH = (value: string): boolean => /^[1-9]\d*$/u.test(value);
 
 /**
- * A `find -name` pattern the glob tool reads the same way: printable ASCII and `*` only. Not `?`
- * (find matches one character, glob one byte), bracket classes (POSIX classes, unmatched
- * brackets), braces (a glob alternation, literal to find), `**`, backslashes, `;` (glob's path
- * separator), slashes, or surrounding spaces (glob trims its paths).
+ * A `find -name` pattern the glob tool reads the same way: letters, digits, `.`, `_`, `-`, `+`,
+ * `=`, a non-leading `@`, and `*` (not `**`). Every other character is read differently by glob
+ * or by the path handling before it: `?` (find matches one character, glob one byte), brackets
+ * and braces (classes and alternations), `;`, `,` and spaces (path separators), quotes (stripped),
+ * `\` (a separator), `:` (a URL scheme), `~` (the home directory), and `/`.
  */
-const SAME_NAME_PATTERN = /^(?! )(?!.*\/)(?:[!-)+-:<->@-Z^-z|~ ]|\*(?!\*))+(?<! )$/u;
+const SAME_NAME_PATTERN = /^(?!@)(?:[A-Za-z0-9._+=@-]|\*(?!\*))+$/u;
 
 /**
- * A `find` root glob reads as the same directory: a relative or absolute path of printable ASCII
- * without glob characters, `;`, surrounding spaces, or a `..` segment (glob resolves it
- * lexically, find through symlinks), and not `/` (glob refuses to search it).
+ * A `find` or `fd` root glob reads as the same directory: a relative or absolute path of the
+ * characters {@link SAME_NAME_PATTERN} allows, without `*`, a leading `@` (a path shorthand), or
+ * a `..` segment (glob resolves it lexically, find through symlinks), and not `/` (glob refuses
+ * to search it).
  */
 function isPlainRoot(root: string): boolean {
-	if (!/^(?! )[!-)+-:<->@-Z^-z|~ ]+(?<! )$/u.test(root)) return false;
-	if (root.replace(/\/+$/u, "") === "") return false;
-	return !root.split("/").includes("..");
+	if (!/^(?!@)[A-Za-z0-9._+=@/-]+$/u.test(root)) return false;
+	return !root.split("/").includes("..") && root.replace(/\/+$/u, "") !== "";
+}
+
+/**
+ * Whether no root lies inside another (`a a`, `a a/b`, `. a`): find walks each root and lists a
+ * file below two of them twice, where glob lists it once. Several roots must be relative, so two
+ * spellings of one directory (`/abs/cwd` and `.`) cannot hide.
+ */
+function rootsDisjoint(roots: readonly string[]): boolean {
+	if (roots.length < 2) return true;
+	if (roots.some(root => root.startsWith("/"))) return false;
+	const normalized = roots.map(root => {
+		const segments = root.split("/").filter(segment => segment !== "" && segment !== ".");
+		return segments.join("/");
+	});
+	return normalized.every((root, i) =>
+		normalized.every(
+			(other, j) => i === j || (root !== "" && other !== "" && root !== other && !other.startsWith(`${root}/`)),
+		),
+	);
 }
 
 /** Whether the shell-style `pattern` matches `name`, as `find -name` (fnmatch without FNM_PERIOD) does. */
@@ -1176,6 +1196,7 @@ function findAsGlob(command: SimpleCommand, filesystem: StepFilesystem | undefin
 	if (names.length === 0) return undefined;
 	// `-print` binds to the last `-name` alone unless the alternatives are parenthesized.
 	if (printed && names.length > 1 && !grouped) return undefined;
+	if (!rootsDisjoint(roots)) return undefined;
 	for (const root of roots) {
 		if (!isPlainRoot(root)) return undefined;
 		// find lists a root the patterns match, and prunes a `.git` root; glob never lists its roots.
@@ -1234,7 +1255,7 @@ function fdAsGlob(command: SimpleCommand, filesystem: StepFilesystem | undefined
 	if (pattern !== "" && !SAME_NAME_PATTERN.test(pattern)) return undefined;
 	if (pattern !== "" && !has("s", "case-sensitive") && !/[A-Z]/u.test(pattern)) return undefined;
 	const roots = rootWords.length > 0 ? rootWords.map(word => word.value) : ["."];
-	if (!roots.every(isPlainRoot)) return undefined;
+	if (!roots.every(isPlainRoot) || !rootsDisjoint(roots)) return undefined;
 	if (filesystem && roots.some(root => filesystem.kind(root, true) !== "directory")) return undefined;
 	const depthValue = given.get("--max-depth") ?? given.get("-d");
 	const name = pattern === "" ? "*" : globMode ? pattern : `*${pattern}*`;

@@ -976,6 +976,45 @@ describe("dedicated tool capability", () => {
 	});
 
 	it.each([
+		// #17840 round 3: characters the glob tool's path handling reads differently — `,` and spaces
+		// separate paths, quotes are stripped, `~` is the home directory, `:` starts a URL or is
+		// dropped, a leading `@` is a shorthand, `\` is a separator.
+		"find r -name 'a,b'",
+		"find r -name 'a b'",
+		"find 'a,b' -name dune",
+		"find 'my dir' -name dune",
+		"find '~/marker' -name dune",
+		"find local: -name dune",
+		"find ':./names' -name dune",
+		"find '\"start' -name 'end\"'",
+		"find '@/abs' -name dune",
+		"find r -name 'a\\z'",
+		"fd -I --glob 'a,b' r",
+		"fd -I --glob 'A b' r",
+		// find walks each root and lists a file below two of them twice; glob lists it once.
+		"find fast fast -name kept",
+		"find a a/b -name dune",
+		"find . src -name dune",
+		"find ./src src/ -name dune",
+		"find /abs/src src -name dune",
+		"fd -I --glob 'A*' r r",
+	])("does not refuse %s (#17840 round 3)", command => {
+		expect(decide(command)).toBeUndefined();
+	});
+
+	it.each([
+		["find src lib -name '*.ts'", { path: "src/**/*.ts;lib/**/*.ts", hidden: true, gitignore: false, git: true }],
+		[
+			"find node_modules/@types -name 'index.d.ts'",
+			{ path: "node_modules/@types/**/index.d.ts", hidden: true, gitignore: false, git: true },
+		],
+		["find src src2 -name dune", { path: "src/**/dune;src2/**/dune", hidden: true, gitignore: false, git: true }],
+	])("still names the glob call for %s (#17840 round 3)", (command, args) => {
+		const result = checkBashInterception(command, tools, DEFAULT_BASH_INTERCEPTOR_RULES);
+		expect(result.message).toContain(`The same listing: glob ${JSON.stringify(args)}`);
+	});
+
+	it.each([
 		[
 			"find r \\( -name A -o -name B \\) -print",
 			{ path: "r/**/A;r/**/B", hidden: true, gitignore: false, git: true },

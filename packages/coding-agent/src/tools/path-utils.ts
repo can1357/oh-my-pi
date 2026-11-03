@@ -524,7 +524,9 @@ export function formatPathRelativeToCwd(
 	const resolvedPath = path.isAbsolute(expanded) ? path.resolve(expanded) : path.resolve(cwd, expanded);
 	const relative = path.relative(resolvedCwd, resolvedPath);
 	const isWithinCwd = relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
-	let displayPath = normalizePosixPath(isWithinCwd ? relative || "." : resolvedPath);
+	const nativePath = isWithinCwd ? relative || "." : resolvedPath;
+	// Only Windows separates with `\`; elsewhere it is part of a file name (`a\z`).
+	let displayPath = path.sep === "\\" ? normalizePosixPath(nativePath) : nativePath;
 	if (options.trailingSlash && displayPath !== "." && !displayPath.endsWith("/")) {
 		displayPath += "/";
 	}

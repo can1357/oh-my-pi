@@ -85,6 +85,31 @@ describe("glob depth", () => {
 		expect(past.content.find(c => c.type === "text")?.text).toContain("past the end");
 	});
 
+	it("reports a timeout, not the end of the listing, when a page past a cut-short scan is empty", async () => {
+		const tool = new GlobTool(session, {
+			timeoutMs: 100,
+			operations: {
+				exists: () => true,
+				glob: pattern => (pattern.includes("**") ? Promise.withResolvers<string[]>().promise : ["kept"]),
+			},
+		});
+		// A custom backend gets one call per listed root: `fast` answers, `slow` never does.
+		const params = { path: ["fast/*", "slow/**/*"], skip: 100 } as unknown as Parameters<typeof tool.execute>[1];
+		const result = await tool.execute("glob-skip-timeout", params);
+		const text = result.content.find(c => c.type === "text")?.text ?? "";
+		expect(result.details?.timedOut).toBe(true);
+		expect(result.details?.truncated).toBe(true);
+		expect(text).not.toContain("past the end");
+		expect(text).toContain("timed out");
+	});
+
+	it.skipIf(path.sep === "\\")("lists a file name holding a backslash as it is on disk", async () => {
+		await Bun.write(path.join(dir, "names", "a\\z"), "x\n");
+		const listed = await files({ path: "names/*" });
+		expect(listed).toEqual(["names/a\\z"]);
+		await expect(fs.stat(path.join(dir, listed![0]))).resolves.toBeDefined();
+	});
+
 	it("bounds a custom backend's URL-rooted results by depth", async () => {
 		const tool = new GlobTool(session, {
 			operations: {
