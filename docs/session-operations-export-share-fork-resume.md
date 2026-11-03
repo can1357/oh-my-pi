@@ -553,9 +553,14 @@ the subagents of its own that go on or could not, the messages and results it ha
 not read, and the tools of its spawn that the new process does not have (a tool
 defined in the parent's eval kernel or by a closure). Its result reaches its
 parent as the job's ordinary `async-result`, so a lane receives its arms' results
-and the root receives the lanes'. The TUI names the subagents that go on and the
-ones that do not, with the reason: an isolated run (never revived), a subagent
-that finished before the teardown stopped it, or one whose transcript is missing.
+and the root receives the lanes'. A parent subagent that finished before the
+restart, or is still reviving, is made live before its child's result is
+delivered. Queued messages and unread results are carried whole. A record is
+resumed only by the session that wrote it (a fork copies the entry and ignores
+it), and a record a startup did not consume is resumed by the next one. The TUI
+names the subagents that go on and the ones that do not, with the reason: an
+isolated run (never revived), a subagent that finished before the teardown
+stopped it, one whose transcript is missing, or one whose job could not start.
 
 `/exit` and a crash are not covered: `/exit` records nothing, and a crash leaves
 transcripts that `omp --restore` already resumes.

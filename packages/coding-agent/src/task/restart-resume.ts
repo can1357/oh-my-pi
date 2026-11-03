@@ -42,9 +42,6 @@ import { cfgTaskMaxRuntimeMs } from "./settings";
 export const RESTART_SUBAGENTS_CUSTOM_TYPE = "restart_subagents";
 export const RESTART_SUBAGENTS_RESUMED_CUSTOM_TYPE = "restart_subagents_resumed";
 
-/** Longest queued message or unread job result carried into a note, in characters. */
-const CARRIED_TEXT_MAX_CHARS = 4_000;
-
 /** A tool call the restart stopped, as the note names it. */
 export interface RestartInterruptedToolCall {
 	toolName: string;
@@ -70,12 +67,10 @@ export interface RestartSubagent {
 /** The `restart_subagents` entry. */
 export interface RestartSubagentsData {
 	restartId: string;
+	/** The session that recorded it; a fork copies the entry under another id. */
+	sessionId: string;
 	recordedAt: string;
 	subagents: RestartSubagent[];
-}
-
-function clip(text: string): string {
-	return text.length > CARRIED_TEXT_MAX_CHARS ? `${text.slice(0, CARRIED_TEXT_MAX_CHARS)}…` : text;
 }
 
 function contentText(content: unknown): string {
@@ -135,14 +130,13 @@ function describeRunningSubagent(
 		.filter(job => job.status !== "running" && !manager?.isJobResultConsumed(job.id))
 		.flatMap(job => {
 			const text = job.resultText ?? job.errorText;
-			return text ? [{ id: job.id, text: clip(text) }] : [];
+			return text ? [{ id: job.id, text }] : [];
 		});
 	// The queues are readable only on a session homed on this thread, which every in-process subagent is.
 	const pendingMessages = isLocalAgentSession(session)
 		? [...session.agent.peekSteeringQueue(), ...session.agent.peekFollowUpQueue()]
 				.map(queuedMessageText)
 				.filter(Boolean)
-				.map(clip)
 		: [];
 	return {
 		id: ref.id,
@@ -174,6 +168,7 @@ export function recordRestartSubagents(session: AgentSession): RestartSubagentsD
 	if (subagents.length === 0) return undefined;
 	const data: RestartSubagentsData = {
 		restartId: `${Date.now().toString(36)}-${process.pid}`,
+		sessionId: sessionManager.getSessionId(),
 		recordedAt: new Date().toISOString(),
 		subagents,
 	};
@@ -190,9 +185,13 @@ function readRestartData(entry: SessionEntry): RestartSubagentsData | undefined 
 	return data as RestartSubagentsData;
 }
 
-/** The branch's last `restart_subagents` entry, unless a later entry consumed it. */
-export function pendingRestartSubagents(entries: readonly SessionEntry[]): RestartSubagentsData | undefined {
+/**
+ * Every `restart_subagents` entry on the branch that no later entry consumed, oldest
+ * first: a startup that stopped before consuming one leaves it for the next.
+ */
+export function pendingRestartSubagents(entries: readonly SessionEntry[]): RestartSubagentsData[] {
 	const consumed = new Set<string>();
+	const pending: RestartSubagentsData[] = [];
 	for (let index = entries.length - 1; index >= 0; index--) {
 		const entry = entries[index]!;
 		if (entry.type !== "custom") continue;
@@ -202,9 +201,9 @@ export function pendingRestartSubagents(entries: readonly SessionEntry[]): Resta
 			continue;
 		}
 		const data = readRestartData(entry);
-		if (data) return consumed.has(data.restartId) ? undefined : data;
+		if (data && !consumed.has(data.restartId)) pending.unshift(data);
 	}
-	return undefined;
+	return pending;
 }
 
 /**
@@ -315,8 +314,8 @@ function depthOf(id: string, byId: ReadonlyMap<string, RestartSubagent>): number
 }
 
 /**
- * Resume the subagents the last `/restart` of `session` recorded (see the module
- * docs). Does nothing when the session's branch holds no unconsumed record.
+ * Resume the subagents the `/restart`s of `session` recorded (see the module docs).
+ * Does nothing when the session's branch holds no unconsumed record of its own.
  */
 export async function resumeRestartedSubagents(
 	session: AgentSession,
@@ -325,23 +324,27 @@ export async function resumeRestartedSubagents(
 	const outcome: RestartResumeOutcome = { resumed: [], notResumed: [] };
 	const sessionFile = session.sessionManager.getSessionFile();
 	if (!sessionFile) return outcome;
-	const record = pendingRestartSubagents(session.sessionManager.getBranch());
-	if (!record) return outcome;
+	// A fork copies the entries under a new session id; its subagents belong to the source.
+	const records = pendingRestartSubagents(session.sessionManager.getBranch()).filter(
+		record => record.sessionId === session.sessionManager.getSessionId(),
+	);
+	if (records.length === 0) return outcome;
 	const registry = AgentRegistry.global();
 	await ensurePersistedRoster(registry, sessionFile);
 	const transcriptOf = (id: string): string | undefined => {
 		const file = registry.get(id)?.sessionFile;
 		return file && sessionFileBelongsToRoot(file, sessionFile) ? file : undefined;
 	};
-	// A record whose subagents have no transcript here came with copied entries (a
-	// fork of the restarted session): its subagents belong to the source session.
-	if (!record.subagents.some(sub => transcriptOf(sub.id))) return outcome;
 	// Consume before anything runs: a resumed subagent that the next restart stops is
-	// recorded again by that restart, never resumed twice from this record.
-	session.sessionManager.appendCustomEntry(RESTART_SUBAGENTS_RESUMED_CUSTOM_TYPE, { restartId: record.restartId });
+	// recorded again by that restart, never resumed twice from these records.
+	for (const record of records) {
+		session.sessionManager.appendCustomEntry(RESTART_SUBAGENTS_RESUMED_CUSTOM_TYPE, { restartId: record.restartId });
+	}
+	// A later record describes a subagent's later stop.
+	const byId = new Map(records.flatMap(record => record.subagents).map(sub => [sub.id, sub]));
+	const subagents = [...byId.values()];
 	const manager = session.asyncJobManager;
-	const byId = new Map(record.subagents.map(sub => [sub.id, sub]));
-	const order = [...record.subagents].sort((a, b) => depthOf(a.id, byId) - depthOf(b.id, byId));
+	const order = [...subagents].sort((a, b) => depthOf(a.id, byId) - depthOf(b.id, byId));
 	if (!manager) {
 		for (const sub of order) {
 			outcome.notResumed.push({
@@ -395,7 +398,7 @@ export async function resumeRestartedSubagents(
 						? new Set([...live.getAllToolNames(), ...live.getMountedXdevToolNames()])
 						: undefined;
 					const missingTools = available ? init.tools.filter(name => !available.has(name)) : [];
-					const children = record.subagents.filter(child => child.parentId === sub.id);
+					const children = subagents.filter(child => child.parentId === sub.id);
 					const result = await runSubagentFollowUpTurn({
 						id: sub.id,
 						agent: persistedAgentDefinition(ref.displayName, init),
@@ -419,6 +422,22 @@ export async function resumeRestartedSubagents(
 						artifactsDir: path.dirname(sessionFileOfRef),
 						maxRuntimeMs: cfgTaskMaxRuntimeMs.get(session.settings),
 					});
+					// The result is delivered to the parent's session, which must be live and
+					// fully revived by then: a parent subagent that finished before the restart
+					// is parked, and one being resumed may still be reviving. `ensureLive`
+					// revives the first and joins the second's revival.
+					const parent = ref.parentId ? AgentRegistry.global().get(ref.parentId) : undefined;
+					if (parent?.kind === "sub") {
+						try {
+							await AgentLifecycleManager.global().ensureLive(parent.id);
+						} catch (error) {
+							logger.warn("Could not revive the parent of a resumed subagent; its result waits in the job", {
+								id: sub.id,
+								parentId: parent.id,
+								error: error instanceof Error ? error.message : String(error),
+							});
+						}
+					}
 					const text = formatTaskResultSummary(result, { totalDurationMs: result.durationMs });
 					const structuredOutput = result.structuredOutput;
 					if (result.aborted || result.exitCode !== 0 || result.error !== undefined) {

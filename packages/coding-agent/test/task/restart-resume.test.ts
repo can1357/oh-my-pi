@@ -41,6 +41,7 @@ const NAMES = ["Alpha", "Beta", "Lane", "Arm"] as const;
 const WORKERS = ["Alpha", "Beta", "Arm"] as const;
 const ALL = ["Alpha", "Beta", "Lane", "Lane.Arm"] as const;
 const nameOf = (id: string): string => id.split(".").at(-1)!;
+const LONG_MESSAGE = `Queued for Alpha: ${"keep every word of this. ".repeat(220)}END-OF-QUEUED-MESSAGE`;
 
 let savedEnv: Record<string, string | undefined> = {};
 let root: string;
@@ -96,6 +97,8 @@ function agentOf(context: Context): string | undefined {
 }
 
 const notesSeen = new Map<string, string>();
+/** When set, Lane answers right after spawning its arm, so only the arm runs at the restart. */
+let laneFinishesEarly = false;
 
 /**
  * Root: spawn Alpha, Beta and Lane. Lane: spawn Arm, then run bash. Every worker:
@@ -145,6 +148,10 @@ function handler(context: Context) {
 				},
 			],
 		};
+	}
+	if (name === "Lane" && laneFinishesEarly) {
+		const armDone = context.messages.some(message => textOf(message.content).includes("Arm resumed"));
+		return { content: [armDone ? "Lane received Arm resumed" : "Lane done"] };
 	}
 	if (!context.messages.some(message => message.role === "toolResult" && message.toolName === "bash")) {
 		return {
@@ -257,22 +264,76 @@ async function runUntilRestart(
 	open: (sessionManager: SessionManager) => Promise<AgentSession>,
 	cwd: string,
 	record: boolean,
+	running: readonly string[] = ALL,
 ): Promise<string> {
 	const first = await open(SessionManager.create(cwd, path.join(root, "sessions")));
 	await first.prompt("Fan out.");
-	await until(() => ALL.every(inBash), "every subagent to be inside bash");
+	await until(() => running.every(inBash), "every subagent to be inside bash");
+	if (!running.includes("Lane")) {
+		await until(() => AgentRegistry.global().get("Lane")?.status === "idle", "the lane to finish");
+	}
 	const mainFile = first.sessionManager.getSessionFile()!;
+	// A long message queued for Alpha that its stopped turn never reads; the note must carry all of it.
+	await AgentRegistry.global().get("Alpha")!.session!.steer(LONG_MESSAGE);
 	// What `/restart` does: record (the fix), then the teardown.
 	if (record)
 		expect(
 			recordRestartSubagents(first)
 				?.subagents.map(sub => sub.id)
 				.sort(),
-		).toEqual([...ALL].sort());
+		).toEqual([...running].sort());
 	await first.dispose();
 	resetProcessGlobals();
 	return mainFile;
 }
+
+it("names every recorded subagent whose transcript is gone instead of resuming nothing silently", async () => {
+	notesSeen.clear();
+	const { cwd, authStorage, open } = await harness();
+	try {
+		const mainFile = await runUntilRestart(open, cwd, true);
+		await fs.rm(mainFile.slice(0, -".jsonl".length), { recursive: true, force: true });
+		const second = await open(await SessionManager.open(mainFile));
+		try {
+			const outcome = await resumeRestartedSubagents(second);
+			expect(outcome.resumed).toEqual([]);
+			expect(outcome.notResumed.map(entry => entry.id).sort()).toEqual([...ALL].sort());
+			for (const entry of outcome.notResumed) expect(entry.reason).toContain("transcript was not found");
+		} finally {
+			await second.dispose();
+		}
+	} finally {
+		authStorage.close();
+	}
+}, 60_000);
+
+it("delivers a resumed arm's result to its lane that finished before the restart", async () => {
+	notesSeen.clear();
+	laneFinishesEarly = true;
+	const { cwd, authStorage, open } = await harness();
+	try {
+		const mainFile = await runUntilRestart(open, cwd, true, ["Alpha", "Beta", "Lane.Arm"]);
+		const second = await open(await SessionManager.open(mainFile));
+		try {
+			const outcome = await resumeRestartedSubagents(second);
+			expect([...outcome.resumed].sort()).toEqual(["Alpha", "Beta", "Lane.Arm"]);
+			const manager = second.asyncJobManager!;
+			await manager.getJob("Lane.Arm")!.promise;
+			expect(manager.getJob("Lane.Arm")!.ownerId).toBe("Lane");
+			// The parked lane is revived to receive its arm's result, and answers it.
+			const laneFile = AgentRegistry.global().get("Lane")!.sessionFile!;
+			await until(
+				() => readFileSync(laneFile, "utf8").includes("Lane received Arm resumed"),
+				"the finished lane to receive its arm's result",
+			);
+		} finally {
+			await second.dispose();
+		}
+	} finally {
+		laneFinishesEarly = false;
+		authStorage.close();
+	}
+}, 60_000);
 
 it("resumes every running subagent, nested ones under their lane, after the restart teardown", async () => {
 	notesSeen.clear();
@@ -305,6 +366,9 @@ it("resumes every running subagent, nested ones under their lane, after the rest
 			// One note each, naming the bash call the restart stopped.
 			for (const name of WORKERS) expect(notesSeen.get(name)).toContain(`echo partial-${name}; sleep 30`);
 			expect(notesSeen.get("Lane")).toContain("Your subagents Lane.Arm were stopped too");
+			// The message queued for Alpha reaches it whole (it is longer than 5,000 characters).
+			expect(LONG_MESSAGE.length).toBeGreaterThan(5_000);
+			expect(notesSeen.get("Alpha")).toContain(LONG_MESSAGE);
 
 			// The record is consumed: a second startup resumes nothing.
 			expect(await resumeRestartedSubagents(second)).toEqual({ resumed: [], notResumed: [] });
