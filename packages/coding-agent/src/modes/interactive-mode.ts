@@ -236,8 +236,11 @@ import {
 import { isNativeRendering, onNativeRenderingChange } from "@oh-my-pi/pi-tui/native/state";
 import {
 	isTranscriptPresentable,
+	messageBlock,
+	onTranscriptBlockIdChanged,
 	onTranscriptPresentationRedrawn,
 	onTranscriptPresentersChanged,
+	PresentedBlock,
 	setTranscriptPresenters,
 } from "@oh-my-pi/pi-tui/chat/transcript-presentation";
 import { renderTreeList } from "@oh-my-pi/pi-tui/render/tree-list";
@@ -1498,9 +1501,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	compactionQueueOrigin: ConversationPosition | undefined = undefined;
 	pendingTools = new Map<string, ToolExecutionHandle>();
 	transcriptMessageComponents = new WeakMap<AgentMessage, Component>();
-	pendingBashComponents: BashExecutionComponent[] = [];
+	pendingBashComponents: PresentedBlock<BashExecutionComponent>[] = [];
 	bashComponent: BashExecutionComponent | undefined = undefined;
-	pendingPythonComponents: EvalExecutionComponent[] = [];
+	pendingPythonComponents: PresentedBlock<EvalExecutionComponent>[] = [];
 	pythonComponent: EvalExecutionComponent | undefined = undefined;
 	isPythonMode = false;
 	streamingComponent: AssistantMessageComponent | undefined = undefined;
@@ -2841,6 +2844,13 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.ui.addStartListener(() => {
 				if (this.#redrawReplay) this.#queueRedrawReplay();
 			}),
+			// A recorded `!`/`$` run or skill prompt takes its recorded id: it stays in the run it was added in.
+			onTranscriptBlockIdChanged((from, to) => {
+				const run = this.#blockRun.get(from);
+				if (run === undefined) return;
+				this.#blockRun.delete(from);
+				this.#blockRun.set(to, run);
+			}),
 		);
 		this.#applyTranscriptPresenters();
 		this.#eventBusUnsubscribers.push(() => {
@@ -3960,7 +3970,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		// instead of settling and retiring into immutable scrollback mid-preflight
 		// where reconcile could no longer swap it out (issue #11217).
 		for (const component of this.#optimisticSkillMessageComponents) {
-			if (component instanceof SkillMessageComponent) component.markTranscriptBlockPending();
+			const card = component instanceof PresentedBlock ? component.inner : component;
+			if (card instanceof SkillMessageComponent) card.markTranscriptBlockPending();
 		}
 		this.ensureLoadingAnimation();
 		this.ui.requestRender();
@@ -3986,7 +3997,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		const present = components.filter(component => this.chatContainer.children.includes(component));
 		if (present.length > 0 && present.every(component => !this.chatContainer.canRemoveBlock(component))) {
 			for (const component of present) {
-				if (component instanceof SkillMessageComponent) component.markTranscriptBlockFinalized();
+				const card = component instanceof PresentedBlock ? component.inner : component;
+				if (card instanceof SkillMessageComponent) card.markTranscriptBlockFinalized();
+				// Presenters see, and refresh by, the recorded message, as the resumed transcript does.
+				if (component instanceof PresentedBlock && message.role === "custom") {
+					component.setBlock(messageBlock(message));
+				}
 			}
 			return;
 		}
@@ -4694,11 +4710,16 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#runEnded = true;
 	}
 
-	/** The ids presenters see for the transcript's blocks; a call whose id has not arrived (`""`) has none to track. */
+	/**
+	 * The ids presenters see for the transcript's blocks, and for `!`/`$` runs still queued outside it
+	 * (they belong to the run they were issued in); a call whose id has not arrived (`""`) has none to track.
+	 */
 	*#transcriptBlockIds(): Generator<string> {
-		for (const block of this.chatContainer.children) {
-			if (!isTranscriptPresentable(block)) continue;
-			for (const id of block.transcriptBlockIds()) if (id) yield id;
+		for (const container of [this.chatContainer, this.pendingShellContainer]) {
+			for (const block of container.children) {
+				if (!isTranscriptPresentable(block)) continue;
+				for (const id of block.transcriptBlockIds()) if (id) yield id;
+			}
 		}
 	}
 
@@ -4740,10 +4761,12 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	refreshTranscriptPresentation(ids?: ReadonlySet<string>): void {
-		this.redrawTranscriptBlocks(
-			this.chatContainer.children,
-			block => isTranscriptPresentable(block) && block.refreshTranscriptPresentation(ids),
-		);
+		const refresh = (block: Component) => isTranscriptPresentable(block) && block.refreshTranscriptPresentation(ids);
+		this.redrawTranscriptBlocks(this.chatContainer.children, refresh);
+		// `!`/`$` runs queued while the agent streams wait outside the transcript, always live.
+		let pendingChanged = false;
+		for (const block of this.pendingShellContainer.children) pendingChanged = refresh(block) || pendingChanged;
+		if (pendingChanged) this.ui.requestRender();
 	}
 
 	redrawTranscriptBlocks(blocks: readonly Component[], redraw: (block: Component) => boolean): void {

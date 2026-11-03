@@ -15,6 +15,7 @@ import { generateRoomKey, importRoomKey } from "@oh-my-pi/pi-coding-agent/collab
 import { CollabGuestLink } from "@oh-my-pi/pi-coding-agent/collab/guest";
 import { COLLAB_PROTO, type CollabFrame, formatCollabLink } from "@oh-my-pi/pi-coding-agent/collab/protocol";
 import { CollabSocket } from "@oh-my-pi/pi-coding-agent/collab/relay-client";
+import * as bashExecutor from "@oh-my-pi/pi-coding-agent/exec/bash-executor";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
@@ -930,5 +931,252 @@ describe("extension transcript presenters", () => {
 		expect(asked).toBe(before);
 		expect(resets).not.toHaveBeenCalled();
 		expect(chat()).toContain("ROW-call1");
+	});
+
+	it("presents advisor, skill and background-job blocks as message blocks, full again when expanded", async () => {
+		// Regression guard: non-tool cards staying full while every tool call is compact, or a
+		// compact one that Ctrl+O cannot open.
+		await installExtensions(
+			presenter(block =>
+				block.type === "message" && block.message.role === "custom"
+					? { compact: { label: `MSG-${block.message.customType}` } }
+					: undefined,
+			),
+		);
+		const custom = (customType: string, details: unknown, timestamp: number) =>
+			session.sessionManager.appendMessage({
+				role: "custom",
+				customType,
+				content: "body",
+				display: true,
+				details,
+				timestamp,
+			});
+		custom("advisor", { notes: [{ note: "ADVISOR-NOTE" }] }, 10);
+		custom("skill-prompt", { name: "demo-skill", path: "/skills/demo/SKILL.md", lineCount: 1 }, 20);
+		custom("async-result", { jobId: "bg-7", type: "bash", durationMs: 1200 }, 30);
+		await start();
+		await mode.renderInitialMessages();
+		for (const type of ["advisor", "skill-prompt", "async-result"]) expect(chat()).toContain(`MSG-${type}`);
+		expect(chat()).not.toContain("ADVISOR-NOTE");
+		expect(chat()).not.toContain("Background job completed");
+
+		mode.setToolsExpanded(true);
+		expect(chat()).not.toContain("MSG-");
+		expect(chat()).toContain("ADVISOR-NOTE");
+		expect(chat()).toContain("Background job completed");
+	});
+
+	/** Answer every `!` run with `LIVE-OUT` instead of running a shell, once `ready` (if any) resolves. */
+	function stubShell(ready?: () => Promise<void>): void {
+		vi.spyOn(bashExecutor, "executeBash").mockImplementation(async () => {
+			await ready?.();
+			return {
+				output: "LIVE-OUT",
+				exitCode: 0,
+				cancelled: false,
+				truncated: false,
+				totalLines: 1,
+				totalBytes: 8,
+				outputLines: 1,
+				outputBytes: 8,
+			};
+		});
+	}
+
+	/** Run `command` as a `!` run while the agent streams: it waits outside the transcript. */
+	async function runBashMidRun(command: string): Promise<void> {
+		Object.defineProperty(session, "isStreaming", { configurable: true, get: () => true });
+		try {
+			await mode.handleBashCommand(command);
+		} finally {
+			Reflect.deleteProperty(session, "isStreaming");
+		}
+	}
+
+	it("gives a live `!` run the id its resumed block gets", async () => {
+		// Regression guard: a presenter keying its choice by block id losing it on resume, because the
+		// live block and the recorded message disagree on the id.
+		const ids: string[] = [];
+		await installExtensions(pi => {
+			pi.registerTranscriptPresenter(block => {
+				if (block.type === "message" && block.message.role === "bashExecution") ids.push(block.id);
+				return undefined;
+			});
+		});
+		stubShell();
+		await start();
+		await mode.handleBashCommand("echo live");
+		mode.chatContainer.render(120);
+		const recorded = session.sessionManager
+			.getEntries()
+			.flatMap(entry => (entry.type === "message" && entry.message.role === "bashExecution" ? [entry.message] : []));
+		expect(recorded).toHaveLength(1);
+		const recordedId = String(recorded[0]!.timestamp);
+		expect(ids.at(-1)).toBe(recordedId);
+
+		ids.length = 0;
+		await mode.renderInitialMessages();
+		mode.chatContainer.render(120);
+		expect(ids).toEqual([recordedId]);
+	});
+
+	it("asks a `!` run issued mid-run again when that run settles, before it moves into the transcript", async () => {
+		// Regression guard: the settled re-ask visiting only the transcript, so a `!` run waiting
+		// outside it kept the answer it got mid-run and carried that stale drawing into the transcript.
+		let label = "BEFORE-ROW";
+		const { startRun, endRun } = await runHarness(pi => {
+			pi.registerTranscriptPresenter(block =>
+				block.type === "message" && block.message.role === "bashExecution" ? { compact: { label } } : undefined,
+			);
+			pi.on("agent_end", () => {
+				label = "AFTER-ROW";
+			});
+		});
+		stubShell();
+		startRun();
+		await runBashMidRun("echo live");
+		const pending = () => plainRows(mode.pendingShellContainer.render(120)).join("\n");
+		expect(pending()).toContain("BEFORE-ROW");
+
+		await endRun();
+		expect(pending()).toContain("AFTER-ROW");
+		mode.flushPendingBashComponents();
+		expect(chat()).toContain("AFTER-ROW");
+		expect(chat()).not.toContain("BEFORE-ROW");
+	});
+
+	it("leaves a `!` run still waiting from an earlier run alone when the next run settles", async () => {
+		// Regression guard: a queued `!` run counting as whichever run is current, so every later
+		// run's settle asked it again until a submission moved it into the transcript.
+		let asked = 0;
+		const { startRun, endRun } = await runHarness(
+			presenter(block => {
+				if (block.type === "message" && block.message.role === "bashExecution") asked++;
+				return undefined;
+			}),
+		);
+		stubShell();
+		startRun();
+		await runBashMidRun("echo live");
+		await endRun();
+
+		startRun();
+		asked = 0;
+		await endRun();
+		expect(asked).toBe(0);
+	});
+
+	it("keeps a `!` run in the run it was issued in when the session records it later", async () => {
+		// Regression guard: recording a run swaps its provisional id for the recorded one, so a run
+		// recorded after the next run started counted as that run's and its settle asked it again.
+		let asked = 0;
+		const entered = Promise.withResolvers<void>();
+		const gate = Promise.withResolvers<void>();
+		const { startRun, endRun } = await runHarness(
+			presenter(block => {
+				if (block.type === "message" && block.message.role === "bashExecution") asked++;
+				return undefined;
+			}),
+		);
+		stubShell(() => {
+			entered.resolve();
+			return gate.promise;
+		});
+		startRun();
+		const ran = runBashMidRun("echo live");
+		await entered.promise;
+		await endRun();
+
+		startRun();
+		gate.resolve();
+		await ran;
+		asked = 0;
+		await endRun();
+		expect(asked).toBe(0);
+	});
+
+	it("draws a `!` run in full while every block is expanded, live and resumed", async () => {
+		// Regression guard: Ctrl+O opening every block but a `!` run, which a presenter kept compact.
+		await installExtensions(
+			presenter(block =>
+				block.type === "message" && block.message.role === "bashExecution"
+					? { compact: { label: "RUN-ROW" } }
+					: undefined,
+			),
+		);
+		await start();
+		mode.setToolsExpanded(true);
+		await mode.handleBashCommand("echo live");
+		expect(chat()).not.toContain("RUN-ROW");
+		expect(chat()).toContain("$ echo live");
+
+		await mode.renderInitialMessages();
+		expect(chat()).not.toContain("RUN-ROW");
+		expect(chat()).toContain("$ echo live");
+	});
+
+	it("replays a retired message block when the presenter's answer for it changes", async () => {
+		// Regression guard: a message block's refresh comparing against an answer it never drew,
+		// so `refreshTranscript` left its old compact row in scrollback.
+		let hidden = false;
+		const { runner } = await installExtensions(
+			presenter(block =>
+				block.type === "message" && block.message.role === "custom"
+					? hidden
+						? "hidden"
+						: { compact: { label: "MSG-ROW" } }
+					: undefined,
+			),
+		);
+		appendReply("First reply.", 1);
+		session.sessionManager.appendMessage({
+			role: "custom",
+			customType: "advisor",
+			content: "body",
+			display: true,
+			details: { notes: [] },
+			timestamp: 10,
+		});
+		for (let index = 0; index < 20; index++) appendReply(`Filler paragraph ${index}.`, 100 + index);
+		term.resize(120, 12);
+		await start();
+		await mode.renderInitialMessages();
+		const buffer = () => plainRows(term.getScrollBuffer()).join("\n");
+		await term.waitForRender(() => screen().includes("Filler paragraph 19.") && buffer().includes("MSG-ROW"));
+
+		const resets = vi.spyOn(mode.ui, "resetDisplay");
+		hidden = true;
+		runner.getUIContext().refreshTranscript(["10"]);
+		expect(resets).toHaveBeenCalledTimes(1);
+		await term.waitForRender(() => !buffer().includes("MSG-ROW"));
+		expect(buffer()).not.toContain("MSG-ROW");
+		expect(buffer()).toContain("First reply.");
+	});
+
+	it("draws a compact `!` run's command without its control sequences", async () => {
+		// Regression guard: omp's own compact head writing a recorded command's escape sequences
+		// (a terminal title, a bell) straight to the terminal.
+		await installExtensions(
+			presenter(block =>
+				block.type === "message" && block.message.role === "bashExecution" ? "compact" : undefined,
+			),
+		);
+		session.sessionManager.appendMessage({
+			role: "bashExecution",
+			command: "echo \x1b]0;PWNED\x07hi\tthere",
+			output: "OUT",
+			exitCode: 0,
+			cancelled: false,
+			truncated: false,
+			timestamp: 10,
+		});
+		await start();
+		await mode.renderInitialMessages();
+		const rows = mode.chatContainer.render(120).join("\n");
+		expect(rows).not.toContain("\x07");
+		expect(rows).not.toContain("\x1b]0;");
+		expect(Bun.stripANSI(rows)).toContain("echo hi there");
+		expect(Bun.stripANSI(rows)).not.toContain("OUT");
 	});
 });
