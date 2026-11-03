@@ -343,7 +343,6 @@ impl ChildGuard {
 impl Drop for ChildGuard {
 	fn drop(&mut self) {
 		self.stop();
-		self.stop_watchdog();
 	}
 }
 
