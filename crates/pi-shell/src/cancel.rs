@@ -86,6 +86,15 @@ impl CancelToken {
 		Self { deadline: timeout.map(|duration| Instant::now() + duration), flag: None }
 	}
 
+	/// Apply an API run limit without extending an earlier caller deadline or
+	/// replacing its explicit abort flag.
+	pub(crate) fn limit_timeout(&mut self, timeout_ms: Option<u32>) {
+		if let Some(ms) = timeout_ms {
+			let deadline = Instant::now() + Duration::from_millis(u64::from(ms));
+			self.deadline = Some(self.deadline.map_or(deadline, |old| old.min(deadline)));
+		}
+	}
+
 	pub fn heartbeat(&self) -> Result<()> {
 		if let Some(flag) = &self.flag
 			&& let Some(reason) = flag.cause()

@@ -83,6 +83,9 @@ pub struct Vproc {
 	/// nested shell). A field, not an overlay record: a record would cost
 	/// every subshell a ~530-byte map allocation (idle vproc ≤ 2 KiB).
 	pub subshell:      u32,
+	/// Engine process nesting, including nested shells that reset
+	/// `$BASH_SUBSHELL`. Never reset while descending into a child.
+	pub fork_depth:    u8,
 	/// The command being run (`BASH_COMMAND`): its unit and syntax node.
 	/// Externalized by unit id (a trap action continuing after a restore
 	/// still names the trapped command).

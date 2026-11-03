@@ -36,7 +36,7 @@ use crate::bash::{
 		ChildRedirs, EnvView, ExitStatus, Invocation, PgroupSpec, ResolveCtx, Resolved, SpawnSpec,
 		StdioSpec, Via,
 	},
-	ids::{CallId, CmdTag, IntrinsicId, RunId},
+	ids::{CallId, CmdTag, Dialect, IntrinsicId, RunId},
 	ir::{self, AssignVal, Op, Part, Unit},
 	signal::SigSet,
 	snapshot::Lost,
@@ -2015,24 +2015,38 @@ fn call_function(
 		.iter()
 		.filter(|f| matches!(f.kind, FrameKind::Function { .. }))
 		.count() as u32;
-	// `FUNCNEST` > 0 lowers the engine's limit; exceeding it abandons the
-	// whole command, as bash's `jump_to_top_level (DISCARD)`.
+	// A positive FUNCNEST lowers the engine limit. Bash 5.3 ends this
+	// shell on refusal, even through root eval/source and lastpipe.
 	let funcnest = match state::lookup(&k.root, cx.store, vp, b"FUNCNEST") {
 		Ok(v) => v
 			.and_then(|v| v.as_scalar())
 			.and_then(builtins::number)
-			.filter(|&n| n > 0),
+			// Bash stores the parsed intmax_t in a signed C int before
+			// testing positivity: both positive and negative values wrap.
+			.map(|n| {
+				if vp.mode.dialect() == Dialect::Bash {
+					i64::from(n as i32)
+				} else {
+					n
+				}
+			})
+			.filter(|&n| n > 0)
+			.map(|n| u32::try_from(n).unwrap_or(u32::MAX)),
 		Err(err) => {
 			k.fail(err);
 			return Some(Flow::Discard(1));
 		},
 	};
 	let limit = k.engine.config().max_call_depth;
-	let max = funcnest.map_or(limit, |n| u32::try_from(n).unwrap_or(u32::MAX).min(limit));
+	let max = funcnest.map_or(limit, |n| n.min(limit));
 	if depth >= max {
-		let max = funcnest.map_or(max, |n| u32::try_from(n).unwrap_or(u32::MAX));
+		let max = funcnest.unwrap_or(max);
 		k.diag(cx, vp, line, Diag::FuncNest { name, max });
-		return Some(Flow::Discard(1));
+		return Some(if vp.mode.dialect() == Dialect::Bash {
+			Flow::Exit(1)
+		} else {
+			Flow::Discard(1)
+		});
 	}
 	let (unit_id, mode, sticky, file, attrs) =
 		match state::record(cx.store, vp, Key::Func(BStr::new(&name))) {

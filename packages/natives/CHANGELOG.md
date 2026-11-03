@@ -8,6 +8,9 @@
 
 ### Fixed
 
+- Fixed recursive `eval`, `source` and command substitutions exhausting memory: they now stop with a nesting error, including recursion reached through aliases ([#17646](https://github.com/can1357/oh-my-pi/pull/17646) by [@sjawhar](https://github.com/sjawhar))
+- Fixed `FUNCNEST` values outside signed 32-bit range ignoring Bash's wrapped limit, and nesting errors incorrectly continuing sourced files, `eval` strings or pipeline stages instead of stopping that shell as in Bash 5.3 ([#17646](https://github.com/can1357/oh-my-pi/pull/17646) by [@sjawhar](https://github.com/sjawhar))
+- Fixed shell API run timeouts being ignored unless repeated in the cancellation token, and cancelling nested functions discarding the session's global state instead of just unwinding their temporary scopes ([#17646](https://github.com/can1357/oh-my-pi/pull/17646) by [@sjawhar](https://github.com/sjawhar))
 - Fixed associative arrays slowing down quadratically as they grow: 100,000 inserts and lookups took about 90 seconds and now take about a tenth of a second
 ### Fixed
 

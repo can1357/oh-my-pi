@@ -26,11 +26,16 @@ pub struct TextError {
 }
 
 /// Engine-wide settings.
+///
+/// Function calls use VM frames, not native recursion. Independently of the
+/// function limit, runtime `eval`/`source` nesting is capped at 500 frames and
+/// virtual process nesting at 64 children (including nested shells), so these
+/// paths cannot retain unbounded parser state or copied scopes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EngineConfig {
 	/// Budget of the compiled-unit cache in bytes (default 32 MiB).
 	pub unit_cache_bytes: usize,
-	/// Hard limit on shell-level call depth (`FUNCNEST` defaults to unlimited
+	/// Hard limit on function call depth (`FUNCNEST` defaults to unlimited
 	/// below it; default 10 000).
 	pub max_call_depth:   u32,
 	/// First vpid (default 2^30).

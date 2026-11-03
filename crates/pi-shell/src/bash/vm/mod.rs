@@ -2380,6 +2380,7 @@ impl Vproc {
 			lineage: crate::bash::host::Lineage::default(),
 			trace_base: 0,
 			subshell: 0,
+			fork_depth: 0,
 			command: None,
 			spare: Vec::new(),
 			calls: Vec::new(),
@@ -2462,6 +2463,7 @@ impl Vproc {
 		// caught-signal traps stay in the overlay: the child lists them but
 		// does not run them (`state::inherited_trap`).
 		set_subshell_depth(&mut vp, subshell_depth(self).saturating_add(1));
+		vp.fork_depth = self.fork_depth.saturating_add(1);
 		vp.status = self.status;
 		vp.scopes = state::copy_scopes(&k.root, store, self).unwrap_or_else(|err| {
 			k.fail(err);
