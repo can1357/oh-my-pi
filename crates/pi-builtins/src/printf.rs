@@ -239,21 +239,24 @@ fn scan_directives(format_string: &str) -> Option<Vec<Piece>> {
 		};
 		let large = |field: Field| matches!(field, Field::Fixed(number) if number > FORMATTER_LIMIT);
 		let star = matches!(width, Field::Star) || matches!(precision, Field::Star);
-		// uucore writes an integer and a plain string as Bash writes them, so
-		// long as the field fits its formatter and it takes the flags. Bash
-		// takes `#` and `'` for a decimal as no flag at all, where uucore
-		// refuses them. Everything else is written here: a float, whose
-		// digits uucore stops writing exactly well before Bash does; `%b`
-		// and `%c`, which carry bytes that are no text; and `%q`, which Bash
-		// escapes with backslashes.
-		let refused = flags.contains('\'')
-			|| (flags.contains('#') && matches!(conversion, b'd' | b'i' | b'u'));
-		let uucore_writes = matches!(conversion, b'd' | b'i' | b'o' | b'u' | b'x' | b'X' | b's')
-			&& !star
-			&& !refused
-			&& !large(width)
-			&& !(has_precision && large(precision));
-		if uucore_writes {
+		// uucore writes every directive as Bash writes it but the ones it
+		// cannot be given: a field larger than its formatter holds, which
+		// ends the process; a field read from an argument, whose size is
+		// known only then; and a `%c` with a precision, which it refuses and
+		// Bash ignores. Those are written here, and nothing else is.
+		// Bash takes `#` for a decimal as no flag at all, where uucore
+		// refuses the directive.
+		let refused = flags.contains('#') && matches!(conversion, b'd' | b'i' | b'u');
+		// `%a` and `%q` are written here whatever their field: uucore writes
+		// a hexadecimal float in lower case for `%A` and quotes a string
+		// where Bash escapes it with backslashes.
+		let takes = refused
+			|| matches!(conversion, b'a' | b'A' | b'q')
+			|| star
+			|| large(width)
+			|| (has_precision && large(precision))
+			|| (has_precision && conversion == b'c');
+		if !takes {
 			continue;
 		}
 		mine = true;
@@ -360,11 +363,7 @@ fn write_pieces(
 		let before = taken;
 		for piece in pieces {
 			match piece {
-				Piece::Literal(text) => {
-					if write_escaped(text.as_bytes(), false, writer)? {
-						return Ok(());
-					}
-				},
+				Piece::Literal(text) => write_uucore(text, &[], writer)?,
 				Piece::Uucore(spelled) => {
 					let next = (taken + 1).min(arguments.len());
 					let used = arguments.get(taken..next).unwrap_or_default();
@@ -504,14 +503,7 @@ fn write_field<W: Write>(
 					report.invalid = true;
 					0
 				},
-				Err(ReadError::OutOfRange) => {
-					let value = arguments.get(*taken).map(|value| value.to_string_lossy());
-					report.say(format_args!(
-						"warning: {}: Numerical result out of range",
-						value.unwrap_or_default()
-					));
-					i64::MAX
-				},
+	Err(ReadError::OutOfRange) => i64::MAX,
 			}
 		},
 		Some(Field::Fixed(number)) => i64::try_from(number).unwrap_or(i64::MAX),
@@ -574,14 +566,20 @@ fn write_field<W: Write>(
 	// (`inf`, `nan`), which has no digits to pad.
 	let numeric = !matches!(spec.conversion, b'c' | b's' | b'b' | b'q')
 		&& text.iter().any(u8::is_ascii_digit);
-	let zeroes = spec.has('0') && numeric && digits == 0;
+	// An integer with a precision pads with spaces, as it does in C, whether
+	// or not that precision adds a digit of its own.
+	let precise_integer =
+		precision.is_some() && matches!(spec.conversion, b'd' | b'i' | b'o' | b'u' | b'x' | b'X');
+	let zeroes = spec.has('0') && numeric && !precise_integer;
 	let padding = width.saturating_sub(text.len() + digits);
 	// Where the field's own digits start, which the zeroes of a precision
 	// and of `0` are written before.
-	let head = if left || (padding == 0 && digits == 0) {
-		text.len()
-	} else if zeroes || digits > 0 {
+	let head = if digits > 0 || zeroes {
+		// The zeroes a precision asks for, and those of `0`, go after the
+		// sign and any `0x`, as uucore places them itself.
 		body_starts_at(&text)
+	} else if left || padding == 0 {
+		text.len()
 	} else {
 		0
 	};
@@ -751,9 +749,16 @@ fn write_hex_float(
 	}
 	reduced.push('a');
 	let mut text = Vec::new();
-	let _ = write_uucore(&reduced, &[OsString::from(value.to_string())], &mut text);
+	// uucore reads the number as a decimal it holds exactly, so it is given
+	// every digit of the value, which 767 after the point reach for any
+	// `f64`: the shortest one that reads back (`5e-324`) is a different
+	// number to it, whose hexadecimal digits are not the value's.
+	let exact = if value.is_finite() { format!("{value:.767e}") } else { value.to_string() };
+	let _ = write_uucore(&reduced, &[OsString::from(exact)], &mut text);
 	let mut text = String::from_utf8(text).unwrap_or_default();
-	if let Some(precision) = precision.filter(|precision| *precision > FORMATTER_LIMIT) {
+	if let Some(precision) = precision.filter(|precision| *precision > FORMATTER_LIMIT)
+		&& text.bytes().any(|byte| byte.is_ascii_digit())
+	{
 		let exponent = text.find(['p', 'P']).unwrap_or(text.len());
 		extend_zeroes(&mut text, precision, exponent);
 	}
@@ -914,7 +919,10 @@ fn read_number(written: &str) -> Result<i64, ReadError> {
 		Ok(number) => Ok(if negative { -number } else { number }),
 		// A number past what this holds is still a number: Bash reports it as
 		// out of range and holds it to what an `int` takes.
-		Err(_) if digits.bytes().all(|byte| byte.is_ascii_hexdigit() || byte == b'x') => {
+		// A number this machine cannot hold is still a number, which Bash
+		// reports as out of range and holds to what an `int` takes; one that
+		// is no number at all it reports and takes as zero.
+		Err(_) if !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()) => {
 			Err(ReadError::OutOfRange)
 		},
 		Err(_) => Err(ReadError::NotANumber),
@@ -958,10 +966,119 @@ fn write_with_uucore(
 	writer: &mut dyn Write,
 	report: &mut Report<impl Write>,
 ) -> Result<(), brush_core::Error> {
+	// Every argument a directive reads as a number is read here first: uucore
+	// reports one it cannot read on this process's own standard error, which
+	// is not the shell's and may be a terminal someone is reading, and it
+	// leaves the command successful. Bash reports it on the shell's standard
+	// error, writes what it could read, and fails.
+	let arguments = read_numbers(format_string, arguments, report);
 	match scan_directives(format_string) {
-		Some(pieces) => write_pieces(&pieces, arguments, writer, report),
-		None => write_uucore(format_string, arguments, writer),
+		Some(pieces) => write_pieces(&pieces, &arguments, writer, report),
+		None => write_uucore(format_string, &arguments, writer),
 	}
+}
+
+/// The arguments as the directives of `format_string` read them: one a
+/// directive reads as a number and cannot is reported and replaced by what
+/// could be read of it, which is nothing for a word that is no number at
+/// all, as Bash reports and takes them.
+fn read_numbers(
+	format_string: &str,
+	arguments: &[OsString],
+	report: &mut Report<impl Write>,
+) -> Vec<OsString> {
+	let mut arguments = arguments.to_vec();
+	let bytes = format_string.as_bytes();
+	let mut taken = 0;
+	loop {
+		let before = taken;
+		let mut at = 0;
+		while at < bytes.len() {
+			if bytes[at] != b'%' {
+				at += 1;
+				continue;
+			}
+			at += 1;
+			let mut stars = 0;
+			while let Some(byte) = bytes.get(at) {
+				match byte {
+					b'-' | b'0' | b'+' | b' ' | b'#' | b'\'' | b'.' => at += 1,
+					b'*' => {
+						stars += 1;
+						at += 1;
+					},
+					byte if byte.is_ascii_digit() => at += 1,
+					_ => break,
+				}
+			}
+			let Some(&conversion) = bytes.get(at) else { break };
+			at += 1;
+			if conversion == b'%' {
+				continue;
+			}
+			// A `*` reads a number of its own, which [`write_field`] reports.
+			taken = (taken + stars).min(arguments.len());
+			let Some(argument) = arguments.get(taken) else { break };
+			let written = argument.to_string_lossy().trim().to_owned();
+			let read = match conversion {
+				b'd' | b'i' | b'o' | b'u' | b'x' | b'X' => read_number_or_report(&written, report),
+				b'e' | b'E' | b'f' | b'F' | b'g' | b'G' | b'a' | b'A' => {
+					read_float_or_report(&written, report)
+				},
+				_ => None,
+			};
+			if let Some(read) = read {
+				arguments[taken] = OsString::from(read);
+			}
+			taken += 1;
+		}
+		if taken >= arguments.len() || taken == before {
+			return arguments;
+		}
+	}
+}
+
+/// What a `%d` argument holds, when it is not a number this writes as it is:
+/// `None` leaves the argument alone.
+fn read_number_or_report(written: &str, report: &mut Report<impl Write>) -> Option<String> {
+	if written.is_empty() || read_number(written).is_ok() {
+		return None;
+	}
+	report.say(format_args!("{written}: invalid number"));
+	report.invalid = true;
+	// Bash writes what it could read of the word, which is the digits it
+	// starts with, and nothing for a word that starts with none.
+	let digits = written.strip_prefix(['-', '+']).unwrap_or(written);
+	let end = digits.bytes().position(|byte| !byte.is_ascii_digit()).unwrap_or(digits.len());
+	let sign = if written.starts_with('-') { "-" } else { "" };
+	Some(format!("{sign}{}", if end == 0 { "0" } else { &digits[..end] }))
+}
+
+/// What a `%f` argument holds, when it is not a number this writes as it is.
+fn read_float_or_report(written: &str, report: &mut Report<impl Write>) -> Option<String> {
+	if written.is_empty() || written.parse::<f64>().is_ok() || read_hex_float(written).is_some() {
+		return None;
+	}
+	// `nan(…)` is a number with a payload, which Bash reads and writes as
+	// `nan`; uucore reads neither.
+	let named = written.strip_prefix(['-', '+']).unwrap_or(written).to_ascii_lowercase();
+	if named.starts_with("nan(") && named.ends_with(')') {
+		let sign = if written.starts_with('-') { "-" } else { "" };
+		return Some(format!("{sign}nan"));
+	}
+	if written.starts_with('\'') || written.starts_with('"') {
+		return None;
+	}
+	report.say(format_args!("{written}: invalid number"));
+	report.invalid = true;
+	let digits = written.strip_prefix(['-', '+']).unwrap_or(written);
+	let end = digits
+		.bytes()
+		.position(|byte| !byte.is_ascii_digit() && byte != b'.')
+		.unwrap_or(digits.len());
+	let sign = if written.starts_with('-') { "-" } else { "" };
+	let read = &digits[..end];
+	Some(format!("{sign}{}", if read.is_empty() || read == "." { "0" } else { read }))
 }
 
 /// [`write_with_uucore`] for a format string uucore is to write as it is,
