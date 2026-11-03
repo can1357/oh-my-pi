@@ -170,17 +170,26 @@ def _decoded(raw: str):
         pass
 
 
-def _refuse_gateway_token_in_inputs(forward_env: dict[str, str]) -> None:
+def _supplied_gateway_token() -> str:
+    """The gateway token from the private file OMP_BENCH_GATEWAY_TOKEN_FILE names ("" if none).
+
+    The runner never puts the token itself in Harbor's environment: Harbor expands
+    `${NAME}` from that environment in task files, so a task could name it.
+    """
+    path = _env("OMP_BENCH_GATEWAY_TOKEN_FILE")
+    return Path(path).read_text(encoding="utf-8") if path else ""
+
+
+def _refuse_gateway_token_in_inputs(forward_env: dict[str, str], token: str) -> None:
     """Refuse agent inputs that would carry the gateway token anywhere but its private file.
 
     Forwarded env reaches the agent's environment, which every process the agent starts
     inherits; every other OMP_BENCH_* input (settings, agent arguments, providers, ...)
     ends up in a generated file or the agent's launch command. Each input is checked as
-    the agent will decode it, and the token as supplied in OMP_BENCH_GATEWAY_TOKEN; only
-    "no-auth", the open gateway, is no secret. No message repeats a name that holds it.
+    the agent will decode it, against the token as supplied; only "no-auth", the open
+    gateway, is no secret. No message repeats a name that holds the token.
     Must match `refuseGatewayTokenIn` in `src/gateway-models.ts`.
     """
-    token = os.environ.get("OMP_BENCH_GATEWAY_TOKEN", "")
     secret = token not in ("", "no-auth")
     for name, value in forward_env.items():
         if name in _GATEWAY_TOKEN_VARS or (secret and (token in name or token in value)):
@@ -189,8 +198,10 @@ def _refuse_gateway_token_in_inputs(forward_env: dict[str, str]) -> None:
     if not secret:
         return
     for name, value in os.environ.items():
-        if not name.startswith("OMP_BENCH_") or name == "OMP_BENCH_GATEWAY_TOKEN":
+        if not name.startswith("OMP_BENCH_"):
             continue
+        if token in name:
+            raise ValueError("An OMP_BENCH_* variable has the gateway token in its name")
         if any(token in text for text in _decoded(value)):
             raise ValueError(f"{name} holds the gateway token, which must reach the agent only through its private file")
 
@@ -332,7 +343,8 @@ class OmpLocal(BaseInstalledAgent):
         self._gateway_url = _env(
             "OMP_BENCH_GATEWAY_URL", "http://host.docker.internal:4000"
         )
-        self._gateway_token = _env("OMP_BENCH_GATEWAY_TOKEN", "no-auth-dummy")
+        supplied_token = _supplied_gateway_token()
+        self._gateway_token = supplied_token or "no-auth-dummy"
         self._gateway_providers = [
             p.strip()
             for p in _env(
@@ -360,7 +372,7 @@ class OmpLocal(BaseInstalledAgent):
         # Extra env (PI_* dialect knobs, explicit --env) the runner forwards into
         # the in-container omp run, JSON-encoded in OMP_BENCH_FORWARD_ENV.
         self._forward_env = self._parse_forward_env()
-        _refuse_gateway_token_in_inputs(self._forward_env)
+        _refuse_gateway_token_in_inputs(self._forward_env, supplied_token)
         # Source-mount paths (defaults must match the runner's compose overlay).
         self._source_dir = _env("OMP_BENCH_SOURCE_DIR", "/opt/omp/src")
         self._source_bun = _env("OMP_BENCH_SOURCE_BUN", "/opt/omp/bin/bun")

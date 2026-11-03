@@ -102,8 +102,10 @@ export async function runTrial(opts: {
 
 	try {
 		await ensureHostDir(opts.trialDir);
-		// A task's environment reaches the guest omp's environment, which every tool call inherits.
+		// A task's environment reaches the guest omp's environment, which every tool call
+		// inherits, and its verifier environment reaches the verifier's shell in the guest.
 		refuseGatewayTokenInEnv(opts.task.environmentEnv, opts.gateway.token);
+		refuseGatewayTokenInEnv(opts.task.verifierEnv, opts.gateway.token);
 		const suffix = crypto.randomUUID().replaceAll("-", "").slice(0, 6);
 		const vmName = `tb-${opts.task.name}-${suffix}`;
 		opts.log?.(`boot ${vmName} from ${opts.task.image}`);

@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { $which } from "@oh-my-pi/pi-utils";
-import { buildHarborEnv, collectForwardEnv, parseArgs, writeModelsYaml } from "../src/runner";
+import { buildHarborEnv, collectForwardEnv, parseArgs, writeGatewayTokenFile, writeModelsYaml } from "../src/runner";
 import { ManagerServer } from "../src/server";
 import type { ConsumerResult } from "./fixtures/omp-config-consumer";
 import { consumeOmpConfig, hostileValues } from "./fixtures/omp-config";
@@ -137,7 +137,16 @@ describe("omp_local", () => {
 				...(inputs.url === undefined ? [] : ["--gateway-url", inputs.url]),
 				...(inputs.settingKey === undefined ? [] : ["--setting", `${inputs.settingKey}=value`]),
 			]);
-			const harborEnv = buildHarborEnv(cfg, writeModelsYaml(root, cfg), null, "test");
+			const harborEnv = buildHarborEnv(
+				cfg,
+				writeModelsYaml(root, cfg),
+				null,
+				"test",
+				null,
+				writeGatewayTokenFile(root, cfg),
+			);
+			// Harbor expands `${NAME}` from its own environment in task files: the token travels as a file.
+			expect(harborEnv.OMP_BENCH_GATEWAY_TOKEN).toBeUndefined();
 			const agentEnv = Object.fromEntries(Object.entries(harborEnv).filter(([key]) => key.startsWith("OMP_BENCH_")));
 			const home = path.join(root, "home");
 			await fs.mkdir(home);
@@ -252,6 +261,24 @@ describe("omp_local", () => {
 			const build = () =>
 				buildHarborEnv(parseArgs(["--model", "openrouter/test-model", ...argv]), "/dev/null", null, "test");
 			expect(build).toThrow(/gateway token/);
+		} finally {
+			for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
+			Object.assign(process.env, saved);
+		}
+	});
+
+	it("refuses an inherited variable whose name holds the token without printing the name", () => {
+		const saved = { ...process.env };
+		Object.assign(process.env, { METAHARNESS_GATEWAY_TOKEN: "same-env-secret", "OMP_BENCH_same-env-secret": "x" });
+		try {
+			let message = "";
+			try {
+				buildHarborEnv(parseArgs(["--model", "openrouter/test-model"]), "/dev/null", null, "test");
+			} catch (error) {
+				message = String(error);
+			}
+			expect(message).toMatch(/gateway token in its name/);
+			expect(message).not.toContain("same-env-secret");
 		} finally {
 			for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
 			Object.assign(process.env, saved);
@@ -531,7 +558,7 @@ describe("runner", () => {
 			// A real launch writes the snapshot, then stops here: there is no tarball to install.
 			const launch = await runRunner(["--install", "local", "--no-build"]);
 
-			expect(dryRun).toContain("OMP_BENCH_GATEWAY_TOKEN=(hidden)");
+			expect(dryRun).toContain("OMP_BENCH_GATEWAY_TOKEN_FILE=");
 			expect(dryRun).not.toContain(token);
 			expect(launch).toContain("no tarball found");
 			const snapshot = path.join(root, "jobs", "_bench", "review", "runner-config.json");
@@ -696,6 +723,8 @@ describe("manager", () => {
 
 				expect(await send("/api/experiments", { id: "tokenexp", goal: token })).toBe(400);
 				expect(await send("/api/experiments/token", { goal: token }, "PUT")).toBe(400);
+				// The experiment id comes from the URL and is stored too.
+				expect(await send(`/api/experiments/${token}`, { goal: "ordinary goal" }, "PUT")).toBe(400);
 				expect(await send("/api/runs/token-probe/resume", { filterErrorTypes: [token] })).toBe(400);
 				// Choosing another token for the request does not let it store a known one.
 				const otherToken = "review-other-bearer";

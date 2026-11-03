@@ -15,12 +15,14 @@ stdout:  JSON {"runEnv": {str: str}, "runCommand": str}; with "install", the age
 """
 
 import asyncio
+import atexit
 import importlib
 import json
 import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import types
 import typing
 from pathlib import Path
@@ -55,6 +57,13 @@ if not hasattr(typing, "override"):  # Python < 3.12; the agents target 3.12.
 request = json.loads(sys.argv[1])
 root = Path(request["root"])
 os.environ.update(request["env"])
+# The runner hands the agents the gateway token as a private file, never as a variable;
+# a request's OMP_BENCH_GATEWAY_TOKEN becomes that file.
+if "OMP_BENCH_GATEWAY_TOKEN" in os.environ:
+    token_dir = Path(tempfile.mkdtemp(prefix="harness-token-"))
+    atexit.register(shutil.rmtree, token_dir, True)
+    (token_dir / "gateway-token").write_text(os.environ.pop("OMP_BENCH_GATEWAY_TOKEN"), encoding="utf-8")
+    os.environ["OMP_BENCH_GATEWAY_TOKEN_FILE"] = str(token_dir / "gateway-token")
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "agent"))
 module = importlib.import_module(request["agent"])
 

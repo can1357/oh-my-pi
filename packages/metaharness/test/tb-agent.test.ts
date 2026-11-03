@@ -143,37 +143,43 @@ describe("writeAgentConfig", () => {
 });
 
 describe("runTrial", () => {
-	it("refuses a task whose [environment.env] holds the gateway token before it boots anything", async () => {
-		const trialDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-tb-trial-"));
-		scratchDirs.push(trialDir);
-		const token = "tb-task-env-bearer";
+	it.each([
+		{ section: "[environment.env]", environmentEnv: { PI_ALIAS: "tb-task-env-bearer" }, verifierEnv: {} },
+		{ section: "[verifier.env]", environmentEnv: {}, verifierEnv: { PI_ALIAS: "tb-task-env-bearer" } },
+	])(
+		"refuses a task whose $section holds the gateway token before it boots anything",
+		async ({ environmentEnv, verifierEnv }) => {
+			const trialDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-tb-trial-"));
+			scratchDirs.push(trialDir);
+			const token = "tb-task-env-bearer";
 
-		// vmond at a closed port: any boot attempt fails with a connection error instead.
-		const result = await runTrial({
-			task: {
-				name: "token-task",
-				dir: trialDir,
-				instruction: "noop",
-				image: "example.invalid/task:latest",
-				cpus: 1,
-				memoryMb: 512,
-				storageMb: 1024,
-				agentTimeoutSec: 5,
-				verifierTimeoutSec: 5,
-				environmentEnv: { PI_ALIAS: token },
-				verifierEnv: {},
-				difficulty: "",
-				category: "",
-			},
-			model: "openrouter/test-model",
-			binaries: {},
-			agent: { tools: ["read"], env: {} },
-			gateway: { url: "http://127.0.0.1:1", token, providers: ["openrouter"], openrouterVariant: "floor" },
-			vmon: { url: "http://127.0.0.1:1", token: "", arch: "x64" },
-			trialDir,
-		});
+			// vmond at a closed port: any boot attempt fails with a connection error instead.
+			const result = await runTrial({
+				task: {
+					name: "token-task",
+					dir: trialDir,
+					instruction: "noop",
+					image: "example.invalid/task:latest",
+					cpus: 1,
+					memoryMb: 512,
+					storageMb: 1024,
+					agentTimeoutSec: 5,
+					verifierTimeoutSec: 5,
+					environmentEnv,
+					verifierEnv,
+					difficulty: "",
+					category: "",
+				},
+				model: "openrouter/test-model",
+				binaries: {},
+				agent: { tools: ["read"], env: {} },
+				gateway: { url: "http://127.0.0.1:1", token, providers: ["openrouter"], openrouterVariant: "floor" },
+				vmon: { url: "http://127.0.0.1:1", token: "", arch: "x64" },
+				trialDir,
+			});
 
-		expect(result.status).toBe("error");
-		expect(result.error).toMatch(/holds the gateway token/);
-	});
+			expect(result.status).toBe("error");
+			expect(result.error).toMatch(/holds the gateway token/);
+		},
+	);
 });

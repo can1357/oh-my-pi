@@ -1405,6 +1405,19 @@ export function writeModelsYaml(benchDir: string, cfg: Config): string {
 	return file;
 }
 
+/**
+ * Write the gateway token where the Harbor agent reads it (`OMP_BENCH_GATEWAY_TOKEN_FILE`):
+ * a fresh mode 0600 file in the bench dir. The token is never put in Harbor's environment,
+ * because Harbor expands `${NAME}` from that environment in task files and agent env, so a
+ * task could name it. The runner removes the file when Harbor exits.
+ */
+export function writeGatewayTokenFile(benchDir: string, cfg: Config): string {
+	const file = path.join(benchDir, "gateway-token");
+	fs.rmSync(file, { force: true });
+	fs.writeFileSync(file, cfg.gatewayToken, { mode: 0o600, flag: "wx" });
+	return file;
+}
+
 function gatewayHealthOk(url: string): boolean {
 	const hostUrl = url
 		.replace("host.docker.internal", "127.0.0.1")
@@ -1540,6 +1553,7 @@ export function buildHarborEnv(
 	tarball: string | null,
 	version: string,
 	source: SourceMount | null = null,
+	gatewayTokenFile: string | null = null,
 ): Record<string, string> {
 	const env: Record<string, string> = { ...(process.env as Record<string, string>) };
 	// Drop any stale OMP_BENCH_FORWARD_ENV inherited from the caller's shell before
@@ -1574,7 +1588,7 @@ export function buildHarborEnv(
 	if (cfg.gateway) {
 		env.OMP_BENCH_MODELS_YAML = modelsYaml;
 		env.OMP_BENCH_GATEWAY_URL = cfg.gatewayUrl;
-		env.OMP_BENCH_GATEWAY_TOKEN = cfg.gatewayToken;
+		if (gatewayTokenFile) env.OMP_BENCH_GATEWAY_TOKEN_FILE = gatewayTokenFile;
 		env.OMP_BENCH_GATEWAY_PROVIDERS = deriveProviders(cfg).join(",");
 	}
 	if (cfg.envType === "apple-container") env.OMP_BENCH_CONTAINER_DNS = CONTAINER_DNS;
@@ -1584,16 +1598,25 @@ export function buildHarborEnv(
 }
 
 /**
- * Harbor's environment with the token in `OMP_BENCH_GATEWAY_TOKEN` only. Harbor expands
- * `${NAME}` in agent env (`--ae`) and in task files from its own environment, and hands the
- * agent every OMP_BENCH_* variable, so any other inherited variable holding the token is
- * refused before Harbor starts or a dry run prints it. Harbor never needs the input variable.
+ * Harbor's environment without the token anywhere. Harbor expands `${NAME}` in agent env
+ * (`--ae`) and in task files from its own environment, so an inherited variable whose value
+ * holds the token is refused before Harbor starts. Harbor hands the agent, and a dry run
+ * prints, every OMP_BENCH_* name, so such a name holding the token is refused too; no
+ * refusal repeats a name that holds it. The agent reads the token from
+ * `OMP_BENCH_GATEWAY_TOKEN_FILE`; Harbor never needs the input variable.
  */
 function withoutGatewayTokenCopies(env: Record<string, string>, token: string): Record<string, string> {
 	delete env[GATEWAY_TOKEN_INPUT_ENV];
 	for (const [name, value] of Object.entries(env)) {
-		if (name !== "OMP_BENCH_GATEWAY_TOKEN")
-			refuseGatewayTokenIn(value, token, `Harbor's environment variable ${name}`);
+		const named = token !== NO_AUTH_TOKEN && token.length > 0 && name.includes(token);
+		if (named && name.startsWith("OMP_BENCH_")) {
+			throw new Error("an OMP_BENCH_* variable in Harbor's environment has the gateway token in its name; unset it");
+		}
+		refuseGatewayTokenIn(
+			value,
+			token,
+			named ? "a variable in Harbor's environment" : `Harbor's environment variable ${name}`,
+		);
 	}
 	return env;
 }
@@ -1788,7 +1811,14 @@ async function runBenchmark(cfg: Config): Promise<BenchmarkRun> {
 	const harborArgs = cfg.resume
 		? buildResumeArgs(cfg, jobDir)
 		: buildHarborArgs(cfg, jobName, modelsYaml, tarball, composeOverlayPath, mountsJson);
-	const harborEnv = buildHarborEnv(cfg, modelsYaml, tarball, version, source);
+	const gatewayTokenFile = cfg.gateway && MANAGED_AGENTS[cfg.agent] ? writeGatewayTokenFile(benchDir, cfg) : null;
+	let harborEnv: Record<string, string>;
+	try {
+		harborEnv = buildHarborEnv(cfg, modelsYaml, tarball, version, source, gatewayTokenFile);
+	} catch (error) {
+		if (gatewayTokenFile) fs.rmSync(gatewayTokenFile, { force: true });
+		throw error;
+	}
 	const logPath = path.join(benchDir, "harbor.log");
 	if (cfg.dryRun) {
 		process.stdout.write(bold("\nharbor command:\n"));
@@ -1800,9 +1830,7 @@ async function runBenchmark(cfg: Config): Promise<BenchmarkRun> {
 		process.stdout.write(bold("omp env:\n"));
 		for (const key in harborEnv) {
 			if (key === "OMP_BENCH_FORWARD_ENV") continue;
-			if (key === "OMP_BENCH_GATEWAY_TOKEN") process.stdout.write(`  ${key}=(hidden)\n`);
-			else if (key.startsWith("OMP_BENCH_") || key === "PYTHONPATH")
-				process.stdout.write(`  ${key}=${harborEnv[key]}\n`);
+			if (key.startsWith("OMP_BENCH_") || key === "PYTHONPATH") process.stdout.write(`  ${key}=${harborEnv[key]}\n`);
 		}
 		if (harborEnv.OMP_BENCH_FORWARD_ENV) {
 			const parsedForwardEnv: unknown = JSON.parse(harborEnv.OMP_BENCH_FORWARD_ENV);
@@ -1813,6 +1841,7 @@ async function runBenchmark(cfg: Config): Promise<BenchmarkRun> {
 			}
 		}
 		process.stdout.write(`\njob dir: ${jobDir}\nbench dir: ${benchDir}\n`);
+		if (gatewayTokenFile) fs.rmSync(gatewayTokenFile, { force: true });
 		return { exitCode: 0, jobName, jobDir, benchDir, tarball, elapsedMs: 0, totals: null, reportPath: null };
 	}
 
@@ -1863,6 +1892,8 @@ async function runBenchmark(cfg: Config): Promise<BenchmarkRun> {
 		render(st); // final frame
 	} finally {
 		gatewayForward?.stop();
+		// Harbor's agent read the token when it set up each trial; nothing needs the file now.
+		if (gatewayTokenFile) fs.rmSync(gatewayTokenFile, { force: true });
 		if (isTTY) process.stdout.write(`${ESC}?25h${ESC}?1049l`); // restore cursor + screen
 		try {
 			fs.closeSync(logFd);

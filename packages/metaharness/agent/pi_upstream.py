@@ -18,7 +18,7 @@ and the docs section (`OMP_BENCH_PI_SYSTEM_PROMPT` supplies the template; the
 `{{CWD}}` placeholder is rendered per trial).
 
 Env knobs (set by the runner; `OMP_BENCH_*` are shared with `omp_local.py`):
-`OMP_BENCH_GATEWAY_URL`, `OMP_BENCH_GATEWAY_TOKEN`, `OMP_BENCH_PI_MODELS`
+`OMP_BENCH_GATEWAY_URL`, `OMP_BENCH_GATEWAY_TOKEN_FILE`, `OMP_BENCH_PI_MODELS`
 (JSON array of model specs), `OMP_BENCH_PI_SYSTEM_PROMPT` (host path),
 `OMP_BENCH_PI_VERSION`, `OMP_BENCH_NODE_VERSION`, `OMP_BENCH_THINKING`,
 `OMP_BENCH_TOOLS`, `OMP_BENCH_AGENT_ARGS`, `OMP_BENCH_FORWARD_ENV`.
@@ -38,7 +38,7 @@ from harbor.agents.installed.base import BaseInstalledAgent, with_prompt_templat
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 
-from omp_local import _Usage, _env, _loads, _place_file, _refuse_gateway_token_in_inputs
+from omp_local import _Usage, _env, _loads, _place_file, _refuse_gateway_token_in_inputs, _supplied_gateway_token
 
 _OUTPUT_FILENAME = "pi.txt"
 _MODELS_DST = "/tmp/pi-models.json"
@@ -67,7 +67,8 @@ class PiUpstream(BaseInstalledAgent):
         self._pkg_version = _env("OMP_BENCH_PI_VERSION", "latest")
         self._node_version = _env("OMP_BENCH_NODE_VERSION", "22.14.0")
         self._gateway_url = _env("OMP_BENCH_GATEWAY_URL", "http://host.docker.internal:4000")
-        self._gateway_token = _env("OMP_BENCH_GATEWAY_TOKEN", "no-auth")
+        supplied_token = _supplied_gateway_token()
+        self._gateway_token = supplied_token or "no-auth"
         self._model_specs = json.loads(_env("OMP_BENCH_PI_MODELS", "[]"))
         self._system_prompt_path = _env("OMP_BENCH_PI_SYSTEM_PROMPT")
         self._thinking = _env("OMP_BENCH_THINKING")
@@ -76,7 +77,7 @@ class PiUpstream(BaseInstalledAgent):
         self._agent_args = [str(a) for a in json.loads(raw_args)] if raw_args else []
         raw_env = _env("OMP_BENCH_FORWARD_ENV")
         self._forward_env = {str(k): str(v) for k, v in json.loads(raw_env).items()} if raw_env else {}
-        _refuse_gateway_token_in_inputs(self._forward_env)
+        _refuse_gateway_token_in_inputs(self._forward_env, supplied_token)
         self._home = "/root"
         self._node_dir = "/root/.pi-bench/node"
         self._app_dir = "/root/.pi-bench/app"
