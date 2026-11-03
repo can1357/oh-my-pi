@@ -13,6 +13,7 @@ import {
 	withTimeout,
 } from "@oh-my-pi/pi-utils";
 import type * as BrowsersNs from "@oh-my-pi/pi-utils/browsers";
+import type { BunFile } from "bun";
 import type {
 	Browser,
 	CDPSession,
@@ -689,7 +690,7 @@ export async function launchHeadlessBrowser(opts: LaunchHeadlessOptions): Promis
 		launchArgs.push("--remote-debugging-pipe", "--remote-debugging-port=0");
 	}
 	const pipe = launchArgs.includes("--remote-debugging-pipe");
-	const activePortFile = path.join(profileDir, "DevToolsActivePort");
+	const activePortFile = Bun.file(path.join(profileDir, "DevToolsActivePort"));
 	try {
 		// A reused profile can hold the file of a browser that was killed.
 		const staleActivePort = pipe ? await readActivePort(activePortFile) : undefined;
@@ -735,7 +736,7 @@ export async function closeLaunchedBrowser(browser: Browser): Promise<void> {
  * Every launch publishes a new browser target path, so `stale`, the file found
  * before the launch, is never this browser's.
  */
-async function activePortEndpoint(file: string, stale: string | undefined): Promise<string> {
+async function activePortEndpoint(file: BunFile, stale: string | undefined): Promise<string> {
 	const deadline = Date.now() + DEVTOOLS_ACTIVE_PORT_TIMEOUT_MS;
 	for (;;) {
 		const published = await readActivePort(file);
@@ -743,14 +744,14 @@ async function activePortEndpoint(file: string, stale: string | undefined): Prom
 			const [port, browserPath] = published.split("\n");
 			if (port && browserPath) return `ws://127.0.0.1:${port}${browserPath}`;
 		}
-		if (Date.now() >= deadline) throw new Error(`Chromium did not publish its DevTools port in ${file}`);
+		if (Date.now() >= deadline) throw new Error(`Chromium did not publish its DevTools port in ${file.name}`);
 		await Bun.sleep(50);
 	}
 }
 
-async function readActivePort(file: string): Promise<string | undefined> {
+async function readActivePort(file: BunFile): Promise<string | undefined> {
 	try {
-		return await Bun.file(file).text();
+		return await file.text();
 	} catch (error) {
 		if (isEnoent(error)) return undefined;
 		throw error;

@@ -6,6 +6,7 @@ import * as path from "node:path";
 import { findFreeCdpPort } from "@oh-my-pi/pi-coding-agent/tools/browser/attach";
 import {
 	chromiumExecutableProbeForTest,
+	closeLaunchedBrowser,
 	launchHeadlessBrowser,
 	loadPuppeteer,
 	removeUserDataDir,
@@ -13,7 +14,7 @@ import {
 	stealthIgnoreDefaultArgs,
 	systemChromiumCandidatesForTest,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
-import { TempDir } from "@oh-my-pi/pi-utils";
+import { readJsonl, TempDir } from "@oh-my-pi/pi-utils";
 import { BrowserPlatform, computeExecutablePath, detectBrowserPlatform } from "@oh-my-pi/pi-utils/browsers";
 import { APP_NAME } from "@oh-my-pi/pi-utils/dirs";
 import { PUPPETEER_REVISIONS } from "puppeteer-core/internal/revisions.js";
@@ -104,13 +105,9 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("process-local headless launch", () => {
 			});
 			let userDataDir: string | undefined;
 			try {
-				let output = "";
-				const decoder = new TextDecoder();
-				for await (const chunk of owner.stdout) {
-					output += decoder.decode(chunk, { stream: true });
-					if (output.includes("\n")) break;
-				}
-				const launched: { wsEndpoint: string; userDataDir: string } = JSON.parse(output);
+				const first = await readJsonl<{ wsEndpoint: string; userDataDir: string }>(owner.stdout).next();
+				if (first.done) throw new Error("The owner exited before reporting its browser");
+				const launched = first.value;
 				userDataDir = launched.userDataDir;
 				const puppeteer = await loadPuppeteer();
 				const observer = await puppeteer.connect({ browserWSEndpoint: launched.wsEndpoint });
@@ -145,7 +142,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("process-local headless launch", () => {
 			expect(await worker.version()).toBe(await browser.version());
 			worker.disconnect();
 		} finally {
-			await browser.close();
+			await closeLaunchedBrowser(browser);
 			if (userDataDir) await removeUserDataDir(userDataDir);
 		}
 	}, 30_000);
