@@ -9010,6 +9010,71 @@ describe("AgentSession retry fallback", () => {
 		expect(finalAssistant.content).toEqual([{ type: "text", text: "Recovered on the same model." }]);
 	});
 
+	// A request whose key source produced nothing (a `!command` apiKey, stored credentials that
+	// cannot serve for a moment) sent nothing, and the same model serves once the key is back. It
+	// retries that model while its retry budget lasts, and walks the fallback chain only after.
+	for (const keyBackAfter of [1, Number.POSITIVE_INFINITY]) {
+		const outcome =
+			keyBackAfter === 1
+				? "retries the same model while"
+				: "walks the fallback chain once the retries run out while";
+		it(`${outcome} the key source produces no key`, async () => {
+			const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+			const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+			if (!primaryModel || !fallbackModel) throw new Error("Expected bundled test models to exist");
+			const primarySelector = `${primaryModel.provider}/${primaryModel.id}`;
+			const fallbackSelector = `${fallbackModel.provider}/${fallbackModel.id}`;
+
+			const keyResolves: string[] = [];
+			let primaryKeyFailures = 0;
+			const agent = new Agent({
+				getApiKey: model => {
+					const selector = `${model.provider}/${model.id}`;
+					keyResolves.push(selector);
+					if (selector === primarySelector && primaryKeyFailures < keyBackAfter) {
+						primaryKeyFailures++;
+						throw new AIError.CredentialUnavailableError(
+							`The apiKey command for provider ${model.provider} produced no key`,
+						);
+					}
+					return `${model.provider}-test-key`;
+				},
+				initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: model => recoveredTextStream(model, `Answered by ${model.provider}.`),
+			});
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"retry.baseDelayMs": 0,
+				"retry.maxRetries": 2,
+				"retry.modelFallback": true,
+				"retry.fallbackChains": { default: [fallbackSelector] },
+			});
+			settings.setModelRole("default", primarySelector);
+			session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+			const fallbackApplied: string[] = [];
+			session.subscribe(event => {
+				if (event.type === "retry_fallback_applied") fallbackApplied.push(event.to);
+			});
+			mockSchedulerWaitWithClock();
+
+			await session.prompt("Answer");
+			await session.waitForIdle();
+
+			if (keyBackAfter === 1) {
+				expect(keyResolves).toEqual([primarySelector, primarySelector]);
+				expect(fallbackApplied).toEqual([]);
+				expect(getLastAssistantMessage(session).content).toEqual([
+					{ type: "text", text: "Answered by anthropic." },
+				]);
+			} else {
+				// The initial attempt and both retries on the same model, then the chain.
+				expect(keyResolves).toEqual([primarySelector, primarySelector, primarySelector, fallbackSelector]);
+				expect(fallbackApplied).toEqual([fallbackSelector]);
+				expect(getLastAssistantMessage(session).content).toEqual([{ type: "text", text: "Answered by openai." }]);
+			}
+		});
+	}
+
 	it("does not reset the retry budget for a chain entry that resolves to the failing model", async () => {
 		const primaryModel = getBundledModel("openrouter", "z-ai/glm-5.2");
 		if (!primaryModel) {

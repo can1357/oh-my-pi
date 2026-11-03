@@ -2940,6 +2940,11 @@ export class TurnRecovery {
 			siblingAvailabilityWaitMs !== undefined &&
 			effectiveUsageLimitWaitMs !== undefined &&
 			effectiveUsageLimitWaitMs <= retrySettings.maxDelayMs;
+		// A request whose `!command` apiKey produced no key sent nothing to the provider, and the
+		// same model serves once the command prints a key again. Like a wait for a sibling
+		// credential, it retries the same model while its budget lasts (the key-command cap
+		// included), then walks the chain.
+		const waitForKeyToComeBack = isApiKeyCommandFailure(message) && !retryBudgetExhausted;
 		const longUsageLimitFallback =
 			currentModel !== undefined &&
 			resolveModelPolicy(currentModel).catalog.longUsageLimitFallback === true &&
@@ -2999,6 +3004,7 @@ export class TurnRecovery {
 				!thinkingLoop &&
 				!sameModelSteerReplay &&
 				!waitForSiblingCredential &&
+				!waitForKeyToComeBack &&
 				!refusalWalkRepeats &&
 				!this.#isFirstAttemptMidStreamSocketDrop(message, id, retryBudgetExhausted)
 			) {
