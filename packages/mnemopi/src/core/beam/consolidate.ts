@@ -7,6 +7,9 @@ import { REGEX_EXTRACTION_MAX_INPUT_CHARS } from "../entities";
 import { EpisodicGraph } from "../episodic-graph";
 import { type ExtractedFactCategories, heuristicExtractFacts } from "../extraction";
 import { clampVeracity, VERACITY_WEIGHTS, type Veracity, VeracityConsolidator } from "../veracity-consolidation";
+import { sourceChannelOf, sourceTierOf } from "../facts-fts";
+import { transaction } from "../../db";
+import { sourceMemoryScope } from "./fact-scope";
 import { scheduleEmbedding } from "./helpers";
 import type { BeamMemoryState, BeamStats, JsonValue, MemoriaRetrieveResult, Metadata, SleepResult } from "./types";
 
@@ -273,6 +276,7 @@ function insertFactRows(
 	context: string,
 	importance: number,
 	sourceMemoryId: string | null,
+	scope = "global",
 ): void {
 	const timestamp = isoNow();
 	beam.db.run(
@@ -283,11 +287,27 @@ function insertFactRows(
 	);
 
 	const factId = stableMemoryId(`${sourceSession(beam)}\0${factType}\0${key}\0${value}`, sourceMemoryId ?? "");
+	// Extracted durable facts inherit the scope of the memory they were
+	// extracted from (default 'global'), so bank-level extraction stays
+	// recallable across sessions while session-scoped consolidations keep
+	// their facts private. Pre-existing fact rows keep the column's 'session'
+	// default (no retroactive widening).
 	beam.db.run(
-		`INSERT OR IGNORE INTO facts
-		 (fact_id, session_id, subject, predicate, object, timestamp, source_msg_id, confidence)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		[factId, sourceSession(beam), key, factType, value, timestamp, sourceMemoryId, importance],
+		`INSERT INTO facts
+		 (fact_id, session_id, subject, predicate, object, timestamp, source_msg_id, confidence, scope, source_tier, channel_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(fact_id) DO UPDATE SET
+			-- A re-extraction that hits an existing fact id refreshes only the
+			-- provenance (source id, tier, channel) — e.g. after the source was
+			-- reassigned to another channel, where IGNORE would keep the stale
+			-- stamp and strand the fact in both channels' recall. Scope, owner,
+			-- and content never change on conflict: re-extraction must not
+			-- retroactively widen or transfer a private fact. Same ownership
+			-- guard as the graph upsert.
+			source_msg_id = CASE WHEN facts.scope = 'global' OR facts.session_id = excluded.session_id THEN excluded.source_msg_id ELSE facts.source_msg_id END,
+			source_tier = CASE WHEN facts.scope = 'global' OR facts.session_id = excluded.session_id THEN excluded.source_tier ELSE facts.source_tier END,
+			channel_id = CASE WHEN facts.scope = 'global' OR facts.session_id = excluded.session_id THEN excluded.channel_id ELSE facts.channel_id END`,
+		[factId, sourceSession(beam), key, factType, value, timestamp, sourceMemoryId, importance, scope, sourceTierOf(beam.db, sourceMemoryId), sourceChannelOf(beam.db, sourceMemoryId)],
 	);
 }
 
@@ -468,7 +488,12 @@ function timelineDate(description: string): string | null {
  * — consolidation is the explicit "settle and compress" step where the graph
  * is supposed to gain edges.
  */
-function ingestIntoEpisodicGraph(beam: BeamMemoryState, memoryId: string, summary: string): void {
+function ingestIntoEpisodicGraph(
+	beam: BeamMemoryState,
+	memoryId: string,
+	summary: string,
+	scope = "global",
+): void {
 	try {
 		const graph =
 			beam.episodicGraph instanceof EpisodicGraph
@@ -478,6 +503,7 @@ function ingestIntoEpisodicGraph(beam: BeamMemoryState, memoryId: string, summar
 			sessionId: sourceSession(beam),
 			linkExisting: true,
 			extractEntities: true,
+			scope,
 		});
 	} catch {
 		// Graph enrichment is best-effort and never blocks consolidation.
@@ -521,8 +547,11 @@ export function consolidateToEpisodic(
 			timestamp,
 		],
 	);
-	extractAndStoreFacts(beam, summary, 0, memoryId);
-	ingestIntoEpisodicGraph(beam, memoryId, summary);
+	// Facts inherit the episode's scope: a session-scoped summary keeps its
+	// extracted facts session-scoped (no silent cross-session widening), in
+	// both the beam extractor and the graph ingestion below.
+	extractAndStoreFacts(beam, summary, 0, memoryId, scope);
+	ingestIntoEpisodicGraph(beam, memoryId, summary, scope);
 	scheduleEmbedding(beam, [{ memoryId, content: summary }]);
 	emitEvent(beam, "MEMORY_CONSOLIDATED", memoryId, summary, source, importance, {
 		summary_of: [...sourceWmIds],
@@ -590,6 +619,7 @@ export function detectLanguage(_beam: BeamMemoryState, text: string): string {
 }
 type StoreFactStringOptions = {
 	routeHeuristicCategories?: boolean;
+	scope?: string;
 };
 
 export function storeFactStrings(
@@ -602,19 +632,30 @@ export function storeFactStrings(
 ): number {
 	const routeHeuristicCategories = options.routeHeuristicCategories ?? true;
 	let stored = 0;
-	for (const fact of facts) {
-		insertFactRows(beam, messageIdx, "entity", "fact", fact, fact, importance, sourceMemoryId);
-		stored++;
-		if (!routeHeuristicCategories) continue;
-		const pref = /^The user (prefers|dislikes) (.+)$/i.exec(fact);
-		if (pref?.[2]) {
-			insertPreference(beam, messageIdx, fact, pref[2], sourceMemoryId);
+	// Direct calls without an explicit scope inherit the source memory's scope,
+	// the same rule as extractAndStoreFacts — a private source must not produce
+	// global facts. The scope lookup and every derivative write must commit as
+	// ONE unit: if another process forgets or force-replaces the source between
+	// the lookup and the inserts, its cleanup runs first and this would leave
+	// an orphan fact carrying the source's old (possibly global) scope — and
+	// recall deliberately admits facts whose source no longer exists, so the
+	// orphan would be visible across sessions.
+	transaction(beam.db, () => {
+		const scope = options.scope ?? (sourceMemoryId !== null ? sourceMemoryScope(beam, sourceMemoryId) : "global");
+		for (const fact of facts) {
+			insertFactRows(beam, messageIdx, "entity", "fact", fact, fact, importance, sourceMemoryId, scope);
+			stored++;
+			if (!routeHeuristicCategories) continue;
+			const pref = /^The user (prefers|dislikes) (.+)$/i.exec(fact);
+			if (pref?.[2]) {
+				insertPreference(beam, messageIdx, fact, pref[2], sourceMemoryId);
+			}
+			const instruction = /^Instruction: (.+)$/i.exec(fact);
+			if (instruction?.[1]) {
+				insertInstruction(beam, messageIdx, instruction[1], fact, sourceMemoryId);
+			}
 		}
-		const instruction = /^Instruction: (.+)$/i.exec(fact);
-		if (instruction?.[1]) {
-			insertInstruction(beam, messageIdx, instruction[1], fact, sourceMemoryId);
-		}
-	}
+	});
 	return stored;
 }
 
@@ -625,16 +666,27 @@ export function storeExtractedFactCategories(
 	messageIdx = 0,
 	sourceMemoryId: string | null = null,
 	importance = 0.7,
+	scope?: string,
 ): number {
-	let stored = storeFactStrings(beam, extracted.facts, messageIdx, sourceMemoryId, importance);
+	// Same inheritance rule as extractAndStoreFacts: callers that omit the
+	// scope get the source memory's scope instead of an unconditional
+	// 'global'. The scope lookup and every derivative write commit as ONE unit
+	// (nested transactions are depth-safe), so a concurrent source cleanup
+	// cannot strand an orphan fact with the source's old scope.
+	const work = () => {
+		const effectiveScope = scope ?? (sourceMemoryId !== null ? sourceMemoryScope(beam, sourceMemoryId) : "global");
+	let stored = storeFactStrings(beam, extracted.facts, messageIdx, sourceMemoryId, importance, { scope: effectiveScope });
 	stored += storeFactStrings(beam, extracted.instructions, messageIdx, sourceMemoryId, importance, {
 		routeHeuristicCategories: false,
+		scope: effectiveScope,
 	});
 	stored += storeFactStrings(beam, extracted.preferences, messageIdx, sourceMemoryId, importance, {
 		routeHeuristicCategories: false,
+		scope: effectiveScope,
 	});
 	stored += storeFactStrings(beam, extracted.timelines, messageIdx, sourceMemoryId, importance, {
 		routeHeuristicCategories: false,
+		scope: effectiveScope,
 	});
 	for (const instruction of extracted.instructions) {
 		insertInstruction(beam, messageIdx, instruction, instruction, sourceMemoryId);
@@ -648,13 +700,16 @@ export function storeExtractedFactCategories(
 	for (const triple of extracted.kg) {
 		insertKg(beam, messageIdx, triple.subject, triple.predicate, triple.object, sourceMemoryId);
 	}
-	return stored;
+		return stored;
+	};
+	return transaction(beam.db, work);
 }
 export function extractAndStoreFacts(
 	beam: BeamMemoryState,
 	content: string,
 	messageIdx = 0,
 	sourceMemoryId: string | null = null,
+	scope?: string,
 ): FactCounts {
 	const counts: FactCounts = {
 		metric: 0,
@@ -668,6 +723,14 @@ export function extractAndStoreFacts(
 	};
 	const text = String(content ?? "");
 	if (text.length > PATTERN_FACT_EXTRACTION_MAX_INPUT_CHARS) return counts;
+	// The effective-scope lookup and every derivative write must commit as
+	// ONE unit (see storeFactStrings): a concurrent source cleanup must not
+	// be able to slip in between them and strand an orphan fact with the
+	// source's old scope. Facts inherit the scope of the memory they were
+	// extracted from and are never more visible than that source; only
+	// scopeless calls without a source default to 'global'.
+	const work = () => {
+		const effectiveScope = scope ?? (sourceMemoryId !== null ? sourceMemoryScope(beam, sourceMemoryId) : "global");
 	for (const match of text.matchAll(
 		/(\d+(?:[.,]\d+)?)\s*(ms|sec|seconds?|minutes?|hours?|days?|weeks?|months?|%|KB|MB|GB|TB|rows?|columns?|roles?|features?|bugs?|commits?|cards?|users?|items?|tests?|APIs?|endpoints?|sprints?|tickets?)\b/gi,
 	)) {
@@ -712,6 +775,7 @@ export function extractAndStoreFacts(
 			contextSnippet(text, match.index ?? 0),
 			0.65,
 			sourceMemoryId,
+			effectiveScope,
 		);
 		counts.metric++;
 		if (counts.metric >= 10) break;
@@ -720,7 +784,7 @@ export function extractAndStoreFacts(
 	for (const match of text.matchAll(/\b(\d{4}-\d{2}-\d{2})\b/g)) {
 		const date = match[1] ?? "";
 		const ctx = contextSnippet(text, match.index ?? 0, 100);
-		insertFactRows(beam, messageIdx, "date", "iso_date", date, ctx, 0.5, sourceMemoryId);
+		insertFactRows(beam, messageIdx, "date", "iso_date", date, ctx, 0.5, sourceMemoryId, effectiveScope);
 		counts.date++;
 		if (/\b(release|deadline|meeting|launch|ship|shipped|due|start|started|finish|finished)\b/i.test(ctx)) {
 			insertTimeline(beam, messageIdx, date, ctx, sourceMemoryId);
@@ -740,11 +804,12 @@ export function extractAndStoreFacts(
 			contextSnippet(text, match.index ?? 0),
 			0.6,
 			sourceMemoryId,
+			effectiveScope,
 		);
 		counts.version++;
 	}
 
-	counts.entity += storeFactStrings(beam, heuristicExtractFacts(text), messageIdx, sourceMemoryId);
+	counts.entity += storeFactStrings(beam, heuristicExtractFacts(text), messageIdx, sourceMemoryId, 0.7, { scope: effectiveScope });
 
 	for (const match of text.matchAll(
 		/\b([A-Z][A-Za-z0-9_-]{2,})\s+(?:is|uses|runs|owns|depends on)\s+([^.!?;]{2,80})/g,
@@ -753,7 +818,9 @@ export function extractAndStoreFacts(
 	}
 	if (/\b(no longer|not|never|don't|do not|isn't|wasn't)\b/i.test(text)) counts.negation++;
 	if (/\b(decided|decision|choose|chose|approved|rejected)\b/i.test(text)) counts.decision++;
-	return counts;
+		return counts;
+	};
+	return transaction(beam.db, work);
 }
 function classifyAbility(query: string): string {
 	const q = query.toLowerCase();

@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Existing memory banks can now migrate to fact scoping (on next open, or via the `e7` migration).
+
+### Fixed
+
+- Newly extracted facts are now recallable across sessions when their source memory is, completing the fact-scoping support the recall path already shipped.
+
 ## [18.14.2] - 2026-10-31
 
 ### Fixed

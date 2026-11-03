@@ -429,7 +429,6 @@ describe("fact-id read path (issue #4725)", () => {
 		insertFact(beam, "fact-other", "session-other", "service", "uses", "postgres database");
 		expect(get(beam, "fact-other")).toBeNull();
 
-		beam.db.run("ALTER TABLE facts ADD COLUMN scope TEXT DEFAULT 'session'");
 		beam.db.run("UPDATE facts SET scope = 'global' WHERE fact_id = 'fact-other'");
 		expect(get(beam, "fact-other")?.memory_store).toBe("fact");
 	});
