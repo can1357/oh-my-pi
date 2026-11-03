@@ -859,12 +859,38 @@ pub use platform::PinnedProcess;
 /// group (a pid namespace hides the group of its first process) refuses
 /// nothing: no pinned process inside the namespace can lead a group outside
 /// it.
+///
+/// The host's own group is read the same way as any other process's, through
+/// the fallback-capable reader: a security module that refuses `getpgid` must
+/// not leave the guard blind, which would let a call that ends one child's
+/// group signal the host.
 #[cfg(unix)]
 fn leads_host_group(pgid: i32) -> bool {
-	// SAFETY: `getpgid(0)` reads the calling process's group and no
-	// caller-owned memory.
-	let host_group = unsafe { libc::getpgid(0) };
-	host_group > 0 && host_group == pgid
+	let Ok(host) = i32::try_from(std::process::id()) else {
+		return false;
+	};
+	host_group(host) == Some(pgid)
+}
+
+/// The process group of `host`, this process itself.
+#[cfg(target_os = "linux")]
+fn host_group(host: i32) -> Option<i32> {
+	crate::proc_snapshot::sys::process_group(host)
+}
+
+/// The process group of `host`, this process itself. macOS has no seccomp
+/// filter to refuse `getpgid`; its short BSD record answers for a sandbox
+/// that denies the call.
+#[cfg(all(unix, not(target_os = "linux")))]
+fn host_group(host: i32) -> Option<i32> {
+	// SAFETY: `getpgid` takes a scalar pid and reads no caller-owned memory.
+	let pgid = unsafe { libc::getpgid(host) };
+	if pgid > 0 {
+		return Some(pgid);
+	}
+	crate::proc_snapshot::sys::short_bsdinfo(host)
+		.and_then(|info| i32::try_from(info.pbsi_pgid).ok())
+		.filter(|pgid| *pgid > 0)
 }
 
 /// Pids a cancellation sweep must never signal: the harness process itself.
@@ -1138,20 +1164,79 @@ pub fn kernel_group_exists(leader: &PinnedProcess) -> bool {
 	leader.signal_group(0)
 }
 
-/// Whether the group `leader` led still has a running member: the kernel has
-/// the group, and the process table read now lists a member of it that runs.
-/// This answers what is left to signal, which a group of processes that have
-/// exited is not; a record is never dropped on it (see
-/// [`kernel_group_exists`]). `table` holds the process table across the
-/// entries of one question, which would otherwise read it once per entry.
+/// Whether the group `leader` led may still hold a process that runs. The
+/// kernel answers first: a group it no longer has holds nothing. While it
+/// has the group, something holds it, and only a reading that accounts for
+/// every holder may call the group spent: each holder must be a child of
+/// this process that has exited and that this process has not reaped, which
+/// holds its pid and its group and can never run again. A listing that finds
+/// nothing at all explains nothing — a member that exits while the table is
+/// read hides its own replacement — and leaves the answer at "it may run".
+/// `table` holds the process table across the entries of one question; the
+/// answer that ends a wait is taken from a reading made for it alone.
 fn kernel_group_runs_in(leader: &PinnedProcess, table: &mut Option<GroupTable>) -> bool {
-	kernel_group_exists(leader) && !list_group(table, leader.pid()).is_empty()
+	if !kernel_group_exists(leader) {
+		return false;
+	}
+	let holders = table.get_or_insert_with(PinnedProcess::process_groups);
+	let spent = |pids: &[i32]| !pids.is_empty() && pids.iter().copied().all(own_unreaped_child);
+	if !spent(holders.get(&leader.pid()).map_or(&[], SmallVec::as_slice)) {
+		return true;
+	}
+	// The table says the group is spent. It may have been read before a
+	// member of it exited, so read this group again for this answer alone.
+	!spent(&group_holders(leader.pid()))
 }
 
 /// [`kernel_group_runs_in`] for a single leader, reading the table for it.
 #[must_use]
 pub fn kernel_group_runs(leader: &PinnedProcess) -> bool {
 	kernel_group_runs_in(leader, &mut None)
+}
+
+/// Every pid the process table lists in `group` now, whether it runs or has
+/// exited without being reaped: both hold the group. Only a caller that can
+/// prove the number names the group may ask (see [`GroupProof`]).
+#[cfg(unix)]
+fn group_holders(group: i32) -> Vec<i32> {
+	PinnedProcess::process_groups()
+		.get(&group)
+		.map_or_else(Vec::new, |pids| pids.as_slice().to_vec())
+}
+
+/// Windows has no process groups.
+#[cfg(windows)]
+fn group_holders(_group: i32) -> Vec<i32> {
+	Vec::new()
+}
+
+/// Whether `pid` is a child of this process that has exited and that this
+/// process has not reaped. Such a process holds its pid and its group and
+/// can never run again. Nothing is reaped here: `WNOWAIT` leaves the child
+/// for the shell's own reap.
+#[cfg(unix)]
+fn own_unreaped_child(pid: i32) -> bool {
+	// SAFETY: an all-zero `siginfo_t` is valid; `waitid` writes only into it.
+	let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+	// SAFETY: as above; the remaining arguments are scalars.
+	let reported = unsafe {
+		libc::waitid(
+			libc::P_PID,
+			pid as libc::id_t,
+			&raw mut info,
+			libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+		)
+	};
+	// A child of this process that no longer runs has exited and waits to be
+	// reaped; `WNOWAIT` left it for the shell's own reap.
+	reported == 0
+		&& PinnedProcess::from_pid(pid).is_some_and(|child| child.status() != ProcessStatus::Running)
+}
+
+/// Windows has no process groups, so nothing asks.
+#[cfg(windows)]
+const fn own_unreaped_child(_pid: i32) -> bool {
+	false
 }
 
 /// Pins the running members of `group`, reading the process table once per
@@ -2171,6 +2256,102 @@ while True:
 		assert!(
 			members.iter().any(|pinned| pinned.same_identity(&member)),
 			"the group's members must be pinned before the reap with getpgid refused"
+		);
+	}
+
+	/// The guard that keeps a group signal off the host's own group reads the
+	/// host's group the same way as any other. With `getpgid` refused it must
+	/// still recognise that group, or ending one child's group takes the host
+	/// with it. Run in a group this test leads, so a blind guard would signal
+	/// the re-run itself.
+	#[cfg(target_os = "linux")]
+	#[test]
+	fn signal_group_refuses_the_hosts_group_when_getpgid_is_refused() {
+		const NAME: &str = "signal_group_refuses_the_hosts_group_when_getpgid_is_refused";
+
+		if !in_own_process_group(NAME) || !without_getpgid(NAME) {
+			return;
+		}
+		let host = i32::try_from(std::process::id()).expect("pid fits");
+		let group = crate::proc_snapshot::sys::process_group(host)
+			.expect("the host's group must read from /proc with getpgid refused");
+		let leader = PinnedProcess::from_pid(group).expect("pin the host's group leader");
+		assert!(
+			!leader.signal_group(0),
+			"the guard must refuse the host's own group ({group}) when getpgid is refused"
+		);
+	}
+
+	/// A listing of the process table proves nothing about a group the kernel
+	/// still has: it may have been read while a member exited, and say nothing
+	/// about the replacement that member left behind. A group counts as spent
+	/// only when every process holding it is one this process holds as an
+	/// exited child of its own. Here the group's leader is reaped and the
+	/// group is held by a process that is this one's grandchild, which no
+	/// listing of running processes reports.
+	#[cfg(target_os = "linux")]
+	#[test]
+	fn a_group_held_by_a_process_this_one_cannot_account_for_is_not_reported_spent() {
+		use std::{
+			io::{BufRead as _, BufReader},
+			os::unix::process::CommandExt as _,
+			process::{Command, Stdio},
+			thread,
+			time::{Duration, Instant},
+		};
+
+		// Forks a child into the leader's group, reports it and keeps running
+		// without reaping it: the child holds the group after it exits, and
+		// it is this test's grandchild, not its child.
+		const HOLDER: &str = r#"import os, sys, time
+group = int(sys.argv[1])
+pid = os.fork()
+if pid == 0:
+    os.setpgid(0, group)
+    os._exit(0)
+print(pid, flush=True)
+while True:
+    time.sleep(1)
+"#;
+
+		let leader = Command::new("/bin/sleep")
+			.arg("600")
+			.process_group(0)
+			.spawn()
+			.expect("start the group leader");
+		let group = i32::try_from(leader.id()).expect("leader pid fits");
+		let leader_pin = PinnedProcess::from_pid(group).expect("pin the leader");
+		let mut guard = ProcessGuard::new(leader);
+		let parent = Command::new("python3")
+			.args(["-u", "-c", HOLDER, &group.to_string()])
+			.stdout(Stdio::piped())
+			.spawn()
+			.expect("start the holder's parent");
+		let parent_pin = PinnedProcess::from_pid(i32::try_from(parent.id()).expect("pid fits"))
+			.expect("pin the holder's parent");
+		guard.pin(&parent_pin);
+		let mut keeper = ProcessGuard::new(parent);
+		let mut line = String::new();
+		BufReader::new(keeper.leader().stdout.take().expect("holder parent stdout"))
+			.read_line(&mut line)
+			.expect("read the holder's pid");
+		let holder = PinnedProcess::from_pid(line.trim().parse::<i32>().expect("holder pid"))
+			.expect("pin the holder");
+		let deadline = Instant::now() + Duration::from_secs(5);
+		while holder.status() == ProcessStatus::Running {
+			assert!(Instant::now() < deadline, "the holder never exited");
+			thread::sleep(Duration::from_millis(5));
+		}
+		guard.leader().kill().expect("end the leader");
+		assert!(guard.leader().wait().is_ok(), "reap the leader");
+
+		if !kernel_group_exists(&leader_pin) {
+			// Linux 5.3 to 6.8 cannot reach a reaped leader's group at all.
+			return;
+		}
+		assert!(
+			kernel_group_runs(&leader_pin),
+			"a group held by a process this one cannot account for must not be reported spent"
 		);
 	}
 
