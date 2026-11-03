@@ -10,6 +10,7 @@
 
 ### Fixed
 
+- Extensions that set the system prompt in `before_agent_start` now get it applied on turns started by a triggered custom message (`sendCustomMessage` / `pi.sendMessage` with `triggerTurn` while idle), not only on `prompt()` turns ([#17969](https://github.com/can1357/oh-my-pi/pull/17969) by [@Delije4](https://github.com/Delije4))
 - Fixed Windows bash output on non-UTF-8 code pages (Korean, Chinese, Japanese, …) turning into mojibake for the rest of a command after a builtin wrote one invalid byte (`printf '\xeb'`, `cut -c` through a CJK character); the stray byte now becomes `�` on its own line, and native programs' ANSI output still decodes, including through `| head` or from `cat` of a legacy file ([#17947](https://github.com/can1357/oh-my-pi/pull/17947) by [@H4vC](https://github.com/H4vC))
 
 ## [18.16.0] - 2026-11-02
