@@ -2704,6 +2704,89 @@ describe("runGcCommand session compression", () => {
 				expect(kept).toHaveLength(1);
 			});
 
+			/** The files under the scratch directories that hold the session's 1 MiB of zeros. */
+			const scratchZeros = async (): Promise<string[]> =>
+				(await filesUnder(root))
+					.filter(
+						({ file, bytes }) => file.includes(".omp-gc-compress-") && bytes.equals(Buffer.alloc(1024 * 1024)),
+					)
+					.map(({ file }) => file);
+
+			// Round 9's review: gc removed the last copy of a session's bytes when
+			// the session file's name was removed, once, by another process — just
+			// before the exchange (cleanup removed the copy), or just before gc
+			// removed the original after a swap. gc holds both files open, and
+			// keeps what the last one holds whenever the other is gone.
+			test("a session file removed by its name just before the exchange leaves the compressed copy, and says so", async () => {
+				await metadataDitto(true);
+				const { file, candidate } = await privateZeros();
+				beforePublish(file, () => fsSync.unlinkSync(file));
+
+				const result = await gcCompress.compressFilesInPlace([candidate], "apfs", new Set());
+
+				expect(await fs.lstat(file).catch(() => undefined)).toBeUndefined();
+				expect(result.compressed).toBe(0);
+				expect(result.errors.join("\n")).toContain(
+					`another process removed ${file} just before its compressed copy took its place`,
+				);
+				expect(await scratchZeros()).toHaveLength(1);
+			});
+
+			for (const [what, act] of [
+				["removed", (file: string) => fsSync.unlinkSync(file)],
+				[
+					"replaced by a rename",
+					(file: string) => {
+						const fresh = path.join(path.dirname(file), "fresh.tmp");
+						fsSync.writeFileSync(fresh, "ONLY NEW PUBLISHED SESSION");
+						fsSync.renameSync(fresh, file);
+					},
+				],
+			] as const) {
+				test(`a session file ${what} by its name just before gc removes the original keeps the session's bytes`, async () => {
+					await metadataDitto(true);
+					const { file, candidate } = await privateZeros();
+					const unlink = fs.unlink;
+					let acted = false;
+					spyOn(fs, "unlink").mockImplementation(async target => {
+						if (!acted && String(target).includes(".omp-gc-compress-")) {
+							acted = true;
+							act(file);
+						}
+						return await unlink(target);
+					});
+
+					const result = await gcCompress.compressFilesInPlace([candidate], "apfs", new Set());
+
+					expect(acted).toBe(true);
+					expect(result.compressed).toBe(0);
+					expect(result.errors.join("\n")).toContain("what it held was kept at");
+					expect(await scratchZeros()).toHaveLength(1);
+				});
+			}
+
+			test("a session file removed by its name before cleanup takes its copy away keeps the session's bytes", async () => {
+				// A real copy, which allocates as much as its original, so it is never
+				// put in place and cleanup takes it away.
+				await metadataDitto(false);
+				const { file, candidate } = await privateZeros();
+				const unlink = fs.unlink;
+				let acted = false;
+				spyOn(fs, "unlink").mockImplementation(async target => {
+					if (!acted && String(target).includes(".omp-gc-compress-")) {
+						acted = true;
+						fsSync.unlinkSync(file);
+					}
+					return await unlink(target);
+				});
+
+				const result = await gcCompress.compressFilesInPlace([candidate], "apfs", new Set());
+
+				expect(acted).toBe(true);
+				expect(result.errors.join("\n")).toContain(`${file} was gone when this run removed its copy`);
+				expect(await scratchZeros()).toHaveLength(1);
+			});
+
 			// The boundary: a second reach of the name, by a process that ignores
 			// the session's ownership lease, in the few system calls before the
 			// exchange back goes to the scratch name with the file it reached. It
