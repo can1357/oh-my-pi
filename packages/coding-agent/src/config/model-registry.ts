@@ -280,6 +280,17 @@ function contextWindowKey(model: { provider: string; id: string }): string {
 	return `${model.provider}\u0000${model.id}`;
 }
 
+/**
+ * Whether two credential tombstones are of the same account: the same account id when both carry
+ * one, else the same email when both carry one. When either cannot tell, they count as the same,
+ * so a removal without an identity still ends the retry for its provider.
+ */
+function sameStoredAccount(a: DisabledCredentialSummary, b: DisabledCredentialSummary): boolean {
+	if (a.accountId && b.accountId) return a.accountId === b.accountId && a.orgId === b.orgId;
+	if (a.email && b.email) return a.email === b.email;
+	return true;
+}
+
 /** The context window a model runs with by default, and the larger one extended context opts it into. */
 export interface ContextWindowTiers {
 	standard: number;
@@ -3262,13 +3273,15 @@ export class ModelRegistry {
 	/**
 	 * Whether the provider has stored credentials that exist but could not serve
 	 * a request: an active row that resolved no key, or an OAuth credential a
-	 * failure disabled ({@link isAutoDisabledCredential}) after the user last
-	 * removed or replaced one. A new login, here or in another session sharing
-	 * the store, brings such a credential back; a provider whose latest teardown
-	 * was the user's own (a logout), or that never had a credential, does not
-	 * count. A tombstone lookup that fails counts, since the store could not
-	 * tell; one the caller aborted does not. False for a disabled provider and
-	 * for one whose catalog dispatches without a key.
+	 * failure disabled ({@link isAutoDisabledCredential}) that the user has not
+	 * since removed or replaced. A new login, here or in another session sharing
+	 * the store, brings such a credential back; an account whose latest teardown
+	 * was the user's own (a logout), or a provider that never had a credential,
+	 * does not count. A user's removal covers the same account only: removing one
+	 * account of a provider leaves another account's failure recoverable. A
+	 * tombstone lookup that fails counts, since the store could not tell; one the
+	 * caller aborted does not. False for a disabled provider and for one whose
+	 * catalog dispatches without a key.
 	 */
 	async #storedCredentialsUnavailable(provider: string, signal?: AbortSignal): Promise<boolean> {
 		if (this.#isProviderDisabled(provider) || getProviderDefinition(provider)?.allowsMissingApiKey) return false;
@@ -3284,16 +3297,17 @@ export class ModelRegistry {
 			});
 			return true;
 		}
-		// The latest teardown decides; an unknown time sorts first, and a tie goes
-		// to the user's removal.
-		let autoDisabledAt = -1;
-		let removedAt = -1;
-		for (const tombstone of tombstones) {
-			const at = tombstone.disabledAtMs ?? 0;
-			if (isAutoDisabledCredential(tombstone)) autoDisabledAt = Math.max(autoDisabledAt, at);
-			else removedAt = Math.max(removedAt, at);
-		}
-		return autoDisabledAt > removedAt;
+		// A removal or replacement of the same account at or after the failure decides it; an
+		// unknown time sorts first, so a tie goes to the user's removal.
+		const removals = tombstones.filter(tombstone => !isAutoDisabledCredential(tombstone));
+		return tombstones.some(
+			failure =>
+				isAutoDisabledCredential(failure) &&
+				!removals.some(
+					removal =>
+						sameStoredAccount(failure, removal) && (removal.disabledAtMs ?? 0) >= (failure.disabledAtMs ?? 0),
+				),
+		);
 	}
 
 	getDiscoverableProviders(): string[] {
@@ -3566,10 +3580,10 @@ export class ModelRegistry {
 	 * finds no key throws a transient {@link CredentialUnavailableError} when the
 	 * key may come back without the user configuring one:
 	 * - the provider's apiKey is a `!command` that produced nothing ({@link ApiKeyCommandError});
-	 * - the session's OAuth account pool has no account that can serve now
-	 *   ({@link AccountPoolUnavailableError}, kept as `cause`);
 	 * - the provider's stored credentials exist but none can serve now
-	 *   ({@link #storedCredentialsUnavailable}).
+	 *   ({@link #storedCredentialsUnavailable}), also when the session's OAuth
+	 *   account pool has no account that can serve ({@link AccountPoolUnavailableError},
+	 *   kept as `cause`). A pool whose credentials the user removed fails for good.
 	 * A registry view that builds its own resolvers wraps them with this.
 	 */
 	failCommandKeyRetryably(provider: string, resolve: ApiKeyResolver): ApiKeyResolver {
@@ -3578,7 +3592,11 @@ export class ModelRegistry {
 			try {
 				resolved = await resolve(ctx);
 			} catch (error) {
-				if (ctx.error === undefined && error instanceof AccountPoolUnavailableError) {
+				if (
+					ctx.error === undefined &&
+					error instanceof AccountPoolUnavailableError &&
+					(await this.#storedCredentialsUnavailable(provider, ctx.signal))
+				) {
 					throw new CredentialUnavailableError(error.message, { cause: error });
 				}
 				throw error;

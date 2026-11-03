@@ -20,6 +20,7 @@ import { ensurePersistedRoster } from "../registry/persisted-agents";
 import { AgentRegistry } from "../registry/agent-registry";
 import type { AgentSession } from "../session/agent-session";
 import { hasRestorableTurn } from "../session/exit-diagnostics";
+import { activeBranch } from "../session/session-entries";
 import { extractSessionInit } from "../session/session-manager";
 import { collectSubSessions } from "../session/sub-sessions";
 import type { EventBus } from "../utils/event-bus";
@@ -73,7 +74,9 @@ async function restoreSubagents(session: AgentSession, options: RestoreOptions):
 	const restored: string[] = [];
 	for (const key of keys) {
 		const sub = subSessions[key]!;
-		if (sub.aborted || !hasRestorableTurn(sub.entries)) continue;
+		// The selected branch, as the subagent's own session reopens it: entries on other branches
+		// (an abandoned turn, a `/clear` that was rolled back) are not its conversation.
+		if (sub.aborted || !hasRestorableTurn(activeBranch(sub.entries))) continue;
 		const id = sub.agentId;
 		const ref = registry.get(id);
 		const init = extractSessionInit(sub.entries);

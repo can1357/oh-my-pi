@@ -122,6 +122,26 @@ describe("disabled credential tombstones", () => {
 			"google-gemini-cli": true,
 		});
 	});
+
+	test("removing one account a failure already disabled records the user's removal on it, and only on it", async () => {
+		await store!.saveOAuth("anthropic", mintOAuth("first@example.test"));
+		await store!.saveOAuth("anthropic", mintOAuth("second@example.test"));
+		await storage!.credentials.reload();
+		const [first, second] = store!.listAuthCredentials("anthropic");
+		await store!.deleteAuthCredential(first!.id, DISABLE_CAUSE);
+		await store!.deleteAuthCredential(second!.id, DISABLE_CAUSE);
+		await storage!.credentials.reload();
+
+		expect(await storage!.credentials.removeById("anthropic", first!.id)).toBe(true);
+		// A per-id removal of another provider's id, or of one already removed, reaches nothing.
+		expect(await storage!.credentials.removeById("openai-codex", second!.id)).toBe(false);
+		expect(await storage!.credentials.removeById("anthropic", first!.id)).toBe(false);
+
+		const byEmail = Object.fromEntries(
+			(await storage!.credentials.listDisabled("anthropic")).map(row => [row.email, isAutoDisabledCredential(row)]),
+		);
+		expect(byEmail).toEqual({ "first@example.test": false, "second@example.test": true });
+	});
 });
 
 describe("broker /v1/credentials/disabled round-trip", () => {
@@ -186,6 +206,24 @@ describe("broker /v1/credentials/disabled round-trip", () => {
 		const tombstones = await serverStorage!.credentials.listDisabled("anthropic");
 		expect(tombstones.map(row => ({ cause: row.cause, recoverable: isAutoDisabledCredential(row) }))).toEqual([
 			{ cause: "deleted by user", recoverable: false },
+		]);
+	});
+
+	test("a remote client's removal of one account reaches that login after the broker disabled it", async () => {
+		await serverStore!.saveOAuth("anthropic", mintOAuth("first@example.test"));
+		await serverStore!.saveOAuth("anthropic", mintOAuth("second@example.test"));
+		const [first, second] = serverStore!.listAuthCredentials("anthropic");
+		await serverStore!.deleteAuthCredential(first!.id, DISABLE_CAUSE);
+		await serverStore!.deleteAuthCredential(second!.id, DISABLE_CAUSE);
+		await clientStorage!.credentials.reload();
+
+		expect(await clientStorage!.credentials.removeById("anthropic", first!.id)).toBe(true);
+		expect(await clientStorage!.credentials.disable(second!.id, "deleted by user")).toBe(true);
+
+		const tombstones = await serverStorage!.credentials.listDisabled("anthropic");
+		expect(tombstones.map(row => ({ email: row.email, cause: row.cause }))).toEqual([
+			{ email: "first@example.test", cause: "deleted by user" },
+			{ email: "second@example.test", cause: "deleted by user" },
 		]);
 	});
 

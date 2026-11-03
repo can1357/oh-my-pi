@@ -391,6 +391,31 @@ export function resolveSessionLeafId(entries: readonly SessionEntry[]): string |
 	return lastSelfSelectedLeafId(entries);
 }
 
+/**
+ * Entries from the root to `leaf`, following `parentId`. Corrupt or pre-fix files can contain
+ * parent cycles; the walk stops at the first repeat, so it is bounded.
+ */
+export function branchPath(leaf: SessionEntry, byId: ReadonlyMap<string, SessionEntry>): SessionEntry[] {
+	const path: SessionEntry[] = [];
+	const seen = new Set<string>();
+	let current: SessionEntry | undefined = leaf;
+	while (current && !seen.has(current.id)) {
+		seen.add(current.id);
+		path.push(current);
+		current = current.parentId ? byId.get(current.parentId) : undefined;
+	}
+	return path.reverse();
+}
+
+/** The branch a file's replay selects: the entries from the root to its active leaf (see {@link resolveSessionLeafId}). */
+export function activeBranch(entries: readonly SessionEntry[]): SessionEntry[] {
+	const leafId = resolveSessionLeafId(entries);
+	if (leafId === null) return [];
+	const byId = new Map(entries.map(entry => [entry.id, entry]));
+	const leaf = byId.get(leafId);
+	return leaf ? branchPath(leaf, byId) : [];
+}
+
 /** Raw logical file entry after loaders strip any fixed-width title slot. */
 export type FileEntry = SessionHeader | SessionEntry;
 

@@ -3,7 +3,7 @@ import { resolveCredentialIdentityKey, serializeCredential } from "./sqlite-cred
 import type { BlockStoreHealth } from "./blocks";
 import type { AccountPolicies } from "./policy";
 import type { AuthCredentialStore } from "./store";
-import { DELETED_BY_USER, isUserRemovalCause, REMOTE_REFRESH_SENTINEL } from "./types";
+import { DELETED_BY_USER, isAutoDisabledCredential, isUserRemovalCause, REMOTE_REFRESH_SENTINEL } from "./types";
 import type {
 	ApiKeyCredential,
 	AuthCredential,
@@ -635,12 +635,21 @@ export class CredentialPool implements CredentialsApi {
 	}
 
 	/**
-	 * Remove one stored credential for a provider.
+	 * Remove one stored credential for a provider. A credential a failure already
+	 * disabled is removed too: its tombstone records the user's removal
+	 * ({@link isAutoDisabledCredential}), so a retry stops counting on it.
 	 */
 	async removeById(provider: string, credentialId: number): Promise<boolean> {
 		const entries = this.entries(provider);
 		const index = entries.findIndex(entry => entry.id === credentialId);
-		if (index === -1) return false;
+		if (index === -1) {
+			const tombstones = this.#store.listDisabledCredentials
+				? await this.#store.listDisabledCredentials(provider)
+				: [];
+			const failed = tombstones.find(tombstone => tombstone.id === credentialId);
+			if (!failed || !isAutoDisabledCredential(failed)) return false;
+			return this.#store.deleteAuthCredential(credentialId, DELETED_BY_USER);
+		}
 		const remainingEntries = entries.filter((_entry, entryIndex) => entryIndex !== index);
 		const deleted = await this.#store.deleteAuthCredential(credentialId, DELETED_BY_USER);
 		if (!deleted) return false;

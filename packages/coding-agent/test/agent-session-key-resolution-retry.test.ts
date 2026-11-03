@@ -2,7 +2,7 @@ import { describe, expect, vi } from "bun:test";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import { type AssistantMessage, resolveCredentialIdentityKey } from "@oh-my-pi/pi-ai";
 import { unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { resolveApiKeyOnce } from "@oh-my-pi/pi-ai/auth-retry";
 import * as envApiKey from "@oh-my-pi/pi-ai/env-api-key";
@@ -440,32 +440,58 @@ describe("AgentSession: a provider key that cannot be resolved for a moment", ()
 	};
 
 	for (const [removal, remove] of Object.entries(USER_REMOVALS)) {
-		it(`ends the turn at once, and refuses the next prompt, when the user ${removal}`, async () => {
-			const ctx = await setUp();
-			const keys: KeyOutage = { start: () => remove(ctx.authStorage), end: async () => {} };
-			const sessionDir = path.join(ctx.tempDir.path(), "sessions");
-			const { session, mock, retryStarts } = await openSession(ctx, {
-				maxRetries: 5,
-				sessionManager: SessionManager.create(ctx.tempDir.path(), sessionDir),
-				outage: { keys, startOn: "probe", resolvesWhileDown: Number.POSITIVE_INFINITY },
-			});
-			mockSchedulerWaitWithClock();
+		for (const pooled of [false, true]) {
+			const where = pooled ? " in a session restricted to its account pool" : "";
+			it(`ends the turn at once, and refuses the next prompt, when the user ${removal}${where}`, async () => {
+				const ctx = await setUp();
+				if (pooled) {
+					// The pool holds the session's own login, so the turn starts and the user's removal ends it.
+					const identity = resolveCredentialIdentityKey("anthropic", oauthLogin("acc-live"));
+					ctx.authStorage.sessions.restrict("anthropic", PROVIDER_SESSION_ID, [identity!]);
+				}
+				const keys: KeyOutage = { start: () => remove(ctx.authStorage), end: async () => {} };
+				const sessionDir = path.join(ctx.tempDir.path(), "sessions");
+				const { session, mock, retryStarts } = await openSession(ctx, {
+					maxRetries: 5,
+					sessionManager: SessionManager.create(ctx.tempDir.path(), sessionDir),
+					outage: { keys, startOn: "probe", resolvesWhileDown: Number.POSITIVE_INFINITY },
+				});
+				mockSchedulerWaitWithClock();
 
-			await session.prompt("run the probe");
-			await session.waitForIdle();
+				await session.prompt("run the probe");
+				await session.waitForIdle();
 
-			const failed = lastAssistant(session);
-			expect({ stopReason: failed.stopReason, errorMessage: failed.errorMessage }).toEqual({
-				stopReason: "error",
-				errorMessage: "No API key for provider: anthropic",
+				const failed = lastAssistant(session);
+				expect(failed.stopReason).toBe("error");
+				// A pooled session names its pool; an unrestricted one names the provider.
+				expect(failed.errorMessage).toContain(pooled ? "account pool" : "No API key for provider: anthropic");
+				expect(AIError.is(failed.errorId, AIError.Flag.CredentialUnavailable)).toBe(false);
+				expect(retryStarts).toEqual([]);
+				expect(mock.calls).toHaveLength(1);
+				await expect(session.prompt("again")).rejects.toThrow("No API key found for anthropic");
+				await expect(session.restoreInterruptedTurn()).resolves.toBe(false);
 			});
-			expect(AIError.is(failed.errorId, AIError.Flag.CredentialUnavailable)).toBe(false);
-			expect(retryStarts).toEqual([]);
-			expect(mock.calls).toHaveLength(1);
-			await expect(session.prompt("again")).rejects.toThrow("No API key found for anthropic");
-			await expect(session.restoreInterruptedTurn()).resolves.toBe(false);
-		});
+		}
 	}
+
+	it("keeps another account's failure recoverable when the user removes one account", async () => {
+		const ctx = await setUp();
+		const { authStorage, modelRegistry } = ctx;
+		await authStorage.credentials.set("anthropic", [oauthLogin("acc-a"), oauthLogin("acc-b")]);
+		const [a, b] = authStorage.oauth.accounts("anthropic");
+		await authStorage.credentials.disable(
+			a!.credentialId,
+			'oauth refresh failed: HTTP 400 {"error":"invalid_grant"}',
+		);
+		await authStorage.credentials.removeById("anthropic", b!.credentialId);
+
+		// A's failure is still A's: a new login of A brings the provider back.
+		expect(await modelRegistry.missingKeyMayRecover("anthropic")).toBe(true);
+
+		await authStorage.credentials.removeById("anthropic", a!.credentialId);
+
+		expect(await modelRegistry.missingKeyMayRecover("anthropic")).toBe(false);
+	});
 
 	it("fails a pooled turn for good when a models.yml apiKey owns the provider", async () => {
 		const ctx = await setUp();

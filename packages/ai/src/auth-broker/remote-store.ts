@@ -920,7 +920,16 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	async deleteAuthCredential(id: number, disabledCause: string): Promise<boolean> {
 		this.#noteActivity();
 		const found = this.#snapshot.credentials.some(entry => entry.id === id);
-		if (!found) return false;
+		if (!found) {
+			// Not active here, but the broker may hold it as a login a failure disabled: a
+			// user's removal records itself on that tombstone (`isAutoDisabledCredential`).
+			if (!isUserRemovalCause(disabledCause)) return false;
+			try {
+				return (await this.#client.disableCredential(id, disabledCause)).ok;
+			} catch {
+				return false;
+			}
+		}
 		await this.#client.disableCredential(id, disabledCause);
 		this.#removeCredentialById(id);
 		this.#maybeRefreshSnapshot("delete credential");

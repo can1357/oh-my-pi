@@ -8879,21 +8879,19 @@ export class AgentSession implements SettingsScope {
 			}
 
 			// Validate API key. A key that may come back without the user configuring
-			// one (a `!command` apiKey that produced nothing, an OAuth account pool or
-			// stored credentials that cannot serve now) is left to the turn, whose
-			// resolver fails retryably so auto-retry covers it. Any other provider
-			// without a key walks the retry fallback chain first.
+			// one (a `!command` apiKey that produced nothing, stored credentials that
+			// cannot serve now, including an OAuth account pool none of whose accounts
+			// can) is left to the turn, whose resolver fails retryably so auto-retry
+			// covers it. Any other provider without a key, a pool whose credentials the
+			// user removed included, walks the retry fallback chain first.
 			let apiKey: string | undefined;
-			let poolUnavailable = false;
 			try {
 				apiKey = await logger.time("prompt:apiKey", () => this.#modelRegistry.getApiKey(model, this.sessionId));
 			} catch (error) {
 				if (!(error instanceof AIError.AccountPoolUnavailableError)) throw error;
-				poolUnavailable = true;
 			}
 			if (
 				!apiKey &&
-				!poolUnavailable &&
 				!(await this.#modelRegistry.missingKeyMayRecover(model.provider, setupAbort.signal)) &&
 				!(await this.#recovery.applyMissingCredentialFallback(setupAbort.signal))
 			) {
