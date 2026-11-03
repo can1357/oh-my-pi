@@ -625,7 +625,13 @@ fn drive(mut control: i32, limits: i32, bound: i32) -> ! {
 			frame::EXIT => exit(arg),
 			_ => exit(1),
 		};
-		answer(control, result);
+		// After a step that set `fd`, its descriptor goes with the answer: the
+		// shell expands the next word with the descriptors the command will have.
+		if result == 0 && matches!(kind, frame::OPEN | frame::DUPLICATE | frame::PLACE) {
+			answer_with_descriptor(control, fd);
+		} else {
+			answer(control, result);
+		}
 	}
 }
 
@@ -806,6 +812,50 @@ fn discard(fd: i32, mut length: usize, buffer: &mut [u8]) {
 fn answer(control: i32, result: i32) {
 	write_all(control, &result.to_le_bytes());
 }
+
+/// Answers a step that succeeded and set `fd`, with `fd` attached. The bytes
+/// alone go if the descriptor cannot (the shell then expands with what it
+/// holds).
+#[cfg(unix)]
+fn answer_with_descriptor(control: i32, fd: i32) {
+	let mut bytes = 0i32.to_le_bytes();
+	let mut iov = libc::iovec { iov_base: bytes.as_mut_ptr().cast(), iov_len: bytes.len() };
+	// Room for one header and one descriptor, aligned as the kernel reads it.
+	let mut space = [0u64; 4];
+	// SAFETY: a zeroed `msghdr` is valid; every pointer set below outlives the
+	// call; the `CMSG_*` helpers stay inside `space`, which is larger than
+	// `CMSG_SPACE` of one descriptor.
+	let sent = unsafe {
+		let mut message: libc::msghdr = std::mem::zeroed();
+		message.msg_iov = &raw mut iov;
+		message.msg_iovlen = 1;
+		message.msg_control = space.as_mut_ptr().cast();
+		message.msg_controllen = libc::CMSG_SPACE(size_of::<i32>() as u32) as _;
+		let header = libc::CMSG_FIRSTHDR(&raw const message);
+		(*header).cmsg_level = libc::SOL_SOCKET;
+		(*header).cmsg_type = libc::SCM_RIGHTS;
+		(*header).cmsg_len = libc::CMSG_LEN(size_of::<i32>() as u32) as _;
+		libc::CMSG_DATA(header).cast::<i32>().write_unaligned(fd);
+		loop {
+			let sent = libc::sendmsg(control, &raw const message, SEND_FLAGS);
+			if sent >= 0 || last_errno() != libc::EINTR {
+				break sent;
+			}
+		}
+	};
+	match usize::try_from(sent) {
+		Ok(sent) if sent == bytes.len() => {},
+		// Part of the answer went, with the descriptor: send the rest.
+		Ok(sent) => write_all(control, &bytes[sent..]),
+		Err(_) => write_all(control, &bytes),
+	}
+}
+
+/// A shell that has gone raises `EPIPE` for the stub, not a `SIGPIPE`.
+#[cfg(target_os = "linux")]
+const SEND_FLAGS: libc::c_int = libc::MSG_NOSIGNAL;
+#[cfg(all(unix, not(target_os = "linux")))]
+const SEND_FLAGS: libc::c_int = 0;
 
 /// The descriptor a stub receives is close-on-exec where the kernel can make
 /// it so; it is moved to its own descriptor, or made inheritable, either way.

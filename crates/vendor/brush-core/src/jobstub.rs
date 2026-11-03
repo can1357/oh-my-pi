@@ -21,7 +21,7 @@ use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd, RawFd};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _, Interest};
+use tokio::io::{AsyncWriteExt as _, Interest};
 use tokio_util::sync::CancellationToken;
 
 use crate::ShellFd;
@@ -107,7 +107,10 @@ pub(crate) struct JobStub {
 #[derive(Debug)]
 struct Channel {
 	requests: tokio::net::unix::OwnedWriteHalf,
-	answers:  tokio::sync::mpsc::UnboundedReceiver<i32>,
+	/// Each answer, with the descriptor that came with it: after a step that
+	/// set a descriptor, the stub's copy of it, so that this shell expands the
+	/// next word with the descriptors the command will have.
+	answers:  tokio::sync::mpsc::UnboundedReceiver<(i32, Option<OwnedFd>)>,
 }
 
 impl JobStub {
@@ -131,15 +134,14 @@ impl JobStub {
 
 	/// The stub `pid`, driven over `control`.
 	pub(crate) fn new(control: tokio::net::UnixStream, pid: i32) -> Self {
-		let (mut stub_answers, requests) = control.into_split();
+		let (stub_answers, requests) = control.into_split();
 		let (answered, answers) = tokio::sync::mpsc::unbounded_channel();
 		let closed = CancellationToken::new();
 		tokio::spawn({
 			let closed = closed.clone();
 			async move {
-				let mut answer = [0u8; 4];
-				while stub_answers.read_exact(&mut answer).await.is_ok() {
-					if answered.send(i32::from_le_bytes(answer)).is_err() {
+				while let Ok(answer) = receive_answer(&stub_answers).await {
+					if answered.send(answer).is_err() {
 						break;
 					}
 				}
@@ -172,8 +174,14 @@ impl JobStub {
 		self.closing.load(Ordering::Acquire)
 	}
 
-	/// Opens `path` on `fd` in the stub, as `mode` says.
-	pub(crate) async fn open(&self, fd: ShellFd, mode: ChildOpenMode, path: &Path) -> Result<(), StepFailure> {
+	/// Opens `path` on `fd` in the stub, as `mode` says; the stub's copy of
+	/// the descriptor it opened.
+	pub(crate) async fn open(
+		&self,
+		fd: ShellFd,
+		mode: ChildOpenMode,
+		path: &Path,
+	) -> Result<Option<OwnedFd>, StepFailure> {
 		let path = path.as_os_str().as_encoded_bytes();
 		if path.contains(&0) {
 			return Err(StepFailure::Call(libc::EINVAL));
@@ -181,24 +189,25 @@ impl JobStub {
 		self.step(frame::OPEN, fd, mode.to_wire(), path, None).await
 	}
 
-	/// Duplicates `from` onto `fd` in the stub.
-	pub(crate) async fn duplicate(&self, fd: ShellFd, from: ShellFd) -> Result<(), StepFailure> {
+	/// Duplicates `from` onto `fd` in the stub; the stub's copy of `fd`.
+	pub(crate) async fn duplicate(&self, fd: ShellFd, from: ShellFd) -> Result<Option<OwnedFd>, StepFailure> {
 		self.step(frame::DUPLICATE, fd, from, &[], None).await
 	}
 
 	/// Closes `fd` in the stub.
 	pub(crate) async fn close(&self, fd: ShellFd) -> Result<(), StepFailure> {
-		self.step(frame::CLOSE, fd, 0, &[], None).await
+		self.step(frame::CLOSE, fd, 0, &[], None).await.map(drop)
 	}
 
 	/// Truncates the file at `fd` in the stub; one that is not a regular file
 	/// is left alone, as `O_TRUNC` leaves it.
 	pub(crate) async fn truncate(&self, fd: ShellFd) -> Result<(), StepFailure> {
-		self.step(frame::TRUNCATE, fd, 0, &[], None).await
+		self.step(frame::TRUNCATE, fd, 0, &[], None).await.map(drop)
 	}
 
-	/// Gives the stub `file`, which this process opened, at `fd`.
-	pub(crate) async fn place(&self, fd: ShellFd, file: RawFd) -> Result<(), StepFailure> {
+	/// Gives the stub `file`, which this process opened, at `fd`; the stub's
+	/// copy of `fd`.
+	pub(crate) async fn place(&self, fd: ShellFd, file: RawFd) -> Result<Option<OwnedFd>, StepFailure> {
 		self.step(frame::PLACE, fd, 0, &[], Some(file)).await
 	}
 
@@ -220,7 +229,7 @@ impl JobStub {
 				self.ended.store(true, Ordering::Release);
 				Ok(())
 			},
-			Some(errno) => Err(StepFailure::Call(errno)),
+			Some((errno, _)) => Err(StepFailure::Call(errno)),
 		}
 	}
 
@@ -257,7 +266,7 @@ impl JobStub {
 		arg: i32,
 		payload: &[u8],
 		file: Option<RawFd>,
-	) -> Result<(), StepFailure> {
+	) -> Result<Option<OwnedFd>, StepFailure> {
 		let mut channel = self.channel.lock().await;
 		if self.has_ended() {
 			return Err(StepFailure::Gone);
@@ -267,11 +276,74 @@ impl JobStub {
 			.map_err(|_| StepFailure::Gone)?;
 		match channel.answers.recv().await {
 			None => Err(StepFailure::Gone),
-			Some(0) => Ok(()),
-			Some(errno) if errno > 0 => Err(StepFailure::Call(errno)),
-			Some(errno) => Err(StepFailure::Target(-errno)),
+			Some((0, descriptor)) => Ok(descriptor),
+			Some((errno, _)) if errno > 0 => Err(StepFailure::Call(errno)),
+			Some((errno, _)) => Err(StepFailure::Target(-errno)),
 		}
 	}
+}
+
+/// Receives one answer from the stub: its four bytes, with the descriptor
+/// that came with them, if any. An error once the stub's end has closed.
+async fn receive_answer(
+	answers: &tokio::net::unix::OwnedReadHalf,
+) -> std::io::Result<(i32, Option<OwnedFd>)> {
+	let socket = answers.as_ref();
+	let mut answer = [0u8; 4];
+	let mut received = 0;
+	let mut descriptor = None;
+	while received < answer.len() {
+		socket.readable().await?;
+		match socket.try_io(Interest::READABLE, || {
+			receive_with_descriptor(socket.as_raw_fd(), &mut answer[received..])
+		}) {
+			Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {},
+			Err(error) => return Err(error),
+			Ok((0, _)) => return Err(std::io::ErrorKind::UnexpectedEof.into()),
+			Ok((read, file)) => {
+				received += read;
+				// Only the answer's first byte carries one.
+				descriptor = descriptor.or(file);
+			},
+		}
+	}
+	Ok((i32::from_le_bytes(answer), descriptor))
+}
+
+/// Reads into `bytes` from the socket at `socket`, with the descriptor that
+/// comes with them, if any, made close-on-exec.
+fn receive_with_descriptor(socket: RawFd, bytes: &mut [u8]) -> std::io::Result<(usize, Option<OwnedFd>)> {
+	let mut iov = libc::iovec { iov_base: bytes.as_mut_ptr().cast(), iov_len: bytes.len() };
+	// Room for one header and one descriptor, aligned as the kernel writes it.
+	let mut space = [0u64; 4];
+	// SAFETY: a zeroed `msghdr` is valid; every pointer set below outlives the
+	// call, and `space` is larger than `CMSG_SPACE` of one descriptor.
+	let mut message: libc::msghdr = unsafe { std::mem::zeroed() };
+	message.msg_iov = &raw mut iov;
+	message.msg_iovlen = 1;
+	message.msg_control = space.as_mut_ptr().cast();
+	message.msg_controllen = size_of_val(&space) as _;
+	#[cfg(target_os = "linux")]
+	let flags = libc::MSG_CMSG_CLOEXEC;
+	#[cfg(not(target_os = "linux"))]
+	let flags = 0;
+	// SAFETY: `message` is fully initialized above.
+	let read = unsafe { libc::recvmsg(socket, &raw mut message, flags) };
+	let read = usize::try_from(read).map_err(|_| std::io::Error::last_os_error())?;
+	// SAFETY: the `CMSG_*` helpers stay inside `space`, which `message`
+	// describes; a descriptor the kernel put there belongs to this process.
+	let descriptor = unsafe {
+		let header = libc::CMSG_FIRSTHDR(&raw const message);
+		if header.is_null() || (*header).cmsg_level != libc::SOL_SOCKET || (*header).cmsg_type != libc::SCM_RIGHTS {
+			None
+		} else {
+			let raw = libc::CMSG_DATA(header).cast::<RawFd>().read_unaligned();
+			#[cfg(not(target_os = "linux"))]
+			libc::fcntl(raw, libc::F_SETFD, libc::FD_CLOEXEC);
+			Some(OwnedFd::from_raw_fd(raw))
+		}
+	};
+	Ok((read, descriptor))
 }
 
 /// Sends one request; `file` goes with a byte after it.

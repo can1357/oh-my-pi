@@ -302,8 +302,11 @@ impl ExecutionParameters {
 	/// Hands the redirections deferred so far to the job's stub, if any, in
 	/// order, each once the one before it is made, as the child Bash forks
 	/// makes them. A file this process carries at a spare descriptor is given
-	/// to the stub at the descriptor it is for. The error of the first one the
-	/// stub cannot make is returned, and the rest are dropped.
+	/// to the stub at the descriptor it is for. Each descriptor the stub sets
+	/// comes back and is put here at the same number (and one it closes is
+	/// closed here), so that the words still to expand see the descriptors the
+	/// command will have, as they do in Bash's child. The error of the first
+	/// one the stub cannot make is returned, and the rest are dropped.
 	#[cfg(unix)]
 	pub(crate) async fn flush_to_stub(&mut self) -> Result<(), error::Error> {
 		use std::os::fd::AsRawFd as _;
@@ -351,17 +354,31 @@ impl ExecutionParameters {
 				DeferredRedirect::Duplicate { fd, from } => stub.duplicate(*fd, *from).await.map_err(|failure| {
 					if matches!(failure, StepFailure::Gone) { gone() } else { bad(*from) }
 				}),
-				DeferredRedirect::Close { fd } => stub.close(*fd).await.map_err(|_| gone()),
-				DeferredRedirect::Truncate { fd, path } => stub.truncate(*fd).await.map_err(|failure| match failure {
-					StepFailure::Call(errno) | StepFailure::Target(errno) => opening(path, errno),
-					StepFailure::Gone => gone(),
-				}),
+				DeferredRedirect::Close { fd } => stub.close(*fd).await.map(|()| None).map_err(|_| gone()),
+				DeferredRedirect::Truncate { fd, path } => {
+					stub.truncate(*fd).await.map(|()| None).map_err(|failure| match failure {
+						StepFailure::Call(errno) | StepFailure::Target(errno) => opening(path, errno),
+						StepFailure::Gone => gone(),
+					})
+				},
 			};
-			if let Err(error) = made {
-				for fd in std::mem::take(&mut self.carried_fds) {
-					self.open_files.remove_fd(fd);
-				}
-				return Err(error);
+			let descriptor = match made {
+				Ok(descriptor) => descriptor,
+				Err(error) => {
+					for fd in std::mem::take(&mut self.carried_fds) {
+						self.open_files.remove_fd(fd);
+					}
+					return Err(error);
+				},
+			};
+			match (&redirect, descriptor) {
+				(DeferredRedirect::Close { fd }, _) => drop(self.open_files.remove_fd(*fd)),
+				(_, Some(descriptor)) => drop(
+					self
+						.open_files
+						.set_fd(redirect.fd(), OpenFile::from(std::fs::File::from(descriptor))),
+				),
+				(_, None) => {},
 			}
 			self.stub_fds.push(redirect.fd());
 		}
@@ -1145,14 +1162,49 @@ async fn background_process_pipeline_for_async_job<SE: extensions::ShellExtensio
 	};
 
 	// Where the command word being looked at is: `None` for the command name,
-	// else the index of a wrapper's operand in the suffix.
+	// else the index of a wrapper's operand in the suffix. Each turn takes a
+	// word, which wrappers and words that expand to nothing bound.
 	let mut position = None;
 	let mut wrappers = 0;
-	for _ in 0..8 {
-		let Some(command_name) =
-			expand_command_word_in_place(simple_cmd, position, shell, params).await?
-		else {
-			return Ok(None);
+	for _ in 0..64 {
+		let command_name = match expand_command_word_in_place(simple_cmd, position, shell, params).await? {
+			CommandWord::Name(name) => name,
+			CommandWord::Missing => return Ok(None),
+			// The word expanded to nothing: the next word is the command's, as in
+			// Bash (`$empty /bin/cmd &`).
+			CommandWord::Vanished => {
+				match position {
+					// A word kept for the status of its substitution, or none left.
+					None if simple_cmd.word_or_name.is_some() => return Ok(None),
+					None => {
+						let suffix = simple_cmd.suffix.as_mut().map(|suffix| &mut suffix.0);
+						let Some(suffix) = suffix else { return Ok(None) };
+						let Some(index) =
+							suffix.iter().position(|item| matches!(item, CommandPrefixOrSuffixItem::Word(_)))
+						else {
+							return Ok(None);
+						};
+						let CommandPrefixOrSuffixItem::Word(word) = suffix.remove(index) else {
+							return Ok(None);
+						};
+						simple_cmd.word_or_name = Some(word);
+					},
+					Some(index) => {
+						let next = simple_cmd.suffix.as_ref().and_then(|suffix| {
+							suffix
+								.0
+								.iter()
+								.enumerate()
+								.skip(index)
+								.find(|(_, item)| matches!(item, CommandPrefixOrSuffixItem::Word(_)))
+								.map(|(next, _)| next)
+						});
+						let Some(next) = next else { return Ok(None) };
+						position = Some(next);
+					},
+				}
+				continue;
+			},
 		};
 
 		if shell.aliases().contains_key(&command_name) {
@@ -1199,16 +1251,27 @@ async fn background_process_pipeline_for_async_job<SE: extensions::ShellExtensio
 	Ok(None)
 }
 
+/// What expanding a background job's command word in place found.
+enum CommandWord {
+	/// The command's name: the first field the word expanded to.
+	Name(String),
+	/// No field: the word is gone, and the next word is the command's.
+	Vanished,
+	/// No word is there.
+	Missing,
+}
+
 /// Expands the command word at `position` in `simple_cmd` (the command name
 /// when `None`, else that suffix item) and puts the fields it expanded to in
 /// its place as single-quoted words, which expand to exactly those fields.
-/// Returns the command name when the word expanded to exactly one field.
+/// The first field is the command's name, as in Bash, however many there are
+/// (`cmd='/bin/sh -c'; $cmd …`).
 async fn expand_command_word_in_place<SE: extensions::ShellExtensions>(
 	simple_cmd: &mut ast::SimpleCommand,
 	position: Option<usize>,
 	shell: &mut Shell<SE>,
 	params: &ExecutionParameters,
-) -> Result<Option<String>, error::Error> {
+) -> Result<CommandWord, error::Error> {
 	let word = match position {
 		None => simple_cmd.word_or_name.as_ref(),
 		Some(index) => match simple_cmd.suffix.as_ref().and_then(|suffix| suffix.0.get(index)) {
@@ -1217,11 +1280,12 @@ async fn expand_command_word_in_place<SE: extensions::ShellExtensions>(
 		},
 	};
 	let Some(word) = word else {
-		return Ok(None);
+		return Ok(CommandWord::Missing);
 	};
 	let loc = word.loc.clone();
 	let status_changes = shell.last_exit_status_change_count();
-	let mut fields = expansion::full_expand_and_split_word(shell, params, word).await?;
+	let fields = expansion::full_expand_and_split_word(shell, params, word).await?;
+	let name = fields.first().cloned();
 
 	let mut literals = fields.iter().map(|field| ast::Word {
 		value: escape::single_quote(field).into_owned(),
@@ -1259,7 +1323,7 @@ async fn expand_command_word_in_place<SE: extensions::ShellExtensions>(
 		},
 	}
 
-	Ok(if fields.len() == 1 { fields.pop() } else { None })
+	Ok(name.map_or(CommandWord::Vanished, CommandWord::Name))
 }
 
 /// The suffix index of the operand of the transparent wrapper whose word is
@@ -3553,16 +3617,26 @@ fn setup_process_substitution(
 	// else holds before starting the substitution command: neither this
 	// context nor the shell, nor a redirection the command's child is left to
 	// make, which would replace the pipe there before the command reads it.
-	let mut candidate_fd_num = 63;
-	while params.open_files.contains_fd(candidate_fd_num)
-		|| params.try_fd(shell, candidate_fd_num).is_some()
-		|| params.deferred_redirects.iter().any(|redirect| redirect.touches(candidate_fd_num))
-		|| params.stub_sets(candidate_fd_num)
-	{
-		candidate_fd_num -= 1;
-		if candidate_fd_num == 0 {
+	// Under `ulimit -n N` the search starts below N, as Bash's pipe lands
+	// there: a background job's process has the limit before it is given the
+	// pipe.
+	let mut candidate_fd_num: ShellFd = 63;
+	#[cfg(unix)]
+	if let Some(limit) = shell.resource_limits().open_files_override() {
+		candidate_fd_num = candidate_fd_num.min(ShellFd::try_from(limit.saturating_sub(1)).unwrap_or(ShellFd::MAX));
+	}
+	loop {
+		if candidate_fd_num <= 0 {
 			return Err(error::ErrorKind::TooManyOpenFiles.into());
 		}
+		if !(params.open_files.contains_fd(candidate_fd_num)
+			|| params.try_fd(shell, candidate_fd_num).is_some()
+			|| params.deferred_redirects.iter().any(|redirect| redirect.touches(candidate_fd_num))
+			|| params.stub_sets(candidate_fd_num))
+		{
+			break;
+		}
+		candidate_fd_num -= 1;
 	}
 
 	// Set up pipe so we can connect to the command.

@@ -624,10 +624,16 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 				)
 				.await
 			} else {
-				self
+				match self
 					.shell
 					.find_first_executable_in_path_using_cache(&self.command_name)
 					.await
+				{
+					// No executable of that name: Bash runs the first file there is,
+					// which fails with `Permission denied` (126), not "not found".
+					None => self.shell.find_unexecutable_in_path(&self.command_name).await,
+					found => found,
+				}
 			};
 
 			if let Some(path) = path {
@@ -928,7 +934,11 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 		let path = if program.contains('/') {
 			Some(PathBuf::from(program))
 		} else {
-			shell.find_first_executable_in_path_using_cache(program).await
+			match shell.find_first_executable_in_path_using_cache(program).await {
+				// As for a command: the first file there is, which fails with 126.
+				None => shell.find_unexecutable_in_path(program).await,
+				found => found,
+			}
 		};
 		let Some(path) = path else {
 			stub.report(127, format!("exec: {program}: not found\n").as_bytes()).await;

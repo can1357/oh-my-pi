@@ -69,4 +69,14 @@ impl ResourceLimits {
 	pub(crate) fn is_empty(&self) -> bool {
 		self.overrides.is_empty()
 	}
+
+	/// The soft open-file limit `ulimit -n` set for external commands, if
+	/// one is set: no descriptor the shell hands such a command over may be
+	/// at or above it.
+	pub(crate) fn open_files_override(&self) -> Option<u64> {
+		self.overrides
+			.iter()
+			.find(|(resource, ..)| *resource == rlimit::Resource::NOFILE)
+			.map(|&(_, soft, _)| soft)
+	}
 }

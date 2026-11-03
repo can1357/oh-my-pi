@@ -171,6 +171,25 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 		}
 	}
 
+	/// Finds what Bash runs for `candidate_name` from `PATH` when no
+	/// executable has that name: the first file of that name that is not a
+	/// directory. Running it fails with `Permission denied` (status 126), as in
+	/// Bash, where "command not found" would be wrong.
+	///
+	/// # Arguments
+	///
+	/// * `candidate_name` - The name of the file to look for.
+	pub async fn find_unexecutable_in_path<S: AsRef<str>>(&self, candidate_name: S) -> Option<PathBuf> {
+		let path_var = self.env_str("PATH").unwrap_or_default();
+		for dir in crate::sys::fs::split_paths(path_var.as_ref()) {
+			let candidate = self.absolute_path(dir.join(candidate_name.as_ref()));
+			if self.filesystem.metadata(&candidate).await.is_ok_and(|metadata| !metadata.is_dir()) {
+				return Some(candidate);
+			}
+		}
+		None
+	}
+
 	/// Gets the absolute form of the given path. Virtual (`scheme://`) paths
 	/// are already absolute; relative paths join the working directory, which
 	/// may itself be virtual.
