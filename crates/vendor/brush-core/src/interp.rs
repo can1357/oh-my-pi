@@ -303,14 +303,14 @@ impl ExecutionParameters {
 	/// order, each once the one before it is made, as the child Bash forks
 	/// makes them. A file this process carries at a spare descriptor is given
 	/// to the stub at the descriptor it is for. Each descriptor the stub sets
-	/// comes back, and is put here at the same number while a word still to
-	/// expand names it (`later` is what those words are written as), so that
-	/// such a word sees the descriptor the command will have, as it does in
-	/// Bash's child; a
-	/// descriptor it closes is closed here. The error of the first one the
-	/// stub cannot make is returned, and the rest are dropped.
+	/// comes back and is put here at the same number (and one it closes is
+	/// closed here), so that the words still to expand see the descriptors the
+	/// command will have, as they do in Bash's child: a child started for one
+	/// of them takes each at its number without this process duplicating it
+	/// (see `inject_fds`). The error of the first one the stub cannot make is
+	/// returned, and the rest are dropped.
 	#[cfg(unix)]
-	pub(crate) async fn flush_to_stub(&mut self, later: &str) -> Result<(), error::Error> {
+	pub(crate) async fn flush_to_stub(&mut self) -> Result<(), error::Error> {
 		use std::os::fd::AsRawFd as _;
 
 		use crate::jobstub::StepFailure;
@@ -375,12 +375,12 @@ impl ExecutionParameters {
 			};
 			match (&redirect, descriptor) {
 				(DeferredRedirect::Close { fd }, _) => drop(self.open_files.remove_fd(*fd)),
-				(_, Some(descriptor)) if expansion_may_read_descriptor(later, redirect.fd()) => drop(
+				(_, Some(descriptor)) => drop(
 					self
 						.open_files
 						.set_fd(redirect.fd(), OpenFile::from(std::fs::File::from(descriptor))),
 				),
-				(_, Some(_) | None) => {},
+				(_, None) => {},
 			}
 			self.stub_fds.push(redirect.fd());
 		}
@@ -798,42 +798,14 @@ async fn setup_simple_command_redirects(
 ) -> Result<(), error::Error> {
 	let prefix = command.prefix.as_ref().map_or(&[][..], |prefix| prefix.0.as_slice());
 	let suffix = command.suffix.as_ref().map_or(&[][..], |suffix| suffix.0.as_slice());
-	let items: Vec<&CommandPrefixOrSuffixItem> = prefix.iter().chain(suffix).collect();
-	for (index, item) in items.iter().enumerate() {
+	for item in prefix.iter().chain(suffix) {
 		if let CommandPrefixOrSuffixItem::IoRedirect(redirect) = item {
 			setup_redirect(shell, params, redirect).await?;
 			#[cfg(unix)]
-			{
-				// A descriptor the stub sets is kept here only while a word
-				// that names it is still to expand, and only if that word
-				// runs something that can read it: a command may have
-				// hundreds of redirections, and holding every one of their
-				// descriptors would reach the open-file limit the command
-				// itself is given.
-				let later: String = items[index + 1..].iter().map(|item| format!("{item:?}")).collect();
-				params.flush_to_stub(&later).await?;
-			}
+			params.flush_to_stub().await?;
 		}
 	}
 	Ok(())
-}
-
-/// Whether a word still to expand can read the descriptor `fd` the command
-/// will have: `later` is what those words are written as, and only a command
-/// or process substitution in them runs something that reads a descriptor.
-/// What it runs is given the standard three as they are, and reads any other
-/// one only by naming it (`&fd`, `/dev/fd/fd`); a command with hundreds of
-/// redirections would otherwise hold every one of their descriptors here and
-/// reach the open-file limit the command itself is given.
-fn expansion_may_read_descriptor(later: &str, fd: ShellFd) -> bool {
-	let runs = later.contains("$(")
-		|| later.contains('`')
-		|| later.contains("<(")
-		|| later.contains(">(");
-	runs
-		&& (fd <= 2
-			|| later.contains(&format!("&{fd}"))
-			|| later.contains(&format!("/dev/fd/{fd}")))
 }
 
 /// Where a simple command reports an error that ends it before its command

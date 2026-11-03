@@ -24,25 +24,98 @@ impl CommandFdInjectionExt for std::process::Command {
 		&mut self,
 		open_files: impl Iterator<Item = (ShellFd, openfiles::OpenFile)>,
 	) -> Result<(), error::Error> {
-		let fd_mappings: Vec<FdMapping> = open_files
-			.map(|(child_fd, open_file)| -> Result<FdMapping, error::Error> {
-				let parent_fd = open_file.try_clone_to_owned()?;
-				Ok(FdMapping { child_fd, parent_fd })
-			})
-			.collect::<Result<Vec<_>, _>>()?;
+		use std::os::fd::AsRawFd as _;
 
-		// `fd_mappings` registers a `pre_exec` closure even for an empty list, and
-		// any closure forces std onto its fork+exec path instead of `posix_spawn`.
-		if fd_mappings.is_empty() {
+		// Each file is held here, not duplicated, until the command is dropped:
+		// a duplicate per descriptor doubled what this process holds while it
+		// starts a child, so a command that this process gives hundreds of
+		// descriptors to reached the open-file limit the command itself is
+		// given. The child takes each at its number by `dup2` alone.
+		let mut held = Vec::new();
+		let mut mappings = Vec::new();
+		for (child_fd, open_file) in open_files {
+			let parent_fd = open_file.try_borrow_as_fd()?.as_raw_fd();
+			if mappings.iter().any(|&(_, child)| child == child_fd) {
+				return Err(error::ErrorKind::ChildCreationFailure.into());
+			}
+			mappings.push((parent_fd, child_fd));
+			held.push(open_file);
+		}
+
+		// `pre_exec` forces std onto its fork+exec path instead of
+		// `posix_spawn`, so none is registered for an empty list.
+		if mappings.is_empty() {
 			return Ok(());
 		}
 
-		self
-			.fd_mappings(fd_mappings)
-			.map_err(|_e| error::ErrorKind::ChildCreationFailure)?;
+		let mut done = vec![false; mappings.len()];
+		// SAFETY: the closure only makes system calls on the descriptors it
+		// was given and on numbers they name, and allocates nothing.
+		unsafe {
+			self.pre_exec(move || {
+				let _ = &held;
+				place_fds(&mut mappings, &mut done)
+			});
+		}
 
 		Ok(())
 	}
+}
+
+/// Puts each `(parent, child)` descriptor at its child number, in the child
+/// before it executes, with no descriptor beyond the ones it is given except
+/// one at a time where the numbers form a ring. A mapping is made once no
+/// other mapping still to be made reads the number it writes; when every one
+/// left does, one source is moved to the lowest free number, which no
+/// mapping writes (every number one writes is open as a source), and the
+/// ring opens.
+fn place_fds(mappings: &mut [(i32, ShellFd)], done: &mut [bool]) -> std::io::Result<()> {
+	let mut left = mappings.len();
+	for index in 0..mappings.len() {
+		let (parent, child) = mappings[index];
+		if parent == child {
+			// SAFETY: plain descriptor call; the child keeps it across exec.
+			if unsafe { libc::fcntl(parent, libc::F_SETFD, 0) } < 0 {
+				return Err(std::io::Error::last_os_error());
+			}
+			done[index] = true;
+			left -= 1;
+		}
+	}
+	while left > 0 {
+		let mut progressed = false;
+		for index in 0..mappings.len() {
+			if done[index] {
+				continue;
+			}
+			let (parent, child) = mappings[index];
+			let read_later = (0..mappings.len()).any(|other| !done[other] && other != index && mappings[other].0 == child);
+			if read_later {
+				continue;
+			}
+			// SAFETY: plain descriptor call; `dup2` clears close-on-exec.
+			if unsafe { libc::dup2(parent, child) } < 0 {
+				return Err(std::io::Error::last_os_error());
+			}
+			done[index] = true;
+			left -= 1;
+			progressed = true;
+		}
+		if !progressed && let Some(index) = (0..mappings.len()).find(|&index| !done[index]) {
+			// SAFETY: plain descriptor call on an open source descriptor.
+			let moved = unsafe { libc::fcntl(mappings[index].0, libc::F_DUPFD_CLOEXEC, 0) };
+			if moved < 0 {
+				return Err(std::io::Error::last_os_error());
+			}
+			let source = mappings[index].0;
+			for (other, mapping) in mappings.iter_mut().enumerate() {
+				if !done[other] && mapping.0 == source {
+					mapping.0 = moved;
+				}
+			}
+		}
+	}
+	Ok(())
 }
 
 /// Extension trait for arranging for commands to take the foreground.
