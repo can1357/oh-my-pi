@@ -22,6 +22,14 @@
  * A continue the server refuses is replayed as a create; any doubt costs a
  * full upload, never a conversation that diverges from the client's.
  *
+ * Prompt caching inside a thread (measured against the API): the create's
+ * system, tools and non-last message breakpoints keep working on every
+ * continue; a continue's own breakpoints act on that request only, each
+ * looking back about 20 blocks for a cache entry. A continue therefore marks
+ * its first appended block, which sits right after the stored response and
+ * reaches the previous request's entry, besides its newest block, which
+ * writes this turn (see {@link continueBreakpoints}).
+ *
  * https://platform.claude.com/docs/en/build-with-claude/message-threads
  */
 import { isOfficialAnthropicApiUrl } from "@oh-my-pi/pi-catalog/compat/anthropic";
@@ -29,7 +37,16 @@ import { $flag } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import type { Model } from "../types";
 import { normalizeExtraBetas } from "./anthropic-headers";
-import type { ContentBlockParam, MessageCreateParamsStreaming, MessageParam } from "./anthropic-wire";
+import type {
+	CacheControlEphemeral,
+	ContentBlockParam,
+	ImageBlockParam,
+	MessageCreateParamsStreaming,
+	MessageParam,
+	TextBlockParam,
+	ToolResultBlockParam,
+	ToolUseBlockParam,
+} from "./anthropic-wire";
 
 /**
  * How long after a stored response a continue may name it. The server keeps a
@@ -212,7 +229,7 @@ export class AnthropicThreadTurn {
 			if (this.#chain.anchor === anchor) this.#chain.anchor = undefined;
 			const body: MessageCreateParamsStreaming = {
 				...params,
-				messages: params.messages.slice(anchor.messages.length),
+				messages: continueBreakpoints(params.messages.slice(anchor.messages.length)),
 				thread: { type: "continue", previous_message_id: anchor.messageId },
 			};
 			if (!this.#resendSystemAndTools) {
@@ -353,7 +370,9 @@ function sameMessage(a: MessageParam, b: MessageParam): boolean {
 	}
 	if (a.content.length !== b.content.length) return false;
 	for (let index = 0; index < a.content.length; index++) {
-		if (!Bun.deepEquals(withoutCacheControl(a.content[index]), withoutCacheControl(b.content[index]))) return false;
+		if (!Bun.deepEquals(withoutCacheControl(a.content[index]), withoutCacheControl(b.content[index]))) {
+			return false;
+		}
 	}
 	return true;
 }
@@ -373,9 +392,65 @@ function soleText(content: MessageParam["content"]): string | undefined {
 	return block.text;
 }
 
-function withoutCacheControl(block: ContentBlockParam): object {
+function withoutCacheControl(block: ContentBlockParam): ContentBlockParam {
 	if (!("cache_control" in block) || block.cache_control == null) return block;
-	const copy: Record<string, unknown> = { ...block };
+	const copy = { ...block };
 	delete copy.cache_control;
 	return copy;
+}
+
+type CacheableBlock = TextBlockParam | ImageBlockParam | ToolUseBlockParam | ToolResultBlockParam;
+
+function isCacheable(block: ContentBlockParam): block is CacheableBlock {
+	return block.type === "text" || block.type === "image" || block.type === "tool_use" || block.type === "tool_result";
+}
+
+/**
+ * Breakpoints for the messages a continue appends. Prompt caching placed the
+ * request's breakpoints for a full upload, but on a continue the trailing one
+ * reaches the previous request's cache entry only when the stored response
+ * plus the appended blocks fit its ~20-block lookback; a turn of parallel tool
+ * calls does not, and would rewrite the whole conversation. This keeps the
+ * newest breakpoint, which writes the turn, adds one on the first appended
+ * block, which reads up to the previous request, and drops the rest: with the
+ * create's system and tools breakpoints that stays within the four a request
+ * may count. Messages without a breakpoint (caching off) pass through.
+ */
+function continueBreakpoints(appended: MessageParam[]): MessageParam[] {
+	let template: CacheControlEphemeral | undefined;
+	let newest: [number, number] | undefined;
+	let first: [number, number] | undefined;
+	for (let m = 0; m < appended.length; m++) {
+		const content = appended[m].content;
+		if (typeof content === "string") {
+			first ??= [m, 0];
+			continue;
+		}
+		for (let b = 0; b < content.length; b++) {
+			const block = content[b];
+			if (!first && isCacheable(block)) first = [m, b];
+			if ("cache_control" in block && block.cache_control) newest = [m, b];
+			if (isCacheable(block) && block.cache_control) template = block.cache_control;
+		}
+	}
+	if (!template || !first) return appended;
+	const marked = (m: number, b: number) =>
+		(m === first[0] && b === first[1]) || (newest !== undefined && m === newest[0] && b === newest[1]);
+	return appended.map((message, m) => {
+		if (m !== first[0] && typeof message.content === "string") return message;
+		const content: ContentBlockParam[] =
+			typeof message.content === "string" ? [{ type: "text", text: message.content }] : message.content;
+		let changed = typeof message.content === "string";
+		const next = content.map((block, b) => {
+			if (!marked(m, b)) {
+				const stripped = withoutCacheControl(block);
+				changed ||= stripped !== block;
+				return stripped;
+			}
+			if (!isCacheable(block) || block.cache_control) return block;
+			changed = true;
+			return { ...block, cache_control: { ...template } };
+		});
+		return changed ? { ...message, content: next } : message;
+	});
 }
