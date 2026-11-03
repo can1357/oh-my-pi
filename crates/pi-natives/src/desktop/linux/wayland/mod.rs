@@ -135,11 +135,14 @@ pub struct WaylandBackend {
 		not(feature = "wayland-pipewire"),
 		expect(dead_code, reason = "only read by the pipewire capture path")
 	)]
-	display:        DisplaySelector,
-	ax:             Option<AtSpiAx>,
-	ax_error:       Option<DesktopError>,
-	input:          Option<libei::Libei>,
-	displays:       Vec<DesktopDisplay>,
+	display:           DisplaySelector,
+	ax:                Option<AtSpiAx>,
+	ax_error:          Option<DesktopError>,
+	input:             Option<libei::Libei>,
+	/// Why native input can never work here, probed once without a prompt;
+	/// `Some(None)` when it may.
+	input_unavailable: Option<Option<String>>,
+	displays:          Vec<DesktopDisplay>,
 	/// The PID that listens on the Wayland socket: gnome-shell on GNOME, whose
 	/// own AT-SPI frames never count as the focused application window. On
 	/// Plasma it is `kwin_wayland_wrapper`, which owns no frames.
@@ -185,9 +188,17 @@ impl WaylandBackend {
 			ax,
 			ax_error,
 			input: None,
+			input_unavailable: None,
 			displays: Vec::new(),
 			compositor_pid: compositor_pid(),
 		}
+	}
+
+	fn input_unavailable(&mut self) -> Option<&str> {
+		self
+			.input_unavailable
+			.get_or_insert_with(portal::input_unavailable_reason)
+			.as_deref()
 	}
 
 	fn window_input_error(target: &Target, kind: &str) -> CoreResult<()> {
@@ -210,6 +221,9 @@ impl WaylandBackend {
 		control::check()?;
 		Self::window_input_error(target, kind)?;
 		if self.input.is_none() {
+			if let Some(reason) = self.input_unavailable() {
+				return Err(DesktopError::permission_denied(reason));
+			}
 			self.input = Some(libei::Libei::new()?);
 		}
 		let input = self.input.as_mut().expect("libei was initialized");
@@ -236,8 +250,11 @@ impl WaylandBackend {
 
 impl Backend for WaylandBackend {
 	fn capabilities(&mut self) -> DesktopCapabilities {
+		let input_unavailable = self.input.is_none() && self.input_unavailable().is_some();
 		let input_permission = if self.input.is_some() {
 			"granted"
+		} else if input_unavailable {
+			"unavailable"
 		} else {
 			"prompt-or-granted"
 		};
@@ -248,13 +265,13 @@ impl Backend for WaylandBackend {
 			// wayland-pipewire feature; without it capture() hard-errors, so the
 			// capability report must not advertise a capture the binary cannot do.
 			capture: cfg!(feature = "wayland-pipewire"),
-			input: true,
+			input: !input_unavailable,
 			ax: self.ax.is_some(),
 			background_window_input: false,
 			takeover: false,
 			applications: crate::desktop::applications::supported(),
 			menus: self.ax.is_some(),
-			held_input: true,
+			held_input: !input_unavailable,
 			spaces: false,
 			global_escape: false,
 			capture_permission: if cfg!(feature = "wayland-pipewire") {

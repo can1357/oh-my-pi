@@ -2,11 +2,16 @@ use std::{
 	fs,
 	path::{Path, PathBuf},
 	sync::LazyLock,
+	time::Duration,
 };
 
+use ashpd::desktop::remote_desktop::RemoteDesktop;
 use tokio::runtime::{Builder, Runtime};
 
 use crate::desktop::error::{CoreResult, DesktopError};
+
+/// How long the input probe waits for the portal frontend to answer.
+const INPUT_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Process-wide Tokio runtime shared by every xdg-desktop-portal call.
 ///
@@ -81,6 +86,30 @@ pub(super) fn store_token(name: &str, token: Option<&str>) {
 	}
 }
 
+/// Why native input can never reach this desktop, or `None` when it may.
+/// `LIBEI_SOCKET` reaches an EIS server directly; otherwise input needs a
+/// `RemoteDesktop` portal backend, which wlroots compositors such as sway lack.
+/// Reads only the frontend's `version` property: no session, no prompt. A
+/// frontend that fails to answer counts as reachable, so only a definite
+/// absence turns input off.
+pub(super) fn input_unavailable_reason() -> Option<String> {
+	if std::env::var_os("LIBEI_SOCKET").is_some() {
+		return None;
+	}
+	let runtime = portal_runtime().ok()?;
+	let probe = runtime.block_on(tokio::time::timeout(INPUT_PROBE_TIMEOUT, RemoteDesktop::new()));
+	probe.ok()?.err().as_ref().and_then(missing_remote_desktop)
+}
+
+fn missing_remote_desktop(error: &ashpd::Error) -> Option<String> {
+	matches!(error, ashpd::Error::PortalNotFound(_)).then(|| {
+		format!(
+			"Wayland input is unavailable: no xdg-desktop-portal backend implements RemoteDesktop on \
+			 this desktop ({error}), and LIBEI_SOCKET is unset; use AX actions instead"
+		)
+	})
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -110,5 +139,17 @@ mod tests {
 		assert!(!token.exists(), "orphaned token must be removed");
 		remove_token_in(&dir);
 		let _ = fs::remove_dir_all(&dir);
+	}
+
+	/// Only a portal frontend that reports the interface missing turns input
+	/// off; any other failure leaves the lazy RemoteDesktop request to decide.
+	#[test]
+	fn only_a_missing_remote_desktop_portal_makes_input_unavailable() {
+		let missing = ashpd::Error::PortalNotFound(
+			zbus::names::OwnedInterfaceName::try_from("org.freedesktop.portal.RemoteDesktop").unwrap(),
+		);
+		let reason = missing_remote_desktop(&missing).expect("a missing portal is reported");
+		assert!(reason.contains("RemoteDesktop"), "{reason}");
+		assert_eq!(missing_remote_desktop(&ashpd::Error::NoResponse), None);
 	}
 }
