@@ -393,6 +393,9 @@ export function createPersistedSubagentReviverFactory(
 					expectedAgentRef: expectedRef,
 					taskDepth,
 					toolNames: revivedToolNames,
+					// `revivedToolNames` is the enabled set, devices included: keep those devices,
+					// or they come back as top-level tools and change the replayed tool list.
+					mountedToolNames: restoredSeance ? undefined : init.mountedTools,
 					outputSchema: init.outputSchema,
 					outputSchemaMode: init.outputSchemaMode,
 					restrictToolNames: restrictToolNames || undefined,

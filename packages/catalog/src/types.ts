@@ -1,5 +1,6 @@
 import type { ModelIdentity } from "./compat/types";
 import type { Effort } from "./effort";
+import type { DatedCostCard } from "./pricing";
 
 // Re-exported from @oh-my-pi/pi-utils so the whole workspace shares one
 // `fetch`-compatible signature (tls-fetch's wrappers produce/accept it).
@@ -1477,8 +1478,8 @@ export interface ModelCost extends TokenCost {
 /**
  * Exact local content tokenizer family for a model.
  *
- * Absent means no first-party local tokenizer is known and consumers retain
- * their estimate/default-tokenizer policy. The values name tokenizer
+ * Absent means no first-party local tokenizer is known and consumers count
+ * in o200k_base. The values name tokenizer
  * generations rather than providers: DeepSeek V3 through V4 share
  * `"deepseek-v3"`; Kimi K2 through K3 share `"kimi-k2"`.
  */
@@ -1491,6 +1492,7 @@ export type ModelTokenizer =
 	| "deepseek-v3"
 	| "kimi-k2"
 	| "glm5"
+	| "cl100k"
 	| "o200k";
 
 /** One account's discovered entitlements on a model; see {@link Model.accountAccess}. */
@@ -1686,8 +1688,12 @@ export interface Model<TApi extends Api = Api> {
 	factoryDroidApiProviders?: string[];
 	/** Factory Droid: `configured_order` when live routing chose the rotation; absent means registry order. */
 	factoryDroidRoutingSource?: "configured_order";
+	/** Factory Droid: server-side refusal fallbacks the account can run; absent when none are named. */
+	factoryDroidRefusalFallbacks?: string[];
 	/** Factory Droid Standard Credits base rate (relative per-token weight, not dollars). */
 	factoryDroidCredits?: number;
+	/** Factory Droid dated `credit-rates` cards, ascending; `getFactoryDroidCreditRate` picks the one due now. */
+	factoryDroidCreditCards?: readonly DatedCostCard[];
 	/** Canonical organization resolved during Factory discovery. */
 	factoryDroidOrgId?: string;
 	cost: ModelCost;

@@ -1337,8 +1337,10 @@ export function resolveDiscoveryApi(spec: ModelSpec<Api>, providerType: string):
  * {@link resolveModelPolicy} without resolving the compat and thinking
  * policies, which dominate its cost on catalog-wide scans.
  */
-export function resolveCatalogAxes(spec: CatalogPolicyInputs): Record<string, unknown> {
-	return resolveCascade(buildResolveTarget(spec, resolveIdentity(spec))).catalog;
+export function resolveCatalogAxes(spec: CatalogPolicyInputs, route?: ResolveRoute): Record<string, unknown> {
+	const target = buildResolveTarget(spec, resolveIdentity(spec));
+	target.upstream = route?.upstream;
+	return resolveCascade(target).catalog;
 }
 
 /**
