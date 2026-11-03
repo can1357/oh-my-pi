@@ -25,6 +25,12 @@ use crate::desktop::{
 
 const DEVICE_DISCOVERY_DRAIN_TIMEOUT: Duration = Duration::from_millis(500);
 const DRAG_STEP_DELAY: Duration = Duration::from_millis(8);
+/// How long each click's button stays down, as on the X11 XTEST route.
+const CLICK_DELAY: Duration = Duration::from_millis(12);
+/// Wall-clock gap between the clicks of a double or triple click, as on the
+/// X11 XTEST route: Qt apps on KDE Plasma saw presses a few microseconds apart
+/// as separate single clicks.
+const MULTI_CLICK_GAP: Duration = Duration::from_millis(50);
 
 #[derive(Clone, Copy)]
 struct DiscoveryTargets {
@@ -126,6 +132,24 @@ fn pace_drag(
 	// Keep the final motion observable before the button release, which
 	// always follows: a cancel now stops the next call.
 	control::settle(DRAG_STEP_DELAY);
+	Ok(())
+}
+
+/// Sends `count` clicks through `send(pressed)`, holding each press for
+/// `CLICK_DELAY` and spacing the clicks `MULTI_CLICK_GAP` apart. A press is
+/// always released: a cancel stops the next press.
+fn pace_clicks(count: u32, mut send: impl FnMut(bool) -> CoreResult<()>) -> CoreResult<()> {
+	let count = count.max(1);
+	for index in 0..count {
+		if index > 0 {
+			control::wait(MULTI_CLICK_GAP)?;
+		}
+		control::check()?;
+		send(true)?;
+		let held = control::sent_gap_wait(CLICK_DELAY, index + 1 == count);
+		let released = control::cleanup(|| send(false));
+		held.and(released)?;
+	}
 	Ok(())
 }
 
@@ -600,21 +624,27 @@ impl Libei {
 				PointerEvent::Click { x, y, count, .. } => {
 					move_to(x, y, &mut time)?;
 					if let (Some(code), Some(interface)) = (button, &button_interface) {
-						for _ in 0..count.max(1) {
-							control::check()?;
-							button_held = true;
-							interface.button(code, ei::button::ButtonState::Press);
+						pace_clicks(count, |pressed| {
+							if pressed {
+								button_held = true;
+							}
+							time = Self::timestamp()?.max(time);
+							interface.button(
+								code,
+								if pressed {
+									ei::button::ButtonState::Press
+								} else {
+									ei::button::ButtonState::Released
+								},
+							);
 							device.device.device().frame(serial, time);
 							time = time.saturating_add(1);
 							self.flush()?;
-							// A press is always released: a cancel stops the
-							// next press.
-							interface.button(code, ei::button::ButtonState::Released);
-							device.device.device().frame(serial, time);
-							time = time.saturating_add(1);
-							self.flush()?;
-							button_held = false;
-						}
+							if !pressed {
+								button_held = false;
+							}
+							Ok(())
+						})?;
 					}
 				},
 				PointerEvent::Hold { x, y, duration, .. } => {
@@ -1010,6 +1040,42 @@ mod tests {
 		.unwrap();
 		assert_eq!(received, [(600.0, 411.0), (750.0, 422.0)]);
 		assert!(previous.elapsed() >= DRAG_STEP_DELAY, "release must not overtake the final motion");
+	}
+
+	#[test]
+	fn multi_click_presses_are_held_and_spaced_for_event_consumers() {
+		use std::time::Instant;
+
+		let mut sent: Vec<(bool, Instant)> = Vec::new();
+		pace_clicks(2, |pressed| {
+			sent.push((pressed, Instant::now()));
+			Ok(())
+		})
+		.unwrap();
+		let order: Vec<bool> = sent.iter().map(|&(pressed, _)| pressed).collect();
+		assert_eq!(order, [true, false, true, false]);
+		assert!(sent[1].1.duration_since(sent[0].1) >= CLICK_DELAY, "first press must be held");
+		assert!(
+			sent[2].1.duration_since(sent[1].1) >= MULTI_CLICK_GAP,
+			"second click must follow the first by a multi-click gap"
+		);
+		assert!(sent[3].1.duration_since(sent[2].1) >= CLICK_DELAY, "second press must be held");
+	}
+
+	#[test]
+	fn cancellation_releases_the_held_press_and_stops_the_next_click() {
+		let source = control::CancellationSource::default();
+		let token = source.token();
+		let mut sent = Vec::new();
+		let result = control::with_token_for_test(&token, || {
+			pace_clicks(2, |pressed| {
+				sent.push(pressed);
+				source.cancel();
+				Ok(())
+			})
+		});
+		assert!(result.is_err());
+		assert_eq!(sent, [true, false]);
 	}
 
 	#[test]

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Wayland double clicks (`doubleClick`, `click` with `count: 2`) landing as single clicks in KDE Plasma's Qt apps: each click now holds its button 12 ms and the clicks go out 50 ms apart, as on X11, instead of microseconds apart
+
 ## [18.16.0] - 2026-11-02
 
 ### Added
