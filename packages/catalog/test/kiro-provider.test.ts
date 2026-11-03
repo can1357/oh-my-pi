@@ -2,7 +2,11 @@ import { afterEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { kiroManagementRequest, sanitizeKiroModelCatalog } from "@oh-my-pi/pi-catalog/discovery/kiro";
+import {
+	kiroManagementRequest,
+	listKiroAvailableProfiles,
+	sanitizeKiroModelCatalog,
+} from "@oh-my-pi/pi-catalog/discovery/kiro";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
 import {
@@ -209,64 +213,59 @@ describe("Kiro provider discovery", () => {
 		expect((await multimodalOptions.fetchDynamicModels?.())?.[0]?.input).toEqual(["text", "image"]);
 	});
 
-	test("rejects missing, null, non-array, empty, unknown, non-string, and duplicate input types", () => {
-		const invalidInputTypes: unknown[] = [undefined, null, "TEXT", [], ["VIDEO"], [1], ["TEXT", "TEXT"]];
+	test("falls back to text-only input when supportedInputTypes is missing or invalid", () => {
+		vi.spyOn(logger, "debug").mockImplementation(() => {});
+		const invalidInputTypes: unknown[] = [null, "TEXT", [], ["VIDEO"], [1], ["TEXT", "TEXT"]];
 		for (const inputTypes of invalidInputTypes) {
-			expect(() => sanitizeKiroModelCatalog(catalogResponse(["invalid-model"], { inputTypes }))).toThrow(
-				"Unsafe ListAvailableModels response",
-			);
+			const catalog = sanitizeKiroModelCatalog(catalogResponse(["invalid-input-model"], { inputTypes }));
+			expect(catalog.models.map(model => model.supportedInputTypes)).toEqual([["TEXT"]]);
 		}
-		expect(() => sanitizeKiroModelCatalog(catalogResponse(["missing-model"], { omitInputTypes: true }))).toThrow(
-			"Unsafe ListAvailableModels response",
-		);
+		const missing = sanitizeKiroModelCatalog(catalogResponse(["missing-input-model"], { omitInputTypes: true }));
+		expect(missing.models.map(model => model.supportedInputTypes)).toEqual([["TEXT"]]);
 	});
 
-	test("rejects duplicate model IDs and malformed recognized schemas", () => {
-		expect(() => sanitizeKiroModelCatalog(catalogResponse(["duplicate-model", "duplicate-model"]))).toThrow(
-			"models.duplicate-id",
-		);
+	test("skips an invalid model, keeps the rest, and rejects only a malformed envelope", async () => {
+		vi.spyOn(logger, "warn").mockImplementation(() => {});
+		vi.spyOn(logger, "debug").mockImplementation(() => {});
+		const payload = catalogResponse(["model-one", "bad-limits", "model-two", "model-one", "bad-schema"]);
+		const models = payload.models as Array<Record<string, unknown>>;
+		models[1]!.tokenLimits = { maxInputTokens: 0, maxOutputTokens: 8_192 };
+		models[3]!.modelName = "Duplicate of model-one";
+		models[4]!.additionalModelRequestFieldsSchema = null;
 
-		const malformedLimits = catalogResponse(["malformed-model"]);
-		const malformedModel = (malformedLimits.models as Array<Record<string, unknown>>)[0]!;
-		malformedModel.tokenLimits = { maxInputTokens: 0, maxOutputTokens: 8_192 };
-		expect(() => sanitizeKiroModelCatalog(malformedLimits)).toThrow("model.max-input");
+		const discovered = await discover(payload);
 
-		const malformedSchema = catalogResponse(["malformed-schema-model"]);
-		const schemaModel = (malformedSchema.models as Array<Record<string, unknown>>)[0]!;
-		schemaModel.additionalModelRequestFieldsSchema = null;
-		expect(() => sanitizeKiroModelCatalog(malformedSchema)).toThrow("schema.object");
+		// The invalid-limit model is skipped, the repeated id keeps its first entry,
+		// and the malformed schema drops only that model's thinking controls.
+		expect(discovered?.map(model => [model.id, model.name, model.reasoning])).toEqual([
+			["model-one", "model-one", false],
+			["model-two", "model-two", false],
+			["bad-schema", "bad-schema", false],
+		]);
+		for (const envelope of [null, { models: "none" }, { models: [], nextToken: 7 }]) {
+			expect(() => sanitizeKiroModelCatalog(envelope)).toThrow("Unsafe ListAvailableModels response");
+		}
 	});
 
-	test("preserves prompt caching, request schema, token limits, and rate metadata", () => {
-		const payload = catalogResponse(["metadata-model"], { inputTypes: ["TEXT"] });
-		const model = (payload.models as Array<Record<string, unknown>>)[0]!;
-		model.description = "Synthetic metadata";
-		model.promptCaching = {
-			supportsPromptCaching: true,
-			maximumCacheCheckpointsPerRequest: 2,
-			minimumTokensPerCacheCheckpoint: 1_024,
-		};
-		model.additionalModelRequestFieldsSchema = {
+	test("keeps request schema, token limits, and credit rates, and drops a non-credit rate", () => {
+		const payload = catalogResponse(["credit-model", "bogus-rate-model"], { inputTypes: ["TEXT"] });
+		const [credit, bogus] = payload.models as Array<Record<string, unknown>>;
+		credit!.additionalModelRequestFieldsSchema = {
 			type: "object",
 			properties: { reasoning: { type: "string" } },
 		};
-		model.rateMultiplier = 1.5;
-		model.rateUnit = "Credit";
+		Object.assign(credit!, { rateMultiplier: 1.5, rateUnit: "Credit" });
+		Object.assign(bogus!, { rateMultiplier: 1, rateUnit: "Bogus" });
 
-		const sanitized = sanitizeKiroModelCatalog(payload).models[0]!;
+		const [sanitized, dropped] = sanitizeKiroModelCatalog(payload).models;
 		expect(sanitized).toMatchObject({
 			supportedInputTypes: ["TEXT"],
-			description: "Synthetic metadata",
 			tokenLimits: { maxInputTokens: 100_000, maxOutputTokens: 8_192 },
-			promptCaching: {
-				supportsPromptCaching: true,
-				maximumCacheCheckpointsPerRequest: 2,
-				minimumTokensPerCacheCheckpoint: 1_024,
-			},
 			rateMultiplier: 1.5,
 			rateUnit: "Credit",
 		});
-		expect(sanitized.additionalModelRequestFieldsSchema?.properties?.reasoning?.type).toBe("string");
+		expect(sanitized?.additionalModelRequestFieldsSchema?.properties?.reasoning?.type).toBe("string");
+		expect(dropped?.rateMultiplier).toBeUndefined();
 	});
 
 	test("maps the live effort-only GPT reasoning schema for the full model catalog", async () => {
@@ -366,8 +365,8 @@ describe("Kiro provider discovery", () => {
 		// Failure mode: an unusable catalog replaced the cached roster with an empty one.
 		const error = vi.spyOn(logger, "error").mockImplementation(() => {});
 		vi.spyOn(logger, "warn").mockImplementation(() => {});
-		const payload = catalogResponse(["claude-bad-rate"]);
-		Object.assign((payload.models as Array<Record<string, unknown>>)[0]!, { rateMultiplier: 1, rateUnit: "Bogus" });
+		const payload = catalogResponse(["claude-bad-limits"]);
+		(payload.models as Array<Record<string, unknown>>)[0]!.tokenLimits = { maxInputTokens: -1 };
 
 		expect(await discover(payload)).toBeNull();
 		expect(error).toHaveBeenCalledTimes(1);
@@ -421,6 +420,55 @@ describe("Kiro provider discovery", () => {
 
 		expect(models?.map(model => model.id)).toEqual(["kiro-oauth-model"]);
 		expect(requestBody).toEqual({ origin: "KIRO_CLI", profileArn: PROFILE_ARN });
+	});
+
+	test("follows nextToken through every page of models and profiles", async () => {
+		const modelBodies: unknown[] = [];
+		const modelFetch: FetchImpl = async (_input, init) => {
+			const body = JSON.parse(String(init?.body)) as { nextToken?: string };
+			modelBodies.push(body);
+			return Response.json(
+				body.nextToken === "models-2"
+					? catalogResponse(["page-two-model"])
+					: { ...catalogResponse(["page-one-model"]), nextToken: "models-2" },
+			);
+		};
+		const models = await kiroModelManagerOptions({
+			apiKey: apiKeyCredential("paged-token"),
+			fetch: modelFetch,
+		}).fetchDynamicModels?.();
+		expect(models?.map(model => model.id)).toEqual(["page-one-model", "page-two-model"]);
+		expect(modelBodies).toEqual([{ origin: "KIRO_CLI" }, { origin: "KIRO_CLI", nextToken: "models-2" }]);
+
+		const profileTwo = "arn:aws:codewhisperer:us-east-1:123456789012:profile/second";
+		const profileFetch: FetchImpl = async (_input, init) => {
+			const body = JSON.parse(String(init?.body)) as { nextToken?: string };
+			return Response.json(
+				body.nextToken === "profiles-2"
+					? { profiles: [{ arn: profileTwo }] }
+					: { profiles: [{ arn: PROFILE_ARN, profileName: "First" }], nextToken: "profiles-2" },
+			);
+		};
+		const profiles = await listKiroAvailableProfiles({ apiRegion: "us-east-1", token: "t", fetch: profileFetch });
+		expect(profiles).toEqual([{ arn: PROFILE_ARN, profileName: "First" }, { arn: profileTwo }]);
+	});
+
+	test("routes an env API key to KIRO_API_REGION without probing other regions", async () => {
+		const requested: string[] = [];
+		const fetch: FetchImpl = async input => {
+			requested.push(String(input));
+			return Response.json(catalogResponse(["eu-model"]));
+		};
+		const previous = Bun.env.KIRO_API_REGION;
+		Bun.env.KIRO_API_REGION = "eu-central-1";
+		try {
+			const models = await kiroModelManagerOptions({ apiKey: "ksk_env-key", fetch }).fetchDynamicModels?.();
+			expect(models?.map(model => [model.id, model.baseUrl])).toEqual([["eu-model", EU_API_ENDPOINT]]);
+			expect(requested).toEqual(["https://management.eu-central-1.kiro.dev/"]);
+		} finally {
+			if (previous === undefined) delete Bun.env.KIRO_API_REGION;
+			else Bun.env.KIRO_API_REGION = previous;
+		}
 	});
 
 	test("uses the legacy service for model discovery", async () => {

@@ -23,6 +23,8 @@ const MAX_MODELS_RESPONSE_BYTES = 1024 * 1024;
 const MAX_PROFILES_RESPONSE_BYTES = 128 * 1024;
 const MAX_MODELS = 128;
 const MAX_PROFILES = 128;
+/** Pages followed per paged listing; a repeating or endless `nextToken` stops here. */
+const MAX_PAGES = 16;
 const MAX_SCHEMA_DEPTH = 8;
 
 const ANTHROPIC_EFFORT_ORDER = [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max] as const;
@@ -33,8 +35,6 @@ const OMP_EFFORTS = new Set<string>([Effort.Minimal, Effort.Low, Effort.Medium, 
 
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/;
 const SAFE_SCHEMA_PROPERTY = /^[A-Za-z_][A-Za-z0-9_-]{0,63}$/;
-const FORBIDDEN_PROPERTY_NAME =
-	/(authorization|cookie|secret|access_?token|refresh_?token|profile|account|email|user|arn)/i;
 const PROTOTYPE_PROPERTY_NAMES = new Set(["__proto__", "constructor", "prototype"]);
 
 export interface KiroDiscoveryRoute {
@@ -66,21 +66,17 @@ export interface SanitizedJsonSchema {
 export interface SanitizedKiroModel {
 	modelId: string;
 	modelName: string;
-	description?: string;
 	supportedInputTypes: Array<"TEXT" | "IMAGE">;
 	tokenLimits: { maxInputTokens: number; maxOutputTokens: number };
 	additionalModelRequestFieldsSchema?: SanitizedJsonSchema;
-	promptCaching?: {
-		supportsPromptCaching: boolean;
-		maximumCacheCheckpointsPerRequest?: number;
-		minimumTokensPerCacheCheckpoint?: number;
-	};
 	rateMultiplier?: number;
 	rateUnit?: string;
 }
 
 export interface SanitizedKiroModelCatalog {
 	models: SanitizedKiroModel[];
+	/** Continuation token of a paged `ListAvailableModels` response. */
+	nextToken?: string;
 }
 
 export interface KiroManagementRequestOptions {
@@ -131,11 +127,7 @@ function safeId(value: unknown, code: string): string {
 
 function safeSchemaProperty(value: unknown, code: string): string {
 	const property = boundedString(value, code, 64);
-	if (
-		!SAFE_SCHEMA_PROPERTY.test(property) ||
-		FORBIDDEN_PROPERTY_NAME.test(property) ||
-		PROTOTYPE_PROPERTY_NAMES.has(property)
-	) {
+	if (!SAFE_SCHEMA_PROPERTY.test(property) || PROTOTYPE_PROPERTY_NAMES.has(property)) {
 		failSanitize(code);
 	}
 	return property;
@@ -202,74 +194,101 @@ function sanitizeJsonSchema(value: unknown, depth = 0): SanitizedJsonSchema {
 	return result;
 }
 
+/** Run an optional-field sanitizer; an invalid value is dropped instead of rejecting the model. */
+function optionalField<T>(modelId: string, field: string, sanitize: () => T): T | undefined {
+	try {
+		return sanitize();
+	} catch (error) {
+		logger.debug("Kiro model field dropped: invalid value", { modelId, field, reason: errorMessage(error) });
+		return undefined;
+	}
+}
+
+function sanitizeInputTypes(value: unknown): Array<"TEXT" | "IMAGE"> {
+	if (!Array.isArray(value)) failSanitize("model.input-types");
+	const inputs = new Set<"TEXT" | "IMAGE">();
+	for (const input of value) {
+		if (input !== "TEXT" && input !== "IMAGE") failSanitize("model.input-type");
+		inputs.add(input);
+	}
+	if (inputs.size === 0 || inputs.size !== value.length) failSanitize("model.input-types");
+	return [...inputs];
+}
+
+/**
+ * Sanitize one model entry. An invalid core field (`modelId`, token limits)
+ * skips the model; an invalid optional field is dropped. A dropped request
+ * schema leaves the model without thinking controls; dropped input types fall
+ * back to text-only.
+ */
 function sanitizeModel(value: unknown): SanitizedKiroModel {
 	const raw = record(value, "model.object");
 	const modelId = safeId(raw.modelId, "model.id");
-	const modelName = boundedString(raw.modelName, "model.name", 128);
-
-	if (!Array.isArray(raw.supportedInputTypes) || raw.supportedInputTypes.length === 0) {
-		failSanitize("model.input-types");
-	}
-	const supportedInputTypes = raw.supportedInputTypes.map(input => {
-		if (input !== "TEXT" && input !== "IMAGE") failSanitize("model.input-type");
-		return input;
-	});
-	if (new Set(supportedInputTypes).size !== supportedInputTypes.length) {
-		failSanitize("model.input-duplicate");
-	}
-
 	const rawLimits = record(raw.tokenLimits, "model.token-limits");
 	const model: SanitizedKiroModel = {
 		modelId,
-		modelName,
-		supportedInputTypes,
+		modelName: optionalField(modelId, "modelName", () => boundedString(raw.modelName, "model.name", 128)) ?? modelId,
+		supportedInputTypes: optionalField(modelId, "supportedInputTypes", () =>
+			sanitizeInputTypes(raw.supportedInputTypes),
+		) ?? ["TEXT"],
 		tokenLimits: {
 			maxInputTokens: positiveInteger(rawLimits.maxInputTokens, "model.max-input"),
 			maxOutputTokens: positiveInteger(rawLimits.maxOutputTokens, "model.max-output"),
 		},
 	};
 
-	if (raw.description !== undefined) model.description = boundedString(raw.description, "model.description", 512);
 	if (raw.additionalModelRequestFieldsSchema !== undefined) {
-		model.additionalModelRequestFieldsSchema = sanitizeJsonSchema(raw.additionalModelRequestFieldsSchema);
+		const schema = optionalField(modelId, "additionalModelRequestFieldsSchema", () =>
+			sanitizeJsonSchema(raw.additionalModelRequestFieldsSchema),
+		);
+		if (schema) model.additionalModelRequestFieldsSchema = schema;
 	}
-	if (raw.promptCaching !== undefined) {
-		const cache = record(raw.promptCaching, "model.prompt-caching");
-		if (typeof cache.supportsPromptCaching !== "boolean") failSanitize("model.prompt-caching.supported");
-		model.promptCaching = { supportsPromptCaching: cache.supportsPromptCaching };
-		if (cache.maximumCacheCheckpointsPerRequest !== undefined) {
-			model.promptCaching.maximumCacheCheckpointsPerRequest = positiveInteger(
-				cache.maximumCacheCheckpointsPerRequest,
-				"model.prompt-caching.maximum",
-			);
-		}
-		if (cache.minimumTokensPerCacheCheckpoint !== undefined) {
-			model.promptCaching.minimumTokensPerCacheCheckpoint = positiveInteger(
-				cache.minimumTokensPerCacheCheckpoint,
-				"model.prompt-caching.minimum",
-			);
+	if (raw.rateMultiplier !== undefined || raw.rateUnit !== undefined) {
+		// Kiro bills in credits; any other unit or a malformed multiplier drops
+		// the rate rather than guessing a multiplier.
+		const rateMultiplier = optionalField(modelId, "rateMultiplier", () =>
+			finiteNonNegative(raw.rateMultiplier, "model.rate-multiplier"),
+		);
+		if (rateMultiplier !== undefined && raw.rateUnit === "Credit") {
+			model.rateMultiplier = rateMultiplier;
+			model.rateUnit = "Credit";
 		}
 	}
-	if (raw.rateMultiplier !== undefined) {
-		model.rateMultiplier = finiteNonNegative(raw.rateMultiplier, "model.rate-multiplier");
-	}
-	if (raw.rateUnit !== undefined) model.rateUnit = boundedString(raw.rateUnit, "model.rate-unit", 32);
 	return model;
 }
 
 /**
- * Fail-closed catalog sanitizer. Unknown additive top-level/model keys are
- * ignored; malformed recognized fields reject the entire response.
+ * Sanitize one `ListAvailableModels` page. Only a malformed envelope (not an
+ * object, `models` not an array, too many models, or a malformed `nextToken`)
+ * rejects the response; an invalid model is skipped and logged so the rest of
+ * the roster survives, and a repeated model id keeps its first entry. Unknown
+ * additive keys are ignored.
  */
 export function sanitizeKiroModelCatalog(value: unknown): SanitizedKiroModelCatalog {
 	const raw = record(value, "top-level.object");
-	if (!Array.isArray(raw.models) || raw.models.length === 0 || raw.models.length > MAX_MODELS) {
-		failSanitize("models.count");
+	if (!Array.isArray(raw.models) || raw.models.length > MAX_MODELS) failSanitize("models.count");
+	const nextToken =
+		raw.nextToken === undefined || raw.nextToken === null
+			? undefined
+			: boundedString(raw.nextToken, "next-token", 4096);
+	const models: SanitizedKiroModel[] = [];
+	const seen = new Set<string>();
+	for (const entry of raw.models) {
+		let model: SanitizedKiroModel;
+		try {
+			model = sanitizeModel(entry);
+		} catch (error) {
+			logger.warn("Kiro model skipped: invalid ListAvailableModels entry", { reason: errorMessage(error) });
+			continue;
+		}
+		if (seen.has(model.modelId)) {
+			logger.warn("Kiro model skipped: duplicate model id", { modelId: model.modelId });
+			continue;
+		}
+		seen.add(model.modelId);
+		models.push(model);
 	}
-	const models = raw.models.map(sanitizeModel);
-	const ids = models.map(model => model.modelId);
-	if (new Set(ids).size !== ids.length) failSanitize("models.duplicate-id");
-	return { models };
+	return nextToken ? { models, nextToken } : { models };
 }
 
 function schemaError(modelId: string, detail: string): never {
@@ -477,11 +496,7 @@ function mapRequestSchema(model: SanitizedKiroModel): {
 }
 
 function premiumMultiplier(model: SanitizedKiroModel): number | undefined {
-	if (model.rateMultiplier === undefined && model.rateUnit === undefined) return undefined;
-	if (model.rateMultiplier === undefined || model.rateUnit !== "Credit") {
-		throw new Error(`Unsupported Kiro rate metadata for ${model.modelId}`);
-	}
-	return model.rateMultiplier;
+	return model.rateUnit === "Credit" ? model.rateMultiplier : undefined;
 }
 
 /** Map one sanitized model into a canonical `ModelSpec<"kiro-api">`. */
@@ -511,38 +526,25 @@ export function mapKiroModel(model: SanitizedKiroModel, runtimeBaseUrl: string):
  * (thinking/effort/max_tokens), so a model whose schema is unrecognised is
  * still usable for plain chat. Such a model is exposed with conservative
  * no-thinking defaults and a warning rather than throwing, so one new or odd
- * Kiro model can never drop the whole provider from the model list. A model is
- * skipped only if even the conservative fallback cannot be built (e.g. invalid
- * rate metadata). If every model is skipped the result is empty and an error is
- * logged; callers treat that as a failed refresh.
+ * Kiro model can never drop the whole provider from the model list. An empty
+ * result is logged; callers treat it as a failed refresh.
  */
 export function mapKiroModelCatalog(
 	catalog: SanitizedKiroModelCatalog,
 	runtimeBaseUrl: string,
 ): ModelSpec<"kiro-api">[] {
-	const mapped: ModelSpec<"kiro-api">[] = [];
-	for (const model of catalog.models) {
+	const mapped = catalog.models.map(model => {
 		try {
-			mapped.push(mapKiroModel(model, runtimeBaseUrl));
-			continue;
+			return mapKiroModel(model, runtimeBaseUrl);
 		} catch (error) {
 			logger.warn("Kiro model request schema unrecognised; exposing without thinking controls", {
 				modelId: model.modelId,
 				reason: errorMessage(error),
 			});
+			return mapKiroModelWithoutThinking(model, runtimeBaseUrl);
 		}
-		try {
-			mapped.push(mapKiroModelWithoutThinking(model, runtimeBaseUrl));
-		} catch (error) {
-			logger.warn("Kiro model skipped: cannot be represented safely", {
-				modelId: model.modelId,
-				reason: errorMessage(error),
-			});
-		}
-	}
-	if (catalog.models.length > 0 && mapped.length === 0) {
-		logger.error("Kiro model catalog yielded no usable models", { modelCount: catalog.models.length });
-	}
+	});
+	if (mapped.length === 0) logger.error("Kiro model catalog yielded no usable models");
 	return mapped;
 }
 
@@ -625,33 +627,109 @@ export interface KiroProfileSummary {
 	profileName?: string;
 }
 
-/** ListAvailableProfiles against one validated management region. */
+function pageToken(value: Record<string, unknown>, target: string): string | undefined {
+	if (value.nextToken === undefined || value.nextToken === null) return undefined;
+	if (typeof value.nextToken !== "string" || value.nextToken.length === 0 || value.nextToken.length > 4096) {
+		throw new Error(`${target}: invalid nextToken`);
+	}
+	return value.nextToken;
+}
+
+/**
+ * ListAvailableProfiles against one validated management region, following
+ * `nextToken` until it is absent, capped at {@link MAX_PROFILES} profiles.
+ */
 export async function listKiroAvailableProfiles(options: {
 	apiRegion: string;
 	token: string;
 	fetch?: FetchImpl;
 	signal?: AbortSignal;
 }): Promise<KiroProfileSummary[]> {
-	const value = await kiroManagementRequest({
-		apiRegion: options.apiRegion,
-		token: options.token,
-		target: "ListAvailableProfiles",
-		body: {},
-		fetch: options.fetch,
-		signal: options.signal,
-		maxBytes: MAX_PROFILES_RESPONSE_BYTES,
-	});
-	if (!isRecord(value) || !Array.isArray(value.profiles) || value.profiles.length > MAX_PROFILES) {
-		throw new Error("ListAvailableProfiles: invalid response");
+	const profiles: KiroProfileSummary[] = [];
+	const seenTokens = new Set<string>();
+	let nextToken: string | undefined;
+	for (let page = 0; page < MAX_PAGES; page += 1) {
+		const value = await kiroManagementRequest({
+			apiRegion: options.apiRegion,
+			token: options.token,
+			target: "ListAvailableProfiles",
+			body: nextToken ? { nextToken } : {},
+			fetch: options.fetch,
+			signal: options.signal,
+			maxBytes: MAX_PROFILES_RESPONSE_BYTES,
+		});
+		if (!isRecord(value) || !Array.isArray(value.profiles) || value.profiles.length > MAX_PROFILES) {
+			throw new Error("ListAvailableProfiles: invalid response");
+		}
+		for (const entry of value.profiles) {
+			if (!isRecord(entry)) throw new Error("ListAvailableProfiles: invalid profile");
+			const parsed = parseKiroProfileArn(typeof entry.arn === "string" ? entry.arn : undefined);
+			if (!parsed) throw new Error("ListAvailableProfiles: invalid profile ARN");
+			const profile: KiroProfileSummary = { arn: parsed.profileArn };
+			if (entry.profileName !== undefined)
+				profile.profileName = boundedString(entry.profileName, "profile.name", 128);
+			if (profiles.length >= MAX_PROFILES) {
+				logger.warn("Kiro profile list truncated", { maxProfiles: MAX_PROFILES });
+				return profiles;
+			}
+			profiles.push(profile);
+		}
+		nextToken = pageToken(value, "ListAvailableProfiles");
+		if (!nextToken || seenTokens.has(nextToken)) return profiles;
+		seenTokens.add(nextToken);
 	}
-	return value.profiles.map(entry => {
-		if (!isRecord(entry)) throw new Error("ListAvailableProfiles: invalid profile");
-		const parsed = parseKiroProfileArn(typeof entry.arn === "string" ? entry.arn : undefined);
-		if (!parsed) throw new Error("ListAvailableProfiles: invalid profile ARN");
-		const profile: KiroProfileSummary = { arn: parsed.profileArn };
-		if (entry.profileName !== undefined) profile.profileName = boundedString(entry.profileName, "profile.name", 128);
-		return profile;
-	});
+	logger.warn("Kiro profile list truncated", { maxPages: MAX_PAGES });
+	return profiles;
+}
+
+/**
+ * ListAvailableModels for one route, following `nextToken` until it is absent,
+ * capped at {@link MAX_MODELS} models. `firstPage` reuses a page already
+ * fetched (the API-key bootstrap probe) instead of requesting it again.
+ */
+export async function listKiroModels(options: {
+	apiRegion: string;
+	token: string;
+	profileArn?: string;
+	fetch?: FetchImpl;
+	signal?: AbortSignal;
+	firstPage?: unknown;
+}): Promise<SanitizedKiroModelCatalog> {
+	const models: SanitizedKiroModel[] = [];
+	const seenIds = new Set<string>();
+	const seenTokens = new Set<string>();
+	let nextToken: string | undefined;
+	let payload = options.firstPage;
+	for (let page = 0; page < MAX_PAGES; page += 1) {
+		payload ??= await kiroManagementRequest({
+			apiRegion: options.apiRegion,
+			token: options.token,
+			target: "ListAvailableModels",
+			body: {
+				origin: "KIRO_CLI",
+				...(options.profileArn ? { profileArn: options.profileArn } : {}),
+				...(nextToken ? { nextToken } : {}),
+			},
+			fetch: options.fetch,
+			signal: options.signal,
+		});
+		const catalog = sanitizeKiroModelCatalog(payload);
+		for (const model of catalog.models) {
+			if (seenIds.has(model.modelId)) continue;
+			if (models.length >= MAX_MODELS) {
+				logger.warn("Kiro model list truncated", { maxModels: MAX_MODELS });
+				return { models };
+			}
+			seenIds.add(model.modelId);
+			models.push(model);
+		}
+		nextToken = catalog.nextToken;
+		if (!nextToken || seenTokens.has(nextToken)) return { models };
+		seenTokens.add(nextToken);
+		payload = undefined;
+	}
+	logger.warn("Kiro model list truncated", { maxPages: MAX_PAGES });
+	return { models };
 }
 
 function routeForApiRegion(apiRegion: string, profileArn?: string): KiroDiscoveryRoute {
@@ -727,9 +805,9 @@ export async function fetchKiroModels(options: FetchKiroModelsOptions): Promise<
 	try {
 		const { credential } = options;
 		let route: KiroDiscoveryRoute | null;
-		let payload: unknown;
-
+		let firstPage: unknown;
 		if (credential.kind === "api_key" && !credential.apiEndpoint) {
+			// An env key with no `KIRO_API_REGION` (the codec applies that pin).
 			const probed = await probeKiroApiKeyBootstrap({
 				token: credential.token,
 				fetch: options.fetch,
@@ -740,26 +818,23 @@ export async function fetchKiroModels(options: FetchKiroModelsOptions): Promise<
 				return null;
 			}
 			route = probed.route;
-			payload = probed.payload;
+			firstPage = probed.payload;
 		} else {
 			route = resolveKiroDiscoveryRoute(credential);
 			if (!route) {
 				logger.debug("Kiro model discovery skipped: route unresolved");
 				return null;
 			}
-			const body =
-				credential.kind === "oauth" ? { origin: "KIRO_CLI", profileArn: route.profileArn } : { origin: "KIRO_CLI" };
-			payload = await kiroManagementRequest({
-				apiRegion: route.apiRegion,
-				token: credential.token,
-				target: "ListAvailableModels",
-				body,
-				fetch: options.fetch,
-				signal: options.signal,
-			});
 		}
 
-		const catalog = sanitizeKiroModelCatalog(payload);
+		const catalog = await listKiroModels({
+			apiRegion: route.apiRegion,
+			token: credential.token,
+			...(credential.kind === "oauth" && route.profileArn ? { profileArn: route.profileArn } : {}),
+			fetch: options.fetch,
+			signal: options.signal,
+			firstPage,
+		});
 		const models = mapKiroModelCatalog(catalog, route.runtimeBaseUrl);
 		// An empty roster is a failed refresh: keep the last safe cache.
 		return models.length > 0 ? models : null;
