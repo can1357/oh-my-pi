@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import type { Model } from "@oh-my-pi/pi-catalog/types";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ModelControls, type ModelControlsHost } from "@oh-my-pi/pi-coding-agent/session/model-controls";
 
 function model(id: string): Model {
@@ -83,7 +84,7 @@ describe("ModelControls automatic selections across a rolled-back switch", () =>
 });
 
 describe("ModelControls durable continuations superseded by a temporary selection", () => {
-	function durableHarness(phase: "reconciliation" | "sync") {
+	function durableHarness(phase: "reconciliation" | "sync", cycle?: "scoped" | "available") {
 		const source = model("source");
 		const durable = model("durable");
 		durable.thinking = {
@@ -95,8 +96,11 @@ describe("ModelControls durable continuations superseded by a temporary selectio
 		temporary.thinking = { mode: "effort", efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.Max] };
 		const entered = Promise.withResolvers<void>();
 		const release = Promise.withResolvers<void>();
+		const temporaryEntered = Promise.withResolvers<void>();
+		const releaseTemporary = Promise.withResolvers<void>();
+		const synchronized: Model[] = [];
 		const receipts: Array<{ value: string; role?: string }> = [];
-		const roles = new Map<string, string>();
+		const settings = Settings.isolated();
 		let active = source;
 		let held = false;
 		async function pause(at: typeof phase) {
@@ -107,15 +111,15 @@ describe("ModelControls durable continuations superseded by a temporary selectio
 		}
 		const host = {
 			agent: { setThinkingLevel: () => {}, setDisableReasoning: () => {} },
-			settings: {
-				getStorage: () => undefined,
-				getModelRole: (role: string) => roles.get(role),
-				setModelRole: (role: string, value: string) => roles.set(role, value),
-			},
+			settings,
+			sessionId: () => "test-session",
 			modelRegistry: {
 				hasConfiguredAuth: () => true,
 				refreshSelectedModelMetadata: async (next: Model) => next,
 				clearSuppressedSelector: () => {},
+				getAvailable: () => [source, durable],
+				getApiKey: async () => "test-key",
+				getApiKeyForProvider: async () => "test-key",
 			},
 			sessionManager: {
 				appendModelChange: (value: string, role?: string) => receipts.push({ value, role }),
@@ -126,19 +130,40 @@ describe("ModelControls durable continuations superseded by a temporary selectio
 			resolveActiveEditMode: () => "replace",
 			syncAfterModelChange: async () => {
 				await pause("sync");
+				synchronized.push(active);
 			},
 			setModelWithProviderSessionReset: async (next: Model, _selection: string, onPublished: () => void) => {
 				active = next;
 				onPublished();
 				await pause("reconciliation");
+				if (cycle && next === temporary) {
+					temporaryEntered.resolve();
+					await releaseTemporary.promise;
+				}
 			},
 			clearActiveRetryFallback: () => {},
 			clearInheritedProviderPromptCacheKey: () => {},
 			emit: () => {},
 			emitNotice: () => {},
 		} as unknown as ModelControlsHost;
-		const controls = new ModelControls(host, { thinkingLevel: Effort.Medium });
-		return { controls, durable, temporary, entered, release, receipts, roles, active: () => active };
+		const controls = new ModelControls(host, {
+			thinkingLevel: Effort.Medium,
+			scopedModels:
+				cycle === "scoped" ? [{ model: source }, { model: durable, thinkingLevel: Effort.Low }] : undefined,
+		});
+		return {
+			controls,
+			durable,
+			temporary,
+			entered,
+			release,
+			temporaryEntered,
+			releaseTemporary,
+			synchronized,
+			receipts,
+			settings,
+			active: () => active,
+		};
 	}
 
 	it.each(["reconciliation", "sync"] as const)(
@@ -160,7 +185,7 @@ describe("ModelControls durable continuations superseded by a temporary selectio
 			expect(h.active()).toBe(h.temporary);
 			expect(h.controls.configuredThinkingLevel()).toBe(Effort.Max);
 			expect(result).toEqual({ switched: false });
-			expect(h.roles.get("default")).toBe("test/durable:low");
+			expect(h.settings.getModelRole("default")).toBe("test/durable:low");
 			expect(h.receipts.findLast(entry => entry.role === "default")).toEqual({
 				value: "test/durable",
 				role: "default",
@@ -195,4 +220,41 @@ describe("ModelControls durable continuations superseded by a temporary selectio
 			});
 		},
 	);
+
+	describe.each(["scoped", "available"] as const)("%s model cycles", cycle => {
+		it.each(["reconciliation", "sync"] as const)(
+			"a cycle superseded during %s preserves the pending temporary effort and cannot report success",
+			async phase => {
+				const h = durableHarness(phase, cycle);
+				const pending = h.controls.cycleModel();
+				await h.entered.promise;
+				let temporarySettled = false;
+				const temporaryPending = h.controls
+					.setModelTemporary(h.temporary, Effort.Max, { ephemeral: true })
+					.then(result => {
+						temporarySettled = true;
+						return result;
+					});
+				try {
+					await h.temporaryEntered.promise;
+					expect(h.active()).toBe(h.temporary);
+					h.release.resolve();
+					expect(await pending).toBeUndefined();
+					expect(temporarySettled).toBe(false);
+					expect(h.synchronized).toEqual([h.temporary]);
+				} finally {
+					h.release.resolve();
+					h.releaseTemporary.resolve();
+				}
+				expect(await temporaryPending).toBe(true);
+				expect(h.active()).toBe(h.temporary);
+				expect(h.controls.configuredThinkingLevel()).toBe(Effort.Max);
+				expect(h.synchronized).toEqual([h.temporary, h.temporary]);
+				expect(h.receipts.findLast(entry => entry.role === undefined)).toEqual({
+					value: "test/durable",
+					role: undefined,
+				});
+			},
+		);
+	});
 });

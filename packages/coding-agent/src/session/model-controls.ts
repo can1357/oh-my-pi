@@ -595,13 +595,15 @@ export class ModelControls {
 		await this.#recordModelReceipt(next.model, undefined, publication, scope);
 		if (this.#publicationScope !== scope) return undefined;
 
-		// Apply the scoped model's configured thinking level, preserving auto.
-		this.setThinkingLevel(this.#autoThinking ? AUTO_THINKING : next.thinkingLevel);
+		if (scope.livePublication === publication) {
+			// Apply the scoped model's configured thinking level, preserving auto.
+			this.setThinkingLevel(this.#autoThinking ? AUTO_THINKING : next.thinkingLevel);
+		}
 		await this.#host.syncAfterModelChange(previousEditMode);
 		while (this.#publicationScope !== scope && this.#host.sessionGenerationSettled()) {
 			await this.#host.sessionGenerationSettled();
 		}
-		if (this.#publicationScope !== scope) return undefined;
+		if (this.#publicationScope !== scope || scope.livePublication !== publication) return undefined;
 
 		return { model: next.model, thinkingLevel: this.thinkingLevel, isScoped: true };
 	}
@@ -640,13 +642,15 @@ export class ModelControls {
 		});
 		await this.#recordModelReceipt(nextModel, undefined, publication, scope);
 		if (this.#publicationScope !== scope) return undefined;
-		// Re-apply the current thinking level (or auto) for the newly selected model
-		this.#reapplyThinkingLevel();
+		if (scope.livePublication === publication) {
+			// Re-apply the current thinking level (or auto) for the newly selected model.
+			this.#reapplyThinkingLevel();
+		}
 		await this.#host.syncAfterModelChange(previousEditMode);
 		while (this.#publicationScope !== scope && this.#host.sessionGenerationSettled()) {
 			await this.#host.sessionGenerationSettled();
 		}
-		if (this.#publicationScope !== scope) return undefined;
+		if (this.#publicationScope !== scope || scope.livePublication !== publication) return undefined;
 
 		return { model: nextModel, thinkingLevel: this.thinkingLevel, isScoped: false };
 	}

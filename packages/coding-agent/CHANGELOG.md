@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Fixed overlapping model cycles overriding a newer temporary model's thinking effort or reporting a stale model selection ([#17292](https://github.com/can1357/oh-my-pi/pull/17292) by [@taibenvenuti](https://github.com/taibenvenuti))
 - Fixed `/prewalk restart` silently cancelling after a superseded planning-model selection or a changed arm; it now explains the cancellation and reports the current model ([#17292](https://github.com/can1357/oh-my-pi/pull/17292) by [@taibenvenuti](https://github.com/taibenvenuti))
 - Fixed overlapping model selections and model cycles restoring an older model instead of the latest resume-eligible selection, including when a later ephemeral fallback is active ([#17292](https://github.com/can1357/oh-my-pi/pull/17292) by [@taibenvenuti](https://github.com/taibenvenuti))
 - Fixed delayed model selections writing into a switched or reloaded session, or losing the last successful resume selection when another model assignment fails ([#17292](https://github.com/can1357/oh-my-pi/pull/17292) by [@taibenvenuti](https://github.com/taibenvenuti))
