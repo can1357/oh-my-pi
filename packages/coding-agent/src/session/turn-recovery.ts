@@ -2970,7 +2970,11 @@ export class TurnRecovery {
 		// error instead, so the user tops up and the error frame's Retry
 		// re-attempts at once rather than idling in a retry the session cannot
 		// finish.
-		const billingCap = isBillingCapUsageLimit(message.errorStatus, errorMessage);
+		// Anthropic's empty-prepaid-balance rejection is retried below (it lifts once
+		// the account is refilled), even when its wording also reads as a billing cap
+		// ("Please add credits"), so it never takes this fail-fast exit.
+		const creditBalanceRejection = AIError.isCreditBalanceTooLow(message.errorStatus, errorMessage);
+		const billingCap = !creditBalanceRejection && isBillingCapUsageLimit(message.errorStatus, errorMessage);
 		const exceedsDelayCap = (waitMs: number): boolean => {
 			if (billingCap) return true;
 			const waitForUsageReset =
@@ -2982,7 +2986,6 @@ export class TurnRecovery {
 			return maxDelayMs > 0 && waitMs > maxDelayMs && !waitForUsageReset;
 		};
 
-		const creditBalanceRejection = AIError.isCreditBalanceTooLow(message.errorStatus, errorMessage);
 		if (!staleOpenAIResponsesReplayError && !switchedCredential && currentSelector) {
 			// The retry budget bounds same-model retries against a failing provider. A
 			// classifier refusal is not that: retrying the same model reproduces it, and

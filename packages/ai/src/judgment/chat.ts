@@ -91,9 +91,14 @@ export function chatTextBackend(model: Model<Api>, options: ChatTextBackendOptio
 					: new AIError.AbortError("judgment: completion aborted");
 			}
 			if (response.stopReason === "error") {
-				throw new AIError.ProviderResponseError(response.errorMessage ?? "unknown error", {
-					provider: model.provider,
-				});
+				// The message stays the provider's text, which callers classify; the
+				// shown text (endpoint, request-dump path) rides beside it for reports.
+				throw Object.assign(
+					new AIError.ProviderResponseError(response.errorMessage ?? "unknown error", {
+						provider: model.provider,
+					}),
+					{ errorDisplayMessage: AIError.errorDisplayText(response) },
+				);
 			}
 			let text = "";
 			for (const block of response.content) {

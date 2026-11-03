@@ -267,6 +267,20 @@ describe("Anthropic credit-balance rejection", () => {
 		expect(final.content).toContainEqual({ type: "text", text: "Recovered" });
 	});
 
+	it("waits out a credit-balance 400 whose wording also reads as a billing cap", async () => {
+		// "Please add credits" also matches the fail-fast billing-cap rule; the credit wait must win.
+		const body = CREDIT_BALANCE_BODY.replace(
+			"Please go to Plans & Billing to upgrade or purchase credits.",
+			"Please add credits to continue.",
+		);
+		const harness = await runTurn(n => (n === 1 ? jsonResponse(400, body) : recoveredResponse()));
+
+		expect(harness.requests).toBe(2);
+		expect(harness.retryStarts).toHaveLength(1);
+		expectCreditBalanceRetryDelay(harness.retryStarts[0]!.delayMs);
+		expect(lastAssistant(harness.session).stopReason).toBe("stop");
+	});
+
 	it("waits out the same rejection when the stream reports it after a 200", async () => {
 		const harness = await runTurn(n => (n === 1 ? creditBalanceStreamResponse() : recoveredResponse()));
 

@@ -1308,7 +1308,7 @@ async function generateShortSummary(
 					outcome = { kind: "aborted" };
 					break;
 				case "error":
-					outcome = { kind: "failed", error: response.errorMessage || "Unknown error" };
+					outcome = { kind: "failed", error: AIError.errorDisplayText(response) || "Unknown error" };
 					break;
 				case "length":
 					outcome = { kind: "failed", error: incompleteOutputError("Short summary failed") };

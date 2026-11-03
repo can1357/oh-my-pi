@@ -512,7 +512,11 @@ export class ChainJudge implements Judge {
 					timeouts.set(timeoutKey, Date.now() + CANDIDATE_TIMEOUT_COOLDOWN_MS);
 					timedOutBefore = true;
 				}
-				lastFailure = error instanceof Error ? error.message : String(error);
+				const shown =
+					error instanceof Error && "errorDisplayMessage" in error && typeof error.errorDisplayMessage === "string"
+						? error.errorDisplayMessage
+						: undefined;
+				lastFailure = shown ?? (error instanceof Error ? error.message : String(error));
 				logger.warn("judgment candidate failed", {
 					candidate: identity,
 					status: AIError.status(error),
