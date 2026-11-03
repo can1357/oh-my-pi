@@ -3175,6 +3175,12 @@ async function relayWakeTurnOutput(args: {
 	finalizeError: unknown;
 	/** Waker already receiving this turn's outcome as an async job delivery. */
 	jobOwnerId: string | undefined;
+	/**
+	 * Parent that owns a wake carrying the missing-yield mark. When no wake job
+	 * could carry the outcome, the parent gets the finalized summary (warning
+	 * and `missing-yield` attribute) in the relay; peers still get the turn text.
+	 */
+	markedWakeOwnerId: string | undefined;
 }): Promise<void> {
 	const bus = IrcBus.global();
 	const sources = wakeSources(args.records, args.id);
@@ -3190,7 +3196,10 @@ async function relayWakeTurnOutput(args: {
 		// strands the waker exactly as before — one message later. So the failure
 		// lane always notifies, flavoured to acknowledge the earlier message.
 		if (alreadyMessaged && !failed) continue;
-		const body = buildWakeRelayBody({ ...args, alreadyMessaged });
+		const body =
+			source.from === args.markedWakeOwnerId && args.result && !failed
+				? formatTaskResultSummary(args.result, { totalDurationMs: args.result.durationMs })
+				: buildWakeRelayBody({ ...args, alreadyMessaged });
 		if (!body) continue;
 		const receipt = await bus.send({
 			from: args.id,
@@ -3596,6 +3605,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 						abortReason,
 						finalizeError,
 						jobOwnerId: wakeJob?.ownerId,
+						markedWakeOwnerId: markedWake ? ownerId : undefined,
 					});
 				} catch (relayError) {
 					logger.warn("IRC wake-turn relay threw", {

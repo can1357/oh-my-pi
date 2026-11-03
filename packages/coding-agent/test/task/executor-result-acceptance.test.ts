@@ -908,6 +908,49 @@ describe("runSubprocess result acceptance", () => {
 			await manager.dispose({ timeoutMs: 1000 });
 		}
 	});
+	it("relays a marked wake's warning to the owner when no wake job can be registered", async () => {
+		const harness = createHarness();
+		const registry = AgentRegistry.global();
+		registry.register({
+			id: "Parent",
+			displayName: "Parent",
+			kind: "main",
+			session: createHarness().session,
+			status: "running",
+		});
+		registry.register({
+			id: AGENT_ID,
+			displayName: AGENT_ID,
+			kind: "sub",
+			parentId: "Parent",
+			session: harness.session,
+			status: "idle",
+		});
+		attachIrcWakeTurnMonitor(harness.session, { id: AGENT_ID, agent: baseAgent });
+		const observer = harness.wakeObserver();
+		if (!observer) throw new Error("wake-turn observer was not registered");
+
+		const finish = observer([
+			{
+				role: "custom",
+				customType: "irc:incoming",
+				content: "report your findings",
+				display: false,
+				details: { id: "msg-no-jobs", from: "Parent", message: "report your findings" },
+				attribution: "agent",
+				timestamp: Date.now(),
+			} as unknown as AgentMessage,
+		]);
+		const reply = IrcBus.global().wait("Parent", { from: AGENT_ID }, 1000);
+		harness.emitAssistantText("Everything verified; writing the report now.");
+		await finish?.(undefined);
+
+		const relayed = await reply;
+		expect(relayed?.body).toContain('missing-yield="wake"');
+		expect(relayed?.body).toContain(
+			"SYSTEM WARNING: Structured subagent replied without calling yield.\n\nEverything verified; writing the report now.",
+		);
+	});
 	it.each(["", " \n "])("reports an empty structured owner wake as before, unmarked (%p)", async reply => {
 		const manager = new AsyncJobManager({});
 		const harness = createHarness({ asyncJobManager: manager });
