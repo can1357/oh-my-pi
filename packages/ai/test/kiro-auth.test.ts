@@ -1090,6 +1090,35 @@ describe("Kiro OAuth API-key projection", () => {
 			authStorage.close();
 		}
 	});
+
+	it("keeps two expired Builder ID logins on the same endpoint in separate caches", async () => {
+		// Builder ID rows share the endpoint and carry no profile ARN. An expired
+		// row reaches discovery through the refresh path (`getOAuthApiKey`), which
+		// used to drop the login id and fall back to the shared endpoint scope.
+		const scopes: string[] = [];
+		for (const loginId of ["builder-login-a", "builder-login-b"]) {
+			const store = await SqliteAuthCredentialStore.open(":memory:");
+			const authStorage = new AuthStorage(store);
+			try {
+				const expired = kiroClientCredentials({
+					access: `${loginId}-expired`,
+					expires: 1,
+					apiEndpoint: "https://runtime.us-east-1.kiro.dev/",
+					kiroLoginId: loginId,
+				});
+				await authStorage.credentials.set("kiro", { type: "oauth", ...expired });
+				const peeked = await authStorage.keys.peek("kiro", { includeExpired: true });
+				const refreshed = await getOAuthApiKey("kiro", {
+					kiro: { ...expired, access: `${loginId}-refreshed`, expires: Date.now() + 3_600_000 },
+				});
+				expect(resolveKiroModelCacheProviderId(refreshed?.apiKey)).toBe(resolveKiroModelCacheProviderId(peeked));
+				scopes.push(resolveKiroModelCacheProviderId(refreshed?.apiKey));
+			} finally {
+				authStorage.close();
+			}
+		}
+		expect(scopes[0]).not.toBe(scopes[1]);
+	});
 });
 
 describe("Kiro login replacement", () => {
