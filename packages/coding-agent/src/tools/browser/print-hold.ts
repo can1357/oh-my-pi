@@ -15,11 +15,12 @@ export type PrintHoldScope = "tab" | "calls";
 
 /**
  * Wraps `window.print` once per document for one attachment and holds it for `holdMs` from `from` (the page's own
- * epoch ms; default now), or for the document's life when `holdMs` is `null`. A held call reports through `binding`
- * (the opener's, in a window omp added no binding to), fires `beforeprint` and `afterprint` as a finished print does,
- * and returns at once; otherwise it calls the `print` it wrapped, which may be another attachment's wrapper. A dialog
- * that opened while held keeps it held `resyncMs` after it returns. Returns the page's time, for the worker to place
- * deadlines in it. Runs in the page, so it stays self-contained.
+ * epoch ms; default now), or for the document's life when `holdMs` is `null`; with `afterTask`, the `holdMs` start
+ * only once the task running now ends. A held call reports through `binding` (the opener's, in a window omp added no
+ * binding to), fires `beforeprint` and `afterprint` as a finished print does, and returns at once; otherwise it calls
+ * the `print` it wrapped, which may be another attachment's wrapper. A dialog that opened while held keeps it held
+ * `resyncMs` after it returns. Returns the page's time, for the worker to place deadlines in it. Runs in the page, so
+ * it stays self-contained.
  */
 function holdPrintInPage(
 	binding: string,
@@ -27,6 +28,7 @@ function holdPrintInPage(
 	holdMs: number | null,
 	from: number | undefined,
 	resyncMs: number,
+	afterTask: boolean,
 ): number {
 	// The clock as the document started, so a page that fakes or replaces `Date.now` cannot move a hold.
 	const clockKey = Symbol.for("omp.printHold.clock");
@@ -37,18 +39,39 @@ function holdPrintInPage(
 	};
 	const deadline = Symbol.for(`${holdKey}.until`);
 	const wrapped = Symbol.for(`${holdKey}.wrapped`);
-	Reflect.set(globalThis, deadline, holdMs === null ? Number.POSITIVE_INFINITY : (from ?? now()) + holdMs);
+	const settling = Symbol.for(`${holdKey}.settling`);
+	const timer: unknown = Reflect.get(globalThis, "setTimeout");
+	// Script that runs in one task (the tab's document-start scripts, a restored page's `pageshow` handlers) can outlast
+	// any fixed tail, and nothing omp sends reaches the page before it ends: hold until then, and `ms` after, unless omp
+	// sets a deadline first.
+	const holdPastTask = (ms: number): void => {
+		const token = {};
+		Reflect.set(globalThis, settling, token);
+		Reflect.set(globalThis, deadline, Number.POSITIVE_INFINITY);
+		const settle = (): void => {
+			if (Reflect.get(globalThis, settling) === token) Reflect.set(globalThis, deadline, now() + ms);
+		};
+		if (typeof timer === "function") Reflect.apply(timer, globalThis, [settle, 0]);
+		else settle();
+	};
+	if (afterTask && holdMs !== null) {
+		holdPastTask(holdMs);
+	} else {
+		Reflect.deleteProperty(globalThis, settling);
+		Reflect.set(globalThis, deadline, holdMs === null ? Number.POSITIVE_INFINITY : (from ?? now()) + holdMs);
+	}
 	if (Reflect.get(globalThis, wrapped)) return now();
 	const print: unknown = Reflect.get(globalThis, "print");
 	if (typeof print !== "function") return now();
 	Reflect.set(globalThis, wrapped, true);
 	// A document back from the back/forward cache kept the deadline it left with, though a call may be running now
-	// or omp may have gone: it holds `resyncMs` from the restore, until omp sets the current deadline. One that went
-	// into the cache before omp attached has no wrapper, and its own `pageshow` runs before omp's update reaches it.
+	// or omp may have gone: it holds through the restore's own handlers and `resyncMs` after, until omp sets the
+	// current deadline. One that went into the cache before omp attached has no wrapper, and its own `pageshow` runs
+	// before omp's update reaches it.
 	Reflect.apply(EventTarget.prototype.addEventListener, globalThis, [
 		"pageshow",
 		(event: Event) => {
-			if (Reflect.get(event, "persisted") === true) Reflect.set(globalThis, deadline, now() + resyncMs);
+			if (Reflect.get(event, "persisted") === true) holdPastTask(resyncMs);
 		},
 		true,
 	]);
@@ -64,12 +87,14 @@ function holdPrintInPage(
 					held = typeof heldUntil === "number" && now() < heldUntil;
 				} catch {}
 				if (!held) return Reflect.apply(target, thisArg, args);
+				// The report says whether a window the tab opened printed, rather than the tab's own document.
 				try {
 					const local: unknown = Reflect.get(globalThis, binding);
 					const opener: unknown = typeof local === "function" ? undefined : Reflect.get(globalThis, "opener");
 					const report: unknown =
 						typeof local === "function" ? local : opener && Reflect.get(Object(opener), binding);
-					if (typeof report === "function") Reflect.apply(report, undefined, [""]);
+					const where = view === globalThis && typeof local === "function" ? "tab" : "window";
+					if (typeof report === "function") Reflect.apply(report, undefined, [where]);
 				} catch {}
 				Reflect.apply(EventTarget.prototype.dispatchEvent, view, [new Event("beforeprint")]);
 				Reflect.apply(EventTarget.prototype.dispatchEvent, view, [new Event("afterprint")]);
@@ -153,6 +178,8 @@ export class PrintHold {
 	/** The page's clock minus the worker's, as last measured: places a new document's deadline in the page's time. */
 	#clockOffset = 0;
 	#requests = 0;
+	/** Prints held in windows the tab opened, which `tab.pdf()` does not reach. */
+	#windowRequests = 0;
 	/** Hold changes apply in order, so a call's end never lands before its start. */
 	#applying: Promise<void> = Promise.resolve();
 	/**
@@ -199,11 +226,12 @@ export class PrintHold {
 			await session.send("Runtime.addBinding", { name: printHold.#binding });
 			// Chrome runs the scripts of the page's own session before any other session's, each session's in the order
 			// they were added: one added there first wraps `print()` before the tab's init scripts can keep the native
-			// one. It never changes, so it stays first; it holds a new document briefly until this session's script,
-			// which carries the current deadline and runs before the page's own scripts, sets it.
+			// one. It never changes, so it stays first; it holds a new document until the task running the start scripts
+			// ends, then briefly, unless this session's script, which carries the current deadline and runs before the
+			// page's own scripts, sets it first.
 			const bootstrapHoldMs = scope === "tab" ? null : USER_DRIVEN_RELEASE_MS;
 			const { identifier } = await page.mainFrame().client.send("Page.addScriptToEvaluateOnNewDocument", {
-				source: printHold.#source(bootstrapHoldMs, null),
+				source: printHold.#source(bootstrapHoldMs, null, true),
 			});
 			printHold.#bootstrapId = identifier;
 			// The loaded document is armed at once; attaching windows takes round trips it must not wait on.
@@ -233,11 +261,22 @@ export class PrintHold {
 		return this.#apply(Date.now() + USER_DRIVEN_RELEASE_MS).catch(() => undefined);
 	}
 
-	/** The line for the call's output when the page called `print()` since the last notice. */
+	/** The lines for the call's output when the page or a window it opened called `print()` since the last notice. */
 	takeNotice(): string | undefined {
-		if (this.#requests === 0) return undefined;
+		const lines: string[] = [];
+		if (this.#requests > 0) {
+			lines.push(
+				"The page called window.print(). omp held it, so no print dialog opened and the page went on as after a finished print. Use tab.pdf() for what it would print.",
+			);
+		}
+		if (this.#windowRequests > 0) {
+			lines.push(
+				"A window the page opened called window.print(). omp held it, so no print dialog opened and the window went on as after a finished print.",
+			);
+		}
 		this.#requests = 0;
-		return "The page called window.print(). omp held it, so no print dialog opened and the page went on as after a finished print. Use tab.pdf() for what it would print.";
+		this.#windowRequests = 0;
+		return lines.length > 0 ? lines.join("\n") : undefined;
 	}
 
 	/** Takes the hold off the page and detaches. A page stopped in a dialog is left with the deadline it has. */
@@ -326,7 +365,9 @@ export class PrintHold {
 	}
 
 	readonly #onBindingCalled = (event: Protocol.Runtime.BindingCalledEvent): void => {
-		if (event.name === this.#binding) this.#requests++;
+		if (event.name !== this.#binding) return;
+		if (event.payload === "window") this.#windowRequests++;
+		else this.#requests++;
 	};
 
 	/** Sets the current deadline in a document back from the back/forward cache, or one that predates the hold. */
@@ -391,9 +432,12 @@ export class PrintHold {
 		});
 	}
 
-	/** The page-side hold, `remaining` ms from `from` on the page's clock (default: as it runs), or for good on `null`. */
-	#source(remaining: number | null, from: number | null): string {
-		const args = [this.#binding, this.#holdKey, remaining, from, USER_DRIVEN_RELEASE_MS];
+	/**
+	 * The page-side hold, `remaining` ms from `from` on the page's clock (default: as it runs), or for good on `null`;
+	 * with `afterTask`, from the end of the task that runs it.
+	 */
+	#source(remaining: number | null, from: number | null, afterTask = false): string {
+		const args = [this.#binding, this.#holdKey, remaining, from, USER_DRIVEN_RELEASE_MS, afterTask];
 		return `(${holdPrintInPage})(${args.map(arg => JSON.stringify(arg)).join(", ")});`;
 	}
 
@@ -477,6 +521,7 @@ export class PrintHold {
 								remaining,
 								undefined,
 								USER_DRIVEN_RELEASE_MS,
+								false,
 							);
 						if (frame === mainFrame) this.#clockOffset = pageNow - Date.now();
 					} catch {}
