@@ -1208,6 +1208,14 @@ export class AgentSession implements SettingsScope {
 	#postPromptTasksPromise: Promise<void> | undefined = undefined;
 	#postPromptTasksResolve: (() => void) | undefined = undefined;
 	#postPromptTasksAbortController = new AbortController();
+	/** Incremented synchronously whenever a run claims the agent (its `agent_start`). */
+	#runEpoch = 0;
+	/**
+	 * While an interrupt unwinds: the post-prompt work the stopped run's aftermath schedules
+	 * (an `agent_end` retry or continuation), which that interrupt cancels. Work scheduled once
+	 * another run has claimed the agent belongs to that run and stays out of it.
+	 */
+	#interruptAftermath: { runEpoch: number; controller: AbortController; tasks: Set<Promise<unknown>> } | undefined;
 	/**
 	 * Cancels the current turn's pre-dispatch setup (memory-backend auto-recall and
 	 * other awaited preparation in {@link #prepareAgentStart}) when {@link abort} runs.
@@ -2434,9 +2442,7 @@ export class AgentSession implements SettingsScope {
 			steeringArrivalSeq: () => this.#steeringArrivalSeq(),
 			steeringArrivalAdmitted: since => this.#steeringArrivalAdmitted(since),
 			steeringArrivalRelease: seq => this.#steeringArrivalRelease(seq),
-			interrupt: () => {
-				void this.abort({ reason: USER_INTERRUPT_LABEL });
-			},
+			interrupt: () => this.#interruptFromToolContext(),
 			queuedMessageCount: () => this.queuedMessageCount,
 			planModeEnabled: () => this.#planModeState?.enabled === true,
 			model: () => this.model,
@@ -4011,6 +4017,7 @@ export class AgentSession implements SettingsScope {
 		// never revoke a foreground-control grant acquired by a later prompt.
 		const computerControlRevocation =
 			event.type === "agent_end" ? revokeComputerControlForOwner(this.#eval.getKernelOwnerId()) : undefined;
+		if (event.type === "agent_start") this.#runEpoch++;
 		// Only the user's own prompt, steer or follow-up lifts the computer-use stop their Escape set;
 		// synthetic continues and agent-sent messages (subagent budget steers) never do.
 		if (
@@ -5274,7 +5281,10 @@ export class AgentSession implements SettingsScope {
 		options?: { delayMs?: number; generation?: number; onSkip?: (reason: PostPromptSkipReason) => void },
 	): void {
 		const delayMs = options?.delayMs ?? 0;
-		const signal = this.#postPromptTasksAbortController.signal;
+		const aftermath = this.#interruptAftermath?.runEpoch === this.#runEpoch ? this.#interruptAftermath : undefined;
+		const signal = aftermath
+			? AbortSignal.any([this.#postPromptTasksAbortController.signal, aftermath.controller.signal])
+			: this.#postPromptTasksAbortController.signal;
 		const scheduled = (async () => {
 			if (delayMs > 0) {
 				try {
@@ -5295,6 +5305,7 @@ export class AgentSession implements SettingsScope {
 			await task(signal);
 		})();
 		this.#trackPostPromptTask(scheduled);
+		aftermath?.tasks.add(scheduled);
 	}
 
 	#skipAgentContinue(reason: AgentContinueSkipReason, request: ScheduledAgentContinueRequest): void {
@@ -11282,6 +11293,11 @@ export class AgentSession implements SettingsScope {
 		this.#promptDropped = handler;
 	}
 
+	/** A tool or dialog context's `abort()`: the user's interrupt, exactly as Esc sends it. */
+	#interruptFromToolContext(): void {
+		void this.abort({ reason: USER_INTERRUPT_LABEL });
+	}
+
 	/**
 	 * Abort current operation and wait for agent to become idle.
 	 *
@@ -11349,20 +11365,32 @@ export class AgentSession implements SettingsScope {
 			const computerControlRevocation = revokeComputerControlForOwner(this.#eval.getKernelOwnerId());
 			const postPromptDrain = this.#cancelPostPromptTasks();
 			this.agent.abort(options?.reason);
+			// From here, post-prompt work the stopped run's aftermath schedules belongs to this
+			// interrupt; a run that claims the agent during the awaits below owns its own work,
+			// and so does a rule interruption newer than the one pending now.
+			const aftermath = {
+				runEpoch: this.#runEpoch,
+				controller: new AbortController(),
+				tasks: new Set<Promise<unknown>>(),
+			};
+			this.#interruptAftermath = aftermath;
+			const ttsrInterruption = this.#ttsr.interruptionToken;
 			await Promise.all([postPromptDrain, computerControlRevocation]);
 			await this.agent.waitForIdle();
 			this.#persistToolResultsEndedWhileDisconnected();
 			// agent_end maintenance can enqueue a retry after the first cancellation.
 			// Keep the abort barrier up until those handlers settle, then cancel
-			// anything they scheduled before making the session revivable. Only
+			// what they scheduled before making the session revivable. Only
 			// agent_end is awaited: a message_end stalled in an extension hook would
 			// otherwise hold /new and every abort for the full handler timeout.
 			await this.#drainAgentEndMaintenance();
-			// The interrupted run's aborted reply is handled by now, so a rule interruption whose
+			// The interrupted run's aborted reply is handled by now, so the rule interruption whose
 			// continuation this abort cancelled can be dropped without unmarking that reply.
-			this.#ttsr.cancelPendingAbort();
-			this.abortRetry();
-			await this.#cancelPostPromptTasks();
+			if (ttsrInterruption !== undefined) this.#ttsr.cancelPendingAbort(ttsrInterruption);
+			if (this.#runEpoch === aftermath.runEpoch) this.abortRetry();
+			aftermath.controller.abort();
+			if (this.#interruptAftermath === aftermath) this.#interruptAftermath = undefined;
+			await Promise.allSettled(aftermath.tasks);
 			// `/compact` disconnects the agent subscription until its finally block.
 			// Do not let abort-and-replace callers start a new prompt before that cleanup
 			// finishes, or the replacement turn's events are neither forwarded nor persisted.
@@ -14245,9 +14273,7 @@ export class AgentSession implements SettingsScope {
 			hasQueuedMessages: () => this.queuedMessageCount > 0,
 			// The re-answer's cancel is the user's interrupt: it cancels the retry, usage
 			// preflights and title work an Esc cancels, not only the agent loop.
-			abort: () => {
-				void this.abort({ reason: USER_INTERRUPT_LABEL });
-			},
+			abort: () => this.#interruptFromToolContext(),
 			settings: this.settings,
 			ui: uiContext,
 			hasUI: true,

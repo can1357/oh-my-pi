@@ -12,8 +12,9 @@ import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensi
 import { TtsrManager } from "@oh-my-pi/pi-coding-agent/export/ttsr";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { convertToLlm, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { registerComputerController } from "@oh-my-pi/pi-coding-agent/tools/computer/supervisor";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
 import { shouldRenderAbortReason } from "@oh-my-pi/pi-tui/chat/messages";
@@ -577,4 +578,96 @@ describe("interrupt scope: races with the stopped run", () => {
 		expect(disposedAtCall).toBe(false);
 		expect(h.mock.calls).toHaveLength(0);
 	});
+
+	// A turn that starts while an interrupt is still cleaning up (here, waiting for a computer-control
+	// revocation acknowledgement over HTTP) is later work: the old cleanup must not cancel its rule continuation.
+	for (const timing of ["during", "after"] as const) {
+		it(`a rule continuation of a turn begun ${timing} an interrupt's cleanup still runs`, async () => {
+			const manager = new TtsrManager({
+				enabled: true,
+				contextMode: "discard",
+				interruptMode: "always",
+				repeatMode: "once",
+				repeatGap: 0,
+			});
+			manager.addRule({
+				name: "later-revocation-rule",
+				path: "later-revocation-rule.md",
+				content: "Avoid LATER_REVOCATION_TOKEN",
+				condition: ["LATER_REVOCATION_TOKEN"],
+				scope: ["text"],
+				_source: { provider: "test", providerName: "test", path: "later-revocation-rule.md", level: "project" },
+			});
+			const started = Promise.withResolvers<void>();
+			const h = await setup(
+				[
+					async (_ctx, opts) => {
+						started.resolve();
+						await untilAborted(opts?.signal);
+						return { content: ["old"] };
+					},
+					{ content: ["LATER_REVOCATION_TOKEN"] },
+					{ content: ["recovered later run"] },
+				],
+				manager,
+			);
+			const ack = h.gate();
+			const server = Bun.serve({
+				hostname: "127.0.0.1",
+				port: 0,
+				fetch: async () => {
+					await ack.wait();
+					return new Response("revoked");
+				},
+			});
+			const unregister = registerComputerController(h.session.getEvalKernelOwnerId(), {
+				revokeControl: async () => {
+					await (await fetch(server.url)).text();
+				},
+				run: async () => {
+					throw new Error("not part of this test");
+				},
+				capabilities: async () => undefined,
+				close: async () => {},
+			});
+			try {
+				const old = h.session.prompt("old request");
+				await started.promise;
+				const stopping = h.session.abort({ reason: USER_INTERRUPT_LABEL });
+				await ack.entered;
+				await h.agent.waitForIdle();
+				if (timing === "after") {
+					ack.release();
+					await stopping;
+					await old;
+				}
+				const triggered = Promise.withResolvers<void>();
+				h.session.subscribe(event => {
+					if (event.type === "ttsr_triggered") {
+						triggered.resolve();
+						ack.release();
+					}
+				});
+				h.session.queueDeferredMessage({
+					...payload("new work during revocation acknowledgement"),
+					role: "custom",
+					timestamp: Date.now(),
+				});
+				await triggered.promise;
+				await stopping;
+				await old;
+				await h.session.waitForIdle();
+				const injections = (await h.saved()).filter(
+					entry => entry.type === "custom_message" && entry.customType === "ttsr-injection",
+				);
+				expect(injections).toHaveLength(1);
+				expect(h.mock.calls).toHaveLength(3);
+				expect(h.session.isTtsrAbortPending).toBe(false);
+			} finally {
+				ack.release();
+				unregister();
+				server.stop(true);
+			}
+		});
+	}
 });
