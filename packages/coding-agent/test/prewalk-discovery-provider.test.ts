@@ -24,6 +24,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { buildSessionOptions } from "@oh-my-pi/pi-coding-agent/main";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
@@ -184,4 +185,71 @@ describe("issue #11820 prewalk into a models.yml discovery provider target", () 
 		expect(options.prewalk).toBeUndefined();
 		expect(requestedUrls).toEqual([]);
 	});
+	test("defers an unresolved static custom provider for later extension registration", async () => {
+		const authStorage = createInMemoryAuthStorage();
+		authStoragesToClose.push(authStorage);
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
+		modelRegistry.registerProvider("local-static", {
+			api: "openai-completions",
+			baseUrl: "https://example.invalid/v1",
+			apiKey: "test-key",
+			models: [
+				{
+					id: "known",
+					name: "Known",
+					reasoning: false,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 4096,
+					maxTokens: 1024,
+				},
+			],
+		});
+		const options = await buildSessionOptions(
+			parseArgs(["--prewalk-into", "local-static/later"]),
+			[],
+			SessionManager.inMemory(),
+			modelRegistry,
+			Settings.isolated(),
+		);
+		expect(options.prewalk).toBeUndefined();
+		expect(options.deferredPrewalk?.target).toBe("local-static/later");
+	});
+
+	test.each(["@task", "openai-codex/runtime-codex-model:medium"])(
+		"discovers a built-in Codex target for %s",
+		async selector => {
+			const authStorage = createInMemoryAuthStorage();
+			authStoragesToClose.push(authStorage);
+			authStorage.keys.setRuntime("openai-codex", "test-codex-key");
+			const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"), {
+				fetch: async input => {
+					requestedUrls.push(String(input));
+					return Response.json({
+						models: [
+							{
+								slug: "runtime-codex-model",
+								display_name: "Runtime Codex Model",
+								context_window: 128000,
+								supported_in_api: true,
+								input_modalities: ["text"],
+							},
+						],
+					});
+				},
+			});
+			const settings = Settings.isolated();
+			settings.setModelRole("task", "openai-codex/runtime-codex-model:medium");
+			const options = await buildSessionOptions(
+				parseArgs(["--prewalk-into", selector]),
+				[],
+				SessionManager.inMemory(),
+				modelRegistry,
+				settings,
+			);
+			expect(options.prewalk?.target.provider).toBe("openai-codex");
+			expect(options.prewalk?.target.id).toBe("runtime-codex-model");
+			expect(options.prewalk?.thinkingLevel).toEqual(parseConfiguredThinkingLevel("medium"));
+		},
+	);
 });
