@@ -476,6 +476,10 @@ pub(crate) enum PumpEnd {
 	/// A single `forward` took longer than the stall timeout; the chunks still
 	/// queued were dropped.
 	Stalled,
+	/// The pump's task panicked before it could say how it ended; the chunks
+	/// still queued were dropped. Its waiters report this; `pump_chunks` never
+	/// returns it.
+	Panicked,
 }
 
 /// One item on a reader→JS bridge queue.
@@ -560,7 +564,7 @@ pub(crate) async fn pump_chunks<T: BridgeItem + Send>(
 const INTERRUPTED_DRAIN_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// The error of a run whose output the pump dropped: a callback stalled or
-/// failed. `None` when the pump forwarded everything.
+/// failed, or the pump panicked. `None` when the pump forwarded everything.
 pub(crate) fn undelivered_output_error(end: PumpEnd) -> Option<Error> {
 	let reason = match end {
 		PumpEnd::Drained => return None,
@@ -568,6 +572,7 @@ pub(crate) fn undelivered_output_error(end: PumpEnd) -> Option<Error> {
 		PumpEnd::Stalled => {
 			format!("the output callback did not return for {} s", FORWARD_STALL_TIMEOUT.as_secs())
 		},
+		PumpEnd::Panicked => "the output pump failed".to_owned(),
 	};
 	Some(Error::from_reason(format!("Command output was not all delivered: {reason}")))
 }
@@ -588,14 +593,10 @@ async fn await_drain(
 		return result;
 	};
 	if !matches!(&result, Ok(result) if result.cancelled || result.timed_out) {
-		return match handle.await {
-			Ok(end) => match undelivered_output_error(end) {
-				Some(error) => result.and(Err(error)),
-				None => result,
-			},
-			Err(err) => result.and(Err(Error::from_reason(format!(
-				"Command output was not all delivered: the output pump failed: {err}"
-			)))),
+		let end = handle.await.unwrap_or(PumpEnd::Panicked);
+		return match undelivered_output_error(end) {
+			Some(error) => result.and(Err(error)),
+			None => result,
 		};
 	}
 	if napi::tokio::time::timeout(INTERRUPTED_DRAIN_SHUTDOWN_TIMEOUT, &mut handle)

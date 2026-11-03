@@ -6,7 +6,7 @@
 
 use std::{
 	collections::HashMap,
-	io::{Read, Write},
+	io::Write,
 	sync::{
 		Arc,
 		atomic::{AtomicU64, Ordering},
@@ -440,6 +440,23 @@ fn run_pty_sync(
 		let _ = writer.write_all(b"\x1b[1;1R");
 		let _ = writer.flush();
 	}
+	// On Unix the reader waits for output with `poll` and only then reads it,
+	// so a read is always short and the drain can tell it apart from a wait
+	// (see `read_terminal`).
+	#[cfg(unix)]
+	let reader = master
+		.as_raw_fd()
+		.ok_or_else(|| {
+			Error::from_reason("Failed to create PTY reader: the master has no descriptor")
+		})
+		.and_then(|fd| {
+			// SAFETY: `fd` is the master's descriptor, open while `master` lives;
+			// it is only duplicated here.
+			unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) }
+				.try_clone_to_owned()
+				.map_err(|err| Error::from_reason(format!("Failed to create PTY reader: {err}")))
+		})?;
+	#[cfg(not(unix))]
 	let mut reader = master
 		.try_clone_reader()
 		.map_err(|err| Error::from_reason(format!("Failed to create PTY reader: {err}")))?;
@@ -465,11 +482,16 @@ fn run_pty_sync(
 			// on a full PTY buffer that nothing drains (#12657).
 			let mut forwarding = true;
 			loop {
-				let n = match reader.read(&mut buf) {
+				#[cfg(unix)]
+				let read = read_terminal(&reader, &mut buf, &progress);
+				#[cfg(not(unix))]
+				let read = std::io::Read::read(&mut reader, &mut buf).inspect(|&n| {
+					progress.read.fetch_add(n as u64, Ordering::AcqRel);
+				});
+				let n = match read {
 					Ok(0) | Err(_) => break,
 					Ok(n) => n,
 				};
-				progress.read.fetch_add(n as u64, Ordering::AcqRel);
 				if forwarding {
 					// Held across the send, so the drain's flush of the decoder
 					// queues its text after every chunk decoded before it.
@@ -649,7 +671,8 @@ fn run_pty_sync(
 	}
 	#[cfg(unix)]
 	let unread = || unread_probe.as_ref().map_or(0, pty_unread_bytes);
-	// ConPTY gives no count of unread output.
+	// ConPTY gives no count of unread output, and the reader there reads
+	// blocking, so it cannot tell a read in flight from a wait either.
 	#[cfg(not(unix))]
 	let unread = || 0;
 	let pump_end = await_pty_output_drain(
@@ -679,6 +702,9 @@ fn run_pty_sync(
 /// holds open.
 #[derive(Default)]
 struct ReaderProgress {
+	/// Odd while a read is taking output from the terminal and counting it in
+	/// `read` (Unix; see `read_terminal`).
+	reads:          AtomicU64,
 	/// Bytes read from the terminal.
 	read:           AtomicU64,
 	/// Of those, bytes decoded (a partial character the decoder holds
@@ -699,6 +725,54 @@ impl ReaderProgress {
 			self.handed_text.fetch_add(len, Ordering::AcqRel);
 		}
 		sent
+	}
+}
+
+/// Reads the next output from the terminal into `buf` and counts it in
+/// `progress.read`.
+///
+/// It waits for output with `poll` and reads only once some is there, so a
+/// read never waits: `progress.reads` is odd only from just before a read
+/// until its bytes are counted. While it is even, every byte taken from the
+/// terminal so far is counted, which a blocking read could not tell apart
+/// from a wait for output that has not come.
+#[cfg(unix)]
+fn read_terminal(
+	terminal: &std::os::fd::OwnedFd,
+	buf: &mut [u8],
+	progress: &ReaderProgress,
+) -> std::io::Result<usize> {
+	use std::os::fd::AsRawFd as _;
+	let fd = terminal.as_raw_fd();
+	loop {
+		let mut ready = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+		// SAFETY: `ready` is one valid `pollfd` for the call.
+		if unsafe { libc::poll(&raw mut ready, 1, -1) } < 0 {
+			let err = std::io::Error::last_os_error();
+			if err.kind() == std::io::ErrorKind::Interrupted {
+				continue;
+			}
+			return Err(err);
+		}
+		progress.reads.fetch_add(1, Ordering::AcqRel);
+		// SAFETY: `buf` is writable for `buf.len()` bytes, and `fd` stays open
+		// for the call.
+		let read = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
+		let read = if read < 0 {
+			Err(std::io::Error::last_os_error())
+		} else {
+			progress.read.fetch_add(read as u64, Ordering::AcqRel);
+			Ok(read as usize)
+		};
+		progress.reads.fetch_add(1, Ordering::AcqRel);
+		match read {
+			Err(err)
+				if matches!(
+					err.kind(),
+					std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
+				) => {},
+			read => return read,
+		}
 	}
 }
 
@@ -766,17 +840,44 @@ fn await_pty_output_drain(
 		return end;
 	}
 
-	let owed = progress
-		.read
-		.load(Ordering::Acquire)
-		.saturating_add(unread());
+	// What the reader owes: what it has read, and what the terminal holds. A
+	// read in progress has taken output that `read` does not count yet, so the
+	// count is taken between reads.
+	let owed = loop {
+		let reads = progress.reads.load(Ordering::Acquire);
+		if reads.is_multiple_of(2) {
+			let owed = progress
+				.read
+				.load(Ordering::Acquire)
+				.saturating_add(unread());
+			if progress.reads.load(Ordering::Acquire) == reads {
+				break owed;
+			}
+			continue;
+		}
+		if reader_thread.is_finished() {
+			break 0;
+		}
+		match pump_done_rx.recv_timeout(DELIVERY_POLL) {
+			Ok(end) => {
+				finish(reader_thread);
+				return Some(end);
+			},
+			// The pump sends how it ended before it drops its sender.
+			Err(flume::RecvTimeoutError::Disconnected) => {
+				finish(reader_thread);
+				return Some(PumpEnd::Panicked);
+			},
+			Err(flume::RecvTimeoutError::Timeout) => {},
+		}
+	};
 	loop {
 		if reader_thread.is_finished() {
 			drop(queued);
 			// Unbounded by design (#7421, same as shell.rs `drain_handle.await`).
-			let end = pump_done_rx.recv().ok();
+			let end = pump_done_rx.recv().unwrap_or(PumpEnd::Panicked);
 			let _ = reader_thread.join();
-			return end;
+			return Some(end);
 		}
 
 		match pump_done_rx.recv_timeout(STUCK_SLAVE_IDLE) {
@@ -786,7 +887,7 @@ fn await_pty_output_drain(
 			},
 			Err(flume::RecvTimeoutError::Disconnected) => {
 				finish(reader_thread);
-				return None;
+				return Some(PumpEnd::Panicked);
 			},
 			Err(flume::RecvTimeoutError::Timeout) => {
 				if reader_thread.is_finished() || progress.handed.load(Ordering::Acquire) < owed {
@@ -821,7 +922,7 @@ fn await_pty_output_drain(
 				},
 				Err(flume::RecvTimeoutError::Disconnected) => {
 					finish(reader_thread);
-					return None;
+					return Some(PumpEnd::Panicked);
 				},
 				Err(flume::RecvTimeoutError::Timeout) => {},
 			}
@@ -999,6 +1100,52 @@ mod reader_queue_tests {
 			"cut the reader off at {stopped_at:?}, before it handed over the terminal's output",
 		);
 		assert!(stopped_at < late + STUCK_SLAVE_IDLE + Duration::from_secs(2));
+	}
+
+	/// A read that has taken 21 bytes from the terminal (so it counts none
+	/// unread) but has not counted them when the drain starts, and counts
+	/// them only after the idle window. The drain took the counts at that
+	/// moment as everything owed and cut the reader off with the 21 bytes. It
+	/// must wait for the read to count them.
+	#[test]
+	fn drain_waits_for_a_read_in_progress_to_count_its_bytes() {
+		let (_pump_tx, pump_rx) = flume::bounded::<PumpEnd>(1);
+		let progress = Arc::new(ReaderProgress::default());
+		progress.reads.fetch_add(1, Ordering::AcqRel);
+		let late = STUCK_SLAVE_IDLE + Duration::from_secs(1);
+		let reader = std::thread::spawn({
+			let progress = Arc::clone(&progress);
+			move || {
+				std::thread::sleep(late);
+				progress.read.fetch_add(21, Ordering::AcqRel);
+				progress.reads.fetch_add(1, Ordering::AcqRel);
+				std::thread::sleep(Duration::from_millis(100));
+				progress.handed.fetch_add(21, Ordering::AcqRel);
+				// The slave stays open.
+				std::thread::park();
+			}
+		});
+		let (queued, _) = flume::bounded::<ReaderEvent>(BRIDGE_QUEUE_CHUNKS);
+		let decoder = Mutex::new(OutputDecoder::new());
+		let stopped_at = OnceLock::new();
+		let start = Instant::now();
+		await_pty_output_drain(
+			pump_rx,
+			reader,
+			queued,
+			&progress,
+			&decoder,
+			|| 0,
+			false,
+			|| {
+				let _ = stopped_at.set(start.elapsed());
+			},
+		);
+		let stopped_at = *stopped_at.get().expect("the open slave is still left");
+		assert!(
+			stopped_at >= late + Duration::from_millis(100),
+			"cut the reader off at {stopped_at:?}, before its read in progress handed its bytes over",
+		);
 	}
 
 	/// A daemon that holds the slave open and writes without end, into a
