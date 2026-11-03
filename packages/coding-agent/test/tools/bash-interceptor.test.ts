@@ -537,12 +537,17 @@ describe("dedicated tool capability", () => {
 		expect(decide(command)).toBeUndefined();
 	});
 
-	it.each(["grep -n x f | head", "grep -nE 'a|b' -e x f", "rg -n x src", "rg x", "rg -tv x .", "grep x < f"])(
-		"refuses %s as a grep",
-		command => {
-			expect(decide(command)).toBe("grep");
-		},
-	);
+	it.each([
+		"grep -n x f | head",
+		"grep -nE 'a|b' f",
+		"grep -n -e x data f",
+		"rg -n x src",
+		"rg x",
+		"rg -tv x .",
+		"grep x < f",
+	])("refuses %s as a grep", command => {
+		expect(decide(command)).toBe("grep");
+	});
 
 	it.each([
 		// Case 6 of the refusal study: `-maxdepth 4` maps to glob's `depth: 4`, but `-type d` does not.
@@ -1084,10 +1089,63 @@ describe("dedicated tool capability", () => {
 		"grep -RI needle symlink-root",
 		"grep -r -- -I binary-dir",
 		"grep -r -e -I binary-dir",
+		// Round 10: expanded paths, `rg -uuu`, and an fd operand after `--`.
+		"grep needle *.bin",
+		"rg needle src/*",
+		"rg -uuu needle .",
+		"rg --unrestricted --unrestricted --unrestricted needle .",
+		"rg -u -uu needle .",
+		"fd -- 'A(?:[0-9]{2})+B' --glob",
+		// Round 11: options are counted where rg reads them (`--` here is `--regexp`'s value), and a
+		// word the shell expands can become any pattern, script or option, in any stage.
+		"rg --regexp -- -uuu data",
+		"rg --regexp -- --unrestricted --unrestricted --unrestricted data",
+		"cat text | sed -e s*foo*bar*",
+		"sed -i s*foo*bar* text",
+		"grep *.pattern text",
+		"grep -e *.pattern text",
+		"grep --regexp *.pattern text",
+		"rg *.pattern text",
+		"cat $f",
+		"find . -name *.ts",
+		// Round 12: an ANSI-C escape without digits stays as written (`\\x`), so perl sees `\\xff`.
+		"perl -pi -e $'s/a/\\x'ff/ f",
+		"perl -pi -e $'s/a/\\u'00e9/ f",
+		// The edit tool edits a notebook's cells, not its JSON.
+		"sed -i 's/old/new/' book.ipynb",
+		"perl -pi -e 's/old/new/' Book.IPYNB",
+		"echo hi > new.ipynb",
+		// Paths the tools read differently: archive members, database tables, read selectors, URL
+		// schemes, `~`, `@`, grep's path lists and excludes, hashline headers, quotes, backslashes.
+		"echo hi > 'native.zip:member'",
+		"echo hi > 'native.db:rows'",
+		"echo hi > ./native.zip:member",
+		"cat 'notes.txt:1-3'",
+		"cat '~/notes.txt'",
+		"cat '@/etc/hosts'",
+		"cat 'my notes.txt'",
+		"grep needle 'a,b'",
+		"grep needle '!skip'",
+		"echo hi > '[notes.md#ABCD]'",
+		"echo hi > '\"quoted\"'",
+		"cat 'a\\b'",
 		// An empty name is no file.
 		'echo hi > ""',
 	])("does not refuse %s (round 8)", command => {
 		expect(decide(command)).toBeUndefined();
+	});
+
+	it.each([
+		["rg --regexp -- data", "grep"],
+		["rg -uu needle .", "grep"],
+		["cat text | sed -e 's*foo*bar*'", "read"],
+		["grep '*.pattern' text", "grep"],
+		["cat src/main.ts", "read"],
+		["cat node_modules/@types/node/index.d.ts", "read"],
+		["echo hi > notes.md", "write"],
+		["perl -pi -e 's/old/new/' book.py", "edit"],
+	])("still refuses %s as %s (round 11)", (command, tool) => {
+		expect(decide(command)).toBe(tool);
 	});
 
 	it("renders a repeated printf only up to a bound", () => {

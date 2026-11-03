@@ -35,9 +35,11 @@ function pathKindIn(cwd: string, target: string, follow: boolean): PathKind {
 	if (URL_PATH.test(cwd) || URL_PATH.test(target)) return "unknown";
 	const joined = joinPhysically(cwd, target);
 	try {
-		const stat = follow ? fs.statSync(joined) : fs.lstatSync(joined);
-		// Unfollowed, any symlink (a dangling one too) is `other`: the shell writes through it, the tools replace it.
-		if (stat.isSymbolicLink()) return "other";
+		if (!follow && fs.lstatSync(joined).isSymbolicLink()) {
+			// Unfollowed, any symlink (a dangling one too) is `other`: the shell writes through it, the tools replace it.
+			return "other";
+		}
+		const stat = fs.statSync(joined);
 		if (SPECIAL_ROOT.test(fs.realpathSync.native(joined))) return "other";
 		return stat.isFile() ? "file" : stat.isDirectory() ? "directory" : "other";
 	} catch (error) {

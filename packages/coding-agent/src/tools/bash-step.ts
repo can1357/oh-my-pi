@@ -138,13 +138,14 @@ function decodeAnsiC(body: string): { text: string; bytes: boolean } {
 				}
 				return String.fromCodePoint(code);
 			}
-			if (esc[0] === "x" || /^[0-7]/u.test(esc)) {
+			// Without digits (`\x`, `\u`, `\U`) bash keeps the escape as written, falling through below.
+			if ((esc[0] === "x" && esc.length > 1) || /^[0-7]/u.test(esc)) {
 				const code = esc[0] === "x" ? Number.parseInt(esc.slice(1), 16) : Number.parseInt(esc, 8) & 0xff;
 				// A NUL ends the word when bash passes it to a command.
 				if (code >= 0x80 || code === 0) bytes = true;
 				return String.fromCharCode(code);
 			}
-			if (esc[0] === "c") {
+			if (esc[0] === "c" && esc.length > 1) {
 				if (esc[1] === "?") return "\x7f";
 				const code = esc.charCodeAt(1) & 0x1f;
 				if (code === 0) bytes = true;
@@ -615,7 +616,6 @@ function isPassThroughFilter(stage: SimpleCommand): boolean {
 	for (let i = 0; i < words.length; i++) {
 		const word = words[i];
 		const text = word.value;
-		if (word.computed) return false;
 		// `-` names stdin, which is the pipe; `--` ends the options.
 		if (text === "-" && filter.operands !== "any") continue;
 		if (text === "--" && !optionsEnded) {
@@ -634,7 +634,7 @@ function isPassThroughFilter(stage: SimpleCommand): boolean {
 			let value: string | undefined = eq >= 0 ? text.slice(eq + 1) : undefined;
 			if (takesValue && value === undefined) {
 				const next = words[++i];
-				if (!next || next.computed) return false;
+				if (!next) return false;
 				value = next.value;
 			}
 			if (name === "regexp" || name === "expression") scripts.push(value ?? "");
@@ -647,7 +647,7 @@ function isPassThroughFilter(stage: SimpleCommand): boolean {
 				let value = text.slice(j + 1);
 				if (value === "") {
 					const next = words[++i];
-					if (!next || next.computed) return false;
+					if (!next) return false;
 					value = next.value;
 				}
 				if (letter === "e") scripts.push(value);
@@ -778,14 +778,17 @@ interface OptionSpec {
 const ANY = (): boolean => true;
 const COUNT = (value: string): boolean => /^\d+$/u.test(value);
 
-/** Splits `words` into options and operands; returns undefined when an option is outside `spec`. */
-function expressibleOperands(words: Word[], spec: OptionSpec, seen?: Set<string>): Word[] | undefined {
+/**
+ * Splits `words` into options and operands; returns undefined when an option is outside `spec`.
+ * `seen` counts each option given (`-u`, `--unrestricted`), read where the command reads it.
+ */
+function expressibleOperands(words: Word[], spec: OptionSpec, seen?: Map<string, number>): Word[] | undefined {
 	const operands: Word[] = [];
 	let optionsEnded = false;
 	for (let i = 0; i < words.length; i++) {
 		const word = words[i];
 		const text = word.value;
-		if (optionsEnded || text === "-" || !text.startsWith("-") || word.computed) {
+		if (optionsEnded || text === "-" || !text.startsWith("-")) {
 			operands.push(word);
 			if (spec.stopAtOperand) optionsEnded = true;
 			continue;
@@ -799,7 +802,7 @@ function expressibleOperands(words: Word[], spec: OptionSpec, seen?: Set<string>
 			const name = text.slice(2, eq < 0 ? undefined : eq);
 			const kind = own(spec.long, name);
 			if (kind === undefined) return undefined;
-			seen?.add(`--${name}`);
+			count(seen, `--${name}`);
 			if (kind === "flag") {
 				if (eq >= 0) return undefined;
 				continue;
@@ -809,7 +812,7 @@ function expressibleOperands(words: Word[], spec: OptionSpec, seen?: Set<string>
 			if (eq >= 0) value = text.slice(eq + 1);
 			else {
 				const next = words[++i];
-				if (!next || next.computed) return undefined;
+				if (!next) return undefined;
 				value = next.value;
 			}
 			if (!kind(value)) return undefined;
@@ -818,13 +821,13 @@ function expressibleOperands(words: Word[], spec: OptionSpec, seen?: Set<string>
 		if (spec.numeric && /^-\d+$/u.test(text)) continue;
 		for (let j = 1; j < text.length; j++) {
 			const letter = text[j];
-			seen?.add(`-${letter}`);
+			count(seen, `-${letter}`);
 			const valued = own(spec.valued, letter);
 			if (valued) {
 				let value = text.slice(j + 1);
 				if (value === "") {
 					const next = words[++i];
-					if (!next || next.computed) return undefined;
+					if (!next) return undefined;
 					value = next.value;
 				}
 				if (!valued(value)) return undefined;
@@ -834,6 +837,10 @@ function expressibleOperands(words: Word[], spec: OptionSpec, seen?: Set<string>
 		}
 	}
 	return operands;
+}
+
+function count(seen: Map<string, number> | undefined, option: string): void {
+	seen?.set(option, (seen.get(option) ?? 0) + 1);
 }
 
 /** Whether `word` names one file the agent can pass to a tool: no glob, no computed part, not stdin. */
@@ -1025,15 +1032,17 @@ const GREP_SPECS: Record<string, OptionSpec> = {
  * context width or cap matches, read patterns from a file, or search stdin, a heredoc or a
  * here-string.
  */
-function grepPaths(spec: OptionSpec, command: SimpleCommand): { paths: Word[]; seen: Set<string> } | undefined {
-	const seen = new Set<string>();
+function grepPaths(spec: OptionSpec, command: SimpleCommand): { paths: Word[]; seen: Map<string, number> } | undefined {
+	const seen = new Map<string, number>();
 	const operands = expressibleOperands(command.words.slice(1), spec, seen);
 	if (!operands || hasOtherInputs(command)) return undefined;
 	const stdin = stdinFiles(command);
 	if (!stdin.every(namesOneFile)) return undefined;
 	const patternGiven = seen.has("-e") || seen.has("--regexp");
 	const paths = patternGiven ? operands : operands.slice(1);
-	if (operands.some(word => word.computed) || paths.some(word => word.value === "-")) return undefined;
+	if (!paths.every(namesOneFile)) return undefined;
+	// `rg -uuu` searches binary files, which the grep tool skips.
+	if (spec === RIPGREP && (seen.get("-u") ?? 0) + (seen.get("--unrestricted") ?? 0) >= 3) return undefined;
 	if (spec === GNU_GREP) {
 		// GNU grep treats a file with a NUL byte or invalid UTF-8 as binary and reports or skips it,
 		// which the grep tool does not; only a walk could show what a directory holds, so a GNU
@@ -1070,13 +1079,12 @@ const GLOB_DEPTH = (value: string): boolean => /^[1-9]\d*$/u.test(value);
 const SAME_NAME_PATTERN = /^(?!@)(?:[A-Za-z0-9._+=@-]|\*(?!\*))+$/u;
 
 /**
- * A `find` or `fd` root glob reads as the same directory: a relative or absolute path of the
- * characters {@link SAME_NAME_PATTERN} allows, without `*`, a leading `@` (a path shorthand), or
- * a `..` segment (glob resolves it lexically, find through symlinks), and not `/` (glob refuses
- * to search it).
+ * A `find` or `fd` root glob reads as the same directory: a path the tools take literally (see
+ * {@link toolsTakeLiterally}), without a `..` segment (glob resolves it lexically, find through
+ * symlinks), and not `/` (glob refuses to search it).
  */
 function isPlainRoot(root: string): boolean {
-	if (!/^(?!@)[A-Za-z0-9._+=@/-]+$/u.test(root)) return false;
+	if (!toolsTakeLiterally(root)) return false;
 	return !root.split("/").includes("..") && root.replace(/\/+$/u, "") !== "";
 }
 
@@ -1149,9 +1157,7 @@ function isGitPrune(test: string | undefined, arg: string | undefined): boolean 
  * has no type, size, time, permission or case-insensitive test, negation, other prune, or action.
  */
 function findAsGlob(command: SimpleCommand, filesystem: StepFilesystem | undefined): GlobArgs | undefined {
-	const words = command.words.slice(1).map(word => (word.computed ? undefined : word.value));
-	if (words.some(word => word === undefined)) return undefined;
-	const args = words as string[];
+	const args = command.words.slice(1).map(word => word.value);
 	let i = 0;
 	let followRoots = false;
 	for (; args[i] === "-P" || args[i] === "-H"; i++) followRoots = args[i] === "-H";
@@ -1242,7 +1248,7 @@ const FD: OptionSpec = {
 function fdAsGlob(command: SimpleCommand, filesystem: StepFilesystem | undefined): GlobArgs | undefined {
 	const options = command.words.slice(1);
 	const operands = expressibleOperands(options, FD);
-	if (!operands || operands.some(word => word.computed)) return undefined;
+	if (!operands) return undefined;
 	const given = fdOptions(options);
 	const has = (short: string, long: string): boolean => given.has(`-${short}`) || given.has(`--${long}`);
 	const unrestricted = has("u", "unrestricted");
@@ -1443,10 +1449,10 @@ function writeCanPerform(
 	if (output.op !== ">" && output.op !== ">|" && !(output.op === ">>" && availableTools.includes("edit")))
 		return false;
 	const target = output.target;
-	if (!target || !namesOneFile(target) || SPECIAL_PATH.test(target.value)) return false;
+	if (!target || !namesOneFile(target) || !toolsTakeLiterally(target.value)) return false;
+	if (SPECIAL_PATH.test(target.value) || NOTEBOOK.test(target.value)) return false;
 	if (filesystem && filesystem.kind(target.value, false) !== "missing") return false;
 	const args = command.words.slice(1);
-	if (args.some(word => word.computed || word.glob)) return false;
 	const text = writeStepText(name, step, args, stdinDocuments);
 	if (text === undefined || text.startsWith("#!")) return false;
 	return stripWriteContentWithPotentialLooseHeader(text).text === text;
@@ -1477,9 +1483,9 @@ function isLiteralSubstitution(script: string): boolean {
 }
 
 /**
- * `sed -i` the edit tool can do: in place without a backup suffix, scripts that only substitute,
- * transliterate or delete (no `r`/`w`/`e`, no `s///w`/`e`, no `-n`, no script file), on named
- * files. Returns the files it edits, or undefined when the edit tool cannot do the step.
+ * `sed -i` the edit tool can do: in place without a backup suffix, every script a literal-for-literal
+ * substitution (see {@link isLiteralSubstitution}), on named files. Returns the files it edits, or
+ * undefined when the edit tool cannot do the step.
  */
 function sedEditFiles(words: Word[]): Word[] | undefined {
 	const scripts: string[] = [];
@@ -1489,7 +1495,6 @@ function sedEditFiles(words: Word[]): Word[] | undefined {
 	for (let i = 0; i < words.length; i++) {
 		const word = words[i];
 		const text = word.value;
-		if (word.computed) return undefined;
 		if (optionsEnded || text === "-" || !text.startsWith("-")) {
 			operands.push(word);
 			continue;
@@ -1506,7 +1511,7 @@ function sedEditFiles(words: Word[]): Word[] | undefined {
 				inPlace = true;
 			} else if (long === "expression") {
 				const script = eq >= 0 ? text.slice(eq + 1) : words[++i]?.value;
-				if (script === undefined || words[i]?.computed) return undefined;
+				if (script === undefined) return undefined;
 				scripts.push(script);
 			} else if (!/^(?:regexp-extended|posix|unbuffered|separate)$/u.test(long)) return undefined;
 			continue;
@@ -1521,7 +1526,7 @@ function sedEditFiles(words: Word[]): Word[] | undefined {
 			}
 			if (letter === "e") {
 				const script = j + 1 < text.length ? text.slice(j + 1) : words[++i]?.value;
-				if (script === undefined || words[i]?.computed) return undefined;
+				if (script === undefined) return undefined;
 				scripts.push(script);
 				break;
 			}
@@ -1550,7 +1555,6 @@ function perlEditFiles(words: Word[]): Word[] | undefined {
 	for (; i < words.length; i++) {
 		const word = words[i];
 		const text = word.value;
-		if (word.computed) return undefined;
 		if (text === "--") {
 			i++;
 			break;
@@ -1565,7 +1569,7 @@ function perlEditFiles(words: Word[]): Word[] | undefined {
 				inPlace = true;
 			} else if (letter === "e") {
 				const script = j + 1 < text.length ? text.slice(j + 1) : words[++i]?.value;
-				if (script === undefined || words[i]?.computed) return undefined;
+				if (script === undefined) return undefined;
 				scripts.push(script);
 				break;
 				// `-l`, `-0` and the rest change the record or output separators or what runs.
@@ -1607,7 +1611,9 @@ const BUILT_IN_TOOLS: Record<string, true> = { read: true, grep: true, glob: tru
 function stepIsLiteral(pipeline: SimpleCommand[], allowStdinDocuments: boolean): boolean {
 	return pipeline.every(
 		stage =>
-			!stage.words[0]?.computed &&
+			// A word the shell expands (`*.pattern`, `$x`) can become a pattern, script, option or
+			// file the step's text does not show.
+			stage.words.every(word => !word.computed && !word.glob) &&
 			// An assignment, even a literal one (`PERL5OPT=-Mx`), changes what the command does.
 			stage.assignments.length === 0 &&
 			stage.redirects.every(({ fd, op, target }) => {
@@ -1663,9 +1669,27 @@ function pathsAre(
 	filesystem: StepFilesystem | undefined,
 ): boolean {
 	return words.every(
-		word => !SPECIAL_PATH.test(word.value) && (!filesystem || allowed.includes(filesystem.kind(word.value, follow))),
+		word =>
+			toolsTakeLiterally(word.value) &&
+			!SPECIAL_PATH.test(word.value) &&
+			(!filesystem || allowed.includes(filesystem.kind(word.value, follow))),
 	);
 }
+
+/**
+ * Whether the read, grep, edit and write tools take `path` as the file the shell names: letters,
+ * digits, `.`, `_`, `-`, `+`, `=`, `@` and `/`, not starting with `@` or `~`. The tools' path
+ * handling reads other characters differently: `:` (a URL scheme, a read selector, an archive
+ * member or database table, a Windows drive, a stray leading colon), `,`, `;` and spaces (grep's
+ * path lists), `!` (a grep exclude), `[…]` and `#` (a hashline header), quotes (stripped), `\`
+ * (a separator), `%` (decoded in URLs), a leading `@` or `~` (shorthands for paths).
+ */
+function toolsTakeLiterally(path: string): boolean {
+	return /^(?![@~])[A-Za-z0-9._+=@/-]+$/u.test(path);
+}
+
+/** A Jupyter notebook: the edit tool edits its cells, not its JSON text. */
+const NOTEBOOK = /\.ipynb$/iu;
 
 /** Whether `facts` describe a file with one link whose text the edit tool rewrites byte for byte. */
 function isPlainSingleFile(facts: FileFacts | undefined): boolean {
@@ -1743,6 +1767,7 @@ export function dedicatedToolCanPerformStep(
 		default: {
 			const files = editCanPerform(name, pipeline);
 			if (!files || !pathsAre(files, ["file", "missing"], false, filesystem)) return false;
+			if (files.some(word => NOTEBOOK.test(word.value))) return false;
 			return (
 				!filesystem ||
 				files.every(
