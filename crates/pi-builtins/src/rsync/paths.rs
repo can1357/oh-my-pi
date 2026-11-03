@@ -972,10 +972,24 @@ impl io::Read for OperatorInput {
 		}
 		#[cfg(unix)]
 		if self.poll
-			&& let Some(native) = self.file.native()
+			&& let Some(mut native) = self.file.native()
 		{
+			// Poll, then read; a FIFO's descriptor is non-blocking
+			// ([`open_fifo`]), so a read that another reader of the FIFO beat
+			// to the bytes returns `EAGAIN` and polls again, observing the
+			// cancellation, instead of blocking past it.
 			let cancel = &self.cancel;
-			pi_vfs::wait_readable(native.as_fd(), || cancel.load(Ordering::Relaxed)).map_err(|err| self.mapped(err))?;
+			loop {
+				pi_vfs::wait_readable(native.as_fd(), || cancel.load(Ordering::Relaxed)).map_err(|err| self.mapped(err))?;
+				match io::Read::read(&mut native, buf) {
+					Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+						if self.cancelled() {
+							return Err(RsyncError::cancelled_io());
+						}
+					},
+					read => return read.map_err(|err| self.mapped(err)),
+				}
+			}
 		}
 		io::Read::read(&mut self.file, buf).map_err(|err| self.mapped(err))
 	}
@@ -1255,18 +1269,24 @@ fn is_fifo(path: &Path) -> bool {
 /// Opens the FIFO at `path` for `kind`, reading nothing of it so another
 /// reader of the same FIFO and an `--early-input` send both get every byte.
 ///
-/// A read opens `O_RDONLY | O_NONBLOCK`, which returns at once even with no
-/// writer (POSIX), then clears `O_NONBLOCK`: the [`OperatorInput`] read then
-/// polls for data or end of input and observes the cancellation, so a FIFO
-/// nobody writes to does not hold up the command, and a writer present but
-/// idle is waited on for its data, as rsync's blocking open plus first read
-/// does. A write opens `O_WRONLY | O_NONBLOCK`, which fails with `ENXIO`
-/// until a reader exists and is retried each poll slice, as rsync's blocking
-/// open waits for a reader; a cancelled wait opens nothing, releasing no
-/// other process waiting on the FIFO. On Linux that wait reaches the FIFO
-/// once by the walk as an `O_PATH` handle and retries through
-/// `/proc/self/fd`, so a FIFO renamed or removed during the wait is still
-/// the one opened.
+/// A read FIFO stays non-blocking: the [`OperatorInput`] read polls for data
+/// or end of input in slices that observe the cancellation, then reads
+/// without blocking and polls again on `EAGAIN`, so a competing reader that
+/// takes the bytes between the poll and the read cannot leave the command
+/// blocked past its cancellation. On Linux the open is `O_RDONLY |
+/// O_NONBLOCK`, which returns at once even with no writer, and `poll`
+/// reports nothing until a writer has come (a writer that writes nothing and
+/// leaves gives end of input, as rsync's blocking open plus first read
+/// does). Elsewhere `poll` on a FIFO that never had a writer may report a
+/// hang-up at once, so the read open waits in a blocking `open` on a helper
+/// thread for the first writer ([`open_fifo_reader`]), as rsync's does.
+///
+/// A write opens `O_WRONLY | O_NONBLOCK`, which fails with `ENXIO` until a
+/// reader exists and is retried each poll slice, as rsync's blocking open
+/// waits for a reader; a cancelled wait opens nothing, releasing no other
+/// process waiting on the FIFO. On Linux that wait reaches the FIFO once by
+/// the walk as an `O_PATH` handle and retries through `/proc/self/fd`, so a
+/// FIFO renamed or removed during the wait is still the one opened.
 #[cfg(unix)]
 fn open_fifo(path: &Path, kind: OpenKind, opts: &OperatorOpts<'_>) -> io::Result<OwnedFd> {
 	use std::os::fd::AsFd;
@@ -1279,16 +1299,21 @@ fn open_fifo(path: &Path, kind: OpenKind, opts: &OperatorOpts<'_>) -> io::Result
 			owner_walk_open(path.as_os_str().as_bytes(), flags | libc::O_NONBLOCK, mode, &walk)
 		}
 	};
-	let blocking = |fd: OwnedFd| -> io::Result<OwnedFd> {
+	let set_nonblock = |fd: OwnedFd, nonblock: bool| -> io::Result<OwnedFd> {
 		let cur = nix::fcntl::OFlag::from_bits_truncate(nix::fcntl::fcntl(fd.as_fd(), nix::fcntl::FcntlArg::F_GETFL)?);
-		nix::fcntl::fcntl(fd.as_fd(), nix::fcntl::FcntlArg::F_SETFL(cur - nix::fcntl::OFlag::O_NONBLOCK))?;
+		let new = if nonblock { cur | nix::fcntl::OFlag::O_NONBLOCK } else { cur - nix::fcntl::OFlag::O_NONBLOCK };
+		nix::fcntl::fcntl(fd.as_fd(), nix::fcntl::FcntlArg::F_SETFL(new))?;
 		Ok(fd)
 	};
+	let blocking = |fd: OwnedFd| set_nonblock(fd, false);
 	if opts.cancel.load(Ordering::Relaxed) {
 		return Err(RsyncError::cancelled_io());
 	}
 	match kind {
-		OpenKind::Read => blocking(open()?),
+		#[cfg(target_os = "linux")]
+		OpenKind::Read => open(),
+		#[cfg(not(target_os = "linux"))]
+		OpenKind::Read => open_fifo_reader(path, flags, opts).and_then(|fd| set_nonblock(fd, true)),
 		OpenKind::Create { .. } => {
 			#[cfg(target_os = "linux")]
 			if *PROC_FD {
@@ -1304,6 +1329,40 @@ fn open_fifo(path: &Path, kind: OpenKind, opts: &OperatorOpts<'_>) -> io::Result
 			}
 			retry_write_fifo(opts.cancel, open).and_then(blocking)
 		},
+	}
+}
+
+/// A FIFO's read open off Linux: a blocking `open` on a helper thread, whose
+/// wait observes `opts.cancel`, so the read starts only once a writer has
+/// come. A cancelled wait leaves the helper in `open` until a writer comes,
+/// which then pairs with it and finds its reader gone (its write fails);
+/// nothing opens the other end to release it, so no other process waiting
+/// on the FIFO is let through.
+#[cfg(all(unix, not(target_os = "linux")))]
+fn open_fifo_reader(path: &Path, flags: libc::c_int, opts: &OperatorOpts<'_>) -> io::Result<OwnedFd> {
+	use std::sync::mpsc::{self, RecvTimeoutError};
+	if opts.cancel.load(Ordering::Relaxed) {
+		return Err(RsyncError::cancelled_io());
+	}
+	let (insecure, owned, confine) = (opts.insecure, path.as_os_str().as_bytes().to_vec(), opts.confine.map(Path::to_path_buf));
+	let (sender, opened) = mpsc::sync_channel(1);
+	std::thread::Builder::new().name("rsync-fifo-open".into()).spawn(move || {
+		let result = if insecure {
+			open_flags(Path::new(OsStr::from_bytes(&owned)), flags, 0)
+		} else {
+			let walk = OwnerWalk { confine: confine.as_deref(), trusted: &trusted_owner };
+			owner_walk_open(&owned, flags, 0, &walk)
+		};
+		// After a cancellation nobody receives, and the descriptor closes here.
+		let _ = sender.send(result);
+	})?;
+	loop {
+		match opened.recv_timeout(pi_vfs::POLL_SLICE) {
+			Ok(result) => return result,
+			Err(RecvTimeoutError::Timeout) if opts.cancel.load(Ordering::Relaxed) => return Err(RsyncError::cancelled_io()),
+			Err(RecvTimeoutError::Timeout) => {},
+			Err(RecvTimeoutError::Disconnected) => return Err(io::Error::other("the FIFO open thread exited")),
+		}
 	}
 }
 
@@ -1897,6 +1956,64 @@ mod tests {
 					assert_eq!(result, Ok(b"ours".to_vec()), "{case}");
 				}
 			}
+		}
+	}
+
+	/// A read of an operator FIFO ends at the cancellation even when another
+	/// reader of the same FIFO takes the bytes after the read's poll reported
+	/// them: the FIFO's descriptor is non-blocking, so the read gets `EAGAIN`
+	/// and polls again. Before, the read blocked once the bytes were gone and
+	/// the writer stayed open, past the cancellation (3 of 3 `--read-batch`
+	/// runs in review, where rsync 3.5.1 printed its `code 20` trailer). A
+	/// writer sends two bytes and stays open; a competing reader races ours for
+	/// them; each of 20 rounds must end within 2 s of its cancellation.
+	#[cfg(unix)]
+	#[test]
+	fn a_fifo_read_beaten_to_its_bytes_still_ends_at_cancellation() {
+		use std::{
+			io::{Read, Write},
+			os::unix::fs::OpenOptionsExt,
+			sync::mpsc,
+			time::{Duration, Instant},
+		};
+
+		let (_guard, base) = canonical_tempdir();
+		let vfs = BlockingFs::native();
+		for round in 0..20 {
+			let fifo = base.join(format!("raced-{round}"));
+			nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap();
+			let cancel = Arc::new(AtomicBool::new(false));
+			// The competing reader and the writer first (off Linux our read open
+			// waits for a writer); both stay open until the end.
+			let mut competitor = fs::OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK).open(&fifo).unwrap();
+			let mut writer = fs::OpenOptions::new().write(true).open(&fifo).unwrap();
+			let mut input = open_operator_file(&vfs, &fifo, round % 2 == 0, &cancel).unwrap();
+			let (done, finished) = mpsc::channel();
+			let reader = std::thread::spawn(move || {
+				let mut buf = [0u8; 8];
+				// Read until the cancellation ends it; data may or may not be ours.
+				let result = loop {
+					match input.read(&mut buf) {
+						Ok(0) => break Ok(()),
+						Ok(_) => {},
+						Err(err) => break Err(err),
+					}
+				};
+				let _ = done.send(result.map_err(|err| RsyncError::is_cancellation(&err)));
+			});
+			std::thread::sleep(Duration::from_millis(20));
+			writer.write_all(b"ab").unwrap();
+			// The competitor takes whatever it can, as fast as it can.
+			let racing = Instant::now();
+			while racing.elapsed() < Duration::from_millis(50) {
+				let _ = competitor.read(&mut [0u8; 8]);
+			}
+			cancel.store(true, Ordering::Relaxed);
+			let ended = finished.recv_timeout(Duration::from_secs(2));
+			assert!(ended.is_ok(), "round {round}: the read stayed blocked past the cancellation");
+			assert_eq!(ended.unwrap(), Err(true), "round {round}: the read did not end as cancelled");
+			reader.join().unwrap();
+			drop((competitor, writer));
 		}
 	}
 

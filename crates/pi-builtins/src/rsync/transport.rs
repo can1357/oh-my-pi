@@ -1486,7 +1486,7 @@ mod tests {
 			drop(writer);
 			let mut out = Vec::new();
 			conn.reader.read_to_end(&mut out).unwrap();
-			let _ = conn.finish();
+			assert!(matches!(conn.finish(), Reaped::Code(0)), "the shell did not exit 0");
 			let split = out.windows(4).position(|w| w == b"\n--\n").expect("marker");
 			let argv = out[..split].split(|&b| b == 0).filter(|a| !a.is_empty()).map(<[u8]>::to_vec);
 			(argv.collect(), out[split + 4..].to_vec())

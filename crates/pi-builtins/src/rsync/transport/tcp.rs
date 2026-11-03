@@ -822,7 +822,7 @@ mod tests {
 		let mut got = [0u8; 22];
 		conn.reader.read_exact(&mut got).unwrap();
 		assert_eq!(&got, b"host=example.org\nping\n");
-		let _ = conn.finish();
+		assert!(matches!(conn.finish(), crate::rsync::transport::Reaped::Code(0)), "the connect program did not exit 0");
 	}
 
 	#[test]
