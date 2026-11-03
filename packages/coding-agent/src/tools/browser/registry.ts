@@ -1,5 +1,5 @@
 import * as path from "node:path";
-import { getLogsDir, isCompiledBinary, logger, untilAborted, withTimeout, workerHostEntry } from "@oh-my-pi/pi-utils";
+import { getLogsDir, isCompiledBinary, logger, untilAborted, workerHostEntry } from "@oh-my-pi/pi-utils";
 import type { Subprocess } from "bun";
 import type { Browser, CDPSession } from "puppeteer-core";
 import { ToolAbortError } from "../tool-errors";
@@ -9,6 +9,7 @@ import type { CmuxKind } from "./cmux/rpc";
 import { CmuxSocketClient } from "./cmux/socket-client";
 import {
 	BROWSER_PROTOCOL_TIMEOUT_MS,
+	closeLaunchedBrowser,
 	connectPuppeteer,
 	DEFAULT_VIEWPORT,
 	launchHeadlessBrowser,
@@ -40,13 +41,6 @@ export type PuppeteerBrowserKind =
 export type BrowserKind = PuppeteerBrowserKind | CmuxKind | TernKind;
 
 export type BrowserKindTag = BrowserKind["kind"];
-
-/**
- * Upper bound on `browser.close()` for headless Chromium. Puppeteer waits for
- * the process to fully exit; a wedged Chromium would otherwise hang cleanup
- * forever (issue #5260), so we cap the wait and force-kill on timeout.
- */
-const HEADLESS_CLOSE_TIMEOUT_MS = 5_000;
 
 interface BrowserHandleCommon {
 	key: string;
@@ -437,20 +431,7 @@ async function disposeBrowserHandle(handle: BrowserHandle, opts: ReleaseBrowserO
 			}
 			return;
 		}
-		if (handle.browser.connected) {
-			// Puppeteer's `browser.close()` resolves only once the Chromium
-			// process fully exits. A wedged Chromium (a known Windows failure
-			// mode) leaves this await pending forever, freezing `releaseTab` in
-			// the "Closing tab" phase (issue #5260). Bound it, then SIGKILL the
-			// process tree so cleanup always completes.
-			const proc = handle.browser.process();
-			try {
-				await withTimeout(handle.browser.close(), HEADLESS_CLOSE_TIMEOUT_MS, "Timed out closing headless browser");
-			} catch (err) {
-				logger.debug("Failed to close headless browser; force-killing", { error: (err as Error).message });
-				if (proc?.pid !== undefined) await gracefulKillTreeOnce(proc.pid).catch(() => undefined);
-			}
-		}
+		if (handle.browser.connected) await closeLaunchedBrowser(handle.browser);
 		// OMP owns the profile directory (puppeteer's temp cleanup is disabled by
 		// our explicit --user-data-dir), so remove it now the process tree has
 		// exited. Tolerant of the Windows lock-held window (issue #7058).

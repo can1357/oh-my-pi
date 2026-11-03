@@ -10,6 +10,7 @@ import {
 	removeWithRetries,
 	toError,
 	untilAborted,
+	withTimeout,
 } from "@oh-my-pi/pi-utils";
 import type * as BrowsersNs from "@oh-my-pi/pi-utils/browsers";
 import type {
@@ -41,7 +42,7 @@ import stealthCodecsScript from "../puppeteer/12_stealth_codecs.txt" with { type
 import stealthWorkerScript from "../puppeteer/13_stealth_worker.txt" with { type: "text" };
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { withDownload } from "../../downloads/activity";
-import { findUserDataDirInArgs, probeCdpResponse } from "./attach";
+import { findUserDataDirInArgs, gracefulKillTreeOnce, probeCdpResponse } from "./attach";
 
 export const DEFAULT_VIEWPORT = { width: 1365, height: 768, deviceScaleFactor: 1.25 };
 
@@ -104,6 +105,8 @@ const USER_AGENT_TARGET_TIMEOUT_MS = 5_000;
 const USER_AGENT_TARGET_TYPES = new Set(["page", "webview", "background_page"]);
 /** How long a pipe-launched Chromium may take to publish its DevTools port after launch. */
 const DEVTOOLS_ACTIVE_PORT_TIMEOUT_MS = 10_000;
+/** Upper bound on `browser.close()`, which resolves only once Chromium exits; a wedged one never does (issue #5260). */
+const HEADLESS_CLOSE_TIMEOUT_MS = 5_000;
 
 /**
  * Lazy-import puppeteer while hiding the user's cwd from cosmiconfig. The
@@ -682,8 +685,10 @@ export async function launchHeadlessBrowser(opts: LaunchHeadlessOptions): Promis
 	// another process holds that port; over the pipe Chromium would run on
 	// without it, and the port would answer for the other process. Chromium
 	// reads the port only inline: after a bare switch the value is a URL to open.
-	const pipe = !launchArgs.some(arg => arg.startsWith("--remote-debugging-port=") && Number(arg.split("=")[1]) > 0);
-	if (pipe) launchArgs.push("--remote-debugging-pipe", "--remote-debugging-port=0");
+	if (!launchArgs.some(arg => arg.startsWith("--remote-debugging-port=") && Number(arg.split("=")[1]) > 0)) {
+		launchArgs.push("--remote-debugging-pipe", "--remote-debugging-port=0");
+	}
+	const pipe = launchArgs.includes("--remote-debugging-pipe");
 	const activePortFile = path.join(profileDir, "DevToolsActivePort");
 	try {
 		// A reused profile can hold the file of a browser that was killed.
@@ -704,12 +709,23 @@ export async function launchHeadlessBrowser(opts: LaunchHeadlessOptions): Promis
 			const wsEndpoint = pipe ? await activePortEndpoint(activePortFile, staleActivePort) : browser.wsEndpoint();
 			return { browser, wsEndpoint, userDataDir };
 		} catch (error) {
-			await browser.close();
+			await closeLaunchedBrowser(browser);
 			throw error;
 		}
 	} catch (error) {
 		if (userDataDir) await removeUserDataDir(userDataDir);
 		throw error;
+	}
+}
+
+/** Close a browser {@link launchHeadlessBrowser} started, force-killing its process tree when the close hangs. */
+export async function closeLaunchedBrowser(browser: Browser): Promise<void> {
+	const proc = browser.process();
+	try {
+		await withTimeout(browser.close(), HEADLESS_CLOSE_TIMEOUT_MS, "Timed out closing headless browser");
+	} catch (err) {
+		logger.debug("Failed to close headless browser; force-killing", { error: toError(err).message });
+		if (proc?.pid !== undefined) await gracefulKillTreeOnce(proc.pid).catch(() => undefined);
 	}
 }
 
