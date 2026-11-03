@@ -266,6 +266,7 @@ import {
 } from "../tools/resolve";
 import { PROPOSE_DEVICE_NAME } from "@oh-my-pi/pi-tui/tools/resolve";
 import { supportsExternalThinking } from "../tools/think";
+import { USER_TODO_EDIT_CUSTOM_TYPE } from "../tools/todo";
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { currentThreadId, isMainThread } from "../thread/identity";
@@ -10729,6 +10730,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	setTodoPhases(phases: TodoPhase[]): void {
 		this.#todo.setPhases(phases);
+	}
+
+	/** Replace the list from outside the `todo` tool: update the cache and record a `user_todo_edit` entry so reloads keep it. */
+	commitTodoPhases(phases: TodoPhase[]): void {
+		this.#todo.setPhases(phases);
+		this.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases });
 	}
 
 	/** Active item labels accepted by this pooled turn's incremental yield tool. */

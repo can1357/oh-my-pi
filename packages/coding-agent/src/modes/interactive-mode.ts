@@ -206,7 +206,6 @@ import {
 	getTodoHudVisibility,
 	nextActionableTask,
 	TODO_HUD_STATE_CUSTOM_TYPE,
-	USER_TODO_EDIT_CUSTOM_TYPE,
 	type TodoHudStateEntryData,
 } from "../tools/todo";
 import {
@@ -5014,10 +5013,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// bound (rather than routing through `setTodos`, which rebinds it to
 		// `viewSession`) keeps a follow-up reconcile in the same window correct.
 		const owner = this.#todoPhasesOwner ?? this.session;
-		owner.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, {
-			phases: next,
-		});
-		owner.setTodoPhases(next);
+		owner.commitTodoPhases(next);
 		this.todoPhases = next;
 		this.#syncTodoHudState(owner);
 		this.#renderTodoList();
