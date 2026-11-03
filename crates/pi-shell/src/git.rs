@@ -602,7 +602,7 @@ async fn run_git<SE: ShellExtensions>(
 	let Some(git) = shell.find_first_executable_in_path_using_cache("git").await else {
 		return Err(ErrorKind::CommandNotFound("git".to_owned()).into());
 	};
-	let cancel = params.cancel_token();
+	let cancel = params.child_cancel();
 	let argv = std::iter::once("git".to_owned())
 		.chain(args)
 		.map(CommandArg::from)

@@ -15,7 +15,7 @@ use crate::{
 	arithmetic::{self, ExpandAndEvaluate},
 	commands::{self, CommandArg},
 	env::{EnvironmentLookup, EnvironmentScope, valid_variable_name},
-	error, expansion, extendedtests, extensions, ioutils, jobs, openfiles,
+	error, expansion, extendedtests, extensions, ioutils, jobs, openfiles, processes,
 	openfiles::{OpenFile, OpenFiles},
 	pipetap::{self, PipeTap},
 	results::{ExecutionExitCode, ExecutionResult, ExecutionSpawnResult, ExecutionWaitResult},
@@ -111,6 +111,9 @@ pub struct ExecutionParameters {
 	pub detach_reparent: bool,
 	/// Optional cancellation token shared with callers.
 	cancel_token:             Option<CancellationToken>,
+	/// The run's cancellation that the embedding host answers by terminating
+	/// the run's processes itself (see [`processes::ChildCancel`]).
+	host_cancel_token:        Option<CancellationToken>,
 	/// Optional command-output marker hook.
 	command_output_marker:    Option<Arc<dyn ExternalCommandOutputMarker>>,
 	/// Whether command-output marking was disabled by shell syntax that can
@@ -243,6 +246,23 @@ impl ExecutionParameters {
 	/// Returns the cancellation token, if present.
 	pub fn cancel_token(&self) -> Option<CancellationToken> {
 		self.cancel_token.clone()
+	}
+
+	/// Assigns `token` as this execution's cancellation and records that the
+	/// embedding host answers it by terminating every process the run spawns
+	/// (reported through the spawn observer): it sends TERM, counts the grace
+	/// from that TERM and kills. A wait cancelled through it then leaves the
+	/// process to the host instead of sending TERM and starting its own kill
+	/// timer. Tokens derived from it (background jobs, coprocesses) keep the
+	/// record, but cancelling only them is not a host termination.
+	pub fn set_host_terminated_cancel_token(&mut self, token: CancellationToken) {
+		self.cancel_token = Some(token.clone());
+		self.host_cancel_token = Some(token);
+	}
+
+	/// How a wait for a child of this execution reacts to cancellation.
+	pub fn child_cancel(&self) -> processes::ChildCancel {
+		processes::ChildCancel::new(self.cancel_token.clone(), self.host_cancel_token.clone())
 	}
 
 	/// Returns true when cancellation has been requested.
@@ -1055,7 +1075,7 @@ async fn interrupted_after_waiting(
 	params: &ExecutionParameters,
 ) -> error::Error {
 	for spawn_result in spawn_results {
-		let _ = spawn_result.wait_with_cancel(params.cancel_token()).await;
+		let _ = spawn_result.wait_with_cancel(params.child_cancel()).await;
 	}
 	error::ErrorKind::Interrupted.into()
 }
@@ -1102,7 +1122,7 @@ async fn wait_for_pipeline_processes_and_update_status(
 		let wait_result = if !stopped_children.is_empty() {
 			child.poll().await?
 		} else {
-			child.wait_with_cancel(params.cancel_token()).await?
+			child.wait_with_cancel(params.child_cancel()).await?
 		};
 
 		match wait_result {
@@ -1352,13 +1372,13 @@ impl Execute for ast::CoprocessCommand {
 			.set_fd(OpenFiles::STDOUT_FD, stdout_writer.into());
 
 		let body = self.body.clone();
-		let cancel_token = child_params.cancel_token();
+		let cancel = child_params.child_cancel();
 		// Give the coprocess its own cancellation flag so `kill %N` ends it at its
 		// next interpreter check, even when the body never yields; a child of the
 		// run's token, as for a background job.
-		let cancellation = cancel_token
-			.as_ref()
-			.map_or_else(CancellationToken::new, CancellationToken::child_token);
+		let cancellation = child_params
+			.cancel_token()
+			.map_or_else(CancellationToken::new, |token| token.child_token());
 		child_params.set_cancel_token(cancellation.clone());
 		let join_handle = tokio::spawn(async move {
 			let pipeline_context = PipelineExecutionContext {
@@ -1369,7 +1389,7 @@ impl Execute for ast::CoprocessCommand {
 			let spawn_result = body
 				.execute_in_pipeline(pipeline_context, child_params)
 				.await?;
-			match spawn_result.wait_with_cancel(cancel_token).await? {
+			match spawn_result.wait_with_cancel(cancel).await? {
 				ExecutionWaitResult::Completed(result) => Ok(result),
 				ExecutionWaitResult::Stopped(_) => Ok(ExecutionResult::stopped()),
 			}

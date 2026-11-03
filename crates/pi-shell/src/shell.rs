@@ -988,11 +988,21 @@ async fn source_snapshot(
 	params.set_fd(OpenFiles::STDIN_FD, null_file()?);
 	params.set_fd(OpenFiles::STDOUT_FD, null_file()?);
 	params.set_fd(OpenFiles::STDERR_FD, null_file()?);
-	if let Some(cancel_token) = cancel_token {
-		params.set_cancel_token(cancel_token);
-	}
-	if let Some(spawn_registry) = spawn_registry {
-		params.set_spawn_observer(spawn_registry);
+	match (cancel_token, spawn_registry) {
+		// The run's `terminate_run` answers this token for every process the
+		// registry records.
+		(Some(cancel_token), Some(spawn_registry)) => {
+			params.set_host_terminated_cancel_token(cancel_token);
+			params.set_spawn_observer(spawn_registry);
+		},
+		(cancel_token, spawn_registry) => {
+			if let Some(cancel_token) = cancel_token {
+				params.set_cancel_token(cancel_token);
+			}
+			if let Some(spawn_registry) = spawn_registry {
+				params.set_spawn_observer(spawn_registry);
+			}
+		},
 	}
 
 	let escaped = snapshot_path.replace('\'', "'\\''");
@@ -1430,7 +1440,9 @@ async fn run_shell_command_once(
 	params.set_fd(OpenFiles::STDERR_FD, stderr_file);
 	params.process_group_policy = ProcessGroupPolicy::NewProcessGroup;
 	register_background_jobs(&session.shell, &spawn_registry);
-	params.set_cancel_token(cancel_token.clone());
+	// `terminate_run` answers this token for every process the registry
+	// records, so brush leaves TERM, its grace and KILL to it.
+	params.set_host_terminated_cancel_token(cancel_token.clone());
 	params.set_spawn_observer(spawn_registry.clone());
 	// Only a buffered capture can be minimized, so only it asks for the report.
 	let reported_error = matches!(capture_mode, CommandCaptureMode::Buffered { .. })
@@ -1595,7 +1607,7 @@ async fn run_shell_command_streams_in_filesystem(
 	params.set_fd(OpenFiles::STDERR_FD, stderr_file);
 	params.process_group_policy = ProcessGroupPolicy::NewProcessGroup;
 	register_background_jobs(&session.shell, &spawn_registry);
-	params.set_cancel_token(cancel_token.clone());
+	params.set_host_terminated_cancel_token(cancel_token.clone());
 	params.set_spawn_observer(spawn_registry.clone());
 	let reader_cancel = CancellationToken::new();
 	let (activity_tx, activity_rx) = flume::bounded::<()>(1);
@@ -7764,8 +7776,11 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 				.set_working_dir(root.path().to_str().expect("utf8 temp path"))
 				.await
 				.expect("set cwd");
+			// The run's cancellation, which the host answers by terminating
+			// the run's processes; this test plays no host, so nothing sends
+			// TERM and each command finishes on its own.
 			let token = CancellationToken::new();
-			params.set_cancel_token(token.clone());
+			params.set_host_terminated_cancel_token(token.clone());
 			params.set_spawn_observer(Arc::new(CancelAfterSpawns {
 				spawns: std::sync::atomic::AtomicUsize::new(0),
 				after,
@@ -7783,6 +7798,69 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 		assert!(
 			killed.is_empty(),
 			"killed instead of finishing inside their cancel grace: {killed:?}"
+		);
+	}
+
+	/// Records each spawned pid, so the test can play a host whose TERM wave
+	/// comes late (it waits for spawns in flight first).
+	#[cfg(unix)]
+	struct LateTermHost {
+		pids: std::sync::Mutex<Vec<i32>>,
+	}
+
+	#[cfg(unix)]
+	impl SpawnObserver for LateTermHost {
+		fn on_spawn(&self, pid: i32, _pgid: Option<i32>) {
+			self.pids.lock().unwrap().push(pid);
+		}
+	}
+
+	/// The TERM grace is counted from the host's TERM, not from the cancel.
+	/// brush used to start a one-second kill timer at the cancel, so a host
+	/// TERM that came 600 ms later left a 600 ms trap 400 ms, and the trap
+	/// was killed before it wrote `done`.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn term_grace_counts_from_the_hosts_term() {
+		let root = tempfile::tempdir().expect("marker directory");
+		let (mut session, mut params) = kill_test_context().await;
+		session
+			.shell
+			.set_working_dir(root.path().to_str().expect("utf8 temp path"))
+			.await
+			.expect("set cwd");
+		let token = CancellationToken::new();
+		params.set_host_terminated_cancel_token(token.clone());
+		let host = Arc::new(LateTermHost { pids: std::sync::Mutex::new(Vec::new()) });
+		params.set_spawn_observer(host.clone());
+		let ready = root.path().join("ready");
+		let terminator = tokio::spawn({
+			let host = host.clone();
+			async move {
+				let deadline = time::Instant::now() + Duration::from_secs(5);
+				while !ready.exists() && time::Instant::now() < deadline {
+					time::sleep(Duration::from_millis(5)).await;
+				}
+				token.cancel();
+				time::sleep(Duration::from_millis(600)).await;
+				for &pid in host.pids.lock().unwrap().iter() {
+					// SAFETY: `kill` sends a signal to a pid this test spawned.
+					unsafe { libc::kill(pid, libc::SIGTERM) };
+				}
+			}
+		});
+		let _ = session
+			.shell
+			.run_string(
+				"sh -c \"trap 'sleep 0.6; : > done; exit 0' TERM; : > ready; while :; do :; done\"",
+				&SourceInfo::from("pi-shell:test"),
+				&params,
+			)
+			.await;
+		terminator.await.expect("terminator task");
+		assert!(
+			root.path().join("done").exists(),
+			"the trap was killed before the grace counted from the host's TERM ended"
 		);
 	}
 

@@ -1336,7 +1336,7 @@ async fn dispatch<SE: ShellExtensions>(
 ) -> Result<CommandStatus, Error> {
 	let mut params = base.clone();
 	params.set_fd(OpenFiles::STDIN_FD, or_null(command.stdin)?);
-	let cancel = params.cancel_token();
+	let cancel = params.child_cancel();
 	let mut args: Vec<CommandArg> = command
 		.argv
 		.into_iter()
@@ -1378,7 +1378,7 @@ async fn dispatch<SE: ShellExtensions>(
 /// (the shell's own result folds it into `128 + signal`).
 async fn wait_status(
 	spawned: ExecutionSpawnResult,
-	cancel: Option<CancellationToken>,
+	cancel: brush_core::processes::ChildCancel,
 ) -> Result<CommandStatus, Error> {
 	let mut child = match spawned {
 		ExecutionSpawnResult::StartedProcess(child) => child,

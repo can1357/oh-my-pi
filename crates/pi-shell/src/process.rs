@@ -879,6 +879,19 @@ impl Process {
 		// cannot be skipped by an early return.
 		let mut wave = SignalWave::new(TERM_SIGNAL);
 		let mut descendants = wave.tree(self, process_group, &protected);
+		// Pin the group's members too, so the hard wave can still reach one
+		// that leaves the group on TERM without being a descendant (an orphan
+		// a double fork left in the group). They are signalled through the
+		// group, not directly.
+		for &pgid in &wave.groups {
+			for member in Self::group_members(pgid) {
+				if !descendants.iter().any(|seen| seen.pid() == member.pid())
+					&& member.pid() != self.pid()
+				{
+					descendants.push(member);
+				}
+			}
+		}
 		let mut groups = wave.deliver().groups;
 
 		// Optional grace wait. A negative `graceful_ms` skips the wait entirely
@@ -900,9 +913,10 @@ impl Process {
 
 		// Hard wave. Re-walk the tree so any grandchild spawned during the grace
 		// period — or any process re-parented to the root — is signalled too.
-		// Every process the polite wave knew that is still alive is added by
-		// its pin: one that left the tree and its group after TERM (`setsid()`
-		// in a handler whose parent then exited) is in neither re-walk.
+		// Every process the polite wave knew (its descendants and its groups'
+		// members) that is still alive is added by its pin: one that left the
+		// tree and its group after TERM (`setsid()` in a handler) is in
+		// neither re-walk.
 		let mut wave = SignalWave::new(KILL_SIGNAL);
 		let mut known = wave.tree(self, process_group, &protected);
 		for process in descendants {
@@ -951,9 +965,14 @@ impl Process {
 /// signal gets nothing after it. Commands a TERM trap starts after the group
 /// signal are not reached.
 ///
-/// Boundary: a process that changes group on its own, not because of this
-/// wave's signal, between the snapshot and the group signal may miss this
-/// wave's signal or get it twice; the next wave, or the KILL wave, reaches it.
+/// Boundaries:
+/// - A process that changes group on its own, not because of this wave's
+///   signal, between the snapshot and the group signal may miss this wave's
+///   signal or get it twice; the next wave, or the KILL wave, reaches it.
+/// - The kernel signals one group at a time, so a process that moves from one
+///   recorded group to another between their two group signals, including a
+///   move the first group's signal causes, gets the signal from both.
+///
 /// The harness's own group is never recorded.
 struct SignalWave {
 	signal:  i32,
@@ -1836,7 +1855,9 @@ mod tests {
 	/// A member's TERM handler creates a new session and keeps running, and
 	/// the leader exits on TERM. The KILL wave re-walks from the dead leader
 	/// and the signalled group, and finds the member in neither; it must still
-	/// kill it before `terminate_tree` reports the tree gone.
+	/// kill it before `terminate_tree` reports the tree gone. In `orphan` mode
+	/// the member was never the leader's descendant (a double fork left it in
+	/// the group), so only the TERM wave's pinned group members know it.
 	#[cfg(target_os = "linux")]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn terminate_tree_kills_a_member_that_left_its_group_on_term() {
@@ -1848,31 +1869,33 @@ mod tests {
 
 		let helper_root = tempfile::tempdir().expect("helper directory");
 		let helper = compile_group_move_helper(helper_root.path());
-		let root = tempfile::tempdir().expect("group-move directory");
-		let mut parent = Command::new(&helper)
-			.arg("exit")
-			.current_dir(root.path())
-			.process_group(0)
-			.spawn()
-			.expect("spawn group-move helper");
-		let deadline = Instant::now() + Duration::from_secs(5);
-		while !root.path().join("ready").exists() {
-			assert!(Instant::now() < deadline, "group-move child never became ready");
-			tokio::time::sleep(Duration::from_millis(5)).await;
+		for mode in ["exit", "orphan"] {
+			let root = tempfile::tempdir().expect("group-move directory");
+			let mut parent = Command::new(&helper)
+				.arg(mode)
+				.current_dir(root.path())
+				.process_group(0)
+				.spawn()
+				.expect("spawn group-move helper");
+			let deadline = Instant::now() + Duration::from_secs(5);
+			while !root.path().join("ready").exists() {
+				assert!(Instant::now() < deadline, "{mode}: group-move child never became ready");
+				tokio::time::sleep(Duration::from_millis(5)).await;
+			}
+			let child_pid = wait_for_pid_file(&root.path().join("childpid"));
+			let child = Process::from_pid(child_pid).expect("pin group-move child");
+			let leader = Process::from_pid(i32::try_from(parent.id()).expect("pid fits"))
+				.expect("pin group-move parent");
+			let exited = leader
+				.terminate_tree(true, 300, 2_000, CancelToken::default())
+				.await
+				.expect("terminate group-move parent");
+			let child_alive = child.status() == ProcessStatus::Running;
+			let _ = child.signal(KILL_SIGNAL);
+			let _ = parent.wait();
+			assert!(exited, "{mode}: terminate_tree must finish the tree");
+			assert!(!child_alive, "{mode}: the member that left its group outlived terminate_tree");
 		}
-		let child_pid = wait_for_pid_file(&root.path().join("childpid"));
-		let child = Process::from_pid(child_pid).expect("pin group-move child");
-		let leader = Process::from_pid(i32::try_from(parent.id()).expect("pid fits"))
-			.expect("pin group-move parent");
-		let exited = leader
-			.terminate_tree(true, 300, 2_000, CancelToken::default())
-			.await
-			.expect("terminate group-move parent");
-		let child_alive = child.status() == ProcessStatus::Running;
-		let _ = child.signal(KILL_SIGNAL);
-		let _ = parent.wait();
-		assert!(exited, "terminate_tree must finish the tree");
-		assert!(!child_alive, "the member that left its group outlived terminate_tree");
 	}
 
 	/// A group member can join after the parent gets TERM, or create a new
