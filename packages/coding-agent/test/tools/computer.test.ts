@@ -1919,6 +1919,12 @@ describe("computer worker round trips", () => {
 				'Open windows by app (id "title"):',
 				'- TextEdit: 8 "notes.txt", 9 "draft.txt"',
 			]);
+			native.listApplications = async () => {
+				throw new Error("inventory unavailable");
+			};
+			const byName = await missMessage(desktopWindows, '{ app: "textedit", title: "report" }', { native });
+			expect(byName).not.toContain("No open window belongs");
+			expect(byName.split("\n")[2]).toContain("- TextEdit:");
 		});
 
 		it("says the app has no window and lists every app's windows, untitled ones included", async () => {
@@ -2093,7 +2099,7 @@ describe("computer worker round trips", () => {
 			const result = await runWorker(
 				transport,
 				"crowded-desktop",
-				'({ listed: (await desktop.windows()).length, filtered: (await desktop.windows({ app: "ORG.EXAMPLE.REAR" })).map(w => w.id), byId: (await desktop.window(999)).app, byApp: (await desktop.window({ app: "org.example.rear" })).id, byPath: (await desktop.window({ app: "/applications/rear.app" })).id })',
+				'({ listed: (await desktop.windows()).length, filtered: (await desktop.windows({ app: "ORG.EXAMPLE.REAR" })).map(w => w.id), byId: (await desktop.window(999)).app, byApp: (await desktop.window({ app: "org.example.rear" })).id, byPath: (await desktop.window({ app: "/applications/rear.app" })).id, byName: (await desktop.window({ app: "rear" })).id, named: (await desktop.windows({ app: "rear" })).map(w => w.id) })',
 			);
 			expect(result.ok).toBe(true);
 			if (result.ok)
@@ -2103,6 +2109,8 @@ describe("computer worker round trips", () => {
 					byId: "Rear",
 					byApp: "999",
 					byPath: "999",
+					byName: "999",
+					named: ["999"],
 				});
 			expect(native.applicationListings).toBe(3);
 		});
@@ -4817,13 +4825,14 @@ describe("window() waiting for a window to appear", () => {
 			super();
 		}
 		override async listApplications() {
+			if (this.listings < this.appearsAt) return [];
 			return [
 				{
 					id: "org.example.preview",
 					name: "Preview",
 					path: "/Applications/Preview.app",
 					running: true,
-					pid: this.listings,
+					pid: 4,
 				},
 			];
 		}

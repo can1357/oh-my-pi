@@ -1708,8 +1708,9 @@ export class ComputerWorkerCore {
 		const listWindows = async (filter: WindowFilter | undefined, signal: AbortSignal) => {
 			const windows = await nativeCall(signal, () => session.listWindows());
 			let appPids: Set<number> | undefined;
-			if (filter?.app) {
-				const app = filter.app.toLocaleLowerCase();
+			const app = filter?.app?.toLocaleLowerCase();
+			// An app filter that names no window's app is looked up as an application id or path.
+			if (app && !windows.some(window => matchesWindowApp(window, app))) {
 				const applications = await nativeCall(signal, () => session.listApplications({ runningOnly: true }));
 				appPids = new Set<number>();
 				for (const application of applications) {
