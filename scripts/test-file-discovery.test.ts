@@ -215,6 +215,35 @@ describe("collectTestsUnder", () => {
 			expect(await testFilesWithoutBucket(tree, ["file"], { files: [], dirs: [{ cwd: "file" }] })).toEqual([]);
 		}));
 
+	it("walks a cycle in time the real directories bound, not the paths through them", () =>
+		withTempDir("test-file-cycle-bounded-", async tree => {
+			// The patterns of the working directory decide how many turns of a cycle the walk takes;
+			// these are the repository root's, which the `scripts` command reads. Four nested
+			// directories with two self-links each have a number of paths that grows with the turns
+			// allowed, and five real directories.
+			await Bun.write(
+				path.join(tree, "bunfig.toml"),
+				'[test]\npathIgnorePatterns = ["**/node_modules/**", "**/dist/**", "python/robomp/data/**"]\n',
+			);
+			let deepest = tree;
+			for (let level = 1; level <= 4; level++) {
+				deepest = path.join(deepest, `d${level}`);
+				await fs.mkdir(deepest, { recursive: true });
+				for (const link of ["l1", "l2"]) await fs.symlink(".", path.join(deepest, link));
+			}
+			await writeTests(deepest, ["x.test.ts"]);
+			const started = performance.now();
+			const collected = await collectTestsUnder(tree, tree, tree);
+			const named = await namedTestFilesUnder(tree, tree, tree);
+			const elapsed = performance.now() - started;
+
+			expect(collected).toEqual(["d1/d2/d3/d4/x.test.ts"]);
+			expect(named).toEqual(["d1/d2/d3/d4/x.test.ts"]);
+			// Five directories of three entries: milliseconds. The budget is wide enough that only a
+			// walk whose cost follows the paths rather than the directories can exceed it.
+			expect(elapsed).toBeLessThan(10_000);
+		}));
+
 	it("selects below a `[test] root` beside or above the working directory, with patterns relative to it", () =>
 		withTempDir("test-file-outside-root-", async tree => {
 			const pkg = path.join(tree, "pkg");
@@ -376,7 +405,7 @@ describe("testFilesWithoutBucket", () => {
 			await expect(guard).rejects.toThrow(`${config} is not valid TOML`);
 		}));
 
-	it("stops with the files' names when test paths differ only in letter case", () =>
+	it("stops with the names when paths of one directory differ only in ASCII letter case", () =>
 		withTempDir("test-file-guard-case-", async repo => {
 			const pkg = path.join(repo, "packages/run");
 			await writeTests(pkg, ["a.test.ts", "a.test.TS", "x/b.test.ts", "y/B.test.ts"]);
@@ -388,21 +417,82 @@ describe("testFilesWithoutBucket", () => {
 				testFilesWithoutBucket(repo, ["packages/run"], { files, dirs });
 
 			await expect(guard([{ cwd: "packages/run" }])).rejects.toThrow(
-				"differ only in letter case, and `bun test` runs one file of each group in place of the others, so CI does not run them all. Rename them apart:\npackages/run/a.test.TS  packages/run/a.test.ts",
+				"These paths of one directory differ only in ASCII letter case, and one `bun test` process reaches one of each group in place of the others, so it does not run every test reached through them. Rename them apart:\npackages/run/a.test.TS  packages/run/a.test.ts",
 			);
 			// Naming one of them does not help: `bun test ./a.test.ts` runs a.test.TS.
 			await expect(guard([], [{ path: "packages/run/a.test.ts", cwd: "packages/run" }])).rejects.toThrow(
 				"packages/run/a.test.TS  packages/run/a.test.ts",
 			);
-			// Two directories that differ only in case collide too.
+			// Two directories that differ only in case collide too, and they are what must be renamed:
+			// the command reaches one of them, so one of the two files below them never runs.
 			await fs.rm(path.join(pkg, "a.test.TS"));
 			await writeTests(pkg, ["Dir/c.test.ts", "dir/c.test.ts"]);
-			await expect(guard([{ cwd: "packages/run" }])).rejects.toThrow(
-				"packages/run/Dir/c.test.ts  packages/run/dir/c.test.ts",
-			);
+			const dirRun = await bunTestRuns(pkg);
+			expect(dirRun.exitCode, dirRun.stderr).toBe(0);
+			expect(dirRun.files.filter(file => /[Dd]ir\/c\.test\.ts$/.test(file))).toHaveLength(1);
+			await expect(guard([{ cwd: "packages/run" }])).rejects.toThrow("packages/run/Dir  packages/run/dir");
 			// Names that differ only in case in different directories do not.
 			await fs.rm(path.join(pkg, "Dir"), { recursive: true });
 			expect(await guard([{ cwd: "packages/run" }])).toEqual([]);
+		}));
+
+	it("lets through names that differ by more than ASCII case, each of which `bun test` runs", () =>
+		withTempDir("test-file-guard-fold-", async repo => {
+			const pkg = path.join(repo, "packages/run");
+			// Pairs one `bun test` process holds as two entries and runs both of: Unicode letter case,
+			// the same letter composed and decomposed (NFC, NFD), and a compatibility character. Each
+			// pair has a directory of its own, so only the pair itself could collide.
+			const pairs = [
+				["case/\u00c9.test.ts", "case/\u00e9.test.ts"],
+				["forms/\u00e9.test.ts", "forms/e\u0301.test.ts"],
+				["compat/\u212a.test.ts", "compat/k.test.ts"],
+			];
+			await writeTests(pkg, pairs.flat());
+			const run = await bunTestRuns(pkg);
+
+			expect(run.exitCode, run.stderr).toBe(0);
+			expect(run.files).toHaveLength(pairs.flat().length);
+			expect(
+				await testFilesWithoutBucket(repo, ["packages/run"], { files: [], dirs: [{ cwd: "packages/run" }] }),
+			).toEqual([]);
+		}));
+
+	it("judges a collision within one command: twin directories two commands reach are no collision", () =>
+		withTempDir("test-file-guard-per-command-", async repo => {
+			// Each package command is its own `bun test` process. Two of them reach Helper.ts and
+			// helper.ts through links of their own; the two names are in directories that differ only
+			// in case, so neither process holds both, and each runs the file its link names.
+			await Bun.write(path.join(repo, "shared/Lib/Helper.ts"), testSource);
+			await Bun.write(path.join(repo, "shared/lib/helper.ts"), testSource);
+			await fs.mkdir(path.join(repo, "packages/omptype"), { recursive: true });
+			await fs.mkdir(path.join(repo, "packages/utils"), { recursive: true });
+			await fs.symlink("../../shared/Lib/Helper.ts", path.join(repo, "packages/omptype/h.test.ts"));
+			await fs.symlink("../../shared/lib/helper.ts", path.join(repo, "packages/utils/h.test.ts"));
+			const roots = ["packages/omptype", "packages/utils"];
+			const dirs = roots.map(cwd => ({ cwd }));
+			const omptype = await bunTestRuns(path.join(repo, "packages/omptype"));
+			const utils = await bunTestRuns(path.join(repo, "packages/utils"));
+
+			expect(omptype.files).toEqual([await fs.realpath(path.join(repo, "shared/Lib/Helper.ts"))]);
+			expect(utils.files).toEqual([await fs.realpath(path.join(repo, "shared/lib/helper.ts"))]);
+			expect(await testFilesWithoutBucket(repo, roots, { files: [], dirs })).toEqual([]);
+
+			// Two links of one command to those same two names in one directory do collide: that one
+			// process reaches one of the two entries, so it runs one file in place of two.
+			await fs.rm(path.join(repo, "shared"), { recursive: true });
+			await Bun.write(path.join(repo, "shared/Helper.ts"), testSource);
+			await Bun.write(path.join(repo, "shared/helper.ts"), testSource);
+			await fs.rm(path.join(repo, "packages/omptype/h.test.ts"));
+			await fs.rm(path.join(repo, "packages/utils/h.test.ts"));
+			await fs.symlink("../../shared/Helper.ts", path.join(repo, "packages/omptype/h1.test.ts"));
+			await fs.symlink("../../shared/helper.ts", path.join(repo, "packages/omptype/h2.test.ts"));
+			const both = await bunTestRuns(path.join(repo, "packages/omptype"));
+
+			expect(both.exitCode, both.stderr).toBe(0);
+			expect(both.files).toHaveLength(1);
+			await expect(testFilesWithoutBucket(repo, roots, { files: [], dirs })).rejects.toThrow(
+				"shared/Helper.ts  shared/helper.ts",
+			);
 		}));
 });
 
