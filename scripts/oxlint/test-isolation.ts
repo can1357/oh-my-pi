@@ -9,8 +9,8 @@
  * exceeded`). If the body resumes later, its cleanup runs in the middle of another test.
  *
  * Cleanup that survives a timeout is cleanup a timeout cannot interrupt: the shared, synchronous
- * `installMockRestores()` helper for spies, a synchronous hook that restores or puts back as a
- * direct statement, or `onTestFinished(<synchronous callback>)` registered before the test can
+ * `installMockRestores()` helper for spies, a synchronous `afterEach` that restores or puts back as
+ * a direct statement, or `onTestFinished(<synchronous callback>)` registered before the test can
  * suspend. The rules credit only those shapes. They are an enforcement aid for new code, not a
  * proof: a shape they credit is safe by construction, and everything else is reported.
  *
@@ -41,8 +41,6 @@ interface RuleContext {
 
 const TEST_NAMES = new Set(["it", "test"]);
 const DESCRIBE_NAMES = new Set(["describe"]);
-const EACH_HOOK_NAMES = new Set(["afterEach", "beforeEach"]);
-const PUT_BACK_HOOK_NAMES = new Set(["afterEach", "beforeEach", "afterAll"]);
 const HOOK_NAMES = new Set(["afterEach", "beforeEach", "afterAll", "beforeAll"]);
 const TEST_MODULES = new Set(["bun:test", "vitest"]);
 /** The shared synchronous restore helper every package's tests import. */
@@ -67,8 +65,6 @@ const SHARED_GLOBALS = new Set([
 const HELPER_DEPTH = 3;
 /** How many `const` aliases or helper parameters a written place is followed through. */
 const ALIAS_DEPTH = 4;
-/** Node types whose children are a statement list. */
-const STATEMENT_LISTS = new Set(["BlockStatement", "Program", "StaticBlock", "SwitchCase", "TSModuleBlock"]);
 
 const node = (value: unknown): Node | undefined =>
 	typeof value === "object" && value !== null && typeof (value as Node).type === "string"
@@ -168,13 +164,13 @@ function declaredInit(context: RuleContext, id: Node, constOnly: boolean): Node 
 	return unwrapAwait(node(def.node.init));
 }
 
-/** The function an identifier is bound to: `function f() {}` or `const f = () => {}`. */
+/** The function an identifier is bound to: a declaration or an immutable `const` initializer. */
 function functionOf(context: RuleContext, id: Node): Node | undefined {
 	const def = variableOf(context, id)?.defs[0];
 	if (!def) return undefined;
 	if (def.type === "FunctionName") return def.node;
 	if (def.node.type === "FunctionDeclaration") return def.node;
-	if (def.type !== "Variable") return undefined;
+	if (def.type !== "Variable" || def.parent?.kind !== "const") return undefined;
 	const init = unwrap(node(def.node.init));
 	return isFunction(init) ? init : undefined;
 }
@@ -476,53 +472,22 @@ function suspendsBefore(facts: FileFacts, flow: Flow, cleanup: Node, start?: Nod
 	return flow.at.parent?.type === "AwaitExpression";
 }
 
-/** The statement `n` belongs to, when that statement sits directly in a statement list. */
-function statementOf(n: Node): Node | undefined {
-	for (let cur: Node = n; cur.parent; cur = cur.parent) {
-		if (STATEMENT_LISTS.has(cur.parent.type)) return cur;
-		if (isFunction(cur.parent)) return undefined;
-	}
-	return undefined;
+/** A cleanup call must itself be an expression statement, not part of another expression. */
+function directCallStatement(n: Node): Node | undefined {
+	const statement = n.parent;
+	return statement?.type === "ExpressionStatement" && node(statement.expression) === n ? statement : undefined;
 }
 
 /**
- * Does `fn` always do `work` when it runs, before it can suspend? Only a direct statement of its
- * body counts, or an `if`/`else` whose every branch does it: both run whatever the condition says.
+ * Is `call` a direct top-level statement of the file or a describe callback body, with no
+ * `return`/`throw`/`break`/`continue` before it in that callback?
  */
-function alwaysDoes(facts: FileFacts, fn: Node, work: (expression: Node) => boolean): boolean {
-	const body = node(fn.body);
-	if (!body) return false;
-	if (body.type !== "BlockStatement") return work(body);
-	const limit = fn.async === true ? firstSuspension(facts, fn) : Number.POSITIVE_INFINITY;
-	return doesInStatements(nodes(body.body), work, limit);
-}
-
-function doesInStatements(statements: Node[], work: (expression: Node) => boolean, limit: number): boolean {
-	for (const statement of statements) {
-		if (statement.range[1] > limit) break;
-		if (statement.type === "ExpressionStatement" || statement.type === "ReturnStatement") {
-			const expression = node(statement.type === "ReturnStatement" ? statement.argument : statement.expression);
-			if (expression && work(expression)) return true;
-		}
-		if (statement.type === "IfStatement" && node(statement.alternate)) {
-			const branches = [node(statement.consequent), node(statement.alternate)];
-			if (branches.every(branch => branch && doesInStatements(branchStatements(branch), work, limit))) return true;
-		}
-	}
-	return false;
-}
-
-function branchStatements(branch: Node): Node[] {
-	return branch.type === "BlockStatement" ? nodes(branch.body) : [branch];
-}
-
-/** Is `call` an unconditional statement of `scope`'s body (the file, or a `describe` callback)? */
-function isTopLevelStatement(call: Node, scope: Node | undefined): boolean {
-	const statement = statementOf(call);
-	if (statement?.type !== "ExpressionStatement") return false;
-	const list = statement.parent;
-	if (!list) return false;
-	return scope === undefined ? list.type === "Program" : node(scope.body) === list;
+function isTopLevelStatement(facts: FileFacts, call: Node, scope: Node | undefined): boolean {
+	const statement = directCallStatement(call);
+	const list = statement?.parent;
+	if (!statement || !list) return false;
+	if (scope === undefined) return list.type === "Program";
+	return node(scope.body) === list && !exitsBefore(facts, scope, statement);
 }
 
 /** The file scope and every `describe` that encloses `test`. */
@@ -542,38 +507,55 @@ function callsRestoreHelper(facts: FileFacts, scope: Node | undefined): boolean 
 		if (def?.type !== "ImportBinding") return false;
 		const source = node((def.parent ?? def.node.parent)?.source);
 		if (typeof source?.value !== "string" || !RESTORE_HELPER_MODULE.test(source.value)) return false;
-		return enclosingFunction(call) === scope && isTopLevelStatement(call, scope);
+		return enclosingFunction(call) === scope && isTopLevelStatement(facts, call, scope);
 	});
 }
 
-/** Do the hooks of `names` registered at `scope`'s top level always do `work` before they suspend? */
-function hookAlwaysDoes(
-	facts: FileFacts,
-	scope: Node | undefined,
-	names: Set<string>,
-	work: (expression: Node) => boolean,
-): boolean {
+/** Does a synchronous top-level `afterEach` of `scope` do `work` as a direct statement before any exit? */
+function afterEachDoes(facts: FileFacts, scope: Node | undefined, work: (expression: Node) => boolean): boolean {
 	for (const call of facts.calls) {
-		if (!names.has(testApi(facts.context, node(call.callee)) ?? "")) continue;
-		if (enclosingFunction(call) !== scope || !isTopLevelStatement(call, scope)) continue;
-		if (registered(facts, call).some(hook => alwaysDoes(facts, hook, work))) return true;
+		if (testApi(facts.context, node(call.callee)) !== "afterEach") continue;
+		if (enclosingFunction(call) !== scope || !isTopLevelStatement(facts, call, scope)) continue;
+		for (const hook of registered(facts, call)) {
+			if (hook.async === true) continue;
+			const body = node(hook.body);
+			if (!body) continue;
+			// `afterEach(() => vi.restoreAllMocks())`: the expression body is the whole hook.
+			if (body.type !== "BlockStatement") {
+				if (work(body)) return true;
+				continue;
+			}
+			for (const statement of nodes(body.body)) {
+				const expression = statement.type === "ExpressionStatement" ? node(statement.expression) : undefined;
+				if (expression && work(expression) && !exitsBefore(facts, hook, expression)) return true;
+			}
+		}
 	}
 	return false;
 }
 
-/** Where `fn` itself first suspends, or `Infinity` when it never does. */
-function firstSuspension(facts: FileFacts, fn: Node): number {
-	let at = Number.POSITIVE_INFINITY;
+/** Does `fn` itself (not a nested function) `return`/`throw`/`break`/`continue` anywhere before `at`? */
+function exitsBefore(facts: FileFacts, fn: Node, at: Node): boolean {
+	let found = false;
 	walk(facts.context, fn, n => {
 		if (
-			(n.type === "AwaitExpression" || (n.type === "ForOfStatement" && n.await === true)) &&
-			enclosingFunction(n) === fn
+			!found &&
+			enclosingFunction(n) === fn &&
+			n.range[0] < at.range[0] &&
+			(n.type === "ReturnStatement" ||
+				n.type === "ThrowStatement" ||
+				n.type === "BreakStatement" ||
+				n.type === "ContinueStatement")
 		)
-			at = Math.min(at, n.range[0]);
+			found = true;
 	});
-	return at;
+	return found;
 }
 
+/**
+ * A call that looks like a mock restore by its method name. The rule reports such a call in a
+ * test body by name, so a look-alike is judged too; only {@link realRestoreKind} earns credit.
+ */
 function restoreKind(call: Node): "restoreAll" | "mockRestore" | undefined {
 	const callee = unwrap(node(call.callee));
 	if (callee?.type !== "MemberExpression") return undefined;
@@ -585,24 +567,39 @@ function restoreKind(call: Node): "restoreAll" | "mockRestore" | undefined {
 }
 
 /**
+ * A restore that provably reaches the test framework: `restoreAllMocks()` / `mock.restore()` on a
+ * `vi`, `jest` or `mock` bound to the bun:test (or vitest) import or the test global, or
+ * `mockRestore()` on a variable a recognised `spyOn(...)` installs.
+ */
+function realRestoreKind(facts: FileFacts, call: Node): "restoreAll" | "mockRestore" | undefined {
+	const kind = restoreKind(call);
+	if (kind === "mockRestore") return spyInstalls(facts, call).length > 0 ? kind : undefined;
+	if (kind !== "restoreAll") return undefined;
+	const receiver = unwrap(node(unwrap(node(call.callee))!.object));
+	if (receiver?.type !== "Identifier") return undefined;
+	const api = testApiName(facts.context, receiver);
+	return api === "vi" || api === "jest" || api === "mock" ? kind : undefined;
+}
+
+/**
  * Is every spy this test installs restored by cleanup a timeout cannot skip: the shared helper, or a
- * hook that calls `vi.restoreAllMocks()` / `mock.restore()` before it can suspend?
+ * synchronous top-level `afterEach` that calls the real restore API?
  */
 function spiesCovered(facts: FileFacts, test: Node): boolean {
 	return coveringScopes(facts, test).some(
 		scope =>
 			callsRestoreHelper(facts, scope) ||
-			hookAlwaysDoes(facts, scope, EACH_HOOK_NAMES, expression => {
+			afterEachDoes(facts, scope, expression => {
 				const call = unwrap(expression);
-				return call?.type === "CallExpression" && restoreKind(call) === "restoreAll";
+				return call?.type === "CallExpression" && realRestoreKind(facts, call) === "restoreAll";
 			}),
 	);
 }
 
-/** Does a hook of a scope that covers `test` put `path` back before it can suspend? */
+/** Does a synchronous top-level `afterEach` of a covering scope put `path` back? */
 function hookPutsBack(facts: FileFacts, test: Node, path: string): boolean {
 	return coveringScopes(facts, test).some(scope =>
-		hookAlwaysDoes(facts, scope, PUT_BACK_HOOK_NAMES, expression => sharedTargets(facts, expression).includes(path)),
+		afterEachDoes(facts, scope, expression => sharedTargets(facts, expression).includes(path)),
 	);
 }
 
@@ -683,7 +680,7 @@ function registered(facts: FileFacts, call: Node): Node[] {
 	});
 }
 
-/** The restore calls anywhere inside the callbacks `finisher` registers. */
+/** The restore calls, recognised by method name, inside the callbacks `finisher` registers. */
 function registeredRestores(facts: FileFacts, finisher: Node): Node[] {
 	const found: Node[] = [];
 	for (const callback of registered(facts, finisher))
@@ -693,42 +690,69 @@ function registeredRestores(facts: FileFacts, finisher: Node): Node[] {
 	return found;
 }
 
-/** A callback a timeout cannot interrupt: synchronous, and doing the work before it could suspend. */
+/** A synchronous callback whose direct statement does `done` with no exit before it. */
 function promptCallback(facts: FileFacts, finisher: Node, done: (expression: Node) => boolean): boolean {
-	return registered(facts, finisher).some(callback => callback.async !== true && alwaysDoes(facts, callback, done));
+	return registered(facts, finisher).some(callback => {
+		if (callback.async === true) return false;
+		const body = node(callback.body);
+		if (!body) return false;
+		if (body.type !== "BlockStatement") return done(body);
+		return nodes(body.body).some(
+			statement =>
+				statement.type === "ExpressionStatement" &&
+				done(node(statement.expression)!) &&
+				!exitsBefore(facts, callback, statement),
+		);
+	});
 }
 
 /**
- * Is `finisher` registered where the test cannot suspend before it: a statement of a block that
- * holds `target` after it, in the same function. A branch that holds both runs them together.
+ * A registration must itself be a direct statement in a block that contains the target after it,
+ * with no `return`/`throw`/`break`/`continue` before it in its function.
  */
-function registeredBefore(finisher: Node, target: Node): boolean {
-	const statement = statementOf(finisher);
+function registeredBefore(facts: FileFacts, finisher: Node, target: Node): boolean {
+	const statement = directCallStatement(finisher);
 	const list = statement?.parent;
-	if (statement?.type !== "ExpressionStatement" || !list) return false;
-	if (enclosingFunction(finisher) !== enclosingFunction(target)) return false;
+	const fn = enclosingFunction(finisher);
+	if (!statement || !list || fn !== enclosingFunction(target)) return false;
+	if (fn && exitsBefore(facts, fn, statement)) return false;
 	return statement.range[1] <= target.range[0] && list.range[0] <= target.range[0] && target.range[1] <= list.range[1];
 }
 
-/** Is `finisher` the statement right after `install`'s own statement, with no suspension between? */
-function registeredNextTo(finisher: Node, install: Node): boolean {
-	const registration = statementOf(finisher);
-	const installed = statementOf(install);
+/** Is `finisher` the direct statement right after an await-free install statement? */
+function registeredNextTo(facts: FileFacts, finisher: Node, install: Node): boolean {
+	const registration = directCallStatement(finisher);
+	let installed: Node | undefined = install;
+	while (
+		installed?.parent &&
+		installed.parent.type !== "ExpressionStatement" &&
+		installed.parent.type !== "VariableDeclaration"
+	) {
+		if (isFunction(installed.parent)) return false;
+		installed = installed.parent;
+	}
+	const statement = installed?.parent;
 	const list = registration?.parent;
-	if (registration?.type !== "ExpressionStatement" || !list || installed?.parent !== list) return false;
-	if (insideAwait(install, enclosingFunction(install))) return false;
-	const statements = nodes(list.body ?? list.consequent);
-	return statements.indexOf(registration) === statements.indexOf(installed) + 1;
+	if (!registration || !statement || !list || statement.parent !== list) return false;
+	const fn = enclosingFunction(finisher);
+	if (fn && exitsBefore(facts, fn, registration)) return false;
+	let hasAwait = false;
+	walk(facts.context, statement, n => {
+		if (n.type === "AwaitExpression" && enclosingFunction(n) === enclosingFunction(install)) hasAwait = true;
+	});
+	if (hasAwait) return false;
+	const statements = nodes(list.body);
+	return statements.indexOf(registration) === statements.indexOf(statement) + 1;
 }
 
 /** Does a synchronous `onTestFinished` registered before the test can suspend restore `install`? */
 function spyRegisteredPromptly(facts: FileFacts, install: Node): boolean {
 	return facts.finishers.some(finisher => {
-		if (!registeredBefore(finisher, install) && !registeredNextTo(finisher, install)) return false;
+		if (!registeredBefore(facts, finisher, install) && !registeredNextTo(facts, finisher, install)) return false;
 		return promptCallback(facts, finisher, expression => {
 			const call = unwrap(expression);
 			if (call?.type !== "CallExpression") return false;
-			const kind = restoreKind(call);
+			const kind = realRestoreKind(facts, call);
 			if (kind === "restoreAll") return true;
 			return kind === "mockRestore" && spyInstalls(facts, call).includes(install);
 		});
@@ -739,7 +763,7 @@ function spyRegisteredPromptly(facts: FileFacts, install: Node): boolean {
 function putBackRegisteredPromptly(facts: FileFacts, path: string, write: Node): boolean {
 	return facts.finishers.some(
 		finisher =>
-			registeredBefore(finisher, write) &&
+			registeredBefore(facts, finisher, write) &&
 			promptCallback(facts, finisher, expression => sharedTargets(facts, expression).includes(path)),
 	);
 }

@@ -16,6 +16,9 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { computeNonMessageTokens } from "@oh-my-pi/pi-tui/status-line/context-usage";
 import { getProjectAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
+import { installMockRestores } from "../../utils/test/helpers/mock-restores";
+
+installMockRestores();
 
 /**
  * Regression test for the snapcompact frame dead-end.

@@ -19,7 +19,7 @@ import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { formatBytes } from "@oh-my-pi/pi-tui/render/render-utils";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
-import { cfgReadSummarizeEnabled } from "@oh-my-pi/pi-coding-agent/tools/settings";
+import { cfgReadSummarizeEnabled, cfgToolsOutputMaxColumns } from "@oh-my-pi/pi-coding-agent/tools/settings";
 
 function textOutput(result: AgentToolResult<ReadToolDetails>): string {
 	return result.content
@@ -92,8 +92,11 @@ describe("read tool single-pass file access", () => {
 			]),
 		);
 
-		// `:1-1` keeps the byte budget at its 50KB floor, which the 60KB line exceeds.
-		const text = textOutput(await new ReadTool(createSession(tmpDir)).execute("bytes", { path: `${filePath}:1-1` }));
+		// `:1-1` keeps the byte budget at its 50KB floor, which the 60KB line exceeds when
+		// uncapped (a column-cut line is charged only its cut display).
+		const session = createSession(tmpDir);
+		cfgToolsOutputMaxColumns.set(session.settings, 0);
+		const text = textOutput(await new ReadTool(session).execute("bytes", { path: `${filePath}:1-1` }));
 
 		expect(text).toContain(`[Line 1 is ${formatBytes(lineBytes)}, exceeds ${formatBytes(50 * 1024)} limit`);
 		expect(text).not.toContain(formatBytes(lineBytes + strayBytes * 2));

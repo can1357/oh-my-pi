@@ -5,6 +5,9 @@ import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
 import { type BtwHistoryRecord, BtwHistoryStore, getBtwCopyText } from "@oh-my-pi/pi-coding-agent/session/btw-history";
 import { acquireFileLock, withFileLock } from "@oh-my-pi/pi-utils";
+import { installMockRestores } from "../../utils/test/helpers/mock-restores";
+
+installMockRestores();
 
 describe("BtwHistoryStore", () => {
 	let directory: string;

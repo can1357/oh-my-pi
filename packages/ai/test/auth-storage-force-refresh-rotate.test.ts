@@ -12,6 +12,9 @@ import type { OAuthCredentials } from "@oh-my-pi/pi-ai/registry/oauth/types";
 import type { CredentialRankingStrategy, UsageProvider } from "@oh-my-pi/pi-ai/usage";
 import { removeWithRetries } from "../../utils/src/temp";
 import { OAuthRefresher } from "../src/auth/refresh";
+import { installMockRestores } from "../../utils/test/helpers/mock-restores";
+
+installMockRestores();
 
 const PROVIDER = "unit-rotate-oauth";
 const SOURCE = "auth-storage-force-refresh-rotate-test";

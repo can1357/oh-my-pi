@@ -22,7 +22,7 @@ it("t", async () => {
 });`,
 		expected: [],
 	},
-	"restore-covered-by-describe-hook": {
+	"describe-before-each-restore-does-not-cover": {
 		body: `
 describe("d", () => {
 	beforeEach(() => mock.restore());
@@ -32,7 +32,7 @@ describe("d", () => {
 		spy.mockRestore();
 	});
 });`,
-		expected: [],
+		expected: ["restore-mocks-in-hooks@9"],
 	},
 	"restore-through-a-hook-that-calls-a-helper": {
 		body: `
@@ -684,7 +684,7 @@ it("t", async () => {
 });`,
 		expected: ["restore-mocks-in-hooks@7"],
 	},
-	"hook-put-back-on-every-branch-covers": {
+	"hook-put-back-split-across-branches-does-not-cover": {
 		body: `
 const saved = Object.getOwnPropertyDescriptor(process, "platform");
 afterEach(() => {
@@ -695,7 +695,7 @@ it("t", async () => {
 	Object.defineProperty(process, "platform", { value: "win32" });
 	try { await Promise.resolve(); } finally { if (saved) Object.defineProperty(process, "platform", saved); }
 });`,
-		expected: [],
+		expected: ["put-back-on-test-finished@11"],
 	},
 	"registration-on-the-opposite-branch-does-not-cover": {
 		body: `
@@ -759,7 +759,7 @@ it("t", async () => {
 });`,
 		expected: ["put-back-on-test-finished@5"],
 	},
-	"named-synchronous-finisher-covers": {
+	"named-finisher-split-across-branches-does-not-cover": {
 		body: `
 it("t", async () => {
 	const saved = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
@@ -771,7 +771,7 @@ it("t", async () => {
 	Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: true });
 	try { await Promise.resolve(); } finally { restore(); }
 });`,
-		expected: [],
+		expected: ["put-back-on-test-finished@7"],
 	},
 	"unknown-key-finisher-does-not-cover-fetch": {
 		body: `
@@ -803,6 +803,216 @@ it("t", async () => {
 	onTestFinished(() => spy.mockRestore());
 	await Promise.resolve();
 	onTestFinished(() => spy.mockRestore());
+});`,
+		expected: [],
+	},
+	"helper-call-inside-a-logical-expression-does-not-cover": {
+		body: `
+import { installMockRestores } from "./helpers/mock-restores";
+process.env.CI && installMockRestores();
+it("t", async () => {
+	const spy = spyOn(console, "log");
+	await Promise.resolve();
+	spy.mockRestore();
+});`,
+		expected: ["restore-mocks-in-hooks@9"],
+	},
+	"hook-registered-inside-a-logical-expression-does-not-cover": {
+		body: `
+process.env.CI && afterEach(() => { vi.restoreAllMocks(); });
+it("t", async () => {
+	const spy = spyOn(console, "log");
+	try { await Promise.resolve(); } finally { spy.mockRestore(); }
+});`,
+		expected: ["restore-mocks-in-hooks@7"],
+	},
+	"expression-bodied-after-each-restore-covers": {
+		body: `
+afterEach(() => vi.restoreAllMocks());
+it("t", async () => {
+	const spy = spyOn(console, "log");
+	try { await Promise.resolve(); } finally { spy.mockRestore(); }
+});`,
+		expected: [],
+	},
+	"put-back-finisher-inside-a-logical-expression-does-not-cover": {
+		body: `
+it("t", async () => {
+	const original = globalThis.fetch;
+	process.env.CI && onTestFinished(() => { globalThis.fetch = original; });
+	globalThis.fetch = (async () => new Response("")) as unknown as typeof fetch;
+	await Promise.resolve();
+	globalThis.fetch = original;
+});`,
+		expected: ["put-back-on-test-finished@7"],
+	},
+	"spy-finisher-inside-a-logical-expression-does-not-cover": {
+		body: `
+it("t", async () => {
+	const spy = spyOn(console, "log");
+	process.env.CI && onTestFinished(() => spy.mockRestore());
+	await Promise.resolve();
+	spy.mockRestore();
+});`,
+		expected: ["restore-mocks-in-hooks@5", "restore-mocks-in-hooks@8"],
+	},
+	"early-return-in-a-hook-before-its-restore-does-not-cover": {
+		body: `
+afterEach(() => {
+	if (process.env.CI) return;
+	vi.restoreAllMocks();
+});
+it("t", async () => {
+	const spy = spyOn(console, "log");
+	try { await Promise.resolve(); } finally { spy.mockRestore(); }
+});`,
+		expected: ["restore-mocks-in-hooks@10"],
+	},
+	"hook-restore-before-an-early-return-covers": {
+		body: `
+afterEach(() => {
+	vi.restoreAllMocks();
+	if (process.env.CI) return;
+	console.log("done");
+});
+it("t", async () => {
+	const spy = spyOn(console, "log");
+	try { await Promise.resolve(); } finally { spy.mockRestore(); }
+});`,
+		expected: [],
+	},
+	"early-return-in-a-finisher-before-its-put-back-does-not-cover": {
+		body: `
+it("t", async () => {
+	const original = globalThis.fetch;
+	onTestFinished(() => {
+		if (process.env.CI) return;
+		globalThis.fetch = original;
+	});
+	globalThis.fetch = (async () => new Response("")) as unknown as typeof fetch;
+	await Promise.resolve();
+	globalThis.fetch = original;
+});`,
+		expected: ["put-back-on-test-finished@10"],
+	},
+	"finisher-put-back-before-an-early-return-covers": {
+		body: `
+it("t", async () => {
+	const original = globalThis.fetch;
+	onTestFinished(() => {
+		globalThis.fetch = original;
+		if (process.env.CI) return;
+		console.log("done");
+	});
+	globalThis.fetch = (async () => new Response("")) as unknown as typeof fetch;
+	await Promise.resolve();
+	globalThis.fetch = original;
+});`,
+		expected: [],
+	},
+	"early-return-before-the-registration-does-not-cover": {
+		body: `
+it("t", async () => {
+	const original = globalThis.fetch;
+	if (!original) return;
+	onTestFinished(() => { globalThis.fetch = original; });
+	globalThis.fetch = (async () => new Response("")) as unknown as typeof fetch;
+	await Promise.resolve();
+	globalThis.fetch = original;
+});`,
+		expected: ["put-back-on-test-finished@8"],
+	},
+	"await-in-the-install-statement-does-not-cover": {
+		body: `
+let spy: { mockRestore(): void };
+it("t", async () => {
+	spy = spyOn(console, "log"), await Promise.resolve();
+	onTestFinished(() => spy.mockRestore());
+});`,
+		expected: ["restore-mocks-in-hooks@6"],
+	},
+	"after-all-put-back-does-not-cover-between-tests": {
+		body: `
+const original = globalThis.fetch;
+afterAll(() => { globalThis.fetch = original; });
+it("t", async () => {
+	globalThis.fetch = (async () => new Response("")) as unknown as typeof fetch;
+	try { await Promise.resolve(); } finally { globalThis.fetch = original; }
+});`,
+		expected: ["put-back-on-test-finished@8"],
+	},
+	"before-each-put-back-does-not-cover-between-tests": {
+		body: `
+const original = globalThis.fetch;
+beforeEach(() => { globalThis.fetch = original; });
+it("t", async () => {
+	globalThis.fetch = (async () => new Response("")) as unknown as typeof fetch;
+	try { await Promise.resolve(); } finally { globalThis.fetch = original; }
+});`,
+		expected: ["put-back-on-test-finished@8"],
+	},
+	"describe-after-each-restore-covers": {
+		body: `
+describe("d", () => {
+	afterEach(() => vi.restoreAllMocks());
+	it("t", async () => {
+		const spy = spyOn(console, "log");
+		await Promise.resolve();
+		spy.mockRestore();
+	});
+});`,
+		expected: [],
+	},
+	"reassigned-let-callback-does-not-cover": {
+		body: `
+it("t", async () => {
+	const spy = spyOn(console, "log");
+	let cleanup = () => { spy.mockRestore(); };
+	cleanup = () => {};
+	onTestFinished(cleanup);
+	await Promise.resolve();
+	spy.mockRestore();
+});`,
+		expected: ["restore-mocks-in-hooks@10"],
+	},
+	"function-declaration-callback-covers": {
+		body: `
+it("t", async () => {
+	const spy = spyOn(console, "log");
+	onTestFinished(cleanup);
+	await Promise.resolve();
+	spy.mockRestore();
+	function cleanup() { spy.mockRestore(); }
+});`,
+		expected: [],
+	},
+	"restore-all-look-alike-in-a-hook-does-not-cover": {
+		body: `
+const fake = { restoreAllMocks() {} };
+afterEach(() => { fake.restoreAllMocks(); });
+it("t", async () => {
+	const spy = spyOn(console, "log");
+	try { await Promise.resolve(); } finally { spy.mockRestore(); }
+});`,
+		expected: ["restore-mocks-in-hooks@8"],
+	},
+	"restore-all-through-a-same-file-helper-in-an-async-body": {
+		body: `
+function resetMocks() { vi.restoreAllMocks(); }
+it("t", async () => {
+	spyOn(console, "log");
+	await Promise.resolve();
+	resetMocks();
+});`,
+		expected: ["restore-mocks-in-hooks@4"],
+	},
+	"restore-all-through-a-same-file-helper-in-a-covered-sync-body": {
+		body: `
+function resetMocks() { vi.restoreAllMocks(); }
+afterEach(() => { vi.restoreAllMocks(); });
+it("t", () => {
+	spyOn(console, "log");
+	resetMocks();
 });`,
 		expected: [],
 	},

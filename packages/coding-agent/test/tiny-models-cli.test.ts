@@ -59,8 +59,8 @@ describe("tiny-models download model resolution", () => {
 		const output: string[] = [];
 		const isTtyDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
 		const restoreIsTTY = () => {
+			Reflect.deleteProperty(process.stdout, "isTTY");
 			if (isTtyDescriptor) Object.defineProperty(process.stdout, "isTTY", isTtyDescriptor);
-			else Reflect.deleteProperty(process.stdout, "isTTY");
 		};
 		onTestFinished(restoreIsTTY);
 		Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: false });
@@ -73,13 +73,9 @@ describe("tiny-models download model resolution", () => {
 			error: "Error: runtime install failed\n    at worker",
 		});
 
-		try {
-			await expect(runTinyModelsCommand({ action: "download", model: "lfm2.5-350m", flags: {} })).rejects.toThrow(
-				"One or more tiny title models failed to download",
-			);
-		} finally {
-			restoreIsTTY();
-		}
+		await expect(runTinyModelsCommand({ action: "download", model: "lfm2.5-350m", flags: {} })).rejects.toThrow(
+			"One or more tiny title models failed to download",
+		);
 
 		expect(output.join("")).toContain("Failed to download LFM2.5 350M: runtime install failed.");
 	});
@@ -88,8 +84,8 @@ describe("tiny-models download model resolution", () => {
 		const output: string[] = [];
 		const isTtyDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
 		const restoreIsTTY = () => {
+			Reflect.deleteProperty(process.stdout, "isTTY");
 			if (isTtyDescriptor) Object.defineProperty(process.stdout, "isTTY", isTtyDescriptor);
-			else Reflect.deleteProperty(process.stdout, "isTTY");
 		};
 		onTestFinished(restoreIsTTY);
 		const diagnostic = [
@@ -109,13 +105,9 @@ describe("tiny-models download model resolution", () => {
 			error: diagnostic,
 		});
 
-		try {
-			await expect(runTinyModelsCommand({ action: "download", model: "lfm2.5-350m", flags: {} })).rejects.toThrow(
-				"One or more tiny title models failed to download",
-			);
-		} finally {
-			restoreIsTTY();
-		}
+		await expect(runTinyModelsCommand({ action: "download", model: "lfm2.5-350m", flags: {} })).rejects.toThrow(
+			"One or more tiny title models failed to download",
+		);
 
 		const text = output.join("");
 		expect(text).toContain("Failed to download LFM2.5 350M:");

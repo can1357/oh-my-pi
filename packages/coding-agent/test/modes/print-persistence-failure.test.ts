@@ -17,6 +17,9 @@ import { registerRpcPersistenceSurface } from "../../src/modes/rpc/rpc-mode";
 import type { AgentSession } from "../../src/session/agent-session";
 import { SessionManager } from "../../src/session/session-manager";
 import { FileSessionStorage } from "../../src/session/session-storage";
+import { installMockRestores } from "../../../utils/test/helpers/mock-restores";
+
+installMockRestores();
 
 const tempDirs: TempDir[] = [];
 

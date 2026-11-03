@@ -142,8 +142,8 @@ describe("cleanse progress", () => {
 		const output: string[] = [];
 		const isTtyDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
 		const restoreIsTTY = () => {
+			Reflect.deleteProperty(process.stdout, "isTTY");
 			if (isTtyDescriptor) Object.defineProperty(process.stdout, "isTTY", isTtyDescriptor);
-			else Reflect.deleteProperty(process.stdout, "isTTY");
 		};
 		onTestFinished(restoreIsTTY);
 		Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: true });

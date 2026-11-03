@@ -7,7 +7,7 @@ afterEach(() => {
 	vi.restoreAllMocks();
 });
 
-it("cmux element click refuses a button or click count it cannot press instead of clicking once", async () => {
+it("cmux element and selector clicks refuse a button or click count they cannot press instead of clicking once", async () => {
 	const methods: string[] = [];
 	spyOn(CmuxSocketClient.prototype, "request").mockImplementation(async (method: string) => {
 		methods.push(method);
@@ -22,5 +22,7 @@ it("cmux element click refuses a button or click count it cannot press instead o
 	await handle.click();
 	await expect(handle.click({ button: "right" })).rejects.toBeInstanceOf(ToolError);
 	await expect(handle.click({ count: 2 })).rejects.toBeInstanceOf(ToolError);
+	await expect(tab.click("#menu", { button: "right" })).rejects.toBeInstanceOf(ToolError);
+	await expect(tab.click("#menu", { count: 2 })).rejects.toBeInstanceOf(ToolError);
 	expect(methods).toEqual(["browser.wait", "browser.click"]);
 });

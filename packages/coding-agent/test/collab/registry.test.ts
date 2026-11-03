@@ -14,6 +14,9 @@ import {
 	resolveCollabHostLink,
 } from "@oh-my-pi/pi-coding-agent/collab/registry";
 import { IpcConnection, IpcServer, ipcEndpoint } from "@oh-my-pi/pi-natives";
+import { installMockRestores } from "../../../utils/test/helpers/mock-restores";
+
+installMockRestores();
 
 const cleanupDirs: string[] = [];
 const openPublications: CollabHostPublication[] = [];
@@ -663,8 +666,7 @@ describe("collab registry", () => {
 		await Bun.write(bystander, "{not registry metadata");
 		const link = path.join(await tempDir(), "collab-hosts");
 		await fs.symlink(target, link, process.platform === "win32" ? "junction" : "dir");
-		const descriptor = Object.getOwnPropertyDescriptor(process, "platform");
-		if (!descriptor) throw new Error("Missing process.platform descriptor");
+		const descriptor = Object.getOwnPropertyDescriptor(process, "platform")!;
 		onTestFinished(() => {
 			Object.defineProperty(process, "platform", descriptor);
 		});

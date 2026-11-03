@@ -191,13 +191,16 @@ describe("AgentSession auto-compaction queue resume", () => {
 		});
 	});
 
-	afterEach(async () => {
-		// Put the fixture's gates back before the first await: a hook that times out there skips the rest.
+	// Put the fixture's gates back in a synchronous hook: a timeout cannot stop it partway.
+	afterEach(() => {
 		(globalThis as typeof globalThis & { __ompManualCompactGate?: Promise<void> }).__ompManualCompactGate = undefined;
 		(globalThis as typeof globalThis & { __ompAgentStartGate?: AgentStartGate }).__ompAgentStartGate = undefined;
 		(globalThis as ParkCommandGlobals).__ompParkGate = undefined;
 		(globalThis as ParkCommandGlobals).__ompParkAction = undefined;
 		(globalThis as typeof globalThis & { __ompManualCompactCancel?: boolean }).__ompManualCompactCancel = undefined;
+	});
+
+	afterEach(async () => {
 		try {
 			await session?.dispose();
 		} finally {

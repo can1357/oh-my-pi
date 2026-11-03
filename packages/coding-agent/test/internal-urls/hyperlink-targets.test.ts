@@ -73,8 +73,8 @@ describe("renderer settings propagation", () => {
 	it("updates renderer preferences when runtime overrides are applied and cleared", async () => {
 		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
 		const restoreRows = () => {
+			Reflect.deleteProperty(process.stdout, "rows");
 			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
-			else Reflect.deleteProperty(process.stdout, "rows");
 		};
 		onTestFinished(restoreRows);
 		resetSettingsForTest();
@@ -105,7 +105,8 @@ describe("renderer settings propagation", () => {
 			expect(isFeedModelBadgeEnabled()).toBe(true);
 			expect(isHyperlinkEnabled()).toBe(true);
 		} finally {
-			restoreRows();
+			Reflect.deleteProperty(process.stdout, "rows");
+			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
 			resetSettingsForTest();
 			await Settings.init({ inMemory: true });
 		}
