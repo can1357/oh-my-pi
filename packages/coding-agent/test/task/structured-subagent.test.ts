@@ -53,6 +53,7 @@ import type { SingleResult, TaskParams } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { __resetDirsFromEnvForTests, logger, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
+import { localLifecycle } from "../helpers/local-lifecycle";
 import { createSessionDefaults } from "../helpers/session-defaults";
 
 import { cfgRetryModelFallback } from "@oh-my-pi/pi-coding-agent/session/settings";
@@ -1484,7 +1485,7 @@ describe("structured subagent primitive", () => {
 				reviveSession: async () => childSession,
 				onRelease: options.onRelease,
 			});
-			owner = AgentLifecycleManager.global();
+			owner = localLifecycle();
 			releasing = owner.release(options.id);
 			await disposeStarted.promise;
 			// Teardown with a deadline it cannot meet: the release stays in

@@ -2,11 +2,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
-import { AgentRegistry, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import { AgentRegistry, type AgentRegistryApi, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { registerPersistedSubagents } from "@oh-my-pi/pi-coding-agent/registry/persisted-agents";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { createReleaseHold } from "@oh-my-pi/pi-coding-agent/utils/release-hold";
+import type { AgentSessionHandle } from "@oh-my-pi/pi-coding-agent/session/agent-session-handle";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { localLifecycle } from "../helpers/local-lifecycle";
 
 interface SessionStub {
 	session: AgentSession;
@@ -41,14 +43,14 @@ async function flushAsync(): Promise<void> {
 const TTL = 20;
 
 describe("AgentLifecycleManager", () => {
-	let registry: AgentRegistry;
+	let registry: AgentRegistryApi;
 	let lifecycle: AgentLifecycleManager;
 
 	beforeEach(() => {
 		AgentRegistry.resetGlobalForTests();
 		AgentLifecycleManager.resetGlobalForTests();
 		registry = AgentRegistry.global();
-		lifecycle = AgentLifecycleManager.global();
+		lifecycle = localLifecycle();
 	});
 	afterEach(() => {
 		vi.useRealTimers();
@@ -542,7 +544,7 @@ describe("AgentLifecycleManager", () => {
 		await flushAsync();
 		await lifecycle.dispose(Date.now());
 
-		const replacement = AgentLifecycleManager.global();
+		const replacement = localLifecycle();
 		expect(replacement).not.toBe(lifecycle);
 		expect(replacement.owesRelease("Late-Sub")).toBe(true);
 		expect(await replacement.reclaimDeadCorpse("Late-Sub", ref)).toBe(false);
@@ -596,6 +598,30 @@ describe("AgentLifecycleManager", () => {
 
 		gate.resolve();
 		await disposing;
+	});
+
+	it("keeps the release hook when a dead thread's warm reviver is dropped, through cold revival", async () => {
+		const manager = new AgentLifecycleManager(registry);
+		const warm = makeSessionStub();
+		const revived = makeSessionStub();
+		const releaseWorkspace = vi.fn(async () => {});
+		const warmReviver = async () => warm.session;
+		const ref = registerIdleSub("Iso-Sub", warm.session);
+		manager.adopt("Iso-Sub", { idleTtlMs: 0, revive: warmReviver, onRelease: releaseWorkspace }, ref);
+		// The session's worker died: the bridge parks the ref, then drops the reviver that lived there.
+		registry.detachSession("Iso-Sub", ref);
+		registry.setStatus("Iso-Sub", "parked", ref);
+		expect(manager.forgetReviver("Iso-Sub", warmReviver)).toBe(true);
+		manager.setPersistedSubagentReviverFactory(
+			async () => async () => revived.session,
+			() => 0,
+		);
+
+		expect(await manager.ensureLive("Iso-Sub")).toBe(revived.session);
+		await manager.release("Iso-Sub");
+
+		expect(revived.disposeCalls()).toBe(1);
+		expect(releaseWorkspace).toHaveBeenCalledTimes(1);
 	});
 
 	it("does not let one stuck adopted agent block sibling disposal", async () => {
@@ -1007,7 +1033,7 @@ describe("AgentLifecycleManager", () => {
 			sessionFile: null,
 			status: "running",
 		});
-		let observed: { status: string; session: AgentSession | null } | undefined;
+		let observed: { status: string; session: AgentSessionHandle | null } | undefined;
 		const unsubscribe = registry.onChange(event => {
 			if (event.type === "status_changed" && event.ref.id === ref.id) {
 				observed = { status: event.ref.status, session: event.ref.session };
