@@ -297,48 +297,43 @@ pub(crate) struct CommandWords {
 /// split (`${VARNAME}` from `lookup`, the environment `env` receives), then
 /// the words after the options, a leading `-` and the `NAME=VALUE`
 /// assignments. `None` when it runs none: it prints the environment, refuses
-/// its arguments, never stops splitting, or splits a `${VARNAME}` while the
+/// its arguments, never stops splitting, is still splitting at `deadline`
+/// (when GNU `env`, which does at least as much work per round, would be too,
+/// and dies of the limit's signal), or splits a `${VARNAME}` while the
 /// environment it receives is not `known` (an earlier `--env0-from -`).
 #[cfg(feature = "util.timeout")]
 pub(crate) fn command_words(
 	argv: &[String],
 	known: bool,
+	deadline: Option<std::time::Instant>,
 	mut lookup: impl FnMut(&str) -> Option<String>,
 ) -> Option<CommandWords> {
-	/// A split string past this many bytes is a program argument too long
-	/// to exec on Linux (`MAX_ARG_STRLEN`), so such a split leaves `env` no
-	/// command it could run.
-	const MAX_SPLIT_STRING: usize = 128 * 1024;
 	/// An argument list past this many bytes cannot be exec'd on Linux
-	/// (`ARG_MAX` with the default stack limit).
+	/// (`ARG_MAX` with the default stack limit), so `env` runs no command.
+	/// It also bounds the memory a growing split can take here.
 	const MAX_ARGV_BYTES: usize = 2 * 1024 * 1024;
-	/// Rounds in a row that split at one place without shrinking the
-	/// argument list. Only `${VARNAME}` makes such a round, and with the
-	/// variables fixed a chain of them repeats or grows without end.
-	const MAX_STALLED_ROUNDS: usize = 64;
-	/// Argument words the splitting may move or hash before the classifier
-	/// stops following it (GNU's own rescan is quadratic too).
-	const MAX_WORK: usize = 1 << 29;
 
 	let argv = Env::rewrite_argv(argv.iter().map(OsString::from).collect()).ok()?;
 	let matches = match <Env as clap::Parser>::try_parse_from(argv).ok()?.parsed {
 		Parsed::Matches(matches) => matches,
 		Parsed::SplitString(mut argv) => {
 			// Each round splits one `-S` and splices its words in where it
-			// was, as GNU's `getopt` rescan sees them; the options before it
-			// stay as they were, so the next round scans on from there. A
-			// round that splits further on, or shrinks the argument list,
-			// makes progress. One that does neither can only repeat an
-			// earlier argument list or grow it, and GNU `env`, and this one
-			// until it is cancelled, never stop.
+			// was, as GNU's `getopt` rescan sees them. The options before it
+			// are already scanned, so what the rounds do next depends only on
+			// the state at that option boundary: the words from there on, and
+			// whether `-v` came before. With the variables fixed the rounds
+			// are deterministic, so a state seen before means they never stop.
+			// Brent's algorithm finds such a repeat exactly, comparing each
+			// state with one kept checkpoint.
 			let mut bytes: usize = argv.iter().map(|word| word.len()).sum();
-			let (mut start, mut debug, mut place) = (1, false, 0);
-			let (mut stalled, mut seen, mut work) = (0, Vec::<u64>::new(), 0_usize);
+			let (mut start, mut debug) = (1, false);
+			let mut checkpoint: Option<(Vec<OsString>, bool)> = None;
+			let (mut power, mut since_checkpoint) = (1_usize, 0_usize);
 			while let Some(found) = scan_options_from(&argv, start, debug) {
 				let Found::SplitString(split) = found else {
 					return None;
 				};
-				if split.string.len() > MAX_SPLIT_STRING || bytes > MAX_ARGV_BYTES {
+				if deadline.is_some_and(|at| std::time::Instant::now() >= at) {
 					return None;
 				}
 				let mut names_variable = false;
@@ -351,30 +346,22 @@ pub(crate) fn command_words(
 				let removed: usize = argv[index..index + split.words].iter().map(|word| word.len()).sum();
 				let added = split.prefix.as_ref().map_or(0, |prefix| prefix.len())
 					+ words.iter().map(Vec::len).sum::<usize>();
-				let shrank = added < removed;
-				work += argv.len() - index + words.len();
 				splice_split(&mut argv, split, &words);
 				bytes = bytes - removed + added;
-				if index > place || shrank {
-					stalled = 0;
-					seen.clear();
-				} else {
-					stalled += 1;
-					work += argv.len() - index;
-					let state = {
-						let mut hasher = std::hash::DefaultHasher::new();
-						std::hash::Hash::hash(&argv[index..], &mut hasher);
-						std::hash::Hasher::finish(&hasher)
-					};
-					if stalled > MAX_STALLED_ROUNDS || seen.contains(&state) {
-						return None;
-					}
-					seen.push(state);
-				}
-				if work > MAX_WORK {
+				if bytes > MAX_ARGV_BYTES {
 					return None;
 				}
-				(start, debug, place) = (index, resume_debug, index);
+				(start, debug) = (index, resume_debug);
+				let tail = &argv[index..];
+				if checkpoint.as_ref().is_some_and(|(kept, kept_debug)| *kept_debug == debug && kept.as_slice() == tail) {
+					return None;
+				}
+				since_checkpoint += 1;
+				if since_checkpoint == power {
+					checkpoint = Some((tail.to_vec(), debug));
+					power *= 2;
+					since_checkpoint = 0;
+				}
 			}
 			app().try_get_matches_from(argv).ok()?
 		},

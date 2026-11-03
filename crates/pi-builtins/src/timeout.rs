@@ -357,6 +357,9 @@ struct Follow<'a> {
 	/// A file not yet in `files` that the classification needs.
 	missing:     Option<PathBuf>,
 	inner:       Vec<InnerTimeout>,
+	/// When the limit fires: classification still under way then stops, as
+	/// GNU `env` still splitting then dies of the signal.
+	deadline:    Option<std::time::Instant>,
 }
 
 impl Follow<'_> {
@@ -400,19 +403,25 @@ impl Follow<'_> {
 				None
 			},
 			Some(env0) => {
-				// The next `env` sees one value per name, the first.
+				// The next `env` sees one value per name, the first that has
+				// one: an entry without `=` holds no variable (`getenv` skips
+				// it), so it hides no later assignment.
 				let known = self.environment.take();
 				let mut initial: Vec<Vec<u8>> = Vec::new();
 				for entry in known.iter().flatten() {
-					let name = entry.split(|&byte| byte == b'=').next().unwrap_or_default();
-					if !initial.iter().any(|kept| kept.split(|&byte| byte == b'=').next() == Some(name)) {
+					let Some(equals) = entry.iter().position(|&byte| byte == b'=') else {
+						continue;
+					};
+					let name = &entry[..=equals];
+					if !initial.iter().any(|kept| kept.starts_with(name)) {
 						initial.push(entry.clone());
 					}
 				}
 				// Built even when the environment is unknown: `env` refuses an
-				// unterminated file or a bad unset name either way.
+				// unterminated file or a bad unset name either way. `-i` drops
+				// what `env` received, so its own entries are known again.
 				let passed = crate::env::passed_environment(initial, command, env0)?;
-				known.is_some().then_some(passed)
+				(known.is_some() || command.clear_env).then_some(passed)
 			},
 		};
 		if let Some(directory) = &command.chdir {
@@ -625,6 +634,7 @@ fn report(
 async fn classify_operand<SE: brush_core::ShellExtensions>(
 	shell: &brush_core::Shell<SE>,
 	words: &[String],
+	deadline: Option<std::time::Instant>,
 ) -> Classified {
 	let mut files = HashMap::new();
 	loop {
@@ -639,6 +649,7 @@ async fn classify_operand<SE: brush_core::ShellExtensions>(
 			files:       &files,
 			missing:     None,
 			inner:       Vec::new(),
+			deadline,
 		};
 		let operand = classify_line(shell, words, &[], &mut follow);
 		let Follow { missing, inner, .. } = follow;
@@ -853,7 +864,9 @@ fn handoff(words: &[String], follow: &Follow<'_>) -> Option<Handoff> {
 			.then_some(Handoff::Simple(command.command_and_args))
 		},
 		#[cfg(feature = "util.env")]
-		"env" => crate::env::command_words(words, follow.environment.is_some(), |name| follow.lookup(name))
+		"env" => crate::env::command_words(words, follow.environment.is_some(), follow.deadline, |name| {
+			follow.lookup(name)
+		})
 		.map(Handoff::Environment),
 		#[cfg(feature = "util.nohup")]
 		"nohup" => <crate::nohup::NohupCommand as builtins::Command>::new(words.iter().cloned())
@@ -965,6 +978,10 @@ impl builtins::Command for TimeoutCommand {
 		params.set_quiet_cancellation(true);
 		params.set_spawn_observer(Arc::clone(&spawns) as Arc<dyn SpawnObserver>);
 
+		// The limit runs from here, before the classification below, so a
+		// slow classification never delays it. GNU: a duration of zero
+		// disables the timeout entirely.
+		let deadline_at = (!limit.is_zero()).then(|| time::Instant::now() + limit);
 		let command_line = crate::host::operand_command_line(&args.command, |word, command_position| {
 			context.shell.expand_command_alias(word, command_position).map(|(words, next)| (words.len(), next))
 		});
@@ -972,8 +989,11 @@ impl builtins::Command for TimeoutCommand {
 		// runs the operand itself, or a utility in-process, no signal reaches
 		// them: when the signal would end them the limit has to cancel the
 		// operand, or `eval 'sleep 5; next'` runs `next` once the signal has
-		// ended `sleep`.
-		let Classified { operand, inner } = classify_operand(context.shell, &args.command).await;
+		// ended `sleep`. Without a limit nothing reads the classification.
+		let Classified { operand, inner } = match deadline_at {
+			Some(at) => classify_operand(context.shell, &args.command, Some(at.into_std())).await,
+			None => Classified { operand: Operand::Program, inner: Vec::new() },
+		};
 
 		// Grab an owned stderr handle up front: `run_future` below holds the
 		// shell mutably, so `context.stderr()` is unavailable once it exists.
@@ -991,12 +1011,10 @@ impl builtins::Command for TimeoutCommand {
 		};
 		tokio::pin!(outer_cancelled);
 
-		// GNU: a duration of zero disables the timeout entirely.
 		let deadline = async {
-			if limit.is_zero() {
-				std::future::pending::<()>().await;
-			} else {
-				time::sleep(limit).await;
+			match deadline_at {
+				Some(at) => time::sleep_until(at).await,
+				None => std::future::pending::<()>().await,
 			}
 		};
 		tokio::pin!(deadline);
@@ -2327,7 +2345,7 @@ f() { /bin/sh -c "$r" | /bin/sh -c "$r; cat"; }
 		assert_eq!(ran.status, 0, "{}", ran.stderr);
 		for name in ["t", "u"] {
 			assert!(
-				classify_operand(&shell, &[name.to_owned()]).await.operand == Operand::Shell,
+				classify_operand(&shell, &[name.to_owned()], None).await.operand == Operand::Shell,
 				"alias {name} must classify as the shell"
 			);
 		}
@@ -2414,12 +2432,45 @@ f() { /bin/sh -c "$r" | /bin/sh -c "$r; cat"; }
 		assert!(wrong.is_empty(), "{wrong:#?}");
 	}
 
+	/// `env` splits a `-S` chain until it ends, however many rounds that
+	/// takes without the argument list shrinking: a 200-link chain of
+	/// variables (`V000='-S${V001}'` … `V200=/bin/sh`) still leaves GNU `env`
+	/// its program, whose TERM handler exits 3. A chain that comes back to an
+	/// earlier state never ends, under GNU too, so the limit fires on time
+	/// and finds `env` still splitting (124), even when the cycle's rounds
+	/// split strings of different lengths.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn env_split_chains_stop_exactly_when_gnu_env_stops() {
+		let links = 200;
+		let mut chain = String::new();
+		for link in 0..links {
+			chain.push_str(&format!("export V{link:03}='-S${{V{:03}}}'; ", link + 1));
+		}
+		let command = format!(
+			r#"{chain}export V{links:03}=/bin/sh; timeout --preserve-status -k 3 1 env -S '${{V000}}' -c 'trap "exit 3" TERM; /bin/sleep 3'"#
+		);
+		let wrong = rows_unlike_gnu(&[
+			("S7", command.as_str(), 3, ""),
+			(
+				"S8",
+				"export A='-S${LONG}' LONG='-S${A}'; timeout -k 1 .2 env -S '${A}'; echo status:$?",
+				0,
+				"status:124\n",
+			),
+		])
+		.await;
+		assert!(wrong.is_empty(), "{wrong:#?}");
+	}
+
 	/// An `env` wrapper changes the environment its nested `env` receives.
 	/// The classifier must use that changed environment for `${VARNAME}` in
 	/// the nested `-S` string, also the entries an `--env0-from` file gives
 	/// (GNU coreutils 9.4 has no `--env0-from`; its analog assigns them).
 	/// Otherwise it takes the program path when brush runs `eval`, and
-	/// `eval` starts `late` after the limit.
+	/// `eval` starts `late` after the limit. An `env -i` after an
+	/// `--env0-from` stream knows its environment again (E8), and a file
+	/// entry without `=` holds no variable, so it hides no later one (E9).
 	#[cfg(unix)]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn nested_env_changes_the_environment_of_a_nested_split_string() {
@@ -2465,6 +2516,18 @@ f() { /bin/sh -c "$r" | /bin/sh -c "$r; cat"; }
 				r#"printf 'P=eval\0P=/bin/sh\0' >envfile; timeout --preserve-status -k 4 .3 env -i --env0-from=envfile env -S '${P} "/bin/sleep 2; echo late > marker"'; s=$?; if test -e marker; then printf marker-created\\n; fi; printf status:$s\\n"#,
 				0,
 				"status:143\n",
+			),
+			(
+				"E8",
+				r#"printf 'IGNORED=x\0' | timeout --preserve-status -k 3 1 env --env0-from=- env -i P=/bin/sh env -S '${P} -c "trap \"exit 3\" TERM; /bin/sleep 3"'"#,
+				3,
+				"",
+			),
+			(
+				"E9",
+				r#"printf 'P\0P=/bin/sh\0' >envfile; timeout --preserve-status -k 3 1 env -i --env0-from=envfile env env -S '${P} -c "trap \"exit 3\" TERM; /bin/sleep 3"'"#,
+				3,
+				"",
 			),
 		])
 		.await;
