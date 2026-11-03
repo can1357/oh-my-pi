@@ -118,7 +118,7 @@
 ### Fixed
 
 - Browser: a headless Chrome launched in-process by an SDK embedding or a `bun test` run now exits when that process is killed, instead of running on with its temporary profile on Linux and macOS ([#17908](https://github.com/can1357/oh-my-pi/pull/17908) by [@will-bogusz](https://github.com/will-bogusz))
-- Extension message renderers can return a component that implements `isTranscriptBlockCompact()`; consecutive compact messages then draw without blank rows between them in the terminal and without gaps in Tern ([#17997](https://github.com/can1357/oh-my-pi/pull/17997) by [@materemias](https://github.com/materemias))
+- Consecutive compact transcript blocks draw as tight rows: no blank rows between them in the terminal (scrollback included) and no gaps in Tern. This covers blocks a transcript presenter draws compact and extension message renderers whose component implements `isTranscriptBlockCompact()` ([#17997](https://github.com/can1357/oh-my-pi/pull/17997) by [@materemias](https://github.com/materemias))
 
 ## [18.16.0] - 2026-11-02
 

@@ -1,6 +1,8 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import { createCustomMessage } from "@oh-my-pi/pi-agent-core/compaction/messages";
 import { CustomMessageComponent } from "@oh-my-pi/pi-tui/chat/custom-message";
+import { stopSharedSpinnerTicker, ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
+import { messageBlock, PresentedBlock, setTranscriptPresenters } from "@oh-my-pi/pi-tui/chat/transcript-presentation";
 import { type CompactTranscriptBlock, TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { Component } from "@oh-my-pi/pi-tui";
@@ -145,6 +147,85 @@ describe("TranscriptContainer compact packing", () => {
 		transcript.addChild(new CustomMessageComponent(message("two"), renderer));
 		transcript.addChild(plain("note"));
 		expect(transcript.render(40)).toEqual(["one", "two", "", "note"]);
+	});
+
+	it("packs blocks a transcript presenter compacts, and separates one the user expands", () => {
+		const ui = { requestRender: () => {}, requestComponentRender: () => {}, resetDisplay: () => {} };
+		setTranscriptPresenters([() => "compact"]);
+		const tools = ["one", "two", "three"].map((word, index) => {
+			const tool = new ToolExecutionComponent("bash", { command: `echo ${word}` }, {}, undefined, ui);
+			tool.setArgsComplete(`call-${index}`);
+			tool.setExecutionStarted(`call-${index}`);
+			tool.updateResult({ content: [{ type: "text", text: word }], isError: false });
+			return tool;
+		});
+		const skill = new PresentedBlock(
+			plain("skill body"),
+			messageBlock(createCustomMessage("skill-prompt", "body", true, { name: "unslop" }, "2026-01-01")),
+		);
+		try {
+			const transcript = new TranscriptContainer();
+			transcript.addChild(tools[0]!);
+			transcript.addChild(skill);
+			transcript.addChild(tools[1]!);
+			transcript.addChild(tools[2]!);
+			const packed = transcript.render(80).map(row => Bun.stripANSI(row));
+			expect(packed).toHaveLength(4);
+			expect(packed[1]).toContain("unslop");
+
+			// Ctrl+O on one call draws its full card, set apart from the compact rows around it.
+			tools[1]!.setExpanded(true);
+			const expanded = transcript.render(80).map(row => Bun.stripANSI(row));
+			expect(expanded.length).toBeGreaterThan(6);
+			expect(expanded[2]).toBe("");
+			expect(expanded.at(-2)).toBe("");
+			tools[1]!.setExpanded(false);
+
+			// A wrapped block drawn in full packs only as its inner block does.
+			skill.setExpanded(true);
+			expect(
+				transcript
+					.render(80)
+					.map(row => Bun.stripANSI(row))
+					.slice(1, 5),
+			).toEqual(["", "skill body", "", expect.stringContaining("echo two")]);
+		} finally {
+			setTranscriptPresenters([]);
+			for (const tool of tools) tool.dispose();
+			stopSharedSpinnerTicker();
+		}
+	});
+
+	it("keeps a squeezed compact block's head first, and stops packing one squeezed to nothing", () => {
+		setTranscriptPresenters([() => ({ compact: { rows: ["row one", "row two"] } })]);
+		try {
+			const skill = new PresentedBlock(
+				plain("skill body"),
+				messageBlock(createCustomMessage("skill-prompt", "body", true, { name: "unslop" }, "2026-01-01")),
+			);
+			skill.setTranscriptAllocation(2, frame);
+			const rows = skill.render(40).map(row => Bun.stripANSI(row).trimEnd());
+			expect(rows).toEqual(["• Skill unslop", "  row one"]);
+			expect(skill.isTranscriptBlockCompact()).toBe(true);
+
+			skill.setTranscriptAllocation(0, frame);
+			expect(skill.render(40)).toEqual([]);
+			expect(skill.isTranscriptBlockCompact()).toBe(false);
+
+			const ui = { requestRender: () => {}, requestComponentRender: () => {}, resetDisplay: () => {} };
+			const tool = new ToolExecutionComponent("bash", { command: "echo one" }, {}, undefined, ui);
+			try {
+				tool.setArgsComplete("call-squeezed");
+				tool.setTranscriptAllocation(0, frame);
+				expect(tool.render(40)).toEqual([]);
+				expect(tool.isTranscriptBlockCompact()).toBe(false);
+			} finally {
+				tool.dispose();
+				stopSharedSpinnerTicker();
+			}
+		} finally {
+			setTranscriptPresenters([]);
+		}
 	});
 
 	it("retires compact runs under pressure without duplicating, dropping or adding a row", () => {

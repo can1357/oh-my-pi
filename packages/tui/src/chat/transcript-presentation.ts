@@ -11,7 +11,7 @@ import { card, col, node, span, text, withHidden } from "../native/describe";
 import { type DescribeContext, type NativeNode, type NativeUiEvent, rootToggleExpanded } from "../native/node";
 import { Memo } from "../native/memo";
 import { plainLine, plainText, spansLine } from "../native/spans";
-import type { AnimationFrame } from "../chrome/transcript-container";
+import type { AnimationFrame, CompactTranscriptBlock } from "../chrome/transcript-container";
 import type { DaemonSnapshot } from "../tools/daemon";
 import type { TranscriptBlock, TranscriptPresentation, TranscriptPresenter } from "./extension-types";
 import type { LateDiagnosticsFile } from "./late-diagnostics-message";
@@ -511,7 +511,7 @@ function blockHead(block: WrappedTranscriptBlock): BlockHead {
 }
 
 /** Transcript hooks a wrapped component may have; the wrapper forwards the ones it has. */
-interface WrappedComponent extends Component {
+interface WrappedComponent extends Component, CompactTranscriptBlock {
 	setExpanded?(expanded: boolean): void;
 	/**
 	 * Whether the user expanded it, including through a nested disclosure no root toggle reports
@@ -610,11 +610,19 @@ export class PresentedBlock<T extends WrappedComponent = WrappedComponent>
 		this.inner.setTranscriptAllocation?.(rows, frame);
 	}
 
+	/** Compact while drawn as compact rows; in full, as compact as `inner` says. */
+	isTranscriptBlockCompact(): boolean {
+		const mode = this.#presentation.shown.mode;
+		if (mode === "full") return this.inner.isTranscriptBlockCompact?.() === true;
+		return mode === "compact" && this.#toolActivityVisible && this.#allocation > 0;
+	}
+
 	/** The cached head row carries theme colours and glyphs. */
 	override invalidate(): void {
 		this.#head = undefined;
 		super.invalidate();
 	}
+
 	override render(width: number): readonly string[] {
 		const shown = this.#presentation.draw();
 		if (shown.mode === "full") return super.render(width);
