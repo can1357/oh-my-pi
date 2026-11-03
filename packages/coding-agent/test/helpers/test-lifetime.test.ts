@@ -56,7 +56,7 @@ function lateWriteAfter(setup: string): string {
 	return `
 		import { expect } from "bun:test";
 		import * as vm from "node:vm";
-		import { trackTestLifetime, noteTimeout } from HELPER;
+		import { trackTestLifetime } from HELPER;
 		const { test, onTestFinished } = trackTestLifetime();
 		const shared = { key: "initial" };
 		${setup}
@@ -180,6 +180,8 @@ describe("trackTestLifetime", () => {
 				test("an async test", () => Bun.sleep(1));
 				it.each([1, 2])("row %d", async () => {});
 				test.skip("a skipped test", () => {});
+				test.skip("a bodyless skipped test");
+				test.todo("a bodyless todo");
 				test("a synchronous test", () => {});
 			`,
 		});
@@ -227,9 +229,9 @@ describe("trackTestLifetime", () => {
 			// A helper module like fake-clock: imported first, its hook runs before the file's teardown hooks.
 			"slow-hook.ts": `
 				import { afterEach } from "bun:test";
-				import { noteTimeout } from HELPER;
+				import { noteTeardown } from HELPER;
 				afterEach(async () => {
-					noteTimeout();
+					noteTeardown();
 					await Bun.sleep(400);
 				});
 			`,
@@ -247,16 +249,19 @@ describe("trackTestLifetime", () => {
 
 	test("refuses a test or hook written in done-callback style instead of letting it pass before it is done", async () => {
 		const runs = await Promise.all(
-			['test("calls done", done => setTimeout(done, 50));', "beforeEach(done => setTimeout(done, 50));"].map(
-				declaration =>
-					runFixtures({
-						"callback.test.ts": `
+			[
+				'test("calls done", done => setTimeout(done, 50));',
+				"beforeEach(done => setTimeout(done, 50));",
+				'test.each([[1], [2]])("row %d calls done", (_row, done) => setTimeout(done, 50));',
+			].map(declaration =>
+				runFixtures({
+					"callback.test.ts": `
 							import { trackTestLifetime } from HELPER;
 							const { test, beforeEach } = trackTestLifetime();
 							${declaration}
 							test("declared after it", () => {});
 						`,
-					}),
+				}),
 			),
 		);
 
@@ -265,5 +270,36 @@ describe("trackTestLifetime", () => {
 			expect(run.outcome("declared after it")).not.toBe("pass");
 			expect(run.exitCode).not.toBe(0);
 		}
+	}, 60_000);
+
+	test("refuses later results after a .each row times out", async () => {
+		const run = await runFixtures({
+			"each.test.ts": lateWriteAfter(`
+				test.each([[400]])("row holding %dms", async ms => {
+					await Bun.sleep(ms);
+					shared.key = "stale";
+				}, 100);
+			`),
+		});
+
+		expect(run.outcome("passes only on the late write")).toBe("fail");
+		expect(run.output).toContain(refusal("row holding %dms"));
+	}, 60_000);
+
+	test("refuses concurrent tests plainly instead of reporting a timeout", async () => {
+		const run = await runFixtures({
+			"concurrent.test.ts": `
+				import { describe } from "bun:test";
+				import { trackTestLifetime } from HELPER;
+				const { test } = trackTestLifetime();
+				describe.concurrent("run together", () => {
+					test("a", () => Bun.sleep(150));
+					test("b", () => Bun.sleep(150));
+				});
+			`,
+		});
+
+		expect(run.output).toContain("tracked files run their tests one at a time");
+		expect(run.output).not.toContain("timed out and may still be running");
 	}, 60_000);
 });
