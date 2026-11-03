@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed X11 takeover into a window that background keyboard input had targeted failing for the rest of the session ("did not become the active, focused window" or "takeover target lost focus during input") under window managers that track focus by core focus events, such as Openbox
+- Fixed X11 takeover into a window that background keyboard input had targeted failing for the rest of the session ("did not become the active, focused window" or "takeover target lost focus during input") under window managers that track focus by core focus events, such as Openbox ([#17910](https://github.com/can1357/oh-my-pi/pull/17910) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.16.0] - 2026-11-02
 
