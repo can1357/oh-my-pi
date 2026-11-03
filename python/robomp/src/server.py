@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
@@ -376,19 +377,37 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
     @app.post("/webhook/github")
     async def webhook(
         request: Request,
-        x_github_event: str = Header(..., alias="X-GitHub-Event"),
+        x_github_event: str | None = Header(None, alias="X-GitHub-Event"),
+        x_gitea_event: str | None = Header(None, alias="X-Gitea-Event"),
+        x_forgejo_event: str | None = Header(None, alias="X-Forgejo-Event"),
         x_github_delivery: str | None = Header(None, alias="X-GitHub-Delivery"),
         x_gitea_delivery: str | None = Header(None, alias="X-Gitea-Delivery"),
         x_forgejo_delivery: str | None = Header(None, alias="X-Forgejo-Delivery"),
         x_hub_signature_256: str | None = Header(None, alias="X-Hub-Signature-256"),
+        x_gitea_signature: str | None = Header(None, alias="X-Gitea-Signature"),
+        x_forgejo_signature: str | None = Header(None, alias="X-Forgejo-Signature"),
     ) -> JSONResponse:
         bag = request.app.state.bag
         cfg: Settings = bag["settings"]
         body = await request.body()
+        # Event header: GitHub native name, then Gitea/Forgejo variants.
+        event = x_github_event or x_gitea_event or x_forgejo_event
+        if not event:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "missing event header (X-GitHub-Event, X-Gitea-Event, or X-Forgejo-Event)",
+            )
+        # Signature: GitHub sends `sha256=<hex>`; Gitea/Forgejo send the bare
+        # hex digest of HMAC-SHA256(body) under the same shared secret.
+        signature = x_hub_signature_256
+        if signature is None:
+            raw_digest = x_gitea_signature or x_forgejo_signature
+            if raw_digest is not None and re.fullmatch(r"[0-9a-f]{64}", raw_digest, re.IGNORECASE):
+                signature = f"sha256={raw_digest.lower()}"
         if not github_events.verify_signature(
             cfg.github_webhook_secret.get_secret_value(),
             body,
-            x_hub_signature_256,
+            signature,
         ):
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid signature")
         try:
@@ -427,16 +446,16 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
         db: Database = bag["db"]
         issue_cache: _IssueBrowseCache = bag["issue_browse_cache"]
         await issue_cache.apply_webhook(
-            event_type=x_github_event,
+            event_type=event,
             payload=payload,
             allowlist=cfg.repo_allowlist,
         )
         # Keep the local search index fresh from every delivery that carries an
         # issue/PR object — including ones the router will skip.
-        if x_github_event in ("issues", "issue_comment") or x_github_event.startswith("pull_request"):
+        if event in ("issues", "issue_comment") or event.startswith("pull_request"):
             if repo_full and repo_full in cfg.repo_allowlist:
                 try:
-                    issue_index.ingest_webhook_payload(db, repo_full, x_github_event, payload)
+                    issue_index.ingest_webhook_payload(db, repo_full, event, payload)
                 except Exception:
                     log.exception("issue index webhook ingest failed", extra={"repo": repo_full})
 
@@ -445,7 +464,7 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
             return row.key if row else None
 
         decision = github_events.route(
-            x_github_event,
+            event,
             payload,
             allowlist=cfg.repo_allowlist,
             bot_login=cfg.bot_login,
@@ -465,12 +484,12 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
         if decision.issue_key:
             cancel_reason: str | None = None
             if (
-                x_github_event == "issue_comment"
+                event == "issue_comment"
                 and str(payload.get("action") or "") == "created"
                 and decision.task == "handle_comment"
             ):
                 cancel_reason = "user_replied"
-            elif x_github_event == "issues" and str(payload.get("action") or "") == "closed":
+            elif event == "issues" and str(payload.get("action") or "") == "closed":
                 cancel_reason = "externally_closed"
             if cancel_reason is not None:
                 cancelled = db.cancel_pending_closure(decision.issue_key, reason=cancel_reason)
@@ -480,7 +499,7 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
                         extra={
                             "issue_key": decision.issue_key,
                             "reason": cancel_reason,
-                            "event": x_github_event,
+                            "event": event,
                         },
                     )
 
@@ -496,10 +515,10 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
             }
 
         if not decision.should_queue:
-            log.info("skip", extra={"event": x_github_event, "reason": decision.reason})
+            log.info("skip", extra={"event": event, "reason": decision.reason})
             db.record_event(
                 delivery_id=delivery_id,
-                event_type=x_github_event,
+                event_type=event,
                 repo=decision.repo,
                 issue_key=decision.issue_key,
                 payload=payload,
@@ -535,7 +554,7 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
                 log.info(
                     "rate_limited",
                     extra={
-                        "event": x_github_event,
+                        "event": event,
                         "delivery": delivery_id,
                         "login": submitter,
                         "association": decision.association,
@@ -545,7 +564,7 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
                 )
                 db.record_event(
                     delivery_id=delivery_id,
-                    event_type=x_github_event,
+                    event_type=event,
                     repo=decision.repo,
                     issue_key=decision.issue_key,
                     payload=payload,
@@ -560,7 +579,7 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
 
         inserted = db.record_event(
             delivery_id=delivery_id,
-            event_type=x_github_event,
+            event_type=event,
             repo=decision.repo,
             issue_key=decision.issue_key,
             payload=payload,
@@ -570,9 +589,9 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
         if inserted:
             pool: _AppPool = bag["pool"]
             pool.wake()
-            log.info("queued", extra={"event": x_github_event, "delivery": delivery_id, "key": decision.issue_key})
+            log.info("queued", extra={"event": event, "delivery": delivery_id, "key": decision.issue_key})
         else:
-            log.info("duplicate", extra={"event": x_github_event, "delivery": delivery_id})
+            log.info("duplicate", extra={"event": event, "delivery": delivery_id})
         return JSONResponse({"delivery": delivery_id, "state": "queued"}, status_code=202)
 
     @app.post("/replay")

@@ -119,6 +119,16 @@ class GitHubProxyClient:
         self._timeout = httpx.Timeout(timeout, connect=10.0)
         self._platform = platform
 
+    @property
+    def max_page_size(self) -> int:
+        """Largest per-page size the upstream honors (100 GitHub, 50 Forgejo)."""
+        return 50 if self._platform == "forgejo" else 100
+
+    @property
+    def platform(self) -> str:
+        """Upstream platform name: ``github`` or ``forgejo``."""
+        return self._platform
+
     def _async_client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(
             base_url=self._base_url,

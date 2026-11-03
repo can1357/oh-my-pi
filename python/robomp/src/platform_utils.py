@@ -6,12 +6,10 @@ event queue, issue index sync) doesn't duplicate inline checks.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 from robomp.config import Settings
-
-if TYPE_CHECKING:
-    from robomp.github_backend import GitHubBackend
+from robomp.github_backend import GitHubBackend
+from robomp.proxy_client import GitHubProxyClient, ProxyGitTransport
+from robomp.sandbox import GitTransport
 
 
 def resolve_token_for_platform(cfg: Settings, platform: str) -> str:
@@ -71,13 +69,11 @@ def create_proxy_backend(cfg: Settings, platform: str) -> GitHubBackend | None:
     """
     if platform == "forgejo":
         base_url, key = proxy_credentials(cfg)
-        from robomp.proxy_client import GitHubProxyClient
-
         return GitHubProxyClient(base_url=base_url, hmac_key=key, platform="forgejo")
     return None
 
 
-def create_git_transport(cfg: Settings, platform: str):
+def create_git_transport(cfg: Settings, platform: str) -> GitTransport | None:
     """Return a git transport (ProxyGitTransport) for the given platform.
 
     For ``github``, returns None (caller should use its cached singleton).
@@ -85,7 +81,5 @@ def create_git_transport(cfg: Settings, platform: str):
     """
     if platform == "forgejo":
         base_url, key = proxy_credentials(cfg)
-        from robomp.proxy_client import ProxyGitTransport
-
         return ProxyGitTransport(base_url=base_url, hmac_key=key, platform="forgejo")
     return None

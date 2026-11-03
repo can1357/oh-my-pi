@@ -1190,6 +1190,80 @@ def test_webhook_github_delivery_records_github_platform(settings: Settings, stu
     assert event.platform == "github"
 
 
+@pytest.mark.parametrize("native", ["Gitea", "Forgejo"])
+@pytest.mark.parametrize("digest_case", ["lower", "upper"])
+def test_webhook_accepts_native_event_and_raw_signature(settings: Settings, native: str, digest_case: str) -> None:
+    body = json.dumps(
+        {
+            "action": "opened",
+            "issue": {"number": 605, "user": {"login": "alice"}},
+            "repository": {"full_name": "octo/widget"},
+        }
+    ).encode()
+    digest = hmac.new(b"test-webhook-secret", body, hashlib.sha256).hexdigest()
+    if digest_case == "upper":
+        digest = digest.upper()
+    delivery = f"native-{native}-{digest_case}"
+    with TestClient(_create_app(settings)) as client:
+        response = client.post(
+            "/webhook/github",
+            content=body,
+            headers={
+                f"X-{native}-Event": "issues",
+                f"X-{native}-Delivery": delivery,
+                f"X-{native}-Signature": digest,
+                "Content-Type": "application/json",
+            },
+        )
+        assert response.status_code == 202, response.text
+        assert response.json() == {"delivery": delivery, "state": "queued"}
+        event = get_database(settings.sqlite_path).get_event(delivery)
+        assert event is not None
+        assert event.event_type == "issues"
+        assert event.platform == "forgejo"
+        assert event.repo == "octo/widget"
+
+
+@pytest.mark.parametrize("native", ["Gitea", "Forgejo"])
+@pytest.mark.parametrize("github_signature_valid", [True, False])
+def test_webhook_github_headers_take_precedence_over_native_headers(
+    settings: Settings, native: str, github_signature_valid: bool
+) -> None:
+    body = json.dumps(
+        {
+            "action": "opened",
+            "issue": {"number": 606, "user": {"login": "alice"}},
+            "repository": {"full_name": "octo/widget"},
+        }
+    ).encode()
+    digest = hmac.new(b"test-webhook-secret", body, hashlib.sha256).hexdigest()
+    headers = _signed_headers("test-webhook-secret", body, event="issues", delivery="github-wins")
+    headers.update(
+        {
+            f"X-{native}-Event": "ping",
+            f"X-{native}-Delivery": "native-loses",
+            f"X-{native}-Signature": "0" * 64 if github_signature_valid else digest,
+        }
+    )
+    if not github_signature_valid:
+        headers["X-Hub-Signature-256"] = "sha256=" + "0" * 64
+    with TestClient(_create_app(settings)) as client:
+        response = client.post("/webhook/github", content=body, headers=headers)
+        db = get_database(settings.sqlite_path)
+        assert db.get_event("native-loses") is None
+        event = db.get_event("github-wins")
+        if github_signature_valid:
+            assert response.status_code == 202, response.text
+            assert response.json() == {"delivery": "github-wins", "state": "queued"}
+            assert event is not None
+            assert event.event_type == "issues"
+            assert event.platform == "forgejo"
+        else:
+            assert response.status_code == 401
+            assert response.json()["detail"] == "invalid signature"
+            assert event is None
+
+
 def test_webhook_missing_delivery_header_returns_400(settings: Settings, stub_dispatch) -> None:
     """A validly-signed request with no delivery-id header at all must be rejected 400."""
     app = create_app(settings)
@@ -1376,6 +1450,7 @@ def _make_issues_handler(
         "per_page": str(expected_limit),
         "sort": "updated",
         "direction": "desc",
+        "page": "1",
     }
 
     def handler(request: httpx.Request) -> httpx.Response:
