@@ -4138,28 +4138,32 @@ export class AgentSession implements SettingsScope {
 		this.#trackPostPromptTask(promise);
 		// The run's end-of-turn maintenance, without the revocation ack: an interrupt waits for this
 		// before it lets later work in, and waits for the ack only after that (see `abort`).
-		const maintenance = Promise.withResolvers<void>();
-		this.#inFlightAgentEndMaintenance.add(maintenance.promise);
-		this.#postPromptTaskCores.set(promise, maintenance.promise);
+		// Maintenance starts now, not behind the revocation ack: it classifies this run's end
+		// against live abort state, and a deferred start lets `abort()` settle first, so a
+		// deliberate empty abort reads as a reasonless one and is auto-retried.
+		const maintenance = (async () => {
+			try {
+				await workOrigin.run(origin, () => this.#processAgentEvent(event));
+			} catch (error) {
+				// Post-turn maintenance (compaction, pruning rewrites, hooks) threw before
+				// publishing the settle. Without it the run never reports idle and every
+				// surface keeps showing a working turn that will never finish.
+				const message = toError(error).message;
+				logger.error("agent_end maintenance failed", { error: message });
+				this.emitNotice("warning", `Post-turn maintenance failed: ${message}`, "agent-end");
+				if (this.#settledAgentEnd !== event) await this.#settleAgentEnd(event, [...this.agent.state.messages]);
+			}
+		})();
+		this.#inFlightAgentEndMaintenance.add(maintenance);
+		this.#postPromptTaskCores.set(promise, maintenance);
+		// Leave the in-flight set the moment maintenance settles, not after the ack: a drain that
+		// still found a settled entry would spin without yielding to I/O, and the ack never came.
+		// The rejection itself still reaches this dispatcher's caller through the await below.
+		const leave = () => void this.#inFlightAgentEndMaintenance.delete(maintenance);
+		void maintenance.then(leave, leave);
 		try {
-			// Maintenance starts now, not behind the revocation ack: it classifies this run's end
-			// against live abort state, and a deferred start lets `abort()` settle first, so a
-			// deliberate empty abort reads as a reasonless one and is auto-retried.
-			const processing = workOrigin
-				.run(origin, () => this.#processAgentEvent(event))
-				.finally(() => maintenance.resolve());
-			await Promise.all([processing, computerControlRevocation]);
-		} catch (error) {
-			// Post-turn maintenance (compaction, pruning rewrites, hooks) threw before
-			// publishing the settle. Without it the run never reports idle and every
-			// surface keeps showing a working turn that will never finish.
-			const message = toError(error).message;
-			logger.error("agent_end maintenance failed", { error: message });
-			this.emitNotice("warning", `Post-turn maintenance failed: ${message}`, "agent-end");
-			if (this.#settledAgentEnd !== event) await this.#settleAgentEnd(event, [...this.agent.state.messages]);
+			await Promise.all([maintenance, computerControlRevocation]);
 		} finally {
-			maintenance.resolve();
-			this.#inFlightAgentEndMaintenance.delete(maintenance.promise);
 			this.#postPromptTaskCores.delete(promise);
 			resolve();
 		}

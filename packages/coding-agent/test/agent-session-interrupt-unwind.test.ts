@@ -295,9 +295,6 @@ it("a later retry must survive a still-pending old HTTP revocation", async () =>
 		h.agent.subscribe(e => {
 			if (e.type === "agent_end") newEnd.resolve();
 		});
-		h.session.subscribe(e => {
-			if (e.type === "auto_retry_start") count++;
-		});
 		h.session.queueDeferredMessage({ ...payload("later failing request"), role: "custom", timestamp: Date.now() });
 		await newEnd.promise;
 		await h.agent.waitForIdle();
