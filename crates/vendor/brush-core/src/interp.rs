@@ -1206,11 +1206,15 @@ impl Execute for ast::Pipeline {
 			// with the status that command returned and the text of the last
 			// command the shell started (`append_process` with `$$`), and the
 			// child the last command forked is a job of its own. Both stay in
-			// the table for the next notify point, `jobs` and `wait`.
+			// the table for the next notify point, `jobs` and `wait`. A last
+			// command that left by a jump skips the append, and the job stays
+			// as installed (see `leaves_lastpipe_by_a_jump`).
 			let shell_pid = sys::process::ProcessId::try_from(std::process::id()).unwrap_or_default();
 			let printed_command = shell.printed_command().to_owned();
 			let (last, last_child) = foreground.lastpipe_tail(shell_pid, printed_command, started_child);
-			shell.jobs_mut().finish_held_job(held.id, last);
+			if !leaves_lastpipe_by_a_jump(&result) {
+				shell.jobs_mut().finish_held_job(held.id, last);
+			}
 			if let Some(last_child) = last_child {
 				let origin = jobs::JobOrigin::of(shell);
 				shell.jobs_mut().keep_foreground(last_child, origin);
@@ -1416,15 +1420,37 @@ fn hold_lastpipe_stages(
 	HeldStages { id, len }
 }
 
-/// Waits, after the last command of a `lastpipe` pipeline failed, for the
-/// processes of the job `held` names, and appends the shell to it with the
-/// status of `error`, as Bash's job holds the last command whatever it did.
+/// Whether `result`, what the last command of a `lastpipe` pipeline
+/// returned, leaves the pipeline by a jump Bash takes with `longjmp`
+/// (`return`, `exit`, `set -e` inside the command, an abandoned command):
+/// Bash's `execute_pipeline` then neither appends the shell to the job of
+/// the pipeline's other processes nor waits for it, and the job stays in the
+/// table as `stop_pipeline` installed it. `break` and `continue` only set a
+/// flag, so the pipeline ends as usual.
+const fn leaves_lastpipe_by_a_jump(result: &ExecutionResult) -> bool {
+	!matches!(
+		result.next_control_flow,
+		ExecutionControlFlow::Normal
+			| ExecutionControlFlow::BreakLoop { .. }
+			| ExecutionControlFlow::ContinueLoop { .. }
+	)
+}
+
+/// After the last command of a `lastpipe` pipeline failed with `error`: a
+/// cancelled run ends the processes of the job `held` names and appends the
+/// shell to it with the status of `error`, so nothing of the job outlives the
+/// run. Any other failure is a fatal error, which Bash takes with `longjmp`
+/// out of `execute_pipeline`, so the job stays as installed (see
+/// [`leaves_lastpipe_by_a_jump`]).
 async fn finish_held_stages_after(
 	shell: &mut Shell<impl extensions::ShellExtensions>,
 	held: &HeldStages,
 	error: &error::Error,
 	params: &ExecutionParameters,
 ) {
+	if !params.is_cancelled() {
+		return;
+	}
 	let _ = shell.jobs_mut().wait_held_job(held.id, params.cancel_token()).await;
 	let shell_pid = sys::process::ProcessId::try_from(std::process::id()).unwrap_or_default();
 	let status = processes::ProcessStatus::Exited(u8::from(ExecutionExitCode::from(error)));
@@ -1839,8 +1865,9 @@ async fn wait_for_pipeline_processes_and_update_status(
 	}
 
 	// A `lastpipe` pipeline's other stages are waited for in its job, once
-	// its last command has ended, and come first in its statuses.
-	if let Some(held) = held {
+	// its last command has ended, and come first in its statuses; not when
+	// the last command left by a jump (see `leaves_lastpipe_by_a_jump`).
+	if let Some(held) = held.filter(|_| !leaves_lastpipe_by_a_jump(&result)) {
 		let held_processes = shell
 			.jobs_mut()
 			.wait_held_job(held.id, params.cancel_token())

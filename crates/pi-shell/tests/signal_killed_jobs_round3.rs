@@ -369,6 +369,72 @@ async fn the_lastpipe_job_is_in_the_table_while_its_last_command_runs() {
 	assert_all_bash(cases).await;
 }
 
+/// What the last command of a `lastpipe` pipeline asks of the control flow
+/// reaches the shell, since that command runs in it. `break` and `continue`
+/// only set a flag, so the job of the pipeline's other processes ends as
+/// usual: for an external first stage, a builtin one and one a signal kills.
+/// `return`, `exit`, `set -e` inside the command and an abandoned command
+/// are jumps Bash takes with `longjmp` out of `execute_pipeline`, which
+/// neither waits for that job nor appends the shell to it: the job stays as
+/// installed, its first stage still running when the next command looks
+/// (a first stage that ends at once would race that command, in Bash too),
+/// and is forgotten or reported at a later notify point once it ends.
+#[tokio::test(flavor = "multi_thread")]
+async fn lastpipe_control_flow_reaches_the_shell_with_its_job() {
+	type Flow = fn(&str) -> String;
+	// Rows whose output does not depend on when the first stage ends: `break`
+	// and `continue` wait for it, and `exit` and `set -e` end the script
+	// before anything looks at it.
+	let any_first: [(&str, Flow); 4] = [
+		("exit", |first| format!("{first} | exit 6; echo after")),
+		("errexit", |first| format!("set -e; {first} | {{ false; echo no; }}; echo after")),
+		("break", |first| {
+			format!("for i in 1 2; do {first} | break; echo i=$i; done; jobs -l; echo done")
+		}),
+		("continue", |first| {
+			format!("for i in 1 2; do {first} | continue; echo i=$i; done; jobs -l; echo done")
+		}),
+	];
+	// Jumps after which the script goes on and looks at the job while its
+	// first stage runs: `return`, and an assignment statement to a readonly
+	// variable, which abandons the rest of its input line.
+	let long_first: [(&str, Flow); 2] = [
+		("return", |first| {
+			format!("f() {{ {first} | return 4; echo no; }}; f; echo st=$?; jobs -l; echo done")
+		}),
+		("abandoned", |first| {
+			format!(
+				"exec 2>/dev/null; readonly r=1; {first} | {{ r=2; echo no; }}; echo same-line\necho \
+				 after=$?; jobs -l"
+			)
+		}),
+	];
+	let mut cases = Vec::new();
+	for first in ["/bin/sleep 0.2", "sleep 0.2", "/bin/sh -c 'kill -KILL $$'"] {
+		for (name, flow) in any_first {
+			cases.push((format!("{name}/{first}"), format!("shopt -s lastpipe; {}", flow(first))));
+		}
+	}
+	for first in ["/bin/sleep 0.2", "sleep 0.2"] {
+		for (name, flow) in long_first {
+			cases.push((format!("{name}/{first}"), format!("shopt -s lastpipe; {}", flow(first))));
+		}
+	}
+	cases.extend(rows(&[
+		(
+			"return/ends-later",
+			"shopt -s lastpipe; f() { /bin/sleep 0.2 | return 4; }; f; /bin/sleep 0.4; jobs -l; echo \
+			 done",
+		),
+		(
+			"return/killed-later",
+			"shopt -s lastpipe; f() { /bin/sh -c 'sleep 0.1; kill -KILL $$' | return 4; }; f; \
+			 /bin/sleep 0.4; jobs -l; echo done",
+		),
+	]));
+	assert_all_bash(cases).await;
+}
+
 /// Every process of a foreground pipeline a signal ended is printed with a
 /// pid, also a stage the shell runs itself. No stage writes to the pipe: a
 /// write after the last stage died would end it with SIGPIPE, or not,
