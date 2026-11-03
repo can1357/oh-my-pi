@@ -658,7 +658,8 @@ fn a_refused_conversion_fails_before_the_protocol_exchange() {
 /// `plain` and exits 23, and does not itemize `./` as new (the empty, inactive
 /// entry sorts first, so main.c's `files[low]` is not `.`); refused by the
 /// sender instead (`--iconv=,UTF-8`) the name is never sent and `./` is
-/// itemized. With `sub/é2` in an incremental list the empty name is outside
+/// itemized, as it is in a dry run (`-n`) of the first copy, which makes no
+/// directory. With `sub/é2` in an incremental list the empty name is outside
 /// `sub`, which aborts the transfer (exit 4) as the receiver, once.
 ///
 /// Not on musl: its iconv writes `*` for a character the charset lacks
@@ -688,6 +689,12 @@ fn a_received_name_the_conversion_refuses_creates_nothing() {
 	assert_eq!(code, 23, "{out}{err}");
 	assert_eq!(out, "created directory d3\ncd+++++++++ ./\n>f+++++++++ plain\n");
 	assert!(err.starts_with(&format!("[sender] cannot convert filename: \\#303\\#251 ({eilseq})\n")), "{err}");
+	// A dry run makes no directory, so the generator finds `./` missing.
+	let (code, out, err) = run(&["-ain", "--iconv=UTF-8,", "src/", "d4/"], dir.path());
+	assert_eq!(code, 23, "{out}{err}");
+	assert_eq!(out, "created directory d4\ncd+++++++++ ./\n>f+++++++++ plain\n");
+	assert!(err.starts_with(&format!("[Receiver] cannot convert filename: \\#303\\#251 ({eilseq})\n")), "{err}");
+	assert!(!dir.path().join("d4").exists());
 
 	fs::create_dir_all(src.join("sub")).unwrap();
 	fs::write(src.join("sub/\u{e9}2"), b"z").unwrap();
