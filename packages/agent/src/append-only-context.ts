@@ -83,6 +83,8 @@ export interface StablePrefixSnapshot {
 export interface BuildOptions {
 	/** Inject the `i` intent field into tool schemas (must match agent-loop's normalizeTools). */
 	intentTracing: boolean;
+	/** Schema description of the injected `i` field (must match agent-loop's normalizeTools). */
+	intentDescription?: string;
 	/** Strip tool descriptions from the provider-bound specs (must match normalizeTools). */
 	pruneToolDescriptions?: boolean;
 }
@@ -137,6 +139,7 @@ export class StablePrefix {
 	// but changes any of these must miss the fast path.
 	#lastToolKey: readonly string[] | undefined;
 	#lastIntentTracing: boolean | undefined;
+	#lastIntentDescription: string | undefined;
 	#lastPruneToolDescriptions: boolean | undefined;
 
 	build(context: AgentContext, options: BuildOptions): boolean {
@@ -167,6 +170,7 @@ export class StablePrefix {
 	#fastPathHit(context: AgentContext, options: BuildOptions, toolKeys: readonly string[]): boolean {
 		if (
 			this.#lastIntentTracing !== options.intentTracing ||
+			this.#lastIntentDescription !== options.intentDescription ||
 			this.#lastPruneToolDescriptions !== options.pruneToolDescriptions
 		) {
 			return false;
@@ -197,6 +201,7 @@ export class StablePrefix {
 	#recordFastPathKey(context: AgentContext, options: BuildOptions, renderedToolKeys: readonly string[]): void {
 		this.#lastPromptSegments = [...context.systemPrompt];
 		this.#lastIntentTracing = options.intentTracing;
+		this.#lastIntentDescription = options.intentDescription;
 		this.#lastPruneToolDescriptions = options.pruneToolDescriptions;
 		this.#lastToolKey = renderedToolKeys;
 	}
@@ -478,6 +483,7 @@ function takeSnapshot(context: AgentContext, options: BuildOptions): StablePrefi
 	const tools =
 		normalizeTools(context.tools, {
 			injectIntent: options.intentTracing,
+			intentDescription: options.intentDescription,
 			pruneDescriptions: options.pruneToolDescriptions,
 		}) ?? [];
 	return {

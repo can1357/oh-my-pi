@@ -155,7 +155,6 @@ import { setWordPredictionHost } from "@oh-my-pi/pi-tui/prompt/word-completion";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
 import { resolveMarkdownLinkHrefs } from "../internal-urls/hyperlink-targets";
 import type { ResolveContext } from "../internal-urls/index";
-import { modelMentionDisplayName } from "@oh-my-pi/pi-tui/prompt/model-mention-syntax";
 import { modelMentionChipLabel, shiftImageMarkers } from "@oh-my-pi/pi-tui/prompt/composer-attachments";
 import { isTranscriptEntry, type SessionContext } from "../session/session-context";
 import type { SessionManager } from "../session/session-manager";
@@ -284,6 +283,9 @@ import { PlanSaveOverlay, type PlanSaveOverlayResult } from "@oh-my-pi/pi-tui/ov
 import { ServedModelTracker } from "@oh-my-pi/pi-tui/chat/served-model-marker";
 import { SessionInfoOverlay } from "@oh-my-pi/pi-tui/overlays/session-info-overlay";
 import { JobsSheet } from "@oh-my-pi/pi-tui/overlays/jobs-panel";
+import { hasSpotlightOriginal, SpotlightSheet } from "@oh-my-pi/pi-tui/overlays/spotlight-sheet";
+import type { SpotlightDetails } from "@oh-my-pi/pi-tui/chat/spotlight";
+import { readArtifactText } from "../spotlight/sink";
 import { SkillMessageComponent } from "@oh-my-pi/pi-tui/chat/skill-message";
 import { StatusLineComponent } from "@oh-my-pi/pi-tui/status-line";
 import { statusLineHost } from "./status-line-host";
@@ -1526,6 +1528,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (rate && title) return `${rate}  ${title}`;
 		return rate ?? title;
 	}
+	#resolveModelMentionChip(selector: string): { label: string; selector: string } | undefined {
+		const resolved = this.session.resolveModelMention(selector);
+		return resolved && { label: modelMentionChipLabel(resolved.name), selector: resolved.selector };
+	}
 	/** Idle stand-in for the working row: the last tok/s reading and the
 	 * band-mode title stay readable between turns, docked where the loader's
 	 * trailer was. */
@@ -1784,6 +1790,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	#planReviewOverlayHandle: OverlayHandle | undefined;
 	#sessionInfoOverlayHandle: OverlayHandle | undefined;
 	#jobsSheetHandle: OverlayHandle | undefined;
+	#spotlightSheetHandle: OverlayHandle | undefined;
 	/** Re-renders the open jobs sheet so output tails and pids stay live. */
 	#jobsSheetTimer: NodeJS.Timeout | undefined;
 	#planReviewOwner: object | undefined;
@@ -2077,10 +2084,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.editor.onToggleDictation = () => void this.#toggleComposerDictation();
 		this.editor.imageReferenceHyperlink = imageReferenceHyperlink;
 		this.editor.skillFilePath = name => this.skillCommands.get(`skill:${name}`)?.filePath;
-		this.editor.modelMentionLabel = selector => {
-			const model = this.session.findMentionableModel(selector);
-			return model ? modelMentionChipLabel(modelMentionDisplayName(model)) : undefined;
-		};
+		this.editor.resolveModelMention = selector => this.#resolveModelMentionChip(selector);
 		this.editor.modelMentionSelector = agent => this.session.modelMentions.find(m => m.agent === agent)?.selector;
 		this.editor.fileHyperlink = (filePath, text) => fileHyperlink(filePath, text, { line: 1 });
 		this.#ownsStartedUi = wasStarted;
@@ -2603,6 +2607,9 @@ export class InteractiveMode implements InteractiveModeContext {
 						(error: unknown) =>
 							this.showWarning(`Copy failed: ${error instanceof Error ? error.message : String(error)}`),
 					);
+					return;
+				case "spotlight":
+					void this.#showSpotlightSheet(action.spotlight, action.reduced);
 			}
 		});
 
@@ -8391,10 +8398,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		nextEditor.attachmentChips = previousEditor.attachmentChips;
 		nextEditor.imageReferenceHyperlink = imageReferenceHyperlink;
 		nextEditor.skillFilePath = name => this.skillCommands.get(`skill:${name}`)?.filePath;
-		nextEditor.modelMentionLabel = selector => {
-			const model = this.session.findMentionableModel(selector);
-			return model ? modelMentionChipLabel(modelMentionDisplayName(model)) : undefined;
-		};
+		nextEditor.resolveModelMention = selector => this.#resolveModelMentionChip(selector);
 		nextEditor.modelMentionSelector = agent => this.session.modelMentions.find(m => m.agent === agent)?.selector;
 		nextEditor.fileHyperlink = (filePath, text) => fileHyperlink(filePath, text, { line: 1 });
 		nextEditor.onAutocompleteCancel = () => {
@@ -8524,6 +8528,44 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#jobsSheetHandle = this.ui.showOverlay(sheet, { anchor: "center", width: "90%", maxHeight: "90%" });
 		this.#jobsSheetTimer = setInterval(() => this.ui.requestRender(), JOBS_SHEET_REFRESH_MS);
 		this.ui.setFocus(sheet);
+		this.ui.requestRender();
+	}
+
+	/**
+	 * The Spotlight sheet of a shaped tool result (its notice's click): the original, loaded from the session
+	 * artifact its trace names, beside the text the model saw; for a held-out or gated result, beside the would-be text
+	 * its `shapedUrl` names. One at a time; Esc closes it.
+	 */
+	async #showSpotlightSheet(spotlight: SpotlightDetails, reduced: string): Promise<void> {
+		if (this.#spotlightSheetHandle || !hasSpotlightOriginal(spotlight)) return;
+		const sessionManager = this.viewSession.sessionManager;
+		const original = await readArtifactText(sessionManager, spotlight.original.url);
+		if (original === null) {
+			this.showWarning(`The original of this result is gone (${spotlight.original.url}).`);
+			return;
+		}
+		if (spotlight.holdout || spotlight.gated) {
+			const shapedUrl = spotlight.original.shapedUrl;
+			const shaped = shapedUrl ? await readArtifactText(sessionManager, shapedUrl) : null;
+			if (shaped === null) {
+				this.showWarning(`The would-be text of this held-out result is gone (${shapedUrl ?? "never saved"}).`);
+				return;
+			}
+			reduced = shaped;
+		}
+		if (this.#spotlightSheetHandle) return;
+		const sheet = new SpotlightSheet({ spotlight, original, reduced, close: () => this.#hideSpotlightSheet() });
+		this.#spotlightSheetHandle = this.ui.showOverlay(sheet, { anchor: "center", width: "100%", maxHeight: "100%" });
+		this.ui.setFocus(sheet);
+		this.ui.requestRender();
+	}
+
+	#hideSpotlightSheet(): void {
+		const handle = this.#spotlightSheetHandle;
+		this.#spotlightSheetHandle = undefined;
+		if (!handle) return;
+		handle.hide();
+		this.#selectorController.focusActiveEditorArea();
 		this.ui.requestRender();
 	}
 
