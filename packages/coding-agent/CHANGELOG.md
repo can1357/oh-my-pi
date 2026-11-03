@@ -56,7 +56,7 @@
 
 ### Fixed
 
-- Fixed `ast_grep` and `ast_edit` ignoring R files with the uppercase `.R` extension unless `lang` was given ([#17958](https://github.com/can1357/oh-my-pi/pull/17958) by [@e-kotov](https://github.com/e-kotov))
+- Fixed `ast_grep` and `ast_edit` ignoring files whose extension is not lowercase (`.R`, `.PY`, …) unless `lang` was given; `.C`/`.H` resolve to C++ ([#17958](https://github.com/can1357/oh-my-pi/pull/17958) by [@e-kotov](https://github.com/e-kotov))
 
 ## [18.16.0] - 2026-11-02
 

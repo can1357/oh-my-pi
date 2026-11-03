@@ -647,7 +647,7 @@ const fn extensions(lang: SupportLang) -> &'static [&'static str] {
 		EmacsLisp => &["el"],
 		Elixir => &["ex", "exs"],
 		Erlang => &["erl", "hrl"],
-		Fortran => &["f90", "F90", "f95", "F95", "f03", "F03", "f08", "F08"],
+		Fortran => &["f90", "f95", "f03", "f08"],
 		Go => &["go"],
 		Graphql => &["graphql", "gql"],
 		Haskell => &["hs"],
@@ -671,7 +671,7 @@ const fn extensions(lang: SupportLang) -> &'static [&'static str] {
 		Powershell => &["ps1", "psm1"],
 		Proto => &["proto"],
 		Python => &["py", "py3", "pyi", "bzl"],
-		R => &["r", "R"],
+		R => &["r"],
 		Regex => &[],
 		Ruby => &["rb", "rbw", "gemspec"],
 		Rust => &["rs"],
@@ -744,10 +744,15 @@ fn from_extension(path: &Path) -> Option<SupportLang> {
 	}
 
 	let ext = path.extension()?.to_str()?;
+	// GCC's convention: an uppercase `.C`/`.H` is C++, not C.
+	if ext == "C" || ext == "H" {
+		return Some(SupportLang::Cpp);
+	}
+	// Otherwise tables list lowercase extensions; `analysis.R` and `MAIN.PY` are the same languages.
 	SupportLang::all_langs()
 		.iter()
 		.copied()
-		.find(|&l| extensions(l).contains(&ext))
+		.find(|&l| extensions(l).iter().any(|known| known.eq_ignore_ascii_case(ext)))
 }
 
 static LANG_ALIASES: phf::Map<&'static str, SupportLang> = phf_map! {
@@ -922,9 +927,12 @@ mod tests {
 	}
 
 	#[test]
-	fn infers_r_sources_with_either_extension_case() {
-		assert_eq!(SupportLang::from_path(Path::new("analysis.r")), Some(SupportLang::R));
+	fn infers_languages_from_extensions_in_any_case() {
 		assert_eq!(SupportLang::from_path(Path::new("analysis.R")), Some(SupportLang::R));
+		assert_eq!(SupportLang::from_path(Path::new("solver.F90")), Some(SupportLang::Fortran));
+		assert_eq!(SupportLang::from_path(Path::new("MAIN.PY")), Some(SupportLang::Python));
+		assert_eq!(SupportLang::from_path(Path::new("kernel.C")), Some(SupportLang::Cpp));
+		assert_eq!(SupportLang::from_path(Path::new("kernel.c")), Some(SupportLang::C));
 	}
 
 	#[test]
