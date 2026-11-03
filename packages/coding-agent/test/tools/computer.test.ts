@@ -1,5 +1,6 @@
 import { afterAll, afterEach, describe, expect, it, vi } from "bun:test";
 import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
+import * as os from "node:os";
 import * as path from "node:path";
 import { inspect } from "node:util";
 import { createContext, runInContext } from "node:vm";
@@ -4245,6 +4246,22 @@ describe("computer background fallback", () => {
 				{ id: "/tmp/report.pdf", options: {} },
 				{ id: "https://example.com", options: {} },
 				{ id: "shell:AppsFolder\\Calculator!App", options: {} },
+			]);
+		});
+
+		it("opens a path under ~ in the user's home, for the target and the app", async () => {
+			const native = new FileSession();
+			const code = [
+				'await desktop.apps.open("~/Desktop/Bench/Inbox");',
+				'await desktop.apps.open("~/notes.txt", { app: "~/Applications/Editor.app" });',
+				'await desktop.apps.open("~");',
+			].join("\n");
+			expect((await run(native, code, "takeover")).ok).toBe(true);
+			const home = os.homedir();
+			expect(native.opened).toEqual([
+				{ id: path.join(home, "Desktop/Bench/Inbox"), options: {} },
+				{ id: path.join(home, "notes.txt"), options: { app: path.join(home, "Applications/Editor.app") } },
+				{ id: home, options: {} },
 			]);
 		});
 
