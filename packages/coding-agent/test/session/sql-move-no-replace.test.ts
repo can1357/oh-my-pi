@@ -66,7 +66,10 @@ async function seed(adapter: SqlSessionStorageAdapter, url: string) {
 	): Promise<{ client: SQL; storage: SqlSessionStorage }> => {
 		const client = new SQL(databaseUrl);
 		clients.push(client);
-		return { client, storage: await SqlSessionStorage.create({ client: wrap ? wrap(client) : client, table, adapter }) };
+		return {
+			client,
+			storage: await SqlSessionStorage.create({ client: wrap ? wrap(client) : client, table, adapter }),
+		};
 	};
 	const { client, storage } = await connect();
 	cleanups.push(async () => {
