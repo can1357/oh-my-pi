@@ -1801,7 +1801,11 @@ export class AgentSession implements SettingsScope {
 					) {
 						return;
 					}
-					if (this.#isDisposed) return;
+					// Accepted records wait with the IRC records disposal writes before session_exit.
+					if (this.#isDisposed) {
+						this.#irc.queueAside(wakeRecords);
+						return;
+					}
 					if (this.hasAdmittedSubmission) {
 						// Input admitted during the compaction goes first. Prompt setup folds pending IRC
 						// into its turn; whatever is still pending once it settles wakes as usual.
@@ -1870,6 +1874,12 @@ export class AgentSession implements SettingsScope {
 		// the transition before building the turn from a consistent contract.
 		void this.whenWorkPoolYieldSettled()
 			.then(() => {
+				// A disposing session starts no turn. The records were accepted, so they wait
+				// with the IRC records disposal writes before session_exit (#recordInputTakenAtDisposal).
+				if (this.#isDisposed) {
+					this.#irc.queueAside(records);
+					return;
+				}
 				// Synchronous ownership check, atomic with the dispatch below:
 				// agent.prompt() claims streaming with no await in between, and the
 				// yield contract above mutates synchronously, so no install can
@@ -2528,6 +2538,12 @@ export class AgentSession implements SettingsScope {
 			injectIdle: async messages => {
 				const first = messages[0];
 				if (!first) return;
+				// A disposing session starts no turn for a background completion. Disposal
+				// writes it before session_exit with the rest of the input it kept.
+				if (this.#isDisposed) {
+					this.#inputTakenAtDisposal.push(...messages);
+					return;
+				}
 				// A user interrupt is still in effect: background completions (async job
 				// results, launch completions, MCP/LSP/advisor asides) must not restart
 				// the run the user stopped. Fold them into context so the next deliberate
@@ -6543,9 +6559,11 @@ export class AgentSession implements SettingsScope {
 	 * sends no request and emits no event that reports a result; the only
 	 * events it still emits are the end events of its own cancellation (an
 	 * aborted compaction, a cancelled retry), which close start events that
-	 * listeners already received. This call itself still writes the IRC messages
-	 * the session had accepted, before it returns, so a peer's delivered message
-	 * is not lost. Every controller of that work is aborted here, and each
+	 * listeners already received. Input the session accepted is not lost: this
+	 * call itself writes the IRC messages it had queued, before it returns, and
+	 * `dispose()` writes the rest of the accepted input no turn ran (see
+	 * `#recordInputTakenAtDisposal`) after the running turn's entries and before
+	 * `session_exit`. Every controller of that work is aborted here, and each
 	 * continuation checks its controller, or the disposed flag, after every await:
 	 *
 	 * - prompt setup: `#promptSetupAbortController`, and the `#promptGeneration`
@@ -6559,11 +6577,14 @@ export class AgentSession implements SettingsScope {
 	 *   `promptCustomMessage`, asides and `triggerTurn` sends among them): they are
 	 *   dropped at their next step, start no turn, and resolve `false`;
 	 * - steers and follow-ups already queued for the running turn: taken out of the
-	 *   queues here, so the turn sends no request for them. They were accepted, so
-	 *   `dispose()` records them in the transcript after that turn's entries and
-	 *   before `session_exit`;
+	 *   queues here, so the turn sends no request for them; `dispose()` records them;
+	 * - turns the session would start on its own: an IRC wake, an idle background
+	 *   completion. They start none; `dispose()` records their messages;
+	 * - session transitions in progress (`newSession`, `fork`, `switchSession`,
+	 *   `branch`, `branchFromBtw`): they stop before their commit and report a
+	 *   cancellation (`switchSession` rejects after its rollback);
 	 * - ephemeral side turns (`runEphemeralTurn`): they reject with an `AbortError`,
-	 *   and a request in flight is aborted;
+	 *   a request in flight is aborted, and no further text is delivered;
 	 * - the vision descriptions of that setup (`#imageDescriptionAbortControllers`);
 	 * - usage preflights, the reserve prompt and its deadline (`#usagePreflightAbortControllers`);
 	 * - model switches still in flight, the automatic prewalk restoration and handoff among them,
@@ -6978,16 +6999,22 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/**
-	 * Takes the steers and follow-ups still queued at {@link beginDispose} out of the agent's
-	 * queues, so the running turn sends no request for them. They were accepted (their
-	 * `prompt()`/`steer()`/`followUp()` already resolved), so they are not dropped: the
-	 * displayable ones, with the hidden companions queued just before each (keyword notices,
-	 * image descriptions), are kept for {@link #recordInputTakenAtDisposal}. Hidden context the
-	 * user never sees (mode context, developer directives, TTSR deliveries) is discarded, as an
-	 * editor-restoring interrupt discards it.
+	 * Takes the steers and follow-ups still queued out of the agent's queues, so no turn sends
+	 * a request for them. They were accepted (their `prompt()`/`steer()`/`followUp()` already
+	 * resolved), so they are not dropped: the displayable ones, with the hidden companions
+	 * queued just before each (keyword notices, image descriptions), are kept for
+	 * {@link #recordInputTakenAtDisposal}. Hidden context the user never sees (mode context,
+	 * developer directives, TTSR deliveries) is discarded, as an editor-restoring interrupt
+	 * discards it. `withdrawUndelivered` also takes input the run dequeued but never recorded
+	 * (live steering held for the in-flight response, a batch taken for its next model call),
+	 * ahead of the rest, as an editor-restoring interrupt does.
 	 */
-	#takeQueuedInputAtDisposal(): void {
-		for (const queue of [this.agent.peekSteeringQueue(), this.agent.peekFollowUpQueue()]) {
+	#takeQueuedInputAtDisposal(options?: { withdrawUndelivered?: boolean }): void {
+		const withdrawn = options?.withdrawUndelivered ? this.agent.withdrawUndeliveredQueuedMessages() : undefined;
+		for (const queue of [
+			[...(withdrawn?.steering ?? []), ...this.agent.peekSteeringQueue()],
+			[...(withdrawn?.followUp ?? []), ...this.agent.peekFollowUpQueue()],
+		]) {
 			const kept = new Set<AgentMessage>();
 			let companionOfKept = false;
 			for (let i = queue.length - 1; i >= 0; i--) {
@@ -7003,18 +7030,29 @@ export class AgentSession implements SettingsScope {
 				}
 			}
 			for (const message of queue) if (kept.has(message)) this.#inputTakenAtDisposal.push(message);
+			this.#releaseTtsrReservations(queue);
 		}
-		this.#releaseQueuedTtsrReservations();
 		this.agent.replaceQueues([], []);
 	}
 
 	/**
-	 * Records the input {@link #takeQueuedInputAtDisposal} kept, as transcript entries that start
+	 * Records the input the session accepted but never ran, as transcript entries that start
 	 * no turn. Disposal calls it after the running turn's entries settled and before
 	 * `session_exit`, so a resumed session has the messages in the order they would have run.
+	 * Besides what {@link beginDispose} took, it takes what arrived or came back since: steers
+	 * and follow-ups queued after `beginDispose()` that no turn ran, live steering the aborted
+	 * response held, background completions, and IRC records accepted after `beginDispose()`
+	 * flushed them or parked for a pooled worker.
 	 */
 	#recordInputTakenAtDisposal(): void {
-		for (const message of this.#inputTakenAtDisposal.splice(0)) {
+		this.#takeQueuedInputAtDisposal({ withdrawUndelivered: true });
+		const irc = this.#irc.clearPending();
+		for (const message of [
+			...this.#inputTakenAtDisposal.splice(0),
+			...irc.interrupts,
+			...irc.asides,
+			...irc.deferredWakes,
+		]) {
 			this.#persistMessageEnd(message, this.#promptGeneration);
 		}
 	}
@@ -11999,6 +12037,9 @@ export class AgentSession implements SettingsScope {
 				return false;
 			}
 		}
+		// A disposing session moves to no other transcript (see beginDispose); this check and the
+		// one at the commit below cover every await between them.
+		if (this.#isDisposed) return false;
 
 		this.#disconnectFromAgent();
 		let advisorRecordersDetached = false;
@@ -12012,6 +12053,7 @@ export class AgentSession implements SettingsScope {
 			advisorRecordersDetached = true;
 			await this.#advisors.drainAndDetachRecorders();
 			try {
+				if (this.#isDisposed) return false;
 				this.#releaseQueuedTtsrReservations();
 				this.agent.reset();
 				this.tokenRate.reset();
@@ -12168,6 +12210,7 @@ export class AgentSession implements SettingsScope {
 				return false;
 			}
 		}
+		if (this.#isDisposed) return false;
 
 		await this.flushToDisk();
 		// Work admitted during the hook or flush awaits would be copied mid-flight.
@@ -12185,6 +12228,10 @@ export class AgentSession implements SettingsScope {
 			try {
 				// No file means fork() is a no-op. Otherwise invalidate admitted
 				// prompt setup before the asynchronous identity rewrite begins.
+				if (this.#isDisposed) {
+					this.#bash.finishSessionTransition(bashTransition, false);
+					return false;
+				}
 				if (previousSessionFile) this.#promptGeneration++;
 				forkResult = await this.sessionManager.fork();
 			} catch (error) {
@@ -13505,6 +13552,9 @@ export class AgentSession implements SettingsScope {
 		try {
 			const stream = await this.#sideStreamFn(model, context, options);
 			for await (const event of stream) {
+				// Events the transport buffered before an abort (the caller's, or beginDispose())
+				// are not delivered: the turn ends with the abort reason instead.
+				signal.throwIfAborted();
 				if (event.type === "text_delta") {
 					providerReplyText += event.delta;
 					if (args.onTextDelta) {
@@ -13513,6 +13563,7 @@ export class AgentSession implements SettingsScope {
 							const delta = readyText.slice(emittedReplyText.length);
 							emittedReplyText = readyText;
 							await args.onTextDelta(delta);
+							signal.throwIfAborted();
 						}
 					}
 					continue;
@@ -13537,6 +13588,8 @@ export class AgentSession implements SettingsScope {
 			}
 		} catch (error) {
 			streamAbort.abort();
+			// A transport that stops on the abort reports its own error; report the abort.
+			signal.throwIfAborted();
 			throw error;
 		} finally {
 			if (!args.conversationKey) {
@@ -13554,8 +13607,10 @@ export class AgentSession implements SettingsScope {
 			throw new Error("Ephemeral turn ended without a final message");
 		}
 		const replyText = this.#deobfuscateFromProvider(providerReplyText);
+		signal.throwIfAborted();
 		if (args.onTextDelta && replyText.length > emittedReplyText.length) {
 			await args.onTextDelta(replyText.slice(emittedReplyText.length));
+			signal.throwIfAborted();
 		}
 		const sanitizedMessage: AssistantMessage = {
 			...assistantMessage,
@@ -13736,6 +13791,7 @@ export class AgentSession implements SettingsScope {
 				return false;
 			}
 		}
+		if (this.#isDisposed) return false;
 
 		this.#disconnectFromAgent();
 		await this.abort({ goalReason: "internal" });
@@ -13744,6 +13800,8 @@ export class AgentSession implements SettingsScope {
 		await this.#bash.flushPending();
 		// Flush pending writes before switching so restore snapshots reflect committed state.
 		await this.sessionManager.flush();
+		// Nothing is swapped yet; disposal finishes the teardown the abort above began.
+		if (this.#isDisposed) return false;
 		const previousSessionState = this.sessionManager.captureState();
 		const bashTransition = this.#bash.beginSessionTransition();
 		// Only same-session reloads compare against the prior context to detect
@@ -13815,6 +13873,8 @@ export class AgentSession implements SettingsScope {
 			}
 			// The file may be reloaded at the same path with a different latest contract (or the
 			// switch rolled back via restoreState); re-read it on the next model call either way.
+			// Disposal that began during the drain above: the rollback below restores this session.
+			if (this.#isDisposed) throw new Error("Session switch cancelled: the session is being disposed.");
 			this.#sessionInit = undefined;
 			await this.sessionManager.setSessionFile(sessionPath);
 			this.#bash.markSessionTransition(bashTransition);
@@ -14199,6 +14259,7 @@ export class AgentSession implements SettingsScope {
 			// A turn or user command may have started while the hook awaited.
 			if (requireIdleFor) this.#assertIdleForSnapshot(requireIdleFor);
 		}
+		if (this.#isDisposed) return false;
 
 		await this.#bash.flushPending();
 		// Flush pending writes before branching
@@ -14225,6 +14286,7 @@ export class AgentSession implements SettingsScope {
 			advisorRecordersDetached = true;
 			await this.#advisors.drainAndDetachRecorders();
 			try {
+				if (this.#isDisposed) return false;
 				// A prompt admitted during the drain awaits above belongs to the history
 				// being replaced; the generation bump drops its pending setup.
 				this.#promptGeneration++;
@@ -14313,6 +14375,7 @@ export class AgentSession implements SettingsScope {
 				return { cancelled: true, sessionFile: previousSessionFile };
 			}
 		}
+		if (this.#isDisposed) return { cancelled: true, sessionFile: previousSessionFile };
 
 		if (this.sessionManager.getSessionId() !== sessionId || this.sessionManager.getLeafId() !== leafId) {
 			throw new Error("Cannot branch /btw: session changed since /btw started");
@@ -14353,6 +14416,7 @@ export class AgentSession implements SettingsScope {
 				if (this.sessionManager.getSessionId() !== sessionId || this.sessionManager.getLeafId() !== leafId) {
 					throw new Error("Cannot branch /btw: session changed since /btw started");
 				}
+				if (this.#isDisposed) return { cancelled: true, sessionFile: previousSessionFile };
 				// A prompt may have been admitted during the flush/drain awaits
 				// after the idle check. It still belongs to the pre-branch context.
 				this.#promptGeneration++;
