@@ -1229,12 +1229,3 @@ mod tests {
 		);
 	}
 }
-
-use brush_core::{ShellExtensions, builtins::Registration};
-
-use crate::host::async_util;
-
-/// Creates the `ast-grep` (and `sg`) builtin registration.
-pub(crate) fn ast_grep_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	async_util::<AstGrep, SE>()
-}

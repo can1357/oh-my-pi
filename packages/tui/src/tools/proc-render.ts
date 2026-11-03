@@ -138,7 +138,7 @@ function jobRow(job: JobSnapshot, theme: Theme): string {
 				? "error"
 				: job.status === "running"
 					? "running"
-					: "done",
+					: "success",
 		theme,
 	);
 	return `${icon} ${formatBadge(job.type, job.status === "failed" ? "error" : job.status === "cancelled" ? "warning" : "accent", theme)} ${theme.fg("toolOutput", safe(job.id))} ${theme.fg("dim", safe(job.intent || job.label))} ${theme.fg("dim", formatDuration(job.durationMs))}`;
