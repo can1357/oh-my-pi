@@ -232,6 +232,18 @@ describe("omp_local", () => {
 			argv: [],
 			hostEnv: { OMP_BENCH_EXTRA_NOTE: "same-env-secret" },
 		},
+		{
+			name: "an inherited host variable holding the token, which Harbor could expand",
+			token: "same-env-secret",
+			argv: ["--", "--ae", "PI_ALIAS=$" + "{ALIAS_TOKEN}"],
+			hostEnv: { ALIAS_TOKEN: "same-env-secret" },
+		},
+		{
+			name: "an inherited PYTHONPATH holding the token",
+			token: "same-env-secret",
+			argv: [],
+			hostEnv: { PYTHONPATH: "/opt/same-env-secret" },
+		},
 	])("refuses a run with $name before anything prints or starts", ({ token, argv, hostEnv }) => {
 		const saved = { ...process.env };
 		Object.assign(process.env, { METAHARNESS_GATEWAY_TOKEN: token }, hostEnv);
@@ -685,6 +697,27 @@ describe("manager", () => {
 				expect(await send("/api/experiments", { id: "tokenexp", goal: token })).toBe(400);
 				expect(await send("/api/experiments/token", { goal: token }, "PUT")).toBe(400);
 				expect(await send("/api/runs/token-probe/resume", { filterErrorTypes: [token] })).toBe(400);
+				// Choosing another token for the request does not let it store a known one.
+				const otherToken = "review-other-bearer";
+				expect(
+					await send("/api/runs/token-probe/resume", { gatewayToken: otherToken, filterErrorTypes: [token] }),
+				).toBe(400);
+				expect(
+					await send("/api/runs", {
+						model: "openrouter/test-model",
+						jobName: "token-other",
+						environment: "docker",
+						gatewayToken: otherToken,
+						note: token,
+						extraArgs: [
+							"--dry-run",
+							"--binary",
+							path.join(root, "omp-linux-x64"),
+							"--gateway-url",
+							"http://127.0.0.1:1",
+						],
+					}),
+				).toBe(400);
 				const armToken = "review-arm-bearer";
 				expect(
 					await send("/api/experiments/token/arms", {
@@ -696,9 +729,12 @@ describe("manager", () => {
 				).toBe(400);
 				const stored = Buffer.concat(
 					await Promise.all(
-						["_manager/metaharness.sqlite", "_manager/metaharness.sqlite-wal", "token-b/manager.json"].map(file =>
-							fs.readFile(path.join(root, file)).catch(() => Buffer.alloc(0)),
-						),
+						[
+							"_manager/metaharness.sqlite",
+							"_manager/metaharness.sqlite-wal",
+							"token-b/manager.json",
+							"token-other/manager.json",
+						].map(file => fs.readFile(path.join(root, file)).catch(() => Buffer.alloc(0))),
 					),
 				);
 				expect(stored.includes(Buffer.from(token))).toBe(false);

@@ -402,8 +402,9 @@ export class ManagerServer {
 		}
 		const token = gatewayToken ?? this.#hostGatewayToken();
 		// Everything in the request is stored with the run, and settings and agent
-		// arguments reach omp as text, so no field may repeat the token.
-		refuseGatewayTokenIn(request, token, "the launch request");
+		// arguments reach omp as text, so no field may repeat this launch's token or any
+		// other token the manager knows.
+		this.#refuseKnownGatewayTokens(request, "the launch request", token);
 		if (!request.model) throw new Error("model is required");
 		const benchmark = request.benchmark ?? "harbor";
 		if (benchmark !== "harbor" && benchmark !== "edit" && benchmark !== "snapcompact") {
@@ -502,8 +503,8 @@ export class ManagerServer {
 		}
 		const filterErrorTypes = opts.filterErrorTypes ?? erroredExceptionTypes(jobDir);
 		const gatewayToken = opts.gatewayToken ?? this.#gatewayTokens.get(jobName);
-		// The resume's own arguments are visible in the process list; none may repeat the token.
-		refuseGatewayTokenIn(filterErrorTypes, gatewayToken ?? this.#hostGatewayToken(), "filterErrorTypes");
+		// The resume's own arguments are visible in the process list; none may repeat a token.
+		this.#refuseKnownGatewayTokens(filterErrorTypes, "filterErrorTypes", gatewayToken);
 		const argv = ["bun", "src/runner.ts", "--resume", jobName, "--jobs-dir", this.jobsDir];
 		for (const t of filterErrorTypes) argv.push("--filter-error-type", t);
 		let prewalk: LaunchRequest["prewalk"];
@@ -663,11 +664,12 @@ export class ManagerServer {
 	}
 
 	/**
-	 * Refuse stored metadata that repeats any gateway token this manager knows: its own,
-	 * and those of the runs it launched. Metadata carries no token of its own to check.
+	 * Refuse a value that repeats any gateway token this manager knows: `extra` (the token
+	 * of the request at hand), its own, and those of the runs it launched.
 	 */
-	#refuseKnownGatewayTokens(value: unknown, where: string): void {
-		for (const token of [this.#hostGatewayToken(), ...this.#gatewayTokens.values()]) {
+	#refuseKnownGatewayTokens(value: unknown, where: string, extra?: string): void {
+		const known = [this.#hostGatewayToken(), ...this.#gatewayTokens.values()];
+		for (const token of extra === undefined ? known : [extra, ...known]) {
 			refuseGatewayTokenIn(value, token, where);
 		}
 	}

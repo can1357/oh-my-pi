@@ -1545,7 +1545,7 @@ export function buildHarborEnv(
 	// Drop any stale OMP_BENCH_FORWARD_ENV inherited from the caller's shell before
 	// the agent-type early return, so it never leaks (incl. into the dry-run dump).
 	delete env.OMP_BENCH_FORWARD_ENV;
-	if (!MANAGED_AGENTS[cfg.agent]) return env;
+	if (!MANAGED_AGENTS[cfg.agent]) return withoutGatewayTokenCopies(env, cfg.gatewayToken);
 	const prepend = (k: string, v: string): void => {
 		env[k] = env[k] ? `${v}:${env[k]}` : v;
 	};
@@ -1580,16 +1580,21 @@ export function buildHarborEnv(
 	if (cfg.envType === "apple-container") env.OMP_BENCH_CONTAINER_DNS = CONTAINER_DNS;
 	const forward = collectForwardEnv(cfg);
 	if (Object.keys(forward).length > 0) env.OMP_BENCH_FORWARD_ENV = JSON.stringify(forward);
-	// Harbor hands the agent every OMP_BENCH_* variable, inherited ones too; the agent
-	// refuses any but OMP_BENCH_GATEWAY_TOKEN that holds the token, so refuse it here
-	// first, before a dry run prints them. Harbor itself never needs the input variable.
+	return withoutGatewayTokenCopies(env, cfg.gatewayToken);
+}
+
+/**
+ * Harbor's environment with the token in `OMP_BENCH_GATEWAY_TOKEN` only. Harbor expands
+ * `${NAME}` in agent env (`--ae`) and in task files from its own environment, and hands the
+ * agent every OMP_BENCH_* variable, so any other inherited variable holding the token is
+ * refused before Harbor starts or a dry run prints it. Harbor never needs the input variable.
+ */
+function withoutGatewayTokenCopies(env: Record<string, string>, token: string): Record<string, string> {
 	delete env[GATEWAY_TOKEN_INPUT_ENV];
-	const { OMP_BENCH_GATEWAY_TOKEN: _token, ...agentInputs } = env;
-	refuseGatewayTokenIn(
-		Object.fromEntries(Object.entries(agentInputs).filter(([key]) => key.startsWith("OMP_BENCH_"))),
-		cfg.gatewayToken,
-		"the agent's inputs",
-	);
+	for (const [name, value] of Object.entries(env)) {
+		if (name !== "OMP_BENCH_GATEWAY_TOKEN")
+			refuseGatewayTokenIn(value, token, `Harbor's environment variable ${name}`);
+	}
 	return env;
 }
 

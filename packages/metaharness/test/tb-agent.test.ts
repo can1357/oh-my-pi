@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { Sandbox } from "@stencil-hq/vibemon";
 import { writeAgentConfig } from "../src/tb/agent";
+import { runTrial } from "../src/tb/trial";
 import type { GatewayConfig } from "../src/tb/types";
 import { TrialVm } from "../src/tb/vmon";
 import { consumeOmpConfig, hostileValues } from "./fixtures/omp-config";
@@ -138,5 +139,41 @@ describe("writeAgentConfig", () => {
 
 		await expect(writeAgentConfig(vm, gateway, { tools: ["read"], env: {} })).rejects.toThrow(/merge key/);
 		expect(await Bun.file(path.join(home, ".omp", "agent", "models.yml")).exists()).toBe(false);
+	});
+});
+
+describe("runTrial", () => {
+	it("refuses a task whose [environment.env] holds the gateway token before it boots anything", async () => {
+		const trialDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-tb-trial-"));
+		scratchDirs.push(trialDir);
+		const token = "tb-task-env-bearer";
+
+		// vmond at a closed port: any boot attempt fails with a connection error instead.
+		const result = await runTrial({
+			task: {
+				name: "token-task",
+				dir: trialDir,
+				instruction: "noop",
+				image: "example.invalid/task:latest",
+				cpus: 1,
+				memoryMb: 512,
+				storageMb: 1024,
+				agentTimeoutSec: 5,
+				verifierTimeoutSec: 5,
+				environmentEnv: { PI_ALIAS: token },
+				verifierEnv: {},
+				difficulty: "",
+				category: "",
+			},
+			model: "openrouter/test-model",
+			binaries: {},
+			agent: { tools: ["read"], env: {} },
+			gateway: { url: "http://127.0.0.1:1", token, providers: ["openrouter"], openrouterVariant: "floor" },
+			vmon: { url: "http://127.0.0.1:1", token: "", arch: "x64" },
+			trialDir,
+		});
+
+		expect(result.status).toBe("error");
+		expect(result.error).toMatch(/holds the gateway token/);
 	});
 });
