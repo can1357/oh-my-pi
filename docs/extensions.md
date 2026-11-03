@@ -128,6 +128,7 @@ Core methods:
 - `getServiceTiers`, `setServiceTier`
 - `registerProvider`, `unregisterProvider`
 - `registerFileWriteFallback`, `registerFileDeleteFallback`
+- `registerTodoBackend`
 - `events` (shared event bus)
 
 `ExtensionAPI` methods retain their extension binding when destructured or passed as callbacks.
@@ -289,6 +290,49 @@ Also exposed:
 - `pi.zod` (Zod-compatible builder backed by omptype)
 - `pi.typebox` (legacy TypeBox-compatible shim)
 - `pi.pi` (package exports)
+
+### Todo backends (`registerTodoBackend`)
+
+A todo backend mirrors the session todo list into an external store (a task tracker, a database, a file).
+
+```ts
+import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+
+export default function (pi: ExtensionAPI) {
+	pi.registerTodoBackend({
+		id: "my-tracker",
+		label: "My tracker",
+		description: "Mirrors the todo list into my tracker",
+		create(ctx) {
+			return {
+				async apply(op, params, next) {
+					await tracker.sync(next); // throw to fail this call
+				},
+				async replace(phases) {
+					await tracker.sync(phases);
+				},
+			};
+		},
+	});
+}
+```
+
+```ts
+interface TodoBackend {
+	apply(op: TodoOp, params: TodoBackendParams, next: TodoPhase[]): Promise<void>;
+	replace(phases: TodoPhase[]): Promise<void>;
+}
+```
+
+- omp applies each `todo` op natively, then calls `apply(op, params, next)` before committing `next`. The session transcript stays the source of truth; the backend mirrors it. `params` holds only the keys declared by the `todo` tool schema.
+- `replace(phases)` receives the full new list for edits made outside the `todo` tool. Exactly these writers call it: the interactive `/todo` verbs (append, start, done, drop, rm, import, edit), the ACP/text-mode `/todo` command, the RPC `set_todos` command, the Cursor todo mirror, and the interactive subagent auto-complete. If `replace` throws, the edit is refused: the list is unchanged and each writer reports the error as it does its other failures. A `todo` call made from an eval cell goes through the `todo` tool, so it reaches `apply` and never `replace`. Resets (`/new`, the `/tan` clone clear, transcript reloads) call neither.
+- Calls run one at a time per session. A throw fails that call and leaves the list unchanged.
+- If the user aborts a `todo` call while `apply` is pending, the call returns an aborted result and the list stays unchanged, but your backend may already be one op ahead; the next `apply` or `replace` carries the full list. A write aborted before it started never reaches `apply`, and a write queued across `/new`, a session switch, a rewind or a fork is dropped rather than applied to the new list.
+- `native` is reserved and duplicate ids are rejected: `registerTodoBackend` throws. Register during the factory, like `registerTool`.
+- Users select a backend with the `todo.backend` setting (default `native`).
+- Main session only: subagents, prewalk, `/tan` and seance use native todos.
+- If `create` throws, or `todo.backend` names an id that is not registered, omp falls back to native todos and shows one notice naming the id and the reason. The backend resolves once startup-deferred extensions are loaded, so the notice never appears before they are bound; a `todo` call that arrives earlier waits for the resolution.
+- Changing `todo.backend` mid-session takes effect after the writes already queued finish: the next write goes to the new backend, and `native` stops mirroring. A switch calls neither `apply` nor `replace`, so it does not copy the current list into the new backend.
 
 ### Runtime setting overrides
 

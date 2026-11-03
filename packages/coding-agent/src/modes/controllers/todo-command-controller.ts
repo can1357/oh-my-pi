@@ -130,6 +130,8 @@ function buildSystemReminder(action: string, phases: TodoPhase[], removed = fals
 	return lines.join("\n");
 }
 
+type TodoPlan = { phases: TodoPhase[]; action: string; status: string; removed?: boolean } | { error: string };
+
 export class TodoCommandController {
 	constructor(private readonly ctx: InteractiveModeContext) {}
 
@@ -178,19 +180,19 @@ export class TodoCommandController {
 				this.ctx.showStatus(USAGE);
 				return;
 			case "append":
-				this.#append(rest);
+				await this.#append(rest);
 				return;
 			case "start":
-				this.#start(rest);
+				await this.#start(rest);
 				return;
 			case "done":
-				this.#mutateStatus(rest, "completed");
+				await this.#mutateStatus(rest, "completed");
 				return;
 			case "drop":
-				this.#mutateStatus(rest, "abandoned");
+				await this.#mutateStatus(rest, "abandoned");
 				return;
 			case "rm":
-				this.#remove(rest);
+				await this.#remove(rest);
 				return;
 			default:
 				this.ctx.showError(`Unknown /todo verb "${verb}".\n${USAGE}`);
@@ -254,21 +256,23 @@ export class TodoCommandController {
 			this.ctx.showError(`Could not parse ${source}:\n  ${errors.join("\n  ")}`);
 			return;
 		}
-		this.#commit(phases, `/todo import ${source}`);
 		const taskCount = phases.reduce((sum, p) => sum + p.tasks.length, 0);
-		this.ctx.showStatus(`Imported ${phases.length} phase(s), ${taskCount} task(s) from ${source}.`);
+		await this.#edit(() => ({
+			phases,
+			action: `/todo import ${source}`,
+			status: `Imported ${phases.length} phase(s), ${taskCount} task(s) from ${source}.`,
+		}));
 	}
 
 	// ------------------------------------------------------------- append
 
-	#append(rest: string): void {
+	async #append(rest: string): Promise<void> {
 		const tokens = tokenize(rest);
 		if (tokens.length === 0) {
 			this.ctx.showError("Usage: /todo append [<phase>] <task...>");
 			return;
 		}
 
-		const current = this.#currentPhases();
 		let phaseName: string | undefined;
 		let content: string;
 
@@ -279,128 +283,123 @@ export class TodoCommandController {
 			content = tokens.slice(1).join(" ");
 		}
 
-		const next = current.map(phase => ({ ...phase, tasks: phase.tasks.slice() }));
-		let targetPhase: TodoPhase | undefined;
+		await this.#edit(current => {
+			const next = current.map(phase => ({ ...phase, tasks: phase.tasks.slice() }));
+			let targetPhase: TodoPhase | undefined;
 
-		if (phaseName) {
-			targetPhase = findPhaseFuzzy(next, phaseName);
-			if (!targetPhase) {
-				targetPhase = { name: titleCase(phaseName), tasks: [] };
+			if (phaseName) {
+				targetPhase = findPhaseFuzzy(next, phaseName);
+				if (!targetPhase) {
+					targetPhase = { name: titleCase(phaseName), tasks: [] };
+					next.push(targetPhase);
+				}
+			} else if (next.length > 0) {
+				targetPhase = next[next.length - 1];
+			} else {
+				targetPhase = { name: "Todos", tasks: [] };
 				next.push(targetPhase);
 			}
-		} else if (next.length > 0) {
-			targetPhase = next[next.length - 1];
-		} else {
-			targetPhase = { name: "Todos", tasks: [] };
-			next.push(targetPhase);
-		}
 
-		const finalContent = titleCaseSentence(content);
-		targetPhase.tasks.push({
-			content: finalContent,
-			status: "pending",
+			const finalContent = titleCaseSentence(content);
+			targetPhase.tasks.push({
+				content: finalContent,
+				status: "pending",
+			});
+			return {
+				phases: next,
+				action: `/todo append → ${targetPhase.name}`,
+				status: `Appended to ${targetPhase.name}: ${finalContent}`,
+			};
 		});
-
-		this.#commit(next, `/todo append → ${targetPhase.name}`);
-		this.ctx.showStatus(`Appended to ${targetPhase.name}: ${finalContent}`);
 	}
 
 	// ------------------------------------------------------------- start / done / drop / rm
 
-	#start(rest: string): void {
+	async #start(rest: string): Promise<void> {
 		if (!rest) {
 			this.ctx.showError("Usage: /todo start <task>");
 			return;
 		}
-		const current = this.#currentPhases();
-		const hit = findTaskFuzzy(current, rest);
-		if (!hit) {
-			this.ctx.showError(`No task matched "${rest}". Use /todo to list current tasks.`);
-			return;
-		}
-		const { phases, errors } = applyOpsToPhases(current, [{ op: "start", task: hit.task.content }]);
-		if (errors.length > 0) {
-			this.ctx.showError(errors.join("; "));
-			return;
-		}
-		this.#commit(phases, `/todo start ${hit.task.content}`);
-		this.ctx.showStatus(`Started: ${hit.task.content}`);
+		await this.#edit(current => {
+			const hit = findTaskFuzzy(current, rest);
+			if (!hit) return { error: `No task matched "${rest}". Use /todo to list current tasks.` };
+			const { phases, errors } = applyOpsToPhases(current, [{ op: "start", task: hit.task.content }]);
+			if (errors.length > 0) return { error: errors.join("; ") };
+			return {
+				phases,
+				action: `/todo start ${hit.task.content}`,
+				status: `Started: ${hit.task.content}`,
+			};
+		});
 	}
 
-	#mutateStatus(rest: string, target: "completed" | "abandoned"): void {
+	async #mutateStatus(rest: string, target: "completed" | "abandoned"): Promise<void> {
 		const op = target === "completed" ? "done" : "drop";
-		const current = this.#currentPhases();
 		const trimmed = rest.trim();
-		if (!trimmed) {
-			// no-arg: apply to all
-			const { phases, errors } = applyOpsToPhases(current, [{ op }]);
-			if (errors.length > 0) {
-				this.ctx.showError(errors.join("; "));
-				return;
+		await this.#edit(current => {
+			if (!trimmed) {
+				// no-arg: apply to all
+				const { phases, errors } = applyOpsToPhases(current, [{ op }]);
+				if (errors.length > 0) return { error: errors.join("; ") };
+				return { phases, action: `/todo ${op} (all)`, status: `Marked all tasks ${target}.` };
 			}
-			this.#commit(phases, `/todo ${op} (all)`);
-			this.ctx.showStatus(`Marked all tasks ${target}.`);
-			return;
-		}
 
-		const taskHit = findTaskFuzzy(current, trimmed);
-		if (taskHit) {
-			const { phases, errors } = applyOpsToPhases(current, [{ op, task: taskHit.task.content }]);
-			if (errors.length > 0) {
-				this.ctx.showError(errors.join("; "));
-				return;
+			const taskHit = findTaskFuzzy(current, trimmed);
+			if (taskHit) {
+				const { phases, errors } = applyOpsToPhases(current, [{ op, task: taskHit.task.content }]);
+				if (errors.length > 0) return { error: errors.join("; ") };
+				return {
+					phases,
+					action: `/todo ${op} ${taskHit.task.content}`,
+					status: `Marked ${target}: ${taskHit.task.content}`,
+				};
 			}
-			this.#commit(phases, `/todo ${op} ${taskHit.task.content}`);
-			this.ctx.showStatus(`Marked ${target}: ${taskHit.task.content}`);
-			return;
-		}
 
-		const phaseHit = findPhaseFuzzy(current, trimmed);
-		if (phaseHit) {
-			const { phases, errors } = applyOpsToPhases(current, [{ op, phase: phaseHit.name }]);
-			if (errors.length > 0) {
-				this.ctx.showError(errors.join("; "));
-				return;
+			const phaseHit = findPhaseFuzzy(current, trimmed);
+			if (phaseHit) {
+				const { phases, errors } = applyOpsToPhases(current, [{ op, phase: phaseHit.name }]);
+				if (errors.length > 0) return { error: errors.join("; ") };
+				return {
+					phases,
+					action: `/todo ${op} ${phaseHit.name}`,
+					status: `Marked phase ${phaseHit.name} ${target}.`,
+				};
 			}
-			this.#commit(phases, `/todo ${op} ${phaseHit.name}`);
-			this.ctx.showStatus(`Marked phase ${phaseHit.name} ${target}.`);
-			return;
-		}
 
-		this.ctx.showError(`No task or phase matched "${trimmed}".`);
+			return { error: `No task or phase matched "${trimmed}".` };
+		});
 	}
 
-	#remove(rest: string): void {
-		const current = this.#currentPhases();
+	async #remove(rest: string): Promise<void> {
 		const trimmed = rest.trim();
-		if (!trimmed) {
-			this.#commit([], "/todo rm (all)", { removed: true });
-			this.ctx.showStatus("Cleared all todos.");
-			return;
-		}
-		const taskHit = findTaskFuzzy(current, trimmed);
-		if (taskHit) {
-			const { phases, errors } = applyOpsToPhases(current, [{ op: "rm", task: taskHit.task.content }]);
-			if (errors.length > 0) {
-				this.ctx.showError(errors.join("; "));
-				return;
+		await this.#edit(current => {
+			if (!trimmed) {
+				return { phases: [], action: "/todo rm (all)", removed: true, status: "Cleared all todos." };
 			}
-			this.#commit(phases, `/todo rm ${taskHit.task.content}`, { removed: true });
-			this.ctx.showStatus(`Removed: ${taskHit.task.content}`);
-			return;
-		}
-		const phaseHit = findPhaseFuzzy(current, trimmed);
-		if (phaseHit) {
-			const { phases, errors } = applyOpsToPhases(current, [{ op: "rm", phase: phaseHit.name }]);
-			if (errors.length > 0) {
-				this.ctx.showError(errors.join("; "));
-				return;
+			const taskHit = findTaskFuzzy(current, trimmed);
+			if (taskHit) {
+				const { phases, errors } = applyOpsToPhases(current, [{ op: "rm", task: taskHit.task.content }]);
+				if (errors.length > 0) return { error: errors.join("; ") };
+				return {
+					phases,
+					action: `/todo rm ${taskHit.task.content}`,
+					removed: true,
+					status: `Removed: ${taskHit.task.content}`,
+				};
 			}
-			this.#commit(phases, `/todo rm ${phaseHit.name}`, { removed: true });
-			this.ctx.showStatus(`Removed phase: ${phaseHit.name}`);
-			return;
-		}
-		this.ctx.showError(`No task or phase matched "${trimmed}".`);
+			const phaseHit = findPhaseFuzzy(current, trimmed);
+			if (phaseHit) {
+				const { phases, errors } = applyOpsToPhases(current, [{ op: "rm", phase: phaseHit.name }]);
+				if (errors.length > 0) return { error: errors.join("; ") };
+				return {
+					phases,
+					action: `/todo rm ${phaseHit.name}`,
+					removed: true,
+					status: `Removed phase: ${phaseHit.name}`,
+				};
+			}
+			return { error: `No task or phase matched "${trimmed}".` };
+		});
 	}
 
 	// ------------------------------------------------------------- editor
@@ -428,9 +427,12 @@ export class TodoCommandController {
 				this.ctx.showError(`Could not parse Markdown:\n  ${errors.join("\n  ")}`);
 				return;
 			}
-			this.#commit(parsed, "/todo edit");
 			const taskCount = parsed.reduce((sum, p) => sum + p.tasks.length, 0);
-			this.ctx.showStatus(`Todos updated from editor: ${parsed.length} phase(s), ${taskCount} task(s).`);
+			await this.#edit(() => ({
+				phases: parsed,
+				action: "/todo edit",
+				status: `Todos updated from editor: ${parsed.length} phase(s), ${taskCount} task(s).`,
+			}));
 		} catch (error) {
 			this.ctx.showWarning(
 				`Failed to open external editor: ${error instanceof Error ? error.message : String(error)}`,
@@ -441,23 +443,57 @@ export class TodoCommandController {
 		}
 	}
 
-	#commit(nextPhases: TodoPhase[], action: string, opts?: { removed?: boolean }): void {
-		// Commit first so HUD visibility binds to the new canonical source.
-		this.ctx.session.commitTodoPhases(nextPhases);
-		this.ctx.setTodos(nextPhases);
+	/**
+	 * Runs `compute` inside the session's queued updater so it sees the list as committed at that moment
+	 * (a `todo` tool write queued earlier is never overwritten), then reports the outcome. Everything after the
+	 * await uses the session/agent/sessionManager captured before it: the user may switch sessions mid-commit.
+	 */
+	async #edit(compute: (current: TodoPhase[]) => TodoPlan): Promise<void> {
+		const { session, agent, sessionManager } = this.ctx;
+		const planned: { plan?: TodoPlan } = {};
+		let committed: TodoPhase[] | undefined;
+		let failure: unknown;
+		try {
+			// Commit first so HUD visibility binds to the new canonical source.
+			committed = await session.commitTodoPhases(current => {
+				planned.plan = compute(current);
+				return "phases" in planned.plan ? planned.plan.phases : undefined;
+			});
+		} catch (error) {
+			failure = error;
+		}
+		if (this.ctx.session !== session) {
+			this.ctx.showStatus("The session changed before the todo edit finished; the edit was not shown here.");
+			return;
+		}
+		if (failure !== undefined) {
+			this.ctx.showError(failure instanceof Error ? failure.message : String(failure));
+			return;
+		}
+		const plan = planned.plan;
+		if (plan && "error" in plan) {
+			this.ctx.showError(plan.error);
+			return;
+		}
+		if (!plan || !committed) {
+			this.ctx.showError("The todo edit was not applied.");
+			return;
+		}
+		this.ctx.setTodos(committed);
 
-		// 3. Inject system reminder so the agent learns about the change next turn.
-		//    Removals carry explicit intent so the agent does not rebuild the
-		//    cleared/removed items on its next turn (issue #5258).
-		const reminderText = buildSystemReminder(action, nextPhases, opts?.removed ?? false);
+		// Inject system reminder so the agent learns about the change next turn.
+		// Removals carry explicit intent so the agent does not rebuild the
+		// cleared/removed items on its next turn (issue #5258).
+		const reminderText = buildSystemReminder(plan.action, committed, plan.removed ?? false);
 		const message = {
 			role: "developer" as const,
 			content: [{ type: "text" as const, text: reminderText }],
 			attribution: "user" as const,
 			timestamp: Date.now(),
 		};
-		this.ctx.agent.appendMessage(message);
-		this.ctx.sessionManager.appendMessage(message);
+		agent.appendMessage(message);
+		sessionManager.appendMessage(message);
+		this.ctx.showStatus(plan.status);
 	}
 }
 

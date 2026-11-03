@@ -50,9 +50,7 @@ it("clearing a settings-panel text field removes the key from config.yml so its 
 
 	const selector = new SettingsSelectorComponent(
 		{
-			availableThinkingLevels: [],
 			thinkingLevel: undefined,
-			availableThemes: ["dark"],
 			providers: [],
 			settings: host,
 			plugins: createPluginSettingsHost(projectDir),

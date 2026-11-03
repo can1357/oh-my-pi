@@ -360,8 +360,12 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 			// A bridged call emits no `todo` toolResult entry, the only thing branch
 			// rehydration reads; without this the in-memory update is lost on the
 			// next resume/rewind/fork and stale todos trigger a false reminder.
-			const phases = committedTodoPhases(result);
-			if (phases) options.session.commitTodoPhases?.(phases);
+			// `mirrored`: the call already went through `TodoTool.execute`, which updated the cache and
+			// reached any backend's `apply`; the session only appends the entry (no `replace`, no cache set).
+			// The identity updater makes the entry record the list as of its queue slot, so a `/todo` edit
+			// queued between the bridged write and this entry is not rolled back on reload.
+			if (committedTodoPhases(result))
+				await options.session.commitTodoPhases?.(current => current, { mirrored: true });
 		}
 		const replies = reply === undefined ? toolResultReplies(result.details) : [reply];
 		if (replies.length > 0) {

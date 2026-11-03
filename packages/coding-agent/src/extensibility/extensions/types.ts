@@ -145,11 +145,14 @@ import type {
 } from "../shared-events";
 import type { SlashCommandInfo } from "../slash-commands";
 import type { TerminalLaunchRequest, TerminalLaunchResult } from "../../subprocess/terminal-launch";
+import type { TodoBackendDefinition, TodoBackendRegistry } from "../../tools/todo-backend";
 
 export type { OverlayHandle, OverlayOptions } from "@oh-my-pi/pi-tui";
 export type { AppKeybinding, KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 export type { ExecOptions, ExecResult } from "../../exec/exec";
 export type { AgentToolResult, AgentToolUpdateCallback };
+export type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
+export type { TodoBackend, TodoBackendDefinition, TodoBackendParams, TodoOp } from "../../tools/todo-backend";
 
 // ============================================================================
 // UI Context
@@ -2153,6 +2156,15 @@ export interface ExtensionAPI {
 	 */
 	unregisterProvider(name: string): void;
 
+	/**
+	 * Register a todo backend that mirrors the session todo list into an external store.
+	 *
+	 * omp applies each `todo` op natively, then calls `apply` before committing; the transcript
+	 * stays the source of truth. Users select it with the `todo.backend` setting. `native` is
+	 * reserved and duplicate ids throw. Main session only.
+	 */
+	registerTodoBackend(definition: TodoBackendDefinition): void;
+
 	/** Shared event bus for extension communication. */
 	events: EventBus;
 }
@@ -2330,6 +2342,8 @@ export interface ExtensionRuntimeState {
 	registerProvider(name: string, config: ProviderConfig, sourceId: string): void;
 	/** Remove a queued or initialized provider registration. */
 	unregisterProvider(name: string, sourceId: string): void;
+	/** Todo backends registered by extensions. Lives on the runtime so deferred extensions register into the same registry. */
+	todoBackends: TodoBackendRegistry;
 }
 
 /** Action implementations for ExtensionAPI methods. */

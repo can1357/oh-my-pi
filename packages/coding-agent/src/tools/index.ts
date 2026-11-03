@@ -75,6 +75,7 @@ import { SecurityScanTool } from "./security-scan";
 import { supportsExternalThinking, ThinkTool } from "./think";
 import { type TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { TodoTool } from "./todo";
+import type { ActiveTodoBackend, TodoWriteGuard } from "./todo-backend";
 import { WriteTool } from "./write";
 import { WaitTool } from "./wait";
 import { isMountableUnderXdev, resolveXdevTool, type XdevState } from "./xdev";
@@ -484,8 +485,23 @@ export interface ToolSession {
 	 * record it on the session branch. Direct `todo` calls persist via their
 	 * toolResult entry; callers that produce none (the eval bridge, Cursor sync)
 	 * use this so branch rehydration agrees with the in-memory list.
+	 * A function `update` runs inside the queued write against the committed list; returning
+	 * `undefined` declines (nothing committed). Resolves with the committed list.
 	 */
-	commitTodoPhases?: (phases: TodoPhase[]) => void;
+	commitTodoPhases?: (
+		update: TodoPhase[] | ((current: TodoPhase[]) => TodoPhase[] | undefined),
+		options?: { mirrored?: boolean },
+	) => Promise<TodoPhase[] | undefined>;
+	/**
+	 * Run a todo write on the session's serial todo queue (see `AgentSession.runTodoWrite`). `active`
+	 * is the backend resolved when the write starts; `undefined` means native todos. The `todo` tool
+	 * runs compute → backend `apply` → commit inside it. `options.signal` abandons the call without
+	 * releasing the queue slot early.
+	 */
+	runTodoWrite?: <T>(
+		write: (active: ActiveTodoBackend | undefined, guard: TodoWriteGuard) => Promise<T>,
+		options?: { signal?: AbortSignal },
+	) => Promise<T>;
 	/** Active workpool items whose incremental yields complete the current turn. */
 	getWorkPoolYieldItems?: () => readonly WorkPoolYieldItem[];
 	/**

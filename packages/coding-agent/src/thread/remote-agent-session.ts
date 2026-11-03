@@ -682,10 +682,19 @@ export class RemoteAgentSession implements AgentViewSession {
 		this.#notify("setTodoPhases", toWireData(phases));
 	}
 
-	/** Same two steps as a home session: the optimistic entry and the mirror update reach the worker in order. */
-	commitTodoPhases(phases: TodoPhase[]): void {
+	/**
+	 * Worker-homed sessions are subagents, which never use a todo backend: `update` runs against the mirrored
+	 * list, and the optimistic entry and the mirror update reach the worker in order.
+	 */
+	commitTodoPhases(
+		update: TodoPhase[] | ((current: TodoPhase[]) => TodoPhase[] | undefined),
+		options?: { mirrored?: boolean },
+	): Promise<TodoPhase[] | undefined> {
+		const phases = typeof update === "function" ? update(this.getTodoPhases()) : update;
+		if (phases === undefined) return Promise.resolve(undefined);
 		this.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases });
-		this.setTodoPhases(phases);
+		if (!options?.mirrored) this.setTodoPhases(phases);
+		return Promise.resolve(phases);
 	}
 
 	/**

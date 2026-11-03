@@ -48,9 +48,7 @@ function stubStdoutGeometry(cols: number): { restore(): void } {
 function createSelector(onCancel: () => void = () => {}): SettingsSelectorComponent {
 	return new SettingsSelectorComponent(
 		{
-			availableThinkingLevels: [],
 			thinkingLevel: undefined,
-			availableThemes: ["dark"],
 			providers: [],
 			settings: createSettingsHost(),
 			plugins: createPluginSettingsHost(process.cwd()),

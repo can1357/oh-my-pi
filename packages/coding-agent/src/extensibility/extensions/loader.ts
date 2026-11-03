@@ -29,6 +29,7 @@ import { getCodingAgentApi } from "../host-api";
 import type { SendUserMessageOptions } from "../../session/agent-session";
 import type { CustomMessagePayload } from "../../session/messages";
 import type { FileDeleteFallbackHandler, FileWriteFallbackHandler } from "../../tools/file-write-fallback";
+import { type TodoBackendDefinition, TodoBackendRegistry } from "../../tools/todo-backend";
 import { isFilesystemSourcePath } from "../../tools/path-utils";
 import { InternalUrlRouter } from "../../internal-urls/router";
 import { EventBus } from "../../utils/event-bus";
@@ -120,6 +121,7 @@ export class ExtensionRuntimeNotInitializedError extends Error {
 export class ExtensionRuntime implements IExtensionRuntime {
 	flagValues = new Map<string, boolean | string>();
 	pendingProviderRegistrations: Array<{ name: string; config: ProviderConfig; sourceId: string }> = [];
+	readonly todoBackends = new TodoBackendRegistry();
 
 	registerProvider(name: string, config: ProviderConfig, sourceId: string): void {
 		this.pendingProviderRegistrations.push({ name, config, sourceId });
@@ -207,6 +209,10 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		config: ProviderConfig;
 		sourceId: string;
 	}> = [];
+
+	get todoBackends(): TodoBackendRegistry {
+		return this.runtime.todoBackends;
+	}
 
 	get pi() {
 		return getCodingAgentApi();
@@ -412,6 +418,10 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 
 	unregisterProvider(name: string): void {
 		this.runtime.unregisterProvider(name, this.extension.path);
+	}
+
+	registerTodoBackend(definition: TodoBackendDefinition): void {
+		this.runtime.todoBackends.register(definition, this.extension.path);
 	}
 }
 

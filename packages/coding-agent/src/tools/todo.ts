@@ -13,6 +13,7 @@ import { isRecord, prompt } from "@oh-my-pi/pi-utils";
 
 import todoDescription from "../prompts/tools/todo.md" with { type: "text" };
 import type { ToolSession } from "../sdk";
+import type { ActiveTodoBackend, TodoWriteGuard } from "./todo-backend";
 import type { SessionEntry } from "../session/session-entries";
 
 import { normalizePathLikeInput, resolveToCwd } from "./path-utils";
@@ -69,8 +70,35 @@ const todoSchema = type({
 	"reason?": type("string").describe("blocker note for block"),
 });
 
-type TodoParams = TodoSchema;
+/** The `todo` tool's validated params (schema keys only). */
+export type TodoParams = TodoSchema;
 type TodoSchema = typeof todoSchema.infer;
+
+/**
+ * Keys `todoSchema` declares. Typed as a full `Record` so adding or removing a schema key without
+ * updating this list fails to compile.
+ */
+const TODO_PARAM_KEYS: Record<keyof TodoSchema, true> = {
+	op: true,
+	list: true,
+	task: true,
+	phase: true,
+	items: true,
+	reason: true,
+};
+
+/**
+ * Drop keys the schema does not declare. `lenientArgValidation` lets raw model arguments reach
+ * `execute`, and omptype objects keep undeclared keys, so backends would otherwise see them.
+ */
+function stripToTodoParams(entry: TodoParams): TodoParams {
+	const stripped: Record<string, unknown> = {};
+	for (const [key, value] of Object.entries(entry)) {
+		if (Object.hasOwn(TODO_PARAM_KEYS, key) && value !== undefined) stripped[key] = value;
+	}
+	return stripped as TodoParams;
+}
+
 /** A single todo op entry (the params object itself). */
 type TodoOpEntryValue = TodoParams;
 
@@ -731,9 +759,41 @@ export class TodoTool implements AgentTool<typeof todoSchema, TodoToolDetails> {
 	async execute(
 		_toolCallId: string,
 		params: TodoParams,
-		_signal?: AbortSignal,
+		signal?: AbortSignal,
 		_onUpdate?: AgentToolUpdateCallback<TodoToolDetails>,
 		_context?: AgentToolContext,
+	): Promise<AgentToolResult<TodoToolDetails>> {
+		// Compute → backend apply → commit runs as one queued unit so concurrent writes and backend
+		// switches cannot interleave with it.
+		const run = this.session.runTodoWrite;
+		if (!run) return this.#write(params, undefined, undefined);
+		try {
+			return await run((active, guard) => this.#write(params, active, guard), { signal });
+		} catch (error) {
+			// The queued write stays in flight (it holds the queue slot) but can no longer commit.
+			if (signal?.aborted) return this.#abortedResult(params);
+			throw error;
+		}
+	}
+
+	#abortedResult(params: TodoParams): AgentToolResult<TodoToolDetails> {
+		const phases = clonePhases(this.session.getTodoPhases?.() ?? []);
+		const resolved = resolveTodoParams(params, phases.length > 0);
+		return {
+			content: [{ type: "text", text: "The todo call was aborted. The todo list is unchanged." }],
+			details: {
+				op: typeof resolved === "string" ? undefined : resolved.op,
+				phases,
+				storage: this.session.getSessionFile() ? "session" : "memory",
+			},
+			isError: true,
+		};
+	}
+
+	async #write(
+		params: TodoParams,
+		active: ActiveTodoBackend | undefined,
+		guard: TodoWriteGuard | undefined,
 	): Promise<AgentToolResult<TodoToolDetails>> {
 		const previousPhases = clonePhases(this.session.getTodoPhases?.() ?? []);
 		const storage = this.session.getSessionFile() ? "session" : "memory";
@@ -758,7 +818,27 @@ export class TodoTool implements AgentTool<typeof todoSchema, TodoToolDetails> {
 		const failed = errors.length > 0;
 		const effective = failed ? previousPhases : updated;
 		const completedTasks = readOnly || failed ? [] : getCompletionTransitions(previousPhases, updated);
-		if (!readOnly && !failed) this.session.setTodoPhases?.(updated);
+		if (active && !readOnly && !failed) {
+			try {
+				await active.backend.apply(op, stripToTodoParams(entry), clonePhases(updated));
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				return {
+					content: [
+						{
+							type: "text",
+							text: `Todo backend "${active.label}" failed to apply "${op}": ${message}. The todo list is unchanged.`,
+						},
+					],
+					details: { op, phases: previousPhases, storage },
+					isError: true,
+				};
+			}
+		}
+		if (!readOnly && !failed) {
+			guard?.assertCurrent();
+			this.session.setTodoPhases?.(updated);
+		}
 		const details: TodoToolDetails = { op, phases: effective, storage };
 		if (completedTasks.length > 0) details.completedTasks = completedTasks;
 

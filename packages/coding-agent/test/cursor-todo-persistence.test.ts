@@ -29,13 +29,16 @@ function newHarness(initial: TodoPhase[] = []): Harness {
 		cwd: "/tmp",
 		tools: new Map(),
 		getTodoPhases: () => phases,
-		commitTodoPhases: next => {
+		commitTodoPhases: async update => {
+			const next = typeof update === "function" ? update(phases) : update;
+			if (!next) return undefined;
 			phases = next;
 			entries.push({
 				type: "custom",
 				customType: USER_TODO_EDIT_CUSTOM_TYPE,
 				data: { phases: next },
 			} as SessionEntry);
+			return next;
 		},
 		emitEvent: event => {
 			events.push(event);

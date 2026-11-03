@@ -1,5 +1,4 @@
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import type { Effort } from "@oh-my-pi/pi-ai";
 import {
 	type Component,
 	Container,
@@ -43,13 +42,12 @@ import {
 import type { TspPrefsControl, TspPrefsProps } from "@oh-my-pi/pi-wire";
 import { prefsSectionId } from "../components/settings-list";
 import { getCurrentThemeName, getSelectListTheme, getSettingsListTheme, theme } from "../theme/theme";
-import { AUTO_THINKING, type ConfiguredThinkingLevel } from "../thinking";
 import { getTabBarTheme } from "../chrome/shared";
 import { type ComposerPreviewStatusSource, ComposerShapePreview } from "./composer-shape-preview";
-import { getComposerShapeOptions } from "./composer-shape-registry";
 import { bottomBorder, divider, row, topBorder } from "../chrome/overlay-box";
+import { sanitizeDisplaySingleLine } from "./extensions/display-text";
 import { PluginSettingsComponent, type PluginSettingsHost } from "./plugin-settings";
-import { getSettingDef, getSettingsForTab, type SettingDef } from "./settings-defs";
+import { getSettingDef, getSettingsForTab, type SettingDef, type SubmenuSettingDef } from "./settings-defs";
 import { SnapcompactShapePreview } from "./snapcompact-shape-preview";
 import { themePickerOptions } from "./theme-selector";
 import type { SelectPickerOptions } from "../native/picker";
@@ -554,6 +552,9 @@ function getSettingsTabs(): Tab[] {
 	];
 }
 
+/** Supplies the live choices of a submenu setting whose options are only known at runtime. */
+export type RuntimeSettingOptionsProvider = (def: SubmenuSettingDef) => readonly SubmenuOption[];
+
 /**
  * Dynamic context for settings that need runtime data.
  * Some settings (like thinking level) are managed by the session, not Settings.
@@ -561,12 +562,13 @@ function getSettingsTabs(): Tab[] {
 export interface SettingsRuntimeContext {
 	settings: SettingsHost;
 	plugins: PluginSettingsHost;
-	/** Available thinking levels (from session) */
-	availableThinkingLevels: Effort[];
 	/** Current thinking level (from session) */
 	thinkingLevel: ThinkingLevel | undefined;
-	/** Available themes */
-	availableThemes: string[];
+	/**
+	 * Runtime choices for submenu settings, keyed by setting path. A setting with
+	 * no entry shows its declared options.
+	 */
+	runtimeOptions?: ReadonlyMap<string, RuntimeSettingOptionsProvider>;
 	/** Provider/source ids shown in /model. */
 	providers: string[];
 	/** Active model (api + id); resolves what the snapcompact `auto` shape maps to. */
@@ -1489,12 +1491,19 @@ export class SettingsSelectorComponent implements Component {
 			case "enum":
 				return { ...item, currentValue: String(currentValue ?? ""), values: [...def.values] };
 
-			case "submenu":
+			case "submenu": {
+				const raw = this.#getSubmenuCurrentValue(def.path, currentValue);
+				// Runtime-choice rows show the choice's label; the submenu still receives the raw value.
+				// Labels can come from extensions, so they are sanitized like other untrusted display text.
+				const runtimeLabel = this.#context.runtimeOptions?.has(def.path)
+					? this.#submenuOptions(def).find(option => option.value === raw)?.label
+					: undefined;
 				return {
 					...item,
-					currentValue: this.#getSubmenuCurrentValue(def.path, currentValue),
-					submenu: (cv, done) => this.#createSubmenu(def, cv, done),
+					currentValue: runtimeLabel === undefined ? raw : sanitizeDisplaySingleLine(runtimeLabel),
+					submenu: (cv, done) => this.#createSubmenu(def, runtimeLabel === undefined ? cv : raw, done),
 				};
+			}
 
 			case "text":
 				return {
@@ -1548,18 +1557,10 @@ export class SettingsSelectorComponent implements Component {
 		return rawValue;
 	}
 
-	/** A submenu's choices: the declared ones, or the runtime ones (thinking levels, themes, composer shapes). */
-	#submenuOptions(def: SettingDef & { type: "submenu" }): readonly SubmenuOption[] {
-		if (def.path === "defaultThinkingLevel") {
-			// Prepend `auto`; the rest are the model's runtime-supported efforts.
-			const levels: ConfiguredThinkingLevel[] = [AUTO_THINKING, ...this.#context.availableThinkingLevels];
-			return levels.map(level => def.options.find(o => o.value === level) ?? { value: level, label: level });
-		}
-		if (def.path === "theme.dark" || def.path === "theme.light") {
-			return this.#context.availableThemes.map(t => ({ value: t, label: t }));
-		}
-		if (def.path === "composer.shape") return getComposerShapeOptions();
-		return def.options;
+	/** A submenu's choices: the provider registered for its path, else the declared ones. */
+	#submenuOptions(def: SubmenuSettingDef): readonly SubmenuOption[] {
+		const provider = this.#context.runtimeOptions?.get(def.path);
+		return provider ? provider(def) : def.options;
 	}
 
 	/**

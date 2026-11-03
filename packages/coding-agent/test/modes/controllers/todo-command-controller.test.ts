@@ -14,7 +14,9 @@ function createContext(cwd: string, phases: TodoPhase[]): InteractiveModeContext
 		},
 		session: {
 			getTodoPhases: () => phases,
-			commitTodoPhases: vi.fn(),
+			commitTodoPhases: vi.fn(async (update: TodoPhase[] | ((current: TodoPhase[]) => TodoPhase[] | undefined)) =>
+				typeof update === "function" ? update(phases) : update,
+			),
 		},
 		sessionManager: {
 			appendMessage: vi.fn(),
@@ -74,7 +76,7 @@ describe("TodoCommandController", () => {
 		await controller.handleTodoCommand("import");
 
 		const expected: TodoPhase[] = [{ name: "Imported", tasks: [{ content: "From cwd", status: "in_progress" }] }];
-		expect(ctx.session.commitTodoPhases).toHaveBeenCalledWith(expected);
+		expect(ctx.session.commitTodoPhases).toHaveBeenCalledTimes(1);
 		expect(ctx.setTodos).toHaveBeenCalledWith(expected);
 		expect(ctx.agent.appendMessage).toHaveBeenCalledWith(expect.objectContaining({ role: "developer" }));
 		expect(ctx.sessionManager.appendMessage).toHaveBeenCalledWith(expect.objectContaining({ role: "developer" }));
@@ -94,7 +96,7 @@ describe("TodoCommandController", () => {
 		const expected: TodoPhase[] = [
 			{ name: "Quoted", tasks: [{ content: "From quoted path", status: "in_progress" }] },
 		];
-		expect(ctx.session.commitTodoPhases).toHaveBeenCalledWith(expected);
+		expect(ctx.setTodos).toHaveBeenCalledWith(expected);
 		expect(ctx.showStatus).toHaveBeenCalledWith(`Imported 1 phase(s), 1 task(s) from ${target}.`);
 		expect(ctx.showError).not.toHaveBeenCalled();
 	});

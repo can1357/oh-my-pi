@@ -2357,7 +2357,11 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 			}
 
 			case "set_todos": {
-				session.commitTodoPhases(command.phases);
+				try {
+					await session.commitTodoPhases(command.phases);
+				} catch (err) {
+					return error(id, "set_todos", err instanceof Error ? err.message : String(err));
+				}
 				const phases = session.getTodoPhases();
 				return success(id, "set_todos", { todoPhases: phases });
 			}

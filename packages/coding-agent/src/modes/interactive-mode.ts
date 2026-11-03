@@ -600,6 +600,25 @@ const HUD_NOTE_SUP_DIGITS: Record<string, string> = {
 	"9": "\u2079",
 };
 
+/**
+ * Completes every open task (pending/in_progress/blocked) that matches a finished subagent description.
+ * Returns `undefined` when nothing changes. A blocker note is dropped with the blocked status: the wait it
+ * described is over.
+ */
+function completeFinishedSubagentTodos(phases: TodoPhase[], completedDescs: string[]): TodoPhase[] | undefined {
+	let mutated = false;
+	const next: TodoPhase[] = phases.map(phase => ({
+		name: phase.name,
+		tasks: phase.tasks.map(task => {
+			if (task.status !== "pending" && task.status !== "in_progress" && task.status !== "blocked") return task;
+			if (!todoMatchesAnyDescription(task.content, completedDescs)) return task;
+			mutated = true;
+			return { content: task.content, status: "completed" as const };
+		}),
+	}));
+	return mutated ? next : undefined;
+}
+
 function formatHudNoteMarker(count: number): string {
 	if (count <= 0) return "";
 	const sub = String(count)
@@ -2022,6 +2041,11 @@ export class InteractiveMode implements InteractiveModeContext {
 	/** Repaints the subagent HUD so live-preview elapsed markers advance between progress events. */
 	#subagentPreviewTickTimer?: NodeJS.Timeout;
 	#observerUiSyncNeedsTodoReconcile = false;
+	/** A subagent-completion todo commit is awaiting the session's write queue. */
+	#todoReconcileInFlight = false;
+	#todoReconcileRerun = false;
+	/** Serialized list a backend refused; suppresses re-attempting the identical commit. */
+	#todoReconcileRefusedKey: string | undefined;
 	/** Active subagent descriptions the todo HUD last rendered with (joined); see #flushObserverUiSync. */
 	#todoHudSubagentKey: string | undefined;
 	#runningSubagentCount = 0;
@@ -5002,32 +5026,48 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		if (completedDescs.length === 0) return;
 
-		let mutated = false;
-		const next: TodoPhase[] = this.todoPhases.map(phase => ({
-			name: phase.name,
-			tasks: phase.tasks.map(task => {
-				if (task.status !== "pending" && task.status !== "in_progress" && task.status !== "blocked") {
-					return task;
-				}
-				if (!todoMatchesAnyDescription(task.content, completedDescs)) return task;
-				mutated = true;
-				// Drop any blocker note along with the blocked status — the wait the
-				// note described is over.
-				return { content: task.content, status: "completed" as const };
-			}),
-		}));
-		if (!mutated) return;
+		// The HUD snapshot only gates whether a commit is worth queueing; the committed list is
+		// recomputed inside the queued updater so a `todo` write queued ahead of it is never overwritten.
+		const next = completeFinishedSubagentTodos(this.todoPhases, completedDescs);
+		if (!next) return;
+		const nextKey = JSON.stringify(next);
+		// A refused list stays refused until the inputs change; retrying on every tick would repeat the warning.
+		if (nextKey === this.#todoReconcileRefusedKey) return;
+		// A commit in flight (the backend's `replace` may be slow) owns the list; rerun once it lands.
+		if (this.#todoReconcileInFlight) {
+			this.#todoReconcileRerun = true;
+			return;
+		}
 		// Persist into the session that owns the snapshot we derived `next` from,
 		// not `viewSession`: the two diverge mid focus-attach, and writing to the
 		// destination there would clobber its canonical plan. Leaving the owner
 		// bound (rather than routing through `setTodos`, which rebinds it to
 		// `viewSession`) keeps a follow-up reconcile in the same window correct.
 		const owner = this.#todoPhasesOwner ?? this.session;
-		owner.commitTodoPhases(next);
-		this.todoPhases = next;
-		this.#syncTodoHudState(owner);
-		this.#renderTodoList();
-		this.ui.requestRender();
+		this.#todoReconcileInFlight = true;
+		void owner
+			.commitTodoPhases(current => completeFinishedSubagentTodos(current, completedDescs))
+			.then(
+				committed => {
+					this.#todoReconcileRefusedKey = undefined;
+					// Nothing to change against the committed list, or the HUD now belongs to another owner.
+					if (!committed || (this.#todoPhasesOwner ?? this.session) !== owner) return;
+					this.todoPhases = committed;
+					this.#syncTodoHudState(owner);
+					this.#renderTodoList();
+					this.ui.requestRender();
+				},
+				error => {
+					this.#todoReconcileRefusedKey = nextKey;
+					this.showWarning(error instanceof Error ? error.message : String(error));
+				},
+			)
+			.finally(() => {
+				this.#todoReconcileInFlight = false;
+				if (!this.#todoReconcileRerun) return;
+				this.#todoReconcileRerun = false;
+				this.#reconcileTodosWithSubagents();
+			});
 	}
 
 	#cancelTodoAutoClearTimer(): void {

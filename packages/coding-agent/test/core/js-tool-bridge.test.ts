@@ -712,7 +712,11 @@ describe("callSessionTool", () => {
 			setTodoPhases: next => {
 				phases = next;
 			},
-			commitTodoPhases: next => persisted.push(next),
+			commitTodoPhases: async update => {
+				const next = typeof update === "function" ? update(phases) : update;
+				if (next) persisted.push(next);
+				return next;
+			},
 			getToolByName: name => (name === "todo" ? (todoTool as unknown as AgentTool) : undefined),
 		};
 		const todoTool = new TodoTool(session);
@@ -737,7 +741,11 @@ describe("callSessionTool", () => {
 			setTodoPhases: next => {
 				phases = next;
 			},
-			commitTodoPhases: next => persisted.push(next),
+			commitTodoPhases: async update => {
+				const next = typeof update === "function" ? update(phases) : update;
+				if (next) persisted.push(next);
+				return next;
+			},
 			getToolForEvalBridge: lookup,
 		};
 		const todoTool = Object.assign(new TodoTool(session), { customWireName: "checklist" });

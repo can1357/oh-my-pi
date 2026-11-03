@@ -33,7 +33,7 @@ import {
 	piTimeout,
 	shellDeadlineSeconds,
 } from "@oh-my-pi/pi-ai/providers/cursor-pi-args";
-import { sanitizeText } from "@oh-my-pi/pi-utils";
+import { logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import { cursorMcpPrefersReplaceEdit, normalizeCursorReplaceArgs } from "./cursor-bridge-tools";
 import type { MCPResourceReadResult } from "./mcp/types";
 import {
@@ -120,7 +120,12 @@ interface CursorExecBridgeOptions {
 	 * emits no local `todo` toolResult, so without this bridge the provider's
 	 * list and the local `todo` state diverge silently and reloads lose it.
 	 */
-	commitTodoPhases?: (phases: TodoPhase[]) => void;
+	commitTodoPhases?: (
+		update: TodoPhase[] | ((current: TodoPhase[]) => TodoPhase[] | undefined),
+		options?: { mirrored?: boolean },
+	) => Promise<TodoPhase[] | undefined>;
+	/** Called with the backend's message when {@link commitTodoPhases} rejects a mirrored list. */
+	reportTodoRefusal?: (message: string) => void;
 	getTodoPhases?: () => TodoPhase[];
 	/**
 	 * Build a `grep` tool honoring a frame's own context width and match cap.
@@ -1041,12 +1046,14 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 			if (origin === "read" && JSON.stringify(next) === JSON.stringify(existing)) {
 				phases = undefined;
 			} else {
-				commitPhases(next);
+				// Stays synchronous: the result below is returned mid-parse. The commit
+				// settles later; a refusal is reported and the HUD resynced then.
+				commitPhases(next).catch(error => this.#todoCommitRefused(result, error));
 				phases = next;
 			}
 		}
 
-		const result = buildTodoSyncResult(toolCallId, phases, error);
+		const result: ToolResultMessage = buildTodoSyncResult(toolCallId, phases, error);
 		// This completion is emitted synchronously mid-parse, while the streamed
 		// `toolcall_start` that creates the visible card rides
 		// `AssistantMessageEventStream` and lands a microtask later. When Cursor
@@ -1065,6 +1072,50 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 			isError: error !== null,
 		});
 		return result;
+	}
+
+	/**
+	 * The session refused a mirrored list (a selected todo backend's `replace` threw), so it kept
+	 * its previous list. Surface why and make every view agree on the committed list:
+	 * - a mirrored identity commit is queued behind every earlier write, so it resolves with the list
+	 *   committed as of its slot (later syncs and `/todo` edits queued before it included);
+	 * - the call's end event carries that list, so `event-controller` replaces the refused list in the HUD;
+	 * - the pending toolResult (not yet persisted, or still in the loop's context) is rewritten to say
+	 *   the update was refused and to carry that list, so the model is told and a reload does
+	 *   not restore the refused one;
+	 * - the mirrored `user_todo_edit` entry that commit appends wins on reload when the toolResult was
+	 *   already persisted with the refused list.
+	 */
+	#todoCommitRefused(result: ToolResultMessage, error: unknown): void {
+		const message = error instanceof Error ? error.message : String(error);
+		this.options.reportTodoRefusal?.(message);
+		const commit = this.options.commitTodoPhases;
+		if (!commit) return;
+		commit(current => current, { mirrored: true }).then(
+			committed => {
+				const phases = committed ?? [];
+				result.content = [
+					{
+						type: "text",
+						text: `Todo update refused, list unchanged (${formatTodoSyncSummary(phases)}): ${message}`,
+					},
+				];
+				result.details = { phases, storage: "session" };
+				result.isError = true;
+				this.options.emitEvent?.({
+					type: "tool_execution_end",
+					toolCallId: result.toolCallId,
+					toolName: "todo",
+					result: { content: result.content, details: result.details },
+					isError: false,
+				});
+			},
+			(persistError: unknown) => {
+				logger.warn("Could not persist the committed todo list after a refused mirror", {
+					error: persistError instanceof Error ? persistError.message : String(persistError),
+				});
+			},
+		);
 	}
 
 	async mcp(call: CursorMcpCall) {

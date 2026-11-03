@@ -38,6 +38,7 @@ import type { AsyncJobSnapshot, SendUserMessageOptions } from "../../session/age
 import { MAIN_AGENT_ID } from "../../registry/agent-registry";
 import type { SessionManager } from "../../session/session-manager";
 import { addFileDeleteFallback, addFileWriteFallback } from "../../tools/file-write-fallback";
+import type { TodoBackendRegistry } from "../../tools/todo-backend";
 import type { BranchHandler, NavigateTreeHandler, NewSessionHandler } from "../session-handler-types";
 import { accumulateToolCallResult, buildAggregatedToolCallResult } from "../shared-events";
 import { ManagedTimers } from "./managed-timers";
@@ -791,6 +792,11 @@ export class ExtensionRunner {
 	 */
 	get cwd(): string {
 		return this.sessionManager.getCwd();
+	}
+
+	/** Todo backends registered by this runner's extensions (including deferred ones). */
+	get todoBackends(): TodoBackendRegistry {
+		return this.runtime.todoBackends;
 	}
 
 	/**

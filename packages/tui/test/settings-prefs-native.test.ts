@@ -111,9 +111,10 @@ function harness(initial: Record<string, unknown> = {}): Harness {
 		{
 			settings,
 			plugins,
-			availableThinkingLevels: [],
 			thinkingLevel: undefined,
-			availableThemes: ["dark", "light", "titanium"],
+			runtimeOptions: new Map([
+				["theme.dark", () => ["dark", "light", "titanium"].map(value => ({ value, label: value }))],
+			]),
 			providers: [],
 		},
 		{
