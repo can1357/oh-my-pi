@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Typing on iPhone Mirroring is about twice as fast (about 150 ms per character instead of 290), and key presses there are quicker ([#17897](https://github.com/can1357/oh-my-pi/pull/17897) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.18.0] - 2026-11-07
 
 ### Fixed
@@ -65,10 +69,6 @@
 - An unanswered Wayland RemoteDesktop permission dialog now fails input with `Timeout` before the run deadline, sending nothing ([#17932](https://github.com/can1357/oh-my-pi/pull/17932) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed X11 takeover input stopping with `Cancelled` after you typed locally; Escape now stops computer use for the rest of the turn ([#17912](https://github.com/can1357/oh-my-pi/pull/17912) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed X11 background `el.type`/`el.press` raising the window and taking your keyboard; elements without GTK 3 focus now use takeover ([#17921](https://github.com/can1357/oh-my-pi/pull/17921) by [@will-bogusz](https://github.com/will-bogusz))
-
-### Changed
-
-- Typing on iPhone Mirroring is about twice as fast (about 150 ms per character instead of 290), and key presses there are quicker.
 
 ## [18.16.0] - 2026-11-02
 
