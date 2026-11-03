@@ -858,7 +858,10 @@ impl File for Trickle {
 	}
 
 	fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
-		if self.full.fetch_xor(true, std::sync::atomic::Ordering::SeqCst) {
+		if self
+			.full
+			.fetch_xor(true, std::sync::atomic::Ordering::SeqCst)
+		{
 			cx.waker().wake_by_ref();
 			return Poll::Pending;
 		}
@@ -951,7 +954,10 @@ impl File for Silent {
 #[test]
 fn input_waiting_for_engine_bytes_is_dropped_with_the_child() {
 	let env = EnvView::default();
-	let s = NativeSpawner::new(SpawnConfig { grace: Duration::from_millis(300), ..SpawnConfig::default() });
+	let s = NativeSpawner::new(SpawnConfig {
+		grace: Duration::from_millis(300),
+		..SpawnConfig::default()
+	});
 	let silent = Silent::default();
 	let a = sh("exit 3");
 	let mut sp = spec(&a, &env, NEW);

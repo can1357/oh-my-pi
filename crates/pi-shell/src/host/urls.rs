@@ -57,8 +57,18 @@ impl Rest {
 	/// ones it was split from. Synchronous: nothing of the spec outlives the
 	/// call, so no borrow of it crosses an await.
 	pub(super) fn launch<R>(self, names: &Names, launch: impl FnOnce(SpawnSpec<'_>) -> R) -> R {
-		let Self { stdio, extra_fds, pgroup, tag, vpid, umask, sigmask_ign, rlimits, lineage, redirs } =
-			self;
+		let Self {
+			stdio,
+			extra_fds,
+			pgroup,
+			tag,
+			vpid,
+			umask,
+			sigmask_ign,
+			rlimits,
+			lineage,
+			redirs,
+		} = self;
 		launch(SpawnSpec {
 			path: names.path.as_bstr(),
 			argv: &names.argv,

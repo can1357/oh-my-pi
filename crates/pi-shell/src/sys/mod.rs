@@ -34,20 +34,20 @@ pub mod pathext;
 #[cfg(unix)]
 pub mod proc;
 mod pump;
-mod relay;
 #[cfg(unix)]
 mod ready;
+mod relay;
 pub mod rlimit;
 pub mod shebang;
 mod spawn;
 
-pub(crate) use crate::sys::{pump::End, relay::Relays};
 pub use crate::sys::{
 	fs::{StdFile, StdFs, std_stream},
 	park::Parker,
 	relay::{ByteDecoder, OutputDecoding},
 	spawn::{Exits, Leftover, NativeSpawner, Sessions, SpawnConfig, UnsupportedFd},
 };
+pub(crate) use crate::sys::{pump::End, relay::Relays};
 
 #[cfg(test)]
 mod suites;

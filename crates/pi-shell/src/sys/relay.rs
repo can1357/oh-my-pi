@@ -265,7 +265,9 @@ impl<'a> Relays<'a> {
 	/// program writes to.
 	pub(crate) fn attach(&mut self, sink: End) -> io::Result<OsHandle> {
 		let (pipe, writer) = os::pipe(false)?;
-		self.set.push(Relay::new(pipe, self.decoding.decoder(), sink));
+		self
+			.set
+			.push(Relay::new(pipe, self.decoding.decoder(), sink));
 		let os = writer_handle(&writer);
 		self.writers.push(writer);
 		Ok(os)
@@ -310,7 +312,11 @@ impl ExtProc for Relayed {
 			drained &= relay.drained(cx);
 		}
 		orphan::poll(cx);
-		if drained { Poll::Ready(status) } else { Poll::Pending }
+		if drained {
+			Poll::Ready(status)
+		} else {
+			Poll::Pending
+		}
 	}
 
 	fn signal(&mut self, sig: Signal) -> io::Result<()> {
@@ -475,12 +481,9 @@ mod tests {
 	async fn program_output_is_decoded_in_order() {
 		let dir = tempfile::tempdir().unwrap();
 		let file = legacy_file(dir.path());
-		let out = run(
-			&mut session(false),
-			&format!("printf 'a\\n'; /bin/cat {file}; printf 'b\\n'"),
-			true,
-		)
-		.await;
+		let out =
+			run(&mut session(false), &format!("printf 'a\\n'; /bin/cat {file}; printf 'b\\n'"), true)
+				.await;
 		assert_eq!(out, "a\ncafé\nb\n".as_bytes());
 	}
 
@@ -552,12 +555,9 @@ mod tests {
 	/// relay that outlived the program's `ExtProc`.
 	#[tokio::test(flavor = "current_thread")]
 	async fn held_bytes_wait_for_the_end_of_a_stream_a_leftover_holds() {
-		let (out, took) = run_timed(
-			&mut session(true),
-			"/bin/sh -c 'printf abc; /bin/sleep 1 &'; printf X",
-			true,
-		)
-		.await;
+		let (out, took) =
+			run_timed(&mut session(true), "/bin/sh -c 'printf abc; /bin/sleep 1 &'; printf X", true)
+				.await;
 		assert_eq!(out, b"abXc");
 		assert!(took < Duration::from_millis(800), "waited for the leftover: {took:?}");
 	}

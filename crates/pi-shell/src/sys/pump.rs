@@ -13,16 +13,16 @@
 //!   holder of the pipe's write end (the child and anything it forked) has
 //!   closed it. If the engine side refuses the bytes (`EPIPE`: the reader is
 //!   gone), the pump closes the OS read end so the child's next write gets
-//!   `SIGPIPE`, exactly as with a real pipe. Each output half reports its
-//!   drain to the [`Tracker`] once, at end of file, on refusal, or when
-//!   dropped: the command completes only once its output is delivered and
-//!   flushed. An output pump still running when its `ExtProc` is dropped (a
-//!   detached or abandoned external, or a leftover it forked holding the
-//!   pipe) goes on to its end of file as adopted work ([`orphan`]).
+//!   `SIGPIPE`, exactly as with a real pipe. Each output half reports its drain
+//!   to the [`Tracker`] once, at end of file, on refusal, or when dropped: the
+//!   command completes only once its output is delivered and flushed. An output
+//!   pump still running when its `ExtProc` is dropped (a detached or abandoned
+//!   external, or a leftover it forked holding the pipe) goes on to its end of
+//!   file as adopted work ([`orphan`]).
 //! - **Input** (engine → child) runs until the engine side reaches end of file
-//!   (then flushed), the child closes its end (`EPIPE`), or the tracker
-//!   cancels it (the child exited, the spawn failed or the `ExtProc` was
-//!   dropped); a cancel wakes the poller, which drops the input work.
+//!   (then flushed), the child closes its end (`EPIPE`), or the tracker cancels
+//!   it (the child exited, the spawn failed or the `ExtProc` was dropped); a
+//!   cancel wakes the poller, which drops the input work.
 //! - **Feed** (engine fd object → children): input from an engine fd object
 //!   goes through one OS pipe per object, shared by every external and fd it is
 //!   handed to ([`Feed`]), as bash shares one kernel pipe. A pump per handoff
@@ -306,13 +306,18 @@ impl Duplex {
 		use std::net::Shutdown;
 
 		if let Some((chunk, _)) = &mut self.outbound
-			&& chunk.poll_copy(cx, &mut self.sock, &mut self.end).is_ready()
+			&& chunk
+				.poll_copy(cx, &mut self.sock, &mut self.end)
+				.is_ready()
 		{
 			self.sock.shutdown(Shutdown::Read);
 			self.outbound = None;
 		}
 		if let Some(chunk) = &mut self.inbound
-			&& (cancelled || chunk.poll_copy(cx, &mut self.end, &mut self.sock).is_ready())
+			&& (cancelled
+				|| chunk
+					.poll_copy(cx, &mut self.end, &mut self.sock)
+					.is_ready())
 		{
 			self.sock.shutdown(Shutdown::Write);
 			self.inbound = None;
@@ -342,11 +347,8 @@ impl Pumps {
 			.into_iter()
 			.map(|p| match p {
 				Pump::In(src, dst) => Task::In { dst, src, chunk: Chunk::new() },
-				Pump::Out(src, dst) => Task::Out {
-					src,
-					dst,
-					chunk: Chunk::new(),
-					_drained: Drained(Arc::clone(tracker)),
+				Pump::Out(src, dst) => {
+					Task::Out { src, dst, chunk: Chunk::new(), _drained: Drained(Arc::clone(tracker)) }
 				},
 				#[cfg(unix)]
 				Pump::Duplex(end, sock) => Task::Duplex(Box::new(Duplex {
@@ -366,7 +368,9 @@ impl Pumps {
 	/// `ExtProc::poll_wait` before it polls the tracker.
 	pub fn poll(&mut self, cx: &mut Context<'_>, tracker: &Tracker) {
 		let cancelled = tracker.pumps_cancelled(cx.waker());
-		self.tasks.retain_mut(|t| t.poll(cx, cancelled).is_pending());
+		self
+			.tasks
+			.retain_mut(|t| t.poll(cx, cancelled).is_pending());
 		for feed in &self.feeds {
 			feed.poll(cx);
 		}
@@ -473,7 +477,11 @@ impl Feed {
 		Ok(Self {
 			read,
 			fd: fd.clone(),
-			state: Mutex::new(FeedState { pipe: Some(pipe), src: End::Fd(fd), chunk: Chunk::new() }),
+			state: Mutex::new(FeedState {
+				pipe:  Some(pipe),
+				src:   End::Fd(fd),
+				chunk: Chunk::new(),
+			}),
 			wakers,
 			waker,
 		})
@@ -574,7 +582,11 @@ mod tests {
 		let (duplex, child_duplex) = os::socket_pair().unwrap();
 		let sink = || End::Fd(FdRef::from_file(Box::new(Never(Arc::new(())))));
 		let mut pumps = Pumps::new(
-			vec![Pump::Out(out_eof, sink()), Pump::Out(out_open, sink()), Pump::Duplex(sink(), duplex)],
+			vec![
+				Pump::Out(out_eof, sink()),
+				Pump::Out(out_open, sink()),
+				Pump::Duplex(sink(), duplex),
+			],
 			Vec::new(),
 			&tracker,
 		);

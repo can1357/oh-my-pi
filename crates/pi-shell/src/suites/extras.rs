@@ -38,11 +38,11 @@ fn env_with(extra: &[(&str, &str)]) -> Vec<(BString, BString)> {
 
 fn session_in(dir: &Path, extra: &[(&str, &str)]) -> Session {
 	Session::new(SessionConfig {
-		env:     env_with(extra),
-		cwd:     BString::from(dir.as_os_str().as_bytes()),
-		fs:      Box::new(crate::sys::StdFs),
-		vfs:     None,
-		runtime: tokio::runtime::Handle::current(),
+		env:             env_with(extra),
+		cwd:             BString::from(dir.as_os_str().as_bytes()),
+		fs:              Box::new(crate::sys::StdFs),
+		vfs:             None,
+		runtime:         tokio::runtime::Handle::current(),
 		output_decoding: None,
 	})
 	.unwrap()
@@ -427,11 +427,11 @@ async fn utilities_read_provider_files() {
 	let vfs = VfsFs::new(pi_vfs::Fs::new(Arc::new(Notes)), tokio::runtime::Handle::current());
 	let cwd = std::env::current_dir().unwrap();
 	let mut s = Session::new(SessionConfig {
-		env:     env_with(&[]),
-		cwd:     BString::from(cwd.as_os_str().as_bytes()),
-		fs:      Box::new(vfs.clone()),
-		vfs:     Some(vfs),
-		runtime: tokio::runtime::Handle::current(),
+		env:             env_with(&[]),
+		cwd:             BString::from(cwd.as_os_str().as_bytes()),
+		fs:              Box::new(vfs.clone()),
+		vfs:             Some(vfs),
+		runtime:         tokio::runtime::Handle::current(),
 		output_decoding: None,
 	})
 	.unwrap();

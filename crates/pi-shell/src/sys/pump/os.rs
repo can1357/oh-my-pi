@@ -7,17 +7,17 @@
 //!   affects nobody else). I/O that would wait registers the task's waker with
 //!   the process-wide readiness poller ([`ready::watch`]). The timer is a
 //!   `timerfd` (Linux) or a kqueue timer (BSD, macOS), watched the same way.
-//! - **Windows**: anonymous pipes cannot do overlapped I/O, so a pump pipe is
-//!   a private named-pipe instance: our server end is overlapped, the child's
+//! - **Windows**: anonymous pipes cannot do overlapped I/O, so a pump pipe is a
+//!   private named-pipe instance: our server end is overlapped, the child's
 //!   client end is an ordinary synchronous handle. Our end is bound to the
 //!   system thread pool (`CreateThreadpoolIo`); one read, write or connect is
-//!   in flight at a time. Its OVERLAPPED and buffer live in a shared
-//!   allocation the completion callback holds a reference to, so dropping
-//!   the end never waits: it cancels the operation, closes the handle, and
-//!   the completion (which only records the result and wakes the stored
-//!   waker) frees the rest. The timer is a thread-pool timer whose callback
-//!   likewise only wakes, and frees the timer once its owner is gone. No
-//!   engine future is polled outside the task polling it.
+//!   in flight at a time. Its OVERLAPPED and buffer live in a shared allocation
+//!   the completion callback holds a reference to, so dropping the end never
+//!   waits: it cancels the operation, closes the handle, and the completion
+//!   (which only records the result and wakes the stored waker) frees the rest.
+//!   The timer is a thread-pool timer whose callback likewise only wakes, and
+//!   frees the timer once its owner is gone. No engine future is polled outside
+//!   the task polling it.
 //!
 //! [`ready::watch`]: crate::sys::ready::watch
 
@@ -27,9 +27,9 @@ use std::{
 	time::{Duration, Instant},
 };
 
-pub use self::imp::{OsPipe, Timer, reclaim};
 #[cfg(unix)]
 pub use self::imp::socket_pair;
+pub use self::imp::{OsPipe, Timer, reclaim};
 
 /// A pipe between a pump and a child: our end, and the child's end (`true`
 /// = the child reads).
@@ -184,7 +184,6 @@ mod imp {
 			}
 			Ok(usize::try_from(n).unwrap_or(0))
 		}
-
 	}
 
 	/// What a feed's pipe still holds, read through the child's end `read`
@@ -296,8 +295,7 @@ mod imp {
 			},
 		};
 		// SAFETY: `spec` is valid; the old value is not wanted.
-		if unsafe { libc::timerfd_settime(fd.as_raw_fd(), 0, &raw const spec, ptr::null_mut()) } < 0
-		{
+		if unsafe { libc::timerfd_settime(fd.as_raw_fd(), 0, &raw const spec, ptr::null_mut()) } < 0 {
 			return Err(io::Error::last_os_error());
 		}
 		Ok(fd)
@@ -465,15 +463,7 @@ mod imp {
 		// SAFETY: as above; opens the client end of the instance just created,
 		// synchronous (no FILE_FLAG_OVERLAPPED), as children expect.
 		let client = owned(unsafe {
-			CreateFileW(
-				wide.as_ptr(),
-				desired,
-				0,
-				ptr::null(),
-				OPEN_EXISTING,
-				0,
-				ptr::null_mut(),
-			)
+			CreateFileW(wide.as_ptr(), desired, 0, ptr::null(), OPEN_EXISTING, 0, ptr::null_mut())
 		})?;
 		Ok((OsPipe(WinEnd::new(server)?), fs::File::from(client)))
 	}
@@ -951,8 +941,9 @@ mod imp {
 			let context = Arc::into_raw(Arc::clone(&shared));
 			// SAFETY: `context` stays valid until the callback, which always
 			// runs once the timer is set, reclaims it.
-			let timer =
-				unsafe { CreateThreadpoolTimer(Some(on_timer), context.cast_mut().cast(), ptr::null()) };
+			let timer = unsafe {
+				CreateThreadpoolTimer(Some(on_timer), context.cast_mut().cast(), ptr::null())
+			};
 			if timer == 0 {
 				let e = io::Error::last_os_error();
 				// SAFETY: the reference made above, never handed out.

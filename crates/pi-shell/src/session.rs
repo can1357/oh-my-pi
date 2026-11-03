@@ -94,20 +94,20 @@ const MAX_PARK: Duration = Duration::from_secs(1);
 pub struct SessionConfig {
 	/// The shell's initial environment, all exported (no inheritance from
 	/// the pi process beyond what is listed).
-	pub env:     Vec<(BString, BString)>,
+	pub env:             Vec<(BString, BString)>,
 	/// Initial working directory (absolute).
-	pub cwd:     BString,
+	pub cwd:             BString,
 	/// The filesystem: `crate::vfs::VfsFs`, or `crate::sys::StdFs`.
-	pub fs:      Box<dyn Fs + Send>,
+	pub fs:              Box<dyn Fs + Send>,
 	/// The pi-vfs filesystem slot behind [`SessionConfig::fs`] (a clone of
 	/// the same [`VfsFs`]), when there is one: pi's utilities and in-process
 	/// `git worktree add` ([`crate::tools`]) work on the filesystem it holds
 	/// when they run, and externals get the host files its URLs alias
 	/// ([`PiHost::spawn`](crate::bash::Host::spawn)). `None`: every path is
 	/// native.
-	pub vfs:     Option<VfsFs>,
+	pub vfs:             Option<VfsFs>,
 	/// Runtime the host's timers (`read -t`, `TMOUT`) sleep on.
-	pub runtime: tokio::runtime::Handle,
+	pub runtime:         tokio::runtime::Handle,
 	/// Decodes what externals write into a text capture
 	/// ([`RunOptions::text_capture`]); `None` is the platform default
 	/// ([`crate::output_decode::external_output_decoding`]).
@@ -321,13 +321,11 @@ impl Session {
 		let engine = Engine::new(EngineConfig { end_orphan_jobs: true, ..EngineConfig::default() });
 		let mut store = MemStore::new();
 		let init = ShellInit { env, cwd, ..ShellInit::default() };
-		let mut shell =
-			Shell::create(&engine, &mut Cx { host: &mut host, store: &mut store }, init)
-				.map_err(SessionError::Create)?;
+		let mut shell = Shell::create(&engine, &mut Cx { host: &mut host, store: &mut store }, init)
+			.map_err(SessionError::Create)?;
 		// Nothing observes events: skip building them.
 		shell.set_event_mask(EventMask::NONE);
-		let driver =
-			Driver { shell, store, host, bell, jobs: rx, children: children.clone(), tools };
+		let driver = Driver { shell, store, host, bell, jobs: rx, children: children.clone(), tools };
 		runtime.spawn(driver.serve());
 		Ok(Self { jobs: Some(jobs), waker, children })
 	}

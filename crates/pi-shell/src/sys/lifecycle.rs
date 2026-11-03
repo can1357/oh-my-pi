@@ -205,7 +205,10 @@ pub struct Tracker {
 impl Tracker {
 	/// Tracker of a process with `draining` output pumps.
 	pub fn new(draining: usize) -> Arc<Self> {
-		Arc::new(Self { life: Mutex::new(Lifecycle::new(draining)), cancel: AtomicBool::new(false) })
+		Arc::new(Self {
+			life:   Mutex::new(Lifecycle::new(draining)),
+			cancel: AtomicBool::new(false),
+		})
 	}
 
 	/// Lock the lifecycle. Signals that must not hit a reaped (recycled)

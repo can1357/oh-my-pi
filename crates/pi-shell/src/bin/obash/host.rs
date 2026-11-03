@@ -157,15 +157,12 @@ impl pi_shell::bash::Host for NativeHost {
 	/// Launches at once (a local process, no I/O to wait for): the future is
 	/// already complete.
 	fn spawn(&mut self, spec: SpawnSpec<'_>) -> SpawnFuture {
-		let spawned = self
-			.spawner
-			.spawn(spec)
-			.map(|child| -> Box<dyn ExtProc> {
-				match &self.bridge {
-					Some((ctl, root)) => Box::new(SignalsOnExit { child, ctl: ctl.clone(), root: *root }),
-					None => child,
-				}
-			});
+		let spawned = self.spawner.spawn(spec).map(|child| -> Box<dyn ExtProc> {
+			match &self.bridge {
+				Some((ctl, root)) => Box::new(SignalsOnExit { child, ctl: ctl.clone(), root: *root }),
+				None => child,
+			}
+		});
 		Box::pin(std::future::ready(spawned))
 	}
 
