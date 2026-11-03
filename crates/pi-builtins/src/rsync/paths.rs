@@ -1143,10 +1143,15 @@ impl io::Write for OperatorOutput {
 		{
 			let never = AtomicBool::new(false);
 			let cancel: &AtomicBool = if cuttable { &self.cancel } else { &never };
+			// Write first, as rsync's blocking write does: a pipe reports
+			// POLLOUT only with a whole page free, while a short write still
+			// fits in the room left in its last page. Wait for room only when
+			// the write would block.
 			loop {
-				wait_writable(native.as_fd(), cancel).map_err(mapped)?;
 				match io::Write::write(&mut native, buf) {
-					Err(err) if err.kind() == io::ErrorKind::WouldBlock => {},
+					Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+						wait_writable(native.as_fd(), cancel).map_err(mapped)?;
+					},
 					written => return written.map_err(mapped),
 				}
 			}
@@ -1938,6 +1943,49 @@ mod tests {
 		let mut buf = vec![0u8; 1 << 16];
 		while reader.read(&mut buf).is_ok_and(|n| n > 0) {}
 		writer.join().unwrap().unwrap();
+	}
+
+	/// A short write goes into the room the last page of a FIFO has, even
+	/// when no page is free and `poll` reports no room, as rsync's
+	/// blocking write does. Waiting for `POLLOUT` first held such a write
+	/// until the reader took a page (35 s in review, where rsync 3.5.1
+	/// finished at once).
+	#[cfg(target_os = "linux")]
+	#[test]
+	fn a_short_write_goes_into_the_room_of_the_last_page() {
+		use std::{
+			io::Write,
+			os::{fd::AsRawFd, unix::fs::OpenOptionsExt},
+			time::{Duration, Instant},
+		};
+
+		let (_guard, base) = canonical_tempdir();
+		let vfs = BlockingFs::native();
+		let fifo = base.join("partial");
+		nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap();
+		let reader = fs::OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK).open(&fifo).unwrap();
+		let mut filler = fs::OpenOptions::new().write(true).custom_flags(libc::O_NONBLOCK).open(&fifo).unwrap();
+		// SAFETY: plain queries on a live descriptor and of the system.
+		let (size, page) = unsafe {
+			(libc::fcntl(filler.as_raw_fd(), libc::F_GETPIPE_SZ), libc::sysconf(libc::_SC_PAGESIZE))
+		};
+		let (size, page) = (usize::try_from(size).unwrap(), usize::try_from(page).unwrap());
+		// Every page but the last full, and the last holding 596 bytes.
+		for _ in 0..size / page - 1 {
+			filler.write_all(&vec![b'x'; page]).unwrap();
+		}
+		filler.write_all(&[b'x'; 596]).unwrap();
+		let mut pfd = libc::pollfd { fd: filler.as_raw_fd(), events: libc::POLLOUT, revents: 0 };
+		// SAFETY: one `pollfd`, valid for the call.
+		assert_eq!(unsafe { libc::poll(&mut pfd, 1, 0) }, 0, "poll reports room: the case is not set up");
+		let cancel = Arc::new(AtomicBool::new(false));
+		for insecure in [false, true] {
+			let mut out = create_operator_file(&vfs, &fifo, true, insecure, &cancel).unwrap();
+			let started = Instant::now();
+			out.write_all(b"ab").unwrap();
+			assert!(started.elapsed() < Duration::from_secs(1), "insecure={insecure}: {:?}", started.elapsed());
+		}
+		drop((reader, filler));
 	}
 	}
 }

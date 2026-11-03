@@ -494,15 +494,19 @@ fn cancelling_a_local_copy_in_setup_reports_before_the_server_half() {
 	);
 }
 
-/// The same with the client's own `--log-file` full when it is cancelled:
-/// while its trailer waits to be logged, its server half gets past setup
-/// and into the protocol. The connection stays open until the half is
-/// stopped, so the half ends with its SIGUSR1 trailer; closed first, the half
-/// found it gone and printed `error in rsync protocol data stream (code 12)`
-/// instead (round 1 of this pull request, 9 of 9 runs in review).
+/// The same with the client's own `--log-file` full when it is cancelled,
+/// the half still opening its log FIFO, which a reader opens 300 ms later:
+/// rsync 3.5.1 (three runs, SIGTERM; the same for SIGINT and SIGHUP in
+/// review) prints the client's trailer alone. Its client signals the half at
+/// once, and a half whose client logs too opens its log inside its first log
+/// write, so `rwrite`'s `in_block` drops the half's trailer. Before, the half
+/// got past its log into the protocol while the client's trailer waited:
+/// with the connection closed it printed `error in rsync protocol data
+/// stream (code 12)` (round 1 of this pull request), and with it kept open
+/// its SIGUSR1 trailer (round 4), neither of which rsync prints.
 #[cfg(unix)]
 #[test]
-fn a_cancelled_client_blocked_on_its_log_keeps_the_connection_for_its_server_half() {
+fn a_half_stopped_opening_its_log_prints_nothing_when_the_client_logs() {
 	use std::io::Read as _;
 	use std::os::unix::fs::OpenOptionsExt;
 
@@ -554,8 +558,7 @@ fn a_cancelled_client_blocked_on_its_log_keeps_the_connection_for_its_server_hal
 	assert_eq!(code, RERR_SIGNAL, "{}", cap.err());
 	assert_eq!(
 		cap.err(),
-		"rsync error: received SIGINT, SIGTERM, or SIGHUP (code 20) at rsync.c(874) [sender=3.5.1]\n\
-		 rsync error: received SIGUSR1 (code 19) at main.c(1687) [Receiver=3.5.1]\n"
+		"rsync error: received SIGINT, SIGTERM, or SIGHUP (code 20) at rsync.c(874) [sender=3.5.1]\n"
 	);
 }
 

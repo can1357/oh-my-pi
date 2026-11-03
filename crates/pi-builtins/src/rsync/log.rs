@@ -383,12 +383,17 @@ impl Logger {
 	/// log_init: opens `config().log_file` for appending through the operator-file walk.
 	/// On failure prints upstream's two messages and falls back to syslog. An
 	/// open that `cancel` ends (a FIFO nobody reads) prints nothing: the run
-	/// ends with its cancellation.
+	/// ends with its cancellation. With `cut_on_cancel` such an open also
+	/// drops every later message (`Outputs::cut`): a local server half's
+	/// rsync opens its log lazily, inside its first log write, when the client
+	/// has a log of its own, so the signal that interrupts that open finds
+	/// `in_block` set and its trailer is lost.
 	pub(crate) fn open_log_file(
 		&self,
 		fs: &pi_vfs::BlockingFs,
 		insecure: bool,
 		cancel: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+		cut_on_cancel: bool,
 	) {
 		let Some(path) = self.inner.cfg.log_file.clone() else {
 			return;
@@ -402,7 +407,11 @@ impl Logger {
 			// the run's output (see `Outputs::cut`); one logged after it, such
 			// as the exit line, waits for the log as rsync's does.
 			Ok(file) => self.set_log_file(Box::new(file.waiting_after_cancel())),
-			Err(err) if RsyncError::is_cancellation(&err) => {},
+			Err(err) if RsyncError::is_cancellation(&err) => {
+				if cut_on_cancel {
+					lock(&self.inner.outputs).cut = true;
+				}
+			},
 			Err(err) => {
 				let mut text = b"failed to open log-file ".to_vec();
 				text.extend_from_slice(&crate::host::os_bytes_lossy(path.as_os_str()));
