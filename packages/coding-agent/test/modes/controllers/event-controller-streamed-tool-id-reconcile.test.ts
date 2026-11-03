@@ -14,6 +14,7 @@ import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
 import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
+import { setTranscriptPresenters } from "@oh-my-pi/pi-tui/chat/transcript-presentation";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -206,5 +207,38 @@ describe("EventController reconciles streamed tool-call ids at message_end", () 
 		// Both siblings settled — no card stuck pending.
 		expect(ctx.pendingTools.size).toBe(0);
 		controller.dispose();
+	});
+
+	it("hands presenters, and refreshTranscript, the migrated card's final id", async () => {
+		// Regression guard: the reused card keeping its streamed id, so presenters saw `""` and a
+		// refresh by the final id missed the live card.
+		await Settings.init({ inMemory: true, cwd: process.cwd() });
+		setTranscriptPresenters([
+			block => (block.type === "toolCall" ? { compact: { label: `ROW-${block.id}` } } : undefined),
+		]);
+		try {
+			const args = { file_path: "/tmp/a.ts", content: "x" };
+			const streamed = makeStreamingMessage([{ type: "toolCall", id: "", name: "write", arguments: args }]);
+			const minted = makeStreamingMessage([{ type: "toolCall", id: "call_1", name: "write", arguments: args }]);
+			const { controller, ctx } = createFixture(streamed);
+			await controller.handleEvent({
+				type: "message_update",
+				message: streamed,
+				assistantMessageEvent: undefined as never,
+			} as Extract<AgentSessionEvent, { type: "message_update" }>);
+			const card = ctx.pendingTools.get("");
+			if (!(card instanceof ToolExecutionComponent)) throw new Error("Expected the streamed card");
+			card.render(120);
+
+			await controller.handleEvent({
+				type: "message_end",
+				message: minted,
+			} as Extract<AgentSessionEvent, { type: "message_end" }>);
+			expect(card.refreshTranscriptPresentation(new Set(["call_1"]))).toBe(true);
+			expect(Bun.stripANSI(card.render(120).join("\n"))).toContain("ROW-call_1");
+			controller.dispose();
+		} finally {
+			setTranscriptPresenters([]);
+		}
 	});
 });

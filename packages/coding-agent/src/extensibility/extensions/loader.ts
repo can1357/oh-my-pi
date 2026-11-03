@@ -39,6 +39,7 @@ import { getAllPluginExtensionPaths } from "../plugins/loader";
 
 import { resolvePath, withHostGuard } from "../utils";
 import type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
+import { notifyTranscriptPresentersChanged } from "@oh-my-pi/pi-tui/chat/transcript-presentation";
 import type {
 	AssistantTextRenderer,
 	AssistantThinkingRenderer,
@@ -56,6 +57,7 @@ import type {
 	SourceInfo,
 	ToolDefinition,
 	ToolInfo,
+	TranscriptPresenter,
 } from "./types";
 
 installLegacyPiSpecifierShim();
@@ -315,6 +317,25 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		this.extension.assistantTextRenderers.push(renderer);
 	}
 
+	registerTranscriptPresenter(presenter: TranscriptPresenter): () => void {
+		if (typeof presenter !== "function") {
+			throw new TypeError(
+				`registerTranscriptPresenter expects a function, got ${typeof presenter} (extension ${this.extension.path})`,
+			);
+		}
+		const presenters = this.extension.transcriptPresenters;
+		presenters.push(presenter);
+		notifyTranscriptPresentersChanged();
+		let registered = true;
+		return () => {
+			if (!registered) return;
+			registered = false;
+			const index = presenters.indexOf(presenter);
+			if (index >= 0) presenters.splice(index, 1);
+			notifyTranscriptPresentersChanged();
+		};
+	}
+
 	registerLinkScheme(scheme: string): void {
 		const normalized = scheme.toLowerCase();
 		if (!LINK_SCHEME_PATTERN.test(normalized)) {
@@ -436,6 +457,7 @@ function createExtension(extensionPath: string, resolvedPath: string): Extension
 		toolRegistrationListeners: new Set(),
 		assistantThinkingRenderers: [],
 		assistantTextRenderers: [],
+		transcriptPresenters: [],
 		linkSchemes: [],
 		fileWriteFallbackHandlers: [],
 		fileDeleteFallbackHandlers: [],

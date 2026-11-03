@@ -515,6 +515,9 @@ describe("ToolExecutionComponent live preview spinners", () => {
 				updateEditorTopBorder: () => {},
 				updateEditorBorderColor: () => {},
 				syncRunningSubagentBadge: () => {},
+				setCollabGuest: (guest: InteractiveModeContext["collabGuest"]) => {
+					Object.assign(ctx, { collabGuest: guest });
+				},
 			} as unknown as InteractiveModeContext;
 			const uiHelpers = new UiHelpers(ctx);
 
@@ -703,6 +706,9 @@ describe("ToolExecutionComponent live preview spinners", () => {
 				updateEditorTopBorder: () => {},
 				updateEditorBorderColor: () => {},
 				syncRunningSubagentBadge: () => {},
+				setCollabGuest: (guest: InteractiveModeContext["collabGuest"]) => {
+					Object.assign(ctx, { collabGuest: guest });
+				},
 			} as unknown as InteractiveModeContext;
 			const uiHelpers = new UiHelpers(ctx);
 
@@ -893,6 +899,9 @@ describe("ToolExecutionComponent live preview spinners", () => {
 				updateEditorTopBorder: () => {},
 				updateEditorBorderColor: () => {},
 				syncRunningSubagentBadge: () => {},
+				setCollabGuest: (guest: InteractiveModeContext["collabGuest"]) => {
+					Object.assign(ctx, { collabGuest: guest });
+				},
 			} as unknown as InteractiveModeContext;
 			const uiHelpers = new UiHelpers(ctx);
 

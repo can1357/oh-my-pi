@@ -15,6 +15,7 @@ import {
 	type MessageRenderer,
 	type AssistantThinkingRenderer,
 	type AssistantTextRenderer,
+	type TranscriptPresenter,
 } from "@oh-my-pi/pi-tui/chat/extension-types";
 export {
 	type ExtensionUiComponent,
@@ -26,6 +27,9 @@ export {
 	type AssistantThinkingRenderer,
 	type AssistantTextRenderContext,
 	type AssistantTextRenderer,
+	type TranscriptBlock,
+	type TranscriptPresentation,
+	type TranscriptPresenter,
 } from "@oh-my-pi/pi-tui/chat/extension-types";
 import type { type as ArkType } from "@oh-my-pi/omptype";
 import type * as TypeBox from "@oh-my-pi/omptype/typebox";
@@ -362,6 +366,15 @@ export interface ExtensionUIContext {
 	 * and only while `extensionRenderers.assistantText` is on; a no-op elsewhere.
 	 */
 	rerenderMessage(timestamp: number): void;
+
+	/**
+	 * Ask the transcript presenters again for the blocks with these ids (`TranscriptBlock.id`)
+	 * and redraw those whose display changed. omp re-asks on its own whenever a block's data
+	 * changes and once every run has ended and all `agent_end` handlers have settled; call this
+	 * when the presenter's own state changes in between. A changed block with rows already in
+	 * terminal scrollback replays the transcript once. Interactive mode only; a no-op elsewhere.
+	 */
+	refreshTranscript(ids: readonly string[]): void;
 
 	/**
 	 * True while a link whose scheme an extension registered can be picked to raise `link_activate`:
@@ -2038,6 +2051,22 @@ export interface ExtensionAPI {
 	registerAssistantTextRenderer(renderer: AssistantTextRenderer): void;
 
 	/**
+	 * Choose how the main session's transcript blocks are drawn (see {@link TranscriptBlock}).
+	 * Presenters are asked in extension load order, the first answer other than `undefined` wins;
+	 * a suspended extension's presenter is skipped. One that throws or answers anything but a
+	 * {@link TranscriptPresentation} (a Promise included) is reported once and draws the block in
+	 * full. Never mutate the block's `args` or `result`: they are omp's live objects. omp may ask
+	 * again at any time (a transcript rebuild, a data change) and keeps no earlier answer: answer
+	 * from the block and the extension's own state only, keyed by block id rather than by run. A
+	 * block the user expanded is always drawn in full, and `display.hideToolActivity` still hides
+	 * tool activity. A focused subagent, a collab guest and the transcript overlays draw stock
+	 * cards. Display only: the session, exports and model context are unchanged. Returns a
+	 * disposer that removes the presenter. Interactive mode only; elsewhere the presenter is
+	 * registered but never asked.
+	 */
+	registerTranscriptPresenter(presenter: TranscriptPresenter): () => void;
+
+	/**
 	 * Claim a link scheme (e.g. `"cc-stretch"` for `cc-stretch:…` links). In a plain terminal,
 	 * Markdown links using it draw without the ` (url)` suffix and are never handed to the terminal
 	 * or browser to open; picking one (its `app.links.hint` tag, or a click with `tui.mouse` on)
@@ -2433,6 +2462,8 @@ export interface Extension {
 	toolRegistrationListeners?: Set<ToolRegistrationListener>;
 	assistantThinkingRenderers: AssistantThinkingRenderer[];
 	assistantTextRenderers: AssistantTextRenderer[];
+	/** Presenters registered with `registerTranscriptPresenter`, in registration order. */
+	transcriptPresenters: TranscriptPresenter[];
 	/** Link schemes claimed with `registerLinkScheme`, lowercase. */
 	linkSchemes: string[];
 	fileWriteFallbackHandlers: FileWriteFallbackHandler[];

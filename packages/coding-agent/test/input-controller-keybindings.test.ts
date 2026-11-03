@@ -1434,7 +1434,7 @@ describe("InputController global editor actions", () => {
 
 	it("refuses Alt+G when collabGuest is active", async () => {
 		const context = await createContext();
-		context.ctx.collabGuest = {} as unknown as InteractiveModeContext["collabGuest"];
+		Object.assign(context.ctx, { collabGuest: {} });
 		const controller = new context.InputController(context.ctx);
 		controller.setupKeyHandlers();
 		const listeners = registeredInputListeners(context.spies.addInputListener);

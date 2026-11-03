@@ -223,6 +223,31 @@ pi.on("session_stop", async event => {
 
 Full event catalog: see [extension authoring guide](../extensions.md).
 
+## Changing how transcript blocks are drawn
+
+`pi.registerTranscriptPresenter(block => …)` picks `"full"`, `"compact"`, `"hidden"` or `{ compact: { label, rows } }` for each tool call of the main session's transcript (`block.type === "toolCall"`, `block.id` its `toolCallId`), or `undefined` to leave it to the next presenter. Return `undefined` for block types you do not know; later versions add more. It returns a disposer.
+
+```ts
+const finished = new Set<string>(); // tool calls of runs that have ended
+pi.on("agent_end", event => {
+	for (const message of event.messages) {
+		if (message.role !== "assistant") continue;
+		for (const part of message.content) if (part.type === "toolCall") finished.add(part.id);
+	}
+});
+pi.registerTranscriptPresenter(block => {
+	if (block.type !== "toolCall") return undefined;
+	return block.toolName !== "edit" && finished.has(block.id) ? "hidden" : "compact";
+});
+```
+
+- omp asks again when a block's data changes, once per run after every `agent_end` handler has settled, and whenever it rebuilds the transcript. Answer from the block and state keyed by its `id`, never per-run state. Call `ctx.ui.refreshTranscript(ids)` when your own state changes at another time.
+- Focused subagents, collab guests and transcript overlays (link browser, rewind, `/copy`) draw stock cards.
+- Expanded blocks (`Ctrl+O`, Tern's toggle) always draw in full; display only, the session and model context are untouched. `block.args` and `block.result` are omp's live objects: read them, never mutate them.
+- Changing a block that already scrolled into terminal scrollback replays the whole scrollback once; avoid changing old blocks often.
+
+Details: [transcript presenter](../extensions.md#transcript-presenter).
+
 ## Extension vs hook — when to use which
 
 | Need                                          | Use                                                                       |

@@ -66,6 +66,7 @@ describe("assistant text renderers of a suspended extension", () => {
 			tools: new Map(),
 			assistantThinkingRenderers: [],
 			assistantTextRenderers: [({ text }) => text.replace("now", "NOW")],
+			transcriptPresenters: [],
 			linkSchemes: [],
 			fileWriteFallbackHandlers: [],
 			fileDeleteFallbackHandlers: [],
