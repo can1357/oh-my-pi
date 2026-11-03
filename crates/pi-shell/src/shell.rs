@@ -6206,6 +6206,280 @@ mod tests {
 		path
 	}
 
+	/// `printf`'s width and precision are whatever number is written: Bash
+	/// reads them as an `intmax_t` and passes them to `printf(3)`, so a field
+	/// 200000 columns wide is written, and one past an `int` writes nothing.
+	/// Rust's own formatting holds both in a `u16`, so a width of 65536 or
+	/// more panicked inside the conversion, which took the shell's run down
+	/// with it ("Shell execution task failed"). Each row prints the bytes
+	/// written, their first and last twelve, and `printf`'s own message, so
+	/// that the row stays small.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn printf_wide_fields_follow_bash() {
+		let rows: Vec<(&str, &str, &str)> = vec![
+			(
+				"a width of 200000 for an integer",
+				"printf '%0200000d' 7 >\"$top/out\" 2>\"$top/err\"; s=$?; echo \"S=$s n=$(wc -c \
+				 <\"$top/out\") head=<$(head -c 12 \"$top/out\")> tail=<$(tail -c 12 \"$top/out\")> \
+				 err=<$(sed \"s/^.*printf: //\" \"$top/err\" | head -1)>\"",
+				"S=0 n=200000 head=<000000000000> tail=<000000000007> err=<>\n",
+			),
+			(
+				"a precision of 200000 for an integer",
+				"printf '%.200000d' 7 >\"$top/out\" 2>\"$top/err\"; s=$?; echo \"S=$s n=$(wc -c \
+				 <\"$top/out\") head=<$(head -c 12 \"$top/out\")> tail=<$(tail -c 12 \"$top/out\")> \
+				 err=<$(sed \"s/^.*printf: //\" \"$top/err\" | head -1)>\"",
+				"S=0 n=200000 head=<000000000000> tail=<000000000007> err=<>\n",
+			),
+			(
+				"a width argument of 200000",
+				"printf '%*d' 200000 7 >\"$top/out\" 2>\"$top/err\"; s=$?; echo \"S=$s n=$(wc -c \
+				 <\"$top/out\") head=<$(head -c 12 \"$top/out\")> tail=<$(tail -c 12 \"$top/out\")> \
+				 err=<$(sed \"s/^.*printf: //\" \"$top/err\" | head -1)>\"",
+				"S=0 n=200000 head=<            > tail=<           7> err=<>\n",
+			),
+			(
+				"a negative width argument",
+				"printf '%*d' -200000 7 >\"$top/out\" 2>\"$top/err\"; s=$?; echo \"S=$s n=$(wc -c \
+				 <\"$top/out\") head=<$(head -c 12 \"$top/out\")> tail=<$(tail -c 12 \"$top/out\")> \
+				 err=<$(sed \"s/^.*printf: //\" \"$top/err\" | head -1)>\"",
+				"S=0 n=200000 head=<7           > tail=<            > err=<>\n",
+			),
+			(
+				"a width of 200000 for a negative integer",
+				"printf '%0200000d' -7 >\"$top/out\" 2>\"$top/err\"; s=$?; echo \"S=$s n=$(wc -c \
+				 <\"$top/out\") head=<$(head -c 12 \"$top/out\")> tail=<$(tail -c 12 \"$top/out\")> \
+				 err=<$(sed \"s/^.*printf: //\" \"$top/err\" | head -1)>\"",
+				"S=0 n=200000 head=<-00000000000> tail=<000000000007> err=<>\n",
+			),
+			(
+				"a width past an int for an integer",
+				"printf '%2147483648d' 7 >\"$top/out\" 2>\"$top/err\"; s=$?; echo \"S=$s n=$(wc -c \
+				 <\"$top/out\") head=<$(head -c 12 \"$top/out\")> tail=<$(tail -c 12 \"$top/out\")> \
+				 err=<$(sed \"s/^.*printf: //\" \"$top/err\" | head -1)>\"",
+				"S=0 n=0 head=<> tail=<> err=<>\n",
+			),
+			(
+				"a width past a long for an integer",
+				"printf '%99999999999999999999d' 7 >\"$top/out\" 2>\"$top/err\"; s=$?; echo \"S=$s \
+				 n=$(wc -c <\"$top/out\") head=<$(head -c 12 \"$top/out\")> tail=<$(tail -c 12 \
+				 \"$top/out\")> err=<$(sed \"s/^.*printf: //\" \"$top/err\" | head -1)>\"",
+				"S=0 n=0 head=<> tail=<> err=<>\n",
+			),
+			(
+				"a width of 200000 for a string",
+				"printf '%200000s' ab >\"$top/out\" 2>\"$top/err\"; s=$?; echo \"S=$s n=$(wc -c \
+				 <\"$top/out\") head=<$(head -c 12 \"$top/out\")> tail=<$(tail -c 12 \"$top/out\")> \
+				 err=<$(sed \"s/^.*printf: //\" \"$top/err\" | head -1)>\"",
+				"S=0 n=200000 head=<            > tail=<          ab> err=<>\n",
+			),
+			(
+				"a left-justified width of 200000 for a string",
+				"printf '%-200000s' ab >\"$top/out\" 2>\"$top/err\"; s=$?; echo \"S=$s n=$(wc -c \
+				 <\"$top/out\") head=<$(head -c 12 \"$top/out\")> tail=<$(tail -c 12 \"$top/out\")> \
+				 err=<$(sed \"s/^.*printf: //\" \"$top/err\" | head -1)>\"",
+				"S=0 n=200000 head=<ab          > tail=<            > err=<>\n",
+			),
+			(
+				"a precision of 70000 for a string",
+				"printf '%.70000s' abc >\"$top/out\" 2>\"$top/err\"; s=$?; echo \"S=$s n=$(wc -c \
+				 <\"$top/out\") head=<$(head -c 12 \"$top/out\")> tail=<$(tail -c 12 \"$top/out\")> \
+				 err=<$(sed \"s/^.*printf: //\" \"$top/err\" | head -1)>\"",
+				"S=0 n=3 head=<abc> tail=<abc> err=<>\n",
+			),
+			(
+				"a width and precision of 200000 for a string",
+				"printf '%200000.70000s' abc >\"$top/out\" 2>\"$top/err\"; s=$?; echo \"S=$s n=$(wc \
+				 -c <\"$top/out\") head=<$(head -c 12 \"$top/out\")> tail=<$(tail -c 12 \
+				 \"$top/out\")> err=<$(sed \"s/^.*printf: //\" \"$top/err\" | head -1)>\"",
+				"S=0 n=200000 head=<            > tail=<         abc> err=<>\n",
+			),
+			(
+				"a width of 200000 for an escaped string",
+				"printf '%200000b' 'a\\tb' >\"$top/out\" 2>\"$top/err\"; s=$?; echo \"S=$s n=$(wc -c \
+				 <\"$top/out\") head=<$(head -c 12 \"$top/out\")> tail=<$(tail -c 12 \"$top/out\")> \
+				 err=<$(sed \"s/^.*printf: //\" \"$top/err\" | head -1)>\"",
+				"S=0 n=200000 head=<            > tail=<         a\tb> err=<>\n",
+			),
+			(
+				"a width of 200000 for a character",
+				"printf '%200000c' z >\"$top/out\" 2>\"$top/err\"; s=$?; echo \"S=$s n=$(wc -c \
+				 <\"$top/out\") head=<$(head -c 12 \"$top/out\")> tail=<$(tail -c 12 \"$top/out\")> \
+				 err=<$(sed \"s/^.*printf: //\" \"$top/err\" | head -1)>\"",
+				"S=0 n=200000 head=<            > tail=<           z> err=<>\n",
+			),
+			(
+				"a width of 200000 for hexadecimal",
+				"printf '%#200000x' 255 >\"$top/out\" 2>\"$top/err\"; s=$?; echo \"S=$s n=$(wc -c \
+				 <\"$top/out\") head=<$(head -c 12 \"$top/out\")> tail=<$(tail -c 12 \"$top/out\")> \
+				 err=<$(sed \"s/^.*printf: //\" \"$top/err\" | head -1)>\"",
+				"S=0 n=200000 head=<            > tail=<        0xff> err=<>\n",
+			),
+			(
+				"a precision of 200000 for hexadecimal",
+				"printf '%.200000x' 255 >\"$top/out\" 2>\"$top/err\"; s=$?; echo \"S=$s n=$(wc -c \
+				 <\"$top/out\") head=<$(head -c 12 \"$top/out\")> tail=<$(tail -c 12 \"$top/out\")> \
+				 err=<$(sed \"s/^.*printf: //\" \"$top/err\" | head -1)>\"",
+				"S=0 n=200000 head=<000000000000> tail=<0000000000ff> err=<>\n",
+			),
+			(
+				"a width of 200000 for octal",
+				"printf '%#200000o' 8 >\"$top/out\" 2>\"$top/err\"; s=$?; echo \"S=$s n=$(wc -c \
+				 <\"$top/out\") head=<$(head -c 12 \"$top/out\")> tail=<$(tail -c 12 \"$top/out\")> \
+				 err=<$(sed \"s/^.*printf: //\" \"$top/err\" | head -1)>\"",
+				"S=0 n=200000 head=<            > tail=<         010> err=<>\n",
+			),
+			(
+				"a width of 200000 for a float",
+				"printf '%200000f' 1.5 >\"$top/out\" 2>\"$top/err\"; s=$?; echo \"S=$s n=$(wc -c \
+				 <\"$top/out\") head=<$(head -c 12 \"$top/out\")> tail=<$(tail -c 12 \"$top/out\")> \
+				 err=<$(sed \"s/^.*printf: //\" \"$top/err\" | head -1)>\"",
+				"S=0 n=200000 head=<            > tail=<    1.500000> err=<>\n",
+			),
+			(
+				"a precision of 200000 for a float",
+				"printf '%.200000f' 1.5 >\"$top/out\" 2>\"$top/err\"; s=$?; echo \"S=$s n=$(wc -c \
+				 <\"$top/out\") head=<$(head -c 12 \"$top/out\")> tail=<$(tail -c 12 \"$top/out\")> \
+				 err=<$(sed \"s/^.*printf: //\" \"$top/err\" | head -1)>\"",
+				"S=0 n=200002 head=<1.5000000000> tail=<000000000000> err=<>\n",
+			),
+			(
+				"a width and precision of 200000 for a float",
+				"printf '%200000.200000f' 1.5 >\"$top/out\" 2>\"$top/err\"; s=$?; echo \"S=$s n=$(wc \
+				 -c <\"$top/out\") head=<$(head -c 12 \"$top/out\")> tail=<$(tail -c 12 \
+				 \"$top/out\")> err=<$(sed \"s/^.*printf: //\" \"$top/err\" | head -1)>\"",
+				"S=0 n=200002 head=<1.5000000000> tail=<000000000000> err=<>\n",
+			),
+			(
+				"a precision of 200000 for a float in exponent form",
+				"printf '%.200000e' 1.5 >\"$top/out\" 2>\"$top/err\"; s=$?; echo \"S=$s n=$(wc -c \
+				 <\"$top/out\") head=<$(head -c 12 \"$top/out\")> tail=<$(tail -c 12 \"$top/out\")> \
+				 err=<$(sed \"s/^.*printf: //\" \"$top/err\" | head -1)>\"",
+				"S=0 n=200006 head=<1.5000000000> tail=<00000000e+00> err=<>\n",
+			),
+			(
+				"a precision of 200000 for a float in shortest form",
+				"printf '%.200000g' 1.5 >\"$top/out\" 2>\"$top/err\"; s=$?; echo \"S=$s n=$(wc -c \
+				 <\"$top/out\") head=<$(head -c 12 \"$top/out\")> tail=<$(tail -c 12 \"$top/out\")> \
+				 err=<$(sed \"s/^.*printf: //\" \"$top/err\" | head -1)>\"",
+				"S=0 n=3 head=<1.5> tail=<1.5> err=<>\n",
+			),
+			(
+				"a precision of 200000 for a float in hexadecimal",
+				"printf '%.200000a' 1.5 >\"$top/out\" 2>\"$top/err\"; s=$?; echo \"S=$s n=$(wc -c \
+				 <\"$top/out\") head=<$(head -c 12 \"$top/out\")> tail=<$(tail -c 12 \"$top/out\")> \
+				 err=<$(sed \"s/^.*printf: //\" \"$top/err\" | head -1)>\"",
+				"S=0 n=200007 head=<0xc.00000000> tail=<000000000p-3> err=<>\n",
+			),
+			(
+				"a precision of 200000 for a float of zero",
+				"printf '%.200000f' 0 >\"$top/out\" 2>\"$top/err\"; s=$?; echo \"S=$s n=$(wc -c \
+				 <\"$top/out\") head=<$(head -c 12 \"$top/out\")> tail=<$(tail -c 12 \"$top/out\")> \
+				 err=<$(sed \"s/^.*printf: //\" \"$top/err\" | head -1)>\"",
+				"S=0 n=200002 head=<0.0000000000> tail=<000000000000> err=<>\n",
+			),
+			(
+				"a precision of 200000 for an infinite float",
+				"printf '%.200000f' inf >\"$top/out\" 2>\"$top/err\"; s=$?; echo \"S=$s n=$(wc -c \
+				 <\"$top/out\") head=<$(head -c 12 \"$top/out\")> tail=<$(tail -c 12 \"$top/out\")> \
+				 err=<$(sed \"s/^.*printf: //\" \"$top/err\" | head -1)>\"",
+				"S=0 n=3 head=<inf> tail=<inf> err=<>\n",
+			),
+			(
+				"a width of 200000 for a float in exponent form",
+				"printf '%200000e' 1.5 >\"$top/out\" 2>\"$top/err\"; s=$?; echo \"S=$s n=$(wc -c \
+				 <\"$top/out\") head=<$(head -c 12 \"$top/out\")> tail=<$(tail -c 12 \"$top/out\")> \
+				 err=<$(sed \"s/^.*printf: //\" \"$top/err\" | head -1)>\"",
+				"S=0 n=200000 head=<            > tail=<1.500000e+00> err=<>\n",
+			),
+			(
+				"a width argument of 200000 for a float",
+				"printf '%*.*f' 200000 200000 1.5 >\"$top/out\" 2>\"$top/err\"; s=$?; echo \"S=$s \
+				 n=$(wc -c <\"$top/out\") head=<$(head -c 12 \"$top/out\")> tail=<$(tail -c 12 \
+				 \"$top/out\")> err=<$(sed \"s/^.*printf: //\" \"$top/err\" | head -1)>\"",
+				"S=0 n=200002 head=<1.5000000000> tail=<000000000000> err=<>\n",
+			),
+			(
+				"a plus sign with a width of 200000",
+				"printf '%+200000d' 7 >\"$top/out\" 2>\"$top/err\"; s=$?; echo \"S=$s n=$(wc -c \
+				 <\"$top/out\") head=<$(head -c 12 \"$top/out\")> tail=<$(tail -c 12 \"$top/out\")> \
+				 err=<$(sed \"s/^.*printf: //\" \"$top/err\" | head -1)>\"",
+				"S=0 n=200000 head=<            > tail=<          +7> err=<>\n",
+			),
+			(
+				"a space flag with a width of 200000",
+				"printf '% 200000d' 7 >\"$top/out\" 2>\"$top/err\"; s=$?; echo \"S=$s n=$(wc -c \
+				 <\"$top/out\") head=<$(head -c 12 \"$top/out\")> tail=<$(tail -c 12 \"$top/out\")> \
+				 err=<$(sed \"s/^.*printf: //\" \"$top/err\" | head -1)>\"",
+				"S=0 n=200000 head=<            > tail=<           7> err=<>\n",
+			),
+			(
+				"a left-justified width of 200000",
+				"printf '%-200000d' 7 >\"$top/out\" 2>\"$top/err\"; s=$?; echo \"S=$s n=$(wc -c \
+				 <\"$top/out\") head=<$(head -c 12 \"$top/out\")> tail=<$(tail -c 12 \"$top/out\")> \
+				 err=<$(sed \"s/^.*printf: //\" \"$top/err\" | head -1)>\"",
+				"S=0 n=200000 head=<7           > tail=<            > err=<>\n",
+			),
+			(
+				"a width of 200000 reused by two arguments",
+				"printf '%200000d' 7 8 >\"$top/out\" 2>\"$top/err\"; s=$?; echo \"S=$s n=$(wc -c \
+				 <\"$top/out\") head=<$(head -c 12 \"$top/out\")> tail=<$(tail -c 12 \"$top/out\")> \
+				 err=<$(sed \"s/^.*printf: //\" \"$top/err\" | head -1)>\"",
+				"S=0 n=400000 head=<            > tail=<           8> err=<>\n",
+			),
+			(
+				"a width of 65535 for a string",
+				"printf '%65535s' ab >\"$top/out\" 2>\"$top/err\"; s=$?; echo \"S=$s n=$(wc -c \
+				 <\"$top/out\") head=<$(head -c 12 \"$top/out\")> tail=<$(tail -c 12 \"$top/out\")> \
+				 err=<$(sed \"s/^.*printf: //\" \"$top/err\" | head -1)>\"",
+				"S=0 n=65535 head=<            > tail=<          ab> err=<>\n",
+			),
+			(
+				"a width of 65536 for a string",
+				"printf '%65536s' ab >\"$top/out\" 2>\"$top/err\"; s=$?; echo \"S=$s n=$(wc -c \
+				 <\"$top/out\") head=<$(head -c 12 \"$top/out\")> tail=<$(tail -c 12 \"$top/out\")> \
+				 err=<$(sed \"s/^.*printf: //\" \"$top/err\" | head -1)>\"",
+				"S=0 n=65536 head=<            > tail=<          ab> err=<>\n",
+			),
+			(
+				"a width of 65536 for an integer",
+				"printf '%65536d' 7 >\"$top/out\" 2>\"$top/err\"; s=$?; echo \"S=$s n=$(wc -c \
+				 <\"$top/out\") head=<$(head -c 12 \"$top/out\")> tail=<$(tail -c 12 \"$top/out\")> \
+				 err=<$(sed \"s/^.*printf: //\" \"$top/err\" | head -1)>\"",
+				"S=0 n=65536 head=<            > tail=<           7> err=<>\n",
+			),
+			(
+				"a precision of 65536 for a float",
+				"printf '%.65536f' 1.5 >\"$top/out\" 2>\"$top/err\"; s=$?; echo \"S=$s n=$(wc -c \
+				 <\"$top/out\") head=<$(head -c 12 \"$top/out\")> tail=<$(tail -c 12 \"$top/out\")> \
+				 err=<$(sed \"s/^.*printf: //\" \"$top/err\" | head -1)>\"",
+				"S=0 n=65538 head=<1.5000000000> tail=<000000000000> err=<>\n",
+			),
+		];
+		let mut failures = Vec::new();
+		for (name, script, bash) in rows {
+			let dir = tempfile::tempdir().expect("scratch directory");
+			let outcome = run_command_capture_within(
+				Duration::from_secs(60),
+				&format!("top=$PWD; {script}"),
+				Some(dir.path()),
+				None,
+				CancelToken::default(),
+			)
+			.await;
+			match outcome {
+				Ok((result, output)) if result.exit_code == Some(0) && output == bash => {},
+				Ok((result, output)) => failures.push(format!(
+					"{name}: Bash prints {bash:?}; got status {:?}, output {output:?}",
+					result.exit_code
+				)),
+				Err(_) => failures.push(format!("{name}: did not finish within 60 s")),
+			}
+		}
+		assert!(failures.is_empty(), "{failures:#?}");
+	}
+
 	#[cfg(unix)]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn uutils_diff_reads_process_substitution_fds() {
