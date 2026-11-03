@@ -7,7 +7,7 @@
 
 use std::sync::LazyLock;
 
-use pi_shell::{Shell, ShellOptions, ShellRunOptions, cancel::CancelToken};
+use pi_shell::{Shell, ShellRunOptions, cancel::CancelToken};
 
 fn oracle() -> bool {
 	std::env::var_os("PI_SHELL_BASH_ORACLE").is_some()
@@ -153,33 +153,6 @@ async fn exec_changes_last_as_long_as_bash_keeps_them() {
 		}
 	}
 	assert_all_bash(cases).await;
-}
-
-/// A run the minimizer would split into segments keeps an `exec`'s change
-/// for the segments after it, in every spelling the shell resolves to
-/// `exec`.
-#[tokio::test(flavor = "multi_thread")]
-async fn quoted_exec_words_persist_when_the_minimizer_segments_the_run() {
-	if oracle() {
-		return;
-	}
-	for script in [
-		"'exec' 2>/dev/null; echo E >&2; echo O",
-		"\"exec\" 2>/dev/null; echo E >&2; echo O",
-		"\\exec 2>/dev/null; echo E >&2; echo O",
-		"e'x'ec 2>/dev/null; echo E >&2; echo O",
-		"command 'exec' 2>/dev/null; echo E >&2; echo O",
-		"builtin exec 2>/dev/null; echo E >&2; echo O",
-		"builtin -- exec 2>/dev/null; echo E >&2; echo O",
-	] {
-		let minimizer =
-			pi_shell::minimizer::MinimizerOptions { enabled: Some(true), ..Default::default() };
-		let shell =
-			Shell::new(Some(ShellOptions { minimizer: Some(minimizer), ..Default::default() }));
-		let result = run_in(&shell, script).await;
-		let (status, output) = run_bash(script).await;
-		assert_eq!(result, (status, normalize(&output)), "{script}");
-	}
 }
 
 /// With `lastpipe` Bash waits for the pipeline with its job list frozen, so

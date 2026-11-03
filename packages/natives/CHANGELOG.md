@@ -9,6 +9,7 @@
 ### Fixed
 
 - Fixed associative arrays slowing down quadratically as they grow: 100,000 inserts and lookups took about 90 seconds and now take about a tenth of a second
+- Fixed the bash tool's output minimizer, when it ran `a; b; c` a command at a time, losing an `exec >file` or `exec 2>/dev/null` made through a shell function, an alias, a trap, or an `exec` spelled with quotes or brace expansion: later commands' output came back instead of going to the file, unlike Bash
 ### Fixed
 
 - Fixed `el.type` and `el.press(keys)` on Wayland moving focus inside the element's app (GNOME showed "… is ready") before refusing the call: they are now refused before anything reaches the app ([#17915](https://github.com/can1357/oh-my-pi/pull/17915) by [@will-bogusz](https://github.com/will-bogusz))
