@@ -1170,11 +1170,7 @@ export class RelayBridge {
 			// Chrome can activate for a window this input opens before the relay hears of it: the browser's keyboard is
 			// watched from the input on.
 			tab.frontAtInput =
-				Date.now() < this.#keepingFrontUntil
-					? null
-					: this.#readFrontApp
-						? this.#readFrontAtInput(this.#readFrontApp, browserPid)
-						: null;
+				Date.now() < this.#keepingFrontUntil ? null : this.#readFrontAtInput(this.#readFrontApp, browserPid);
 		}
 		try {
 			const result = await this.#send(tab, inst, msg.method, msg.params, realSessionId);
