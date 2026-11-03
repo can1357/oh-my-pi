@@ -144,7 +144,7 @@ impl X11Input {
 	) -> CoreResult<()> {
 		if matches!(target, Target::Desktop | Target::Display(_)) || mode != DeliveryMode::Background
 		{
-			self.keymap = Keymap::core(&self.conn)?;
+			self.keymap = Keymap::xtest(&self.conn)?;
 		}
 		match (target, mode) {
 			(Target::Desktop | Target::Display(_), _) => self.pointer_xtest(&event),
@@ -251,7 +251,13 @@ impl X11Input {
 	}
 
 	fn keys(&mut self, target: &Target, keys: Keys<'_>, mode: DeliveryMode) -> CoreResult<()> {
-		self.keymap = Keymap::core(&self.conn)?;
+		// `XSendEvent` keys are read in the core map, `XTest` keys in its
+		// device's.
+		self.keymap = if matches!(target, Target::Window(_)) && mode == DeliveryMode::Background {
+			Keymap::core(&self.conn)?
+		} else {
+			Keymap::xtest(&self.conn)?
+		};
 		match (target, mode) {
 			(Target::Desktop | Target::Display(_), _) => {
 				let steps = keys.plan(&self.keymap)?;
@@ -482,12 +488,17 @@ impl X11Input {
 		let _ = self.conn.flush();
 	}
 
-	fn pointer_send_event(&self, window: Window, event: &PointerEvent) -> CoreResult<()> {
+	fn pointer_send_event(&mut self, window: Window, event: &PointerEvent) -> CoreResult<()> {
 		pointer_endpoint(event)?;
 		let keys = match event {
 			PointerEvent::Hold { keys, .. } | PointerEvent::Drag { keys, .. } => keys.as_slice(),
 			_ => &[],
 		};
+		// `XSendEvent` keys are read in the core map; an earlier `XTest` call
+		// left the `XTest` keyboard's.
+		if !keys.is_empty() {
+			self.keymap = Keymap::core(&self.conn)?;
+		}
 		let codes = self.keymap.held_keycodes(keys)?;
 		let mut state = 0u16;
 		keymap::with_held_codes(
