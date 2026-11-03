@@ -779,7 +779,8 @@ async fn line_reads_after_a_newline_in_an_alias_with_the_aliases_then() {
 
 /// From a line in which a command begins with an alias, the input runs as
 /// written: a comment, a trailing backslash or a blank in the alias's value
-/// acts on the input after it as in Bash, with or without the minimizer.
+/// acts on the input after it as in Bash, with or without the minimizer. A
+/// redirection or a `!` before the alias's name stays with it (G57 to G60).
 #[tokio::test]
 async fn input_after_an_alias_runs_as_written() {
 	let cases = [
@@ -790,6 +791,22 @@ async fn input_after_an_alias_runs_as_written() {
 			"shopt -s expand_aliases\nalias -- q='echo Q\\'\n",
 			"git status --short 2>/dev/null; q word",
 			"Q word\n",
+		),
+		("shopt -s expand_aliases\nalias -- q='echo Q'\n", ">out q; cat out", "Q\n"),
+		(
+			"shopt -s expand_aliases\nalias -- q='echo Q'\n",
+			"git status --short 2>/dev/null\n>out q; cat out",
+			"Q\n",
+		),
+		(
+			"shopt -s expand_aliases\nalias -- q='false'\n",
+			"git status --short 2>/dev/null\n! q; echo \"st=$?\"",
+			"st=0\n",
+		),
+		(
+			"shopt -s expand_aliases\nalias -- q='cat'\n",
+			"printf 'DATA\\n' > in\n<in q; echo AFTER",
+			"DATA\nAFTER\n",
 		),
 	];
 	for (snapshot, command, expected) in cases {

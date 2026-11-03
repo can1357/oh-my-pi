@@ -266,6 +266,8 @@ pub(crate) struct Tokenizer<I: Iterator<Item = std::io::Result<char>>> {
     /// Whether the bodies of the here-documents now being read have begun
     /// (and the rest of the input line been held, if it had to be).
     here_bodies_begun: bool,
+    /// Whether the char read last came from an alias's value.
+    last_char_from_alias: bool,
     cross_state: CrossTokenParseState,
     options: TokenizerOptions,
 }
@@ -749,6 +751,7 @@ impl<I: Iterator<Item = std::io::Result<char>>> Tokenizer<I> {
             pushed: vec![],
             input_at_line_start: true,
             here_bodies_begun: false,
+            last_char_from_alias: false,
             cross_state: CrossTokenParseState {
                 cursor: SourcePosition {
                     index: 0,
@@ -884,6 +887,7 @@ impl<I: Iterator<Item = std::io::Result<char>>> Tokenizer<I> {
 
     fn next_char(&mut self) -> Result<Option<char>, TokenizerError> {
         let from_alias = self.reading_alias_value()?;
+        self.last_char_from_alias = from_alias;
         let c = if let Some(top) = self.pushed.last_mut().filter(|_| from_alias) {
             if let Some(&c) = top.chars.get(top.position) {
                 top.position += 1;
@@ -1199,16 +1203,21 @@ impl<I: Iterator<Item = std::io::Result<char>>> Tokenizer<I> {
                 if c == '\\' {
                     // Consume the backslash ourselves so we can peek past it.
                     self.consume_char()?;
+                    let from_alias = self.last_char_from_alias;
 
-                    if matches!(self.peek_char()?, Some('\n')) {
-                        // Make sure the newline char gets consumed too.
-                        self.consume_char()?;
-
-                        // Make sure to include neither the backslash nor the newline character.
-                    } else {
-                        state.in_escape = true;
-                        state.quoted = true;
-                        state.append_char(c);
+                    match self.peek_char()? {
+                        // Make sure the newline char gets consumed too, and include
+                        // neither the backslash nor the newline character.
+                        Some('\n') => self.consume_char()?,
+                        // As in Bash, a backslash that ends an alias's value at the end
+                        // of the input continues the line: the end of the input stands
+                        // for its newline.
+                        None if from_alias => {}
+                        _ => {
+                            state.in_escape = true;
+                            state.quoted = true;
+                            state.append_char(c);
+                        }
                     }
                 } else if c == '\'' {
                     state.quoted = true;

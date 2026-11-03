@@ -523,6 +523,15 @@ async fn blank_after_an_alias_name_is_read_after_the_value() {
 	assert_eq!(with_aliases("q='echo Q\\'", "eval 'q word'").await, "Q word\n");
 }
 
+/// G61, G62, G63: a value ending in a backslash, read at the end of the
+/// input, continues the line: the end of the input stands for its newline.
+#[tokio::test]
+async fn backslash_ending_a_value_at_the_end_of_input_continues_the_line() {
+	assert_eq!(with_aliases("q='echo Q\\'", "q").await, "Q\n");
+	assert_eq!(with_aliases("q='echo Q\\'", "eval q").await, "Q\n");
+	assert_eq!(with_aliases("q='echo Q\\'", "echo \"[$(q)]\"").await, "[Q]\n");
+}
+
 /// G26: `alias -p` lists the aliases, then handles its operands.
 #[tokio::test]
 async fn alias_p_lists_then_defines() {

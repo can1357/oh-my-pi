@@ -184,7 +184,7 @@ fn classify_chain(program: &Program) -> Option<CommandPlan> {
 				run_if_previous_succeeded,
 				suppress_errexit,
 				starts_line,
-				source_start: pipeline.location()?.start.index,
+				source_start: pipeline_start(pipeline)?,
 			});
 			starts_line = false;
 
@@ -208,6 +208,27 @@ fn classify_chain(program: &Program) -> Option<CommandPlan> {
 	}
 
 	(segments.len() >= 2).then_some(CommandPlan::Chain { segments })
+}
+
+/// Where `pipeline` begins in the analyzed command, in characters, when the
+/// parser recorded it. It records no position for a leading `!` or for a
+/// redirection, so a pipeline that begins with one has none: its recorded
+/// location would begin after it.
+fn pipeline_start(pipeline: &Pipeline) -> Option<usize> {
+	if pipeline.bang {
+		return None;
+	}
+	if pipeline.timed.is_none()
+		&& let Some(Command::Simple(simple)) = pipeline.seq.first()
+		&& simple
+			.prefix
+			.as_ref()
+			.and_then(|prefix| prefix.0.first())
+			.is_some_and(|item| item.location().is_none())
+	{
+		return None;
+	}
+	Some(pipeline.location()?.start.index)
 }
 
 fn word_has_command_substitution(word: &Word) -> bool {
