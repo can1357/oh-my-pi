@@ -10,6 +10,11 @@ import browserPython from "./prelude.py" with { type: "text" };
 import type { BrowserKind } from "./registry";
 import { cfgBrowserEnabled } from "./settings";
 
+/** The browser eval documentation; its Linux X11 notes reach agents only on Linux hosts. */
+export function browserDocumentation(platform: NodeJS.Platform = process.platform): string {
+	return prompt.render(browserDescription, { linux: platform === "linux" });
+}
+
 /** Build the browser eval facade after an eval runtime first requests preludes. */
 export function createBrowserPreludeDefinition(
 	session: ToolSession,
@@ -21,7 +26,7 @@ export function createBrowserPreludeDefinition(
 	const fallback = host.relayFallback;
 	return {
 		name: "browser",
-		documentation: browserDescription,
+		documentation: browserDocumentation(),
 		guidance: fallback
 			? prompt.render(relayGuidance, {
 					// The block reaches the model provider: never echo userinfo or token params.

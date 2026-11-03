@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- On Linux under X11, the browser guide now tells agents to use the keyboard instead of clicking in the Chrome tab you can see when you need to keep your app in front, since a click raises Chrome and sends your typing into the page ([#17940](https://github.com/can1357/oh-my-pi/pull/17940) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.18.1] - 2026-11-08
 
 ### Breaking Changes
@@ -193,10 +197,6 @@
 - Out-of-credit provider errors now fail immediately instead of retrying for long periods; Retry works promptly once the account is funded.
 - DeepSeek-style `*** End` and `*** End Patch` markers are no longer written into files or truncate later edits
 - Composer prediction ghost text no longer vanishes when advisor messages arrive
-
-### Fixed
-
-- On Linux under X11, a browser agent asked to keep your app in front no longer clicks in the Chrome tab you can see, which raised Chrome and sent your typing into the page ([#17940](https://github.com/can1357/oh-my-pi/pull/17940) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.16.0] - 2026-11-02
 
