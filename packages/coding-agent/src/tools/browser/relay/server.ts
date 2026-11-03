@@ -124,14 +124,8 @@ export function startRelayServer(opts: RelayServerOptions): RelayServer {
 	const startedAt = Date.now();
 	// Only macOS can hand the front app back; elsewhere the relay never reads it. PI_BROWSER_RELAY_KEEP_FRONT=0 turns
 	// off the hold and the key reroute it carries: neither the front app nor the browser behind a socket is looked up.
-	if (process.platform === "darwin" && parseFlag(process.env.PI_BROWSER_RELAY_KEEP_FRONT, true)) {
-		bridge.keepFrontAppWith(macOSFrontApp, async socket => {
-			const peerPort = (socket as RelayWebSocket).data.peerPort;
-			const port = server.port;
-			if (peerPort === undefined || port === undefined) return null;
-			return (await macOSLoopbackPeerApp(port, peerPort)) ?? null;
-		});
-	}
+	const keepFrontApp = process.platform === "darwin" && parseFlag(process.env.PI_BROWSER_RELAY_KEEP_FRONT, true);
+	if (keepFrontApp) bridge.keepFrontAppWith(macOSFrontApp);
 
 	const server = Bun.serve({
 		hostname: "127.0.0.1",
@@ -199,7 +193,13 @@ export function startRelayServer(opts: RelayServerOptions): RelayServer {
 			open(ws: RelayWebSocket): void {
 				sockets.add(ws);
 				if (ws.data.role === "ext") {
-					bridge.extConnected(ws, ws.data.extensionId);
+					const peerPort = ws.data.peerPort;
+					const port = server.port;
+					const findBrowser =
+						keepFrontApp && peerPort !== undefined && port !== undefined
+							? async () => (await macOSLoopbackPeerApp(port, peerPort)) ?? null
+							: undefined;
+					bridge.extConnected(ws, ws.data.extensionId, findBrowser);
 				} else {
 					ws.data.connId = bridge.cdpConnected(ws);
 				}
