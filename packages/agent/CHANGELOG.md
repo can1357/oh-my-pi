@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `Agent.queuedMessageGate`, a synchronous `QueuedMessageGate` consulted before every queued-message delivery batch (it can drop candidates) and told when claimed messages go back undelivered
+
 ## [18.16.0] - 2026-11-02
 
 ### Changed

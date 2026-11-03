@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `logger.setLogForwarder(forwarder)` (`LogForwarder { emit, flush }`), which routes a thread's records — `withContext` fields merged, context reduced to clone-safe JSON — to another thread instead of its own file and sinks, and `logger.emitForeign(event)`, which writes such a record with its original timestamp and runs the sinks without the caller's `withContext` fields
+
 ## [18.16.0] - 2026-11-02
 
 ### Added

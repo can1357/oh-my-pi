@@ -2,7 +2,7 @@ import type { AgentOptions, AgentTelemetryConfig, AgentTool, AgentToolContext } 
 import type { EditStore } from "@oh-my-pi/pi-natives";
 import type { FetchImpl, ImageContent, Message, Model, ServiceTierByFamily, ToolChoice } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
-import type { AsyncJobManager } from "../async/job-manager";
+import type { AsyncJobManagerApi } from "../async/job-manager";
 import type { Rule } from "../capability/rule";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { EvalPreludeDefinition } from "../eval/preludes";
@@ -23,16 +23,16 @@ import type { HindsightSessionState } from "../hindsight/state";
 import type { LocalProtocolOptions } from "../internal-urls";
 import type { DaemonCompletionNotification } from "../launch/protocol";
 import { LspTool } from "../lsp";
-import type { MCPManager } from "../mcp";
+import type { MCPManagerApi } from "../mcp";
 import { MEMORY_BACKEND_TOOL_NAMES } from "../memory-backend/tool-names";
 import type { MnemopiSessionState } from "../mnemopi/state";
 import type { PlanModeState } from "../plan-mode/state";
 import type { CallContext, SpotlightSession } from "../spotlight/types";
-import type { AgentLifecycleManager } from "../registry/agent-lifecycle";
-import type { AgentRegistry } from "../registry/agent-registry";
-import type { ArtifactManager } from "../session/artifacts";
+import type { AgentLifecycleApi } from "../registry/agent-lifecycle";
+import type { AgentRegistryApi } from "../registry/agent-registry";
+import type { ArtifactManagerApi } from "../session/artifacts";
 import type { ClientBridge } from "../session/client-bridge";
-import type { CostGate } from "../session/cost-gate";
+import type { CostGateApi } from "../session/cost-gate";
 import type { CustomMessage } from "../session/messages";
 import type { UsageStatistics } from "../session/session-entries";
 import type { SessionManager } from "../session/session-manager";
@@ -212,7 +212,7 @@ export interface ToolSession {
 	/** Current working directory */
 	cwd: string;
 	/** Cost gate of the session tree, forwarded to subagents. */
-	costGate?: CostGate;
+	costGate?: CostGateApi;
 	/** Additional workspace directories beyond cwd (multi-root), forwarded to subagents. */
 	additionalDirectories?: string[];
 	/** Whether UI is available */
@@ -406,13 +406,13 @@ export interface ToolSession {
 	 */
 	pendingFullWriteDescription?: boolean;
 	/** Agent registry for IRC routing across live sessions. */
-	agentRegistry?: AgentRegistry;
+	agentRegistry?: AgentRegistryApi;
 	/** Idle→parked→revive lifecycle owner; lets explicit cancellation stop a non-job-backed agent registration. Default: AgentLifecycleManager.global(). */
-	agentLifecycle?: () => AgentLifecycleManager;
+	agentLifecycle?: () => AgentLifecycleApi;
 	/** Get artifacts directory for artifact:// URLs */
 	getArtifactsDir?: () => string | null;
 	/** Get the ArtifactManager backing this session (shared across parent + subagents). */
-	getArtifactManager?: () => ArtifactManager | null;
+	getArtifactManager?: () => ArtifactManagerApi | null;
 	/** Allocate a new artifact path and ID for session-scoped truncated output. */
 	allocateOutputArtifact?: (toolType: string) => Promise<{ id?: string; path?: string }>;
 	/** Get session spawns */
@@ -450,9 +450,9 @@ export interface ToolSession {
 	/** Agent output manager for unique agent:// IDs across task invocations */
 	agentOutputManager?: AgentOutputManager;
 	/** Manager of this session's root, shared only with that root's subagents. */
-	asyncJobManager?: AsyncJobManager;
+	asyncJobManager?: AsyncJobManagerApi;
 	/** MCP manager visible to subagents without relying on the process-global singleton. */
-	mcpManager?: MCPManager;
+	mcpManager?: MCPManagerApi;
 	/** Local protocol root to propagate to nested subagents and eval-created agents. */
 	localProtocolOptions?: LocalProtocolOptions;
 	/** Settings instance for passing to subagents */

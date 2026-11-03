@@ -1,5 +1,5 @@
 import { isRecord } from "@oh-my-pi/pi-utils";
-import type { AsyncJob, AsyncJobManager } from "../async";
+import type { AsyncJob, AsyncJobManagerApi } from "../async";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { ToolSession } from "../tools";
 import { ToolAbortError } from "../tools/tool-errors";
@@ -41,7 +41,7 @@ interface EvalHandleBridgeOptions {
 }
 
 type ResolvedHandle =
-	| { ref: EvalHandleRef; job: AsyncJob; manager: AsyncJobManager }
+	| { ref: EvalHandleRef; job: AsyncJob; manager: AsyncJobManagerApi }
 	| { ref: EvalHandleRef; completion: CompletionHandleEntry };
 
 function parseRef(value: unknown): EvalHandleRef {

@@ -4,6 +4,7 @@
 
 ### Added
 
+- `AuthStorage` can be constructed over an `AuthStorageBackend` (its namespaces plus `setAccountPolicies`/`replaceStore`/`close`) instead of a credential store, so another thread's instance can serve every call
 - Anthropic sessions on the official API now use message threads (`message-threads-2026-08-12`, as Claude Code does): after the first turn each request sends only the new messages, cutting time to first token in long conversations; a refused or expired thread replays the full conversation automatically. `statefulResponses: false` or `PI_ANTHROPIC_MESSAGE_THREADS=0` turns it off, `PI_ANTHROPIC_MESSAGE_THREADS=1` opts other endpoints in
 
 ### Fixed
