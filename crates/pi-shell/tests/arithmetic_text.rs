@@ -152,7 +152,9 @@ async fn arithmetic_for_header_has_no_comments_or_extended_globs() {
 
 /// A `for ((` header keeps those rules wherever it stands: after a here tag on
 /// the same line, and inside the text of a bare `((` that turns out to open
-/// nested subshells, which Bash reads again as shell text.
+/// nested subshells, which Bash reads again as shell text. Such a header
+/// leaves the text around it as deep as it was, so a later `<<` there is
+/// still a shift.
 #[tokio::test]
 async fn arithmetic_for_header_rules_hold_after_here_tags_and_in_spaced_subshells() {
 	let out = run(concat!(
@@ -171,6 +173,10 @@ async fn arithmetic_for_header_rules_hold_after_here_tags_and_in_spaced_subshell
 	let out = run("cat <<EOF; for ((i=0;0;i+(;))); do :; done\ndoc\nEOF\necho ran\n").await;
 	assert_eq!(out.stdout, "", "the four-part header ran; stderr: {}", out.stderr);
 	assert_eq!(out.exit_code, Some(2), "stderr: {}", out.stderr);
+
+	let out = run("(( for ((1)) << 2 ))\necho \"rc=$?\"\necho after\n").await;
+	assert_eq!(out.stdout, "rc=1\nafter\n", "stderr: {}", out.stderr);
+	assert!(out.stderr.contains("for"), "the expression must be reported: {}", out.stderr);
 }
 
 /// Bash counts the parentheses of a `${...}` word toward the header of an

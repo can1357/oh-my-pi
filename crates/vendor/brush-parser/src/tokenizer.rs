@@ -975,9 +975,14 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                                 && !self.cross_state.in_parameter_word
                             {
                                 // A `for ((` header inside bare `((` text: read it as a header,
-                                // then return to the text with its depth unchanged.
-                                self.cross_state.outer_arithmetic_depth =
-                                    self.cross_state.arithmetic_command_depth.replace(0);
+                                // then return to the text. The header ends at the parenthesis
+                                // that matches its second `(`; its first `(` counts toward the
+                                // outer text, so the header's last `)` closes it there.
+                                self.cross_state.outer_arithmetic_depth = self
+                                    .cross_state
+                                    .arithmetic_command_depth
+                                    .replace(0)
+                                    .map(|depth| depth + 1);
                                 self.cross_state.arithmetic_for_header = true;
                             } else {
                                 self.note_arithmetic_command_paren(&state);
