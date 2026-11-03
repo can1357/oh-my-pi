@@ -120,6 +120,7 @@ declare const chrome: {
 	downloads: {
 		search(query: { id?: number }): Promise<ChromeDownloadItem[]>;
 		onCreated: ChromeEvent<(item: ChromeDownloadItem) => void>;
+		onChanged: ChromeEvent<(delta: { id: number; state?: { current: ChromeDownloadItem["state"] } }) => void>;
 	};
 	storage: {
 		local: {

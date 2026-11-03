@@ -358,6 +358,10 @@ async function connect(): Promise<void> {
 const downloads = new DownloadPairing();
 
 chrome.downloads.onCreated.addListener(item => downloads.created(item.id, item.finalUrl));
+chrome.downloads.onChanged.addListener(delta => {
+	const state = delta.state?.current;
+	if (state === "complete" || state === "interrupted") downloads.finished(delta.id, state);
+});
 
 // ---- event streaming ---------------------------------------------------------
 
