@@ -338,16 +338,20 @@ enum Env0File {
 }
 
 /// What the classifier carries while it follows wrapper commands: the
-/// environment the next `env` receives, the `--env0-from` files read so far,
-/// and the inner `timeout`s passed on the way.
+/// environment and directory the next `env` receives, the `--env0-from`
+/// files read so far, and the inner `timeout`s passed on the way.
 #[cfg_attr(
 	not(feature = "util.env"),
 	allow(dead_code, reason = "only a nested `env` reads the environment and its files")
 )]
 struct Follow<'a> {
-	/// Exported variables, or `None` once an `--env0-from` stream makes them
-	/// unknowable (`env` reads it when it starts).
-	environment: Option<HashMap<String, String>>,
+	/// The environment's entries as `env` keeps them (a lookup takes the
+	/// first entry of a name, as `getenv` does), or `None` once an
+	/// `--env0-from` stream makes them unknowable (`env` reads it when it
+	/// starts).
+	environment: Option<Vec<Vec<u8>>>,
+	/// The directory the next command runs in, which an `env -C` changes.
+	directory:   PathBuf,
 	/// `--env0-from` files by absolute path.
 	files:       &'a HashMap<PathBuf, Env0File>,
 	/// A file not yet in `files` that the classification needs.
@@ -356,23 +360,29 @@ struct Follow<'a> {
 }
 
 impl Follow<'_> {
-	/// Applies what an `env` does to the environment it passes on, in its
-	/// order: clear or merge the `--env0-from` entries, unset, assign.
-	/// `None` when `env` would refuse to run, or the classification needs a
-	/// file not read yet.
+	/// The value of `name` in the environment the next `env` receives.
 	#[cfg(feature = "util.env")]
-	fn apply<SE: brush_core::ShellExtensions>(
-		&mut self,
-		shell: &brush_core::Shell<SE>,
-		command: &crate::env::CommandWords,
-	) -> Option<()> {
-		let entries = match command.env0_from.as_deref() {
-			None => Some(Vec::new()),
+	fn lookup(&self, name: &str) -> Option<String> {
+		self.environment.as_ref()?.iter().find_map(|entry| {
+			let value = entry.strip_prefix(name.as_bytes())?.strip_prefix(b"=")?;
+			Some(String::from_utf8_lossy(value).into_owned())
+		})
+	}
+
+	/// Applies what an `env` does to the environment it passes on, as `env`
+	/// itself builds it ([`crate::env::passed_environment`]), and to the
+	/// directory its command runs in. `None` when `env` would refuse to run,
+	/// or the classification needs a file not read yet.
+	#[cfg(feature = "util.env")]
+	fn apply(&mut self, command: &crate::env::CommandWords) -> Option<()> {
+		// `env` reads its file before it changes directory for its command.
+		let env0 = match command.env0_from.as_deref() {
+			None => Some(None),
 			Some("-") => None,
 			Some(file) => {
-				let path = shell.working_dir().join(file);
+				let path = self.directory.join(file);
 				match self.files.get(&path) {
-					Some(Env0File::Data(data)) => Some(crate::env::env0_entries(data)?),
+					Some(Env0File::Data(data)) => Some(Some(data.as_slice())),
 					Some(Env0File::Unreadable) => return None,
 					Some(Env0File::Stream) => None,
 					None => {
@@ -382,24 +392,31 @@ impl Follow<'_> {
 				}
 			},
 		};
-		match entries {
-			None => self.environment = None,
-			Some(entries) => {
-				if command.clear_env {
-					self.environment = Some(HashMap::new());
-				}
-				if let Some(values) = &mut self.environment {
-					values.extend(entries);
-				}
+		self.environment = match env0 {
+			// A stream: what it holds stays unknown, though `env` still
+			// refuses a bad unset name.
+			None => {
+				crate::env::passed_environment(Vec::new(), command, Some(&[]))?;
+				None
 			},
-		}
-		if let Some(values) = &mut self.environment {
-			if !command.clear_env || command.env0_from.is_some() {
-				for name in &command.unset {
-					values.remove(name);
+			Some(env0) => {
+				// The next `env` sees one value per name, the first.
+				let known = self.environment.take();
+				let mut initial: Vec<Vec<u8>> = Vec::new();
+				for entry in known.iter().flatten() {
+					let name = entry.split(|&byte| byte == b'=').next().unwrap_or_default();
+					if !initial.iter().any(|kept| kept.split(|&byte| byte == b'=').next() == Some(name)) {
+						initial.push(entry.clone());
+					}
 				}
-			}
-			values.extend(command.assignments.iter().cloned());
+				// Built even when the environment is unknown: `env` refuses an
+				// unterminated file or a bad unset name either way.
+				let passed = crate::env::passed_environment(initial, command, env0)?;
+				known.is_some().then_some(passed)
+			},
+		};
+		if let Some(directory) = &command.chdir {
+			self.directory = self.directory.join(directory);
 		}
 		Some(())
 	}
@@ -535,8 +552,18 @@ fn deliver(signal: TrapSignal, inner: &[InnerTimeout], depth: usize, group: bool
 		// ALRM is its own limit expiring, whatever its `-s` signal is.
 		let alarm = dispositions::alarm(number);
 		let passed = if alarm { first.signal } else { signal };
-		let own = first.kill_after.map(|after| Kill { after, group: !first.foreground, depth });
-		deliver(passed, inner, depth + 1, !first.foreground).above(own, alarm.then_some(depth))
+		if passed.as_str() == "SIGKILL" && !first.foreground {
+			// It sends KILL to its own process group, which it is in: it dies
+			// with its command.
+			Delivery::Ends {
+				signal:  passed,
+				depth,
+				expired: alarm.then_some(depth).into_iter().collect(),
+			}
+		} else {
+			let own = first.kill_after.map(|after| Kill { after, group: !first.foreground, depth });
+			deliver(passed, inner, depth + 1, !first.foreground).above(own, alarm.then_some(depth))
+		}
 	} else if dispositions::ignored(number) || dispositions::ignored_by_timeout(number) {
 		Delivery::Absorbed { expired: Vec::new(), kill: None }
 	} else if dispositions::stops(number) {
@@ -602,7 +629,13 @@ async fn classify_operand<SE: brush_core::ShellExtensions>(
 	let mut files = HashMap::new();
 	loop {
 		let mut follow = Follow {
-			environment: Some(crate::host::exported_env(shell)),
+			environment: Some(
+				crate::host::exported_env(shell)
+					.into_iter()
+					.map(|(name, value)| format!("{name}={value}").into_bytes())
+					.collect(),
+			),
+			directory:   shell.working_dir().to_path_buf(),
 			files:       &files,
 			missing:     None,
 			inner:       Vec::new(),
@@ -745,7 +778,7 @@ fn classify_simple<SE: brush_core::ShellExtensions>(
 		CommandTarget::Function(_) => return Operand::Shell,
 		CommandTarget::Builtin(builtin) => builtin,
 	};
-	let handed = handoff(words, follow.environment.as_ref());
+	let handed = handoff(words, follow);
 	let (operand, line) = match handed {
 		#[cfg(feature = "util.nohup")]
 		Some(Handoff::Line(operand)) => (operand, true),
@@ -754,7 +787,7 @@ fn classify_simple<SE: brush_core::ShellExtensions>(
 			(operand, true)
 		},
 		#[cfg(feature = "util.env")]
-		Some(Handoff::Environment(command)) => match follow.apply(shell, &command) {
+		Some(Handoff::Environment(command)) => match follow.apply(&command) {
 			Some(()) => (command.command, false),
 			// `env` refuses to run, or a file is still to be read.
 			None => return Operand::Utility,
@@ -808,7 +841,7 @@ enum Handoff {
 /// utilities that run commands, `xargs`, `find -exec` and `ifne`, wait for
 /// them instead, and die of the signal themselves.
 #[cfg_attr(not(feature = "util.env"), allow(unused_variables, reason = "only `env` reads it"))]
-fn handoff(words: &[String], environment: Option<&HashMap<String, String>>) -> Option<Handoff> {
+fn handoff(words: &[String], follow: &Follow<'_>) -> Option<Handoff> {
 	match words[0].as_str() {
 		#[cfg(feature = "builtin.command")]
 		"command" => {
@@ -820,9 +853,7 @@ fn handoff(words: &[String], environment: Option<&HashMap<String, String>>) -> O
 			.then_some(Handoff::Simple(command.command_and_args))
 		},
 		#[cfg(feature = "util.env")]
-		"env" => crate::env::command_words(words, environment.is_some(), |name| {
-			environment.and_then(|values| values.get(name).cloned())
-		})
+		"env" => crate::env::command_words(words, follow.environment.is_some(), |name| follow.lookup(name))
 		.map(Handoff::Environment),
 		#[cfg(feature = "util.nohup")]
 		"nohup" => <crate::nohup::NohupCommand as builtins::Command>::new(words.iter().cloned())
@@ -909,7 +940,12 @@ impl builtins::Command for TimeoutCommand {
 			None => TrapSignal::try_from("TERM").expect("SIGTERM must be a known signal"),
 		};
 
-		let child_cancel = CancellationToken::new();
+		// A child of the caller's token: when an outer `timeout` cancels its
+		// operand, this operand stops in the same step, before the signal the
+		// outer sends next can let it go on to its next command.
+		let child_cancel = context
+			.cancel_token()
+			.map_or_else(CancellationToken::new, |token| token.child_token());
 		let spawns = Arc::new(SpawnRecorder {
 			spawns: Mutex::default(),
 			parent: context.params.spawn_observer().cloned(),
@@ -929,9 +965,9 @@ impl builtins::Command for TimeoutCommand {
 		params.set_quiet_cancellation(true);
 		params.set_spawn_observer(Arc::clone(&spawns) as Arc<dyn SpawnObserver>);
 
-		let aliases = context.shell.aliases();
-		let command_line =
-			crate::host::operand_command_line(&args.command, |word| aliases.contains_key(word));
+		let command_line = crate::host::operand_command_line(&args.command, |word, command_position| {
+			context.shell.expand_command_alias(word, command_position).map(|(words, next)| (words.len(), next))
+		});
 		// GNU runs a program, which the limit's signal acts on. When the shell
 		// runs the operand itself, or a utility in-process, no signal reaches
 		// them: when the signal would end them the limit has to cancel the
@@ -966,11 +1002,12 @@ impl builtins::Command for TimeoutCommand {
 		tokio::pin!(deadline);
 
 		tokio::select! {
-			result = &mut run_future => return result,
+			biased;
 			() = &mut outer_cancelled => {
 				child_cancel.cancel();
 				return Ok(ExecutionExitCode::Interrupted.into());
 			},
+			result = &mut run_future => return result,
 			() = &mut deadline => {},
 		}
 
@@ -993,8 +1030,12 @@ impl builtins::Command for TimeoutCommand {
 				// An inner timeout died of it: GNU reports that death at once
 				// and leaves the inner command running. An in-process inner
 				// timeout cannot outlive its operand, so the command ends
-				// with it.
+				// with it. One that sent KILL to its own group killed its
+				// command too.
 				child_cancel.cancel();
+				if died_of.as_str() == "SIGKILL" {
+					spawns.signal(died_of, true);
+				}
 				return Ok(ExecutionResult::new(report(
 					&inner,
 					&expired,
@@ -1004,21 +1045,6 @@ impl builtins::Command for TimeoutCommand {
 				)));
 			},
 		};
-		// Every signal is sent: one that reached a process must not skip the
-		// next.
-		let mut signalled = false;
-		for one in &sent {
-			signalled |= spawns.signal(one.signal, one.group);
-		}
-		// GNU follows any other signal with CONT in group mode, so a stopped
-		// child receives it and a stop signal leaves nothing stopped.
-		if sent
-			.iter()
-			.any(|one| one.group && !matches!(one.signal.as_str(), "SIGKILL" | "SIGCONT"))
-			&& let Ok(cont) = TrapSignal::try_from("CONT")
-		{
-			spawns.signal(cont, true);
-		}
 		// A program that received the signal is left to it, as under GNU.
 		// Otherwise the signal acts on the shell or the utility running the
 		// operand, or, with no child left to receive it, on the program's
@@ -1037,13 +1063,35 @@ impl builtins::Command for TimeoutCommand {
 		let stops = sent
 			.iter()
 			.any(|one| !one.group && signal_effect(one.signal, operand) == SignalEffect::Stops);
+		// An in-process operand the signal ends is cancelled before the signal
+		// goes out: a child it waits for could die of the signal first, and
+		// the shell would start its next command.
+		let ends_in_process = ending.is_some() && matches!(operand, Operand::Shell | Operand::Utility);
+		if ends_in_process {
+			child_cancel.cancel();
+		}
+		// Every signal is sent: one that reached a process must not skip the
+		// next.
+		let mut signalled = false;
+		for one in &sent {
+			signalled |= spawns.signal(one.signal, one.group);
+		}
+		// GNU follows any other signal with CONT in group mode, so a stopped
+		// child receives it and a stop signal leaves nothing stopped.
+		if sent
+			.iter()
+			.any(|one| one.group && !matches!(one.signal.as_str(), "SIGKILL" | "SIGCONT"))
+			&& let Ok(cont) = TrapSignal::try_from("CONT")
+		{
+			spawns.signal(cont, true);
+		}
 		let (cancelled, stopped) = match operand {
 			_ if sent.is_empty() => (false, held),
 			Operand::Program if signalled => (false, stops),
 			Operand::Program => (ending.is_some(), false),
 			Operand::Shell | Operand::Utility => (ending.is_some(), stops),
 		};
-		if cancelled {
+		if cancelled && !ends_in_process {
 			child_cancel.cancel();
 		}
 		let mut killed = signal.as_str() == "SIGKILL";
@@ -1084,11 +1132,12 @@ impl builtins::Command for TimeoutCommand {
 
 		let child_result = loop {
 			tokio::select! {
-				result = &mut run_future, if !stopped => break reap(result)?,
+				biased;
 				() = &mut outer_cancelled => {
 					child_cancel.cancel();
 					return Ok(ExecutionExitCode::Interrupted.into());
 				},
+				result = &mut run_future, if !stopped => break reap(result)?,
 				() = &mut inner_kill_deadline, if inner_kill_pending => {
 					if let Some(kill) = inner_kill {
 						spawns.signal(kill_signal(), kill.group);
@@ -2351,6 +2400,20 @@ f() { /bin/sh -c "$r" | /bin/sh -c "$r; cat"; }
 		assert!(wrong.is_empty(), "{wrong:#?}");
 	}
 
+	/// `env` stops splitting only when its argument list stops changing,
+	/// however many independent `-S` options it holds: 1,025 of them still
+	/// leave GNU `env` its program, whose TERM handler exits 3.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn many_independent_split_strings_still_run_the_program() {
+		let splits = " -S '-u ${V}'".repeat(1025);
+		let command = format!(
+			r#"export V=HOME; timeout --preserve-status 1 env{splits} -S '/bin/sh -c "trap \"exit 3\" TERM; /bin/sleep 5"'"#
+		);
+		let wrong = rows_unlike_gnu(&[("S6", command.as_str(), 3, "")]).await;
+		assert!(wrong.is_empty(), "{wrong:#?}");
+	}
+
 	/// An `env` wrapper changes the environment its nested `env` receives.
 	/// The classifier must use that changed environment for `${VARNAME}` in
 	/// the nested `-S` string, also the entries an `--env0-from` file gives
@@ -2378,6 +2441,30 @@ f() { /bin/sh -c "$r" | /bin/sh -c "$r; cat"; }
 				r#"printf 'P=/bin/sh\0' >envfile; timeout --preserve-status 1 env --env0-from=envfile env -S '${P} -c "trap \"exit 3\" TERM; /bin/sleep 5"'"#,
 				3,
 				"",
+			),
+			(
+				"E4",
+				r#"mkdir sub; printf 'P=/bin/sh\0' >sub/envfile; timeout --preserve-status -k 4 1 env -C sub env --env0-from=envfile env -S '${P} -c "trap \"exit 3\" TERM; /bin/sleep 5"'"#,
+				3,
+				"",
+			),
+			(
+				"E5",
+				r#"mkdir sub; printf 'P=/bin/sh\0' >envfile; printf 'P=eval\0' >sub/envfile; timeout --preserve-status -k 4 .3 env -C sub env --env0-from=envfile env -S '${P} "/bin/sleep 2; echo late > marker"'; s=$?; if test -e marker; then printf marker-created\\n; fi; printf status:$s\\n"#,
+				0,
+				"status:143\n",
+			),
+			(
+				"E6",
+				r#"printf 'P=/bin/sh\0P=eval\0' >envfile; timeout --preserve-status -k 4 1 env -i --env0-from=envfile env -S '${P} -c "trap \"exit 3\" TERM; /bin/sleep 5"'"#,
+				3,
+				"",
+			),
+			(
+				"E7",
+				r#"printf 'P=eval\0P=/bin/sh\0' >envfile; timeout --preserve-status -k 4 .3 env -i --env0-from=envfile env -S '${P} "/bin/sleep 2; echo late > marker"'; s=$?; if test -e marker; then printf marker-created\\n; fi; printf status:$s\\n"#,
+				0,
+				"status:143\n",
 			),
 		])
 		.await;
@@ -2622,6 +2709,13 @@ f() { /bin/sh -c "$r" | /bin/sh -c "$r; cat"; }
 				0,
 				"status:137\n",
 			),
+			(
+				"K11",
+				"timeout --preserve-status -s ALRM -k 3 1 timeout -s KILL 10 /bin/sleep 5",
+				137,
+				"",
+			),
+			("K12", "timeout -s ALRM -k 3 1 timeout -s KILL 10 /bin/sleep 5", 137, ""),
 		])
 		.await;
 		assert!(wrong.is_empty(), "{wrong:#?}");
@@ -2637,6 +2731,8 @@ f() { /bin/sh -c "$r" | /bin/sh -c "$r; cat"; }
 		let wrong = rows_unlike_gnu(&[
 			("O1", "timeout 5 time -p /bin/true", 0, ""),
 			("O2", "nohup time -p /bin/true", 0, ""),
+			("O3", "alias -- -p=BOGUS; timeout 5 time -p /bin/true", 0, ""),
+			("O4", "alias -- -p=BOGUS; nohup time -p /bin/true", 0, ""),
 		])
 		.await;
 		assert!(wrong.is_empty(), "{wrong:#?}");

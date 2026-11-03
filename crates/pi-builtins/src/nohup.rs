@@ -106,8 +106,9 @@ impl builtins::Command for NohupCommand {
 			// operand directly with session reparenting, double-forking it out of the
 			// shell's descendant tree. Like coreutils, we run the operand here; we only
 			// differ by not masking SIGHUP.
-			let aliases = context.shell.aliases();
-			let command_line = rebuild_command_line(&command, |word| aliases.contains_key(word));
+			let command_line = rebuild_command_line(&command, |word, command_position| {
+				context.shell.expand_command_alias(word, command_position).map(|(words, next)| (words.len(), next))
+			});
 
 			let mut params = context.params.clone();
 			params.process_group_policy = ProcessGroupPolicy::NewProcessGroup;
@@ -134,8 +135,8 @@ fn report_missing_operand(mut stderr: impl Write) -> ExecutionResult {
 	ExecutionResult::new(125)
 }
 
-fn rebuild_command_line(command: &[String], is_alias: impl Fn(&str) -> bool) -> String {
-	operand_command_line(command, is_alias)
+fn rebuild_command_line(command: &[String], alias: impl FnMut(&str, bool) -> Option<(usize, bool)>) -> String {
+	operand_command_line(command, alias)
 }
 
 #[cfg(test)]
@@ -212,7 +213,7 @@ mod tests {
 		];
 
 		assert_eq!(
-			rebuild_command_line(&command, |_| false),
+			rebuild_command_line(&command, |_, _| None),
 			"printf '%s %s' 'two words' 'it'\"'\"'s' ''"
 		);
 	}

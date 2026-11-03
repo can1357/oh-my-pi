@@ -284,10 +284,13 @@ pub(crate) struct CommandWords {
 	/// `-i` or a leading `-`: start from an empty environment.
 	pub clear_env:   bool,
 	/// `--env0-from`: the file (or `-` for standard input) whose
-	/// NUL-terminated entries `env` reads first.
+	/// NUL-terminated entries `env` reads first, relative to the directory
+	/// `env` runs in.
 	pub env0_from:   Option<String>,
 	pub unset:       Vec<String>,
 	pub assignments: Vec<(String, String)>,
+	/// `-C`: the directory the command runs in.
+	pub chdir:       Option<String>,
 }
 
 /// The command `env` runs for `argv` (its own name first): `-S` strings
@@ -309,45 +312,69 @@ pub(crate) fn command_words(
 	/// An argument list past this many bytes cannot be exec'd on Linux
 	/// (`ARG_MAX` with the default stack limit).
 	const MAX_ARGV_BYTES: usize = 2 * 1024 * 1024;
-	/// A split that `${VARNAME}` keeps producing further `-S` options can
-	/// grow without repeating; real chains end long before this.
-	const MAX_ROUNDS: usize = 1024;
+	/// Rounds in a row that split at one place without shrinking the
+	/// argument list. Only `${VARNAME}` makes such a round, and with the
+	/// variables fixed a chain of them repeats or grows without end.
+	const MAX_STALLED_ROUNDS: usize = 64;
+	/// Argument words the splitting may move or hash before the classifier
+	/// stops following it (GNU's own rescan is quadratic too).
+	const MAX_WORK: usize = 1 << 29;
 
 	let argv = Env::rewrite_argv(argv.iter().map(OsString::from).collect()).ok()?;
 	let matches = match <Env as clap::Parser>::try_parse_from(argv).ok()?.parsed {
 		Parsed::Matches(matches) => matches,
 		Parsed::SplitString(mut argv) => {
-			// Each round splits one `-S` and splices its words in, as GNU's
-			// `getopt` rescan does. The rounds are deterministic, so an
-			// argument list seen before means GNU `env`, and this one until it
-			// is cancelled, never stops; independent `-S` options never repeat
-			// one, since each round removes one.
-			let mut seen: Vec<u64> = Vec::new();
-			while let Some(found) = scan_options(&argv) {
+			// Each round splits one `-S` and splices its words in where it
+			// was, as GNU's `getopt` rescan sees them; the options before it
+			// stay as they were, so the next round scans on from there. A
+			// round that splits further on, or shrinks the argument list,
+			// makes progress. One that does neither can only repeat an
+			// earlier argument list or grow it, and GNU `env`, and this one
+			// until it is cancelled, never stop.
+			let mut bytes: usize = argv.iter().map(|word| word.len()).sum();
+			let (mut start, mut debug, mut place) = (1, false, 0);
+			let (mut stalled, mut seen, mut work) = (0, Vec::<u64>::new(), 0_usize);
+			while let Some(found) = scan_options_from(&argv, start, debug) {
 				let Found::SplitString(split) = found else {
 					return None;
 				};
-				let state = {
-					let mut hasher = std::hash::DefaultHasher::new();
-					std::hash::Hash::hash(&argv, &mut hasher);
-					std::hash::Hasher::finish(&hasher)
-				};
-				let argv_bytes: usize = argv.iter().map(|word| word.len()).sum();
-				if seen.len() >= MAX_ROUNDS
-					|| seen.contains(&state)
-					|| split.string.len() > MAX_SPLIT_STRING
-					|| argv_bytes > MAX_ARGV_BYTES
-				{
+				if split.string.len() > MAX_SPLIT_STRING || bytes > MAX_ARGV_BYTES {
 					return None;
 				}
-				seen.push(state);
 				let mut names_variable = false;
 				let words =
 					split_string(&split.string, &mut lookup, |_, _| names_variable = true).ok()?;
 				if names_variable && !known {
 					return None;
 				}
+				let (index, resume_debug) = (split.index, split.debug);
+				let removed: usize = argv[index..index + split.words].iter().map(|word| word.len()).sum();
+				let added = split.prefix.as_ref().map_or(0, |prefix| prefix.len())
+					+ words.iter().map(Vec::len).sum::<usize>();
+				let shrank = added < removed;
+				work += argv.len() - index + words.len();
 				splice_split(&mut argv, split, &words);
+				bytes = bytes - removed + added;
+				if index > place || shrank {
+					stalled = 0;
+					seen.clear();
+				} else {
+					stalled += 1;
+					work += argv.len() - index;
+					let state = {
+						let mut hasher = std::hash::DefaultHasher::new();
+						std::hash::Hash::hash(&argv[index..], &mut hasher);
+						std::hash::Hasher::finish(&hasher)
+					};
+					if stalled > MAX_STALLED_ROUNDS || seen.contains(&state) {
+						return None;
+					}
+					seen.push(state);
+				}
+				if work > MAX_WORK {
+					return None;
+				}
+				(start, debug, place) = (index, resume_debug, index);
 			}
 			app().try_get_matches_from(argv).ok()?
 		},
@@ -373,12 +400,15 @@ pub(crate) fn command_words(
 		})
 		.collect();
 	let command = words.split_off(assignment_count);
-	(!command.is_empty()).then_some(CommandWords {
+	let string = |id: &str| {
+		matches
+			.get_one::<OsString>(id)
+			.map(|value| value.to_string_lossy().into_owned())
+	};
+	(!command.is_empty()).then(|| CommandWords {
 		command,
 		clear_env,
-		env0_from: matches
-			.get_one::<OsString>(options::ENV0_FROM)
-			.map(|file| file.to_string_lossy().into_owned()),
+		env0_from: string(options::ENV0_FROM),
 		unset: matches
 			.get_many::<OsString>(options::UNSET)
 			.into_iter()
@@ -386,24 +416,60 @@ pub(crate) fn command_words(
 			.map(|word| word.to_string_lossy().into_owned())
 			.collect(),
 		assignments,
+		chdir: string(options::CHDIR),
 	})
 }
 
-/// The `NAME=VALUE` entries of an `--env0-from` file, as `env` reads them:
-/// NUL-terminated. `None` when `env` refuses the file (no final NUL).
+/// The environment `env` gives its command, built as [`Run`] builds it:
+/// `initial` (the environment `env` received), or nothing under `-i`; the
+/// `--env0-from` entries `env0` holds; the unsets; the assignments. `None`
+/// when `env` refuses: an `--env0-from` file without its final NUL, or a
+/// name it cannot unset.
 #[cfg(feature = "util.timeout")]
-pub(crate) fn env0_entries(data: &[u8]) -> Option<Vec<(String, String)>> {
+pub(crate) fn passed_environment(
+	initial: Vec<Vec<u8>>,
+	command: &CommandWords,
+	env0: Option<&[u8]>,
+) -> Option<Vec<Vec<u8>>> {
+	let mut env = Vec::new();
+	if command.clear_env {
+		if let Some(data) = env0 {
+			env = env0_file_entries(data)?;
+		}
+	} else {
+		env = initial;
+		let entries = match env0 {
+			Some(data) => env0_file_entries(data)?,
+			None => Vec::new(),
+		};
+		for entry in entries {
+			if entry.contains(&b'=') {
+				set_entry(&mut env, entry);
+			} else {
+				env.push(entry);
+			}
+		}
+	}
+	if !command.clear_env || env0.is_some() {
+		for name in &command.unset {
+			if name.is_empty() || name.contains('=') {
+				return None;
+			}
+			env.retain(|entry| entry_name(entry) != Some(name.as_bytes()));
+		}
+	}
+	for (name, value) in &command.assignments {
+		set_entry(&mut env, entry(name, value));
+	}
+	Some(env)
+}
+
+/// The entries of an `--env0-from` file, as `env` reads them: each ends in
+/// NUL. `None` when the file does not end in NUL, which `env` refuses.
+fn env0_file_entries(data: &[u8]) -> Option<Vec<Vec<u8>>> {
 	match data.split_last() {
 		None => Some(Vec::new()),
-		Some((&0, entries)) => Some(
-			entries
-				.split(|&byte| byte == 0)
-				.filter_map(|entry| {
-					let entry = String::from_utf8_lossy(entry);
-					entry.split_once('=').map(|(name, value)| (name.to_owned(), value.to_owned()))
-				})
-				.collect(),
-		),
+		Some((&0, entries)) => Some(entries.split(|&byte| byte == 0).map(<[u8]>::to_vec).collect()),
 		Some(_) => None,
 	}
 }
@@ -483,8 +549,15 @@ fn long_option(name: &[u8]) -> Option<(&'static str, bool)> {
 /// Walks the options of `argv` (they end at the first operand) for the first
 /// `-S` or whitespace short option.
 fn scan_options(argv: &[OsString]) -> Option<Found> {
-	let mut debug = false;
-	let mut index = 1;
+	scan_options_from(argv, 1, false)
+}
+
+/// [`scan_options`] resumed at word `start`, with `debug` as the options
+/// before it left it: a `-S` spliced in at `start` leaves the options before
+/// it as they were.
+fn scan_options_from(argv: &[OsString], start: usize, debug: bool) -> Option<Found> {
+	let mut debug = debug;
+	let mut index = start;
 	while let Some(word) = argv.get(index) {
 		let bytes = os_bytes_lossy(word);
 		if bytes.as_ref() == b"--" || bytes.len() < 2 || bytes[0] != b'-' {
@@ -962,18 +1035,10 @@ impl Run<'_> {
 				return Err(self.die(&message));
 			},
 		};
-		match data.split_last() {
-			None => Ok(Vec::new()),
-			Some((&0, entries)) => Ok(entries
-				.split(|&byte| byte == 0)
-				.map(<[u8]>::to_vec)
-				.collect()),
-			Some(_) => {
-				let message =
-					format!("{}: file must end with a NUL byte", os_string(file).maybe_quote());
-				Err(self.die(&message))
-			},
-		}
+		env0_file_entries(&data).ok_or_else(|| {
+			let message = format!("{}: file must end with a NUL byte", os_string(file).maybe_quote());
+			self.die(&message)
+		})
 	}
 
 	/// Merges `--env0-from` entries into `env`: an assignment replaces the

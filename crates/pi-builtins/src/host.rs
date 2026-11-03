@@ -1942,17 +1942,51 @@ pub(crate) fn quote_arg(arg: &str) -> String {
 
 /// Rebuilds the command line that `timeout` and `nohup` re-read for their
 /// operand. Each word gets [`quote_arg`]'s quoting, so the shell parses the
-/// operand as it was given (a `time -p` keyword pipeline included). A later
-/// word that names an alias is single-quoted as well: it is data, and on the
-/// re-read no alias may take it, which an alias whose value ends in a blank
-/// would otherwise allow.
-pub(crate) fn operand_command_line(words: &[String], is_alias: impl Fn(&str) -> bool) -> String {
+/// operand as it was given (a `time -p` keyword pipeline included). The one
+/// word the re-read would newly make an alias is single-quoted as well: a
+/// later word right after an alias whose value ends in a blank. It is data,
+/// and no alias may take it; quoting it stops that chain. `alias` reports
+/// what the shell substitutes for a word, as
+/// `Shell::expand_command_alias` does: how many words, and whether the word
+/// after them may name an alias too.
+pub(crate) fn operand_command_line(
+	words: &[String],
+	mut alias: impl FnMut(&str, bool) -> Option<(usize, bool)>,
+) -> String {
 	let mut line = String::new();
+	// Until a word becomes the command, the next word is in command
+	// position: after `!`, after `time` and its `-p`, after an alias that
+	// expands to nothing.
+	let mut command_position = true;
+	let mut after_time = false;
+	let mut alias_next = false;
 	for (index, word) in words.iter().enumerate() {
 		if index > 0 {
 			line.push(' ');
 		}
-		if index > 0 && is_alias(word) && quote_arg(word) == *word {
+		let literal = quote_arg(word) == *word;
+		let mut data_alias = false;
+		if command_position {
+			let time_option = after_time && word == "-p";
+			after_time = literal && word == "time";
+			if !(literal && (word == "!" || after_time || time_option)) {
+				// The shell looks the command word up after expansion, quoted
+				// or not.
+				match alias(word, true) {
+					Some((count, next)) => {
+						command_position = count == 0;
+						alias_next = next;
+					},
+					None => {
+						command_position = false;
+						alias_next = false;
+					},
+				}
+			}
+		} else if std::mem::take(&mut alias_next) {
+			data_alias = literal && alias(word, false).is_some();
+		}
+		if data_alias {
 			line.push('\'');
 			line.push_str(word);
 			line.push('\'');
