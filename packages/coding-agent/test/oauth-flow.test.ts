@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 import { MCPOAuthFlow, refreshMCPOAuthToken } from "@oh-my-pi/pi-coding-agent/mcp/oauth-flow";
+import { allowMCPInTests } from "./helpers/mcp-policy";
+
+// These tests drive MCP OAuth helpers against stubs; the test runner exports PI_NO_MCP=1.
+allowMCPInTests();
 
 afterEach(() => {
 	vi.restoreAllMocks();

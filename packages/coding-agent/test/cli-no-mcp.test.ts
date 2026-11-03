@@ -273,6 +273,46 @@ describe("spawned omp and the user's MCP servers", () => {
 			await removeWithRetries(user.root);
 		}
 	}, 240_000);
+
+	// Round-7 review: a custom `spawn` transport got no `--no-mcp` from a host
+	// with MCP off.
+	test("an RpcClient with a custom spawn starts none of them while its host has MCP off", async () => {
+		const user = await standInUser("");
+		setNoMcpEnvForTest("1");
+		try {
+			await withFakeModel(user, async () => {
+				const client = new RpcClient({
+					args: RPC_ARGS,
+					spawn: args => {
+						// The transport builds its own environment, here one that says MCP is on.
+						const child = ptree.spawn([process.execPath, cli, ...args], {
+							cwd: user.project,
+							env: user.env,
+							stdin: "pipe",
+							detached: true,
+						});
+						return {
+							stdin: child.stdin,
+							stdout: child.stdout,
+							exited: child.exited,
+							peekStderr: () => child.peekStderr(),
+							kill: (reason, graceMs) => child.kill(reason, graceMs),
+						};
+					},
+				});
+				try {
+					await client.start();
+					await client.getState();
+					expect(await spawnedPids(user.audit)).toHaveLength(0);
+				} finally {
+					await client.stop();
+				}
+			});
+		} finally {
+			await stopStartedServers(user.audit);
+			await removeWithRetries(user.root);
+		}
+	}, 240_000);
 });
 
 const readCases = [

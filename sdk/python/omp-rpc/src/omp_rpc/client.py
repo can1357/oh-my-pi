@@ -51,6 +51,9 @@ from .host_tools import HostTool, HostToolContext
 from .host_uris import HostUri, HostUriContext, normalize_read_result
 from .protocol import assistant_text
 
+# Values omp reads as true for a boolean environment flag (pi-utils `parseFlag`).
+_TRUTHY_FLAG_VALUES = frozenset({"1", "Y", "y", "TRUE", "true", "YES", "yes", "ON", "on"})
+
 AgentEventListener = Callable[[RpcAgentEvent], None]
 NotificationListener = Callable[[RpcNotification], None]
 UiRequestListener = Callable[[ExtensionUiRequest], None]
@@ -621,10 +624,15 @@ class RpcClient(WireClient):
             self._protocol_errors.clear()
             self._listener_errors.clear()
 
+        env = {**os.environ, **self._env}
+        # An explicit env can never turn MCP back on for the child while this
+        # host has it off (PI_NO_MCP set to a value omp reads as true).
+        if os.environ.get("PI_NO_MCP") in _TRUTHY_FLAG_VALUES:
+            env["PI_NO_MCP"] = "1"
         process = subprocess.Popen(
             list(self._build_command()),
             cwd=str(self._cwd) if self._cwd is not None else None,
-            env={**os.environ, **self._env},
+            env=env,
             user=self._user,
             group=self._group,
             extra_groups=self._extra_groups,

@@ -12,6 +12,7 @@ import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 import { getActiveProfile } from "@oh-my-pi/pi-utils/dirs";
 import type { OAuthCredential } from "../session/auth-storage";
 import { buildWellKnownUrls } from "./oauth-discovery";
+import { assertMCPEnabled } from "./policy";
 
 /** Credential-id prefix for OMP-managed MCP OAuth credentials keyed by profile and server URL. */
 const MCP_OAUTH_URL_CREDENTIAL_PREFIX = "mcp_oauth:";
@@ -372,6 +373,8 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 		ctrl: OAuthController,
 	) {
 		super(ctrl, resolveCallbackOptions(config));
+		// Authorizes against an MCP server (and its authorization server); refused while MCP is off.
+		assertMCPEnabled();
 		this.#resolvedClientId = this.#resolveClientId(config);
 		this.#fetch = config.fetch ?? ctrl.fetch ?? fetch;
 		this.#resource = this.#filterResourceIndicator(
@@ -806,6 +809,8 @@ export async function refreshMCPOAuthToken(
 	resourceOrOpts?: string | RefreshMCPOAuthTokenOptions,
 	opts?: RefreshMCPOAuthTokenOptions,
 ): Promise<OAuthCredentials> {
+	// Refreshes an MCP server credential, often at the server itself; refused while MCP is off.
+	assertMCPEnabled();
 	const optsFromTrailing = typeof resourceOrOpts === "string" ? opts : resourceOrOpts;
 	const fetchImpl: FetchImpl = optsFromTrailing?.fetch ?? fetch;
 	const resource = typeof resourceOrOpts === "string" ? resourceOrOpts : undefined;

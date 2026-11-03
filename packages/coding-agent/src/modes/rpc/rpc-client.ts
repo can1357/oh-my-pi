@@ -57,7 +57,7 @@ import type {
 	RpcSubagentSnapshot,
 	RpcSubagentSubscriptionLevel,
 } from "./rpc-types";
-import { mcpPolicyEnv } from "../../mcp/policy";
+import { isMCPDisabled, mcpPolicyEnv } from "../../mcp/policy";
 
 /** Distributive Omit that works with union types */
 type DistributiveOmit<T, K extends keyof T> = T extends unknown ? Omit<T, K> : never;
@@ -406,7 +406,8 @@ export class RpcClient {
 		if (this.options.sessionDir) {
 			args.push("--session-dir", this.options.sessionDir);
 		}
-		if (this.options.noMcp) {
+		// The host's own choice too, so a custom `spawn` transport carries it.
+		if (this.options.noMcp || isMCPDisabled()) {
 			args.push("--no-mcp");
 		}
 		if (this.options.args) {

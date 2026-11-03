@@ -5,6 +5,10 @@ import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import { refreshStoredManagedMcpOAuthCredential } from "@oh-my-pi/pi-coding-agent/mcp/oauth-credentials";
 import type { MCPStoredOAuthCredential } from "@oh-my-pi/pi-coding-agent/mcp/oauth-flow";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { allowMCPInTests } from "./helpers/mcp-policy";
+
+// The in-process refresh helpers below run against a stub; the test runner exports PI_NO_MCP=1.
+allowMCPInTests();
 
 /** Capture the `resource` form field of the single refresh_token grant a helper call makes. */
 async function captureRefreshResource(
@@ -100,6 +104,8 @@ test("token refreshes and persists a rotating local MCP OAuth grant", async () =
 				OMP_AUTH_BROKER_TOKEN: undefined,
 				OMP_AUTH_BROKER_URL: undefined,
 				PI_CODING_AGENT_DIR: tempDir.path(),
+				// The test runner exports PI_NO_MCP=1, which refuses MCP credential refreshes.
+				PI_NO_MCP: "",
 			},
 			stdout: "pipe",
 			stderr: "pipe",
@@ -133,6 +139,61 @@ test("token refreshes and persists a rotating local MCP OAuth grant", async () =
 		tokenServer.stop(true);
 	}
 }, 30_000);
+
+// PR #17795 review, round 7: `omp --no-mcp token` refreshed an MCP credential,
+// contacting the server's token endpoint.
+for (const { name, args, noMcp } of [
+	{ name: "PI_NO_MCP=1", args: [], noMcp: "1" },
+	{ name: "--no-mcp", args: ["--no-mcp"], noMcp: "" },
+]) {
+	test(`token refreshes no MCP credential under ${name}`, async () => {
+		using tempDir = TempDir.createSync("@omp-token-mcp-oauth-off-");
+		const provider = "mcp_oauth:profile:default:https://mcp.example.test/MCP";
+		let requests = 0;
+		const tokenServer = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch() {
+				requests += 1;
+				return Response.json({ access_token: "access-1", refresh_token: "refresh-1", expires_in: 3600 });
+			},
+		});
+		try {
+			const authStorage = new AuthStorage(await SqliteAuthCredentialStore.open(tempDir.join("agent.db")));
+			await authStorage.credentials.reload();
+			const credential: MCPStoredOAuthCredential = {
+				type: "oauth",
+				access: "access-0",
+				refresh: "refresh-0",
+				expires: Date.now() - 60_000,
+				tokenUrl: `http://127.0.0.1:${tokenServer.port}/token`,
+			};
+			await authStorage.credentials.set(provider, credential);
+			authStorage.close();
+
+			const proc = Bun.spawn([process.execPath, cliEntry, ...args, "token", provider, "--force-refresh"], {
+				cwd: path.resolve(import.meta.dir, "../../.."),
+				env: {
+					...process.env,
+					NO_COLOR: "1",
+					OMP_AUTH_BROKER_TOKEN: undefined,
+					OMP_AUTH_BROKER_URL: undefined,
+					PI_CODING_AGENT_DIR: tempDir.path(),
+					PI_NO_MCP: noMcp,
+				},
+				stdout: "pipe",
+				stderr: "pipe",
+			});
+			const [exitCode, stdout] = await Promise.all([proc.exited, new Response(proc.stdout).text()]);
+
+			expect(requests).toBe(0);
+			expect(stdout).not.toContain("access-1");
+			expect(exitCode).not.toBe(0);
+		} finally {
+			tokenServer.stop(true);
+		}
+	}, 30_000);
+}
 
 test("token refuses a managed MCP id scoped to another profile", async () => {
 	using tempDir = TempDir.createSync("@omp-token-mcp-oauth-xprofile-");
