@@ -1049,7 +1049,7 @@ export class ExtensionRunner {
 	 * wait for the user.
 	 */
 	setUserWaitTracker(track: UserWaitTracker): void {
-		this.#trackUserWait = asSessionWork(this.#runAsSessionWork, track);
+		this.#trackUserWait = dialog => this.#runAsSessionWork(() => track(dialog));
 	}
 
 	/** Waits until the interactive transcript can show the tool call being approved. */
