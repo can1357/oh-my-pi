@@ -27,6 +27,9 @@
 ### Fixed
 
 - Fixed Wayland double and triple clicks (`doubleClick`, `click` with `count`) landing as a single click in Qt apps on KDE Plasma, such as Kate ([#17903](https://github.com/can1357/oh-my-pi/pull/17903) by [@will-bogusz](https://github.com/will-bogusz))
+### Fixed
+
+- Fixed `press()`, `perform()` and `menu.select()` refusing on Linux in Firefox, Chromium, VS Code and LibreOffice, and in apps under a non-English locale, with "AT-SPI action 'press' is unavailable"; `actions()` now lists the actions' untranslated names (`press`, `click`) instead of empty or translated labels, and `press()` toggles toggle buttons and selects radio buttons as it does checkboxes ([#17936](https://github.com/can1357/oh-my-pi/pull/17936) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.16.0] - 2026-11-02
 
