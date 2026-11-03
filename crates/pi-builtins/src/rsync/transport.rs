@@ -152,8 +152,8 @@ pub(crate) struct Connection {
 	/// Whether `reader` would return at once (data or EOF waiting), without
 	/// reading; None when the stream cannot tell.
 	pub probe:  Option<ReadProbe>,
-	/// Remote-shell (or connect-program) process; killed on drop or cancel,
-	/// reaped by [`Connection::finish`].
+	/// Remote-shell (or connect-program) process; stopped on drop
+	/// ([`ChildGuard::stop`]), reaped by [`Connection::finish`].
 	pub child:  Option<ChildGuard>,
 	/// Limits enforced by `reader`/`writer` when they were created here.
 	pub ctl:    ConnCtl,
@@ -182,6 +182,11 @@ impl Connection {
 	}
 }
 
+/// How long a child signalled with SIGUSR1 ([`ChildGuard::stop`]) has to
+/// exit, its stderr still forwarded, before it is killed.
+#[cfg(unix)]
+const CHILD_STOP: Duration = Duration::from_secs(1);
+
 /// A spawned helper process: the remote shell or `RSYNC_CONNECT_PROG`.
 pub(crate) struct ChildGuard {
 	child:    Arc<Mutex<Child>>,
@@ -198,8 +203,11 @@ pub(crate) struct ChildGuard {
 }
 
 impl ChildGuard {
-	/// Takes ownership of `child`, forwarding its stderr through `env` and
-	/// killing it as soon as `cancel` rises.
+	/// Takes ownership of `child`, forwarding its stderr through `env`. On
+	/// Windows a watchdog kills it as soon as `cancel` rises, because a write
+	/// blocked on its stdin pipe breaks only when it dies; on Unix the socket
+	/// halves observe `cancel` themselves, and the child is stopped after the
+	/// run has reported ([`Self::stop`]).
 	fn new(
 		env: &ChildEnv,
 		mut child: Child,
@@ -209,11 +217,14 @@ impl ChildGuard {
 	) -> Self {
 		let stderr = child.stderr.take().map(|err| env.forward_stderr(err));
 		let child = Arc::new(Mutex::new(child));
-		let (stop, stopped) = flume::bounded::<()>(1);
-		let watchdog = {
+		#[cfg(unix)]
+		let (stop, watchdog) = (None, None);
+		#[cfg(not(unix))]
+		let (stop, watchdog) = {
+			let (stop, stopped) = flume::bounded::<()>(1);
 			let child = Arc::clone(&child);
 			let cancel = Arc::clone(&cancel);
-			std::thread::Builder::new()
+			let watchdog = std::thread::Builder::new()
 				.name("rsync-child-watchdog".into())
 				.spawn(move || {
 					loop {
@@ -228,13 +239,14 @@ impl ChildGuard {
 						}
 					}
 				})
-				.ok()
+				.ok();
+			(Some(stop), watchdog)
 		};
 		Self {
 			child,
 			cancel,
 			stderr,
-			stop: Some(stop),
+			stop,
 			watchdog,
 			report,
 			reaped: false,
@@ -252,10 +264,7 @@ impl ChildGuard {
 	fn wait(mut self) -> Result<(), RsyncError> {
 		let status = loop {
 			if self.cancel.load(Ordering::Relaxed) {
-				let mut child = lock(&self.child);
-				let _ = child.kill();
-				let _ = child.wait();
-				self.reaped = true;
+				self.stop();
 				return Err(RsyncError::cancelled());
 			}
 			match lock(&self.child).try_wait() {
@@ -273,6 +282,40 @@ impl ChildGuard {
 			Ok(_) => Ok(()),
 			Err(err) => Err(RsyncError::new(RERR_WAITCHILD, syserr_text(self.role, &err, "waitpid"))),
 		}
+	}
+
+	/// Stops a child that still runs, as upstream's exit cleanup does
+	/// (`kill_all(SIGUSR1)`): the signal lets an rsync at the other end of a
+	/// remote shell print its own `received SIGUSR1` trailer, which is
+	/// forwarded after ours, before the child is reaped. One that has not
+	/// exited within [`CHILD_STOP`] is killed. Windows has no SIGUSR1: the
+	/// child is killed. Idempotent.
+	fn stop(&mut self) {
+		if self.reaped {
+			return;
+		}
+		{
+			let mut child = lock(&self.child);
+			let exited = |child: &mut Child| matches!(child.try_wait(), Ok(Some(_)));
+			#[cfg(unix)]
+			if !exited(&mut *child)
+				&& let Ok(pid) = i32::try_from(child.id())
+			{
+				// The child is not reaped yet, so its pid is still its own.
+				let _ = nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), nix::sys::signal::Signal::SIGUSR1);
+				let until = Instant::now() + CHILD_STOP;
+				while !exited(&mut *child) && Instant::now() < until {
+					std::thread::sleep(Duration::from_millis(10));
+				}
+			}
+			if !exited(&mut *child) {
+				let _ = child.kill();
+				let _ = child.wait();
+			}
+		}
+		self.reaped = true;
+		self.stop_watchdog();
+		self.drain_stderr();
 	}
 
 	fn stop_watchdog(&mut self) {
@@ -299,13 +342,7 @@ impl ChildGuard {
 
 impl Drop for ChildGuard {
 	fn drop(&mut self) {
-		if !self.reaped {
-			let mut child = lock(&self.child);
-			if !matches!(child.try_wait(), Ok(Some(_))) {
-				let _ = child.kill();
-				let _ = child.wait();
-			}
-		}
+		self.stop();
 		self.stop_watchdog();
 	}
 }

@@ -126,6 +126,8 @@ pub(crate) struct Deleter {
 	confine: Option<std::path::PathBuf>,
 	/// Resolves the destination root for relative merge-file names.
 	paths: crate::host::ShellPaths,
+	/// Ends a wait on a merge file that is a FIFO.
+	cancel: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// The DEL_FOR_* flag for an entry of `mode` (upstream get_del_for_flag).
@@ -159,11 +161,16 @@ impl Deleter {
 			insecure_links: ctx.opts.insecure_links,
 			confine: ctx.opts.confine_root.as_ref().map(std::path::PathBuf::from),
 			paths: ctx.paths.clone(),
+			cancel: Arc::clone(&ctx.cancel),
 		}
 	}
 
 	fn reader<'a>(&'a self, tree: &'a Tree) -> impl Fn(&[u8]) -> io::Result<Option<Vec<u8>>> + 'a {
-		let opts = paths::OperatorOpts { insecure: self.insecure_links, confine: self.confine.as_deref() };
+		let opts = paths::OperatorOpts {
+			insecure: self.insecure_links,
+			confine:  self.confine.as_deref(),
+			cancel:   &self.cancel,
+		};
 		merge_reader(self.paths.resolve(tree.root()), &self.fs, opts)
 	}
 

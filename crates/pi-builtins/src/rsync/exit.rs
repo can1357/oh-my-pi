@@ -144,6 +144,13 @@ impl RsyncError {
 		io::Error::other(Self::cancelled())
 	}
 
+	/// Whether `err` carries [`Self::cancelled`] ([`Self::cancelled_io`]).
+	pub(crate) fn is_cancellation(err: &io::Error) -> bool {
+		err.get_ref()
+			.and_then(|inner| inner.downcast_ref::<Self>())
+			.is_some_and(|e| e.code == RERR_SIGNAL)
+	}
+
 	/// Maps an io::Error from the wire layers (timeouts → RERR_TIMEOUT, EOF → RERR_STREAMIO,
 	/// else `code`). A [`crate::rsync::wire::WireError`] or `RsyncError` carried inside the
 	/// io::Error (cancellation, peer-data errors) is used verbatim.

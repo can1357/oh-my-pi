@@ -376,8 +376,15 @@ impl Logger {
 	}
 
 	/// log_init: opens `config().log_file` for appending through the operator-file walk.
-	/// On failure prints upstream's two messages and falls back to syslog.
-	pub(crate) fn open_log_file(&self, fs: &pi_vfs::BlockingFs, insecure: bool) {
+	/// On failure prints upstream's two messages and falls back to syslog. An
+	/// open that `cancel` ends (a FIFO nobody reads) prints nothing: the run
+	/// ends with its cancellation.
+	pub(crate) fn open_log_file(
+		&self,
+		fs: &pi_vfs::BlockingFs,
+		insecure: bool,
+		cancel: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+	) {
 		let Some(path) = self.inner.cfg.log_file.clone() else {
 			return;
 		};
@@ -385,8 +392,9 @@ impl Logger {
 			lock(&self.inner.outputs).log = LogTarget::Syslog;
 			return;
 		}
-		match crate::rsync::paths::create_operator_file(fs, &path, true, insecure) {
+		match crate::rsync::paths::create_operator_file(fs, &path, true, insecure, cancel) {
 			Ok(file) => self.set_log_file(Box::new(file)),
+			Err(err) if RsyncError::is_cancellation(&err) => {},
 			Err(err) => {
 				let mut text = b"failed to open log-file ".to_vec();
 				text.extend_from_slice(&crate::host::os_bytes_lossy(path.as_os_str()));

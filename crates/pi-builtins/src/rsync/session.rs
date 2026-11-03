@@ -913,9 +913,10 @@ fn filter_config(io: &HostIo, opts: &Options, am_sender: bool, am_server: bool, 
 	let fs = io.fs.clone();
 	let paths = io.paths.clone();
 	let insecure = opts.insecure_links;
+	let cancel = Arc::clone(&io.cancel);
 	let read_file: FileReader = Arc::new(move |p: &[u8]| {
 		let path = paths.resolve(bytes_os_lossy(p));
-		let mut f = paths::open_operator_file(&fs, &path, insecure)?;
+		let mut f = paths::open_operator_file(&fs, &path, insecure, &cancel)?;
 		let mut buf = Vec::new();
 		f.read_to_end(&mut buf)?;
 		Ok(buf)
@@ -945,6 +946,7 @@ fn client_filters(io: &HostIo, opts: &Options, argv: &[OsString], cfg: FilterCon
 	let stdin = io.stdin.clone();
 	let insecure = opts.insecure_links;
 	let paths = io.paths.clone();
+	let cancel = Arc::clone(&io.cancel);
 	let files = move |p: &Path| -> io::Result<Vec<u8>> {
 		let mut buf = Vec::new();
 		if p.as_os_str() == "-" {
@@ -954,7 +956,7 @@ fn client_filters(io: &HostIo, opts: &Options, argv: &[OsString], cfg: FilterCon
 		// --include-from/--exclude-from files are not confined by --confine-root
 		// (rsync 3.5.1 reads one outside DIR).
 		let path = paths.resolve(p);
-		paths::open_operator_file(&fs, &path, insecure)?.read_to_end(&mut buf)?;
+		paths::open_operator_file(&fs, &path, insecure, &cancel)?.read_to_end(&mut buf)?;
 		Ok(buf)
 	};
 	let split = if opts.delete_excluded {
@@ -1120,8 +1122,9 @@ fn open_files_from(io: &HostIo, opts: &Options) -> Result<Option<Box<dyn Read + 
 			// The list file itself is not confined by --confine-root; the names it
 			// selects are (scan.rs).
 			let path = io.resolve(&name);
-			match paths::open_operator_file(&io.fs, &path, opts.insecure_links) {
+			match paths::open_operator_file(&io.fs, &path, opts.insecure_links, &io.cancel) {
 				Ok(f) => Ok(Some(Box::new(io::BufReader::new(f)))),
+				Err(err) if RsyncError::is_cancellation(&err) => Err(RsyncError::cancelled()),
 				Err(err) => Err(options::files_from_open_error(&name, &err)),
 			}
 		}
@@ -1138,6 +1141,9 @@ fn client_main(io: &HostIo, mut opts: Options, argv: &[OsString]) -> i32 {
 		.with_role(Role::PreReceiver);
 	let fail = |err: RsyncError, role: Role| {
 		let logger = logger.with_role(role);
+		// Whatever the cancellation broke (a FIFO's wait, a read of stdin)
+		// ends as upstream's signal exit, from the step it interrupted.
+		let err = if io.host_cancel.load(Ordering::Relaxed) { RsyncError::cancelled() } else { err };
 		report(&logger, &err);
 		logger.finish(err.code, err.site, &Stats::default(), false);
 		err.code
@@ -1159,7 +1165,7 @@ fn client_main(io: &HostIo, mut opts: Options, argv: &[OsString]) -> i32 {
 	let logger = Logger::local(Box::new(io.out.clone()), Box::new(io.err.clone()), log_config(io, &opts, false, local))
 		.with_role(role);
 	if opts.logfile_name.is_some() {
-		logger.open_log_file(&io.fs, opts.insecure_links);
+		logger.open_log_file(&io.fs, opts.insecure_links, &io.cancel);
 	}
 	for notice in &opts.notices {
 		logger.rprintf(LogCode::Info, format!("{notice}\n").as_bytes());
@@ -1197,7 +1203,7 @@ fn client_inputs(
 		let stdin = io.stdin.clone();
 		let mut take = move || -> Box<dyn Read + Send> { Box::new(stdin.clone()) };
 		let resolve = |p: &Path| io.paths.resolve(p);
-		Some(batch::open_batch_files(opts, &io.fs, &io.cwd, &resolve, &mut take)?)
+		Some(batch::open_batch_files(opts, &io.fs, &io.cwd, &resolve, &mut take, &io.cancel)?)
 	} else {
 		None
 	};
@@ -1541,6 +1547,7 @@ fn connect_remote(
 				early_input: early.as_deref(),
 				fs: &io.fs,
 				insecure_operator_files: opts.insecure_links,
+				cancel: &io.cancel,
 				getenv: &getenv,
 				read_stdin_line: Some(read_line),
 				connect_deadline: deadline,
@@ -1662,7 +1669,7 @@ impl ClientRun<'_> {
 			}
 			let text = batch::shell_script(&raw, &opts.args, &filters.script_lines(), opts.eol_nulls, neg.proto.version, &vfs);
 			setup_err = match text {
-				Ok(text) => batch::write_shell_file(&self.io.fs, script, &text, &opts.batch_name.clone().unwrap_or_default(), opts.insecure_links).err(),
+				Ok(text) => batch::write_shell_file(&self.io.fs, script, &text, &opts.batch_name.clone().unwrap_or_default(), opts.insecure_links, &self.io.cancel).err(),
 				Err(e) => Some(e),
 			};
 		}
@@ -1983,7 +1990,7 @@ fn server_main(io: &HostIo, opts: Options, local: Option<LocalServer>) -> i32 {
 		base_logger.set_deleted_sink(Some(deleted));
 	}
 	if opts.logfile_name.is_some() {
-		base_logger.open_log_file(&io.fs, opts.insecure_links);
+		base_logger.open_log_file(&io.fs, opts.insecure_links, &io.cancel);
 	}
 	for notice in &opts.notices {
 		base_logger.rprintf(LogCode::Info, format!("{notice}\n").as_bytes());

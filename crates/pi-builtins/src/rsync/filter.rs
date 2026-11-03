@@ -1362,6 +1362,8 @@ impl Filters {
 		}
 		let data = match data {
 			Ok(d) => d,
+			// A FIFO's wait ended by the command's cancellation is no open failure.
+			Err(err) if RsyncError::is_cancellation(&err) => return Err(RsyncError::cancelled()),
 			Err(err) => {
 				if xflags & XFLG_FATAL_ERRORS == 0 {
 					return Ok(());
