@@ -185,17 +185,6 @@ interface Base {
 	recovery: boolean;
 }
 
-function withNote(view: View, note: string): View {
-	return { lines: [...view.lines, note], spans: view.spans && [...view.spans, null] };
-}
-
-const foldedNote = (paths: string[]) => {
-	const file = paths.length === 1 ? paths[0] : "FILE";
-	return `[folded: … [lines A-B] are lines A-B of ${file} (read ${file}:A-B)]`;
-};
-const docsNote = (paths: string[]) =>
-	`[sections folded: read ${paths.length === 1 ? paths[0] : "FILE"}:A-B prints one]`;
-
 async function realPath(cwd: string, file: string): Promise<string> {
 	const abs = path.resolve(cwd, file);
 	try {
@@ -215,11 +204,11 @@ async function base(run: Run, subject: Subject): Promise<Base> {
 		let recovery = false;
 		if (SOURCE_PATH.test(input.read.path)) {
 			const o = await outlineRead(run, await realPath(run.cwd, input.read.path));
-			if (o.view) return { view: withNote(o.view, foldedNote(o.paths)), steps: ["outline"], recovery: false };
+			if (o.view) return { view: o.view, steps: ["outline"], recovery: false };
 			recovery = o.recovery;
 		}
 		const doc = await foldReadDoc(run);
-		if (doc) return { view: withNote(doc, docsNote([input.read.path])), steps: ["docs"], recovery };
+		if (doc) return { view: doc, steps: ["docs"], recovery };
 		const dump = await shapeDumpRead(run);
 		if (dump) return { view: dump, steps: ["dump"], recovery };
 		return { view: subject.view, steps: [], recovery };
@@ -232,12 +221,12 @@ async function base(run: Run, subject: Subject): Promise<Base> {
 		const code = await outlineBash(run, text);
 		recovery = code.recovery;
 		if (code.text !== undefined) {
-			text = `${code.text}\n${foldedNote(code.paths)}`;
+			text = code.text;
 			steps.push("outline");
 		}
 		const docs = await foldBashDocs(run, text);
-		if (docs) {
-			text = `${docs.text}\n${docsNote(docs.paths)}`;
+		if (docs !== undefined) {
+			text = docs;
 			steps.push("docs");
 		}
 		if (isTestRun(command)) {
@@ -329,23 +318,19 @@ function commitNote(hidden: readonly string[]): string {
 const seenMarker = (count: number, url: string, [a, z]: [number, number], note = "") =>
 	`… [${count} ${count === 1 ? "line" : "lines"} as shown before${note}: read ${url}:${a}-${z}]`;
 
-/** The footer of a result with numbered gaps (`… [A-B]`) or capped lines: where those numbers are. */
-const cutFooter = (url: string) => `[cut: … [A-B] are lines A-B of ${url} (read ${url}:A-B)]`;
+/**
+ * The last line of a result whose gaps (`… [A-B]`) or capped lines number lines of a saved copy: the copy's URL. The
+ * shape rule in the system prompt says what the numbers mean, so the footer carries only the URL.
+ */
+const cutFooter = (url: string) => `[cut: ${url}]`;
 
 /**
  * Lines no seen-collapse hides: a line holding a word of the call's intent that few lines hold (the agent asked for
  * that line now, beside this result), and for command output its last line, which says how the run ended. An output
- * matching an earlier one but cut short otherwise collapses whole and reads as the earlier run. `named` lists the
- * lines holding such an intent word, `terms` the words, and `missing` the intent's words no line holds.
+ * matching an earlier one but cut short otherwise collapses whole and reads as the earlier run.
  */
-function seenKeeps(
-	run: Run,
-	lines: readonly string[],
-): { keep: boolean[]; named: number[]; terms: string[]; missing: string[] } {
+function seenKeeps(run: Run, lines: readonly string[]): boolean[] {
 	const keep = Array.from<boolean>({ length: lines.length }).fill(false);
-	const named: number[] = [];
-	const terms: string[] = [];
-	const missing: string[] = [];
 	const asked = words(run.ctx.intent);
 	if (asked.size) {
 		const hits = new Map<string, number[]>();
@@ -358,31 +343,14 @@ function seenKeeps(
 				else hits.set(w, [i]);
 			}
 		});
-		for (const [term, at] of hits) {
+		for (const at of hits.values()) {
 			if (at.length > INTENT_LINES) {
 				// Too common to name one line, but newest-first and newest-last output put the latest at an end.
 				keep[at[0]] = true;
 				keep[at[at.length - 1]] = true;
 				continue;
 			}
-			terms.push(term);
-			for (const i of at) {
-				if (!keep[i]) named.push(i);
-				keep[i] = true;
-			}
-		}
-		// A word counts as present when any line holds its stem anywhere (`shape` in `#shapeOutput`, `truncat` in
-		// `truncated`): a claim that no line holds it must be true of every spelling a reader would accept.
-		const text = lines.join("\n").toLowerCase();
-		const stems = new Map<string, string>();
-		for (const term of asked) {
-			if (hits.has(term)) continue;
-			const stem = term.slice(0, Math.max(5, term.length - 3));
-			if (!text.includes(stem)) stems.set(stem, term);
-		}
-		// `truncate` and `truncation` miss as `trunc…` and `truncat…`: the shorter stem says both.
-		for (const [stem, shown] of stems) {
-			if (![...stems.keys()].some(other => other !== stem && stem.startsWith(other))) missing.push(shown);
+			for (const i of at) keep[i] = true;
 		}
 	}
 	if (!run.input.read) {
@@ -392,7 +360,7 @@ function seenKeeps(
 			break;
 		}
 	}
-	return { keep, named, terms, missing };
+	return keep;
 }
 
 /** `mask` without the runs whose text (newlines included) is shorter than their marker plus {@link SEEN_MARGIN}. */
@@ -417,7 +385,7 @@ function payingRuns(lines: readonly string[], mask: readonly boolean[]): boolean
  * collapsed to one marker naming the read that brings the lines back.
  */
 async function collapseSeen(run: Run, view: View, steps: string[]): Promise<View> {
-	const { keep } = seenKeeps(run, view.lines);
+	const keep = seenKeeps(run, view.lines);
 	const mask = payingRuns(view.lines, witnessedMask(view.lines, run.state.seen, SHORT_SEEN_RUN, keep));
 	if (!mask.includes(true)) return view;
 	noteWhy(
@@ -496,7 +464,7 @@ async function shapeSubject(run: Run, subject: Subject): Promise<{ view: View; s
 	}
 	if (again) bump(run, "reasks");
 
-	const { keep, named, terms, missing } = seenKeeps(run, lines);
+	const keep = seenKeeps(run, lines);
 	const witnessed = witnessedMask(lines, state.seen, again ? Math.min(SEEN_RUN, 2) : SEEN_RUN, keep);
 	const width = lines.map(l => (!again && l.length > MAX_LINE ? LINE_KEEP + 36 : l.length));
 	let shown = 0;
@@ -685,29 +653,8 @@ async function shapeSubject(run: Run, subject: Subject): Promise<{ view: View; s
 			outSpans.push(null);
 		}
 	}
-	// What a cut means for the intent's words: every line naming a rare one is shown, and none holds the missing ones.
-	// Saying so spares the agent a read to check the gaps.
-	if (hidden) {
-		const quoted = (ws: readonly string[]) =>
-			`${ws
-				.slice(0, 4)
-				.map(w => `"${w}"`)
-				.join(", ")}${ws.length > 4 ? ", …" : ""}`;
-		const said: string[] = [];
-		if (terms.length && named.every(i => show(i))) said.push(`every line naming ${quoted(terms)} is shown`);
-		if (missing.length) {
-			// A tool that stopped at its own result limit returned only part of what exists.
-			const limited = lines.some(l => /\blimit reached\]?$/i.test(l.trim()));
-			said.push(
-				`no line contains any spelling of ${quoted(missing)}${limited ? " (of those the tool returned before its limit)" : ""}`,
-			);
-		}
-		if (said.length) {
-			out.push(`[intent: ${said.join("; ")}]`);
-			outSpans.push(null);
-		}
-	}
-	if (bare || shortened) {
+	// A read's numbers are its file's own lines, which the shape rule says: only a saved copy needs naming.
+	if ((bare || shortened) && !target.spans) {
 		out.push(cutFooter(target.url));
 		outSpans.push(null);
 	}

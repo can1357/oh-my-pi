@@ -4,8 +4,7 @@
  */
 
 /** A line of earlier shaping (fold, gap, dump marker, note): cheap and says what is where, so never hidden or collapsed. */
-export const MARKER =
-	/^\s*(?:… \[|…\[|\[(?:display only|folded|sections folded|exit code|outline|cut|uniform|intent)|\(\d+ rows\))/;
+export const MARKER = /^\s*(?:… \[|…\[|\[(?:display only|exit code|outline|cut|uniform)|\(\d+ rows\))/;
 
 /** Lines shorter than this (normalised) are too generic to count as already seen, or as hidden by a cut. */
 export const WITNESS_CHARS = 12;
