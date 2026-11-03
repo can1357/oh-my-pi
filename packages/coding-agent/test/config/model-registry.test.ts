@@ -41,7 +41,7 @@ describe("ModelRegistry", () => {
 		fs.rmSync(tmpDir, { recursive: true, force: true });
 	});
 
-	async function listModels(): Promise<{ stdout: string; stderr: string }> {
+	async function listModels(additionalExtensionPaths: string[] = []): Promise<{ stdout: string; stderr: string }> {
 		let stdout = "";
 		let stderr = "";
 		const out = vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
@@ -53,7 +53,13 @@ describe("ModelRegistry", () => {
 			return true;
 		});
 		try {
-			await runModelsListing({ modelRegistry: registry, cwd: tmpDir, json: true, disableExtensionDiscovery: true });
+			await runModelsListing({
+				modelRegistry: registry,
+				cwd: tmpDir,
+				json: true,
+				additionalExtensionPaths,
+				disableExtensionDiscovery: true,
+			});
 		} finally {
 			out.mockRestore();
 			err.mockRestore();
@@ -112,6 +118,47 @@ describe("ModelRegistry", () => {
 		expect((await listModels()).stderr).toBe(
 			`Warning: Unknown compat key in ${modelsPath}: providers.custom.compat.supportsStorre (configuration still loaded).\n`,
 		);
+	});
+
+	test("reports a failed extension provider discovery on stderr and clears it once discovery succeeds (#17925)", async () => {
+		const failMarker = path.join(tmpDir, "fail");
+		const extPath = path.join(tmpDir, "flow-ext.ts");
+		await Bun.write(failMarker, "HTTP 401\nunauthorized");
+		await Bun.write(
+			extPath,
+			`export default function (pi) {
+	pi.registerProvider("flow-api", {
+		baseUrl: "https://flow.example.test/v1",
+		apiKey: "literal-test-key",
+		api: "openai-completions",
+		fetchDynamicModels: async () => {
+			const marker = Bun.file(${JSON.stringify(failMarker)});
+			if (await marker.exists()) throw new Error(await marker.text());
+			return [{
+				id: "flow-model",
+				name: "Flow Model",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 128000,
+				maxTokens: 4096,
+			}];
+		},
+	});
+}
+`,
+		);
+
+		const failed = await listModels([extPath]);
+		expect(JSON.parse(failed.stdout).models).not.toContainEqual(expect.objectContaining({ provider: "flow-api" }));
+		expect(failed.stderr).toBe("Warning: flow-api model discovery failed (unavailable): HTTP 401 unauthorized\n");
+
+		fs.rmSync(failMarker);
+		const recovered = await listModels([extPath]);
+		expect(JSON.parse(recovered.stdout).models).toContainEqual(
+			expect.objectContaining({ provider: "flow-api", id: "flow-model" }),
+		);
+		expect(recovered.stderr).toBe("");
 	});
 
 	test("warns for nested fixed-field compat keys but accepts open extraBody payloads", async () => {
