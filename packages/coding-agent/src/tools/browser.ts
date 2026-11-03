@@ -33,6 +33,7 @@ import {
 	getTab,
 	listTabs,
 	releaseAllTabs,
+	releaseTabsForOwner,
 	releaseIdleTabsForOwner,
 	releaseTab,
 	runInTab,
@@ -141,9 +142,11 @@ const browserSchema = type({
 	"args?": type("unknown[]").describe("arguments passed to a serialized function"),
 	"chain?": tabCallStepSchema.array(),
 	"timeout?": type("number").describe("timeout in seconds"),
-	"all?": type("boolean").describe("release every managed tab"),
+	"all?": type("boolean").describe("release every managed tab this agent opened"),
 	"kill?": type("boolean").describe("also kill spawned-app browsers"),
-	"persist?": type("boolean").describe("keep tab live across turn settle and idle close"),
+	"persist?": type("boolean").describe(
+		"keep tab live across turn settle and idle close; on a relay tab omp opened, keep it open after the session ends",
+	),
 });
 
 type BrowserParams = typeof browserSchema.infer;
@@ -297,12 +300,22 @@ export async function restartBrowserForModeChange(): Promise<void> {
 }
 
 /**
+ * Owner key for tabs this session opens: the agent's stable kernel owner id,
+ * which survives `/new`, `/resume`, fork, and branch (unlike the conversation
+ * session id) and is shared with its advisors, like eval kernels and computer
+ * sessions. Subagents get their own.
+ */
+function tabOwnerId(session: ToolSession): string | undefined {
+	return session.getEvalKernelOwnerId?.() ?? undefined;
+}
+
+/**
  * Best-effort idle-close sweep for the calling session's owned headless
  * tabs. Never throws — callers detach it (`void`) so a slow reap cannot
  * delay the open it follows.
  */
 function sweepIdleOwnedTabs(session: ToolSession): Promise<number> {
-	const ownerId = session.getSessionId?.() ?? undefined;
+	const ownerId = tabOwnerId(session);
 	if (!ownerId) return Promise.resolve(0);
 	const idleSec = cfgBrowserIdleCloseSec.get(session.settings);
 	if (!(idleSec > 0)) {
@@ -339,7 +352,7 @@ async function invokeBrowser(
 			case "open":
 				return await openBrowser(session, name, parsed, details, timeoutMs, context.signal);
 			case "close":
-				return await closeBrowser(name, parsed, details, timeoutMs, context.signal);
+				return await closeBrowser(session, name, parsed, details, timeoutMs, context.signal);
 			case "tabs":
 				details.value = listTabs();
 				return toolResult(details).done();
@@ -520,7 +533,7 @@ async function openOnKind(
 					userAgent: params.user_agent,
 					ignoreHttpsErrors: params.ignore_https_errors,
 					signal: openSignal,
-					ownerSessionId: session.getSessionId?.() ?? undefined,
+					ownerSessionId: tabOwnerId(session),
 					// Omitted stays undefined: creation defaults it to false
 					// while reuse by the owner leaves a set value alone.
 					persist: params.persist,
@@ -622,6 +635,7 @@ async function listTargets(
 }
 
 async function closeBrowser(
+	session: ToolSession,
 	name: string,
 	params: BrowserParams,
 	details: BrowserPreludeDetails,
@@ -630,7 +644,13 @@ async function closeBrowser(
 ): Promise<AgentToolResult<unknown>> {
 	const kill = !!params.kill;
 	if (params.all) {
-		const count = await untilAborted(signal, () => releaseAllTabs({ kill, timeoutMs }));
+		// Only the caller's own tabs: another agent's tabs (a parent's, a sibling's)
+		// are reaped when that agent disposes. No owner (SDK callers) keeps the
+		// process-wide release.
+		const ownerId = tabOwnerId(session);
+		const count = await untilAborted(signal, () =>
+			ownerId ? releaseTabsForOwner(ownerId, { kill, timeoutMs }) : releaseAllTabs({ kill, timeoutMs }),
+		);
 		const text = `Released ${count} managed tab${count === 1 ? "" : "s"}`;
 		return toolResult(details).text(text).done();
 	}

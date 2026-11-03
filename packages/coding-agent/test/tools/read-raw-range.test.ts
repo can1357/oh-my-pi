@@ -338,7 +338,12 @@ describe("read tool raw range exactness", () => {
 			["leading-context", `oversized-${"x".repeat(70_000)}-end`, "trailing-one", "trailing-two"].join("\n"),
 		);
 
-		const result = await tool.execute("call-buffered-oversized-selected", { path: `${bufferedFile}:2-2` });
+		// Uncapped, so the line is charged its full size rather than its column-cut display.
+		const uncapped = new ReadTool({
+			...makeSession(testDir),
+			settings: Settings.isolated({ "tools.outputMaxColumns": 0 }),
+		});
+		const result = await uncapped.execute("call-buffered-oversized-selected", { path: `${bufferedFile}:2-2` });
 		const output = getTextOutput(result);
 
 		expect(output).toContain("leading-context");
