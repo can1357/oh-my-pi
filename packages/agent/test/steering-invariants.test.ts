@@ -1952,7 +1952,7 @@ describe("steering invariants: the round-eleven reproductions", () => {
  * follow-up and a steer) touches exactly the occurrence delivered. The other keeps its promotion and its
  * place in the agent-steering wait. Each case also runs with distinct objects as the control.
  */
-describe("steering invariants: the round-fifteen reproductions", () => {
+describe("steering invariants: the round-fifteen and round-sixteen reproductions", () => {
 	/** An Agent whose context transform can park the conversion of one live claim. */
 	function createParkingAgent(park?: (messages: AgentMessage[]) => Promise<void> | undefined) {
 		const mock = createMockModel({
@@ -2136,4 +2136,139 @@ describe("steering invariants: the round-fifteen reproductions", () => {
 		expect(agent.state.messages).toEqual([]);
 		expect(agent.state.isStreaming).toBe(false);
 	});
+
+	// Round sixteen: live input that never reached the provider, host records, and record order.
+	for (const conversion of ["image", "throws", "empty", "reject"] as const) {
+		it(`the next request owns promoted live input that ${conversion === "reject" ? "the provider declined" : `failed to convert (${conversion})`}`, async () => {
+			const v = person("V");
+			if (conversion === "image") {
+				v.content = [
+					{ type: "text", text: "V" },
+					{
+						type: "image",
+						data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aV1cAAAAASUVORK5CYII=",
+						mimeType: "image/png",
+					},
+				];
+			}
+			const mock = createMockModel({ handler: () => ({ content: ["ack"] }) });
+			const agent = new Agent({
+				initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: mock.stream,
+				convertToLlm,
+				steeringMode: "one-at-a-time",
+				// Only live steering converts V alone.
+				transformContext: async messages => {
+					if (messages.length !== 1 || messages[0] !== v) return messages;
+					if (conversion === "throws") throw new Error("live conversion unavailable");
+					return conversion === "empty" ? [] : messages;
+				},
+			});
+			const requests: string[][] = [];
+			let first = true;
+			agent.streamFn = async (model, context, options) => {
+				requests.push(
+					context.messages
+						.filter(message => message.role === "user")
+						.map(message => messageText(message as AgentMessage)),
+				);
+				if (first && options?.liveSteering && options.signal) {
+					first = false;
+					agent.steer(v);
+					agent.prioritizeSteering([v]);
+					(await options.liveSteering.claim(options.signal))?.reject();
+				}
+				return mock.stream(model, context, options);
+			};
+
+			await agent.prompt("start");
+
+			expect(requests).toEqual([["start"], ["start", "V"]]);
+			expect(transcriptTexts(agent)).toEqual(["start", "V"]);
+			expect(agent.peekSteeringQueue()).toEqual([]);
+			expect(agent.peekUndeliveredQueuedMessages()).toEqual([]);
+		});
+	}
+
+	for (const alias of [false, true]) {
+		it(`a host record of ${alias ? "a request's object" : "another V"} leaves an unsettled promoted V its promotion`, async () => {
+			const { agent, mock } = createAgent();
+			const v = person("V");
+			const host = alias ? v : person("host V");
+			let first = true;
+			let hostDone = false;
+			agent.streamFn = async (model, context, options) => {
+				if (first && options?.liveSteering && options.signal) {
+					first = false;
+					agent.steer(v);
+					agent.prioritizeSteering([v]);
+					// Handed to the provider and never settled; a second occurrence goes into the next request.
+					await options.liveSteering.claim(options.signal);
+					agent.steer(v);
+				}
+				return mock.stream(model, context, options);
+			};
+			agent.addBeforeModelCallHook((_signal, context) => {
+				if (hostDone || !context.messages.includes(v)) return;
+				hostDone = true;
+				agent.appendMessage(host);
+			});
+
+			await agent.prompt("start");
+			const w = person("W");
+			agent.steer(w);
+			agent.setSteeringPriority(message => message === w);
+
+			expect(hostDone).toBe(true);
+			expect(texts(agent.peekSteeringQueue())).toEqual(["V", "W"]);
+			expect(texts(agent.peekNextSteering())).toEqual(["V"]);
+		});
+	}
+
+	for (const reverse of [false, true]) {
+		it(`a grouped request's records ${reverse ? "in reverse order" : "in order"} leave nothing held`, async () => {
+			const a = person("A");
+			const b = person("B");
+			const requests: string[][] = [];
+			// A host that records the run's own input events once both arrive, in either order.
+			class RecordingAgent extends Agent {
+				#buffered: AgentMessage[] = [];
+				override appendMessage(message: AgentMessage): void {
+					if (this.#buffered.length < 2 && (message === a || message === b)) {
+						this.#buffered.push(message);
+						if (this.#buffered.length === 2) {
+							for (const item of reverse ? [...this.#buffered].reverse() : this.#buffered)
+								super.appendMessage(item);
+						}
+						return;
+					}
+					super.appendMessage(message);
+				}
+			}
+			const mock = createMockModel({ handler: () => ({ content: ["ack"] }) });
+			const agent = new RecordingAgent({
+				initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
+				convertToLlm,
+				steeringMode: "one-at-a-time",
+				streamFn: async (model, context, options) => {
+					requests.push(
+						context.messages
+							.filter(message => message.role === "user")
+							.map(message => messageText(message as AgentMessage)),
+					);
+					return mock.stream(model, context, options);
+				},
+			});
+			agent.setQueuedMessageGrouping((previous, next) => previous === a && next === b);
+			agent.steer(a);
+			agent.steer(b);
+
+			await agent.prompt("start");
+
+			expect(transcriptTexts(agent)).toEqual(reverse ? ["start", "B", "A"] : ["start", "A", "B"]);
+			expect(agent.peekUndeliveredQueuedMessages()).toEqual([]);
+			expect(agent.peekSteeringQueue()).toEqual([]);
+			expect(requests).toHaveLength(1);
+		});
+	}
 });

@@ -26,7 +26,10 @@ export interface LiveSteeringQueue {
 	keep?(messages: AgentMessage[]): AgentMessage[];
 	/** The provider is handed `messages`, kept from the batch `taken` returned (`AgentLoopConfig.commitQueuedInput`). */
 	commit?(messages: readonly AgentMessage[], taken: readonly AgentMessage[]): void;
-	/** The provider handed `messages` back undelivered (`AgentLoopConfig.releaseQueuedInput`). */
+	/**
+	 * `messages` went back undelivered (`AgentLoopConfig.releaseQueuedInput`): the provider declined the list
+	 * `commit` was given, or the batch `take` returned could not be converted.
+	 */
 	release?(messages: readonly AgentMessage[]): void;
 	/** The provider accepted `messages` into its response (`AgentLoopConfig.acceptQueuedInput`). */
 	accept?(messages: readonly AgentMessage[]): void;
@@ -80,6 +83,8 @@ export class LiveSteeringChannel implements LiveSteering {
 				});
 			}
 			if (!providerMessages) {
+				// Not delivered: the next boundary delivers it, as it does a steer the provider declined.
+				this.#queue.release?.(taken);
 				this.deferred.push(...messages);
 				return undefined;
 			}
