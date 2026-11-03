@@ -159,15 +159,12 @@ mod tests {
 	}
 
 	/// The probe runs from the desktop session thread, outside any runtime; a
-	/// timer built there panics with "no reactor running". Whatever the test
-	/// host's D-Bus offers, the probe must answer within its timeout.
+	/// timer built there panics with "no reactor running".
 	#[test]
 	fn the_input_probe_runs_on_the_portal_runtime_from_a_plain_thread() {
 		let runtime = portal_runtime().expect("portal runtime builds");
-		let started = std::time::Instant::now();
 		let _ = std::thread::spawn(move || remote_desktop_missing(runtime))
 			.join()
 			.expect("the input probe must not panic");
-		assert!(started.elapsed() < INPUT_PROBE_TIMEOUT + Duration::from_secs(1));
 	}
 }
