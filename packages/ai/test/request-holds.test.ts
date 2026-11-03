@@ -466,6 +466,90 @@ describe("what the last check covers", () => {
 		done.resolve();
 	});
 
+	it("reads a native promise's `then` once, ending the exemption when it cannot be read again", async () => {
+		const holds = new TestHolds();
+		const done = Promise.withResolvers<void>();
+		const started = Promise.withResolvers<SentRequest>();
+		runWithRequestHolds(holds, () =>
+			runOutsideRequestHolds(holds, () => {
+				setImmediate(() => started.resolve(request()));
+				const promise = done.promise;
+				const nativeThen = promise.then.bind(promise);
+				let reads = 0;
+				// A read-once `then` on a native promise: the case under test.
+				// oxlint-disable-next-line unicorn/no-thenable
+				Object.defineProperty(promise, "then", {
+					get() {
+						reads++;
+						if (reads > 1) throw new Error("read twice");
+						return nativeThen;
+					},
+				});
+				return promise;
+			}),
+		);
+		const during = await started.promise;
+		await during.result;
+		// Still exempt while the promise is pending: its `then` was followed once.
+		expect(during.sent).toBe(true);
+		done.resolve();
+	});
+
+	it("fails a wait whose hold fails, with an alias in the context as without", async () => {
+		const failing: RequestHolds = {
+			open: () => ({ check: () => Promise.reject(new Error("hold failed")), release: () => {} }),
+		};
+		const alias = new RequestHoldsAlias();
+		alias.bind(captureRequestHolds());
+		const sent = runWithRequestHolds(failing, () => runWithRequestHolds(alias, () => request()));
+		await expect(sent.result!).rejects.toThrow("hold failed");
+		expect(sent.sent).toBe(false);
+	});
+
+	it("removes an aborted wait's rebind listeners, and adds no reaction per rebinding to a pending hold", async () => {
+		const holds = new TestHolds();
+		let registered = 0;
+		class CountingAlias extends RequestHoldsAlias {
+			override onRebind(listener: () => void): () => void {
+				registered++;
+				const remove = super.onRebind(listener);
+				return () => {
+					registered--;
+					remove();
+				};
+			}
+		}
+		const alias = new CountingAlias();
+		const empty = captureRequestHolds();
+		alias.bind(empty);
+		let checks = 0;
+		const counting: RequestHolds = {
+			open: () => {
+				const view = holds.open();
+				return {
+					check: () => {
+						checks++;
+						return view.check();
+					},
+					release: () => view.release(),
+				};
+			},
+		};
+		const controller = new AbortController();
+		const sent = runWithRequestHolds(counting, () => runWithRequestHolds(alias, () => request(controller.signal)));
+		await turns();
+		// Rebinding wakes the wait again and again; the pending hold is the same each time.
+		for (let rebind = 0; rebind < 100; rebind++) {
+			alias.bind(empty);
+			await turns(1);
+		}
+		expect(checks).toBeGreaterThan(100);
+		controller.abort();
+		await expect(sent.result!).rejects.toThrow();
+		expect(registered).toBe(0);
+		holds.let();
+	});
+
 	it("keeps nothing on a long-lived alias for waits that are over", async () => {
 		const holds = new TestHolds();
 		holds.armed = false;

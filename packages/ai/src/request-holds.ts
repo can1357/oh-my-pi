@@ -89,16 +89,21 @@ function endWhenSettled<T>(fn: () => T, end: () => void): T {
 		end();
 		return result;
 	}
-	if (result instanceof Promise) {
-		// A native promise has already adopted whatever it was resolved with, and
-		// ends the exemption in the same turn its awaiters resume.
-		void result.then(end, end);
-		return result;
-	}
 	const followed = then;
-	new Promise<unknown>((resolve, reject) => {
-		followed.call(result, resolve, reject);
-	}).then(end, end);
+	try {
+		if (result instanceof Promise) {
+			// A native promise has already adopted whatever it was resolved with; its
+			// `then`, as read above, ends the exemption in the turn its awaiters resume.
+			followed.call(result, end, end);
+			return result;
+		}
+		new Promise<unknown>((resolve, reject) => {
+			followed.call(result, resolve, reject);
+		}).then(end, end);
+	} catch {
+		// Its `then` could not be followed: the work counts as settled.
+		end();
+	}
 	return result;
 }
 
@@ -434,24 +439,64 @@ export function openRequestHolds(own?: { holds: RequestHolds; view: RequestHoldV
 			if (!openedNow) return active;
 		}
 	};
+	/** The wait the last check returned, while it lasts; the watched promises forward to it. */
+	let currentWake: PromiseWithResolvers<void> | undefined;
+	/** Removes the last wait's rebind listeners. */
+	let stopWaking = () => {};
+	/** What the current wait waits on; a watched promise settling wakes it only if it is this one. */
+	let currentHeld: Promise<void> | undefined;
+	const watchedHelds = new Set<Promise<void>>();
+	const watchedEnds = new Set<Promise<void>>();
 	return {
 		check() {
+			// A check supersedes the wait the previous one returned: that wait's
+			// rebind listeners go now, whether it settled, was abandoned or aborted.
+			stopWaking();
 			for (const entry of refresh()) {
 				const held = entry.view?.check();
 				if (!held) continue;
 				// The wait also ends when its answer may change: a carried view's
 				// request ends, or an alias is rebound. The check then runs again.
-				// The rebind listeners are removed once the wait ends, so a long-lived
-				// alias keeps nothing of waits that are over.
-				const ended = entry.carried ? firstEnd(entry.scope.lifetimes) : undefined;
-				if (aliases.length === 0) return ended ? Promise.race([held, ended]) : held;
+				const lifetimes = entry.carried ? entry.scope.lifetimes : [];
+				if (aliases.length === 0) {
+					const ended = firstEnd(lifetimes);
+					return ended ? Promise.race([held, ended]) : held;
+				}
 				const wake = Promise.withResolvers<void>();
+				currentWake = wake;
 				const removals = aliases.map(alias => alias.onRebind(wake.resolve));
-				void held.then(wake.resolve, wake.resolve);
-				if (ended) void ended.then(wake.resolve);
-				void wake.promise.then(() => {
+				stopWaking = () => {
 					for (const remove of removals) remove();
-				});
+					stopWaking = () => {};
+					if (currentWake === wake) currentWake = undefined;
+				};
+				// One reaction per distinct promise, forwarding to whichever wait is
+				// current, so waits woken again and again by rebinding add none. A hold
+				// that fails fails the wait, as it would without an alias.
+				currentHeld = held;
+				if (!watchedHelds.has(held)) {
+					watchedHelds.add(held);
+					const watched = held;
+					watched.then(
+						() => {
+							watchedHelds.delete(watched);
+							if (currentHeld === watched) currentWake?.resolve();
+						},
+						error => {
+							watchedHelds.delete(watched);
+							if (currentHeld === watched) currentWake?.reject(error);
+						},
+					);
+				}
+				for (const lifetime of lifetimes) {
+					if (watchedEnds.has(lifetime.ended)) continue;
+					watchedEnds.add(lifetime.ended);
+					void lifetime.ended.then(() => currentWake?.resolve());
+				}
+				void wake.promise.then(
+					() => stopWaking(),
+					() => stopWaking(),
+				);
 				return wake.promise;
 			}
 			return undefined;
@@ -479,6 +524,7 @@ export function openRequestHolds(own?: { holds: RequestHolds; view: RequestHoldV
 			}
 		},
 		release() {
+			stopWaking();
 			const views = opened.splice(0);
 			for (const view of views) view.release();
 		},
