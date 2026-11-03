@@ -4520,9 +4520,11 @@ describe("openai-codex streaming", () => {
 			throw new Error("SSE fallback should not be called");
 		});
 
+		const socketRoutingHints: Array<string | undefined> = [];
 		class UltrafastWebSocket extends MockWebSocket {
 			constructor(url: string, options?: { headers?: WsHeaders }) {
 				super(url, options);
+				socketRoutingHints.push(options?.headers?.["x-codex-routing-hint"]);
 				this.scheduleOpen();
 			}
 
@@ -4591,6 +4593,14 @@ describe("openai-codex streaming", () => {
 			["ultrafast", "resp_2"],
 			// Ultrafast → Standard: full create again.
 			[undefined, undefined],
+		]);
+		// Ultrafast is a separate serving path: each switch opens a socket routed to
+		// the new tier, while Ultrafast → Ultrafast chains on the same socket.
+		const routedModel = model.requestModelId ?? model.id;
+		expect(socketRoutingHints).toEqual([
+			`model=${routedModel}`,
+			`model=${routedModel};tier=ultrafast`,
+			`model=${routedModel}`,
 		]);
 		expect(JSON.stringify(sentRequests[1]?.input)).toContain("Question 1");
 		expect(JSON.stringify(sentRequests[2]?.input)).not.toContain("Question 2");
@@ -7846,59 +7856,70 @@ describe("openai-codex streaming", () => {
 		},
 	);
 
-	it("replays full input when onPayload deletes previous_response_id on a chained websocket turn", async () => {
-		const tempDir = TempDir.createSync("@pi-codex-stream-");
-		setAgentDir(tempDir.path());
-		const sentRequests: Array<Record<string, unknown>> = [];
-		class HookDeleteContinuationWebSocket extends MockWebSocket {
-			constructor(url: string, options?: WsOptions) {
-				super(url, options);
-				this.scheduleOpen();
-			}
+	it.each(["unchanged", "rewritten"] as const)(
+		"replays full input when onPayload deletes previous_response_id on a chained websocket turn (%s delta)",
+		async deltaMode => {
+			const tempDir = TempDir.createSync("@pi-codex-stream-");
+			setAgentDir(tempDir.path());
+			const sentRequests: Array<Record<string, unknown>> = [];
+			class HookDeleteContinuationWebSocket extends MockWebSocket {
+				constructor(url: string, options?: WsOptions) {
+					super(url, options);
+					this.scheduleOpen();
+				}
 
-			override send(data: string): void {
-				sentRequests.push(JSON.parse(data) as Record<string, unknown>);
-				const index = sentRequests.length;
-				this.emitCodexResponse({
-					messageId: `msg_${index}`,
-					responseId: `resp_${index}`,
-					text: `Answer ${index}`,
-					terminalType: "response.completed",
-					includeCreated: true,
-				});
+				override send(data: string): void {
+					sentRequests.push(JSON.parse(data) as Record<string, unknown>);
+					const index = sentRequests.length;
+					this.emitCodexResponse({
+						messageId: `msg_${index}`,
+						responseId: `resp_${index}`,
+						text: `Answer ${index}`,
+						terminalType: "response.completed",
+						includeCreated: true,
+					});
+				}
 			}
-		}
-		global.WebSocket = HookDeleteContinuationWebSocket as unknown as typeof WebSocket;
-		const model = createCodexTestModel("https://chatgpt.com/backend-api");
-		const providerSessionState = new Map<string, ProviderSessionState>();
-		const options = {
-			apiKey: createCodexTestToken(),
-			sessionId: "ws-hook-delete-continuation",
-			providerSessionState,
-		};
-		const context: Context = {
-			messages: [{ role: "user", content: "Turn one question", timestamp: Date.now() }],
-		};
-		try {
-			const first = await streamOpenAICodexResponses(model, context, options).result();
-			context.messages.push(first, { role: "user", content: "Turn two question", timestamp: Date.now() + 1 });
-			const second = await streamOpenAICodexResponses(model, context, {
-				...options,
-				onPayload: payload => {
-					const next = { ...(payload as Record<string, unknown>) };
-					delete next.previous_response_id;
-					return next;
-				},
-			}).result();
-			expect(second.stopReason).toBe("stop");
-			expect(sentRequests[1]?.previous_response_id).toBeUndefined();
-			const secondInput = JSON.stringify(sentRequests[1]?.input);
-			expect(secondInput).toContain("Turn one question");
-			expect(secondInput).toContain("Turn two question");
-		} finally {
-			for (const state of providerSessionState.values()) state.close();
-		}
-	});
+			global.WebSocket = HookDeleteContinuationWebSocket as unknown as typeof WebSocket;
+			const model = createCodexTestModel("https://chatgpt.com/backend-api");
+			const providerSessionState = new Map<string, ProviderSessionState>();
+			const options = {
+				apiKey: createCodexTestToken(),
+				sessionId: "ws-hook-delete-continuation",
+				providerSessionState,
+			};
+			const context: Context = {
+				messages: [{ role: "user", content: "Turn one question", timestamp: Date.now() }],
+			};
+			try {
+				const first = await streamOpenAICodexResponses(model, context, options).result();
+				context.messages.push(first, { role: "user", content: "Turn two question", timestamp: Date.now() + 1 });
+				const second = await streamOpenAICodexResponses(model, context, {
+					...options,
+					onPayload: payload => {
+						const next = { ...(payload as Record<string, unknown>) };
+						delete next.previous_response_id;
+						if (deltaMode === "rewritten") {
+							next.input = [
+								...(next.input as unknown[]),
+								{ role: "user", content: [{ type: "input_text", text: "Hook appended note" }] },
+							];
+						}
+						return next;
+					},
+				}).result();
+				expect(second.stopReason).toBe("stop");
+				expect(sentRequests[1]?.previous_response_id).toBeUndefined();
+				const secondInput = JSON.stringify(sentRequests[1]?.input);
+				expect(secondInput).toContain("Turn one question");
+				expect(secondInput).toContain("Answer 1");
+				expect(secondInput).toContain("Turn two question");
+				if (deltaMode === "rewritten") expect(secondInput).toContain("Hook appended note");
+			} finally {
+				for (const state of providerSessionState.values()) state.close();
+			}
+		},
+	);
 
 	it("replaces a prewarmed websocket when the first turn changes routing hint and skips late prewarm on a busy socket", async () => {
 		const tempDir = TempDir.createSync("@pi-codex-prewarm-routing-change-");
@@ -7993,6 +8014,67 @@ describe("openai-codex streaming", () => {
 			releaseFirstTurn();
 			const first = await turnPromise;
 			expect(first.stopReason).toBe("stop");
+		} finally {
+			for (const state of providerSessionState.values()) state.close();
+		}
+	});
+
+	it("joins a turn's in-flight handshake on late prewarm without replacing the socket", async () => {
+		const tempDir = TempDir.createSync("@pi-codex-prewarm-join-");
+		setAgentDir(tempDir.path());
+		const model = createCodexTestModel("https://chatgpt.com/backend-api");
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		const sockets: MockWebSocket[] = [];
+		const closeReasons: Array<string | undefined> = [];
+		const constructed = Promise.withResolvers<void>();
+
+		class DeferredOpenWebSocket extends MockWebSocket {
+			constructor(url: string, options?: WsOptions) {
+				super(url, options);
+				sockets.push(this);
+				constructed.resolve();
+			}
+
+			override close(_code = 1000, reason = ""): void {
+				closeReasons.push(reason);
+				super.close();
+			}
+
+			override send(_data: string): void {
+				this.emitCodexResponse({
+					messageId: "msg_1",
+					responseId: "resp_1",
+					text: "Answer 1",
+					terminalType: "response.completed",
+					includeCreated: true,
+				});
+			}
+		}
+		global.WebSocket = DeferredOpenWebSocket as unknown as typeof WebSocket;
+		const options = {
+			apiKey: createCodexTestToken(),
+			sessionId: "ws-prewarm-join",
+			providerSessionState,
+		};
+
+		try {
+			const turnPromise = streamOpenAICodexResponses(
+				model,
+				{ messages: [{ role: "user", content: "Hello", timestamp: Date.now() }] },
+				options,
+			).result();
+			await constructed.promise;
+			// The prewarm's tier differs from the turn's handshake: once the handshake
+			// opens it must not be closed as a routing change.
+			const prewarmPromise = prewarmOpenAICodexResponses(model, { ...options, serviceTier: "priority" });
+			sockets[0]!.scheduleOpen();
+			await prewarmPromise;
+			const first = await turnPromise;
+
+			expect(first.stopReason).toBe("stop");
+			expect(sockets).toHaveLength(1);
+			expect(closeReasons).toEqual([]);
+			expect(getOpenAICodexTransportDetails(model, options).prewarmed).toBe(true);
 		} finally {
 			for (const state of providerSessionState.values()) state.close();
 		}

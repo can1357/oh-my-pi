@@ -1843,6 +1843,12 @@ async function openCodexWebSocketTransport(
 			canAppendBeforeRequest = false;
 			chainedBody = requestContext.transformedBody;
 		}
+		// Input the server already holds for a chained request (everything before
+		// the delta); a hook that drops `previous_response_id` must resend it.
+		const fullInput = requestContext.transformedBody.input ?? [];
+		let chainCarriedInput: InputItem[] = chainedBody.previous_response_id
+			? fullInput.slice(0, fullInput.length - (chainedBody.input?.length ?? 0))
+			: [];
 		const timeouts: CodexWebSocketRequestTimeouts = {
 			idleTimeoutMs: requestSetup.websocketIdleTimeoutMs,
 			firstEventTimeoutMs: requestSetup.websocketFirstEventTimeoutMs,
@@ -1873,6 +1879,9 @@ async function openCodexWebSocketTransport(
 				};
 			}
 			if (plan.kind === "create") {
+				// The server prepends the accepted steering itself; it is carried too.
+				const delta = chainedBody.input ?? [];
+				chainCarriedInput = [...chainCarriedInput, ...delta.filter(item => !plan.input.includes(item))];
 				chainedBody = { ...chainedBody, input: plan.input };
 			} else {
 				// The server continues from input this request cannot line up with; a
@@ -1914,12 +1923,13 @@ async function openCodexWebSocketTransport(
 		if (replacementWebsocketRequest !== undefined) {
 			websocketRequest = replacementWebsocketRequest as RequestBody;
 		}
-		if (
-			!websocketRequest.previous_response_id &&
-			chainedBody.input !== requestContext.transformedBody.input &&
-			Bun.deepEquals(websocketRequest.input, chainedBody.input)
-		) {
-			websocketRequest.input = requestContext.transformedBody.input;
+		// The hook dropped the chain: the server no longer holds the chained
+		// prefix, so the frame must carry it. An untouched delta becomes the full
+		// transcript; a rewritten one keeps the hook's edits after that prefix.
+		if (chainedBody.previous_response_id && !websocketRequest.previous_response_id) {
+			websocketRequest.input = Bun.deepEquals(websocketRequest.input, chainedBody.input)
+				? requestContext.transformedBody.input
+				: [...chainCarriedInput, ...(websocketRequest.input ?? [])];
 		}
 		recordCodexTurnRequestDiagnostics(websocketState, websocketRequest, "websocket", canAppendBeforeRequest);
 		const requestBodyForState = cloneJsonTree(requestContext.transformedBody);
@@ -3471,10 +3481,22 @@ export async function prewarmOpenAICodexResponses(
 		attestation,
 		routedRequest,
 	);
+	const existing = state.connection;
 	if (
-		state.connection?.isBusy() ||
-		(state.acceptedSteering !== undefined && state.acceptedSteering.connection === state.connection)
+		existing?.isReserved() ||
+		(state.acceptedSteering !== undefined && state.acceptedSteering.connection === existing)
 	) {
+		return;
+	}
+	if (existing?.isConnecting()) {
+		// Another caller owns this handshake: join it rather than racing it with a
+		// routing-change close once it opens.
+		try {
+			await existing.connect(options?.signal);
+		} catch {
+			return;
+		}
+		if (state.connection === existing && existing.isOpen()) state.prewarmed = true;
 		return;
 	}
 	try {
@@ -3937,9 +3959,9 @@ class CodexWebSocketConnection {
 		return this.#connectPromise !== undefined;
 	}
 
-	/** True while a handshake or a request stream is in flight on this socket. */
+	/** True while a handshake is in flight or a request owns or has reserved this socket. */
 	isBusy(): boolean {
-		return this.#activeRequest || this.#pendingRequests > 0 || this.#connectPromise !== undefined;
+		return this.isReserved() || this.#connectPromise !== undefined;
 	}
 
 	/** True while a request stream owns this socket. */
@@ -3947,6 +3969,21 @@ class CodexWebSocketConnection {
 		return this.#activeRequest;
 	}
 
+	/** True while a request stream owns this socket or a request has reserved it. */
+	isReserved(): boolean {
+		return this.#activeRequest || this.#pendingRequests > 0;
+	}
+
+	/**
+	 * Reserve the socket for a request that selected it but has not started
+	 * streaming yet (e.g. while `onPayload` runs). The reservation only keeps
+	 * prewarm and routing-hint reconnects off the socket; concurrent turns still
+	 * race for it, and the first to start streaming wins (the other falls back to
+	 * SSE). Pass the returned release to {@link streamRequest}, which drops the
+	 * reservation once it owns the socket; callers that never iterate that stream
+	 * MUST call the release themselves, or the socket stays reserved until
+	 * {@link close}.
+	 */
 	reserveForRequest(): () => void {
 		this.#pendingRequests += 1;
 		let released = false;
