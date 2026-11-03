@@ -1082,7 +1082,15 @@ impl Run<'_> {
 		let host = &*self.host;
 		let split = split_string(
 			string,
-			|name| host.var(name).map(str::to_owned),
+			// Once `env` is cancelled it expands nothing more, so even a
+			// split of many large values ends at once, as GNU `env` dies of
+			// the signal mid-split.
+			|name| {
+				if host.is_cancelled() {
+					return None;
+				}
+				host.var(name).map(str::to_owned)
+			},
 			|name, value| {
 				notes.push(match value {
 					Some((value, _)) => format!("expanding ${{{name}}} into {}\n", value.quote()),
@@ -1090,6 +1098,9 @@ impl Run<'_> {
 				});
 			},
 		);
+		if self.host.is_cancelled() {
+			return Err(EXIT_INTERRUPTED);
+		}
 		for note in &notes {
 			self.vmsg(note);
 		}
