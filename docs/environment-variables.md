@@ -68,6 +68,7 @@ Plain provider credential names come from `env` entries in `packages/catalog/src
 | `XIAOMI_TOKEN_PLAN_AMS_API_KEY`       | Xiaomi MiMo Token Plan auth (AMS)                  | Using `xiaomi-token-plan-ams` provider                         |                                                                                                                                              |
 | `XIAOMI_TOKEN_PLAN_CN_API_KEY`        | Xiaomi MiMo Token Plan auth (CN)                   | Using `xiaomi-token-plan-cn` provider                          |                                                                                                                                              |
 | `XIAOMI_TOKEN_PLAN_SGP_API_KEY`       | Xiaomi MiMo Token Plan auth (SGP)                  | Using `xiaomi-token-plan-sgp` provider                         |                                                                                                                                              |
+| `KIRO_API_KEY`                        | Kiro API-key auth                                  | Using `kiro` without `/login kiro`                             | Must be a `ksk_…` key; a stored `/login kiro` credential wins                                                                                |
 | `MOONSHOT_API_KEY`                    | Moonshot auth                                      | Using `moonshot` provider                                      | `KIMI_API_KEY` is accepted as a fallback alias                                                                                               |
 | `STEPFUN_API_KEY`                     | StepFun auth                                       | Using `stepfun` provider                                       | Keys are region-scoped: the `.ai` key works against `api.stepfun.ai`, the `.com` key against `api.stepfun.com`                               |
 | `HELMCODE_API_KEY`                    | Helmcode auth                                      | Using `helmcode` provider                                      |                                                                                                                                              |
@@ -311,6 +312,14 @@ Base URL resolution: option `azureBaseUrl` → env `AZURE_OPENAI_BASE_URL` → o
 | `KIMI_CODE_BASE_URL`   | Overrides Kimi usage endpoint base URL (`usage/kimi.ts`) |
 
 OAuth host chain: `KIMI_CODE_OAUTH_HOST` → `KIMI_OAUTH_HOST` → `https://auth.kimi.com`.
+
+### Kiro
+
+| Variable          | Default / behavior                                                                                                                       |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `KIRO_API_REGION` | Unset: an API key without a stored endpoint is probed in the bootstrap regions. Set: discovery and requests use this AWS region directly |
+
+An invalid `KIRO_API_REGION` is an error rather than a silent fallback. `/login kiro` also reads it when validating a pasted API key. See [Kiro](./kiro.md).
 
 ### OpenAI-compatible endpoint controls
 

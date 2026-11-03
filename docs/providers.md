@@ -154,6 +154,7 @@ The variables below supply credentials after runtime/config overrides and stored
 | `gmi-cloud`                      | `GMI_API_KEY`                                                                       |
 | `huggingface`                    | `HUGGINGFACE_HUB_TOKEN`, then `HF_TOKEN`                                            |
 | `inception`                      | `INCEPTION_API_KEY`                                                                 |
+| `kiro`                           | `KIRO_API_KEY` (`ksk_…`); `KIRO_API_REGION` pins its region                         |
 | `moonshot`                       | `MOONSHOT_API_KEY`, then `KIMI_API_KEY`                                             |
 | `stepfun`                        | `STEPFUN_API_KEY`                                                                   |
 | `helmcode`                       | `HELMCODE_API_KEY`                                                                  |

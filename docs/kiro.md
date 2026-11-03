@@ -25,11 +25,13 @@ OMP registers a public Kiro client for the selected OIDC region, requests a devi
 
 The selected profile determines the Kiro runtime route. Its profile identity, registered client metadata, and validated token endpoint are stored with the OAuth credential. If a registration response omits `tokenEndpoint` or returns it as `null`, OMP uses and persists the validated canonical regional endpoint `https://oidc.<region>.amazonaws.com/token`; a returned non-null endpoint is preserved only after the same validation.
 
-OMP caches the validated Start URL, OIDC region, and registered public client locally. Cached registrations are scoped to their region, expire with the registered client, and are repaired with the canonical token endpoint when an older cache entry omitted that field or stored `null`.
+OMP registers a fresh public client on every login rather than reusing an earlier registration. Each login also gets its own login id, which survives token refresh and scopes the model cache to that login.
+
+When a refresh is rejected with `invalid_grant` or `expired_token`, the grant cannot recover: OMP disables the stored credential and asks you to run `/login kiro` again. Other refresh failures are treated as transient and retried later.
 
 ## Kiro API-key login
 
-Choose **API** and paste the Kiro API key. Keys must use the `ksk_...` format; surrounding quotes and control characters are removed before validation. OMP validates the key against the Kiro model-management route and stores the resolved runtime endpoint with the key.
+Choose **API** and paste the Kiro API key. Keys must use the `ksk_...` format; surrounding quotes and control characters are removed before validation. OMP validates the key against the Kiro model-management route and stores the key together with its resolved runtime endpoint.
 
 Set `KIRO_API_REGION` when the key's AWS region is known:
 
@@ -38,23 +40,24 @@ export KIRO_API_KEY=ksk_...
 export KIRO_API_REGION=us-east-1
 ```
 
-`KIRO_API_KEY` is the environment fallback for the provider. `KIRO_API_REGION` is optional when validation resolves exactly one safe route; set it when route discovery is ambiguous or when the key is tied to a non-bootstrap region.
+`KIRO_API_KEY` is the environment fallback for the provider. `KIRO_API_REGION` pins an API key without a stored endpoint (such as `KIRO_API_KEY`) to that region for both model discovery and requests, with no probing of other regions. Without it, OMP probes the bootstrap regions and uses the key only when exactly one accepts it; set it when that probe is ambiguous or the key is tied to another region. An invalid region is an error rather than a silent fallback.
 
 ## Profile selection and model discovery
 
 Model discovery is credential-scoped:
 
 - AWS OAuth discovery uses the selected profile and its runtime region.
-- API-key discovery uses the key's resolved runtime endpoint.
+- API-key discovery uses the key's resolved runtime endpoint, or `KIRO_API_REGION`.
+- Discovery follows every page of the model and profile listings.
 - Cached models are restored only after the selected Kiro credential is known.
 
-Kiro defaults to `auto` when no explicit model is selected; online discovery replaces the catalog with the account's live models. A cache entry for one profile, API key, or endpoint is not reused for another. If models disappear after switching accounts, log in again and allow discovery to complete.
+The roster is never bundled into OMP's model catalog, because it depends on the signed-in account. Kiro defaults to `auto` when no explicit model is selected; online discovery replaces the catalog with the account's live models. The model cache is scoped per login for Identity Center and Builder ID, and per key and endpoint for API keys, so one login's cache is never reused for another. A model whose metadata cannot be read is skipped without hiding the rest of the roster; a model whose request schema is not recognised is listed without thinking controls. If models disappear after switching accounts, log in again and allow discovery to complete.
 
 ## Builder ID
 
 **Builder** signs in with a personal AWS Builder ID instead of an IAM Identity Center organization. It runs the same OIDC device grant, pinned to the public Builder portal (`https://view.awsapps.com/start`) and `us-east-1`, so it asks for no Start URL, region, or profile.
 
-Because a Builder ID has no organization, the stored credential carries no profile ARN and the service infers the profile from the bearer token. The runtime region comes from the login region. Model discovery and the model cache behave the same as for AWS: the cache is scoped to the endpoint, and switching accounts requires logging in again.
+Because a Builder ID has no organization, the stored credential carries no profile ARN and the service infers the profile from the bearer token. The runtime region comes from the login region. Model discovery behaves the same as for Identity Center, and the model cache is scoped to the login, so two Builder ID accounts in the same region keep separate caches, including after their tokens expire.
 
 Choose **Identity Center** when you sign in through an IAM Identity Center Start URL, and **API key** when you have a `ksk_…` key.
 
@@ -71,12 +74,17 @@ Run `/login kiro` again when:
 
 ## Transient request failures
 
-Two Kiro runtime responses are retried automatically once, with an identical request body and a fresh request id, and only before any output has been shown:
+A Kiro request is retried at most once, with an identical request body and a fresh request id, and only before any output has been shown, for exactly these failures:
 
 - `InsufficientModelCapacity`, the runtime's capacity rejection.
 - `HTTP 400 ValidationException: Invalid tool use format.`, which the runtime fleet occasionally returns for a fresh remote session's first request. Replaying the same payload succeeds.
+- An event-stream frame cut off before any output, unless the service already sent its billing (`meteringEvent`) frame for the request.
 
-Any other HTTP 400 is terminal and is reported as-is.
+A request the service has billed is never replayed. Any other failure, including another HTTP 400 or a stream that ends without output, is terminal and is reported as-is.
+
+## Usage and truncation
+
+Token usage comes only from the token metrics Kiro sends; when it sends none, usage is reported as zero rather than estimated. When a response is cut off at the output limit (`MAX_TOKENS`), it stops with `length` and any tool call whose arguments were cut off is dropped, so it never runs.
 
 ## Troubleshooting
 
