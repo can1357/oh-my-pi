@@ -45,6 +45,7 @@
 - Added a frame-rate ceiling (`frame-rate`: `setMaxFps`, `minFrameIntervalMs`) honoured by the render scheduler and animation timers; frames a keystroke waits on keep 30 fps ([#14240](https://github.com/can1357/oh-my-pi/pull/14240) by [@mccraigmccraig](https://github.com/mccraigmccraig))
 - Added a decorative-motion switch (`motion-effects`: `setMotionEffects`) gating the status-line blink and brand fade, the editor's magic-keyword sweep, and native `fx` spans; a static spinner clock also stills native `spinner` nodes ([#14240](https://github.com/can1357/oh-my-pi/pull/14240) by [@mccraigmccraig](https://github.com/mccraigmccraig))
 - The status-line usage segment shows a monthly window for any provider whose limit is marked `scope.enforced` (gateway budgets), and when several limits share a window class it shows the most-used one instead of the first ([#17873](https://github.com/can1357/oh-my-pi/pull/17873) by [@maykonmichel](https://github.com/maykonmichel))
+- The status-line usage segment shows a monthly window for any provider whose limit is classified `scope.budget` (gateway spend caps), and when several limits share a window class it shows the most-used one instead of the first ([#17873](https://github.com/can1357/oh-my-pi/pull/17873) by [@maykonmichel](https://github.com/maykonmichel))
 
 ### Fixed
 - Tern's classic renderer draws inline images (table charts included) as Kitty Unicode placeholders, so text that replaces an image's cells removes the image instead of leaving a stale copy over the table while an answer streams or the pane resizes

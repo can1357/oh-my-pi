@@ -157,7 +157,7 @@ describe("LiteLLM usage provider: management endpoints", () => {
 				{
 					id: USER_LIMIT_ID,
 					label: "User budget",
-					scope: { provider: ALIAS, shared: true, enforced: true, windowId: "7d", accountId: "u1" },
+					scope: { provider: ALIAS, shared: true, budget: true, windowId: "7d", accountId: "u1" },
 					window: { id: "7d", label: "7d", resetsAt: Date.UTC(2030, 0, 7) },
 					amount: {
 						used: 25,
@@ -209,7 +209,7 @@ describe("LiteLLM usage provider: management endpoints", () => {
 		expect(requireLimit(report, KEY_LIMIT_ID)).toEqual({
 			id: KEY_LIMIT_ID,
 			label: "Key budget",
-			scope: { provider: ALIAS, shared: true, enforced: true, windowId: "30d", accountId: "u1" },
+			scope: { provider: ALIAS, shared: true, budget: true, windowId: "30d", accountId: "u1" },
 			window: { id: "30d", label: "30d", resetsAt: Date.UTC(2030, 0, 31) },
 			amount: { used: 10, limit: 40, remaining: 30, usedFraction: 0.25, remainingFraction: 0.75, unit: "usd" },
 			status: "ok",
@@ -675,7 +675,7 @@ describe("LiteLLM usage provider: budget counters", () => {
 		expect(requireLimit(report, windowId("1d"))).toEqual({
 			id: windowId("1d"),
 			label: "Key budget",
-			scope: { provider: ALIAS, shared: true, enforced: true, windowId: "1d", accountId: "u1" },
+			scope: { provider: ALIAS, shared: true, budget: true, windowId: "1d", accountId: "u1" },
 			window: { id: "1d", label: "1d", resetsAt: Date.UTC(2030, 0, 2) },
 			amount: { used: 2.5, limit: 10, remaining: 7.5, usedFraction: 0.25, remainingFraction: 0.75, unit: "usd" },
 			status: "ok",
@@ -688,7 +688,7 @@ describe("LiteLLM usage provider: budget counters", () => {
 		expect(weekly.notes).toBeUndefined();
 		const hourly = requireLimit(report, windowId("1h"));
 		expect(hourly.amount).toEqual({ used: 0.25, unit: "usd" });
-		expect(hourly.scope.enforced).toBeUndefined();
+		expect(hourly.scope.budget).toBeUndefined();
 		expect(hourly.status).toBe("unknown");
 		expect(hourly.notes).toEqual([NO_LIMIT_NOTE]);
 		expectWireValid(report);

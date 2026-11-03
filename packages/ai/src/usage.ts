@@ -57,11 +57,12 @@ export interface UsageScope {
 	/** Stable identity shared by routing-specific copies of one upstream quota. */
 	sharedGroup?: string;
 	/**
-	 * The upstream refuses requests once this window is exhausted, so compact
-	 * surfaces may treat it as the session's quota even for a monthly window.
-	 * Unset for informational side-counters (overage meters, billing summaries).
+	 * This window is a spend budget on the credential's own requests (a gateway
+	 * cap), not an informational side-counter such as an overage meter or
+	 * billing summary, so compact surfaces may show it even when monthly. It
+	 * says nothing about how or whether the upstream enforces the cap.
 	 */
-	enforced?: boolean;
+	budget?: boolean;
 }
 
 /** Normalized limit entry for a single window or quota bucket. */
@@ -321,7 +322,7 @@ export const usageScopeSchema = type({
 	"windowId?": "string",
 	"shared?": "boolean",
 	"sharedGroup?": "string",
-	"enforced?": "boolean",
+	"budget?": "boolean",
 });
 
 export const usageLimitSchema = type({

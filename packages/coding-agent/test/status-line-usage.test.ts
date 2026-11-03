@@ -638,9 +638,9 @@ describe("usage status-line segment", () => {
 		expect(content).not.toContain("42%");
 	});
 
-	it("renders a monthly window a gateway enforces for any provider, but not an unenforced one", async () => {
+	it("renders a monthly budget window for any provider, but not a monthly side-counter", async () => {
 		const now = Date.now();
-		const render = async (enforced: boolean) => {
+		const render = async (budget: boolean) => {
 			const component = makeComponent(
 				[
 					{
@@ -652,7 +652,7 @@ describe("usage status-line segment", () => {
 									provider: "team-gateway",
 									windowId: "30d",
 									shared: true,
-									...(enforced ? { enforced } : {}),
+									...(budget ? { budget } : {}),
 								},
 								window: { id: "30d", label: "30d", resetsAt: now + 400 * 3_600_000 },
 								amount: { used: 40, limit: 100, usedFraction: 0.4, unit: "usd" },
@@ -667,12 +667,12 @@ describe("usage status-line segment", () => {
 			return stripVTControlCharacters(component.getTopBorder(200).content);
 		};
 
-		const enforced = await render(true);
-		expect(enforced).toContain("mo");
-		expect(enforced).toContain("40%");
-		const unenforced = await render(false);
-		expect(unenforced).not.toContain("mo");
-		expect(unenforced).not.toContain("40%");
+		const budget = await render(true);
+		expect(budget).toContain("mo");
+		expect(budget).toContain("40%");
+		const informational = await render(false);
+		expect(informational).not.toContain("mo");
+		expect(informational).not.toContain("40%");
 	});
 
 	it("shows the most-used limit when several share a window class", async () => {
@@ -686,13 +686,13 @@ describe("usage status-line segment", () => {
 					limits: [
 						{
 							id: "team-gateway:key:abc:budget",
-							scope: { provider: "team-gateway", windowId: "7d", shared: true, enforced: true },
+							scope: { provider: "team-gateway", windowId: "7d", shared: true, budget: true },
 							window: { id: "7d", label: "7d", resetsAt: now + 100 * 3_600_000 },
 							amount: { used: 25, limit: 100, usedFraction: 0.25, unit: "usd" },
 						},
 						{
 							id: "team-gateway:user:budget",
-							scope: { provider: "team-gateway", windowId: "7d", shared: true, enforced: true },
+							scope: { provider: "team-gateway", windowId: "7d", shared: true, budget: true },
 							window: { id: "7d", label: "7d", resetsAt: now + 50 * 3_600_000 },
 							amount: { used: 95, limit: 100, usedFraction: 0.95, unit: "usd" },
 						},

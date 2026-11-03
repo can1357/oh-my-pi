@@ -2424,13 +2424,12 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 										? "7d"
 										: undefined;
 				// A monthly window is shown only when it is the session's quota: the
-				// provider's subscription (table above) or a limit the adapter marks as
-				// enforced (gateway budgets). Monthly side-counters stay out.
-				const enforced = "enforced" in scope && scope.enforced === true;
+				// provider's subscription (table above) or a limit the adapter classifies
+				// as a budget on the credential's requests. Monthly side-counters stay out.
+				const budget = "budget" in scope && scope.budget === true;
 				const monthlyWindow = windowId === "monthly" || windowId === "30d" || windowId === "1mo";
 				const windowClass =
-					subscriptionWindow ??
-					((monthlySubscriptionProvider || enforced) && monthlyWindow ? "monthly" : undefined);
+					subscriptionWindow ?? ((monthlySubscriptionProvider || budget) && monthlyWindow ? "monthly" : undefined);
 				if (!windowClass) continue;
 
 				const modelId = normalizeUsageScopeValue("modelId" in scope ? scope.modelId : undefined);
