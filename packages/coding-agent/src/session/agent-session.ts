@@ -1203,7 +1203,6 @@ export class AgentSession implements SettingsScope {
 	 *  `message_end` + `stopReason: "aborted"`; callers clear it in `finally` so
 	 *  it cannot leak into later unrelated aborts. */
 	#planInternalAbortPending = false;
-	#pendingAbortErrorId?: number;
 
 	#postPromptTasks = new Set<Promise<unknown>>();
 	#postPromptTasksPromise: Promise<void> | undefined = undefined;
@@ -4550,9 +4549,11 @@ export class AgentSession implements SettingsScope {
 				message.errorMessage = SILENT_ABORT_MARKER;
 				message.errorId = AIError.create(AIError.Flag.SilentAbort);
 				this.#planInternalAbortPending = false;
-			} else if (this.#pendingAbortErrorId) {
-				message.errorId = this.#pendingAbortErrorId;
-				this.#pendingAbortErrorId = undefined;
+			} else if (message.errorMessage === USER_INTERRUPT_LABEL) {
+				// The interrupt's reason rides the stopped run's own abort signal into this
+				// message, so only the run the interrupt stopped is marked: never a later,
+				// unrelated abort.
+				message.errorId = AIError.create(AIError.Flag.UserInterrupt);
 			} else if (this.#ttsr.abortPending) {
 				// A TTSR rule interruption is control flow, not a failure: the turn
 				// re-runs and the injection surfaces via `TtsrNotificationComponent`.
@@ -6639,6 +6640,8 @@ export class AgentSession implements SettingsScope {
 		// Drop the conversation: messages, queued steers/follow-ups, pending tool
 		// calls, and error state. agent.reset() keeps the model and system prompt.
 		this.#releaseQueuedTtsrReservations();
+		// The session is idle, so no aborted reply is still on its way; the rule continuation is cancelled.
+		this.#ttsr.cancelPendingAbort();
 		this.agent.reset();
 		// The cleared context is a new transcript: an aside or held message captured for the old one drops
 		// its record instead of landing here (mirrors newSession()).
@@ -8834,6 +8837,12 @@ export class AgentSession implements SettingsScope {
 		this.#promptSequence++;
 		const setupAbort = new AbortController();
 		this.#promptSetupAbortController = setupAbort;
+		let drainedNextTurnMessages: CustomMessage[] = [];
+		let handedToAgent = false;
+		const sessionGeneration = this.#sessionGeneration;
+		// A prompt started while the session was already disposing may still run (the "direct"
+		// preparation origin allows it); one that disposal overtook must not.
+		const disposingAtStart = this.#isDisposed;
 		try {
 			options?.onPromptAdmitted?.();
 			await this.#recovery.maybeRestoreRetryFallbackPrimary();
@@ -8929,10 +8938,10 @@ export class AgentSession implements SettingsScope {
 			const xdevMountNoticeIndex = messages.length;
 			messages.push(message);
 			// Inject any pending "nextTurn" messages as context alongside the user message
-			for (const msg of this.#pendingNextTurnMessages) {
-				messages.push(msg);
-			}
+			// Messages it drains here go back to the queue if this prompt never reaches the agent.
+			drainedNextTurnMessages = this.#pendingNextTurnMessages;
 			this.#pendingNextTurnMessages = [];
+			messages.push(...drainedNextTurnMessages);
 
 			// Auto-read @filepath mentions
 			const fileMentions = extractFileMentions(expandedText);
@@ -9069,26 +9078,42 @@ export class AgentSession implements SettingsScope {
 			if (planReferenceMessage) {
 				this.#planReferenceSent = true;
 			}
-			// An interrupt mark belongs to the run it stopped; a new run starts unmarked.
-			this.#pendingAbortErrorId = undefined;
+			let dispatched: boolean;
 			try {
-				const run = this.#recovery.promptAgentWithIdleRetry(messages, agentPromptOptions, () => {
-					// `agent.prompt` claims streaming synchronously before its
-					// first await: this callback fires exactly when THIS
-					// client-owned run goes live (never on a busy-retry that
-					// waits behind an autonomous run) — wake steers parked on
-					// the dispatch so they admit into the run they targeted.
-					this.#wakeDispatchLiveWaiters();
-				});
-				await run;
+				const run = this.#recovery.promptAgentWithIdleRetry(
+					messages,
+					agentPromptOptions,
+					() => {
+						handedToAgent = true;
+						// `agent.prompt` claims streaming synchronously before its
+						// first await: this callback fires exactly when THIS
+						// client-owned run goes live (never on a busy-retry that
+						// waits behind an autonomous run) — wake steers parked on
+						// the dispatch so they admit into the run they targeted.
+						this.#wakeDispatchLiveWaiters();
+					},
+					// A prompt parked behind another run must not start once an interrupt,
+					// a session switch or disposal has superseded it.
+					() =>
+						this.#promptGeneration !== generation ||
+						this.#sessionGeneration !== sessionGeneration ||
+						(this.#isDisposed && !disposingAtStart),
+				);
+				dispatched = await run;
 			} finally {
 				this.#stats.setPendingSnapshot(undefined);
 			}
+			if (!dispatched) return false;
 			if (!options?.skipPostPromptRecoveryWait) {
 				await this.#waitForPostPromptRecovery(generation);
 			}
 			return true;
 		} finally {
+			// A bail before dispatch (an interrupt's generation bump, disposal, a usage denial or a setup
+			// error) must not lose the accepted next-turn messages this prompt drained.
+			if (!handedToAgent && drainedNextTurnMessages.length > 0 && sessionGeneration === this.#sessionGeneration) {
+				this.#pendingNextTurnMessages = [...drainedNextTurnMessages, ...this.#pendingNextTurnMessages];
+			}
 			// The per-turn before_agent_start override lives only for this turn.
 			this.#tools.clearTurnSystemPromptOverride();
 			this.#usagePreflightReadyForNextModelCall = false;
@@ -9924,6 +9949,7 @@ export class AgentSession implements SettingsScope {
 		}
 
 		const prependMessages = queuedMessages.slice(0, -1);
+		const sessionGeneration = this.#sessionGeneration;
 		const textContent = this.#getCustomMessageTextContent(message);
 		let dispatched: boolean;
 		try {
@@ -9936,8 +9962,11 @@ export class AgentSession implements SettingsScope {
 			throw error;
 		}
 		// An interrupt, disposal or usage denial dropped the prompt before it reached the agent:
-		// the messages were accepted, so they wait for the next prompt instead of being lost.
-		if (!dispatched) this.#pendingNextTurnMessages = [...queuedMessages, ...this.#pendingNextTurnMessages];
+		// the messages were accepted, so they wait for the next prompt instead of being lost. A
+		// session switch meanwhile discarded the old session's queue, and these with it.
+		if (!dispatched && sessionGeneration === this.#sessionGeneration) {
+			this.#pendingNextTurnMessages = [...queuedMessages, ...this.#pendingNextTurnMessages];
+		}
 	}
 
 	#getCustomMessageTextContent(message: Pick<CustomMessage, "content">): string {
@@ -11268,12 +11297,6 @@ export class AgentSession implements SettingsScope {
 		preserveCompaction?: boolean;
 	}): Promise<void> {
 		const userInterrupt = options?.reason === USER_INTERRUPT_LABEL;
-		// The interrupt marks the aborted reply of the turn it stops. With nothing running there is no
-		// such reply, and a mark left pending would hide a later, unrelated provider abort.
-		this.#pendingAbortErrorId =
-			userInterrupt && (this.isStreaming || this.agent.hasQueuedMessages())
-				? AIError.create(AIError.Flag.UserInterrupt)
-				: undefined;
 		// Latch only when the interrupt stops something; an idle Esc would otherwise fold
 		// every later background completion for the rest of the session.
 		if (userInterrupt && (this.isStreaming || this.agent.hasQueuedMessages())) {
@@ -11335,6 +11358,9 @@ export class AgentSession implements SettingsScope {
 			// agent_end is awaited: a message_end stalled in an extension hook would
 			// otherwise hold /new and every abort for the full handler timeout.
 			await this.#drainAgentEndMaintenance();
+			// The interrupted run's aborted reply is handled by now, so a rule interruption whose
+			// continuation this abort cancelled can be dropped without unmarking that reply.
+			this.#ttsr.cancelPendingAbort();
 			this.abortRetry();
 			await this.#cancelPostPromptTasks();
 			// `/compact` disconnects the agent subscription until its finally block.
@@ -13725,6 +13751,7 @@ export class AgentSession implements SettingsScope {
 		this.#pendingNextTurnMessages = [];
 		this.#scheduledHiddenNextTurnGeneration = undefined;
 		this.#releaseQueuedTtsrReservations();
+		this.#ttsr.cancelPendingAbort();
 		this.agent.replaceQueues([], []);
 		this.#queuedMessageDrainBlocked = false;
 		this.#usagePreflightReadyForNextModelCall = false;

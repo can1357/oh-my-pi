@@ -342,6 +342,21 @@ export class TtsrCoordinator {
 		this.#resumePromise = undefined;
 	}
 
+	/**
+	 * Drops a rule interruption whose continuation was cancelled (an interrupt,
+	 * a conversation reset or a branch). The continuation would have cleared this
+	 * state; left pending, it marks the next unrelated abort as a rule interruption.
+	 * Call it only once the interrupted run's own aborted reply has been handled.
+	 */
+	cancelPendingAbort(): void {
+		this.#retryToken++;
+		this.#abortPending = false;
+		this.#pendingInjections = [];
+		this.#pendingExcerpts = {};
+		this.#perToolInjections.clear();
+		this.resolveResume();
+	}
+
 	#ensureResumePromise(): void {
 		if (this.#resumePromise) return;
 		const { promise, resolve } = Promise.withResolvers<void>();

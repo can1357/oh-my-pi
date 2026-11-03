@@ -869,8 +869,9 @@ export class TurnRecovery {
 		messages: AgentMessage[],
 		options?: { toolChoice?: ToolChoice },
 		onClaimed?: () => void,
-	): Promise<void> {
-		return this.#promptAgentWithIdleRetry(messages, options, onClaimed);
+		isCancelled?: () => boolean,
+	): Promise<boolean> {
+		return this.#promptAgentWithIdleRetry(messages, options, onClaimed, isCancelled);
 	}
 
 	/** Parses provider retry and rate-limit reset hints into a delay. */
@@ -3305,13 +3306,20 @@ export class TurnRecovery {
 		this.resolveRetry();
 	}
 
+	/**
+	 * Prompts the agent, waiting behind a run that already holds it. Resolves
+	 * `true` once this prompt's run finishes, or `false` when `isCancelled`
+	 * reports, before a claim, that the prompt was superseded while it waited.
+	 */
 	async #promptAgentWithIdleRetry(
 		messages: AgentMessage[],
 		options?: { toolChoice?: ToolChoice },
 		onClaimed?: () => void,
-	): Promise<void> {
+		isCancelled?: () => boolean,
+	): Promise<boolean> {
 		const deadline = Date.now() + 30_000;
 		for (;;) {
+			if (isCancelled?.()) return false;
 			// A claim whose synchronous prefix throws (busy agent, missing
 			// model) returns an already-rejected promise. Probe for that
 			// before firing `onClaimed`: a busy-retry parked behind an
@@ -3330,7 +3338,7 @@ export class TurnRecovery {
 				await Promise.resolve();
 				if (!claimFailed) onClaimed?.();
 				await claim;
-				return;
+				return true;
 			} catch (err) {
 				if (!(err instanceof AgentBusyError)) {
 					throw err;

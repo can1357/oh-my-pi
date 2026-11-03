@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, describe, expect, it, spyOn } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { createMockModel, type MockModel, type MockResponseSource } from "@oh-my-pi/pi-ai/providers/mock";
@@ -8,8 +8,9 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ExtensionUIContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { convertToLlm, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { SessionMaintenance } from "@oh-my-pi/pi-coding-agent/session/session-maintenance";
 import { AskTool } from "@oh-my-pi/pi-coding-agent/tools/ask";
 import { shouldRenderAbortReason } from "@oh-my-pi/pi-tui/chat/messages";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
@@ -43,7 +44,7 @@ afterEach(async () => {
 });
 
 async function createSession(responses: MockResponseSource): Promise<Harness> {
-	const dir = TempDir.createSync("idle-interrupt-");
+	const dir = TempDir.createSync("@idle-interrupt-");
 	const mock = createMockModel({ responses, handler: { content: ["finished"] } });
 	const auth = await AuthStorage.create(":memory:");
 	auth.keys.setRuntime("anthropic", "test-key");
@@ -151,5 +152,54 @@ describe("interrupt with no run to stop", () => {
 
 		expect(JSON.stringify(h.mock.calls.map(c => c.context.messages))).toContain("scheduled context must survive");
 		expect(JSON.stringify(h.sessionManager.getEntries())).toContain("scheduled context must survive");
+	});
+
+	it("keeps a next-turn message a user prompt drained when an interrupt stops that prompt's setup", async () => {
+		const streamStarted = Promise.withResolvers<void>();
+		const finishStream = Promise.withResolvers<void>();
+		const h = await createSession([
+			async () => {
+				streamStarted.resolve();
+				await finishStream.promise;
+				return { content: ["first answer"] };
+			},
+			{ content: ["third answer"] },
+		]);
+		// Sent while a turn streams, the aside waits in the next-turn queue for the next user prompt.
+		const first = h.session.prompt("first request");
+		await streamStarted.promise;
+		await h.session.sendCustomMessage(
+			{ customType: "review-context", content: "queued aside must survive", display: false },
+			{ deliverAs: "nextTurn" },
+		);
+		finishStream.resolve();
+		await first;
+		await h.session.waitForIdle();
+		// Hold the prompt in its pre-prompt maintenance, after it took the queued aside.
+		const reached = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const maintenance = SessionMaintenance.prototype.runPrePromptCompactionIfNeeded;
+		const hold = spyOn(SessionMaintenance.prototype, "runPrePromptCompactionIfNeeded").mockImplementationOnce(
+			async function (this: SessionMaintenance, ...args) {
+				reached.resolve();
+				await release.promise;
+				return maintenance.apply(this, args);
+			},
+		);
+		const second = h.session.prompt("second request");
+		await reached.promise;
+		const abort = h.session.abort({ reason: USER_INTERRUPT_LABEL });
+		release.resolve();
+		await abort;
+		await second;
+		hold.mockRestore();
+		expect(h.mock.calls).toHaveLength(1);
+		expect(JSON.stringify(h.mock.calls[0]?.context.messages)).not.toContain("queued aside must survive");
+
+		await h.session.prompt("third request");
+		await h.session.waitForIdle();
+
+		expect(h.mock.calls).toHaveLength(2);
+		expect(JSON.stringify(h.mock.calls[1]?.context.messages)).toContain("queued aside must survive");
 	});
 });
