@@ -147,6 +147,8 @@ function decodeAnsiC(body: string): { text: string; bytes: boolean } {
 			}
 			if (esc[0] === "c" && esc.length > 1) {
 				if (esc[1] === "?") return "\x7f";
+				// bash takes the control character from the first byte of a multibyte character.
+				if (esc.charCodeAt(1) >= 0x80) bytes = true;
 				const code = esc.charCodeAt(1) & 0x1f;
 				if (code === 0) bytes = true;
 				return String.fromCharCode(code);
@@ -1083,10 +1085,15 @@ function findCanPerform(command: SimpleCommand): boolean {
 	const words = command.words.slice(1);
 	let i = 0;
 	while (i < words.length && (words[i].value === "-P" || words[i].value === "-H")) i++;
+	const roots: string[] = [];
 	for (; i < words.length; i++) {
 		const value = words[i].value;
 		if (value.startsWith("-") || value === "!" || own(FIND_OPERATORS, value)) break;
+		roots.push(value);
 	}
+	if (roots.length === 0) roots.push(".");
+	if (!roots.every(toolsTakeLiterally)) return false;
+	const tests: Array<{ test: string; pattern: string }> = [];
 	let negated = false;
 	let prunedTest = false;
 	for (; i < words.length; i++) {
@@ -1106,13 +1113,45 @@ function findCanPerform(command: SimpleCommand): boolean {
 		if (arity === undefined) return false;
 		const arg = arity === 1 ? words[++i] : undefined;
 		if (arity === 1 && !arg) return false;
+		if (arg) tests.push({ test: value, pattern: arg.value });
 		prunedTest = value !== "-print" && PRUNED_BY_GLOB.test(arg?.value ?? "");
 		if (negated && !prunedTest) return false;
 		// The glob tool never lists `.git`, so a search for it is not expressible unless it is pruned.
 		if (!negated && prunedTest && arg?.value.includes(".git") && words[i + 1]?.value !== "-prune") return false;
 		negated = false;
 	}
-	return true;
+	// find tests its roots too and lists one a test matches (`find . -name .`); glob never lists its roots.
+	return roots.every(root => {
+		const name = root.replace(/\/+$/u, "").split("/").pop() || root;
+		return !tests.some(({ test, pattern }) => fnmatch(pattern, test === "-name" ? name : root));
+	});
+}
+
+/** Whether the shell-style `pattern` matches `name`, as `find -name` (fnmatch without FNM_PERIOD) does. */
+function fnmatch(pattern: string, name: string): boolean {
+	let source = "";
+	for (let i = 0; i < pattern.length; i++) {
+		const ch = pattern[i];
+		if (ch === "*") source += "[^]*";
+		else if (ch === "?") source += "[^]";
+		else if (ch === "[") {
+			const close = pattern.indexOf("]", i + 2);
+			if (close < 0) source += "\\[";
+			else {
+				const body = pattern
+					.slice(i + 1, close)
+					.replace(/^!/u, "^")
+					.replace(/\\/gu, "\\\\");
+				source += `[${body}]`;
+				i = close;
+			}
+		} else source += ch.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+	}
+	try {
+		return new RegExp(`^${source}$`, "u").test(name);
+	} catch {
+		return true;
+	}
 }
 
 const FD: OptionSpec = {
@@ -1141,7 +1180,7 @@ const FD: OptionSpec = {
 function fdCanPerform(command: SimpleCommand): boolean {
 	const seen = new Map<string, number>();
 	const operands = expressibleOperands(command.words.slice(1), FD, seen);
-	if (!operands) return false;
+	if (!operands || !operands.slice(1).every(root => toolsTakeLiterally(root.value))) return false;
 	const pattern = operands[0]?.value;
 	if (pattern === undefined || pattern === "") return true;
 	const globMode = seen.has("-g") || seen.has("--glob");
@@ -1517,10 +1556,11 @@ function pathsAre(
  * handling reads other characters differently: `:` (a URL scheme, a read selector, an archive
  * member or database table, a Windows drive, a stray leading colon), `,`, `;` and spaces (grep's
  * path lists), `!` (a grep exclude), `[…]` and `#` (a hashline header), quotes (stripped), `\`
- * (a separator), `%` (decoded in URLs), a leading `@` or `~` (shorthands for paths).
+ * (a separator), `%` (decoded in URLs), a leading `@` or `~` (shorthands for paths). Nor a `..`
+ * segment: the tools resolve it lexically, the shell through symlinks (`link/../f`).
  */
 function toolsTakeLiterally(path: string): boolean {
-	return /^(?![@~])[A-Za-z0-9._+=@/-]+$/u.test(path);
+	return /^(?![@~])[A-Za-z0-9._+=@/-]+$/u.test(path) && !path.split("/").includes("..");
 }
 
 /** A Jupyter notebook: the edit tool edits its cells, not its JSON text. */

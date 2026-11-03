@@ -1014,6 +1014,23 @@ describe("dedicated tool capability", () => {
 		"echo hi > '[notes.md#ABCD]'",
 		"echo hi > '\"quoted\"'",
 		"cat 'a\\b'",
+		// Round 13: a `..` segment resolves through symlinks in the shell, lexically in the tools.
+		"cat link/../file.txt",
+		"grep needle link/../file.txt",
+		"sed -i 's/a/b/' link/../file.txt",
+		"echo hi > link/../new.txt",
+		"find link/.. -name dune",
+		"fd -I --glob 'A*' link/..",
+		// bash takes `\\c`'s control character from the first byte of a multibyte character.
+		"printf '%s' $'\\c\u00e9' > out",
+		// find lists a root its tests match; glob never lists its roots.
+		"find . -name .",
+		"find . -name '.*'",
+		"find src -name 'sr*'",
+		"find src/ -path 'src*'",
+		// Roots glob reads differently.
+		"find 'a,b' -name dune",
+		"fd -I --glob 'A*' 'a b'",
 		// An empty name is no file.
 		'echo hi > ""',
 	])("does not refuse %s (round 8)", command => {
@@ -1029,6 +1046,8 @@ describe("dedicated tool capability", () => {
 		["cat node_modules/@types/node/index.d.ts", "read"],
 		["echo hi > notes.md", "write"],
 		["perl -pi -e 's/old/new/' book.py", "edit"],
+		["find src -name '*.ts'", "glob"],
+		["find . -path './node_modules' -prune -o -name '*.ts' -print", "glob"],
 	])("still refuses %s as %s (round 11)", (command, tool) => {
 		expect(decide(command)).toBe(tool);
 	});
