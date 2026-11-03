@@ -244,7 +244,7 @@ describe("native prompt-cache marker", () => {
 		expect(facts(line).map(seg => seg.key)).toEqual(["hostname", "cache"]);
 	});
 
-	it("strikes the glyph through in the warning tone for an uncached prefix, its card giving the reason, the re-sent size and the snapcompact hint", () => {
+	it("strikes the glyph through in the warning tone for an uncached prefix, its card giving the reason and the re-sent size", () => {
 		setNativeRendering(true);
 		const marker = cacheMarker(cacheStatusLine(CACHE_SETTINGS, () => COLD_MODEL));
 		expect(marker!.tone).toBe("warning");
@@ -253,12 +253,12 @@ describe("native prompt-cache marker", () => {
 		expect(marker!.aria).toBe("Not cached — model changed: claude-opus-4-5 → claude-sonnet-4-5");
 		// Another model leaves nothing cached: the whole prompt is re-sent.
 		expect(marker!.title).toBe(
-			"Not cached — model changed: claude-opus-4-5 → claude-sonnet-4-5\nNext message re-sends ~320K · /compact snapcompact first",
+			"Not cached — model changed: claude-opus-4-5 → claude-sonnet-4-5\nNext message re-sends ~320K",
 		);
 		const card = JSON.stringify(marker!.hovercard);
 		expect(card).toContain("omp.composer.cache.card");
 		expect(card).toContain("model changed: claude-opus-4-5 → claude-sonnet-4-5");
-		expect(card).toContain("/compact snapcompact first");
+		expect(card).not.toContain("compact");
 	});
 
 	it("bounds the re-sent tokens when the change keeps the cached blocks ahead of it", () => {
@@ -272,7 +272,7 @@ describe("native prompt-cache marker", () => {
 		const rekeyed: PromptCacheStatus = { ...COLD_MODEL, reason: { kind: "cache-key" } };
 		const marker = cacheMarker(cacheStatusLine(CACHE_SETTINGS, () => rekeyed));
 		expect(marker!.spans).toEqual([{ t: SYMBOL_PRESETS.nerd["icon.cacheCold"], s: "warning" }]);
-		expect(marker!.title).toContain("re-sends ~320K ·");
+		expect(marker!.title).toEndWith("re-sends ~320K");
 		expect(JSON.stringify(marker!.hovercard)).toContain("provider cache session changed");
 	});
 

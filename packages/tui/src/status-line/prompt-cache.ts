@@ -114,7 +114,7 @@ function resendText(status: PromptCacheStatus): string {
 export function promptCacheBrief(status: PromptCacheStatus, nowMs: number): readonly [string, string] {
 	if (status.state === "cold") {
 		const why = status.reason ? ` — ${coldReasonText(status.reason, nowMs, "card")}` : "";
-		return [`Not cached${why}`, `Next message ${resendText(status)} · /compact snapcompact first`];
+		return [`Not cached${why}`, `Next message ${resendText(status)}`];
 	}
 	const cached = status.inferred ? "Likely cached" : "Cached";
 	const until = status.ttlMs === undefined ? ", no expiry" : ` until ${when(status.touchedAt + status.ttlMs, nowMs)}`;
@@ -159,7 +159,6 @@ export function promptCacheDetails(status: PromptCacheStatus, nowMs: number): Pr
 		});
 	} else {
 		rows.push({ label: "Next message", value: `${resendText(status)} uncached` });
-		rows.push({ label: "Hint", value: "/compact snapcompact first to send less" });
 	}
 	return rows;
 }
