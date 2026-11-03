@@ -975,6 +975,45 @@ describe("Kiro authentication", () => {
 		expect(semanticAttempts).toBe(1);
 	});
 
+	it("disables the credential on a dead refresh grant and keeps it on other refresh failures", async () => {
+		const cases = [
+			{ body: { error: "invalid_grant", error_description: "Invalid refresh token" }, disabled: true },
+			{ body: { __type: "com.amazonaws.ssooidc#ExpiredTokenException" }, disabled: true },
+			{ body: { error: "invalid_request" }, disabled: false },
+		];
+		for (const { body, disabled } of cases) {
+			const store = await SqliteAuthCredentialStore.open(":memory:");
+			const causes: string[] = [];
+			const authStorage = new AuthStorage(store, {
+				onCredentialDisabled: event => {
+					causes.push(event.disabledCause);
+				},
+			});
+			const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
+				Object.assign(async () => json(body, 400), { preconnect: globalThis.fetch.preconnect }),
+			);
+			try {
+				await authStorage.credentials.set("kiro", {
+					type: "oauth",
+					...kiroClientCredentials({
+						expires: 1,
+						apiEndpoint: "https://runtime.us-east-1.kiro.dev/",
+						kiroLoginId: "login-dead",
+					}),
+				});
+
+				expect(await authStorage.keys.get("kiro", "session-dead-grant")).toBeUndefined();
+
+				expect(authStorage.credentials.has("kiro")).toBe(!disabled);
+				if (disabled) expect(causes).toEqual([expect.stringContaining("run /login kiro")]);
+				else expect(causes).toEqual([]);
+			} finally {
+				fetchSpy.mockRestore();
+				authStorage.close();
+			}
+		}
+	});
+
 	it("retains the old refresh token when rotation is omitted and rejects cancellation", async () => {
 		const retained = await refreshKiroToken(kiroClientCredentials(), {
 			fetch: async () => json({ accessToken: "new-access", expiresIn: 3600 }),

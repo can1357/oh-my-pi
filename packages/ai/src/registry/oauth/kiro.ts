@@ -27,6 +27,7 @@ import {
 	validateKiroApiRegion,
 } from "@oh-my-pi/pi-catalog/wire/kiro";
 import { encodeKiroCredential } from "@oh-my-pi/pi-catalog/wire/kiro-credential";
+import { isRecord } from "@oh-my-pi/pi-utils";
 import { BoundedJsonReadError, readBoundedJson } from "@oh-my-pi/pi-utils/bounded-json";
 import { sanitizeText } from "@oh-my-pi/pi-utils/sanitize-text";
 import * as AIError from "../../error";
@@ -712,6 +713,31 @@ export async function loginKiroDevice(ctrl: OAuthController, config: KiroDeviceC
 	};
 }
 
+/**
+ * The re-login message for an OIDC refresh rejection that no retry can fix, or
+ * `undefined` for any other failure. AWS SSO OIDC reports the code as `error`
+ * (`invalid_grant`, `expired_token`) or as an exception `__type`.
+ */
+function permanentKiroRefreshFailure(body: unknown): string | undefined {
+	if (!isRecord(body)) return undefined;
+	const raw =
+		typeof body.error === "string"
+			? body.error
+			: typeof body.__type === "string"
+				? body.__type.slice(body.__type.lastIndexOf("#") + 1)
+				: undefined;
+	switch (raw) {
+		case "invalid_grant":
+		case "InvalidGrantException":
+			return "Kiro refresh token was rejected (invalid_grant); run /login kiro again";
+		case "expired_token":
+		case "ExpiredTokenException":
+			return "Kiro refresh token expired (expired_token); run /login kiro again";
+		default:
+			return undefined;
+	}
+}
+
 export async function refreshKiroToken(
 	current: OAuthCredentials,
 	options: KiroRequestOptions = {},
@@ -783,7 +809,11 @@ export async function refreshKiroToken(
 		"token-refresh",
 	);
 	if (!response.response.ok) {
-		throw new AIError.OAuthError(`Kiro refresh failed: HTTP ${response.response.status}`, {
+		// A dead grant names itself in the OIDC error body. The message carries
+		// the code so `isDefinitiveOAuthFailure` disables the row with a re-login
+		// hint; any other failure stays transient and the row is retried.
+		const permanent = permanentKiroRefreshFailure(response.body);
+		throw new AIError.OAuthError(permanent ?? `Kiro refresh failed: HTTP ${response.response.status}`, {
 			kind: "token-refresh",
 			provider: PROVIDER,
 			status: response.response.status,
