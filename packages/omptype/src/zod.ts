@@ -2,11 +2,11 @@ import { type OmpErrors, OmpTypeError } from "./errors";
 import { type EmbeddableSchema, embed, type IR, IR_BRAND, type PropIR } from "./ir";
 import { type NarrowContext, type Type, type } from "./type";
 
-interface OptionalSchemaMarker {
+export interface OptionalSchemaMarker {
 	readonly _optional: true;
 }
 
-interface RefineOptions {
+export interface RefineOptions {
 	message?: string;
 	error?: string;
 }

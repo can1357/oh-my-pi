@@ -49,6 +49,8 @@ const boundOmit = user.omit.bind(user);
 const boundOmitted: true = exactly<{ id: number; nick?: string }>()(boundOmit("name").infer);
 const boundKeys: true = exactly<PropertyKey>()(user.keyof.bind(user)().infer);
 const calledKeys: true = exactly<PropertyKey>()(user.keyof.call(user).infer);
+const detachedKeyof = user.keyof;
+const detachedKeys: true = exactly<PropertyKey>()(detachedKeyof().infer);
 // Called on a union of schemas, `keyof()` gives each member's own keys, as on main.
 const left = type({ a: "number" });
 const right = type({ b: "string" });
@@ -59,11 +61,20 @@ const eitherKey: "a" | "b" = either.keyof().assert("a");
 const eitherKeys: true = exactly<"a" | "b">()(either.keyof().infer);
 const overlapKeys: true = exactly<"a" | "c">()(overlap.keyof().infer);
 
+// Attached views retain their output keys even when inference metadata is omitted.
+const withoutOutput: Omit<typeof user, "infer"> = user;
+const withoutInput: Omit<typeof user, "inferIn"> = user;
+const minimalView: Pick<typeof user, "ir" | "keyof"> = user;
+const withoutOutputKeys: true = exactly<"id" | "name" | "nick">()(withoutOutput.keyof().infer);
+const withoutInputKeys: true = exactly<"id" | "name" | "nick">()(withoutInput.keyof().infer);
+const minimalViewKeys: true = exactly<"id" | "name" | "nick">()(minimalView.keyof().infer);
+
 export {
 	boundKeys,
 	boundOmitted,
 	boundPicked,
 	calledKeys,
+	detachedKeys,
 	eitherKey,
 	eitherKeys,
 	fluentObject,
@@ -73,10 +84,13 @@ export {
 	omitted,
 	overlapKeys,
 	picked,
+	minimalViewKeys,
 	plainPrimitive,
 	sameInput,
 	unknownInput,
 	unrelated,
 	wider,
 	zodLike,
+	withoutInputKeys,
+	withoutOutputKeys,
 };

@@ -67,7 +67,7 @@ declare const brand: unique symbol;
 /** Inference-only nominal brand attached by `.brand(name)`. */
 export type Brand<t, name extends string> = t & { readonly [brand]: name };
 
-interface SchemaInference<out t, i = t> {
+export interface SchemaInference<out t, i = t> {
 	readonly [IR_BRAND]: true;
 	readonly infer: t;
 	readonly inferIn: i;
@@ -305,7 +305,7 @@ interface FluentMethods<out t, out i> {
 	onDeepUndeclaredKey(behavior: "ignore" | "reject" | "delete"): FluentType<t, i>;
 }
 
-interface PipeMethod<out t, out i> {
+export interface PipeMethod<out t, out i> {
 	<r>(fn: (data: t, ctx: NarrowContext) => r): FluentType<Exclude<r, OmpErrors>, i>;
 	<r, ri>(schema: SchemaInference<r, ri>): FluentType<r, i>;
 	(...steps: readonly unknown[]): FluentType<unknown, i>;
@@ -317,35 +317,31 @@ interface PipeMethod<out t, out i> {
 
 type InputObject<i> = i extends object ? i : object;
 
-/**
- * The receiver `keyof()` reads its keys from. A schema's key list is contravariant in its
- * output, so stating it through `t` would make no object schema covariant (nor `Type`, whose
- * `in`/`out` are object schemas too), and TypeScript would decide `Type<{ id: number }>` against
- * `Type<unknown>` member by member, passing or failing by its depth limit.
- */
-interface ObjectReceiver<out t, out i> {
-	readonly infer: t;
-	readonly inferIn: i;
-}
+declare const keyofType: unique symbol;
 
 /**
- * `keyof()`'s result for a receiver, distributed over a union of schemas so each member keeps its own
- * keys: `(typeof a | typeof b).keyof()` gives `FluentType<"a"> | FluentType<"b">`, as it did when the
- * method was typed from `t`.
+ * Carries output/input types covariantly on the method itself, so attached schema views do not
+ * need `infer` or `inferIn`. Keys are derived only through the receiver: deriving them directly
+ * from `t` would make the method contravariant and prevent schema covariance.
  */
-type KeyofResult<receiver> =
-	receiver extends ObjectReceiver<infer self, infer selfIn>
-		? FluentType<Extract<keyof self, PropertyKey>, Extract<keyof InputObject<selfIn>, PropertyKey>>
-		: never;
+export interface KeyofMethod<out t extends object, out i> {
+	readonly [keyofType]?: readonly [t, i];
+	<receiver extends { readonly keyof: KeyofMethod<object, unknown> }>(this: receiver): KeyofResult<receiver>;
+	/** Called detached (`bind`, `call`, or extracted), without an inferred receiver. */
+	(): FluentType<PropertyKey>;
+}
+
+/** Distributes over receiver unions so each schema retains its own output and input keys. */
+type KeyofResult<receiver> = receiver extends { readonly keyof: KeyofMethod<infer self, infer selfIn> }
+	? FluentType<Extract<keyof self, PropertyKey>, Extract<keyof InputObject<selfIn>, PropertyKey>>
+	: never;
 
 interface ObjectMethods<out t extends object, out i> {
 	readonly props: readonly TypeProperty[];
 	map(
 		mapper: (property: TypeProperty) => TypeProperty | readonly TypeProperty[],
 	): FluentType<Record<PropertyKey, unknown>>;
-	keyof<receiver extends ObjectReceiver<object, unknown>>(this: receiver): KeyofResult<receiver>;
-	/** Called detached (`bind`, `call`), where TypeScript does not pass the receiver's type. */
-	keyof(): FluentType<PropertyKey>;
+	readonly keyof: KeyofMethod<t, i>;
 	get<const path extends readonly PropertyKey[]>(...path: path): FluentType<unknown>;
 	pick<const keys extends readonly (keyof t)[]>(
 		...keys: keys
@@ -377,7 +373,7 @@ type ObjectMethodsFor<t, i> = [t] extends [never]
  * same `FluentType<string>` to `FluentType<unknown>` assignment passed in one
  * program and failed in another.
  */
-interface FluentCore<out t, out i> extends Type<t, i>, FluentMethods<t, i> {}
+export interface FluentCore<out t, out i> extends Type<t, i>, FluentMethods<t, i> {}
 /** Callable schema with fluent methods specialized to its output and input. */
 export type FluentType<t = unknown, i = t> = FluentCore<t, i> & ObjectMethodsFor<t, i>;
 
