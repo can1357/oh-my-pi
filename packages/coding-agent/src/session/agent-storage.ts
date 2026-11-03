@@ -471,6 +471,7 @@ FROM model_usage_legacy
 			dbPath,
 			db => {
 				const opened = new AgentStorage(db, dbPath);
+				if (preserved.backupPath !== undefined) opened.#authStore.recoverCredentialsFrom(preserved.backupPath);
 				// Publish synchronously: concurrent opens must reuse this handle before the helper yields.
 				// Exit-only cleanup keeps the connection valid for continuing sessions.
 				cancelExitCleanup ??= postmortem.register("agent-storage", () => AgentStorage.close(), { exitOnly: true });
@@ -484,7 +485,6 @@ FROM model_usage_legacy
 				},
 			},
 		);
-		if (preserved.backupPath !== undefined) await storage.#authStore.recoverCredentialsFrom(preserved.backupPath);
 		return storage;
 	}
 

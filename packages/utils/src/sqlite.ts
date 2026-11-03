@@ -12,13 +12,6 @@ import * as logger from "./logger";
 const BUSY_MAX_ATTEMPTS = 4;
 const BUSY_BASE_DELAY_MS = 100;
 const SQLITE_STORE_SUFFIXES = ["-wal", "-shm", "-journal", ""];
-/**
- * How long a quarantine waits for another connection's write transaction to end
- * before it copies and replaces the store anyway. Bounded: recovery must not
- * stall behind a peer that keeps the write lock for a long time.
- */
-const QUARANTINE_QUIESCE_ATTEMPTS = 5;
-const QUARANTINE_QUIESCE_DELAY_MS = 200;
 
 let sqliteLockShimInstalled: boolean | undefined;
 
@@ -226,49 +219,8 @@ function openOnce<T>(dbPath: string, initialize: (db: Database) => T, options: S
 	}
 }
 
-/**
- * True while another connection holds `dbPath`'s write lock. A WAL writer holds
- * that lock for its whole transaction, so a probe that cannot take it is looking
- * at a live writer. `SQLITE_BUSY` is the only answer that means "someone else is
- * writing"; anything else — including a store too damaged to open — leaves the
- * decision to the caller's own corruption handling.
- *
- * @internal Exported for the quarantine path's tests.
- */
-export function isSqliteStoreWriteLocked(dbPath: string): boolean {
-	let probe: Database | undefined;
-	try {
-		probe = new Database(dbPath, { create: false, readwrite: true });
-		// The caller picks how long to wait; the probe itself never blocks.
-		probe.run("PRAGMA busy_timeout = 0");
-		probe.run("BEGIN IMMEDIATE");
-		probe.run("ROLLBACK");
-		return false;
-	} catch (error) {
-		return isSqliteBusyError(error);
-	} finally {
-		try {
-			probe?.close();
-		} catch {}
-	}
-}
-
 function quarantineCorruptSqliteStore(dbPath: string, db: Database | undefined): string {
 	const backupPath = `${dbPath}.corrupt-${Date.now()}-${crypto.randomUUID()}`;
-	// Another connection's write transaction may still be appending to the store we
-	// are about to copy and replace: copying mid-transaction preserves a torn
-	// snapshot, and the preserved copy is what credentials are restored from.
-	// Wait for the writer to finish, bounded so a stuck peer cannot pin recovery.
-	// Best-effort by nature: an idle peer keeps its handle to the replaced inode
-	// regardless, which only cooperative locking across every opener can prevent.
-	for (let attempt = 0; attempt < QUARANTINE_QUIESCE_ATTEMPTS; attempt++) {
-		if (!isSqliteStoreWriteLocked(dbPath)) break;
-		if (attempt + 1 >= QUARANTINE_QUIESCE_ATTEMPTS) {
-			logger.warn("SQLite quarantine replacing a store another connection is still writing", { path: dbPath });
-			break;
-		}
-		Bun.sleepSync(QUARANTINE_QUIESCE_DELAY_MS);
-	}
 	const preserved: string[] = [];
 	// Closing a failed WAL connection can truncate its WAL. Copy evidence
 	// before closing, and remove originals only after every copy succeeds.
@@ -354,7 +306,6 @@ function recoverCorruptDatabase(dbPath: string, error: unknown, options: SqliteO
 	logger.warn("SQLite database corrupt; preserved damaged store before recreating it", {
 		path: dbPath,
 		backupPath,
-		warning: "Stored credentials from this database may require re-login.",
 	});
 	options.onCorruptionPreserved?.(backupPath, failure.original);
 }

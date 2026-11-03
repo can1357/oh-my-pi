@@ -221,3 +221,37 @@ test("agent.db corruption restores the credentials its preserved copy still hold
 	}
 	await expectQuarantinedDamage(dbPath, damaged);
 });
+
+test("every concurrent agent opener sees restored credentials before using the shared store", async () => {
+	await using tempDir = await TempDir.create("@omp-storage-errors-");
+	const dbPath = tempDir.join("agent.db");
+	const seeded = await SqliteAuthCredentialStore.open(dbPath);
+	await seeded.replaceAuthCredentials("openai", [
+		{ type: "api_key", key: "preserved-key" },
+		{ type: "oauth", access: "preserved-access", refresh: "preserved-refresh", expires: 123456789 },
+	]);
+	seeded.close();
+	const damaged = await corruptStorePage(dbPath, "auth_schema_version");
+
+	AgentStorage.close();
+	try {
+		const first = AgentStorage.open(dbPath);
+		// Cover callers arriving across the initializer's microtask boundaries, not
+		// only callers that await the initiating open before reading credentials.
+		const observers = Array.from({ length: 16 }, async (_, delay) => {
+			for (let tick = 0; tick < delay; tick++) await Promise.resolve();
+			const storage = await AgentStorage.open(dbPath);
+			return storage.listAuthCredentials("openai").map(row => row.credential);
+		});
+		await first;
+		for (const credentials of await Promise.all(observers)) {
+			expect(credentials).toEqual([
+				{ type: "api_key", key: "preserved-key" },
+				{ type: "oauth", access: "preserved-access", refresh: "preserved-refresh", expires: 123456789 },
+			]);
+		}
+	} finally {
+		AgentStorage.close();
+	}
+	await expectQuarantinedDamage(dbPath, damaged);
+});

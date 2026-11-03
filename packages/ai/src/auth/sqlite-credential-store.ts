@@ -608,7 +608,9 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 					// Ignore chmod failures (e.g., Windows)
 				}
 				SqliteAuthCredentialStore.#ensureAuthCredentialRefreshLeasesTable(db);
-				return new SqliteAuthCredentialStore(db);
+				const opened = new SqliteAuthCredentialStore(db);
+				if (preserved.backupPath !== undefined) opened.recoverCredentialsFrom(preserved.backupPath);
+				return opened;
 			},
 			{
 				recoverCorruption: true,
@@ -617,7 +619,6 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				},
 			},
 		);
-		if (preserved.backupPath !== undefined) await store.recoverCredentialsFrom(preserved.backupPath);
 		return store;
 	}
 
@@ -1326,7 +1327,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	 * @param backupPath - Path of the quarantined copy (`<db>.corrupt-<ts>-<uuid>`).
 	 * @returns Number of credentials imported.
 	 */
-	async recoverCredentialsFrom(backupPath: string): Promise<number> {
+	recoverCredentialsFrom(backupPath: string): number {
 		let backup: Database | undefined;
 		try {
 			backup = new Database(backupPath, { readonly: true });
@@ -1367,7 +1368,8 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 					continue;
 				}
 				try {
-					await this.upsertAuthCredential(row.provider, credential);
+					// Restore persisted fields verbatim, without OAuth login-time replacement rules.
+					this.#insertStmt.get(row.provider, row.credential_type, row.data, row.identity_key);
 					restored += 1;
 				} catch (error) {
 					skipped += 1;
