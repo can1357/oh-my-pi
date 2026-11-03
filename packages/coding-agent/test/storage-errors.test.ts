@@ -226,10 +226,13 @@ test("every concurrent agent opener sees restored credentials before using the s
 	await using tempDir = await TempDir.create("@omp-storage-errors-");
 	const dbPath = tempDir.join("agent.db");
 	const seeded = await SqliteAuthCredentialStore.open(dbPath);
-	await seeded.replaceAuthCredentials("openai", [
-		{ type: "api_key", key: "preserved-key" },
-		{ type: "oauth", access: "preserved-access", refresh: "preserved-refresh", expires: 123456789 },
-	]);
+	// Different providers avoid login-time replacement entirely, isolating the
+	// publication window from the mixed-provider salvage regression.
+	const expected = Array.from({ length: 32 }, (_, index) => ({
+		provider: `provider-${index}`,
+		credential: { type: "api_key" as const, key: `preserved-key-${index}` },
+	}));
+	for (const { provider, credential } of expected) await seeded.saveApiKey(provider, credential.key);
 	seeded.close();
 	const damaged = await corruptStorePage(dbPath, "auth_schema_version");
 
@@ -241,15 +244,10 @@ test("every concurrent agent opener sees restored credentials before using the s
 		const observers = Array.from({ length: 16 }, async (_, delay) => {
 			for (let tick = 0; tick < delay; tick++) await Promise.resolve();
 			const storage = await AgentStorage.open(dbPath);
-			return storage.listAuthCredentials("openai").map(row => row.credential);
+			return storage.listAuthCredentials().map(({ provider, credential }) => ({ provider, credential }));
 		});
 		await first;
-		for (const credentials of await Promise.all(observers)) {
-			expect(credentials).toEqual([
-				{ type: "api_key", key: "preserved-key" },
-				{ type: "oauth", access: "preserved-access", refresh: "preserved-refresh", expires: 123456789 },
-			]);
-		}
+		for (const credentials of await Promise.all(observers)) expect(credentials).toEqual(expected);
 	} finally {
 		AgentStorage.close();
 	}
