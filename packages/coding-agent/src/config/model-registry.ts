@@ -1344,18 +1344,21 @@ export class ModelRegistry {
 	}
 
 	/**
-	 * Register every enabled `discovery.type: litellm` alias with the LiteLLM
-	 * usage adapter so `/usage` can report its key/user budgets before any
-	 * discovery runs. Synchronous: `omp usage` probes right after construction.
+	 * Register every `discovery.type: litellm` alias with the LiteLLM usage
+	 * adapter so `/usage` can report its key/user budgets before any discovery
+	 * runs, and hand the host's `disabledProviders` to usage so a disabled
+	 * provider — alias or built-in — is never probed with any credential.
+	 * Synchronous: `omp usage` probes right after construction.
 	 */
 	#syncConfiguredUsageProviders(): void {
 		const disabledProviders = getDisabledProviderIdsFromSettings(this.#settings);
 		const configured = new Map<string, UsageProvider>();
 		for (const providerConfig of this.#discoverableProviders) {
-			if (providerConfig.discovery.type !== "litellm" || disabledProviders.has(providerConfig.provider)) continue;
+			if (providerConfig.discovery.type !== "litellm") continue;
 			configured.set(providerConfig.provider, litellmUsageProvider);
 		}
 		this.authStorage.usage.replaceConfiguredProviders(configured);
+		this.authStorage.usage.replaceDisabledProviders(disabledProviders);
 	}
 
 	#resetStaticComposition(): void {

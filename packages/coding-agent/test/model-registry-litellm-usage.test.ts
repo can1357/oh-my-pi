@@ -387,6 +387,32 @@ describe("ModelRegistry LiteLLM usage registration", () => {
 		expect(gateway.take()).toEqual([]);
 	});
 
+	test("a disabled built-in LiteLLM is never probed, with an env key or a stored key, until re-enabled", async () => {
+		await withEnv({ LITELLM_API_KEY: "fixture-env", LITELLM_BASE_URL: "https://builtin.example/v1" }, async () => {
+			using tempDir = TempDir.createSync("@omp-litellm-usage-");
+			const builtinUserInfo = "https://builtin.example/v2/user/info";
+			const gateway = createGateway({
+				[builtinUserInfo]: byBearer({ "fixture-env": userInfo("env-user", 10, 100) }),
+			});
+			writeModels(tempDir, {});
+			const settings = Settings.isolated();
+			cfgDisabledProviders.set(settings, ["litellm"]);
+			const authStorage = await createUsageStorage({ fetch: gateway.fetch, resolver: builtInLiteLLMOnly });
+			await authStorage.credentials.set("litellm", { type: "api_key", key: "sk-stored" });
+			const registry = createRegistry(authStorage, tempDir, { settings });
+
+			expect(authStorage.usage.providerFor("litellm")).toBeUndefined();
+			expect(await usageReports(authStorage, registry)).toEqual([]);
+			expect(await usageReports(authStorage, registry, "litellm")).toEqual([]);
+			expect(gateway.take()).toEqual([]);
+
+			cfgDisabledProviders.set(settings, []);
+			await registry.reapplyModelPolicies();
+			expect(budgetRows(await usageReports(authStorage, registry))).toEqual(["litellm litellm:user:budget 10/100"]);
+			expect(gateway.take()).toEqual([`fixture-env ${builtinUserInfo}`]);
+		});
+	});
+
 	test("built-in LiteLLM reports through its models.yml endpoint and key without a discovery block", async () => {
 		await withEnv({ LITELLM_API_KEY: "env-decoy", LITELLM_BASE_URL: "https://env-decoy.example/v1" }, async () => {
 			using tempDir = TempDir.createSync("@omp-litellm-usage-");

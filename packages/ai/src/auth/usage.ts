@@ -118,6 +118,8 @@ export class UsageService implements UsageApi {
 	#runtimeUsageProviderOverrides: Map<Provider, { provider: UsageProvider; apiKey?: string }> = new Map();
 	/** Configuration-registered providers (custom gateway aliases); above the injected resolver. */
 	#configuredUsageProviders: Map<Provider, UsageProvider> = new Map();
+	/** Host-disabled providers: no usage concept at all while present. */
+	#disabledProviders: Set<Provider> = new Set();
 	/** One probe per credential report key, tagged with the refresh epoch it can answer. */
 	#usageRequestInFlight: Map<string, { refreshEpoch: number; promise: Promise<UsageReport | null> }> = new Map();
 	#usageHeaderIngestAt: Map<string, number> = new Map();
@@ -146,11 +148,30 @@ export class UsageService implements UsageApi {
 	 * providers without a usage API) — the latter never warrants a usage row.
 	 */
 	providerFor(provider: Provider): UsageProvider | undefined {
+		return this.#disabledProviders.has(provider) ? undefined : this.registeredProviderFor(provider);
+	}
+
+	/**
+	 * Registration lookup that ignores the disabled set: runtime override →
+	 * configured → injected resolver. Cache namespaces follow it so a disabled
+	 * provider's snapshots keep their version segment and survive re-enabling.
+	 */
+	registeredProviderFor(provider: Provider): UsageProvider | undefined {
 		return (
 			this.#runtimeUsageProviderOverrides.get(provider)?.provider ??
 			this.#configuredUsageProviders.get(provider) ??
 			this.#deps.usageProviders(provider)
 		);
+	}
+
+	/**
+	 * Replace the providers the host has disabled. A disabled provider has no
+	 * usage concept for every consumer: it is neither enumerated nor probed
+	 * (stored, env, or pinned keys), reports no health, and its accounts are
+	 * not listed as lacking usage. Snapshots stay cached for re-enabling.
+	 */
+	replaceDisabledProviders(providers: ReadonlySet<Provider>): void {
+		this.#disabledProviders = new Set(providers);
 	}
 
 	/**
@@ -166,10 +187,11 @@ export class UsageService implements UsageApi {
 		});
 		this.#deps.cache.invalidateForProvider(provider);
 	}
-	/** Carry runtime and configured usage registrations over from the service this one replaces (store swap). */
+	/** Carry runtime/configured registrations and the disabled set over from the service this one replaces (store swap). */
 	adoptRegistrations(previous: UsageService): void {
 		this.#runtimeUsageProviderOverrides = new Map(previous.#runtimeUsageProviderOverrides);
 		this.#configuredUsageProviders = new Map(previous.#configuredUsageProviders);
+		this.#disabledProviders = new Set(previous.#disabledProviders);
 	}
 
 	/**

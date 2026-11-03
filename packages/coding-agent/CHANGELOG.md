@@ -167,6 +167,7 @@
 - Browser: a headless Chrome launched in-process by an SDK embedding or a `bun test` run now exits when that process is killed, instead of running on with its temporary profile on Linux and macOS ([#17908](https://github.com/can1357/oh-my-pi/pull/17908) by [@will-bogusz](https://github.com/will-bogusz))
 - `/usage` and `omp usage` show LiteLLM key and user budgets for the built-in `litellm` provider and for every models.yml provider declared with `discovery.type: litellm`, probed with that provider's configured key and endpoint without waiting for model discovery
 - `/usage` and `omp usage` show LiteLLM key and user budgets for the built-in `litellm` provider and for every models.yml provider declared with `discovery.type: litellm`, probed with that provider's configured key and endpoint without waiting for model discovery ([#17873](https://github.com/can1357/oh-my-pi/pull/17873) by [@maykonmichel](https://github.com/maykonmichel))
+- `/usage` and `omp usage` no longer probe providers listed in `disabledProviders`, with any credential; re-enabling a provider reuses its cached snapshot ([#17873](https://github.com/can1357/oh-my-pi/pull/17873) by [@maykonmichel](https://github.com/maykonmichel))
 
 ## [18.16.0] - 2026-11-02
 

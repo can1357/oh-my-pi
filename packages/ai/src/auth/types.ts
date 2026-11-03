@@ -1317,6 +1317,14 @@ export interface UsageApi {
 	 * reloads and first registrations keep their snapshots.
 	 */
 	replaceConfiguredProviders(providers: ReadonlyMap<Provider, UsageProvider>): void;
+	/**
+	 * Replace the providers the host has disabled. A disabled provider has no
+	 * usage concept: {@link providerFor} returns undefined, so it is neither
+	 * enumerated nor probed with any credential, reports no health, and its
+	 * accounts are not listed as lacking usage. Cached snapshots are kept for
+	 * re-enabling.
+	 */
+	replaceDisabledProviders(providers: ReadonlySet<Provider>): void;
 }
 
 /** Credential and model-level health probes. */

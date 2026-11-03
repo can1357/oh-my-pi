@@ -1810,6 +1810,39 @@ describe("AuthStorage usage cache: configured usage providers", () => {
 		expect(configured.calls).toBe(1);
 	});
 
+	it("gives a disabled provider no usage at all, and re-enabling reuses its snapshot", async () => {
+		const builtIn = countingUsageProvider("built-in", 30, 1);
+		const runtime = countingUsageProvider("runtime", 40, 2);
+		const storage = await openStorage(makeStore([gatewayRow()]), builtIn);
+		expect(gatewayReading(await storage.usage.reports())).toEqual({ source: "built-in", used: 30 });
+
+		// Disabled: not enumerated, not probed with its stored key, no usage concept for callers.
+		storage.usage.replaceDisabledProviders(new Set([GATEWAY_PROVIDER]));
+		expect(storage.usage.providerFor(GATEWAY_PROVIDER)).toBeUndefined();
+		expect(gatewayReading(await storage.usage.reports())).toBeUndefined();
+		expect(gatewayReading(await storage.usage.reports({ provider: GATEWAY_PROVIDER }))).toBeUndefined();
+		// A runtime extension adapter for a disabled provider is gated the same way.
+		storage.usage.setProvider(GATEWAY_PROVIDER, runtime);
+		expect(gatewayReading(await storage.usage.reports())).toBeUndefined();
+		storage.usage.removeProvider(GATEWAY_PROVIDER);
+		expect(runtime.calls).toBe(0);
+
+		// Re-enabled: the cached snapshot answers without a new probe.
+		storage.usage.replaceDisabledProviders(new Set());
+		expect(gatewayReading(await storage.usage.reports())).toEqual({ source: "built-in", used: 30 });
+		expect(builtIn.calls).toBe(1);
+	});
+
+	it("keeps the disabled set across a store swap", async () => {
+		const builtIn = countingUsageProvider("built-in", 30, 1);
+		const storage = await openStorage(makeStore([gatewayRow()]), builtIn);
+		storage.usage.replaceDisabledProviders(new Set([GATEWAY_PROVIDER]));
+
+		await storage.replaceStore(makeStore([gatewayRow()]));
+		expect(gatewayReading(await storage.usage.reports())).toBeUndefined();
+		expect(builtIn.calls).toBe(0);
+	});
+
 	it("copies the registration map, so later caller mutations change nothing", async () => {
 		const configuredA = countingUsageProvider("configured-a", 10);
 		const configuredB = countingUsageProvider("configured-b", 20);
