@@ -74,7 +74,7 @@ describe("read URL answered by a bot wall", () => {
 		servers.length = 0;
 	});
 
-	async function read(wall: () => Response, readerBody: string, raw?: true) {
+	async function read(wall: (request: Request) => Response, readerBody: string, raw?: true) {
 		vi.spyOn(toolsManager, "ensureTool").mockResolvedValue(undefined);
 		const server = Bun.serve({ port: 0, fetch: wall });
 		servers.push(server);
@@ -89,10 +89,20 @@ describe("read URL answered by a bot wall", () => {
 			path: `http://127.0.0.1:${server.port}/post${raw ? ":raw" : ""}`,
 		});
 		const text = result.content.find(block => block.type === "text")?.text ?? "";
-		return { method: result.details?.method, notes: result.details?.notes?.join("\n") ?? "", text, remoteCalls };
+		return {
+			method: result.details?.method,
+			finalUrl: result.details?.finalUrl,
+			notes: result.details?.notes?.join("\n") ?? "",
+			text,
+			remoteCalls,
+		};
 	}
 
-	const challenge = () => new Response(REDDIT_CHALLENGE, { headers: { "content-type": "text/html" } });
+	// The post's old URL redirects to its canonical one, which serves the challenge.
+	const challenge = (request: Request) =>
+		new URL(request.url).pathname === "/post"
+			? Response.redirect(new URL("/canonical", request.url).href, 301)
+			: new Response(REDDIT_CHALLENGE, { headers: { "content-type": "text/html" } });
 
 	it.each([
 		{
@@ -118,8 +128,11 @@ describe("read URL answered by a bot wall", () => {
 
 		expect(result.method).toBe(method);
 		expect(result.notes).toContain(note);
-		if (method === "jina") expect(result.text).toContain("Neural networks are not just another classifier");
-		else {
+		if (method === "jina") {
+			expect(result.text).toContain("Neural networks are not just another classifier");
+			expect(result.finalUrl).toEndWith("/canonical");
+			expect(result.remoteCalls[0]).toEndWith("/canonical");
+		} else {
 			expect(result.text).not.toMatch(/blocked by network security|Enable JavaScript/);
 			expect(result.notes).toContain("the browser tool");
 		}
@@ -153,6 +166,9 @@ describe("read URL answered by a bot wall", () => {
 		const article = `<html><head><title>Detecting bot walls</title></head><body><article><h1>Detecting bot walls</h1>
 <p>${"A challenge page carries markers that a scraper can recognise before it renders anything. ".repeat(4)}</p>
 <pre>window._cf_chl_opt={cType:'managed'}; &lt;input type="hidden" name="js_challenge"&gt; id="px-captcha" geo.captcha-delivery.com</pre>
+<!-- <input type="hidden" name="js_challenge"> -->
+<script>const sample = '<input type="hidden" name="js_challenge">';</script>
+<textarea><input type="hidden" name="js_challenge"></textarea>
 </article></body></html>`;
 		const result = await read(
 			() => new Response(article, { headers: { "content-type": "text/html" } }),
