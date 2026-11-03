@@ -21,6 +21,8 @@ matches_parser!(Md5sum, app);
 impl Utility for Md5sum {
 	const NAME: &'static str = "md5sum";
 	const USAGE_ERROR: u8 = 2;
+	/// GNU's `exit_failure`.
+	const OUTPUT_ERROR: u8 = 1;
 
 	fn run(self, host: &mut Host) -> i32 {
 		cksum::run(host, AlgoKind::Md5, self.matches, None)

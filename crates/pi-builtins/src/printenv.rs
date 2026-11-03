@@ -22,6 +22,8 @@ matches_parser!(Printenv, app);
 
 impl Utility for Printenv {
 	const NAME: &'static str = "printenv";
+	/// GNU `printenv`'s `exit_failure` (`PRINTENV_FAILURE`).
+	const OUTPUT_ERROR: u8 = 2;
 
 	fn run(self, host: &mut Host) -> i32 {
 		let variables = self

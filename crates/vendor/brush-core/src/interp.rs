@@ -6,6 +6,7 @@ use std::{
 };
 
 use brush_parser::ast::{self, CommandPrefixOrSuffixItem};
+use futures::future::BoxFuture;
 use itertools::Itertools;
 
 use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
@@ -512,7 +513,7 @@ impl Execute for ast::CompoundList {
 			let run_async = matches!(sep, ast::SeparatorOperator::Async);
 
 			if run_async {
-				let job = spawn_async_ao_list_as_job(ao_list, shell, params).await?;
+				let job = spawn_async_job(ao_list, shell, params).await?;
 				let job_formatted = job.to_pid_style_string();
 
 				if shell.options().interactive && !shell.is_subshell() {
@@ -537,6 +538,18 @@ impl Execute for ast::CompoundList {
 
 		Ok(result)
 	}
+}
+
+/// Starts `ao_list` as a background job (see [`spawn_async_ao_list_as_job`])
+/// as a boxed future built in this frame: the spawn adds nothing to the stack
+/// frame of [`ast::CompoundList::execute`], which every nested command runs
+/// under.
+fn spawn_async_job<'a, SE: extensions::ShellExtensions>(
+	ao_list: &'a ast::AndOrList,
+	shell: &'a mut Shell<SE>,
+	params: &'a ExecutionParameters,
+) -> BoxFuture<'a, Result<&'a jobs::Job, error::Error>> {
+	Box::pin(spawn_async_ao_list_as_job(ao_list, shell, params))
 }
 
 async fn spawn_async_ao_list_as_job<'a, SE: extensions::ShellExtensions>(
@@ -868,131 +881,169 @@ impl Execute for ast::Pipeline {
 		// Spawn all the processes required for the pipeline, connecting outputs/inputs
 		// with pipes as needed.
 		let (spawn_results, stopped_by_debug_trap) = spawn_pipeline_processes(self, shell, &params).await?;
+		finish_pipeline(self, spawn_results, stopped_by_debug_trap, shell, &params, stopwatch, err_trap_at_start).await
+	}
+}
 
-		// A command's DEBUG trap exited the shell, returned from a function or
-		// SIGPIPE killed the shell in it before the command started: the
-		// pipeline ends at once. Bash neither waits for the commands it already
-		// started nor stops them: they run on alone.
-		if let Some(stop) = stopped_by_debug_trap {
-			for (spawn_result, _) in spawn_results {
-				if let ExecutionSpawnResult::StartedProcess(child) = spawn_result {
-					child.detach();
-				}
+/// Settles `pipeline` once its commands started (see [`settle_pipeline`]),
+/// as a boxed future built in this frame: none of its rarely taken paths add
+/// to the stack frame of [`ast::Pipeline::execute`], which every command
+/// nested in the pipeline runs under.
+fn finish_pipeline<'a>(
+	pipeline: &'a ast::Pipeline,
+	spawn_results: VecDeque<(ExecutionSpawnResult, bool)>,
+	stopped_by_debug_trap: Option<ExecutionResult>,
+	shell: &'a mut Shell<impl extensions::ShellExtensions>,
+	params: &'a ExecutionParameters,
+	stopwatch: Option<timing::Stopwatch>,
+	err_trap_at_start: bool,
+) -> BoxFuture<'a, Result<ExecutionResult, error::Error>> {
+	Box::pin(settle_pipeline(
+		pipeline,
+		spawn_results,
+		stopped_by_debug_trap,
+		shell,
+		params,
+		stopwatch,
+		err_trap_at_start,
+	))
+}
+
+/// Settles `pipeline` once its commands started: waits for them, then runs
+/// what follows a pipeline (the SIGPIPE handler, the ERR trap, errexit, the
+/// timing report).
+async fn settle_pipeline(
+	pipeline: &ast::Pipeline,
+	spawn_results: VecDeque<(ExecutionSpawnResult, bool)>,
+	stopped_by_debug_trap: Option<ExecutionResult>,
+	shell: &mut Shell<impl extensions::ShellExtensions>,
+	params: &ExecutionParameters,
+	stopwatch: Option<timing::Stopwatch>,
+	err_trap_at_start: bool,
+) -> Result<ExecutionResult, error::Error> {
+	// A command's DEBUG trap exited the shell, returned from a function or
+	// SIGPIPE killed the shell in it before the command started: the
+	// pipeline ends at once. Bash neither waits for the commands it already
+	// started nor stops them: they run on alone.
+	if let Some(stop) = stopped_by_debug_trap {
+		for (spawn_result, _) in spawn_results {
+			if let ExecutionSpawnResult::StartedProcess(child) = spawn_result {
+				child.detach();
 			}
-			if shell.wrote_to_broken_pipe() {
-				return Ok(end_killed_shell(shell));
-			}
-			shell.set_last_exit_status(stop.exit_code.into());
-			return Ok(stop);
 		}
-
-		// Wait for the processes. This also has a side effect of updating pipeline
-		// status.
-		let mut result =
-			wait_for_pipeline_processes_and_update_status(self, spawn_results, shell, &params).await?;
-
-		// Virtual files the pipeline's redirections opened close in the
-		// background once dropped. Settle them so the next command observes
-		// committed contents, and so a failed commit fails this pipeline.
-		if let Err(close_error) = shell.filesystem().drain_closes().await {
-			let mut stderr = params.stderr(shell);
-			shell
-				.conclude_error(close_error.into(), Some(&mut stderr), DiagnosticWriter::Shell)
-				.await;
-			result.exit_code = ExecutionExitCode::GeneralError;
-		}
-
-		// A caught SIGPIPE a write in the pipeline raised runs its handler now;
-		// an `exit` or `return` in the handler ends the pipeline with it.
-		if let Some(handler_result) = shell.run_pending_sigpipe_trap(&params).await? {
-			shell.set_last_exit_status(handler_result.exit_code.into());
-			return Ok(handler_result);
-		}
-
-		// SIGPIPE killed the shell during the pipeline (a write of its own found
-		// a pipe with no reader): nothing below (the ERR trap, errexit, the
-		// timing report) happens.
 		if shell.wrote_to_broken_pipe() {
 			return Ok(end_killed_shell(shell));
 		}
-
-		// Invert the exit code if requested.
-		if self.bang {
-			result.exit_code = ExecutionExitCode::from(if result.is_success() { 1 } else { 0 });
-		}
-
-		// Update exit status.
-		shell.set_last_exit_status(result.exit_code.into());
-
-		// Fire the ERR trap if the pipeline failed in a non-conditional context.
-		// We reuse `suppress_errexit` here because bash suppresses the ERR trap in
-		// exactly the same contexts it suppresses errexit (conditionals, `!`-prefixed
-		// pipelines, etc.). Bash runs no ERR trap for `return` or `exit` (their
-		// status is the function's or shell's, not a failure of theirs).
-		if !result.is_success()
-			&& !result.is_return_or_exit()
-			&& !params.suppress_errexit
-			&& !self.bang
-			&& err_trap_at_start
-		{
-			if shell.traps().handles(crate::traps::TrapSignal::Err) {
-				let handler_result = shell
-					.invoke_trap_handler(crate::traps::TrapSignal::Err, &params)
-					.await?;
-				// SIGPIPE killed the shell in the handler.
-				if shell.wrote_to_broken_pipe() {
-					return Ok(end_killed_shell(shell));
-				}
-				// An `exit` or `return` in the handler acts here, as in Bash.
-				if handler_result.is_return_or_exit() {
-					shell.set_last_exit_status(handler_result.exit_code.into());
-					return Ok(handler_result);
-				}
-			}
-		}
-
-		// Apply errexit if not suppressed (and not negated)
-		if !params.suppress_errexit && !self.bang {
-			shell.apply_errexit_if_enabled(&mut result);
-		}
-
-		// If requested, report timing.
-		if let (Some(timed), Some(stopwatch)) = (&self.timed, &stopwatch)
-			&& let Some(mut stderr) = params.try_fd(shell, openfiles::OpenFiles::STDERR_FD)
-		{
-			let timing = stopwatch.stop()?;
-			let report = if timed.is_posix_output() {
-				std::format!(
-					"real {}\nuser {}\nsys {}\n",
-					timing::format_duration_posixly(&timing.wall),
-					timing::format_duration_posixly(&timing.user),
-					timing::format_duration_posixly(&timing.system),
-				)
-			} else {
-				std::format!(
-					"\nreal\t{}\nuser\t{}\nsys\t{}\n",
-					timing::format_duration_non_posixly(&timing.wall),
-					timing::format_duration_non_posixly(&timing.user),
-					timing::format_duration_non_posixly(&timing.system),
-				)
-			};
-			if let Err(err) = stderr.write_all_async(report.as_bytes()).await {
-				if err.kind() != std::io::ErrorKind::BrokenPipe {
-					return Err(err.into());
-				}
-				if shell.raise_sigpipe(err).is_err() {
-					return Ok(end_killed_shell(shell));
-				}
-				// The report raised a caught SIGPIPE: its handler runs now.
-				if let Some(handler_result) = shell.run_pending_sigpipe_trap(&params).await? {
-					shell.set_last_exit_status(handler_result.exit_code.into());
-					return Ok(handler_result);
-				}
-			}
-		}
-
-		Ok(result)
+		shell.set_last_exit_status(stop.exit_code.into());
+		return Ok(stop);
 	}
+
+	// Wait for the processes. This also has a side effect of updating pipeline
+	// status.
+	let mut result =
+		wait_for_pipeline_processes_and_update_status(pipeline, spawn_results, shell, params).await?;
+
+	// Virtual files the pipeline's redirections opened close in the
+	// background once dropped. Settle them so the next command observes
+	// committed contents, and so a failed commit fails this pipeline.
+	if let Err(close_error) = shell.filesystem().drain_closes().await {
+		let mut stderr = params.stderr(shell);
+		shell
+			.conclude_error(close_error.into(), Some(&mut stderr), DiagnosticWriter::Shell)
+			.await;
+		result.exit_code = ExecutionExitCode::GeneralError;
+	}
+
+	// A caught SIGPIPE a write in the pipeline raised runs its handler now;
+	// an `exit` or `return` in the handler ends the pipeline with it.
+	if let Some(handler_result) = shell.run_pending_sigpipe_trap(params).await? {
+		shell.set_last_exit_status(handler_result.exit_code.into());
+		return Ok(handler_result);
+	}
+
+	// SIGPIPE killed the shell during the pipeline (a write of its own found
+	// a pipe with no reader): nothing below (the ERR trap, errexit, the
+	// timing report) happens.
+	if shell.wrote_to_broken_pipe() {
+		return Ok(end_killed_shell(shell));
+	}
+
+	// Invert the exit code if requested.
+	if pipeline.bang {
+		result.exit_code = ExecutionExitCode::from(if result.is_success() { 1 } else { 0 });
+	}
+
+	// Update exit status.
+	shell.set_last_exit_status(result.exit_code.into());
+
+	// Fire the ERR trap if the pipeline failed in a non-conditional context.
+	// We reuse `suppress_errexit` here because bash suppresses the ERR trap in
+	// exactly the same contexts it suppresses errexit (conditionals, `!`-prefixed
+	// pipelines, etc.). Bash runs no ERR trap for `return` or `exit` (their
+	// status is the function's or shell's, not a failure of theirs).
+	if !result.is_success()
+		&& !result.is_return_or_exit()
+		&& !params.suppress_errexit
+		&& !pipeline.bang
+		&& err_trap_at_start
+	{
+		if shell.traps().handles(crate::traps::TrapSignal::Err) {
+			let handler_result = shell
+				.invoke_trap_handler(crate::traps::TrapSignal::Err, params)
+				.await?;
+			// SIGPIPE killed the shell in the handler.
+			if shell.wrote_to_broken_pipe() {
+				return Ok(end_killed_shell(shell));
+			}
+			// An `exit` or `return` in the handler acts here, as in Bash.
+			if handler_result.is_return_or_exit() {
+				shell.set_last_exit_status(handler_result.exit_code.into());
+				return Ok(handler_result);
+			}
+		}
+	}
+
+	// Apply errexit if not suppressed (and not negated)
+	if !params.suppress_errexit && !pipeline.bang {
+		shell.apply_errexit_if_enabled(&mut result);
+	}
+
+	// If requested, report timing.
+	if let (Some(timed), Some(stopwatch)) = (&pipeline.timed, &stopwatch)
+		&& let Some(mut stderr) = params.try_fd(shell, openfiles::OpenFiles::STDERR_FD)
+	{
+		let timing = stopwatch.stop()?;
+		let report = if timed.is_posix_output() {
+			std::format!(
+				"real {}\nuser {}\nsys {}\n",
+				timing::format_duration_posixly(&timing.wall),
+				timing::format_duration_posixly(&timing.user),
+				timing::format_duration_posixly(&timing.system),
+			)
+		} else {
+			std::format!(
+				"\nreal\t{}\nuser\t{}\nsys\t{}\n",
+				timing::format_duration_non_posixly(&timing.wall),
+				timing::format_duration_non_posixly(&timing.user),
+				timing::format_duration_non_posixly(&timing.system),
+			)
+		};
+		if let Err(err) = stderr.write_all_async(report.as_bytes()).await {
+			if err.kind() != std::io::ErrorKind::BrokenPipe {
+				return Err(err.into());
+			}
+			if shell.raise_sigpipe(err).is_err() {
+				return Ok(end_killed_shell(shell));
+			}
+			// The report raised a caught SIGPIPE: its handler runs now.
+			if let Some(handler_result) = shell.run_pending_sigpipe_trap(params).await? {
+				shell.set_last_exit_status(handler_result.exit_code.into());
+				return Ok(handler_result);
+			}
+		}
+	}
+
+	Ok(result)
 }
 
 /// Returns the result of a pipeline whose shell SIGPIPE killed: the shell
@@ -1386,21 +1437,7 @@ impl Execute for ast::CompoundCommand {
 				// from propagating to the parent shell.
 				let subshell_result = match list.execute(&mut subshell, params).await {
 					Ok(result) => result,
-					// The subshell reports its own error, per its own SIGPIPE
-					// disposition (only its exit status reaches this shell). A
-					// diagnostic that finds a pipe with no reader kills it by default,
-					// as SIGPIPE kills Bash's subshell; a caught SIGPIPE runs the
-					// subshell's handler before it ends.
-					Err(error) => {
-						let mut stderr = params.reports_errors().then(|| params.stderr(&subshell));
-						let result = subshell
-							.conclude_error(error, stderr.as_mut(), DiagnosticWriter::Shell)
-							.await;
-						subshell
-							.run_pending_sigpipe_trap(params)
-							.await?
-							.unwrap_or(result)
-					},
+					Err(error) => conclude_subshell_error(&mut subshell, error, params).await?,
 				};
 				// A subshell that SIGPIPE killed leaves the SIGPIPE status.
 				let subshell_result = subshell.subshell_outcome(Ok(subshell_result))?;
@@ -1419,6 +1456,35 @@ impl Execute for ast::CompoundCommand {
 			Self::Coprocess(c) => c.execute(shell, params).await,
 		}
 	}
+}
+
+/// Ends a subshell whose body failed with `error` (see
+/// [`settle_subshell_error`]), as a boxed future built in this frame: this
+/// rare path adds nothing to the stack frame of
+/// [`ast::CompoundCommand::execute`], which every nested command runs under.
+fn conclude_subshell_error<'a>(
+	subshell: &'a mut Shell<impl extensions::ShellExtensions>,
+	error: error::Error,
+	params: &'a ExecutionParameters,
+) -> BoxFuture<'a, Result<ExecutionResult, error::Error>> {
+	Box::pin(settle_subshell_error(subshell, error, params))
+}
+
+/// Ends a subshell whose body failed with `error`: the subshell reports its
+/// own error, per its own SIGPIPE disposition (only its exit status reaches
+/// the parent shell). A diagnostic that finds a pipe with no reader kills it
+/// by default, as SIGPIPE kills Bash's subshell; a caught SIGPIPE runs the
+/// subshell's handler before it ends.
+async fn settle_subshell_error(
+	subshell: &mut Shell<impl extensions::ShellExtensions>,
+	error: error::Error,
+	params: &ExecutionParameters,
+) -> Result<ExecutionResult, error::Error> {
+	let mut stderr = params.reports_errors().then(|| params.stderr(subshell));
+	let result = subshell
+		.conclude_error(error, stderr.as_mut(), DiagnosticWriter::Shell)
+		.await;
+	Ok(subshell.run_pending_sigpipe_trap(params).await?.unwrap_or(result))
 }
 
 #[async_trait::async_trait]
@@ -2113,9 +2179,7 @@ async fn run_debug_trap(
 		);
 	}
 	if shell.traps().handles(crate::traps::TrapSignal::Debug)
-		&& let Ok(result) = shell
-			.invoke_trap_handler(crate::traps::TrapSignal::Debug, params)
-			.await
+		&& let Ok(result) = invoke_debug_trap(shell, params).await
 		&& result.is_return_or_exit()
 		&& !shell.wrote_to_broken_pipe()
 	{
@@ -2124,6 +2188,16 @@ async fn run_debug_trap(
 	shell
 		.wrote_to_broken_pipe()
 		.then(|| end_killed_shell(shell))
+}
+
+/// Runs the DEBUG trap's handler as a boxed future, built in this frame: the
+/// future of [`run_debug_trap`], which every simple command awaits, then
+/// holds a pointer, not the handler's whole execution.
+fn invoke_debug_trap<'a>(
+	shell: &'a mut Shell<impl extensions::ShellExtensions>,
+	params: &'a ExecutionParameters,
+) -> BoxFuture<'a, Result<ExecutionResult, error::Error>> {
+	Box::pin(shell.invoke_trap_handler(crate::traps::TrapSignal::Debug, params))
 }
 
 async fn execute_command(

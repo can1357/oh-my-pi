@@ -102,6 +102,12 @@ impl Utility for Rsync {
 	}
 
 	fn run(self, host: &mut Host) -> i32 {
+		// rsync ignores SIGPIPE and the errors of its standard output: a dead
+		// output pipe leaves the transfer and its status alone, and a
+		// diagnostic it cannot write ends the run with RERR_MESSAGEIO (see
+		// `Logger::emit`; measured against rsync 3.5.1 under Bash 5.2.21).
+		host.ignore_sigpipe();
+		host.checks_own_output();
 		let mut argv = Vec::with_capacity(self.args.len() + 1);
 		argv.push(OsString::from(Self::NAME));
 		argv.extend(self.args);

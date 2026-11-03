@@ -16,7 +16,7 @@ use crate::{
 	error::unsupported,
 	metadata::Metadata,
 	native,
-	runtime::{CloseTicket, CloseTracker, Scope, block_on, offload, park_on},
+	runtime::{CloseTicket, CloseTracker, Scope, WriteErrors, block_on, offload, park_on},
 	types::{FileId, FileTime, Permissions},
 };
 
@@ -84,11 +84,14 @@ pub trait FileHandle: Send + Sync + fmt::Debug + 'static {
 /// `*_async` equivalents. Synchronous I/O on provider handles is for blocking
 /// workers and foreign threads; async code must use the `*_async` methods.
 pub struct File {
-	repr:        Repr,
+	repr:         Repr,
 	/// Cancellation of the facade that opened this host file: once it fires,
 	/// reads fail with [`crate::cancelled`]. Provider files keep theirs in
 	/// [`Shared`].
-	read_cancel: Option<HostCancel>,
+	read_cancel:  Option<HostCancel>,
+	/// Told of every failed write, from the facade that opened the file; see
+	/// [`crate::Fs::with_write_errors`].
+	write_errors: Option<WriteErrors>,
 }
 
 /// How reads of a host file opened through a cancellable facade observe its
@@ -446,7 +449,7 @@ impl fmt::Debug for File {
 
 impl From<std::fs::File> for File {
 	fn from(file: std::fs::File) -> Self {
-		Self { repr: Repr::Native(file), read_cancel: None }
+		Self { repr: Repr::Native(file), read_cancel: None, write_errors: None }
 	}
 }
 
@@ -501,19 +504,22 @@ impl File {
 	/// Wraps a shared provider handle; see [`File::from_handle`].
 	pub fn from_arc(handle: Arc<dyn FileHandle>) -> Self {
 		Self {
-			repr:        Repr::Virtual(Arc::new(Shared {
+			repr:         Repr::Virtual(Arc::new(Shared {
 				handle:  Some(handle),
 				runtime: Handle::try_current().ok(),
 				cancel:  None,
 				closes:  None,
 			})),
-			read_cancel: None,
+			read_cancel:  None,
+			write_errors: None,
 		}
 	}
 
-	/// Attaches a facade's cancellation token and close tracker to a freshly
-	/// opened file. A host file only takes the token, for its reads.
+	/// Attaches a facade's cancellation token, close tracker and write-error
+	/// hook to a freshly opened file. A host file only takes the token, for
+	/// its reads, and the hook.
 	pub(crate) fn bind(mut self, scope: &Scope) -> Self {
+		self = self.bind_writes(scope);
 		if let Repr::Native(file) = &self.repr {
 			self.read_cancel = scope
 				.cancel
@@ -534,6 +540,15 @@ impl File {
 		self
 	}
 
+	/// Attaches a facade's write-error hook (see
+	/// [`crate::Fs::with_write_errors`]) unless the file has one.
+	pub(crate) fn bind_writes(mut self, scope: &Scope) -> Self {
+		if self.write_errors.is_none() {
+			self.write_errors.clone_from(&scope.write_errors);
+		}
+		self
+	}
+
 	/// [`Self::bind`] for a host file whose type the opener already knows
 	/// (`poll`: not a regular file), so binding takes no `fstat`.
 	#[cfg(unix)]
@@ -542,6 +557,24 @@ impl File {
 			self.read_cancel = Some(HostCancel { token, poll });
 		}
 		self
+	}
+
+	/// Tells the facade that opened this file of a failed write (see
+	/// [`crate::Fs::with_write_errors`]) before the writer sees it.
+	fn wrote<T>(&self, result: io::Result<T>) -> io::Result<T> {
+		if let (Err(error), Some(write_errors)) = (&result, &self.write_errors) {
+			write_errors.report(error);
+		}
+		result
+	}
+
+	/// Tells the facade that opened this file of an error a write made
+	/// through its host file directly ([`File::native`]: a kernel copy), as
+	/// this file's own writes do (see [`crate::Fs::with_write_errors`]).
+	pub fn report_write_error(&self, error: &io::Error) {
+		if let Some(write_errors) = &self.write_errors {
+			write_errors.report(error);
+		}
 	}
 
 	/// The host file, for fd-level fast paths (mmap, `lseek`, ...).
@@ -555,7 +588,9 @@ impl File {
 	pub fn into_native(self) -> Result<std::fs::File, Self> {
 		match self.repr {
 			Repr::Native(file) => Ok(file),
-			repr @ Repr::Virtual(_) => Err(Self { repr, read_cancel: self.read_cancel }),
+			repr @ Repr::Virtual(_) => {
+				Err(Self { repr, read_cancel: self.read_cancel, write_errors: self.write_errors })
+			},
 		}
 	}
 
@@ -566,11 +601,12 @@ impl File {
 	/// A second handle sharing this one's position (`dup`).
 	pub fn try_clone(&self) -> io::Result<Self> {
 		Ok(Self {
-			repr:        match &self.repr {
+			repr:         match &self.repr {
 				Repr::Native(file) => Repr::Native(file.try_clone()?),
 				Repr::Virtual(shared) => Repr::Virtual(Arc::clone(shared)),
 			},
-			read_cancel: self.read_cancel.clone(),
+			read_cancel:  self.read_cancel.clone(),
+			write_errors: self.write_errors.clone(),
 		})
 	}
 
@@ -717,17 +753,19 @@ impl File {
 	}
 
 	pub async fn write_async(&self, buf: &[u8]) -> io::Result<usize> {
-		match &self.repr {
+		let result = match &self.repr {
 			Repr::Native(file) => host(file).write(buf),
 			Repr::Virtual(shared) => shared.guard(shared.handle().write(buf)).await,
-		}
+		};
+		self.wrote(result)
 	}
 
 	pub async fn write_all_async(&self, buf: &[u8]) -> io::Result<()> {
-		match &self.repr {
+		let result = match &self.repr {
 			Repr::Native(file) => host(file).write_all(buf),
 			Repr::Virtual(shared) => shared.guard(write_all_handle(shared.handle(), buf)).await,
-		}
+		};
+		self.wrote(result)
 	}
 
 	/// A host file bound to a token is read off the runtime worker (see
@@ -771,10 +809,11 @@ impl File {
 	}
 
 	pub async fn flush_async(&self) -> io::Result<()> {
-		match &self.repr {
+		let result = match &self.repr {
 			Repr::Native(_) => Ok(()),
 			Repr::Virtual(shared) => shared.guard(shared.handle().flush()).await,
-		}
+		};
+		self.wrote(result)
 	}
 
 	pub async fn seek_async(&self, pos: SeekFrom) -> io::Result<u64> {
@@ -890,24 +929,27 @@ impl Read for &File {
 
 impl Write for &File {
 	fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-		match &self.repr {
+		let result = match &self.repr {
 			Repr::Native(file) => host(file).write(buf),
 			Repr::Virtual(shared) => shared.run(shared.handle().write(buf)),
-		}
+		};
+		self.wrote(result)
 	}
 
 	fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
-		match &self.repr {
+		let result = match &self.repr {
 			Repr::Native(file) => host(file).write_all(buf),
 			Repr::Virtual(shared) => shared.run(write_all_handle(shared.handle(), buf)),
-		}
+		};
+		self.wrote(result)
 	}
 
 	fn flush(&mut self) -> io::Result<()> {
-		match &self.repr {
+		let result = match &self.repr {
 			Repr::Native(_) => Ok(()),
 			Repr::Virtual(shared) => shared.run(shared.handle().flush()),
-		}
+		};
+		self.wrote(result)
 	}
 }
 

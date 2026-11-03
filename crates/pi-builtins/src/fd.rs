@@ -569,8 +569,17 @@ struct SearchState {
 impl AsyncUtility for FdCli {
 	const NAME: &'static str = "fd";
 	const USAGE_ERROR: u8 = 2;
+	/// fd writes standard output through an 8 KiB `BufWriter`.
+	const STDOUT_BUFFER: usize = 8 * 1024;
 
 	async fn run(mut self, host: &mut Host) -> i32 {
+		// fd, a Rust program, ignores SIGPIPE: it ends with status 1 once its
+		// output finds the reader gone (its final flush fails), and an error
+		// message it cannot write panics `eprintln!` (status 101); it never
+		// checks its streams at exit.
+		host.ignore_sigpipe();
+		host.checks_own_output();
+		host.exit_at_broken_stderr(101);
 		let quiet = self.quiet;
 		let base_dir = self
 			.base_directory
@@ -583,6 +592,15 @@ impl AsyncUtility for FdCli {
 			.collect();
 		match search(self, base_dir, host).await {
 			Ok(state) => {
+				// fd flushes its output before it exits; one that finds the
+				// reader gone ends it with ExitCode::GeneralError.
+				if host
+					.flush_stdout_now()
+					.await
+					.is_err_and(|error| error.kind() == io::ErrorKind::BrokenPipe)
+				{
+					return 1;
+				}
 				if state.had_error {
 					2
 				} else if quiet {
@@ -591,10 +609,8 @@ impl AsyncUtility for FdCli {
 					0
 				}
 			},
-			// Abort the walk; the host maps the BrokenPipe status.
-			Err(err) if err.kind() == io::ErrorKind::BrokenPipe => {
-				crate::host::BROKEN_WRITE
-			},
+			// fd's output found its reader gone: it ends with ExitCode::GeneralError.
+			Err(err) if err.kind() == io::ErrorKind::BrokenPipe => 1,
 			Err(err) => {
 				let _ = writeln!(host.stderr, "fd: {err}");
 				2

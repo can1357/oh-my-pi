@@ -87,6 +87,30 @@ pub(crate) struct Scope {
 	/// Mode bits cleared from host creations; see
 	/// [`crate::Fs::with_creation_mask`].
 	pub(crate) creation_mask: Option<u32>,
+	/// Told of every failed write to a file opened through the facade; see
+	/// [`crate::Fs::with_write_errors`].
+	pub(crate) write_errors:  Option<WriteErrors>,
+}
+
+/// Told of each error a write to a file opened through a facade returns,
+/// before the writer sees it (see [`crate::Fs::with_write_errors`]).
+#[derive(Clone)]
+pub struct WriteErrors(Arc<dyn Fn(&io::Error) + Send + Sync>);
+
+impl WriteErrors {
+	pub fn new(report: impl Fn(&io::Error) + Send + Sync + 'static) -> Self {
+		Self(Arc::new(report))
+	}
+
+	pub(crate) fn report(&self, error: &io::Error) {
+		(self.0)(error);
+	}
+}
+
+impl std::fmt::Debug for WriteErrors {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.write_str("WriteErrors")
+	}
 }
 
 impl Scope {

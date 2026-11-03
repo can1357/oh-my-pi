@@ -5041,6 +5041,12 @@ pub fn runtime_error<T>(location: &ScriptLocation, msg: impl ToString) -> SedRes
 	location_error(location, msg, 2)
 }
 
+/// Fails with an output error at the command location: GNU sed panics
+/// (`ck_fwrite`, `ck_fclose`) with status 4.
+pub fn output_error<T>(location: &ScriptLocation, msg: impl ToString) -> SedResult<T> {
+	location_error(location, msg, 4)
+}
+
 /// Fails with a runtime error including command and input locations.
 pub fn input_runtime_error<T>(
 	location: &ScriptLocation,
@@ -7651,7 +7657,7 @@ pub mod named_writer {
 
 use std::{
 	cell::RefCell,
-	io::{BufWriter, Write},
+	io::{self, Write},
 	path::PathBuf,
 	rc::Rc,
 };
@@ -7664,7 +7670,7 @@ use crate::sed::fast_io::OutputBuffer;
 use uucore::display::Quotable;
 use crate::sed::error_handling::SedResult;
 
-use crate::sed::error_handling::{ScriptLocation, runtime_error};
+use crate::sed::error_handling::{ScriptLocation, output_error, runtime_error};
 
 thread_local! {
 	 /// Global list of all writers that should be flushed at shutdown
@@ -7674,7 +7680,7 @@ thread_local! {
 /// Where a `w` file's lines go.
 #[derive(Debug)]
 enum Target {
-	File(BufWriter<File>),
+	File(BlockWriter),
 	/// `w /dev/stdout`: sed's own output stream, as GNU sed does, so the lines
 	/// interleave with `p` output in order instead of racing it through a
 	/// second open of the same file.
@@ -7683,6 +7689,51 @@ enum Target {
 	Stderr,
 	/// A file already flushed and closed by [`flush_all`].
 	Closed,
+}
+
+/// stdio's buffer for a `w` file: one block.
+const BLOCK: usize = 4096;
+
+/// A `w` file's buffer as GNU sed's stdio keeps it: each block is written as
+/// it fills, and the rest at a flush or at exit (see [`flush_at_exit`]), or
+/// lost when sed dies (see [`reset`]), as a killed process's buffers are.
+#[derive(Debug)]
+struct BlockWriter {
+	file:   File,
+	buffer: Vec<u8>,
+}
+
+impl BlockWriter {
+	fn new(file: File) -> Self {
+		Self { file, buffer: Vec::with_capacity(BLOCK) }
+	}
+
+	/// Writes out the buffer and returns the file.
+	fn into_file(mut self) -> io::Result<File> {
+		self.flush()?;
+		Ok(self.file)
+	}
+}
+
+impl Write for BlockWriter {
+	fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+		let mut rest = buf;
+		while !rest.is_empty() {
+			let take = (BLOCK - self.buffer.len()).min(rest.len());
+			self.buffer.extend_from_slice(&rest[..take]);
+			rest = &rest[take..];
+			if self.buffer.len() == BLOCK {
+				self.flush()?;
+			}
+		}
+		Ok(buf.len())
+	}
+
+	fn flush(&mut self) -> io::Result<()> {
+		let result = (&self.file).write_all(&self.buffer);
+		self.buffer.clear();
+		result
+	}
 }
 
 #[derive(Debug)]
@@ -7718,7 +7769,7 @@ impl NamedWriter {
 						runtime_error::<()>(&location, format!("creating file {}: {}", path.quote(), e))
 							.unwrap_err()
 					})?;
-				Target::File(BufWriter::new(file))
+				Target::File(BlockWriter::new(file))
 			},
 		};
 
@@ -7747,7 +7798,7 @@ impl NamedWriter {
 			Target::Closed => Err(std::io::Error::other("file already closed")),
 		};
 		result.map_err(|e| {
-			runtime_error::<()>(&self.location, format!("writing to file {}: {e}", self.path.quote()))
+			output_error::<()>(&self.location, format!("writing to file {}: {e}", self.path.quote()))
 				.unwrap_err()
 		})
 	}
@@ -7764,35 +7815,67 @@ impl NamedWriter {
 				return Ok(());
 			},
 		};
-		writer.into_inner().map_err(|e| e.into_error()).and_then(File::close).map_err(|e| {
-			runtime_error::<()>(
-				&self.location,
-				format!("writing to file {}: {}", self.path.quote(), e),
-			)
-			.unwrap_err()
+		writer.into_file().and_then(File::close).map_err(|e| {
+			output_error::<()>(&self.location, format!("writing to file {}: {}", self.path.quote(), e))
+				.unwrap_err()
 		})
+	}
+
+	/// Closes the file with its buffer unwritten, as the buffers of a process
+	/// that died are lost.
+	fn discard(&mut self) {
+		if let Target::File(writer) = std::mem::replace(&mut self.target, Target::Closed) {
+			drop(writer.file);
+		}
 	}
 }
 
-/// Flush buffered content to the files and close them, returning
-/// descriptive errors.
+/// Flush buffered content to the files and close them, returning the first
+/// error. A failed close ends sed (GNU's `ck_fclose` panics), and its exit
+/// still writes the other files, so each is closed.
 // the registry is drained (not just
 // iterated) so open files do not outlive the invocation on a reused thread.
 pub fn flush_all() -> SedResult<()> {
 	FLUSH_LIST.with(|cell| {
+		let mut result = Ok(());
 		for handle in cell.borrow_mut().drain(..) {
-			handle.borrow_mut().close()?;
+			let closed = handle.borrow_mut().close();
+			if result.is_ok() {
+				result = closed;
+			}
 		}
-
-		Ok(())
+		result
 	})
+}
+
+/// Writes out and closes every file, ignoring errors, as the exit that ends
+/// sed after an error does (GNU sed's `panic` ends with `exit`).
+pub fn flush_at_exit() {
+	let _ = flush_all();
 }
 
 /// Clear the thread-local writer registry. Called at builtin entry so
 /// writers registered by a previous invocation on the same thread (one that
-/// failed before reaching `flush_all`) cannot leak into this run.
+/// died before reaching `flush_all`) cannot leak into this run; their
+/// buffers are dropped unwritten, as a dead process's are, so a finished
+/// run's bytes never reach a file late.
 pub fn reset() {
-	FLUSH_LIST.with(|cell| cell.borrow_mut().clear());
+	FLUSH_LIST.with(|cell| {
+		for handle in cell.borrow_mut().drain(..) {
+			handle.borrow_mut().discard();
+		}
+	});
+}
+
+/// Clears the registry when sed's run ends without closing its files: it
+/// died (SIGPIPE, a panic), and a dead process's buffers are lost (see
+/// [`reset`]).
+pub struct DeathGuard;
+
+impl Drop for DeathGuard {
+	fn drop(&mut self) {
+		reset();
+	}
 }
 }
 pub mod processor {
@@ -9361,6 +9444,8 @@ matches_parser!(Sed, uu_app);
 
 impl Utility for Sed {
 	const NAME: &'static str = "sed";
+	/// GNU `sed` ends with `EXIT_PANIC` when its output fails.
+	const OUTPUT_ERROR: u8 = 4;
 
 	fn rewrite_argv(argv: Vec<OsString>) -> Result<Vec<OsString>, String> {
 		Ok(normalize_args(argv))
@@ -9368,6 +9453,8 @@ impl Utility for Sed {
 
 	fn run(self, host: &mut Host) -> i32 {
 		named_writer::reset();
+		// A run SIGPIPE ends drops the `w` files' buffers unwritten.
+		let _death = named_writer::DeathGuard;
 		if !self.matches.args_present() {
 			let _ = write!(host.stdout, "{}", uu_app().render_help());
 			return 1;
@@ -9379,10 +9466,12 @@ impl Utility for Sed {
 		match sed_main(&self.matches, host) {
 			Ok(()) => host.exit_code(),
 			Err(error) => {
+				// The exit that ends sed after an error writes its `w` files.
+				named_writer::flush_at_exit();
 				let code = error.code();
 				host.error(error, if code == 0 { 1 } else { code });
 				host.exit_code()
-			}
+			},
 		}
 	}
 }

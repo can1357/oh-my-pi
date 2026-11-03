@@ -238,13 +238,14 @@ fn plan_scoped_open(scope: &Scope, path: &Path, options: &OpenOptions) -> Scoped
 fn native_open_scoped(scope: &Scope, path: &Path, options: &OpenOptions) -> io::Result<File> {
 	match plan_scoped_open(scope, path, options) {
 		#[cfg(unix)]
-		ScopedOpen::Typed { token, poll } => {
-			Ok(native_open(scope, path, options)?.bind_host(token, poll))
-		},
+		ScopedOpen::Typed { token, poll } => Ok(native_open(scope, path, options)?
+			.bind_host(token, poll)
+			.bind_writes(scope)),
 		#[cfg(unix)]
 		ScopedOpen::Fifo { token, end } => Ok(FifoOpening::start(scope, path, options, end, &token)?
 			.wait(&token)?
-			.bind_host(token, true)),
+			.bind_host(token, true)
+			.bind_writes(scope)),
 		ScopedOpen::Plain => Ok(native_open(scope, path, options)?.bind(scope)),
 	}
 }
@@ -263,14 +264,15 @@ async fn native_open_scoped_async(
 ) -> io::Result<File> {
 	match plan_scoped_open(scope, path, options) {
 		#[cfg(unix)]
-		ScopedOpen::Typed { token, poll } => {
-			Ok(native_open(scope, path, options)?.bind_host(token, poll))
-		},
+		ScopedOpen::Typed { token, poll } => Ok(native_open(scope, path, options)?
+			.bind_host(token, poll)
+			.bind_writes(scope)),
 		#[cfg(unix)]
 		ScopedOpen::Fifo { token, end } => Ok(FifoOpening::start(scope, path, options, end, &token)?
 			.wait_async(&token)
 			.await?
-			.bind_host(token, true)),
+			.bind_host(token, true)
+			.bind_writes(scope)),
 		ScopedOpen::Plain => Ok(native_open(scope, path, options)?.bind(scope)),
 	}
 }
@@ -716,6 +718,7 @@ impl Fs {
 				cancel:        None,
 				closes:        Some(Arc::new(CloseTracker::default())),
 				creation_mask: None,
+				write_errors:  None,
 			},
 		}
 	}
@@ -764,6 +767,16 @@ impl Fs {
 	pub fn with_cancellation(&self, token: CancellationToken) -> Self {
 		let mut fs = self.clone();
 		fs.scope.cancel = Some(token);
+		fs
+	}
+
+	/// A view that tells `write_errors` of every error a write to a file
+	/// opened through it returns, before the writer sees it, so a caller can
+	/// act on a failed write wherever the file goes (a shell builtin raising
+	/// SIGPIPE at a pipe with no reader). Other operations are unaffected.
+	pub fn with_write_errors(&self, write_errors: crate::WriteErrors) -> Self {
+		let mut fs = self.clone();
+		fs.scope.write_errors = Some(write_errors);
 		fs
 	}
 
@@ -1472,6 +1485,11 @@ impl BlockingFs {
 	/// See [`Fs::with_cancellation`].
 	pub fn with_cancellation(&self, token: CancellationToken) -> Self {
 		Self { fs: self.fs.with_cancellation(token), runtime: self.runtime.clone() }
+	}
+
+	/// See [`Fs::with_write_errors`].
+	pub fn with_write_errors(&self, write_errors: crate::WriteErrors) -> Self {
+		Self { fs: self.fs.with_write_errors(write_errors), runtime: self.runtime.clone() }
 	}
 
 	/// See [`Fs::creation_mask`].

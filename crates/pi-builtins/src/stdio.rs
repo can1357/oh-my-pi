@@ -78,9 +78,14 @@ struct Shared {
 	handle:       OpenFile,
 	regular_file: bool,
 	gate:         OutputGate,
-	/// A standard-error write that could not be delivered at once is pending
-	/// (see [`AsyncOut::owes_delivery`]).
+	/// Bytes the program would already have written are pending (see
+	/// [`AsyncOut::owes_delivery`]).
 	owed:         AtomicBool,
+	/// The owed bytes are a write the program made at once (an unbuffered
+	/// standard-error write, or its explicit flush: see
+	/// [`AsyncOut::flush_now`]): delivering them to a pipe with no reader
+	/// kills the utility at once, or, SIGPIPE ignored, fails at once.
+	at_once:      AtomicBool,
 }
 
 enum Sink {
@@ -185,6 +190,7 @@ impl AsyncOut {
 				regular_file,
 				gate,
 				owed: AtomicBool::new(false),
+				at_once: AtomicBool::new(false),
 			}),
 			unbuffered: false,
 		}
@@ -215,12 +221,15 @@ impl AsyncOut {
 		self.shared.handle.is_terminal()
 	}
 
-	/// Whether a standard-error write is still pending that an unbuffered
-	/// write would already have delivered: a provider file written from a
-	/// thread that must not block (a current-thread runtime's own thread), or
-	/// while another drain held the order lock. The utility's body must not
-	/// run on until it is delivered (see `host::run_caught_async`), as a
-	/// process does nothing after an unbuffered write before the write is done.
+	/// Whether bytes are pending that the program would already have written:
+	/// a standard-error write, which is unbuffered (on a native descriptor; a
+	/// provider file written from a thread that must not block, or while
+	/// another drain held the order lock), a standard-output write that filled
+	/// the program's buffer, or an explicit flush. The utility's body must not
+	/// run on until they are delivered (see `host::run_caught_async` and
+	/// `Host::deliver_owed_output`), as a process does nothing after such a
+	/// write before the write is done; a delivery that finds no reader kills
+	/// it at once (see `OutputGate::record_unbuffered`).
 	pub fn owes_delivery(&self) -> bool {
 		self.shared.owed.load(Ordering::Acquire)
 	}
@@ -254,10 +263,12 @@ impl Shared {
 	}
 
 	/// Appends the bytes of a write; one the utility made to standard output
-	/// is `counted` toward its output buffer (see `OutputGate::wrote`).
+	/// is `counted` toward its output buffer (see `OutputGate::wrote`). A
+	/// counted write that fills the program's buffer is owed (see
+	/// [`AsyncOut::owes_delivery`]): the program writes its buffer then.
 	fn append(&self, buf: &[u8], counted: bool) -> io::Result<()> {
-		if counted {
-			self.gate.wrote(buf.len());
+		if counted && self.gate.wrote(buf.len()) {
+			self.owed.store(true, Ordering::Release);
 		}
 		if self.gate.discards() {
 			return Ok(());
@@ -280,6 +291,7 @@ impl Shared {
 		match &self.sink {
 			Sink::Native(_) => {
 				self.owed.store(true, Ordering::Release);
+				self.at_once.store(true, Ordering::Release);
 				#[cfg(unix)]
 				if !self.regular_file
 					&& let Ok(fd) = self.handle.try_borrow_as_fd()
@@ -294,6 +306,7 @@ impl Shared {
 				let order = if sync_io_allowed() { order.try_lock().ok() } else { None };
 				let (Some(_order), Some(file)) = (order, self.handle.as_vfs()) else {
 					self.owed.store(true, Ordering::Release);
+					self.at_once.store(true, Ordering::Release);
 					return;
 				};
 				let bytes = std::mem::take(&mut *self.pending.lock());
@@ -324,17 +337,19 @@ impl Shared {
 	}
 
 	/// Notes how a delivery ended, returning its result as the utility sees
-	/// it. One that carried a standard-error write (`owed`) failed as an
-	/// unbuffered write does, killing the utility at once even on a
-	/// destination standard output shares (`2>&1`). A standard-output
-	/// delivery whose death SIGPIPE defers (its buffer is not full yet)
-	/// succeeds, as the program's write into its buffer does.
-	fn delivered(&self, result: io::Result<()>, owed: bool) -> io::Result<()> {
+	/// it. One the program made `at_once` (an unbuffered standard-error write,
+	/// an explicit flush) failed at once, killing the utility even on a
+	/// destination its other stream shares (`2>&1`). A standard-output
+	/// delivery of a batch the utility wrote after `before` bytes fails where
+	/// its buffer would be written (a full buffer); short of that SIGPIPE's
+	/// death is deferred and the delivery succeeds, as the program's write
+	/// into its buffer does.
+	fn delivered(&self, result: io::Result<()>, at_once: bool, before: usize) -> io::Result<()> {
 		if let Err(error) = &result {
-			if owed {
+			if at_once {
 				self.gate.record_unbuffered(error);
 			} else {
-				self.gate.record(error);
+				self.gate.record_since(error, before);
 			}
 			if self.gate.discards() {
 				return Ok(());
@@ -345,8 +360,9 @@ impl Shared {
 
 	async fn drain_provider(&self, order: &tokio::sync::Mutex<()>) -> io::Result<()> {
 		let _order = order.lock().await;
-		let owed = self.owed.swap(false, Ordering::AcqRel);
-		let bytes = std::mem::take(&mut *self.pending.lock());
+		self.owed.store(false, Ordering::Release);
+		let at_once = self.at_once.swap(false, Ordering::AcqRel);
+		let (bytes, before) = self.take_pending();
 		let Some(file) = self.handle.as_vfs() else {
 			return Ok(());
 		};
@@ -360,13 +376,14 @@ impl Shared {
 		}
 		.await;
 		self.recycle(bytes);
-		self.delivered(result, owed)
+		self.delivered(result, at_once, before)
 	}
 
 	async fn drain_native(&self, native: &tokio::sync::Mutex<Native>) -> io::Result<()> {
 		let mut native = native.lock().await;
-		let owed = self.owed.swap(false, Ordering::AcqRel);
-		let bytes = std::mem::take(&mut *self.pending.lock());
+		self.owed.store(false, Ordering::Release);
+		let at_once = self.at_once.swap(false, Ordering::AcqRel);
+		let (bytes, before) = self.take_pending();
 		if bytes.is_empty() {
 			return Ok(());
 		}
@@ -379,29 +396,61 @@ impl Shared {
 		}
 		let (bytes, result) = native.write_all(bytes).await;
 		self.recycle(bytes);
-		self.delivered(result, owed)
+		self.delivered(result, at_once, before)
+	}
+
+	/// Takes the pending bytes, and how many bytes the utility had written to
+	/// standard output before them.
+	fn take_pending(&self) -> (Vec<u8>, usize) {
+		let bytes = std::mem::take(&mut *self.pending.lock());
+		let before = self.gate.stdout_written().saturating_sub(bytes.len());
+		(bytes, before)
 	}
 }
 
 impl Write for AsyncOut {
 	fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-		self.shared.append(buf, !self.unbuffered)?;
-		if self.unbuffered {
-			self.shared.deliver_unbuffered();
-		}
+		self.write_all(buf)?;
 		Ok(buf.len())
 	}
 
 	fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
 		self.shared.append(buf, !self.unbuffered)?;
-		if self.unbuffered {
+		// A write of no bytes writes nothing, and raises nothing.
+		if self.unbuffered && !buf.is_empty() {
 			self.shared.deliver_unbuffered();
 		}
 		Ok(())
 	}
 
+	/// A flush the port makes to deliver its output: the pending bytes are
+	/// owed (see [`AsyncOut::owes_delivery`]), as buffered writes. A flush the
+	/// program it stands in for makes is [`AsyncOut::flush_now`].
 	fn flush(&mut self) -> io::Result<()> {
+		if !self.shared.pending.lock().is_empty() {
+			self.shared.owed.store(true, Ordering::Release);
+		}
 		Ok(())
+	}
+}
+
+impl AsyncOut {
+	/// The program's explicit flush (`find -printf '\c'`, fd's final flush):
+	/// its buffer is written at once, so once its output finds the pipe's
+	/// reader gone, SIGPIPE kills the utility there, or, SIGPIPE ignored, the
+	/// flush and every later write fail (see [`AsyncOut::fails`]).
+	pub(crate) fn flush_now(&self) {
+		if self.shared.pending.lock().is_empty() {
+			self.shared.gate.flushed();
+			return;
+		}
+		self.shared.at_once.store(true, Ordering::Release);
+		self.shared.owed.store(true, Ordering::Release);
+	}
+
+	/// Whether writes to this stream fail (see `OutputGate::fails`).
+	pub(crate) fn fails(&self) -> bool {
+		self.shared.gate.fails()
 	}
 }
 

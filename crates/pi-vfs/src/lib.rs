@@ -66,4 +66,5 @@ pub use path::{
 	join_path, normalize_lexically, parent_path, relative_path, url_scheme, with_file_name,
 };
 pub use provider::FileSystem;
+pub use runtime::WriteErrors;
 pub use types::{FileId, FileKind, FileTime, FileType, NodeKind, Permissions, StatFs, SymlinkKind};

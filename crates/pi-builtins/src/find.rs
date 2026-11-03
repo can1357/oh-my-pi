@@ -4052,6 +4052,7 @@ pub mod matchers {
 				out.write_all(bytes)?;
 				if flush {
 					out.flush()?;
+					deps.flush_now();
 				}
 				Ok(())
 			},
@@ -4903,12 +4904,16 @@ impl Default for Config {
 pub trait Dependencies: Send + Sync {
 	fn get_output(&self) -> &Mutex<dyn Write + Send>;
 	fn now(&self) -> SystemTime;
+	/// GNU find's `fflush` of its standard output (`-printf '\c'`): the
+	/// output written so far is written at once (see `AsyncOut::flush_now`).
+	fn flush_now(&self) {}
 }
 
 /// Struct that holds the dependencies we use when run as the real executable.
 struct StandardDependencies {
-	output: Arc<Mutex<dyn Write + Send>>,
-	now:    SystemTime,
+	output:  Arc<Mutex<dyn Write + Send>>,
+	now:     SystemTime,
+	flusher: Option<crate::stdio::AsyncOut>,
 }
 
 impl StandardDependencies {
@@ -4917,7 +4922,11 @@ impl StandardDependencies {
 		// Line-buffered on pipes (one write per printed path), block-buffered
 		// for files, and shared with stderr under 2>&1 so diagnostics stay in
 		// order.
-		Self { output: Arc::new(Mutex::new(host.stdout_writer())), now: SystemTime::now() }
+		Self {
+			output:  Arc::new(Mutex::new(host.stdout_writer())),
+			now:     SystemTime::now(),
+			flusher: host.stdout_flusher(),
+		}
 	}
 }
 
@@ -4925,6 +4934,12 @@ impl StandardDependencies {
 impl Dependencies for StandardDependencies {
 	fn get_output(&self) -> &Mutex<dyn Write + Send> {
 		self.output.as_ref()
+	}
+
+	fn flush_now(&self) {
+		if let Some(flusher) = &self.flusher {
+			flusher.flush_now();
+		}
 	}
 
 	fn now(&self) -> SystemTime {

@@ -45,7 +45,7 @@ use std::{
 	time::Duration,
 	sync::{
 		Arc, OnceLock,
-		atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
+		atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicUsize, Ordering},
 	},
 };
 
@@ -80,6 +80,12 @@ pub(crate) trait Utility: clap::Parser + Send + Sync + 'static {
 	/// Exit status for a usage error. Most GNU utilities use 1; the
 	/// `ls`/`grep`/`cmp` families reserve 1 for "differences found" and use 2.
 	const USAGE_ERROR: u8 = 1;
+
+	/// Exit status when the utility's output fails and SIGPIPE does not kill
+	/// it (it is ignored): GNU's `exit_failure`, which `close_stdout` exits
+	/// with (see [`close_stdout`]). The usage-error status for most
+	/// utilities; 4 for `sed`, whose output errors are fatal.
+	const OUTPUT_ERROR: u8 = Self::USAGE_ERROR;
 
 	/// Whether the utility runs command lines through [`Host::run_command`] or
 	/// [`Host::spawn_command`] (`xargs`, `find -exec`, `ifne`). The adapter then
@@ -145,6 +151,9 @@ pub(crate) trait AsyncUtility: clap::Parser + Send + Sync + 'static {
 
 	/// Exit status for a usage error; see [`Utility::USAGE_ERROR`].
 	const USAGE_ERROR: u8 = 1;
+
+	/// See [`Utility::OUTPUT_ERROR`].
+	const OUTPUT_ERROR: u8 = Self::USAGE_ERROR;
 
 	/// Whether the body runs command lines through [`Host::run_command_async`]
 	/// or [`Host::spawn_command_async`].
@@ -336,13 +345,26 @@ pub(crate) struct Sigpipe {
 	/// The utility handles its own standard-output write errors (GNU `tee`
 	/// clears each one): the check at exit skips them.
 	checks_stdout:   AtomicBool,
+	/// The utility handles its own standard-error write errors too (`rsync`):
+	/// the check at exit skips them.
+	checks_stderr:   AtomicBool,
 	/// A command ran in place of the utility, as `execvp` replaces a program
 	/// (`env`): no check at exit happens.
 	exec_replaced:   AtomicBool,
 	/// SIGPIPE has killed the utility (see [`Sigpipe::kill`]); a hit on
 	/// standard output alone only kills it once its buffer would be written.
 	killed:          AtomicBool,
+	/// The status the program exits with at once when a standard-error write
+	/// finds a pipe with no reader ([`NO_EXIT`] for none): ripgrep exits 0,
+	/// and a Rust program whose `eprintln!` fails panics with 101.
+	stderr_exit:     AtomicI32,
+	/// The status the program exited with at such a write ([`NO_EXIT`]
+	/// before); see [`Sigpipe::exit_at_broken_stderr`].
+	exited:          AtomicI32,
 }
+
+/// No status in [`Sigpipe::stderr_exit`] or [`Sigpipe::exited`].
+const NO_EXIT: i32 = i32::MIN;
 
 impl Default for Sigpipe {
 	fn default() -> Self {
@@ -360,8 +382,11 @@ impl Sigpipe {
 			stdout_death_at: AtomicUsize::new(0),
 			failed_ignored: AtomicU8::new(0),
 			checks_stdout: AtomicBool::new(false),
+			checks_stderr: AtomicBool::new(false),
 			exec_replaced: AtomicBool::new(false),
 			killed: AtomicBool::new(false),
+			stderr_exit: AtomicI32::new(NO_EXIT),
+			exited: AtomicI32::new(NO_EXIT),
 		}
 	}
 
@@ -382,12 +407,36 @@ impl Sigpipe {
 		at != 0 && self.stdout_written.load(Ordering::Relaxed) >= at
 	}
 
+	/// Whether a standard-output write found a pipe with no reader.
+	fn stdout_broken(&self) -> bool {
+		self.stdout_death_at.load(Ordering::Relaxed) != 0
+	}
+
+	/// The program flushed its standard output: its buffer is written now,
+	/// so once a write found the pipe's reader gone, SIGPIPE kills it here,
+	/// or, ignored, the flush and every later write fail (see
+	/// [`OutputGate::fails`]).
+	fn flushed_stdout(&self) {
+		if !self.stdout_broken() {
+			return;
+		}
+		let written = self.stdout_written.load(Ordering::Relaxed).max(1);
+		self.stdout_death_at.fetch_min(written, Ordering::Relaxed);
+		self.kill();
+	}
+
 	/// Counts `n` bytes the utility wrote to standard output; once its buffer
-	/// would be written to a pipe with no reader, SIGPIPE kills it.
-	fn wrote_stdout(&self, n: usize) {
-		self.stdout_written.fetch_add(n, Ordering::Relaxed);
+	/// would be written to a pipe with no reader, SIGPIPE kills it. Returns
+	/// whether the write filled the buffer, so the program would write it out
+	/// now (every write, for a program that writes unbuffered).
+	fn wrote_stdout(&self, n: usize) -> bool {
+		let before = self.stdout_written.fetch_add(n, Ordering::Relaxed);
 		if self.is_hit() && self.stdout_due() {
 			self.kill();
+		}
+		match self.stdout_buffer.load(Ordering::Relaxed) {
+			0 => n > 0,
+			buffer => before / buffer != (before + n) / buffer,
 		}
 	}
 
@@ -412,6 +461,29 @@ impl Sigpipe {
 
 	fn is_killed(&self) -> bool {
 		self.killed.load(Ordering::Relaxed)
+	}
+
+	/// Ends the utility at once with the status it exits with at a failed
+	/// standard-error write (see [`Host::exit_at_broken_stderr`]), as
+	/// [`Sigpipe::kill`] ends it; a no-op for a utility without one.
+	fn exit_at_broken_stderr(&self) {
+		let code = self.stderr_exit.load(Ordering::Relaxed);
+		if code == NO_EXIT {
+			return;
+		}
+		let _ = self
+			.exited
+			.compare_exchange(NO_EXIT, code, Ordering::Relaxed, Ordering::Relaxed);
+		self.killed.store(true, Ordering::Relaxed);
+		if SigpipeUnwindScope::active() && !std::thread::panicking() {
+			std::panic::resume_unwind(Box::new(SigpipeDeath));
+		}
+	}
+
+	/// The status the utility exited with at a failed standard-error write.
+	fn exit_code(&self) -> Option<i32> {
+		let code = self.exited.load(Ordering::Relaxed);
+		(code != NO_EXIT).then_some(code)
 	}
 }
 
@@ -462,22 +534,25 @@ impl OutputGate {
 		(self.cancel.silences && self.cancel.fired())
 			|| match self.stream {
 				GuardedStream::Stderr => self.sigpipe.is_killed(),
-				GuardedStream::Stdout => self.sigpipe.is_hit() && !self.sigpipe.is_killed(),
+				GuardedStream::Stdout => {
+					self.sigpipe.stdout_broken() && !self.sigpipe.stdout_due() && !self.sigpipe.is_killed()
+				},
 			}
 	}
 
-	/// Whether writes to this stream fail: stdout once SIGPIPE killed the
-	/// utility.
+	/// Whether writes to this stream fail: stdout once its buffer would have
+	/// been written to a pipe with no reader (SIGPIPE ignored), or once
+	/// SIGPIPE killed the utility.
 	pub fn fails(&self) -> bool {
-		matches!(self.stream, GuardedStream::Stdout) && self.sigpipe.is_killed()
+		matches!(self.stream, GuardedStream::Stdout)
+			&& (self.sigpipe.is_killed() || self.sigpipe.stdout_due())
 	}
 
 	/// Counts `n` bytes the utility wrote to standard output; once its buffer
-	/// would be written to a pipe with no reader, SIGPIPE kills it.
-	pub fn wrote(&self, n: usize) {
-		if matches!(self.stream, GuardedStream::Stdout) {
-			self.sigpipe.wrote_stdout(n);
-		}
+	/// would be written to a pipe with no reader, SIGPIPE kills it. Returns
+	/// whether the write filled the buffer (see [`Sigpipe::wrote_stdout`]).
+	pub fn wrote(&self, n: usize) -> bool {
+		matches!(self.stream, GuardedStream::Stdout) && self.sigpipe.wrote_stdout(n)
 	}
 
 	/// Notes a failed write, flipping the SIGPIPE state on a closed reader. A
@@ -490,24 +565,34 @@ impl OutputGate {
 	/// working until then. A program that writes unbuffered dies at once.
 	///
 	/// With SIGPIPE ignored the write fails with `EPIPE`, which is noted for
-	/// the check at exit (see [`close_stdout`]).
+	/// the check at exit (see [`close_stdout`]); on standard output the
+	/// failure, too, comes only once the buffer would be written.
 	pub fn record(&self, error: &io::Error) {
+		self.record_since(error, self.sigpipe.stdout_written.load(Ordering::Relaxed));
+	}
+
+	/// [`OutputGate::record`] for a write made when the utility had written
+	/// `before` bytes to standard output: its buffer is next written at the
+	/// first block boundary past them, so a write that reaches that boundary
+	/// dies (or, SIGPIPE ignored, fails) at once.
+	pub(crate) fn record_since(&self, error: &io::Error, before: usize) {
 		if error.kind() != io::ErrorKind::BrokenPipe {
 			return;
 		}
-		if self.sigpipe.ignored.load(Ordering::Relaxed) {
+		let ignored = self.sigpipe.ignored.load(Ordering::Relaxed);
+		if ignored {
 			self.sigpipe.failed_ignored.fetch_or(self.stream.failed_bit(), Ordering::Relaxed);
-			return;
+		} else {
+			self.sigpipe.record(error);
 		}
-		self.sigpipe.record(error);
 		if matches!(self.stream, GuardedStream::Stderr) {
+			self.sigpipe.exit_at_broken_stderr();
 			self.sigpipe.kill();
 			return;
 		}
-		let written = self.sigpipe.stdout_written.load(Ordering::Relaxed);
 		let at = match self.sigpipe.stdout_buffer.load(Ordering::Relaxed) {
-			0 => written.max(1),
-			buffer => written.div_ceil(buffer).max(1) * buffer,
+			0 => self.sigpipe.stdout_written.load(Ordering::Relaxed).max(1),
+			buffer => (before / buffer + 1) * buffer,
 		};
 		let _ = self
 			.sigpipe
@@ -518,12 +603,27 @@ impl OutputGate {
 		}
 	}
 
-	/// [`OutputGate::record`] for a write the program made unbuffered (its
-	/// standard error) to a destination that may also carry its standard
-	/// output (`2>&1`): SIGPIPE kills it at once.
+	/// [`OutputGate::record`] for a write the program made at once (its
+	/// unbuffered standard error, a full standard-output buffer, a flush),
+	/// also to a destination its other stream shares (`2>&1`): SIGPIPE kills
+	/// it at once, or, ignored, the write fails at once.
 	pub fn record_unbuffered(&self, error: &io::Error) {
 		self.record(error);
+		self.flushed();
 		self.sigpipe.kill();
+	}
+
+	/// The program flushed its standard output (see
+	/// [`Sigpipe::flushed_stdout`]).
+	pub fn flushed(&self) {
+		if matches!(self.stream, GuardedStream::Stdout) {
+			self.sigpipe.flushed_stdout();
+		}
+	}
+
+	/// Bytes the utility wrote to standard output so far.
+	pub(crate) fn stdout_written(&self) -> usize {
+		self.sigpipe.stdout_written.load(Ordering::Relaxed)
 	}
 
 	/// Raises SIGPIPE for a standard-error write to a destination whose
@@ -531,6 +631,7 @@ impl OutputGate {
 	/// at once (see [`Sigpipe::kill`]), unless SIGPIPE is ignored.
 	pub fn die_of_closed_reader(&self) {
 		self.sigpipe.record(&io::ErrorKind::BrokenPipe.into());
+		self.sigpipe.exit_at_broken_stderr();
 		self.sigpipe.kill();
 	}
 }
@@ -590,6 +691,7 @@ impl Read for SigpipeGuard {
 
 impl Write for SigpipeGuard {
 	fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+		let before = self.gate.sigpipe.stdout_written.load(Ordering::Relaxed);
 		if self.counts {
 			self.gate.wrote(buf.len());
 		}
@@ -598,7 +700,7 @@ impl Write for SigpipeGuard {
 		}
 		match self.inner.write(buf) {
 			Err(error) => {
-				self.gate.record(&error);
+				self.gate.record_since(&error, before);
 				// A death SIGPIPE defers (standard output's buffer is not full
 				// yet) leaves the write succeeding, as the program's write into
 				// its buffer does.
@@ -734,6 +836,13 @@ impl ShellPaths {
 			#[cfg(unix)]
 			descriptors,
 		}
+	}
+
+	/// Tells `write_errors` of every failed write to a file opened through
+	/// this resolver's filesystem (see [`pi_vfs::Fs::with_write_errors`]).
+	fn with_write_errors(mut self, write_errors: pi_vfs::WriteErrors) -> Self {
+		self.filesystem = self.filesystem.with_write_errors(write_errors);
+		self
 	}
 
 	/// A resolver with no descriptors, for tests that exercise path handling
@@ -1016,15 +1125,45 @@ impl Host {
 		self.sigpipe.is_killed()
 	}
 
-	/// Delivers a standard-error write an unbuffered write would already have
-	/// delivered (see [`AsyncOut::owes_delivery`]) before the utility goes
-	/// on; one that finds a pipe with no reader kills the utility here.
+	/// Delivers what the program would already have written (see
+	/// [`AsyncOut::owes_delivery`]) before the utility goes on; a delivery
+	/// that finds a pipe with no reader kills the utility here.
 	pub async fn deliver_owed_output(&self) {
-		if let Some(streams) = &self.async_out
-			&& streams.stderr.owes_delivery()
-		{
-			let _ = streams.stderr.drain(true).await;
+		if let Some(streams) = &self.async_out {
+			deliver_owed(&streams.stdout, &streams.stderr).await;
 		}
+	}
+
+	/// The program's explicit flush of its standard output (fd's final
+	/// flush): its buffer is written now, so once its output found the pipe's
+	/// reader gone, SIGPIPE kills the utility here, or, SIGPIPE ignored, this
+	/// fails.
+	///
+	/// # Errors
+	///
+	/// `BrokenPipe` when the flush found the pipe's reader gone; any other
+	/// delivery error.
+	pub async fn flush_stdout_now(&mut self) -> io::Result<()> {
+		let Some(streams) = &self.async_out else {
+			self.stdout.flush()?;
+			self.sigpipe.flushed_stdout();
+			return if self.sigpipe.stdout_due() || self.sigpipe.is_killed() {
+				Err(io::ErrorKind::BrokenPipe.into())
+			} else {
+				Ok(())
+			};
+		};
+		let stdout = streams.stdout.clone();
+		stdout.flush_now();
+		self.flush_output().await?;
+		if stdout.fails() { Err(io::ErrorKind::BrokenPipe.into()) } else { Ok(()) }
+	}
+
+	/// A handle for the program's explicit flushes of its standard output
+	/// from where it has no `Host` (see [`AsyncOut::flush_now`]); `None` for
+	/// a synchronous utility.
+	pub(crate) fn stdout_flusher(&self) -> Option<AsyncOut> {
+		self.async_out.as_ref().map(|streams| streams.stdout.clone())
 	}
 
 	/// Stops treating a closed reader as fatal, like `signal(SIGPIPE,
@@ -1039,6 +1178,24 @@ impl Host {
 	/// skips them.
 	pub fn checks_own_stdout(&self) {
 		self.sigpipe.checks_stdout.store(true, Ordering::Relaxed);
+	}
+
+	/// Takes every write error on standard output and standard error as the
+	/// utility's own to handle, as a program that does not check its streams
+	/// at exit (`rsync`): the check at exit (see [`close_stdout`]) skips them.
+	pub fn checks_own_output(&self) {
+		self.sigpipe.checks_stdout.store(true, Ordering::Relaxed);
+		self.sigpipe.checks_stderr.store(true, Ordering::Relaxed);
+	}
+
+	/// Ends the utility at once with status `code` when a standard-error
+	/// write finds a pipe with no reader, as the program it stands in for
+	/// exits there: ripgrep exits 0 (its message macro), a Rust program whose
+	/// `eprintln!` fails panics with 101. With SIGPIPE's default action the
+	/// write would kill a C program instead; these programs ignore SIGPIPE
+	/// (see [`Host::ignore_sigpipe`]).
+	pub fn exit_at_broken_stderr(&self, code: i32) {
+		self.sigpipe.stderr_exit.store(code, Ordering::Relaxed);
 	}
 
 	/// Makes standard output unbuffered, for a program that flushes each
@@ -1060,9 +1217,10 @@ impl Host {
 	}
 
 	/// Runs `command` in place of this utility, as `execvp` replaces a program
-	/// (`env`): once it ran, its status is the utility's, and the check a
-	/// program makes of its streams at exit (see [`close_stdout`]) never
-	/// happens.
+	/// (`env`): once it ran, its status is the utility's (a command SIGPIPE
+	/// killed leaves the utility killed by it, as the process it became is),
+	/// and the check a program makes of its streams at exit (see
+	/// [`close_stdout`]) never happens.
 	///
 	/// # Errors
 	///
@@ -1071,6 +1229,11 @@ impl Host {
 	pub fn exec_command(&mut self, command: ShellCommand) -> io::Result<CommandStatus> {
 		let status = self.run_command(command)?;
 		self.sigpipe.exec_replaced.store(true, Ordering::Relaxed);
+		#[cfg(unix)]
+		if status == CommandStatus::Signaled(libc::SIGPIPE) {
+			self.sigpipe.hit.store(true, Ordering::Relaxed);
+			self.sigpipe.killed.store(true, Ordering::Relaxed);
+		}
 		Ok(status)
 	}
 
@@ -1785,10 +1948,11 @@ impl StreamWriter {
 /// [`StreamWriter::Shared`]).
 ///
 /// A standard-output write counts toward the utility's output buffer (see
-/// [`Sigpipe::wrote_stdout`]). A standard-error write is delivered at once,
-/// and one once the destination's reader has gone kills the utility (see
-/// [`Sigpipe::kill`]), whatever standard output's buffer still holds. Either
-/// kill comes once the lock is released.
+/// [`Sigpipe::wrote_stdout`]). A standard-error write is delivered at once:
+/// once the destination's reader has gone it raises SIGPIPE, whatever
+/// standard output's buffer still holds, which kills the utility (see
+/// [`Sigpipe::kill`]), or, ignored, fails the write. The kill comes once the
+/// lock is released.
 fn write_shared<T>(
 	shared: &Mutex<StreamWriter>,
 	stream: GuardedStream,
@@ -1810,7 +1974,13 @@ fn write_shared<T>(
 				let mut writer = shared.lock();
 				write(&mut *writer).and_then(|value| writer.flush().map(|()| value))
 			};
-			sigpipe.kill();
+			if sigpipe.stdout_broken() {
+				sigpipe.exit_at_broken_stderr();
+				sigpipe.kill();
+				// SIGPIPE is ignored: the write fails, for the check at exit too.
+				sigpipe.failed_ignored.fetch_or(FAILED_STDERR, Ordering::Relaxed);
+				return Err(io::ErrorKind::BrokenPipe.into());
+			}
 			result
 		},
 	}
@@ -2734,24 +2904,28 @@ pub(crate) fn run_caught<U: Utility>(parsed: U, host: &mut Host) -> i32 {
 		let _unwind = SigpipeUnwindScope::enter();
 		parsed.run(host)
 	}));
-	settle(U::NAME, U::USAGE_ERROR, outcome, host)
+	settle(U::NAME, U::OUTPUT_ERROR, outcome, host)
 }
 
 /// [`run_caught`] for an [`AsyncUtility`]: the panic scope covers each poll of
 /// the body, which may resume on another thread, and the body's closes are
 /// drained afterwards.
 ///
-/// A standard-error write the body could not deliver at once (see
+/// Output the program would already have written (a standard-error write, a
+/// full standard-output buffer, an explicit flush: see
 /// [`AsyncOut::owes_delivery`]) is delivered while the body is suspended,
-/// before it is polled again, as a process does nothing after an unbuffered
-/// write before the write is done; when that delivery finds a pipe with no
-/// reader, SIGPIPE kills the utility and the body never resumes.
+/// before it is polled again, as a process does nothing after such a write
+/// before the write is done; when that delivery finds a pipe with no reader,
+/// SIGPIPE kills the utility and the body never resumes.
 ///
 /// All output the body left pending is delivered before the status is
 /// settled, so a closed reader still ends it with [`SIGPIPE_EXIT_CODE`]; a
 /// cancelled command delivers nothing more.
 async fn run_caught_async<U: AsyncUtility>(parsed: U, host: &mut Host) -> i32 {
-	let stderr = host.async_out.as_ref().map(|streams| streams.stderr.clone());
+	let outputs = host.async_out.as_ref().map(|streams| (streams.stdout.clone(), streams.stderr.clone()));
+	let owes = |outputs: &Option<(AsyncOut, AsyncOut)>| {
+		outputs.as_ref().is_some_and(|(out, err)| out.owes_delivery() || err.owes_delivery())
+	};
 	let sigpipe = Arc::clone(&host.sigpipe);
 	let outcome = {
 		let body = AssertUnwindSafe(async { parsed.run(host).await }).catch_unwind();
@@ -2763,7 +2937,7 @@ async fn run_caught_async<U: AsyncUtility>(parsed: U, host: &mut Host) -> i32 {
 				let _unwind = SigpipeUnwindScope::enter();
 				match body.as_mut().poll(cx) {
 					Poll::Ready(outcome) => Poll::Ready(Some(outcome)),
-					Poll::Pending if stderr.as_ref().is_some_and(AsyncOut::owes_delivery) => Poll::Ready(None),
+					Poll::Pending if owes(&outputs) => Poll::Ready(None),
 					Poll::Pending => Poll::Pending,
 				}
 			})
@@ -2771,8 +2945,8 @@ async fn run_caught_async<U: AsyncUtility>(parsed: U, host: &mut Host) -> i32 {
 			if let Some(outcome) = step {
 				break outcome;
 			}
-			if let Some(stderr) = &stderr {
-				let _ = stderr.drain(true).await;
+			if let Some((out, err)) = &outputs {
+				deliver_owed(out, err).await;
 			}
 			if sigpipe.is_killed() {
 				break Ok(SIGPIPE_EXIT_CODE);
@@ -2780,7 +2954,7 @@ async fn run_caught_async<U: AsyncUtility>(parsed: U, host: &mut Host) -> i32 {
 		}
 	};
 	let drained = host.drain_output(true).await;
-	let code = settle(U::NAME, U::USAGE_ERROR, outcome, host);
+	let code = settle(U::NAME, U::OUTPUT_ERROR, outcome, host);
 	// A broken pipe is settled above: SIGPIPE's status, or the check at exit
 	// when SIGPIPE is ignored.
 	let code = match drained {
@@ -2793,7 +2967,23 @@ async fn run_caught_async<U: AsyncUtility>(parsed: U, host: &mut Host) -> i32 {
 	let closes = host.vfs().drain_closes().await;
 	let code = closes_status(host, closes, code);
 	let _ = host.drain_output(true).await;
-	if host.sigpipe_hit() { SIGPIPE_EXIT_CODE } else { code }
+	match host.sigpipe.exit_code() {
+		Some(code) => code,
+		None if host.sigpipe_hit() => SIGPIPE_EXIT_CODE,
+		None => code,
+	}
+}
+
+/// Delivers each of an async utility's outputs that owes a delivery (see
+/// [`AsyncOut::owes_delivery`]): standard output first, as the program wrote
+/// it; one buffer once when both streams share a destination.
+async fn deliver_owed(stdout: &AsyncOut, stderr: &AsyncOut) {
+	if stdout.owes_delivery() {
+		let _ = stdout.drain(true).await;
+	}
+	if !stdout.same_as(stderr) && stderr.owes_delivery() {
+		let _ = stderr.drain(true).await;
+	}
 }
 
 /// Marks the current thread as inside a utility body for [`panic_scope_active`].
@@ -2840,9 +3030,12 @@ impl Drop for SigpipeUnwindScope {
 /// [`BROKEN_WRITE`], which a body returns for its own write that found a pipe
 /// with no reader, is SIGPIPE's status. With SIGPIPE ignored the program was
 /// not killed: it saw `EPIPE`, so it reports the write error and ends with its
-/// `failure` status (its usage-error status, which is GNU's "trouble" status:
-/// 1 for most utilities, 2 for `grep`, `ls`, `sort`).
+/// `failure` status ([`Utility::OUTPUT_ERROR`], GNU's `exit_failure`: 1 for
+/// most utilities, 2 for `grep`, `ls`, `sort`, 4 for `sed`).
 fn settle(name: &str, failure: u8, outcome: std::thread::Result<i32>, host: &mut Host) -> i32 {
+	if let Some(code) = host.sigpipe.exit_code() {
+		return code;
+	}
 	if host.sigpipe_hit() {
 		return SIGPIPE_EXIT_CODE;
 	}
@@ -2876,7 +3069,8 @@ fn close_stdout(name: &str, failure: u8, code: i32, host: &mut Host) -> i32 {
 	}
 	let failed = sigpipe.failed_ignored.load(Ordering::Relaxed);
 	let stdout_failed = failed & FAILED_STDOUT != 0 && !sigpipe.checks_stdout.load(Ordering::Relaxed);
-	if !stdout_failed && failed & FAILED_STDERR == 0 {
+	let stderr_failed = failed & FAILED_STDERR != 0 && !sigpipe.checks_stderr.load(Ordering::Relaxed);
+	if !stdout_failed && !stderr_failed {
 		return code;
 	}
 	if stdout_failed && code == 0 {
@@ -2991,7 +3185,7 @@ fn build_host<SE: ShellExtensions>(context: &ExecutionContext<'_, SE>, spec: Spe
 		stdout_metadata: OnceLock::new(),
 		umask: OnceLock::new(),
 		name: invoked,
-		paths: ShellPaths::new(context),
+		paths: ShellPaths::new(context).with_write_errors(file_write_errors(&sigpipe)),
 		env,
 		cancel,
 		exit_code: 0,
@@ -3002,6 +3196,21 @@ fn build_host<SE: ShellExtensions>(context: &ExecutionContext<'_, SE>, spec: Spe
 		reported_error: context.params.reported_error().cloned(),
 		async_out,
 		stdin_source: None,
+	})
+}
+
+/// How a utility's write to a file it opened itself (`tee FILE`, `dd of=`,
+/// `cp SRC DEST`, `sed 'w FILE'`, `find -fprint`) ends at a pipe with no
+/// reader, `/dev/fd/N` or a FIFO: as the program's write would, raising
+/// SIGPIPE, which kills it at once (see [`Sigpipe::kill`]) unless it is
+/// ignored, when the write fails with `EPIPE` for the utility to handle.
+fn file_write_errors(sigpipe: &Arc<Sigpipe>) -> pi_vfs::WriteErrors {
+	let sigpipe = Arc::clone(sigpipe);
+	pi_vfs::WriteErrors::new(move |error| {
+		if error.kind() == io::ErrorKind::BrokenPipe {
+			sigpipe.record(error);
+			sigpipe.kill();
+		}
 	})
 }
 

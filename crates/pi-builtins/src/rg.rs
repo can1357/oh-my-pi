@@ -548,8 +548,11 @@ struct SearchOptions {
 }
 
 struct SearchOutcome {
-	any_match: bool,
-	had_error: bool,
+	any_match:   bool,
+	had_error:   bool,
+	/// A write found standard output's reader gone: ripgrep stops searching,
+	/// and what it already wrote counts (`any_match`).
+	output_gone: bool,
 }
 
 struct RgSink<'a, M: Matcher, W: Write> {
@@ -1617,17 +1620,18 @@ async fn process_file<M: Matcher + Send + Sync + 'static, W: Write, E: Write>(
 	if let Some(stdout) = shared.stdout.as_ref()
 		&& stdout.is(&shared.fs, path).await
 	{
-		return Ok(SearchOutcome { any_match: false, had_error: false });
+		return Ok(SearchOutcome { any_match: false, had_error: false, output_gone: false });
 	}
 	let result = search_path(shared, scratch, path, display, stats, out).await;
 	match result {
-		Ok(any_match) => Ok(SearchOutcome { any_match, had_error: false }),
+		Ok(any_match) => Ok(SearchOutcome { any_match, had_error: false, output_gone: false }),
 		Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Err(error),
 		Err(error) => {
 			let message = describe_search_error(&error);
 			Ok(SearchOutcome {
-				any_match: false,
-				had_error: report_path_error(err, display, path, &message, opts),
+				any_match:   false,
+				had_error:   report_path_error(err, display, path, &message, opts),
+				output_gone: false,
 			})
 		},
 	}
@@ -1801,7 +1805,7 @@ async fn search_dir<M: Matcher<Captures: Send> + Clone + Send + Sync + 'static, 
 	let Some(CollectedFiles { paths, parallelism }) =
 		collect_files(host, cli, filters, root, opts.no_messages, &mut had_error).await
 	else {
-		return Ok(SearchOutcome { any_match: false, had_error });
+		return Ok(SearchOutcome { any_match: false, had_error, output_gone: false });
 	};
 	let workers = if cli.line_buffered && !cli.no_line_buffered {
 		1
@@ -1848,13 +1852,16 @@ async fn search_dir<M: Matcher<Captures: Send> + Clone + Send + Sync + 'static, 
 		}
 	}
 	drop(results);
-	if let Some(error) = failed {
+	// A write that found standard output's reader gone stops the search, as
+	// ripgrep's walk quits there; the files already written count.
+	let output_gone = failed.as_ref().is_some_and(|error| error.kind() == io::ErrorKind::BrokenPipe);
+	if let Some(error) = failed.filter(|_| !output_gone) {
 		return Err(error);
 	}
 	if host.is_cancelled() {
 		had_error = true;
 	}
-	Ok(SearchOutcome { any_match, had_error })
+	Ok(SearchOutcome { any_match, had_error, output_gone })
 }
 
 /// Hands everything written to `out` and `host.stderr` so far to the host's destinations.
@@ -1965,7 +1972,7 @@ async fn list_files<W: Write>(
 			break;
 		}
 	}
-	SearchOutcome { any_match: any, had_error }
+	SearchOutcome { any_match: any, had_error, output_gone: false }
 }
 
 fn default_paths(paths: &mut Vec<OsString>, use_implicit_stdin: bool) {
@@ -2073,9 +2080,9 @@ async fn execute_search<M: Matcher<Captures: Send> + Clone + Send + Sync + 'stat
 			};
 			match searched {
 				Ok(matched) => any_match |= matched,
-				Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {
-					return crate::host::BROKEN_WRITE;
-				},
+				// ripgrep stops at a write that finds standard output's reader
+				// gone; the haystack it was searching does not count.
+				Err(error) if error.kind() == io::ErrorKind::BrokenPipe => break,
 				Err(error) => {
 					had_error = true;
 					if !opts.no_messages {
@@ -2117,7 +2124,7 @@ async fn execute_search<M: Matcher<Captures: Send> + Clone + Send + Sync + 'stat
 						if !opts.no_messages {
 							let _ = writeln!(host.stderr, "{error}");
 						}
-						Ok(SearchOutcome { any_match: false, had_error: true })
+						Ok(SearchOutcome { any_match: false, had_error: true, output_gone: false })
 					},
 				};
 				filters = Some(built);
@@ -2125,10 +2132,11 @@ async fn execute_search<M: Matcher<Captures: Send> + Clone + Send + Sync + 'stat
 					Ok(outcome) => {
 						any_match |= outcome.any_match;
 						had_error |= outcome.had_error;
+						if outcome.output_gone {
+							break;
+						}
 					},
-					Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {
-						return crate::host::BROKEN_WRITE;
-					},
+					Err(error) if error.kind() == io::ErrorKind::BrokenPipe => break,
 					Err(error) => {
 						had_error = true;
 						if !opts.no_messages {
@@ -2173,9 +2181,7 @@ async fn execute_search<M: Matcher<Captures: Send> + Clone + Send + Sync + 'stat
 						any_match |= outcome.any_match;
 						had_error |= outcome.had_error;
 					},
-					Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {
-						return crate::host::BROKEN_WRITE;
-					},
+					Err(error) if error.kind() == io::ErrorKind::BrokenPipe => break,
 					Err(error) => {
 						had_error = true;
 						if !opts.no_messages {
@@ -2198,16 +2204,12 @@ async fn execute_search<M: Matcher<Captures: Send> + Clone + Send + Sync + 'stat
 			break;
 		}
 	}
+	// ripgrep ignores a summary or final flush that finds standard output's
+	// reader gone: its status stands.
 	if opts.json {
-		if write_json_summary(out, &stats)
-			.is_err_and(|error| error.kind() == io::ErrorKind::BrokenPipe)
-		{
-			return crate::host::BROKEN_WRITE;
-		}
+		let _ = write_json_summary(out, &stats);
 	}
-	if out.flush().is_err_and(|error| error.kind() == io::ErrorKind::BrokenPipe) {
-		return crate::host::BROKEN_WRITE;
-	}
+	let _ = out.flush();
 	exit_status(opts.quiet, any_match, had_error)
 }
 
@@ -2215,8 +2217,17 @@ impl AsyncUtility for Rg {
 	const NAME: &'static str = "rg";
 	const USAGE_ERROR: u8 = 2;
 	const CHECKS_STDOUT_PATH: bool = true;
+	/// ripgrep writes standard output through an 8 KiB `BufWriter`.
+	const STDOUT_BUFFER: usize = 8 * 1024;
 
 	async fn run(self, host: &mut Host) -> i32 {
+		// ripgrep, a Rust program, ignores SIGPIPE: a write that finds
+		// standard output's reader gone stops its search with its usual
+		// status, and one to standard error exits 0 at once (its message
+		// macro); it never checks its streams at exit.
+		host.ignore_sigpipe();
+		host.checks_own_output();
+		host.exit_at_broken_stderr(0);
 		let cli = self;
 	let mut opts = search_options(&cli);
 	match parse_path_separator(cli.path_separator.as_deref()) {

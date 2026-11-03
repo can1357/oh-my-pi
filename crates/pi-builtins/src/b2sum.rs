@@ -21,6 +21,8 @@ matches_parser!(B2sum, app);
 impl Utility for B2sum {
 	const NAME: &'static str = "b2sum";
 	const USAGE_ERROR: u8 = 2;
+	/// GNU's `exit_failure`.
+	const OUTPUT_ERROR: u8 = 1;
 
 	fn run(self, host: &mut Host) -> i32 {
 		let length = self

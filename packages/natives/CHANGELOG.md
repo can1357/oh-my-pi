@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed the bash tool's shell going on after a built-in command, error message or `set -x` line wrote to a closed pipe, with its own status instead of SIGPIPE's 141 as in Bash; `trap '' PIPE` now turns such a write into a write error, and built-in utilities end at a closed pipe as their GNU programs do (buffered output, `tee`, `xargs`, `ps`, `top`, `tail -f`) ([#17827](https://github.com/can1357/oh-my-pi/pull/17827) by [@sjawhar](https://github.com/sjawhar))
+- Fixed the bash tool's shell going on after a built-in command, error message or `set -x` line wrote to a closed pipe, with its own status instead of SIGPIPE's 141 as in Bash; `trap '' PIPE` now turns such a write into a write error, and built-in utilities end at a closed pipe as the programs they stand in for do (buffered output, file operands, `tee`, `xargs`, `sed`'s `w` files, `ps`, `top`, `tail -f`, `rsync`, `rg`, `fd`) ([#17827](https://github.com/can1357/oh-my-pi/pull/17827) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.16.0] - 2026-11-02
 
