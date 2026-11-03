@@ -1019,28 +1019,32 @@ function createHttp1RunTransport(options: CursorHttp1RunTransportOptions): Curso
 	};
 }
 
-function isHttp2Unavailable(error: unknown): boolean {
-	const code = (error as { code?: unknown } | null)?.code;
+function isHttp2AlpnRejected(error: unknown): boolean {
+	const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
 	const message = error instanceof Error ? error.message : String(error);
 	return (
 		(code === "ERR_HTTP2_ERROR" && /h2 is not supported/i.test(message)) ||
-		// A TLS-intercepting proxy without HTTP/2 resets a ClientHello that offers only h2.
-		(code === "ECONNRESET" && /disconnected before secure TLS connection was established/i.test(message)) ||
 		/Cursor run transport could not negotiate HTTP\/2/i.test(message)
 	);
 }
 
+function isCursorTlsReset(error: unknown): boolean {
+	const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
+	const message = error instanceof Error ? error.message : String(error);
+	return code === "ECONNRESET" && /disconnected before secure TLS connection was established/i.test(message);
+}
+
+function isHttp2Unavailable(error: unknown): boolean {
+	return isHttp2AlpnRejected(error) || isCursorTlsReset(error);
+}
+
+const CURSOR_HTTP2_UNAVAILABLE_CACHE_MAX = 32;
 const CURSOR_HTTP2_UNAVAILABLE_TTL_MS = 10 * 60_000;
 
-const http2UnavailableAt = new Map<string, number>();
-
-function isHttp2RecentlyUnavailable(baseUrl: string): boolean {
-	const at = http2UnavailableAt.get(baseUrl);
-	if (at === undefined) return false;
-	if (Date.now() - at < CURSOR_HTTP2_UNAVAILABLE_TTL_MS) return true;
-	http2UnavailableAt.delete(baseUrl);
-	return false;
-}
+const http2Unavailable = new LRUCache<string, true>({
+	max: CURSOR_HTTP2_UNAVAILABLE_CACHE_MAX,
+	ttl: CURSOR_HTTP2_UNAVAILABLE_TTL_MS,
+});
 
 /**
  * Maps an opaque HTTP/2 negotiation failure into an actionable error.
@@ -1209,7 +1213,7 @@ function streamCursorWithWireMode(
 		const transportMode =
 			timing?.transport ??
 			(options?.transport === "http1" ||
-			(options?.transport !== "http2" && isHttp2RecentlyUnavailable(model.baseUrl || CURSOR_API_URL))
+			(options?.transport !== "http2" && http2Unavailable.get(model.baseUrl || CURSOR_API_URL))
 				? "http1"
 				: "http2");
 		let startTime = timing?.startTime ?? performance.now();
@@ -2013,7 +2017,7 @@ function streamCursorWithWireMode(
 			if (relay) clearTimeout(relay.quietTimer);
 			let error = caughtError;
 			const h2Unavailable = transportMode === "http2" && isHttp2Unavailable(error);
-			if (h2Unavailable) http2UnavailableAt.set(model.baseUrl || CURSOR_API_URL, Date.now());
+			if (h2Unavailable && isHttp2AlpnRejected(error)) http2Unavailable.set(model.baseUrl || CURSOR_API_URL, true);
 			if (
 				h2Unavailable &&
 				options?.transport !== "http2" &&
@@ -2055,6 +2059,7 @@ function streamCursorWithWireMode(
 				try {
 					for await (const event of http1Stream) {
 						if (event.type === "start") continue;
+						if (event.type === "done") http2Unavailable.set(model.baseUrl || CURSOR_API_URL, true);
 						stream.push(event);
 					}
 					const http1Result = await http1Stream.result();

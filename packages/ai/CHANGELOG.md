@@ -53,6 +53,8 @@
 - Fixed the auth gateway silently dropping the tool namespace and developer `additional_tools` items from Codex Responses requests, so Codex turns replayed tools without them ([#17863](https://github.com/can1357/oh-my-pi/pull/17863) by [@codyw912](https://github.com/codyw912))
 - Cursor turns over HTTP/1 (RunSSE) no longer stall for minutes after Cursor asks for many history blobs; the answers go out one BidiAppend at a time, in order
 - Cursor turns over HTTP/1 (RunSSE) survive a 502, 503 or 504 on a BidiAppend: the append is resent up to twice on the open stream, after `retry-after` (at most 5 s) or a short backoff, instead of restarting or failing the turn
+- Fixed Cursor turns over HTTP/1 stalling for minutes on long conversations ([#17983](https://github.com/can1357/oh-my-pi/pull/17983) by [@breakwaterlabs](https://github.com/breakwaterlabs))
+- Fixed one proxy gateway error ending a Cursor turn over HTTP/1 ([#17983](https://github.com/can1357/oh-my-pi/pull/17983) by [@breakwaterlabs](https://github.com/breakwaterlabs))
 - Fixed Cursor turns failing behind TLS-intercepting proxies that block HTTP/2; later turns start on HTTP/1 ([#17985](https://github.com/can1357/oh-my-pi/pull/17985) by [@breakwaterlabs](https://github.com/breakwaterlabs))
 
 ## [18.16.0] - 2026-11-02
