@@ -350,8 +350,8 @@ async fn action_names(
 }
 
 /// The index of `action` among `proxy`'s actions, matched by machine name. A
-/// generic press of a checkbox or toggle button falls back on `check` or
-/// `uncheck`, the only activation Chromium and Electron give them.
+/// generic press of a checkbox, radio button or toggle button falls back on
+/// `check` or `uncheck`, the only activation Chromium and Electron give them.
 async fn resolve_action(
 	proxy: &atspi::proxy::action::ActionProxy<'_>,
 	accessible: &atspi::proxy::accessible::AccessibleProxy<'_>,
@@ -366,7 +366,11 @@ async fn resolve_action(
 		&& action.eq_ignore_ascii_case("press")
 		&& matches!(
 			accessible.get_role().await,
-			Ok(Role::CheckBox | Role::CheckMenuItem | Role::ToggleButton)
+			Ok(Role::CheckBox
+				| Role::CheckMenuItem
+				| Role::RadioButton
+				| Role::RadioMenuItem
+				| Role::ToggleButton)
 		) {
 		index = names().position(|name| {
 			name.eq_ignore_ascii_case("check") || name.eq_ignore_ascii_case("uncheck")
@@ -907,18 +911,28 @@ mod tests {
 			&'static str,
 			Option<i32>,
 		);
-		const CASES: [Case; 6] = [
+		const CASES: [Case; 7] = [
 			// Firefox.
 			("/firefox", &[";;"], &["press"], 1, Role::Button, "press", Some(0)),
 			// A GTK app under a German locale.
 			("/german", &["Klicken"], &["click"], 1, Role::Button, "press", Some(0)),
-			// Chromium's checkbox, and VS Code's Toggle Panel: a toggle button.
+			// Chromium's checkbox and radio button, and VS Code's Toggle Panel: a
+			// toggle button.
 			(
 				"/checkbox",
 				&["", ""],
 				&["uncheck", "showContextMenu"],
 				2,
 				Role::CheckBox,
+				"press",
+				Some(0),
+			),
+			(
+				"/radio",
+				&["", ""],
+				&["check", "showContextMenu"],
+				2,
+				Role::RadioButton,
 				"press",
 				Some(0),
 			),
