@@ -21,7 +21,7 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
-import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
+import { type CreateAgentSessionOptions, createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { createPersistedSubagentReviverFactory } from "@oh-my-pi/pi-coding-agent/task/persisted-revive";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
@@ -660,32 +660,15 @@ describe("work a session left running, or started before it existed, waits for i
 		expect(server.requests).toEqual(["POST /v1/chat/completions"]);
 	}, 60_000);
 
-	it("holds a request that work a host prepared before the session, in its start-up holds, schedules", async () => {
-		const temp = tempDir("@gate-host-preload-");
-		const server = localModelServer();
-		cleanups.push(server.stop);
-		const auth = await AuthStorage.create(":memory:");
-		cleanups.push(() => auth.close());
-		const go = Promise.withResolvers<void>();
-		let work: Promise<unknown> | undefined;
-		// The host prepares session work (an extension preload, say) before it calls createAgentSession.
-		const startupHolds = new RequestHoldsAlias();
-		runWithRequestHolds(startupHolds, () => {
-			work = go.promise.then(() =>
-				completeSimple(
-					server.model,
-					{ messages: [{ role: "user", content: "preloaded", timestamp: 0 }] },
-					{ apiKey: "k" },
-				),
-			);
-		});
-		const { session } = await createAgentSession({
+	/** Options for a minimal real session on `server`'s model. */
+	function minimalSessionOptions(temp: TempDir, auth: AuthStorage, model: Model): CreateAgentSessionOptions {
+		return {
 			cwd: temp.path(),
 			agentDir: temp.path(),
 			authStorage: auth,
 			modelRegistry: new ModelRegistry(auth, path.join(temp.path(), "models.yml")),
 			sessionManager: SessionManager.inMemory(temp.path()),
-			model: server.model,
+			model,
 			settings: Settings.isolated({
 				"advisor.enabled": false,
 				"compaction.enabled": false,
@@ -693,7 +676,6 @@ describe("work a session left running, or started before it existed, waits for i
 				"todo.enabled": false,
 			}),
 			disableExtensionDiscovery: true,
-			startupHolds,
 			skills: [],
 			rules: [],
 			contextFiles: [],
@@ -703,26 +685,81 @@ describe("work a session left running, or started before it existed, waits for i
 			enableMCP: false,
 			enableLsp: false,
 			skipPythonPreflight: true,
-		});
-		cleanups.push(() => session.dispose());
-		const release = Promise.withResolvers<void>();
-		let held = true;
-		const reached = Promise.withResolvers<void>();
-		session.agent.addHold(() => ({
-			pending: () => {
-				if (!held) return undefined;
-				reached.resolve();
-				return release.promise;
-			},
-		}));
-		go.resolve();
-		await reached.promise;
-		await eventLoopTurns();
-		expect(server.requests).toEqual([]);
-		held = false;
-		release.resolve();
-		await work;
-		expect(server.requests).toEqual(["POST /v1/chat/completions"]);
+		};
+	}
+
+	for (const where of [
+		"in its start-up holds, before the session",
+		"in the host's extension-roots callback",
+	] as const) {
+		it(`holds a request that work a host prepared ${where} schedules`, async () => {
+			const temp = tempDir("@gate-host-preload-");
+			const server = localModelServer();
+			cleanups.push(server.stop);
+			const auth = await AuthStorage.create(":memory:");
+			cleanups.push(() => auth.close());
+			const go = Promise.withResolvers<void>();
+			let work: Promise<unknown> | undefined;
+			const schedule = () => {
+				work = go.promise.then(() =>
+					completeSimple(
+						server.model,
+						{ messages: [{ role: "user", content: "preloaded", timestamp: 0 }] },
+						{ apiKey: "k" },
+					),
+				);
+			};
+			const options = minimalSessionOptions(temp, auth, server.model);
+			if (where === "in its start-up holds, before the session") {
+				// The host prepares session work (an extension preload, say) before it calls createAgentSession.
+				const startupHolds = new RequestHoldsAlias();
+				runWithRequestHolds(startupHolds, schedule);
+				options.startupHolds = startupHolds;
+			} else {
+				// The first call is the one start-up makes before anything else.
+				let calls = 0;
+				options.extensionRoots = () => {
+					if (calls++ === 0) schedule();
+					return { explicit: [], mode: "explicit-only" };
+				};
+			}
+			const { session } = await createAgentSession(options);
+			cleanups.push(() => session.dispose());
+			const release = Promise.withResolvers<void>();
+			let held = true;
+			const reached = Promise.withResolvers<void>();
+			session.agent.addHold(() => ({
+				pending: () => {
+					if (!held) return undefined;
+					reached.resolve();
+					return release.promise;
+				},
+			}));
+			go.resolve();
+			await reached.promise;
+			await eventLoopTurns();
+			expect(server.requests).toEqual([]);
+			held = false;
+			release.resolve();
+			await work;
+			expect(server.requests).toEqual(["POST /v1/chat/completions"]);
+		}, 60_000);
+	}
+
+	it("refuses start-up holds another live session was built with, and accepts them once it is disposed", async () => {
+		const temp = tempDir("@gate-startup-owner-");
+		const server = localModelServer();
+		cleanups.push(server.stop);
+		const auth = await AuthStorage.create(":memory:");
+		cleanups.push(() => auth.close());
+		const startupHolds = new RequestHoldsAlias();
+		const first = await createAgentSession({ ...minimalSessionOptions(temp, auth, server.model), startupHolds });
+		await expect(
+			createAgentSession({ ...minimalSessionOptions(temp, auth, server.model), startupHolds }),
+		).rejects.toThrow("These start-up holds already belong to another live session");
+		await first.session.dispose();
+		const second = await createAgentSession({ ...minimalSessionOptions(temp, auth, server.model), startupHolds });
+		await second.session.dispose();
 	}, 60_000);
 
 	it("holds a cold-revived subagent by its live parent's holds, whoever revives it", async () => {
