@@ -66,14 +66,30 @@ function fileFactsIn(cwd: string, target: string): FileFacts | undefined {
 		return undefined;
 	}
 	let plainText: boolean | undefined;
+	let maybeBinary: boolean | undefined;
 	return {
 		size: stat.size,
 		links: stat.nlink,
+		mode: stat.mode,
 		plainText: () => {
 			plainText ??= isPlainText(joined, stat.size);
 			return plainText;
 		},
+		maybeBinary: () => {
+			maybeBinary ??= mayHoldNul(joined, stat.size);
+			return maybeBinary;
+		},
 	};
+}
+
+/** Whether the file may hold a NUL byte: true when it does, when it cannot be read, or over 4 MB. */
+function mayHoldNul(file: string, size: number): boolean {
+	if (size > PLAIN_TEXT_LIMIT) return true;
+	try {
+		return fs.readFileSync(file).includes(0);
+	} catch {
+		return true;
+	}
 }
 
 /** Whether the file is at most 4 MB of valid UTF-8 with no byte-order mark and no carriage return. */
