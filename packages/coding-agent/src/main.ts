@@ -9,7 +9,7 @@ import * as os from "node:os";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
 import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
 import { getModelPricingStatus } from "@oh-my-pi/pi-catalog/models";
-import { isEnoent, isEnotdir } from "@oh-my-pi/pi-utils";
+import { ensureSqliteLockShim, isEnoent, isEnotdir } from "@oh-my-pi/pi-utils";
 import {
 	APP_NAME,
 	directoryIsMissing,
@@ -2352,6 +2352,13 @@ export async function runRootCommand(
 			if (isInteractive) notifs.push({ kind: "warn", message: warning });
 			else writeStartupWarning(warning);
 		};
+		// The CLI moved SQLite onto OFD locks before any store opened; without them a
+		// read of a live store elsewhere in this process can corrupt it (issue #15586).
+		if (process.platform === "linux" && !ensureSqliteLockShim()) {
+			startupWarning(
+				"SQLite lock protection is unavailable with this Bun build: reading omp's own databases from inside omp (e.g. `grep -r ~/.omp`, `cp ~/.omp/agent/agent.db`) can corrupt them. Avoid it, and report this with your Bun version (#15586).",
+			);
+		}
 		const buildStartupSessionOptions = async (manager: SessionManager | undefined) => {
 			const options = await logger.time(
 				"buildSessionOptions",

@@ -279,6 +279,8 @@ export interface AgentOptions {
 
 	/** Enable intent tracing schema injection/stripping in the harness. */
 	intentTracing?: boolean;
+	/** Schema description of the injected intent field; `PI_INTENT_DESC` overrides it. Default `concise intent`. */
+	intentDescription?: string;
 	/**
 	 * Strip tool descriptions from provider-bound tool specs (top-level + nested
 	 * schema annotations). Use when the full catalog is rendered into the system
@@ -493,6 +495,7 @@ export class Agent {
 	#resolveFallbackTool?: (name: string, advertised: readonly AgentTool<any>[]) => AgentTool<any> | undefined;
 	#suggestFallbackToolNames?: () => Iterable<string>;
 	#intentTracing: boolean;
+	#intentDescription?: string;
 	#pruneToolDescriptions: boolean;
 	#dialect?: Dialect;
 	#dialectResolver?: (model: Model) => Dialect | undefined;
@@ -602,6 +605,7 @@ export class Agent {
 		this.#resolveFallbackTool = opts.resolveFallbackTool;
 		this.#suggestFallbackToolNames = opts.suggestFallbackToolNames;
 		this.#intentTracing = opts.intentTracing === true;
+		this.#intentDescription = opts.intentDescription;
 		this.#pruneToolDescriptions = opts.pruneToolDescriptions === true;
 		this.#dialect = opts.dialect;
 		this.#dialectResolver = opts.dialectResolver;
@@ -864,6 +868,11 @@ export class Agent {
 		this.#intentTracing = value;
 	}
 
+	/** The intent field's schema description this agent was built with (`PI_INTENT_DESC` still overrides it). */
+	get intentDescription(): string | undefined {
+		return this.#intentDescription;
+	}
+
 	/** Abort the provider request on a fabricated tool result; applies from the next prompt run. */
 	get abortOnFabricatedToolResult(): boolean | undefined {
 		return this.#abortOnFabricatedToolResult;
@@ -970,6 +979,7 @@ export class Agent {
 			? []
 			: (normalizeTools(this.#toolsForModel(model), {
 					injectIntent: this.#intentTracing,
+					intentDescription: this.#intentDescription,
 					pruneDescriptions: this.#pruneToolDescriptions,
 				}) ?? []);
 		let context: Context = { systemPrompt, messages, tools };
@@ -1991,6 +2001,7 @@ export class Agent {
 			resolveFallbackTool: this.#resolveFallbackTool,
 			suggestFallbackToolNames: this.#suggestFallbackToolNames,
 			intentTracing: this.#intentTracing,
+			intentDescription: this.#intentDescription,
 			pruneToolDescriptions: this.#pruneToolDescriptions,
 			dialect: this.#dialect,
 			getDialect: this.#dialectResolver,

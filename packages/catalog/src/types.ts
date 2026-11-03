@@ -616,6 +616,14 @@ export interface AnthropicCompat {
 	 */
 	supportsServerCompaction?: boolean;
 	/**
+	 * Whether the model supports message threads (`message-threads-2026-08-12`):
+	 * later turns continue a server-held conversation and send only new
+	 * messages. Enabled on Claude 4.5+ for the first-party provider; the
+	 * transport still requires the official endpoint unless the caller opts in.
+	 * Default: false.
+	 */
+	supportsMessageThreads?: boolean;
+	/**
 	 * Whether the model is served by the first-party Anthropic provider (its
 	 * default route is the official API). Rule-owned on the provider; the
 	 * compaction transport pairs it with a per-request effective-URL check

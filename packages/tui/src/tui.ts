@@ -309,6 +309,13 @@ export interface Component {
 	handleNativeEvent?(event: NativeUiEvent): void;
 
 	/**
+	 * Native transcript blocks drawn right after this one as siblings (a `TranscriptContainer` child only): notes
+	 * about the block that must show while it is collapsed, such as a tool card's Spotlight notice. The terminal
+	 * rows never show them. Return the same array while unchanged.
+	 */
+	nativeTrailers?(): readonly Component[];
+
+	/**
 	 * Pure preflight for focused input that must precede TUI-wide input listeners
 	 * and debug shortcuts. A true result routes the event to this component first.
 	 */
@@ -1326,6 +1333,10 @@ export class TUI extends Container {
 				const index = this.overlayStack.indexOf(entry);
 				if (index !== -1) {
 					this.overlayStack.splice(index, 1);
+					// Overlays opened over this one return focus to where it would have.
+					for (const other of this.overlayStack) {
+						if (other.preFocus && isOverlayFocusTarget(component, other.preFocus)) other.preFocus = entry.preFocus;
+					}
 					// Restore focus if this overlay or one of its owned targets had focus
 					if (isOverlayFocusTarget(component, this.#focusedComponent)) {
 						this.setFocus(this.#getKeyHolderOverlay()?.component ?? entry.preFocus);
