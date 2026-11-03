@@ -58,6 +58,11 @@ export class ToolAllowList {
 		return new ToolAllowList(names, mcpServers, allDevices);
 	}
 
+	/** This list plus the named tools. */
+	withNames(names: readonly string[]): ToolAllowList {
+		return new ToolAllowList(new Set([...this.#names, ...names]), new Set(this.#mcpServers), this.#allDevices);
+	}
+
 	/** The entries that name one tool (selectors excluded). */
 	get toolNames(): string[] {
 		return [...this.#names];

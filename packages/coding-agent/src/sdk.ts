@@ -2809,11 +2809,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		});
 
 		// Restricted sessions cannot inherit or discover MCP capabilities.
+		// A structured subagent must be able to report its result, whatever its
+		// parent's list names: `yield` only ends the run.
+		const toolAllowList =
+			options.requireYieldTool === true ? options.toolAllowList?.withNames(["yield"]) : options.toolAllowList;
 		// An allow-list with no MCP entry can reach no MCP tool: start no server.
-		const enableMCP = !restrictToolNames && (options.enableMCP ?? true) && (options.toolAllowList?.allowsMCP ?? true);
+		const enableMCP = !restrictToolNames && (options.enableMCP ?? true) && (toolAllowList?.allowsMCP ?? true);
 		let mcpManager: MCPManager | undefined = enableMCP ? options.mcpManager : undefined;
 		toolSession.mcpManager = mcpManager;
 		toolSession.enableMCP = enableMCP;
+		toolSession.toolAllowList = toolAllowList;
 		const deferMCPDiscoveryForUI = enableMCP && !mcpManager && options.hasUI === true;
 		const customTools: CustomTool[] = [];
 		const initialMcpManagerTools: CustomTool[] = [];
@@ -4503,7 +4508,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				initialToolNames.push(name);
 			}
 		}
-		const toolAllowList = options.toolAllowList;
 		if (toolAllowList) {
 			initialToolNames = initialToolNames.filter(name => toolAllowList.allows(name, toolRegistry.get(name)));
 		}
@@ -5141,7 +5145,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getXdevToolEntries: () => (toolSession.xdev ? xdevEntries(toolSession.xdev) : []),
 			xdev: toolSession.xdev,
 			presentationPinnedToolNames,
-			toolAllowList: options.toolAllowList,
+			toolAllowList,
 			setActiveToolNames: setSessionActiveToolNames,
 			ensureWriteRegistered,
 			isDeviceOnlyWrite: () => toolSession.deviceOnlyWrite === true,

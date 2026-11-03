@@ -104,6 +104,7 @@ import { cfgGoalEnabled } from "../goals/settings";
 import { cfgLspEnabled } from "../lsp/settings";
 import { cfgMemoryBackend } from "../memory-backend/settings";
 import { cfgTaskMaxRecursionDepth } from "../task/settings";
+import type { ToolAllowList } from "./tool-allowlist";
 
 export * from "../edit";
 export * from "../goals";
@@ -452,6 +453,11 @@ export interface ToolSession {
 	asyncJobManager?: AsyncJobManager;
 	/** MCP manager visible to subagents without relying on the process-global singleton. */
 	mcpManager?: MCPManager;
+	/**
+	 * The session's tool allow-list (CLI `--tools`), inherited by every subagent it
+	 * spawns, so a child can invoke nothing its parent could not.
+	 */
+	toolAllowList?: ToolAllowList;
 	/** Local protocol root to propagate to nested subagents and eval-created agents. */
 	localProtocolOptions?: LocalProtocolOptions;
 	/** Settings instance for passing to subagents */

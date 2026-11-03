@@ -805,6 +805,7 @@ function buildExecutorOptions(
 		inheritedSessionAgents: session.getSessionAgents?.(),
 		mcpManager: enableMCP ? (session.mcpManager ?? MCPManager.instance()) : undefined,
 		enableMCP,
+		toolAllowList: session.toolAllowList,
 		customTools: request.customTools,
 		workPoolYieldItems: request.workPoolYieldItems,
 		contextFiles: session.contextFiles,

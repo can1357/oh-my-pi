@@ -2685,6 +2685,7 @@ export async function runRootCommand(
 					modelRegistry,
 					settings: settingsInstance,
 					enableLsp: sessionOptions.enableLsp ?? true,
+					toolAllowList: sessionOptions.toolAllowList,
 					eventBus,
 					subagentEventBus,
 				}),

@@ -164,6 +164,7 @@ import {
 	cfgCompactionThresholdPercent,
 	cfgCompactionThresholdTokens,
 } from "../session/context-settings";
+import type { ToolAllowList } from "../tools/tool-allowlist";
 
 export type { YieldItem } from "@oh-my-pi/pi-tui/tools/task";
 
@@ -542,6 +543,8 @@ export interface ExecutorOptions {
 	 */
 	preloadedCustomToolPaths?: ToolPathWithSource[];
 	mcpManager?: MCPManager;
+	/** The parent's tool allow-list (CLI `--tools`); the child can invoke nothing outside it. */
+	toolAllowList?: ToolAllowList;
 	/** User-authorized model agents available to this child and its descendants. */
 	inheritedSessionAgents?: CreateAgentSessionOptions["inheritedSessionAgents"];
 	authStorage?: AuthStorage;
@@ -4825,6 +4828,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					skipPythonPreflight,
 					enableMCP,
 					mcpManager,
+					toolAllowList: options.toolAllowList,
 					// MCP proxies are minted per build as `mcpTools` in buildSubagentSessionOptions.
 					customTools: options.customTools,
 					localProtocolOptions: options.localProtocolOptions,
