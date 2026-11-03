@@ -4,7 +4,7 @@
 
 ### Changed
 
-- `grep()` streams files over 4 MB to their end in directory searches instead of searching their first 4 MB, and lists in `partialFiles` the files it searched only in part (multiline mode over 4 MB, or a line too long to stream)
+- `grep()` streams files over 4 MB to their end in directory searches instead of searching their first 4 MB, and lists in `partialFiles` the files it searched only in part (multiline mode over 4 MB, or a line too long to stream, which no longer fails a search of one named file)
 - `grep()` resolves with the matches found so far and `timedOut: true` when `timeoutMs` passes, instead of rejecting with `Aborted: Timeout`; it still rejects when a search cannot stop within 5 s after that
 
 ## [18.16.0] - 2026-11-02

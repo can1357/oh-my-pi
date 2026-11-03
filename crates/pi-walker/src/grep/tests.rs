@@ -380,7 +380,8 @@ fn scan_both<M: grep_matcher::Matcher>(
 	let a = scan::Scanner::default()
 		.scan(matcher, false, false, doc, params, &mut ours)
 		.unwrap_or_else(|err| panic!("scan: {err}"));
-	let b = scan::scan_reader(matcher, doc, params, &mut theirs).expect("stream");
+	let (b, stopped) = scan::scan_reader(matcher, doc, params, &mut theirs);
+	assert!(stopped.is_none(), "stream: {stopped:?}");
 	[(a, ours), (b, theirs)]
 }
 
@@ -501,17 +502,24 @@ async fn oversized_file_roots_are_streamed_in_full_or_cut_in_multiline_mode() {
 	assert_eq!(res.total_matches, 1, "multiline mode searches the leading window");
 }
 
+/// A line too long to stream stops a file root's search: the matches before
+/// it stand, and the file is named as searched in part, in content and count
+/// modes alike.
 #[tokio::test(flavor = "multi_thread")]
-async fn streamed_file_root_fails_on_a_line_over_the_limit() {
+async fn streamed_file_root_stops_at_a_line_over_the_limit_and_names_it_partial() {
 	let dir = TempDir::new();
-	let mut content = vec![b'a'; scan::STREAM_LINE_LIMIT + 1024];
-	content.extend_from_slice(b"\nneedle\n");
+	let mut content = b"needle kept\n".to_vec();
+	content.extend(std::iter::repeat_n(b'a', scan::STREAM_LINE_LIMIT + 1024));
+	content.extend_from_slice(b"\nneedle lost\n");
 	let big = dir.write("long.txt", &content);
 	let engine = needle();
-	let Err(GrepError::Search(reason)) = grep(&Fs::native(), &big, options(&engine)).await else {
-		panic!("a line over the limit must fail the search");
-	};
-	assert!(reason.contains("a line longer than 64 MiB cannot be searched"), "{reason}");
+	for mode in [Mode::Content, Mode::Count] {
+		let res = grep(&Fs::native(), &big, GrepOptions { mode, ..options(&engine) })
+			.await
+			.expect("a line over the limit ends the search, not the call");
+		assert_eq!(res.total_matches, 1, "{mode:?}");
+		assert_eq!(res.partial_files.len(), 1, "{mode:?}");
+	}
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1234,4 +1242,24 @@ async fn directory_search_reads_large_files_whole_or_names_them_partial() {
 	let root =
 		run(&dir.path().join("big.txt"), &GrepOptions { multiline: true, ..options(&multi) }).await;
 	assert_eq!(root.partial_files.len(), 1);
+}
+
+/// In a directory search, a line too long to stream ends that file's search
+/// with its earlier matches kept (counted in count mode too) and the file
+/// named as partial.
+#[tokio::test(flavor = "multi_thread")]
+async fn directory_search_keeps_matches_before_a_line_over_the_limit() {
+	let dir = TempDir::new();
+	let mut content = b"needle kept\n".to_vec();
+	content.extend(std::iter::repeat_n(b'a', scan::STREAM_LINE_LIMIT + 1024));
+	content.extend_from_slice(b"\nneedle lost\n");
+	dir.write("long.txt", &content);
+	dir.write("small.txt", "needle small\n");
+	let engine = needle();
+	for (mode, max_count) in [(Mode::Content, None), (Mode::Count, None), (Mode::Count, Some(1_000))]
+	{
+		let res = run(dir.path(), &GrepOptions { mode, max_count, ..options(&engine) }).await;
+		assert_eq!(res.total_matches, 2, "{mode:?} {max_count:?}");
+		assert_eq!(res.partial_files, ["long.txt"], "{mode:?} {max_count:?}");
+	}
 }

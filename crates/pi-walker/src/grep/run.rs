@@ -22,7 +22,7 @@ use tokio::sync::mpsc;
 
 use super::{
 	Engine, GrepError, GrepOptions, GrepResult, MAX_FILE_BYTES, Match, Mode,
-	scan::{STREAM_LINE_LIMIT, ScanOutcome, ScanParams, Scanner, scan_reader},
+	scan::{ScanOutcome, ScanParams, Scanner, scan_reader},
 	types::TypeFilter,
 };
 use crate::{
@@ -230,11 +230,6 @@ async fn file_root<M: Matcher + Sync>(
 		}
 	};
 	drop(session);
-	let partial_files = if truncated {
-		vec![root.to_string_lossy().into_owned()]
-	} else {
-		Vec::new()
-	};
 
 	// One file either matches or not: report it once, as a directory walk
 	// does.
@@ -250,23 +245,23 @@ async fn file_root<M: Matcher + Sync>(
 			.scan(search.matcher, search.multiline, search.spans, &buf, &params, &mut matches)
 			.map_err(|err| GrepError::Search(err.to_string()))?,
 		Haystack::Stream(mut file) => {
-			match stream_file(search.matcher, &mut file, &params, &mut matches, halt).await {
-				Ok(outcome) => outcome,
-				// The deadline halted the read: what was matched before it stands.
-				Err(_) if expired.load(Ordering::Relaxed) => {
-					let found = matches.len() as u64;
-					ScanOutcome { count: found, collected: found, limit_reached: false }
-				},
-				Err(err) => {
-					return Err(GrepError::Search(format!(
-						"{err} (a line longer than {} MiB cannot be searched; use read for this file)",
-						STREAM_LINE_LIMIT / (1024 * 1024)
-					)));
-				},
+			let streamed = stream_file(search.matcher, &mut file, &params, &mut matches, halt)
+				.await
+				.map_err(|err| GrepError::Search(err.to_string()))?;
+			// The deadline or a line too long to stream stopped the read: what
+			// was matched before it stands, and the file is named as partial.
+			if streamed.stopped.is_some() && !expired.load(Ordering::Relaxed) {
+				truncated = true;
 			}
+			streamed.outcome
 		},
 	};
 	let timed_out = expired.load(Ordering::Relaxed);
+	let partial_files = if truncated {
+		vec![root.to_string_lossy().into_owned()]
+	} else {
+		Vec::new()
+	};
 	if outcome.count == 0 {
 		return Ok(GrepResult {
 			files_searched: 1,
@@ -314,7 +309,7 @@ async fn file_root<M: Matcher + Sync>(
 }
 
 /// Searches `file` line by line: a native file through grep-searcher's
-/// bounded reader (lines up to [`STREAM_LINE_LIMIT`]), ending once `halt`
+/// bounded reader (lines up to 64 MiB), ending once `halt`
 /// is raised; a provider file read in full.
 async fn stream_file<M: Matcher + Sync>(
 	matcher: &M,
@@ -322,15 +317,24 @@ async fn stream_file<M: Matcher + Sync>(
 	params: &ScanParams,
 	matches: &mut Vec<Match>,
 	halt: &AtomicBool,
-) -> io::Result<ScanOutcome> {
+) -> io::Result<Streamed> {
 	if let Some(reader) = file.native_reader() {
-		return scan_reader(matcher, Halting { reader, halt }, params, matches);
+		let (outcome, stopped) = scan_reader(matcher, Halting { reader, halt }, params, matches);
+		return Ok(Streamed { outcome, stopped });
 	}
 	let mut buf = Vec::new();
 	file.read_into(&mut buf, u64::MAX).await?;
-	Scanner::default()
+	let outcome = Scanner::default()
 		.scan(matcher, false, false, &buf, params, matches)
-		.map_err(|err| io::Error::other(err.to_string()))
+		.map_err(|err| io::Error::other(err.to_string()))?;
+	Ok(Streamed { outcome, stopped: None })
+}
+
+/// What a streamed search found, and the error that stopped it before the
+/// end, if any: the counts cover the lines read before it.
+struct Streamed {
+	outcome: ScanOutcome,
+	stopped: Option<io::Error>,
 }
 
 /// A reader that fails once the search is halted.
@@ -428,11 +432,10 @@ async fn scan_oversized<M: Matcher + Sync>(
 	matches: &mut Vec<Match>,
 ) -> Option<(ScanOutcome, bool)> {
 	if !search.multiline {
-		if let Ok(outcome) = stream_file(search.matcher, file, &search.params, matches, halt).await {
-			return Some((outcome, false));
-		}
-		let found = matches.len() as u64;
-		return Some((ScanOutcome { count: found, collected: found, limit_reached: false }, true));
+		let streamed = stream_file(search.matcher, file, &search.params, matches, halt)
+			.await
+			.ok()?;
+		return Some((streamed.outcome, streamed.stopped.is_some()));
 	}
 	file
 		.read_into(&mut scratch.buf, MAX_FILE_BYTES)

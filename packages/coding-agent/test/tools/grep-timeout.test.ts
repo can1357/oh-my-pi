@@ -165,4 +165,19 @@ describe("grep timeout", () => {
 		expect(text).toContain("Searched only part of these files");
 		expect(text).toContain("big.txt");
 	});
+
+	it("names at most ten partially searched files, so the matches still show", async () => {
+		await Bun.write(path.join(cwd, "a.txt"), "needle one\n");
+		const partialFiles = Array.from({ length: 250 }, (_, i) => `${"long-directory-name/".repeat(10)}file-${i}.txt`);
+		const tool = new GrepTool(session, {
+			nativeGrep: async () => found([hit("a.txt", 1, "needle one")], { partialFiles }),
+		});
+
+		const text = textOf(await tool.execute("many-partial", { pattern: "needle", path: "." }));
+
+		expect(text).toContain("needle one");
+		expect(text).toContain("file-9.txt");
+		expect(text).not.toContain("file-10.txt");
+		expect(text).toContain("and 240 more");
+	});
 });

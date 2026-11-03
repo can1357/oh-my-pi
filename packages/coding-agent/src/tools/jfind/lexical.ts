@@ -47,30 +47,39 @@ export async function grepIndex(
 	const index: GrepIndex = { keywords, perFileKw: new Map(), filesScanned: 0, timedOut: false };
 	if (keywords.length === 0) return index;
 	const { perFileKw } = index;
-	const result = await natives.grep({
-		pattern: keywords.map(escapeRegex).join("|"),
-		path: root,
-		ignoreCase: true,
-		hidden: options.includeHidden,
-		gitignore: true,
-		mode: natives.GrepOutputMode.Content,
-		filesystem: options.filesystem,
-		signal: options.signal,
-		timeoutMs: options.timeoutMs,
-		onMatches: matches => {
-			for (const match of matches) {
-				let counts = perFileKw.get(match.path);
-				if (!counts) {
-					counts = Array.from({ length: keywords.length }, () => 0);
-					perFileKw.set(match.path, counts);
+	let result: natives.GrepResult;
+	try {
+		result = await natives.grep({
+			pattern: keywords.map(escapeRegex).join("|"),
+			path: root,
+			ignoreCase: true,
+			hidden: options.includeHidden,
+			gitignore: true,
+			mode: natives.GrepOutputMode.Content,
+			filesystem: options.filesystem,
+			signal: options.signal,
+			timeoutMs: options.timeoutMs,
+			onMatches: matches => {
+				for (const match of matches) {
+					let counts = perFileKw.get(match.path);
+					if (!counts) {
+						counts = Array.from({ length: keywords.length }, () => 0);
+						perFileKw.set(match.path, counts);
+					}
+					const line = match.line.toLowerCase();
+					for (let k = 0; k < keywords.length; k++) {
+						counts[k]! += countOccurrences(line, keywords[k]!);
+					}
 				}
-				const line = match.line.toLowerCase();
-				for (let k = 0; k < keywords.length; k++) {
-					counts[k]! += countOccurrences(line, keywords[k]!);
-				}
-			}
-		},
-	});
+			},
+		});
+	} catch (err) {
+		// A scan that could not stop after its deadline: the counts streamed so far stand.
+		if (!(err instanceof Error && err.message.includes("Aborted: Timeout"))) throw err;
+		index.filesScanned = perFileKw.size;
+		index.timedOut = true;
+		return index;
+	}
 	index.filesScanned = result.filesSearched + (result.skippedOversized ?? 0);
 	index.timedOut = Boolean(result.timedOut);
 	return index;

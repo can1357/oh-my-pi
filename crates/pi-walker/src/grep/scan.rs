@@ -462,12 +462,15 @@ impl<M: Matcher> Sink for StreamCollector<'_, M> {
 /// Searches `reader` line by line through grep-searcher's bounded buffer
 /// (lines up to [`STREAM_LINE_LIMIT`]), with the semantics of
 /// [`Scanner::scan`] in line mode.
+/// Streams `reader` through `matcher`. Returns what was counted and collected,
+/// and the error that stopped the stream early, if any: the counts cover the
+/// lines read before it.
 pub fn scan_reader<M: Matcher>(
 	matcher: &M,
 	reader: impl io::Read,
 	p: &ScanParams,
 	out: &mut Vec<Match>,
-) -> io::Result<ScanOutcome> {
+) -> (ScanOutcome, Option<io::Error>) {
 	let (before, after) = if p.content {
 		(p.before, p.after)
 	} else {
@@ -488,6 +491,6 @@ pub fn scan_reader<M: Matcher>(
 		skipped: 0,
 		before: Vec::new(),
 	};
-	searcher.search_reader(matcher, reader, &mut sink)?;
-	Ok(sink.res)
+	let stopped = searcher.search_reader(matcher, reader, &mut sink).err();
+	(sink.res, stopped)
 }

@@ -104,6 +104,16 @@ const NATIVE_GREP_MAX_FILE_BYTES = 4 * 1024 * 1024;
  * `Aborted: Timeout` only when it cannot stop within a grace period after. */
 const SEARCH_GREP_TIMEOUT_MS = 30_000;
 
+/** How many partially searched files the notice names before counting the rest. */
+const PARTIAL_FILES_SHOWN = 10;
+
+/** The first {@link PARTIAL_FILES_SHOWN} names and a count of the rest, so the notice never crowds out the matches. */
+function formatPartialFiles(files: readonly string[]): string {
+	const shown = files.slice(0, PARTIAL_FILES_SHOWN).join(", ");
+	const rest = files.length - PARTIAL_FILES_SHOWN;
+	return rest > 0 ? `${shown}, and ${rest} more` : shown;
+}
+
 /** The notice a timed-out search carries: what it shows is not the whole answer. */
 function grepTimeoutNotice(timeoutMs: number): string {
 	return `Grep timed out after ${Number((timeoutMs / 1000).toFixed(3))}s; results are partial (only matches found before the timeout are shown). Narrow paths or pattern, or scope with \`glob\` first.`;
@@ -1088,7 +1098,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 				// note the caller might take matches (or "no matches") there as the whole file.
 				const oversizedNote =
 					partialFiles.length > 0
-						? `Searched only part of these files (multiline search reads the first ${limitMb}MB of a large file; a line too long to stream ends the search; matches past that point are not shown; search without a newline in the pattern, or use \`read\`, for the rest): ${[...new Set(partialFiles)].map(formatPath).join(", ")}`
+						? `Searched only part of these files (multiline search reads the first ${limitMb}MB of a large file; a line too long to stream ends the search; matches past that point are not shown; search without a newline in the pattern, or use \`read\`, for the rest): ${formatPartialFiles([...new Set(partialFiles)].map(formatPath))}`
 						: undefined;
 				// Directory/multi-target scopes: native counts files it could not map
 				// even a prefix of (rare mmap failures), but cannot name them.
