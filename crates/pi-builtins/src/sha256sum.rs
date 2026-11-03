@@ -2,13 +2,12 @@
 //!
 //! Ported from uutils coreutils 0.8.0.
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::ArgMatches;
 use uucore::checksum::AlgoKind;
 
 use crate::{
 	cksum,
-	host::{Host, Utility, matches_parser, util},
+	host::{Host, Utility, matches_parser},
 };
 
 /// Parsed `sha256sum` invocation.
@@ -29,9 +28,4 @@ impl Utility for Sha256sum {
 
 fn app() -> clap::Command {
 	cksum::command(Sha256sum::NAME, false)
-}
-
-/// Creates the `sha256sum` builtin registration.
-pub(crate) fn sha256sum_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Sha256sum, SE>()
 }

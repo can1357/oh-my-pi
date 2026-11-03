@@ -469,7 +469,7 @@ describe("job renderer task-result preview", () => {
 			const tiles = (strip!.c ?? []) as NativeNode[];
 			expect(tiles.map(tile => byRole(tile, "omp.job.tile.title")?.p)).toMatchObject([
 				{ spans: [{ t: "Bencher" }] },
-				{ spans: [{ t: "verb-bench · decode throughput" }] },
+				{ spans: [{ t: "loadtest · decode throughput" }] },
 			]);
 			const bench = tiles[1]!;
 			expect(byRole(bench, "omp.job.tile.chart")).toBeDefined();
@@ -496,7 +496,7 @@ describe("job renderer task-result preview", () => {
 				const lines = (component.render(100) as readonly string[]).map(line => Bun.stripANSI(line));
 				const row = lines.findIndex(line => line.includes("bg_3"));
 				expect(row).toBeGreaterThan(0);
-				expect(lines[row]).toContain("verb-bench · decode throughput bg_3");
+				expect(lines[row]).toContain("loadtest · decode throughput bg_3");
 				expect(lines[row]).toMatch(/decode 186 tok\/s ▲ 15% {2}42\.0s$/);
 				expect(lines[row + 1]).toMatch(/[▁▂▃▄▅▆▇█]+ {2}186 tok\/s {2}┄ target 200 tok\/s/);
 				for (const line of lines) expect(Bun.stringWidth(line)).toBeLessThanOrEqual(100);
