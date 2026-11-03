@@ -204,6 +204,9 @@ async function joinGuestLink(link: string, onError: (message: string) => void = 
 			resetTranscriptAnchors: () => {},
 		},
 		syncRunningSubagentBadge: () => {},
+		closeLinkBrowser: () => {},
+		rerenderInLinkBrowser: () => {},
+		rebuildTranscriptScrollback: () => {},
 		showHookSelector: (
 			title: string,
 			options: ExtensionUISelectItem[],
@@ -893,6 +896,7 @@ function makeAskHostContext(): InteractiveModeContext {
 		...base,
 		editorContainer: { clear: () => {}, addChild: () => {} },
 		editor: { getText: () => "", setText: () => {} },
+		closeLinkBrowser: () => {},
 		ui: {
 			requestRender: () => {},
 			setFocus: () => {},

@@ -1643,6 +1643,7 @@ export class AskDialogComponent implements Component {
 			state.noteImages = note.images;
 			state.noteRowKey = rowItem.key;
 			commitNote(state);
+			this.#justAnswered = undefined;
 		} finally {
 			this.#promptActive = false;
 			this.#runDeferredInterrupt();

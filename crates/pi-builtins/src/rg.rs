@@ -2613,12 +2613,3 @@ mod tests {
 		assert!(err.contains("rg: big: pattern file larger than 256 MiB"), "{err}");
 	}
 }
-
-use brush_core::{ShellExtensions, builtins::Registration};
-
-use crate::host::async_util;
-
-/// Creates the ripgrep-compatible `rg` builtin registration.
-pub(crate) fn rg_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	async_util::<Rg, SE>()
-}
