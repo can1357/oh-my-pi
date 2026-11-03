@@ -378,6 +378,7 @@ import {
 	shouldEvaluateCodexAutoRedeem,
 	shouldPromptCodexAutoRedeem,
 } from "./codex-auto-reset";
+import { computeSessionContextBreakdown } from "./context-usage-runtime";
 import { COST_GATE_NOTICE_SOURCE, type CostCapRefusal, CostGate, type CostGateApi } from "./cost-gate";
 import { recordCredentialPin, seedCredentialPins } from "./credential-pin";
 import { isDateCwdReminderControl } from "./date-cwd-reminder";
@@ -9142,6 +9143,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			getPendingPlanReview: () => undefined,
 			openPlanReview: async () => false,
 			getContextUsage: () => this.getContextUsage(),
+			getContextBreakdown: () => computeSessionContextBreakdown(this, { snapcompactSavings: true }),
 			getAsyncJobSnapshot: () => this.getAsyncJobSnapshot(),
 			waitForIdle: () => this.waitForIdle(),
 			newSession: async options => {
