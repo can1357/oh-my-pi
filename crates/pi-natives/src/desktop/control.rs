@@ -460,6 +460,19 @@ fn busy() -> DesktopError {
 	DesktopError::input_busy("another desktop operation owns input/focus control; no input was sent")
 }
 
+/// Owns input/focus control, without the emergency-stop monitor, for a focus
+/// correction that sends no input. Busy while another operation, in this
+/// process or another, owns control.
+#[cfg(target_os = "macos")]
+pub(crate) struct FocusOwner {
+	_owner: KernelOwner,
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn own_focus() -> CoreResult<FocusOwner> {
+	KernelOwner::acquire().map(|owner| FocusOwner { _owner: owner })
+}
+
 /// The kernel owner lives on its own thread: Windows mutex release must happen
 /// on the same thread that acquired it, even when the session is disposed from
 /// another host thread. Closing/crashing the process releases the OS resource.
@@ -1184,6 +1197,18 @@ mod tests {
 		assert!(ProcessLease::acquire().is_err());
 		drop(first);
 		assert!(ProcessLease::acquire().is_ok());
+	}
+
+	#[cfg(target_os = "macos")]
+	#[test]
+	fn a_focus_correction_is_busy_while_a_task_owns_control() {
+		let _serial = OWNERSHIP_TEST.lock();
+		let source = CancellationSource::default();
+		grant_for_test(&source);
+		assert!(own_focus().is_err());
+		source.release_control();
+		drop(own_focus().expect("free once the task releases control"));
+		remove_test_lock();
 	}
 
 	#[cfg(unix)]
