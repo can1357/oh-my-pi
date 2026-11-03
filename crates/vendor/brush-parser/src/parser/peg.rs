@@ -763,12 +763,47 @@ fn locations_are_contiguous(loc_left: &crate::SourceSpan, loc_right: &crate::Sou
     loc_left.end.index == loc_right.start.index
 }
 
+/// The parentheses a `${...}` word of an arithmetic `for` header adds to it, those its expansions
+/// and substitutions carry included. Bash reads every one of them, while the parser reads the
+/// whole word as one token, so the header's end only agrees with Bash's when they are counted
+/// too. Quoted and escaped ones are text for Bash, as is the rest of a comment.
+fn word_parens(text: &str) -> isize {
+    let mut parens = 0_isize;
+    let mut chars = text.chars().peekable();
+    let mut after_blank = true;
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                chars.next();
+            }
+            '\'' => while chars.next().is_some_and(|c| c != '\'') {},
+            '"' => {
+                while let Some(c) = chars.next() {
+                    match c {
+                        '\\' => {
+                            chars.next();
+                        }
+                        '"' => break,
+                        _ => (),
+                    }
+                }
+            }
+            '#' if after_blank => while chars.next().is_some_and(|c| c != '\n') {},
+            '(' => parens += 1,
+            ')' => parens -= 1,
+            _ => (),
+        }
+        after_blank = matches!(c, ' ' | '\t' | '\n' | '(' | ';' | '&' | '|');
+    }
+    parens
+}
+
 /// Reads the header of an arithmetic for loop: the tokens from `pos` up to the `)` that closes the
-/// loop's `((`, with any parentheses between them balanced. As Bash does, it splits the header's
-/// text into the initializer, the condition and the updater at every `;`, whatever the depth of
-/// parentheses, and including each `;` of the `;;`, `;;&` and `;&` operators that the tokenizer
-/// joins adjacent semicolons into; any other character of such an operator (the `&`) starts the
-/// next expression. A header with other than three expressions does not parse.
+/// loop's `((`. As Bash does, it splits the header's text into the initializer, the condition and
+/// the updater at every `;`, whatever the depth of parentheses, and including each `;` of the
+/// `;;`, `;;&` and `;&` operators that the tokenizer joins adjacent semicolons into; any other
+/// character of such an operator (the `&`) starts the next expression. A header with other than
+/// three expressions does not parse.
 fn arithmetic_for_header(
     input: &Tokens<'_>,
     pos: usize,
@@ -776,12 +811,12 @@ fn arithmetic_for_header(
     let mut parts = Vec::with_capacity(3);
     let mut current = String::new();
     let mut previous_end = None;
-    let mut depth = 0_usize;
+    let mut depth = 0_isize;
     for (index, token) in input.tokens.iter().enumerate().skip(pos) {
         let location = token.location();
-        if let Token::Operator(op, _) = token {
-            match op.as_str() {
-                ")" if depth == 0 => {
+        match token {
+            Token::Operator(op, _) => match op.as_str() {
+                ")" if depth <= 0 => {
                     parts.push(current);
                     return match <[String; 3]>::try_from(parts) {
                         Ok(parts) => peg::RuleResult::Matched(
@@ -805,7 +840,8 @@ fn arithmetic_for_header(
                     continue;
                 }
                 _ => {}
-            }
+            },
+            Token::Word(word, _) => depth += word_parens(word),
         }
         // Keep one space where the source had a gap between two tokens of the same expression,
         // as reconstructing a token slice does.

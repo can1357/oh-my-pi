@@ -209,9 +209,11 @@ async fn parameter_word_parentheses_follow_bash() {
 	assert_eq!(out.stderr, "");
 	assert_eq!(out.stdout, "x=1\ni=0\ny=1 1\n");
 
-	// Words that cancel out leave the header where the parser ends it, as in
-	// Bash. The expressions they make are then evaluated, and these fail at
-	// run time in Bash too.
+	// Parentheses that cancel out across the header leave it where the parser
+	// ends it, as in Bash, wherever they stand: in one word, across two words,
+	// in an arithmetic expansion, in a `$[ ]`, or against a literal one. The
+	// expressions they make are then evaluated, and these fail at run time in
+	// Bash too.
 	let out = run(concat!(
 		"v=\n",
 		"w=0\n",
@@ -224,6 +226,19 @@ async fn parameter_word_parentheses_follow_bash() {
 	assert_eq!(out.stdout, "rc=1\nrc=1\n", "stderr: {}", out.stderr);
 	assert!(out.stderr.contains("j=(0"), "the expression must be reported: {}", out.stderr);
 
+	let out = run(concat!(
+		"unset v\n",
+		"w=0\n",
+		"for ((i=${v-$(( (0) ))};0;)); do :; done\n",
+		"echo \"a=$?\"\n",
+		"for ((i=(0${v:-)};0;)); do :; done\n",
+		"echo \"b=$?\"\n",
+		"for ((i=${w:-(}$[ ${w:-)} ];0;)); do :; done\n",
+		"echo \"c=$?\"\n",
+	))
+	.await;
+	assert_eq!(out.stdout, "a=0\nb=0\nc=0\n", "stderr: {}", out.stderr);
+	assert_eq!(out.stderr, "");
 	for script in [
 		"v=1\nfor ((x=${v:?(};0;)); do :; done\necho after\n",
 		"v=1\nfor ((x=${v:-(};0;)); do :; done\necho after\n",
@@ -231,6 +246,7 @@ async fn parameter_word_parentheses_follow_bash() {
 		"v=0\nfor ((i=${v:-${w:-)}};0;)); do :; done\necho after\n",
 		"v=0\n(((( for ((i=${v:-)};0;)) << 2 )) ))\necho after\n",
 		"v=0; w=0\n(( for ((i=${v-$(( ${w:-)} ))};0;)) << 2 ))\necho after\n",
+		"unset v\nfor ((i=${v:-(}${v:-(};0;)))); do :; done\necho after\n",
 	] {
 		let out = run(script).await;
 		assert_eq!(out.stdout, "", "{script:?} ran; stderr: {}", out.stderr);

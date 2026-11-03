@@ -674,63 +674,69 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
         }
     }
 
-    /// Notes a `)` read while the tokenizer may be inside the arithmetic text of a bare `((`.
-    /// The text ends when the parenthesis that matches the second `(` closes.
-    fn note_arithmetic_command_close(&mut self) -> Result<(), TokenizerError> {
-        match self.cross_state.arithmetic_command_depth {
-            Some(depth) if depth > 1 => {
-                self.cross_state.arithmetic_command_depth = Some(depth - 1);
-            }
-            Some(_) => {
-                let was_header = self.cross_state.arithmetic_for_header;
-                self.cross_state.arithmetic_for_header = false;
-                // A header read inside bare `((` text returns to that text.
-                self.cross_state.arithmetic_command_depth =
-                    self.cross_state.outer_arithmetic_depth.take();
-                self.cross_state.arithmetic_expansion =
-                    self.cross_state.arithmetic_command_depth.is_some();
-                // Bash counts the parentheses of the header's `${...}` words toward the header,
-                // but the parser sees each word as one token. When they do not cancel out, Bash
-                // ends the header elsewhere than the parser does, and reports a syntax error or
-                // reads text the parser cannot.
-                if was_header && std::mem::take(&mut self.cross_state.header_word_parens) != 0 {
-                    return Err(TokenizerError::UnbalancedParameterWordInArithmetic);
+    /// Notes a parenthesis the tokenizer read while a bare `((` or an arithmetic `for` header is
+    /// open. Bash counts every parenthesis of a header, those inside its `${...}` words and its
+    /// expansions included, and ends the header where they balance; the parser sees each word as
+    /// one token. A parenthesis the parser does not see is counted on the header instead, except
+    /// that a closing one first closes a parenthesis the parser does see, as it does for Bash.
+    fn note_paren(&mut self, open: bool) -> Result<(), TokenizerError> {
+        let depth = self.cross_state.arithmetic_command_depth;
+        let hidden = self.cross_state.in_parameter_word || depth.is_none();
+        if hidden && !self.cross_state.arithmetic_for_header {
+            // Outside a header the tokenizer reads a word as Bash does not, so counting its
+            // parentheses would end the arithmetic text where the parser does not.
+            return Ok(());
+        }
+        if hidden {
+            match depth {
+                Some(depth) if !open && depth > 1 => {
+                    self.cross_state.arithmetic_command_depth = Some(depth - 1);
                 }
+                _ => self.cross_state.header_word_parens += if open { 1 } else { -1 },
             }
-            None => (),
+            return Ok(());
+        }
+        let Some(depth) = depth else {
+            return Ok(());
+        };
+        if open {
+            self.cross_state.arithmetic_command_depth = Some(depth + 1);
+            return Ok(());
+        }
+        if depth > 1 {
+            self.cross_state.arithmetic_command_depth = Some(depth - 1);
+            return Ok(());
+        }
+        // The parenthesis that matches the second `(` closes: the arithmetic text ends here.
+        let was_header = self.cross_state.arithmetic_for_header;
+        self.cross_state.arithmetic_for_header = false;
+        // A header read inside bare `((` text returns to that text.
+        self.cross_state.arithmetic_command_depth = self.cross_state.outer_arithmetic_depth.take();
+        self.cross_state.arithmetic_expansion = self.cross_state.arithmetic_command_depth.is_some();
+        // A header whose hidden parentheses do not cancel out ends elsewhere for Bash than for
+        // the parser, so Bash reads a header the parser cannot and reports a syntax error.
+        if was_header && std::mem::take(&mut self.cross_state.header_word_parens) != 0 {
+            return Err(TokenizerError::UnbalancedParameterWordInArithmetic);
         }
         Ok(())
     }
 
-    /// Counts a `(` or `)` operator token toward the arithmetic text of a bare `((`, if any.
-    /// A `${...}` word's parentheses are counted on the header instead: the parser sees the whole
-    /// word as one token, so applying them here would end the text where the parser does not.
+    /// Notes a `)` that closes a parenthesis of the arithmetic text around it.
+    fn note_arithmetic_command_close(&mut self) -> Result<(), TokenizerError> {
+        self.note_paren(false)
+    }
+
+    /// Counts a `(` or `)` operator token toward the arithmetic text or header around it.
     fn note_arithmetic_command_paren(
         &mut self,
         token: &TokenParseState,
     ) -> Result<(), TokenizerError> {
-        if self.cross_state.in_parameter_word {
-            return Ok(());
-        }
-        if let Some(depth) = self.cross_state.arithmetic_command_depth {
-            if token.is_specific_operator("(") {
-                self.cross_state.arithmetic_command_depth = Some(depth + 1);
-            } else if token.is_specific_operator(")") {
-                self.note_arithmetic_command_close()?;
-            }
+        if token.is_specific_operator("(") {
+            self.note_paren(true)?;
+        } else if token.is_specific_operator(")") {
+            self.note_paren(false)?;
         }
         Ok(())
-    }
-
-    /// Counts a `(` or `)` operator token of a `${...}` word toward the header around it, if any.
-    fn note_parameter_word_paren(&mut self, token: &TokenParseState) {
-        if self.cross_state.in_parameter_word && self.cross_state.arithmetic_for_header {
-            if token.is_specific_operator("(") {
-                self.cross_state.header_word_parens += 1;
-            } else if token.is_specific_operator(")") {
-                self.cross_state.header_word_parens -= 1;
-            }
-        }
     }
 
     pub fn next_token(&mut self) -> Result<TokenizeResult, TokenizerError> {
@@ -949,7 +955,6 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                 // arithmetic `for` header or parameter word around it.
                 if state.in_operator() {
                     self.note_arithmetic_command_paren(&state)?;
-                    self.note_parameter_word_paren(&state);
                 }
                 result = state.delimit_current_token(reason, &mut self.cross_state)?;
             } else if state.in_operator() {
@@ -967,7 +972,6 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                 } else {
                     assert!(state.started_token());
 
-                    self.note_parameter_word_paren(&state);
 
                     //
                     // N.B. If the completed operator indicates a here-document, then keep
@@ -981,10 +985,13 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                         // minus operator.
                         //
 
-                        if self.cross_state.arithmetic_command_depth.is_some() {
+                        if self.cross_state.arithmetic_command_depth.is_some()
+                            || self.cross_state.arithmetic_for_header
+                        {
                             if state.is_specific_operator("(")
                                 && c == '('
                                 && self.cross_state.after_for_word
+                                && self.cross_state.arithmetic_command_depth.is_some()
                                 && !self.cross_state.arithmetic_for_header
                                 && !self.cross_state.in_parameter_word
                             {
@@ -1124,8 +1131,12 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                             // A command substitution is shell text even inside an arithmetic
                             // `for` header or a parameter word, so it starts fresh there and
                             // restores the outer state afterward. An arithmetic expansion is
-                            // part of the word around it: its `${...}` words keep counting
-                            // toward the header, as Bash counts them.
+                            // part of the header around it: its parentheses count toward the
+                            // header, as Bash counts them. It opens with two and closes with
+                            // two, and the last of those ends the scan without being read.
+                            if is_arithmetic && self.cross_state.arithmetic_for_header {
+                                self.cross_state.header_word_parens += 1;
+                            }
                             let outer_state = (
                                 self.cross_state.arithmetic_expansion,
                                 self.cross_state.arithmetic_command_depth.take(),
@@ -1168,11 +1179,12 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                             state.append_char(self.next_char()?.unwrap());
 
                             // Keep track that we're in an arithmetic expression, since
-                            // some text will be interpreted differently as a result.
+                            // some text will be interpreted differently as a result. A `$[ ... ]`
+                            // is part of the header around it, so its parentheses keep counting
+                            // toward that header; the brackets themselves are not parentheses.
                             let outer_arithmetic = (
                                 self.cross_state.arithmetic_expansion,
                                 self.cross_state.arithmetic_command_depth.take(),
-                                std::mem::take(&mut self.cross_state.arithmetic_for_header),
                                 self.cross_state.outer_arithmetic_depth.take(),
                             );
                             self.cross_state.arithmetic_expansion = true;
@@ -1182,7 +1194,6 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                             (
                                 self.cross_state.arithmetic_expansion,
                                 self.cross_state.arithmetic_command_depth,
-                                self.cross_state.arithmetic_for_header,
                                 self.cross_state.outer_arithmetic_depth,
                             ) = outer_arithmetic;
                         }
