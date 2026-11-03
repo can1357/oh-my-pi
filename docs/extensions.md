@@ -305,11 +305,11 @@ export default function (pi: ExtensionAPI) {
 		description: "Mirrors the todo list into my tracker",
 		create(ctx) {
 			return {
-				async apply(op, params, next) {
-					await tracker.sync(next); // throw to fail this call
+				async apply(op, params, next, signal) {
+					await tracker.sync(next, { signal }); // throw to fail this call
 				},
-				async replace(phases) {
-					await tracker.sync(phases);
+				async replace(phases, signal) {
+					await tracker.sync(phases, { signal });
 				},
 			};
 		},
@@ -319,16 +319,16 @@ export default function (pi: ExtensionAPI) {
 
 ```ts
 interface TodoBackend {
-	apply(op: TodoOp, params: TodoBackendParams, next: TodoPhase[]): Promise<void>;
-	replace(phases: TodoPhase[]): Promise<void>;
+	apply(op: TodoOp, params: TodoBackendParams, next: TodoPhase[], signal: AbortSignal): Promise<void>;
+	replace(phases: TodoPhase[], signal: AbortSignal): Promise<void>;
 }
 ```
 
-- omp applies each `todo` op natively, then calls `apply(op, params, next)` before committing `next`. The session transcript stays the source of truth; the backend mirrors it. `params` holds only the keys declared by the `todo` tool schema.
+- omp applies each `todo` op natively, then calls `apply(op, params, next, signal)` before committing `next`. The session transcript stays the source of truth; the backend mirrors it. `params` holds only the keys declared by the `todo` tool schema; the tool validates leniently, so their values are passed as the model sent them once omp applied them without errors.
 - `replace(phases)` receives the full new list for edits made outside the `todo` tool. Exactly these writers call it: the interactive `/todo` verbs (append, start, done, drop, rm, import, edit), the ACP/text-mode `/todo` command, the RPC `set_todos` command, the Cursor todo mirror, and the interactive subagent auto-complete. If `replace` throws, the edit is refused: the list is unchanged and each writer reports the error as it does its other failures. A `todo` call made from an eval cell goes through the `todo` tool, so it reaches `apply` and never `replace`. Resets (`/new`, the `/tan` clone clear, transcript reloads) call neither.
 - Calls run one at a time per session. A throw fails that call and leaves the list unchanged.
-- If the user aborts a `todo` call while `apply` is pending, the call returns an aborted result and the list stays unchanged, but your backend may already be one op ahead; the next `apply` or `replace` carries the full list. A write aborted before it started never reaches `apply`, and a write queued across `/new`, a session switch, a rewind or a fork is dropped rather than applied to the new list.
-- `native` is reserved and duplicate ids are rejected: `registerTodoBackend` throws. Register during the factory, like `registerTool`.
+- `create`, `apply` and `replace` run like event handlers: in the session's settings scope and within the 30-second handler budget. When the budget runs out, or the user aborts the `todo` call while `apply` is pending, omp aborts `signal`, fails the call with the list unchanged and stops waiting, so the next call can start while one that ignores `signal` is still running. Your backend may then be one op ahead; the next `apply` or `replace` carries the full list. A `create` that runs out of the budget falls back to native todos. A write aborted before it started never reaches `apply`, and a write queued across `/new`, a session switch, a rewind or a fork is dropped rather than applied to the new list.
+- `native` is reserved and duplicate ids are rejected: `registerTodoBackend` throws. Register during the factory, like `registerTool`; an extension whose factory throws keeps none of its backends.
 - Users select a backend with the `todo.backend` setting (default `native`).
 - Main session only: subagents, prewalk, `/tan` and seance use native todos.
 - If `create` throws, or `todo.backend` names an id that is not registered, omp falls back to native todos and shows one notice naming the id and the reason. The backend resolves once startup-deferred extensions are loaded, so the notice never appears before they are bound; a `todo` call that arrives earlier waits for the resolution.

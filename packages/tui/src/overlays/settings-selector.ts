@@ -45,7 +45,7 @@ import { getCurrentThemeName, getSelectListTheme, getSettingsListTheme, theme } 
 import { getTabBarTheme } from "../chrome/shared";
 import { type ComposerPreviewStatusSource, ComposerShapePreview } from "./composer-shape-preview";
 import { bottomBorder, divider, row, topBorder } from "../chrome/overlay-box";
-import { sanitizeDisplaySingleLine } from "./extensions/display-text";
+import { sanitizeDisplayLineField, sanitizeDisplaySingleLine } from "./extensions/display-text";
 import { PluginSettingsComponent, type PluginSettingsHost } from "./plugin-settings";
 import { getSettingDef, getSettingsForTab, type SettingDef, type SubmenuSettingDef } from "./settings-defs";
 import { SnapcompactShapePreview } from "./snapcompact-shape-preview";
@@ -1494,13 +1494,12 @@ export class SettingsSelectorComponent implements Component {
 			case "submenu": {
 				const raw = this.#getSubmenuCurrentValue(def.path, currentValue);
 				// Runtime-choice rows show the choice's label; the submenu still receives the raw value.
-				// Labels can come from extensions, so they are sanitized like other untrusted display text.
 				const runtimeLabel = this.#context.runtimeOptions?.has(def.path)
 					? this.#submenuOptions(def).find(option => option.value === raw)?.label
 					: undefined;
 				return {
 					...item,
-					currentValue: runtimeLabel === undefined ? raw : sanitizeDisplaySingleLine(runtimeLabel),
+					currentValue: runtimeLabel ?? raw,
 					submenu: (cv, done) => this.#createSubmenu(def, runtimeLabel === undefined ? cv : raw, done),
 				};
 			}
@@ -1557,10 +1556,19 @@ export class SettingsSelectorComponent implements Component {
 		return rawValue;
 	}
 
-	/** A submenu's choices: the provider registered for its path, else the declared ones. */
+	/**
+	 * A submenu's choices: the provider registered for its path, else the declared ones. Runtime
+	 * choices can come from extensions, so their labels and descriptions are sanitized like other
+	 * untrusted display text.
+	 */
 	#submenuOptions(def: SubmenuSettingDef): readonly SubmenuOption[] {
 		const provider = this.#context.runtimeOptions?.get(def.path);
-		return provider ? provider(def) : def.options;
+		if (!provider) return def.options;
+		return provider(def).map(option => ({
+			...option,
+			label: sanitizeDisplaySingleLine(option.label),
+			description: sanitizeDisplayLineField(option.description),
+		}));
 	}
 
 	/**

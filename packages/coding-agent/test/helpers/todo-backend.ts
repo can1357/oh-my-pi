@@ -23,12 +23,12 @@ export interface TodoBackendRecorder {
 	created: number;
 	/** `create` throws this when set. */
 	createError?: Error;
-	/** Awaited at the start of `apply`, before the error check and before the call is recorded. */
-	beforeApply?: () => void | Promise<void>;
+	/** Awaited at the start of `apply` with the call's signal, before the error check and before the call is recorded. */
+	beforeApply?: (signal: AbortSignal) => void | Promise<void>;
 	/** `apply` throws this after `beforeApply` settled; a failed apply is not recorded. */
 	applyError?: Error;
-	/** Awaited in `replace` after the call is recorded; lets a test hold a replace in flight. */
-	beforeReplace?: () => void | Promise<void>;
+	/** Awaited in `replace` with the call's signal, after the call is recorded; lets a test hold a replace in flight. */
+	beforeReplace?: (signal: AbortSignal) => void | Promise<void>;
 	/** `replace` throws this after `beforeReplace` settled; the call is still recorded. */
 	replaceError?: Error;
 	/** Extension factory that registers this backend under `id` with `label`. */
@@ -61,8 +61,8 @@ export function createTodoBackendRecorder(id: string, options: TodoBackendRecord
 						recorder.created++;
 						if (recorder.createError) throw recorder.createError;
 						return {
-							async apply(op, params, next) {
-								await recorder.beforeApply?.();
+							async apply(op, params, next, signal) {
+								await recorder.beforeApply?.(signal);
 								if (recorder.applyError) throw recorder.applyError;
 								calls.push({
 									backend: id,
@@ -72,9 +72,9 @@ export function createTodoBackendRecorder(id: string, options: TodoBackendRecord
 									phases: structuredClone(next),
 								});
 							},
-							async replace(phases) {
+							async replace(phases, signal) {
 								calls.push({ backend: id, method: "replace", phases: structuredClone(phases) });
-								await recorder.beforeReplace?.();
+								await recorder.beforeReplace?.(signal);
 								if (recorder.replaceError) throw recorder.replaceError;
 							},
 						};

@@ -268,7 +268,12 @@ import {
 import { PROPOSE_DEVICE_NAME } from "@oh-my-pi/pi-tui/tools/resolve";
 import { supportsExternalThinking } from "../tools/think";
 import { USER_TODO_EDIT_CUSTOM_TYPE } from "../tools/todo";
-import { type ActiveTodoBackend, NATIVE_TODO_BACKEND_ID, type TodoWriteGuard } from "../tools/todo-backend";
+import {
+	type ActiveTodoBackend,
+	NATIVE_TODO_BACKEND_ID,
+	TODO_BACKEND_NOTICE_SOURCE,
+	type TodoWriteGuard,
+} from "../tools/todo-backend";
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { currentThreadId, isMainThread } from "../thread/identity";
@@ -11127,23 +11132,30 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.emitNotice(
 				"warning",
 				`Todo backend "${id}" is not registered by any loaded extension; using native todos.`,
-				"todo-backend",
+				TODO_BACKEND_NOTICE_SOURCE,
 			);
 			return;
 		}
 		try {
-			const backend = await definition.create(context);
+			const backend = await runner.runTodoBackendCall(() => definition.create(context));
 			if (!backend || typeof backend.apply !== "function" || typeof backend.replace !== "function") {
 				throw new Error("create() did not return an object with apply() and replace()");
 			}
-			this.#activeTodoBackend = { id, label: definition.label, backend };
+			this.#activeTodoBackend = {
+				id,
+				label: definition.label,
+				apply: (op, params, next, signal) =>
+					runner.runTodoBackendCall(backendSignal => backend.apply(op, params, next, backendSignal), signal),
+				replace: (phases, signal) =>
+					runner.runTodoBackendCall(backendSignal => backend.replace(phases, backendSignal), signal),
+			};
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			logger.warn("Todo backend create failed", { id, error: message });
 			this.emitNotice(
 				"warning",
 				`Todo backend "${id}" failed to start: ${message}; using native todos.`,
-				"todo-backend",
+				TODO_BACKEND_NOTICE_SOURCE,
 			);
 		}
 	}
@@ -11166,7 +11178,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			if (phases === undefined) return undefined;
 			if (active && !options?.mirrored) {
 				try {
-					await active.backend.replace(this.#todo.clonePhases(phases));
+					await active.replace(this.#todo.clonePhases(phases));
 				} catch (error) {
 					const reason = error instanceof Error ? error.message : String(error);
 					throw new Error(`Todo backend "${active.label}" refused the edit: ${reason}`, { cause: error });

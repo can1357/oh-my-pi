@@ -1581,6 +1581,22 @@ export class ExtensionRunner {
 	}
 
 	/**
+	 * Run a todo backend callback (`create`, `apply`, `replace`) the way event handlers run: within
+	 * this session's settings scope and the generic handler budget. `work` gets a signal that aborts
+	 * when the budget runs out or `signal` aborts; the call then rejects at once without waiting for
+	 * `work`, so a backend that never settles cannot hold the session's todo queue.
+	 */
+	async runTodoBackendCall<T>(work: (signal: AbortSignal) => Promise<T> | T, signal?: AbortSignal): Promise<T> {
+		const timeoutMs = extensionHandlerTimeoutMs;
+		const result = await this.runScoped(() => raceHandlerWithTimeout(work, timeoutMs, signal));
+		if (result === EXTENSION_HANDLER_TIMEOUT) throw new Error(`did not respond within ${timeoutMs}ms`);
+		if (result === EXTENSION_HANDLER_ABORTED) {
+			throw signal?.reason ?? new DOMException("This operation was aborted", "AbortError");
+		}
+		return result;
+	}
+
+	/**
 	 * Creates an extension context, optionally scoped to a provider request model.
 	 *
 	 * `delegation` wires the same-tool `ctx.invokeTool` for a re-registered built-in: when `toolName`

@@ -522,6 +522,39 @@ function formatTodoSyncSummary(phases: TodoPhase[]): string {
 }
 
 /**
+ * Lay a Cursor snapshot's flat todos over the local phases: a task keeps the phase it is in
+ * locally, tasks new to the snapshot go to {@link CURSOR_TODO_PHASE}, the local phase order is
+ * kept and phases new to the snapshot append.
+ */
+function mapCursorTodoSnapshot(snapshot: CursorTodoSnapshot, local: TodoPhase[]): TodoPhase[] {
+	const phaseByContent = new Map<string, string>();
+	for (const phase of local) {
+		for (const task of phase.tasks) phaseByContent.set(task.content, phase.name);
+	}
+
+	const grouped = new Map<string, TodoPhase["tasks"]>();
+	for (const todo of snapshot.todos) {
+		const name = phaseByContent.get(todo.content) ?? CURSOR_TODO_PHASE;
+		let tasks = grouped.get(name);
+		if (!tasks) {
+			tasks = [];
+			grouped.set(name, tasks);
+		}
+		tasks.push({ content: todo.content, status: todo.status as TodoStatus });
+	}
+
+	const next: TodoPhase[] = [];
+	for (const phase of local) {
+		const tasks = grouped.get(phase.name);
+		if (!tasks) continue;
+		next.push({ name: phase.name, tasks });
+		grouped.delete(phase.name);
+	}
+	for (const [name, tasks] of grouped) next.push({ name, tasks });
+	return next;
+}
+
+/**
  * Persisted result for a server-resolved todo call.
  *
  * `details` is only attached for an authoritative snapshot, and then
@@ -1018,37 +1051,16 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		// or a host with no local todo state must still resolve it.
 		let phases: TodoPhase[] | undefined;
 		if (snapshot && commitPhases) {
-			const phaseByContent = new Map<string, string>();
-			for (const phase of existing) {
-				for (const task of phase.tasks) phaseByContent.set(task.content, phase.name);
-			}
-
-			const grouped = new Map<string, TodoPhase["tasks"]>();
-			for (const todo of snapshot.todos) {
-				const name = phaseByContent.get(todo.content) ?? CURSOR_TODO_PHASE;
-				let tasks = grouped.get(name);
-				if (!tasks) {
-					tasks = [];
-					grouped.set(name, tasks);
-				}
-				tasks.push({ content: todo.content, status: todo.status as TodoStatus });
-			}
-
-			// Preserve the local phase order; phases new to this snapshot append.
-			const next: TodoPhase[] = [];
-			for (const phase of existing) {
-				const tasks = grouped.get(phase.name);
-				if (!tasks) continue;
-				next.push({ name: phase.name, tasks });
-				grouped.delete(phase.name);
-			}
-			for (const [name, tasks] of grouped) next.push({ name, tasks });
+			const next = mapCursorTodoSnapshot(snapshot, existing);
 			if (origin === "read" && JSON.stringify(next) === JSON.stringify(existing)) {
 				phases = undefined;
 			} else {
-				// Stays synchronous: the result below is returned mid-parse. The commit
-				// settles later; a refusal is reported and the HUD resynced then.
-				commitPhases(next).catch(error => this.#todoCommitRefused(result, error));
+				// Stays synchronous: the result below is returned mid-parse. The commit settles later
+				// and maps the snapshot again onto the list committed at its queue slot, so an earlier
+				// queued edit that renamed or regrouped phases survives; a refusal is reported then.
+				commitPhases(current => mapCursorTodoSnapshot(snapshot, current)).catch(error =>
+					this.#todoCommitRefused(result, error),
+				);
 				phases = next;
 			}
 		}
@@ -1076,15 +1088,13 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 
 	/**
 	 * The session refused a mirrored list (a selected todo backend's `replace` threw), so it kept
-	 * its previous list. Surface why and make every view agree on the committed list:
-	 * - a mirrored identity commit is queued behind every earlier write, so it resolves with the list
-	 *   committed as of its slot (later syncs and `/todo` edits queued before it included);
-	 * - the call's end event carries that list, so `event-controller` replaces the refused list in the HUD;
-	 * - the pending toolResult (not yet persisted, or still in the loop's context) is rewritten to say
-	 *   the update was refused and to carry that list, so the model is told and a reload does
-	 *   not restore the refused one;
-	 * - the mirrored `user_todo_edit` entry that commit appends wins on reload when the toolResult was
-	 *   already persisted with the refused list.
+	 * its previous list. The notice says why, and the interactive HUD reloads the committed list
+	 * when it sees it. The call's toolResult must not restore the refused list on reload:
+	 * - when the loop has not persisted it yet, it is rewritten to say the update was refused and
+	 *   to carry the committed list;
+	 * - when it was persisted already, the mirrored `user_todo_edit` entry recorded here comes after
+	 *   it and wins. That identity commit is queued behind every earlier write, so it resolves with
+	 *   the list committed as of its slot.
 	 */
 	#todoCommitRefused(result: ToolResultMessage, error: unknown): void {
 		const message = error instanceof Error ? error.message : String(error);
@@ -1102,13 +1112,6 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 				];
 				result.details = { phases, storage: "session" };
 				result.isError = true;
-				this.options.emitEvent?.({
-					type: "tool_execution_end",
-					toolCallId: result.toolCallId,
-					toolName: "todo",
-					result: { content: result.content, details: result.details },
-					isError: false,
-				});
 			},
 			(persistError: unknown) => {
 				logger.warn("Could not persist the committed todo list after a refused mirror", {

@@ -92,11 +92,15 @@ const TODO_PARAM_KEYS: Record<keyof TodoSchema, true> = {
  * `execute`, and omptype objects keep undeclared keys, so backends would otherwise see them.
  */
 function stripToTodoParams(entry: TodoParams): TodoParams {
-	const stripped: Record<string, unknown> = {};
-	for (const [key, value] of Object.entries(entry)) {
-		if (Object.hasOwn(TODO_PARAM_KEYS, key) && value !== undefined) stripped[key] = value;
-	}
-	return stripped as TodoParams;
+	const stripped: TodoParams = { op: entry.op };
+	let key: keyof TodoSchema;
+	for (key in TODO_PARAM_KEYS) copyTodoParam(entry, stripped, key);
+	return stripped;
+}
+
+function copyTodoParam<K extends keyof TodoSchema>(from: TodoParams, to: TodoParams, key: K): void {
+	const value = from[key];
+	if (value !== undefined) to[key] = value;
 }
 
 /** A single todo op entry (the params object itself). */
@@ -766,11 +770,11 @@ export class TodoTool implements AgentTool<typeof todoSchema, TodoToolDetails> {
 		// Compute → backend apply → commit runs as one queued unit so concurrent writes and backend
 		// switches cannot interleave with it.
 		const run = this.session.runTodoWrite;
-		if (!run) return this.#write(params, undefined, undefined);
+		if (!run) return this.#write(params, undefined, undefined, signal);
 		try {
-			return await run((active, guard) => this.#write(params, active, guard), { signal });
+			return await run((active, guard) => this.#write(params, active, guard, signal), { signal });
 		} catch (error) {
-			// The queued write stays in flight (it holds the queue slot) but can no longer commit.
+			// The queued write can no longer commit, and its backend call (if any) saw the same abort.
 			if (signal?.aborted) return this.#abortedResult(params);
 			throw error;
 		}
@@ -794,6 +798,7 @@ export class TodoTool implements AgentTool<typeof todoSchema, TodoToolDetails> {
 		params: TodoParams,
 		active: ActiveTodoBackend | undefined,
 		guard: TodoWriteGuard | undefined,
+		signal: AbortSignal | undefined,
 	): Promise<AgentToolResult<TodoToolDetails>> {
 		const previousPhases = clonePhases(this.session.getTodoPhases?.() ?? []);
 		const storage = this.session.getSessionFile() ? "session" : "memory";
@@ -820,7 +825,7 @@ export class TodoTool implements AgentTool<typeof todoSchema, TodoToolDetails> {
 		const completedTasks = readOnly || failed ? [] : getCompletionTransitions(previousPhases, updated);
 		if (active && !readOnly && !failed) {
 			try {
-				await active.backend.apply(op, stripToTodoParams(entry), clonePhases(updated));
+				await active.apply(op, stripToTodoParams(entry), clonePhases(updated), signal);
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				return {

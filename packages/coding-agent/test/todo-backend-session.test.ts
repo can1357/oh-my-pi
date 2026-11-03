@@ -3,10 +3,14 @@ import * as fs from "node:fs";
 import { setImmediate } from "node:timers/promises";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { findScopedSettings, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { loadExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { ExtensionFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import {
+	EXTENSION_HANDLER_TIMEOUT_MS,
+	testSetExtensionHandlerTimeoutMs,
+} from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import {
 	cfgCompactionAutoContinue,
 	cfgCompactionKeepRecentTokens,
@@ -177,6 +181,67 @@ describe("todo backends in a real session", () => {
 		const retried = await todo(session, { op: "append", phase: "Tasks", items: ["again"] });
 		expect(retried.isError).toBeUndefined();
 		expect(session.getTodoPhases()[0]?.tasks.map(task => task.content)).toEqual(["keep", "again"]);
+	});
+
+	test("a backend call that never settles fails after the handler budget, aborts its signal and holds no later write", async () => {
+		const recorder = createTodoBackendRecorder("tracker", { label: "Tracker tracker" });
+		const session = await createSession({ backend: "tracker", extensions: [recorder.extension()] });
+		await todo(session, { op: "init", items: ["base"] });
+		const before = structuredClone(session.getTodoPhases());
+		const signals: AbortSignal[] = [];
+		const hang = (signal: AbortSignal) => {
+			signals.push(signal);
+			return new Promise<void>(() => {});
+		};
+		testSetExtensionHandlerTimeoutMs(50);
+		try {
+			recorder.beforeApply = hang;
+			const stuckApply = await todo(session, { op: "append", phase: "Tasks", items: ["stuck"] });
+			expect(stuckApply.isError).toBe(true);
+			expect(text(stuckApply)).toContain("did not respond within 50ms");
+			expect(session.getTodoPhases()).toEqual(before);
+
+			recorder.beforeApply = undefined;
+			recorder.beforeReplace = hang;
+			const edited: TodoPhase[] = [{ name: "Tasks", tasks: [{ content: "edited", status: "pending" }] }];
+			await expect(session.commitTodoPhases(edited)).rejects.toThrow("did not respond within 50ms");
+			expect(session.getTodoPhases()).toEqual(before);
+			expect(signals.map(signal => signal.aborted)).toEqual([true, true]);
+
+			recorder.beforeReplace = undefined;
+			expect(await session.commitTodoPhases(edited)).toEqual(edited);
+			expect(session.getTodoPhases()).toEqual(edited);
+		} finally {
+			testSetExtensionHandlerTimeoutMs(EXTENSION_HANDLER_TIMEOUT_MS);
+		}
+	});
+
+	test("create, apply and replace run in the session's settings scope", async () => {
+		const scopes: Array<[string, Settings | undefined]> = [];
+		const scoped: ExtensionFactory = pi => {
+			pi.registerTodoBackend({
+				id: "scoped",
+				label: "Scoped",
+				create() {
+					scopes.push(["create", findScopedSettings()]);
+					return {
+						async apply() {
+							scopes.push(["apply", findScopedSettings()]);
+						},
+						async replace() {
+							scopes.push(["replace", findScopedSettings()]);
+						},
+					};
+				},
+			});
+		};
+		const session = await createSession({ backend: "scoped", extensions: [scoped] });
+
+		await todo(session, { op: "init", items: ["one"] });
+		await session.commitTodoPhases(session.getTodoPhases());
+
+		expect(scopes.map(([call]) => call)).toEqual(["create", "apply", "replace"]);
+		for (const [, settings] of scopes) expect(settings).toBe(session.settings);
 	});
 
 	test("view and failed batches never call apply", async () => {
@@ -383,13 +448,17 @@ export default function(pi) {
 		expect(calls.slice(seededCalls)).toEqual([]);
 	});
 
-	test("aborting while apply is pending returns at once, never commits, and the next write carries the full list", async () => {
+	test("aborting while apply is pending returns at once, aborts apply's signal, never commits, and frees the queue", async () => {
 		const recorder = createTodoBackendRecorder("tracker", { label: "Tracker tracker" });
 		const gate = createGate();
-		recorder.beforeApply = gate.beforeApply;
 		const session = await createSession({ backend: "tracker", extensions: [recorder.extension()] });
 		await todo(session, { op: "init", items: ["base"] });
 		const before = structuredClone(session.getTodoPhases());
+		let heldSignal: AbortSignal | undefined;
+		recorder.beforeApply = signal => {
+			heldSignal ??= signal;
+			return gate.beforeApply();
+		};
 
 		gate.held = true;
 		const controller = new AbortController();
@@ -401,15 +470,17 @@ export default function(pi) {
 		expect(result.isError).toBe(true);
 		expect(text(result)).toContain("aborted");
 		expect(result.details).toMatchObject({ op: "append", phases: before });
+		expect(heldSignal?.aborted).toBe(true);
 
+		// The aborted apply has not returned, yet the next write runs and carries the full list.
 		gate.held = false;
-		gate.release.resolve();
-		await flushTodoWrites(session);
-		expect(session.getTodoPhases()).toEqual(before);
-
 		await todo(session, { op: "append", phase: "Tasks", items: ["real"] });
 		const lastApply = recorder.calls.filter(call => call.method === "apply").at(-1);
 		expect(lastApply?.phases.flatMap(phase => phase.tasks.map(task => task.content))).toEqual(["base", "real"]);
+		expect(taskContents(session)).toEqual(["base", "real"]);
+
+		gate.release.resolve();
+		await flushTodoWrites(session);
 		expect(taskContents(session)).toEqual(["base", "real"]);
 	});
 

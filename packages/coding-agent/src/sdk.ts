@@ -336,6 +336,7 @@ import { isFilesystemSourcePath } from "./tools/path-utils";
 import { isAutoQaEnabled } from "./tools/report-tool-issue";
 import { queueResolveHandler } from "./tools/resolve";
 import { ttsTool } from "./tools/tts";
+import { TODO_BACKEND_NOTICE_SOURCE } from "./tools/todo-backend";
 import { resolveActiveRepoContext } from "./utils/active-repo-context";
 import { EventBus } from "./utils/event-bus";
 import { normalizeProviderContextImagesForModel } from "./utils/image-loading";
@@ -4159,7 +4160,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			emitEvent: event => cursorEventEmitter?.(event),
 			getTodoPhases: () => session.getTodoPhases(),
 			commitTodoPhases: (update, options) => session.commitTodoPhases(update, options),
-			reportTodoRefusal: message => session.emitNotice("error", message, "todo-backend"),
+			reportTodoRefusal: message => session.emitNotice("error", message, TODO_BACKEND_NOTICE_SOURCE),
 			// `pi_grep` carries its own context width and match cap, which the
 			// shared grep instance fixed at construction cannot express. Gated on
 			// the grant: the factory builds a fresh tool and `executeTool` prefers

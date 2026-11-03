@@ -40,6 +40,7 @@ import { appKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
 import { getSymbolTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "../../modes/types";
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
+import { TODO_BACKEND_NOTICE_SOURCE } from "../../tools/todo-backend";
 import type { AgentSessionEvent } from "../../session/agent-session";
 import {
 	isSilentAbort,
@@ -1538,6 +1539,8 @@ export class EventController {
 		} else {
 			this.ctx.showStatus(message);
 		}
+		// A backend refused a Cursor-mirrored list after that call's end event put it in the HUD.
+		if (event.source === TODO_BACKEND_NOTICE_SOURCE) this.ctx.setTodos(this.ctx.viewSession.getTodoPhases());
 	}
 
 	/**

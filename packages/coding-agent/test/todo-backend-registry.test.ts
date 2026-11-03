@@ -78,4 +78,22 @@ describe("pi.registerTodoBackend", () => {
 		).rejects.toThrow(/native/);
 		expect(runtime.todoBackends.list()).toEqual([]);
 	});
+
+	test("a factory that throws after registering leaves earlier backends and frees its id", async () => {
+		const runtime = new ExtensionRuntime();
+		const load = (factory: Parameters<typeof loadExtensionFromFactory>[0], name: string) =>
+			loadExtensionFromFactory(factory, process.cwd(), new EventBus(), runtime, name);
+		await load(pi => pi.registerTodoBackend({ id: "earlier", label: "Earlier", create: () => noopBackend }), "a");
+
+		await expect(
+			load(pi => {
+				pi.registerTodoBackend({ id: "tracker", label: "Broken", create: () => noopBackend });
+				throw new Error("factory failed");
+			}, "broken"),
+		).rejects.toThrow("factory failed");
+		expect(runtime.todoBackends.list().map(entry => entry.id)).toEqual(["earlier"]);
+
+		await load(pi => pi.registerTodoBackend({ id: "tracker", label: "Healthy", create: () => noopBackend }), "b");
+		expect(runtime.todoBackends.get("tracker")?.label).toBe("Healthy");
+	});
 });

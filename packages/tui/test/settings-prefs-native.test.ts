@@ -3,7 +3,10 @@ import type { TspPrefsProps } from "@oh-my-pi/pi-wire";
 import type { DescribeContext, NativeNode, NativeUiEvent } from "@oh-my-pi/pi-tui/native/node";
 import type { PluginSettingsHost } from "@oh-my-pi/pi-tui/overlays/plugin-settings";
 import type { SettingsDisplayEntry, SettingsHost } from "@oh-my-pi/pi-tui/overlays/settings-defs";
-import { SettingsSelectorComponent } from "@oh-my-pi/pi-tui/overlays/settings-selector";
+import {
+	type RuntimeSettingOptionsProvider,
+	SettingsSelectorComponent,
+} from "@oh-my-pi/pi-tui/overlays/settings-selector";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
 
 const ENTER = "\n";
@@ -77,7 +80,11 @@ interface Harness {
 	previews: string[];
 }
 
-function harness(initial: Record<string, unknown> = {}): Harness {
+function harness(
+	initial: Record<string, unknown> = {},
+	themeOptions: RuntimeSettingOptionsProvider = () =>
+		["dark", "light", "titanium"].map(value => ({ value, label: value })),
+): Harness {
 	const values = new Map<string, unknown>();
 	for (const entry of ENTRIES) values.set(entry.path, entry.defaultValue);
 	for (const key in initial) values.set(key, initial[key]);
@@ -112,9 +119,7 @@ function harness(initial: Record<string, unknown> = {}): Harness {
 			settings,
 			plugins,
 			thinkingLevel: undefined,
-			runtimeOptions: new Map([
-				["theme.dark", () => ["dark", "light", "titanium"].map(value => ({ value, label: value }))],
-			]),
+			runtimeOptions: new Map([["theme.dark", themeOptions]]),
 			providers: [],
 		},
 		{
@@ -188,6 +193,23 @@ describe("settings as a native prefs page", () => {
 		});
 		expect(row(props, "display.risky").warning).toBe("Can get you flagged");
 		expect(props.focus).toBe("theme.dark");
+	});
+
+	it("strips control sequences and line breaks from runtime choice labels and descriptions", () => {
+		const { selector } = harness({ "theme.dark": "evil" }, () => [
+			{ value: "dark", label: "dark" },
+			{ value: "evil", label: "Evil\x1b[31m red\x1b]0;title\x07", description: "line one\nline\x1b[2J two" },
+		]);
+		const control = row(prefs(selector).props, "theme.dark").control;
+		if (control.k !== "choice") throw new Error(`expected a choice control, got ${control.k}`);
+		const evil = control.options.find(option => option.value === "evil");
+		if (!evil) throw new Error("expected the evil option");
+		for (const text of [control.value, evil.label, evil.detail]) {
+			expect(text).toBeString();
+			expect(text).not.toMatch(/[\x00-\x1f\x7f]/);
+		}
+		expect(control.value).toBe(evil.label);
+		expect(evil.detail).toBe("line one line two");
 	});
 
 	it("puts the status-line preview after its section on Appearance only", () => {
