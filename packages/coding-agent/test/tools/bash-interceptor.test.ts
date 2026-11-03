@@ -1132,11 +1132,135 @@ describe("dedicated tool capability", () => {
 			expect(at("grep ORIGINAL f/")).toBeUndefined();
 			expect(at("cat f/x")).toBeUndefined();
 			expect(at("cat f")).toBe("read");
-			expect(at("cat src/")).toBe("read");
+			expect(at("cat src/")).toBeUndefined();
 		} finally {
 			await fs.rm(dir, { recursive: true, force: true });
 		}
 	});
+
+	it.each([
+		"literal.pdf",
+		"slides.pptx",
+		"document.docx",
+		"sheet.xlsx",
+		"book.epub",
+		"book.IPYNB",
+		"process.sample.txt",
+		"process.cpuprofile",
+		"drawing.svg",
+		"drawing.svgz",
+		"image.png",
+		"image.gif",
+		"image.heic",
+		"clip.mp4",
+		"bundle.zip",
+		"bundle.tar.gz",
+		"stream.gz",
+		"bundle.asar",
+		"bundle.zip:member.txt",
+		"data.sqlite",
+		"data.db:rows",
+		"dir/",
+	])("does not refuse a name-only read of %s that read may render or list", operand => {
+		expect(decide(`cat ${operand}`)).toBeUndefined();
+	});
+
+	it.each(["literal.pdf", "valid.pdf"])("does not replace %s source reads with document conversion", async operand => {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "bash-interceptor-pdf-")));
+		try {
+			await Bun.write(path.join(dir, "literal.pdf"), "literal bytes\n");
+			const stream = "BT /F1 12 Tf 72 720 Td (Hello read) Tj ET\n";
+			const objects = [
+				"<< /Type /Catalog /Pages 2 0 R >>",
+				"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+				"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+				"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+				`<< /Length ${stream.length} >>\nstream\n${stream}endstream`,
+			];
+			let pdf = "%PDF-1.4\n";
+			const offsets = [0];
+			for (const [index, object] of objects.entries()) {
+				offsets.push(pdf.length);
+				pdf += `${index + 1} 0 obj\n${object}\nendobj\n`;
+			}
+			const xref = pdf.length;
+			pdf += `xref\n0 ${offsets.length}\n0000000000 65535 f \n`;
+			pdf += offsets
+				.slice(1)
+				.map(offset => `${String(offset).padStart(10, "0")} 00000 n \n`)
+				.join("");
+			pdf += `trailer\n<< /Size ${offsets.length} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
+			await Bun.write(path.join(dir, "valid.pdf"), pdf);
+			const command = `cat ${operand}`;
+			expect(checkBashInterception(command, tools, DEFAULT_BASH_INTERCEPTOR_RULES, command, dir).block).toBe(false);
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	it.each([
+		"document.docx",
+		"slides.pptx",
+		"sheet.xlsx",
+		"book.epub",
+		"book.ipynb",
+		"process.sample.txt",
+		"process.cpuprofile",
+		"drawing.svg",
+		"drawing.svgz",
+		"bundle.zip",
+		"bundle.tar.gz",
+		"stream.gz",
+		"bundle.asar",
+		"clip.mp4",
+	])("does not replace %s file reads with read's format handler", async operand => {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "bash-interceptor-rendered-")));
+		try {
+			await Bun.write(path.join(dir, operand), "literal text\n");
+			const command = `head -n 1 ${operand}`;
+			expect(checkBashInterception(command, tools, DEFAULT_BASH_INTERCEPTOR_RULES, command, dir).block).toBe(false);
+			await Bun.write(path.join(dir, "ordinary.txt"), "ordinary text\n");
+			expect(
+				checkBashInterception("cat ordinary.txt", tools, DEFAULT_BASH_INTERCEPTOR_RULES, undefined, dir)
+					.suggestedTool,
+			).toBe("read");
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	it.each([
+		["invalid-utf8", new Uint8Array([0x78, 0xff, 0x0a])],
+		["nul", new Uint8Array([0x78, 0, 0x0a])],
+		// GIF magic can be valid UTF-8 without a NUL; the image sniff must still win.
+		["gif-as-text.txt", new TextEncoder().encode("GIF89a")],
+		["heif-as-text.txt", new TextEncoder().encode("    ftypavif    ")],
+		["sqlite-as-text.db", new TextEncoder().encode("SQLite format 3\0")],
+	])("does not refuse a byte read of %s that read cannot show as text", async (operand, bytes) => {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "bash-interceptor-read-bytes-")));
+		try {
+			await Bun.write(path.join(dir, operand), bytes);
+			const command = `cat ${operand}`;
+			expect(checkBashInterception(command, tools, DEFAULT_BASH_INTERCEPTOR_RULES, command, dir).block).toBe(false);
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	it.each(["cat dir", "cat dir/", "head -n 1 dir", "tail -n 1 dir", "cat dir || echo recovered > recovery"])(
+		"does not replace the failed directory read in %s with a successful listing",
+		async command => {
+			const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "bash-interceptor-read-directory-")));
+			try {
+				await fs.mkdir(path.join(dir, "dir"));
+				expect(checkBashInterception(command, ["read"], DEFAULT_BASH_INTERCEPTOR_RULES, command, dir).block).toBe(
+					false,
+				);
+			} finally {
+				await fs.rm(dir, { recursive: true, force: true });
+			}
+		},
+	);
 
 	it("refuses a find over a symlinked root only when -H follows it", async () => {
 		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "bash-interceptor-find-root-")));

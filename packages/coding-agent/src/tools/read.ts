@@ -31,6 +31,7 @@ import {
 	readImageMetadata,
 } from "@oh-my-pi/pi-utils";
 import { peekFile } from "@oh-my-pi/pi-utils/peek-file";
+import { parseArchivePathCandidates } from "@oh-my-pi/pi-utils/ar";
 import {
 	cfgIdaAvailable,
 	EXECUTABLE_SNIFF_BYTES,
@@ -812,6 +813,24 @@ const MEDIA_QUESTION_TARGET =
 function isMediaQuestionTarget(readPath: string): boolean {
 	const queryIndex = readPath.indexOf("?");
 	return queryIndex !== -1 && MEDIA_QUESTION_TARGET.test(readPath.slice(0, queryIndex));
+}
+
+/** Names whose read dispatch may render a format instead of returning the file's text.
+ * Kept with the dispatch predicates so callers need no second list of supported formats. */
+export function readPathMayRender(filePath: string): boolean {
+	const ext = path.extname(filePath).toLowerCase();
+	return (
+		CONVERTIBLE_EXTENSIONS.has(ext) ||
+		ext === ".ipynb" ||
+		ext === ".svgz" ||
+		isSampleProfilePath(filePath) ||
+		isCpuProfilePath(filePath) ||
+		MEDIA_QUESTION_TARGET.test(filePath) ||
+		isVideoPath(filePath) ||
+		isIdaDatabasePath(filePath) ||
+		parseArchivePathCandidates(filePath).length > 0 ||
+		parseSqlitePathCandidates(filePath).length > 0
+	);
 }
 
 // Maximum image file size (20MB) - larger images will be rejected to prevent OOM during serialization

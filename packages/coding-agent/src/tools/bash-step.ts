@@ -10,6 +10,7 @@
  * adds a refusal: it only withdraws one the named tool cannot carry out.
  */
 import * as os from "node:os";
+import { readPathMayRender } from "./read";
 import { stripWriteContentWithPotentialLooseHeader } from "./write-content";
 
 /** One shell word of a simple command. */
@@ -1654,6 +1655,8 @@ export interface FileFacts {
 	 * and rg treat it as binary or print its bytes, where the grep tool skips it or prints
 	 * replacement characters. Reads the file on first use. */
 	maybeBinary(): boolean;
+	/** At most 4 MB of valid UTF-8 without NUL or image magic: read returns text, not pixels. */
+	readableText(): boolean;
 	/** The current user may write the file; the edit tool cannot change a read-only file that
 	 * `sed -i` and `perl -i` replace. */
 	writable: boolean;
@@ -1718,8 +1721,8 @@ const MULTILINE_OPTION = /^(?:-[^-]*U|--multiline(?:-dotall)?$)/u;
  * command this module does not know: the rule's own match decides. `false` for a step of a
  * built-in tool's command that it cannot parse: nothing shows the tool can do it. `filesystem`,
  * when given, reports what each operand or target names; a FIFO, device or path it cannot
- * inspect is never sent to read, grep, write or edit, which take regular files (and directories
- * for read and grep), and an edit's files must be plain text the edit tool rewrites byte for byte.
+ * inspect is never sent to read, grep, write or edit. File readers never become directory
+ * listings or format renderings, and an edit's files must be text the edit tool rewrites byte for byte.
  */
 export function dedicatedToolCanPerformStep(
 	tool: string,
@@ -1739,7 +1742,15 @@ export function dedicatedToolCanPerformStep(
 			const spec = own(READ_SPECS, name);
 			if (!spec) return true;
 			const paths = outputReachesAgent(pipeline) ? readPaths(spec, command) : undefined;
-			return !!paths && pathsAre(paths, ["file", "directory", "missing"], true, filesystem);
+			if (!paths || !pathsAre(paths, ["file", "missing"], true, filesystem)) return false;
+			return paths.every(
+				word =>
+					!word.value.endsWith("/") &&
+					!readPathMayRender(word.value) &&
+					(!filesystem ||
+						filesystem.kind(word.value, true) !== "file" ||
+						filesystem.facts(word.value)?.readableText() === true),
+			);
 		}
 		case "grep": {
 			const spec = own(GREP_SPECS, name);
