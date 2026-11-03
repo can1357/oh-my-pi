@@ -902,6 +902,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			text,
 			plain: built + formatOutputNotice(outputMeta().truncationFromSummary(result, { direction: "tail" }).get()),
 			plainWidthCut: whole && widthCut,
+			artifact: whole ? `artifact://${result.artifactId}` : undefined,
 			command,
 			exitCode: result.exitCode,
 			source: command,

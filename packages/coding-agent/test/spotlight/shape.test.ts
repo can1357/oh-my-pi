@@ -54,7 +54,7 @@ function migrations(n: number): string[] {
 
 /** A valve cut's gaps `… [A-B]` and the saved copy its footer says they number lines of. */
 function cutGaps(text: string): { url: string; gaps: { from: number; to: number }[] } {
-	const url = /^\[cut: A-B in a … marker are lines A-B of (\S+) \(read /m.exec(text)?.[1];
+	const url = /^\[cut: … \[A-B\] are lines A-B of (\S+) \(read /m.exec(text)?.[1];
 	if (!url) throw new Error("a cut names where its hidden lines are");
 	const gaps = [...text.matchAll(/^\s*… \[(\d+)-(\d+)\]$/gm)].map(m => ({ from: Number(m[1]), to: Number(m[2]) }));
 	return { url, gaps };
@@ -164,7 +164,7 @@ describe("spotlight shaping", () => {
 		expect(out.steps).toEqual(["outline", "window"]);
 		expect(store.saved.size).toBe(0);
 		const body = out.text.split("\n");
-		expect(body.at(-1)).toBe("[cut: A-B in a … marker are lines A-B of src/big.ts (read src/big.ts:A-B)]");
+		expect(body.at(-1)).toBe("[cut: … [A-B] are lines A-B of src/big.ts (read src/big.ts:A-B)]");
 		// Shown lines, folds and cuts together cover the file's lines 1…n exactly once, in order.
 		let next = 1;
 		let cuts = 0;
@@ -426,9 +426,8 @@ describe("spotlight shaping", () => {
 		const input = bash("bin/migrate", ["Applying migrations to staging", ...first, "Done: 5 applied"].join("\n"));
 		const collapsed = [
 			"Applying migrations to staging",
-			"… [5 lines as shown before: 2-6]",
+			"… [5 lines as shown before; read artifact://1:2-6]",
 			"Done: 5 applied",
-			"[cut: A-B in a … marker are lines A-B of artifact://1 (read artifact://1:A-B)]",
 		].join("\n");
 		// The collapse would save tokens, just not enough.
 		expect(countTokens(collapsed)).toBeLessThan(countTokens(input.text));
@@ -507,15 +506,14 @@ describe("spotlight shaping", () => {
 		expect(out.text).toBe(
 			[
 				"Applying migrations to staging",
-				"… [14 lines as shown before: 2-15]",
+				"… [14 lines as shown before; read artifact://1:2-15]",
 				"Done: 14 applied, 0 failed",
-				"[cut: A-B in a … marker are lines A-B of artifact://1 (read artifact://1:A-B)]",
 			].join("\n"),
 		);
 		// The fourteen lines are hidden as seen before, under the marker; nothing decided on the two around them.
 		const trace = traceOf(out, again);
 		expect(trace.why.join("")).toBe(`-${"r".repeat(14)}-`);
-		expect(trace.map).toEqual([1, [2, 15], 16, null]);
+		expect(trace.map).toEqual([1, [2, 15], 16]);
 		expect(trace.rank).toBeUndefined();
 	});
 
@@ -540,9 +538,34 @@ describe("spotlight shaping", () => {
 		);
 
 		const lines = out.text.split("\n");
-		expect(lines[0]).toBe("… [24 lines as shown before: 1-24]");
+		expect(lines[0]).toBe("… [24 lines as shown before; read artifact://1:1-24]");
 		expect(lines[1]).toBe(first[24]);
 		expect(store.saved.get("artifact://1")?.split("\n").slice(0, 24)).toEqual(first.slice(0, 24));
+	});
+
+	it("points a collapse at the run's own artifact when it numbers the same lines, saving no copy", async () => {
+		const state = newShapeState();
+		const first = migrations(30);
+		await shapeResult(
+			bash("bin/migrate --dry-run", first.join("\n")),
+			context(),
+			scorer(() => 0.5),
+			state,
+			sink(),
+		);
+		const again = ["Applying migrations to staging", ...first, "Done: 30 applied, 0 failed"];
+		const store = sink();
+
+		const out = await shapeResult(
+			{ ...bash("bin/migrate", again.join("\n")), artifact: "artifact://42" },
+			context(),
+			scorer(() => 0.5),
+			state,
+			store,
+		);
+
+		expect(out.text.split("\n")[1]).toBe("… [30 lines as shown before; read artifact://42:2-31]");
+		expect(store.saved.size).toBe(0);
 	});
 
 	it("shows a seen line the call's intent names, and still collapses lines a generic intent word names", async () => {
@@ -571,9 +594,9 @@ describe("spotlight shaping", () => {
 
 		expect(named.text.split("\n").slice(0, 4)).toEqual([
 			"Applying migrations to staging",
-			"… [5 lines as shown before: 2-6]",
+			"… [5 lines as shown before; read artifact://1:2-6]",
 			first[5],
-			"… [24 lines as shown before: 8-31]",
+			"… [24 lines as shown before; read artifact://1:8-31]",
 		]);
 		expect(generic.text).not.toContain(first[5]);
 	});

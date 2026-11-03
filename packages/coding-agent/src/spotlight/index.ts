@@ -192,7 +192,9 @@ export async function shapeToolText(
 		// The original is a read's window lines (numbered from its first file line), else the whole text.
 		const read = request.read;
 		try {
-			const url = await experiment.sink.save(read ? read.lines.join("\n") : request.text, request.tool);
+			const url =
+				(!read && outcome?.textUrl) ||
+				(await experiment.sink.save(read ? read.lines.join("\n") : request.text, request.tool));
 			const shapedUrl = holdout || gated ? await experiment.sink.save(shaped, request.tool) : undefined;
 			spotlight.original = {
 				url,

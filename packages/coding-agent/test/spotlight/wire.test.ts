@@ -785,11 +785,14 @@ describe("spotlight shaping of any tool", () => {
 		expect(text.length).toBeLessThan(OUTPUT.length / 4);
 		expect(sources).toContain(callSummary("grep", ARGS));
 		// Every hidden run reads back from the saved copy the last line names.
-		const footer =
-			/\[cut: A-B in a … marker are lines A-B of (artifact:\/\/(\d+)) \(read artifact:\/\/\d+:A-B\)\]$/.exec(text);
+		const footer = /\[cut: … \[A-B\] are lines A-B of (artifact:\/\/(\d+)) \(read artifact:\/\/\d+:A-B\)\]$/.exec(
+			text,
+		);
 		if (!footer) throw new Error("a cut names where its hidden lines are");
 		const saved = run.manager.getArtifactContent(footer[2]) ?? "";
 		expect(saved).toBe(OUTPUT);
+		// The trace's original is that same copy, not a second one.
+		expect(result.details?.spotlight?.original?.url).toBe(footer[1]);
 		const markers = [...text.matchAll(/… \[(\d+)-(\d+)\]/g)];
 		expect(markers.length).toBeGreaterThan(0);
 		for (const [, from, to] of markers) {
@@ -901,9 +904,8 @@ describe("spotlight shaping of any tool", () => {
 		expect(resultText(again)).toBe(
 			[
 				"board: 10 open, 2 done",
-				"… [10 lines as shown before: 2-11]",
+				"… [10 lines as shown before; read artifact://0:2-11]",
 				"- [done] add the edit gate setting",
-				"[cut: A-B in a … marker are lines A-B of artifact://0 (read artifact://0:A-B)]",
 			].join("\n"),
 		);
 		const entry = entries(run.manager, SPOTLIGHT_ENTRY.shape)[1];
@@ -951,7 +953,9 @@ describe("spotlight shaping of any tool", () => {
 		const board = fakeTool("board", BOARD.join("\n"));
 		const next = fakeTool("board", NEXT_BOARD);
 		context.push(shown("t1", await agentCall(board, run, "t1")), call("t2"));
-		expect(resultText(await agentCall(next, run, "t2"))).toContain("… [10 lines as shown before: 2-11]");
+		expect(resultText(await agentCall(next, run, "t2"))).toMatch(
+			/… \[10 lines as shown before; read artifact:\/\/\d+:2-11\]/,
+		);
 
 		// A compaction leaves its summary and the new turn: the boards are gone from the context.
 		context = [{ role: "user", content: "Summary: the board was triaged.", timestamp: 0 }, call("t3")];
@@ -968,7 +972,7 @@ describe("spotlight shaping of any tool", () => {
 		await agentCall(fakeTool("board", BOARD.join("\n")), run, "t1");
 		const sibling = await agentCall(fakeTool("board", NEXT_BOARD), run, "t2");
 
-		expect(resultText(sibling)).toContain("… [10 lines as shown before: 2-11]");
+		expect(resultText(sibling)).toMatch(/… \[10 lines as shown before; read artifact:\/\/\d+:2-11\]/);
 	});
 
 	it("shapes and journals only the tools spotlight.experiment.tools names", async () => {

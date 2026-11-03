@@ -242,20 +242,24 @@ async function base(run: Run, subject: Subject): Promise<Base> {
 
 /**
  * Where the hidden runs of a view point: the file, for a read whose lines map to file lines (raw or outlined: a run
- * spans from its first hidden line's file line to its last's, folded bodies included), else a saved copy (command
- * output, compacted data). The copy is written only once the shaped text clears the savings gate ({@link shapeResult});
- * until then {@link PENDING_COPY} stands for its URL.
+ * spans from its first hidden line's file line to its last's, folded bodies included); the run's own artifact, when
+ * the view is its output line for line; else a saved copy (compacted data, unspilled output). The copy is written
+ * only once the shaped text clears the savings gate ({@link shapeResult}); until then {@link PENDING_COPY} stands for
+ * its URL.
  */
 function cutTarget(run: Run, view: View): { url: string; spans: Span[] | null } {
 	const read = run.input.read;
 	if (read && view.spans) return { url: read.path, spans: view.spans };
-	run.copy = view.lines.join("\n");
+	const copy = view.lines.join("\n");
+	const own = run.input.artifact;
+	if (own && copy.replace(/\n+$/, "") === run.input.text.replace(/\n+$/, "")) return { url: own, spans: null };
+	run.copy = copy;
 	return { url: PENDING_COPY, spans: null };
 }
 
 /** Stands in the shaped text for the saved copy's URL until the copy is written; no tool output holds it. */
 const PENDING_COPY = "\u0000spotlight-copy\u0000";
-/** What the savings gate counts {@link PENDING_COPY} as: a session artifact's URL, the size the footer ships with. */
+/** What the savings gate counts {@link PENDING_COPY} as: a session artifact's URL, the size it ships with. */
 const COUNTED_COPY = "artifact://100";
 
 /**
@@ -278,11 +282,12 @@ function runLines(spans: readonly Span[] | null, i: number, j: number): [number,
 	return (spans && runSpan(spans, i, j)) ?? [i + 1, j];
 }
 
-/** A collapsed run of already-seen lines, with where they are, so the agent never has to run the call again. */
-const seenMarker = (count: number, [a, z]: [number, number]) => `… [${count} lines as shown before: ${a}-${z}]`;
+/** A collapsed run of already-seen lines and the read that brings them back, so the agent never reruns the call. */
+const seenMarker = (count: number, url: string, [a, z]: [number, number]) =>
+	`… [${count} lines as shown before; read ${url}:${a}-${z}]`;
 
-/** The footer of a result with hidden lines: where its numbered gaps are. */
-const cutFooter = (url: string) => `[cut: A-B in a … marker are lines A-B of ${url} (read ${url}:A-B)]`;
+/** The footer of a result with numbered gaps (`… [A-B]`) or capped lines: where those numbers are. */
+const cutFooter = (url: string) => `[cut: … [A-B] are lines A-B of ${url} (read ${url}:A-B)]`;
 
 /**
  * Lines no seen-collapse hides: a line holding a word of the call's intent that few lines hold (the agent asked for
@@ -326,7 +331,7 @@ function payingRuns(lines: readonly string[], mask: readonly boolean[]): boolean
 		let j = i;
 		let chars = 0;
 		while (j < lines.length && out[j]) chars += lines[j++].length + 1;
-		if (chars < seenMarker(j - i, [i + 1, j]).length + 1 + SEEN_MARGIN) out.fill(false, i, j);
+		if (chars < seenMarker(j - i, COUNTED_COPY, [i + 1, j]).length + 1 + SEEN_MARGIN) out.fill(false, i, j);
 		i = j;
 	}
 	return out;
@@ -334,7 +339,7 @@ function payingRuns(lines: readonly string[], mask: readonly boolean[]): boolean
 
 /**
  * A short result's view with every run of ≥ 3 already-seen lines that pays for its marker ({@link payingRuns})
- * collapsed to one marker naming where the lines are, under the cut footer.
+ * collapsed to one marker naming the read that brings the lines back.
  */
 async function collapseSeen(run: Run, view: View, steps: string[]): Promise<View> {
 	const keep = seenKeeps(run, view.lines);
@@ -358,13 +363,13 @@ async function collapseSeen(run: Run, view: View, steps: string[]): Promise<View
 		}
 		let j = i;
 		while (j < view.lines.length && mask[j]) j++;
-		lines.push(`${indentOfFirst(view.lines.slice(i, j))}${seenMarker(j - i, runLines(target.spans, i, j))}`);
+		lines.push(
+			`${indentOfFirst(view.lines.slice(i, j))}${seenMarker(j - i, target.url, runLines(target.spans, i, j))}`,
+		);
 		spans.push(view.spans && runSpan(view.spans, i, j));
 		omitted += j - i;
 		i = j;
 	}
-	lines.push(cutFooter(target.url));
-	spans.push(null);
 	bump(run, "seenLines", omitted);
 	steps.push("seen");
 	return { lines, spans: view.spans && spans };
@@ -509,14 +514,16 @@ async function shapeSubject(run: Run, subject: Subject): Promise<{ view: View; s
 			out.push(`${indent}… [${a}-${z}]`);
 			hidden += j - i;
 		} else {
-			out.push(`${indent}${seenMarker(j - i, [a, z])}`);
+			out.push(`${indent}${seenMarker(j - i, target.url, [a, z])}`);
 			omitted += j - i;
 		}
 		outSpans.push(spans && runSpan(spans, i, j));
 		i = j;
 	}
-	out.push(cutFooter(target.url));
-	outSpans.push(null);
+	if (hidden || shortened) {
+		out.push(cutFooter(target.url));
+		outSpans.push(null);
+	}
 	if (cut) {
 		bump(run, "windowed");
 		bump(run, "windowHiddenLines", hidden);
@@ -619,9 +626,12 @@ export async function shapeResult(
 		outTokens = inTokens;
 	}
 	// A kept text names its saved copy: written now, so a reverted or capped result leaves no artifact behind.
+	let textUrl = input.artifact;
 	if (run.copy !== undefined && text !== input.text && !capped) {
-		text = text.replaceAll(PENDING_COPY, await sink.save(run.copy, input.tool));
+		const url = await sink.save(run.copy, input.tool);
+		text = text.replaceAll(PENDING_COPY, url);
 		outTokens = countTokens(text);
+		if (run.copy === input.text) textUrl ??= url;
 	}
 	const applied = text !== input.text && !holdout && !capped;
 	// What the cut hid and folded joins the session only now: a failed save above throws before the state changes.
@@ -630,7 +640,10 @@ export async function shapeResult(
 	stats.charsOut = text.length;
 	const outcome: ShapeOutcome = { text, steps: steps.length ? steps : ["none"], stats, inTokens, outTokens };
 	if (capped) outcome.capped = true;
-	else if (subject && text !== input.text) outcome.lines = traceLines(run, text);
+	else if (subject && text !== input.text) {
+		outcome.lines = traceLines(run, text);
+		if (textUrl) outcome.textUrl = textUrl;
+	}
 	return outcome;
 }
 
