@@ -1,3 +1,4 @@
+import { sanitizeDisplayLine } from "@oh-my-pi/pi-tui/overlays/extensions/display-text";
 import type { TodoOperation, TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import type { ExtensionContext } from "../extensibility/extensions/types";
 import type { TodoParams } from "./todo";
@@ -10,6 +11,14 @@ export const NATIVE_TODO_BACKEND_ID = "native";
  * lists a backend refused. The interactive HUD reloads the committed list when it sees one.
  */
 export const TODO_BACKEND_NOTICE_SOURCE = "todo-backend";
+
+/**
+ * Text an extension or the user supplied (a backend id or label, a thrown error) as one
+ * display-safe line. It reaches notices, `/todo` errors and tool results, which render it as is.
+ */
+export function todoBackendText(value: unknown): string {
+	return sanitizeDisplayLine(value instanceof Error ? value.message : String(value));
+}
 
 /**
  * The `todo` tool's params; only keys declared by the tool schema.

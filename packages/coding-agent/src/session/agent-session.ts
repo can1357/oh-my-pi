@@ -106,6 +106,7 @@ import {
 	logger,
 	postmortem,
 	prompt,
+	Serial,
 	Snowflake,
 	stringProperty,
 	toError,
@@ -273,6 +274,7 @@ import {
 	NATIVE_TODO_BACKEND_ID,
 	TODO_BACKEND_NOTICE_SOURCE,
 	type TodoWriteGuard,
+	todoBackendText,
 } from "../tools/todo-backend";
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
@@ -1168,8 +1170,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#todoBackendInit: Promise<void> | undefined;
 	/** Bumped whenever the todo list is reset or reloaded; queued writes from an older epoch must not land. */
 	#todoEpoch = 0;
-	/** Tail of the serial todo queue; never rejects. */
-	#todoQueueTail: Promise<void> = Promise.resolve();
+	/** Serial queue for every todo write and backend resolution. */
+	readonly #todoQueue = new Serial();
 	readonly #modelMentions: ModelMentionRegistry;
 	#workPoolYieldItems: readonly WorkPoolYieldItem[] = [];
 	/** Item set matching the last successfully rebuilt provider prompt. The base
@@ -11051,7 +11053,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const queued = (async () => {
 			await this.#awaitTodoBackendReady();
 			this.#observeTodoBackendSetting();
-			return this.#enqueueTodoTask(() => {
+			return this.#todoQueue.run(() => {
 				assertCurrent();
 				return write(this.#activeTodoBackend, { assertCurrent });
 			});
@@ -11083,9 +11085,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		if (!this.#todoBackendInitStarted || this.#todoBackendInit) return;
 		const id = cfgTodoBackend.get(this.settings);
 		this.#todoBackendRequestedId = id;
-		this.#todoBackendInit = this.#enqueueTodoTask(() => this.#resolveTodoBackend(id)).catch((error: unknown) => {
-			logger.warn("Todo backend resolution failed", { id, error: String(error) });
-		});
+		this.#todoBackendInit = this.#todoQueue
+			.run(() => this.#resolveTodoBackend(id))
+			.catch((error: unknown) => {
+				logger.warn("Todo backend resolution failed", { id, error: String(error) });
+			});
 	}
 
 	async #awaitTodoBackendReady(): Promise<void> {
@@ -11103,18 +11107,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const id = cfgTodoBackend.get(this.settings);
 		if (id === this.#todoBackendRequestedId) return;
 		this.#todoBackendRequestedId = id;
-		this.#enqueueTodoTask(() => this.#resolveTodoBackend(id)).catch((error: unknown) => {
-			logger.warn("Todo backend switch failed", { id, error: String(error) });
-		});
-	}
-
-	#enqueueTodoTask<T>(task: () => Promise<T>): Promise<T> {
-		const run = this.#todoQueueTail.then(task);
-		this.#todoQueueTail = run.then(
-			() => undefined,
-			() => undefined,
-		);
-		return run;
+		this.#todoQueue
+			.run(() => this.#resolveTodoBackend(id))
+			.catch((error: unknown) => {
+				logger.warn("Todo backend switch failed", { id, error: String(error) });
+			});
 	}
 
 	/**
@@ -11131,7 +11128,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		if (!definition) {
 			this.emitNotice(
 				"warning",
-				`Todo backend "${id}" is not registered by any loaded extension; using native todos.`,
+				`Todo backend "${todoBackendText(id)}" is not registered by any loaded extension; using native todos.`,
 				TODO_BACKEND_NOTICE_SOURCE,
 			);
 			return;
@@ -11143,18 +11140,18 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			}
 			this.#activeTodoBackend = {
 				id,
-				label: definition.label,
+				label: todoBackendText(definition.label),
 				apply: (op, params, next, signal) =>
 					runner.runTodoBackendCall(backendSignal => backend.apply(op, params, next, backendSignal), signal),
 				replace: (phases, signal) =>
 					runner.runTodoBackendCall(backendSignal => backend.replace(phases, backendSignal), signal),
 			};
 		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
+			const message = todoBackendText(error);
 			logger.warn("Todo backend create failed", { id, error: message });
 			this.emitNotice(
 				"warning",
-				`Todo backend "${id}" failed to start: ${message}; using native todos.`,
+				`Todo backend "${todoBackendText(id)}" failed to start: ${message}; using native todos.`,
 				TODO_BACKEND_NOTICE_SOURCE,
 			);
 		}
@@ -11180,8 +11177,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				try {
 					await active.replace(this.#todo.clonePhases(phases));
 				} catch (error) {
-					const reason = error instanceof Error ? error.message : String(error);
-					throw new Error(`Todo backend "${active.label}" refused the edit: ${reason}`, { cause: error });
+					throw new Error(`Todo backend "${active.label}" refused the edit: ${todoBackendText(error)}`, {
+						cause: error,
+					});
 				}
 			}
 			guard.assertCurrent();

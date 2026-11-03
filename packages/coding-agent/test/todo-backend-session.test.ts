@@ -1,6 +1,4 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import * as fs from "node:fs";
-import { setImmediate } from "node:timers/promises";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { findScopedSettings, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -114,15 +112,15 @@ describe("todo backends in a real session", () => {
 	}
 
 	/** Write an extension source file; a deferred one binds only on `loadDeferredExtensions`. */
-	function writeSource(name: string, source: string): string {
+	async function writeSource(name: string, source: string): Promise<string> {
 		const file = tempDir.join(name);
-		fs.writeFileSync(file, source);
+		await Bun.write(file, source);
 		return file;
 	}
 
 	async function createSessionWithDeferred(deferredPath: string, backend: string): Promise<AgentSession> {
 		const eventBus = new EventBus();
-		const eager = writeSource("eager.ts", "export default function() {}\n");
+		const eager = await writeSource("eager.ts", "export default function() {}\n");
 		const preloaded = await loadExtensions([eager], tempDir.path(), eventBus);
 		return createSession({
 			backend,
@@ -139,7 +137,7 @@ describe("todo backends in a real session", () => {
 		recorder.beforeApply = async () => {
 			inFlight++;
 			if (inFlight > 1) overlapped = true;
-			await setImmediate();
+			await Bun.sleep(0);
 			inFlight--;
 		};
 		const session = await createSession({ backend: "tracker", extensions: [recorder.extension()] });
@@ -161,18 +159,19 @@ describe("todo backends in a real session", () => {
 		expect(applies.at(-1)?.phases).toEqual(session.getTodoPhases());
 	});
 
-	test("a throwing apply fails the call and leaves the list and details.phases unchanged", async () => {
-		const recorder = createTodoBackendRecorder("tracker", { label: "Tracker tracker" });
+	test("a throwing apply fails the call with display-safe text and leaves the list and details.phases unchanged", async () => {
+		const recorder = createTodoBackendRecorder("tracker", { label: "Tracker\x1b[31m tracker" });
 		const session = await createSession({ backend: "tracker", extensions: [recorder.extension()] });
 		await todo(session, { op: "init", items: ["keep"] });
 		const before = structuredClone(session.getTodoPhases());
 
-		recorder.applyError = new Error("tracker is down");
+		recorder.applyError = new Error("tracker\x1b[2J is\ndown");
 		const result = await todo(session, { op: "append", phase: "Tasks", items: ["lost"] });
 
 		expect(result.isError).toBe(true);
 		expect(text(result)).toContain("Tracker tracker");
 		expect(text(result)).toContain("tracker is down");
+		expect(text(result)).not.toMatch(/[\x00-\x1f\x7f]/);
 		expect(result.details).toMatchObject({ op: "append", phases: before, storage: "memory" });
 		expect(session.getTodoPhases()).toEqual(before);
 
@@ -191,7 +190,7 @@ describe("todo backends in a real session", () => {
 		const signals: AbortSignal[] = [];
 		const hang = (signal: AbortSignal) => {
 			signals.push(signal);
-			return new Promise<void>(() => {});
+			return Promise.withResolvers<void>().promise;
 		};
 		testSetExtensionHandlerTimeoutMs(50);
 		try {
@@ -364,15 +363,15 @@ describe("todo backends in a real session", () => {
 
 	test("a backend registered by a deferred extension is used once it loads, without a notice", async () => {
 		const log = tempDir.join("deferred-backend.log");
-		const deferred = writeSource(
+		const deferred = await writeSource(
 			"deferred-tracker.ts",
-			`import * as fs from "node:fs";
+			`import * as fs from "node:fs/promises";
 export default function(pi) {
 	pi.registerTodoBackend({
 		id: "late",
 		label: "Late",
 		create: () => ({
-			apply: async (op) => { fs.appendFileSync(${JSON.stringify(log)}, "apply:" + op + "\\n"); },
+			apply: async (op) => { await fs.appendFile(${JSON.stringify(log)}, "apply:" + op + "\\n"); },
 			replace: async () => {},
 		}),
 	});
@@ -383,14 +382,14 @@ export default function(pi) {
 		const notices = collectNotices(session);
 
 		// Nothing may be announced before the deferred extension binds: "late" is unregistered until then.
-		await setImmediate();
+		await Bun.sleep(0);
 		expect(notices).toEqual([]);
 
 		// A write starts the deferred load and waits for the resolution.
 		const result = await todo(session, { op: "init", items: ["via deferred backend"] });
 
 		expect(result.isError).toBeUndefined();
-		expect(fs.readFileSync(log, "utf8")).toBe("apply:init\n");
+		expect(await Bun.file(log).text()).toBe("apply:init\n");
 		expect(notices).toEqual([]);
 	});
 
