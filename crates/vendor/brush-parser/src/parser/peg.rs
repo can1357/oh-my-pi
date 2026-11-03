@@ -776,40 +776,18 @@ fn skip_quoted(chars: &mut std::iter::Peekable<std::str::Chars<'_>>, quote: char
     }
 }
 
-/// Skips the shell text of a command substitution, up to and including the `)` that closes it.
-/// Its parentheses are its own: Bash reads the substitution as a command, so none of them counts
-/// toward the arithmetic text around it, and a quote or a comment inside it hides its own.
-fn skip_command_substitution(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
-    let mut depth = 1_usize;
-    let mut after_blank = true;
-    while let Some(c) = chars.next() {
-        match c {
-            '\\' => {
-                chars.next();
-            }
-            '\'' => skip_quoted(chars, '\'', false),
-            '"' => skip_quoted(chars, '"', true),
-            '`' => skip_quoted(chars, '`', true),
-            '#' if after_blank => skip_quoted(chars, '\n', false),
-            '(' => depth += 1,
-            ')' => {
-                depth -= 1;
-                if depth == 0 {
-                    return;
-                }
-            }
-            _ => (),
-        }
-        after_blank = matches!(c, ' ' | '\t' | '\n' | ';' | '&' | '|' | '(');
+/// The parentheses a word of an arithmetic `for` header adds to it. Bash reads every parenthesis
+/// of a header, those inside its words included, while the parser reads the whole word as one
+/// token, so the header's end only agrees with Bash's when they are counted too. A quoted or
+/// escaped one is text and counts for neither.
+///
+/// A word that runs a command carries parentheses that belong to that command, and where its
+/// text ends takes a shell parser to say. Such a word returns `None`: the header is then read as
+/// it is without this fix, rather than on a guess.
+fn word_parens(text: &str) -> Option<isize> {
+    if text.contains("$(") || text.contains('`') {
+        return None;
     }
-}
-
-/// The parentheses a word of an arithmetic `for` header adds to it, those its parameter and
-/// arithmetic expansions carry included. Bash reads every one of them, while the parser reads the
-/// whole word as one token, so the header's end only agrees with Bash's when they are counted
-/// too. A quoted or escaped parenthesis is text, and the parentheses of a command substitution
-/// belong to the command it runs.
-fn word_parens(text: &str) -> isize {
     let mut parens = 0_isize;
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
@@ -819,33 +797,16 @@ fn word_parens(text: &str) -> isize {
             }
             '\'' => skip_quoted(&mut chars, '\'', false),
             '"' => skip_quoted(&mut chars, '"', true),
-            '`' => skip_quoted(&mut chars, '`', true),
-            '$' => match chars.peek() {
-                // A `$'...'` span honours backslash escapes; a `$(( ... ))` is arithmetic text,
-                // whose parentheses are read on; a `$( ... )` is a command.
-                Some('\'') => {
-                    chars.next();
-                    skip_quoted(&mut chars, '\'', true);
-                }
-                Some('(') => {
-                    chars.next();
-                    parens += 1;
-                    if chars.peek() == Some(&'(') {
-                        chars.next();
-                        parens += 1;
-                    } else {
-                        parens -= 1;
-                        skip_command_substitution(&mut chars);
-                    }
-                }
-                _ => (),
-            },
+            '$' if chars.peek() == Some(&'\'') => {
+                chars.next();
+                skip_quoted(&mut chars, '\'', true);
+            }
             '(' => parens += 1,
             ')' => parens -= 1,
             _ => (),
         }
     }
-    parens
+    Some(parens)
 }
 
 /// Reads the header of an arithmetic for loop: the tokens from `pos` up to the `)` that closes the
@@ -891,7 +852,7 @@ fn arithmetic_for_header(
                 }
                 _ => {}
             },
-            Token::Word(word, _) => depth += word_parens(word),
+            Token::Word(word, _) => depth += word_parens(word).unwrap_or(0),
         }
         // Keep one space where the source had a gap between two tokens of the same expression,
         // as reconstructing a token slice does.

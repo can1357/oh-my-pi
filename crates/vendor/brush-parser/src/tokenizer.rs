@@ -244,6 +244,10 @@ struct CrossTokenParseState {
     /// far in its `${...}` words. The parser sees each word as one token, so the header's end
     /// agrees with Bash's only when this is zero once the header closes.
     header_word_parens: i32,
+    /// Did a word of the header run a command? Where the text of a command substitution ends
+    /// takes a shell parser to say, so the header's parentheses cannot be counted against it,
+    /// and it is read as it is without this fix.
+    header_word_runs_command: bool,
     /// Was the last word `for` (so a `((` right after it opens an arithmetic `for` header)?
     after_for_word: bool,
 }
@@ -629,6 +633,7 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                 outer_arithmetic_depth: None,
                 in_parameter_word: false,
                 header_word_parens: 0,
+                header_word_runs_command: false,
                 after_for_word: false,
             },
         }
@@ -677,8 +682,8 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
     /// Notes a parenthesis the tokenizer read while a bare `((` or an arithmetic `for` header is
     /// open. Bash counts every parenthesis of a header, those inside its `${...}` words and its
     /// expansions included, and ends the header where they balance; the parser sees each word as
-    /// one token. A parenthesis the parser does not see is counted on the header instead: a
-    /// closing one closes a hidden parenthesis first, then one the parser can see, as for Bash.
+    /// one token. A parenthesis the parser does not see is counted on the header instead, and one
+    /// it can see closes such a hidden one before the header itself, as it does for Bash.
     fn note_paren(&mut self, open: bool) -> Result<(), TokenizerError> {
         let depth = self.cross_state.arithmetic_command_depth;
         let hidden = self.cross_state.in_parameter_word || depth.is_none();
@@ -688,11 +693,17 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
             return Ok(());
         }
         if hidden {
-            match depth {
-                Some(depth) if !open && self.cross_state.header_word_parens <= 0 && depth > 1 => {
-                    self.cross_state.arithmetic_command_depth = Some(depth - 1);
-                }
-                _ => self.cross_state.header_word_parens += if open { 1 } else { -1 },
+            if open {
+                self.cross_state.header_word_parens += 1;
+            } else if self.cross_state.header_word_parens > 0 {
+                self.cross_state.header_word_parens -= 1;
+            } else if depth.is_some_and(|depth| depth > 1) {
+                // The parser can see an open parenthesis for this one to close.
+                self.cross_state.arithmetic_command_depth = depth.map(|depth| depth - 1);
+            } else if !self.cross_state.header_word_runs_command {
+                // Nothing is open, so Bash ends the header here, inside a word, where the parser
+                // reads one token and cannot end it.
+                return Err(TokenizerError::UnbalancedParameterWordInArithmetic);
             }
             return Ok(());
         }
@@ -707,6 +718,16 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
             self.cross_state.arithmetic_command_depth = Some(depth - 1);
             return Ok(());
         }
+        // A parenthesis a word of the header opened is still open: Bash closes it with this one
+        // and reads on, so the header does not end here. A header inside the text of a bare `((`
+        // keeps its end, because the parentheses it would read on belong to that text.
+        if self.cross_state.arithmetic_for_header
+            && self.cross_state.header_word_parens > 0
+            && self.cross_state.outer_arithmetic_depth.is_none()
+        {
+            self.cross_state.header_word_parens -= 1;
+            return Ok(());
+        }
         // The parenthesis that matches the second `(` closes: the arithmetic text ends here.
         let was_header = self.cross_state.arithmetic_for_header;
         self.cross_state.arithmetic_for_header = false;
@@ -715,7 +736,9 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
         self.cross_state.arithmetic_expansion = self.cross_state.arithmetic_command_depth.is_some();
         // A header whose hidden parentheses do not cancel out ends elsewhere for Bash than for
         // the parser, so Bash reads a header the parser cannot and reports a syntax error.
-        if was_header && std::mem::take(&mut self.cross_state.header_word_parens) != 0 {
+        let counted = std::mem::take(&mut self.cross_state.header_word_parens);
+        let uncertain = std::mem::take(&mut self.cross_state.header_word_runs_command);
+        if was_header && !uncertain && counted != 0 {
             return Err(TokenizerError::UnbalancedParameterWordInArithmetic);
         }
         Ok(())
@@ -1134,8 +1157,12 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                             // part of the header around it: its parentheses count toward the
                             // header, as Bash counts them. It opens with two and closes with
                             // two, and the last of those ends the scan without being read.
-                            if is_arithmetic && self.cross_state.arithmetic_for_header {
-                                self.cross_state.header_word_parens += 1;
+                            if self.cross_state.arithmetic_for_header {
+                                if is_arithmetic {
+                                    self.cross_state.header_word_parens += 1;
+                                } else {
+                                    self.cross_state.header_word_runs_command = true;
+                                }
                             }
                             let outer_state = (
                                 self.cross_state.arithmetic_expansion,
@@ -1280,6 +1307,9 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                 } else {
                     // We look for the terminating backquote. First disable normal consumption and
                     // consume the starting backquote.
+                    if self.cross_state.arithmetic_for_header {
+                        self.cross_state.header_word_runs_command = true;
+                    }
                     let backquote_pos = self.cross_state.cursor.clone();
                     self.consume_char()?;
 

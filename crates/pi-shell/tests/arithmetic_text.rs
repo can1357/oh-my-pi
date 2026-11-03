@@ -257,19 +257,42 @@ async fn parameter_word_parentheses_follow_bash() {
 	.await;
 	assert_eq!(out.stdout, "abcdef\n", "stderr: {}", out.stderr);
 	assert_eq!(out.stderr, "");
+	// A parenthesis a word opens is closed by a later one, as in Bash, so the
+	// header ends at the last of them and the loop runs.
+	let out = run(concat!(
+		"unset v\n",
+		"for ((i=${v:-(}${v:-(};0;)))); do :; done\n",
+		"echo \"g=$?\"\n",
+	))
+	.await;
+	assert_eq!(out.stdout, "g=1\n", "stderr: {}", out.stderr);
+	assert!(out.stderr.contains("i=(("), "the expression must be reported: {}", out.stderr);
+
 	for script in [
 		"v=1\nfor ((x=${v:?(};0;)); do :; done\necho after\n",
 		"v=1\nfor ((x=${v:-(};0;)); do :; done\necho after\n",
 		"v=0\nfor ((i=${v:-)};0;)); do :; done\necho after\n",
 		"v=0\nfor ((i=${v:-${w:-)}};0;)); do :; done\necho after\n",
 		"v=0\n(((( for ((i=${v:-)};0;)) << 2 )) ))\necho after\n",
+		"v=0\n(((( for ((i=${v:-(};0;)) << 2 )) ))\necho after\n",
 		"v=0; w=0\n(( for ((i=${v-$(( ${w:-)} ))};0;)) << 2 ))\necho after\n",
-		"unset v\nfor ((i=${v:-(}${v:-(};0;)))); do :; done\necho after\n",
+		"v=0\nfor ((i=${v:- # )}${v:-(};i<1;i++)); do :; done\necho after\n",
 	] {
 		let out = run(script).await;
 		assert_eq!(out.stdout, "", "{script:?} ran; stderr: {}", out.stderr);
 		assert_eq!(out.exit_code, Some(2), "{script:?}; stderr: {}", out.stderr);
 	}
+
+	// A word that runs a command carries parentheses the parser cannot place,
+	// so the header keeps the reading it has without this fix.
+	let out = run(concat!(
+		"v=0\n",
+		"for ((i=${v:-\"$(echo \"(\")\"};i<1;i++)); do printf h; done\n",
+		"for ((i=${v:-$(case x in x) echo '(';; esac)};i<1;i++)); do printf i; done\n",
+		"echo\n",
+	))
+	.await;
+	assert_eq!(out.stdout, "hi\n", "stderr: {}", out.stderr);
 }
 
 /// Only the header of an arithmetic `for` loop is read with the rules of
