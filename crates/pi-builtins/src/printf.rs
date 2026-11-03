@@ -496,15 +496,14 @@ fn write_field<W: Write>(
 			let Some(argument) = arguments.get(*taken) else { return 0 };
 			*taken += 1;
 			let written = argument.to_string_lossy();
-			match read_number(written.trim()) {
-				Ok(number) => number,
-				Err(ReadError::NotANumber) => {
-					report.say(format_args!("{written}: invalid number"));
-					report.invalid = true;
-					0
-				},
-	Err(ReadError::OutOfRange) => i64::MAX,
+			// A number past what this machine holds is held to its largest,
+			// which the field limit below holds again; any other word is read
+			// as a `%d` argument is, its leading digits taken and the rest
+			// reported.
+			if !written.starts_with(['\'', '"']) && scan_integer(&written).magnitude > u128::from(i64::MAX.unsigned_abs()) {
+				return i64::MAX;
 			}
+			read_number_or_report(&written, b'd', report).and_then(|number| number.parse().ok()).unwrap_or(0)
 		},
 		Some(Field::Fixed(number)) => i64::try_from(number).unwrap_or(i64::MAX),
 		None => 0,
@@ -886,49 +885,6 @@ fn read_hex_float(written: &str) -> Option<f64> {
 	Some(if negative { -value } else { value })
 }
 
-/// Why [`read_number`] could not read an argument.
-enum ReadError {
-	/// It is no number at all.
-	NotANumber,
-	/// It is a number larger than this machine holds.
-	OutOfRange,
-}
-
-/// The number `written` holds, as Bash reads a width, a precision or a `%d`
-/// argument: a decimal, a hexadecimal after `0x`, an octal after `0`, or the
-/// character after a quote, with a sign and nothing else around it.
-fn read_number(written: &str) -> Result<i64, ReadError> {
-	if written.is_empty() {
-		return Ok(0);
-	}
-	if let Some(character) = written.strip_prefix('\'').or(written.strip_prefix('"')) {
-		return Ok(character.chars().next().map_or(0, |c| i64::from(u32::from(c))));
-	}
-	let (negative, digits) = match written.strip_prefix('-') {
-		Some(digits) => (true, digits),
-		None => (false, written.strip_prefix('+').unwrap_or(written)),
-	};
-	let read = if let Some(hexadecimal) = digits.strip_prefix("0x").or(digits.strip_prefix("0X")) {
-		i64::from_str_radix(hexadecimal, 16)
-	} else if digits.len() > 1 && digits.starts_with('0') {
-		i64::from_str_radix(&digits[1..], 8)
-	} else {
-		digits.parse()
-	};
-	match read {
-		Ok(number) => Ok(if negative { -number } else { number }),
-		// A number past what this holds is still a number: Bash reports it as
-		// out of range and holds it to what an `int` takes.
-		// A number this machine cannot hold is still a number, which Bash
-		// reports as out of range and holds to what an `int` takes; one that
-		// is no number at all it reports and takes as zero.
-		Err(_) if !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()) => {
-			Err(ReadError::OutOfRange)
-		},
-		Err(_) => Err(ReadError::NotANumber),
-	}
-}
-
 /// Where a number's own digits start in `text`: after a sign, a space held
 /// for one, and the `0x` of a hexadecimal.
 fn body_starts_at(text: &[u8]) -> usize {
@@ -1019,9 +975,12 @@ fn read_numbers(
 			// A `*` reads a number of its own, which [`write_field`] reports.
 			taken = (taken + stars).min(arguments.len());
 			let Some(argument) = arguments.get(taken) else { break };
-			let written = argument.to_string_lossy().trim().to_owned();
+			let lossy = argument.to_string_lossy();
+			let written = lossy.trim();
 			let read = match conversion {
-				b'd' | b'i' | b'o' | b'u' | b'x' | b'X' => read_number_or_report(&written, report),
+				// A blank after an integer makes it no number, as Bash reads
+				// it; one before it does not.
+				b'd' | b'i' | b'o' | b'u' | b'x' | b'X' => read_number_or_report(&lossy, conversion, report),
 				b'e' | b'E' | b'f' | b'F' | b'g' | b'G' | b'a' | b'A' => {
 					read_float_or_report(&written, report)
 				},
@@ -1038,20 +997,82 @@ fn read_numbers(
 	}
 }
 
-/// What a `%d` argument holds, when it is not a number this writes as it is:
-/// `None` leaves the argument alone.
-fn read_number_or_report(written: &str, report: &mut Report<impl Write>) -> Option<String> {
-	if written.is_empty() || read_number(written).is_ok() {
+/// An integer argument as C's `strtoimax` and `strtoumax` read it, which is
+/// how Bash reads one: blanks, a sign, then the longest run of digits in the
+/// base the word starts with (`0x` hexadecimal, `0` octal, else decimal).
+struct ScannedInteger {
+	/// Whether a `-` came before the digits.
+	negative:  bool,
+	/// The digits' value, held to `u128::MAX`.
+	magnitude: u128,
+	/// Whether the word ends where the digits do.
+	whole:     bool,
+	/// What Bash calls a word that does not: `hex`, `octal` or nothing.
+	kind:      &'static str,
+}
+
+fn scan_integer(written: &str) -> ScannedInteger {
+	let text = written.trim_start_matches([' ', '\t', '\n']);
+	let (negative, unsigned) = match text.as_bytes().first() {
+		Some(b'-') => (true, &text[1..]),
+		Some(b'+') => (false, &text[1..]),
+		_ => (false, text),
+	};
+	let bytes = unsigned.as_bytes();
+	let (base, start, kind) = if bytes.len() > 1 && bytes[0] == b'0' && matches!(bytes[1], b'x' | b'X') {
+		(16, 2, "hex ")
+	} else if bytes.len() > 1 && bytes[0] == b'0' {
+		(8, 1, "octal ")
+	} else {
+		(10, 0, "")
+	};
+	let mut magnitude: u128 = 0;
+	let mut end = start;
+	while let Some(digit) = bytes.get(end).and_then(|byte| char::from(*byte).to_digit(base)) {
+		magnitude = magnitude.saturating_mul(u128::from(base)).saturating_add(u128::from(digit));
+		end += 1;
+	}
+	// `0x` with no hexadecimal digit after it is the number 0, read from the
+	// `0` alone, and the word goes on past it.
+	let whole = if base == 16 && end == start { false } else { end == bytes.len() && !bytes.is_empty() };
+	ScannedInteger { negative, magnitude, whole: whole || written.is_empty(), kind }
+}
+
+/// What an integer argument holds for `conversion`, as Bash writes it: a
+/// word that does not end where its digits do is reported and taken as
+/// those digits, and a number past what the conversion holds is reported
+/// and held to its largest, as `strtoimax` and `strtoumax` hold it. The
+/// result is the value in decimal, which uucore reads as it is.
+fn read_number_or_report(written: &str, conversion: u8, report: &mut Report<impl Write>) -> Option<String> {
+	if written.is_empty() {
 		return None;
 	}
-	report.say(format_args!("{written}: invalid number"));
-	report.invalid = true;
-	// Bash writes what it could read of the word, which is the digits it
-	// starts with, and nothing for a word that starts with none.
-	let digits = written.strip_prefix(['-', '+']).unwrap_or(written);
-	let end = digits.bytes().position(|byte| !byte.is_ascii_digit()).unwrap_or(digits.len());
-	let sign = if written.starts_with('-') { "-" } else { "" };
-	Some(format!("{sign}{}", if end == 0 { "0" } else { &digits[..end] }))
+	if let Some(character) = written.strip_prefix('\'').or(written.strip_prefix('"')) {
+		return Some(character.chars().next().map_or(0, u32::from).to_string());
+	}
+	let scanned = scan_integer(written);
+	if !scanned.whole {
+		report.say(format_args!("{written}: invalid {}number", scanned.kind));
+		report.invalid = true;
+	}
+	let (limit, unsigned) = if matches!(conversion, b'd' | b'i') {
+		(if scanned.negative { 1u128 << 63 } else { (1u128 << 63) - 1 }, false)
+	} else {
+		(u128::from(u64::MAX), true)
+	};
+	if scanned.magnitude > limit {
+		report.say(format_args!("warning: {written}: Numerical result out of range"));
+	}
+	let magnitude = scanned.magnitude.min(limit);
+	Some(if !unsigned {
+		if scanned.negative { format!("-{magnitude}") } else { magnitude.to_string() }
+	} else if scanned.magnitude > limit {
+		u64::MAX.to_string()
+	} else {
+		// A negative number wraps as `strtoumax` wraps it.
+		let value = u64::try_from(magnitude).unwrap_or(u64::MAX);
+		(if scanned.negative { value.wrapping_neg() } else { value }).to_string()
+	})
 }
 
 /// What a `%f` argument holds, when it is not a number this writes as it is.
