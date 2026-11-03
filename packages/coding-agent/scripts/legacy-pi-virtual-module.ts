@@ -146,7 +146,7 @@ export async function collectBundledPiEntries(): Promise<BundledPiEntry[]> {
 			const pattern = parseWildcardPattern(exportKey, sourcePattern);
 			if (!pattern || !/\.(ts|tsx|mts|cts|js|mjs|cjs|jsx)$/.test(pattern.sourceSuffix)) continue;
 			const rootWildcard = pattern.exportPrefix === "" || pattern.exportPrefix === "/";
-			if (rootWildcard && (exportKey !== "./*" || !pkg.rootWildcard)) continue;
+			if (rootWildcard && !pkg.rootWildcard) continue;
 
 			const sourceDir = path.join(packageRoot, pattern.sourcePrefix);
 			try {
