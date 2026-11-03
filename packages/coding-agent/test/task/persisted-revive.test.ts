@@ -53,7 +53,7 @@ import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { type IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
-import { __resetDirsFromEnvForTests, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
+import { __resetDirsFromEnvForTests, getAgentDir, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import { createSessionDefaults } from "../helpers/session-defaults";
 
 import { cfgAdvisorEnabled } from "@oh-my-pi/pi-coding-agent/advisor/settings";
@@ -72,19 +72,28 @@ const originalEnv = {
 	PI_PROFILE: process.env.PI_PROFILE,
 };
 
+/** Put-backs for the spies this file installs, newest first. */
+const restoreSpies: Array<() => void> = [];
+
 beforeEach(() => {
 	process.env.HOME = isolatedHome.path();
-	vi.spyOn(os, "homedir").mockReturnValue(isolatedHome.path());
+	const homedir = vi.spyOn(os, "homedir").mockReturnValue(isolatedHome.path());
+	restoreSpies.push(() => homedir.mockRestore());
 	setAgentDir(path.join(isolatedHome.path(), ".omp", "agent"));
-	vi.spyOn(connectionPrewarm, "prewarmModelConnection").mockResolvedValue(undefined);
+	const prewarm = vi.spyOn(connectionPrewarm, "prewarmModelConnection").mockResolvedValue(undefined);
+	restoreSpies.push(() => prewarm.mockRestore());
 });
 
 afterEach(() => {
+	// The home function goes back before the directory cache is rebuilt: a cache rebuilt while it
+	// still answers with the temporary home would keep those paths after the fixture is removed.
+	while (restoreSpies.length > 0) restoreSpies.pop()?.();
 	for (const [key, value] of Object.entries(originalEnv)) {
 		if (value === undefined) delete process.env[key];
 		else process.env[key] = value;
 	}
 	__resetDirsFromEnvForTests();
+	expect(getAgentDir().startsWith(isolatedHome.path())).toBe(false);
 });
 
 afterAll(() => {
