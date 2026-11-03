@@ -677,8 +677,8 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
     /// Notes a parenthesis the tokenizer read while a bare `((` or an arithmetic `for` header is
     /// open. Bash counts every parenthesis of a header, those inside its `${...}` words and its
     /// expansions included, and ends the header where they balance; the parser sees each word as
-    /// one token. A parenthesis the parser does not see is counted on the header instead, except
-    /// that a closing one first closes a parenthesis the parser does see, as it does for Bash.
+    /// one token. A parenthesis the parser does not see is counted on the header instead: a
+    /// closing one closes a hidden parenthesis first, then one the parser can see, as for Bash.
     fn note_paren(&mut self, open: bool) -> Result<(), TokenizerError> {
         let depth = self.cross_state.arithmetic_command_depth;
         let hidden = self.cross_state.in_parameter_word || depth.is_none();
@@ -689,7 +689,7 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
         }
         if hidden {
             match depth {
-                Some(depth) if !open && depth > 1 => {
+                Some(depth) if !open && self.cross_state.header_word_parens <= 0 && depth > 1 => {
                     self.cross_state.arithmetic_command_depth = Some(depth - 1);
                 }
                 _ => self.cross_state.header_word_parens += if open { 1 } else { -1 },

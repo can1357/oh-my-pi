@@ -239,6 +239,24 @@ async fn parameter_word_parentheses_follow_bash() {
 	.await;
 	assert_eq!(out.stdout, "a=0\nb=0\nc=0\n", "stderr: {}", out.stderr);
 	assert_eq!(out.stderr, "");
+
+	// A parenthesis is text where Bash reads text: quoted, escaped, inside
+	// `$'...'` whose quote is escaped, and inside a command substitution,
+	// whose own parentheses belong to the command it runs. A `#` in a word
+	// starts no comment, so it hides none of them.
+	let out = run(concat!(
+		"v=0\n",
+		"for ((i=(0+${v:-(0)});i<1;i++)); do printf a; done\n",
+		"for ((i=${v:-$'\\'('};i<1;i++)); do printf b; done\n",
+		"for ((i=${v:-$(echo ${v:-(})};i<1;i++)); do printf c; done\n",
+		"for ((i=${v:-`echo \"(\"`};i<1;i++)); do printf d; done\n",
+		"for ((i=${v:-(}${v:- # )};i<1;i++)); do printf e; done\n",
+		"for ((i=${v:-\\(};i<1;i++)); do printf f; done\n",
+		"echo\n",
+	))
+	.await;
+	assert_eq!(out.stdout, "abcdef\n", "stderr: {}", out.stderr);
+	assert_eq!(out.stderr, "");
 	for script in [
 		"v=1\nfor ((x=${v:?(};0;)); do :; done\necho after\n",
 		"v=1\nfor ((x=${v:-(};0;)); do :; done\necho after\n",
