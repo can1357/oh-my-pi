@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed the bash tool's `printf` never ending when its format has no conversion and an argument follows it (`printf 'done\n' extra`, `printf '' x`); as in Bash, such a format is written once. `\c` in a `%b` argument now ends all output, `\c` in the format is written as it is, and `%q` quotes with backslashes in any format, as Bash does
+- Fixed the bash tool's `printf` never ending when its format has no conversion and an argument follows it (`printf 'done\n' extra`, `printf '' x`); as in Bash, such a format is written once. `\c` in a `%b` argument now ends all output, `\c` in the format is written as it is, and `%q` quotes with backslashes in any format, as Bash does ([#17914](https://github.com/can1357/oh-my-pi/pull/17914) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.16.0] - 2026-11-02
 
