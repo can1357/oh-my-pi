@@ -53,6 +53,8 @@ const USER_AGENTS = [
 const BLOCKED_STATUSES = new Set([403, 429, 503, 999]);
 
 const CHALLENGE_INPUT_ATTR = 'name="js_challenge"';
+/** A challenge interstitial carries no content (Reddit's is about 8 KB); a larger page is no wall. */
+const CHALLENGE_PAGE_MAX_CHARS = 64 * 1024;
 /** Occurrences of the attribute checked per page; a challenge page has one. */
 const MAX_CHALLENGE_CANDIDATES = 8;
 /** Elements whose content is text or inert, so an input inside one is quoted source, not a field. */
@@ -71,16 +73,21 @@ const RAW_TEXT_TAGS = [
 ];
 
 /**
- * True when the page holds a `js_challenge` `<input>` tag outside comments and raw-text elements.
- * Each candidate costs a few linear string searches, so a hostile body cannot stall the read.
+ * True when a page small enough to be an interstitial holds a `js_challenge` `<input>` tag outside
+ * comments and raw-text elements. The size cap bounds every search below.
  */
 function hasChallengeForm(content: string): boolean {
+	if (content.length > CHALLENGE_PAGE_MAX_CHARS) return false;
 	let at = content.indexOf(CHALLENGE_INPUT_ATTR);
 	if (at < 0) return false;
 	const lower = content.toLowerCase();
 	for (let seen = 0; at >= 0 && seen < MAX_CHALLENGE_CANDIDATES; seen++) {
 		const open = lower.lastIndexOf("<", at);
-		const inInputTag = open >= 0 && lower.startsWith("<input", open) && lower.indexOf(">", open) > at;
+		const inInputTag =
+			open >= 0 &&
+			lower.startsWith("<input", open) &&
+			/[\s/>]/.test(lower.charAt(open + 6)) &&
+			lower.indexOf(">", open) > at;
 		const inComment = lower.lastIndexOf("<!--", open) > lower.lastIndexOf("-->", open);
 		const inRawText = RAW_TEXT_TAGS.some(
 			tag => lower.lastIndexOf(`<${tag}`, open) > lower.lastIndexOf(`</${tag}`, open),

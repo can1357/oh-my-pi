@@ -627,6 +627,10 @@ const FETCH_PROVIDER_ORDER: readonly FetchProvider[] = [
 
 /** Reader backends that fetch the URL from their own servers, so a wall refusing this host may let them in. */
 const REMOTE_FETCH_PROVIDERS: readonly FetchProvider[] = ["parallel", "firecrawl", "jina"];
+/** Block-page wording a remote reader may be served too; a short rendering holding one is the wall. */
+const BLOCK_PAGE_RE =
+	/blocked by network security|verify you are human|are you a robot|access to this page has been denied/i;
+const BLOCK_PAGE_MAX_CHARS = 2048;
 
 /**
  * Render HTML to markdown by trying reader backends in priority order: native
@@ -1209,7 +1213,8 @@ async function renderUrl(
 			fetchOverride,
 			REMOTE_FETCH_PROVIDERS,
 		);
-		if (remote.ok && !isLowQualityOutput(remote.content, remote.method)) {
+		const remoteBlocked = remote.content.length <= BLOCK_PAGE_MAX_CHARS && BLOCK_PAGE_RE.test(remote.content);
+		if (remote.ok && !remoteBlocked && !isLowQualityOutput(remote.content, remote.method)) {
 			return {
 				url,
 				finalUrl: response.finalUrl,
