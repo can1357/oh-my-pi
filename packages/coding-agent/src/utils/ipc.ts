@@ -103,11 +103,23 @@ function observe(value: unknown, onRejected: (reason: unknown) => void, onSettle
 	}
 	// The built-in `then` returns a promise that rejects only when a callback throws, and these do not.
 	if (then === promiseThen || !types.isPromise(returned)) return;
+	// What `then` returns settles nothing by fulfilling; but a promise it fulfils with (one whose own
+	// `then` was removed, so it was not adopted) is followed, and its rejection reported and settles.
+	const followReturned = (result: unknown): void => {
+		if (!types.isPromise(result) || followed.has(result)) return;
+		followed.add(result);
+		try {
+			reflectApply(promiseThen, result, [followReturned, reject]);
+		} catch (error) {
+			reject(error);
+		}
+	};
+	followed.add(returned);
 	try {
 		// Only a native promise reports an unhandled rejection. The built-in `then` observes one
-		// without calling any `then` it overrides; what it fulfils with is observed in turn, and
-		// its callbacks return nothing, so nothing is forwarded into a child promise.
-		reflectApply(promiseThen, returned, [observeRejection, reject]);
+		// without calling any `then` it overrides; its callbacks return nothing, so nothing is
+		// forwarded into a child promise.
+		reflectApply(promiseThen, returned, [followReturned, reject]);
 	} catch (error) {
 		// The returned promise's `constructor` or species refused: reported, as above.
 		reject(error);

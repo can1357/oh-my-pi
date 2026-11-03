@@ -372,7 +372,10 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 
 		const onAbort = () => {
 			pending.cancelled = true;
-			pending.timedOut = pending.timedOut || isTimeoutReason(options?.signal?.reason);
+			// Read the reason even when the timer already timed the cell out: describing it is what
+			// observes a rejected promise passed as the reason.
+			const reasonTimedOut = isTimeoutReason(options?.signal?.reason);
+			pending.timedOut = pending.timedOut || reasonTimedOut;
 			requestCancel();
 		};
 		const timeoutId =

@@ -16,7 +16,7 @@ import { disposeAllKernelSessions, executePython } from "@oh-my-pi/pi-coding-age
 import { PythonKernel } from "@oh-my-pi/pi-coding-agent/eval/py/kernel";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import type { JsStatusEvent } from "@oh-my-pi/pi-coding-agent/eval/js/shared/types";
-import { catchRejection } from "@oh-my-pi/pi-coding-agent/utils/ipc";
+import { catchRejection, settled } from "@oh-my-pi/pi-coding-agent/utils/ipc";
 import { describeError, logger, postmortem, TempDir } from "@oh-my-pi/pi-utils";
 
 type Language = "py" | "js";
@@ -1865,4 +1865,43 @@ describe("cancellation checks and descriptions read a thrown value or abort reas
 			"thenable inner",
 		]);
 	});
+
+	it("settles and reports when a thenable's then returns a promise fulfilled with a then-less rejected promise", async () => {
+		const inner = Promise.reject(new Error("returned inner"));
+		Object.defineProperty(inner, "then", { value: null });
+		const outer = Promise.withResolvers<unknown>();
+		outer.resolve(inner);
+		const reported: unknown[] = [];
+		const unhandled = await unhandledRejectionsDuring(async () => {
+			// `settled()` is what the Python reader awaits: it must resolve, or the reader stalls.
+			await settled({ then: () => outer.promise }, reason => reported.push(reason));
+		});
+		expect(unhandled).toEqual([]);
+		expect(reported.map(reason => describeError(reason).message)).toEqual(["returned inner"]);
+	});
+
+	it.skipIf(!PYTHON_INTEGRATION)(
+		"py: an abort with a rejected promise as its reason, after the kernel's own timeout fired, is observed",
+		async () => {
+			const kernel = await PythonKernel.start({ cwd: process.cwd() });
+			try {
+				const interrupt = new AbortController();
+				const unhandled = await unhandledRejectionsDuring(async () => {
+					const running = kernel.execute(
+						"import signal, time\nsignal.signal(signal.SIGINT, signal.SIG_IGN)\nprint('started', flush=True)\ntime.sleep(30)",
+						{ signal: interrupt.signal, timeoutMs: 1_000 },
+					);
+					// The 1 s timeout must fire first; the cell ignores SIGINT, so the kernel is still
+					// escalating when the caller aborts. Real time: the timeout is the kernel's own timer.
+					await Bun.sleep(1_500);
+					interrupt.abort(Promise.reject(new Error("late abort reason")));
+					await running.catch(() => {});
+				});
+				expect(unhandled).toEqual([]);
+			} finally {
+				await kernel.shutdown();
+			}
+		},
+		120_000,
+	);
 });
