@@ -108,6 +108,14 @@ const server = Bun.serve({
 					document.querySelector("#popup-url-print").addEventListener("click", () => void open("/receipt"));
 					document.querySelector("#noopener-print").addEventListener("click", () => void open("/receipt-alone", "_blank", "noopener"));
 					if (location.pathname === "/print-on-load") addEventListener("load", () => { print(); log.push("load print returned"); });
+					// Restored from the back/forward cache, a handler keeps the page busy past the 1.5 s tail, then prints.
+					if (location.search === "?slow-restore") addEventListener("pageshow", event => {
+						if (!event.persisted) return;
+						const until = Date.now() + 2_000;
+						while (Date.now() < until);
+						print();
+						log.push("restore print returned");
+					});
 				</script>`,
 				{ headers },
 			);
@@ -796,7 +804,10 @@ return await tab.evaluate(() => {
 								.mainRealm()
 								.evaluate('document.querySelector("#popup-print").click(); globalThis.log'),
 						).toEqual(["receipt afterprint", "receipt print returned"]);
-						expect(hold.takeNotice()).toContain("The page called window.print()");
+						// The tab's printout would not be the window's: the notice says a window printed, without `tab.pdf()`.
+						const notice = hold.takeNotice();
+						expect(notice).toContain("A window the page opened called window.print()");
+						expect(notice).not.toContain("tab.pdf()");
 					} finally {
 						await hold.dispose();
 					}
@@ -834,8 +845,8 @@ return await tab.evaluate(() => {
 							// The window reports through the page that opened it, while it can reach that page.
 							expect(await popup.mainFrame().mainRealm().evaluate(print)).toEqual(held);
 							const notice = hold.takeNotice();
-							expect(notice).toContain("The page called window.print()");
-							expect(notice).toContain("tab.pdf()");
+							expect(notice).toContain("A window the page opened called window.print()");
+							expect(notice).not.toContain("tab.pdf()");
 							// The window's own hold does not depend on the page that opened it.
 							await page.goto(baseUrl.replace("127.0.0.1", "localhost"));
 							expect(await popup.mainFrame().mainRealm().evaluate(print)).toEqual(held);
@@ -1101,6 +1112,59 @@ return await tab.evaluate(() => {
 					expect(await page.mainFrame().mainRealm().evaluate("globalThis.log")).toEqual([
 						"afterprint",
 						"load print returned",
+					]);
+				} finally {
+					await hold.dispose();
+				}
+			} finally {
+				await user.disconnect();
+			}
+		});
+	}, 30_000);
+
+	test("holds print() an init script makes after outlasting the release tail during a call", async () => {
+		await withUserBrowser(async cdpUrl => {
+			const user = await puppeteer.connect({ browserURL: cdpUrl, defaultViewport: null });
+			try {
+				const page = await user.newPage();
+				const hold = await PrintHold.install(page, "calls");
+				try {
+					// Runs after the hold's first script and before the one carrying the call's deadline, busy past 1.5 s.
+					await page.evaluateOnNewDocument(
+						'{ let printed = false; addEventListener("afterprint", () => { printed = true; }, { once: true }); const until = Date.now() + 2_000; while (Date.now() < until); print(); globalThis.initPrintHeld = printed; }',
+					);
+					await hold.beginCall(30_000);
+					await page.goto(`${baseUrl}/print`);
+					expect(await page.mainFrame().mainRealm().evaluate("globalThis.initPrintHeld")).toBe(true);
+				} finally {
+					await hold.dispose();
+				}
+			} finally {
+				await user.disconnect();
+			}
+		});
+	}, 30_000);
+
+	test("keeps the call's hold through a restored page's own pageshow handler", async () => {
+		await withUserBrowser(async cdpUrl => {
+			const user = await puppeteer.connect({ browserURL: cdpUrl, defaultViewport: null });
+			try {
+				const page = await user.newPage();
+				const hold = await PrintHold.install(page, "calls");
+				try {
+					await hold.beginCall(30_000);
+					// Loaded under the hold, so its restore listener runs ahead of the page's own.
+					await page.goto(`${baseUrl}/print?slow-restore`);
+					await page.goto(`${baseUrl}/one`);
+					await page.goBack();
+					await page
+						.mainFrame()
+						.mainRealm()
+						.waitForFunction('log.includes("restore print returned")', { timeout: 0, polling: 50 });
+					expect(await page.mainFrame().mainRealm().evaluate("globalThis.log")).toEqual([
+						"restored",
+						"afterprint",
+						"restore print returned",
 					]);
 				} finally {
 					await hold.dispose();
