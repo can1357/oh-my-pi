@@ -54,6 +54,10 @@
 
 - A read summary that names URLs (for example `Read 2 files` over two links) links each of them, so the terminal can open them instead of leaving them as dead text ([#17929](https://github.com/can1357/oh-my-pi/pull/17929) by [@iacore](https://github.com/iacore))
 
+### Fixed
+
+- Fixed `ast_grep` and `ast_edit` ignoring R files with the uppercase `.R` extension unless `lang` was given ([#17958](https://github.com/can1357/oh-my-pi/pull/17958) by [@e-kotov](https://github.com/e-kotov))
+
 ## [18.16.0] - 2026-11-02
 
 ### Added
