@@ -6758,6 +6758,144 @@ mod tests {
 				"cd: aa: Not a directory\nS=1\n".into(),
 				false,
 			),
+			(
+				"a removed directory through a symbolic link, cd -P",
+				"mkdir -p real/parent/gone; ln -s real/parent via; cd via/gone; rmdir \
+				 \"$top/real/parent/gone\"; cd -P ../..; echo \"S=$? PWD=<${PWD#$top}>\""
+					.into(),
+				"S=0 PWD=</real>\n".into(),
+				false,
+			),
+			(
+				"a removed directory through a symbolic link, cd -L",
+				"mkdir -p real/parent/gone; ln -s real/parent via; cd via/gone; rmdir \
+				 \"$top/real/parent/gone\"; cd -L ../..; echo \"S=$? PWD=<${PWD#$top}>\""
+					.into(),
+				"S=0 PWD=</real>\n".into(),
+				false,
+			),
+			(
+				"a removed directory through a symbolic link, one up",
+				"mkdir -p real/parent/gone; ln -s real/parent via; cd via/gone; rmdir \
+				 \"$top/real/parent/gone\"; cd ..; echo \"S=$? PWD=<${PWD#$top}>\""
+					.into(),
+				"S=0 PWD=</real/parent>\n".into(),
+				false,
+			),
+			(
+				"a removed directory, a name after ..",
+				"mkdir gone; cd gone; rmdir \"$top/gone\"; cd -P ../d; echo \"S=$? PWD=<${PWD#$top}>\""
+					.into(),
+				"S=0 PWD=</d>\n".into(),
+				false,
+			),
+			(
+				"a removed directory, a name after .. logically",
+				"mkdir gone; cd gone; rmdir \"$top/gone\"; cd ../d; echo \"S=$? PWD=<${PWD#$top}>\""
+					.into(),
+				"S=0 PWD=</d>\n".into(),
+				false,
+			),
+			(
+				"a removed directory, a missing name after ..",
+				"mkdir gone; cd gone; rmdir \"$top/gone\"; cd ../nosuch; echo \"S=$? \
+				 PWD=<${PWD#$top}>\""
+					.into(),
+				"cd: ../nosuch: No such file or directory\nS=1 PWD=</gone>\n".into(),
+				false,
+			),
+			(
+				"a removed directory, a name after two ..",
+				"mkdir -p gone/in; cd gone/in; rm -r \"$top/gone\"; cd ../../d; echo \"S=$? \
+				 PWD=<${PWD#$top}>\""
+					.into(),
+				"S=0 PWD=</d>\n".into(),
+				false,
+			),
+			(
+				"a removed directory, a name after ./..",
+				"mkdir gone; cd gone; rmdir \"$top/gone\"; cd ./../d; echo \"S=$? PWD=<${PWD#$top}>\""
+					.into(),
+				"S=0 PWD=</d>\n".into(),
+				false,
+			),
+			(
+				"a removed tree, cd .. logically",
+				"mkdir -p gone/in; cd gone/in; rm -r \"$top/gone\"; cd -L ..; echo \"S=$? \
+				 PWD=<${PWD#$top}>\""
+					.into(),
+				"cd: error retrieving current directory: getcwd: cannot access parent directories: No \
+				 such file or directory\nS=0 PWD=</gone/in/..>\n"
+					.into(),
+				false,
+			),
+			(
+				"a removed tree, cd .. physically",
+				"mkdir -p gone/in; cd gone/in; rm -r \"$top/gone\"; cd -P ..; echo \"S=$? \
+				 PWD=<${PWD#$top}>\""
+					.into(),
+				"cd: error retrieving current directory: getcwd: cannot access parent directories: No \
+				 such file or directory\nS=0 PWD=</gone/in/..>\n"
+					.into(),
+				false,
+			),
+			(
+				"a removed tree, cd ../.. to a directory that is there",
+				"mkdir -p gone/in; cd gone/in; rm -r \"$top/gone\"; cd ../..; echo \"S=$? \
+				 PWD=<${PWD#$top}>\""
+					.into(),
+				"S=0 PWD=<>\n".into(),
+				false,
+			),
+			(
+				"a removed directory, a name of its own",
+				"mkdir gone; cd gone; rmdir \"$top/gone\"; cd d; echo \"S=$? PWD=<${PWD#$top}>\""
+					.into(),
+				"cd: d: No such file or directory\nS=1 PWD=</gone>\n".into(),
+				false,
+			),
+			(
+				"a removed directory, ./ before a name of its own",
+				"mkdir gone; cd gone; rmdir \"$top/gone\"; cd ./d; echo \"S=$? PWD=<${PWD#$top}>\""
+					.into(),
+				"cd: ./d: No such file or directory\nS=1 PWD=</gone>\n".into(),
+				false,
+			),
+			(
+				"OLDPWD is what PWD held",
+				"PWD=custom; cd d; echo \"S=$? OLDPWD=<$OLDPWD>\"".into(),
+				"S=0 OLDPWD=<custom>\n".into(),
+				false,
+			),
+			(
+				"OLDPWD with PWD unset",
+				"unset PWD; cd d; echo \"S=$? OLDPWD=<$OLDPWD>\"".into(),
+				"S=0 OLDPWD=<>\n".into(),
+				false,
+			),
+			(
+				"OLDPWD from a removed directory",
+				"mkdir gone; cd gone; rmdir \"$top/gone\"; PWD=custom; cd .; echo \"S=$? \
+				 OLDPWD=<$OLDPWD>\""
+					.into(),
+				"cd: error retrieving current directory: getcwd: cannot access parent directories: No \
+				 such file or directory\nS=0 OLDPWD=<custom>\n"
+					.into(),
+				false,
+			),
+			(
+				"OLDPWD after pushd",
+				"PWD=custom; pushd d >/dev/null; echo \"S=$? OLDPWD=<$OLDPWD>\"".into(),
+				"S=0 OLDPWD=<custom>\n".into(),
+				false,
+			),
+			(
+				"cd - after PWD was written",
+				"PWD=custom; cd d >/dev/null; cd - >/dev/null 2>&1; echo \"S=$? PWD=<${PWD#$top}>\""
+					.into(),
+				"S=1 PWD=</d>\n".into(),
+				false,
+			),
 		];
 		// SAFETY: `geteuid` has no preconditions.
 		let root = unsafe { libc::geteuid() } == 0;
