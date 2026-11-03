@@ -6740,6 +6740,12 @@ mod tests {
 				"ref=new\n",
 			),
 			(
+				"a name that holds another, assigned twice",
+				"printf KEEP >first; dest=old; declare -n ref=dest; ref=first ref=second /bin/sh -c \
+				 'printf NEW >\"$dest\"'; echo \"first=<$(cat first)> second=<$(cat second)>\"",
+				"first=<KEEP> second=<NEW>\n",
+			),
+			(
 				"a ring of names that hold each other",
 				"declare -n ref=second; declare -n second=third; declare -n third=ref; ref=new \
 				 /bin/sh -c 'printf \"ref=<%s> second=<%s> third=<%s>\\n\" \"$ref\" \"$second\" \
