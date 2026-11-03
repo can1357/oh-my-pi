@@ -5,6 +5,8 @@ import type { CustomTool, CustomToolContext } from "../../src/extensibility/cust
 import { bindPreparedExtensions } from "../../src/extensibility/extensions/loader";
 import type { PreparedExtension } from "../../src/extensibility/extensions/types";
 import { type LocalProtocolOptions, resolveLocalRoot } from "../../src/internal-urls/local-protocol";
+import { hasExactMcpResource } from "../../src/internal-urls/mcp-protocol";
+import { parseInternalUrl } from "../../src/internal-urls/parse";
 import { MCPManager } from "../../src/mcp/manager";
 import { SessionManager } from "../../src/session/session-manager";
 import { createMCPProxyTools, type ExecutorOptions } from "../../src/task/executor";
@@ -30,6 +32,8 @@ export interface IntegrationsProbe {
 	mcpGlobal(): Promise<{ available: boolean; remote: boolean; servers: string[]; tools: string[] }>;
 	/** Each scope's MCP tool names as this worker reads them, in order, through one `RemoteMCPManager`. */
 	mcpViews(scopes: string[]): Promise<string[][]>;
+	/** Classify an exact resource through the worker manager, including unsettled discovery errors. */
+	exactMcpResource(uri: string): Promise<boolean>;
 	/** Call an MCP tool through `createMCPProxyTools(MCPManager.instance())`, as a child session would. */
 	mcpCall(
 		registry: ModelRegistry,
@@ -126,6 +130,11 @@ function buildProbe(): IntegrationsProbe {
 			const manager = MCPManager.instance();
 			if (!manager) throw new Error("no MCP manager in worker");
 			return scopes.map(scope => manager.getTools(scope).map(tool => tool.mcpToolName ?? ""));
+		},
+		exactMcpResource: async uri => {
+			const manager = MCPManager.instance();
+			if (!manager) throw new Error("no MCP manager in worker");
+			return hasExactMcpResource(manager, parseInternalUrl(uri));
 		},
 		mcpCall: async (registry, toolName, args, signal) => {
 			const manager = MCPManager.instance();

@@ -278,8 +278,8 @@ export interface MCPManagerApi {
 	addToolsChangedListener(listener: () => void): () => void;
 	/** Subscribe to every server notification frame; returns an unsubscribe fn. */
 	addNotificationListener(listener: (serverName: string, method: string, params: unknown) => void): () => void;
-	/** Known server inventory, when the manager exposes pending and failed handshakes. */
-	getAllServerNames?(): string[];
+	/** Known server inventory, including pending and failed handshakes. */
+	getAllServerNames(): string[];
 	/** Names of currently connected servers. */
 	getConnectedServers(): string[];
 	/** Cached resources/templates of one server. */
