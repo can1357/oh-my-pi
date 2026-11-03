@@ -6664,7 +6664,6 @@ dependencies = [
  "pi-vfs",
  "pi-voice",
  "pi-walker",
- "pipewire",
  "png",
  "portable-pty",
  "ptts",
