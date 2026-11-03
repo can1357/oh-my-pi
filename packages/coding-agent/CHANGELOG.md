@@ -28,7 +28,6 @@
 
 ### Fixed
 - Fixed a second `ask` note on a later single-select question reopening and replacing the previous question's note ([#17979](https://github.com/can1357/oh-my-pi/issues/17979))
-- Fixed saved sessions losing or replaying stale content when a message carries an accessor-shaped image block, a signature or reasoning item the session cannot read, an array payload, a compaction archive, or a serializer hook, and when an entry's own metadata or payload is changed in place, or a value that changes on every read is stored a revision ahead of the write ([#15222](https://github.com/can1357/oh-my-pi/pull/15222) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 - Retrying an aborted turn keeps the unsent composer draft instead of clearing it ([#17977](https://github.com/can1357/oh-my-pi/pull/17977) by [@Shadorain](https://github.com/Shadorain))
 - Fixed the `tts` tool never producing Grok Voice audio: xAI rejected every request for a missing `language`, so it silently fell back to local Kokoro. The tool's `language` is now sent to xAI, which auto-detects when it is omitted ([#17992](https://github.com/can1357/oh-my-pi/pull/17992) by [@Mirceone](https://github.com/Mirceone))
