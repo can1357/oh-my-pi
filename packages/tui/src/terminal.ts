@@ -1746,8 +1746,13 @@ export class ProcessTerminal implements Terminal {
 					if (match) {
 						let states: string[] | undefined;
 						for (const pair of match[1]!.split(":")) {
-							const [key, value] = pair.trim().split("=", 2);
-							if (key === "states") states = value?.split(",").map(state => state.trim()) ?? [];
+							// The spec allows whitespace around both keys and values.
+							const eq = pair.indexOf("=");
+							if (eq === -1 || pair.slice(0, eq).trim() !== "states") continue;
+							states = pair
+								.slice(eq + 1)
+								.split(",")
+								.map(state => state.trim());
 						}
 						this.#resolveProgramStatusSupport(
 							states === undefined || (states.includes("working") && states.includes("blocked")),

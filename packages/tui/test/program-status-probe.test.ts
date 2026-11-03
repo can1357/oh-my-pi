@@ -135,10 +135,15 @@ describe("OSC 7501 program-status negotiation", () => {
 		}
 	});
 
-	it("rejects a receiver without both working and blocked states", () => {
+	// The spec strips whitespace around keys and values, so the spaced form
+	// must declare the same partial state list as the compact one.
+	it.each([
+		["compact", "\x1b]7501;?:states=idle,working,done\x07"],
+		["spaced", "\x1b]7501;?: states = idle , working , done \x07"],
+	])("rejects a %s reply without both working and blocked states", (_form, reply) => {
 		const { terminal, results } = startTerminal();
 		try {
-			process.stdin.emit("data", "\x1b]7501;?:states=idle,working,done\x07");
+			process.stdin.emit("data", reply);
 			expect(results).toEqual([false]);
 		} finally {
 			terminal.stop();
