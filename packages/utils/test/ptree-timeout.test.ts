@@ -587,4 +587,48 @@ describe.skipIf(process.platform !== "linux")("ptree subreaper stop", () => {
 			await fs.rm(dir, { recursive: true, force: true });
 		}
 	}, 30_000);
+
+	for (const [name, escalate] of [
+		["the command exits on SIGTERM", false],
+		["a hard kill ends the grace period", true],
+	] as const) {
+		it(`lets the caller's process exit once the stop is over when ${name}`, async () => {
+			// The stop runs in a fresh Bun process with a 10 s grace period. Once
+			// wait() has settled, nothing of the stop may keep that process alive.
+			const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-utils-subreaper-stop-"));
+			const pidFile = path.join(dir, "pid");
+			const script = path.join(dir, "stop.ts");
+			await Bun.write(
+				script,
+				`import { AbortError, spawn } from ${JSON.stringify(path.join(import.meta.dir, "../src/ptree.ts"))};
+const child = spawn(["/bin/sh", "-c", ${JSON.stringify(`trap 'exit 0' TERM; echo $$ > '${pidFile}'; sleep 3600 & wait`)}], { subreaper: true });
+const outcome = child.wait().catch(() => {});
+while (!(await Bun.file(${JSON.stringify(pidFile)}).text().catch(() => ""))) await Bun.sleep(10);
+child.kill(new AbortError(new Error("stop"), ""), 10_000);
+${escalate ? `await Bun.sleep(50); child.kill(new AbortError(new Error("stop"), ""), -1);` : ""}
+await outcome;
+console.log("settled");
+`,
+			);
+			try {
+				const caller = Bun.spawn([process.execPath, script], { stdout: "pipe", stderr: "inherit" });
+				const reader = caller.stdout.getReader();
+				let output = "";
+				while (!output.includes("settled")) {
+					const chunk = await reader.read();
+					if (chunk.done) break;
+					output += new TextDecoder().decode(chunk.value);
+				}
+				const settledAt = Date.now();
+				reader.releaseLock();
+
+				expect(output).toContain("settled");
+				const exitCode = await caller.exited;
+				expect(exitCode).toBe(0);
+				expect(Date.now() - settledAt).toBeLessThan(3_000);
+			} finally {
+				await fs.rm(dir, { recursive: true, force: true });
+			}
+		}, 60_000);
+	}
 });

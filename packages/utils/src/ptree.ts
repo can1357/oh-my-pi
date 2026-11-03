@@ -429,12 +429,20 @@ export class ChildProcess<In extends InMask = InMask> {
 	 * children and their trees (never the subreaper itself), then, after
 	 * `gracefulMs`, the subreaper's own exit, or `escalated`, the hard sweep.
 	 * The subreaper stays alive through the grace period, so a descendant
-	 * orphaned in it is still the subreaper's child when the sweep runs.
+	 * orphaned in it is still the subreaper's child when the sweep runs. The
+	 * grace timer is cleared as soon as the sequence moves on, so a finished
+	 * stop never keeps the caller's process alive.
 	 */
 	async #stopSubreaperTree(root: Process, gracefulMs: number, escalated: Promise<void>): Promise<void> {
 		if (gracefulMs > 0) {
 			for (const child of root.children()) child.killTree(15);
-			await Promise.race([this.proc.exited, Bun.sleep(gracefulMs), escalated]);
+			const { promise: graceOver, resolve: endGrace } = Promise.withResolvers<void>();
+			const graceTimer = setTimeout(endGrace, gracefulMs);
+			try {
+				await Promise.race([this.proc.exited, graceOver, escalated]);
+			} finally {
+				clearTimeout(graceTimer);
+			}
 		}
 		await this.#hardKillSubreaperTree(root);
 	}
