@@ -370,6 +370,7 @@ export class ModelRegistry {
 	#cacheDbPath?: string;
 	#suppressedSelectors: Map<string, number> = new Map();
 	#backgroundRefresh?: Promise<void>;
+	#catalogDiscoveries = new Set<Promise<void>>();
 	/** Whether the first background discovery has settled; latches once so a late-armed waiter still resolves. */
 	#initialRefreshSettled = false;
 	/** Waiter armed before the initial background refresh starts (CLI kicks it off after the session is built, #10048). */
@@ -651,7 +652,7 @@ export class ModelRegistry {
 				}
 				this.#markInitialRefreshSettled();
 			});
-		this.#backgroundRefresh = refreshPromise;
+		this.#backgroundRefresh = this.#trackCatalogDiscovery(refreshPromise);
 	}
 
 	/** Whether background discovery started by {@link refreshInBackground} is still running and may add models. */
@@ -660,25 +661,22 @@ export class ModelRegistry {
 	}
 
 	/**
-	 * Wait for any in-flight background model discovery to settle.
-	 *
-	 * Background discovery started by {@link refreshInBackground} is
-	 * fire-and-forget; RPC consumers (e.g. `get_available_models`,
-	 * `set_model`) and deferred `--model` resolution that read the registry
-	 * immediately after session creation can otherwise observe a partial
-	 * catalog before discovery-backed providers have populated `#models`.
-	 * Awaiting the tracked promise ensures the response reflects every
-	 * configured provider once the initial background refresh resolves.
-	 *
-	 * No-op when no refresh is in flight (`#backgroundRefresh` cleared in the
-	 * `finally` of `refreshInBackground` on completion). Resolves immediately
-	 * in that case so already-warm sessions are unaffected. Discovery errors
-	 * remain swallowed by `refreshInBackground`'s existing `.catch`.
+	 * Wait for a snapshot of catalog discovery already in flight, including
+	 * scheduled background refreshes, runtime providers and offline hydration.
+	 * Discovery started later does not extend this wait. Errors remain the
+	 * producer's responsibility; waiting for the catalog never rejects.
 	 */
 	async awaitBackgroundRefresh(): Promise<void> {
-		if (this.#backgroundRefresh) {
-			await this.#backgroundRefresh;
+		if (this.#catalogDiscoveries.size > 0) {
+			await Promise.allSettled([...this.#catalogDiscoveries]);
 		}
+	}
+
+	#trackCatalogDiscovery(discovery: Promise<void>): Promise<void> {
+		this.#catalogDiscoveries.add(discovery);
+		const settled = () => this.#catalogDiscoveries.delete(discovery);
+		void discovery.then(settled, settled);
+		return discovery;
 	}
 
 	/**
@@ -1900,13 +1898,18 @@ export class ModelRegistry {
 		};
 	}
 
-	async #refreshRuntimeDiscoveries(
-		strategy: ModelRefreshStrategy,
-		providerFilter?: ReadonlySet<string>,
-	): Promise<void> {
+	#refreshRuntimeDiscoveries(strategy: ModelRefreshStrategy, providerFilter?: ReadonlySet<string>): Promise<void> {
+		return this.#trackCatalogDiscovery(this.#runRuntimeDiscoveries(strategy, providerFilter));
+	}
+
+	async #runRuntimeDiscoveries(strategy: ModelRefreshStrategy, providerFilter?: ReadonlySet<string>): Promise<void> {
 		// One cache connection for the whole pass: every provider manager reads
 		// (and may write) its row, which would otherwise reopen the database each time.
 		using _cacheConnection = retainModelCacheConnection(this.#cacheDbPath);
+		const runtimeSources = new Map(
+			[...this.#runtimeModelManagers].map(([provider, manager]) => [provider, manager.sourceId] as const),
+		);
+		const discoveryStates = new Map<string, ProviderDiscoveryState>();
 		const disabledProviders = getDisabledProviderIdsFromSettings(this.#settings);
 		const selectedDiscoverableProviders = (
 			providerFilter
@@ -1924,9 +1927,34 @@ export class ModelRegistry {
 					);
 		const [configuredDiscoveryResults, builtInDiscovery] = await Promise.all([
 			configuredDiscoveriesPromise,
-			this.#discoverBuiltInProviderModels(strategy, providerFilter),
+			this.#discoverBuiltInProviderModels(strategy, discoveryStates, providerFilter),
 		]);
-		this.#captureCatalogMetrics(builtInDiscovery.models, providerFilter === undefined);
+		// A provider can be removed, or handed to another source, while discovery is
+		// awaiting I/O; its old manager must not publish rows under the new owner. A
+		// provider re-registered by the same source keeps these (fresher) results.
+		const staleProviders = new Set(
+			[...runtimeSources]
+				.filter(([provider, sourceId]) => this.#runtimeModelManagers.get(provider)?.sourceId !== sourceId)
+				.map(([provider]) => provider),
+		);
+		if (staleProviders.size > 0) {
+			builtInDiscovery.models = builtInDiscovery.models.filter(model => !staleProviders.has(model.provider));
+		}
+		for (const provider of staleProviders) {
+			builtInDiscovery.authoritativeProviders.delete(provider);
+			builtInDiscovery.replaceRuntimeProviders.delete(provider);
+			discoveryStates.delete(provider);
+		}
+		for (const [provider, state] of discoveryStates) this.#providerDiscoveryStates.set(provider, state);
+		this.#applyRuntimeDiscoveries(builtInDiscovery, configuredDiscoveryResults, providerFilter === undefined);
+	}
+
+	#applyRuntimeDiscoveries(
+		builtInDiscovery: BuiltInDiscoveryResult,
+		configuredDiscoveryResults: Array<ConfiguredModelDiscoveryResult & { provider: DiscoveryProviderConfig }> = [],
+		fullCatalog = false,
+	): void {
+		this.#captureCatalogMetrics(builtInDiscovery.models, fullCatalog);
 		const currentDiscoverableProviders = new Set(this.#discoverableProviders);
 		const currentConfiguredDiscoveryResults = configuredDiscoveryResults.filter(result =>
 			currentDiscoverableProviders.has(result.provider),
@@ -2266,6 +2294,7 @@ export class ModelRegistry {
 
 	async #discoverBuiltInProviderModels(
 		strategy: ModelRefreshStrategy,
+		discoveryStates: Map<string, ProviderDiscoveryState>,
 		providerFilter?: ReadonlySet<string>,
 	): Promise<BuiltInDiscoveryResult> {
 		// Skip providers already handled by configured discovery (e.g. user-configured ollama with discovery.type)
@@ -2280,7 +2309,7 @@ export class ModelRegistry {
 		}
 		const writesBefore = getModelCacheWriteStats();
 		const discoveries = await Promise.all(
-			managerOptions.map(options => this.#discoverWithModelManager(options, strategy)),
+			managerOptions.map(options => this.#discoverWithModelManager(options, strategy, discoveryStates)),
 		);
 		const writesAfter = getModelCacheWriteStats();
 		const rewrittenRows = writesAfter.payloadWrites - writesBefore.payloadWrites;
@@ -2581,6 +2610,7 @@ export class ModelRegistry {
 	async #discoverWithModelManager(
 		options: ModelManagerOptions<Api>,
 		strategy: ModelRefreshStrategy,
+		discoveryStates: Map<string, ProviderDiscoveryState>,
 	): Promise<BuiltInDiscoveryResult> {
 		try {
 			const manager = createModelManager({ ...options, cacheDbPath: this.#cacheDbPath });
@@ -2600,7 +2630,7 @@ export class ModelRegistry {
 							: result.models.length > 0
 								? "ok"
 								: "empty";
-			this.#providerDiscoveryStates.set(options.providerId, {
+			discoveryStates.set(options.providerId, {
 				provider: options.providerId,
 				status,
 				optional: false,
@@ -2620,12 +2650,13 @@ export class ModelRegistry {
 			return { models, authoritativeProviders, replaceRuntimeProviders };
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
-			const previous = this.#providerDiscoveryStates.get(options.providerId);
+			const previous =
+				discoveryStates.get(options.providerId) ?? this.#providerDiscoveryStates.get(options.providerId);
 			// Same auth-rejection surfacing as the configured-discovery path: a
 			// 401/403 with nothing to serve is a credential problem, not an
 			// outage (issue #12281).
 			const authRejected = (previous?.models.length ?? 0) === 0 && isDiscoveryAuthRejection(error);
-			this.#providerDiscoveryStates.set(options.providerId, {
+			discoveryStates.set(options.providerId, {
 				provider: options.providerId,
 				status: authRejected ? "unauthenticated" : "unavailable",
 				optional: previous?.optional ?? false,
@@ -3562,6 +3593,63 @@ export class ModelRegistry {
 	}
 
 	/**
+	 * Rebind extension sources without exposing an empty dynamic catalog while
+	 * their cached replacement rows are loading. Sources/providers omitted from
+	 * the replacement are still removed.
+	 */
+	replaceSourceRegistrations(
+		activeSourceIds: string[],
+		registrations: readonly ProviderRegistration[],
+	): Promise<void> {
+		return this.#trackCatalogDiscovery(this.#replaceSourceRegistrations([...activeSourceIds], [...registrations]));
+	}
+
+	async #replaceSourceRegistrations(
+		activeSourceIds: string[],
+		registrations: readonly ProviderRegistration[],
+	): Promise<void> {
+		const managers = new Map<string, { options: ModelManagerOptions<Api>; sourceId: string }>();
+		for (const { name, config, sourceId } of registrations) {
+			this.#validateProviderRegistration(name, config);
+			if (managers.get(name)?.sourceId !== sourceId) managers.delete(name);
+			const options = this.#createRuntimeModelManagerOptions(name, config);
+			if (options) managers.set(name, { options, sourceId });
+		}
+		// Configured discovery takes precedence over extension managers, as in a
+		// normal runtime refresh. Its cache is restored by the static reload.
+		const configuredProviders = new Set(this.#discoverableProviders.map(provider => provider.provider));
+		const stagedProviders = new Set([...managers.keys()].filter(provider => !configuredProviders.has(provider)));
+		const discoveryStates = new Map<string, ProviderDiscoveryState>();
+		const discoveries = await Promise.all(
+			[...stagedProviders].map(provider =>
+				this.#discoverWithModelManager(managers.get(provider)!.options, "offline", discoveryStates),
+			),
+		);
+
+		// No await between clearing registrations and publishing the prepared
+		// rows: concurrent readers see either the old catalog or its replacement.
+		this.syncExtensionSources(activeSourceIds);
+		this.clearSourceRegistrations(new Set(activeSourceIds));
+		for (const { name, config, sourceId } of registrations) {
+			this.registerProvider(name, config, sourceId);
+		}
+		for (const [provider, state] of discoveryStates) this.#providerDiscoveryStates.set(provider, state);
+		this.#applyRuntimeDiscoveries({
+			models: discoveries.flatMap(discovery => discovery.models),
+			authoritativeProviders: new Set(discoveries.flatMap(discovery => [...discovery.authoritativeProviders])),
+			replaceRuntimeProviders: new Set(discoveries.flatMap(discovery => [...discovery.replaceRuntimeProviders])),
+		});
+		// Preserve hydration for configured, unsourced and special built-in
+		// managers, without reading the staged extension caches a second time.
+		const remainingProviders = new Set(
+			[...this.#runtimeModelManagers.keys()].filter(
+				provider => !stagedProviders.has(provider) || SPECIAL_MODEL_MANAGER_PROVIDER_IDS.includes(provider),
+			),
+		);
+		if (remainingProviders.size > 0) await this.#refreshRuntimeDiscoveries("offline", remainingProviders);
+	}
+
+	/**
 	 * Register a provider dynamically (from extensions).
 	 *
 	 * If provider has models: replaces all existing models for this provider.
@@ -3570,22 +3658,7 @@ export class ModelRegistry {
 	 * If provider has oauth: registers OAuth provider for /login support.
 	 */
 	registerProvider(providerName: string, config: ProviderConfigInput, sourceId?: string): void {
-		if (config.streamSimple && !config.api) {
-			throw new Error(`Provider ${providerName}: "api" is required when registering streamSimple.`);
-		}
-
-		validateProviderConfiguration(
-			providerName,
-			{
-				baseUrl: config.baseUrl,
-				headers: config.headers,
-				apiKey: config.apiKey,
-				api: config.api,
-				oauthConfigured: Boolean(config.oauth),
-				models: (config.models ?? []) as ProviderValidationModel[],
-			},
-			"runtime-register",
-		);
+		this.#validateProviderRegistration(providerName, config);
 
 		if (config.streamSimple && config.api) {
 			const streamSimple = config.streamSimple;
@@ -3715,62 +3788,10 @@ export class ModelRegistry {
 			if (!config.fetchDynamicModels) return;
 		}
 
-		if (config.fetchDynamicModels) {
-			const fetcher = config.fetchDynamicModels;
-			const providerBaseUrl = config.baseUrl ?? "";
-			const providerApi = config.api;
-			const providerHeaders = config.headers;
-			const providerApiKey = config.apiKey;
-			const providerAuthHeader = config.authHeader;
-			const providerCompat = config.compat;
-			const managerOptions: ModelManagerOptions<Api> = {
-				providerId: providerName as Parameters<typeof createModelManager>[0]["providerId"],
-				staticModels: [],
-				cacheDbPath: this.#cacheDbPath,
-				cacheTtlMs: 24 * 60 * 60 * 1000,
-				dynamicModelsAuthoritative: true,
-				fetchDynamicModels: async () => {
-					const apiKey = await this.#peekApiKeyForProvider(providerName);
-					const resolvedKey = isAuthenticated(apiKey) ? apiKey : undefined;
-					const modelDefs = await withModelDiscoveryTimeout(RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS, () =>
-						fetcher(resolvedKey),
-					);
-					// Dynamic rows can carry `!command` headers that are not on the
-					// registerProvider() config; track them so F5 / 401 can evict the cache.
-					this.#recordRuntimeModelHeaderCommands(providerName, modelDefs);
-					const results: Model<Api>[] = [];
-					for (const modelDef of modelDefs) {
-						const overlay = buildCustomModelOverlay(
-							providerName,
-							modelDef.baseUrl ?? providerBaseUrl,
-							modelDef.api ?? providerApi,
-							providerHeaders,
-							providerApiKey,
-							providerAuthHeader,
-							providerCompat,
-							undefined,
-							config.remoteCompaction,
-							modelDef as CustomModelDefinitionLike,
-						);
-						if (!overlay) continue;
-						// Static registrations fail validation on this mismatch; a live row is dropped instead.
-						if (overlay.kind !== undefined && !apiServesKind(overlay.api, overlay.kind)) {
-							logger.warn("fetchDynamicModels row dropped: its api does not serve its kind", {
-								provider: providerName,
-								model: overlay.id,
-								kind: overlay.kind,
-								api: overlay.api,
-							});
-							continue;
-						}
-						results.push(finalizeCustomModel(overlay, { useDefaults: true }));
-					}
-					return results.map(toModelSpec);
-				},
-			};
+		const managerOptions = this.#createRuntimeModelManagerOptions(providerName, config);
+		if (managerOptions) {
 			this.#runtimeModelManagers.set(providerName, { options: managerOptions, sourceId: sourceId ?? "" });
-			// Discovery is driven by refreshRuntimeProviders() after the drain — not
-			// here, so registration has no network side effect and callers can await.
+			// Registration has no network side effect; callers drive discovery.
 		}
 
 		if (
@@ -3805,6 +3826,82 @@ export class ModelRegistry {
 			}
 			this.#invalidateProviderModelCache(providerName);
 		}
+	}
+
+	#validateProviderRegistration(providerName: string, config: ProviderConfigInput): void {
+		if (config.streamSimple && !config.api) {
+			throw new Error(`Provider ${providerName}: "api" is required when registering streamSimple.`);
+		}
+		validateProviderConfiguration(
+			providerName,
+			{
+				baseUrl: config.baseUrl,
+				headers: config.headers,
+				apiKey: config.apiKey,
+				api: config.api,
+				oauthConfigured: Boolean(config.oauth),
+				models: (config.models ?? []) as ProviderValidationModel[],
+			},
+			"runtime-register",
+		);
+	}
+
+	#createRuntimeModelManagerOptions(
+		providerName: string,
+		config: ProviderConfigInput,
+	): ModelManagerOptions<Api> | undefined {
+		const fetcher = config.fetchDynamicModels;
+		if (!fetcher) return undefined;
+		const providerBaseUrl = config.baseUrl ?? "";
+		const providerApi = config.api;
+		const providerHeaders = config.headers;
+		const providerApiKey = config.apiKey;
+		const providerAuthHeader = config.authHeader;
+		const providerCompat = config.compat;
+		return {
+			providerId: providerName as Parameters<typeof createModelManager>[0]["providerId"],
+			staticModels: [],
+			cacheDbPath: this.#cacheDbPath,
+			cacheTtlMs: 24 * 60 * 60 * 1000,
+			dynamicModelsAuthoritative: true,
+			fetchDynamicModels: async () => {
+				const apiKey = await this.#peekApiKeyForProvider(providerName);
+				const resolvedKey = isAuthenticated(apiKey) ? apiKey : undefined;
+				const modelDefs = await withModelDiscoveryTimeout(RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS, () =>
+					fetcher(resolvedKey),
+				);
+				// Dynamic rows can carry !command headers absent from the provider config.
+				this.#recordRuntimeModelHeaderCommands(providerName, modelDefs);
+				const results: Model<Api>[] = [];
+				for (const modelDef of modelDefs) {
+					const overlay = buildCustomModelOverlay(
+						providerName,
+						modelDef.baseUrl ?? providerBaseUrl,
+						modelDef.api ?? providerApi,
+						providerHeaders,
+						providerApiKey,
+						providerAuthHeader,
+						providerCompat,
+						undefined,
+						config.remoteCompaction,
+						modelDef as CustomModelDefinitionLike,
+					);
+					if (!overlay) continue;
+					// Static registrations fail validation on this mismatch; a live row is dropped instead.
+					if (overlay.kind !== undefined && !apiServesKind(overlay.api, overlay.kind)) {
+						logger.warn("fetchDynamicModels row dropped: its api does not serve its kind", {
+							provider: providerName,
+							model: overlay.id,
+							kind: overlay.kind,
+							api: overlay.api,
+						});
+						continue;
+					}
+					results.push(finalizeCustomModel(overlay, { useDefaults: true }));
+				}
+				return results.map(toModelSpec);
+			},
+		};
 	}
 
 	/**
@@ -3907,4 +4004,11 @@ export interface ProviderConfigInput {
 		remoteCompaction?: RemoteCompactionConfig<Api>;
 		premiumMultiplier?: number;
 	}>;
+}
+
+/** A provider registration owned by one loaded extension source. */
+export interface ProviderRegistration {
+	name: string;
+	config: ProviderConfigInput;
+	sourceId: string;
 }
