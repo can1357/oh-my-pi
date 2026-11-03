@@ -604,6 +604,83 @@ describe("what the last check covers", () => {
 		holds.let();
 	});
 
+	for (const wrap of ["bound", "wrapped"] as const) {
+		it(`ends an exemption before an awaiter resumes, for a native promise with a ${wrap} \`then\``, async () => {
+			const holds = new TestHolds();
+			const done = Promise.withResolvers<void>();
+			const result = done.promise;
+			const own = Promise.prototype.then;
+			// `await` ignores a native promise's `then` property when its constructor is `Promise`.
+			// oxlint-disable-next-line unicorn/no-thenable
+			Object.defineProperty(result, "then", {
+				value:
+					wrap === "bound"
+						? own.bind(result)
+						: function (this: Promise<void>, ...args: Parameters<Promise<void>["then"]>) {
+								return own.apply(this, args);
+							},
+			});
+			let after: Promise<SentRequest> | undefined;
+			runWithRequestHolds(holds, () =>
+				runOutsideRequestHolds(holds, () => {
+					// An awaiter the exempt step itself leaves behind, registered after the step returned.
+					queueMicrotask(() => {
+						after = (async () => {
+							await result;
+							// Work after the exempt step settled is held again.
+							return request();
+						})();
+					});
+					return result;
+				}),
+			);
+			await turns(1);
+			done.resolve();
+			const sent = await after;
+			await turns();
+			expect(sent?.sent).toBe(false);
+			holds.let();
+			await sent?.result;
+			expect(sent?.sent).toBe(true);
+		});
+	}
+
+	it("keeps no hold promise alive that no wait is on any more", async () => {
+		const holds = new TestHolds();
+		const alias = new RequestHoldsAlias();
+		let produced = 0;
+		const live = new Set<WeakRef<Promise<void>>>();
+		// Each check gets a fresh pending promise the hold itself drops.
+		const fresh: RequestHolds = {
+			open: () => ({
+				check: () => {
+					produced++;
+					const promise = new Promise<void>(() => {});
+					live.add(new WeakRef(promise));
+					return promise;
+				},
+				release: () => {},
+			}),
+		};
+		alias.bind(runWithRequestHolds(fresh, captureRequestHolds));
+		const views = runWithRequestHolds(alias, () => openRequestHolds());
+		for (let i = 0; i < 2000; i++) {
+			const wait = views.check();
+			alias.bind(runWithRequestHolds(fresh, captureRequestHolds));
+			await wait;
+		}
+		for (let i = 0; i < 4; i++) {
+			Bun.gc(true);
+			await turns(1);
+		}
+		const alive = [...live].filter(ref => ref.deref() !== undefined).length;
+		views.release();
+		expect(produced).toBeGreaterThanOrEqual(2000);
+		// The current wait's promise may stay; the superseded ones must not.
+		expect(alive).toBeLessThan(50);
+		holds.let();
+	});
+
 	it("leaves nothing on a carried request's lifetime for waits that are over", async () => {
 		const holds = new TestHolds();
 		const collect = async (): Promise<number> => {
