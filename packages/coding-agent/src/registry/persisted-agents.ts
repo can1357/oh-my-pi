@@ -6,7 +6,7 @@ import { ADVISOR_TRANSCRIPT_FILENAME, isAdvisorTranscriptName } from "../advisor
 import { resolveExplicitModelRole } from "../config/model-resolver";
 import { assistantTurnProducedOutput } from "../session/messages";
 import { EPHEMERAL_MODEL_CHANGE_ROLE, PREWALK_MODEL_CHANGE_ROLE } from "../session/session-entries";
-import { visitEntriesFromFileStream } from "../session/session-loader";
+import { readSessionHeaderId, visitEntriesFromFileStream } from "../session/session-loader";
 import { loadBundledAgents } from "../task/agents";
 import { isReadOnlyAgent } from "../task/read-only-policy";
 import { persistedVibeChildIds } from "../vibe/lifecycle";
@@ -676,6 +676,8 @@ export async function registerPersistedSubagents(
 		 * against, bounded by this root's own transcript tree.
 		 */
 		owned?: Map<string, string>;
+		/** Observe refs already registered from a different root whose transcript is also present in this root. */
+		onCopiedRef?: (ref: AgentRef) => void;
 	} = {},
 ): Promise<void> {
 	if (!sessionFile?.endsWith(".jsonl")) return;
@@ -696,6 +698,7 @@ export async function registerPersistedSubagents(
 		shouldContinue,
 		sessionFile,
 		options.owned,
+		options.onCopiedRef,
 	);
 	if (!hydrateHistory || !shouldContinue()) return;
 	let nextTranscript = 0;
@@ -728,6 +731,7 @@ async function registerPersistedSubagentsFromDir(
 	shouldContinue: () => boolean,
 	rootSessionFile: string,
 	owned?: Map<string, string>,
+	onCopiedRef?: (ref: AgentRef) => void,
 ): Promise<void> {
 	if (!shouldContinue()) return;
 	let entries: fs.Dirent[];
@@ -826,6 +830,25 @@ async function registerPersistedSubagentsFromDir(
 			typeof existing.sessionFile === "string" &&
 			!sessionFileBelongsToRoot(existing.sessionFile, rootSessionFile);
 		if (existing && !replaceable) {
+			// A fork can copy a live idle or killed transcript without detaching its
+			// source ref. The copy keeps the source transcript's header id; a
+			// separately created same-id agent does not. Report only proven copies,
+			// and never replace the live owner.
+			if (
+				existing.kind === "sub" &&
+				existing.sessionFile !== null &&
+				existing.sessionFile !== sessionFile &&
+				(existing.status === "idle" || existing.status === "aborted")
+			) {
+				const [sourceHeaderId, copiedHeaderId] = await Promise.all([
+					readSessionHeaderId(existing.sessionFile),
+					readSessionHeaderId(sessionFile),
+				]);
+				if (!shouldContinue()) return;
+				if (sourceHeaderId !== undefined && sourceHeaderId === copiedHeaderId && registry.get(id) === existing) {
+					onCopiedRef?.(existing);
+				}
+			}
 			if (existing.sessionFile === sessionFile) {
 				owned?.set(id, sessionFile);
 				transcripts.push({
@@ -888,6 +911,7 @@ async function registerPersistedSubagentsFromDir(
 				shouldContinue,
 				rootSessionFile,
 				owned,
+				onCopiedRef,
 			);
 		}
 	}

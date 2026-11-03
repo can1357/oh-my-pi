@@ -19,6 +19,7 @@
 - Added a decorative-motion switch (`motion-effects`: `setMotionEffects`) gating the status-line blink and brand fade, the editor's magic-keyword sweep, and native `fx` spans; a static spinner clock also stills native `spinner` nodes ([#14240](https://github.com/can1357/oh-my-pi/pull/14240) by [@mccraigmccraig](https://github.com/mccraigmccraig))
 
 ### Fixed
+- Ask notes added on successive single-select questions now start with an empty editor and stay with their respective answers ([#17979](https://github.com/can1357/oh-my-pi/issues/17979))
 
 - Closing an overlay that others were opened over no longer leaves them returning focus to it once they close ([#16476](https://github.com/can1357/oh-my-pi/pull/16476))
 
