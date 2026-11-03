@@ -148,8 +148,9 @@ export class TodoWrites {
 	}
 
 	/**
-	 * Make every queued write fail its guard. Call synchronously before a session file swap, so a
-	 * write settling mid-swap cannot land in the new file.
+	 * Make every queued write fail its guard. Call synchronously before switching to a different list
+	 * (new session, session switch, branch), so a write settling mid-swap cannot land in it. A
+	 * whole-session fork keeps the same list, so queued writes stay valid there.
 	 */
 	invalidate(): void {
 		this.#epoch++;
