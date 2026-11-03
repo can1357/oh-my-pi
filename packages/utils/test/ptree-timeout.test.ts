@@ -3,7 +3,14 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Process, ProcessStatus } from "@oh-my-pi/pi-natives";
-import { createLinuxSubreaperScript, exec, NonZeroExitError, spawn, TimeoutError } from "@oh-my-pi/pi-utils/ptree";
+import {
+	AbortError,
+	createLinuxSubreaperScript,
+	exec,
+	NonZeroExitError,
+	spawn,
+	TimeoutError,
+} from "@oh-my-pi/pi-utils/ptree";
 
 async function supportsLinuxMountNamespaces(): Promise<boolean> {
 	if (process.platform !== "linux") return false;
@@ -484,4 +491,100 @@ ${createLinuxSubreaperScript()}
 			expect(threw).toBeInstanceOf(TimeoutError);
 		},
 	);
+});
+
+describe.skipIf(process.platform !== "linux")("ptree subreaper stop", () => {
+	async function readPid(pidFile: string): Promise<number> {
+		// Polls a file a real process writes; returns as soon as it holds a pid.
+		const deadline = Date.now() + 10_000;
+		while (Date.now() < deadline) {
+			const pid = Number.parseInt(
+				await Bun.file(pidFile)
+					.text()
+					.catch(() => ""),
+				10,
+			);
+			if (pid > 0) return pid;
+			await Bun.sleep(10);
+		}
+		throw new Error("command never wrote its pid");
+	}
+
+	async function runningAfter(pid: number, ms: number): Promise<boolean> {
+		const deadline = Date.now() + ms;
+		let status = Process.fromPid(pid)?.status();
+		while (status === ProcessStatus.Running && Date.now() < deadline) {
+			await Bun.sleep(10);
+			status = Process.fromPid(pid)?.status();
+		}
+		return status === ProcessStatus.Running;
+	}
+
+	const stops = [
+		["an AbortSignal", (child: ReturnType<typeof spawn>, controller: AbortController) => controller.abort()],
+		["dispose", (child: ReturnType<typeof spawn>) => child[Symbol.dispose]()],
+		["a graceful kill", (child: ReturnType<typeof spawn>) => child.kill(new AbortError(new Error("stop"), ""), 500)],
+		["a hard kill", (child: ReturnType<typeof spawn>) => child.kill(new AbortError(new Error("stop"), ""), -1)],
+	] as const;
+
+	for (const [name, stop] of stops) {
+		it(`ends a descendant that ignores SIGTERM on ${name}`, async () => {
+			// The shell and its background child both ignore SIGTERM (an ignored
+			// disposition survives exec). Only the stop's SIGKILL can end them,
+			// and only while the subreaper still holds the orphaned child.
+			const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-utils-subreaper-stop-"));
+			const pidFile = path.join(dir, "pid");
+			let orphanPid: number | undefined;
+			try {
+				const controller = new AbortController();
+				const child = spawn(["/bin/sh", "-c", `trap "" TERM; sleep 3600 & echo $! > '${pidFile}'; wait`], {
+					subreaper: true,
+					signal: controller.signal,
+				});
+				const outcome = child.wait().then(
+					() => new Error("run finished without the stop"),
+					(error: unknown) => error,
+				);
+				orphanPid = await readPid(pidFile);
+				const stoppedAt = Date.now();
+
+				stop(child, controller);
+
+				expect(await outcome).toBeInstanceOf(AbortError);
+				expect(await runningAfter(orphanPid, 2_000)).toBe(false);
+				expect(Date.now() - stoppedAt).toBeLessThan(10_000);
+			} finally {
+				if (orphanPid) Process.fromPid(orphanPid)?.killTree(9);
+				await fs.rm(dir, { recursive: true, force: true });
+			}
+		}, 30_000);
+	}
+
+	it("gives the command its SIGTERM before the hard kill on a graceful stop", async () => {
+		// A command that cleans up on SIGTERM must get the chance on a graceful
+		// stop, not only a SIGKILL.
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-utils-subreaper-stop-"));
+		const pidFile = path.join(dir, "pid");
+		const marker = path.join(dir, "cleaned");
+		try {
+			const controller = new AbortController();
+			const child = spawn(
+				[
+					"/bin/sh",
+					"-c",
+					`trap 'echo cleaned > "${marker}"; exit 0' TERM; echo $$ > '${pidFile}'; sleep 3600 & wait`,
+				],
+				{ subreaper: true, signal: controller.signal },
+			);
+			const outcome = child.wait().catch((error: unknown) => error);
+			await readPid(pidFile);
+
+			controller.abort();
+
+			expect(await outcome).toBeInstanceOf(AbortError);
+			expect(await Bun.file(marker).text()).toBe("cleaned\n");
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	}, 30_000);
 });
