@@ -1925,8 +1925,11 @@ export function createAutoLearnCaptureRunner(
  * });
  * ```
  */
-/** The live session each start-up alias was bound for, so a second live session cannot take it over. */
-const startupHoldsOwners = new WeakMap<RequestHoldsAlias, AgentSession>();
+/**
+ * Who each start-up alias stands for: a start-up still running, or the live
+ * session it built. A second start-up cannot take it over while either lasts.
+ */
+const startupHoldsOwners = new WeakMap<RequestHoldsAlias, "starting" | AgentSession>();
 
 export async function createAgentSession(options: CreateAgentSessionOptions = {}): Promise<CreateAgentSessionResult> {
 	// Everything built here is the session's work, though the session's agent
@@ -1938,15 +1941,26 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	// a start-up that failed, or after its session was disposed, may reuse them.
 	const sessionHolds = options.startupHolds ?? new RequestHoldsAlias();
 	const owner = startupHoldsOwners.get(sessionHolds);
-	if (owner && !owner.isDisposed) throw new Error("These start-up holds already belong to another live session");
-	const result = await runWithRequestHolds(sessionHolds, async () => {
-		registerLocalInferenceApi();
-		await loadRuntimeIdentity();
-		const extensionRoots = options.extensionRoots?.();
-		const explicit = extensionRoots?.explicit ?? options.additionalExtensionPaths ?? [];
-		const mode = extensionRoots?.mode ?? (options.disableExtensionDiscovery ? "explicit-only" : "merge");
-		return await withOmpExtensionRootScope(explicit, mode, () => createAgentSessionScoped(options, sessionHolds));
-	});
+	if (owner === "starting" || (owner && !owner.isDisposed)) {
+		throw new Error("These start-up holds already belong to another live session");
+	}
+	// Reserved before anything asynchronous, so overlapping start-ups cannot share them.
+	startupHoldsOwners.set(sessionHolds, "starting");
+	let result: CreateAgentSessionResult;
+	try {
+		result = await runWithRequestHolds(sessionHolds, async () => {
+			registerLocalInferenceApi();
+			await loadRuntimeIdentity();
+			const extensionRoots = options.extensionRoots?.();
+			const explicit = extensionRoots?.explicit ?? options.additionalExtensionPaths ?? [];
+			const mode = extensionRoots?.mode ?? (options.disableExtensionDiscovery ? "explicit-only" : "merge");
+			return await withOmpExtensionRootScope(explicit, mode, () => createAgentSessionScoped(options, sessionHolds));
+		});
+	} catch (error) {
+		// A start-up that failed holds nothing: a retry may use them.
+		startupHoldsOwners.delete(sessionHolds);
+		throw error;
+	}
 	startupHoldsOwners.set(sessionHolds, result.session);
 	return result;
 }
