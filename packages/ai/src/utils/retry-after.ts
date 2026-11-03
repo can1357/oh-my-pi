@@ -50,6 +50,20 @@ export function getRetryAfterMsFromHeaders(headers: HeadersLike): number | undef
 	return Math.max(...candidates);
 }
 
+/**
+ * The server's explicit `x-should-retry` verdict: `true`/`false` when the
+ * header says so, `undefined` when absent or unrecognised. Non-standard
+ * (Stainless-SDK convention) but emitted by OpenAI, Anthropic, and retrying
+ * gateways; when present it overrides status/text retry heuristics.
+ */
+export function getShouldRetryFromHeaders(headers: HeadersLike): boolean | undefined {
+	if (!headers) return undefined;
+	const value = getHeaderValue(headers, "x-should-retry");
+	if (value === "true") return true;
+	if (value === "false") return false;
+	return undefined;
+}
+
 export function getHeadersFromError(error: unknown): HeadersLike {
 	if (!error || typeof error !== "object") return undefined;
 	const record = error as { headers?: unknown; response?: { headers?: unknown }; cause?: unknown };
