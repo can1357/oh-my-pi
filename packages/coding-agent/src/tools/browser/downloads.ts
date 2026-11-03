@@ -43,10 +43,6 @@ interface DownloadWaiter {
 /** Chromium names an `allowAndName` download after its GUID, a lowercase UUID. */
 const DOWNLOAD_GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-/** The omp relay drives Chrome through an extension, which Chrome never lets choose where downloads go. */
-const PAGE_EVENTS_FOLDER_REFUSAL =
-	"The omp browser relay cannot choose where Chrome saves downloads: open the tab without `downloads`, and tab.waitForDownload() and tab.downloads() report where Chrome saved each file.";
-
 /** Owns tab-scoped Chromium download behavior and completion events. */
 export class DownloadManager {
 	readonly #browser: Browser;
@@ -54,8 +50,8 @@ export class DownloadManager {
 	readonly #defaultDirectory: string;
 	readonly #perTab: boolean;
 	/**
-	 * No browser-level target (the omp relay): downloads are heard as the page's own `Page.download*` events on the
-	 * sessions of its frames, and the relay says where Chrome saved each file.
+	 * The omp relay, which has no browser-level target: downloads are heard as the page's own `Page.download*` events on
+	 * the sessions of its frames, Chrome saves them where its own settings say, and the relay names each saved file.
 	 */
 	readonly #pageEvents: boolean;
 	#directory?: string;
@@ -73,32 +69,32 @@ export class DownloadManager {
 	/**
 	 * `perTab` gives each tab its own folder by saving under download GUIDs and moving each tab's own files. Leave it off
 	 * for a browser the user drives (connected, relay): there the folder also receives the user's own downloads, which
-	 * would otherwise be saved under bare GUIDs nobody renames.
+	 * would otherwise be saved under bare GUIDs nobody renames. `pageEvents` is for the omp relay.
 	 */
-	constructor(browser: Browser, page: Page, tabId: string, options: { perTab: boolean }) {
+	constructor(browser: Browser, page: Page, tabId: string, options: { perTab: boolean; pageEvents: boolean }) {
 		this.#browser = browser;
 		this.#page = page;
 		this.#defaultDirectory = path.join(os.tmpdir(), `omp-downloads-${tabId}`);
 		this.#perTab = options.perTab;
-		this.#pageEvents = !browser.targets().some(target => target.type() === "browser");
+		this.#pageEvents = options.pageEvents;
 	}
 
 	/**
-	 * Start a new tab's downloads: point them at `directory` when the tab was opened with one. Where downloads are page
-	 * events, tracking changes no browser setting, so it starts here and a download clicked before any wait is listed.
+	 * Start a new tab's downloads: point them at `directory` when the tab was opened with one. Page events change no
+	 * browser setting, so the relay tracks them from here and a download clicked before any wait is listed.
 	 */
 	async start(directory?: string): Promise<void> {
-		if (directory) await this.enable(directory);
-		else if (this.#pageEvents) await this.enable();
+		if (this.#pageEvents) this.#hearPage();
+		else if (directory) await this.enable(directory);
 	}
 
 	/**
 	 * Point the browser's one download folder at this tab's folder. Per tab, files are saved under their download GUID
-	 * so tabs never overwrite each other's, and each tab moves its own into its folder under the suggested name.
+	 * so tabs never overwrite each other's, and each tab moves its own into its folder under the suggested name. The
+	 * relay cannot point Chrome anywhere (the tab supervisor refuses a folder for it), so there this only listens.
 	 */
 	async enable(directory?: string): Promise<void> {
 		if (this.#pageEvents) {
-			if (directory !== undefined) throw new ToolError(PAGE_EVENTS_FOLDER_REFUSAL);
 			this.#hearPage();
 			return;
 		}
