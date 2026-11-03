@@ -212,8 +212,9 @@ fn classify_chain(program: &Program) -> Option<CommandPlan> {
 
 /// Where `pipeline` begins in the analyzed command, in characters, when the
 /// parser recorded it. It records no position for a leading `!` or for a
-/// redirection, so a pipeline that begins with one has none: its recorded
-/// location would begin after it.
+/// redirection, and the location of a command whose prefix holds one begins
+/// at its command word, after the prefix; so a pipeline that begins with
+/// either has none.
 fn pipeline_start(pipeline: &Pipeline) -> Option<usize> {
 	if pipeline.bang {
 		return None;
@@ -223,8 +224,7 @@ fn pipeline_start(pipeline: &Pipeline) -> Option<usize> {
 		&& simple
 			.prefix
 			.as_ref()
-			.and_then(|prefix| prefix.0.first())
-			.is_some_and(|item| item.location().is_none())
+			.is_some_and(|prefix| prefix.0.iter().any(|item| item.location().is_none()))
 	{
 		return None;
 	}

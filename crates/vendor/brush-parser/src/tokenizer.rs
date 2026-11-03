@@ -283,8 +283,9 @@ struct PushedAlias {
     /// Whether the value ends in a blank, so the next word is looked up too.
     expand_next: bool,
     /// Bash reads a blank after a value that does not end in one (or in a
-    /// newline, a backslash, a shell metacharacter, or inside quotes), so the
-    /// value's last word ends with it.
+    /// newline, a shell metacharacter, or inside quotes), so the value's last
+    /// word ends with it. For a value ending in backslashes see
+    /// `ends_without_blank`.
     end_blank: bool,
 }
 
@@ -292,8 +293,9 @@ impl PushedAlias {
     fn new(name: String, value: &str) -> Self {
         let chars: Vec<char> = value.chars().collect();
         let end_blank = chars.last().is_some_and(|&last| {
-            !matches!(last, ' ' | '\t' | '\n' | '\\' | '(' | ')' | '<' | '>' | ';' | '&' | '|')
-        }) && !ends_inside_quotes(&chars);
+            !matches!(last, ' ' | '\t' | '\n' | '(' | ')' | '<' | '>' | ';' | '&' | '|')
+        }) && !ends_without_blank(&chars)
+            && !ends_inside_quotes(&chars);
         Self {
             name: Some(name),
             expand_next: matches!(chars.last(), Some(' ' | '\t')),
@@ -317,6 +319,17 @@ impl PushedAlias {
     const fn unread(&self) -> bool {
         self.position < self.chars.len() || self.end_blank
     }
+}
+
+/// Whether a value ending in backslashes gets no blank read after it, so its
+/// last backslash escapes the next character of the input: a blank, a newline
+/// (joining the lines), or the end of the input (where it is dropped). Bash
+/// 5.2.21 does so when the value ends in 1, 5, 9, ... backslashes. After 3, 7,
+/// 11, ... it reads the blank and the last backslash escapes it, so the word
+/// ends with a blank; after an even number the backslashes pair up and the
+/// blank only ends the word. Measured with `bash -c` for 1 to 9 backslashes.
+fn ends_without_blank(chars: &[char]) -> bool {
+    chars.iter().rev().take_while(|&&c| c == '\\').count() % 4 == 1
 }
 
 /// Whether text ends inside single or double quotes.

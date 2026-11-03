@@ -808,6 +808,16 @@ async fn input_after_an_alias_runs_as_written() {
 			"printf 'DATA\\n' > in\n<in q; echo AFTER",
 			"DATA\nAFTER\n",
 		),
+		(
+			"shopt -s expand_aliases\nalias -- q='echo Q'\n",
+			"X=x >out echo HELLO; q; cat out",
+			"Q\nHELLO\n",
+		),
+		(
+			"shopt -s expand_aliases\nalias -- q='echo Q'\n",
+			"X=x 1>out echo HELLO; q; cat out",
+			"Q\nHELLO\n",
+		),
 	];
 	for (snapshot, command, expected) in cases {
 		for minimizer in [false, true] {

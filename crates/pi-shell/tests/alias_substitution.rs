@@ -532,6 +532,23 @@ async fn backslash_ending_a_value_at_the_end_of_input_continues_the_line() {
 	assert_eq!(with_aliases("q='echo Q\\'", "echo \"[$(q)]\"").await, "[Q]\n");
 }
 
+/// G64 to G69 (`oracle-r7.sh`): a value ending in 3, 7, ... backslashes gets
+/// a blank read after it, which its last backslash escapes; one ending in 1,
+/// 5, ... has its last backslash escape the input's next character; at the end
+/// of the input that backslash is dropped.
+#[tokio::test]
+async fn trailing_backslashes_follow_bash() {
+	let three = "q='printf \"<%s>|\" A\\\\\\'";
+	let five = "q='printf \"<%s>|\" A\\\\\\\\\\'";
+	let seven = "q='printf \"<%s>|\" A\\\\\\\\\\\\\\'";
+	assert_eq!(with_aliases(three, "q").await, "<A\\ >|");
+	assert_eq!(with_aliases(three, "q word").await, "<A\\ >|<word>|");
+	assert_eq!(with_aliases(five, "q").await, "<A\\\\>|");
+	assert_eq!(with_aliases(five, "q word").await, "<A\\\\ word>|");
+	assert_eq!(with_aliases(seven, "q").await, "<A\\\\\\ >|");
+	assert_eq!(with_aliases(seven, "q word").await, "<A\\\\\\ >|<word>|");
+}
+
 /// G26: `alias -p` lists the aliases, then handles its operands.
 #[tokio::test]
 async fn alias_p_lists_then_defines() {
