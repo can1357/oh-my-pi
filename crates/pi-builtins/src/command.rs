@@ -154,9 +154,13 @@ impl CommandCommand {
 			None
 		};
 
+		// Bash's `executing_command_builtin` (see
+		// `ExecutionParameters::executing_command_builtin`).
+		let mut params = context.params;
+		params.executing_command_builtin = true;
 		let mut cmd = commands::SimpleCommand::new(
 			commands::ShellForCommand::ParentShell(context.shell),
-			context.params,
+			params,
 			context.command_name,
 			command_and_args,
 		);

@@ -65,6 +65,12 @@ pub fn kill_process(
 	Ok(())
 }
 
+/// Whether signal 0 reaches `pid` (a negative value names a process group):
+/// the target exists and may be signalled.
+pub(crate) fn probe_process(pid: sys::process::ProcessId) -> bool {
+	nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_ok()
+}
+
 pub(crate) fn lead_new_process_group() -> Result<(), error::Error> {
 	nix::unistd::setpgid(nix::unistd::Pid::from_raw(0), nix::unistd::Pid::from_raw(0))?;
 	Ok(())

@@ -159,6 +159,11 @@ pub(crate) const fn needs_continue_when_stopped(_signal: Signal) -> bool {
 	false
 }
 
+/// Whether signal 0 reaches `pid`; a stub platform cannot ask.
+pub(crate) const fn probe_process(_pid: sys::process::ProcessId) -> bool {
+	false
+}
+
 /// Sends a signal to a specific process.
 ///
 /// This is a stub implementation that returns an error.

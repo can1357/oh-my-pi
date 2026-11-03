@@ -2,10 +2,11 @@
 
 use std::io::Write;
 
+#[cfg(not(unix))]
+use brush_core::sys;
 use brush_core::{
 	ExecutionExitCode, ExecutionResult, builtins,
 	jobs::{self, Job},
-	sys,
 	traps::TrapSignal,
 	ExecutionContext,
 };
@@ -141,9 +142,9 @@ impl builtins::Command for KillCommand {
 		let blocks = |target: i32| host.as_ref().is_some_and(|host| blocks_target(host, target));
 
 		// `kill -0` asks only whether a target exists. Unix answers per target with
-		// one syscall; elsewhere there is no such call, so the table is walked once
-		// here and every target is answered from that snapshot rather than from a
-		// fresh walk apiece.
+		// one syscall (`KillDelivery::deliver`); elsewhere there is no such call, so
+		// the table is walked once here and every target is answered from that
+		// snapshot rather than from a fresh walk apiece.
 		#[cfg(not(unix))]
 		let running: Vec<i32> = if signal.sends_signal() {
 			Vec::new()
@@ -153,11 +154,6 @@ impl builtins::Command for KillCommand {
 				.filter(|process| process.status() == ProcessStatus::Running)
 				.map(|process| process.pid())
 				.collect()
-		};
-		#[cfg(unix)]
-		let exists = |target: i32| {
-			// SAFETY: signal 0 only checks target existence and permission.
-			unsafe { libc::kill(target, 0) == 0 }
 		};
 		#[cfg(not(unix))]
 		let exists = |target: i32| target > 0 && running.contains(&target);
@@ -175,16 +171,19 @@ impl builtins::Command for KillCommand {
 					continue;
 				};
 				job.clear_listed();
-				// Without job control Bash signals each process of the job that
-				// is still alive (`kill_pid`), so a job that has ended gets no
-				// signal and the call succeeds.
-				job.refresh()?;
-				if !job_control && job.is_done() {
-					continue;
+				let in_process = job.in_process_pid().is_some();
+				if in_process || cfg!(not(unix)) {
+					// Without job control Bash signals each process of the job
+					// that is still alive (`kill_pid`), so a job that has ended
+					// gets no signal and the call succeeds.
+					job.refresh()?;
+					if !job_control && job.is_done() {
+						continue;
+					}
 				}
 				// A job running inside the shell has no process to deliver the signal
 				// to; a signal that would end a process ends the job instead.
-				if job.in_process_pid().is_some() {
+				if in_process {
 					if !signal_own_in_process_job(job, signal).await? {
 						writeln!(
 							context.stderr(),
@@ -198,16 +197,9 @@ impl builtins::Command for KillCommand {
 				}
 				#[cfg(unix)]
 				{
-					// Bash signals the job's process group with job control,
-					// which reaches the children an ended stage left in it, and
-					// each live process without (`kill_pid`).
-					let mut targets = job.signal_targets(job_control);
-					if targets.is_empty()
-						&& let Some(pgid) = job.process_group_id()
-					{
-						targets.push(-pgid);
-					}
-					if targets.iter().copied().any(&blocks) {
+					// Bash's `kill_pid` for the job (see `Job::kill_delivery`).
+					let delivery = job.kill_delivery(signal.delivered(), None, job_control)?;
+					if delivery.targets.iter().copied().any(&blocks) {
 						writeln!(
 							context.stderr(),
 							"{}: {}: refusing to signal the shell process",
@@ -217,29 +209,7 @@ impl builtins::Command for KillCommand {
 						had_failure = true;
 						continue;
 					}
-					// With job control Bash continues a stopped job that gets
-					// SIGTERM or SIGHUP, and marks one SIGCONT continues as running
-					// (`kill_pid`).
-					let continue_after = match signal {
-						KillSignal::Signal(signal) if job_control => job.prepare_job_control_signal(signal)?,
-						_ => false,
-					};
-					let succeeded = match signal {
-						KillSignal::Probe => targets.iter().copied().any(&exists),
-						KillSignal::Signal(signal) => {
-							let mut succeeded = false;
-							for target in targets {
-								if sys::signal::kill_process(target, signal).is_ok() {
-									succeeded = true;
-								}
-							}
-							succeeded
-						},
-					};
-					if continue_after {
-						let _ = job.continue_processes();
-					}
-					if !succeeded {
+					if !delivery.deliver(signal.delivered()) {
 						writeln!(
 							context.stderr(),
 							"{}: {}: failed to send signal",
@@ -341,18 +311,6 @@ impl builtins::Command for KillCommand {
 					continue;
 				},
 			};
-			// A negative pid names a process group, and Bash counts a signal to
-			// a job's group as it counts one sent through its job spec, stopped
-			// job included (`kill_pid`).
-			let group_job = pid.checked_neg().filter(|&group| group > 1);
-			let mut continue_group_after = false;
-			if let Some(job) = group_job.and_then(|group| context.shell.jobs_mut().resolve_process_id(group))
-			{
-				job.clear_listed();
-				if job_control && let KillSignal::Signal(signal) = signal {
-					continue_group_after = job.prepare_job_control_signal(signal)?;
-				}
-			}
 			// Consult the live in-process registry, not a numeric range: a real
 			// operating-system process can have a high signed PID on Windows.
 			if jobs::has_in_process_job(pid) {
@@ -371,40 +329,66 @@ impl builtins::Command for KillCommand {
 				}
 				continue;
 			}
-			if blocks(pid) {
-				writeln!(
-					context.stderr(),
-					"{}: {}: refusing to signal the shell process",
-					context.command_name,
-					operand
-				)?;
-				had_failure = true;
-				continue;
+			#[cfg(unix)]
+			{
+				// Bash's `kill_pid` for a pid operand: a negative one naming a
+				// job's process signals that job as its job spec would (see
+				// `JobManager::kill_pid_delivery`).
+				let delivery = context
+					.shell
+					.jobs_mut()
+					.kill_pid_delivery(pid, signal.delivered(), job_control)?;
+				if delivery.targets.iter().copied().any(&blocks) {
+					writeln!(
+						context.stderr(),
+						"{}: {}: refusing to signal the shell process",
+						context.command_name,
+						operand
+					)?;
+					had_failure = true;
+					continue;
+				}
+				if !delivery.deliver(signal.delivered()) {
+					writeln!(
+						context.stderr(),
+						"{}: {}: failed to send signal",
+						context.command_name,
+						operand
+					)?;
+					had_failure = true;
+				}
 			}
-			match signal {
-				KillSignal::Probe => {
-					if !exists(pid) {
-						writeln!(
-							context.stderr(),
-							"{}: {}: failed to send signal",
-							context.command_name,
-							operand
-						)?;
-						had_failure = true;
-					}
-				},
-				KillSignal::Signal(signal) => {
-					if let Err(err) = sys::signal::kill_process(pid, signal) {
-						writeln!(context.stderr(), "{}: {}: {}", context.command_name, operand, err)?;
-						had_failure = true;
-					}
-					if continue_group_after
-						&& let Some(job) =
-							group_job.and_then(|group| context.shell.jobs_mut().resolve_process_id(group))
-					{
-						let _ = job.continue_processes();
-					}
-				},
+			#[cfg(not(unix))]
+			{
+				if blocks(pid) {
+					writeln!(
+						context.stderr(),
+						"{}: {}: refusing to signal the shell process",
+						context.command_name,
+						operand
+					)?;
+					had_failure = true;
+					continue;
+				}
+				match signal {
+					KillSignal::Probe => {
+						if !exists(pid) {
+							writeln!(
+								context.stderr(),
+								"{}: {}: failed to send signal",
+								context.command_name,
+								operand
+							)?;
+							had_failure = true;
+						}
+					},
+					KillSignal::Signal(signal) => {
+						if let Err(err) = sys::signal::kill_process(pid, signal) {
+							writeln!(context.stderr(), "{}: {}: {}", context.command_name, operand, err)?;
+							had_failure = true;
+						}
+					},
+				}
 			}
 		}
 
@@ -691,6 +675,14 @@ impl KillSignal {
 
 	const fn sends_signal(self) -> bool {
 		matches!(self, Self::Signal(_))
+	}
+
+	/// The signal to deliver, or `None` for the signal-0 probe.
+	const fn delivered(self) -> Option<TrapSignal> {
+		match self {
+			Self::Probe => None,
+			Self::Signal(signal) => Some(signal),
+		}
 	}
 }
 

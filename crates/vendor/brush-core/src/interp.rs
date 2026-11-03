@@ -114,6 +114,11 @@ pub struct ExecutionParameters {
 	/// [`jobs::JobManager::remove_reported_jobs`]). A program it runs in turn,
 	/// such as an `eval` string, reads lines of its own. Defaults to `false`.
 	pub continues_input_line: bool,
+	/// Whether this runs under the `command` builtin, as Bash's
+	/// `executing_command_builtin` records: a failed assignment statement
+	/// then abandons the command being run instead of exiting a POSIX-mode
+	/// shell (`do_assignment_statements`). Defaults to `false`.
+	pub executing_command_builtin: bool,
 	/// Optional hook reporting spawned external children for scoped teardown.
 	spawn_observer:           Option<Arc<dyn SpawnObserver>>,
 	/// Optional hook mirroring the bytes that cross pipeline pipes.
@@ -514,6 +519,14 @@ impl Execute for ast::Program {
 				},
 			}
 
+			// An abandoned command (`DISCARD`) ends here, where Bash's
+			// `reader_loop` and `parse_and_execute` catch the jump: the text
+			// goes on with its next command. In a subshell the jump ends the
+			// subshell instead.
+			if matches!(result.next_control_flow, ExecutionControlFlow::DiscardCommand) && !shell.is_subshell() {
+				result.next_control_flow = ExecutionControlFlow::Normal;
+			}
+
 			// Update status
 			shell.set_last_exit_status(result.exit_code.into());
 
@@ -910,10 +923,18 @@ impl Execute for ast::Pipeline {
 			wait_for_pipeline_processes_and_update_status(self, spawn_results, shell, &params).await
 		}
 		.await;
+		let last_in_shell = frozen_before.is_some();
 		if let Some(frozen) = frozen_before {
 			shell.jobs_mut().set_frozen(frozen);
 		}
 		let mut result = waited?;
+		// Every stage of a pipeline of two or more runs in a subshell, the
+		// last one too unless `lastpipe` runs it in this shell: what it asks
+		// of the control flow (`exit`, `return`, `break`, an abandoned
+		// command) ends that subshell alone.
+		if self.seq.len() > 1 && !last_in_shell {
+			result.next_control_flow = ExecutionControlFlow::Normal;
+		}
 
 		// Virtual files the pipeline's redirections opened close in the
 		// background once dropped. Settle them so the next command observes
@@ -2022,9 +2043,8 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 		let mut temporary_environment = None;
 		if has_command {
 			// In POSIX mode an assignment error before a special builtin
-			// exits the shell, and before any other command abandons the
-			// command being run (`DISCARD` in `do_assignment_statements`),
-			// which the error does as it leaves for the program level.
+			// exits a non-interactive shell, and otherwise abandons the
+			// command being run (`DISCARD` in `do_assignment_statements`).
 			let posix_mode = context.shell.options().posix_mode;
 			let special_builtin = posix_mode
 				&& args.first().is_some_and(|name| is_special_builtin(&context.shell, &name.to_string()));
@@ -2032,13 +2052,14 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 			for &assignment in &pending_assignments {
 				if let Err(err) = apply_temporary_assignment(&mut context.shell, &params, assignment).await {
 					let _ = context.shell.env_mut().pop_scope(EnvironmentScope::Command);
-					if posix_mode && !special_builtin {
-						return Err(err);
-					}
 					let err = if special_builtin { err.into_fatal() } else { err };
 					let mut stderr = params.stderr(&context.shell);
 					let _ = context.shell.display_error(&mut stderr, &err).await;
-					return Ok(err.into_result(&context.shell).into());
+					let mut result = err.into_result(&context.shell);
+					if posix_mode && result.is_normal_flow() {
+						result.next_control_flow = ExecutionControlFlow::DiscardCommand;
+					}
+					return Ok(result.into());
 				}
 			}
 			// A redirection does not see the temporary environment
@@ -2049,7 +2070,7 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 				forget_reported_jobs_for_compound_assignment(&mut context.shell, assignment);
 				// Apply the assignment. Don't mark as fatal - let errors be handled
 				// at the program level so multiple complete_commands can execute independently.
-				apply_assignment(
+				let applied = apply_assignment(
 					assignment,
 					&mut context.shell,
 					&params,
@@ -2057,7 +2078,28 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 					None,
 					EnvironmentScope::Global,
 				)
-				.await?;
+				.await;
+				// An assignment statement that cannot assign (a readonly
+				// variable) abandons the command being run, and exits a
+				// non-interactive POSIX-mode shell unless it runs under
+				// `command` (`do_assignment_statements`).
+				if let Err(err) = applied {
+					if !matches!(err.kind(), error::ErrorKind::ReadonlyVariable) {
+						return Err(err);
+					}
+					let mut stderr = params.stderr(&context.shell);
+					let _ = context.shell.display_error(&mut stderr, &err).await;
+					let mut result = err.into_result(&context.shell);
+					result.next_control_flow = if context.shell.options().posix_mode
+						&& !context.shell.options().interactive
+						&& !params.executing_command_builtin
+					{
+						ExecutionControlFlow::ExitShell
+					} else {
+						ExecutionControlFlow::DiscardCommand
+					};
+					return Ok(result.into());
+				}
 			}
 			// Bash runs a null command in a child when one of its redirections
 			// reads standard input, which installs a job.
