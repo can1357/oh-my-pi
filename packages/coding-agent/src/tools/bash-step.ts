@@ -10,6 +10,7 @@
  * adds a refusal: it only withdraws one the named tool cannot carry out.
  */
 import * as os from "node:os";
+import { stripWriteContentWithPotentialLooseHeader } from "./write-content";
 
 /** One shell word of a simple command. */
 interface Word {
@@ -489,9 +490,12 @@ function redirectEffect(command: SimpleCommand, initial: FdTarget): RedirectEffe
 	return { stdout: fds.get("1") ?? { kind: "closed" }, stdinFromPipe: fds.get("0")?.kind === "pipe", opened };
 }
 
+/**
+ * The command word as written. A word with a directory (`./sort`, `/usr/bin/cat`) is kept whole,
+ * so it never matches a known command: the program there may do anything.
+ */
 function commandName(command: SimpleCommand): string {
-	const first = command.words[0]?.value ?? "";
-	return first.slice(first.lastIndexOf("/") + 1);
+	return command.words[0]?.value ?? "";
 }
 
 /** One pass-through filter: its option letters without a value, those with one, its long options, and its operands. */
@@ -646,7 +650,7 @@ function isPassThroughFilter(stage: SimpleCommand): boolean {
 	if (filter.operands === "sed") {
 		const all = scripts.length > 0 ? scripts : operands.length > 0 ? [operands[0].value] : [];
 		const files = scripts.length > 0 ? operands.length : operands.length - 1;
-		return files === 0 && all.length > 0 && all.every(script => sedScriptIsSafe(script, "filter"));
+		return files === 0 && all.length > 0 && all.every(sedScriptIsSafe);
 	}
 	// Any other operand is a file the filter reads in place of the pipe.
 	return operands.length === 0;
@@ -662,18 +666,18 @@ function outputReachesAgent(pipeline: SimpleCommand[]): boolean {
 		const last = i === pipeline.length - 1;
 		const effect = redirectEffect(pipeline[i], { kind: last ? "agent" : "pipe" });
 		if (effect.opened.length > 0 || effect.stdout.kind !== (last ? "agent" : "pipe")) return false;
-		if (i > 0 && (!effect.stdinFromPipe || !isPassThroughFilter(pipeline[i]))) return false;
+		if (i > 0 && (!effect.stdinFromPipe || hasOtherInputs(pipeline[i]) || !isPassThroughFilter(pipeline[i]))) {
+			return false;
+		}
 	}
 	return true;
 }
 
 /**
- * Whether a sed script only rewrites lines. `filter` (a later pipeline stage) allows every
- * command that only shapes stdout; `edit` (`sed -i`) allows substitutions, transliterations and
- * deletions, the changes the edit tool can make. Neither allows `r`, `R`, `w`, `W`, `e`, or an
- * `s` command's `w`/`e` flags, which read or write other files or run commands.
+ * Whether a sed script in a later pipeline stage only shapes the text on stdout: no `r`, `R`, `w`,
+ * `W`, `e`, or an `s` command's `w`/`e` flags, which read or write other files or run commands.
  */
-function sedScriptIsSafe(script: string, mode: "filter" | "edit"): boolean {
+function sedScriptIsSafe(script: string): boolean {
 	const filterOnly = "pPqQ=lnNgGhHxDz";
 	let i = 0;
 	const skipDelimited = (delim: string): boolean => {
@@ -725,7 +729,6 @@ function sedScriptIsSafe(script: string, mode: "filter" | "edit"): boolean {
 			if (cmd === "s") {
 				const flags = /^[gpiImM0-9]*/u.exec(script.slice(i))?.[0] ?? "";
 				i += flags.length;
-				if (mode === "edit" && flags.includes("p")) return false;
 				// Any other flag (`w file`, `e`) reads, writes or runs something.
 				if (i < script.length && !/[\s;}]/u.test(script[i])) return false;
 			}
@@ -735,7 +738,7 @@ function sedScriptIsSafe(script: string, mode: "filter" | "edit"): boolean {
 			i++;
 			continue;
 		}
-		if (mode === "filter" && filterOnly.includes(cmd)) {
+		if (filterOnly.includes(cmd)) {
 			i++;
 			if (cmd === "q" || cmd === "Q") while (/\d/u.test(script[i] ?? "")) i++;
 			continue;
@@ -821,7 +824,7 @@ function expressibleOperands(words: Word[], spec: OptionSpec): Word[] | undefine
 
 /** Whether `word` names one file the agent can pass to a tool: no glob, no computed part, not stdin. */
 function namesOneFile(word: Word): boolean {
-	return word.value !== "-" && !word.glob && !word.computed;
+	return word.value !== "-" && word.value !== "" && !word.glob && !word.computed;
 }
 
 // ── read: cat, head, tail, less, more ────────────────────────────────────────
@@ -1128,56 +1131,56 @@ function fdCanPerform(command: SimpleCommand): boolean {
 const HEREDOC_EXPANSION = /(?:^|[^\\])(?:\\\\)*[$`]/u;
 
 /** A decimal integer `printf %d`/`%i` prints as given and accepts without error. */
-const PRINTF_INTEGER = /^-?(?:0|[1-9]\d{0,17})$/u;
+const PRINTF_INTEGER = /^(?:0|-?[1-9]\d{0,17})$/u;
+
+/** The escapes a text `printf` format may use, with what they print. */
+const PRINTF_ESCAPES: Record<string, string> = { n: "\n", t: "\t", "\\": "\\", '"': '"', "'": "'" };
 
 /**
- * The conversions of a `printf` format the write tool can reproduce, in order (`s`, `d` or `i`);
- * undefined for any other format. Allowed: text, `%%`, `%s` with flags and width but no precision
- * (a precision can cut a character's bytes in half), `%d`/`%i` with flags, width and precision,
- * and only the `\n`, `\t`, `\\`, `\"` and `\'` escapes. Anything else (`%b`, `%n`, `%q`, `%(…)T`,
- * octal or `\x` escapes) assigns shell state or may produce bytes that are not UTF-8 text.
- * One linear pass.
+ * The exact text `printf FORMAT ARGS…` prints, or undefined when it may print anything else: a
+ * format of text, `%%`, plain `%s`, `%d` and `%i` (no flags, width or precision, whose padding is
+ * counted in bytes), and the escapes in {@link PRINTF_ESCAPES}, with integer arguments for `%d` and
+ * `%i`. Anything else (`%b`, `%n`, `%q`, `%(…)T`, octal or `\x` escapes) assigns shell state or may
+ * produce bytes that are not UTF-8 text. Linear in the output.
  */
-function textPrintfConversions(format: string): string[] | undefined {
-	const conversions: string[] = [];
-	for (let i = 0; i < format.length; i++) {
-		const ch = format[i];
-		if (ch === "\\") {
-			if (!`nt\\"'`.includes(format[i + 1] ?? "")) return undefined;
-			i++;
-			continue;
+function printfText(args: Word[]): string | undefined {
+	const format = args[0]?.value;
+	if (format === undefined || format.startsWith("-")) return undefined;
+	const values = args.slice(1).map(word => word.value);
+	let out = "";
+	let next = 0;
+	do {
+		let converted = false;
+		for (let i = 0; i < format.length; i++) {
+			const ch = format[i];
+			if (ch === "\\") {
+				const escaped = own(PRINTF_ESCAPES, format[i + 1] ?? "");
+				if (escaped === undefined) return undefined;
+				out += escaped;
+				i++;
+				continue;
+			}
+			if (ch !== "%") {
+				out += ch;
+				continue;
+			}
+			const conversion = format[++i];
+			if (conversion === "%") {
+				out += "%";
+				continue;
+			}
+			if (conversion !== "s" && conversion !== "d" && conversion !== "i") return undefined;
+			converted = true;
+			const value = values[next++];
+			if (conversion === "s") out += value ?? "";
+			else if (value === undefined) out += "0";
+			else if (PRINTF_INTEGER.test(value)) out += value;
+			else return undefined;
 		}
-		if (ch !== "%") continue;
-		i++;
-		if (format[i] === "%") continue;
-		while ("-+ #0".includes(format[i] ?? "x")) i++;
-		while (/\d/u.test(format[i] ?? "")) i++;
-		let precision = false;
-		if (format[i] === ".") {
-			precision = true;
-			i++;
-			while (/\d/u.test(format[i] ?? "")) i++;
-		}
-		const conversion = format[i];
-		if (conversion === "s" && !precision) conversions.push("s");
-		else if (conversion === "d" || conversion === "i") conversions.push(conversion);
-		else return undefined;
-	}
-	return conversions;
-}
-
-/** Whether `printf FORMAT ARGS…` prints text the write tool can reproduce, without an error. */
-function printfIsText(args: Word[]): boolean {
-	if (args.length === 0 || args[0].value.startsWith("-")) return false;
-	const conversions = textPrintfConversions(args[0].value);
-	if (!conversions) return false;
-	// printf reuses the format for extra arguments; every argument of a %d or %i must be an integer.
-	return args
-		.slice(1)
-		.every(
-			(arg, k) =>
-				conversions.length === 0 || conversions[k % conversions.length] === "s" || PRINTF_INTEGER.test(arg.value),
-		);
+		// printf reuses the format while arguments remain; with no conversion it prints once.
+		if (!converted) break;
+	} while (next < values.length);
+	return out;
 }
 
 /** The prefix of a large file the grep tool's multiline search reads. */
@@ -1186,6 +1189,33 @@ const NATIVE_GREP_WINDOW_BYTES = 4 * 1024 * 1024;
 /** Paths whose writes reach a device or kernel interface, not a file the write tool creates. */
 const SPECIAL_PATH = /^\/(?:dev|proc|sys)\//u;
 
+/** The text an unquoted-delimiter heredoc body produces once bash removes its escapes. */
+function expandedHeredocText(body: string): string {
+	return body.replace(/\\(\n|[\\$`])/gu, (_, escaped: string) => (escaped === "\n" ? "" : escaped));
+}
+
+/** The exact text a write step sends to its file, or undefined when it is not one of the write shapes. */
+function writeStepText(name: string, step: ParsedStep, args: Word[], stdinDocuments: Redirect[]): string | undefined {
+	if (name === "echo") {
+		const noNewline = args[0]?.value === "-n";
+		const words = noNewline ? args.slice(1) : args;
+		if (words.some(word => word.value.startsWith("-"))) return undefined;
+		return words.map(word => word.value).join(" ") + (noNewline ? "" : "\n");
+	}
+	if (name === "printf") return printfText(args);
+	// cat writes only its stdin document; any operand or option makes it more than that.
+	if (args.length > 0 || stdinDocuments.length !== 1) return undefined;
+	const [document] = stdinDocuments;
+	if (document.op === "<<<")
+		return document.target && !document.target.computed ? `${document.target.value}\n` : undefined;
+	const [heredoc] = heredocBodies(step.pipeline[0], step.afterLine) ?? [];
+	if (!heredoc) return undefined;
+	if (!heredoc.expands) return heredoc.body === "" ? "" : `${heredoc.body}\n`;
+	if (HEREDOC_EXPANSION.test(heredoc.body)) return undefined;
+	const text = expandedHeredocText(heredoc.body);
+	return text === "" ? "" : `${text}\n`;
+}
+
 /**
  * The write tool creates a UTF-8 text file the agent supplies; to append, the write rule's message
  * points at `edit`. A step is a write only in these shapes: `echo` (`-n` at most) with literal
@@ -1193,9 +1223,11 @@ const SPECIAL_PATH = /^\/(?:dev|proc|sys)\//u;
  * or here-string; and exactly one redirection besides cat's stdin document, sending stdout to a
  * literal path that is not a device. When the filesystem is known, the target must not exist yet
  * (over an existing file the write tool keeps its byte-order mark and line endings, which the
- * shell replaces), and the text must not start with `#!` (the write tool makes such a file
- * executable). Anything else (a copy, `echo -e`, `printf -v`/`%n`/`%b`, raw bytes, a second
- * file, an input, a FIFO) is not a write.
+ * shell replaces). The exact text the step writes must reach the file unchanged through the write
+ * tool: it does not start with `#!` (the write tool makes such a file executable) and the write
+ * tool's removal of copied read-output prefixes (`[path#TAG]`, `12:`) leaves it as it is.
+ * Anything else (a copy, `echo -e`, `printf -v`/`%n`/`%b`, raw bytes, a second file, an input, a
+ * FIFO) is not a write.
  */
 function writeCanPerform(
 	name: string,
@@ -1221,44 +1253,34 @@ function writeCanPerform(
 	if (filesystem && filesystem.kind(target.value, false) !== "missing") return false;
 	const args = command.words.slice(1);
 	if (args.some(word => word.computed || word.glob)) return false;
-	if (name === "echo") {
-		const text = args.filter((word, i) => !(word.value === "-n" && i === 0));
-		// A `#!` line anywhere at the start of a word may start the file; the write tool makes it executable.
-		return (
-			args.every((word, i) => !word.value.startsWith("-") || (word.value === "-n" && i === 0)) &&
-			!text.some(word => word.value.startsWith("#!"))
-		);
-	}
-	if (name === "printf") {
-		// The output starts with the format's text, or with an argument when the format starts with a
-		// conversion; either may begin a `#!` line split across words (`'#%s' '!/bin/sh'`).
-		const format = args[0]?.value ?? "";
-		const mayStartShebang =
-			/^#(?:!|%)/u.test(format) ||
-			(format.startsWith("%") && args.slice(1).some(word => word.value.startsWith("#")));
-		return printfIsText(args) && !mayStartShebang;
-	}
-	// cat writes only its stdin document; any operand or option makes it more than that.
-	if (args.length > 0 || stdinDocuments.length !== 1) return false;
-	const [document] = stdinDocuments;
-	if (document.op === "<<<")
-		return !!document.target && !document.target.computed && !document.target.value.startsWith("#!");
-	const bodies = heredocBodies(command, step.afterLine);
-	return (
-		bodies !== undefined &&
-		bodies.every(({ body, expands }) => !body.startsWith("#!") && (!expands || !HEREDOC_EXPANSION.test(body)))
-	);
+	const text = writeStepText(name, step, args, stdinDocuments);
+	if (text === undefined || text.startsWith("#!")) return false;
+	return stripWriteContentWithPotentialLooseHeader(text).text === text;
 }
 
 // ── edit: sed -i, perl -i, awk -i inplace ────────────────────────────────────
 
+/** Text with no special meaning in a sed or perl pattern or replacement, and no line break. */
+const LITERAL_TEXT = /^[^\\.^$*+?()[\]{}|&@\r\n]*$/u;
+
 /**
- * Escapes with which sed (`\xHH`, `\oNNN`, `\dNNN`, `\cX`) or perl (`\xHH`, `\x{…}`, `\N{…}`,
- * `\o{…}`, `\cX`, octal) writes a character by its code: the result can be bytes that are not
- * UTF-8 text, which the edit tool cannot produce.
+ * Whether `script` is one substitution of literal text for literal text (`s/old/new/`, optionally
+ * `g`): then sed and perl change exactly the characters the edit tool's literal replacement does.
+ * A pattern can otherwise match part of a multibyte character (perl's `.` without `use utf8`) and
+ * a replacement can write raw bytes, a carriage return or the match itself, none of which the
+ * edit tool reproduces.
  */
-const SED_BYTE_ESCAPE = /\\[xodc]/u;
-const PERL_BYTE_ESCAPE = /\\(?:[xcNo]|0|[1-7][0-7])/u;
+function isLiteralSubstitution(script: string): boolean {
+	if (script[0] !== "s" || script.length < 4) return false;
+	const delimiter = script[1];
+	if (/[\w\s\\]/u.test(delimiter)) return false;
+	const parts = script.slice(2).split(delimiter);
+	if (parts.length !== 3) return false;
+	const [pattern, replacement, flags] = parts;
+	return (
+		pattern !== "" && LITERAL_TEXT.test(pattern) && LITERAL_TEXT.test(replacement) && (flags === "" || flags === "g")
+	);
+}
 
 /**
  * `sed -i` the edit tool can do: in place without a backup suffix, scripts that only substitute,
@@ -1318,62 +1340,9 @@ function sedEditFiles(words: Word[]): Word[] | undefined {
 		scripts.push(script.value);
 	}
 	const expressible =
-		inPlace &&
-		operands.length > 0 &&
-		operands.every(namesOneFile) &&
-		scripts.every(s => !SED_BYTE_ESCAPE.test(s) && sedScriptIsSafe(s, "edit"));
+		inPlace && operands.length > 0 && operands.every(namesOneFile) && scripts.every(isLiteralSubstitution);
 	return expressible ? operands : undefined;
 }
-
-/**
- * Splits one perl `s///` or `tr///`/`y///` script into its operator, delimiter, pattern and
- * replacement in one pass; undefined for anything else (another statement, bracketing
- * delimiters, trailing code). Linear in the script's length.
- */
-function perlSubstitution(
-	script: string,
-): { op: "s" | "tr"; delim: string; pattern: string; replacement: string; flags: string } | undefined {
-	let i = 0;
-	while (/\s/u.test(script[i] ?? "")) i++;
-	let op: "s" | "tr";
-	if (script[i] === "s") {
-		op = "s";
-		i++;
-	} else if (script.startsWith("tr", i)) {
-		op = "tr";
-		i += 2;
-	} else if (script[i] === "y") {
-		op = "tr";
-		i++;
-	} else return undefined;
-	const delim = script[i];
-	if (delim === undefined || /[\w\s({[<]/u.test(delim)) return undefined;
-	i++;
-	const part = (): string | undefined => {
-		const start = i;
-		for (; i < script.length; i++) {
-			if (script[i] === "\\") i++;
-			else if (script[i] === delim) return script.slice(start, i++);
-		}
-		return undefined;
-	};
-	const pattern = part();
-	const replacement = pattern === undefined ? undefined : part();
-	if (pattern === undefined || replacement === undefined) return undefined;
-	const flags = /^[a-z]*/u.exec(script.slice(i))?.[0] ?? "";
-	if (!/^\s*;?\s*$/u.test(script.slice(i + flags.length))) return undefined;
-	if (op === "s" ? /[^gimsxr]/u.test(flags) : /[^cdsr]/u.test(flags)) return undefined;
-	return { op, delim, pattern, replacement, flags };
-}
-
-/** Regex code blocks (`(?{…})`, `(??{…})`, `(*{…})`), which run whatever the delimiter. */
-const PERL_CODE_BLOCK = /\(\?\??\{|\(\*\{/u;
-/**
- * Interpolation, which runs code through `${…}`/`@{…}` and reads variables: a `$` that ends the
- * pattern or precedes `)` or `|` is an anchor, and `$1`/`$&` in a replacement are captures.
- */
-const PERL_PATTERN_INTERPOLATION = /@[\w{:$]|\$(?![)|]|$)/u;
-const PERL_REPLACEMENT_INTERPOLATION = /@[\w{:$]|\$(?!\d|&)/u;
 
 /**
  * `perl -pi -e 's/…/…/' files` the edit tool can do: in place without a backup suffix,
@@ -1400,30 +1369,18 @@ function perlEditFiles(words: Word[]): Word[] | undefined {
 				// perl reads the rest of the word as a backup extension (`-pi.bak`, even `-pie`).
 				if (j + 1 < text.length) return undefined;
 				inPlace = true;
-			} else if (letter === "e" || letter === "E") {
+			} else if (letter === "e") {
 				const script = j + 1 < text.length ? text.slice(j + 1) : words[++i]?.value;
 				if (script === undefined || words[i]?.computed) return undefined;
 				scripts.push(script);
 				break;
-			} else if (letter === "0" || letter === "l") {
-				while (/[0-9a-fA-Fx]/u.test(text[j + 1] ?? "")) j++;
-			} else if (letter !== "w") return undefined;
+				// `-l`, `-0` and the rest change the record or output separators or what runs.
+			} else return undefined;
 		}
 	}
 	const files = words.slice(i);
 	if (!print || !inPlace || scripts.length === 0 || files.length === 0 || !files.every(namesOneFile)) return undefined;
-	const expressible = scripts.every(script => {
-		if (PERL_BYTE_ESCAPE.test(script)) return false;
-		const sub = perlSubstitution(script);
-		if (!sub) return false;
-		if (sub.op === "tr") return true;
-		if (PERL_CODE_BLOCK.test(sub.pattern) || PERL_CODE_BLOCK.test(sub.replacement)) return false;
-		// With `'` as delimiter perl interpolates nothing; code blocks still run.
-		return (
-			sub.delim === "'" ||
-			(!PERL_PATTERN_INTERPOLATION.test(sub.pattern) && !PERL_REPLACEMENT_INTERPOLATION.test(sub.replacement))
-		);
-	});
+	const expressible = scripts.every(isLiteralSubstitution);
 	return expressible ? files : undefined;
 }
 
@@ -1475,13 +1432,15 @@ function stepIsLiteral(pipeline: SimpleCommand[], allowStdinDocuments: boolean):
  */
 export type PathKind = "file" | "directory" | "other" | "missing" | "unknown";
 
-/** The size of a regular file and whether the edit tool rewrites it byte for byte. */
+/** A regular file's size and links, and whether the edit tool rewrites it byte for byte. */
 export interface FileFacts {
 	size: number;
+	/** Hard links to the file: `sed -i` replaces the one named, the edit tool writes through all. */
+	links: number;
 	/** At most 4 MB of valid UTF-8 with no byte-order mark and no carriage return: the edit tool
 	 * keeps a byte-order mark and CRLF line endings and refuses other encodings, which `sed -i`
-	 * does not. */
-	plainText: boolean;
+	 * does not. Reads the file on first use. */
+	plainText(): boolean;
 }
 
 /** The filesystem a step runs against, as far as the caller can inspect it. */
@@ -1503,6 +1462,11 @@ function pathsAre(
 	return words.every(
 		word => !SPECIAL_PATH.test(word.value) && (!filesystem || allowed.includes(filesystem.kind(word.value, follow))),
 	);
+}
+
+/** Whether `facts` describe a file with one link whose text the edit tool rewrites byte for byte. */
+function isPlainSingleFile(facts: FileFacts | undefined): boolean {
+	return facts !== undefined && facts.links === 1 && facts.plainText();
 }
 
 /** Options with which rg and ag match across lines. */
@@ -1552,6 +1516,8 @@ export function dedicatedToolCanPerformStep(
 		case "glob":
 			if (name === "locate") return false;
 			if (name !== "find" && name !== "fd") return true;
+			// An input redirection opens something (a FIFO waits for its writer) that glob never opens.
+			if (hasOtherInputs(command) || stdinFiles(command).length > 0) return false;
 			return outputReachesAgent(pipeline) && (name === "find" ? findCanPerform(command) : fdCanPerform(command));
 		case "write":
 			return writeCanPerform(name, step, availableTools, filesystem);
@@ -1561,8 +1527,7 @@ export function dedicatedToolCanPerformStep(
 			return (
 				!filesystem ||
 				files.every(
-					word =>
-						filesystem.kind(word.value, false) !== "file" || filesystem.facts(word.value)?.plainText === true,
+					word => filesystem.kind(word.value, false) !== "file" || isPlainSingleFile(filesystem.facts(word.value)),
 				)
 			);
 		}
