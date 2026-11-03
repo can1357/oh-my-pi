@@ -542,18 +542,21 @@ describe("interrupt scope: races with the stopped run", () => {
 				throw new Error(`tool never entered: ${JSON.stringify(h.session.messages)}`);
 			}),
 		]);
-		const attempted = Promise.withResolvers<void>();
+		let attempted = false;
 		const prompt = h.agent.prompt.bind(h.agent) as (...args: unknown[]) => Promise<void>;
 		h.agent.prompt = ((...args: unknown[]) => {
-			attempted.resolve();
+			attempted = true;
 			return prompt(...args);
 		}) as typeof h.agent.prompt;
 		h.session.queueDeferredMessage({ ...payload("late dispatch"), role: "custom", timestamp: Date.now() });
-		try {
-			await attempted.promise;
-		} finally {
-			release.resolve();
+		// The late dispatch waits for the interrupt's cleanup, which waits for the interrupted tool.
+		for (let i = 0; i < 20; i++) {
+			const tick = Promise.withResolvers<void>();
+			setImmediate(tick.resolve);
+			await tick.promise;
 		}
+		expect(attempted).toBe(false);
+		release.resolve();
 		await run;
 		await h.session.waitForIdle();
 		const old = result(h, "old-tool-mark")[0]!;

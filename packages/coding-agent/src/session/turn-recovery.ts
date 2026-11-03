@@ -864,14 +864,15 @@ export class TurnRecovery {
 
 	/** Prompts after transient overlap with a prior agent run. `onClaimed` fires synchronously
 	 *  right after a successful `agent.prompt` claim (before the run is awaited), letting the
-	 *  caller mark the exact moment its own run went live. */
+	 *  caller mark the exact moment its own run went live. `admit` runs before every claim and
+	 *  may wait; `false` means the prompt was superseded and must not claim the agent. */
 	promptAgentWithIdleRetry(
 		messages: AgentMessage[],
 		options?: { toolChoice?: ToolChoice },
 		onClaimed?: () => void,
-		isCancelled?: () => boolean,
+		admit?: () => Promise<boolean>,
 	): Promise<boolean> {
-		return this.#promptAgentWithIdleRetry(messages, options, onClaimed, isCancelled);
+		return this.#promptAgentWithIdleRetry(messages, options, onClaimed, admit);
 	}
 
 	/** Parses provider retry and rate-limit reset hints into a delay. */
@@ -3308,18 +3309,18 @@ export class TurnRecovery {
 
 	/**
 	 * Prompts the agent, waiting behind a run that already holds it. Resolves
-	 * `true` once this prompt's run finishes, or `false` when `isCancelled`
-	 * reports, before a claim, that the prompt was superseded while it waited.
+	 * `true` once this prompt's run finishes, or `false` when `admit` reports,
+	 * before a claim, that the prompt was superseded while it waited.
 	 */
 	async #promptAgentWithIdleRetry(
 		messages: AgentMessage[],
 		options?: { toolChoice?: ToolChoice },
 		onClaimed?: () => void,
-		isCancelled?: () => boolean,
+		admit?: () => Promise<boolean>,
 	): Promise<boolean> {
 		const deadline = Date.now() + 30_000;
 		for (;;) {
-			if (isCancelled?.()) return false;
+			if (admit && !(await admit())) return false;
 			// A claim whose synchronous prefix throws (busy agent, missing
 			// model) returns an already-rejected promise. Probe for that
 			// before firing `onClaimed`: a busy-retry parked behind an

@@ -615,6 +615,13 @@ const IMAGE_DESCRIPTION_ADMISSION_TIMEOUT_MS = 20_000;
 /** Marks work running inside the deferred extension load so it never waits on itself. */
 const deferredExtensionLoadScope = new AsyncLocalStorage<true>();
 
+/**
+ * Where running session work came from: the run whose agent events it handles (`runEpoch`), and the
+ * post-prompt task running it (`taskSignal`). An interrupt owns work that came from the run it stopped,
+ * and work waiting for an interrupt gives up when its task is cancelled; see `AgentSession.abort`.
+ */
+const workOrigin = new AsyncLocalStorage<{ runEpoch?: number; taskSignal?: AbortSignal }>();
+
 /** A failed preparation, not a provider failure: the ordinary input can still be restored. */
 class AgentStartPolicyChangedError extends Error {
 	constructor() {
@@ -1216,6 +1223,12 @@ export class AgentSession implements SettingsScope {
 	 * another run has claimed the agent belongs to that run and stays out of it.
 	 */
 	#interruptAftermath: { runEpoch: number; controller: AbortController; tasks: Set<Promise<unknown>> } | undefined;
+	/** Interrupts still in their state cleanup; new runs wait for them (see {@link abort}). */
+	#abortsInProgress = 0;
+	/** Settles whenever an interrupt starts or finishes its state cleanup. */
+	#interruptChange = Promise.withResolvers<void>();
+	/** Open prompt (`#beginInFlight`) and client (`#prompt`) brackets by the in-flight epoch they opened in. */
+	#inFlightByEpoch = new Map<number, { prompts: number; clients: number }>();
 	/**
 	 * Cancels the current turn's pre-dispatch setup (memory-backend auto-recall and
 	 * other awaited preparation in {@link #prepareAgentStart}) when {@link abort} runs.
@@ -1261,7 +1274,39 @@ export class AgentSession implements SettingsScope {
 	/** Whether the open dialogs ended a prompt's computer turn, which goes on once they settle. */
 	#userWaitEndedTurn = false;
 	#inFlightEpoch = 0;
-	#abortInProgress = false;
+	/** Whether an interrupt is in its state cleanup; nested interrupts each hold it until their own cleanup ends. */
+	get #abortInProgress(): boolean {
+		return this.#abortsInProgress > 0;
+	}
+
+	#notifyInterruptChange(): void {
+		this.#interruptChange.resolve();
+		this.#interruptChange = Promise.withResolvers<void>();
+	}
+
+	/**
+	 * Waits until no interrupt is in its state cleanup, so a run begun during that cleanup claims the agent
+	 * only after it: the cleanup can then neither cancel nor reset the new run. Resolves `false` instead
+	 * when `superseded()` reports that this work was overtaken (by a later interrupt, a session switch or
+	 * disposal), or when the post-prompt task running it is cancelled, which is how work an interrupt is
+	 * itself waiting for gives way rather than waiting on that interrupt.
+	 */
+	async #admitAfterInterrupts(superseded: () => boolean): Promise<boolean> {
+		const taskSignal = workOrigin.getStore()?.taskSignal;
+		let taskCancelled: Promise<void> | undefined;
+		for (;;) {
+			if (superseded() || taskSignal?.aborted) return false;
+			if (!this.#abortInProgress) return true;
+			if (taskSignal && !taskCancelled) {
+				const cancelled = Promise.withResolvers<void>();
+				taskSignal.addEventListener("abort", () => cancelled.resolve(), { once: true });
+				taskCancelled = cancelled.promise;
+			}
+			const change = this.#interruptChange.promise;
+			await (taskCancelled ? Promise.race([change, taskCancelled]) : change);
+		}
+	}
+
 	/** In-flight {@link abort} calls; each settles after scheduling its stranded-queue drain, which {@link waitForIdle} must observe. */
 	#abortUnwinds = new Set<Promise<void>>();
 	/** Submissions accepted by prompt()/promptCustomMessage()/sendCustomMessage() that have not
@@ -1363,8 +1408,19 @@ export class AgentSession implements SettingsScope {
 		}
 	}
 
+	/** Open prompt and client brackets by in-flight epoch; an interrupt drops the epochs it took over. */
+	#inFlightEntry(epoch: number): { prompts: number; clients: number } {
+		let entry = this.#inFlightByEpoch.get(epoch);
+		if (!entry) {
+			entry = { prompts: 0, clients: 0 };
+			this.#inFlightByEpoch.set(epoch, entry);
+		}
+		return entry;
+	}
+
 	#beginInFlight(): number {
 		this.#promptInFlightCount++;
+		this.#inFlightEntry(this.#inFlightEpoch).prompts++;
 		if (this.#promptInFlightCount === 1) {
 			this.#acquirePowerAssertion();
 			this.#beginComputerTurn();
@@ -1374,10 +1430,14 @@ export class AgentSession implements SettingsScope {
 
 	#endInFlight(epoch: number, onSettled?: () => void | Promise<void>): void {
 		if (onSettled) this.#inFlightSettledCallbacks.push(onSettled);
-		// Abort has already taken an earlier epoch's bracket out of the count, so its late finalizer leaves the
-		// count to a newer turn; with none in flight it still settles, since a turn begun while abort() was
-		// finishing has its bracket reset by it and ends here.
-		if (epoch === this.#inFlightEpoch) this.#promptInFlightCount = Math.max(0, this.#promptInFlightCount - 1);
+		// A bracket an interrupt already dropped (#takeInterruptedInFlight) no longer counts, so its late
+		// finalizer leaves the count to newer turns; with none in flight it still settles.
+		const entry = this.#inFlightByEpoch.get(epoch);
+		if (entry && entry.prompts > 0) {
+			entry.prompts--;
+			if (entry.prompts === 0 && entry.clients === 0) this.#inFlightByEpoch.delete(epoch);
+			this.#promptInFlightCount = Math.max(0, this.#promptInFlightCount - 1);
+		}
 		if (this.#promptInFlightCount !== 0) return;
 		this.yieldQueue.requestIdleFlush();
 		this.#releasePowerAssertion();
@@ -1666,7 +1726,14 @@ export class AgentSession implements SettingsScope {
 		// advertise one yield schema while the runtime enforces the other, so join
 		// the transition before building the turn from a consistent contract.
 		void this.whenWorkPoolYieldSettled()
-			.then(() => {
+			// A wake that lands during an interrupt's cleanup starts once it is done; one an interrupt
+			// overtook keeps its records for the next turn, like a wake behind a running turn.
+			.then(() => this.#admitAfterInterrupts(() => this.#promptGeneration !== generation || this.#isDisposed))
+			.then(admitted => {
+				if (!admitted) {
+					this.#irc.queueAside(records);
+					return;
+				}
 				// Synchronous ownership check, atomic with the dispatch below:
 				// agent.prompt() claims streaming with no await in between, and the
 				// yield contract above mutates synchronously, so no install can
@@ -1848,23 +1915,34 @@ export class AgentSession implements SettingsScope {
 		this.#recordWithoutTurn([card]);
 	}
 
-	#resetInFlight(): void {
-		this.#inFlightEpoch++;
-		this.#promptInFlightCount = 0;
-		this.#clientPromptInFlightCount = 0;
-		this.yieldQueue.requestIdleFlush();
-		this.#releasePowerAssertion();
-		this.#endComputerTurn();
-		this.#flushPendingAgentEnd();
-		// The abort/disposal cleared every in-flight bracket: wake steers
-		// parked on a dispatch that will never go live — they re-check
-		// `#abortInProgress` and keep their content.
-		this.#wakeDispatchLiveWaiters();
-		if (this.#inFlightSettledCallbacks.length === 0) {
-			this.#drainStrandedQueuedMessages();
-			return;
-		}
-		void this.#flushInFlightSettledCallbacks().finally(() => this.#drainStrandedQueuedMessages());
+	/**
+	 * Takes over the prompt brackets open when an interrupt begins: they belong to the work it stops. The
+	 * epoch moves on, so brackets opened during the interrupt (later work) are counted apart. The stopped
+	 * work's brackets still close normally while the interrupt unwinds; the returned release, called once
+	 * its cleanup is done, drops whichever of them are still open and leaves later work's in flight.
+	 */
+	#takeInterruptedInFlight(): () => void {
+		const laterEpoch = ++this.#inFlightEpoch;
+		return () => {
+			for (const [epoch, entry] of this.#inFlightByEpoch) {
+				if (epoch >= laterEpoch) continue;
+				this.#promptInFlightCount = Math.max(0, this.#promptInFlightCount - entry.prompts);
+				this.#clientPromptInFlightCount = Math.max(0, this.#clientPromptInFlightCount - entry.clients);
+				this.#inFlightByEpoch.delete(epoch);
+			}
+			// Steers parked on a dispatch the interrupt ended re-check `#abortInProgress` and keep their content.
+			this.#wakeDispatchLiveWaiters();
+			if (this.#promptInFlightCount !== 0) return;
+			this.yieldQueue.requestIdleFlush();
+			this.#releasePowerAssertion();
+			this.#endComputerTurn();
+			this.#flushPendingAgentEnd();
+			if (this.#inFlightSettledCallbacks.length === 0) {
+				this.#drainStrandedQueuedMessages();
+				return;
+			}
+			void this.#flushInFlightSettledCallbacks().finally(() => this.#drainStrandedQueuedMessages());
+		};
 	}
 
 	#flushPendingAgentEnd(): void {
@@ -2323,12 +2401,19 @@ export class AgentSession implements SettingsScope {
 			injectIdle: async messages => {
 				const first = messages[0];
 				if (!first) return;
+				// A delivery that lands during an interrupt's cleanup starts its turn once the cleanup is
+				// done; one an interrupt overtook (its flush task cancelled) is folded into context below.
+				const generation = this.#promptGeneration;
+				const admitted = await this.#admitAfterInterrupts(
+					() => this.#promptGeneration !== generation || this.#isDisposed,
+				);
+				if (this.#isDisposed) return;
 				// A user interrupt is still in effect: background completions (async job
 				// results, launch completions, MCP/LSP/advisor asides) must not restart
 				// the run the user stopped. Fold them into context so the next deliberate
 				// prompt sees them — same policy as #resumeStrandedIrcAsides — until a later
 				// turn has ended on its own.
-				if (this.#advisors.autoResumeSuppressed && !this.#turnSettledSinceUserInterrupt) {
+				if (!admitted || (this.#advisors.autoResumeSuppressed && !this.#turnSettledSinceUserInterrupt)) {
 					logger.debug("Background delivery folded into context without a turn", {
 						count: messages.length,
 						customTypes: messages.map(message => (message.role === "custom" ? message.customType : message.role)),
@@ -4018,6 +4103,8 @@ export class AgentSession implements SettingsScope {
 		const computerControlRevocation =
 			event.type === "agent_end" ? revokeComputerControlForOwner(this.#eval.getKernelOwnerId()) : undefined;
 		if (event.type === "agent_start") this.#runEpoch++;
+		// Work this event's handling schedules comes from this run; an interrupt that stops the run owns it.
+		const origin = { runEpoch: this.#runEpoch };
 		// Only the user's own prompt, steer or follow-up lifts the computer-use stop their Escape set;
 		// synthetic continues and agent-sent messages (subagent budget steers) never do.
 		if (
@@ -4036,7 +4123,7 @@ export class AgentSession implements SettingsScope {
 			}
 		}
 		if (event.type !== "agent_end") {
-			const processing = this.#processAgentEvent(event);
+			const processing = workOrigin.run(origin, () => this.#processAgentEvent(event));
 			if ((event.type === "message_start" || event.type === "message_end") && isAdvisorCard(event.message)) {
 				this.#advisors.trackCardEvent(processing);
 			}
@@ -4049,7 +4136,7 @@ export class AgentSession implements SettingsScope {
 			// Maintenance starts now, not behind the revocation ack: it classifies this run's end
 			// against live abort state, and a deferred start lets `abort()` settle first, so a
 			// deliberate empty abort reads as a reasonless one and is auto-retried.
-			await Promise.all([this.#processAgentEvent(event), computerControlRevocation]);
+			await Promise.all([workOrigin.run(origin, () => this.#processAgentEvent(event)), computerControlRevocation]);
 		} catch (error) {
 			// Post-turn maintenance (compaction, pruning rewrites, hooks) threw before
 			// publishing the settle. Without it the run never reports idle and every
@@ -5281,7 +5368,13 @@ export class AgentSession implements SettingsScope {
 		options?: { delayMs?: number; generation?: number; onSkip?: (reason: PostPromptSkipReason) => void },
 	): void {
 		const delayMs = options?.delayMs ?? 0;
-		const aftermath = this.#interruptAftermath?.runEpoch === this.#runEpoch ? this.#interruptAftermath : undefined;
+		// Work that came from the run an unwinding interrupt stopped belongs to that interrupt; work begun
+		// since (a message queued during the unwind) does not, and runs once the unwind is done.
+		const runEpoch = workOrigin.getStore()?.runEpoch;
+		const aftermath =
+			runEpoch !== undefined && this.#interruptAftermath?.runEpoch === runEpoch
+				? this.#interruptAftermath
+				: undefined;
 		const signal = aftermath
 			? AbortSignal.any([this.#postPromptTasksAbortController.signal, aftermath.controller.signal])
 			: this.#postPromptTasksAbortController.signal;
@@ -5302,7 +5395,7 @@ export class AgentSession implements SettingsScope {
 				options.onSkip?.("stale-generation");
 				return;
 			}
-			await task(signal);
+			await workOrigin.run({ runEpoch, taskSignal: signal }, () => task(signal));
 		})();
 		this.#trackPostPromptTask(scheduled);
 		aftermath?.tasks.add(scheduled);
@@ -8202,11 +8295,12 @@ export class AgentSession implements SettingsScope {
 		// #promptWithMessage, past those awaits. Released when the dispatched
 		// turn settles (this bracket spans dispatch + run, matching
 		// #promptWithMessage's awaited lifetime) or on every path that never
-		// starts a turn. The epoch guard keeps an aborted prompt's finally
-		// from eating a later prompt's claim after #resetInFlight zeroed the
-		// count.
+		// starts a turn. The epoch keeps an aborted prompt's finally from
+		// eating a later prompt's claim: once the interrupt dropped this
+		// bracket (#takeInterruptedInFlight), the finally finds nothing to close.
 		const claimEpoch = this.#inFlightEpoch;
 		this.#clientPromptInFlightCount++;
+		this.#inFlightEntry(claimEpoch).clients++;
 		try {
 			// Idle compaction rewrites history without owning a prompt. Manual `/compact`
 			// reconnects the agent after preserving queues; `/handoff` commits a new
@@ -8222,13 +8316,16 @@ export class AgentSession implements SettingsScope {
 				release(outcome.sessionClaimed);
 			}
 		} finally {
-			if (claimEpoch === this.#inFlightEpoch) {
+			const entry = this.#inFlightByEpoch.get(claimEpoch);
+			if (entry && entry.clients > 0) {
+				entry.clients--;
+				if (entry.prompts === 0 && entry.clients === 0) this.#inFlightByEpoch.delete(claimEpoch);
 				this.#clientPromptInFlightCount = Math.max(0, this.#clientPromptInFlightCount - 1);
 				// Dropped after the settle wake inside #endInFlight (this
 				// frame settles after #promptWithMessage returns): wake the
 				// parked steers again so they re-check against zero and
 				// refuse (keeping their content) instead of admitting after
-				// settle, mirroring #resetInFlight's wake.
+				// settle, mirroring the interrupt's release wake.
 				if (this.#clientPromptInFlightCount === 0) {
 					this.#wakeDispatchLiveWaiters();
 				}
@@ -9104,11 +9201,15 @@ export class AgentSession implements SettingsScope {
 						this.#wakeDispatchLiveWaiters();
 					},
 					// A prompt parked behind another run must not start once an interrupt,
-					// a session switch or disposal has superseded it.
+					// a session switch or disposal has superseded it, and a prompt begun during
+					// an interrupt's cleanup claims the agent only once that cleanup is done.
 					() =>
-						this.#promptGeneration !== generation ||
-						this.#sessionGeneration !== sessionGeneration ||
-						(this.#isDisposed && !disposingAtStart),
+						this.#admitAfterInterrupts(
+							() =>
+								this.#promptGeneration !== generation ||
+								this.#sessionGeneration !== sessionGeneration ||
+								(this.#isDisposed && !disposingAtStart),
+						),
 				);
 				dispatched = await run;
 			} finally {
@@ -9684,7 +9785,7 @@ export class AgentSession implements SettingsScope {
 	 * run's first batch boundary. Fired from the client prompt's own
 	 * `agent.prompt` claim (the `onClaimed` hook in
 	 * `#promptAgentWithIdleRetry` — an autonomous run's streaming never
-	 * fires it), and from `#endInFlight`/`#resetInFlight` when the count
+	 * fires it), and from `#endInFlight`/an interrupt's release when the count
 	 * drains without the client run ever going live (setup failure, abort,
 	 * disposal).
 	 */
@@ -10016,8 +10117,15 @@ export class AgentSession implements SettingsScope {
 		options?: { acceptTerminalEmptyStop?: boolean },
 	): Promise<boolean> {
 		const inFlightEpoch = this.#beginInFlight();
+		const generation = this.#promptGeneration;
 		try {
 			if (!(await this.#runUsageAwarePreflightForNextModelCall())) return false;
+			// Begun during an interrupt's cleanup: start once it is done. Overtaken by an interrupt
+			// (or disposal) instead: the interrupt stops the turn, and the message stays in context.
+			if (!(await this.#admitAfterInterrupts(() => this.#promptGeneration !== generation || this.#isDisposed))) {
+				if (!this.#isDisposed) this.#recordWithoutTurn([message]);
+				return false;
+			}
 			const acceptTerminalEmptyStop = options?.acceptTerminalEmptyStop === true;
 			if (acceptTerminalEmptyStop) {
 				this.#resetPromptMaintenanceState();
@@ -11329,10 +11437,28 @@ export class AgentSession implements SettingsScope {
 		const strandedMessages = this.#extractInterruptedQueuedMessages(userInterrupt);
 		// Session switch/compact paths disconnect first; explicit aborts should
 		// leave any queued steer/follow-up visible for the user rather than
-		// auto-starting a fresh turn during cleanup.
-		this.#abortInProgress = true;
+		// auto-starting a fresh turn during cleanup. Until this interrupt's state
+		// cleanup ends, new runs wait (#admitAfterInterrupts), so the cleanup below
+		// only ever meets the work it stops.
+		this.#abortsInProgress++;
+		this.#notifyInterruptChange();
+		const releaseInterruptedInFlight = this.#takeInterruptedInFlight();
 		const unwind = Promise.withResolvers<void>();
 		this.#abortUnwinds.add(unwind.promise);
+		// A failing step (a computer-control revocation that throws, say) must not skip the cleanup
+		// after it: the first failure is kept and rethrown once the interrupt has fully unwound.
+		let failure: { error: unknown } | undefined;
+		const keepFailure = (error: unknown): void => {
+			failure ??= { error };
+		};
+		let cleaning = true;
+		const endStateCleanup = (): void => {
+			if (!cleaning) return;
+			cleaning = false;
+			this.#abortsInProgress--;
+			this.#notifyInterruptChange();
+			this.#drainStrandedQueuedMessages();
+		};
 		try {
 			this.#titleGenerationAbortController.abort();
 			if (!this.#isDisposed) this.#titleGenerationAbortController = new AbortController();
@@ -11362,12 +11488,13 @@ export class AgentSession implements SettingsScope {
 			}
 			this.abortBash();
 			this.abortEval();
-			const computerControlRevocation = revokeComputerControlForOwner(this.#eval.getKernelOwnerId());
+			const computerControlRevocation = Promise.try(() =>
+				revokeComputerControlForOwner(this.#eval.getKernelOwnerId()),
+			).catch(keepFailure);
 			const postPromptDrain = this.#cancelPostPromptTasks();
 			this.agent.abort(options?.reason);
-			// From here, post-prompt work the stopped run's aftermath schedules belongs to this
-			// interrupt; a run that claims the agent during the awaits below owns its own work,
-			// and so does a rule interruption newer than the one pending now.
+			// From here, post-prompt work that comes from the stopped run (its agent_end
+			// maintenance) belongs to this interrupt; so does the rule interruption pending now.
 			const aftermath = {
 				runEpoch: this.#runEpoch,
 				controller: new AbortController(),
@@ -11375,38 +11502,41 @@ export class AgentSession implements SettingsScope {
 			};
 			this.#interruptAftermath = aftermath;
 			const ttsrInterruption = this.#ttsr.interruptionToken;
-			await Promise.all([postPromptDrain, computerControlRevocation]);
-			await this.agent.waitForIdle();
-			this.#persistToolResultsEndedWhileDisconnected();
-			// agent_end maintenance can enqueue a retry after the first cancellation.
-			// Keep the abort barrier up until those handlers settle, then cancel
-			// what they scheduled before making the session revivable. Only
-			// agent_end is awaited: a message_end stalled in an extension hook would
-			// otherwise hold /new and every abort for the full handler timeout.
-			await this.#drainAgentEndMaintenance();
+			try {
+				await Promise.all([postPromptDrain, computerControlRevocation]);
+				await this.agent.waitForIdle();
+				this.#persistToolResultsEndedWhileDisconnected();
+				// agent_end maintenance can enqueue a retry after the first cancellation.
+				// Keep the abort barrier up until those handlers settle, then cancel
+				// what they scheduled before making the session revivable. Only
+				// agent_end is awaited: a message_end stalled in an extension hook would
+				// otherwise hold /new and every abort for the full handler timeout.
+				await this.#drainAgentEndMaintenance();
+			} catch (error) {
+				keepFailure(error);
+			}
 			// The interrupted run's aborted reply is handled by now, so the rule interruption whose
 			// continuation this abort cancelled can be dropped without unmarking that reply.
 			if (ttsrInterruption !== undefined) this.#ttsr.cancelPendingAbort(ttsrInterruption);
-			if (this.#runEpoch === aftermath.runEpoch) this.abortRetry();
+			this.abortRetry();
 			aftermath.controller.abort();
 			if (this.#interruptAftermath === aftermath) this.#interruptAftermath = undefined;
 			await Promise.allSettled(aftermath.tasks);
 			// `/compact` disconnects the agent subscription until its finally block.
 			// Do not let abort-and-replace callers start a new prompt before that cleanup
 			// finishes, or the replacement turn's events are neither forwarded nor persisted.
-			await manualCompactionCleanup;
-			await this.#drainAutolearnCapture();
-			await this.#goalRuntime.onTaskAborted({ reason: options?.goalReason ?? "interrupted" });
-			// Clear prompt-in-flight state: waitForIdle resolves when the agent loop's finally
-			// block runs, but nested prompt setup/finalizers may still be unwinding. Without this,
-			// a subsequent prompt() can incorrectly observe the session as busy after an abort.
-			this.#resetInFlight();
+			await manualCompactionCleanup?.catch(keepFailure);
+			// waitForIdle resolves when the agent loop's finally block runs, but the stopped
+			// prompt's setup/finalizers may still be unwinding: drop the brackets this
+			// interrupt took over, so a subsequent prompt() does not observe the session as busy.
+			releaseInterruptedInFlight();
 			this.#resetSessionStopContinuationState();
 			this.#clearPendingSessionStopContinuations();
 			// Safety net: if the agent loop aborted without producing an assistant
 			// message (e.g. failed before the first stream), the in-flight yield was
 			// never resolved or rejected by the normal message_end path. Reject it now
-			// so any requeue callback still fires and the queue stays consistent.
+			// so any requeue callback still fires and the queue stays consistent. No
+			// later run can hold a directive yet: runs wait for this cleanup.
 			if (this.#toolChoiceQueue.hasInFlight) {
 				this.#toolChoiceQueue.reject("aborted");
 			}
@@ -11414,11 +11544,9 @@ export class AgentSession implements SettingsScope {
 			// transcript entries without triggering a turn, plus any advisor cards that
 			// arrived via AdviseTool routing mid-abort and were parked hidden in
 			// #pendingNextTurnMessages while the turn was still tearing down. Other deferred
-			// next-turn context (non-advisor) stays queued, in order. A turn another source
-			// started during the awaits above (an idle triggerTurn send, an IRC wake) that is
-			// already streaming must not get them spliced into its live stream: they ride that
-			// turn as follow-ups instead. A prompt still in its setup has sent nothing yet, so
-			// recording them now puts them ahead of it, as for any later prompt.
+			// next-turn context (non-advisor) stays queued, in order. An autonomous run that
+			// is somehow streaming must not get them spliced into its live stream: they ride
+			// that turn as follow-ups instead.
 			const parkedAdvisorCards = this.#pendingNextTurnMessages.filter(isAdvisorCard);
 			if (parkedAdvisorCards.length > 0) {
 				this.#pendingNextTurnMessages = this.#pendingNextTurnMessages.filter(m => !isAdvisorCard(m));
@@ -11431,12 +11559,17 @@ export class AgentSession implements SettingsScope {
 					this.agent.followUp(message);
 				} else this.#recordWithoutTurn([message]);
 			}
+			// The session state is clean: later work may run. The remaining steps only wait on
+			// outside work (autolearn capture, goal hooks) and touch none of it.
+			endStateCleanup();
+			await this.#drainAutolearnCapture().catch(keepFailure);
+			await this.#goalRuntime.onTaskAborted({ reason: options?.goalReason ?? "interrupted" }).catch(keepFailure);
 		} finally {
-			this.#abortInProgress = false;
-			this.#drainStrandedQueuedMessages();
+			endStateCleanup();
 			this.#abortUnwinds.delete(unwind.promise);
 			unwind.resolve();
 		}
+		if (failure) throw failure.error;
 	}
 
 	/**
