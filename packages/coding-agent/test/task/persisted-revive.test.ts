@@ -93,7 +93,6 @@ afterEach(() => {
 		else process.env[key] = value;
 	}
 	__resetDirsFromEnvForTests();
-	expect(getAgentDir().startsWith(isolatedHome.path())).toBe(false);
 });
 
 afterAll(() => {
@@ -305,6 +304,9 @@ afterEach(async () => {
 	vi.restoreAllMocks();
 	MCPManager.resetForTests();
 	await Promise.all(tempDirs.splice(0).map(dir => dir.remove()));
+	// Last, so that a put-back this file got wrong is reported with every other cleanup already
+	// done: a hook that throws skips the hooks after it.
+	expect(getAgentDir().startsWith(isolatedHome.path())).toBe(false);
 });
 
 describe("persisted subagent revival", () => {
