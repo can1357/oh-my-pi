@@ -45,46 +45,6 @@ impl std::fmt::Display for EnvironmentScope {
 	}
 }
 
-/// A guard that pushes a scope onto a shell environment and pops it when
-/// dropped.
-pub(crate) struct ScopeGuard<'a, SE: extensions::ShellExtensions> {
-	scope_type: EnvironmentScope,
-	shell:      &'a mut crate::Shell<SE>,
-	detached:   bool,
-}
-
-impl<'a, SE: extensions::ShellExtensions> ScopeGuard<'a, SE> {
-	/// Creates a new scope guard, pushing the given scope type onto the
-	/// environment.
-	///
-	/// # Arguments
-	///
-	/// * `shell` - The shell whose environment to modify.
-	/// * `scope_type` - The type of scope to push.
-	pub fn new(shell: &'a mut crate::Shell<SE>, scope_type: EnvironmentScope) -> Self {
-		shell.env_mut().push_scope(scope_type);
-		Self { scope_type, shell, detached: false }
-	}
-
-	/// Returns a mutable reference to the shell.
-	pub const fn shell(&mut self) -> &mut crate::Shell<SE> {
-		self.shell
-	}
-
-	/// Detaches the guard, preventing it from popping the scope on drop.
-	pub const fn detach(&mut self) {
-		self.detached = true;
-	}
-}
-
-impl<SE: extensions::ShellExtensions> Drop for ScopeGuard<'_, SE> {
-	fn drop(&mut self) {
-		if !self.detached {
-			let _ = self.shell.env_mut().pop_scope(self.scope_type);
-		}
-	}
-}
-
 /// Represents the shell variable environment, composed of a stack of scopes.
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -129,10 +89,24 @@ impl ShellEnvironment {
 	/// * `expected_scope_type` - The type of scope that is expected to be atop
 	///   the stack.
 	pub fn pop_scope(&mut self, expected_scope_type: EnvironmentScope) -> Result<(), error::Error> {
+		self.pop_scope_variables(expected_scope_type).map(drop)
+	}
+
+	/// Pops the top-most scope off the environment's scope stack and returns
+	/// its variables.
+	///
+	/// # Arguments
+	///
+	/// * `expected_scope_type` - The type of scope that is expected to be atop
+	///   the stack.
+	pub fn pop_scope_variables(
+		&mut self,
+		expected_scope_type: EnvironmentScope,
+	) -> Result<ShellVariableMap, error::Error> {
 		// TODO(env): Should we panic instead on failure? It's effectively a broken
 		// invariant.
 		match self.scopes.pop() {
-			Some((actual_scope_type, _)) if actual_scope_type == expected_scope_type => Ok(()),
+			Some((actual_scope_type, variables)) if actual_scope_type == expected_scope_type => Ok(variables),
 			Some((actual_scope_type, _)) => Err(
 				error::ErrorKind::UnexpectedScopeType {
 					expected: expected_scope_type,
@@ -142,6 +116,12 @@ impl ShellEnvironment {
 			),
 			None => Err(error::ErrorKind::MissingScope.into()),
 		}
+	}
+
+	/// Pushes a scope of the given type holding `variables`, as one that
+	/// [`Self::pop_scope_variables`] returned.
+	pub fn push_scope_variables(&mut self, scope_type: EnvironmentScope, variables: ShellVariableMap) {
+		self.scopes.push((scope_type, variables));
 	}
 
 	//
@@ -649,6 +629,15 @@ impl ShellVariableMap {
 	/// * `var` - The variable to set.
 	pub fn set<N: Into<String>>(&mut self, name: N, var: ShellVariable) -> Option<ShellVariable> {
 		self.variables.insert(name.into(), var)
+	}
+}
+
+impl IntoIterator for ShellVariableMap {
+	type IntoIter = std::collections::hash_map::IntoIter<String, ShellVariable>;
+	type Item = (String, ShellVariable);
+
+	fn into_iter(self) -> Self::IntoIter {
+		self.variables.into_iter()
 	}
 }
 

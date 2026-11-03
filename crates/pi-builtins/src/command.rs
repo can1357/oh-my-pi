@@ -171,8 +171,8 @@ impl CommandCommand {
 			ExecutionSpawnResult::StartedProcess(child) => child.pid(),
 			ExecutionSpawnResult::Completed(_) | ExecutionSpawnResult::StartedTask(_) => None,
 		};
-		let (wait_result, status) = spawn_result.wait_with_status(None).await?;
-		if let Some(status) = status {
+		let (wait_result, waited) = spawn_result.wait_with_status(None).await?;
+		if let Some(status) = waited.process {
 			params.record_stand_in_process(pid, status);
 		}
 

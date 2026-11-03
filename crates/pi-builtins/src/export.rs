@@ -85,6 +85,12 @@ impl ExportCommand {
 						return Ok(ExecutionExitCode::InvalidUsage.into());
 					}
 				}
+				// A word that is no variable name fails, as Bash's
+				// `set_or_show_attributes` reports it (`export 2`).
+				else if !brush_core::env::valid_variable_name(s) {
+					writeln!(context.stderr(), "{}: {s}: not a valid variable name", context.command_name)?;
+					return Ok(ExecutionExitCode::GeneralError.into());
+				}
 				// Try to find the variable already present; if we find it, then mark it
 				// exported.
 				else if let Some((_, variable)) = context.shell.env_mut().get_mut(s) {

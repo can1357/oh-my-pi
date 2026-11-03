@@ -62,6 +62,35 @@ pub(crate) fn reads_command_text(
 	scan().is_err()
 }
 
+/// The operand of a `%`, `#`, `/`, `^`, `,` or `:` expansion in a
+/// here-document as Bash's extraction leaves it
+/// (`extract_heredoc_dolbrace_string`), which is what Bash then expands:
+/// each `$'...'` at the operand's own level single-quoted, one in a nested
+/// `${...}` its value as it is, and each `$"..."` a double-quoted string.
+/// `None` when the operand holds neither, or when the extraction read text
+/// (the word's own scan counted that, see [`reads_command_text`]).
+pub(crate) fn translate_heredoc_operand(operand: &str, posix: bool) -> Option<String> {
+	if !operand.contains("$'") && !operand.contains("$\"") {
+		return None;
+	}
+	let mut translated = Vec::with_capacity(operand.len());
+	Scanner { s: operand.as_bytes(), posix }
+		.extract_heredoc_dolbrace_string(0, SX_POSIXEXP | SX_WORD, Some(&mut translated))
+		.ok()?;
+	Some(String::from_utf8_lossy(&translated).into_owned())
+}
+
+/// Whether Bash reads text with its parser when it expands a here-document
+/// operand as [`translate_heredoc_operand`] leaves it, which it does only
+/// when it uses the operand: a pattern as `getpattern` expands it
+/// (`Q_PATQUOTE`, no process substitution), the offset or length of `:`
+/// (`arithmetic`) as `expand_arith_string` does. A nested `${...}` reads
+/// its operand as it is extracted, whether or not it uses it.
+pub(crate) fn heredoc_operand_reads_command_text(translated: &str, arithmetic: bool, posix: bool) -> bool {
+	let scanner = Scanner { s: translated.as_bytes(), posix };
+	if arithmetic { scanner.arith_scan() } else { scanner.word_scan(0, true) }.is_err()
+}
+
 /// Bash called its parser on the text being scanned (`xparse_dolparen`).
 struct Parsed;
 
@@ -481,7 +510,7 @@ impl Scanner<'_> {
 			state = DOLBRACE_QUOTE;
 		}
 		if quoted == Q_HERE_DOCUMENT && state == DOLBRACE_QUOTE && flags & SX_NOALLOC == 0 {
-			return self.extract_heredoc_dolbrace_string(i, flags);
+			return self.extract_heredoc_dolbrace_string(i, flags, None);
 		}
 		let start = i;
 		let mut saved_states = vec![state];
@@ -568,85 +597,87 @@ impl Scanner<'_> {
 	}
 
 	/// `extract_heredoc_dolbrace_string`, which a here-document uses for an
-	/// operator that quotes its pattern (`%`, `#`, `/`, `^`, `,`, `:`).
-	fn extract_heredoc_dolbrace_string(&self, mut i: usize, flags: u8) -> Scan {
+	/// operator that quotes its pattern (`%`, `#`, `/`, `^`, `,`, `:`). With
+	/// `operand` it also copies the operand there as Bash's result buffer
+	/// holds it: each `$'...'` translated, single-quoted in a pattern and as
+	/// it is elsewhere (`DOLBRACE_PARAM`, `DOLBRACE_OP`, `DOLBRACE_WORD`, in
+	/// a nested `${...}`). Bash keeps the outer state when a nested `${...}`
+	/// ends.
+	fn extract_heredoc_dolbrace_string(&self, mut i: usize, flags: u8, mut operand: Option<&mut Vec<u8>>) -> Scan {
 		let start = i;
 		let mut state = DOLBRACE_QUOTE;
 		let mut pass_next = false;
 		let mut nesting = 1_usize;
 		while i < self.len() {
 			let c = self.s[i];
+			let from = i;
 			if pass_next {
 				pass_next = false;
 				i += 1;
-				continue;
-			}
-			if c == b'\\' {
+			} else if c == b'\\' {
 				pass_next = true;
 				i += 1;
-				continue;
-			}
-			if c == b'$' && self.at(i + 1) == b'\'' {
+			} else if c == b'$' && self.at(i + 1) == b'\'' {
 				if self.posix && state != DOLBRACE_QUOTE && state != DOLBRACE_QUOTE2 {
 					i += 2;
 				} else {
-					i = self.extract_single_quoted(i + 2, true);
+					let end = self.extract_single_quoted(i + 2, true);
+					if let Some(operand) = operand.as_deref_mut() {
+						let (_, value) = ansi_c_value(self.s, i + 2);
+						if state == DOLBRACE_QUOTE || state == DOLBRACE_QUOTE2 {
+							operand.extend_from_slice(&single_quote(&value));
+						} else {
+							operand.extend_from_slice(&value);
+						}
+					}
+					i = end;
+					continue;
+				}
+			} else if c == b'$' && self.at(i + 1) == b'"' {
+				i = self.skip_double_quoted(i + 2, flags)?;
+				if let Some(operand) = operand.as_deref_mut() {
+					operand.extend_from_slice(&self.s[from + 1..i]);
 				}
 				continue;
-			}
-			if c == b'$' && self.at(i + 1) == b'"' {
-				i = self.skip_double_quoted(i + 2, flags)?;
-				continue;
-			}
-			if c == b'$' && self.at(i + 1) == b'{' {
+			} else if c == b'$' && self.at(i + 1) == b'{' {
 				nesting += 1;
 				i += 2;
 				if matches!(state, DOLBRACE_QUOTE | DOLBRACE_QUOTE2 | DOLBRACE_WORD) {
 					state = DOLBRACE_PARAM;
 				}
-				continue;
-			}
-			if c == b'}' {
+			} else if c == b'}' {
 				nesting -= 1;
 				if nesting == 0 {
 					break;
 				}
 				i += 1;
-				continue;
-			}
-			if c == b'`' {
+			} else if c == b'`' {
 				let end = self.string_extract(i + 1, b"`", flags)?;
 				if end >= self.len() {
 					return Ok(self.len());
 				}
 				i = end + 1;
-				continue;
-			}
-			if c == b'$' && self.at(i + 1) == b'(' {
+			} else if c == b'$' && self.at(i + 1) == b'(' {
 				let end = self.extract_command_subst(i + 2, flags)?;
 				if end >= self.len() {
 					return Ok(self.len());
 				}
 				i = end + 1;
-				continue;
-			}
-			if matches!(c, b'<' | b'>') && self.at(i + 1) == b'(' {
+			} else if matches!(c, b'<' | b'>') && self.at(i + 1) == b'(' {
 				return Err(Parsed);
-			}
-			if c == b'\'' && self.posix && state != DOLBRACE_QUOTE {
+			} else if c == b'\'' && self.posix && state != DOLBRACE_QUOTE {
 				i += 1;
-				continue;
-			}
-			if c == b'"' {
+			} else if c == b'"' {
 				i = self.skip_double_quoted(i + 1, flags)?;
-				continue;
-			}
-			if c == b'\'' {
+			} else if c == b'\'' {
 				i = self.extract_single_quoted(i + 1, false);
-				continue;
+			} else {
+				i += 1;
+				state = next_dolbrace_state(state, c, i - start);
 			}
-			i += 1;
-			state = next_dolbrace_state(state, c, i - start);
+			if let Some(operand) = operand.as_deref_mut() {
+				operand.extend_from_slice(&self.s[from..i.min(self.len())]);
+			}
 		}
 		Ok(i)
 	}
@@ -912,12 +943,23 @@ fn normalize_dolbrace(s: &[u8], start: usize, dquote: bool, out: &mut Vec<u8>) -
 }
 
 /// The value of the `$'...'` whose text starts at `start` (after `$'`),
-/// with the index after its closing quote.
+/// with the index after its closing quote. A NUL an escape produced ends
+/// Bash's C string there, so the value stops before it; `ansi_c_value_nul`
+/// says whether it did.
 fn ansi_c_value(s: &[u8], start: usize) -> (usize, Vec<u8>) {
+	let (end, mut value) = ansi_c_value_nul(s, start);
+	if let Some(nul) = value.iter().position(|&b| b == 0) {
+		value.truncate(nul);
+	}
+	(end, value)
+}
+
+/// [`ansi_c_value`] with a NUL an escape produced kept in the value.
+fn ansi_c_value_nul(s: &[u8], start: usize) -> (usize, Vec<u8>) {
 	let end = Scanner { s, posix: false }.extract_single_quoted(start, true);
 	let content_end = if end > start && s.get(end - 1) == Some(&b'\'') { end - 1 } else { end };
 	let content = String::from_utf8_lossy(&s[start..content_end]);
-	let value = escape::expand_backslash_escapes(&content, escape::EscapeExpansionMode::AnsiCQuotes)
+	let value = escape::expand_backslash_escapes_keeping_nul(&content, escape::EscapeExpansionMode::AnsiCQuotes)
 		.map(|(value, _)| value)
 		.unwrap_or_else(|_| content.as_bytes().to_vec());
 	(end, value)
@@ -939,15 +981,32 @@ fn single_quote(value: &[u8]) -> Vec<u8> {
 }
 
 /// The word of `${x:-word}` (and `+`, `=`, `?`) as Bash expands it within
-/// double quotes or a here-document: `string_extract_double_quoted` with
-/// `SX_STRIPDQ` (`parameter_brace_expand_rhs`) removes each unescaped double
-/// quote outside a `$(...)`, `${...}` or backquoted command, keeps a
+/// double quotes or a here-document. Outside a here-document Bash's parser
+/// has first translated the word's `$'...'` strings (see
+/// [`translate_operand_ansi_c_strings`]). Then `string_extract_double_quoted`
+/// with `SX_STRIPDQ` (`parameter_brace_expand_rhs`) removes each unescaped
+/// double quote outside a `$(...)`, `${...}` or backquoted command, keeps a
 /// backslash before `$`, `` ` ``, `"`, `\` and a newline inside such quotes
 /// and before anything outside them, and drops it otherwise. The result is
 /// then expanded as if double-quoted. A single quote is an ordinary
 /// character here. The extent of a `$(...)` or `${...}` is the one Bash's
-/// parser finds, here brush's word parser.
-pub(crate) fn strip_embedded_double_quotes(word: &str, options: &brush_parser::ParserOptions, heredoc: bool) -> String {
+/// parser finds, here brush's word parser. Fails, as Bash's `bad
+/// substitution`, when a translated `$'...'` leaves the expansion without
+/// its closing `}`.
+pub(crate) fn strip_embedded_double_quotes(
+	word: &str,
+	options: &brush_parser::ParserOptions,
+	heredoc: bool,
+) -> Result<String, crate::error::Error> {
+	let translated;
+	let word = if heredoc {
+		word
+	} else {
+		translated = translate_operand_ansi_c_strings(word, options).map_err(|text| {
+			crate::error::ErrorKind::BadSubstitution(std::format!("no closing `}}' after `{text}'"))
+		})?;
+		translated.as_str()
+	};
 	let mut out = String::with_capacity(word.len());
 	let mut dquote = false;
 	let mut backquote = false;
@@ -974,41 +1033,6 @@ pub(crate) fn strip_embedded_double_quotes(word: &str, options: &brush_parser::P
 				backquote = true;
 				out.push(c);
 			},
-			'$' if !heredoc && matches!(chars.peek(), Some((_, '\''))) => {
-				// A `$'...'` inside a double-quoted operand is translated by
-				// `string_extract_double_quoted` with `SX_STRIPDQ`: the escape
-				// sequences become their values.
-				chars.next(); // consume the opening `'`
-				let start = chars.peek().map_or(word.len(), |&(j, _)| j);
-				let mut escape_next = false;
-				let mut content_end = word.len();
-				while let Some(&(pos, ch)) = chars.peek() {
-					if escape_next {
-						escape_next = false;
-						chars.next();
-						continue;
-					}
-					if ch == '\\' {
-						escape_next = true;
-						chars.next();
-						continue;
-					}
-					if ch == '\'' {
-						content_end = pos;
-						chars.next();
-						break;
-					}
-					chars.next();
-				}
-				let content = &word[start..content_end];
-				let value = crate::escape::expand_backslash_escapes(
-					content,
-					crate::escape::EscapeExpansionMode::AnsiCQuotes,
-				)
-				.map(|(v, _)| String::from_utf8_lossy(&v).into_owned())
-				.unwrap_or_else(|_| content.to_owned());
-				out.push_str(&value);
-			},
 			'$' if matches!(chars.peek(), Some((_, '(' | '{'))) => {
 				let rest = &word[i..];
 				let end = substitution_end(rest, options).unwrap_or(rest.len());
@@ -1021,7 +1045,84 @@ pub(crate) fn strip_embedded_double_quotes(word: &str, options: &brush_parser::P
 			c => out.push(c),
 		}
 	}
-	out
+	Ok(out)
+}
+
+/// The word of a double-quoted `${x:-word}` as Bash's parser leaves it
+/// (`parse_matched_pair` with `P_DQUOTE|P_DOLBRACE`): each `$'...'` at the
+/// word's own level becomes its value as it is, since single quotes are not
+/// special in double quotes, and a later expansion reads that value. One
+/// inside a single-quoted or double-quoted string or a backquoted command
+/// stays as it is, and so does one inside a nested `$(...)` or `${...}`,
+/// whose own expansion translates it. In POSIX mode a single quote in the
+/// word quotes nothing, so the parser translates no `$'...'` there.
+///
+/// Bash then extracts the `${...}` again from the translated text
+/// (`extract_dollar_brace_string`), so a value that leaves a quote open, or
+/// holds a NUL that ends the parser's text, leaves the expansion without its
+/// closing `}`: an error, `bad substitution`.
+fn translate_operand_ansi_c_strings(word: &str, options: &brush_parser::ParserOptions) -> Result<String, String> {
+	if options.posix_mode || !word.contains("$'") {
+		return Ok(word.to_owned());
+	}
+	let mut out = String::with_capacity(word.len());
+	let mut translated = false;
+	let mut i = 0;
+	while let Some(c) = word[i..].chars().next() {
+		let rest = &word[i..];
+		let next = rest[c.len_utf8()..].chars().next();
+		let len = match (c, next) {
+			('\\', Some(escaped)) => 1 + escaped.len_utf8(),
+			('\'', _) => rest[1..].find('\'').map_or(rest.len(), |end| end + 2),
+			('"', _) => quoted_end(rest, '"', options),
+			('`', _) => quoted_end(rest, '`', options),
+			('$', Some('\'')) => {
+				let (end, value) = ansi_c_value_nul(rest.as_bytes(), 2);
+				if value.contains(&0) {
+					return Err(out);
+				}
+				out.push_str(&String::from_utf8_lossy(&value));
+				translated = true;
+				i += end;
+				continue;
+			},
+			('$', Some('(' | '{')) => substitution_end(rest, options).unwrap_or(rest.len()),
+			_ => c.len_utf8(),
+		};
+		out.push_str(&rest[..len]);
+		i += len;
+	}
+	if translated {
+		let mut text = Vec::with_capacity(out.len() + 1);
+		text.extend_from_slice(out.as_bytes());
+		text.push(b'}');
+		let scanner = Scanner { s: &text, posix: false };
+		if matches!(scanner.extract_dollar_brace_string(0, Q_DOUBLE_QUOTES, SX_WORD | SX_NOALLOC), Ok(end) if end >= text.len()) {
+			return Err(out);
+		}
+	}
+	Ok(out)
+}
+
+/// The length of the double-quoted string or backquoted command that starts
+/// `text` with `quote`, through its closing quote: a backslash quotes the
+/// next character, and in a double-quoted string a `$(...)`, `${...}` or
+/// backquoted command is skipped whole.
+fn quoted_end(text: &str, quote: char, options: &brush_parser::ParserOptions) -> usize {
+	let mut i = 1;
+	while let Some(c) = text[i..].chars().next() {
+		let rest = &text[i..];
+		i += match c {
+			'\\' => 1 + rest[1..].chars().next().map_or(0, char::len_utf8),
+			c if c == quote => return i + 1,
+			'`' if quote == '"' => quoted_end(rest, '`', options),
+			'$' if quote == '"' && matches!(rest[1..].chars().next(), Some('(' | '{')) => {
+				substitution_end(rest, options).unwrap_or(rest.len())
+			},
+			c => c.len_utf8(),
+		};
+	}
+	text.len()
 }
 
 /// The length of the `$(...)` or `${...}` that starts `text`: the shortest
@@ -1040,7 +1141,10 @@ fn substitution_end(text: &str, options: &brush_parser::ParserOptions) -> Option
 
 #[cfg(test)]
 mod tests {
-	use super::{WordContext, reads_command_text};
+	use super::{
+		WordContext, heredoc_operand_reads_command_text, reads_command_text, strip_embedded_double_quotes,
+		translate_heredoc_operand,
+	};
 
 	#[test]
 	fn extraction_reads_what_bash_reads() {
@@ -1063,5 +1167,41 @@ mod tests {
 		let heredoc = |w: &str| reads_command_text(w, WordContext::HereDocument, false, true);
 		assert!(!heredoc("${y:-'$(echo 0)'}"));
 		assert!(heredoc("'$(echo 0)'"));
+		// A pattern's own `$'...'` is single-quoted; one in a nested `${...}`
+		// is its value as it is, which the pattern's expansion reads.
+		assert!(!heredoc("${x/${y:-$'$(echo 0)'}}"));
+		let operand = |w: &str| translate_heredoc_operand(w, false).expect("translated");
+		assert_eq!(operand("${y:-$'$(echo 0)'}"), "${y:-$(echo 0)}");
+		assert_eq!(operand(r"$'a\tb'"), "'a\tb'");
+		assert_eq!(operand(r"${y#$'a\tb'}"), "${y#'a\tb'}");
+		assert_eq!(translate_heredoc_operand("${y:-a}", false), None);
+		let reads = |w: &str, arithmetic| heredoc_operand_reads_command_text(&operand(w), arithmetic, false);
+		assert!(reads("${y:-$'$(echo 0)'}", false));
+		assert!(reads("${y:-$'$(echo 0)'}", true));
+		assert!(!reads("$'$(echo 0)'", false));
+		assert!(!reads("${y#$'$(echo 0)'}", false));
+		assert!(!reads("${y:-'$(echo 0)'}x$'b'", false));
+	}
+
+	#[test]
+	fn a_double_quoted_operand_translates_its_own_ansi_c_strings() {
+		let options = brush_parser::ParserOptions::default();
+		let strip = |w: &str| strip_embedded_double_quotes(w, &options, false).ok();
+		let ok = |w: &str| Some(w.to_owned());
+		assert_eq!(strip(r"$'a\tb'"), ok("a\tb"));
+		assert_eq!(strip(r#""$'a\tb'""#), ok("$'atb'"));
+		assert_eq!(strip(r#""$'\x24(echo 0)'""#), ok("$'x24(echo 0)'"));
+		assert_eq!(strip(r"'$'a\tb''"), ok(r"'$'a\tb''"));
+		assert_eq!(strip(r"'a'$'\tb'"), ok("'a'\tb"));
+		assert_eq!(strip(r"${y:-$'\t'}"), ok(r"${y:-$'\t'}"));
+		assert_eq!(strip(r"$'\x24{x:-Y}'"), ok("${x:-Y}"));
+		// A value that leaves a quote open, or holds a NUL, leaves the
+		// expansion without its closing brace.
+		assert_eq!(strip(r#"$'\"'"#), None);
+		assert_eq!(strip(r"$'\''"), None);
+		assert_eq!(strip(r"$'\\'"), None);
+		assert_eq!(strip(r"$'a\0b'"), None);
+		// A here-document's operand is not translated.
+		assert_eq!(strip_embedded_double_quotes(r"$'a\tb'", &options, true).ok(), ok(r"$'a\tb'"));
 	}
 }

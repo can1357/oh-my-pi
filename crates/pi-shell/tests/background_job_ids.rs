@@ -10,14 +10,16 @@ use std::sync::Arc;
 
 use pi_shell::{Shell, ShellRunOptions, cancel::CancelToken};
 
-/// Runs `command` in `shell`, returning its exit status and output.
+/// Runs `command` in `shell`, returning its exit status and output. The
+/// bound is for a script that hangs: a loaded host takes seconds for a row
+/// that waits on processes, and nextest ends a test of its own after 240 s.
 async fn run_in(shell: &Shell, command: &str) -> (Option<i32>, String) {
 	let (tx, rx) = flume::unbounded::<String>();
 	let result = shell
 		.run(
 			ShellRunOptions { command: command.to_owned(), ..Default::default() },
 			Some(tx),
-			CancelToken::new(Some(20_000)),
+			CancelToken::new(Some(60_000)),
 		)
 		.await
 		.expect("run");
@@ -346,7 +348,10 @@ async fn a_disowned_external_job_keeps_the_session_alive() {
 	if let Ok(pid) = std::fs::read_to_string(&pidfile)
 		&& let Ok(pid) = pid.trim().parse::<i32>()
 	{
+		// SAFETY: `kill` and `waitpid` take a plain pid and a null status
+		// pointer, which `waitpid` accepts; they touch no Rust memory.
 		unsafe { libc::kill(pid, libc::SIGKILL) };
+		// SAFETY: as above.
 		unsafe { libc::waitpid(pid, std::ptr::null_mut(), 0) };
 	}
 }
@@ -651,10 +656,7 @@ async fn jobs_n_lists_a_job_whose_state_changed() {
 				external.to_string(),
 				format!(r#"/bin/sh -c 'read -r x < "$0"; exit 6' '{external}' & "#),
 			),
-			(
-				in_process.to_string(),
-				format!(r#"g(){{ read -r x < '{in_process}'; return 6; }}; g & "#),
-			),
+			(in_process.to_string(), format!(r"g(){{ read -r x < '{in_process}'; return 6; }}; g & ")),
 		];
 		for (fifo, start) in starts {
 			scripts.push((
@@ -804,14 +806,14 @@ async fn the_last_of_jobs_l_n_and_p_decides_the_listing() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_reported_job_is_forgotten_before_the_next_input_line() {
 	const WAITS: &str = r#"wait %1 2>/dev/null; echo "job=$?"; wait "$p"; echo "pid=$?""#;
-	const AGAIN: &str = r#"jobs %1 >/dev/null 2>&1; echo again=$?"#;
+	const AGAIN: &str = r"jobs %1 >/dev/null 2>&1; echo again=$?";
 	let rows = [
 		(
 			format!("jobs -n >/dev/null\njobs %1 > \"$o\" 2>/dev/null; kind; {WAITS}"),
 			"none\njob=127\npid=1\n",
 		),
 		(format!(r#"jobs -n >/dev/null; jobs %1 > "$o"; kind; {WAITS}"#), "full\njob=127\npid=1\n"),
-		(format!(r#"jobs >/dev/null; eval $':\n{AGAIN}'; {WAITS}"#), "again=1\njob=127\npid=1\n"),
+		(format!(r"jobs >/dev/null; eval $':\n{AGAIN}'; {WAITS}"), "again=1\njob=127\npid=1\n"),
 		(format!("jobs >/dev/null; eval ':'; {WAITS}"), "job=127\npid=1\n"),
 		(
 			format!(
@@ -1957,4 +1959,249 @@ async fn kill_continues_a_stopped_job_as_bash_does() {
 		r#"{WAIT_STOPPED}d=$(mktemp -d); set -m; /bin/sh -c 'trap "echo trapped > \"$1/t\"; exit 5" TERM; kill -STOP $$; while :; do sleep 0.01; done' sh "$d" & p=$!; waitstop "$p"; kill %1; i=0; until [ -e "$d/t" ] || [ $i -ge 500 ]; do sleep 0.01; i=$((i+1)); done; cat "$d/t" 2>/dev/null || echo missing; kill -KILL "$p" 2>/dev/null; wait %1 >/dev/null 2>&1; rm -rf "$d""#
 	);
 	assert_bash_outputs(&[(&marks, "S1=1\nR=1\nS2=0\nOBS=7\n"), (&term, "trapped\n")]).await;
+}
+
+/// A foreground pipeline that stops returns what Bash's `wait_for` returns
+/// for a stopped job: 128 plus the `WSTOPSIG` value of its first process's
+/// status, which is the signal that stopped it, or its exit status once it
+/// has exited, 0 when a signal killed it, and a builtin's status, which Bash
+/// runs in a child. It can pass 255 (`exit 200` gives 328), and `PIPESTATUS`
+/// keeps its value, since Bash sets it only for a job that ended. `return`
+/// passes the status through `builtin_status`, which keeps 256 and makes 328
+/// a 1, and a process exit keeps its low 8 bits. A script prints no
+/// `Stopped` line; `jobs` lists the job. The status was 128 plus the stop
+/// signal of the stage that stopped, `PIPESTATUS` held every stage, and the
+/// shell printed the job. (A first stage that still runs when a later one
+/// stops is left out: Bash waits for it to end, which hangs when it blocks
+/// on a stopped reader, so this shell gives such a stage only a short
+/// grace. Each row here stops after its first stage has ended.)
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stopped_foreground_job_returns_what_bash_wait_for_returns() {
+	const STOP: &str = "/bin/sh -c 'sleep .05; kill -STOP $$; exit 7'";
+	const TAIL: &str = "kill -CONT %1; wait %1; echo final=$?";
+	let mut rows: Vec<(String, String)> = [
+		("/bin/sh -c 'exit 0'", "128/0"),
+		("/bin/sh -c 'exit 3'", "131/0"),
+		("/bin/sh -c 'exit 128'", "256/0"),
+		("/bin/sh -c 'exit 200'", "328/0"),
+		("/bin/sh -c 'kill -TERM $$'", "128/0"),
+		("echo x", "128/0"),
+	]
+	.into_iter()
+	.map(|(first, status)| {
+		(
+			format!(r#"set -m; {first} | {STOP}; echo "s=$?/${{PIPESTATUS[*]}}"; {TAIL}"#),
+			format!("s={status}\nfinal=7\n"),
+		)
+	})
+	.collect();
+	for (script, output) in [
+		(
+			format!(
+				r#"set -m; /bin/sh -c 'kill -STOP $$; exit 5' | /bin/sh -c 'sleep .2; exit 7'; echo "s=$?/${{PIPESTATUS[*]}}"; {TAIL}"#
+			),
+			"s=147/0\nfinal=7\n",
+		),
+		(
+			format!(
+				r#"set -m; set -o pipefail; /bin/sh -c 'exit 3' | {STOP}; echo "s=$?/${{PIPESTATUS[*]}}"; {TAIL}"#
+			),
+			"s=131/0\nfinal=7\n",
+		),
+		(
+			format!(
+				r#"set -m; trap 'echo "err=$?/${{PIPESTATUS[*]}}"' ERR; /bin/sh -c 'exit 128' | {STOP}; trap - ERR; {TAIL}"#
+			),
+			"err=256/0\nfinal=7\n",
+		),
+		(
+			format!(
+				r#"set -m; g(){{ /bin/sh -c 'exit 128' | {STOP}; return; }}; g; echo "s=$?/${{PIPESTATUS[*]}}"; {TAIL}"#
+			),
+			"s=256/256\nfinal=7\n",
+		),
+		(
+			format!(
+				r#"set -m; g(){{ /bin/sh -c 'exit 200' | {STOP}; return; }}; g; echo "s=$?/${{PIPESTATUS[*]}}"; {TAIL}"#
+			),
+			"s=1/1\nfinal=7\n",
+		),
+		(
+			format!(
+				r#"set -m; /bin/sh -c 'exit 200' | {STOP}; x=$?; ( exit $x ); echo "sub=$?"; {TAIL}"#
+			),
+			"sub=72\nfinal=7\n",
+		),
+		(
+			format!(
+				r#"set -m; /bin/sh -c 'kill -STOP $$; exit 7'; echo "s=$?/${{PIPESTATUS[*]}}"; {TAIL}"#
+			),
+			"s=147/0\nfinal=7\n",
+		),
+		(
+			format!(
+				r#"{LISTING_KIND}set -m; /bin/sh -c 'kill -STOP $$; exit 7'; echo "s=$?"; jobs > "$o"; kind; {TAIL}; rm -f "$o""#
+			),
+			"s=147\nfull\nfinal=7\n",
+		),
+	] {
+		rows.push((script, output.to_owned()));
+	}
+	let rows: Vec<(&str, &str)> = rows
+		.iter()
+		.map(|(script, output)| (script.as_str(), output.as_str()))
+		.collect();
+	assert_bash_outputs(&rows).await;
+}
+
+/// `wait -p` names the pid Bash waits for: the last process of a pipeline
+/// (`find_last_pid`), as `$!` does, also for a job that stopped. It named
+/// the first.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn wait_p_names_the_last_process_of_a_pipeline() {
+	assert_bash_outputs(&[
+		(
+			r#"/bin/true | /bin/sh -c 'exit 3' & p=$!; wait -p got %1; echo "s=$? same=$([ "$got" = "$p" ] && echo y)""#,
+			"s=3 same=y\n",
+		),
+		(
+			r#"/bin/true | /bin/sh -c 'exit 3' & p=$!; wait -n -p got; echo "s=$? same=$([ "$got" = "$p" ] && echo y)""#,
+			"s=3 same=y\n",
+		),
+		(
+			r#"set -m; /bin/true | /bin/sh -c 'kill -STOP $$; exit 7' & p=$!; /bin/sh -c 'while [ -e /proc/$1/stat ]; do read a b s r </proc/$1/stat; [ "$s" = T ] && break; done' sh "$p"; sleep 0.1; wait -p got %1 2>/dev/null; echo "s=$? same=$([ "$got" = "$p" ] && echo y)"; kill -CONT %1; wait %1; echo final=$?"#,
+			"s=128 same=y\nfinal=7\n",
+		),
+	])
+	.await;
+}
+
+/// `bg` continues every process group the job had when it started, as
+/// Bash's `killpg` on the job's group does, also the group of a stage that
+/// has exited, which still holds that stage's stopped child. Only the
+/// groups of the stages still tracked got SIGCONT, so the child stayed
+/// stopped.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn bg_continues_the_group_of_a_stage_that_exited() {
+	assert_bash_outputs(&[(
+		r#"d=$(mktemp -d); cd "$d"; set -m; /bin/sh -c '/usr/bin/python3 -c '"'"'import os,signal,pathlib;pathlib.Path("childpid").write_text(str(os.getpid()));os.kill(os.getpid(),signal.SIGSTOP);pathlib.Path("resumed").write_text("yes")'"'"' & exit 0' | /bin/sh -c 'echo $$ >stagepid; kill -STOP $$; exit 7' & until [ -s childpid ] && [ -s stagepid ]; do /bin/sleep .01; done; read c <childpid; /bin/sleep .2; jobs >/dev/null; bg %1 >/dev/null; wait %1; echo s=$?; i=0; until [ -s resumed ] || [ $i -ge 500 ]; do /bin/sleep .01; i=$((i+1)); done; if [ -s resumed ]; then echo child=resumed; else echo child=still-stopped; fi; kill -CONT "$c" 2>/dev/null; /bin/sleep .1; cd /; rm -rf "$d""#,
+		"s=7\nchild=resumed\n",
+	)])
+	.await;
+}
+
+/// In a double-quoted `${x:-word}` Bash's parser translates a `$'...'` of
+/// the word's own to its value as it is (`parse_matched_pair`), and the
+/// expansion reads that value; one inside a single-quoted or double-quoted
+/// string of the word stays as written, and its backslash goes with the
+/// double quotes. One inside a nested double-quoted string was translated,
+/// so `\x24(...)` became a command that ran, and one after a single quote
+/// was translated.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_double_quoted_operand_translates_only_its_own_ansi_c_strings() {
+	let rows: Vec<(String, &str)> = [
+		(r#""${x:-"$'a\tb'"}""#, "<$'atb'>\nm=\n"),
+		(r#""${x:-"$'\x24(echo injected >>m; echo BAD)'"}""#, "<$'x24(echo injected >>m; echo BAD)'>\nm=\n"),
+		(r#""${x:-'$'a\tb''}""#, "<'$'a\\tb''>\nm=\n"),
+		(r#""${x:-${y:-'$'a\tb''}}""#, "<'$'a\\tb''>\nm=\n"),
+		(r#""${x:-$'a\tb'}""#, "<a\tb>\nm=\n"),
+		(r#""${x:-'a'$'\tb'}""#, "<'a'\tb>\nm=\n"),
+		(r#""${x:-`echo $'a\tb'`}""#, "<a\tb>\nm=\n"),
+		(r#""${x:-$(echo $'a\tb')}""#, "<a\tb>\nm=\n"),
+		(r#""${x:-a"b"$'\tc'}""#, "<ab\tc>\nm=\n"),
+	]
+	.into_iter()
+	.map(|(word, output)| {
+		(
+			format!(
+				r#"unset x y; d=$(mktemp -d); cd "$d"; : >m; printf '<%s>\n' {word}; printf 'm=%s\n' "$(cat m)"; cd /; rm -rf "$d""#
+			),
+			output,
+		)
+	})
+	.collect();
+	let rows: Vec<(&str, &str)> = rows
+		.iter()
+		.map(|(script, output)| (script.as_str(), *output))
+		.collect();
+	assert_bash_outputs(&rows).await;
+}
+
+/// In a here-document Bash translates each `$'...'` of a `%`, `#`, `/`,
+/// `^`, `,` or `:` operand as it extracts it, single-quoted at the
+/// operand's own level and as it is in a nested `${...}`
+/// (`extract_heredoc_dolbrace_string`), and then expands the operand when
+/// the variable is set, reading a `$(...)` the translation produced even
+/// where the nested expansion does not use it. The scan saw only the text
+/// as written, so the reported job stayed.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_here_document_operand_is_read_as_bash_translates_it() {
+	let mut rows: Vec<(String, String)> = Vec::new();
+	for op in ["/", ":", "##", "^^", "%", ",,"] {
+		for (inner, status) in [
+			("${y:-$'$(echo 0)'}", 127),
+			("${y:-'$(echo 0)'}", 7),
+			("$'$(echo 0)'", 7),
+			("${y:+$'$(echo 0)'}", 127),
+			("${y#$'$(echo 0)'}", 7),
+		] {
+			// Bash's offset `'$(echo 0)'` is an arithmetic syntax error.
+			if op == ":" && inner == "$'$(echo 0)'" {
+				continue;
+			}
+			rows.push((
+				sweep_script("heredoc", "set", &format!("${{x{op}{inner}}}")),
+				format!("OBS={status}\n"),
+			));
+		}
+	}
+	rows.push((sweep_script("heredoc", "unset", "${x/${y:-$'$(echo 0)'}}"), "OBS=7\n".to_owned()));
+	let rows: Vec<(&str, &str)> = rows
+		.iter()
+		.map(|(script, output)| (script.as_str(), output.as_str()))
+		.collect();
+	assert_bash_outputs(&rows).await;
+}
+
+/// Bash extracts a double-quoted `${x OP word}` again from the text its
+/// parser left, with each `$'...'` translated, whatever `x` holds: a value
+/// that leaves a quote open (`\"`, `\'`, `\\`) or holds a NUL, which ends
+/// the parser's text, leaves the expansion without its closing `}`, a `bad
+/// substitution` that ends the subshell with status 1. The value went in
+/// as text, and the command printed it.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_translation_that_leaves_the_expansion_open_is_a_bad_substitution() {
+	let mut rows: Vec<(String, &str)> = Vec::new();
+	for state in ["unset x", "x=used"] {
+		for op in [":-", ":+", ":=", "-"] {
+			for word in [r#"$'\"'"#, r"$'\''", r"$'\\'", r"$'a\0b'", r"$'a\tb'"] {
+				let output = match (word, state, op) {
+					(r"$'a\tb'", "unset x", ":+") => "<>\nafter\nstatus=0\n",
+					(r"$'a\tb'", "unset x", _) | (r"$'a\tb'", "x=used", ":+") => {
+						"<a\tb>\nafter\nstatus=0\n"
+					},
+					(r"$'a\tb'", ..) => "<used>\nafter\nstatus=0\n",
+					_ => "status=1\n",
+				};
+				rows.push((
+					format!(
+						"{state}; ( printf '<%s>\\n' \"${{x{op}{word}}}\"; echo after ) \
+						 2>/dev/null\necho \"status=$?\""
+					),
+					output,
+				));
+			}
+		}
+	}
+	let rows: Vec<(&str, &str)> = rows
+		.iter()
+		.map(|(script, output)| (script.as_str(), *output))
+		.collect();
+	assert_bash_outputs(&rows).await;
 }

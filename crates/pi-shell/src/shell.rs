@@ -689,8 +689,8 @@ const fn exit_code(result: &ExecutionResult) -> i32 {
 		ExecutionExitCode::Interrupted => 130,
 		ExecutionExitCode::BrokenPipe => 141,
 		ExecutionExitCode::Custom(code) => code as i32,
-		// `$?` 256 exits a process with its low 8 bits, as Bash's would.
-		ExecutionExitCode::StoppedStatusLimit => 0,
+		// A `$?` above 255 exits a process with its low 8 bits, as Bash's would.
+		ExecutionExitCode::StoppedJob(status) => (status & 0xff) as i32,
 	}
 }
 

@@ -130,12 +130,13 @@ pub enum ExecutionExitCode {
 	Unimplemented,
 	/// A custom exit code.
 	Custom(u8),
-	/// 256, the one status above 255 that `$?` can hold: Bash's `wait` and
-	/// `fg` on a job that stopped return 128 plus the stop value of the
-	/// status of its first process (`wait_for`), and its `builtin_status`
-	/// turns every larger value into 1 or 2. A process exit keeps the low 8
-	/// bits, 0.
-	StoppedStatusLimit,
+	/// A status above 255, from 256 to 383: Bash's `wait_for` returns 128
+	/// plus the `WSTOPSIG` value of the status of a stopped job's first
+	/// process, which is its exit status once it has exited. A foreground
+	/// job keeps it whole in `$?`; `wait`, `fg` and `return` pass it through
+	/// `builtin_status`, which keeps only 256. A process exit keeps the low
+	/// 8 bits.
+	StoppedJob(u16),
 }
 
 impl ExecutionExitCode {
@@ -144,11 +145,20 @@ impl ExecutionExitCode {
 		matches!(self, Self::Success)
 	}
 
-	/// The status `$?` shows: 0 to 256.
+	/// The status `$?` shows: 0 to 383.
 	pub fn status(&self) -> u16 {
 		match self {
-			Self::StoppedStatusLimit => 256,
+			Self::StoppedJob(status) => *status,
 			code => u16::from(u8::from(code)),
+		}
+	}
+
+	/// The status of a stopped job, 128 plus `word` (see
+	/// [`ExecutionExitCode::StoppedJob`]).
+	pub fn stopped_job(word: u8) -> Self {
+		match 128 + u16::from(word) {
+			status @ 0..=255 => Self::from(u8::try_from(status).unwrap_or(u8::MAX)),
+			status => Self::StoppedJob(status),
 		}
 	}
 
@@ -158,7 +168,7 @@ impl ExecutionExitCode {
 	pub fn from_builtin_status(status: u32) -> Self {
 		match status {
 			0..=255 => Self::from(u8::try_from(status).unwrap_or(u8::MAX)),
-			256 => Self::StoppedStatusLimit,
+			256 => Self::StoppedJob(256),
 			257 | 258 => Self::InvalidUsage,
 			_ => Self::GeneralError,
 		}
@@ -166,7 +176,8 @@ impl ExecutionExitCode {
 }
 
 impl From<u16> for ExecutionExitCode {
-	/// Takes a status `$?` holds (see [`ExecutionExitCode::status`]).
+	/// Takes a status `$?` holds (see [`ExecutionExitCode::status`]) as a
+	/// builtin returns it (see [`ExecutionExitCode::from_builtin_status`]).
 	fn from(status: u16) -> Self {
 		Self::from_builtin_status(u32::from(status))
 	}
@@ -212,7 +223,7 @@ impl From<&ExecutionExitCode> for u8 {
 			ExecutionExitCode::Interrupted => 130,
 			ExecutionExitCode::BrokenPipe => 141,
 			ExecutionExitCode::Custom(code) => *code,
-			ExecutionExitCode::StoppedStatusLimit => 0,
+			ExecutionExitCode::StoppedJob(status) => status.to_le_bytes()[0],
 		}
 	}
 }
@@ -274,6 +285,22 @@ impl From<ExecutionResult> for ExecutionSpawnResult {
 	}
 }
 
+/// What Bash keeps of how a waited command ended, besides its result.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct WaitedStatus {
+	/// How an external process ended; `None` for a command that ran in the
+	/// shell, one that stopped, and one that cancellation killed.
+	pub process:   Option<processes::ProcessStatus>,
+	/// The `WSTOPSIG` value of the command's wait status, which Bash's
+	/// `wait_for` adds to 128 for a stopped job whose first process has
+	/// ended: the exit status of a process that exited, 0 for one a signal
+	/// killed (see [`processes::ProcessStatus::stop_signal_word`]), the
+	/// status of a command the shell ran itself, which Bash would have run as
+	/// a child that exits with it, and 0 for one that stopped or that
+	/// cancellation killed.
+	pub stop_word: u8,
+}
+
 impl ExecutionSpawnResult {
 	/// Waits for the command to complete without a cancellation token.
 	pub async fn wait(self) -> Result<ExecutionWaitResult, error::Error> {
@@ -290,13 +317,16 @@ impl ExecutionSpawnResult {
 		Ok(self.wait_with_status(cancel_token).await?.0)
 	}
 
-	/// Waits like [`Self::wait_with_cancel`], and also returns how an external
-	/// process ended. The status is `None` for a command that ran in the
-	/// shell, one that stopped, and one that cancellation killed.
+	/// Waits like [`Self::wait_with_cancel`], and also returns what Bash
+	/// keeps of how the command ended (see [`WaitedStatus`]).
 	pub async fn wait_with_status(
 		self,
 		cancel_token: Option<CancellationToken>,
-	) -> Result<(ExecutionWaitResult, Option<processes::ProcessStatus>), error::Error> {
+	) -> Result<(ExecutionWaitResult, WaitedStatus), error::Error> {
+		let completed = |result: ExecutionResult| {
+			let stop_word = u8::from(result.exit_code);
+			(ExecutionWaitResult::Completed(result), WaitedStatus { process: None, stop_word })
+		};
 		let result = match self {
 			Self::StartedProcess(mut child) => {
 				// Wait for the process to exit or for a relevant signal, whichever happens
@@ -304,21 +334,19 @@ impl ExecutionSpawnResult {
 				match child.wait(cancel_token).await? {
 					processes::ProcessWaitResult::Completed(output) => {
 						let status = processes::ProcessStatus::from_exit_status(&output.status);
-						(ExecutionWaitResult::Completed(ExecutionResult::from(output)), Some(status))
+						let waited = WaitedStatus { process: Some(status), stop_word: status.stop_signal_word() };
+						(ExecutionWaitResult::Completed(ExecutionResult::from(output)), waited)
 					},
 					processes::ProcessWaitResult::Stopped(signal) => {
-						(ExecutionWaitResult::Stopped(child, signal), None)
+						(ExecutionWaitResult::Stopped(child, signal), WaitedStatus::default())
 					},
 					processes::ProcessWaitResult::Cancelled => {
-						(ExecutionWaitResult::Completed(ExecutionResult::new(130)), None)
+						(ExecutionWaitResult::Completed(ExecutionResult::new(130)), WaitedStatus::default())
 					},
 				}
 			},
-			Self::Completed(result) => (ExecutionWaitResult::Completed(result), None),
-			Self::StartedTask(join_handle) => {
-				let result = join_handle.await?;
-				(ExecutionWaitResult::Completed(result?), None)
-			},
+			Self::Completed(result) => completed(result),
+			Self::StartedTask(join_handle) => completed(join_handle.await??),
 		};
 
 		Ok(result)

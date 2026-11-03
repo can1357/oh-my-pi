@@ -4,25 +4,43 @@ pub(crate) use nix::sys::signal::Signal;
 
 use crate::{error, sys, traps};
 
-/// Sends SIGCONT to the process group of each of `pids`, as Bash's
-/// `start_job` and `kill_pid` continue a job with `killpg`: the stages of a
-/// pipeline may each lead a group of their own, and a group holds the
-/// stage's own children too. A stage in the shell's own process group gets
-/// the signal alone. Fails when no signal could be sent.
+/// The process group of each of `pids` other than the shell's own, each
+/// once: what a job records when it starts, since a group outlives the
+/// stage that leads it while the stage's children remain in it.
+pub(crate) fn process_groups(pids: impl IntoIterator<Item = sys::process::ProcessId>) -> Vec<sys::process::ProcessId> {
+	let own_group = nix::unistd::getpgrp();
+	let mut groups: Vec<_> = pids
+		.into_iter()
+		.filter_map(|pid| nix::unistd::getpgid(Some(nix::unistd::Pid::from_raw(pid))).ok())
+		.filter(|&group| group != own_group)
+		.map(nix::unistd::Pid::as_raw)
+		.collect();
+	groups.sort_unstable();
+	groups.dedup();
+	groups
+}
+
+/// Sends SIGCONT to each of `groups` (a job's recorded groups, see
+/// [`process_groups`]) and to the process group of each of `pids`, as
+/// Bash's `start_job` and `kill_pid` continue a job with `killpg`: the
+/// stages of a pipeline may each lead a group of their own, and a group
+/// holds the stage's own children too, after the stage itself has exited.
+/// A stage in the shell's own process group gets the signal alone. Fails
+/// when no signal could be sent.
 pub(crate) fn continue_process_groups(
+	groups: &[sys::process::ProcessId],
 	pids: impl IntoIterator<Item = sys::process::ProcessId>,
 ) -> Result<(), error::Error> {
 	let own_group = nix::unistd::getpgrp();
-	let mut targets: Vec<nix::unistd::Pid> = pids
-		.into_iter()
-		.map(|pid| {
-			let pid = nix::unistd::Pid::from_raw(pid);
-			match nix::unistd::getpgid(Some(pid)) {
-				Ok(group) if group != own_group => nix::unistd::Pid::from_raw(-group.as_raw()),
-				_ => pid,
-			}
-		})
-		.collect();
+	let mut targets: Vec<nix::unistd::Pid> =
+		groups.iter().map(|&group| nix::unistd::Pid::from_raw(-group)).collect();
+	targets.extend(pids.into_iter().map(|pid| {
+		let pid = nix::unistd::Pid::from_raw(pid);
+		match nix::unistd::getpgid(Some(pid)) {
+			Ok(group) if group != own_group => nix::unistd::Pid::from_raw(-group.as_raw()),
+			_ => pid,
+		}
+	}));
 	targets.sort_unstable();
 	targets.dedup();
 	let mut sent = false;
@@ -104,7 +122,8 @@ pub(crate) fn mask_sigttou() -> Result<(), error::Error> {
 	Ok(())
 }
 
-/// Consumes a pending stopped-child status for a process or pipeline.
+/// Consumes the pending stopped-child statuses of a process or pipeline and
+/// returns each stopped process with its `WSTOPSIG`, in the order of `pids`.
 ///
 /// A pipeline's external member IDs are always checked first. A process group
 /// is an additional scoped check: a detached pipe-input stage can leave the
@@ -115,16 +134,16 @@ pub(crate) fn mask_sigttou() -> Result<(), error::Error> {
 pub(crate) fn poll_for_stopped_processes(
 	pids: &[sys::process::ProcessId],
 	pgid: Option<sys::process::ProcessId>,
-) -> Result<Option<u8>, error::Error> {
+) -> Result<Vec<(sys::process::ProcessId, u8)>, error::Error> {
 	let flags = nix::sys::wait::WaitPidFlag::WUNTRACED | nix::sys::wait::WaitPidFlag::WNOHANG;
-	let mut signal = None;
+	let mut stops = Vec::new();
 	for pid in pids {
-		signal = signal.or(drain_stopped(|| waitid_child(*pid, None, flags))?);
+		drain_stopped(|| waitid_child(*pid, None, flags), &mut stops)?;
 	}
 	if let Some(pgid) = pgid {
-		signal = signal.or(drain_stopped(|| waitid_child(pgid, Some(pgid), flags))?);
+		drain_stopped(|| waitid_child(pgid, Some(pgid), flags), &mut stops)?;
 	}
-	Ok(signal)
+	Ok(stops)
 }
 
 /// The last stop or continue a child reported.
@@ -171,14 +190,19 @@ pub(crate) fn process_has_exited(pid: sys::process::ProcessId) -> bool {
 
 fn drain_stopped(
 	mut wait: impl FnMut() -> Result<nix::sys::wait::WaitStatus, nix::errno::Errno>,
-) -> Result<Option<u8>, error::Error> {
-	let mut signal = None;
+	stops: &mut Vec<(sys::process::ProcessId, u8)>,
+) -> Result<(), error::Error> {
 	loop {
 		match wait() {
-			Ok(nix::sys::wait::WaitStatus::Stopped(_stopped_pid, sig)) => {
-				signal = Some(u8::try_from(sig as i32).unwrap_or(u8::MAX));
+			Ok(nix::sys::wait::WaitStatus::Stopped(stopped_pid, sig)) => {
+				let signal = u8::try_from(sig as i32).unwrap_or(u8::MAX);
+				let stopped_pid = stopped_pid.as_raw();
+				match stops.iter_mut().find(|(pid, _)| *pid == stopped_pid) {
+					Some(stop) => stop.1 = signal,
+					None => stops.push((stopped_pid, signal)),
+				}
 			},
-			Ok(_) | Err(nix::errno::Errno::ECHILD) => return Ok(signal),
+			Ok(_) | Err(nix::errno::Errno::ECHILD) => return Ok(()),
 			Err(e) => return Err(e.into()),
 		}
 	}

@@ -507,8 +507,10 @@ struct WordExpander<'a, SE: extensions::ShellExtensions> {
 	/// Whether to use heredoc expansion semantics (literal quotes, no brace
 	/// expansion).
 	heredoc_mode: bool,
-	/// Whether the current expansion is inside a here-document body; `$'...'`
-	/// in a `${x:-...}` operand is literal there, not translated.
+	/// Whether the current expansion is inside a here-document body: a
+	/// `$'...'` in a `${x:-...}` operand is literal there, and one in the
+	/// operand of a pattern or substring operator is translated as Bash's
+	/// extraction does (see [`Self::heredoc_operand`]).
 	in_heredoc_body: bool,
 	/// How Bash expands the word this expander was made for, so that the
 	/// first expansion forgets the reported jobs where Bash's extraction of
@@ -573,6 +575,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 		word: Option<String>,
 	) -> Result<Option<patterns::Pattern>, error::Error> {
 		if let Some(word) = word {
+			let word = self.heredoc_operand(&word, false).await.unwrap_or(word);
 			let pattern = self
 				.basic_expand_pattern(&word)
 				.await?
@@ -582,6 +585,26 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 		} else {
 			Ok(None)
 		}
+	}
+
+	/// In a here-document, the operand of a `%`, `#`, `/`, `^`, `,` or `:`
+	/// expansion as Bash expands it, its `$'...'` strings translated (see
+	/// [`bash_reads::translate_heredoc_operand`]); where that expansion reads
+	/// text, the jobs that ended are reported and the reported ones forgotten
+	/// (`notify_and_cleanup` in `shell_getc`). `None` to expand the operand as
+	/// written. Called where Bash expands the operand.
+	async fn heredoc_operand(&mut self, operand: &str, arithmetic: bool) -> Option<String> {
+		if !self.in_heredoc_body {
+			return None;
+		}
+		let posix = self.shell.options().posix_mode;
+		let translated = bash_reads::translate_heredoc_operand(operand, posix)?;
+		if !self.shell.jobs().jobs.is_empty()
+			&& bash_reads::heredoc_operand_reads_command_text(&translated, arithmetic, posix)
+		{
+			self.shell.notify_and_cleanup_jobs(self.params).await;
+		}
+		Some(translated)
 	}
 
 	async fn basic_expand_pattern(&mut self, word: &str) -> Result<patterns::Pattern, error::Error> {
@@ -729,12 +752,27 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 	/// literal, and parameters, command substitutions and arithmetic expand.
 	async fn expand_parameter_word(&mut self, word: &str) -> Result<Expansion, error::Error> {
 		if self.in_double_quotes {
-			let stripped = bash_reads::strip_embedded_double_quotes(word, &self.parser_options, self.in_heredoc_body);
+			// Expansion errors are fatal per POSIX spec.
+			let stripped = bash_reads::strip_embedded_double_quotes(word, &self.parser_options, self.in_heredoc_body)
+				.map_err(error::Error::into_fatal)?;
 			self.basic_expand(&std::format!("\"{stripped}\"")).await
 		} else {
 			// When not inside double-quotes, perform normal expansion with quote removal
 			self.basic_expand(word).await
 		}
+	}
+
+	/// Bash translates the `$'...'` strings of a double-quoted `${x OP word}`
+	/// when it parses it and then extracts the expansion again, whatever the
+	/// variable holds, so a translation that leaves the expansion without
+	/// its closing `}` is a `bad substitution` also when the word goes
+	/// unused (see [`bash_reads::strip_embedded_double_quotes`]).
+	fn check_parameter_word(&self, word: &str) -> Result<(), error::Error> {
+		if self.in_double_quotes && !self.in_heredoc_body && word.contains("$'") {
+			bash_reads::strip_embedded_double_quotes(word, &self.parser_options, false)
+				.map_err(error::Error::into_fatal)?;
+		}
+		Ok(())
 	}
 
 	/// Perform brace expansion on `word`, returning each expanded element as a
@@ -1142,10 +1180,11 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 				test_type,
 				default_value,
 			} => {
+				let default_value = default_value.as_ref().map_or_else(|| "", |v| v.as_str());
+				self.check_parameter_word(default_value)?;
 				let expanded_parameter = self
 					.expand_parameter_allowing_unset(&parameter, indirect)
 					.await?;
-				let default_value = default_value.as_ref().map_or_else(|| "", |v| v.as_str());
 
 				match (test_type, expanded_parameter.classify()) {
 					(_, ParameterState::NonZeroLength)
@@ -1162,10 +1201,11 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 				test_type,
 				default_value,
 			} => {
+				let default_value = default_value.as_ref().map_or_else(|| "", |v| v.as_str());
+				self.check_parameter_word(default_value)?;
 				let expanded_parameter = self
 					.expand_parameter_allowing_unset(&parameter, indirect)
 					.await?;
-				let default_value = default_value.as_ref().map_or_else(|| "", |v| v.as_str());
 
 				match (test_type, expanded_parameter.classify()) {
 					(_, ParameterState::NonZeroLength)
@@ -1189,10 +1229,11 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 				test_type,
 				error_message,
 			} => {
+				let error_message = error_message.as_ref().map_or_else(|| "", |v| v.as_str());
+				self.check_parameter_word(error_message)?;
 				let expanded_parameter = self
 					.expand_parameter_allowing_unset(&parameter, indirect)
 					.await?;
-				let error_message = error_message.as_ref().map_or_else(|| "", |v| v.as_str());
 
 				match (test_type, expanded_parameter.classify()) {
 					(_, ParameterState::NonZeroLength)
@@ -1215,12 +1256,13 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 				test_type,
 				alternative_value,
 			} => {
-				let expanded_parameter = self
-					.expand_parameter_allowing_unset(&parameter, indirect)
-					.await?;
 				let alternative_value = alternative_value
 					.as_ref()
 					.map_or_else(|| "", |v| v.as_str());
+				self.check_parameter_word(alternative_value)?;
+				let expanded_parameter = self
+					.expand_parameter_allowing_unset(&parameter, indirect)
+					.await?;
 
 				match (test_type, expanded_parameter.classify()) {
 					(_, ParameterState::NonZeroLength)
@@ -1351,6 +1393,10 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 
 				#[expect(clippy::cast_possible_wrap)]
 				let expanded_parameter_len = expanded_parameter.polymorphic_len() as i64;
+				let offset = match self.heredoc_operand(&offset.value, true).await {
+					Some(value) => brush_parser::ast::UnexpandedArithmeticExpr { value },
+					None => offset,
+				};
 				let mut expanded_offset = offset.eval(self.shell, self.params, false).await?;
 
 				// We handle negative indexes as offsets from the end of the element, with -1
@@ -1369,6 +1415,10 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 				let expanded_offset = min(expanded_offset, expanded_parameter_len);
 
 				let end_offset = if let Some(length) = length {
+					let length = match self.heredoc_operand(&length.value, true).await {
+						Some(value) => brush_parser::ast::UnexpandedArithmeticExpr { value },
+						None => length,
+					};
 					let mut expanded_length = length.eval(self.shell, self.params, false).await?;
 					if expanded_length < 0 {
 						expanded_length += expanded_parameter_len;
@@ -1530,6 +1580,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 				if expanded_parameter.undefined {
 					return Ok(expanded_parameter);
 				}
+				let pattern = self.heredoc_operand(&pattern, false).await.unwrap_or(pattern);
 				let expanded_pattern = self
 					.basic_expand_pattern(pattern.as_str())
 					.await?
@@ -1538,6 +1589,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 
 				// If no replacement was provided, then we replace with an empty string.
 				let replacement = replacement.unwrap_or(String::new());
+				let replacement = self.heredoc_operand(&replacement, false).await.unwrap_or(replacement);
 				let expanded_replacement = self.basic_expand_to_str(&replacement).await?;
 
 				let regex = expanded_pattern.to_regex(
