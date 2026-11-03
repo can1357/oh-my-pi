@@ -1939,9 +1939,14 @@ fn server_main(io: &HostIo, opts: Options, local: Option<LocalServer>) -> i32 {
 		return daemon_refusal(&startup.with_role(Role::PreReceiver), 1975);
 	}
 	let abort = Arc::new(AtomicBool::new(false));
-	// Ends a wait on the log file: the stop, and for a local half also the
-	// host's cancellation, as upstream's client signals its child
-	// (`kill_all(SIGUSR1)`) before it prints its own exit line.
+	// Ends a wait on the log file: the stop, and for a local half whose
+	// client has a `--log-file` too also the host's cancellation. Upstream's
+	// client signals its child (`kill_all(SIGUSR1)`) before it prints its own
+	// exit line; a child whose client logs then loses its trailer (see
+	// `open_log_file` below) while the client's line waits on that log.
+	// Without a client log the half's trailer follows the client's line, as
+	// here when the half waits for its stop: released at the cancellation
+	// itself, it could reach the protocol and print a connection error first.
 	let log_cancel = Arc::new(AtomicBool::new(false));
 	let shared_slot: Arc<Mutex<Option<Arc<Shared>>>> = Arc::default();
 	let _watch = Watch::start(
@@ -1951,15 +1956,12 @@ fn server_main(io: &HostIo, opts: Options, local: Option<LocalServer>) -> i32 {
 		Arc::clone(&shared_slot),
 	);
 	let local_server = local.is_some();
-	let _host_watch = local_server
+	let client_logs = local.as_ref().is_some_and(|local| local.client_logs);
+	let _host_watch = client_logs
 		.then(|| Watch::start(Arc::clone(&io.host_cancel), vec![Arc::clone(&log_cancel)], 0, Arc::default()));
-	let mut client_logs = false;
 	let (conn_reader, conn_writer, probe, client_info, local_filters): (Box<dyn Read + Send>, Box<dyn Write + Send>, Option<ReadProbe>, Vec<u8>, Option<Filters>) =
 		match local {
-			Some(LocalServer { conn, client_info, filters, client_logs: logs }) => {
-				client_logs = logs;
-				(conn.reader, conn.writer, conn.probe, client_info, Some(filters))
-			},
+			Some(LocalServer { conn, client_info, filters, .. }) => (conn.reader, conn.writer, conn.probe, client_info, Some(filters)),
 			None => (Box::new(io.stdin.clone()), Box::new(io.stdout_raw.clone()), None, Vec::new(), None),
 		};
 	let mut streams = make_streams(conn_reader, conn_writer, probe, &abort, None, &opts);
@@ -2014,7 +2016,7 @@ fn server_main(io: &HostIo, opts: Options, local: Option<LocalServer>) -> i32 {
 	// inside its first log write: a signal that interrupts that open drops
 	// the half's trailer (`rwrite`'s `in_block`).
 	if opts.logfile_name.is_some() {
-		base_logger.open_log_file(&io.fs, opts.insecure_links, &log_cancel, local_server && client_logs);
+		base_logger.open_log_file(&io.fs, opts.insecure_links, &log_cancel, client_logs);
 	}
 	for notice in &opts.notices {
 		base_logger.rprintf(LogCode::Info, format!("{notice}\n").as_bytes());
