@@ -147,6 +147,8 @@ While iPhone Mirroring shows a connection screen ("Connection Paused", "iPhone i
 
 Wayland per-window native input and `raise()` remain unavailable without compositor-specific integration; use AX actions, or desktop input after focusing the target yourself.
 
+On Wayland, `type` presses the keys of the active keyboard layout. Text with a character that layout has no key for (other scripts, emoji) goes out whole as libei text where the compositor offers it (KDE Plasma 6.8 and later, built with libei 1.6), so the application receives it as committed text rather than keystrokes; such text cannot contain line breaks or tabs, so press Enter or Tab between `type` calls. Elsewhere, GNOME included, it throws `InputFailed` before anything is typed.
+
 `await win.observe({ silent?, all?, maxDepth? })` captures a full screenshot and accessibility tree together. It returns screenshot metadata plus `ax`, `nodeCount`, and `truncated`, and normally emits both image and tree. A failed or canceled observation does not replace the previous delivered click frame.
 
 ## Accessibility-first automation
