@@ -499,9 +499,12 @@ Canonical event unions and payload types are in `types.ts`.
 - `session_shutdown`
 
 In the interactive TUI, an extension whose factory registers no providers,
-shortcuts, composer shapes, or file fallbacks is loaded after the composer
-accepts input, once a previous launch has recorded that about its current
-source. Its `session_start` still runs (it is delivered when the extension
+shortcuts, composer shapes, file fallbacks, or `resources_discover` handler is
+loaded after the composer accepts input, once a previous launch has recorded
+that about its current source. A `resources_discover` handler keeps an
+extension eager because the startup pass folds its skill, prompt, and theme
+directories into the session before the first prompt. Its `session_start` still
+runs (it is delivered when the extension
 binds), and the first submitted message and every model turn wait until it is
 loaded, so its tools, commands, and `input`/`before_agent_start` hooks apply from
 the first request. Events emitted before it binds are not replayed. Resumed

@@ -16,6 +16,7 @@
 - Fixed task subagent startup dropping extension messages sent from a `resources_discover` handler by draining them before the first prompt ([#9379](https://github.com/can1357/oh-my-pi/pull/9379) by [@sjawhar](https://github.com/sjawhar)).
 - Fixed task/eval/vibe subagents silently dropping skills their own `resources_discover` handlers discovered at startup; those directories now merge into the inherited snapshot instead of being scanned and thrown away ([#9379](https://github.com/can1357/oh-my-pi/pull/9379) by [@sjawhar](https://github.com/sjawhar)).
 - Fixed print mode and revived task subagents potentially throwing `AgentBusyError` or reordering the initial turn when a `session_start`/`resources_discover` extension handler sent a message during startup, by draining those sends the same way the task executor already does; RPC mode does not wait for such a turn, so its client can negotiate, query and abort while it runs ([#9379](https://github.com/can1357/oh-my-pi/pull/9379) by [@sjawhar](https://github.com/sjawhar)).
+- Fixed fresh interactive sessions losing every skill, prompt and theme directory an extension contributes through `resources_discover` from the second launch on, when startup deferral bound that extension after the startup pass; such an extension now always loads before the session starts ([#9379](https://github.com/can1357/oh-my-pi/pull/9379) by [@sjawhar](https://github.com/sjawhar)).
 
 ## [18.14.2] - 2026-10-31
 

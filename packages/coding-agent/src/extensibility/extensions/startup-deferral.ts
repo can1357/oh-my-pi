@@ -5,11 +5,13 @@
  * Only a previous load can tell whether an extension's factory registers state
  * that must exist before the first frame: model providers (startup model
  * resolution), keyboard shortcuts (bound once at editor setup), composer shapes
- * (installed at UI init), or file-mutation fallbacks (installed at runner
- * init). Each load records that verdict in agent.db, keyed by the module's
- * resolved path and fingerprinted by its size and mtime. A source with no
- * verdict for its current fingerprint loads eagerly and records one, so a
- * changed module is never deferred on stale knowledge.
+ * (installed at UI init), file-mutation fallbacks (installed at runner init), or
+ * a `resources_discover` handler (the startup pass folds its skill, prompt and
+ * theme directories into the session before the first prompt; a late bind
+ * replays only `session_start`). Each load records that verdict in agent.db,
+ * keyed by the module's resolved path and fingerprinted by its size and mtime. A
+ * source with no verdict for its current fingerprint loads eagerly and records
+ * one, so a changed module is never deferred on stale knowledge.
  */
 import * as fs from "node:fs/promises";
 import { isRecord, logger } from "@oh-my-pi/pi-utils";
@@ -17,7 +19,8 @@ import type { AgentStorage } from "../../session/agent-storage";
 import { resolvePath } from "../utils";
 import type { Extension } from "./types";
 
-const CACHE_PREFIX = "extension_startup:v1:";
+// v2: `resources_discover` handlers block deferral; a v1 verdict may say deferrable for one.
+const CACHE_PREFIX = "extension_startup:v2:";
 const CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 interface StartupVerdict {
@@ -61,7 +64,8 @@ export function canBindAfterStartup(extension: Extension): boolean {
 		extension.shortcuts.size === 0 &&
 		extension.composerShapes.size === 0 &&
 		extension.fileWriteFallbackHandlers.length === 0 &&
-		extension.fileDeleteFallbackHandlers.length === 0
+		extension.fileDeleteFallbackHandlers.length === 0 &&
+		!extension.handlers.get("resources_discover")?.length
 	);
 }
 

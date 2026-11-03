@@ -81,6 +81,29 @@ describe("startup-deferred extensions", () => {
 		});
 	});
 
+	// The startup `resources_discover` pass folds an extension's skill, prompt and theme directories
+	// into the session before the first prompt, and a late bind replays only `session_start`. A
+	// deferred contributor would lose its skills on every fresh interactive launch after its first.
+	it("keeps an extension that answers resources_discover eager after its verdict is recorded", async () => {
+		const storage = await AgentStorage.open(path.join(tempDir.path(), "agent.db"));
+		const skillsDir = path.join(tempDir.path(), "skills");
+		const contributor = path.join(tempDir.path(), "skill-contributor.ts");
+		fs.writeFileSync(
+			contributor,
+			`export default function(pi) {
+				pi.on("resources_discover", () => ({ skillPaths: [${JSON.stringify(skillsDir)}] }));
+			}`,
+		);
+
+		const loaded = await loadExtensions([contributor], tempDir.path());
+		await recordStartupVerdicts(storage, loaded.extensions);
+
+		expect(await partitionStartupExtensions(storage, [contributor], tempDir.path())).toEqual({
+			eager: [contributor],
+			deferred: [],
+		});
+	});
+
 	it("binds a deferred extension into the live session and replays session_start to it alone", async () => {
 		const logPath = path.join(tempDir.path(), "session-start.log");
 		const eagerPath = path.join(tempDir.path(), "eager.ts");
