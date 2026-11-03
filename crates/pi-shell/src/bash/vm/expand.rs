@@ -360,6 +360,25 @@ impl<'e, 'c> Expander<'e, 'c> {
 			}
 			return Ok(());
 		}
+		// A quoted scalar parameter already is one complete field. Read it
+		// into a recycled buffer without building a splitting/globbing sink.
+		if w.braces.is_none()
+			&& let [Part::Param(p)] = w.parts.as_slice()
+			&& p.quoted
+			&& matches!(p.op, OpIr::None)
+		{
+			let mut field = spare(&mut self.pool);
+			if self
+				.with_scalar(p, |s| field.extend_from_slice(s))?
+				.is_some()
+			{
+				out.push(BString::from(field));
+				return Ok(());
+			}
+			if field.capacity() > 0 {
+				self.pool.push(BString::from(field));
+			}
+		}
 		if let Some(alts) = &w.braces
 			&& state::option(&mut self.k.root, self.cx.store, self.vp, OptId::Braceexpand)?
 		{
@@ -412,6 +431,12 @@ impl<'e, 'c> Expander<'e, 'c> {
 	pub fn scalar(&mut self, unit: &Arc<Unit>, w: &Word) -> X<BString> {
 		if w.fixed {
 			return Ok(BString::from(fixed_text(w).into_owned()));
+		}
+		if let [Part::Param(p)] = w.parts.as_slice()
+			&& matches!(p.op, OpIr::None)
+			&& let Some(value) = self.with_scalar(p, |s| BString::from(s))?
+		{
+			return Ok(value);
 		}
 		let mut sink = Sink::Scalar(Vec::with_capacity(lit_len(w)));
 		self.word(unit, w, &mut sink, false, false)?;
@@ -1712,19 +1737,26 @@ impl<'e, 'c> Expander<'e, 'c> {
 	}
 
 	/// Run `f` on the value of `p` in place when `p` is a plain set scalar
-	/// reference (`$name`, no subscript, not indirect, not a dynamic
+	/// reference (`$name` or `$1`, no subscript, not indirect, not a dynamic
 	/// variable) and no replay log is recorded; `None` otherwise (the
 	/// general path copies the value).
 	fn with_scalar<R>(&mut self, p: &ParamIr, f: impl FnOnce(&[u8]) -> R) -> X<Option<R>> {
-		let ParamRef::Var(name) = &p.param else {
-			return Ok(None);
-		};
-		if self.record || p.indirect || p.index.is_some() || is_dynamic(name) {
+		if self.record || p.indirect || p.index.is_some() {
 			return Ok(None);
 		}
-		Ok(state::lookup(&self.k.root, self.cx.store, self.vp, name)?
-			.and_then(Var::as_scalar)
-			.map(f))
+		match &p.param {
+			ParamRef::Var(name) if !is_dynamic(name) => {
+				Ok(state::lookup(&self.k.root, self.cx.store, self.vp, name)?
+					.and_then(Var::as_scalar)
+					.map(f))
+			},
+			ParamRef::Positional(n) if *n > 0 => {
+				Ok(state::positional_ref(&self.k.root, self.cx.store, self.vp)?
+					.get(*n as usize - 1)
+					.map(|s| f(s)))
+			},
+			_ => Ok(None),
+		}
 	}
 
 	/// The compound assignment `name=(…)` (or `name+=(…)`): to an

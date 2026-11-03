@@ -56,6 +56,9 @@ impl NativeHost {
 	/// first process's set after a fault-injector re-exec); the clock starts
 	/// at `elapsed_ns` (non-zero when a re-executed process continues a
 	/// shell, so deadlines and `$SECONDS` carry on).
+	///
+	/// Called once during process startup, before any worker threads exist:
+	/// the process mask can therefore be read by setting and restoring it.
 	#[cfg_attr(
 		not(unix),
 		expect(
@@ -70,10 +73,24 @@ impl NativeHost {
 		ignored: pi_shell::bash::SigSet,
 		elapsed_ns: u64,
 	) -> Self {
+		// Unlike an embedded host, this standalone process is still
+		// single-threaded here, and nothing in it changes the mask later:
+		// read and restore it directly rather than forking a helper.
+		#[cfg(unix)]
+		// SAFETY: umask has no preconditions; nothing can create files
+		// concurrently before this host starts its workers.
+		let umask = Some(unsafe {
+			let mask = libc::umask(0);
+			libc::umask(mask);
+			mask as u32
+		});
+		#[cfg(not(unix))]
+		let umask = None;
+		let std_fs = StdFs { umask };
 		let fs: Box<dyn Fs> = if pending_fs {
-			Box::new(PendingFs(StdFs))
+			Box::new(PendingFs(std_fs))
 		} else {
-			Box::new(StdFs)
+			Box::new(std_fs)
 		};
 		Self {
 			fs,
@@ -84,6 +101,8 @@ impl NativeHost {
 			spawner: NativeSpawner::new(SpawnConfig {
 				sessions: Sessions::Inherit,
 				exits: Exits::Park,
+				#[cfg(unix)]
+				umask,
 				..SpawnConfig::default()
 			}),
 			events,
@@ -253,14 +272,11 @@ impl pi_shell::bash::Host for NativeHost {
 	}
 
 	fn login_shell(&self) -> Option<BString> {
-		#[cfg(unix)]
-		{
-			// SAFETY: getuid has no preconditions.
-			login_shell(unsafe { libc::getuid() })
-				.or_else(|| std::env::var_os("SHELL").map(|v| BString::from(v.as_encoded_bytes())))
-		}
-		#[cfg(not(unix))]
-		std::env::var_os("SHELL").map(|v| BString::from(v.as_encoded_bytes()))
+		read_login_shell()
+	}
+
+	fn login_shell_initializer(&self) -> Option<fn() -> Option<BString>> {
+		Some(read_login_shell)
 	}
 
 	fn umask(&self) -> u32 {
@@ -462,6 +478,17 @@ pub fn inherited_fds() -> Vec<(i32, Box<dyn File>)> {
 #[cfg(not(unix))]
 pub fn inherited_fds() -> Vec<(i32, Box<dyn File>)> {
 	Vec::new()
+}
+
+fn read_login_shell() -> Option<BString> {
+	#[cfg(unix)]
+	{
+		// SAFETY: getuid has no preconditions.
+		login_shell(unsafe { libc::getuid() })
+			.or_else(|| std::env::var_os("SHELL").map(|v| BString::from(v.as_encoded_bytes())))
+	}
+	#[cfg(not(unix))]
+	std::env::var_os("SHELL").map(|v| BString::from(v.as_encoded_bytes()))
 }
 
 /// The login shell of `uid` from the password database (bash sets `SHELL`

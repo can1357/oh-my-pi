@@ -40,7 +40,7 @@ fn session_in(dir: &Path, extra: &[(&str, &str)]) -> Session {
 	Session::new(SessionConfig {
 		env:             env_with(extra),
 		cwd:             BString::from(dir.as_os_str().as_bytes()),
-		fs:              Box::new(crate::sys::StdFs),
+		fs:              Box::new(crate::sys::StdFs::default()),
 		vfs:             None,
 		runtime:         tokio::runtime::Handle::current(),
 		output_decoding: None,

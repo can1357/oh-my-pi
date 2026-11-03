@@ -52,6 +52,25 @@ function indentOf(line: string): number {
 	return n;
 }
 
+/** Lines a multi-line signature may span above the line that closes it and opens the body. */
+const SIGNATURE_LINES = 20;
+
+/**
+ * The name a block's header gives it. A header closing a multi-line signature (`): Promise<T> {`) names nothing
+ * itself: the name is on the line at its depth that opened the signature (`async #shapeOutput(`), so the
+ * conversation naming the function still opens its body.
+ */
+function blockName(lines: readonly string[], ind: readonly number[], head: number): string {
+	const own = BLOCK_NAME.exec(lines[head]);
+	if (own || !/^\s*[)\]]/.test(lines[head])) return own?.slice(1).find(Boolean) ?? "";
+	for (let k = head - 1; k >= Math.max(0, head - SIGNATURE_LINES); k--) {
+		if (lines[k].trim() === "" || ind[k] > ind[head]) continue;
+		if (ind[k] < ind[head]) break;
+		return BLOCK_NAME.exec(lines[k])?.slice(1).find(Boolean) ?? "";
+	}
+	return "";
+}
+
 /**
  * Indentation blocks of `lines` (any language): a non-blank line followed by more-indented lines heads a block whose
  * body runs while lines are blank or more indented. A Python docstring at the top of a body stays with the header
@@ -87,8 +106,7 @@ function foldBlocks(lines: readonly string[]): FoldBlock[] {
 			}
 			const children = build(bodyFrom, end, ind[i] + 1);
 			if (end - bodyFrom + 1 >= MIN_FOLD) {
-				const m = BLOCK_NAME.exec(lines[i]);
-				out.push({ head: i, from: bodyFrom, to: end, children, name: m?.slice(1).find(Boolean) ?? "" });
+				out.push({ head: i, from: bodyFrom, to: end, children, name: blockName(lines, ind, i) });
 			} else out.push(...children);
 			i = end;
 		}

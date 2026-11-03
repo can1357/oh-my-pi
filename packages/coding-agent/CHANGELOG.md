@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added the default-off `providers.openaiResponsesWebsockets` setting for catalog-supported standard Responses models, independently of Codex; model/request `false` always disables it ([#17354](https://github.com/can1357/oh-my-pi/pull/17354) by [@TatsukiMeng](https://github.com/TatsukiMeng))
 - Pinned sessions show a pin beside their title in the status line and the band composer's title, and `/unpin [session id]` unpins a session ([#17848](https://github.com/can1357/oh-my-pi/pull/17848) by [@SuperUserA](https://github.com/SuperUserA))
 - Added a fullscreen extension link browser for picking links already in terminal scrollback: press Alt+O again (or Page Up) while link tags are shown, or Alt+O with no extension link on screen ([#16476](https://github.com/can1357/oh-my-pi/pull/16476) by [@materemias](https://github.com/materemias))
 - Added `agentSteeringNext` to RPC `queue_update` and `get_state` `queuedMessages`: `true` when the next steering delivery is agent-authored, so the first queued `steering` entry is read one delivery later ([#17575](https://github.com/can1357/oh-my-pi/pull/17575) by [@sjawhar](https://github.com/sjawhar))
@@ -15,14 +16,27 @@
 - Fixed a message typed into a busy session waiting behind every extension or agent message queued before it, one per model turn, while the queue showed only `Steering · 1`; your queued message is now read at the next step, ahead of agent-authored steering, except that after 4 of yours the oldest waiting agent message goes first, and the queue then says "an agent message goes first, yours next" ([#17575](https://github.com/can1357/oh-my-pi/pull/17575) by [@sjawhar](https://github.com/sjawhar))
 - Fixed a queued message briefly disappearing from the queue (and from RPC `queue_update`) while it was being prepared for delivery, and reappearing in a `queue_update` while the run that put it back was still busy, so a client that resumed on that update was refused ([#17575](https://github.com/can1357/oh-my-pi/pull/17575) by [@sjawhar](https://github.com/sjawhar))
 - Fixed leaving Vibe mode, an interrupt, or an advisor reset bringing back Vibe instructions or an advisor card that the stopped turn had already taken, so the next turn read them ([#17575](https://github.com/can1357/oh-my-pi/pull/17575) by [@sjawhar](https://github.com/sjawhar))
+- Added a `cache` status-line segment (in the `full` and `nerd` presets) showing before you send whether the next message reads the prompt cache; hover it in Tern or open `/session` for why not and how much it re-sends ([#12677](https://github.com/can1357/oh-my-pi/issues/12677)) ([#17496](https://github.com/can1357/oh-my-pi/pull/17496) by [@will-bogusz](https://github.com/will-bogusz))
 - Added a `:level` suffix to `^` model tags, such as `^openai-codex/gpt-6-astra:high`, that sets the tagged subagent's initial effort. Typing `:` after a mention lists the model's supported levels. The task tool's `effort` hint and `task.maxEffort` do not override the tagged level, and a per-call `model` for that agent fails as a conflict ([#17574](https://github.com/can1357/oh-my-pi/pull/17574) by [@a-glapinski](https://github.com/a-glapinski))
+- RPC `bash` results now say when the output was cut: `elidedBytes`/`elidedLines` for a dropped middle, and `columnTruncatedLines`, `columnTruncatedRange`, `columnDroppedBytes` and `columnMax` for lines cut to the column cap. The Go, Python and Rust SDKs decode them ([#17957](https://github.com/can1357/oh-my-pi/pull/17957) by [@H4vC](https://github.com/H4vC))
+
+### Fixed
+
+- Long bash output cut in the middle no longer splits a line at the `[…N ln elided…]` marker, and its "Showing lines …" notice now names the lines actually shown, ending at the output's real last line ([#17957](https://github.com/can1357/oh-my-pi/pull/17957) by [@H4vC](https://github.com/H4vC))
+- A bash command that prints nothing and succeeds now returns `(no output, exit code 0)` instead of a bare `(no output)`, so an empty diff or search no longer reads like a failed command ([#17957](https://github.com/can1357/oh-my-pi/pull/17957) by [@H4vC](https://github.com/H4vC))
+- Added `tui.motion` (`full` / `reduced` / `none`, also `--motion` and `PI_MOTION`), one switch over spinners, the thinking pulse, shimmer and the status-line blink/fade for many-pane or reduced-motion use; a `tui.spinnerInterval` you set still wins over the preset ([#14240](https://github.com/can1357/oh-my-pi/pull/14240) by [@mccraigmccraig](https://github.com/mccraigmccraig))
+- Added `tui.spinnerInterval` (also `--spinner-interval` and `PI_SPINNER_INTERVAL`) to slow every spinner, the terminal title included, or pin them static with `0` ([#14240](https://github.com/can1357/oh-my-pi/pull/14240) by [@mccraigmccraig](https://github.com/mccraigmccraig))
+- Added `tui.maxFps` (also `--max-fps` and `PI_MAX_FPS`) to cap how often the TUI repaints; keystroke echo keeps 30 fps ([#14240](https://github.com/can1357/oh-my-pi/pull/14240) by [@mccraigmccraig](https://github.com/mccraigmccraig))
 
 ### Changed
 
+- A CLI flag, session-only settings write or SDK override now outranks the setting's environment variable, so `PI_MOTION=none omp --motion full` runs with full motion; env vars still outrank every settings file
+- Updated abort error handling for JS and Python tools to propagate original abort reasons
 - Subagents now move into worker threads when many run at once, so their model streaming and tool work no longer competes with the TUI: up to 3 concurrent subagents run on the main thread, 4 add a worker, and each doubling (8, 16, 32) adds one more, up to the new `task.workerThreads` (default 4; `0` keeps every subagent on the main thread). Each subagent goes where the fewest are running; a needed worker starts while the model is still streaming the spawning call and exits a minute after its last subagent finishes or parks. IRC, the Agent Hub and focus view, `agent://`/`history://`/`proc://`, parking and revival, async jobs, cost caps, account pools and OAuth refresh, runtime model providers, MCP, memory, telemetry, `PI_PROXY` and logs keep working across the thread boundary. If omp's own files change while it runs (a source checkout or an in-place update), new subagents run on the main thread until omp restarts
 
 ### Fixed
 
+- Retrying an aborted turn keeps the unsent composer draft instead of clearing it ([#17977](https://github.com/can1357/oh-my-pi/pull/17977) by [@Shadorain](https://github.com/Shadorain))
 - Fixed Windows bash output on non-UTF-8 code pages (Korean, Chinese, Japanese, …) turning into mojibake for the rest of a command after a builtin wrote one invalid byte (`printf '\xeb'`, `cut -c` through a CJK character); the stray byte now becomes `�` on its own line, and native programs' ANSI output still decodes, including through `| head` or from `cat` of a legacy file ([#17947](https://github.com/can1357/oh-my-pi/pull/17947) by [@H4vC](https://github.com/H4vC))
 - Fixed Hindsight silently dropping the last mental model (often `User Preferences`) from the prompt once models outgrew their share of the render budget ([#17548](https://github.com/can1357/oh-my-pi/issues/17548), [#17955](https://github.com/can1357/oh-my-pi/pull/17955) by [@harshaygadekar](https://github.com/harshaygadekar))
 - The run status `blocked` indicator of a focused subagent follows the subagent's own approval mode, tool policies, remembered grants, and "approve for this session" answers instead of the main session's
@@ -33,6 +47,8 @@
 - In the bash tool, `xargs` reports a command killed by a signal as GNU xargs does: `xargs: CMD: terminated by signal N`, no further commands, status 125
 - On macOS, starting a bash tool session no longer briefly sets pi's umask to 022, which could give files created at that moment the wrong permissions
 - In the bash tool, an executable script without a `#!` line started in the background with its input from a FIFO (`./script < fifo &`) runs as a bash script instead of failing with `Exec format error`
+- Fixed subagents hanging forever in an async Python `@tool` call that waits on a kernel-global `asyncio.Lock` (or other asyncio primitive) another subagent's call held; concurrent async tool calls now share one event loop
+- Interrupting or cancelling a subagent mid-call now cancels an async Python `@tool` coroutine, releasing any locks it holds, and the subagent sees `Python tool request was cancelled` instead of `Python tool call returned an invalid response`
 
 ## [18.16.0] - 2026-11-02
 
