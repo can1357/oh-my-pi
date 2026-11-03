@@ -98,6 +98,7 @@ import { lastModelChangeRole, SessionEntryIndex } from "../session/session-manag
 import type { AgentDefinition } from "../task/types";
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
 import { type ApprovalGrantStore, getApprovalGrants } from "../tools/approval-cache";
+import { USER_TODO_EDIT_CUSTOM_TYPE } from "../tools/todo";
 import { TokenRateMeter } from "../utils/token-rate";
 import type { ThreadId } from "./identity";
 import { type RemoteObject, RpcClosedError, rpcSync } from "./rpc";
@@ -679,6 +680,12 @@ export class RemoteAgentSession implements AgentViewSession {
 	setTodoPhases(phases: TodoPhase[]): void {
 		this.#view = { ...this.#view, todoPhases: phases };
 		this.#notify("setTodoPhases", toWireData(phases));
+	}
+
+	/** Same two steps as a home session: the optimistic entry and the mirror update reach the worker in order. */
+	commitTodoPhases(phases: TodoPhase[]): void {
+		this.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases });
+		this.setTodoPhases(phases);
 	}
 
 	/**

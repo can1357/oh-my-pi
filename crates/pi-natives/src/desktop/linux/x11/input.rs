@@ -39,17 +39,14 @@ use super::{
 	wm::{Atoms, FocusSnapshot, Wm},
 };
 use crate::desktop::{
-	backend::{DeliveryMode, Modifiers, MouseButton, PointerEvent},
+	backend::{DeliveryMode, ElementInput, Modifiers, MouseButton, PointerEvent},
 	control,
 	error::{CoreResult, DesktopError, ErrorCode},
 	keys::KeyName,
+	linux::{CLICK_DELAY, pace_clicks},
 	types::Target,
 };
 
-const CLICK_DELAY: Duration = Duration::from_millis(12);
-/// Release → next press of an `XTest` multi-click. Chromium synthesizes
-/// `dblclick` only when the first pair reached it before the second.
-const MULTI_CLICK_GAP: Duration = Duration::from_millis(50);
 const DRAG_STEP_DELAY: Duration = Duration::from_millis(8);
 /// Activation budget of a foreground pointer action.
 const FOREGROUND_POINTER_SETTLE: Duration = Duration::from_millis(800);
@@ -64,6 +61,9 @@ const FOREGROUND_POLL: Duration = Duration::from_millis(15);
 const FOREGROUND_RESTORE_SETTLE: Duration = Duration::from_millis(150);
 /// Bound on re-activating the user's window after a foreground action.
 const FOREGROUND_RESTORE_BUDGET: Duration = Duration::from_millis(400);
+/// Why background keys, typed or held, cannot reach a Qt window.
+const QT_CORE_KEYBOARD: &str =
+	"its Qt toolkit reads core keyboard events, which the XI2-MPX virtual keyboard does not send";
 
 pub struct X11Input {
 	conn:             Arc<RustConnection>,
@@ -144,7 +144,7 @@ impl X11Input {
 	) -> CoreResult<()> {
 		if matches!(target, Target::Desktop | Target::Display(_)) || mode != DeliveryMode::Background
 		{
-			self.keymap = Keymap::core(&self.conn)?;
+			self.keymap = Keymap::xtest(&self.conn)?;
 		}
 		match (target, mode) {
 			(Target::Desktop | Target::Display(_), _) => self.pointer_xtest(&event),
@@ -166,6 +166,16 @@ impl X11Input {
 						));
 					}
 					return self.pointer_send_event(window, &event);
+				}
+				// Qt reads modifiers off the XI2 pointer events; other held keys
+				// only as core key events.
+				let holds_keys = matches!(
+					&event,
+					PointerEvent::Hold { keys, .. } | PointerEvent::Drag { keys, .. }
+						if keys.iter().any(|key| !key.is_modifier())
+				);
+				if holds_keys && self.reads_core_keyboard(window) {
+					return Err(background_unavailable(id, event_kind(&event), QT_CORE_KEYBOARD));
 				}
 				let reason = match ensure_mpx(&mut self.mpx, &mut self.mpx_unavailable) {
 					Ok(mpx) => {
@@ -217,6 +227,27 @@ impl X11Input {
 		self.keys(target, Keys::Chord(keys), mode)
 	}
 
+	/// Takeover keys into `window`, with `prepare` run inside the takeover
+	/// once the user's window is recorded, so an activation `prepare` causes,
+	/// such as an AT-SPI focus request, is handed back with the takeover.
+	pub(crate) fn foreground_keys_after(
+		&mut self,
+		window: Window,
+		input: &ElementInput,
+		prepare: impl FnOnce() -> CoreResult<()>,
+	) -> CoreResult<()> {
+		self.keymap = Keymap::core(&self.conn)?;
+		let keys = match input {
+			ElementInput::Text(text) => Keys::Text(text),
+			ElementInput::Chord(keys) => Keys::Chord(keys),
+		};
+		let steps = keys.plan(&self.keymap)?;
+		self.with_foreground(window, FOREGROUND_KEYBOARD_SETTLE, |this| {
+			prepare()?;
+			this.xtest_steps(&steps, keys.duration())
+		})
+	}
+
 	pub(crate) fn hold_keys(
 		&mut self,
 		target: &Target,
@@ -229,6 +260,9 @@ impl X11Input {
 
 	/// Persistent activation: the target stays active afterwards.
 	pub(crate) fn raise_window(&self, window: Window) -> CoreResult<()> {
+		if let Some(mpx) = &self.mpx {
+			mpx.release_focus(window)?;
+		}
 		let wm = self.wm();
 		wm.request_activation(window, wm.active_window())
 	}
@@ -238,7 +272,13 @@ impl X11Input {
 	}
 
 	fn keys(&mut self, target: &Target, keys: Keys<'_>, mode: DeliveryMode) -> CoreResult<()> {
-		self.keymap = Keymap::core(&self.conn)?;
+		// `XSendEvent` keys are read in the core map, `XTest` keys in its
+		// device's.
+		self.keymap = if matches!(target, Target::Window(_)) && mode == DeliveryMode::Background {
+			Keymap::core(&self.conn)?
+		} else {
+			Keymap::xtest(&self.conn)?
+		};
 		match (target, mode) {
 			(Target::Desktop | Target::Display(_), _) => {
 				let steps = keys.plan(&self.keymap)?;
@@ -270,10 +310,14 @@ impl X11Input {
 			let steps = keys.plan(&self.keymap)?;
 			return self.send_key_steps(window, &steps, keys.duration());
 		}
+		let pid = self.wm().owning_pid(window);
+		// Empty text plans no keys, so it stays the no-op it is everywhere.
+		if pid.is_some_and(toolkit::process_reads_core_keyboard) && !matches!(keys, Keys::Text("")) {
+			return Err(background_unavailable(id, keys.kind(), QT_CORE_KEYBOARD));
+		}
 		let reason = match ensure_mpx(&mut self.mpx, &mut self.mpx_unavailable) {
 			Ok(mpx) => {
 				let wm = Wm { conn: &self.conn, root: self.root, atoms: &self.atoms };
-				let pid = wm.owning_pid(window);
 				if let Some(pid) = pid
 					&& let Some(popup) = wm.grab_popup_of(pid)
 				{
@@ -330,6 +374,11 @@ impl X11Input {
 		budget: Duration,
 		body: impl FnOnce(&mut Self) -> CoreResult<T>,
 	) -> CoreResult<T> {
+		// The activation's core `FocusIn` reaches the target and its window
+		// manager only when no other keyboard focuses it.
+		if let Some(mpx) = &self.mpx {
+			mpx.release_focus(window)?;
+		}
 		let wm = self.wm();
 		let ewmh = wm.tracks_active_window();
 		let previous_active = wm.active_window();
@@ -460,12 +509,17 @@ impl X11Input {
 		let _ = self.conn.flush();
 	}
 
-	fn pointer_send_event(&self, window: Window, event: &PointerEvent) -> CoreResult<()> {
+	fn pointer_send_event(&mut self, window: Window, event: &PointerEvent) -> CoreResult<()> {
 		pointer_endpoint(event)?;
 		let keys = match event {
 			PointerEvent::Hold { keys, .. } | PointerEvent::Drag { keys, .. } => keys.as_slice(),
 			_ => &[],
 		};
+		// `XSendEvent` keys are read in the core map; an earlier `XTest` call
+		// left the `XTest` keyboard's.
+		if !keys.is_empty() {
+			self.keymap = Keymap::core(&self.conn)?;
+		}
 		let codes = self.keymap.held_keycodes(keys)?;
 		let mut state = 0u16;
 		keymap::with_held_codes(
@@ -610,19 +664,7 @@ impl X11Input {
 				let (x, y) = validate_xtest_point(*x, *y)?;
 				self.xtest_motion(x, y)?;
 				let detail = button_detail(*button);
-				let count = (*count).max(1);
-				for index in 0..count {
-					if index > 0 {
-						control::wait(MULTI_CLICK_GAP)?;
-					}
-					control::check()?;
-					let pressed = self
-						.xtest_button(detail, true)
-						.and_then(|()| control::sent_gap_wait(CLICK_DELAY, index + 1 == count));
-					let released = control::cleanup(|| self.xtest_button(detail, false));
-					pressed.and(released)?;
-				}
-				Ok(())
+				pace_clicks(*count, |pressed| self.xtest_button(detail, pressed))
 			},
 			PointerEvent::Hold { x, y, button, duration, .. } => {
 				let (x, y) = validate_xtest_point(*x, *y)?;
@@ -990,6 +1032,15 @@ impl X11Input {
 			}
 		}
 		Ok(())
+	}
+
+	/// Whether `window`'s process takes keys only as core events
+	/// ([`toolkit::process_reads_core_keyboard`]).
+	fn reads_core_keyboard(&self, window: Window) -> bool {
+		self
+			.wm()
+			.owning_pid(window)
+			.is_some_and(toolkit::process_reads_core_keyboard)
 	}
 
 	fn requires_core_events(&self, window: Window) -> bool {

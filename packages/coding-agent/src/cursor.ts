@@ -115,17 +115,13 @@ interface CursorExecBridgeOptions {
 	 */
 	allowDirectFileMutation?: boolean | (() => boolean);
 	/**
-	 * Mirror Cursor's server-owned todo list into local session state. Cursor
-	 * resolves `update_todos` / `read_todos` remotely, so without this bridge
-	 * the provider's list and the local `todo` state diverge silently.
+	 * Mirror Cursor's server-owned todo list into local session state and the
+	 * session branch. Cursor resolves `update_todos` / `read_todos` remotely and
+	 * emits no local `todo` toolResult, so without this bridge the provider's
+	 * list and the local `todo` state diverge silently and reloads lose it.
 	 */
-	setTodoPhases?: (phases: TodoPhase[]) => void;
+	commitTodoPhases?: (phases: TodoPhase[]) => void;
 	getTodoPhases?: () => TodoPhase[];
-	/**
-	 * Persist the mirrored list to the session branch so it survives reloads.
-	 * Cursor emits no local `todo` toolResult, so nothing else records it.
-	 */
-	persistTodoPhases?: (phases: TodoPhase[]) => void;
 	/**
 	 * Build a `grep` tool honoring a frame's own context width and match cap.
 	 *
@@ -1008,7 +1004,7 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		error: string | null = null,
 		origin: "read" | "update" = "update",
 	): ToolResultMessage {
-		const setPhases = this.options.setTodoPhases;
+		const commitPhases = this.options.commitTodoPhases;
 		const existing = this.options.getTodoPhases?.() ?? [];
 
 		// Mirroring is gated on having both a snapshot and somewhere to put it.
@@ -1016,7 +1012,7 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		// only on a matching `tool_execution_end`, so a refusal, a server error,
 		// or a host with no local todo state must still resolve it.
 		let phases: TodoPhase[] | undefined;
-		if (snapshot && setPhases) {
+		if (snapshot && commitPhases) {
 			const phaseByContent = new Map<string, string>();
 			for (const phase of existing) {
 				for (const task of phase.tasks) phaseByContent.set(task.content, phase.name);
@@ -1045,8 +1041,7 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 			if (origin === "read" && JSON.stringify(next) === JSON.stringify(existing)) {
 				phases = undefined;
 			} else {
-				setPhases(next);
-				this.options.persistTodoPhases?.(next);
+				commitPhases(next);
 				phases = next;
 			}
 		}

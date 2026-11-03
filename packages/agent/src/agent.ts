@@ -1415,6 +1415,7 @@ export class Agent {
 		// A listener may have replaced the queue, or popped the claim back into it.
 		if (this.#queuedMessageClaims[queue] !== claim) return [];
 		const preparationSignal = AbortSignal.any([signal, claim.controller.signal]);
+		this.#emitQueueChanged();
 		try {
 			const preparation = await prepare(messages, preparationSignal, queue);
 			signal.throwIfAborted();
