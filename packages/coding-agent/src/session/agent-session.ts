@@ -106,7 +106,6 @@ import {
 	logger,
 	postmortem,
 	prompt,
-	Serial,
 	Snowflake,
 	stringProperty,
 	toError,
@@ -268,14 +267,7 @@ import {
 } from "../tools/resolve";
 import { PROPOSE_DEVICE_NAME } from "@oh-my-pi/pi-tui/tools/resolve";
 import { supportsExternalThinking } from "../tools/think";
-import { USER_TODO_EDIT_CUSTOM_TYPE } from "../tools/todo";
-import {
-	type ActiveTodoBackend,
-	NATIVE_TODO_BACKEND_ID,
-	TODO_BACKEND_NOTICE_SOURCE,
-	type TodoWriteGuard,
-	todoBackendText,
-} from "../tools/todo-backend";
+import type { ActiveTodoBackend, TodoWriteGuard } from "../tools/todo-backend";
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { currentThreadId, isMainThread } from "../thread/identity";
@@ -534,6 +526,7 @@ const TITLE_DRIFT_JUDGE_TIMEOUT_MS = 15_000;
 
 import { LoopGuards, type StreamGuardsHost, StreamingEditGuard } from "./stream-guards";
 import { EAGER_TODO_PRELUDE_MESSAGE_TYPE, TodoTracker, type TodoTrackerHost } from "./todo-tracker";
+import { TodoWrites } from "./todo-writes";
 import { TtsrCoordinator, type TtsrCoordinatorHost } from "./ttsr-coordinator";
 
 import { cfgAdvisorEnabled, cfgAdvisorMaxNotesPerUpdate } from "../advisor/settings";
@@ -600,7 +593,6 @@ import {
 	cfgRatchetEnabled,
 	cfgDevAutoqa,
 	cfgDevAutoqaConsent,
-	cfgTodoBackend,
 	cfgTodoEnabled,
 	cfgToolsApproval,
 } from "../tools/settings";
@@ -986,8 +978,6 @@ function isEvalActivity(message: AgentMessage): boolean {
 	);
 }
 
-const TODO_SESSION_CHANGED_MESSAGE = "The session changed before the todo edit was saved; nothing was changed.";
-
 /** A retry supersedes a failed operation only when its intent matches, allowing a missing append phase to be supplied. */
 function todoRetryMatches(failed: Record<string, unknown>, retry: Record<string, unknown>): boolean {
 	if (Bun.deepEquals(failed, retry)) return true;
@@ -1160,18 +1150,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#planModeReminderCount = 0;
 	#planModeReminderAwaitingProgress = false;
 	readonly #todo: TodoTracker;
-	/** Backend mirroring the main session's todo list; `undefined` = native todos. */
-	#activeTodoBackend: ActiveTodoBackend | undefined;
-	/** Latest `todo.backend` value a resolution was queued for. */
-	#todoBackendRequestedId: string | undefined;
-	/** Set by `initializeTodoBackend`; backend resolution stays dormant until then. */
-	#todoBackendInitStarted = false;
-	/** The queued first backend resolution; every write awaits it. Set once, at the first prompt admission or todo write. */
-	#todoBackendInit: Promise<void> | undefined;
-	/** Bumped whenever the todo list is reset or reloaded; queued writes from an older epoch must not land. */
-	#todoEpoch = 0;
-	/** Serial queue for every todo write and backend resolution. */
-	readonly #todoQueue = new Serial();
+	/** Every todo write and the todo backend those writes reach. */
+	readonly #todoWrites: TodoWrites;
 	readonly #modelMentions: ModelMentionRegistry;
 	#workPoolYieldItems: readonly WorkPoolYieldItem[] = [];
 	/** Item set matching the last successfully rebuilt provider prompt. The base
@@ -2241,6 +2221,22 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			consumeLastServedToolChoiceLabel: () => this.#toolChoiceQueue.consumeLastServedLabel(),
 		};
 		this.#todo = new TodoTracker(todoHost);
+		this.#todoWrites = new TodoWrites({
+			settings: this.settings,
+			addDisposer: dispose => this.addDisposer(dispose),
+			sessionManager: this.sessionManager,
+			todo: this.#todo,
+			extensionRunner: () => this.#extensionRunner,
+			isMainAgent: () => this.#agentKind === "main",
+			isDisposed: () => this.#isDisposed,
+			emitNotice: (level, message, source) => this.emitNotice(level, message, source),
+			bindDeferredExtensions: async () => {
+				// A write issued from inside the deferred load must not wait on that load.
+				if (deferredExtensionLoadScope.getStore()) return false;
+				if (this.hasPendingDeferredExtensions) await this.loadDeferredExtensions();
+				return true;
+			},
+		});
 		this.#modelMentions = new ModelMentionRegistry({
 			sessionManager: this.sessionManager,
 			modelRegistry: this.#modelRegistry,
@@ -3656,7 +3652,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#admittedSubmissionCount++;
 		try {
 			if (this.hasPendingDeferredExtensions) await this.loadDeferredExtensions();
-			if (!this.hasPendingDeferredExtensions) this.#queueInitialTodoBackendResolution();
+			if (!this.hasPendingDeferredExtensions) this.#todoWrites.resolveBackend();
 			return await this.#inLogContext(work);
 		} finally {
 			if (--this.#admittedSubmissionCount === 0 && this.#admittedSubmissionsSettled) {
@@ -7564,7 +7560,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					},
 				)
 				// Extensions are bound (or failed to load): the todo backend can now resolve.
-				.then(() => this.#queueInitialTodoBackendResolution())
+				.then(() => this.#todoWrites.resolveBackend())
 				.finally(() => {
 					if (this.#deferredExtensionLoad === pending) this.#deferredExtensionLoad = undefined;
 				});
@@ -11029,164 +11025,25 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#todo.setPhases(phases);
 	}
 
-	/**
-	 * Serial queue for every todo write and backend switch. Each write starts after all earlier
-	 * ones settled (a rejected one does not block the next) and receives the backend resolved at
-	 * that moment (`undefined` = native todos) plus a guard whose `assertCurrent()` must run before
-	 * committing. Waits for the initial backend resolution first.
-	 *
-	 * A write whose todo epoch moved (`/new`, switch, rewind, tree navigation, fork) since this call
-	 * rejects without starting. `options.signal` races the caller against the queue: the returned
-	 * promise rejects at once on abort, a not-yet-started write is skipped, and a started one keeps
-	 * the queue slot until it settles but fails `assertCurrent()` so it never commits.
-	 */
+	/** Queue a todo write; see {@link TodoWrites.run}. */
 	runTodoWrite<T>(
 		write: (active: ActiveTodoBackend | undefined, guard: TodoWriteGuard) => Promise<T>,
 		options?: { signal?: AbortSignal },
 	): Promise<T> {
-		const signal = options?.signal;
-		const epoch = this.#todoEpoch;
-		const assertCurrent = (): void => {
-			signal?.throwIfAborted();
-			if (this.#todoEpoch !== epoch) throw new Error(TODO_SESSION_CHANGED_MESSAGE);
-		};
-		const queued = (async () => {
-			await this.#awaitTodoBackendReady();
-			this.#observeTodoBackendSetting();
-			return this.#todoQueue.run(() => {
-				assertCurrent();
-				return write(this.#activeTodoBackend, { assertCurrent });
-			});
-		})();
-		return untilAborted(signal, queued);
+		return this.#todoWrites.run(write, options);
 	}
 
-	/** Reload the todo list for a different list identity (reset, switch, rewind, navigation, fork), invalidating queued writes. */
-	#reloadTodoFromBranch(): void {
-		this.#todoEpoch++;
-		this.#todo.syncFromBranch();
-	}
-
-	/**
-	 * Arm todo backend resolution for the main session and watch `todo.backend`. Call once, after
-	 * {@link setDeferredExtensionLoader}. Resolution itself is lazy: it runs at the first prompt
-	 * admission, after the deferred-extension load, or at the first todo write, whichever comes first.
-	 * Both happen after the mode subscribed its event listeners, so the fallback notice reaches the
-	 * client; resolving inside `createAgentSession` would emit it before anyone listens. Sessions
-	 * without an extension runner never use a backend.
-	 */
+	/** Arm todo backend resolution; see {@link TodoWrites.arm}. Call once, after {@link setDeferredExtensionLoader}. */
 	initializeTodoBackend(): void {
-		if (this.#todoBackendInitStarted || !this.#extensionRunner) return;
-		this.#todoBackendInitStarted = true;
-		cfgTodoBackend.listen(this, () => this.#observeTodoBackendSetting());
+		this.#todoWrites.arm();
 	}
 
-	#queueInitialTodoBackendResolution(): void {
-		if (!this.#todoBackendInitStarted || this.#todoBackendInit) return;
-		const id = cfgTodoBackend.get(this.settings);
-		this.#todoBackendRequestedId = id;
-		this.#todoBackendInit = this.#todoQueue
-			.run(() => this.#resolveTodoBackend(id))
-			.catch((error: unknown) => {
-				logger.warn("Todo backend resolution failed", { id, error: String(error) });
-			});
-	}
-
-	async #awaitTodoBackendReady(): Promise<void> {
-		// A write issued from inside the deferred load must not wait on that load.
-		if (!this.#todoBackendInitStarted || deferredExtensionLoadScope.getStore()) return;
-		if (this.hasPendingDeferredExtensions) await this.loadDeferredExtensions();
-		this.#queueInitialTodoBackendResolution();
-		await this.#todoBackendInit;
-	}
-
-	/** Queue a re-resolution when `todo.backend` no longer matches the id last resolved. */
-	#observeTodoBackendSetting(): void {
-		// Before the initial resolution runs, it reads the setting itself.
-		if (!this.#todoBackendInit || this.#isDisposed) return;
-		const id = cfgTodoBackend.get(this.settings);
-		if (id === this.#todoBackendRequestedId) return;
-		this.#todoBackendRequestedId = id;
-		this.#todoQueue
-			.run(() => this.#resolveTodoBackend(id))
-			.catch((error: unknown) => {
-				logger.warn("Todo backend switch failed", { id, error: String(error) });
-			});
-	}
-
-	/**
-	 * Resolve `todo.backend` into {@link #activeTodoBackend}. Never throws: an unregistered id or a
-	 * failing `create` leaves native todos in place and emits one notice. Does not touch the list.
-	 */
-	async #resolveTodoBackend(id: string): Promise<void> {
-		this.#activeTodoBackend = undefined;
-		const runner = this.#extensionRunner;
-		if (!runner || this.#agentKind !== "main" || this.#isDisposed) return;
-		if (id.trim() === "" || id === NATIVE_TODO_BACKEND_ID) return;
-		const context = runner.createContext();
-		const definition = runner.todoBackends.get(id);
-		if (!definition) {
-			this.emitNotice(
-				"warning",
-				`Todo backend "${todoBackendText(id)}" is not registered by any loaded extension; using native todos.`,
-				TODO_BACKEND_NOTICE_SOURCE,
-			);
-			return;
-		}
-		try {
-			const backend = await runner.runTodoBackendCall(() => definition.create(context));
-			if (!backend || typeof backend.apply !== "function" || typeof backend.replace !== "function") {
-				throw new Error("create() did not return an object with apply() and replace()");
-			}
-			this.#activeTodoBackend = {
-				id,
-				label: todoBackendText(definition.label),
-				apply: (op, params, next, signal) =>
-					runner.runTodoBackendCall(backendSignal => backend.apply(op, params, next, backendSignal), signal),
-				replace: (phases, signal) =>
-					runner.runTodoBackendCall(backendSignal => backend.replace(phases, backendSignal), signal),
-			};
-		} catch (error) {
-			const message = todoBackendText(error);
-			logger.warn("Todo backend create failed", { id, error: message });
-			this.emitNotice(
-				"warning",
-				`Todo backend "${todoBackendText(id)}" failed to start: ${message}; using native todos.`,
-				TODO_BACKEND_NOTICE_SOURCE,
-			);
-		}
-	}
-
-	/**
-	 * Replace the list from outside the `todo` tool. Runs on the todo write queue: a function `update`
-	 * receives the committed list at that moment (a function returning `undefined` declines and nothing
-	 * is sent or committed); a selected backend's `replace` then receives a copy of the full list, the
-	 * cache updates and a `user_todo_edit` entry is recorded so reloads keep it. A throwing `replace`
-	 * rejects (naming the backend) and commits nothing; so does a session reset while queued.
-	 * `mirrored` (eval bridge) only records the entry: the bridged `todo` call already updated the cache
-	 * and reached `apply`. Resolves with the committed list.
-	 */
+	/** Replace the todo list from outside the `todo` tool; see {@link TodoWrites.commit}. */
 	commitTodoPhases(
 		update: TodoPhase[] | ((current: TodoPhase[]) => TodoPhase[] | undefined),
 		options?: { mirrored?: boolean },
 	): Promise<TodoPhase[] | undefined> {
-		return this.runTodoWrite(async (active, guard) => {
-			const phases = typeof update === "function" ? update(this.#todo.phases) : update;
-			if (phases === undefined) return undefined;
-			if (active && !options?.mirrored) {
-				try {
-					await active.replace(this.#todo.clonePhases(phases));
-				} catch (error) {
-					throw new Error(`Todo backend "${active.label}" refused the edit: ${todoBackendText(error)}`, {
-						cause: error,
-					});
-				}
-			}
-			guard.assertCurrent();
-			if (!options?.mirrored) this.#todo.setPhases(phases);
-			this.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases });
-			return phases;
-		});
+		return this.#todoWrites.commit(update, options);
 	}
 
 	/** Active item labels accepted by this pooled turn's incremental yield tool. */
@@ -11901,8 +11758,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				} else {
 					await this.sessionManager.flush();
 				}
-				// Synchronous epoch bump before the file swap: a queued todo commit settling mid-swap must not land in the new file.
-				this.#todoEpoch++;
+				this.#todoWrites.invalidate();
 				await this.sessionManager.newSession({
 					...options,
 					additionalDirectories: cfgWorkspaceAdditionalDirectories.get(this.settings),
@@ -11919,7 +11775,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 			this.#clearSessionScopedToolState();
 			this.#clearCheckpointRuntimeState();
-			this.#todoEpoch++;
+			this.#todoWrites.invalidate();
 			this.setTodoPhases([]);
 			this.#freshProviderSessionId = undefined;
 			this.#clearInheritedProviderPromptCacheKey();
@@ -12699,7 +12555,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		}
 		this.agent.replaceMessages(activeMessages ?? sessionContext.messages);
 		this.#advisors.resetSessionState({ preserveCost: true });
-		this.#reloadTodoFromBranch();
+		this.#todoWrites.reload();
 		this.#modelMentions.syncFromBranch();
 		this.#closeCodexProviderSessionsForHistoryRewrite();
 		this.#checkpointState = undefined;
@@ -13700,8 +13556,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// The file may be reloaded at the same path with a different latest contract (or the
 			// switch rolled back via restoreState); re-read it on the next model call either way.
 			this.#sessionInit = undefined;
-			// Synchronous epoch bump before the file swap: a queued todo commit settling mid-swap must not land in the new file.
-			this.#todoEpoch++;
+			this.#todoWrites.invalidate();
 			await this.sessionManager.setSessionFile(sessionPath);
 			this.#bash.markSessionTransition(bashTransition);
 			const newCwd = this.sessionManager.getCwd();
@@ -13786,7 +13641,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.agent.replaceMessages(sessionContext.messages);
 			this.#reseedTokenRate();
 			this.#advisors.resetSessionState({ preserveCost: true });
-			this.#reloadTodoFromBranch();
+			this.#todoWrites.reload();
 			this.#modelMentions.syncFromBranch();
 			if (switchingToDifferentSession) {
 				this.#closeAllProviderSessions("session switch");
@@ -13966,7 +13821,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			if (modelRolledBack) {
 				this.#emit({ type: "model_changed" });
 			}
-			this.#reloadTodoFromBranch();
+			this.#todoWrites.reload();
 			this.#modelMentions.syncFromBranch();
 			this.#advisors.resetAllRuntimes();
 			this.#advisors.reattachRecorderFeeds();
@@ -14118,8 +13973,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				// A prompt admitted during the drain awaits above belongs to the history
 				// being replaced; the generation bump drops its pending setup.
 				this.#promptGeneration++;
-				// Synchronous epoch bump before the file swap: a queued todo commit settling mid-swap must not land in the new file.
-				this.#todoEpoch++;
+				this.#todoWrites.invalidate();
 				if (!leafId) {
 					const title = this.sessionManager.getSessionName();
 					const titleSource = this.sessionManager.titleSource;
@@ -14136,7 +13990,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			}
 			this.#clearSessionScopedToolState();
 			this.#rehydrateCheckpointRewindState();
-			this.#reloadTodoFromBranch();
+			this.#todoWrites.reload();
 			this.#modelMentions.syncFromBranch();
 			this.#freshProviderSessionId = undefined;
 			this.#clearInheritedProviderPromptCacheKey();
@@ -14248,8 +14102,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				// A prompt may have been admitted during the flush/drain awaits
 				// after the idle check. It still belongs to the pre-branch context.
 				this.#promptGeneration++;
-				// Synchronous epoch bump before the file swap: a queued todo commit settling mid-swap must not land in the new file.
-				this.#todoEpoch++;
+				this.#todoWrites.invalidate();
 				this.sessionManager.createBranchedSession(leafId);
 				this.#bash.markSessionTransition(bashTransition);
 				this.#advisors.clearCost();
@@ -14269,7 +14122,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				timestamp: Date.now(),
 			});
 			this.sessionManager.appendMessage(sanitizeAssistantForReparentedHistory(assistantMessage));
-			this.#reloadTodoFromBranch();
+			this.#todoWrites.reload();
 			this.#modelMentions.syncFromBranch();
 			this.#freshProviderSessionId = undefined;
 			this.#syncAgentSessionId();
@@ -14601,7 +14454,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.agent.replaceMessages(displayContext.messages);
 		this.#rehydrateCheckpointRewindState();
 		this.#advisors.resetSessionState({ preserveCost: true });
-		this.#reloadTodoFromBranch();
+		this.#todoWrites.reload();
 		this.#modelMentions.syncFromBranch();
 		this.#closeCodexProviderSessionsForHistoryRewrite();
 

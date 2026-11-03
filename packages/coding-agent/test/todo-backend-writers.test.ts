@@ -146,16 +146,18 @@ function contentsOf(phases: TodoPhase[]): string[] {
 	return phases.flatMap(phase => phase.tasks.map(task => task.content));
 }
 
-/** Resolves once the session's write queue has accepted `count` writes in total from now. */
+/** Resolves once `count` todo writes (tool writes and commits) were issued on the session from now. */
 function writeQueuedAt(session: AgentSession, count: number): Promise<void> {
 	const queued = Promise.withResolvers<void>();
-	const original = session.runTodoWrite.bind(session);
 	let writes = 0;
-	vi.spyOn(session, "runTodoWrite").mockImplementation((...args) => {
-		const run = original(...args);
+	const issued = <T>(write: T): T => {
 		if (++writes === count) queued.resolve();
-		return run;
-	});
+		return write;
+	};
+	const run = session.runTodoWrite.bind(session);
+	const commit = session.commitTodoPhases.bind(session);
+	vi.spyOn(session, "runTodoWrite").mockImplementation((...args) => issued(run(...args)));
+	vi.spyOn(session, "commitTodoPhases").mockImplementation((...args) => issued(commit(...args)));
 	return queued.promise;
 }
 
