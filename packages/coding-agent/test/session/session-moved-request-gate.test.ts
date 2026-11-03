@@ -1153,6 +1153,31 @@ describe("a host function the session, its manager or its runner keeps runs as t
 				session.yieldQueue.hasDeliverable("probe");
 			},
 		],
+		[
+			// A real timer, awaited by its firing: a fake clock would fire it in the advancer's context.
+			"a runner-managed timer (`ctx.setTimeout`), scheduled from outside any session work",
+			({ runner, callback }) => {
+				const fired = Promise.withResolvers<void>();
+				runner.createContext().setTimeout(() => {
+					callback();
+					fired.resolve();
+				}, 1);
+				return fired.promise;
+			},
+		],
+		[
+			"a runner-managed interval (`ctx.setInterval`), scheduled from outside any session work",
+			({ runner, callback }) => {
+				const fired = Promise.withResolvers<void>();
+				const ctx = runner.createContext();
+				const timer = ctx.setInterval(() => {
+					ctx.clearTimer(timer);
+					callback();
+					fired.resolve();
+				}, 1);
+				return fired.promise;
+			},
+		],
 	];
 	for (const [registration, trigger] of registrations) {
 		it(`holds the model request of ${registration}`, async () => {
@@ -1162,8 +1187,8 @@ describe("a host function the session, its manager or its runner keeps runs as t
 		}, 60_000);
 	}
 
-	it("keeps a manager's host functions with the first live session over it, not a later one", async () => {
-		const temp = tempDir("@gate-manager-owner-");
+	it("runs a manager's host functions as the work of every live session over it", async () => {
+		const temp = tempDir("@gate-manager-owners-");
 		const server = localModelServer();
 		cleanups.push(server.stop);
 		const auth = await AuthStorage.create(":memory:");
@@ -1182,17 +1207,87 @@ describe("a host function the session, its manager or its runner keeps runs as t
 				settings: settings(),
 			});
 			cleanups.push(() => session.dispose());
-			return agent;
+			return { session, hold: holdUntilLetGo(agent) };
 		};
-		const hold = holdUntilLetGo(build());
-		// A second live session over the manager, without holds: had it taken the manager over, the request would go out.
-		build();
+		const first = build();
+		const second = build();
 		let work: Promise<unknown> | undefined;
-		manager.onEntryAppended = () => {
+		manager.onSessionNameChanged(() => {
 			work ??= requestFrom(server.model);
-		};
-		manager.appendCustomEntry("probe", {});
-		await expectHeldThenSentOnce(server, hold, work);
+		});
+		// The second session renames; the manager's listener is the work of both.
+		await second.session.setSessionName("second");
+		if (!work) throw new Error("The rename listener was never called");
+		// The nearest hold (the second session's) is asked first; either one holds the request.
+		await Promise.race([first.hold.reached, second.hold.reached, server.arrived]);
+		await eventLoopTurns();
+		expect(server.requests).toEqual([]);
+		// The first session's hold lets go; the second's still holds.
+		first.hold.letGo();
+		await expectHeldThenSentOnce(server, second.hold, work);
+	}, 60_000);
+
+	it("holds a model request a host's config getter starts — own or inherited — while the session is built", async () => {
+		const temp = tempDir("@gate-config-getter-");
+		const auth = await AuthStorage.create(":memory:");
+		cleanups.push(() => auth.close());
+		const registry = new ModelRegistry(auth, path.join(temp.path(), "models.yml"));
+		for (const shape of ["own", "inherited"] as const) {
+			const server = localModelServer();
+			cleanups.push(server.stop);
+			const agent = new Agent({
+				initialState: { model: server.model, systemPrompt: ["test"], messages: [], tools: [] },
+				getApiKey: () => "k",
+			});
+			const hold = holdUntilLetGo(agent);
+			let work: Promise<unknown> | undefined;
+			const accessor: PropertyDescriptor = {
+				get: () => {
+					work ??= requestFrom(server.model);
+					return () => [];
+				},
+				enumerable: true,
+			};
+			const config: AgentSessionConfig = {
+				agent,
+				sessionManager: SessionManager.inMemory(temp.path()),
+				modelRegistry: registry,
+				settings: settings(),
+			};
+			if (shape === "own") Object.defineProperty(config, "getEvalPreludes", accessor);
+			else Object.setPrototypeOf(config, Object.defineProperty({}, "getEvalPreludes", accessor));
+			// Built from outside any session work: the getter runs while the constructor reads the config.
+			const session = new AgentSession(config);
+			cleanups.push(() => session.dispose());
+			await expectHeldThenSentOnce(server, hold, work);
+		}
+	}, 60_000);
+
+	it("releases the runner and the manager a constructor that throws had claimed, so the host can build again", async () => {
+		const temp = tempDir("@gate-failed-build-");
+		const auth = await AuthStorage.create(":memory:");
+		cleanups.push(() => auth.close());
+		const registry = new ModelRegistry(auth, path.join(temp.path(), "models.yml"));
+		const manager = SessionManager.inMemory(temp.path());
+		const runner = new ExtensionRunner([], new ExtensionRuntime(), temp.path(), manager, registry);
+		const mock = createMockModel({ responses: [] });
+		const build = (fail: boolean) =>
+			new AgentSession({
+				agent: new Agent({ initialState: { model: mock.model, systemPrompt: ["test"], messages: [], tools: [] } }),
+				sessionManager: manager,
+				modelRegistry: registry,
+				settings: settings(),
+				extensionRunner: runner,
+				// Called while the session is constructed.
+				getEvalPreludes: () => {
+					if (fail) throw new Error("host setup failed");
+					return [];
+				},
+			});
+		expect(() => build(true)).toThrow("host setup failed");
+		const retry = build(false);
+		cleanups.push(() => retry.dispose());
+		expect(runner.requestContextOwner).toBe(retry);
 	}, 60_000);
 
 	it("keeps every function a host's config exposes — own, inherited or non-enumerable — as the session's work", async () => {

@@ -610,11 +610,14 @@ export class ExtensionRunner {
 	 * `ctx.setTimeout` helpers. Callbacks run with the same isolation as handler
 	 * dispatch — a throw is logged and routed through {@link onError} instead of
 	 * escaping to the process `uncaughtException` handler and tearing down the
-	 * whole session (issue #5664). Handles are `unref`'d and every outstanding
-	 * timer is cleared on session teardown via {@link clearManagedTimers}.
+	 * whole session (issue #5664). Each firing runs as the session's work (see
+	 * {@link runScoped}), whatever context scheduled it. Handles are `unref`'d
+	 * and every outstanding timer is cleared on session teardown via
+	 * {@link clearManagedTimers}.
 	 */
-	#managedTimers = new ManagedTimers((event, error, stack) =>
-		this.emitError({ extensionPath: "<timer>", event, error, stack }),
+	#managedTimers = new ManagedTimers(
+		(event, error, stack) => this.emitError({ extensionPath: "<timer>", event, error, stack }),
+		fire => this.runScoped(fire),
 	);
 	/**
 	 * Disposers for the trampolines installed via {@link addFileWriteFallback} and
@@ -1049,7 +1052,7 @@ export class ExtensionRunner {
 	 * wait for the user.
 	 */
 	setUserWaitTracker(track: UserWaitTracker): void {
-		this.#trackUserWait = asSessionWork(this.#runAsSessionWork, track);
+		this.#trackUserWait = dialog => this.#runAsSessionWork(() => track(dialog));
 	}
 
 	/** Waits until the interactive transcript can show the tool call being approved. */

@@ -2103,8 +2103,9 @@ export class AgentSession implements SettingsScope {
 		// a prompt rebuild, a later rediscovery: a model request it starts waits
 		// for the session's holds. Every member the host's config exposes reads
 		// through, inherited and non-enumerable ones included.
+		// The agent first, read as is: its context is the one the config's members enter.
+		this.agent = sessionConfig.agent;
 		const config = membersAsSessionWork(this.#runAsHostWork, sessionConfig);
-		this.agent = config.agent;
 		this.tokenRate = new TokenRateMeter(text => this.agent.tokenizer.countTokens(text));
 		this.#reseedTokenRate();
 		this.agent.setQueuedMessageGrouping(
@@ -2112,27 +2113,9 @@ export class AgentSession implements SettingsScope {
 				isHiddenUserCompanion(previous) && (isHiddenUserCompanion(next) || isUserQueuedMessage(next)),
 		);
 		this.sessionManager = config.sessionManager;
-		// Every extension callback, and every host callback the runner or the
-		// manager keeps, is the session's work, whichever path calls it — so
-		// both are claimed before the session's first write. A runner answers to
-		// one live session: a second live session would put the first one's
-		// extension work outside the first one's holds. A manager two live
-		// sessions share stays with the first; the second does not take it over.
-		const runner = config.extensionRunner;
-		if (runner) {
-			const owner = runner.requestContextOwner;
-			if (owner && owner !== this && !owner.isDisposed) {
-				throw new Error("This extension runner already belongs to another live session");
-			}
-			runner.requestContextOwner = this;
-			runner.runInRequestContext = fn => this.#inLogContext(fn);
-		}
-		const managerOwner = this.sessionManager.requestContextOwner;
-		if (!managerOwner || managerOwner === this || managerOwner.isDisposed) {
-			this.sessionManager.requestContextOwner = this;
-			this.sessionManager.runInRequestContext = this.#runAsHostWork;
-		}
-		registerSessionWork(this, fn => this.#inLogContext(fn));
+		// Claimed before the session's first write; released again if this
+		// constructor throws, so the host can build the session anew.
+		using claims = this.#claimRequestContexts(config.extensionRunner);
 		this.settings = config.settings;
 		this.#ownsCostGate = config.costGate === undefined;
 		this.#costGate = config.costGate ?? this.#createCostGate();
@@ -3187,6 +3170,45 @@ export class AgentSession implements SettingsScope {
 		this.#watchWorkspaceAndPowerSettings();
 		this.#watchSessionSettings();
 		this.#watchModelAvailabilitySettings();
+		claims.keep();
+	}
+
+	/**
+	 * Makes every extension callback, and every host callback the runner or the manager keeps, this
+	 * session's work, whichever path calls it. A runner answers to one live session: a second live
+	 * session would put the first one's extension work outside the first one's holds. A manager
+	 * answers to every live session over it. The claims are released when the returned guard is
+	 * disposed without {@link keep} — a constructor that threw — and the half-built session counts
+	 * as disposed, so whatever it left registered on shared objects goes inert.
+	 */
+	#claimRequestContexts(runner: ExtensionRunner | undefined): Disposable & { keep(): void } {
+		if (runner) {
+			const owner = runner.requestContextOwner;
+			if (owner && owner !== this && !owner.isDisposed) {
+				throw new Error("This extension runner already belongs to another live session");
+			}
+			runner.requestContextOwner = this;
+			runner.runInRequestContext = fn => this.#inLogContext(fn);
+		}
+		const leaveManager = this.sessionManager.addRequestContextOwner(this, this.#runAsHostWork);
+		registerSessionWork(this, fn => this.#inLogContext(fn));
+		let kept = false;
+		return {
+			keep: () => {
+				kept = true;
+			},
+			[Symbol.dispose]: () => {
+				if (kept) return;
+				this.#isDisposed = true;
+				leaveManager();
+				if (runner?.requestContextOwner === this) {
+					runner.requestContextOwner = undefined;
+					runner.runInRequestContext = undefined;
+				}
+				this.#unsubscribeSessionMoved?.();
+				this.#unregisterAsyncDeliverySink?.();
+			},
+		};
 	}
 
 	/** Registers teardown to run when this session is disposed (e.g. handle listeners bound to it). */
