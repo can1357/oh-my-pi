@@ -37,7 +37,6 @@ import {
 	type StillMovedRemoval,
 	unlinkStillMoved,
 	writeExclusive,
-	createExclusive,
 } from "../session/regular-file";
 import { type CopiedBytes, digestOfHandle, handleBeginsWith, holdsCopied } from "../session/session-archive";
 import { FileSessionStorage } from "../session/session-storage";
@@ -423,57 +422,6 @@ async function leaseFile(file: string, handle: fs.FileHandle): Promise<LeasedFil
 }
 
 /**
- * Write what `held` — a file this run holds open — holds to a new file in
- * the scratch directory, at `at` or, where that name is taken, a fresh name
- * beside it, with its permission bits and modification time: used once the
- * other copy of a session's bytes is gone and `held`'s last name is gone
- * too, so that the descriptor is the only way left to them. Returns the
- * path written, or throws when nothing could be written.
- */
-async function keepHeld(held: LeasedFile, at: string): Promise<string> {
-	let target = at;
-	let out: fs.FileHandle | undefined;
-	for (let attempt = 0; !out; attempt++) {
-		try {
-			out = await createExclusive(target, held.metadata.mode);
-		} catch (error) {
-			if (!isEexist(error) || attempt >= SCRATCH_ATTEMPTS) throw error;
-			target = `${at}.kept-${newNonce()}`;
-		}
-	}
-	try {
-		const chunk = Buffer.alloc(1024 * 1024);
-		for (let position = 0; ;) {
-			const { bytesRead } = await held.handle.read(chunk, 0, chunk.length, position);
-			if (bytesRead === 0) break;
-			await out.write(chunk, 0, bytesRead, position);
-			position += bytesRead;
-		}
-		const mtime = Number(held.metadata.mtimeNs / 1_000_000n) / 1000;
-		await out.utimes(mtime, mtime);
-		await out.sync();
-	} finally {
-		await out.close().catch(() => undefined);
-	}
-	return target;
-}
-
-/**
- * Keep what `held` holds when its last name is gone — see {@link keepHeld} —
- * and say where, as a clause; undefined while it still has a name, so
- * whoever took that name away left the bytes reachable there or chose to
- * remove them themselves.
- */
-async function keepIfUnnamed(held: LeasedFile, at: string): Promise<string | undefined> {
-	if ((await held.handle.stat()).nlink > 0) return undefined;
-	try {
-		return `what it held was kept at ${await keepHeld(held, at)}`;
-	} catch (error) {
-		return `what it held could not be kept (${errorMessage(error)})`;
-	}
-}
-
-/**
  * Unlink `aside`, the private name a file this run holds as `held` was moved
  * to, only while that file's lease still stands — so no other process has
  * opened it since its bytes were proved; one that has keeps it — only while
@@ -743,34 +691,23 @@ async function swapUnlocked(candidate: CompressCandidate, copyPath: string, copy
 		copyAtScratch: true,
 		notes: [note],
 	});
-	// The session file's name lost the original before the swap moved it: the
-	// copy may hold the last of the session's bytes, so cleanup leaves it.
-	const gone = (note: string): SwapOutcome => ({
-		swapped: false,
-		originalFreed: false,
-		copyAtScratch: false,
-		notes: [`${note}; its compressed copy was left at ${copyPath}`],
-	});
 	let exchanged = false;
 	let handle: fs.FileHandle | undefined;
 	try {
 		handle = await openRegularFile(file, { noFollow: true });
-		// Removed before the swap: the copy holds the last of its bytes, so it stays.
-		if (!handle) return gone(`${file} was gone before its compressed copy could take its place`);
+		if (!handle) return kept(`${file} was gone before its compressed copy could take its place`);
 		const original = await leaseFile(file, handle);
 		if (typeof original === "string") return kept(`${original}, so it was left as it is`);
 		const refusal = await swapRefusal(file, candidate, original, copyPath, copy);
 		if (refusal) return kept(`${refusal}, so it was left as it is`);
 		const swap = await renameExchange(copyPath, file);
 		if (swap.outcome === "absent") {
-			if (isHeld(await identityAt(copyPath), copy)) {
-				return gone(
-					`another process removed ${file} just before its compressed copy took its place, so nothing moved`,
-				);
-			}
-			return kept(
-				`the compressed copy of ${file} lost its name ${copyPath} just before it took ${file}'s place, so nothing moved`,
-			);
+			// A removal of the session file is that process's deletion of it, which
+			// stands: the copy not put in place goes, as any such copy does.
+			const which = isHeld(await identityAt(copyPath), copy)
+				? `another process removed ${file} just before its compressed copy took its place`
+				: `the compressed copy of ${file} lost its name ${copyPath} just before it took ${file}'s place`;
+			return kept(`${which}, so nothing moved`);
 		}
 		if (swap.outcome === "unsupported") {
 			return kept(`the compressed copy of ${file} could not be put in its place (${swap.why}), so nothing moved`);
@@ -871,6 +808,12 @@ const isHeld = (at: { dev: number; ino: number; isFile: boolean } | undefined, h
  * the scratch name with the file it reached: the exchange back is the
  * swap's last move, so it is seen after, reported, and the file is kept,
  * never removed, but the session file's name does not have it.
+ *
+ * A removal of the session file's name, or a file renamed onto it, is the
+ * other process's deletion or replacement of the session, at whatever point
+ * of the swap it lands: gc does not keep what the name held for it, and
+ * removes its own copies as it would have — the original at the scratch
+ * name, once nothing reached it, and a copy not put in place.
  */
 async function settleExchange(
 	file: string,
@@ -881,16 +824,22 @@ async function settleExchange(
 	const atName = await identityAt(file);
 	const atScratch = await identityAt(copyPath);
 	if (!isHeld(atName, copy)) {
-		// Removed, or replaced by a rename onto it, after the exchange: what the
-		// name holds now, or that it holds nothing, is the other process's doing.
-		// gc removes the original only once the name holds the copy, so it stays.
+		// Removed, or replaced by a rename onto it, after the exchange: the other
+		// process's deletion or replacement of the session, which stands.
 		const happened = atName
 			? `another process put a file at ${file} as it was compressed, and it was left there`
 			: `another process removed ${file} as it was compressed`;
-		const where = isHeld(atScratch, original)
-			? `what ${file} held before it was compressed was left at ${copyPath}`
-			: `${copyPath} holds another file too, and was left as it is`;
-		return { swapped: false, originalFreed: false, copyAtScratch: false, notes: [`${happened}; ${where}`] };
+		if (!isHeld(atScratch, original)) {
+			return {
+				swapped: false,
+				originalFreed: false,
+				copyAtScratch: false,
+				notes: [`${happened}; ${copyPath} holds another file too, and was left as it is`],
+			};
+		}
+		const why = (await originalChanged(file, original)) ?? (await unlinkLeased(file, copyPath, original));
+		const notes = [why ? `${happened}; ${why}, so what ${file} held before was left at ${copyPath}` : happened];
+		return { swapped: false, originalFreed: why === undefined, copyAtScratch: false, notes };
 	}
 	const giveBack = !isHeld(atScratch, original)
 		? `another process put a file at ${file} as it was exchanged with its compressed copy`
@@ -901,15 +850,9 @@ async function settleExchange(
 	if (!giveBack) {
 		const why = await unlinkLeased(file, copyPath, original);
 		const notes = why ? [`${why}, so what ${file} held before it was compressed was left at ${copyPath}`] : [];
-		// The compressed copy counts only while the name still holds it. Once
-		// the original is gone, a copy whose last name went with a reach of the
-		// name in the meantime is the only way left to the session's bytes, so
-		// what it holds is kept.
+		// The compressed copy counts only while the name still holds it.
 		if (!isHeld(await identityAt(file), copy)) {
-			const kept = why === undefined ? await keepIfUnnamed(copy, copyPath) : undefined;
-			notes.push(
-				`another process put a file at ${file}, or removed it, as it was compressed, and it was left so${kept ? `; ${kept}` : ""}`,
-			);
+			notes.push(`another process put a file at ${file}, or removed it, as it was compressed, and it was left so`);
 			return { swapped: false, originalFreed: why === undefined, copyAtScratch: false, notes };
 		}
 		return { swapped: true, originalFreed: why === undefined, copyAtScratch: false, notes };
@@ -1103,7 +1046,7 @@ async function compressBatch(
 	}
 	// Copies this run proved and holds, still in the scratch directory: each
 	// removed under its lease before the directory goes.
-	const owned: Array<{ path: string; copy: LeasedFile; candidate: CompressCandidate }> = [];
+	const owned: Array<{ path: string; copy: LeasedFile }> = [];
 	try {
 		const digests = await sha256Files(batch.map(candidate => candidate.path));
 		const run = await $`ditto --hfsCompression ${batch.map(candidate => candidate.path)} ${scratch.dir}`
@@ -1124,7 +1067,7 @@ async function compressBatch(
 					if (copiedAll) result.errors.push(`${candidate.path}: ditto left no copy at ${copyPath}`);
 					continue;
 				}
-				const entry = { path: copyPath, copy: found.copy, candidate };
+				const entry = { path: copyPath, copy: found.copy };
 				owned.push(entry);
 				if (!copiedAll) continue;
 				if (!found.whole) {
@@ -1154,24 +1097,11 @@ async function compressBatch(
 	} catch (error) {
 		result.errors.push(`${dir}: ${errorMessage(error)}`);
 	} finally {
-		for (const { path: copyPath, copy, candidate } of owned) {
+		for (const { path: copyPath, copy } of owned) {
 			const left = await removeLeased(copyPath, copy, "the copy this run made").catch(
 				(error: unknown) => `${copyPath} could not be removed (${errorMessage(error)}), so it was left as it is`,
 			);
 			if (left) result.errors.push(left);
-			else {
-				// Removed: lost nothing while the original is still at its name. Where
-				// another process removed or replaced it meanwhile, the copy, held
-				// here, has the last of those bytes, and they are kept.
-				const there = await identityAt(candidate.path).catch(() => undefined);
-				if (!there?.isFile || there.ino !== Number(candidate.ino)) {
-					const kept = await keepHeld(copy, copyPath).then(
-						at => `what it held was kept at ${at}`,
-						(error: unknown) => `what it held could not be kept (${errorMessage(error)})`,
-					);
-					result.errors.push(`${candidate.path} was gone when this run removed its copy, ${copyPath}; ${kept}`);
-				}
-			}
 			await copy.handle.close().catch(() => undefined);
 		}
 		result.errors.push(...(await removeScratch(scratch)));
