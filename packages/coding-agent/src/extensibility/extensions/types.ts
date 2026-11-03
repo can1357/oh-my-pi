@@ -152,6 +152,7 @@ import type {
 	TurnStartEvent,
 } from "../shared-events";
 import type { SlashCommandInfo } from "../slash-commands";
+import type { ExtensionRegistrations } from "./registrations";
 import type { TerminalLaunchRequest, TerminalLaunchResult } from "../../subprocess/terminal-launch";
 
 export type { Keybinding, OverlayHandle, OverlayOptions } from "@oh-my-pi/pi-tui";
@@ -1958,6 +1959,14 @@ export interface ExtensionAPI {
 	on(event: "mcp_notification", handler: ExtensionHandler<McpNotificationEvent>): void;
 	on(event: "link_activate", handler: ExtensionHandler<LinkActivateEvent>): void;
 
+	/**
+	 * Call `listener` when this load is suspended (`true`) or resumed (`false`) in place, as a live
+	 * `disabledExtensions` edit does. A suspended load keeps its module state, but receives no events
+	 * until resumed, so work it drives itself (a socket, a timer) should pause here. Returns the
+	 * unsubscribe; listeners are dropped when the load is torn down.
+	 */
+	onSuspensionChange(listener: (suspended: boolean) => void): () => void;
+
 	// =========================================================================
 	// Tool Registration
 	// =========================================================================
@@ -2521,6 +2530,12 @@ export interface Extension {
 	shortcuts: Map<KeyId, ExtensionShortcut>;
 	/** Set once the extension calls `registerProvider`; providers feed startup model resolution. */
 	registersProviders?: boolean;
+	/**
+	 * Registrations this load made outside its own session state (process-wide URL schemes, reply
+	 * expectations a tool honours): suspended and resumed with the load, released when it is torn
+	 * down. Absent on extensions not created by the loader.
+	 */
+	registrations?: ExtensionRegistrations;
 }
 
 /**

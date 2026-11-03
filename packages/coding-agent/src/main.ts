@@ -589,7 +589,13 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 			args.parsedArgs.trustedExtensions && args.parsedArgs.trustedExtensions.length > 0
 				? await loadTrustedSessionExtensions(args.baseOptions, cwd, eventBus)
 				: undefined;
+		// This request owns the trusted loads until a session adopts them, and it never retries: when it
+		// gives up, it releases what they registered outside their session state (process-wide).
+		const releaseTrusted = (): void => {
+			for (const extension of trustedExtensions?.extensions ?? []) extension.registrations?.release();
+		};
 		if (trustedExtensions && trustedExtensions.errors.length > 0) {
+			releaseTrusted();
 			throw new Error(
 				`Trusted extension failed to load: ${trustedExtensions.errors.map(item => item.error).join("; ")}`,
 			);
@@ -597,23 +603,32 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 		// Like every top-level session, it holds process-wide effects (`worktree.base`, request
 		// limits, …) on its own project's settings until disposed; its requests redact credentials
 		// per that project's `secrets.enabled` regardless of which session holds the effects.
-		const { session: nextSession, setToolUIContext } = await args.createSession({
-			...args.baseOptions,
-			cwd,
-			sessionManager: nextSessionManager,
-			settings: nextSettings,
-			authStorage: args.authStorage,
-			modelRegistry: args.modelRegistry,
-			agentId,
-			// ACP defers the `ask` capability and reserve-policy confirmation until
-			// client capabilities are known, without enabling other UI-only behavior.
-			interactivePrompts: factoryOptions?.interactivePrompts,
-			deferUsageReserveConfirmation: true,
-			enableMCP: false,
-			titleSystemPrompt,
-			eventBus,
-			preloadedExtensions: trustedExtensions,
-		});
+		let created: CreateAgentSessionResult;
+		try {
+			created = await args.createSession({
+				...args.baseOptions,
+				cwd,
+				sessionManager: nextSessionManager,
+				settings: nextSettings,
+				authStorage: args.authStorage,
+				modelRegistry: args.modelRegistry,
+				agentId,
+				// ACP defers the `ask` capability and reserve-policy confirmation until
+				// client capabilities are known, without enabling other UI-only behavior.
+				interactivePrompts: factoryOptions?.interactivePrompts,
+				deferUsageReserveConfirmation: true,
+				enableMCP: false,
+				titleSystemPrompt,
+				eventBus,
+				preloadedExtensions: trustedExtensions,
+			});
+		} catch (error) {
+			// A failed startup only suspends the caller's preloaded loads (for a retry, see
+			// `createAgentSession`); this caller does not retry.
+			releaseTrusted();
+			throw error;
+		}
+		const { session: nextSession, setToolUIContext } = created;
 		if (args.parsedArgs.apiKey && !args.baseOptions.model && nextSession.model) {
 			args.authStorage.keys.setRuntime(nextSession.model.provider, args.parsedArgs.apiKey);
 		}
