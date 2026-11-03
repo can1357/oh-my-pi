@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `read` on a URL that answers with a bot challenge (Reddit posts, Cloudflare, DataDome, PerimeterX) tries the next user agent before falling back to readers, and no longer returns the site's block page, or a reader's copy of it, as the page: an unrecovered read ends `blocked` or `failed` and names the protection ([#17904](https://github.com/can1357/oh-my-pi/pull/17904) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.18.1] - 2026-11-08
 
 ### Breaking Changes
@@ -193,10 +197,6 @@
 - Out-of-credit provider errors now fail immediately instead of retrying for long periods; Retry works promptly once the account is funded.
 - DeepSeek-style `*** End` and `*** End Patch` markers are no longer written into files or truncate later edits
 - Composer prediction ghost text no longer vanishes when advisor messages arrive
-
-### Fixed
-
-- `read` on a URL that answers with a bot challenge (Reddit posts, Cloudflare, DataDome, PerimeterX) no longer returns the site's block page, or a reader's copy of it, as the page: the read ends `blocked` or `failed` and names the protection ([#17904](https://github.com/can1357/oh-my-pi/pull/17904) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.16.0] - 2026-11-02
 
