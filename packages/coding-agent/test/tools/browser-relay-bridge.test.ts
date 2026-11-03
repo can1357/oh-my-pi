@@ -2710,3 +2710,68 @@ describe("RelayBridge foreign extension frames", () => {
 		expect(ext.rpcs("send").some(rpc => rpc.method === "OMP.claimTarget")).toBeFalse();
 	});
 });
+
+describe("RelayBridge download paths", () => {
+	function hello(bridge: RelayBridge, socket: FakeExtSocket, downloadsProtocol?: number): void {
+		bridge.extConnected(socket);
+		bridge.extMessage(
+			socket,
+			JSON.stringify({
+				t: "hello",
+				userAgent: "test",
+				browserVersion: "Chrome/151.0.0.0",
+				discardedTabsProtocol: 1,
+				downloadsProtocol,
+				tabs: [tab({ tabId: 1 })],
+				attachedTabIds: [],
+			}),
+		);
+	}
+
+	async function askPath(bridge: RelayBridge, ext: FakeExtSocket): Promise<{ cdp: FakeCdpSocket; id: number }> {
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const sessionId = await attachPage(bridge, ext, cdp, connId, 1);
+		const id = ++msgSeq;
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({ id, sessionId, method: "OMP.downloadPath", params: { url: "https://example.com/r.csv" } }),
+		);
+		await flush();
+		return { cdp, id };
+	}
+
+	it("looks up where Chrome saved a download, and only in the tab's browser", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		hello(bridge, ext, 1);
+		const { cdp, id } = await askPath(bridge, ext);
+		expect(ext.pending("findDownload").map(rpc => rpc.url)).toEqual(["https://example.com/r.csv"]);
+		ack(bridge, ext, "findDownload", { filename: "/Users/me/Downloads/r (1).csv", state: "complete" });
+		await flush();
+		expect(cdp.messages.find(m => m.id === id)).toMatchObject({
+			result: { filePath: "/Users/me/Downloads/r (1).csv" },
+		});
+
+		// A download Chrome has not finished, or does not list, has no saved path yet.
+		for (const found of [{ filename: "/Users/me/Downloads/r.csv", state: "in_progress" }, null]) {
+			const pending = await askPath(bridge, ext);
+			ack(bridge, ext, "findDownload", found);
+			await flush();
+			expect(pending.cdp.messages.find(m => m.id === pending.id)).toMatchObject({
+				error: { message: "Chrome lists no completed download of https://example.com/r.csv" },
+			});
+		}
+	});
+
+	it("tells an extension installed before download tracking to update, without asking it", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		hello(bridge, ext);
+		const { cdp, id } = await askPath(bridge, ext);
+		expect(ext.rpcs("findDownload")).toEqual([]);
+		expect(cdp.messages.find(m => m.id === id)).toMatchObject({
+			error: { message: expect.stringContaining("run `omp browser-relay install`") },
+		});
+	});
+});

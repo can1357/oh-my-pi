@@ -1,8 +1,9 @@
-// ../coding-agent/src/tools/browser/relay/protocol.ts
+// packages/coding-agent/src/tools/browser/relay/protocol.ts
 var EXTENSION_RELOAD_PROTOCOL_VERSION = 1;
 var FOREIGN_FRAME_REFUSAL = /chrome-extension:\/\/ URL of different extension/i;
+var DOWNLOADS_PROTOCOL_VERSION = 1;
 
-// extension/debugger-ownership.ts
+// packages/browser-relay/extension/debugger-ownership.ts
 async function ownedDebuggerTabs(targets, probe) {
   const owned = await Promise.all(targets.map(async (target) => {
     if (!target.attached || target.tabId === undefined)
@@ -17,7 +18,7 @@ async function ownedDebuggerTabs(targets, probe) {
   return owned.filter((tabId) => tabId !== undefined);
 }
 
-// extension/foreign-frames.ts
+// packages/browser-relay/extension/foreign-frames.ts
 var RETRY_DELAYS_MS = [50, 100, 200, 400];
 var sweeps = new Map;
 async function pastForeignFrames(tabId, request) {
@@ -79,7 +80,7 @@ async function neutralizeForeignFrames(tabId) {
   }
 }
 
-// extension/background.ts
+// packages/browser-relay/extension/background.ts
 var DEFAULT_PORT = 9224;
 var PING_INTERVAL_MS = 20000;
 var RECONNECT_MIN_MS = 1000;
@@ -240,6 +241,7 @@ async function buildHello() {
     discardedTabsProtocol: 1,
     ompVersion: typeof OMP_INSTALL_VERSION === "string" ? OMP_INSTALL_VERSION : undefined,
     reloadProtocol: EXTENSION_RELOAD_PROTOCOL_VERSION,
+    downloadsProtocol: DOWNLOADS_PROTOCOL_VERSION,
     tabs: snapshots,
     attachedTabIds
   };
@@ -287,6 +289,11 @@ async function runRpc(msg, origin) {
     case "ungroup":
       await enqueueGroupOp(() => chrome.tabs.ungroup(msg.tabIds).catch(() => {}));
       return {};
+    case "findDownload": {
+      const [item] = await chrome.downloads.search({ finalUrl: msg.url, orderBy: ["-startTime"], limit: 1 });
+      const found = item ? { filename: item.filename, state: item.state } : null;
+      return found;
+    }
   }
 }
 function handleRelayMessage(socket, raw) {

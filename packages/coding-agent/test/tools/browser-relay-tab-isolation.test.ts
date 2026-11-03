@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { findFreeCdpPort } from "@oh-my-pi/pi-coding-agent/tools/browser/attach";
+import type { BrowserDownload } from "@oh-my-pi/pi-coding-agent/tools/browser/downloads";
 import {
 	closeLaunchedBrowser,
 	ensureChromiumExecutable,
@@ -100,6 +101,11 @@ async function launchRelayFixture(
 		fetch(request) {
 			const url = new URL(request.url);
 			const route = url.pathname;
+			if (route === "/report.csv") {
+				return new Response("a,b\n1,2\n", {
+					headers: { "Content-Type": "text/csv", "Content-Disposition": 'attachment; filename="report.csv"' },
+				});
+			}
 			const html =
 				route === "/first"
 					? `<title>First</title><button onclick="this.textContent='clicked'">First</button><p id="hover" onmouseover="this.textContent='hovered'">Hover</p>`
@@ -107,7 +113,9 @@ async function launchRelayFixture(
 						? "<title>Second</title><button>Second</button>"
 						: route === "/login"
 							? `<title>Login ${url.searchParams.get("who")}</title><input id="pw" type="password">`
-							: "<title>Human sentinel</title><h1>Keep me</h1>";
+							: route === "/download"
+								? `<title>Download</title><a href="/report.csv">Report</a>`
+								: "<title>Human sentinel</title><h1>Keep me</h1>";
 			return new Response(html, { headers: { "Content-Type": "text/html" } });
 		},
 	});
@@ -543,6 +551,58 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("relay tab ownership", () => {
 		} finally {
 			await releaseTab(name).catch(() => undefined);
 			await releaseTab(otherName).catch(() => undefined);
+			await releaseBrowser(relay, { kill: false });
+			await fixture.close();
+		}
+	}, 60_000);
+
+	it("reports a relay tab's download clicked before any wait, at the path Chrome saved it to", async () => {
+		const fixture = await launchRelayFixture();
+		// Chrome's own folder for this browser, so the test never writes to the user's Downloads.
+		const saved = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "omp-relay-download-")));
+		const native = await fixture.browser.target().createCDPSession();
+		await native.send("Browser.setDownloadBehavior", { behavior: "allow", downloadPath: saved });
+		const relay = await acquireBrowser({ kind: "relay", cdpUrl: fixture.cdpUrl }, { cwd: process.cwd() });
+		const name = `relay-download-${process.pid}`;
+		try {
+			await acquireTab(name, relay, { url: `${fixture.origin}/download`, timeoutMs: 15_000 });
+			const result = await runInTab(name, {
+				code: "await tab.click('a'); const download = await tab.waitForDownload({ timeout: 10000 }); return { download, listed: await tab.downloads() };",
+				timeoutMs: 20_000,
+				session,
+			});
+			const { download, listed } = result.returnValue as { download: BrowserDownload; listed: BrowserDownload[] };
+			expect(download).toEqual({
+				path: path.join(saved, "report.csv"),
+				suggestedFilename: "report.csv",
+				url: `${fixture.origin}/report.csv`,
+				bytes: 8,
+			});
+			expect(await Bun.file(download.path).text()).toBe("a,b\n1,2\n");
+			expect(listed).toEqual([download]);
+		} finally {
+			await releaseTab(name).catch(() => undefined);
+			await releaseBrowser(relay, { kill: false });
+			await native.detach().catch(() => undefined);
+			await fixture.close();
+			await fs.rm(saved, { recursive: true, force: true });
+		}
+	}, 60_000);
+
+	it("refuses a downloads folder for a relay tab, which Chrome will not let the extension choose", async () => {
+		const fixture = await launchRelayFixture();
+		const relay = await acquireBrowser({ kind: "relay", cdpUrl: fixture.cdpUrl }, { cwd: process.cwd() });
+		const name = `relay-download-folder-${process.pid}`;
+		try {
+			await expect(
+				acquireTab(name, relay, {
+					url: `${fixture.origin}/download`,
+					downloadsPath: path.join(os.tmpdir(), "omp-relay-download-folder"),
+					timeoutMs: 15_000,
+				}),
+			).rejects.toThrow("cannot choose where Chrome saves downloads");
+		} finally {
+			await releaseTab(name).catch(() => undefined);
 			await releaseBrowser(relay, { kill: false });
 			await fixture.close();
 		}

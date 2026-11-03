@@ -10,8 +10,10 @@
  * and re-dials after Chrome reaps it while disconnected.
  */
 import {
+	DOWNLOADS_PROTOCOL_VERSION,
 	EXTENSION_RELOAD_PROTOCOL_VERSION,
 	type ExtToRelayMessage,
+	type FoundDownload,
 	type RelayToExtMessage,
 	type TabSnapshot,
 } from "../../coding-agent/src/tools/browser/relay/protocol";
@@ -222,6 +224,7 @@ async function buildHello(): Promise<ExtToRelayMessage> {
 		discardedTabsProtocol: 1, // Keep in sync with the relay protocol version.
 		ompVersion: typeof OMP_INSTALL_VERSION === "string" ? OMP_INSTALL_VERSION : undefined,
 		reloadProtocol: EXTENSION_RELOAD_PROTOCOL_VERSION,
+		downloadsProtocol: DOWNLOADS_PROTOCOL_VERSION,
 		tabs: snapshots,
 		attachedTabIds,
 	};
@@ -275,6 +278,12 @@ async function runRpc(msg: Extract<RelayToExtMessage, { t: "rpc" }>, origin: Web
 		case "ungroup":
 			await enqueueGroupOp(() => chrome.tabs.ungroup(msg.tabIds).catch(() => {}));
 			return {};
+		case "findDownload": {
+			// The page's download events carry the URL the file was served from, Chrome's `finalUrl`.
+			const [item] = await chrome.downloads.search({ finalUrl: msg.url, orderBy: ["-startTime"], limit: 1 });
+			const found: FoundDownload = item ? { filename: item.filename, state: item.state } : null;
+			return found;
+		}
 	}
 }
 
