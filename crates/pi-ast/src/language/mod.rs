@@ -671,7 +671,7 @@ const fn extensions(lang: SupportLang) -> &'static [&'static str] {
 		Powershell => &["ps1", "psm1"],
 		Proto => &["proto"],
 		Python => &["py", "py3", "pyi", "bzl"],
-		R => &["r"],
+		R => &["r", "R"],
 		Regex => &[],
 		Ruby => &["rb", "rbw", "gemspec"],
 		Rust => &["rs"],
@@ -919,6 +919,12 @@ mod tests {
 	fn infers_cuda_sources_and_headers_as_cpp() {
 		assert_eq!(SupportLang::from_path(Path::new("kernel.cu")), Some(SupportLang::Cpp));
 		assert_eq!(SupportLang::from_path(Path::new("kernel.cuh")), Some(SupportLang::Cpp));
+	}
+
+	#[test]
+	fn infers_r_sources_with_either_extension_case() {
+		assert_eq!(SupportLang::from_path(Path::new("analysis.r")), Some(SupportLang::R));
+		assert_eq!(SupportLang::from_path(Path::new("analysis.R")), Some(SupportLang::R));
 	}
 
 	#[test]
