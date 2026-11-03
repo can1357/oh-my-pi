@@ -24,9 +24,13 @@
  * callbacks in registration order, and once one of them times out it skips every later one. So a
  * cleanup counts only when no hook or callback that can suspend (`async`, a `done` parameter, or a
  * returned promise) runs before it; `installMockRestores()` still counts, because its next
- * `beforeEach` and its `afterAll` restore whatever Bun skipped. The rules credit only those shapes.
- * They are an enforcement aid for new code, not a proof: a shape they credit is safe by
- * construction, and everything else is reported.
+ * `beforeEach` and its `afterAll` restore whatever Bun skipped. A hook or callback that throws makes
+ * Bun skip the later ones the same way (measured for a synchronous `afterEach` and for an
+ * `onTestFinished` callback), but the rules do not count a hook that can throw as one that blocks:
+ * such a hook fails its own test, so the leak arrives with a red test, and almost any hook can
+ * throw. The rules credit only those shapes. They are an enforcement aid for new code, not a proof:
+ * a shape they credit is safe by construction, and every cleanup written in another shape is
+ * reported (a spy or write with no cleanup at all is neither credited nor reported).
  *
  * The rules judge only what one file shows: writes and restores reached from a test body directly
  * or through a function declared in the same file, and hooks declared in the same file. A hook
