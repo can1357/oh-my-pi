@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- A `mnemopi.dbPath` that starts with `~` now resolves under the home directory instead of creating a literal `~` directory in the working directory
+- A `mnemopi.dbPath` that starts with `~` now resolves under the home directory instead of creating a literal `~` directory in the working directory ([#17986](https://github.com/can1357/oh-my-pi/pull/17986) by [@breakwaterlabs](https://github.com/breakwaterlabs))
 
 ## [18.16.0] - 2026-11-02
 
