@@ -62,6 +62,9 @@ build:macos --@rules_rust//rust/settings:extra_exec_rustc_flag=-Clink-arg=-Wl,-S
 build:clippy --aspects=@rules_rust//rust:defs.bzl%rust_clippy_aspect
 build:clippy --output_groups=+clippy_checks
 build:clippy --@rules_rust//rust/settings:clippy_flag=-Dwarnings
+# CI passes `bazelisk query` results as explicit targets; platform-only ones
+# (the macOS input_release_helper on Linux) are skipped instead of failing.
+build:clippy --skip_incompatible_explicit_targets
 build:clippy-strict --config=clippy
 build:clippy-ported --config=clippy
 build:clippy-ported --@rules_rust//rust/settings:clippy_flag=-Aclippy::all
