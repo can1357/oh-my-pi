@@ -37,7 +37,10 @@ function holdPrintInPage(
 	};
 	const deadline = Symbol.for(`${holdKey}.until`);
 	const wrapped = Symbol.for(`${holdKey}.wrapped`);
-	Reflect.set(globalThis, deadline, holdMs === null ? Number.POSITIVE_INFINITY : (from ?? now()) + holdMs);
+	const existing: unknown = Reflect.get(globalThis, deadline);
+	const hold = typeof existing === "object" && existing !== null ? existing : { until: 0 };
+	Reflect.set(hold, "until", holdMs === null ? Number.POSITIVE_INFINITY : (from ?? now()) + holdMs);
+	Reflect.set(globalThis, deadline, hold);
 	if (Reflect.get(globalThis, wrapped)) return now();
 	const print: unknown = Reflect.get(globalThis, "print");
 	if (typeof print !== "function") return now();
@@ -48,29 +51,36 @@ function holdPrintInPage(
 	Reflect.apply(EventTarget.prototype.addEventListener, globalThis, [
 		"pageshow",
 		(event: Event) => {
-			if (Reflect.get(event, "persisted") === true) Reflect.set(globalThis, deadline, now() + resyncMs);
+			if (Reflect.get(event, "persisted") === true) Reflect.set(hold, "until", now() + resyncMs);
 		},
 		true,
 	]);
 	// A proxy keeps the native function's name and length, and its source still reads `[native code]`. A held call
 	// fires the print events on the window it printed.
-	const holdPrintOf = (view: object, print: Function): Function =>
-		new Proxy(print, {
+	const holdPrintOf = (view: object, print: Function): Function => {
+		const clock: Function = Reflect.get(globalThis, clockKey);
+		return new Proxy(print, {
 			apply(target, thisArg, args) {
-				// A popup keeps this proxy after its opener navigates. The former realm's WindowProxy can then
-				// refuse access; it no longer owns a reachable hold, so let the popup print normally.
-				let held = false;
+				// The popup retains the deadline object and clock even if its opener changes origin. Losing access
+				// to the opener does not release an active hold; a finite deadline still runs out on its own.
+				let time: number;
 				try {
-					const heldUntil: unknown = Reflect.get(globalThis, deadline);
-					held = typeof heldUntil === "number" && now() < heldUntil;
+					time = now();
+				} catch {
+					time = Number(Reflect.apply(clock, undefined, []));
+				}
+				const heldUntil: unknown = Reflect.get(hold, "until");
+				if (typeof heldUntil !== "number" || time >= heldUntil) return Reflect.apply(target, thisArg, args);
+				// The old document's binding may be gone after navigation, but its popup still needs the hold.
+				try {
+					const report: unknown = Reflect.get(globalThis, binding);
+					if (typeof report === "function") report("");
 				} catch {}
-				if (!held) return Reflect.apply(target, thisArg, args);
-				const report: unknown = Reflect.get(globalThis, binding);
-				if (typeof report === "function") report("");
 				Reflect.apply(EventTarget.prototype.dispatchEvent, view, [new Event("beforeprint")]);
 				Reflect.apply(EventTarget.prototype.dispatchEvent, view, [new Event("afterprint")]);
 			},
 		});
+	};
 	Reflect.set(globalThis, "print", holdPrintOf(globalThis, print));
 	// A page that prints through a window it opens (`open("")`, write, `print()`) calls that window's own `print()`
 	// before omp could reach the new window, and its print preview blocks this page too: hold it on this document's
@@ -103,13 +113,13 @@ function holdPrintInPage(
 		if (typeof dialog !== "function") continue;
 		const heldDialog = new Proxy(dialog, {
 			apply(target, thisArg, args) {
-				const heldUntil: unknown = Reflect.get(globalThis, deadline);
+				const heldUntil: unknown = Reflect.get(hold, "until");
 				const held = typeof heldUntil === "number" && now() < heldUntil;
 				try {
 					return Reflect.apply(target, thisArg, args);
 				} finally {
-					const until: unknown = Reflect.get(globalThis, deadline);
-					if (held) Reflect.set(globalThis, deadline, Math.max(Number(until), now() + resyncMs));
+					const until: unknown = Reflect.get(hold, "until");
+					if (held) Reflect.set(hold, "until", Math.max(Number(until), now() + resyncMs));
 				}
 			},
 		});
