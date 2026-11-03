@@ -1396,7 +1396,7 @@ mod tests {
 		let ctx = ctx("psql", &cfg);
 		let mut input = String::from(" level | message\n-------+---------\n");
 		for idx in 0..5000 {
-			input.push_str(&format!(" ERROR | disk full on volume {idx}\n"));
+			let _ = writeln!(input, " ERROR | disk full on volume {idx}");
 		}
 		input.push_str("(5000 rows)\n");
 		let out = filter(&ctx, &input, 0);
@@ -1417,7 +1417,7 @@ mod tests {
 		let ctx = ctx("psql", &cfg);
 		let mut input = String::from(" id | name\n----+------\n");
 		for idx in 0..50 {
-			input.push_str(&format!(" {idx:>2} | n{idx}\n"));
+			let _ = writeln!(input, " {idx:>2} | n{idx}");
 		}
 		input.push_str(
 			"(50 rows)\n\nERROR:  operator does not exist: integer || integer\nLINE 1: select 1 || \

@@ -715,6 +715,79 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 		}
 	});
 
+	it("coordinates concurrent async tool calls through a kernel-global asyncio lock", async () => {
+		using tempDir = TempDir.createSync("@python-runner-tool-lock-");
+		const kernel = await PythonKernel.start({ cwd: tempDir.path() });
+		try {
+			const defined = await executePythonWithKernel(
+				kernel,
+				[
+					"GATE = asyncio.Lock()",
+					"@tool",
+					"async def gated(n: int) -> int:",
+					"    async with GATE:",
+					"        await asyncio.sleep(0.2)",
+					"    return n",
+				].join("\n"),
+			);
+			expect(defined.exitCode).toBe(0);
+
+			// Subagents call tools in parallel. The call that waits on GATE must be
+			// woken when the holder releases it, not parked until its caller gives up.
+			const calls = await Promise.all(
+				[1, 2].map(n => kernel.invokeTool({ op: "call", name: "gated", args: { n } }, { timeoutMs: 2_000 })),
+			);
+			expect(calls.map(call => call.reply)).toEqual([
+				{ ok: true, value: 1 },
+				{ ok: true, value: 2 },
+			]);
+		} finally {
+			await kernel.shutdown();
+		}
+	});
+
+	it("cancels an async tool call so it releases what it holds", async () => {
+		using tempDir = TempDir.createSync("@python-runner-tool-cancel-");
+		const kernel = await PythonKernel.start({ cwd: tempDir.path() });
+		try {
+			const defined = await executePythonWithKernel(
+				kernel,
+				[
+					"import threading",
+					"GATE = asyncio.Lock()",
+					"HELD = threading.Event()",
+					"@tool",
+					"async def hold() -> str:",
+					"    async with GATE:",
+					"        HELD.set()",
+					"        await asyncio.sleep(30)",
+					"    return 'held'",
+					"@tool",
+					"def wait_held() -> bool:",
+					"    return HELD.wait(5)",
+					"@tool",
+					"async def gated(n: int) -> int:",
+					"    async with GATE:",
+					"        return n",
+				].join("\n"),
+			);
+			expect(defined.exitCode).toBe(0);
+
+			// An interrupted subagent abandons `hold`; its coroutine must not keep GATE for 30s.
+			const controller = new AbortController();
+			const held = kernel.invokeTool({ op: "call", name: "hold", args: {} }, { signal: controller.signal });
+			const holding = await kernel.invokeTool({ op: "call", name: "wait_held", args: {} });
+			expect(holding.reply).toEqual({ ok: true, value: true });
+			controller.abort();
+			expect((await held).cancelled).toBe(true);
+
+			const next = await kernel.invokeTool({ op: "call", name: "gated", args: { n: 7 } }, { timeoutMs: 2_000 });
+			expect(next.reply).toEqual({ ok: true, value: 7 });
+		} finally {
+			await kernel.shutdown();
+		}
+	});
+
 	it("preserves awaited arguments in calls named like speculative bridge operations", async () => {
 		using tempDir = TempDir.createSync("@python-runner-call-site-");
 		const kernel = await PythonKernel.start({ cwd: tempDir.path() });

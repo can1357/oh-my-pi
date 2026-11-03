@@ -614,7 +614,7 @@ describe("browser tabs whose renderer crashed", () => {
 				await userPage.goto(url);
 				// A connected tab: closing it leaves the page there for a reattach to find.
 				const connected = await acquireBrowser(
-					{ kind: "connected", cdpUrl: `http://${new URL(launched.browser.wsEndpoint()).host}` },
+					{ kind: "connected", cdpUrl: `http://${new URL(launched.wsEndpoint).host}` },
 					{ cwd: process.cwd() },
 				);
 				await acquireTab(name, connected, { target: url, timeoutMs: 30_000 });
