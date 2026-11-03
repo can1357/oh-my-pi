@@ -531,8 +531,10 @@ describe("AgentSession retry delay cap", () => {
 		expect(retryStartEvents).toHaveLength(0);
 		expect(retryEndEvents).toHaveLength(1);
 		expect(retryEndEvents[0]).toMatchObject({ success: false });
-		expect(retryEndEvents[0].finalError).toContain("exceeds retry.maxDelayMs");
-		expect(retryEndEvents[0].finalError).toContain("Provider requested 1800000ms wait");
+		// An out-of-money balance has no reset clock, so the error surfaces as the
+		// provider stated it rather than as cap arithmetic about a wait that never
+		// was going to help.
+		expect(retryEndEvents[0].finalError).toBe(balanceError);
 		for (const call of waitSpy.mock.calls) {
 			expect(call[0]).toBeLessThanOrEqual(100);
 		}

@@ -126,7 +126,7 @@ export type JobWidgetBlock =
  * a session reload.
  */
 export interface JobWidgetView {
-	/** Short name of what is being watched (`verb-bench · 3 models`). */
+	/** Short name of what is being watched (`loadtest · 3 models`). */
 	title: string;
 	headline?: JobWidgetHeadline;
 	/** What the job is doing now: a subagent's stage, or the last line of output. */
@@ -239,7 +239,7 @@ export function latestJobWidget<T extends JobWidgetEntry>(entries: readonly T[])
 	return latest;
 }
 
-/** The widget as one plain line for tooltips: `verb-bench · 3 models — decode 186 tok/s ▲ 15%`. */
+/** The widget as one plain line for tooltips: `loadtest · 3 models — decode 186 tok/s ▲ 15%`. */
 export function jobWidgetSummary(view: JobWidgetView): string {
 	const glance = jobWidgetGlance(view);
 	const title = plainLine(view.title);
