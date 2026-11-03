@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed stats syncs failing with `database is locked` while another process writes `stats.db`: initializing a current schema only reads it
+
 ## [18.16.0] - 2026-11-02
 
 ### Fixed
