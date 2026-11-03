@@ -15,6 +15,7 @@
 import { type } from "@oh-my-pi/omptype";
 import { instrumentedCompleteSimple, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
 import { type Api, type AssistantMessage, Effort, type Model, type Tool } from "@oh-my-pi/pi-ai";
+import { errorDisplayText } from "@oh-my-pi/pi-ai/error";
 import { clampThinkingLevelForModel, getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { Snowflake } from "@oh-my-pi/pi-utils";
 import { extractTextContent, extractToolCall, parseJsonPayload } from "../commit/utils";
@@ -419,7 +420,7 @@ async function executeCompletion(
 			throw new ToolError("completion() request aborted.");
 		}
 		if (response.stopReason === "error") {
-			lastError = new ToolError(response.errorMessage ?? "completion() request failed.");
+			lastError = new ToolError(errorDisplayText(response) ?? "completion() request failed.");
 			failAttempt(attempt, lastError, signal);
 			if (!signal.aborted && index < candidates.length - 1) continue;
 			throw lastError;

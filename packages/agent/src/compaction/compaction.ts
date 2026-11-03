@@ -672,6 +672,8 @@ function resolveCompactionEffort(model: Model, level: ThinkingLevel | undefined)
  * message-based check is still required upstream — see issue #986.
  */
 function createSummarizationError(prefix: string, response: AssistantMessage): Error {
+	// The provider's text, not `errorDisplayText`: callers classify this error (auth,
+	// overflow, retry) from its message, and the display text holds local paths.
 	const text = `${prefix}: ${response.errorMessage || "Unknown error"}`;
 	return response.errorStatus === undefined
 		? new Error(text)

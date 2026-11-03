@@ -6,6 +6,7 @@
  */
 
 import type { Api, ApiKey, AssistantMessage, Context, Model, SimpleStreamOptions } from "@oh-my-pi/pi-ai";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import { prompt } from "@oh-my-pi/pi-utils";
@@ -379,7 +380,7 @@ export async function generateBranchSummary(
 		return { aborted: true };
 	}
 	if (response.stopReason === "error") {
-		return { error: response.errorMessage || "Summarization failed" };
+		return { error: AIError.errorDisplayText(response) || "Summarization failed" };
 	}
 	if (response.stopReason === "length") {
 		return { error: incompleteOutputError("Summarization failed") };
