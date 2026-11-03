@@ -280,3 +280,103 @@ fn cancellation_stops_a_long_list_inside_one_command() {
 
 	assert!(missed.is_empty(), "the cancellation came too late for the {}", missed.join("; "));
 }
+
+/// Runs `script` through [`Shell::run`] on a runtime with one worker, the
+/// state of the bash tool's runtime when every other worker is busy. Returns
+/// the output, or `None` when the run has not ended after 10 s. Whatever a
+/// background job or a pipe's other end must do then waits for that worker,
+/// so it runs only if the foreground loop yields.
+fn run_on_one_worker(script: &str) -> Option<String> {
+	let (done_tx, done_rx) = mpsc::channel();
+	let command = script.to_owned();
+	let cwd = tempfile::tempdir().expect("tempdir");
+	let cwd_path = cwd.path().to_string_lossy().into_owned();
+	std::thread::spawn(move || {
+		let runtime = tokio::runtime::Builder::new_multi_thread()
+			.worker_threads(1)
+			.enable_all()
+			.build()
+			.expect("runtime");
+		let output = runtime.block_on(async move {
+			let shell = Shell::new(None);
+			let (tx, rx) = flume::unbounded::<String>();
+			let result = shell
+				.run(
+					ShellRunOptions { command, cwd: Some(cwd_path), ..Default::default() },
+					Some(tx),
+					CancelToken::new(None),
+				)
+				.await;
+			let output: String = rx.drain().collect();
+			format!(
+				"{output}[run: {}]",
+				result.map_or_else(|e| e.to_string(), |r| format!("{:?}", r.exit_code))
+			)
+		});
+		let _ = done_tx.send(output);
+		std::mem::forget(runtime);
+	});
+	let output = done_rx.recv_timeout(Duration::from_secs(10)).ok();
+	drop(cwd);
+	output
+}
+
+/// INFRA-714's case: a process substitution is read while a busy loop runs in
+/// the background. The substitution's writer and the loop share the worker,
+/// so `mapfile` gets its line, and `grep` then answers, only if the loop
+/// yields.
+#[test]
+fn mapfile_and_grep_answer_beside_a_background_busy_loop() {
+	let output = run_on_one_worker(
+		"while :; do :; done & mapfile -t x < <(printf a); echo \"got=${x[0]}\"; printf 'b\\n' | \
+		 grep b; kill %1; echo end",
+	)
+	.expect("the script did not end within 10 s");
+	assert!(output.starts_with("got=a\nb\n"), "{output:?}");
+	assert!(output.contains("end\n"), "{output:?}");
+}
+
+/// A foreground loop that polls a background job with `kill -0` must see the
+/// job end: the job's task needs the worker the loop runs on.
+#[test]
+fn a_loop_polling_a_background_job_sees_it_end() {
+	for script in [
+		"false & p=$!; while kill -0 $p 2>/dev/null; do :; done; echo ended",
+		"{ false; } & p=$!; while kill -0 $p 2>/dev/null; do :; done; echo ended",
+		"sleep 0.1 & p=$!; until ! kill -0 $p 2>/dev/null; do :; done; echo ended",
+	] {
+		let output =
+			run_on_one_worker(script).unwrap_or_else(|| panic!("{script:?} did not end within 10 s"));
+		assert!(output.starts_with("ended\n"), "{script:?}: {output:?}");
+	}
+}
+
+/// Each kind of loop, run in the background, must leave the foreground able to
+/// run, to start a command substitution, and to stop the loop with `kill`.
+#[test]
+fn foreground_work_runs_beside_each_kind_of_background_loop() {
+	let loops = [
+		"while :; do :; done",
+		"until false; do :; done",
+		"for ((i = 0; 1; i++)); do :; done",
+		"while ((1)); do ((1)); done",
+		"while [[ 1 ]]; do [ 1 ]; done",
+		"f() { :; }; while :; do f; done",
+		"f() { :; }; g() { f; }; while :; do g; done",
+		"while :; do eval ':'; done",
+		"while :; do { :; }; done",
+		"while :; do true && false || :; done",
+		"while :; do case a in b) ;; esac; done",
+		"while :; do if false; then :; elif false; then :; fi; done",
+		"while :; do printf -v x %s a; done",
+	];
+	let mut missed = vec![];
+	for body in loops {
+		let script = format!("{body} & sleep 0.2; echo \"fg=$(echo sub)\"; kill %1; echo end");
+		match run_on_one_worker(&script) {
+			Some(output) if output.starts_with("fg=sub\n") && output.contains("end\n") => {},
+			other => missed.push(format!("{body:?}: {other:?}")),
+		}
+	}
+	assert!(missed.is_empty(), "the foreground did not run beside: {}", missed.join("; "));
+}
