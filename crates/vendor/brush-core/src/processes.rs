@@ -19,6 +19,13 @@ struct CompletionMarker {
 	end_marker_suffix: String,
 }
 
+impl CompletionMarker {
+	fn write(mut self, exit_code: i32) {
+		let _ = write!(self.output, "{}{}{}", self.end_marker_prefix, exit_code, self.end_marker_suffix);
+		let _ = self.output.flush();
+	}
+}
+
 /// A waitable future that will yield the results of a child process's
 /// execution.
 pub(crate) type WaitableChildProcess = std::pin::Pin<
@@ -229,13 +236,15 @@ impl ChildProcess {
 
 	/// Reports the exited process once its relays have forwarded its output.
 	/// The exit status is known by then, so a cancellation only stops the
-	/// waiting.
+	/// waiting; the completion marker still follows the output, written once
+	/// the drain the cancellation left behind finishes.
 	async fn complete(
 		&mut self,
 		output: std::process::Output,
 		cancel_token: Option<&CancellationToken>,
 	) -> ProcessWaitResult {
-		let relays = std::mem::take(&mut self.output_relays);
+		let exit_code = completion_exit_code(&output.status);
+		let mut drain = Box::pin(crate::outputrelay::drain(std::mem::take(&mut self.output_relays)));
 		let cancelled = async {
 			match cancel_token {
 				Some(token) => token.cancelled().await,
@@ -243,21 +252,22 @@ impl ChildProcess {
 			}
 		};
 		tokio::select! {
-			() = crate::outputrelay::drain(relays) => {},
-			() = cancelled => {},
+			() = &mut drain => self.write_completion_marker(exit_code),
+			() = cancelled => {
+				if let Some(marker) = self.completion_marker.take() {
+					tokio::spawn(async move {
+						drain.await;
+						marker.write(exit_code);
+					});
+				}
+			},
 		}
-		self.write_completion_marker(completion_exit_code(&output.status));
 		ProcessWaitResult::Completed(output)
 	}
 
 	fn write_completion_marker(&mut self, exit_code: i32) {
-		if let Some(mut marker) = self.completion_marker.take() {
-			let _ = write!(
-				marker.output,
-				"{}{}{}",
-				marker.end_marker_prefix, exit_code, marker.end_marker_suffix
-			);
-			let _ = marker.output.flush();
+		if let Some(marker) = self.completion_marker.take() {
+			marker.write(exit_code);
 		}
 	}
 
@@ -469,10 +479,25 @@ mod relay_tests {
 	}
 
 	/// Cancelling while an exited command's output still drains keeps the
-	/// status the command exited with.
+	/// status the command exited with, and its completion marker still waits
+	/// for that output.
 	#[tokio::test]
 	async fn cancellation_while_output_drains_keeps_the_exit_status() {
-		let (_forwarding, mut child) = exited_with_forwarding_relay();
+		use std::io::{Read, Seek, SeekFrom};
+
+		let (forwarding, mut child) = exited_with_forwarding_relay();
+		let mut marker = tempfile::tempfile().expect("marker file");
+		child.set_completion_marker(
+			OpenFile::from(marker.try_clone().expect("marker writer")),
+			"<exit>".into(),
+			"</exit>".into(),
+		);
+		let read_marker = |marker: &mut std::fs::File| {
+			let mut text = String::new();
+			marker.seek(SeekFrom::Start(0)).expect("rewind marker");
+			marker.read_to_string(&mut text).expect("read marker");
+			text
+		};
 		let cancel = CancellationToken::new();
 		let trigger = cancel.clone();
 		tokio::spawn(async move {
@@ -483,6 +508,17 @@ mod relay_tests {
 			panic!("an exited command reported as cancelled");
 		};
 		assert_eq!(output.status.code(), Some(7));
+		assert_eq!(read_marker(&mut marker), "", "marker written ahead of the output");
+
+		forwarding.finish();
+		tokio::time::timeout(std::time::Duration::from_secs(5), async {
+			while read_marker(&mut marker).is_empty() {
+				tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.expect("marker written once the output drained");
+		assert_eq!(read_marker(&mut marker), "<exit>7</exit>");
 	}
 
 	/// The background reaper's poll reports an exited job only once its
