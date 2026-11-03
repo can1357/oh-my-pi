@@ -1538,8 +1538,9 @@ describe("archive helpers", () => {
 	});
 
 	describe("viewWithoutThinking", () => {
+		// Ends like a template-rendered summary, which a view renders again (`viewSummary`).
 		const THINKING_SUMMARY =
-			"Archived transcript scopes:\n- `¶user:`, `¶think:`, `¶ai:`, `¶call:`: user, assistant reasoning, assistant reply, tool call.\nHISTORY";
+			"Archived transcript scopes:\n- `¶user:`, `¶think:`, `¶ai:`, `¶call:`: user, assistant reasoning, assistant reply, tool call.\nHISTORY\n===================";
 		const frame = { data: "ZmFrZQ==", mimeType: "image/png", cols: 64, rows: 40, chars: 10 };
 
 		it("reads the stored variant, or the original when its summary declares no reasoning", () => {
@@ -1611,6 +1612,23 @@ describe("archive helpers", () => {
 			const source = snapcompact.getPreservedArchive(rendered.preserveData)?.text ?? "";
 			expect(source).not.toContain("secret");
 			expect(source).toContain("answer two");
+		});
+
+		it("fails closed when the summary declares no reasoning scope but the archive's text keeps a thought", () => {
+			const text = "¶user: ask\n¶think: secret\n¶ai: answer";
+			const archive = { frames: [frame], totalChars: text.length, truncatedChars: 0, text, textHead: text };
+			const view = snapcompact.viewWithoutThinking("Summarized by an extension.", archive);
+			expect(view.archive.frames).toEqual([]);
+			const sent = `${view.summary}\n${snapcompact.archiveSourceText(view.archive)}`;
+			expect(sent).not.toContain("secret");
+			expect(sent).toContain("answer");
+			// The extension's own words lead, followed by the template's guide to the view's text.
+			expect(view.summary).toStartWith("Summarized by an extension.\n\n");
+			expect(view.summary.trimEnd()).toEndWith("HISTORY\n===================");
+			// Those words lose any reasoning they quote.
+			const quoting = snapcompact.viewWithoutThinking("Extension notes.\n¶think: secret plan\n¶ai: done", archive);
+			expect(quoting.summary).toStartWith("Extension notes.\n¶ai: done\n\n");
+			expect(quoting.summary).not.toContain("secret plan");
 		});
 	});
 
@@ -1684,6 +1702,46 @@ describe("archive helpers", () => {
 			expect(sent).not.toContain("MIDDLE sentinel");
 			expect(sent).toContain("middle history omitted above");
 			expect(sent).toContain(`About ${view.archive.truncatedChars} characters of older middle history dropped`);
+		});
+
+		it("drops reasoning for a reader without it when the summary declares no reasoning scope", async () => {
+			// An extension's summary over the archive, without the `¶think:` legend.
+			const result = await framedArchive();
+			const archive = snapcompact.getPreservedArchive(result.preserveData)!;
+			expect(archive.text).toContain("PRIVATE plan");
+			const view = snapcompact.viewWithoutFrames("Summarized by an extension.", archive, { includeThinking: false });
+			const sent = sentText(view);
+			expect(sent).not.toContain("PRIVATE plan");
+			expect(sent).not.toContain("¶think:");
+			expect(sent).toContain("MIDDLE sentinel");
+			expect(view.summary).toStartWith("Summarized by an extension.\n\n");
+
+			const frameless = { frames: [], totalChars: archive.text!.length, truncatedChars: 0, textHead: archive.text! };
+			const framelessSent = sentText(
+				snapcompact.viewWithoutFrames("Summarized by an extension.", frameless, { includeThinking: false }),
+			);
+			expect(framelessSent).not.toContain("PRIVATE plan");
+			expect(framelessSent).toContain("TAIL sentinel");
+		});
+
+		it("skips a legacy archive's unscoped tail lines for a reader without reasoning whatever its summary declares", () => {
+			// No whole source and no label on either edge: the tail opens inside a section whose label
+			// sat in the imaged middle, which may be a thought.
+			const frame = { data: "ZmFrZQ==", mimeType: "image/png", cols: 64, rows: 40, chars: 10 };
+			const legacy = {
+				frames: [frame],
+				totalChars: 100,
+				truncatedChars: 0,
+				textHead: "¶user: ask\n¶ai: answer one",
+				textTail: "secret continuation\n¶ai: answer two",
+			};
+			const sent = sentText(
+				snapcompact.viewWithoutFrames("Summarized by an extension.", legacy, { includeThinking: false }),
+			);
+			expect(sent).not.toContain("secret");
+			expect(sent).toContain("answer two");
+			// A reader that may read reasoning keeps the whole tail.
+			expect(sentText(snapcompact.viewWithoutFrames("Summarized by an extension.", legacy))).toContain("secret");
 		});
 	});
 

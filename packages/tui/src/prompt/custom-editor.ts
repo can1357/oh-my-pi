@@ -620,7 +620,7 @@ export class CustomEditor extends Editor {
 					name => this.skillFilePath(name) !== undefined,
 					register,
 				),
-				selector => this.#mentionLabelFor(selector),
+				selector => this.#mentionChipFor(selector),
 				register,
 			),
 		);
@@ -635,18 +635,20 @@ export class CustomEditor extends Editor {
 	 */
 	skillFilePath: (name: string) => string | undefined = () => undefined;
 
-	/** Host-owned model probe: maps a mentionable selector to its display chip label. */
-	modelMentionLabel: (selector: string) => string | undefined = () => undefined;
+	/**
+	 * Host-owned model probe: a mentionable `provider/id[:level]` selector's chip label and
+	 * canonical selector, so equivalent spellings (`:hi`/`:high`, bare/`:auto`) share a chip.
+	 */
+	resolveModelMention: (selector: string) => { label: string; selector: string } | undefined = () => undefined;
 
 	/** Host-owned session probe: maps a persisted model pseudonym back to its selector. */
 	modelMentionSelector: (agent: string) => string | undefined = () => undefined;
 
-	#mentionLabelFor(selector: string): string | undefined {
-		const label = this.modelMentionLabel(selector);
-		if (label === undefined) return undefined;
-		const expansion = modelMentionToken(selector);
-		const registered = this.atoms.get(label);
-		return registered !== undefined && registered !== expansion ? undefined : label;
+	#mentionChipFor(selector: string): { label: string; selector: string } | undefined {
+		const chip = this.resolveModelMention(selector);
+		if (chip === undefined) return undefined;
+		const registered = this.atoms.get(chip.label);
+		return registered === undefined || registered === modelMentionToken(chip.selector) ? chip : undefined;
 	}
 
 	/**
@@ -700,9 +702,9 @@ export class CustomEditor extends Editor {
 					const start = match.index + match[1].length;
 					const end = match.index + match[0].length;
 					if (end === line.length && i === lines.length - 1) break;
-					const label = this.#mentionLabelFor(selector);
-					if (label === undefined) continue;
-					this.collapseToAtom(i, start, end, label, modelMentionToken(selector));
+					const chip = this.#mentionChipFor(selector);
+					if (chip === undefined) continue;
+					this.collapseToAtom(i, start, end, chip.label, modelMentionToken(chip.selector));
 					collapsed = true;
 					anyCollapsed = true;
 					break;

@@ -271,7 +271,7 @@ import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
 import type { AgentDefinition } from "../task/types";
 import type { ModelMention } from "@oh-my-pi/pi-tui/prompt/model-mention-syntax";
-import { ModelMentionRegistry } from "./model-mentions";
+import { ModelMentionRegistry, type ResolvedModelMention } from "./model-mentions";
 import { parseCommandArgs } from "../utils/command-args";
 import type { EditMode } from "@oh-my-pi/pi-tui/tools/edit";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
@@ -622,6 +622,9 @@ class AgentStartPolicyChangedError extends Error {
 		this.name = "AgentStartPolicyChangedError";
 	}
 }
+
+/** A missing model or credential rejects a prompt before it reaches the agent. */
+class PromptPreflightError extends Error {}
 
 /**
  * Rejection from {@link AgentSession.prompt} with `throwOnDrop: true` when the
@@ -6307,7 +6310,7 @@ export class AgentSession implements SettingsScope {
 	 * never throws, so teardown cannot break the event flow.
 	 */
 	async #settleOwnedBrowserTabs(): Promise<void> {
-		const ownerId = this.sessionManager.getSessionId();
+		const ownerId = this.#eval.getKernelOwnerId();
 		if (!ownerId) return;
 		try {
 			const idleSec = cfgBrowserIdleCloseSec.get(this.settings);
@@ -6433,7 +6436,7 @@ export class AgentSession implements SettingsScope {
 		const results = await Promise.allSettled([
 			this.#disposeOwnedAsyncJobs(),
 			this.#eval.disposeKernels(),
-			this.#releaseOwnedBrowserTabs(this.sessionManager.getSessionId()),
+			this.#releaseOwnedBrowserTabs(this.#eval.getKernelOwnerId()),
 			this.#releaseOwnedComputerSessions(this.#eval.getKernelOwnerId()),
 			this.#disconnectOwnedMcp(),
 			advisorRecorderClosed,
@@ -8140,13 +8143,18 @@ export class AgentSession implements SettingsScope {
 	 * Resume the agent for the operator's `.`/`c` continue shortcut. A prompt the
 	 * model has not answered yet (an Esc before any output) runs again as is: a
 	 * continue directive would add nothing. Otherwise the hidden manual-continue
-	 * directive asks the model to pick its work back up.
+	 * directive asks the model to pick its work back up. An empty conversation
+	 * cannot be continued.
 	 *
 	 * @throws {AgentBusyError} while a turn runs.
+	 * @throws {Error} when there is no conversation to resume.
 	 */
 	async resume(): Promise<void> {
 		const prompt = this.#recovery.prepareResume();
 		if (!prompt) {
+			if (!this.agent.state.messages.some(message => message.role === "user")) {
+				throw new Error("Nothing to resume");
+			}
 			await this.prompt(manualContinuePrompt, {
 				synthetic: true,
 				userInitiated: true,
@@ -8442,7 +8450,10 @@ export class AgentSession implements SettingsScope {
 			});
 		} catch (error) {
 			turnError = error;
-			if (error instanceof AgentStartPolicyChangedError && message.role === "user") {
+			if (
+				(error instanceof AgentStartPolicyChangedError || error instanceof PromptPreflightError) &&
+				message.role === "user"
+			) {
 				this.#promptDropped?.({ text: typedText, images: options?.images });
 			}
 			throw error;
@@ -8651,11 +8662,27 @@ export class AgentSession implements SettingsScope {
 		const promptText = text.join("\n\n");
 		const preparationImages = images.length > 0 ? images : undefined;
 		// Steering amends the running task; only a follow-up starts a new one worth routing.
-		if (queue === "followUp" && userMessages.some(message => this.#isAutoPrewalkTask(message))) {
-			return this.#prepareQueuedAutoPrewalkTask(first, promptText, preparationImages, signal);
-		}
-		return this.#prepareAgentStart(first, promptText, preparationImages, this.#promptGeneration, signal, "queued");
+		const preparation =
+			queue === "followUp" && userMessages.some(message => this.#isAutoPrewalkTask(message))
+				? this.#prepareQueuedAutoPrewalkTask(first, promptText, preparationImages, signal)
+				: this.#prepareAgentStart(first, promptText, preparationImages, this.#promptGeneration, signal, "queued");
+		return this.#relaxOnDelivery(preparation, promptText);
 	};
+
+	/** Apply `chillax` when the batch is delivered, so a steer relaxes the running turn from its next request. */
+	async #relaxOnDelivery(
+		pending: Promise<QueuedMessagePreparation>,
+		promptText: string,
+	): Promise<QueuedMessagePreparation> {
+		const preparation = await pending;
+		return {
+			commit: () => {
+				const additional = preparation.commit();
+				if (additional !== undefined) this.#models.applyChillax(promptText);
+				return additional;
+			},
+		};
+	}
 
 	/**
 	 * A queued follow-up starts a new task: leave the previous task's auto handoff, judge this one alongside its
@@ -8857,7 +8884,7 @@ export class AgentSession implements SettingsScope {
 			// Validate model
 			const model = this.model;
 			if (!model) {
-				throw new Error(
+				throw new PromptPreflightError(
 					"No model selected.\n\n" +
 						`Use /login, set an API key environment variable, or create ${getAgentDbPath()}\n\n` +
 						"Then use /model to select a model.",
@@ -8868,7 +8895,7 @@ export class AgentSession implements SettingsScope {
 			const apiKey = await logger.time("prompt:apiKey", () => this.#modelRegistry.getApiKey(model, this.sessionId));
 			if (!apiKey && !(await this.#recovery.applyMissingCredentialFallback(setupAbort.signal))) {
 				if (setupAbort.signal.aborted) return false;
-				throw new Error(
+				throw new PromptPreflightError(
 					`No API key found for ${model.provider}.\n\n` +
 						`Use /login, set an API key environment variable, or create ${getAgentDbPath()}`,
 				);
@@ -8968,7 +8995,9 @@ export class AgentSession implements SettingsScope {
 			// non-auto sessions are skipped. Never blocks the turn — failures fall
 			// back to a concrete level inside the helper.
 			const isUserTurn = message.role === "user" || (message.role === "custom" && isUserInvokedSkillPrompt(message));
-			if (this.isAutoThinking && isUserTurn) {
+			// `chillax` settles the turn's effort itself, so classification is skipped.
+			const relaxed = isUserTurn && this.#models.applyChillax(expandedText);
+			if (this.isAutoThinking && isUserTurn && !relaxed) {
 				await this.#models.applyAutoThinkingLevel(expandedText, generation, options?.solutionSpace);
 				if (this.#promptGeneration !== generation) {
 					return false;
@@ -10694,9 +10723,9 @@ export class AgentSession implements SettingsScope {
 		return this.#modelMentions.mentions;
 	}
 
-	/** Resolve a model selector within the session picker's scope. */
-	findMentionableModel(selector: string): Model | undefined {
-		return this.#modelMentions.findMentionable(selector);
+	/** Resolve a `provider/id[:level]` mention within the session picker's scope. */
+	resolveModelMention(selector: string): ResolvedModelMention | undefined {
+		return this.#modelMentions.resolve(selector);
 	}
 
 	getTodoPhases(): TodoPhase[] {

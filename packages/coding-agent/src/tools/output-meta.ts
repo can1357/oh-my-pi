@@ -22,7 +22,12 @@ import {
 	truncateMiddle,
 	truncateTail,
 } from "@oh-my-pi/pi-tui/tools/streaming-output";
-import { formatOutputNotice, type OutputMeta, type TruncationMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
+import {
+	formatOutputNotice,
+	type MinimizedMeta,
+	type OutputMeta,
+	type TruncationMeta,
+} from "@oh-my-pi/pi-tui/tools/output-meta";
 import { renderError } from "./tool-errors";
 import {
 	cfgToolsArtifactHeadBytes,
@@ -45,6 +50,8 @@ export interface LimitsInput {
 	columnLines?: { first: number; last: number };
 	/** Target the `:raw:<first>-<last>` recovery selector is appended to. */
 	columnSelectorBase?: string;
+	/** Bytes a `:raw` read of the first cut line returns when that line is larger, so the hint names the cap. */
+	columnRawByteCap?: number;
 }
 
 // =============================================================================
@@ -338,6 +345,7 @@ export class OutputMetaBuilder {
 			this.columnTruncated(limits.columnMax, limits.columnUnit, undefined, undefined, {
 				lines: limits.columnLines,
 				selectorBase: limits.columnSelectorBase,
+				rawByteCap: limits.columnRawByteCap,
 			});
 		}
 		return this;
@@ -379,7 +387,7 @@ export class OutputMetaBuilder {
 		unit: "bytes" | "chars" = "chars",
 		artifactId?: string,
 		artifactElidedBytes?: number,
-		recovery?: { lines?: { first: number; last: number }; selectorBase?: string },
+		recovery?: { lines?: { first: number; last: number }; selectorBase?: string; rawByteCap?: number },
 	): this {
 		if (maxColumn <= 0) return this;
 		// Lines matter only with a target the recovery selector can read them from.
@@ -393,6 +401,7 @@ export class OutputMetaBuilder {
 				...(artifactId && artifactElidedBytes ? { artifactElidedBytes } : {}),
 				...(lines ? { lines } : {}),
 				...(lines && recovery?.selectorBase !== undefined ? { selectorBase: recovery.selectorBase } : {}),
+				...(lines && recovery?.rawByteCap !== undefined ? { rawByteCap: recovery.rawByteCap } : {}),
 			},
 		};
 		return this;
@@ -426,6 +435,12 @@ export class OutputMetaBuilder {
 	diagnostics(summary: string, messages: string[]): this {
 		if (messages.length === 0) return this;
 		this.#meta.diagnostics = { summary, messages };
+		return this;
+	}
+
+	/** Record the bash minimizer's rewrite. No-op when the output was not minimized. */
+	minimized(value: MinimizedMeta | undefined): this {
+		if (value) this.#meta.minimized = value;
 		return this;
 	}
 
@@ -751,25 +766,54 @@ async function wrappedExecute(
 ): Promise<AgentToolResult> {
 	const originalExecute = this[kUnwrappedExecute];
 
+	let own: AgentToolResult;
+	let result: AgentToolResult;
 	try {
-		let result = await originalExecute.call(this, toolCallId, params, signal, onUpdate, context);
+		own = await originalExecute.call(this, toolCallId, params, signal, onUpdate, context);
 
 		// Spill large results to artifact, truncate to tail
-		result = await spillLargeResultToArtifact(result, this.name, context);
+		result = await spillLargeResultToArtifact(own, this.name, context);
 
 		// Append notices from meta
 		const meta: OutputMeta | undefined = result.details?.meta;
 		if (meta) {
-			return {
+			result = {
 				...result,
 				content: appendOutputNotice(result.content, meta),
 			};
 		}
-		return result;
 	} catch (e) {
 		// Re-throw with formatted message so agent-loop sets isError flag
 		throw new Error(renderError(e));
 	}
+	// The Spotlight experiment shapes what the agent's own calls return; calls a tool or script makes stay whole.
+	const shape = context?.spotlightShape;
+	if (shape && isAgentCall(this, toolCallId, context)) {
+		result = await shape({
+			tool: this.name,
+			toolCallId,
+			args: params,
+			own,
+			result,
+			signal,
+			targets: () => this.matcherPaths?.(params),
+		});
+	}
+	return result;
+}
+
+/**
+ * Whether call `toolCallId` of `tool` is one the agent made: the loop's batch lists it under this tool's name. Calls
+ * dispatched under another tool's call (an `xd://` device behind `write`) or outside the loop (eval's tool bridge, an
+ * advisor) are not.
+ */
+function isAgentCall(tool: AgentTool, toolCallId: string, context: AgentToolContext): boolean {
+	const calls = context.toolCall?.toolCalls;
+	if (!calls) return false;
+	for (const call of calls) {
+		if (call.id === toolCallId) return call.name === tool.name || call.name === tool.customWireName;
+	}
+	return false;
 }
 
 /**

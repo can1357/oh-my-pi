@@ -1877,7 +1877,10 @@ export class SelectorController {
 								}
 								return renamed;
 							},
-							onSetPinned: (session: SessionInfo, pinned: boolean) => setSessionPinned(session.id, pinned),
+							onSetPinned: async (session: SessionInfo, pinned: boolean) => {
+								await setSessionPinned(session.id, pinned);
+								this.ctx.applySessionPin(session.id, pinned);
+							},
 						}
 					: {
 							title: "Select a Session to Consult",
