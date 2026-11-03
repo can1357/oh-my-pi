@@ -9,6 +9,7 @@ import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { resolveThresholdTokens, shouldCompact } from "@oh-my-pi/pi-agent-core/compaction";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import type { EffectiveExtensionRoots } from "@oh-my-pi/pi-coding-agent/capability/types";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -60,8 +61,9 @@ import { cfgAdvisorEnabled } from "@oh-my-pi/pi-coding-agent/advisor/settings";
 const tempDirs: TempDir[] = [];
 // Revivals here run the real createAgentSession, which discovers commands, skills, rules and
 // context from the home and agent directories and opens the model's API connection ahead of the
-// first request. Point both directories at an empty one and keep the prewarm off the network, so
-// each test measures only the fixture it builds.
+// first request. Point `HOME`, `os.homedir()` (Bun keeps returning the launch-time home when only
+// the variable changes, and discovery asks for it directly) and the agent directory at an empty
+// one, and keep the prewarm off the network, so each test measures only the fixture it builds.
 const isolatedHome = TempDir.createSync("@pi-revive-home-");
 const originalEnv = {
 	HOME: process.env.HOME,
@@ -72,6 +74,7 @@ const originalEnv = {
 
 beforeEach(() => {
 	process.env.HOME = isolatedHome.path();
+	vi.spyOn(os, "homedir").mockReturnValue(isolatedHome.path());
 	setAgentDir(path.join(isolatedHome.path(), ".omp", "agent"));
 	vi.spyOn(connectionPrewarm, "prewarmModelConnection").mockResolvedValue(undefined);
 });
