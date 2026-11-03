@@ -406,8 +406,9 @@ impl Backend for WaylandBackend {
 		token.check()?;
 		Err(DesktopError::background_unavailable(
 			"wayland-compositor-focus-only: Wayland cannot programmatically activate the element's \
-			 window, so el.type and el.press are refused before the element is focused; nothing was \
-			 sent. Use ax actions (setValue), or click the window and use desktop input",
+			 window, so el.type and el.press(keys) are refused before the element is focused; \
+			 nothing was sent. Use setValue, or click the field where a desktop screenshot shows it \
+			 (AX bounds are window-relative here) and then type with desktop input",
 		))
 	}
 
