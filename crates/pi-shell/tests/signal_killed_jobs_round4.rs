@@ -227,7 +227,7 @@ async fn an_errored_stage_ends_with_its_error_status() {
 	let errors = [
 		": ${x?bad}",
 		": $((1/0))",
-		": ${x:?}",
+		": ${x:?null}",
 		"readonly r=1; r=2; echo no",
 		"set -u; : $undef_zz",
 		"f",

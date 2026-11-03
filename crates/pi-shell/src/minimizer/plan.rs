@@ -328,7 +328,8 @@ const SHELL_STATE_BUILTINS: [&str; 6] = ["exec", "eval", "source", ".", "alias",
 /// it (see [`SHELL_STATE_BUILTINS`]). The command is resolved as the shell
 /// resolves it: by its words after quote removal (`'exec'`, `"exec"` and
 /// `\exec` are `exec`), and through `command` and `builtin` with their
-/// options. A word the shell would expand (`$cmd`, `$(...)`, `~`, `$'...'`)
+/// options. A word the shell would expand (`$cmd`, `$(...)`, `~`, `$'...'`,
+/// an unquoted `{` that brace expansion may take, as `{exec,}` is `exec`)
 /// cannot be resolved here, so such a command counts as one that can.
 fn simple_command_mutates_shell(simple: &SimpleCommand, options: &ParserOptions) -> bool {
 	let suffix_words = simple
@@ -381,6 +382,8 @@ fn static_word_text(word: &str, options: &ParserOptions) -> Option<String> {
 
 fn push_static_piece(piece: &WordPiece, text: &mut String) -> Option<()> {
 	match piece {
+		// Brace expansion reads an unquoted `{` (`{exec,}` is `exec`).
+		WordPiece::Text(part) if part.contains('{') => return None,
 		WordPiece::Text(part) | WordPiece::SingleQuotedText(part) => text.push_str(part),
 		WordPiece::EscapeSequence(escaped) => {
 			text.push_str(escaped.strip_prefix('\\').unwrap_or(escaped));
@@ -605,10 +608,14 @@ mod tests {
 			"\"alias\" ll=ls",
 			"$cmd 2>/dev/null",
 			"\"$cmd\" 2>/dev/null",
+			"{exec,} 2>/dev/null",
+			"command {exec,} 2>/dev/null",
 		] {
 			assert!(mutates(command), "{command}");
 		}
-		for command in ["echo exec", "command -v exec", "printf '%s' exec", "'git' status"] {
+		for command in
+			["echo exec", "command -v exec", "printf '%s' exec", "'git' status", "echo {a,b}"]
+		{
 			assert!(!mutates(command), "{command}");
 		}
 	}
