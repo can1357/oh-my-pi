@@ -349,6 +349,57 @@ describe("filterChildShellEnv", () => {
 		expect(JSON.parse(stdout)).toEqual({ array: "1", object: "1", piped: "1", explicit: "unset" });
 	});
 
+	// Bun also starts a worker thread given no `env` with the launch
+	// environment, so `omp --no-mcp` (set at runtime) did not reach a subagent
+	// worker: its sessions and the processes they started had MCP on (PR #17795
+	// review, round 10).
+	it("gives a worker started without env the value this process set at runtime", async () => {
+		const envModulePath = path.join(import.meta.dir, "..", "src", "env.ts");
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-utils-env-worker-"));
+		tempDirs.push(dir);
+		const workerPath = path.join(dir, "worker.ts");
+		const probe = "process.stdout.write(process.env.PI_NO_MCP ?? 'unset')";
+		fs.writeFileSync(
+			workerPath,
+			[
+				// pi-utils loads in every omp worker; its children get the worker's value too.
+				`import ${JSON.stringify(envModulePath)};`,
+				`const child = Bun.spawnSync([process.execPath, "-e", ${JSON.stringify(probe)}]);`,
+				'self.postMessage({ own: process.env.PI_NO_MCP ?? "unset", child: child.stdout.toString() });',
+			].join("\n"),
+		);
+		const script = [
+			`import { setInheritedEnv } from ${JSON.stringify(envModulePath)};`,
+			'setInheritedEnv("PI_NO_MCP", "1");',
+			"const read = async (options) => {",
+			`	const worker = new Worker(${JSON.stringify(workerPath)}, options);`,
+			"	const result = await new Promise(resolve => { worker.onmessage = event => resolve(event.data); });",
+			"	worker.terminate();",
+			"	return result;",
+			"};",
+			"const plain = await read(undefined);",
+			'const explicit = await read({ env: { PATH: process.env.PATH ?? "" } });',
+			"process.stdout.write(JSON.stringify({ plain, explicit }));",
+		].join("\n");
+		const proc = Bun.spawn([process.execPath, "--no-install", "--eval", script], {
+			env: { ...process.env, PI_NO_MCP: "" },
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const [stdout, stderr, exitCode] = await Promise.all([
+			new Response(proc.stdout).text(),
+			new Response(proc.stderr).text(),
+			proc.exited,
+		]);
+
+		expect(exitCode, stderr).toBe(0);
+		expect(JSON.parse(stdout)).toEqual({
+			plain: { own: "1", child: "1" },
+			// An explicit `env` stays exactly what the caller gave.
+			explicit: { own: "unset", child: "unset" },
+		});
+	});
+
 	it.skipIf(process.platform === "win32")(
 		"keeps filtering after the process working directory is deleted",
 		async () => {

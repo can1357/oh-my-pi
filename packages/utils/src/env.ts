@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { parseEnv } from "node:util";
+import { isMainThread } from "node:worker_threads";
 import { getAgentDir, getConfigRootDir, getProjectDir, refreshDirsFromEnv } from "./dirs";
 import { isBunTestRuntime } from "./test-runtime";
 
@@ -153,21 +154,41 @@ export function setInheritedEnv(name: string, value: string): void {
 let liveSpawnEnvDefaultInstalled = false;
 
 /**
- * Bun starts a child that is given no `env` with the environment this process
- * was launched with, not `process.env`: a value set at runtime never reaches
- * it. Once this process exports a value at runtime ({@link setInheritedEnv}),
- * `Bun.spawn` and `Bun.spawnSync` default to the live environment, as Node's
- * `child_process` already does, so every child inherits the value.
+ * Bun starts a child process or a worker thread that is given no `env` with
+ * the environment this process was launched with, not `process.env`: a value
+ * set at runtime never reaches it. Once this process exports a value at
+ * runtime ({@link setInheritedEnv}), `Bun.spawn`, `Bun.spawnSync` and `Worker`
+ * default to the live environment, as Node's `child_process` already does, so
+ * every child and worker inherits the value (a worker then exports it to its
+ * own children in turn).
  */
 function installLiveSpawnEnvDefault(): void {
 	if (liveSpawnEnvDefaultInstalled) return;
 	liveSpawnEnvDefaultInstalled = true;
+	const BaseWorker = globalThis.Worker;
+	if (BaseWorker) {
+		globalThis.Worker = class extends BaseWorker {
+			constructor(url: string | URL, options?: WorkerOptions) {
+				super(url, options?.env === undefined ? { ...options, env: liveEnvRecord() } : options);
+			}
+		};
+	}
 	const spawn = Bun.spawn;
 	const spawnSync = Bun.spawnSync;
 	Bun.spawn = ((...args: unknown[]) =>
 		(spawn as (...args: unknown[]) => unknown)(...withLiveEnv(args))) as typeof Bun.spawn;
 	Bun.spawnSync = ((...args: unknown[]) =>
 		(spawnSync as (...args: unknown[]) => unknown)(...withLiveEnv(args))) as typeof Bun.spawnSync;
+}
+
+/** The live environment as a worker's `env`: every variable that has a value. */
+function liveEnvRecord(): Record<string, string> {
+	const env: Record<string, string> = {};
+	for (const key in process.env) {
+		const value = process.env[key];
+		if (value !== undefined) env[key] = value;
+	}
+	return env;
 }
 
 /** `Bun.spawn` arguments, in either call form, with `env: process.env` when they set none. */
@@ -182,6 +203,10 @@ function withLiveEnv(args: unknown[]): unknown[] {
 	}
 	return args;
 }
+
+// A worker thread's environment is the one its parent gave it, not the launch
+// environment Bun hands a child: the worker's children and workers get its own.
+if (!isMainThread) installLiveSpawnEnvDefault();
 
 function expandDotenvValues(values: Record<string, string>, env: Record<string, string>): Record<string, string> {
 	const expanded: Record<string, string> = {};
