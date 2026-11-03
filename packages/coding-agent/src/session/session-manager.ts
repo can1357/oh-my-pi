@@ -3594,6 +3594,9 @@ export class SessionManager {
 	#recordDurableBody(target: string, body: SessionFileBody): void {
 		const durable = this.#durableBody;
 		if (durable?.file === target && durable.revision >= body.stamp.revision) return;
+		// A late confirmation for a file the session has left does not displace the
+		// record of its current file.
+		if (durable?.file === this.#sessionFile && target !== this.#sessionFile) return;
 		this.#durableBody = { file: target, revision: body.stamp.revision };
 	}
 
@@ -4019,7 +4022,12 @@ export class SessionManager {
 		while (this.#publishesOffChain.size > 0) await Promise.race(this.#publishesOffChain);
 		const durable = this.#durableBody;
 		if (durable && durable.file === this.#sessionFile && durable.revision >= revision) return;
-		this.#restoreUnsaved(restore);
+		try {
+			this.#restoreUnsaved(restore);
+		} catch (restoreError) {
+			// A restore that throws does not hide why the change was not saved.
+			logger.warn("Restoring an unsaved session change failed", { error: String(restoreError) });
+		}
 		throw this.#diskFailure ?? error;
 	}
 

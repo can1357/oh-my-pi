@@ -318,6 +318,49 @@ for (const depth of [0, 1, 2, 4, 8, 16]) {
 	});
 }
 
+it("reports why a rewrite failed when its caller's restore throws", async () => {
+	using tempDir = TempDir.createSync("@omp-rewrite-superseded-restore-throws-");
+	const storage = new StorageTakenOverMidRewrite();
+	const manager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"), storage);
+	manager.onPersistenceError(() => {});
+	try {
+		manager.appendMessage({ role: "user", content: "a turn worth saving", timestamp: Date.now() });
+		manager.appendCustomEntry("marker", { state: "before" });
+		await manager.ensureOnDisk();
+		await manager.flush();
+		const original = manager.getSessionFile();
+		if (!original) throw new Error("Expected a persisted session");
+		const marker = manager.getEntries().find(entry => entry.type === "custom" && entry.customType === "marker");
+		if (marker?.type !== "custom") throw new Error("Expected the marker entry");
+		marker.data = { state: "after" };
+		const held = { file: original, reached: Promise.withResolvers<void>(), go: Promise.withResolvers<void>() };
+		storage.held = held;
+		const rewrite = manager.rewriteEntries({
+			restore: () => {
+				storage.failSyncWrites = false;
+				throw new Error("restore broke");
+			},
+		});
+		const settled = rewrite.then(
+			() => undefined,
+			(error: unknown) => error,
+		);
+		await held.reached.promise;
+		// The successor fails, and storage stays failing until the verdict is in.
+		storage.failSyncWrites = true;
+		manager.appendCustomEntry("concurrent", {});
+		held.go.resolve();
+
+		const error = await settled;
+		expect(error).toBeInstanceOf(Error);
+		expect((error as Error).message).not.toContain("restore broke");
+	} finally {
+		storage.failSyncWrites = false;
+		manager.seal();
+		await manager.close().catch(() => {});
+	}
+});
+
 it("reports a rewrite failed when the session is sealed before its turn on the disk chain", async () => {
 	using tempDir = TempDir.createSync("@omp-rewrite-superseded-queued-");
 	const manager = SessionManager.create(
