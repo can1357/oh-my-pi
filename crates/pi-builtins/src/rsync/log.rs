@@ -13,10 +13,10 @@ mod stats;
 use std::{
 	io::{self, Write},
 	sync::{
-		Arc, Mutex,
+		Arc, Condvar, Mutex, PoisonError,
 		atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering},
 	},
-	time::Duration,
+	time::{Duration, Instant},
 };
 
 #[cfg(all(test, unix))]
@@ -191,6 +191,47 @@ enum LogTarget {
 	File(Box<dyn Write + Send>),
 	/// The log file could not be opened: messages go to syslog (unix) like upstream.
 	Syslog,
+	/// Opened at the first message logged ([`Logger::defer_log_file`]).
+	Deferred(DeferredLog),
+}
+
+/// What a deferred `--log-file` open needs.
+struct DeferredLog {
+	path:     std::path::PathBuf,
+	fs:       pi_vfs::BlockingFs,
+	insecure: bool,
+	cancel:   Arc<AtomicBool>,
+}
+
+/// Holds a local server half's last report until its client has reported, or
+/// until the client's report waits on its own `--log-file`. Upstream's client
+/// signals its child (`kill_all`) just before it prints its exit line, which
+/// then comes first unless that line's log write blocks; the child's comes
+/// first then.
+#[derive(Default)]
+pub(crate) struct ReportGate {
+	open:   Mutex<bool>,
+	opened: Condvar,
+}
+
+impl ReportGate {
+	pub(crate) fn open(&self) {
+		*lock(&self.open) = true;
+		self.opened.notify_all();
+	}
+
+	/// Waits until the gate is open, at most `limit`.
+	pub(crate) fn wait(&self, limit: Duration) {
+		let until = Instant::now() + limit;
+		let mut open = lock(&self.open);
+		while !*open {
+			let now = Instant::now();
+			if now >= until {
+				return;
+			}
+			open = self.opened.wait_timeout(open, until - now).unwrap_or_else(PoisonError::into_inner).0;
+		}
+	}
 }
 
 struct Outputs {
@@ -224,6 +265,9 @@ struct Inner {
 	protocol: AtomicU32,
 	checksums: Mutex<(CsumType, CsumType)>,
 	fatal: Mutex<Option<RsyncError>>,
+	/// Opened when this logger's `--log-file` write would block, before it
+	/// waits for room ([`Logger::release_on_log_stall`]).
+	log_stall: Arc<Mutex<Option<Arc<ReportGate>>>>,
 }
 
 /// Where messages go: local stdout/stderr (client) or the peer (server role).
@@ -303,6 +347,7 @@ impl Logger {
 			protocol: AtomicU32::new(33),
 			checksums: Mutex::new((CsumType::Md5, CsumType::Md5)),
 			fatal: Mutex::new(None),
+			log_stall: Arc::default(),
 			cfg,
 		};
 		Self { inner: Arc::new(inner), role }
@@ -383,17 +428,12 @@ impl Logger {
 	/// log_init: opens `config().log_file` for appending through the operator-file walk.
 	/// On failure prints upstream's two messages and falls back to syslog. An
 	/// open that `cancel` ends (a FIFO nobody reads) prints nothing: the run
-	/// ends with its cancellation. With `cut_on_cancel` such an open also
-	/// drops every later message (`Outputs::cut`): a local server half's
-	/// rsync opens its log lazily, inside its first log write, when the client
-	/// has a log of its own, so the signal that interrupts that open finds
-	/// `in_block` set and its trailer is lost.
+	/// ends with its cancellation.
 	pub(crate) fn open_log_file(
 		&self,
 		fs: &pi_vfs::BlockingFs,
 		insecure: bool,
 		cancel: &std::sync::Arc<std::sync::atomic::AtomicBool>,
-		cut_on_cancel: bool,
 	) {
 		let Some(path) = self.inner.cfg.log_file.clone() else {
 			return;
@@ -402,24 +442,63 @@ impl Logger {
 			lock(&self.inner.outputs).log = LogTarget::Syslog;
 			return;
 		}
-		match crate::rsync::paths::create_operator_file(fs, &path, true, insecure, cancel) {
-			// A line the cancellation finds waiting is lost with the rest of
-			// the run's output (see `Outputs::cut`); one logged after it, such
-			// as the exit line, waits for the log as rsync's does.
-			Ok(file) => self.set_log_file(Box::new(file.waiting_after_cancel())),
-			Err(err) if RsyncError::is_cancellation(&err) => {
-				if cut_on_cancel {
-					lock(&self.inner.outputs).cut = true;
-				}
-			},
-			Err(err) => {
-				let mut text = b"failed to open log-file ".to_vec();
-				text.extend_from_slice(&crate::host::os_bytes_lossy(path.as_os_str()));
-				self.rsyserr(LogCode::Error, &err, &text);
-				self.rprintf(LogCode::Info, b"Ignoring \"log file\" setting.\n");
-				lock(&self.inner.outputs).log = LogTarget::Syslog;
-			}
+		let deferred = DeferredLog { path, fs: fs.clone(), insecure, cancel: Arc::clone(cancel) };
+		match self.open_deferred(&deferred) {
+			Ok(file) => self.set_log_file(file),
+			Err(err) if RsyncError::is_cancellation(&err) => {},
+			Err(err) => self.log_open_failed(&deferred.path, &err),
 		}
+	}
+
+	/// A local server half's `--log-file` when its client logs too: upstream's
+	/// child inherits the client's log, closes it (`pipe.c`) and opens its own
+	/// inside its first log write (`logfile_reopen`), past the protocol setup.
+	/// A signal that interrupts that open finds `rwrite`'s `in_block` set, so
+	/// that message and every later one are lost (`Outputs::cut`).
+	pub(crate) fn defer_log_file(
+		&self,
+		fs: &pi_vfs::BlockingFs,
+		insecure: bool,
+		cancel: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+	) {
+		let Some(path) = self.inner.cfg.log_file.clone() else {
+			return;
+		};
+		lock(&self.inner.outputs).log = if path.is_empty() {
+			LogTarget::Syslog
+		} else {
+			LogTarget::Deferred(DeferredLog { path, fs: fs.clone(), insecure, cancel: Arc::clone(cancel) })
+		};
+	}
+
+	/// Opens a `--log-file` for appending. A line the cancellation finds
+	/// waiting is lost with the rest of the run's output (see `Outputs::cut`);
+	/// one logged after it, such as the exit line, waits for the log as
+	/// rsync's does, and opens [`Logger::release_on_log_stall`]'s gate first.
+	fn open_deferred(&self, log: &DeferredLog) -> io::Result<Box<dyn Write + Send>> {
+		let file = crate::rsync::paths::create_operator_file(&log.fs, &log.path, true, log.insecure, &log.cancel)?;
+		let stall = Arc::clone(&self.inner.log_stall);
+		let file = file.waiting_after_cancel().on_stall(Arc::new(move || {
+			if let Some(gate) = lock(&stall).as_ref() {
+				gate.open();
+			}
+		}));
+		Ok(Box::new(file))
+	}
+
+	/// logfile_open's failure: upstream's two messages, then syslog.
+	fn log_open_failed(&self, path: &std::path::Path, err: &io::Error) {
+		lock(&self.inner.outputs).log = LogTarget::Syslog;
+		let mut text = b"failed to open log-file ".to_vec();
+		text.extend_from_slice(&crate::host::os_bytes_lossy(path.as_os_str()));
+		self.rsyserr(LogCode::Error, err, &text);
+		self.rprintf(LogCode::Info, b"Ignoring \"log file\" setting.\n");
+	}
+
+	/// Opens `gate` when this logger's `--log-file` write would block (a FIFO
+	/// with no room), before the write waits; `None` stops that.
+	pub(crate) fn release_on_log_stall(&self, gate: Option<Arc<ReportGate>>) {
+		*lock(&self.inner.log_stall) = gate;
 	}
 
 	/// rprintf: `text` carries its own trailing newline like upstream's format strings.
@@ -711,6 +790,30 @@ impl Logger {
 		if outputs.cut {
 			return;
 		}
+		// Upstream logit's logfile_reopen: a deferred log opens at the first
+		// message logged, inside rwrite, holding up the process; every thread
+		// that logs here waits for it.
+		if code != LogCode::Client
+			&& !outputs.in_block
+			&& matches!(outputs.log, LogTarget::Deferred(_))
+			&& let LogTarget::Deferred(deferred) = std::mem::replace(&mut outputs.log, LogTarget::Off)
+		{
+			match self.open_deferred(&deferred) {
+				Ok(file) => outputs.log = LogTarget::File(file),
+				Err(err) if RsyncError::is_cancellation(&err) => {
+					outputs.cut = true;
+					return;
+				},
+				Err(err) => {
+					drop(outputs);
+					self.log_open_failed(&deferred.path, &err);
+					outputs = lock(&inner.outputs);
+					if outputs.cut {
+						return;
+					}
+				},
+			}
+		}
 		if code == LogCode::Client {
 			code = LogCode::Info;
 		} else if !matches!(outputs.log, LogTarget::Off) {
@@ -859,6 +962,8 @@ fn write_log(target: &mut LogTarget, text: &[u8], info: bool, tz: &jiff::tz::Tim
 			syslog(body, info);
 			false
 		},
+		// Opened before any write reaches here (see `Logger::emit`).
+		LogTarget::Deferred(_) => false,
 	}
 }
 

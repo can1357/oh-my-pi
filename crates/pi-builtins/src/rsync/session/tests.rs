@@ -494,19 +494,16 @@ fn cancelling_a_local_copy_in_setup_reports_before_the_server_half() {
 	);
 }
 
-/// The same with the client's own `--log-file` full when it is cancelled,
-/// the half still opening its log FIFO, which a reader opens 300 ms later:
-/// rsync 3.5.1 (three runs, SIGTERM; the same for SIGINT and SIGHUP in
-/// review) prints the client's trailer alone. Its client signals the half at
-/// once, and a half whose client logs too opens its log inside its first log
-/// write, so `rwrite`'s `in_block` drops the half's trailer. Before, the half
-/// got past its log into the protocol while the client's trailer waited:
-/// with the connection closed it printed `error in rsync protocol data
-/// stream (code 12)` (round 1 of this pull request), and with it kept open
-/// its SIGUSR1 trailer (round 4), neither of which rsync prints.
+/// A local copy whose client and server half both log to FIFOs, cancelled
+/// with the client's log full; the half's log gets a reader `server_log_at`
+/// after the cancellation, and both are drained 900 ms after it. Returns
+/// stderr. Upstream's half of a client that logs opens its log only at its
+/// first log write ("receiving file list"), so it is waiting there, past
+/// the protocol setup, when the client is cancelled; the client sleeps
+/// 400 ms (`sig_int`), signals the half, then logs its exit line, which
+/// waits on its full log.
 #[cfg(unix)]
-#[test]
-fn a_half_stopped_opening_its_log_prints_nothing_when_the_client_logs() {
+fn both_logs_cancelled(server_log_at: Duration) -> (i32, String) {
 	use std::io::Read as _;
 	use std::os::unix::fs::OpenOptionsExt;
 
@@ -525,14 +522,15 @@ fn a_half_stopped_opening_its_log_prints_nothing_when_the_client_logs() {
 	let release = server_log.clone();
 	let driver = std::thread::spawn(move || {
 		std::thread::sleep(Duration::from_millis(300));
-		// Fill the client's log, then cancel: its trailer waits to be logged.
+		// Fill the client's log, then cancel: its exit line waits to be logged.
 		while std::io::Write::write(&mut client_log_end, &[b'x'; 4096]).is_ok() {}
 		cancel.store(true, Ordering::Relaxed);
-		std::thread::sleep(Duration::from_millis(300));
-		// Let the server half past its log file and into the protocol.
+		let cancelled = Instant::now();
+		std::thread::sleep(server_log_at);
+		// Let the server half open its log.
 		let mut server_log_end = fs::OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK).open(&release).unwrap();
-		std::thread::sleep(Duration::from_millis(600));
-		// Then let the client log its trailer.
+		std::thread::sleep((cancelled + Duration::from_millis(900)).saturating_duration_since(Instant::now()));
+		// Then let both logs drain.
 		let mut buf = [0u8; 65536];
 		let deadline = Instant::now() + Duration::from_secs(10);
 		while Instant::now() < deadline {
@@ -555,11 +553,39 @@ fn a_half_stopped_opening_its_log_prints_nothing_when_the_client_logs() {
 	.unwrap();
 	let code = crate::host::run_caught::<Rsync>(parsed, &mut host);
 	drop(driver);
-	assert_eq!(code, RERR_SIGNAL, "{}", cap.err());
+	(code, cap.err())
+}
+
+/// [`both_logs_cancelled`] with the half's log opened 300 ms after the
+/// cancellation, within the client's 400 ms: the half gets past its log and
+/// reports as the generator when the client signals it, before the client,
+/// whose exit line waits on its log. rsync 3.5.1 printed exactly these two
+/// lines in 29 of 29 runs (SIGTERM, SIGINT and SIGHUP; one-file and this
+/// tree). Ended at the cancellation itself, the half's log open dropped the
+/// half's line (round 5 of this pull request).
+#[cfg(unix)]
+#[test]
+fn a_half_past_its_log_reports_before_a_client_waiting_on_its_own() {
+	let (code, err) = both_logs_cancelled(Duration::from_millis(300));
+	assert_eq!(code, RERR_SIGNAL, "{err}");
 	assert_eq!(
-		cap.err(),
-		"rsync error: received SIGINT, SIGTERM, or SIGHUP (code 20) at rsync.c(874) [sender=3.5.1]\n"
+		err,
+		"rsync error: received SIGUSR1 (code 19) at main.c(1687) [generator=3.5.1]\n\
+		 rsync error: received SIGINT, SIGTERM, or SIGHUP (code 20) at rsync.c(874) [sender=3.5.1]\n"
 	);
+}
+
+/// [`both_logs_cancelled`] with the half's log opened 900 ms after the
+/// cancellation, past the client's 400 ms: the half is still opening its
+/// log, inside its first log write, when the client signals it, so its line
+/// is lost (`rwrite`'s `in_block`) and the client's prints alone. rsync
+/// 3.5.1 printed exactly this line in 5 of 5 runs.
+#[cfg(unix)]
+#[test]
+fn a_half_stopped_opening_its_log_prints_nothing_when_the_client_logs() {
+	let (code, err) = both_logs_cancelled(Duration::from_millis(900));
+	assert_eq!(code, RERR_SIGNAL, "{err}");
+	assert_eq!(err, "rsync error: received SIGINT, SIGTERM, or SIGHUP (code 20) at rsync.c(874) [sender=3.5.1]\n");
 }
 
 /// Opens the other end of the FIFO at `path` (without waiting) every 50 ms

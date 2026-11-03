@@ -1094,6 +1094,8 @@ pub(crate) struct OperatorOutput {
 	fifo:         bool,
 	/// Whether a write that starts after the cancellation waits for room.
 	after_cancel: bool,
+	/// Called when a write would block, before it waits for room.
+	on_stall:     Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl OperatorOutput {
@@ -1108,7 +1110,7 @@ impl OperatorOutput {
 		};
 		#[cfg(not(unix))]
 		let fifo = false;
-		Ok(Self { file, cancel: Arc::clone(cancel), fifo, after_cancel: false })
+		Ok(Self { file, cancel: Arc::clone(cancel), fifo, after_cancel: false, on_stall: None })
 	}
 
 	/// Writes that start after the cancellation wait for room and report
@@ -1117,6 +1119,14 @@ impl OperatorOutput {
 	/// and that write waits until the log takes it.
 	pub(crate) const fn waiting_after_cancel(mut self) -> Self {
 		self.after_cancel = true;
+		self
+	}
+
+	/// Calls `hook` each time a write would block, before it waits for room
+	/// (the exit line of a client whose `--log-file` is full: see
+	/// `Logger::release_on_log_stall`).
+	pub(crate) fn on_stall(mut self, hook: Arc<dyn Fn() + Send + Sync>) -> Self {
+		self.on_stall = Some(hook);
 		self
 	}
 
@@ -1150,6 +1160,9 @@ impl io::Write for OperatorOutput {
 			loop {
 				match io::Write::write(&mut native, buf) {
 					Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+						if let Some(hook) = &self.on_stall {
+							hook();
+						}
 						wait_writable(native.as_fd(), cancel).map_err(mapped)?;
 					},
 					written => return written.map_err(mapped),
