@@ -655,9 +655,11 @@ fn a_refused_conversion_fails_before_the_protocol_exchange() {
 /// rsync 3.5.1's recv_file_entry, so nothing is created under the name as
 /// sent. Captured from rsync 3.5.1 under `LC_ALL=C` (20 runs, always so):
 /// with `é` and `plain` at the top, `--iconv=UTF-8,` reports the name, copies
-/// `plain` and exits 23; with `sub/é2` in an incremental list the empty name
-/// is outside `sub`, which aborts the transfer (exit 4) as the receiver,
-/// once.
+/// `plain` and exits 23, and does not itemize `./` as new (the empty, inactive
+/// entry sorts first, so main.c's `files[low]` is not `.`); refused by the
+/// sender instead (`--iconv=,UTF-8`) the name is never sent and `./` is
+/// itemized. With `sub/é2` in an incremental list the empty name is outside
+/// `sub`, which aborts the transfer (exit 4) as the receiver, once.
 ///
 /// Not on musl: its iconv writes `*` for a character the charset lacks
 /// instead of refusing it ([`crate::rsync::iconv`]'s
@@ -678,10 +680,14 @@ fn a_received_name_the_conversion_refuses_creates_nothing() {
 	fs::write(src.join("plain"), b"y").unwrap();
 	let (code, out, err) = run(&["-ai", "--iconv=UTF-8,", "src/", "d1/"], dir.path());
 	assert_eq!(code, 23, "{out}{err}");
-	assert!(out.contains(">f+++++++++ plain\n"), "{out}");
+	assert_eq!(out, "created directory d1\n>f+++++++++ plain\n");
 	assert!(err.starts_with(&format!("[Receiver] cannot convert filename: \\#303\\#251 ({eilseq})\n")), "{err}");
 	let names: Vec<_> = fs::read_dir(dir.path().join("d1")).unwrap().map(|e| e.unwrap().file_name()).collect();
 	assert_eq!(names, [std::ffi::OsString::from("plain")]);
+	let (code, out, err) = run(&["-ai", "--iconv=,UTF-8", "src/", "d3/"], dir.path());
+	assert_eq!(code, 23, "{out}{err}");
+	assert_eq!(out, "created directory d3\ncd+++++++++ ./\n>f+++++++++ plain\n");
+	assert!(err.starts_with(&format!("[sender] cannot convert filename: \\#303\\#251 ({eilseq})\n")), "{err}");
 
 	fs::create_dir_all(src.join("sub")).unwrap();
 	fs::write(src.join("sub/\u{e9}2"), b"z").unwrap();
