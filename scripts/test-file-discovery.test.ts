@@ -43,6 +43,11 @@ beforeAll(async () => {
 	await fs.symlink(path.join(root, "a.test.ts"), path.join(root, "sub", "again.test.ts"));
 	await fs.symlink("..", path.join(root, "sub", "deeper", "loop"));
 	await fs.symlink(path.join(root, "missing.test.ts"), path.join(root, "dangling.test.ts"));
+	// `bun test` reads the `[test] pathIgnorePatterns` of the bunfig.toml where it runs and skips a
+	// matching file, as the repository root's does for `**/dist/**`.
+	await Bun.write(path.join(root, "bunfig.toml"), '[test]\npathIgnorePatterns = ["**/dist/**", "skip/**"]\n');
+	for (const file of ["dist/x.test.ts", "sub/dist/y.test.ts", "skip/z.test.ts", "skipnot/w.test.ts"])
+		await Bun.write(path.join(root, file), source(file));
 });
 
 afterAll(async () => {
@@ -90,6 +95,10 @@ describe("testFilesWithoutBucket", () => {
 			await Bun.write(path.join(repo, "packages/new/b.test.ts"), test);
 			await Bun.write(path.join(repo, "packages/new/reached.test.ts"), test);
 			await Bun.write(path.join(repo, "scripts/s.test.ts"), test);
+			// The scripts command runs from the repository root, whose bunfig.toml ignores dist.
+			await Bun.write(path.join(repo, "scripts/dist/missed.test.ts"), test);
+			await Bun.write(path.join(repo, "bunfig.toml"), '[test]\npathIgnorePatterns = ["**/dist/**"]\n');
+			await fs.symlink("../../scripts/dist/missed.test.ts", path.join(repo, "packages/new/f-dist.test.ts"));
 			await Bun.write(path.join(repo, ".omp/tests/tui.test.ts"), test);
 			await Bun.write(path.join(repo, ".omp/tests/zzz-new.test.ts"), test);
 			// Links sort before their targets, so the collector reports the link's spelling.
@@ -104,8 +113,11 @@ describe("testFilesWithoutBucket", () => {
 			await fs.symlink("../run/node_modules/dep/d.test.ts", path.join(repo, "packages/new/e-dep.test.ts"));
 
 			const missing = await testFilesWithoutBucket(repo, ["packages/run", "packages/new", ".omp/tests"], {
-				files: [".omp/tests/tui.test.ts"],
-				dirs: ["packages/run", "scripts"],
+				files: [{ path: ".omp/tests/tui.test.ts", cwd: "." }],
+				dirs: [
+					{ path: "packages/run", cwd: "packages/run" },
+					{ path: "scripts", cwd: "." },
+				],
 			});
 			expect(missing.sort()).toEqual([
 				".omp/tests/zzz-new.test.ts",
@@ -113,6 +125,7 @@ describe("testFilesWithoutBucket", () => {
 				"packages/new/c-helper.test.ts",
 				"packages/new/d-hidden.test.ts",
 				"packages/new/e-dep.test.ts",
+				"packages/new/f-dist.test.ts",
 			]);
 		} finally {
 			await fs.rm(repo, { recursive: true, force: true });

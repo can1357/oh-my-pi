@@ -236,7 +236,8 @@ function rustTestCommand(): TestCommand {
 
 // The repository's own tooling tests (release, install and CI helper scripts).
 async function scriptsTestCommand(extraArgs: string[] = []): Promise<TestCommand> {
-	const files = await collectTestsUnder(path.join(repoRoot, "scripts"), repoRoot);
+	// Collected as `bun test` selects them from the repository root, root `bunfig.toml` ignores included.
+	const files = await collectTestsUnder(path.join(repoRoot, "scripts"), repoRoot, repoRoot);
 	return {
 		label: "scripts",
 		cwd: ".",
@@ -249,12 +250,16 @@ async function scriptsTestCommand(extraArgs: string[] = []): Promise<TestCommand
 // runs. The modes CI and `bun run test` use refuse to start while any exists, so
 // a package added without a bucket fails CI instead of going untested.
 async function uncoveredTestFiles(): Promise<string[]> {
+	const inOwnDir = (pkg: string) => ({ path: pkg, cwd: pkg });
 	return testFilesWithoutBucket(
 		repoRoot,
 		[...(await workspacePackageDirs(repoRoot)), path.dirname(projectToolTestFile)],
 		{
-			files: [projectToolTestFile],
-			dirs: [...fastWorkspacePackages, ...nativeAndIntegrationPackages, codingAgentDir, "scripts"],
+			files: [{ path: projectToolTestFile, cwd: "." }],
+			dirs: [
+				...[...fastWorkspacePackages, ...nativeAndIntegrationPackages, codingAgentDir].map(inOwnDir),
+				{ path: "scripts", cwd: "." },
+			],
 		},
 	);
 }

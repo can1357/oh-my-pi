@@ -10,39 +10,65 @@ import * as path from "node:path";
 export const testFilePattern = /[._](test|spec)\.(?:[jt]sx?|[cm][jt]s)$/i;
 
 /**
- * Test files below `root`, as `/`-separated paths relative to `baseDir`, skipping `node_modules` and
- * dot-directories. Like `bun test`, it follows symbolic links to files and directories and runs each
- * real file once: a file or directory already reached by another path, or a link cycle, is skipped,
- * and a dangling link is ignored.
+ * The `[test] pathIgnorePatterns` of the `bunfig.toml` in `cwd`, the only one `bun test` reads when
+ * it runs there. `bun test` skips a matching file even when the command names it.
  */
-export async function collectTestsUnder(root: string, baseDir: string, seen = new Set<string>()): Promise<string[]> {
-	const realRoot = await fs.realpath(root);
-	if (seen.has(realRoot)) return [];
-	seen.add(realRoot);
-	const entries = await fs.readdir(root, { withFileTypes: true });
-	const files: string[] = [];
-	for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
-		const filePath = path.join(root, entry.name);
-		let isDirectory = entry.isDirectory();
-		let isFile = entry.isFile();
-		if (entry.isSymbolicLink()) {
-			const target = await fs.stat(filePath).catch(() => null);
-			if (!target) continue;
-			isDirectory = target.isDirectory();
-			isFile = target.isFile();
-		}
-		if (isDirectory) {
-			if (entry.name === "node_modules" || entry.name.startsWith(".")) continue;
-			files.push(...(await collectTestsUnder(filePath, baseDir, seen)));
-			continue;
-		}
-		if (!isFile || !testFilePattern.test(entry.name)) continue;
-		const realFile = await fs.realpath(filePath);
-		if (seen.has(realFile)) continue;
-		seen.add(realFile);
-		files.push(path.relative(baseDir, filePath).split(path.sep).join("/"));
+async function bunTestIgnorePatterns(cwd: string): Promise<Bun.Glob[]> {
+	let text: string;
+	try {
+		text = await Bun.file(path.join(cwd, "bunfig.toml")).text();
+	} catch {
+		return [];
 	}
-	return files;
+	const config = Bun.TOML.parse(text) as { test?: { pathIgnorePatterns?: unknown } };
+	const patterns = config.test?.pathIgnorePatterns;
+	return Array.isArray(patterns) ? patterns.filter(p => typeof p === "string").map(p => new Bun.Glob(p)) : [];
+}
+
+/**
+ * The test files `bun test`, run in `cwd`, finds below `root`, as `/`-separated paths relative to
+ * `baseDir`. It skips `node_modules`, dot-directories and files `cwd`'s `bunfig.toml` ignores, and
+ * like `bun test` it follows symbolic links to files and directories and takes each real file once:
+ * a file or directory already reached by another path, or a link cycle, is skipped, and a dangling
+ * link is ignored.
+ */
+export async function collectTestsUnder(root: string, baseDir: string, cwd = root): Promise<string[]> {
+	const ignore = await bunTestIgnorePatterns(cwd);
+	const ignored = (file: string) => {
+		const relative = path.relative(cwd, file).split(path.sep).join("/");
+		return ignore.some(glob => glob.match(relative));
+	};
+	const seen = new Set<string>();
+	const walk = async (dir: string): Promise<string[]> => {
+		const realDir = await fs.realpath(dir);
+		if (seen.has(realDir)) return [];
+		seen.add(realDir);
+		const entries = await fs.readdir(dir, { withFileTypes: true });
+		const files: string[] = [];
+		for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+			const filePath = path.join(dir, entry.name);
+			let isDirectory = entry.isDirectory();
+			let isFile = entry.isFile();
+			if (entry.isSymbolicLink()) {
+				const target = await fs.stat(filePath).catch(() => null);
+				if (!target) continue;
+				isDirectory = target.isDirectory();
+				isFile = target.isFile();
+			}
+			if (isDirectory) {
+				if (entry.name === "node_modules" || entry.name.startsWith(".")) continue;
+				files.push(...(await walk(filePath)));
+				continue;
+			}
+			if (!isFile || !testFilePattern.test(entry.name) || ignored(filePath)) continue;
+			const realFile = await fs.realpath(filePath);
+			if (seen.has(realFile)) continue;
+			seen.add(realFile);
+			files.push(path.relative(baseDir, filePath).split(path.sep).join("/"));
+		}
+		return files;
+	};
+	return walk(root);
 }
 
 /**
@@ -65,31 +91,54 @@ export async function workspacePackageDirs(repoRoot: string): Promise<string[]> 
 	return dirs.sort();
 }
 
+/** A path CI's commands cover, and the directory the covering `bun test` runs in (both relative to the repository). */
+export interface BucketEntry {
+	path: string;
+	cwd: string;
+}
+
 /** What CI runs: test files it names, and directories in which it runs every test `bun test` finds. */
 export interface Buckets {
-	files: string[];
-	dirs: string[];
+	files: BucketEntry[];
+	dirs: BucketEntry[];
 }
 
 /**
  * The test files below `roots` (paths relative to `repoRoot`) that no bucket runs. A file is run when
- * a bucket names it or it lies below a bucketed directory by its own spelling, or when its real path
- * is the real path of a file a bucket runs: a link to a test CI runs is the same test. A link to a
- * file a bucketed directory holds but `bun test` there would not run (not a test name, or in
- * `node_modules` or a dot-directory) is not covered.
+ * its own path or its real path is that of a file a bucket command runs: a file it names, or a file
+ * `bun test` finds below a bucketed directory, both as `bun test` selects them in the command's
+ * working directory (its `bunfig.toml` ignores included). A link to a test CI runs is the same test;
+ * a link to a file the command skips is not covered.
  */
 export async function testFilesWithoutBucket(repoRoot: string, roots: string[], buckets: Buckets): Promise<string[]> {
 	const real = (file: string) => fs.realpath(path.join(repoRoot, file)).catch(() => undefined);
-	const run = new Set<string | undefined>(await Promise.all(buckets.files.map(real)));
-	for (const dir of buckets.dirs) {
-		const files = await collectTestsUnder(path.join(repoRoot, dir), repoRoot).catch(() => []);
-		for (const file of await Promise.all(files.map(real))) run.add(file);
+	const spelled = new Set<string>();
+	const realRun = new Set<string>();
+	const add = async (file: string) => {
+		spelled.add(file);
+		const realFile = await real(file);
+		if (realFile) realRun.add(realFile);
+	};
+	for (const entry of buckets.files) {
+		const cwd = path.join(repoRoot, entry.cwd);
+		const ignore = await bunTestIgnorePatterns(cwd);
+		const relative = path.relative(cwd, path.join(repoRoot, entry.path)).split(path.sep).join("/");
+		if (!ignore.some(glob => glob.match(relative))) await add(entry.path);
+	}
+	for (const entry of buckets.dirs) {
+		const files = await collectTestsUnder(
+			path.join(repoRoot, entry.path),
+			repoRoot,
+			path.join(repoRoot, entry.cwd),
+		).catch(() => []);
+		for (const file of files) await add(file);
 	}
 	const missing: string[] = [];
 	for (const root of roots) {
-		for (const file of await collectTestsUnder(path.join(repoRoot, root), repoRoot)) {
-			if (buckets.files.includes(file) || buckets.dirs.some(dir => file.startsWith(`${dir}/`))) continue;
-			if (run.has(await real(file))) continue;
+		for (const file of await collectTestsUnder(path.join(repoRoot, root), repoRoot, path.join(repoRoot, root))) {
+			if (spelled.has(file)) continue;
+			const realFile = await real(file);
+			if (realFile && realRun.has(realFile)) continue;
 			missing.push(file);
 		}
 	}
