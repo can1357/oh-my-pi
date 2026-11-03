@@ -3305,6 +3305,10 @@ export async function restoreArchivedSession(
 	try {
 		return await withGcLock(dir, () => restoreArchivedSessionLocked(archiveFile, dir, undefined, progress), {
 			waitMs: 30_000,
+			// Said where the restore's own progress is said: the session is
+			// whole, and a lock left behind blocks only later gc runs.
+			onReleaseFailure: note =>
+				progress?.(`The session came back, but this process could not remove its gc lock: ${note}`),
 		});
 	} catch (error) {
 		if (error instanceof Error && error.message.startsWith("GC already running")) {

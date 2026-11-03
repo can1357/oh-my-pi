@@ -341,6 +341,12 @@ export interface GcResult {
 	compress?: CompressGcResult;
 	wal?: WalGcResult;
 	lockPath: string;
+	/**
+	 * What this run could not remove of its own gc locks: left behind, a lock
+	 * names this process, and every later run while it lives reads it as
+	 * held. Also in the errors {@link collectGcErrors} gathers.
+	 */
+	lockNotReleased?: string[];
 }
 
 interface BlobCandidate {
@@ -526,6 +532,7 @@ export function collectGcErrors(result: GcResult): string[] {
 		...(result.restore?.errors ?? []).map(error => `restore: ${error}`),
 		...(result.reclaim?.errors ?? []).map(error => `reclaim: ${error}`),
 		...(result.compress?.errors ?? []).map(error => `compress: ${error}`),
+		...(result.lockNotReleased ?? []).map(note => `lock: ${note}`),
 	];
 }
 
@@ -3427,6 +3434,7 @@ export function renderText(result: GcResult): string {
 		const state = result.wal.checkpointed ? "checkpointed" : "checkpoint dry-run";
 		lines.push(`wal: ${state}, ${formatBytes(result.wal.walBytes)} across ${result.wal.databases.length} dbs`);
 	}
+	for (const note of result.lockNotReleased ?? []) lines.push(`gc lock left behind: ${note}`);
 	return `${lines.join("\n")}\n`;
 }
 
@@ -4100,8 +4108,8 @@ export async function runGcCommand(args: GcCommandArgs): Promise<GcResult> {
 			next.restore = await runRestoreGc(options, options.restoreTarget);
 			return next;
 		}
-		// Reclaiming runs alone too: it is the one phase that deletes a live
-		// session, and no sweep may race it.
+		// Reclaiming runs alone too: it is the one phase that moves a live
+		// session out of the sessions tree, and no sweep may race it.
 		if (options.reclaimTarget !== undefined) {
 			next.reclaim = await runReclaimGc(options, options.reclaimTarget);
 			return next;
@@ -4114,7 +4122,11 @@ export async function runGcCommand(args: GcCommandArgs): Promise<GcResult> {
 		if (options.runWal) next.wal = await runWalGc(options);
 		return next;
 	};
-	const result = options.apply ? await withGcLock(options.agentDir, run) : await withoutGcLock(options.agentDir, run);
+	const lockNotReleased: string[] = [];
+	const result = options.apply
+		? await withGcLock(options.agentDir, run, { onReleaseFailure: note => lockNotReleased.push(note) })
+		: await withoutGcLock(options.agentDir, run);
+	if (lockNotReleased.length > 0) result.lockNotReleased = lockNotReleased;
 
 	const output = options.json ? `${JSON.stringify(result, null, 2)}\n` : renderText(result);
 	process.stdout.write(output);

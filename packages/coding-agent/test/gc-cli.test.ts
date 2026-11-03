@@ -10,7 +10,7 @@ import {
 	GC_AUTO_COMPRESS_LOG,
 	scheduleGcAutoCompress,
 } from "@oh-my-pi/pi-coding-agent/cli/gc-auto-compress";
-import { type GcResult, runGcCommand } from "@oh-my-pi/pi-coding-agent/cli/gc-cli";
+import { collectGcErrors, type GcResult, runGcCommand } from "@oh-my-pi/pi-coding-agent/cli/gc-cli";
 import * as gcCompress from "@oh-my-pi/pi-coding-agent/cli/gc-compress";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
@@ -1376,6 +1376,66 @@ describe("runGcCommand lock handling", () => {
 		);
 		expect(await Bun.file(lockPath).exists()).toBe(true);
 		expect(await Bun.file(breakerPath).exists()).toBe(true);
+	});
+
+	// A lock left by a run that is gone, which cannot be removed, is not a
+	// running gc: a review failed its removal with `EIO`, and made the lock's
+	// directory read-only, and every command said "GC already running" with
+	// the holder dead.
+	for (const how of ["its removal fails with EIO", "its directory is read-only"] as const) {
+		test(`a stale gc lock that cannot be removed because ${how} is reported as that, not as a running gc`, async () => {
+			const lockPath = path.join(root, "gc.lock");
+			await leaveDeadGcLock(root);
+			const left = await Bun.file(lockPath).text();
+			const realUnlink = fs.unlink;
+			if (how === "its removal fails with EIO") {
+				spyOn(fs, "unlink").mockImplementation(async file => {
+					if (String(file) === lockPath)
+						throw Object.assign(new Error("EIO: injected lock removal"), { code: "EIO" });
+					return await realUnlink(file);
+				});
+			} else {
+				await fs.chmod(root, 0o500);
+			}
+			try {
+				const refused = runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+				// A read-only directory refuses the breaker lock before the stale
+				// one is reached: the refusal names that, as it came.
+				await expect(refused).rejects.toThrow(
+					how === "its removal fails with EIO"
+						? "was left by a gc run that is no longer running, and it could not be removed (EIO: injected lock removal)"
+						: "EACCES",
+				);
+				await expect(refused).rejects.not.toThrow("GC already running");
+				expect(await Bun.file(lockPath).text()).toBe(left);
+			} finally {
+				mock.restore();
+				await fs.chmod(root, 0o700);
+			}
+		});
+	}
+
+	// A completed run that cannot remove its own lock says so: left behind,
+	// the lock names this process, and the next command refuses. A review
+	// saw a completed archive report no errors and leave it.
+	test("a run that cannot remove its own gc lock reports it in its result", async () => {
+		const lockPath = path.join(root, "gc.lock");
+		const realUnlink = fs.unlink;
+		spyOn(fs, "unlink").mockImplementation(async file => {
+			if (String(file) === lockPath) throw Object.assign(new Error("EIO: injected lock release"), { code: "EIO" });
+			return await realUnlink(file);
+		});
+		try {
+			const result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true, json: true } });
+			mock.restore();
+
+			expect(result.lockNotReleased?.join("\n")).toContain("EIO: injected lock release");
+			expect(collectGcErrors(result).join("\n")).toContain("lock: ");
+			expect(await Bun.file(lockPath).exists()).toBe(true);
+		} finally {
+			mock.restore();
+			await fs.rm(lockPath, { force: true });
+		}
 	});
 });
 
