@@ -12922,7 +12922,7 @@ export class AgentSession implements SettingsScope {
 					break;
 				}
 				if (event.type === "error") {
-					throw new Error(event.error.errorMessage || "Ephemeral turn failed");
+					throw new Error(AIError.errorDisplayText(event.error) || "Ephemeral turn failed");
 				}
 			}
 		} catch (error) {

@@ -170,7 +170,7 @@ const CREDIT_BALANCE_STREAM_ERROR_PREFIX = `Anthropic stream error (invalid_requ
 // wait at least 5 minutes. The 30 s floor is a heuristic from two observed
 // outages, not a measured maximum outage. Up to 7.5 s of jitter on top keeps
 // sessions that failed together from retrying at the same instant.
-const CREDIT_BALANCE_BACKOFF_MS = 30 * 1000;
+export const CREDIT_BALANCE_BACKOFF_MS = 30 * 1000;
 const CREDIT_BALANCE_JITTER_MS = 7.5 * 1000;
 
 /**

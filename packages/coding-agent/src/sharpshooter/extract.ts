@@ -1,4 +1,5 @@
 import { type } from "@oh-my-pi/omptype";
+import { errorDisplayText } from "@oh-my-pi/pi-ai/error";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { completeSimple, Effort, type Model, retryTransientCompletion } from "@oh-my-pi/pi-ai";
 import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
@@ -256,7 +257,7 @@ async function runSharpshooterExtraction(
 		{ provider: model.provider },
 	);
 	if (response.stopReason === "error") {
-		throw new Error(response.errorMessage || "Sharpshooter extraction model error");
+		throw new Error(errorDisplayText(response) || "Sharpshooter extraction model error");
 	}
 
 	for (const block of response.content) {

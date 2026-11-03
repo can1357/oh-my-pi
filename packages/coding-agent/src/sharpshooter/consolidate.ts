@@ -1,4 +1,5 @@
 import * as fs from "node:fs/promises";
+import { errorDisplayText } from "@oh-my-pi/pi-ai/error";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { completeSimple, Effort, retryTransientCompletion } from "@oh-my-pi/pi-ai";
@@ -175,7 +176,7 @@ async function consolidateLocked(
 			{ provider: model.provider },
 		);
 		if (response.stopReason === "error") {
-			throw new Error(response.errorMessage || "sharpshooter consolidation model error");
+			throw new Error(errorDisplayText(response) || "sharpshooter consolidation model error");
 		}
 
 		const files = parseReplacementFiles(response.content, currentFiles);

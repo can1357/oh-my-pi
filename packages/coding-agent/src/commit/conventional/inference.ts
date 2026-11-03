@@ -1,6 +1,7 @@
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Api, ApiKey, AuthStorage, Model } from "@oh-my-pi/pi-ai";
 import { completeSimple } from "@oh-my-pi/pi-ai";
+import { errorDisplayText } from "@oh-my-pi/pi-ai/error";
 import { toError } from "@oh-my-pi/pi-utils";
 import { toReasoningEffort } from "@oh-my-pi/pi-tui/thinking";
 import type { ResolvedCommitModel } from "../model-selection";
@@ -133,7 +134,7 @@ export class OmpCommitInference implements CommitInference {
 					},
 				);
 				responseText = extractTextContent(message);
-				if (message.stopReason === "error") throw new Error(message.errorMessage ?? "Provider error");
+				if (message.stopReason === "error") throw new Error(errorDisplayText(message) ?? "Provider error");
 				if (!responseText.trim()) throw new Error("Empty model response");
 				const raw = { text: responseText, stopReason: message.stopReason };
 				const parsed = parse(raw);

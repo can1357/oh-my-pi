@@ -1,4 +1,5 @@
 import { Database, type Statement } from "bun:sqlite";
+import { errorDisplayText } from "@oh-my-pi/pi-ai/error";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { type AgentTelemetry, instrumentedCompleteSimple } from "@oh-my-pi/pi-agent-core";
@@ -113,7 +114,7 @@ export function createSkillDescriptionCompressor(
 				throw new SkillDescriptionLengthError("Model stopped: length");
 			}
 			if (response.stopReason !== "stop") {
-				throw new Error(`Model stopped: ${response.stopReason} ${response.errorMessage ?? ""}`);
+				throw new Error(`Model stopped: ${response.stopReason} ${errorDisplayText(response) ?? ""}`);
 			}
 			return response.content
 				.filter(block => block.type === "text")

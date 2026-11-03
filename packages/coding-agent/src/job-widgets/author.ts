@@ -4,6 +4,7 @@
  * schema, fed the job's brief and redacted output samples.
  */
 import { type AgentTelemetryConfig, instrumentedCompleteSimple, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
+import { errorDisplayText } from "@oh-my-pi/pi-ai/error";
 import type { Api, AssistantMessage, Model, UserMessage } from "@oh-my-pi/pi-ai";
 import { markPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { roleDefaultModels } from "@oh-my-pi/pi-catalog/compat/behavior";
@@ -243,7 +244,7 @@ export function createModelJobWidgetAuthor(options: ModelJobWidgetAuthorOptions)
 		costGate?.record(response.usage.cost.total);
 		options.onUsage?.(response);
 		if (response.stopReason === "error" || response.stopReason === "aborted") {
-			throw new Error(response.errorMessage ?? `widget spec request ${response.stopReason}`);
+			throw new Error(errorDisplayText(response) ?? `widget spec request ${response.stopReason}`);
 		}
 		const call = extractToolCall(response, RESPOND_TOOL);
 		if (call) return call.arguments;

@@ -2968,6 +2968,7 @@ export class TurnRecovery {
 			return maxDelayMs > 0 && waitMs > maxDelayMs && !waitForUsageReset;
 		};
 
+		const creditBalanceRejection = AIError.isCreditBalanceTooLow(message.errorStatus, errorMessage);
 		if (!staleOpenAIResponsesReplayError && !switchedCredential && currentSelector) {
 			// The retry budget bounds same-model retries against a failing provider. A
 			// classifier refusal is not that: retrying the same model reproduces it, and
@@ -3026,9 +3027,14 @@ export class TurnRecovery {
 							!this.isRetryableError(message)
 						) &&
 						!exceedsDelayCap(
-							usageLimitWaitMs === undefined && parsedRetryAfterMs && parsedRetryAfterMs > delayMs
-								? parsedRetryAfterMs
-								: delayMs,
+							Math.max(
+								usageLimitWaitMs === undefined && parsedRetryAfterMs && parsedRetryAfterMs > delayMs
+									? parsedRetryAfterMs
+									: delayMs,
+								// The credit wait below never drops under its floor, so a cap
+								// below it ends the turn: defer no fallback for that retry.
+								creditBalanceRejection ? AIError.CREDIT_BALANCE_BACKOFF_MS : 0,
+							),
 						),
 				});
 			}
@@ -3049,8 +3055,11 @@ export class TurnRecovery {
 		// An empty prepaid balance lifts within minutes: wait at least 30 seconds
 		// and add jitter after any provider hint has selected the effective
 		// minimum. A fallback changes models immediately and skips this wait.
-		if (!switchedModel && AIError.isCreditBalanceTooLow(message.errorStatus, errorMessage)) {
-			delayMs = calculateCreditBalanceBackoffMs(Math.max(delayMs, 30_000), retrySettings.maxDelayMs);
+		if (!switchedModel && creditBalanceRejection) {
+			delayMs = calculateCreditBalanceBackoffMs(
+				Math.max(delayMs, AIError.CREDIT_BALANCE_BACKOFF_MS),
+				retrySettings.maxDelayMs,
+			);
 		}
 
 		if (retryBudgetExhausted) {

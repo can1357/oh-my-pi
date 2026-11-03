@@ -1,4 +1,5 @@
 import { instrumentedCompleteSimple, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
+import { errorDisplayText } from "@oh-my-pi/pi-ai/error";
 import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
 import { type Api, type AssistantMessage, completeSimple, type Model, type Usage } from "@oh-my-pi/pi-ai";
 import { prompt } from "@oh-my-pi/pi-utils";
@@ -168,7 +169,7 @@ export async function askImageQuestion(
 	}
 
 	if (response.stopReason === "error") {
-		throw new ToolError(response.errorMessage ?? "Image question request failed.");
+		throw new ToolError(errorDisplayText(response) ?? "Image question request failed.");
 	}
 	if (response.stopReason === "aborted") {
 		if (timedOut()) throw new ToolError(formatTimeoutMessage());

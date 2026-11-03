@@ -1,4 +1,5 @@
 import type { Database } from "bun:sqlite";
+import { errorDisplayText } from "@oh-my-pi/pi-ai/error";
 import type * as fsNode from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
@@ -1058,7 +1059,7 @@ async function runConsolidationModel(options: {
 		{ provider: model.provider, maxAttempts: model.api === "openai-completions" ? 1 : undefined },
 	);
 	if (response.stopReason === "error") {
-		throw new Error(response.errorMessage || "phase2 model error");
+		throw new Error(errorDisplayText(response) || "phase2 model error");
 	}
 	const text = response.content
 		.filter((c): c is { type: "text"; text: string } => c.type === "text")
