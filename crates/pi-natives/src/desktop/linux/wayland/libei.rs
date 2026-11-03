@@ -907,9 +907,9 @@ fn plan_typing(
 
 /// Packs whole graphemes into `ei_text.utf8` payloads, splitting a grapheme at
 /// character boundaries only when it exceeds the per-request limit.
-/// Control characters are refused: committed text is no key press, so a line break
-/// never submits and a tab never moves focus, and Kate dropped a commit that
-/// began with a line break.
+/// Control characters are refused: committed text is no key press, so a line
+/// break never submits and a tab never moves focus, and Kate dropped a commit
+/// that began with a line break.
 fn text_runs(text: &str) -> CoreResult<Vec<String>> {
 	let mut runs: Vec<String> = Vec::new();
 	let mut append = |part: &str| match runs.last_mut() {
@@ -1277,11 +1277,11 @@ mod tests {
 			runs:   vec!["日".repeat(84), "日".repeat(16)],
 		});
 		for grapheme in ["e\u{301}", "👩‍💻", "🇫🇷"] {
-			let prefix = "a".repeat(EI_TEXT_UTF8_MAX - 1);
-			assert_eq!(
-				text_runs(&format!("{prefix}{grapheme}")).unwrap(),
-				vec![prefix, grapheme.to_owned()]
-			);
+			let prefix = "a".repeat(EI_TEXT_UTF8_MAX - grapheme.chars().next().unwrap().len_utf8());
+			assert_eq!(text_runs(&format!("{prefix}{grapheme}")).unwrap(), vec![
+				prefix,
+				grapheme.to_owned()
+			]);
 		}
 		let oversized = format!("e{}", "\u{301}".repeat(EI_TEXT_UTF8_MAX));
 		let runs = text_runs(&oversized).unwrap();
