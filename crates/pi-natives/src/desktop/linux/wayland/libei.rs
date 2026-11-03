@@ -25,6 +25,9 @@ use crate::desktop::{
 
 const DEVICE_DISCOVERY_DRAIN_TIMEOUT: Duration = Duration::from_millis(500);
 const DRAG_STEP_DELAY: Duration = Duration::from_millis(8);
+/// How long before the run's end an unanswered permission prompt is given up,
+/// leaving time to close the portal session and answer the caller.
+const CONSENT_MARGIN: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Copy)]
 struct DiscoveryTargets {
@@ -115,6 +118,28 @@ pub(super) async fn cancellable<T>(future: impl Future<Output = T>) -> CoreResul
 	}
 }
 
+/// Bounds a wait on a portal permission dialog by the current operation's
+/// deadline (the run's end or the caller's reply timeout). GNOME can open the
+/// dialog behind other windows; unbounded, the call outlives its run and the
+/// next run meets a second dialog.
+pub(super) async fn until_deadline<T>(
+	prompt: &str,
+	future: impl Future<Output = T>,
+) -> CoreResult<T> {
+	let Some(deadline) = control::current_token().and_then(|token| token.deadline()) else {
+		return Ok(future.await);
+	};
+	let give_up = deadline.checked_sub(CONSENT_MARGIN).unwrap_or(deadline);
+	tokio::time::timeout_at(give_up.into(), future)
+		.await
+		.map_err(|_| {
+			DesktopError::timeout(format!(
+				"the {prompt} permission dialog was not answered before the run's deadline, so it was \
+				 closed; it can open behind other windows. Retry and answer it"
+			))
+		})
+}
+
 fn pace_drag(
 	path: &[(f64, f64)],
 	mut send_motion: impl FnMut(f64, f64) -> CoreResult<()>,
@@ -190,7 +215,7 @@ impl Libei {
 			let session = cancellable(portal.create_session()).await?.map_err(|err| {
 				DesktopError::permission_denied(format!("RemoteDesktop CreateSession: {err}"))
 			})?;
-			let fd = cancellable(async {
+			let fd = cancellable(until_deadline("RemoteDesktop", async {
 				portal
 					.select_devices(
 						&session,
@@ -216,8 +241,9 @@ impl Libei {
 					.await
 					.map(|fd| (fd, targets))
 					.map_err(|err| format!("RemoteDesktop ConnectToEIS: {err}"))
-			})
+			}))
 			.await
+			.and_then(|bounded| bounded)
 			.and_then(|result| result.map_err(DesktopError::permission_denied));
 			match fd {
 				Ok((fd, targets)) => Ok((fd, session, targets)),
@@ -1030,6 +1056,33 @@ mod tests {
 		});
 		assert!(result.is_err());
 		assert_eq!(starts, 1);
+	}
+
+	#[test]
+	fn an_unanswered_permission_dialog_is_given_up_before_the_run_ends() {
+		let runtime = tokio::runtime::Builder::new_current_thread()
+			.enable_time()
+			.build()
+			.unwrap();
+		let source = control::CancellationSource::default();
+		let run_end = std::time::Instant::now() + Duration::from_millis(700);
+		source.set_deadline(Some(run_end));
+		let token = source.token();
+		let result = control::with_token_for_test(&token, || {
+			runtime.block_on(until_deadline("RemoteDesktop", std::future::pending::<()>()))
+		});
+		let error = result.unwrap_err();
+		assert_eq!(error.code.as_str(), "Timeout");
+		assert!(error.message.contains("RemoteDesktop permission dialog"), "{}", error.message);
+		assert!(
+			std::time::Instant::now() + CONSENT_MARGIN / 2 <= run_end,
+			"the wait must end before the run does"
+		);
+
+		let answered = control::with_token_for_test(&token, || {
+			runtime.block_on(until_deadline("RemoteDesktop", async { 7 }))
+		});
+		assert_eq!(answered.unwrap(), 7);
 	}
 
 	#[test]
