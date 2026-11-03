@@ -293,20 +293,24 @@ pub(crate) struct CommandWords {
 	pub chdir:       Option<String>,
 }
 
+/// A variable whose value cannot be known before `env` runs: an
+/// `--env0-from` stream may have set it.
+#[cfg(feature = "util.timeout")]
+pub(crate) struct UnknownVariable;
+
 /// The command `env` runs for `argv` (its own name first): `-S` strings
 /// split (`${VARNAME}` from `lookup`, the environment `env` receives), then
 /// the words after the options, a leading `-` and the `NAME=VALUE`
 /// assignments. `None` when it runs none: it prints the environment, refuses
 /// its arguments, never stops splitting, is still splitting at `deadline`
 /// (when GNU `env`, which does at least as much work per round, would be too,
-/// and dies of the limit's signal), or splits a `${VARNAME}` while the
-/// environment it receives is not `known` (an earlier `--env0-from -`).
+/// and dies of the limit's signal), or splits a `${VARNAME}` whose value is
+/// unknown.
 #[cfg(feature = "util.timeout")]
 pub(crate) fn command_words(
 	argv: &[String],
-	known: bool,
 	deadline: Option<std::time::Instant>,
-	mut lookup: impl FnMut(&str) -> Option<String>,
+	mut lookup: impl FnMut(&str) -> Result<Option<String>, UnknownVariable>,
 ) -> Option<CommandWords> {
 	/// An argument list past this many bytes cannot be exec'd on Linux
 	/// (`ARG_MAX` with the default stack limit), so `env` runs no command.
@@ -336,10 +340,19 @@ pub(crate) fn command_words(
 				if deadline.is_some_and(|at| std::time::Instant::now() >= at) {
 					return None;
 				}
-				let mut names_variable = false;
-				let words =
-					split_string(&split.string, &mut lookup, |_, _| names_variable = true).ok()?;
-				if names_variable && !known {
+				let mut unknown = false;
+				let words = split_string(
+					&split.string,
+					|name| {
+						lookup(name).unwrap_or_else(|UnknownVariable| {
+							unknown = true;
+							None
+						})
+					},
+					|_, _| {},
+				)
+				.ok()?;
+				if unknown {
 					return None;
 				}
 				let (index, resume_debug) = (split.index, split.debug);

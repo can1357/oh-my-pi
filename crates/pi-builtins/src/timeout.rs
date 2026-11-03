@@ -345,31 +345,41 @@ enum Env0File {
 	allow(dead_code, reason = "only a nested `env` reads the environment and its files")
 )]
 struct Follow<'a> {
-	/// The environment's entries as `env` keeps them (a lookup takes the
-	/// first entry of a name, as `getenv` does), or `None` once an
-	/// `--env0-from` stream makes them unknowable (`env` reads it when it
-	/// starts).
-	environment: Option<Vec<Vec<u8>>>,
+	/// The known entries of the environment the next `env` receives (a
+	/// lookup takes the first entry of a name, as `getenv` does).
+	environment:  Vec<Vec<u8>>,
+	/// Names known to be unset while `unknown_rest` holds.
+	absent:       Vec<String>,
+	/// Whether a variable neither in `environment` nor in `absent` is
+	/// unknown: an `--env0-from` stream may have set it, which `env` reads
+	/// only when it starts.
+	unknown_rest: bool,
 	/// The directory the next command runs in, which an `env -C` changes.
-	directory:   PathBuf,
+	directory:    PathBuf,
 	/// `--env0-from` files by absolute path.
-	files:       &'a HashMap<PathBuf, Env0File>,
+	files:        &'a HashMap<PathBuf, Env0File>,
 	/// A file not yet in `files` that the classification needs.
-	missing:     Option<PathBuf>,
-	inner:       Vec<InnerTimeout>,
+	missing:      Option<PathBuf>,
+	inner:        Vec<InnerTimeout>,
 	/// When the limit fires: classification still under way then stops, as
 	/// GNU `env` still splitting then dies of the signal.
-	deadline:    Option<std::time::Instant>,
+	deadline:     Option<std::time::Instant>,
 }
 
 impl Follow<'_> {
-	/// The value of `name` in the environment the next `env` receives.
+	/// The value of `name` in the environment the next `env` receives:
+	/// `None` when it is unset, an error when a stream may have set it.
 	#[cfg(feature = "util.env")]
-	fn lookup(&self, name: &str) -> Option<String> {
-		self.environment.as_ref()?.iter().find_map(|entry| {
+	fn lookup(&self, name: &str) -> Result<Option<String>, crate::env::UnknownVariable> {
+		let known = self.environment.iter().find_map(|entry| {
 			let value = entry.strip_prefix(name.as_bytes())?.strip_prefix(b"=")?;
 			Some(String::from_utf8_lossy(value).into_owned())
-		})
+		});
+		match known {
+			Some(value) => Ok(Some(value)),
+			None if !self.unknown_rest || self.absent.iter().any(|absent| absent == name) => Ok(None),
+			None => Err(crate::env::UnknownVariable),
+		}
 	}
 
 	/// Applies what an `env` does to the environment it passes on, as `env`
@@ -378,12 +388,14 @@ impl Follow<'_> {
 	/// or the classification needs a file not read yet.
 	#[cfg(feature = "util.env")]
 	fn apply(&mut self, command: &crate::env::CommandWords) -> Option<()> {
-		// `env` reads its file before it changes directory for its command.
+		// `env` reads its file in the directory it runs in, before it
+		// changes directory for its command, and resolves the name as the
+		// shell does.
 		let env0 = match command.env0_from.as_deref() {
 			None => Some(None),
 			Some("-") => None,
 			Some(file) => {
-				let path = self.directory.join(file);
+				let path = pi_vfs::absolute_path(&self.directory, Path::new(file));
 				match self.files.get(&path) {
 					Some(Env0File::Data(data)) => Some(Some(data.as_slice())),
 					Some(Env0File::Unreadable) => return None,
@@ -395,37 +407,41 @@ impl Follow<'_> {
 				}
 			},
 		};
-		self.environment = match env0 {
-			// A stream: what it holds stays unknown, though `env` still
-			// refuses a bad unset name.
+		match env0 {
+			// A stream may set any variable, those known before too. `env`
+			// then unsets and assigns as usual, and those names are known.
 			None => {
-				crate::env::passed_environment(Vec::new(), command, Some(&[]))?;
-				None
+				self.environment = crate::env::passed_environment(Vec::new(), command, Some(&[]))?;
+				self.absent.clone_from(&command.unset);
+				self.unknown_rest = true;
 			},
 			Some(env0) => {
 				// The next `env` sees one value per name, the first that has
 				// one: an entry without `=` holds no variable (`getenv` skips
 				// it), so it hides no later assignment.
-				let known = self.environment.take();
 				let mut initial: Vec<Vec<u8>> = Vec::new();
-				for entry in known.iter().flatten() {
+				for entry in self.environment.drain(..) {
 					let Some(equals) = entry.iter().position(|&byte| byte == b'=') else {
 						continue;
 					};
-					let name = &entry[..=equals];
-					if !initial.iter().any(|kept| kept.starts_with(name)) {
-						initial.push(entry.clone());
+					if !initial.iter().any(|kept| kept.starts_with(&entry[..=equals])) {
+						initial.push(entry);
 					}
 				}
-				// Built even when the environment is unknown: `env` refuses an
-				// unterminated file or a bad unset name either way. `-i` drops
-				// what `env` received, so its own entries are known again.
-				let passed = crate::env::passed_environment(initial, command, env0)?;
-				(known.is_some() || command.clear_env).then_some(passed)
+				self.environment = crate::env::passed_environment(initial, command, env0)?;
+				if command.clear_env {
+					// `-i` drops what `env` received, so all is known again.
+					self.absent.clear();
+					self.unknown_rest = false;
+				} else if self.unknown_rest {
+					self.absent.extend(command.unset.iter().cloned());
+				}
 			},
-		};
+		}
+		// The shell checks the directory as spelled and keeps it normalized
+		// lexically, without resolving symbolic links (a logical `cd`).
 		if let Some(directory) = &command.chdir {
-			self.directory = self.directory.join(directory);
+			self.directory = pi_vfs::normalize_lexically(&pi_vfs::absolute_path(&self.directory, Path::new(directory)));
 		}
 		Some(())
 	}
@@ -639,16 +655,16 @@ async fn classify_operand<SE: brush_core::ShellExtensions>(
 	let mut files = HashMap::new();
 	loop {
 		let mut follow = Follow {
-			environment: Some(
-				crate::host::exported_env(shell)
-					.into_iter()
-					.map(|(name, value)| format!("{name}={value}").into_bytes())
-					.collect(),
-			),
-			directory:   shell.working_dir().to_path_buf(),
-			files:       &files,
-			missing:     None,
-			inner:       Vec::new(),
+			environment:  crate::host::exported_env(shell)
+				.into_iter()
+				.map(|(name, value)| format!("{name}={value}").into_bytes())
+				.collect(),
+			absent:       Vec::new(),
+			unknown_rest: false,
+			directory:    shell.working_dir().to_path_buf(),
+			files:        &files,
+			missing:      None,
+			inner:        Vec::new(),
 			deadline,
 		};
 		let operand = classify_line(shell, words, &[], &mut follow);
@@ -864,10 +880,7 @@ fn handoff(words: &[String], follow: &Follow<'_>) -> Option<Handoff> {
 			.then_some(Handoff::Simple(command.command_and_args))
 		},
 		#[cfg(feature = "util.env")]
-		"env" => crate::env::command_words(words, follow.environment.is_some(), follow.deadline, |name| {
-			follow.lookup(name)
-		})
-		.map(Handoff::Environment),
+		"env" => crate::env::command_words(words, follow.deadline, |name| follow.lookup(name)).map(Handoff::Environment),
 		#[cfg(feature = "util.nohup")]
 		"nohup" => <crate::nohup::NohupCommand as builtins::Command>::new(words.iter().cloned())
 			.ok()?
@@ -2529,9 +2542,33 @@ f() { /bin/sh -c "$r" | /bin/sh -c "$r; cat"; }
 				3,
 				"",
 			),
+			(
+				"E10",
+				r#"printf 'IGNORED=x\0' | timeout --preserve-status -k 3 1 env --env0-from=- env P=/bin/sh env -S '${P} -c "trap \"exit 3\" TERM; /bin/sleep 3"'"#,
+				3,
+				"",
+			),
 		])
 		.await;
 		assert!(wrong.is_empty(), "{wrong:#?}");
+	}
+
+	/// An `env -C` directory is the one the shell then runs in: checked as
+	/// spelled and kept normalized lexically, without resolving symbolic links
+	/// (a logical `cd`). So after `env -C a/link env -C ..`, where `a/link`
+	/// points to `../b/c`, the next `env --env0-from=f` reads `a/f`, and the
+	/// classifier must read that file too. Here `a/f` names the program, whose
+	/// TERM handler exits 3; `b/f`, which a physical `..` reaches, names
+	/// `eval`. GNU `env` resolves `..` physically, so it has no matching row:
+	/// this asserts that the classification agrees with what the operand runs.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn env_minus_c_resolves_the_directory_as_the_shell_does() {
+		let (status, stdout) = run_row(
+			r#"mkdir -p a b/c; ln -s ../b/c a/link; printf 'P=/bin/sh\0' >a/f; printf 'P=eval\0' >b/f; timeout --preserve-status -k 3 1 env -C a/link env -C .. env --env0-from=f env -S '${P} -c "trap \"exit 3\" TERM; /bin/sleep 3"'"#,
+		)
+		.await;
+		assert_eq!((status, stdout.as_str()), (3, ""), "the classifier read a different file than the operand");
 	}
 
 	/// The limit's signal ends an in-process operand only when it would end
