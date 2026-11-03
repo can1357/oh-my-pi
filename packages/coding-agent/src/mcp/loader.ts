@@ -5,7 +5,7 @@
  */
 import { logger } from "@oh-my-pi/pi-utils";
 import type { LoadedCustomTool } from "../extensibility/custom-tools/types";
-import { AgentStorage } from "../session/agent-storage";
+import { AgentStorage, type AgentStorageApi } from "../session/agent-storage";
 import type { AuthStorage } from "../session/auth-storage";
 import { type MCPLoadResult, MCPManager } from "./manager";
 import type { McpConnectionStatusEvent } from "./startup-events";
@@ -38,12 +38,12 @@ export interface MCPToolsLoadOptions {
 	/** Whether to filter out browser MCP servers when the built-in browser capability is enabled (default: false) */
 	filterBrowser?: boolean;
 	/** SQLite storage for MCP tool cache (null disables cache) */
-	cacheStorage?: AgentStorage | null;
+	cacheStorage?: AgentStorageApi | null;
 	/** Auth storage used to resolve OAuth credentials before initial MCP connect */
 	authStorage?: AuthStorage;
 }
 
-async function resolveToolCache(storage: AgentStorage | null | undefined): Promise<MCPToolCache | null> {
+async function resolveToolCache(storage: AgentStorageApi | null | undefined): Promise<MCPToolCache | null> {
 	if (storage === null) return null;
 	try {
 		const resolved = storage ?? (await AgentStorage.open());
