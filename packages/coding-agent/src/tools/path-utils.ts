@@ -1038,12 +1038,15 @@ function findCommonBasePath(paths: string[]): string {
 	return joined || path.parse(path.resolve(paths[0])).root;
 }
 
-function toScopeDisplay(items: string[], cwd: string): string {
+/** Scope paths as shown to the caller: each item under its `displayNames` entry when it has one. */
+function toScopeDisplay(items: string[], cwd: string, displayNames?: ReadonlyMap<string, string>): string {
 	return items
-		.map(item =>
-			formatPathRelativeToCwd(item, cwd, {
-				trailingSlash: item.endsWith("/") || item.endsWith("\\"),
-			}),
+		.map(
+			item =>
+				displayNames?.get(item) ??
+				formatPathRelativeToCwd(item, cwd, {
+					trailingSlash: item.endsWith("/") || item.endsWith("\\"),
+				}),
 		)
 		.join(", ");
 }
@@ -1054,6 +1057,7 @@ async function resolveSearchPathItems(
 	filesystem: InternalUrlFilesystem,
 	suffixGlob?: string,
 	fanOutFileItems = false,
+	displayNames?: ReadonlyMap<string, string>,
 ): Promise<ResolvedMultiSearchPath | undefined> {
 	if (pathItems.length < 1) {
 		return undefined;
@@ -1128,7 +1132,7 @@ async function resolveSearchPathItems(
 	return {
 		basePath: commonBasePath,
 		glob: buildBraceUnion(combinedPatterns),
-		scopePath: toScopeDisplay(pathItems, cwd),
+		scopePath: toScopeDisplay(pathItems, cwd, displayNames),
 		exactFilePaths: allExactFiles ? parsedItems.map(item => item.absoluteBasePath) : undefined,
 		targets,
 	};
@@ -1140,8 +1144,9 @@ export async function resolveExplicitSearchPaths(
 	filesystem: InternalUrlFilesystem,
 	suffixGlob?: string,
 	fanOutFileItems = false,
+	displayNames?: ReadonlyMap<string, string>,
 ): Promise<ResolvedMultiSearchPath | undefined> {
-	return resolveSearchPathItems([...new Set(pathItems)], cwd, filesystem, suffixGlob, fanOutFileItems);
+	return resolveSearchPathItems([...new Set(pathItems)], cwd, filesystem, suffixGlob, fanOutFileItems, displayNames);
 }
 
 async function resolveFindPatternItems(
@@ -1422,6 +1427,8 @@ export interface ToolScopeOptions {
 	multipathStatHint?: string;
 	/** Materialize readable external URLs to local text files before scope derivation. */
 	resolveExternalUrl?: (rawPath: string) => Promise<ResolvedExternalSearchUrl | undefined>;
+	/** Names `scopePath` shows for resolved paths instead of the paths (archive members searched through scratch copies). */
+	displayNames?: ReadonlyMap<string, string>;
 }
 
 export interface ToolScopeResolution {
@@ -1541,7 +1548,7 @@ export async function resolveToolSearchScope(opts: ToolScopeOptions): Promise<To
 		searchPath = resolveSearchBase(parsedPath.basePath, cwd);
 		globFilter = parsedPath.glob;
 		bareGlob = isBareSearchGlob(effectivePaths[0]!, parsedPath);
-		scopePath = formatPathRelativeToCwd(searchPath, cwd);
+		scopePath = opts.displayNames?.get(searchPath) ?? formatPathRelativeToCwd(searchPath, cwd);
 	} else {
 		const multiSearchPath = await resolveExplicitSearchPaths(
 			effectivePaths,
@@ -1549,6 +1556,7 @@ export async function resolveToolSearchScope(opts: ToolScopeOptions): Promise<To
 			opts.filesystem,
 			undefined,
 			opts.fanOutFileTargets === true,
+			opts.displayNames,
 		);
 		if (!multiSearchPath) {
 			throw new ToolError("`paths` must contain at least one path or glob");

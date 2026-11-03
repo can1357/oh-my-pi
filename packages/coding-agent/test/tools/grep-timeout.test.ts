@@ -6,6 +6,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { type GrepMatch, type GrepOptions, type GrepResult, grep } from "@oh-my-pi/pi-natives";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { writeArchive } from "@oh-my-pi/pi-utils/ar";
 import { GrepTool } from "../../src/tools/grep";
 
 function textOf(result: { content: Array<{ type: string; text?: string }> }): string {
@@ -164,6 +165,27 @@ describe("grep timeout", () => {
 		const text = textOf(multiline);
 		expect(text).toContain("Searched only part of these files");
 		expect(text).toContain("big.txt");
+	});
+
+	it("names archive members by their archive paths, not their deleted scratch copies", async () => {
+		const filler = "filler line of haystack text\n".repeat(160_000);
+		await writeArchive(path.join(cwd, "bundle.zip"), "zip", [
+			["big.txt", `needle head\n${filler}needle tail\nend marker\n`],
+			["other.txt", "needle other\n"],
+		]);
+		const tool = new GrepTool(session);
+
+		for (const [target, scope] of [
+			["bundle.zip:big.txt", "bundle.zip:big.txt"],
+			["bundle.zip:big.txt;bundle.zip:other.txt", "bundle.zip:big.txt, bundle.zip:other.txt"],
+		]) {
+			const result = await tool.execute("archive-partial", { pattern: "needle tail\nend", path: target });
+			const text = textOf(result);
+			expect(text).toContain("Searched only part of these files");
+			expect(text).toContain("bundle.zip:big.txt");
+			expect(text).not.toContain("omp-search-archive");
+			expect(result.details?.scopePath).toBe(scope);
+		}
 	});
 
 	it("names at most ten partially searched files, so the matches still show", async () => {

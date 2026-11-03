@@ -72,11 +72,11 @@ Terminology follows `docs/natives-architecture.md`:
    - `hasMatch` compiles/checks pattern against provided content and returns a boolean.
    - No filesystem scan or listing cache.
 - **Single-file branch**
-   - `grep` resolves the path through the selected filesystem, checks metadata, and searches a file directly. Oversized files are searched after the others, streamed to their end (multiline mode: over their leading 4 MiB, listed in `partialFiles`); native oversized file roots are streamed through grep-searcher's reader inline, provider files are read async.
+   - `grep` resolves the path through the selected filesystem, checks metadata, and searches a file directly. Oversized files are searched after the others, streamed to their end (multiline mode: over their leading 4 MiB, listed in `partialFiles`). A native file is streamed through grep-searcher's reader inline; a provider file is streamed on Tokio's blocking pool through a reader that waits on each of its async reads until the read returns, the search is halted (cancelled, or stopped by the deadline elsewhere) or the deadline passes, so it is never read whole and a read that never returns holds neither the search nor a blocking-pool thread past `timeoutMs` or cancellation.
 - **Directory branch**
    - `pi_walker::grep::grep` walks with `walk::Options::cache` left `false`: directory searches never read or populate the shared listing cache.
    - The glob compiles to a `pi_walker::glob::Selector::scope` (files it matches plus every file under a directory it matches) that also prunes the walk; `exclude` patterns compile to `Selector::exclude`.
-   - Files larger than 4 MiB are searched over their first 4 MiB after all other files.
+   - Files larger than 4 MiB are searched after all other files, streamed line by line to their end (multiline mode: over their first 4 MiB).
 
 ### Search/collection semantics
 
@@ -91,23 +91,23 @@ Terminology follows `docs/natives-architecture.md`:
    - `filesWithMatches` emits one path-only entry per matched file (`lineNumber=0`, `line=""`, `matchCount` omitted).
    - `offset` and `maxCount` are applied during aggregation across sorted file results; `maxCountPerFile` can additionally prevent one hot file consuming the content-mode budget.
    - Directory execution model (`pi_walker::grep::grep`):
-      - Without a match budget, each walker worker lists a directory and scans its selected files itself, reusing its filesystem session, scanner, and read buffer. Files open relative to the live directory handle, or by absolute path for cached listings. Only completed search results cross the bounded output channel; there is no second search pool or candidate handoff. Per-file results are put in path order afterwards.
+      - Without a match budget, each walker worker lists a directory and scans its selected files itself, reusing its filesystem session, scanner, and read buffer; it streams the directory's files over 4 MiB after its other files, so a long stream cannot keep those from being searched before the deadline. Files open relative to the live directory handle, or by absolute path for cached listings. Only completed search results cross the bounded output channel; there is no second search pool or candidate handoff. Per-file results are put in path order afterwards.
       - With a match budget (`maxCount`), a `walk::Tree` (`Order::Paths`, a serial async cursor) feeds `exec::ordered`: a fixed pool with worker-local sessions and scanners. Candidates are grouped in batches of up to 16 and at most `parallelism*16` candidates are in flight. Results are consumed strictly in path order; settling the budget drops the stream and stops the producer and workers. Path-ordered first pages are deterministic.
       - `maxCountPerFile` (content mode) caps matches collected per file so one hot file cannot exhaust the global `maxCount` budget before other files are reached.
-      - Files over 4 MiB are ordered after all other files and searched over their first 4 MiB only.
+      - Files over 4 MiB are ordered after all other files and streamed line by line to their end; multiline mode searches their first 4 MiB and lists them in `partialFiles`.
       - `offset` and `maxCount` are applied while aggregating per-file results. The positional `onMatch(error, match)` callback is emitted after directory aggregation; the direct-file branch returns its matches without that callback.
 
 ### Batched delivery (`onMatches`)
 
 `GrepOptions.onMatches(matches)` is a separate streaming API with no error-first argument. It delivers batches of at most 1024 entries while scanning, with no file-order guarantee. It supports content, count, and files-with-matches output. It cannot be combined with `maxCount` or a nonzero `offset`; `maxCountPerFile` remains available.
 
-Batches flow through a bounded `tokio::sync::mpsc::Sender<Vec<Match>>` (each batch comes from one file) to a forwarder that awaits each JS call (`call_async_catch`) and coalesces queued batches up to 1024 matches; the channel holds 4 batches, so backpressure reaches the scan end to end. Successful completion waits for every callback, returns counters with `matches: []`, and does not call the positional `onMatch`. A callback throw rejects with that error. Cancellation drops the search future, but callbacks already queued on JS may still run.
+Batches flow through a bounded `tokio::sync::mpsc::Sender<Vec<Match>>` (each batch comes from one file) to a forwarder that awaits each JS call (`call_async_catch`) and coalesces queued batches up to 1024 matches; the channel holds 4 batches, so backpressure reaches the scan end to end. A file held in memory (4 MiB or less) is sent once searched. A file over 4 MiB in content mode is scanned on Tokio's blocking pool; the scan hands each batch of 1024 matches over a one-batch channel to the walker worker or file-root task that opened the file, which sends it on and waits for room, so the scan waits for the callback and the file's matches are never all held at once. Its batches can interleave with other files' batches. The deadline stops such a scan through the halt flag rather than cutting it off, so what it matched is still sent and the file still counts as searched. Every send is counted and none is made after the result is taken, so `totalMatches`, `filesWithMatches`, and `limitReached` count exactly what the callback was sent, a timed-out search included. Successful completion waits for every callback, returns counters with `matches: []`, and does not call the positional `onMatch`. A callback throw rejects with that error. Cancellation drops the search future, but callbacks already queued on JS may still run.
 
 ### Result shaping back to JS
 
 - Rust `SearchResult`/`GrepResult` fields map to TS interfaces via N-API object conversion.
 - Counters are clamped before crossing N-API where needed.
-- `GrepResult.limitReached` is optional and emitted when true; `skippedOversized` counts oversized files that could not be read; `partialFiles` names files searched only in part (multiline over 4 MiB, or a line too long to stream); `timedOut` marks a search `timeoutMs` stopped.
+- `GrepResult.limitReached` is optional and emitted when true; `skippedOversized` counts oversized files that could not be read; `partialFiles` names files searched only in part (multiline over 4 MiB, or a stream that a line too long to stream, the deadline, or a failed read stopped), the same for a directory search and a named file; `timedOut` marks a search `timeoutMs` stopped.
 - `onMatches` receives shaped batches during scanning; the positional directory `onMatch` callback receives one shaped entry after aggregation.
 
 ### Failure behavior

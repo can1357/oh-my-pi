@@ -13,10 +13,12 @@
 //! results are unbounded; with a match budget a path-ordered walk streams
 //! candidates into a parallel search that consumes them in that order, and
 //! both stop once the budget is settled. Either way results are in path
-//! order — files over 4 MiB, searched over their first 4 MiB, after all
-//! others — and identical from run to run. With a sink, results are
-//! delivered per file, as they complete, instead of returned. Dropping the
-//! [`grep`] future cancels the search.
+//! order — files over 4 MiB, streamed line by line (in multiline mode
+//! searched over their first 4 MiB), after all others — and identical from
+//! run to run. With a sink, results are delivered as they are found instead
+//! of returned: a file held in memory once it is searched, a streamed file's
+//! matches in batches while it is read. Dropping the [`grep`] future cancels
+//! the search.
 //!
 //! ```ignore
 //! let engine = Arc::new(Engine::compile(r"impl\s+\w+ for", false, false)?);
@@ -46,8 +48,9 @@ use crate::{
 	walk::{self, WalkError},
 };
 
-/// Largest prefix of a file that is searched; longer files are searched over
-/// this window after every shorter file.
+/// Largest file held in memory to be searched; a longer file is streamed
+/// line by line (in multiline mode, searched over this prefix), after every
+/// shorter file.
 pub const MAX_FILE_BYTES: u64 = 4 * 1024 * 1024;
 
 /// What a search reports.
@@ -197,9 +200,12 @@ pub struct GrepOptions {
 	/// Traversal: `hidden`, `gitignore`, `workers`, `cache` are honoured;
 	/// `.git` is always pruned and `node_modules` unless the glob names it.
 	pub walk:               walk::Options,
-	/// Deliver results per file (batches of at most 1024 entries, all from
-	/// one file) instead of returning them; a full channel pauses the search.
-	/// Incompatible with `offset` and `max_count`.
+	/// Deliver results instead of returning them, in batches of at most 1024
+	/// entries, each from one file. A file over [`MAX_FILE_BYTES`] sends its
+	/// batches while it is read, so they may interleave with other files'
+	/// batches. A full channel pauses the search, and the result's totals
+	/// count exactly what was sent. Incompatible with `offset` and
+	/// `max_count`.
 	pub sink:               Option<tokio::sync::mpsc::Sender<Vec<Match>>>,
 	/// Stop at this instant and return what was found by then, with
 	/// [`GrepResult::timed_out`] set: the files searched so far, in path
@@ -251,9 +257,10 @@ pub struct GrepResult {
 	/// The [`GrepOptions::deadline`] passed before the search finished: the
 	/// results cover only the files searched by then.
 	pub timed_out:          bool,
-	/// Files searched only in part, in path order: in a directory search,
-	/// files over [`MAX_FILE_BYTES`] in multiline mode (searched over their
-	/// first [`MAX_FILE_BYTES`]) and files with a line too long to stream.
+	/// Files searched only in part, in path order: files over
+	/// [`MAX_FILE_BYTES`] in multiline mode (searched over their first
+	/// [`MAX_FILE_BYTES`]) and streamed files whose stream stopped before the
+	/// end (a line too long to stream, the deadline, a failed read).
 	pub partial_files:      Vec<String>,
 }
 

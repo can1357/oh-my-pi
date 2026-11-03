@@ -768,8 +768,11 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 					surfaceExactFilePaths: true,
 					fanOutFileTargets: true,
 					multipathStatHint: " (`path` list entries must each exist relative to cwd)",
+					// Archive members show as the caller spelled them, not as their scratch copies.
+					displayNames: archiveDisplayMap,
 				});
-				const { searchPath, isDirectory, multiTargets, exactFilePaths, missingPaths, globFilter } = scope;
+				const { searchPath, scopePath, isDirectory, multiTargets, exactFilePaths, missingPaths, globFilter } =
+					scope;
 				const immutableSourcePaths = scope.immutableSourcePaths;
 				// Build the per-file line-range filter after URL materialization has run:
 				// archive entries are keyed by scratch path, external URL entries by read-cache
@@ -802,12 +805,6 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 						mergeRangesInto(rangesByAbsPath, path.resolve(resolved), spec.ranges);
 					}
 				}
-				// When the only input was an archive selector, surface that selector instead
-				// of the temp scratch path the resolver substituted in.
-				const scopePath =
-					resolvedPaths.length === 1 && archiveDisplayMap.get(searchPath)
-						? (archiveDisplayMap.get(searchPath) as string)
-						: scope.scopePath;
 				if (missingPaths.length > 0 && missingPaths.length === resolvedPaths.length) {
 					const archiveHint =
 						archiveUnreadable.length > 0
@@ -1008,6 +1005,12 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 						const display = archiveDisplayMap.get(resolveSearchResultPath(searchPath, match.path));
 						if (display) match.path = display;
 					}
+					// Name an archive member as the caller did: its scratch copy is deleted
+					// before the notice's `read` advice can be followed.
+					for (const [index, partialFile] of partialFiles.entries()) {
+						const display = archiveDisplayMap.get(resolveSearchResultPath(searchPath, partialFile));
+						if (display) partialFiles[index] = display;
+					}
 				}
 
 				const formatPath = (filePath: string): string =>
@@ -1094,11 +1097,12 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 				const limitMb = Math.floor(NATIVE_GREP_MAX_FILE_BYTES / (1024 * 1024));
 				// Native streams every file whole, except in multiline mode, which holds a
 				// file in memory and so reads only its first NATIVE_GREP_MAX_FILE_BYTES, and
-				// except past a line too long to stream. It names those files; without this
-				// note the caller might take matches (or "no matches") there as the whole file.
+				// except past a line too long to stream or the time budget. It names those
+				// files; without this note the caller might take matches (or "no matches")
+				// there as the whole file.
 				const oversizedNote =
 					partialFiles.length > 0
-						? `Searched only part of these files (multiline search reads the first ${limitMb}MB of a large file; a line too long to stream ends the search; matches past that point are not shown; search without a newline in the pattern, or use \`read\`, for the rest): ${formatPartialFiles([...new Set(partialFiles)].map(formatPath))}`
+						? `Searched only part of these files (multiline search reads the first ${limitMb}MB of a large file; a line too long to stream, or the time budget, ends the search; matches past that point are not shown; search without a newline in the pattern, or use \`read\`, for the rest): ${formatPartialFiles([...new Set(partialFiles)].map(formatPath))}`
 						: undefined;
 				// Directory/multi-target scopes: native counts files it could not map
 				// even a prefix of (rare mmap failures), but cannot name them.

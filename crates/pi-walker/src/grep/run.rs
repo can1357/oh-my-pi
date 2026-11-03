@@ -18,11 +18,11 @@ use std::{
 use futures::{Stream, StreamExt, stream};
 use grep_matcher::Matcher;
 use parking_lot::Mutex;
-use tokio::sync::mpsc;
+use tokio::{runtime::Handle, sync::mpsc};
 
 use super::{
 	Engine, GrepError, GrepOptions, GrepResult, MAX_FILE_BYTES, Match, Mode,
-	scan::{ScanOutcome, ScanParams, Scanner, scan_reader},
+	scan::{Batches, ScanOutcome, ScanParams, Scanner, scan_reader},
 	types::TypeFilter,
 };
 use crate::{
@@ -40,6 +40,8 @@ const SINK_CLOSED: &str = "grep sink closed";
 /// How long a file root's search may take to stop once the deadline
 /// passes before it is abandoned.
 const FILE_STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
+/// How often a provider read that has not returned checks the halt flag.
+const HALT_POLL: std::time::Duration = std::time::Duration::from_millis(10);
 
 /// Which entries a directory search reads.
 struct PathFilter {
@@ -162,6 +164,166 @@ fn batches(mode: Mode, path: &str, matches: Vec<Match>, count: u64) -> Vec<Vec<M
 	out
 }
 
+/// A search's sink, shared with its tasks: a streamed file sends its matches
+/// from the task reading it, in batches as they are found, besides the
+/// batches of the files held in memory. Every send is counted and none is
+/// made once the result is taken, so the result's totals are exactly what
+/// the receiver was sent.
+struct Outlet {
+	/// Upgraded for each send: the search's own future holds the only
+	/// lasting sender, so the receiver sees the end once it returns.
+	sender: mpsc::WeakSender<Vec<Match>>,
+	sent:   Mutex<Sent>,
+	/// Raised when the receiver is gone, so the rest of the search stops.
+	halt:   Arc<AtomicBool>,
+}
+
+/// What an [`Outlet`] sent.
+#[derive(Default)]
+struct Sent {
+	/// The result was taken: nothing more is sent.
+	closed:             bool,
+	/// A send found the receiver gone.
+	failed:             bool,
+	total_matches:      u64,
+	files_with_matches: u64,
+	limit_reached:      bool,
+}
+
+impl Outlet {
+	fn new(sink: &mpsc::Sender<Vec<Match>>, halt: Arc<AtomicBool>) -> Self {
+		Self { sender: sink.downgrade(), sent: Mutex::default(), halt }
+	}
+
+	/// Sends `batch`, which stands for `matches` of one file's matches
+	/// (`first` when no batch of the file was sent before), once the channel
+	/// has room. `Ok(false)` when nothing more may be sent: the search's
+	/// result was taken.
+	async fn send(&self, batch: Vec<Match>, matches: u64, first: bool) -> Result<bool, GrepError> {
+		let Some(sender) = self.sender.upgrade() else {
+			return Ok(false);
+		};
+		let Ok(permit) = sender.reserve().await else {
+			self.sent.lock().failed = true;
+			self.halt.store(true, Ordering::Relaxed);
+			return Err(GrepError::Sink(SINK_CLOSED.to_owned()));
+		};
+		let mut sent = self.sent.lock();
+		if sent.closed {
+			return Ok(false);
+		}
+		sent.total_matches = sent.total_matches.saturating_add(matches);
+		sent.files_with_matches += u64::from(first);
+		permit.send(batch);
+		Ok(true)
+	}
+
+	/// Counts the rest of a matching file: `unsent` matches found but not
+	/// sent (the one past its cap), whether its cap stopped it, and the file
+	/// itself unless a batch already `counted` it.
+	fn finish(&self, unsent: u64, limit_reached: bool, counted: bool) {
+		let mut sent = self.sent.lock();
+		if !sent.closed {
+			sent.total_matches = sent.total_matches.saturating_add(unsent);
+			sent.limit_reached |= limit_reached;
+			sent.files_with_matches += u64::from(!counted);
+		}
+	}
+
+	/// Sends a matching file's results held in memory ([`batches`]): `count`
+	/// matches, `matches` of them collected.
+	async fn deliver(
+		&self,
+		mode: Mode,
+		path: &str,
+		matches: Vec<Match>,
+		count: u64,
+		limit_reached: bool,
+	) -> Result<(), GrepError> {
+		let collected = matches.len() as u64;
+		let mut counted = false;
+		for batch in batches(mode, path, matches, count) {
+			let units = if mode == Mode::Content {
+				batch.len() as u64
+			} else {
+				count
+			};
+			if !self.send(batch, units, !counted).await? {
+				return Ok(());
+			}
+			counted = true;
+		}
+		let unsent = if mode == Mode::Content {
+			count.saturating_sub(collected)
+		} else {
+			0
+		};
+		self.finish(unsent, limit_reached, counted);
+		Ok(())
+	}
+
+	/// Takes the search's result: `result` with the totals of what was sent,
+	/// or the sink's failure. Nothing is sent after.
+	fn close(&self, result: Result<GrepResult, GrepError>) -> Result<GrepResult, GrepError> {
+		let mut sent = self.sent.lock();
+		sent.closed = true;
+		if sent.failed {
+			return Err(GrepError::Sink(SINK_CLOSED.to_owned()));
+		}
+		result.map(|result| GrepResult {
+			total_matches: sent.total_matches,
+			files_with_matches: sent.files_with_matches,
+			limit_reached: sent.limit_reached,
+			..result
+		})
+	}
+}
+
+/// A streamed file's way to its search's [`Outlet`] in content mode: its
+/// matches go out in batches of [`SINK_BATCH`], with `path` set, while it is
+/// read.
+struct Feed<'a> {
+	outlet:  &'a Outlet,
+	path:    &'a str,
+	/// A batch was sent, counting the file as matching.
+	counted: bool,
+}
+
+impl<'a> Feed<'a> {
+	const fn new(outlet: &'a Outlet, path: &'a str) -> Self {
+		Self { outlet, path, counted: false }
+	}
+
+	/// Sends one batch; fails once nothing more may be sent, which ends the
+	/// file's scan.
+	async fn send(&mut self, mut batch: Vec<Match>) -> io::Result<()> {
+		for m in &mut batch {
+			self.path.clone_into(&mut m.path);
+		}
+		let matches = batch.len() as u64;
+		match self.outlet.send(batch, matches, !self.counted).await {
+			Ok(true) => {
+				self.counted = true;
+				Ok(())
+			},
+			Ok(false) | Err(_) => Err(io::Error::other(SINK_CLOSED)),
+		}
+	}
+
+	/// Sends the matches the scan still holds (at most a batch) and counts the
+	/// rest of the file.
+	async fn finish(mut self, held: Vec<Match>, outcome: &ScanOutcome) {
+		if !held.is_empty() && self.send(held).await.is_err() {
+			return;
+		}
+		if outcome.count > 0 {
+			self
+				.outlet
+				.finish(outcome.count - outcome.collected, outcome.limit_reached, self.counted);
+		}
+	}
+}
+
 /// The smaller of two optional caps.
 fn min_some(a: Option<u64>, b: Option<u64>) -> Option<u64> {
 	match (a, b) {
@@ -178,17 +340,15 @@ enum Haystack {
 	Stream(File),
 }
 
+/// Searches the file root of `shared`. With an outlet, its results go there
+/// (counted by it) instead of into the result.
 async fn file_root<M: Matcher + Sync>(
 	search: &Search<'_, M>,
+	shared: &Shared,
 	mut session: Session,
-	root: &Path,
-	opts: &GrepOptions,
-	sink: Option<&mpsc::Sender<Vec<Match>>>,
-	types: Option<&TypeFilter>,
-	halt: &AtomicBool,
-	expired: &AtomicBool,
 ) -> Result<GrepResult, GrepError> {
-	if let Some(types) = types {
+	let (root, opts, outlet) = (shared.root.as_path(), &shared.opts, shared.outlet.as_ref());
+	if let Some(types) = &shared.filter.types {
 		let name = pi_vfs::file_name(root);
 		if !name.is_some_and(|name| types.matches(name.as_encoded_bytes())) {
 			return Ok(GrepResult::default());
@@ -239,38 +399,35 @@ async fn file_root<M: Matcher + Sync>(
 	} else {
 		search.params
 	};
+	let path = root.to_string_lossy().into_owned();
 	let mut matches = Vec::new();
+	// A streamed file's matches go to the outlet as they are found.
+	let mut sent = false;
 	let outcome = match haystack {
 		Haystack::Bytes => Scanner::default()
 			.scan(search.matcher, search.multiline, search.spans, &buf, &params, &mut matches)
 			.map_err(|err| GrepError::Search(err.to_string()))?,
-		Haystack::Stream(mut file) => {
-			let streamed = stream_file(search.matcher, &mut file, &params, &mut matches, halt)
-				.await
-				.map_err(|err| GrepError::Search(err.to_string()))?;
-			// The deadline or a line too long to stream stopped the read: what
-			// was matched before it stands, and the file is named as partial.
-			if streamed.stopped.is_some() && !expired.load(Ordering::Relaxed) {
-				truncated = true;
-			}
+		Haystack::Stream(file) => {
+			let feed = outlet
+				.filter(|_| params.content)
+				.map(|outlet| Feed::new(outlet, &path));
+			sent = feed.is_some();
+			let streamed = stream_file(search, shared, file, &params, &mut matches, feed).await;
+			// A stream stopped before the end (the deadline, a line too long to
+			// stream) keeps what it matched, and the file is named as partial,
+			// as in a directory search.
+			truncated |= streamed.stopped.is_some();
 			streamed.outcome
 		},
 	};
-	let timed_out = expired.load(Ordering::Relaxed);
 	let partial_files = if truncated {
-		vec![root.to_string_lossy().into_owned()]
+		vec![path.clone()]
 	} else {
 		Vec::new()
 	};
 	if outcome.count == 0 {
-		return Ok(GrepResult {
-			files_searched: 1,
-			timed_out,
-			partial_files,
-			..GrepResult::default()
-		});
+		return Ok(GrepResult { files_searched: 1, partial_files, ..GrepResult::default() });
 	}
-	let path = root.to_string_lossy().into_owned();
 	let (total, limit_reached) = if fast {
 		(1, false)
 	} else {
@@ -286,15 +443,14 @@ async fn file_root<M: Matcher + Sync>(
 		files_searched: 1,
 		limit_reached,
 		skipped_oversized: 0,
-		timed_out,
+		timed_out: false,
 		partial_files,
 	};
-	if let Some(sink) = sink {
-		for batch in batches(opts.mode, &path, matches, outcome.count) {
-			sink
-				.send(batch)
-				.await
-				.map_err(|_| GrepError::Sink(SINK_CLOSED.to_owned()))?;
+	if let Some(outlet) = outlet {
+		if !sent {
+			outlet
+				.deliver(opts.mode, &path, matches, total, limit_reached)
+				.await?;
 		}
 		return Ok(result);
 	}
@@ -308,26 +464,137 @@ async fn file_root<M: Matcher + Sync>(
 	Ok(result)
 }
 
-/// Searches `file` line by line: a native file through grep-searcher's
-/// bounded reader (lines up to 64 MiB), ending once `halt`
-/// is raised; a provider file read in full.
+/// A file over [`MAX_FILE_BYTES`] as grep-searcher's synchronous reader: a
+/// native file read directly, a provider file through its asynchronous
+/// reads. A provider read that has not returned ends once the search is
+/// halted (checked every [`HALT_POLL`]) or its deadline passes, so a read
+/// that never returns cannot hold the search, or the thread scanning it,
+/// past either; one that outlasts the deadline marks the search `expired`
+/// and halts it, as [`before_deadline`] does. A provider read blocks the
+/// thread, so a provider file is only read this way on the blocking pool
+/// ([`stream_blocking`]).
+struct FileReader<'a> {
+	file:     &'a mut File,
+	handle:   Handle,
+	deadline: Option<tokio::time::Instant>,
+	expired:  &'a AtomicBool,
+	halt:     &'a AtomicBool,
+}
+
+impl io::Read for FileReader<'_> {
+	fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+		if let Some(mut native) = self.file.native_reader() {
+			return io::Read::read(&mut native, buf);
+		}
+		let (halt, expired, deadline) = (self.halt, self.expired, self.deadline);
+		let read = self.file.read(buf);
+		let halted = async {
+			while !halt.load(Ordering::Relaxed) {
+				tokio::time::sleep(HALT_POLL).await;
+			}
+		};
+		let deadline_passed = async {
+			match deadline {
+				Some(deadline) => tokio::time::sleep_until(deadline).await,
+				None => std::future::pending().await,
+			}
+		};
+		self.handle.block_on(async {
+			tokio::select! {
+				read = read => read,
+				() = halted => Err(io::Error::other("grep stopped")),
+				() = deadline_passed => {
+					expired.store(true, Ordering::Relaxed);
+					halt.store(true, Ordering::Relaxed);
+					Err(io::Error::other("grep deadline passed"))
+				},
+			}
+		})
+	}
+}
+
+/// Searches `file`, over [`MAX_FILE_BYTES`], line by line through
+/// grep-searcher's bounded reader (lines up to 64 MiB) until it ends or the
+/// search is halted, so no file is ever held whole. A native file without
+/// `feed` is scanned inline; a provider file, whose reads wait on the
+/// provider, or a scan with `feed`, whose batches wait on the receiver, runs
+/// on the blocking pool ([`stream_blocking`]). The deadline does not cut a
+/// stream off: it stops at the halt flag or at a provider read that outlasts
+/// the deadline, and what it matched stands.
 async fn stream_file<M: Matcher + Sync>(
-	matcher: &M,
-	file: &mut File,
+	search: &Search<'_, M>,
+	shared: &Shared,
+	mut file: File,
 	params: &ScanParams,
 	matches: &mut Vec<Match>,
-	halt: &AtomicBool,
-) -> io::Result<Streamed> {
-	if let Some(reader) = file.native_reader() {
-		let (outcome, stopped) = scan_reader(matcher, Halting { reader, halt }, params, matches);
-		return Ok(Streamed { outcome, stopped });
+	feed: Option<Feed<'_>>,
+) -> Streamed {
+	if feed.is_none()
+		&& let Some(reader) = file.native_reader()
+	{
+		let reader = Halting { reader, halt: &shared.halt };
+		let (outcome, stopped) = scan_reader(search.matcher, reader, params, matches, None);
+		return Streamed { outcome, stopped };
 	}
-	let mut buf = Vec::new();
-	file.read_into(&mut buf, u64::MAX).await?;
-	let outcome = Scanner::default()
-		.scan(matcher, false, false, &buf, params, matches)
-		.map_err(|err| io::Error::other(err.to_string()))?;
-	Ok(Streamed { outcome, stopped: None })
+	stream_blocking(shared, file, *params, matches, feed).await
+}
+
+/// [`stream_file`] on the blocking pool. With `feed`, each full batch goes to
+/// the outlet while the file is read: the scan hands it to this task over a
+/// one-batch channel and this task waits for room, so at most a few batches
+/// of the file exist at once and `matches` stays empty. Without, every match
+/// lands in `matches`.
+async fn stream_blocking(
+	shared: &Shared,
+	mut file: File,
+	params: ScanParams,
+	matches: &mut Vec<Match>,
+	mut feed: Option<Feed<'_>>,
+) -> Streamed {
+	let (tx, mut rx) = mpsc::channel(1);
+	let fed = feed.is_some();
+	let engine = Arc::clone(&shared.engine);
+	let (halt, expired) = (Arc::clone(&shared.halt), Arc::clone(&shared.expired));
+	let (handle, deadline) = (Handle::current(), shared.opts.deadline);
+	let scan = tokio::task::spawn_blocking(move || {
+		let reader = FileReader { file: &mut file, handle, deadline, expired: &expired, halt: &halt };
+		let reader = Halting { reader, halt: &halt };
+		let mut send = |batch: Vec<Match>| {
+			tx.blocking_send(batch)
+				.map_err(|_| io::Error::other(SINK_CLOSED))
+		};
+		let batches = if fed {
+			Some(Batches { size: SINK_BATCH, send: &mut send })
+		} else {
+			None
+		};
+		let mut held = Vec::new();
+		let (outcome, stopped) = match &*engine {
+			Engine::Rust(m) => scan_reader(m, reader, &params, &mut held, batches),
+			Engine::Pcre(m) => scan_reader(m, reader, &params, &mut held, batches),
+		};
+		(outcome, stopped, held)
+	});
+	if let Some(feed) = &mut feed {
+		while let Some(batch) = rx.recv().await {
+			if feed.send(batch).await.is_err() {
+				// Nothing more may be sent: the scan stops at its next batch.
+				break;
+			}
+		}
+	}
+	drop(rx);
+	let (outcome, stopped, mut held) = match scan.await {
+		Ok(scanned) => scanned,
+		Err(join) if join.is_panic() => std::panic::resume_unwind(join.into_panic()),
+		Err(_) => (ScanOutcome::default(), Some(io::Error::other("grep stopped")), Vec::new()),
+	};
+	match feed {
+		Some(feed) => feed.finish(held, &outcome).await,
+		None if matches.is_empty() => *matches = held,
+		None => matches.append(&mut held),
+	}
+	Streamed { outcome, stopped }
 }
 
 /// What a streamed search found, and the error that stopped it before the
@@ -367,7 +634,8 @@ enum Outcome {
 
 /// Searches the candidate at walk-relative `rel` for a budgeted pass: in full
 /// (deferring files over [`MAX_FILE_BYTES`]) or, with `prefix`, over that
-/// prefix.
+/// prefix. `None` once the deadline passes while it is opened or read into
+/// memory.
 async fn search_candidate<M: Matcher + Sync>(
 	search: &Search<'_, M>,
 	shared: &Shared,
@@ -375,40 +643,39 @@ async fn search_candidate<M: Matcher + Sync>(
 	session: &mut Session,
 	rel: &[u8],
 	prefix: bool,
-) -> Outcome {
+) -> Option<Outcome> {
 	let unreadable = if prefix {
 		Outcome::SkippedOversized
 	} else {
 		Outcome::Skipped
 	};
-	let Ok((mut file, info)) = open_candidate(shared, session, rel).await else {
-		return unreadable;
+	let Ok((mut file, info)) = before_deadline(shared, open_candidate(shared, session, rel)).await?
+	else {
+		return Some(unreadable);
 	};
 	if !prefix && info.size > MAX_FILE_BYTES {
-		return Outcome::Defer;
+		return Some(Outcome::Defer);
 	}
 	let mut matches = Vec::new();
 	let (outcome, partial) = if prefix {
-		match scan_oversized(search, scratch, &mut file, &shared.halt, &mut matches).await {
-			Some(scanned) => scanned,
-			None => return unreadable,
+		match scan_oversized(search, shared, scratch, file, &mut matches, None).await {
+			Large::Scanned(outcome, partial) => (outcome, partial),
+			Large::Unreadable => return Some(unreadable),
+			Large::TimedOut => return None,
 		}
 	} else {
-		if file
-			.read_into(&mut scratch.buf, MAX_FILE_BYTES + 1)
-			.await
-			.is_err()
-		{
-			return unreadable;
+		let read = file.read_into(&mut scratch.buf, MAX_FILE_BYTES + 1);
+		if before_deadline(shared, read).await?.is_err() {
+			return Some(unreadable);
 		}
+		drop(file);
 		if scratch.buf.len() as u64 > MAX_FILE_BYTES {
-			return Outcome::Defer;
+			return Some(Outcome::Defer);
 		}
 		(search.scan(&mut scratch.scanner, &scratch.buf, &mut matches), false)
 	};
-	drop(file);
 	if outcome.count == 0 {
-		return Outcome::Searched(None, partial);
+		return Some(Outcome::Searched(None, partial));
 	}
 	let hit = FileHit {
 		path: String::from_utf8_lossy(rel).into_owned(),
@@ -417,31 +684,42 @@ async fn search_candidate<M: Matcher + Sync>(
 		limit_reached: outcome.limit_reached,
 		oversized: prefix,
 	};
-	Outcome::Searched(Some((hit, outcome.collected)), partial)
+	Some(Outcome::Searched(Some((hit, outcome.collected)), partial))
 }
 
-/// Searches a file over [`MAX_FILE_BYTES`] in full, streamed line by line.
+/// How a file over [`MAX_FILE_BYTES`] was searched.
+enum Large {
+	/// Its outcome, and whether only part of it was searched.
+	Scanned(ScanOutcome, bool),
+	Unreadable,
+	/// The deadline passed while its prefix was read into memory.
+	TimedOut,
+}
+
+/// Searches a file over [`MAX_FILE_BYTES`] in full, streamed line by line
+/// ([`stream_file`]; with `feed`, its matches sent as they are found).
 /// Multiline mode holds the file in memory, so it searches only the first
-/// [`MAX_FILE_BYTES`]; a line too long to stream ends the stream early. Either
-/// way the file is reported as partial (`true`). `None` when it cannot be read.
+/// [`MAX_FILE_BYTES`] and leaves `feed` unused; a line too long to stream ends
+/// the stream early. Either way the file is reported as partial.
 async fn scan_oversized<M: Matcher + Sync>(
 	search: &Search<'_, M>,
+	shared: &Shared,
 	scratch: &mut Scratch,
-	file: &mut File,
-	halt: &AtomicBool,
+	mut file: File,
 	matches: &mut Vec<Match>,
-) -> Option<(ScanOutcome, bool)> {
+	feed: Option<Feed<'_>>,
+) -> Large {
 	if !search.multiline {
-		let streamed = stream_file(search.matcher, file, &search.params, matches, halt)
-			.await
-			.ok()?;
-		return Some((streamed.outcome, streamed.stopped.is_some()));
+		let streamed = stream_file(search, shared, file, &search.params, matches, feed).await;
+		return Large::Scanned(streamed.outcome, streamed.stopped.is_some());
 	}
-	file
-		.read_into(&mut scratch.buf, MAX_FILE_BYTES)
-		.await
-		.ok()?;
-	Some((search.scan(&mut scratch.scanner, &scratch.buf, matches), true))
+	match before_deadline(shared, file.read_into(&mut scratch.buf, MAX_FILE_BYTES)).await {
+		None => Large::TimedOut,
+		Some(Err(_)) => Large::Unreadable,
+		Some(Ok(())) => {
+			Large::Scanned(search.scan(&mut scratch.scanner, &scratch.buf, matches), true)
+		},
+	}
 }
 
 /// The settled prefix of a budgeted search.
@@ -571,13 +849,17 @@ fn aggregate(hits: Vec<FileHit>, opts: &GrepOptions, searched: u64, oversized: u
 	result
 }
 
-/// Raises the halt flag when the grep future is dropped, so spawned tasks
-/// stop before their next file.
-struct HaltOnDrop(Arc<AtomicBool>);
+/// Stops the spawned tasks when the grep future ends or is dropped: raises
+/// the halt flag, so they stop before their next file or read, and closes
+/// the outlet, so they send nothing more.
+struct StopOnDrop(Arc<Shared>);
 
-impl Drop for HaltOnDrop {
+impl Drop for StopOnDrop {
 	fn drop(&mut self) {
-		self.0.store(true, Ordering::Relaxed);
+		self.0.halt.store(true, Ordering::Relaxed);
+		if let Some(outlet) = &self.0.outlet {
+			outlet.sent.lock().closed = true;
+		}
 	}
 }
 
@@ -593,6 +875,12 @@ struct Shared {
 	filter:    PathFilter,
 	opts:      GrepOptions,
 	halt:      Arc<AtomicBool>,
+	/// A file's search hit the deadline (an open or read into memory cut off,
+	/// or a provider read in a stream that outlasted it): the result is
+	/// partial however the search's own race with the deadline came out.
+	expired:   Arc<AtomicBool>,
+	/// The sink, when the results are streamed.
+	outlet:    Option<Outlet>,
 }
 
 /// A search worker's state, kept across the files it searches.
@@ -696,10 +984,13 @@ pub async fn grep(fs: &Fs, root: &Path, mut opts: GrepOptions) -> Result<GrepRes
 		_ => return Ok(GrepResult::default()),
 	}
 	// The sink stays with this future, so every sender is gone once it
-	// returns even if a search task outlives it.
+	// returns even if a search task outlives it: the tasks send through the
+	// outlet, which only borrows it for each send.
 	let sink = opts.sink.take();
 	let halt = Arc::new(AtomicBool::new(false));
-	let _halt = HaltOnDrop(halt.clone());
+	let outlet = sink
+		.as_ref()
+		.map(|sink| Outlet::new(sink, Arc::clone(&halt)));
 	let shared = Arc::new(Shared {
 		engine: opts.engine.clone(),
 		multiline: opts.multiline,
@@ -711,69 +1002,77 @@ pub async fn grep(fs: &Fs, root: &Path, mut opts: GrepOptions) -> Result<GrepRes
 		filter,
 		opts,
 		halt,
+		expired: Arc::new(AtomicBool::new(false)),
+		outlet,
 	});
-	if file_type == Some(FileType::File) {
-		// Its own task: a streamed native file is searched by a synchronous
-		// reader, so this future stays free to be dropped (raising the halt
-		// flag the reader checks) while it runs.
-		let expired = Arc::new(AtomicBool::new(false));
-		let task = Arc::clone(&shared);
-		let task_expired = Arc::clone(&expired);
-		let mut searched = tokio::spawn(async move {
-			with_search!(&task, |search| file_root(
-				&search,
-				session,
-				&task.root,
-				&task.opts,
-				sink.as_ref(),
-				task.filter.types.as_ref(),
-				&task.halt,
-				&task_expired
-			)
-			.await)
-		});
-		let joined = match shared.opts.deadline {
-			None => searched.await,
-			Some(deadline) => tokio::select! {
-				joined = &mut searched => joined,
-				() = tokio::time::sleep_until(deadline) => {
-					// Stop the reader; a native stream returns what it matched so
-					// far. A read that does not return (a hung provider) is
-					// abandoned.
-					expired.store(true, Ordering::Relaxed);
-					shared.halt.store(true, Ordering::Relaxed);
-					if let Ok(joined) = tokio::time::timeout(FILE_STOP_GRACE, &mut searched).await {
-						joined
-					} else {
-						searched.abort();
-						return Ok(GrepResult { timed_out: true, ..GrepResult::default() });
-					}
-				},
-			},
+	let _stop = StopOnDrop(Arc::clone(&shared));
+	let result = if file_type == Some(FileType::File) {
+		search_file(&shared, session).await
+	} else {
+		drop(session);
+		let wopts = walk::Options {
+			hidden: shared.opts.walk.hidden,
+			gitignore: shared.opts.walk.gitignore,
+			skip_git: true,
+			skip_node_modules: !shared
+				.filter
+				.scope
+				.as_ref()
+				.is_some_and(Selector::mentions_node_modules),
+			follow_links: false,
+			detail: Detail::Minimal,
+			max_depth: shared.filter.scope.as_ref().and_then(Selector::max_depth),
+			workers: shared.opts.walk.workers,
+			cache: shared.opts.walk.cache,
+			..walk::Options::default()
 		};
-		return joined.unwrap_or_else(|join| std::panic::resume_unwind(join.into_panic()));
-	}
-	drop(session);
-	let wopts = walk::Options {
-		hidden: shared.opts.walk.hidden,
-		gitignore: shared.opts.walk.gitignore,
-		skip_git: true,
-		skip_node_modules: !shared
-			.filter
-			.scope
-			.as_ref()
-			.is_some_and(Selector::mentions_node_modules),
-		follow_links: false,
-		detail: Detail::Minimal,
-		max_depth: shared.filter.scope.as_ref().and_then(Selector::max_depth),
-		workers: shared.opts.walk.workers,
-		cache: shared.opts.walk.cache,
-		..walk::Options::default()
+		match shared.opts.max_count {
+			Some(max) if max > 0 => budgeted(Arc::clone(&shared), wopts, max).await,
+			_ => unbounded(Arc::clone(&shared), wopts).await,
+		}
 	};
-	match shared.opts.max_count {
-		Some(max) if max > 0 => budgeted(shared, wopts, max).await,
-		_ => unbounded(shared, wopts, sink).await,
-	}
+	let result = match &shared.outlet {
+		Some(outlet) => outlet.close(result),
+		None => result,
+	};
+	drop(sink);
+	result
+}
+
+/// Searches the file root in its own task: a streamed native file is
+/// searched by a synchronous reader, so this future stays free to be dropped
+/// (raising the halt flag the reader checks) while it runs.
+async fn search_file(shared: &Arc<Shared>, session: Session) -> Result<GrepResult, GrepError> {
+	let task = Arc::clone(shared);
+	let mut searched = tokio::spawn(async move {
+		with_search!(&task, |search| file_root(&search, &task, session).await)
+	});
+	let joined = match shared.opts.deadline {
+		None => searched.await,
+		Some(deadline) => tokio::select! {
+			joined = &mut searched => joined,
+			() = tokio::time::sleep_until(deadline) => {
+				// Stop the reader; a native stream returns what it matched so
+				// far. A read that does not return (a hung provider) is
+				// abandoned.
+				shared.expired.store(true, Ordering::Relaxed);
+				shared.halt.store(true, Ordering::Relaxed);
+				if let Ok(joined) = tokio::time::timeout(FILE_STOP_GRACE, &mut searched).await {
+					joined
+				} else {
+					searched.abort();
+					return Ok(GrepResult { timed_out: true, ..GrepResult::default() });
+				}
+			},
+		},
+	};
+	// The deadline stopped the search if this future saw it pass or the task's
+	// stream did (a provider read that outlasted it); the joined task's
+	// writes are visible here.
+	let timed_out = shared.expired.load(Ordering::Relaxed);
+	joined
+		.unwrap_or_else(|join| std::panic::resume_unwind(join.into_panic()))
+		.map(|result| GrepResult { timed_out, ..result })
 }
 
 /// Opens the file at walk-relative `rel` for a budgeted pass, by path.
@@ -880,7 +1179,12 @@ impl walk::Sink for SearchSink {
 
 /// Searches one directory's candidates on the worker that listed it: opened
 /// relative to `dir` while the walk holds the listed directory, otherwise by
-/// absolute path.
+/// absolute path. Files over [`MAX_FILE_BYTES`] are streamed after the
+/// others, so a long stream cannot keep its smaller siblings from being
+/// searched before the deadline. With an outlet, a streamed file's content
+/// matches go there as they are found, not into its hit. The deadline cuts
+/// off an open or a read into memory; a stream stops on its own and keeps
+/// what it matched.
 async fn search_directory<M: Matcher + Sync>(
 	search: &Search<'_, M>,
 	shared: &Shared,
@@ -891,88 +1195,101 @@ async fn search_directory<M: Matcher + Sync>(
 	candidates: Vec<Candidate>,
 ) -> Found {
 	let mut found = Found::default();
-	for candidate in candidates {
-		if shared.halted() {
-			break;
-		}
-		let mut matches = Vec::new();
-		let searched = before_deadline(shared, async {
-			let opened = match dir {
-				Some(dir) => session.open_file_at(dir, candidate.name()).await,
-				None => session.open_file(worker.abs_rel(&candidate.rel)).await,
+	// The first pass defers the files over MAX_FILE_BYTES, which the second
+	// opens again and streams.
+	let mut pending = candidates;
+	let mut large = Vec::new();
+	for deferring in [true, false] {
+		for candidate in std::mem::take(&mut pending) {
+			if shared.halted() {
+				return found;
+			}
+			let opened = before_deadline(shared, async {
+				match dir {
+					Some(dir) => session.open_file_at(dir, candidate.name()).await,
+					None => session.open_file(worker.abs_rel(&candidate.rel)).await,
+				}
+			})
+			.await;
+			// The deadline passed during this file: the files before it stand.
+			let Some(opened) = opened else {
+				return found;
 			};
 			let Ok((mut file, info)) = opened else {
-				return FileSearch::Unreadable;
-			};
-			if info.size > MAX_FILE_BYTES {
-				return match scan_oversized(search, scratch, &mut file, &shared.halt, &mut matches)
-					.await
-				{
-					Some((outcome, partial)) => FileSearch::Done(outcome, partial, true),
-					None => FileSearch::Oversized,
-				};
-			}
-			if file
-				.read_into(&mut scratch.buf, MAX_FILE_BYTES + 1)
-				.await
-				.is_err()
-			{
-				return FileSearch::Unreadable;
-			}
-			// A file that grew past its listed size is searched over its first
-			// MAX_FILE_BYTES and reported as partial.
-			let grew = scratch.buf.len() as u64 > MAX_FILE_BYTES;
-			if grew {
-				scratch.buf.truncate(MAX_FILE_BYTES as usize);
-			}
-			FileSearch::Done(search.scan(&mut scratch.scanner, &scratch.buf, &mut matches), grew, grew)
-		})
-		.await;
-		let (outcome, partial, oversized) = match searched {
-			// The deadline passed during this file: the files before it stand.
-			None => break,
-			Some(FileSearch::Unreadable) => continue,
-			Some(FileSearch::Oversized) => {
-				found.oversized += 1;
 				continue;
-			},
-			Some(FileSearch::Done(outcome, partial, oversized)) => (outcome, partial, oversized),
-		};
-		found.searched += 1;
-		let path = String::from_utf8_lossy(&candidate.rel).into_owned();
-		if partial {
-			found.partial.push(path.clone());
+			};
+			if deferring && info.size > MAX_FILE_BYTES {
+				large.push(candidate);
+				continue;
+			}
+			let path = String::from_utf8_lossy(&candidate.rel);
+			let mut matches = Vec::new();
+			let (outcome, partial, oversized, sent) = if info.size > MAX_FILE_BYTES {
+				// A streamed file's content matches go to the outlet as they
+				// are found.
+				let feed = shared
+					.outlet
+					.as_ref()
+					.filter(|_| search.params.content && !search.multiline)
+					.map(|outlet| Feed::new(outlet, &path));
+				let sent = feed.is_some();
+				match scan_oversized(search, shared, scratch, file, &mut matches, feed).await {
+					Large::Scanned(outcome, partial) => (outcome, partial, true, sent),
+					Large::Unreadable => {
+						found.oversized += 1;
+						continue;
+					},
+					Large::TimedOut => return found,
+				}
+			} else {
+				let read = file.read_into(&mut scratch.buf, MAX_FILE_BYTES + 1);
+				match before_deadline(shared, read).await {
+					None => return found,
+					Some(Err(_)) => continue,
+					Some(Ok(())) => {},
+				}
+				// A file that grew past its listed size is searched over its
+				// first MAX_FILE_BYTES and reported as partial.
+				let grew = scratch.buf.len() as u64 > MAX_FILE_BYTES;
+				if grew {
+					scratch.buf.truncate(MAX_FILE_BYTES as usize);
+				}
+				(search.scan(&mut scratch.scanner, &scratch.buf, &mut matches), grew, grew, false)
+			};
+			found.searched += 1;
+			let path = path.into_owned();
+			if partial {
+				found.partial.push(path.clone());
+			}
+			if outcome.count > 0 && !sent {
+				found.hits.push(FileHit {
+					path,
+					matches,
+					count: outcome.count,
+					limit_reached: outcome.limit_reached,
+					oversized,
+				});
+			}
 		}
-		if outcome.count > 0 {
-			found.hits.push(FileHit {
-				path,
-				matches,
-				count: outcome.count,
-				limit_reached: outcome.limit_reached,
-				oversized,
-			});
-		}
+		pending = std::mem::take(&mut large);
 	}
 	found
-}
-
-/// One file's search in a directory walk.
-enum FileSearch {
-	Unreadable,
-	Oversized,
-	/// Searched: its outcome, whether only in part, whether over
-	/// [`MAX_FILE_BYTES`].
-	Done(ScanOutcome, bool, bool),
 }
 
 /// `work`'s result, or `None` once the search's deadline passes first, so a
 /// file that never finishes reading cannot hold back the files searched
 /// before it.
 async fn before_deadline<T>(shared: &Shared, work: impl Future<Output = T>) -> Option<T> {
-	match shared.opts.deadline {
-		None => Some(work.await),
-		Some(deadline) => tokio::time::timeout_at(deadline, work).await.ok(),
+	let Some(deadline) = shared.opts.deadline else {
+		return Some(work.await);
+	};
+	let finished = tokio::time::timeout_at(deadline, work).await.ok();
+	if finished.is_none() {
+		// Stop the walk and the other workers too.
+		shared.expired.store(true, Ordering::Relaxed);
+		shared.halt.store(true, Ordering::Relaxed);
 	}
+	finished
 }
 
 /// `stream`'s next item. Once `deadline` passes, `expired` is set, the search
@@ -1005,21 +1322,17 @@ async fn next_before<S: Stream + Unpin>(
 
 /// Searches every candidate of one walk, each directory's files on the
 /// walker worker that listed it; results merge into path order, files over
-/// [`MAX_FILE_BYTES`] (searched over that prefix) last. With a sink, each
-/// file's batches are sent as the directories' searches complete. At the
+/// [`MAX_FILE_BYTES`] last. With an outlet, each file held in memory is sent
+/// as the directories' searches complete (a streamed file's matches as they
+/// are found, by its worker) and the outlet counts the totals. At the
 /// deadline the walk stops and the files searched so far are the result.
-async fn unbounded(
-	shared: Arc<Shared>,
-	wopts: walk::Options,
-	sink: Option<mpsc::Sender<Vec<Match>>>,
-) -> Result<GrepResult, GrepError> {
+async fn unbounded(shared: Arc<Shared>, wopts: walk::Options) -> Result<GrepResult, GrepError> {
 	let mut walked =
 		walk::walk_sink(&shared.fs, &shared.root, &wopts, SearchSink { shared: Arc::clone(&shared) })
 			.await
 			.map_err(GrepError::Walk)?;
 	let (mut searched, mut oversized) = (0, 0);
 	let mut hits = Vec::new();
-	let mut streamed = GrepResult::default();
 	let mut partial = Vec::new();
 	let mut timed_out = false;
 	while let Some(batch) =
@@ -1029,36 +1342,33 @@ async fn unbounded(
 			searched += found.searched;
 			oversized += found.oversized;
 			partial.extend(found.partial);
-			let Some(sink) = &sink else {
+			let Some(outlet) = &shared.outlet else {
 				hits.extend(found.hits);
 				continue;
 			};
 			for hit in found.hits {
-				streamed.files_with_matches += 1;
-				streamed.total_matches += hit.count;
-				streamed.limit_reached |= hit.limit_reached;
-				for batch in batches(shared.mode, &hit.path, hit.matches, hit.count) {
-					sink
-						.send(batch)
-						.await
-						.map_err(|_| GrepError::Sink(SINK_CLOSED.to_owned()))?;
-				}
+				outlet
+					.deliver(shared.mode, &hit.path, hit.matches, hit.count, hit.limit_reached)
+					.await?;
 			}
 		}
 	}
 	// Dropping the walk cancels the directories still being listed.
 	drop(walked);
+	let timed_out = timed_out || shared.expired.load(Ordering::Relaxed);
 	if timed_out {
 		// Streams still running stop at their next read.
 		shared.halt.store(true, Ordering::Relaxed);
 	}
 	partial.sort_unstable();
-	if sink.is_some() {
-		streamed.files_searched = searched;
-		streamed.skipped_oversized = oversized;
-		streamed.timed_out = timed_out;
-		streamed.partial_files = partial;
-		return Ok(streamed);
+	if shared.outlet.is_some() {
+		return Ok(GrepResult {
+			files_searched: searched,
+			skipped_oversized: oversized,
+			timed_out,
+			partial_files: partial,
+			..GrepResult::default()
+		});
 	}
 	hits.sort_unstable_by(|a, b| (a.oversized, &a.path).cmp(&(b.oversized, &b.path)));
 	Ok(GrepResult {
@@ -1111,9 +1421,8 @@ fn search_in_order(
 						continue;
 					}
 					let (scratch, session) = &mut state;
-					let outcome = with_search!(&shared, |search| before_deadline(
-						&shared,
-						search_candidate(&search, &shared, scratch, session, &rel, prefix)
+					let outcome = with_search!(&shared, |search| search_candidate(
+						&search, &shared, scratch, session, &rel, prefix
 					)
 					.await);
 					// The deadline passed during this file: the files before it
@@ -1230,6 +1539,7 @@ async fn budgeted(
 		}
 	}
 	drop(results);
+	timed_out |= shared.expired.load(Ordering::Relaxed);
 	if !budget.settled
 		&& !timed_out
 		&& let Some(error) = failure.lock().take()
@@ -1247,6 +1557,7 @@ async fn budgeted(
 			}
 		}
 	}
+	let timed_out = timed_out || shared.expired.load(Ordering::Relaxed);
 	if timed_out {
 		// Streams still running stop at their next read.
 		shared.halt.store(true, Ordering::Relaxed);

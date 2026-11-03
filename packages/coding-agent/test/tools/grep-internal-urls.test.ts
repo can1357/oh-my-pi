@@ -13,6 +13,8 @@ import {
 	LocalProtocolHandler,
 	type ProtocolHandler,
 } from "@oh-my-pi/pi-coding-agent/internal-urls";
+import { InternalUrlFilesystem } from "@oh-my-pi/pi-coding-agent/internal-urls/url-filesystem";
+import { ShellFsOp } from "@oh-my-pi/pi-natives";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import * as sshFileTransfer from "@oh-my-pi/pi-coding-agent/ssh/file-transfer";
@@ -331,6 +333,26 @@ describe("GrepTool internal URL resolution", () => {
 		const tool = new GrepTool(createSession());
 		const result = await tool.execute("ranged-cap", { pattern: "needle", path: "virtual://big.md:2090-2100" });
 		expect(getResultText(result)).toContain("needle 2095");
+	});
+
+	it("streams a virtual file over 4 MB in bounded reads instead of reading it whole", async () => {
+		const filler = "filler line of virtual text\n".repeat(200_000);
+		registerVirtualDocs(new Map([["huge.md", `needle head\n${filler}needle tail\n`]]));
+		const handle = vi.spyOn(InternalUrlFilesystem.prototype, "handle");
+
+		const result = await new GrepTool(createSession()).execute("huge-virtual", {
+			pattern: "needle tail",
+			path: "virtual://huge.md",
+		});
+
+		// The match past 4 MB was found, and the provider was never asked for more than 1 MB at once.
+		expect(getResultText(result)).toContain("needle tail");
+		const readLengths = handle.mock.calls
+			.map(([request]) => request)
+			.filter(request => request.op === ShellFsOp.Read)
+			.map(request => request.length ?? 0);
+		expect(readLengths.length).toBeGreaterThan(0);
+		expect(Math.max(...readLengths)).toBeLessThanOrEqual(1024 * 1024);
 	});
 
 	it("truncates a multibyte virtual match by UTF-8 bytes and labels the notice bytes", async () => {

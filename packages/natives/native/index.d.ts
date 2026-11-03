@@ -2318,7 +2318,8 @@ export interface GrepOptions {
   filesystem?: ShellFilesystem
   /**
    * Stream results instead of returning them: called on the JS thread with
-   * batches (at most 1024 entries, files in no particular order) of what
+   * batches (at most 1024 entries, files in no particular order; a large
+   * file's matches can span several calls, between other files') of what
    * `matches` would hold, while the search runs. A slow callback pauses the
    * search instead of buffering. Successful completion waits for every
    * callback and carries counts with empty `matches`; cancellation also
@@ -2363,7 +2364,8 @@ export interface GrepResult {
   timedOut?: boolean
   /**
    * Files searched only in part (multiline search of a file over 4 MB, or a
-   * line too long to stream): matches past that point are missing.
+   * file over 4 MB whose read a line too long to stream or `timeoutMs`
+   * stopped): matches past that point are missing.
    */
   partialFiles?: Array<string>
 }

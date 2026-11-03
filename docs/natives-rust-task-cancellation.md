@@ -142,7 +142,7 @@ Synchronous loops (`task::blocking`, PTY) must call `heartbeat()` at predictable
 Observed patterns:
 
 - `grep`, `glob`, `fuzzyFind`, `listWorkspace`, `astGrep`, and `astEdit` run through `task::filesystem_future(env, tag, ct, fs, work)`. On abort/timeout the work future is dropped with the same rejection strings as `task::filesystem`. `pi-walker` has no runtime of its own: its futures spawn tasks with `tokio::spawn` on the current runtime, and dropping the future sets a halt flag (drop guard) that stops them. `walk::Tree` spends tokio's coop budget per entry (`tokio::task::coop::consume_budget`), so raced serial traversals also cancel.
-- `grep` streams batches through a bounded `tokio::sync::mpsc::Sender<Vec<Match>>`. The `onMatches` forwarder awaits each JS call (`call_async_catch`) and coalesces queued batches up to 1024 matches; a channel of 4 batches gives end-to-end backpressure.
+- `grep` streams batches through a bounded `tokio::sync::mpsc::Sender<Vec<Match>>`. The `onMatches` forwarder awaits each JS call (`call_async_catch`) and coalesces queued batches up to 1024 matches; a channel of 4 batches gives end-to-end backpressure. A file over 4 MiB from a filesystem provider, or streamed to `onMatches`, is scanned on Tokio's blocking pool (`spawn_blocking`), which dropping the future cannot abort: the scan stops at its next read once the halt flag is set (a provider read still waiting is abandoned within 10 ms of the flag, or at the deadline), or at its next batch once the task forwarding them is gone.
 - `astMatch` (in-memory `find_source`) stays on `task::blocking` with `CancelToken::cancellation()`.
 - `run_pty_sync` checks every loop tick with a maximum 16ms wait cadence.
 

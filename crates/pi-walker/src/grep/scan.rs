@@ -384,18 +384,28 @@ impl Scanner {
 	}
 }
 
+/// Where a streamed scan sends its matches while it runs: once `size` are
+/// held, they go to `send` before the next one is kept, so a large file's
+/// matches are never all in memory at once. An error from `send` ends the
+/// scan.
+pub struct Batches<'a> {
+	pub size: usize,
+	pub send: &'a mut dyn FnMut(Vec<Match>) -> io::Result<()>,
+}
+
 /// pi's `MatchCollector` over grep-searcher: the streamed search of a file
-/// root too large to hold in memory.
-struct StreamCollector<'a, M> {
+/// too large to hold in memory.
+struct StreamCollector<'a, 'b, M> {
 	matcher: &'a M,
 	params:  &'a ScanParams,
 	out:     &'a mut Vec<Match>,
+	batches: Option<Batches<'b>>,
 	res:     ScanOutcome,
 	skipped: u64,
 	before:  Vec<ContextLine>,
 }
 
-impl<M: Matcher> Sink for StreamCollector<'_, M> {
+impl<M: Matcher> Sink for StreamCollector<'_, '_, M> {
 	type Error = io::Error;
 
 	fn matched(&mut self, _: &Searcher, mat: &SinkMatch<'_>) -> Result<bool, io::Error> {
@@ -409,6 +419,14 @@ impl<M: Matcher> Sink for StreamCollector<'_, M> {
 			return Ok(true);
 		}
 		if self.params.content {
+			// A full batch goes before this match is kept: the after-context of
+			// its last match is complete, since this one follows it.
+			if let Some(batches) = &mut self.batches
+				&& self.out.len() >= batches.size
+			{
+				let full = std::mem::replace(self.out, Vec::with_capacity(batches.size));
+				(batches.send)(full)?;
+			}
 			let range = mat.bytes_range_in_buffer();
 			let (text, truncated, column) = matched_text(
 				self.matcher,
@@ -461,15 +479,16 @@ impl<M: Matcher> Sink for StreamCollector<'_, M> {
 
 /// Searches `reader` line by line through grep-searcher's bounded buffer
 /// (lines up to [`STREAM_LINE_LIMIT`]), with the semantics of
-/// [`Scanner::scan`] in line mode.
-/// Streams `reader` through `matcher`. Returns what was counted and collected,
-/// and the error that stopped the stream early, if any: the counts cover the
-/// lines read before it.
+/// [`Scanner::scan`] in line mode, collecting into `out`; with `batches`,
+/// `out` is handed on whenever it is full. Returns what was counted and
+/// collected, and the error that stopped the stream early, if any: the
+/// counts cover the lines read before it.
 pub fn scan_reader<M: Matcher>(
 	matcher: &M,
 	reader: impl io::Read,
 	p: &ScanParams,
 	out: &mut Vec<Match>,
+	batches: Option<Batches<'_>>,
 ) -> (ScanOutcome, Option<io::Error>) {
 	let (before, after) = if p.content {
 		(p.before, p.after)
@@ -487,6 +506,7 @@ pub fn scan_reader<M: Matcher>(
 		matcher,
 		params: p,
 		out,
+		batches,
 		res: ScanOutcome::default(),
 		skipped: 0,
 		before: Vec::new(),

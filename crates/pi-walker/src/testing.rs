@@ -5,7 +5,10 @@ use std::{
 	collections::BTreeMap,
 	io::{self, SeekFrom},
 	path::{Path, PathBuf},
-	sync::Arc,
+	sync::{
+		Arc,
+		atomic::{AtomicUsize, Ordering},
+	},
 	time::{Duration, SystemTime},
 };
 
@@ -125,11 +128,17 @@ fn metadata_of(node: &Node) -> Metadata {
 /// In-memory `mem://` provider: files, directories, symlinks (absolute URL
 /// targets, followed by `metadata`/`open`), and FIFOs. Paths are stored as
 /// spelled (percent-encoded segments); every operation completes immediately,
-/// except reads of a file added with [`MemFs::add_stalled_file`].
+/// except reads of a file added with [`MemFs::add_stalled_file`] or
+/// [`MemFs::add_file_stalled_at`]. It records the largest buffer a read was
+/// given ([`MemFs::take_largest_read`]) and counts the files open
+/// ([`MemFs::open_files`]).
 #[derive(Debug, Default)]
 pub struct MemFs {
-	tree:    Mutex<Tree>,
-	stalled: Mutex<std::collections::BTreeSet<PathBuf>>,
+	tree:         Mutex<Tree>,
+	/// Files whose reads at or past the offset never complete.
+	stalled:      Mutex<BTreeMap<PathBuf, u64>>,
+	largest_read: Arc<AtomicUsize>,
+	open_files:   Arc<AtomicUsize>,
 }
 
 impl MemFs {
@@ -155,8 +164,26 @@ impl MemFs {
 	/// Creates the file at `path` whose reads never complete, as a hung
 	/// network mount's would.
 	pub fn add_stalled_file(&self, path: &str, contents: &[u8]) {
+		self.add_file_stalled_at(path, contents, 0);
+	}
+
+	/// Creates the file at `path` whose reads end at byte `offset` and, from
+	/// there, never complete.
+	pub fn add_file_stalled_at(&self, path: &str, contents: &[u8], offset: u64) {
 		self.add_file(path, contents);
-		self.stalled.lock().insert(PathBuf::from(path));
+		self.stalled.lock().insert(PathBuf::from(path), offset);
+	}
+
+	/// The largest buffer one read was given since the last call, so a test
+	/// can tell a streamed file from one read whole.
+	pub fn take_largest_read(&self) -> usize {
+		self.largest_read.swap(0, Ordering::Relaxed)
+	}
+
+	/// Handles opened and not yet dropped, so a test can tell a file a
+	/// stopped search released from one a stuck reader still holds.
+	pub fn open_files(&self) -> usize {
+		self.open_files.load(Ordering::Relaxed)
 	}
 
 	/// Creates the directory at `path` (and missing ancestors).
@@ -181,24 +208,37 @@ impl MemFs {
 /// Open [`MemFs`] file: shared contents plus this handle's cursor.
 #[derive(Debug)]
 struct MemHandle {
-	data:  Arc<Mutex<Vec<u8>>>,
-	pos:   Mutex<u64>,
-	ino:   u64,
-	mtime: u64,
-	/// Reads never complete.
-	stall: bool,
+	data:         Arc<Mutex<Vec<u8>>>,
+	pos:          Mutex<u64>,
+	ino:          u64,
+	mtime:        u64,
+	/// Reads at or past this offset never complete.
+	stall:        Option<u64>,
+	largest_read: Arc<AtomicUsize>,
+	open_files:   Arc<AtomicUsize>,
+}
+
+impl Drop for MemHandle {
+	fn drop(&mut self) {
+		self.open_files.fetch_sub(1, Ordering::Relaxed);
+	}
 }
 
 #[async_trait]
 impl FileHandle for MemHandle {
 	async fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
-		if self.stall {
+		self.largest_read.fetch_max(buf.len(), Ordering::Relaxed);
+		if self.stall.is_some_and(|at| *self.pos.lock() >= at) {
 			std::future::pending::<()>().await;
 		}
 		let data = self.data.lock();
 		let mut pos = self.pos.lock();
-		let start = usize::try_from(*pos).map_or(data.len(), |pos| pos.min(data.len()));
-		let n = buf.len().min(data.len() - start);
+		let end = self
+			.stall
+			.and_then(|at| usize::try_from(at).ok())
+			.map_or(data.len(), |at| at.min(data.len()));
+		let start = usize::try_from(*pos).map_or(end, |pos| pos.min(end));
+		let n = buf.len().min(end - start);
 		buf[..n].copy_from_slice(&data[start..start + n]);
 		*pos += n as u64;
 		Ok(n)
@@ -260,8 +300,19 @@ impl FileSystem for MemFs {
 			data.lock().clear();
 		}
 		drop(tree);
-		let stall = self.stalled.lock().contains(path);
-		Ok(File::from_handle(MemHandle { data, pos: Mutex::new(0), ino, mtime, stall }))
+		let stall = self.stalled.lock().get(path).copied();
+		let largest_read = Arc::clone(&self.largest_read);
+		let open_files = Arc::clone(&self.open_files);
+		open_files.fetch_add(1, Ordering::Relaxed);
+		Ok(File::from_handle(MemHandle {
+			data,
+			pos: Mutex::new(0),
+			ino,
+			mtime,
+			stall,
+			largest_read,
+			open_files,
+		}))
 	}
 
 	async fn metadata(&self, path: &Path) -> io::Result<Metadata> {

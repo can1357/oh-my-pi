@@ -1,6 +1,7 @@
 use std::{
 	fmt::Write as _,
 	fs,
+	io::Write as _,
 	path::{Path, PathBuf},
 	sync::{
 		Arc,
@@ -370,19 +371,30 @@ fn long_line_window_shows_an_empty_match_at_the_end_of_input() {
 	}
 }
 
-/// Line-mode outcome and matches of the scanner and of the chunked stream.
+/// Line-mode outcome and matches of the scanner, of the chunked stream, and
+/// of the chunked stream handing its matches on in batches of two.
 fn scan_both<M: grep_matcher::Matcher>(
 	matcher: &M,
 	doc: &[u8],
 	params: &scan::ScanParams,
-) -> [(scan::ScanOutcome, Vec<Match>); 2] {
+) -> [(scan::ScanOutcome, Vec<Match>); 3] {
 	let (mut ours, mut theirs) = (Vec::new(), Vec::new());
 	let a = scan::Scanner::default()
 		.scan(matcher, false, false, doc, params, &mut ours)
 		.unwrap_or_else(|err| panic!("scan: {err}"));
-	let (b, stopped) = scan::scan_reader(matcher, doc, params, &mut theirs);
+	let (b, stopped) = scan::scan_reader(matcher, doc, params, &mut theirs, None);
 	assert!(stopped.is_none(), "stream: {stopped:?}");
-	[(a, ours), (b, theirs)]
+	let (mut sent, mut held) = (Vec::new(), Vec::new());
+	let mut send = |batch: Vec<Match>| -> std::io::Result<()> {
+		assert_eq!(batch.len(), 2, "only full batches go out mid-scan");
+		sent.extend(batch);
+		Ok(())
+	};
+	let batches = scan::Batches { size: 2, send: &mut send };
+	let (c, stopped) = scan::scan_reader(matcher, doc, params, &mut held, Some(batches));
+	assert!(stopped.is_none(), "batched stream: {stopped:?}");
+	sent.extend(held);
+	[(a, ours), (b, theirs), (c, sent)]
 }
 
 /// The in-memory scanner and grep-searcher (which streams oversized file
@@ -417,11 +429,12 @@ fn scanner_matches_grep_searcher_in_line_mode() {
 				cap:         [None, Some(0), Some(1), Some(2), Some(5)][next(5)],
 				probe:       true,
 			};
-			let [ours, theirs] = match &engine {
+			let [ours, theirs, batched] = match &engine {
 				Engine::Rust(m) => scan_both(m, doc.as_bytes(), &params),
 				Engine::Pcre(m) => scan_both(m, doc.as_bytes(), &params),
 			};
 			assert_eq!(ours, theirs, "{pattern} {params:?}\n{doc}");
+			assert_eq!(theirs, batched, "batched: {pattern} {params:?}\n{doc}");
 		}
 	}
 }
@@ -1020,6 +1033,254 @@ async fn sink_receives_bounded_batches_and_the_result_only_counts() {
 			assert_eq!(m.text, format!("needle {i}"));
 			assert_eq!(m.after, [ContextLine { line: 2 * i as u64 + 2, text: format!("ctx {i}") }]);
 		}
+	}
+}
+
+/// Contents over [`MAX_FILE_BYTES`] whose every line matches `needle`, and
+/// their line count.
+fn dense_oversized() -> (String, u64) {
+	let mut body = String::new();
+	let mut lines = 0u64;
+	while body.len() as u64 <= MAX_FILE_BYTES + 1024 {
+		let _ =
+			writeln!(body, "needle {lines:07} on a line long enough to keep the match count modest");
+		lines += 1;
+	}
+	(body, lines)
+}
+
+/// A [`dense_oversized`] file, its contents, and its line count.
+fn write_dense_oversized(dir: &TempDir, rel: &str) -> (PathBuf, String, u64) {
+	let (body, lines) = dense_oversized();
+	(dir.write(rel, &body), body, lines)
+}
+
+/// With a sink, a file over [`MAX_FILE_BYTES`] sends its matches in bounded
+/// batches while it is read, not once it ends: the search waits on a
+/// receiver that stops taking batches mid-file, so a line appended to the
+/// file then is still found. The totals count exactly what was sent. A
+/// directory search and a file root alike.
+#[tokio::test(flavor = "multi_thread")]
+async fn sink_receives_a_large_files_batches_while_it_is_read() {
+	let dir = TempDir::new();
+	let (big, body, lines) = write_dense_oversized(&dir, "big.txt");
+	let engine = needle();
+	let native = Fs::native();
+	for root in [dir.path().to_path_buf(), big.clone()] {
+		fs::write(&big, &body).expect("reset the file");
+		let (tx, mut rx) = mpsc::channel(1);
+		let opts = GrepOptions { sink: Some(tx), ..options(&engine) };
+		let drain = async {
+			let first = rx.recv().await.expect("a first batch");
+			// The search waits for this receiver, far from the file's end.
+			fs::OpenOptions::new()
+				.append(true)
+				.open(&big)
+				.and_then(|mut file| file.write_all(b"needle appended\n"))
+				.expect("append a line");
+			let mut batches = vec![first];
+			while let Some(batch) = rx.recv().await {
+				batches.push(batch);
+			}
+			batches
+		};
+		let (res, batches) = tokio::join!(grep(&native, &root, opts), drain);
+		let res = res.expect("grep succeeds");
+		assert!(
+			batches
+				.iter()
+				.all(|batch| !batch.is_empty() && batch.len() <= 1024),
+			"{root:?}"
+		);
+		let sent: Vec<&Match> = batches.iter().flatten().collect();
+		assert_eq!(sent.len() as u64, lines + 1, "{root:?}: every line and the appended one");
+		assert_eq!(sent.last().map(|m| m.text.as_str()), Some("needle appended"), "{root:?}");
+		assert!(
+			sent
+				.iter()
+				.all(|m| m.path == sent[0].path && !m.path.is_empty()),
+			"{root:?}"
+		);
+		assert!(res.matches.is_empty());
+		assert_eq!(
+			(res.total_matches, res.files_with_matches, res.files_searched, res.timed_out),
+			(lines + 1, 1, 1, false),
+			"{root:?}"
+		);
+
+		let (res, batches) =
+			run_sunk(&root, GrepOptions { mode: Mode::Count, ..options(&engine) }).await;
+		let res = res.expect("grep succeeds");
+		let counts: Vec<Option<u64>> = batches.iter().flatten().map(|m| m.count).collect();
+		assert_eq!(counts, [Some(lines + 1)], "{root:?}");
+		assert_eq!((res.total_matches, res.files_with_matches), (lines + 1, 1), "{root:?}");
+	}
+}
+
+/// A deadline that passes while a large file waits on a stalled receiver ends
+/// the search: the file's scan stops, what it matched is still sent, the
+/// totals count exactly the matches the receiver got, and the sink closes
+/// once the search returns.
+#[tokio::test(flavor = "multi_thread")]
+async fn deadline_during_a_large_files_stream_counts_what_was_sent() {
+	let dir = TempDir::new();
+	let (big, _, lines) = write_dense_oversized(&dir, "big.txt");
+	let engine = needle();
+	let native = Fs::native();
+	for root in [dir.path().to_path_buf(), big] {
+		let (tx, mut rx) = mpsc::channel(1);
+		let deadline = tokio::time::Instant::now() + Duration::from_millis(300);
+		let opts = GrepOptions { sink: Some(tx), deadline: Some(deadline), ..options(&engine) };
+		let drain = async {
+			let mut sent = 0u64;
+			let mut stalled = false;
+			while let Some(batch) = rx.recv().await {
+				if !stalled {
+					stalled = true;
+					// Hold the search mid-file until just past its deadline.
+					tokio::time::sleep_until(deadline + Duration::from_millis(100)).await;
+				}
+				assert!(batch.len() <= 1024);
+				sent += batch.len() as u64;
+			}
+			sent
+		};
+		let (res, sent) = tokio::time::timeout(Duration::from_secs(20), async {
+			tokio::join!(grep(&native, &root, opts), drain)
+		})
+		.await
+		.expect("the deadline ends the search and closes the sink");
+		let res = res.expect("a timed-out stream still succeeds");
+		assert!(res.timed_out, "{root:?}");
+		assert_eq!(res.total_matches, sent, "{root:?}");
+		assert!(0 < sent && sent < lines, "{root:?}: {sent} of {lines}");
+		assert_eq!((res.files_with_matches, res.files_searched), (1, 1), "{root:?}");
+		assert_eq!(res.partial_files.len(), 1, "{root:?}: the deadline stopped its stream");
+	}
+}
+
+/// A provider file over [`MAX_FILE_BYTES`] is streamed, not read whole: no
+/// read is given more than a streaming buffer, and every line is still
+/// searched, in a directory and as a file root, with and without a sink.
+#[tokio::test(flavor = "multi_thread")]
+async fn provider_files_over_the_window_are_streamed_not_read_whole() {
+	let (body, lines) = dense_oversized();
+	let (mem, vfs) = crate::testing::MemFs::with_files(&[("mem://root/big.txt", &body)]);
+	let fs = Fs::Provider(vfs);
+	let engine = needle();
+	let bound = MAX_FILE_BYTES as usize / 4;
+	for root in [Path::new("mem://root"), Path::new("mem://root/big.txt")] {
+		for mode in [Mode::Content, Mode::Count] {
+			let res = grep(&fs, root, GrepOptions { mode, ..options(&engine) })
+				.await
+				.expect("grep succeeds");
+			assert_eq!(res.total_matches, lines, "{root:?} {mode:?}");
+			if mode == Mode::Content {
+				assert_eq!(res.matches.len() as u64, lines, "{root:?}");
+			}
+			assert!(res.partial_files.is_empty(), "{root:?} {mode:?}");
+			let largest = mem.take_largest_read();
+			assert!(largest <= bound, "{root:?} {mode:?}: one read of {largest} bytes");
+		}
+		let (tx, mut rx) = mpsc::channel::<Vec<Match>>(1);
+		let drain = async {
+			let mut sent = 0u64;
+			while let Some(batch) = rx.recv().await {
+				sent += batch.len() as u64;
+			}
+			sent
+		};
+		let opts = GrepOptions { sink: Some(tx), ..options(&engine) };
+		let (res, sent) = tokio::join!(grep(&fs, root, opts), drain);
+		assert_eq!((res.expect("grep succeeds").total_matches, sent), (lines, lines), "{root:?}");
+		let largest = mem.take_largest_read();
+		assert!(largest <= bound, "{root:?} with a sink: one read of {largest} bytes");
+	}
+}
+
+/// A deadline that passes while a provider file's stream waits on a read
+/// that never returns stops that file's search: the matches read before it
+/// stand and the file is named as searched in part, in a directory and as a
+/// file root alike.
+#[tokio::test(flavor = "multi_thread")]
+async fn deadline_stops_a_stalled_provider_stream_and_names_it_partial() {
+	let (body, _) = dense_oversized();
+	// Reads end at a line boundary near 64 KiB, well before the deadline, and
+	// then hang.
+	let stall = body[..64 << 10].rfind('\n').expect("a line") + 1;
+	let before = body[..stall].lines().count() as u64;
+	let (mem, vfs) = crate::testing::MemFs::with_files(&[]);
+	mem.add_file_stalled_at("mem://root/big.txt", body.as_bytes(), stall as u64);
+	let fs = Fs::Provider(vfs);
+	let engine = needle();
+	for (root, named) in [("mem://root", "big.txt"), ("mem://root/big.txt", "mem://root/big.txt")] {
+		for mode in [Mode::Content, Mode::Count] {
+			let deadline = tokio::time::Instant::now() + Duration::from_millis(500);
+			let opts = GrepOptions { mode, deadline: Some(deadline), ..options(&engine) };
+			let res = tokio::time::timeout(Duration::from_secs(10), grep(&fs, Path::new(root), opts))
+				.await
+				.expect("the deadline ends the search")
+				.expect("a timed-out search still succeeds");
+			assert!(res.timed_out, "{root} {mode:?}");
+			assert_eq!(res.total_matches, before, "{root} {mode:?}: the matches before the stall");
+			assert_eq!(res.files_searched, 1, "{root} {mode:?}");
+			assert_eq!(res.partial_files, [named], "{root} {mode:?}");
+		}
+	}
+}
+
+/// Without a budget, a directory's files over [`MAX_FILE_BYTES`] are streamed
+/// after the files held in memory: a large file listed first that outlasts
+/// the deadline does not keep its smaller siblings from being searched, and
+/// is named as searched in part.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_large_file_that_outlasts_the_deadline_leaves_its_siblings_searched() {
+	let (body, _) = dense_oversized();
+	let stall = body[..64 << 10].rfind('\n').expect("a line") + 1;
+	let (mem, vfs) =
+		crate::testing::MemFs::with_files(&[("mem://root/b_small.txt", "needle small\n")]);
+	mem.add_file_stalled_at("mem://root/a_big.txt", body.as_bytes(), stall as u64);
+	let fs = Fs::Provider(vfs);
+	let engine = needle();
+	for mode in [Mode::Content, Mode::Count] {
+		let deadline = tokio::time::Instant::now() + Duration::from_millis(500);
+		let opts = GrepOptions { mode, deadline: Some(deadline), ..options(&engine) };
+		let res =
+			tokio::time::timeout(Duration::from_secs(10), grep(&fs, Path::new("mem://root"), opts))
+				.await
+				.expect("the deadline ends the search")
+				.expect("a timed-out search still succeeds");
+		assert!(res.timed_out, "{mode:?}");
+		assert!(paths(&res).contains(&"b_small.txt"), "{mode:?}: {:?}", paths(&res));
+		assert_eq!(res.files_searched, 2, "{mode:?}");
+		assert_eq!(res.partial_files, ["a_big.txt"], "{mode:?}");
+	}
+}
+
+/// Dropping a search without a deadline whose provider stream waits on a read
+/// that never returns releases the file: the halt flag ends the read, so the
+/// blocking thread scanning it is not held until the provider answers. In a
+/// directory and as a file root alike.
+#[tokio::test(flavor = "multi_thread")]
+async fn dropping_a_search_releases_a_stalled_provider_stream() {
+	let (body, _) = dense_oversized();
+	let stall = body[..64 << 10].rfind('\n').expect("a line") + 1;
+	let (mem, vfs) = crate::testing::MemFs::with_files(&[]);
+	mem.add_file_stalled_at("mem://root/big.txt", body.as_bytes(), stall as u64);
+	let fs = Fs::Provider(vfs);
+	let engine = needle();
+	for root in ["mem://root", "mem://root/big.txt"] {
+		let search = grep(&fs, Path::new(root), options(&engine));
+		let waited = tokio::time::timeout(Duration::from_millis(300), search).await;
+		assert!(waited.is_err(), "{root}: the search waits on the stalled read");
+		// The timeout dropped the search.
+		let released = tokio::time::timeout(Duration::from_secs(5), async {
+			while mem.open_files() > 0 {
+				tokio::time::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await;
+		assert!(released.is_ok(), "{root}: the stalled file is still open");
 	}
 }
 
