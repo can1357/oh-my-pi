@@ -1,5 +1,5 @@
 import type { Component } from "../tui";
-import { getProjectDir } from "@oh-my-pi/pi-utils";
+import { getProjectDir, jsonContainerEnd } from "@oh-my-pi/pi-utils";
 import { highlightCode, type Theme } from "../theme/theme";
 import { renderStatusLine } from "../render/status-line";
 import { framedToolCard, type ToolCardSnapshot } from "../render/tool-card";
@@ -7,11 +7,13 @@ import { formatOutputPaneLines } from "../render/output-pane";
 import {
 	capPreviewLines,
 	DEFAULT_TERMINAL_PREVIEW_LINES,
+	formatDuration,
 	formatToolWorkingDirectory,
 	previewWindowRows,
 	replaceTabs,
 } from "../render/render-utils";
 import {
+	formatMinimizedMeta,
 	formatStyledTruncationWarning,
 	type OutputMeta,
 	stripOutputNotice,
@@ -26,6 +28,7 @@ import type {
 	ToolRenderer,
 } from "./renderer";
 import { INTENT_FIELD, type TspTone } from "@oh-my-pi/pi-wire";
+import type { SpotlightDetails } from "../chat/spotlight";
 import { plainText } from "../native/spans";
 import { resultText, runBox, runFoot, runInput, runOutput, type RunState } from "./native-view";
 
@@ -68,6 +71,10 @@ export interface BashToolDetails {
 	exitCode?: number;
 	/** True when the command was killed by its timeout deadline (not a failure). */
 	timedOut?: boolean;
+	/** Text the command wrote to `out://`, oldest first; transcripts draw each as a reply after the call. */
+	replies?: string[];
+	/** What the session's Spotlight shaping did to the output. */
+	spotlight?: SpotlightDetails;
 	/** Live ACP update only; completed results refer to released terminals. */
 	terminalId?: string;
 	service?: {
@@ -173,28 +180,10 @@ function extractPartialBashEnv(partialJson: string | undefined): Readonly<Record
 	const objectStart = envStart === -1 ? -1 : partialJson.indexOf("{", envStart);
 	if (objectStart !== -1) {
 		// Scan only the env object: stop at its closing brace (outside strings)
-		// so the keys that follow it are not read as env assignments.
-		let objectEnd = partialJson.length;
-		let depth = 0;
-		for (let i = objectStart + 1; i < partialJson.length; i++) {
-			const ch = partialJson.charCodeAt(i);
-			if (ch === 0x22) {
-				// Skip the string body, honoring escapes; an unterminated string runs to the end.
-				for (i++; i < partialJson.length; i++) {
-					const inner = partialJson.charCodeAt(i);
-					if (inner === 0x5c) i++;
-					else if (inner === 0x22) break;
-				}
-			} else if (ch === 0x7b || ch === 0x5b) {
-				depth++;
-			} else if (ch === 0x7d || ch === 0x5d) {
-				if (depth === 0) {
-					objectEnd = i;
-					break;
-				}
-				depth--;
-			}
-		}
+		// so the keys that follow it are not read as env assignments. An
+		// unclosed object (still streaming) runs to the end.
+		const end = jsonContainerEnd(partialJson, objectStart);
+		const objectEnd = end === -1 ? partialJson.length : end - 1;
 		const envBody = partialJson.slice(objectStart + 1, objectEnd);
 		const matcher = /"([A-Za-z_][A-Za-z0-9_]*)"\s*:\s*"((?:\\.|[^"\\])*)(?:"|$)/gu;
 		for (const match of envBody.matchAll(matcher)) {
@@ -366,6 +355,10 @@ function bashStatsParts(
 	if (artifactId) {
 		statsParts.push(`Artifact: ${artifactId}`);
 	}
+	const minimized = details?.meta?.minimized;
+	if (minimized) {
+		statsParts.push(`Minimized: ${formatMinimizedMeta(minimized)}`);
+	}
 	if (isError && typeof details?.exitCode === "number") {
 		statsParts.push(`Exit: ${details.exitCode}`);
 	}
@@ -415,6 +408,8 @@ function shellFootParts(details: BashToolDetails | undefined, artifactId: string
 		if (service.pid !== undefined) parts.push(`PID ${service.pid}`);
 	}
 	if (artifactId) parts.push(`Artifact ${artifactId}`);
+	const minimized = details?.meta?.minimized;
+	if (minimized) parts.push(`Minimized ${formatMinimizedMeta(minimized)}`);
 	return parts;
 }
 
@@ -470,9 +465,14 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 								},
 								uiTheme,
 							);
+				const elapsedMs = options.executionStarted ? options.elapsedMs : undefined;
 				return {
 					header,
 					phase: options.spinnerFrame !== undefined ? "running" : "pending",
+					footerMeta:
+						elapsedMs === undefined || elapsedMs < 1000
+							? undefined
+							: uiTheme.fg("dim", `elapsed ${formatDuration(Math.floor(elapsedMs / 1000) * 1000)}`),
 					sections: [{ content: capPreviewLines(cmdLines, uiTheme, { expanded: options.expanded }) }],
 				};
 			});
@@ -528,6 +528,7 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 			let cachedIsPartial: boolean | undefined;
 			let cachedPreviewWindow: number | undefined;
 			let cachedSnapshot: ToolCardSnapshot | undefined;
+			let cachedElapsedSecond: number | undefined;
 			const dropSnapshot = () => {
 				cachedSnapshot = undefined;
 				cachedWidth = undefined;
@@ -536,6 +537,7 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 				cachedRawOutput = undefined;
 				cachedIsPartial = undefined;
 				cachedPreviewWindow = undefined;
+				cachedElapsedSecond = undefined;
 			};
 
 			return framedToolCard(
@@ -553,6 +555,11 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 
 					const isPartial = options.isPartial === true;
 					const previewWindow = previewWindowRows();
+					// A running command shows its live elapsed time in the bottom
+					// border; key the cache on whole seconds so it advances once a
+					// second instead of rebuilding every spinner frame.
+					const liveElapsedMs = isPartial && details?.wallTimeMs === undefined ? options.elapsedMs : undefined;
+					const elapsedSecond = liveElapsedMs === undefined ? undefined : Math.floor(liveElapsedMs / 1000);
 
 					if (
 						cachedSnapshot !== undefined &&
@@ -561,7 +568,8 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 						cachedExpanded === expanded &&
 						cachedRawOutput === rawOutput &&
 						cachedIsPartial === isPartial &&
-						cachedPreviewWindow === previewWindow
+						cachedPreviewWindow === previewWindow &&
+						cachedElapsedSecond === elapsedSecond
 					) {
 						return cachedSnapshot;
 					}
@@ -576,13 +584,11 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 						rawOutputArtifact.artifactId,
 						isError,
 					);
-					const timeoutLine =
-						statsParts.length > 0
-							? uiTheme.fg(
-									"dim",
-									`${uiTheme.format.bracketLeft}${statsParts.join(" | ")}${uiTheme.format.bracketRight}`,
-								)
-							: undefined;
+					if (elapsedSecond !== undefined && elapsedSecond > 0) {
+						statsParts.unshift(`elapsed ${formatDuration(elapsedSecond * 1000)}`);
+					}
+					const footerMeta =
+						statsParts.length > 0 ? uiTheme.fg("dim", statsParts.join(uiTheme.sep.dot)) : undefined;
 					let warningLine: string | undefined;
 					if (details?.meta?.artifactError || (details?.meta?.truncation && !showingFullOutput)) {
 						warningLine = formatStyledTruncationWarning(details.meta, uiTheme) ?? undefined;
@@ -610,12 +616,12 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 						uiTheme,
 					);
 					const outputLines: string[] = [...formatted.lines];
-					if (timeoutLine) outputLines.push(timeoutLine);
 					if (warningLine) outputLines.push(warningLine);
 
 					const snapshot: ToolCardSnapshot = {
 						header,
 						phase: isPartial ? "partial" : isError ? (isTimeout ? "warning" : "error") : "success",
+						footerMeta,
 						sections: [
 							{
 								// Viewport-sized tail window in every state — streaming and final
@@ -636,6 +642,7 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 					cachedRawOutput = rawOutput;
 					cachedIsPartial = isPartial;
 					cachedPreviewWindow = previewWindow;
+					cachedElapsedSecond = elapsedSecond;
 					cachedSnapshot = snapshot;
 					return snapshot;
 				},
@@ -714,6 +721,9 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 		},
 		mergeCallAndResult: true,
 		inline: true,
+		// The live elapsed footer reads `options.elapsedMs` at render time; a
+		// once-a-second repaint keeps it moving for a quiet running command.
+		tickElapsed: true,
 	} satisfies ToolRenderer<TArgs, BashToolDetails>;
 }
 

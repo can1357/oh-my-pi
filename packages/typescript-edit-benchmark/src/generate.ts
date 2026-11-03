@@ -453,10 +453,6 @@ function recordRegion(usedLines: Map<string, number[]>, filePath: string, lineNu
 	usedLines.set(filePath, used);
 }
 
-function escapeRegExp(value: string): string {
-	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
 /** Where a bug sits for medium prompts: containing function, else file-third region. */
 function locateBug(
 	content: string,
@@ -485,7 +481,7 @@ function buildIdentifierPrompt(
 ): string | null {
 	const pair = info.identifier;
 	if (!pair) return null;
-	const wordRe = new RegExp(`(?<![A-Za-z0-9_$])${escapeRegExp(pair.misspelled)}(?![A-Za-z0-9_$])`, "g");
+	const wordRe = new RegExp(`(?<![A-Za-z0-9_$])${RegExp.escape(pair.misspelled)}(?![A-Za-z0-9_$])`, "g");
 	if (input.replace(wordRe, pair.correct) !== expected) return null;
 
 	const affectedLines: number[] = [];

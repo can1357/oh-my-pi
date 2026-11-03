@@ -64,6 +64,7 @@ export function openaiCodexModelManagerOptions(
 		providerId: "openai-codex",
 		cacheProviderId: resolveModelCacheProviderId("openai-codex", { baseUrl }),
 		dynamicModelsAuthoritative: providerEntry("openai-codex")?.dynamicModelsAuthoritative === true,
+		keepStaticNames: providerEntry("openai-codex")?.keepBundledNames === true,
 		...(resolveAccounts
 			? {
 					fetchDynamicModels: async () => {
@@ -93,11 +94,10 @@ export function openaiCodexModelManagerOptions(
  * {@link unionAccountCatalogs}.
  *
  * Returns `null` when any account's fetch failed transiently, so a partial list
- * cannot replace the previous or bundled authoritative catalog. An account
- * whose credential the backend rejected outright (401/403 — revoked or
- * deauthorized) contributes nothing and is skipped instead: it would otherwise
- * veto every sibling account's models until the user removes it. If no account
- * produced a catalog, discovery aborts the same way.
+ * cannot replace the previous or bundled authoritative catalog. A definitive
+ * account denial (401/403 auth or 402 payment) contributes nothing and is skipped
+ * instead: it would otherwise veto every sibling account's models until the
+ * account recovers. If no account produced a catalog, discovery aborts.
  */
 function unionCodexModels(
 	results: readonly { accountId: string | undefined; result: CodexModelDiscoveryResult | null }[],
@@ -106,7 +106,7 @@ function unionCodexModels(
 	for (const { accountId, result } of results) {
 		if (!result) return null;
 		if (result.rejectedStatus !== undefined) {
-			logger.warn("Codex model discovery skipped an account whose credential was rejected", {
+			logger.warn("Codex model discovery skipped an account denied by the backend", {
 				accountId,
 				status: result.rejectedStatus,
 			});
@@ -421,25 +421,30 @@ export interface TypeSafeModelManagerConfig {
 	fetch?: FetchImpl;
 }
 
-/** Discover account-visible judge models while keeping the bundled offline seed. */
+/**
+ * Discover account-visible judge models while keeping the bundled offline seed. `GET /v1/models` lists
+ * only aliases, yet TypeSafe accepts versioned ids whether or not they are listed, so a successful
+ * discovery is extended with the seed rows it omits (the pinned default judge, `jev-1.14.0`) instead of
+ * pruning them as `dynamicModelsAuthoritative` otherwise would.
+ */
 export function typesafeModelManagerOptions(config: TypeSafeModelManagerConfig = {}): ModelManagerOptions<"typesafe"> {
 	const { apiKey } = config;
 	const envBaseUrl = Bun.env.TYPESAFE_BASE_URL?.trim();
 	const baseUrl = (config.baseUrl ?? (envBaseUrl || TYPESAFE_DEFAULT_BASE_URL)).replace(/\/+$/, "");
-	const staticModels = seedModels<"typesafe">("typesafe");
+	const staticModels = seedModels<"typesafe">("typesafe").map(model => ({ ...model, baseUrl }));
 	return {
 		providerId: "typesafe",
 		cacheProviderId: resolveModelCacheProviderId("typesafe"),
-		staticModels: staticModels.map(model => ({ ...model, baseUrl })),
+		staticModels,
 		...(apiKey ? { dynamicModelsAuthoritative: true } : undefined),
 		...(apiKey
 			? {
-					fetchDynamicModels: () =>
-						fetchTypeSafeModels({
-							apiKey,
-							baseUrl,
-							fetch: config.fetch,
-						}),
+					fetchDynamicModels: async () => {
+						const discovered = await fetchTypeSafeModels({ apiKey, baseUrl, fetch: config.fetch });
+						if (!discovered) return discovered;
+						const listed = new Set(discovered.map(model => model.id));
+						return [...discovered, ...staticModels.filter(model => !listed.has(model.id))];
+					},
 				}
 			: undefined),
 	};

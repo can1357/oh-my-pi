@@ -308,6 +308,18 @@ function mapAssistantMessageUpdate(
 			}
 			break;
 		}
+		case "thinking_end": {
+			// Narration streams as thinking; once its block closes as narration,
+			// surface it as the reply it is.
+			const block = event.assistantMessageEvent.partial?.content?.[event.assistantMessageEvent.contentIndex];
+			if (block?.type !== "thinking" || !block.narration) return [];
+			sessionUpdate = "agent_message_chunk";
+			text = canonicalizeMessage(event.assistantMessageEvent.content);
+			if (text.length > 0 && progress) {
+				progress.textEmitted = true;
+			}
+			break;
+		}
 		case "done":
 			if (progress?.textEmitted) {
 				return [];
@@ -463,6 +475,7 @@ export function buildToolCallStartUpdate(input: {
 	const update: ToolCall & { sessionUpdate: "tool_call" } = {
 		sessionUpdate: "tool_call",
 		toolCallId: input.toolCallId,
+		name: input.toolName,
 		title: buildToolTitle(input.toolName, input.args, input.intent),
 		kind: mapToolKind(input.toolName, input.args),
 		status: input.status ?? "pending",

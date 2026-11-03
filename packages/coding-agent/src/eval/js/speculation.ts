@@ -500,6 +500,24 @@ function addBarrier(state: ProjectionState, reason: string, node: Node): false {
 	return false;
 }
 
+/** `print(...)` / `console.log(...)` on the unshadowed prelude bindings: output only, safe around shadow reads. */
+function isOutputCallee(callee: Node, state: ProjectionState): boolean {
+	let binding: string;
+	if (isIdentifier(callee, { name: "print" })) {
+		binding = "print";
+	} else if (
+		isMemberExpression(callee) &&
+		!callee.computed &&
+		isIdentifier(callee.object, { name: "console" }) &&
+		isIdentifier(callee.property, { name: "log" })
+	) {
+		binding = "console";
+	} else {
+		return false;
+	}
+	return !state.environment.has(binding) && !(binding in state.snapshot);
+}
+
 function hasToolBinding(statements: readonly Statement[]): boolean {
 	return statements.some(statement => {
 		if (isVariableDeclaration(statement)) {
@@ -660,9 +678,7 @@ function projectStatement(
 		}
 		if (
 			isCallExpression(expression) &&
-			isIdentifier(expression.callee, { name: "display" }) &&
-			!state.environment.has("display") &&
-			!("display" in state.snapshot) &&
+			isOutputCallee(expression.callee, state) &&
 			expression.arguments.every(argument => isExpression(argument) && projectExpression(argument, state))
 		) {
 			return true;

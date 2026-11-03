@@ -35,7 +35,7 @@ macro_rules! grammar {
 /// bare parser, which cannot run wasm grammars.
 fn parse_doc<L: LanguageExt + LanguageGrammar>(src: &str, lang: L) -> Result<StrDoc<L>, String> {
 	let language = lang.grammar().load().map_err(|err| err.to_string())?;
-	let tree = grammar::parse(&language, src)
+	let tree = grammar::parse(&language, src, None)
 		.map_err(|err| err.to_string())?
 		.ok_or("tree-sitter produced no tree")?;
 	Ok(StrDoc { src: src.to_owned(), lang, tree })

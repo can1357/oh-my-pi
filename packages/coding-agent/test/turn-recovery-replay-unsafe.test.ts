@@ -1253,6 +1253,10 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 				"Stream closed with error code NGHTTP2_INTERNAL_ERROR",
 				"OpenAI responses stream closed before a terminal response event was received",
 				"The socket connection was closed unexpectedly before the response completed",
+				// A gateway/proxy that cuts the upstream stream substitutes an in-band
+				// `error` frame for the missing terminal event; the provider reports it
+				// as the same envelope truncation a dropped connection produces.
+				"Anthropic stream envelope error: error frame received before message_stop (type=server_error code=upstream_stream_truncated): [upstream stream truncated (no completion event; 0 text chars)]",
 			]) {
 				const message = stalledTextTurn(undefined, errorMessage);
 				const { host, continues } = continuationHost(message);
@@ -1294,6 +1298,34 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 			expect(recovery.handleCommittedTextStreamStall(message)).toBe(true);
 		});
 
+		it("continues a Codex turn the native lane dropped over omp's steer after committed text", () => {
+			// The steer rejection drops the response mid-stream like a transport
+			// failure; committed text vetoes the replay retry, so without a
+			// continuation the session stopped on a pinned "Request failed".
+			const codex = getBundledModel("openai-codex", "gpt-6-astra");
+			if (!codex) throw new Error("Expected bundled Codex model");
+			const message = makeMessage(
+				[{ type: "text", text: "RoboOMP's attribution is already in. I'll squash" }],
+				codex,
+			);
+			message.errorMessage =
+				"Codex error event: The experimental native turn lane cannot accept stateful WebSocket messages while a native turn is running. Start a new independent response.create turn instead. (code=unsupported_native_inflight_message)";
+			const messages: AgentMessage[] = [message];
+			const continues: string[] = [];
+			const host = createHost(codex, modelRegistry, { messages, textOutputCommitted: true });
+			host.agent = {
+				state: { messages },
+				appendMessage: (appended: AgentMessage) => messages.push(appended),
+			} as never;
+			host.scheduleAgentContinue = options => continues.push(options.source);
+			const recovery = new TurnRecovery(host);
+
+			expect(recovery.isRetryableError(message)).toBe(false);
+			expect(recovery.handleCommittedTextStreamStall(message)).toBe(true);
+			expect(messages[0]).toBe(message);
+			expect(continues).toEqual(["stream-stall-continue"]);
+		});
+
 		it("leaves uncommitted text, tool turns, other errors, and disabled retry to the error path", () => {
 			const cases: Array<[AssistantMessage, boolean]> = [
 				[stalledTextTurn(), false],
@@ -1320,6 +1352,32 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 			recovery.setAutoRetryEnabled(false);
 			expect(recovery.handleCommittedTextStreamStall(message)).toBe(false);
 			expect(continues).toEqual([]);
+		});
+	});
+
+	describe("reasonless abort carrying only a fallback boundary", () => {
+		// A mid-turn server-side fallback persists a `fallback` boundary block
+		// before the fallback model emits anything. An abort right there leaves
+		// `[fallback]`: bookkeeping, no output, so the turn is as replay-safe to
+		// retry as an empty one.
+		function abortedTurn(content: AssistantMessage["content"]): AssistantMessage {
+			const message = makeMessage(content, model);
+			message.stopReason = "aborted";
+			message.errorMessage = "Request was aborted";
+			return message;
+		}
+
+		it("retries a boundary-only abort and still settles one carrying output", () => {
+			const boundary = abortedTurn([
+				{ type: "fallback", from: { model: "claude-opus-5-5" }, to: { model: "claude-opus-4-8" } },
+			]);
+			expect(new TurnRecovery(createHost(model, modelRegistry)).isRetryableReasonlessAbort(boundary)).toBe(true);
+
+			const withOutput = abortedTurn([
+				{ type: "fallback", from: { model: "claude-opus-5-5" }, to: { model: "claude-opus-4-8" } },
+				{ type: "text", text: "Partial answer" },
+			]);
+			expect(new TurnRecovery(createHost(model, modelRegistry)).isRetryableReasonlessAbort(withOutput)).toBe(false);
 		});
 	});
 });

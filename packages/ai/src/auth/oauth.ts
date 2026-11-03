@@ -185,6 +185,7 @@ export class OAuthAccounts implements OAuthApi {
 				await this.refresh(selection.credentialId, options.signal, {
 					reuseRecentMint: options.refreshReason === "auth-recovery",
 					reason: options.refreshReason,
+					rejectedAccess: options.rejectedAccessToken,
 				});
 				// The refresh re-lists rows, so a concurrently removed row can shift this one's position.
 				index = this.#deps.pool.entries(provider).findIndex(entry => entry.id === selection.credentialId);

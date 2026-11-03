@@ -35,7 +35,8 @@ export const cfgAutoResume = register({
 		tab: "interaction",
 		group: "Startup & Updates",
 		label: "Auto Resume",
-		description: "Automatically resume the most recent session in the current directory",
+		description:
+			"Automatically resume the most recent session in the current directory. If its model cannot be restored and model fallback is disabled, interactive startup warns and starts a new session without the saved history",
 	},
 });
 
@@ -388,6 +389,19 @@ export const cfgTuiResizeScrollback = register({
 	},
 });
 
+export const cfgTuiCompleteScrollback = register({
+	id: "tui.completeScrollback",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Complete Scrollback",
+		description:
+			"Send transcript rows pushed off screen by a growing HUD or dialog straight to scrollback; when it shrinks, blank rows sit between the transcript and the input until new output fills them",
+	},
+});
+
 export const cfgTerminalShowProgress = register({
 	id: "terminal.showProgress",
 	type: "boolean",
@@ -455,8 +469,8 @@ export const cfgTuiRenderSvg = register({
 export const cfgTuiAutoGraph = register({
 	id: "tui.autoGraph",
 	type: "enum",
-	values: ["smart", "always", "off"] as const,
-	default: "always",
+	values: ["auto", "smart", "always", "off"] as const,
+	default: "auto",
 	ui: {
 		tab: "appearance",
 		group: "Display",
@@ -464,6 +478,11 @@ export const cfgTuiAutoGraph = register({
 		description:
 			"Draw a chart under numeric tables in the agent's answers, in your theme's colors, on terminals that show graphics",
 		options: [
+			{
+				value: "auto",
+				label: "Auto",
+				description: "Smart when the judge role resolves to a native TypeSafe jev model, else Always",
+			},
 			{
 				value: "smart",
 				label: "Smart",
@@ -566,7 +585,7 @@ export const cfgTuiMouse = register({
 		label: "Mouse Click-to-Focus",
 		get description() {
 			const shift = formatKeyHint("shift");
-			return `Capture mouse clicks in the main session so live subagent cards and HUD rows focus on click, with a hover highlight on the target. Native text selection becomes ${shift}+drag and wheel scroll becomes ${shift}+wheel while on`;
+			return `Capture mouse clicks in the main session so live subagent cards and HUD rows focus on click, with a hover highlight on the target, and clicks on extension-owned links reach their extension (the link-hint key picks them without the mouse). Native text selection becomes ${shift}+drag and wheel scroll becomes ${shift}+wheel while on`;
 		},
 	},
 });
@@ -692,6 +711,26 @@ export const cfgDisplayCacheMissMarker = register({
 		description: "Show a divider after an assistant turn whose request lost (missed) the prompt cache",
 	},
 });
+
+export const cfgDisplayAdvisorCollapsedLines = register({
+	id: "display.advisorCollapsedLines",
+	type: "number",
+	default: 0,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Advisor Collapsed Lines",
+		description:
+			"Maximum note lines a collapsed advisor card shows below its header (0 keeps the full preview; expand with the tool-output toggle)",
+		options: [
+			{ value: "0", label: "No limit", description: "Default." },
+			{ value: "1", label: "1 line" },
+			{ value: "2", label: "2 lines" },
+			{ value: "3", label: "3 lines" },
+			{ value: "5", label: "5 lines" },
+		],
+	},
+});
 effect(
 	combine({
 		hideToolActivity: cfgDisplayHideToolActivity,
@@ -700,6 +739,7 @@ effect(
 		cacheMissMarker: cfgDisplayCacheMissMarker,
 		showTokenUsage: cfgDisplayShowTokenUsage,
 		showTurnTime: cfgDisplayShowTurnTime,
+		advisorCollapsedLines: cfgDisplayAdvisorCollapsedLines,
 	}),
 	setChatTranscriptDisplayPreferences,
 );
@@ -782,6 +822,19 @@ export const cfgInterruptMode = register({
 		group: "Input",
 		label: "Interrupt Mode",
 		description: "When steering messages interrupt tool execution",
+	},
+});
+
+export const cfgBtwInject = register({
+	id: "btw.inject",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "interaction",
+		group: "Input",
+		label: "/btw Steering Inject",
+		description:
+			"When you ask /btw for a steering prompt, it drafts one in <inject> tags, highlighted in the answer; Alt+I (app.btw.inject) sends it to the main session",
 	},
 });
 
@@ -1008,6 +1061,21 @@ export const cfgComposerPredictions = register({
 		get description() {
 			return `After a completed turn, ask the active model to predict your next message and show it as ghost text in the empty composer; ${formatKeyHint("tab")} or ${formatKeyHint("right")} inserts it without sending. Extra usage: every completed turn sends one more billed request over the whole conversation (counted in /stats)`;
 		},
+	},
+});
+
+export const cfgComposerPredictionAlternatives = register({
+	id: "composer.predictionAlternatives",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "interaction",
+		group: "Input",
+		label: "Prediction Alternatives",
+		get description() {
+			return `Ask for up to four distinct predictions instead of one, most likely first. The ghost text shows the first one your draft matches; after inserting one, press ${formatKeyHint("tab")} again to pick another. The same single request returns a few more output tokens`;
+		},
+		condition: "composerPredictionsEnabled",
 	},
 });
 

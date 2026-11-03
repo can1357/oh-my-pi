@@ -180,9 +180,11 @@ export function truncateToWidth(
 	pad?: boolean | null,
 ): string {
 	maxWidth = Math.max(0, maxWidth | 0);
-	// Fast path: every UTF-16 unit is at most 3 cells wide, so a string whose
-	// `length * 3` already fits within `safeWidth` cannot need truncation.
-	if (!pad && text.length * 3 <= maxWidth) {
+	// Fast path: every UTF-16 unit is at most 3 cells wide, so a plain string
+	// whose `length * 3` already fits within `maxWidth` cannot need truncation.
+	// OSC 66 spans are excluded because their display width is metadata-driven,
+	// not proportional to their UTF-16 length.
+	if (!pad && !text.includes("\x1b]66") && text.length * 3 <= maxWidth) {
 		return text;
 	}
 	return nativeTruncateToWidth(
@@ -217,6 +219,16 @@ const TAB_SPACES = " ".repeat(DEFAULT_TAB_WIDTH);
  */
 export function replaceTabs(text: string): string {
 	return text.replaceAll("\t", TAB_SPACES);
+}
+
+/** Tabs expanded and line breaks collapsed to spaces, for text confined to one rendered row. */
+export function singleLine(text: string): string {
+	return replaceTabs(text).replace(/[\r\n]+/g, " ");
+}
+
+/** A non-negative integer cell width; non-finite input becomes `fallback`. */
+export function finiteWidth(width: number, fallback = 0): number {
+	return Number.isFinite(width) ? Math.max(0, Math.trunc(width)) : fallback;
 }
 
 /**

@@ -10,12 +10,9 @@ use std::{
 	io::{self, Read, Write},
 };
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches};
 
-use crate::host::{
-	CommandStatus, Host, RunningCommand, ShellCommand, Utility, matches_parser, util,
-};
+use crate::host::{CommandStatus, Host, RunningCommand, ShellCommand, Utility, matches_parser};
 
 mod options {
 	pub const COMMAND: &str = "COMMAND";
@@ -98,11 +95,9 @@ struct LimiterCursor<'collection> {
 
 impl LimiterCursor<'_> {
 	fn try_next(self, arg: Argument) -> Result<Argument, ExhaustedCommandSpace> {
-		if self.limiters.is_empty() {
-			Ok(arg)
-		} else {
-			let (current, remaining) = self.limiters.split_at_mut(1);
-			current[0].try_arg(arg, LimiterCursor { limiters: remaining })
+		match self.limiters.split_first_mut() {
+			None => Ok(arg),
+			Some((current, remaining)) => current.try_arg(arg, LimiterCursor { limiters: remaining }),
 		}
 	}
 }
@@ -156,11 +151,12 @@ fn count_osstr_chars_for_exec(s: &OsStr) -> usize {
 struct MaxCharsCommandSizeLimiter {
 	current_size: usize,
 	max_chars:    usize,
+	per_arg_overhead: usize,
 }
 
 impl MaxCharsCommandSizeLimiter {
 	fn new(max_chars: usize) -> Self {
-		Self { current_size: 0, max_chars }
+		Self { current_size: 0, max_chars, per_arg_overhead: 0 }
 	}
 
 	#[cfg(windows)]
@@ -176,13 +172,20 @@ impl MaxCharsCommandSizeLimiter {
 		// can have room to set their own environment variables.
 		const ARG_HEADROOM: usize = 2048;
 		let arg_max = unsafe { libc::sysconf(libc::_SC_ARG_MAX) } as usize;
+		let pointer_size = std::mem::size_of::<*const libc::c_char>();
 
 		let env_size: usize = env
 			.iter()
-			.map(|(var, value)| count_osstr_chars_for_exec(var) + count_osstr_chars_for_exec(value))
+			// The two string terminators account for '=' and '\0'; envp has one pointer.
+			.map(|(var, value)| {
+				count_osstr_chars_for_exec(var) + count_osstr_chars_for_exec(value) + pointer_size
+			})
 			.sum();
 
-		Self::new(arg_max - ARG_HEADROOM - env_size)
+		let mut limiter = Self::new(arg_max.saturating_sub(ARG_HEADROOM).saturating_sub(env_size).max(1));
+		// ARG_MAX covers argv pointers as well as strings. Keep -s string-only.
+		limiter.per_arg_overhead = pointer_size;
+		limiter
 	}
 }
 
@@ -192,7 +195,7 @@ impl CommandSizeLimiter for MaxCharsCommandSizeLimiter {
 		arg: Argument,
 		cursor: LimiterCursor<'_>,
 	) -> Result<Argument, ExhaustedCommandSpace> {
-		let chars = count_osstr_chars_for_exec(&arg.arg);
+		let chars = count_osstr_chars_for_exec(&arg.arg) + self.per_arg_overhead;
 		if self.current_size + chars <= self.max_chars {
 			let arg = cursor.try_next(arg)?;
 			self.current_size += chars;
@@ -296,37 +299,49 @@ impl CommandResult {
 enum CommandExecutionError {
 	// exit code 255
 	UrgentlyFailed,
-	Killed { signal: i32 },
+	Killed { name: OsString, signal: i32 },
 	CannotRun(io::Error),
-	NotFound,
+	/// Nothing runs under this command name (GNU: status 127).
+	NotFound(OsString),
 }
 
 impl Display for CommandExecutionError {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		match self {
 			Self::UrgentlyFailed => write!(f, "Command exited with code 255"),
-			Self::Killed { signal } => {
-				write!(f, "Command was killed with signal {signal}")
+			Self::Killed { name, signal } => {
+				write!(f, "{}: terminated by signal {signal}", name.to_string_lossy())
 			},
 			Self::CannotRun(err) => write!(f, "Command could not be run: {err}"),
-			Self::NotFound => write!(f, "Command not found"),
+			Self::NotFound(name) => write!(f, "{}: No such file or directory", name.to_string_lossy()),
 		}
 	}
 }
 
 impl Error for CommandExecutionError {}
 
-/// Maps how a command ended onto xargs' verdict for it.
+/// Maps how a command named `name` ended onto xargs' verdict for it.
 fn command_outcome(
 	status: io::Result<CommandStatus>,
+	name: &OsStr,
 ) -> Result<CommandResult, CommandExecutionError> {
 	match status {
 		Ok(CommandStatus::Exited(0)) => Ok(CommandResult::Success),
 		Ok(CommandStatus::Exited(255)) => Err(CommandExecutionError::UrgentlyFailed),
 		Ok(CommandStatus::Exited(_)) => Ok(CommandResult::Failure),
-		Ok(CommandStatus::Signaled(signal)) => Err(CommandExecutionError::Killed { signal }),
-		Err(e) if e.kind() == io::ErrorKind::NotFound => Err(CommandExecutionError::NotFound),
-		Err(e) => Err(CommandExecutionError::CannotRun(e)),
+		Ok(CommandStatus::Signaled(signal)) => {
+			Err(CommandExecutionError::Killed { name: name.to_owned(), signal })
+		},
+		Err(e) => Err(cannot_run(e, name)),
+	}
+}
+
+/// Why the command named `name` did not run.
+fn cannot_run(error: io::Error, name: &OsStr) -> CommandExecutionError {
+	if error.kind() == io::ErrorKind::NotFound {
+		CommandExecutionError::NotFound(name.to_owned())
+	} else {
+		CommandExecutionError::CannotRun(error)
 	}
 }
 
@@ -335,19 +350,29 @@ struct Jobs {
 	limit:   usize,
 	running: Vec<RunningCommand>,
 	result:  CommandResult,
+	/// The command name every command line runs (`argv[0]`), for diagnostics.
+	command: OsString,
 }
 
 impl Jobs {
 	fn new(limit: usize) -> Self {
-		Self { limit, running: Vec::new(), result: CommandResult::Success }
+		Self { limit, running: Vec::new(), result: CommandResult::Success, command: OsString::new() }
 	}
 
 	/// Starts `argv`, then waits until fewer than `limit` commands run, so
 	/// `-P 1` runs each command to completion before reading more input.
 	fn spawn(&mut self, host: &mut Host, argv: Vec<OsString>) -> Result<(), CommandExecutionError> {
+		// A child may have finished while there was still a free slot (in
+		// particular with -P 0). Observe fatal outcomes before launching more.
+		while let Some(status) = RunningCommand::try_wait_any(&mut self.running) {
+			self.result.combine(command_outcome(status, &self.command)?);
+		}
+		if let Some(name) = argv.first() {
+			self.command.clone_from(name);
+		}
 		let command = host
 			.spawn_command(ShellCommand::new(argv))
-			.map_err(CommandExecutionError::CannotRun)?;
+			.map_err(|error| cannot_run(error, &self.command))?;
 		self.running.push(command);
 		while self.running.len() >= self.limit {
 			self.reap()?;
@@ -358,7 +383,7 @@ impl Jobs {
 	/// Waits for one running command and folds its status into the result.
 	fn reap(&mut self) -> Result<(), CommandExecutionError> {
 		if let Some(status) = RunningCommand::wait_any(&mut self.running) {
-			self.result.combine(command_outcome(status)?);
+			self.result.combine(command_outcome(status, &self.command)?);
 		}
 		Ok(())
 	}
@@ -602,7 +627,7 @@ impl ArgumentReader for WhitespaceDelimitedArgumentReader {
 		}
 
 		Ok(Some(Argument {
-			arg:  String::from_utf8_lossy(&result[..]).into_owned().into(),
+			arg:  String::from_utf8_lossy_owned(result).into(),
 			kind: if terminated_by_newline {
 				ArgumentKind::HardTerminated
 			} else {
@@ -657,7 +682,7 @@ impl ArgumentReader for ByteDelimitedArgumentReader {
 				continue;
 			}
 			return Ok(Some(Argument {
-				arg:  String::from_utf8_lossy(&result).into_owned().into(),
+				arg:  String::from_utf8_lossy_owned(result).into(),
 				kind: ArgumentKind::HardTerminated,
 			}));
 		}
@@ -1114,13 +1139,13 @@ impl Utility for Xargs {
 			Ok(CommandResult::Success) => 0,
 			Ok(CommandResult::Failure) => 123,
 			Err(error) => {
-				let _ = writeln!(host.stderr, "Error: {error}");
+				let _ = writeln!(host.stderr, "xargs: {error}");
 				if let XargsError::CommandExecution(command_error) = error {
 					match command_error {
 						CommandExecutionError::UrgentlyFailed => 124,
 						CommandExecutionError::Killed { .. } => 125,
 						CommandExecutionError::CannotRun(_) => 126,
-						CommandExecutionError::NotFound => 127,
+						CommandExecutionError::NotFound(_) => 127,
 					}
 				} else {
 					1
@@ -1128,11 +1153,6 @@ impl Utility for Xargs {
 			},
 		}
 	}
-}
-
-/// Creates the `xargs` builtin registration.
-pub(crate) fn xargs_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Xargs, SE>()
 }
 
 #[cfg(test)]
@@ -1228,6 +1248,45 @@ mod tests {
 				.is_err()
 		);
 		assert!(limiter.try_arg(make_arg_hard("a"), empty_cursor()).is_ok());
+	}
+
+	#[cfg(unix)]
+	#[tokio::test]
+	async fn large_input_is_split_into_successful_external_commands() {
+		let arg_max = unsafe { libc::sysconf(libc::_SC_ARG_MAX) } as usize;
+		// String bytes alone fit, but the argv pointers force multiple batches.
+		// Use a real external executable so an oversized batch surfaces E2BIG.
+		let count = arg_max / 256;
+		let input = format!("{}\n", "x".repeat(255)).repeat(count);
+		let (code, stdout, stderr) = xargs_in(
+			&std::env::current_dir().unwrap(),
+			&["/bin/sh", "-c", "printf \"%s\\n\" \"$#\"", "sh"],
+			&input,
+		)
+		.await;
+		assert_eq!(code, 0, "{stderr}");
+		assert!(stderr.is_empty(), "{stderr}");
+		let batches: Vec<usize> = stdout.lines().map(|line| line.parse().unwrap()).collect();
+		assert!(batches.len() > 1, "input was not split into multiple commands");
+		assert_eq!(batches.iter().sum::<usize>(), count);
+		assert!(batches.iter().all(|&count| count > 0));
+	}
+
+	#[cfg(unix)]
+	#[tokio::test]
+	async fn oversized_environment_rejects_command_without_panicking() {
+		let arg_max = unsafe { libc::sysconf(libc::_SC_ARG_MAX) } as usize;
+		// These short strings fit on their own, but their envp pointers do not.
+		let names: Vec<String> = (0..arg_max / 20).map(|i| format!("XARGS_{i:08}")).collect();
+		let exports: Vec<(&str, &str)> = names.iter().map(|name| (name.as_str(), "")).collect();
+		let (code, stdout, stderr) =
+			xargs_with_env(&std::env::temp_dir(), &["/bin/echo"], "x\n", &exports).await;
+		assert_eq!(code, 1, "{stderr}");
+		assert_eq!(stdout, "");
+		assert!(
+			stderr.contains("Base command and environment are too large"),
+			"an environment that exhausts ARG_MAX must reject the base command: {stderr}"
+		);
 	}
 
 	#[test]
@@ -1421,15 +1480,20 @@ mod tests {
 		assert!(parse_delimiter("abc").is_err());
 	}
 
-	/// Runs `xargs ARGV` in a real shell from `cwd`, so commands dispatch the
-	/// way they do in the harness.
+	/// Runs `xargs ARGV` from `cwd`, its commands served by the test runner
+	/// (extras first, then programs on `PATH`).
 	async fn xargs_in(cwd: &std::path::Path, argv: &[&str], stdin: &str) -> (i32, String, String) {
-		let script = std::iter::once("xargs")
-			.chain(argv.iter().copied())
-			.map(crate::host::quote_arg)
-			.collect::<Vec<_>>()
-			.join(" ");
-		crate::host::run_script(&script, stdin, cwd).await
+		xargs_with_env(cwd, argv, stdin, &[]).await
+	}
+
+	async fn xargs_with_env(
+		cwd: &std::path::Path,
+		argv: &[&str],
+		stdin: &str,
+		env: &[(&str, &str)],
+	) -> (i32, String, String) {
+		let argv: Vec<&str> = std::iter::once("xargs").chain(argv.iter().copied()).collect();
+		crate::host::run_extra(&argv, stdin, cwd, env).await
 	}
 
 	async fn run_simple(argv: &[&str], stdin: &str) -> (i32, String, String) {
@@ -1494,7 +1558,7 @@ mod tests {
 	async fn missing_command_yields_127() {
 		let (code, _, err) = run_simple(&["definitely-not-a-real-command-xyz"], "x\n").await;
 		assert_eq!(code, 127);
-		assert!(err.contains("Command not found"), "got: {err:?}");
+		assert_eq!(err, "xargs: definitely-not-a-real-command-xyz: No such file or directory\n");
 	}
 
 	#[cfg(unix)]
@@ -1517,9 +1581,17 @@ mod tests {
 	#[cfg(unix)]
 	#[tokio::test]
 	async fn signalled_child_yields_125() {
-		let (code, _, err) = run_simple(&["sh", "-c", "kill -TERM $$", "_"], "x\n").await;
+		let (code, _, err) = run_simple(&["sh", "-c", "kill -9 $$", "_"], "x\n").await;
 		assert_eq!(code, 125);
-		assert!(err.contains("signal"), "got: {err:?}");
+		assert_eq!(err, "xargs: sh: terminated by signal 9\n");
+	}
+
+	#[cfg(unix)]
+	#[tokio::test]
+	async fn exit_137_child_yields_123_not_signal() {
+		let (code, _, err) = run_simple(&["sh", "-c", "exit 137", "_"], "x\n").await;
+		assert_eq!(code, 123);
+		assert!(!err.contains("signal"), "got: {err:?}");
 	}
 
 	/// Contract: `-P N` runs up to N commands at once. Each command waits (up
@@ -1575,33 +1647,15 @@ mod tests {
 
 	#[tokio::test]
 	async fn children_see_host_environment() {
-		let (code, out, _) = crate::host::run_script(
-			"export XVAR=hello; xargs sh -c 'echo \"$XVAR\"' _",
-			"x\n",
+		let (code, out, _) = xargs_with_env(
 			&std::env::temp_dir(),
+			&["sh", "-c", "echo \"$XVAR\"", "_"],
+			"x\n",
+			&[("XVAR", "hello")],
 		)
 		.await;
 		assert_eq!(code, 0);
 		assert_eq!(out, "hello\n");
-	}
-
-	/// Contract: a command runs like a child process, so builtins that change
-	/// shell state (`cd`) cannot leak into the invoking shell or into the next
-	/// batch.
-	#[tokio::test]
-	async fn builtin_commands_cannot_change_the_invoking_shell() {
-		let dir = tempfile::TempDir::new().expect("tempdir");
-		std::fs::create_dir(dir.path().join("sub")).expect("subdirectory");
-		let root = std::fs::canonicalize(dir.path()).expect("canonical root");
-		let (code, out, err) = crate::host::run_script(
-			"printf 'sub\\nsub\\n' | xargs -n1 cd && xargs pwd < /dev/null && pwd",
-			"",
-			&root,
-		)
-		.await;
-		assert_eq!(code, 0, "stderr: {err:?}");
-		let expected = format!("{0}\n{0}\n", root.display());
-		assert_eq!(out, expected);
 	}
 
 	#[tokio::test]

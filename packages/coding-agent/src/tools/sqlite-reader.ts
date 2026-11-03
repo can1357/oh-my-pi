@@ -1,4 +1,4 @@
-import { Database, type SQLQueryBindings } from "bun:sqlite";
+import { Database, type SQLQueryBindings, type Statement } from "bun:sqlite";
 import { formatBytes, replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
@@ -129,7 +129,8 @@ export type SqliteSelector =
 	| { kind: "schema"; table: string; sampleLimit: number }
 	| { kind: "row"; table: string; key: string }
 	| { kind: "query"; table: string; limit: number; offset: number; order?: string; where?: string }
-	| { kind: "raw"; sql: string };
+	/** `page` is set when `limit` or `offset` pages the query's rows, as they page a table. */
+	| { kind: "raw"; sql: string; page?: { limit: number; offset: number } };
 
 export type SqliteRowLookup = { kind: "pk"; column: string; type: string } | { kind: "rowid" };
 
@@ -344,6 +345,20 @@ function getPrimaryKeyColumns(db: Database, table: string): SqliteTableInfoRow[]
 	return getTableInfoRows(db, table)
 		.filter(column => column.pk > 0)
 		.sort((left, right) => left.pk - right.pk);
+}
+
+/** A declared column shadows the corresponding hidden rowid alias, even when generated. */
+function resolveRowIdColumn(db: Database, table: string): string {
+	const columns = new Set(
+		db
+			.query<Pick<SqliteTableInfoRow, "name">, []>(`PRAGMA table_xinfo(${quoteSqliteIdentifier(table)})`)
+			.all()
+			.map(column => column.name.toLowerCase()),
+	);
+	for (const alias of ["rowid", "_rowid_", "oid"]) {
+		if (!columns.has(alias)) return quoteSqliteIdentifier(alias);
+	}
+	throw new ToolError(`SQLite table '${table}' shadows all ROWID aliases; row-key access is unavailable`);
 }
 
 function coerceIntegerKey(key: string, label: string): number | bigint {
@@ -568,14 +583,28 @@ export function parseSqliteSelector(subPath: string, queryString: string): Sqlit
 	const rawQuery = params.get("q");
 
 	if (rawQuery !== null) {
-		const otherKeys = [...params.keys()].filter(key => key !== "q");
-		if (normalizedSubPath || otherKeys.length > 0) {
-			throw new ToolError("SQLite raw queries cannot be combined with table selectors or pagination");
+		if (normalizedSubPath) {
+			throw new ToolError(
+				`SQLite ?q= queries run against the whole database; drop ':${normalizedSubPath}' from the path`,
+			);
+		}
+		for (const keyName of params.keys()) {
+			if (keyName !== "q" && keyName !== "limit" && keyName !== "offset") {
+				throw new ToolError(`SQLite ?q= queries take only limit and offset; put '${keyName}' into the SQL`);
+			}
 		}
 		if (!rawQuery.trim()) {
 			throw new ToolError("SQLite query parameter 'q' cannot be empty");
 		}
-		return { kind: "raw", sql: rawQuery };
+		if (!params.has("limit") && !params.has("offset")) return { kind: "raw", sql: rawQuery };
+		return {
+			kind: "raw",
+			sql: rawQuery,
+			page: {
+				limit: parseLimit(params.get("limit"), DEFAULT_QUERY_LIMIT),
+				offset: parseOffset(params.get("offset")),
+			},
+		};
 	}
 
 	if (!normalizedSubPath) {
@@ -727,7 +756,9 @@ export function queryRows(
 	table: string,
 	opts: { limit: number; offset: number; order?: string; where?: string },
 ): { columns: string[]; rows: Record<string, unknown>[]; totalCount: number } {
-	const columns = getTableColumns(db, table);
+	getTableMasterRow(db, table);
+	// table_info omits generated columns; use the columns SELECT * actually returns.
+	const columns = db.query<SqliteRow, []>(`SELECT * FROM ${quoteSqliteIdentifier(table)} LIMIT 0`).columnNames;
 	const validatedWhere = validateWhereClause(opts.where);
 	const whereClause = validatedWhere ? ` WHERE ${validatedWhere}` : "";
 	const orderClause = resolveOrderClause(opts.order, columns);
@@ -771,23 +802,52 @@ export function getRowByRowId(db: Database, table: string, key: string): Record<
 	getTableMasterRow(db, table);
 	const binding = coerceIntegerKey(key, "SQLite ROWID");
 	return db
-		.query<SqliteRow, SQLQueryBindings[]>(`SELECT * FROM ${quoteSqliteIdentifier(table)} WHERE rowid = ? LIMIT 1`)
+		.query<SqliteRow, SQLQueryBindings[]>(
+			`SELECT * FROM ${quoteSqliteIdentifier(table)} WHERE ${resolveRowIdColumn(db, table)} = ? LIMIT 1`,
+		)
 		.get(binding);
 }
 
+/**
+ * Runs a read-only SQL query. Without `page`, rows are capped at
+ * {@link MAX_RAW_QUERY_ROWS}; with it, `offset` rows are skipped and at most
+ * `limit` kept. `truncated` says rows remain past the ones returned.
+ */
 export function executeReadQuery(
 	db: Database,
 	sql: string,
+	page?: { limit: number; offset: number },
 ): { columns: string[]; rows: Record<string, unknown>[]; truncated: boolean } {
 	const statement = db.query<SqliteRow, []>(sql);
 	if (statement.paramsCount > 0) {
 		throw new ToolError("SQLite raw queries do not support bound parameters");
 	}
 	const columns = [...statement.columnNames];
+	// A query that nests as a subquery pages inside SQLite, so skipped rows are
+	// never built; the newline closes a trailing `--` comment. Statements that
+	// cannot nest (PRAGMA, EXPLAIN) fail to prepare, and repeated column names
+	// would come back renamed (`x`, `x:1`); both skip rows while iterating.
+	if (page && new Set(columns).size === columns.length) {
+		let paged: Statement<SqliteRow, [number, number]> | undefined;
+		try {
+			paged = db.query(`SELECT * FROM (\n${sql.replace(/[\s;]+$/, "")}\n) LIMIT ? OFFSET ?`);
+		} catch {}
+		if (paged) {
+			const rows = paged.all(page.limit + 1, page.offset);
+			const truncated = rows.length > page.limit;
+			return { columns, rows: truncated ? rows.slice(0, page.limit) : rows, truncated };
+		}
+	}
+	const limit = page?.limit ?? MAX_RAW_QUERY_ROWS;
+	let skip = page?.offset ?? 0;
 	const rows: SqliteRow[] = [];
 	let truncated = false;
 	for (const row of statement.iterate()) {
-		if (rows.length >= MAX_RAW_QUERY_ROWS) {
+		if (skip > 0) {
+			skip--;
+			continue;
+		}
+		if (rows.length >= limit) {
 			truncated = true;
 			break;
 		}
@@ -846,7 +906,7 @@ export function updateRowByRowId(db: Database, table: string, key: string, data:
 	const bindings = entries.map(([, value]) => value);
 	bindings.push(coerceIntegerKey(key, "SQLite ROWID"));
 	const statement = db.query<SqliteRow, SQLQueryBindings[]>(
-		`UPDATE ${quoteSqliteIdentifier(table)} SET ${assignments} WHERE rowid = ?`,
+		`UPDATE ${quoteSqliteIdentifier(table)} SET ${assignments} WHERE ${resolveRowIdColumn(db, table)} = ?`,
 	);
 	return statement.run(...bindings).changes;
 }
@@ -869,7 +929,7 @@ export function deleteRowByRowId(db: Database, table: string, key: string): numb
 	getTableMasterRow(db, table);
 	const binding = coerceIntegerKey(key, "SQLite ROWID");
 	const statement = db.query<SqliteRow, SQLQueryBindings[]>(
-		`DELETE FROM ${quoteSqliteIdentifier(table)} WHERE rowid = ?`,
+		`DELETE FROM ${quoteSqliteIdentifier(table)} WHERE ${resolveRowIdColumn(db, table)} = ?`,
 	);
 	return statement.run(binding).changes;
 }
@@ -922,20 +982,27 @@ export function renderRow(row: Record<string, unknown>): string {
 export function renderTable(
 	columns: string[],
 	rows: Record<string, unknown>[],
-	meta: { totalCount: number; offset: number; limit: number; table: string; dbPath: string },
+	meta: {
+		totalCount: number;
+		offset: number;
+		limit: number;
+		table: string;
+		dbPath: string;
+		where?: string;
+		order?: string;
+	},
 ): string {
 	const parts = [buildAsciiTable(columns, rows)];
 	const shown = Math.min(meta.totalCount, meta.offset + rows.length);
 	if (shown < meta.totalCount) {
 		const remaining = meta.totalCount - shown;
 		const nextOffset = meta.offset + rows.length;
+		const params = new URLSearchParams({ limit: String(meta.limit), offset: String(nextOffset) });
+		if (meta.where !== undefined) params.set("where", meta.where);
+		if (meta.order !== undefined) params.set("order", meta.order);
+		// Keep the full selector usable even when an encoded filter exceeds the table's width.
 		parts.push(
-			truncateToWidth(
-				replaceTabs(
-					`[${remaining} more rows; append :${meta.table}?limit=${meta.limit}&offset=${nextOffset} to the database path to continue]`,
-				),
-				MAX_RENDER_WIDTH,
-			),
+			replaceTabs(`[${remaining} more rows; append :${meta.table}?${params} to the database path to continue]`),
 		);
 	}
 	return parts.join("\n");

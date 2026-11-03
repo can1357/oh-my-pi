@@ -32,6 +32,9 @@ export const tmuxMultiplexer = {
 	// An explicit appearance refresh passes OSC 11 to the outer terminal, then
 	// re-reads tmux's cache once it has consumed the reply.
 	backgroundColorCache: { passthrough: wrapTmuxPassthrough, settleMs: 100 },
+	// tmux drops paste markers for a pane whose own DEC 2004 flag another
+	// writer cleared, and only answers DECRQM 2004 since 3.6.
+	gatesBracketedPaste: true,
 	expandsRepPadding: true,
 	// tmux expires synchronized output after one second.
 	expiresSynchronizedOutput: true,

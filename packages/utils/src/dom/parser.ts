@@ -366,7 +366,12 @@ export function parseInto(html: string, document: Document, root: Document | Doc
 			index = match ? closePattern.lastIndex : html.length;
 			continue;
 		}
-		if (!VOID_ELEMENTS[parsed.name] && !(namespace === SVG_NAMESPACE && parsed.selfClosing)) {
+		// Feed documents follow XML rules: only an explicit `/>` closes immediately, so RSS `<link>url</link>`
+		// keeps its text instead of being treated as an HTML void element.
+		const isVoid = xmlLike
+			? parsed.selfClosing
+			: VOID_ELEMENTS[parsed.name] || (namespace === SVG_NAMESPACE && parsed.selfClosing);
+		if (!isVoid) {
 			stack.push(element);
 			parent = element;
 		}

@@ -1064,11 +1064,23 @@ describe("OutputSink maxColumns (per-line cap)", () => {
 			spillThreshold: 100_000,
 		});
 		await sink.push("one\ntwo\n");
-		sink.replace("rewritten\n");
+		sink.replace("rewrote\n");
 		await sink.push(`${"z".repeat(50)}\n`);
 		const dumped = await sink.dump();
 		expect(dumped.columnTruncatedLines).toBe(1);
 		expect(dumped.columnTruncatedRange).toBeUndefined();
+	});
+
+	test("replace() holds the replacement to the column cap", async () => {
+		const sink = new OutputSink({ maxColumns: 8, spillThreshold: 100_000 });
+		await sink.push("raw\n");
+		const replacement = `ok\n${"x".repeat(50)}\n`;
+		sink.replace(replacement);
+		const dumped = await sink.dump();
+		expect(dumped.output).toBe("ok\nxxxxx…\n");
+		expect(dumped.truncated).toBe(false);
+		expect(dumped.columnTruncatedLines).toBe(1);
+		expect(dumped.totalBytes).toBe(byteLength(replacement));
 	});
 
 	test("multibyte line: cap counts UTF-8 bytes and the notice says bytes", async () => {

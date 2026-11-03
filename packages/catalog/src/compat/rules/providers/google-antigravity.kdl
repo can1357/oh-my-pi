@@ -41,6 +41,24 @@ provider "google-antigravity" {
 		// any image edge over 3,000 px. The clamp above caps each image; with no
 		// byte budget on this wire, the count bounds the body.
 		image-count-budget 20
+		// Cache-warmer lifetime. Claude here is Vertex Anthropic, whose prompt
+		// cache has a five-minute default TTL refreshed on every hit; this wire
+		// sends no `cache_control`, so the 1h tier is never requested.
+		// https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/partner-models/claude/prompt-caching
+		// Gemini declares none: its implicit cache keeps entries for a
+		// load-dependent time ("caches always deleted within 24 hours"), so no
+		// fixed lifetime exists to warm against.
+		// https://cloud.google.com/blog/products/ai-machine-learning/vertex-ai-context-caching
+		prompt-cache {
+			short 300
+		}
+		// Cloud Code Assist rejects Claude 4.x requests over 64,000 output
+		// tokens with a 400 (`Request contains an invalid argument`) even when
+		// the roster advertises 65,536 (#3067). The ceiling also lowers the
+		// discovered per-SKU wire caps the transport sends verbatim.
+		revision "<5" {
+			max-tokens-ceiling 64000
+		}
 		family "opus" {
 			thinking-mode "budget"
 		}

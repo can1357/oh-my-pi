@@ -19,6 +19,7 @@ export type SymbolKey =
 	| "status.running"
 	| "status.shadowed"
 	| "status.aborted"
+	/** @deprecated Alias of `status.success`; kept so extensions and theme overrides that name it keep working. */
 	| "status.done"
 	// Navigation
 	| "nav.cursor"
@@ -38,6 +39,10 @@ export type SymbolKey =
 	// Context gauge boundaries
 	| "context.speculation"
 	| "context.compaction"
+	| "context.content"
+	| "context.messages"
+	| "context.buffer"
+	| "context.free"
 	// Box Drawing - Rounded
 	| "boxRound.topLeft"
 	| "boxRound.topRight"
@@ -208,6 +213,8 @@ export type SymbolKey =
 	| "advisor.rail"
 	// Skill callout rail (user turn that opened with a skill chip)
 	| "skill.rail"
+	// /btw steering-prompt rail (the <inject> block a side answer drafted)
+	| "btw.rail"
 	// Language/file type icons
 	| "lang.default"
 	| "lang.typescript"
@@ -371,6 +378,7 @@ export type SlashCommandIconName =
 	| "jobs"
 	| "gauge"
 	| "context"
+	| "ghost"
 	| "agents"
 	| "branch"
 	| "tree"
@@ -399,7 +407,7 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	"status.running": "⟳",
 	"status.shadowed": "○",
 	"status.aborted": "⏹",
-	"status.done": "•",
+	"status.done": "✔",
 	// Navigation
 	"nav.cursor": "❯",
 	"nav.selected": "➤",
@@ -418,6 +426,10 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	// Context gauge boundaries
 	"context.speculation": "╎",
 	"context.compaction": "┃",
+	"context.content": "⛁",
+	"context.messages": "⛃",
+	"context.buffer": "⛝",
+	"context.free": "⛶",
 	// Box (rounded)
 	"boxRound.topLeft": "╭",
 	"boxRound.topRight": "╮",
@@ -589,6 +601,7 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	// Advisor note rail (heavier than md.quoteBorder so notes read as a distinct voice)
 	"advisor.rail": "▎",
 	"skill.rail": "▎",
+	"btw.rail": "▎",
 	// Language/file icons (emoji-centric, no Nerd Font required)
 	"lang.default": "⌘",
 	"lang.typescript": "🟦",
@@ -627,9 +640,11 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	"lang.pdf": "📕",
 	"lang.archive": "🗜",
 	"lang.binary": "⚙",
-	// Composer attachment chips
-	"chip.image": "🖼",
-	"chip.video": "🎞",
+	// Composer attachment chips. These sit inside the editable buffer, so the caret column
+	// depends on their width: use Emoji_Presentation glyphs, which every terminal draws 2 cells
+	// wide. Text-presentation pictographs (🖼, 🎞) measure 1 cell but many terminals draw them 2.
+	"chip.image": "📷",
+	"chip.video": "🎬",
 	"chip.paste": "📄",
 	// Settings tabs
 	"tab.appearance": "🎨",
@@ -710,8 +725,8 @@ const NERD_SYMBOLS: SymbolMap = {
 	"status.shadowed": "\uf10c",
 	// pick:  | alt:  
 	"status.aborted": "\uf04d",
-	// pick: • | alt: ● ·
-	"status.done": "•",
+	// alias of status.success
+	"status.done": "\uf00c",
 	// Navigation
 	// pick:  | alt:  
 	"nav.cursor": "\uf054",
@@ -742,6 +757,10 @@ const NERD_SYMBOLS: SymbolMap = {
 	// Context gauge boundaries — vector intersection starts async speculation; auto-fix applies compaction.
 	"context.speculation": "\u{f055d}",
 	"context.compaction": "\u{f0068}",
+	"context.content": "⛁",
+	"context.messages": "⛃",
+	"context.buffer": "⛝",
+	"context.free": "⛶",
 	// Box Drawing - Rounded (same as unicode)
 	// pick: ╭ | alt: ┌ ┏ ╔
 	"boxRound.topLeft": "╭",
@@ -1057,6 +1076,7 @@ const NERD_SYMBOLS: SymbolMap = {
 	// pick: ▎ | alt: ┃ │
 	"advisor.rail": "▎",
 	"skill.rail": "▎",
+	"btw.rail": "▎",
 	// Language icons (nerd font devicons)
 	"lang.default": "",
 	"lang.typescript": "\u{E628}",
@@ -1171,17 +1191,17 @@ const NERD_SYMBOLS: SymbolMap = {
 
 const ASCII_SYMBOLS: SymbolMap = {
 	// Status Indicators
-	"status.success": "[ok]",
-	"status.error": "[!!]",
+	"status.success": "[+]",
+	"status.error": "[-]",
 	"status.warning": "[!]",
 	"status.info": "[i]",
-	"status.pending": "[*]",
+	"status.pending": "[ ]",
 	"status.disabled": "[ ]",
 	"status.enabled": "[x]",
 	"status.running": "[~]",
 	"status.shadowed": "[/]",
-	"status.aborted": "[-]",
-	"status.done": "*",
+	"status.aborted": "[#]",
+	"status.done": "[+]",
 	// Navigation
 	"nav.cursor": ">",
 	"nav.selected": "->",
@@ -1200,6 +1220,10 @@ const ASCII_SYMBOLS: SymbolMap = {
 	// Context gauge boundaries
 	"context.speculation": ":",
 	"context.compaction": "|",
+	"context.content": "#",
+	"context.messages": "@",
+	"context.buffer": "x",
+	"context.free": ".",
 	// Box Drawing - Rounded (ASCII fallback)
 	"boxRound.topLeft": "+",
 	"boxRound.topRight": "+",
@@ -1367,6 +1391,7 @@ const ASCII_SYMBOLS: SymbolMap = {
 	"md.colorSwatch": "[]",
 	"advisor.rail": "|",
 	"skill.rail": "|",
+	"btw.rail": "|",
 	// Language icons (ASCII uses abbreviations)
 	"lang.default": "code",
 	"lang.typescript": "ts",
@@ -1483,7 +1508,8 @@ export const SPINNER_FRAMES: Record<SymbolPreset, Record<SpinnerType, string[]>>
 		activity: ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"],
 	},
 	ascii: {
-		status: ["|", "/", "-", "\\"],
+		// Bracketed like the `status.*` glyphs, so a settling call keeps its column width.
+		status: ["[|]", "[/]", "[-]", "[\\]"],
 		activity: ["-", "\\", "|", "/"],
 	},
 };

@@ -18,7 +18,10 @@
  * Four failure shapes are detected:
  * 1. **Exact suffix cycles** — a byte-identical unit repeated back-to-back,
  *    including long cycles such as the observed 311-character Kiro runaway.
- *    This bounded detector applies to every model.
+ *    This bounded detector applies to every model the guard covers. A cycle
+ *    spanning a line break repeats whole lines — reasoning summarizers restate
+ *    one status line ("Still writing the parser...") while hidden work runs —
+ *    so it needs the long-cycle floor, not the short-stutter one.
  * 2. **Near-duplicate segments** — paragraphs that normalize to the same
  *    word-trigram fingerprint. Caught with a Jaccard window over recent
  *    paragraphs. Thresholds were calibrated on a real loop transcript plus
@@ -37,8 +40,9 @@
  * before analysis because legitimate code repeats one keyword skeleton with
  * different literals, and numeric tokens are stripped during normalization.
  *
- * Scope: exact cycles are guarded for every model; semantic heuristics remain
- * limited to Gemini, DeepSeek, and Grok family streams. Thinking stays armed
+ * Scope: the `thinking-loop-guard` catalog axis picks the level per model line
+ * ({@link loopGuardLevel}): exact cycles by default, plus semantic heuristics
+ * for Gemini, DeepSeek, and Grok, and no guard for Claude. Thinking stays armed
  * after a tool call starts — xAI/Grok can keep emitting `thinking_delta` after
  * `toolcall_start`, and those deltas count as stream progress so the idle
  * watchdog never fires. Visible assistant text still latches the thinking
@@ -49,6 +53,7 @@
  * three guarded attempts and then fail closed. Disable detection with
  * `PI_NO_THINKING_LOOP_GUARD=1`.
  */
+import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import { logger } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import type { Api, AssistantMessage, Model, StreamOptions } from "../types";
@@ -68,8 +73,15 @@ const EXACT_CHECK_STRIDE = 128;
 /** Short cycles need four repeats covering at least this many characters. */
 const EXACT_SHORT_MAX_UNIT = 60;
 const EXACT_SHORT_MIN_REPEATED_CHARS = 180;
-/** Long cycles need at least three repeats covering at least this many chars. */
+/** Long cycles need at least three repeats covering at least this many chars.
+ *  Short cycles that span a line break need it too: those repeat whole lines,
+ *  which summarizer status lines do legitimately. */
 const EXACT_LONG_MIN_REPEATED_CHARS = 1024;
+/** Repeated characters before a punctuation-only run counts as a loop. Matches
+ *  {@link EXACT_LONG_MIN_REPEATED_CHARS}: a model that has emitted a kilobyte of
+ *  one punctuation cycle back-to-back is degenerate, while the short separators
+ *  real output produces (table rules, dividers) never reach it. */
+const EXACT_PUNCTUATION_MIN_REPEATED_CHARS = EXACT_LONG_MIN_REPEATED_CHARS;
 
 /** Char cap for an unterminated segment; forces a flush so a wall-of-text loop
  *  (no blank lines / headings) still segments. */
@@ -120,19 +132,21 @@ const CONCRETE_ANCHOR =
 const CODE_LINE = /^(?:[ \t]*```.*|(?: {2,}|\t)(?![ \t]*(?:[-*+]|\d+[.)])[ \t]).*|.*[{}[\](;,>][ \t]*)$/gm;
 
 /**
- * True when resolved compatibility policy enables semantic loop heuristics for
- * this model. Exact suffix-cycle detection applies to every enabled model
- * independently of this predicate.
+ * How much of the loop guard runs on a stream: `off` none, `exact` only
+ * exact suffix cycles, `semantic` exact cycles plus the near-duplicate and
+ * progress-lexicon paragraph heuristics.
  */
-export function isLoopGuardedModel(model: Model<Api>, options?: StreamOptions): boolean {
-	if (options?.loopGuard?.enabled === false) return false;
-	const compat = model.compat;
-	if (compat !== undefined) return "thinkingLoopGuard" in compat && compat.thinkingLoopGuard !== undefined;
-	// Custom API surfaces resolve no compat record, so the KDL `thinking-loop-guard`
-	// axis cannot land on them; fall back to the class facts the axis encodes
-	// (classes/{gemini,deepseek,xai}.kdl).
-	const cls = model.identity?.class;
-	return cls === "gemini" || cls === "deepseek" || cls === "xai";
+export type LoopGuardLevel = "off" | "exact" | "semantic";
+
+/**
+ * Loop-guard level for a model stream. `PI_NO_THINKING_LOOP_GUARD=1` and
+ * `loopGuard.enabled: false` turn it off; otherwise the model line's
+ * `thinking-loop-guard` catalog axis decides, and unassigned lines get `exact`.
+ */
+export function loopGuardLevel(model: Model<Api>, options?: StreamOptions): LoopGuardLevel {
+	if (process.env.PI_NO_THINKING_LOOP_GUARD === "1" || options?.loopGuard?.enabled === false) return "off";
+	const level = resolveCatalogPolicy(model).thinkingLoopGuard;
+	return level === "off" || level === "semantic" ? level : "exact";
 }
 
 /**
@@ -392,7 +406,7 @@ export function guardThinkingLoopStream(
 	options?: StreamOptions,
 ): AssistantMessageEventStream {
 	const outer = new AssistantMessageEventStream();
-	const semanticHeuristics = isLoopGuardedModel(model, options);
+	const semanticHeuristics = loopGuardLevel(model, options) === "semantic";
 	const thinkingDetector = new ThinkingLoopDetector(semanticHeuristics);
 	const textDetector = new ThinkingLoopDetector(semanticHeuristics);
 	const checkAssistantContent = options?.loopGuard?.checkAssistantContent !== false;
@@ -401,8 +415,30 @@ export function guardThinkingLoopStream(
 		let thinkingArmed = true;
 		let textArmed = checkAssistantContent;
 		let textStarted = false;
+		// The provider's latest snapshot of this attempt, and when (wall clock,
+		// like its `timestamp`) its first delta arrived: the guard reports the
+		// attempt that tripped, not the wrapper's lifetime around retries. The
+		// attempt's start is kept as a value: providers that retry may reset
+		// the same output object's `timestamp` in place.
+		let snapshot: AssistantMessage | undefined;
+		let attemptStart: number | undefined;
+		let firstDeltaAt: number | undefined;
 		try {
 			for await (const event of inner) {
+				const next = "partial" in event ? event.partial : event.type === "done" ? event.message : undefined;
+				if (next) {
+					if (next.timestamp !== attemptStart) {
+						attemptStart = next.timestamp;
+						firstDeltaAt = undefined;
+					}
+					snapshot = next;
+				}
+				if (
+					firstDeltaAt === undefined &&
+					(event.type === "text_delta" || event.type === "thinking_delta" || event.type === "toolcall_delta")
+				) {
+					firstDeltaAt = Date.now();
+				}
 				let detail: string | null = null;
 				if (event.type === "thinking_delta") {
 					// Re-arm after thinking_end / toolcall_start unless visible answer
@@ -450,7 +486,7 @@ export function guardThinkingLoopStream(
 					outer.push({
 						type: "error",
 						reason: "error",
-						error: buildThinkingLoopError(model, detail),
+						error: buildThinkingLoopError(model, detail, snapshot, firstDeltaAt),
 					});
 					return;
 				}
@@ -473,11 +509,10 @@ export function guardThinkingLoopStream(
 }
 
 /**
- * Apply the loop guard around a provider dispatch. Unless explicitly disabled,
- * every model gets exact suffix-cycle detection; Gemini, DeepSeek, and Grok also
- * get the semantic heuristics selected by {@link isLoopGuardedModel}. The guard
- * injects an abort signal into the provider call so a detected loop tears down
- * the upstream, then wraps the returned stream. Bounding result-path re-samples
+ * Apply the loop guard around a provider dispatch at the model's
+ * {@link loopGuardLevel}; `off` dispatches unwrapped. The guard injects an
+ * abort signal into the provider call so a detected loop tears down the
+ * upstream, then wraps the returned stream. Bounding result-path re-samples
  * lives in the result-awaiting caller.
  */
 export function withThinkingLoopGuard<
@@ -487,9 +522,7 @@ export function withThinkingLoopGuard<
 	options: O | undefined,
 	dispatch: (options: O | undefined) => AssistantMessageEventStream,
 ): AssistantMessageEventStream {
-	if (process.env.PI_NO_THINKING_LOOP_GUARD === "1" || options?.loopGuard?.enabled === false) {
-		return dispatch(options);
-	}
+	if (loopGuardLevel(model, options) === "off") return dispatch(options);
 	const controller = new AbortController();
 	const caller = options?.signal;
 	const signal = caller ? AbortSignal.any([caller, controller.signal]) : controller.signal;
@@ -497,7 +530,24 @@ export function withThinkingLoopGuard<
 	return guardThinkingLoopStream(dispatch(merged), model, controller, options);
 }
 
-function buildThinkingLoopError(model: Model<Api>, detail: string): AssistantMessage {
+/**
+ * The loop-abort error for one attempt. It keeps what the provider had
+ * reported for that attempt when the guard tripped (usage so far, start time,
+ * response id, and timing a finished snapshot already carries); otherwise
+ * duration and time to first delta run from the attempt's own start, since
+ * the provider's timers stop with the abort.
+ */
+function buildThinkingLoopError(
+	model: Model<Api>,
+	detail: string,
+	snapshot: AssistantMessage | undefined,
+	firstDeltaAt: number | undefined,
+): AssistantMessage {
+	const now = Date.now();
+	const duration = snapshot ? (snapshot.duration ?? now - snapshot.timestamp) : undefined;
+	const ttft =
+		snapshot?.ttft ??
+		(snapshot && firstDeltaAt !== undefined ? Math.max(0, firstDeltaAt - snapshot.timestamp) : undefined);
 	return {
 		role: "assistant",
 		// Empty content is load-bearing: loop-guard output is replay garbage, even
@@ -507,20 +557,26 @@ function buildThinkingLoopError(model: Model<Api>, detail: string): AssistantMes
 		api: model.api,
 		provider: model.provider,
 		model: model.id,
-		usage: {
-			input: 0,
-			output: 0,
-			cacheRead: 0,
-			cacheWrite: 0,
-			totalTokens: 0,
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-		},
+		// Cloned: the provider keeps mutating its output while it tears down.
+		usage: snapshot?.usage
+			? structuredClone(snapshot.usage)
+			: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
 		stopReason: "error",
 		// "stream stall" makes the transport/session retry classifiers treat this
 		// as a transient (retryable) failure with no bespoke rule.
 		errorMessage: `${THINKING_LOOP_ERROR_MARKER}: the model repeated near-identical content (${detail}). Treating as a stream stall and retrying.`,
 		errorId: AIError.create(AIError.Flag.ThinkingLoop),
-		timestamp: Date.now(),
+		...(snapshot?.responseId && { responseId: snapshot.responseId }),
+		...(duration !== undefined && { duration }),
+		...(ttft !== undefined && { ttft }),
+		timestamp: snapshot?.timestamp ?? now,
 	};
 }
 
@@ -534,7 +590,14 @@ const exactZ = new Uint16Array(EXACT_MAX_UNIT + 1);
  * computed — the period check reads nothing past it, and each `z[i]` reads
  * only `z[i - left]` with `i - left < i`, which is already filled. Short
  * cycles retain the original 180-character/four-repeat sensitivity; long
- * cycles require at least three repeats and 1024 repeated characters.
+ * cycles and short ones spanning a line break require at least three repeats
+ * and 1024 repeated characters.
+ *
+ * A unit carrying a letter or an emoji matches at those thresholds. A unit with
+ * neither, such as the `?!?!` run a stuck model emits, matches only once it has
+ * repeated for {@link EXACT_PUNCTUATION_MIN_REPEATED_CHARS} characters, and never
+ * when it holds only digits and whitespace: padding, indentation and zero-filled
+ * hexdumps or literals are ordinary output at any length.
  */
 function detectExactSuffixCycle(text: string): [unit: string, count: number] | null {
 	const n = text.length;
@@ -557,10 +620,19 @@ function detectExactSuffixCycle(text: string): [unit: string, count: number] | n
 	for (let len = 2; len <= maxUnit; len++) {
 		const count = 1 + Math.floor(z[len] / len);
 		const minCount = len <= EXACT_SHORT_MAX_UNIT ? 4 : 3;
-		const minChars = len <= EXACT_SHORT_MAX_UNIT ? EXACT_SHORT_MIN_REPEATED_CHARS : EXACT_LONG_MIN_REPEATED_CHARS;
-		if (count < minCount || len * count < minChars) continue;
+		if (count < minCount) continue;
 		const unit = text.slice(-len);
-		if (/\p{L}|\p{Extended_Pictographic}/u.test(unit)) return [unit, count];
+		if (/\p{L}|\p{Extended_Pictographic}/u.test(unit)) {
+			// `unit` is one whole period, so it holds a newline iff the cycle does.
+			const minChars =
+				len <= EXACT_SHORT_MAX_UNIT && !unit.includes("\n")
+					? EXACT_SHORT_MIN_REPEATED_CHARS
+					: EXACT_LONG_MIN_REPEATED_CHARS;
+			if (len * count >= minChars) return [unit, count];
+			continue;
+		}
+		if (/^[\p{N}\s]*$/u.test(unit)) continue;
+		if (len * count >= EXACT_PUNCTUATION_MIN_REPEATED_CHARS) return [unit, count];
 	}
 	return null;
 }

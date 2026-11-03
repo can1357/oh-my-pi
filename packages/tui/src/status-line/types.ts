@@ -36,6 +36,7 @@ export interface CollabStatus {
 }
 
 export interface StatusLineSegmentOptions {
+	pi?: { showProfile?: boolean };
 	model?: { showThinkingLevel?: boolean };
 	path?: { abbreviate?: boolean; maxLength?: number; stripWorkPrefix?: boolean };
 	git?: { showBranch?: boolean; showStaged?: boolean; showUnstaged?: boolean; showUntracked?: boolean };
@@ -85,6 +86,8 @@ export interface SegmentContext {
 	sessionAccent?: boolean;
 	/** Stand-in session title for previews; `session_name` renders it when the session is unnamed. */
 	previewTitle?: string;
+	/** The viewed session is pinned; `session_name` prefixes the pin icon. */
+	isPinned?: boolean;
 	activeRepo: ActiveRepoContext | null;
 	width: number;
 	options: StatusLineSegmentOptions;

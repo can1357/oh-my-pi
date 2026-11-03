@@ -615,6 +615,45 @@ describe("wrapLeakedThinkingStream", () => {
 		expect(thinks(result).map(b => [b.thinking, b.thinkingSignature])).toEqual([["recovered reasoning", signature]]);
 	});
 
+	it("replays finalized signed reasoning once when deltas are absent or incomplete", async () => {
+		const text = "synthetic reasoning";
+		const signature = JSON.stringify({
+			type: "reasoning",
+			id: "rs_repro",
+			summary: [],
+			content: [{ type: "reasoning_text", text }],
+		});
+		const block: ThinkingContent = { type: "thinking", thinking: text, thinkingSignature: signature, summary: false };
+		for (const streamed of ["", "synthetic ", text]) {
+			const terminal = msg({ content: [block] });
+			const { events, result } = await runWrapper(inner => {
+				inner.push({ type: "start", partial: msg() });
+				inner.push({
+					type: "thinking_start",
+					contentIndex: 0,
+					partial: msg({ content: [{ type: "thinking", thinking: "" }] }),
+				});
+				if (streamed) {
+					inner.push({
+						type: "thinking_delta",
+						contentIndex: 0,
+						delta: streamed,
+						partial: msg({ content: [{ type: "thinking", thinking: streamed }] }),
+					});
+				}
+				inner.push({ type: "thinking_end", contentIndex: 0, content: text, partial: terminal });
+				inner.push({ type: "done", reason: "stop", message: terminal });
+			});
+
+			expect(result.content).toEqual([block]);
+			expect(events.filter(event => event.type === "thinking_delta").map(event => event.delta)).toEqual(
+				[streamed, text.slice(streamed.length)].filter(Boolean),
+			);
+			const end = events.find(event => event.type === "thinking_end");
+			expect(end?.type === "thinking_end" && end.content).toBe(text);
+		}
+	});
+
 	it("keeps a thinking block's summary state on every projection path", async () => {
 		const signature = JSON.stringify({ id: "rs_1", type: "reasoning", summary: [] });
 		const streamed = { type: "thinking" as const, thinking: "trace", summary: false };
@@ -844,6 +883,32 @@ describe("wrapLeakedThinkingStream", () => {
 		expect(result.content.map(b => b.type)).toEqual(["text", "thinking", "text"]);
 		expect(texts(result)).toEqual(["Partial.", "Recovered."]);
 		expect(result.stopReason).toBe("error");
+	});
+
+	it("honours a provider's discarded content on an error event", async () => {
+		const { events, result } = await runWrapper(inner => {
+			inner.push({ type: "start", partial: msg() });
+			inner.push({
+				type: "thinking_delta",
+				contentIndex: 0,
+				delta: "looping reasoning that the provider discarded",
+				partial: msg({
+					content: [{ type: "thinking", thinking: "looping reasoning that the provider discarded" }],
+				}),
+			});
+			inner.push({
+				type: "error",
+				reason: "error",
+				error: msg({ content: [], stopReason: "error" }),
+			});
+		});
+
+		const terminal = events.at(-1);
+		expect(terminal?.type).toBe("error");
+		if (terminal?.type === "error") {
+			expect(terminal.error.content).toEqual([]);
+		}
+		expect(result.content).toEqual([]);
 	});
 });
 

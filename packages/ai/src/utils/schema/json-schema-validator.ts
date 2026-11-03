@@ -12,8 +12,10 @@
  * Compared to AJV this is single-pass, synchronous, dependency-free, and
  * tolerates non-standard shapes (`nullable`) that LLM-emitted schemas carry.
  */
+import { parseLocalRefPointer } from "@oh-my-pi/omptype";
 import { isRecord, logger } from "@oh-my-pi/pi-utils";
 import { areJsonValuesEqual } from "./equality";
+import { stamp } from "./stamps";
 
 export interface JsonSchemaValidationIssue {
 	path: PropertyKey[];
@@ -163,18 +165,11 @@ function schemaTypes(schema: Record<string, unknown>): string[] {
 
 /** Extract the effective `type` list from a schema, treating `nullable: true` as adding `"null"`. */
 
-function decodePointerToken(token: string): string {
-	return token.replace(/~1/g, "/").replace(/~0/g, "~");
-}
-
-/** RFC 6901 token decode: `~1` → `/`, `~0` → `~`. */
-
 function resolveLocalRef(root: unknown, ref: string): unknown | undefined {
-	if (ref === "#") return root;
-	if (!ref.startsWith("#/")) return undefined;
+	const pointer = parseLocalRefPointer(ref);
+	if (pointer === undefined) return undefined;
 	let current: unknown = root;
-	for (const rawToken of ref.slice(2).split("/")) {
-		const token = decodePointerToken(rawToken);
+	for (const token of pointer) {
 		if (!isRecord(current) && !Array.isArray(current)) return undefined;
 		current = (current as Record<string, unknown>)[token];
 	}
@@ -209,8 +204,43 @@ function requiresOnlyPropertyPresence(schema: unknown, key: string, root: unknow
 	);
 }
 
-/** Whether any same-instance schema declaration or constraint owns this property name. */
+/**
+ * Memo slot for {@link schemaDefinesProperty}'s per-schema answer cache: one
+ * slot per schema object, with the property name as the key inside it.
+ */
+const kDefinesPropertyCache = Symbol("ai.schemaDefinesPropertyCache");
+
+/**
+ * Whether any same-instance schema declaration or constraint owns this property name.
+ *
+ * The answer depends on exactly two things: the property name, and the content
+ * of the JSON-Schema graph reachable from the root. The cache is keyed by BOTH
+ * — the root's object identity (through {@link stamp}, the repo's
+ * identity-keyed side table) and the property name within it — so two
+ * schemas asking about the same name keep separate answers, and one schema
+ * asked about two names keeps two answers.
+ *
+ * The root identity covers the graph because callers must not mutate a schema
+ * after its first query: wire schemas are covered by that same rule (their
+ * derived values memoize against the same identity), and raw MCP
+ * `inputSchema` and eval-tool `parameters` graphs reach this function with no
+ * other stamp on them, so a new identity is what resets the memo for those.
+ */
 export function schemaDefinesProperty(schema: unknown, key: string): boolean {
+	if (!isRecord(schema)) return false;
+	const cache = stamp(schema, kDefinesPropertyCache, () => new Map<string, boolean>());
+	const cached = cache.get(key);
+	if (cached !== undefined) return cached;
+	const result = computeSchemaDefinesProperty(schema, key);
+	cache.set(key, result);
+	return result;
+}
+
+/**
+ * Uncached walk of the schema graph. {@link schemaDefinesProperty} fronts
+ * this with the memo described there.
+ */
+function computeSchemaDefinesProperty(schema: unknown, key: string): boolean {
 	const root = schema;
 	const visited = new WeakMap<object, number>();
 	const visit = (node: unknown, context: "positive" | "negative" | "predicate" = "positive"): boolean => {

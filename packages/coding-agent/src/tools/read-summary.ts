@@ -39,8 +39,8 @@ function getSummaryParseCache(session: object): LRUCache<string, SummaryResult |
 	}
 	return cache;
 }
-const MAX_SUMMARY_BYTES = 2 * 1024 * 1024;
-const MAX_SUMMARY_LINES = 20_000;
+export const MAX_SUMMARY_BYTES = 2 * 1024 * 1024;
+export const MAX_SUMMARY_LINES = 20_000;
 /**
  * Prose files (Markdown flavors and plain text) skip code-block summarization
  * unless `read.summarize.prose` opts them in.
@@ -117,7 +117,8 @@ export async function trySummarize(
 	}
 }
 
-/** Read session display preferences and format a structural summary. */
+/** Read session display preferences and format a structural summary; `rowPrefixes` records whether its rows carry `N:`/`N|` prefixes. */
 export function renderSummary(session: ToolSession, summary: SummaryResult) {
-	return formatReadSummary(resolveFileDisplayMode(session), summary);
+	const displayMode = resolveFileDisplayMode(session);
+	return { ...formatReadSummary(displayMode, summary), rowPrefixes: displayMode.lineNumbers };
 }

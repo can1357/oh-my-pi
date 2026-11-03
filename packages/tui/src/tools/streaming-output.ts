@@ -323,6 +323,47 @@ export function truncateLineBytes(
 	return { text: materializeString(`${head}…`), wasTruncated: true };
 }
 
+/** Leading characters of a text's first line {@link findColumnCapped} searches for. */
+const CAPPED_PROBE_CHARS = 16;
+
+/**
+ * Where `text` shows in `output` written through an {@link OutputSink} with
+ * `maxColumns`, searching from `from`: each of its lines whole, or, where the
+ * cap cut the output line, a head of it and `…` ending that output line.
+ * Only the first line can be cut short of its first 16 characters (after
+ * other text on its output line); such text is not found.
+ */
+export function findColumnCapped(output: string, text: string, from = 0): { start: number; end: number } | undefined {
+	if (!text) return undefined;
+	const lines = text.split(NL);
+	const probe = lines[0] ? lines[0].slice(0, CAPPED_PROBE_CHARS) : NL;
+	for (let at = output.indexOf(probe, from); at !== -1; at = output.indexOf(probe, at + 1)) {
+		const end = cappedLinesEnd(output, at, lines);
+		if (end !== undefined) return { start: at, end };
+	}
+	return undefined;
+}
+
+/** End of `lines` shown in column-capped `output` from `at`, if they show there. */
+function cappedLinesEnd(output: string, at: number, lines: readonly string[]): number | undefined {
+	let pos = at;
+	for (let i = 0; i < lines.length; i++) {
+		const line = lines[i];
+		const last = i === lines.length - 1;
+		if (output.startsWith(line, pos) && (last || output[pos + line.length] === NL)) {
+			pos += last ? line.length : line.length + 1;
+			continue;
+		}
+		let eol = output.indexOf(NL, pos);
+		if (eol === -1) eol = output.length;
+		if (eol === pos || output[eol - 1] !== ELLIPSIS || !line.startsWith(output.slice(pos, eol - 1))) return undefined;
+		if (last) return eol;
+		if (eol === output.length) return undefined;
+		pos = eol + 1;
+	}
+	return pos;
+}
+
 // =============================================================================
 // Content truncation (line + byte aware, no full Buffer allocation)
 // =============================================================================
@@ -1432,6 +1473,7 @@ export class OutputSink {
 	 * Replace the in-memory buffer with the given text. Used when an upstream
 	 * minimizer rewrites the captured output after the raw bytes have already
 	 * been streamed.
+	 * The replacement is held to the per-line column cap like streamed output.
 	 *
 	 * After this call the buffer is authoritative: streaming counters realign
 	 * to the replacement, the retained head window is cleared, and head
@@ -1442,23 +1484,24 @@ export class OutputSink {
 	 */
 	replace(text: string): void {
 		this.#clearPendingChunkTimer();
-		this.#buffer = text;
-		this.#bufferBytes = Buffer.byteLength(text, "utf-8");
-		this.#tailUntrimmed = false;
-		this.#head = "";
-		this.#headBytes = 0;
-		this.#headLines = 0;
-		this.#headRetentionDisabled = true;
-		this.#totalBytes = this.#bufferBytes;
-		this.#totalLines = countNewlines(text);
-		this.#sawData = text.length > 0;
-		this.#truncated = false;
 		this.#currentLineBytes = 0;
 		this.#columnEllipsisAdded = false;
 		this.#columnDroppedBytes = 0;
 		this.#columnTruncatedLines = 0;
 		// The artifact keeps the replaced stream, so later line numbers no longer match it.
 		this.#columnCutLinesUnmapped = true;
+		const capped = this.#maxColumns > 0 ? this.#applyColumnCap(text, 0) : text;
+		this.#buffer = capped;
+		this.#bufferBytes = Buffer.byteLength(capped, "utf-8");
+		this.#tailUntrimmed = false;
+		this.#head = "";
+		this.#headBytes = 0;
+		this.#headLines = 0;
+		this.#headRetentionDisabled = true;
+		this.#totalBytes = Buffer.byteLength(text, "utf-8");
+		this.#totalLines = countNewlines(text);
+		this.#sawData = text.length > 0;
+		this.#truncated = false;
 		this.#pendingChunk = "";
 		this.#pendingCarriageReturn = false;
 	}

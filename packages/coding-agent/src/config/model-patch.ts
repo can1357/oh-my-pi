@@ -249,6 +249,7 @@ export interface ModelPatch {
 	thinking?: ThinkingConfig;
 	input?: ("text" | "image")[];
 	imageInputDecoder?: Model<Api>["imageInputDecoder"];
+	imageCountBudget?: number;
 	tokenizer?: Model<Api>["tokenizer"];
 	supportsTools?: boolean;
 	cost?: Partial<Model<Api>["cost"]>;
@@ -294,6 +295,7 @@ export function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: 
 	if (patch.input !== undefined) result.input = patch.input;
 	if (patch.tokenizer !== undefined) result.tokenizer = patch.tokenizer;
 	if (patch.imageInputDecoder !== undefined) result.imageInputDecoder = patch.imageInputDecoder;
+	if (patch.imageCountBudget !== undefined) result.imageCountBudget = patch.imageCountBudget;
 	if (patch.supportsTools !== undefined) result.supportsTools = patch.supportsTools;
 	if (patch.promptCache !== undefined) {
 		result.promptCache = patch.promptCache;
@@ -353,7 +355,10 @@ export function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: 
 	if (patch.thinking !== undefined && built.thinking !== undefined) {
 		// Config-authored capability metadata owns the explicit surface; build
 		// first so non-reasoning and wire-disabled models still suppress it.
-		built.thinking = patch.thinking;
+		// Prefix binding is a lineage safety invariant, not surface: keep the
+		// rule-derived flag unless the patch sets it.
+		const { prefixBinding } = built.thinking;
+		built.thinking = prefixBinding ? { prefixBinding, ...patch.thinking } : patch.thinking;
 	}
 	// Capacity already includes registry policy and runtime metadata; rebuilding
 	// compat must not replace it with the catalog's baseline limits.

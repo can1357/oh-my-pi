@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
-import { ImageProtocol, setTerminalImageProtocol, TERMINAL, TUI } from "@oh-my-pi/pi-tui";
+import { ImageProtocol, resolveImageProtocol, setTerminalImageProtocol, TERMINAL, TUI } from "@oh-my-pi/pi-tui";
 import { VirtualTerminal } from "./virtual-terminal";
 import {
 	createProcessTerminalRenderHarness,
 	type ProcessTerminalRenderHarness,
 } from "./process-terminal-render-harness";
 import { withoutTerminalMultiplexer } from "./helpers/terminal-multiplexer";
+import { withFakeTmux } from "./helpers/fake-tmux";
 
 type MutableTerminalInfo = {
 	imageProtocol: ImageProtocol | null;
@@ -40,9 +41,9 @@ function restoreEnv(name: string, value: string | undefined): void {
 	else Bun.env[name] = value;
 }
 
-function startProbe(terminal: VirtualTerminal): TUI {
-	setTerminalImageProtocol(null);
-	terminalInfo.imageProtocol = null;
+function startProbe(terminal: VirtualTerminal, protocol: ImageProtocol | null = null): TUI {
+	setTerminalImageProtocol(protocol);
+	terminalInfo.imageProtocol = protocol;
 	Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
 	Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
 	const tui = new TUI(terminal);
@@ -84,6 +85,17 @@ describe("TUI SIXEL capability probe", () => {
 		delete Bun.env.WSL_INTEROP;
 		const terminal = new VirtualTerminal(80, 24);
 		const tui = startProbe(terminal);
+
+		terminal.sendInput(SIXEL_SUPPORTED_REPLY);
+
+		expect(TERMINAL.imageProtocol).toBe(ImageProtocol.Sixel);
+		tui.stop();
+	});
+
+	it("selects SIXEL through the probe for an unknown tmux client", () => {
+		const env = { TMUX: "/tmp/tmux/default,1,0", TERM: "tmux-256color", TERM_PROGRAM: "tmux" };
+		const terminal = new VirtualTerminal(80, 24);
+		const tui = startProbe(terminal, resolveImageProtocol("base", env, true));
 
 		terminal.sendInput(SIXEL_SUPPORTED_REPLY);
 
@@ -250,6 +262,49 @@ describe("ProcessTerminal DA1 SIXEL detection", () => {
 		expect(received).toEqual(["x"]);
 		expect(TERMINAL.imageProtocol).toBe(ImageProtocol.Sixel);
 	});
+
+	// tmux 3.6a built with SIXEL answers pane DA1 with attribute 4 whatever
+	// client is attached, and refuses the XTSMGRAPHICS geometry query. Only the
+	// client terminal's effective `Sxl` (terminfo, overrides, or the `sixel`
+	// feature) says whether tmux draws SIXEL or its text placeholder.
+	for (const [name, socket, capability, expected] of [
+		["ignores tmux's DA1 SIXEL attribute when the client lacks Sxl", "4242", " 216: Sxl: [missing]", null],
+		[
+			"trusts tmux's DA1 SIXEL attribute when terminal-overrides supply Sxl",
+			"4243",
+			" 216: Sxl: (flag) true",
+			ImageProtocol.Sixel,
+		],
+	] as const) {
+		it.skipIf(process.platform === "win32")(name, async () => {
+			const replies = {
+				"display-message -p #{client_name}": "/dev/pts/3",
+				"show-messages -T -t /dev/pts/3": `Terminal 0: st-256color for /dev/pts/3, flags=0x0:\n${capability}`,
+			};
+			await withFakeTmux(replies, async binDir => {
+				const previousPath = Bun.env.PATH;
+				try {
+					Bun.env.PATH = `${binDir}:${previousPath ?? ""}`;
+					Bun.env.TMUX = `/tmp/tmux-1000/default,${socket},0`;
+					harness = createProcessTerminalRenderHarness(80, 24, { conpty: false });
+					const received: string[] = [];
+					harness.tui.addInputListener(data => {
+						received.push(data);
+					});
+
+					process.stdin.emit("data", "\x1b[?1;2;4c\x1b[?2;3;0Sx");
+					vi.advanceTimersByTime(251);
+
+					expect(received).toEqual(["x"]);
+					expect(TERMINAL.imageProtocol).toBe(expected);
+				} finally {
+					harness?.dispose();
+					harness = undefined;
+					restoreEnv("PATH", previousPath);
+				}
+			});
+		});
+	}
 
 	it("reassembles a DA1 advertisement split beyond the stdin flush deadline", () => {
 		harness = createProcessTerminalRenderHarness(80, 24, { conpty: true, nativeWindowsConsole: false });

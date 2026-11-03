@@ -499,13 +499,11 @@ export function extractEmbeddedAddons({ files, targetDir }) {
 	return writtenPaths;
 }
 
-function maybeExtractEmbeddedAddon(ctx, errors) {
+function maybeExtractEmbeddedAddon(ctx, errors, file = selectEmbeddedAddonFile(ctx.selectedVariant)) {
 	if (!ctx.isCompiledBinary || !embeddedAddon) return null;
 	if (embeddedAddon.platformTag !== ctx.platformTag || embeddedAddon.version !== ctx.packageVersion) return null;
-
-	const selectedEmbeddedFile = selectEmbeddedAddonFile(ctx.selectedVariant);
-	if (!selectedEmbeddedFile) return null;
-	const targetPath = path.join(ctx.versionedDir, selectedEmbeddedFile.filename);
+	if (!file) return null;
+	const targetPath = path.join(ctx.versionedDir, file.filename);
 
 	startupMarker("native:extractEmbeddedAddon:start");
 	try {
@@ -517,11 +515,11 @@ function maybeExtractEmbeddedAddon(ctx, errors) {
 	}
 
 	try {
-		extractEmbeddedAddons({ files: embeddedAddon.files, targetDir: ctx.versionedDir });
+		extractEmbeddedAddons({ files: [file], targetDir: ctx.versionedDir });
 		return targetPath;
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
-		errors.push(`embedded addon extraction (${selectedEmbeddedFile.filename}): ${message}`);
+		errors.push(`embedded addon extraction (${file.filename}): ${message}`);
 		return null;
 	}
 }
@@ -866,8 +864,16 @@ export function loadNative() {
 	const stagedCandidate = embeddedCandidate ? null : maybeStageNodeModulesAddon(ctx, errors);
 	const prepended = [embeddedCandidate, stagedCandidate].filter(c => typeof c === "string");
 	const runtimeCandidates = prepended.length > 0 ? [...prepended, ...ctx.candidates] : ctx.candidates;
+	const fallbackEmbeddedFile =
+		ctx.selectedVariant === "modern" && embeddedAddon
+			? embeddedAddon.files.find(file => file.variant === "baseline")
+			: null;
+	const fallbackEmbeddedPath = fallbackEmbeddedFile && path.join(ctx.versionedDir, fallbackEmbeddedFile.filename);
 
 	for (const candidate of runtimeCandidates) {
+		if (fallbackEmbeddedFile && candidate === fallbackEmbeddedPath) {
+			maybeExtractEmbeddedAddon(ctx, errors, fallbackEmbeddedFile);
+		}
 		try {
 			startupMarker(`native:require:${path.basename(candidate)}`);
 			const bindings = require_(candidate);

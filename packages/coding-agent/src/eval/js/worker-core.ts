@@ -10,7 +10,6 @@ import type {
 } from "./worker-protocol";
 
 interface PendingTool {
-	runId: string;
 	resolve(value: unknown): void;
 	reject(error: Error): void;
 }
@@ -18,7 +17,6 @@ interface PendingTool {
 interface ActiveRun {
 	runId: string;
 	filename: string;
-	pendingTools: Map<string, PendingTool>;
 	/** Rejections floated by this run's cell code, captured before its result was sent. */
 	floatingRejections: unknown[];
 }
@@ -116,6 +114,7 @@ export class WorkerCore {
 	#transport: Transport;
 	#runtime: JsRuntime | null = null;
 	#runs = new Map<string, ActiveRun>();
+	#pendingTools = new Map<string, PendingTool>();
 	#recentCellFiles = new Set<string>();
 	#unsubscribe: () => void;
 	#uninstallRejectionGuard: () => void;
@@ -353,7 +352,7 @@ export class WorkerCore {
 	}
 
 	async #runOne(runId: string, code: string, filename: string, snapshot: SessionSnapshot): Promise<void> {
-		const active: ActiveRun = { runId, filename, pendingTools: new Map(), floatingRejections: [] };
+		const active: ActiveRun = { runId, filename, floatingRejections: [] };
 		this.#runs.set(runId, active);
 		const hooks: RuntimeHooks = {
 			onText: chunk => this.#transport.send({ type: "text", runId, chunk }),
@@ -365,8 +364,12 @@ export class WorkerCore {
 			const runtime = this.#ensureRuntime(snapshot, runId);
 			runtime.setCwd(snapshot.cwd);
 			runtime.syncPreludes(snapshot.preludes ?? []);
-			const value = await runtime.run(code, filename, hooks, { runId, cwd: snapshot.cwd });
-			runtime.displayValue(value, hooks);
+			const value = await runtime.run(code, filename, hooks, {
+				runId,
+				cwd: snapshot.cwd,
+				localRoots: snapshot.localRoots ?? {},
+			});
+			runtime.echo(value, hooks);
 			result = { type: "result", runId, ok: true };
 		} catch (error) {
 			result = { type: "result", runId, ok: false, error: errorPayload(error) };
@@ -388,7 +391,6 @@ export class WorkerCore {
 		const active: ActiveRun = {
 			runId: msg.runId,
 			filename: `tool-${msg.runId}`,
-			pendingTools: new Map(),
 			floatingRejections: [],
 		};
 		this.#runs.set(msg.runId, active);
@@ -432,8 +434,7 @@ export class WorkerCore {
 				}
 				envelope = { ok: true, value: cloneable };
 			}
-			this.#transport.send({ type: "display", runId: msg.runId, output: { type: "json", data: envelope } });
-			this.#transport.send({ type: "result", runId: msg.runId, ok: true });
+			this.#transport.send({ type: "result", runId: msg.runId, ok: true, value: envelope });
 		} catch (error) {
 			this.#transport.send({ type: "result", runId: msg.runId, ok: false, error: errorPayload(error) });
 		} finally {
@@ -454,37 +455,32 @@ export class WorkerCore {
 	async #callTool(active: ActiveRun, name: string, args: unknown, identity?: RuntimeCallIdentity): Promise<unknown> {
 		const id = `tc-${active.runId}-${crypto.randomUUID()}`;
 		const { promise, resolve, reject } = Promise.withResolvers<unknown>();
-		active.pendingTools.set(id, { runId: active.runId, resolve, reject });
+		this.#pendingTools.set(id, { resolve, reject });
 		try {
 			this.#transport.send({ type: "tool-call", id, runId: active.runId, name, args, identity });
 		} catch (error) {
 			// Non-serializable args (DataCloneError from postMessage / IPC send).
 			// No reply will ever arrive; fail this call instead of stranding a
 			// pending entry until close.
-			active.pendingTools.delete(id);
+			this.#pendingTools.delete(id);
 			reject(error);
 		}
 		return await promise;
 	}
 
 	#deliverToolReply(id: string, reply: ToolReply): void {
-		for (const active of this.#runs.values()) {
-			const pending = active.pendingTools.get(id);
-			if (!pending) continue;
-			active.pendingTools.delete(id);
-			if (reply.ok) pending.resolve(reply.value);
-			else pending.reject(errorFromPayload(reply.error));
-			return;
-		}
+		const pending = this.#pendingTools.get(id);
+		if (!pending) return;
+		this.#pendingTools.delete(id);
+		if (reply.ok) pending.resolve(reply.value);
+		else pending.reject(errorFromPayload(reply.error));
 	}
 
 	#close(): void {
-		for (const active of this.#runs.values()) {
-			for (const pending of active.pendingTools.values()) {
-				pending.reject(new ToolError("JS worker closed"));
-			}
-			active.pendingTools.clear();
+		for (const pending of this.#pendingTools.values()) {
+			pending.reject(new ToolError("JS worker closed"));
 		}
+		this.#pendingTools.clear();
 		this.#runs.clear();
 		this.#runtime?.dispose?.();
 		this.#runtime = null;
@@ -495,12 +491,10 @@ export class WorkerCore {
 	}
 
 	dispose(): void {
-		for (const active of this.#runs.values()) {
-			for (const pending of active.pendingTools.values()) {
-				pending.reject(new ToolError("JS worker closed"));
-			}
-			active.pendingTools.clear();
+		for (const pending of this.#pendingTools.values()) {
+			pending.reject(new ToolError("JS worker closed"));
 		}
+		this.#pendingTools.clear();
 		this.#runs.clear();
 		this.#runtime?.dispose?.();
 		this.#runtime = null;

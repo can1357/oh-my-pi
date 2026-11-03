@@ -7,7 +7,7 @@ import {
 	OPENAI_HEADERS,
 	URL_PATHS,
 } from "@oh-my-pi/pi-catalog/wire/codex";
-import { readSseJson, USER_AGENT } from "@oh-my-pi/pi-utils";
+import { prompt, readSseJson, USER_AGENT } from "@oh-my-pi/pi-utils";
 import { withAuth } from "../auth-retry";
 import * as AIError from "../error";
 import { applySessionHeader } from "../providers/inference-headers";
@@ -20,6 +20,7 @@ import {
 	toDataUrl,
 	usageFromWire,
 } from "./shared";
+import codexFormatDirective from "./codex-format-directive.md" with { type: "text" };
 import type { GeneratedImage, ImageGenerationOptions, ImageGenerationRequest, ImageGenerationResult } from "./types";
 
 const DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1";
@@ -143,6 +144,27 @@ async function parseSse(response: Response, signal?: AbortSignal): Promise<Image
 	return collectResponse(completed?.output?.length ? completed : { ...completed, output: fallbackOutput });
 }
 
+/**
+ * The Codex backend runs its image tool with `size: "auto"`, ignoring the requested `size`, and
+ * shapes the canvas from the prompt alone. Spell the requested shape out so it is honored.
+ */
+function withCodexFormatDirective(request: ImageGenerationRequest): string {
+	const dimensions = request.imageSize?.match(/^(\d+)x(\d+)$/);
+	const ratio = dimensions ? undefined : request.aspectRatio?.match(/^(\d+):(\d+)$/);
+	const match = dimensions ?? ratio;
+	if (!match) return request.prompt;
+	const width = Number(match[1]);
+	const height = Number(match[2]);
+	const shape = width === height ? "square" : width > height ? "landscape" : "portrait";
+	return prompt.render(codexFormatDirective, {
+		prompt: request.prompt,
+		shape,
+		width,
+		height,
+		pixels: dimensions !== undefined,
+	});
+}
+
 export async function generateHostedImage(
 	model: Model,
 	request: ImageGenerationRequest,
@@ -154,7 +176,8 @@ export async function generateHostedImage(
 		throw new AIError.ValidationError(`Hosted image carrier API ${carrier.api} is unsupported`);
 	}
 	const stream = carrier.api === "openai-codex-responses";
-	const content: Array<Record<string, unknown>> = [{ type: "input_text", text: request.prompt }];
+	const inputText = stream ? withCodexFormatDirective(request) : request.prompt;
+	const content: Array<Record<string, unknown>> = [{ type: "input_text", text: inputText }];
 	for (const image of request.inputImages ?? []) {
 		content.push({ type: "input_image", detail: "auto", image_url: toDataUrl(image) });
 	}

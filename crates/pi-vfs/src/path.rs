@@ -10,7 +10,7 @@
 use std::{
 	borrow::Cow,
 	ffi::{OsStr, OsString},
-	path::{Component, Path, PathBuf},
+	path::{Component, Path, PathBuf, Prefix},
 };
 
 /// Length in bytes of the `scheme://` root of `path`, if it is a URL.
@@ -155,10 +155,7 @@ fn os_from_bytes(bytes: Vec<u8>) -> OsString {
 	}
 	#[cfg(not(unix))]
 	{
-		match String::from_utf8(bytes) {
-			Ok(text) => text.into(),
-			Err(err) => String::from_utf8_lossy(err.as_bytes()).into_owned().into(),
-		}
+		String::from_utf8_lossy_owned(bytes).into()
 	}
 }
 
@@ -233,7 +230,10 @@ fn ends_with_separator(path: &Path) -> bool {
 
 /// URL-aware [`Path::join`].
 ///
-/// A URL, rooted, or prefixed `rel` replaces `base` (as with `Path::join`).
+/// A URL, rooted, or prefixed `rel` replaces `base` (as with `Path::join`),
+/// except a Windows drive-relative `rel` (`C:`, `C:name`), which resolves
+/// against `base` on the same drive and against the drive root otherwise,
+/// never against the process's per-drive working directory.
 /// Under a URL `base`, each component of the raw relative path becomes one
 /// percent-encoded segment ([`encode_segment`]) joined with `/`, so
 /// `scheme://` is never collapsed; a trailing separator is kept.
@@ -241,13 +241,16 @@ pub fn join_path(base: &Path, rel: &Path) -> PathBuf {
 	if is_virtual_path(rel) {
 		return rel.to_path_buf();
 	}
+	if let Some(joined) = join_drive_relative(base, rel) {
+		return joined;
+	}
 	if !is_virtual_path(base) {
 		return base.join(rel);
 	}
 	if rel.has_root() || matches!(rel.components().next(), Some(Component::Prefix(_))) {
 		return rel.to_path_buf();
 	}
-	if rel.as_os_str().is_empty() {
+	if rel.is_empty() {
 		// `Path::join("")` appends a separator; keep that directory spelling.
 		let mut out = OsString::from(base.as_os_str());
 		if !base.as_os_str().as_encoded_bytes().ends_with(b"/") {
@@ -269,6 +272,41 @@ pub fn join_path(base: &Path, rel: &Path) -> PathBuf {
 		spelled.push("/");
 	}
 	push_url(base, &spelled)
+}
+
+/// Joins a Windows drive-relative `rel` (`C:`, `C:name`) lexically; `None`
+/// for any other `rel`. Left to Win32, it would resolve against the process's
+/// per-drive cwd instead of the shell's. On `base`'s drive the remainder joins
+/// onto `base` (`C:` is `base` itself); otherwise (another drive, a URL
+/// `base`) onto that drive's root `X:\`.
+fn join_drive_relative(base: &Path, rel: &Path) -> Option<PathBuf> {
+	let mut components = rel.components();
+	let Some(Component::Prefix(prefix)) = components.next() else {
+		return None;
+	};
+	let Prefix::Disk(drive) = prefix.kind() else {
+		return None;
+	};
+	if rel.has_root() {
+		return None;
+	}
+	let same_drive = matches!(
+		base.components().next(),
+		Some(Component::Prefix(base_prefix))
+			if matches!(base_prefix.kind(), Prefix::Disk(d) | Prefix::VerbatimDisk(d) if d.eq_ignore_ascii_case(&drive))
+	);
+	let mut out = if same_drive {
+		base.to_path_buf()
+	} else {
+		let mut root = OsString::from(prefix.as_os_str());
+		root.push("\\");
+		PathBuf::from(root)
+	};
+	let rest = components.as_path();
+	if !rest.is_empty() {
+		out.push(rest);
+	}
+	Some(out)
 }
 
 /// Path of the directory entry named `name` (raw) inside `dir`: host
@@ -447,7 +485,7 @@ pub fn normalize_lexically(path: &Path) -> PathBuf {
 			},
 		}
 	}
-	if out.as_os_str().is_empty() {
+	if out.is_empty() {
 		out.push(".");
 	}
 	out
@@ -481,9 +519,7 @@ pub(crate) fn parts(path: &Path) -> Vec<Part> {
 	for component in path.components() {
 		match component {
 			Component::Prefix(_) | Component::RootDir => {
-				root
-					.get_or_insert_with(PathBuf::new)
-					.push(component.as_os_str());
+				root.get_or_insert_default().push(component.as_os_str());
 				continue;
 			},
 			_ => {},

@@ -12,24 +12,30 @@
 //!
 //! Only lexing runs in wasm: tree-sitter copies the parse tables into native
 //! memory, so the resulting trees are ordinary native trees. A parser needs a
-//! [`WasmStore`] to run a wasm grammar; [`parse`] keeps one per thread, and
-//! every parse in this crate goes through it.
+//! [`WasmStore`] to run a wasm grammar; [`parse`] keeps one per thread,
+//! replacing it after [`WASM_STORE_BYTE_BUDGET`], and every parse in this crate
+//! goes through it.
 //!
 //! `LanguageExt::get_ts_language` and `LanguageExt::ast_grep` panic for a wasm
 //! grammar that is not installed, like ast-grep's own parse failures. Entry
 //! points check [`GrammarSource::load`] first and treat
 //! [`GrammarError::NotInstalled`] as "no tree" or report it.
 
+#[cfg(feature = "wasm")]
+use std::{cell::RefCell, sync::LazyLock};
 use std::{
-	cell::RefCell,
 	error::Error,
 	fmt,
 	path::PathBuf,
-	sync::{LazyLock, Mutex, OnceLock, PoisonError, RwLock},
+	sync::{Mutex, OnceLock, PoisonError, RwLock},
 };
 
-use anyhow::{Context, Result};
-use tree_sitter::{Language, Parser, Tree, WasmStore, wasmtime::Engine};
+#[cfg(feature = "wasm")]
+use anyhow::Context;
+use anyhow::Result;
+use tree_sitter::{Language, Parser, Tree};
+#[cfg(feature = "wasm")]
+use tree_sitter::{WasmStore, wasmtime::Engine};
 
 /// Where a language's grammar comes from.
 #[derive(Clone, Copy, Debug)]
@@ -96,16 +102,39 @@ impl fmt::Display for GrammarError {
 
 impl Error for GrammarError {}
 
+#[cfg(feature = "wasm")]
 static ENGINE: LazyLock<Engine> = LazyLock::new(Engine::default);
 static GRAMMAR_DIR: RwLock<Option<PathBuf>> = RwLock::new(None);
 /// Serializes module loads: compiling one takes tens of milliseconds, which
 /// every thread needing the grammar would otherwise repeat.
 static LOAD_LOCK: Mutex<()> = Mutex::new(());
 
+/// Source bytes a thread's wasm store may parse before [`parse`] replaces it.
+///
+/// tree-sitter 0.25 looks up the wasm function on every scanner call
+/// (`ts_wasm_store__call` → `wasmtime_table_get`), and wasmtime 29 registers
+/// each looked-up function in the store until the store is dropped: about 32
+/// bytes per byte of lexed source. Reusing one store per thread forever let a
+/// worker that repeatedly parsed a 2.5 MB C# file grow that registry until a
+/// 40 GiB reallocation aborted the process (issue #16067). Past this budget
+/// the store is dropped and a fresh one is built, bounding each thread's store
+/// to roughly 128 MiB plus the source of a single parse.
+#[cfg(feature = "wasm")]
+const WASM_STORE_BYTE_BUDGET: usize = 4 << 20;
+
+/// A wasm-capable parser and the source bytes its store has parsed so far.
+#[cfg(feature = "wasm")]
+struct WasmParser {
+	parser: Parser,
+	parsed: usize,
+}
+
+#[cfg(feature = "wasm")]
 thread_local! {
 	/// Parser holding a wasm store. Creating a store instantiates
-	/// tree-sitter's wasm C library, so each thread keeps its first one.
-	static WASM_PARSER: RefCell<Option<Parser>> = const { RefCell::new(None) };
+	/// tree-sitter's wasm C library, so each thread reuses one until it has
+	/// parsed [`WASM_STORE_BYTE_BUDGET`] bytes.
+	static WASM_PARSER: RefCell<Option<WasmParser>> = const { RefCell::new(None) };
 }
 
 /// Sets the directory wasm grammars are read from (`<dir>/<file>`).
@@ -159,11 +188,19 @@ impl WasmGrammar {
 		let invalid = |reason: String| GrammarError::Invalid { language: self.language, reason };
 		let bytes = std::fs::read(&path)
 			.map_err(|err| invalid(format!("reading {}: {err}", path.display())))?;
-		let mut store = WasmStore::new(&ENGINE).map_err(|err| invalid(err.to_string()))?;
-		let language = store
-			.load_language(self.symbol, &bytes)
-			.map_err(|err| invalid(err.to_string()))?;
-		Ok(self.loaded.get_or_init(|| language).clone())
+		#[cfg(feature = "wasm")]
+		{
+			let mut store = WasmStore::new(&ENGINE).map_err(|err| invalid(err.to_string()))?;
+			let language = store
+				.load_language(self.symbol, &bytes)
+				.map_err(|err| invalid(err.to_string()))?;
+			Ok(self.loaded.get_or_init(|| language).clone())
+		}
+		#[cfg(not(feature = "wasm"))]
+		{
+			let _ = bytes;
+			Err(invalid("pi-ast was built without its `wasm` feature".to_owned()))
+		}
 	}
 
 	/// Uses `language` for this grammar instead of a downloaded module; tests
@@ -190,32 +227,45 @@ fn test_stand_in(language: &str) -> Option<Language> {
 /// Parses `source` as `language`, on this thread's wasm-capable parser when
 /// `language` is a wasm grammar.
 ///
+/// `old_tree`, when given, must already carry a [`Tree::edit`] describing the
+/// change from its source to `source`; tree-sitter then reuses its unchanged
+/// subtrees.
+///
 /// # Errors
 /// When the parser rejects `language` (incompatible ABI) or the thread's wasm
 /// store cannot be created.
-pub fn parse(language: &Language, source: &str) -> Result<Option<Tree>> {
-	if !language.is_wasm() {
-		let mut parser = Parser::new();
-		parser.set_language(language)?;
-		return Ok(parser.parse(source, None));
+pub fn parse(language: &Language, source: &str, old_tree: Option<&Tree>) -> Result<Option<Tree>> {
+	#[cfg(feature = "wasm")]
+	if language.is_wasm() {
+		return parse_wasm(language, source, old_tree);
 	}
+	let mut parser = Parser::new();
+	parser.set_language(language)?;
+	Ok(parser.parse(source, old_tree))
+}
+
+#[cfg(feature = "wasm")]
+fn parse_wasm(language: &Language, source: &str, old_tree: Option<&Tree>) -> Result<Option<Tree>> {
 	WASM_PARSER.with_borrow_mut(|slot| {
-		let mut parser = if let Some(parser) = slot.take() {
-			parser
-		} else {
-			let mut parser = Parser::new();
-			parser.set_wasm_store(WasmStore::new(&ENGINE).context("creating a wasm store")?)?;
-			parser
+		let mut wasm = match slot.take() {
+			Some(wasm) if wasm.parsed < WASM_STORE_BYTE_BUDGET => wasm,
+			_ => {
+				let mut parser = Parser::new();
+				parser.set_wasm_store(WasmStore::new(&ENGINE).context("creating a wasm store")?)?;
+				WasmParser { parser, parsed: 0 }
+			},
 		};
-		let tree = parser
+		let tree = wasm
+			.parser
 			.set_language(language)
-			.map(|()| parser.parse(source, None));
-		*slot = Some(parser);
+			.map(|()| wasm.parser.parse(source, old_tree));
+		wasm.parsed += source.len();
+		*slot = Some(wasm);
 		Ok(tree?)
 	})
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "wasm"))]
 mod tests {
 	use ast_grep_core::{MatchStrictness, tree_sitter::LanguageExt};
 
@@ -278,5 +328,52 @@ mod tests {
 		assert_eq!(matches, ["mode = fast\n"]);
 
 		std::fs::remove_dir_all(dir).ok();
+	}
+
+	/// Languages instantiated in this thread's wasm store, read without
+	/// replacing the store.
+	fn wasm_store_language_count() -> usize {
+		WASM_PARSER.with_borrow_mut(|slot| {
+			let parser = &mut slot.as_mut().expect("parser kept").parser;
+			let store = parser.take_wasm_store().expect("parser has a store");
+			let count = store.language_count();
+			parser.set_wasm_store(store).expect("store goes back");
+			count
+		})
+	}
+
+	#[test]
+	fn wasm_parser_retires_its_store_after_the_budget() {
+		let language = WasmStore::new(&ENGINE)
+			.expect("create store")
+			.load_language(INI.symbol, INI_WASM)
+			.expect("module loads");
+		let tree = parse(&language, SOURCE, None)
+			.expect("parse runs")
+			.expect("tree");
+		assert!(!tree.root_node().has_error());
+		assert_eq!(wasm_store_language_count(), 1);
+
+		// Mark the current store with a second instance, then exhaust its budget.
+		// The marker must stay alive: a dropped language no longer counts.
+		let _marker = WASM_PARSER.with_borrow_mut(|slot| {
+			let wasm = slot.as_mut().expect("parser kept");
+			let mut store = wasm.parser.take_wasm_store().expect("parser has a store");
+			let marker = store
+				.load_language(INI.symbol, INI_WASM)
+				.expect("module loads");
+			wasm.parser.set_wasm_store(store).expect("store goes back");
+			wasm.parsed = WASM_STORE_BYTE_BUDGET;
+			marker
+		});
+		assert_eq!(wasm_store_language_count(), 2);
+
+		let tree = parse(&language, SOURCE, None)
+			.expect("parse runs")
+			.expect("tree");
+		assert!(!tree.root_node().has_error(), "the replacement store runs the wasm grammar");
+		assert_eq!(wasm_store_language_count(), 1, "the exhausted store was dropped, not reused");
+		let parsed = WASM_PARSER.with_borrow(|slot| slot.as_ref().expect("parser kept").parsed);
+		assert_eq!(parsed, SOURCE.len());
 	}
 }

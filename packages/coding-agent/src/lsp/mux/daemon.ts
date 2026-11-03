@@ -11,7 +11,7 @@
  */
 import * as os from "node:os";
 import { IpcConnection, ipcEndpoint } from "@oh-my-pi/pi-natives";
-import { logger, ptree } from "@oh-my-pi/pi-utils";
+import { logger, ptree, toError } from "@oh-my-pi/pi-utils";
 import { encodeMessageFrame, MessageFramer } from "../../jsonrpc/message-framing";
 import { daemonClientForProject } from "../../launch/client";
 import { describeQuietly, stopQuietly, waitReady } from "../../launch/ensure";
@@ -106,7 +106,7 @@ function requestOnLink(
 					message = JSON.parse(text);
 				} catch (error) {
 					cleanup();
-					reject(error instanceof Error ? error : new Error(String(error)));
+					reject(toError(error));
 					return;
 				}
 				if (message.id !== request.id) continue;
@@ -118,7 +118,7 @@ function requestOnLink(
 		} catch (error) {
 			cleanup();
 			link.connection.destroy();
-			reject(error instanceof Error ? error : new Error(String(error)));
+			reject(toError(error));
 		}
 	};
 	const close = () => {
@@ -301,6 +301,7 @@ export async function connectSharedLspTransport(opts: {
 	args: string[];
 	cwd: string;
 	env?: Record<string, string>;
+	initializationOptions: unknown;
 	signal?: AbortSignal;
 }): Promise<LspTransport | null> {
 	try {
@@ -311,6 +312,7 @@ export async function connectSharedLspTransport(opts: {
 			args: opts.args,
 			cwd: opts.cwd,
 			env: opts.env,
+			initializationOptions: opts.initializationOptions,
 		});
 	} catch (error) {
 		if (opts.signal?.aborted) throw error;

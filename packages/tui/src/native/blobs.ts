@@ -8,9 +8,11 @@
  * references it.
  */
 import type { TspProps } from "@oh-my-pi/pi-wire";
+import { tryFileUri } from "../render/hyperlink";
 import { resolveImageOptions } from "../render/render-utils";
 import { getImageDimensions } from "../terminal-capabilities";
 import { node } from "./describe";
+import { imageLinksEnabled, transcriptImageLink } from "../prompt/image-references";
 import type { NativeChild, NativeNode } from "./node";
 
 export interface NativeBlob {
@@ -92,15 +94,31 @@ export function base64ImageNode(
 	);
 }
 
-/** `image` nodes for base64 payloads, one per slot key, rebuilt only when the slot's payload changes. */
-export class NativeImageCache {
-	#entries = new Map<string, { data: string; node: NativeNode }>();
+/**
+ * Props that make an `image` node open the file at `filePath` (as a `file://` URL, the TSP
+ * open-target form): a click zooms the image in the terminal, and the file opens from its
+ * context menu. Always uses a local file URL because the open action runs locally,
+ * even when remote file handlers are configured. Empty without a file.
+ */
+export function openableImageProps(filePath: string | undefined): Pick<TspProps<"image">, "href" | "actions"> {
+	const href = filePath ? tryFileUri(filePath, { local: true }) : undefined;
+	return href ? { href, actions: { menu: ["open"] } } : {};
+}
 
-	get(key: string, data: string, mimeType: string): NativeNode {
+/**
+ * `image` nodes for base64 payloads, one per slot key, rebuilt only when the slot's payload
+ * or the link policy changes. Each opens its file (`sourcePath`, else a blob copy).
+ */
+export class NativeImageCache {
+	#entries = new Map<string, { data: string; linked: boolean; node: NativeNode }>();
+
+	get(key: string, data: string, mimeType: string, sourcePath?: string): NativeNode {
+		const linked = imageLinksEnabled();
 		const cached = this.#entries.get(key);
-		if (cached?.data === data) return cached.node;
-		const image = base64ImageNode(data, mimeType, { alt: mimeType }, key);
-		this.#entries.set(key, { data, node: image });
+		if (cached?.data === data && cached.linked === linked) return cached.node;
+		const open = openableImageProps(transcriptImageLink({ data, mimeType }, sourcePath));
+		const image = base64ImageNode(data, mimeType, { alt: mimeType, ...open }, key);
+		this.#entries.set(key, { data, linked, node: image });
 		return image;
 	}
 }

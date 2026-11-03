@@ -44,6 +44,8 @@ function extension(name: string, handler: (event: BeforeAgentStartEvent) => Prom
 		]),
 		tools: new Map(),
 		assistantThinkingRenderers: [],
+		assistantTextRenderers: [],
+		linkSchemes: [],
 		fileWriteFallbackHandlers: [],
 		fileDeleteFallbackHandlers: [],
 		messageRenderers: new Map(),
@@ -185,7 +187,7 @@ describe("queued user delivery policy", () => {
 				systemPrompt: [
 					...BASE,
 					`tools:${toolNames.join(",")}`,
-					(await backend.buildDeveloperInstructions(dir.path(), settings, session)) ?? "",
+					(await backend.buildDeveloperInstructions(dir.path(), dir.path(), settings, session)) ?? "",
 				],
 			}),
 			{ settings, tools, policy },
@@ -925,8 +927,8 @@ describe("queued user delivery policy", () => {
 		);
 		const prepare = agent.prepareQueuedMessages;
 		if (!prepare) throw new Error("Session queue preparation was not installed");
-		agent.prepareQueuedMessages = async (messages, signal) => {
-			const preparation = await prepare(messages, signal);
+		agent.prepareQueuedMessages = async (messages, signal, queue) => {
+			const preparation = await prepare(messages, signal, queue);
 			await session.setActiveToolsByName(["new_tool"]);
 			return preparation;
 		};

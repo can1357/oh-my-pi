@@ -18,6 +18,7 @@ import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
 import type { AssistantMessage, CacheRetention, Context, Message, Model, ModelSpec } from "@oh-my-pi/pi-ai/types";
 import { markPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { requestBodyText } from "@oh-my-pi/pi-ai/utils/request-body";
 
 const MODEL_SPEC: ModelSpec<"anthropic-messages"> = {
 	id: "claude-sonnet-4-5",
@@ -59,7 +60,7 @@ async function captureWireBody(
 ): Promise<MessageCreateParams> {
 	let body: MessageCreateParams | undefined;
 	const fetchMock = (async (_input: string | URL | Request, init?: RequestInit) => {
-		body = JSON.parse(String(init?.body ?? "{}")) as MessageCreateParams;
+		body = JSON.parse(requestBodyText(init) ?? "{}") as MessageCreateParams;
 		return new Response(
 			JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "captured" } }),
 			{ status: 400, headers: { "Content-Type": "application/json" } },
@@ -266,6 +267,26 @@ describe("anthropic head caching (general API-key path)", () => {
 		// and the budget runs out before the sub-prefix anchor.
 		const withTools = await captureWireBody(undefined, { ...CONTEXT, messages });
 		expect(findCachedMessageIndices(withTools)).toEqual([28, 64]);
+	});
+
+	it("shares the cached reply prefix between a side request and the next user turn", async () => {
+		const persisted: Message[] = [
+			{ role: "user", content: "Fix the issue", timestamp: 1 },
+			assistantMessage("Fixed.", 2),
+		];
+		const reminder: Message = { role: "developer", content: "No tools", timestamp: 3 };
+		const sidePrompt: Message = { role: "user", content: "Predict the next user message", timestamp: 4 };
+		markPerCallContextMessage(reminder);
+		markPerCallContextMessage(sidePrompt);
+		const side = await captureWireBody(undefined, { ...CONTEXT, messages: [...persisted, reminder, sidePrompt] });
+		const nextTurn = await captureWireBody(undefined, {
+			...CONTEXT,
+			messages: [...persisted, { role: "user", content: "Review the test", timestamp: 5 }],
+		});
+
+		expect(findCachedMessageIndices(side).filter(index => index >= 1)).toEqual([1]);
+		expect(findCachedMessageIndices(nextTurn)).toContain(1);
+		expect(side.messages[1]?.content).toEqual(nextTurn.messages[1]?.content);
 	});
 
 	it("bounds the stable prefix at the oldest of several per-call marks", async () => {

@@ -168,7 +168,10 @@ describe("Anthropic many-image payload resizing", () => {
 	it("clamps a single image past Anthropic's hard 8000px limit", async () => {
 		// Reproduces the 400 "At least one of the image dimensions exceed max
 		// allowed size: 8000 pixels" from a full-page screenshot tool result.
-		const tallData = await makeRedPng(1440, 8570);
+		const tallData = await makeRedPng(240, 8570);
+		const source = await new Bun.Image(Buffer.from(tallData, "base64")).metadata();
+		expect(source.height).toBeGreaterThan(8000);
+		expect(tallData.length).toBeLessThanOrEqual(9 * 1024 * 1024);
 		const tallImage: ImageContent = { type: "image", data: tallData, mimeType: "image/png" };
 		const context = makeToolResultContext([tallImage]);
 
@@ -181,7 +184,7 @@ describe("Anthropic many-image payload resizing", () => {
 
 		const { width, height } = await new Bun.Image(Buffer.from(images[0].source.data, "base64")).metadata();
 		expect(height).toBe(8000);
-		expect(width).toBe(1344);
+		expect(width).toBe(224);
 	});
 
 	it("re-encodes an image past Anthropic's 10 MB payload limit", async () => {
@@ -276,15 +279,19 @@ describe("Anthropic many-image payload resizing", () => {
 		// API overrides it instead of inheriting 8000px.
 		const tightModel = makeAnthropicModel({ maxImageDimension: 4000 });
 		expect(tightModel.compat.maxImageDimension).toBe(4000);
-		const tallData = await makeRedPng(1440, 8570);
+		const tallData = await makeRedPng(240, 8570);
+		const source = await new Bun.Image(Buffer.from(tallData, "base64")).metadata();
+		expect(source.height).toBeGreaterThan(8000);
+		expect(tallData.length).toBeLessThanOrEqual(9 * 1024 * 1024);
 		const tallImage: ImageContent = { type: "image", data: tallData, mimeType: "image/png" };
 
 		const payload = await capturePayload(makeToolResultContext([tallImage]), tightModel);
 
 		const images = extractToolResultImages(payload);
 		expect(images).toHaveLength(1);
+		expect(tallImage.data).toBe(tallData);
 		const { width, height } = await new Bun.Image(Buffer.from(images[0].source.data, "base64")).metadata();
 		expect(height).toBe(4000);
-		expect(width).toBe(672);
+		expect(width).toBe(112);
 	});
 });

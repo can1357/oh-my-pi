@@ -6,12 +6,32 @@ const WINDOWS_PER_APP = 3;
 const WINDOWS_PER_MATCHED_APP = 10;
 const MAX_TITLE_CHARS = 80;
 
+/**
+ * What `computer.apps.open` does for an app with no listed window: on macOS it also shows a window of a running app
+ * that has none and returns it; elsewhere it only launches. A read-only run still gets the hint, since the next call
+ * can open the app.
+ */
+export type AppOpenRoute = "shows-window" | "launches";
+
 /** Lists the open windows by app, apps matching `app` first, for a selector that matched nothing. */
-export function describeWindowMiss(windows: readonly DesktopWindow[], app: string | undefined): string {
-	if (windows.length === 0) return "No windows are open.";
+export function describeWindowMiss(
+	windows: readonly DesktopWindow[],
+	app: string | undefined,
+	route: AppOpenRoute,
+): string {
 	// An empty `app` filters nothing in `matchesFilter`, so it matches no app here either.
 	const needle = app?.toLocaleLowerCase() || undefined;
 	const matched = (name: string): boolean => needle !== undefined && name.toLocaleLowerCase().includes(needle);
+	const call = `computer.apps.open(${JSON.stringify(app)})`;
+	const hint =
+		route === "shows-window"
+			? `${call} opens it by that exact name or ID, or shows a window of it if it runs without one, and returns it with that window (window: null if none appears within 3 s).\n`
+			: `${call} launches it by that exact name or ID.\n`;
+	const note =
+		needle !== undefined && !windows.some(window => matched(window.app))
+			? `No open window belongs to an app matching ${JSON.stringify(app)}.\n${hint}`
+			: "";
+	if (windows.length === 0) return `${note}No windows are open.`;
 	const byApp = Map.groupBy(windows, window => window.app);
 	const focusedApp = windows.find(window => window.focused)?.app;
 	const rank = (name: string): number => (matched(name) ? 0 : name === focusedApp ? 1 : 2);
@@ -32,9 +52,5 @@ export function describeWindowMiss(windows: readonly DesktopWindow[], app: strin
 		const count = omitted.reduce((sum, name) => sum + byApp.get(name)!.length, 0);
 		lines.push(`- ${omitted.length} more ${omitted.length === 1 ? "app" : "apps"} with ${count} windows`);
 	}
-	const note =
-		needle !== undefined && !apps.some(matched)
-			? `No open window belongs to an app matching ${JSON.stringify(app)}.\n`
-			: "";
 	return `${note}Open windows by app (id "title"):\n${lines.join("\n")}`;
 }

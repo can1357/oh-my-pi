@@ -30,10 +30,17 @@ export class Text implements Component {
 	#customBgFn?: (text: string) => string;
 	#styleFn?: (text: string) => string;
 	#ignoreTight = false;
+	#wrapLine?: (line: string, width: number) => string[];
 
 	setIgnoreTight(ignore: boolean): this {
 		if (this.#ignoreTight === ignore) return this;
 		this.#ignoreTight = ignore;
+		this.invalidate();
+		return this;
+	}
+	/** Override row wrapping when the source carries structural prefixes. */
+	setWrapLine(wrapLine: (line: string, width: number) => string[]): this {
+		this.#wrapLine = wrapLine;
 		this.invalidate();
 		return this;
 	}
@@ -162,7 +169,10 @@ export class Text implements Component {
 		const paddingX = this.#ignoreTight ? this.#paddingX : getPaddingX(this.#paddingX);
 		const contentWidth = Math.max(1, width - paddingX * 2);
 		// Wrap text (this preserves ANSI codes but does NOT pad)
-		const wrappedLines = wrapTextWithAnsi(normalizedText, contentWidth);
+		const wrapLine = this.#wrapLine;
+		const wrappedLines = wrapLine
+			? normalizedText.split("\n").flatMap(line => wrapLine(line, contentWidth))
+			: wrapTextWithAnsi(normalizedText, contentWidth);
 
 		// Add margins and background to each line
 		const leftMargin = padding(paddingX);

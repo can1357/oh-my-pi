@@ -331,6 +331,7 @@ describe("Command Code provider support", () => {
 	test("routes effort-ladder ids to Responses with the right off switch", async () => {
 		// supported_endpoints on 2026-10-01: these ladder ids lack /responses.
 		// Qwen3.8 stays on chat because `enable_thinking: false` already disables it there.
+		// glm-5.3-flash left /responses later: chat-only by 2026-10-14.
 		const chatLadderIds: Record<string, true> = {
 			"deepseek/deepseek-v4-flash-fast": true,
 			"google/gemini-3.7-flash": true,
@@ -341,6 +342,7 @@ describe("Command Code provider support", () => {
 			"Qwen/Qwen3.8-Omni-Flash": true,
 			"stealth/space-bunny-alpha": true,
 			"tencent/hy4-preview": true,
+			"z-ai/glm-5.3-flash": true,
 		};
 		// First-party OpenAI accepts `none` only on GPT-5.6; other GPT ids keep the lowest effort.
 		const lowestEffortGptIds: Record<string, true> = {

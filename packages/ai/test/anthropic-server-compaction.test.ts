@@ -7,6 +7,7 @@ import {
 import type { AssistantMessage, Context, Model, ModelSpec, UserMessage } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { withEnv, withOfficialAnthropicEndpoint } from "./helpers";
+import { requestBodyText } from "@oh-my-pi/pi-ai/utils/request-body";
 
 const spec: ModelSpec<"anthropic-messages"> = {
 	id: "claude-fable-5",
@@ -23,6 +24,11 @@ const spec: ModelSpec<"anthropic-messages"> = {
 const model = buildModel(spec);
 const SUMMARY = "## Goal\nAudit the handlers.\n\n## Next Steps\nContinue with chunk 11.";
 const SIGNATURE = "sig_opaque_on_demand";
+// Opaque records covered by the signature; the lone surrogate must survive replay sanitization.
+const SIGNED_TOOL_CHANGES: Record<string, unknown>[] = [
+	{ type: "tool_addition", tool: { type: "tool_reference", name: "search" }, opaque: { exact: "\ud800" } },
+	{ type: "tool_removal", tool: { type: "tool_reference", name: "legacy_search" } },
+];
 const ENCRYPTED = "enc_opaque_legacy";
 const vertexUrl =
 	"https://us-east5-aiplatform.googleapis.com/v1/projects/p/locations/us-east5/publishers/anthropic/models/claude-fable-5:rawPredict";
@@ -82,7 +88,7 @@ async function captureRequest(
 	const fetchMock: typeof fetch = Object.assign(
 		async (_input: string | URL | Request, init?: RequestInit) => {
 			beta = new Headers(init?.headers).get("anthropic-beta") ?? "";
-			const body: unknown = JSON.parse(String(init?.body ?? "{}"));
+			const body: unknown = JSON.parse(requestBodyText(init) ?? "{}");
 			payload = body !== null && typeof body === "object" ? { ...body } : {};
 			return new Response(
 				JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "captured" } }),
@@ -135,7 +141,7 @@ async function captureInjected(
 	return { beta, payload };
 }
 
-function mockEvents(stopReason: string, modelId = model.id): Record<string, unknown>[] {
+function mockEvents(stopReason: string, modelId = model.id, toolChanges?: unknown): Record<string, unknown>[] {
 	return [
 		{
 			type: "message_start",
@@ -144,7 +150,12 @@ function mockEvents(stopReason: string, modelId = model.id): Record<string, unkn
 		{
 			type: "content_block_start",
 			index: 0,
-			content_block: { type: "compaction", content: SUMMARY, signature: SIGNATURE },
+			content_block: {
+				type: "compaction",
+				content: SUMMARY,
+				signature: SIGNATURE,
+				...(toolChanges !== undefined ? { tool_changes: toolChanges } : {}),
+			},
 		},
 		{ type: "content_block_stop", index: 0 },
 		{
@@ -334,6 +345,44 @@ describe("Anthropic on-demand compaction response", () => {
 		expect(result.usage.cacheWrite).toBe(80_082);
 		expect(result.usage.totalTokens).toBe(82_148);
 		expect(requests).toBe(1);
+	});
+
+	it("keeps signed tool_changes and replays them byte-identical", async () => {
+		const fetchMock: typeof fetch = Object.assign(
+			async () => sseResponse(mockEvents("compaction", model.id, SIGNED_TOOL_CHANGES)),
+			{ preconnect: fetch.preconnect },
+		);
+		const result = await streamAnthropic(model, context, {
+			apiKey: "sk-ant-test",
+			anthropicCompaction: {},
+			fetch: fetchMock,
+		}).result();
+		expect(result.providerPayload).toEqual({
+			type: "anthropicCompaction",
+			provider: "anthropic",
+			content: SUMMARY,
+			signature: SIGNATURE,
+			toolChanges: SIGNED_TOOL_CHANGES,
+		});
+
+		const next = await captureRequest(model, {}, [result, { role: "user", content: "Continue", timestamp: 2 }]);
+		const block = (next.payload.messages as Array<{ content: Array<Record<string, unknown>> }>)[0]?.content[0];
+		expect(block).toMatchObject({ type: "compaction", content: SUMMARY, signature: SIGNATURE });
+		expect(block?.tool_changes).toEqual(SIGNED_TOOL_CHANGES);
+	});
+
+	it("publishes no block when signed tool_changes are malformed", async () => {
+		const fetchMock: typeof fetch = Object.assign(
+			async () => sseResponse(mockEvents("compaction", model.id, [SIGNED_TOOL_CHANGES[0], null])),
+			{ preconnect: fetch.preconnect },
+		);
+		const result = await streamAnthropic(model, context, {
+			apiKey: "sk-ant-test",
+			anthropicCompaction: {},
+			fetch: fetchMock,
+		}).result();
+		expect(result.stopDetails).toEqual({ type: "compaction" });
+		expect(result.providerPayload).toBeUndefined();
 	});
 
 	it("does not publish a block if the response stopped for another reason", async () => {

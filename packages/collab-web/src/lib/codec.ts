@@ -5,6 +5,7 @@
  * The room key lives only in the link fragment; the relay sees opaque bytes.
  * Sealed layout: `[12B IV][ciphertext+tag]`.
  */
+import { asStrictBytes } from "@oh-my-pi/pi-utils/bytes";
 import type { WireFrame } from "@oh-my-pi/pi-wire";
 
 const AES_ALGORITHM = "AES-GCM";
@@ -23,7 +24,7 @@ export function importRoomKey(raw: Uint8Array): Promise<CryptoKey> {
 	if (raw.byteLength !== KEY_LENGTH) {
 		throw new Error(`Room key must be ${KEY_LENGTH} bytes, got ${raw.byteLength}`);
 	}
-	return crypto.subtle.importKey("raw", asStrict(raw), AES_ALGORITHM, false, ["encrypt", "decrypt"]);
+	return crypto.subtle.importKey("raw", asStrictBytes(raw), AES_ALGORITHM, false, ["encrypt", "decrypt"]);
 }
 
 export async function seal(key: CryptoKey, frame: WireFrame): Promise<Uint8Array> {
@@ -42,17 +43,8 @@ export async function open(key: CryptoKey, data: Uint8Array): Promise<WireFrame>
 	if (data.byteLength <= IV_LENGTH) {
 		throw new Error("Sealed frame too short");
 	}
-	const iv = asStrict(data.subarray(0, IV_LENGTH));
-	const ciphertext = asStrict(data.subarray(IV_LENGTH));
+	const iv = asStrictBytes(data.subarray(0, IV_LENGTH));
+	const ciphertext = asStrictBytes(data.subarray(IV_LENGTH));
 	const plaintext = new Uint8Array(await crypto.subtle.decrypt({ name: AES_ALGORITHM, iv }, key, ciphertext));
 	return JSON.parse(TEXT_DECODER.decode(plaintext)) as WireFrame;
-}
-
-function asStrict(bytes: Uint8Array): Uint8Array<ArrayBuffer> {
-	if (bytes.buffer instanceof ArrayBuffer && bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength) {
-		return bytes as Uint8Array<ArrayBuffer>;
-	}
-	const copy = new Uint8Array(bytes.byteLength);
-	copy.set(bytes);
-	return copy;
 }

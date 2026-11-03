@@ -15,13 +15,12 @@ import { DAY_MS, HOUR_MS } from "./shared";
 
 const OPENCODE_GO_PROVIDER = "opencode-go";
 const DEFAULT_ENDPOINT = "https://opencode.ai/zen/go";
+const MODEL_ENDPOINT = "https://opencode.ai/inference/go";
 const USAGE_PATH = "/v1/usage";
 
 /**
- * `GET /zen/go/v1/usage` response windows. The route is first-party but
- * undocumented (`anomalyco/opencode` `packages/console/app/src/routes/zen/go/v1/usage.ts`)
- * and its shape changed once on merge day, so each window is decoded
- * defensively and malformed windows are skipped rather than failing the report.
+ * `GET /zen/go/v1/usage` response windows. The account endpoint remains on
+ * Zen even though inference and model discovery use `/inference/go/v1`.
  *
  * Per window: `status` is `"ok" | "rate-limited"`, `percent` is a floored,
  * clamped integer 0-100, and `resetsAt` is an ISO timestamp computed server
@@ -36,11 +35,11 @@ const OPENCODE_GO_WINDOWS = [
 
 function normalizeBaseUrl(baseUrl?: string): string {
 	if (!baseUrl?.trim()) return DEFAULT_ENDPOINT;
-	// Strip a trailing `/v1` (models.json carries both `zen/go` and
-	// `zen/go/v1` base URLs) so the usage path doesn't double it, while
-	// preserving any path-mounted gateway prefix.
+	// Preserve custom gateway prefixes while mapping first-party model URLs
+	// back to the separate Zen account endpoint.
 	const withoutTrailingSlash = baseUrl.trim().replace(/\/+$/, "");
-	return withoutTrailingSlash.replace(/\/v1$/i, "") || DEFAULT_ENDPOINT;
+	const normalized = withoutTrailingSlash.replace(/\/v1$/i, "");
+	return normalized === MODEL_ENDPOINT ? DEFAULT_ENDPOINT : normalized || DEFAULT_ENDPOINT;
 }
 
 function resolveStatus(windowStatus: unknown, usedFraction: number): UsageStatus {

@@ -153,6 +153,35 @@ describe("Anthropic mid-conversation system messages", () => {
 		expect(params.at(-1)?.content).toBe("Switch to German.");
 	});
 
+	it("keeps user-attributed developer turns on the user role (#15881)", () => {
+		const model = makeModel();
+		const fileMention: DeveloperMessage = {
+			...developer('<file path="report.md">\n1:# Report\n</file>'),
+			attribution: "user",
+		};
+		const extensionStatus: DeveloperMessage = {
+			...developer("[extension] status=disconnected"),
+			attribution: "user",
+		};
+		// User-supplied context must not gain system authority or end the request
+		// in place of the user's turn.
+		expect(
+			convertAnthropicMessages([user("@report.md polish this"), fileMention], model, false).map(p => p.role),
+		).toEqual(["user", "user"]);
+		expect(
+			convertAnthropicMessages([user("@report.md polish this"), fileMention, extensionStatus], model, false).map(
+				p => p.role,
+			),
+		).toEqual(["user", "user", "user"]);
+		// An agent-owned reminder after the user-supplied context is still upgraded.
+		const reminder: DeveloperMessage = { ...developer("Track multi-step work."), attribution: "agent" };
+		expect(
+			convertAnthropicMessages([user("@report.md polish this"), fileMention, reminder], model, false).map(
+				p => p.role,
+			),
+		).toEqual(["user", "user", "system"]);
+	});
+
 	it("never emits a developer message in the first position as system", () => {
 		const model = makeModel();
 		const params = convertAnthropicMessages([developer("Global rule."), user("hi")], model, false);

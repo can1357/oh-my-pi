@@ -3,14 +3,14 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { AgentProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/agent-protocol";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
-import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import { AgentRegistry, type AgentRegistryApi } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 
 const received = new Map<string, IrcMessage[]>();
-let registry: AgentRegistry;
+let registry: AgentRegistryApi;
 
 function registerPeer(id: string, status: "running" | "idle" = "running"): void {
 	const messages: IrcMessage[] = [];
@@ -100,6 +100,16 @@ describe("write agent:// messaging", () => {
 			{ to: "Reviewer", outcome: "woken" },
 		]);
 		await expect(new AgentProtocolHandler().resolve(new URL("agent://all") as never)).rejects.toThrow("write-only");
+	});
+
+	it("marks ?progress writes as progress and rejects progress broadcasts", async () => {
+		registerPeer("Scout");
+		const tool = new WriteTool(makeSession());
+		await tool.execute("ack", { path: "agent://Scout?progress", content: "on it" });
+		expect(received.get("Scout")).toMatchObject([{ to: "Scout", body: "on it", progress: true }]);
+		await expect(tool.execute("all", { path: "agent://all?progress", content: "on it" })).rejects.toThrow(
+			"?progress",
+		);
 	});
 
 	it("does not duplicate a child broadcast in the main session's relay view", async () => {

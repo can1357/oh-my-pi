@@ -1,6 +1,14 @@
 import type { AssistantMessage, Model } from "@oh-my-pi/pi-ai";
+import { renderDemotedThinking } from "@oh-my-pi/pi-ai/dialect/demotion";
+import { isFactoryDroidGeminiWire, keepsFactoryGeminiReasoning } from "@oh-my-pi/pi-ai/providers/factory-droid/gemini";
+import { ollamaChatDropsOwnThinking } from "@oh-my-pi/pi-ai/providers/ollama";
+import { completionsDropsOwnThinking, isLiteLLMThinkingSignature } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import { isColdReplayableResponsesTurn } from "@oh-my-pi/pi-ai/providers/openai-shared";
-import { shouldDropTruncatedThinkingOnlyAssistant } from "@oh-my-pi/pi-ai/providers/transform-messages";
+import {
+	dropsForeignReasoningPayload,
+	isSameModelTurn,
+	shouldDropTruncatedThinkingOnlyAssistant,
+} from "@oh-my-pi/pi-ai/providers/transform-messages";
 import {
 	getOpenAIResponsesHistoryItems,
 	sanitizeOpenAIResponsesAssistantHistoryItemsForReplay,
@@ -16,7 +24,6 @@ import { base64ImageSize, estimateImageTokens, type ImageDetail, type ImageSize 
 import type { AgentMessage } from "./types";
 
 const testEnv = Bun.env.NODE_ENV === "test";
-const accurate = process.env.PI_TOKENIZER_ACCURATE === "1" && !testEnv;
 
 const NATIVE_ENCODING: Record<ModelTokenizer, natives.Encoding> = {
 	"claude-v3": natives.Encoding.ClaudeV3,
@@ -27,6 +34,7 @@ const NATIVE_ENCODING: Record<ModelTokenizer, natives.Encoding> = {
 	"deepseek-v3": natives.Encoding.DeepSeekV3,
 	"kimi-k2": natives.Encoding.KimiK2,
 	glm5: natives.Encoding.Glm5,
+	cl100k: natives.Encoding.Cl100kBase,
 	o200k: natives.Encoding.O200kBase,
 };
 
@@ -36,7 +44,12 @@ export function tokenizerEncodingForModel(model: Pick<Model, "tokenizer"> | null
 }
 
 type TokenizerModel = Pick<Model, "tokenizer"> &
-	snapcompact.ShapeTarget & { compat?: Model["compat"]; thinking?: Model["thinking"] };
+	snapcompact.ShapeTarget & {
+		compat?: Model["compat"];
+		thinking?: Model["thinking"];
+		reasoning?: boolean;
+		requestModelId?: string;
+	};
 
 /** The model an assistant turn's native reasoning (signed thinking, Responses history) is replayed to. */
 interface ReasoningReplayReader {
@@ -71,13 +84,12 @@ export interface TokenizerOptions {
 }
 
 /**
- * `strict` always tries an exact native count (the catalog-resolved tokenizer
- * when known, o200k_base otherwise), falling back to the byte upper bound when
- * the loaded addon does not recognize that encoding. `approximate` and
- * `upperbound` prefer the same exact count for known tokenizer families or
- * when `PI_TOKENIZER_ACCURATE=1` is set; otherwise they use a cheap heuristic:
- * `approximate` a bytes/4 guess, `upperbound` the raw byte length (never
- * undercounts).
+ * Every mode counts with the native tokenizer: the catalog-resolved family
+ * when known, o200k_base otherwise. They differ only in the fallback when the
+ * loaded addon does not recognize that encoding: `strict` and `upperbound`
+ * the raw byte length (never undercounts), `approximate` a bytes/4 guess.
+ * Tests (`NODE_ENV=test`) skip the native count outside `strict` and use that
+ * fallback.
  */
 export type TokenCountMode = "strict" | "approximate" | "upperbound";
 
@@ -199,16 +211,20 @@ interface MessageEstimate {
  * when the model's encoding, image or thinking-replay pricing, replay
  * identity or native-history replay state changes); one-shot flows construct
  * their own for the model that will be billed. Known tokenizer families use
- * exact native counts; unknown models keep the fast byte estimate (or o200k
- * when `PI_TOKENIZER_ACCURATE=1`).
+ * exact native counts; other models are counted in o200k_base, which bills
+ * unknown readers closer than a bytes/4 guess.
  */
 export class Tokenizer {
 	readonly #encoding: natives.Encoding | null;
 	readonly #frameBilling: snapcompact.FrameBilling;
 	readonly frameBillingKey: string;
 	readonly #reasoningReader: ReasoningReplayReader | undefined;
+	readonly #dropsOllamaThinking: boolean;
+	readonly #dropsCompletionsThinking: boolean;
 	/** Claude's own API and prefix-bound hosts keep another model's signature from their deployment. */
 	readonly #readsDeploymentSignatures: boolean;
+	/** Factory's Gemini generate wire, whose replay pass keeps only Google-origin reasoning. */
+	readonly #factoryGeminiWire: boolean;
 	readonly reasoningReplayKey: string;
 	/** How the reader bills replayed signed thinking (catalog `thinking-replay-tokens`). */
 	readonly thinkingReplayTokens: ThinkingReplayTokens;
@@ -244,11 +260,17 @@ export class Tokenizer {
 		this.#frameBilling = snapcompact.frameBilling(model ?? undefined);
 		this.frameBillingKey = snapcompact.frameBillingKey(this.#frameBilling);
 		this.#reasoningReader = reasoningReplayReader(model);
+		this.#dropsOllamaThinking = ollamaChatDropsOwnThinking(model);
+		this.#dropsCompletionsThinking = completionsDropsOwnThinking(model);
 		const compat = model?.compat;
 		this.#readsDeploymentSignatures =
 			model?.api === "anthropic-messages" &&
 			((compat !== undefined && "officialEndpoint" in compat && compat.officialEndpoint) ||
 				model.thinking?.prefixBinding === true);
+		this.#factoryGeminiWire =
+			model?.api === "factory-droid-agent" &&
+			model.id !== undefined &&
+			isFactoryDroidGeminiWire({ id: model.id, requestModelId: model.requestModelId });
 		this.reasoningReplayKey = reasoningReplayKey(model);
 		this.thinkingReplayTokens = resolveThinkingReplayTokens(model ?? {});
 		this.nativeHistoryReplay = options?.nativeHistoryReplay ?? true;
@@ -259,11 +281,8 @@ export class Tokenizer {
 	}
 
 	countTokens(text: string | string[], mode: TokenCountMode = "approximate"): number {
-		if (mode === "strict") return countTokensNat(text, this.#encoding, mode, this.#nativeCounts).tokens;
-		if (!testEnv && this.#encoding !== null)
-			return countTokensNat(text, this.#encoding, mode, this.#nativeCounts).tokens;
-		if (accurate) return countTokensNat(text, undefined, mode, this.#nativeCounts).tokens;
-		return sumFragments(text, mode === "upperbound" ? byteLength : byteEstimate);
+		if (testEnv && mode !== "strict") return sumFragments(text, mode === "upperbound" ? byteLength : byteEstimate);
+		return countTokensNat(text, this.#encoding, mode, this.#nativeCounts).tokens;
 	}
 
 	/**
@@ -295,7 +314,7 @@ export class Tokenizer {
 	 */
 	countMessage(message: AgentMessage, options?: MessageCountOptions): number {
 		const floored = options?.excludeEncryptedReasoning === true;
-		if (!isEstimateCacheable(message)) return this.#measureMessage(message, floored);
+		if (!isEstimateCacheable(message)) return this.#measureMessage(message, floored, false);
 		const version = messageEstimateVersion(message);
 		let entry = this.#estimates.get(message);
 		if (entry === undefined || entry.version !== version) {
@@ -304,10 +323,23 @@ export class Tokenizer {
 		}
 		const cached = floored ? entry.floored : entry.default;
 		if (cached !== undefined) return cached;
-		const result = this.#measureMessage(message, floored);
+		const result = this.#measureMessage(message, floored, false);
 		if (floored) entry.floored = result;
 		else entry.default = result;
 		return result;
+	}
+
+	/**
+	 * {@link countMessage} for the transcript's latest surviving assistant turn
+	 * (`isSurvivingAssistant`), which an Anthropic Messages replay keeps
+	 * byte-for-byte (`transformMessages`): a turn whose tool calls ended without
+	 * a tool-use stop keeps its signatures then, so its reasoning is charged. A
+	 * count of one message cannot see its position; a caller walking back from
+	 * the end of the transcript counts that turn here. Not memoized: it differs
+	 * from {@link countMessage} only for that one turn.
+	 */
+	countLatestTurn(message: AgentMessage, options?: MessageCountOptions): number {
+		return this.#measureMessage(message, options?.excludeEncryptedReasoning === true, true);
 	}
 
 	/** Sum of {@link countMessage} over `messages`. */
@@ -343,6 +375,21 @@ export class Tokenizer {
 	}
 
 	/**
+	 * Whether `message`'s opaque reasoning payload (thinking signatures, redacted
+	 * thinking) may reach this reader: everything except what `transformMessages`
+	 * certainly strips from another model's turn, or what Factory's Gemini wire
+	 * drops from a turn not of Google origin. Without a replay reader (no
+	 * model, or a `filterReasoningHistory` target) every payload is charged,
+	 * which overcounts a filtering reader's foreign turns.
+	 */
+	#receivesReasoningPayload(message: AssistantMessage): boolean {
+		const reader = this.#reasoningReader;
+		if (reader === undefined) return true;
+		if (this.#factoryGeminiWire) return keepsFactoryGeminiReasoning(message);
+		return !dropsForeignReasoningPayload(message, reader);
+	}
+
+	/**
 	 * The replayed native Responses reasoning {@link countMessage} charges
 	 * across `messages`: the part of a count that changes with the reading
 	 * model. A replay whose backend reported no reasoning tokens counts at the
@@ -361,7 +408,7 @@ export class Tokenizer {
 		return total;
 	}
 
-	#measureMessage(message: AgentMessage, excludeEncryptedReasoning: boolean): number {
+	#measureMessage(message: AgentMessage, excludeEncryptedReasoning: boolean, latestTurn: boolean): number {
 		const fragments: string[] = [];
 		let extra = 0;
 		// Declaration-merged app roles (the coding-agent's bashExecution) are
@@ -402,19 +449,30 @@ export class Tokenizer {
 				// reaches the wire then (the payload items replay instead); a turn whose
 				// backend reported no reasoning tokens keeps the signature as its price.
 				const replayedReasoning = this.#replayedReasoningTokens(message);
+				const ollamaReader = this.#reasoningReader?.api === "ollama-chat" ? this.#reasoningReader : undefined;
+				const ownOllamaTurn = ollamaReader !== undefined && isSameModelTurn(message, ollamaReader);
+				const completionsReader = this.#dropsCompletionsThinking ? this.#reasoningReader : undefined;
+				const ownDroppedCompletionsTurn =
+					completionsReader !== undefined && isSameModelTurn(message, completionsReader);
 				if (typeof replayedReasoning === "number") extra += replayedReasoning;
 				const signaturesPriced = this.thinkingReplayTokens === "signature";
 				// The replay's signature rule (`transformMessages`): an aborted or
 				// errored turn's final block can hold a partial signature, and a turn
 				// whose tool calls ended without a tool-use stop is abandoned, so all
-				// its signatures are stripped. Every other block completed. The latest
-				// assistant turn keeps an abandoned turn's signatures byte-for-byte;
-				// a per-message count cannot see position, so it follows the rule for
-				// older turns, and that latest turn's own usage anchors transcript counts.
+				// its signatures are stripped. Every other block completed. On the
+				// Anthropic Messages API the latest assistant turn keeps an abandoned
+				// turn's signatures byte-for-byte (Bedrock's Converse replay strips
+				// them too); a per-message count cannot see position, so it follows
+				// the rule for older turns unless the caller says it is the latest
+				// (`countLatestTurn`).
 				const content = message.content;
 				const invalidStop = message.stopReason === "aborted" || message.stopReason === "error";
+				const keepsLatestSignatures = latestTurn && message.api === "anthropic-messages";
 				const abandonedToolUse =
-					!invalidStop && message.stopReason !== "toolUse" && content.some(block => block.type === "toolCall");
+					!keepsLatestSignatures &&
+					!invalidStop &&
+					message.stopReason !== "toolUse" &&
+					content.some(block => block.type === "toolCall");
 				const untrustedIndex = invalidStop ? content.length - 1 : -1;
 				let signedReasoning = false;
 				for (let index = 0; index < content.length; index++) {
@@ -422,18 +480,29 @@ export class Tokenizer {
 					if (block.type === "text") {
 						fragments.push(block.text);
 					} else if (block.type === "thinking") {
+						// `transformMessages` drops another model's empty thinking and demotes the
+						// rest to visible text; only the reader's own thinking stays native.
+						if (ollamaReader && !ownOllamaTurn) {
+							if (block.thinking.trim()) fragments.push(renderDemotedThinking(ollamaReader.id, block.thinking));
+							continue;
+						}
+						if (this.#dropsOllamaThinking && ownOllamaTurn) continue;
+						// Chat-completions drops it unless LiteLLM replays it in `thinking_blocks`.
+						if (ownDroppedCompletionsTurn && !isLiteLLMThinkingSignature(block.thinkingSignature)) continue;
 						fragments.push(block.thinking);
 						// Providers charge for the opaque signature/reasoning payload that
 						// rides alongside the thinking text (OpenAI Responses encrypted
-						// reasoning items, Gemini thought signatures). A reader billing at
-						// `output` size (Claude) charges the reasoning, priced below, not
-						// these bytes. The compaction floor excludes it (its local byte size
-						// diverges from provider billing).
+						// reasoning items, Gemini thought signatures) wherever it survives
+						// replay; `transformMessages` strips another model's on most wires.
+						// A reader billing at `output` size (Claude) charges the reasoning,
+						// priced below, not these bytes. The compaction floor excludes it
+						// (its local byte size diverges from provider billing).
 						if (
 							block.thinkingSignature &&
 							!excludeEncryptedReasoning &&
 							signaturesPriced &&
-							typeof replayedReasoning !== "number"
+							typeof replayedReasoning !== "number" &&
+							this.#receivesReasoningPayload(message)
 						) {
 							fragments.push(block.thinkingSignature);
 						}
@@ -442,10 +511,13 @@ export class Tokenizer {
 						fragments.push(block.name);
 						fragments.push(stringifyJson(block.arguments) ?? "null");
 					} else if (block.type === "redactedThinking") {
-						// Encrypted reasoning blob the provider still bills for on replay;
-						// excluded from the compaction floor for the same reason as above.
+						// Encrypted reasoning blob the provider still bills for wherever it
+						// survives replay, as above; excluded from the compaction floor for
+						// the same reason.
 						signedReasoning = true;
-						if (!excludeEncryptedReasoning && signaturesPriced) fragments.push(block.data);
+						if (!excludeEncryptedReasoning && signaturesPriced && this.#receivesReasoningPayload(message)) {
+							fragments.push(block.data);
+						}
 					} else if (block.type === "anthropicServerTool") {
 						// Native Anthropic server-tool call/result replayed verbatim on the
 						// wire (server_tool_use input and opaque result content). The provider
@@ -542,6 +614,8 @@ export class Tokenizer {
 			snapcompact.frameBillingKey(snapcompact.frameBilling(model ?? undefined)) === this.frameBillingKey &&
 			reasoningReplayKey(model) === this.reasoningReplayKey &&
 			resolveThinkingReplayTokens(model ?? {}) === this.thinkingReplayTokens &&
+			ollamaChatDropsOwnThinking(model) === this.#dropsOllamaThinking &&
+			completionsDropsOwnThinking(model) === this.#dropsCompletionsThinking &&
 			(options?.nativeHistoryReplay ?? true) === this.nativeHistoryReplay
 		);
 	}

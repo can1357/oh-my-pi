@@ -101,6 +101,31 @@ async fn trailing_end_patch_closes_a_wrapped_insert_instead_of_being_inserted() 
 }
 
 #[tokio::test]
+async fn end_sentinels_close_put_bodies_but_stay_literal_in_find() {
+	for (before, input, expected) in [
+		// Models that close every body with `*** End …`: neither leaks into the
+		// file nor swallows the operations after it.
+		(
+			"one\ntwo\nthree\nfour\n",
+			"*** Edit File: a.txt\n*** Find\none\n*** Replace\nONE\n*** End Patch\n*** \
+			 Find\ntwo\n*** Replace\nTWO\n*** End\n*** Find\nthree\n*** Insert After\n3.5\n*** \
+			 End\n*** Find\nfour\n*** Replace\nFOUR\n*** End\n",
+			"ONE\nTWO\nthree\n3.5\nFOUR\n",
+		),
+		// A Find body is matched as written, so a literal sentinel line can be removed.
+		("a\n*** End\nb\n", "*** Edit File: a.txt\n*** Find\na\n*** End\n*** Replace\na\n", "a\nb\n"),
+	] {
+		let workspace = Workspace::new(EditMode::Sloppy);
+		workspace.write("a.txt", before);
+		workspace
+			.apply_json(&json!({ "input": input }), &DiskWriter::default())
+			.await
+			.expect("sentinel-closed payload");
+		assert_eq!(workspace.read("a.txt").unwrap(), expected, "{input:?}");
+	}
+}
+
+#[tokio::test]
 async fn after_requires_all_even_when_ambiguous_insertions_have_identical_outcomes() {
 	let workspace = Workspace::new(EditMode::Sloppy);
 	workspace.write("a.txt", "item\nitem\n");
@@ -287,7 +312,7 @@ async fn no_op_recovery_respects_utf8_boundaries_in_source_and_replacement() {
 			.apply_raw(&input, &writer)
 			.await
 			.expect_err("an unchanged edit reports a no-op instead of panicking");
-		assert!(matches!(error, EditError::Match(_)));
+		assert_eq!(error.kind(), "no_change", "{error}");
 		assert!(writer.requests.lock().is_empty());
 		assert_eq!(workspace.read("a.txt").unwrap(), before);
 	}
@@ -305,6 +330,26 @@ async fn overlapping_desired_matches_are_rejected_without_collapsing_source() {
 		.expect_err("overlapping matches are not adjacent duplicate blocks");
 	assert!(matches!(error, EditError::Match(_)));
 	assert!(error.to_string().contains("ambiguous"));
+	assert!(writer.requests.lock().is_empty());
+	assert_eq!(workspace.read("a.txt").unwrap(), before);
+}
+
+#[tokio::test]
+async fn a_staged_insertion_is_not_dropped_by_a_later_replace_on_the_same_find() {
+	let workspace = Workspace::new(EditMode::Sloppy);
+	let before = "old\nkeep\n";
+	workspace.write("a.txt", before);
+	let writer = DiskWriter::default();
+	let error = workspace
+		.apply_raw(
+			"*** Edit File: a.txt\n*** Find\nold\n*** Insert Before\nstaged\n*** Replace\nnew\n",
+			&writer,
+		)
+		.await
+		.expect_err("two operators on one *** Find cannot both apply");
+	assert!(matches!(error, EditError::Parse { .. }));
+	assert!(error.to_string().contains("*** Insert Before"), "{error}");
+	assert!(error.to_string().contains("*** Replace"), "{error}");
 	assert!(writer.requests.lock().is_empty());
 	assert_eq!(workspace.read("a.txt").unwrap(), before);
 }

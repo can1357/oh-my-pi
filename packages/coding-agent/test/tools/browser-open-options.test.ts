@@ -7,12 +7,17 @@ import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { disposeAllVmContexts } from "@oh-my-pi/pi-coding-agent/eval/js/context-manager";
 import { createBrowserPrelude } from "@oh-my-pi/pi-coding-agent/tools/browser";
-import { applyIgnoreHttpsErrors, resolveInitScriptSources } from "@oh-my-pi/pi-coding-agent/tools/browser/open-options";
+import { resolveInitScriptSources } from "@oh-my-pi/pi-coding-agent/tools/browser/open-options";
 import { DownloadManager } from "@oh-my-pi/pi-coding-agent/tools/browser/downloads";
-import { buildHeadlessLaunchArgs } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
+import {
+	buildHeadlessLaunchArgs,
+	launchHeadlessBrowser,
+	removeUserDataDir,
+} from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
 import { getTab, releaseAllTabs } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
+import { CLAUDE_TRACE_DEBUG_CERT, CLAUDE_TRACE_DEBUG_KEY } from "@oh-my-pi/pi-coding-agent/cli/claude-trace-cli";
 import type { Browser, Page } from "puppeteer-core";
 import { rejectionOf } from "../helpers/rejection";
 import { chromiumAvailable } from "./chromium-probe";
@@ -50,7 +55,7 @@ afterAll(async () => {
 });
 
 describe("browser open options CDP helpers", () => {
-	it("sends the invalid-certificate override through CDP", async () => {
+	it("adds the per-open launch switches when requested", () => {
 		const args = buildHeadlessLaunchArgs(
 			{ width: 800, height: 600 },
 			{ ignoreHttpsErrors: true, allowFileAccess: true },
@@ -59,23 +64,16 @@ describe("browser open options CDP helpers", () => {
 		expect(args).toContain("--enable-features=WebMCPTesting,DevToolsWebMCPSupport");
 		expect(args).toContain("--ignore-certificate-errors");
 		expect(args).toContain("--allow-file-access-from-files");
-		const calls: Array<{ method: string; params: unknown }> = [];
-		let detached = false;
-		const page = {
-			createCDPSession: async () => ({
-				send: async (method: string, params: unknown) => {
-					calls.push({ method, params });
-				},
-				detach: async () => {
-					detached = true;
-				},
-			}),
-		} as unknown as Page;
+	});
 
-		await applyIgnoreHttpsErrors(page);
-
-		expect(calls).toEqual([{ method: "Security.setIgnoreCertificateErrors", params: { ignore: true } }]);
-		expect(detached).toBe(true);
+	it("rejects ignore_https_errors on the relay before opening a tab", async () => {
+		const name = `relay-tls-${crypto.randomUUID()}`;
+		const error = await rejectionOf(
+			browserHost()({ action: "open", name, app: { relay: true }, ignore_https_errors: true }),
+		);
+		expect(error).toBeInstanceOf(ToolError);
+		expect(error).toMatchObject({ message: expect.stringContaining("Security domain") });
+		expect(getTab(name)).toBeUndefined();
 	});
 
 	it("omits per-open launch switches unless requested", () => {
@@ -393,38 +391,78 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser open options", () => {
 		}
 	});
 
-	it("keeps the tab on what loaded when the page outlasts the open timeout", async () => {
-		const server = Bun.serve({
-			port: 0,
-			fetch(request) {
-				// The image never answers, so the page never fires `load`.
-				if (new URL(request.url).pathname === "/hang.png") return new Promise<Response>(() => {});
-				return new Response('<title>slow</title><p>partial</p><img src="/hang.png">', {
-					headers: { "content-type": "text/html" },
-				});
-			},
-		});
+	it("accepts an untrusted certificate for the tab's lifetime, across a worker recycle, and checks it again once the tab closes", async () => {
+		const serveUntrusted = () =>
+			Bun.serve({
+				port: 0,
+				tls: { cert: CLAUDE_TRACE_DEBUG_CERT, key: CLAUDE_TRACE_DEBUG_KEY },
+				fetch: () => new Response("<title>untrusted</title>", { headers: { "content-type": "text/html" } }),
+			});
+		const server = serveUntrusted();
+		// Fresh origins after the recycle and after close: Chromium reuses an accepted connection to an origin.
+		const recycled = serveUntrusted();
+		const later = serveUntrusted();
+		// Launched without --ignore-certificate-errors and attached over app.cdp_url, as the shared
+		// browser is: only the tab's CDP override can accept the certificate.
+		const { browser, userDataDir } = await launchHeadlessBrowser({ headless: true });
 		try {
+			const [page] = await browser.pages();
+			if (!page) throw new Error("Expected the launched browser to expose a page");
 			const invoke = browserHost();
-			const name = `slow-${crypto.randomUUID()}`;
-			const open = () => rejectionOf(invoke({ action: "open", name, url: server.url.href, timeout: 3 }));
-			const keptTab = { message: expect.stringContaining(`browser.tab(${JSON.stringify(name)})`) };
-			// The first open creates the tab; the second reuses the one it kept.
-			expect(await open()).toMatchObject(keptTab);
-			expect(await open()).toMatchObject(keptTab);
+			const name = `tls-${crypto.randomUUID()}`;
+			await invoke({
+				action: "open",
+				name,
+				url: server.url.href,
+				app: { cdp_url: `http://${new URL(browser.wsEndpoint()).host}` },
+				ignore_https_errors: true,
+			});
 			expect(
 				returnedValue(
 					await invoke({
 						action: "run",
 						name,
-						code: "return { url: tab.url(), text: await tab.evaluate(() => document.body.innerText) };",
+						code: "await tab.reload(); return await tab.title();",
 					}),
 				),
-			).toEqual({ url: server.url.href, text: "partial" });
+			).toBe("untrusted");
+			const opened = getTab(name);
+			const worker = opened?.backend === "worker" ? opened.worker : undefined;
+			// A worker that exits on its own is recycled: the tab is reattached to a new worker on the same page. The
+			// rejection's stack never touches the run's source, so the run guard leaves it to end the worker.
+			const endWorker = `const err = new Error("library-internal");
+err.stack = "Error: library-internal\\n    at #onFileChooser (puppeteer/Page.js:1:1)";
+Promise.reject(err);
+await Promise.withResolvers().promise;`;
+			expect(await rejectionOf(invoke({ action: "run", name, code: endWorker }))).toMatchObject({
+				message: expect.stringContaining("the tab is being reattached"),
+			});
+			const tab = getTab(name);
+			if (tab?.backend !== "worker") throw new Error("Expected a worker tab");
+			expect(await tab.workerRecovery).toBe(true);
+			expect(tab.worker).not.toBe(worker);
+			expect(
+				returnedValue(
+					await invoke({
+						action: "run",
+						name,
+						code: `await tab.goto(${JSON.stringify(recycled.url.href)}); return await tab.title();`,
+					}),
+				),
+			).toBe("untrusted");
+			await invoke({ action: "close", name });
+			// The borrowed page outlives the tab; its certificate checks come back with the override released.
+			expect(await rejectionOf(page.goto(later.url.href))).toMatchObject({
+				message: expect.stringContaining("net::ERR_CERT_AUTHORITY_INVALID"),
+			});
 		} finally {
 			server.stop(true);
+			recycled.stop(true);
+			later.stop(true);
+			await browser.close();
+			if (userDataDir) await removeUserDataDir(userDataDir);
 		}
-	}, 20_000);
+	}, 30_000);
 
 	it("closes the tab its open created when the navigation fails outright, but keeps a reused one", async () => {
 		const refused = Bun.serve({ port: 0, fetch: () => new Response("") });

@@ -14,12 +14,14 @@
  *
  * - **Anthropic** — `fastModeDisabled` is account-scoped: the rejection reads
  *   "this model does not support fast mode for your account", i.e. a plan
- *   entitlement, so a switch to an entitled sibling must re-probe. Its
- *   siblings are endpoint-scoped and stay: `strictToolsDisabled`
+ *   entitlement, so a switch to an entitled sibling must re-probe. Message
+ *   thread chains are account-scoped too: a thread continues only for the
+ *   credential that created it. Its siblings are endpoint-scoped and stay:
+ *   `strictToolsDisabled`
  *   (grammar-too-large 400 for the model's tool schema),
  *   `replayUnsignedThinkingDisabled` / `thinkingReplayDisabled` (the endpoint
- *   is a signing proxy), `prefixDroppedThinkingBlocks` (blocks a prefix-binding
- *   400 made the client strip).
+ *   is a signing proxy), `prefixDroppedThinkingBlocks` (blocks a rejected
+ *   replay made the client strip).
  * - **OpenAI Responses** — the `previous_response_id` chain baselines are
  *   account-scoped: a stored response belongs to the account that created it.
  *   Strict-tools / reasoning-effort fallbacks, replay warmup and the chaining
@@ -38,8 +40,8 @@
  *   very turn that rotated; it stays on its existing session-close path.
  */
 
-import { clearAnthropicFastModeFallback } from "./providers/anthropic-state";
-import { resetOpenAIResponsesAccountScopedState } from "./providers/openai-responses";
+import { clearAnthropicFastModeFallback, resetAnthropicThreads } from "./providers/anthropic-state";
+import { resetOpenAIResponsesAccountScopedState } from "./providers/openai-responses-state";
 import type { ProviderSessionState } from "./types";
 
 /**
@@ -52,5 +54,6 @@ export function resetAccountScopedProviderSessionState(states: Map<string, Provi
 	// Fast mode is the account-scoped half of the Anthropic record; the helper
 	// the `/fast on` re-arm path already uses clears exactly that flag.
 	clearAnthropicFastModeFallback(states);
+	resetAnthropicThreads(states);
 	resetOpenAIResponsesAccountScopedState(states);
 }

@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn } from "bun:test";
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { Agent, AppendOnlyContextManager } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
@@ -108,6 +109,27 @@ describe("AgentSession.newSession boundary", () => {
 
 		expect(session.sessionId).not.toBe(previousSessionId);
 		expect(session.sessionId).toBe(sessionManager.getSessionId());
+	});
+
+	it("keeps the /delete successor lazy so quitting leaves no empty session", async () => {
+		const { session, sessionManager } = await createHarness();
+		await sessionManager.ensureOnDisk();
+		const droppedSessionFile = sessionManager.getSessionFile();
+		expect(droppedSessionFile).toBeDefined();
+		expect(fs.existsSync(droppedSessionFile!)).toBe(true);
+
+		expect(await session.newSession({ drop: true })).toBe(true);
+
+		expect(fs.existsSync(droppedSessionFile!)).toBe(false);
+		const successorSessionFile = sessionManager.getSessionFile();
+		expect(successorSessionFile).toBeDefined();
+		expect(successorSessionFile).not.toBe(droppedSessionFile);
+		expect(sessionManager.isSessionOnDisk()).toBe(false);
+		expect(fs.existsSync(successorSessionFile!)).toBe(false);
+
+		// A zero-turn quit must not materialize the successor either.
+		await session.dispose();
+		expect(fs.existsSync(successorSessionFile!)).toBe(false);
 	});
 
 	it("keeps old-session messages out of the new session when notifications finish late", async () => {

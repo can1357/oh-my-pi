@@ -10,6 +10,7 @@ import * as fs from "node:fs";
 import { APP_NAME } from "./dirs";
 import * as logger from "./logger";
 import { restoreTerminalStderr } from "./stderr-guard";
+import { toError } from "./type-guards";
 
 // Cleanup reasons, in order of priority/meaning.
 export enum Reason {
@@ -27,8 +28,24 @@ interface CleanupRegistration {
 	id: string;
 	callback: (reason: Reason) => Promise<void> | void;
 	exitOnly: boolean;
+	/** How long a pass waits for this callback, when longer than {@link CLEANUP_DEADLINE_MS}. */
+	deadlineMs: number | undefined;
+	/** Printed to stderr when exit waits on this callback alone; see {@link CleanupRegistrationOptions.waitMessage}. */
+	waitMessage: string | undefined;
 	cancelled: boolean;
 	lastPass: number;
+}
+
+/** The deadline of one cleanup pass, which callbacks with their own `deadlineMs` hold open. */
+interface CleanupPassDeadline {
+	/**
+	 * Keep the pass open until `pending` settles, for at most `deadlineMs`. A
+	 * `waitMessage` is printed to stderr if the pass is still waiting on it once
+	 * every other callback has finished.
+	 */
+	extend(pending: Promise<unknown>, deadlineMs: number, waitMessage?: string): void;
+	/** Whether a callback with its own deadline still holds the pass open. */
+	extended(): boolean;
 }
 
 // Active cleanup callbacks in registration order. Registrations survive
@@ -42,6 +59,8 @@ let activeCleanupKeepAlive = false;
 // Promises of callbacks invoked late (registered while a pass runs), joined by
 // the active pass before it settles so `cleanup()`/signal exits await them.
 let activeLatePromises: Promise<void>[] | undefined;
+// Deadline of the running pass, so callbacks invoked late can extend it too.
+let activePassDeadline: CleanupPassDeadline | undefined;
 const CLEANUP_DEADLINE_MS = 10_000;
 /**
  * Symbol stamped by the extension-load guard onto the throwing replacement it
@@ -122,7 +141,7 @@ export function exitProcess(code: number): never {
 let cleanupPromise: Promise<void> | undefined;
 let stdioDisconnectRegistrations = 0;
 
-/** User-facing command printed before fatal cleanup so interrupted work can be resumed. */
+/** User-facing command printed after fatal or SIGTERM cleanup so interrupted work can be resumed. */
 export interface FatalRecoveryHint {
 	/** Stable label identifying the recoverable session or process. */
 	label: string;
@@ -184,16 +203,81 @@ function runCleanup(reason: Reason, keepAlive = false): Promise<void> {
 		}
 	};
 
+	// The pass ends once every callback settles, or at the deadline: CLEANUP_DEADLINE_MS,
+	// held open while a callback with a longer `deadlineMs` is still pending.
+	const deadline = Promise.withResolvers<void>();
+	const deadlineTimers: NodeJS.Timeout[] = [];
+	let baseDeadlineElapsed = false;
+	let openExtensions = 0;
+	let passDone = false;
+	const expireIfDue = (): void => {
+		if (passDone || !baseDeadlineElapsed || openExtensions > 0) return;
+		passDone = true;
+		logger.error("Cleanup deadline exceeded; proceeding with exit", { reason });
+		settle();
+		deadline.resolve();
+	};
+	// Holds that still keep the pass open and have a message for the user. The
+	// message is printed once the pass waits on nothing else, so a terminal owner
+	// has already released the screen and the user sees why exit is slow.
+	const announced: { message: string; until: number; open: () => boolean }[] = [];
+	let othersSettled = false;
+	const announce = (): void => {
+		if (passDone || !othersSettled) return;
+		for (const hold of announced.splice(0)) {
+			if (!hold.open()) continue;
+			const seconds = Math.max(1, Math.ceil((hold.until - Date.now()) / 1000));
+			try {
+				fs.writeSync(2, `${hold.message} (up to ${seconds} s)…\n`);
+			} catch {}
+		}
+	};
+	const passDeadline: CleanupPassDeadline = {
+		extend(pending, deadlineMs, waitMessage) {
+			if (passDone || deadlineMs <= 0) return;
+			openExtensions++;
+			let open = true;
+			const close = (): void => {
+				if (!open) return;
+				open = false;
+				openExtensions--;
+				// Check on a later macrotask: when this was the last pending callback, the
+				// pass completes first and no deadline is reported.
+				deadlineTimers.push(setTimeout(expireIfDue, 0));
+			};
+			deadlineTimers.push(setTimeout(close, deadlineMs));
+			pending.then(close, close);
+			if (waitMessage !== undefined) {
+				announced.push({ message: waitMessage, until: Date.now() + deadlineMs, open: () => open });
+				// On a later macrotask, so a callback that is already done closes first.
+				if (othersSettled) deadlineTimers.push(setTimeout(announce, 0));
+			}
+		},
+		extended: () => !passDone && openExtensions > 0,
+	};
+	activePassDeadline = passDeadline;
+
 	// Snapshot the pass. Registrations added while a keep-alive cleanup runs are
 	// invoked by register() when appropriate and remain active for later passes.
-	const promises = callbackList.toReversed().map(registration => {
-		return Promise.try(() => invokeCleanup(registration, reason, keepAlive, pass));
+	const snapshot = callbackList.toReversed();
+	const promises = snapshot.map(registration => {
+		return Promise.try(() => {
+			const pending = invokeCleanup(registration, reason, keepAlive, pass);
+			if (pending && registration.deadlineMs !== undefined) {
+				passDeadline.extend(pending, registration.deadlineMs, registration.waitMessage);
+			}
+			return pending;
+		});
+	});
+	void Promise.allSettled(promises.filter((_, index) => snapshot[index]?.deadlineMs === undefined)).then(() => {
+		othersSettled = true;
+		deadlineTimers.push(setTimeout(announce, 0));
 	});
 
 	const cleanupSettled = Promise.allSettled(promises).then(async results => {
 		for (const result of results) {
 			if (result.status === "rejected") {
-				const err = result.reason instanceof Error ? result.reason : new Error(String(result.reason));
+				const err = toError(result.reason);
 				logger.error("Cleanup callback failed", { err, stack: err.stack });
 			}
 		}
@@ -202,14 +286,20 @@ function runCleanup(reason: Reason, keepAlive = false): Promise<void> {
 		while (late.length > 0) await Promise.allSettled(late.splice(0));
 		settle();
 	});
-	const deadline = Promise.withResolvers<void>();
-	const deadlineTimer = setTimeout(() => {
-		logger.error("Cleanup deadline exceeded; proceeding with exit", { reason });
-		settle();
-		deadline.resolve();
-	}, CLEANUP_DEADLINE_MS);
+	deadlineTimers.push(
+		setTimeout(() => {
+			baseDeadlineElapsed = true;
+			// The pass no longer waits on the other callbacks, so a hold still open is
+			// what exit waits on; terminal owners released the screen synchronously.
+			othersSettled = true;
+			announce();
+			expireIfDue();
+		}, CLEANUP_DEADLINE_MS),
+	);
 	const passPromise = Promise.race([cleanupSettled, deadline.promise]).finally(() => {
-		clearTimeout(deadlineTimer);
+		passDone = true;
+		for (const timer of deadlineTimers) clearTimeout(timer);
+		if (activePassDeadline === passDeadline) activePassDeadline = undefined;
 		// A re-armed pass must drop only its own settled promise; an older
 		// deadline-limited pass may finish after a newer one has already started.
 		if (keepAlive && cleanupPass === pass && cleanupPromise === passPromise) cleanupPromise = undefined;
@@ -218,9 +308,7 @@ function runCleanup(reason: Reason, keepAlive = false): Promise<void> {
 	return cleanupPromise;
 }
 
-// Register signal and error event handlers to trigger cleanup before exit.
-// Main thread: full signal handling (SIGINT, SIGTERM, SIGHUP) + exceptions + exit
-// Worker thread: exit only (workers use self.addEventListener for exceptions)
+// CLI-owned main threads handle signals and fatal errors; workers handle exit only.
 let inspectorOpened = false;
 
 /** Origin of an EPIPE raised by a process communication channel. */
@@ -469,18 +557,55 @@ export function isExpectedCleanupError(reason: unknown): boolean {
 /** Interceptors consulted by the global `unhandledRejection` handler before the fatal path. */
 const rejectionInterceptors = new Set<(reason: unknown) => boolean>();
 
+function interceptRejection(reason: unknown): boolean {
+	for (const interceptor of rejectionInterceptors) {
+		try {
+			if (interceptor(reason)) return true;
+		} catch (interceptorErr) {
+			logger.warn("Unhandled-rejection interceptor threw; continuing with fatal path", { err: interceptorErr });
+		}
+	}
+	return false;
+}
+
+/**
+ * Without the CLI's handlers (SDK embedding), interceptors still need a listener. It exists only while
+ * interceptors do, and rethrows what none consumes unless the host listens too, keeping Bun's default.
+ */
+let embeddedRejectionListener: ((reason: unknown) => void) | undefined;
+
 /**
  * Register an interceptor consulted before an unhandled rejection tears the
  * process down. A consuming interceptor owns reporting and keeps the process alive.
  */
 export function interceptUnhandledRejections(interceptor: (reason: unknown) => boolean): () => void {
 	rejectionInterceptors.add(interceptor);
-	return () => rejectionInterceptors.delete(interceptor);
+	if (!processHandlersInstalled && Bun.isMainThread && !embeddedRejectionListener) {
+		const listener = (reason: unknown) => {
+			if (interceptRejection(reason) || process.listenerCount("unhandledRejection") > 1) return;
+			throw reason;
+		};
+		embeddedRejectionListener = listener;
+		process.on("unhandledRejection", listener);
+	}
+	return () => {
+		rejectionInterceptors.delete(interceptor);
+		if (rejectionInterceptors.size === 0) removeEmbeddedRejectionListener();
+	};
+}
+
+function removeEmbeddedRejectionListener(): void {
+	if (!embeddedRejectionListener) return;
+	process.off("unhandledRejection", embeddedRejectionListener);
+	embeddedRejectionListener = undefined;
 }
 
 /**
  * Register a synchronous recovery command to print when the process exits
- * through an uncaught exception or unhandled rejection.
+ * through an uncaught exception, an unhandled rejection, or SIGTERM.
+ *
+ * Providers are read once cleanup finishes (or hits its deadline), so they
+ * report what teardown left behind: a session it saved or one it dropped.
  */
 export function registerFatalRecoveryHint(provider: FatalRecoveryHintProvider): () => void {
 	fatalRecoveryHintProviders.add(provider);
@@ -494,10 +619,10 @@ function escapeFatalHintText(value: string): string {
 	});
 }
 
-function formatFatalRecoveryHints(): string {
+function formatFatalRecoveryHints(providers: Iterable<FatalRecoveryHintProvider>): string {
 	const lines: string[] = [];
 	const seenCommands = new Set<string>();
-	for (const provider of fatalRecoveryHintProviders) {
+	for (const provider of providers) {
 		try {
 			const hint = provider();
 			if (!hint?.command || seenCommands.has(hint.command)) continue;
@@ -519,21 +644,54 @@ function formatFatalError(label: string, err: Error): string {
 	return `\n[${label}] ${name}: ${message}${formattedStack}\n`;
 }
 
+/** Write a final report to stderr once terminal owners have handed the terminal back. */
+function writeTerminalReport(output: string): void {
+	restoreTerminalStderr();
+	// A revoked terminal can make stream writes raise another fatal error. Use
+	// the descriptor directly so failure stays synchronous and contained.
+	try {
+		fs.writeSync(2, output);
+	} catch {}
+}
+
+let recoveryHintsWritten = false;
+
+/**
+ * Print the recovery commands at most once per process. Callers snapshot the
+ * providers before cleanup, because a session's own cleanup unregisters its
+ * provider, and call this after cleanup, because teardown can still save the
+ * session (an unsent draft, an aborted first reply) or drop an empty one.
+ */
+function writeRecoveryHints(providers: readonly FatalRecoveryHintProvider[], heading = ""): void {
+	if (recoveryHintsWritten) return;
+	const hints = formatFatalRecoveryHints(providers);
+	if (!hints) return;
+	recoveryHintsWritten = true;
+	writeTerminalReport(`${heading}${hints}`);
+}
+
 async function exitAfterFatal(output: string, logMessage: string, err: Error, reason: Reason): Promise<never> {
-	const forcedExit = setTimeout(() => exitProcess(1), CLEANUP_DEADLINE_MS);
+	const hintProviders = [...fatalRecoveryHintProviders];
+	// The forced exit backs up the pass deadline, so it waits while a callback with
+	// its own `deadlineMs` holds the pass open; that pass still ends at its deadline.
+	const forceExit = (): void => {
+		if (activePassDeadline?.extended()) {
+			forcedExit = setTimeout(forceExit, CLEANUP_DEADLINE_MS);
+			return;
+		}
+		writeRecoveryHints(hintProviders);
+		exitProcess(1);
+	};
+	let forcedExit = setTimeout(forceExit, CLEANUP_DEADLINE_MS);
 	try {
 		// Cleanup callbacks are invoked synchronously before runCleanup returns its
 		// completion promise. TUI owners therefore hand the cursor back before the
 		// fatal report is written, while slower resource cleanup continues afterward.
 		const cleanup = runCleanup(reason);
-		restoreTerminalStderr();
-		// A revoked terminal can make stream writes raise another fatal error. Use
-		// the descriptor directly so failure stays synchronous and contained.
-		try {
-			fs.writeSync(2, output);
-		} catch {}
+		writeTerminalReport(output);
 		logger.error(logMessage, { err });
 		await cleanup;
+		writeRecoveryHints(hintProviders);
 	} finally {
 		clearTimeout(forcedExit);
 		exitProcess(1);
@@ -551,16 +709,31 @@ function handleWorkerSendEpipe(err: Error): boolean {
  * Reports a caught top-level failure after terminal owners restore their display, then exits.
  */
 export async function fatal(error: unknown): Promise<never> {
-	const err = error instanceof Error ? error : new Error(String(error));
-	const output = `${Bun.inspect(error, { colors: process.stderr.isTTY === true })}\n${formatFatalRecoveryHints()}`;
+	const err = toError(error);
+	const report = `${Bun.inspect(error, { colors: process.stderr.isTTY === true })}\n`;
 	if (!Bun.isMainThread) {
-		process.stderr.write(output);
+		process.stderr.write(`${report}${formatFatalRecoveryHints(fatalRecoveryHintProviders)}`);
 		process.exit(1);
 	}
-	return exitAfterFatal(output, "Fatal error", err, Reason.UNHANDLED_REJECTION);
+	return exitAfterFatal(report, "Fatal error", err, Reason.UNHANDLED_REJECTION);
 }
 
-if (Bun.isMainThread) {
+// Exit-time cleanup is safe in any host: it neither delays nor triggers an exit. Signal and fatal
+// handlers change the process lifecycle, so only {@link installProcessHandlers} adds them.
+process.on("exit", () => {
+	void runCleanup(Reason.EXIT); // fire and forget (exit imminent)
+});
+
+let processHandlersInstalled = false;
+
+/** Installs OMP's process-wide signal and fatal handlers for a CLI-owned process. */
+export function installProcessHandlers(): void {
+	if (processHandlersInstalled) return;
+	processHandlersInstalled = true;
+	removeEmbeddedRejectionListener();
+	// Workers report failures through their own error listeners to the parent.
+	if (!Bun.isMainThread) return;
+
 	process
 		.on("SIGINT", async () => {
 			await runCleanup(Reason.SIGINT);
@@ -581,7 +754,7 @@ if (Bun.isMainThread) {
 				logger.warn("Ignoring expected cleanup exception", { err: thrown });
 				return;
 			}
-			const err = thrown instanceof Error ? thrown : new Error(String(thrown));
+			const err = toError(thrown);
 			// A worker IPC `send()` race can surface through either global error event;
 			// contain it in both. Stdout write disconnects are attributed to stdout by
 			// registerStdioDisconnectHandling's `error` listener, not classified here.
@@ -607,54 +780,40 @@ if (Bun.isMainThread) {
 				return;
 			}
 			await exitAfterFatal(
-				`${formatFatalError("Uncaught Exception", err)}${formatFatalRecoveryHints()}`,
+				formatFatalError("Uncaught Exception", err),
 				"Uncaught exception",
 				err,
 				Reason.UNCAUGHT_EXCEPTION,
 			);
 		})
 		.on("unhandledRejection", async reason => {
-			const err = reason instanceof Error ? reason : new Error(String(reason));
+			const err = toError(reason);
 			if (handleWorkerSendEpipe(err)) return;
 			if (isExpectedCleanupError(reason)) {
 				logger.warn("Ignoring expected cleanup rejection", { err });
 				return;
 			}
-			for (const interceptor of rejectionInterceptors) {
-				try {
-					if (interceptor(reason)) return;
-				} catch (interceptorErr) {
-					logger.warn("Unhandled-rejection interceptor threw; continuing with fatal path", {
-						err: interceptorErr,
-					});
-				}
-			}
+			if (interceptRejection(reason)) return;
 			await exitAfterFatal(
-				`${formatFatalError("Unhandled Rejection", err)}${formatFatalRecoveryHints()}`,
+				formatFatalError("Unhandled Rejection", err),
 				"Unhandled rejection",
 				err,
 				Reason.UNHANDLED_REJECTION,
 			);
 		})
-		.on("exit", async () => {
-			void runCleanup(Reason.EXIT); // fire and forget (exit imminent)
-		})
 		.on("SIGTERM", async () => {
+			// A stopped session otherwise leaves its last frame above the shell prompt,
+			// which reads as a crash. A repeated SIGTERM joins the same cleanup and the
+			// hints still print once.
+			const hintProviders = [...fatalRecoveryHintProviders];
 			await runCleanup(Reason.SIGTERM);
+			writeRecoveryHints(hintProviders, "\n[Stopped by SIGTERM]");
 			exitProcess(143); // 128 + SIGTERM (15)
 		})
 		.on("SIGHUP", async () => {
 			await runCleanup(Reason.SIGHUP);
 			exitProcess(129); // 128 + SIGHUP (1)
 		});
-} else {
-	// Worker thread: only register exit handler for cleanup.
-	// DO NOT register uncaughtException/unhandledRejection handlers here -
-	// they would swallow errors before the worker's own handlers (self.addEventListener)
-	// can report failures back to the parent thread.
-	process.on("exit", () => {
-		void runCleanup(Reason.EXIT);
-	});
 }
 
 /** Controls when a registered cleanup callback participates in cleanup passes. */
@@ -664,11 +823,24 @@ export interface CleanupRegistrationOptions {
 	 * The registration remains armed when a keep-alive pass skips it.
 	 */
 	exitOnly?: boolean;
+	/**
+	 * How long a pass waits for this callback, when that is longer than the
+	 * default 10 s cleanup deadline. It extends the pass only while the callback
+	 * is still pending: one that settles early ends its hold at once.
+	 */
+	deadlineMs?: number;
+	/**
+	 * With `deadlineMs`: a line printed to stderr, with the remaining wait
+	 * appended, if exit is still waiting on this callback once every other
+	 * callback has finished (a terminal owner has then released the screen), or
+	 * at the default 10 s deadline when another callback is still running.
+	 * Nothing is printed when the callback finishes first.
+	 */
+	waitMessage?: string;
 }
 
 /**
- * Registers a cleanup callback for shutdown, signals, fatal errors, and
- * repeatable manual cleanup passes.
+ * Registers a cleanup callback for manual passes and, when installed, process shutdown.
  *
  * Registrations persist across keep-alive {@link cleanup} passes and run at
  * most once per pass. Set `exitOnly` for resources the continuing process still
@@ -690,6 +862,8 @@ export function register(
 		id,
 		callback,
 		exitOnly: options.exitOnly ?? false,
+		deadlineMs: options.deadlineMs,
+		waitMessage: options.waitMessage,
 		cancelled: false,
 		lastPass: 0,
 	};
@@ -703,14 +877,17 @@ export function register(
 			const pending = invokeCleanup(registration, reason, keepAlive, cleanupPass);
 			if (!pending) return;
 			const tracked = pending.catch(error => {
-				const err = error instanceof Error ? error : new Error(String(error));
+				const err = toError(error);
 				logger.error("Cleanup callback failed", { err, id, stack: err.stack });
 			});
 			// Join the active pass so cleanup()/signal exits await it; after a
 			// completed exit pass there is nothing left to join.
 			activeLatePromises?.push(tracked);
+			if (registration.deadlineMs !== undefined) {
+				activePassDeadline?.extend(tracked, registration.deadlineMs, registration.waitMessage);
+			}
 		} catch (error) {
-			const err = error instanceof Error ? error : new Error(String(error));
+			const err = toError(error);
 			logger.error("Cleanup callback failed", { err, id, stack: err.stack });
 		}
 	};

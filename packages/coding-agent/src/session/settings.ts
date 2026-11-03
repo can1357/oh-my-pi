@@ -1,6 +1,5 @@
+import { isRecord } from "@oh-my-pi/pi-utils";
 import { combine, effect, register, type SettingValueOf } from "../config/registry";
-import { cfgEditMode } from "../edit/settings";
-import { cfgEvalJs } from "../eval/settings";
 import {
 	SERVICE_TIER_ANTHROPIC_OPTIONS,
 	SERVICE_TIER_ANTHROPIC_VALUES,
@@ -23,16 +22,35 @@ import {
 } from "../tiny/dtype";
 import { DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS, MAX_WEB_SEARCH_TIMEOUT_SECONDS } from "../web/search/types";
 import { DEFAULT_USAGE_RESERVE_PCT } from "@oh-my-pi/pi-ai/auth-storage";
-import { configureProviderStoreResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
+import { configureProviderStoreResponses } from "@oh-my-pi/pi-ai/providers/openai-responses-state";
+import { configureCodexAccessPrograms } from "@oh-my-pi/pi-ai/providers/openai-codex/access-programs";
 import { configureProviderMaxInFlightRequests } from "@oh-my-pi/pi-ai/stream";
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
 import { AUTO_THINKING, getConfiguredThinkingLevelMetadata, getThinkingLevelMetadata } from "@oh-my-pi/pi-tui/thinking";
 
-const EMPTY_STRING_ARRAY: string[] = [];
 const EMPTY_NUMBER_RECORD: Record<string, number> = {};
 const EMPTY_STRING_ARRAYS_RECORD: Record<string, string[]> = {};
 const DEFAULT_TOOL_CALL_LOOP_EXEMPT_TOOLS: string[] = ["wait"];
+
+/** Scope of the resume picker's current-folder list. */
+export const cfgSessionWorktreeScope = register({
+	id: "session.worktreeScope",
+	type: "enum",
+	values: ["directory", "repo"] as const,
+	default: "repo",
+	ui: {
+		tab: "interaction",
+		group: "Startup & Updates",
+		label: "Resume Worktree Scope",
+		description:
+			"Choose whether the resume picker's current folder includes sessions from other repository worktrees",
+		options: [
+			{ value: "directory", label: "This Directory", description: "Only sessions saved for this directory" },
+			{ value: "repo", label: "Repository Worktrees", description: "Also include sessions from sibling worktrees" },
+		],
+	},
+});
 
 // Power assertions: macOS IOKit, Linux login1/ScreenSaver, Windows execution state.
 export const cfgPowerSleepPrevention = register({
@@ -45,7 +63,7 @@ export const cfgPowerSleepPrevention = register({
 		group: "Power",
 		label: "Sleep Prevention",
 		description:
-			"Prevent the system sleeping during active sessions. Each level is cumulative — it adds the flags of all lower levels.",
+			"Prevent the system sleeping while the agent is running a turn; an idle session, including one waiting on background jobs, does not hold it. Each level is cumulative — it adds the flags of all lower levels.",
 		options: [
 			{
 				value: "off",
@@ -55,7 +73,7 @@ export const cfgPowerSleepPrevention = register({
 			{
 				value: "idle",
 				label: "Prevent Idle Sleep",
-				description: "Keep the system awake while a session is open (macOS `caffeinate -i`)",
+				description: "Keep the system awake while the agent is running a turn (macOS `caffeinate -i`)",
 			},
 			{
 				value: "display",
@@ -85,9 +103,70 @@ export const cfgPrewalkEnabled = register({
 	},
 });
 
-function isLimitRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
+export const cfgPrewalkFrom = register({
+	id: "prewalk.from",
+	type: "string",
+	default: "@default",
+	ui: {
+		tab: "model",
+		group: "Prewalk",
+		label: "Prewalk planning model",
+		description: "Model or role (default '@default') that /prewalk restart returns to for planning.",
+	},
+});
+
+export const cfgPrewalkInto = register({
+	id: "prewalk.into",
+	type: "string",
+	default: "@smol",
+	ui: {
+		tab: "model",
+		group: "Prewalk",
+		label: "Prewalk target",
+		description:
+			"Model or role (default '@smol') that prewalk hands off to at the first edit/write: /prewalk, /prewalk restart, Enable Prewalk, and --prewalk. Auto-prewalk uses its own target.",
+	},
+});
+
+export const cfgPrewalkAuto = register({
+	id: "prewalk.auto",
+	type: "enum",
+	values: ["off", "suggest", "on"] as const,
+	default: "off",
+	ui: {
+		tab: "model",
+		group: "Prewalk",
+		label: "Auto Prewalk",
+		description:
+			"Ask the native judge resolved through the 'judge' role whether each new top-level user task front-loads its hard reasoning. Needs a native judge; without one nothing is classified. Independent of Enable Prewalk.",
+		options: [
+			{ value: "off", label: "Off", description: "Never classify prompts for prewalk" },
+			{
+				value: "suggest",
+				label: "Suggest",
+				description: "Classify each task and report the decision without arming prewalk",
+			},
+			{
+				value: "on",
+				label: "On",
+				description:
+					"For confidently front-loaded tasks, arm a handoff from the active model to the auto target; the next task starts back on the planning model",
+			},
+		],
+	},
+});
+
+export const cfgPrewalkAutoTarget = register({
+	id: "prewalk.autoTarget",
+	type: "string",
+	default: "@smol",
+	ui: {
+		tab: "model",
+		group: "Prewalk",
+		label: "Auto-prewalk target",
+		description: "Model or role (default '@smol') auto-prewalk hands off to at the first edit/write.",
+	},
+});
 
 function isPositiveLimit(limit: unknown): limit is number {
 	return typeof limit === "number" && Number.isFinite(limit) && limit > 0;
@@ -96,7 +175,7 @@ function isPositiveLimit(limit: unknown): limit is number {
 /** Per-provider request limits floored to whole numbers ≥ 1; non-positive or non-numeric entries are dropped. */
 export function normalizeProviderMaxInFlightRequests(value: unknown): Record<string, number> {
 	const normalized: Record<string, number> = {};
-	if (!isLimitRecord(value)) return normalized;
+	if (!isRecord(value)) return normalized;
 	for (const provider in value) {
 		const limit = value[provider];
 		if (isPositiveLimit(limit)) normalized[provider] = Math.max(1, Math.floor(limit));
@@ -110,7 +189,7 @@ export function normalizeProviderMaxInFlightRequests(value: unknown): Record<str
  * @throws Error naming every provider whose limit is not a positive number.
  */
 export function validateProviderMaxInFlightRequests(value: unknown): Record<string, number> {
-	if (isLimitRecord(value)) {
+	if (isRecord(value)) {
 		const invalidProviders: string[] = [];
 		for (const provider in value) if (!isPositiveLimit(value[provider])) invalidProviders.push(provider);
 		if (invalidProviders.length > 0) {
@@ -137,44 +216,6 @@ export const cfgProvidersMaxInFlightRequests = register({
 effect(cfgProvidersMaxInFlightRequests, limits =>
 	configureProviderMaxInFlightRequests(normalizeProviderMaxInFlightRequests(limits)),
 );
-
-export const cfgProvidersOpenaiCodexCodeMode = register({
-	id: "providers.openai-codex.codeMode",
-	type: "enum",
-	values: ["off", "on", "auto"] as const,
-	default: "off",
-	ui: {
-		tab: "providers",
-		group: "Services",
-		label: "Codex Code Mode",
-		description:
-			"Route Codex code_mode_only models (GPT-5.6) through eval. The direct tools are eval, ask, todo, yield, think, checkpoint, and rewind. Use eval cells for other session tools. Mirrors codex-rs Code Mode. 'auto' follows the model catalog flag.",
-	},
-});
-
-export const cfgProvidersOpenaiCodexCodeModeDirectTools = register({
-	id: "providers.openai-codex.codeModeDirectTools",
-	type: "array",
-	default: EMPTY_STRING_ARRAY,
-	ui: {
-		tab: "providers",
-		group: "Services",
-		label: "Codex Code Mode Direct Tools",
-		description:
-			"Extra direct tools for Codex Code Mode. The standard direct tools are eval, ask, todo, yield, think, checkpoint, and rewind.",
-	},
-});
-
-/**
- * Settings that change the Code Mode tool partition. `edit.mode` belongs here because it renames
- * `EditTool` on the wire (`apply_patch` vs `edit`), which the namespace metadata is keyed by.
- */
-export const cfgCodeModeInputs = combine({
-	codeMode: cfgProvidersOpenaiCodexCodeMode,
-	directTools: cfgProvidersOpenaiCodexCodeModeDirectTools,
-	evalJs: cfgEvalJs,
-	editMode: cfgEditMode,
-});
 
 export const cfgImagesDescribeForTextModels = register({
 	id: "images.describeForTextModels",
@@ -735,7 +776,8 @@ export const cfgRetryModelFallback = register({
 		tab: "model",
 		group: "Retry & Fallback",
 		label: "Retry Model Fallback",
-		description: "Allow retry recovery to switch to configured fallback models",
+		description:
+			"Allow retry recovery to switch to models in retry.fallbackChains after provider errors. Independent of Auto-Promote Context",
 	},
 });
 
@@ -762,6 +804,19 @@ export const cfgRetryFallbackOn = register({
 				description: "Wait out or surface a usage limit; switch on other errors",
 			},
 		],
+	},
+});
+
+export const cfgRetryRateLimitWalksChain = register({
+	id: "retry.rateLimitWalksChain",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "model",
+		group: "Retry & Fallback",
+		label: "Rate Limit Walks Chain",
+		description:
+			"On a rate limit, do not hold the retry.fallbackChains walk for a turn whose thinking is signed by the failing model. Off (the default), such a turn keeps retrying the rate-limited model until retry.maxRetries is spent before the chain is reached.",
 	},
 });
 
@@ -873,6 +928,7 @@ export const cfgRetry = combine({
 	waitForUsageReset: cfgRetryWaitForUsageReset,
 	modelFallback: cfgRetryModelFallback,
 	fallbackOn: cfgRetryFallbackOn,
+	rateLimitWalksChain: cfgRetryRateLimitWalksChain,
 	usageAwareFallback: cfgRetryUsageAwareFallback,
 	usageReservePct: cfgRetryUsageReservePct,
 	usageReservePolicy: cfgRetryUsageReservePolicy,
@@ -1115,7 +1171,7 @@ export const cfgProvidersOpenaiWebsockets = register({
 export const cfgProvidersOpenaiLiveSteering = register({
 	id: "providers.openaiLiveSteering",
 	type: "boolean",
-	default: true,
+	default: false,
 	ui: {
 		tab: "providers",
 		group: "Protocol",
@@ -1142,6 +1198,22 @@ export const cfgProvidersMuseCodeStoreResponses = register({
 // directly (titles, commit messages, memories) follow the setting.
 effect(cfgProvidersMuseCodeStoreResponses, enabled => configureProviderStoreResponses({ "muse-code": enabled }));
 
+export const cfgProvidersOpenaiCodexDaybreak = register({
+	id: "providers.openai-codex.daybreak",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "providers",
+		group: "Protocol",
+		label: "Codex Daybreak Blue",
+		description:
+			"Automatically request the Daybreak Blue cyber access program on ChatGPT accounts eligible for it. OpenAI may use content from Daybreak Blue sessions to improve its models. Does not cover dedicated Daybreak Blue models (gpt-daybreak-blue-*), which may still run as Daybreak sessions.",
+	},
+});
+// Sessions pass their own value per request; this process-wide default covers
+// callers without a session stream function (titles, commit messages, memories).
+effect(cfgProvidersOpenaiCodexDaybreak, enabled => configureCodexAccessPrograms(enabled));
+
 export const cfgProvidersCacheRetention = register({
 	id: "providers.cacheRetention",
 	type: "enum",
@@ -1167,8 +1239,9 @@ export const cfgProvidersCacheRetention = register({
 			},
 			{
 				value: "long",
-				label: "Long (1h)",
-				description: "1h TTL where the provider supports it; pricier writes, only warmed during active runs",
+				label: "Long (1h+)",
+				description:
+					"Longer TTL where supported (Anthropic/Bedrock 1h, OpenAI GPT-5.6+ Responses 12h); pricier writes, only warmed during active runs",
 			},
 			{ value: "none", label: "Off", description: "Disable prompt caching and cache-affinity routing" },
 		],
@@ -1480,4 +1553,28 @@ export const cfgThinkingBudgets = combine({
 	high: cfgThinkingBudgetsHigh,
 	xhigh: cfgThinkingBudgetsXhigh,
 	max: cfgThinkingBudgetsMax,
+});
+
+/** Rejects a cost threshold that is not a positive USD amount. */
+function validateCostThreshold(id: string): (raw: unknown) => void {
+	return raw => {
+		if (raw === undefined || raw === null || (typeof raw === "number" && Number.isFinite(raw) && raw > 0)) return;
+		throw new Error(`Invalid ${id}: expected a positive USD amount, got ${Bun.inspect(raw)}.`);
+	};
+}
+
+/** Session-tree spend (USD) at which omp warns once; `--warn-cost` overrides it for one run. */
+export const cfgSessionWarnCost = register({
+	id: "session.warnCost",
+	type: "number",
+	default: undefined,
+	validate: validateCostThreshold("session.warnCost"),
+});
+
+/** Session-tree spend (USD) at which omp stops sending model requests; `--max-cost` overrides it for one run. */
+export const cfgSessionMaxCost = register({
+	id: "session.maxCost",
+	type: "number",
+	default: undefined,
+	validate: validateCostThreshold("session.maxCost"),
 });

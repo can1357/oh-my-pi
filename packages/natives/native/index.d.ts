@@ -43,10 +43,29 @@ export declare class DesktopSession {
    * behind the worker, so it answers at once even while a request is stuck.
    */
   get screenState(): DesktopScreenState
+  /**
+   * Keeps the display awake from the next activity request until
+   * `releaseDisplayAwake()`, however long the session sits idle in between,
+   * instead of for the grace period after the last request. An agent calls
+   * this when it acts inside a turn.
+   */
+  holdDisplayUntilReleased(): void
+  /**
+   * Lets the display sleep now if a turn holds it, without waiting behind
+   * queued requests, and returns later activity to the grace period. Activity
+   * outside a turn keeps its grace. An agent calls this when its turn ends.
+   */
+  releaseDisplayAwake(): void
+  /**
+   * How many times the user's physical Escape has stopped takeover input in
+   * this session, or under its `escapeStopKey`. Host cancels, retirement and
+   * release never count, so a rise tells the host the user stopped the work.
+   */
+  get escapeStops(): number
   listDisplays(): Promise<Array<DesktopDisplay>>
   listWindows(): Promise<Array<DesktopWindow>>
   listApplications(options?: ApplicationQuery | undefined | null): Promise<Array<Application>>
-  openApplication(id: string, options?: ApplicationOpenOptions | undefined | null): Promise<Application>
+  openApplication(id: string, options?: ApplicationOpenOptions | undefined | null): Promise<OpenedApplication>
   /**
    * Capture and accessibility share one serialized request. Neither a failed
    * snapshot nor an abandoned reply replaces the last delivered input frame.
@@ -55,8 +74,8 @@ export declare class DesktopSession {
   menuItems(target: string, path?: Array<string> | undefined | null): Promise<Array<DesktopMenuItem>>
   menuSelect(target: string, path: Array<string>): Promise<undefined>
   bringToCurrentSpace(windowId: string): Promise<undefined>
-  holdKeys(target: string, keys: Array<string>, options: HoldOptions): Promise<undefined>
-  holdMouse(target: string, x: number, y: number, options: HoldOptions): Promise<undefined>
+  holdKeys(target: string, keys: Array<string>, options: HoldOptions): Promise<DesktopFocusReturn | undefined | null>
+  holdMouse(target: string, x: number, y: number, options: HoldOptions): Promise<DesktopFocusReturn | undefined | null>
   /**
    * Native ownership only. Human approval is required by the host before
    * calling this method.
@@ -66,18 +85,24 @@ export declare class DesktopSession {
   controlState(): DesktopControlState
   /** Retire queued work from a completed helper without revoking task control. */
   retire(): void
+  /**
+   * Sets when the current run ends, `remaining_ms` from now; each run sets
+   * it before its first call. On macOS, input waiting for the user to pause
+   * in its app gives up shortly before it.
+   */
+  setRunDeadline(remainingMs: number): void
   capture(target: string, caps?: CaptureCaps | undefined | null): Promise<DesktopCapture>
   /**
    * Capture a fresh native-detail region without replacing the full input
    * coordinate frame.
    */
   captureRegion(target: string, region: CaptureRegion, caps?: CaptureCaps | undefined | null): Promise<DesktopCapture>
-  click(target: string, x: number, y: number, opts?: PointerOptions | undefined | null): Promise<undefined>
-  moveMouse(target: string, x: number, y: number, opts?: PointerOptions | undefined | null): Promise<undefined>
-  drag(target: string, path: Array<DesktopPoint>, opts?: PointerOptions | undefined | null): Promise<undefined>
-  scroll(target: string, x: number, y: number, dx: number, dy: number, opts?: PointerOptions | undefined | null): Promise<undefined>
-  typeText(target: string, text: string, opts?: PointerOptions | undefined | null): Promise<undefined>
-  keyChord(target: string, keys: Array<string>, opts?: PointerOptions | undefined | null): Promise<undefined>
+  click(target: string, x: number, y: number, opts?: PointerOptions | undefined | null): Promise<DesktopFocusReturn | undefined | null>
+  moveMouse(target: string, x: number, y: number, opts?: PointerOptions | undefined | null): Promise<DesktopFocusReturn | undefined | null>
+  drag(target: string, path: Array<DesktopPoint>, opts?: PointerOptions | undefined | null): Promise<DesktopFocusReturn | undefined | null>
+  scroll(target: string, x: number, y: number, dx: number, dy: number, opts?: PointerOptions | undefined | null): Promise<DesktopFocusReturn | undefined | null>
+  typeText(target: string, text: string, opts?: PointerOptions | undefined | null): Promise<DesktopFocusReturn | undefined | null>
+  keyChord(target: string, keys: Array<string>, opts?: PointerOptions | undefined | null): Promise<DesktopFocusReturn | undefined | null>
   raiseWindow(windowId: string): Promise<undefined>
   axSnapshot(target: string, opts?: AxSnapshotOptions | undefined | null): Promise<AxSnapshot>
   axQuery(target: string, query: AxQuery): Promise<Array<AxNode>>
@@ -91,10 +116,26 @@ export declare class DesktopSession {
   axAttributes(reference: string): Promise<Array<[string, string]>>
   axChildren(reference: string): Promise<Array<AxNode>>
   axParent(reference: string): Promise<AxNode | undefined | null>
-  axPerform(reference: string, action: string): Promise<undefined>
+  /**
+   * Performs `action` on the element; with `menu`, chooses that item path
+   * in the menu the action opens, which closes it.
+   */
+  axPerform(reference: string, action: string, menu?: Array<string> | undefined | null): Promise<undefined>
   axSetValue(reference: string, value: string): Promise<undefined>
+  /**
+   * Selects `text` in the element's value by accessibility, or places a
+   * caret at its start or end, without focus change or keystrokes.
+   */
+  axSelectText(reference: string, text: string, opts?: AxSelectTextOptions | undefined | null): Promise<AxTextSelection>
   axFocus(reference: string): Promise<undefined>
-  axClick(reference: string, opts?: PointerOptions | undefined | null): Promise<undefined>
+  axClick(reference: string, opts?: PointerOptions | undefined | null): Promise<DesktopFocusReturn | undefined | null>
+  /**
+   * Types `text` into the element: native text fields take it by AX
+   * insertion, other elements as keystrokes once they hold keyboard focus.
+   */
+  axType(reference: string, text: string, opts?: PointerOptions | undefined | null): Promise<DesktopFocusReturn | undefined | null>
+  /** Presses a key chord in the element once it holds keyboard focus. */
+  axKeyChord(reference: string, keys: Array<string>, opts?: PointerOptions | undefined | null): Promise<DesktopFocusReturn | undefined | null>
   /**
    * Immediately cancel operations submitted before this call. Later
    * operations may proceed.
@@ -211,6 +252,14 @@ export declare class EditStore {
 export declare class FileLock {
   /** Try to acquire `path` without blocking. */
   static tryAcquire(path: string): FileLock
+  /**
+   * Whether any handle, in any process including this one, holds `path`.
+   *
+   * Observes without locking or opening the lock: a `connect(2)` probe on
+   * Linux, an `F_GETLK` query on other Unix platforms, a `\BaseNamedObjects`
+   * directory listing on Windows. A concurrent `tryAcquire()` never meets it.
+   */
+  static isHeld(path: string): boolean
   /** Whether this handle owns the requested lock. */
   get acquired(): boolean
   /** Release this handle's ownership without affecting a successor. */
@@ -314,6 +363,29 @@ export declare class IpcServer {
   unref(): void
 }
 
+/** Native multi-pattern line matcher returning named captures per line. */
+export declare class LineMatcher {
+  /**
+   * Throws when a pattern fails to compile; message names the failing index
+   * and the regex error, e.g. `pattern 2: regex parse error: ...`.
+   *
+   * # Errors
+   * Returns an error when any pattern fails to compile.
+   */
+  constructor(patterns: Array<string>)
+  /**
+   * Named groups of each pattern, in pattern order: the layout of a match's
+   * `start, end` pairs in [`LineMatches::spans`].
+   */
+  groupNames(): Array<Array<string>>
+  /**
+   * Matches every line (split on `
+  `) against every pattern; first match
+   * per line per pattern; ordered by line then pattern index.
+   */
+  matchLines(text: string): LineMatches
+}
+
 /** WebRTC peer that accepts 16 kHz mono PCM and renders remote Opus audio. */
 export declare class LiveWebRtcPeer {
   /**
@@ -356,6 +428,24 @@ export declare class MacAppearanceObserver {
   stop(): void
 }
 
+/** The app the user had in front when `macOSFrontApp()` read it. */
+export declare class MacOSFrontApp {
+  /**
+   * Puts this app back in front, without raising its windows, each time the
+   * app that took the front from it takes it again during the next
+   * `durationMs`. Ends early once a hardware mouse button or ⌘/⌃ is used
+   * after the app was read, the app came from a launcher or Spotlight panel,
+   * or a different app comes forward: that is the user picking an app.
+   * Typing does not end it, and a hand-back macOS refuses for a key typed
+   * meanwhile is asked again. Holds nothing when called over a second after
+   * the latest read, as picks made since then went unwatched. Owns desktop
+   * input/focus control only for each hand-back, and rejects if another
+   * operation owns it then. Resolves how many times it put the app back.
+   */
+  keepInFront(durationMs: number): Promise<number>
+}
+export type MacosFrontApp = MacOSFrontApp
+
 /** A transactional, process-owned native OAuth callback receiver. */
 export declare class NativeOAuthCallback {
   /** Create a receiver without touching the filesystem or OS registration. */
@@ -371,6 +461,27 @@ export declare class NativeOAuthCallback {
   waitForCallback(timeoutMs?: number | undefined | null): Promise<string>
   /** Restore prior OS state and release ownership. Safe to call repeatedly. */
   dispose(): Promise<undefined>
+}
+
+/**
+ * The bytes crossing one shell run's pipeline pipes, during and after the run.
+ *
+ * For `cargo build 2>&1 | tail -5`, stream 1 holds what `cargo` has written
+ * so far while `tail` still holds it back. Create one per run and pass it as
+ * [`ShellRunOptions::streams`]. Streams are numbered from 1 in the order the
+ * run opened its pipes; each keeps its most recent 1 MiB, and a run keeps its
+ * 4 newest finished streams.
+ */
+export declare class PipeStreams {
+  constructor()
+  /** The run's retained streams, oldest first. */
+  list(): Array<PipeStreamInfo>
+  /**
+   * Retained bytes of stream `id` from stream offset `from` on (all of them
+   * without it), or `null` for a stream the run never opened or no longer
+   * keeps.
+   */
+  read(id: number, from?: number | undefined | null): PipeStreamChunk | null
 }
 
 /**
@@ -456,7 +567,7 @@ export declare class PtySession {
   kill(): void
 }
 
-/** Persistent brush-core shell session. */
+/** Persistent embedded bash engine (pi-shell) shell session. */
 export declare class Shell {
   /**
    * Create a new shell session from optional configuration.
@@ -862,9 +973,18 @@ export interface Application {
   pid?: number
 }
 
-/** Controls whether launching an application deliberately activates it. */
+/**
+ * How `apps.open` opens its target.
+ *
+ * `activate` deliberately brings the application forward. On macOS a file,
+ * folder or URL target opens in its default application, or in `app` (an
+ * application ID, name or path); `reveal` instead shows the file or folder
+ * selected in Finder, which comes to the front.
+ */
 export interface ApplicationOpenOptions {
   activate?: boolean
+  reveal?: boolean
+  app?: string
 }
 
 /** Filters the native application inventory without requiring screen access. */
@@ -1171,6 +1291,16 @@ export interface AxQuery {
   limit?: number
 }
 
+/** Where `axSelectText` looks for its text and what it selects there. */
+export interface AxSelectTextOptions {
+  /** Text that must directly precede the match. */
+  prefix?: string
+  /** Text that must directly follow the match. */
+  suffix?: string
+  /** `text` (default) selects the match; `start` and `end` place a caret. */
+  select?: string
+}
+
 export interface AxSnapshot {
   text: string
   nodeCount: number
@@ -1181,6 +1311,19 @@ export interface AxSnapshotOptions {
   maxDepth?: number
   maxNodes?: number
   all?: boolean
+}
+
+/** The selection read back after `axSelectText`, in UTF-16 code units. */
+export interface AxTextSelection {
+  start: number
+  length: number
+  /** The selected text, empty for a caret. */
+  text: string
+  /**
+   * Whether the element is focused in its app: typing and AX insertion
+   * act on the focused element.
+   */
+  focused: boolean
 }
 
 export interface BlockParseOptions {
@@ -1239,6 +1382,16 @@ export interface ClipboardImage {
   /** MIME type for the encoded image payload. */
   mimeType: string
 }
+
+/**
+ * Invalidates this process's event taps before it exits.
+ *
+ * No desktop session here sees the user's input again afterwards. A macOS tap
+ * that dies with its process while the user types makes `WindowServer`
+ * deliver their key again; Bun's `process.exit` runs no native exit hook, so
+ * the host calls this from its exit handler.
+ */
+export declare function closeDesktopEventTaps(): void
 
 /** A context line (before or after a match). */
 export interface ContextLine {
@@ -1319,8 +1472,10 @@ export interface DesktopCapabilities {
   heldInput: boolean
   spaces: boolean
   /**
-   * Native global Escape cancellation while input/control ownership is held.
-   * Wayland requires the host interrupt action instead.
+   * Native global Escape cancellation of takeover input (`takeover: true`,
+   * held control, desktop/display-level input, raises, activating launches).
+   * Without held control, background window input never watches the user's
+   * keys; it and Wayland stop only through the host interrupt.
    */
   globalEscape: boolean
   capturePermission: string
@@ -1394,6 +1549,26 @@ export interface DesktopDisplay {
 }
 
 /**
+ * Physical-Escape stops counted under `key` by every desktop session created
+ * with it, including closed ones, until the key is forgotten.
+ */
+export declare function desktopEscapeStops(key: string): number
+
+/**
+ * Where focus ended after a takeover input call, as `WindowServer` reports
+ * it. Input calls resolve to it on macOS when they took over; other
+ * backends and background delivery resolve to `null`.
+ */
+export interface DesktopFocusReturn {
+  /** Whether the takeover handed focus back to the app front before it. */
+  handedBack: boolean
+  /** The process front before the takeover. */
+  previousPid?: number
+  /** The process front once the takeover ended; absent when unreadable. */
+  frontPid?: number
+}
+
+/**
  * One immediate child of a native application menu. Paths contain the actual
  * native labels, including ellipses; selection accepts normalized labels.
  */
@@ -1427,6 +1602,11 @@ export interface DesktopScreenState {
 
 export interface DesktopSessionOptions {
   display?: string
+  /**
+   * Sessions created with the same key share one physical-Escape stop
+   * count, which `desktopEscapeStops` reads after they close.
+   */
+  escapeStopKey?: string
 }
 
 /** One capturable top-level window in global logical desktop coordinates. */
@@ -1572,12 +1752,13 @@ export declare function diffWords(oldText: string, newText: string): Array<DiffC
 
 /**
  * Whole-call apply outcome. `is_error` carries the model-facing failure in
- * `text` with no files.
+ * `text` with no files, and `error_kind` its class (`EditError::kind`).
  */
 export interface EditApplyOutcome {
   text: string
   files: Array<EditFileOutcome>
   isError: boolean
+  errorKind?: string
 }
 
 /** Apply-time knobs. */
@@ -1604,6 +1785,9 @@ export interface EditDiffResult {
 
 /** Numbered unified diff between two texts (`generateDiffString`). */
 export declare function editDiffString(oldText: string, newText: string, path?: string | undefined | null): EditDiffResult
+
+/** Every `errorKind` a failed apply outcome can carry. */
+export declare function editErrorKinds(): Array<string>
 
 /** A destructive file operation a payload declares. */
 export interface EditFileOpIntent {
@@ -1682,6 +1866,12 @@ export interface EditPolicy {
   allowFuzzy: boolean
   fuzzyThreshold: number
   enforceSeenLines: boolean
+  /**
+   * Narrowest per-line display cap any tool applies, in UTF-8 bytes (0: no
+   * tool cuts lines). Without recorded read provenance, hashline anchors on
+   * longer lines are rejected.
+   */
+  maxColumns: number
   blockAutoGenerated: boolean
   planActive: boolean
   /** Registered internal URL schemes (router spec keys). */
@@ -1781,13 +1971,17 @@ export interface EnclosingBoundaryOptions {
  * the calling thread.
  *
  * The input image is decoded and resized to the requested pixel dimensions
- * before encoding. Prefer [`encode_sixel_async`] unless the caller cannot
- * wait: the decode, resize and dither block the JS thread.
+ * (not resampled when it already has them), then partial alpha is composited
+ * against `background_rgb` (packed `0xRRGGBB`). Fully transparent pixels
+ * remain transparent. Encoding uses whole 6-pixel bands: a partial last band
+ * is dropped, see [`band_rows`]. Prefer
+ * [`encode_sixel_async`] unless the caller cannot wait: the decode, resize
+ * and dither block the JS thread.
  *
  * # Errors
  * Returns an error if decoding, resizing, or SIXEL encoding fails.
  */
-export declare function encodeSixel(bytes: Uint8Array, targetWidthPx: number, targetHeightPx: number): string
+export declare function encodeSixel(bytes: Uint8Array, targetWidthPx: number, targetHeightPx: number, backgroundRgb: number): string
 
 /**
  * Same result as [`encode_sixel`], but the decode, resize and dither run on
@@ -1796,7 +1990,7 @@ export declare function encodeSixel(bytes: Uint8Array, targetWidthPx: number, ta
  * # Errors
  * Rejects if decoding, resizing, or SIXEL encoding fails.
  */
-export declare function encodeSixelAsync(bytes: Uint8Array, targetWidthPx: number, targetHeightPx: number): Promise<string>
+export declare function encodeSixelAsync(bytes: Uint8Array, targetWidthPx: number, targetHeightPx: number, backgroundRgb: number): Promise<string>
 
 /** Tokenizer encoding to use. */
 export declare enum Encoding {
@@ -1841,7 +2035,7 @@ export declare enum Encoding {
 export declare function execReplace(argv: Array<string>): void
 
 /**
- * Execute a brush shell command.
+ * Execute a command in the embedded bash engine (pi-shell).
  *
  * Creates a fresh session for each call. The `on_chunk` callback receives
  * streamed stdout/stderr output. Returns the exit code when the command
@@ -1885,6 +2079,9 @@ export declare enum FileType {
   Symlink = 3
 }
 
+/** Drops the stop count kept under `key` once no session will use it again. */
+export declare function forgetDesktopEscapeStops(key: string): void
+
 /** Fuzzy file path search for autocomplete. */
 export declare function fuzzyFind(options: FuzzyFindOptions): Promise<FuzzyFindResult>
 
@@ -1908,7 +2105,7 @@ export interface FuzzyFindOptions {
   hidden?: boolean
   /** Respect .gitignore (default: true). */
   gitignore?: boolean
-  /** Enable walker scan caching (default: false). */
+  /** Reuse unchanged directory listings across calls (default: false). */
   cache?: boolean
   /** Maximum number of matches to return (default: 100). */
   maxResults?: number
@@ -1943,12 +2140,8 @@ export declare function getWorkProfile(lastSeconds: number): WorkProfile
 /**
  * Find filesystem entries matching a glob pattern.
  *
- * Resolves the search root, scans entries, applies glob and optional file-type
- * filters, and optionally streams each accepted match through `on_match`.
- *
- * When `sortByMtime` is enabled, the walker ranks matches by mtime before the
- * native layer applies final symlink-aware file-type filtering and callback
- * emission.
+ * Resolves the search root, runs the glob search, and optionally streams each
+ * returned match through `on_match`.
  *
  * # Errors
  * Returns an error when the search path cannot be resolved, the path is not a
@@ -1982,13 +2175,18 @@ export interface GlobOptions {
   fileType?: FileType
   /** Match simple patterns recursively by default (`*.ts` -> recursive). */
   recursive?: boolean
+  /**
+   * Follow descendant symbolic links with cycle detection (default: false).
+   * The filesystem provider is responsible for enforcing mount containment.
+   */
+  followLinks?: boolean
   /** Include hidden files (default: false). */
   hidden?: boolean
   /** Maximum number of results to return. */
   maxResults?: number
   /** Respect .gitignore files (default: true). */
   gitignore?: boolean
-  /** Enable walker scan caching (default: false). */
+  /** Reuse unchanged directory listings across calls (default: false). */
   cache?: boolean
   /** Sort results by mtime (most recent first) before applying limit. */
   sortByMtime?: boolean
@@ -2058,8 +2256,18 @@ export interface GrepOptions {
   pattern: string
   /** Directory or file to search: a host path or an absolute `scheme://` URL. */
   path: string
-  /** Glob filter for filenames (e.g., "*.ts"). */
+  /**
+   * Glob filter for file paths (e.g., "*.ts"); a matched directory selects
+   * every file under it.
+   */
   glob?: string
+  /**
+   * Glob patterns of files and directories to leave out, relative to `path`:
+   * one without `/` matches at any depth (`*.test.ts`, `vendor`), a leading
+   * `/` anchors it to `path` (`/vendor`); a matched directory is not
+   * searched.
+   */
+  exclude?: Array<string>
   /**
    * Match simple glob patterns at any depth (default: true; `*.ts` ->
    * `**\/*.ts`). Set false when `glob` is already relative to `path`.
@@ -2188,6 +2396,25 @@ export declare function hashlineStripPrefixes(lines: Array<string>): Array<strin
 export declare function hasMatch(content: string | Uint8Array, pattern: string | Uint8Array, ignoreCase?: boolean | undefined | null, multiline?: boolean | undefined | null): boolean
 
 /**
+ * How `path` is held by this process: open through another descriptor and
+ * locked. `null` when it is not, and always outside Linux.
+ *
+ * Looks at the path's inode through the descriptors already open, without
+ * opening the file.
+ */
+export declare function heldFileKind(path: string): HeldFileKind | null
+
+/** What a file this process holds locked is. */
+export declare enum HeldFileKind {
+  /** A SQLite database this process has open with its locks. */
+  Database = 'database',
+  /** A SQLite WAL-index (`-shm`) file this process has open with its locks. */
+  WalIndex = 'wal-index',
+  /** Another file this process holds open with a record lock. */
+  Locked = 'locked'
+}
+
+/**
  * Highlight code and return ANSI-colored lines.
  *
  * # Arguments
@@ -2236,6 +2463,16 @@ export interface HoldOptions {
   button?: string
   keys?: Array<string>
   takeover?: boolean
+  /**
+   * With `takeover`, hand focus back to the user's app even after their
+   * input during the hold; see `PointerOptions.returnFocus`.
+   */
+  returnFocus?: boolean
+  /**
+   * Refuse a background left hold that starts on a control that opens a
+   * menu; see `PointerOptions.refuseMenu`.
+   */
+  refuseMenu?: boolean
 }
 
 /**
@@ -2252,6 +2489,12 @@ export interface HtmlToMarkdownOptions {
   cleanContent?: boolean
   /** Skip images during conversion. */
   skipImages?: boolean
+  /**
+   * Hidden content to keep: "drop" (default) omits it, "reachable" keeps
+   * content the page can reveal (collapsed sections, inactive tab panels),
+   * "all" also keeps `<template>` and `<noscript>` content.
+   */
+  hiddenContent?: string
 }
 
 /** One stray sloppy payload region inside prose (UTF-16 offsets). */
@@ -2262,15 +2505,13 @@ export interface InlineSloppyRegion {
 }
 
 /**
- * Invalidate the walker scan cache.
+ * Moves this process's SQLite record locks onto open-file-description locks.
  *
- * When called with a path, removes entries for roots containing that path.
- * When called without a path, clears the entire cache.
- *
- * Intended to be called after agent file mutations: write, edit, rename, or
- * delete.
+ * No other close of the file can release those (see `ofd_locks.rs`). Call it
+ * before the process opens any SQLite database. Returns whether SQLite now
+ * uses them: `false` outside Linux, or when Bun's SQLite is not found.
  */
-export declare function invalidateFsScanCache(path?: string | undefined | null): void
+export declare function installSqliteLockShim(): boolean
 
 /** Options for `IpcConnection.connect`. */
 export interface IpcConnectOptions {
@@ -2427,6 +2668,25 @@ export declare enum KeyEventType {
   Release = 3
 }
 
+/**
+ * Matches of one [`LineMatcher::match_lines`] call, column-wise.
+ *
+ * Match `i` is on line `lines[i]` for pattern `rules[i]`, and its named
+ * groups (in [`LineMatcher::group_names`] order for that pattern) are the
+ * next `start, end` pairs of `spans`.
+ */
+export interface LineMatches {
+  /** 0-based line index per match. */
+  lines: Uint32Array
+  /** Pattern index per match. */
+  rules: Uint32Array
+  /**
+   * Per match and named group: UTF-16 start and end within the line, `-1, -1`
+   * when the group did not participate.
+   */
+  spans: Int32Array
+}
+
 export interface LineRange {
   /** 1-indexed inclusive first visible line. */
   startLine: number
@@ -2439,7 +2699,7 @@ export interface LineRange {
  *
  * File-level ignore rules for AGENTS.md are bypassed by checking each
  * traversed directory directly when `collectAgentsMd` is enabled, but ignored
- * directories are still pruned by the walker and are not searched.
+ * directories are still pruned by the walk and are not searched.
  */
 export declare function listWorkspace(options: ListWorkspaceOptions): Promise<ListWorkspaceResult>
 
@@ -2454,11 +2714,25 @@ export interface ListWorkspaceOptions {
   /** Respect .gitignore files. Default: true. */
   gitignore?: boolean
   /**
+   * Prune dependency, VCS, build-output, and cache directory names
+   * (`node_modules`, `.git`, `dist`, `target`, …); `false` lists them too.
+   * Hidden entries still require `hidden: true`; ignored entries require
+   * `gitignore: false`. Default: true.
+   */
+  pruneExcludedDirs?: boolean
+  /**
    * Also surface AGENTS.md files in directories at depth 1..=4, even when
    * gitignore would otherwise hide the file. Walks deeper than `maxDepth`
    * to find them. Default: false.
    */
   collectAgentsMd?: boolean
+  /**
+   * Report unreadable directories instead of silently skipping them: an
+   * unreadable root fails the scan, and unreadable subdirectories are
+   * returned in `unreadableDirectories` while the walk continues. Default:
+   * false (startup discovery stays best-effort).
+   */
+  reportDirectoryErrors?: boolean
   /** Timeout in milliseconds for the operation. */
   timeoutMs?: number
   /** Abort signal for cancelling the operation. */
@@ -2476,6 +2750,11 @@ export interface ListWorkspaceResult {
   agentsMdFiles: Array<string>
   /** True when any output cap was hit. */
   truncated: boolean
+  /**
+   * Subdirectories whose contents could not be listed. Always empty unless
+   * `reportDirectoryErrors` is set.
+   */
+  unreadableDirectories: Array<WorkspaceDirectoryError>
 }
 
 /**
@@ -2505,6 +2784,12 @@ export declare function macOSAutocorrectWord(text: string, start: number, length
  * On macOS, the check runs on the dedicated spelling thread.
  */
 export declare function macOSCheckSpelling(text: string): Promise<Array<SpellingRange>>
+
+/**
+ * The app macOS `WindowServer` has in front. `null` off macOS and when the
+ * front-process SPI is unavailable.
+ */
+export declare function macOSFrontApp(): MacOSFrontApp | null
 
 /** Whether the host can use Apple's native spelling service. */
 export declare function macOSSpellCheckerAvailable(): boolean
@@ -2706,8 +2991,31 @@ export interface NodeSpan {
   kind: string
 }
 
+/**
+ * Truncate and clamp dimensions to the same limits used by PTY start and
+ * resize.
+ */
+export declare function normalizePtyDimensions(cols: number, rows: number): PtyDimensions
+
 /** Decode notebook JSON into the editable cell-marker text. */
 export declare function notebookToEditableText(json: string, displayPath: string): string
+
+/**
+ * An opened application: its [`Application`] fields and the window it
+ * shows. On macOS `window` is its frontmost window once one is on screen;
+ * other platforms report none.
+ */
+export interface OpenedApplication {
+  id: string
+  name: string
+  path: string
+  running: boolean
+  pid?: number
+  window?: DesktopWindow
+}
+
+/** Check syntax through the shared parse cache without constructing a summary. */
+export declare function parseCodeStatus(options: ParseStatusOptions): ParseStatus
 
 /** Parsed Kitty keyboard protocol sequence result for a Kitty input sequence. */
 export interface ParsedKittyResult {
@@ -2736,6 +3044,23 @@ export declare function parseKey(data: string, kittyProtocolActive: boolean): st
  * Returns a structured parse result when the input is a valid Kitty sequence.
  */
 export declare function parseKittySequence(data: string): ParsedKittyResult | null
+
+export interface ParseStatus {
+  /** Canonical language name only when parsing succeeded. */
+  language?: string
+  /** True when non-empty source parses without syntax errors. */
+  parsed: boolean
+}
+
+/** Options for checking source syntax without generating a summary. */
+export interface ParseStatusOptions {
+  /** Source code to parse; empty input is not parsed. */
+  code: string
+  /** Language alias; a non-blank value overrides path-based detection. */
+  lang?: string
+  /** File path used to infer language when `lang` is omitted or blank. */
+  path?: string
+}
 
 /** One hunk of a unified diff, matching jsdiff `structuredPatch` hunks. */
 export interface PatchHunk {
@@ -2780,6 +3105,35 @@ export interface PdfMarkdownResult {
  */
 export declare function pdfToMarkdown(input: Uint8Array): Promise<PdfMarkdownResult>
 
+/** Retained bytes of a stream, as stream offsets `start..end`. */
+export interface PipeStreamChunk {
+  /**
+   * Stream offset of `data`'s first byte; past 0 once older bytes were
+   * dropped.
+   */
+  start: number
+  /** Stream offset just past `data`: the next read's `from`. */
+  end: number
+  /** The bytes `start..end`. */
+  data: Buffer
+  /** Whether bytes may still arrive. */
+  open: boolean
+}
+
+/** A tapped pipe of a run. */
+export interface PipeStreamInfo {
+  /** Stream number, from 1. */
+  id: number
+  /** Source text of the stage writing into the pipe. */
+  producer: string
+  /** Source text of the stage reading from it. */
+  consumer: string
+  /** Bytes written so far, including those no longer retained. */
+  total: number
+  /** Whether bytes may still arrive. */
+  open: boolean
+}
+
 export interface PointerOptions {
   button?: string
   count?: number
@@ -2791,6 +3145,26 @@ export interface PointerOptions {
    * default background delivery.
    */
   takeover?: boolean
+  /**
+   * With `takeover`, hand focus back to the user's app even if they typed
+   * or clicked during the action; only a third app they switched to keeps
+   * it. The host sets this when it reruns a refused background action.
+   */
+  returnFocus?: boolean
+  /**
+   * Item path to choose in the menu a click opens, matched like a menu-bar
+   * path, e.g. a context menu's `["Add to", "Fonts"]`; the call opens the
+   * menu, presses the item and returns with the menu closed.
+   */
+  menu?: Array<string>
+  /**
+   * Refuse a background left click that lands on a control that opens a
+   * menu (on macOS a menu button or popup button), or a drag that starts on
+   * one, with `BackgroundUnavailable` before anything is sent. The host sets
+   * this when the user refuses foreground takeover: an open menu takes their
+   * keyboard.
+   */
+  refuseMenu?: boolean
 }
 
 /**
@@ -2874,6 +3248,12 @@ export interface PtyArgvStartOptions {
   cols?: number
   /** PTY row count. */
   rows?: number
+}
+
+/** Effective terminal dimensions shared by PTY sessions and screen emulators. */
+export interface PtyDimensions {
+  cols: number
+  rows: number
 }
 
 /** Result of a PTY command run. */
@@ -3035,7 +3415,7 @@ export interface SearchResult {
 
 export declare function setHangulCompatJamoWidthOverride(value: number): void
 
-/** Options for executing a shell command via brush-core. */
+/** Options for executing a shell command via the embedded bash engine (pi-shell). */
 export interface ShellExecuteOptions {
   /** Command string to execute in the shell. */
   command: string
@@ -3403,6 +3783,8 @@ export interface ShellRunOptions {
    * filesystem applies again to later runs.
    */
   filesystem?: ShellFilesystem
+  /** Receives a copy of every byte crossing the run's pipeline pipes. */
+  streams?: PipeStreams
 }
 
 /** Result of running a shell command. */
@@ -3850,8 +4232,8 @@ export declare function visibleWidth(text: string, tabWidth: number): number
  * [`enclosing_block_boundaries`], [`block_range_at`] and [`node_chain_at`]
  * are synchronous and parse on the JS thread when their source is not
  * cached; awaiting this first makes that parse a cache hit. Resolves without
- * parsing when the language is unrecognized or the source is too large for
- * the cache to keep.
+ * parsing when the language is unrecognized or the source is over 2 MiB,
+ * where a typical tree would not fit the cache's memory budget.
  */
 export declare function warmBlockParse(options: BlockParseOptions): Promise<undefined>
 
@@ -3906,6 +4288,14 @@ export interface WorkProfile {
   totalMs: number
   /** Number of samples collected. */
   sampleCount: number
+}
+
+/** A subdirectory the scan could not list. */
+export interface WorkspaceDirectoryError {
+  /** Forward-slash path relative to the scan root. */
+  path: string
+  /** Platform error, e.g. `Permission denied (os error 13)`. */
+  message: string
 }
 
 /**

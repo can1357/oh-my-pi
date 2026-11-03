@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import { closeDb, getRecentRequests, initDb, insertMessageStats } from "@oh-my-pi/omp-stats/db";
 import {
 	getCostTimeSeries,
@@ -9,6 +9,7 @@ import {
 	getStatsByProvider,
 } from "@oh-my-pi/omp-stats/rollup";
 import type { MessageStats } from "@oh-my-pi/omp-stats/types";
+import * as catalogModels from "@oh-my-pi/pi-catalog/models";
 import { getBundledModel, getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { getStatsDbPath, VERSION } from "@oh-my-pi/pi-utils";
 import { installStatsTestIsolation } from "./helpers/temp-agent";
@@ -409,7 +410,6 @@ describe("stats scheduled response costs", () => {
 		const requests = [
 			["peak", "2026-09-10T03:00:00Z"],
 			["off-peak", "2026-09-10T04:00:00Z"],
-			["new-rate", "2026-09-14T04:00:00Z"],
 		].map(([entryId, timestamp]) => {
 			const stats = createCodexGptStats(entryId);
 			stats.provider = "deepseek";
@@ -429,20 +429,86 @@ describe("stats scheduled response costs", () => {
 			return stats;
 		});
 		insertMessageStats(requests);
-		const stored = getRecentRequests(3);
+		const stored = getRecentRequests(2);
 		expect(stored.find(request => request.entryId === "peak")?.usage.cost.total).toBeCloseTo(0.044, 8);
 		expect(stored.find(request => request.entryId === "off-peak")?.usage.cost.total).toBeCloseTo(0.022, 8);
-		expect(stored.find(request => request.entryId === "new-rate")?.usage.cost.total).toBeCloseTo(0.003, 8);
-		expect(getOverallStats().totalCost).toBeCloseTo(0.069, 8);
-		expect(getOverallStats().cacheSavings).toBeCloseTo(1 - 0.069 / 2.13, 8);
+		expect(getOverallStats().totalCost).toBeCloseTo(0.066, 8);
+		// The no-cache estimate prices the cached tokens at each request's input rate: 1.32 peak, 0.66 off-peak.
+		expect(getOverallStats().cacheSavings).toBeCloseTo(1 - 0.066 / 1.98, 8);
 
 		// Simulate a database predating the no-cache estimate column's backfill.
 		database.run("UPDATE messages SET cost_no_cache_input = NULL");
 		database.run("DELETE FROM meta WHERE key = 'cost_no_cache_input_v1'");
 		closeDb();
 		await initDb();
-		expect(getOverallStats().totalCost).toBeCloseTo(0.069, 8);
-		expect(getOverallStats().cacheSavings).toBeCloseTo(1 - 0.069 / 2.13, 8);
+		expect(getOverallStats().totalCost).toBeCloseTo(0.066, 8);
+		expect(getOverallStats().cacheSavings).toBeCloseTo(1 - 0.066 / 1.98, 8);
+	});
+
+	it("reprices recorded zeros on a dated rate card at the card in force for each request", async () => {
+		// A dated list-price change (Gemini 4 Argon's), not a recurring tariff:
+		// the zero Argon usage recorded before its price existed is legacy
+		// absence, so it gets priced like any other unscheduled model's.
+		const switchAt = Date.parse("2026-12-01T08:00:00Z");
+		const dated = {
+			...codexReferenceModel,
+			id: "dated-card-model",
+			provider: "google-antigravity",
+			cost: {
+				input: 2,
+				output: 10,
+				cacheRead: 0.1,
+				cacheWrite: 0,
+				timeBased: {
+					offPeakMultiplier: 1,
+					peakWindows: [],
+					effectiveRates: [
+						{ effectiveFrom: -8_640_000_000_000_000, input: 2, output: 10, cacheRead: 0.1, cacheWrite: 0 },
+						{ effectiveFrom: switchAt, input: 4, output: 20, cacheRead: 0.2, cacheWrite: 0 },
+					],
+				},
+			},
+		};
+		// The isolated database holds only these requests, so every lookup is theirs.
+		const lookup = spyOn(catalogModels, "getBundledModel").mockReturnValue(dated);
+		try {
+			const database = await initDb();
+			const requests = [
+				["intro", switchAt - 1],
+				["list", switchAt],
+			] as const;
+			insertMessageStats(
+				requests.map(([entryId, timestamp]) => {
+					const stats = createCodexGptStats(entryId);
+					stats.provider = dated.provider;
+					stats.model = dated.id;
+					stats.api = "google-gemini-cli";
+					stats.timestamp = timestamp;
+					stats.usage = {
+						input: 1_000_000,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 1_000_000,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					};
+					return stats;
+				}),
+			);
+			const totals = () =>
+				Object.fromEntries(getRecentRequests(2).map(request => [request.entryId, request.usage.cost.total]));
+			expect(totals()).toEqual({ intro: 2, list: 4 });
+
+			// Rows ingested at $0 before the card existed are repaired by the
+			// release's catalog backfill.
+			database.run("UPDATE messages SET cost_input = 0, cost_total = 0");
+			database.run("DELETE FROM meta WHERE key = 'catalog_cost_backfill'");
+			closeDb();
+			await initDb();
+			expect(totals()).toEqual({ intro: 2, list: 4 });
+		} finally {
+			lookup.mockRestore();
+		}
 	});
 
 	it("reports a scheduled request with no recoverable timestamp as unpriced, not free", async () => {

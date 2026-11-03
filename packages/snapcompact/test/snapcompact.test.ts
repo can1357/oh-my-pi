@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import type { AssistantMessage, Message, Model, Usage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, Message, Model, ModelSpec, Usage } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-references";
@@ -134,6 +134,46 @@ describe("computeFileLists", () => {
 			readFiles: ["src/read-only.ts"],
 			modifiedFiles: ["src/edited.ts"],
 		});
+	});
+});
+
+describe("upsertFileOperations", () => {
+	it("renders one grouped <files> tree with Read/Write/RW markers", () => {
+		const rendered = snapcompact.upsertFileOperations(
+			"",
+			["src/a.ts", "src/b.ts"],
+			["src/c.ts", "src/d.ts"],
+			new Set(["src/a.ts", "src/b.ts", "src/c.ts"]),
+		);
+		expect(rendered).toBe(
+			["<files>", "# src/", "a.ts (Read)", "b.ts (Read)", "c.ts (RW)", "d.ts (Write)", "</files>"].join("\n"),
+		);
+	});
+
+	it("marks modified files Write when no read set is provided", () => {
+		const rendered = snapcompact.upsertFileOperations("", [], ["c.ts"]);
+		expect(rendered).toBe(["<files>", "c.ts (Write)", "</files>"].join("\n"));
+	});
+});
+
+describe("isUrlSchemePath", () => {
+	it("flags internal URIs and web URLs", () => {
+		expect(snapcompact.isUrlSchemePath("conflict://1")).toBe(true);
+		expect(snapcompact.isUrlSchemePath("conflict://*")).toBe(true);
+		expect(snapcompact.isUrlSchemePath("artifact://7")).toBe(true);
+		expect(snapcompact.isUrlSchemePath("local://ctx.md")).toBe(true);
+		expect(snapcompact.isUrlSchemePath("history://AuthLoader")).toBe(true);
+		expect(snapcompact.isUrlSchemePath("https://example.com/page")).toBe(true);
+		// Prefixed conflict typo form — scheme appears after a colon, not at start.
+		expect(snapcompact.isUrlSchemePath("src/login.ts:conflict://3")).toBe(true);
+	});
+
+	it("leaves real filesystem paths untouched", () => {
+		expect(snapcompact.isUrlSchemePath("src/foo.ts")).toBe(false);
+		expect(snapcompact.isUrlSchemePath("C:/Users/me/file.ts")).toBe(false);
+		expect(snapcompact.isUrlSchemePath("db.sqlite:users")).toBe(false);
+		expect(snapcompact.isUrlSchemePath("archive.zip:dir/file.ts")).toBe(false);
+		expect(snapcompact.isUrlSchemePath("docs/compaction.md:100-170:raw")).toBe(false);
 	});
 });
 
@@ -509,6 +549,12 @@ describe("shape resolution", () => {
 				snapcompact.resolveShape({ api: "openai-responses", provider: "xai", id: "grok-4.7" }),
 			),
 		).toBe(2442);
+		// DeepSeek V4.1 Flash via OpenRouter: its own verified rule, not the Anthropic-wire fallback's 3,136.
+		expect(
+			snapcompact.plannedFrameTokens(
+				snapcompact.resolveShape(getBundledModel("openrouter", "deepseek/deepseek-v4.1-flash-1017")),
+			),
+		).toBe(994);
 		expect(
 			snapcompact.plannedFrameTokens(snapcompact.resolveShape({ api: "anthropic-messages", id: "claude-opus-4-6" })),
 		).toBe(snapcompact.FRAME_TOKEN_ESTIMATE);
@@ -1273,13 +1319,16 @@ describe("compact", () => {
 		expect(second.preserveData?.appKey).toBe("kept");
 	});
 
-	it("scrubs legacy ¶think: sections from the prior archive when thinking is excluded", async () => {
+	it("scrubs every paragraph of ¶think: sections from the prior archive when thinking is excluded", async () => {
 		const first = await snapcompact.compact(
 			makePreparation({
 				messagesToSummarize: [
 					createUserMessage("Investigate the flaky auth test."),
 					createAssistantMessage([
-						{ type: "thinking", thinking: "legacy private chain of thought" },
+						{
+							type: "thinking",
+							thinking: "First reasoning paragraph.\n\nSecond reasoning paragraph.\nThird reasoning line.",
+						},
 						{ type: "text", text: "The token clock is skewed." },
 					]),
 				],
@@ -1297,9 +1346,51 @@ describe("compact", () => {
 		);
 		const archiveText = snapcompact.getPreservedArchive(second.preserveData)?.text ?? "";
 		expect(archiveText).not.toContain("¶think:");
-		expect(archiveText).not.toContain("legacy private chain of thought");
+		expect(archiveText).not.toContain("reasoning");
 		expect(archiveText).toContain("Investigate the flaky auth test.");
 		expect(archiveText).toContain("The token clock is skewed.");
+	});
+
+	it("scrubs multi-paragraph ¶think: sections from legacy archive text with real newlines", async () => {
+		const text =
+			"¶user: Investigate the flaky auth test.\n¶think: First reasoning paragraph.\n\nSecond reasoning paragraph.\n¶ai: The token clock is skewed.";
+		const second = await snapcompact.compact(
+			makePreparation({
+				messagesToSummarize: [createUserMessage("Continue after switching to Claude.")],
+				previousPreserveData: { snapcompact: { frames: [], totalChars: text.length, truncatedChars: 0, text } },
+			}),
+			{ frameSize: TEST_FRAME_SIZE, includeThinking: false },
+		);
+		const archiveText = snapcompact.getPreservedArchive(second.preserveData)?.text ?? "";
+		expect(archiveText).not.toContain("reasoning");
+		expect(archiveText).toContain("Investigate the flaky auth test.");
+		expect(archiveText).toContain("The token clock is skewed.");
+	});
+
+	it("keeps a ¶think: line printed inside archived tool output", async () => {
+		const first = await snapcompact.compact(
+			makePreparation({
+				messagesToSummarize: [
+					createAssistantMessage([
+						{ type: "toolCall", id: "call-1", name: "bash", arguments: { command: "cat dump.txt" } },
+					]),
+					createToolResultMessage("dump start\n¶think: dumped line\ndump end"),
+					createAssistantMessage([{ type: "text", text: "Read the dump." }]),
+				],
+			}),
+			{ frameSize: TEST_FRAME_SIZE },
+		);
+		const second = await snapcompact.compact(
+			makePreparation({
+				messagesToSummarize: [createUserMessage("Continue after switching to Claude.")],
+				previousPreserveData: first.preserveData,
+			}),
+			{ frameSize: TEST_FRAME_SIZE, includeThinking: false },
+		);
+		const archiveText = snapcompact.getPreservedArchive(second.preserveData)?.text ?? "";
+		expect(archiveText).toContain("¶think: dumped line");
+		expect(archiveText).toContain("dump end");
+		expect(archiveText).toContain("Read the dump.");
 	});
 
 	it("keeps legacy ¶think: sections when thinking stays included", async () => {
@@ -1351,17 +1442,35 @@ describe("frame data budget", () => {
 		const opus = getBundledModel("anthropic", "claude-opus-5-5");
 		const sol = getBundledModel("openai-codex", "gpt-6.1-sol");
 		const throughProxy = (model: Model) => buildModel({ ...toModelSpec(model), baseUrl: "https://proxy.example/v1" });
-		expect(snapcompact.frameDataBytesBudget(opus)).toBe(12_000_000);
+		expect(snapcompact.frameDataBytesBudget(opus)).toBe(60_000_000);
 		expect(snapcompact.frameDataBytesBudget(sol)).toBe(12_000_000);
 		// A rerouted baseUrl has its own body limit; so does a host without a budget rule.
 		expect(snapcompact.frameDataBytesBudget(throughProxy(opus))).toBe(budget);
 		expect(snapcompact.frameDataBytesBudget(throughProxy(sol))).toBe(budget);
 		expect(snapcompact.frameDataBytesBudget(getBundledModel("openrouter", "anthropic/claude-opus-5.5"))).toBe(budget);
 		expect(snapcompact.frameDataBytesBudget(undefined)).toBe(budget);
-		// Opus's 1932px frames: 17 under the default, 70 under Anthropic's share.
+		// Factory Droid's own hosts carry a smaller budget; a custom gateway in front of Factory keeps the default.
+		const factory = (baseUrl: string) => {
+			const spec: ModelSpec<"factory-droid-agent"> = {
+				id: "claude-haiku-4-5-20251001",
+				name: "Haiku 4.5",
+				api: "factory-droid-agent",
+				provider: "factory-droid",
+				baseUrl,
+				reasoning: true,
+				input: ["text", "image"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 200_000,
+				maxTokens: 64_000,
+			};
+			return buildModel(spec);
+		};
+		expect(snapcompact.frameDataBytesBudget(factory("https://api.factory.ai/api/llm/a"))).toBeLessThan(budget);
+		expect(snapcompact.frameDataBytesBudget(factory("https://factory-gateway.example/api/llm/a"))).toBe(budget);
+		// Opus's 1932px frames: 17 under the default, 352 under Anthropic's share.
 		const opusShape = snapcompact.resolveShape(opus);
 		expect(snapcompact.maxFramesForDataBudget(opusShape, budget)).toBe(17);
-		expect(snapcompact.maxFramesForDataBudget(opusShape, snapcompact.frameDataBytesBudget(opus))).toBe(70);
+		expect(snapcompact.maxFramesForDataBudget(opusShape, snapcompact.frameDataBytesBudget(opus))).toBe(352);
 	});
 
 	it.each([
@@ -1381,7 +1490,7 @@ describe("frame data budget", () => {
 				FOUNDRY_BASE_URL: undefined,
 			};
 			withEnv(official, () => {
-				expect(snapcompact.frameDataBytesBudget(opus)).toBe(12_000_000);
+				expect(snapcompact.frameDataBytesBudget(opus)).toBe(60_000_000);
 				expect(snapcompact.providerImageBudget(opus)).toBe(600);
 			});
 			withEnv({ ...official, ...reroute }, () => {
@@ -1406,6 +1515,274 @@ describe("archive helpers", () => {
 			truncatedChars: 0,
 		};
 		expect(snapcompact.getPreservedArchive({ [snapcompact.PRESERVE_KEY]: valid })).toEqual(valid);
+	});
+
+	it("getPreservedArchive carries a valid no-reasoning variant and drops a malformed one", () => {
+		const frame = { data: "ZmFrZQ==", mimeType: "image/png", cols: 64, rows: 40, chars: 10 };
+		const variant: snapcompact.ArchiveView = {
+			summary: "plain legend",
+			archive: { frames: [frame], totalChars: 10, truncatedChars: 0, text: "¶ai: hi" },
+		};
+		const base = { frames: [frame], totalChars: 10, truncatedChars: 0 };
+		expect(
+			snapcompact.getPreservedArchive({ [snapcompact.PRESERVE_KEY]: { ...base, withoutThinking: variant } }),
+		).toEqual({ ...base, withoutThinking: variant });
+		for (const malformed of [
+			{ summary: "", archive: variant.archive },
+			{ summary: "s", archive: { frames: [] } },
+		]) {
+			expect(
+				snapcompact.getPreservedArchive({ [snapcompact.PRESERVE_KEY]: { ...base, withoutThinking: malformed } }),
+			).toEqual(base);
+		}
+	});
+
+	describe("viewWithoutThinking", () => {
+		// Ends like a template-rendered summary, which a view renders again (`viewSummary`).
+		const THINKING_SUMMARY =
+			"Archived transcript scopes:\n- `¶user:`, `¶think:`, `¶ai:`, `¶call:`: user, assistant reasoning, assistant reply, tool call.\nHISTORY\n===================";
+		const frame = { data: "ZmFrZQ==", mimeType: "image/png", cols: 64, rows: 40, chars: 10 };
+
+		it("reads the stored variant, or the original when its summary declares no reasoning", () => {
+			const variant: snapcompact.ArchiveView = {
+				summary: "plain",
+				archive: { frames: [frame], totalChars: 10, truncatedChars: 0 },
+			};
+			const archive = { frames: [frame], totalChars: 10, truncatedChars: 0, withoutThinking: variant };
+			expect(snapcompact.viewWithoutThinking(THINKING_SUMMARY, archive)).toBe(variant);
+			const plain = { frames: [frame], totalChars: 10, truncatedChars: 0 };
+			expect(snapcompact.viewWithoutThinking("no scopes", plain)).toEqual({ summary: "no scopes", archive: plain });
+		});
+
+		it("fails closed to text edges without frames, reasoning or its legend", () => {
+			// The head edge ends inside a reasoning section: stripping the whole
+			// source before cutting the edges keeps its continuation out too.
+			const text =
+				"¶user: ask\n¶think: secret one\n\nsecret two\n¶ai: answer one\nfiller middle line\n¶ai: answer two";
+			const textHead = text.slice(0, text.indexOf("secret two") + 6);
+			const textTail = "¶ai: answer two";
+			const view = snapcompact.viewWithoutThinking(
+				THINKING_SUMMARY,
+				{ frames: [frame], totalChars: 100, truncatedChars: 5, text, textHead, textTail },
+				{ readFiles: ["src/a.ts"], modifiedFiles: [] },
+			);
+			expect(view.archive.frames).toEqual([]);
+			const blocks = snapcompact.historyBlocks(view.archive);
+			const sent = `${view.summary}\n${blocks.map(block => (block.type === "text" ? block.text : "")).join("\n")}`;
+			expect(sent).not.toContain("¶think:");
+			expect(sent).not.toContain("secret");
+			expect(sent).not.toContain("assistant reasoning");
+			expect(sent).toContain("`¶user:`, `¶ai:`, `¶call:`: user, assistant reply, tool call.");
+			expect(sent).toContain("a.ts (Read)");
+			expect(view.archive.textHead).toStartWith("¶user: ask\n¶ai: answer one");
+			expect(view.archive.textTail).toBe(textTail);
+			const stripped = "¶user: ask\n¶ai: answer one\nfiller middle line\n¶ai: answer two";
+			expect(view.archive.truncatedChars).toBe(5 + stripped.length - textHead.length - textTail.length);
+		});
+
+		it("leaves out a tail's opening lines when the archive kept no whole source to scope them", async () => {
+			// Without `text` the tail may open inside a thought whose label sat in
+			// the dropped middle; both the fail-closed view and a re-render skip it.
+			const legacy = {
+				frames: [frame],
+				totalChars: 100,
+				truncatedChars: 0,
+				textHead: "¶user: ask\n¶ai: answer one",
+				textTail: "secret continuation\n¶ai: answer two",
+			};
+			const view = snapcompact.viewWithoutThinking(THINKING_SUMMARY, legacy);
+			const sent = snapcompact
+				.historyBlocks(view.archive)
+				.map(block => (block.type === "text" ? block.text : ""))
+				.join("\n");
+			expect(sent).not.toContain("secret");
+			expect(sent).toContain("answer two");
+
+			const rendered = await snapcompact.compact(
+				{
+					firstKeptEntryId: "kept",
+					messagesToSummarize: [createUserMessage("Continue.")],
+					turnPrefixMessages: [],
+					tokensBefore: 0,
+					previousPreserveData: { [snapcompact.PRESERVE_KEY]: legacy },
+					fileOps: snapcompact.createFileOps(),
+				},
+				{ frameSize: TEST_FRAME_SIZE, includeThinking: false },
+			);
+			const source = snapcompact.getPreservedArchive(rendered.preserveData)?.text ?? "";
+			expect(source).not.toContain("secret");
+			expect(source).toContain("answer two");
+		});
+
+		it("fails closed when the summary declares no reasoning scope but the archive's text keeps a thought", () => {
+			const text = "¶user: ask\n¶think: secret\n¶ai: answer";
+			const archive = { frames: [frame], totalChars: text.length, truncatedChars: 0, text, textHead: text };
+			const view = snapcompact.viewWithoutThinking("Summarized by an extension.", archive);
+			expect(view.archive.frames).toEqual([]);
+			const sent = `${view.summary}\n${snapcompact.archiveSourceText(view.archive)}`;
+			expect(sent).not.toContain("secret");
+			expect(sent).toContain("answer");
+			// The extension's own words lead, followed by the template's guide to the view's text.
+			expect(view.summary).toStartWith("Summarized by an extension.\n\n");
+			expect(view.summary.trimEnd()).toEndWith("HISTORY\n===================");
+			// Those words lose any reasoning they quote.
+			const quoting = snapcompact.viewWithoutThinking("Extension notes.\n¶think: secret plan\n¶ai: done", archive);
+			expect(quoting.summary).toStartWith("Extension notes.\n¶ai: done\n\n");
+			expect(quoting.summary).not.toContain("secret plan");
+		});
+	});
+
+	describe("viewWithoutFrames", () => {
+		function sentText(view: snapcompact.ArchiveView): string {
+			const blocks = snapcompact.historyBlocks(view.archive);
+			expect(blocks.every(block => block.type === "text")).toBe(true);
+			return `${view.summary}\n${blocks.map(block => (block.type === "text" ? block.text : "")).join("\n")}`;
+		}
+
+		async function framedArchive(): Promise<snapcompact.CompactionResult> {
+			const fileOps = snapcompact.createFileOps();
+			fileOps.read.add("src/read-only.ts");
+			fileOps.read.add("src/both.ts");
+			fileOps.edited.add("src/both.ts");
+			fileOps.edited.add("src/edited.ts");
+			const result = await snapcompact.compact(
+				makePreparation({
+					messagesToSummarize: [
+						createUserMessage(`HEAD sentinel. ${"Important fact number one. ".repeat(60)}`),
+						createAssistantMessage([
+							{ type: "thinking", thinking: "PRIVATE plan." },
+							{ type: "text", text: `MIDDLE sentinel. ${"Important fact number two. ".repeat(60)}` },
+						]),
+						createUserMessage(`${"Important fact number three. ".repeat(60)}TAIL sentinel.`),
+					],
+					fileOps,
+				}),
+				{ model: { api: "anthropic-messages" }, frameSize: TEST_FRAME_SIZE, maxFrames: 5 },
+			);
+			const archive = snapcompact.getPreservedArchive(result.preserveData)!;
+			expect(archive.frames.length).toBeGreaterThan(0);
+			expect(archive.textHead).not.toContain("MIDDLE sentinel");
+			expect(archive.textTail).not.toContain("MIDDLE sentinel");
+			return result;
+		}
+
+		it("reads the archive's whole kept source as text in place of its frames, with its file list", async () => {
+			const result = await framedArchive();
+			const archive = snapcompact.getPreservedArchive(result.preserveData)!;
+			const view = snapcompact.viewWithoutFrames(result.summary, archive);
+			expect(view.archive.frames).toEqual([]);
+			expect(view.archive.text).toBe(archive.text);
+			const sent = sentText(view);
+			for (const sentinel of ["HEAD sentinel", "MIDDLE sentinel", "TAIL sentinel", "PRIVATE plan"]) {
+				expect(sent).toContain(sentinel);
+			}
+			expect(result.summary).toContain("images, not text");
+			expect(sent).not.toContain("images, not text");
+			// This reader may read reasoning, so the legend keeps it.
+			expect(sent).toContain("`¶think:`");
+			// The summary's own file list, read-and-written files included.
+			for (const file of ["read-only.ts (Read)", "both.ts (RW)", "edited.ts (Write)"]) {
+				expect(result.summary).toContain(file);
+				expect(sent).toContain(file);
+			}
+		});
+
+		it("keeps both ends of the text past maxChars and counts the cut middle as dropped", async () => {
+			const result = await framedArchive();
+			const archive = snapcompact.getPreservedArchive(result.preserveData)!;
+			const view = snapcompact.viewWithoutFrames(result.summary, archive, { maxChars: 400 });
+			expect(view.archive.frames).toEqual([]);
+			expect(view.archive.textHead).toHaveLength(200);
+			expect(view.archive.textTail).toHaveLength(200);
+			expect(view.archive.totalChars).toBe(400);
+			expect(view.archive.truncatedChars).toBe(archive.truncatedChars + archive.text!.length - 400);
+			const sent = sentText(view);
+			expect(sent).toContain("HEAD sentinel");
+			expect(sent).toContain("TAIL sentinel");
+			expect(sent).not.toContain("MIDDLE sentinel");
+			expect(sent).toContain("middle history omitted above");
+			expect(sent).toContain(`About ${view.archive.truncatedChars} characters of older middle history dropped`);
+		});
+
+		it("drops reasoning for a reader without it when the summary declares no reasoning scope", async () => {
+			// An extension's summary over the archive, without the `¶think:` legend.
+			const result = await framedArchive();
+			const archive = snapcompact.getPreservedArchive(result.preserveData)!;
+			expect(archive.text).toContain("PRIVATE plan");
+			const view = snapcompact.viewWithoutFrames("Summarized by an extension.", archive, { includeThinking: false });
+			const sent = sentText(view);
+			expect(sent).not.toContain("PRIVATE plan");
+			expect(sent).not.toContain("¶think:");
+			expect(sent).toContain("MIDDLE sentinel");
+			expect(view.summary).toStartWith("Summarized by an extension.\n\n");
+
+			const frameless = { frames: [], totalChars: archive.text!.length, truncatedChars: 0, textHead: archive.text! };
+			const framelessSent = sentText(
+				snapcompact.viewWithoutFrames("Summarized by an extension.", frameless, { includeThinking: false }),
+			);
+			expect(framelessSent).not.toContain("PRIVATE plan");
+			expect(framelessSent).toContain("TAIL sentinel");
+		});
+
+		it("skips a legacy archive's unscoped tail lines for a reader without reasoning whatever its summary declares", () => {
+			// No whole source and no label on either edge: the tail opens inside a section whose label
+			// sat in the imaged middle, which may be a thought.
+			const frame = { data: "ZmFrZQ==", mimeType: "image/png", cols: 64, rows: 40, chars: 10 };
+			const legacy = {
+				frames: [frame],
+				totalChars: 100,
+				truncatedChars: 0,
+				textHead: "¶user: ask\n¶ai: answer one",
+				textTail: "secret continuation\n¶ai: answer two",
+			};
+			const sent = sentText(
+				snapcompact.viewWithoutFrames("Summarized by an extension.", legacy, { includeThinking: false }),
+			);
+			expect(sent).not.toContain("secret");
+			expect(sent).toContain("answer two");
+			// A reader that may read reasoning keeps the whole tail.
+			expect(sentText(snapcompact.viewWithoutFrames("Summarized by an extension.", legacy))).toContain("secret");
+		});
+	});
+
+	it("textWithoutThinking drops reasoning sections and the reasoning scope from either legend wording", () => {
+		const summary = [
+			"- `¶user:`, `¶think:`, `¶ai:`, `¶call:`: user, assistant reasoning, assistant reply, tool call.",
+			"- `¶user:`, `¶think:`, `¶ai:`, and `¶call:` open user, assistant reasoning, assistant reply, and tool-call scopes.",
+			"¶user: hi",
+			"¶think: hidden",
+			"¶ai: shown",
+		].join("\n");
+		expect(snapcompact.textWithoutThinking(summary)).toBe(
+			[
+				"- `¶user:`, `¶ai:`, `¶call:`: user, assistant reply, tool call.",
+				"- `¶user:`, `¶ai:`, and `¶call:` open user, assistant reply, and tool-call scopes.",
+				"¶user: hi",
+				"¶ai: shown",
+			].join("\n"),
+		);
+	});
+
+	it("re-renders an archive without the reasoning legend of a summary archived inside it", async () => {
+		// A compaction summary later archived as conversation keeps its legend
+		// mid-line in the normalized source, where no section boundary marks it.
+		const legend = "- `¶user:`, `¶think:`, `¶ai:`, `¶call:`: user, assistant reasoning, assistant reply, tool call.";
+		const text = `¶user: 41822 Resume prior conversation.${snapcompact.NEWLINE_GLYPH}${legend}${snapcompact.NEWLINE_GLYPH}¶ai: done`;
+		const rendered = await snapcompact.compact(
+			{
+				firstKeptEntryId: "kept",
+				messagesToSummarize: [createUserMessage("Continue.")],
+				turnPrefixMessages: [],
+				tokensBefore: 0,
+				previousPreserveData: { snapcompact: { frames: [], totalChars: text.length, truncatedChars: 0, text } },
+				fileOps: snapcompact.createFileOps(),
+			},
+			{ frameSize: TEST_FRAME_SIZE, includeThinking: false },
+		);
+		const archiveText = snapcompact.getPreservedArchive(rendered.preserveData)?.text ?? "";
+		expect(archiveText).not.toContain("¶think:");
+		expect(archiveText).not.toContain("assistant reasoning");
+		expect(archiveText).toContain("`¶user:`, `¶ai:`, `¶call:`: user, assistant reply, tool call.");
 	});
 
 	it("stripPreservedArchive drops the frame archive and collapses to undefined when empty", () => {

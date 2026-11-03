@@ -2,8 +2,8 @@
  * Text bridge: answers {@link Questions} with any model that completes text.
  *
  * Questions render into one system prompt asking for keyword answers (an
- * option label, `yes`/`no`, or a level number); the state is the user message,
- * so the question part stays byte-identical across calls and prompt caches
+ * option label, `yes`/`no`, or a level number); the state is the user text block,
+ * with separate image content blocks beside it, so the question part stays byte-identical
  * hit. Several questions batch into a single completion answered one line per
  * question id. Answers are one-hot: a parsed keyword yields probability 1 and
  * confidence 1, since a text completion carries no distribution.
@@ -14,7 +14,8 @@
  */
 import { escapeXmlAttribute, escapeXmlText, prompt } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
-import type { Usage } from "../types";
+import * as AIError from "../error";
+import type { ImageContent, Usage } from "../types";
 import textJudgeRetryTemplate from "./text-judge-retry.md" with { type: "text" };
 import textJudgeStateTemplate from "./text-judge-state.md" with { type: "text" };
 import textJudgeTemplate from "./text-judge.md" with { type: "text" };
@@ -35,6 +36,8 @@ import {
 export interface TextPrompt {
 	system: string;
 	user: string;
+	/** Images are kept as distinct content blocks, never rendered into JSON text. */
+	images?: readonly ImageContent[];
 	/** Format-correction attempt; chat backends may enforce tool suppression on the wire. */
 	retry?: boolean;
 }
@@ -50,6 +53,8 @@ export interface TextBackend {
 	readonly api: string;
 	readonly provider: string;
 	readonly model: string;
+	/** Whether this backend can send image content on the wire. */
+	readonly supportsImages?: boolean;
 	/** State guard for agent-tuned chat models; on-device classifier workers may disable it. */
 	readonly guardState?: boolean;
 	/** Format-correction retries after a completion cannot be parsed. */
@@ -93,24 +98,17 @@ function renderStateField(key: string, value: JsonValue): string {
 	if (typeof value !== "object" || value === null) {
 		return `${open}${escapeXmlText(value === null ? "null" : String(value))}${close}`;
 	}
-	const yaml = YAML.stringify(value, null, 2)
-		// Bun <=1.4.2 emits `key: ` before a nested block and puts an empty
-		// collection on its own line; 1.4.3 emits `key:` and `key: {}`. Pin the
-		// newer form so prompt bytes (and prompt-cache keys) do not depend on the
-		// Bun build. Values with edge whitespace are always quoted, so trimming
-		// line ends never alters data.
-		.replace(/[ \t]+$/gm, "")
-		.replace(/:\n +(\{\}|\[\])$/gm, ": $1")
-		.trimEnd();
+	const yaml = YAML.stringify(value, null, 2);
 	return `${open}\n${escapeXmlText(yaml)}\n${close}`;
 }
 
 /**
  * Render a request: the system prompt carries the preamble and question
- * definitions (constant across states, so prompt caches hit); the user message
- * carries XML-field state followed by the answer-format cue. Small models act
- * on a bare request (answer it, emit tool calls) instead of classifying it —
- * explicit tags and the trailing cue keep them on task.
+ * definitions (constant across states, so prompt caches hit); the user text
+ * carries XML-field state followed by the answer-format cue. Images remain
+ * separate content blocks. Small models act on a bare request (answer it,
+ * emit tool calls) instead of classifying it — explicit tags and the trailing
+ * cue keep them on task.
  */
 export function renderJudgmentPrompt(request: JudgmentRequest, options: { guardState?: boolean } = {}): TextPrompt {
 	const questions: RenderedQuestion[] = [];
@@ -145,6 +143,7 @@ export function renderJudgmentPrompt(request: JudgmentRequest, options: { guardS
 			multi,
 			state: renderJudgmentState(request.state),
 		}),
+		...(request.images ? { images: request.images } : {}),
 	};
 }
 
@@ -258,15 +257,19 @@ export function parseAnswer(id: string, question: Question, reply: string): Answ
 			}
 			return { type: "score", score: level, probabilities, confidence: 1 };
 		}
+		case "box":
+			throw new AIError.ValidationError(`judgment "${id}": text judges cannot answer box questions`);
 	}
 }
 
 export class TextJudge implements Judge {
+	readonly supportsImages?: boolean;
 	readonly label: string;
 	readonly #backend: TextBackend;
 
 	constructor(backend: TextBackend) {
 		this.#backend = backend;
+		if (backend.supportsImages === true) this.supportsImages = true;
 		this.label = `${backend.provider}/${backend.model}`;
 	}
 
@@ -276,6 +279,13 @@ export class TextJudge implements Judge {
 	): Promise<JudgmentResult<Q>> {
 		const ids = Object.keys(request.questions);
 		if (ids.length === 0) throw new Error("judgment request has no questions");
+		if (request.images?.length && this.#backend.supportsImages !== true) {
+			throw new AIError.ValidationError(`Text judgment backend ${this.label} does not support image inputs`);
+		}
+		for (const id of ids) {
+			if (request.questions[id].type !== "box") continue;
+			throw new AIError.ValidationError(`Text judgment backend ${this.label} does not answer box questions`);
+		}
 		const rendered = renderJudgmentPrompt(request, { guardState: this.#backend.guardState });
 		const retries = this.#backend.parseRetries ?? 0;
 		for (let attempt = 0; ; attempt++) {
@@ -288,6 +298,7 @@ export class TextJudge implements Judge {
 								multi: ids.length > 1,
 							}),
 							user: rendered.user,
+							...(rendered.images ? { images: rendered.images } : {}),
 							retry: true,
 						};
 			const completion = await this.#backend.complete(textPrompt, options);

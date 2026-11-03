@@ -121,7 +121,7 @@ describe("probeCandidates", () => {
 			{ cwd: process.cwd(), timeoutMs: 300 },
 		);
 		const elapsed = Date.now() - start;
-		expect(result).toEqual({ ok: false, aborted: false, failures: expect.any(Array) });
+		expect(result).toEqual({ ok: false, aborted: false, timedOut: true, failures: expect.any(Array) });
 		// One 300ms budget total, not 3×: the whole discovery stays well under the
 		// combined per-candidate cost it would incur without a shared deadline.
 		expect(elapsed).toBeLessThan(900);

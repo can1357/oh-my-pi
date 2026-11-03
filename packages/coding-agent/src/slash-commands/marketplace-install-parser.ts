@@ -62,8 +62,8 @@ export interface PluginScopeArgs {
 }
 
 /**
- * Parse `[--scope user|project] <name@marketplace>` for commands that accept a
- * single plugin ID and an optional scope flag.
+ * Parse `[--scope user|project] <plugin>` for commands that accept one plugin ID.
+ * Scope applies to marketplace installs; npm plugin toggles are global.
  *
  * Returns parsed args or `{ error }` ready for `ctx.showStatus`.
  */

@@ -12,9 +12,10 @@
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { Agent, type StreamFn } from "@oh-my-pi/pi-agent-core";
-import type { FetchImpl, Model, SimpleStreamOptions } from "@oh-my-pi/pi-ai";
+import type { Context, FetchImpl, Model, SimpleStreamOptions } from "@oh-my-pi/pi-ai";
 import { streamSimple } from "@oh-my-pi/pi-ai";
 import { resolveApiKeyOnce } from "@oh-my-pi/pi-ai/auth-retry";
+import { closeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { SessionAccountPoolScope } from "@oh-my-pi/pi-coding-agent/config/account-pools";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -48,11 +49,15 @@ describe("AgentSession advisor provider-options parity", () => {
 	let authStorage: AuthStorage;
 	let modelRegistry: ModelRegistry;
 	let model: Model;
+	let cacheDir: TempDir;
 
 	beforeAll(() => {
 		authStorage = createInMemoryAuthStorage();
 		authStorage.keys.setRuntime("anthropic", "test-key");
-		modelRegistry = new ModelRegistry(authStorage);
+		// An isolated discovery cache keeps the bundled catalog authoritative; the
+		// developer's `~/.omp` models.db can drop models these tests select.
+		cacheDir = TempDir.createSync("@pi-advisor-parity-cache-");
+		modelRegistry = new ModelRegistry(authStorage, undefined, { cacheDbPath: cacheDir.join("models.db") });
 		const bundled = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!bundled) throw new Error("Expected built-in anthropic model to exist");
 		model = bundled;
@@ -60,6 +65,8 @@ describe("AgentSession advisor provider-options parity", () => {
 
 	afterAll(() => {
 		authStorage.close();
+		closeModelCache();
+		cacheDir.removeSync();
 	});
 
 	let tempDir: TempDir;
@@ -145,6 +152,50 @@ describe("AgentSession advisor provider-options parity", () => {
 		expect(opts.promptCacheKey).toBe(advisor.sessionId);
 		expect(opts.providerSessionState).toBe(session.providerSessionState);
 		expect(opts.preferWebsockets).toBe(true);
+	});
+
+	it("gives each advisor a provider transform of its own, apart from the main loop's", async () => {
+		// The SDK's transform keeps per-conversation state (the date/cwd reminder). Two
+		// advisors can start their histories with turns stamped in the same millisecond,
+		// so a shared transform could not tell their conversations apart.
+		const mainRequests: Context[] = [];
+		const transformProviderContext = (context: Context): Context => {
+			mainRequests.push(context);
+			return context;
+		};
+		const advisorRequests: Context[][] = [];
+		const createAdvisorTransformProviderContext = () => {
+			const requests: Context[] = [];
+			advisorRequests.push(requests);
+			return (context: Context): Context => {
+				requests.push(context);
+				return context;
+			};
+		};
+		session = new AgentSession({
+			agent: new Agent({ initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] } }),
+			sessionManager,
+			settings: settings(),
+			modelRegistry,
+			advisorTools: [],
+			advisorStreamFn: () => {
+				throw new Error("capture-stop");
+			},
+			advisorConfigs: [{ name: "alpha" }, { name: "beta" }],
+			transformProviderContext,
+			createAdvisorTransformProviderContext,
+		});
+		session.settings.setModelRole("advisor", "anthropic/claude-sonnet-4-5");
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+		expect(advisorRequests).toHaveLength(2);
+
+		const advisor = session.getAdvisorAgent();
+		if (!advisor) throw new Error("Expected advisor agent to be live");
+		await advisor.prompt("ping").catch(() => {});
+
+		expect(advisorRequests[0]!.length).toBeGreaterThan(0);
+		expect(advisorRequests[1]).toHaveLength(0);
+		expect(mainRequests).toHaveLength(0);
 	});
 
 	it("caps Codex SSE attempts inside each advisor-level retry", async () => {

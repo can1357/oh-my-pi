@@ -1,4 +1,4 @@
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, toError } from "@oh-my-pi/pi-utils";
 import { Settings } from "../config/settings";
 import { type OutputArtifactError, OutputSink } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { statusEventKey } from "@oh-my-pi/pi-tui/tools/eval";
@@ -10,9 +10,9 @@ import {
 } from "../tools/output-meta";
 import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP, isEvalTimeoutControlEvent } from "./bridge-timeout";
 import type { JsStatusEvent } from "./js/shared/types";
-import type { KernelDisplayOutput } from "./py/display";
 import { registerPyToolBridge } from "./py/tool-bridge";
 import { getActiveEvalShadowCell } from "./speculation/runtime-context";
+import type { EvalDisplayOutput } from "./types";
 
 /**
  * Constructor for a language executor's cancellation error. Each backend
@@ -37,13 +37,12 @@ export class EvalKernelNotRunningError extends Error {
  * over agents keeps one event per handle instead of one per poll tick. Shared
  * by the kernel (Python) and VM (JS) executors.
  */
-export class DisplayOutputCollector<T extends KernelDisplayOutput> {
-	readonly outputs: T[] = [];
+export class DisplayOutputCollector {
+	readonly outputs: EvalDisplayOutput[] = [];
 	readonly #snapshotIndex = new Map<string, number>();
 
-	push(output: T): void {
-		const display: KernelDisplayOutput = output;
-		const key = display.type === "status" ? statusEventKey(display.event) : undefined;
+	push(output: EvalDisplayOutput): void {
+		const key = output.type === "status" ? statusEventKey(output.event) : undefined;
 		if (key !== undefined) {
 			const index = this.#snapshotIndex.get(key);
 			if (index !== undefined) {
@@ -73,10 +72,14 @@ export interface KernelExecutorBaseOptions {
 	signal?: AbortSignal;
 	onStatus?: (event: JsStatusEvent) => void;
 	emitStatus?: (event: JsStatusEvent) => void;
+	/** Shows the user `out://` replies of the cell's bridged tool calls; absent, those calls are refused. */
+	onReply?: (text: string) => void;
 	toolSession?: ToolSession;
 	bridgeSessionId?: string;
 	artifactId?: string;
 	artifactPath?: string;
+	/** Set by the kernel session registry; true when this cell is the first on a replacement for a dead kernel. */
+	claimKernelRestartNotice?: () => boolean;
 }
 
 /** Normalised execution result produced by {@link executeWithKernelBase}. */
@@ -93,8 +96,13 @@ export interface KernelExecutionResult {
 	totalBytes: number;
 	outputLines: number;
 	outputBytes: number;
-	displayOutputs: KernelDisplayOutput[];
+	displayOutputs: EvalDisplayOutput[];
 	stdinRequested: boolean;
+}
+
+/** Mirrors the `eval-state-context` reminder wording so agents recognise it. */
+export function formatKernelRestartNotice(runtimeLabel: string): string {
+	return `Kernel restarted: the previous ${runtimeLabel} is dead; state is unavailable. Re-run needed setup: variables, imports and definitions from earlier cells are gone.`;
 }
 
 /** Minimal kernel surface the base executor drives, satisfied by every backend kernel. */
@@ -108,7 +116,7 @@ export interface GenericKernel<TEnv> {
 			id: string;
 			signal?: AbortSignal;
 			onChunk: (text: string) => Promise<void> | void;
-			onDisplay: (output: KernelDisplayOutput) => Promise<void> | void;
+			onDisplay: (output: EvalDisplayOutput) => Promise<void> | void;
 		},
 	): Promise<{
 		status: "ok" | "error";
@@ -453,7 +461,7 @@ export async function executeWithKernelBase<
 		maxColumns: resolveOutputMaxColumns(settings),
 	});
 
-	const display = new DisplayOutputCollector<KernelDisplayOutput>();
+	const display = new DisplayOutputCollector();
 	const displayOutputs = display.outputs;
 	const deadlineMs = getExecutionDeadlineMs(options);
 	const remainingMs = getRemainingTimeoutMs(deadlineMs);
@@ -475,7 +483,7 @@ export async function executeWithKernelBase<
 			: (timeoutSignal ?? options?.signal);
 	const abortShield = createBridgeAbortShield(abortSource);
 
-	const collectDisplay = (output: KernelDisplayOutput): void => {
+	const collectDisplay = (output: EvalDisplayOutput): void => {
 		if (output.type === "status") {
 			abortShield.handleStatus?.(output.event);
 			options?.onStatus?.(output.event);
@@ -503,6 +511,7 @@ export async function executeWithKernelBase<
 					signal: options.signal,
 					shieldedSignal: abortShield.signal,
 					emitStatus,
+					onReply: options.onReply,
 					shadowCell: getActiveEvalShadowCell(),
 					abortRequested: () => {
 						return abortShield.abortRequested;
@@ -510,7 +519,11 @@ export async function executeWithKernelBase<
 				})
 			: null;
 
+	const restartNotice = options?.claimKernelRestartNotice?.()
+		? formatKernelRestartNotice(`${errorLogLabel} kernel`)
+		: undefined;
 	try {
+		if (restartNotice) sink.push(`${restartNotice}\n`);
 		if (remainingMs !== undefined && remainingMs <= 0) {
 			throw new cancelledErrorClass(true);
 		}
@@ -608,8 +621,10 @@ export async function executeWithKernelBase<
 				stdinRequested: false,
 			};
 		}
-		const error = err instanceof Error ? err : new Error(String(err));
+		const error = toError(err);
 		logger.error(`${errorLogLabel} execution failed`, { error: error.message });
+		// The notice was claimed for this cell; a thrown error drops streamed output, so carry it here.
+		if (restartNotice) error.message = `${restartNotice}\n${error.message}`;
 		throw error;
 	} finally {
 		await sink.dispose();

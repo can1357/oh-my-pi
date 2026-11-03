@@ -4,16 +4,15 @@
 
 use std::{
 	ffi::{OsStr, OsString},
-	io::{self, Write},
+	io::Write,
 	path::Path,
 };
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command, ValueHint, builder::ValueParser};
 use jiff::{Timestamp, tz::TimeZone};
 
 use crate::{
-	host::{Host, Utility, format_usage, matches_parser, util},
+	host::{Host, Utility, format_usage, matches_parser},
 	time_zone::shell_time_zone,
 };
 
@@ -314,7 +313,7 @@ fn process_is_gone(pid: i32) -> bool {
 	// SAFETY: signal 0 only probes for the process; nothing is delivered.
 	pid > 0
 		&& unsafe { libc::kill(pid, 0) } < 0
-		&& io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+		&& std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
 }
 
 #[cfg(not(unix))]
@@ -354,11 +353,11 @@ fn read_records(host: &Host, path: &Path) -> Vec<Record> {
 	use layout::*;
 
 	let bytes = regular_file_bytes(host, path);
-	let i16_at = |record: &[u8], at: usize| i16::from_ne_bytes([record[at], record[at + 1]]);
-	let i32_at = |record: &[u8], at: usize| {
+	let i16_at = |record: &[u8; RECORD], at: usize| i16::from_ne_bytes([record[at], record[at + 1]]);
+	let i32_at = |record: &[u8; RECORD], at: usize| {
 		i32::from_ne_bytes([record[at], record[at + 1], record[at + 2], record[at + 3]])
 	};
-	let mut chunks = bytes.chunks_exact(RECORD);
+	let mut chunks = bytes.as_chunks::<RECORD>().0.iter();
 	let signed = chunks.next().is_some_and(|signature| {
 		let user = &signature[USER..USER + USER_LEN];
 		user.split(|&byte| byte == 0).next() == Some(SIGNATURE)
@@ -477,11 +476,6 @@ fn system_boot_time(_host: &Host) -> Option<i64> {
 #[cfg(not(any(target_vendor = "apple", target_os = "linux", windows)))]
 fn system_boot_time(_host: &Host) -> Option<i64> {
 	None
-}
-
-/// Creates the `uptime` builtin registration.
-pub(crate) fn uptime_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Uptime, SE>()
 }
 
 #[cfg(test)]

@@ -41,7 +41,7 @@ use super::{
 	input::button_detail,
 	keymap::{self, KeyStep, Keymap},
 	uinput::{UInputDevice, X_KEYCODE_OFFSET},
-	wm::{Atoms, Wm},
+	wm::{Atoms, Wm, refusal},
 };
 use crate::desktop::{
 	backend::{Modifiers, MouseButton},
@@ -97,6 +97,9 @@ pub(super) struct Mpx {
 	/// A timeout can leave kernel events in flight. Never retarget that pair
 	/// to another window after an uncertain dispatch.
 	uncertain:       bool,
+	/// Whether the current call already sent a key, button, wheel or motion
+	/// event, which turns a later refusal into a partial delivery.
+	sent:            bool,
 }
 
 /// The uinput keyboard slave, created on the first keyboard or modifier use
@@ -186,6 +189,7 @@ impl Mpx {
 			pointer_slave,
 			keyboard: None,
 			uncertain: false,
+			sent: false,
 		};
 		mpx.park();
 		Ok(mpx)
@@ -207,11 +211,20 @@ impl Mpx {
 			let mut confirmed = true;
 			for index in 0..count {
 				this.check_target(target, x, y)?;
-				this.pointer.button(detail, true)?;
-				confirmed &= this.wait_raw(this.pointer_slave, Raw::ButtonPress(detail), 1)?;
-				control::wait(PRESS_HOLD)?;
-				this.pointer.button(detail, false)?;
-				confirmed &= this.wait_raw(this.pointer_slave, Raw::ButtonRelease(detail), 1)?;
+				this.button(detail, true)?;
+				let mut finish = || -> CoreResult<bool> {
+					let pressed = this.wait_raw(this.pointer_slave, Raw::ButtonPress(detail), 1)?;
+					control::wait(PRESS_HOLD)?;
+					this.button(detail, false)?;
+					let released = this.wait_raw(this.pointer_slave, Raw::ButtonRelease(detail), 1)?;
+					Ok(pressed && released)
+				};
+				// The last press is out: a cancel no longer cuts its click short.
+				confirmed &= if index + 1 == count {
+					control::cleanup(finish)?
+				} else {
+					finish()?
+				};
 				if index + 1 < count {
 					control::wait(CLICK_GAP)?;
 				}
@@ -240,21 +253,26 @@ impl Mpx {
 			this.warp(start.0, start.1)?;
 			this.drain();
 			this.check_target(target, start.0, start.1)?;
-			this.pointer.button(detail, true)?;
+			this.button(detail, true)?;
 			let mut confirmed = this.wait_raw(this.pointer_slave, Raw::ButtonPress(detail), 1)?;
 			control::wait(DRAG_ARM)?;
 			this.drain();
-			for &(dx, dy) in &steps {
-				this.pointer.motion(dx, dy)?;
-				control::wait(DRAG_STEP_DELAY)?;
+			for (index, &(dx, dy)) in steps.iter().enumerate() {
+				this.motion(dx, dy)?;
+				control::sent_gap_wait(DRAG_STEP_DELAY, index + 1 == steps.len())?;
 			}
-			// The end warp must not overtake a relative step still in flight.
-			confirmed &= this.wait_raw(this.pointer_slave, Raw::Motion, steps.len())?;
-			this.warp(end.0, end.1)?;
-			control::wait(DRAG_RELEASE_SETTLE)?;
-			this.drain();
-			this.pointer.button(detail, false)?;
-			confirmed &= this.wait_raw(this.pointer_slave, Raw::ButtonRelease(detail), 1)?;
+			// Every step is out: the end and the release follow even after a
+			// cancel.
+			confirmed &= control::cleanup(|| -> CoreResult<bool> {
+				// The end warp must not overtake a relative step still in flight.
+				let moved = this.wait_raw(this.pointer_slave, Raw::Motion, steps.len())?;
+				this.warp(end.0, end.1)?;
+				control::wait(DRAG_RELEASE_SETTLE)?;
+				this.drain();
+				this.button(detail, false)?;
+				let released = this.wait_raw(this.pointer_slave, Raw::ButtonRelease(detail), 1)?;
+				Ok(moved && released)
+			})?;
 			Ok(confirmed)
 		})
 	}
@@ -277,13 +295,14 @@ impl Mpx {
 			};
 			for &(horizontal, value) in earlier {
 				this.check_target(target, x, y)?;
-				this.pointer.wheel(horizontal, value)?;
+				this.wheel(horizontal, value)?;
 				control::wait(SCROLL_DETENT_DELAY)?;
 			}
 			this.drain();
 			this.check_target(target, x, y)?;
-			this.pointer.wheel(horizontal, value)?;
-			this.wait_raw(this.pointer_slave, Raw::Wheel, 1)
+			this.wheel(horizontal, value)?;
+			// The last detent is out: its confirmation is not cancelled.
+			control::cleanup(|| this.wait_raw(this.pointer_slave, Raw::Wheel, 1))
 		})
 	}
 
@@ -297,10 +316,13 @@ impl Mpx {
 			this.check_target(target, x - step, y)?;
 			this.warp(x - step, y)?;
 			this.drain();
-			this.pointer.motion(i32::from(step), 0)?;
-			let confirmed = this.wait_raw(this.pointer_slave, Raw::Motion, 1)?;
-			this.warp(x, y)?;
-			Ok(confirmed)
+			this.motion(i32::from(step), 0)?;
+			// The motion is out: its confirmation and the final warp follow.
+			control::cleanup(|| {
+				let confirmed = this.wait_raw(this.pointer_slave, Raw::Motion, 1)?;
+				this.warp(x, y)?;
+				Ok(confirmed)
+			})
 		})
 	}
 
@@ -329,24 +351,24 @@ impl Mpx {
 			this.warp(x, y)?;
 			this.drain();
 			this.check_target(target, x, y)?;
-			this.pointer.button(detail, true)?;
+			this.button(detail, true)?;
 			let mut confirmed = this.wait_raw(this.pointer_slave, Raw::ButtonPress(detail), 1)?;
 			control::wait(duration)?;
 			this.drain();
-			this.pointer.button(detail, false)?;
+			this.button(detail, false)?;
 			confirmed &= this.wait_raw(this.pointer_slave, Raw::ButtonRelease(detail), 1)?;
 			Ok(confirmed)
 		})
 	}
 
 	pub(super) fn type_text(&mut self, target: Window, text: &str) -> CoreResult<()> {
-		self.check_ready()?;
+		self.begin()?;
 		let steps = self.keyboard_keymap()?.plan_text(text)?;
 		self.deliver_keys(target, &steps)
 	}
 
 	pub(super) fn key_chord(&mut self, target: Window, keys: &[KeyName]) -> CoreResult<()> {
-		self.check_ready()?;
+		self.begin()?;
 		let steps = self.keyboard_keymap()?.plan_chord(keys)?;
 		self.deliver_keys(target, &steps)
 	}
@@ -357,7 +379,7 @@ impl Mpx {
 			self.uncertain = true;
 			return Err(error);
 		}
-		control::wait(KEY_SETTLE)?;
+		control::settle(KEY_SETTLE);
 		Ok(())
 	}
 
@@ -376,7 +398,7 @@ impl Mpx {
 		park_after: bool,
 		body: impl FnOnce(&mut Self) -> CoreResult<bool>,
 	) -> CoreResult<()> {
-		self.check_ready()?;
+		self.begin()?;
 		self.thaw();
 		let held = self.press_keys(target, modifiers, keys)?;
 		let result = body(self);
@@ -402,7 +424,7 @@ impl Mpx {
 			},
 			Ok(false) => Err(DesktopError::input_failed(
 				"the X server did not confirm virtual input or key release; delivery is uncertain, so \
-				 do not retry blindly; use ax actions or takeover:true for subsequent input",
+				 do not retry blindly; inspect the desktop first",
 			)),
 			Err(error) => Err(error),
 		}
@@ -473,18 +495,28 @@ impl Mpx {
 	}
 
 	/// Emits `steps` through the keyboard slave and waits until the server
-	/// reports the last one.
+	/// reports the last one. Once the last press is out, a cancel no longer
+	/// fails the call: the releases and the server's report follow anyway.
 	fn emit_keys(&mut self, steps: &[KeyStep]) -> CoreResult<()> {
 		self.drain();
+		self.sent = true;
 		let keyboard = self
 			.keyboard
 			.as_mut()
 			.ok_or_else(|| DesktopError::internal("virtual keyboard used before it was attached"))?;
 		let slave = keyboard.slave;
+		let last_press = steps.iter().rposition(|step| step.press);
+		let mut index = 0;
 		keymap::run_steps(steps, |step| {
-			keyboard.device.key(step.keycode, step.press)?;
-			control::wait(KEY_DELAY)?;
-			Ok(())
+			if index > 0 {
+				if last_press.is_none_or(|last| index > last) {
+					control::settle(KEY_DELAY);
+				} else {
+					control::wait(KEY_DELAY)?;
+				}
+			}
+			index += 1;
+			keyboard.device.key(step.keycode, step.press)
 		})?;
 		let Some(last) = steps.last() else {
 			return Ok(());
@@ -494,15 +526,13 @@ impl Mpx {
 		} else {
 			Raw::KeyRelease(last.keycode)
 		};
-		if self.wait_raw(slave, raw, 1)? {
-			Ok(())
-		} else {
-			Err(DesktopError::input_failed(format!(
+		control::cleanup(|| self.wait_raw(slave, raw, 1))?.ok_or_else(|| {
+			DesktopError::input_failed(format!(
 				"the X server did not confirm the virtual keyboard's last key within {}ms; the keys \
 				 may not have been delivered",
 				KEY_CONFIRM_TIMEOUT.as_millis()
-			)))
-		}
+			))
+		})
 	}
 
 	/// Points the virtual keyboard's own focus at `window`; the core focus is
@@ -530,31 +560,50 @@ impl Mpx {
 				control::wait(Duration::from_millis(30))?;
 			}
 		}
-		Err(DesktopError::background_unavailable(format!(
-			"window {window} cannot take the virtual keyboard focus (not viewable); retry with \
-			 takeover:true or use ax actions"
-		)))
+		Err(refusal(
+			self.sent,
+			format_args!("window {window} cannot take the virtual keyboard focus (not viewable)"),
+			DesktopError::background_unavailable,
+		))
 	}
 
 	pub(super) const fn inhibit(&mut self) {
 		self.uncertain = true;
 	}
 
-	fn check_ready(&self) -> CoreResult<()> {
+	/// Starts one call: refuses while a prior call left delivery uncertain,
+	/// and clears [`Self::sent`].
+	fn begin(&mut self) -> CoreResult<()> {
 		control::check()?;
 		if self.uncertain {
 			return Err(DesktopError::background_unavailable(
 				"the virtual input device could not confirm isolated delivery of a prior action and \
-				 cannot be retargeted; use ax actions or takeover:true",
+				 cannot be retargeted; no input was sent",
 			));
 		}
+		self.sent = false;
 		Ok(())
 	}
 
 	fn check_target(&self, target: Window, x: i16, y: i16) -> CoreResult<()> {
 		control::check()?;
 		Wm { conn: &self.conn, root: self.root, atoms: &self.atoms }
-			.check_pointer_target(target, x, y)
+			.check_pointer_target(target, x, y, self.sent)
+	}
+
+	fn button(&mut self, detail: u8, press: bool) -> CoreResult<()> {
+		self.sent = true;
+		self.pointer.button(detail, press)
+	}
+
+	fn motion(&mut self, dx: i32, dy: i32) -> CoreResult<()> {
+		self.sent = true;
+		self.pointer.motion(dx, dy)
+	}
+
+	fn wheel(&mut self, horizontal: bool, value: i32) -> CoreResult<()> {
+		self.sent = true;
+		self.pointer.wheel(horizontal, value)
 	}
 
 	fn keyboard_keymap(&mut self) -> CoreResult<Keymap> {
@@ -719,9 +768,9 @@ fn relative_steps(path: &[(i16, i16)]) -> Vec<(i32, i32)> {
 		return steps;
 	};
 	let (mut last_x, mut last_y) = (i32::from(start_x), i32::from(start_y));
-	for segment in path.windows(2) {
-		let (from_x, from_y) = (f64::from(segment[0].0), f64::from(segment[0].1));
-		let (to_x, to_y) = (f64::from(segment[1].0), f64::from(segment[1].1));
+	for &[(from_x, from_y), (to_x, to_y)] in path.array_windows() {
+		let (from_x, from_y) = (f64::from(from_x), f64::from(from_y));
+		let (to_x, to_y) = (f64::from(to_x), f64::from(to_y));
 		let length = (to_x - from_x).hypot(to_y - from_y);
 		let count = (length / DRAG_STEP_MAX_PX).ceil().max(1.0) as u32;
 		for index in 1..=count {
@@ -1021,10 +1070,7 @@ impl Owner {
 	}
 
 	fn from_pointer_name(name: &str) -> Option<Self> {
-		let mut parts = name
-			.strip_prefix(OWNER_PREFIX)?
-			.strip_suffix(" pointer")?
-			.split('.');
+		let mut parts = name.strip_circumfix(OWNER_PREFIX, " pointer")?.split('.');
 		let domain = u64::from_str_radix(parts.next()?, 16).ok()?;
 		let pid = u32::from_str_radix(parts.next()?, 16).ok()?;
 		let start = u64::from_str_radix(parts.next()?, 16).ok()?;

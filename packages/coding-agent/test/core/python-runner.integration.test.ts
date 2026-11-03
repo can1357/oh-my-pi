@@ -20,7 +20,7 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 const SHOULD_RUN = Bun.env.PI_PYTHON_INTEGRATION === "1";
 const MATPLOTLIB_TEST_CWD = process.cwd();
 
-async function hasMatplotlib(cwd: string): Promise<boolean> {
+async function hasModule(cwd: string, module: string): Promise<boolean> {
 	if (!SHOULD_RUN) return false;
 	try {
 		const { env } = (await Settings.init()).getShellConfig();
@@ -29,7 +29,7 @@ async function hasMatplotlib(cwd: string): Promise<boolean> {
 		for (const [key, value] of Object.entries(runtime.env)) {
 			if (typeof value === "string") spawnEnv[key] = value;
 		}
-		const result = Bun.spawnSync([runtime.pythonPath, "-c", "import matplotlib"], {
+		const result = Bun.spawnSync([runtime.pythonPath, "-c", `import ${module}`], {
 			cwd,
 			env: spawnEnv,
 			stdout: "ignore",
@@ -41,7 +41,113 @@ async function hasMatplotlib(cwd: string): Promise<boolean> {
 	}
 }
 
-const HAS_MATPLOTLIB = await hasMatplotlib(MATPLOTLIB_TEST_CWD);
+const HAS_MATPLOTLIB = await hasModule(MATPLOTLIB_TEST_CWD, "matplotlib");
+const HAS_PANDAS = await hasModule(MATPLOTLIB_TEST_CWD, "pandas");
+const HAS_ENSUREPIP = await hasModule(MATPLOTLIB_TEST_CWD, "ensurepip");
+
+/** A venv like the ones `uv venv` makes: no pip installed. Returns its interpreter. */
+async function createPiplessVenv(dir: string): Promise<string> {
+	const { env } = (await Settings.init()).getShellConfig();
+	const base = resolvePythonRuntime(dir, filterEnv(env)).pythonPath;
+	const venv = path.join(dir, "venv");
+	const created = Bun.spawnSync([base, "-m", "venv", "--without-pip", venv], { stdout: "ignore", stderr: "pipe" });
+	if (created.exitCode !== 0) throw new Error(`venv creation failed: ${created.stderr.toString()}`);
+	return path.join(venv, "bin", "python");
+}
+
+const SLEEP = Bun.which("sleep") ?? "/bin/sleep";
+
+/**
+ * Starts a kernel on a pip-less venv. `ensurepipMain` shadows the stdlib `ensurepip`'s
+ * `__main__`, `sitecustomize` runs at interpreter startup, and `uvScript` (POSIX sh)
+ * becomes `uv`; PATH holds nothing else, so a system uv never runs.
+ */
+async function startPiplessKernel(
+	dir: string,
+	fakes: { ensurepipMain?: string; sitecustomize?: string; uvScript?: string },
+): Promise<{ kernel: PythonKernel; python: string; sitePackages: string }> {
+	const python = await createPiplessVenv(dir);
+	const purelib = Bun.spawnSync([python, "-c", "import sysconfig; print(sysconfig.get_paths()['purelib'])"]);
+	const sitePackages = purelib.stdout.toString().trim();
+	const binDir = path.join(dir, "bin");
+	await fs.mkdir(binDir);
+	const env: Record<string, string> = { PATH: binDir };
+	if (fakes.uvScript !== undefined) {
+		await Bun.write(path.join(binDir, "uv"), `#!/bin/sh\nPATH=/usr/bin:/bin\n${fakes.uvScript}\n`);
+		await fs.chmod(path.join(binDir, "uv"), 0o755);
+	}
+	const fakeRoot = path.join(dir, "fake");
+	if (fakes.ensurepipMain !== undefined) {
+		const fakeDir = path.join(fakeRoot, "ensurepip");
+		await fs.mkdir(fakeDir, { recursive: true });
+		await Bun.write(path.join(fakeDir, "__init__.py"), "");
+		await Bun.write(path.join(fakeDir, "__main__.py"), fakes.ensurepipMain);
+		env.PYTHONPATH = fakeRoot;
+	}
+	if (fakes.sitecustomize !== undefined) {
+		await Bun.write(path.join(fakeRoot, "sitecustomize.py"), fakes.sitecustomize);
+		env.PYTHONPATH = fakeRoot;
+	}
+	const kernel = await PythonKernel.start({ cwd: dir, interpreter: python, env });
+	return { kernel, python, sitePackages };
+}
+
+/** An `ensurepip` that fails the way Debian's disabled system copy does. */
+const DISABLED_ENSUREPIP = 'import sys\nprint("ensurepip is disabled")\nsys.exit(1)\n';
+
+/**
+ * Like the real `ensurepip`, runs pip in a child process; prints both pids for `cancelInstall`
+ * and writes them to `installer-pids` in its working directory.
+ */
+const CHILD_SPAWNING_ENSUREPIP = [
+	"import os, subprocess",
+	`child = subprocess.Popen([${JSON.stringify(SLEEP)}, "30"])`,
+	'print(f"installer-pids:{os.getpid()},{child.pid}", flush=True)',
+	'with open("installer-pids.tmp", "w") as f: f.write(f"{os.getpid()},{child.pid}")',
+	'os.replace("installer-pids.tmp", "installer-pids")',
+	"child.wait()",
+].join("\n");
+
+// Both poll real processes and files outside the kernel's protocol, which emits no event for them.
+
+/** The pids a fake installer wrote to `file` as `<pid>,<pid>`, once it exists. */
+async function readPids(file: string): Promise<number[]> {
+	for (let i = 0; i < 200 && !(await Bun.file(file).exists()); i++) await Bun.sleep(50);
+	return (await Bun.file(file).text()).split(",").map(Number);
+}
+
+/** Which of `pids` still run after a moment: a guard kills its group once it notices the kernel gone. */
+async function survivors(pids: number[]): Promise<number[]> {
+	for (let i = 0; i < 40 && pids.some(isRunning); i++) await Bun.sleep(50);
+	return pids.filter(isRunning);
+}
+
+/** Running and not a zombie: a killed process may wait a moment for its reaper. */
+function isRunning(pid: number): boolean {
+	const ps = Bun.spawnSync(["ps", "-o", "stat=", "-p", String(pid)], { stdout: "pipe", stderr: "ignore" });
+	const state = ps.stdout.toString().trim();
+	return state !== "" && !state.startsWith("Z");
+}
+
+/** Runs `code`, cancels it once the installer prints `installer-pids:<pid>,<pid>`, and returns those pids. */
+async function cancelInstall(kernel: PythonKernel, code: string): Promise<number[]> {
+	const ac = new AbortController();
+	const started = Promise.withResolvers<number[]>();
+	let streamed = "";
+	const pending = executePythonWithKernel(kernel, code, {
+		signal: ac.signal,
+		onChunk: chunk => {
+			streamed += chunk;
+			const match = /installer-pids:(\d+),(\d+)/.exec(streamed);
+			if (match) started.resolve([Number(match[1]), Number(match[2])]);
+		},
+	});
+	const pids = await started.promise;
+	ac.abort(new DOMException("user cancelled", "AbortError"));
+	const result = await pending;
+	expect(result.cancelled).toBe(true);
+	return pids;
+}
 
 describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 	afterEach(async () => {
@@ -73,7 +179,10 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 
 		const next = await executePython("print(21 * 2)", options);
 		expect(next.exitCode).toBe(0);
-		expect(next.output.trim()).toBe("42");
+		// The crash ended the kernel, so the next cell runs on a new one and says its state is gone.
+		const [notice, value] = next.output.trim().split("\n");
+		expect(notice).toStartWith("Kernel restarted: the previous Python kernel is dead; state is unavailable.");
+		expect(value).toBe("42");
 		expect(await Bun.file(path.join(tempDir.path(), "effects.txt")).text()).toBe("once\n");
 	}, 30_000);
 
@@ -179,6 +288,322 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 		}
 	});
 
+	it.skipIf(process.platform === "win32" || !HAS_ENSUREPIP)(
+		"%pip bootstraps pip with ensurepip when the venv has no pip",
+		async () => {
+			using tempDir = TempDir.createSync("@python-runner-pip-ensurepip-");
+			const { kernel } = await startPiplessKernel(tempDir.path(), {});
+			try {
+				const result = await executePythonWithKernel(kernel, "%pip --version");
+				expect(result.output).not.toContain("No module named pip");
+				expect(result.output).toContain(path.join("venv", "lib"));
+				expect(result.displayOutputs).toContainEqual({
+					type: "status",
+					event: { op: "pip", args: "--version", installed: [], exit_code: 0 },
+				});
+			} finally {
+				await kernel.shutdown();
+			}
+		},
+		120_000,
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"%pip has uv install pip into the kernel's interpreter when ensurepip fails, then runs pip with the cell's arguments",
+		async () => {
+			using tempDir = TempDir.createSync("@python-runner-pip-uv-");
+			const uvLog = path.join(tempDir.path(), "uv.log");
+			const { kernel, python, sitePackages } = await startPiplessKernel(tempDir.path(), {
+				ensurepipMain: DISABLED_ENSUREPIP,
+				// Stands in for `uv pip install pip`: a pip that echoes its arguments.
+				uvScript: [
+					`printf '%s\\n' "$*" "$UV_PYTHON" > '${uvLog}'`,
+					'SITE="$("$UV_PYTHON" -c "import sysconfig; print(sysconfig.get_paths()[\'purelib\'])")"',
+					'mkdir -p "$SITE/pip"',
+					': > "$SITE/pip/__init__.py"',
+					`printf '%s\\n' 'import sys' 'print("pip-args:", *sys.argv[1:])' 'print("Successfully installed six-1.17.0")' > "$SITE/pip/__main__.py"`,
+				].join("\n"),
+			});
+			try {
+				const result = await executePythonWithKernel(kernel, "%pip install --disable-pip-version-check six");
+				expect(result.output).toContain("ensurepip is disabled");
+				const [uvArgs, uvPython] = (await Bun.file(uvLog).text()).trimEnd().split("\n");
+				expect(uvArgs).toBe("pip install pip");
+				expect(await fs.realpath(uvPython)).toBe(await fs.realpath(python));
+				expect(await Bun.file(path.join(sitePackages, "pip", "__main__.py")).exists()).toBe(true);
+				expect(result.output).toContain("pip-args: install --disable-pip-version-check six");
+				expect(result.displayOutputs).toContainEqual({
+					type: "status",
+					event: {
+						op: "pip",
+						args: "install --disable-pip-version-check six",
+						installed: ["six"],
+						exit_code: 0,
+					},
+				});
+			} finally {
+				await kernel.shutdown();
+			}
+		},
+		60_000,
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"%pip reports the bootstrap failure when ensurepip fails and uv is not on PATH",
+		async () => {
+			using tempDir = TempDir.createSync("@python-runner-pip-no-bootstrap-");
+			const { kernel } = await startPiplessKernel(tempDir.path(), { ensurepipMain: DISABLED_ENSUREPIP });
+			try {
+				const result = await executePythonWithKernel(kernel, "%pip install six");
+				expect(result.output).toContain("ensurepip is disabled");
+				expect(result.displayOutputs).toContainEqual({
+					type: "status",
+					event: { op: "pip", args: "install six", installed: [], exit_code: 1 },
+				});
+			} finally {
+				await kernel.shutdown();
+			}
+		},
+		30_000,
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"cancelling %pip during the ensurepip bootstrap stops ensurepip and the pip it spawned",
+		async () => {
+			using tempDir = TempDir.createSync("@python-runner-pip-cancel-ensurepip-");
+			const { kernel } = await startPiplessKernel(tempDir.path(), { ensurepipMain: CHILD_SPAWNING_ENSUREPIP });
+			try {
+				const pids = await cancelInstall(kernel, "%pip install six");
+				expect(pids.filter(isRunning)).toEqual([]);
+			} finally {
+				await kernel.shutdown();
+			}
+		},
+		30_000,
+	);
+
+	// A procfs inherited from a parent PID namespace: every pid and parent pid it reports is the outer one.
+	const outerNamespaceStat = [
+		"import builtins, io, re",
+		"_open = builtins.open",
+		"def _open_outer(file, mode='r', *args, **kwargs):",
+		"    handle = _open(file, mode, *args, **kwargs)",
+		"    if isinstance(file, str) and re.fullmatch(r'/proc/(self|\\d+)/stat', file) and 'b' in mode:",
+		"        pid, rest = handle.read().split(b' ', 1)",
+		"        handle.close()",
+		"        name, fields = rest.rsplit(b')', 1)",
+		"        fields = fields.split()",
+		"        fields[1] = str(int(fields[1]) + 100000).encode()",
+		"        return io.BytesIO(str(int(pid) + 100000).encode() + b' ' + name + b') ' + b' '.join(fields))",
+		"    return handle",
+		"builtins.open = _open_outer",
+	];
+	for (const [procfs, listing, extra] of [
+		["cannot be listed", "raise PermissionError(13, 'Permission denied', '/proc')", []],
+		["is an empty, unmounted directory", "return []", []],
+		["belongs to a parent PID namespace", "return _listdir(path)", outerNamespaceStat],
+	] as const) {
+		// What a kernel sees without a procfs of its own (some containers and
+		// chroots, nested PID namespaces): /proc lists nothing, or nothing it can
+		// match, and Linux `ps` reads /proc too, so it is hidden as well.
+		const noProcfs = [
+			"import os",
+			"_listdir = os.listdir",
+			"def _listdir_without_procfs(path='.'):",
+			"    if os.fspath(path) == '/proc':",
+			`        ${listing}`,
+			"    return _listdir(path)",
+			"os.listdir = _listdir_without_procfs",
+			"_exists = os.path.exists",
+			"os.path.exists = lambda path: os.fspath(path) != '/bin/ps' and _exists(path)",
+			...extra,
+		].join("\n");
+
+		it.skipIf(process.platform !== "linux")(
+			`cancelling %pip stops the installer tree when /proc ${procfs}`,
+			async () => {
+				using tempDir = TempDir.createSync("@python-runner-pip-cancel-no-procfs-");
+				const { kernel } = await startPiplessKernel(tempDir.path(), {
+					ensurepipMain: CHILD_SPAWNING_ENSUREPIP,
+					sitecustomize: noProcfs,
+				});
+				try {
+					const pids = await cancelInstall(kernel, "%pip install six");
+					expect(pids.filter(isRunning)).toEqual([]);
+				} finally {
+					await kernel.shutdown();
+				}
+			},
+			30_000,
+		);
+
+		// Every unusable /proc routes to the same guarded installer: exercise the guard under one of them.
+		if (procfs !== "cannot be listed") continue;
+
+		// Any `uv` fallback `_bootstrap_pip` starts once ensurepip dies leaves its tree's pids too.
+		const uvFallback = `${JSON.stringify(SLEEP)} 30 &\necho "$$,$!" > uv-pids.tmp && mv uv-pids.tmp uv-pids\nwait`;
+		for (const [where, code] of [
+			["", "%pip install six"],
+			[
+				" started off the main thread",
+				// As a `%pip` inside a tool call runs: on another thread, which SIGINT never reaches.
+				[
+					"import contextvars, threading",
+					"worker = threading.Thread(target=contextvars.copy_context().run, args=(__omp_magic, 'pip', 'install six'))",
+					"worker.start()",
+					"worker.join()",
+				].join("\n"),
+			],
+			[
+				" with SIGTERM blocked",
+				"import signal\nsignal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})\n%pip install six",
+			],
+			[" with SIGTERM ignored", "import signal\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\n%pip install six"],
+		] as const) {
+			it.skipIf(process.platform !== "linux")(
+				`kernel shutdown during %pip${where} stops the installer tree when /proc ${procfs}`,
+				async () => {
+					using tempDir = TempDir.createSync("@python-runner-pip-shutdown-no-procfs-");
+					const { kernel } = await startPiplessKernel(tempDir.path(), {
+						ensurepipMain: CHILD_SPAWNING_ENSUREPIP,
+						sitecustomize: noProcfs,
+						uvScript: uvFallback,
+					});
+					try {
+						const pending = executePythonWithKernel(kernel, code);
+						const pids = await readPids(path.join(tempDir.path(), "installer-pids"));
+						await kernel.shutdown();
+						await pending;
+						const uvPids = path.join(tempDir.path(), "uv-pids");
+						if (await Bun.file(uvPids).exists()) pids.push(...(await readPids(uvPids)));
+						expect(await survivors(pids)).toEqual([]);
+					} finally {
+						await kernel.shutdown();
+					}
+				},
+				30_000,
+			);
+		}
+
+		it.skipIf(process.platform !== "linux")(
+			`a kernel killed during %pip takes the installer tree with it when /proc ${procfs}`,
+			async () => {
+				using tempDir = TempDir.createSync("@python-runner-pip-killed-no-procfs-");
+				const { kernel } = await startPiplessKernel(tempDir.path(), {
+					ensurepipMain: CHILD_SPAWNING_ENSUREPIP,
+					sitecustomize: noProcfs,
+				});
+				try {
+					const kernelPid = Promise.withResolvers<number>();
+					let streamed = "";
+					const pending = executePythonWithKernel(
+						kernel,
+						'import os\nprint(f"kernel-pid:{os.getpid()}", flush=True)\n%pip install six',
+						{
+							onChunk: chunk => {
+								streamed += chunk;
+								const match = /kernel-pid:(\d+)/.exec(streamed);
+								if (match) kernelPid.resolve(Number(match[1]));
+							},
+						},
+					);
+					const pids = await readPids(path.join(tempDir.path(), "installer-pids"));
+					// Nothing in the kernel runs: no handler, no finally.
+					process.kill(await kernelPid.promise, "SIGKILL");
+					await pending;
+					expect(await survivors(pids)).toEqual([]);
+				} finally {
+					await kernel.shutdown();
+				}
+			},
+			30_000,
+		);
+
+		it.skipIf(process.platform !== "linux")(
+			`a cancel landing as the installer spawns stops its tree when /proc ${procfs}`,
+			async () => {
+				using tempDir = TempDir.createSync("@python-runner-pip-spawn-cancel-no-procfs-");
+				const { kernel } = await startPiplessKernel(tempDir.path(), {
+					ensurepipMain: CHILD_SPAWNING_ENSUREPIP,
+					sitecustomize: noProcfs,
+				});
+				try {
+					// The SIGINT arrives just as the kernel's Popen returns, once the installer runs.
+					const result = await executePythonWithKernel(
+						kernel,
+						[
+							"import os, subprocess, time",
+							"_popen = subprocess.Popen",
+							"class _InterruptedPopen(_popen):",
+							"    def __init__(self, *args, **kwargs):",
+							"        subprocess.Popen = _popen",
+							"        super().__init__(*args, **kwargs)",
+							"        while not os.path.exists('installer-pids'):",
+							"            time.sleep(0.05)",
+							"        raise KeyboardInterrupt",
+							"subprocess.Popen = _InterruptedPopen",
+							"%pip install six",
+						].join("\n"),
+					);
+					expect(result.output).toContain("KeyboardInterrupt");
+					expect(await survivors(await readPids(path.join(tempDir.path(), "installer-pids")))).toEqual([]);
+				} finally {
+					await kernel.shutdown();
+				}
+			},
+			30_000,
+		);
+
+		it.skipIf(process.platform !== "linux")(
+			`kernel shutdown after %pip stops what the installer left running when /proc ${procfs}`,
+			async () => {
+				using tempDir = TempDir.createSync("@python-runner-pip-leftover-no-procfs-");
+				const { kernel } = await startPiplessKernel(tempDir.path(), {
+					// Leaves a helper running, its output redirected, and exits.
+					ensurepipMain: [
+						"import os, subprocess",
+						`child = subprocess.Popen([${JSON.stringify(SLEEP)}, "30"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)`,
+						'print(f"installer-pids:{os.getpid()},{child.pid}", flush=True)',
+					].join("\n"),
+					sitecustomize: noProcfs,
+				});
+				try {
+					let streamed = "";
+					await executePythonWithKernel(kernel, "%pip install six", {
+						onChunk: chunk => {
+							streamed += chunk;
+						},
+					});
+					const match = /installer-pids:(\d+),(\d+)/.exec(streamed);
+					expect(match).not.toBeNull();
+					await kernel.shutdown();
+					expect(await survivors([Number(match?.[1]), Number(match?.[2])])).toEqual([]);
+				} finally {
+					await kernel.shutdown();
+				}
+			},
+			30_000,
+		);
+	}
+
+	it.skipIf(process.platform === "win32")(
+		"cancelling %pip while uv installs pip stops uv and what it spawned",
+		async () => {
+			using tempDir = TempDir.createSync("@python-runner-pip-cancel-uv-");
+			const { kernel } = await startPiplessKernel(tempDir.path(), {
+				ensurepipMain: DISABLED_ENSUREPIP,
+				uvScript: 'sleep 30 &\necho "installer-pids:$$,$!"\nwait',
+			});
+			try {
+				const pids = await cancelInstall(kernel, "%pip install six");
+				expect(pids.filter(isRunning)).toEqual([]);
+			} finally {
+				await kernel.shutdown();
+			}
+		},
+		30_000,
+	);
+
 	it("loads quoted scripts without source echo, retaining namespace, filename and async execution", async () => {
 		using tempDir = TempDir.createSync("@python-runner-load-");
 		const scriptDir = path.join(tempDir.path(), "script folder");
@@ -246,49 +671,28 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 			);
 			expect(defined.exitCode).toBe(0);
 
-			const described: unknown[] = [];
-			const describeResult = await kernel.invokeTool(
-				{ op: "describe", names: ["dbl", "missing"] },
-				{
-					onDisplay: output => {
-						described.push(output);
-					},
-				},
-			);
+			const describeResult = await kernel.invokeTool({ op: "describe", names: ["dbl", "missing"] });
 			expect(describeResult.status).toBe("ok");
-			expect(described).toEqual([
-				{
-					type: "json",
-					data: {
-						ok: true,
-						tools: [
-							{
-								name: "dbl",
-								description: "Double an integer.",
-								parameters: {
-									type: "object",
-									properties: { n: { type: "integer" } },
-									required: ["n"],
-									additionalProperties: false,
-								},
-							},
-						],
-						missing: ["missing"],
+			expect(describeResult.reply).toEqual({
+				ok: true,
+				tools: [
+					{
+						name: "dbl",
+						description: "Double an integer.",
+						parameters: {
+							type: "object",
+							properties: { n: { type: "integer" } },
+							required: ["n"],
+							additionalProperties: false,
+						},
 					},
-				},
-			]);
+				],
+				missing: ["missing"],
+			});
 
-			const called: unknown[] = [];
-			const callResult = await kernel.invokeTool(
-				{ op: "call", name: "dbl", args: { n: 2 } },
-				{
-					onDisplay: output => {
-						called.push(output);
-					},
-				},
-			);
+			const callResult = await kernel.invokeTool({ op: "call", name: "dbl", args: { n: 2 } });
 			expect(callResult.status).toBe("ok");
-			expect(called).toEqual([{ type: "json", data: { ok: true, value: 4 } }]);
+			expect(callResult.reply).toEqual({ ok: true, value: 4 });
 
 			// A raising tool is reported to the caller, not surfaced as a kernel crash.
 			const failing = await executePythonWithKernel(
@@ -504,7 +908,154 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 		}
 	});
 
-	it.skipIf(!HAS_MATPLOTLIB)("captures display(fig) as a PNG before the figure is closed", async () => {
+	it("echoes a long trailing dict as text plus a JSON view with unsafe integers as decimal strings", async () => {
+		const kernel = await PythonKernel.start({ cwd: MATPLOTLIB_TEST_CWD });
+		try {
+			const text =
+				"{'seed': 18446744073709551615, 'nested': [9007199254740991, 9007199254740992, -9007199254740992, True]}";
+			const result = await executePythonWithKernel(kernel, text);
+			expect(result.exitCode).toBe(0);
+			expect(result.output).toBe(`${text}\n`);
+			expect(result.displayOutputs).toEqual([
+				{
+					type: "view",
+					text,
+					view: {
+						kind: "json",
+						value: {
+							seed: "18446744073709551615",
+							nested: [9007199254740991, "9007199254740992", "-9007199254740992", true],
+						},
+					},
+				},
+			]);
+		} finally {
+			await kernel.shutdown();
+		}
+	});
+
+	it("keeps short structures as plain text", async () => {
+		const kernel = await PythonKernel.start({ cwd: MATPLOTLIB_TEST_CWD });
+		try {
+			const result = await executePythonWithKernel(kernel, "print({'a': 1})\n[1, 2]");
+			expect(result.exitCode).toBe(0);
+			expect(result.output).toBe("{'a': 1}\n[1, 2]\n");
+			expect(result.displayOutputs).toEqual([]);
+		} finally {
+			await kernel.shutdown();
+		}
+	});
+
+	it("prints JSON text as text plus a JSON view, other long strings as text only", async () => {
+		const kernel = await PythonKernel.start({ cwd: MATPLOTLIB_TEST_CWD });
+		try {
+			const value = { items: Array.from({ length: 30 }, (_, i) => i) };
+			const text = JSON.stringify(value);
+			const result = await executePythonWithKernel(kernel, `print(${JSON.stringify(text)})\nprint('{' + 'x' * 100)`);
+			expect(result.exitCode).toBe(0);
+			expect(result.output).toBe(`${text}\n{${"x".repeat(100)}\n`);
+			expect(result.displayOutputs).toEqual([{ type: "view", text, view: { kind: "json", value } }]);
+		} finally {
+			await kernel.shutdown();
+		}
+	});
+
+	it("prints an image dict as a placeholder and emits the image with its metadata", async () => {
+		const kernel = await PythonKernel.start({ cwd: MATPLOTLIB_TEST_CWD });
+		try {
+			const result = await executePythonWithKernel(
+				kernel,
+				"print('see', {'type': 'image', 'mimeType': 'image/png', 'data': b'png-bytes', 'detail': 'low'})",
+			);
+			expect(result.exitCode).toBe(0);
+			expect(result.output).toBe("see <image image/png>\n");
+			expect(result.displayOutputs).toEqual([
+				{ type: "image", mimeType: "image/png", data: Buffer.from("png-bytes").toString("base64"), detail: "low" },
+			]);
+		} finally {
+			await kernel.shutdown();
+		}
+	});
+
+	it("prints Markdown objects as their source with a markdown view", async () => {
+		const kernel = await PythonKernel.start({ cwd: MATPLOTLIB_TEST_CWD });
+		try {
+			const result = await executePythonWithKernel(
+				kernel,
+				["class Note:", "    def _repr_markdown_(self):", "        return '# Title'", "print(Note())"].join("\n"),
+			);
+			expect(result.exitCode).toBe(0);
+			expect(result.output).toBe("# Title\n");
+			expect(result.displayOutputs).toEqual([
+				{ type: "view", text: "# Title", view: { kind: "markdown", text: "# Title" } },
+			]);
+		} finally {
+			await kernel.shutdown();
+		}
+	});
+
+	it.skipIf(!HAS_PANDAS)("prints a DataFrame as its text with a matching table view", async () => {
+		const kernel = await PythonKernel.start({ cwd: MATPLOTLIB_TEST_CWD });
+		try {
+			const result = await executePythonWithKernel(
+				kernel,
+				[
+					"import pandas as pd",
+					"df = pd.DataFrame({'n': [1, 2], 'name': ['a', 'b']})",
+					"print(df)",
+					"print(df, file=__import__('sys').stderr)",
+				].join("\n"),
+			);
+			expect(result.exitCode).toBe(0);
+			const text = "   n name\n0  1    a\n1  2    b";
+			expect(result.output).toBe(`${text}\n${text}\n`);
+			expect(result.displayOutputs).toEqual([
+				{
+					type: "view",
+					text,
+					view: {
+						kind: "table",
+						columns: [{ head: "", numeric: true }, { head: "n", numeric: true }, { head: "name" }],
+						rows: [
+							["0", "1", "a"],
+							["1", "2", "b"],
+						],
+					},
+				},
+			]);
+		} finally {
+			await kernel.shutdown();
+		}
+	});
+
+	it.skipIf(!HAS_PANDAS)("elides truncated DataFrame rows like pandas' own repr", async () => {
+		const kernel = await PythonKernel.start({ cwd: MATPLOTLIB_TEST_CWD });
+		try {
+			const result = await executePythonWithKernel(
+				kernel,
+				["import pandas as pd", "pd.DataFrame({'x': range(100)})"].join("\n"),
+			);
+			expect(result.exitCode).toBe(0);
+			const view = result.displayOutputs.find(output => output.type === "view");
+			expect(view?.type === "view" && view.view.kind === "table" ? view.view.rows : []).toEqual([
+				["0", "0"],
+				["1", "1"],
+				["2", "2"],
+				["3", "3"],
+				["4", "4"],
+				["…", "…"],
+				["95", "95"],
+				["96", "96"],
+				["97", "97"],
+				["98", "98"],
+				["99", "99"],
+			]);
+		} finally {
+			await kernel.shutdown();
+		}
+	});
+
+	it.skipIf(!HAS_MATPLOTLIB)("captures a printed figure as a PNG before the figure is closed", async () => {
 		const kernel = await PythonKernel.start({ cwd: MATPLOTLIB_TEST_CWD });
 		try {
 			const result = await executePythonWithKernel(
@@ -513,7 +1064,7 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 					"import matplotlib.pyplot as plt",
 					"fig, ax = plt.subplots()",
 					"ax.plot([0, 1], [0, 1])",
-					"display(fig)",
+					"print(fig)",
 					"plt.close(fig)",
 				].join("\n"),
 			);
@@ -522,24 +1073,20 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 			const images = result.displayOutputs.filter(output => output.type === "image");
 			expect(images).toHaveLength(1);
 			expect(images[0]).toMatchObject({ mimeType: "image/png" });
-			expect(images[0]?.data).not.toContain("blob:");
-			expect(result.output).toContain("<Figure");
+			expect(result.output).toContain("Figure(");
 		} finally {
 			await kernel.shutdown();
 		}
 	});
 
-	it.skipIf(!HAS_MATPLOTLIB)("does not flush a second PNG for a displayed open figure", async () => {
+	it.skipIf(!HAS_MATPLOTLIB)("does not flush a second PNG for an echoed open figure", async () => {
 		const kernel = await PythonKernel.start({ cwd: MATPLOTLIB_TEST_CWD });
 		try {
 			const result = await executePythonWithKernel(
 				kernel,
-				[
-					"import matplotlib.pyplot as plt",
-					"fig, ax = plt.subplots()",
-					"ax.plot([0, 1], [1, 0])",
-					"display(fig)",
-				].join("\n"),
+				["import matplotlib.pyplot as plt", "fig, ax = plt.subplots()", "ax.plot([0, 1], [1, 0])", "fig"].join(
+					"\n",
+				),
 			);
 
 			expect(result.exitCode).toBe(0);

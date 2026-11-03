@@ -20,6 +20,8 @@ import type { Database, Statement } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { Answer, JudgmentRequest, JudgmentResult, Question, Questions } from "@oh-my-pi/pi-ai";
+import * as AIError from "@oh-my-pi/pi-ai/error";
+import { isEmbeddedImageContent } from "@oh-my-pi/pi-ai/images/shared";
 import {
 	checkpointWal,
 	getJudgmentCacheDbPath,
@@ -67,9 +69,9 @@ CREATE INDEX IF NOT EXISTS idx_usage_state ON usage(state);
 
 /** Cached answers for one request, plus the state identity {@link JudgmentCache.record} reuses. */
 export interface CachedAnswers {
-	/** `sha256` of the canonical state JSON. */
+	/** `sha256` of canonical state JSON or the namespaced multimodal identity. */
 	stateId: string;
-	/** Canonical state JSON, stored once per distinct state. */
+	/** Canonical state JSON or a digest-only image envelope, stored once per identity. */
 	state: string;
 	/** Answers already known for the request's questions, keyed by question id. */
 	answers: Record<string, Answer>;
@@ -87,9 +89,28 @@ function questionKey(name: string, question: Question): QuestionKey {
 		name,
 		type: question.type,
 		instruction: question.instructions,
-		// `null`, not SQL NULL: NULLs never collide under UNIQUE, which would let duplicates in.
-		criteria: stableStringifyJson(question.criteria ?? null),
+		// `null`, not SQL NULL: NULLs never collide under UNIQUE, which would let duplicates in. A box
+		// question's `image` stays local (answers are cached as measured on the sent image), so it is no key.
+		criteria: stableStringifyJson(question.type === "box" ? null : (question.criteria ?? null)),
 	};
+}
+
+function cacheStateIdentity(request: JudgmentRequest): string {
+	const state = stableStringifyJson(request.state);
+	if (!request.images?.length) return state;
+
+	const images = request.images.map(image => {
+		if (!isEmbeddedImageContent(image)) {
+			throw new AIError.ValidationError("Judgment cache images must be valid embedded image content");
+		}
+		return {
+			// The wire lowercases MIME types, so case variants of one image share an answer.
+			mimeType: image.mimeType.toLowerCase(),
+			digest: new Bun.CryptoHasher("sha256").update(Buffer.from(image.data, "base64")).digest("hex"),
+			detail: image.detail ?? "auto",
+		};
+	});
+	return `multimodal-judgment-cache-v1:${stableStringifyJson({ state, images })}`;
 }
 
 function unixSeconds(): number {
@@ -157,10 +178,11 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
 
 	/**
 	 * Answers already recorded for `request`'s questions under `model`. Best-effort:
-	 * a database failure is logged and reported as no cached answers.
+	 * a database failure is logged and reported as no cached answers. Invalid image
+	 * input is rejected before the best-effort database lookup.
 	 */
 	lookup(model: string, request: JudgmentRequest): CachedAnswers {
-		const state = stableStringifyJson(request.state);
+		const state = cacheStateIdentity(request);
 		const stateId = new Bun.CryptoHasher("sha256").update(state).digest("hex");
 		const answers: Record<string, Answer> = {};
 		try {

@@ -12,9 +12,10 @@ export type ToolArgumentSource = "parsed" | "payload";
 
 /**
  * Validate a call's arguments against `tool`'s schema, honoring
- * {@link AgentTool.lenientArgValidation}: on a schema mismatch a lenient tool
- * receives its raw arguments minus the internal `__parseError`/`__rawJson`
- * sentinels. Malformed JSON from a provider stream is never lenient.
+ * {@link AgentTool.lenientArgValidation}: a lenient tool keeps unknown root
+ * keys its closed schema would heal away, and on a schema mismatch receives its
+ * raw arguments minus the internal `__parseError`/`__rawJson` sentinels.
+ * Malformed JSON from a provider stream is never lenient.
  *
  * @throws the validation error when the tool is strict or the arguments failed to parse.
  */
@@ -24,7 +25,9 @@ export function validateAgentToolArguments(
 	source: ToolArgumentSource = "parsed",
 ): ToolCall["arguments"] {
 	try {
-		return validateToolArguments(tool, toolCall);
+		const validated = validateToolArguments(tool, toolCall, { keepUnknownRootKeys: tool.lenientArgValidation });
+		// Kept unknown root keys must not smuggle the internal sentinels past validation.
+		return tool.lenientArgValidation ? withoutSentinels(validated) : validated;
 	} catch (error) {
 		const args: unknown = toolCall.arguments;
 		if (!tool.lenientArgValidation) throw error;
@@ -35,4 +38,13 @@ export function validateAgentToolArguments(
 		delete fallback.__rawJson;
 		return fallback;
 	}
+}
+
+function withoutSentinels(args: ToolCall["arguments"]): ToolCall["arguments"] {
+	if (args === null || typeof args !== "object" || Array.isArray(args)) return args;
+	if (!Object.hasOwn(args, "__parseError") && !Object.hasOwn(args, "__rawJson")) return args;
+	const stripped = { ...(args as Record<string, unknown>) };
+	delete stripped.__parseError;
+	delete stripped.__rawJson;
+	return stripped;
 }

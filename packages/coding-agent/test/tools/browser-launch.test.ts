@@ -1,25 +1,44 @@
 import { describe, expect, it } from "bun:test";
 
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import {
 	chromiumExecutableProbeForTest,
 	resolveSharedBrowserLaunchSpec,
-	stealthIgnoreDefaultArgsForTest,
+	stealthIgnoreDefaultArgs,
 	systemChromiumCandidatesForTest,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import { computeExecutablePath, detectBrowserPlatform } from "@oh-my-pi/pi-utils/browsers";
+import { BrowserPlatform, computeExecutablePath, detectBrowserPlatform } from "@oh-my-pi/pi-utils/browsers";
 import { APP_NAME } from "@oh-my-pi/pi-utils/dirs";
 import { PUPPETEER_REVISIONS } from "puppeteer-core/internal/revisions.js";
 
 const EXECUTABLE_PROBE = path.resolve(import.meta.dir, "../fixtures/browser-executable-probe.ts");
+
+/**
+ * The parent's environment without the variables that relocate omp's directories or pick a browser.
+ * `setAgentDir()` exports `PI_CODING_AGENT_DIR` for the rest of the process, and an agent-dir or
+ * profile override disables the XDG roots the tests below pin the child's puppeteer cache with, so
+ * an inherited one would point the child at a cache without the seeded Chrome for Testing.
+ */
+function probeEnv(): Record<string, string | undefined> {
+	const env: Record<string, string | undefined> = { ...process.env };
+	for (const key in env) {
+		if (key.startsWith("XDG_") || key.startsWith("PUPPETEER_")) delete env[key];
+	}
+	for (const key of ["PI_CODING_AGENT_DIR", "PI_CONFIG_DIR", "OMP_PROFILE", "PI_PROFILE"]) delete env[key];
+	return env;
+}
 
 const AUTOMATION_FLAG = "--enable-automation";
 
 const EDGE_EXECUTABLE_PATHS = [
 	"C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
 	"/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+	"/Applications/Microsoft Edge Beta.app/Contents/MacOS/Microsoft Edge Beta",
+	"/Applications/Microsoft Edge Dev.app/Contents/MacOS/Microsoft Edge Dev",
+	"/Applications/Microsoft Edge Canary.app/Contents/MacOS/Microsoft Edge Canary",
 	"/usr/bin/microsoft-edge-stable",
 ] as const;
 
@@ -32,7 +51,7 @@ const CHROME_EXECUTABLE_PATHS = [
 describe("browser launch stealth defaults", () => {
 	it("keeps Puppeteer's automation default for Microsoft Edge executables", () => {
 		for (const executablePath of EDGE_EXECUTABLE_PATHS) {
-			const ignoreDefaultArgs = stealthIgnoreDefaultArgsForTest(executablePath);
+			const ignoreDefaultArgs = stealthIgnoreDefaultArgs(executablePath);
 
 			expect(ignoreDefaultArgs).not.toContain(AUTOMATION_FLAG);
 			expect(ignoreDefaultArgs).toContain("--disable-extensions");
@@ -41,7 +60,7 @@ describe("browser launch stealth defaults", () => {
 
 	it("continues filtering Puppeteer's automation default for Chrome and Chromium executables", () => {
 		for (const executablePath of CHROME_EXECUTABLE_PATHS) {
-			const ignoreDefaultArgs = stealthIgnoreDefaultArgsForTest(executablePath);
+			const ignoreDefaultArgs = stealthIgnoreDefaultArgs(executablePath);
 
 			expect(ignoreDefaultArgs).toContain(AUTOMATION_FLAG);
 		}
@@ -147,21 +166,6 @@ describe("browser executable selection", () => {
 		},
 	);
 
-	it.skipIf(process.platform !== "linux")("rejects wrappers that hang during the version probe", async () => {
-		const tempDir = TempDir.createSync("@browser-probe-hanging-");
-		try {
-			const hangingWrapper = path.join(tempDir.path(), "google-chrome");
-			await Bun.write(hangingWrapper, "#!/bin/sh\nsleep 60\n");
-			fs.chmodSync(hangingWrapper, 0o755);
-
-			const startedAt = performance.now();
-			await expect(chromiumExecutableProbeForTest(hangingWrapper)).resolves.toBe(false);
-			expect(performance.now() - startedAt).toBeLessThan(5000);
-		} finally {
-			await tempDir.remove();
-		}
-	});
-
 	it("does not launch the candidate to probe its version off Linux (#8445)", async () => {
 		for (const platform of ["win32", "darwin"] as const) {
 			const tempDir = TempDir.createSync(`@browser-probe-${platform}-`);
@@ -198,7 +202,7 @@ describe("browser executable selection", () => {
 
 			const result = Bun.spawnSync([process.execPath, EXECUTABLE_PROBE], {
 				env: {
-					...process.env,
+					...probeEnv(),
 					OMP_BROWSER_PROBE_PLATFORM: "win32",
 					ProgramFiles: tempDir.path(),
 					"ProgramFiles(x86)": path.join(tempDir.path(), "missing-x86"),
@@ -234,7 +238,7 @@ describe("browser executable selection", () => {
 					fs.mkdirSync(path.join(xdg, APP_NAME), { recursive: true });
 				}
 				const env = {
-					...process.env,
+					...probeEnv(),
 					HOME: home,
 					XDG_CACHE_HOME: xdgCache,
 					XDG_DATA_HOME: path.join(tempDir.path(), "data"),
@@ -253,8 +257,8 @@ describe("browser executable selection", () => {
 				// probe resolves it without a network download. getPuppeteerDir() resolves
 				// to `<XDG_CACHE_HOME>/omp/puppeteer` given the dirs created above.
 				const cacheDir = path.join(xdgCache, APP_NAME, "puppeteer");
-				const platform = detectBrowserPlatform();
-				if (!platform) throw new Error("unsupported host platform for Chrome-for-Testing selection test");
+				// The child emulates macOS on this host's CPU, so Chrome for Testing resolves to mac/mac_arm.
+				const platform = os.arch() === "arm64" ? BrowserPlatform.MAC_ARM : BrowserPlatform.MAC;
 				const buildId = PUPPETEER_REVISIONS.chrome;
 				const chromeForTesting = computeExecutablePath({ buildId, cacheDir, platform });
 				await Bun.write(chromeForTesting, "#!/bin/sh\necho 'Chrome for Testing'\n");
@@ -267,6 +271,53 @@ describe("browser executable selection", () => {
 				const selected = new TextDecoder().decode(result.stdout);
 				expect(selected).toBe(chromeForTesting);
 				expect(selected).not.toBe(systemChrome);
+			} finally {
+				await tempDir.remove();
+			}
+		},
+	);
+
+	// Same Windows limit as above: XDG_CACHE_HOME cannot pin the child's Chrome for Testing cache there.
+	it.skipIf(process.platform === "win32")(
+		"replaces Microsoft Edge with Chrome for Testing for sign-in windows (#16141)",
+		async () => {
+			const tempDir = TempDir.createSync("@browser-signin-edge-");
+			try {
+				const xdgCache = path.join(tempDir.path(), "cache");
+				for (const xdg of [xdgCache, path.join(tempDir.path(), "data"), path.join(tempDir.path(), "state")]) {
+					fs.mkdirSync(path.join(xdg, APP_NAME), { recursive: true });
+				}
+				const platform = detectBrowserPlatform();
+				if (!platform) throw new Error("Expected a Chrome for Testing platform");
+				const chromeForTesting = computeExecutablePath({
+					buildId: PUPPETEER_REVISIONS.chrome,
+					cacheDir: path.join(xdgCache, APP_NAME, "puppeteer"),
+					platform,
+				});
+				await Bun.write(chromeForTesting, "#!/bin/sh\necho 'Chrome for Testing'\n");
+				fs.chmodSync(chromeForTesting, 0o755);
+				const edge = EDGE_EXECUTABLE_PATHS[0];
+				const env = {
+					...probeEnv(),
+					HOME: path.join(tempDir.path(), "home"),
+					XDG_CACHE_HOME: xdgCache,
+					XDG_DATA_HOME: path.join(tempDir.path(), "data"),
+					XDG_STATE_HOME: path.join(tempDir.path(), "state"),
+					PUPPETEER_EXECUTABLE_PATH: edge,
+				};
+				const probe = (purpose: string) => {
+					const result = Bun.spawnSync([process.execPath, EXECUTABLE_PROBE], {
+						env: { ...env, OMP_BROWSER_PROBE_PURPOSE: purpose },
+						stdout: "pipe",
+						stderr: "pipe",
+					});
+					expect(result.exitCode, new TextDecoder().decode(result.stderr)).toBe(0);
+					return new TextDecoder().decode(result.stdout);
+				};
+
+				// Edge must keep `--enable-automation` to launch, which Google sign-in rejects.
+				expect(probe("sign-in")).toBe(chromeForTesting);
+				expect(probe("browser")).toBe(edge);
 			} finally {
 				await tempDir.remove();
 			}

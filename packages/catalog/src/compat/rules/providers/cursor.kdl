@@ -387,6 +387,16 @@ provider "cursor" {
 			cache-write 0
 		}
 	}
+	// DeepSeek V4.1 Flash 1017: $0.30/$1.20, cache read $0.006, no write fee.
+	// The bare id and every reasoning-effort wire id share one card.
+	models "deepseek-v41-flash-1017*" {
+		cost-patch {
+			input 0.3
+			output 1.2
+			cache-read 0.006
+			cache-write 0
+		}
+	}
 	// Gemini 3 Flash: $0.50/$3.00, cache read $0.05.
 	models "gemini-3-flash" {
 		cost-patch {
@@ -448,6 +458,26 @@ provider "cursor" {
 			output 3.5
 			cache-read 0.075
 			cache-write 0
+		}
+	}
+	// Gemini 4 Argon: $2/$10, cache read $0.10. Other Models bill at the
+	// model's API price, so the card follows Google's list-price increase to
+	// $4/$20, cache read $0.20, from 2026-12-01 (midnight US Pacific).
+	models "gemini-4-argon" {
+		cost-patch {
+			input 2.0
+			output 10.0
+			cache-read 0.1
+			cache-write 0
+			effective-rates {
+				list-price {
+					effective-from "2026-12-01T08:00:00Z"
+					input 4.0
+					output 20.0
+					cache-read 0.2
+					cache-write 0
+				}
+			}
 		}
 	}
 	// GLM 5.2: $1.40/$4.40, cache read $0.26.

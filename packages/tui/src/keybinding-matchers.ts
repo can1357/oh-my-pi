@@ -28,6 +28,11 @@ export function matchesAppToolsExpand(data: string): boolean {
 	return matchesKey(data, "ctrl+o");
 }
 
+/** Effective tools-expand key: the first bound key, or Ctrl+O when unbound. */
+export function appToolsExpandKey(): KeyId {
+	return getKeybindings().getKeys("app.tools.expand")[0] ?? "ctrl+o";
+}
+
 /** Match the generic selector cancel keybinding. */
 export function matchesSelectCancel(data: string): boolean {
 	return getKeybindings().matches(data, "tui.select.cancel");
@@ -100,4 +105,31 @@ export function matchesAppFollowUp(data: string): boolean {
 		return matchesEffectiveKeys(data, keys);
 	}
 	return matchesEffectiveKeys(data, ["ctrl+enter", "ctrl+q"]);
+}
+
+/** Approve-key defaults when `app.approval.approve` is unbound: approval must stay reachable by keyboard. */
+const APPROVE_DEFAULT_KEYS: readonly KeyId[] = ["ctrl+enter", "ctrl+q"];
+
+/** Effective tool-approval keys: the `app.approval.approve` bindings, or Ctrl+Enter/Ctrl+Q when unbound. */
+export function appApproveKeys(): readonly KeyId[] {
+	const keys = getKeybindings().getKeys("app.approval.approve");
+	return keys.length > 0 ? keys : APPROVE_DEFAULT_KEYS;
+}
+
+/** Match the tool-approval key, recognizing modifier-tagged LF as Ctrl+Enter like {@link matchesAppFollowUp}. */
+export function matchesAppApprove(data: string): boolean {
+	return matchesEffectiveKeys(data, appApproveKeys());
+}
+
+/**
+ * Effective /btw inject key (Alt+I by default). No fallback: it sends text into the main
+ * session, so a user who unbinds it gets no key at all.
+ */
+export function appBtwInjectKey(): KeyId | undefined {
+	return getKeybindings().getKeys("app.btw.inject")[0];
+}
+
+/** Match the key that sends a /btw answer's steering prompt to the main session. */
+export function matchesAppBtwInject(data: string): boolean {
+	return getKeybindings().matches(data, "app.btw.inject");
 }

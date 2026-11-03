@@ -68,6 +68,20 @@ export function terminalMultiplexerSessions(
 }
 
 /**
+ * Whether OSC 11 background replies are trusted on this platform. Any active
+ * session with `backgroundQueryBrokenOn` matching the platform makes the entire
+ * path untrusted; TERM-only classification does not identify an active session.
+ */
+export function isTerminalBackgroundQueryTrusted(
+	env: NodeJS.ProcessEnv = Bun.env,
+	platform: NodeJS.Platform = process.platform,
+): boolean {
+	return !TERMINAL_MULTIPLEXERS.some(
+		multiplexer => multiplexer.isInside(env) && multiplexer.backgroundQueryBrokenOn?.includes(platform),
+	);
+}
+
+/**
  * The multiplexer TERM names, whether or not its session markers survived.
  * This is classification's TERM fallback; session markers are not consulted.
  */
