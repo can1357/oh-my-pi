@@ -2,13 +2,12 @@
 //!
 //! Ported from uutils coreutils 0.8.0.
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::ArgMatches;
 use uucore::checksum::AlgoKind;
 
 use crate::{
 	cksum,
-	host::{Host, Utility, matches_parser, util},
+	host::{Host, Utility, matches_parser},
 };
 
 /// Parsed `sha512sum` invocation.
@@ -29,9 +28,4 @@ impl Utility for Sha512sum {
 
 fn app() -> clap::Command {
 	cksum::command(Sha512sum::NAME, false)
-}
-
-/// Creates the `sha512sum` builtin registration.
-pub(crate) fn sha512sum_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Sha512sum, SE>()
 }
