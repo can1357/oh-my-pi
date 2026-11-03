@@ -7139,7 +7139,7 @@ export class AgentSession implements SettingsScope {
 		return this.#tools.refreshSkills();
 	}
 
-	/** Rediscovers skills for the registry only; the next user prompt carries a notice of the change. */
+	/** Rediscovers skills without rebuilding the system prompt's skill list. */
 	reloadSkills(): Promise<void> {
 		return this.#tools.reloadSkills();
 	}
@@ -10648,7 +10648,7 @@ export class AgentSession implements SettingsScope {
 		return this.#tools.skills;
 	}
 
-	/** Skills the system prompt lists; behind {@link skills} after {@link reloadSkills} until the next full refresh. */
+	/** Skills the system prompt lists; behind {@link skills} after {@link reloadSkills}. */
 	get promptSkills(): readonly Skill[] {
 		return this.#tools.promptSkills;
 	}

@@ -310,7 +310,7 @@ interface EvalPreludeNoticeDetails {
 	removed: string[];
 }
 
-/** Skills one hidden {@link SKILL_NOTICE_MESSAGE_TYPE} message announced (new or with a new description) or withdrew. */
+/** Skills one hidden {@link SKILL_NOTICE_MESSAGE_TYPE} message announced or withdrew. */
 interface SkillNoticeDetails {
 	announced: Array<{ name: string; description: string }>;
 	removed: string[];
@@ -473,11 +473,6 @@ export class SessionTools {
 	#ensureGoalRegistered: SessionToolsOptions["ensureGoalRegistered"];
 	#reconcileSettingsGatedTools: SessionToolsOptions["reconcileSettingsGatedTools"];
 	#skills: Skill[];
-	/**
-	 * The skill list the system prompt renders. A full rediscovery moves it to the live list; a
-	 * {@link reloadSkills} after a tool wrote a skill does not, so later unrelated rebuilds keep the
-	 * prompt byte-stable and the change rides a hidden {@link takeSkillNotice} message instead.
-	 */
 	#promptSkills: Skill[];
 	#skillWarnings: SkillWarning[];
 	#skillsSettings: SkillsSettings | undefined;
@@ -609,7 +604,7 @@ export class SessionTools {
 		return this.#skills;
 	}
 
-	/** Skills the system prompt renders; behind {@link skills} after a {@link reloadSkills}. */
+	/** Skills the system prompt renders; behind {@link skills} after {@link reloadSkills}. */
 	get promptSkills(): Skill[] {
 		return this.#promptSkills;
 	}
@@ -1913,15 +1908,10 @@ export class SessionTools {
 	}
 
 	/**
-	 * Builds the hidden notice reconciling the skills the system prompt lists with the live registry.
-	 * Delivered with the next user prompt instead of rebuilding the prompt, so a skill auto-learn writes
-	 * mid-session keeps the provider cache prefix intact.
-	 *
-	 * Known skills (name to description) are the prompt's list, then every skill notice still in context,
-	 * applied in order (a resumed session renders its prompt from disk, so a notice from before the resume
-	 * adds nothing). A skill whose description changed is announced again, since the description is what
-	 * the model routes on. Hidden skills get no notice, and neither does a session whose prompt lists no
-	 * skills: `skillful` off, or no active tool that reads `skill://` (the prompt's own gate).
+	 * Builds the hidden notice of skills the live registry has gained, changed or lost since the system
+	 * prompt and the notices still in context listed them. A changed description is announced again
+	 * because the model routes on it. Gated like the prompt's skill list: `skillful` on and an active
+	 * tool that reads `skill://`.
 	 */
 	takeSkillNotice(): CustomMessage<SkillNoticeDetails> | undefined {
 		if (cfgSkillful.get(this.#host.settings) !== true) return undefined;
@@ -1945,16 +1935,14 @@ export class SessionTools {
 		const updated = live.filter(skill => known.has(skill.name) && known.get(skill.name) !== skill.description);
 		const removed = [...known.keys()].filter(name => !liveNames.has(name));
 		if (added.length === 0 && updated.length === 0 && removed.length === 0) return undefined;
-		const entry = (skill: Skill) => ({ name: skill.name, description: skill.description });
 		return {
 			role: "custom",
 			customType: SKILL_NOTICE_MESSAGE_TYPE,
-			content: prompt.render(skillNoticePrompt, {
-				added: added.map(entry),
-				updated: updated.map(entry),
+			content: prompt.render(skillNoticePrompt, { added, updated, removed }),
+			details: {
+				announced: [...added, ...updated].map(({ name, description }) => ({ name, description })),
 				removed,
-			}),
-			details: { announced: [...added, ...updated].map(entry), removed },
+			},
 			attribution: "agent",
 			display: false,
 			timestamp: Date.now(),
@@ -2114,9 +2102,8 @@ export class SessionTools {
 	}
 
 	/**
-	 * Rediscovers reloadable skills for the registry only, after a tool wrote or deleted one. The system
-	 * prompt keeps its list, so the provider cache prefix survives; the next user prompt carries a hidden
-	 * {@link takeSkillNotice} message naming the change.
+	 * Rediscovers skills for the registry only, after a tool wrote or deleted one. The system prompt keeps
+	 * its list so the provider cache prefix survives; {@link takeSkillNotice} tells the model instead.
 	 */
 	reloadSkills(): Promise<void> {
 		return this.runToolRegistryMutation(async () => {

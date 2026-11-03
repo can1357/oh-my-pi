@@ -259,10 +259,7 @@ export interface ToolSession {
 	 * rebuilds (mid-session `/skillful` toggles ride the prompt, not the prefix).
 	 */
 	skillHintVisible?: boolean;
-	/**
-	 * Rediscover live session skills after a tool mutates their backing files. The system prompt keeps its
-	 * skill list (the provider cache prefix survives); the next user prompt carries a notice of the change.
-	 */
+	/** Rediscover live session skills after a tool mutates their backing files. */
 	refreshSkills?: () => Promise<void>;
 	/** The session as the holder `skill://` rediscovers through when a skill's files are gone. */
 	skillRediscoveryHost?: () => SkillRediscoveryHost;

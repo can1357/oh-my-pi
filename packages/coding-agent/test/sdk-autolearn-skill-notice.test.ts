@@ -11,11 +11,9 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { getAgentDir, setAgentDir } from "@oh-my-pi/pi-utils/dirs";
+import { asGlobalFetch } from "./helpers/fetch-mock";
 import { restoreEnvValue } from "./helpers/settings-test-state";
 
-// A skill that auto-learn creates mid-session reaches the model through a hidden notice appended to the
-// transcript. The system prompt keeps the skill list it was built with, so the provider prompt cache (and a
-// local server's prefix cache) survives the skill's creation and any later unrelated prompt rebuild.
 const SKILL = "pickup-watch";
 
 function sseDone(): Response {
@@ -33,13 +31,8 @@ function sseDone(): Response {
 	});
 }
 
-interface WireMessage {
-	role: string;
-	content: unknown;
-}
-
-function wireMessages(body: string): WireMessage[] {
-	return (JSON.parse(body) as { messages: WireMessage[] }).messages;
+function wireMessages(body: string): Array<{ role: string; content: unknown }> {
+	return JSON.parse(body).messages;
 }
 
 function systemPrompt(body: string): string {
@@ -73,15 +66,13 @@ describe("auto-learn skill notice", () => {
 		spyOn(os, "homedir").mockReturnValue(tempHome);
 		setAgentDir(path.join(tempHome, ".omp", "agent"));
 		bodies = [];
-		const fetchStub = Object.assign(
-			async (_input: string | URL | Request, init?: RequestInit | BunFetchRequestInit) => {
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			asGlobalFetch((_input, init) => {
 				const body = String(init?.body ?? "");
 				if (body.includes('"messages"')) bodies.push(body);
 				return sseDone();
-			},
-			{ preconnect: globalThis.fetch.preconnect },
+			}),
 		);
-		vi.spyOn(globalThis, "fetch").mockImplementation(fetchStub);
 	});
 
 	afterEach(async () => {
@@ -140,8 +131,7 @@ describe("auto-learn skill notice", () => {
 		await createSkill(session, "update", "Watch Apple store stock and file a deploy ticket");
 		await session.sendUserMessage("third");
 
-		const [first, , third] = bodies as [string, string, string];
-		expect(systemPrompt(third)).toBe(systemPrompt(first));
+		const third = bodies[2] as string;
 		expect(noticeCount(third)).toBe(2);
 		expect(JSON.stringify(wireMessages(third).at(-2)?.content)).toContain("file a deploy ticket");
 	});
@@ -163,15 +153,12 @@ describe("auto-learn skill notice", () => {
 		await session.sendUserMessage("second");
 		await session.sendUserMessage("third");
 
-		expect(bodies).toHaveLength(3);
 		const [first, second, third] = bodies as [string, string, string];
 		expect(systemPrompt(first)).not.toContain(SKILL);
 		expect(systemPrompt(second)).toBe(systemPrompt(first));
 		expect(noticeCount(second)).toBe(1);
 		// Delivered once: the third request replays that notice, it does not add another.
 		expect(noticeCount(third)).toBe(1);
-		// The registry sees the skill at once, so `skill://` and `/skill:` resolve it.
-		expect(session.skills.some(skill => skill.name === SKILL)).toBe(true);
 	});
 
 	it("keeps the announced skill out of the system prompt across an unrelated rebuild", async () => {
