@@ -25,9 +25,11 @@ use crate::desktop::{
 
 const DEVICE_DISCOVERY_DRAIN_TIMEOUT: Duration = Duration::from_millis(500);
 const DRAG_STEP_DELAY: Duration = Duration::from_millis(8);
-/// How long before the run's end an unanswered permission prompt is given up,
-/// leaving time to close the portal session and answer the caller.
-const CONSENT_MARGIN: Duration = Duration::from_millis(500);
+/// How long before the run's end an unanswered permission prompt is given up:
+/// the bounded portal-session close (`CLOSE_TIMEOUT`) plus time to answer the
+/// caller, so the dialog's own error still beats the run's timeout.
+const CONSENT_MARGIN: Duration =
+	crate::desktop::CLOSE_TIMEOUT.saturating_add(Duration::from_millis(500));
 
 #[derive(Clone, Copy)]
 struct DiscoveryTargets {
@@ -213,7 +215,7 @@ impl Libei {
 			let session = cancellable(portal.create_session()).await?.map_err(|err| {
 				DesktopError::permission_denied(format!("RemoteDesktop CreateSession: {err}"))
 			})?;
-			let fd = cancellable(until_deadline(async {
+			let fd = cancellable(async {
 				portal
 					.select_devices(
 						&session,
@@ -222,13 +224,20 @@ impl Libei {
 						PersistMode::DoNot,
 					)
 					.await
-					.map_err(|err| format!("RemoteDesktop SelectDevices: {err}"))?;
-				let response = portal
-					.start(&session, None)
-					.await
-					.map_err(|err| format!("RemoteDesktop Start: {err}"))?
+					.map_err(|err| {
+						DesktopError::permission_denied(format!("RemoteDesktop SelectDevices: {err}"))
+					})?;
+				// Only `Start` waits on the user; the steps around it are not
+				// the dialog and keep `main`'s cancel-only bound.
+				let response = until_deadline(portal.start(&session, None))
+					.await?
+					.map_err(|err| {
+						DesktopError::permission_denied(format!("RemoteDesktop Start: {err}"))
+					})?
 					.response()
-					.map_err(|err| format!("RemoteDesktop permission: {err}"))?;
+					.map_err(|err| {
+						DesktopError::permission_denied(format!("RemoteDesktop permission: {err}"))
+					})?;
 				let devices = response.devices();
 				let targets = DiscoveryTargets {
 					pointer:  devices.contains(DeviceType::Pointer),
@@ -238,11 +247,12 @@ impl Libei {
 					.connect_to_eis(&session)
 					.await
 					.map(|fd| (fd, targets))
-					.map_err(|err| format!("RemoteDesktop ConnectToEIS: {err}"))
-			}))
+					.map_err(|err| {
+						DesktopError::permission_denied(format!("RemoteDesktop ConnectToEIS: {err}"))
+					})
+			})
 			.await
-			.and_then(|bounded| bounded)
-			.and_then(|result| result.map_err(DesktopError::permission_denied));
+			.and_then(|result| result);
 			match fd {
 				Ok((fd, targets)) => Ok((fd, session, targets)),
 				Err(err) => {
@@ -1064,10 +1074,11 @@ mod tests {
 			.enable_time()
 			.build()
 			.unwrap();
-		// The run ends inside the margin, so the dialog wait must give up on its
-		// first poll; an unbounded wait would still be pending.
+		// The run leaves only the session-close budget, so the dialog wait must
+		// give up on its first poll; an unbounded wait would still be pending,
+		// and a margin shorter than the close would wait for the run to end.
 		let ending = control::CancellationSource::default();
-		ending.set_deadline(Some(std::time::Instant::now() + CONSENT_MARGIN / 2));
+		ending.set_deadline(Some(std::time::Instant::now() + crate::desktop::CLOSE_TIMEOUT));
 		let error = control::with_token_for_test(&ending.token(), || {
 			runtime.block_on(async { until_deadline(std::future::pending::<()>()).now_or_never() })
 		})
