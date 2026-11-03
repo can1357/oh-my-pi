@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed takeover keys into iPhone Mirroring and Screen Sharing keeping Fn (Globe) held after a Delete, arrow or function key, which dropped Shift and lost later letters
+- Fixed takeover keys into iPhone Mirroring and Screen Sharing keeping Fn (Globe) held after a Delete, arrow or function key, which dropped Shift and lost later letters ([#17909](https://github.com/can1357/oh-my-pi/pull/17909) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.16.0] - 2026-11-02
 
