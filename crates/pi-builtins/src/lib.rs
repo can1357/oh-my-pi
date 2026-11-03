@@ -257,6 +257,13 @@ mod pgrep;
 mod pidwait;
 #[cfg(feature = "util.pkill")]
 mod pkill;
+/// Identity-pinned process references, and the ledger of spawned processes
+/// built on them.
+#[cfg(all(
+	feature = "util.procs",
+	any(target_os = "linux", target_os = "macos", target_os = "windows")
+))]
+mod pinned_process;
 /// Shared process-matching engine behind `pgrep`, `pkill`, and `pidwait`.
 #[cfg(feature = "util.proc-match")]
 mod proc_match;
@@ -338,14 +345,26 @@ pub use withheld::withheld_builtin;
 /// same snapshot its `ps`/`pgrep`/`kill` builtins use.
 #[cfg(feature = "util.procs")]
 pub use proc_snapshot::{ProcInfo, ProcessStatus};
-/// The OS process primitives under those snapshots. `pi-shell` builds its
-/// identity-pinned process references on them, so each platform query has one
-/// implementation.
+/// The OS process primitives under those snapshots and under
+/// [`PinnedProcess`], so each platform query has one implementation.
 #[cfg(all(
 	feature = "util.procs",
 	any(target_os = "linux", target_os = "macos", target_os = "windows")
 ))]
 pub use proc_snapshot::sys as proc_sys;
+/// Identity-pinned process references, which signal a process, or the group
+/// it leads, through its identity and never by number; the signal wave that
+/// delivers one signal to each of them at most once; the ledger of the
+/// processes a run spawned; and the descendant walk that spares the harness.
+/// `pi-shell`'s process references wrap them.
+#[cfg(all(
+	feature = "util.procs",
+	any(target_os = "linux", target_os = "macos", target_os = "windows")
+))]
+pub use pinned_process::{
+	GroupProof, LedgerWave, PinnedProcess, SignalWave, SpawnEntry, SpawnLedger, host_protected_pids,
+	kernel_group_runs, pid_in_protected_subtree, signalable_descendants,
+};
 
 /// Macro to define a struct that represents a shell built-in flag argument that
 /// can be enabled or disabled by specifying an option with a leading '+' or '-'

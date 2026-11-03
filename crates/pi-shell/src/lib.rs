@@ -5,6 +5,8 @@ pub mod output_decode;
 pub mod process;
 pub mod shell;
 pub mod taps;
+#[cfg(all(test, target_os = "linux"))]
+mod test_support;
 
 #[cfg(windows)]
 pub mod windows;

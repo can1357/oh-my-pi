@@ -4,8 +4,8 @@
 //! One `ProcInfo` per platform, each exposing the same accessors so the
 //! builtins above stay platform-agnostic. The platform queries themselves —
 //! procfs parsing, pidfds, libproc, Toolhelp, process handles — live in
-//! [`sys`], which `pi-shell`'s identity-pinned process references
-//! (`pi_shell::process`) are built on too, so each query has one
+//! [`sys`], which the identity-pinned process references
+//! (`crate::PinnedProcess`) are built on too, so each query has one
 //! implementation and a platform fix lands once.
 
 // Consumers (`ps`, `top`, `pgrep`, `pkill`, `pidwait`, `kill`) are each
@@ -143,6 +143,30 @@ pub mod sys {
 		}
 	}
 
+	/// `PIDFD_SIGNAL_PROCESS_GROUP` (Linux 6.9): deliver the signal to the
+	/// process group the pidfd's process leads instead of to the process.
+	const PIDFD_SIGNAL_PROCESS_GROUP: libc::c_uint = 1 << 2;
+
+	/// Sends `signal` to the process group the process behind `pidfd` leads:
+	/// the group whose id is that process's pid, which the kernel finds
+	/// through the pinned process rather than the number, so it is reached
+	/// after the leader exited and a group that took the number since never
+	/// is. Linux before 6.9 rejects the flag with `EINVAL`.
+	pub fn pidfd_send_group_signal(pidfd: BorrowedFd<'_>, signal: i32) -> std::io::Result<()> {
+		// SAFETY: pidfd is open for the call. A null siginfo makes the kernel
+		// fill in what kill(2) would.
+		let sent = unsafe {
+			libc::syscall(
+				libc::SYS_pidfd_send_signal,
+				pidfd.as_raw_fd(),
+				signal,
+				std::ptr::null::<libc::siginfo_t>(),
+				PIDFD_SIGNAL_PROCESS_GROUP,
+			)
+		};
+		if sent == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
+	}
+
 	/// The fields of a `/proc/<pid>/stat` line from `state` (field 3) on. The
 	/// command name before them may itself contain spaces and parentheses, so
 	/// the split starts after the *last* `)`.
@@ -166,6 +190,24 @@ pub mod sys {
 	/// The recorded parent pid (`ppid`, field 4).
 	pub fn parent_pid(pid: i32) -> Option<i32> {
 		stat_field(pid, 1)
+	}
+
+	/// The process group. `getpgid` is one syscall, against the open, read and
+	/// parse of `/proc/<pid>/stat`: scanning a thousand processes costs about
+	/// one millisecond instead of fifteen, which a shell pays on the reap of
+	/// every external command. It reports a group for a process `/proc` hides
+	/// too. A security module may refuse it (`EPERM`), so the stat line stays
+	/// as the fallback; `ESRCH` means nobody holds the pid.
+	pub fn process_group(pid: i32) -> Option<i32> {
+		// SAFETY: `getpgid` takes a scalar pid and reads no caller-owned memory.
+		let pgid = unsafe { libc::getpgid(pid) };
+		if pgid > 0 {
+			return Some(pgid);
+		}
+		match std::io::Error::last_os_error().raw_os_error() {
+			Some(libc::EPERM) => stat_field(pid, 2),
+			_ => None,
+		}
 	}
 
 	/// The argument vector from `/proc/<pid>/cmdline`; `None` when unreadable.

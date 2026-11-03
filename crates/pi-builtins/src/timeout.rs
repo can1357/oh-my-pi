@@ -1,20 +1,20 @@
 //! `timeout` builtin, moved from `pi-shell`.
 
-use std::{
-	io::Write,
-	sync::{Arc, Mutex},
-	time::Duration,
-};
+use std::{io::Write, sync::Arc, time::Duration};
 
 use brush_core::{
 	ExecutionContext, ExecutionExitCode, ExecutionResult, ProcessGroupPolicy, SourceInfo,
-	SpawnObserver, builtins, sys, traps::TrapSignal,
+	SpawnObserver, builtins, traps::TrapSignal,
 };
 use clap::Parser;
+use parking_lot::Mutex;
 use tokio::time;
 use tokio_util::sync::CancellationToken;
 
-use crate::host::{parse_duration, quote_arg};
+use crate::{
+	PinnedProcess, SpawnLedger,
+	host::{parse_duration, quote_arg},
+};
 
 /// GNU timeout's exit status for its own usage/internal errors.
 const EXIT_TIMEOUT_FAILURE: u8 = 125;
@@ -88,38 +88,60 @@ impl clap::Parser for TimeoutCommand {}
 ///
 /// brush's cancellation token sends TERM then KILL (see
 /// `brush_core::processes::Process::wait`), so delivering the *configured*
-/// signal requires knowing the child's pid/pgid; the shell reports those
-/// through its [`SpawnObserver`] hook.
-#[derive(Default)]
-struct SpawnRecorder(Mutex<Vec<(i32, Option<i32>)>>);
+/// signal requires knowing the children; the shell reports them through its
+/// [`SpawnObserver`] hook, and each is pinned as it is reported, so the signal
+/// reaches it, or the group it was spawned into, and never a process that took
+/// its pid or group number after it exited.
+///
+/// Each spawn is also reported to the observer this command inherited: the
+/// run's spawn registry, or an enclosing `timeout`. That observer signals
+/// what it recorded when the whole run is cancelled or an outer limit
+/// expires; replacing it would leave the operand's process group, which
+/// direct-child cancellation does not reach, unknown to it.
+struct SpawnRecorder {
+	spawns: Mutex<SpawnLedger>,
+	parent: Option<Arc<dyn SpawnObserver>>,
+}
 
 impl SpawnObserver for SpawnRecorder {
 	fn on_spawn(&self, pid: i32, pgid: Option<i32>) {
-		if let Ok(mut spawns) = self.0.lock() {
-			spawns.push((pid, pgid));
+		// Forward first: the run's registry pins the child's identity at once.
+		if let Some(parent) = &self.parent {
+			parent.on_spawn(pid, pgid);
 		}
+		// Windows has no signals for `timeout` to deliver: it cancels the
+		// operand instead, so there is nothing to record.
+		if cfg!(windows) {
+			return;
+		}
+		// brush has not reaped the child yet, so `pid` still names it.
+		let process = PinnedProcess::from_pid(pid);
+		self.spawns.lock().record(pgid, process);
+	}
+
+	fn before_reap(&self, pid: i32, unreaped: bool) {
+		if let Some(parent) = &self.parent {
+			parent.before_reap(pid, unreaped);
+		}
+		self.spawns.lock().before_reap(pid, unreaped);
 	}
 }
 
 impl SpawnRecorder {
-	/// Sends `signal` to every recorded child — its whole process group when
-	/// `group` is set — and reports whether any delivery succeeded.
+	/// Sends `signal` to every recorded child that is still there and, when
+	/// `group` is set, to the group each recorded leader leads: listed while
+	/// the shell has not reaped the leader, through the kernel's group signal
+	/// (Linux 6.9 and later) after that. One wave delivers it (see
+	/// [`crate::SignalWave`]), with the ledger locked, so the shell cannot
+	/// reap a leader while the wave lists its group.
 	fn signal(&self, signal: TrapSignal, group: bool) -> bool {
-		let spawns = match self.0.lock() {
-			Ok(spawns) => spawns.clone(),
-			Err(_) => return false,
+		let Ok(signal) = i32::try_from(signal) else {
+			return false;
 		};
-		let mut sent = false;
-		for (pid, pgid) in spawns {
-			let target = match pgid {
-				Some(pgid) if group => -pgid,
-				_ => pid,
-			};
-			if sys::signal::kill_process(target, signal).is_ok() {
-				sent = true;
-			}
-		}
-		sent
+		let mut spawns = self.spawns.lock();
+		let wave = spawns.plan_wave(signal, group).deliver();
+		spawns.record_reached(&wave);
+		!wave.reached().is_empty() || !wave.members().is_empty() || !wave.kernel_leaders().is_empty()
 	}
 }
 
@@ -203,7 +225,10 @@ impl builtins::Command for TimeoutCommand {
 		};
 
 		let child_cancel = CancellationToken::new();
-		let spawns = Arc::new(SpawnRecorder::default());
+		let spawns = Arc::new(SpawnRecorder {
+			spawns: Mutex::default(),
+			parent: context.params.spawn_observer().cloned(),
+		});
 		let mut params = context.params.clone();
 		// GNU runs the command in its own process group and signals the whole
 		// group; `--foreground` keeps it in the invoking group and signals
@@ -321,34 +346,36 @@ impl builtins::Command for TimeoutCommand {
 				child_cancel.cancel();
 				// SIGKILL can't be resisted; bound the reaping wait anyway so
 				// a wedged in-process operand can't hang the builtin forever.
+				// The operand's own result is moot once it was sent SIGKILL,
+				// and the cancellation just above can surface as Interrupted.
 				match time::timeout(Duration::from_secs(2), &mut run_future).await {
-					Ok(result) => reap(result)?,
-					Err(_) => None,
+					Ok(Err(err)) if !matches!(err.kind(), brush_core::ErrorKind::Interrupted) => {
+						return Err(err);
+					},
+					_ => None,
 				}
 			},
 		};
 
-		// Exit status per GNU: the command's own status under
-		// `--preserve-status`; 137 when it died from SIGKILL; else 124.
+		// Exit status per GNU: 137 once the command was sent SIGKILL, by `-s`
+		// or by `-k`, with or without `--preserve-status`: the operand's result
+		// after `-k` races the cancellation that follows the kill and can read
+		// 130. Otherwise the command's own status under `--preserve-status`,
+		// else 124.
+		if killed {
+			return Ok(ExecutionResult::new(EXIT_KILLED));
+		}
 		if args.preserve_status {
-			if signalled {
-				return Ok(child_result.unwrap_or_else(|| ExecutionResult::new(EXIT_KILLED)));
+			if let Some(result) = child_result.filter(|_| signalled) {
+				return Ok(result);
 			}
 			// Cancel-fallback path (in-process operand): the inner shell's own
 			// cancellation check races the operand's result, so its status is
-			// unreliable. Report death by the delivered signal (128+N, or 137
-			// after escalation) deterministically, matching GNU for a command
-			// taken down by the timeout signal.
+			// unreliable. Report death by the delivered signal (128+N)
+			// deterministically, matching GNU for a command taken down by the
+			// timeout signal.
 			let number = i32::try_from(signal).unwrap_or(15);
-			let code = if killed {
-				EXIT_KILLED
-			} else {
-				128_u8.wrapping_add(number as u8)
-			};
-			return Ok(ExecutionResult::new(code));
-		}
-		if killed {
-			return Ok(ExecutionResult::new(EXIT_KILLED));
+			return Ok(ExecutionResult::new(128_u8.wrapping_add(number as u8)));
 		}
 		Ok(ExecutionResult::new(EXIT_TIMED_OUT))
 	}
@@ -489,7 +516,7 @@ mod tests {
 		shell
 	}
 
-	/// What [`run_in_process`] saw.
+	/// What [`run_with_params`] saw.
 	#[cfg(unix)]
 	struct Ran {
 		status: u8,
@@ -506,22 +533,41 @@ mod tests {
 		command: &str,
 		cancel: Option<tokio_util::sync::CancellationToken>,
 	) -> Ran {
-		let mut stdout = tempfile::tempfile().expect("create stdout capture");
-		let mut stderr = tempfile::tempfile().expect("create stderr capture");
 		let mut params = shell.default_exec_params();
-		params.set_fd(OpenFiles::STDIN_FD, brush_core::openfiles::null().expect("null device"));
-		params.set_fd(OpenFiles::STDOUT_FD, stdout.try_clone().expect("clone stdout capture").into());
-		params.set_fd(OpenFiles::STDERR_FD, stderr.try_clone().expect("clone stderr capture").into());
 		if let Some(token) = cancel {
 			params.set_cancel_token(token);
 		}
-		let result = tokio::time::timeout(
-			Duration::from_secs(1),
-			shell.run_string(command, &SourceInfo::default(), &params),
-		)
-		.await
-		.unwrap_or_else(|_| panic!("`{command}` ignored cancellation"))
-		.expect("execute test command");
+		run_with_params(shell, command, params).await
+	}
+
+	/// [`run_in_process`] with `params` in place of the shell's defaults.
+	#[cfg(unix)]
+	async fn run_with_params(
+		shell: &mut Shell<DefaultShellExtensions>,
+		command: &str,
+		params: brush_core::ExecutionParameters,
+	) -> Ran {
+		run_with_params_within(shell, command, params, Duration::from_secs(1)).await
+	}
+
+	/// [`run_with_params`] for a command that runs longer than one second:
+	/// it fails only when the command has not returned by `deadline`.
+	#[cfg(unix)]
+	async fn run_with_params_within(
+		shell: &mut Shell<DefaultShellExtensions>,
+		command: &str,
+		mut params: brush_core::ExecutionParameters,
+		deadline: Duration,
+	) -> Ran {
+		let mut stdout = tempfile::tempfile().expect("create stdout capture");
+		let mut stderr = tempfile::tempfile().expect("create stderr capture");
+		params.set_fd(OpenFiles::STDIN_FD, brush_core::openfiles::null().expect("null device"));
+		params.set_fd(OpenFiles::STDOUT_FD, stdout.try_clone().expect("clone stdout capture").into());
+		params.set_fd(OpenFiles::STDERR_FD, stderr.try_clone().expect("clone stderr capture").into());
+		let result = tokio::time::timeout(deadline, shell.run_string(command, &SourceInfo::default(), &params))
+			.await
+			.unwrap_or_else(|_| panic!("`{command}` ignored cancellation"))
+			.expect("execute test command");
 		let read_back = |file: &mut std::fs::File| {
 			file.seek(SeekFrom::Start(0)).expect("rewind capture");
 			let mut text = String::new();
@@ -807,6 +853,82 @@ mod tests {
 		assert_eq!(args.duration, "-1");
 	}
 
+	/// A timeout's group-mode wave reaches a joined pipeline stage through its
+	/// leader's group. The recorder must not then deliver the same signal to
+	/// that stage directly: shells run one TERM trap for each TERM they take.
+	#[cfg(unix)]
+	#[test]
+	fn recorder_signals_a_group_member_once_per_wave() {
+		use std::{
+			io::{BufRead as _, BufReader},
+			os::unix::process::CommandExt as _,
+			process::{Command, Stdio},
+			thread,
+			time::Instant,
+		};
+
+		use brush_core::traps::TrapSignal;
+		use parking_lot::Mutex;
+
+		use super::SpawnRecorder;
+		use crate::{PinnedProcess, ProcessStatus, SpawnLedger, pinned_process::tests::ProcessGuard};
+
+		// Two TERMs sent back to back merge while both are pending, so a
+		// single attempt can pass with the defect; one in several does not.
+		for attempt in 0..40 {
+			let dir = tempfile::tempdir().expect("trap directory");
+			// The leader starts a member of its own group (a joined pipeline
+			// stage) whose TERM trap appends one `x` per TERM it takes.
+			let script = r#"sh -c 'trap "printf x >> runs; sleep 0.3; exit 0" TERM
+: > ready
+while :; do :; done' &
+echo "$!"
+while :; do :; done"#;
+			let mut leader = Command::new("sh")
+				.args(["-c", script])
+				.current_dir(dir.path())
+				.process_group(0)
+				.stdout(Stdio::piped())
+				.spawn()
+				.expect("start group leader");
+			let mut output = BufReader::new(leader.stdout.take().expect("leader stdout"));
+			let leader_pid = i32::try_from(leader.id()).expect("leader pid fits");
+			let mut guard = ProcessGuard::new(leader);
+			let mut line = String::new();
+			output.read_line(&mut line).expect("read joined member pid");
+			let member_pid = line.trim().parse::<i32>().expect("member pid");
+			let leader_pin = PinnedProcess::from_pid(leader_pid).expect("pin group leader");
+			let member_pin = PinnedProcess::from_pid(member_pid).expect("pin joined member");
+			guard.pin(&member_pin);
+			let deadline = Instant::now() + Duration::from_secs(5);
+			while !dir.path().join("ready").exists() {
+				assert!(Instant::now() < deadline, "attempt {attempt}: the member never set its trap");
+				thread::sleep(Duration::from_millis(10));
+			}
+			assert_eq!(member_pin.group_id(), Some(leader_pid), "the member joined the leader's group");
+
+			let recorder = SpawnRecorder { spawns: Mutex::new(SpawnLedger::default()), parent: None };
+			{
+				let mut spawns = recorder.spawns.lock();
+				spawns.record(Some(leader_pid), Some(leader_pin));
+				spawns.record(Some(leader_pid), Some(member_pin.clone()));
+			}
+			let term = TrapSignal::try_from("TERM").expect("TERM is a signal");
+			assert!(recorder.signal(term, true), "attempt {attempt}: the wave must reach the group");
+
+			let deadline = Instant::now() + Duration::from_secs(5);
+			while member_pin.status() == ProcessStatus::Running && Instant::now() < deadline {
+				thread::sleep(Duration::from_millis(10));
+			}
+			assert!(
+				member_pin.status() != ProcessStatus::Running,
+				"attempt {attempt}: the member must end after its TERM trap"
+			);
+			let runs = std::fs::read_to_string(dir.path().join("runs")).expect("TERM trap ran");
+			assert_eq!(runs, "x", "attempt {attempt}: the member must take TERM once");
+		}
+	}
+
 	#[test]
 	fn signal_spellings_parse_and_display_without_prefix() {
 		// Failure mode: rejecting a signal spelling GNU accepts.
@@ -944,5 +1066,151 @@ mod tests {
 		let result =
 			run_with_deadline("timeout --preserve-status 0.050 sleep 5").await;
 		assert_eq!(u8::from(result.exit_code), 143, "SIGTERM death is 128+15");
+	}
+
+	/// `-k` escalation under `--preserve-status` reports the command's death
+	/// by SIGKILL, 137, as GNU `timeout` does. The operand token cancelled
+	/// after the kill could win over the real exit status, and 130 came out.
+	///
+	/// The operand writes its pid to `ready` once its `trap "" TERM` is in
+	/// place. An attempt without `ready` took TERM before the trap (a machine
+	/// so loaded that `sh` needed more than the 1 s limit to start), so it
+	/// shows nothing about the status and is not counted.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn preserve_status_after_kill_escalation_reports_137() {
+		/// Kills the operand and its `sleep` when an attempt ends, passed or
+		/// failed, if `timeout`'s SIGKILL did not: both ignore TERM. Each pid
+		/// is pinned and checked against what the test started before the kill.
+		struct OperandGuard<'a>(&'a std::path::Path);
+
+		impl Drop for OperandGuard<'_> {
+			fn drop(&mut self) {
+				for (file, word) in [("ready", "trap"), ("sleep_pid", "sleep")] {
+					let Some(pid) = std::fs::read_to_string(self.0.join(file))
+						.ok()
+						.and_then(|text| text.trim().parse::<i32>().ok())
+					else {
+						continue;
+					};
+					if let Some(process) = crate::PinnedProcess::from_pid(pid)
+						&& process.args().iter().any(|arg| arg.contains(word))
+					{
+						let _ = process.kill(libc::SIGKILL);
+					}
+				}
+			}
+		}
+
+		const COUNTED: u32 = 5;
+		const ATTEMPTS: u32 = 20;
+		let dir = tempfile::tempdir().expect("create scratch dir");
+		let mut shell = full_shell(dir.path()).await;
+		let mut counted = 0;
+		for attempt in 0..ATTEMPTS {
+			for file in ["ready", "sleep_pid"] {
+				let _ = std::fs::remove_file(dir.path().join(file));
+			}
+			let _guard = OperandGuard(dir.path());
+			let params = shell.default_exec_params();
+			let ran = run_with_params_within(
+				&mut shell,
+				"timeout --preserve-status -k 0.1 1 /bin/sh -c 'trap \"\" TERM; echo $$ > ready; /bin/sleep \
+				 30 & echo $! > sleep_pid; wait'",
+				params,
+				Duration::from_secs(10),
+			)
+			.await;
+			if !dir.path().join("ready").exists() {
+				continue;
+			}
+			assert_eq!(ran.status, 137, "attempt {attempt}: {}", ran.stderr);
+			counted += 1;
+			if counted == COUNTED {
+				return;
+			}
+		}
+		panic!("only {counted} of {ATTEMPTS} operands set their TERM trap within the 1 s limit");
+	}
+
+	/// Records what the shell reports for each external child it spawns.
+	#[cfg(target_os = "linux")]
+	#[derive(Default)]
+	struct SpawnLog(std::sync::Mutex<Vec<(i32, Option<i32>)>>);
+
+	#[cfg(target_os = "linux")]
+	impl brush_core::SpawnObserver for SpawnLog {
+		fn on_spawn(&self, pid: i32, pgid: Option<i32>) {
+			self.0.lock().expect("spawn log lock").push((pid, pgid));
+		}
+	}
+
+	/// The run's spawn registry, and an outer `timeout`, signal the process
+	/// group a child is reported in. Each child here prints the group `/proc`
+	/// shows it in, and the report must name that group, or none when it is
+	/// the shell's own (the host's), which no teardown may signal. A child
+	/// detached into its own session under `SameProcessGroup` (the default
+	/// policy, `--foreground`, later pipeline stages) was reported in no group
+	/// or in the pipeline leader's, so its background children were lost once
+	/// it died.
+	#[cfg(target_os = "linux")]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn spawned_children_report_the_process_group_they_are_in() {
+		use std::{collections::HashMap, sync::Arc};
+
+		let pty = nix::pty::openpty(None, None).expect("open a pseudo-terminal");
+		let tty = nix::unistd::ttyname(&pty.slave).expect("name the pseudo-terminal");
+		let tty = tty.display();
+		let shell_group = nix::unistd::getpgrp().as_raw();
+		// `r` prints the pid and process group of the `sh` that runs it.
+		let setup = r#"r='read -r p c s pp g x < /proc/$$/stat; echo "$p $g"'
+f() { /bin/sh -c "$r" | /bin/sh -c "$r; cat"; }
+"#;
+		let dir = tempfile::tempdir().expect("create scratch dir");
+		let mut shell = full_shell(dir.path()).await;
+		let mut wrong = Vec::new();
+		for (case, command) in [
+			("a child", r#"/bin/sh -c "$r""#.to_owned()),
+			("pipeline stages", "f".to_owned()),
+			("a timeout operand", r#"timeout 5 /bin/sh -c "$r""#.to_owned()),
+			("pipeline stages under timeout", "timeout 5 f".to_owned()),
+			("a --foreground operand", r#"timeout --foreground 5 /bin/sh -c "$r""#.to_owned()),
+			("pipeline stages under --foreground", "timeout --foreground 5 f".to_owned()),
+			("a child reading a terminal", format!(r#"/bin/sh -c "$r" < {tty}"#)),
+			(
+				"a --foreground operand reading a terminal",
+				format!(r#"timeout --foreground 5 /bin/sh -c "$r" < {tty}"#),
+			),
+		] {
+			let log = Arc::new(SpawnLog::default());
+			let mut params = shell.default_exec_params();
+			params.set_spawn_observer(Arc::clone(&log) as Arc<dyn brush_core::SpawnObserver>);
+			let ran = run_with_params(&mut shell, &format!("{setup}{command}"), params).await;
+			assert_eq!(ran.status, 0, "{case}: {}", ran.stderr);
+			let groups: HashMap<i32, i32> = ran
+				.stdout
+				.lines()
+				.map(|line| {
+					let (pid, group) = line.split_once(' ').expect("`pid group` line");
+					(pid.parse().expect("pid"), group.parse().expect("group"))
+				})
+				.collect();
+			assert!(!groups.is_empty(), "{case}: no child reported its group");
+			let reported = log.0.lock().expect("spawn log lock").clone();
+			for (pid, group) in groups {
+				let reported_group = reported
+					.iter()
+					.find_map(|&(spawned, group)| (spawned == pid).then_some(group))
+					.unwrap_or_else(|| panic!("{case}: child {pid} was not reported: {reported:?}"));
+				let expected = (group != shell_group).then_some(group);
+				if reported_group != expected {
+					wrong.push(format!(
+						"{case}: child {pid} is in group {group} (the shell's is {shell_group}), \
+						 reported in {reported_group:?}"
+					));
+				}
+			}
+		}
+		assert!(wrong.is_empty(), "children reported in the wrong group: {wrong:#?}");
 	}
 }

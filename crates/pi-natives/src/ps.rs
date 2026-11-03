@@ -13,7 +13,7 @@ use napi::{
 };
 use napi_derive::napi;
 use pi_shell::process::{self as core_process, ProcessStatus as CoreProcessStatus};
-pub use pi_shell::process::{KILL_SIGNAL, TERM_SIGNAL, TerminationTargets, kill_process_group};
+pub use pi_shell::process::{KILL_SIGNAL, TERM_SIGNAL, TerminationTargets};
 
 use crate::{js::into_string, task};
 

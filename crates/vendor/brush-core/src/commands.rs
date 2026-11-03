@@ -6,6 +6,7 @@ use std::{
 	fmt::Display,
 	io::{self, Write},
 	path::{Path, PathBuf},
+	sync::Arc,
 };
 
 use brush_parser::ast;
@@ -996,14 +997,24 @@ pub(crate) async fn execute_external_command(
 			// launches (`detach_reparent`, e.g. `nohup cmd &`): those double-fork
 			// out of the descendant tree and must survive the host's cancellation
 			// cleanup, so they are intentionally left unowned.
-			if !context.params.detach_reparent
+			//
+			// The group reported is the one the child is in, not the pipeline's
+			// shared group (`actual_pgid`): a detached child leads its own.
+			let exit_observer = if !context.params.detach_reparent
 				&& let Some(observer) = context.params.spawn_observer()
 				&& let Some(pid) = pid
 			{
-				observer.on_spawn(pid, actual_pgid);
-			}
+				observer.on_spawn(
+					pid,
+					spawned_process_group(session_action, new_pg, pid, process_group_id),
+				);
+				Some(Arc::clone(observer))
+			} else {
+				None
+			};
 
 			let mut child_process = processes::ChildProcess::new(child, pid, actual_pgid);
+			child_process.set_exit_observer(exit_observer);
 			if let Some((output, markers)) = marker_output.take() {
 				child_process.set_completion_marker(
 					output,
@@ -1337,4 +1348,30 @@ pub const fn child_session_action(
 	}
 
 	ChildSessionAction::DetachSession
+}
+
+/// The process group a freshly spawned child is in, or `None` when that is
+/// the shell's own group.
+///
+/// `setsid()` (`DetachSession`, and a session-leading foreground child) and
+/// `process_group(0)` each make the child the leader of a new group named by
+/// its pid, whatever the [`ProcessGroupPolicy`] asked for: a
+/// `SameProcessGroup` child whose stdin is not a terminal, a later pipeline
+/// stage reading a pipe included, is detached into a group of its own. A
+/// child that joined an established pipeline group with `process_group(pgid)`
+/// is in that group. A child spawned with neither stays in the shell's group,
+/// which is the embedding host's: a teardown that signals recorded groups
+/// must never reach it, so none is reported.
+const fn spawned_process_group(
+	session_action: ChildSessionAction,
+	new_pg: bool,
+	pid: i32,
+	joined_pgid: Option<i32>,
+) -> Option<i32> {
+	// Only Unix has `setsid`: elsewhere `detach_session` is a no-op.
+	let detached = cfg!(unix) && matches!(session_action, ChildSessionAction::DetachSession);
+	if new_pg || detached {
+		return Some(pid);
+	}
+	joined_pgid
 }

@@ -109,6 +109,36 @@ fn drain_stopped(
 	}
 }
 
+/// Whether `pid` has exited and is still waiting to be reaped. It uses
+/// `WNOWAIT`, so the child stays a zombie and its pid keeps holding its number
+/// and the number of any process group it leads. An interrupted check is
+/// repeated; any other failure is returned.
+pub(crate) fn exited_unreaped(pid: sys::process::ProcessId) -> std::io::Result<bool> {
+	loop {
+		// SAFETY: `siginfo_t` is a C struct for which all-zero bytes are valid.
+		let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+		// SAFETY: `info` is writable for the call; the remaining arguments are
+		// scalar values and select only this pid.
+		let result = unsafe {
+			libc::waitid(
+				libc::P_PID,
+				pid as libc::id_t,
+				&raw mut info,
+				libc::WEXITED | libc::WNOWAIT | libc::WNOHANG,
+			)
+		};
+		if result != 0 {
+			let error = std::io::Error::last_os_error();
+			if error.kind() == std::io::ErrorKind::Interrupted {
+				continue;
+			}
+			return Err(error);
+		}
+		// SAFETY: waitid filled `info`; zero means no exited child was available.
+		return Ok(unsafe { info.si_pid() } != 0);
+	}
+}
+
 #[cfg(not(target_os = "macos"))]
 fn waitid_child(
 	pid: sys::process::ProcessId,

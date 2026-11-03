@@ -36,7 +36,6 @@ jiff = { version = "0.2", features = ["tzdb-bundle-platform"] }
 libc.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-smallvec.workspace = true
 windows-sys.workspace = true
 winreg.workspace = true
 
