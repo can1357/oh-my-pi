@@ -654,6 +654,9 @@ interface QueuedMessageDelivery {
 	unit?: TakenSteeringUnit;
 }
 
+/** Which kind of holder a record ended. */
+type RecordedHolder = "live" | "delivery" | "none";
+
 /** One occurrence a request carries, with the holder it is; prepared context and asides have none. */
 interface RecordedOccurrence {
 	message: AgentMessage;
@@ -740,7 +743,7 @@ export class Agent {
 	#recordLedger = new WeakMap<AbortController, RecordedOccurrence[]>();
 	/**
 	 * Messages the run's loop reported and {@link appendMessage} has not recorded yet (a subclass may defer
-	 * or reorder them), so their records take their ledger holders.
+	 * or reorder them), so each such record ends the occurrence the run delivered. Cleared when a run ends.
 	 */
 	#loopRecords: AgentMessage[] = [];
 	#steeringWaiters = new Set<() => void>();
@@ -1547,14 +1550,31 @@ export class Agent {
 		else this.#settleSteeringWait();
 	}
 
-	/** Move steering live steering took out of the queue-delivery records into {@link #liveSteered}. */
+	/**
+	 * Move steering live steering took out of the queue-delivery records into {@link #liveSteered}: one
+	 * occurrence per taken message, from the newest record first (the take's own), never from a record a
+	 * request already carries, which is delivered.
+	 */
 	#adoptLiveSteering(taken: readonly AgentMessage[]): void {
 		let adopted = false;
 		const entries: LiveSteeredEntry[] = [];
-		for (const delivery of this.#queuedMessageDeliveries) {
+		const wanted = new Map<AgentMessage, number>();
+		for (const message of taken) wanted.set(message, (wanted.get(message) ?? 0) + 1);
+		const take = (message: AgentMessage): boolean => {
+			const count = wanted.get(message);
+			if (!count) return false;
+			wanted.set(message, count - 1);
+			return true;
+		};
+		for (const delivery of [...this.#queuedMessageDeliveries].reverse()) {
+			if (delivery.committed) continue;
+			const adopting = new Set<number>();
+			for (let i = delivery.next; i < delivery.messages.length; i++) {
+				if (take(delivery.messages[i])) adopting.add(i);
+			}
+			if (adopting.size === 0) continue;
 			const pending = delivery.messages.slice(delivery.next);
-			const kept = pending.filter(message => !taken.includes(message));
-			if (kept.length === pending.length) continue;
+			const kept = pending.filter((_, offset) => !adopting.has(delivery.next + offset));
 			// Context prepared for a batch taken whole goes with that batch's entries.
 			const batch =
 				kept.length === 0 && delivery.additional.length > 0 ? { additional: delivery.additional } : undefined;
@@ -1563,7 +1583,7 @@ export class Agent {
 			for (let i = delivery.next; i < delivery.messages.length; i++) {
 				const message = delivery.messages[i];
 				const promoted = delivery.promoted?.[i] === true;
-				if (!taken.includes(message)) {
+				if (!adopting.has(i)) {
 					keptPromoted.push(promoted);
 					continue;
 				}
@@ -2217,19 +2237,19 @@ export class Agent {
 	}
 
 	/**
-	 * Record `m` in the transcript. The run's own records ({@link #recordLoopMessage}) take exactly the holder
-	 * their request wrote down. Any other record (a host's own) is an occurrence no request wrote down, so it
-	 * takes the occurrence the model most likely read: live steering the provider accepted, then input put
-	 * into a request, then any other holder.
+	 * Add `m` to the transcript. A record of a message the run's loop reported ({@link #recordLoopMessage})
+	 * ends the occurrence the run delivered, even when a subclass defers or reorders this call. Any other
+	 * record is a host's: a new occurrence, which ends no occurrence the Agent holds for delivery.
 	 */
 	appendMessage(m: AgentMessage) {
 		this.#state.messages.push(m);
 		const loopRecord = this.#loopRecords.indexOf(m);
-		if (loopRecord >= 0) {
-			this.#loopRecords.splice(loopRecord, 1);
-			if (this.#recordFromLedger(m)) return;
-		}
-		this.#recordHeldOccurrence(m);
+		if (loopRecord < 0) return;
+		this.#loopRecords.splice(loopRecord, 1);
+		const ended = this.#recordFromLedger(m) ?? this.#recordAcceptedLiveSteering(m);
+		// A live-steered occurrence ended: it stops counting as queued pending input, and listeners hear it
+		// now that the message is in the transcript.
+		if (ended === "live") this.#emitQueueChanged();
 	}
 
 	/** The run's loop reported `m` as recorded. */
@@ -2242,27 +2262,24 @@ export class Agent {
 	 * A request wrote down which holder each occurrence it carries is: record exactly that one, in whatever
 	 * order the loop reports them, so an undelivered copy of the same message object keeps its own state (its
 	 * promotion, its place in the agent-steering wait), and prepared context or an aside that reuses a held
-	 * object touches no holder. Returns false when no request wrote `m` down.
+	 * object touches no holder. Returns undefined when no request wrote `m` down, else which kind of holder ended.
 	 */
-	#recordFromLedger(m: AgentMessage): boolean {
+	#recordFromLedger(m: AgentMessage): RecordedHolder | undefined {
 		const controller = this.#abortController;
 		const ledger = controller ? this.#recordLedger.get(controller) : undefined;
 		const at = ledger ? ledger.findIndex(occurrence => occurrence.message === m) : -1;
-		if (!ledger || at < 0) return false;
+		if (!ledger || at < 0) return undefined;
 		const [{ holder }] = ledger.splice(at, 1);
-		if (!holder) return true;
+		if (!holder) return "none";
 		if ("queue" in holder) {
 			this.#recordDelivery(holder, m);
-			return true;
+			return "delivery";
 		}
 		const live = this.#liveSteered.indexOf(holder);
-		if (live < 0) return true;
+		if (live < 0) return "none";
 		this.#liveSteered.splice(live, 1);
 		this.#recordTakenSteering(m, holder.unit ?? null);
-		// The message landed in the transcript, so it stops counting as
-		// queued pending input; snapshots shrink and listeners must hear it.
-		this.#emitQueueChanged();
-		return true;
+		return "live";
 	}
 
 	/** Record `m` from the delivery record holding it, in whatever order the record's messages are reported. */
@@ -2282,29 +2299,20 @@ export class Agent {
 		if (++holder.next === holder.messages.length) this.#queuedMessageDeliveries.delete(holder);
 	}
 
-	/** A record of `m` no request wrote down: the holder of the occurrence the model most likely read. */
-	#recordHeldOccurrence(m: AgentMessage): void {
-		const liveRank = (entry: LiveSteeredEntry): number => (entry.accepted ? 0 : entry.committed ? 2 : 3);
-		const recordRank = (delivery: QueuedMessageDelivery): number => (delivery.committed ? 1 : 3);
-		let live = -1;
-		for (let i = 0; i < this.#liveSteered.length; i++) {
-			const entry = this.#liveSteered[i];
-			if (entry.message !== m) continue;
-			if (live < 0 || liveRank(entry) < liveRank(this.#liveSteered[live])) live = i;
-		}
-		let recorded: QueuedMessageDelivery | undefined;
-		for (const delivery of this.#queuedMessageDeliveries) {
-			if (delivery.messages.indexOf(m, delivery.next) < 0) continue;
-			if (!recorded || recordRank(delivery) < recordRank(recorded)) recorded = delivery;
-		}
-		if (live >= 0 && (!recorded || liveRank(this.#liveSteered[live]) <= recordRank(recorded))) {
-			const [entry] = this.#liveSteered.splice(live, 1);
-			this.#recordTakenSteering(m, entry.unit ?? null);
-			this.#emitQueueChanged();
-			return;
-		}
-		if (recorded) this.#recordDelivery(recorded, m);
-		else this.#recordTakenSteering(m);
+	/**
+	 * A record of `m` the run's loop reported and its requests did not write down: live steering the
+	 * provider accepted into the response, recorded before any request carries it again. Prompt input and
+	 * anything else the loop records end no held occurrence.
+	 */
+	#recordAcceptedLiveSteering(m: AgentMessage): RecordedHolder {
+		const controller = this.#abortController;
+		const live = this.#liveSteered.findIndex(
+			entry => entry.message === m && entry.accepted && entry.controller === controller,
+		);
+		if (live < 0) return "none";
+		const [entry] = this.#liveSteered.splice(live, 1);
+		this.#recordTakenSteering(m, entry.unit ?? null);
+		return "live";
 	}
 
 	popMessage(): AgentMessage | undefined {

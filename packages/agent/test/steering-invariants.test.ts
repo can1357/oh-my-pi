@@ -2278,3 +2278,141 @@ describe("steering invariants: the round-fifteen and round-sixteen reproductions
 		});
 	}
 });
+
+/**
+ * Only the run's own records end an occurrence the Agent holds, and each ends the occurrence its request
+ * delivered, at the moment the loop reports it. A subclass that defers or reorders `appendMessage`, or a
+ * host record of the same object, changes only the transcript.
+ */
+describe("steering invariants: the round-seventeen reproductions", () => {
+	/** An Agent whose subclass defers the transcript records of `held` until `flush()`. */
+	function createDeferringAgent(held: AgentMessage, stream: Agent["streamFn"]) {
+		const mock = createMockModel({ handler: () => ({ content: ["ack"] }) });
+		class DeferringAgent extends Agent {
+			#buffered: AgentMessage[] = [];
+			override appendMessage(message: AgentMessage): void {
+				if (message === held) this.#buffered.push(message);
+				else super.appendMessage(message);
+			}
+			flush(before?: AgentMessage): void {
+				if (before) super.appendMessage(before);
+				for (const message of this.#buffered.splice(0)) super.appendMessage(message);
+			}
+		}
+		const agent = new DeferringAgent({
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
+			convertToLlm,
+			steeringMode: "one-at-a-time",
+			streamFn: (model, context, options) => stream(model, context, options),
+		});
+		return { agent, mock };
+	}
+
+	for (const alias of [false, true]) {
+		it(`a host record of ${alias ? "the same object" : "another V"} before a deferred loop record leaves an unsettled promoted V its promotion`, async () => {
+			const v = person("V");
+			const host = alias ? v : person("host V");
+			let first = true;
+			let hostDone = false;
+			const { agent, mock } = createDeferringAgent(v, async (model, context, options) => {
+				if (first && options?.liveSteering && options.signal) {
+					first = false;
+					agent.steer(v);
+					agent.prioritizeSteering([v]);
+					// Handed to the provider and never settled; a second occurrence goes into the next request.
+					await options.liveSteering.claim(options.signal);
+					agent.steer(v);
+				}
+				return mock.stream(model, context, options);
+			});
+			agent.subscribe(event => {
+				if (hostDone || event.type !== "message_end" || event.message !== v) return;
+				hostDone = true;
+				agent.flush(host);
+			});
+
+			await agent.prompt("start");
+			const w = person("W");
+			agent.steer(w);
+			agent.setSteeringPriority(message => message === w);
+
+			expect(hostDone).toBe(true);
+			expect(texts(agent.peekSteeringQueue())).toEqual(["V", "W"]);
+			expect(texts(agent.peekNextSteering())).toEqual(["V"]);
+		});
+	}
+
+	for (const queue of ["steering", "followUp"] as const) {
+		for (const alias of [false, true]) {
+			it(`a live take of ${alias ? "the same object" : "another V"} leaves an earlier ${queue} request's occurrence delivered`, async () => {
+				const v = person("V");
+				const later = alias ? v : person("later V");
+				let first = true;
+				const { agent, mock } = createDeferringAgent(v, async (model, context, options) => {
+					if (first && options?.liveSteering && options.signal) {
+						first = false;
+						agent.steer(later);
+						agent.prioritizeSteering([later]);
+						await options.liveSteering.claim(options.signal);
+						agent.flush();
+						agent.abort();
+					}
+					return mock.stream(model, context, options);
+				});
+				if (queue === "steering") agent.steer(v);
+				else agent.followUp(v);
+
+				await agent.continue();
+				const w = person("W");
+				agent.steer(w);
+				agent.setSteeringPriority(message => message === w);
+
+				expect(transcriptTexts(agent)).toEqual(["V"]);
+				expect(texts(agent.peekSteeringQueue())).toEqual([alias ? "V" : "later V", "W"]);
+				expect(agent.peekFollowUpQueue()).toEqual([]);
+				expect(texts(agent.peekNextSteering())).toEqual([alias ? "V" : "later V"]);
+			});
+		}
+	}
+
+	it("a host's appendMessage of live steering the run holds ends nothing: the run's end still puts it back", async () => {
+		const { agent, mock } = createAgent();
+		const v = person("V");
+		let first = true;
+		agent.streamFn = async (model, context, options) => {
+			if (first && options?.liveSteering && options.signal) {
+				first = false;
+				agent.steer(v);
+				(await options.liveSteering.claim(options.signal))?.accept();
+				// A host's own record is a new occurrence; the aborted response's acceptance is discarded.
+				agent.appendMessage(v);
+				agent.abort();
+			}
+			return mock.stream(model, context, options);
+		};
+
+		await agent.prompt("start");
+
+		expect(transcriptTexts(agent)).toEqual(["start", "V"]);
+		expect(texts(agent.peekSteeringQueue())).toEqual(["V"]);
+		expect(agent.peekUndeliveredQueuedMessages()).toEqual([]);
+	});
+
+	it("a loop record a subclass drops leaves the occurrence unrecorded, so the run's end puts it back", async () => {
+		const v = person("V");
+		let first = true;
+		const { agent, mock } = createDeferringAgent(v, async (model, context, options) => {
+			if (first) {
+				first = false;
+				agent.steer(v);
+			}
+			return mock.stream(model, context, options);
+		});
+
+		await agent.prompt("start");
+
+		// The record of V never reached the transcript (the subclass held it back), so V is queued again.
+		expect(transcriptTexts(agent)).toEqual(["start"]);
+		expect(texts(agent.peekSteeringQueue())).toEqual(["V"]);
+	});
+});

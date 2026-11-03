@@ -204,7 +204,7 @@ agent.setModel(getModel("openai", "gpt-4o"));
 agent.setThinkingLevel("medium");
 agent.setTools([myTool]);
 agent.replaceMessages(newMessages);
-agent.appendMessage(message);
+agent.appendMessage(message); // A host's record: ends no queued or in-flight occurrence of `message`
 agent.clearMessages();
 agent.reset(); // Clear everything
 ```
