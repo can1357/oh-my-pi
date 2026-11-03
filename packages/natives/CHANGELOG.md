@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed X11 background typing, shortcuts and keys held during drags into Qt 5/6 apps reporting success while the app received no keys; the `computer` tool now runs them in takeover, or refuses them when `computer.backgroundFallback` is `refuse`
+
 ## [18.16.0] - 2026-11-02
 
 ### Added
