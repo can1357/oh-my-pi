@@ -791,6 +791,8 @@ export class ExtensionRunner {
 		this.#createAnnotations = createAnnotations;
 		this.#getAsyncJobSnapshotFn = getAsyncJobSnapshot ?? (() => null);
 		this.runtime.getShortcutConflict = (shortcut, extensionPath) => this.getShortcutConflict(shortcut, extensionPath);
+		// Process-wide registrations (URL schemes) route calls by the session that adopted the load.
+		for (const extension of extensions) extension.getSessionId = () => this.sessionId;
 		// A load suspended by a failed startup (see `createAgentSession`) acts again once a session adopts it.
 		for (const extension of extensions) extension.registrations?.setSuspended(false);
 	}
@@ -1160,6 +1162,7 @@ export class ExtensionRunner {
 		if (added.some(extension => extension.transcriptPresenters.length > 0)) {
 			notifyTranscriptPresentersChanged();
 		}
+		for (const extension of added) extension.getSessionId = () => this.sessionId;
 		if (this.#initialized) {
 			for (const extension of added) this.#installFileFallbacks(extension);
 		}
