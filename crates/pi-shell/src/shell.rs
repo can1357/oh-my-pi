@@ -6206,6 +6206,276 @@ mod tests {
 		path
 	}
 
+	/// Every way `cd`, `pushd` and `popd` fail to change directory, and
+	/// `CDPATH`, against Bash 5.2.21: each row's output is Bash's, less the
+	/// `script: line N:` prefix Bash puts on a builtin's message, which this
+	/// shell puts on none. Each row runs in a fresh directory holding `file`,
+	/// `d/sub` and `locked`, a directory with no search permission. `cd` printed
+	/// the shell's own error (`error: cd: i/o error: No such file or directory
+	/// (os error 2)`), which names no directory; it entered a directory it may
+	/// not search; it had no `CDPATH`; an unknown option, a second directory or
+	/// an empty one got its parser's message and status 2; and `popd` dropped
+	/// the entry it could not enter, and put `error: ` before `directory stack
+	/// empty`.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn directory_changes_fail_as_bash_reports_them() {
+		const SETUP: &str =
+			"unset CDPATH; top=$PWD; : >file; mkdir -p locked/inner d/sub; chmod 000 locked; ";
+		const CLEANUP: &str = "; cd \"$top\"; chmod 755 locked";
+		let long = "a".repeat(300);
+		let nf = "No such file or directory";
+		let usage = "cd: usage: cd [-L|[-P [-e]] [-@]] [dir]";
+		let same = |name: &str| format!("[ \"$PWD\" = \"$top{name}\" ]");
+		// (row, script, what Bash prints, whether the row needs a directory the
+		// user may not search, which root may)
+		let rows: Vec<(&str, String, String, bool)> = vec![
+			(
+				"missing",
+				"cd /nonexistent/BOOM; echo \"S=$?\"".into(),
+				format!("cd: /nonexistent/BOOM: {nf}\nS=1\n"),
+				false,
+			),
+			(
+				"missing, relative",
+				"cd nosuch; echo \"S=$?\"".into(),
+				format!("cd: nosuch: {nf}\nS=1\n"),
+				false,
+			),
+			(
+				"a file",
+				"cd file; echo \"S=$?\"".into(),
+				"cd: file: Not a directory\nS=1\n".into(),
+				false,
+			),
+			(
+				"below a file",
+				"cd file/x; echo \"S=$?\"".into(),
+				"cd: file/x: Not a directory\nS=1\n".into(),
+				false,
+			),
+			(
+				"no search permission",
+				format!("cd locked; echo \"S=$?\"; {} && echo STAYED", same("")),
+				"cd: locked: Permission denied\nS=1\nSTAYED\n".into(),
+				true,
+			),
+			(
+				"below no search permission",
+				"cd locked/inner; echo \"S=$?\"".into(),
+				"cd: locked/inner: Permission denied\nS=1\n".into(),
+				true,
+			),
+			(
+				"two directories",
+				format!("cd d d; echo \"S=$?\"; {} && echo STAYED", same("")),
+				"cd: too many arguments\nS=1\nSTAYED\n".into(),
+				false,
+			),
+			(
+				"two after -",
+				"cd d; cd - -; echo \"S=$?\"".into(),
+				"cd: too many arguments\nS=1\n".into(),
+				false,
+			),
+			(
+				"OLDPWD unset",
+				"unset OLDPWD; cd -; echo \"S=$?\"".into(),
+				"cd: OLDPWD not set\nS=1\n".into(),
+				false,
+			),
+			(
+				"OLDPWD missing",
+				"OLDPWD=/nonexistent/old; cd -; echo \"S=$?\"".into(),
+				format!("cd: /nonexistent/old: {nf}\nS=1\n"),
+				false,
+			),
+			(
+				"HOME unset",
+				"unset HOME; cd; echo \"S=$?\"".into(),
+				"cd: HOME not set\nS=1\n".into(),
+				false,
+			),
+			(
+				"HOME missing",
+				"HOME=/nonexistent/home; cd; echo \"S=$?\"".into(),
+				format!("cd: /nonexistent/home: {nf}\nS=1\n"),
+				false,
+			),
+			(
+				"CDPATH misses",
+				"CDPATH=/tmp; cd nosuch; echo \"S=$?\"".into(),
+				format!("cd: nosuch: {nf}\nS=1\n"),
+				false,
+			),
+			(
+				"CDPATH finds and prints",
+				format!(
+					"CDPATH=$top/d; cd sub >\"$top/out\"; echo \"S=$?\"; [ \"$(cat \"$top/out\")\" = \
+					 \"$top/d/sub\" ] && echo PRINTED; {} && echo IN",
+					same("/d/sub")
+				),
+				"S=0\nPRINTED\nIN\n".into(),
+				false,
+			),
+			(
+				"CDPATH relative entry prints the absolute name",
+				"CDPATH=./d; cd sub >\"$top/out\"; echo \"S=$?\"; [ \"$(cat \"$top/out\")\" = \
+				 \"$top/d/sub\" ] && echo PRINTED"
+					.into(),
+				"S=0\nPRINTED\n".into(),
+				false,
+			),
+			(
+				"CDPATH empty entry is quiet",
+				format!(
+					"CDPATH=:$top/d; cd d >\"$top/out\"; echo \"S=$? out=<$(cat \"$top/out\")>\"; {} \
+					 && echo IN",
+					same("/d")
+				),
+				"S=0 out=<>\nIN\n".into(),
+				false,
+			),
+			(
+				"CDPATH skips a file",
+				format!(
+					"mkdir c2; : >c2/sub; CDPATH=$top/c2:$top/d; cd sub >/dev/null; echo \"S=$?\"; {} \
+					 && echo IN",
+					same("/d/sub")
+				),
+				"S=0\nIN\n".into(),
+				false,
+			),
+			(
+				"CDPATH falls back to the directory itself",
+				format!("CDPATH=/nonexistent; cd d; echo \"S=$?\"; {} && echo IN", same("/d")),
+				"S=0\nIN\n".into(),
+				false,
+			),
+			(
+				"CDPATH is not searched for ./",
+				"CDPATH=$top/d; cd ./sub; echo \"S=$?\"".into(),
+				format!("cd: ./sub: {nf}\nS=1\n"),
+				false,
+			),
+			(
+				"an empty directory",
+				format!("cd \"\"; echo \"S=$?\"; {} && echo STAYED", same("")),
+				"S=0\nSTAYED\n".into(),
+				false,
+			),
+			(
+				"an unknown option",
+				"cd -x; echo \"S=$?\"".into(),
+				format!("cd: -x: invalid option\n{usage}\nS=2\n"),
+				false,
+			),
+			(
+				"an unknown option after a known one",
+				"cd -Lx d; echo \"S=$?\"".into(),
+				format!("cd: -x: invalid option\n{usage}\nS=2\n"),
+				false,
+			),
+			(
+				"-- then -",
+				format!("cd d; cd -- - >/dev/null; echo \"S=$?\"; {} && echo BACK", same("")),
+				"S=0\nBACK\n".into(),
+				false,
+			),
+			(
+				"- prints",
+				"cd d; cd - >\"$top/out\"; echo \"S=$?\"; [ \"$(cat \"$top/out\")\" = \"$top\" ] && \
+				 echo PRINTED"
+					.into(),
+				"S=0\nPRINTED\n".into(),
+				false,
+			),
+			(
+				"a name too long",
+				format!("cd {long}; echo \"S=$?\""),
+				format!("cd: {long}: File name too long\nS=1\n"),
+				false,
+			),
+			(
+				"a loop of links",
+				"ln -s l2 l1; ln -s l1 l2; cd l1; echo \"S=$?\"".into(),
+				"cd: l1: Too many levels of symbolic links\nS=1\n".into(),
+				false,
+			),
+			(
+				"a loop of links, -P",
+				"ln -s l2 l1; ln -s l1 l2; cd -P l1; echo \"S=$?\"".into(),
+				"cd: l1: Too many levels of symbolic links\nS=1\n".into(),
+				false,
+			),
+			(
+				"a second failure",
+				"cd nosuch; cd nosuch2 && echo no; echo \"S=$?\"".into(),
+				format!("cd: nosuch: {nf}\ncd: nosuch2: {nf}\nS=1\n"),
+				false,
+			),
+			(
+				"pushd, missing",
+				"pushd /nonexistent/BOOM; echo \"S=$?\"".into(),
+				format!("pushd: /nonexistent/BOOM: {nf}\nS=1\n"),
+				false,
+			),
+			(
+				"pushd, a file",
+				"pushd file; echo \"S=$?\"".into(),
+				"pushd: file: Not a directory\nS=1\n".into(),
+				false,
+			),
+			(
+				"pushd, no search permission",
+				format!("pushd locked; echo \"S=$?\"; {} && echo STAYED", same("")),
+				"pushd: locked: Permission denied\nS=1\nSTAYED\n".into(),
+				true,
+			),
+			(
+				"popd, a removed directory",
+				"mkdir gone; pushd gone >/dev/null; pushd \"$top\" >/dev/null; rmdir \"$top/gone\"; \
+				 popd 2>\"$top/err\"; echo \"S=$?\"; case \"$(cat \"$top/err\")\" in *\"popd: \
+				 $top/gone: No such file or directory\") echo NAMED;; esac; dirs | wc -w | tr -d \" \""
+					.into(),
+				"S=1\nNAMED\n3\n".into(),
+				false,
+			),
+			(
+				"popd, an empty stack",
+				"popd; echo \"S=$?\"".into(),
+				"popd: directory stack empty\nS=1\n".into(),
+				false,
+			),
+		];
+		// SAFETY: `geteuid` has no preconditions.
+		let root = unsafe { libc::geteuid() } == 0;
+		let mut failures = Vec::new();
+		for (name, script, bash, needs_permissions) in rows {
+			if needs_permissions && root {
+				continue;
+			}
+			let dir = tempfile::tempdir().expect("scratch directory");
+			let outcome = run_command_capture_within(
+				Duration::from_secs(15),
+				&format!("{SETUP}{script}{CLEANUP}"),
+				Some(dir.path()),
+				None,
+				CancelToken::default(),
+			)
+			.await;
+			match outcome {
+				Ok((result, output)) if result.exit_code == Some(0) && output == bash => {},
+				Ok((result, output)) => failures.push(format!(
+					"{name}: Bash prints {bash:?}; got status {:?}, output {output:?}",
+					result.exit_code
+				)),
+				Err(_) => failures.push(format!("{name}: did not finish within 15 s")),
+			}
+		}
+		assert!(failures.is_empty(), "{failures:#?}");
+	}
+
 	#[cfg(unix)]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn uutils_diff_reads_process_substitution_fds() {
