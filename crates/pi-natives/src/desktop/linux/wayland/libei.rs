@@ -625,10 +625,10 @@ impl Libei {
 					move_to(x, y, &mut time)?;
 					if let (Some(code), Some(interface)) = (button, &button_interface) {
 						pace_clicks(count, |pressed| {
+							time = Self::timestamp()?.max(time);
 							if pressed {
 								button_held = true;
 							}
-							time = Self::timestamp()?.max(time);
 							interface.button(
 								code,
 								if pressed {
@@ -1063,7 +1063,7 @@ mod tests {
 	}
 
 	#[test]
-	fn cancellation_releases_the_held_press_and_stops_the_next_click() {
+	fn cancellation_releases_the_held_press_and_spares_a_click_that_went_out() {
 		let source = control::CancellationSource::default();
 		let token = source.token();
 		let mut sent = Vec::new();
@@ -1074,7 +1074,22 @@ mod tests {
 				Ok(())
 			})
 		});
-		assert!(result.is_err());
+		assert!(result.is_err(), "a cancel before the last press stops the gesture");
+		assert_eq!(sent, [true, false]);
+
+		let source = control::CancellationSource::default();
+		let token = source.token();
+		let mut sent = Vec::new();
+		let result = control::with_token_for_test(&token, || {
+			pace_clicks(1, |pressed| {
+				sent.push(pressed);
+				if pressed {
+					source.cancel();
+				}
+				Ok(())
+			})
+		});
+		assert!(result.is_ok(), "a click whose last press went out must not report Cancelled");
 		assert_eq!(sent, [true, false]);
 	}
 
