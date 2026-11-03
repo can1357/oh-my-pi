@@ -2007,80 +2007,90 @@ async fn expand_prefix_assignments_in_scope(
 			let _ = writeln!(stderr, "`{}': not a valid identifier", assignment.name);
 			continue;
 		}
-		let mut one = expand_assignment_once(assignment, shell, params).await?;
+		let written = match &assignment.name {
+			ast::AssignmentName::VariableName(name) => name.clone(),
+			ast::AssignmentName::ArrayElementName(name, _) => name.clone(),
+		};
 		// A name that holds another name (`declare -n`) is assigned through:
 		// the command runs with the name it holds, as it does in Bash.
-		one.name = followed_name(shell, one.name);
-		// What the command would otherwise see, which the shell keeps: the
-		// value `+=` appends to, and the attributes the temporary assignment
-		// does not carry. An integer one is kept while the value is
-		// appended, so that `declare -i a=5; a+=3` gives 8, as in Bash, and
-		// taken off again after.
-		let visible = shell.env().get(one.name.as_str()).map(|(_, variable)| {
-			(variable.value().to_cow_str(shell).into_owned(), variable.is_treated_as_integer(), variable.is_readonly())
-		});
-		if let Some((_, _, true)) = visible {
-			// Bash reports a readonly name, leaves the shell's value as it
-			// is, and runs the command with an empty one.
-			let _ = writeln!(stderr, "{}: readonly variable", one.name);
-			shell.env_mut().set_in_current_scope(one.name.clone(), empty_variable());
+		let chain = followed_names(shell, &written, stderr);
+		let target = chain.last().cloned().unwrap_or_else(|| written.clone());
+		// Bash reports a readonly name before it expands the value, which it
+		// then does not, and gives the command no name of its own: it runs
+		// with what the shell holds.
+		if shell.env().get(target.as_str()).is_some_and(|(_, variable)| variable.is_readonly()) {
+			let _ = writeln!(stderr, "{written}: readonly variable");
 			continue;
 		}
-		if one.append {
-			let (text, integer) = visible.map_or((String::new(), false), |(text, integer, _)| (text, integer));
-			let mut seed = ShellVariable::new(ShellValue::String(text));
-			if integer {
-				seed.treat_as_integer();
-			}
-			shell.env_mut().set_in_current_scope(one.name.clone(), seed);
-		}
-		let name = one.name.clone();
+		let mut one = expand_assignment_once(assignment, shell, params).await?;
+		one.name.clone_from(&target);
+		// `+=` appends to what the command would otherwise see, with the
+		// attributes that name has (`declare -i a=5; a+=3` gives 8,
+		// `declare -l a=AbC; a+=NeW` gives `abcnew`, as in Bash); the
+		// command's name carries none of them, only the value they gave it.
 		let appended = one.append;
-		assign_expanded(one, shell, true, Some(EnvironmentScope::Command), EnvironmentScope::Command)?;
 		if appended {
-			// The temporary assignment carries none of the attributes the
-			// name had, only the value they gave it.
-			let made = shell
-				.env()
-				.get(name.as_str())
-				.map(|(_, variable)| (variable.value().to_cow_str(shell).into_owned(), variable.is_exported()));
-			if let Some((text, exported)) = made {
-				let mut plain = ShellVariable::new(ShellValue::String(text));
-				if exported {
-					plain.export();
-				}
-				shell.env_mut().set_in_current_scope(name, plain);
+			let mut seed = match shell.env().get(target.as_str()) {
+				Some((_, variable)) if !variable.is_treated_as_nameref() => variable.clone(),
+				Some((_, variable)) => ShellVariable::new(ShellValue::String(variable.value().to_cow_str(shell).into_owned())),
+				None => ShellVariable::new(ShellValue::String(String::new())),
+			};
+			seed.unexport();
+			shell.env_mut().set_in_current_scope(target.clone(), seed);
+		}
+		assign_expanded(one, shell, true, Some(EnvironmentScope::Command), EnvironmentScope::Command)?;
+		let made = shell
+			.env()
+			.get(target.as_str())
+			.map(|(_, variable)| variable.value().to_cow_str(shell).into_owned());
+		let Some(text) = made else { continue };
+		if appended {
+			let mut plain = ShellVariable::new(ShellValue::String(text.clone()));
+			plain.export();
+			shell.env_mut().set_in_current_scope(target.clone(), plain);
+		}
+		// The names that led to it read as the value while the command runs,
+		// as they do in Bash, and are not in its environment: this shell
+		// reads a `declare -n` name as the name it holds.
+		for name in chain.iter().rev().skip(1).chain(std::iter::once(&written)) {
+			if *name != target {
+				shell
+					.env_mut()
+					.set_in_current_scope(name.clone(), ShellVariable::new(ShellValue::String(text.clone())));
 			}
 		}
 	}
 	Ok(())
 }
 
-/// The name a command's prefix assignment reaches: the one a `declare -n`
-/// name holds, as Bash follows it, and the name itself otherwise.
-fn followed_name(shell: &Shell<impl extensions::ShellExtensions>, name: String) -> String {
-	let mut name = name;
-	// A name that holds itself, or a ring of them, is followed only so far.
-	for _ in 0..32 {
-		let Some((_, variable)) = shell.env().get(name.as_str()) else { return name };
+/// The names a command's prefix assignment to `name` reaches, in order: each
+/// one a `declare -n` name holds, as Bash follows them, ending with the one
+/// assigned; empty where `name` holds none. A name that holds an array
+/// element is not followed, as in Bash, and neither is a ring of names,
+/// which Bash warns of.
+fn followed_names(
+	shell: &Shell<impl extensions::ShellExtensions>,
+	name: &str,
+	stderr: &mut openfiles::OpenFile,
+) -> Vec<String> {
+	let mut chain: Vec<String> = Vec::new();
+	let mut current = name.to_owned();
+	loop {
+		let Some((_, variable)) = shell.env().get(current.as_str()) else { return chain };
 		if !variable.is_treated_as_nameref() {
-			return name;
+			return chain;
 		}
 		let held = variable.value().to_cow_str(shell).into_owned();
-		if held.is_empty() || held == name {
-			return name;
+		if held.is_empty() || held.contains('[') {
+			return chain;
 		}
-		name = held;
+		if held == name || chain.contains(&held) {
+			let _ = writeln!(stderr, "warning: {name}: circular name reference");
+			return Vec::new();
+		}
+		chain.push(held.clone());
+		current = held;
 	}
-	name
-}
-
-/// A variable with nothing in it, which a command runs with where Bash
-/// leaves one.
-fn empty_variable() -> ShellVariable {
-	let mut variable = ShellVariable::new(ShellValue::String(String::new()));
-	variable.export();
-	variable
 }
 
 async fn execute_command(
