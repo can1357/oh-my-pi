@@ -11,6 +11,7 @@ const MESSAGES = { color: "userMessageText", symbol: "context.messages" } as con
 const OUTPUT = { color: "muted", symbol: "context.messages" } as const;
 export const CONTEXT_PRESENTATION = {
 	"system-prompt": SYSTEM,
+	"instruction-files": DETAILS,
 	skills: SKILLS,
 	"built-in-tools": TOOLS,
 	"custom-tools": DETAILS,

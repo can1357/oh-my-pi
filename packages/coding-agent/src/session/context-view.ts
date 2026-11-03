@@ -8,9 +8,11 @@ import {
 	type ContextViewCategory,
 	type ContextViewData,
 	type ContextViewEntry,
+	type ContextViewSourceMarker,
 } from "@oh-my-pi/pi-tui/chrome/context-view-model";
 import { type ContextBreakdown, toolSchemaFragments } from "@oh-my-pi/pi-tui/status-line/context-usage";
 import { stringifyJson } from "@oh-my-pi/pi-utils";
+import type { SystemPromptSource, SystemPromptSources } from "../system-prompt";
 import type { AgentSession } from "./agent-session";
 import { computeSessionContextBreakdown } from "./context-usage-runtime";
 import { type ContextViewMessage, convertMessagesForContextView } from "./messages";
@@ -107,21 +109,128 @@ function appendToolOutput(state: SnapshotBuildState, toolName: string, entry: Co
 	appendEntry(state, "tool-output", entry);
 }
 
-function appendSystemPromptEntries(session: AgentSession, state: SnapshotBuildState, skillListingTokens: number): void {
-	for (const [index, block] of session.systemPrompt.entries()) {
+/** A located source fragment inside one effective system block. */
+interface SourceClaim {
+	readonly start: number;
+	readonly end: number;
+	readonly source: SystemPromptSource;
+	/** Repeated sources only reserve their locations; they are never attributed. */
+	readonly ambiguous: boolean;
+}
+
+function countBlocks(blocks: readonly string[]): Map<string, number> {
+	const counts = new Map<string, number>();
+	for (const block of blocks) counts.set(block, (counts.get(block) ?? 0) + 1);
+	return counts;
+}
+
+/**
+ * Claims each source fragment in the effective prompt. A source is claimed only when its built
+ * block is unchanged at its original index, unique in both the built and effective prompts, and
+ * holds one fragment occurrence that overlaps no other source. `complete` is false when any source
+ * stays unattributed.
+ */
+function claimPromptSources(
+	effective: readonly string[],
+	metadata: SystemPromptSources,
+): { claims: Map<number, SourceClaim[]>; complete: boolean } {
+	let complete = true;
+	const builtCounts = countBlocks(metadata.blocks);
+	const effectiveCounts = countBlocks(effective);
+	const candidates = new Map<number, SourceClaim[]>();
+	for (const source of metadata.sources) {
+		const ambiguous = source.blockIndex < 0;
+		if (ambiguous) complete = false;
+		// A repeated fragment still reserves every location, so no other source can claim overlapping text.
+		const indices = ambiguous
+			? metadata.blocks.flatMap((block, index) => (block.includes(source.fragment) ? [index] : []))
+			: [source.blockIndex];
+		for (const index of indices) {
+			const block = metadata.blocks[index];
+			// Never remap moved or changed blocks, even when the fragment text still appears.
+			if (
+				block === undefined ||
+				effective[index] !== block ||
+				builtCounts.get(block) !== 1 ||
+				effectiveCounts.get(block) !== 1
+			) {
+				complete = false;
+				continue;
+			}
+			const ranges = candidates.get(index) ?? [];
+			for (let start = block.indexOf(source.fragment); start >= 0; start = block.indexOf(source.fragment, start + 1))
+				ranges.push({ start, end: start + source.fragment.length, source, ambiguous });
+			candidates.set(index, ranges);
+		}
+	}
+	const claims = new Map<number, SourceClaim[]>();
+	for (const [index, ranges] of candidates) {
+		// Validate the whole block before claiming: every participant in an overlap stays unattributed.
+		const accepted = ranges.filter(range => {
+			const overlaps = ranges.some(other => other !== range && range.start < other.end && range.end > other.start);
+			if (overlaps) complete = false;
+			return !range.ambiguous && !overlaps;
+		});
+		claims.set(
+			index,
+			accepted.sort((a, b) => a.start - b.start),
+		);
+	}
+	return { claims, complete };
+}
+
+/**
+ * System blocks with claimed instruction-file and skill fragments moved to their own categories.
+ * Each fragment leaves a colored marker in its block; markers are display-only and carry no tokens.
+ * Returns false when some source could not be attributed and remains in System Prompt.
+ */
+function appendSystemPromptEntries(session: AgentSession, state: SnapshotBuildState): boolean {
+	const tokenizer = session.agent.tokenizer;
+	const effective = session.systemPrompt;
+	const metadata = session.systemPromptSources;
+	const { claims, complete } = metadata
+		? claimPromptSources(effective, metadata)
+		: { claims: new Map<number, SourceClaim[]>(), complete: true };
+	for (const [index, block] of effective.entries()) {
+		const blockClaims = claims.get(index) ?? [];
+		const remaining: string[] = [];
+		const display: string[] = [];
+		const sourceMarkers: ContextViewSourceMarker[] = [];
+		let displayLength = 0;
+		let cursor = 0;
+		for (const { start, end, source } of blockClaims) {
+			const before = block.slice(cursor, start);
+			const category = state.categoriesById.get(source.kind)!;
+			const marker = `[Shown in ${category.label}: ${source.label}]`;
+			remaining.push(before);
+			display.push(before, marker);
+			displayLength += before.length;
+			sourceMarkers.push({ start: displayLength, end: displayLength + marker.length, category: source.kind });
+			displayLength += marker.length;
+			cursor = end;
+			appendEntry(state, source.kind, {
+				id: `${source.kind}/${source.id}`,
+				label: source.label,
+				path: source.path,
+				text: source.fragment,
+				tokens: tokenizer.countTokens(source.fragment),
+			});
+		}
+		const tail = block.slice(cursor);
+		remaining.push(tail);
+		display.push(tail);
+		const remainingText = remaining.join("");
+		// A block made entirely of claimed fragments still shows its markers.
+		if (!remainingText && sourceMarkers.length === 0) continue;
 		appendEntry(state, "system-prompt", {
 			id: `system-prompt/${index}`,
 			label: `System Block ${index + 1}`,
-			text: block,
-			tokens: session.agent.tokenizer.countTokens(block),
+			text: display.join(""),
+			tokens: tokenizer.countTokens(remainingText),
+			sourceMarkers: sourceMarkers.length > 0 ? sourceMarkers : undefined,
 		});
 	}
-	const skillsCategory = state.categoriesById.get("skills")!;
-	skillsCategory.tokens = skillListingTokens;
-	const systemPromptCategory = state.categoriesById.get("system-prompt")!;
-	// Skills estimates the prompt's skill listing, not full skill files or additional context.
-	// Subtract it only from the category weight; entries retain complete blocks and unscaled estimates.
-	systemPromptCategory.tokens = Math.max(0, systemPromptCategory.tokens - skillListingTokens);
+	return complete;
 }
 
 function appendToolDefinitionEntries(session: AgentSession, state: SnapshotBuildState): void {
@@ -383,10 +492,12 @@ export function buildSessionContextView(
 		serverToolNamesByCallId: new Map(),
 	};
 
-	appendSystemPromptEntries(session, state, breakdown.categories.find(category => category.id === "skills")!.tokens);
+	const notices: string[] = [];
+	if (!appendSystemPromptEntries(session, state))
+		notices.push("Some prompt sources could not be attributed; their content remains in System Prompt.");
 	appendToolDefinitionEntries(session, state);
 	appendMessageEntries(session, state);
 	finalizeToolOutputGroups(state);
 
-	return { breakdown, categories };
+	return { breakdown, categories, notices };
 }

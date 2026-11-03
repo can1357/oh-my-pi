@@ -43,7 +43,7 @@ You are omp's trusted coding assistant.
 Matching skill → MUST read `skill://<name>` first.
 <skills>
 {{#each skills}}
-- {{name}}: {{description}}
+{{fragment}}
 {{/each}}
 </skills>
 {{/if}}
