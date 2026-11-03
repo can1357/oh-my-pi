@@ -91,7 +91,7 @@ const server = Bun.serve({
 			// `log` records what the page saw: Chrome fires afterprint only once a print finished, and headless Chrome
 			// returns from an unheld print() without printing anything.
 			return new Response(
-				`<button id="print">Print</button><button id="confirm-print">Print after asking</button><button id="popup-print">Print a receipt</button><button id="popup-url-print">Open a receipt</button><script>
+				`<button id="print">Print</button><button id="confirm-print">Print after asking</button><button id="popup-print">Print a receipt</button><button id="popup-url-print">Open a receipt</button><a id="link-print" href="/receipt-alone" target="_blank">Receipt</a><form action="/receipt-alone" target="_blank"><button id="form-print">Receipt</button></form><button id="noopener-print">Open a receipt alone</button><script>
 					globalThis.log = [];
 					addEventListener("afterprint", () => log.push("afterprint"));
 					addEventListener("pageshow", event => { if (event.persisted) log.push("restored"); });
@@ -106,7 +106,24 @@ const server = Bun.serve({
 						receipt.close();
 					});
 					document.querySelector("#popup-url-print").addEventListener("click", () => void open("/receipt"));
+					document.querySelector("#noopener-print").addEventListener("click", () => void open("/receipt-alone", "_blank", "noopener"));
 					if (location.pathname === "/print-on-load") addEventListener("load", () => { print(); log.push("load print returned"); });
+				</script>`,
+				{ headers },
+			);
+		}
+		if (pathname === "/receipt-alone" || pathname === "/receipt-slow") {
+			// A receipt window with no way back to the page that opened it, printing as it loads; the slow one first keeps
+			// its renderer busy 2 s, longer than the release tail, so nothing omp sends reaches it before it prints.
+			const busy =
+				pathname === "/receipt-slow" ? "const until = Date.now() + 2_000; while (Date.now() < until);" : "";
+			return new Response(
+				`<p>receipt</p><script>
+					globalThis.log = [];
+					addEventListener("afterprint", () => log.push("afterprint"));
+					${busy}
+					print();
+					log.push("print returned");
 				</script>`,
 				{ headers },
 			);
@@ -220,7 +237,7 @@ async function untilCallEnded(page: Page): Promise<void> {
 		.waitForFunction(
 			`Object.getOwnPropertySymbols(globalThis)
 				.filter(key => key.description?.endsWith(".until"))
-				.every(key => globalThis[key].until - ${PRINT_HOLD_CLOCK}() <= 1_500)`,
+				.every(key => globalThis[key] - ${PRINT_HOLD_CLOCK}() <= 1_500)`,
 			{ timeout: 0, polling: 50 },
 		);
 }
@@ -765,29 +782,19 @@ return await tab.evaluate(() => {
 	}, 30_000);
 
 	test.each(["calls", "tab"] as const)(
-		"keeps a popup's %s print hold after its opener changes origin",
+		"keeps a window's %s print hold on the tab's calls after the page that opened it changes origin",
 		async scope => {
 			await withUserBrowser(async cdpUrl => {
 				const user = await puppeteer.connect({ browserURL: cdpUrl, defaultViewport: null });
 				try {
 					const page = await user.newPage();
 					await page.goto(`${baseUrl}/print`);
-					// A clock retained by the popup can advance even after the opener becomes inaccessible.
-					await page.mainFrame().mainRealm().evaluate(`{
-					const real = Date.now;
-					let elapsed = 0;
-					${PRINT_HOLD_CLOCK} = () => real() + elapsed;
-					globalThis.advanceClock = ms => { elapsed += ms; };
-				}`);
 					const hold = await PrintHold.install(page, scope);
 					let disposed = false;
 					try {
 						await hold.beginCall(30_000);
 						const popupTarget = user.waitForTarget(target => target.opener() === page.target());
-						await page
-							.mainFrame()
-							.mainRealm()
-							.evaluate('const receipt = open(""); receipt.advanceClock = advanceClock');
+						await page.mainFrame().mainRealm().evaluate('open("")');
 						const popup = await (await popupTarget).page();
 						if (!popup) throw new Error("Expected the receipt popup");
 						try {
@@ -805,7 +812,7 @@ return await tab.evaluate(() => {
 							expect(notice).toContain("The page called window.print()");
 							expect(notice).toContain("tab.pdf()");
 							await hold.endCall();
-							await popup.mainFrame().mainRealm().evaluate("advanceClock(1_500)");
+							await advancePrintClock(popup, 1_500);
 							expect(await popup.mainFrame().mainRealm().evaluate(print)).toEqual(
 								scope === "calls" ? ["print returned"] : ["afterprint", "print returned"],
 							);
@@ -825,6 +832,84 @@ return await tab.evaluate(() => {
 		},
 		30_000,
 	);
+
+	test.each([
+		["a link with a target", "#link-print"],
+		["a form with a target", "#form-print"],
+		["open() with noopener", "#noopener-print"],
+	])(
+		"holds print() in the first document of a window the page opens through %s",
+		async (_how, control) => {
+			await withUserBrowser(async cdpUrl => {
+				const user = await puppeteer.connect({ browserURL: cdpUrl, defaultViewport: null });
+				try {
+					const page = await user.newPage();
+					await page.goto(`${baseUrl}/print`);
+					const hold = await PrintHold.install(page, "calls");
+					try {
+						await hold.beginCall(30_000);
+						// No window comes back to the page, and the receipt prints before omp could reach it through puppeteer.
+						const popupTarget = user.waitForTarget(target => target.opener() === page.target());
+						await page
+							.mainFrame()
+							.mainRealm()
+							.evaluate(`document.querySelector(${JSON.stringify(control)}).click()`);
+						const popup = await (await popupTarget).page();
+						if (!popup) throw new Error("Expected the receipt popup");
+						try {
+							await popup
+								.mainFrame()
+								.mainRealm()
+								.waitForFunction('globalThis.log?.includes("print returned")', { timeout: 0, polling: 50 });
+							expect(await popup.mainFrame().mainRealm().evaluate("globalThis.log")).toEqual([
+								"afterprint",
+								"print returned",
+							]);
+						} finally {
+							await popup.close();
+						}
+					} finally {
+						await hold.dispose();
+					}
+				} finally {
+					await user.disconnect();
+				}
+			});
+		},
+		30_000,
+	);
+
+	test("holds print() in a window's later document for the whole call, not only the release tail", async () => {
+		await withUserBrowser(async cdpUrl => {
+			const user = await puppeteer.connect({ browserURL: cdpUrl, defaultViewport: null });
+			try {
+				const page = await user.newPage();
+				await page.goto(`${baseUrl}/print`);
+				const hold = await PrintHold.install(page, "calls");
+				try {
+					await hold.beginCall(30_000);
+					const popupTarget = user.waitForTarget(target => target.opener() === page.target());
+					await page.mainFrame().mainRealm().evaluate('document.querySelector("#popup-url-print").click()');
+					const popup = await (await popupTarget).page();
+					if (!popup) throw new Error("Expected the receipt popup");
+					try {
+						// The receipt keeps its renderer busy past the 1.5 s release tail, then prints, all within the call.
+						await popup.goto(`${baseUrl}/receipt-slow`);
+						expect(await popup.mainFrame().mainRealm().evaluate("globalThis.log")).toEqual([
+							"afterprint",
+							"print returned",
+						]);
+					} finally {
+						await popup.close();
+					}
+				} finally {
+					await hold.dispose();
+				}
+			} finally {
+				await user.disconnect();
+			}
+		});
+	}, 30_000);
 
 	test("moves and releases popup print holds without waiting on the popup's dialog", async () => {
 		await withUserBrowser(async cdpUrl => {
