@@ -9,7 +9,7 @@
 
 ### Fixed
 
-- `computer.apps.open("~/…")` opens the item in your home folder, as other tools read `~`, instead of failing with "must identify an existing .app bundle"; the `app` option reads `~` the same way
+- `computer.apps.open("~/…")` and its `app` option open from your home folder instead of failing with "must identify an existing .app bundle"
 
 ## [18.16.0] - 2026-11-02
 

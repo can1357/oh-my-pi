@@ -394,10 +394,10 @@ const URL_SCHEME = /^[A-Za-z][A-Za-z0-9+.-]+:/;
 /**
  * `apps.open`'s target or `app` selector, against the session's folder
  * `cwd` when it names a path there: one written as a relative path (`./a`,
- * `a/b`), even if missing, or a bare name of an existing entry. A leading `~`
- * is the user's home, as in every other path a tool takes. An exact
- * application ID or native path (`listed`) keeps precedence over a same-named
- * entry; absolute paths, URLs and other names pass through to native
+ * `a/b`), even if missing, or a bare name of an existing entry. `~` and a
+ * leading `~/` name the user's home. An exact application ID or native path
+ * (`listed`) keeps precedence over a same-named entry; absolute paths, URLs
+ * and other names pass through to native
  * resolution.
  */
 async function sessionPath(value: string, cwd: string, listed: (value: string) => Promise<boolean>): Promise<string> {
