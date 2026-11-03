@@ -424,6 +424,7 @@ import {
 	isUserAuthoredMessage,
 	isUserInterruptAbort,
 	isUserInvokedSkillPrompt,
+	isUserTurnInitiator,
 	logProviderTurnError,
 	normalizeCustomMessagePayload,
 	operatorTitleText,
@@ -9660,11 +9661,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// Synthetic/tool-continuation turns, agent-originated or autoloaded skill
 			// injections, and non-auto sessions are skipped. Failures fall back to a
 			// concrete level inside the helper.
-			const isUserTurn =
-				message.role === "user" ||
-				(message.role === "custom" &&
-					(isUserInvokedSkillPrompt(message) ||
-						(message.customType === COLLAB_PROMPT_MESSAGE_TYPE && message.attribution === "user")));
+			const isUserTurn = message.role === "user" || (message.role === "custom" && isUserTurnInitiator(message));
 			// `chillax` settles the turn's effort itself, so classification is skipped.
 			const relaxed = isUserTurn && this.#models.applyChillax(expandedText);
 			if (this.isAutoThinking && isUserTurn && !relaxed) {
