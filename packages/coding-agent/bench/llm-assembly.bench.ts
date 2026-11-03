@@ -21,8 +21,8 @@
  * noise <=20% of the median (not raw stddev/median).
  *
  * Run: `bun run packages/coding-agent/bench/llm-assembly.bench.ts`
- * Env: `LLM_ASSEMBLY_N` overrides the history length (default 5000);
- *      `PI_TOKENIZER_ACCURATE=1` uses the native cl100k tokenizer.
+ * Env: `LLM_ASSEMBLY_N` overrides the history length (default 5000). Estimates
+ *      count with the native o200k_base tokenizer (no model, so no catalog family).
  */
 import { type AgentMessage, Tokenizer } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ToolResultMessage, Usage } from "@oh-my-pi/pi-ai";

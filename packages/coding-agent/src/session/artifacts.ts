@@ -67,6 +67,28 @@ export async function writeArtifact(path: string, content: string): Promise<numb
 }
 
 /**
+ * Artifact surface shared by a session and the subagents that adopt its
+ * manager. {@link ArtifactManager} implements it on the owning thread; a
+ * subagent worker holds a remote implementation whose ids come from the owner
+ * (`thread/services/runtime-remote.ts`), so ids stay unique across the tree.
+ */
+export interface ArtifactManagerApi {
+	/** Artifact directory path; may not exist until the first artifact is saved. */
+	readonly dir: string;
+	/** Allocate the next artifact id. */
+	allocateId(): number;
+	/** Allocate a new artifact path and id without writing content. */
+	allocatePath(toolType: string): Promise<{ id: string; path: string }>;
+	/** Save `content` as a new artifact; returns its id. */
+	save(content: string, toolType: string): Promise<string>;
+	exists(id: string): Promise<boolean>;
+	/** Every artifact file name in the directory; empty when it does not exist. */
+	listFiles(): Promise<string[]>;
+	/** Full path of an artifact file, or null when it does not exist. */
+	getPath(id: string): Promise<string | null>;
+}
+
+/**
  * Manages artifact storage for a session.
  *
  * Artifacts are stored with sequential IDs in the session's artifact directory.
@@ -76,7 +98,7 @@ export async function writeArtifact(path: string, content: string): Promise<numb
  * adopted via `SessionManager.adoptArtifactManager`, so the whole parent +
  * subagent tree shares one ID space and one directory.
  */
-export class ArtifactManager {
+export class ArtifactManager implements ArtifactManagerApi {
 	#nextId = 0;
 	readonly #dir: string;
 	#dirCreated = false;
