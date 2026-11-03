@@ -10,13 +10,20 @@
  * or projected message still carries exactly that identity.
  */
 import { describe, expect, it } from "bun:test";
+import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { Context, Message } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { type AsideProvenanceCarrier, kAsideProvenance } from "@oh-my-pi/pi-ai/utils/block-symbols";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { loadExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
+import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { obfuscateMessages, obfuscateProviderContext } from "@oh-my-pi/pi-coding-agent/secrets/message-transform";
 import { SecretObfuscator } from "@oh-my-pi/pi-coding-agent/secrets/obfuscator";
 import { DateCwdReminderInjector } from "@oh-my-pi/pi-coding-agent/session/date-cwd-reminder";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { TempDir } from "@oh-my-pi/pi-utils";
 import {
 	convertToLlm,
 	replaceLlmImagesWithText,
@@ -134,4 +141,37 @@ describe("claimable aside identity through the provider pipeline", () => {
 		const messages = convertToLlm([user, quote]);
 		expect(carriers(messages, token)).toHaveLength(0);
 	});
+
+	for (const handler of [
+		["changes nothing", "() => {}"],
+		["returns an equal copy of every message", "event => ({ messages: event.messages.map(m => ({ ...m })) })"],
+		["rebuilds every message from its JSON", "event => ({ messages: JSON.parse(JSON.stringify(event.messages)) })"],
+	] as const) {
+		it(`survives an extension's context handler that ${handler[0]}`, async () => {
+			const tempDir = TempDir.createSync("@pi-aside-provenance-");
+			const authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
+			try {
+				const extension = path.join(tempDir.path(), "context.ts");
+				await Bun.write(extension, `export default function (pi) { pi.on("context", ${handler[1]}); }`);
+				const loaded = await loadExtensions([extension], tempDir.path());
+				expect(loaded.errors).toHaveLength(0);
+				const runner = new ExtensionRunner(
+					loaded.extensions,
+					loaded.runtime,
+					tempDir.path(),
+					SessionManager.inMemory(tempDir.path()),
+					new ModelRegistry(authStorage),
+				);
+				const { aside, token } = markedNotice();
+				const out = await runner.emitContext([user, aside]);
+				// The structured clone drops symbols; the runner gives each clone back its original's identity.
+				expect(out.filter(message => (message as AsideProvenanceCarrier)[kAsideProvenance] === token)).toHaveLength(
+					1,
+				);
+			} finally {
+				authStorage.close();
+				tempDir.removeSync();
+			}
+		});
+	}
 });

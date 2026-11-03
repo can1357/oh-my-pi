@@ -1309,8 +1309,9 @@ function convertOneCached(m: AgentMessage, interruptedNext: boolean): Message[] 
 		for (const message of fragment) copyPerCallContextMessage(message, m);
 		convertCache.set(m, { interruptedNext, fragment });
 	}
-	// Copied on every pass: a claimable aside gets its identity when the agent
-	// loop takes it into a request, which can follow an earlier conversion.
+	// Copied on every pass, so a cached fragment stands for its message's current
+	// identity. A producer gives a claimable aside its identity when it builds it,
+	// before any conversion; the array-level shortcuts in `convertToLlm` rely on that.
 	for (const message of fragment) copyAsideProvenance(message, m);
 	return fragment;
 }

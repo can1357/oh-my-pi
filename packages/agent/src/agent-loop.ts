@@ -40,6 +40,7 @@ import {
 	copyCursorExecResolved,
 	getStreamingPartialJson,
 	kAsideProvenance,
+	markAsideProvenance,
 	kCursorExecResolved,
 } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { schemaDefinesProperty } from "@oh-my-pi/pi-ai/utils/schema/json-schema-validator";
@@ -1213,18 +1214,6 @@ export function isClaimableAside(message: AgentMessage): boolean {
 	return typeof (message as CommittableAsideMessage)[ASIDE_MESSAGE_CLAIM] === "function";
 }
 
-/**
- * Give a claimable aside its identity as it is taken into a request: a token
- * every message converted or projected from it carries
- * ({@link kAsideProvenance}), so the hand-off can tell whether the request
- * about to be sent holds this very aside, not merely text like it.
- */
-function markAsideProvenance(message: AgentMessage): AgentMessage {
-	const carrier = message as AgentMessage & AsideProvenanceCarrier;
-	carrier[kAsideProvenance] ??= {};
-	return message;
-}
-
 /** Whether `sent`, the provider-bound context about to go out, holds a message carrying `message`'s identity. */
 function carries(sent: Context, message: AgentMessage): boolean {
 	const provenance = (message as AgentMessage & AsideProvenanceCarrier)[kAsideProvenance];
@@ -2315,11 +2304,9 @@ async function streamAssistantResponse(
 
 	try {
 		return await runInActiveSpan(chatSpan, async () => {
-			// The hand-off is the last step before the provider call: every host
-			// callback of the request, the chat span's telemetry hooks included, has
-			// run, and nothing but this call's own argument object follows.
-			handOff?.(llmContext);
-			let response = await streamFunction(model, llmContext, {
+			// Read every option, the host's own config getters included, before the
+			// hand-off: nothing of the host's may run between it and the provider call.
+			const providerOptions = {
 				...config,
 				apiKey,
 				metadata: resolvedMetadata,
@@ -2333,7 +2320,12 @@ async function streamAssistantResponse(
 				onResponse: captureOnResponse,
 				cursorOnToolResult: collectCursorToolResult,
 				liveSteering: providerCall.liveSteering,
-			});
+			};
+			// The hand-off is the last step before the provider call: every host
+			// callback of the request, the chat span's telemetry hooks and the
+			// option reads included, has run.
+			handOff?.(llmContext);
+			let response = await streamFunction(model, llmContext, providerOptions);
 			if (promptToolWireTools && ownedDialect) {
 				// Re-materialize in-band tool-call text as native toolCall content blocks
 				// so the rest of the loop executes them unchanged. When the model starts

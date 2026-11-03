@@ -17,6 +17,7 @@
 import type { AgentTool } from "./types";
 import type { Context, Message, Tool } from "@oh-my-pi/pi-ai";
 import { toolWireSchema } from "@oh-my-pi/pi-ai";
+import { copyAsideProvenance } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { normalizeTools } from "./agent-loop";
 import { messageEstimateVersion } from "./compaction/message-cache";
 import type { AgentContext, AgentMessage } from "./types";
@@ -375,6 +376,11 @@ export class AppendOnlyContextManager {
 				this.#messageDigests.length = stableCount;
 			}
 		}
+		// A kept entry stands in for the new message with the same bytes: it takes
+		// that message's aside identity (or none), which the bytes do not hold.
+		const kept = this.log.entries();
+		for (let i = 0; i < this.#lastSyncCount && i < kept.length; i++)
+			copyAsideProvenance(kept[i]!, normalizedMessages[i]);
 
 		// Append the diverged tail (or the full delta on a normal turn).
 		for (let i = this.#lastSyncCount; i < normalizedMessages.length; i++) {

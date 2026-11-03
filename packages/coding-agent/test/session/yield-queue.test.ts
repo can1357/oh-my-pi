@@ -3,6 +3,7 @@ import {
 	type AgentContext,
 	type AgentLoopConfig,
 	type AgentMessage,
+	AppendOnlyContextManager,
 	ASIDE_MESSAGE_CLAIM,
 	ASIDE_MESSAGE_COMMIT,
 	agentLoop,
@@ -10,6 +11,7 @@ import {
 } from "@oh-my-pi/pi-agent-core";
 import type { Message } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { YieldQueue } from "@oh-my-pi/pi-coding-agent/session/yield-queue";
 import { type Tracer, trace } from "@opentelemetry/api";
 
@@ -609,5 +611,112 @@ describe("YieldQueue claimAtRequest through the real agent loop", () => {
 		expect(other).toBe("delivered");
 		expect(conversions).toBe(2);
 		expect(l.mock.calls).toHaveLength(1);
+	});
+});
+
+describe("YieldQueue claimAtRequest through the production converter and caches", () => {
+	const TEXT = "PIPELINE_NOTICE: a child is taking longer than you said";
+	const user: AgentMessage = { role: "user", content: "an ordinary request", timestamp: 1 };
+	const noticeLike = (timestamp: number): AgentMessage =>
+		({
+			role: "custom",
+			customType: "subagent-overdue",
+			content: TEXT,
+			display: true,
+			attribution: "agent",
+			timestamp,
+		}) as AgentMessage;
+	/** A due-by-shaped notice through the queue, the coding-agent converter and the real loop. */
+	function pipeline() {
+		let ended = "pending";
+		let stale = false;
+		const queue = new YieldQueue({ isStreaming: () => true, injectIdle: async () => {}, scheduleIdleFlush() {} });
+		queue.register<string>("notice", { claimAtRequest: true, isStale: () => stale, build: () => noticeLike(2) });
+		const receipt = queue.enqueueWithReceipt<string>("notice", "x").then(
+			() => void (ended = "delivered"),
+			() => void (ended = "discarded"),
+		);
+		const notice = queue.drainLazy()[0]!()!;
+		const mock = createMockModel({ responses: [{ content: ["ok"] }] });
+		const config: AgentLoopConfig = { model: mock.model, convertToLlm };
+		const context: AgentContext = { systemPrompt: ["test"], messages: [], tools: [] };
+		const run = async () => {
+			try {
+				for await (const _ of agentLoop([user, notice], context, config, undefined, mock.stream)) {
+					// drain
+				}
+			} catch {
+				// A failing host callback fails the run; the receipt is what is asserted.
+			}
+			await receipt;
+			return {
+				ended,
+				calls: mock.calls.length,
+				carried: mock.calls.some(call => JSON.stringify(call.context.messages).includes(TEXT)),
+			};
+		};
+		return {
+			notice,
+			config,
+			run,
+			makeStale: () => {
+				stale = true;
+			},
+		};
+	}
+
+	for (const growth of [false, true]) {
+		test(`a notice converted before the loop takes it in is delivered (${growth ? "array grew" : "same array"})`, async () => {
+			const p = pipeline();
+			const stable: AgentMessage[] = [user, p.notice, { role: "user", content: "tail", timestamp: 3 }];
+			convertToLlm(stable);
+			if (growth) stable.push({ role: "user", content: "growth", timestamp: 4 });
+			p.config.transformContext = async () => stable;
+			expect(await p.run()).toEqual({ ended: "delivered", calls: 1, carried: true });
+		});
+	}
+
+	test("an append-only log entry with the same bytes stands for the new notice", async () => {
+		const p = pipeline();
+		const appendOnly = new AppendOnlyContextManager();
+		appendOnly.syncMessages(convertToLlm([user, noticeLike(2)]));
+		p.config.appendOnlyContext = appendOnly;
+		expect(await p.run()).toEqual({ ended: "delivered", calls: 1, carried: true });
+	});
+
+	test("an identical notice after a stopped request is delivered through the same append-only log", async () => {
+		const appendOnly = new AppendOnlyContextManager();
+		const first = pipeline();
+		first.config.appendOnlyContext = appendOnly;
+		first.config.beforeModelCall = () => ({ stop: true });
+		expect((await first.run()).ended).toBe("discarded");
+		const next = pipeline();
+		next.config.appendOnlyContext = appendOnly;
+		expect(await next.run()).toEqual({ ended: "delivered", calls: 1, carried: true });
+	});
+
+	test("a host option getter that throws runs before the notice is committed", async () => {
+		const p = pipeline();
+		Object.defineProperty(p.config, "onPayload", {
+			enumerable: true,
+			get() {
+				throw new Error("host option getter");
+			},
+		});
+		expect(await p.run()).toEqual({ ended: "discarded", calls: 0, carried: false });
+	});
+
+	test("a host option getter cannot make a notice stale after it is committed", async () => {
+		const p = pipeline();
+		Object.defineProperty(p.config, "onPayload", {
+			enumerable: true,
+			get() {
+				p.makeStale();
+				return undefined;
+			},
+		});
+		const result = await p.run();
+		expect(result.ended).toBe("discarded");
+		expect(result.carried).toBe(false);
 	});
 });

@@ -5,6 +5,7 @@ import {
 	ASIDE_MESSAGE_DISCARD,
 	type CommittableAsideMessage,
 } from "@oh-my-pi/pi-agent-core";
+import { markAsideProvenance } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { logger, toError } from "@oh-my-pi/pi-utils";
 
 export interface YieldDispatcher<P> {
@@ -362,6 +363,9 @@ export class YieldQueue {
 			},
 		});
 		if (!built.dispatcher.claimAtRequest) return;
+		// Its identity from the moment it exists, so no conversion or cache can
+		// hand out a copy of it that lacks one.
+		markAsideProvenance(built.message);
 		const { kind, dispatcher } = built;
 		Object.defineProperty(built.message, ASIDE_MESSAGE_CLAIM, {
 			configurable: true,
