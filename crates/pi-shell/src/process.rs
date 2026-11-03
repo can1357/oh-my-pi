@@ -874,25 +874,16 @@ impl Process {
 		let protected = host_protected_pids();
 
 		// Polite wave: SIGTERM the group, every live descendant, then the root.
-		// The waits below cover every group the wave signalled, so a member
-		// forked during the wave keeps the tree "running" until it is gone and
-		// cannot be skipped by an early return.
+		// It returns every process it knew (its snapshot and its groups'
+		// members, pinned before and after the group signal). The waits below
+		// cover those processes and every group the wave signalled, so a
+		// member forked during the wave, or one that left its group on TERM,
+		// keeps the tree "running" until it is gone and cannot be skipped by
+		// an early return.
 		let mut wave = SignalWave::new(TERM_SIGNAL);
-		let mut descendants = wave.tree(self, process_group, &protected);
-		// Pin the group's members too, so the hard wave can still reach one
-		// that leaves the group on TERM without being a descendant (an orphan
-		// a double fork left in the group). They are signalled through the
-		// group, not directly.
-		for &pgid in &wave.groups {
-			for member in Self::group_members(pgid) {
-				if !descendants.iter().any(|seen| seen.pid() == member.pid())
-					&& member.pid() != self.pid()
-				{
-					descendants.push(member);
-				}
-			}
-		}
-		let mut groups = wave.deliver().groups;
+		wave.tree(self, process_group, &protected);
+		let (delivery, mut known) = wave.deliver_known();
+		let mut groups = delivery.groups;
 
 		// Optional grace wait. A negative `graceful_ms` skips the wait entirely
 		// (we still emit the polite signal so cleanup handlers can run before
@@ -900,7 +891,7 @@ impl Process {
 		if graceful_ms >= 0 {
 			let exited = wait_for_exit(
 				self,
-				&descendants,
+				&known,
 				&groups,
 				Some(Duration::from_millis(graceful_ms as u64)),
 				ct.clone(),
@@ -912,32 +903,19 @@ impl Process {
 		}
 
 		// Hard wave. Re-walk the tree so any grandchild spawned during the grace
-		// period — or any process re-parented to the root — is signalled too.
-		// Every process the polite wave knew (its descendants and its groups'
-		// members) that is still alive is added by its pin: one that left the
-		// tree and its group after TERM (`setsid()` in a handler) is in
-		// neither re-walk.
+		// period — or any process re-parented to the root — is signalled too,
+		// and carry every process the polite wave knew that is still alive:
+		// one that left the tree and its group after TERM (`setsid()` in a
+		// handler) is in neither re-walk.
 		let mut wave = SignalWave::new(KILL_SIGNAL);
-		let mut known = wave.tree(self, process_group, &protected);
-		for process in descendants {
-			if process.status() == ProcessStatus::Running
-				&& !known.iter().any(|seen| seen.pid() == process.pid())
-			{
-				wave.add(process.clone());
-				known.push(process);
-			}
-		}
-		descendants = known;
-		groups = wave.deliver().groups;
+		wave.tree(self, process_group, &protected);
+		wave.carry(&known);
+		let delivery;
+		(delivery, known) = wave.deliver_known();
+		groups = delivery.groups;
 
-		wait_for_exit(
-			self,
-			&descendants,
-			&groups,
-			Some(Duration::from_millis(u64::from(timeout_ms))),
-			ct,
-		)
-		.await
+		wait_for_exit(self, &known, &groups, Some(Duration::from_millis(u64::from(timeout_ms))), ct)
+			.await
 	}
 }
 
@@ -972,6 +950,11 @@ impl Process {
 /// - The kernel signals one group at a time, so a process that moves from one
 ///   recorded group to another between their two group signals, including a
 ///   move the first group's signal causes, gets the signal from both.
+/// - The members a wave returns for a later wave to carry are pinned just
+///   before and just after the group signal. A member forked after the first
+///   scan that leaves its group in its TERM handler before the second scan
+///   reads it, and that no known process has as a descendant, is not carried;
+///   once its leader has exited, a later wave does not reach it.
 ///
 /// The harness's own group is never recorded.
 struct SignalWave {
@@ -1060,6 +1043,47 @@ impl SignalWave {
 			reached += u32::from(target.inner.kill(self.signal));
 		}
 		Delivery { reached, groups }
+	}
+
+	/// Snapshot each of `carried` that is still running: processes an earlier
+	/// wave knew that may have left the recorded trees and groups since (a
+	/// `setsid()` in a TERM handler whose leader then exited). One that is
+	/// still in a recorded group is reached through it; one that left is
+	/// signalled through its pin.
+	fn carry(&mut self, carried: &[Process]) {
+		for process in carried {
+			if process.status() == ProcessStatus::Running {
+				self.add(process.clone());
+			}
+		}
+	}
+
+	/// Delivers the wave and returns, with what it reached, every process it
+	/// knew of: its snapshot, the recorded groups' members pinned just before
+	/// the group signals, and the signalled groups' members pinned just after
+	/// them. A later wave carries them, so a member that leaves its group
+	/// because of this signal is still reached. A member that leaves before
+	/// the scan after the group signal reads it, and that no known process has
+	/// as a descendant, is not known.
+	fn deliver_known(&mut self) -> (Delivery, Vec<Process>) {
+		fn pin_members(groups: &[i32], known: &mut Vec<Process>) {
+			for &pgid in groups {
+				for member in Process::group_members(pgid) {
+					if !known.iter().any(|seen| seen.pid() == member.pid()) {
+						known.push(member);
+					}
+				}
+			}
+		}
+		let mut known: Vec<Process> = self
+			.targets
+			.iter()
+			.map(|(process, _)| process.clone())
+			.collect();
+		pin_members(&self.groups, &mut known);
+		let delivery = self.deliver();
+		pin_members(&delivery.groups, &mut known);
+		(delivery, known)
 	}
 }
 
@@ -1301,6 +1325,21 @@ impl TerminationTargets {
 	/// swallowed: targets routinely exit between collection and signalling,
 	/// and the caller's policy is "best effort".
 	pub fn signal(&self, signal: i32) {
+		self.wave(signal).deliver();
+	}
+
+	/// Like [`signal`](Self::signal), and also signals each of `carried`
+	/// that is still running (processes an earlier wave returned, which may
+	/// have left the recorded trees and groups since). Returns every process
+	/// this wave knew of, for the next wave to carry; see
+	/// `SignalWave::deliver_known`.
+	pub fn signal_carrying(&self, signal: i32, carried: &[Process]) -> Vec<Process> {
+		let mut wave = self.wave(signal);
+		wave.carry(carried);
+		wave.deliver_known().1
+	}
+
+	fn wave(&self, signal: i32) -> SignalWave {
 		let mut wave = SignalWave::new(signal);
 		for &pgid in &self.pgids {
 			wave.group(pgid);
@@ -1309,7 +1348,7 @@ impl TerminationTargets {
 		for process in &self.processes {
 			wave.tree(process, process.led_group(), &protected);
 		}
-		wave.deliver();
+		wave
 	}
 }
 
@@ -1554,7 +1593,7 @@ const fn platform_process_group_alive(_pgid: i32) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
 	use super::*;
 
 	/// The harness pid must be the only protected pid. Including its recorded
@@ -1838,7 +1877,7 @@ mod tests {
 
 	/// Compiles `tests/fixtures/group-move.c` into `dir` and returns its path.
 	#[cfg(target_os = "linux")]
-	fn compile_group_move_helper(dir: &std::path::Path) -> std::path::PathBuf {
+	pub(crate) fn compile_group_move_helper(dir: &std::path::Path) -> std::path::PathBuf {
 		let fixture =
 			std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/group-move.c");
 		let helper = dir.join("group-move");
@@ -2006,7 +2045,7 @@ mod tests {
 
 	/// Polls `path` for up to 5 s until it holds a pid.
 	#[cfg(unix)]
-	fn wait_for_pid_file(path: &std::path::Path) -> i32 {
+	pub(crate) fn wait_for_pid_file(path: &std::path::Path) -> i32 {
 		use std::{
 			thread,
 			time::{Duration, Instant},

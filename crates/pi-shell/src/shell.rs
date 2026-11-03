@@ -1816,14 +1816,18 @@ async fn terminate_run(registry: &process::SpawnRegistry) {
 	if targets.is_empty() {
 		return;
 	}
-	targets.signal(process::TERM_SIGNAL);
-	wait_for_term_grace(registry).await;
+	// Each wave carries every process the previous one knew (its snapshot and
+	// its groups' members): one that left its group in its TERM handler, after
+	// its leader exited, is no longer in what the registry builds.
+	let mut known = targets.signal_carrying(process::TERM_SIGNAL, &[]);
+	wait_for_term_grace(registry, &known).await;
 	for wave in 0..KILL_WAVES {
+		known.retain(|process| process.status() == process::ProcessStatus::Running);
 		let targets = registry.build_targets();
-		if targets.is_empty() {
+		if targets.is_empty() && known.is_empty() {
 			return;
 		}
-		targets.signal(process::KILL_SIGNAL);
+		known = targets.signal_carrying(process::KILL_SIGNAL, &known);
 		if wave + 1 < KILL_WAVES {
 			time::sleep(Duration::from_millis(150)).await;
 		}
@@ -1852,7 +1856,7 @@ async fn settle_spawns(registry: &process::SpawnRegistry) {
 	not(unix),
 	expect(clippy::unused_async, reason = "the TERM grace wait only awaits on unix")
 )]
-async fn wait_for_term_grace(registry: &process::SpawnRegistry) {
+async fn wait_for_term_grace(registry: &process::SpawnRegistry, known: &[process::Process]) {
 	// Windows TERM is already hard termination; there is no trap to wait for.
 	#[cfg(unix)]
 	{
@@ -1860,7 +1864,11 @@ async fn wait_for_term_grace(registry: &process::SpawnRegistry) {
 		// and the caller would then hard-kill a process before its TERM.
 		settle_spawns(registry).await;
 		let deadline = time::Instant::now() + TERM_GRACE;
-		while !registry.build_targets().is_empty() {
+		while !registry.build_targets().is_empty()
+			|| known
+				.iter()
+				.any(|process| process.status() == process::ProcessStatus::Running)
+		{
 			let now = time::Instant::now();
 			if now >= deadline {
 				break;
@@ -1869,7 +1877,7 @@ async fn wait_for_term_grace(registry: &process::SpawnRegistry) {
 		}
 	}
 	#[cfg(not(unix))]
-	let _ = registry;
+	let _ = (registry, known);
 }
 
 fn register_background_jobs(shell: &BrushShell, registry: &process::SpawnRegistry) {
@@ -1890,7 +1898,7 @@ async fn terminate_background_jobs(shell: &mut BrushShell, registry: &process::S
 	// The run's cancellation bridge owns TERM/KILL, including background jobs.
 	// Aborting their internal tasks sooner drops ChildProcess and hard-kills
 	// children while their TERM traps are still running.
-	wait_for_term_grace(registry).await;
+	wait_for_term_grace(registry, &[]).await;
 	for job in &mut shell.jobs_mut().jobs {
 		job.abort_internal_tasks();
 	}
@@ -7930,6 +7938,51 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 			fs::read_to_string(root.path().join("cleaned")).expect("TERM trap ran"),
 			"cleaned"
 		);
+	}
+
+	/// A run's cancellation reaches a group member that leaves its group in
+	/// its TERM handler after its leader exits (`exit`), including one that
+	/// was never the leader's descendant (`orphan`). The KILL waves built only
+	/// from the registry no longer found it, so it outlived the cancel.
+	#[cfg(target_os = "linux")]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn run_cancellation_kills_a_member_that_left_its_group_on_term() {
+		use std::os::unix::process::CommandExt as _;
+
+		let helper_root = tempfile::tempdir().expect("helper directory");
+		let helper = process::tests::compile_group_move_helper(helper_root.path());
+		for mode in ["exit", "orphan"] {
+			let root = tempfile::tempdir().expect("group-move directory");
+			let mut parent = std::process::Command::new(&helper)
+				.arg(mode)
+				.current_dir(root.path())
+				.process_group(0)
+				.spawn()
+				.expect("spawn group-move helper");
+			let deadline = time::Instant::now() + Duration::from_secs(5);
+			while !root.path().join("ready").exists() {
+				assert!(time::Instant::now() < deadline, "{mode}: group-move child never became ready");
+				time::sleep(Duration::from_millis(5)).await;
+			}
+			let member_pid = process::tests::wait_for_pid_file(&root.path().join("childpid"));
+			let member = process::Process::from_pid(member_pid).expect("pin group-move member");
+			let parent_pid = i32::try_from(parent.id()).expect("pid fits");
+			let registry = process::SpawnRegistry::new();
+			registry.record(Some(parent_pid), process::Process::from_pid(parent_pid));
+			terminate_run(&registry).await;
+			// The last KILL wave can be the one that reaches the member (its
+			// TERM handler ran late and moved it between a wave's snapshot and
+			// its group signal), and `terminate_run` does not wait after it.
+			let deadline = time::Instant::now() + Duration::from_secs(2);
+			while member.status() == process::ProcessStatus::Running && time::Instant::now() < deadline
+			{
+				time::sleep(Duration::from_millis(10)).await;
+			}
+			let member_alive = member.status() == process::ProcessStatus::Running;
+			let _ = member.signal(process::KILL_SIGNAL);
+			let _ = parent.wait();
+			assert!(!member_alive, "{mode}: the member that left its group outlived the run's cancel");
+		}
 	}
 
 	/// Records the order of the spawn reports brush sends, and cancels the run
