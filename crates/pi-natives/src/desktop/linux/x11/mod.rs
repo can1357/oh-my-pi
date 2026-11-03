@@ -178,19 +178,15 @@ impl Backend for X11Backend {
 		let windows = self.windows()?;
 		let ax = self.ax.as_mut().ok_or_else(DesktopError::ax_unsupported)?;
 		let window = ax.window_id(element, &windows)?;
-		if mode == DeliveryMode::Background {
-			if let Some(refusal) = background_element_refusal(&window, &ax.element_focus(element)?) {
-				return Err(refusal);
-			}
-		} else {
-			ax.focus(element)?;
-		}
-		let target = Target::Window(window);
-		match input {
-			ElementInput::Text(text) => self.type_text(&target, text, mode, token)?,
-			ElementInput::Chord(keys) => self.key_chord(&target, keys, mode, token)?,
-		}
-		Ok(ElementDelivery::Delivered)
+		let mut route = X11ElementKeys {
+			ax,
+			input: &mut self.input,
+			element,
+			window: &window,
+			keys: input,
+			token,
+		};
+		deliver_element_keys(&window, mode, &mut route)
 	}
 
 	fn ax(&mut self) -> Option<&mut dyn AxBackend> {
@@ -198,17 +194,91 @@ impl Backend for X11Backend {
 	}
 }
 
+/// The steps of keyboard input addressed to an element, apart so their order
+/// is testable without an X server.
+trait ElementKeys {
+	/// The element's focus state and the toolkit reporting it.
+	fn focus_state(&mut self) -> CoreResult<ElementFocus>;
+	/// Sends the keys to the element's window in the background.
+	fn send_background(&mut self) -> CoreResult<()>;
+	/// Takes the element's window over, focuses the element inside the
+	/// takeover, and sends the keys.
+	fn send_takeover(&mut self) -> CoreResult<()>;
+}
+
+/// Background keys go out only to an element that already holds its window's
+/// keyboard focus, read without focusing anything; takeover focuses it.
+fn deliver_element_keys(
+	window: &str,
+	mode: DeliveryMode,
+	route: &mut impl ElementKeys,
+) -> CoreResult<ElementDelivery> {
+	if mode == DeliveryMode::Background {
+		if let Some(refusal) = background_element_refusal(window, &route.focus_state()?) {
+			return Err(refusal);
+		}
+		route.send_background()?;
+	} else {
+		route.send_takeover()?;
+	}
+	Ok(ElementDelivery::Delivered)
+}
+
+struct X11ElementKeys<'a> {
+	ax:      &'a mut AtSpiAx,
+	input:   &'a mut X11Input,
+	element: &'a AxHandle,
+	window:  &'a str,
+	keys:    &'a ElementInput,
+	token:   &'a OperationToken,
+}
+
+impl ElementKeys for X11ElementKeys<'_> {
+	fn focus_state(&mut self) -> CoreResult<ElementFocus> {
+		self.ax.element_focus(self.element)
+	}
+
+	fn send_background(&mut self) -> CoreResult<()> {
+		self.token.check()?;
+		let target = Target::Window(self.window.to_owned());
+		match self.keys {
+			ElementInput::Text(text) => self
+				.input
+				.type_text(&target, text, DeliveryMode::Background),
+			ElementInput::Chord(keys) => self
+				.input
+				.key_chord(&target, keys, DeliveryMode::Background),
+		}
+	}
+
+	fn send_takeover(&mut self) -> CoreResult<()> {
+		self.token.check()?;
+		let window = self.window.parse::<u32>().map_err(|_| {
+			DesktopError::window_not_found(format!("invalid X11 window id {}", self.window))
+		})?;
+		let Self { ax, input, element, keys, .. } = self;
+		// The focus request may activate the window, so it runs after the
+		// takeover has recorded the user's window to hand back to.
+		input.foreground_keys_after(window, keys, || ax.focus(element))
+	}
+}
+
 /// Why background keys sent to `window` would miss an element reporting
 /// `focus`. GTK 3 reports `Focused` only for its window's focus widget
 /// (`gtkwidgetaccessible.c`); Chromium reports its page's focused node while
-/// the omnibox or another view holds the window's keyboard.
+/// the omnibox or another view holds the window's keyboard. A toolkit the
+/// application does not name is not trusted either.
 fn background_element_refusal(window: &str, focus: &ElementFocus) -> Option<DesktopError> {
 	let gtk3 = focus.toolkit.eq_ignore_ascii_case("gtk") && focus.version.starts_with("3.");
 	let reason = if !gtk3 {
+		let toolkit = if focus.toolkit.is_empty() {
+			"unidentified"
+		} else {
+			&focus.toolkit
+		};
 		format!(
-			"keys sent to window {window} may not reach the element, since its {} toolkit does not \
-			 report which element holds the window's keyboard",
-			focus.toolkit
+			"keys sent to window {window} may not reach the element, since its {toolkit} toolkit \
+			 does not report which element holds the window's keyboard"
 		)
 	} else if !focus.focused {
 		format!("the element does not hold the keyboard focus of window {window}")
@@ -225,18 +295,67 @@ mod tests {
 	use super::*;
 	use crate::desktop::error::ErrorCode;
 
+	/// Records which steps of an element input ran, in order.
+	struct Recorder {
+		focused: bool,
+		toolkit: &'static str,
+		version: &'static str,
+		steps:   Vec<&'static str>,
+	}
+
+	impl ElementKeys for Recorder {
+		fn focus_state(&mut self) -> CoreResult<ElementFocus> {
+			self.steps.push("read focus");
+			Ok(ElementFocus {
+				focused: self.focused,
+				toolkit: self.toolkit.to_owned(),
+				version: self.version.to_owned(),
+			})
+		}
+
+		fn send_background(&mut self) -> CoreResult<()> {
+			self.steps.push("background keys");
+			Ok(())
+		}
+
+		fn send_takeover(&mut self) -> CoreResult<()> {
+			self.steps.push("takeover keys");
+			Ok(())
+		}
+	}
+
+	fn deliver(
+		mode: DeliveryMode,
+		focused: bool,
+		toolkit: &'static str,
+		version: &'static str,
+	) -> (CoreResult<ElementDelivery>, Vec<&'static str>) {
+		let mut route = Recorder { focused, toolkit, version, steps: Vec::new() };
+		(deliver_element_keys("42", mode, &mut route), route.steps)
+	}
+
 	#[test]
 	fn background_element_keys_go_only_to_a_gtk3_window_focus_widget() {
-		let focus = |focused, toolkit: &str, version: &str| ElementFocus {
-			focused,
-			toolkit: toolkit.to_owned(),
-			version: version.to_owned(),
-		};
-		assert!(background_element_refusal("42", &focus(true, "gtk", "3.24.41")).is_none());
-		for refused in [focus(false, "gtk", "3.24.41"), focus(true, "Chromium", "1.0")] {
-			let error = background_element_refusal("42", &refused).expect("refused");
+		let (delivered, steps) = deliver(DeliveryMode::Background, true, "gtk", "3.24.41");
+		assert!(matches!(delivered, Ok(ElementDelivery::Delivered)));
+		assert_eq!(steps, ["read focus", "background keys"]);
+
+		for (focused, toolkit, version) in
+			[(false, "gtk", "3.24.41"), (true, "Chromium", "1.0"), (true, "", "")]
+		{
+			let (delivered, steps) = deliver(DeliveryMode::Background, focused, toolkit, version);
+			let Err(error) = delivered else {
+				panic!("{toolkit} {version} focused={focused} was sent")
+			};
 			assert_eq!(error.code, ErrorCode::BackgroundUnavailable);
 			assert!(error.message.ends_with("; no input was sent"), "{}", error.message);
+			assert_eq!(steps, ["read focus"], "nothing focused or sent after a refusal");
+		}
+
+		for mode in [DeliveryMode::Foreground, DeliveryMode::ForegroundReturnFocus] {
+			let (delivered, steps) = deliver(mode, false, "Chromium", "1.0");
+			assert!(matches!(delivered, Ok(ElementDelivery::Delivered)));
+			assert_eq!(steps, ["takeover keys"]);
 		}
 	}
 }

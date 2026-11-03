@@ -39,7 +39,7 @@ use super::{
 	wm::{Atoms, FocusSnapshot, Wm},
 };
 use crate::desktop::{
-	backend::{DeliveryMode, Modifiers, MouseButton, PointerEvent},
+	backend::{DeliveryMode, ElementInput, Modifiers, MouseButton, PointerEvent},
 	control,
 	error::{CoreResult, DesktopError, ErrorCode},
 	keys::KeyName,
@@ -215,6 +215,27 @@ impl X11Input {
 		mode: DeliveryMode,
 	) -> CoreResult<()> {
 		self.keys(target, Keys::Chord(keys), mode)
+	}
+
+	/// Takeover keys into `window`, with `prepare` run inside the takeover
+	/// once the user's window is recorded, so an activation `prepare` causes,
+	/// such as an AT-SPI focus request, is handed back with the takeover.
+	pub(crate) fn foreground_keys_after(
+		&mut self,
+		window: Window,
+		input: &ElementInput,
+		prepare: impl FnOnce() -> CoreResult<()>,
+	) -> CoreResult<()> {
+		self.keymap = Keymap::core(&self.conn)?;
+		let keys = match input {
+			ElementInput::Text(text) => Keys::Text(text),
+			ElementInput::Chord(keys) => Keys::Chord(keys),
+		};
+		let steps = keys.plan(&self.keymap)?;
+		self.with_foreground(window, FOREGROUND_KEYBOARD_SETTLE, |this| {
+			prepare()?;
+			this.xtest_steps(&steps, keys.duration())
+		})
 	}
 
 	pub(crate) fn hold_keys(
