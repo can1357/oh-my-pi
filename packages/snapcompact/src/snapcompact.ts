@@ -2535,7 +2535,14 @@ export async function compact<TMessage = Message>(
 		archiveText = archiveText.length > 0 ? `${head} [Recent conversation] ${archiveText}` : head;
 	}
 
-	let truncatedChars = previousArchive?.truncatedChars ?? 0;
+	// An archive persisted without `text` (written before the text-first layout)
+	// holds its middle only as frames, which cannot be re-rendered: the new
+	// archive drops them, so count them as dropped history instead of silently.
+	let truncatedChars =
+		(previousArchive?.truncatedChars ?? 0) +
+		(previousArchive && previousArchive.text === undefined
+			? previousArchive.frames.reduce((sum, frame) => sum + frame.chars, 0)
+			: 0);
 
 	// Re-compacting a snapcompacted history unfolds the prior archive's source
 	// text and treats it as one coherent transcript: the previous kept source
