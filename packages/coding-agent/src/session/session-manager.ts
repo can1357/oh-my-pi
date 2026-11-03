@@ -2672,14 +2672,14 @@ export class SessionManager {
 						: `Cannot move session to "${file}": it holds another session. Nothing was moved.`,
 				);
 			}
-			const release = this.#storage.claimSession?.(id, file);
+			const release = this.#storage.claimSession(id, file);
 			if (release === null) {
 				throw new SessionMoveRefusedError(
 					`Cannot move session to "${file}": another live omp process writes the session there. Nothing was moved.`,
 				);
 			}
 			destination?.release();
-			destination = release ? { id, release } : undefined;
+			destination = { id, release };
 		};
 		// The file at the source path must still be this session: if another
 		// session replaced it, moving it would carry that session away from its
