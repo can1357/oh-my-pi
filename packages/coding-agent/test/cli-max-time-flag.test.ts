@@ -1,10 +1,11 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it, onTestFinished, vi } from "bun:test";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { clearOmpExtensionCliRoots } from "@oh-my-pi/pi-coding-agent/discovery/omp-extension-roots";
 import { runCli } from "../src/cli";
 
 // `runRootCommand` registers the CLI's extension roots (`--no-extensions` → explicit-only) process-wide.
 afterEach(() => {
+	vi.restoreAllMocks();
 	clearOmpExtensionCliRoots();
 });
 
@@ -54,6 +55,9 @@ describe("parseArgs — --max-time flag", () => {
 
 	it("reports invalid --max-time values as CLI usage errors", async () => {
 		const previousExitCode = process.exitCode;
+		onTestFinished(() => {
+			process.exitCode = previousExitCode ?? 0;
+		});
 		let observedExitCode: string | number | null | undefined;
 		const captured: string[] = [];
 		vi.spyOn(process.stderr, "write").mockImplementation((chunk: string | Uint8Array) => {
@@ -65,7 +69,6 @@ describe("parseArgs — --max-time flag", () => {
 			await runCli(["--max-time", "5d", "--print", "hello"]);
 			observedExitCode = process.exitCode;
 		} finally {
-			vi.restoreAllMocks();
 			process.exitCode = previousExitCode ?? 0;
 		}
 

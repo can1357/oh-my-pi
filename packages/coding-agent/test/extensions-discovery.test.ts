@@ -14,6 +14,10 @@ import { discoverSessionExtensionPaths } from "@oh-my-pi/pi-coding-agent/sdk";
 import { getProjectAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import { filterUserScoped } from "./utils/filter-user-extensions";
 
+afterEach(() => {
+	vi.restoreAllMocks();
+});
+
 describe("extensions discovery", () => {
 	let tempDir: TempDir;
 	let extensionsDir: string;
@@ -244,14 +248,10 @@ describe("extensions discovery", () => {
 		);
 
 		const permissionError = Object.assign(new Error("permission denied"), { code: "EACCES" });
-		const readdirSpy = vi.spyOn(fsPromises, "readdir").mockRejectedValueOnce(permissionError);
-		try {
-			await expect(
-				discoverExtensionPaths([packageDir], tempDir.path(), undefined, { ambient: false }),
-			).resolves.toEqual([path.join(sourceDir, "main.ts")]);
-		} finally {
-			readdirSpy.mockRestore();
-		}
+		vi.spyOn(fsPromises, "readdir").mockRejectedValueOnce(permissionError);
+		await expect(
+			discoverExtensionPaths([packageDir], tempDir.path(), undefined, { ambient: false }),
+		).resolves.toEqual([path.join(sourceDir, "main.ts")]);
 	});
 
 	it("discovers a symlinked extension package directory", async () => {
@@ -768,16 +768,12 @@ describe("extensions discovery", () => {
 		expect(foreignIds.length).toBeGreaterThan(0);
 
 		const spies = providers.map(provider => vi.spyOn(provider, "load"));
-		try {
-			await discoverExtensionPaths([], tempDir.path());
+		await discoverExtensionPaths([], tempDir.path());
 
-			const callsById = new Map(providers.map((provider, i) => [provider.id, spies[i].mock.calls.length]));
-			expect(callsById.get("native")).toBe(1);
-			for (const id of foreignIds) {
-				expect(callsById.get(id), `foreign provider ${id} must not be walked`).toBe(0);
-			}
-		} finally {
-			for (const spy of spies) spy.mockRestore();
+		const callsById = new Map(providers.map((provider, i) => [provider.id, spies[i].mock.calls.length]));
+		expect(callsById.get("native")).toBe(1);
+		for (const id of foreignIds) {
+			expect(callsById.get(id), `foreign provider ${id} must not be walked`).toBe(0);
 		}
 	});
 });

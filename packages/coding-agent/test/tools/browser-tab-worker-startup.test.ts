@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it, spyOn } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, onTestFinished, spyOn, vi } from "bun:test";
 
 // Browser globals read inside page.evaluate callbacks; absent from bun-types.
 declare const devicePixelRatio: number;
@@ -24,6 +24,10 @@ import {
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 import type { CDPSession } from "puppeteer-core";
 import { chromiumAvailable, visibleBrowserAvailable } from "./chromium-probe";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
 // Headful launches additionally need a display; `CHROMIUM_AVAILABLE` only
@@ -625,21 +629,17 @@ describe("browser tabs whose renderer crashed", () => {
 				const terminate = crashedWorker.terminate.bind(crashedWorker);
 				let released: Promise<boolean> | undefined;
 				// The reattach terminates the crashed page's worker before starting a new one: close the tab right then.
-				const terminateSpy = spyOn(crashedWorker, "terminate").mockImplementation(async () => {
+				spyOn(crashedWorker, "terminate").mockImplementation(async () => {
 					await terminate();
 					released ??= releaseTab(name, { kill: false });
 				});
-				try {
-					const outcome = await runInTab(name, { code: "return 1;", timeoutMs: 10_000, session }).catch(
-						(error: unknown) => error,
-					);
-					await released;
-					expect(String(outcome)).toContain("was closed");
-					expect(tab.state).toBe("dead");
-					expect(tab.worker).toBe(crashedWorker);
-				} finally {
-					terminateSpy.mockRestore();
-				}
+				const outcome = await runInTab(name, { code: "return 1;", timeoutMs: 10_000, session }).catch(
+					(error: unknown) => error,
+				);
+				await released;
+				expect(String(outcome)).toContain("was closed");
+				expect(tab.state).toBe("dead");
+				expect(tab.worker).toBe(crashedWorker);
 			} finally {
 				await releaseTab(name, { kill: false });
 				await userPage.close().catch(() => undefined);
@@ -694,6 +694,11 @@ describe("browser tabs whose renderer crashed", () => {
 	it.skipIf(!CHROMIUM_AVAILABLE)(
 		"reattaches to a page Puppeteer has not listed yet because its URL is still empty",
 		async () => {
+			// Registered before any statement that can throw, so the put-back is certain to be registered.
+			const RealWorker = globalThis.Worker;
+			onTestFinished(() => {
+				globalThis.Worker = RealWorker;
+			});
 			const loadGate = Promise.withResolvers<void>();
 			const server = Bun.serve({
 				port: 0,
@@ -730,7 +735,6 @@ describe("browser tabs whose renderer crashed", () => {
 				tab.targetId = popupId;
 				// Commit the popup's load only after the new worker has looked the target up. The worker lists
 				// Puppeteer's targets in the same turn it reports `setup`, so that report releases the load.
-				const RealWorker = globalThis.Worker;
 				globalThis.Worker = class SetupReportingWorker extends RealWorker {
 					constructor(...args: ConstructorParameters<typeof Worker>) {
 						super(...args);

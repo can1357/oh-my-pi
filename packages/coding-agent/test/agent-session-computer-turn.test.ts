@@ -4,7 +4,7 @@
  * turn holds it again. A dialog waiting for the user's answer ends the turn's hold until it settles, and a subagent
  * marks no turns, so its runs keep the native grace period.
  */
-import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn, vi } from "bun:test";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
@@ -19,6 +19,10 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { computerTurnInFlight, registerComputerController } from "@oh-my-pi/pi-coding-agent/tools/computer/supervisor";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 describe("AgentSession computer display hold per turn", () => {
 	let tempDir: TempDir;
@@ -176,25 +180,21 @@ describe("AgentSession computer display hold per turn", () => {
 	it("releases at an interrupt while the prompt's setup is still unwinding", async () => {
 		const entered = Promise.withResolvers<void>();
 		const unblock = Promise.withResolvers<void>();
-		const getApiKey = spyOn(modelRegistry, "getApiKey").mockImplementation(async () => {
+		spyOn(modelRegistry, "getApiKey").mockImplementation(async () => {
 			entered.resolve();
 			await unblock.promise;
 			return "test-key";
 		});
-		try {
-			const target = createSession([{ content: ["done"] }]);
-			const running = target.prompt("go").catch(() => undefined);
-			await entered.promise;
-			expect(computerTurnInFlight(owner)).toBe(1);
-			await target.abort();
-			expect(computerTurnInFlight(owner)).toBeUndefined();
-			expect(releases).toEqual([1]);
-			unblock.resolve();
-			await running;
-			expect(releases).toEqual([1]);
-		} finally {
-			getApiKey.mockRestore();
-		}
+		const target = createSession([{ content: ["done"] }]);
+		const running = target.prompt("go").catch(() => undefined);
+		await entered.promise;
+		expect(computerTurnInFlight(owner)).toBe(1);
+		await target.abort();
+		expect(computerTurnInFlight(owner)).toBeUndefined();
+		expect(releases).toEqual([1]);
+		unblock.resolve();
+		await running;
+		expect(releases).toEqual([1]);
 	});
 
 	it("lets the display sleep while the user is asked, and holds again once they answer", async () => {

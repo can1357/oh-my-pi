@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, onTestFinished, spyOn, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -155,6 +155,10 @@ describe("handleSkillList", () => {
 		let stderr = "";
 		const originalStdoutWrite = process.stdout.write;
 		const originalStderrWrite = process.stderr.write;
+		onTestFinished(() => {
+			process.stdout.write = originalStdoutWrite;
+			process.stderr.write = originalStderrWrite;
+		});
 		process.stdout.write = ((chunk: string | Uint8Array) => {
 			stdout += chunk.toString();
 			return true;

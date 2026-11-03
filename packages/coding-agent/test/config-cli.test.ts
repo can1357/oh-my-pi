@@ -1,9 +1,12 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "bun:test";
 import * as path from "node:path";
 import { runConfigCommand } from "@oh-my-pi/pi-coding-agent/cli/config-cli";
-import { resetSettingsForTest } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { getConfigRootDir, getProjectDir, setAgentDir, setProjectDir, TempDir } from "@oh-my-pi/pi-utils";
+import { installMockRestores, testLifetime } from "../../utils/test/helpers/mock-restores";
+
+installMockRestores();
 
 let testAgentDir: TempDir | undefined;
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -105,8 +108,13 @@ describe("config CLI schema coverage", () => {
 	});
 
 	it("rejects invalid provider in-flight request limit entries", async () => {
+		const life = testLifetime();
 		vi.spyOn(console, "log").mockImplementation(() => {});
 		vi.spyOn(console, "error").mockImplementation(() => {});
+		// Load settings first: `runConfigCommand` then reaches `process.exit` without waiting on I/O,
+		// so a timeout cannot abandon it mid-load and let it call the real exit after the spy is gone.
+		await Settings.init();
+		life.assertLive();
 		const exitSpy = vi.spyOn(process, "exit").mockImplementation((() => {
 			throw new Error("process.exit");
 		}) as typeof process.exit);
@@ -141,8 +149,12 @@ describe("config CLI schema coverage", () => {
 	});
 
 	it("rejects unknown status line segment ids", async () => {
+		const life = testLifetime();
 		vi.spyOn(console, "log").mockImplementation(() => {});
 		vi.spyOn(console, "error").mockImplementation(() => {});
+		// Load settings first, as above: the exit spy then meets `process.exit` before a timeout can.
+		await Settings.init();
+		life.assertLive();
 		const exitSpy = vi.spyOn(process, "exit").mockImplementation((() => {
 			throw new Error("process.exit");
 		}) as typeof process.exit);
@@ -219,23 +231,24 @@ describe("config CLI schema coverage", () => {
 		expect(parsed).toMatchObject({ modelRoles: { type: "record" } });
 	});
 	it("reports the value written to config.yml and the layer that still overrides it", async () => {
+		const life = testLifetime();
+		const previousConfigFiles = process.env.PI_CONFIG_FILES;
+		onTestFinished(() => {
+			if (previousConfigFiles === undefined) delete process.env.PI_CONFIG_FILES;
+			else process.env.PI_CONFIG_FILES = previousConfigFiles;
+		});
 		if (!testAgentDir) throw new Error("Test agent directory was not initialized");
 		const overlayPath = path.join(testAgentDir.path(), "overlay.yml");
 		await Bun.write(overlayPath, "compaction:\n  enabled: false\n");
-		const previousConfigFiles = process.env.PI_CONFIG_FILES;
+		life.assertLive();
 		process.env.PI_CONFIG_FILES = overlayPath;
-		try {
-			const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
-			await runConfigCommand({ action: "set", key: "compaction.enabled", value: "true", flags: { json: true } });
-			expect(JSON.parse(String(logSpy.mock.calls.at(-1)?.[0]))).toEqual({
-				key: "compaction.enabled",
-				value: true,
-				overriddenBy: "overlay",
-			});
-		} finally {
-			if (previousConfigFiles === undefined) delete process.env.PI_CONFIG_FILES;
-			else process.env.PI_CONFIG_FILES = previousConfigFiles;
-		}
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		await runConfigCommand({ action: "set", key: "compaction.enabled", value: "true", flags: { json: true } });
+		expect(JSON.parse(String(logSpy.mock.calls.at(-1)?.[0]))).toEqual({
+			key: "compaction.enabled",
+			value: true,
+			overriddenBy: "overlay",
+		});
 	});
 	it("loads PI_CONFIG_FILES overlays in path-list order", async () => {
 		if (!testAgentDir) throw new Error("Test agent directory was not initialized");

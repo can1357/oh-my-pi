@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, type Mock, spyOn, vi } from "bun:test";
+import { afterEach, describe, expect, it, type Mock, onTestFinished, spyOn, vi } from "bun:test";
 import * as nodeFs from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -42,6 +42,9 @@ import Update from "@oh-my-pi/pi-coding-agent/commands/update";
 import { $which, removeWithRetries } from "@oh-my-pi/pi-utils";
 import type { CliConfig } from "@oh-my-pi/pi-utils/cli";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
+import { installMockRestores } from "../../utils/test/helpers/mock-restores";
+
+installMockRestores();
 
 const miseBinary = Bun.env.MISE_BIN ?? $which("mise");
 const npmBinary = $which("npm");
@@ -89,8 +92,10 @@ function withPlatform<T>(platform: NodeJS.Platform, fn: () => T): T {
 
 /** Async {@link withPlatform}: keeps the override until the returned promise settles. */
 async function withPlatformAsync<T>(platform: NodeJS.Platform, fn: () => Promise<T>): Promise<T> {
-	const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
-	if (!platformDescriptor) throw new Error("process.platform descriptor missing");
+	const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform")!;
+	onTestFinished(() => {
+		Object.defineProperty(process, "platform", platformDescriptor);
+	});
 	Object.defineProperty(process, "platform", { ...platformDescriptor, value: platform });
 	try {
 		return await fn();
@@ -880,17 +885,15 @@ describe("migrateRenamedInstall transaction", () => {
 
 	it("uses the platform-aware PowerShell reinstall hint on Windows", async () => {
 		vi.spyOn(console, "log").mockImplementation(() => {});
-		const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
-		if (!platformDescriptor) throw new Error("process.platform descriptor missing");
-		Object.defineProperty(process, "platform", { ...platformDescriptor, value: "win32" });
-		try {
-			const { steps } = scriptedSteps({ install: [0, 0], verify: [false, false] });
-			const promise = migrateRenamedInstall(release, steps);
-			await expect(promise).rejects.toThrow("irm https://omp.sh/install.ps1");
-			await expect(promise).rejects.not.toThrow("| sh");
-		} finally {
+		const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform")!;
+		onTestFinished(() => {
 			Object.defineProperty(process, "platform", platformDescriptor);
-		}
+		});
+		Object.defineProperty(process, "platform", { ...platformDescriptor, value: "win32" });
+		const { steps } = scriptedSteps({ install: [0, 0], verify: [false, false] });
+		const promise = migrateRenamedInstall(release, steps);
+		await expect(promise).rejects.toThrow("irm https://omp.sh/install.ps1");
+		await expect(promise).rejects.not.toThrow("| sh");
 	});
 });
 

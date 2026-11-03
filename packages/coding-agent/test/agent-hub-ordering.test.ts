@@ -3,7 +3,7 @@ import { createAgentHubRuntime } from "@oh-my-pi/pi-coding-agent/modes/agent-hub
  * Regression: the agent hub keeps its initial status/recency order while open,
  * regardless of heartbeats; newly spawned agents appear above existing rows.
  */
-import { afterEach, beforeAll, describe, expect, it, setSystemTime, vi } from "bun:test";
+import { afterEach, beforeAll, describe, expect, it, onTestFinished, setSystemTime, vi } from "bun:test";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
@@ -245,6 +245,7 @@ describe("Agent hub row ordering", () => {
 	it("keeps rows still while saved agents load; found agents rank in place, new generations go on top", async () => {
 		vi.useFakeTimers();
 		geometry = stubStdoutGeometry(120);
+		onTestFinished(geometry.restore);
 		const agents = new AgentRegistry();
 		setSystemTime(1000);
 		agents.register({ id: "A", displayName: "Alpha", kind: "sub", session: {} as AgentSession });
@@ -507,6 +508,7 @@ describe("Agent hub row ordering", () => {
 	});
 	it("matches fullscreen menu mouse selection, wheel, and activation", async () => {
 		geometry = stubStdoutGeometry(120);
+		onTestFinished(geometry.restore);
 		const agents = new AgentRegistry();
 		setSystemTime(1_000);
 		agents.register({ id: "Alpha", displayName: "Alpha", kind: "sub", session: {} as AgentSession });

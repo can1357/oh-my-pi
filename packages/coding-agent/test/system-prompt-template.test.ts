@@ -1,4 +1,4 @@
-import { describe, expect, it, spyOn } from "bun:test";
+import { afterEach, describe, expect, it, onTestFinished, spyOn, vi } from "bun:test";
 import * as os from "node:os";
 import * as path from "node:path";
 import { __resetDirsFromEnvForTests, CONFIG_DIR_NAME, getConfigAgentDirName, TempDir } from "@oh-my-pi/pi-utils";
@@ -13,6 +13,10 @@ import eagerTasksTemplate from "./fixtures/system-prompt-template/eager-tasks.md
 import literalDataTemplate from "./fixtures/system-prompt-template/literal-data.md" with { type: "text" };
 import liveDataTemplate from "./fixtures/system-prompt-template/live-data.md" with { type: "text" };
 import { restoreEnvValue } from "./helpers/settings-test-state";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 const EMPTY_TREE = {
 	rootPath: "",
@@ -31,29 +35,28 @@ interface DiscoveryPaths {
 async function withDiscoveryHome<T>(fn: (paths: DiscoveryPaths) => Promise<T>): Promise<T> {
 	using tempDir = TempDir.createSync("@omp-system-prompt-template-discovery-");
 	const home = tempDir.join("home");
-	const homedirSpy = spyOn(os, "homedir").mockReturnValue(home);
+	spyOn(os, "homedir").mockReturnValue(home);
 	const previousHome = process.env.HOME;
 	const previousUserProfile = process.env.USERPROFILE;
 	const previousAgentDirEnv = process.env.PI_CODING_AGENT_DIR;
-	process.env.HOME = home;
-	process.env.USERPROFILE = home;
-	restoreEnvValue("PI_CODING_AGENT_DIR", undefined);
-	__resetDirsFromEnvForTests();
-	try {
-		return await fn({
-			cwd: tempDir.join("project"),
-			projectConfig: tempDir.join("project", CONFIG_DIR_NAME),
-			userConfig: path.join(home, getConfigAgentDirName()),
-		});
-	} finally {
-		homedirSpy.mockRestore();
+	// Runs after afterEach restores the homedir spy, so the resolver rebuilds from the real home.
+	onTestFinished(() => {
 		if (previousHome === undefined) delete process.env.HOME;
 		else process.env.HOME = previousHome;
 		if (previousUserProfile === undefined) delete process.env.USERPROFILE;
 		else process.env.USERPROFILE = previousUserProfile;
 		restoreEnvValue("PI_CODING_AGENT_DIR", previousAgentDirEnv);
 		__resetDirsFromEnvForTests();
-	}
+	});
+	process.env.HOME = home;
+	process.env.USERPROFILE = home;
+	restoreEnvValue("PI_CODING_AGENT_DIR", undefined);
+	__resetDirsFromEnvForTests();
+	return await fn({
+		cwd: tempDir.join("project"),
+		projectConfig: tempDir.join("project", CONFIG_DIR_NAME),
+		userConfig: path.join(home, getConfigAgentDirName()),
+	});
 }
 
 function options(cwd: string, overrides: Partial<BuildSystemPromptOptions> = {}): BuildSystemPromptOptions {

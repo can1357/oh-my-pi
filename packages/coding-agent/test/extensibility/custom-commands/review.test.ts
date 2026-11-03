@@ -1,4 +1,16 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, type Mock, spyOn, vi } from "bun:test";
+import {
+	afterAll,
+	afterEach,
+	beforeAll,
+	beforeEach,
+	describe,
+	expect,
+	it,
+	type Mock,
+	onTestFinished,
+	spyOn,
+	vi,
+} from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -19,6 +31,7 @@ import type { VcsGitRepo, VcsRepo } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
+import { testLifetime } from "../../../../utils/test/helpers/mock-restores";
 
 const SAMPLE_JJ_DIFF = `diff --git a/src/workspace.ts b/src/workspace.ts
 --- a/src/workspace.ts
@@ -314,10 +327,18 @@ describe("ReviewCommand", () => {
 	});
 
 	it("does not retain a review snapshot when the GitHub cache is disabled", async () => {
+		const life = testLifetime();
 		const dir = createTempDir();
 		const previousToken = process.env.GH_TOKEN;
 		const previousCacheDb = process.env.OMP_GITHUB_CACHE_DB;
+		onTestFinished(() => {
+			if (previousToken === undefined) delete process.env.GH_TOKEN;
+			else process.env.GH_TOKEN = previousToken;
+			if (previousCacheDb === undefined) delete process.env.OMP_GITHUB_CACHE_DB;
+			else process.env.OMP_GITHUB_CACHE_DB = previousCacheDb;
+		});
 		const cacheDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-review-cache-off-"));
+		life.assertLive();
 		process.env.GH_TOKEN = "review-cache-disabled";
 		process.env.OMP_GITHUB_CACHE_DB = path.join(cacheDir, "github-cache.db");
 		resetCacheForTests();
@@ -336,10 +357,6 @@ describe("ReviewCommand", () => {
 			expect(result!).not.toContain("?at=");
 		} finally {
 			resetCacheForTests();
-			if (previousToken === undefined) delete process.env.GH_TOKEN;
-			else process.env.GH_TOKEN = previousToken;
-			if (previousCacheDb === undefined) delete process.env.OMP_GITHUB_CACHE_DB;
-			else process.env.OMP_GITHUB_CACHE_DB = previousCacheDb;
 			resetCacheForTests();
 			await removeWithRetries(cacheDir);
 		}
@@ -351,9 +368,17 @@ describe("ReviewCommand", () => {
 	])(
 		"links each PR file to its actual diff slice with $fileCount reviewable files",
 		async ({ fileCount, lastIndex }) => {
+			const life = testLifetime();
 			const previousCacheDb = process.env.OMP_GITHUB_CACHE_DB;
 			const previousGhToken = process.env.GH_TOKEN;
+			onTestFinished(() => {
+				if (previousCacheDb === undefined) delete process.env.OMP_GITHUB_CACHE_DB;
+				else process.env.OMP_GITHUB_CACHE_DB = previousCacheDb;
+				if (previousGhToken === undefined) delete process.env.GH_TOKEN;
+				else process.env.GH_TOKEN = previousGhToken;
+			});
 			const cacheDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-review-cache-"));
+			life.assertLive();
 			process.env.OMP_GITHUB_CACHE_DB = path.join(cacheDir, "github-cache.db");
 			process.env.GH_TOKEN = "review-test-token";
 			retainGeneration.mockRestore();
@@ -414,10 +439,6 @@ describe("ReviewCommand", () => {
 				}
 			} finally {
 				resetCacheForTests();
-				if (previousCacheDb === undefined) delete process.env.OMP_GITHUB_CACHE_DB;
-				else process.env.OMP_GITHUB_CACHE_DB = previousCacheDb;
-				if (previousGhToken === undefined) delete process.env.GH_TOKEN;
-				else process.env.GH_TOKEN = previousGhToken;
 				resetCacheForTests();
 				await removeWithRetries(cacheDir);
 			}

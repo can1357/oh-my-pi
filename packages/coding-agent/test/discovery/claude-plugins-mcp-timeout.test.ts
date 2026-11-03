@@ -9,6 +9,10 @@ import { clearClaudePluginRootsCache } from "@oh-my-pi/pi-coding-agent/discovery
 import { loadAllMCPConfigs } from "@oh-my-pi/pi-coding-agent/mcp/config";
 import { __resetDirsFromEnvForTests, logger, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import "@oh-my-pi/pi-coding-agent/discovery/claude-plugins";
+import { installMockRestores } from "../../../utils/test/helpers/mock-restores";
+
+installMockRestores();
+
 describe("Claude plugin MCP timeout compatibility", () => {
 	let tempDir: string;
 	let testAgentDir: string;

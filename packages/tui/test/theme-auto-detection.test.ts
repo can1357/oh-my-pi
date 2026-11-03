@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "bun:test";
 import * as themeModule from "@oh-my-pi/pi-tui/theme";
 import * as nativesModule from "@oh-my-pi/pi-natives";
 import { type MacAppearanceObserver, MacOSAppearance } from "@oh-my-pi/pi-natives";
@@ -15,7 +15,16 @@ type ThemeTestGlobals = {
 	zellij?: string;
 };
 
-const withThemeTestGlobals = (globals: ThemeTestGlobals = {}) => {
+/** Set the platform, COLORFGBG and ZELLIJ for the rest of the test; the describe's afterEach puts the variables back. */
+const setThemeTestGlobals = (globals: ThemeTestGlobals = {}) => {
+	const restorePlatform = () => {
+		Object.defineProperty(process, "platform", {
+			value: originalPlatform,
+			configurable: true,
+			writable: true,
+		});
+	};
+	onTestFinished(restorePlatform);
 	Object.defineProperty(process, "platform", {
 		value: globals.platform ?? "darwin",
 		configurable: true,
@@ -27,22 +36,6 @@ const withThemeTestGlobals = (globals: ThemeTestGlobals = {}) => {
 
 	if (globals.zellij === undefined) delete Bun.env.ZELLIJ;
 	else Bun.env.ZELLIJ = globals.zellij;
-
-	return {
-		[Symbol.dispose]() {
-			themeModule.stopThemeWatcher();
-			Object.defineProperty(process, "platform", {
-				value: originalPlatform,
-				configurable: true,
-				writable: true,
-			});
-			if (originalColorfgbg === undefined) delete Bun.env.COLORFGBG;
-			else Bun.env.COLORFGBG = originalColorfgbg;
-			if (originalZellij === undefined) delete Bun.env.ZELLIJ;
-			else Bun.env.ZELLIJ = originalZellij;
-			vi.restoreAllMocks();
-		},
-	};
 };
 
 type AppearanceTerminal = Pick<
@@ -139,10 +132,14 @@ describe("theme auto-detection", () => {
 		themeModule.stopThemeWatcher();
 		setTerminalBackgroundColor(undefined);
 		vi.restoreAllMocks();
+		if (originalColorfgbg === undefined) delete Bun.env.COLORFGBG;
+		else Bun.env.COLORFGBG = originalColorfgbg;
+		if (originalZellij === undefined) delete Bun.env.ZELLIJ;
+		else Bun.env.ZELLIJ = originalZellij;
 	});
 
 	it("uses detected black or white only when OSC 11 has not reported actual RGB", () => {
-		using _globals = withThemeTestGlobals({ platform: "linux", colorfgbg: "0;15" });
+		setThemeTestGlobals({ platform: "linux", colorfgbg: "0;15" });
 		expect(getTerminalBackgroundColor()).toBe(0xffffff);
 		setTerminalBackgroundColor(0x102030);
 		expect(getTerminalBackgroundColor()).toBe(0x102030);
@@ -153,13 +150,13 @@ describe("theme auto-detection", () => {
 	});
 
 	it("shares terminal-reported appearance fallback rather than the active theme palette", () => {
-		using _globals = withThemeTestGlobals({ platform: "linux", colorfgbg: "15;0" });
+		setThemeTestGlobals({ platform: "linux", colorfgbg: "15;0" });
 		themeModule.onTerminalAppearanceChange("light");
 		expect(getTerminalBackgroundColor()).toBe(0xffffff);
 	});
 
 	it("ignores cached OSC 11 RGB in favor of COLORFGBG on Darwin inside Zellij", () => {
-		using _globals = withThemeTestGlobals({ zellij: "1", colorfgbg: "15;0" });
+		setThemeTestGlobals({ zellij: "1", colorfgbg: "15;0" });
 		const detectSpy = vi.spyOn(nativesModule, "detectMacOSAppearance").mockReturnValue(MacOSAppearance.Light);
 		setTerminalBackgroundColor(0x102030);
 		themeModule.onTerminalAppearanceChange("light");
@@ -175,7 +172,7 @@ describe("theme auto-detection", () => {
 	});
 
 	it("prefers COLORFGBG before macOS fallback inside Zellij", async () => {
-		using _globals = withThemeTestGlobals({ zellij: "1", colorfgbg: "15;0" });
+		setThemeTestGlobals({ zellij: "1", colorfgbg: "15;0" });
 		const detectSpy = vi.spyOn(nativesModule, "detectMacOSAppearance").mockReturnValue(MacOSAppearance.Light);
 
 		await themeModule.initTheme(false, undefined, undefined, "dark", "light");
@@ -185,7 +182,7 @@ describe("theme auto-detection", () => {
 	});
 
 	it("keeps honoring terminal-reported appearance and RGB on direct Darwin", async () => {
-		using _globals = withThemeTestGlobals({ colorfgbg: "0;15" });
+		setThemeTestGlobals({ colorfgbg: "0;15" });
 		const detectSpy = vi.spyOn(nativesModule, "detectMacOSAppearance").mockReturnValue(MacOSAppearance.Light);
 		const observerSpy = vi.spyOn(nativesModule.MacAppearanceObserver, "start");
 
@@ -200,7 +197,7 @@ describe("theme auto-detection", () => {
 	});
 
 	it("updates auto theme and fallback compositing RGB from the native observer despite cached RGB in Zellij", async () => {
-		using _globals = withThemeTestGlobals({ zellij: "1" });
+		setThemeTestGlobals({ zellij: "1" });
 		const observer = mockMacAppearanceObserver();
 		vi.spyOn(nativesModule, "detectMacOSAppearance").mockReturnValue(MacOSAppearance.Light);
 		setTerminalBackgroundColor(0x102030);
@@ -222,7 +219,7 @@ describe("theme auto-detection", () => {
 	});
 
 	it("publishes fallback RGB changes after a missing startup theme falls back to dark", async () => {
-		using _globals = withThemeTestGlobals({ zellij: "1" });
+		setThemeTestGlobals({ zellij: "1" });
 		const observer = mockMacAppearanceObserver();
 		vi.spyOn(nativesModule, "detectMacOSAppearance").mockReturnValue(MacOSAppearance.Dark);
 		const missingTheme = `missing-background-${crypto.randomUUID()}`;
@@ -243,7 +240,7 @@ describe("theme auto-detection", () => {
 	});
 
 	it("re-arms the macOS fallback observer after a runtime theme change", async () => {
-		using _globals = withThemeTestGlobals({ zellij: "1" });
+		setThemeTestGlobals({ zellij: "1" });
 		const observer = mockMacAppearanceObserver();
 		vi.spyOn(nativesModule, "detectMacOSAppearance").mockReturnValue(MacOSAppearance.Light);
 
@@ -270,7 +267,7 @@ describe("theme auto-detection", () => {
 	});
 
 	it("keeps trusting terminal-reported appearance and RGB on Linux inside Zellij", async () => {
-		using _globals = withThemeTestGlobals({ platform: "linux", zellij: "1", colorfgbg: "0;15" });
+		setThemeTestGlobals({ platform: "linux", zellij: "1", colorfgbg: "0;15" });
 		const detectSpy = vi.spyOn(nativesModule, "detectMacOSAppearance").mockReturnValue(MacOSAppearance.Light);
 		setTerminalBackgroundColor(0x102030);
 
@@ -283,7 +280,7 @@ describe("theme auto-detection", () => {
 	});
 
 	it("terminal-reported appearance wins over conflicting COLORFGBG", async () => {
-		using _globals = withThemeTestGlobals({ colorfgbg: "15;0" });
+		setThemeTestGlobals({ colorfgbg: "15;0" });
 		const detectSpy = vi.spyOn(nativesModule, "detectMacOSAppearance").mockReturnValue(MacOSAppearance.Light);
 
 		themeModule.onTerminalAppearanceChange("light");
@@ -335,7 +332,7 @@ describe("theme auto-detection", () => {
 		});
 
 		it("switches provisionally, reprobes at every contracted delay, then reconciles unchanged terminal state", async () => {
-			using _globals = withThemeTestGlobals();
+			setThemeTestGlobals();
 			await themeModule.initTheme(false, undefined, undefined, "dark", "light");
 			const observer = mockMacAppearanceObserver();
 			const terminal = new FakeAppearanceTerminal("dark");
@@ -386,7 +383,7 @@ describe("theme auto-detection", () => {
 		});
 
 		it("keeps the provisional native theme when every OSC probe times out", async () => {
-			using _globals = withThemeTestGlobals();
+			setThemeTestGlobals();
 			await themeModule.initTheme(false, undefined, undefined, "dark", "light");
 			const observer = mockMacAppearanceObserver();
 			const terminal = new FakeAppearanceTerminal("dark");
@@ -411,7 +408,7 @@ describe("theme auto-detection", () => {
 		});
 
 		it("cancels the previous probes and reconciliation when a newer native event starts a fresh sequence", async () => {
-			using _globals = withThemeTestGlobals();
+			setThemeTestGlobals();
 			await themeModule.initTheme(false, undefined, undefined, "dark", "light");
 			const observer = mockMacAppearanceObserver();
 			const terminal = new FakeAppearanceTerminal("dark");
@@ -446,7 +443,7 @@ describe("theme auto-detection", () => {
 		});
 
 		it("keeps a genuinely changed terminal appearance authoritative and cancels reconciliation", async () => {
-			using _globals = withThemeTestGlobals();
+			setThemeTestGlobals();
 			await themeModule.initTheme(false, undefined, undefined, "dark", "light");
 			const observer = mockMacAppearanceObserver();
 			const terminal = new FakeAppearanceTerminal("dark");
@@ -492,7 +489,7 @@ describe("theme auto-detection", () => {
 		});
 
 		it("disposer stops the observer, cancels timers, and guards retained callbacks", async () => {
-			using _globals = withThemeTestGlobals();
+			setThemeTestGlobals();
 			await themeModule.initTheme(false, undefined, undefined, "dark", "light");
 			const observer = mockMacAppearanceObserver();
 			const terminal = new FakeAppearanceTerminal("dark");

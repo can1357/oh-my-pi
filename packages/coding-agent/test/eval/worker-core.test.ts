@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, onTestFinished } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -146,6 +146,7 @@ describe("WorkerCore", () => {
 
 		const gate = Promise.withResolvers<void>();
 		const entered = Promise.withResolvers<void>();
+		onTestFinished(() => Reflect.deleteProperty(globalThis, "__omp_worker_core_gate"));
 		(globalThis as { __omp_worker_core_gate?: { entered(): void; wait: Promise<void> } }).__omp_worker_core_gate = {
 			entered: () => entered.resolve(),
 			wait: gate.promise,
@@ -195,8 +196,6 @@ describe("WorkerCore", () => {
 		} finally {
 			uninstall();
 			gate.resolve();
-			delete (globalThis as { __omp_worker_core_gate?: { entered(): void; wait: Promise<void> } })
-				.__omp_worker_core_gate;
 			first.send({ type: "close" });
 			second.send({ type: "close" });
 		}
@@ -213,6 +212,7 @@ describe("WorkerCore", () => {
 
 		const gate = Promise.withResolvers<void>();
 		const entered = Promise.withResolvers<void>();
+		onTestFinished(() => Reflect.deleteProperty(globalThis, "__omp_worker_core_gate"));
 		(globalThis as { __omp_worker_core_gate?: { entered(): void; wait: Promise<void> } }).__omp_worker_core_gate = {
 			entered: () => entered.resolve(),
 			wait: gate.promise,
@@ -282,8 +282,6 @@ describe("WorkerCore", () => {
 		} finally {
 			uninstall();
 			gate.resolve();
-			delete (globalThis as { __omp_worker_core_gate?: { entered(): void; wait: Promise<void> } })
-				.__omp_worker_core_gate;
 			first.send({ type: "close" });
 			second.send({ type: "close" });
 			third.send({ type: "close" });
@@ -298,6 +296,7 @@ describe("WorkerCore", () => {
 
 		const gate = Promise.withResolvers<void>();
 		const entered = Promise.withResolvers<void>();
+		onTestFinished(() => Reflect.deleteProperty(globalThis, "__omp_worker_core_gate"));
 		(globalThis as { __omp_worker_core_gate?: { entered(): void; wait: Promise<void> } }).__omp_worker_core_gate = {
 			entered: () => entered.resolve(),
 			wait: gate.promise,
@@ -350,8 +349,6 @@ describe("WorkerCore", () => {
 		} finally {
 			uninstall();
 			gate.resolve();
-			delete (globalThis as { __omp_worker_core_gate?: { entered(): void; wait: Promise<void> } })
-				.__omp_worker_core_gate;
 			first.send({ type: "close" });
 			second.send({ type: "close" });
 		}
@@ -390,6 +387,7 @@ describe("WorkerCore", () => {
 
 		const gate = Promise.withResolvers<void>();
 		const entered = Promise.withResolvers<void>();
+		onTestFinished(() => Reflect.deleteProperty(globalThis, "__omp_worker_cwd_gate"));
 		(globalThis as { __omp_worker_cwd_gate?: { entered(): void; wait: Promise<void> } }).__omp_worker_cwd_gate = {
 			entered: () => entered.resolve(),
 			wait: gate.promise,
@@ -451,8 +449,6 @@ describe("WorkerCore", () => {
 			expect(chdirs.at(-1)).toBe(dirB);
 		} finally {
 			gate.resolve();
-			delete (globalThis as { __omp_worker_cwd_gate?: { entered(): void; wait: Promise<void> } })
-				.__omp_worker_cwd_gate;
 			harness.send({ type: "close" });
 			await fs.rm(dirA, { recursive: true, force: true });
 			await fs.rm(dirB, { recursive: true, force: true });
@@ -466,6 +462,9 @@ describe("WorkerCore", () => {
 		await Bun.write(path.join(dirB, "5.eval.log"), "from B");
 		const harness = createWorkerHarness();
 		const probe = globalThis as { __omp_artifact_probe?: unknown };
+		onTestFinished(() => {
+			delete probe.__omp_artifact_probe;
+		});
 		const run = async (runId: string, artifacts: string) => {
 			const result = waitForMessage(harness, message => message.type === "result" && message.runId === runId);
 			harness.send({
@@ -487,7 +486,6 @@ describe("WorkerCore", () => {
 			expect(await run("artifact-a", dirA)).toBe("from A");
 			expect(await run("artifact-b", dirB)).toBe("from B");
 		} finally {
-			delete probe.__omp_artifact_probe;
 			harness.send({ type: "close" });
 			await fs.rm(dirA, { recursive: true, force: true });
 			await fs.rm(dirB, { recursive: true, force: true });
@@ -506,6 +504,10 @@ describe("WorkerCore", () => {
 			__omp_roots_gate?: { entered(): void; wait: Promise<void> };
 			__omp_roots_probe?: Record<string, unknown>;
 		};
+		onTestFinished(() => {
+			delete probe.__omp_roots_gate;
+			delete probe.__omp_roots_probe;
+		});
 		probe.__omp_roots_gate = { entered: () => entered.resolve(), wait: gate.promise };
 		probe.__omp_roots_probe = {};
 		const snapshot = (artifacts: string): SessionSnapshot => ({
@@ -543,8 +545,6 @@ describe("WorkerCore", () => {
 			expect(probe.__omp_roots_probe).toEqual({ overlap: "from B", hold: "from A" });
 		} finally {
 			gate.resolve();
-			delete probe.__omp_roots_gate;
-			delete probe.__omp_roots_probe;
 			harness.send({ type: "close" });
 			await fs.rm(dirA, { recursive: true, force: true });
 			await fs.rm(dirB, { recursive: true, force: true });

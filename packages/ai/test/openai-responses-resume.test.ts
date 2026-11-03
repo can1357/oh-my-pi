@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it, onTestFinished, vi } from "bun:test";
 import {
 	pollOpenAIResponsesResultForCompletion,
 	streamOpenAIResponses,
@@ -151,17 +151,16 @@ const context: Context = { messages: [{ role: "user", content: "hi", timestamp: 
 // Poll sleeps and transient-retry backoff go through the injectable wait seam.
 const noWait = async (): Promise<void> => {};
 
-/** Run `fn` with PI_MUSE_STORE_RESPONSES set to `value` (unset when undefined), then restore it. */
+/** Run `fn` with PI_MUSE_STORE_RESPONSES set to `value` (unset when undefined); the test's end puts it back. */
 async function withStoreEnv(value: string | undefined, fn: () => Promise<void>): Promise<void> {
 	const previous = process.env.PI_MUSE_STORE_RESPONSES;
-	if (value === undefined) delete process.env.PI_MUSE_STORE_RESPONSES;
-	else process.env.PI_MUSE_STORE_RESPONSES = value;
-	try {
-		await fn();
-	} finally {
+	onTestFinished(() => {
 		if (previous === undefined) delete process.env.PI_MUSE_STORE_RESPONSES;
 		else process.env.PI_MUSE_STORE_RESPONSES = previous;
-	}
+	});
+	if (value === undefined) delete process.env.PI_MUSE_STORE_RESPONSES;
+	else process.env.PI_MUSE_STORE_RESPONSES = value;
+	await fn();
 }
 
 afterEach(() => {
@@ -363,93 +362,92 @@ describe("openai-responses socket-drop resume", () => {
 		// host with strict tool schemas (custom providers can set `store-responses`)
 		// exercises the fallback; the shipped muse-code row disables strict mode.
 		const previous = process.env.PI_MUSE_STORE_RESPONSES;
-		delete process.env.PI_MUSE_STORE_RESPONSES;
-		try {
-			const postBodies: Array<Record<string, unknown>> = [];
-			let rejectStrict = true;
-			const fetchImpl = (async (_url: unknown, init?: RequestInit) => {
-				const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
-				postBodies.push(body);
-				// Reject strict tool schemas once so the fallback rebuilds the params.
-				if (rejectStrict) {
-					rejectStrict = false;
-					return Response.json(
-						{ error: { message: "Invalid schema for function 'lookup': strict mode unsupported" } },
-						{ status: 400 },
-					);
-				}
-				const id = `resp_optout_${postBodies.length}`;
-				return new Response(
-					sseFrame({
-						type: "response.completed",
-						response: {
-							id,
-							status: "completed",
-							output: [
-								{
-									id: `msg_${postBodies.length}`,
-									type: "message",
-									status: "completed",
-									role: "assistant",
-									content: [{ type: "output_text", text: "ok", annotations: [] }],
-								},
-							],
-							usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
-						},
-					} as { type: string }),
-					{ status: 200, headers: { "content-type": "text/event-stream" } },
-				);
-			}) as FetchImpl;
-			const base = bundledModel("muse-code");
-			const model: Model<"openai-responses"> = { ...base, compat: { ...base.compat, supportsStrictMode: true } };
-			const tools: Context["tools"] = [
-				{
-					name: "lookup",
-					description: "Look something up",
-					parameters: { type: "object", properties: { q: { type: "string" } }, required: ["q"] } as never,
-				},
-			];
-			const options = {
-				fetch: fetchImpl,
-				apiKey: "test-key",
-				providerRetryWait: noWait,
-				statefulResponses: true,
-				sessionId: "optout-session",
-				providerSessionState: new Map(),
-			};
-			const first = await streamOpenAIResponses(
-				model,
-				{ messages: [{ role: "user", content: "hi", timestamp: 1 }], tools },
-				options,
-			).result();
-			// A second turn on the same session is where chaining would add
-			// `previous_response_id` and force storage.
-			await streamOpenAIResponses(
-				model,
-				{
-					messages: [
-						{ role: "user", content: "hi", timestamp: 1 },
-						first,
-						{ role: "user", content: "again", timestamp: 2 },
-					],
-					tools,
-				},
-				options,
-			).result();
-
-			// Every path ran: the strict request, the non-strict fallback retry,
-			// and the second turn's request (carrying the first turn's history).
-			const strictFlags = postBodies.map(body => (body.tools as Array<{ strict?: boolean }>)[0].strict);
-			expect(strictFlags[0]).toBe(true);
-			expect(strictFlags.slice(1).every(strict => strict !== true)).toBe(true);
-			expect(postBodies.some(body => Array.isArray(body.input) && body.input.length > 1)).toBe(true);
-			for (const body of postBodies) {
-				expect(body.store).toBe(false);
-				expect(body.previous_response_id).toBeUndefined();
-			}
-		} finally {
+		onTestFinished(() => {
 			if (previous === undefined) delete process.env.PI_MUSE_STORE_RESPONSES;
 			else process.env.PI_MUSE_STORE_RESPONSES = previous;
+		});
+		delete process.env.PI_MUSE_STORE_RESPONSES;
+		const postBodies: Array<Record<string, unknown>> = [];
+		let rejectStrict = true;
+		const fetchImpl = (async (_url: unknown, init?: RequestInit) => {
+			const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+			postBodies.push(body);
+			// Reject strict tool schemas once so the fallback rebuilds the params.
+			if (rejectStrict) {
+				rejectStrict = false;
+				return Response.json(
+					{ error: { message: "Invalid schema for function 'lookup': strict mode unsupported" } },
+					{ status: 400 },
+				);
+			}
+			const id = `resp_optout_${postBodies.length}`;
+			return new Response(
+				sseFrame({
+					type: "response.completed",
+					response: {
+						id,
+						status: "completed",
+						output: [
+							{
+								id: `msg_${postBodies.length}`,
+								type: "message",
+								status: "completed",
+								role: "assistant",
+								content: [{ type: "output_text", text: "ok", annotations: [] }],
+							},
+						],
+						usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+					},
+				} as { type: string }),
+				{ status: 200, headers: { "content-type": "text/event-stream" } },
+			);
+		}) as FetchImpl;
+		const base = bundledModel("muse-code");
+		const model: Model<"openai-responses"> = { ...base, compat: { ...base.compat, supportsStrictMode: true } };
+		const tools: Context["tools"] = [
+			{
+				name: "lookup",
+				description: "Look something up",
+				parameters: { type: "object", properties: { q: { type: "string" } }, required: ["q"] } as never,
+			},
+		];
+		const options = {
+			fetch: fetchImpl,
+			apiKey: "test-key",
+			providerRetryWait: noWait,
+			statefulResponses: true,
+			sessionId: "optout-session",
+			providerSessionState: new Map(),
+		};
+		const first = await streamOpenAIResponses(
+			model,
+			{ messages: [{ role: "user", content: "hi", timestamp: 1 }], tools },
+			options,
+		).result();
+		// A second turn on the same session is where chaining would add
+		// `previous_response_id` and force storage.
+		await streamOpenAIResponses(
+			model,
+			{
+				messages: [
+					{ role: "user", content: "hi", timestamp: 1 },
+					first,
+					{ role: "user", content: "again", timestamp: 2 },
+				],
+				tools,
+			},
+			options,
+		).result();
+
+		// Every path ran: the strict request, the non-strict fallback retry,
+		// and the second turn's request (carrying the first turn's history).
+		const strictFlags = postBodies.map(body => (body.tools as Array<{ strict?: boolean }>)[0].strict);
+		expect(strictFlags[0]).toBe(true);
+		expect(strictFlags.slice(1).every(strict => strict !== true)).toBe(true);
+		expect(postBodies.some(body => Array.isArray(body.input) && body.input.length > 1)).toBe(true);
+		for (const body of postBodies) {
+			expect(body.store).toBe(false);
+			expect(body.previous_response_id).toBeUndefined();
 		}
 	});
 });

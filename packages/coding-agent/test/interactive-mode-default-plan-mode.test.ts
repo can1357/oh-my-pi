@@ -16,6 +16,9 @@ import { InteractiveMode, shouldEnterPlanModeOnStartup } from "../src/modes/inte
 import { resolveXdevTool, type XdevState } from "../src/tools/xdev";
 
 import { cfgStartupQuiet } from "@oh-my-pi/pi-coding-agent/modes/settings";
+import { installMockRestores } from "../../utils/test/helpers/mock-restores";
+
+installMockRestores();
 
 function makeTool(name: string): AgentTool {
 	return {

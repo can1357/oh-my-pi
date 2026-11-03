@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it } from "bun:test";
+import { beforeAll, describe, expect, it, onTestFinished } from "bun:test";
 import { AttachmentChipsBand } from "@oh-my-pi/pi-tui/prompt/attachment-chips";
 import { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
 import { chipLabel } from "@oh-my-pi/pi-tui/prompt/composer-attachments";
@@ -131,34 +131,33 @@ describe("AttachmentChipsBand — Kitty placeholder thumbnails", () => {
 		const mutable = TERMINAL as unknown as { imageProtocol: ImageProtocol | null };
 		const originalProtocol = TERMINAL.imageProtocol;
 		const originalCellDims = { ...getCellDimensions() };
-		mutable.imageProtocol = ImageProtocol.Kitty;
-		setKittyGraphics({ unicodePlaceholders: true });
-		setCellDimensions({ widthPx: 10, heightPx: 21 });
-		try {
-			// Regression: pasted images are re-encoded JPEG/WebP; transmitting those raw
-			// bytes as f=100 made Ghostty reject the data (EINVAL) and render blank cells.
-			const jpeg = await new Bun.Image(Buffer.from(TINY_PNG, "base64")).jpeg().toBase64();
-			const editor = new CustomEditor(getEditorTheme());
-			const budget = new ImageBudget(8);
-			const repaint = Promise.withResolvers<void>();
-			const band = new AttachmentChipsBand(editor, budget, () => repaint.resolve());
-			editor.pendingImages.push({ type: "image", data: jpeg, mimeType: "image/jpeg" });
-			editor.insertAtom(chipLabel("image", 1), "[Image #1, 2x2]");
-			// Conversion in flight: icon fallback, nothing transmitted yet.
-			band.render(80);
-			expect(budget.hasPendingTransmits()).toBe(false);
-			await repaint.promise;
-			const rows = band.render(80);
-			expect(rows.some(row => row.includes("\x1b_Ga=p,U=1"))).toBe(true);
-			const transmits = budget.takeTransmits();
-			expect(transmits).toHaveLength(1);
-			const payload = transmits[0]!.slice(transmits[0]!.indexOf(";") + 1);
-			expect(payload.startsWith("iVBOR")).toBe(true);
-		} finally {
+		onTestFinished(() => {
 			mutable.imageProtocol = originalProtocol;
 			setKittyGraphics({ unicodePlaceholders: false });
 			setCellDimensions(originalCellDims);
-		}
+		});
+		mutable.imageProtocol = ImageProtocol.Kitty;
+		setKittyGraphics({ unicodePlaceholders: true });
+		setCellDimensions({ widthPx: 10, heightPx: 21 });
+		// Regression: pasted images are re-encoded JPEG/WebP; transmitting those raw
+		// bytes as f=100 made Ghostty reject the data (EINVAL) and render blank cells.
+		const jpeg = await new Bun.Image(Buffer.from(TINY_PNG, "base64")).jpeg().toBase64();
+		const editor = new CustomEditor(getEditorTheme());
+		const budget = new ImageBudget(8);
+		const repaint = Promise.withResolvers<void>();
+		const band = new AttachmentChipsBand(editor, budget, () => repaint.resolve());
+		editor.pendingImages.push({ type: "image", data: jpeg, mimeType: "image/jpeg" });
+		editor.insertAtom(chipLabel("image", 1), "[Image #1, 2x2]");
+		// Conversion in flight: icon fallback, nothing transmitted yet.
+		band.render(80);
+		expect(budget.hasPendingTransmits()).toBe(false);
+		await repaint.promise;
+		const rows = band.render(80);
+		expect(rows.some(row => row.includes("\x1b_Ga=p,U=1"))).toBe(true);
+		const transmits = budget.takeTransmits();
+		expect(transmits).toHaveLength(1);
+		const payload = transmits[0]!.slice(transmits[0]!.indexOf(";") + 1);
+		expect(payload.startsWith("iVBOR")).toBe(true);
 	});
 });
 

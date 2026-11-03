@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it, onTestFinished, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -59,21 +59,20 @@ async function writeSession(file: string, id: string, cwd: string, entries: unkn
 	await Bun.write(file, `${[sessionHeader(id, cwd), ...entries].map(entry => JSON.stringify(entry)).join("\n")}\n`);
 }
 
-/** Point the agent dir (and so every project's session bucket) at a temp root for one test. */
+/** Point the agent dir (and so every project's session bucket) at a temp root for the rest of the test. */
 async function withAgentDir<T>(agentDir: string, fn: () => Promise<T>): Promise<T> {
 	const originalAgentDir = getAgentDir();
 	const originalAgentDirOverride = process.env.PI_CODING_AGENT_DIR;
-	setAgentDir(agentDir);
-	try {
-		return await fn();
-	} finally {
+	onTestFinished(() => {
 		if (originalAgentDirOverride !== undefined) {
 			setAgentDir(originalAgentDirOverride);
 		} else {
 			setAgentDir(originalAgentDir);
 			delete process.env.PI_CODING_AGENT_DIR;
 		}
-	}
+	});
+	setAgentDir(agentDir);
+	return await fn();
 }
 
 afterEach(() => {

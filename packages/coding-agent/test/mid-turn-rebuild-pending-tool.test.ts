@@ -12,7 +12,7 @@
  *  - Idle rebuilds seal leftover danglers instead of pinning the transcript
  *    live region with a spinner that can never resolve.
  */
-import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeAll, describe, expect, it, onTestFinished, vi } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -107,6 +107,9 @@ describe("mid-turn transcript rebuild keeps in-flight tool calls", () => {
 	for (const arrival of ["buffered", "live", "persisted", "during-replay"] as const) {
 		it(`keeps replayed read images visible after ${arrival} completion`, async () => {
 			const protocol = Object.getOwnPropertyDescriptor(TERMINAL, "imageProtocol")!;
+			onTestFinished(() => {
+				Object.defineProperty(TERMINAL, "imageProtocol", protocol);
+			});
 			Object.defineProperty(TERMINAL, "imageProtocol", { value: null });
 			const { ctx, helpers, controller, chatContainer } = createFixture({ isStreaming: true });
 			const showImages = cfgTerminalShowImages.get(ctx.settings);
@@ -181,7 +184,6 @@ describe("mid-turn transcript rebuild keeps in-flight tool calls", () => {
 				expect(ctx.pendingTools.size).toBe(0);
 			} finally {
 				cfgTerminalShowImages.set(ctx.settings, showImages);
-				Object.defineProperty(TERMINAL, "imageProtocol", protocol);
 			}
 		});
 	}

@@ -191,6 +191,15 @@ describe("AgentSession auto-compaction queue resume", () => {
 		});
 	});
 
+	// Put the fixture's gates back in a synchronous hook: a timeout cannot stop it partway.
+	afterEach(() => {
+		(globalThis as typeof globalThis & { __ompManualCompactGate?: Promise<void> }).__ompManualCompactGate = undefined;
+		(globalThis as typeof globalThis & { __ompAgentStartGate?: AgentStartGate }).__ompAgentStartGate = undefined;
+		(globalThis as ParkCommandGlobals).__ompParkGate = undefined;
+		(globalThis as ParkCommandGlobals).__ompParkAction = undefined;
+		(globalThis as typeof globalThis & { __ompManualCompactCancel?: boolean }).__ompManualCompactCancel = undefined;
+	});
+
 	afterEach(async () => {
 		try {
 			await session?.dispose();
@@ -200,14 +209,6 @@ describe("AgentSession auto-compaction queue resume", () => {
 				await Bun.sleep(0);
 			} finally {
 				getRuntimeSignals().length = 0;
-				(globalThis as typeof globalThis & { __ompManualCompactGate?: Promise<void> }).__ompManualCompactGate =
-					undefined;
-				(globalThis as typeof globalThis & { __ompAgentStartGate?: AgentStartGate }).__ompAgentStartGate =
-					undefined;
-				(globalThis as ParkCommandGlobals).__ompParkGate = undefined;
-				(globalThis as ParkCommandGlobals).__ompParkAction = undefined;
-				(globalThis as typeof globalThis & { __ompManualCompactCancel?: boolean }).__ompManualCompactCancel =
-					undefined;
 				vi.restoreAllMocks();
 			}
 		}

@@ -12,7 +12,7 @@
  * extension-registered providers/models appear in the output.
  */
 
-import { afterAll, beforeAll, expect, test } from "bun:test";
+import { afterAll, beforeAll, expect, onTestFinished, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { AuthStorage } from "@oh-my-pi/pi-ai";
@@ -142,6 +142,9 @@ test("omp models surfaces extension-registered providers (issue #905)", async ()
 
 		const captured: string[] = [];
 		const originalWrite = process.stdout.write.bind(process.stdout);
+		onTestFinished(() => {
+			process.stdout.write = originalWrite;
+		});
 		process.stdout.write = ((chunk: string | Uint8Array) => {
 			captured.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"));
 			return true;
@@ -173,6 +176,9 @@ test("omp models does not execute ambient hooks while retaining explicit provide
 		const modelRegistry = new ModelRegistry(authStorage);
 		const captured: string[] = [];
 		const originalWrite = process.stdout.write.bind(process.stdout);
+		onTestFinished(() => {
+			process.stdout.write = originalWrite;
+		});
 		process.stdout.write = ((chunk: string | Uint8Array) => {
 			captured.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"));
 			return true;
@@ -224,6 +230,9 @@ test("omp models explicit-only mode resolves a package and excludes settings pro
 		const modelRegistry = new ModelRegistry(authStorage);
 		const captured: string[] = [];
 		const originalWrite = process.stdout.write.bind(process.stdout);
+		onTestFinished(() => {
+			process.stdout.write = originalWrite;
+		});
 		process.stdout.write = ((chunk: string | Uint8Array) => {
 			captured.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"));
 			return true;
@@ -280,6 +289,9 @@ test("omp models prints invalid models.yml schema errors before listing output",
 
 		const captured: string[] = [];
 		const originalWrite = process.stdout.write;
+		onTestFinished(() => {
+			process.stdout.write = originalWrite;
+		});
 		Reflect.set(process.stdout, "write", (chunk: string | Uint8Array) => {
 			captured.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"));
 			return true;

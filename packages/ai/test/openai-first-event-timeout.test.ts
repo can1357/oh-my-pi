@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "bun:test";
+import { describe, expect, it, onTestFinished, vi } from "bun:test";
 import { streamAzureOpenAIResponses } from "@oh-my-pi/pi-ai/providers/azure-openai-responses";
 import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
@@ -359,23 +359,7 @@ describe("OpenAI-family first-event timeouts", () => {
 	it("lets PI_OPENAI_STREAM_IDLE_TIMEOUT_MS widen OpenAI responses first-event request setup", async () => {
 		const previousOpenAIIdleTimeout = Bun.env.PI_OPENAI_STREAM_IDLE_TIMEOUT_MS;
 		const previousGenericFirstEventTimeout = Bun.env.PI_STREAM_FIRST_EVENT_TIMEOUT_MS;
-		const timeoutHeaders: string[] = [];
-		Bun.env.PI_OPENAI_STREAM_IDLE_TIMEOUT_MS = "1500";
-		Bun.env.PI_STREAM_FIRST_EVENT_TIMEOUT_MS = "20";
-		const fetchMock = createDelayedFetch(30, createOpenAIResponsesSuccessResponse, (input, init) => {
-			timeoutHeaders.push(getRequestHeader(input, init, "X-Stainless-Timeout") ?? "");
-		});
-
-		try {
-			const result = await streamOpenAIResponses(openAIResponsesModel, baseContext(), {
-				apiKey: "test-key",
-				fetch: fetchMock,
-			}).result();
-
-			expect(result.stopReason).toBe("stop");
-			expect(getFirstTextContent(result)).toMatchObject({ type: "text", text: "Hello delayed" });
-			expect(timeoutHeaders).toContain("1");
-		} finally {
+		onTestFinished(() => {
 			if (previousOpenAIIdleTimeout === undefined) {
 				delete Bun.env.PI_OPENAI_STREAM_IDLE_TIMEOUT_MS;
 			} else {
@@ -386,25 +370,28 @@ describe("OpenAI-family first-event timeouts", () => {
 			} else {
 				Bun.env.PI_STREAM_FIRST_EVENT_TIMEOUT_MS = previousGenericFirstEventTimeout;
 			}
-		}
+		});
+		const timeoutHeaders: string[] = [];
+		Bun.env.PI_OPENAI_STREAM_IDLE_TIMEOUT_MS = "1500";
+		Bun.env.PI_STREAM_FIRST_EVENT_TIMEOUT_MS = "20";
+		const fetchMock = createDelayedFetch(30, createOpenAIResponsesSuccessResponse, (input, init) => {
+			timeoutHeaders.push(getRequestHeader(input, init, "X-Stainless-Timeout") ?? "");
+		});
+
+		const result = await streamOpenAIResponses(openAIResponsesModel, baseContext(), {
+			apiKey: "test-key",
+			fetch: fetchMock,
+		}).result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(getFirstTextContent(result)).toMatchObject({ type: "text", text: "Hello delayed" });
+		expect(timeoutHeaders).toContain("1");
 	});
 
 	it("lets PI_OPENAI_STREAM_IDLE_TIMEOUT_MS widen native Ollama first-event request setup", async () => {
 		const previousOpenAIIdleTimeout = Bun.env.PI_OPENAI_STREAM_IDLE_TIMEOUT_MS;
 		const previousGenericFirstEventTimeout = Bun.env.PI_STREAM_FIRST_EVENT_TIMEOUT_MS;
-		Bun.env.PI_OPENAI_STREAM_IDLE_TIMEOUT_MS = "1500";
-		Bun.env.PI_STREAM_FIRST_EVENT_TIMEOUT_MS = "20";
-		const fetchMock = createDelayedFetch(30, createOllamaChatSuccessResponse);
-
-		try {
-			const result = await streamSimple(ollamaChatModel, baseContext(), {
-				apiKey: "test-key",
-				fetch: fetchMock,
-			}).result();
-
-			expect(result.stopReason).toBe("stop");
-			expect(getFirstTextContent(result)).toMatchObject({ type: "text", text: "Hello delayed" });
-		} finally {
+		onTestFinished(() => {
 			if (previousOpenAIIdleTimeout === undefined) {
 				delete Bun.env.PI_OPENAI_STREAM_IDLE_TIMEOUT_MS;
 			} else {
@@ -415,30 +402,24 @@ describe("OpenAI-family first-event timeouts", () => {
 			} else {
 				Bun.env.PI_STREAM_FIRST_EVENT_TIMEOUT_MS = previousGenericFirstEventTimeout;
 			}
-		}
+		});
+		Bun.env.PI_OPENAI_STREAM_IDLE_TIMEOUT_MS = "1500";
+		Bun.env.PI_STREAM_FIRST_EVENT_TIMEOUT_MS = "20";
+		const fetchMock = createDelayedFetch(30, createOllamaChatSuccessResponse);
+
+		const result = await streamSimple(ollamaChatModel, baseContext(), {
+			apiKey: "test-key",
+			fetch: fetchMock,
+		}).result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(getFirstTextContent(result)).toMatchObject({ type: "text", text: "Hello delayed" });
 	});
 
 	it("honors PI_OPENAI_STREAM_FIRST_EVENT_TIMEOUT_MS even when caller pins streamIdleTimeoutMs", async () => {
 		const previousOpenAIFirstEventTimeout = Bun.env.PI_OPENAI_STREAM_FIRST_EVENT_TIMEOUT_MS;
 		const previousGenericFirstEventTimeout = Bun.env.PI_STREAM_FIRST_EVENT_TIMEOUT_MS;
-		const timeoutHeaders: string[] = [];
-		Bun.env.PI_OPENAI_STREAM_FIRST_EVENT_TIMEOUT_MS = "1500";
-		Bun.env.PI_STREAM_FIRST_EVENT_TIMEOUT_MS = "20";
-		const fetchMock = createDelayedFetch(30, createOpenAIResponsesSuccessResponse, (input, init) => {
-			timeoutHeaders.push(getRequestHeader(input, init, "X-Stainless-Timeout") ?? "");
-		});
-
-		try {
-			const result = await streamOpenAIResponses(openAIResponsesModel, baseContext(), {
-				apiKey: "test-key",
-				streamIdleTimeoutMs: 5_000,
-				fetch: fetchMock,
-			}).result();
-
-			expect(result.stopReason).toBe("stop");
-			expect(getFirstTextContent(result)).toMatchObject({ type: "text", text: "Hello delayed" });
-			expect(timeoutHeaders).toContain("1");
-		} finally {
+		onTestFinished(() => {
 			if (previousOpenAIFirstEventTimeout === undefined) {
 				delete Bun.env.PI_OPENAI_STREAM_FIRST_EVENT_TIMEOUT_MS;
 			} else {
@@ -449,7 +430,23 @@ describe("OpenAI-family first-event timeouts", () => {
 			} else {
 				Bun.env.PI_STREAM_FIRST_EVENT_TIMEOUT_MS = previousGenericFirstEventTimeout;
 			}
-		}
+		});
+		const timeoutHeaders: string[] = [];
+		Bun.env.PI_OPENAI_STREAM_FIRST_EVENT_TIMEOUT_MS = "1500";
+		Bun.env.PI_STREAM_FIRST_EVENT_TIMEOUT_MS = "20";
+		const fetchMock = createDelayedFetch(30, createOpenAIResponsesSuccessResponse, (input, init) => {
+			timeoutHeaders.push(getRequestHeader(input, init, "X-Stainless-Timeout") ?? "");
+		});
+
+		const result = await streamOpenAIResponses(openAIResponsesModel, baseContext(), {
+			apiKey: "test-key",
+			streamIdleTimeoutMs: 5_000,
+			fetch: fetchMock,
+		}).result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(getFirstTextContent(result)).toMatchObject({ type: "text", text: "Hello delayed" });
+		expect(timeoutHeaders).toContain("1");
 	});
 
 	it("times out OpenAI responses streams that only emit no-progress status events", async () => {

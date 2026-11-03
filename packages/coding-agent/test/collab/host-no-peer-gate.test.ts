@@ -14,6 +14,9 @@ import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/typ
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memory-relay";
+import { installMockRestores } from "../../../utils/test/helpers/mock-restores";
+
+installMockRestores();
 
 interface Fixture {
 	ctx: InteractiveModeContext;
@@ -92,6 +95,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+	vi.restoreAllMocks();
 	vi.useRealTimers();
 	if (host) await host.stop("test cleanup").catch(() => {});
 	uninstallInMemoryRelay();

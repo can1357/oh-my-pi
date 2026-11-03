@@ -1,10 +1,14 @@
-import { afterAll, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "bun:test";
 import type { AuthStorage, FetchImpl } from "@oh-my-pi/pi-ai";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resolveFirecrawlUrl } from "@oh-my-pi/pi-coding-agent/web/firecrawl";
 import { FirecrawlProvider, searchFirecrawl } from "@oh-my-pi/pi-coding-agent/web/search/providers/firecrawl";
 import { SearchProviderError } from "@oh-my-pi/pi-coding-agent/web/search/types";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 const TEST_KEY = "test-firecrawl-key";
 
@@ -21,19 +25,19 @@ const providerFixture = createFirecrawlFixture(providerAuthStorage);
 
 const keylessAuthStorage = createInMemoryAuthStorage();
 const keylessFixture = createFirecrawlFixture(keylessAuthStorage);
-const keylessResolverSpy = vi.spyOn(keylessAuthStorage.keys, "resolver").mockImplementation((provider, options) => {
-	expect(provider).toBe("firecrawl");
-	expect(options?.sessionId).toBe("session-firecrawl-test");
-	return async () => undefined;
-});
-const keylessSourceSpy = vi.spyOn(keylessAuthStorage.keys, "source").mockImplementation(provider => {
-	expect(provider).toBe("firecrawl");
-	return undefined;
+beforeEach(() => {
+	vi.spyOn(keylessAuthStorage.keys, "resolver").mockImplementation((provider, options) => {
+		expect(provider).toBe("firecrawl");
+		expect(options?.sessionId).toBe("session-firecrawl-test");
+		return async () => undefined;
+	});
+	vi.spyOn(keylessAuthStorage.keys, "source").mockImplementation(provider => {
+		expect(provider).toBe("firecrawl");
+		return undefined;
+	});
 });
 
 afterAll(() => {
-	keylessResolverSpy.mockRestore();
-	keylessSourceSpy.mockRestore();
 	providerAuthStorage.close();
 	keylessAuthStorage.close();
 });
@@ -183,7 +187,7 @@ describe("Firecrawl web search provider", () => {
 	it("uses the initially resolved credential for the first authenticated request", async () => {
 		let resolutionCount = 0;
 		const authStorage = createInMemoryAuthStorage();
-		const resolverSpy = vi.spyOn(authStorage.keys, "resolver").mockImplementation((provider, options) => {
+		vi.spyOn(authStorage.keys, "resolver").mockImplementation((provider, options) => {
 			expect(provider).toBe("firecrawl");
 			expect(options?.sessionId).toBe("session-firecrawl-test");
 			return async () => {
@@ -208,7 +212,6 @@ describe("Firecrawl web search provider", () => {
 			expect(response.authMode).toBe("api_key");
 			expect(resolutionCount).toBe(1);
 		} finally {
-			resolverSpy.mockRestore();
 			authStorage.close();
 		}
 	});
@@ -217,7 +220,7 @@ describe("Firecrawl web search provider", () => {
 		const resolvedKeys = ["initial-firecrawl-key", "rotated-firecrawl-key"] as const;
 		let resolutionCount = 0;
 		const authStorage = createInMemoryAuthStorage();
-		const resolverSpy = vi.spyOn(authStorage.keys, "resolver").mockImplementation((provider, options) => {
+		vi.spyOn(authStorage.keys, "resolver").mockImplementation((provider, options) => {
 			expect(provider).toBe("firecrawl");
 			expect(options?.sessionId).toBe("session-firecrawl-test");
 			return async () => resolvedKeys[resolutionCount++];
@@ -250,7 +253,6 @@ describe("Firecrawl web search provider", () => {
 				authMode: "api_key",
 			});
 		} finally {
-			resolverSpy.mockRestore();
 			authStorage.close();
 		}
 	});
@@ -274,49 +276,47 @@ describe("Firecrawl web search provider", () => {
 		const originalApiKey = process.env.FIRECRAWL_API_KEY;
 		const originalBaseUrl = process.env.FIRECRAWL_BASE_URL;
 		const originalApiUrl = process.env.FIRECRAWL_API_URL;
-		delete process.env.FIRECRAWL_API_KEY;
-		delete process.env.FIRECRAWL_BASE_URL;
-		delete process.env.FIRECRAWL_API_URL;
-		try {
-			expect(new FirecrawlProvider().isAvailable(keylessAuthStorage)).toBe(true);
-		} finally {
+		onTestFinished(() => {
 			if (originalApiKey === undefined) delete process.env.FIRECRAWL_API_KEY;
 			else process.env.FIRECRAWL_API_KEY = originalApiKey;
 			if (originalBaseUrl === undefined) delete process.env.FIRECRAWL_BASE_URL;
 			else process.env.FIRECRAWL_BASE_URL = originalBaseUrl;
 			if (originalApiUrl === undefined) delete process.env.FIRECRAWL_API_URL;
 			else process.env.FIRECRAWL_API_URL = originalApiUrl;
-		}
+		});
+		delete process.env.FIRECRAWL_API_KEY;
+		delete process.env.FIRECRAWL_BASE_URL;
+		delete process.env.FIRECRAWL_API_URL;
+		expect(new FirecrawlProvider().isAvailable(keylessAuthStorage)).toBe(true);
 	});
 
 	it("uses a self-hosted endpoint and accepts Firecrawl v1 array responses", async () => {
 		const originalBaseUrl = process.env.FIRECRAWL_BASE_URL;
-		process.env.FIRECRAWL_BASE_URL = "http://localhost:3002/v1/";
-		let requestUrl = "";
-		try {
-			const fetchMock: FetchImpl = async input => {
-				requestUrl = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-				return new Response(
-					JSON.stringify({
-						success: true,
-						data: [{ title: "Legacy result", url: "https://example.com/legacy", snippet: "Legacy snippet" }],
-					}),
-					{ status: 200, headers: { "Content-Type": "application/json" } },
-				);
-			};
-			const response = await searchFirecrawl({
-				...makeParams("legacy query", keylessAuthStorage),
-				fetch: fetchMock,
-			});
-
-			expect(requestUrl).toBe("http://localhost:3002/v1/search");
-			expect(response.sources).toEqual([
-				{ title: "Legacy result", url: "https://example.com/legacy", snippet: "Legacy snippet" },
-			]);
-		} finally {
+		onTestFinished(() => {
 			if (originalBaseUrl === undefined) delete process.env.FIRECRAWL_BASE_URL;
 			else process.env.FIRECRAWL_BASE_URL = originalBaseUrl;
-		}
+		});
+		process.env.FIRECRAWL_BASE_URL = "http://localhost:3002/v1/";
+		let requestUrl = "";
+		const fetchMock: FetchImpl = async input => {
+			requestUrl = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+			return new Response(
+				JSON.stringify({
+					success: true,
+					data: [{ title: "Legacy result", url: "https://example.com/legacy", snippet: "Legacy snippet" }],
+				}),
+				{ status: 200, headers: { "Content-Type": "application/json" } },
+			);
+		};
+		const response = await searchFirecrawl({
+			...makeParams("legacy query", keylessAuthStorage),
+			fetch: fetchMock,
+		});
+
+		expect(requestUrl).toBe("http://localhost:3002/v1/search");
+		expect(response.sources).toEqual([
+			{ title: "Legacy result", url: "https://example.com/legacy", snippet: "Legacy snippet" },
+		]);
 	});
 
 	it("uses keyless mode when no API key is configured (no Authorization header)", async () => {

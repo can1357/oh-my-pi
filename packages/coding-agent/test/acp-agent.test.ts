@@ -530,6 +530,7 @@ const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
 const fallbackAgentDir = path.join(getConfigRootDir(), "agent");
 
 afterEach(async () => {
+	vi.restoreAllMocks();
 	vi.useRealTimers();
 	if (originalAgentDir) {
 		setAgentDir(originalAgentDir);
@@ -4221,27 +4222,23 @@ describe("ACP agent MCP server configuration (late-connecting servers)", () => {
 		const refreshSpy = spyOn(FakeAgentSession.prototype, "refreshMCPTools");
 		const namesOf = (tools: unknown[]) => (tools as Array<{ name: string }>).map(tool => tool.name);
 
-		try {
-			const created = await harness.agent.newSession({
-				cwd: harness.cwdA,
-				mcpServers: [{ name: "delayed", command: BUN_EXEC, args: [FIXTURE_PATH], env: [] }],
-			});
-			expectAcpStructure(zNewSessionResponse, created);
+		const created = await harness.agent.newSession({
+			cwd: harness.cwdA,
+			mcpServers: [{ name: "delayed", command: BUN_EXEC, args: [FIXTURE_PATH], env: [] }],
+		});
+		expectAcpStructure(zNewSessionResponse, created);
 
-			// The fixture delays its `initialize` response past the 250ms startup
-			// race, so the first (synchronous) refresh inside `#configureMcpServers`
-			// must see no tools yet.
-			expect(refreshSpy.mock.calls).toHaveLength(1);
-			expect(namesOf(refreshSpy.mock.calls[0]?.[0] ?? [])).toEqual([]);
+		// The fixture delays its `initialize` response past the 250ms startup
+		// race, so the first (synchronous) refresh inside `#configureMcpServers`
+		// must see no tools yet.
+		expect(refreshSpy.mock.calls).toHaveLength(1);
+		expect(namesOf(refreshSpy.mock.calls[0]?.[0] ?? [])).toEqual([]);
 
-			// Once the delayed `initialize` response lands, the background
-			// `onToolsChanged` -> queued `refreshMCPTools` call must deliver the
-			// server's tool. Before the fix, this late arrival was dropped.
-			await pollUntil(() => refreshSpy.mock.calls.length > 1);
-			expect(namesOf(refreshSpy.mock.calls.at(-1)?.[0] ?? [])).toEqual([`mcp__delayed_${DELAYED_MCP_TOOL_NAME}`]);
-		} finally {
-			refreshSpy.mockRestore();
-		}
+		// Once the delayed `initialize` response lands, the background
+		// `onToolsChanged` -> queued `refreshMCPTools` call must deliver the
+		// server's tool. Before the fix, this late arrival was dropped.
+		await pollUntil(() => refreshSpy.mock.calls.length > 1);
+		expect(namesOf(refreshSpy.mock.calls.at(-1)?.[0] ?? [])).toEqual([`mcp__delayed_${DELAYED_MCP_TOOL_NAME}`]);
 	}, 15_000);
 
 	it("keeps a client-declared server whose initial connect fails in a usable record", async () => {
@@ -4393,7 +4390,7 @@ describe("ACP agent MCP server configuration (late-connecting servers)", () => {
 		const authStorage = new AuthStorage(new SqliteAuthCredentialStore(database));
 		// No browser in CI: the flow's token exchange is stubbed at the login
 		// boundary, exactly like the dispatcher-level reauth tests.
-		const loginSpy = spyOn(oauthFlowModule.MCPOAuthFlow.prototype, "login").mockResolvedValue({
+		spyOn(oauthFlowModule.MCPOAuthFlow.prototype, "login").mockResolvedValue({
 			access: "fresh-access",
 			refresh: "fresh-refresh",
 			expires: Date.now() + 3_600_000,
@@ -4450,7 +4447,6 @@ describe("ACP agent MCP server configuration (late-connecting servers)", () => {
 				authStorage.credentials.get(oauthFlowModule.mcpOAuthCredentialId(`http://127.0.0.1:${server.port}/mcp`)),
 			).toMatchObject({ access: "fresh-access" });
 		} finally {
-			loginSpy.mockRestore();
 			await server.stop(true);
 			database.close();
 		}

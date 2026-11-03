@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -27,6 +27,7 @@ const msg = (id: string, parentId: string, text: string) => ({
 
 let dir: string | undefined;
 afterEach(() => {
+	vi.restoreAllMocks();
 	if (dir) {
 		fs.rmSync(dir, { recursive: true, force: true });
 		dir = undefined;
@@ -346,7 +347,7 @@ describe("loadEntriesFromFileStream (Bun.JSONL parity)", () => {
 		let bytesRead = 0;
 		let firstChunkBytes = 0;
 		const realBunFile = Bun.file.bind(Bun);
-		const bunFileSpy = spyOn(Bun, "file").mockImplementation((arg: unknown, opts?: BlobPropertyBag) => {
+		spyOn(Bun, "file").mockImplementation((arg: unknown, opts?: BlobPropertyBag) => {
 			const handle = realBunFile(arg as string, opts);
 			const realStream = handle.stream.bind(handle);
 			// An async generator, not a piped stream: it is strictly pull-driven, so
@@ -362,16 +363,12 @@ describe("loadEntriesFromFileStream (Bun.JSONL parity)", () => {
 			return handle;
 		});
 
-		try {
-			const visited: FileEntry[] = [];
-			await sessionLoader.visitEntriesFromFileStream(file, entry => void visited.push(entry), { maxRecords: 0 });
+		const visited: FileEntry[] = [];
+		await sessionLoader.visitEntriesFromFileStream(file, entry => void visited.push(entry), { maxRecords: 0 });
 
-			expect(visited).toEqual([]);
-			expect(firstChunkBytes).toBeLessThan(Buffer.byteLength(content));
-			expect(bytesRead).toBe(firstChunkBytes);
-		} finally {
-			bunFileSpy.mockRestore();
-		}
+		expect(visited).toEqual([]);
+		expect(firstChunkBytes).toBeLessThan(Buffer.byteLength(content));
+		expect(bytesRead).toBe(firstChunkBytes);
 	});
 
 	it("retains an unfinished value across embedded newlines before the trailing fragment", async () => {

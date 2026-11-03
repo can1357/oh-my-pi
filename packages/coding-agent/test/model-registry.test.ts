@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, onTestFinished, spyOn, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -517,23 +517,22 @@ describe("ModelRegistry", () => {
 
 		test("apiKey-only override supplies fallback auth for built-in models", async () => {
 			const originalOpenAiKey = Bun.env.OPENAI_API_KEY;
-			delete Bun.env.OPENAI_API_KEY;
-			try {
-				writeRawModelsJson({
-					openai: {
-						apiKey: "issue-typed-key",
-					},
-				});
-
-				const registry = new ModelRegistry(authStorage, modelsJsonPath);
-				const openaiModels = getModelsForProvider(registry, "openai");
-
-				expect(openaiModels.length).toBeGreaterThan(0);
-				await expect(registry.getApiKey(openaiModels[0])).resolves.toBe("issue-typed-key");
-			} finally {
+			onTestFinished(() => {
 				if (originalOpenAiKey === undefined) delete Bun.env.OPENAI_API_KEY;
 				else Bun.env.OPENAI_API_KEY = originalOpenAiKey;
-			}
+			});
+			delete Bun.env.OPENAI_API_KEY;
+			writeRawModelsJson({
+				openai: {
+					apiKey: "issue-typed-key",
+				},
+			});
+
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			const openaiModels = getModelsForProvider(registry, "openai");
+
+			expect(openaiModels.length).toBeGreaterThan(0);
+			await expect(registry.getApiKey(openaiModels[0])).resolves.toBe("issue-typed-key");
 		});
 		test("zhipu-coding-plan glm-5.2 chat resolves the zhipu credential with model-scoped hints", async () => {
 			const registry = new ModelRegistry(authStorage, modelsJsonPath);

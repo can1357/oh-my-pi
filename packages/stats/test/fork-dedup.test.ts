@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { describe, expect, it, spyOn } from "bun:test";
+import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { syncAllSessions } from "@oh-my-pi/omp-stats/aggregator";
@@ -9,6 +9,10 @@ import * as parser from "@oh-my-pi/omp-stats/parser";
 import type { MessageStats } from "@oh-my-pi/omp-stats/types";
 import { getSessionsDir, getStatsDbPath } from "@oh-my-pi/pi-utils";
 import { installStatsTestIsolation } from "./helpers/temp-agent";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 installStatsTestIsolation("@pi-stats-fork-dedup-");
 

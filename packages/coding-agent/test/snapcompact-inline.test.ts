@@ -1,4 +1,4 @@
-import { describe, expect, it, spyOn } from "bun:test";
+import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import { Tokenizer } from "@oh-my-pi/pi-agent-core";
 import type {
 	AssistantMessage,
@@ -22,6 +22,10 @@ import {
 import type { ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 /**
  * Token-dense deterministic word salad: each word is `w` + ≤5 digits, ~7
@@ -236,45 +240,41 @@ describe("SnapcompactInlineTransformer", () => {
 		const options = withTestShape({ renderSystemPrompt: "none", renderToolResults: true });
 		const model = makeModel({ id: "claude-opus-5-5" });
 		const spy = spyOn(snapcompact, "renderMany");
-		try {
-			const result = await new SnapcompactInlineTransformer(options).transform(context, model);
-			const swapped = result.messages[1] as ToolResultMessage;
-			const frames = swapped.content.filter(block => block.type === "image");
+		const result = await new SnapcompactInlineTransformer(options).transform(context, model);
+		const swapped = result.messages[1] as ToolResultMessage;
+		const frames = swapped.content.filter(block => block.type === "image");
 
-			// The header stays copyable text; the frames start at the first row.
-			const note = (swapped.content[0] as TextContent).text;
-			expect(note.split("\n")).toContain(header);
-			const rendered = spy.mock.calls[0][0];
-			expect(rendered).not.toContain(header);
-			expect(rendered.startsWith("1:[·4]w")).toBe(true);
-			expect(rendered).toContain("\n2:[»1·2]w");
-			expect(rendered).toContain("\n3:w");
-			expect(rendered).toContain("\n4:[»2]w");
-			expect(rendered).toContain(`\n${last + 1}-${last + 30}:[»1]collapsed() { … }`);
-			expect(rendered).toContain(`\n${last + 31}:x\u2028  y`);
-			expect(rendered).toContain(`\n${last + 32}:[0][·4]literal`);
-			expect(rendered).toContain(`\n${last + 33}:[»1][0]literal`);
-			expect(rendered).not.toMatch(/^[\d-]+:[ \t]/m);
+		// The header stays copyable text; the frames start at the first row.
+		const note = (swapped.content[0] as TextContent).text;
+		expect(note.split("\n")).toContain(header);
+		const rendered = spy.mock.calls[0][0];
+		expect(rendered).not.toContain(header);
+		expect(rendered.startsWith("1:[·4]w")).toBe(true);
+		expect(rendered).toContain("\n2:[»1·2]w");
+		expect(rendered).toContain("\n3:w");
+		expect(rendered).toContain("\n4:[»2]w");
+		expect(rendered).toContain(`\n${last + 1}-${last + 30}:[»1]collapsed() { … }`);
+		expect(rendered).toContain(`\n${last + 31}:x\u2028  y`);
+		expect(rendered).toContain(`\n${last + 32}:[0][·4]literal`);
+		expect(rendered).toContain(`\n${last + 33}:[»1][0]literal`);
+		expect(rendered).not.toMatch(/^[\d-]+:[ \t]/m);
 
-			// The brackets cost cells: planning counts frames on the encoded body,
-			// so /context and the image cap see what the request carries.
-			const shape = snapcompact.resolveShape(model, TEST_SHAPE);
-			expect(snapcompact.frames(raw, { shape })).toBeLessThan(frames.length);
-			const estimate = estimateInlineSavings({
-				options,
-				model,
-				systemPrompt: ["system"],
-				messages: context.messages,
-			});
-			expect(estimate.toolResults?.frames).toBe(frames.length);
-			// The header and legend still go out as text, so they are not counted as saved.
-			const tokenizer = new Tokenizer(model);
-			const kept = tokenizer.countTokens(note) - tokenizer.countTokens(toolResultNote);
-			expect(kept).toBeGreaterThan(0);
-			expect(estimate.toolResults?.textTokens).toBe(tokenizer.countTokens(raw) - kept);
-		} finally {
-			spy.mockRestore();
-		}
+		// The brackets cost cells: planning counts frames on the encoded body,
+		// so /context and the image cap see what the request carries.
+		const shape = snapcompact.resolveShape(model, TEST_SHAPE);
+		expect(snapcompact.frames(raw, { shape })).toBeLessThan(frames.length);
+		const estimate = estimateInlineSavings({
+			options,
+			model,
+			systemPrompt: ["system"],
+			messages: context.messages,
+		});
+		expect(estimate.toolResults?.frames).toBe(frames.length);
+		// The header and legend still go out as text, so they are not counted as saved.
+		const tokenizer = new Tokenizer(model);
+		const kept = tokenizer.countTokens(note) - tokenizer.countTokens(toolResultNote);
+		expect(kept).toBeGreaterThan(0);
+		expect(estimate.toolResults?.textTokens).toBe(tokenizer.countTokens(raw) - kept);
 	});
 
 	it("treats a leading `N:` as content, not a line number, in a read without line numbers", async () => {
@@ -290,16 +290,12 @@ describe("SnapcompactInlineTransformer", () => {
 			messages: [userMessage("go"), toolResult("read-raw", rows.join("\n"), "read")],
 		};
 		const spy = spyOn(snapcompact, "renderMany");
-		try {
-			await new SnapcompactInlineTransformer(
-				withTestShape({ renderSystemPrompt: "none", renderToolResults: true }),
-			).transform(context, makeModel({ id: "claude-opus-5-5" }));
-			const rendered = spy.mock.calls[0][0];
-			expect(rendered.startsWith("200:  OK\n404:  Not found\nresponses:\n[·2]w")).toBe(true);
-			expect(rendered.endsWith("\n[0]500|[·4]literal")).toBe(true);
-		} finally {
-			spy.mockRestore();
-		}
+		await new SnapcompactInlineTransformer(
+			withTestShape({ renderSystemPrompt: "none", renderToolResults: true }),
+		).transform(context, makeModel({ id: "claude-opus-5-5" }));
+		const rendered = spy.mock.calls[0][0];
+		expect(rendered.startsWith("200:  OK\n404:  Not found\nresponses:\n[·2]w")).toBe(true);
+		expect(rendered.endsWith("\n[0]500|[·4]literal")).toBe(true);
 	});
 
 	it("brackets a line-number read's rows behind a suffix-resolution notice", async () => {
@@ -315,17 +311,13 @@ describe("SnapcompactInlineTransformer", () => {
 			messages: [userMessage("go"), toolResult("read-numbered", rows.join("\n"), "read")],
 		};
 		const spy = spyOn(snapcompact, "renderMany");
-		try {
-			await new SnapcompactInlineTransformer(
-				withTestShape({ renderSystemPrompt: "none", renderToolResults: true }),
-			).transform(context, makeModel({ id: "claude-opus-5-5" }));
-			const rendered = spy.mock.calls[0][0];
-			expect(rendered.startsWith(`${notice}\n1|[»2]w`)).toBe(true);
-			expect(rendered).toContain(`\n${line}-${line + 30}|[»1]collapsed() { … }`);
-			expect(rendered).not.toMatch(/\n[\d-]+\|\t/);
-		} finally {
-			spy.mockRestore();
-		}
+		await new SnapcompactInlineTransformer(
+			withTestShape({ renderSystemPrompt: "none", renderToolResults: true }),
+		).transform(context, makeModel({ id: "claude-opus-5-5" }));
+		const rendered = spy.mock.calls[0][0];
+		expect(rendered.startsWith(`${notice}\n1|[»2]w`)).toBe(true);
+		expect(rendered).toContain(`\n${line}-${line + 30}|[»1]collapsed() { … }`);
+		expect(rendered).not.toMatch(/\n[\d-]+\|\t/);
 	});
 
 	it("trusts the read's recorded metadata over the text's shape", async () => {
@@ -351,19 +343,15 @@ describe("SnapcompactInlineTransformer", () => {
 			],
 		};
 		const spy = spyOn(snapcompact, "renderMany");
-		try {
-			const result = await new SnapcompactInlineTransformer(
-				withTestShape({ renderSystemPrompt: "none", renderToolResults: true }),
-			).transform(context, makeModel({ id: "claude-opus-5-5" }));
-			const [oneRow, rawRows, ...rest] = spy.mock.calls.map(call => call[0]);
-			expect(oneRow.startsWith("42|[·4]w")).toBe(true);
-			expect(rawRows.startsWith("[file.ts#ABCD]\n1:  w")).toBe(true);
-			expect(rawRows).not.toContain("[·");
-			expect(rest).toEqual([]);
-			expect(result.messages[3]).toBe(context.messages[3]);
-		} finally {
-			spy.mockRestore();
-		}
+		const result = await new SnapcompactInlineTransformer(
+			withTestShape({ renderSystemPrompt: "none", renderToolResults: true }),
+		).transform(context, makeModel({ id: "claude-opus-5-5" }));
+		const [oneRow, rawRows, ...rest] = spy.mock.calls.map(call => call[0]);
+		expect(oneRow.startsWith("42|[·4]w")).toBe(true);
+		expect(rawRows.startsWith("[file.ts#ABCD]\n1:  w")).toBe(true);
+		expect(rawRows).not.toContain("[·");
+		expect(rest).toEqual([]);
+		expect(result.messages[3]).toBe(context.messages[3]);
 	});
 
 	it("applies option changes on the next request, re-rendering cached frames when the shape changes", async () => {
@@ -723,28 +711,24 @@ describe("SnapcompactInlineTransformer", () => {
 
 	it("caches renders across turns: identical input does not re-rasterize", async () => {
 		const spy = spyOn(snapcompact, "renderMany");
-		try {
-			const transformer = new SnapcompactInlineTransformer(
-				withTestShape({ renderSystemPrompt: "all", renderToolResults: true }),
-			);
-			const context = makeContext();
-			const model = makeModel();
+		const transformer = new SnapcompactInlineTransformer(
+			withTestShape({ renderSystemPrompt: "all", renderToolResults: true }),
+		);
+		const context = makeContext();
+		const model = makeModel();
 
-			const first = await transformer.transform(context, model);
-			const callsAfterFirst = spy.mock.calls.length;
-			expect(callsAfterFirst).toBeGreaterThan(0);
+		const first = await transformer.transform(context, model);
+		const callsAfterFirst = spy.mock.calls.length;
+		expect(callsAfterFirst).toBeGreaterThan(0);
 
-			const second = await transformer.transform(context, model);
-			expect(spy.mock.calls.length).toBe(callsAfterFirst);
+		const second = await transformer.transform(context, model);
+		expect(spy.mock.calls.length).toBe(callsAfterFirst);
 
-			const firstFrames = (first.messages[1] as ToolResultMessage).content.slice(1);
-			const secondFrames = (second.messages[1] as ToolResultMessage).content.slice(1);
-			expect(secondFrames.length).toBe(firstFrames.length);
-			for (let i = 0; i < firstFrames.length; i++) {
-				expect(secondFrames[i]).toBe(firstFrames[i]);
-			}
-		} finally {
-			spy.mockRestore();
+		const firstFrames = (first.messages[1] as ToolResultMessage).content.slice(1);
+		const secondFrames = (second.messages[1] as ToolResultMessage).content.slice(1);
+		expect(secondFrames.length).toBe(firstFrames.length);
+		for (let i = 0; i < firstFrames.length; i++) {
+			expect(secondFrames[i]).toBe(firstFrames[i]);
 		}
 	});
 

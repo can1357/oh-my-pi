@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "bun:test";
+import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
@@ -136,8 +137,8 @@ function result(): SingleResult {
 	};
 }
 
-function mockDiscovery(agent: AgentDefinition = AGENT): void {
-	vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [agent], projectAgentsDir: null });
+function mockDiscovery(agent: AgentDefinition = AGENT) {
+	return vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [agent], projectAgentsDir: null });
 }
 
 afterEach(() => {
@@ -324,33 +325,32 @@ describe("structured subagent primitive", () => {
 
 	it("gives task and eval invocations identical blocked-agent preflight errors", async () => {
 		const previous = Bun.env.PI_BLOCKED_AGENT;
-		Bun.env.PI_BLOCKED_AGENT = "worker";
-		try {
-			const discover = vi.spyOn(discoveryModule, "discoverAgents");
-			const taskRequest = request();
-			const evalRequest = request({ session: taskRequest.session, invocationKind: "eval" });
-			const messages: string[] = [];
-			for (const candidate of [taskRequest, evalRequest]) {
-				try {
-					await resolveEffectiveSubagentPolicy(candidate);
-				} catch (error) {
-					expect(error).toBeInstanceOf(StructuredSubagentError);
-					messages.push((error as Error).message);
-				}
-			}
-			expect(messages).toEqual([
-				"Cannot spawn worker agent from within itself (recursion prevention). Use a different agent type.",
-				"Cannot spawn worker agent from within itself (recursion prevention). Use a different agent type.",
-			]);
-			expect(discover).not.toHaveBeenCalled();
-		} finally {
+		onTestFinished(() => {
 			if (previous === undefined) delete Bun.env.PI_BLOCKED_AGENT;
 			else Bun.env.PI_BLOCKED_AGENT = previous;
+		});
+		Bun.env.PI_BLOCKED_AGENT = "worker";
+		const discover = vi.spyOn(discoveryModule, "discoverAgents");
+		const taskRequest = request();
+		const evalRequest = request({ session: taskRequest.session, invocationKind: "eval" });
+		const messages: string[] = [];
+		for (const candidate of [taskRequest, evalRequest]) {
+			try {
+				await resolveEffectiveSubagentPolicy(candidate);
+			} catch (error) {
+				expect(error).toBeInstanceOf(StructuredSubagentError);
+				messages.push((error as Error).message);
+			}
 		}
+		expect(messages).toEqual([
+			"Cannot spawn worker agent from within itself (recursion prevention). Use a different agent type.",
+			"Cannot spawn worker agent from within itself (recursion prevention). Use a different agent type.",
+		]);
+		expect(discover).not.toHaveBeenCalled();
 	});
 
 	it("attenuates plan-mode agents and rejects mutable isolation controls before discovery", async () => {
-		mockDiscovery();
+		const discoveryMock = mockDiscovery();
 		const policy = await resolveEffectiveSubagentPolicy(
 			request({ session: session({ planMode: true }), enableLsp: true, enableIrc: true }),
 		);
@@ -359,7 +359,7 @@ describe("structured subagent primitive", () => {
 		expect(policy.enableLsp).toBe(false);
 		expect(policy.enableIrc).toBe(false);
 
-		vi.restoreAllMocks();
+		discoveryMock.mockRestore();
 		const discover = vi.spyOn(discoveryModule, "discoverAgents");
 		await expect(
 			resolveEffectiveSubagentPolicy(
@@ -1356,7 +1356,10 @@ describe("structured subagent primitive", () => {
 describe("agent frontmatter structured opt-in", () => {
 	const MOCK_API_SOURCE = "test/structured-subagent-opt-in";
 	const ENV_KEYS = ["HOME", "PI_CODING_AGENT_DIR", "OMP_PROFILE", "PI_PROFILE"] as const;
-	let savedEnv: Record<string, string | undefined> = {};
+	// Captured once, so a put-back skipped by a timed-out afterEach cannot become the next test's baseline.
+	const savedEnv: Record<string, string | undefined> = Object.fromEntries(
+		ENV_KEYS.map(key => [key, process.env[key]]),
+	);
 	let root: string;
 
 	function restoreEnvValue(key: string, value: string | undefined): void {
@@ -1390,11 +1393,16 @@ describe("agent frontmatter structured opt-in", () => {
 		].join("\n");
 	}
 
-	beforeEach(async () => {
-		savedEnv = Object.fromEntries(ENV_KEYS.map(key => [key, process.env[key]]));
-		root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-structured-opt-in-"));
+	// Synchronous, so a timed-out hook cannot resume later and install HOME during another test.
+	beforeEach(() => {
+		// Runs after afterEach: disposal still sees the test root and the homedir spy is restored.
+		onTestFinished(() => {
+			for (const key of ENV_KEYS) restoreEnvValue(key, savedEnv[key]);
+			__resetDirsFromEnvForTests();
+		});
+		root = fsSync.mkdtempSync(path.join(os.tmpdir(), "omp-structured-opt-in-"));
 		const home = path.join(root, "home");
-		await fs.mkdir(home, { recursive: true });
+		fsSync.mkdirSync(home, { recursive: true });
 		restoreEnvValue("HOME", home);
 		vi.spyOn(os, "homedir").mockReturnValue(home);
 		setAgentDir(path.join(home, ".omp", "agent"));
@@ -1403,13 +1411,12 @@ describe("agent frontmatter structured opt-in", () => {
 		registerMockApi(MOCK_API_SOURCE);
 	});
 
+	// Disposal only: the environment put-back above does not wait for it to finish.
 	afterEach(async () => {
 		await AgentLifecycleManager.global().dispose();
 		AgentLifecycleManager.resetGlobalForTests();
 		AgentRegistry.resetGlobalForTests();
 		unregisterCustomApis(MOCK_API_SOURCE);
-		for (const key of ENV_KEYS) restoreEnvValue(key, savedEnv[key]);
-		__resetDirsFromEnvForTests();
 		// The child sessions opened agent.db and models.db under root; Windows cannot delete open files.
 		AgentStorage.close();
 		closeModelCache();

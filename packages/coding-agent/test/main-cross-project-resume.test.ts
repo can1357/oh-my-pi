@@ -6,7 +6,7 @@
  * recorded directory no longer exists, `--resume <id>` offers to *move*
  * (re-root) the session rather than opening against a missing directory.
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
@@ -30,6 +30,9 @@ import {
 	setAgentDir,
 	setProjectDir,
 } from "@oh-my-pi/pi-utils";
+import { installMockRestores } from "../../utils/test/helpers/mock-restores";
+
+installMockRestores();
 
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
 const originalPiProfile = process.env.PI_PROFILE;
@@ -50,6 +53,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+	vi.restoreAllMocks();
 	// `runRootCommand` registers the CLI's extension roots (`--no-extensions` → explicit-only) process-wide.
 	clearOmpExtensionCliRoots();
 	restoreEnv("PI_CODING_AGENT_DIR", originalAgentDir);
@@ -153,10 +157,7 @@ describe("SessionManager.open — recorded cwd adoption", () => {
 			path: fs.PathLike,
 			options?: fs.StatOptions,
 		) => Promise<fs.Stats>;
-		const stat = vi.spyOn(fs.promises, "stat").mockImplementation((async (
-			target: fs.PathLike,
-			options?: fs.StatOptions,
-		) => {
+		vi.spyOn(fs.promises, "stat").mockImplementation((async (target: fs.PathLike, options?: fs.StatOptions) => {
 			if (normalizePathForComparison(String(target)) === normalizePathForComparison(deniedProject)) {
 				throw Object.assign(new Error("operation not permitted"), { code: "EACCES" });
 			}
@@ -172,7 +173,6 @@ describe("SessionManager.open — recorded cwd adoption", () => {
 				await manager.close();
 			}
 		} finally {
-			stat.mockRestore();
 			await fsp.rm(root, { recursive: true, force: true });
 		}
 	});
@@ -194,7 +194,7 @@ describe("SessionManager.open — recorded cwd adoption", () => {
 			})}\n`,
 		);
 		const realAccess = fs.promises.access.bind(fs.promises);
-		const access = vi.spyOn(fs.promises, "access").mockImplementation(async (target, mode) => {
+		vi.spyOn(fs.promises, "access").mockImplementation(async (target, mode) => {
 			if (normalizePathForComparison(String(target)) === normalizePathForComparison(deniedProject)) {
 				throw Object.assign(new Error("permission denied"), { code: "EACCES" });
 			}
@@ -211,7 +211,6 @@ describe("SessionManager.open — recorded cwd adoption", () => {
 				await manager.close();
 			}
 		} finally {
-			access.mockRestore();
 			await fsp.rm(root, { recursive: true, force: true });
 		}
 	});
@@ -476,16 +475,15 @@ describe("createSessionManager — cross-project --resume relocation (moved work
 
 	it("throws the move-specific error when unavailable in non-interactive mode", async () => {
 		const originalIsTTY = process.stdin.isTTY;
-		Object.defineProperty(process.stdin, "isTTY", { value: false, configurable: true });
-		try {
-			vi.spyOn(sessionListingModule, "resolveResumableSession").mockResolvedValue(buildGlobalMatch(missingProject));
-
-			await expect(createSessionManager(buildArgs("019e84ed"), "/current/project", stubSettings)).rejects.toThrow(
-				`Session "019e84ed" belongs to a directory that no longer exists (${missingProject}); run interactively to move it into the current project.`,
-			);
-		} finally {
+		onTestFinished(() => {
 			Object.defineProperty(process.stdin, "isTTY", { value: originalIsTTY, configurable: true });
-		}
+		});
+		Object.defineProperty(process.stdin, "isTTY", { value: false, configurable: true });
+		vi.spyOn(sessionListingModule, "resolveResumableSession").mockResolvedValue(buildGlobalMatch(missingProject));
+
+		await expect(createSessionManager(buildArgs("019e84ed"), "/current/project", stubSettings)).rejects.toThrow(
+			`Session "019e84ed" belongs to a directory that no longer exists (${missingProject}); run interactively to move it into the current project.`,
+		);
 	});
 
 	it("moves a local explicit-session-dir match whose recorded cwd is gone", async () => {

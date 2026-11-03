@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it, onTestFinished, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -492,6 +492,10 @@ it.each(["TUI", "headless"] as const)(
 	async mode => {
 		const { session, sessionManager, execute } = createRuntime(mode);
 		const previousNoTitle = Bun.env.PI_NO_TITLE;
+		onTestFinished(() => {
+			if (previousNoTitle === undefined) delete Bun.env.PI_NO_TITLE;
+			else Bun.env.PI_NO_TITLE = previousNoTitle;
+		});
 		delete Bun.env.PI_NO_TITLE;
 		const automatic = Promise.withResolvers<string | null>();
 		const manual = Promise.withResolvers<string | null>();
@@ -521,8 +525,6 @@ it.each(["TUI", "headless"] as const)(
 			manual.resolve(null);
 			await pending;
 			unsubscribe();
-			if (previousNoTitle === undefined) delete Bun.env.PI_NO_TITLE;
-			else Bun.env.PI_NO_TITLE = previousNoTitle;
 		}
 	},
 );

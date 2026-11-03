@@ -1,10 +1,11 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, onTestFinished, vi } from "bun:test";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { Loader } from "@oh-my-pi/pi-tui";
 import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
+import { testLifetime } from "../../../../utils/test/helpers/mock-restores";
 
 import { cfgTerminalShowProgress } from "@oh-my-pi/pi-coding-agent/modes/settings";
 
@@ -321,22 +322,23 @@ describe("EventController loader recovery after overflow maintenance", () => {
 	});
 
 	it("reports OSC 9;4 activity to Tern even when the setting is off", async () => {
+		const life = testLifetime();
 		const program = Bun.env.TERM_PROGRAM;
-		try {
-			Bun.env.TERM_PROGRAM = "vscode";
-			const outside = createContext();
-			await new EventController(outside.ctx).handleEvent(AGENT_START);
-			expect(outside.setProgress).not.toHaveBeenCalled();
-
-			Bun.env.TERM_PROGRAM = "tern";
-			const { ctx, setProgress } = createContext();
-			const controller = new EventController(ctx);
-			await controller.handleEvent(AGENT_START);
-			await controller.handleEvent(AGENT_END);
-			expect(setProgress.mock.calls.map(call => call[0])).toEqual([true, false]);
-		} finally {
+		onTestFinished(() => {
 			if (program === undefined) delete Bun.env.TERM_PROGRAM;
 			else Bun.env.TERM_PROGRAM = program;
-		}
+		});
+		Bun.env.TERM_PROGRAM = "vscode";
+		const outside = createContext();
+		await new EventController(outside.ctx).handleEvent(AGENT_START);
+		expect(outside.setProgress).not.toHaveBeenCalled();
+
+		life.assertLive();
+		Bun.env.TERM_PROGRAM = "tern";
+		const { ctx, setProgress } = createContext();
+		const controller = new EventController(ctx);
+		await controller.handleEvent(AGENT_START);
+		await controller.handleEvent(AGENT_END);
+		expect(setProgress.mock.calls.map(call => call[0])).toEqual([true, false]);
 	});
 });

@@ -5,6 +5,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { initTelemetryExport, isTelemetryExportEnabled } from "@oh-my-pi/pi-coding-agent/telemetry-export";
 import { estimateProviderCost } from "@oh-my-pi/pi-coding-agent/telemetry-export-otlp";
 import { cfgTelemetryOtlpExportEnabled } from "@oh-my-pi/pi-coding-agent/telemetry-settings";
+import { testLifetime } from "../../utils/test/helpers/mock-restores";
 
 /**
  * Gating contract for the OTLP export bootstrap. These cases all short-circuit
@@ -70,23 +71,27 @@ describe("initTelemetryExport gating", () => {
 	});
 
 	it("declines unsupported OTLP protocols instead of misrouting spans", async () => {
+		const life = testLifetime();
 		process.env.OTEL_EXPORTER_OTLP_ENDPOINT = "http://localhost:4317";
 		process.env.OTEL_EXPORTER_OTLP_PROTOCOL = "grpc";
 		await initTelemetryExport(true);
 		expect(isTelemetryExportEnabled()).toBe(false);
 
+		life.assertLive();
 		process.env.OTEL_EXPORTER_OTLP_TRACES_PROTOCOL = "http/json";
 		await initTelemetryExport(true);
 		expect(isTelemetryExportEnabled()).toBe(false);
 	});
 
-	it("honors the kill-switches case-insensitively per the OTEL env contract", async () => {
+	it("honors OTEL_SDK_DISABLED case-insensitively per the OTEL env contract", async () => {
 		process.env.OTEL_EXPORTER_OTLP_ENDPOINT = "http://localhost:4318";
 		process.env.OTEL_SDK_DISABLED = "TRUE";
 		await initTelemetryExport(true);
 		expect(isTelemetryExportEnabled()).toBe(false);
+	});
 
-		delete process.env.OTEL_SDK_DISABLED;
+	it("honors none exporters case-insensitively per the OTEL env contract", async () => {
+		process.env.OTEL_EXPORTER_OTLP_ENDPOINT = "http://localhost:4318";
 		process.env.OTEL_TRACES_EXPORTER = "otlp,None";
 		process.env.OTEL_LOGS_EXPORTER = "none";
 		process.env.OTEL_METRICS_EXPORTER = "none";

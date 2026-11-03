@@ -12,7 +12,7 @@
  * the `publishCollabHost` export redirects discovery metadata into a temp dir,
  * so the registry's real Unix-socket IPC is exercised without touching ~/.omp.
  */
-import { afterEach, beforeEach, describe, expect, it, type Mock, spyOn } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, type Mock, spyOn, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -32,6 +32,9 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { FakeWebSocket, installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memory-relay";
+import { installMockRestores } from "../../../utils/test/helpers/mock-restores";
+
+installMockRestores();
 
 const RELAY_URL = "ws://localhost:8788";
 const WEB_URL = "https://collab.example";
@@ -157,6 +160,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+	vi.restoreAllMocks();
 	for (const cleanup of guestCleanups.splice(0).reverse()) cleanup();
 	if (host) await host.stop("test cleanup").catch(() => {});
 	uninstallInMemoryRelay();
@@ -197,13 +201,13 @@ describe("collab host registry lifecycle (#6099)", () => {
 			const release = Promise.withResolvers<void>();
 			const completed = Promise.withResolvers<boolean>();
 			const getApiKey = models.getApiKey.bind(models);
-			const keyLookup = spyOn(models, "getApiKey").mockImplementation(async (...args) => {
+			spyOn(models, "getApiKey").mockImplementation(async (...args) => {
 				reached.resolve();
 				await release.promise;
 				return getApiKey(...args);
 			});
 			const prompt = session.promptCustomMessage.bind(session);
-			const submission = spyOn(session, "promptCustomMessage").mockImplementation(async (...args) => {
+			spyOn(session, "promptCustomMessage").mockImplementation(async (...args) => {
 				const result = await prompt(...args);
 				completed.resolve(result);
 				return result;
@@ -249,8 +253,6 @@ describe("collab host registry lifecycle (#6099)", () => {
 			} finally {
 				release.resolve();
 				await host?.stop("test cleanup");
-				keyLookup.mockRestore();
-				submission.mockRestore();
 				await session.dispose();
 				auth.close();
 			}
@@ -358,7 +360,6 @@ describe("collab host registry lifecycle (#6099)", () => {
 							: { kind: "unavailable" },
 				);
 			} finally {
-				replay?.mockRestore();
 				state.transition = undefined;
 				transition.resolve();
 			}
@@ -392,23 +393,19 @@ describe("collab host registry lifecycle (#6099)", () => {
 			1,
 		);
 		const send = spyOn(transport, "send");
-		try {
-			const abort = new AbortController();
-			const answer = host.requestGuestUi({ kind: "select", title: "Pending", options: ["Yes"] }, abort.signal);
-			expect(
-				send.mock.calls.filter(([frame]) => typeof frame !== "string" && frame.t === "ui-request"),
-			).toHaveLength(1);
-			const original = state.sessionId;
-			state.sessionId = "provisional";
-			send.mockClear();
-			abort.abort();
-			expect(await answer).toEqual({ kind: "unavailable" });
-			expect(send.mock.calls).toEqual([[{ t: "ui-request-end", reqId: 1 }, 1]]);
-			state.sessionId = original;
-			expect((await registry.listCollabHosts({ dir: tmp }))[0]?.inputRequired).toBe(false);
-		} finally {
-			send.mockRestore();
-		}
+		const abort = new AbortController();
+		const answer = host.requestGuestUi({ kind: "select", title: "Pending", options: ["Yes"] }, abort.signal);
+		expect(send.mock.calls.filter(([frame]) => typeof frame !== "string" && frame.t === "ui-request")).toHaveLength(
+			1,
+		);
+		const original = state.sessionId;
+		state.sessionId = "provisional";
+		send.mockClear();
+		abort.abort();
+		expect(await answer).toEqual({ kind: "unavailable" });
+		expect(send.mock.calls).toEqual([[{ t: "ui-request-end", reqId: 1 }, 1]]);
+		state.sessionId = original;
+		expect((await registry.listCollabHosts({ dir: tmp }))[0]?.inputRequired).toBe(false);
 	});
 	for (const transition of ["suspend", "stop", "fatal close"] as const) {
 		it(`closes guest traffic and deferred replies on ${transition}`, async () => {
@@ -447,7 +444,7 @@ describe("collab host registry lifecycle (#6099)", () => {
 			const cancel = new AbortController();
 			const answer = host.requestGuestUi({ kind: "select", title: "Pending", options: ["Yes"] }, cancel.signal);
 			const drain = Promise.withResolvers<void>();
-			const flush = spyOn(transport, "flush").mockImplementation(() => drain.promise);
+			spyOn(transport, "flush").mockImplementation(() => drain.promise);
 			let stopping: Promise<void> | undefined;
 			if (transition === "suspend") state.sessionId = "another-session";
 			else if (transition === "stop") stopping = host.stop("test stop");
@@ -474,11 +471,6 @@ describe("collab host registry lifecycle (#6099)", () => {
 				expect(await registry.listCollabHosts({ dir: tmp })).toEqual([]);
 			} finally {
 				drain.resolve();
-				flush.mockRestore();
-				send.mockRestore();
-				prompt.mockRestore();
-				abort.mockRestore();
-				notice.mockRestore();
 				await stopping;
 			}
 		});
@@ -751,7 +743,7 @@ describe("collab host registry lifecycle (#6099)", () => {
 		const release = Promise.withResolvers<void>();
 		const originalEncrypt = crypto.subtle.encrypt.bind(crypto.subtle);
 		let held = false;
-		const encrypt = spyOn(crypto.subtle, "encrypt").mockImplementation(async (algorithm, key, data) => {
+		spyOn(crypto.subtle, "encrypt").mockImplementation(async (algorithm, key, data) => {
 			if (!held) {
 				held = true;
 				sealing.resolve();
@@ -770,7 +762,6 @@ describe("collab host registry lifecycle (#6099)", () => {
 			expect(received).toEqual([{ t: "bye", reason: "revoked" }]);
 		} finally {
 			release.resolve();
-			encrypt.mockRestore();
 		}
 	});
 

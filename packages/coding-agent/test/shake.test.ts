@@ -14,6 +14,7 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { formatShakeSummary } from "@oh-my-pi/pi-coding-agent/session/shake-types";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { installMockRestores } from "../../utils/test/helpers/mock-restores";
 
 import {
 	cfgCompactionDropUseless,
@@ -41,6 +42,8 @@ describe("AgentSession shake", () => {
 	let modelRegistry: ModelRegistry;
 	let events: AgentSessionEvent[];
 	let apiInfo: { api: AssistantMessage["api"]; provider: AssistantMessage["provider"]; model: string };
+
+	installMockRestores();
 
 	beforeEach(async () => {
 		tempDir = TempDir.createSync("@pi-shake-");
@@ -70,7 +73,6 @@ describe("AgentSession shake", () => {
 		try {
 			await tempDir.remove();
 		} catch {}
-		vi.restoreAllMocks();
 	});
 
 	/** Seed a user → assistant(toolCall) → toolResult turn carrying a heavy bash result. */

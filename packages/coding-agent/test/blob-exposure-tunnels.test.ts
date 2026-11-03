@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -12,6 +12,7 @@ import {
 	parseZrokUrl,
 	startExposure,
 } from "../src/blob-broker/exposure";
+import { testLifetime } from "../../utils/test/helpers/mock-restores";
 import { writeFakeExecutable } from "./helpers/fake-executable";
 
 const PORT = 43127;
@@ -106,11 +107,15 @@ beforeAll(() => {
 	fakeBinDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-blob-tunnels-"));
 });
 
+// Each test points PATH at its own fake binaries; this is the only put-back.
+afterEach(() => {
+	if (originalPath === undefined) delete process.env.PATH;
+	else process.env.PATH = originalPath;
+});
+
 afterAll(async () => {
 	for (const active of activeExposures) active.stop();
 	await Promise.all(activeExposures.map(active => active.exited));
-	if (originalPath === undefined) delete process.env.PATH;
-	else process.env.PATH = originalPath;
 	fs.rmSync(fakeBinDir, { recursive: true, force: true });
 });
 
@@ -243,6 +248,7 @@ describe("startExposure tunnel adapters", () => {
 	});
 
 	it("starts devtunnel and zrok with public HTTP argv", async () => {
+		const life = testLifetime();
 		const devInvocation = prepareFake(`Hosting port ${PORT} at https://blue-${PORT}.use2.devtunnels.ms/`);
 		const dev = await startExposure(exposure("devtunnel"), PORT);
 		activeExposures.push(dev);
@@ -257,6 +263,7 @@ describe("startExposure tunnel adapters", () => {
 		]);
 		await stopAndObserve(dev, devInvocation);
 
+		life.assertLive();
 		const zrokInvocation = prepareFake("[INFO]: frontend endpoint: https://violet.share.zrok.io");
 		const zrok = await startExposure(exposure("zrok"), PORT);
 		activeExposures.push(zrok);
@@ -295,6 +302,7 @@ describe("startExposure tunnel adapters", () => {
 	});
 
 	it("starts named Cloudflare token and local-config modes only after registration", async () => {
+		const life = testLifetime();
 		const tokenInvocation = prepareFake("Registered tunnel connection connIndex=0 location=sjc");
 		const token = await startExposure(
 			exposure("named-cloudflared", {
@@ -314,6 +322,7 @@ describe("startExposure tunnel adapters", () => {
 		]);
 		await stopAndObserve(token, tokenInvocation);
 
+		life.assertLive();
 		const configInvocation = prepareFake("Connection abc123 registered with protocol quic");
 		const configured = await startExposure(
 			exposure("named-cloudflared", {
@@ -336,6 +345,7 @@ describe("startExposure tunnel adapters", () => {
 	});
 
 	it("reports invalid adapter configuration without echoing named Cloudflare tokens", async () => {
+		const life = testLifetime();
 		await expect(startExposure(exposure("bore", { options: { server: 17 } }), PORT)).rejects.toThrow(
 			"Destination option server must be a string",
 		);
@@ -353,6 +363,7 @@ describe("startExposure tunnel adapters", () => {
 			),
 		).rejects.toThrow("options.configFile and options.tunnelName");
 
+		life.assertLive();
 		const invocation = prepareFake("cloudflared failed internally", { exitCode: 19 });
 		const secret = "must-not-appear-in-errors";
 		let failure = "";
@@ -374,7 +385,6 @@ describe("startExposure tunnel adapters", () => {
 
 	it("reports absent adapter binaries without invoking the network", async () => {
 		const emptyPath = fs.mkdtempSync(path.join(os.tmpdir(), "omp-no-tunnel-bin-"));
-		const fakePath = process.env.PATH;
 		process.env.PATH = emptyPath;
 		try {
 			const cases: Array<[ExposureConfig, string]> = [
@@ -395,7 +405,6 @@ describe("startExposure tunnel adapters", () => {
 				await expect(startExposure(config, PORT)).rejects.toThrow(message);
 			}
 		} finally {
-			process.env.PATH = fakePath;
 			fs.rmSync(emptyPath, { recursive: true, force: true });
 		}
 	});

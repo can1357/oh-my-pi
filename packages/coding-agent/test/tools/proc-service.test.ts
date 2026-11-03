@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it, onTestFinished, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { procmgr, setProcessName, TempDir } from "@oh-my-pi/pi-utils";
@@ -25,6 +25,10 @@ import { WriteTool } from "../../src/tools/write";
 import { sharedBrowserDaemonName } from "../../src/tools/browser/shared-daemon";
 import type { ToolSession } from "../../src/tools";
 import type { DaemonSnapshot } from "@oh-my-pi/pi-tui/tools/daemon";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 function startBroker(projectDir: string, runtimeDir: string): Promise<void> {
 	const previous = [
@@ -252,7 +256,6 @@ describe("proc:// background jobs", () => {
 				expect(manager.isJobResultConsumed(id)).toBeFalse();
 				if (!launch) expect(broker).not.toHaveBeenCalled();
 			} finally {
-				broker.mockRestore();
 				await manager.dispose();
 			}
 		},
@@ -535,7 +538,7 @@ describe("proc:// background jobs", () => {
 				throw new Error(`Unexpected broker op ${operation.op}`);
 			},
 		} as unknown as DaemonBrokerClient;
-		const spy = vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(client);
+		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(client);
 		const { manager, session } = await wokenAgentSession({ launch: true });
 		const protocol = new ProcProtocolHandler();
 		try {
@@ -548,7 +551,6 @@ describe("proc:// background jobs", () => {
 			expect(stopped).toEqual(["Quick"]);
 			expect(manager.getJob("Quick-2")?.status).toBe("running");
 		} finally {
-			spy.mockRestore();
 			await manager.dispose();
 		}
 	});
@@ -603,7 +605,7 @@ describe("proc:// background jobs", () => {
 	});
 
 	it("keeps listing jobs and agents when the daemon broker hangs, flagging agents with no live turn", async () => {
-		const broker = vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue({
+		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue({
 			request: async () => {
 				throw new Error("Daemon list request timed out");
 			},
@@ -647,7 +649,6 @@ describe("proc:// background jobs", () => {
 				"Daemon list request timed out",
 			);
 		} finally {
-			broker.mockRestore();
 			await manager.dispose();
 		}
 	});
@@ -660,8 +661,12 @@ describe("bash services via proc://", () => {
 		const runtimeDir = path.join(temp.path(), "runtime");
 		await fs.mkdir(cwd);
 		const client = await createDaemonBrokerClient(cwd, { runtimeDir, idleGraceMs: 5_000 });
-		const spy = vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(client);
+		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(client);
 		const oldTitle = process.title;
+		// The broker names this process "omp daemon broker"; put the name back even if the test times out.
+		onTestFinished(() => {
+			setProcessName(oldTitle);
+		});
 		const broker = startBroker(cwd, runtimeDir);
 		const manager = new AsyncJobManager({});
 		const session = toolSession(cwd, manager);
@@ -801,8 +806,6 @@ describe("bash services via proc://", () => {
 			await manager.dispose({ timeoutMs: 1_000 });
 			client.close();
 			await broker;
-			setProcessName(oldTitle);
-			spy.mockRestore();
 		}
 	}, 25_000);
 
@@ -812,8 +815,11 @@ describe("bash services via proc://", () => {
 		const runtimeDir = path.join(temp.path(), "runtime");
 		await fs.mkdir(cwd);
 		const client = await createDaemonBrokerClient(cwd, { runtimeDir, idleGraceMs: 5_000 });
-		const spy = vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(client);
+		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(client);
 		const oldTitle = process.title;
+		onTestFinished(() => {
+			setProcessName(oldTitle);
+		});
 		const broker = startBroker(cwd, runtimeDir);
 		// Already queued when the call starts, i.e. before the broker connection.
 		const steering = new AbortController();
@@ -844,8 +850,6 @@ describe("bash services via proc://", () => {
 			await client.request({ op: "shutdown" }).catch(() => undefined);
 			client.close();
 			await broker;
-			setProcessName(oldTitle);
-			spy.mockRestore();
 		}
 	}, 20_000);
 
@@ -855,8 +859,11 @@ describe("bash services via proc://", () => {
 		const runtimeDir = path.join(temp.path(), "runtime");
 		await fs.mkdir(cwd);
 		const client = await createDaemonBrokerClient(cwd, { runtimeDir, idleGraceMs: 5_000 });
-		const spy = vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(client);
+		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(client);
 		const oldTitle = process.title;
+		onTestFinished(() => {
+			setProcessName(oldTitle);
+		});
 		const broker = startBroker(cwd, runtimeDir);
 		try {
 			const result = await new BashTool(toolSession(cwd)).execute("service", {
@@ -871,8 +878,6 @@ describe("bash services via proc://", () => {
 			await client.request({ op: "shutdown" }).catch(() => undefined);
 			client.close();
 			await broker;
-			setProcessName(oldTitle);
-			spy.mockRestore();
 		}
 	}, 20_000);
 
@@ -891,34 +896,30 @@ describe("bash services via proc://", () => {
 				throw new Error(`Unexpected broker op ${operation.op}`);
 			},
 		} as unknown as DaemonBrokerClient;
-		const spy = vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(client);
+		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(client);
 		const bash = new BashTool(toolSession(process.cwd()));
-		try {
-			expect(
-				await rejectionMessage(
-					bash.execute(
-						"launch-failure",
-						{ command: "sleep 600", name: "launch-failure", ready: { log: "never-printed", timeout: 300 } },
-						undefined,
-						undefined,
-						steeringContext(steering.signal),
-					),
+		expect(
+			await rejectionMessage(
+				bash.execute(
+					"launch-failure",
+					{ command: "sleep 600", name: "launch-failure", ready: { log: "never-printed", timeout: 300 } },
+					undefined,
+					undefined,
+					steeringContext(steering.signal),
 				),
-			).toContain("Daemon cwd is not a directory");
-			expect(
-				await rejectionMessage(
-					bash.execute(
-						"bad-regex",
-						{ command: "true", name: "bad-regex", ready: { log: "(", timeout: 300 } },
-						undefined,
-						undefined,
-						steeringContext(steering.signal),
-					),
+			),
+		).toContain("Daemon cwd is not a directory");
+		expect(
+			await rejectionMessage(
+				bash.execute(
+					"bad-regex",
+					{ command: "true", name: "bad-regex", ready: { log: "(", timeout: 300 } },
+					undefined,
+					undefined,
+					steeringContext(steering.signal),
 				),
-			).toContain("Invalid readiness regex");
-		} finally {
-			spy.mockRestore();
-		}
+			),
+		).toContain("Invalid readiness regex");
 	});
 
 	it("keeps the settled service result when a steer arrives during log retrieval", async () => {
@@ -953,37 +954,33 @@ describe("bash services via proc://", () => {
 				throw new Error(`Unexpected broker op ${operation.op}`);
 			},
 		} as unknown as DaemonBrokerClient;
-		const spy = vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(client);
+		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(client);
 		const steering = new AbortController();
-		try {
-			const pending = new BashTool(toolSession(process.cwd())).execute(
-				"ready-service",
-				{ command: "printf 'READY\n'", name: "ready-service", ready: { log: "READY", timeout: 300 } },
-				undefined,
-				undefined,
-				steeringContext(steering.signal),
-			);
-			await logsRequested.promise;
-			steering.abort();
-			logs.resolve({
-				op: "logs",
-				name: "ready-service",
-				text: "READY\n",
-				cursor: 6,
-				timedOut: false,
-				state: "ready",
-			});
-			const result = await pending;
-			expect(result.details?.service).toMatchObject({
-				name: "ready-service",
-				state: "ready",
-				ready: true,
-				pid: 12345,
-			});
-			expect(result.content[0]?.type === "text" ? result.content[0].text : "").toContain("READY");
-		} finally {
-			spy.mockRestore();
-		}
+		const pending = new BashTool(toolSession(process.cwd())).execute(
+			"ready-service",
+			{ command: "printf 'READY\n'", name: "ready-service", ready: { log: "READY", timeout: 300 } },
+			undefined,
+			undefined,
+			steeringContext(steering.signal),
+		);
+		await logsRequested.promise;
+		steering.abort();
+		logs.resolve({
+			op: "logs",
+			name: "ready-service",
+			text: "READY\n",
+			cursor: 6,
+			timedOut: false,
+			state: "ready",
+		});
+		const result = await pending;
+		expect(result.details?.service).toMatchObject({
+			name: "ready-service",
+			state: "ready",
+			ready: true,
+			pid: 12345,
+		});
+		expect(result.content[0]?.type === "text" ? result.content[0].text : "").toContain("READY");
 	});
 
 	it.each([
@@ -1043,16 +1040,12 @@ describe("bash services via proc://", () => {
 				throw new Error(`Unexpected broker op ${operation.op}`);
 			},
 		} as unknown as DaemonBrokerClient;
-		const spy = vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(client);
-		try {
-			await rejectionMessage(
-				new ProcProtocolHandler().write(parseInternalUrl(`proc://${name}/mode`), "detached", {
-					session: toolSession(process.cwd()),
-				}),
-			);
-			expect(operations).not.toContain("mode");
-		} finally {
-			spy.mockRestore();
-		}
+		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(client);
+		await rejectionMessage(
+			new ProcProtocolHandler().write(parseInternalUrl(`proc://${name}/mode`), "detached", {
+				session: toolSession(process.cwd()),
+			}),
+		);
+		expect(operations).not.toContain("mode");
 	});
 });

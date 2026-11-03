@@ -33,6 +33,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+	vi.restoreAllMocks();
 	resetSettingsForTest();
 	await removeWithRetries(tempDir);
 });
@@ -337,17 +338,13 @@ describe.skipIf(process.platform === "win32")("EditTool move permissions", () =>
 			.spyOn(fs, "chmod")
 			.mockRejectedValueOnce(Object.assign(new Error("EPERM: operation not permitted, chmod"), { code: "EPERM" }));
 
-		try {
-			const result = await new EditTool(session, "hashline").execute("move-script", {
-				input: `${header}\nMV renamed.sh`,
-			});
-			expect(result.isError).not.toBe(true);
-			expect(chmod).toHaveBeenCalledTimes(1);
-			expect(await Bun.file(source).exists()).toBe(false);
-			expect(await Bun.file(destination).text()).toBe("#!/bin/sh\nprintf 'moved\\n'\n");
-		} finally {
-			chmod.mockRestore();
-		}
+		const result = await new EditTool(session, "hashline").execute("move-script", {
+			input: `${header}\nMV renamed.sh`,
+		});
+		expect(result.isError).not.toBe(true);
+		expect(chmod).toHaveBeenCalledTimes(1);
+		expect(await Bun.file(source).exists()).toBe(false);
+		expect(await Bun.file(destination).text()).toBe("#!/bin/sh\nprintf 'moved\\n'\n");
 	});
 });
 

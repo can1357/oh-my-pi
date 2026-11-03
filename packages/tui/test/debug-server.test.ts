@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, onTestFinished, test } from "bun:test";
 import * as os from "node:os";
 import { IpcConnection, ipcEndpoint } from "@oh-my-pi/pi-natives";
 import { type Component, Input, Text, TUI, type TuiDebugTreeNode } from "../src";
@@ -85,6 +85,10 @@ async function paintedText(client: DebugClient): Promise<DebugReply> {
 
 test("OMP_TUI_DEBUG drives and inspects a live TUI", async () => {
 	const previousDebugPath = process.env.OMP_TUI_DEBUG;
+	onTestFinished(() => {
+		if (previousDebugPath === undefined) delete process.env.OMP_TUI_DEBUG;
+		else process.env.OMP_TUI_DEBUG = previousDebugPath;
+	});
 	const socketPath = ipcEndpoint(os.tmpdir(), `pi-tui-${process.pid}-${Bun.randomUUIDv7().slice(0, 8)}`);
 	process.env.OMP_TUI_DEBUG = socketPath;
 	const terminal = new VirtualTerminal(50, 12);
@@ -136,7 +140,5 @@ test("OMP_TUI_DEBUG drives and inspects a live TUI", async () => {
 	} finally {
 		client?.close();
 		tui.stop();
-		if (previousDebugPath === undefined) delete process.env.OMP_TUI_DEBUG;
-		else process.env.OMP_TUI_DEBUG = previousDebugPath;
 	}
 });

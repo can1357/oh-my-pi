@@ -31,6 +31,10 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { getProjectAgentDir, logger, TempDir } from "@oh-my-pi/pi-utils";
 
+afterEach(() => {
+	vi.restoreAllMocks();
+});
+
 const HANG_EXTENSION_SRC = `
 	export default function(pi) {
 		pi.on("session_shutdown", async () => {
@@ -117,7 +121,6 @@ describe("issue #2600 - session_shutdown handler timeout", () => {
 				});
 			}
 		} finally {
-			warnSpy.mockRestore();
 			cleanup();
 		}
 	});
@@ -148,7 +151,6 @@ describe("issue #2600 - session_shutdown handler timeout", () => {
 				event: "session_shutdown",
 				timeoutMs: 50,
 			});
-			warnSpy.mockRestore();
 		} finally {
 			cleanup();
 		}

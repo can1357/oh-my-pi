@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { describe, expect, it, spyOn } from "bun:test";
+import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import { closeDb, getRecentRequests, initDb, insertMessageStats } from "@oh-my-pi/omp-stats/db";
 import {
 	getCostTimeSeries,
@@ -13,6 +13,10 @@ import * as catalogModels from "@oh-my-pi/pi-catalog/models";
 import { getBundledModel, getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { getStatsDbPath, VERSION } from "@oh-my-pi/pi-utils";
 import { installStatsTestIsolation } from "./helpers/temp-agent";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 installStatsTestIsolation("@pi-stats-db-");
 
@@ -470,45 +474,41 @@ describe("stats scheduled response costs", () => {
 			},
 		};
 		// The isolated database holds only these requests, so every lookup is theirs.
-		const lookup = spyOn(catalogModels, "getBundledModel").mockReturnValue(dated);
-		try {
-			const database = await initDb();
-			const requests = [
-				["intro", switchAt - 1],
-				["list", switchAt],
-			] as const;
-			insertMessageStats(
-				requests.map(([entryId, timestamp]) => {
-					const stats = createCodexGptStats(entryId);
-					stats.provider = dated.provider;
-					stats.model = dated.id;
-					stats.api = "google-gemini-cli";
-					stats.timestamp = timestamp;
-					stats.usage = {
-						input: 1_000_000,
-						output: 0,
-						cacheRead: 0,
-						cacheWrite: 0,
-						totalTokens: 1_000_000,
-						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-					};
-					return stats;
-				}),
-			);
-			const totals = () =>
-				Object.fromEntries(getRecentRequests(2).map(request => [request.entryId, request.usage.cost.total]));
-			expect(totals()).toEqual({ intro: 2, list: 4 });
+		spyOn(catalogModels, "getBundledModel").mockReturnValue(dated);
+		const database = await initDb();
+		const requests = [
+			["intro", switchAt - 1],
+			["list", switchAt],
+		] as const;
+		insertMessageStats(
+			requests.map(([entryId, timestamp]) => {
+				const stats = createCodexGptStats(entryId);
+				stats.provider = dated.provider;
+				stats.model = dated.id;
+				stats.api = "google-gemini-cli";
+				stats.timestamp = timestamp;
+				stats.usage = {
+					input: 1_000_000,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 1_000_000,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				};
+				return stats;
+			}),
+		);
+		const totals = () =>
+			Object.fromEntries(getRecentRequests(2).map(request => [request.entryId, request.usage.cost.total]));
+		expect(totals()).toEqual({ intro: 2, list: 4 });
 
-			// Rows ingested at $0 before the card existed are repaired by the
-			// release's catalog backfill.
-			database.run("UPDATE messages SET cost_input = 0, cost_total = 0");
-			database.run("DELETE FROM meta WHERE key = 'catalog_cost_backfill'");
-			closeDb();
-			await initDb();
-			expect(totals()).toEqual({ intro: 2, list: 4 });
-		} finally {
-			lookup.mockRestore();
-		}
+		// Rows ingested at $0 before the card existed are repaired by the
+		// release's catalog backfill.
+		database.run("UPDATE messages SET cost_input = 0, cost_total = 0");
+		database.run("DELETE FROM meta WHERE key = 'catalog_cost_backfill'");
+		closeDb();
+		await initDb();
+		expect(totals()).toEqual({ intro: 2, list: 4 });
 	});
 
 	it("reports a scheduled request with no recoverable timestamp as unpriced, not free", async () => {

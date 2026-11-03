@@ -1,4 +1,4 @@
-import { describe, expect, test, vi } from "bun:test";
+import { afterEach, describe, expect, test, vi } from "bun:test";
 import { type Api, Effort, type Model, type ModelSpec } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -33,6 +33,10 @@ import {
 } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { DEFAULT_MODEL_ROLE_ALIAS, LEGACY_MODEL_ROLE_ALIAS_PREFIX } from "@oh-my-pi/pi-coding-agent/config/model-roles";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 // Mock models for testing
 const mockModels: Model<"anthropic-messages">[] = [
@@ -2209,16 +2213,12 @@ describe("resolveModelScope", () => {
 		const search = runnerSpec("web", "exa", "search");
 		const chat = openaiGpt55Models;
 		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
-		try {
-			const scoped = await resolveModelScope(
-				["openrouter/~typesafe/jev-latest", "web/*", "openai/gpt-5.5", "nonexistent-model"],
-				{ getAvailable: kind => (kind === "all" ? [...chat, judge, search] : chat) },
-			);
-			expect(scoped.map(entry => `${entry.model.provider}/${entry.model.id}`)).toEqual(["openai/gpt-5.5"]);
-			expect(warn.mock.calls.map(call => call[0])).toEqual(['No models match pattern "nonexistent-model"']);
-		} finally {
-			warn.mockRestore();
-		}
+		const scoped = await resolveModelScope(
+			["openrouter/~typesafe/jev-latest", "web/*", "openai/gpt-5.5", "nonexistent-model"],
+			{ getAvailable: kind => (kind === "all" ? [...chat, judge, search] : chat) },
+		);
+		expect(scoped.map(entry => `${entry.model.provider}/${entry.model.id}`)).toEqual(["openai/gpt-5.5"]);
+		expect(warn.mock.calls.map(call => call[0])).toEqual(['No models match pattern "nonexistent-model"']);
 	});
 
 	test("resolves role aliases in --models scope to the role's model with its thinking level", async () => {

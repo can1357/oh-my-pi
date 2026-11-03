@@ -1,6 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import { DEFAULT_SHAKE_CONFIG } from "@oh-my-pi/pi-agent-core/compaction";
@@ -15,6 +15,10 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 const NATIVE_REPLAY_BULK = "NATIVE_REPLAY_BULK_SENTINEL ".repeat(1000);
 const BODY_READ_TIMEOUT = "Timed out reading request body. Try again, or use a smaller request size.";
@@ -422,9 +426,10 @@ describe("AgentSession Responses request-body timeout recovery", () => {
 		const artifactsDir = harness.sessionManager.getArtifactsDir();
 		if (!artifactsDir) throw new Error("Expected session artifacts directory");
 		const artifactId = "artifact-segment-".repeat(20);
-		const allocateArtifactPath = vi
-			.spyOn(harness.sessionManager, "allocateArtifactPath")
-			.mockResolvedValue({ id: artifactId, path: path.join(artifactsDir, "reserved-shake.log") });
+		vi.spyOn(harness.sessionManager, "allocateArtifactPath").mockResolvedValue({
+			id: artifactId,
+			path: path.join(artifactsDir, "reserved-shake.log"),
+		});
 		try {
 			const legacyPlaceholderEstimate = 16;
 			let toolResultText = "";
@@ -487,7 +492,6 @@ describe("AgentSession Responses request-body timeout recovery", () => {
 			expect(await fs.readdir(artifactsDir).catch(() => [])).toEqual([]);
 			assertTerminalErrorState(harness);
 		} finally {
-			allocateArtifactPath.mockRestore();
 			await harness.cleanup();
 		}
 	});
@@ -628,9 +632,10 @@ describe("AgentSession Responses request-body timeout recovery", () => {
 	}, 30_000);
 	it("does not rewrite when the recovery artifact cannot be saved", async () => {
 		const harness = await createSessionHarness();
-		const allocateArtifactPath = vi
-			.spyOn(harness.sessionManager, "allocateArtifactPath")
-			.mockResolvedValue({ id: "reserved", path: harness.tempDir.path() });
+		vi.spyOn(harness.sessionManager, "allocateArtifactPath").mockResolvedValue({
+			id: "reserved",
+			path: harness.tempDir.path(),
+		});
 		try {
 			await runPrompt(harness);
 			expect(harness.requests).toHaveLength(1);
@@ -645,16 +650,13 @@ describe("AgentSession Responses request-body timeout recovery", () => {
 			).toBe(true);
 			assertTerminalErrorState(harness);
 		} finally {
-			allocateArtifactPath.mockRestore();
 			await harness.cleanup();
 		}
 	});
 
 	it("rolls back the in-memory rewrite when durable history write fails", async () => {
 		const harness = await createSessionHarness();
-		const rewriteEntries = vi
-			.spyOn(harness.sessionManager, "rewriteEntries")
-			.mockRejectedValueOnce(new Error("injected rewrite failure"));
+		vi.spyOn(harness.sessionManager, "rewriteEntries").mockRejectedValueOnce(new Error("injected rewrite failure"));
 		try {
 			await runPrompt(harness);
 			expect(harness.requests).toHaveLength(1);
@@ -669,7 +671,6 @@ describe("AgentSession Responses request-body timeout recovery", () => {
 			).toBe(true);
 			assertTerminalErrorState(harness);
 		} finally {
-			rewriteEntries.mockRestore();
 			await harness.cleanup();
 		}
 	});
@@ -678,12 +679,10 @@ describe("AgentSession Responses request-body timeout recovery", () => {
 		const artifactStarted = Promise.withResolvers<void>();
 		const releaseArtifact = Promise.withResolvers<{ id?: string; path?: string }>();
 		const harness = await createSessionHarness();
-		const allocateArtifactPath = vi
-			.spyOn(harness.sessionManager, "allocateArtifactPath")
-			.mockImplementation(async () => {
-				artifactStarted.resolve();
-				return await releaseArtifact.promise;
-			});
+		vi.spyOn(harness.sessionManager, "allocateArtifactPath").mockImplementation(async () => {
+			artifactStarted.resolve();
+			return await releaseArtifact.promise;
+		});
 		try {
 			const prompt = harness.session.prompt("continue");
 			await artifactStarted.promise;
@@ -695,7 +694,6 @@ describe("AgentSession Responses request-body timeout recovery", () => {
 			expect(harness.requests).toHaveLength(1);
 			assertTerminalErrorState(harness);
 		} finally {
-			allocateArtifactPath.mockRestore();
 			await harness.cleanup();
 		}
 	});
@@ -706,7 +704,7 @@ describe("AgentSession Responses request-body timeout recovery", () => {
 		const harness = await createSessionHarness();
 		const originalRewrite = harness.sessionManager.rewriteEntries.bind(harness.sessionManager);
 		let blocked = true;
-		const rewriteEntries = vi.spyOn(harness.sessionManager, "rewriteEntries").mockImplementation(async () => {
+		vi.spyOn(harness.sessionManager, "rewriteEntries").mockImplementation(async () => {
 			if (blocked) {
 				blocked = false;
 				rewriteStarted.resolve();
@@ -755,7 +753,6 @@ describe("AgentSession Responses request-body timeout recovery", () => {
 				content: [{ type: "text", text: "Recovered" }],
 			});
 		} finally {
-			rewriteEntries.mockRestore();
 			await harness.cleanup();
 		}
 	});

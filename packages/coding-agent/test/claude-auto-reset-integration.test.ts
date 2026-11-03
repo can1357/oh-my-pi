@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, onTestFinished, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type {
 	ResetCreditAccountStatus,
@@ -731,6 +731,15 @@ describe("Claude saved-reset trigger integration", () => {
 			OMP_PROFILE: process.env.OMP_PROFILE,
 			PI_PROFILE: process.env.PI_PROFILE,
 		};
+		onTestFinished(() => {
+			if (originalEnv.PI_CODING_AGENT_DIR === undefined) delete process.env.PI_CODING_AGENT_DIR;
+			else process.env.PI_CODING_AGENT_DIR = originalEnv.PI_CODING_AGENT_DIR;
+			if (originalEnv.OMP_PROFILE === undefined) delete process.env.OMP_PROFILE;
+			else process.env.OMP_PROFILE = originalEnv.OMP_PROFILE;
+			if (originalEnv.PI_PROFILE === undefined) delete process.env.PI_PROFILE;
+			else process.env.PI_PROFILE = originalEnv.PI_PROFILE;
+			__resetDirsFromEnvForTests();
+		});
 		setAgentDir(tempDir.path());
 		try {
 			const status = claudeStatus(true);
@@ -761,11 +770,6 @@ describe("Claude saved-reset trigger integration", () => {
 			expect(revalidate).toHaveBeenCalled();
 			expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
 		} finally {
-			for (const [key, value] of Object.entries(originalEnv)) {
-				if (value === undefined) delete process.env[key];
-				else process.env[key] = value;
-			}
-			__resetDirsFromEnvForTests();
 			// The CLI's ModelRegistry opened `<agentDir>/models.db`; Windows cannot delete it while open.
 			closeModelCache();
 		}

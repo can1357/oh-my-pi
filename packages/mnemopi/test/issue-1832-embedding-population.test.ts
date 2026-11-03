@@ -12,7 +12,7 @@
  */
 
 import { Database } from "bun:sqlite";
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, onTestFinished } from "bun:test";
 import { randomBytes } from "node:crypto";
 import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -318,26 +318,25 @@ describe("issue #1832 — embedding write/read coverage", () => {
 		};
 
 		const originalDataDir = process.env.MNEMOPI_DATA_DIR;
-		process.env.MNEMOPI_DATA_DIR = dataDir;
-		let thrown: unknown;
-		try {
-			await withMnemopiRuntimeOptions(runtimeOptions, async () => {
-				try {
-					await withBeam({ bank: "default" }, async beam => {
-						beam.remember("alpha throw-path regression", { source: "test", importance: 0.5 });
-						throw new Error("simulated handler failure");
-					});
-				} catch (error) {
-					thrown = error;
-				}
-			});
-		} finally {
+		onTestFinished(() => {
 			if (originalDataDir === undefined) {
 				delete process.env.MNEMOPI_DATA_DIR;
 			} else {
 				process.env.MNEMOPI_DATA_DIR = originalDataDir;
 			}
-		}
+		});
+		process.env.MNEMOPI_DATA_DIR = dataDir;
+		let thrown: unknown;
+		await withMnemopiRuntimeOptions(runtimeOptions, async () => {
+			try {
+				await withBeam({ bank: "default" }, async beam => {
+					beam.remember("alpha throw-path regression", { source: "test", importance: 0.5 });
+					throw new Error("simulated handler failure");
+				});
+			} catch (error) {
+				thrown = error;
+			}
+		});
 		// MCP reports handler failures to the client through isError, which depends
 		// on withBeam PROPAGATING the rejection. Assert that first: without it a
 		// wrapper that swallows the failure still passes the persistence check.

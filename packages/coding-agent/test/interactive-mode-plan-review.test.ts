@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, onTestFinished, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { Agent, AgentBusyError, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
@@ -32,6 +32,7 @@ import { AUTO_THINKING } from "@oh-my-pi/pi-tui/thinking";
 import * as clipboard from "@oh-my-pi/pi-coding-agent/utils/clipboard";
 import { setKeybindings } from "@oh-my-pi/pi-tui";
 import { formatNumber, TempDir } from "@oh-my-pi/pi-utils";
+import { testLifetime } from "../../utils/test/helpers/mock-restores";
 
 import { cfgPlanAutosave, cfgPlanAutosaveDir } from "@oh-my-pi/pi-coding-agent/plan-mode/settings";
 
@@ -1135,6 +1136,7 @@ describe("InteractiveMode plan review rendering", () => {
 	});
 
 	it("opens the annotation external editor from the real plan review overlay", async () => {
+		const life = testLifetime();
 		// A Bun script instead of a `#!/bin/sh` file: Windows launches $EDITOR through cmd.exe, which cannot run sh scripts.
 		const editorScriptPath = path.join(tempDir.path(), "annotation-editor.ts");
 		await Bun.write(
@@ -1160,43 +1162,43 @@ describe("InteractiveMode plan review rendering", () => {
 		const { promise: editorApplied, resolve: markEditorApplied } = Promise.withResolvers<void>();
 		vi.spyOn(mode.ui, "start").mockImplementation(() => markEditorApplied());
 
-		try {
-			Bun.env.EDITOR = editorPath;
-			delete Bun.env.VISUAL;
-			const choice = mode.showPlanReview(
-				"# Plan\n\nIntro\n\n## Rollout\n\nSteps\n\n## Verify\n\nChecks\n",
-				"Plan mode - next step",
-				["Approve and execute", "Refine plan"],
-				{
-					onFeedbackChange: value => {
-						feedback = value;
-					},
-				},
-			);
-
-			expect(capturedOverlay).toBeDefined();
-			const overlay = capturedOverlay!;
-			overlay.render(80);
-			overlay.handleInput("\t"); // -> toc (Rollout)
-			overlay.handleInput("a");
-			for (const ch of "draft") overlay.handleInput(ch);
-			overlay.handleInput("\x05"); // ctrl+e
-			await editorApplied;
-			expect(feedback).toBe("");
-			overlay.handleInput("\r"); // Explicitly save the returned draft.
-			expect(feedback).toContain("## Rollout\n```md\n- add rollback command\n- include smoke test\n```");
-
-			overlay.handleInput("\x1b[B"); // Rollout -> Verify
-			overlay.handleInput("\x1b[B"); // toc -> actions
-			overlay.handleInput("\x1b[B"); // select Refine plan
-			overlay.handleInput("\r");
-			expect(await choice).toBe("Refine plan");
-		} finally {
+		onTestFinished(() => {
 			if (previousEditor === undefined) delete Bun.env.EDITOR;
 			else Bun.env.EDITOR = previousEditor;
 			if (previousVisual === undefined) delete Bun.env.VISUAL;
 			else Bun.env.VISUAL = previousVisual;
-		}
+		});
+		life.assertLive();
+		Bun.env.EDITOR = editorPath;
+		delete Bun.env.VISUAL;
+		const choice = mode.showPlanReview(
+			"# Plan\n\nIntro\n\n## Rollout\n\nSteps\n\n## Verify\n\nChecks\n",
+			"Plan mode - next step",
+			["Approve and execute", "Refine plan"],
+			{
+				onFeedbackChange: value => {
+					feedback = value;
+				},
+			},
+		);
+
+		expect(capturedOverlay).toBeDefined();
+		const overlay = capturedOverlay!;
+		overlay.render(80);
+		overlay.handleInput("\t"); // -> toc (Rollout)
+		overlay.handleInput("a");
+		for (const ch of "draft") overlay.handleInput(ch);
+		overlay.handleInput("\x05"); // ctrl+e
+		await editorApplied;
+		expect(feedback).toBe("");
+		overlay.handleInput("\r"); // Explicitly save the returned draft.
+		expect(feedback).toContain("## Rollout\n```md\n- add rollback command\n- include smoke test\n```");
+
+		overlay.handleInput("\x1b[B"); // Rollout -> Verify
+		overlay.handleInput("\x1b[B"); // toc -> actions
+		overlay.handleInput("\x1b[B"); // select Refine plan
+		overlay.handleInput("\r");
+		expect(await choice).toBe("Refine plan");
 	});
 
 	it("dismisses Plan Review and restores input when a provider error is pinned", async () => {

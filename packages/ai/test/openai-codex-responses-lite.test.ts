@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, onTestFinished, vi } from "bun:test";
 import { type InputItem, transformRequestBody } from "@oh-my-pi/pi-ai/providers/openai-codex/request-transformer";
 import {
 	buildTransformedCodexRequestBody,
@@ -18,6 +18,7 @@ import type {
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import * as piUtils from "@oh-my-pi/pi-utils";
 import { createCodexModel } from "./helpers";
+import { testLifetime } from "../../utils/test/helpers/mock-restores";
 
 beforeAll(() => configureCredentialRedaction(true));
 afterAll(() => configureCredentialRedaction(false));
@@ -397,28 +398,29 @@ describe("openai-codex Responses Lite input shaping", () => {
 	});
 
 	it("defaults normal inference to full Responses and keeps explicit options above the environment", async () => {
+		const life = testLifetime();
 		const previous = Bun.env.PI_CODEX_RESPONSES_LITE;
 		const model = createCodexModel("gpt-5.6-terra", { useResponsesLite: true });
-		try {
-			delete Bun.env.PI_CODEX_RESPONSES_LITE;
-			const defaultRequest = await transformRequestBody({ model: model.id, instructions: "sys" }, model, {});
-			expect(defaultRequest.instructions).toBe("sys");
-			expect(defaultRequest.input?.some(item => item.type === "additional_tools")).toBe(false);
-
-			Bun.env.PI_CODEX_RESPONSES_LITE = "true";
-			const envOptIn = await transformRequestBody({ model: model.id, instructions: "sys" }, model, {});
-			expect(envOptIn.instructions).toBeUndefined();
-			expect(envOptIn.input?.[0]?.type).toBe("additional_tools");
-
-			const explicitOptOut = await transformRequestBody({ model: model.id, instructions: "sys" }, model, {
-				responsesLite: false,
-			});
-			expect(explicitOptOut.instructions).toBe("sys");
-			expect(explicitOptOut.input?.some(item => item.type === "additional_tools")).toBe(false);
-		} finally {
+		onTestFinished(() => {
 			if (previous === undefined) delete Bun.env.PI_CODEX_RESPONSES_LITE;
 			else Bun.env.PI_CODEX_RESPONSES_LITE = previous;
-		}
+		});
+		delete Bun.env.PI_CODEX_RESPONSES_LITE;
+		const defaultRequest = await transformRequestBody({ model: model.id, instructions: "sys" }, model, {});
+		expect(defaultRequest.instructions).toBe("sys");
+		expect(defaultRequest.input?.some(item => item.type === "additional_tools")).toBe(false);
+
+		life.assertLive();
+		Bun.env.PI_CODEX_RESPONSES_LITE = "true";
+		const envOptIn = await transformRequestBody({ model: model.id, instructions: "sys" }, model, {});
+		expect(envOptIn.instructions).toBeUndefined();
+		expect(envOptIn.input?.[0]?.type).toBe("additional_tools");
+
+		const explicitOptOut = await transformRequestBody({ model: model.id, instructions: "sys" }, model, {
+			responsesLite: false,
+		});
+		expect(explicitOptOut.instructions).toBe("sys");
+		expect(explicitOptOut.input?.some(item => item.type === "additional_tools")).toBe(false);
 	});
 });
 
@@ -789,6 +791,7 @@ describe("openai-codex concurrent reasoning summaries", () => {
 	});
 
 	it("sends stream_options only when opted in, with a supported summary requested", async () => {
+		const life = testLifetime();
 		const terra = createCodexModel("gpt-5.6-terra");
 		const summaryRequest = { reasoningEffort: "medium", reasoningSummary: "detailed" } as const;
 
@@ -797,10 +800,12 @@ describe("openai-codex concurrent reasoning summaries", () => {
 		expect(withSummary.reasoning?.summary).toBe("detailed");
 
 		// Opted out: the summary is still requested, only the delivery mode drops.
+		life.assertLive();
 		delete Bun.env.PI_CODEX_CONCURRENT_SUMMARIES;
 		const optedOut = await transformRequestBody({ model: terra.id }, terra, summaryRequest);
 		expect(optedOut.stream_options).toBeUndefined();
 		expect(optedOut.reasoning?.summary).toBe("detailed");
+		life.assertLive();
 		Bun.env.PI_CODEX_CONCURRENT_SUMMARIES = "1";
 
 		const suppressed = await transformRequestBody({ model: terra.id }, terra, {

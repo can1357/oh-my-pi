@@ -1,10 +1,14 @@
-import { describe, expect, test, vi } from "bun:test";
+import { afterEach, describe, expect, test, vi } from "bun:test";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { createModelManager } from "@oh-my-pi/pi-catalog/model-manager";
 import * as modelsModule from "@oh-my-pi/pi-catalog/models";
 import { yoloAutoModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 /**
  * Fixture mirrors the live `https://yolo-auto.com/v1/models` surface: an
@@ -156,19 +160,15 @@ describe("Yolo-Auto provider discovery", () => {
 			}
 			return originalGetBundledModels(provider);
 		}) as typeof modelsModule.getBundledModels);
-		try {
-			const fetch: FetchImpl = async () =>
-				new Response(JSON.stringify({ data: [{ id: "qwen3.8-27b", object: "model" }] }), { status: 200 });
-			const models = await yoloAutoModelManagerOptions({ apiKey: "yolo-test-key", fetch }).fetchDynamicModels?.();
-			const qwen = models?.find(model => model.id === "qwen3.8-27b");
+		const fetch: FetchImpl = async () =>
+			new Response(JSON.stringify({ data: [{ id: "qwen3.8-27b", object: "model" }] }), { status: 200 });
+		const models = await yoloAutoModelManagerOptions({ apiKey: "yolo-test-key", fetch }).fetchDynamicModels?.();
+		const qwen = models?.find(model => model.id === "qwen3.8-27b");
 
-			expect(qwen).toMatchObject({
-				contextWindow: 262144,
-				compat: { thinkingFormat: "qwen-chat-template" },
-			});
-		} finally {
-			vi.restoreAllMocks();
-		}
+		expect(qwen).toMatchObject({
+			contextWindow: 262144,
+			compat: { thinkingFormat: "qwen-chat-template" },
+		});
 	});
 
 	test("discovers qwen3.8-27b and yolo at the documented 256K deployment cap", async () => {

@@ -2,7 +2,7 @@
  * Integration test: the real broker socket and child-process exit drive the
  * generation transition, so fake timers cannot control the observed events.
  */
-import { describe, expect, it, spyOn } from "bun:test";
+import { afterEach, describe, expect, it, onTestFinished, spyOn, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -10,6 +10,10 @@ import { startDaemonBrokerFromEnvironment } from "../../src/launch/broker";
 import { createDaemonBrokerClient, type DaemonBrokerClient, DaemonBrokerRejectedError } from "../../src/launch/client";
 import { DAEMON_IDLE_GRACE_ENV, DAEMON_PROJECT_DIR_ENV, DAEMON_RUNTIME_DIR_ENV } from "../../src/launch/protocol";
 import { type DaemonSpec } from "@oh-my-pi/pi-tui/tools/daemon";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 function restoreEnv(name: string, value: string | undefined): void {
 	if (value === undefined) delete process.env[name];
@@ -61,6 +65,9 @@ describe("daemon wait generation binding", () => {
 		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
 		const previousTitle = process.title;
 		const broker = startBroker(projectDir, runtimeDir);
+		onTestFinished(() => {
+			process.title = previousTitle;
+		});
 		try {
 			const started = await client.request({
 				op: "start",
@@ -98,7 +105,6 @@ describe("daemon wait generation binding", () => {
 			expect(elapsed).toBeLessThan(1_000);
 		} finally {
 			await shutdown(client, broker, "restarting");
-			process.title = previousTitle;
 		}
 	}, 25_000);
 
@@ -111,6 +117,9 @@ describe("daemon wait generation binding", () => {
 		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
 		const previousTitle = process.title;
 		const broker = startBroker(projectDir, runtimeDir);
+		onTestFinished(() => {
+			process.title = previousTitle;
+		});
 		try {
 			const started = await client.request({ op: "start", spec: exitingSpec("crashing", projectDir, "no") });
 			if (started.op !== "start") throw new Error("unexpected start result");
@@ -133,7 +142,6 @@ describe("daemon wait generation binding", () => {
 			expect(elapsed).toBeLessThan(5_000);
 		} finally {
 			await shutdown(client, broker, "crashing");
-			process.title = previousTitle;
 		}
 	}, 25_000);
 
@@ -148,10 +156,13 @@ describe("daemon wait generation binding", () => {
 		const broker = startBroker(projectDir, runtimeDir);
 		const ids: string[] = [];
 		const randomUUID = crypto.randomUUID.bind(crypto);
-		const uuidSpy = spyOn(crypto, "randomUUID").mockImplementation(() => {
+		spyOn(crypto, "randomUUID").mockImplementation(() => {
 			const id = randomUUID();
 			ids.push(id);
 			return id;
+		});
+		onTestFinished(() => {
+			process.title = previousTitle;
 		});
 		try {
 			const spec: DaemonSpec = {
@@ -193,9 +204,7 @@ describe("daemon wait generation binding", () => {
 			const late = await client.request({ op: "cancel", requestId: abortedId });
 			expect(late).toEqual({ op: "cancel", cancelled: false });
 		} finally {
-			uuidSpy.mockRestore();
 			await shutdown(client, broker, "idle");
-			process.title = previousTitle;
 		}
 	}, 25_000);
 });

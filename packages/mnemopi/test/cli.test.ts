@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, onTestFinished } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -108,6 +108,9 @@ describe("CLI command handlers", () => {
 
 	it("awaits the MCP server until stdin closes", async () => {
 		const originalStream = Bun.stdin.stream;
+		onTestFinished(() => {
+			Bun.stdin.stream = originalStream;
+		});
 		const ready = Promise.withResolvers<void>();
 		let controller: ReadableStreamDefaultController<Uint8Array<ArrayBuffer>> | undefined;
 		let closed = false;
@@ -134,7 +137,6 @@ describe("CLI command handlers", () => {
 			expect(await cliPromise).toBe(0);
 			expect(resolved).toBe(true);
 		} finally {
-			Bun.stdin.stream = originalStream;
 			if (!closed) controller?.close();
 		}
 	});

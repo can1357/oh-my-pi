@@ -11,7 +11,7 @@
  * agent) in a focused view, `/export` writes the main session instead of the viewed
  * one, or a model/thinking change lands on the main session instead of the agent.
  */
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it, onTestFinished, vi } from "bun:test";
 import { AgentBusyError } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { CommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
@@ -232,13 +232,10 @@ describe("focused subagent view slash commands", () => {
 		});
 		const controller = new InputController(focused.ctx);
 		const settingsState = beginSettingsTest();
-		try {
-			await Settings.init({ inMemory: true });
-			controller.cycleThinkingLevel();
-			await controller.cycleRoleModel("forward");
-		} finally {
-			restoreSettingsTestState(settingsState);
-		}
+		onTestFinished(() => restoreSettingsTestState(settingsState));
+		await Settings.init({ inMemory: true });
+		controller.cycleThinkingLevel();
+		await controller.cycleRoleModel("forward");
 
 		expect(focusedCycleThinking).toHaveBeenCalledTimes(1);
 		expect(focusedCycleRoles).toHaveBeenCalledTimes(1);

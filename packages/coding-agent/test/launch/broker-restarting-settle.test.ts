@@ -3,7 +3,7 @@
 // `setTimeout` in #settle that resurrects a stopped daemon. Fake timers cannot control the OS
 // process-exit promise or the unix-socket RPC the broker relies on. The embedded broker uses a
 // shorter real backoff here; proving the absence of resurrection still requires crossing it.
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, onTestFinished } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { Process } from "@oh-my-pi/pi-natives";
@@ -67,6 +67,10 @@ describe("daemon broker restart settling", () => {
 		await fs.mkdir(projectDir);
 
 		const previousTitle = process.title;
+		// The broker names this process "omp daemon broker"; put the title back even if the test times out.
+		onTestFinished(() => {
+			process.title = previousTitle;
+		});
 		// Create the client (writes broker.token) before starting the broker, which reads that token.
 		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
 		const broker = startBroker(projectDir, runtimeDir, {
@@ -119,7 +123,6 @@ describe("daemon broker restart settling", () => {
 			await client.request({ op: "shutdown" }).catch(() => undefined);
 			client.close();
 			await broker;
-			process.title = previousTitle;
 		}
 	}, 20_000);
 
@@ -130,6 +133,9 @@ describe("daemon broker restart settling", () => {
 		await fs.mkdir(projectDir);
 
 		const previousTitle = process.title;
+		onTestFinished(() => {
+			process.title = previousTitle;
+		});
 		const name = "recovered-crash";
 		let pid: number | undefined;
 
@@ -191,7 +197,6 @@ describe("daemon broker restart settling", () => {
 			if (processRef?.status() === "running") {
 				await processRef.terminate({ group: true, gracefulMs: 0, timeoutMs: 2_000 });
 			}
-			process.title = previousTitle;
 		}
 	}, 20_000);
 });

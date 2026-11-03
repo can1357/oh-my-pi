@@ -1,10 +1,11 @@
-import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, describe, expect, it, onTestFinished, spyOn, vi } from "bun:test";
 import { Mnemopi } from "@oh-my-pi/pi-mnemopi/core/memory";
 import type { MnemopiLlmCompletion } from "@oh-my-pi/pi-mnemopi/core/runtime-options";
 
 const instances: Mnemopi[] = [];
 
 afterEach(async () => {
+	vi.restoreAllMocks();
 	for (const memory of instances) {
 		await memory.flushExtractions();
 		memory.close();
@@ -127,37 +128,35 @@ describe("remember(extract) wires the LLM fact extractor", () => {
 			{ preconnect: () => {} },
 		);
 		const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(fetchMock);
-		try {
-			process.env.MNEMOPI_LLM_ENABLED = "true";
-			delete process.env.MNEMOPI_LLM_BASE_URL;
-			const memory = new Mnemopi({
-				sessionId: "extract-remote-runtime",
-				dbPath: ":memory:",
-				embeddings: false,
-				llm: {
-					enabled: true,
-					baseUrl: "http://remote.test/v1",
-					model: "remote-model",
-				},
-			});
-			instances.push(memory);
-
-			memory.remember("I prefer deterministic tests.", { source: "test", extract: true });
-			await memory.flushExtractions();
-
-			expect(fetchSpy).toHaveBeenCalledTimes(1);
-			expect(requestedUrl).toBe("http://remote.test/v1/chat/completions");
-			expect(requestedBody).toContain('"model":"remote-model"');
-			expect(
-				memory.beam.factRecall("runtime config", 5).some(fact => fact.content === "Remote runtime config fact"),
-			).toBe(true);
-		} finally {
-			fetchSpy.mockRestore();
+		onTestFinished(() => {
 			if (previousEnabled === undefined) delete process.env.MNEMOPI_LLM_ENABLED;
 			else process.env.MNEMOPI_LLM_ENABLED = previousEnabled;
 			if (previousBaseUrl === undefined) delete process.env.MNEMOPI_LLM_BASE_URL;
 			else process.env.MNEMOPI_LLM_BASE_URL = previousBaseUrl;
-		}
+		});
+		process.env.MNEMOPI_LLM_ENABLED = "true";
+		delete process.env.MNEMOPI_LLM_BASE_URL;
+		const memory = new Mnemopi({
+			sessionId: "extract-remote-runtime",
+			dbPath: ":memory:",
+			embeddings: false,
+			llm: {
+				enabled: true,
+				baseUrl: "http://remote.test/v1",
+				model: "remote-model",
+			},
+		});
+		instances.push(memory);
+
+		memory.remember("I prefer deterministic tests.", { source: "test", extract: true });
+		await memory.flushExtractions();
+
+		expect(fetchSpy).toHaveBeenCalledTimes(1);
+		expect(requestedUrl).toBe("http://remote.test/v1/chat/completions");
+		expect(requestedBody).toContain('"model":"remote-model"');
+		expect(
+			memory.beam.factRecall("runtime config", 5).some(fact => fact.content === "Remote runtime config fact"),
+		).toBe(true);
 	});
 
 	it("uses extractText instead of stored content for background extraction", async () => {

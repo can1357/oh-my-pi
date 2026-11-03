@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, beforeAll, describe, expect, it, onTestFinished, spyOn, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -23,6 +23,11 @@ import { cfgBrowserEnabled, cfgBrowserHeadless } from "@oh-my-pi/pi-coding-agent
 import { cfgExtendedContext } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 import { cfgMemoryBackend } from "@oh-my-pi/pi-coding-agent/memory-backend/settings";
 import { cfgWorktreeCleanSource } from "@oh-my-pi/pi-coding-agent/task/settings";
+import { testLifetime } from "../../utils/test/helpers/mock-restores";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 interface FakeAcpBuiltinSession {
 	fastMode: boolean;
@@ -377,37 +382,33 @@ describe("ACP builtin slash commands", () => {
 	});
 	it("/usage show renders the same report as plain /usage", async () => {
 		const now = 1_700_000_000_000;
-		const nowSpy = spyOn(Date, "now").mockReturnValue(now);
-		try {
-			const reports: UsageReport[] = [
-				{
-					provider: "openai-codex",
-					fetchedAt: now - 5_000,
-					limits: [
-						{
-							id: "codex-5h",
-							label: "5 hours",
-							scope: { provider: "openai-codex", tier: "prolite", accountId: "account-1" },
-							window: { id: "5h", label: "5 hours", resetsAt: now + 60 * 60 * 1000 },
-							amount: { used: 0.24, usedFraction: 0.24, unit: "unknown" },
-						},
-					],
-					metadata: { email: "user@example.com" },
-				},
-			];
-			const plain = createRuntime();
-			const show = createRuntime();
-			plain.runtime.session.fetchUsageReports = async () => reports;
-			show.runtime.session.fetchUsageReports = async () => reports;
+		spyOn(Date, "now").mockReturnValue(now);
+		const reports: UsageReport[] = [
+			{
+				provider: "openai-codex",
+				fetchedAt: now - 5_000,
+				limits: [
+					{
+						id: "codex-5h",
+						label: "5 hours",
+						scope: { provider: "openai-codex", tier: "prolite", accountId: "account-1" },
+						window: { id: "5h", label: "5 hours", resetsAt: now + 60 * 60 * 1000 },
+						amount: { used: 0.24, usedFraction: 0.24, unit: "unknown" },
+					},
+				],
+				metadata: { email: "user@example.com" },
+			},
+		];
+		const plain = createRuntime();
+		const show = createRuntime();
+		plain.runtime.session.fetchUsageReports = async () => reports;
+		show.runtime.session.fetchUsageReports = async () => reports;
 
-			const plainResult = await executeAcpBuiltinSlashCommand("/usage", plain.runtime);
-			const showResult = await executeAcpBuiltinSlashCommand("/usage show", show.runtime);
+		const plainResult = await executeAcpBuiltinSlashCommand("/usage", plain.runtime);
+		const showResult = await executeAcpBuiltinSlashCommand("/usage show", show.runtime);
 
-			expect(showResult).toEqual(plainResult);
-			expect(show.output).toEqual(plain.output);
-		} finally {
-			nowSpy.mockRestore();
-		}
+		expect(showResult).toEqual(plainResult);
+		expect(show.output).toEqual(plain.output);
 	});
 
 	it("routes saved reset redemption through /usage reset", async () => {
@@ -1157,12 +1158,18 @@ describe("wave 3 commands", () => {
 	});
 
 	it("/wt: creates a worktree carrying uncommitted changes and relocates the session into it", async () => {
+		const life = testLifetime();
+		const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
+		onTestFinished(() => {
+			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
+			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
+		});
 		const { output, runtime, fakeSessionManager } = createRuntime();
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-wt-"));
 		const repoDir = path.join(root, "repo");
 		const worktreeBase = path.join(root, "wt");
 		const originalProjectDir = process.cwd();
-		const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
+		life.assertLive();
 		process.env.OMP_WORKTREE_DIR = worktreeBase;
 		const git = async (...args: string[]) => {
 			const proc = Bun.spawn(["git", ...args], { cwd: repoDir, stdout: "pipe", stderr: "pipe" });
@@ -1202,20 +1209,24 @@ describe("wave 3 commands", () => {
 			expect(await git("symbolic-ref", "HEAD")).toBe("refs/heads/main");
 		} finally {
 			setProjectDir(originalProjectDir);
-			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
-			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
 			await fs.rm(root, { recursive: true, force: true });
 		}
 	});
 
 	it("/wt: with worktree.cleanSource=true, cleans the source checkout while preserving the worktree", async () => {
+		const life = testLifetime();
+		const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
+		onTestFinished(() => {
+			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
+			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
+		});
 		const { output, runtime, fakeSessionManager } = createRuntime();
 		cfgWorktreeCleanSource.override(runtime.settings, true);
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-wt-clean-"));
 		const repoDir = path.join(root, "repo");
 		const worktreeBase = path.join(root, "wt");
 		const originalProjectDir = process.cwd();
-		const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
+		life.assertLive();
 		process.env.OMP_WORKTREE_DIR = worktreeBase;
 		const git = async (...args: string[]) => {
 			const proc = Bun.spawn(["git", ...args], { cwd: repoDir, stdout: "pipe", stderr: "pipe" });
@@ -1260,20 +1271,24 @@ describe("wave 3 commands", () => {
 			expect(await git("status", "--porcelain")).toBe("");
 		} finally {
 			setProjectDir(originalProjectDir);
-			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
-			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
 			await fs.rm(root, { recursive: true, force: true });
 		}
 	});
 
 	it("/wt: aborts and leaves source checkout untouched when settings flush fails", async () => {
+		const life = testLifetime();
+		const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
+		onTestFinished(() => {
+			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
+			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
+		});
 		const { output, runtime, fakeSessionManager } = createRuntime();
 		spyOn(runtime.settings, "flush").mockRejectedValue(new Error("disk full"));
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-wt-flush-fail-"));
 		const repoDir = path.join(root, "repo");
 		const worktreeBase = path.join(root, "wt");
 		const originalProjectDir = process.cwd();
-		const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
+		life.assertLive();
 		process.env.OMP_WORKTREE_DIR = worktreeBase;
 		const git = async (...args: string[]) => {
 			const proc = Bun.spawn(["git", ...args], { cwd: repoDir, stdout: "pipe", stderr: "pipe" });
@@ -1307,8 +1322,6 @@ describe("wave 3 commands", () => {
 			expect(wtDirs).toEqual([]);
 		} finally {
 			setProjectDir(originalProjectDir);
-			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
-			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
 			await fs.rm(root, { recursive: true, force: true });
 		}
 	});
@@ -1518,19 +1531,14 @@ describe("wave 4 commands", () => {
 
 	// /plugins
 	it("/plugin list: the singular alias dispatches the plugins builtin", async () => {
-		const npmSpy = spyOn(PluginManager.prototype, "list").mockResolvedValue([
+		spyOn(PluginManager.prototype, "list").mockResolvedValue([
 			{ name: "@czottmann/pi-automode", version: "1.16.0" } as never,
 		]);
-		const installedSpy = spyOn(MarketplaceManager.prototype, "listInstalledPlugins").mockResolvedValue([]);
-		try {
-			const { output, runtime } = createRuntime();
-			const result = await executeAcpBuiltinSlashCommand("/plugin list", runtime);
-			expect(result).toEqual({ consumed: true });
-			expect(output[0]).toContain("@czottmann/pi-automode@1.16.0");
-		} finally {
-			npmSpy.mockRestore();
-			installedSpy.mockRestore();
-		}
+		spyOn(MarketplaceManager.prototype, "listInstalledPlugins").mockResolvedValue([]);
+		const { output, runtime } = createRuntime();
+		const result = await executeAcpBuiltinSlashCommand("/plugin list", runtime);
+		expect(result).toEqual({ consumed: true });
+		expect(output[0]).toContain("@czottmann/pi-automode@1.16.0");
 	});
 
 	// /todo start with in_progress status in fuzzy list
@@ -1558,29 +1566,25 @@ describe("wave 5 — adapters and polish", () => {
 		// We verify the command either reports success or a meaningful error (not a parse error).
 		const mcpModule = await import("@oh-my-pi/pi-coding-agent/mcp/config-writer");
 		const spy = spyOn(mcpModule, "addMCPServer").mockResolvedValue(undefined);
-		try {
-			const { output, runtime } = createRuntime();
-			const result = await executeAcpBuiltinSlashCommand(
-				"/mcp add foo --url https://example.com --token X --scope project",
-				runtime,
-			);
-			expect(result).toEqual({ consumed: true });
-			expect(output[0]).toContain('Added MCP server "foo" (project).');
-			expect(spy).toHaveBeenCalledTimes(1);
-			// Lock in the parsed call shape so future regressions in
-			// `--url` / `--token` / `--scope` parsing fail this test instead of
-			// silently writing a different config.
-			const [configPath, serverName, serverConfig] = spy.mock.calls[0]!;
-			expect(configPath).toContain("project");
-			expect(serverName).toBe("foo");
-			expect(serverConfig).toMatchObject({
-				type: "http",
-				url: "https://example.com",
-				headers: { Authorization: "Bearer X" },
-			});
-		} finally {
-			spy.mockRestore();
-		}
+		const { output, runtime } = createRuntime();
+		const result = await executeAcpBuiltinSlashCommand(
+			"/mcp add foo --url https://example.com --token X --scope project",
+			runtime,
+		);
+		expect(result).toEqual({ consumed: true });
+		expect(output[0]).toContain('Added MCP server "foo" (project).');
+		expect(spy).toHaveBeenCalledTimes(1);
+		// Lock in the parsed call shape so future regressions in
+		// `--url` / `--token` / `--scope` parsing fail this test instead of
+		// silently writing a different config.
+		const [configPath, serverName, serverConfig] = spy.mock.calls[0]!;
+		expect(configPath).toContain("project");
+		expect(serverName).toBe("foo");
+		expect(serverConfig).toMatchObject({
+			type: "http",
+			url: "https://example.com",
+			headers: { Authorization: "Bearer X" },
+		});
 	});
 
 	// /mcp test — spy on connectToServer
@@ -1596,20 +1600,16 @@ describe("wave 5 — adapters and polish", () => {
 	it("/ssh add foo --host x --user y --scope user: calls addSSHHost", async () => {
 		const sshModule = await import("@oh-my-pi/pi-coding-agent/ssh/config-writer");
 		const spy = spyOn(sshModule, "addSSHHost").mockResolvedValue(undefined);
-		try {
-			const { output, runtime } = createRuntime();
-			const result = await executeAcpBuiltinSlashCommand("/ssh add foo --host x --user y --scope user", runtime);
-			expect(result).toEqual({ consumed: true });
-			expect(output[0]).toContain('Added SSH host "foo" (user).');
-			// Without this assertion, the command could succeed via a side-effect-free
-			// path that prints the success message without writing the host config.
-			expect(spy).toHaveBeenCalledTimes(1);
-			const [, name, hostConfig] = spy.mock.calls[0]!;
-			expect(name).toBe("foo");
-			expect(hostConfig).toMatchObject({ host: "x", username: "y" });
-		} finally {
-			spy.mockRestore();
-		}
+		const { output, runtime } = createRuntime();
+		const result = await executeAcpBuiltinSlashCommand("/ssh add foo --host x --user y --scope user", runtime);
+		expect(result).toEqual({ consumed: true });
+		expect(output[0]).toContain('Added SSH host "foo" (user).');
+		// Without this assertion, the command could succeed via a side-effect-free
+		// path that prints the success message without writing the host config.
+		expect(spy).toHaveBeenCalledTimes(1);
+		const [, name, hostConfig] = spy.mock.calls[0]!;
+		expect(name).toBe("foo");
+		expect(hostConfig).toMatchObject({ host: "x", username: "y" });
 	});
 
 	// /model with unknown id
@@ -1685,19 +1685,15 @@ describe("wave 5 — adapters and polish", () => {
 	// /marketplace discover bulleted list
 	it("/marketplace discover: output is bulleted with '  - ' token", async () => {
 		const { MarketplaceManager } = await import("@oh-my-pi/pi-coding-agent/extensibility/plugins/marketplace");
-		const discoverSpy = spyOn(MarketplaceManager.prototype, "listAvailablePlugins").mockResolvedValue([
+		spyOn(MarketplaceManager.prototype, "listAvailablePlugins").mockResolvedValue([
 			{ name: "hello", version: "1.0.0", description: "A greeting plugin" } as never,
 			{ name: "world", version: "2.0.0", description: undefined } as never,
 		]);
-		try {
-			const { output, runtime } = createRuntime();
-			const result = await executeAcpBuiltinSlashCommand("/marketplace discover", runtime);
-			expect(result).toEqual({ consumed: true });
-			expect(output[0]).toContain("  - ");
-			expect(output[0]).toContain("hello@1.0.0");
-		} finally {
-			discoverSpy.mockRestore();
-		}
+		const { output, runtime } = createRuntime();
+		const result = await executeAcpBuiltinSlashCommand("/marketplace discover", runtime);
+		expect(result).toEqual({ consumed: true });
+		expect(output[0]).toContain("  - ");
+		expect(output[0]).toContain("hello@1.0.0");
 	});
 });
 
@@ -1707,9 +1703,7 @@ describe("/move preflight flush", () => {
 		const originalProjectDir = getProjectDir();
 		const { output, runtime, session } = createRuntime();
 		const dispose = spyOn(session, "dispose");
-		const reloadForCwd = spyOn(runtime.settings, "reloadForCwd").mockRejectedValue(
-			new Error("workspace reload failed"),
-		);
+		spyOn(runtime.settings, "reloadForCwd").mockRejectedValue(new Error("workspace reload failed"));
 		try {
 			const result = await executeAcpBuiltinSlashCommand(`/move ${targetDir}`, runtime);
 
@@ -1717,8 +1711,6 @@ describe("/move preflight flush", () => {
 			expect(dispose).toHaveBeenCalledTimes(1);
 			expect(output.some(text => text.includes("failed to re-align workspace"))).toBe(true);
 		} finally {
-			reloadForCwd.mockRestore();
-			dispose.mockRestore();
 			setProjectDir(originalProjectDir);
 			await fs.rm(targetDir, { recursive: true, force: true });
 		}

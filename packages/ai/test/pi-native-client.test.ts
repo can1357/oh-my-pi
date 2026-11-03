@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, type Mock, mock, spyOn } from "bun:test";
+import { afterEach, describe, expect, it, type Mock, mock, onTestFinished, spyOn } from "bun:test";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { streamPiNative } from "@oh-my-pi/pi-ai/providers/pi-native-client";
 import { encodeStream } from "@oh-my-pi/pi-ai/providers/pi-native-server";
@@ -432,24 +432,23 @@ describe("streamPiNative event flow", () => {
 
 	it("uses PI_STREAM_FIRST_EVENT_TIMEOUT_MS for silent pi-native streams", async () => {
 		const previous = Bun.env.PI_STREAM_FIRST_EVENT_TIMEOUT_MS;
-		Bun.env.PI_STREAM_FIRST_EVENT_TIMEOUT_MS = "20";
-		try {
-			const fetchImpl: FetchImpl = (async () =>
-				new Response(stalledBody(), {
-					status: 200,
-					headers: { "Content-Type": "text/event-stream" },
-				})) as FetchImpl;
-
-			const stream = streamPiNative(fakeModel(), baseContext, { apiKey: "k", fetch: fetchImpl });
-
-			await expect(stream.result()).rejects.toThrow(/first event/);
-		} finally {
+		onTestFinished(() => {
 			if (previous === undefined) {
 				delete Bun.env.PI_STREAM_FIRST_EVENT_TIMEOUT_MS;
 			} else {
 				Bun.env.PI_STREAM_FIRST_EVENT_TIMEOUT_MS = previous;
 			}
-		}
+		});
+		Bun.env.PI_STREAM_FIRST_EVENT_TIMEOUT_MS = "20";
+		const fetchImpl: FetchImpl = (async () =>
+			new Response(stalledBody(), {
+				status: 200,
+				headers: { "Content-Type": "text/event-stream" },
+			})) as FetchImpl;
+
+		const stream = streamPiNative(fakeModel(), baseContext, { apiKey: "k", fetch: fetchImpl });
+
+		await expect(stream.result()).rejects.toThrow(/first event/);
 	});
 
 	it("rejects when a pi-native stream stalls after semantic progress", async () => {

@@ -19,6 +19,7 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { computeNonMessageTokens } from "@oh-my-pi/pi-tui/status-line/context-usage";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { rejectionOf } from "./helpers/rejection";
+import { installMockRestores } from "../../utils/test/helpers/mock-restores";
 
 const SHARE = 0.5;
 const TARGET = 0.6;
@@ -28,6 +29,8 @@ describe("snapcompact archive sized by the compaction trigger", () => {
 	let modelRegistry: ModelRegistry;
 	const sessions: AgentSession[] = [];
 
+	installMockRestores();
+
 	beforeAll(async () => {
 		authStorage = await AuthStorage.create(":memory:");
 		authStorage.keys.setRuntime("anthropic", "test-key");
@@ -36,7 +39,6 @@ describe("snapcompact archive sized by the compaction trigger", () => {
 
 	afterEach(async () => {
 		for (const session of sessions.splice(0)) await session.dispose();
-		vi.restoreAllMocks();
 	});
 
 	afterAll(() => {

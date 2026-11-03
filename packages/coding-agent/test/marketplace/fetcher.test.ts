@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -9,6 +9,10 @@ import {
 } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/marketplace";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 // Fixture lives at test/marketplace/fixtures/valid-marketplace/
 const FIXTURE_DIR = path.join(import.meta.dir, "fixtures", "valid-marketplace");
@@ -247,7 +251,7 @@ describe("fetchMarketplace", () => {
 	});
 
 	it("hides temp clone paths in cloned catalog validation errors", async () => {
-		const cloneSpy = spyOn(vcs, "clone").mockImplementation(async (_url, targetDir) => {
+		spyOn(vcs, "clone").mockImplementation(async (_url, targetDir) => {
 			fs.mkdirSync(path.join(targetDir, ".claude-plugin"), { recursive: true });
 			fs.writeFileSync(
 				path.join(targetDir, ".claude-plugin", "marketplace.json"),
@@ -255,46 +259,34 @@ describe("fetchMarketplace", () => {
 			);
 		});
 
-		try {
-			await expect(fetchMarketplace("kubeshark/kubeshark", tmpDir)).rejects.toThrow(
-				'Cloned repository https://github.com/kubeshark/kubeshark.git: Missing or invalid field "owner" in catalog: .claude-plugin/marketplace.json (source: kubeshark/kubeshark)',
-			);
-		} finally {
-			cloneSpy.mockRestore();
-		}
+		await expect(fetchMarketplace("kubeshark/kubeshark", tmpDir)).rejects.toThrow(
+			'Cloned repository https://github.com/kubeshark/kubeshark.git: Missing or invalid field "owner" in catalog: .claude-plugin/marketplace.json (source: kubeshark/kubeshark)',
+		);
 	});
 
 	it("removes a partial checkout when cloning fails", async () => {
-		const cloneSpy = spyOn(vcs, "clone").mockImplementation(async (_url, targetDir) => {
+		spyOn(vcs, "clone").mockImplementation(async (_url, targetDir) => {
 			fs.writeFileSync(path.join(targetDir, "partial"), "unfinished");
 			throw new Error("clone failed");
 		});
-		try {
-			await expect(fetchMarketplace("owner/repo", tmpDir)).rejects.toThrow("clone failed");
-			expect(fs.readdirSync(tmpDir)).toEqual([]);
-		} finally {
-			cloneSpy.mockRestore();
-		}
+		await expect(fetchMarketplace("owner/repo", tmpDir)).rejects.toThrow("clone failed");
+		expect(fs.readdirSync(tmpDir)).toEqual([]);
 	});
 
 	it("keeps simultaneous clone checkouts isolated", async () => {
-		const cloneSpy = spyOn(vcs, "clone").mockImplementation(async (_url, targetDir) => {
+		spyOn(vcs, "clone").mockImplementation(async (_url, targetDir) => {
 			fs.mkdirSync(path.join(targetDir, ".omp-plugin"));
 			fs.writeFileSync(
 				path.join(targetDir, ".omp-plugin", "marketplace.json"),
 				JSON.stringify({ name: "test-marketplace", owner: { name: "Test" }, plugins: [] }),
 			);
 		});
-		try {
-			const [first, second] = await Promise.all([
-				fetchMarketplace("owner/repo", tmpDir),
-				fetchMarketplace("owner/repo", tmpDir),
-			]);
-			expect(first.clonePath).not.toBe(second.clonePath);
-			expect(fs.existsSync(path.join(first.clonePath!, ".omp-plugin", "marketplace.json"))).toBe(true);
-			expect(fs.existsSync(path.join(second.clonePath!, ".omp-plugin", "marketplace.json"))).toBe(true);
-		} finally {
-			cloneSpy.mockRestore();
-		}
+		const [first, second] = await Promise.all([
+			fetchMarketplace("owner/repo", tmpDir),
+			fetchMarketplace("owner/repo", tmpDir),
+		]);
+		expect(first.clonePath).not.toBe(second.clonePath);
+		expect(fs.existsSync(path.join(first.clonePath!, ".omp-plugin", "marketplace.json"))).toBe(true);
+		expect(fs.existsSync(path.join(second.clonePath!, ".omp-plugin", "marketplace.json"))).toBe(true);
 	});
 });

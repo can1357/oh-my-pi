@@ -2,13 +2,20 @@
 // assertion is about real child-process I/O over a real PTY, where the injected
 // bytes arrive asynchronously from the platform's console host. Fake timers
 // cannot drive the pty reader or the daemon's socket RPC.
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { startDaemonBrokerFromEnvironment } from "../../src/launch/broker";
 import { createDaemonBrokerClient } from "../../src/launch/client";
 import { DAEMON_IDLE_GRACE_ENV, DAEMON_PROJECT_DIR_ENV, DAEMON_RUNTIME_DIR_ENV } from "../../src/launch/protocol";
+
+// The in-process broker names this process "omp daemon broker". Put the title back after every test,
+// including one that times out.
+const originalTitle = process.title;
+afterEach(() => {
+	process.title = originalTitle;
+});
 
 function restoreEnv(name: string, value: string | undefined): void {
 	if (value === undefined) delete process.env[name];

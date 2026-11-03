@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, onTestFinished, test } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { disposeAllVmContexts } from "@oh-my-pi/pi-coding-agent/eval/js/context-manager";
 import { createBrowserPrelude } from "@oh-my-pi/pi-coding-agent/tools/browser";
@@ -60,6 +60,9 @@ test("raises a main-frame wait past its timeout as Puppeteer's timeout, still na
 		browser: () => ({ connected: true }),
 	} as unknown as Page;
 	const nameDescriptor = Object.getOwnPropertyDescriptor(TimeoutError, "name")!;
+	onTestFinished(() => {
+		Object.defineProperty(TimeoutError, "name", nameDescriptor);
+	});
 	Object.defineProperty(TimeoutError, "name", { ...nameDescriptor, value: "Og" });
 	// Real time on purpose: the wait polls the frame on a timer and must stop reading at its deadline.
 	const late = setTimeout(() => events.add("load"), 90);
@@ -72,7 +75,6 @@ test("raises a main-frame wait past its timeout as Puppeteer's timeout, still na
 		expect(error.message).toBe("Navigation timeout of 60 ms exceeded");
 	} finally {
 		clearTimeout(late);
-		Object.defineProperty(TimeoutError, "name", nameDescriptor);
 	}
 });
 
@@ -82,6 +84,9 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser timeouts with release-build class 
 		// puts a tab on the inline worker. bun runs a file's tests one at a time, so no other browser
 		// call is in flight while `Worker` or the class name is replaced.
 		const workerDescriptor = Object.getOwnPropertyDescriptor(globalThis, "Worker")!;
+		onTestFinished(() => {
+			Object.defineProperty(globalThis, "Worker", workerDescriptor);
+		});
 		Object.defineProperty(globalThis, "Worker", {
 			...workerDescriptor,
 			value: function UnavailableWorker(): never {
@@ -96,6 +101,9 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser timeouts with release-build class 
 		}
 		expect(getTab("minified-timeout")).toMatchObject({ worker: { mode: "inline" } });
 		const nameDescriptor = Object.getOwnPropertyDescriptor(TimeoutError, "name")!;
+		onTestFinished(() => {
+			Object.defineProperty(TimeoutError, "name", nameDescriptor);
+		});
 		Object.defineProperty(TimeoutError, "name", { ...nameDescriptor, value: "Og" });
 		try {
 			const error = await invoke({

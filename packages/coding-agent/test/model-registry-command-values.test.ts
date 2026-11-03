@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -86,12 +86,8 @@ function refreshGateFetch(seen: Array<{ auth?: string; tenant?: string }>): Fetc
 
 describe("ModelRegistry command-resolved models.yml values", () => {
 	test("does not run a command-backed value outside an enterable project", async () => {
-		const enterable = spyOn(piUtils, "directoryIsEnterable").mockResolvedValue(false);
-		try {
-			expect(await resolveConfigValue("!printf %s home-secret")).toBeUndefined();
-		} finally {
-			enterable.mockRestore();
-		}
+		spyOn(piUtils, "directoryIsEnterable").mockResolvedValue(false);
+		expect(await resolveConfigValue("!printf %s home-secret")).toBeUndefined();
 	});
 
 	let tempDir = "";
@@ -106,6 +102,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 	});
 
 	afterEach(() => {
+		vi.restoreAllMocks();
 		authStorage.close();
 		if (!tempDir || !fs.existsSync(tempDir)) return;
 		try {

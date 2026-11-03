@@ -1,5 +1,5 @@
 import * as path from "node:path";
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, onTestFinished } from "bun:test";
 import { SvgFigure } from "@oh-my-pi/pi-tui/chat/svg-figure";
 import { Markdown } from "@oh-my-pi/pi-tui/components/markdown";
 import { getKittyGraphics, setKittyGraphics } from "@oh-my-pi/pi-tui/kitty-graphics";
@@ -171,25 +171,25 @@ describe("SvgFigure", () => {
 	// terminal at once, blanking a SIXEL until its re-encode landed.
 	it("keeps the drawn image while a shorter terminal's redraw is on its way", async () => {
 		const rows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		const restoreRows = () => {
+			Reflect.deleteProperty(process.stdout, "rows");
+			if (rows) Object.defineProperty(process.stdout, "rows", rows);
+		};
+		onTestFinished(restoreRows);
 		Object.defineProperty(process.stdout, "rows", { configurable: true, value: 40 });
 		let landed = Promise.withResolvers<void>();
 		const svg = new SvgFigure({ onChange: () => landed.resolve() });
 		svg.update(TALL_SVG, true);
-		try {
-			svg.render(76);
-			await landed.promise;
-			const drawn = svg.render(76);
-			expect(drawn.length).toBeGreaterThan(9);
+		svg.render(76);
+		await landed.promise;
+		const drawn = svg.render(76);
+		expect(drawn.length).toBeGreaterThan(9);
 
-			landed = Promise.withResolvers<void>();
-			Object.defineProperty(process.stdout, "rows", { configurable: true, value: 12 });
-			expect(svg.render(76)).toBe(drawn);
-			await landed.promise;
-			expect(svg.render(76)).toHaveLength(9);
-		} finally {
-			if (rows) Object.defineProperty(process.stdout, "rows", rows);
-			else Reflect.deleteProperty(process.stdout, "rows");
-		}
+		landed = Promise.withResolvers<void>();
+		Object.defineProperty(process.stdout, "rows", { configurable: true, value: 12 });
+		expect(svg.render(76)).toBe(drawn);
+		await landed.promise;
+		expect(svg.render(76)).toHaveLength(9);
 	});
 
 	it("hides below one whole row without holding up completion, then draws when room returns", async () => {

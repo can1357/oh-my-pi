@@ -41,6 +41,9 @@ import { getTabsMapForTest, releaseTab, runInTab } from "@oh-my-pi/pi-coding-age
 import type { TabSession } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 import type { DaemonSnapshot } from "@oh-my-pi/pi-tui/tools/daemon";
+import { installMockRestores } from "../../../utils/test/helpers/mock-restores";
+
+installMockRestores();
 
 const DAEMON_NAME = "omp.browser.headless";
 /** The target id the incident log names for the tab whose close never landed. */

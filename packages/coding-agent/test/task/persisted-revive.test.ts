@@ -55,6 +55,9 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 import { createSessionDefaults } from "../helpers/session-defaults";
 
 import { cfgAdvisorEnabled } from "@oh-my-pi/pi-coding-agent/advisor/settings";
+import { installMockRestores } from "../../../utils/test/helpers/mock-restores";
+
+installMockRestores();
 
 const tempDirs: TempDir[] = [];
 

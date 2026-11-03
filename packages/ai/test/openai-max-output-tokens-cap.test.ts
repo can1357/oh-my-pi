@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it, onTestFinished, vi } from "bun:test";
 import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 import { type Context, type Model, type ModelSpec, OPENAI_MAX_OUTPUT_TOKENS } from "@oh-my-pi/pi-ai/types";
@@ -48,29 +48,25 @@ async function drainResponses(
 	maxTokens?: number,
 ): Promise<Record<string, unknown>> {
 	const previousOpenRouterResponses = Bun.env.PI_OPENROUTER_RESPONSES;
+	onTestFinished(() => {
+		if (previousOpenRouterResponses === undefined) delete Bun.env.PI_OPENROUTER_RESPONSES;
+		else Bun.env.PI_OPENROUTER_RESPONSES = previousOpenRouterResponses;
+	});
 	if (model.api === "openrouter") Bun.env.PI_OPENROUTER_RESPONSES = "1";
-	try {
-		const { fetchMock, captured } = captureResponsesBody();
-		const apiKey =
-			model.provider === "muse-code"
-				? JSON.stringify({ oauthAccessToken: "meta-account-access", apiKey: "muse-subscription-key" })
-				: "k";
-		const stream = streamSimple(model, ctx, {
-			apiKey,
-			...(maxTokens === undefined ? {} : { maxTokens }),
-			fetch: fetchMock,
-		});
-		for await (const event of stream) {
-			if (event.type === "done" || event.type === "error") break;
-		}
-		return captured;
-	} finally {
-		if (previousOpenRouterResponses === undefined) {
-			delete Bun.env.PI_OPENROUTER_RESPONSES;
-		} else {
-			Bun.env.PI_OPENROUTER_RESPONSES = previousOpenRouterResponses;
-		}
+	const { fetchMock, captured } = captureResponsesBody();
+	const apiKey =
+		model.provider === "muse-code"
+			? JSON.stringify({ oauthAccessToken: "meta-account-access", apiKey: "muse-subscription-key" })
+			: "k";
+	const stream = streamSimple(model, ctx, {
+		apiKey,
+		...(maxTokens === undefined ? {} : { maxTokens }),
+		fetch: fetchMock,
+	});
+	for await (const event of stream) {
+		if (event.type === "done" || event.type === "error") break;
 	}
+	return captured;
 }
 
 function completionsSse(): Response {

@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, onTestFinished, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -21,6 +21,7 @@ import { readRetainedMountBackend } from "@oh-my-pi/pi-coding-agent/task/isolati
 import * as natives from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { removeWithRetries, setWorktreesDir } from "@oh-my-pi/pi-utils";
+import { testLifetime } from "../../../utils/test/helpers/mock-restores";
 
 const tempDirs: string[] = [];
 
@@ -274,9 +275,15 @@ describe("worktree isolation helpers", () => {
 		});
 
 		it("uses compact isolation paths that do not embed long task ids", async () => {
+			const life = testLifetime();
 			const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
+			onTestFinished(() => {
+				if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
+				else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
+			});
 			const worktreeBase = await fs.mkdtemp(path.join(os.tmpdir(), "omp-worktree-base-"));
 			tempDirs.push(worktreeBase);
+			life.assertLive();
 			delete process.env.OMP_WORKTREE_DIR;
 			setWorktreesDir(worktreeBase);
 			vi.spyOn(natives, "isoResolve").mockResolvedValue({
@@ -297,11 +304,6 @@ describe("worktree isolation helpers", () => {
 				expect(isolationSegment).not.toContain(longTaskId);
 				expect(isolationSegment.length).toBeLessThanOrEqual(12);
 			} finally {
-				if (originalWorktreeDir === undefined) {
-					delete process.env.OMP_WORKTREE_DIR;
-				} else {
-					process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
-				}
 				setWorktreesDir(undefined);
 			}
 		});
@@ -848,6 +850,12 @@ describe("detachGitDir", () => {
 	});
 
 	it("isolates recursive submodule git state from a linked worktree", async () => {
+		const life = testLifetime();
+		const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
+		onTestFinished(() => {
+			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
+			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
+		});
 		const leaf = await createGitRepo();
 		await runGit(leaf, ["config", "user.email", "src@example.com"]);
 		await runGit(leaf, ["config", "user.name", "Source User"]);
@@ -876,7 +884,7 @@ describe("detachGitDir", () => {
 		});
 		const worktreeBase = await fs.mkdtemp(path.join(os.tmpdir(), "omp-detach-submodule-base-"));
 		tempDirs.push(worktreeBase);
-		const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
+		life.assertLive();
 		delete process.env.OMP_WORKTREE_DIR;
 		setWorktreesDir(worktreeBase);
 		let lastBranchName = "";
@@ -942,12 +950,16 @@ describe("detachGitDir", () => {
 			expect(await runGit(wt, ["ls-tree", "HEAD", "packages/module"])).toContain(lastModuleCommit);
 		} finally {
 			setWorktreesDir(undefined);
-			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
-			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
 		}
 	}, 30_000);
 
 	it("preserves commits in a submodule added inside the isolation", async () => {
+		const life = testLifetime();
+		const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
+		onTestFinished(() => {
+			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
+			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
+		});
 		const leaf = await createGitRepo();
 		await runGit(leaf, ["config", "user.email", "src@example.com"]);
 		await runGit(leaf, ["config", "user.name", "Source User"]);
@@ -964,7 +976,7 @@ describe("detachGitDir", () => {
 		});
 		const worktreeBase = await fs.mkdtemp(path.join(os.tmpdir(), "omp-added-submodule-base-"));
 		tempDirs.push(worktreeBase);
-		const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
+		life.assertLive();
 		delete process.env.OMP_WORKTREE_DIR;
 		setWorktreesDir(worktreeBase);
 		try {
@@ -987,12 +999,16 @@ describe("detachGitDir", () => {
 			expect(await runGit(wt, ["cat-file", "-t", addedCommit])).toBe("commit");
 		} finally {
 			setWorktreesDir(undefined);
-			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
-			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
 		}
 	}, 30_000);
 
 	it("keeps ensureIsolation from mutating a linked-worktree parent (rcopy backend)", async () => {
+		const life = testLifetime();
+		const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
+		onTestFinished(() => {
+			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
+			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
+		});
 		const { wt, baseSha } = await makeLinkedWorktree();
 		vi.spyOn(natives, "isoResolve").mockResolvedValue({
 			kind: natives.IsoBackendKind.Rcopy,
@@ -1002,7 +1018,7 @@ describe("detachGitDir", () => {
 		});
 		const worktreeBase = await fs.mkdtemp(path.join(os.tmpdir(), "omp-detach-wtbase-"));
 		tempDirs.push(worktreeBase);
-		const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
+		life.assertLive();
 		delete process.env.OMP_WORKTREE_DIR;
 		setWorktreesDir(worktreeBase);
 		try {
@@ -1022,8 +1038,6 @@ describe("detachGitDir", () => {
 			expect(await runGit(handle.mergedDir, ["rev-parse", "HEAD^"])).toBe(baseSha);
 		} finally {
 			setWorktreesDir(undefined);
-			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
-			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
 		}
 	});
 });

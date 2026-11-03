@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -10,6 +10,10 @@ import {
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { formatTruncationMetaNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 function getTextOutput(result: { content: Array<{ type: string; text?: string }> }): string {
 	return result.content
@@ -198,18 +202,14 @@ describe("read tool large artifact handling", () => {
 	});
 
 	it("shortens artifact paths under the user's home dir instead of leaking the absolute path", async () => {
-		const homeSpy = spyOn(os, "homedir").mockReturnValue(testDir);
-		try {
-			const result = await tool.execute("call-raw-home", { path: "artifact://0:raw" });
-			const output = getTextOutput(result);
-			// artifactDir sits under the (mocked) home, so the notice must display it
-			// as `~`-relative (with `/` separators) and must NOT leak the absolute
-			// artifact path. Assert the exact displayed path rather than recomputing
-			// it with the production shortener.
-			expect(output).toContain("~/session/0.mcp.log");
-			expect(output).not.toContain(artifactDir);
-		} finally {
-			homeSpy.mockRestore();
-		}
+		spyOn(os, "homedir").mockReturnValue(testDir);
+		const result = await tool.execute("call-raw-home", { path: "artifact://0:raw" });
+		const output = getTextOutput(result);
+		// artifactDir sits under the (mocked) home, so the notice must display it
+		// as `~`-relative (with `/` separators) and must NOT leak the absolute
+		// artifact path. Assert the exact displayed path rather than recomputing
+		// it with the production shortener.
+		expect(output).toContain("~/session/0.mcp.log");
+		expect(output).not.toContain(artifactDir);
 	});
 });

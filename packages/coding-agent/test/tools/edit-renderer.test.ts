@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it } from "bun:test";
+import { beforeAll, describe, expect, it, onTestFinished } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -765,6 +765,9 @@ describe("editToolRenderer diff line wrapping", () => {
 		// inside an inverse-highlighted span; the frame pads each row with spaces,
 		// so any inverse still active at row end paints those cells as gray blocks.
 		const previousLevel = chalk.level;
+		onTestFinished(() => {
+			chalk.level = previousLevel;
+		});
 		chalk.level = 3;
 		let rows: readonly string[];
 		try {

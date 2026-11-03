@@ -14,7 +14,7 @@
  * reauthorized definition (an ACP name collision must not reconnect the
  * unrelated live server).
  */
-import { afterEach, describe, expect, test, vi } from "bun:test";
+import { afterEach, describe, expect, onTestFinished, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -164,18 +164,17 @@ describe("reconnectMcpManagerServer", () => {
 		// full suite becomes order-dependent.
 		const originalBunHost = Bun.env.MCP_HOST;
 		const originalProcessHost = process.env.MCP_HOST;
-		Bun.env.MCP_HOST = "mcp.example.com";
-		process.env.MCP_HOST = "mcp.example.com";
-		try {
-			expect(await reconnectMcpManagerServer(manager as unknown as MCPManager, "env-server", selected)).toBe(
-				"connected",
-			);
-		} finally {
+		onTestFinished(() => {
 			if (originalBunHost === undefined) delete Bun.env.MCP_HOST;
 			else Bun.env.MCP_HOST = originalBunHost;
 			if (originalProcessHost === undefined) delete process.env.MCP_HOST;
 			else process.env.MCP_HOST = originalProcessHost;
-		}
+		});
+		Bun.env.MCP_HOST = "mcp.example.com";
+		process.env.MCP_HOST = "mcp.example.com";
+		expect(await reconnectMcpManagerServer(manager as unknown as MCPManager, "env-server", selected)).toBe(
+			"connected",
+		);
 		// No manager at all (RPC/print hosts without one): nothing to do.
 		expect(await reconnectMcpManagerServer(undefined, "env-server", selected)).toBeUndefined();
 	});

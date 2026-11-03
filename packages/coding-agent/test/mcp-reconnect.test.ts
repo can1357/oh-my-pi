@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import {
 	createMCPJsonRpcError,
 	MCPTransportError,
@@ -19,6 +19,10 @@ import { LegacySseTransport } from "@oh-my-pi/pi-coding-agent/mcp/transports/sse
 import type { MCPServerConnection, MCPToolCallResult, MCPTransport } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { logger } from "@oh-my-pi/pi-utils";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -56,22 +60,18 @@ function makeConnection(transport: MCPTransport, name = "test-server"): MCPServe
 
 describe("deduplicateMCPToolsByName", () => {
 	it("keeps the same collision winner after a reconnect reorders the tool list", () => {
-		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
-		try {
-			const dotted = { name: "mcp__foo_bar_lookup", mcpServerName: "foo.bar", mcpToolName: "lookup" };
-			const underscored = { name: "mcp__foo_bar_lookup", mcpServerName: "foo_bar", mcpToolName: "lookup" };
+		vi.spyOn(logger, "warn").mockImplementation(() => {});
+		const dotted = { name: "mcp__foo_bar_lookup", mcpServerName: "foo.bar", mcpToolName: "lookup" };
+		const underscored = { name: "mcp__foo_bar_lookup", mcpServerName: "foo_bar", mcpToolName: "lookup" };
 
-			const before = deduplicateMCPToolsByName([dotted, underscored]);
-			expect(before).toEqual([dotted]);
+		const before = deduplicateMCPToolsByName([dotted, underscored]);
+		expect(before).toEqual([dotted]);
 
-			// Simulate MCPManager#replaceServerTools on the current winner: its
-			// tools are removed and re-appended, reordering it behind the loser.
-			// The minted name must not silently switch owners.
-			const after = deduplicateMCPToolsByName([underscored, dotted]);
-			expect(after).toEqual([dotted]);
-		} finally {
-			warn.mockRestore();
-		}
+		// Simulate MCPManager#replaceServerTools on the current winner: its
+		// tools are removed and re-appended, reordering it behind the loser.
+		// The minted name must not silently switch owners.
+		const after = deduplicateMCPToolsByName([underscored, dotted]);
+		expect(after).toEqual([dotted]);
 	});
 });
 
@@ -268,23 +268,18 @@ describe("MCPTool.execute retry on connection error", () => {
 				reconnects++;
 				return connection;
 			});
-			let fetchSpy: { mockRestore(): void } | undefined;
-
 			try {
 				await transport.connect();
 				// Captured from a real Bun fetch; avoid a live DNS lookup in the test suite.
-				fetchSpy = vi
-					.spyOn(globalThis, "fetch")
-					.mockRejectedValueOnce(
-						Object.assign(new TypeError("getaddrinfo ENOTFOUND omp-mcp-test.invalid"), { code: "ENOTFOUND" }),
-					);
+				vi.spyOn(globalThis, "fetch").mockRejectedValueOnce(
+					Object.assign(new TypeError("getaddrinfo ENOTFOUND omp-mcp-test.invalid"), { code: "ENOTFOUND" }),
+				);
 				const result = await tool.execute("dns", {}, noop, noCtx);
 				expect(result.details?.isError).toBeFalsy();
 				expect(result.content).toEqual([{ type: "text", text: "recovered" }]);
 				expect(reconnects).toBe(1);
 				expect(calls).toBe(1);
 			} finally {
-				fetchSpy?.mockRestore();
 				await transport.close();
 				await server.stop(true);
 			}

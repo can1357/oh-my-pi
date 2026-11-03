@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
@@ -173,30 +173,29 @@ describe("AgentSession bash session ownership", () => {
 			prefix: undefined,
 		});
 		const previousMirror = process.env.OMP_USER_SHELL_MIRROR;
-		process.env.OMP_USER_SHELL_MIRROR = "mirrored-value";
-		try {
-			const spawnHook = vi.fn(spawn => ({
-				...spawn,
-				env: { ...spawn.env, OMP_USER_SHELL_MIRROR: "mirrored-value" },
-			}));
-			const definition = createBashTool(tempDir.path(), { spawnHook });
-			const extensionRunner = {
-				hasHandlers: vi.fn(() => false),
-				getRegisteredTool: vi.fn((name: string) => (name === "bash" ? { definition } : undefined)),
-				emit: vi.fn().mockResolvedValue(undefined),
-				emitBeforeAgentStart: vi.fn().mockResolvedValue(undefined),
-			} as unknown as ExtensionRunner;
-			createSession(undefined, extensionRunner);
-
-			const result = await session.executeBash('printf "%s" "$OMP_USER_SHELL_MIRROR"', undefined, {
-				useUserShell: true,
-			});
-
-			expect(result.output).toBe("mirrored-value");
-		} finally {
+		onTestFinished(() => {
 			if (previousMirror === undefined) delete process.env.OMP_USER_SHELL_MIRROR;
 			else process.env.OMP_USER_SHELL_MIRROR = previousMirror;
-		}
+		});
+		process.env.OMP_USER_SHELL_MIRROR = "mirrored-value";
+		const spawnHook = vi.fn(spawn => ({
+			...spawn,
+			env: { ...spawn.env, OMP_USER_SHELL_MIRROR: "mirrored-value" },
+		}));
+		const definition = createBashTool(tempDir.path(), { spawnHook });
+		const extensionRunner = {
+			hasHandlers: vi.fn(() => false),
+			getRegisteredTool: vi.fn((name: string) => (name === "bash" ? { definition } : undefined)),
+			emit: vi.fn().mockResolvedValue(undefined),
+			emitBeforeAgentStart: vi.fn().mockResolvedValue(undefined),
+		} as unknown as ExtensionRunner;
+		createSession(undefined, extensionRunner);
+
+		const result = await session.executeBash('printf "%s" "$OMP_USER_SHELL_MIRROR"', undefined, {
+			useUserShell: true,
+		});
+
+		expect(result.output).toBe("mirrored-value");
 	});
 
 	it("does not poison the cached shell env when a hook mutates its context in place", async () => {

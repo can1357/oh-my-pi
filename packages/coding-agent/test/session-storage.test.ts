@@ -16,6 +16,10 @@ import {
 } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { type SessionTitleUpdate, serializeTitleSlot } from "@oh-my-pi/pi-coding-agent/session/session-title-slot";
 
+afterEach(() => {
+	vi.restoreAllMocks();
+});
+
 class ControlledTitleUpdateBackend implements SessionStorageBackend {
 	readonly #sessionPath: string;
 	readonly #initialEntry: SessionStorageIndexEntry;
@@ -376,7 +380,7 @@ describe("FileSessionStorage.writeTextSync", () => {
 		const original = fs.fstatSync(reader);
 		const rename = fs.renameSync;
 		let failed = false;
-		const renameSpy = vi.spyOn(fs, "renameSync").mockImplementation((source, target) => {
+		vi.spyOn(fs, "renameSync").mockImplementation((source, target) => {
 			if (!failed && target === sessionPath) {
 				failed = true;
 				throw Object.assign(new Error("replace blocked"), { code: "EPERM" });
@@ -392,7 +396,6 @@ describe("FileSessionStorage.writeTextSync", () => {
 				"session.jsonl",
 			]);
 		} finally {
-			renameSpy.mockRestore();
 			fs.closeSync(reader);
 		}
 	});
@@ -404,7 +407,7 @@ describe("FileSessionStorage.writeTextSync", () => {
 		const original = fs.statSync(sessionPath);
 		const rename = fs.renameSync;
 		let attempts = 0;
-		const renameSpy = vi.spyOn(fs, "renameSync").mockImplementation((source, target) => {
+		vi.spyOn(fs, "renameSync").mockImplementation((source, target) => {
 			if (typeof source === "string" && source.endsWith(".tmp") && target === sessionPath) {
 				attempts++;
 				throw Object.assign(new Error(attempts === 1 ? "replace blocked" : "retry failed"), {
@@ -413,16 +416,10 @@ describe("FileSessionStorage.writeTextSync", () => {
 			}
 			rename(source, target);
 		});
-		try {
-			expect(() => storage.writeTextSync(sessionPath, "replacement\n")).toThrow("retry failed");
-			expect(fs.statSync(sessionPath).ino).toBe(original.ino);
-			expect(await Bun.file(sessionPath).text()).toBe("original\n");
-			expect((await fsp.readdir(tempDir)).filter(file => file !== ".session.jsonl.lock.os")).toEqual([
-				"session.jsonl",
-			]);
-		} finally {
-			renameSpy.mockRestore();
-		}
+		expect(() => storage.writeTextSync(sessionPath, "replacement\n")).toThrow("retry failed");
+		expect(fs.statSync(sessionPath).ino).toBe(original.ino);
+		expect(await Bun.file(sessionPath).text()).toBe("original\n");
+		expect((await fsp.readdir(tempDir)).filter(file => file !== ".session.jsonl.lock.os")).toEqual(["session.jsonl"]);
 	});
 
 	it("preserves the original when staging the replacement fails with EPERM", async () => {
@@ -431,22 +428,16 @@ describe("FileSessionStorage.writeTextSync", () => {
 		storage.writeTextSync(sessionPath, "original\n");
 		const original = fs.statSync(sessionPath);
 		const write = fs.writeFileSync;
-		const writeSpy = vi.spyOn(fs, "writeFileSync").mockImplementation((file, content, options) => {
+		vi.spyOn(fs, "writeFileSync").mockImplementation((file, content, options) => {
 			if (typeof file === "string" && path.dirname(file) === tempDir && file.endsWith(".tmp")) {
 				throw Object.assign(new Error("staging denied"), { code: "EPERM" });
 			}
 			write(file, content, options);
 		});
-		try {
-			expect(() => storage.writeTextSync(sessionPath, "replacement\n")).toThrow("staging denied");
-			expect(fs.statSync(sessionPath).ino).toBe(original.ino);
-			expect(await Bun.file(sessionPath).text()).toBe("original\n");
-			expect((await fsp.readdir(tempDir)).filter(file => file !== ".session.jsonl.lock.os")).toEqual([
-				"session.jsonl",
-			]);
-		} finally {
-			writeSpy.mockRestore();
-		}
+		expect(() => storage.writeTextSync(sessionPath, "replacement\n")).toThrow("staging denied");
+		expect(fs.statSync(sessionPath).ino).toBe(original.ino);
+		expect(await Bun.file(sessionPath).text()).toBe("original\n");
+		expect((await fsp.readdir(tempDir)).filter(file => file !== ".session.jsonl.lock.os")).toEqual(["session.jsonl"]);
 	});
 
 	it("keeps an open writer appending to the replaced file after a rewrite", async () => {
@@ -540,7 +531,7 @@ describe("FileSessionStorage.writeTextSync", () => {
 		// Windows FSLogix profile disks report a different dev/ino from a path
 		// stat than from an fstat of an open handle to the same file.
 		const realStat = fs.statSync;
-		const statSpy = vi.spyOn(fs, "statSync").mockImplementation(((p: fs.PathLike, opts?: fs.StatSyncOptions) => {
+		vi.spyOn(fs, "statSync").mockImplementation(((p: fs.PathLike, opts?: fs.StatSyncOptions) => {
 			if (!opts?.bigint) return realStat(p, { ...opts, bigint: false });
 			const s = realStat(p, { bigint: true });
 			s.dev += 1n;
@@ -549,20 +540,16 @@ describe("FileSessionStorage.writeTextSync", () => {
 		const storage = new FileSessionStorage();
 		const sessionPath = path.join(tempDir, "session.jsonl");
 		const lockPath = path.join(tempDir, ".session.jsonl.lock");
-		try {
-			storage.writeTextSync(sessionPath, "original\n");
-			expect(fs.readFileSync(sessionPath, "utf8")).toBe("original\n");
-			expect(fs.existsSync(lockPath)).toBe(false);
+		storage.writeTextSync(sessionPath, "original\n");
+		expect(fs.readFileSync(sessionPath, "utf8")).toBe("original\n");
+		expect(fs.existsSync(lockPath)).toBe(false);
 
-			const writer = storage.openWriter(sessionPath);
-			writer.appendSync!("a\n");
-			writer.appendSync!("b\n");
-			expect(fs.readFileSync(sessionPath, "utf8")).toBe("original\na\nb\n");
-			expect(fs.existsSync(lockPath)).toBe(false);
-			await writer.close();
-		} finally {
-			statSpy.mockRestore();
-		}
+		const writer = storage.openWriter(sessionPath);
+		writer.appendSync!("a\n");
+		writer.appendSync!("b\n");
+		expect(fs.readFileSync(sessionPath, "utf8")).toBe("original\na\nb\n");
+		expect(fs.existsSync(lockPath)).toBe(false);
+		await writer.close();
 	});
 });
 

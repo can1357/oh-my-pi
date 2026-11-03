@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test, vi } from "bun:test";
+import { afterEach, describe, expect, onTestFinished, test, vi } from "bun:test";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/registry/oauth";
 import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -177,6 +177,9 @@ describe("SingularityAPI universal gateway support", () => {
 		const { calls, fetch } = singularityApiModelsFetch();
 		const onAuth = vi.fn();
 		const previousFetch = globalThis.fetch;
+		onTestFinished(() => {
+			globalThis.fetch = previousFetch;
+		});
 		globalThis.fetch = fetch as typeof globalThis.fetch;
 		try {
 			await expect(
@@ -200,14 +203,13 @@ describe("SingularityAPI universal gateway support", () => {
 		const unauthorizedFetch: FetchImpl = async () =>
 			Response.json({ error: { message: "Invalid API key.", type: "invalid_request_error" } }, { status: 401 });
 		const previousFetch = globalThis.fetch;
-		globalThis.fetch = unauthorizedFetch as typeof globalThis.fetch;
-		try {
-			await expect(
-				login?.({ onPrompt: async () => "sk-sapi-bogus" }) ?? Promise.reject(new Error("missing login")),
-			).rejects.toThrow();
-		} finally {
+		onTestFinished(() => {
 			globalThis.fetch = previousFetch;
-		}
+		});
+		globalThis.fetch = unauthorizedFetch as typeof globalThis.fetch;
+		await expect(
+			login?.({ onPrompt: async () => "sk-sapi-bogus" }) ?? Promise.reject(new Error("missing login")),
+		).rejects.toThrow();
 	});
 
 	test("scopes the model cache to the credential and the endpoint across both call paths", () => {

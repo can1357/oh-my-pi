@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "bun:test";
 import { AuthStorage, type FetchImpl, type Model, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -349,22 +349,21 @@ describe("searchCodex model selection", () => {
 		// Nothing is stored here on purpose — that is the setup from the issue.
 		const envAuthStorage = createAuthStorage();
 		const previous = process.env.OPENAI_CODEX_OAUTH_TOKEN;
-		process.env.OPENAI_CODEX_OAUTH_TOKEN = "env-bearer-token";
-		try {
-			const result = await searchCodex({
-				...makeSearchParams("env bearer codex search", mockCodexFetch("gpt-5.6-luna"), selectedCodexModel),
-				authStorage: envAuthStorage,
-				modelRegistry: new ModelRegistry(envAuthStorage, modelsYmlPath()),
-			});
-
-			expect(await hasCodexSearch(envAuthStorage)).toBe(true);
-			const headers = new Headers(capturedRequest?.headers);
-			expect(headers.get("authorization")).toBe("Bearer env-bearer-token");
-			expect(result.answer).toBe("Codex answer");
-		} finally {
+		onTestFinished(() => {
 			if (previous === undefined) delete process.env.OPENAI_CODEX_OAUTH_TOKEN;
 			else process.env.OPENAI_CODEX_OAUTH_TOKEN = previous;
-		}
+		});
+		process.env.OPENAI_CODEX_OAUTH_TOKEN = "env-bearer-token";
+		const result = await searchCodex({
+			...makeSearchParams("env bearer codex search", mockCodexFetch("gpt-5.6-luna"), selectedCodexModel),
+			authStorage: envAuthStorage,
+			modelRegistry: new ModelRegistry(envAuthStorage, modelsYmlPath()),
+		});
+
+		expect(await hasCodexSearch(envAuthStorage)).toBe(true);
+		const headers = new Headers(capturedRequest?.headers);
+		expect(headers.get("authorization")).toBe("Bearer env-bearer-token");
+		expect(result.answer).toBe("Codex answer");
 	});
 
 	it("applies the configured request timeout to Codex search", async () => {

@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it, type Mock, spyOn } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, type Mock, spyOn, vi } from "bun:test";
 import * as os from "node:os";
 import { AuthStorage } from "@oh-my-pi/pi-ai";
 import { closeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
@@ -11,6 +11,10 @@ import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { __resetDirsFromEnvForTests, getAgentDir, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 const PRIMARY_MARKER = "primary-context-marker-7f3a";
 const EXTRA_ROOT_MARKER = "extra-root-context-marker-2c9d";

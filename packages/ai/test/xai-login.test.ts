@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { afterEach, describe, expect, test, vi } from "bun:test";
+import { afterEach, describe, expect, onTestFinished, test, vi } from "bun:test";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
 import { getEnvApiKey } from "@oh-my-pi/pi-ai/env-api-key";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
@@ -23,6 +23,13 @@ describe("xAI API login wiring", () => {
 
 	test("XAI_API_KEY alone does not mark SuperGrok as available", async () => {
 		const originalOauthToken = Bun.env.XAI_OAUTH_TOKEN;
+		onTestFinished(() => {
+			if (originalOauthToken === undefined) {
+				delete Bun.env.XAI_OAUTH_TOKEN;
+			} else {
+				Bun.env.XAI_OAUTH_TOKEN = originalOauthToken;
+			}
+		});
 		Bun.env.XAI_API_KEY = "xai-env-key";
 		delete Bun.env.XAI_OAUTH_TOKEN;
 		const store = new SqliteAuthCredentialStore(new Database(":memory:"));
@@ -37,17 +44,19 @@ describe("xAI API login wiring", () => {
 			expect(storage.keys.source("xai")).toEqual({ kind: "env", envVar: "XAI_API_KEY", concrete: true });
 			expect(storage.keys.source("xai-oauth")).toBeUndefined();
 		} finally {
-			if (originalOauthToken === undefined) {
-				delete Bun.env.XAI_OAUTH_TOKEN;
-			} else {
-				Bun.env.XAI_OAUTH_TOKEN = originalOauthToken;
-			}
 			store.close();
 		}
 	});
 
 	test("XAI_OAUTH_TOKEN marks SuperGrok available without a paid API key", async () => {
 		const originalOauthToken = Bun.env.XAI_OAUTH_TOKEN;
+		onTestFinished(() => {
+			if (originalOauthToken === undefined) {
+				delete Bun.env.XAI_OAUTH_TOKEN;
+			} else {
+				Bun.env.XAI_OAUTH_TOKEN = originalOauthToken;
+			}
+		});
 		delete Bun.env.XAI_API_KEY;
 		Bun.env.XAI_OAUTH_TOKEN = "xai-oauth-env";
 		const store = new SqliteAuthCredentialStore(new Database(":memory:"));
@@ -58,11 +67,6 @@ describe("xAI API login wiring", () => {
 			expect(storage.keys.source("xai-oauth") !== undefined).toBe(true);
 			expect(storage.keys.source("xai-oauth")).toEqual({ kind: "env", concrete: true });
 		} finally {
-			if (originalOauthToken === undefined) {
-				delete Bun.env.XAI_OAUTH_TOKEN;
-			} else {
-				Bun.env.XAI_OAUTH_TOKEN = originalOauthToken;
-			}
 			store.close();
 		}
 	});

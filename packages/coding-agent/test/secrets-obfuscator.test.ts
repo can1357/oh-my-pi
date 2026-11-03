@@ -2,7 +2,7 @@
  * Tests for secrets regex parsing, compilation, and obfuscation.
  */
 
-import { describe, expect, it, spyOn } from "bun:test";
+import { afterEach, describe, expect, it, onTestFinished, spyOn, vi } from "bun:test";
 import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -48,7 +48,12 @@ import {
 	stripPendingSecretPlaceholderSuffix,
 } from "@oh-my-pi/pi-coding-agent/secrets/placeholder";
 import { compileSecretRegex } from "@oh-my-pi/pi-coding-agent/secrets/regex";
-import { getActiveProfile, getAgentDir, setProfile } from "@oh-my-pi/pi-utils/dirs";
+import { __resetDirsFromEnvForTests, getAgentDir, setProfile } from "@oh-my-pi/pi-utils/dirs";
+import { testLifetime } from "../../utils/test/helpers/mock-restores";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 describe("compileSecretRegex", () => {
 	it("adds global flag when not provided", () => {
@@ -185,13 +190,12 @@ describe("collectEnvSecrets connection URLs", () => {
 		const db = "shop";
 		const url = `${scheme}://${user}:${pw}@${host}/${db}`;
 		process.env[name] = url;
-		try {
-			const entries = collectEnvSecrets();
-			expect(entries.some(e => e.type === "plain" && e.mode === "obfuscate" && e.content === pw)).toBe(true);
-			expect(entries.some(e => e.content === url)).toBe(false);
-		} finally {
+		onTestFinished(() => {
 			delete process.env[name];
-		}
+		});
+		const entries = collectEnvSecrets();
+		expect(entries.some(e => e.type === "plain" && e.mode === "obfuscate" && e.content === pw)).toBe(true);
+		expect(entries.some(e => e.content === url)).toBe(false);
 	});
 
 	it("registers both raw and decoded forms of a percent-encoded password", () => {
@@ -200,13 +204,12 @@ describe("collectEnvSecrets connection URLs", () => {
 		const pwDecoded = decodeURIComponent(pwRaw);
 		const url = `postgres://app:${pwRaw}@db.internal:5432/shop`;
 		process.env[name] = url;
-		try {
-			const entries = collectEnvSecrets();
-			expect(entries.some(e => e.content === pwRaw)).toBe(true);
-			expect(entries.some(e => e.content === pwDecoded)).toBe(true);
-		} finally {
+		onTestFinished(() => {
 			delete process.env[name];
-		}
+		});
+		const entries = collectEnvSecrets();
+		expect(entries.some(e => e.content === pwRaw)).toBe(true);
+		expect(entries.some(e => e.content === pwDecoded)).toBe(true);
 	});
 
 	it("registers the password from a userless connection URL", () => {
@@ -214,12 +217,11 @@ describe("collectEnvSecrets connection URLs", () => {
 		const pw = `pw${"0123456789ab".slice(0, 12)}`;
 		const url = `redis://:${pw}@redis.internal:6379/0`;
 		process.env[name] = url;
-		try {
-			const entries = collectEnvSecrets();
-			expect(entries.some(e => e.type === "plain" && e.mode === "obfuscate" && e.content === pw)).toBe(true);
-		} finally {
+		onTestFinished(() => {
 			delete process.env[name];
-		}
+		});
+		const entries = collectEnvSecrets();
+		expect(entries.some(e => e.type === "plain" && e.mode === "obfuscate" && e.content === pw)).toBe(true);
 	});
 
 	it("registers the full password when it contains an unescaped at sign", () => {
@@ -227,37 +229,34 @@ describe("collectEnvSecrets connection URLs", () => {
 		const pw = "passwrd1@correcthorse";
 		const url = `postgres://app:${pw}@db.internal/shop`;
 		process.env[name] = url;
-		try {
-			const entries = collectEnvSecrets();
-			expect(entries.some(e => e.type === "plain" && e.mode === "obfuscate" && e.content === pw)).toBe(true);
-			expect(new SecretObfuscator(entries).obfuscate(url)).not.toContain("correcthorse");
-		} finally {
+		onTestFinished(() => {
 			delete process.env[name];
-		}
+		});
+		const entries = collectEnvSecrets();
+		expect(entries.some(e => e.type === "plain" && e.mode === "obfuscate" && e.content === pw)).toBe(true);
+		expect(new SecretObfuscator(entries).obfuscate(url)).not.toContain("correcthorse");
 	});
 
 	it("skips connection-URL passwords shorter than the minimum length", () => {
 		const name = "OMP_TEST_CONNURL_SHORT";
 		const url = "postgres://app:pw@db.internal:5432/shop";
 		process.env[name] = url;
-		try {
-			const entries = collectEnvSecrets();
-			expect(entries.some(e => e.content === "pw")).toBe(false);
-		} finally {
+		onTestFinished(() => {
 			delete process.env[name];
-		}
+		});
+		const entries = collectEnvSecrets();
+		expect(entries.some(e => e.content === "pw")).toBe(false);
 	});
 
 	it("ignores non-URL values on non-secret variable names", () => {
 		const name = "OMP_TEST_CONNURL_PLAIN";
 		const value = "hello-world-value-123";
 		process.env[name] = value;
-		try {
-			const entries = collectEnvSecrets();
-			expect(entries.some(e => e.content === value)).toBe(false);
-		} finally {
+		onTestFinished(() => {
 			delete process.env[name];
-		}
+		});
+		const entries = collectEnvSecrets();
+		expect(entries.some(e => e.content === value)).toBe(false);
 	});
 });
 
@@ -503,27 +502,38 @@ describe("getSecretPlaceholderKey", () => {
 	// through the SAME `getAgentDir()` the runtime uses (see getSecretPlaceholderKey's
 	// docstring) rather than the unrelated `getConfigRootDir()`.
 	async function withTempAgentHome(run: () => Promise<void>): Promise<void> {
-		const originalProfile = getActiveProfile();
 		const originalHome = process.env.HOME;
-		const tempHomeDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-secret-key-"));
-		process.env.HOME = tempHomeDir;
-		const homedirSpy = spyOn(os, "homedir").mockReturnValue(tempHomeDir);
+		const originalOmpProfile = process.env.OMP_PROFILE;
+		const originalPiProfile = process.env.PI_PROFILE;
+		const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
+		const life = testLifetime();
+		// Runs after afterEach restores the homedir spy, so the resolver rebuilds from the real home.
+		onTestFinished(() => {
+			if (originalHome === undefined) delete process.env.HOME;
+			else process.env.HOME = originalHome;
+			if (originalOmpProfile === undefined) delete process.env.OMP_PROFILE;
+			else process.env.OMP_PROFILE = originalOmpProfile;
+			if (originalPiProfile === undefined) delete process.env.PI_PROFILE;
+			else process.env.PI_PROFILE = originalPiProfile;
+			if (originalAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+			else process.env.PI_CODING_AGENT_DIR = originalAgentDir;
+			__resetDirsFromEnvForTests();
+		});
+		let tempHomeDir: string | undefined;
 		try {
+			tempHomeDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-secret-key-"));
+			life.assertLive();
+			process.env.HOME = tempHomeDir;
+			spyOn(os, "homedir").mockReturnValue(tempHomeDir);
 			setProfile(undefined);
 			await run();
 		} finally {
-			setProfile(originalProfile);
-			homedirSpy.mockRestore();
-			if (originalHome === undefined) {
-				delete process.env.HOME;
-			} else {
-				process.env.HOME = originalHome;
-			}
-			await fs.rm(tempHomeDir, { recursive: true, force: true });
+			if (tempHomeDir) await fs.rm(tempHomeDir, { recursive: true, force: true });
 		}
 	}
 
 	it("caches placeholder keys per profile agent dir", async () => {
+		const life = testLifetime();
 		await withTempAgentHome(async () => {
 			const alphaKey = "A".repeat(43);
 			const betaKey = "B".repeat(43);
@@ -532,6 +542,7 @@ describe("getSecretPlaceholderKey", () => {
 			await fs.writeFile(path.join(getAgentDir(), "secret-placeholder.key"), alphaKey);
 			expect(await getSecretPlaceholderKey()).toBe(alphaKey);
 
+			life.assertLive();
 			setProfile("beta");
 			await fs.mkdir(getAgentDir(), { recursive: true });
 			await fs.writeFile(path.join(getAgentDir(), "secret-placeholder.key"), betaKey);

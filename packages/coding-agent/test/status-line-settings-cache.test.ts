@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -34,6 +34,7 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
+	vi.restoreAllMocks();
 	statusLines.dispose();
 	restoreSettingsTestState(settingsState);
 	settingsState = undefined;
@@ -298,57 +299,45 @@ describe("StatusLineComponent effective settings cache", () => {
 		const headSpy = spyOn(vcs, "gitInfo");
 		const statusSpy = spyOn(vcs, "watch");
 		const repoSpy = spyOn(vcs, "repo");
-		try {
-			cfgGitEnabled.override(Settings.instance, false);
-			const component = makeComponent({
-				preset: "custom",
-				leftSegments: ["git", "pr"],
-				rightSegments: [],
-				sessionAccent: false,
-			});
+		cfgGitEnabled.override(Settings.instance, false);
+		const component = makeComponent({
+			preset: "custom",
+			leftSegments: ["git", "pr"],
+			rightSegments: [],
+			sessionAccent: false,
+		});
 
-			component.watchBranch(() => {
-				throw new Error("git watcher should not fire while git integration is disabled");
-			});
-			component.getTopBorder(100);
-			await Promise.resolve();
+		component.watchBranch(() => {
+			throw new Error("git watcher should not fire while git integration is disabled");
+		});
+		component.getTopBorder(100);
+		await Promise.resolve();
 
-			expect(repoSpy).not.toHaveBeenCalled();
-			expect(headSpy).not.toHaveBeenCalled();
-			expect(statusSpy).not.toHaveBeenCalled();
-		} finally {
-			repoSpy.mockRestore();
-			statusSpy.mockRestore();
-			headSpy.mockRestore();
-		}
+		expect(repoSpy).not.toHaveBeenCalled();
+		expect(headSpy).not.toHaveBeenCalled();
+		expect(statusSpy).not.toHaveBeenCalled();
 	});
 
 	it("skips git probes when no git-backed segment is visible", async () => {
 		const headSpy = spyOn(vcs, "gitInfo");
 		const statusSpy = spyOn(vcs, "watch");
 		const repoSpy = spyOn(vcs, "repo");
-		try {
-			const component = makeComponent({
-				preset: "custom",
-				leftSegments: ["pi"],
-				rightSegments: ["session_name"],
-				sessionAccent: false,
-			});
+		const component = makeComponent({
+			preset: "custom",
+			leftSegments: ["pi"],
+			rightSegments: ["session_name"],
+			sessionAccent: false,
+		});
 
-			component.watchBranch(() => {
-				throw new Error("git watcher should not fire when no git-backed segment is visible");
-			});
-			component.getTopBorder(100);
-			await Promise.resolve();
+		component.watchBranch(() => {
+			throw new Error("git watcher should not fire when no git-backed segment is visible");
+		});
+		component.getTopBorder(100);
+		await Promise.resolve();
 
-			expect(repoSpy).not.toHaveBeenCalled();
-			expect(headSpy).not.toHaveBeenCalled();
-			expect(statusSpy).not.toHaveBeenCalled();
-		} finally {
-			repoSpy.mockRestore();
-			statusSpy.mockRestore();
-			headSpy.mockRestore();
-		}
+		expect(repoSpy).not.toHaveBeenCalled();
+		expect(headSpy).not.toHaveBeenCalled();
+		expect(statusSpy).not.toHaveBeenCalled();
 	});
 });
 

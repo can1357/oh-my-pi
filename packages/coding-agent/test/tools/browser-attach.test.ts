@@ -7,7 +7,7 @@
  * - mainFrame readiness is polled past the frameTree race.
  */
 
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, test, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, onTestFinished, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -43,6 +43,10 @@ import {
 } from "puppeteer-core";
 import { rejectionOf } from "../helpers/rejection";
 import { chromiumAvailable } from "./chromium-probe";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
 let sharedHeadless: BrowserHandle | undefined;
@@ -1045,6 +1049,9 @@ describe("pickElectronTarget relay path", () => {
 		};
 		const puppeteerBrowser = await (await loadPuppeteer()).connect({ transport, defaultViewport: null });
 		const nameDescriptor = Object.getOwnPropertyDescriptor(TimeoutError, "name")!;
+		onTestFinished(() => {
+			Object.defineProperty(TimeoutError, "name", nameDescriptor);
+		});
 		// Release builds minify class names, so Puppeteer names its timeout like this there.
 		Object.defineProperty(TimeoutError, "name", { ...nameDescriptor, value: "Og" });
 		try {
@@ -1057,7 +1064,6 @@ describe("pickElectronTarget relay path", () => {
 
 			expect((error as Error).message).toMatch(/^Selected tab did not become available.*retry, or reopen it/);
 		} finally {
-			Object.defineProperty(TimeoutError, "name", nameDescriptor);
 			await puppeteerBrowser.disconnect();
 		}
 	});
@@ -1289,6 +1295,17 @@ it("uses relay metadata through a proxy without corrupting UTF-8 titles", async 
 		NO_PROXY: process.env.NO_PROXY,
 		no_proxy: process.env.no_proxy,
 	};
+	// Bun's fetch never unlearns a deleted proxy var, so assign "" before deleting.
+	onTestFinished(() => {
+		process.env.HTTP_PROXY = saved.HTTP_PROXY ?? "";
+		process.env.http_proxy = saved.http_proxy ?? "";
+		process.env.NO_PROXY = saved.NO_PROXY ?? "";
+		process.env.no_proxy = saved.no_proxy ?? "";
+		if (saved.HTTP_PROXY === undefined) delete process.env.HTTP_PROXY;
+		if (saved.http_proxy === undefined) delete process.env.http_proxy;
+		if (saved.NO_PROXY === undefined) delete process.env.NO_PROXY;
+		if (saved.no_proxy === undefined) delete process.env.no_proxy;
+	});
 	process.env.HTTP_PROXY = `http://127.0.0.1:${proxy.port}`;
 	process.env.http_proxy = process.env.HTTP_PROXY;
 	process.env.NO_PROXY = "";
@@ -1307,10 +1324,6 @@ it("uses relay metadata through a proxy without corrupting UTF-8 titles", async 
 		expect(relayHits).toBe(1);
 		expect(proxyHits).toBe(0);
 	} finally {
-		for (const key of ["HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy"] as const) {
-			process.env[key] = saved[key] ?? "";
-			if (saved[key] === undefined) delete process.env[key];
-		}
 		await proxy.stop(true);
 		await relay.stop(true);
 	}
@@ -1359,20 +1372,22 @@ describe("probeCdpStatus", () => {
 		const cdp = Bun.serve({ port: 0, fetch: () => new Response("{}", { status: 200 }) });
 		const proxy = Bun.serve({ port: 0, fetch: () => new Response("Bad Gateway", { status: 502 }) });
 		const saved = { HTTP_PROXY: process.env.HTTP_PROXY, http_proxy: process.env.http_proxy };
+		// Bun's fetch never unlearns a deleted proxy var: `delete process.env.X`
+		// (or assigning undefined) leaves the proxy active process-wide, silently
+		// routing every later fetch in the suite to the stopped proxy port. Only
+		// assignment flushes it, so write "" first, then restore the JS view.
+		onTestFinished(() => {
+			process.env.HTTP_PROXY = saved.HTTP_PROXY ?? "";
+			process.env.http_proxy = saved.http_proxy ?? "";
+			if (saved.HTTP_PROXY === undefined) delete process.env.HTTP_PROXY;
+			if (saved.http_proxy === undefined) delete process.env.http_proxy;
+		});
 		process.env.HTTP_PROXY = `http://127.0.0.1:${proxy.port}`;
 		process.env.http_proxy = `http://127.0.0.1:${proxy.port}`;
 		try {
 			const status = await probeCdpStatus(`http://127.0.0.1:${cdp.port}/json/version`, { timeoutMs: 1500 });
 			expect(status).toBe(200);
 		} finally {
-			// Bun's fetch never unlearns a deleted proxy var: `delete process.env.X`
-			// (or assigning undefined) leaves the proxy active process-wide, silently
-			// routing every later fetch in the suite to the stopped proxy port. Only
-			// assignment flushes it, so write "" first, then restore the JS view.
-			process.env.HTTP_PROXY = saved.HTTP_PROXY ?? "";
-			process.env.http_proxy = saved.http_proxy ?? "";
-			if (saved.HTTP_PROXY === undefined) delete process.env.HTTP_PROXY;
-			if (saved.http_proxy === undefined) delete process.env.http_proxy;
 			await cdp.stop(true);
 			await proxy.stop(true);
 		}

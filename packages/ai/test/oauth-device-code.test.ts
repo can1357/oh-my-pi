@@ -1,5 +1,9 @@
-import { describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import { pollOAuthDeviceCodeFlow } from "@oh-my-pi/pi-ai/oauth";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 describe("OAuth device-code polling", () => {
 	it("exports the legacy device-code poll helper for external providers", async () => {
@@ -20,19 +24,15 @@ describe("OAuth device-code polling", () => {
 
 	it("keeps a successful poll that finishes after the deadline", async () => {
 		let now = 1_000;
-		const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
-		try {
-			const value = await pollOAuthDeviceCodeFlow({
-				expiresInSeconds: 1,
-				poll: () => {
-					now = 2_001;
-					return { status: "complete", value: "authorized" };
-				},
-			});
-			expect(value).toBe("authorized");
-		} finally {
-			clock.mockRestore();
-		}
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		const value = await pollOAuthDeviceCodeFlow({
+			expiresInSeconds: 1,
+			poll: () => {
+				now = 2_001;
+				return { status: "complete", value: "authorized" };
+			},
+		});
+		expect(value).toBe("authorized");
 	});
 
 	it("prefers caller cancellation over a completed poll", async () => {

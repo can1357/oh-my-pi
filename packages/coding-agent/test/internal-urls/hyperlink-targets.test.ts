@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, onTestFinished } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -72,6 +72,11 @@ describe("InternalUrlRouter.locateSync", () => {
 describe("renderer settings propagation", () => {
 	it("updates renderer preferences when runtime overrides are applied and cleared", async () => {
 		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		const restoreRows = () => {
+			Reflect.deleteProperty(process.stdout, "rows");
+			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
+		};
+		onTestFinished(restoreRows);
 		resetSettingsForTest();
 		try {
 			Object.defineProperty(process.stdout, "rows", { value: 40, configurable: true });
@@ -100,8 +105,8 @@ describe("renderer settings propagation", () => {
 			expect(isFeedModelBadgeEnabled()).toBe(true);
 			expect(isHyperlinkEnabled()).toBe(true);
 		} finally {
+			Reflect.deleteProperty(process.stdout, "rows");
 			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
-			else Reflect.deleteProperty(process.stdout, "rows");
 			resetSettingsForTest();
 			await Settings.init({ inMemory: true });
 		}

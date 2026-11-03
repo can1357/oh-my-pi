@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -17,6 +17,10 @@ import type {
 } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 function makeEventStream(events: AssistantMessageEvent[], final: AssistantMessage): AssistantMessageEventStream {
 	async function* iter() {
@@ -394,7 +398,7 @@ describe("pi-native gateway usage attribution", () => {
 			costUsd?: number;
 			client?: { installId: string; hostname?: string; app?: string };
 		}> = [];
-		const spy = vi.spyOn(storage.usage, "observe").mockImplementation(entry => {
+		vi.spyOn(storage.usage, "observe").mockImplementation(entry => {
 			recorded.push(entry);
 		});
 		const mock = createMockModel({ provider: "openrouter", id: "pi-native-usage" });
@@ -456,7 +460,6 @@ describe("pi-native gateway usage attribution", () => {
 			await zeroUsage.json();
 			expect(recorded).toHaveLength(2);
 		} finally {
-			spy.mockRestore();
 			await handle.close();
 			storage.close();
 			await fs.rm(dir, { recursive: true, force: true });

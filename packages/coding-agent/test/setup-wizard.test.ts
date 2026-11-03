@@ -54,6 +54,7 @@ function testScene(id: string, minVersion: number, shouldRun?: () => boolean): S
 }
 
 afterEach(async () => {
+	vi.restoreAllMocks();
 	await initTheme(false, "unicode", false, "titanium", "light");
 });
 
@@ -400,7 +401,7 @@ describe("setup wizard short terminals", () => {
 		const component = new SetupWizardComponent(createSetupHost(shortTerminalCtx(24)), [providersSetupScene]);
 		void component.run();
 		component.handleInput("\r"); // splash → scene
-		const nowSpy = skipDissolve();
+		skipDissolve();
 		try {
 			// Walk down past a full wrap and back up; the selection must stay
 			// inside the 24-row frame on every step (the list window used to
@@ -412,7 +413,6 @@ describe("setup wizard short terminals", () => {
 				expect(frame.some(line => line.includes(`${theme.nav.cursor} `))).toBe(true);
 			}
 		} finally {
-			nowSpy.mockRestore();
 			component.dispose();
 		}
 	});
@@ -422,7 +422,7 @@ describe("setup wizard short terminals", () => {
 		const component = new SetupWizardComponent(createSetupHost(shortTerminalCtx(24)), [themeSetupScene]);
 		void component.run();
 		component.handleInput("\r"); // splash → scene
-		const nowSpy = skipDissolve();
+		skipDissolve();
 		try {
 			const frame = component.render(80).map(line => Bun.stripANSI(line));
 			expect(frame.length).toBe(24);
@@ -431,7 +431,6 @@ describe("setup wizard short terminals", () => {
 				expect(frame.some(line => line.includes(label))).toBe(true);
 			}
 		} finally {
-			nowSpy.mockRestore();
 			component.dispose();
 		}
 	});

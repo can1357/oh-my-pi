@@ -1,10 +1,13 @@
-import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { MemorySessionStorage, type WriteTextAtomicOptions } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { parseJsonlLenient, TempDir } from "@oh-my-pi/pi-utils";
+import { installMockRestores } from "../../utils/test/helpers/mock-restores";
+
+installMockRestores();
 
 const tempDirs: TempDir[] = [];
 
@@ -15,6 +18,7 @@ function makeTempDir(prefix: string): string {
 }
 
 afterEach(async () => {
+	vi.restoreAllMocks();
 	await Promise.all(tempDirs.splice(0).map(dir => dir.remove()));
 });
 
@@ -366,27 +370,23 @@ describe("SessionManager JSONL software-crash durability", () => {
 			failures.push(error);
 		});
 
-		try {
-			expect(() =>
-				manager.appendMessage({ role: "user", content: "failed-user", timestamp: Date.now() }),
-			).not.toThrow();
-			expect(() => manager.flushSync()).toThrow("ENOSPC");
-			expect(failures).toHaveLength(1);
+		expect(() =>
+			manager.appendMessage({ role: "user", content: "failed-user", timestamp: Date.now() }),
+		).not.toThrow();
+		expect(() => manager.flushSync()).toThrow("ENOSPC");
+		expect(failures).toHaveLength(1);
 
-			writeSpy.mockRestore();
-			expect(() =>
-				manager.appendMessage({ role: "user", content: "recovered-user", timestamp: Date.now() }),
-			).not.toThrow();
-			expect(() => manager.flushSync()).not.toThrow();
+		writeSpy.mockRestore();
+		expect(() =>
+			manager.appendMessage({ role: "user", content: "recovered-user", timestamp: Date.now() }),
+		).not.toThrow();
+		expect(() => manager.flushSync()).not.toThrow();
 
-			const users = readJsonl(sessionFile)
-				.filter(entry => entry.type === "message" && messageRole(entry) === "user")
-				.map(entry => messageContent(entry));
-			expect(users).toEqual(["ok-user", "failed-user", "recovered-user"]);
-			expect(failures).toHaveLength(1);
-		} finally {
-			writeSpy.mockRestore();
-		}
+		const users = readJsonl(sessionFile)
+			.filter(entry => entry.type === "message" && messageRole(entry) === "user")
+			.map(entry => messageContent(entry));
+		expect(users).toEqual(["ok-user", "failed-user", "recovered-user"]);
+		expect(failures).toHaveLength(1);
 	});
 
 	it("reparents metadata children when durably discarding an entry", async () => {

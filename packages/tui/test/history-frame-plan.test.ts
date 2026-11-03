@@ -590,30 +590,27 @@ describe("terminal frame plans", () => {
 	});
 
 	it("rebuilds on a multiplexer height shrink to repair clipped and pushed live rows", async () => {
+		// withoutTerminalMultiplexer() saves TMUX before the test and puts it back after it.
 		Bun.env.TMUX = "/tmp/tmux-0/default,1,0"; // isInsideTerminalMultiplexer ← authoritative
-		try {
-			const terminal = new CountingTerminal(20, 6);
-			const provider = new WidthReplayProvider();
-			const renderScheduler = new VirtualRenderScheduler();
-			const tui = new TUI(terminal, undefined, { renderScheduler });
-			tui.setResizeScrollback("rebuild");
-			tui.setFrameProvider(provider);
-			tui.start();
-			await renderScheduler.settle(terminal);
-			provider.resetCount = 0;
-			terminal.writes.length = 0;
+		const terminal = new CountingTerminal(20, 6);
+		const provider = new WidthReplayProvider();
+		const renderScheduler = new VirtualRenderScheduler();
+		const tui = new TUI(terminal, undefined, { renderScheduler });
+		tui.setResizeScrollback("rebuild");
+		tui.setFrameProvider(provider);
+		tui.start();
+		await renderScheduler.settle(terminal);
+		provider.resetCount = 0;
+		terminal.writes.length = 0;
 
-			// tmux discards below the cursor first, then pushes above it. A
-			// current-width replay must replace that damaged physical copy.
-			terminal.resize(20, 2);
-			await renderScheduler.advance(terminal, 160);
+		// tmux discards below the cursor first, then pushes above it. A
+		// current-width replay must replace that damaged physical copy.
+		terminal.resize(20, 2);
+		await renderScheduler.advance(terminal, 160);
 
-			expect(provider.resetCount).toBe(1);
-			expect(plainBuffer(terminal)).toEqual(["history-one@20", "history-two@20", "editor@20"]);
-			tui.stop();
-		} finally {
-			delete Bun.env.TMUX;
-		}
+		expect(provider.resetCount).toBe(1);
+		expect(plainBuffer(terminal)).toEqual(["history-one@20", "history-two@20", "editor@20"]);
+		tui.stop();
 	});
 
 	it("re-anchors retained history after a height grow behind a fullscreen overlay", async () => {

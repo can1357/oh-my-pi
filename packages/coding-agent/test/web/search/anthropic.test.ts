@@ -1,9 +1,13 @@
-import { describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it, onTestFinished, vi } from "bun:test";
 import type { FetchImpl } from "@oh-my-pi/pi-ai";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { searchAnthropic } from "@oh-my-pi/pi-coding-agent/web/search/providers/anthropic";
 import { createInMemoryAuthStorage } from "../../helpers/agent-session-setup";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 const SELECTED_BASE_URL = "https://anthropic-grounding.example.test/v1";
 
@@ -134,7 +138,6 @@ describe("Anthropic search request body", () => {
 			expect(userId.account_uuid).toBe(accountUuid);
 			expect(userId.device_id).toMatch(/^[0-9a-f]{64}$/);
 		} finally {
-			vi.restoreAllMocks();
 			fixture.authStorage.close();
 		}
 	});
@@ -255,6 +258,10 @@ describe("Anthropic search request body", () => {
 	it("sends API version 2026-10-21 without temperature when opted in on the official API", async () => {
 		const fixture = createFixture("claude-haiku-4-5", "https://api.anthropic.com");
 		const previous = Bun.env.PI_ANTHROPIC_API_VERSION;
+		onTestFinished(() => {
+			if (previous === undefined) delete Bun.env.PI_ANTHROPIC_API_VERSION;
+			else Bun.env.PI_ANTHROPIC_API_VERSION = previous;
+		});
 		Bun.env.PI_ANTHROPIC_API_VERSION = "2026-10-21";
 		try {
 			const cap = makeCaptureFetch();
@@ -271,8 +278,6 @@ describe("Anthropic search request body", () => {
 			expect(cap.headers()?.get("anthropic-version")).toBe("2026-10-21");
 			expect(cap.body()).not.toHaveProperty("temperature");
 		} finally {
-			if (previous === undefined) delete Bun.env.PI_ANTHROPIC_API_VERSION;
-			else Bun.env.PI_ANTHROPIC_API_VERSION = previous;
 			fixture.authStorage.close();
 		}
 	});

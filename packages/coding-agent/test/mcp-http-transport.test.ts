@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it, onTestFinished, vi } from "bun:test";
 import { connectToServer } from "@oh-my-pi/pi-coding-agent/mcp/client";
 import { MCPTransportError } from "@oh-my-pi/pi-coding-agent/mcp/errors";
 import { analyzeAuthError } from "@oh-my-pi/pi-coding-agent/mcp/oauth-discovery";
@@ -544,6 +544,9 @@ describe("MCP Streamable HTTP transport timeouts", () => {
 		vi.useFakeTimers();
 		const caller = new AbortController();
 		const originalFetch = globalThis.fetch;
+		onTestFinished(() => {
+			globalThis.fetch = originalFetch;
+		});
 		const jsonStarted = Promise.withResolvers<void>();
 		globalThis.fetch = (async (_input, init) => {
 			const response = new Response(null, { headers: { "Content-Type": "application/json" } });
@@ -575,7 +578,6 @@ describe("MCP Streamable HTTP transport timeouts", () => {
 
 			await expect(request).rejects.toThrow(`Request timeout after ${REQUEST_TIMEOUT_MS}ms`);
 		} finally {
-			globalThis.fetch = originalFetch;
 			vi.useRealTimers();
 		}
 	});
@@ -584,6 +586,9 @@ describe("MCP Streamable HTTP transport timeouts", () => {
 		vi.useFakeTimers();
 		const caller = new AbortController();
 		const originalFetch = globalThis.fetch;
+		onTestFinished(() => {
+			globalThis.fetch = originalFetch;
+		});
 		const jsonStarted = Promise.withResolvers<void>();
 		globalThis.fetch = (async (_input, init) => {
 			const response = new Response(null, { headers: { "Content-Type": "application/json" } });
@@ -617,7 +622,6 @@ describe("MCP Streamable HTTP transport timeouts", () => {
 
 			await expect(request).rejects.toThrow("Unexpected end of JSON input");
 		} finally {
-			globalThis.fetch = originalFetch;
 			vi.useRealTimers();
 		}
 	});

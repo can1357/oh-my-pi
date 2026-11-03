@@ -13,6 +13,9 @@ import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir, withTimeout } from "@oh-my-pi/pi-utils";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
+import { installMockRestores } from "../../utils/test/helpers/mock-restores";
+
+installMockRestores();
 
 const recordToolSchema = type({ value: type("string") });
 
@@ -196,7 +199,6 @@ afterEach(async () => {
 		await harness.session.dispose();
 		harness.tempDir.removeSync();
 	}
-	vi.restoreAllMocks();
 });
 
 describe("AgentSession empty stop guard", () => {

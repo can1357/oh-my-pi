@@ -4,7 +4,7 @@
  * startup — every session and subagent the run spawns — must not keep
  * appending to that tree for the life of the process.
  */
-import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, describe, expect, it, onTestFinished, spyOn, vi } from "bun:test";
 import { parseArgs, type Args } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { clearOmpExtensionCliRoots } from "@oh-my-pi/pi-coding-agent/discovery/omp-extension-roots";
@@ -14,10 +14,18 @@ import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-sessi
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { logger, postmortem, TempDir } from "@oh-my-pi/pi-utils";
+import { installMockRestores, testLifetime } from "../../utils/test/helpers/mock-restores";
+import { createTeardownFence } from "./helpers/teardown-fence";
+
+installMockRestores();
 
 const tempDirs: TempDir[] = [];
+/** Parks a body abandoned on timeout before `runRootCommand` reaches the real `postmortem.quit`. */
+const fence = createTeardownFence();
 
 afterEach(async () => {
+	fence.close();
+	vi.restoreAllMocks();
 	// `runRootCommand` registers the CLI's extension roots (`--no-extensions` → explicit-only) process-wide.
 	clearOmpExtensionCliRoots();
 
@@ -42,6 +50,15 @@ function headlessArgs(argv: string[], sessionDir: string): Args {
 
 describe("startup timing after a headless runner starts", () => {
 	it("stops recording before print mode runs the prompt", async () => {
+		const life = testLifetime();
+		// Print mode intentionally keeps recording under PI_TIMING; this case covers the default.
+		const savedTiming = process.env.PI_TIMING;
+		onTestFinished(() => {
+			if (savedTiming !== undefined) process.env.PI_TIMING = savedTiming;
+			else delete process.env.PI_TIMING;
+		});
+		// Every async step the fixtures hand to `runRootCommand` settles only while this test runs.
+		const step = fence.forThisTest();
 		const dir = TempDir.createSync("@pi-headless-timing-");
 		tempDirs.push(dir);
 		const authStorage = await AuthStorage.create(":memory:");
@@ -59,26 +76,25 @@ describe("startup timing after a headless runner starts", () => {
 			getLastAssistantMessage: () => undefined,
 			disableStopTimeTodoReminders: () => {},
 			prepareForHeadlessAdvisorDrain: () => {},
-			waitForIdle: async () => {},
+			waitForIdle: () => step(async () => {}),
 			setTextOutputCommitted: () => {},
-			waitForAdvisorCatchup: async () => true,
-			prompt: async () => {
-				recordedDuringPrompt = spanRecorded();
-			},
-			dispose: () => manager.close(),
+			waitForAdvisorCatchup: () => step(async () => true),
+			prompt: () =>
+				step(async () => {
+					recordedDuringPrompt = spanRecorded();
+				}),
+			dispose: () => step(() => manager.close()),
 		} as unknown as AgentSession;
 		const quitSpy = spyOn(postmortem, "quit").mockImplementation(async () => {});
-		// Print mode intentionally keeps recording under PI_TIMING; this case covers the default.
-		const savedTiming = process.env.PI_TIMING;
+		life.assertLive();
 		delete process.env.PI_TIMING;
 		try {
 			await runRootCommand(headlessArgs(["--print", "hello"], dir.path()), ["--print", "hello"], {
-				discoverAuthStorage: async () => authStorage,
+				discoverAuthStorage: () => step(async () => authStorage),
 				settings: Settings.isolated({ "marketplace.autoUpdate": "off" }),
-				createAgentSession: async () => ({ session }) as unknown as CreateAgentSessionResult,
+				createAgentSession: () => step(async () => ({ session }) as unknown as CreateAgentSessionResult),
 			});
 		} finally {
-			if (savedTiming !== undefined) process.env.PI_TIMING = savedTiming;
 			logger.endTiming();
 			quitSpy.mockRestore();
 			authStorage.close();

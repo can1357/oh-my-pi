@@ -1,4 +1,4 @@
-import { describe, expect, it, spyOn } from "bun:test";
+import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import {
 	type CliConfig,
 	type CommandCtor,
@@ -7,6 +7,10 @@ import {
 	renderRootHelp,
 } from "@oh-my-pi/pi-utils/cli";
 import { commands } from "../src/cli-commands";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 function captureStdout(render: () => void): string {
 	const chunks: string[] = [];

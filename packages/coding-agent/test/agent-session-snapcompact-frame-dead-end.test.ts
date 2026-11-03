@@ -16,6 +16,9 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { computeNonMessageTokens } from "@oh-my-pi/pi-tui/status-line/context-usage";
 import { getProjectAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
+import { installMockRestores } from "../../utils/test/helpers/mock-restores";
+
+installMockRestores();
 
 /**
  * Regression test for the snapcompact frame dead-end.
@@ -199,11 +202,11 @@ describe("AgentSession snapcompact frame dead-end rescue", () => {
 	}
 
 	afterEach(async () => {
+		vi.restoreAllMocks();
 		try {
 			await session?.dispose();
 		} finally {
 			await tempDir?.remove();
-			vi.restoreAllMocks();
 		}
 	});
 
@@ -372,7 +375,7 @@ describe("AgentSession snapcompact frame dead-end rescue", () => {
 		expect(snapcompact.resolveShape(unverified).frameTokenEstimate).toBe(price);
 		expect(price).toBe(2882);
 
-		const rebuildFrames = async (model: Model): Promise<{ frames: number; budget: number }> => {
+		const rebuildFrames = async (model: Model): Promise<{ frames: number; budget: number; restore(): void }> => {
 			await createSession({ frameCount: SEEDED_FRAME_COUNT, model });
 			const [firstEntry] = sessionManager.getBranch();
 			if (firstEntry?.type !== "message") throw new Error("Expected the seeded user turn first");
@@ -384,14 +387,16 @@ describe("AgentSession snapcompact frame dead-end rescue", () => {
 				session.agent.tokenizer.countMessage(firstEntry.message) -
 				Math.ceil((2 * snapcompact.geometry(snapcompact.resolveShape(model)).capacity * 1.15) / 4) -
 				2000;
-			vi.spyOn(session.agent, "prompt").mockImplementation(async () => {});
-			vi.spyOn(session.agent, "continue").mockResolvedValue();
+			const promptSpy = vi.spyOn(session.agent, "prompt").mockImplementation(async () => {});
+			const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
 			let rebuilt = false;
-			vi.spyOn(session, "getContextUsage").mockImplementation(() =>
-				rebuilt
-					? { tokens: 30000, contextWindow: 200000, percent: 15 }
-					: { tokens: 190000, contextWindow: 200000, percent: 95 },
-			);
+			const contextUsageSpy = vi
+				.spyOn(session, "getContextUsage")
+				.mockImplementation(() =>
+					rebuilt
+						? { tokens: 30000, contextWindow: 200000, percent: 15 }
+						: { tokens: 190000, contextWindow: 200000, percent: 95 },
+				);
 			const compactSpy = vi.spyOn(snapcompact, "compact").mockImplementation(async () => {
 				rebuilt = true;
 				return {
@@ -404,12 +409,21 @@ describe("AgentSession snapcompact frame dead-end rescue", () => {
 				};
 			});
 			await triggerMaintenance();
-			return { frames: compactSpy.mock.calls[0]?.[1]?.maxFrames ?? 0, budget };
+			return {
+				frames: compactSpy.mock.calls[0]?.[1]?.maxFrames ?? 0,
+				budget,
+				restore() {
+					promptSpy.mockRestore();
+					continueSpy.mockRestore();
+					contextUsageSpy.mockRestore();
+					compactSpy.mockRestore();
+				},
+			};
 		};
 		const atCeiling = await rebuildFrames(unverified);
 		await session.dispose();
 		await tempDir.remove();
-		vi.restoreAllMocks();
+		atCeiling.restore();
 		const atPrice = await rebuildFrames(verified);
 
 		expect(atPrice.frames).toBe(Math.floor(atPrice.budget / price));

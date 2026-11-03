@@ -1,10 +1,11 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, onTestFinished } from "bun:test";
 import { existsSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { procmgr } from "@oh-my-pi/pi-utils";
 import { getOrCreateSnapshot, sanitizeSnapshotForBrush } from "@oh-my-pi/pi-coding-agent/utils/shell-snapshot";
+import { testLifetime } from "../../utils/test/helpers/mock-restores";
 import fnEnvHelper from "../src/utils/shell-snapshot-fn-env.sh" with { type: "text" };
 
 // macOS ships bash at `/bin/bash`, not `/usr/bin/bash`; resolve a real bash the
@@ -419,8 +420,14 @@ describe("getOrCreateSnapshot", () => {
 		expect(stdout).toBe("file\nalias\n");
 	});
 	it("cleans up the empty snapshot file when the shell exits with a non-zero code", async () => {
-		const testRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-snap-fail-"));
+		const life = testLifetime();
 		const originalTmpDir = process.env.TMPDIR;
+		onTestFinished(() => {
+			if (originalTmpDir === undefined) delete process.env.TMPDIR;
+			else process.env.TMPDIR = originalTmpDir;
+		});
+		const testRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-snap-fail-"));
+		life.assertLive();
 		process.env.TMPDIR = testRoot;
 		try {
 			const fakeShell = path.join(testRoot, "fail-shell.sh");
@@ -439,15 +446,19 @@ describe("getOrCreateSnapshot", () => {
 				expect(files).toEqual([]);
 			}
 		} finally {
-			if (originalTmpDir === undefined) delete process.env.TMPDIR;
-			else process.env.TMPDIR = originalTmpDir;
 			await fs.rm(testRoot, { recursive: true, force: true });
 		}
 	});
 
 	it("cleans up the empty snapshot file when the shell fails to spawn", async () => {
-		const testRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-snap-spawn-fail-"));
+		const life = testLifetime();
 		const originalTmpDir = process.env.TMPDIR;
+		onTestFinished(() => {
+			if (originalTmpDir === undefined) delete process.env.TMPDIR;
+			else process.env.TMPDIR = originalTmpDir;
+		});
+		const testRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-snap-spawn-fail-"));
+		life.assertLive();
 		process.env.TMPDIR = testRoot;
 		try {
 			const fakeShell = path.join(testRoot, "does-not-exist-shell");
@@ -463,15 +474,19 @@ describe("getOrCreateSnapshot", () => {
 				expect(files).toEqual([]);
 			}
 		} finally {
-			if (originalTmpDir === undefined) delete process.env.TMPDIR;
-			else process.env.TMPDIR = originalTmpDir;
 			await fs.rm(testRoot, { recursive: true, force: true });
 		}
 	});
 
 	it("cleans up the empty snapshot file when the shell execution times out", async () => {
-		const testRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-snap-timeout-"));
+		const life = testLifetime();
 		const originalTmpDir = process.env.TMPDIR;
+		onTestFinished(() => {
+			if (originalTmpDir === undefined) delete process.env.TMPDIR;
+			else process.env.TMPDIR = originalTmpDir;
+		});
+		const testRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-snap-timeout-"));
+		life.assertLive();
 		process.env.TMPDIR = testRoot;
 		try {
 			const fakeShell = path.join(testRoot, "timeout-shell.sh");
@@ -491,17 +506,21 @@ describe("getOrCreateSnapshot", () => {
 				expect(files).toEqual([]);
 			}
 		} finally {
-			if (originalTmpDir === undefined) delete process.env.TMPDIR;
-			else process.env.TMPDIR = originalTmpDir;
 			await fs.rm(testRoot, { recursive: true, force: true });
 		}
 	});
 
 	it("shares one in-flight creation across concurrent callers (no orphaned snapshot files)", async () => {
+		const life = testLifetime();
+		const originalTmpDir = process.env.TMPDIR;
+		onTestFinished(() => {
+			if (originalTmpDir === undefined) delete process.env.TMPDIR;
+			else process.env.TMPDIR = originalTmpDir;
+		});
 		const realBash = REAL_BASH;
 		if (process.platform === "win32" || !existsSync(realBash)) return;
 		const testRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-snap-inflight-"));
-		const originalTmpDir = process.env.TMPDIR;
+		life.assertLive();
 		process.env.TMPDIR = testRoot;
 		try {
 			const shellLink = path.join(testRoot, "bash-omp-inflight");
@@ -515,16 +534,20 @@ describe("getOrCreateSnapshot", () => {
 			expect(second).toBe(first);
 			expect(await fs.readdir(snapshotDirIn(testRoot))).toEqual([path.basename(first!)]);
 		} finally {
-			if (originalTmpDir === undefined) delete process.env.TMPDIR;
-			else process.env.TMPDIR = originalTmpDir;
 			await fs.rm(testRoot, { recursive: true, force: true });
 		}
 	});
 
 	it("remembers a failed snapshot instead of respawning the shell on every call", async () => {
+		const life = testLifetime();
+		const originalTmpDir = process.env.TMPDIR;
+		onTestFinished(() => {
+			if (originalTmpDir === undefined) delete process.env.TMPDIR;
+			else process.env.TMPDIR = originalTmpDir;
+		});
 		if (process.platform === "win32") return;
 		const testRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-snap-negative-"));
-		const originalTmpDir = process.env.TMPDIR;
+		life.assertLive();
 		process.env.TMPDIR = testRoot;
 		try {
 			const runs = path.join(testRoot, "runs");
@@ -537,8 +560,6 @@ describe("getOrCreateSnapshot", () => {
 			expect(await getOrCreateSnapshot(fakeShell, env)).toBeNull();
 			expect(await fs.readFile(runs, "utf8")).toBe("x");
 		} finally {
-			if (originalTmpDir === undefined) delete process.env.TMPDIR;
-			else process.env.TMPDIR = originalTmpDir;
 			await fs.rm(testRoot, { recursive: true, force: true });
 		}
 	});
@@ -547,10 +568,16 @@ describe("getOrCreateSnapshot", () => {
 		// Regression: the dir used to be a single fixed `omp-shell-snapshots` name
 		// under the shared `os.tmpdir()`, created 0700. The first account to run omp
 		// owned it and every other account's pre-create write died with EACCES.
+		const life = testLifetime();
+		const originalTmpDir = process.env.TMPDIR;
+		onTestFinished(() => {
+			if (originalTmpDir === undefined) delete process.env.TMPDIR;
+			else process.env.TMPDIR = originalTmpDir;
+		});
 		const realBash = REAL_BASH;
 		if (!existsSync(realBash)) return;
 		const testRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-snap-uid-"));
-		const originalTmpDir = process.env.TMPDIR;
+		life.assertLive();
 		process.env.TMPDIR = testRoot;
 		try {
 			const shellLink = path.join(testRoot, "bash-omp-uid");
@@ -559,8 +586,6 @@ describe("getOrCreateSnapshot", () => {
 			expect(snapshotPath).not.toBeNull();
 			expect(path.dirname(snapshotPath!)).toBe(snapshotDirIn(testRoot));
 		} finally {
-			if (originalTmpDir === undefined) delete process.env.TMPDIR;
-			else process.env.TMPDIR = originalTmpDir;
 			await fs.rm(testRoot, { recursive: true, force: true });
 		}
 	});
@@ -573,13 +598,19 @@ describe("getOrCreateSnapshot", () => {
 		// In the field the trigger is a dir owned by another account (chmod then
 		// fails EPERM and is swallowed); ownership can't be faked without root, so
 		// this pins the same guard via an unwritable parent.
+		const life = testLifetime();
+		const originalTmpDir = process.env.TMPDIR;
+		onTestFinished(() => {
+			if (originalTmpDir === undefined) delete process.env.TMPDIR;
+			else process.env.TMPDIR = originalTmpDir;
+		});
 		if (process.getuid?.() === 0) return; // root ignores mode bits
 		const realBash = REAL_BASH;
 		if (!existsSync(realBash)) return;
 		const testRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-snap-eacces-"));
-		const originalTmpDir = process.env.TMPDIR;
 		const shellLink = path.join(testRoot, "bash-omp-eacces");
 		await fs.symlink(realBash, shellLink);
+		life.assertLive();
 		process.env.TMPDIR = testRoot;
 		try {
 			await fs.chmod(testRoot, 0o500); // r-x: snapshot dir cannot be created
@@ -588,8 +619,6 @@ describe("getOrCreateSnapshot", () => {
 			expect(existsSync(snapshotDirIn(testRoot))).toBe(false);
 		} finally {
 			await fs.chmod(testRoot, 0o700).catch(() => {});
-			if (originalTmpDir === undefined) delete process.env.TMPDIR;
-			else process.env.TMPDIR = originalTmpDir;
 			await fs.rm(testRoot, { recursive: true, force: true });
 		}
 	});

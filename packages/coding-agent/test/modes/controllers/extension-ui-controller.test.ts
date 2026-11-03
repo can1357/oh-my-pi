@@ -13,6 +13,7 @@ import { getEditorTheme, getThemeByName, setThemeInstance } from "@oh-my-pi/pi-t
 import type { InteractiveModeContext } from "../../../src/modes/types";
 
 afterEach(() => {
+	vi.restoreAllMocks();
 	setKeybindings(KeybindingsManager.inMemory());
 });
 
@@ -569,25 +570,21 @@ describe("ExtensionUiController tool approval", () => {
 
 	it("lists the choices over a live composer: with it empty, the arrows and Enter take the session approval", async () => {
 		const now = vi.spyOn(performance, "now").mockReturnValue(1_000);
-		try {
-			const harness = makeHarness();
-			const pending = harness.controller.showCollabAwareApproval({
-				...prompt,
-				session: "Approve bash for this session",
-			});
-			const [dialog] = harness.editorContainer.children;
-			expect(harness.editorContainer.children).toEqual([dialog, harness.editor]);
-			// The composer's cursor stays visible: typing there steers instead.
-			expect(harness.editor.focused).toBe(true);
-			now.mockReturnValue(2_000);
-			harness.handleInput("\x1b[B");
-			harness.handleInput("\r");
-			expect(await pending).toBe("session");
-			expect(harness.editorContainer.children).toEqual([harness.editor]);
-			expect(harness.getFocused()).toBe(harness.editor);
-		} finally {
-			now.mockRestore();
-		}
+		const harness = makeHarness();
+		const pending = harness.controller.showCollabAwareApproval({
+			...prompt,
+			session: "Approve bash for this session",
+		});
+		const [dialog] = harness.editorContainer.children;
+		expect(harness.editorContainer.children).toEqual([dialog, harness.editor]);
+		// The composer's cursor stays visible: typing there steers instead.
+		expect(harness.editor.focused).toBe(true);
+		now.mockReturnValue(2_000);
+		harness.handleInput("\x1b[B");
+		harness.handleInput("\r");
+		expect(await pending).toBe("session");
+		expect(harness.editorContainer.children).toEqual([harness.editor]);
+		expect(harness.getFocused()).toBe(harness.editor);
 	});
 
 	it("lets the composer steer while a call waits: the queued message denies the call", async () => {

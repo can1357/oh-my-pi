@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { Args } from "@oh-my-pi/pi-coding-agent/cli/args";
@@ -13,6 +13,7 @@ import { SessionManager, type SessionPersistenceNotice } from "@oh-my-pi/pi-codi
 import { writeTerminalBreadcrumb } from "@oh-my-pi/pi-coding-agent/session/session-paths";
 import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { __resetDirsFromEnvForTests, getTerminalSessionsDir, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
+import { testLifetime } from "../../../utils/test/helpers/mock-restores";
 
 const SESSION_MANAGER_MODULE = path.join(import.meta.dir, "../../src/session/session-manager.ts");
 const EXIT_DIAGNOSTICS_MODULE = path.join(import.meta.dir, "../../src/session/exit-diagnostics.ts");
@@ -383,24 +384,25 @@ describe("--resume of a session that continued in a sibling file", () => {
 	}, 30_000);
 
 	it("keeps the terminal's own last session when both copies went on, even if the other copy has the newest turn", async () => {
+		const life = testLifetime();
+		const pane = process.env.TMUX_PANE;
+		onTestFinished(() => {
+			if (pane === undefined) delete process.env.TMUX_PANE;
+			else process.env.TMUX_PANE = pane;
+		});
 		using tempDir = TempDir.createSync("@omp-resume-continuation-");
 		const { continuation } = await divergedWithContinuationWrittenLast(tempDir);
 		// This terminal's record of its last session names the continuation; a
 		// terminal id is needed to keep one, so give this test its own.
-		const pane = process.env.TMUX_PANE;
+		life.assertLive();
 		process.env.TMUX_PANE = "%resume-continuation-test";
+		await fs.rm(getTerminalSessionsDir(), { recursive: true, force: true });
+		writeTerminalBreadcrumb(tempDir.path(), continuation);
+		const manager = await createSessionManager(continueArgs(tempDir.path()), tempDir.path(), stubSettings);
 		try {
-			await fs.rm(getTerminalSessionsDir(), { recursive: true, force: true });
-			writeTerminalBreadcrumb(tempDir.path(), continuation);
-			const manager = await createSessionManager(continueArgs(tempDir.path()), tempDir.path(), stubSettings);
-			try {
-				expect(manager?.getSessionFile()).toBe(continuation);
-			} finally {
-				await manager?.close();
-			}
+			expect(manager?.getSessionFile()).toBe(continuation);
 		} finally {
-			if (pane === undefined) delete process.env.TMUX_PANE;
-			else process.env.TMUX_PANE = pane;
+			await manager?.close();
 		}
 	}, 30_000);
 

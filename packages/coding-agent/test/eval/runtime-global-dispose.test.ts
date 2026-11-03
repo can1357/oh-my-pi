@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, onTestFinished } from "bun:test";
 import {
 	JsRuntime,
 	type RuntimeCallIdentity,
@@ -81,30 +81,29 @@ describe("JsRuntime global disposal", () => {
 	it("snapshots only JSON-safe globals published after runtime initialization", async () => {
 		const globals = globalThis as Record<string, unknown>;
 		const runtime = new JsRuntime({ initialCwd: process.cwd(), sessionId: "shadow-snapshot" });
-		try {
-			globals.shadowSnapshotProbe = { nested: ["safe"] };
-			globals.shadowSnapshotUnsupported = () => undefined;
-
-			expect(runtime.snapshotUserGlobals()).toEqual({
-				revision: 0,
-				values: { shadowSnapshotProbe: { nested: ["safe"] } },
-				initialGlobals: {
-					String: true,
-					JSON: true,
-					"JSON.stringify": true,
-					"Array.prototype.join": true,
-					"Object.prototype.toString": true,
-					__omp_call_tool__: true,
-				},
-			});
-
-			await runtime.run("undefined;", undefined, hooks);
-			expect(runtime.snapshotUserGlobals().revision).toBe(1);
-		} finally {
+		onTestFinished(() => {
 			delete globals.shadowSnapshotProbe;
 			delete globals.shadowSnapshotUnsupported;
 			runtime.dispose();
-		}
+		});
+		globals.shadowSnapshotProbe = { nested: ["safe"] };
+		globals.shadowSnapshotUnsupported = () => undefined;
+
+		expect(runtime.snapshotUserGlobals()).toEqual({
+			revision: 0,
+			values: { shadowSnapshotProbe: { nested: ["safe"] } },
+			initialGlobals: {
+				String: true,
+				JSON: true,
+				"JSON.stringify": true,
+				"Array.prototype.join": true,
+				"Object.prototype.toString": true,
+				__omp_call_tool__: true,
+			},
+		});
+
+		await runtime.run("undefined;", undefined, hooks);
+		expect(runtime.snapshotUserGlobals().revision).toBe(1);
 	});
 
 	it("bounds shadow snapshot string data across the whole retained namespace", () => {
@@ -155,6 +154,9 @@ describe("JsRuntime global disposal", () => {
 	it("changes the snapshot digest when Object.prototype.toString is replaced", async () => {
 		const runtime = new JsRuntime({ initialCwd: process.cwd(), sessionId: "shadow-tostring" });
 		const genuineToString = Object.prototype.toString;
+		onTestFinished(() => {
+			Object.prototype.toString = genuineToString;
+		});
 		try {
 			const before = shadowSnapshotDigest(runtime.snapshotUserGlobals());
 			Object.prototype.toString = function toString() {
@@ -164,51 +166,45 @@ describe("JsRuntime global disposal", () => {
 			expect(after.initialGlobals).toMatchObject({ "Object.prototype.toString": false });
 			expect(shadowSnapshotDigest(after)).not.toBe(before);
 		} finally {
-			Object.prototype.toString = genuineToString;
 			runtime.dispose();
 		}
 	});
 
 	it("tags repeated tool calls with source-stable site occurrences", async () => {
 		const runtime = new JsRuntime({ initialCwd: process.cwd(), sessionId: "runtime-call-identity" });
+		// The runtime publishes process globals; dispose it even if the run times out.
+		onTestFinished(() => runtime.dispose());
 		const identities: Array<RuntimeCallIdentity | undefined> = [];
 		const code = "for (let index = 0; index < 2; index++) await tool.read({ path: String(index) });";
-		try {
-			await runtime.run(code, "identity.ts", {
-				onText: () => {},
-				onDisplay: () => {},
-				callTool: async (_name, _args, identity) => {
-					identities.push(identity);
-					return "";
-				},
-			});
-			const siteId = `js:${code.indexOf("tool.read")}`;
-			expect(identities).toEqual([
-				{ siteId, occurrence: 0 },
-				{ siteId, occurrence: 1 },
-			]);
-		} finally {
-			runtime.dispose();
-		}
+		await runtime.run(code, "identity.ts", {
+			onText: () => {},
+			onDisplay: () => {},
+			callTool: async (_name, _args, identity) => {
+				identities.push(identity);
+				return "";
+			},
+		});
+		const siteId = `js:${code.indexOf("tool.read")}`;
+		expect(identities).toEqual([
+			{ siteId, occurrence: 0 },
+			{ siteId, occurrence: 1 },
+		]);
 	});
 
 	it("tags whitespace-separated tool reads with a source identity", async () => {
 		const runtime = new JsRuntime({ initialCwd: process.cwd(), sessionId: "runtime-spaced-call-identity" });
+		onTestFinished(() => runtime.dispose());
 		const identities: Array<RuntimeCallIdentity | undefined> = [];
 		const code = 'await tool \n. read({ path: "formatted.txt" });';
-		try {
-			await runtime.run(code, "identity.ts", {
-				onText: () => {},
-				onDisplay: () => {},
-				callTool: async (_name, _args, identity) => {
-					identities.push(identity);
-					return "";
-				},
-			});
-			expect(identities).toEqual([{ siteId: `js:${code.indexOf("tool")}`, occurrence: 0 }]);
-		} finally {
-			runtime.dispose();
-		}
+		await runtime.run(code, "identity.ts", {
+			onText: () => {},
+			onDisplay: () => {},
+			callTool: async (_name, _args, identity) => {
+				identities.push(identity);
+				return "";
+			},
+		});
+		expect(identities).toEqual([{ siteId: `js:${code.indexOf("tool")}`, occurrence: 0 }]);
 	});
 
 	it("reactivates older same-realm runtime globals when no other run is active", async () => {
@@ -216,22 +212,21 @@ describe("JsRuntime global disposal", () => {
 		const before = snapshotGlobals();
 		const first = new JsRuntime({ initialCwd: process.cwd(), sessionId: "first-reactivated" });
 		const second = new JsRuntime({ initialCwd: process.cwd(), sessionId: "second-reactivated" });
-
-		try {
-			expect(globals.__omp_helpers__).toBe(second.helpers);
-			first.setCwd(process.cwd());
-			expect(globals.__omp_helpers__).toBe(first.helpers);
-			first.setRunScope({ reactivatedProbe: 7 });
-			expect(globals.reactivatedProbe).toBe(7);
-			expect(await first.run("1 + 6;", undefined, hooks)).toBe(7);
-			second.setCwd(process.cwd());
-			expect(globals.__omp_helpers__).toBe(second.helpers);
-		} finally {
+		onTestFinished(() => {
 			delete globals.reactivatedProbe;
 			first.dispose();
 			second.dispose();
 			restoreGlobals(before);
-		}
+		});
+
+		expect(globals.__omp_helpers__).toBe(second.helpers);
+		first.setCwd(process.cwd());
+		expect(globals.__omp_helpers__).toBe(first.helpers);
+		first.setRunScope({ reactivatedProbe: 7 });
+		expect(globals.reactivatedProbe).toBe(7);
+		expect(await first.run("1 + 6;", undefined, hooks)).toBe(7);
+		second.setCwd(process.cwd());
+		expect(globals.__omp_helpers__).toBe(second.helpers);
 	});
 
 	it("defers cross-runtime setCwd while another same-realm runtime is running", async () => {
@@ -242,42 +237,36 @@ describe("JsRuntime global disposal", () => {
 		const first = new JsRuntime({ initialCwd: firstCwd, sessionId: "first-overlap" });
 		const second = new JsRuntime({ initialCwd: secondCwd, sessionId: "second-overlap" });
 		const gate = Promise.withResolvers<void>();
-		let activeSecond: Promise<unknown> | undefined;
 		const pendingCwd = `${firstCwd}/pending-same-realm-cwd`;
-
-		try {
-			second.setRunScope({ gate: gate.promise });
-			activeSecond = second.run("await gate;", undefined, hooks);
-			// Local cwd may be stamped without stealing the active realm.
-			first.setCwd(pendingCwd);
-			expect(first.cwd).toBe(pendingCwd);
-			expect(globals.__omp_helpers__).toBe(second.helpers);
-			await first.run("1", undefined, hooks).then(
-				() => {
-					throw new Error("expected active runtime rejection");
-				},
-				error =>
-					expect(error).toHaveProperty(
-						"message",
-						"Cannot run code while another same-realm JS runtime is running",
-					),
-			);
+		second.setRunScope({ gate: gate.promise });
+		const activeSecond = second.run("await gate;", undefined, hooks);
+		onTestFinished(async () => {
 			gate.resolve();
-			await activeSecond;
-			// The deferred cwd must reach this runtime's next run WITHOUT a second
-			// setCwd: the saved __omp_session__ stack entry carries the new value.
-			expect(await first.run("__omp_session__.cwd", undefined, hooks)).toBe(pendingCwd);
-			expect(first.cwd).toBe(pendingCwd);
-			expect(globals.__omp_helpers__).toBe(first.helpers);
-			expect(globals.__omp_session__).toMatchObject({ cwd: pendingCwd });
-		} finally {
-			gate.resolve();
-			if (activeSecond) await activeSecond.catch(() => undefined);
+			await activeSecond.catch(() => undefined);
 			delete globals.gate;
 			first.dispose();
 			second.dispose();
 			restoreGlobals(before);
-		}
+		});
+		// Local cwd may be stamped without stealing the active realm.
+		first.setCwd(pendingCwd);
+		expect(first.cwd).toBe(pendingCwd);
+		expect(globals.__omp_helpers__).toBe(second.helpers);
+		await first.run("1", undefined, hooks).then(
+			() => {
+				throw new Error("expected active runtime rejection");
+			},
+			error =>
+				expect(error).toHaveProperty("message", "Cannot run code while another same-realm JS runtime is running"),
+		);
+		gate.resolve();
+		await activeSecond;
+		// The deferred cwd must reach this runtime's next run WITHOUT a second
+		// setCwd: the saved __omp_session__ stack entry carries the new value.
+		expect(await first.run("__omp_session__.cwd", undefined, hooks)).toBe(pendingCwd);
+		expect(first.cwd).toBe(pendingCwd);
+		expect(globals.__omp_helpers__).toBe(first.helpers);
+		expect(globals.__omp_session__).toMatchObject({ cwd: pendingCwd });
 	});
 
 	it("setCwd on a disposed runtime still throws", () => {

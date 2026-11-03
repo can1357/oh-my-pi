@@ -1,4 +1,4 @@
-import { describe, expect, spyOn, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test, vi } from "bun:test";
 import { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
@@ -10,6 +10,10 @@ import { stream } from "@oh-my-pi/pi-ai/stream";
 import type { Context, FetchImpl } from "@oh-my-pi/pi-ai/types";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { withEnv } from "./helpers";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 const ACCOUNT = "https://myorg-acct.snowflakecomputing.com";
 const CLAUDE = getBundledModel<"anthropic-messages">("snowflake", "claude-sonnet-4-6");
@@ -316,7 +320,7 @@ describe("Snowflake refresh transitions", () => {
 		"refresh retains or rotates the grant (%s) with bounded expiry",
 		async refreshToken => {
 			const captured: CapturedRequest = {};
-			const mock = spyOn(globalThis, "fetch").mockImplementation(
+			spyOn(globalThis, "fetch").mockImplementation(
 				captureRequest(captured, () =>
 					Response.json({
 						access_token: "new-access",
@@ -325,26 +329,22 @@ describe("Snowflake refresh transitions", () => {
 					}),
 				),
 			);
-			try {
-				const before = Date.now();
-				const refreshed = await refreshSnowflakeToken(CREDENTIAL);
-				expect(refreshed).toMatchObject({
-					access: "new-access",
-					refresh: refreshToken ?? "old-refresh",
-					enterpriseUrl: ACCOUNT,
-				});
-				expect(refreshed.expires).toBeGreaterThanOrEqual(before + 60_000);
-				expect(refreshed.expires).toBeLessThanOrEqual(Date.now() + 60_000);
-				expect(captured.url).toBe(`${ACCOUNT}/oauth/token-request`);
-				expect(captured.redirect).toBe("error");
-				const form = new URLSearchParams(captured.body);
-				expect(form.get("grant_type")).toBe("refresh_token");
-				expect(form.get("refresh_token")).toBe("old-refresh");
-				expect(form.get("client_id")).toBe("LOCAL_APPLICATION");
-				expect(CREDENTIAL.access).toBe("old-access");
-			} finally {
-				mock.mockRestore();
-			}
+			const before = Date.now();
+			const refreshed = await refreshSnowflakeToken(CREDENTIAL);
+			expect(refreshed).toMatchObject({
+				access: "new-access",
+				refresh: refreshToken ?? "old-refresh",
+				enterpriseUrl: ACCOUNT,
+			});
+			expect(refreshed.expires).toBeGreaterThanOrEqual(before + 60_000);
+			expect(refreshed.expires).toBeLessThanOrEqual(Date.now() + 60_000);
+			expect(captured.url).toBe(`${ACCOUNT}/oauth/token-request`);
+			expect(captured.redirect).toBe("error");
+			const form = new URLSearchParams(captured.body);
+			expect(form.get("grant_type")).toBe("refresh_token");
+			expect(form.get("refresh_token")).toBe("old-refresh");
+			expect(form.get("client_id")).toBe("LOCAL_APPLICATION");
+			expect(CREDENTIAL.access).toBe("old-access");
 		},
 	);
 
@@ -354,13 +354,9 @@ describe("Snowflake refresh transitions", () => {
 		["unsafe origin", { enterpriseUrl: "https://evil.test" }, "validation"],
 	])("%s rejects before network access", async (_name, patch, kind) => {
 		const mock = spyOn(globalThis, "fetch").mockImplementation(captureRequest({}));
-		try {
-			const error = await refreshSnowflakeToken({ ...CREDENTIAL, ...patch }).catch((caught: unknown) => caught);
-			expect(error).toMatchObject({ kind, provider: "snowflake" });
-			expect(mock).not.toHaveBeenCalled();
-		} finally {
-			mock.mockRestore();
-		}
+		const error = await refreshSnowflakeToken({ ...CREDENTIAL, ...patch }).catch((caught: unknown) => caught);
+		expect(error).toMatchObject({ kind, provider: "snowflake" });
+		expect(mock).not.toHaveBeenCalled();
 	});
 
 	test.each([
@@ -373,20 +369,16 @@ describe("Snowflake refresh transitions", () => {
 		["overflow lifetime", '{"access_token":"a","expires_in":1e308}'],
 		["invalid refresh", '{"access_token":"a","expires_in":600,"refresh_token":null}'],
 	])("%s does not replace persisted credentials", async (_name, body) => {
-		const mock = spyOn(globalThis, "fetch").mockImplementation(captureRequest({}, () => new Response(body)));
-		try {
-			const previous = { ...CREDENTIAL };
-			const error = await refreshSnowflakeToken(CREDENTIAL).catch((caught: unknown) => caught);
-			expect(error).toMatchObject({ kind: "validation", provider: "snowflake" });
-			expect(CREDENTIAL).toEqual(previous);
-		} finally {
-			mock.mockRestore();
-		}
+		spyOn(globalThis, "fetch").mockImplementation(captureRequest({}, () => new Response(body)));
+		const previous = { ...CREDENTIAL };
+		const error = await refreshSnowflakeToken(CREDENTIAL).catch((caught: unknown) => caught);
+		expect(error).toMatchObject({ kind: "validation", provider: "snowflake" });
+		expect(CREDENTIAL).toEqual(previous);
 	});
 
 	test("invalid_grant exposes status and refresh kind but no server-reflected secret", async () => {
 		const secret = "sentinel-refresh-secret";
-		const mock = spyOn(globalThis, "fetch").mockImplementation(
+		spyOn(globalThis, "fetch").mockImplementation(
 			captureRequest({}, () =>
 				Response.json(
 					{
@@ -397,21 +389,17 @@ describe("Snowflake refresh transitions", () => {
 				),
 			),
 		);
-		try {
-			const error = await refreshSnowflakeToken(CREDENTIAL).catch((caught: unknown) => caught);
-			expect(error).toBeInstanceOf(AIError.OAuthError);
-			expect(error).toMatchObject({ kind: "token-refresh", status: 400, provider: "snowflake" });
-			expect(String(error)).not.toContain(secret);
-			expect(JSON.stringify(error)).not.toContain(secret);
-		} finally {
-			mock.mockRestore();
-		}
+		const error = await refreshSnowflakeToken(CREDENTIAL).catch((caught: unknown) => caught);
+		expect(error).toBeInstanceOf(AIError.OAuthError);
+		expect(error).toMatchObject({ kind: "token-refresh", status: 400, provider: "snowflake" });
+		expect(String(error)).not.toContain(secret);
+		expect(JSON.stringify(error)).not.toContain(secret);
 	});
 
 	test("aborted refresh forwards cancellation and leaves the old credential intact", async () => {
 		const signal = AbortSignal.abort(new Error("refresh cancelled"));
 		let received: AbortSignal | null | undefined;
-		const mock = spyOn(globalThis, "fetch").mockImplementation(
+		spyOn(globalThis, "fetch").mockImplementation(
 			Object.assign(
 				async (_input: string | URL | Request, init?: RequestInit) => {
 					received = init?.signal;
@@ -421,13 +409,9 @@ describe("Snowflake refresh transitions", () => {
 				{ preconnect: fetch.preconnect },
 			),
 		);
-		try {
-			const previous = { ...CREDENTIAL };
-			await expect(refreshSnowflakeToken(CREDENTIAL, signal)).rejects.toThrow("refresh cancelled");
-			expect(received).toBe(signal);
-			expect(CREDENTIAL).toEqual(previous);
-		} finally {
-			mock.mockRestore();
-		}
+		const previous = { ...CREDENTIAL };
+		await expect(refreshSnowflakeToken(CREDENTIAL, signal)).rejects.toThrow("refresh cancelled");
+		expect(received).toBe(signal);
+		expect(CREDENTIAL).toEqual(previous);
 	});
 });

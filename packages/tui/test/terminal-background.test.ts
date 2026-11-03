@@ -22,6 +22,11 @@ import { withoutTerminalMultiplexer } from "./helpers/terminal-multiplexer";
 import { ManualScheduler, TspHarness, TspTestTerminal } from "./native/tsp-harness";
 import { VirtualRenderScheduler } from "./virtual-render-scheduler";
 import { VirtualTerminal } from "./virtual-terminal";
+import { testLifetime } from "../../utils/test/helpers/mock-restores";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 withoutTerminalMultiplexer();
 
@@ -150,7 +155,7 @@ describe("terminal background SIXEL repaint", () => {
 	it("repaints when a new owner reports the previous owner's RGB after resetting it at startup", async () => {
 		const terminal = new AppearanceTerminal(40, 5);
 		const start = terminal.start.bind(terminal);
-		const startSpy = vi.spyOn(terminal, "start").mockImplementation((onInput, onResize) => {
+		vi.spyOn(terminal, "start").mockImplementation((onInput, onResize) => {
 			setTerminalBackgroundColor(undefined);
 			start(onInput, onResize);
 		});
@@ -173,7 +178,6 @@ describe("terminal background SIXEL repaint", () => {
 			expect(terminal.writes.join("")).toContain("\x1b[3J");
 		} finally {
 			tui.stop();
-			startSpy.mockRestore();
 		}
 	});
 
@@ -207,7 +211,7 @@ describe("terminal background SIXEL repaint", () => {
 	});
 
 	it("repaints multiplexer viewports without clearing their native history", async () => {
-		const previousSty = Bun.env.STY;
+		// withoutTerminalMultiplexer() saves STY before the test and puts it back after it.
 		Bun.env.STY = "fixture";
 		expect(isInsideTerminalMultiplexer()).toBe(true);
 		expect(isTerminalBackgroundQueryTrusted()).toBe(true);
@@ -236,8 +240,6 @@ describe("terminal background SIXEL repaint", () => {
 			expect(terminal.writes.join("")).not.toContain("\x1b[3J");
 		} finally {
 			tui.stop();
-			if (previousSty === undefined) delete Bun.env.STY;
-			else Bun.env.STY = previousSty;
 		}
 	});
 
@@ -465,6 +467,7 @@ describe("terminal background SIXEL repaint", () => {
 		});
 
 		it("does not repaint duplicate reports or changes overridden by COLORFGBG", async () => {
+			const life = testLifetime();
 			const { terminal, scheduler, tui } = await startFallbackImage();
 			try {
 				terminal.writes.length = 0;
@@ -472,6 +475,7 @@ describe("terminal background SIXEL repaint", () => {
 				await scheduler.settle(terminal);
 				expect(terminal.writes).toEqual([]);
 
+				life.assertLive();
 				Bun.env.COLORFGBG = "15;0";
 				reportAppearance(MacOSAppearance.Light);
 				await scheduler.settle(terminal);

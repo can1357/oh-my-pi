@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 import { resolveCodexResponsesUrl } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { CODEX_BASE_URL } from "@oh-my-pi/pi-catalog/wire/codex";
@@ -8,6 +8,10 @@ import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import type { SearchParams } from "@oh-my-pi/pi-coding-agent/web/search/providers/base";
 import { searchCodex } from "@oh-my-pi/pi-coding-agent/web/search/providers/codex";
 import { createInMemoryAuthStorage } from "../../helpers/agent-session-setup";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 function makeSseResponse(): string {
 	return [
@@ -87,7 +91,6 @@ describe("Codex web search broker auth", () => {
 			expect(requestHeaders?.get("chatgpt-account-id")).toBe("broker-account-id");
 			expect(openSpy).not.toHaveBeenCalled();
 		} finally {
-			vi.restoreAllMocks();
 			authStorage.close();
 		}
 	});

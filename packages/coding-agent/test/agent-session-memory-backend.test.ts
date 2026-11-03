@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, spyOn } from "bun:test";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
@@ -25,6 +25,7 @@ import { tinyModelClient } from "@oh-my-pi/pi-coding-agent/tiny/title-client";
 import { resetMemoryForTests } from "@oh-my-pi/pi-mnemopi";
 import { getProjectAgentDir, getProjectDir, setProjectDir, TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
+import { installMockRestores } from "../../utils/test/helpers/mock-restores";
 
 import { cfgAutolearnEnabled } from "@oh-my-pi/pi-coding-agent/autolearn/settings";
 import { cfgHindsightApiUrl, cfgHindsightMentalModelsEnabled } from "@oh-my-pi/pi-coding-agent/hindsight/settings";
@@ -49,6 +50,8 @@ describe("AgentSession memory backend lifecycle", () => {
 	let settings: Settings;
 	let tempDir: TempDir;
 
+	installMockRestores();
+
 	beforeEach(() => {
 		tempDir = TempDir.createSync("@memory-backend-lifecycle-");
 		authStorage = createInMemoryAuthStorage();
@@ -64,7 +67,6 @@ describe("AgentSession memory backend lifecycle", () => {
 		await session?.dispose();
 		session = undefined;
 		resetMemoryForTests();
-		vi.restoreAllMocks();
 		authStorage.close();
 		// `Settings.loadIsolated` opens agent.db under tempDir; close it before the directory goes away.
 		AgentStorage.close();
@@ -458,25 +460,23 @@ describe("AgentSession memory backend lifecycle", () => {
 		let destinationDbPath: string | undefined;
 		const output: string[] = [];
 		const originalProjectDir = getProjectDir();
-		try {
-			await executeAcpBuiltinSlashCommand("/move " + destinationCwd, {
-				session: current,
-				sessionManager: current.sessionManager,
-				settings,
-				cwd: sourceCwd,
-				output: text => {
-					output.push(text);
-				},
-				refreshCommands: () => {},
-				reloadPlugins: async () => {
-					if (current.sessionManager.getCwd() !== destinationCwd) return;
-					destinationDbPath = getMnemopiSessionState(current)!.memory.dbPath!;
-					if (rollback) throw new Error("destination plugin rescope failed");
-				},
-			});
-		} finally {
-			setProjectDir(originalProjectDir);
-		}
+		// `/move` switches the process-wide project directory; put it back even if the test times out.
+		onTestFinished(() => setProjectDir(originalProjectDir));
+		await executeAcpBuiltinSlashCommand("/move " + destinationCwd, {
+			session: current,
+			sessionManager: current.sessionManager,
+			settings,
+			cwd: sourceCwd,
+			output: text => {
+				output.push(text);
+			},
+			refreshCommands: () => {},
+			reloadPlugins: async () => {
+				if (current.sessionManager.getCwd() !== destinationCwd) return;
+				destinationDbPath = getMnemopiSessionState(current)!.memory.dbPath!;
+				if (rollback) throw new Error("destination plugin rescope failed");
+			},
+		});
 		const committedCwd = rollback ? sourceCwd : destinationCwd;
 		expect(current.sessionManager.getCwd()).toBe(committedCwd);
 		expect(output).toContainEqual(
@@ -556,43 +556,40 @@ describe("AgentSession memory backend lifecycle", () => {
 				reloadPlugins: async () => {},
 			};
 			const originalProjectDir = getProjectDir();
-			try {
-				await executeAcpBuiltinSlashCommand("/move " + destinationCwd, runtime);
-				expect(output).toContainEqual(expect.stringMatching(/Move failed:.*Mnemopi/));
-				expect(current.sessionManager.getCwd()).toBe(sourceCwd);
-				expect(cfgMemoryBackend.get(settings)).toBe(source);
-				expect(current.getActiveToolNames()).toEqual(sourceTools);
-				expect(current.systemPrompt).toEqual(sourcePrompt);
-				if (source === "mnemopi") {
-					expect(current.getMnemopiSessionState()?.memory.dbPath).toBe(sourceDbPath);
-				} else {
-					expect(current.getHindsightSessionState()?.bankId).toBe(sourceBank);
-				}
+			onTestFinished(() => setProjectDir(originalProjectDir));
+			await executeAcpBuiltinSlashCommand("/move " + destinationCwd, runtime);
+			expect(output).toContainEqual(expect.stringMatching(/Move failed:.*Mnemopi/));
+			expect(current.sessionManager.getCwd()).toBe(sourceCwd);
+			expect(cfgMemoryBackend.get(settings)).toBe(source);
+			expect(current.getActiveToolNames()).toEqual(sourceTools);
+			expect(current.systemPrompt).toEqual(sourcePrompt);
+			if (source === "mnemopi") {
+				expect(current.getMnemopiSessionState()?.memory.dbPath).toBe(sourceDbPath);
+			} else {
+				expect(current.getHindsightSessionState()?.bankId).toBe(sourceBank);
+			}
 
-				// Repair the destination and retry the same command; the installed tool must really write there.
-				const destinationDbPath = path.join(destinationCwd, "memory.db");
-				await Bun.write(
-					destinationConfig,
-					Bun.YAML.stringify({
-						memory: { backend: "mnemopi" },
-						mnemopi: { ...mnemopi, dbPath: destinationDbPath },
-					}),
-				);
-				await executeAcpBuiltinSlashCommand("/move " + destinationCwd, runtime);
-				expect(current.sessionManager.getCwd()).toBe(destinationCwd);
-				await current.getToolByName("retain")!.execute("after-move", {
-					items: [{ content: "The destination project deploys from its release branch." }],
-				});
-				const db = new Database(destinationDbPath, { readonly: true });
-				try {
-					expect(
-						db.query("SELECT content FROM working_memory WHERE source = 'coding-agent-retain'").all(),
-					).toEqual([{ content: "The destination project deploys from its release branch." }]);
-				} finally {
-					db.close();
-				}
+			// Repair the destination and retry the same command; the installed tool must really write there.
+			const destinationDbPath = path.join(destinationCwd, "memory.db");
+			await Bun.write(
+				destinationConfig,
+				Bun.YAML.stringify({
+					memory: { backend: "mnemopi" },
+					mnemopi: { ...mnemopi, dbPath: destinationDbPath },
+				}),
+			);
+			await executeAcpBuiltinSlashCommand("/move " + destinationCwd, runtime);
+			expect(current.sessionManager.getCwd()).toBe(destinationCwd);
+			await current.getToolByName("retain")!.execute("after-move", {
+				items: [{ content: "The destination project deploys from its release branch." }],
+			});
+			const db = new Database(destinationDbPath, { readonly: true });
+			try {
+				expect(db.query("SELECT content FROM working_memory WHERE source = 'coding-agent-retain'").all()).toEqual([
+					{ content: "The destination project deploys from its release branch." },
+				]);
 			} finally {
-				setProjectDir(originalProjectDir);
+				db.close();
 			}
 		},
 	);
@@ -652,6 +649,7 @@ describe("AgentSession memory backend lifecycle", () => {
 			});
 			const output: string[] = [];
 			const originalProjectDir = getProjectDir();
+			onTestFinished(() => setProjectDir(originalProjectDir));
 			try {
 				await executeAcpBuiltinSlashCommand("/move " + destinationCwd, {
 					session: current,
@@ -665,9 +663,9 @@ describe("AgentSession memory backend lifecycle", () => {
 					reloadPlugins: async () => {},
 				});
 			} finally {
+				// The assertions below inspect the real backends and settings again.
 				for (const spy of startSpies) spy.mockRestore();
 				reloadSpy.mockRestore();
-				setProjectDir(originalProjectDir);
 			}
 			if (usable) {
 				expect(output.join("\n")).not.toContain("Move failed");

@@ -9,7 +9,7 @@
  * so an unreachable broker stays fatal — the fix is the recovery guidance, not
  * a silent fallback to local credentials.
  */
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it, onTestFinished, vi } from "bun:test";
 import { AuthBrokerError } from "@oh-my-pi/pi-ai/auth-broker";
 import { MissingApiKeyError } from "@oh-my-pi/pi-ai/error";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
@@ -27,6 +27,7 @@ class ProcessExitSignal extends Error {
 
 // `runRootCommand` registers the CLI's extension roots (`--no-extensions` → explicit-only) process-wide.
 afterEach(() => {
+	vi.restoreAllMocks();
 	clearOmpExtensionCliRoots();
 });
 
@@ -46,17 +47,16 @@ describe("describeAuthBrokerStartupError", () => {
 	it("names the configured broker URL when it can be resolved", async () => {
 		const prevUrl = process.env.OMP_AUTH_BROKER_URL;
 		const prevToken = process.env.OMP_AUTH_BROKER_TOKEN;
-		process.env.OMP_AUTH_BROKER_URL = "http://127.0.0.1:8765";
-		process.env.OMP_AUTH_BROKER_TOKEN = "test-token";
-		try {
-			const message = await describeAuthBrokerStartupError(new AuthBrokerError("connection refused"));
-			expect(message).toContain("http://127.0.0.1:8765");
-		} finally {
+		onTestFinished(() => {
 			if (prevUrl === undefined) delete process.env.OMP_AUTH_BROKER_URL;
 			else process.env.OMP_AUTH_BROKER_URL = prevUrl;
 			if (prevToken === undefined) delete process.env.OMP_AUTH_BROKER_TOKEN;
 			else process.env.OMP_AUTH_BROKER_TOKEN = prevToken;
-		}
+		});
+		process.env.OMP_AUTH_BROKER_URL = "http://127.0.0.1:8765";
+		process.env.OMP_AUTH_BROKER_TOKEN = "test-token";
+		const message = await describeAuthBrokerStartupError(new AuthBrokerError("connection refused"));
+		expect(message).toContain("http://127.0.0.1:8765");
 	});
 
 	it("passes through a missing-token message unchanged", async () => {
@@ -77,6 +77,9 @@ describe("runRootCommand — unreachable auth broker at startup", () => {
 		parsed.noExtensions = true;
 		// An interactive launch needs a terminal on stdin; without one it exits 2.
 		const originalIsTTY = process.stdin.isTTY;
+		onTestFinished(() => {
+			Object.defineProperty(process.stdin, "isTTY", { value: originalIsTTY, configurable: true });
+		});
 		Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
 
 		const exitCodes: number[] = [];
@@ -100,7 +103,6 @@ describe("runRootCommand — unreachable auth broker at startup", () => {
 		} catch (err) {
 			thrown = err;
 		} finally {
-			vi.restoreAllMocks();
 			Object.defineProperty(process.stdin, "isTTY", { value: originalIsTTY, configurable: true });
 			setInteractiveHost(previous);
 		}

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, spyOn, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -19,6 +19,10 @@ import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { runGrepCommand } from "../../src/cli/grep-cli";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { GrepTool } from "../../src/tools/grep";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 function getText(result: { content: Array<{ type: string; text?: string }> }): string {
 	return result.content
@@ -92,35 +96,28 @@ describe("literal colon filename resolution (issue #4618)", () => {
 		it("uses only confirmed Windows literal paths", async () => {
 			const literal = "base.txt:1-2";
 			await Bun.write(path.join(tmpDir, literal), "stream\n");
-			const platform = Object.getOwnPropertyDescriptor(process, "platform");
-			if (platform === undefined) throw new Error("process.platform descriptor is unavailable");
+			const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+			onTestFinished(() => {
+				Object.defineProperty(process, "platform", platform);
+			});
 			Object.defineProperty(process, "platform", { configurable: true, value: "win32" });
 
-			try {
-				const expectedLiteral = { path: literal };
-				expect(await splitPathAndSelPreferringLiteral(literal, tmpDir)).toEqual(expectedLiteral);
-				expect(splitPathAndSelPreferringLiteralSync(literal, tmpDir)).toEqual(expectedLiteral);
-				await fs.promises.rm(path.join(tmpDir, literal));
+			const expectedLiteral = { path: literal };
+			expect(await splitPathAndSelPreferringLiteral(literal, tmpDir)).toEqual(expectedLiteral);
+			expect(splitPathAndSelPreferringLiteralSync(literal, tmpDir)).toEqual(expectedLiteral);
+			await fs.promises.rm(path.join(tmpDir, literal));
 
-				const busy = Object.assign(new Error("resource busy"), { code: "EBUSY" });
-				const lstat = spyOn(fs.promises, "lstat").mockRejectedValue(busy);
-				const lstatSync = spyOn(fs, "lstatSync").mockImplementation(() => {
-					throw busy;
-				});
+			const busy = Object.assign(new Error("resource busy"), { code: "EBUSY" });
+			const lstat = spyOn(fs.promises, "lstat").mockRejectedValue(busy);
+			const lstatSync = spyOn(fs, "lstatSync").mockImplementation(() => {
+				throw busy;
+			});
 
-				try {
-					const expectedSelector = { path: "base.txt", sel: "1-2" };
-					expect(await splitPathAndSelPreferringLiteral(literal, tmpDir)).toEqual(expectedSelector);
-					expect(splitPathAndSelPreferringLiteralSync(literal, tmpDir)).toEqual(expectedSelector);
-					expect(lstat).toHaveBeenCalledTimes(1);
-					expect(lstatSync).toHaveBeenCalledTimes(1);
-				} finally {
-					lstatSync.mockRestore();
-					lstat.mockRestore();
-				}
-			} finally {
-				Object.defineProperty(process, "platform", platform);
-			}
+			const expectedSelector = { path: "base.txt", sel: "1-2" };
+			expect(await splitPathAndSelPreferringLiteral(literal, tmpDir)).toEqual(expectedSelector);
+			expect(splitPathAndSelPreferringLiteralSync(literal, tmpDir)).toEqual(expectedSelector);
+			expect(lstat).toHaveBeenCalledTimes(1);
+			expect(lstatSync).toHaveBeenCalledTimes(1);
 		});
 
 		it("keeps the selector when Windows lstat falsely reports a missing stream as present", async () => {
@@ -135,35 +132,30 @@ describe("literal colon filename resolution (issue #4618)", () => {
 			const realLstat = fs.promises.lstat;
 			const realLstatSync = fs.lstatSync;
 			const realBunFile = Bun.file.bind(Bun);
-			const platform = Object.getOwnPropertyDescriptor(process, "platform");
-			if (platform === undefined) throw new Error("process.platform descriptor is unavailable");
+			const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+			onTestFinished(() => {
+				Object.defineProperty(process, "platform", platform);
+			});
 			Object.defineProperty(process, "platform", { configurable: true, value: "win32" });
-			const lstat = spyOn(fs.promises, "lstat").mockImplementation((async (target: fs.PathLike) =>
+			spyOn(fs.promises, "lstat").mockImplementation((async (target: fs.PathLike) =>
 				String(target) === stream ? baseStat : await realLstat(target)) as typeof fs.promises.lstat);
-			const lstatSync = spyOn(fs, "lstatSync").mockImplementation(((target: fs.PathLike) =>
+			spyOn(fs, "lstatSync").mockImplementation(((target: fs.PathLike) =>
 				String(target) === stream ? baseStat : realLstatSync(target)) as typeof fs.lstatSync);
-			const bunFile = spyOn(Bun, "file").mockImplementation((source, options) => {
+			spyOn(Bun, "file").mockImplementation((source, options) => {
 				const file = realBunFile(source as string, options);
 				if (source === stream) file.stat = async () => baseStat;
 				return file;
 			});
 
-			try {
-				const expectedSelector = { path: base, sel: "1-2" };
-				expect(await splitPathAndSelPreferringLiteral(stream, tmpDir)).toEqual(expectedSelector);
-				expect(splitPathAndSelPreferringLiteralSync(stream, tmpDir)).toEqual(expectedSelector);
+			const expectedSelector = { path: base, sel: "1-2" };
+			expect(await splitPathAndSelPreferringLiteral(stream, tmpDir)).toEqual(expectedSelector);
+			expect(splitPathAndSelPreferringLiteralSync(stream, tmpDir)).toEqual(expectedSelector);
 
-				const result = await new ReadTool(createSession()).execute("read-false-positive-stream", { path: stream });
-				const output = getText(result);
-				expect(output).toContain("line one");
-				expect(output).toContain("line two");
-				expect(output).not.toContain("ENOENT");
-			} finally {
-				bunFile.mockRestore();
-				lstatSync.mockRestore();
-				lstat.mockRestore();
-				Object.defineProperty(process, "platform", platform);
-			}
+			const result = await new ReadTool(createSession()).execute("read-false-positive-stream", { path: stream });
+			const output = getText(result);
+			expect(output).toContain("line one");
+			expect(output).toContain("line two");
+			expect(output).not.toContain("ENOENT");
 		});
 
 		it("also protects `:raw`-shaped literal filenames", async () => {

@@ -2,7 +2,7 @@
  * Tests for ExtensionRunner - conflict detection, error handling, tool wrapping.
  */
 
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, onTestFinished, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { Type } from "@oh-my-pi/omptype/typebox";
@@ -35,6 +35,10 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { getProjectAgentDir, logger, TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 describe("ExtensionRunner", () => {
 	let tempDir: TempDir;
@@ -233,8 +237,6 @@ describe("ExtensionRunner", () => {
 
 			expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("conflicts with built-in"), expect.any(Object));
 			expect(shortcuts.has("ctrl+c")).toBe(false);
-
-			warnSpy.mockRestore();
 		});
 
 		it("rejects ctrl+q so it cannot shadow the app.message.followUp default (#1903)", async () => {
@@ -266,8 +268,6 @@ describe("ExtensionRunner", () => {
 			// overwrites it in the editor's custom-key map.
 			expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("conflicts with built-in"), expect.any(Object));
 			expect(shortcuts.has("ctrl+q")).toBe(false);
-
-			warnSpy.mockRestore();
 		});
 
 		it("rejects Alt+M so it cannot shadow the app.model.select default", async () => {
@@ -295,8 +295,6 @@ describe("ExtensionRunner", () => {
 
 			expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("conflicts with built-in"), expect.any(Object));
 			expect(shortcuts.has("alt+m")).toBe(false);
-
-			warnSpy.mockRestore();
 		});
 
 		it("warns when two extensions register same shortcut", async () => {
@@ -335,8 +333,6 @@ describe("ExtensionRunner", () => {
 			expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("shortcut conflict"), expect.any(Object));
 			// Last one wins
 			expect(shortcuts.has("ctrl+shift+x")).toBe(true);
-
-			warnSpy.mockRestore();
 		});
 	});
 
@@ -579,6 +575,9 @@ describe("ExtensionRunner", () => {
 		it("routes a claimed link's click to its claimant only, while extensionRenderers.assistantText is on", async () => {
 			const clicks: string[] = [];
 			// The extension files below run in this process and record into this global.
+			onTestFinished(() => {
+				Reflect.deleteProperty(globalThis, "__linkClicks");
+			});
 			Reflect.set(globalThis, "__linkClicks", clicks);
 			await Bun.write(
 				path.join(extensionsDir, "link-owner.ts"),
@@ -603,46 +602,46 @@ describe("ExtensionRunner", () => {
 				path.join(extensionsDir, "link-drive-letter.ts"),
 				`export default function(pi) { pi.registerLinkScheme("C"); }`,
 			);
-			try {
-				const result = await loadTestExtensions();
-				// Claiming a web scheme or one of omp's internal URL schemes fails that extension's load
-				// instead of capturing every such link.
-				expect(result.errors.find(error => error.path.endsWith("link-hijack.ts"))?.error).toContain("reserved");
-				expect(result.errors.find(error => error.path.endsWith("link-internal-hijack.ts"))?.error).toContain(
-					"reserved",
+			const result = await loadTestExtensions();
+			// Claiming a web scheme or one of omp's internal URL schemes fails that extension's load
+			// instead of capturing every such link.
+			expect(result.errors.find(error => error.path.endsWith("link-hijack.ts"))?.error).toContain("reserved");
+			expect(result.errors.find(error => error.path.endsWith("link-internal-hijack.ts"))?.error).toContain(
+				"reserved",
+			);
+			// A one-letter scheme would claim Windows paths such as `C:/notes.md`.
+			expect(result.errors.find(error => error.path.endsWith("link-drive-letter.ts"))?.error).toContain(
+				"two or more characters",
+			);
+			const runnerWith = (settings: Settings) =>
+				new ExtensionRunner(
+					result.extensions,
+					result.runtime,
+					tempDir.path(),
+					sessionManager,
+					modelRegistry,
+					undefined,
+					settings,
 				);
-				// A one-letter scheme would claim Windows paths such as `C:/notes.md`.
-				expect(result.errors.find(error => error.path.endsWith("link-drive-letter.ts"))?.error).toContain(
-					"two or more characters",
-				);
-				const runnerWith = (settings: Settings) =>
-					new ExtensionRunner(
-						result.extensions,
-						result.runtime,
-						tempDir.path(),
-						sessionManager,
-						modelRegistry,
-						undefined,
-						settings,
-					);
 
-				const off = runnerWith(Settings.isolated({}));
-				expect(off.getLinkSchemes()).toEqual([]);
-				expect(await off.emitLinkActivate("demo:open/1")).toBe(false);
+			const off = runnerWith(Settings.isolated({}));
+			expect(off.getLinkSchemes()).toEqual([]);
+			expect(await off.emitLinkActivate("demo:open/1")).toBe(false);
 
-				const on = runnerWith(Settings.isolated({ "extensionRenderers.assistantText": true }));
-				expect(on.getLinkSchemes()).toEqual(["demo"]);
-				expect(await on.emitLinkActivate("DEMO:open/2")).toBe(true);
-				expect(await on.emitLinkActivate("https://example.com")).toBe(false);
-				expect(clicks).toEqual(["owner demo DEMO:open/2"]);
-			} finally {
-				Reflect.deleteProperty(globalThis, "__linkClicks");
-			}
+			const on = runnerWith(Settings.isolated({ "extensionRenderers.assistantText": true }));
+			expect(on.getLinkSchemes()).toEqual(["demo"]);
+			expect(await on.emitLinkActivate("DEMO:open/2")).toBe(true);
+			expect(await on.emitLinkActivate("https://example.com")).toBe(false);
+			expect(clicks).toEqual(["owner demo DEMO:open/2"]);
 		});
 
 		it("lets a link_activate handler run past the event-handler timeout, as a command would", async () => {
 			const release = Promise.withResolvers<void>();
 			const done: string[] = [];
+			onTestFinished(() => {
+				Reflect.deleteProperty(globalThis, "__linkRelease");
+				Reflect.deleteProperty(globalThis, "__linkDone");
+			});
 			Reflect.set(globalThis, "__linkRelease", release.promise);
 			Reflect.set(globalThis, "__linkDone", done);
 			await Bun.write(
@@ -679,8 +678,6 @@ describe("ExtensionRunner", () => {
 				expect(errors).toEqual([]);
 			} finally {
 				vi.useRealTimers();
-				Reflect.deleteProperty(globalThis, "__linkRelease");
-				Reflect.deleteProperty(globalThis, "__linkDone");
 			}
 		});
 	});
@@ -914,6 +911,9 @@ describe("ExtensionRunner", () => {
 		it("returns completed rewrites without awaiting or accepting a handler after abort", async () => {
 			const signals = { started: Promise.withResolvers<void>(), skippedRan: false };
 			const globalState = globalThis as typeof globalThis & { __assistantMessageAbort?: typeof signals };
+			onTestFinished(() => {
+				delete globalState.__assistantMessageAbort;
+			});
 			globalState.__assistantMessageAbort = signals;
 			fs.writeFileSync(
 				path.join(extensionsDir, "assistant-message-abort.ts"),
@@ -949,7 +949,6 @@ describe("ExtensionRunner", () => {
 			controller.abort(new Error("cancelled"));
 			await expect(emission).resolves.toEqual([{ type: "text", text: "accepted" }]);
 			expect(signals.skippedRan).toBe(false);
-			delete globalState.__assistantMessageAbort;
 		});
 
 		it("rejects attempts to change tool calls", async () => {
@@ -1907,8 +1906,6 @@ describe("ExtensionRunner", () => {
 					error: "handler timed out after 10ms",
 				},
 			]);
-
-			warnSpy.mockRestore();
 		});
 
 		it("keeps a stalled registration inside the session_shutdown deadline", async () => {
@@ -2024,8 +2021,6 @@ describe("ExtensionRunner", () => {
 					error: "handler timed out after 10ms",
 				},
 			]);
-
-			warnSpy.mockRestore();
 		});
 
 		it("falls back to the default tool_call timeout for invalid configured values", async () => {
@@ -2267,7 +2262,7 @@ describe("ExtensionRunner", () => {
 			initializeRunner(runner, uiContext);
 			vi.useFakeTimers();
 			let now = 0;
-			const performanceNow = vi.spyOn(performance, "now").mockImplementation(() => now);
+			vi.spyOn(performance, "now").mockImplementation(() => now);
 			try {
 				testSetExtensionHandlerTimeoutMs(25);
 
@@ -2314,7 +2309,6 @@ describe("ExtensionRunner", () => {
 				vi.advanceTimersByTime(0);
 				await expect(execution).rejects.toThrow(`Extension ${extensionPath} timed out after 25ms`);
 			} finally {
-				performanceNow.mockRestore();
 				vi.useRealTimers();
 			}
 		});
@@ -2467,6 +2461,9 @@ describe("ExtensionRunner", () => {
 			const explicitExtensionPath = path.join(tempDir.path(), "memory-context.ts");
 			fs.writeFileSync(explicitExtensionPath, extCode);
 			const globalState = globalThis as typeof globalThis & { __ompMemoryStatus?: unknown };
+			onTestFinished(() => {
+				delete globalState.__ompMemoryStatus;
+			});
 			delete globalState.__ompMemoryStatus;
 
 			const result = await loadTestExtensions([explicitExtensionPath]);
@@ -2522,7 +2519,6 @@ describe("ExtensionRunner", () => {
 				active: true,
 				searchable: true,
 			});
-			delete globalState.__ompMemoryStatus;
 		});
 	});
 
@@ -2775,6 +2771,9 @@ describe("ExtensionRunner", () => {
 			`;
 			fs.writeFileSync(path.join(extensionsDir, "approval-events.ts"), extCode);
 			const globalState = globalThis as typeof globalThis & { __approvalEvents?: typeof events };
+			onTestFinished(() => {
+				delete globalState.__approvalEvents;
+			});
 			globalState.__approvalEvents = events;
 
 			const result = await loadTestExtensions();
@@ -2812,7 +2811,6 @@ describe("ExtensionRunner", () => {
 				"Approve dangerous_tool for this session",
 				"Deny",
 			]);
-			delete globalState.__approvalEvents;
 		});
 
 		it("approving for this session skips later mode prompts of that tool and tier, until the session changes", async () => {
@@ -2986,6 +2984,9 @@ describe("ExtensionRunner", () => {
 			`;
 			fs.writeFileSync(path.join(extensionsDir, "denied-approval-events.ts"), extCode);
 			const globalState = globalThis as typeof globalThis & { __deniedApprovalEvents?: typeof events };
+			onTestFinished(() => {
+				delete globalState.__deniedApprovalEvents;
+			});
 			globalState.__deniedApprovalEvents = events;
 
 			const result = await loadTestExtensions();
@@ -3015,7 +3016,6 @@ describe("ExtensionRunner", () => {
 				{ type: "tool_approval_requested", reason: undefined },
 				{ type: "tool_approval_resolved", approved: false, reason: "denied by user" },
 			]);
-			delete globalState.__deniedApprovalEvents;
 		});
 		it("emits resolved false when the approval prompt throws", async () => {
 			const events: Array<{ type: string; approved?: boolean; reason?: string }> = [];
@@ -3035,6 +3035,9 @@ describe("ExtensionRunner", () => {
 			`;
 			fs.writeFileSync(path.join(extensionsDir, "thrown-approval-events.ts"), extCode);
 			const globalState = globalThis as typeof globalThis & { __thrownApprovalEvents?: typeof events };
+			onTestFinished(() => {
+				delete globalState.__thrownApprovalEvents;
+			});
 			globalState.__thrownApprovalEvents = events;
 
 			const result = await loadTestExtensions();
@@ -3066,7 +3069,6 @@ describe("ExtensionRunner", () => {
 				{ type: "tool_approval_requested", reason: undefined },
 				{ type: "tool_approval_resolved", approved: false, reason: "dialog aborted" },
 			]);
-			delete globalState.__thrownApprovalEvents;
 		});
 		it("emits lifecycle events when partial context has no session manager", async () => {
 			const events: Array<{ type: string; approved?: boolean; reason?: string; sessionId?: string }> = [];
@@ -3091,6 +3093,9 @@ describe("ExtensionRunner", () => {
 			`;
 			fs.writeFileSync(path.join(extensionsDir, "partial-context-approval-events.ts"), extCode);
 			const globalState = globalThis as typeof globalThis & { __partialContextApprovalEvents?: typeof events };
+			onTestFinished(() => {
+				delete globalState.__partialContextApprovalEvents;
+			});
 			globalState.__partialContextApprovalEvents = events;
 
 			const result = await loadTestExtensions();
@@ -3118,7 +3123,6 @@ describe("ExtensionRunner", () => {
 					reason: "no interactive UI available",
 				},
 			]);
-			delete globalState.__partialContextApprovalEvents;
 		});
 	});
 
@@ -4110,6 +4114,9 @@ describe("ExtensionRunner", () => {
 			`;
 			fs.writeFileSync(path.join(extensionsDir, "tool-call-order.ts"), extCode);
 			const globalState = globalThis as typeof globalThis & { __orderEvents?: string[] };
+			onTestFinished(() => {
+				delete globalState.__orderEvents;
+			});
 			globalState.__orderEvents = order;
 
 			const result = await loadTestExtensions();
@@ -4146,7 +4153,6 @@ describe("ExtensionRunner", () => {
 			);
 
 			expect(order).toEqual(["tool_call", "tool_approval_requested", "ui_select"]);
-			delete globalState.__orderEvents;
 		});
 	});
 	describe("hasHandlers", () => {

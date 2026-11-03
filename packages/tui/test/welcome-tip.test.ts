@@ -1,7 +1,11 @@
-import { beforeAll, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, beforeAll, describe, expect, it, spyOn, vi } from "bun:test";
 import { renderWelcomeTip, WelcomeComponent } from "@oh-my-pi/pi-tui/prompt/welcome";
 import { initTheme, setSymbolPreset, setTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import { visibleWidth } from "@oh-my-pi/pi-tui";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 describe("renderWelcomeTip", () => {
 	beforeAll(async () => {
@@ -96,14 +100,13 @@ describe("renderWelcomeTip", () => {
 		// Regression: the startup prepaint runs under the default "unicode"
 		// preset before settings load; the nag latched there used to survive
 		// the switch to the user's configured "nerd" preset.
-		const rand = spyOn(Math, "random").mockReturnValue(0.05);
+		spyOn(Math, "random").mockReturnValue(0.05);
 		try {
 			const welcome = new WelcomeComponent("1.0.0");
 			expect(welcome.tip).toBe("Please use nerdfont 😭.");
 			await setSymbolPreset("nerd");
 			expect(welcome.tip).not.toBe("Please use nerdfont 😭.");
 		} finally {
-			rand.mockRestore();
 			await setSymbolPreset("unicode");
 		}
 	});

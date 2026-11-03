@@ -5,7 +5,7 @@
  * clean stderr message + non-zero exit instead of letting it surface as
  * `[Uncaught Exception]`.
  */
-import { describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -20,6 +20,10 @@ import * as sessionListingModule from "@oh-my-pi/pi-coding-agent/session/session
 import { loadEntriesFromFile, loadSessionFile } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { ForkSourceNotFoundError, SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 function buildResumeArgs(resume: string, sessionDir?: string): Args {
 	return {
@@ -107,29 +111,25 @@ describe("writeStartupNotice", () => {
 describe("createSessionManager — missing session (#2084)", () => {
 	it("rejects --resume with SessionResolutionError carrying a usage hint", async () => {
 		vi.spyOn(sessionListingModule, "resolveResumableSession").mockResolvedValue(undefined);
-		try {
-			await expect(
-				createSessionManager(
-					buildResumeArgs("019ea530-0000-7000-0000-000000000000"),
-					"/current/project",
-					stubSettings,
-				),
-			).rejects.toMatchObject({
-				name: "SessionResolutionError",
-				message: 'Session "019ea530-0000-7000-0000-000000000000" not found.',
-				hint: expect.stringContaining("omp --resume"),
-			});
-
-			// Confirm it's the exported class so `runRootCommand`'s `instanceof` check works.
-			const caught = await createSessionManager(
+		await expect(
+			createSessionManager(
 				buildResumeArgs("019ea530-0000-7000-0000-000000000000"),
 				"/current/project",
 				stubSettings,
-			).catch((err: unknown) => err);
-			expect(caught).toBeInstanceOf(SessionResolutionError);
-		} finally {
-			vi.restoreAllMocks();
-		}
+			),
+		).rejects.toMatchObject({
+			name: "SessionResolutionError",
+			message: 'Session "019ea530-0000-7000-0000-000000000000" not found.',
+			hint: expect.stringContaining("omp --resume"),
+		});
+
+		// Confirm it's the exported class so `runRootCommand`'s `instanceof` check works.
+		const caught = await createSessionManager(
+			buildResumeArgs("019ea530-0000-7000-0000-000000000000"),
+			"/current/project",
+			stubSettings,
+		).catch((err: unknown) => err);
+		expect(caught).toBeInstanceOf(SessionResolutionError);
 	});
 
 	it("rejects --resume with unknown id instead of falling back to latest persisted session", async () => {
@@ -179,21 +179,13 @@ describe("createSessionManager — missing session (#2084)", () => {
 
 	it("rejects --fork with SessionResolutionError carrying a usage hint", async () => {
 		vi.spyOn(sessionListingModule, "resolveResumableSession").mockResolvedValue(undefined);
-		try {
-			await expect(
-				createSessionManager(
-					buildForkArgs("019ea530-0000-7000-0000-000000000000"),
-					"/current/project",
-					stubSettings,
-				),
-			).rejects.toMatchObject({
-				name: "SessionResolutionError",
-				message: 'Session "019ea530-0000-7000-0000-000000000000" not found.',
-				hint: expect.stringContaining("omp --resume"),
-			});
-		} finally {
-			vi.restoreAllMocks();
-		}
+		await expect(
+			createSessionManager(buildForkArgs("019ea530-0000-7000-0000-000000000000"), "/current/project", stubSettings),
+		).rejects.toMatchObject({
+			name: "SessionResolutionError",
+			message: 'Session "019ea530-0000-7000-0000-000000000000" not found.',
+			hint: expect.stringContaining("omp --resume"),
+		});
 	});
 
 	it("rejects --fork combined with --no-session as a SessionResolutionError (no hint)", async () => {
@@ -312,7 +304,6 @@ describe("createSessionManager — missing session (#2084)", () => {
 				expect(persistedResult.message.isError).toBe(true);
 				expect(persistedResult.message).not.toHaveProperty("details");
 			} finally {
-				vi.restoreAllMocks();
 				await fsp.rm(cwd, { recursive: true, force: true });
 			}
 		},
@@ -369,7 +360,6 @@ describe("createSessionManager — missing session (#2084)", () => {
 			expect(caught).toBeInstanceOf(ForkSourceNotFoundError);
 			await expect(fsp.readdir(sessionDir)).resolves.toEqual([]);
 		} finally {
-			vi.restoreAllMocks();
 			await fsp.rm(cwd, { recursive: true, force: true });
 		}
 	});
@@ -405,7 +395,6 @@ describe("createSessionManager — missing session (#2084)", () => {
 			});
 			await expect(fsp.readdir(sessionDir)).resolves.toEqual([]);
 		} finally {
-			vi.restoreAllMocks();
 			await fsp.rm(cwd, { recursive: true, force: true });
 		}
 	});

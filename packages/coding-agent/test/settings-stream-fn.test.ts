@@ -7,7 +7,7 @@
  * OpenRouter sticky-routing / response caching behaves the same on advisor turns
  * (can1357/oh-my-pi#3639).
  */
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, onTestFinished } from "bun:test";
 import type { StreamFn } from "@oh-my-pi/pi-agent-core";
 import { type Context, type Model, type SimpleStreamOptions, streamSimple } from "@oh-my-pi/pi-ai";
 import { configureProviderStoreResponses } from "@oh-my-pi/pi-ai/providers/openai-responses-state";
@@ -18,6 +18,7 @@ import { bindEffects } from "@oh-my-pi/pi-coding-agent/config/registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { cfgProvidersMuseCodeStoreResponses } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { createSettingsAwareStreamFn } from "@oh-my-pi/pi-coding-agent/session/settings-stream-fn";
+import { testLifetime } from "../../utils/test/helpers/mock-restores";
 
 function captureBase(): { fn: StreamFn; calls: Array<{ options?: SimpleStreamOptions }> } {
 	const calls: Array<{ options?: SimpleStreamOptions }> = [];
@@ -471,26 +472,32 @@ describe("createSettingsAwareStreamFn", () => {
 
 		const context: Context = { messages: [{ role: "user", content: "hi", timestamp: 0 }] };
 
-		/** Send one real request via `send` with a capturing fetch; return the wire `store` field. */
+		/**
+		 * Send one real request via `send` with a capturing fetch; return the wire `store` field.
+		 * The variable goes back after the request so a second call starts from the same value.
+		 */
 		async function wireStore(
 			env: string | undefined,
 			send: (options: SimpleStreamOptions) => Promise<unknown>,
 		): Promise<unknown> {
+			const life = testLifetime();
 			const previous = process.env.PI_MUSE_STORE_RESPONSES;
-			if (env === undefined) delete process.env.PI_MUSE_STORE_RESPONSES;
-			else process.env.PI_MUSE_STORE_RESPONSES = env;
-			try {
-				const bodies: Array<Record<string, unknown>> = [];
-				const fetch = (async (_url: unknown, init?: RequestInit) => {
-					bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
-					return new Response(sseBody, { headers: { "content-type": "text/event-stream" } });
-				}) as FetchImpl;
-				await send({ apiKey: museCredential, fetch });
-				return bodies[0]?.store;
-			} finally {
+			onTestFinished(() => {
 				if (previous === undefined) delete process.env.PI_MUSE_STORE_RESPONSES;
 				else process.env.PI_MUSE_STORE_RESPONSES = previous;
-			}
+			});
+			if (env === undefined) delete process.env.PI_MUSE_STORE_RESPONSES;
+			else process.env.PI_MUSE_STORE_RESPONSES = env;
+			const bodies: Array<Record<string, unknown>> = [];
+			const fetch = (async (_url: unknown, init?: RequestInit) => {
+				bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+				return new Response(sseBody, { headers: { "content-type": "text/event-stream" } });
+			}) as FetchImpl;
+			await send({ apiKey: museCredential, fetch });
+			life.assertLive();
+			if (previous === undefined) delete process.env.PI_MUSE_STORE_RESPONSES;
+			else process.env.PI_MUSE_STORE_RESPONSES = previous;
+			return bodies[0]?.store;
 		}
 
 		/** A session turn: the settings-aware stream over the real `streamSimple`. */
@@ -521,6 +528,7 @@ describe("createSettingsAwareStreamFn", () => {
 		it("applies to direct side requests through the bound settings", async () => {
 			// Titles, commit messages, and memories call `completeSimple`/`streamSimple`
 			// without the settings-aware stream; the process-wide effect covers them.
+			const life = testLifetime();
 			const settings = Settings.isolated();
 			const release = bindEffects(settings);
 			const direct = (options: SimpleStreamOptions) => streamSimple(museModel, context, options).result();
@@ -528,6 +536,7 @@ describe("createSettingsAwareStreamFn", () => {
 				expect(await wireStore(undefined, direct)).toBe(false);
 				// Turning the setting on mid-process reaches the next direct request.
 				cfgProvidersMuseCodeStoreResponses.set(settings, true);
+				life.assertLive();
 				expect(await wireStore(undefined, direct)).toBe(true);
 			} finally {
 				release();

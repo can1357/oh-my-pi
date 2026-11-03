@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, onTestFinished, spyOn, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -39,20 +39,17 @@ function createTtsrRule(name: string): Rule {
 const SECRET_ENV_PATTERNS = /(?:KEY|SECRET|TOKEN|PASSWORD|PASS|AUTH|CREDENTIAL|PRIVATE|OAUTH)(?:_|$)/i;
 
 async function withClearedSecretEnv<T>(run: () => Promise<T>): Promise<T> {
-	const removed: Array<[string, string]> = [];
+	const removed: Record<string, string> = {};
+	onTestFinished(() => {
+		Object.assign(process.env, removed);
+	});
 	for (const [name, value] of Object.entries(process.env)) {
 		if (!value || value.length < 8) continue;
 		if (!SECRET_ENV_PATTERNS.test(name)) continue;
-		removed.push([name, value]);
+		removed[name] = value;
 		delete process.env[name];
 	}
-	try {
-		return await run();
-	} finally {
-		for (const [name, value] of removed) {
-			process.env[name] = value;
-		}
-	}
+	return await run();
 }
 
 async function withTempConfigRoot<T>(run: () => Promise<T>): Promise<T> {
@@ -61,23 +58,19 @@ async function withTempConfigRoot<T>(run: () => Promise<T>): Promise<T> {
 	const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
 	const configDirName = `.omp-sdk-session-${Snowflake.next()}`;
 	const configRoot = path.join(os.homedir(), configDirName);
-	try {
-		process.env.PI_CONFIG_DIR = configDirName;
+	onTestFinished(() => {
 		setProfile(undefined);
+		if (originalConfigDir === undefined) delete process.env.PI_CONFIG_DIR;
+		else process.env.PI_CONFIG_DIR = originalConfigDir;
+		if (originalAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = originalAgentDir;
+		setProfile(originalProfile);
+	});
+	process.env.PI_CONFIG_DIR = configDirName;
+	setProfile(undefined);
+	try {
 		return await run();
 	} finally {
-		setProfile(undefined);
-		if (originalConfigDir === undefined) {
-			delete process.env.PI_CONFIG_DIR;
-		} else {
-			process.env.PI_CONFIG_DIR = originalConfigDir;
-		}
-		if (originalAgentDir === undefined) {
-			delete process.env.PI_CODING_AGENT_DIR;
-		} else {
-			process.env.PI_CODING_AGENT_DIR = originalAgentDir;
-		}
-		setProfile(originalProfile);
 		// The model registry opened the shared `<configRoot>/agent/models.db` cache while the
 		// temp root was active; release it so Windows can delete the root.
 		closeModelCache();

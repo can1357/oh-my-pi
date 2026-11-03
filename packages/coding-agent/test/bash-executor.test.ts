@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -98,8 +98,8 @@ describe("executeBash", () => {
 	});
 
 	afterEach(() => {
-		resetSettingsForTest();
 		vi.restoreAllMocks();
+		resetSettingsForTest();
 		if (fs.existsSync(tempDir)) {
 			removeSyncWithRetries(tempDir);
 		}
@@ -450,11 +450,18 @@ exit 64
 	});
 
 	it("uses executable SHELL for user-shell shortcut commands", async () => {
+		const originalShell = Bun.env.SHELL;
+		onTestFinished(() => {
+			if (originalShell === undefined) {
+				delete Bun.env.SHELL;
+			} else {
+				Bun.env.SHELL = originalShell;
+			}
+		});
 		if (process.platform === "win32") {
 			return;
 		}
 
-		const originalShell = Bun.env.SHELL;
 		const shellDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-env-shell-"));
 		const marker = path.join(shellDir, "env-shell-ran");
 		const markerEscaped = marker.replace(/'/g, "'\\''");
@@ -503,11 +510,6 @@ exit 64
 			expect(fs.readFileSync(marker, "utf8")).toContain("-i -c");
 			expect(fs.readFileSync(marker, "utf8")).not.toContain("-l");
 		} finally {
-			if (originalShell === undefined) {
-				delete Bun.env.SHELL;
-			} else {
-				Bun.env.SHELL = originalShell;
-			}
 			removeSyncWithRetries(shellDir);
 		}
 	});
@@ -831,12 +833,12 @@ exit 64
 
 		const nativeResult = Promise.withResolvers<{ exitCode: undefined; cancelled: true; timedOut: false }>();
 		const dispatched = Promise.withResolvers<void>();
-		vi.spyOn(piNatives.Shell.prototype, "run").mockImplementation((_options, onChunk) => {
+		const runSpy = vi.spyOn(piNatives.Shell.prototype, "run").mockImplementation((_options, onChunk) => {
 			onChunk?.(null, "started\n");
 			dispatched.resolve();
 			return nativeResult.promise;
 		});
-		vi.spyOn(piNatives.Shell.prototype, "abort").mockResolvedValue();
+		const abortSpy = vi.spyOn(piNatives.Shell.prototype, "abort").mockResolvedValue();
 
 		const controller = new AbortController();
 		const promise = executeBash("sleep 10", {
@@ -851,7 +853,8 @@ exit 64
 
 		nativeResult.resolve({ exitCode: undefined, cancelled: true, timedOut: false });
 		await Bun.sleep(0);
-		vi.restoreAllMocks();
+		runSpy.mockRestore();
+		abortSpy.mockRestore();
 
 		await executeBash("export PI_AFTER_ABORT=still_persistent", {
 			cwd: tempDir,

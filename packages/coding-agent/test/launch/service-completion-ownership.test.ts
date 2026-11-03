@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it, onTestFinished, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { Process } from "@oh-my-pi/pi-natives";
@@ -15,6 +15,10 @@ import {
 import { listServices, sendService, startService, waitForOwnedServiceCompletion } from "../../src/launch/services";
 import type { ToolSession } from "../../src/tools";
 import { BashTool } from "../../src/tools/bash";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 interface EmbeddedBroker {
 	/** Settles once this in-process broker has shut down and flushed its metadata. */
@@ -55,6 +59,11 @@ describe("session-owned supervised services", () => {
 		await fs.mkdir(projectDir);
 		const client = await brokerClients.createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
 		const previousTitle = process.title;
+		// startBroker names this process "omp daemon broker" and then awaits; put the title back even if
+		// the test times out there.
+		onTestFinished(() => {
+			process.title = previousTitle;
+		});
 		const broker = await startBroker(projectDir, runtimeDir);
 		const settings = Settings.isolated();
 		const firstCompletions: DaemonCompletionNotification[] = [];
@@ -95,11 +104,9 @@ describe("session-owned supervised services", () => {
 			expect(secondCompletions).toEqual([]);
 			expect(started.daemon.owner).toBe("first-session");
 		} finally {
-			vi.restoreAllMocks();
 			await client.request({ op: "shutdown" }).catch(() => undefined);
 			client.close();
 			await broker.finished;
-			process.title = previousTitle;
 		}
 	}, 15_000);
 
@@ -110,6 +117,9 @@ describe("session-owned supervised services", () => {
 		await fs.mkdir(projectDir);
 		const client = await brokerClients.createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
 		const previousTitle = process.title;
+		onTestFinished(() => {
+			process.title = previousTitle;
+		});
 		const broker = await startBroker(projectDir, runtimeDir);
 		let sessionId = "old-session";
 		const callbacks: Array<() => void> = [];
@@ -162,11 +172,9 @@ describe("session-owned supervised services", () => {
 			};
 			expect(metadata.pendingCompletions).toEqual([]);
 		} finally {
-			vi.restoreAllMocks();
 			await client.request({ op: "shutdown" }).catch(() => undefined);
 			client.close();
 			await broker.finished;
-			process.title = previousTitle;
 		}
 	}, 15_000);
 
@@ -177,6 +185,9 @@ describe("session-owned supervised services", () => {
 		await fs.mkdir(projectDir);
 		let client = await brokerClients.createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
 		const previousTitle = process.title;
+		onTestFinished(() => {
+			process.title = previousTitle;
+		});
 		let broker = await startBroker(projectDir, runtimeDir);
 		let daemonPid: number | undefined;
 		const laterCompletions: DaemonCompletionNotification[] = [];
@@ -256,7 +267,6 @@ describe("session-owned supervised services", () => {
 			};
 			expect(metadata.pendingCompletions).toEqual([]);
 		} finally {
-			vi.restoreAllMocks();
 			await client.request({ op: "shutdown" }).catch(() => undefined);
 			client.close();
 			await broker.finished;
@@ -266,7 +276,6 @@ describe("session-owned supervised services", () => {
 					await processRef.terminate({ group: true, gracefulMs: 0, timeoutMs: 2_000 });
 				}
 			}
-			process.title = previousTitle;
 		}
 	}, 20_000);
 
@@ -277,6 +286,9 @@ describe("session-owned supervised services", () => {
 		await fs.mkdir(projectDir);
 		const client = await brokerClients.createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
 		const previousTitle = process.title;
+		onTestFinished(() => {
+			process.title = previousTitle;
+		});
 		const broker = await startBroker(projectDir, runtimeDir);
 		const sessionFile = path.join(projectDir, "svc.jsonl");
 		const session: ToolSession = {
@@ -301,11 +313,9 @@ describe("session-owned supervised services", () => {
 			});
 			expect(result.details?.service).toMatchObject({ name: "env-service", ready: true, timedOut: false });
 		} finally {
-			vi.restoreAllMocks();
 			await client.request({ op: "shutdown" }).catch(() => undefined);
 			client.close();
 			await broker.finished;
-			process.title = previousTitle;
 		}
 	}, 15_000);
 });

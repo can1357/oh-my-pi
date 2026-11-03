@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it, onTestFinished, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { parseArgs, validateGoalLaunch, validateGoalStartup } from "@oh-my-pi/pi-coding-agent/cli/args";
@@ -55,6 +55,9 @@ async function launchInteractive(rawArgs: string[]): Promise<{ thrown: unknown; 
 	parsed.noLsp = true;
 	const previousHost = setInteractiveHost(false);
 	const originalIsTTY = process.stdin.isTTY;
+	onTestFinished(() => {
+		Object.defineProperty(process.stdin, "isTTY", { value: originalIsTTY, configurable: true });
+	});
 	Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
 	vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
 		throw new ProcessExitSignal(code ?? 0);
@@ -82,7 +85,6 @@ async function launchInteractive(rawArgs: string[]): Promise<{ thrown: unknown; 
 	} catch (error) {
 		return { thrown: error, touched };
 	} finally {
-		vi.restoreAllMocks();
 		Object.defineProperty(process.stdin, "isTTY", { value: originalIsTTY, configurable: true });
 		setInteractiveHost(previousHost);
 		authStorage.close();
@@ -91,6 +93,7 @@ async function launchInteractive(rawArgs: string[]): Promise<{ thrown: unknown; 
 
 // `runRootCommand` registers the CLI's extension roots (`--no-extensions` → explicit-only) process-wide.
 afterEach(() => {
+	vi.restoreAllMocks();
 	clearOmpExtensionCliRoots();
 });
 
@@ -188,7 +191,6 @@ describe("--goal launch option", () => {
 			expect(goalArgs.continue).toBeUndefined();
 			expect(resume).toHaveBeenCalledTimes(1);
 		} finally {
-			resume.mockRestore();
 			await previous.close();
 		}
 	});

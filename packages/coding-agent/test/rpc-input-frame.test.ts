@@ -1,4 +1,4 @@
-import { describe, expect, spyOn, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -24,6 +24,10 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as imageLoading from "@oh-my-pi/pi-coding-agent/utils/image-loading";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 type OutputFrame = RpcResponse | object;
 
@@ -632,7 +636,7 @@ describe("RpcInputDispatcher", () => {
 			// vision-model description call for a text-only model.
 			const normalizeStarted = Promise.withResolvers<void>();
 			const releaseNormalize = Promise.withResolvers<void>();
-			const normalizeSpy = spyOn(imageLoading, "normalizeModelContextImages").mockImplementation(async images => {
+			spyOn(imageLoading, "normalizeModelContextImages").mockImplementation(async images => {
 				normalizeStarted.resolve();
 				await releaseNormalize.promise;
 				return images;
@@ -678,8 +682,6 @@ describe("RpcInputDispatcher", () => {
 			releaseNormalize.resolve();
 			await trackedPromptTask;
 			expect(outputs).toContainEqual({ id: "p1", type: "response", command: "prompt", success: true });
-
-			normalizeSpy.mockRestore();
 		} finally {
 			await session.dispose();
 			authStorage.close();

@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import { factRecall, formatContext, recall, recallEnhanced } from "@oh-my-pi/pi-mnemopi/core/beam/recall";
 import { initBeam } from "@oh-my-pi/pi-mnemopi/core/beam/schema";
 import { invalidate } from "@oh-my-pi/pi-mnemopi/core/beam/store";
@@ -46,6 +46,7 @@ function makeBeam(): TestBeam {
 }
 
 afterEach(() => {
+	vi.restoreAllMocks();
 	while (beams.length > 0) beams.pop()?.close();
 });
 

@@ -8,13 +8,17 @@
  * code the caller passes to `postmortem.quit`.
  */
 import * as path from "node:path";
-import { describe, expect, it, spyOn } from "bun:test";
+import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { postmortem, TempDir } from "@oh-my-pi/pi-utils";
 import { Settings } from "../../src/config/settings";
 import { runPrintMode } from "../../src/modes/print-mode";
 import type { AgentSession } from "../../src/session/agent-session";
 import * as telemetryExport from "../../src/telemetry-export";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 describe("print mode disposes the session before terminating", () => {
 	it("disposes on the assistant-error path before returning exit code 1", async () => {

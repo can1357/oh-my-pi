@@ -16,7 +16,11 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { installMockRestores } from "../../utils/test/helpers/mock-restores";
 import manualContinuePrompt from "../src/prompts/system/manual-continue.md" with { type: "text" };
+
+// The describe's `afterEach` awaits disposal, so mocks are restored by the shared synchronous helper.
+installMockRestores();
 
 /** A response that stalls until aborted; `started` resolves once the request is in flight. */
 function stalledResponse(): { handler: MockHandler; started: Promise<void> } {
@@ -121,26 +125,22 @@ describe("AgentSession.resume", () => {
 	it("returns an uncredentialed prompt for retry and refuses context-free resume", async () => {
 		const registry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
 		const getApiKey = spyOn(registry, "getApiKey").mockResolvedValue(undefined);
-		try {
-			const { session, mock } = createSession([{ content: ["answer"] }], registry);
-			const dropped: string[] = [];
-			session.setPromptDropped(prompt => dropped.push(prompt.text));
+		const { session, mock } = createSession([{ content: ["answer"] }], registry);
+		const dropped: string[] = [];
+		session.setPromptDropped(prompt => dropped.push(prompt.text));
 
-			await expect(session.prompt("finish this request")).rejects.toThrow("No API key found for anthropic");
-			expect(dropped).toEqual(["finish this request"]);
-			await expect(session.resume()).rejects.toThrow("Nothing to resume");
-			expect(mock.calls).toHaveLength(0);
-			expect(session.agent.state.messages).toEqual([]);
-			getApiKey.mockResolvedValue("test-key");
-			await session.prompt(dropped[0]);
-			await session.waitForIdle();
-			expect(session.agent.state.messages.map(message => [message.role, textOf(message)])).toEqual([
-				["user", "finish this request"],
-				["assistant", "answer"],
-			]);
-		} finally {
-			getApiKey.mockRestore();
-		}
+		await expect(session.prompt("finish this request")).rejects.toThrow("No API key found for anthropic");
+		expect(dropped).toEqual(["finish this request"]);
+		await expect(session.resume()).rejects.toThrow("Nothing to resume");
+		expect(mock.calls).toHaveLength(0);
+		expect(session.agent.state.messages).toEqual([]);
+		getApiKey.mockResolvedValue("test-key");
+		await session.prompt(dropped[0]);
+		await session.waitForIdle();
+		expect(session.agent.state.messages.map(message => [message.role, textOf(message)])).toEqual([
+			["user", "finish this request"],
+			["assistant", "answer"],
+		]);
 	});
 
 	it("injects the continue directive after an answered turn", async () => {

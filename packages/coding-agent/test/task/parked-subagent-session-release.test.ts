@@ -23,6 +23,7 @@ import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-sessi
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
+import { installMockRestores } from "../../../utils/test/helpers/mock-restores";
 
 const AGENT_ID = "ParkedRelease";
 const MOCK_API_SOURCE = "test/parked-subagent-session-release";
@@ -47,6 +48,8 @@ function restoreEnvValue(key: string, value: string | undefined): void {
 	Bun.env[key] = value;
 }
 
+installMockRestores();
+
 beforeEach(async () => {
 	savedEnv = Object.fromEntries(ENV_KEYS.map(key => [key, process.env[key]]));
 	root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-parked-release-"));
@@ -65,7 +68,6 @@ afterEach(async () => {
 	AgentLifecycleManager.resetGlobalForTests();
 	AgentRegistry.resetGlobalForTests();
 	unregisterCustomApis(MOCK_API_SOURCE);
-	vi.restoreAllMocks();
 	for (const key of ENV_KEYS) restoreEnvValue(key, savedEnv[key]);
 	__resetDirsFromEnvForTests();
 	// The subagent session opened agent.db and models.db under root; Windows cannot delete open files.

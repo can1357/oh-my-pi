@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "bun:test";
 import * as path from "node:path";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { importRoomKey } from "@oh-my-pi/pi-coding-agent/collab/crypto";
@@ -98,6 +98,7 @@ class InputTrackingTerminal extends CountingTerminal {
 
 // `runRootCommand` registers the CLI's extension roots (`--no-extensions` → explicit-only) process-wide.
 afterEach(() => {
+	vi.restoreAllMocks();
 	clearOmpExtensionCliRoots();
 });
 
@@ -105,6 +106,9 @@ describe("outer startup collaboration gate", () => {
 	it.each(["completes", "fails"] as const)("keeps guest mutations gated until outer startup %s", async result => {
 		const originalProject = getProjectDir();
 		const originalIsTTY = process.stdin.isTTY;
+		onTestFinished(() => {
+			Object.defineProperty(process.stdin, "isTTY", { value: originalIsTTY, configurable: true });
+		});
 		resetSettingsForTest();
 		await initTheme();
 		const testSession = await createTestSession({
@@ -276,14 +280,12 @@ describe("outer startup collaboration gate", () => {
 			await mode?.collabController.shutdown("test cleanup");
 			mode?.stop();
 			stopPendingStartupComposer();
-			vi.restoreAllMocks();
 			uninstallInMemoryRelay();
 			authStorage.close();
 			// setProjectDir chdir'd into tempDir; Windows cannot delete the process cwd.
 			setProjectDir(originalProject);
 			await testSession.cleanup();
 			resetSettingsForTest();
-			Object.defineProperty(process.stdin, "isTTY", { value: originalIsTTY, configurable: true });
 		}
 	});
 });
@@ -359,7 +361,6 @@ describe("Composer prepaint", () => {
 				mode.stop();
 				cache.close();
 				await testSession.cleanup();
-				vi.restoreAllMocks();
 			}
 		},
 	);
@@ -456,7 +457,6 @@ describe("Composer prepaint", () => {
 		} finally {
 			mode?.stop();
 			await testSession.cleanup();
-			vi.restoreAllMocks();
 			await initTheme();
 		}
 	});
@@ -512,7 +512,6 @@ describe("Composer prepaint", () => {
 			mode.stop();
 			lease.dispose();
 			await testSession.cleanup();
-			vi.restoreAllMocks();
 		}
 	});
 
@@ -546,7 +545,6 @@ describe("Composer prepaint", () => {
 			mode.stop();
 			lease.dispose();
 			await testSession.cleanup();
-			vi.restoreAllMocks();
 		}
 	});
 
@@ -592,7 +590,6 @@ describe("Composer prepaint", () => {
 			mode.stop();
 			lease.dispose();
 			await testSession.cleanup();
-			vi.restoreAllMocks();
 		}
 	});
 
@@ -661,7 +658,6 @@ describe("Composer prepaint", () => {
 			mode.stop();
 			lease.dispose();
 			await testSession.cleanup();
-			vi.restoreAllMocks();
 		}
 	});
 
@@ -816,7 +812,6 @@ describe("Composer prepaint", () => {
 			mode?.stop();
 			lease.dispose();
 			await testSession.cleanup();
-			vi.restoreAllMocks();
 		}
 	});
 

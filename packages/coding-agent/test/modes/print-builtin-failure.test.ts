@@ -7,7 +7,7 @@
  * previous turn, and the merged stdin/@file message is never dispatched as a
  * command: a pipe controls it end to end.
  */
-import { describe, expect, test, vi } from "bun:test";
+import { afterEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -15,6 +15,10 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { runPrintMode } from "@oh-my-pi/pi-coding-agent/modes/print-mode";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 function printSession(cwd: string, prompts: string[]): AgentSession {
 	return {
@@ -45,7 +49,7 @@ describe("print mode builtin exit codes", () => {
 	test("exits 1 when the dispatched reauth fails, 0 for other slash input", async () => {
 		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-print-builtin-"));
 		const stderrLines: string[] = [];
-		const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(((chunk: unknown) => {
+		vi.spyOn(process.stderr, "write").mockImplementation(((chunk: unknown) => {
 			stderrLines.push(String(chunk));
 			return true;
 		}) as never);
@@ -72,8 +76,6 @@ describe("print mode builtin exit codes", () => {
 			expect(prompts).toEqual(["/mcp help"]);
 			expect(stderrLines.join("")).not.toContain("/mcp list");
 		} finally {
-			stderrSpy.mockRestore();
-			vi.restoreAllMocks();
 			await removeWithRetries(cwd);
 		}
 	});
@@ -84,7 +86,7 @@ describe("print mode builtin exit codes", () => {
 		// `/mcp add`) must reach the model as text, never run as a command.
 		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-print-stdin-"));
 		const stderrLines: string[] = [];
-		const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(((chunk: unknown) => {
+		vi.spyOn(process.stderr, "write").mockImplementation(((chunk: unknown) => {
 			stderrLines.push(String(chunk));
 			return true;
 		}) as never);
@@ -102,8 +104,6 @@ describe("print mode builtin exit codes", () => {
 			expect(exit).toBe(0);
 			expect(stderrLines.join("")).not.toContain("not found");
 		} finally {
-			stderrSpy.mockRestore();
-			vi.restoreAllMocks();
 			await removeWithRetries(cwd);
 		}
 	});
@@ -115,7 +115,7 @@ describe("print mode builtin exit codes", () => {
 		// reason decides the exit status.
 		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-print-retry-"));
 		const stdoutLines: string[] = [];
-		const stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation(((
+		vi.spyOn(process.stdout, "write").mockImplementation(((
 			chunk: unknown,
 			callback?: (err?: Error | null) => void,
 		) => {
@@ -162,8 +162,6 @@ describe("print mode builtin exit codes", () => {
 			// …and the retried turn's answer was printed as this run's answer.
 			expect(stdoutLines.join("")).toContain("retried answer");
 		} finally {
-			stdoutSpy.mockRestore();
-			vi.restoreAllMocks();
 			await removeWithRetries(cwd);
 		}
 	});

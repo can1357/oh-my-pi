@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as path from "node:path";
 import { setImmediate } from "node:timers/promises";
 import { type } from "@oh-my-pi/omptype";
@@ -24,6 +24,10 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { WaitTool } from "@oh-my-pi/pi-coding-agent/tools/wait";
 import * as imageLoading from "@oh-my-pi/pi-coding-agent/utils/image-loading";
 import { TempDir, untilAborted } from "@oh-my-pi/pi-utils";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 const zeroUsage = {
 	input: 0,
@@ -1188,7 +1192,7 @@ describe("AgentSession aside delivery", () => {
 
 		const normalizeStarted = Promise.withResolvers<void>();
 		const releaseNormalize = Promise.withResolvers<void>();
-		const normalizeSpy = spyOn(imageLoading, "normalizeModelContextImages").mockImplementation(async images => {
+		spyOn(imageLoading, "normalizeModelContextImages").mockImplementation(async images => {
 			normalizeStarted.resolve();
 			await releaseNormalize.promise;
 			return images;
@@ -1230,7 +1234,6 @@ describe("AgentSession aside delivery", () => {
 			await newSessionPromise;
 			await asidePromise;
 			await run.catch(() => {});
-			normalizeSpy.mockRestore();
 		}
 	});
 
@@ -1310,33 +1313,29 @@ describe("AgentSession aside delivery", () => {
 
 		const normalizeStarted = Promise.withResolvers<void>();
 		const releaseNormalize = Promise.withResolvers<void>();
-		const normalizeSpy = spyOn(imageLoading, "normalizeModelContextImages").mockImplementation(async images => {
+		spyOn(imageLoading, "normalizeModelContextImages").mockImplementation(async images => {
 			normalizeStarted.resolve();
 			await releaseNormalize.promise;
 			return images;
 		});
-		try {
-			expect(session.isStreaming).toBe(false);
-			const image: ImageContent = { type: "image", data: "aW1hZ2U=", mimeType: "image/png" };
-			const dispatched = session.sendCustomMessage(
-				{
-					customType: "ext-aside",
-					content: [{ type: "text", text: "IDLE_GENERATION_ASIDE" }, image],
-					display: true,
-					attribution: "agent",
-				},
-				{ deliverAs: "aside" },
-			);
-			await normalizeStarted.promise;
+		expect(session.isStreaming).toBe(false);
+		const image: ImageContent = { type: "image", data: "aW1hZ2U=", mimeType: "image/png" };
+		const dispatched = session.sendCustomMessage(
+			{
+				customType: "ext-aside",
+				content: [{ type: "text", text: "IDLE_GENERATION_ASIDE" }, image],
+				display: true,
+				attribution: "agent",
+			},
+			{ deliverAs: "aside" },
+		);
+		await normalizeStarted.promise;
 
-			await session.newSession();
-			releaseNormalize.resolve();
+		await session.newSession();
+		releaseNormalize.resolve();
 
-			expect(await dispatched).toBe(false);
-			expect(JSON.stringify(session.agent.state.messages)).not.toContain("IDLE_GENERATION_ASIDE");
-		} finally {
-			normalizeSpy.mockRestore();
-		}
+		expect(await dispatched).toBe(false);
+		expect(JSON.stringify(session.agent.state.messages)).not.toContain("IDLE_GENERATION_ASIDE");
 	});
 
 	it("does not wake a stranded aside into an agent disconnected by an in-flight newSession()", async () => {
@@ -1386,7 +1385,7 @@ describe("AgentSession aside delivery", () => {
 		const advisorsGateReached = Promise.withResolvers<void>();
 		const releaseAdvisorsGate = Promise.withResolvers<void>();
 		const originalDrainAndDetachRecorders = SessionAdvisors.prototype.drainAndDetachRecorders;
-		const advisorsSpy = spyOn(SessionAdvisors.prototype, "drainAndDetachRecorders").mockImplementation(
+		spyOn(SessionAdvisors.prototype, "drainAndDetachRecorders").mockImplementation(
 			async function (this: SessionAdvisors) {
 				advisorsGateReached.resolve();
 				await releaseAdvisorsGate.promise;
@@ -1395,38 +1394,33 @@ describe("AgentSession aside delivery", () => {
 		);
 		const normalizeStarted = Promise.withResolvers<void>();
 		const releaseNormalize = Promise.withResolvers<void>();
-		const normalizeSpy = spyOn(imageLoading, "normalizeModelContextImages").mockImplementation(async images => {
+		spyOn(imageLoading, "normalizeModelContextImages").mockImplementation(async images => {
 			normalizeStarted.resolve();
 			await releaseNormalize.promise;
 			return images;
 		});
 
-		try {
-			const asidePromise = session.sendUserMessage("DISCONNECTED_ASIDE", { deliverAs: "aside" });
-			await normalizeStarted.promise;
+		const asidePromise = session.sendUserMessage("DISCONNECTED_ASIDE", { deliverAs: "aside" });
+		await normalizeStarted.promise;
 
-			const newSessionPromise = session.newSession();
-			// #disconnectFromAgent()/abort() have run; agent.reset() and the generation bump have not.
-			await advisorsGateReached.promise;
+		const newSessionPromise = session.newSession();
+		// #disconnectFromAgent()/abort() have run; agent.reset() and the generation bump have not.
+		await advisorsGateReached.promise;
 
-			releaseNormalize.resolve();
-			await asidePromise;
-			// Flush any fire-and-forget microtask chain a stray #wakeForIrc call would have started
-			// (agent.prompt() is invoked asynchronously, not synchronously, from #wakeForIrc).
-			for (let i = 0; i < 5; i++) await Promise.resolve();
+		releaseNormalize.resolve();
+		await asidePromise;
+		// Flush any fire-and-forget microtask chain a stray #wakeForIrc call would have started
+		// (agent.prompt() is invoked asynchronously, not synchronously, from #wakeForIrc).
+		for (let i = 0; i < 5; i++) await Promise.resolve();
 
-			expect(callCount).toBe(1);
+		expect(callCount).toBe(1);
 
-			releaseAdvisorsGate.resolve();
-			expect(await newSessionPromise).toBe(true);
-			await run.catch(() => {});
-			await session.waitForIdle();
+		releaseAdvisorsGate.resolve();
+		expect(await newSessionPromise).toBe(true);
+		await run.catch(() => {});
+		await session.waitForIdle();
 
-			expect(JSON.stringify(session.agent.state.messages)).not.toContain("DISCONNECTED_ASIDE");
-		} finally {
-			normalizeSpy.mockRestore();
-			advisorsSpy.mockRestore();
-		}
+		expect(JSON.stringify(session.agent.state.messages)).not.toContain("DISCONNECTED_ASIDE");
 	});
 
 	it("preserves a normalized aside across a rolled-back switchSession()", async () => {
@@ -1481,14 +1475,14 @@ describe("AgentSession aside delivery", () => {
 
 		const normalizeStarted = Promise.withResolvers<void>();
 		const releaseNormalize = Promise.withResolvers<void>();
-		const normalizeSpy = spyOn(imageLoading, "normalizeModelContextImages").mockImplementation(async images => {
+		spyOn(imageLoading, "normalizeModelContextImages").mockImplementation(async images => {
 			normalizeStarted.resolve();
 			await releaseNormalize.promise;
 			return images;
 		});
 		const setSessionFileReached = Promise.withResolvers<void>();
 		const releaseSetSessionFileFailure = Promise.withResolvers<void>();
-		const setSessionFileSpy = spyOn(SessionManager.prototype, "setSessionFile").mockImplementation(async () => {
+		spyOn(SessionManager.prototype, "setSessionFile").mockImplementation(async () => {
 			setSessionFileReached.resolve();
 			await releaseSetSessionFileFailure.promise;
 			throw new Error("forced switchSession failure");
@@ -1541,8 +1535,6 @@ describe("AgentSession aside delivery", () => {
 			await switchedPromise?.catch(() => {});
 			await asidePromise;
 			await run.catch(() => {});
-			normalizeSpy.mockRestore();
-			setSessionFileSpy.mockRestore();
 		}
 	});
 

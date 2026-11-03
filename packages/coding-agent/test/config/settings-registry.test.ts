@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { orderedSettings } from "@oh-my-pi/pi-coding-agent/config/all-settings";
@@ -19,6 +19,10 @@ import { cfgTaskMaxConcurrency } from "@oh-my-pi/pi-coding-agent/task/settings";
 import { cfgEvalPy } from "@oh-my-pi/pi-coding-agent/eval/settings";
 import { cfgModelRoles } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { cfgSearxngBasicPassword, cfgSearxngEndpoint } from "@oh-my-pi/pi-coding-agent/web/settings";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 const tick = () => Promise.resolve();
 
@@ -316,7 +320,6 @@ describe("settings registry", () => {
 			cfgTemperature.get(settings);
 			expect(invalid()).toHaveLength(2);
 		} finally {
-			vi.restoreAllMocks();
 			tempDir.removeSync();
 		}
 	});

@@ -5,7 +5,7 @@
  * cache + router singletons. `github.json` / `github.text` are spied
  * per-test and restored in `afterEach`.
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -392,22 +392,21 @@ describe("pr:// protocol handler", () => {
 		});
 
 		const saved = process.env.GH_HOST;
-		process.env.GH_HOST = "ghe.example.com";
-		try {
-			const router = InternalUrlRouter.instance();
-			await router.resolve("pr://owner/example/81");
-			// The bare form above belongs to ghe.example.com, so github.com's #81
-			// is a different pull request and must be fetched, not served from it.
-			const explicit = await router.resolve("pr://github.com/owner/example/81");
-			expect(explicit.notes?.[0]).toBe("Fetched live");
-			expect(spy).toHaveBeenCalledTimes(4);
-		} finally {
+		onTestFinished(() => {
 			if (saved === undefined) {
 				delete process.env.GH_HOST;
 			} else {
 				process.env.GH_HOST = saved;
 			}
-		}
+		});
+		process.env.GH_HOST = "ghe.example.com";
+		const router = InternalUrlRouter.instance();
+		await router.resolve("pr://owner/example/81");
+		// The bare form above belongs to ghe.example.com, so github.com's #81
+		// is a different pull request and must be fetched, not served from it.
+		const explicit = await router.resolve("pr://github.com/owner/example/81");
+		expect(explicit.notes?.[0]).toBe("Fetched live");
+		expect(spy).toHaveBeenCalledTimes(4);
 	});
 
 	it("rejects a host-prefixed URL that names no repository", async () => {

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, onTestFinished } from "bun:test";
 
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -70,18 +70,17 @@ describe("browser launch stealth defaults", () => {
 describe("shared browser launch", () => {
 	it("suppresses the broker-owned blank startup window", async () => {
 		const previousExecutable = process.env.PUPPETEER_EXECUTABLE_PATH;
-		process.env.PUPPETEER_EXECUTABLE_PATH = "/test/chrome";
-		try {
-			const launch = await resolveSharedBrowserLaunchSpec({
-				headless: true,
-				userDataDir: "/test/profile",
-			});
-
-			expect(launch?.args).toContain("--no-startup-window");
-		} finally {
+		onTestFinished(() => {
 			if (previousExecutable === undefined) delete process.env.PUPPETEER_EXECUTABLE_PATH;
 			else process.env.PUPPETEER_EXECUTABLE_PATH = previousExecutable;
-		}
+		});
+		process.env.PUPPETEER_EXECUTABLE_PATH = "/test/chrome";
+		const launch = await resolveSharedBrowserLaunchSpec({
+			headless: true,
+			userDataDir: "/test/profile",
+		});
+
+		expect(launch?.args).toContain("--no-startup-window");
 	});
 });
 
@@ -177,12 +176,15 @@ describe("browser executable selection", () => {
 				await Bun.write(fakeChrome, `#!/bin/sh\ntouch "${marker}"\necho "activating existing window"\n`);
 				fs.chmodSync(fakeChrome, 0o755);
 
-				const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
+				const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform")!;
+				onTestFinished(() => {
+					Object.defineProperty(process, "platform", platformDescriptor);
+				});
 				Object.defineProperty(process, "platform", { value: platform, configurable: true });
 				try {
 					await expect(chromiumExecutableProbeForTest(fakeChrome)).resolves.toBe(true);
 				} finally {
-					if (platformDescriptor) Object.defineProperty(process, "platform", platformDescriptor);
+					Object.defineProperty(process, "platform", platformDescriptor);
 				}
 
 				expect(fs.existsSync(marker)).toBe(false);

@@ -8,9 +8,11 @@ import { computeDefaultSessionDir } from "@oh-my-pi/pi-coding-agent/session/sess
 import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
 import { getConfigRootDir, refreshDirsFromEnv, setAgentDir } from "@oh-my-pi/pi-utils";
+import { testLifetime } from "../../../utils/test/helpers/mock-restores";
 
 let tempDir: string;
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
+const originalXdgData = process.env.XDG_DATA_HOME;
 const fallbackAgentDir = path.join(getConfigRootDir(), "agent");
 const storage = new FileSessionStorage();
 
@@ -20,6 +22,9 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+	// XDG_DATA_HOME goes back first: setAgentDir() below rebuilds the directory resolver from it.
+	if (originalXdgData === undefined) delete process.env.XDG_DATA_HOME;
+	else process.env.XDG_DATA_HOME = originalXdgData;
 	if (originalAgentDir) {
 		setAgentDir(originalAgentDir);
 	} else {
@@ -231,40 +236,34 @@ describe("/resume slash command", () => {
 	});
 
 	it.skipIf(process.platform === "win32")("lists and resumes sessions stored in XDG_DATA_HOME", async () => {
+		const life = testLifetime();
 		const xdgDataDir = path.join(tempDir, "xdg-data");
 		const xdgOmpDir = path.join(xdgDataDir, "omp");
 		await fs.mkdir(xdgOmpDir, { recursive: true });
 
-		const originalXdgData = process.env.XDG_DATA_HOME;
-		const originalPiCodingAgentDir = process.env.PI_CODING_AGENT_DIR;
+		life.assertLive();
+		// The afterEach hook puts both variables back and rebuilds the directory resolver from them.
 		delete process.env.PI_CODING_AGENT_DIR;
 		process.env.XDG_DATA_HOME = xdgDataDir;
 		refreshDirsFromEnv();
 
-		try {
-			const projA = path.join(tempDir, "projA");
-			const projB = path.join(tempDir, "projB");
-			await fs.mkdir(projA, { recursive: true });
-			await fs.mkdir(projB, { recursive: true });
+		const projA = path.join(tempDir, "projA");
+		const projB = path.join(tempDir, "projB");
+		await fs.mkdir(projA, { recursive: true });
+		await fs.mkdir(projB, { recursive: true });
 
-			const sessionDirA = computeDefaultSessionDir(projA, storage);
-			const sessionPathA = await writeSession("019ed999-02fb-7000-8dac-396e2f84d484", projA, sessionDirA);
+		const sessionDirA = computeDefaultSessionDir(projA, storage);
+		const sessionPathA = await writeSession("019ed999-02fb-7000-8dac-396e2f84d484", projA, sessionDirA);
 
-			expect(sessionPathA.startsWith(xdgOmpDir)).toBe(true);
+		expect(sessionPathA.startsWith(xdgOmpDir)).toBe(true);
 
-			const allSessions = await listAllSessions(storage);
-			expect(allSessions.some(s => s.id === "019ed999-02fb-7000-8dac-396e2f84d484")).toBe(true);
+		const allSessions = await listAllSessions(storage);
+		expect(allSessions.some(s => s.id === "019ed999-02fb-7000-8dac-396e2f84d484")).toBe(true);
 
-			const harness = createRuntime(projB);
-			const handled = await executeBuiltinSlashCommand("/resume 019ed999", harness.runtime);
-			expect(handled).toBe(true);
-			expect(harness.showError).not.toHaveBeenCalled();
-			expect(harness.handleResumeSession).toHaveBeenCalledWith(sessionPathA, { continuation: undefined });
-		} finally {
-			if (originalXdgData !== undefined) process.env.XDG_DATA_HOME = originalXdgData;
-			else delete process.env.XDG_DATA_HOME;
-			if (originalPiCodingAgentDir !== undefined) process.env.PI_CODING_AGENT_DIR = originalPiCodingAgentDir;
-			refreshDirsFromEnv();
-		}
+		const harness = createRuntime(projB);
+		const handled = await executeBuiltinSlashCommand("/resume 019ed999", harness.runtime);
+		expect(handled).toBe(true);
+		expect(harness.showError).not.toHaveBeenCalled();
+		expect(harness.handleResumeSession).toHaveBeenCalledWith(sessionPathA, { continuation: undefined });
 	});
 });

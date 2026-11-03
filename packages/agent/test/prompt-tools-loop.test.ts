@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, onTestFinished } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import { agentLoop } from "@oh-my-pi/pi-agent-core/agent-loop";
 import type { AgentContext, AgentLoopConfig, AgentMessage, AgentTool } from "@oh-my-pi/pi-agent-core/types";
@@ -221,50 +221,49 @@ describe("agentLoop with owned in-band tool calls", () => {
 
 	it("uses PI_DIALECT=minimax when config.dialect is unset", async () => {
 		const before = Bun.env.PI_DIALECT;
-		Bun.env.PI_DIALECT = "minimax";
-		try {
-			const echoArgs: Array<{ msg: string }> = [];
-			const toolSchema = type({ msg: "string" });
-			const echoTool: AgentTool<typeof toolSchema, { msg: string }> = {
-				name: "echo",
-				label: "Echo",
-				description: "Echo a message back",
-				parameters: toolSchema,
-				async execute(_toolCallId, params) {
-					echoArgs.push(params);
-					return { content: [{ type: "text", text: `echoed:${params.msg}` }], details: params };
-				},
-			};
-
-			const captured: Context[] = [];
-			const mock = createMockModel({
-				responses: [
-					context => {
-						captured.push(context);
-						return {
-							content: [
-								'<minimax:tool_call>\n<invoke name="echo"><parameter name="msg">from env</parameter></invoke>\n</minimax:tool_call>',
-							],
-						};
-					},
-					context => {
-						captured.push(context);
-						return { content: ["done"] };
-					},
-				],
-			});
-
-			const context: AgentContext = { systemPrompt: ["BASE PROMPT"], messages: [], tools: [echoTool] };
-			const config: AgentLoopConfig = { model: mock.model, convertToLlm: identityConverter };
-
-			await agentLoop([createUserMessage("say hi")], context, config, undefined, mock.stream).result();
-
-			expect(echoArgs).toEqual([{ msg: "from env" }]);
-			expect(captured[0].tools).toBeUndefined();
-			expect((captured[0].systemPrompt ?? []).join("\n")).toContain("<minimax:tool_call>");
-		} finally {
+		onTestFinished(() => {
 			if (before === undefined) delete Bun.env.PI_DIALECT;
 			else Bun.env.PI_DIALECT = before;
-		}
+		});
+		Bun.env.PI_DIALECT = "minimax";
+		const echoArgs: Array<{ msg: string }> = [];
+		const toolSchema = type({ msg: "string" });
+		const echoTool: AgentTool<typeof toolSchema, { msg: string }> = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo a message back",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				echoArgs.push(params);
+				return { content: [{ type: "text", text: `echoed:${params.msg}` }], details: params };
+			},
+		};
+
+		const captured: Context[] = [];
+		const mock = createMockModel({
+			responses: [
+				context => {
+					captured.push(context);
+					return {
+						content: [
+							'<minimax:tool_call>\n<invoke name="echo"><parameter name="msg">from env</parameter></invoke>\n</minimax:tool_call>',
+						],
+					};
+				},
+				context => {
+					captured.push(context);
+					return { content: ["done"] };
+				},
+			],
+		});
+
+		const context: AgentContext = { systemPrompt: ["BASE PROMPT"], messages: [], tools: [echoTool] };
+		const config: AgentLoopConfig = { model: mock.model, convertToLlm: identityConverter };
+
+		await agentLoop([createUserMessage("say hi")], context, config, undefined, mock.stream).result();
+
+		expect(echoArgs).toEqual([{ msg: "from env" }]);
+		expect(captured[0].tools).toBeUndefined();
+		expect((captured[0].systemPrompt ?? []).join("\n")).toContain("<minimax:tool_call>");
 	});
 });

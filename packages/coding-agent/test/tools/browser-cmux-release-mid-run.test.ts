@@ -28,7 +28,7 @@
  *    from PR #4502.)
  */
 
-import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
+import { afterEach, describe, expect, it, onTestFinished, spyOn, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -299,6 +299,10 @@ describe("browser tab-supervisor — cmux tab close mid-run (#4499)", () => {
 			__ompLateRejectionStarted?: () => void;
 			__ompLateRejectionGate?: Promise<void>;
 		};
+		onTestFinished(() => {
+			delete globals.__ompLateRejectionStarted;
+			delete globals.__ompLateRejectionGate;
+		});
 		globals.__ompLateRejectionStarted = continuationStarted.resolve;
 		globals.__ompLateRejectionGate = continuationGate.promise;
 
@@ -355,8 +359,6 @@ describe("browser tab-supervisor — cmux tab close mid-run (#4499)", () => {
 			});
 		} finally {
 			continuationGate.resolve();
-			delete globals.__ompLateRejectionStarted;
-			delete globals.__ompLateRejectionGate;
 		}
 	});
 

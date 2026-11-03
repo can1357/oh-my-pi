@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, onTestFinished, test, vi } from "bun:test";
 import { ThinkingLevel, Tokenizer } from "@oh-my-pi/pi-agent-core";
 import {
 	type CompactionPreparation,
@@ -1915,6 +1915,7 @@ describe("Responses Lite remote compaction", () => {
 				for (const event of events) socket.emit(event);
 			},
 		});
+		onTestFinished(webSocket.restore);
 		try {
 			const model = makeCodexLiteModel({ preferWebsockets: true });
 			const sessionId = "codex-websocket-compaction";
@@ -1981,7 +1982,6 @@ describe("Responses Lite remote compaction", () => {
 		} finally {
 			for (const state of providerSessionState.values()) state.close();
 			providerSessionState.clear();
-			webSocket.restore();
 		}
 	});
 
@@ -1997,6 +1997,7 @@ describe("Responses Lite remote compaction", () => {
 				queueMicrotask(() => socket.fail());
 			},
 		});
+		onTestFinished(webSocket.restore);
 		try {
 			const model = makeCodexLiteModel({ preferWebsockets: true });
 			const request = buildCompactionV2Request(
@@ -2029,7 +2030,6 @@ describe("Responses Lite remote compaction", () => {
 		} finally {
 			for (const state of providerSessionState.values()) state.close();
 			providerSessionState.clear();
-			webSocket.restore();
 		}
 	});
 
@@ -2046,6 +2046,7 @@ describe("Responses Lite remote compaction", () => {
 				for (const event of compactionV2Events(`enc-metadata-${responseCount}`)) socket.emit(event);
 			},
 		});
+		onTestFinished(webSocket.restore);
 		try {
 			const model = makeCodexLiteModel({ preferWebsockets: true });
 			const sessionId = "codex-websocket-turn-state";
@@ -2076,7 +2077,6 @@ describe("Responses Lite remote compaction", () => {
 		} finally {
 			for (const state of providerSessionState.values()) state.close();
 			providerSessionState.clear();
-			webSocket.restore();
 		}
 	});
 
@@ -2257,6 +2257,7 @@ describe("Responses Lite remote compaction", () => {
 				for (const event of events) socket.emit(event);
 			},
 		});
+		onTestFinished(webSocket.restore);
 
 		const providerSessionState = new Map<string, ProviderSessionState>();
 		try {
@@ -2317,7 +2318,6 @@ describe("Responses Lite remote compaction", () => {
 		} finally {
 			for (const state of providerSessionState.values()) state.close();
 			providerSessionState.clear();
-			webSocket.restore();
 		}
 	});
 });
@@ -2380,6 +2380,13 @@ test("keeps the LiteLLM conversation session header on V1 compaction unless conf
 
 test("uses Azure request shape for Azure Responses remote compaction", async () => {
 	const previousDeploymentMap = Bun.env.AZURE_OPENAI_DEPLOYMENT_NAME_MAP;
+	onTestFinished(() => {
+		if (previousDeploymentMap === undefined) {
+			delete Bun.env.AZURE_OPENAI_DEPLOYMENT_NAME_MAP;
+		} else {
+			Bun.env.AZURE_OPENAI_DEPLOYMENT_NAME_MAP = previousDeploymentMap;
+		}
+	});
 	Bun.env.AZURE_OPENAI_DEPLOYMENT_NAME_MAP = "gpt-5-compact=azure-gpt-5-compact";
 	const model = makeAzureModel({
 		headers: { "x-custom-header": "custom" },
@@ -2428,11 +2435,6 @@ test("uses Azure request shape for Azure Responses remote compaction", async () 
 	expect(requestContentType).toBe("application/json");
 	expect(requestCustomHeader).toBe("custom");
 	expect(requestBody).toMatchObject({ model: "azure-gpt-5-compact" });
-	if (previousDeploymentMap === undefined) {
-		delete Bun.env.AZURE_OPENAI_DEPLOYMENT_NAME_MAP;
-	} else {
-		Bun.env.AZURE_OPENAI_DEPLOYMENT_NAME_MAP = previousDeploymentMap;
-	}
 });
 
 describe("requestOpenAiRemoteCompaction abort", () => {
@@ -3613,22 +3615,23 @@ describe("Amazon Bedrock OpenAI routes", () => {
 	] as const;
 
 	async function withAwsEnv<T>(env: Partial<Record<(typeof AWS_ENV_KEYS)[number], string>>, run: () => Promise<T>) {
-		const previous = new Map(AWS_ENV_KEYS.map(key => [key, Bun.env[key]]));
-		try {
-			for (const key of AWS_ENV_KEYS) {
-				const value = env[key];
-				if (value === undefined) delete Bun.env[key];
-				else Bun.env[key] = value;
-			}
-			clearAwsCredentialCache();
-			return await run();
-		} finally {
-			for (const [key, value] of previous) {
-				if (value === undefined) delete Bun.env[key];
-				else Bun.env[key] = value;
-			}
-			clearAwsCredentialCache();
+		const previous: Record<string, string> = {};
+		for (const key of AWS_ENV_KEYS) {
+			const value = Bun.env[key];
+			if (value !== undefined) previous[key] = value;
 		}
+		onTestFinished(() => {
+			for (const key of AWS_ENV_KEYS) delete Bun.env[key];
+			Object.assign(Bun.env, previous);
+			clearAwsCredentialCache();
+		});
+		for (const key of AWS_ENV_KEYS) {
+			const value = env[key];
+			if (value === undefined) delete Bun.env[key];
+			else Bun.env[key] = value;
+		}
+		clearAwsCredentialCache();
+		return await run();
 	}
 
 	function makeBedrockModel(
@@ -3824,6 +3827,11 @@ describe("Amazon Bedrock compaction request preparation", () => {
 			baseUrl: runtimeUrl,
 		});
 		const previous = Bun.env.PI_PROXY_COMPACTION_PROXY_TEST;
+		onTestFinished(() => {
+			if (previous === undefined) delete Bun.env.PI_PROXY_COMPACTION_PROXY_TEST;
+			else Bun.env.PI_PROXY_COMPACTION_PROXY_TEST = previous;
+			__resetProxyCache();
+		});
 		Bun.env.PI_PROXY_COMPACTION_PROXY_TEST = "http://proxy.example.test:8080";
 		__resetProxyCache();
 		const proxies: unknown[] = [];
@@ -3831,22 +3839,16 @@ describe("Amazon Bedrock compaction request preparation", () => {
 			proxies.push((init as { proxy?: unknown } | undefined)?.proxy);
 			return String(input).endsWith("/compact") ? compactionResponse() : v2Response();
 		};
-		try {
-			await requestOpenAiRemoteCompaction(model, "test-key", nativeInput, "instructions", undefined, {
-				fetch: fetchMock,
-			});
-			await requestCompactionV2Streaming(
-				model,
-				"test-key",
-				buildCompactionV2Request(model, nativeInput, "instructions"),
-				undefined,
-				{ fetch: fetchMock },
-			);
-		} finally {
-			if (previous === undefined) delete Bun.env.PI_PROXY_COMPACTION_PROXY_TEST;
-			else Bun.env.PI_PROXY_COMPACTION_PROXY_TEST = previous;
-			__resetProxyCache();
-		}
+		await requestOpenAiRemoteCompaction(model, "test-key", nativeInput, "instructions", undefined, {
+			fetch: fetchMock,
+		});
+		await requestCompactionV2Streaming(
+			model,
+			"test-key",
+			buildCompactionV2Request(model, nativeInput, "instructions"),
+			undefined,
+			{ fetch: fetchMock },
+		);
 
 		expect(proxies).toEqual(["http://proxy.example.test:8080", "http://proxy.example.test:8080"]);
 	});

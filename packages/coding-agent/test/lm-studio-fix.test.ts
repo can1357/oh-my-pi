@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, onTestFinished, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -114,36 +114,35 @@ describe("ModelRegistry LM Studio Fixes", () => {
 
 	test("LM_STUDIO_BASE_URL can target any local OpenAI-compatible /v1 server", async () => {
 		const originalBaseUrl = Bun.env.LM_STUDIO_BASE_URL;
-		Bun.env.LM_STUDIO_BASE_URL = "http://127.0.0.1:11434/v1";
-		let requestedUrl = "";
-		try {
-			const fetchMock: FetchImpl = input => {
-				const url = String(input);
-				if (url.includes(":11434/v1/models")) {
-					requestedUrl = url;
-					return Promise.resolve(
-						new Response(JSON.stringify({ data: [{ id: "omlx-model" }] }), {
-							status: 200,
-							headers: { "Content-Type": "application/json" },
-						}),
-					);
-				}
-				return Promise.resolve(new Response(null, { status: 404 }));
-			};
-
-			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
-			await registry.refresh();
-
-			expect(requestedUrl).toBe("http://127.0.0.1:11434/v1/models");
-			// Implicit discovery is still registered under the built-in lm-studio provider even when the base URL points to oMLX.
-			expect(registry.getAll().some(m => m.provider === "lm-studio" && m.id === "omlx-model")).toBe(true);
-		} finally {
+		onTestFinished(() => {
 			if (originalBaseUrl === undefined) {
 				delete Bun.env.LM_STUDIO_BASE_URL;
 			} else {
 				Bun.env.LM_STUDIO_BASE_URL = originalBaseUrl;
 			}
-		}
+		});
+		Bun.env.LM_STUDIO_BASE_URL = "http://127.0.0.1:11434/v1";
+		let requestedUrl = "";
+		const fetchMock: FetchImpl = input => {
+			const url = String(input);
+			if (url.includes(":11434/v1/models")) {
+				requestedUrl = url;
+				return Promise.resolve(
+					new Response(JSON.stringify({ data: [{ id: "omlx-model" }] }), {
+						status: 200,
+						headers: { "Content-Type": "application/json" },
+					}),
+				);
+			}
+			return Promise.resolve(new Response(null, { status: 404 }));
+		};
+
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refresh();
+
+		expect(requestedUrl).toBe("http://127.0.0.1:11434/v1/models");
+		// Implicit discovery is still registered under the built-in lm-studio provider even when the base URL points to oMLX.
+		expect(registry.getAll().some(m => m.provider === "lm-studio" && m.id === "omlx-model")).toBe(true);
 	});
 
 	test("refreshSelectedModelMetadata tracks the LM Studio JIT-load lifecycle", async () => {

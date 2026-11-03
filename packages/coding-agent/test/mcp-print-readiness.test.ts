@@ -1,5 +1,5 @@
 import * as path from "node:path";
-import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { callTool } from "@oh-my-pi/pi-coding-agent/mcp/client";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
@@ -8,6 +8,9 @@ import type { MCPStdioServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { runPrintMode } from "@oh-my-pi/pi-coding-agent/modes/print-mode";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { installMockRestores } from "../../utils/test/helpers/mock-restores";
+
+installMockRestores();
 
 const FIXTURE = path.join(import.meta.dir, "fixtures", "readiness-mcp.ts");
 const SLOW_START_MS = 1_100;
@@ -18,6 +21,7 @@ const originalStartup = Bun.env.OMP_MCP_STARTUP_TIMEOUT_MS;
 const originalStrict = Bun.env.OMP_MCP_REQUIRE_READY;
 
 afterEach(async () => {
+	vi.restoreAllMocks();
 	await Promise.all(managers.splice(0).map(manager => manager.disconnectAll()));
 	if (originalTimeout === undefined) delete Bun.env.OMP_MCP_TIMEOUT_MS;
 	else Bun.env.OMP_MCP_TIMEOUT_MS = originalTimeout;

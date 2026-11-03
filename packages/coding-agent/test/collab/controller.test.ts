@@ -10,7 +10,7 @@
  * real Unix-socket IPC is redirected into a temp dir via a spy on
  * `publishCollabHost`, exactly as in host-registry.test.ts.
  */
-import { afterEach, beforeEach, describe, expect, it, type Mock, spyOn, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, type Mock, onTestFinished, spyOn, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -56,6 +56,9 @@ import {
 	cfgStartupSetupWizard,
 	cfgStartupShowSplash,
 } from "@oh-my-pi/pi-coding-agent/modes/settings";
+import { installMockRestores } from "../../../utils/test/helpers/mock-restores";
+
+installMockRestores();
 
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
 const originalPiProfile = process.env.PI_PROFILE;
@@ -260,6 +263,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+	vi.restoreAllMocks();
 	for (const cleanup of guestCleanups.splice(0).reverse()) cleanup();
 	await controller?.shutdown("test cleanup").catch(() => {});
 	uninstallInMemoryRelay();
@@ -466,6 +470,9 @@ describe("interactive collaboration startup", () => {
 		spyOn(ModelRegistry.prototype, "refreshInBackground").mockImplementation(() => {});
 		spyOn(pluginHelpers, "preloadPluginRoots").mockResolvedValue(undefined);
 		const originalIsTTY = process.stdin.isTTY;
+		onTestFinished(() => {
+			Object.defineProperty(process.stdin, "isTTY", { value: originalIsTTY, configurable: true });
+		});
 		Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
 		const authStorage = await AuthStorage.create(path.join(tmp, "failed-join-auth.db"));
 		try {
@@ -489,7 +496,6 @@ describe("interactive collaboration startup", () => {
 				}),
 			).rejects.toBe(finished);
 		} finally {
-			Object.defineProperty(process.stdin, "isTTY", { value: originalIsTTY, configurable: true });
 			authStorage.close();
 		}
 	});
@@ -746,21 +752,17 @@ describe("interactive collaboration startup", () => {
 		const { local, remote, localFile } = await prepareGuestMode();
 		const guest = new CollabGuestLink(local);
 		await guest.join(remote.link);
-		const switchSession = spyOn(local.session, "switchSession").mockResolvedValueOnce(false);
+		spyOn(local.session, "switchSession").mockResolvedValueOnce(false);
 		const reported = Promise.withResolvers<string>();
 		spyOn(local, "showError").mockImplementation(message => reported.resolve(message));
-		try {
-			await remote.stop("host goodbye");
-			expect(await reported.promise).toContain("Local session restoration was cancelled");
-			await expect(guest.leave("left")).rejects.toThrow("Local session restoration was cancelled");
-			local.collabController.autoStart();
-			await local.collabController.idle();
-			expect(local.sessionManager.getSessionFile()).not.toBe(localFile);
-			expect(local.collabGuest).toBe(guest);
-			expect(local.collabHost).toBeUndefined();
-		} finally {
-			switchSession.mockRestore();
-		}
+		await remote.stop("host goodbye");
+		expect(await reported.promise).toContain("Local session restoration was cancelled");
+		await expect(guest.leave("left")).rejects.toThrow("Local session restoration was cancelled");
+		local.collabController.autoStart();
+		await local.collabController.idle();
+		expect(local.sessionManager.getSessionFile()).not.toBe(localFile);
+		expect(local.collabGuest).toBe(guest);
+		expect(local.collabHost).toBeUndefined();
 	});
 
 	it.each(["hooks", "replay", "cleanup rejection"] as const)(
@@ -809,6 +811,9 @@ describe("interactive collaboration startup", () => {
 			spyOn(ModelRegistry.prototype, "refreshInBackground").mockImplementation(() => {});
 			spyOn(pluginHelpers, "preloadPluginRoots").mockResolvedValue(undefined);
 			const originalIsTTY = process.stdin.isTTY;
+			onTestFinished(() => {
+				Object.defineProperty(process.stdin, "isTTY", { value: originalIsTTY, configurable: true });
+			});
 			Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
 			const authStorage = await AuthStorage.create(path.join(tmp, "startup-auth.db"));
 			try {
@@ -836,7 +841,6 @@ describe("interactive collaboration startup", () => {
 				expect(earlyHost?.ending).toBe(true);
 				expect(await registry.listCollabHosts({ dir: tmp })).toEqual([]);
 			} finally {
-				Object.defineProperty(process.stdin, "isTTY", { value: originalIsTTY, configurable: true });
 				authStorage.close();
 			}
 		},
@@ -850,21 +854,17 @@ describe("CollabController", () => {
 		controller.autoStart();
 		await controller.idle();
 		const failure = new Error("rotation UI teardown failed");
-		const status = spyOn(ctx.statusLine, "setCollabStatus").mockImplementationOnce(() => {
+		spyOn(ctx.statusLine, "setCollabStatus").mockImplementationOnce(() => {
 			throw failure;
 		});
-		try {
-			switchSession(state, "failed-rotation");
-			await controller.idle().catch(() => {});
-			switchSession(state, "recovered-rotation");
-			await controller.idle().catch(() => {});
-			expect(ctx.collabHost?.sessionId).toBe("recovered-rotation");
-			expect(state.showStatus.some(message => message.includes(failure.message))).toBe(true);
-			await controller.shutdown("done");
-			expect(await registry.listCollabHosts({ dir: tmp })).toEqual([]);
-		} finally {
-			status.mockRestore();
-		}
+		switchSession(state, "failed-rotation");
+		await controller.idle().catch(() => {});
+		switchSession(state, "recovered-rotation");
+		await controller.idle().catch(() => {});
+		expect(ctx.collabHost?.sessionId).toBe("recovered-rotation");
+		expect(state.showStatus.some(message => message.includes(failure.message))).toBe(true);
+		await controller.shutdown("done");
+		expect(await registry.listCollabHosts({ dir: tmp })).toEqual([]);
 	});
 
 	it("keeps manual teardown errors observable while allowing the next start", async () => {
@@ -872,18 +872,14 @@ describe("CollabController", () => {
 		controller = new CollabController(ctx);
 		await controller.start({ access: "view" });
 		const failure = new Error("manual UI teardown failed");
-		const status = spyOn(ctx.statusLine, "setCollabStatus").mockImplementationOnce(() => {
+		spyOn(ctx.statusLine, "setCollabStatus").mockImplementationOnce(() => {
 			throw failure;
 		});
-		try {
-			await expect(controller.start({ access: "control" })).rejects.toBe(failure);
-			const recovered = await controller.start({ access: "control" });
-			expect(recovered.access).toBe("control");
-			await controller.shutdown("done");
-			expect(await registry.listCollabHosts({ dir: tmp })).toEqual([]);
-		} finally {
-			status.mockRestore();
-		}
+		await expect(controller.start({ access: "control" })).rejects.toBe(failure);
+		const recovered = await controller.start({ access: "control" });
+		expect(recovered.access).toBe("control");
+		await controller.shutdown("done");
+		expect(await registry.listCollabHosts({ dir: tmp })).toEqual([]);
 	});
 
 	it("rechecks guest ownership after waiting for a session transition", async () => {

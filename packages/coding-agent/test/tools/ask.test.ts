@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, onTestFinished, spyOn, vi } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import { type } from "@oh-my-pi/omptype";
 import { agentLoop, type AgentToolContext } from "@oh-my-pi/pi-agent-core";
@@ -21,6 +21,10 @@ import * as ai from "@oh-my-pi/pi-ai";
 import type { Api, AssistantMessage, Message, Model } from "@oh-my-pi/pi-ai";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 // 1x1 transparent PNG.
 const TINY_PNG_BASE64 =
@@ -711,42 +715,41 @@ describe("AskTool custom input", () => {
 	});
 	it("titles the Other editor with the question text alone, free of terminal layout", async () => {
 		const originalColumns = process.stdout.columns;
+		onTestFinished(() => {
+			Object.defineProperty(process.stdout, "columns", { value: originalColumns, configurable: true });
+		});
 		// A narrow terminal must not clip the title: UI surfaces own its layout.
 		Object.defineProperty(process.stdout, "columns", { value: 20, configurable: true });
-		try {
-			const question = "A question long enough to exceed any clipped terminal width, ending here?";
-			const tool = new AskTool(createSession());
-			const editor = vi.fn(async (_title: string) => "custom");
-			const context = createContext({
-				select: async () => "Other (type your own)",
-				editor,
-			});
-			await tool.execute(
-				"call-editor-title-single",
-				{ questions: [{ id: "one", question, options: [{ label: "yes", description: "Detail." }] }] },
-				undefined,
-				undefined,
-				context,
-			);
-			expect(editor.mock.calls[0]?.[0]).toBe(question);
+		const question = "A question long enough to exceed any clipped terminal width, ending here?";
+		const tool = new AskTool(createSession());
+		const editor = vi.fn(async (_title: string) => "custom");
+		const context = createContext({
+			select: async () => "Other (type your own)",
+			editor,
+		});
+		await tool.execute(
+			"call-editor-title-single",
+			{ questions: [{ id: "one", question, options: [{ label: "yes", description: "Detail." }] }] },
+			undefined,
+			undefined,
+			context,
+		);
+		expect(editor.mock.calls[0]?.[0]).toBe(question);
 
-			const multiEditor = vi.fn(async (_title: string) => "custom");
-			let call = 0;
-			const multiContext = createContext({
-				select: async () => (call++ === 0 ? "yes" : "Other (type your own)"),
-				editor: multiEditor,
-			});
-			await tool.execute(
-				"call-editor-title-multi",
-				{ questions: [{ id: "many", question, options: [{ label: "yes" }, { label: "no" }], multi: true }] },
-				undefined,
-				undefined,
-				multiContext,
-			);
-			expect(multiEditor.mock.calls[0]?.[0]).toBe(`(1 selected) ${question}`);
-		} finally {
-			Object.defineProperty(process.stdout, "columns", { value: originalColumns, configurable: true });
-		}
+		const multiEditor = vi.fn(async (_title: string) => "custom");
+		let call = 0;
+		const multiContext = createContext({
+			select: async () => (call++ === 0 ? "yes" : "Other (type your own)"),
+			editor: multiEditor,
+		});
+		await tool.execute(
+			"call-editor-title-multi",
+			{ questions: [{ id: "many", question, options: [{ label: "yes" }, { label: "no" }], multi: true }] },
+			undefined,
+			undefined,
+			multiContext,
+		);
+		expect(multiEditor.mock.calls[0]?.[0]).toBe(`(1 selected) ${question}`);
 	});
 
 	it("returns to the option selector when custom input is dismissed in single-question flow", async () => {
@@ -1922,26 +1925,22 @@ describe("AskTool rich ask dialog", () => {
 			}),
 		);
 
-		try {
-			await tool.execute(
-				"call-acp-dialog",
-				{
-					questions: [
-						{
-							id: "storage",
-							question: "Storage?",
-							options: [{ label: "SQLite" }, { label: "PostgreSQL" }],
-						},
-					],
-				},
-				undefined,
-				undefined,
-				createContext({ askDialog }),
-			);
-			expect(sendNotification).not.toHaveBeenCalled();
-		} finally {
-			sendNotification.mockRestore();
-		}
+		await tool.execute(
+			"call-acp-dialog",
+			{
+				questions: [
+					{
+						id: "storage",
+						question: "Storage?",
+						options: [{ label: "SQLite" }, { label: "PostgreSQL" }],
+					},
+				],
+			},
+			undefined,
+			undefined,
+			createContext({ askDialog }),
+		);
+		expect(sendNotification).not.toHaveBeenCalled();
 	});
 
 	it("aborts and throws ToolAbortError when askDialog returns undefined", async () => {

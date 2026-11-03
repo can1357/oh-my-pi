@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, onTestFinished } from "bun:test";
 import { retryTransientCompletion } from "@oh-my-pi/pi-ai/oneshot-retry";
 import type { AssistantMessage, Usage } from "@oh-my-pi/pi-ai/types";
 
@@ -427,33 +427,32 @@ describe("retryTransientCompletion", () => {
 		// the 3h cap → fail fast). Same body; provider policy flips the flow.
 		const fixedNow = Date.parse("2099-09-01T00:00:00Z");
 		const realNow = Date.now;
-		Date.now = () => fixedNow;
-		try {
-			const errorMessage = "rate_limit_error: too many requests. Your limit will reset at 2099-09-01 06:00:00";
-			const opts = { baseDelayMs: 1, maxAttempts: 2, maxDelayMs: 3 * 60 * 60_000 } as const;
-
-			let genericCalls = 0;
-			const generic = await retryTransientCompletion(() => {
-				genericCalls += 1;
-				return Promise.resolve(message({ stopReason: "error", errorStatus: 429, errorMessage }));
-			}, opts);
-			expect(genericCalls).toBe(1);
-			expect(generic.stopReason).toBe("error");
-
-			let zaiCalls = 0;
-			const zai = await retryTransientCompletion(
-				() => {
-					zaiCalls += 1;
-					return Promise.resolve(
-						zaiCalls === 1 ? message({ stopReason: "error", errorStatus: 429, errorMessage }) : message(),
-					);
-				},
-				{ ...opts, provider: "zai" },
-			);
-			expect(zaiCalls).toBe(2);
-			expect(zai.stopReason).toBe("stop");
-		} finally {
+		onTestFinished(() => {
 			Date.now = realNow;
-		}
+		});
+		Date.now = () => fixedNow;
+		const errorMessage = "rate_limit_error: too many requests. Your limit will reset at 2099-09-01 06:00:00";
+		const opts = { baseDelayMs: 1, maxAttempts: 2, maxDelayMs: 3 * 60 * 60_000 } as const;
+
+		let genericCalls = 0;
+		const generic = await retryTransientCompletion(() => {
+			genericCalls += 1;
+			return Promise.resolve(message({ stopReason: "error", errorStatus: 429, errorMessage }));
+		}, opts);
+		expect(genericCalls).toBe(1);
+		expect(generic.stopReason).toBe("error");
+
+		let zaiCalls = 0;
+		const zai = await retryTransientCompletion(
+			() => {
+				zaiCalls += 1;
+				return Promise.resolve(
+					zaiCalls === 1 ? message({ stopReason: "error", errorStatus: 429, errorMessage }) : message(),
+				);
+			},
+			{ ...opts, provider: "zai" },
+		);
+		expect(zaiCalls).toBe(2);
+		expect(zai.stopReason).toBe("stop");
 	});
 });

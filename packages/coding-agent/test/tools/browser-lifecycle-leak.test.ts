@@ -57,6 +57,10 @@ function mockCmuxClient(): void {
 	);
 }
 
+afterEach(() => {
+	vi.restoreAllMocks();
+});
+
 function makeKind(socketSuffix: string): CmuxKind {
 	return { kind: "cmux", socketPath: `/tmp/omp-test-${socketSuffix}.sock`, surface: `surface-${socketSuffix}` };
 }
@@ -80,47 +84,37 @@ describe("browser lifecycle — aborted open must not leak a browser handle", ()
 		});
 		const closeSpy = spyOn(CmuxSocketClient.prototype, "close").mockImplementation(() => undefined);
 
-		try {
-			const kind = makeKind("abort-orphan");
-			const controller = new AbortController();
-			const pending = acquireBrowser(kind, { cwd: "/tmp", signal: controller.signal });
-			// The reporter's scenario: abort fires while the launch is in flight.
-			controller.abort();
-			// The launch resolves *after* the abort has been observed by the caller.
-			gate.resolve();
+		const kind = makeKind("abort-orphan");
+		const controller = new AbortController();
+		const pending = acquireBrowser(kind, { cwd: "/tmp", signal: controller.signal });
+		// The reporter's scenario: abort fires while the launch is in flight.
+		controller.abort();
+		// The launch resolves *after* the abort has been observed by the caller.
+		gate.resolve();
 
-			await expect(pending).rejects.toBeInstanceOf(ToolAbortError);
-			expect(connectSpy).toHaveBeenCalledTimes(1);
-			// The freshly-launched browser MUST be torn down before publication so it
-			// does not sit at refCount:0 in the global map, leaking a live cmux socket
-			// (or, for headless, a live Chromium process) that no `releaseAllTabs`
-			// / `dropHeadlessTabs` walk would ever reap.
-			expect(closeSpy).toHaveBeenCalledTimes(1);
-			expect(getBrowsersMapForTest().size).toBe(0);
-		} finally {
-			connectSpy.mockRestore();
-			closeSpy.mockRestore();
-		}
+		await expect(pending).rejects.toBeInstanceOf(ToolAbortError);
+		expect(connectSpy).toHaveBeenCalledTimes(1);
+		// The freshly-launched browser MUST be torn down before publication so it
+		// does not sit at refCount:0 in the global map, leaking a live cmux socket
+		// (or, for headless, a live Chromium process) that no `releaseAllTabs`
+		// / `dropHeadlessTabs` walk would ever reap.
+		expect(closeSpy).toHaveBeenCalledTimes(1);
+		expect(getBrowsersMapForTest().size).toBe(0);
 	});
 
 	it("does not launch at all when the signal was already aborted", async () => {
 		const connectSpy = spyOn(CmuxSocketClient.prototype, "connect").mockResolvedValue(undefined);
 		const closeSpy = spyOn(CmuxSocketClient.prototype, "close").mockImplementation(() => undefined);
-		try {
-			const kind = makeKind("preaborted");
-			const controller = new AbortController();
-			controller.abort();
-			await expect(acquireBrowser(kind, { cwd: "/tmp", signal: controller.signal })).rejects.toBeInstanceOf(
-				ToolAbortError,
-			);
-			// Not called: pre-abort short-circuit fires before openBrowserHandle.
-			expect(connectSpy).not.toHaveBeenCalled();
-			expect(closeSpy).not.toHaveBeenCalled();
-			expect(getBrowsersMapForTest().size).toBe(0);
-		} finally {
-			connectSpy.mockRestore();
-			closeSpy.mockRestore();
-		}
+		const kind = makeKind("preaborted");
+		const controller = new AbortController();
+		controller.abort();
+		await expect(acquireBrowser(kind, { cwd: "/tmp", signal: controller.signal })).rejects.toBeInstanceOf(
+			ToolAbortError,
+		);
+		// Not called: pre-abort short-circuit fires before openBrowserHandle.
+		expect(connectSpy).not.toHaveBeenCalled();
+		expect(closeSpy).not.toHaveBeenCalled();
+		expect(getBrowsersMapForTest().size).toBe(0);
 	});
 });
 

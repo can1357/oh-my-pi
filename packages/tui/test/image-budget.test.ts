@@ -51,6 +51,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	vi.restoreAllMocks();
 	if (ORIGINAL_TMUX === undefined) delete Bun.env.TMUX;
 	else Bun.env.TMUX = ORIGINAL_TMUX;
 	if (ORIGINAL_HERDR_ENV === undefined) delete Bun.env.HERDR_ENV;
@@ -463,144 +464,128 @@ describe("Image budget integration", () => {
 	it("encodes a budgeted SIXEL image once, off the render pass, and repaints when it lands", async () => {
 		terminal.imageProtocol = ImageProtocol.Sixel;
 		const encodeSixel = spyOn(natives, "encodeSixelAsync");
-		try {
-			let repaints = 0;
-			const budget = new ImageBudget(3, () => {
-				repaints++;
-			});
-			const image = new Image(
-				BASE64_ONE_PIXEL_PNG,
-				"image/png",
-				{ fallbackColor: t => t },
-				{ maxWidthCells: 4, maxHeightCells: 4, budget, imageKey: "k" },
-			);
-			const render = (): readonly string[] => {
-				budget.beginPass();
-				const lines = image.render(20);
-				budget.endPass();
-				return lines;
-			};
+		let repaints = 0;
+		const budget = new ImageBudget(3, () => {
+			repaints++;
+		});
+		const image = new Image(
+			BASE64_ONE_PIXEL_PNG,
+			"image/png",
+			{ fallbackColor: t => t },
+			{ maxWidthCells: 4, maxHeightCells: 4, budget, imageKey: "k" },
+		);
+		const render = (): readonly string[] => {
+			budget.beginPass();
+			const lines = image.render(20);
+			budget.endPass();
+			return lines;
+		};
 
-			// The first pass reserves the image's rows while the encode runs.
-			const pending = render();
-			expect(pending.join("")).not.toContain("\x1bP");
-			const repaintsBefore = repaints;
-			await encodeSixel.mock.results[0]?.value;
-			expect(repaints).toBe(repaintsBefore + 1);
+		// The first pass reserves the image's rows while the encode runs.
+		const pending = render();
+		expect(pending.join("")).not.toContain("\x1bP");
+		const repaintsBefore = repaints;
+		await encodeSixel.mock.results[0]?.value;
+		expect(repaints).toBe(repaintsBefore + 1);
 
-			const frames = [render(), render()];
-			// SIXEL carries the image inside the line and never registers a
-			// transmit; each extra encode would be a full re-encode per frame.
-			expect(encodeSixel).toHaveBeenCalledTimes(1);
-			expect(frames[0]?.at(-1)).toContain("\x1bP");
-			expect(frames[0]).toHaveLength(pending.length);
-			expect(frames[1]).toEqual(frames[0]!);
-		} finally {
-			encodeSixel.mockRestore();
-		}
+		const frames = [render(), render()];
+		// SIXEL carries the image inside the line and never registers a
+		// transmit; each extra encode would be a full re-encode per frame.
+		expect(encodeSixel).toHaveBeenCalledTimes(1);
+		expect(frames[0]?.at(-1)).toContain("\x1bP");
+		expect(frames[0]).toHaveLength(pending.length);
+		expect(frames[1]).toEqual(frames[0]!);
 	});
 
 	it("repaints a budget-less SIXEL image through its requestRender once the encode lands", async () => {
 		terminal.imageProtocol = ImageProtocol.Sixel;
 		const encodeSixel = spyOn(natives, "encodeSixelAsync");
-		try {
-			let repaints = 0;
-			const image = new Image(
-				BASE64_ONE_PIXEL_PNG,
-				"image/png",
-				{ fallbackColor: t => t },
-				{
-					maxWidthCells: 4,
-					maxHeightCells: 4,
-					requestRender: () => {
-						repaints++;
-					},
+		let repaints = 0;
+		const image = new Image(
+			BASE64_ONE_PIXEL_PNG,
+			"image/png",
+			{ fallbackColor: t => t },
+			{
+				maxWidthCells: 4,
+				maxHeightCells: 4,
+				requestRender: () => {
+					repaints++;
 				},
-			);
+			},
+		);
 
-			expect(image.render(20).join("")).not.toContain("\x1bP");
-			await encodeSixel.mock.results[0]?.value;
-			expect(repaints).toBe(1);
-			expect(image.render(20).at(-1)).toContain("\x1bP");
-		} finally {
-			encodeSixel.mockRestore();
-		}
+		expect(image.render(20).join("")).not.toContain("\x1bP");
+		await encodeSixel.mock.results[0]?.value;
+		expect(repaints).toBe(1);
+		expect(image.render(20).at(-1)).toContain("\x1bP");
 	});
 
 	it("commits a SIXEL image to scrollback with its sequence while the off-thread encode is pending", async () => {
 		terminal.imageProtocol = ImageProtocol.Sixel;
 		const encodeSixel = spyOn(natives, "encodeSixelAsync");
-		try {
-			const transcript = new TranscriptContainer();
-			transcript.addChild(
-				new Image(
-					BASE64_ONE_PIXEL_PNG,
-					"image/png",
-					{ fallbackColor: t => t },
-					{ maxWidthCells: 4, maxHeightCells: 4, requestRender: () => {} },
-					// Several rows, so the pending block is reserved rows rather than one empty line.
-					{ widthPx: 40, heightPx: 40 },
-				),
-			);
+		const transcript = new TranscriptContainer();
+		transcript.addChild(
+			new Image(
+				BASE64_ONE_PIXEL_PNG,
+				"image/png",
+				{ fallbackColor: t => t },
+				{ maxWidthCells: 4, maxHeightCells: 4, requestRender: () => {} },
+				// Several rows, so the pending block is reserved rows rather than one empty line.
+				{ widthPx: 40, heightPx: 40 },
+			),
+		);
 
-			// The live frame starts the encode and reserves the image's rows.
-			expect(transcript.renderViewport(80, 10, { tick: 0, now: 0 }).join("")).not.toContain("\x1bP");
-			expect(encodeSixel).toHaveBeenCalledTimes(1);
-			// Pressure retires the block before the encode lands; nothing can
-			// repaint those rows once they reach native scrollback.
-			const retired = transcript.peekFinalizedBatch(80, 0);
-			expect(retired?.rows.join("")).toContain("\x1bP");
-			await encodeSixel.mock.results[0]?.value;
-		} finally {
-			encodeSixel.mockRestore();
-		}
+		// The live frame starts the encode and reserves the image's rows.
+		expect(transcript.renderViewport(80, 10, { tick: 0, now: 0 }).join("")).not.toContain("\x1bP");
+		expect(encodeSixel).toHaveBeenCalledTimes(1);
+		// Pressure retires the block before the encode lands; nothing can
+		// repaint those rows once they reach native scrollback.
+		const retired = transcript.peekFinalizedBatch(80, 0);
+		expect(retired?.rows.join("")).toContain("\x1bP");
+		await encodeSixel.mock.results[0]?.value;
 	});
 	it("commits a straddling SIXEL image exactly once while its off-thread encode is pending", async () => {
 		terminal.imageProtocol = ImageProtocol.Sixel;
 		const encodeSixel = spyOn(natives, "encodeSixelAsync");
-		try {
-			const transcript = new TranscriptContainer();
-			// Prose above and below the image, so the split commits the image
-			// rows themselves while the encode is still pending.
-			const block = new Container();
-			block.addChild(new Text("AAA-prose-above", 0, 0));
-			block.addChild(
-				new Image(
-					BASE64_ONE_PIXEL_PNG,
-					"image/png",
-					{ fallbackColor: t => t },
-					{ maxWidthCells: 4, maxHeightCells: 4, requestRender: () => {} },
-					// Several rows, so the pending block straddles the viewport top.
-					{ widthPx: 40, heightPx: 40 },
-				),
-			);
-			block.addChild(new Text("ZZZ-prose-below", 0, 0));
-			transcript.addChild(block);
-			transcript.addChild(new Text("tail", 0, 0));
+		const transcript = new TranscriptContainer();
+		// Prose above and below the image, so the split commits the image
+		// rows themselves while the encode is still pending.
+		const block = new Container();
+		block.addChild(new Text("AAA-prose-above", 0, 0));
+		block.addChild(
+			new Image(
+				BASE64_ONE_PIXEL_PNG,
+				"image/png",
+				{ fallbackColor: t => t },
+				{ maxWidthCells: 4, maxHeightCells: 4, requestRender: () => {} },
+				// Several rows, so the pending block straddles the viewport top.
+				{ widthPx: 40, heightPx: 40 },
+			),
+		);
+		block.addChild(new Text("ZZZ-prose-below", 0, 0));
+		transcript.addChild(block);
+		transcript.addChild(new Text("tail", 0, 0));
 
-			// The live frame starts the encode and reserves the image's rows.
-			const live = transcript.renderViewport(80, 3, { tick: 0, now: 0 });
-			expect(live.join("")).not.toContain("\x1bP");
-			expect(encodeSixel).toHaveBeenCalledTimes(1);
-			// Pressure splits the block while the encode is pending; the image
-			// rows reach scrollback with the sequence, encoded synchronously.
-			const head = transcript.peekFinalizedBatch(80, 3)!;
-			expect(head.rows.join("")).toContain("\x1bP");
-			transcript.acknowledgeFinalizedBatch(head.id);
-			// The split fingerprint covers the committed bytes, so the seam
-			// still locates once the async encode lands and re-renders the
-			// tail: the sequence must not repeat below the committed prefix.
-			await encodeSixel.mock.results[0]?.value;
-			transcript.renderViewport(80, 3, { tick: 1, now: 1 });
-			const rest = transcript.peekFlushBatch(80)!.rows;
-			expect(rest.join("")).not.toContain("\x1bP");
-			expect(rest.join("")).toContain("ZZZ-prose-below");
-			expect(rest.join("")).toContain("tail");
-			const sequences = [...head.rows, ...rest].join("").split("\x1bP").length - 1;
-			expect(sequences).toBe(1);
-		} finally {
-			encodeSixel.mockRestore();
-		}
+		// The live frame starts the encode and reserves the image's rows.
+		const live = transcript.renderViewport(80, 3, { tick: 0, now: 0 });
+		expect(live.join("")).not.toContain("\x1bP");
+		expect(encodeSixel).toHaveBeenCalledTimes(1);
+		// Pressure splits the block while the encode is pending; the image
+		// rows reach scrollback with the sequence, encoded synchronously.
+		const head = transcript.peekFinalizedBatch(80, 3)!;
+		expect(head.rows.join("")).toContain("\x1bP");
+		transcript.acknowledgeFinalizedBatch(head.id);
+		// The split fingerprint covers the committed bytes, so the seam
+		// still locates once the async encode lands and re-renders the
+		// tail: the sequence must not repeat below the committed prefix.
+		await encodeSixel.mock.results[0]?.value;
+		transcript.renderViewport(80, 3, { tick: 1, now: 1 });
+		const rest = transcript.peekFlushBatch(80)!.rows;
+		expect(rest.join("")).not.toContain("\x1bP");
+		expect(rest.join("")).toContain("ZZZ-prose-below");
+		expect(rest.join("")).toContain("tail");
+		const sequences = [...head.rows, ...rest].join("").split("\x1bP").length - 1;
+		expect(sequences).toBe(1);
 	});
 
 	it("moves back up before multi-row direct Kitty placements and restores the cursor below them", () => {
@@ -873,7 +858,6 @@ describe("TUI inline-image budget", () => {
 
 	it("clips a direct Kitty placement during an in-place width repaint", async () => {
 		const originalGraphics = { ...getKittyGraphics() };
-		const originalResizeMode = Bun.env.PI_TUI_RESIZE_IN_PLACE;
 		const term = new VirtualTerminal(40, 6);
 		const writes: string[] = [];
 		const realWrite = term.write.bind(term);
@@ -883,6 +867,7 @@ describe("TUI inline-image budget", () => {
 		});
 
 		setKittyGraphics({ unicodePlaceholders: false });
+		// withoutTerminalMultiplexer() saves PI_TUI_RESIZE_IN_PLACE before the test and puts it back after it.
 		Bun.env.PI_TUI_RESIZE_IN_PLACE = "1";
 		const tui = createTui(term);
 		tui.addChild(
@@ -910,8 +895,6 @@ describe("TUI inline-image budget", () => {
 		} finally {
 			tui.stop();
 			setKittyGraphics(originalGraphics);
-			if (originalResizeMode === undefined) delete Bun.env.PI_TUI_RESIZE_IN_PLACE;
-			else Bun.env.PI_TUI_RESIZE_IN_PLACE = originalResizeMode;
 		}
 	});
 

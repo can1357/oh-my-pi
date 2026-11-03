@@ -11,7 +11,7 @@
  * drives a real CollabGuestLink over the in-memory relay so every guest→host
  * frame is observable.
  */
-import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fsp from "node:fs/promises";
 import { generateRoomKey, importRoomKey } from "@oh-my-pi/pi-coding-agent/collab/crypto";
 import { CollabGuestLink } from "@oh-my-pi/pi-coding-agent/collab/guest";
@@ -297,6 +297,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+	vi.restoreAllMocks();
 	for (const cleanup of harnessCleanups.splice(0).reverse()) await cleanup();
 	writeSpy?.mockRestore();
 	renameSpy?.mockRestore();
@@ -881,7 +882,7 @@ describe("guest ask room ownership", () => {
 		const abort = new AbortController();
 		const replaced = Promise.withResolvers<void>();
 		const requestGuestUi = host.requestGuestUi.bind(host);
-		const requestSpy = spyOn(host, "requestGuestUi").mockImplementation((request, signal) => {
+		spyOn(host, "requestGuestUi").mockImplementation((request, signal) => {
 			const response = requestGuestUi(request, signal);
 			// Exercise the settled-answer / suspended-loop boundary. Ending the old
 			// room cannot change this already answered promise to unavailable.
@@ -918,7 +919,6 @@ describe("guest ask room ownership", () => {
 			expect(await result).toBeUndefined();
 		} finally {
 			abort.abort();
-			requestSpy.mockRestore();
 			guest.socket.close();
 			await host.stop("test done");
 			await successor.stop("test done");

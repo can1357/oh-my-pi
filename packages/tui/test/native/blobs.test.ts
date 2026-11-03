@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, onTestFinished } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -161,14 +161,13 @@ describe("native blob delivery", () => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "tsp-record-"));
 		const record = path.join(tempDir, "tsp.jsonl");
 		const before = Bun.env.PI_TUI_TSP_RECORD;
-		Bun.env.PI_TUI_TSP_RECORD = record;
-		const pic = image();
-		try {
-			harness = await TspHarness.start(tui => tui.addChild(pic.probe()), { heldBlobs: [pic.bytes] });
-		} finally {
+		onTestFinished(() => {
 			if (before === undefined) delete Bun.env.PI_TUI_TSP_RECORD;
 			else Bun.env.PI_TUI_TSP_RECORD = before;
-		}
+		});
+		Bun.env.PI_TUI_TSP_RECORD = record;
+		const pic = image();
+		harness = await TspHarness.start(tui => tui.addChild(pic.probe()), { heldBlobs: [pic.bytes] });
 		const lines = fs
 			.readFileSync(record, "utf8")
 			.trim()

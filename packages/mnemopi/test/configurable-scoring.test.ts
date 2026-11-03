@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { normalizedRecallWeights } from "@oh-my-pi/pi-mnemopi/config";
 import { BeamMemory } from "@oh-my-pi/pi-mnemopi/core/beam";
+import { testLifetime } from "../../utils/test/helpers/mock-restores";
 
 const beams: BeamMemory[] = [];
 const ORIGINAL_ENV = {
@@ -13,14 +14,6 @@ const ORIGINAL_ENV = {
 	MNEMOPI_TIER2_WEIGHT: process.env.MNEMOPI_TIER2_WEIGHT,
 };
 
-function restoreEnv(): void {
-	for (const key in ORIGINAL_ENV) {
-		const value = ORIGINAL_ENV[key as keyof typeof ORIGINAL_ENV];
-		if (value === undefined) delete process.env[key];
-		else process.env[key] = value;
-	}
-}
-
 function makeBeam(): BeamMemory {
 	const beam = new BeamMemory({ sessionId: "scoring", dbPath: ":memory:" });
 	beams.push(beam);
@@ -29,7 +22,20 @@ function makeBeam(): BeamMemory {
 
 afterEach(() => {
 	while (beams.length > 0) beams.pop()?.close();
-	restoreEnv();
+	if (ORIGINAL_ENV.MNEMOPI_VEC_WEIGHT === undefined) delete process.env.MNEMOPI_VEC_WEIGHT;
+	else process.env.MNEMOPI_VEC_WEIGHT = ORIGINAL_ENV.MNEMOPI_VEC_WEIGHT;
+	if (ORIGINAL_ENV.MNEMOPI_FTS_WEIGHT === undefined) delete process.env.MNEMOPI_FTS_WEIGHT;
+	else process.env.MNEMOPI_FTS_WEIGHT = ORIGINAL_ENV.MNEMOPI_FTS_WEIGHT;
+	if (ORIGINAL_ENV.MNEMOPI_IMPORTANCE_WEIGHT === undefined) delete process.env.MNEMOPI_IMPORTANCE_WEIGHT;
+	else process.env.MNEMOPI_IMPORTANCE_WEIGHT = ORIGINAL_ENV.MNEMOPI_IMPORTANCE_WEIGHT;
+	if (ORIGINAL_ENV.MNEMOPI_TOOL_WEIGHT === undefined) delete process.env.MNEMOPI_TOOL_WEIGHT;
+	else process.env.MNEMOPI_TOOL_WEIGHT = ORIGINAL_ENV.MNEMOPI_TOOL_WEIGHT;
+	if (ORIGINAL_ENV.MNEMOPI_UNKNOWN_WEIGHT === undefined) delete process.env.MNEMOPI_UNKNOWN_WEIGHT;
+	else process.env.MNEMOPI_UNKNOWN_WEIGHT = ORIGINAL_ENV.MNEMOPI_UNKNOWN_WEIGHT;
+	if (ORIGINAL_ENV.MNEMOPI_TIER1_WEIGHT === undefined) delete process.env.MNEMOPI_TIER1_WEIGHT;
+	else process.env.MNEMOPI_TIER1_WEIGHT = ORIGINAL_ENV.MNEMOPI_TIER1_WEIGHT;
+	if (ORIGINAL_ENV.MNEMOPI_TIER2_WEIGHT === undefined) delete process.env.MNEMOPI_TIER2_WEIGHT;
+	else process.env.MNEMOPI_TIER2_WEIGHT = ORIGINAL_ENV.MNEMOPI_TIER2_WEIGHT;
 });
 
 describe("configurable recall scoring", () => {
@@ -115,6 +121,7 @@ describe("configurable recall scoring", () => {
 	});
 
 	it("ranks by the MNEMOPI_<LABEL>_WEIGHT veracity weights", async () => {
+		const life = testLifetime();
 		delete process.env.MNEMOPI_TOOL_WEIGHT;
 		delete process.env.MNEMOPI_UNKNOWN_WEIGHT;
 		const beam = makeBeam();
@@ -123,6 +130,7 @@ describe("configurable recall scoring", () => {
 		const order = async () => (await beam.recall("quorum ledger rotation", 2)).map(row => row.veracity);
 
 		expect(await order()).toEqual(["unknown", "tool"]);
+		life.assertLive();
 		process.env.MNEMOPI_TOOL_WEIGHT = "1.0";
 		process.env.MNEMOPI_UNKNOWN_WEIGHT = "0.5";
 		expect(await order()).toEqual(["tool", "unknown"]);
@@ -141,6 +149,7 @@ describe("configurable recall scoring", () => {
 	});
 
 	it("ranks episodic rows by the MNEMOPI_TIER<N>_WEIGHT degradation weights", async () => {
+		const life = testLifetime();
 		delete process.env.MNEMOPI_TIER1_WEIGHT;
 		delete process.env.MNEMOPI_TIER2_WEIGHT;
 		const beam = makeBeam();
@@ -157,6 +166,7 @@ describe("configurable recall scoring", () => {
 		const order = async () => (await beam.recall("harbor crane manifest", 2)).map(row => row.id);
 
 		expect(await order()).toEqual(["ep-tier1", "ep-tier2"]);
+		life.assertLive();
 		process.env.MNEMOPI_TIER1_WEIGHT = "0.5";
 		process.env.MNEMOPI_TIER2_WEIGHT = "1.0";
 		expect(await order()).toEqual(["ep-tier2", "ep-tier1"]);

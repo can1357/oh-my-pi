@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { InternalUrlRouter, type LocalFileEntry, LocalProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls";
@@ -85,18 +85,17 @@ describe("resolveLocalEditorTarget", () => {
 	it("strips control bytes from errors shown for missing control-byte names", async () => {
 		using tmp = TempDir.createSync("@omp-local-editor-");
 		const editorBackup = process.env.EDITOR;
+		onTestFinished(() => {
+			if (editorBackup === undefined) delete process.env.EDITOR;
+			else process.env.EDITOR = editorBackup;
+		});
 		process.env.EDITOR = "true";
 		const showError = vi.fn();
 		const ctx = {
 			sessionManager: { getArtifactsDir: () => tmp.path(), getSessionId: () => "s" },
 			showError,
 		} as unknown as InteractiveModeContext;
-		try {
-			await openLocalFileInEditor(ctx, "no\x1bpe.md");
-		} finally {
-			if (editorBackup === undefined) delete process.env.EDITOR;
-			else process.env.EDITOR = editorBackup;
-		}
+		await openLocalFileInEditor(ctx, "no\x1bpe.md");
 
 		expect(showError).toHaveBeenCalledTimes(1);
 		const shown = showError.mock.calls[0]![0] as string;

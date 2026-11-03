@@ -6,7 +6,7 @@
  * snapshot tag is hashed from, exact on-disk byte counts, the raw terminal
  * newline sentinel, and the absence of a second whole-file read.
  */
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -131,6 +131,9 @@ describe("read tool single-pass file access", () => {
 		type FileFactory = typeof Bun.file;
 		const originalFile: FileFactory = Bun.file;
 		const bunNamespace = Bun as unknown as { file: FileFactory };
+		onTestFinished(() => {
+			bunNamespace.file = originalFile;
+		});
 		let wholeFileReads = 0;
 		bunNamespace.file = ((target: Parameters<FileFactory>[0], ...rest: unknown[]) => {
 			const factory = originalFile as unknown as (t: unknown, ...r: unknown[]) => Bun.BunFile;
@@ -153,14 +156,10 @@ describe("read tool single-pass file access", () => {
 			});
 		}) as FileFactory;
 
-		try {
-			const tool = new ReadTool(createSession(tmpDir));
-			const text = textOutput(await tool.execute("counted", { path: `${filePath}:100-120` }));
-			expect(text).toContain("export const value100 = 100;");
-			expect(text).toMatch(/^\[counted\.ts#[0-9A-F]{4}\]$/m);
-		} finally {
-			bunNamespace.file = originalFile;
-		}
+		const tool = new ReadTool(createSession(tmpDir));
+		const text = textOutput(await tool.execute("counted", { path: `${filePath}:100-120` }));
+		expect(text).toContain("export const value100 = 100;");
+		expect(text).toMatch(/^\[counted\.ts#[0-9A-F]{4}\]$/m);
 
 		expect(wholeFileReads).toBe(0);
 	});

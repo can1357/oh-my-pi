@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, onTestFinished } from "bun:test";
 import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
@@ -135,22 +135,16 @@ describe("persistent JavaScript package environments", () => {
 		// The eval falls back to the managed environment, which lives under the agent dir (by default in HOME), so a
 		// `node_modules` beside HOME would supply the package. Root the agent dir in the workspace instead.
 		const settingsState = beginSettingsTest();
+		onTestFinished(() => restoreSettingsTestState(settingsState));
 		setAgentDir(workspace.join("agent"));
-		try {
-			const sessionId = `js-package-missing:${crypto.randomUUID()}`;
-			const session = makeSession(workspace.path(), sessionId);
-			// The package must be missing from both roots the eval resolves from: the project and its fallback.
-			const { packageRoot } = resolveJsPackageEnvironment(workspace.path());
-			if (packageRoot === undefined) throw new Error("The managed JS package environment has no fallback root");
-			const specifier = ompOnlyPackage(workspace.path(), packageRoot);
-			const result = await executeJs(
-				`await import(${JSON.stringify(specifier)})`,
-				executorOptions(session, sessionId),
-			);
-			expect(result.exitCode).toBe(1);
-			expect(result.output).toContain("JS package environment fallback");
-		} finally {
-			restoreSettingsTestState(settingsState);
-		}
+		const sessionId = `js-package-missing:${crypto.randomUUID()}`;
+		const session = makeSession(workspace.path(), sessionId);
+		// The package must be missing from both roots the eval resolves from: the project and its fallback.
+		const { packageRoot } = resolveJsPackageEnvironment(workspace.path());
+		if (packageRoot === undefined) throw new Error("The managed JS package environment has no fallback root");
+		const specifier = ompOnlyPackage(workspace.path(), packageRoot);
+		const result = await executeJs(`await import(${JSON.stringify(specifier)})`, executorOptions(session, sessionId));
+		expect(result.exitCode).toBe(1);
+		expect(result.output).toContain("JS package environment fallback");
 	});
 });

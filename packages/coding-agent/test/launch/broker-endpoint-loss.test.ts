@@ -3,7 +3,7 @@
 // socket. Fake timers cannot drive the unix-socket RPC or the replacement broker process. Shutdown is
 // observed by awaiting the broker's own run() promise; a regression leaves it pending, so the test's
 // own timeout surfaces the failure.
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, onTestFinished } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -42,6 +42,9 @@ describe.skipIf(process.platform === "win32")("daemon broker runtime dir loss", 
 		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 1_000 });
 		const listening = Promise.withResolvers<void>();
 		const broker = startBroker(projectDir, runtimeDir, listening.resolve);
+		onTestFinished(() => {
+			process.title = previousTitle;
+		});
 		try {
 			await listening.promise;
 			expect((await client.request({ op: "ping" })).op).toBe("ping");
@@ -56,7 +59,6 @@ describe.skipIf(process.platform === "win32")("daemon broker runtime dir loss", 
 			if (ping.op !== "ping") throw new Error(`unexpected daemon result ${ping.op}`);
 			expect(ping.projectDir).toBe(client.projectDir);
 		} finally {
-			process.title = previousTitle;
 			try {
 				await client.request({ op: "shutdown" });
 			} catch {

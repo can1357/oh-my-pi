@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, onTestFinished } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -36,7 +36,8 @@ function createIsolatedSkillsSettings(overrides: Record<string, unknown> = {}): 
 describe("skillful setting and /skillful session toggle", () => {
 	let tempDir: string;
 	let tempHomeDir = "";
-	let originalHome: string | undefined;
+	// Captured once, so a put-back skipped by a timed-out afterEach cannot become the next test's baseline.
+	const originalHome = process.env.HOME;
 	let sharedDir: string;
 	let sharedAuthStorage: AuthStorage;
 	let sharedModelRegistry: ModelRegistry;
@@ -55,7 +56,8 @@ describe("skillful setting and /skillful session toggle", () => {
 
 	beforeEach(() => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-skillful-"));
-		originalHome = process.env.HOME;
+		// Runs after afterEach has disposed the session, which still sees the temp home.
+		onTestFinished(cleanupTempHome(() => ({ tempDir, tempHomeDir, originalHome })));
 		tempHomeDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-skillful-home-"));
 		process.env.HOME = tempHomeDir;
 		fs.mkdirSync(path.join(tempDir, ".omp", "skills", "test-skill"), { recursive: true });
@@ -68,7 +70,6 @@ describe("skillful setting and /skillful session toggle", () => {
 	afterEach(async () => {
 		await session?.dispose();
 		session = undefined;
-		cleanupTempHome(() => ({ tempDir, tempHomeDir, originalHome }))();
 	});
 
 	async function createSession(overrides: Record<string, unknown> = {}, skills?: Skill[]): Promise<AgentSession> {

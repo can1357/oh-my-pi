@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, onTestFinished, test, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -1131,42 +1131,41 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "alias-fallback-models.yml"));
 		const originalXaiApiKey = Bun.env.XAI_API_KEY;
 		const originalXaiOauthToken = Bun.env.XAI_OAUTH_TOKEN;
-		// XAI_API_KEY authenticates `xai-oauth` requests through an alias, but
-		// default availability ignores that alias and offers `xai` instead.
-		Bun.env.XAI_API_KEY = "xai-env-key";
-		delete Bun.env.XAI_OAUTH_TOKEN;
-		try {
-			const { session, modelFallbackMessage } = await createAgentSession({
-				cwd: tempDir,
-				agentDir: tempDir,
-				authStorage,
-				modelRegistry,
-				settings,
-				sessionManager: SessionManager.inMemory(),
-				disableExtensionDiscovery: true,
-				skills: [],
-				contextFiles: [],
-				promptTemplates: [],
-				slashCommands: [],
-				enableMCP: false,
-				enableLsp: false,
-				skipPythonPreflight: true,
-				rules: [],
-				preloadedCustomToolPaths: [],
-				toolNames: ["read"],
-			});
-			try {
-				expect(session.model?.provider).toBe("xai-oauth");
-				expect(session.model?.id).toBe(fallbackId);
-				expect(modelFallbackMessage).toBeUndefined();
-			} finally {
-				await session.dispose();
-			}
-		} finally {
+		onTestFinished(() => {
 			if (originalXaiApiKey === undefined) delete Bun.env.XAI_API_KEY;
 			else Bun.env.XAI_API_KEY = originalXaiApiKey;
 			if (originalXaiOauthToken === undefined) delete Bun.env.XAI_OAUTH_TOKEN;
 			else Bun.env.XAI_OAUTH_TOKEN = originalXaiOauthToken;
+		});
+		// XAI_API_KEY authenticates `xai-oauth` requests through an alias, but
+		// default availability ignores that alias and offers `xai` instead.
+		Bun.env.XAI_API_KEY = "xai-env-key";
+		delete Bun.env.XAI_OAUTH_TOKEN;
+		const { session, modelFallbackMessage } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			authStorage,
+			modelRegistry,
+			settings,
+			sessionManager: SessionManager.inMemory(),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			rules: [],
+			preloadedCustomToolPaths: [],
+			toolNames: ["read"],
+		});
+		try {
+			expect(session.model?.provider).toBe("xai-oauth");
+			expect(session.model?.id).toBe(fallbackId);
+			expect(modelFallbackMessage).toBeUndefined();
+		} finally {
+			await session.dispose();
 		}
 	});
 

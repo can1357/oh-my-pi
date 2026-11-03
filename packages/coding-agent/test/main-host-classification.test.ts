@@ -1,10 +1,11 @@
-import { afterEach, expect, it } from "bun:test";
+import { afterEach, expect, it, onTestFinished } from "bun:test";
 import { discoverAuthStorage } from "@oh-my-pi/pi-coding-agent/sdk";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { resetSettingsForTest } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { clearOmpExtensionCliRoots } from "@oh-my-pi/pi-coding-agent/discovery/omp-extension-roots";
 import { runRootCommand } from "@oh-my-pi/pi-coding-agent/main";
 import { getDbBusyTimeoutMs, setInteractiveHost, TempDir } from "@oh-my-pi/pi-utils";
+import { testLifetime } from "../../utils/test/helpers/mock-restores";
 
 // `runRootCommand` registers the CLI's extension roots (`--no-extensions` → explicit-only) process-wide.
 afterEach(() => {
@@ -19,6 +20,9 @@ it("classifies an interactive host before opening auth storage", async () => {
 	parsed.noExtensions = true;
 	// An interactive launch needs a terminal on stdin; without one it exits 2.
 	const originalIsTTY = process.stdin.isTTY;
+	onTestFinished(() => {
+		Object.defineProperty(process.stdin, "isTTY", { value: originalIsTTY, configurable: true });
+	});
 	Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
 
 	try {
@@ -39,6 +43,12 @@ it("classifies an interactive host before opening auth storage", async () => {
 });
 
 it("standalone auth discovery routes by PI_CONFIG_FILES policy over main config", async () => {
+	const life = testLifetime();
+	const previousOverlay = process.env.PI_CONFIG_FILES;
+	onTestFinished(() => {
+		if (previousOverlay === undefined) delete process.env.PI_CONFIG_FILES;
+		else process.env.PI_CONFIG_FILES = previousOverlay;
+	});
 	using tempDir = TempDir.createSync("@omp-standalone-policy-");
 	const overlayPath = tempDir.join("policy.yml");
 	await Bun.write(
@@ -59,7 +69,7 @@ it("standalone auth discovery routes by PI_CONFIG_FILES policy over main config"
 			"",
 		].join("\n"),
 	);
-	const previousOverlay = process.env.PI_CONFIG_FILES;
+	life.assertLive();
 	process.env.PI_CONFIG_FILES = overlayPath;
 	resetSettingsForTest();
 	try {
@@ -86,8 +96,6 @@ it("standalone auth discovery routes by PI_CONFIG_FILES policy over main config"
 			storage.close();
 		}
 	} finally {
-		if (previousOverlay === undefined) delete process.env.PI_CONFIG_FILES;
-		else process.env.PI_CONFIG_FILES = previousOverlay;
 		resetSettingsForTest();
 	}
 });

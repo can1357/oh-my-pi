@@ -21,6 +21,7 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
+	vi.restoreAllMocks();
 	resetSettingsForTest();
 });
 
@@ -173,7 +174,6 @@ describe("apply_patch rendering", () => {
 
 			expect(setTimeoutSpy).not.toHaveBeenCalled();
 		} finally {
-			setTimeoutSpy.mockRestore();
 			await removeWithRetries(tmpDir);
 		}
 	});

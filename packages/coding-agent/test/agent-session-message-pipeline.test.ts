@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it, onTestFinished, vi } from "bun:test";
 import {
 	Agent,
 	type AgentMessage,
@@ -86,16 +86,15 @@ function getConvertedUserText(message: Message | undefined): string {
 
 async function withNativeDialectEnv<T>(fn: () => Promise<T>): Promise<T> {
 	const previous = Bun.env.PI_DIALECT;
-	delete Bun.env.PI_DIALECT;
-	try {
-		return await fn();
-	} finally {
+	onTestFinished(() => {
 		if (previous === undefined) {
 			delete Bun.env.PI_DIALECT;
 		} else {
 			Bun.env.PI_DIALECT = previous;
 		}
-	}
+	});
+	delete Bun.env.PI_DIALECT;
+	return await fn();
 }
 
 describe("AgentSession message pipeline", () => {

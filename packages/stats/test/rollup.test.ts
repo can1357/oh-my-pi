@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, onTestFinished } from "bun:test";
 import { initDb, insertMessageStats, insertToolCalls } from "@oh-my-pi/omp-stats/db";
 import {
 	getDailyActivityFromRollup,
@@ -14,6 +14,7 @@ import {
 } from "@oh-my-pi/omp-stats/rollup";
 import type { MessageStats, ToolCallStats } from "@oh-my-pi/omp-stats/types";
 import { installStatsTestIsolation } from "./helpers/temp-agent";
+import { testLifetime } from "../../utils/test/helpers/mock-restores";
 
 installStatsTestIsolation("@pi-stats-rollup-");
 
@@ -126,17 +127,18 @@ describe("rollups", () => {
 	});
 
 	it("leaves daily activity to the exact query in half-hour-offset timezones", async () => {
+		const life = testLifetime();
+		const previousTz = process.env.TZ;
+		onTestFinished(() => {
+			if (previousTz === undefined) delete process.env.TZ;
+			else process.env.TZ = previousTz;
+		});
 		await initDb();
 		insertMessageStats([message("a", BASE + 10 * 60_000)]);
 		await refreshRollups();
-		const previousTz = process.env.TZ;
+		life.assertLive();
 		process.env.TZ = "Asia/Kolkata";
-		try {
-			expect(new Date().getTimezoneOffset()).toBe(-330);
-			expect(getDailyActivityFromRollup(BASE - 24 * HOUR)).toBeNull();
-		} finally {
-			if (previousTz === undefined) delete process.env.TZ;
-			else process.env.TZ = previousTz;
-		}
+		expect(new Date().getTimezoneOffset()).toBe(-330);
+		expect(getDailyActivityFromRollup(BASE - 24 * HOUR)).toBeNull();
 	});
 });

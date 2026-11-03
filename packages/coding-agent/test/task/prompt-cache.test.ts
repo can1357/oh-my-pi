@@ -18,13 +18,15 @@ import * as settingsStream from "@oh-my-pi/pi-coding-agent/session/settings-stre
 import type { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import * as discovery from "@oh-my-pi/pi-coding-agent/task/discovery";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { installMockRestores } from "../../../utils/test/helpers/mock-restores";
 
 describe("task sibling prompt-cache routing", () => {
 	const sessions: AgentSession[] = [];
 
+	installMockRestores();
+
 	afterEach(async () => {
 		await Promise.all(sessions.splice(0).map(session => session.dispose()));
-		vi.restoreAllMocks();
 		AgentLifecycleManager.resetGlobalForTests();
 		AgentRegistry.resetGlobalForTests();
 	});

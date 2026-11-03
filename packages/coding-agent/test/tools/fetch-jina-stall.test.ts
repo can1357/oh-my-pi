@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, onTestFinished } from "bun:test";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
@@ -100,36 +100,39 @@ describe("renderHtmlToText: jina stall does not starve local fallbacks (#1449)",
 describe("renderHtmlToText: Jina response validation", () => {
 	it("sends JINA_API_KEY as optional bearer authentication", async () => {
 		const originalApiKey = process.env.JINA_API_KEY;
-		process.env.JINA_API_KEY = "env-jina-key";
-		try {
-			const settings = Settings.isolated({ "providers.fetch": "jina" });
-			let requestHeaders: Headers | undefined;
-			const markdown = `# Authenticated article\n\n${"Substantive reader content. ".repeat(8)}`.trim();
-			const fetchMock = asGlobalFetch((_input, init) => {
-				requestHeaders = new Headers(init?.headers);
-				return new Response(`Markdown Content:\n${markdown}`);
-			});
-
-			const result = await renderHtmlToText(
-				"https://example.com/article",
-				"<html><body>short</body></html>",
-				1,
-				settings,
-				undefined,
-				null,
-				fetchMock,
-			);
-
-			expect(result.method).toBe("jina");
-			expect(requestHeaders?.get("authorization")).toBe("Bearer env-jina-key");
-		} finally {
+		onTestFinished(() => {
 			if (originalApiKey === undefined) delete process.env.JINA_API_KEY;
 			else process.env.JINA_API_KEY = originalApiKey;
-		}
+		});
+		process.env.JINA_API_KEY = "env-jina-key";
+		const settings = Settings.isolated({ "providers.fetch": "jina" });
+		let requestHeaders: Headers | undefined;
+		const markdown = `# Authenticated article\n\n${"Substantive reader content. ".repeat(8)}`.trim();
+		const fetchMock = asGlobalFetch((_input, init) => {
+			requestHeaders = new Headers(init?.headers);
+			return new Response(`Markdown Content:\n${markdown}`);
+		});
+
+		const result = await renderHtmlToText(
+			"https://example.com/article",
+			"<html><body>short</body></html>",
+			1,
+			settings,
+			undefined,
+			null,
+			fetchMock,
+		);
+
+		expect(result.method).toBe("jina");
+		expect(requestHeaders?.get("authorization")).toBe("Bearer env-jina-key");
 	});
 
 	it("uses a stored Jina credential when the environment key is absent", async () => {
 		const originalApiKey = process.env.JINA_API_KEY;
+		onTestFinished(() => {
+			if (originalApiKey === undefined) delete process.env.JINA_API_KEY;
+			else process.env.JINA_API_KEY = originalApiKey;
+		});
 		delete process.env.JINA_API_KEY;
 		const tempDir = TempDir.createSync("@omp-jina-reader-auth-");
 		try {
@@ -158,8 +161,6 @@ describe("renderHtmlToText: Jina response validation", () => {
 		} finally {
 			AgentStorage.close();
 			await tempDir.remove().catch(() => {});
-			if (originalApiKey === undefined) delete process.env.JINA_API_KEY;
-			else process.env.JINA_API_KEY = originalApiKey;
 		}
 	});
 

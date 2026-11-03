@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import * as os from "node:os";
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import * as reportIssue from "@oh-my-pi/pi-coding-agent/tools/report-tool-issue";
@@ -645,6 +645,10 @@ describe("dispatchReportIssueDevice", () => {
 	it("writes nothing while consent is unresolved", async () => {
 		Bun.env.PI_AUTO_QA = "1";
 		const originalPush = Bun.env.PI_AUTO_QA_PUSH;
+		onTestFinished(() => {
+			if (originalPush === undefined) delete Bun.env.PI_AUTO_QA_PUSH;
+			else Bun.env.PI_AUTO_QA_PUSH = originalPush;
+		});
 		delete Bun.env.PI_AUTO_QA_PUSH;
 		const db = openTempDb();
 		const openSpy = vi.spyOn(reportIssue, "openAutoQaDb").mockReturnValue(db);
@@ -657,8 +661,6 @@ describe("dispatchReportIssueDevice", () => {
 			await settlePipeline();
 			expect(selectIds(db)).toHaveLength(0);
 		} finally {
-			if (originalPush === undefined) delete Bun.env.PI_AUTO_QA_PUSH;
-			else Bun.env.PI_AUTO_QA_PUSH = originalPush;
 			openSpy.mockRestore();
 			db.close();
 		}

@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, onTestFinished, test } from "bun:test";
 import { renderTerminalOutputIsolated } from "../src/launch/terminal-output-worker-client";
 
 class CleanExitWorker extends EventTarget {
@@ -11,6 +11,11 @@ class CleanExitWorker extends EventTarget {
 
 test("legacy replay rejects when its worker exits before responding", async () => {
 	const originalWorkerDescriptor = Object.getOwnPropertyDescriptor(globalThis, "Worker");
+	const restoreWorker = () => {
+		Reflect.deleteProperty(globalThis, "Worker");
+		if (originalWorkerDescriptor) Object.defineProperty(globalThis, "Worker", originalWorkerDescriptor);
+	};
+	onTestFinished(restoreWorker);
 	expect(originalWorkerDescriptor).toBeDefined();
 	Object.defineProperty(globalThis, "Worker", { configurable: true, value: CleanExitWorker });
 	try {
@@ -30,11 +35,8 @@ test("legacy replay rejects when its worker exits before responding", async () =
 		expect(outcome.error).toBeInstanceOf(Error);
 		expect((outcome.error as Error).message).toBe("Terminal output worker exited before responding");
 	} finally {
-		if (originalWorkerDescriptor) {
-			Object.defineProperty(globalThis, "Worker", originalWorkerDescriptor);
-		} else {
-			Reflect.deleteProperty(globalThis, "Worker");
-		}
+		Reflect.deleteProperty(globalThis, "Worker");
+		if (originalWorkerDescriptor) Object.defineProperty(globalThis, "Worker", originalWorkerDescriptor);
 	}
 	expect(Object.getOwnPropertyDescriptor(globalThis, "Worker")).toEqual(originalWorkerDescriptor);
 });

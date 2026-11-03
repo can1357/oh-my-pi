@@ -6,7 +6,7 @@
  * lock-tolerant, warn-and-leave cleanup.
  */
 
-import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -25,6 +25,10 @@ import {
 } from "@oh-my-pi/pi-coding-agent/tools/browser/shared-daemon";
 import type { DaemonSnapshot, DaemonState } from "@oh-my-pi/pi-tui/tools/daemon";
 import * as piUtils from "@oh-my-pi/pi-utils";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 async function makeProfileDir(): Promise<string> {
 	const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-chrome-profile-test-"));
@@ -148,7 +152,6 @@ describe("headless Chromium profile cleanup (issue #7058)", () => {
 			expect(removeSpy).toHaveBeenCalledTimes(1);
 			expect(warnSpy).toHaveBeenCalledTimes(1);
 		} finally {
-			removeSpy.mockRestore();
 			// Real removal so the fixture does not leak.
 			await fs.promises.rm(dir, { recursive: true, force: true });
 		}
@@ -202,7 +205,7 @@ describe("owned Chromium profile preferences", () => {
 
 	it("warns instead of failing the launch and leaves no staged file when the write fails", async () => {
 		const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-chrome-profile-test-"));
-		const renameSpy = spyOn(fs.promises, "rename").mockRejectedValue(
+		spyOn(fs.promises, "rename").mockRejectedValue(
 			Object.assign(new Error("EBUSY: resource busy or locked"), { code: "EBUSY" }),
 		);
 		const warnSpy = spyOn(piUtils.logger, "warn");
@@ -211,8 +214,6 @@ describe("owned Chromium profile preferences", () => {
 			expect(warnSpy).toHaveBeenCalledTimes(1);
 			expect(await fs.promises.readdir(path.join(dir, "Default"))).toEqual([]);
 		} finally {
-			renameSpy.mockRestore();
-			warnSpy.mockRestore();
 			await fs.promises.rm(dir, { recursive: true, force: true });
 		}
 	});
@@ -243,7 +244,7 @@ describe("owned Chromium profile preferences", () => {
 				chromeLive.resolve();
 			},
 		});
-		const seedSpy = spyOn(browserLaunch, "seedOwnedProfilePreferences").mockImplementation(async userDataDir => {
+		spyOn(browserLaunch, "seedOwnedProfilePreferences").mockImplementation(async userDataDir => {
 			seedsWhileChromeRunning.push(chromeRunning);
 			await seed(userDataDir);
 		});
@@ -261,7 +262,6 @@ describe("owned Chromium profile preferences", () => {
 			// started over the live profile's Preferences.
 			expect(seedsWhileChromeRunning).toEqual([false]);
 		} finally {
-			seedSpy.mockRestore();
 			broker.restore();
 			await fs.promises.rm(daemonRuntimeDir(projectDir), { recursive: true, force: true });
 			await fs.promises.rm(projectDir, { recursive: true, force: true });
@@ -333,7 +333,7 @@ describe("shared Chromium session-restore state", () => {
 				sessionsAtLaunch = await fs.promises.readdir(sessionsDir).catch(() => []);
 			},
 		});
-		const warnSpy = spyOn(piUtils.logger, "warn").mockImplementation(() => {});
+		spyOn(piUtils.logger, "warn").mockImplementation(() => {});
 		let lockSpy: { mockRestore(): void } | undefined;
 		const holdClaimElsewhere = () => {
 			lockSpy = spyOn(piUtils, "acquireFileLock").mockRejectedValue(new Error("lock held by another omp process"));
@@ -358,7 +358,6 @@ describe("shared Chromium session-restore state", () => {
 			expect(broker.starts).toBe(1);
 		} finally {
 			releaseClaim();
-			warnSpy.mockRestore();
 			broker.restore();
 			await fs.promises.rm(daemonRuntimeDir(projectDir), { recursive: true, force: true });
 			await fs.promises.rm(projectDir, { recursive: true, force: true });

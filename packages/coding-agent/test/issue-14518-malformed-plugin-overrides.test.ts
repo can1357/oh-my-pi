@@ -1,4 +1,4 @@
-import { afterEach, expect, spyOn, test } from "bun:test";
+import { afterEach, expect, spyOn, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -17,6 +17,7 @@ import { logger, removeWithRetries } from "@oh-my-pi/pi-utils";
 const tempRoots: string[] = [];
 
 afterEach(async () => {
+	vi.restoreAllMocks();
 	clearClaudePluginRootsCache();
 	for (const root of tempRoots.splice(0)) {
 		await removeWithRetries(root);
@@ -75,52 +76,37 @@ test("a malformed project plugin-overrides.json is diagnosed instead of silently
 	const overridesPath = await writeOverrides(cwd, "{ not valid json");
 
 	const warn = spyOn(logger, "warn").mockImplementation(() => {});
-	try {
-		const plugins = await getEnabledPlugins(cwd, { home });
-		// Fallback semantics preserved: overrides degrade to {} instead of
-		// failing plugin collection.
-		expect(plugins.map(plugin => plugin.name)).toEqual(["declared-plugin"]);
-		// Contract: the dropped overrides MUST be reported with the path.
-		const warning = overridesWarning(warn);
-		expect(warning).toBeDefined();
-		expect(String(warning?.message)).toContain("plugin overrides");
-		expect(warning?.path).toBe(overridesPath);
-	} finally {
-		warn.mockRestore();
-	}
+	const plugins = await getEnabledPlugins(cwd, { home });
+	// Fallback semantics preserved: overrides degrade to {} instead of
+	// failing plugin collection.
+	expect(plugins.map(plugin => plugin.name)).toEqual(["declared-plugin"]);
+	// Contract: the dropped overrides MUST be reported with the path.
+	const warning = overridesWarning(warn);
+	expect(warning).toBeDefined();
+	expect(String(warning?.message)).toContain("plugin overrides");
+	expect(warning?.path).toBe(overridesPath);
 });
 
 test("getPluginSettings surfaces the same diagnostic for malformed project overrides", async () => {
 	const { cwd, pluginsDir } = await plantRoot("omp-plugin-overrides-settings-");
 	const overridesPath = await writeOverrides(cwd, "{ not valid json");
 
-	const getPluginsLockfile = spyOn(piUtils, "getPluginsLockfile").mockReturnValue(
-		path.join(pluginsDir, "omp-plugins.lock.json"),
-	);
+	spyOn(piUtils, "getPluginsLockfile").mockReturnValue(path.join(pluginsDir, "omp-plugins.lock.json"));
 	const warn = spyOn(logger, "warn").mockImplementation(() => {});
-	try {
-		const settings = await getPluginSettings("declared-plugin", cwd);
-		expect(settings).toEqual({});
-		const warning = overridesWarning(warn);
-		expect(warning).toBeDefined();
-		expect(warning?.path).toBe(overridesPath);
-	} finally {
-		warn.mockRestore();
-		getPluginsLockfile.mockRestore();
-	}
+	const settings = await getPluginSettings("declared-plugin", cwd);
+	expect(settings).toEqual({});
+	const warning = overridesWarning(warn);
+	expect(warning).toBeDefined();
+	expect(warning?.path).toBe(overridesPath);
 });
 
 test("a missing project plugin-overrides.json stays silent", async () => {
 	const { home, cwd } = await plantRoot("omp-plugin-overrides-missing-");
 
 	const warn = spyOn(logger, "warn").mockImplementation(() => {});
-	try {
-		const plugins = await getEnabledPlugins(cwd, { home });
-		expect(plugins.map(plugin => plugin.name)).toEqual(["declared-plugin"]);
-		expect(warn).not.toHaveBeenCalled();
-	} finally {
-		warn.mockRestore();
-	}
+	const plugins = await getEnabledPlugins(cwd, { home });
+	expect(plugins.map(plugin => plugin.name)).toEqual(["declared-plugin"]);
+	expect(warn).not.toHaveBeenCalled();
 });
 
 test("a valid project plugin-overrides.json still disables its plugin", async () => {

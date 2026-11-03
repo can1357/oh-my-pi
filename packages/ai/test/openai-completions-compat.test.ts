@@ -1,4 +1,4 @@
-import { describe, expect, it, spyOn } from "bun:test";
+import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import { renderDemotedThinking } from "@oh-my-pi/pi-ai/dialect";
 import {
 	applyOpenRouterRoutingVariant,
@@ -22,6 +22,10 @@ import { clampThinkingLevelForModel, getSupportedEfforts } from "@oh-my-pi/pi-ca
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { ResolvedOpenAICompat } from "@oh-my-pi/pi-catalog/types";
 import { serializeAlibabaTokenPlanCredential } from "@oh-my-pi/pi-catalog/wire/alibaba-token-plan";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 const gpt4oMiniSpec: ModelSpec<"openai-completions"> = (() => {
 	const {
@@ -621,7 +625,7 @@ describe("openai-completions compatibility", () => {
 		const peakStart = Date.parse("2026-09-10T03:59:59Z");
 		const offPeakStart = Date.parse("2026-09-10T04:00:00Z");
 		let now = peakStart;
-		const clock = spyOn(Date, "now").mockImplementation(() => now);
+		spyOn(Date, "now").mockImplementation(() => now);
 		const releaseFinalUsage = Promise.withResolvers<void>();
 		const encoder = new TextEncoder();
 		const firstChunk = {
@@ -674,7 +678,6 @@ describe("openai-completions compatibility", () => {
 			expect(first.usage.cost.total).toBeCloseTo(0.54, 12);
 		} finally {
 			releaseFinalUsage.resolve();
-			clock.mockRestore();
 		}
 	});
 
