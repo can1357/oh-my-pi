@@ -1054,10 +1054,11 @@ export class UsageDashboardComponent implements Component {
 		const scrollHint = maxScroll > 0 ? `${editorKeys("tui.select.up", "tui.select.down")} scroll · ` : "";
 		const cancel = editorKey("tui.select.cancel");
 		const refreshHint = this.#options.refresh ? "r refresh · " : "";
+		const tabKey = formatKeyHint("tab");
 		const hint =
 			this.#view === "detail"
-				? `${scrollHint}${refreshHint}${cancel} back`
-				: `${scrollHint}${refreshHint}${formatKeyHint("enter")} details · ${cancel} close`;
+				? `${scrollHint}${refreshHint}${tabKey} overview · ${cancel} close`
+				: `${scrollHint}${refreshHint}${tabKey} details · ${cancel} close`;
 		this.#panel.title = title;
 		this.#header.setLines([checkedText ? theme.fg("dim", checkedText) : ""]);
 		this.#body.setLines(contentSource.slice(this.#scroll, this.#scroll + contentRows));
@@ -1086,8 +1087,7 @@ export class UsageDashboardComponent implements Component {
 			return cache.node;
 		}
 		const body = this.#view === "detail" ? this.#describeDetail() : this.#describeOverview(meter, chart);
-		// Esc leaves Details for Overview first, so only Overview's Close wears its keycap.
-		const close = actionButton("Close", "close", this.#view === "overview" ? { keys: "escape" } : {});
+		const close = actionButton("Close", "close", { keys: "escape" });
 		const root = col(
 			[
 				this.#describeHead(),
@@ -1791,10 +1791,6 @@ export class UsageDashboardComponent implements Component {
 			return;
 		}
 		if (matchesSelectCancel(data) || matchesKey(data, "q")) {
-			if (this.#view === "detail") {
-				this.#setView("overview");
-				return;
-			}
 			this.#close();
 			return;
 		}
@@ -1803,10 +1799,11 @@ export class UsageDashboardComponent implements Component {
 			return;
 		}
 		if (
-			this.#view === "overview" &&
-			(matchesKey(data, "return") || matchesKey(data, "tab") || matchesKey(data, "d"))
+			matchesKey(data, "tab") ||
+			(this.#view === "overview" && (matchesKey(data, "return") || matchesKey(data, "d"))) ||
+			(this.#view === "detail" && (matchesKey(data, "return") || matchesKey(data, "o")))
 		) {
-			this.#setView("detail");
+			this.#setView(this.#view === "overview" ? "detail" : "overview");
 			return;
 		}
 		if (matchesSelectUp(data)) this.#scrollBy(-1);

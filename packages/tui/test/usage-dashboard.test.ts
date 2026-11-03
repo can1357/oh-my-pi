@@ -301,16 +301,17 @@ describe("UsageDashboardComponent", () => {
 	function dashboard(
 		reports: UsageReport[],
 		unavailableAccounts: UnavailableUsageAccount[] = [],
+		onClose: () => void = () => {},
 	): UsageDashboardComponent {
 		return new UsageDashboardComponent({
 			reports,
 			unavailableAccounts,
-			renderDetail: () => "",
+			renderDetail: () => "detail-content",
 			loadActivity: async push => {
 				push([]);
 			},
 			requestRender: () => {},
-			onClose: () => {},
+			onClose,
 		});
 	}
 
@@ -564,6 +565,57 @@ describe("UsageDashboardComponent", () => {
 		expect(contentLine).toContain(
 			"Usage history unavailable (subprocess crashed at ~/.omp/stats.db: failed to open line 2).",
 		);
+	});
+
+	it("toggles bidirectionally between overview and detail views on tab", () => {
+		const component = dashboard([]);
+		try {
+			expect(component.render(80).join("\n")).toContain("Usage");
+			expect(component.render(80).join("\n")).not.toContain("Usage · Details");
+
+			component.handleInput("\t");
+			expect(component.render(80).join("\n")).toContain("Usage · Details");
+			expect(component.render(80).join("\n")).toContain("detail-content");
+
+			component.handleInput("\t");
+			expect(component.render(80).join("\n")).not.toContain("Usage · Details");
+		} finally {
+			component.dispose();
+		}
+	});
+
+	it("closes immediately on escape or q from both overview and detail views", () => {
+		let closed = 0;
+		const component = dashboard([], [], () => {
+			closed++;
+		});
+		try {
+			component.handleInput("\t"); // enter detail
+			component.handleInput("\x1b"); // escape should close directly, not return to overview
+			expect(closed).toBe(1);
+
+			component.handleInput("\t"); // enter detail
+			component.handleInput("q"); // q should close directly
+			expect(closed).toBe(2);
+		} finally {
+			component.dispose();
+		}
+	});
+	it("displays tab and cancel close shortcuts in both overview and detail footer hints", () => {
+		const component = dashboard([]);
+		try {
+			const overview = component.render(80).join("\n");
+			expect(overview).toContain("details");
+			expect(overview).toContain("close");
+
+			component.handleInput("\t");
+			const detail = component.render(80).join("\n");
+			expect(detail).toContain("overview");
+			expect(detail).toContain("close");
+			expect(detail).not.toContain("back");
+		} finally {
+			component.dispose();
+		}
 	});
 });
 
