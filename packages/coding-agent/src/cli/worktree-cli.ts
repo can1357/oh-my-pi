@@ -25,6 +25,7 @@ import chalk from "@oh-my-pi/pi-utils/chalk";
 import { Settings } from "../config/settings";
 import {
 	decideIsolationReclaim,
+	foreignMountsUnder,
 	ISOLATION_REMOVING_SUFFIX,
 	requireSandboxLockHeld,
 	withSandboxLock,
@@ -40,6 +41,9 @@ type WorktreeKind = "pr-checkout" | "task-isolation" | "empty" | "stray";
 
 const TASK_ISOLATION_MOUNT_DIRS = ["m", "merged"] as const;
 
+/** Why an entry that is a symlink is listed and never removed. */
+const SYMLINK_ENTRY_REASON = "is a symlink; clear does not follow it out of the worktree directory";
+
 export interface WorktreeEntry {
 	/** Absolute path to the worktree dir (or stray container) under `~/.omp/wt/`. */
 	path: string;
@@ -51,6 +55,12 @@ export interface WorktreeEntry {
 	branch?: string;
 	/** When set, the entry is unhealthy and `omp worktree clear` will remove it. */
 	orphanReason?: string;
+	/**
+	 * Why plain `omp worktree clear` leaves this entry, when it can say: for a
+	 * task-isolation sandbox that cannot prove it is finished, which only
+	 * `--all` removes.
+	 */
+	keptReason?: string;
 	/**
 	 * Set when this process could not read the entry. It is listed so the user
 	 * sees it, and never removed: a failure to look is not a licence to delete.
@@ -73,7 +83,7 @@ export interface ListWorktreesOptions {
 }
 
 export interface ClearWorktreesOptions {
-	/** Remove every entry, including live PR-checkout worktrees. */
+	/** Remove every entry, including live PR-checkout worktrees and sandboxes that cannot prove they are finished. */
 	all: boolean;
 	/** Print what would be removed without touching the filesystem. */
 	dryRun: boolean;
@@ -86,10 +96,12 @@ export interface ClearWorktreesOptions {
  * Btrfs subvolume root, removable only via subvolume delete) — and mounts
  * survive the owning session, so the reclaim path (unlike teardown) cannot
  * rely on the creator to stop them. Side-effect-free without a retained-
- * backend sidecar (returns false); throws when the sidecar cannot be read
- * or teardown itself fails, so the caller skips removal instead of
- * traversing a possibly live mount — the entry is then reported failed
- * with the error, data intact.
+ * backend sidecar (returns false), and when neither mount directory is there
+ * (nothing can be mounted at a name that does not exist: a teardown whose stop
+ * succeeded and which was killed before its removal leaves exactly that);
+ * throws when the sidecar cannot be read or teardown itself fails, so the
+ * caller skips removal instead of traversing a possibly live mount — the
+ * entry is then reported failed with the error, data intact.
  */
 export async function stopRetainedMount(dir: string): Promise<boolean> {
 	const backend = await readRetainedMountBackend(dir);
@@ -98,24 +110,44 @@ export async function stopRetainedMount(dir: string): Promise<boolean> {
 		const candidate = path.join(dir, name);
 		// A stat that failed is not a mount directory that is absent. Reading
 		// it as absent skipped the native stop and left the next step — a
-		// recursive removal — pointed at what may still be a mount.
-		const found = await fs.statLookup(candidate);
+		// recursive removal — pointed at what may still be a mount. And the
+		// stop is never given a symlink: it follows one into whatever it names,
+		// and unmounted a mount that belonged to someone else.
+		const found = await fs.lstatLookup(candidate);
 		if (found.kind === "unknown") {
 			throw new Error(
 				`Isolation workspace ${dir} records a ${backend} mount, and ${candidate} could not be read ` +
 					`(${found.reason}); refusing to remove it without stopping the mount.`,
 			);
 		}
-		if (found.kind === "absent" || !found.value.isDirectory()) continue;
+		if (found.kind === "absent") continue;
+		if (found.value.isSymbolicLink()) {
+			throw new Error(`Isolation workspace ${dir} has a symlink at ${candidate}; refusing to stop or remove it.`);
+		}
+		if (!found.value.isDirectory()) continue;
+		// The record is written before the backend mounts, so an overlay
+		// directory can be there and never have been mounted; stopping it then
+		// fails for ever. The mount table says whether there is anything to
+		// stop. A subvolume is not a mount, and its stop also removes a plain
+		// directory, so it is always stopped.
+		if (backend === natives.IsoBackendKind.Overlayfs && (await fs.liveMountsUnder(candidate)).length === 0) continue;
+		// The stop removes a tree (overlayfs deletes `upper` and `work` after it
+		// unmounts), so it never runs while something other than this
+		// backend's own mount is under the workspace: a mount below `upper`
+		// had its source deleted by the stop itself.
+		const foreign = await foreignMountsUnder(dir, backend, candidate);
+		if (foreign.length > 0) {
+			throw new Error(
+				`Isolation workspace ${dir} has ${foreign.join(", ")} mounted in it; refusing to stop or remove it.`,
+			);
+		}
 		await natives.isoStop(backend, candidate);
 		return true;
 	}
-	// The sidecar names a mount backend and no mount directory is here: the
-	// workspace is not in the shape this guard knows, so it is not removed.
-	throw new Error(
-		`Isolation workspace ${dir} records a ${backend} mount, but none of ${TASK_ISOLATION_MOUNT_DIRS.join(", ")} ` +
-			"is there; refusing to remove it.",
-	);
+	// The record names a mount backend and nothing is mounted where this
+	// workspace mounts: the record is written before the mount and outlives a
+	// successful stop.
+	return false;
 }
 
 export async function addWorktree(options: AddWorktreeOptions): Promise<void> {
@@ -246,58 +278,20 @@ export async function clearWorktrees(options: ClearWorktreesOptions): Promise<{ 
 		return { removed: 0, failed: 0 };
 	}
 
-	const results: { path: string; ok: boolean; error?: string; skipped?: boolean }[] = [];
+	const results: { path: string; ok: boolean; error?: string; skipped?: boolean; reason?: string }[] = [];
 	const parentsToPrune = new Set<string>();
 	for (const target of targets) {
 		try {
 			if (target.keep) {
-				results.push({ path: target.path, ok: true, skipped: true });
+				results.push({ path: target.path, ok: true, skipped: true, reason: target.orphanReason });
 				continue;
 			}
-			if (target.kind === "pr-checkout" && target.parentRepo && !target.orphanReason) {
-				// Live worktree: ask git to remove it cleanly. If git refuses (locked,
-				// dirty, etc.), fall back to fs.rm and rely on `worktree prune` to
-				// clean the bookkeeping on the parent side.
-				const removed = await vcs.git(target.parentRepo)?.worktreeRemove(target.path, true);
-				if (!removed) {
-					await fs.rm(target.path, { recursive: true, force: true });
-					parentsToPrune.add(target.parentRepo);
-				}
-			} else {
-				if (target.kind === "task-isolation") {
-					// The scan is a decision taken earlier; this is the moment of
-					// deletion. Resolve the sandbox to the directory itself first:
-					// locking and deleting the scanned path lets a symlink swapped
-					// in between point the removal at a different, live sandbox,
-					// and a lock on an alias excludes nobody. Then, under that
-					// lock, ask again — unless `--all` was asked for, which
-					// deletes whatever is there.
-					const sandbox = await resolveSandboxIdentity(target.path);
-					// Through the one entry point, so the decision and the
-					// removal share a recorded hold and anything they call
-					// detects it rather than queueing behind this command.
-					const removed = await withSandboxLock(sandbox, "remove", async () => {
-						if (!options.all && !(await decideIsolationReclaim(sandbox)).reclaimable) return false;
-						await stopRetainedMount(sandbox);
-						// One atomic step under the hold, then the delete.
-						// Checking the hold immediately before a recursive
-						// removal still leaves the removal running after the
-						// hold ends, and it erased a file a peer created in a
-						// directory it was already walking. After the rename
-						// there is nothing for a peer to lose: whatever it
-						// writes to the live path is not inside what goes.
-						const aside = `${sandbox}${ISOLATION_REMOVING_SUFFIX}${Snowflake.next()}`;
-						requireSandboxLockHeld(sandbox, "remove");
-						await fs.rename(sandbox, aside);
-						await fs.rm(aside, { recursive: true, force: true });
-						return true;
-					});
-					results.push(removed ? { path: target.path, ok: true } : { path: target.path, ok: true, skipped: true });
-					continue;
-				}
-				await fs.rm(target.path, { recursive: true, force: true });
-				if (target.parentRepo) parentsToPrune.add(target.parentRepo);
+			const removal = await removeEntry(target, options.all);
+			if (!removal.removed) {
+				results.push({ path: target.path, ok: true, skipped: true, reason: removal.reason });
+				continue;
 			}
+			if (target.parentRepo) parentsToPrune.add(target.parentRepo);
 			results.push({ path: target.path, ok: true });
 		} catch (err) {
 			results.push({ path: target.path, ok: false, error: err instanceof Error ? err.message : String(err) });
@@ -324,7 +318,7 @@ export async function clearWorktrees(options: ClearWorktreesOptions): Promise<{ 
 	for (const result of results) {
 		if (result.skipped) {
 			console.log(`${chalk.dim("kept   ")}  ${result.path}`);
-			console.log(`          ${chalk.dim("in use when the removal came round")}`);
+			console.log(`          ${chalk.dim(result.reason ?? "in use when the removal came round")}`);
 		} else if (result.ok) {
 			console.log(`${chalk.green("removed")}  ${result.path}`);
 		} else {
@@ -354,14 +348,22 @@ async function scanWorktrees(): Promise<WorktreeEntry[]> {
 	const entries: WorktreeEntry[] = [];
 	for (const name of topLevel) {
 		const dir = path.join(root, name);
-		const stat = await fs.statLookup(dir);
+		// Never followed: an entry that is a symlink names something outside
+		// what `omp` made here, and resolving it sent the removal to a directory
+		// outside the worktree directory. It is listed, and kept.
+		const stat = await fs.lstatLookup(dir);
 		if (stat.kind === "unknown") {
 			// Named, not dropped: an entry nobody can look at is exactly the
 			// one a user needs to hear about, and it is never removed.
 			entries.push({ path: dir, kind: "stray", orphanReason: `could not be read (${stat.reason})`, keep: true });
 			continue;
 		}
-		if (stat.kind === "absent" || !stat.value.isDirectory()) continue;
+		if (stat.kind === "absent") continue;
+		if (stat.value.isSymbolicLink()) {
+			entries.push({ path: dir, kind: "stray", orphanReason: SYMLINK_ENTRY_REASON, keep: true });
+			continue;
+		}
+		if (!stat.value.isDirectory()) continue;
 
 		const direct = await classifyDir(dir);
 		if (direct) {
@@ -369,64 +371,174 @@ async function scanWorktrees(): Promise<WorktreeEntry[]> {
 			continue;
 		}
 
-		// Legacy nesting: ~/.omp/wt/<encoded-project>/<branch-or-id>
-		const childListing = await fs.readdirLookup(dir);
-		if (childListing.kind === "unknown") {
-			entries.push({
+		const nested = await classifyContainer(dir);
+		entries.push(...nested.children);
+		if (nested.container) entries.push(nested.container);
+	}
+	return entries;
+}
+
+/**
+ * A legacy container (`~/.omp/wt/<encoded-project>/<branch-or-id>`): the
+ * entries under it, and its own entry when it has one — an empty directory, a
+ * stray, or one nobody can read.
+ */
+async function classifyContainer(dir: string): Promise<{ children: WorktreeEntry[]; container?: WorktreeEntry }> {
+	const childListing = await fs.readdirLookup(dir);
+	if (childListing.kind === "unknown") {
+		return {
+			children: [],
+			container: {
 				path: dir,
 				kind: "stray",
 				orphanReason: `could not be listed (${childListing.reason})`,
 				keep: true,
+			},
+		};
+	}
+	if (childListing.kind === "absent") return { children: [] };
+	const children = childListing.value;
+	const entries: WorktreeEntry[] = [];
+	let nested = 0;
+	let unclassifiable = false;
+	for (const child of children) {
+		const childDir = path.join(dir, child);
+		const childStat = await fs.lstatLookup(childDir);
+		if (childStat.kind === "unknown") {
+			entries.push({
+				path: childDir,
+				kind: "stray",
+				orphanReason: `could not be read (${childStat.reason})`,
+				keep: true,
 			});
+			// Keeping the child while calling its parent a stray deletes the
+			// child with the parent: a removal of the container takes
+			// everything under it, so a parent holding something nobody
+			// could classify is not a stray either.
+			unclassifiable = true;
 			continue;
 		}
-		if (childListing.kind === "absent") continue;
-		const children = childListing.value;
-		let nested = 0;
-		let unclassifiable = false;
-		for (const child of children) {
-			const childDir = path.join(dir, child);
-			const childStat = await fs.statLookup(childDir);
-			if (childStat.kind === "unknown") {
-				entries.push({
-					path: childDir,
-					kind: "stray",
-					orphanReason: `could not be read (${childStat.reason})`,
-					keep: true,
-				});
-				// Keeping the child while calling its parent a stray deletes the
-				// child with the parent: a removal of the container takes
-				// everything under it, so a parent holding something nobody
-				// could classify is not a stray either.
-				unclassifiable = true;
-				continue;
-			}
-			if (childStat.kind === "absent" || !childStat.value.isDirectory()) continue;
-			const childClassified = await classifyDir(childDir);
-			if (childClassified) {
-				entries.push(childClassified);
-				nested += 1;
-				if (childClassified.keep) unclassifiable = true;
-			}
+		if (childStat.kind === "absent") continue;
+		if (childStat.value.isSymbolicLink()) {
+			entries.push({ path: childDir, kind: "stray", orphanReason: SYMLINK_ENTRY_REASON, keep: true });
+			unclassifiable = true;
+			continue;
 		}
-		if (unclassifiable) {
-			entries.push({
+		if (!childStat.value.isDirectory()) continue;
+		const childClassified = await classifyDir(childDir);
+		if (childClassified) {
+			entries.push(childClassified);
+			nested += 1;
+			if (childClassified.keep) unclassifiable = true;
+		}
+	}
+	if (unclassifiable) {
+		return {
+			children: entries,
+			container: {
 				path: dir,
 				kind: "stray",
 				orphanReason: "holds a directory this process could not read",
 				keep: true,
-			});
-			continue;
-		}
-		if (nested === 0) {
-			entries.push({
-				path: dir,
-				kind: children.length === 0 ? "empty" : "stray",
-				orphanReason: children.length === 0 ? "empty directory" : "no recognizable worktree contents",
-			});
-		}
+			},
+		};
 	}
-	return entries;
+	if (nested > 0) return { children: entries };
+	return {
+		children: entries,
+		container: {
+			path: dir,
+			kind: children.length === 0 ? "empty" : "stray",
+			orphanReason: children.length === 0 ? "empty directory" : "no recognizable worktree contents",
+		},
+	};
+}
+
+/** What a removal found when it came to act. */
+type Removal = { removed: true } | { removed: false; reason: string };
+
+/**
+ * Remove one scanned entry, deciding again at the moment of removal.
+ *
+ * The scan is evidence gathered earlier, and nothing is deleted on it. An
+ * empty directory is the first moment of a sandbox — `ensureIsolation` mints
+ * it, resolves its backend, then takes the sandbox lock and claims it — and a
+ * removal that trusted the scan's "empty" deleted the workspace that finished
+ * materialising in between, with a task's only copy of its work. So every
+ * removal, whatever the scan called the entry, takes the sandbox lock on the
+ * entry's own directory, pins that directory by identity, classifies it again
+ * by the scan's rules, and goes on only when it is still the same kind of
+ * entry and still removable (or `--all` was asked for). It is then renamed
+ * aside in one step under the hold, and only the pinned directory is deleted.
+ */
+async function removeEntry(target: WorktreeEntry, all: boolean): Promise<Removal> {
+	// Resolved to the directory itself first: locking and deleting the scanned
+	// path lets a symlink swapped in between point the removal at a different,
+	// live sandbox, and a lock on an alias excludes nobody.
+	const dir = await resolveSandboxIdentity(target.path);
+	// Through the one entry point, so the decision and the removal share a
+	// recorded hold and anything they call detects it rather than queueing
+	// behind this command.
+	return await withSandboxLock(dir, "remove", async (): Promise<Removal> => {
+		let pin: fs.DirectoryPin;
+		try {
+			pin = await fs.pinDirectory(dir);
+		} catch (error) {
+			return {
+				removed: false,
+				reason: `it is no longer a directory (${error instanceof Error ? error.message : String(error)})`,
+			};
+		}
+		try {
+			// The scan's rules, asked again: the directory itself, or a
+			// container's own entry.
+			const now = (await classifyDir(dir)) ?? (await classifyContainer(dir)).container ?? null;
+			if (now === null || now.kind !== target.kind) {
+				return { removed: false, reason: `it changed since the scan (now ${now?.kind ?? "unrecognized"})` };
+			}
+			if (now.keep) return { removed: false, reason: now.orphanReason ?? "it could not be read" };
+			if (!all && now.orphanReason === undefined) {
+				return { removed: false, reason: now.keptReason ?? "in use when the removal came round" };
+			}
+			// The stop and the rename act on a pathname, so each is preceded by a
+			// check that the name still holds the pinned directory.
+			const beforeStop = await fs.checkPinnedDirectory(dir, pin);
+			if (!beforeStop.same) return { removed: false, reason: beforeStop.reason };
+			if (now.kind === "task-isolation") await stopRetainedMount(dir);
+			const present = await fs.checkPinnedDirectory(dir, pin);
+			if (!present.same) return { removed: false, reason: present.reason };
+			// One atomic step under the hold, then the delete. Checking the
+			// hold immediately before a recursive removal still leaves the
+			// removal running after the hold ends, and it erased a file a peer
+			// created in a directory it was already walking. After the rename
+			// there is nothing for a peer to lose: whatever it writes to the
+			// live path is not inside what goes.
+			// Nothing is removed through a mount, whatever the record said or
+			// failed to say: the mount table is asked now.
+			const mounts = await fs.liveMountsUnder(dir);
+			if (mounts.length > 0) throw new Error(`${dir} still has ${mounts.join(", ")} mounted; refusing to remove it`);
+			const aside = `${dir}${ISOLATION_REMOVING_SUFFIX}${Snowflake.next()}`;
+			requireSandboxLockHeld(dir, "remove");
+			await fs.rename(dir, aside);
+			const moved = await fs.checkPinnedDirectory(aside, pin);
+			if (!moved.same) {
+				await fs.rename(aside, dir).catch(() => undefined);
+				throw new Error(`${dir} was replaced while it was being removed (${moved.reason}); nothing was deleted`);
+			}
+			// Asked again of what is about to go, after the move: the move takes
+			// a mount inside the tree with it, and the removal must not walk
+			// into one, whenever it appeared.
+			const asideMounts = await fs.liveMountsUnder(aside);
+			if (asideMounts.length > 0) {
+				await fs.rename(aside, dir).catch(() => undefined);
+				throw new Error(`${dir} has ${asideMounts.join(", ")} mounted in it; refusing to remove it`);
+			}
+			await fs.rm(aside, { recursive: true, force: true });
+			return { removed: true };
+		} finally {
+			await pin.release();
+		}
+	});
 }
 
 async function classifyDir(dir: string): Promise<WorktreeEntry | null> {
@@ -472,7 +584,7 @@ async function classifyDir(dir: string): Promise<WorktreeEntry | null> {
 	return {
 		path: dir,
 		kind: "task-isolation",
-		orphanReason: decision.reclaimable ? decision.reason : undefined,
+		...(decision.reclaimable ? { orphanReason: decision.reason } : { keptReason: decision.reason }),
 	};
 }
 
@@ -564,5 +676,6 @@ function formatEntryDetail(entry: WorktreeEntry): string {
 		parts.push("unrecognized contents");
 	}
 	if (entry.orphanReason) parts.push(entry.orphanReason);
+	if (entry.keptReason) parts.push(entry.keptReason);
 	return parts.join(" — ");
 }

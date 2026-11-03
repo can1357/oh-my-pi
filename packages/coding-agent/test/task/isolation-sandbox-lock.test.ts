@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
-import { isFileLockHeld } from "@oh-my-pi/pi-utils";
+import { isFileLockHeld, logger } from "@oh-my-pi/pi-utils";
 import {
 	deferTeardownWhileLeased,
 	forgetIsolationWorkspace,
@@ -196,50 +196,23 @@ describe("the sandbox lock", () => {
 		expect(claim.kind === "unknown" ? claim.reason : "").toContain("EIO");
 	});
 
-	it("keeps working when the notice throws on write", async () => {
-		// A closed descriptor throws synchronously from `write`.
+	it("says it is waiting in the log, and never on stderr", async () => {
+		// The waits run in the host process, under the TUI, where a raw write
+		// to stderr lands in the middle of the rendered screen.
 		const { baseDir } = await makeSandbox();
 		const lock = await acquireSandboxLockWithNotice(baseDir, "hold for the test");
-		const spy = vi.spyOn(process.stderr, "write").mockImplementation(() => {
-			throw Object.assign(new Error("EBADF: bad file descriptor"), { code: "EBADF" });
-		});
-		const waiting = withSandboxLock(baseDir, "wait through a closed descriptor", async () => "granted");
+		const stderr = vi.spyOn(process.stderr, "write");
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		const waiting = withSandboxLock(baseDir, "wait under the TUI", async () => "granted");
 
+		// Past the notice deadline, so the notice is certainly given.
 		await scheduler.wait(1_300);
-		// Restored before the grant: everything else in this process writes to
-		// stderr too, and the notice is the only writer under test.
-		spy.mockRestore();
 		lock.release();
 
 		expect(await waiting).toBe("granted");
-	});
-
-	it("keeps working when the notice fails after the write returns", async () => {
-		// A diagnostic must never be fatal. A closed stderr and a broken pipe
-		// both made children exit 1 while waiting for a lock that was about to
-		// be granted.
-		const { baseDir } = await makeSandbox();
-		const lock = await acquireSandboxLockWithNotice(baseDir, "hold for the test");
-		// The shape the guard missed: a broken pipe does not throw from
-		// `write`, it reports later through the callback and the stream's
-		// error event, and with nothing listening that terminates the process.
-		const spy = vi.spyOn(process.stderr, "write").mockImplementation(((
-			_chunk: unknown,
-			callback?: (error?: Error | null) => void,
-		) => {
-			const failure = Object.assign(new Error("EPIPE: broken pipe"), { code: "EPIPE" });
-			callback?.(failure);
-			process.stderr.emit("error", failure);
-			return false;
-		}) as unknown as typeof process.stderr.write);
-		const waiting = withSandboxLock(baseDir, "wait through a broken pipe", async () => "granted");
-
-		// Past the notice deadline, so the write is certainly attempted.
-		await scheduler.wait(1_300);
-		spy.mockRestore();
-		lock.release();
-
-		expect(await waiting).toBe("granted");
+		const notice = (text: unknown) => String(text).includes("Waiting for the isolation workspace lock");
+		expect(warn.mock.calls.some(([message]) => notice(message))).toBe(true);
+		expect(stderr.mock.calls.some(([chunk]) => notice(chunk))).toBe(false);
 	});
 });
 

@@ -1,4 +1,4 @@
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, toError } from "@oh-my-pi/pi-utils";
 import { Settings } from "../config/settings";
 import { type OutputArtifactError, OutputSink } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { statusEventKey } from "@oh-my-pi/pi-tui/tools/eval";
@@ -80,9 +80,9 @@ export interface KernelExecutorBaseOptions {
 	artifactPath?: string;
 	/**
 	 * Set by the kernel session registry. Called once, when the cell starts on
-	 * its kernel, and returns the line that cell must open with — today, that
-	 * the kernel the session previously used here was shut down and its state
-	 * is gone. Returns undefined when there is nothing to say.
+	 * its kernel, and returns the line that cell must open with: that the
+	 * kernel the session previously used here was reclaimed, or died, and its
+	 * state is gone. Returns undefined when there is nothing to say.
 	 */
 	claimKernelNotice?: () => string | undefined;
 }
@@ -145,6 +145,15 @@ export function formatKernelReclaimNotice(
 	teardown: keyof typeof RECLAIM_TEARDOWN,
 ): string {
 	return `Kernel restarted: the previous ${runtimeLabel} for ${directory} was reclaimed after this session moved away from it, so variables, imports and definitions from earlier cells are gone; re-run needed setup. ${RECLAIM_TEARDOWN[teardown]}`;
+}
+
+/**
+ * First line of a cell that runs on a kernel which replaced one that died on
+ * its own, not by a reset, a disposal or a reclaim. Mirrors the
+ * `eval-state-context` reminder wording so agents recognise it.
+ */
+export function formatKernelRestartNotice(runtimeLabel: string): string {
+	return `Kernel restarted: the previous ${runtimeLabel} is dead; state is unavailable. Re-run needed setup: variables, imports and definitions from earlier cells are gone.`;
 }
 
 /** Minimal kernel surface the base executor drives, satisfied by every backend kernel. */
@@ -561,8 +570,10 @@ export async function executeWithKernelBase<
 				})
 			: null;
 
+	// Claimed once, as the cell starts. A thrown error drops streamed output,
+	// so the catch below carries the line too.
+	const notice = options?.claimKernelNotice?.();
 	try {
-		const notice = options?.claimKernelNotice?.();
 		if (notice !== undefined) sink.push(`${notice}\n`);
 		if (remainingMs !== undefined && remainingMs <= 0) {
 			throw new cancelledErrorClass(true);
@@ -661,8 +672,10 @@ export async function executeWithKernelBase<
 				stdinRequested: false,
 			};
 		}
-		const error = err instanceof Error ? err : new Error(String(err));
+		const error = toError(err);
 		logger.error(`${errorLogLabel} execution failed`, { error: error.message });
+		// The notice was claimed for this cell; a thrown error drops streamed output, so carry it here.
+		if (notice !== undefined) error.message = `${notice}\n${error.message}`;
 		throw error;
 	} finally {
 		await sink.dispose();

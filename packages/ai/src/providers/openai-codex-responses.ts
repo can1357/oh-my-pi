@@ -15,6 +15,7 @@ import {
 	$env,
 	$flag,
 	asRecord,
+	toError,
 	cloneJsonTree,
 	fetchWithRetry,
 	getInstallId,
@@ -3084,7 +3085,7 @@ class CodexStreamProcessor {
 			await this.#reopenSseStream(state);
 			return true;
 		}
-		const streamError = error instanceof Error ? error : new Error(String(error));
+		const streamError = toError(error);
 		const replayingBufferedOutputOverSse = this.output.content.length > 0;
 		const fatalWebSocketMessage = streamError.message.toLowerCase();
 		const isFatal = CODEX_WEBSOCKET_FATAL_PATTERNS.some(pattern =>

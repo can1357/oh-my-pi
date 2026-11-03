@@ -40,12 +40,16 @@ const TERMINATE_GRACE: Duration = Duration::from_secs(5);
 const TRUNCATION_MARKER: &str = "\n[git subprocess output truncated at the capture limit]\n";
 
 /// Captured result of a completed git invocation.
+///
+/// Stdout is text for most callers. A path list keeps it as the bytes git
+/// wrote (`CliOutput<Vec<u8>>`): a name that is not UTF-8 decoded lossily
+/// names a file that does not exist.
 #[derive(Debug, Clone)]
-pub(crate) struct CliOutput {
+pub(crate) struct CliOutput<Out = String> {
 	/// Process exit code (`124` designates a deadline kill).
 	pub exit_code:   i32,
 	/// Captured stdout, possibly truncated.
-	pub stdout:      String,
+	pub stdout:      Out,
 	/// Captured stderr, possibly truncated.
 	pub stderr:      String,
 	/// Why the stdout capture stopped before the stream ended, if it did.
@@ -87,18 +91,43 @@ pub(crate) struct Capture {
 	pub loss: Option<CaptureLoss>,
 }
 
-impl CliOutput {
-	/// Convert a non-zero exit into [`Error::Cli`].
-	pub fn into_checked(self, args: &[String]) -> Result<Self> {
+impl<Out> CliOutput<Out> {
+	/// Convert a non-zero exit into [`Error::Cli`], whose stdout is `text`.
+	fn checked(self, args: &[String], text: impl FnOnce(Out) -> String) -> Result<Self> {
 		if self.exit_code == 0 {
 			return Ok(self);
 		}
 		Err(Error::Cli {
 			command:   format!("git {}", args.join(" ")),
 			exit_code: self.exit_code,
-			stdout:    self.stdout,
+			stdout:    text(self.stdout),
 			stderr:    self.stderr,
 		})
+	}
+}
+
+impl CliOutput {
+	/// Convert a non-zero exit into [`Error::Cli`].
+	pub fn into_checked(self, args: &[String]) -> Result<Self> {
+		self.checked(args, |stdout| stdout)
+	}
+}
+
+impl CliOutput<Vec<u8>> {
+	/// Convert a non-zero exit into [`Error::Cli`].
+	pub fn into_checked(self, args: &[String]) -> Result<Self> {
+		self.checked(args, String::from_utf8_lossy_owned)
+	}
+
+	/// Stdout as text, with what is not UTF-8 replaced.
+	fn into_text(self) -> CliOutput {
+		CliOutput {
+			exit_code:   self.exit_code,
+			stdout:      String::from_utf8_lossy_owned(self.stdout),
+			stderr:      self.stderr,
+			stdout_loss: self.stdout_loss,
+			stderr_loss: self.stderr_loss,
+		}
 	}
 }
 
@@ -310,8 +339,8 @@ pub(crate) fn is_spawn_failure(err: &Error) -> bool {
 /// Whether captured output hit [`OUTPUT_LIMIT_BYTES`] and therefore lost
 /// bytes. Callers whose output is a value rather than a diagnostic (path
 /// lists) must retry in-process or fail, never return the short result.
-pub(crate) fn is_truncated(text: &str) -> bool {
-	text.ends_with(TRUNCATION_MARKER)
+pub(crate) fn is_truncated(output: impl AsRef<[u8]>) -> bool {
+	output.as_ref().ends_with(TRUNCATION_MARKER.as_bytes())
 }
 
 /// Whether git refused the checkout under its `safe.directory` ownership
@@ -367,6 +396,7 @@ pub(crate) fn run_sync_write(
 	input: &SyncWrite<'_>,
 ) -> Result<CliOutput> {
 	run_sync_impl(cwd, args, timeout, OUTPUT_LIMIT_BYTES, Some(input))
+		.map(CliOutput::<Vec<u8>>::into_text)
 }
 
 /// [`run_sync`] with an explicit retention cap. The cap is a parameter rather
@@ -379,6 +409,16 @@ pub(crate) fn run_sync_capped(
 	timeout: Duration,
 	limit: usize,
 ) -> Result<CliOutput> {
+	run_sync_capped_bytes(cwd, args, timeout, limit).map(CliOutput::<Vec<u8>>::into_text)
+}
+
+/// [`run_sync_capped`], keeping stdout as the bytes git wrote.
+pub(crate) fn run_sync_capped_bytes(
+	cwd: &Path,
+	args: &[String],
+	timeout: Duration,
+	limit: usize,
+) -> Result<CliOutput<Vec<u8>>> {
 	run_sync_impl(cwd, args, timeout, limit, None)
 }
 
@@ -389,7 +429,7 @@ fn run_sync_impl(
 	timeout: Duration,
 	limit: usize,
 	write: Option<&SyncWrite<'_>>,
-) -> Result<CliOutput> {
+) -> Result<CliOutput<Vec<u8>>> {
 	let argv = hardened_args(args, write.is_none());
 	let mut cmd = std::process::Command::new("git");
 	cmd.args(&argv)
@@ -446,7 +486,7 @@ fn wait_sync(
 	stdout: SyncReader,
 	stderr: SyncReader,
 	timeout: Duration,
-) -> Result<CliOutput> {
+) -> Result<CliOutput<Vec<u8>>> {
 	let deadline = std::time::Instant::now() + timeout;
 	let status = loop {
 		match child.try_wait()? {
@@ -468,15 +508,22 @@ fn wait_sync(
 	};
 	Ok(CliOutput {
 		exit_code:   status.code().unwrap_or(-1),
-		stdout:      stdout.text,
-		stderr:      stderr.text,
+		stdout:      stdout.bytes,
+		stderr:      String::from_utf8_lossy_owned(stderr.bytes),
 		stdout_loss: stdout.loss,
 		stderr_loss: stderr.loss,
 	})
 }
 
+/// One drained stream: the bytes kept, ending in [`TRUNCATION_MARKER`] when
+/// the cap cut them, and why draining stopped early if it did.
+struct Drained {
+	bytes: Vec<u8>,
+	loss:  Option<CaptureLoss>,
+}
+
 /// A stream's reader thread, or why it could not start.
-type SyncReader = std::result::Result<std::thread::JoinHandle<Capture>, CaptureLoss>;
+type SyncReader = std::result::Result<std::thread::JoinHandle<Drained>, CaptureLoss>;
 
 /// Drain a child stream on a helper thread, mirroring [`read_capped`].
 ///
@@ -497,19 +544,19 @@ fn spawn_sync_reader(
 
 /// What a [`spawn_sync_reader`] thread captured. One that never started, or
 /// that panicked, leaves nothing the caller can take as the whole stream.
-fn finish_sync_reader(reader: SyncReader) -> Capture {
+fn finish_sync_reader(reader: SyncReader) -> Drained {
 	let loss = match reader.map(std::thread::JoinHandle::join) {
-		Ok(Ok(capture)) => return capture,
+		Ok(Ok(drained)) => return drained,
 		Ok(Err(_panic)) => CaptureLoss::Panic,
 		Err(loss) => loss,
 	};
-	Capture { text: String::new(), loss: Some(loss) }
+	Drained { bytes: Vec::new(), loss: Some(loss) }
 }
 
 /// Synchronous mirror of [`read_capped`]: cap retention at `limit` while
 /// draining to EOF so the child never blocks. An interrupted read is retried;
 /// any other read error ends the capture, and is kept as its loss.
-fn read_capped_sync(mut stream: impl std::io::Read, limit: usize) -> Capture {
+fn read_capped_sync(mut stream: impl std::io::Read, limit: usize) -> Drained {
 	let mut retained: Vec<u8> = Vec::new();
 	let mut buf = [0u8; 8 * 1024];
 	let mut truncated = false;
@@ -535,11 +582,10 @@ fn read_capped_sync(mut stream: impl std::io::Read, limit: usize) -> Capture {
 			truncated = true;
 		}
 	}
-	let mut text = String::from_utf8_lossy_owned(retained);
 	if truncated {
-		text.push_str(TRUNCATION_MARKER);
+		retained.extend_from_slice(TRUNCATION_MARKER.as_bytes());
 	}
-	Capture { text, loss }
+	Drained { bytes: retained, loss }
 }
 
 fn spawn_error(cwd: &Path, err: std::io::Error) -> Error {
@@ -827,9 +873,9 @@ mod tests {
 		let reads = Scripted(
 			[Ok(WARNING_A), Err(std::io::ErrorKind::Interrupted.into()), Ok(WARNING_B)].into(),
 		);
-		let capture = read_capped_sync(reads, OUTPUT_LIMIT_BYTES);
-		assert_eq!(capture.text.as_bytes(), [WARNING_A, WARNING_B].concat());
-		assert!(capture.loss.is_none(), "{:?}", capture.loss);
+		let drained = read_capped_sync(reads, OUTPUT_LIMIT_BYTES);
+		assert_eq!(drained.bytes, [WARNING_A, WARNING_B].concat());
+		assert!(drained.loss.is_none(), "{:?}", drained.loss);
 	}
 
 	#[test]
@@ -839,12 +885,12 @@ mod tests {
 		let reads = Scripted(
 			[Ok(WARNING_A), Err(std::io::Error::other("injected read failure")), Ok(WARNING_B)].into(),
 		);
-		let capture = read_capped_sync(reads, OUTPUT_LIMIT_BYTES);
-		assert_eq!(capture.text.as_bytes(), WARNING_A);
+		let drained = read_capped_sync(reads, OUTPUT_LIMIT_BYTES);
+		assert_eq!(drained.bytes, WARNING_A);
 		assert!(
-			matches!(&capture.loss, Some(CaptureLoss::Read(err)) if err.contains("injected read failure")),
+			matches!(&drained.loss, Some(CaptureLoss::Read(err)) if err.contains("injected read failure")),
 			"{:?}",
-			capture.loss
+			drained.loss
 		);
 	}
 

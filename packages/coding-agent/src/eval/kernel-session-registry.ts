@@ -5,6 +5,7 @@ import {
 	attachSessionOwner,
 	type CancelledErrorClass,
 	formatKernelReclaimNotice,
+	formatKernelRestartNotice,
 	getRemainingTimeoutMs,
 	isCancellationError,
 	isTimedOutCancellation,
@@ -209,6 +210,13 @@ export function createKernelSessionRegistry<
 	 * disposal retries it; `disposeAll` retries every one.
 	 */
 	const retained = new Set<TSession>();
+	/**
+	 * The kernel each session record's latest started cell ran on. A cell on a
+	 * different live kernel means the one before it died; an intentional
+	 * teardown — a reclaim, a disposal — drops the entry, so the replacement it
+	 * leads to is no surprise restart.
+	 */
+	const servedKernels = new WeakMap<TSession, TKernel>();
 
 	const context: KernelSessionRegistryContext<TKernel, TOptions, TSession> = {
 		sessions,
@@ -477,6 +485,9 @@ export function createKernelSessionRegistry<
 		// step, not after the shutdown, and nothing that settles later writes
 		// it again.
 		recordReclaimedKernel(key, session);
+		// A reclaim is intentional: its own line explains what follows, and the
+		// replacement it leads to is no surprise restart.
+		servedKernels.delete(session);
 		const result = await settleShutdown(session, false);
 		if (result.status === "fulfilled" && result.value?.confirmed !== false) return "settled";
 		logger.warn(`${descriptor.languageLabel} kernel left behind by its session did not confirm exit`, {
@@ -531,6 +542,8 @@ export function createKernelSessionRegistry<
 	 * attempt and stays retained until that I/O completes or is aborted.
 	 */
 	async function shutdownForDisposal(session: TSession): Promise<boolean> {
+		// A disposal is intentional, so a later replacement is no surprise restart.
+		servedKernels.delete(session);
 		const result = await settleShutdown(session, false);
 		if (result.status === "fulfilled" && result.value?.confirmed !== false) return true;
 		logger.warn(`${descriptor.languageLabel} kernel shutdown not confirmed`, {
@@ -789,8 +802,9 @@ export function createKernelSessionRegistry<
 			session = await acquireSession(sessionKey, sessionId, cwd, options);
 			reconcileSupersededSessions();
 			throwIfCallerCancelled(options);
-			const kernel = await acquireLiveSessionKernel(session, cwd, options);
-			if (!isCurrent(session, kernel)) throw new descriptor.cancelledErrorClass(false);
+			const held = session;
+			const kernel = await acquireLiveSessionKernel(held, cwd, options);
+			if (!isCurrent(held, kernel)) throw new descriptor.cancelledErrorClass(false);
 			throwIfCallerCancelled(options);
 			// An owner whose kernel here a reclaim took is told so by its first
 			// cell that runs on another kernel — whether the cell started a fresh
@@ -802,17 +816,26 @@ export function createKernelSessionRegistry<
 			// Written by the claim inside the executor, so held in an object:
 			// control-flow narrowing does not see a closure's assignment.
 			const claim: { announced?: ReclaimedKernel<TKernel> } = {};
+			// One line at most. A reclaim is the specific cause, so its line wins
+			// over the generic one for a kernel that died; either way this kernel
+			// becomes the one served, so the replacement this cell already
+			// explained is not announced again by the next cell.
 			const claimKernelNotice = (): string | undefined => {
-				if (owner === undefined) return undefined;
-				const record = reclaimedKernels.get(owner)?.get(sessionKey);
-				if (record === undefined || record.announcing) return undefined;
-				if (record.kernel === kernel) {
-					forgetReclaimedKernel(owner, sessionKey, record);
-					return undefined;
+				const previous = servedKernels.get(held);
+				servedKernels.set(held, kernel);
+				const record = owner === undefined ? undefined : reclaimedKernels.get(owner)?.get(sessionKey);
+				if (record !== undefined && !record.announcing) {
+					if (record.kernel !== kernel) {
+						record.announcing = true;
+						claim.announced = record;
+						return formatKernelReclaimNotice(`${descriptor.languageLabel} kernel`, record.cwd, "process-group");
+					}
+					if (owner !== undefined) forgetReclaimedKernel(owner, sessionKey, record);
 				}
-				record.announcing = true;
-				claim.announced = record;
-				return formatKernelReclaimNotice(`${descriptor.languageLabel} kernel`, record.cwd, "process-group");
+				if (previous !== undefined && previous !== kernel) {
+					return formatKernelRestartNotice(`${descriptor.languageLabel} kernel`);
+				}
+				return undefined;
 			};
 			const runOptions = { ...options, cwd, claimKernelNotice };
 			try {
@@ -823,16 +846,29 @@ export function createKernelSessionRegistry<
 				}
 				return result;
 			} catch (err) {
-				// A cell that threw returns no output, so the notice it carried
-				// reached nobody. The record stays, and the next cell carries it.
-				if (claim.announced !== undefined) claim.announced.announcing = false;
 				if (
 					descriptor.isCancellation?.(err) ||
 					isCancellationError(err, descriptor.cancelledErrorClass) ||
 					options.signal?.aborted
-				)
+				) {
+					// A cancellation that throws brings no output back, so the
+					// reclaim line it claimed reached nobody; the next cell says it.
+					if (claim.announced !== undefined) claim.announced.announcing = false;
 					throw err;
-				if (kernel.isAlive()) throw err;
+				}
+				if (kernel.isAlive()) {
+					// The error reaches the caller as it is, and the executor
+					// carries the claimed line in its message: said once, here.
+					if (claim.announced !== undefined && owner !== undefined) {
+						forgetReclaimedKernel(owner, sessionKey, claim.announced);
+					}
+					throw err;
+				}
+				// Replaced below by an error that does not carry the line, so the
+				// reclaim line reached nobody: the next cell on this key says it.
+				// A restart line needs no such help — the next cell runs on
+				// another kernel than this one, and says so.
+				if (claim.announced !== undefined) claim.announced.announcing = false;
 				throw new Error(
 					`${descriptor.languageLabel} kernel died during execution; completion is uncertain and the cell was not replayed. The next call will start a fresh kernel.`,
 					{ cause: err },

@@ -1,5 +1,5 @@
 import * as path from "node:path";
-import { logger, Snowflake, workerHostEntry } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, Snowflake, workerHostEntry } from "@oh-my-pi/pi-utils";
 import {
 	createWorkerHandle,
 	createWorkerSubprocess,
@@ -19,6 +19,7 @@ import {
 	attachSessionOwner,
 	EvalKernelNotRunningError,
 	formatKernelReclaimNotice,
+	formatKernelRestartNotice,
 	type SessionOwners,
 } from "../executor-base";
 import { shouldDetachKernel } from "../py/spawn-options";
@@ -177,6 +178,13 @@ interface UnconfirmedWorker {
  */
 const unconfirmedWorkers = new Set<UnconfirmedWorker>();
 
+/**
+ * Owners of session keys whose worker died on its own — not by a reset, a
+ * disposal or a reclaim, none of which pass through {@link killSessionFor}
+ * with their context still in the map. The next cell on such a key says the
+ * worker's state is gone.
+ */
+const lostSessions = new Map<string, Set<string>>();
 // Worker startup (module-graph import + WorkerCore construction) is infrastructure
 // cost, not user compute. Floor it independently of Bun's 5s default per-test timeout
 // so a slow cold-start under load isn't aborted mid-init — terminating a still-
@@ -283,11 +291,19 @@ export async function executeInVmContext(options: {
 		// carries it when the cell throws, and after the acquisition so a
 		// startup that fails leaves it owed.
 		const reclaimed = ownerId === undefined ? undefined : reclaimedWorkers.get(ownerId)?.get(sessionKey);
+		let announced = false;
 		if (reclaimed !== undefined && ownerId !== undefined) {
 			forgetReclaimedWorker(ownerId, sessionKey);
 			if (reclaimed.kernelId !== session.kernelId) {
 				options.runState.onText?.(`${formatKernelReclaimNotice("JS worker", reclaimed.cwd, "worker")}\n`);
+				announced = true;
 			}
+		}
+		// A worker that died on its own: the next cell on the key says so, in the
+		// same place and for the same reasons — one line at most, and the reclaim
+		// line, the specific cause, wins.
+		if (!options.reset && lostSessions.delete(sessionKey) && !announced) {
+			options.runState.onText?.(`${formatKernelRestartNotice("JS worker")}\n`);
 		}
 		const result = await runOnce(session, options);
 		if (session.state === "alive" && path.isAbsolute(options.filename)) {
@@ -417,10 +433,6 @@ export function borrowVmContext(sessionKey: string): () => void {
 	};
 }
 
-function isUnknownRecord(value: unknown): value is Record<string, unknown> {
-	return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
 /** Describe or invoke tools defined in a retained JavaScript kernel. */
 export async function invokeJsTool(
 	request: JsToolRequest,
@@ -470,7 +482,7 @@ export async function invokeJsTool(
 		session.pending.delete(runId);
 	}
 
-	if (!isUnknownRecord(envelope) || envelope.ok !== true) {
+	if (!isRecord(envelope) || envelope.ok !== true) {
 		return { ok: false, error: "JavaScript tool request returned an invalid response" };
 	}
 	if (request.op === "call") {
@@ -481,9 +493,9 @@ export async function invokeJsTool(
 	const rawTools = Array.isArray(envelope.tools) ? envelope.tools : [];
 	const tools: EvalToolDescriptor[] = [];
 	for (const rawTool of rawTools) {
-		if (!isUnknownRecord(rawTool)) continue;
+		if (!isRecord(rawTool)) continue;
 		const { name, description, parameters } = rawTool;
-		if (typeof name !== "string" || typeof description !== "string" || !isUnknownRecord(parameters)) continue;
+		if (typeof name !== "string" || typeof description !== "string" || !isRecord(parameters)) continue;
 		tools.push({ name, description, parameters, language: "js" });
 	}
 	const missing = Array.isArray(envelope.missing)
@@ -589,6 +601,7 @@ export async function runIfSnapshotMatches(options: {
 }
 
 export async function resetVmContext(sessionKey: string): Promise<void> {
+	lostSessions.delete(sessionKey);
 	const session = sessions.get(sessionKey) ?? (await startingSessions.get(sessionKey)?.promise.catch(() => undefined));
 	if (!session) return;
 	reaper.cancel(session);
@@ -632,6 +645,9 @@ export async function disposeAllVmContexts(): Promise<void> {
 	// A joined reclaim whose kill went unconfirmed gets one more attempt; what
 	// this disposal's own kills could not confirm is kept for the next one.
 	await retryUnconfirmedWorkers(unconfirmedOf(reclaiming));
+	// After every await: a worker that died while this disposal ran marked its
+	// key lost, and nothing is left to be told.
+	lostSessions.clear();
 }
 
 /**
@@ -655,6 +671,9 @@ export async function disposeVmContextsByOwner(ownerId: string): Promise<void> {
 	// on it, and nobody is left to tell what a reclaim took from it.
 	ownerKeys.delete(ownerId);
 	reclaimedWorkers.delete(ownerId);
+	for (const [sessionKey, ownerIds] of lostSessions) {
+		if (ownerIds.delete(ownerId) && ownerIds.size === 0) lostSessions.delete(sessionKey);
+	}
 	const toKill: JsSession[] = [];
 	for (const [key, session] of Array.from(sessions.entries())) {
 		if (!session.ownerIds.has(ownerId)) continue;
@@ -1175,6 +1194,7 @@ function settlePending(session: JsSession, msg: Extract<WorkerOutbound, { type: 
 async function killSessionFor(session: JsSession, error: Error, options: { force: boolean }): Promise<void> {
 	if (sessions.get(session.sessionKey) === session) {
 		sessions.delete(session.sessionKey);
+		lostSessions.set(session.sessionKey, new Set(session.ownerIds));
 	}
 	await killSession(session, error, options);
 }

@@ -242,6 +242,20 @@ export function splitInternalUrlSel(
 	return { path, sel: chunks.join(":") };
 }
 
+/** A read query after a filesystem path: `?key=` (`?q=…`, `?limit=…&where=…`), not a `\\?\` long-path prefix. */
+const READ_QUERY_RE = /(?<!^\\\\)\?\w+=/;
+
+/**
+ * Split a filesystem read target from its query (`data.json?q=.items` →
+ * `data.json`, `?q=.items`), the display twin of the read tool's JSON, SQLite
+ * and image-question parsers. URLs own their query string and stay whole, as
+ * does a `?` inside a file name.
+ */
+export function splitReadQuery(readPath: string): { path: string; query?: string } {
+	const at = splitUrlScheme(readPath) ? -1 : readPath.search(READ_QUERY_RE);
+	return at > 0 ? { path: readPath.slice(0, at), query: readPath.slice(at) } : { path: readPath };
+}
+
 /** Recognize HTTP URLs and www-prefixed external read targets. */
 export function isReadableUrlPath(value: string): boolean {
 	return /^https?:\/\/?/i.test(value) || /^www\./i.test(value);

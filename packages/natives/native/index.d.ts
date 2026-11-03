@@ -428,6 +428,24 @@ export declare class MacAppearanceObserver {
   stop(): void
 }
 
+/** The app the user had in front when `macOSFrontApp()` read it. */
+export declare class MacOSFrontApp {
+  /**
+   * Puts this app back in front, without raising its windows, each time the
+   * app that took the front from it takes it again during the next
+   * `durationMs`. Ends early once a hardware mouse button or ⌘/⌃ is used
+   * after the app was read, the app came from a launcher or Spotlight panel,
+   * or a different app comes forward: that is the user picking an app.
+   * Typing does not end it, and a hand-back macOS refuses for a key typed
+   * meanwhile is asked again. Holds nothing when called over a second after
+   * the latest read, as picks made since then went unwatched. Owns desktop
+   * input/focus control only for each hand-back, and rejects if another
+   * operation owns it then. Resolves how many times it put the app back.
+   */
+  keepInFront(durationMs: number): Promise<number>
+}
+export type MacosFrontApp = MacOSFrontApp
+
 /** A transactional, process-owned native OAuth callback receiver. */
 export declare class NativeOAuthCallback {
   /** Create a receiver without touching the filesystem or OS registration. */
@@ -748,11 +766,12 @@ export declare class VcsGitRepo {
   /** List index or untracked paths. */
   lsFiles(others: boolean, excludeStandard: boolean, signal?: unknown | undefined | null): Promise<Array<string>>
   /**
-   * Untracked paths, plus the directories git said it could not open.
+   * Untracked paths, plus what the listing cannot answer for.
    *
    * `git ls-files --others` warns and exits 0 when it cannot open a
-   * directory, so the list alone cannot say whether it is complete. A
-   * caller that deletes a workspace on the strength of it needs both.
+   * directory, so the list alone cannot say whether it is complete; and a
+   * name that is not UTF-8 has no JS string. A caller that deletes a
+   * workspace on the strength of the list needs all three.
    */
   lsFilesWithWarnings(others: boolean, excludeStandard: boolean, signal?: unknown | undefined | null): Promise<LsFilesWithWarnings>
   /** List tree paths. */
@@ -886,7 +905,7 @@ export declare class VcsRepo {
   commitDetails(rev: string, signal?: unknown | undefined | null): Promise<VcsCommitDetails>
   /** List tracked or untracked paths. */
   lsFiles(others: boolean, excludeStandard: boolean, signal?: unknown | undefined | null): Promise<Array<string>>
-  /** Untracked paths, plus the directories git said it could not open. */
+  /** Untracked paths, plus what the listing cannot answer for. */
   lsFilesWithWarnings(others: boolean, excludeStandard: boolean, signal?: unknown | undefined | null): Promise<LsFilesWithWarnings>
 }
 
@@ -2388,6 +2407,25 @@ export declare function hashlineStripPrefixes(lines: Array<string>): Array<strin
 export declare function hasMatch(content: string | Uint8Array, pattern: string | Uint8Array, ignoreCase?: boolean | undefined | null, multiline?: boolean | undefined | null): boolean
 
 /**
+ * How `path` is held by this process: open through another descriptor and
+ * locked. `null` when it is not, and always outside Linux.
+ *
+ * Looks at the path's inode through the descriptors already open, without
+ * opening the file.
+ */
+export declare function heldFileKind(path: string): HeldFileKind | null
+
+/** What a file this process holds locked is. */
+export declare enum HeldFileKind {
+  /** A SQLite database this process has open with its locks. */
+  Database = 'database',
+  /** A SQLite WAL-index (`-shm`) file this process has open with its locks. */
+  WalIndex = 'wal-index',
+  /** Another file this process holds open with a record lock. */
+  Locked = 'locked'
+}
+
+/**
  * Highlight code and return ANSI-colored lines.
  *
  * # Arguments
@@ -2476,6 +2514,15 @@ export interface InlineSloppyRegion {
   end: number
   payload: string
 }
+
+/**
+ * Moves this process's SQLite record locks onto open-file-description locks.
+ *
+ * No other close of the file can release those (see `ofd_locks.rs`). Call it
+ * before the process opens any SQLite database. Returns whether SQLite now
+ * uses them: `false` outside Linux, or when Bun's SQLite is not found.
+ */
+export declare function installSqliteLockShim(): boolean
 
 /** Options for `IpcConnection.connect`. */
 export interface IpcConnectOptions {
@@ -2721,12 +2768,19 @@ export interface ListWorkspaceResult {
   unreadableDirectories: Array<WorkspaceDirectoryError>
 }
 
-/** An untracked listing with git's own report of what it could not read. */
+/** An untracked listing with what it cannot answer for. */
 export interface LsFilesWithWarnings {
   /** The untracked paths git listed. */
   paths: Array<string>
   /** Directories git reported it could not open, so the listing is short. */
   unreadable: Array<string>
+  /**
+   * Entries git listed whose names are not UTF-8. A JS string cannot hold
+   * such a name, so `paths` leaves them out and no path API reaches them.
+   * Each is written for a person: a byte outside a UTF-8 character as
+   * `\xNN`, a backslash doubled.
+   */
+  undecodable: Array<string>
 }
 
 /**
@@ -2756,6 +2810,12 @@ export declare function macOSAutocorrectWord(text: string, start: number, length
  * On macOS, the check runs on the dedicated spelling thread.
  */
 export declare function macOSCheckSpelling(text: string): Promise<Array<SpellingRange>>
+
+/**
+ * The app macOS `WindowServer` has in front. `null` off macOS and when the
+ * front-process SPI is unavailable.
+ */
+export declare function macOSFrontApp(): MacOSFrontApp | null
 
 /** Whether the host can use Apple's native spelling service. */
 export declare function macOSSpellCheckerAvailable(): boolean

@@ -33,6 +33,7 @@ import { logger, Snowflake } from "@oh-my-pi/pi-utils";
 import {
 	withSandboxLock,
 	isProcessStillLive,
+	OutsideWorktreeDirectoryError,
 	type ProcessIdentity,
 	readIsolationClaim,
 	readProcessIdentity,
@@ -139,7 +140,17 @@ const ISOLATION_MOUNT_DIRS = ["m", "merged"];
  * nobody honours.
  */
 async function findSandboxBase(cwd: string): Promise<FoundSandbox | undefined> {
-	let dir = await resolveSandboxIdentity(cwd);
+	let dir: string;
+	try {
+		dir = await resolveSandboxIdentity(cwd);
+	} catch (error) {
+		// A cwd whose real directory is outside the worktree directory is in no
+		// sandbox `omp` made — sandboxes are only made inside it — and walking
+		// up from where the name leads would lease, and pin against teardown,
+		// a directory that is not one.
+		if (error instanceof OutsideWorktreeDirectoryError) return undefined;
+		throw error;
+	}
 	for (let depth = 0; depth < 64; depth += 1) {
 		const parent = path.dirname(dir);
 		if (parent === dir) return undefined;

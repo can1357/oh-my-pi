@@ -1,6 +1,7 @@
 //! Git-compatible patch generation.
 
 use std::{
+	borrow::Cow,
 	fmt::{NumBuffer, Write as _},
 	io::Write as _,
 	path::Path,
@@ -19,8 +20,11 @@ use crate::{
 
 #[derive(Clone)]
 struct FileChange {
-	old_path:     String,
-	new_path:     String,
+	/// Paths as the bytes git holds. A lossy `String` here named another file
+	/// once a name was not UTF-8: the worktree side was read from a path that
+	/// does not exist, and the patch created a file under the wrong name.
+	old_path:     BString,
+	new_path:     BString,
 	old_id:       gix::ObjectId,
 	new_id:       gix::ObjectId,
 	old_mode:     Option<gix::objs::tree::EntryMode>,
@@ -66,7 +70,7 @@ impl GitRepo {
 		let repo = self.gix()?;
 		Ok(collect_changes(&repo, options)?
 			.into_iter()
-			.map(|change| change.new_path)
+			.map(|change| String::from_utf8_lossy(&change.new_path).into_owned())
 			.collect())
 	}
 
@@ -79,7 +83,7 @@ impl GitRepo {
 			.into_iter()
 			.zip(rendered)
 			.map(|(change, rendered)| NumstatEntry {
-				path:    change.new_path,
+				path:    String::from_utf8_lossy(&change.new_path).into_owned(),
 				added:   rendered.added,
 				removed: rendered.removed,
 			})
@@ -103,6 +107,12 @@ impl GitRepo {
 	}
 
 	/// Render a no-index patch between filesystem paths.
+	///
+	/// `/dev/null` (or `NUL`) is the empty side of a creation or deletion. Any
+	/// other path must be there: one that is not is an error, as it is for
+	/// `git diff --no-index`. Read as an empty side, a name that does not
+	/// match the file on disk, or a file that went between a listing and this
+	/// read, rendered as no change at all.
 	pub fn diff_no_index(&self, left: &Path, right: &Path, binary: bool) -> Result<String> {
 		let repo = self.gix()?;
 		let left_file = read_no_index_file(self.root(), left)?;
@@ -241,8 +251,8 @@ fn tree_changes(
 		use gix::object::tree::diff::ChangeDetached;
 		let item = match change {
 			ChangeDetached::Addition { location, entry_mode, id, .. } => FileChange {
-				old_path:     path_string(location.as_ref()),
-				new_path:     path_string(location.as_ref()),
+				old_path:     location.clone(),
+				new_path:     location,
 				old_id:       null,
 				new_id:       id,
 				old_mode:     None,
@@ -251,8 +261,8 @@ fn tree_changes(
 				worktree_new: false,
 			},
 			ChangeDetached::Deletion { location, entry_mode, id, .. } => FileChange {
-				old_path:     path_string(location.as_ref()),
-				new_path:     path_string(location.as_ref()),
+				old_path:     location.clone(),
+				new_path:     location,
 				old_id:       id,
 				new_id:       null,
 				old_mode:     Some(entry_mode),
@@ -267,8 +277,8 @@ fn tree_changes(
 				entry_mode,
 				id,
 			} => FileChange {
-				old_path:     path_string(location.as_ref()),
-				new_path:     path_string(location.as_ref()),
+				old_path:     location.clone(),
+				new_path:     location,
 				old_id:       previous_id,
 				new_id:       id,
 				old_mode:     Some(previous_entry_mode),
@@ -291,8 +301,8 @@ fn tree_changes(
 					continue;
 				}
 				FileChange {
-					old_path:     path_string(source_location.as_ref()),
-					new_path:     path_string(location.as_ref()),
+					old_path:     source_location,
+					new_path:     location,
 					old_id:       source_id,
 					new_id:       id,
 					old_mode:     Some(source_entry_mode),
@@ -312,8 +322,8 @@ fn tree_changes(
 			continue;
 		}
 		if pathspec.as_mut().is_none_or(|spec| {
-			spec.is_included(item.old_path.as_bytes().as_bstr(), Some(false))
-				|| spec.is_included(item.new_path.as_bytes().as_bstr(), Some(false))
+			spec.is_included(item.old_path.as_bstr(), Some(false))
+				|| spec.is_included(item.new_path.as_bstr(), Some(false))
 		}) {
 			out.push(item);
 		}
@@ -426,8 +436,8 @@ fn index_change(repo: &gix::Repository, change: gix::diff::index::Change) -> Res
 	let null = repo.object_hash().null();
 	let result = match change {
 		ChangeRef::Addition { location, entry_mode, id, .. } => FileChange {
-			old_path:     path_string(location.as_ref()),
-			new_path:     path_string(location.as_ref()),
+			old_path:     location.as_ref().to_owned(),
+			new_path:     location.as_ref().to_owned(),
 			old_id:       null,
 			new_id:       id.into_owned(),
 			old_mode:     None,
@@ -436,8 +446,8 @@ fn index_change(repo: &gix::Repository, change: gix::diff::index::Change) -> Res
 			worktree_new: false,
 		},
 		ChangeRef::Deletion { location, entry_mode, id, .. } => FileChange {
-			old_path:     path_string(location.as_ref()),
-			new_path:     path_string(location.as_ref()),
+			old_path:     location.as_ref().to_owned(),
+			new_path:     location.as_ref().to_owned(),
 			old_id:       id.into_owned(),
 			new_id:       null,
 			old_mode:     index_mode(entry_mode)?,
@@ -453,8 +463,8 @@ fn index_change(repo: &gix::Repository, change: gix::diff::index::Change) -> Res
 			id,
 			..
 		} => FileChange {
-			old_path:     path_string(location.as_ref()),
-			new_path:     path_string(location.as_ref()),
+			old_path:     location.as_ref().to_owned(),
+			new_path:     location.as_ref().to_owned(),
 			old_id:       previous_id.into_owned(),
 			new_id:       id.into_owned(),
 			old_mode:     index_mode(previous_entry_mode)?,
@@ -477,8 +487,8 @@ fn index_change(repo: &gix::Repository, change: gix::diff::index::Change) -> Res
 			}
 			let identical = source_id == id;
 			FileChange {
-				old_path:     path_string(source_location.as_ref()),
-				new_path:     path_string(location.as_ref()),
+				old_path:     source_location.as_ref().to_owned(),
+				new_path:     location.as_ref().to_owned(),
 				old_id:       source_id.into_owned(),
 				new_id:       id.into_owned(),
 				old_mode:     index_mode(source_entry_mode)?,
@@ -547,7 +557,6 @@ fn worktree_changes(repo: &gix::Repository, files: &[String]) -> Result<Vec<File
 		if new_mode.is_some() && old_id == new_id && old_mode == new_mode {
 			continue;
 		}
-		let path = path_string(path.as_ref());
 		out.push(FileChange {
 			old_path: path.clone(),
 			new_path: path,
@@ -680,7 +689,10 @@ fn change_input_bytes(repo: &gix::Repository, change: &FileChange) -> usize {
 	let new_bytes = if change.worktree_new {
 		repo
 			.workdir()
-			.and_then(|dir| std::fs::symlink_metadata(dir.join(&change.new_path)).ok())
+			.and_then(|dir| {
+				std::fs::symlink_metadata(dir.join(gix::path::from_bstr(change.new_path.as_bstr())))
+					.ok()
+			})
 			.map_or(0, |meta| usize::try_from(meta.len()).unwrap_or(usize::MAX))
 	} else {
 		blob_bytes(change.new_id)
@@ -702,7 +714,7 @@ fn render_change(
 		.chain(change.new_mode.iter())
 		.all(|mode| mode.kind() == gix::objs::tree::EntryKind::Commit)
 	{
-		return Ok(render_gitlink(change));
+		return render_gitlink(change, binary_patch);
 	}
 	let old_kind = change
 		.old_mode
@@ -718,7 +730,7 @@ fn render_change(
 		.set_resource(
 			change.old_id,
 			old_kind,
-			change.old_path.as_bytes().as_bstr(),
+			change.old_path.as_bstr(),
 			gix::diff::blob::ResourceKind::OldOrSource,
 			repo,
 		)
@@ -727,7 +739,7 @@ fn render_change(
 		.set_resource(
 			change.new_id,
 			new_kind,
-			change.new_path.as_bytes().as_bstr(),
+			change.new_path.as_bstr(),
 			gix::diff::blob::ResourceKind::NewOrDestination,
 			repo,
 		)
@@ -736,96 +748,152 @@ fn render_change(
 		.prepare_diff()
 		.map_err(|err| Error::backend("git diff", err))?;
 
+	// A patch for applying is exact or refused; one for reading is shown as
+	// best a `String` can.
+	let old_label = header_path(change.old_path.as_bstr(), binary_patch)?;
+	let new_label = header_path(change.new_path.as_bstr(), binary_patch)?;
 	let mut text = String::new();
 	text.push_str("diff --git a/");
-	text.push_str(&change.old_path);
+	text.push_str(&old_label);
 	text.push_str(" b/");
-	text.push_str(&change.new_path);
+	text.push_str(&new_label);
 	text.push('\n');
-	let is_binary = matches!(
-		prepared.operation,
-		gix::diff::blob::platform::prepare_diff::Operation::SourceOrDestinationIsBinary
-	);
+	let algorithm = match prepared.operation {
+		gix::diff::blob::platform::prepare_diff::Operation::ExternalCommand { .. } => {
+			return Err(Error::backend(
+				"git diff",
+				"external diff drivers cannot be rendered in-process",
+			));
+		},
+		gix::diff::blob::platform::prepare_diff::Operation::SourceOrDestinationIsBinary => None,
+		gix::diff::blob::platform::prepare_diff::Operation::InternalDiff { algorithm } => {
+			Some(algorithm)
+		},
+	};
+	// A hunk is text in a `String`, so content that is not UTF-8 cannot ride
+	// in one: each invalid byte became U+FFFD, the patch applied, and the file
+	// it wrote was not the file. A patch for applying carries such content in
+	// a binary body, which holds every byte.
+	let algorithm = algorithm.filter(|_| !binary_patch || sides_are_utf8(&prepared));
+	let is_binary = algorithm.is_none();
 	let similarity = if change.similarity == Some(u8::MAX) {
 		compute_similarity(&prepared)
 	} else {
 		change.similarity
 	};
-	append_metadata(&mut text, change, similarity, binary_patch && is_binary);
+	append_metadata(
+		&mut text,
+		change,
+		&old_label,
+		&new_label,
+		similarity,
+		binary_patch && is_binary,
+	);
 
-	match prepared.operation {
-		gix::diff::blob::platform::prepare_diff::Operation::SourceOrDestinationIsBinary => {
-			if binary_patch {
-				text.push_str("GIT binary patch\n");
-				let old = object_bytes(repo, change.old_id)?;
-				let new = object_bytes(repo, change.new_id)?;
-				append_binary_body(&mut text, &old, &new, budget)?;
-				append_binary_body(&mut text, &new, &old, budget)?;
-			} else {
-				text.push_str("Binary files ");
-				push_old_path(&mut text, change);
-				text.push_str(" and ");
-				push_new_path(&mut text, change);
-				text.push_str(" differ\n");
-			}
-			Ok(Rendered { text, added: None, removed: None })
-		},
-		gix::diff::blob::platform::prepare_diff::Operation::InternalDiff { algorithm } => {
-			// Tokenize with line terminators kept: git's xdiff treats the
-			// terminator as part of the line, so CRLF content diffs with
-			// literal `\r` bytes and a final line without a newline is a
-			// different line than the same text with one. The convenience
-			// `prepared.interned_input()` strips LF/CRLF and would lose both.
-			let input = gix::diff::blob::InternedInput::new(
-				prepared.old.intern_source(),
-				prepared.new.intern_source(),
-			);
-			let diff = gix::diff::blob::diff_with_slider_heuristics(algorithm, &input);
-			let added = diff.count_additions();
-			let removed = diff.count_removals();
-			if added != 0 || removed != 0 {
-				text.push_str("--- ");
-				push_old_path(&mut text, change);
-				text.push('\n');
-				text.push_str("+++ ");
-				push_new_path(&mut text, change);
-				text.push('\n');
-				let old_data = prepared.old.data.as_slice().unwrap_or_default();
-				let sink = GitHunks::new(&mut text, old_data, budget);
-				gix::diff::blob::UnifiedDiff::new(
-					&diff,
-					&input,
-					sink,
-					gix::diff::blob::unified_diff::ContextSize::symmetrical(context),
-				)
-				.consume()
-				.map_err(|err| map_hunk_error(err, budget))?;
-			}
-			Ok(Rendered { text, added: Some(added), removed: Some(removed) })
-		},
-		gix::diff::blob::platform::prepare_diff::Operation::ExternalCommand { .. } => {
-			Err(Error::backend("git diff", "external diff drivers cannot be rendered in-process"))
-		},
+	let Some(algorithm) = algorithm else {
+		if binary_patch {
+			text.push_str("GIT binary patch\n");
+			let old = object_bytes(repo, change.old_id)?;
+			let new = object_bytes(repo, change.new_id)?;
+			append_binary_body(&mut text, &old, &new, budget)?;
+			append_binary_body(&mut text, &new, &old, budget)?;
+		} else {
+			text.push_str("Binary files ");
+			push_old_path(&mut text, change, &old_label);
+			text.push_str(" and ");
+			push_new_path(&mut text, change, &new_label);
+			text.push_str(" differ\n");
+		}
+		return Ok(Rendered { text, added: None, removed: None });
+	};
+	// Tokenize with line terminators kept: git's xdiff treats the terminator
+	// as part of the line, so CRLF content diffs with literal `\r` bytes and a
+	// final line without a newline is a different line than the same text
+	// with one. The convenience `prepared.interned_input()` strips LF/CRLF and
+	// would lose both.
+	let input = gix::diff::blob::InternedInput::new(
+		prepared.old.intern_source(),
+		prepared.new.intern_source(),
+	);
+	let diff = gix::diff::blob::diff_with_slider_heuristics(algorithm, &input);
+	let added = diff.count_additions();
+	let removed = diff.count_removals();
+	if added != 0 || removed != 0 {
+		text.push_str("--- ");
+		push_old_path(&mut text, change, &old_label);
+		text.push('\n');
+		text.push_str("+++ ");
+		push_new_path(&mut text, change, &new_label);
+		text.push('\n');
+		let old_data = prepared.old.data.as_slice().unwrap_or_default();
+		let sink = GitHunks::new(&mut text, old_data, budget);
+		gix::diff::blob::UnifiedDiff::new(
+			&diff,
+			&input,
+			sink,
+			gix::diff::blob::unified_diff::ContextSize::symmetrical(context),
+		)
+		.consume()
+		.map_err(|err| map_hunk_error(err, budget))?;
 	}
+	Ok(Rendered { text, added: Some(added), removed: Some(removed) })
 }
 
-fn render_gitlink(change: &FileChange) -> Rendered {
-	let mut text = format!("diff --git a/{} b/{}\n", change.old_path, change.new_path);
+/// Whether every side of a prepared text diff is UTF-8.
+fn sides_are_utf8(prepared: &gix::diff::blob::platform::prepare_diff::Outcome<'_>) -> bool {
+	[prepared.old.data.as_slice(), prepared.new.data.as_slice()]
+		.into_iter()
+		.flatten()
+		.all(|data| std::str::from_utf8(data).is_ok())
+}
+
+/// The text a patch header carries for `path`.
+///
+/// A patch rendered for applying (`exact`) carries the name byte for byte or
+/// is refused. A `String` cannot hold a name that is not UTF-8, and the
+/// appliers read an unquoted header name literally and a quoted one not at
+/// all, so a name holding a control character (a tab ends a `---` name, a
+/// newline ends the line) or a double quote (trimmed off a name's ends) has
+/// no spelling here that reads back as the same name. Rendered lossily, such
+/// a name came back as another file, the capture reported success, and the
+/// original went with the workspace. A patch rendered for reading shows the
+/// name as best a `String` can.
+fn header_path(path: &BStr, exact: bool) -> Result<Cow<'_, str>> {
+	if !exact {
+		return Ok(String::from_utf8_lossy(path));
+	}
+	let refuse = |why: &str| {
+		Error::backend("git diff", format!("{why}, so a patch cannot carry it: {path:?}"))
+	};
+	let text = std::str::from_utf8(path).map_err(|_| refuse("path is not UTF-8"))?;
+	if text
+		.bytes()
+		.any(|byte| byte.is_ascii_control() || byte == b'"')
+	{
+		return Err(refuse("path holds a control character or a double quote"));
+	}
+	Ok(Cow::Borrowed(text))
+}
+
+fn render_gitlink(change: &FileChange, exact: bool) -> Result<Rendered> {
+	let old_label = header_path(change.old_path.as_bstr(), exact)?;
+	let new_label = header_path(change.new_path.as_bstr(), exact)?;
+	let mut text = format!("diff --git a/{old_label} b/{new_label}\n");
 	// Gitlinks have no content to score, so only an exact-id rename carries a
 	// meaningful similarity; the "compute later" sentinel has nothing to
 	// compute.
 	let similarity = change
 		.similarity
 		.filter(|&similarity| similarity != u8::MAX);
-	append_metadata(&mut text, change, similarity, false);
+	append_metadata(&mut text, change, &old_label, &new_label, similarity, false);
 	if change.old_id == change.new_id {
 		// Pure rename: git emits only the rename header and counts 0/0.
-		return Rendered { text, added: Some(0), removed: Some(0) };
+		return Ok(Rendered { text, added: Some(0), removed: Some(0) });
 	}
 	text.push_str("--- ");
-	push_old_path(&mut text, change);
+	push_old_path(&mut text, change, &old_label);
 	text.push_str("\n+++ ");
-	push_new_path(&mut text, change);
+	push_new_path(&mut text, change, &new_label);
 	text.push('\n');
 	match (change.old_mode, change.new_mode) {
 		(Some(_), Some(_)) => text.push_str("@@ -1 +1 @@\n"),
@@ -839,17 +907,24 @@ fn render_gitlink(change: &FileChange) -> Rendered {
 	if change.new_mode.is_some() {
 		let _ = writeln!(text, "+Subproject commit {}", change.new_id);
 	}
-	Rendered { text, added: change.new_mode.map(|_| 1), removed: change.old_mode.map(|_| 1) }
+	Ok(Rendered { text, added: change.new_mode.map(|_| 1), removed: change.old_mode.map(|_| 1) })
 }
 
-fn append_metadata(out: &mut String, change: &FileChange, similarity: Option<u8>, full_ids: bool) {
+fn append_metadata(
+	out: &mut String,
+	change: &FileChange,
+	old_label: &str,
+	new_label: &str,
+	similarity: Option<u8>,
+	full_ids: bool,
+) {
 	if let Some(similarity) = similarity {
 		let _ = writeln!(out, "similarity index {similarity}%");
 		out.push_str("rename from ");
-		out.push_str(&change.old_path);
+		out.push_str(old_label);
 		out.push('\n');
 		out.push_str("rename to ");
-		out.push_str(&change.new_path);
+		out.push_str(new_label);
 		out.push('\n');
 	}
 	match (change.old_mode, change.new_mode) {
@@ -1401,6 +1476,8 @@ struct NoIndexFile {
 	mode: gix::objs::tree::EntryMode,
 }
 
+/// The file at `path`, or `None` when `path` is the null device. A missing
+/// path is an error, not an empty side.
 fn read_no_index_file(root: &Path, path: &Path) -> Result<Option<NoIndexFile>> {
 	if is_null_device(path) {
 		return Ok(None);
@@ -1410,11 +1487,9 @@ fn read_no_index_file(root: &Path, path: &Path) -> Result<Option<NoIndexFile>> {
 	} else {
 		root.join(path)
 	};
-	let metadata = match std::fs::symlink_metadata(&resolved) {
-		Ok(metadata) => metadata,
-		Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-		Err(err) => return Err(err.into()),
-	};
+	let metadata = std::fs::symlink_metadata(&resolved).map_err(|err| {
+		Error::backend("git diff --no-index", format!("could not access '{}': {err}", path.display()))
+	})?;
 	let file_type = metadata.file_type();
 	let (data, kind) = if file_type.is_symlink() {
 		let target = std::fs::read_link(&resolved)?;
@@ -1449,13 +1524,21 @@ fn write_no_index_blob(
 		.transpose()
 }
 
-fn no_index_label(root: &Path, path: &Path) -> String {
+/// The name a no-index patch gives `path`: relative to the repository root
+/// when it is inside it, as the bytes the filesystem holds. A backslash is a
+/// separator only on Windows; elsewhere it is part of the name, and turning
+/// it into `/` named another file.
+fn no_index_label(root: &Path, path: &Path) -> BString {
 	let path = if path.is_absolute() {
 		path.strip_prefix(root).unwrap_or(path)
 	} else {
 		path
 	};
-	path.to_string_lossy().replace('\\', "/")
+	if cfg!(windows) {
+		BString::from(path.to_string_lossy().replace('\\', "/"))
+	} else {
+		BString::from(os_path_bytes(path))
+	}
 }
 
 fn is_null_device(path: &Path) -> bool {
@@ -1524,10 +1607,6 @@ fn index_mode(mode: gix::index::entry::Mode) -> Result<Option<gix::objs::tree::E
 		.ok_or_else(|| Error::backend("git diff", "invalid index entry mode"))
 }
 
-fn path_string(path: &BStr) -> String {
-	String::from_utf8_lossy(path).into_owned()
-}
-
 fn display_id(id: gix::ObjectId, full: bool) -> String {
 	if id.is_null() {
 		if full {
@@ -1559,19 +1638,19 @@ fn push_range(out: &mut String, start: u32, len: u32) {
 	}
 }
 
-fn push_old_path(out: &mut String, change: &FileChange) {
+fn push_old_path(out: &mut String, change: &FileChange, label: &str) {
 	if change.old_mode.is_some() {
 		out.push_str("a/");
-		out.push_str(&change.old_path);
+		out.push_str(label);
 	} else {
 		out.push_str("/dev/null");
 	}
 }
 
-fn push_new_path(out: &mut String, change: &FileChange) {
+fn push_new_path(out: &mut String, change: &FileChange, label: &str) {
 	if change.new_mode.is_some() {
 		out.push_str("b/");
-		out.push_str(&change.new_path);
+		out.push_str(label);
 	} else {
 		out.push_str("/dev/null");
 	}
@@ -1581,9 +1660,8 @@ fn sort_changes(changes: &mut [FileChange]) {
 	changes.sort_unstable_by(|left, right| {
 		left
 			.new_path
-			.as_bytes()
-			.cmp(right.new_path.as_bytes())
-			.then_with(|| left.old_path.as_bytes().cmp(right.old_path.as_bytes()))
+			.cmp(&right.new_path)
+			.then_with(|| left.old_path.cmp(&right.old_path))
 	});
 }
 #[cfg(test)]
@@ -2164,6 +2242,198 @@ mod tests {
 					"/dev/null",
 					path
 				])
+			);
+		}
+	}
+
+	#[test]
+	fn no_index_refuses_a_missing_path_and_keeps_the_null_side_empty() {
+		// Failure mode: a path that is not on disk read as the null device. A
+		// listed name that did not match the file on disk (a name that is not
+		// UTF-8, decoded lossily), or a file gone since the listing, rendered
+		// as no change, and the capture resting on it let the workspace go.
+		let dir = fixture();
+		let repo = GitRepo::discover(dir.path())
+			.expect("discover")
+			.expect("repository");
+		let null = Path::new("/dev/null");
+		let missing = Path::new("raw-\u{fffd}.txt");
+		for (left, right) in [(null, missing), (missing, null)] {
+			let err = repo
+				.diff_no_index(left, right, true)
+				.expect_err("a missing path must not diff as an empty side");
+			assert!(
+				err.to_string()
+					.contains("could not access 'raw-\u{fffd}.txt'"),
+				"{err}"
+			);
+		}
+		// The null device on both sides is still no change, as in git.
+		assert_eq!(
+			repo
+				.diff_no_index(null, null, true)
+				.expect("null against null"),
+			""
+		);
+	}
+
+	/// `git` with raw stdout, for listings whose names are bytes.
+	#[cfg(unix)]
+	fn git_bytes(dir: &Path, args: &[&str]) -> Vec<u8> {
+		let output = Command::new("git")
+			.args(args)
+			.current_dir(dir)
+			.output()
+			.unwrap_or_else(|err| panic!("run git {args:?}: {err}"));
+		assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+		output.stdout
+	}
+
+	#[cfg(unix)]
+	fn clone_of(source: &Path) -> TempDir {
+		let dir = tempfile::tempdir().expect("tempdir");
+		let target = dir.path().join("clone");
+		git(source, &[
+			"clone",
+			"-q",
+			source.to_str().expect("UTF-8 temp path"),
+			target.to_str().expect("UTF-8 temp path"),
+		]);
+		dir
+	}
+
+	/// Apply `patch` to a clone's index with the native applier and return
+	/// that index's listing: names as bytes, modes and blob ids.
+	#[cfg(unix)]
+	fn applied_index(clone: &TempDir, patch: &str) -> Vec<u8> {
+		let dir = clone.path().join("clone");
+		GitRepo::discover(&dir)
+			.expect("discover clone")
+			.expect("clone repository")
+			.apply_patch(patch, &ApplyOptions { cached: true, ..ApplyOptions::default() })
+			.unwrap_or_else(|err| panic!("apply {patch:?}: {err}"));
+		git_bytes(&dir, &["ls-files", "-s", "-z"])
+	}
+
+	// The names and contents a patch for applying (`binary`, as a capture
+	// renders it) must carry exactly: spaces anywhere in a name, a backslash,
+	// UTF-8, a name holding ` b/`, an empty file and a binary one (whose
+	// sections have no `---`/`+++` lines, so their name comes from the
+	// `diff --git` line alone), and text that is not UTF-8.
+	#[cfg(unix)]
+	const CARRIED: &[(&str, &[u8])] = &[
+		("plain.txt", b"plain\n"),
+		("my notes.txt", b""),
+		("my file.bin", &[0, 1, 2, 255]),
+		("a\\b.txt", b"backslash\n"),
+		("caf\u{e9}.txt", b"utf8\n"),
+		(" lead.txt", b"lead\n"),
+		("trail.txt ", b"trail\n"),
+		("x b/y.txt", b"spaced directory\n"),
+		("latin.txt", b"caf\xe9\n"),
+	];
+
+	#[cfg(unix)]
+	#[test]
+	fn a_patch_for_applying_carries_every_name_and_byte() {
+		// Failure mode: a capture rendered a name or a byte lossily, the patch
+		// still applied, and the workspace holding the only copy was deleted.
+		// Every path a capture renders through is checked: untracked
+		// (no-index), staged, committed (tree) and unstaged.
+		let dir = fixture();
+		let root = dir.path();
+		let untracked_clone = clone_of(root);
+		let staged_clone = clone_of(root);
+		let committed_clone = clone_of(root);
+		fs::create_dir(root.join("x b")).expect("mkdir");
+		for (name, content) in CARRIED {
+			fs::write(root.join(name), content).expect("write");
+		}
+		let repo = GitRepo::discover(root)
+			.expect("discover")
+			.expect("repository");
+
+		let untracked: String = CARRIED
+			.iter()
+			.map(|(name, _)| {
+				repo
+					.diff_no_index(Path::new("/dev/null"), Path::new(name), true)
+					.expect("no-index diff")
+			})
+			.collect();
+		git(root, &["add", "-A"]);
+		let expected = git_bytes(root, &["ls-files", "-s", "-z"]);
+		assert_eq!(applied_index(&untracked_clone, &untracked), expected, "untracked:\n{untracked}");
+
+		let staged = repo
+			.diff_text(&DiffOptions { cached: true, binary: true, ..DiffOptions::default() })
+			.expect("staged diff");
+		assert_eq!(applied_index(&staged_clone, &staged), expected, "staged:\n{staged}");
+
+		git(root, &["commit", "-qm", "names"]);
+		let committed = repo.diff_tree("HEAD~1", "HEAD", true).expect("tree diff");
+		assert_eq!(applied_index(&committed_clone, &committed), expected, "committed:\n{committed}");
+
+		let unstaged_clone = clone_of(root);
+		for (name, _) in CARRIED {
+			fs::write(root.join(name), b"\xe9t\xe9 \xff changed\n").expect("rewrite");
+		}
+		let unstaged = repo
+			.diff_text(&DiffOptions { binary: true, ..DiffOptions::default() })
+			.expect("unstaged diff");
+		git(root, &["add", "-A"]);
+		assert_eq!(
+			applied_index(&unstaged_clone, &unstaged),
+			git_bytes(root, &["ls-files", "-s", "-z"]),
+			"unstaged:\n{unstaged}"
+		);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn a_patch_for_applying_refuses_a_name_it_cannot_carry() {
+		// A name that is not UTF-8 has no `String`; a tab ends a `---` name; a
+		// newline ends the header; a double quote is trimmed off a name's
+		// ends. Rendered, each came back as another file. Refused, the capture
+		// fails and the workspace is kept. A patch for reading still shows them.
+		use std::os::unix::ffi::OsStrExt;
+		let names: [&[u8]; 4] = [b"raw-\xff.txt", b"tab\there.txt", b"new\nline.txt", b"quote\".txt"];
+		for name in names {
+			let file = std::ffi::OsStr::from_bytes(name);
+			let dir = fixture();
+			let root = dir.path();
+			fs::write(root.join(file), b"only copy\n").expect("write");
+			let repo = GitRepo::discover(root)
+				.expect("discover")
+				.expect("repository");
+			let refused = |result: Result<String>, path: &str| {
+				let err = result.expect_err(&format!("{path} rendered {name:?}"));
+				assert!(err.to_string().contains("so a patch cannot carry it"), "{path}: {err}");
+			};
+			refused(repo.diff_no_index(Path::new("/dev/null"), Path::new(file), true), "untracked");
+			Command::new("git")
+				.arg("add")
+				.arg("--")
+				.arg(file)
+				.current_dir(root)
+				.status()
+				.expect("git add");
+			refused(
+				repo.diff_text(&DiffOptions { cached: true, binary: true, ..DiffOptions::default() }),
+				"staged",
+			);
+			assert!(
+				repo
+					.diff_text(&DiffOptions { cached: true, ..DiffOptions::default() })
+					.expect("a diff for reading")
+					.contains("only copy"),
+			);
+			git(root, &["commit", "-qm", "name"]);
+			refused(repo.diff_tree("HEAD~1", "HEAD", true), "committed");
+			fs::write(root.join(file), b"changed\n").expect("rewrite");
+			refused(
+				repo.diff_text(&DiffOptions { binary: true, ..DiffOptions::default() }),
+				"unstaged",
 			);
 		}
 	}

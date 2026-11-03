@@ -2,6 +2,31 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `macOSFrontApp()`, which reads the app macOS has in front and can put it back in front for a while (`keepInFront`) without stopping for the user's typing ([#16284](https://github.com/can1357/oh-my-pi/pull/16284) by [@will-bogusz](https://github.com/will-bogusz))
+- Added `lsFilesWithWarnings` to `VcsGitRepo` and `VcsRepo`: the untracked listing together with the directories git could not open and the names that are not valid UTF-8, so a caller can tell a short listing from a complete one ([#17641](https://github.com/can1357/oh-my-pi/pull/17641) by [@sjawhar](https://github.com/sjawhar))
+
+### Changed
+
+- `lsFiles` on a git repository now leaves out a name that is not valid UTF-8 instead of returning it with `�` in place of its bytes, and `diffNoIndex` now fails on a path that does not exist instead of diffing it as empty ([#17641](https://github.com/can1357/oh-my-pi/pull/17641) by [@sjawhar](https://github.com/sjawhar))
+- With `binary: true`, `diffText`, `diffTree` and `diffNoIndex` now carry content that is not valid UTF-8 as a binary patch instead of replacing each such byte with `�`, keep a backslash in a file name instead of turning it into `/` (outside Windows), and fail on a path the patch cannot carry exactly (not valid UTF-8, a control character or a double quote); `applyPatch` now reads a name with a space from a section that has no `---`/`+++` lines ([#17641](https://github.com/can1357/oh-my-pi/pull/17641) by [@sjawhar](https://github.com/sjawhar))
+
+### Fixed
+
+- Fixed iPhone Mirroring clicks, scrolls and keys reporting success while the mirror showed a connection screen such as "iPhone in Use" instead of the phone; they now fail and quote that screen ([#17755](https://github.com/can1357/oh-my-pi/pull/17755) by [@will-bogusz](https://github.com/will-bogusz))
+### Fixed
+
+- `parseKey`/`matchesKey` now recognize the parameterless `CSI P`/`CSI Q`/`CSI S` (and `CSI 1 <letter>`) forms that kitty-protocol terminals such as Ghostty send for unmodified F1/F2/F4, and modified F2–F9 no longer match other keys (e.g. Ctrl+PageDown as Ctrl+F8) ([#17812](https://github.com/can1357/oh-my-pi/issues/17812)).
+- Added `installSqliteLockShim()` (Linux), which moves Bun's SQLite record locks onto open-file-description locks that no other close of the file releases, and `heldFileKind(path)`, which reports a file this process holds open and locked. Both are also on `@oh-my-pi/pi-natives/sqlite-locks`, which loads the addon on first call ([#15586](https://github.com/can1357/oh-my-pi/issues/15586))
+
+## [18.15.0] - 2026-11-01
+
+### Fixed
+
+- Fixed the bash tool's shell stopping with status 1 and no message after about 40 levels of nested functions, `eval` or `source` when the process may open only 1,024 files; a shell that runs out of open files now says so and names the limit to raise ([#17668](https://github.com/can1357/oh-my-pi/pull/17668) by [@sjawhar](https://github.com/sjawhar))
+- `bun check` now runs the Rust half when your branch commits a Rust change on a clean tree, skips it on a TypeScript-only branch even under `CI=true`, and prints one line saying which it did and why (`OMP_FORCE_RUST_TASKS=1` always runs it) ([#17628](https://github.com/can1357/oh-my-pi/pull/17628) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.14.2] - 2026-10-31
 
 ### Added

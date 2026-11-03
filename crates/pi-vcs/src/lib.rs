@@ -230,20 +230,23 @@ impl Repo {
 		}
 	}
 
-	/// [`Self::ls_files`], with the directories git reported it could not read.
+	/// [`Self::ls_files`], with what the listing cannot answer for.
 	///
 	/// A `git ls-files --others` run that cannot open a directory warns and
 	/// exits 0, so a caller that deletes on the strength of the listing needs
-	/// to know the listing is short. Jujutsu has no untracked set, so its
-	/// answer is always complete.
+	/// to know the listing is short; and a name that is not UTF-8 cannot be
+	/// returned as a path at all. Jujutsu has no untracked set, so its answer
+	/// is always complete.
 	pub fn ls_files_with_warnings(
 		&self,
 		others: bool,
 		exclude_standard: bool,
-	) -> Result<(Vec<String>, Vec<String>)> {
+	) -> Result<LsFilesReport> {
 		match self {
 			Self::Git(repo) => repo.ls_files_with_warnings(others, exclude_standard),
-			Self::Jj(workspace) => Ok((workspace.ls_files(others)?, Vec::new())),
+			Self::Jj(workspace) => {
+				Ok(LsFilesReport { paths: workspace.ls_files(others)?, ..LsFilesReport::default() })
+			},
 		}
 	}
 

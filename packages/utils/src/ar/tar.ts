@@ -1,5 +1,5 @@
 import * as path from "node:path";
-import { bytesMatchAscii } from "./bytes";
+import { bytesMatchAscii, indexOfAscii } from "./bytes";
 import { resolveArchiveLinkPath, upsertArchiveEntry } from "./entries";
 import { ArchiveError } from "./error";
 import {
@@ -417,13 +417,6 @@ function paxDeclaresSparse(
 	localPax: ReadonlyMap<string, string> | undefined,
 ): boolean {
 	return paxAttribute(globalPax, localPax, PAX_SPARSE_MARKER) === "1";
-}
-
-function indexOfAscii(bytes: Uint8Array, value: string, start: number): number {
-	for (let offset = start; offset <= bytes.byteLength - value.length; offset++) {
-		if (bytesMatchAscii(bytes, offset, value)) return offset;
-	}
-	return -1;
 }
 
 function normalizeOldGnuName(value: string, field: string, limits: ArchiveLimits): string {

@@ -653,9 +653,27 @@ fn parse_file_patch(raw: &str) -> std::result::Result<FilePatch, ApplyFailure> {
 	Ok(patch)
 }
 
+/// The two names of an unquoted `diff --git` line.
+///
+/// A name can hold a space, so the line has no single separator. git reads
+/// it as this does: when the names after `a/` and `b/` are the same — every
+/// header that is not a rename — the split is where they agree. A section
+/// with no `---`/`+++` lines (a new empty file, a mode change, a binary
+/// body) takes its name from this line alone, and a split at the first space
+/// created `notes.txt b/my notes.txt` for `my notes.txt`. A rename names its
+/// paths again on its `rename from`/`rename to` lines.
 fn split_diff_paths(paths: &str) -> std::result::Result<(&str, &str), ApplyFailure> {
 	if paths.starts_with('"') {
 		return Err(ApplyFailure::Invalid("quoted paths in diff headers are unsupported".into()));
+	}
+	let symmetric = paths
+		.match_indices(' ')
+		.map(|(at, _)| (&paths[..at], &paths[at + 1..]))
+		.find(|(old, new)| {
+			matches!((old.strip_prefix("a/"), new.strip_prefix("b/")), (Some(old), Some(new)) if old == new)
+		});
+	if let Some(names) = symmetric {
+		return Ok(names);
 	}
 	paths
 		.split_once(' ')

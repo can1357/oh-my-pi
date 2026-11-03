@@ -10,7 +10,7 @@ import * as fs from "./isolation-fs";
 import * as path from "node:path";
 import * as natives from "@oh-my-pi/pi-natives";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { acquireFileLock, logger, Snowflake } from "@oh-my-pi/pi-utils";
+import { acquireFileLock, getWorktreesDir, logger, Snowflake } from "@oh-my-pi/pi-utils";
 import { hasLiveIsolationLease, hasUnfinishedWriter } from "./isolation-lease";
 
 /**
@@ -33,9 +33,39 @@ export const SANDBOX_LOCK_WAIT = { retries: 600, retryDelayMs: 100 };
  * I/O error — is raised: silently falling back to the alias is how two holders
  * end up with two locks on one directory, and a caller that cannot establish
  * the identity must not act as though it had.
+ *
+ * A name inside the worktree directory must resolve inside it, and is refused
+ * otherwise. A symlink there — an alias that names a sandbox elsewhere, a
+ * container that points out of the directory — resolved to a directory
+ * outside, and `omp worktree clear` deleted that directory's files. Every
+ * caller that locks, claims, leases, stops or removes a sandbox resolves it
+ * here first, so none of them follows a symlink out. A name outside the
+ * worktree directory is not one `omp` manages there and resolves as it is. The
+ * worktree directory may itself be a symlink; containment is against where it
+ * really is.
  */
 export async function resolveSandboxIdentity(target: string): Promise<string> {
 	const absolute = path.resolve(target);
+	const resolved = await resolveExistingPath(absolute);
+	const root = path.resolve(getWorktreesDir());
+	const realRoot = await resolveExistingPath(root);
+	if ((isWithin(absolute, root) || isWithin(absolute, realRoot)) && !isWithin(resolved, realRoot)) {
+		throw new OutsideWorktreeDirectoryError(absolute, resolved, realRoot);
+	}
+	return resolved;
+}
+
+/** A name inside the worktree directory whose real directory is outside it. */
+export class OutsideWorktreeDirectoryError extends Error {
+	constructor(name: string, resolved: string, root: string) {
+		super(
+			`Isolation path ${name} resolves to ${resolved}, outside the worktree directory ${root}; it is not followed.`,
+		);
+		this.name = "OutsideWorktreeDirectoryError";
+	}
+}
+
+async function resolveExistingPath(absolute: string): Promise<string> {
 	const resolved = await fs.realpathLookup(absolute);
 	if (resolved.kind === "found") return resolved.value;
 	if (resolved.kind === "unknown") {
@@ -43,7 +73,13 @@ export async function resolveSandboxIdentity(target: string): Promise<string> {
 	}
 	const parent = path.dirname(absolute);
 	if (parent === absolute) return absolute;
-	return path.join(await resolveSandboxIdentity(parent), path.basename(absolute));
+	return path.join(await resolveExistingPath(parent), path.basename(absolute));
+}
+
+/** Whether `candidate` is `root` or lies under it, by whole path components. */
+function isWithin(candidate: string, root: string): boolean {
+	if (candidate === root) return true;
+	return candidate.startsWith(root.endsWith(path.sep) ? root : `${root}${path.sep}`);
 }
 
 const { IsoBackendKind } = natives;
@@ -190,10 +226,14 @@ export async function markIsolationRetired(baseDir: string): Promise<void> {
  * backend stop outran its bound. The stop can still delete this path, so
  * nothing may materialise here until it settles — and when it never does, the
  * marker names the process to wait on, so reclamation can retire it once that
- * process is gone.
+ * process is gone. It also names the generation being torn down, so the stop's
+ * settlement can tell its own marker from a claim written since.
  */
-export async function markIsolationRetiring(baseDir: string): Promise<void> {
-	await writeProcessIdentity(path.join(baseDir, ISOLATION_OWNER_FILE), { retiring: true });
+export async function markIsolationRetiring(baseDir: string, generation?: string): Promise<void> {
+	await writeProcessIdentity(path.join(baseDir, ISOLATION_OWNER_FILE), {
+		retiring: true,
+		...(generation === undefined ? {} : { generation }),
+	});
 }
 
 /**
@@ -210,7 +250,7 @@ export type IsolationClaim =
 	/** The marker names the generation that currently owns the sandbox. */
 	| { kind: "claimed"; generation: string }
 	/** A teardown is still running on this path; nothing may materialise here. */
-	| { kind: "retiring" }
+	| { kind: "retiring"; generation?: string }
 	/** There is no marker here at all: this is not a sandbox. */
 	| { kind: "absent" }
 	/**
@@ -233,7 +273,11 @@ export async function readIsolationClaim(baseDir: string): Promise<IsolationClai
 	if (typeof decoded !== "object" || decoded === null) {
 		return { kind: "unknown", reason: "marker is not an object" };
 	}
-	if ("retiring" in decoded && decoded.retiring === true) return { kind: "retiring" };
+	if ("retiring" in decoded && decoded.retiring === true) {
+		const generation =
+			"generation" in decoded && typeof decoded.generation === "string" ? decoded.generation : undefined;
+		return generation === undefined ? { kind: "retiring" } : { kind: "retiring", generation };
+	}
 	if (!("generation" in decoded)) {
 		return { kind: "unknown", reason: "marker carries no generation" };
 	}
@@ -253,6 +297,14 @@ export async function readIsolationClaim(baseDir: string): Promise<IsolationClai
  */
 export async function clearClaimedWorkspace(baseDir: string): Promise<void> {
 	requireSandboxLockHeld(baseDir, "empty");
+	// Moving entries aside and deleting them walks into a live mount as into
+	// any directory. A backend that mounted and then failed left one here; the
+	// teardown record went aside with everything else, and `omp worktree clear`
+	// then deleted through the mount. A mounted sandbox is not cleared.
+	const mounts = await fs.liveMountsUnder(baseDir);
+	if (mounts.length > 0) {
+		throw new Error(`Isolation workspace ${baseDir} still has ${mounts.join(", ")} mounted; refusing to clear it.`);
+	}
 	// A listing that fails is not an empty sandbox: reading it as one leaves
 	// the previous owner's data in place under this run's claim, and the run
 	// then works in a workspace it believes is clean.
@@ -339,6 +391,17 @@ export async function decideIsolationReclaim(baseDir: string): Promise<Isolation
 		return { reclaimable: false, reason: "owner marker unreadable (no usable owner identity)" };
 	}
 	if (await isProcessStillLive(identity)) {
+		// A teardown whose backend stop outran its bound marks the sandbox as
+		// retiring under its own process. Read as an owner, that process was
+		// reported as "the omp process that built it" — true of neither.
+		if ("retiring" in decoded && decoded.retiring === true) {
+			return {
+				reclaimable: false,
+				reason:
+					`a teardown's backend stop is still running on it (pid ${identity.pid}); \`omp worktree clear\` ` +
+					"can remove it once that process has exited",
+			};
+		}
 		// Precise about what is known: the process that built this sandbox is
 		// still running. That is not the same as a task still working in it —
 		// a user who has just cleared the last lease and the last writer record
@@ -348,8 +411,8 @@ export async function decideIsolationReclaim(baseDir: string): Promise<Isolation
 			reclaimable: false,
 			reason: inUse
 				? `a live task is working in it (pid ${identity.pid})`
-				: `the omp process that built it is still running (pid ${identity.pid}); it goes when that run ` +
-					"finishes with it, or now with --all",
+				: `the omp process that built it is still running (pid ${identity.pid}); \`omp worktree clear\` ` +
+					"can remove it once that run has exited, and --all removes it now",
 		};
 	}
 	if (await hasLiveIsolationLease(baseDir)) {
@@ -370,7 +433,12 @@ export const ISOLATION_REMOVING_SUFFIX = ".removing-";
 /** Prefix of the staging directory a clear moves a sandbox's contents into before deleting them. */
 export const ISOLATION_CLEARING_PREFIX = ".omp-clearing-";
 
-/** Sidecar recording the native-teardown backend of a retained workspace. */
+/**
+ * Record of the native-teardown backend of a workspace. Written before the
+ * backend mounts anything and again before a teardown starts, so a run killed
+ * at any point leaves it behind; the name predates that and is kept so older
+ * workspaces still read.
+ */
 export const RETAINED_BACKEND_FILE = ".omp-retained-backend.json";
 
 /**
@@ -393,9 +461,30 @@ export function needsNativeTeardown(backend: unknown): backend is number {
 }
 
 /**
- * Record which backend built a retained workspace, so cleanup can route it
- * through native teardown before removal. Best-effort: retention stays valid
- * without it (the workspace merely falls back to plain recursive removal).
+ * Mounts under a workspace that its backend did not make.
+ *
+ * Every native stop removes a tree: the copy and clone backends delete the
+ * merged directory; overlayfs unmounts it and then deletes `upper`, `work` and
+ * the merged directory; btrfs and zfs delete the subvolume or the dataset. A
+ * removal walks into a mounted directory as into any other and deletes what
+ * the mount shows — another tree's files — so no stop and no removal may run
+ * while anything other than the backend's own mount is under the workspace.
+ * The own mount is the merged directory itself, for the backends that mount
+ * there (overlayfs and zfs); every other mount is foreign, including one
+ * nested inside the merged directory. Callers ask immediately before the stop
+ * or the removal and keep the workspace when the answer is not empty. `base`
+ * and `merged` are canonical paths.
+ */
+export async function foreignMountsUnder(base: string, backend: number | undefined, merged: string): Promise<string[]> {
+	const own = backend === IsoBackendKind.Overlayfs || backend === IsoBackendKind.Zfs ? merged : undefined;
+	return (await fs.liveMountsUnder(base)).filter(mount => mount !== own);
+}
+
+/**
+ * Record which backend a workspace needs stopped, so `omp worktree clear`
+ * routes it through native teardown before it removes anything. Callers write
+ * it before the act that could leave a live mount behind — the mount itself,
+ * and the teardown — and treat a failed write as a reason not to go on.
  */
 export async function writeRetainedBackend(baseDir: string, backend: number): Promise<void> {
 	await fs.writeFileDeep(
@@ -599,46 +688,17 @@ const SANDBOX_LOCK_REMINDER_MS = 30_000;
  */
 const heldByThisProcess = new Set<SandboxLockHandle>();
 
-/** Set once: stderr keeps a no-op error listener so a late stream failure cannot kill the run. */
-let stderrGuarded = false;
-
 /**
- * Write a diagnostic to stderr, and never fail because of it.
- *
- * A closed descriptor throws here; a broken pipe fails *later*, as a stream
- * error with no listener, which terminates the process. Both killed children
- * that were a moment away from being granted the lock they were waiting for.
- * A diagnostic is not worth a run, so the synchronous throw, the write
- * callback's error and the stream's own error event are all swallowed.
- */
-function writeNoticeSafely(text: string): void {
-	try {
-		const stream = process.stderr;
-		if (!stderrGuarded) {
-			stderrGuarded = true;
-			stream.on?.("error", () => {
-				// Nothing to do: the caller cannot be told. That is not a failure
-				// of the work it is doing.
-			});
-		}
-		stream.write(text, () => {
-			// Swallows the asynchronous failure the callback reports.
-		});
-	} catch {
-		// Swallows the synchronous one.
-	}
-}
-
-/**
- * Take a sandbox lock, telling the caller at the *start* of a wait rather than
- * at the end of it.
+ * Take a sandbox lock, logging at the *start* of a wait rather than at the end
+ * of it.
  *
  * The wait itself is unchanged — shortening it would only trade a slow
- * materialisation for a failed one — but there is no reason the caller should
+ * materialisation for a failed one — but there is no reason the log should
  * learn in the sixtieth second what can be said in the first. The notice
  * carries what is actually knowable: the holder of the lock is an anonymous
  * kernel object, and the pid in the marker is the run that built the
- * workspace, which may not be the holder.
+ * workspace, which may not be the holder. It goes to the log only: these
+ * waits run in the host process, where the TUI owns the terminal.
  */
 export async function acquireSandboxLockWithNotice(baseDir: string, purpose: string): Promise<SandboxLockHandle> {
 	const startedAt = Date.now();
@@ -656,12 +716,8 @@ export async function acquireSandboxLockWithNotice(baseDir: string, purpose: str
 			// Says only what is true at this moment: the lock has not been granted.
 			// Whether that is a holder or a lock that cannot be opened is not known
 			// until the attempt ends, and claiming a holder here contradicted the
-			// failure that followed.
-			const message =
-				`Waiting for the isolation workspace lock to ${purpose} ${baseDir} — it has not been granted yet. ` +
-				`If another run holds it, the holder is not identifiable, and ${recorded}. ` +
-				"`omp worktree list` shows what owns it.";
-			writeNoticeSafely(`${message}\n`);
+			// failure that followed. Logged rather than written to stderr: the
+			// waits run in the host process, under the TUI.
 			logger.warn(`Waiting for the isolation workspace lock to ${purpose} ${baseDir}`, {
 				waitedMs: Date.now() - startedAt,
 				detail:

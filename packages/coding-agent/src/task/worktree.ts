@@ -20,16 +20,20 @@ import {
 } from "./isolation-lease";
 import {
 	clearClaimedWorkspace,
+	foreignMountsUnder,
 	acquireSandboxLockWithNotice,
 	holdsSandboxLock,
+	needsNativeTeardown,
 	requireSandboxLockHeld,
 	runHoldingSandboxLock,
 	withSandboxLock,
 	markIsolationRetired,
 	markIsolationRetiring,
+	type IsolationClaim,
 	readIsolationClaim,
 	resolveSandboxIdentity,
 	writeIsolationOwner,
+	writeRetainedBackend,
 } from "./isolation-ownership";
 import { mapWithConcurrencyLimit } from "./parallel";
 import type { cfgIsolationBackend } from "./settings";
@@ -78,6 +82,27 @@ async function diffTree(repo: VcsGitRepo, base: string, head: string): Promise<s
 		if (vcs.isVcsError(error)) {
 			throw new IsolationCaptureIncompleteError(
 				`Could not diff ${base}..${head}: ${error.stderr.trim() || error.message}`,
+				[],
+				error,
+			);
+		}
+		throw error;
+	}
+}
+
+/**
+ * Render a patch a capture rests on, failing as a capture failure when the
+ * renderer refuses. It refuses a name or content its patch cannot carry
+ * exactly — that is a file this capture cannot save, and the workspace holding
+ * it has to stay.
+ */
+async function renderForCapture(repoDir: string, what: string, render: () => Promise<string>): Promise<string> {
+	try {
+		return await render();
+	} catch (error) {
+		if (vcs.isVcsError(error)) {
+			throw new IsolationCaptureIncompleteError(
+				`Could not capture the ${what} in ${repoDir}: ${error.stderr.trim() || error.message}`,
 				[],
 				error,
 			);
@@ -318,11 +343,15 @@ async function captureUntrackedPatch(
 	const patches: string[] = [];
 	for (const result of untrackedDiffs) {
 		if (result === undefined) continue;
-		if (result.diff === undefined) {
+		// A listed file always renders at least its header, even when it is
+		// empty, so an empty diff means the read found nothing at that name. As
+		// a patch it said there was nothing to save, and the file went with the
+		// workspace.
+		if (result.diff === undefined || !result.diff.trim()) {
 			unread.push(result.entry);
 			continue;
 		}
-		if (result.diff.trim()) patches.push(result.diff);
+		patches.push(result.diff);
 	}
 	return { patch: patches.join("\n"), unread };
 }
@@ -468,8 +497,10 @@ async function captureRepoDeltaPatch(repoDir: string, rb: RepoBaseline, objectRe
 	const repo = vcs.requireGit(repoDir);
 	const objectRepo = objectRepoDir === repoDir ? repo : vcs.requireGit(objectRepoDir);
 	const currentHead = (await repo.headSha()) ?? "";
-	const currentStaged = await repo.diffText({ binary: true, cached: true });
-	const currentUnstaged = await repo.diffText({ binary: true });
+	const currentStaged = await renderForCapture(repoDir, "staged changes", () =>
+		repo.diffText({ binary: true, cached: true }),
+	);
+	const currentUnstaged = await renderForCapture(repoDir, "unstaged changes", () => repo.diffText({ binary: true }));
 	// Git's own report of what it did not look at, through the binding that
 	// runs git the way this repository runs git — the stripped environment,
 	// the deadline, the cancellation signal and the in-process fallback. A
@@ -481,6 +512,17 @@ async function captureRepoDeltaPatch(repoDir: string, rb: RepoBaseline, objectRe
 			`git could not read ${listed.unreadable.length} ${listed.unreadable.length === 1 ? "directory" : "directories"} ` +
 				`in ${repoDir}, so this capture cannot say what is in them: ${listed.unreadable.slice(0, 10).join(", ")}`,
 			listed.unreadable,
+		);
+	}
+	if (listed.undecodable.length > 0) {
+		// A name that is not UTF-8 has no JS string, so no path this process
+		// holds reaches the file and the patch cannot carry it. Decoded
+		// lossily, it named a file that does not exist, whose diff read as
+		// empty, and the teardown deleted the only copy.
+		throw new IsolationCaptureIncompleteError(
+			`git listed ${listed.undecodable.length} untracked file(s) in ${repoDir} whose names are not UTF-8, ` +
+				`so this capture cannot carry them: ${listed.undecodable.slice(0, 10).join(", ")}`,
+			listed.undecodable,
 		);
 	}
 	const currentUntracked = listed.paths;
@@ -531,7 +573,19 @@ function parseDiffGitLinePaths(line: string): string[] {
 	if (!line.startsWith("diff --git ")) return [];
 	const rest = line.slice("diff --git ".length);
 	const quoted = rest.match(/^("(?:\\.|[^"])+"|\/dev\/null) ("(?:\\.|[^"])+"|\/dev\/null)$/);
-	const parts = quoted ? [quoted[1], quoted[2]] : rest.split(" ");
+	// A name can hold a space. When both sides name the same path — anything
+	// but a rename — the split is where they agree, as git and the patch
+	// applier read it; at the first space, `my notes.txt` was `my`.
+	const symmetric = quoted
+		? undefined
+		: [...rest.matchAll(/ /g)]
+				.map(match => match.index)
+				.find(at => rest.startsWith("a/") && rest.slice(at + 1) === `b/${rest.slice(2, at)}`);
+	const parts = quoted
+		? [quoted[1], quoted[2]]
+		: symmetric !== undefined
+			? [rest.slice(0, symmetric), rest.slice(symmetric + 1)]
+			: rest.split(" ");
 	if (parts.length < 2) return [];
 	const paths = parts
 		.slice(0, 2)
@@ -777,7 +831,9 @@ function errorMessage(err: unknown): string {
  * hook child still running after the owner died writes into a path nobody can
  * take, instead of into the workspace a successor has since built at the same
  * name — which is how a successor's data was read and overwritten. The cost is
- * a directory left for the sweeper; the cost of reuse was a user's work.
+ * a directory nothing removes on its own: the user's `omp worktree clear`
+ * removes it once its owner has gone, and `--all` removes one that cannot
+ * prove it is finished. The cost of reuse was a user's work.
  */
 function getTaskIsolationSegment(repoRoot: string, id: string): string {
 	const key = `${path.resolve(repoRoot)}\0${id}`;
@@ -929,6 +985,12 @@ export async function ensureIsolation(
 				const generation = await writeIsolationOwner(baseDir, id);
 				claimed = true;
 				await clearClaimedWorkspace(baseDir);
+				// Recorded before the backend can mount anything. A run killed
+				// between the mount and its teardown leaves a live mount behind,
+				// and `omp worktree clear` must stop it before it removes a byte;
+				// this record is how it knows. A backend that turns out to be
+				// unavailable has its record cleared with the rest above.
+				if (needsNativeTeardown(candidate)) await writeRetainedBackend(baseDir, candidate);
 				await natives.isoStart(candidate, repoRoot, mergedDir);
 				// Sever the isolation's git metadata from the source checkout. Copy
 				// backends duplicate `repoRoot`'s `.git` verbatim — a linked-worktree
@@ -957,8 +1019,30 @@ export async function ensureIsolation(
 			} catch (err) {
 				// Only a claimed sandbox may be emptied — and only under this
 				// hold: a failure before the claim landed leaves whatever was
-				// there for its own owner.
-				if (claimed) await clearClaimedWorkspace(baseDir).catch(() => undefined);
+				// there for its own owner. A backend that mounted before it
+				// failed is stopped first; one that will not stop leaves its
+				// mount, its record and the sandbox, which the clear refuses.
+				// Neither the stop nor the emptying runs while something other
+				// than the backend's own mount is under the sandbox: both remove
+				// trees, and would remove through it.
+				if (claimed) {
+					const foreign = await foreignMountsUnder(baseDir, candidate, mergedDir).catch(() => undefined);
+					if (foreign === undefined || foreign.length > 0) {
+						logger.warn("isolation workspace kept after a failed start: something else is mounted in it", {
+							mergedDir,
+							mounts: foreign,
+						});
+					} else {
+						if (needsNativeTeardown(candidate)) {
+							const mounted = await fs.liveMountsUnder(mergedDir).then(
+								mounts => mounts.length > 0,
+								() => true,
+							);
+							if (mounted) await natives.isoStop(candidate, mergedDir).catch(() => undefined);
+						}
+						await clearClaimedWorkspace(baseDir).catch(() => undefined);
+					}
+				}
 				const message = errorMessage(err);
 				if (!natives.isoIsUnavailableError(message)) throw err;
 				return { kind: "unavailable", message };
@@ -978,20 +1062,81 @@ type MaterialiseOutcome =
 	| { kind: "unavailable"; message: string };
 
 /**
+ * Report a backend stop that failed. A mount or subvolume whose stop failed may
+ * still be live, and a recursive removal would walk through it into what it
+ * projects, so the caller keeps that workspace; the record of its backend is
+ * already on disk (written before the mount, and again before the teardown
+ * began), which is what makes `omp worktree clear` stop it first.
+ */
+function reportFailedStop(backend: IsoBackendKind, mergedDir: string, error: unknown): void {
+	logger.warn("isolation backend stop failed during cleanup", {
+		backend,
+		mergedDir,
+		error: error instanceof Error ? error.message : String(error),
+		retained: needsNativeTeardown(backend),
+	});
+}
+
+/**
  * Wait for a backend stop this teardown had to leave running, then put the
  * slot back into service: the directory goes, the retiring marker with it, and
  * the lock — if this teardown had to keep holding it because that marker could
  * not be written — goes back. A slot refused for ever because one stop was
- * slow is a leak of its own.
+ * slow is a leak of its own. A mount or subvolume whose stop fails keeps the
+ * directory, as an in-time one does.
+ *
+ * The removal is decided again when it happens: under the sandbox lock (the
+ * one handed over, or taken now), and only if the path is still the directory
+ * this teardown pinned, its marker is still the one this teardown left
+ * (`expected`), and nothing is mounted under it. The directory never left its
+ * name — that is why the stop ran in place — so neither the name nor the
+ * directory proves anything by the time the stop settles: a claim written into
+ * that same directory since is somebody else's.
  */
 async function settleAbandonedStop(
 	stop: Promise<unknown>,
 	teardownBase: string,
+	backend: IsoBackendKind,
 	heldLock: { release: () => void } | undefined,
+	pin: fs.DirectoryPin,
+	expected: (claim: IsolationClaim) => boolean,
 ): Promise<void> {
 	try {
-		await stop;
-		await fs.rm(teardownBase, { recursive: true, force: true });
+		try {
+			await stop;
+		} catch (error) {
+			reportFailedStop(backend, teardownBase, error);
+			if (needsNativeTeardown(backend)) return;
+		}
+		const remove = async (): Promise<void> => {
+			const now = await fs.checkPinnedDirectory(teardownBase, pin);
+			if (!now.same) {
+				logger.warn("abandoned isolation stop settled; the sandbox is not the directory it pinned, so it stays", {
+					mergedDir: teardownBase,
+					reason: now.reason,
+				});
+				return;
+			}
+			const claim = await readIsolationClaim(teardownBase);
+			if (!expected(claim)) {
+				logger.warn("abandoned isolation stop settled; the sandbox has been claimed since, so it stays", {
+					mergedDir: teardownBase,
+					found: claim.kind,
+				});
+				return;
+			}
+			const mounts = await fs.liveMountsUnder(teardownBase);
+			if (mounts.length > 0) {
+				logger.warn("abandoned isolation stop settled; something is still mounted in the sandbox, so it stays", {
+					mergedDir: teardownBase,
+					mounts,
+				});
+				return;
+			}
+			await fs.rm(teardownBase, { recursive: true, force: true });
+		};
+		if (heldLock) await remove();
+		else await withSandboxLock(teardownBase, "remove after a slow teardown", remove);
 	} catch (error) {
 		logger.warn("abandoned isolation stop did not settle cleanly; leaving the sandbox for reclamation", {
 			mergedDir: teardownBase,
@@ -999,6 +1144,7 @@ async function settleAbandonedStop(
 		});
 	} finally {
 		heldLock?.release();
+		await pin.release();
 	}
 }
 
@@ -1009,21 +1155,22 @@ async function settleAbandonedStop(
  * out again to a replacement spawn, to a session the SDK opens on it, or to
  * another omp process entirely, and a teardown can arrive long after its own
  * run — a release that outlived its lifecycle manager's deadline. So ownership
- * is proved at the moment of deletion rather than before it, in three steps,
- * under the sandbox lock:
+ * is proved at the moment of deletion rather than before it, under the sandbox
+ * lock. **Nothing is deleted on evidence gathered earlier**: identity,
+ * ownership and the backend requirement are all established on the directory
+ * being removed, at the moment of removal.
  *
  * - the marker must still name *this* generation. Anything else — a later
  *   run's generation, a damaged, truncated, unreadable or absent marker —
  *   leaves the directory alone. A handle cannot establish ownership from a
  *   marker nobody can read, and an unreadable marker is `omp worktree clear`'s
  *   problem, not a licence.
- * - the directory is then renamed out of the way, which takes it out of
- *   circulation in one atomic step: a materialisation that starts the instant
- *   the lock is released builds a fresh sandbox at the original path and
- *   cannot be touched by the teardown below, which now names only the retired
- *   copy. A mount the backend still holds refuses the rename (`EBUSY`); that
- *   teardown keeps the lock instead, which blocks the materialisation rather
- *   than racing it.
+ * - the directory the claim was read from is pinned by identity (device and
+ *   inode, with a descriptor held open), and the backend it needs stopped is
+ *   written beside it before anything can be interrupted. A path names
+ *   whatever sits there next; a directory renamed away during the capture and
+ *   replaced by another claimed sandbox, or by a symlink to one, answered to
+ *   the same name, and the teardown deleted the other run's workspace.
  * - `capture` — writing this run's patch, and its branch — runs *here*, under
  *   that same lock, immediately before the removal. Capture and the authority
  *   to delete have to be one span: every ordering where they were not left a
@@ -1034,8 +1181,18 @@ async function settleAbandonedStop(
  * - the capture is bounded, and the bound **refuses**: when it cannot be
  *   completed the workspace is kept and said so, because a workspace that
  *   survives costs disk and a log line while a lost patch costs a user's work.
- * - only then are the directory retired, the backend stopped and the removal
- *   run.
+ * - only then, and only after the path is checked against the pin and the
+ *   marker is read again, is the directory retired: renamed out of the way,
+ *   which takes it out of circulation in one atomic step, so a
+ *   materialisation that starts the instant the lock is released builds a
+ *   fresh sandbox at the original path. A mount the backend still holds
+ *   refuses the rename (`EBUSY`); that teardown keeps the lock instead. The
+ *   retired copy is checked against the pin again, the backend is stopped —
+ *   never through a mount directory that is a symlink — and the removal runs
+ *   on the pinned directory or not at all. A mount or subvolume backend whose
+ *   stop fails is not removed: the mount may still be live and the removal
+ *   would walk through it. `omp worktree clear` stops it, by its record,
+ *   before it removes anything.
  *
  * A handle with no generation predates claims (a fixture's hand-built handle)
  * and keeps the old unconditional behaviour.
@@ -1068,6 +1225,7 @@ export async function cleanupIsolation(
 	let retiredDir: string | undefined;
 	let proceed = false;
 	await runHoldingSandboxLock(baseDir, lock, async () => {
+		let pin: fs.DirectoryPin | undefined;
 		try {
 			if (handle.generation !== undefined) {
 				const claim = await readIsolationClaim(baseDir);
@@ -1079,6 +1237,16 @@ export async function cleanupIsolation(
 					});
 					return;
 				}
+			}
+			// The directory the claim was just read from, held by what it is.
+			try {
+				pin = await fs.pinDirectory(baseDir);
+			} catch (error) {
+				logger.warn("isolation cleanup skipped: the sandbox could not be held by identity", {
+					mergedDir: handle.mergedDir,
+					error: error instanceof Error ? error.message : String(error),
+				});
+				return;
 			}
 			// Someone is still working in here — a nested child that inherited this
 			// cwd, a session another process opened in it. Asked under the lock and
@@ -1101,6 +1269,23 @@ export async function cleanupIsolation(
 					mergedDir: handle.mergedDir,
 				});
 				return;
+			}
+			// The backend this workspace needs stopped goes on disk before anything
+			// here can be interrupted. A teardown killed after the retiring rename
+			// and before a failed stop wrote it left a retired directory with no
+			// record, and `omp worktree clear` then removed a file through the live
+			// mount. Materialisation writes it too; this covers a sandbox built
+			// before it did. A record that cannot be written stops the teardown.
+			if (needsNativeTeardown(handle.backend)) {
+				try {
+					await writeRetainedBackend(baseDir, handle.backend);
+				} catch (error) {
+					logger.warn("isolation workspace kept: its backend could not be recorded before teardown", {
+						mergedDir: handle.mergedDir,
+						error: error instanceof Error ? error.message : String(error),
+					});
+					return;
+				}
 			}
 			// The last thing before the directory goes, and still under the lock
 			// that authorises its going.
@@ -1150,6 +1335,29 @@ export async function cleanupIsolation(
 				}
 				if (!(await capturing)) return;
 			}
+			// At the act, on the object about to go: the claim check above and
+			// everything after it ran against a pathname, and the capture may have
+			// run for minutes. What has that name now must be the pinned
+			// directory, and its marker must still name this generation.
+			const present = await fs.checkPinnedDirectory(baseDir, pin);
+			if (!present.same) {
+				logger.warn("isolation cleanup skipped: the sandbox is no longer the directory this run proved its own", {
+					mergedDir: handle.mergedDir,
+					reason: present.reason,
+				});
+				return;
+			}
+			if (handle.generation !== undefined) {
+				const claim = await readIsolationClaim(baseDir);
+				if (claim.kind !== "claimed" || claim.generation !== handle.generation) {
+					logger.warn("isolation cleanup skipped: the workspace changed hands during the capture", {
+						mergedDir: handle.mergedDir,
+						expected: handle.generation,
+						found: claim.kind === "claimed" ? claim.generation : claim.kind,
+					});
+					return;
+				}
+			}
 			const candidate = `${baseDir}.retiring-${handle.generation ?? Snowflake.next()}`;
 			try {
 				// At the act: the capture above may have run long enough for
@@ -1157,32 +1365,89 @@ export async function cleanupIsolation(
 				requireSandboxLockHeld(baseDir, "retire");
 				await fs.rename(baseDir, candidate);
 				retiredDir = candidate;
-				// The copy left behind is nobody's sandbox now. Saying so keeps a
-				// failed removal below from looking like a live owner's workspace to
-				// `omp worktree clear`, which would then never reclaim it while this
-				// process lives.
-				await markIsolationRetired(candidate).catch(() => undefined);
 			} catch {
 				// A live mount pins the directory in place; hold the lock across the
 				// teardown instead, so no materialisation can start beside it.
 				retiredDir = undefined;
 			}
+			if (retiredDir !== undefined) {
+				// A rename moves whatever had the name. Only the pinned directory
+				// goes further; anything else is put back and left alone.
+				const moved = await fs.checkPinnedDirectory(retiredDir, pin);
+				if (!moved.same) {
+					logger.warn("isolation cleanup skipped: what was retired is not the directory this run proved its own", {
+						mergedDir: handle.mergedDir,
+						reason: moved.reason,
+					});
+					await fs.rename(retiredDir, baseDir).catch(() => undefined);
+					retiredDir = undefined;
+					return;
+				}
+				// The copy left behind is nobody's sandbox now. Saying so keeps a
+				// failed removal below from looking like a live owner's workspace to
+				// the user's `omp worktree clear`, which would then refuse to remove
+				// it while this process lives.
+				await markIsolationRetired(retiredDir).catch(() => undefined);
+			}
 			proceed = true;
 		} finally {
 			// Held past here only when the directory could not be retired.
 			if (!proceed || retiredDir !== undefined) lock.release();
+			if (!proceed) await pin?.release();
 		}
+		if (pin === undefined) return;
+		const held = pin;
 		const teardownBase = retiredDir ?? baseDir;
 		const teardownMerged = path.join(teardownBase, path.basename(handle.mergedDir));
 		// An in-place teardown holds the lock, so a backend stop that never settles
 		// would deny every later materialisation of this id. Bounded: past the
 		// bound the stop is left running, the lock goes back, and the directory is
-		// left to `omp worktree clear`, which can tell a retired sandbox from a
-		// live one.
+		// left for the user to remove with `omp worktree clear`, which can tell a
+		// retired sandbox from a live one. Nothing removes it on its own.
 		let abandoned = false;
 		let lockHandedOver = false;
+		let pinHandedOver = false;
+		// Set when the directory must stay: a mount or subvolume whose stop
+		// failed may still be live and the removal would walk through it, and a
+		// directory that is no longer the pinned one is not this teardown's.
+		let keep = false;
 		try {
 			try {
+				// A stop follows a symlink at the mount directory into whatever it
+				// names, and unmounts or deletes that instead.
+				const mountDir = await fs.lstatLookup(teardownMerged);
+				if (mountDir.kind === "found" && mountDir.value.isSymbolicLink()) {
+					keep = true;
+					logger.warn("isolation workspace kept: its mount directory is a symlink, so it is not stopped", {
+						mergedDir: teardownMerged,
+					});
+					return;
+				}
+				// Every native stop removes a tree, so it never runs while
+				// something other than the backend's own mount is under the
+				// workspace: a mount nested in an rcopy copy, or below an
+				// overlay's `upper`, had its source deleted by the stop itself,
+				// before the removal's own check could refuse.
+				const foreign = await foreignMountsUnder(teardownBase, handle.backend, teardownMerged);
+				if (foreign.length > 0) {
+					keep = true;
+					logger.warn("isolation workspace kept: something else is mounted in it, so it is not stopped", {
+						mergedDir: teardownMerged,
+						mounts: foreign,
+					});
+					return;
+				}
+				// The stop acts on a pathname; checked against the pin at the last
+				// moment before it, not only when the directory was retired.
+				const beforeStop = await fs.checkPinnedDirectory(teardownBase, held);
+				if (!beforeStop.same) {
+					keep = true;
+					logger.warn("isolation workspace not stopped: it is no longer the directory this run proved its own", {
+						mergedDir: teardownMerged,
+						reason: beforeStop.reason,
+					});
+					return;
+				}
 				const stop = natives.isoStop(handle.backend, teardownMerged);
 				if (retiredDir === undefined) {
 					abandoned = !(await Promise.race([
@@ -1200,7 +1465,7 @@ export async function cleanupIsolation(
 						// lock stays held instead — a slot nobody can take is the
 						// same answer, and releasing it on a failed write is how a
 						// successor's data ends up deleted by that stop.
-						const marked = await markIsolationRetiring(teardownBase).then(
+						const marked = await markIsolationRetiring(teardownBase, handle.generation).then(
 							() => true,
 							(error: unknown) => {
 								logger.warn("isolation retiring marker could not be written; holding the sandbox lock", {
@@ -1215,26 +1480,56 @@ export async function cleanupIsolation(
 						// life of the owner.
 						// Handed to the continuation when the marker could not be
 						// written: it, and not the `finally` below, gives the lock
-						// back once the stop settles.
+						// back once the stop settles. The pin always goes with it.
 						lockHandedOver = !marked;
-						trackLateCleanup(settleAbandonedStop(stop, teardownBase, marked ? undefined : lock), {
-							id: path.basename(teardownBase),
-							resource: "isolation",
-						});
+						pinHandedOver = true;
+						trackLateCleanup(
+							settleAbandonedStop(
+								stop,
+								teardownBase,
+								handle.backend,
+								marked ? undefined : lock,
+								held,
+								marked
+									? claim => claim.kind === "retiring" && claim.generation === handle.generation
+									: claim =>
+											handle.generation === undefined ||
+											(claim.kind === "claimed" && claim.generation === handle.generation),
+							),
+							{
+								id: path.basename(teardownBase),
+								resource: "isolation",
+							},
+						);
 					}
 				} else {
 					await stop;
 				}
 			} catch (err) {
-				logger.warn("isolation backend stop failed during cleanup", {
-					backend: handle.backend,
-					mergedDir: teardownMerged,
-					error: err instanceof Error ? err.message : String(err),
-				});
+				keep = needsNativeTeardown(handle.backend);
+				reportFailedStop(handle.backend, teardownMerged, err);
 			}
 		} finally {
 			try {
-				if (!abandoned) await fs.rm(teardownBase, { recursive: true, force: true });
+				if (!abandoned && !keep) {
+					// The removal acts on what has the name now, and never walks
+					// into a mount.
+					const now = await fs.checkPinnedDirectory(teardownBase, held);
+					const mounts = now.same ? await fs.liveMountsUnder(teardownBase) : [];
+					if (now.same && mounts.length === 0) {
+						await fs.rm(teardownBase, { recursive: true, force: true });
+					} else if (mounts.length > 0) {
+						logger.warn("isolation workspace kept: something is still mounted in it", {
+							mergedDir: teardownMerged,
+							mounts,
+						});
+					} else if (!now.same) {
+						logger.warn("isolation workspace kept: it is no longer the directory this run proved its own", {
+							mergedDir: teardownMerged,
+							reason: now.reason,
+						});
+					}
+				}
 			} catch (err) {
 				logger.warn("isolation workspace removal failed; leaving it for reclamation", {
 					mergedDir: teardownMerged,
@@ -1247,6 +1542,7 @@ export async function cleanupIsolation(
 				// teardown — of the materialisation that replaced it.
 				forgetIsolationWorkspace(handle.mergedDir, handle.generation);
 				if (retiredDir === undefined && !lockHandedOver) lock.release();
+				if (!pinHandedOver) await held.release();
 			}
 		}
 	});
