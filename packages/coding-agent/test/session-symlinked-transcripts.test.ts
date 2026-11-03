@@ -18,6 +18,7 @@ import {
 	resolveResumableSession,
 } from "@oh-my-pi/pi-coding-agent/session/session-listing";
 import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
+import { rebuildSessionLocator } from "@oh-my-pi/pi-coding-agent/session/session-locator";
 
 const SESSION_ID = "0198aaaa-0000-7000-8000-000000000001";
 const SESSION_NAME = `2026-10-15T00-00-00-000Z_${SESSION_ID}.jsonl`;
@@ -88,7 +89,8 @@ describe("a transcript that is a symlink", () => {
 		await fs.promises.mkdir(bucket, { recursive: true });
 		await fs.promises.symlink(real, path.join(bucket, SESSION_NAME));
 
-		expect(await findSessionFiles(SESSION_ID.slice(0, 8), sessionsDir)).toEqual([path.join(bucket, SESSION_NAME)]);
+		await rebuildSessionLocator(sessionsDir);
+		expect(await findSessionFiles(SESSION_ID.slice(0, 8), [sessionsDir])).toEqual([path.join(bucket, SESSION_NAME)]);
 	});
 
 	it.skipIf(!symlinksAvailable)("is listed once when a project bucket is a symlink to another", async () => {
@@ -103,7 +105,8 @@ describe("a transcript that is a symlink", () => {
 
 		const storage = new FileSessionStorage();
 		expect((await listAllSessions(storage, sessionsDir)).map(session => session.id)).toEqual([SESSION_ID]);
-		expect(await findSessionFiles(SESSION_ID.slice(0, 8), sessionsDir)).toEqual([
+		await rebuildSessionLocator(sessionsDir);
+		expect(await findSessionFiles(SESSION_ID.slice(0, 8), [sessionsDir])).toEqual([
 			path.join(realBucket, SESSION_NAME),
 		]);
 		expect((await listRecentSessions({ limit: 10, sessionsRoot: sessionsDir })).map(s => s.id)).toEqual([SESSION_ID]);
@@ -119,7 +122,8 @@ describe("a transcript that is a symlink", () => {
 
 		const storage = new FileSessionStorage();
 		expect(await listAllSessions(storage, sessionsDir)).toEqual([]);
-		expect(await findSessionFiles(SESSION_ID.slice(0, 8), sessionsDir)).toEqual([]);
+		await rebuildSessionLocator(sessionsDir);
+		expect(await findSessionFiles(SESSION_ID.slice(0, 8), [sessionsDir])).toEqual([]);
 		expect(await listRecentSessions({ limit: 10, sessionsRoot: sessionsDir })).toEqual([]);
 	});
 });

@@ -8,10 +8,11 @@ import seanceAssignmentTemplate from "../prompts/system/seance-assignment.md" wi
 import seanceTaskGuidanceTemplate from "../prompts/tools/seance-task-guidance.md" with { type: "text" };
 import { buildSessionContext, getRestorableSessionModels } from "../session/session-context";
 import { listSessionsReadOnly } from "../session/session-listing";
+import { locateSessions } from "../session/session-locator";
 import { sessionDirForCwd } from "../session/session-paths";
 import { resolveSessionLeafId, type SessionEntry } from "../session/session-entries";
 import { FileSessionStorage, type SessionStorage } from "../session/session-storage";
-import { SessionManager, type PersistedSessionInit } from "../session/session-manager";
+import type { PersistedSessionInit } from "../session/session-manager";
 import { loadSessionFile } from "../session/session-loader";
 import type { ModelRegistry } from "../config/model-registry";
 import type { TaskItem, TaskParams } from "@oh-my-pi/pi-tui/tools/task";
@@ -151,7 +152,13 @@ export async function resolveSeanceSource(
 	const localMatch = chooseId(local, source);
 	if (localMatch) return validateSourceFile(localMatch.path, storage);
 	if (options.includeGlobal) {
-		const matchGlobal = chooseId(await SessionManager.listAll(storage), source);
+		// Every other session omp recorded, through the session index: never a
+		// walk of the sessions tree. Copies of one session count once, newest first.
+		const newestCopies = new Map<string, { id: string; path: string }>();
+		for (const hit of await locateSessions(source)) {
+			if (!hit.archived && !newestCopies.has(hit.id)) newestCopies.set(hit.id, { id: hit.id, path: hit.path });
+		}
+		const matchGlobal = chooseId([...newestCopies.values()], source);
 		if (matchGlobal) return validateSourceFile(matchGlobal.path, storage);
 	}
 	throw new Error(`Session "${label}" was not found.`);

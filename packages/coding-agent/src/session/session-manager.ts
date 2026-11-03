@@ -107,6 +107,7 @@ import {
 	type SessionLoadResult,
 	visitEntriesFromFile,
 } from "./session-loader";
+import { recordSessionLocation, recordSessionTree } from "./session-locator";
 import { generateId, migrateToCurrentVersion } from "./session-migrations";
 import {
 	computeDefaultSessionDir,
@@ -910,6 +911,8 @@ export class SessionManager {
 	readonly #blobs: BlobStore;
 
 	#sessionId = "";
+	/** `<id>\0<path>` last recorded in the session index (see {@link SessionManager.#noteLocation}). */
+	#indexedLocation: string | undefined;
 	/**
 	 * Parent-derived sibling family candidate stashed by the Task executor once
 	 * the child session exists. Session-scoped and non-persisted: the header
@@ -1544,10 +1547,26 @@ export class SessionManager {
 	}
 	#recordDurableAppend(line: string): void {
 		this.#expectedDiskSize = (this.#expectedDiskSize ?? 0) + Buffer.byteLength(line, "utf8");
+		this.#noteLocation();
 	}
 
 	#recordFullRewrite(bytes: number): void {
 		this.#expectedDiskSize = bytes;
+		this.#noteLocation();
+	}
+
+	/**
+	 * Record the session file's path in the session index the first time this
+	 * session is durably written at it, so a lookup by id finds it without
+	 * walking the sessions tree (see `session-locator.ts`).
+	 */
+	#noteLocation(): void {
+		if (!this.#persist || !this.#sessionFile || !this.#sessionId) return;
+		if (!(this.#storage instanceof FileSessionStorage)) return;
+		const location = `${this.#sessionId}\0${this.#sessionFile}`;
+		if (location === this.#indexedLocation) return;
+		this.#indexedLocation = location;
+		recordSessionLocation(this.#sessionId, this.#sessionFile);
 	}
 
 	/**
@@ -2704,6 +2723,12 @@ export class SessionManager {
 				this.#artifactManagerSessionFile = null;
 				// Path is repointed; hot-path appends may use `#sessionFile` again.
 				this.#sessionFileRelocating = null;
+				// The move carried the artifact tree, and with it every subagent
+				// transcript: record them all at their new paths.
+				if (sessionMoved && this.#storage instanceof FileSessionStorage) {
+					this.#indexedLocation = `${this.#sessionId}\0${newSessionFile}`;
+					await recordSessionTree(newSessionFile);
+				}
 			}
 
 			this.#cwd = resolvedCwd;

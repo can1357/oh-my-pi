@@ -395,7 +395,7 @@ Startup `--fork` is resolved before normal session creation:
 
 1. `--fork` is rejected with `--no-session`.
 2. Path-like values (`/`, `\`, or `.jsonl`) fork directly from the given path.
-3. Other values resolve via `resolveResumableSession(...)`: local sessions first, then global search when `sessionDir` is not forced. Matching accepts lowercased session id prefixes, full JSONL filename prefixes, and timestamp-stripped filename id suffixes.
+3. Other values resolve via `resolveResumableSession(...)`: local sessions first, then, when `sessionDir` is not forced, the session index of every sessions root (see [Finding a session by id](./session.md#finding-a-session-by-id)); nothing walks the sessions tree. Matching accepts lowercased session id prefixes, full JSONL filename prefixes, and timestamp-stripped filename id suffixes. A session `omp gc` compressed into the archive fails with a message naming the archived file and where to decompress it.
 4. The forked file is created in the current cwd/session-dir scope and becomes the active session manager for startup. Source artifacts are copied recursively by default. Missing source files fail instead of producing an empty fork.
    An unresolved tool call on the copied active branch is paired with an
    outcome-unknown result in the child, rather than being marked never executed.
@@ -410,7 +410,7 @@ Use `--prompt-cache-key <key>` to pin the provider prompt-cache identity explici
 
 ## Seance
 
-`/seance [id|path] [--model selector]` opens a source picker when no source is supplied; an id or path (`~` expands) selects directly. Typed ids search the current project, then every project. The source is read without opening a writer and is never modified.
+`/seance [id|path] [--model selector]` opens a source picker when no source is supplied; an id or path (`~` expands) selects directly. Typed ids search the current project, then every session the session index records (subagent transcripts and other profiles included). The source is read without opening a writer and is never modified.
 
 Each consult forks only the source transcript, into `<current session artifacts>/<ConsultId>.jsonl`, with `seanceSource` in its header. Artifacts are not copied: the consultant's `history://`, `artifact://`, and `agent://` read the source's artifacts directory in place, and its own new artifact ids are allocated past the source's so inherited `artifact://<n>` references keep naming the source artifact. Consulting the current session repeatedly adds one transcript per consult, not a copy of the tree.
 
@@ -435,7 +435,7 @@ Without an argument:
 
 With an argument:
 
-- `/resume <id>` resolves an id/filename prefix with local-first, then global fallback, and opens the copy `resolveResumeTarget` picks, the same one the CLI's `--resume <id>` opens (see CLI `--resume <value>`); an unknown value reports `Session "<value>" not found`.
+- `/resume <id>` resolves an id/filename prefix with local-first, then the session index of every root, and opens the copy `resolveResumeTarget` picks, the same one the CLI's `--resume <id>` opens (see CLI `--resume <value>`); an unknown value reports `Session "<value>" not found`, and an archived one names the archived file.
 - `/resume @claude` and `/resume @codex` open a foreign-session picker. Selecting one converts and persists it under a fresh OMP session identity, then switches to that new session.
 
 ## CLI `--resume`
@@ -452,9 +452,9 @@ With an argument:
 1. If value looks like path (`/`, `\`, or `.jsonl`), open directly. A path that does not exist fails with `Session "<path>" not found.` rather than creating a session there.
 2. Else `resolveResumableSession(...)` searches:
    - current scope (`SessionManager.list(cwd, sessionDir)`)
-   - global sessions (`SessionManager.listAll()`) only when no explicit `sessionDir` was provided
-3. Matching accepts case-insensitive session id prefixes, full JSONL filename prefixes, and the id suffix after the timestamp in `<timestamp>_<sessionId>.jsonl`.
-4. When nothing matches, the resolver (`resolveResumeTarget`) looks in the same scopes for a `<timestamp>_<sessionId>.jsonl` file whose name matches but which no longer reads as a session (the listing skips it), and takes the copy that continues it (see below). Otherwise resolution fails with `Session "<value>" not found.`
+   - the session index of every root (`locateSessions`: this profile's root and archive, `session.extraRoots`, other profiles) only when no explicit `sessionDir` was provided. It reads index files and stats candidate paths; it never lists another project's directory. See [Finding a session by id](./session.md#finding-a-session-by-id).
+3. Matching accepts case-insensitive session id prefixes, full JSONL filename prefixes, and the id suffix after the timestamp in `<timestamp>_<sessionId>.jsonl` (file names only for top-level transcripts). Subagent transcripts match by id.
+4. When nothing matches, the resolver (`resolveResumeTarget`) looks in the same scopes for a `<timestamp>_<sessionId>.jsonl` file whose name matches but which no longer reads as a session (the listing skips it), and takes the copy that continues it (see below). A key that names only a session `omp gc` compressed into the archive fails with `ArchivedSessionError`, naming the archived file and the path to decompress it to. Otherwise resolution fails with `Session "<value>" not found.`; when this root's index was never rebuilt, the hint says that `omp session reindex` indexes sessions an older omp wrote.
 
 Both forms then follow the session's continuations (`findSessionContinuation`, through `resolveResumeTarget` for a key): when its conversation went on in another file of the same directory (a sibling whose header names it in `continuationOf`), the copy with the newest turn opens instead, unless the named file has turns of its own that copy lacks, and a notice names both files. A file that no longer holds the session its generated `<timestamp>_<sessionId>.jsonl` name records was replaced under that session (conflict recovery leaves it as it found it); resume then opens the copy that continues the named session, when one exists. That applies to a path whose file no longer parses, and to a key that matched only the file name (the file holds another session) or found an unlisted file in step 4. A path whose file holds another session opens that session; a file without a generated name records no session id and is never taken as replaced.
 

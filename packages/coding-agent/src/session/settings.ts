@@ -21,6 +21,7 @@ import {
 	TINY_MODEL_DTYPE_SETTING_VALUES,
 } from "../tiny/dtype";
 import { DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS, MAX_WEB_SEARCH_TIMEOUT_SECONDS } from "../web/search/types";
+import { configureSessionExtraRoots, parseSessionRootList, SESSION_EXTRA_ROOTS_ENV } from "./session-locator";
 import { DEFAULT_USAGE_RESERVE_PCT } from "@oh-my-pi/pi-ai/auth-storage";
 import { configureProviderStoreResponses } from "@oh-my-pi/pi-ai/providers/openai-responses-state";
 import { configureCodexAccessPrograms } from "@oh-my-pi/pi-ai/providers/openai-codex/access-programs";
@@ -32,6 +33,7 @@ import { AUTO_THINKING, getConfiguredThinkingLevelMetadata, getThinkingLevelMeta
 const EMPTY_NUMBER_RECORD: Record<string, number> = {};
 const EMPTY_STRING_ARRAYS_RECORD: Record<string, string[]> = {};
 const DEFAULT_TOOL_CALL_LOOP_EXEMPT_TOOLS: string[] = ["wait"];
+const EMPTY_STRING_ARRAY: string[] = [];
 
 /** Scope of the resume picker's current-folder list. */
 export const cfgSessionWorktreeScope = register({
@@ -51,6 +53,24 @@ export const cfgSessionWorktreeScope = register({
 		],
 	},
 });
+
+/**
+ * Extra session roots (e.g. a tree moved to another disk) that a lookup by
+ * session id consults through their `.session-index.tsv`, never by walking them.
+ */
+export const cfgSessionExtraRoots = register({
+	id: "session.extraRoots",
+	type: "array",
+	default: EMPTY_STRING_ARRAY,
+	env: { name: SESSION_EXTRA_ROOTS_ENV, parse: parseSessionRootList },
+	validate: raw => {
+		if (raw === undefined) return;
+		if (!Array.isArray(raw) || raw.some(root => typeof root !== "string")) {
+			throw new Error("session.extraRoots must be a list of directory paths");
+		}
+	},
+});
+effect(cfgSessionExtraRoots, roots => configureSessionExtraRoots(roots));
 
 // Power assertions: macOS IOKit, Linux login1/ScreenSaver, Windows execution state.
 export const cfgPowerSleepPrevention = register({
