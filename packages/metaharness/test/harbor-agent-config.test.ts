@@ -267,6 +267,19 @@ describe("omp_local", () => {
 		}
 	});
 
+	it("gives each run its own private token file, so a concurrent run of the job cannot remove it", async () => {
+		const { root } = await scratch("runner-token-file-");
+		const cfg = parseArgs(["--model", "openrouter/test-model", "--gateway-token", "file-bearer"]);
+
+		const active = writeGatewayTokenFile(root, cfg);
+		const concurrent = writeGatewayTokenFile(root, cfg);
+		await fs.rm(concurrent);
+
+		expect(concurrent).not.toBe(active);
+		expect(await Bun.file(active).text()).toBe("file-bearer");
+		expect((await fs.stat(active)).mode & 0o777).toBe(0o600);
+	});
+
 	it("refuses an inherited variable whose name holds the token without printing the name", () => {
 		const saved = { ...process.env };
 		Object.assign(process.env, { METAHARNESS_GATEWAY_TOKEN: "same-env-secret", "OMP_BENCH_same-env-secret": "x" });
@@ -725,6 +738,8 @@ describe("manager", () => {
 				expect(await send("/api/experiments/token", { goal: token }, "PUT")).toBe(400);
 				// The experiment id comes from the URL and is stored too.
 				expect(await send(`/api/experiments/${token}`, { goal: "ordinary goal" }, "PUT")).toBe(400);
+				// A body id must not stand in for the URL id the update is stored under.
+				expect(await send(`/api/experiments/${token}`, { id: "safe-id", goal: "ordinary goal" }, "PUT")).toBe(400);
 				expect(await send("/api/runs/token-probe/resume", { filterErrorTypes: [token] })).toBe(400);
 				// Choosing another token for the request does not let it store a known one.
 				const otherToken = "review-other-bearer";

@@ -1407,15 +1407,25 @@ export function writeModelsYaml(benchDir: string, cfg: Config): string {
 
 /**
  * Write the gateway token where the Harbor agent reads it (`OMP_BENCH_GATEWAY_TOKEN_FILE`):
- * a fresh mode 0600 file in the bench dir. The token is never put in Harbor's environment,
- * because Harbor expands `${NAME}` from that environment in task files and agent env, so a
- * task could name it. The runner removes the file when Harbor exits.
+ * a new mode 0600 file in the bench dir, named for this invocation so a concurrent run of
+ * the same job (a dry run, say) never replaces or removes it. The token is never put in
+ * Harbor's environment, because Harbor expands `${NAME}` from that environment in task files
+ * and agent env, so a task could name it. The file is removed when this process exits for
+ * any reason it can observe; a SIGKILL leaves it, mode 0600, until removed by hand.
  */
 export function writeGatewayTokenFile(benchDir: string, cfg: Config): string {
-	const file = path.join(benchDir, "gateway-token");
-	fs.rmSync(file, { force: true });
+	const file = path.join(benchDir, `gateway-token-${crypto.randomUUID()}`);
 	fs.writeFileSync(file, cfg.gatewayToken, { mode: 0o600, flag: "wx" });
+	if (gatewayTokenFiles.size === 0) process.once("exit", removeGatewayTokenFiles);
+	gatewayTokenFiles.add(file);
 	return file;
+}
+
+/** Token files this process wrote; `removeGatewayTokenFiles` deletes them when it exits. */
+const gatewayTokenFiles = new Set<string>();
+
+function removeGatewayTokenFiles(): void {
+	for (const file of gatewayTokenFiles) fs.rmSync(file, { force: true });
 }
 
 function gatewayHealthOk(url: string): boolean {

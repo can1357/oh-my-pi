@@ -596,7 +596,7 @@ export class ManagerServer {
 	/** Apply goal + per-run role/note metadata; used by the UI and for backfill. */
 	updateExperimentMeta(id: string, update: ExperimentMetaUpdate): { id: string; updatedRuns: string[] } {
 		// The id comes from the URL and is stored as the experiment's key, so it is checked too.
-		this.#refuseKnownGatewayTokens({ id, ...update }, "the experiment update");
+		this.#refuseKnownGatewayTokens({ id, update }, "the experiment update");
 		if (update.goal !== undefined) this.#store.setExperimentGoal(id, update.goal);
 		const updatedRuns: string[] = [];
 		for (const jobName in update.runs) {
