@@ -17,7 +17,7 @@
  *   no restart, once another session stores a login and the model asks for
  *   one of its tools again; without a stored login nothing is retried.
  */
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -103,7 +103,10 @@ describe("MCP server that is not connected", () => {
 	let server: LoginRequiredServer;
 	let config: MCPHttpServerConfig;
 
-	beforeEach(async () => {
+	// Opening a SqliteAuthCredentialStore creates and migrates its tables; on a loaded host that took
+	// 9-14 s for the two opens below (a 64-core host at load ~400). Open them once per
+	// file with that budget instead of in every beforeEach under the default 5 s hook limit.
+	beforeAll(async () => {
 		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-unavailable-"));
 		const dbPath = path.join(tempDir, "agent.db");
 		// Two stores on one file: this session and another omp process on the same machine.
@@ -111,6 +114,16 @@ describe("MCP server that is not connected", () => {
 		otherSession = new AuthStorage(await SqliteAuthCredentialStore.open(dbPath));
 		await session.credentials.reload();
 		await otherSession.credentials.reload();
+	}, 60_000);
+
+	afterAll(async () => {
+		session.close();
+		otherSession.close();
+		await removeWithRetries(tempDir);
+	});
+
+	// Each test gets its own server, so its own URL and credential id.
+	beforeEach(async () => {
 		server = startLoginRequiredServer();
 		config = { type: "http", url: server.url, timeout: 2_000 };
 		manager = new MCPManager(tempDir);
@@ -122,9 +135,9 @@ describe("MCP server that is not connected", () => {
 	afterEach(async () => {
 		await manager.disconnectAll();
 		server.stop();
-		session.close();
-		otherSession.close();
-		await removeWithRetries(tempDir);
+		// A later test whose server reuses this port must start with no login stored.
+		await otherSession.credentials.remove(mcpOAuthCredentialId(server.url));
+		await session.credentials.poll();
 	});
 
 	async function storeLoginInOtherSession(): Promise<void> {
