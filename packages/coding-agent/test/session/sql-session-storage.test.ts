@@ -563,6 +563,9 @@ describe("SqlSessionStorage (SQLite concurrency)", () => {
 			[
 				'import { SQL } from "bun";',
 				"const client = new SQL(process.argv[2]);",
+				// As an omp process's store does: its COMMIT then waits out the
+				// moment this test's store holds the shared lock while it retries.
+				'await client.unsafe("PRAGMA busy_timeout = 5000");',
 				'await client.unsafe("BEGIN IMMEDIATE");',
 				"await client.unsafe(\"INSERT INTO omp_session_files (path, content, mtime_ms, byte_len) VALUES ('/sessions/p/other.jsonl', 'other\\n', 1, 6)\");",
 				'process.stdout.write("locked\\n");',
