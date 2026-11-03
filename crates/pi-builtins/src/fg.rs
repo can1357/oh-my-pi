@@ -81,7 +81,10 @@ impl builtins::Command for FgCommand {
 			sys::terminal::move_self_to_foreground()?;
 		}
 
-		if let Some(job) = context.shell.jobs().jobs.iter().find(|job| job.id == id)
+		// Bash running a script prints nothing for a job that stops
+		// (`notify_of_job_status`); `jobs` shows it.
+		if is_interactive
+			&& let Some(job) = context.shell.jobs().jobs.iter().find(|job| job.id == id)
 			&& matches!(job.state, jobs::JobState::Stopped)
 		{
 			// N.B. We use the '\r' to overwrite any ^Z output.

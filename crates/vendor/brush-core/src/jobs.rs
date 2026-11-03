@@ -376,6 +376,57 @@ pub(crate) struct PipelineStop {
 	pub first_word:  Option<u8>,
 	/// The last stage's status, once it ended.
 	pub last_status: Option<ExecutionExitCode>,
+	/// What a job-control signal reaches of every external stage, as each
+	/// started (see [`processes::ChildProcess::signal_target`]).
+	pub signal_targets: Vec<sys::process::ProcessId>,
+}
+
+/// How `kill` delivers a signal, as Bash's `kill_pid` decides it (see
+/// [`Job::kill_delivery`], [`JobManager::kill_pid_delivery`]).
+pub struct KillDelivery {
+	/// Each target of the signal: a pid, or a negative process group.
+	pub targets:         Vec<sys::process::ProcessId>,
+	/// Whether the same targets get SIGCONT after the signal.
+	pub continue_after:  bool,
+	/// Whether the call fails when no target took the signal; Bash's
+	/// per-process path for a job started without job control never fails.
+	pub reports_failure: bool,
+}
+
+impl KillDelivery {
+	/// The signal goes to `targets` alone.
+	const fn to(targets: Vec<sys::process::ProcessId>) -> Self {
+		Self { targets, continue_after: false, reports_failure: true }
+	}
+
+	/// Sends `signal` to every target (`None` probes them with signal 0),
+	/// then SIGCONT to the same targets when the delivery asks for it.
+	/// Returns whether the call succeeded: some target took the signal, or
+	/// the delivery never fails.
+	pub fn deliver(&self, signal: Option<traps::TrapSignal>) -> bool {
+		let mut delivered = false;
+		for &target in &self.targets {
+			delivered |= match signal {
+				Some(signal) => sys::signal::kill_process(target, signal).is_ok(),
+				None => sys::signal::probe_process(target),
+			};
+		}
+		if self.continue_after {
+			let _ = sys::signal::continue_targets(&self.targets);
+		}
+		delivered || !self.reports_failure
+	}
+}
+
+/// The signal targets of `processes`, each once (see
+/// [`processes::ChildProcess::signal_target`]).
+pub(crate) fn signal_targets<'a>(
+	processes: impl IntoIterator<Item = &'a processes::ChildProcess>,
+) -> Vec<sys::process::ProcessId> {
+	let mut targets: Vec<_> = processes.into_iter().filter_map(processes::ChildProcess::signal_target).collect();
+	targets.sort_unstable();
+	targets.dedup();
+	targets
 }
 impl JobTask {
 	/// Returns whether the task is an external process.
@@ -1150,6 +1201,26 @@ impl JobManager {
 		self.jobs.iter_mut().find(|job| job.contains_process_id(pid))
 	}
 
+	/// Bash's `kill_pid` (`jobs.c:3670-3741`) for a pid operand of `kill`
+	/// (`signal` is `None` for signal 0). A pid below -1 names a process
+	/// group: if one of the jobs holds the pid it negates, that job decides
+	/// the delivery (see [`Job::kill_delivery`]), else the group gets the
+	/// signal. Any other pid gets the signal alone, with no regard to a job
+	/// that holds it: no SIGCONT follows, and the job's state stays.
+	pub fn kill_pid_delivery(
+		&mut self,
+		pid: sys::process::ProcessId,
+		signal: Option<traps::TrapSignal>,
+		observe_stops: bool,
+	) -> Result<KillDelivery, error::Error> {
+		if let Some(group) = pid.checked_neg().filter(|&group| group > 1)
+			&& let Some(job) = self.resolve_process_id(group)
+		{
+			return job.kill_delivery(signal, Some(group), observe_stops);
+		}
+		Ok(KillDelivery::to(vec![pid]))
+	}
+
 	/// Waits for every job, as Bash's `wait` with no operand does
 	/// (`wait_for_background_pids`), then forgets the jobs that ended and every
 	/// status kept for a pid, reporting nothing. The shell's `wait` uses
@@ -1855,11 +1926,13 @@ pub struct Job {
 	/// If available, the process group ID of the job's processes.
 	pgid: Option<sys::process::ProcessId>,
 
-	/// The process group of each external stage other than the shell's own,
-	/// as the job started: continuing the job signals each of them (see
-	/// [`Job::resume`]), since a group still holds a stage's children after
-	/// the stage has exited.
-	process_groups: Vec<sys::process::ProcessId>,
+	/// What a job-control signal reaches of each external stage, recorded as
+	/// the stage started: its process group (negative), unless that is the
+	/// shell's own, then the process. `fg`, `bg` and `kill` signal exactly
+	/// these (see [`Job::signal_targets`]); a group still holds a stage's
+	/// children after the stage has exited, as Bash's `killpg` on the job's
+	/// group reaches them.
+	signal_targets: Vec<sys::process::ProcessId>,
 
 	/// The annotation of the job (e.g., current, previous).
 	annotation: JobAnnotation,
@@ -1966,7 +2039,10 @@ impl Job {
 			JobTask::External(process) => process.pgid().or_else(|| process.pid()),
 			JobTask::Internal(_) => None,
 		});
-		let process_groups = sys::signal::process_groups(external_pids());
+		let signal_targets = signal_targets(tasks.iter().filter_map(|task| match task {
+			JobTask::External(process) => Some(process),
+			JobTask::Internal(_) => None,
+		}));
 		Self {
 			id: 0,
 			tasks,
@@ -1975,7 +2051,7 @@ impl Job {
 			representative_process_id,
 			last_process_id,
 			pgid,
-			process_groups,
+			signal_targets,
 			annotation: JobAnnotation::None,
 			command_line,
 			state,
@@ -2521,8 +2597,9 @@ impl Job {
 	/// pipeline's first and last external pids name the job (`jobs -p`,
 	/// `wait -p`), an ended stage's pid still selects it (`wait PID`), each
 	/// stopped stage keeps its stop signal, the first stage's status once it
-	/// has ended gives the stopped status (see [`Job::stopped_status`]), and
-	/// the last stage's status once it has ended is the job's.
+	/// has ended gives the stopped status (see [`Job::stopped_status`]), the
+	/// last stage's status once it has ended is the job's, and every stage's
+	/// signal target, ended stages' included, is the job's.
 	pub(crate) fn record_pipeline_stop(&mut self, stop: PipelineStop) {
 		self.representative_process_id = stop.first_pid.or(self.representative_process_id);
 		self.last_process_id = stop.last_pid.or(self.last_process_id);
@@ -2534,15 +2611,21 @@ impl Job {
 		if let Some(status) = stop.last_status {
 			self.completed_result = Some(Ok(ExecutionResult::from(status)));
 		}
+		self.signal_targets = stop.signal_targets;
 	}
 
 	/// Applies the stops, continues and exits the job's processes reported
 	/// since the last look, as Bash's `set_job_status_and_cleanup` does: any of
-	/// them is a change no listing has shown, and the job is stopped while no
-	/// process of it runs and one is stopped. A process that exited does not
-	/// run, so a pipeline with one stage stopped and the others ended is
-	/// stopped. Bash sees stops and continues only with job control on, so
-	/// only then do callers look.
+	/// them is a change no listing has shown. A running job becomes stopped
+	/// when no process of it runs and one is stopped; a process that exited
+	/// does not run, so a pipeline with one stage stopped and the others ended
+	/// is stopped. A stopped job stays stopped while one of its processes is
+	/// stopped, though another runs (`jobs.c:4021-4040`: only a job that is
+	/// not stopped returns early while a process runs), so a foreground
+	/// pipeline this shell counted stopped while a stage still ran stays so
+	/// until it is continued; it runs again once none is stopped. Bash sees
+	/// stops and continues only with job control on, so only then do callers
+	/// look.
 	fn observe_stops_and_continues(&mut self) -> Result<(), error::Error> {
 		if self.is_done() {
 			return Ok(());
@@ -2583,14 +2666,18 @@ impl Job {
 		if decides_state {
 			let live: Vec<_> = self.process_ids().collect();
 			self.stopped_processes.retain(|(pid, _)| live.contains(pid));
-			let all_stopped = !self.stopped_processes.is_empty()
-				&& self.tasks.iter().all(|task| match task {
-					JobTask::External(process) => process
-						.pid()
-						.is_some_and(|pid| self.stopped_processes.iter().any(|&(stopped, _)| stopped == pid)),
-					JobTask::Internal(_) => false,
-				});
-			self.state = if all_stopped { JobState::Stopped } else { JobState::Running };
+			let any_stopped = !self.stopped_processes.is_empty();
+			let any_running = self.tasks.iter().any(|task| match task {
+				JobTask::External(process) => process
+					.pid()
+					.is_none_or(|pid| !self.stopped_processes.iter().any(|&(stopped, _)| stopped == pid)),
+				JobTask::Internal(_) => true,
+			});
+			let stopped = match self.state {
+				JobState::Stopped => any_stopped,
+				_ => any_stopped && !any_running,
+			};
+			self.state = if stopped { JobState::Stopped } else { JobState::Running };
 		}
 		Ok(())
 	}
@@ -2734,10 +2821,10 @@ impl Job {
 		Ok(())
 	}
 
-	/// Continues a stopped job as Bash's `start_job` does: every process
-	/// group of the job gets SIGCONT (`killpg`; each stage of a pipeline the
-	/// shell detached leads its own), whether or not that succeeds, the job
-	/// runs, and continuing it counts as reported (`J_NOTIFIED`).
+	/// Continues a stopped job as Bash's `start_job` does: the job's signal
+	/// targets get SIGCONT (`killpg`; see [`Self::signal_targets`]), whether
+	/// or not that succeeds, the job runs, and continuing it counts as
+	/// reported (`J_NOTIFIED`).
 	fn resume(&mut self) {
 		let _ = self.continue_processes();
 		self.state = JobState::Running;
@@ -2745,32 +2832,90 @@ impl Job {
 		self.listed = true;
 	}
 
-	/// Bash's `kill_pid` bookkeeping when `kill` signals a job through its job
-	/// spec with job control on, which the caller asks before it sends
-	/// `signal`: if the job is stopped, SIGCONT makes it run and counts as
-	/// reported, as `bg` does (see [`Self::resume`], without a second
-	/// signal), and SIGTERM or SIGHUP must be followed by SIGCONT so the job
-	/// can act on it. Returns whether to send that SIGCONT.
-	pub fn prepare_job_control_signal(&mut self, signal: traps::TrapSignal) -> Result<bool, error::Error> {
-		self.observe_stops_and_continues()?;
-		if !matches!(self.state, JobState::Stopped) {
-			return Ok(false);
+	/// Bash's `kill_pid` (`jobs.c:3670-3741`) for a signal `kill` sends to
+	/// this job: through its job spec, or through the negative pid of one of
+	/// its processes, `group` being the process group that pid names
+	/// (`signal` is `None` for signal 0, which only probes). The job counts
+	/// as one no listing has shown (`J_NOTIFIED`).
+	///
+	/// A job started without job control shares the shell's process group
+	/// in Bash: the negative pid goes to that group as named (`killpg
+	/// (pid)`), and a job spec signals each live process by pid, never its
+	/// group, never continues it, and succeeds whatever the signals did.
+	/// A job started with job control is signalled through its group, which
+	/// here is every group its stages had (see [`Self::signal_targets`]),
+	/// whichever process the negative pid named. If it is stopped, SIGTERM
+	/// and SIGHUP are followed by SIGCONT to the same targets, and SIGCONT
+	/// makes it run and count as reported, as `bg` would. Stops are seen
+	/// only when `observe_stops`, as Bash's `waitchld` sees them only with
+	/// job control on.
+	pub fn kill_delivery(
+		&mut self,
+		signal: Option<traps::TrapSignal>,
+		group: Option<sys::process::ProcessId>,
+		observe_stops: bool,
+	) -> Result<KillDelivery, error::Error> {
+		self.listed = false;
+		if !self.started_with_job_control {
+			if let Some(group) = group {
+				return Ok(KillDelivery::to(vec![-group]));
+			}
+			self.refresh()?;
+			return Ok(KillDelivery {
+				targets:         self.process_ids().collect(),
+				continue_after:  false,
+				reports_failure: false,
+			});
 		}
-		match signal {
-			traps::TrapSignal::Signal(signal) if sys::signal::is_continue(signal) => {
-				self.state = JobState::Running;
-				self.stopped_processes.clear();
-				self.listed = true;
-				Ok(false)
-			},
-			traps::TrapSignal::Signal(signal) => Ok(sys::signal::needs_continue_when_stopped(signal)),
-			_ => Ok(false),
+		if observe_stops {
+			self.observe_stops_and_continues()?;
 		}
+		let stopped = matches!(self.state, JobState::Stopped);
+		let signal = match signal {
+			Some(traps::TrapSignal::Signal(signal)) => Some(signal),
+			_ => None,
+		};
+		if stopped && signal.is_some_and(sys::signal::is_continue) {
+			self.state = JobState::Running;
+			self.stopped_processes.clear();
+			self.listed = true;
+		}
+		let mut targets = self.signal_targets();
+		if targets.is_empty()
+			&& let Some(pgid) = self.process_group_id()
+		{
+			targets.push(-pgid);
+		}
+		Ok(KillDelivery {
+			targets,
+			continue_after: stopped && signal.is_some_and(sys::signal::needs_continue_when_stopped),
+			reports_failure: true,
+		})
 	}
 
-	/// Sends SIGCONT to every process group of the job (see [`Self::resume`]).
+	/// What a signal to the job's process group reaches, as Bash's `start_job`
+	/// and `kill_pid` signal a job started with job control (`killpg`):
+	/// every process group the job's stages had as they started, an ended
+	/// stage's too (it still holds the children that stage left), and each
+	/// stage still tracked that ran in the shell's own group. The pid of a
+	/// stage that has ended is never a target: it may name another process
+	/// by now.
+	pub fn signal_targets(&self) -> Vec<sys::process::ProcessId> {
+		let live = self.tasks.iter().filter_map(|task| match task {
+			JobTask::External(process) => process.signal_target(),
+			JobTask::Internal(_) => None,
+		});
+		let mut targets: Vec<_> =
+			self.signal_targets.iter().copied().filter(|&target| target < 0).chain(live).collect();
+		targets.sort_unstable();
+		targets.dedup();
+		targets
+	}
+
+	/// Sends SIGCONT to the job's process groups (see [`Self::resume`],
+	/// [`Self::signal_targets`]).
 	pub fn continue_processes(&self) -> Result<(), error::Error> {
-		sys::signal::continue_process_groups(&self.process_groups, self.process_ids())
+		sys::signal::continue_targets(&self.signal_targets())
 	}
 
 	/// Kills the job.

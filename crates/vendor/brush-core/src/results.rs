@@ -64,12 +64,15 @@ impl ExecutionResult {
 	}
 
 	/// Returns whether the execution result indicates an early return
-	/// from a function or script, or an exit from the shell. Returns `false`
+	/// from a function or script, an exit from the shell, or an abandoned
+	/// command (see [`ExecutionControlFlow::DiscardCommand`]). Returns `false`
 	/// otherwise, including loop breaks or continues.
 	pub const fn is_return_or_exit(&self) -> bool {
 		matches!(
 			self.next_control_flow,
-			ExecutionControlFlow::ReturnFromFunctionOrScript | ExecutionControlFlow::ExitShell
+			ExecutionControlFlow::ReturnFromFunctionOrScript
+				| ExecutionControlFlow::ExitShell
+				| ExecutionControlFlow::DiscardCommand
 		)
 	}
 }
@@ -250,6 +253,12 @@ pub enum ExecutionControlFlow {
 	ReturnFromFunctionOrScript,
 	/// Exit the shell.
 	ExitShell,
+	/// Abandon the command being run, as Bash's `jump_to_top_level
+	/// (DISCARD)` does: every enclosing command ends, functions and loops
+	/// included, up to the program text it was read from (a line of the
+	/// script, `eval`, `source` or a trap handler), which goes on with its
+	/// next command; in a subshell the subshell ends.
+	DiscardCommand,
 }
 
 impl ExecutionControlFlow {

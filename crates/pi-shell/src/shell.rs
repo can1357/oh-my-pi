@@ -2091,10 +2091,12 @@ fn ensure_trailing_newline_for_heredoc(command: &mut String) {
 }
 
 /// Whether the command goes on to its next segment; `exit`, errexit, and other
-/// non-normal control flow stop it (the session itself stays usable).
+/// non-normal control flow stop it (the session itself stays usable). An
+/// abandoned command never reaches here: the program it was read from goes
+/// on with its next command, as Bash does.
 const fn continues_command(result: &ExecutionResult) -> bool {
 	match result.next_control_flow {
-		ExecutionControlFlow::Normal => true,
+		ExecutionControlFlow::Normal | ExecutionControlFlow::DiscardCommand => true,
 		ExecutionControlFlow::BreakLoop { .. } => false,
 		ExecutionControlFlow::ContinueLoop { .. } => false,
 		ExecutionControlFlow::ReturnFromFunctionOrScript => false,

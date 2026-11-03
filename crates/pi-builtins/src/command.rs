@@ -156,15 +156,19 @@ impl CommandCommand {
 
 		// The process `command` runs is the child Bash forks for the command,
 		// so the pipeline stage that ran `command` reports how it ended.
-		let params = context.params.clone();
+		let stand_in = context.params.clone();
 		// Bash strips `command [-p] [--]` before it dispatches the command, so
 		// the command `command` runs is its simple command's own when
 		// `command` is: `command exec` keeps its redirections, `builtin
 		// command exec` does not.
-		let dispatches_simple_command = params.dispatches_simple_command();
+		let dispatches_simple_command = stand_in.dispatches_simple_command();
+		// Bash's `executing_command_builtin` (see
+		// `ExecutionParameters::executing_command_builtin`).
+		let mut params = context.params;
+		params.executing_command_builtin = true;
 		let mut cmd = commands::SimpleCommand::new(
 			commands::ShellForCommand::ParentShell(context.shell),
-			context.params,
+			params,
 			context.command_name,
 			command_and_args,
 		);
@@ -179,7 +183,7 @@ impl CommandCommand {
 		};
 		let (wait_result, waited) = spawn_result.wait_with_status(None).await?;
 		if let Some(status) = waited.process {
-			params.record_stand_in_process(pid, status);
+			stand_in.record_stand_in_process(pid, status);
 		}
 
 		Ok(wait_result.into())

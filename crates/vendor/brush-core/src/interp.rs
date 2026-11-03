@@ -118,6 +118,11 @@ pub struct ExecutionParameters {
 	/// [`jobs::JobManager::remove_reported_jobs`]). A program it runs in turn,
 	/// such as an `eval` string, reads lines of its own. Defaults to `false`.
 	pub continues_input_line: bool,
+	/// Whether this runs under the `command` builtin, as Bash's
+	/// `executing_command_builtin` records: a failed assignment statement
+	/// then abandons the command being run instead of exiting a POSIX-mode
+	/// shell (`do_assignment_statements`). Defaults to `false`.
+	pub executing_command_builtin: bool,
 	/// Optional hook reporting spawned external children for scoped teardown.
 	spawn_observer:           Option<Arc<dyn SpawnObserver>>,
 	/// Optional hook mirroring the bytes that cross pipeline pipes.
@@ -682,6 +687,16 @@ impl Execute for ast::Program {
 					},
 				}
 
+				// An abandoned command (`DISCARD`) ends here, where Bash's
+				// `reader_loop` and `parse_and_execute` catch the jump: the text
+				// goes on with its next command. In a subshell the jump ends the
+				// subshell instead.
+				if matches!(result.next_control_flow, ExecutionControlFlow::DiscardCommand)
+					&& !shell.is_subshell()
+				{
+					result.next_control_flow = ExecutionControlFlow::Normal;
+				}
+
 				// Update status
 				shell.set_last_exit_status(result.exit_code.into());
 
@@ -1145,6 +1160,7 @@ impl Execute for ast::Pipeline {
 				.await
 		}
 		.await;
+		let last_in_shell = frozen_before.is_some();
 		if let Some(frozen) = frozen_before {
 			shell.jobs_mut().set_frozen(frozen);
 		}
@@ -1193,6 +1209,13 @@ impl Execute for ast::Pipeline {
 				let origin = jobs::JobOrigin::of(shell);
 				shell.jobs_mut().keep_foreground(last_child, origin, None);
 			}
+		}
+		// Every stage of a pipeline of two or more runs in a subshell, the
+		// last one too unless `lastpipe` runs it in this shell: what it asks
+		// of the control flow (`exit`, `return`, `break`, an abandoned
+		// command) ends that subshell alone.
+		if self.seq.len() > 1 && !last_in_shell {
+			result.next_control_flow = ExecutionControlFlow::Normal;
 		}
 
 		// Virtual files the pipeline's redirections opened close in the
@@ -1530,6 +1553,12 @@ async fn wait_for_pipeline_processes_and_update_status(
 	let mut stop = jobs::PipelineStop {
 		first_pid: external_pids.first().copied(),
 		last_pid: external_pids.last().copied(),
+		// Taken before any stage is reaped, so the job keeps the group of a
+		// stage that ends before the pipeline stops.
+		signal_targets: jobs::signal_targets(process_spawn_results.iter().filter_map(|stage| match &stage.spawn {
+			ExecutionSpawnResult::StartedProcess(child) => Some(child),
+			ExecutionSpawnResult::Completed(_) | ExecutionSpawnResult::StartedTask(_) => None,
+		})),
 		..jobs::PipelineStop::default()
 	};
 	let stage_count = process_spawn_results.len();
@@ -2532,8 +2561,12 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 
 		let items: Vec<&CommandPrefixOrSuffixItem> =
 			prefix_iter.chain(cmd_name_items.iter()).chain(suffix_iter).collect();
+		// An assignment word is a prefix assignment where the parser found it
+		// before the command name; after a command name that expands to
+		// nothing it is still a word (`$empty a=1` runs `a=1`).
+		let prefix_len = self.prefix.as_ref().map_or(0, |prefix| prefix.0.len());
 		let command_takes_assignments = takes_assignment_arguments(&context.shell, &items);
-		for &item in &items {
+		for (index, &item) in items.iter().enumerate() {
 			ensure_not_cancelled(&params)?;
 			match item {
 				CommandPrefixOrSuffixItem::IoRedirect(_) => {},
@@ -2549,7 +2582,7 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 					args.push(CommandArg::String(std::format!("/dev/fd/{installed_fd_num}")));
 				},
 				CommandPrefixOrSuffixItem::AssignmentWord(assignment, word) => {
-					if args.is_empty() {
+					if index < prefix_len {
 						pending_assignments.push(assignment);
 					} else if command_takes_assignments {
 						// A declaration builtin receives this as an
@@ -2604,8 +2637,10 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 		let mut temporary_environment = None;
 		if has_command {
 			// In POSIX mode an assignment error before a special builtin
-			// exits the shell.
-			let special_builtin = context.shell.options().posix_mode
+			// exits a non-interactive shell, and otherwise abandons the
+			// command being run (`DISCARD` in `do_assignment_statements`).
+			let posix_mode = context.shell.options().posix_mode;
+			let special_builtin = posix_mode
 				&& args.first().is_some_and(|name| is_special_builtin(&context.shell, &name.to_string()));
 			context.shell.env_mut().push_scope(EnvironmentScope::Command);
 			for &assignment in &pending_assignments {
@@ -2614,7 +2649,11 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 					let err = if special_builtin { err.into_fatal() } else { err };
 					let mut stderr = params.stderr(&context.shell);
 					context.shell.display_error(&mut stderr, &err).await;
-					return Ok(err.into_result(&context.shell).into());
+					let mut result = err.into_result(&context.shell);
+					if posix_mode && result.is_normal_flow() {
+						result.next_control_flow = ExecutionControlFlow::DiscardCommand;
+					}
+					return Ok(result.into());
 				}
 			}
 			// A redirection does not see the temporary environment
@@ -2625,7 +2664,7 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 				report_jobs_for_compound_assignment(&mut context.shell, &params, assignment).await;
 				// Apply the assignment. Don't mark as fatal - let errors be handled
 				// at the program level so multiple complete_commands can execute independently.
-				apply_assignment(
+				let applied = apply_assignment(
 					assignment,
 					&mut context.shell,
 					&params,
@@ -2633,7 +2672,28 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 					None,
 					EnvironmentScope::Global,
 				)
-				.await?;
+				.await;
+				// An assignment statement that cannot assign (a readonly
+				// variable) abandons the command being run, and exits a
+				// non-interactive POSIX-mode shell unless it runs under
+				// `command` (`do_assignment_statements`).
+				if let Err(err) = applied {
+					if !matches!(err.kind(), error::ErrorKind::ReadonlyVariable) {
+						return Err(err);
+					}
+					let mut stderr = params.stderr(&context.shell);
+					context.shell.display_error(&mut stderr, &err).await;
+					let mut result = err.into_result(&context.shell);
+					result.next_control_flow = if context.shell.options().posix_mode
+						&& !context.shell.options().interactive
+						&& !params.executing_command_builtin
+					{
+						ExecutionControlFlow::ExitShell
+					} else {
+						ExecutionControlFlow::DiscardCommand
+					};
+					return Ok(result.into());
+				}
 			}
 			// Bash runs a null command in a child when one of its redirections
 			// reads standard input, which installs a job, and waits for it
@@ -2834,7 +2894,12 @@ fn takes_assignment_arguments(
 /// Puts one prefix assignment into the temporary environment of the command
 /// it precedes, as Bash's `assign_in_env` does: a readonly variable is
 /// refused before its value is expanded; without POSIX mode that is
-/// reported and the command runs on (`tempenv_assign_error`).
+/// reported and the command runs on (`tempenv_assign_error`). The temporary
+/// variable is a plain exported string: the expanded value, or for `+=` on
+/// a variable the command sees, that variable's value with the expanded
+/// value appended as an assignment to it appends it (`make_variable_value`
+/// with `ASS_APPEND`: integer addition for an integer variable, the string
+/// joined otherwise). The variable itself is left as it is.
 async fn apply_temporary_assignment(
 	shell: &mut Shell<impl extensions::ShellExtensions>,
 	params: &ExecutionParameters,
@@ -2852,16 +2917,36 @@ async fn apply_temporary_assignment(
 		shell.display_error(&mut stderr, &error).await;
 		return Ok(());
 	}
-	// Ensure it's tagged as exported and created in the command scope.
-	apply_assignment(
-		assignment,
-		shell,
-		params,
-		true,
-		Some(EnvironmentScope::Command),
-		EnvironmentScope::Command,
-	)
-	.await
+	let (ast::AssignmentName::VariableName(name), ast::AssignmentValue::Scalar(word)) =
+		(&assignment.name, &assignment.value)
+	else {
+		// Ensure it's tagged as exported and created in the command scope.
+		return apply_assignment(
+			assignment,
+			shell,
+			params,
+			true,
+			Some(EnvironmentScope::Command),
+			EnvironmentScope::Command,
+		)
+		.await;
+	};
+	let value = expansion::basic_expand_assignment_word(shell, params, word).await?;
+	if shell.options().print_commands_and_arguments {
+		let op = if assignment.append { "+=" } else { "=" };
+		shell.trace_command(params, std::format!("{name}{op}{value}")).await;
+	}
+	let value = match shell.env().get(name) {
+		Some((_, existing)) if assignment.append => {
+			let mut appended = existing.clone();
+			appended.assign(ShellValueLiteral::Scalar(value), true)?;
+			appended.value().to_cow_str(shell).into_owned()
+		},
+		_ => value,
+	};
+	let mut variable = ShellVariable::new(ShellValue::String(value));
+	variable.export();
+	shell.env_mut().add(name, variable, EnvironmentScope::Command)
 }
 
 /// Ends a special builtin's temporary environment in POSIX mode as Bash's

@@ -4,48 +4,27 @@ pub(crate) use nix::sys::signal::Signal;
 
 use crate::{error, sys, traps};
 
-/// The process group of each of `pids` other than the shell's own, each
-/// once: what a job records when it starts, since a group outlives the
-/// stage that leads it while the stage's children remain in it.
-pub(crate) fn process_groups(pids: impl IntoIterator<Item = sys::process::ProcessId>) -> Vec<sys::process::ProcessId> {
+/// What a job-control signal to the job of the process `pid` reaches, as
+/// the job records it when the process starts (before any stage is reaped):
+/// its process group (`-pgid`, as `kill(2)` names a group) when it is not
+/// the shell's own, which also holds the stage's own children after the
+/// stage has exited, as Bash's `killpg` on the job's group reaches them;
+/// else the process alone.
+pub(crate) fn signal_target(pid: sys::process::ProcessId) -> sys::process::ProcessId {
 	let own_group = nix::unistd::getpgrp();
-	let mut groups: Vec<_> = pids
-		.into_iter()
-		.filter_map(|pid| nix::unistd::getpgid(Some(nix::unistd::Pid::from_raw(pid))).ok())
-		.filter(|&group| group != own_group)
-		.map(nix::unistd::Pid::as_raw)
-		.collect();
-	groups.sort_unstable();
-	groups.dedup();
-	groups
+	match nix::unistd::getpgid(Some(nix::unistd::Pid::from_raw(pid))) {
+		Ok(group) if group != own_group => -group.as_raw(),
+		_ => pid,
+	}
 }
 
-/// Sends SIGCONT to each of `groups` (a job's recorded groups, see
-/// [`process_groups`]) and to the process group of each of `pids`, as
-/// Bash's `start_job` and `kill_pid` continue a job with `killpg`: the
-/// stages of a pipeline may each lead a group of their own, and a group
-/// holds the stage's own children too, after the stage itself has exited.
-/// A stage in the shell's own process group gets the signal alone. Fails
+/// Sends SIGCONT to each of a job's `targets` (see [`signal_target`]), as
+/// Bash's `start_job` and `kill_pid` continue a job with `killpg`. Fails
 /// when no signal could be sent.
-pub(crate) fn continue_process_groups(
-	groups: &[sys::process::ProcessId],
-	pids: impl IntoIterator<Item = sys::process::ProcessId>,
-) -> Result<(), error::Error> {
-	let own_group = nix::unistd::getpgrp();
-	let mut targets: Vec<nix::unistd::Pid> =
-		groups.iter().map(|&group| nix::unistd::Pid::from_raw(-group)).collect();
-	targets.extend(pids.into_iter().map(|pid| {
-		let pid = nix::unistd::Pid::from_raw(pid);
-		match nix::unistd::getpgid(Some(pid)) {
-			Ok(group) if group != own_group => nix::unistd::Pid::from_raw(-group.as_raw()),
-			_ => pid,
-		}
-	}));
-	targets.sort_unstable();
-	targets.dedup();
+pub(crate) fn continue_targets(targets: &[sys::process::ProcessId]) -> Result<(), error::Error> {
 	let mut sent = false;
-	for target in targets {
-		sent |= nix::sys::signal::kill(target, nix::sys::signal::SIGCONT).is_ok();
+	for &target in targets {
+		sent |= nix::sys::signal::kill(nix::unistd::Pid::from_raw(target), Signal::SIGCONT).is_ok();
 	}
 	if sent { Ok(()) } else { Err(error::ErrorKind::FailedToSendSignal.into()) }
 }
@@ -84,6 +63,12 @@ pub fn kill_process(
 		.map_err(|_errno| error::ErrorKind::FailedToSendSignal)?;
 
 	Ok(())
+}
+
+/// Whether signal 0 reaches `pid` (a negative value names a process group):
+/// the target exists and may be signalled.
+pub(crate) fn probe_process(pid: sys::process::ProcessId) -> bool {
+	nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_ok()
 }
 
 pub(crate) fn lead_new_process_group() -> Result<(), error::Error> {

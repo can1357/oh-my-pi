@@ -6,9 +6,13 @@
 //! bash 5.2.21 prints for the same script.
 #![cfg(unix)]
 
-use std::sync::Arc;
-
 use pi_shell::{Shell, ShellRunOptions, cancel::CancelToken};
+
+/// The scripts that run at once in the whole test process. `cargo test` runs
+/// every test of this file in one process, as many at once as the host has
+/// CPUs; with eight scripts each, 57 tests passed the default limit of 1024
+/// open files, though a shell holds none once its script has run.
+static SCRIPT_RUNS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(8);
 
 /// Runs `command` in `shell`, returning its exit status and output. The
 /// bound is for a script that hangs: a loaded host takes seconds for a row
@@ -26,15 +30,15 @@ async fn run_in(shell: &Shell, command: &str) -> (Option<i32>, String) {
 	(result.exit_code, rx.drain().collect())
 }
 
-/// Runs each script in a fresh shell, eight at a time, and asserts Bash's
-/// output and exit status 0, reporting every row that differs.
+/// Runs each script in a fresh shell, eight at a time across the process
+/// (see [`SCRIPT_RUNS`]), and asserts Bash's output and exit status 0,
+/// reporting every row that differs.
 async fn assert_bash_outputs(rows: &[(&str, &str)]) {
-	let limit = Arc::new(tokio::sync::Semaphore::new(8));
 	let mut runs = tokio::task::JoinSet::new();
 	for (index, &(script, _)) in rows.iter().enumerate() {
-		let (script, limit) = (script.to_owned(), Arc::clone(&limit));
+		let script = script.to_owned();
 		runs.spawn(async move {
-			let _permit = limit.acquire_owned().await.expect("run limit");
+			let _permit = SCRIPT_RUNS.acquire().await.expect("run limit");
 			(index, run_in(&Shell::new(None), &script).await)
 		});
 	}
@@ -2078,19 +2082,78 @@ async fn wait_p_names_the_last_process_of_a_pipeline() {
 	.await;
 }
 
-/// `bg` continues every process group the job had when it started, as
-/// Bash's `killpg` on the job's group does, also the group of a stage that
-/// has exited, which still holds that stage's stopped child. Only the
-/// groups of the stages still tracked got SIGCONT, so the child stayed
-/// stopped.
+/// `fg`, `bg` and `kill -CONT %1` continue every process group the job's
+/// stages had when they started, as Bash's `killpg` on the job's group
+/// does, also the group of a stage that has exited, which still holds that
+/// stage's stopped child, and for a pipeline that stopped in the
+/// foreground as for one started in the background. Only `bg` and `fg` on
+/// a background job reached that group: a foreground pipeline became a job
+/// after its ended stage was reaped, so the job never knew the group, and
+/// `kill -CONT` signalled the groups of the stages still tracked.
 #[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread")]
-async fn bg_continues_the_group_of_a_stage_that_exited() {
-	assert_bash_outputs(&[(
-		r#"d=$(mktemp -d); cd "$d"; set -m; /bin/sh -c '/usr/bin/python3 -c '"'"'import os,signal,pathlib;pathlib.Path("childpid").write_text(str(os.getpid()));os.kill(os.getpid(),signal.SIGSTOP);pathlib.Path("resumed").write_text("yes")'"'"' & exit 0' | /bin/sh -c 'echo $$ >stagepid; kill -STOP $$; exit 7' & until [ -s childpid ] && [ -s stagepid ]; do /bin/sleep .01; done; read c <childpid; /bin/sleep .2; jobs >/dev/null; bg %1 >/dev/null; wait %1; echo s=$?; i=0; until [ -s resumed ] || [ $i -ge 500 ]; do /bin/sleep .01; i=$((i+1)); done; if [ -s resumed ]; then echo child=resumed; else echo child=still-stopped; fi; kill -CONT "$c" 2>/dev/null; /bin/sleep .1; cd /; rm -rf "$d""#,
-		"s=7\nchild=resumed\n",
-	)])
-	.await;
+async fn continuing_a_job_reaches_the_group_of_a_stage_that_exited() {
+	const CHILD: &str = r#"/usr/bin/python3 -c '"'"'import os,signal,pathlib;pathlib.Path("childpid").write_text(str(os.getpid()));os.kill(os.getpid(),signal.SIGSTOP);pathlib.Path("resumed").write_text("yes")'"'"'"#;
+	const STAGE: &str = r"/bin/sh -c 'echo $$ >stagepid; until [ -s childpid ]; do /bin/sleep .01; done; /bin/sleep .2; kill -STOP $$; exit 7'";
+	const STOPPED: &str = r#"until [ -s stagepid ]; do /bin/sleep .01; done; read s <stagepid; until read -r _ _ st _ <"/proc/$s/stat" && [ "$st" = T ]; do /bin/sleep .01; done; jobs >/dev/null; "#;
+	const AFTER: &str = r#"i=0; until [ -s resumed ] || [ $i -ge 500 ]; do /bin/sleep .01; i=$((i+1)); done; if [ -s resumed ]; then echo child=resumed; else echo child=still-stopped; fi; read c <childpid; kill -CONT "$c" 2>/dev/null; /bin/sleep .1; cd /; rm -rf "$d""#;
+	let mut rows = Vec::new();
+	for background in [true, false] {
+		for resume in [
+			"bg %1 >/dev/null; wait %1; echo s=$?; ",
+			"fg %1 >/dev/null; echo s=$?; ",
+			"kill -CONT %1; wait %1; echo s=$?; ",
+		] {
+			let mut script = String::from(r#"d=$(mktemp -d); cd "$d"; set -m; /bin/sh -c '"#);
+			script.push_str(CHILD);
+			script.push_str(" & exit 0' | ");
+			script.push_str(STAGE);
+			script.push_str(if background { " & " } else { "; " });
+			if background {
+				script.push_str(STOPPED);
+			}
+			script.push_str(resume);
+			script.push_str(AFTER);
+			rows.push(script);
+		}
+	}
+	let rows: Vec<(&str, &str)> = rows
+		.iter()
+		.map(|script| (script.as_str(), "s=7\nchild=resumed\n"))
+		.collect();
+	assert_bash_outputs(&rows).await;
+}
+
+/// A foreground pipeline whose stage still runs when another stops counts
+/// as stopped here after a short grace (Bash waits for the stage instead),
+/// and the job then stays stopped, as a stopped Bash job does while one of
+/// its processes is stopped (`set_job_status_and_cleanup`), until `bg`,
+/// `fg` or `kill -CONT` continues it and the wait gets the last stage's
+/// status. The job ran again as soon as it was looked at, since a stage
+/// still ran, so `bg` reported it already in the background and `fg`
+/// returned the stopped status.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pipeline_stopped_while_a_stage_ran_resumes_as_bash_does() {
+	const GRACE: &str =
+		"set -m; /bin/sh -c 'sleep 1; exit 33' | /bin/sh -c 'kill -STOP $$; exit 7'; ";
+	let rows: Vec<(String, &str)> = [
+		(r#"bg %1 >/dev/null; echo "resume=$?"; wait %1; echo "final=$?""#, "resume=0\nfinal=7\n"),
+		(r#"fg %1 >/dev/null; echo "fg=$?""#, "fg=7\n"),
+		(r#"kill -CONT %1; echo "resume=$?"; wait %1; echo "final=$?""#, "resume=0\nfinal=7\n"),
+		(
+			r#"jobs -s >/dev/null; jobs -r; echo "running=$?"; kill -CONT %1; wait %1; echo "final=$?""#,
+			"running=0\nfinal=7\n",
+		),
+	]
+	.into_iter()
+	.map(|(tail, output)| (format!("{GRACE}{tail}"), output))
+	.collect();
+	let rows: Vec<(&str, &str)> = rows
+		.iter()
+		.map(|(script, output)| (script.as_str(), *output))
+		.collect();
+	assert_bash_outputs(&rows).await;
 }
 
 /// In a double-quoted `${x:-word}` Bash's parser translates a `$'...'` of
@@ -2204,4 +2267,132 @@ async fn a_translation_that_leaves_the_expansion_open_is_a_bad_substitution() {
 		.map(|(script, output)| (script.as_str(), *output))
 		.collect();
 	assert_bash_outputs(&rows).await;
+}
+
+/// `kill` signals a job as Bash's `kill_pid` does (`jobs.c:3670-3741`),
+/// shown on a pipeline whose two stages both stopped. A job started with
+/// job control is signalled through its process group, whichever of its
+/// processes a negative pid names, and here that is every group its stages
+/// had; a stopped one gets SIGCONT after SIGTERM or SIGHUP, to the same
+/// targets, and SIGCONT makes it run. A pid gets the signal alone, with no
+/// SIGCONT and no change to the job. A job started without job control gets
+/// the signal in each live process by pid and is never continued. The
+/// SIGCONT after SIGTERM to one stage's group went to every group, so the
+/// other stage ran instead of ending.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn kill_signals_a_stopped_pipeline_as_bash_kill_pid_does() {
+	const STATE: &str = r#"st(){ s=dead; if [ -r "/proc/$1/stat" ]; then read -r _ _ s _ <"/proc/$1/stat"; [ "$s" = Z ] && s=dead; fi; echo "$s"; }; "#;
+	const PIPE: &str = r#"/bin/sh -c 'echo $$ >p1; kill -STOP $$; echo one >one' | /bin/sh -c 'echo $$ >p2; kill -STOP $$; echo two >two' & until [ -s p1 ] && [ -s p2 ]; do /bin/sleep .01; done; read a <p1; read b <p2; until [ "$(st $a)" = T ] && [ "$(st $b)" = T ]; do /bin/sleep .01; done; jobs >/dev/null; "#;
+	const SETTLE: &str = r#"/bin/sleep .3; i=0; while [ $i -lt 300 ]; do sa=$(st $a); sb=$(st $b); case "$sa:$sb" in dead:dead|dead:T|T:dead|T:T) break;; esac; /bin/sleep .01; i=$((i+1)); done; "#;
+	const REPORT: &str = r#"one=no; [ -s one ] && one=ran; two=no; [ -s two ] && two=ran; echo "one=$one two=$two a=$(st $a) b=$(st $b)"; jobs -r >r.txt; jobs -s >s.txt; nr=0; while read -r l; do nr=$((nr+1)); done <r.txt; ns=0; while read -r l; do ns=$((ns+1)); done <s.txt; echo "running=$nr stopped=$ns"; "#;
+	const CLEAN: &str =
+		r#"/bin/kill -KILL "$a" "$b" 2>/dev/null; wait 2>/dev/null; cd /; rm -rf "$d""#;
+	let table: [(&str, &str, &str, &str); 32] = [
+		("-m", "TERM", "%1", "kill=0\none=no two=no a=dead b=dead\nrunning=0 stopped=0\n"),
+		("-m", "TERM", "-- -$a", "kill=0\none=no two=no a=dead b=dead\nrunning=0 stopped=0\n"),
+		("-m", "TERM", "-- -$b", "kill=0\none=no two=no a=dead b=dead\nrunning=0 stopped=0\n"),
+		("-m", "TERM", "$a", "kill=0\none=no two=no a=T b=T\nrunning=0 stopped=1\n"),
+		("-m", "TERM", "$b", "kill=0\none=no two=no a=T b=T\nrunning=0 stopped=1\n"),
+		("-m", "HUP", "%1", "kill=0\none=no two=no a=dead b=dead\nrunning=0 stopped=0\n"),
+		("-m", "HUP", "-- -$a", "kill=0\none=no two=no a=dead b=dead\nrunning=0 stopped=0\n"),
+		("-m", "HUP", "-- -$b", "kill=0\none=no two=no a=dead b=dead\nrunning=0 stopped=0\n"),
+		("-m", "HUP", "$a", "kill=0\none=no two=no a=T b=T\nrunning=0 stopped=1\n"),
+		("-m", "HUP", "$b", "kill=0\none=no two=no a=T b=T\nrunning=0 stopped=1\n"),
+		("-m", "CONT", "%1", "kill=0\none=ran two=ran a=dead b=dead\nrunning=0 stopped=0\n"),
+		("-m", "CONT", "-- -$a", "kill=0\none=ran two=ran a=dead b=dead\nrunning=0 stopped=0\n"),
+		("-m", "CONT", "-- -$b", "kill=0\none=ran two=ran a=dead b=dead\nrunning=0 stopped=0\n"),
+		("-m", "CONT", "$a", "kill=0\none=ran two=no a=dead b=T\nrunning=0 stopped=1\n"),
+		("-m", "CONT", "$b", "kill=0\none=no two=ran a=T b=dead\nrunning=0 stopped=1\n"),
+		("-m", "KILL", "%1", "kill=0\none=no two=no a=dead b=dead\nrunning=0 stopped=0\n"),
+		("-m", "KILL", "-- -$a", "kill=0\none=no two=no a=dead b=dead\nrunning=0 stopped=0\n"),
+		("-m", "KILL", "-- -$b", "kill=0\none=no two=no a=dead b=dead\nrunning=0 stopped=0\n"),
+		("-m", "KILL", "$a", "kill=0\none=no two=no a=dead b=T\nrunning=0 stopped=1\n"),
+		("-m", "KILL", "$b", "kill=0\none=no two=no a=T b=dead\nrunning=0 stopped=1\n"),
+		("+m", "TERM", "%1", "kill=0\none=no two=no a=T b=T\nrunning=1 stopped=0\n"),
+		("+m", "TERM", "$a", "kill=0\none=no two=no a=T b=T\nrunning=1 stopped=0\n"),
+		("+m", "TERM", "$b", "kill=0\none=no two=no a=T b=T\nrunning=1 stopped=0\n"),
+		("+m", "HUP", "%1", "kill=0\none=no two=no a=T b=T\nrunning=1 stopped=0\n"),
+		("+m", "HUP", "$a", "kill=0\none=no two=no a=T b=T\nrunning=1 stopped=0\n"),
+		("+m", "HUP", "$b", "kill=0\none=no two=no a=T b=T\nrunning=1 stopped=0\n"),
+		("+m", "CONT", "%1", "kill=0\none=ran two=ran a=dead b=dead\nrunning=0 stopped=0\n"),
+		("+m", "CONT", "$a", "kill=0\none=ran two=no a=dead b=T\nrunning=1 stopped=0\n"),
+		("+m", "CONT", "$b", "kill=0\none=no two=ran a=T b=dead\nrunning=1 stopped=0\n"),
+		("+m", "KILL", "%1", "kill=0\none=no two=no a=dead b=dead\nrunning=0 stopped=0\n"),
+		("+m", "KILL", "$a", "kill=0\none=no two=no a=dead b=T\nrunning=1 stopped=0\n"),
+		("+m", "KILL", "$b", "kill=0\none=no two=no a=T b=dead\nrunning=1 stopped=0\n"),
+	];
+	let rows: Vec<(String, &str)> = table
+		.into_iter()
+		.map(|(mode, signal, target, output)| {
+			(
+				format!(
+					r#"{{ d=$(mktemp -d); cd "$d"; {STATE}set {mode}; {PIPE}kill -{signal} {target} 2>/dev/null; echo kill=$?; {SETTLE}{REPORT}{CLEAN}; }} 2>/dev/null"#
+				),
+				output,
+			)
+		})
+		.collect();
+	let rows: Vec<(&str, &str)> = rows
+		.iter()
+		.map(|(script, output)| (script.as_str(), *output))
+		.collect();
+	assert_bash_outputs(&rows).await;
+}
+
+/// Without job control `kill %1` signals each live process of the job by
+/// pid, as Bash's `kill_pid` does for a job in the shell's own process
+/// group: a child of the job's process, in that process's group, gets
+/// nothing. With job control the job's group gets it, child included; a pid
+/// reaches that process alone either way. The child got the signal without
+/// job control too.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn kill_without_job_control_signals_each_process_by_pid() {
+	const CHILD: &str = r#"/usr/bin/python3 -c 'import os,signal,pathlib,time
+signal.signal(signal.SIGUSR1,lambda *a: pathlib.Path("parent-hit").write_text("yes"))
+c=os.fork()
+if c==0:
+ signal.signal(signal.SIGUSR1,lambda *a: pathlib.Path("child-hit").write_text("yes"))
+ pathlib.Path("childpid").write_text(str(os.getpid()))
+else:
+ pathlib.Path("parentpid").write_text(str(os.getpid()))
+while True: time.sleep(.02)
+' & "#;
+	let table: [(&str, &str, &str); 4] = [
+		("+m", "%1", "kill=0\nparent=hit\nchild=miss\n"),
+		("+m", "$p", "kill=0\nparent=hit\nchild=miss\n"),
+		("-m", "%1", "kill=0\nparent=hit\nchild=hit\n"),
+		("-m", "$p", "kill=0\nparent=hit\nchild=miss\n"),
+	];
+	let rows: Vec<(String, &str)> = table
+		.into_iter()
+		.map(|(mode, target, output)| {
+			(
+				format!(
+					r#"{{ d=$(mktemp -d); cd "$d"; set {mode}; {CHILD}p=$!; until [ -s childpid ] && [ -s parentpid ]; do /bin/sleep .01; done; kill -USR1 {target}; echo kill=$?; i=0; until [ -s parent-hit ] || [ $i -ge 300 ]; do /bin/sleep .01; i=$((i+1)); done; /bin/sleep .2; if [ -s parent-hit ]; then echo parent=hit; else echo parent=miss; fi; if [ -s child-hit ]; then echo child=hit; else echo child=miss; fi; read c <childpid; read q <parentpid; /bin/kill -KILL "$c" "$q" 2>/dev/null; wait 2>/dev/null; cd /; rm -rf "$d"; }} 2>/dev/null"#
+				),
+				output,
+			)
+		})
+		.collect();
+	let rows: Vec<(&str, &str)> = rows
+		.iter()
+		.map(|(script, output)| (script.as_str(), *output))
+		.collect();
+	assert_bash_outputs(&rows).await;
+}
+
+/// `fg` on a job that stops again returns the stopped status and, in a
+/// script, prints nothing for it, as Bash's `notify_of_job_status` prints a
+/// stopped job only in an interactive shell. `fg` printed the job's
+/// `Stopped` line.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn fg_prints_nothing_for_a_job_that_stops_again_in_a_script() {
+	assert_bash_outputs(&[(
+		r#"set -m; /bin/sh -c 'kill -STOP $$; kill -STOP $$; exit 7' & p=$!; until read -r _ _ st _ <"/proc/$p/stat" && [ "$st" = T ]; do /bin/sleep .01; done; jobs >/dev/null; fg %1 >/dev/null; echo "fg=$?"; kill -CONT %1; wait %1; echo "final=$?""#,
+		"fg=147\nfinal=7\n",
+	)])
+	.await;
 }

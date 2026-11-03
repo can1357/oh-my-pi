@@ -139,17 +139,12 @@ impl TryFrom<i32> for Signal {
 	}
 }
 
-/// No stub platform has process groups.
-pub(crate) fn process_groups(
-	_pids: impl IntoIterator<Item = sys::process::ProcessId>,
-) -> Vec<sys::process::ProcessId> {
-	Vec::new()
+/// No stub platform has process groups: a process is its own target.
+pub(crate) const fn signal_target(pid: sys::process::ProcessId) -> sys::process::ProcessId {
+	pid
 }
 
-pub(crate) fn continue_process_groups(
-	_groups: &[sys::process::ProcessId],
-	_pids: impl IntoIterator<Item = sys::process::ProcessId>,
-) -> Result<(), error::Error> {
+pub(crate) fn continue_targets(_targets: &[sys::process::ProcessId]) -> Result<(), error::Error> {
 	Err(error::ErrorKind::NotSupportedOnThisPlatform("continuing process").into())
 }
 
@@ -161,6 +156,11 @@ pub(crate) const fn is_continue(_signal: Signal) -> bool {
 /// Whether `signal` must be followed by SIGCONT for a stopped job; no stub
 /// platform stops processes.
 pub(crate) const fn needs_continue_when_stopped(_signal: Signal) -> bool {
+	false
+}
+
+/// Whether signal 0 reaches `pid`; a stub platform cannot ask.
+pub(crate) const fn probe_process(_pid: sys::process::ProcessId) -> bool {
 	false
 }
 
