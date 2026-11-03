@@ -39,11 +39,26 @@ export function createAgentHubRuntime(
 	} = {},
 ): Pick<
 	AgentHubDeps<AgentRef>,
-	"registry" | "lifecycle" | "irc" | "activity" | "manageActivityLive" | "transcript" | "loadPersisted" | "getRoleInfo"
+	| "registry"
+	| "inSession"
+	| "lifecycle"
+	| "irc"
+	| "activity"
+	| "manageActivityLive"
+	| "transcript"
+	| "loadPersisted"
+	| "getRoleInfo"
 > {
 	const registry = options.registry ?? AgentRegistry.global();
+	const rootSessionFile = options.sessionFile?.endsWith(".jsonl") ? options.sessionFile : undefined;
 	return {
 		registry,
+		// Local roster only: a collab guest mirrors the host's registry, whose
+		// transcript paths never sit under the guest's replica session.
+		inSession:
+			rootSessionFile && !options.remote
+				? ref => !ref.sessionFile || sessionFileBelongsToRoot(ref.sessionFile, rootSessionFile)
+				: undefined,
 		lifecycle: () => options.lifecycle ?? AgentLifecycleManager.global(),
 		irc: options.irc ?? IrcBus.global(),
 		activity: options.activity ?? new AgentActivityIndex({ remote: options.remote }),
