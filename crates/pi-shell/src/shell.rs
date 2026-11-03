@@ -97,6 +97,7 @@ async fn set_shell_working_dir_if_changed(shell: &mut BrushShell, cwd: &str) -> 
 	shell
 		.set_working_dir(cwd)
 		.await
+		.map(|_readonly| ())
 		.map_err(|err| Error::msg(format!("Failed to set cwd: {err}")))
 }
 
@@ -6894,6 +6895,122 @@ mod tests {
 				"PWD=custom; cd d >/dev/null; cd - >/dev/null 2>&1; echo \"S=$? PWD=<${PWD#$top}>\""
 					.into(),
 				"S=1 PWD=</d>\n".into(),
+				false,
+			),
+			(
+				"a removed directory whose link is gone, cd -P",
+				"mkdir -p real/parent/gone; ln -s real/parent via; cd via/gone; rm \"$top/via\"; \
+				 rmdir \"$top/real/parent/gone\"; cd -P ../..; echo \"S=$? PWD=<${PWD#$top}>\""
+					.into(),
+				"S=0 PWD=</real>\n".into(),
+				false,
+			),
+			(
+				"a removed directory whose link is gone, cd -L",
+				"mkdir -p real/parent/gone; ln -s real/parent via; cd via/gone; rm \"$top/via\"; \
+				 rmdir \"$top/real/parent/gone\"; cd -L ../..; echo \"S=$? PWD=<${PWD#$top}>\""
+					.into(),
+				"S=0 PWD=</real>\n".into(),
+				false,
+			),
+			(
+				"a removed tree left by two cd ..",
+				"mkdir -p gone/in; cd gone/in; rm -r \"$top/gone\"; cd ..; cd ..; : >probe; echo \
+				 \"W=$?\"; [ -f \"$top/probe\" ] && echo HERE"
+					.into(),
+				"cd: error retrieving current directory: getcwd: cannot access parent directories: No \
+				 such file or directory\nW=0\nHERE\n"
+					.into(),
+				false,
+			),
+			(
+				"a removed tree left by cd ../..",
+				"mkdir -p gone/in; cd gone/in; rm -r \"$top/gone\"; cd ../..; : >probe; echo \
+				 \"W=$?\"; [ -f \"$top/probe\" ] && echo HERE"
+					.into(),
+				"W=0\nHERE\n".into(),
+				false,
+			),
+			(
+				"a removed directory, .. to a file",
+				"mkdir gone; cd gone; rmdir \"$top/gone\"; cd -P ../file; echo \"S=$? \
+				 PWD=<${PWD#$top}>\""
+					.into(),
+				"cd: ../file: Not a directory\nS=1 PWD=</gone>\n".into(),
+				false,
+			),
+			(
+				"a removed directory, .. to a file with a slash",
+				"mkdir gone; cd gone; rmdir \"$top/gone\"; cd ../file/; echo \"S=$? \
+				 PWD=<${PWD#$top}>\""
+					.into(),
+				"cd: ../file/: No such file or directory\nS=1 PWD=</gone>\n".into(),
+				false,
+			),
+			(
+				"a removed directory, a name through a file after ..",
+				"mkdir gone; cd gone; rmdir \"$top/gone\"; cd ../file/../d; echo \"S=$? \
+				 PWD=<${PWD#$top}>\""
+					.into(),
+				"cd: ../file/../d: No such file or directory\nS=1 PWD=</gone>\n".into(),
+				false,
+			),
+			(
+				"a moved working directory, cd .",
+				"mkdir -p from/here there; cd from/here; mv \"$top/from/here\" \"$top/there/here\"; \
+				 cd .; echo \"S=$? PWD=<${PWD#$top}>\""
+					.into(),
+				"S=0 PWD=</there/here>\n".into(),
+				false,
+			),
+			(
+				"a moved working directory, cd ..",
+				"mkdir -p from/here there; cd from/here; mv \"$top/from/here\" \"$top/there/here\"; \
+				 cd ..; echo \"S=$? PWD=<${PWD#$top}>\""
+					.into(),
+				"S=0 PWD=</there>\n".into(),
+				false,
+			),
+			(
+				"a readonly PWD and a CDPATH",
+				"mkdir -p a/d b/d; CDPATH=\"$top/a:$top/b\"; readonly PWD; cd d >/dev/null; : \
+				 >marker; for x in a b; do [ -f \"$top/$x/d/marker\" ] && echo \"MARKER=$x\"; done"
+					.into(),
+				"PWD: readonly variable\nMARKER=a\nPWD: readonly variable\n".into(),
+				false,
+			),
+			(
+				"a readonly PWD keeps OLDPWD",
+				"unset OLDPWD; PWD=custom; readonly PWD; cd d; echo \"OLDPWD=<$OLDPWD>\"".into(),
+				"PWD: readonly variable\nOLDPWD=<custom>\nPWD: readonly variable\n".into(),
+				false,
+			),
+			(
+				"a readonly OLDPWD",
+				"OLDPWD=kept; readonly OLDPWD; cd d; echo \"S=$? PWD=<${PWD#$top}> OLDPWD=<$OLDPWD>\""
+					.into(),
+				"OLDPWD: readonly variable\nS=1 PWD=</d> OLDPWD=<kept>\nOLDPWD: readonly variable\n"
+					.into(),
+				false,
+			),
+			(
+				"cd .. from one level under the root",
+				"cd /; cd ..; echo \"S=$? PWD=<$PWD>\"".into(),
+				"S=0 PWD=</>\n".into(),
+				false,
+			),
+			(
+				"cd past the root",
+				"cd /; cd ../../..; echo \"S=$? PWD=<$PWD>\"".into(),
+				"S=0 PWD=</>\n".into(),
+				false,
+			),
+			(
+				"a removed directory, .. with a name that is there",
+				"mkdir gone; cd gone; rmdir \"$top/gone\"; cd ../d/sub; echo \"S=$? \
+				 PWD=<${PWD#$top}>\""
+					.into(),
+				"S=0 PWD=</d/sub>\n".into(),
 				false,
 			),
 		];
