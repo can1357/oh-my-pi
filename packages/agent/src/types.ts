@@ -325,9 +325,10 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 
 	/**
 	 * The loop put `messages` into a provider request, or live steering handed them to the provider
-	 * (`live`): they are delivered, so the host can no longer take them back, and the loop records them.
+	 * (`live`, kept from the batch the live take returned as `taken`): they are delivered, so the host can no
+	 * longer take them back, and the loop records them.
 	 */
-	commitQueuedInput?: (messages: readonly AgentMessage[], live: boolean) => void;
+	commitQueuedInput?: (messages: readonly AgentMessage[], live: boolean, taken?: readonly AgentMessage[]) => void;
 
 	/**
 	 * The provider handed back the live-steered `messages` (the same list passed to

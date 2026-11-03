@@ -1945,3 +1945,195 @@ describe("steering invariants: the round-eleven reproductions", () => {
 		expect(texts(agent.peekNextSteering())).toEqual(["V"]);
 	});
 });
+
+/**
+ * A request writes down which holder each occurrence it carries is, so recording one message object held
+ * twice (as prepared context and as a promoted original, or by two overlapping live claims, or as a
+ * follow-up and a steer) touches exactly the occurrence delivered. The other keeps its promotion and its
+ * place in the agent-steering wait. Each case also runs with distinct objects as the control.
+ */
+describe("steering invariants: the round-fifteen reproductions", () => {
+	/** An Agent whose context transform can park the conversion of one live claim. */
+	function createParkingAgent(park?: (messages: AgentMessage[]) => Promise<void> | undefined) {
+		const mock = createMockModel({
+			handler: (_context, options) => ({ content: ["ack"], delayMs: options?.signal?.aborted ? 1 : 0 }),
+		});
+		const agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: mock.stream,
+			convertToLlm,
+			steeringMode: "one-at-a-time",
+			transformContext: async messages => {
+				await park?.(messages);
+				return messages;
+			},
+		});
+		return { agent, mock };
+	}
+
+	for (const alias of [false, true]) {
+		for (const held of ["unsettled", "converting"] as const) {
+			for (const delivered of ["live-original", "live-context", "request-original", "request-context"] as const) {
+				it(`a promoted ${held} live V keeps its promotion when ${delivered} delivers ${alias ? "the same object" : "another V"}`, async () => {
+					const v = person("V");
+					const copy = alias ? v : person("V");
+					const a = person("A");
+					const parked = Promise.withResolvers<void>();
+					const release = Promise.withResolvers<void>();
+					let parking = held === "converting";
+					const { agent, mock } = createParkingAgent(messages => {
+						if (!parking || messages.length !== 1 || messages[0] !== v) return undefined;
+						parking = false;
+						parked.resolve();
+						return release.promise;
+					});
+					let first = true;
+					let pending: Promise<unknown> | undefined;
+					agent.streamFn = async (model, context, options) => {
+						if (first && options?.liveSteering && options.signal) {
+							first = false;
+							agent.steer(v);
+							agent.prioritizeSteering([v]);
+							if (held === "unsettled") await options.liveSteering.claim(options.signal);
+							else {
+								pending = options.liveSteering.claim(options.signal);
+								await parked.promise;
+							}
+							const withContext = delivered.endsWith("context");
+							if (withContext) agent.prepareQueuedMessages = () => ({ commit: () => [copy] });
+							agent.steer(withContext ? a : copy);
+							if (delivered.startsWith("live")) (await options.liveSteering.claim(options.signal))?.accept();
+						}
+						return mock.stream(model, context, options);
+					};
+
+					try {
+						await agent.prompt("start");
+					} finally {
+						release.resolve();
+					}
+					await pending;
+					agent.prepareQueuedMessages = undefined;
+					// W is a prioritized steer, so only a V that kept its promotion still goes first.
+					const w = person("W");
+					agent.steer(w);
+					agent.setSteeringPriority(message => message === w);
+
+					expect(transcriptTexts(agent)).toEqual(
+						delivered.endsWith("context") ? ["start", "A", "V"] : ["start", "V"],
+					);
+					expect(texts(agent.peekSteeringQueue())).toEqual(["V", "W"]);
+					expect(texts(agent.peekNextSteering())).toEqual(["V"]);
+				});
+			}
+		}
+	}
+
+	for (const alias of [false, true]) {
+		for (const held of ["unsettled", "converting"] as const) {
+			it(`accepted context of ${alias ? "the same object" : "another V"} recorded before a promoted ${held} live V leaves its promotion`, async () => {
+				const a = person("A");
+				const v = person("V");
+				const context = alias ? v : person("V");
+				const parked = Promise.withResolvers<void>();
+				const release = Promise.withResolvers<void>();
+				let parking = held === "converting";
+				const { agent, mock } = createParkingAgent(messages => {
+					if (!parking || messages.length !== 1 || messages[0] !== v) return undefined;
+					parking = false;
+					parked.resolve();
+					return release.promise;
+				});
+				let first = true;
+				let pending: Promise<unknown> | undefined;
+				agent.streamFn = async (model, streamContext, options) => {
+					if (first && options?.liveSteering && options.signal) {
+						first = false;
+						agent.prepareQueuedMessages = () => ({ commit: () => [context] });
+						agent.steer(a);
+						(await options.liveSteering.claim(options.signal))?.accept();
+						agent.prepareQueuedMessages = undefined;
+						agent.steer(v);
+						agent.prioritizeSteering([v]);
+						if (held === "unsettled") await options.liveSteering.claim(options.signal);
+						else {
+							pending = options.liveSteering.claim(options.signal);
+							await parked.promise;
+						}
+					}
+					return mock.stream(model, streamContext, options);
+				};
+
+				try {
+					await agent.prompt("start");
+				} finally {
+					release.resolve();
+				}
+				await pending;
+				const w = person("W");
+				agent.steer(w);
+				agent.setSteeringPriority(message => message === w);
+
+				expect(transcriptTexts(agent)).toEqual(["start", "A", "V"]);
+				expect(texts(agent.peekSteeringQueue())).toEqual(["V", "W"]);
+				expect(texts(agent.peekNextSteering())).toEqual(["V"]);
+			});
+		}
+	}
+
+	for (const alias of [false, true]) {
+		it(`recording a follow-up of ${alias ? "a held steer's object" : "another V"} charges no steering place`, async () => {
+			const { agent, mock } = createAgent();
+			const v = person("V");
+			const copy = alias ? v : person("V");
+			const agentCard: AgentMessage = { ...person("CARD"), attribution: "agent" } as AgentMessage;
+			let calls = 0;
+			agent.streamFn = async (model, context, options) => {
+				calls++;
+				if (calls === 1 && options?.liveSteering && options.signal) {
+					agent.steer(agentCard);
+					agent.steer(v);
+					agent.prioritizeSteering([v]);
+					// Both are handed to the provider and never settled.
+					for (let i = 0; i < 2; i++) await options.liveSteering.claim(options.signal);
+					agent.followUp(copy);
+				} else if (calls === 2) {
+					agent.abort();
+				}
+				return mock.stream(model, context, options);
+			};
+
+			await agent.prompt("start");
+			expect(texts(agent.peekSteeringQueue())).toEqual(["V", "CARD"]);
+			expect(transcriptTexts(agent)).toEqual(["start", "V"]);
+			expect(texts(agent.removeQueuedMessages(message => message === v).steering)).toEqual(["V"]);
+			for (let i = 0; i < 5; i++) agent.steer(person(`P${i}`));
+			await agent.continue();
+
+			expect(transcriptTexts(agent).slice(2)).toEqual(["P0", "P1", "P2", "P3", "CARD", "P4"]);
+		});
+	}
+
+	it("reset() discards a run requested at an agent_end before it starts", async () => {
+		const { agent, mock } = createAgent();
+		const requests: string[][] = [];
+		agent.streamFn = async (model, context, options) => {
+			requests.push(texts(context.messages as AgentMessage[]));
+			return mock.stream(model, context, options);
+		};
+		let next: Promise<void> | undefined;
+		agent.subscribe(event => {
+			if (event.type !== "agent_end" || next) return;
+			next = agent.prompt("stale");
+			agent.reset();
+		});
+
+		await agent.prompt("first");
+		await next;
+		await agent.waitForIdle();
+
+		expect(requests).toEqual([["first"]]);
+		expect(agent.state.messages).toEqual([]);
+		expect(agent.state.isStreaming).toBe(false);
+	});
+});

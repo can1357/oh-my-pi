@@ -1950,7 +1950,9 @@ function openLiveSteering(
 			return messages;
 		},
 		keep: config.keepQueuedInput ? messages => config.keepQueuedInput?.(messages, true) ?? messages : undefined,
-		commit: config.commitQueuedInput ? messages => config.commitQueuedInput?.(messages, true) : undefined,
+		commit: config.commitQueuedInput
+			? (messages, taken) => config.commitQueuedInput?.(messages, true, taken)
+			: undefined,
 		release: config.releaseQueuedInput,
 		accept: config.acceptQueuedInput,
 		toProvider: async (messages, signal) => {

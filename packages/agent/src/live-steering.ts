@@ -24,8 +24,8 @@ export interface LiveSteeringQueue {
 	toProvider(messages: AgentMessage[], signal: AbortSignal): Promise<UserMessage[] | undefined>;
 	/** `messages` without the input the host took back since it was taken (`AgentLoopConfig.keepQueuedInput`). */
 	keep?(messages: AgentMessage[]): AgentMessage[];
-	/** The provider is handed `messages`: they are delivered (`AgentLoopConfig.commitQueuedInput`). */
-	commit?(messages: readonly AgentMessage[]): void;
+	/** The provider is handed `messages`, kept from the batch `taken` returned (`AgentLoopConfig.commitQueuedInput`). */
+	commit?(messages: readonly AgentMessage[], taken: readonly AgentMessage[]): void;
 	/** The provider handed `messages` back undelivered (`AgentLoopConfig.releaseQueuedInput`). */
 	release?(messages: readonly AgentMessage[]): void;
 	/** The provider accepted `messages` into its response (`AgentLoopConfig.acceptQueuedInput`). */
@@ -67,6 +67,7 @@ export class LiveSteeringChannel implements LiveSteering {
 			return undefined;
 		}
 		if (messages.length === 0) return undefined;
+		const taken = messages;
 		let providerMessages: UserMessage[] | undefined;
 		// The host may take input back while it is converted; the provider gets only what is left.
 		for (;;) {
@@ -88,7 +89,7 @@ export class LiveSteeringChannel implements LiveSteering {
 			if (messages.length === 0) return undefined;
 		}
 		const delivered = messages;
-		this.#queue.commit?.(delivered);
+		this.#queue.commit?.(delivered, taken);
 		let settled = false;
 		return {
 			messages: providerMessages,
