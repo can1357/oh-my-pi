@@ -33,7 +33,7 @@ const BUNDLED_PACKAGES: readonly BundledPackage[] = [
 	// pi-tui keeps stateful singletons (`TERMINAL`, theme, figure settings) in
 	// root-level and nested modules; extensions must share the host's records.
 	{ dir: "tui", identifier: "PiTui", rootShim: "legacy-pi-tui-shim.ts", rootWildcard: "nested" },
-	{ dir: "utils", identifier: "PiUtils", rootShim: null, rootWildcard: null },
+	{ dir: "utils", identifier: "PiUtils", rootShim: null, rootWildcard: "flat" },
 ];
 
 const TYPEBOX_MODULE_KEY = "typebox";

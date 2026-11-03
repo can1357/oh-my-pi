@@ -82,6 +82,31 @@ export const finalBeta = Reflect.get(globalThis, "__betaLoads") ?? 0;
 		expect(overrides["@oh-my-pi/pi-ai/oauth"]).toBe("omp-legacy-pi-bundled:@oh-my-pi/pi-ai/oauth");
 	});
 
+	it("loads utility root-wildcard subpaths used by external image-link extensions", async () => {
+		const keys = ["@oh-my-pi/pi-utils/lru", "@oh-my-pi/pi-utils/marked"] as const;
+		const entries = bundledEntries.filter(entry => (keys as readonly string[]).includes(entry.key));
+		expect(entries.map(entry => entry.key).sort()).toEqual([...keys]);
+
+		const observed = await runRegistryProbe(
+			entries,
+			`const { Lexer } = await BUNDLED_PI_MODULE_LOADERS["@oh-my-pi/pi-utils/marked"]();
+const { LRUCache } = await BUNDLED_PI_MODULE_LOADERS["@oh-my-pi/pi-utils/lru"]();
+const cache = new LRUCache({ max: 1 });
+cache.set("image", "photo.png");
+const paragraph = Lexer.lex("[photo.png](file:///tmp/photo.png)")[0];
+export const observed = {
+	cachedImage: cache.get("image"),
+	link: paragraph.tokens.map(token => ({ type: token.type, text: token.text, href: token.href })),
+};`,
+		);
+		expect(observed).toEqual({
+			cachedImage: "photo.png",
+			link: [{ type: "link", text: "photo.png", href: "file:///tmp/photo.png" }],
+		});
+		const overrides = __buildLegacyPiPackageRootOverrides(true, bundledModuleKeys);
+		for (const key of keys) expect(overrides[key]).toBe(`omp-legacy-pi-bundled:${key}`);
+	});
+
 	it("expands wildcard exports for concrete on-disk targets (issue #3442 follow-up)", () => {
 		// `pi-ai/oauth/anthropic` is exposed via the `./oauth/*` wildcard export;
 		// the original fix only bundled non-wildcard subpaths, so peer-only plugins
