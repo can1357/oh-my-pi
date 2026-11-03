@@ -27,7 +27,6 @@ import {
 	nonRetryableMCPTransportError,
 	normalizeMCPTransportError,
 	redactDiagnosticText,
-	fetchAdvicePrefixLength,
 	stripTrailingFetchAdvice,
 	trailingFetchAdviceStarts,
 } from "../errors";
@@ -617,18 +616,15 @@ class StderrTail {
 	 */
 	#trim(): void {
 		const text = this.#redacted;
-		// A hint still being written (its first words) stays at the end, after the
-		// complete hints before it.
-		const head = text.slice(0, text.length - fetchAdvicePrefixLength(text));
-		const starts = trailingFetchAdviceStarts(head);
+		const starts = trailingFetchAdviceStarts(text);
 		if (starts.length === 0) {
 			this.#redacted = text.slice(-STDERR_TAIL_CHARS);
 			return;
 		}
 		const firstHint = starts[starts.length - 1]!;
-		const before = stripTrailingFetchAdvice(head);
-		const keepFrom = starts.find(start => head.length - start >= STDERR_HINT_KEEP_CHARS) ?? firstHint;
-		const separator = keepFrom === firstHint ? head.slice(before.length, firstHint) : before.length > 0 ? "\n" : "";
+		const before = stripTrailingFetchAdvice(text);
+		const keepFrom = starts.find(start => text.length - start >= STDERR_HINT_KEEP_CHARS) ?? firstHint;
+		const separator = keepFrom === firstHint ? text.slice(before.length, firstHint) : before.length > 0 ? "\n" : "";
 		this.#redacted = before.slice(-STDERR_TAIL_CHARS) + separator + text.slice(keepFrom);
 	}
 

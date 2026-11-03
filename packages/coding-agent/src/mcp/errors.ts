@@ -44,12 +44,25 @@ const FETCH_VERBOSE_ADVICE = "for more information, pass `verbose: true` in the 
 /**
  * Where each of Bun's fetch hints at the end of `value` starts, last hint
  * first: the hint once or repeated, with or without whitespace or a final
- * period between copies. Linear: it compares fixed suffixes only, so a long
- * error with near-miss hints costs no backtracking.
+ * period between copies. A hint cut off at the very end (a process stopped
+ * while writing it) counts too, when complete hints come before it. Linear: it
+ * compares fixed suffixes only, so a long error with near-miss hints costs no
+ * backtracking.
  */
 export function trailingFetchAdviceStarts(value: string): number[] {
-	const starts: number[] = [];
 	let end = value.length;
+	while (end > 0 && /\s/.test(value[end - 1]!)) end--;
+	const partial = fetchAdvicePrefixLength(value.slice(0, end));
+	const complete = completeFetchAdviceStarts(value, end - partial);
+	if (partial === 0 || partial === FETCH_VERBOSE_ADVICE.length) {
+		return partial === 0 ? complete : [end - partial, ...complete];
+	}
+	return complete.length > 0 ? [end - partial, ...complete] : completeFetchAdviceStarts(value, value.length);
+}
+
+/** {@link trailingFetchAdviceStarts} for complete hints ending at or before `end`. */
+function completeFetchAdviceStarts(value: string, end: number): number[] {
+	const starts: number[] = [];
 	for (;;) {
 		let cut = end;
 		while (cut > 0 && /\s/.test(value[cut - 1]!)) cut--;
@@ -61,12 +74,8 @@ export function trailingFetchAdviceStarts(value: string): number[] {
 	}
 }
 
-/**
- * Length of the longest end of `value` that is the start of a fetch hint still
- * being written (case-insensitive), so a caller cutting text can tell a hint
- * in progress from other text.
- */
-export function fetchAdvicePrefixLength(value: string): number {
+/** Length of the longest end of `value` that is the start of a fetch hint (case-insensitive). */
+function fetchAdvicePrefixLength(value: string): number {
 	for (let length = Math.min(value.length, FETCH_VERBOSE_ADVICE.length); length > 0; length--) {
 		if (FETCH_VERBOSE_ADVICE.startsWith(value.slice(-length).toLowerCase())) return length;
 	}

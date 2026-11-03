@@ -18,6 +18,12 @@ describe("stripTrailingFetchAdvice", () => {
 		expect(stripTrailingFetchAdvice(`REFUSED ${HINT.slice(0, -1)}`)).toBe("REFUSED");
 	});
 
+	it("removes a hint cut off at the end only after complete hints", () => {
+		expect(stripTrailingFetchAdvice(`REFUSED\n${HINT}\n${HINT.slice(0, 30)}`)).toBe("REFUSED");
+		expect(stripTrailingFetchAdvice(`REFUSED\n${HINT.slice(0, 30)}`)).toBe(`REFUSED\n${HINT.slice(0, 30)}`);
+		expect(stripTrailingFetchAdvice("REFUSED for")).toBe("REFUSED for");
+	});
+
 	it("keeps text that does not end in a hint, unchanged", () => {
 		for (const value of ["REFUSED  ", `${HINT} REFUSED`, `${HINT}!`, "fetch().", ""]) {
 			expect(stripTrailingFetchAdvice(value)).toBe(value);

@@ -289,6 +289,39 @@ describe.skipIf(process.platform === "win32" || !PYTHON)("StdioTransport exit re
 		);
 	}
 
+	// Round 9: a hint cut off at the end (a process stopped while writing it)
+	// kept the complete hints before it from being dropped.
+	for (const hints of [3, 520]) {
+		it(
+			`keeps the reason before ${hints} fetch hints and one cut off at the end`,
+			async () => {
+				const advice = "For more information, pass `verbose: true` in the second argument to fetch().";
+				const args = server(
+					`${stderrWrites([`REFUSAL_REASON_CANARY\n${`${advice}\n`.repeat(hints)}${advice.slice(0, 30)}`])}\nsys.exit(77)`,
+				);
+				const error = await withTransport({ command: python, args }, transport =>
+					transportRejection(transport.request("tools/call")),
+				);
+
+				expect(error.message).toEndWith("REFUSAL_REASON_CANARY");
+			},
+			TEST_TIMEOUT_MS,
+		);
+	}
+
+	it(
+		"keeps text that only looks like the start of a hint",
+		async () => {
+			const args = server(`${stderrWrites(["REFUSED for"])}\nsys.exit(77)`);
+			const error = await withTransport({ command: python, args }, transport =>
+				transportRejection(transport.request("tools/call")),
+			);
+
+			expect(error.message).toEndWith("REFUSED for");
+		},
+		TEST_TIMEOUT_MS,
+	);
+
 	it(
 		"keeps the final refusal after many carriage-return-only lines",
 		async () => {
