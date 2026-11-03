@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A schema of a specific type is now always assignable to the schema of a supertype (`Type<{ id: number }>` to `Type<unknown>`, so to `TSchema` and through `Static`). Before, TypeScript accepted it only when its depth limit cut the member-by-member comparison short, so the same code type-checked in one program and failed in another. `keyof()`, `pick()` and `omit()` now read their keys from the schema they are called on
+
 ## [18.13.3] - 2026-10-28
 
 ### Changed

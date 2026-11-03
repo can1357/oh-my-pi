@@ -136,7 +136,7 @@ export interface StandardJsonSchemaOptions {
 }
 
 /** A compiled schema: callable validator plus composition methods. */
-export interface Type<out t = unknown, i = t> {
+export interface Type<out t = unknown, out i = t> {
 	(data: unknown): t | OmpErrors;
 	readonly [IR_BRAND]: true;
 	/** Structural IR (base type; runtime steps live in `steps`). */
@@ -239,7 +239,7 @@ type NaryPipeInput<items extends readonly unknown[]> = items extends readonly [i
 			: InferDefIn<first>
 	: unknown;
 
-interface FluentMethods<t, i> {
+interface FluentMethods<out t, out i> {
 	describe(description: string): FluentType<t, i>;
 	configure(config: SchemaConfig, selector?: "self" | ConfigureSelector): FluentType<t, i>;
 
@@ -305,7 +305,7 @@ interface FluentMethods<t, i> {
 	onDeepUndeclaredKey(behavior: "ignore" | "reject" | "delete"): FluentType<t, i>;
 }
 
-interface PipeMethod<t, i> {
+interface PipeMethod<out t, out i> {
 	<r>(fn: (data: t, ctx: NarrowContext) => r): FluentType<Exclude<r, OmpErrors>, i>;
 	<r, ri>(schema: SchemaInference<r, ri>): FluentType<r, i>;
 	(...steps: readonly unknown[]): FluentType<unknown, i>;
@@ -317,19 +317,37 @@ interface PipeMethod<t, i> {
 
 type InputObject<i> = i extends object ? i : object;
 
-interface ObjectMethods<t extends object, i> {
+/** The receiver an object schema's key methods read their keys from. */
+interface ObjectReceiver<out t, out i> {
+	readonly infer: t;
+	readonly inferIn: i;
+}
+
+/**
+ * Object-only fluent methods. `keyof`, `pick` and `omit` read the keys from the
+ * schema they are called on (`this`) rather than from `t` and `i`: a key list is
+ * contravariant in the object, so stating it through `t` would make an object
+ * schema not assignable to the schema of a supertype, and TypeScript would then
+ * decide `Type<{ id: number }>` against `Type<unknown>` member by member, which
+ * passes or fails depending on its depth limit.
+ */
+interface ObjectMethods<out t extends object, out i> {
 	readonly props: readonly TypeProperty[];
 	map(
 		mapper: (property: TypeProperty) => TypeProperty | readonly TypeProperty[],
 	): FluentType<Record<PropertyKey, unknown>>;
-	keyof(): FluentType<Extract<keyof t, PropertyKey>, Extract<keyof InputObject<i>, PropertyKey>>;
+	keyof<self extends object, selfIn>(
+		this: ObjectReceiver<self, selfIn>,
+	): FluentType<Extract<keyof self, PropertyKey>, Extract<keyof InputObject<selfIn>, PropertyKey>>;
 	get<const path extends readonly PropertyKey[]>(...path: path): FluentType<unknown>;
-	pick<const keys extends readonly (keyof t)[]>(
+	pick<self extends object, selfIn, const keys extends readonly (keyof self)[]>(
+		this: ObjectReceiver<self, selfIn>,
 		...keys: keys
-	): FluentType<Pick<t, keys[number]>, Pick<InputObject<i>, Extract<keys[number], keyof InputObject<i>>>>;
-	omit<const keys extends readonly (keyof t)[]>(
+	): FluentType<Pick<self, keys[number]>, Pick<InputObject<selfIn>, Extract<keys[number], keyof InputObject<selfIn>>>>;
+	omit<self extends object, selfIn, const keys extends readonly (keyof self)[]>(
+		this: ObjectReceiver<self, selfIn>,
 		...keys: keys
-	): FluentType<Omit<t, keys[number]>, Omit<InputObject<i>, Extract<keys[number], keyof InputObject<i>>>>;
+	): FluentType<Omit<self, keys[number]>, Omit<InputObject<selfIn>, Extract<keys[number], keyof InputObject<selfIn>>>>;
 	partial(): FluentType<Partial<t>, Partial<InputObject<i>>>;
 	required(): FluentType<Required<t>, Required<InputObject<i>>>;
 	merge<r, ri>(def: SchemaInference<r, ri>): FluentType<MergeTypes<t, r>, MergeTypes<i, ri>>;
@@ -346,8 +364,17 @@ type ObjectMethodsFor<t, i> = [t] extends [never]
 		: [t] extends [object]
 			? ObjectMethods<t & object, i>
 			: unknown;
+/**
+ * The fluent surface every schema has. An interface with declared variance, so
+ * TypeScript relates two of them by their type arguments. As members of the
+ * conditional `FluentType` alias they were related through the alias's measured
+ * variance, which depended on the order the compiler met the comparisons: the
+ * same `FluentType<string>` to `FluentType<unknown>` assignment passed in one
+ * program and failed in another.
+ */
+interface FluentCore<out t, out i> extends Type<t, i>, FluentMethods<t, i> {}
 /** Callable schema with fluent methods specialized to its output and input. */
-export type FluentType<t = unknown, i = t> = Type<t, i> & FluentMethods<t, i> & ObjectMethodsFor<t, i>;
+export type FluentType<t = unknown, i = t> = FluentCore<t, i> & ObjectMethodsFor<t, i>;
 
 type FnDefinition = Def | SchemaInference<unknown, unknown>;
 

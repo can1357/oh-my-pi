@@ -511,7 +511,8 @@ function tComposite<const E extends readonly TObject<Record<string, AnySchema>>[
 function tUnsafe<T = unknown>(_jsonSchema: Record<string, unknown> = {}): TUnsafe<T> {
 	// Raw JSON Schema is accepted for source compatibility but is not retained or validated:
 	// omptype cannot honestly implement that contract without importing a second validator.
-	return withLegacyCompat(type.unknown as OmpType<T>);
+	// `T` is the caller's claim, as TypeBox's `Unsafe` is: an unknown schema is not a schema of `T`.
+	return withLegacyCompat(type.unknown as unknown as OmpType<T>);
 }
 
 export const Type = {
