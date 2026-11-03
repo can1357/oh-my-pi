@@ -262,6 +262,19 @@ describe("ComposerPredictionController", () => {
 		expect(controller.choices).toBeUndefined();
 	});
 
+	it("keeps the prediction when a silent advisor card lands during or after the request", async () => {
+		const advisorCard = (timestamp: number) =>
+			({ role: "custom", customType: "advisor", content: "note", display: true, timestamp }) as AgentMessage;
+		const { controller, messages, reply } = harness();
+		controller.request();
+		messages.push(advisorCard(2));
+		await reply(0, "now run the tests");
+		expect(controller.choices).toEqual(["now run the tests"]);
+
+		messages.push(advisorCard(3));
+		expect(controller.choices).toEqual(["now run the tests"]);
+	});
+
 	it("drops a reply that lands after cancel or a newer request", async () => {
 		const { controller, turns, reply } = harness();
 		controller.request();
