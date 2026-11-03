@@ -196,7 +196,7 @@
 
 ### Fixed
 
-- On Linux under X11, a browser agent asked to keep your app in front no longer clicks in the Chrome tab you can see, which raised Chrome and sent your typing into the page
+- On Linux under X11, a browser agent asked to keep your app in front no longer clicks in the Chrome tab you can see, which raised Chrome and sent your typing into the page ([#17940](https://github.com/can1357/oh-my-pi/pull/17940) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.16.0] - 2026-11-02
 
