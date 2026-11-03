@@ -449,12 +449,7 @@ export interface CursorOptions extends StreamOptions {
 	externalToolExecutor?: boolean;
 	/** Wire model id selected after thinking-effort routing (`resolveWireModelId`). */
 	wireModelId?: string;
-	/**
-	 * Run transport. `auto` starts with HTTP/2 and falls back to RunSSE when
-	 * HTTP/2 is unavailable: failed ALPN negotiation, or a TLS-intercepting
-	 * proxy that closes an h2-only handshake. For ten minutes after that, `auto`
-	 * turns to the same base URL start on RunSSE.
-	 */
+	/** Run transport. `auto` starts with HTTP/2 and falls back on failed ALPN negotiation or a TLS reset. */
 	transport?: "auto" | "http2" | "http1";
 }
 
@@ -468,8 +463,9 @@ interface CursorRetryContext {
 	checkpointHash?: string;
 	noProgressResumes: number;
 	output: AssistantMessage;
-	blockState: BlockState;
-	usageState: UsageState;
+	/** Unset when the earlier attempt failed before its run started. */
+	blockState?: BlockState;
+	usageState?: UsageState;
 	baseConversationId: string;
 	conversationId: string;
 	blobStore: Map<string, Uint8Array>;
@@ -1050,31 +1046,19 @@ function createHttp1RunTransport(options: CursorHttp1RunTransportOptions): Curso
 	};
 }
 
-/**
- * True when the HTTP/2 run transport cannot be used, so `auto` retries on
- * RunSSE: the handshake negotiated no h2 via ALPN, or a TLS-intercepting proxy
- * that does not speak HTTP/2 closed a ClientHello whose only ALPN offer is
- * `h2` before the handshake finished.
- */
 function isHttp2Unavailable(error: unknown): boolean {
 	const code = (error as { code?: unknown } | null)?.code;
 	const message = error instanceof Error ? error.message : String(error);
 	return (
 		(code === "ERR_HTTP2_ERROR" && /h2 is not supported/i.test(message)) ||
+		// A TLS-intercepting proxy without HTTP/2 resets a ClientHello that offers only h2.
 		(code === "ECONNRESET" && /disconnected before secure TLS connection was established/i.test(message)) ||
 		/Cursor run transport could not negotiate HTTP\/2/i.test(message)
 	);
 }
 
-/** How long `auto` turns start on RunSSE after HTTP/2 was unavailable at their base URL. */
 const CURSOR_HTTP2_UNAVAILABLE_TTL_MS = 10 * 60_000;
 
-/**
- * When HTTP/2 was last unavailable at each base URL in this process. A proxy
- * that drops h2 drops every handshake, so `auto` turns skip the handshake for
- * a while; once the entry expires, the next turn tries HTTP/2 again in case
- * the network changed.
- */
 const http2UnavailableAt = new Map<string, number>();
 
 function isHttp2RecentlyUnavailable(baseUrl: string): boolean {
@@ -1547,6 +1531,8 @@ function streamCursorWithWireMode(
 					})
 				: undefined;
 
+			// Before connecting: the RunSSE fallback for a failed connect does not push its own start.
+			if (!retryContext) stream.push({ type: "start", partial: output });
 			if (transportMode === "http2") {
 				const proxyUrl = getProxyForUrl(model.provider, new URL(baseUrl));
 				let client: http2.ClientHttp2Session;
@@ -1573,8 +1559,6 @@ function streamCursorWithWireMode(
 					retryWait: options?.providerRetryWait,
 				});
 			}
-
-			if (!retryContext) stream.push({ type: "start", partial: output });
 
 			const frameDecoder = new ConnectFrameDecoder();
 			const previousState = retryContext?.blockState;
@@ -2060,8 +2044,6 @@ function streamCursorWithWireMode(
 				options?.transport !== "http2" &&
 				!sawProgressOrSideEffect &&
 				!options?.signal?.aborted &&
-				openBlockState !== undefined &&
-				usageState !== undefined &&
 				baseConversationId !== undefined &&
 				conversationId !== undefined &&
 				activeBlobStore !== undefined &&
@@ -2085,8 +2067,8 @@ function streamCursorWithWireMode(
 						checkpointHash: retryContext?.checkpointHash,
 						noProgressResumes: retryContext?.noProgressResumes ?? 0,
 						output,
-						blockState: openBlockState,
-						usageState,
+						blockState: openBlockState ?? retryContext?.blockState,
+						usageState: usageState ?? retryContext?.usageState,
 						baseConversationId,
 						conversationId,
 						blobStore: activeBlobStore,
