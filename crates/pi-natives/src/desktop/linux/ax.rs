@@ -2,7 +2,7 @@ use atspi::{CoordType, ObjectRefOwned, Role, State, proxy::accessible::ObjectRef
 use tokio::runtime::{Builder, Runtime};
 
 use crate::desktop::{
-	ax::{AxBounds, AxHandle, AxProps, normalize_role_atspi},
+	ax::{AxBounds, AxHandle, AxProps, normalize_role_atspi, text_readback},
 	backend::AxBackend,
 	error::{CoreResult, DesktopError},
 	types::DesktopWindow,
@@ -416,8 +416,11 @@ fn atspi_window_id(frame: &ObjectRefOwned) -> String {
 }
 
 /// Replaces an element's text and reads it back: Gecko (Firefox, Thunderbird)
-/// accepts the write and keeps the old text. A password field reads back one
-/// mask character per character (GTK `●●●`), so there the length is the check.
+/// accepts the write and keeps the old text. A field that hides its text reads
+/// back one mask character per character, whatever its role (a GTK4 entry
+/// with visibility off is a plain `Text`), so there the length is the check,
+/// once the field has read back empty after a clear: old text of the same
+/// length shows the same mask. A hidden field's text never enters an error.
 async fn write_text(
 	connection: &atspi::zbus::Connection,
 	accessible: &atspi::proxy::accessible::AccessibleProxy<'_>,
@@ -434,29 +437,59 @@ async fn write_text(
 		.build()
 		.await
 		.map_err(|err| DesktopError::ax_failed(format!("AT-SPI editable text: {err}")))?;
-	if !editable
-		.set_text_contents(value)
-		.await
-		.map_err(|err| DesktopError::ax_failed(format!("AT-SPI text value: {err}")))?
-	{
-		return Err(DesktopError::ax_failed("AT-SPI text value was rejected"));
-	}
-	let actual = text_contents(connection, object).await.ok();
-	// A role that cannot be read counts as a password field's, so no password
-	// enters an error.
-	let role = accessible.get_role().await.ok();
-	let password = role == Some(Role::PasswordText);
-	if password && actual.as_deref().is_some_and(|actual| masks(actual, value)) {
+	let replace = async |text: &str| {
+		if !editable
+			.set_text_contents(text)
+			.await
+			.map_err(|err| DesktopError::ax_failed(format!("AT-SPI text value: {err}")))?
+		{
+			return Err(DesktopError::ax_failed("AT-SPI text value was rejected"));
+		}
+		CoreResult::Ok(text_contents(connection, object).await.ok())
+	};
+	let actual = replace(value).await?;
+	if actual.as_deref() == Some(value) {
 		return Ok(());
 	}
-	crate::desktop::ax::text_readback(value, value, actual.as_deref(), password || role.is_none())
+	if actual.as_deref().is_some_and(|actual| masks(actual, value)) {
+		let rewritten = if replace("").await?.as_deref() == Some("") {
+			replace(value).await?
+		} else {
+			None
+		};
+		if rewritten
+			.as_deref()
+			.is_some_and(|actual| masks(actual, value))
+		{
+			return Ok(());
+		}
+		return text_readback(value, value, None, true);
+	}
+	// A role that cannot be read counts as a password field's, so no password
+	// enters an error.
+	let secure = actual.as_deref().is_some_and(masked)
+		|| accessible
+			.get_role()
+			.await
+			.ok()
+			.is_none_or(|role| role == Role::PasswordText);
+	text_readback(value, value, actual.as_deref(), secure)
 }
 
-/// Whether `actual` is one repeated mask character per character of `value`.
-fn masks(actual: &str, value: &str) -> bool {
+/// Whether `actual` is one repeated mask character: one of GTK's, or the `*`
+/// toolkits fall back on.
+fn masked(actual: &str) -> bool {
 	let mut chars = actual.chars();
-	let first = chars.next();
-	chars.all(|char| Some(char) == first) && actual.chars().count() == value.chars().count()
+	chars.next().is_some_and(|first| {
+		['●', '•', '✱', '✺', '*'].contains(&first) && chars.all(|char| char == first)
+	})
+}
+
+/// Whether `actual` masks `value`: one mask character per character, or per
+/// UTF-16 unit as Qt masks.
+fn masks(actual: &str, value: &str) -> bool {
+	let shown = actual.chars().count();
+	masked(actual) && (shown == value.chars().count() || shown == value.encode_utf16().count())
 }
 
 /// The whole text of an element with the `Text` interface.
@@ -1055,26 +1088,43 @@ mod tests {
 			}
 		}
 
-		/// `org.a11y.atspi.Text`; a password field reads one `●` per character.
+		/// How a field shows its text: as is, or one `●` per character (GTK,
+		/// Gecko) or per UTF-16 unit (Qt).
+		#[derive(Clone, Copy)]
+		enum Shown {
+			Plain,
+			PerChar,
+			PerUtf16,
+		}
+
+		fn shown(text: &str, shown: Shown) -> String {
+			match shown {
+				Shown::Plain => text.to_owned(),
+				Shown::PerChar => "●".repeat(text.chars().count()),
+				Shown::PerUtf16 => "●".repeat(text.encode_utf16().count()),
+			}
+		}
+
+		/// `org.a11y.atspi.Text`, reading what the field shows.
 		struct Text {
-			text:   Arc<Mutex<String>>,
-			masked: bool,
+			text:  Arc<Mutex<String>>,
+			shown: Shown,
 		}
 
 		#[interface(name = "org.a11y.atspi.Text")]
 		impl Text {
 			#[zbus(property)]
 			fn character_count(&self) -> i32 {
-				self.text.lock().unwrap().chars().count() as i32
+				shown(&self.text.lock().unwrap(), self.shown)
+					.chars()
+					.count() as i32
 			}
 
 			fn get_text(&self, start_offset: i32, end_offset: i32) -> String {
-				let text = self.text.lock().unwrap();
-				text
+				shown(&self.text.lock().unwrap(), self.shown)
 					.chars()
 					.skip(start_offset as usize)
 					.take((end_offset - start_offset) as usize)
-					.map(|char| if self.masked { '●' } else { char })
 					.collect()
 			}
 		}
@@ -1088,13 +1138,73 @@ mod tests {
 			}
 		}
 
+		/// An error naming what the field reads, or one that names no text.
+		enum Verdict {
+			Ok,
+			Reads(&'static str),
+			Hidden,
+		}
+
 		const PEER: &str = ":1.7";
-		// GTK, Qt and LibreOffice take the write; Gecko keeps the old text.
-		let cases = [
-			("/gtk", true, Role::Entry),
-			("/gecko", false, Role::Entry),
-			("/gtk_password", true, Role::PasswordText),
-			("/gecko_password", false, Role::PasswordText),
+		// Path, whether the write applies (GTK, Qt and LibreOffice; Gecko keeps
+		// the old text), role (`None`: unreadable), how the field shows its
+		// text (`None`: no `Text`), its old text, and the verdict.
+		type Case = (&'static str, bool, Option<Role>, Option<Shown>, &'static str, Verdict);
+		let cases: [Case; 10] = [
+			("/gtk", true, Some(Role::Entry), Some(Shown::Plain), "old", Verdict::Ok),
+			(
+				"/gecko",
+				false,
+				Some(Role::Entry),
+				Some(Shown::Plain),
+				"old",
+				Verdict::Reads(r#"the field now reads "old""#),
+			),
+			(
+				"/gtk_password",
+				true,
+				Some(Role::PasswordText),
+				Some(Shown::PerChar),
+				"old",
+				Verdict::Ok,
+			),
+			(
+				"/gecko_password",
+				false,
+				Some(Role::PasswordText),
+				Some(Shown::PerChar),
+				"old",
+				Verdict::Hidden,
+			),
+			// The old text shows the same mask as the new one would.
+			(
+				"/gecko_password_same_length",
+				false,
+				Some(Role::PasswordText),
+				Some(Shown::PerChar),
+				"abcdefg",
+				Verdict::Hidden,
+			),
+			(
+				"/qt_password",
+				true,
+				Some(Role::PasswordText),
+				Some(Shown::PerUtf16),
+				"old",
+				Verdict::Ok,
+			),
+			// A GTK4 entry with visibility off and no password purpose.
+			("/gtk4_hidden", true, Some(Role::Text), Some(Shown::PerChar), "old", Verdict::Ok),
+			(
+				"/gtk4_hidden_ignored",
+				false,
+				Some(Role::Text),
+				Some(Shown::PerChar),
+				"old",
+				Verdict::Hidden,
+			),
+			("/no_role", false, None, Some(Shown::Plain), "old", Verdict::Hidden),
+			("/no_text", true, Some(Role::PasswordText), None, "old", Verdict::Hidden),
 		];
 		let rt = Builder::new_current_thread().enable_all().build().unwrap();
 		let results = rt.block_on(async {
@@ -1103,20 +1213,22 @@ mod tests {
 				.server(atspi::zbus::Guid::generate())
 				.unwrap()
 				.p2p();
-			for (path, applies, role) in cases {
-				let text = Arc::new(Mutex::new("old".to_owned()));
+			for &(path, applies, role, shown, old, _) in &cases {
+				let text = Arc::new(Mutex::new(old.to_owned()));
 				builder = builder
 					.serve_at(path, Editable { text: text.clone(), applies })
-					.unwrap()
-					.serve_at(path, Text { text, masked: role == Role::PasswordText })
-					.unwrap()
-					.serve_at(path, Accessible(role))
 					.unwrap();
+				if let Some(shown) = shown {
+					builder = builder.serve_at(path, Text { text, shown }).unwrap();
+				}
+				if let Some(role) = role {
+					builder = builder.serve_at(path, Accessible(role)).unwrap();
+				}
 			}
 			let client = ConnectionBuilder::unix_stream(client).p2p().build();
 			let (server, client) = tokio::try_join!(builder.build(), client).unwrap();
 			let mut results = Vec::new();
-			for (path, ..) in cases {
+			for &(path, ..) in &cases {
 				let object = ObjectRefOwned::from_static_str_unchecked(PEER, path);
 				let accessible = object.as_accessible_proxy(&client).await.unwrap();
 				results.push(write_text(&client, &accessible, &object, "new ä€😀").await);
@@ -1124,14 +1236,15 @@ mod tests {
 			drop(server);
 			results
 		});
-		let [gtk, gecko, gtk_password, gecko_password] = <[_; 4]>::try_from(results).ok().unwrap();
-		gtk.unwrap();
-		let gecko = gecko.unwrap_err();
-		assert!(gecko.message.contains(r#"the field now reads "old""#), "{}", gecko.message);
-		gtk_password.unwrap();
-		let password = gecko_password.unwrap_err();
-		assert!(password.message.contains("secure"), "{}", password.message);
-		assert!(!password.message.contains("new"), "{}", password.message);
+		for ((path, .., verdict), result) in cases.iter().zip(results) {
+			match (verdict, result) {
+				(Verdict::Ok, Ok(())) => {},
+				(Verdict::Reads(text), Err(err)) if err.message.contains(text) => {},
+				(Verdict::Hidden, Err(err))
+					if err.message.contains("secure") && !err.message.contains("new") => {},
+				(_, result) => panic!("{path}: {result:?}"),
+			}
+		}
 	}
 
 	#[test]
