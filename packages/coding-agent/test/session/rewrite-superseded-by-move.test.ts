@@ -80,6 +80,12 @@ it("keeps a rewrite whose own write failed when a write that ran meanwhile saved
 		const onDisk = fs.readFileSync(file, "utf8");
 		expect(onDisk).toContain('"state":"after"');
 		expect(onDisk).toContain('"customType":"successor"');
+		// The write that saved it recovered storage: the failed write's error is not left
+		// behind to refuse the next flush or rewrite.
+		await manager.flush();
+		marker.data = { state: "later" };
+		await manager.rewriteEntries();
+		expect(fs.readFileSync(file, "utf8")).toContain('"state":"later"');
 	} finally {
 		manager.seal();
 		await manager.close().catch(() => {});

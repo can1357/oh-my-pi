@@ -4073,16 +4073,25 @@ export class SessionManager {
 		// Every change made before this rewrite is carried by bodies serialized at this revision or later.
 		const revision = ++this.#bodyRevision;
 		let outcome: FencedRewriteOutcome | undefined;
+		let failedAlone = false;
 		try {
 			await this.#scheduleDiskWork(
 				async () => {
 					try {
 						outcome = await this.#runFencedAtomicRewrite(startEpoch);
 					} catch (error) {
-						// Its write failed. The failure latches as any disk failure does, and
-						// whether the change is saved anyway — by a write that ran meanwhile — is
-						// settled off the chain, like a superseded rewrite.
-						this.#noteDiskFailure(error);
+						if (this.#diskEpoch === startEpoch) {
+							// No other write ran while it failed, so the failure is the rewrite's own
+							// and is what the caller is told: the change is restored in the turn the
+							// write failed in, and the failure latches on the chain as any disk failure does.
+							failedAlone = true;
+							this.#restoreUnsaved(restore);
+							throw error;
+						}
+						// A write that ran meanwhile moved the epoch on. That write owns the
+						// session's disk state, its failure or its recovery included, so this
+						// failure does not latch over it; whether it saved the change is settled
+						// off the chain, like a superseded rewrite.
 						outcome = { superseded: error };
 						return;
 					}
@@ -4096,6 +4105,7 @@ export class SessionManager {
 				{ epoch: startEpoch },
 			);
 		} catch (error) {
+			if (failedAlone) throw error;
 			// A failure latched before its turn refused it.
 			outcome = { superseded: error };
 		}
