@@ -4,14 +4,7 @@
  * Primary provider for OMP native configs. Supports all capabilities.
  */
 import * as path from "node:path";
-import {
-	expandTilde,
-	getAgentDir,
-	logger,
-	normalizePathForComparison,
-	parseFrontmatter,
-	tryParseJson,
-} from "@oh-my-pi/pi-utils";
+import { getAgentDir, logger, normalizePathForComparison, parseFrontmatter, tryParseJson } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
 import { getManagedSkillsDir, MANAGED_SKILLS_PROVIDER_ID } from "../autolearn/managed-skills";
 import { registerProvider } from "../capability";
@@ -30,6 +23,7 @@ import { type SlashCommand, slashCommandCapability } from "../capability/slash-c
 import { type SystemPrompt, systemPromptCapability } from "../capability/system-prompt";
 import { type CustomTool, toolCapability } from "../capability/tool";
 import type { LoadContext, LoadResult } from "../capability/types";
+import { expandTilde } from "../tools/path-utils";
 import {
 	discoverRuleFromMarkdown,
 	createSourceMeta,

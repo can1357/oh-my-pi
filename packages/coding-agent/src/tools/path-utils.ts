@@ -104,6 +104,8 @@ function stripFileUrl(filePath: string): string {
 	}
 }
 
+export { expandTilde };
+
 export function expandPath(filePath: string): string {
 	// Some models intermittently prefix an otherwise-valid path with a stray
 	// `:` (e.g. `:/abs/path`, `:../rel`, or the Windows forms `:C:\repo\file`

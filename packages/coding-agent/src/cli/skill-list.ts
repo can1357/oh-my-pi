@@ -1,12 +1,13 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { expandTilde, isEnoent, isEnotdir } from "@oh-my-pi/pi-utils";
+import { isEnoent, isEnotdir } from "@oh-my-pi/pi-utils";
 import { CliUsageError } from "@oh-my-pi/pi-utils/cli";
 import { Settings } from "../config/settings";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import { initializeWithSettings } from "../discovery";
 import { cfgDisabledExtensions, cfgExtensions, cfgSkills, type SkillsSettings } from "../extensibility/settings";
 import { loadSkills, type SkillWarning } from "../extensibility/skills";
+import { expandTilde } from "../tools/path-utils";
 
 /** Public skill listing entry: the fields a machine consumer may rely on. */
 export interface SkillSummary {

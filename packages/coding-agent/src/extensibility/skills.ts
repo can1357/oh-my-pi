@@ -1,7 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import {
-	expandTilde,
 	getProjectDir,
 	isEnoent,
 	normalizePathForComparison,
@@ -37,6 +36,7 @@ import autoloadTemplate from "../prompts/skills/autoload.md" with { type: "text"
 import userInvocationTemplate from "../prompts/skills/user-invocation.md" with { type: "text" };
 import { SKILLSHARE_PROVIDER_ID } from "../discovery/skillshare";
 import type { SkillPromptDetails } from "../session/messages";
+import { expandTilde } from "../tools/path-utils";
 
 export { allowsSkillTokens, SKILL_TOKEN_RE };
 

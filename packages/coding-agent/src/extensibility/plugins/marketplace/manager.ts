@@ -10,7 +10,8 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { expandTilde, isEnoent, logger, pathIsWithin } from "@oh-my-pi/pi-utils";
+import { isEnoent, logger, pathIsWithin } from "@oh-my-pi/pi-utils";
+import { expandTilde } from "../../../tools/path-utils";
 import { linkPluginDirectory } from "../directory-link";
 import { normalizePluginRuntimeConfig, writePluginRuntimeConfig } from "../runtime-config";
 import type { PluginRuntimeConfig, PluginRuntimeState } from "../types";
