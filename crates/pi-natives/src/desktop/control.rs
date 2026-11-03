@@ -46,9 +46,9 @@ struct CancellationState {
 	/// retirement and release never count, so the host can tell the user's
 	/// stop from its own. Shared with every session under the same key.
 	escape_stops: Arc<AtomicU32>,
-	/// When the current computer run ends; input waiting for the user to
-	/// pause stops shortly before it.
-	#[cfg(target_os = "macos")]
+	/// When the current computer run ends. Input waiting for the user to pause
+	/// (macOS) or for a Wayland permission prompt stops shortly before it.
+	#[cfg(any(target_os = "macos", target_os = "linux"))]
 	deadline:     Mutex<Option<Instant>>,
 	#[cfg(target_os = "linux")]
 	async_wake:   tokio::sync::Notify,
@@ -67,7 +67,7 @@ impl CancellationSource {
 		OperationToken {
 			source: self.clone(),
 			generation: self.0.generation.load(Ordering::Acquire),
-			#[cfg(target_os = "macos")]
+			#[cfg(any(target_os = "macos", target_os = "linux"))]
 			reply_by: None,
 		}
 	}
@@ -124,7 +124,7 @@ impl CancellationSource {
 
 	/// Sets when the current computer run ends, `None` for no deadline. Each
 	/// run sets it before its first call.
-	#[cfg(target_os = "macos")]
+	#[cfg(any(target_os = "macos", target_os = "linux"))]
 	pub(crate) fn set_deadline(&self, deadline: Option<Instant>) {
 		*self.0.deadline.lock() = deadline;
 	}
@@ -156,14 +156,14 @@ pub(crate) struct OperationToken {
 	source:     CancellationSource,
 	generation: u64,
 	/// When the caller stops waiting for this request's reply.
-	#[cfg(target_os = "macos")]
+	#[cfg(any(target_os = "macos", target_os = "linux"))]
 	reply_by:   Option<Instant>,
 }
 
 impl OperationToken {
 	/// When this operation must have answered: the run's end or the caller's
 	/// reply timeout, whichever comes first.
-	#[cfg(target_os = "macos")]
+	#[cfg(any(target_os = "macos", target_os = "linux"))]
 	pub(crate) fn deadline(&self) -> Option<Instant> {
 		let run = *self.source.0.deadline.lock();
 		match (run, self.reply_by) {
@@ -173,7 +173,7 @@ impl OperationToken {
 	}
 
 	/// This token for a request whose caller waits for its reply until `at`.
-	#[cfg(target_os = "macos")]
+	#[cfg(any(target_os = "macos", target_os = "linux"))]
 	pub(crate) fn replying_by(self, at: Instant) -> Self {
 		Self { reply_by: Some(at), ..self }
 	}

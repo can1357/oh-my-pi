@@ -84,6 +84,15 @@ export function loadRuntimeIdentity(): Promise<void> {
 	return ready;
 }
 
+/**
+ * Subagent worker threads only: take the main thread's settled identity (one process, one build)
+ * instead of reading the checkout again, which costs a full `git diff HEAD` per thread.
+ */
+export function adoptRuntimeIdentity(identity: RuntimeIdentity): void {
+	current = identity;
+	ready = Promise.resolve();
+}
+
 /** Build identity of this process; a source checkout's `diff` is `unknown` until {@link loadRuntimeIdentity} settles. */
 export function currentRuntimeIdentity(): RuntimeIdentity {
 	return resolveRuntimeIdentity();
