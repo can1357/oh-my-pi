@@ -211,12 +211,6 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 			throw new CliUsageError(`--motion: ${(error as Error).message}`);
 		}
 	},
-	"--shimmer": (result, value) => {
-		if (value !== "classic" && value !== "kitt" && value !== "disabled") {
-			throw new CliUsageError(`--shimmer: expected classic, kitt, or disabled, got ${JSON.stringify(value)}`);
-		}
-		result.shimmer = value;
-	},
 	"--api-key": (result, value) => {
 		result.apiKey = value;
 	},

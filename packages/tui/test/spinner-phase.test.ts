@@ -69,7 +69,7 @@ describe("spinner owners share one clock", () => {
 	it("a working row and a live tool card started out of phase repaint once per period, not once each", () => {
 		// Each owner used to tick on its own start time: two spinners 120 ms apart woke the renderer
 		// twice per period — 8 frames/s at a 250 ms cadence — and showed different glyphs.
-		vi.useFakeTimers();
+		vi.useFakeTimers({ now: 0 });
 		setSpinnerInterval(250);
 		const term = new VirtualTerminal(80, 12);
 		let paints = 0;
@@ -109,7 +109,7 @@ describe("spinner owners share one clock", () => {
 		// that stop the loader mid-turn). Armed from its own start, it was a second out-of-phase
 		// 250 ms owner under `--motion reduced` — 8 frames/s again — and under the default 80 ms
 		// cadence it added four paints a second between the row's own.
-		vi.useFakeTimers();
+		vi.useFakeTimers({ now: 0 });
 		const countPaintsPerFourSeconds = (spinnerMs: number): number => {
 			setSpinnerInterval(spinnerMs);
 			const term = new VirtualTerminal(80, 12);

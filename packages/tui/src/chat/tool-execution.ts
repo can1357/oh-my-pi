@@ -1,7 +1,6 @@
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { Box } from "../components/box";
-import { minFrameIntervalMs, onMaxFpsChange } from "../frame-rate";
 import {
 	onSpinnerIntervalChange,
 	sharedSpinnerFrame,
@@ -313,19 +312,13 @@ const NATIVE_STATUS_TONE: Record<TspCardStatus, TspTone | undefined> = {
 const liveSpinnerBlocks = new Set<ToolExecutionComponent>();
 let sharedSpinnerTimer: NodeJS.Timeout | undefined;
 
-/** Arm the shared spinner ticker if it is not already running and spinners animate. */
+/**
+ * Arm the shared ticker if it is not already running and spinners animate. Ticks land on the shared
+ * clock's boundaries, so this ticker and the working row repaint in the same frame. Each tick re-reads
+ * the period; a tick under a static spinner paints frame 0 and leaves the ticker stopped.
+ */
 function ensureSharedSpinnerTicker(): void {
 	if (sharedSpinnerTimer || isNativeRendering() || !spinnerAnimated()) return;
-	armSharedSpinnerTicker();
-}
-
-/**
- * One tick per period on the shared clock's boundaries (never faster than a frame can land under
- * the `tui.maxFps` ceiling), so this ticker and every other spinner owner — the working row above
- * all — fire in the same turn and repaint in the same frame.
- */
-function armSharedSpinnerTicker(): void {
-	const intervalMs = Math.max(spinnerInterval(), minFrameIntervalMs());
 	sharedSpinnerTimer = setTimeout(() => {
 		sharedSpinnerTimer = undefined;
 		// A native surface opened while blocks were live: the terminal clocks their spinners, so the
@@ -337,26 +330,13 @@ function armSharedSpinnerTicker(): void {
 		const frame = sharedSpinnerFrame(theme.spinnerFrames.length);
 		// Removing the current block mid-iteration is safe on a Set.
 		for (const block of liveSpinnerBlocks) block.tickSpinner(frame);
-		if (liveSpinnerBlocks.size > 0 && spinnerAnimated()) armSharedSpinnerTicker();
-	}, spinnerTickDelay(intervalMs));
+		if (liveSpinnerBlocks.size > 0) ensureSharedSpinnerTicker();
+	}, spinnerTickDelay(spinnerInterval()));
 }
-
-// A live cadence or ceiling change re-arms the ticker at the new period; a static interval pins every
-// live block on frame 0 and leaves no timer running.
-function rearmSharedSpinnerTicker(): void {
-	if (sharedSpinnerTimer) {
-		clearTimeout(sharedSpinnerTimer);
-		sharedSpinnerTimer = undefined;
-	}
-	if (liveSpinnerBlocks.size === 0) return;
-	if (spinnerAnimated()) {
-		ensureSharedSpinnerTicker();
-		return;
-	}
-	for (const block of liveSpinnerBlocks) block.tickSpinner(0);
-}
-onSpinnerIntervalChange(rearmSharedSpinnerTicker);
-onMaxFpsChange(rearmSharedSpinnerTicker);
+// Static → animated: nothing is ticking, so restart.
+onSpinnerIntervalChange(() => {
+	if (liveSpinnerBlocks.size > 0) ensureSharedSpinnerTicker();
+});
 
 /** Register a live block with the shared ticker, starting it on first use. */
 function registerSpinnerBlock(block: ToolExecutionComponent): void {
@@ -375,7 +355,7 @@ function unregisterSpinnerBlock(block: ToolExecutionComponent): void {
 
 /** Stop the shared spinner ticker and drop every registered live block.
  *  Called on interactive-mode teardown so a stray live block cannot keep the
- *  process-wide 80ms interval alive past shutdown (lingering event-loop
+ *  process-wide spinner timer alive past shutdown (lingering event-loop
  *  handles pin the process; cf. `postmortem.quit`). Test files that assert on
  *  ticker arming also use this to start from a clean slate. */
 export function stopSharedSpinnerTicker(): void {

@@ -1,26 +1,25 @@
 /**
- * Decorative motion with no knob of its own — the status-line speculation blink and the brand
- * fade — behind one switch the host's `tui.motion` preset drives. Enabled by default (the
- * historical behaviour); `reduced` and `none` turn it off so a quiet pane is quiet.
+ * Decorative motion with no knob of its own — the status-line blink and brand fade, the editor's
+ * magic-keyword sweep, native `fx` spans — behind one switch the host's `tui.motion` preset drives.
  */
 
 let enabled = true;
-const listeners = new Set<(enabled: boolean) => void>();
+const listeners = new Set<() => void>();
 
-/** Whether decorative one-off motion (blink, fade) may run. */
+/** Whether decorative motion may run. */
 export function motionEffectsEnabled(): boolean {
 	return enabled;
 }
 
-/** Enable or disable decorative motion for every consumer; listeners stop in-flight timers at once. */
+/** Enable or disable decorative motion. Timer-driven effects stop at their next frame. */
 export function setMotionEffects(next: boolean): void {
 	if (next === enabled) return;
 	enabled = next;
-	for (const listener of listeners) listener(next);
+	for (const listener of listeners) listener();
 }
 
-/** Observe switch changes (for consumers that own a timer); returns the unsubscribe. */
-export function onMotionEffectsChange(listener: (enabled: boolean) => void): () => void {
+/** Observe switch flips, for output nothing would otherwise re-describe; returns the unsubscribe. */
+export function onMotionEffectsChange(listener: () => void): () => void {
 	listeners.add(listener);
 	return () => {
 		listeners.delete(listener);

@@ -67,7 +67,7 @@ describe("status line active-window repaint ticker", () => {
 	});
 
 	it("repaints on its own cadence while a turn window is open, with no loader running", () => {
-		vi.useFakeTimers();
+		vi.useFakeTimers({ now: 0 });
 		const { component, repaint } = createComponent();
 
 		component.markActivityStart();
@@ -84,7 +84,7 @@ describe("status line active-window repaint ticker", () => {
 	});
 
 	it("stays silent while idle, re-arms for the next turn, and stops on dispose", () => {
-		vi.useFakeTimers();
+		vi.useFakeTimers({ now: 0 });
 		const { component, repaint } = createComponent();
 
 		vi.advanceTimersByTime(1000);
@@ -105,7 +105,7 @@ describe("status line active-window repaint ticker", () => {
 	});
 
 	it("re-arms when focus returns to a session whose turn is still running", () => {
-		vi.useFakeTimers();
+		vi.useFakeTimers({ now: 0 });
 		const main = createSession(true);
 		const component = new StatusLineComponent(main, createHost());
 		const repaint = vi.fn();
@@ -132,7 +132,7 @@ describe("status line active-window repaint ticker", () => {
 	});
 
 	it("re-arms when a native surface that suppressed the ticker is revoked mid-turn", () => {
-		vi.useFakeTimers();
+		vi.useFakeTimers({ now: 0 });
 		const { component, repaint } = createComponent();
 
 		// The turn starts while a TSP surface renders the status area, so
@@ -151,8 +151,8 @@ describe("status line active-window repaint ticker", () => {
 		component.dispose();
 	});
 
-	it("follows the spinner clock: a slower or static spinner stops the 4 Hz wakeups, live", () => {
-		vi.useFakeTimers();
+	it("follows the spinner clock: a slower or static spinner stops the 4 Hz wakeups", () => {
+		vi.useFakeTimers({ now: 0 });
 		const { component, repaint } = createComponent();
 
 		// A spinner slower than the safety net sets the pace.
@@ -161,30 +161,21 @@ describe("status line active-window repaint ticker", () => {
 		vi.advanceTimersByTime(1000);
 		expect(repaint.mock.calls.length).toBe(2);
 
-		// Static spinners (`tui.motion: none`): only the one-second turn timer still moves, and the
-		// armed ticker re-paces at once rather than at the next turn.
+		// Static spinners (`tui.motion: none`): the armed tick lands at t=1500, then only the one-second
+		// turn timer moves (2000, 3000, 4000).
 		setSpinnerInterval(SPINNER_INTERVAL_STATIC);
 		repaint.mockClear();
-		vi.advanceTimersByTime(999);
-		expect(repaint.mock.calls.length).toBe(0);
-		vi.advanceTimersByTime(2001);
-		expect(repaint.mock.calls.length).toBe(3);
-
-		// Back to the default cadence mid-turn: four 80 ms frames per tick (320 ms), on the clock's
-		// boundaries — from t=4000 those are 4160, 4480 and 4800.
-		setSpinnerInterval(DEFAULT_SPINNER_INTERVAL_MS);
-		repaint.mockClear();
-		vi.advanceTimersByTime(1000);
-		expect(repaint.mock.calls.length).toBe(3);
+		vi.advanceTimersByTime(3000);
+		expect(repaint.mock.calls.length).toBe(4);
 
 		component.dispose();
-		setSpinnerInterval(SPINNER_INTERVAL_STATIC);
 		vi.advanceTimersByTime(2000);
-		expect(repaint.mock.calls.length).toBe(3);
+		expect(repaint.mock.calls.length).toBe(4);
+		setSpinnerInterval(DEFAULT_SPINNER_INTERVAL_MS);
 	});
 
 	it("ticks a whole number of spinner frames apart, on the clock's boundaries, whenever the turn started", () => {
-		vi.useFakeTimers();
+		vi.useFakeTimers({ now: 0 });
 		const { component, repaint } = createComponent();
 
 		// Default 80 ms spinner: the safety net rounds up to 320 ms. A turn opened at t=120 ticks at

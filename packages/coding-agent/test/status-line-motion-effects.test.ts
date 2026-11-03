@@ -65,7 +65,7 @@ function brandColor(row: string): string | undefined {
 
 describe("status line decorative motion", () => {
 	it("eases the brand color over a fade timer by default, and snaps without one when motion effects are off", () => {
-		vi.useFakeTimers();
+		vi.useFakeTimers({ now: 0 });
 		const setIntervalSpy = vi.spyOn(globalThis, "setInterval");
 
 		// Default: the idle→working transition arms the 40 ms fade timer, and the brand color right
@@ -94,33 +94,13 @@ describe("status line decorative motion", () => {
 		expect(first).toBe(settled);
 		still.component.dispose();
 	});
-
-	it("stops an in-flight brand fade the instant motion effects are switched off", () => {
-		vi.useFakeTimers();
-		const { component, render } = fixture();
-		render();
-		component.markActivityStart();
-		const midFade = brandColor(render());
-		// The fade's frame timer runs beside the turn-window repaint ticker; only the fade stops.
-		const timersMidFade = vi.getTimerCount();
-		expect(timersMidFade).toBeGreaterThan(1);
-
-		setMotionEffects(false);
-		expect(vi.getTimerCount()).toBe(timersMidFade - 1);
-		const snapped = brandColor(render());
-		expect(snapped).not.toBe(midFade);
-		vi.advanceTimersByTime(1000);
-		component.invalidate();
-		expect(brandColor(render())).toBe(snapped);
-		component.dispose();
-	});
 });
 
 describe("status line with a static spinner", () => {
 	it("still advances the brand's elapsed timer once a second", () => {
 		// The spinner clock was the only tick while working; static spinners made it a constant, so
 		// the cached row stayed at "0s" for the whole turn.
-		vi.useFakeTimers();
+		vi.useFakeTimers({ now: 0 });
 		setSpinnerInterval(0);
 		setMotionEffects(false);
 		const { component, render } = fixture();

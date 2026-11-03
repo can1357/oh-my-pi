@@ -15,11 +15,7 @@ import {
 	claudeComposerStyle,
 	padding,
 	motionEffectsEnabled,
-	onMotionEffectsChange,
-	minFrameIntervalMs,
-	onSpinnerIntervalChange,
 	spinnerAnimated,
-	spinnerClockTick,
 	spinnerInterval,
 	spinnerTickDelay,
 	truncateToWidth,
@@ -724,10 +720,6 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	#brandFadeTimer: NodeJS.Timeout | undefined;
 	/** Repaint ticker while a turn's active-processing window is open (see #syncActiveWindowRepaint). */
 	#activeWindowRepaintTimer: NodeJS.Timeout | undefined;
-	/** Drops the decorative-motion subscription on dispose. */
-	readonly #unsubscribeMotionEffects: () => void;
-	/** Drops the spinner-clock subscription that re-paces the turn-window ticker. */
-	readonly #unsubscribeSpinnerInterval: () => void;
 	/** One wall-clock wakeup for the active model's next tariff change, including while idle. */
 	#pricingTimer: NodeJS.Timeout | undefined;
 	#pricingTimerCost: ModelCost | undefined;
@@ -853,16 +845,6 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	) {
 		this.#settings = host.getSettings();
 		this.#unwatchNativeRendering = onNativeRenderingChange(() => this.#syncActiveWindowRepaint());
-		// A live switch to reduced/none motion stops an in-flight blink or fade at once, matching the
-		// spinner clock and frame ceiling, which also take effect on change.
-		this.#unsubscribeMotionEffects = onMotionEffectsChange(enabled => {
-			if (enabled) return;
-			this.#stopSpeculationBlink();
-			this.#stopBrandFadeTimer();
-			this.#brandFade = null;
-			this.invalidate();
-		});
-		this.#unsubscribeSpinnerInterval = onSpinnerIntervalChange(() => this.#syncActiveWindowRepaint());
 	}
 
 	#gitEnabled(): boolean {
@@ -1343,8 +1325,6 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 
 	dispose(): void {
 		this.#disposed = true;
-		this.#unsubscribeMotionEffects();
-		this.#unsubscribeSpinnerInterval();
 		this.#branchResolveActive?.controller.abort();
 		this.#branchResolveActive = undefined;
 		this.#resetJjRequests();
@@ -1448,9 +1428,8 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	}
 
 	#startBrandFadeTimer(): void {
-		// The native brand segment is a terminal-clocked spinner; nothing to repaint. With decorative
-		// motion off the brand settles on its final color in the next ordinary paint.
-		if (this.#brandFadeTimer || this.#disposed || isNativeRendering() || !motionEffectsEnabled()) return;
+		// The native brand segment is a terminal-clocked spinner; nothing to repaint.
+		if (this.#brandFadeTimer || this.#disposed || isNativeRendering()) return;
 		this.#brandFadeTimer = setInterval(() => {
 			const fade = this.#brandFade;
 			if (!fade || Date.now() - fade.startedAt >= BRAND_FADE_MS) this.#stopBrandFadeTimer();
@@ -1478,33 +1457,28 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	 * own spinner and needs none.
 	 */
 	#syncActiveWindowRepaint(): void {
-		this.#stopActiveWindowRepaint();
-		if (this.#disposed || isNativeRendering() || this.getTurnElapsedMs() === null) return;
-		this.#armActiveWindowRepaint();
+		if (this.#disposed || isNativeRendering() || this.getTurnElapsedMs() === null) {
+			this.#stopActiveWindowRepaint();
+			return;
+		}
+		if (!this.#activeWindowRepaintTimer) this.#armActiveWindowRepaint();
 	}
 
 	/**
-	 * Ticker period: a whole number of spinner frames no shorter than the 250 ms safety net (the
-	 * spinner period itself when that is slower), or a 1 s tick for the turn timer when spinners
-	 * are static (`tui.spinnerInterval: 0`, `tui.motion: none`). A multiple of the working row's
-	 * cadence, armed on the shared clock's boundaries, makes every tick coincide with one of the
-	 * row's own, so the two owners cost one frame per period rather than one each.
+	 * One tick on the shared clock's next boundary (see {@link spinnerTickDelay}); re-arms itself,
+	 * re-reading the period. The period is a whole number of spinner frames no shorter than the
+	 * 250 ms safety net, so every tick coincides with one of the working row's own and the two cost
+	 * one frame; with static spinners it is the turn timer's 1 s.
 	 */
-	#activeWindowRepaintPeriodMs(): number {
-		if (!spinnerAnimated()) return STATIC_SPINNER_REPAINT_MS;
-		const frameMs = Math.max(spinnerInterval(), minFrameIntervalMs());
-		return Math.ceil(ACTIVE_WINDOW_REPAINT_MS / frameMs - 1e-6) * frameMs;
-	}
-
-	/** One tick on the shared clock's next boundary (see {@link spinnerTickDelay}); re-arms itself. */
 	#armActiveWindowRepaint(): void {
-		const periodMs = this.#activeWindowRepaintPeriodMs();
+		const frameMs = spinnerInterval();
+		const periodMs = spinnerAnimated()
+			? Math.ceil(ACTIVE_WINDOW_REPAINT_MS / frameMs - 1e-6) * frameMs
+			: STATIC_SPINNER_REPAINT_MS;
 		const timer = setTimeout(() => {
-			if (this.#activeWindowRepaintTimer !== timer) return;
 			this.#activeWindowRepaintTimer = undefined;
 			if (this.#disposed || isNativeRendering() || this.getTurnElapsedMs() === null) return;
 			this.#onBranchChange?.();
-			// Re-derive the period: a ceiling change mid-turn moves the next tick, not just the next turn.
 			this.#armActiveWindowRepaint();
 		}, spinnerTickDelay(periodMs));
 		timer.unref?.();
@@ -2953,7 +2927,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		) {
 			// The brand spinner follows the shared clock. With a static spinner the brand's elapsed
 			// timer still advances once a second, and a brand fade repaints on its own frame cadence.
-			if (spinnerAnimated()) return spinnerClockTick(nowMs);
+			if (spinnerAnimated()) return Math.floor(nowMs / spinnerInterval());
 			return this.#brandFade !== null ? Math.floor(nowMs / BRAND_FADE_FRAME_MS) : Math.floor(nowMs / 1_000);
 		}
 		const includesTime = leftSegments.includes("time") || rightSegments.includes("time");

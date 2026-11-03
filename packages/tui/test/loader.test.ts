@@ -40,7 +40,7 @@ describe("Loader component", () => {
 	});
 
 	it("keeps spinner cadence when animated messages repaint at 30fps", () => {
-		vi.useFakeTimers();
+		vi.useFakeTimers({ now: 0 });
 		const ui = { requestComponentRender: vi.fn() };
 		const colorMessage = ((text: string) => text) as LoaderMessageColorFn & { animated: true };
 		colorMessage.animated = true;
@@ -54,7 +54,7 @@ describe("Loader component", () => {
 	});
 
 	it("skips animated render requests when composed text is unchanged before the spinner advances", () => {
-		vi.useFakeTimers();
+		vi.useFakeTimers({ now: 0 });
 		const ui = { requestComponentRender: vi.fn() };
 		const colorMessage = ((text: string) => text) as LoaderMessageColorFn & { animated: true };
 		colorMessage.animated = true;
@@ -73,7 +73,7 @@ describe("Loader component", () => {
 	});
 
 	it("requests component renders for message changes but not repeated identical messages", () => {
-		vi.useFakeTimers();
+		vi.useFakeTimers({ now: 0 });
 		const ui = { requestComponentRender: vi.fn() };
 		const loader = new Loader(
 			ui as unknown as TUI,
@@ -96,7 +96,7 @@ describe("Loader component", () => {
 	});
 
 	it("requests component renders when animated message bytes change between spinner frames", () => {
-		vi.useFakeTimers();
+		vi.useFakeTimers({ now: 0 });
 		setSystemTime(new Date(1_000));
 		const ui = { synchronizedOutput: true, requestComponentRender: vi.fn() };
 		const colorMessage = ((text: string) => `${text}-${Date.now()}`) as LoaderMessageColorFn & { animated: true };
@@ -113,7 +113,7 @@ describe("Loader component", () => {
 	});
 
 	it("backs off animated paints when component renders consume the frame budget", () => {
-		vi.useFakeTimers();
+		vi.useFakeTimers({ now: 0 });
 		let now = 0;
 		const ui = {
 			synchronizedOutput: true,
@@ -139,7 +139,7 @@ describe("Loader component", () => {
 	});
 
 	it("backs off from the completed TUI frame cost when render requests are asynchronous", () => {
-		vi.useFakeTimers();
+		vi.useFakeTimers({ now: 0 });
 		let lastFrameCostMs = 0;
 		const ui = {
 			synchronizedOutput: true,
@@ -170,7 +170,7 @@ describe("Loader component", () => {
 	});
 
 	it("caps backpressure after a pathological one-off frame", () => {
-		vi.useFakeTimers();
+		vi.useFakeTimers({ now: 0 });
 		const ui = {
 			synchronizedOutput: true,
 			lastFrameCostMs: 5_000,
@@ -197,7 +197,7 @@ describe("Loader component", () => {
 	});
 
 	it("reuses text layout when only animated ANSI styling changes", () => {
-		vi.useFakeTimers();
+		vi.useFakeTimers({ now: 0 });
 		let colorFrame = 0;
 		const ui = { synchronizedOutput: true, requestComponentRender: vi.fn() };
 		const colorMessage = ((text: string) => `\x1b[3${colorFrame++ % 3}m${text}\x1b[0m`) as LoaderMessageColorFn & {
@@ -220,7 +220,7 @@ describe("Loader component", () => {
 	});
 
 	it("reuses the wrapped layout across static spinner frames without re-measuring", () => {
-		vi.useFakeTimers();
+		vi.useFakeTimers({ now: 0 });
 		const ui = { synchronizedOutput: true, requestComponentRender: vi.fn() };
 		const loader = new Loader(
 			ui as unknown as TUI,
@@ -246,7 +246,7 @@ describe("Loader component", () => {
 	});
 
 	it("rewraps custom spinner frames when their display widths differ", () => {
-		vi.useFakeTimers();
+		vi.useFakeTimers({ now: 0 });
 		const ui = { synchronizedOutput: true, requestComponentRender: vi.fn() };
 		const loader = new Loader(
 			ui as unknown as TUI,
@@ -268,7 +268,7 @@ describe("Loader component", () => {
 	});
 
 	it("redocks changing trailers with live colors and variable-width spinner output", () => {
-		vi.useFakeTimers();
+		vi.useFakeTimers({ now: 0 });
 		const tui = new TUI(new VirtualTerminal(24, 4));
 		let color = 31;
 		let spinnerSuffix = "";
@@ -302,7 +302,7 @@ describe("Loader component", () => {
 	});
 
 	it("preserves trailer docking when colorizers move ANSI past trailing message whitespace", () => {
-		vi.useFakeTimers();
+		vi.useFakeTimers({ now: 0 });
 		const tui = new TUI(new VirtualTerminal(18, 4));
 		let reset = "";
 		const loader = new Loader(
@@ -321,7 +321,7 @@ describe("Loader component", () => {
 	});
 
 	it("holds animated message-only frames when synchronized output is unavailable", () => {
-		vi.useFakeTimers();
+		vi.useFakeTimers({ now: 0 });
 		setSystemTime(new Date(1_000));
 		const ui = { synchronizedOutput: false, requestComponentRender: vi.fn() };
 		const colorMessage = ((text: string) => `${text}-${Date.now()}`) as LoaderMessageColorFn & { animated: true };
@@ -360,7 +360,7 @@ describe("Loader component", () => {
 	});
 
 	it("container disposeChildren stops detached loader repaints", () => {
-		vi.useFakeTimers();
+		vi.useFakeTimers({ now: 0 });
 		const term = new VirtualTerminal(20, 4);
 		const tui = new TUI(term);
 		const spy = spyOn(tui, "requestComponentRender");
@@ -383,7 +383,7 @@ describe("Loader component", () => {
 		tui.stop();
 	});
 	it("re-evaluates a dynamic message function on each spinner tick", () => {
-		vi.useFakeTimers();
+		vi.useFakeTimers({ now: 0 });
 		const ui = { requestDirectWrite: vi.fn(), requestComponentRender: vi.fn() };
 		let step = 0;
 		const loader = new Loader(
@@ -410,7 +410,7 @@ describe("Loader component", () => {
 	});
 
 	it("advances on the shared spinner clock: a slower interval slows the glyph, a static one pins it", () => {
-		vi.useFakeTimers();
+		vi.useFakeTimers({ now: 0 });
 		const ui = { requestComponentRender: vi.fn() };
 		try {
 			setSpinnerInterval(500);
@@ -456,44 +456,6 @@ describe("Loader component", () => {
 			vi.advanceTimersByTime(1);
 			expect(still.render(20).join("\n")).toContain("0 step 2");
 			still.stop();
-		} finally {
-			setSpinnerInterval(DEFAULT_SPINNER_INTERVAL_MS);
-		}
-	});
-
-	it("applies a live interval change at once: static pins frame 0 and re-arms, animated resumes without waiting", () => {
-		vi.useFakeTimers();
-		const ui = { requestComponentRender: vi.fn() };
-		try {
-			const loader = new Loader(
-				ui as unknown as TUI,
-				t => t,
-				t => t,
-				"Checking",
-				["0", "1", "2", "3"],
-			);
-			vi.advanceTimersByTime(DEFAULT_SPINNER_INTERVAL_MS);
-			expect(loader.render(20).join("\n")).toContain("1 Checking");
-
-			// Mid-animation → static: the glyph snaps to frame 0 immediately, not on the old 80 ms timer.
-			ui.requestComponentRender.mockClear();
-			setSpinnerInterval(SPINNER_INTERVAL_STATIC);
-			expect(loader.render(20).join("\n")).toContain("0 Checking");
-			expect(ui.requestComponentRender).toHaveBeenCalledTimes(1);
-			vi.advanceTimersByTime(DEFAULT_SPINNER_INTERVAL_MS * 3);
-			expect(ui.requestComponentRender).toHaveBeenCalledTimes(1);
-			expect(loader.render(20).join("\n")).toContain("0 Checking");
-
-			// Static → animated: the first frame advances one period later, not after the 1 s refresh.
-			setSpinnerInterval(DEFAULT_SPINNER_INTERVAL_MS);
-			vi.advanceTimersByTime(DEFAULT_SPINNER_INTERVAL_MS);
-			expect(loader.render(20).join("\n")).toContain("1 Checking");
-			loader.stop();
-
-			// A stopped loader no longer listens.
-			ui.requestComponentRender.mockClear();
-			setSpinnerInterval(SPINNER_INTERVAL_STATIC);
-			expect(ui.requestComponentRender).toHaveBeenCalledTimes(0);
 		} finally {
 			setSpinnerInterval(DEFAULT_SPINNER_INTERVAL_MS);
 		}

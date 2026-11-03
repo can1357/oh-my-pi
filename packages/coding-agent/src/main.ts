@@ -187,7 +187,6 @@ import {
 	cfgTuiResizeScrollback,
 	cfgTuiSpinnerInterval,
 	cfgTuiMaxFps,
-	cfgDisplayShimmer,
 	cfgTuiMotion,
 	cfgUpdateChannel,
 } from "./modes/settings";
@@ -2063,7 +2062,7 @@ export async function runRootCommand(
 		if (parsedArgs.externalThinking) {
 			cfgExternalThinking.override(settingsInstance, true);
 		}
-		// Apply --spinner-interval CLI flag (ephemeral, not persisted)
+		// Apply motion flags (ephemeral, not persisted; they outrank PI_SPINNER_INTERVAL/PI_MAX_FPS/PI_MOTION)
 		if (parsedArgs.spinnerInterval !== undefined) {
 			cfgTuiSpinnerInterval.override(settingsInstance, parsedArgs.spinnerInterval);
 		}
@@ -2072,9 +2071,6 @@ export async function runRootCommand(
 		}
 		if (parsedArgs.motion !== undefined) {
 			cfgTuiMotion.override(settingsInstance, parsedArgs.motion);
-		}
-		if (parsedArgs.shimmer !== undefined) {
-			cfgDisplayShimmer.override(settingsInstance, parsedArgs.shimmer);
 		}
 
 		await logger.time(

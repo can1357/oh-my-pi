@@ -9,7 +9,6 @@ import {
 	DEFAULT_SPINNER_INTERVAL_MS,
 	setSpinnerInterval,
 	SPINNER_INTERVAL_STATIC,
-	STATIC_SPINNER_GLYPH,
 } from "@oh-my-pi/pi-tui/spinner-clock";
 import type { Component } from "@oh-my-pi/pi-tui/tui";
 
@@ -60,15 +59,16 @@ describe("quietMotion", () => {
 		const quiet = quietMotion(described);
 		expect(quiet).not.toBe(described);
 		const [spin, labelled, pulse, tool, agent, editor, plain] = quiet.c as NativeNode[];
+		// Each style keeps its own frame 0: starburst's first facet, braille for the rest.
 		expect(spin).toMatchObject({
 			k: "text",
 			key: "spin",
-			p: { tone: "accent", role: "omp.working.spin", spans: [{ t: STATIC_SPINNER_GLYPH }] },
+			p: { tone: "accent", role: "omp.working.spin", spans: [{ t: "✻" }] },
 		});
 		expect((spin!.p as { style?: unknown }).style).toBeUndefined();
 		expect(labelled).toMatchObject({
 			k: "text",
-			p: { spans: [{ t: STATIC_SPINNER_GLYPH }, { t: " " }, { t: "booting", s: "dim", fx: "shimmer" }] },
+			p: { spans: [{ t: "⠋" }, { t: " " }, { t: "booting", s: "dim", fx: "shimmer" }] },
 		});
 		// Effects stay on: the pulse and shimmer spans are not the spinner switch's business.
 		expect(pulse).toBe(before[2]);
@@ -143,7 +143,7 @@ describe("quietMotion", () => {
 		expect(still.applyFrame({ sf: "s:t", s: 1, ops: new Reconciler("s:t").reconcile(regions, cx) })).toEqual([]);
 		expect(still.get(nativeComponentId(comp))).toMatchObject({
 			k: "text",
-			p: { spans: [{ t: STATIC_SPINNER_GLYPH }, { t: " Thinking" }] },
+			p: { spans: [{ t: "⠋" }, { t: " Thinking" }] },
 		});
 	});
 });

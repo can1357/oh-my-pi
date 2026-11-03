@@ -1,14 +1,13 @@
 /**
  * Describe-time gate for the animations a TSP terminal clocks itself. The protocol has no "static
- * spinner" or "no effects" knob — a `spinner` node and an `fx` span animate until they are removed —
- * so `tui.motion` is honoured here, on the way to the wire: with static spinners a `spinner` node
- * becomes its frame-0 glyph (label and common props kept), and with decorative motion off every
- * `fx` (span effects, editor decorations) is dropped. Subtrees with nothing to still keep their identity (the reconciler
- * memoizes on it); translations are cached per described node until a switch flips.
+ * spinner" or "no effects" knob, so `tui.motion` is honoured on the way to the wire: with static
+ * spinners a `spinner` node becomes its frame-0 glyph (label and common props kept), and with
+ * decorative motion off every `fx` is dropped. Untouched subtrees keep their identity (the reconciler
+ * memoizes on it); translations are cached per described node until a switch changes.
  */
 import type { TspSpan, TspSpinnerProps, TspText } from "@oh-my-pi/pi-wire";
 import { motionEffectsEnabled } from "../motion-effects";
-import { spinnerAnimated, STATIC_SPINNER_GLYPH } from "../spinner-clock";
+import { spinnerAnimated } from "../spinner-clock";
 import type { NativeChild, NativeNode } from "./node";
 
 let cache = new WeakMap<NativeNode, NativeNode>();
@@ -55,10 +54,14 @@ function quietChildren(
 	return out ?? children;
 }
 
-/** A `spinner` as the static text it would show at frame 0: glyph, then its label, under its common props. */
+/**
+ * A `spinner` as the static text it would show at frame 0: glyph, then its label, under its common
+ * props. Starburst's first facet matches the ANSI thinking pulse's frame 0; every other style shows
+ * the braille frame 0 the ANSI spinners pin to.
+ */
 function stillSpinner(node: NativeNode, props: Readonly<Record<string, unknown>> | undefined): NativeNode {
-	const { style: _style, label, ...common } = (props ?? {}) as TspSpinnerProps & { label?: TspText };
-	const spans: TspSpan[] = [{ t: STATIC_SPINNER_GLYPH }];
+	const { style, label, ...common } = (props ?? {}) as TspSpinnerProps & { label?: TspText };
+	const spans: TspSpan[] = [{ t: style === "starburst" ? "✻" : "⠋" }];
 	if (typeof label === "string") {
 		if (label.length > 0) spans.push({ t: ` ${label}` });
 	} else if (label && label.length > 0) {

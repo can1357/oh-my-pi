@@ -1202,18 +1202,4 @@ describe("magic-keyword shimmer honours tui.motion", () => {
 		expect(repaint).toHaveBeenCalledTimes(0); // no sweep frames
 		editor.setShimmerRepaintHandler(undefined);
 	});
-
-	it("stops a running sweep the instant motion effects are switched off", () => {
-		vi.useFakeTimers();
-		setMotionEffects(true);
-		const editor = litKeyword();
-		const repaint = vi.fn();
-		editor.setShimmerRepaintHandler(repaint);
-		decorate(editor); // arms a frame
-		setMotionEffects(false); // live switch: cancels the pending frame, repaints once to settle
-		repaint.mockClear();
-		vi.advanceTimersByTime(CustomEditor.SHIMMER_FRAME_MS * 4);
-		expect(repaint).toHaveBeenCalledTimes(0);
-		editor.setShimmerRepaintHandler(undefined);
-	});
 });

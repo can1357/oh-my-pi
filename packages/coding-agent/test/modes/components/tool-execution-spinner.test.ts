@@ -49,7 +49,7 @@ describe("ToolExecutionComponent live preview spinners", () => {
 	});
 
 	it("animates the eval pending cell while the call is live", () => {
-		vi.useFakeTimers();
+		vi.useFakeTimers({ now: 0 });
 		const requestRender = vi.fn();
 		const requestComponentRender = vi.fn();
 		const component = new ToolExecutionComponent(
@@ -77,7 +77,7 @@ describe("ToolExecutionComponent live preview spinners", () => {
 	});
 
 	it("does not tick headerless bash pending previews", () => {
-		vi.useFakeTimers();
+		vi.useFakeTimers({ now: 0 });
 		const requestRender = vi.fn();
 		const requestComponentRender = vi.fn();
 		const component = new ToolExecutionComponent(
@@ -101,7 +101,7 @@ describe("ToolExecutionComponent live preview spinners", () => {
 	});
 
 	it("repaints a running bash call once a second so its elapsed time advances", () => {
-		vi.useFakeTimers();
+		vi.useFakeTimers({ now: 0 });
 		const requestRender = vi.fn();
 		const requestComponentRender = vi.fn();
 		const component = new ToolExecutionComponent(
@@ -129,7 +129,7 @@ describe("ToolExecutionComponent live preview spinners", () => {
 	});
 
 	it("does not tick detached async bash result snapshots", () => {
-		vi.useFakeTimers();
+		vi.useFakeTimers({ now: 0 });
 		const requestRender = vi.fn();
 		const requestComponentRender = vi.fn();
 		const component = new ToolExecutionComponent(
@@ -163,7 +163,7 @@ describe("ToolExecutionComponent live preview spinners", () => {
 	});
 
 	it("does not tick github pending previews whose Text is materialized per rebuild", () => {
-		vi.useFakeTimers();
+		vi.useFakeTimers({ now: 0 });
 		const requestRender = vi.fn();
 		const requestComponentRender = vi.fn();
 		const component = new ToolExecutionComponent(
@@ -187,7 +187,7 @@ describe("ToolExecutionComponent live preview spinners", () => {
 	});
 
 	it("does not tick custom tools whose pending label is a static tool-name Text", () => {
-		vi.useFakeTimers();
+		vi.useFakeTimers({ now: 0 });
 		const requestRender = vi.fn();
 		const requestComponentRender = vi.fn();
 		// A renderResult-only custom tool renders the static tool-name label
@@ -217,7 +217,7 @@ describe("ToolExecutionComponent live preview spinners", () => {
 	// subagents — must share ONE spinner timer, not one per block, or active-work
 	// CPU scales with block count.
 	it("drives every concurrent live block from a single shared spinner timer", () => {
-		vi.useFakeTimers();
+		vi.useFakeTimers({ now: 0 });
 		const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
 		const renders = [vi.fn(), vi.fn(), vi.fn()];
 		const components = renders.map(
@@ -248,8 +248,9 @@ describe("ToolExecutionComponent live preview spinners", () => {
 		}
 	});
 
-	it("follows the shared spinner clock live: a slower interval re-arms the ticker, a static one stops it", () => {
-		vi.useFakeTimers();
+	it("follows the shared spinner clock: a slower interval spaces the ticks, static stops them until animation resumes", () => {
+		vi.useFakeTimers({ now: 0 });
+		setSpinnerInterval(1000);
 		const requestComponentRender = vi.fn();
 		const component = new ToolExecutionComponent(
 			"eval",
@@ -260,22 +261,21 @@ describe("ToolExecutionComponent live preview spinners", () => {
 			process.cwd(),
 		);
 		try {
-			// Slowed to 1 s: the default-period ticks no longer fire, the new period does.
-			setSpinnerInterval(1000);
 			requestComponentRender.mockClear();
-			vi.advanceTimersByTime(DEFAULT_SPINNER_INTERVAL_MS * 5);
+			vi.advanceTimersByTime(999);
 			expect(requestComponentRender).toHaveBeenCalledTimes(0);
-			vi.advanceTimersByTime(1000 - DEFAULT_SPINNER_INTERVAL_MS * 5);
+			vi.advanceTimersByTime(1);
 			expect(requestComponentRender).toHaveBeenCalledTimes(1);
 
-			// Static: one repaint pins frame 0, then no timer ticks at all.
+			// Static: the armed tick paints frame 0, then no timer runs.
 			setSpinnerInterval(SPINNER_INTERVAL_STATIC);
+			vi.advanceTimersByTime(1000);
 			expect(requestComponentRender).toHaveBeenCalledTimes(2);
 			vi.advanceTimersByTime(10_000);
 			expect(requestComponentRender).toHaveBeenCalledTimes(2);
 			expect(sharedSpinnerTickerArmed()).toBe(false);
 
-			// Back to the default: the shared ticker is re-armed at the default period.
+			// Animated again: the ticker restarts at the new period.
 			setSpinnerInterval(DEFAULT_SPINNER_INTERVAL_MS);
 			vi.advanceTimersByTime(DEFAULT_SPINNER_INTERVAL_MS);
 			expect(requestComponentRender).toHaveBeenCalledTimes(3);
@@ -422,7 +422,7 @@ describe("ToolExecutionComponent live preview spinners", () => {
 		const writeSpy = spyOn(Bun, "write").mockResolvedValue(0);
 		const renameSpy = spyOn(fsp, "rename").mockResolvedValue(undefined);
 		try {
-			vi.useFakeTimers();
+			vi.useFakeTimers({ now: 0 });
 
 			const chatContainer = new TranscriptContainer();
 			const liveBlock = new ToolExecutionComponent(
@@ -590,7 +590,7 @@ describe("ToolExecutionComponent live preview spinners", () => {
 		const writeSpy = spyOn(Bun, "write").mockResolvedValue(0);
 		const renameSpy = spyOn(fsp, "rename").mockResolvedValue(undefined);
 		try {
-			vi.useFakeTimers();
+			vi.useFakeTimers({ now: 0 });
 
 			const chatContainer = new TranscriptContainer();
 			await Settings.init({ inMemory: true });
@@ -793,7 +793,7 @@ describe("ToolExecutionComponent live preview spinners", () => {
 		const writeSpy = spyOn(Bun, "write").mockResolvedValue(0);
 		const renameSpy = spyOn(fsp, "rename").mockResolvedValue(undefined);
 		try {
-			vi.useFakeTimers();
+			vi.useFakeTimers({ now: 0 });
 
 			const chatContainer = new TranscriptContainer();
 			const pendingBlock = new ToolExecutionComponent(

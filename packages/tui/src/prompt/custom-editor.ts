@@ -42,7 +42,7 @@ import { type MacOSSpellingFeatures, MacOSSpellingProvider } from "./macos-spell
 import { TypingWordTracker } from "./typing-word";
 import { hasMagicKeyword, highlightMagicKeywords, magicKeywordRanges } from "./magic-keywords";
 import type { TspEditorDecoration, TspText } from "@oh-my-pi/pi-wire";
-import { motionEffectsEnabled, onMotionEffectsChange } from "../motion-effects";
+import { motionEffectsEnabled } from "../motion-effects";
 import { isNativeRendering } from "../native/state";
 import { isQueuedMessageList, parseQueueShorthand, QUEUE_LIST_MARKER_RE } from "./queue-input";
 import { type WordCompletionMethod, WordCompletionProvider } from "./word-completion";
@@ -845,8 +845,6 @@ export class CustomEditor extends Editor {
 	 *  timer to request the next animation frame. Undefined when nobody is
 	 *  listening (tests, headless callers); the timer chain still self-cleans. */
 	#requestShimmerRepaint: (() => void) | undefined;
-	/** Live-switch hook: a `tui.motion` change stops a running keyword-shimmer timer at once. */
-	#unsubscribeMotionEffects: (() => void) | undefined;
 	/** Text revision the per-revision decoration inputs below were computed for. */
 	#decorationRevision = -1;
 	#decorationText = "";
@@ -876,8 +874,7 @@ export class CustomEditor extends Editor {
 		const caret = this.getCursor();
 		this.#typing.update(this.textRevision, this.#decorationLines, caret.line, caret.col, this.focused);
 		const typing = this.#typing.word;
-		// Honour `tui.motion`: with decorative motion off the keyword stays highlighted (static gradient,
-		// phase 0) but does not sweep — parity with the native path, where `quietMotion` drops the decor fx.
+		// With decorative motion off the keyword keeps its static highlight; the pending frame chain ends here.
 		const animated = this.focused && this.#shimmerEnabled() && motionEffectsEnabled() && hasMagicKeyword(editorText);
 		const phase = animated ? (Date.now() % CustomEditor.SHIMMER_PERIOD_MS) / CustomEditor.SHIMMER_PERIOD_MS : 0;
 		if (animated) this.#scheduleShimmerFrame();
@@ -1049,27 +1046,11 @@ export class CustomEditor extends Editor {
 	 *  editor). Passing `undefined` clears any pending frame. */
 	setShimmerRepaintHandler(handler: (() => void) | undefined): void {
 		this.#requestShimmerRepaint = handler;
-		if (handler) {
-			this.#unsubscribeMotionEffects ??= onMotionEffectsChange(this.#onMotionEffectsChange);
-			return;
-		}
-		this.#unsubscribeMotionEffects?.();
-		this.#unsubscribeMotionEffects = undefined;
-		if (this.#shimmerTimer) {
+		if (!handler && this.#shimmerTimer) {
 			clearTimeout(this.#shimmerTimer);
 			this.#shimmerTimer = undefined;
 		}
 	}
-
-	/** A live `tui.motion` switch: drop a pending sweep frame and repaint, so the keyword settles to
-	 *  its static gradient at once (and re-arms from the next render when motion returns). */
-	#onMotionEffectsChange = (): void => {
-		if (this.#shimmerTimer) {
-			clearTimeout(this.#shimmerTimer);
-			this.#shimmerTimer = undefined;
-		}
-		this.#requestShimmerRepaint?.();
-	};
 
 	/** Schedule one shimmer frame if none is already pending. The next render
 	 *  decides whether to schedule another, so the chain stops by itself when

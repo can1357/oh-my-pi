@@ -116,19 +116,15 @@ export const launchHelp = {
 		"no-title": Flags.boolean({ description: "Disable title auto-generation" }),
 		"spinner-interval": Flags.string({
 			description:
-				"Milliseconds between spinner frames (working row, tool cards, status line, terminal title; default 80; 0 = static). Overrides tui.spinnerInterval for this run; PI_SPINNER_INTERVAL takes precedence",
+				"Milliseconds between spinner frames (default 80; 0 = static). Overrides tui.spinnerInterval and PI_SPINNER_INTERVAL for this run",
 		}),
 		"max-fps": Flags.string({
 			description:
-				"Ceiling on how often the TUI repaints, in frames per second (default 30; 1-120). Keystroke echo keeps the full rate. Overrides tui.maxFps for this run; PI_MAX_FPS takes precedence",
+				"Repaint ceiling in frames per second (default 30; 1-120); keystroke echo keeps 30 fps. Overrides tui.maxFps and PI_MAX_FPS for this run",
 		}),
 		motion: Flags.string({
 			description:
-				"One switch over every animation: full (default), reduced (spinners 250 ms, no shimmer or blink), or none (static). Streaming text keeps its frame rate; cap it with --max-fps. Explicit spinner-interval/max-fps/shimmer settings still win. Overrides tui.motion for this run; PI_MOTION takes precedence",
-		}),
-		shimmer: Flags.string({
-			description:
-				"Working-row text animation: classic (default), kitt, or disabled. Overrides display.shimmer for this run; PI_SHIMMER takes precedence",
+				"Animation preset: full (default), reduced (250 ms spinners, no shimmer or blink), or none (static). Overrides tui.motion and PI_MOTION for this run",
 		}),
 		"no-ui": Flags.boolean({
 			description: "With --mode rpc or rpc-ui: run extensions headless (rpc-ui tool UI remains enabled)",
