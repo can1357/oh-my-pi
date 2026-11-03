@@ -11,7 +11,7 @@ import { navigateMainFrame } from "@oh-my-pi/pi-coding-agent/tools/browser/navig
 import { PrintHold } from "@oh-my-pi/pi-coding-agent/tools/browser/print-hold";
 import { releaseAllTabs } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
-import puppeteer, { type Dialog, type Page, type WaitForOptions } from "puppeteer-core";
+import puppeteer, { type CDPSession, type Dialog, type Page, type WaitForOptions } from "puppeteer-core";
 import { chromiumAvailable } from "./chromium-probe";
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
@@ -1174,6 +1174,82 @@ return await tab.evaluate(() => {
 			}
 		});
 	}, 30_000);
+
+	test.each([
+		// Another script on the session keeps Chrome's numbering past the lost one: removing it answers `Script not found`.
+		["the next one gets a new number", true],
+		// Nothing else on the session: Chrome gives the next script the lost one's number.
+		["the next one gets its number", false],
+	])(
+		"keeps holding print() in a call when Chrome has lost the hold's script and %s",
+		async (_case, another) => {
+			await withUserBrowser(async cdpUrl => {
+				const user = await puppeteer.connect({ browserURL: cdpUrl, defaultViewport: null });
+				try {
+					const page = await user.newPage();
+					// The hold's own session, and the scripts Chrome registered on it.
+					const scripts: string[] = [];
+					let holdSession: CDPSession | undefined;
+					const watched = new Proxy(page, {
+						get: (target, key) =>
+							key === "createCDPSession"
+								? async () => {
+										const session = await target.createCDPSession();
+										holdSession = session;
+										const send = session.send.bind(session);
+										return new Proxy(session, {
+											get: (object, name) => {
+												if (name !== "send") {
+													const value: unknown = Reflect.get(object, name);
+													return typeof value === "function" ? value.bind(object) : value;
+												}
+												return async (...args: Parameters<typeof send>) => {
+													const result = await send(...args);
+													if (
+														args[0] === "Page.addScriptToEvaluateOnNewDocument" &&
+														typeof result === "object" &&
+														"identifier" in result
+													) {
+														scripts.push(String(result.identifier));
+													}
+													return result;
+												};
+											},
+										});
+									}
+								: (() => {
+										const value: unknown = Reflect.get(target, key);
+										return typeof value === "function" ? value.bind(target) : value;
+									})(),
+					});
+					const hold = await PrintHold.install(watched, "calls");
+					try {
+						// Chrome loses the hold's current script, as it had in a relay tab between two calls of a run.
+						const current = scripts.at(-1);
+						if (!holdSession || !current) throw new Error("Expected the hold's script");
+						if (another) await holdSession.send("Page.addScriptToEvaluateOnNewDocument", { source: ";" });
+						await holdSession.send("Page.removeScriptToEvaluateOnNewDocument", { identifier: current });
+						// This used to fail the call with `Script not found`, or remove the script it had just added.
+						await hold.beginCall(30_000);
+						// Past the 1.5 s the first script holds a new document for, only the call's deadline holds.
+						await page.goto(`${baseUrl}/print`);
+						await advancePrintClock(page, 1_500);
+						expect(
+							await page
+								.mainFrame()
+								.mainRealm()
+								.evaluate('document.querySelector("#print").click(); globalThis.log'),
+						).toEqual(["afterprint", "print returned"]);
+					} finally {
+						await hold.dispose();
+					}
+				} finally {
+					await user.disconnect();
+				}
+			});
+		},
+		30_000,
+	);
 
 	test("holds print() in the user's browser while omp sets up the tab, until setup ends", async () => {
 		await withUserBrowser(async cdpUrl => {
