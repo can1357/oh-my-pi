@@ -18,18 +18,34 @@
  *
  * Step 1 happens once per top-level call; steps 2 and 3 are per-spawn.
  */
-import * as fs from "node:fs/promises";
+import * as fs from "./isolation-fs";
 import * as path from "node:path";
+import { scheduler } from "node:timers/promises";
 import type * as natives from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { prompt } from "@oh-my-pi/pi-utils";
+import { logger, prompt } from "@oh-my-pi/pi-utils";
 import isolationErrorTemplate from "../prompts/tools/isolation-error.md" with { type: "text" };
 import isolationSummaryTemplate from "../prompts/tools/isolation-summary.md" with { type: "text" };
-import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { AgentRegistry } from "../registry/agent-registry";
 import type { ToolSession } from "../tools";
 import { generateCommitMessage } from "../utils/commit-message-generator";
+/**
+ * How long a finished, successful isolated run waits for deferred owner jobs
+ * before capturing anyway. Long enough for a flush to land, short enough that
+ * a job which never settles cannot hold the result.
+ */
+const DEFERRED_CLEANUP_MAX_WAIT_MS = 30_000;
+
 import { trackLateCleanup } from "../utils/late-cleanup";
+import { armTeardown, hasLiveIsolationLease, hasUnfinishedWriter } from "./isolation-lease";
+import {
+	readIsolationClaim,
+	readRetainedMountBackend,
+	requireSandboxLockHeld,
+	resolveSandboxIdentity,
+	withSandboxLock,
+} from "./isolation-ownership";
+import { asReleaseHold, createReleaseHold } from "../utils/release-hold";
 import type { ExecutorOptions } from "./executor";
 import { runSubprocess } from "./executor";
 import { needsNativeTeardown, writeRetainedBackend } from "./isolation-ownership";
@@ -150,7 +166,7 @@ export async function prepareIsolationContext(cwd: string): Promise<IsolationCon
 function deltaFingerprint(rootPatch: string, nestedPatches: readonly NestedRepoPatch[]): bigint | number {
 	let key = rootPatch;
 	for (const { relativePath, patch } of nestedPatches) key += `\0${relativePath}\0${patch}`;
-	return Bun.hash(key);
+	return fs.hash(key);
 }
 
 /** Build a commit-message callback for branch/nested commits; `undefined` ⇒ fall back to generic message. */
@@ -215,7 +231,7 @@ export interface IsolatedRunOptions {
  * and return the paths. Throws on the first write failure: the caller must
  * then keep the isolation workspace alive, because it is the only other copy.
  * Every attempted destination is removed best-effort on failure — including
- * the in-progress file, which `Bun.write` may have created or truncated
+ * the in-progress file, which the write may have created or truncated
  * before rejecting — so a half-written set cannot be mistaken for the
  * complete capture by the persisted-agent scanner.
  */
@@ -235,7 +251,7 @@ export async function persistNestedPatches(
 			// leave a truncated file behind, and `force: true` makes removing
 			// a never-created path a no-op.
 			saved.push(destination);
-			await Bun.write(destination, nestedPatch.patch);
+			await fs.writeFileDeep(destination, nestedPatch.patch);
 		}
 	} catch (error) {
 		await Promise.all(saved.map(file => fs.rm(file, { force: true }).catch(() => undefined)));
@@ -270,7 +286,7 @@ async function writeIsolationPatch(
 ): Promise<IsolationPatchCapture> {
 	const delta = await captureDeltaPatch(isolationDir, baseline);
 	const patchPath = path.join(artifactsDir, `${agentId}.patch`);
-	await Bun.write(patchPath, delta.rootPatch);
+	await fs.writeFileDeep(patchPath, delta.rootPatch);
 	const nestedPatchPaths = await persistNestedPatches(artifactsDir, agentId, delta.nestedPatches);
 	return {
 		artifacts: {
@@ -295,6 +311,9 @@ async function writeIsolationPatch(
  * and a later write would leave a mounted workspace with a dead owner and
  * no metadata, and cleanup would traverse the live mount.
  */
+/** Mount directory name inside a sandbox base dir. */
+const TASK_ISOLATION_MOUNT_NAME = "m";
+
 export interface RetainedWorkspace {
 	/** Workspace path to report (unique sibling on success, original dir when the move fails). */
 	dir: string;
@@ -305,15 +324,156 @@ export interface RetainedWorkspace {
 	 * manual unmount instead of advertising plain `worktree clear`.
 	 */
 	sidecarOk: boolean;
+	/**
+	 * Whether there is a workspace to recover from: `here` names {@link dir},
+	 * `gone` means a teardown won the race and removed it, and `unknown`
+	 * means this process could not find out — which is not the same as gone,
+	 * and must not be reported as a path.
+	 */
+	location: "here" | "gone" | "unknown";
 }
 
 export async function retainIsolationWorkspace(
 	isolationDir: string,
 	backend?: natives.IsoBackendKind,
+	generation?: string,
 ): Promise<RetainedWorkspace> {
-	const baseDir = path.dirname(isolationDir);
-	const retainedBase = `${baseDir}.retained-${Date.now().toString(36)}-${Math.floor(Math.random() * 2 ** 32).toString(16)}`;
+	const baseDir = await resolveSandboxIdentity(path.dirname(isolationDir));
+	// Check and act under one hold. A session admitted *after* the check and
+	// before the rename got `ENOENT` at its own cwd: a check-then-act window
+	// is not a decision, and a lease taken in it is as real as one taken
+	// before. The teardown path already holds this lock, and re-taking it
+	// there would deadlock against itself, so it says so.
+	return await withSandboxLock(baseDir, "retain", async () => {
+		// The directory may already be gone: a concurrent retention, or a
+		// teardown that won the race, has moved it. Reporting a path that does
+		// not exist sends the user to an empty name, so the sibling that does
+		// exist is reported instead.
+		// Only `ENOENT` says the workspace has moved. A stat that fails for any
+		// other reason is a workspace this caller could not look at, and
+		// retention goes ahead on the real path rather than hunting siblings.
+		// The path is not the claim. A successor materialised here is a
+		// different workspace with a different owner, and moving it took a
+		// stranger's work while this run's own retained copy sat intact beside
+		// it. Checked wherever the path is claimed, not only where siblings
+		// are searched.
+		if (generation !== undefined) {
+			const claim = await readIsolationClaim(baseDir);
+			if (claim.kind === "unknown") {
+				return { dir: isolationDir, sidecarOk: false, location: "unknown" };
+			}
+			// Three ways this path is not this run's workspace, and `retiring`
+			// is the one that was falling through to the rename. A teardown in
+			// progress owns that path: moving its marker left its backend stop
+			// running on a name a successor then took, and the successor was
+			// deleted by that continuation. "Not claimed by me" is the
+			// condition, not "claimed by somebody else".
+			if (claim.kind !== "claimed" || claim.generation !== generation) {
+				const sibling = await findRetainedSibling(baseDir, generation);
+				if (sibling.kind === "unknown") return { dir: isolationDir, sidecarOk: false, location: "unknown" };
+				if (sibling.kind === "absent") return { dir: isolationDir, sidecarOk: false, location: "gone" };
+				return {
+					dir: sibling.value,
+					sidecarOk: await hasRetainedSidecar(path.dirname(sibling.value), backend),
+					location: "here",
+				};
+			}
+		}
+		const existing = await fs.statLookup(isolationDir);
+		if (existing.kind === "absent") {
+			// Someone else moved it. Report a path that exists and a sidecar
+			// state that is read rather than assumed: a decoy `.retained-*`
+			// without a mount, or an older sibling, sent callers to the wrong
+			// workspace and claimed metadata nothing had written.
+			const retained = await findRetainedSibling(baseDir, generation);
+			// Three answers, three messages. "Could not look" is neither a
+			// workspace to recover from nor a workspace that is gone, and
+			// naming the original path for it sent the user to an empty name.
+			if (retained.kind === "unknown") {
+				return { dir: isolationDir, sidecarOk: false, location: "unknown" };
+			}
+			if (retained.kind === "absent") return { dir: isolationDir, sidecarOk: false, location: "gone" };
+			return {
+				dir: retained.value,
+				sidecarOk: await hasRetainedSidecar(path.dirname(retained.value), backend),
+				location: "here",
+			};
+		}
+		return await retainUnderLock(isolationDir, baseDir, backend);
+	});
+}
+
+/** The newest `.retained-*` copy of this sandbox that actually holds a workspace. */
+async function findRetainedSibling(baseDir: string, generation: string | undefined): Promise<fs.Lookup<string>> {
+	const parent = path.dirname(baseDir);
+	const prefix = `${path.basename(baseDir)}.retained-`;
+	const listing = await fs.readdirLookup(parent);
+	if (listing.kind !== "found") return listing.kind === "absent" ? fs.ABSENT : listing;
+	// Ordered by the retention stamp in the name, not by modification time:
+	// a file touched inside an older retention made that unrelated workspace
+	// look like the newest one, and the user was sent to a stranger's run.
+	let latest: { dir: string; stamp: number } | undefined;
+	for (const entry of listing.value) {
+		if (!entry.startsWith(prefix)) continue;
+		const stamp = Number.parseInt(entry.slice(prefix.length).split("-")[0] ?? "", 36);
+		if (!Number.isFinite(stamp)) continue;
+		const candidate = path.join(parent, entry, TASK_ISOLATION_MOUNT_NAME);
+		// A retained copy with no mount directory is not this workspace. A
+		// candidate that cannot be looked at is not evidence either way, so
+		// the whole answer becomes "I do not know" rather than the next best.
+		const found = await fs.statLookup(candidate);
+		if (found.kind === "unknown") return found;
+		if (found.kind === "absent" || !found.value.isDirectory()) continue;
+		// The stamp orders retentions of *this* path; it does not say whose run
+		// they hold. A later retention of the same slot by a successor was
+		// reported to the owner of the earlier one, whose own copy sat intact
+		// beside it. The marker inside the retained copy answers that.
+		if (generation !== undefined) {
+			const claim = await readIsolationClaim(path.join(parent, entry));
+			if (claim.kind === "unknown") return fs.UNKNOWN(claim.reason);
+			if (claim.kind !== "claimed" || claim.generation !== generation) continue;
+		}
+		if (latest === undefined || stamp > latest.stamp) latest = { dir: candidate, stamp };
+	}
+	return latest === undefined ? fs.ABSENT : fs.FOUND(latest.dir);
+}
+
+/**
+ * Whether the cleanup metadata `clear` would need is really on disk for a
+ * retained workspace — read, not inferred from the fact that a sibling exists:
+ * a second retention reported it present while the first had failed to write it.
+ */
+async function hasRetainedSidecar(retainedBase: string, backend: natives.IsoBackendKind | undefined): Promise<boolean> {
+	if (backend === undefined || !needsNativeTeardown(backend)) return true;
+	return (await readRetainedMountBackend(retainedBase).catch(() => undefined)) !== undefined;
+}
+
+async function retainUnderLock(
+	isolationDir: string,
+	baseDir: string,
+	backend: natives.IsoBackendKind | undefined,
+): Promise<RetainedWorkspace> {
 	const needsSidecar = backend !== undefined && needsNativeTeardown(backend);
+	// Nothing renames a workspace somebody is in — the same rule deletion
+	// already follows. A recorded writer keeps its cwd, and so does a live
+	// lease that is not ours: moving the directory gave a second session
+	// `ENOENT` at its own cwd, which is the loss retention exists to prevent.
+	if ((await hasUnfinishedWriter(baseDir)) || (await hasLiveIsolationLease(baseDir))) {
+		logger.warn("isolation workspace retained in place: another session is still working in this path", {
+			isolationDir,
+		});
+		// The sidecar still has to be here, or `clear` skips the native stop
+		// for a mount backend and traverses a live mount later.
+		let inPlaceSidecarOk = !needsSidecar;
+		if (needsSidecar && backend !== undefined) {
+			inPlaceSidecarOk = await writeRetainedBackend(baseDir, backend).then(
+				() => true,
+				() => false,
+			);
+		}
+		return { dir: isolationDir, sidecarOk: inPlaceSidecarOk, location: "here" };
+	}
+	const retainedBase = `${baseDir}.retained-${Date.now().toString(36)}-${Math.floor(Math.random() * 2 ** 32).toString(16)}`;
 	let sidecarOk = !needsSidecar;
 	if (needsSidecar && backend !== undefined) {
 		try {
@@ -327,14 +487,17 @@ export async function retainIsolationWorkspace(
 	// retry briefly before conceding the deterministic slot.
 	for (let attempt = 0; attempt < 3; attempt++) {
 		try {
+			// At the act, not at the decision: everything above may have taken
+			// long enough for this call's hold to have ended.
+			requireSandboxLockHeld(baseDir, "move");
 			await fs.rename(baseDir, retainedBase);
-			return { dir: path.join(retainedBase, path.basename(isolationDir)), sidecarOk };
+			return { dir: path.join(retainedBase, path.basename(isolationDir)), sidecarOk, location: "here" };
 		} catch {
-			if (attempt === 2) return { dir: isolationDir, sidecarOk };
-			await Bun.sleep(25);
+			if (attempt === 2) return { dir: isolationDir, sidecarOk, location: "here" };
+			await fs.sleep(25);
 		}
 	}
-	return { dir: isolationDir, sidecarOk };
+	return { dir: isolationDir, sidecarOk, location: "here" };
 }
 /** Context for `isolation-error.md`: the `result.error` text for a run whose changes could not be captured or landed. */
 interface IsolationErrorContext {
@@ -350,6 +513,10 @@ interface IsolationErrorContext {
 	 * unmount instead of advertising plain `worktree clear`.
 	 */
 	sidecarMissing?: boolean;
+	/** Set when the retained workspace is not on disk at all, so no path can be named. */
+	retainedGone?: boolean;
+	/** Set when this process could not find out where the workspace went. */
+	retainedUnknown?: boolean;
 }
 
 function renderIsolationError(context: IsolationErrorContext): string {
@@ -390,18 +557,114 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 	let baseReleasePromise: Promise<void> | undefined;
 	let cleanupPromise: Promise<void> | undefined;
 	let releasePromise: Promise<void> | undefined;
+	/** Artifacts {@link releaseIsolation} captured, when it ran before this function's own post-run capture. */
+	let releasedCapture: Partial<SingleResult> | undefined;
 	/** The run's IRC wake hold, released only once the run-end capture is done. */
 	let releaseIrcWakes: (() => void) | undefined;
 	const releaseBase = (): Promise<void> => {
 		baseReleasePromise ??= opts.baseOptions.onRelease?.() ?? Promise.resolve();
 		return baseReleasePromise;
 	};
+	/**
+	 * Release what the caller held and tear the workspace down, handing the
+	 * teardown this run's capture so it runs under the lock that authorises the
+	 * removal. Memoised, because the caller's release must run once — but a
+	 * teardown deferred to a late departure re-enters `cleanupIsolation`
+	 * directly, since a memoised promise that has already resolved would report
+	 * a removal that never happened.
+	 */
 	const cleanupHandle = (): Promise<void> => {
 		cleanupPromise ??= (async () => {
 			await releaseBase();
-			if (handle && !retainWorkspace) await cleanupIsolation(handle);
+			if (handle && !retainWorkspace) {
+				await cleanupIsolation(handle, {
+					capture: async () => {
+						try {
+							await capture();
+						} catch (error) {
+							// Kept for the caller's result: the teardown keeps
+							// the workspace on this failure, and a kept
+							// workspace nobody is told about is a lost patch.
+							finalCaptureError = error;
+							throw error;
+						}
+					},
+				});
+			}
 		})();
 		return cleanupPromise;
+	};
+	/**
+	 * Write this run's patch, and its branch, from the sandbox as it stands.
+	 *
+	 * Raises on failure, always, and its two callers answer that differently on
+	 * purpose. The capture the teardown runs under the sandbox lock *authorises
+	 * a deletion*, so a failure there must stop it: an earlier successful
+	 * capture used to make a later failure a warning, and the caller reading
+	 * that as "captured" deleted the source of a half-written patch. The
+	 * capture at release authorises nothing — it only fills in the parent's
+	 * result — so a failure there is logged and the release goes on, because
+	 * throwing out of it abandons the caller's hold and replaces a child's real
+	 * output with a blank failure.
+	 */
+	const capture = async (): Promise<void> => {
+		if (!handle || !taskBaseline || retainWorkspace) {
+			return;
+		}
+		const sandbox = handle;
+		const baselineAtRelease = taskBaseline;
+		let capture: IsolationPatchCapture;
+		try {
+			capture = await writeIsolationPatch(sandbox.mergedDir, baselineAtRelease, opts.artifactsDir, opts.agentId);
+		} catch (captureErr) {
+			retainWorkspace = true;
+			const retained = await retainIsolationWorkspace(sandbox.mergedDir, sandbox.backend, sandbox.generation);
+			throw new Error(
+				renderIsolationError({
+					kind: "patch-capture-failed",
+					message: captureErr instanceof Error ? captureErr.message : String(captureErr),
+					retainedDir: retained.dir,
+					sidecarMissing: !retained.sidecarOk,
+					retainedGone: retained.location === "gone",
+					retainedUnknown: retained.location === "unknown",
+				}),
+			);
+		}
+		const patchResult = capture.artifacts;
+		// Kept for the post-run path: a release that ran inside the child's
+		// own teardown — a refused adoption ends the child there — has
+		// already captured and removed the workspace, so the result the
+		// parent reads must carry that capture rather than a second,
+		// impossible one.
+		releasedCapture = { ...patchResult };
+		AgentRegistry.global().setHistory(opts.agentId, {
+			patchPath: patchResult.patchPath,
+			nestedPatchPaths: patchResult.nestedPatchPaths,
+		});
+		// Nothing changed since the run-end capture the caller already
+		// merged or applied: a branch now would only duplicate that work.
+		if (capture.fingerprint === handedOff) return;
+		const commitResult = await commitToBranch(
+			sandbox.mergedDir,
+			baselineAtRelease,
+			opts.agentId,
+			opts.description,
+			undefined,
+		);
+		// Branch mode's result is the branch, not the patch: a caller handed
+		// only the patch path reports "No changes to apply" and drops work
+		// that is sitting on a branch this release just made.
+		releasedCapture = {
+			...patchResult,
+			...(commitResult?.branchName ? { branchName: commitResult.branchName } : {}),
+			...(commitResult?.baseSha ? { branchBaseSha: commitResult.baseSha } : {}),
+			...(commitResult?.nestedPatches ? { nestedPatches: commitResult.nestedPatches } : {}),
+		};
+		AgentRegistry.global().setHistory(opts.agentId, {
+			patchPath: patchResult.patchPath,
+			branchName: commitResult?.branchName,
+			nestedPatchPaths: patchResult.nestedPatchPaths,
+		});
 	};
 	const releaseIsolation = (): Promise<void> => {
 		releasePromise ??= (async () => {
@@ -409,54 +672,74 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 				await cleanupHandle();
 				return;
 			}
-			try {
-				let capture: IsolationPatchCapture;
-				try {
-					capture = await writeIsolationPatch(handle.mergedDir, taskBaseline, opts.artifactsDir, opts.agentId);
-				} catch (captureErr) {
-					retainWorkspace = true;
-					const retained = await retainIsolationWorkspace(handle.mergedDir, handle.backend);
-					throw new Error(
-						renderIsolationError({
-							kind: "patch-capture-failed",
-							message: captureErr instanceof Error ? captureErr.message : String(captureErr),
-							retainedDir: retained.dir,
-							sidecarMissing: !retained.sidecarOk,
-						}),
-					);
-				}
-				const patchResult = capture.artifacts;
-				AgentRegistry.global().setHistory(opts.agentId, {
-					patchPath: patchResult.patchPath,
-					nestedPatchPaths: patchResult.nestedPatchPaths,
+			// Capture now, whatever else happens: this release is what the
+			// parent's result is built from, and a capture postponed to an
+			// unknown later moment leaves that result with no patch and no
+			// branch for work the child really did.
+			//
+			// A failure here is reported and does not stop the release. This
+			// capture is not what authorises a deletion — the one under the
+			// sandbox lock below is, and that one raises — so throwing out of
+			// here only abandons the caller's hold and replaces a child's real
+			// output with a blank failure result.
+			await capture().catch(error => {
+				logger.warn("capture at release failed; the locked capture before removal decides", {
+					agentId: opts.agentId,
+					error: error instanceof Error ? error.message : String(error),
 				});
-				// Nothing changed since the run-end capture the caller already
-				// merged or applied: a branch now would only duplicate that work.
-				if (capture.fingerprint === handedOff) return;
-				const commitResult = await commitToBranch(
-					handle.mergedDir,
-					taskBaseline,
-					opts.agentId,
-					opts.description,
-					undefined,
-				);
-				AgentRegistry.global().setHistory(opts.agentId, {
-					patchPath: patchResult.patchPath,
-					branchName: commitResult?.branchName,
-					nestedPatchPaths: patchResult.nestedPatchPaths,
-				});
-			} finally {
-				await cleanupHandle();
-			}
+				// Kept, so the caller's result can say it. A release whose
+				// capture failed used to return exit 0 with no error, no patch
+				// and no path: the only copy of the work survived in a
+				// directory nobody was told about.
+				releaseCaptureError = error;
+			});
+			const sandbox = handle;
+			// Someone is still working in the sandbox — a nested child that
+			// inherited this cwd, a session another process opened in it. The
+			// removal waits for them, and so does a second capture, or
+			// everything they write after this moment is captured by nobody.
+			// Registered before anything is decided and *not* withdrawn here:
+			// this path holds no lock, so a user admitted between a look and
+			// the cleanup below would otherwise depart with nothing registered
+			// to capture its work. The registration is the same teardown the
+			// cleanup runs — capture under the sandbox lock, then removal — so
+			// a late departure gets the same guarantee, and it re-enters
+			// `cleanupIsolation` rather than the memoised handle cleanup.
+			armTeardown(handle.mergedDir, async () => await cleanupIsolation(sandbox, { capture }), {
+				generation: handle.generation,
+			});
+			await cleanupHandle();
 		})();
 		return releasePromise;
 	};
+	/** Why the capture at release failed, when it did; the caller's result must carry it. */
+	let releaseCaptureError: unknown;
+	/** Why the teardown's own capture — the last one — failed, when it did. */
+	let finalCaptureError: unknown;
+	let lifecycleOwnsRelease = false;
 	try {
 		handle = await ensureIsolation(opts.context.repoRoot, opts.agentId, opts.preferredBackend);
 		const isolationDir = handle.mergedDir;
 		const isolationBackend = handle.backend;
 		const baseline = await captureIsolationBaseline(isolationDir, opts.context.repoRoot);
 		taskBaseline = baseline;
+		/**
+		 * What this run hands the child, built only once there is a child to
+		 * hand it to: the base release for a one-shot run (it never touches the
+		 * worktree, and its `finalizeSubagentLifecycle` runs `onRelease` before
+		 * the post-run capture below, so the handle must survive to the
+		 * `finally`), full capture-and-cleanup for a kept-alive one. Claiming it
+		 * says the agent lifecycle owns the workspace and everything the caller
+		 * held behind it, which is what the `finally` asks instead of looking a
+		 * manager up by id — a manager mid-release, replaced, or rewritten by a
+		 * concurrent operation answers for neither.
+		 */
+		const childHold = createReleaseHold(opts.baseOptions.keepAlive === false ? releaseBase : releaseIsolation, () => {
+			lifecycleOwnsRelease = true;
+			// Whatever owns this owns the caller's hold behind it, since
+			// discharging this discharges that.
+			asReleaseHold(opts.baseOptions.onRelease)?.claim();
+		});
 		const result = await runSubprocess({
 			...opts.baseOptions,
 			worktree: isolationDir,
@@ -472,7 +755,7 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 			// post-run capture, so the handle must survive until the `finally`
 			// below cleans it up. Only kept-alive runs hand full capture+cleanup
 			// (`releaseIsolation`) to the agent lifecycle.
-			onRelease: opts.baseOptions.keepAlive === false ? releaseBase : releaseIsolation,
+			onRelease: childHold,
 			deferIrcWakeRelease: release => {
 				releaseIrcWakes = release;
 			},
@@ -482,7 +765,72 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 		// shutdown hooks may still write the worktree. Failed runs skip capture,
 		// so their cleanup remains asynchronous.
 		if (deferredCleanup && result.exitCode === 0) {
-			await deferredCleanup;
+			// Bounded. A deferred owner job that never settles would otherwise
+			// hold a finished, successful run for ever — the capture below is
+			// worth waiting for, but not without end.
+			const settled = await Promise.race([
+				deferredCleanup.then(() => true),
+				scheduler.wait(DEFERRED_CLEANUP_MAX_WAIT_MS).then(() => false),
+			]);
+			if (!settled) {
+				logger.warn("deferred owner jobs outran the capture wait; capturing the workspace as it stands", {
+					agentId: opts.agentId,
+					waitedMs: DEFERRED_CLEANUP_MAX_WAIT_MS,
+				});
+			}
+		}
+		/**
+		 * Run the teardown here, where this function can still speak, and fold
+		 * its capture failure into the result. The teardown's capture is the
+		 * last one and it keeps the workspace when it fails; left to the
+		 * `finally`, that failure reached a log while the caller got exit 0,
+		 * earlier artifacts, no error and no path to the only copy.
+		 */
+		const reportingFinalCapture = async (artifacts: SingleResult): Promise<SingleResult> => {
+			if (!releasePromise && !lifecycleOwnsRelease && !deferredCleanup && !retainWorkspace) {
+				await cleanupHandle();
+			}
+			if (finalCaptureError === undefined) return artifacts;
+			retainWorkspace = true;
+			const kept = await retainIsolationWorkspace(isolationDir, isolationBackend, handle?.generation);
+			return {
+				...artifacts,
+				error: renderIsolationError({
+					kind: "patch-capture-failed",
+					message: finalCaptureError instanceof Error ? finalCaptureError.message : String(finalCaptureError),
+					retainedDir: kept.dir,
+					sidecarMissing: !kept.sidecarOk,
+					retainedGone: kept.location === "gone",
+					retainedUnknown: kept.location === "unknown",
+				}),
+			};
+		};
+		if (releasePromise) {
+			// The child's own teardown already ran the release — a refused
+			// adoption ends the child inside `runSubprocess` — so the capture and
+			// the workspace removal have happened. Re-capturing from a directory
+			// that is gone would report a capture failure, and a retained
+			// workspace, for work that was in fact captured: hand back what the
+			// release wrote.
+			await releasePromise;
+			const released = await reportingFinalCapture(rememberAgentArtifacts({ ...result, ...releasedCapture }));
+			if (releaseCaptureError === undefined) return released;
+			// The workspace is kept by the locked capture that refused; name it,
+			// because it holds the only copy of what could not be captured.
+			const retained = await retainIsolationWorkspace(isolationDir, isolationBackend, handle?.generation);
+			retainWorkspace = true;
+			return {
+				...released,
+				error: renderIsolationError({
+					kind: "patch-capture-failed",
+					message:
+						releaseCaptureError instanceof Error ? releaseCaptureError.message : String(releaseCaptureError),
+					retainedDir: retained.dir,
+					sidecarMissing: !retained.sidecarOk,
+					retainedGone: retained.location === "gone",
+					retainedUnknown: retained.location === "unknown",
+				}),
+			};
 		}
 		if (opts.mergeMode === "branch" && result.exitCode === 0) {
 			let commitResult: CommitToBranchResult | null;
@@ -518,7 +866,7 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 					});
 				} catch (patchErr) {
 					retainWorkspace = true;
-					const retained = await retainIsolationWorkspace(isolationDir, isolationBackend);
+					const retained = await retainIsolationWorkspace(isolationDir, isolationBackend, handle?.generation);
 					return rememberAgentArtifacts({
 						...result,
 						error: renderIsolationError({
@@ -528,6 +876,8 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 							rescueBranch,
 							retainedDir: retained.dir,
 							sidecarMissing: !retained.sidecarOk,
+							retainedGone: retained.location === "gone",
+							retainedUnknown: retained.location === "unknown",
 						}),
 					});
 				}
@@ -541,16 +891,18 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 					opts.agentId,
 					commitResult?.nestedPatches ?? [],
 				);
-				return rememberAgentArtifacts({
-					...result,
-					branchName: commitResult?.branchName,
-					branchBaseSha: commitResult?.baseSha,
-					nestedPatches: commitResult?.nestedPatches,
-					nestedPatchPaths,
-				});
+				return await reportingFinalCapture(
+					rememberAgentArtifacts({
+						...result,
+						branchName: commitResult?.branchName,
+						branchBaseSha: commitResult?.baseSha,
+						nestedPatches: commitResult?.nestedPatches,
+						nestedPatchPaths,
+					}),
+				);
 			} catch (persistErr) {
 				retainWorkspace = true;
-				const retained = await retainIsolationWorkspace(isolationDir, isolationBackend);
+				const retained = await retainIsolationWorkspace(isolationDir, isolationBackend, handle?.generation);
 				return rememberAgentArtifacts({
 					...result,
 					branchName: commitResult?.branchName,
@@ -561,6 +913,8 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 						message: persistErr instanceof Error ? persistErr.message : String(persistErr),
 						retainedDir: retained.dir,
 						sidecarMissing: !retained.sidecarOk,
+						retainedGone: retained.location === "gone",
+						retainedUnknown: retained.location === "unknown",
 					}),
 				});
 			}
@@ -569,10 +923,10 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 			try {
 				const capture = await writeIsolationPatch(isolationDir, baseline, opts.artifactsDir, opts.agentId);
 				handedOff = capture.fingerprint;
-				return rememberAgentArtifacts({ ...result, ...capture.artifacts });
+				return await reportingFinalCapture(rememberAgentArtifacts({ ...result, ...capture.artifacts }));
 			} catch (patchErr) {
 				retainWorkspace = true;
-				const retained = await retainIsolationWorkspace(isolationDir, isolationBackend);
+				const retained = await retainIsolationWorkspace(isolationDir, isolationBackend, handle?.generation);
 				return rememberAgentArtifacts({
 					...result,
 					error: renderIsolationError({
@@ -580,6 +934,8 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 						message: patchErr instanceof Error ? patchErr.message : String(patchErr),
 						retainedDir: retained.dir,
 						sidecarMissing: !retained.sidecarOk,
+						retainedGone: retained.location === "gone",
+						retainedUnknown: retained.location === "unknown",
 					}),
 				});
 			}
@@ -588,13 +944,19 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 	} catch (err) {
 		return rememberAgentArtifacts(opts.buildFailureResult(err));
 	} finally {
-		if (
-			handle &&
-			!retainWorkspace &&
-			!releasePromise &&
-			!(opts.baseOptions.keepAlive !== false && AgentLifecycleManager.global().has(opts.agentId))
-		) {
-			if (deferredCleanup) {
+		if (!handle) {
+			// Isolation failed before a workspace existed, so no child was ever
+			// dispatched and no child lifecycle will end: whatever the caller
+			// holds for this child is still owed, and this is the last place
+			// that can discharge it.
+			await releaseBase();
+		} else if (!releasePromise && !lifecycleOwnsRelease) {
+			if (retainWorkspace) {
+				// The workspace stays on disk, but the caller's hold is not part
+				// of it: nothing left will end to release it. `releaseBase` runs
+				// at most once.
+				await releaseBase();
+			} else if (deferredCleanup) {
 				trackLateCleanup(deferredCleanup.then(cleanupHandle), {
 					agentId: opts.agentId,
 					resource: "isolation",
@@ -714,7 +1076,15 @@ export async function mergeIsolatedChanges(opts: IsolationMergeOptions): Promise
 			changesApplied = false;
 			hadAnyChanges = false;
 		} else {
-			const patchText = await Bun.file(result.patchPath).text();
+			// A patch this process cannot read is not an empty patch: read that
+			// way, the run reports no changes for work it has already written.
+			const read = await fs.readTextLookup(result.patchPath);
+			if (read.kind !== "found") {
+				throw new Error(
+					`Captured patch ${result.patchPath} could not be read (${read.kind === "absent" ? "it is not there" : read.reason}).`,
+				);
+			}
+			const patchText = read.value;
 			if (!patchText.trim()) {
 				changesApplied = true;
 				hadAnyChanges = false;

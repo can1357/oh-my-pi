@@ -28,6 +28,7 @@ function context(baseline = cleanBaseline()): SecurityRemediationContext {
 function handle(): IsolationHandle {
 	return {
 		mergedDir: "/state/worktrees/security/m",
+		generation: "test",
 		backend: IsoBackendKind.Rcopy,
 		fellBack: false,
 		fallbackReason: null,

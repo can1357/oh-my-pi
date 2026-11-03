@@ -1,16 +1,40 @@
 import { type NestedRepoPatch } from "@oh-my-pi/pi-tui/tools/task";
-import type { Dirent } from "node:fs";
-import * as fs from "node:fs/promises";
+import * as fs from "./isolation-fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { scheduler } from "node:timers/promises";
 import type { VcsCommitAuthor, VcsGitRepo } from "@oh-my-pi/pi-natives";
 import * as natives from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { formatBytes, getWorktreeDir, isEnoent, logger, Snowflake } from "@oh-my-pi/pi-utils";
+import { formatBytes, getWorktreeDir, logger, Snowflake } from "@oh-my-pi/pi-utils";
 import type { SettingValueOf } from "../config/registry";
 
 import { withRepoLock } from "../utils/repo-lock";
-import { needsNativeTeardown, writeIsolationOwner, writeRetainedBackend } from "./isolation-ownership";
+import { trackLateCleanup } from "../utils/late-cleanup";
+import {
+	deferTeardownWhileLeased,
+	forgetIsolationWorkspace,
+	hasLiveIsolationLease,
+	hasUnfinishedWriter,
+	registerIsolationWorkspace,
+} from "./isolation-lease";
+import {
+	clearClaimedWorkspace,
+	foreignMountsUnder,
+	acquireSandboxLockWithNotice,
+	holdsSandboxLock,
+	needsNativeTeardown,
+	requireSandboxLockHeld,
+	runHoldingSandboxLock,
+	withSandboxLock,
+	markIsolationRetired,
+	markIsolationRetiring,
+	type IsolationClaim,
+	readIsolationClaim,
+	resolveSandboxIdentity,
+	writeIsolationOwner,
+	writeRetainedBackend,
+} from "./isolation-ownership";
 import { mapWithConcurrencyLimit } from "./parallel";
 import type { cfgIsolationBackend } from "./settings";
 
@@ -19,13 +43,70 @@ const { IsoBackendKind } = natives;
 const TASK_ISOLATION_DIR_PREFIX = "t";
 const TASK_ISOLATION_DIR_DIGEST_CHARS = 9;
 const TASK_ISOLATION_MOUNT_DIR = "m";
+/** How long an in-place teardown holds the lock for a backend stop before leaving it to reclamation. */
+const SANDBOX_STOP_MAX_WAIT_MS = 10_000;
+/** How long a teardown holds the lock to capture before it refuses to delete. */
+const SANDBOX_CAPTURE_MAX_WAIT_MS = 120_000;
 const GIT_NETWORK_TIMEOUT_MS = 30 * 60 * 1000;
 type IsoBackendKind = natives.IsoBackendKind;
-async function diffTreeOrEmpty(repo: VcsGitRepo, base: string, head: string): Promise<string> {
+/**
+ * A capture that could not read part of the working tree.
+ *
+ * It is thrown rather than smoothed into an empty patch, because an empty
+ * patch is a statement that there is nothing to save — and the teardown
+ * deletes the workspace on the strength of it. A real `chmod 000` untracked
+ * file took that path: the diff failed, the capture reported no changes, and
+ * the workspace with the unread file in it was removed.
+ */
+export class IsolationCaptureIncompleteError extends Error {
+	/** Paths this capture could not read, when it knows them. */
+	readonly unread: readonly string[];
+	constructor(message: string, unread: readonly string[] = [], cause?: unknown) {
+		super(message, cause === undefined ? undefined : { cause });
+		this.name = "IsolationCaptureIncompleteError";
+		this.unread = unread;
+	}
+}
+
+/**
+ * Diff two trees, failing when git cannot.
+ *
+ * There is no "or empty" here: a diff that could not be taken is not a diff
+ * showing no changes, and every caller below builds either the patch a run is
+ * kept for or the commit that carries its work.
+ */
+async function diffTree(repo: VcsGitRepo, base: string, head: string): Promise<string> {
 	try {
 		return await repo.diffTree(base, head, true);
 	} catch (error) {
-		if (vcs.isVcsError(error)) return "";
+		if (vcs.isVcsError(error)) {
+			throw new IsolationCaptureIncompleteError(
+				`Could not diff ${base}..${head}: ${error.stderr.trim() || error.message}`,
+				[],
+				error,
+			);
+		}
+		throw error;
+	}
+}
+
+/**
+ * Render a patch a capture rests on, failing as a capture failure when the
+ * renderer refuses. It refuses a name or content its patch cannot carry
+ * exactly — that is a file this capture cannot save, and the workspace holding
+ * it has to stay.
+ */
+async function renderForCapture(repoDir: string, what: string, render: () => Promise<string>): Promise<string> {
+	try {
+		return await render();
+	} catch (error) {
+		if (vcs.isVcsError(error)) {
+			throw new IsolationCaptureIncompleteError(
+				`Could not capture the ${what} in ${repoDir}: ${error.stderr.trim() || error.message}`,
+				[],
+				error,
+			);
+		}
 		throw error;
 	}
 }
@@ -38,6 +119,11 @@ export interface RepoBaseline {
 	unstaged: string;
 	untracked: string[];
 	untrackedPatch: string;
+	/**
+	 * Untracked entries the baseline could not read. Absent on hand-built
+	 * baselines, which have nothing to say about it.
+	 */
+	unreadUntracked?: string[];
 }
 
 /** Baseline state for the project, including any nested git repos. */
@@ -75,7 +161,12 @@ async function realCommonDir(dir: string): Promise<string | undefined> {
 	if (!commonDir) return undefined;
 	// git writes realpath'd admin pointers; match them across symlinked
 	// prefixes (macOS /var -> /private/var).
-	return fs.realpath(commonDir).catch(() => path.resolve(commonDir));
+	// A path that cannot be resolved has no canonical form, and two callers
+	// that fall back to different spellings lock different files.
+	const resolved = await fs.realpathLookup(commonDir);
+	if (resolved.kind === "found") return resolved.value;
+	if (resolved.kind === "absent") return path.resolve(commonDir);
+	throw new IsolationCaptureIncompleteError(`Could not resolve ${commonDir}: ${resolved.reason}`, [commonDir]);
 }
 
 /**
@@ -98,24 +189,44 @@ async function discoverNestedRepos(repoRoot: string, ownRepos: readonly string[]
 	// Find all .git dirs/files that aren't the root or known submodules
 	const result: string[] = [];
 	async function walk(dir: string): Promise<void> {
-		let entries: Dirent[];
-		try {
-			entries = await fs.readdir(dir, { withFileTypes: true });
-		} catch {
+		const listing = await fs.readdirTypedLookup(dir);
+		if (listing.kind === "absent") return;
+		if (listing.kind === "unknown") {
+			// Recorded, not raised. This walk looks for nested repositories
+			// while the baseline is taken, and git decides what the capture
+			// can see: refusing here stopped runs whose unreadable directory
+			// was gitignored — `target/`, `.venv`, `dist/`, `__pycache__` —
+			// which git never reads and the capture never misses. The capture
+			// itself refuses, on git's own report, at the moment that
+			// authorises a delete.
+			logger.warn("nested-repository scan could not list a directory", { dir, reason: listing.reason });
 			return;
 		}
+		const entries = listing.value;
 		for (const entry of entries) {
 			if (entry.name === "node_modules" || entry.name === ".git") continue;
 			if (!entry.isDirectory()) continue;
 			const full = path.join(dir, entry.name);
 			const rel = path.relative(repoRoot, full);
-			// Check if this directory is itself a git repo
+			// Check if this directory is itself a git repo. A `.git` that
+			// cannot be reached is not a directory without one: read that way,
+			// a nested repo's changes never reach the patch.
 			const gitDir = path.join(full, ".git");
-			let hasGit = false;
-			try {
-				await fs.access(gitDir);
-				hasGit = true;
-			} catch {}
+			const gitEntry = await fs.lstatLookup(gitDir);
+			if (gitEntry.kind === "unknown") {
+				// Recorded, like the listing above it and for the same reason:
+				// this scan runs while the baseline is taken, and an
+				// unreadable directory here is usually an ignored one — git
+				// never reads it, so the capture never misses it. What the
+				// capture can see is decided by git, at the moment that
+				// authorises a delete.
+				logger.warn("nested-repository scan could not read a .git entry", {
+					gitDir,
+					reason: gitEntry.reason,
+				});
+				continue;
+			}
+			const hasGit = gitEntry.kind === "found";
 			if (hasGit && !submodulePaths.has(rel)) {
 				const commonDir = await realCommonDir(full);
 				if (commonDir && ownCommonDirs.has(commonDir)) continue;
@@ -185,34 +296,64 @@ export class IsolationBaselineTooLargeError extends Error {
 async function sumUntrackedBytes(repoRoot: string, untracked: readonly string[]): Promise<number> {
 	if (untracked.length === 0) return 0;
 	const { results } = await mapWithConcurrencyLimit([...untracked], 16, async entry => {
-		try {
-			const stat = await fs.lstat(path.join(repoRoot, entry));
-			return stat.isFile() ? stat.size : 0;
-		} catch {
+		// A budget estimate, not a decision about deletion: an entry that
+		// vanished mid-scan is the common case and contributes nothing, and an
+		// entry nobody can stat has no size to contribute either. Both are
+		// named in the log the budget failure prints rather than silently
+		// shrinking the estimate.
+		const found = await fs.lstatLookup(path.join(repoRoot, entry));
+		if (found.kind === "unknown") {
+			logger.warn("isolation baseline could not size an untracked entry", { entry, reason: found.reason });
 			return 0;
 		}
+		if (found.kind === "absent") return 0;
+		return found.value.isFile() ? found.value.size : 0;
 	});
 	return results.reduce((total: number, size) => total + (size ?? 0), 0);
+}
+
+/** An untracked-file capture, with the entries it could not read named. */
+interface UntrackedCapture {
+	patch: string;
+	/** Entries whose diff failed: read neither as present nor as absent. */
+	unread: string[];
 }
 
 async function captureUntrackedPatch(
 	repoRoot: string,
 	untracked: readonly string[],
 	repo: VcsGitRepo = vcs.requireGit(repoRoot),
-): Promise<string> {
-	if (untracked.length === 0) return "";
+): Promise<UntrackedCapture> {
+	if (untracked.length === 0) return { patch: "", unread: [] };
 	const nullPath = getGitNoIndexNullPath();
 	// Bound concurrent native encodes so large untracked sets do not hold every
 	// file and binary patch in memory at once.
 	const { results: untrackedDiffs } = await mapWithConcurrencyLimit([...untracked], 8, async entry => {
 		try {
-			return await repo.diffNoIndex(nullPath, entry, true);
+			return { entry, diff: await repo.diffNoIndex(nullPath, entry, true) };
 		} catch (error) {
-			if (vcs.isVcsError(error)) return "";
+			// Named, not dropped. A file whose permissions deny this process is
+			// still the user's work, and it is the one file nobody can
+			// reconstruct from the patch.
+			if (vcs.isVcsError(error)) return { entry, diff: undefined };
 			throw error;
 		}
 	});
-	return untrackedDiffs.filter((diff): diff is string => !!diff?.trim()).join("\n");
+	const unread: string[] = [];
+	const patches: string[] = [];
+	for (const result of untrackedDiffs) {
+		if (result === undefined) continue;
+		// A listed file always renders at least its header, even when it is
+		// empty, so an empty diff means the read found nothing at that name. As
+		// a patch it said there was nothing to save, and the file went with the
+		// workspace.
+		if (result.diff === undefined || !result.diff.trim()) {
+			unread.push(result.entry);
+			continue;
+		}
+		patches.push(result.diff);
+	}
+	return { patch: patches.join("\n"), unread };
 }
 
 /**
@@ -250,8 +391,26 @@ async function captureRepoBaseline(repoRoot: string, budgetBytes: number): Promi
 	if (contentBytes > budgetBytes) {
 		throw new IsolationBaselineTooLargeError(repoRoot, contentBytes, budgetBytes);
 	}
-	const untrackedPatch = await captureUntrackedPatch(repoRoot, untracked, repo);
-	return { repoRoot, headCommit, staged, unstaged, untracked, untrackedPatch };
+	const untrackedCapture = await captureUntrackedPatch(repoRoot, untracked, repo);
+	if (untrackedCapture.unread.length > 0) {
+		// Recorded rather than raised: a baseline that missed a file costs
+		// precision in the delta, not a user's work. The delta capture, which
+		// is what a deletion rests on, refuses instead.
+		logger.warn("isolation baseline could not read some untracked files", {
+			repoRoot,
+			unread: untrackedCapture.unread.slice(0, 20),
+			unreadCount: untrackedCapture.unread.length,
+		});
+	}
+	return {
+		repoRoot,
+		headCommit,
+		staged,
+		unstaged,
+		untracked,
+		untrackedPatch: untrackedCapture.patch,
+		unreadUntracked: untrackedCapture.unread,
+	};
 }
 
 interface SyntheticTreeOptions {
@@ -338,12 +497,50 @@ async function captureRepoDeltaPatch(repoDir: string, rb: RepoBaseline, objectRe
 	const repo = vcs.requireGit(repoDir);
 	const objectRepo = objectRepoDir === repoDir ? repo : vcs.requireGit(objectRepoDir);
 	const currentHead = (await repo.headSha()) ?? "";
-	const currentStaged = await repo.diffText({ binary: true, cached: true });
-	const currentUnstaged = await repo.diffText({ binary: true });
-	const currentUntracked = await repo.lsFiles(true, true);
-	const currentUntrackedPatch = await captureUntrackedPatch(repoDir, currentUntracked, repo);
+	const currentStaged = await renderForCapture(repoDir, "staged changes", () =>
+		repo.diffText({ binary: true, cached: true }),
+	);
+	const currentUnstaged = await renderForCapture(repoDir, "unstaged changes", () => repo.diffText({ binary: true }));
+	// Git's own report of what it did not look at, through the binding that
+	// runs git the way this repository runs git — the stripped environment,
+	// the deadline, the cancellation signal and the in-process fallback. A
+	// hand-spawned `git -C` inherited `GIT_WORK_TREE` from the caller, listed
+	// another tree, and the teardown removed this one on the strength of it.
+	const listed = await repo.lsFilesWithWarnings(true, true);
+	if (listed.unreadable.length > 0) {
+		throw new IsolationCaptureIncompleteError(
+			`git could not read ${listed.unreadable.length} ${listed.unreadable.length === 1 ? "directory" : "directories"} ` +
+				`in ${repoDir}, so this capture cannot say what is in them: ${listed.unreadable.slice(0, 10).join(", ")}`,
+			listed.unreadable,
+		);
+	}
+	if (listed.undecodable.length > 0) {
+		// A name that is not UTF-8 has no JS string, so no path this process
+		// holds reaches the file and the patch cannot carry it. Decoded
+		// lossily, it named a file that does not exist, whose diff read as
+		// empty, and the teardown deleted the only copy.
+		throw new IsolationCaptureIncompleteError(
+			`git listed ${listed.undecodable.length} untracked file(s) in ${repoDir} whose names are not UTF-8, ` +
+				`so this capture cannot carry them: ${listed.undecodable.slice(0, 10).join(", ")}`,
+			listed.undecodable,
+		);
+	}
+	const currentUntracked = listed.paths;
+	const currentUntracked_ = await captureUntrackedPatch(repoDir, currentUntracked, repo);
+	if (currentUntracked_.unread.length > 0) {
+		// The whole point of the capture is to decide whether the workspace may
+		// go. Returning a patch that silently omits a file this process could
+		// not read tells the teardown there is nothing to save, and the file is
+		// deleted with the directory.
+		throw new IsolationCaptureIncompleteError(
+			`Could not read ${currentUntracked_.unread.length} untracked file(s) in ${repoDir}: ` +
+				`${currentUntracked_.unread.slice(0, 10).join(", ")}`,
+			currentUntracked_.unread,
+		);
+	}
+	const currentUntrackedPatch = currentUntracked_.patch;
 	const committedPatch =
-		currentHead && currentHead !== rb.headCommit ? await diffTreeOrEmpty(repo, rb.headCommit, currentHead) : "";
+		currentHead && currentHead !== rb.headCommit ? await diffTree(repo, rb.headCommit, currentHead) : "";
 
 	const baselineTree = await writeSyntheticTree(objectRepoDir, rb.headCommit, [
 		rb.staged,
@@ -357,7 +554,7 @@ async function captureRepoDeltaPatch(repoDir: string, rb: RepoBaseline, objectRe
 		currentUntrackedPatch,
 	]);
 
-	return diffTreeOrEmpty(objectRepo, baselineTree, currentTree);
+	return diffTree(objectRepo, baselineTree, currentTree);
 }
 
 function unquoteGitDiffPath(rawPath: string): string {
@@ -376,7 +573,19 @@ function parseDiffGitLinePaths(line: string): string[] {
 	if (!line.startsWith("diff --git ")) return [];
 	const rest = line.slice("diff --git ".length);
 	const quoted = rest.match(/^("(?:\\.|[^"])+"|\/dev\/null) ("(?:\\.|[^"])+"|\/dev\/null)$/);
-	const parts = quoted ? [quoted[1], quoted[2]] : rest.split(" ");
+	// A name can hold a space. When both sides name the same path — anything
+	// but a rename — the split is where they agree, as git and the patch
+	// applier read it; at the first space, `my notes.txt` was `my`.
+	const symmetric = quoted
+		? undefined
+		: [...rest.matchAll(/ /g)]
+				.map(match => match.index)
+				.find(at => rest.startsWith("a/") && rest.slice(at + 1) === `b/${rest.slice(2, at)}`);
+	const parts = quoted
+		? [quoted[1], quoted[2]]
+		: symmetric !== undefined
+			? [rest.slice(0, symmetric), rest.slice(symmetric + 1)]
+			: rest.split(" ");
 	if (parts.length < 2) return [];
 	const paths = parts
 		.slice(0, 2)
@@ -399,13 +608,11 @@ export interface DeltaPatchResult {
 }
 
 async function hasGitEntry(dir: string): Promise<boolean> {
-	try {
-		await fs.lstat(path.join(dir, ".git"));
-		return true;
-	} catch (error) {
-		if (isEnoent(error)) return false;
-		throw error;
+	const found = await fs.lstatLookup(path.join(dir, ".git"));
+	if (found.kind === "unknown") {
+		throw new IsolationCaptureIncompleteError(`Could not read ${path.join(dir, ".git")}: ${found.reason}`, [dir]);
 	}
+	return found.kind === "found";
 }
 
 export async function captureDeltaPatch(isolationDir: string, baseline: WorktreeBaseline): Promise<DeltaPatchResult> {
@@ -431,10 +638,16 @@ export async function captureDeltaPatch(isolationDir: string, baseline: Worktree
 
 	for (const { relativePath, baseline: nb } of baseline.nested) {
 		const nestedDir = path.join(isolationDir, relativePath);
-		try {
-			await fs.access(path.join(nestedDir, ".git"));
-		} catch {
-			continue;
+		// A nested repo whose `.git` cannot be reached is not a nested repo
+		// that went away: skipping it drops its work from the patch, and the
+		// teardown then deletes the directory holding the only copy.
+		const nestedGit = await fs.lstatLookup(path.join(nestedDir, ".git"));
+		if (nestedGit.kind === "absent") continue;
+		if (nestedGit.kind === "unknown") {
+			throw new IsolationCaptureIncompleteError(
+				`Could not read ${path.join(nestedDir, ".git")}: ${nestedGit.reason}`,
+				[nestedDir],
+			);
 		}
 		const patch = await captureRepoDeltaPatch(nestedDir, nb, nb.repoRoot);
 		if (patch.trim()) nestedPatches.push({ relativePath, patch });
@@ -478,10 +691,12 @@ export async function applyNestedPatches(
 
 	for (const [relativePath, repoPatches] of byRepo) {
 		const nestedDir = path.join(repoRoot, relativePath);
-		try {
-			await fs.access(path.join(nestedDir, ".git"));
-		} catch {
-			continue;
+		const nestedGit = await fs.lstatLookup(path.join(nestedDir, ".git"));
+		if (nestedGit.kind === "absent") continue;
+		if (nestedGit.kind === "unknown") {
+			// This applies a captured patch. Skipping a repo nobody could look
+			// at drops the agent's work for it without saying so.
+			throw new Error(`Could not read ${path.join(nestedDir, ".git")}: ${nestedGit.reason}`);
 		}
 		const repository = vcs.requireGit(nestedDir);
 
@@ -582,6 +797,12 @@ export function formatIsolationBackend(backend: IsoBackendKind): Exclude<Isolati
 export interface IsolationHandle {
 	/** Merged view materialised by the backend; pass this to the task. */
 	mergedDir: string;
+	/**
+	 * The marker generation this materialisation wrote. `cleanupIsolation`
+	 * compares it with what is on disk, so a teardown holding a stale handle
+	 * cannot delete a path a later run has since claimed.
+	 */
+	generation: string;
 	/** Backend the PAL actually used. */
 	backend: IsoBackendKind;
 	/** True when the resolver downgraded from `preferred` to `backend`. */
@@ -601,10 +822,65 @@ function errorMessage(err: unknown): string {
 	return err instanceof Error ? err.message : String(err);
 }
 
+/**
+ * The directory name for one materialisation of a task's sandbox.
+ *
+ * The digest still says which repository and task it belongs to, and the mint
+ * after it says *which materialisation*, so a path is never handed out twice.
+ * That is what makes a descendant which outlives its owner harmless: a git
+ * hook child still running after the owner died writes into a path nobody can
+ * take, instead of into the workspace a successor has since built at the same
+ * name — which is how a successor's data was read and overwritten. The cost is
+ * a directory nothing removes on its own: the user's `omp worktree clear`
+ * removes it once its owner has gone, and `--all` removes one that cannot
+ * prove it is finished. The cost of reuse was a user's work.
+ */
 function getTaskIsolationSegment(repoRoot: string, id: string): string {
 	const key = `${path.resolve(repoRoot)}\0${id}`;
-	const digest = Bun.hash(key).toString(16).padStart(16, "0").slice(-TASK_ISOLATION_DIR_DIGEST_CHARS);
-	return `${TASK_ISOLATION_DIR_PREFIX}${digest}`;
+	const digest = fs.hash(key).toString(16).padStart(16, "0").slice(-TASK_ISOLATION_DIR_DIGEST_CHARS);
+	// 122 random bits from the system's cryptographic source, not a timestamp and a
+	// counter. A timestamp-and-counter mint is a prediction two processes can
+	// make identically — same clock, same entropy, same name, and the second
+	// materialisation destroyed the first's output — and `mkdir` can only say
+	// whether a name is free *now*, which is a different question: ordinary
+	// reclamation frees a name while a dead owner's git hook is still writing
+	// to it, and the next mint hands that hook a successor's workspace. The
+	// property a surviving descendant needs is that the name was never handed
+	// out before, which only an unguessably large draw gives. `mkdir` with
+	// `EEXIST` below stays as the last guard, not as the mechanism.
+	const mint = crypto.randomUUID().replaceAll("-", "");
+	if (mint.length !== 32) throw new Error(`randomUUID returned ${mint.length} hex characters, expected 32`);
+	return `${TASK_ISOLATION_DIR_PREFIX}${digest}-${mint}`;
+}
+
+/**
+ * Create a directory for one materialisation, under a name nothing has used.
+ *
+ * `mkdir` without `recursive` is the test: it creates the name or fails with
+ * `EEXIST`, and that answer comes from the kernel rather than from an
+ * assumption about clocks and counters. A surviving descendant — a git hook
+ * child still running after its owner died — then writes into a path that can
+ * never be handed out again, which is the whole point of minting one.
+ */
+async function mintSandboxDirectory(repoRoot: string, id: string): Promise<string> {
+	const parent = getWorktreeDir("");
+	await fs.mkdir(parent, { recursive: true });
+	let lastError: unknown;
+	for (let attempt = 0; attempt < 64; attempt += 1) {
+		const candidate = await resolveSandboxIdentity(getWorktreeDir(getTaskIsolationSegment(repoRoot, id)));
+		try {
+			await fs.mkdir(candidate);
+			return candidate;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+			lastError = error;
+		}
+	}
+	throw new Error(
+		`Could not mint an unused isolation workspace under ${parent}: 64 names in a row already existed ` +
+			`(EEXIST). Last error: ${lastError instanceof Error ? lastError.message : String(lastError)}`,
+		{ cause: lastError },
+	);
 }
 
 /**
@@ -618,22 +894,24 @@ async function detachSubmodules(sourceRoot: string, isolationRoot: string): Prom
 	for (const relativePath of paths) {
 		const sourceDir = path.join(sourceRoot, relativePath);
 		const isolatedDir = path.join(isolationRoot, relativePath);
-		try {
-			await fs.lstat(path.join(sourceDir, ".git"));
-		} catch (error) {
-			if (isEnoent(error)) continue;
-			throw error;
+		const sourceGit = await fs.lstatLookup(path.join(sourceDir, ".git"));
+		if (sourceGit.kind === "absent") continue;
+		if (sourceGit.kind === "unknown") {
+			throw new Error(`Could not read ${path.join(sourceDir, ".git")}: ${sourceGit.reason}`);
 		}
-		let isolatedEntry;
-		try {
-			isolatedEntry = await fs.lstat(path.join(isolatedDir, ".git"));
-		} catch (error) {
-			if (!isEnoent(error)) throw error;
+		let isolated = await fs.lstatLookup(path.join(isolatedDir, ".git"));
+		if (isolated.kind === "unknown") {
+			throw new Error(`Could not read ${path.join(isolatedDir, ".git")}: ${isolated.reason}`);
+		}
+		if (isolated.kind === "absent") {
 			// `git worktree add` (rcopy) checks out gitlinks but not their trees.
 			await fs.cp(sourceDir, isolatedDir, { recursive: true });
-			isolatedEntry = await fs.lstat(path.join(isolatedDir, ".git"));
+			isolated = await fs.lstatLookup(path.join(isolatedDir, ".git"));
+			if (isolated.kind !== "found") {
+				throw new Error(`Submodule ${relativePath} has no .git after being copied into the isolation.`);
+			}
 		}
-		initialized.push({ sourceDir, isolatedDir, isFile: isolatedEntry.isFile() });
+		initialized.push({ sourceDir, isolatedDir, isFile: isolated.value.isFile() });
 	}
 	for (const { sourceDir, isolatedDir, isFile } of initialized.reverse()) {
 		if (!isFile) continue;
@@ -652,81 +930,622 @@ export async function ensureIsolation(
 ): Promise<IsolationHandle> {
 	const repoRoot = await getRepoRoot(baseCwd);
 	const sourceCommonDir = vcs.requireGit(repoRoot).info().commonDir;
-	const baseDir = getWorktreeDir(getTaskIsolationSegment(repoRoot, id));
+	// The filesystem decides whether a name has been handed out, not a
+	// generator: a mint is a prediction — two processes with the same clock and
+	// the same entropy produced the same one, and the second materialisation
+	// destroyed the first's output — while `mkdir` without `recursive` either
+	// creates the directory or says `EEXIST`, which is the fact itself.
+	const baseDir = await mintSandboxDirectory(repoRoot, id);
 	const mergedDir = path.join(baseDir, TASK_ISOLATION_MOUNT_DIR);
 	const resolution = await natives.isoResolve(preferred ?? null);
 	const candidates = resolution.candidates.length > 0 ? resolution.candidates : [resolution.kind];
 	let fallbackReason = resolution.reason ?? null;
 
 	for (const candidate of candidates) {
-		await fs.rm(baseDir, { recursive: true, force: true });
-		// Claim ownership before the backend materialises `m`. Backends only
-		// create/replace `mergedDir` (and overlay upper/work), never the base
-		// dir, so the marker survives `isoStart` — and a concurrent
-		// `omp worktree clear` never sees this sandbox without a live owner,
-		// even while a large clone is still in progress.
-		await fs.mkdir(baseDir, { recursive: true });
-		await writeIsolationOwner(baseDir, id);
-		try {
-			await natives.isoStart(candidate, repoRoot, mergedDir);
-			// Sever the isolation's git metadata from the source checkout. Copy
-			// backends duplicate `repoRoot`'s `.git` verbatim — a linked-worktree
-			// pointer file (or the rcopy `git worktree add` registration) leaves
-			// the isolation sharing the source's HEAD/index/ref namespace, so a
-			// task's git operations would mutate the parent checkout and stack
-			// parallel task branches. Detaching gives each isolation a private,
-			// frozen repo that still borrows the source object DB via alternates.
-			await detachSubmodules(repoRoot, mergedDir);
-			await vcs.detachGitDir(mergedDir, sourceCommonDir);
-			return {
-				mergedDir,
-				backend: candidate,
-				fellBack: candidate !== resolution.kind || resolution.fellBack,
-				fallbackReason,
-			};
-		} catch (err) {
-			await fs.rm(baseDir, { recursive: true, force: true });
-			const message = errorMessage(err);
-			if (!natives.isoIsUnavailableError(message)) {
-				throw err;
+		// The whole attempt runs under the sandbox lock, so a teardown cannot
+		// retire the directory out from under a materialisation that has already
+		// claimed it, and two materialisations of one id cannot interleave.
+		const outcome = await withSandboxLock(baseDir, "materialise", async (): Promise<MaterialiseOutcome> => {
+			let claimed = false;
+			try {
+				// Taking this slot destroys what is in it, so the same question the
+				// teardown asks is asked here, under the same lock: is anybody still
+				// working in this sandbox? A live lease belongs to a session — this
+				// process's or another's — whose cwd and whose files would go with
+				// the directory, and no replacement is worth that.
+				if (await hasLiveIsolationLease(baseDir)) {
+					throw new Error(
+						`Isolation workspace ${baseDir} is still in use by a live session; refusing to materialise over it.`,
+					);
+				}
+				// A writer that gave up its lease but said it might still be saving
+				// into this directory is as much a user of it as a lease holder:
+				// taking the slot erases what it is writing.
+				if (await hasUnfinishedWriter(baseDir)) {
+					throw new Error(
+						`Isolation workspace ${baseDir} still has an unfinished writer; refusing to materialise over it.`,
+					);
+				}
+				// A teardown that outran its bound left its backend stop running on
+				// this path. Materialising beside it hands the successor to that
+				// stop's removal.
+				const existingClaim = await readIsolationClaim(baseDir);
+				if (existingClaim.kind === "retiring") {
+					throw new Error(`Isolation workspace ${baseDir} is being torn down; refusing to materialise over it.`);
+				}
+				// Claim ownership before anything is destroyed or materialised. The
+				// previous contents go only once this generation's marker is on disk,
+				// so live data never sits under no marker, and the previous owner's
+				// teardown finds a generation that is not its own. Backends only
+				// create/replace `mergedDir` (and overlay upper/work), never the base
+				// dir, so the marker survives `isoStart` — and a concurrent
+				// `omp worktree clear` never sees this sandbox without a live owner,
+				// even while a large clone is still in progress.
+				await fs.mkdir(baseDir, { recursive: true });
+				const generation = await writeIsolationOwner(baseDir, id);
+				claimed = true;
+				await clearClaimedWorkspace(baseDir);
+				// Recorded before the backend can mount anything. A run killed
+				// between the mount and its teardown leaves a live mount behind,
+				// and `omp worktree clear` must stop it before it removes a byte;
+				// this record is how it knows. A backend that turns out to be
+				// unavailable has its record cleared with the rest above.
+				if (needsNativeTeardown(candidate)) await writeRetainedBackend(baseDir, candidate);
+				await natives.isoStart(candidate, repoRoot, mergedDir);
+				// Sever the isolation's git metadata from the source checkout. Copy
+				// backends duplicate `repoRoot`'s `.git` verbatim — a linked-worktree
+				// pointer file (or the rcopy `git worktree add` registration) leaves
+				// the isolation sharing the source's HEAD/index/ref namespace, so a
+				// task's git operations would mutate the parent checkout and stack
+				// parallel task branches. Detaching gives each isolation a private,
+				// frozen repo that still borrows the source object DB via alternates.
+				await detachSubmodules(repoRoot, mergedDir);
+				await vcs.detachGitDir(mergedDir, sourceCommonDir);
+				// Descendants that inherit this cwd without materialising anything of
+				// their own are accounted for against this sandbox from here. The
+				// owner's own child session leases it too, under this agent id, and
+				// that lease does not pin the sandbox against its own run.
+				registerIsolationWorkspace(mergedDir, { baseDir, generation, agentId: id });
+				return {
+					kind: "ready",
+					handle: {
+						mergedDir,
+						generation,
+						backend: candidate,
+						fellBack: candidate !== resolution.kind || resolution.fellBack,
+						fallbackReason,
+					},
+				};
+			} catch (err) {
+				// Only a claimed sandbox may be emptied — and only under this
+				// hold: a failure before the claim landed leaves whatever was
+				// there for its own owner. A backend that mounted before it
+				// failed is stopped first; one that will not stop leaves its
+				// mount, its record and the sandbox, which the clear refuses.
+				// Neither the stop nor the emptying runs while something other
+				// than the backend's own mount is under the sandbox: both remove
+				// trees, and would remove through it.
+				if (claimed) {
+					const foreign = await foreignMountsUnder(baseDir, candidate, mergedDir).catch(() => undefined);
+					if (foreign === undefined || foreign.length > 0) {
+						logger.warn("isolation workspace kept after a failed start: something else is mounted in it", {
+							mergedDir,
+							mounts: foreign,
+						});
+					} else {
+						if (needsNativeTeardown(candidate)) {
+							const mounted = await fs.liveMountsUnder(mergedDir).then(
+								mounts => mounts.length > 0,
+								() => true,
+							);
+							if (mounted) await natives.isoStop(candidate, mergedDir).catch(() => undefined);
+						}
+						await clearClaimedWorkspace(baseDir).catch(() => undefined);
+					}
+				}
+				const message = errorMessage(err);
+				if (!natives.isoIsUnavailableError(message)) throw err;
+				return { kind: "unavailable", message };
 			}
-			fallbackReason ??= message;
-		}
+		});
+		if (outcome.kind === "ready") return outcome.handle;
+		fallbackReason ??= outcome.message;
 	}
 
 	throw new Error(fallbackReason ?? "No isolation backend is available.");
 }
 
+/** Result of one backend attempt under the materialisation hold. */
+type MaterialiseOutcome =
+	| { kind: "ready"; handle: IsolationHandle }
+	/** This backend is not available here; the loop tries the next one. */
+	| { kind: "unavailable"; message: string };
+
 /**
- * Tear down a handle returned by {@link ensureIsolation}. When native teardown fails for a mount or
- * subvolume backend, the workspace is kept with a retained-backend sidecar (recursive `rm` would
- * traverse the live mount); `omp worktree clear` retries the teardown later.
+ * Report a backend stop that failed. A mount or subvolume whose stop failed may
+ * still be live, and a recursive removal would walk through it into what it
+ * projects, so the caller keeps that workspace; the record of its backend is
+ * already on disk (written before the mount, and again before the teardown
+ * began), which is what makes `omp worktree clear` stop it first.
  */
-export async function cleanupIsolation(handle: IsolationHandle): Promise<void> {
-	const baseDir = path.dirname(handle.mergedDir);
+function reportFailedStop(backend: IsoBackendKind, mergedDir: string, error: unknown): void {
+	logger.warn("isolation backend stop failed during cleanup", {
+		backend,
+		mergedDir,
+		error: error instanceof Error ? error.message : String(error),
+		retained: needsNativeTeardown(backend),
+	});
+}
+
+/**
+ * Wait for a backend stop this teardown had to leave running, then put the
+ * slot back into service: the directory goes, the retiring marker with it, and
+ * the lock — if this teardown had to keep holding it because that marker could
+ * not be written — goes back. A slot refused for ever because one stop was
+ * slow is a leak of its own. A mount or subvolume whose stop fails keeps the
+ * directory, as an in-time one does.
+ *
+ * The removal is decided again when it happens: under the sandbox lock (the
+ * one handed over, or taken now), and only if the path is still the directory
+ * this teardown pinned, its marker is still the one this teardown left
+ * (`expected`), and nothing is mounted under it. The directory never left its
+ * name — that is why the stop ran in place — so neither the name nor the
+ * directory proves anything by the time the stop settles: a claim written into
+ * that same directory since is somebody else's.
+ */
+async function settleAbandonedStop(
+	stop: Promise<unknown>,
+	teardownBase: string,
+	backend: IsoBackendKind,
+	heldLock: { release: () => void } | undefined,
+	pin: fs.DirectoryPin,
+	expected: (claim: IsolationClaim) => boolean,
+): Promise<void> {
 	try {
-		await natives.isoStop(handle.backend, handle.mergedDir);
-	} catch (err) {
-		const retain = needsNativeTeardown(handle.backend);
-		logger.warn("isolation backend stop failed during cleanup", {
-			backend: handle.backend,
-			mergedDir: handle.mergedDir,
-			error: err instanceof Error ? err.message : String(err),
-			retained: retain,
-		});
-		if (retain) {
-			try {
-				await writeRetainedBackend(baseDir, handle.backend);
-			} catch (writeErr) {
-				logger.warn("retained-backend record write failed; unmount the workspace manually", {
-					mergedDir: handle.mergedDir,
-					error: writeErr instanceof Error ? writeErr.message : String(writeErr),
-				});
-			}
-			return;
+		try {
+			await stop;
+		} catch (error) {
+			reportFailedStop(backend, teardownBase, error);
+			if (needsNativeTeardown(backend)) return;
 		}
+		const remove = async (): Promise<void> => {
+			const now = await fs.checkPinnedDirectory(teardownBase, pin);
+			if (!now.same) {
+				logger.warn("abandoned isolation stop settled; the sandbox is not the directory it pinned, so it stays", {
+					mergedDir: teardownBase,
+					reason: now.reason,
+				});
+				return;
+			}
+			const claim = await readIsolationClaim(teardownBase);
+			if (!expected(claim)) {
+				logger.warn("abandoned isolation stop settled; the sandbox has been claimed since, so it stays", {
+					mergedDir: teardownBase,
+					found: claim.kind,
+				});
+				return;
+			}
+			const mounts = await fs.liveMountsUnder(teardownBase);
+			if (mounts.length > 0) {
+				logger.warn("abandoned isolation stop settled; something is still mounted in the sandbox, so it stays", {
+					mergedDir: teardownBase,
+					mounts,
+				});
+				return;
+			}
+			await fs.rm(teardownBase, { recursive: true, force: true });
+		};
+		if (heldLock) await remove();
+		else await withSandboxLock(teardownBase, "remove after a slow teardown", remove);
+	} catch (error) {
+		logger.warn("abandoned isolation stop did not settle cleanly; leaving the sandbox for reclamation", {
+			mergedDir: teardownBase,
+			error: error instanceof Error ? error.message : String(error),
+		});
+	} finally {
+		heldLock?.release();
+		await pin.release();
 	}
-	await fs.rm(baseDir, { recursive: true, force: true });
+}
+
+/**
+ * Tear down a handle returned by {@link ensureIsolation}.
+ *
+ * The workspace path is derived from the task id, so the same path is handed
+ * out again to a replacement spawn, to a session the SDK opens on it, or to
+ * another omp process entirely, and a teardown can arrive long after its own
+ * run — a release that outlived its lifecycle manager's deadline. So ownership
+ * is proved at the moment of deletion rather than before it, under the sandbox
+ * lock. **Nothing is deleted on evidence gathered earlier**: identity,
+ * ownership and the backend requirement are all established on the directory
+ * being removed, at the moment of removal.
+ *
+ * - the marker must still name *this* generation. Anything else — a later
+ *   run's generation, a damaged, truncated, unreadable or absent marker —
+ *   leaves the directory alone. A handle cannot establish ownership from a
+ *   marker nobody can read, and an unreadable marker is `omp worktree clear`'s
+ *   problem, not a licence.
+ * - the directory the claim was read from is pinned by identity (device and
+ *   inode, with a descriptor held open), and the backend it needs stopped is
+ *   written beside it before anything can be interrupted. A path names
+ *   whatever sits there next; a directory renamed away during the capture and
+ *   replaced by another claimed sandbox, or by a symlink to one, answered to
+ *   the same name, and the teardown deleted the other run's workspace.
+ * - `capture` — writing this run's patch, and its branch — runs *here*, under
+ *   that same lock, immediately before the removal. Capture and the authority
+ *   to delete have to be one span: every ordering where they were not left a
+ *   window in which something was admitted, replaced or cleaned between them,
+ *   and the work written in that window went with the directory. Nothing can
+ *   take the lock between the two, and a party that wants it waits and then
+ *   fails, which is the right answer.
+ * - the capture is bounded, and the bound **refuses**: when it cannot be
+ *   completed the workspace is kept and said so, because a workspace that
+ *   survives costs disk and a log line while a lost patch costs a user's work.
+ * - only then, and only after the path is checked against the pin and the
+ *   marker is read again, is the directory retired: renamed out of the way,
+ *   which takes it out of circulation in one atomic step, so a
+ *   materialisation that starts the instant the lock is released builds a
+ *   fresh sandbox at the original path. A mount the backend still holds
+ *   refuses the rename (`EBUSY`); that teardown keeps the lock instead. The
+ *   retired copy is checked against the pin again, the backend is stopped —
+ *   never through a mount directory that is a symlink — and the removal runs
+ *   on the pinned directory or not at all. A mount or subvolume backend whose
+ *   stop fails is not removed: the mount may still be live and the removal
+ *   would walk through it. `omp worktree clear` stops it, by its record,
+ *   before it removes anything.
+ *
+ * A handle with no generation predates claims (a fixture's hand-built handle)
+ * and keeps the old unconditional behaviour.
+ */
+
+export async function cleanupIsolation(
+	handle: IsolationHandle,
+	options: { capture?: () => Promise<void> } = {},
+): Promise<void> {
+	// baseDir is the parent of the merged directory, resolved to the directory
+	// itself: a lock on an alias of this path excludes nobody.
+	const baseDir = await resolveSandboxIdentity(path.dirname(handle.mergedDir));
+	// This lock outlives the decision — an in-place teardown keeps it across
+	// the backend stop, and hands it to the continuation when the retiring
+	// marker cannot be written — so it is taken as a handle rather than in a
+	// `withSandboxLock` body. The hold is still *recorded* for the whole
+	// teardown, which is what lets the capture's retention, and everything
+	// else under here, detect it instead of queueing behind it.
+	//
+	// Re-entering would queue this call behind itself for the full wait, so
+	// say so immediately instead of hanging: the deferred teardown is run
+	// outside the hold that decided to run it, and nothing else may call this
+	// while holding the lock.
+	if (holdsSandboxLock(baseDir)) {
+		throw new Error(`Isolation teardown of ${baseDir} was called while its sandbox lock is already held.`);
+	}
+	// Waiting for a slow materialisation or teardown is the point of the lock,
+	// so wait generously rather than failing the run that needs the sandbox.
+	const lock = await acquireSandboxLockWithNotice(baseDir, "tear down");
+	let retiredDir: string | undefined;
+	let proceed = false;
+	await runHoldingSandboxLock(baseDir, lock, async () => {
+		let pin: fs.DirectoryPin | undefined;
+		try {
+			if (handle.generation !== undefined) {
+				const claim = await readIsolationClaim(baseDir);
+				if (claim.kind !== "claimed" || claim.generation !== handle.generation) {
+					logger.warn("isolation cleanup skipped: the workspace is no longer provably this run's", {
+						mergedDir: handle.mergedDir,
+						expected: handle.generation,
+						found: claim.kind === "claimed" ? claim.generation : claim.kind,
+					});
+					return;
+				}
+			}
+			// The directory the claim was just read from, held by what it is.
+			try {
+				pin = await fs.pinDirectory(baseDir);
+			} catch (error) {
+				logger.warn("isolation cleanup skipped: the sandbox could not be held by identity", {
+					mergedDir: handle.mergedDir,
+					error: error instanceof Error ? error.message : String(error),
+				});
+				return;
+			}
+			// Someone is still working in here — a nested child that inherited this
+			// cwd, a session another process opened in it. Asked under the lock and
+			// after the claim check, so a lease taken while this teardown was
+			// deciding still counts. The owner keeps the teardown; the last user to
+			// leave runs it. See `isolation-lease`.
+			if (
+				await deferTeardownWhileLeased(handle.mergedDir, async () => await cleanupIsolation(handle, options), {
+					generation: handle.generation,
+				})
+			) {
+				return;
+			}
+			// A user had to give up its lease while its own shutdown might still be
+			// writing here. Removing the directory under that write loses the work
+			// just as surely as deleting it with the lease held would have, so the
+			// workspace stays and reclamation takes it once that process is gone.
+			if (await hasUnfinishedWriter(baseDir)) {
+				logger.warn("isolation workspace kept: a user may still be writing into it", {
+					mergedDir: handle.mergedDir,
+				});
+				return;
+			}
+			// The backend this workspace needs stopped goes on disk before anything
+			// here can be interrupted. A teardown killed after the retiring rename
+			// and before a failed stop wrote it left a retired directory with no
+			// record, and `omp worktree clear` then removed a file through the live
+			// mount. Materialisation writes it too; this covers a sandbox built
+			// before it did. A record that cannot be written stops the teardown.
+			if (needsNativeTeardown(handle.backend)) {
+				try {
+					await writeRetainedBackend(baseDir, handle.backend);
+				} catch (error) {
+					logger.warn("isolation workspace kept: its backend could not be recorded before teardown", {
+						mergedDir: handle.mergedDir,
+						error: error instanceof Error ? error.message : String(error),
+					});
+					return;
+				}
+			}
+			// The last thing before the directory goes, and still under the lock
+			// that authorises its going.
+			//
+			// The deadline decides the *outcome*, never the holding. A capture
+			// cannot be cancelled once a patch write or a branch commit is under
+			// way, so releasing the lock at a deadline while that work continues
+			// hands the pathname to the next materialisation and lets the capture
+			// land in — or move — a successor's workspace. The lock is held until
+			// the capture really stops; past the deadline the only thing that
+			// changes is that this teardown no longer deletes.
+			if (options.capture) {
+				// The capture runs inside this teardown's hold: retention it calls
+				// detects that rather than waiting sixty seconds on a lock this
+				// very call owns.
+				const capturing = options
+					.capture()
+					.then(() => true)
+					.catch(error => {
+						logger.warn("isolation capture failed; keeping the workspace", {
+							mergedDir: handle.mergedDir,
+							error: error instanceof Error ? error.message : String(error),
+						});
+						return false;
+					});
+				const deadline = new AbortController();
+				const overran = await Promise.race([
+					capturing.then(() => false),
+					// Aborted the moment the capture settles, so the loser cannot
+					// keep this process alive after the work is done.
+					scheduler.wait(SANDBOX_CAPTURE_MAX_WAIT_MS, { signal: deadline.signal }).then(
+						() => true,
+						() => false,
+					),
+				]);
+				deadline.abort();
+				if (overran) {
+					logger.warn(
+						"isolation capture outran its deadline; keeping the workspace and holding it until the capture stops",
+						{
+							mergedDir: handle.mergedDir,
+							waitedMs: SANDBOX_CAPTURE_MAX_WAIT_MS,
+						},
+					);
+					await capturing;
+					return;
+				}
+				if (!(await capturing)) return;
+			}
+			// At the act, on the object about to go: the claim check above and
+			// everything after it ran against a pathname, and the capture may have
+			// run for minutes. What has that name now must be the pinned
+			// directory, and its marker must still name this generation.
+			const present = await fs.checkPinnedDirectory(baseDir, pin);
+			if (!present.same) {
+				logger.warn("isolation cleanup skipped: the sandbox is no longer the directory this run proved its own", {
+					mergedDir: handle.mergedDir,
+					reason: present.reason,
+				});
+				return;
+			}
+			if (handle.generation !== undefined) {
+				const claim = await readIsolationClaim(baseDir);
+				if (claim.kind !== "claimed" || claim.generation !== handle.generation) {
+					logger.warn("isolation cleanup skipped: the workspace changed hands during the capture", {
+						mergedDir: handle.mergedDir,
+						expected: handle.generation,
+						found: claim.kind === "claimed" ? claim.generation : claim.kind,
+					});
+					return;
+				}
+			}
+			const candidate = `${baseDir}.retiring-${handle.generation ?? Snowflake.next()}`;
+			try {
+				// At the act: the capture above may have run long enough for
+				// this teardown's hold to have ended under it.
+				requireSandboxLockHeld(baseDir, "retire");
+				await fs.rename(baseDir, candidate);
+				retiredDir = candidate;
+			} catch {
+				// A live mount pins the directory in place; hold the lock across the
+				// teardown instead, so no materialisation can start beside it.
+				retiredDir = undefined;
+			}
+			if (retiredDir !== undefined) {
+				// A rename moves whatever had the name. Only the pinned directory
+				// goes further; anything else is put back and left alone.
+				const moved = await fs.checkPinnedDirectory(retiredDir, pin);
+				if (!moved.same) {
+					logger.warn("isolation cleanup skipped: what was retired is not the directory this run proved its own", {
+						mergedDir: handle.mergedDir,
+						reason: moved.reason,
+					});
+					await fs.rename(retiredDir, baseDir).catch(() => undefined);
+					retiredDir = undefined;
+					return;
+				}
+				// The copy left behind is nobody's sandbox now. Saying so keeps a
+				// failed removal below from looking like a live owner's workspace to
+				// the user's `omp worktree clear`, which would then refuse to remove
+				// it while this process lives.
+				await markIsolationRetired(retiredDir).catch(() => undefined);
+			}
+			proceed = true;
+		} finally {
+			// Held past here only when the directory could not be retired.
+			if (!proceed || retiredDir !== undefined) lock.release();
+			if (!proceed) await pin?.release();
+		}
+		if (pin === undefined) return;
+		const held = pin;
+		const teardownBase = retiredDir ?? baseDir;
+		const teardownMerged = path.join(teardownBase, path.basename(handle.mergedDir));
+		// An in-place teardown holds the lock, so a backend stop that never settles
+		// would deny every later materialisation of this id. Bounded: past the
+		// bound the stop is left running, the lock goes back, and the directory is
+		// left for the user to remove with `omp worktree clear`, which can tell a
+		// retired sandbox from a live one. Nothing removes it on its own.
+		let abandoned = false;
+		let lockHandedOver = false;
+		let pinHandedOver = false;
+		// Set when the directory must stay: a mount or subvolume whose stop
+		// failed may still be live and the removal would walk through it, and a
+		// directory that is no longer the pinned one is not this teardown's.
+		let keep = false;
+		try {
+			try {
+				// A stop follows a symlink at the mount directory into whatever it
+				// names, and unmounts or deletes that instead.
+				const mountDir = await fs.lstatLookup(teardownMerged);
+				if (mountDir.kind === "found" && mountDir.value.isSymbolicLink()) {
+					keep = true;
+					logger.warn("isolation workspace kept: its mount directory is a symlink, so it is not stopped", {
+						mergedDir: teardownMerged,
+					});
+					return;
+				}
+				// Every native stop removes a tree, so it never runs while
+				// something other than the backend's own mount is under the
+				// workspace: a mount nested in an rcopy copy, or below an
+				// overlay's `upper`, had its source deleted by the stop itself,
+				// before the removal's own check could refuse.
+				const foreign = await foreignMountsUnder(teardownBase, handle.backend, teardownMerged);
+				if (foreign.length > 0) {
+					keep = true;
+					logger.warn("isolation workspace kept: something else is mounted in it, so it is not stopped", {
+						mergedDir: teardownMerged,
+						mounts: foreign,
+					});
+					return;
+				}
+				// The stop acts on a pathname; checked against the pin at the last
+				// moment before it, not only when the directory was retired.
+				const beforeStop = await fs.checkPinnedDirectory(teardownBase, held);
+				if (!beforeStop.same) {
+					keep = true;
+					logger.warn("isolation workspace not stopped: it is no longer the directory this run proved its own", {
+						mergedDir: teardownMerged,
+						reason: beforeStop.reason,
+					});
+					return;
+				}
+				const stop = natives.isoStop(handle.backend, teardownMerged);
+				if (retiredDir === undefined) {
+					abandoned = !(await Promise.race([
+						stop.then(() => true),
+						scheduler.wait(SANDBOX_STOP_MAX_WAIT_MS).then(() => false),
+					]));
+					if (abandoned) {
+						logger.warn("isolation backend stop outran its teardown bound", {
+							backend: handle.backend,
+							mergedDir: teardownMerged,
+						});
+						// The stop is still running on this exact path and can still
+						// delete it, so nothing may take the slot until it settles.
+						// The marker is what says so; when it cannot be written the
+						// lock stays held instead — a slot nobody can take is the
+						// same answer, and releasing it on a failed write is how a
+						// successor's data ends up deleted by that stop.
+						const marked = await markIsolationRetiring(teardownBase, handle.generation).then(
+							() => true,
+							(error: unknown) => {
+								logger.warn("isolation retiring marker could not be written; holding the sandbox lock", {
+									mergedDir: teardownMerged,
+									error: error instanceof Error ? error.message : String(error),
+								});
+								return false;
+							},
+						);
+						// The stop is still this teardown's: when it ends, the slot
+						// goes back into service rather than staying refused for the
+						// life of the owner.
+						// Handed to the continuation when the marker could not be
+						// written: it, and not the `finally` below, gives the lock
+						// back once the stop settles. The pin always goes with it.
+						lockHandedOver = !marked;
+						pinHandedOver = true;
+						trackLateCleanup(
+							settleAbandonedStop(
+								stop,
+								teardownBase,
+								handle.backend,
+								marked ? undefined : lock,
+								held,
+								marked
+									? claim => claim.kind === "retiring" && claim.generation === handle.generation
+									: claim =>
+											handle.generation === undefined ||
+											(claim.kind === "claimed" && claim.generation === handle.generation),
+							),
+							{
+								id: path.basename(teardownBase),
+								resource: "isolation",
+							},
+						);
+					}
+				} else {
+					await stop;
+				}
+			} catch (err) {
+				keep = needsNativeTeardown(handle.backend);
+				reportFailedStop(handle.backend, teardownMerged, err);
+			}
+		} finally {
+			try {
+				if (!abandoned && !keep) {
+					// The removal acts on what has the name now, and never walks
+					// into a mount.
+					const now = await fs.checkPinnedDirectory(teardownBase, held);
+					const mounts = now.same ? await fs.liveMountsUnder(teardownBase) : [];
+					if (now.same && mounts.length === 0) {
+						await fs.rm(teardownBase, { recursive: true, force: true });
+					} else if (mounts.length > 0) {
+						logger.warn("isolation workspace kept: something is still mounted in it", {
+							mergedDir: teardownMerged,
+							mounts,
+						});
+					} else if (!now.same) {
+						logger.warn("isolation workspace kept: it is no longer the directory this run proved its own", {
+							mergedDir: teardownMerged,
+							reason: now.reason,
+						});
+					}
+				}
+			} catch (err) {
+				logger.warn("isolation workspace removal failed; leaving it for reclamation", {
+					mergedDir: teardownMerged,
+					error: err instanceof Error ? err.message : String(err),
+				});
+			} finally {
+				// Always: a removal that threw must not keep the sandbox locked for
+				// the life of this process. Keyed by generation, so an older
+				// teardown finishing cannot drop the record — and the pending
+				// teardown — of the materialisation that replaced it.
+				forgetIsolationWorkspace(handle.mergedDir, handle.generation);
+				if (retiredDir === undefined && !lockHandedOver) lock.release();
+				if (!pinHandedOver) await held.release();
+			}
+		}
+	});
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -829,9 +1648,7 @@ async function patchTree(
 		// WIP-only files are untouched by the delta, so their post-delta state
 		// is the WIP state; diffing it back to the parent rewinds them.
 		const rewind =
-			wipOnly.size > 0
-				? filterPatchFiles(await diffTreeOrEmpty(vcs.requireGit(repoDir), withWip, parentSha), wipOnly)
-				: "";
+			wipOnly.size > 0 ? filterPatchFiles(await diffTree(vcs.requireGit(repoDir), withWip, parentSha), wipOnly) : "";
 		return await writeSyntheticTree(repoDir, parentSha, [...wipPatches, patchText, rewind]);
 	} catch (wipErr) {
 		if (!vcs.isVcsError(wipErr)) throw wipErr;
@@ -886,7 +1703,7 @@ async function replayFilteredAgentCommits(opts: FilteredAgentReplayOptions): Pro
 	let previousFilteredTree = baselineSha;
 
 	for (const commitSha of agentCommits) {
-		const taskStatePatch = await diffTreeOrEmpty(isolationRepo, dirtyBaselineTree, `${commitSha}^{tree}`);
+		const taskStatePatch = await diffTree(isolationRepo, dirtyBaselineTree, `${commitSha}^{tree}`);
 		// The delta is captured against `HEAD + baseline WIP`, so synthesise the
 		// filtered tree through `patchTree` with that WIP context: hunks that
 		// touch WIP paths — including deletions of untracked WIP the agent never
@@ -900,7 +1717,7 @@ async function replayFilteredAgentCommits(opts: FilteredAgentReplayOptions): Pro
 			taskStatePatch,
 			opts.baseline.root,
 		);
-		const commitPatchText = await diffTreeOrEmpty(repo, previousFilteredTree, currentFilteredTree);
+		const commitPatchText = await diffTree(repo, previousFilteredTree, currentFilteredTree);
 		if (commitPatchText.trim()) {
 			const details = await isolationRepo.commitDetails(commitSha);
 			tip = await commitPatch(
@@ -937,7 +1754,7 @@ async function replayFilteredAgentCommits(opts: FilteredAgentReplayOptions): Pro
 		opts.rootPatch,
 		opts.baseline.root,
 	);
-	const leftoverPatch = await diffTreeOrEmpty(repo, previousFilteredTree, finalFilteredTree);
+	const leftoverPatch = await diffTree(repo, previousFilteredTree, finalFilteredTree);
 	if (!leftoverPatch.trim()) return tip;
 	const msg = (opts.commitMessage && (await opts.commitMessage(leftoverPatch))) || opts.fallbackMessage;
 	return commitPatch(opts.repoRoot, tip, opts.taskId, leftoverPatch, msg);

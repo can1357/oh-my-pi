@@ -61,6 +61,8 @@ function createInitFailingHandle(
 		async terminate() {
 			state.terminations++;
 			messageListeners.clear();
+			// Nothing runs behind this handle, so there is no exit left to wait for.
+			return true;
 		},
 	};
 }

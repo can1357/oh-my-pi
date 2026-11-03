@@ -260,6 +260,16 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 	}
 
 	/**
+	 * True while the runner still owes this host a frame: a cell, a backgrounded
+	 * cell, a tool request or a control request. Reclaiming a kernel its session
+	 * has walked away from consults this so work already in flight is never
+	 * killed under the caller that started it.
+	 */
+	hasPendingWork(): boolean {
+		return this.#pending.size > 0 || this.#pendingControls.size > 0;
+	}
+
+	/**
 	 * Settles once the kernel stops accepting work: subprocess exit or the start
 	 * of a shutdown. Retained-state reporting uses it to mark the kernel dead.
 	 */

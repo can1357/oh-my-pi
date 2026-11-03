@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `lsFilesWithWarnings` to `VcsGitRepo` and `VcsRepo`: the untracked listing together with the directories git could not open and the names that are not valid UTF-8, so a caller can tell a short listing from a complete one ([#17641](https://github.com/can1357/oh-my-pi/pull/17641) by [@sjawhar](https://github.com/sjawhar))
+
+### Changed
+
+- `lsFiles` on a git repository now leaves out a name that is not valid UTF-8 instead of returning it with `�` in place of its bytes, and `diffNoIndex` now fails on a path that does not exist instead of diffing it as empty ([#17641](https://github.com/can1357/oh-my-pi/pull/17641) by [@sjawhar](https://github.com/sjawhar))
+- With `binary: true`, `diffText`, `diffTree` and `diffNoIndex` now carry content that is not valid UTF-8 as a binary patch instead of replacing each such byte with `�`, keep a backslash in a file name instead of turning it into `/` (outside Windows), and fail on a path the patch cannot carry exactly (not valid UTF-8, a control character or a double quote); `applyPatch` now reads a name with a space from a section that has no `---`/`+++` lines ([#17641](https://github.com/can1357/oh-my-pi/pull/17641) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.16.0] - 2026-11-02
 
 ### Added

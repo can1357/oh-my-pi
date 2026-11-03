@@ -19,6 +19,7 @@ class FakeKernel {
 	#alive: boolean;
 	readonly executeCalls: string[] = [];
 	shutdownCalls = 0;
+	pendingWork = false;
 
 	constructor(
 		result: KernelExecuteResult,
@@ -31,6 +32,10 @@ class FakeKernel {
 
 	isAlive(): boolean {
 		return this.#alive;
+	}
+
+	hasPendingWork(): boolean {
+		return this.pendingWork;
 	}
 
 	markDead(): void {

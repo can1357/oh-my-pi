@@ -4,7 +4,7 @@
 import { type } from "@oh-my-pi/omptype";
 import type { Settings } from "../config/settings";
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
-import { createEvalCustomTools, describeEvalTools } from "../task/eval-tools";
+import { borrowEvalToolKernels, createEvalCustomTools, describeEvalTools } from "../task/eval-tools";
 import {
 	buildStructuredSubagentRecoveryHint,
 	invalidModelSelectorReason,
@@ -192,9 +192,16 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 					...(parsed.apply !== undefined ? { apply: parsed.apply } : {}),
 				}
 			: undefined;
-	const customTools = parsed.tools?.length
-		? createEvalCustomTools(options.session, await describeEvalTools(options.session, parsed.tools, options.signal))
+	const descriptors = parsed.tools?.length
+		? await describeEvalTools(options.session, parsed.tools, options.signal)
 		: undefined;
+	const customTools = descriptors ? createEvalCustomTools(options.session, descriptors) : undefined;
+	// Held until the agent can no longer call these tools: it is registered with
+	// `keepAlive`, so it stays wakeable by id after its first job ends, and the
+	// parent's next cell elsewhere must not reclaim the kernel they run on
+	// under it. `runStructuredSubagent` runs this exactly once, at the end of
+	// that agent's lifecycle.
+	const releaseKernels = descriptors ? borrowEvalToolKernels(options.session, descriptors) : () => {};
 
 	try {
 		const policy = await resolveEffectiveSubagentPolicy({
@@ -234,6 +241,7 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 						...(customTools ? { customTools } : {}),
 						retainArtifacts: true,
 						keepAlive: true,
+						onRelease: releaseKernels,
 						signal,
 						onProgress: progress => {
 							latestProgress = progress;
@@ -255,6 +263,9 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 		);
 		return { id, agent: policy.agentName };
 	} catch (error) {
+		// Only reached before the job exists; from registration on, the child's
+		// lifecycle owns the release.
+		releaseKernels();
 		if (error instanceof StructuredSubagentError) throw new ToolError(error.message);
 		throw error;
 	}

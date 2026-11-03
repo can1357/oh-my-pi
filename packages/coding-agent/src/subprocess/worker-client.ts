@@ -444,19 +444,65 @@ async function drainStderrCapture(capture: StderrCapture, exitLabel: string, tai
 }
 
 /**
+ * How long a kill waits to see the worker exit. `SIGKILL` cannot be caught or
+ * ignored, so what can hold the exit back is a thread in truly uninterruptible
+ * kernel I/O — which no signal ends at once, and which leaves only when that
+ * I/O completes or is aborted — or a host too loaded to run the reaper. A
+ * bounded wait cannot guarantee the exit; it only bounds how long a teardown
+ * waits before saying the exit went unconfirmed.
+ */
+export const WORKER_EXIT_CONFIRM_MS = 5_000;
+
+/**
+ * Whether `exited` settles within `timeoutMs`. Sending a kill is not seeing
+ * the exit: callers that promise a worker is down await this, and keep the
+ * worker when it says no. The timer never holds the host open.
+ */
+export async function settlesWithin(exited: Promise<unknown>, timeoutMs: number): Promise<boolean> {
+	const { promise, resolve } = Promise.withResolvers<boolean>();
+	const timer = setTimeout(() => resolve(false), timeoutMs);
+	timer.unref?.();
+	void exited.then(
+		() => resolve(true),
+		() => resolve(true),
+	);
+	try {
+		return await promise;
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
+/**
+ * `SIGKILL` the worker and wait, bounded by {@link WORKER_EXIT_CONFIRM_MS},
+ * for it to exit and be reaped. Resolves whether that was seen. The
+ * intentional-exit flag is flipped *before* the kill so `onExit` can tell it
+ * apart from a native crash.
+ */
+export async function killWorkerSubprocess<Outbound>(spawned: SpawnedSubprocess<Outbound>): Promise<boolean> {
+	spawned.intentionalExit.value = true;
+	try {
+		spawned.proc.kill("SIGKILL");
+	} catch {
+		// Already gone.
+	}
+	return await settlesWithin(spawned.proc.exited, WORKER_EXIT_CONFIRM_MS);
+}
+
+/**
  * Wrap a {@link SpawnedSubprocess} as a {@link WorkerHandle}. The `send`
  * strategy is injected so each client keeps its exact IPC-send behaviour (e.g.
  * `safeSend` vs an inline guarded `proc.send`). `terminate()` SIGKILLs: the
  * point of subprocess isolation is that the parent never runs
  * `onnxruntime-node`'s NAPI finalizer (it crashes Bun on Windows), so the OS
- * reclaims the model memory instead. The intentional-exit flag is flipped
- * *before* the kill so `onExit` can tell it apart from a native crash.
+ * reclaims the model memory instead. It returns once the exit is seen, or
+ * once {@link WORKER_EXIT_CONFIRM_MS} has passed without it.
  */
 export function createWorkerHandle<Inbound, Outbound>(
 	spawned: SpawnedSubprocess<Outbound>,
 	send: (message: Inbound) => void,
 ): WorkerHandle<Inbound, Outbound> {
-	const { proc, inbound, errors, intentionalExit } = spawned;
+	const { inbound, errors } = spawned;
 	return {
 		send,
 		onMessage(handler) {
@@ -468,12 +514,7 @@ export function createWorkerHandle<Inbound, Outbound>(
 			return () => errors.delete(handler);
 		},
 		async terminate() {
-			intentionalExit.value = true;
-			try {
-				proc.kill("SIGKILL");
-			} catch {
-				// Already gone.
-			}
+			await killWorkerSubprocess(spawned);
 		},
 	};
 }

@@ -78,8 +78,13 @@ export interface KernelExecutorBaseOptions {
 	bridgeSessionId?: string;
 	artifactId?: string;
 	artifactPath?: string;
-	/** Set by the kernel session registry; true when this cell is the first on a replacement for a dead kernel. */
-	claimKernelRestartNotice?: () => boolean;
+	/**
+	 * Set by the kernel session registry. Called once, when the cell starts on
+	 * its kernel, and returns the line that cell must open with: that the
+	 * kernel the session previously used here was reclaimed, or died, and its
+	 * state is gone. Returns undefined when there is nothing to say.
+	 */
+	claimKernelNotice?: () => string | undefined;
 }
 
 /** Normalised execution result produced by {@link executeWithKernelBase}. */
@@ -100,7 +105,53 @@ export interface KernelExecutionResult {
 	stdinRequested: boolean;
 }
 
-/** Mirrors the `eval-state-context` reminder wording so agents recognise it. */
+/**
+ * What a reclaim's teardown does besides losing the namespace, by how the
+ * runtime is torn down. Unlike the namespace loss, which the cell carrying
+ * the notice proves by running on another kernel, these are what the
+ * teardown sends, not what it observed — the old runtime may still be exiting
+ * when the notice is read — so each says where the signal does not reach.
+ *
+ * A kernel process's shutdown ends in a `SIGKILL` to the runner's process
+ * group. A child that started its own session or process group (an ordinary
+ * `Popen(..., start_new_session=True)`) is outside it and is not signalled.
+ * A JavaScript worker is terminated on its own, not as a group, so its
+ * timers, callbacks and `node:worker_threads` threads end with it while a
+ * subprocess it spawned is not signalled. In both, a signal cannot
+ * immediately end truly uninterruptible kernel I/O: a thread blocked in it
+ * outlives the kill until that I/O completes or is aborted.
+ */
+const RECLAIM_TEARDOWN = {
+	"process-group":
+		"Its shutdown sends SIGKILL to the kernel's process group, which stops threads and subprocesses its cells left running and loses writes they had not flushed — except a subprocess that started its own session or process group, which is not signalled and can keep running, and a thread blocked in uninterruptible I/O, which outlives the kill until that I/O completes or is aborted.",
+	worker:
+		"Its shutdown terminates the worker, which stops the timers, pending callbacks and background threads its cells left running and loses writes they had not flushed — except a thread blocked in uninterruptible I/O, which outlives the kill until that I/O completes or is aborted. Subprocesses its cells started are not signalled and can keep running.",
+} as const;
+
+/**
+ * First line of a cell that runs on a kernel which replaced one this session
+ * left behind and the registry reclaimed. Reclaiming frees the memory a
+ * forgotten runtime holds, and the cost lands on the user as a namespace that
+ * is suddenly empty, so the cell that meets it says so instead of failing with
+ * an unexplained `NameError`. It names `directory`, the working directory of
+ * the kernel that went, because an agent working in two directories cannot
+ * otherwise tell which namespace it lost. The namespace loss comes first, as
+ * the one certainty; what the teardown also stops, and what it cannot reach,
+ * follows.
+ */
+export function formatKernelReclaimNotice(
+	runtimeLabel: string,
+	directory: string,
+	teardown: keyof typeof RECLAIM_TEARDOWN,
+): string {
+	return `Kernel restarted: the previous ${runtimeLabel} for ${directory} was reclaimed after this session moved away from it, so variables, imports and definitions from earlier cells are gone; re-run needed setup. ${RECLAIM_TEARDOWN[teardown]}`;
+}
+
+/**
+ * First line of a cell that runs on a kernel which replaced one that died on
+ * its own, not by a reset, a disposal or a reclaim. Mirrors the
+ * `eval-state-context` reminder wording so agents recognise it.
+ */
 export function formatKernelRestartNotice(runtimeLabel: string): string {
 	return `Kernel restarted: the previous ${runtimeLabel} is dead; state is unavailable. Re-run needed setup: variables, imports and definitions from earlier cells are gone.`;
 }
@@ -519,11 +570,11 @@ export async function executeWithKernelBase<
 				})
 			: null;
 
-	const restartNotice = options?.claimKernelRestartNotice?.()
-		? formatKernelRestartNotice(`${errorLogLabel} kernel`)
-		: undefined;
+	// Claimed once, as the cell starts. A thrown error drops streamed output,
+	// so the catch below carries the line too.
+	const notice = options?.claimKernelNotice?.();
 	try {
-		if (restartNotice) sink.push(`${restartNotice}\n`);
+		if (notice !== undefined) sink.push(`${notice}\n`);
 		if (remainingMs !== undefined && remainingMs <= 0) {
 			throw new cancelledErrorClass(true);
 		}
@@ -624,7 +675,7 @@ export async function executeWithKernelBase<
 		const error = toError(err);
 		logger.error(`${errorLogLabel} execution failed`, { error: error.message });
 		// The notice was claimed for this cell; a thrown error drops streamed output, so carry it here.
-		if (restartNotice) error.message = `${restartNotice}\n${error.message}`;
+		if (notice !== undefined) error.message = `${notice}\n${error.message}`;
 		throw error;
 	} finally {
 		await sink.dispose();

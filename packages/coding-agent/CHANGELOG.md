@@ -4,8 +4,24 @@
 
 ### Added
 
+- Added `eval.kernelReclaimGraceMs` to set how long a Python kernel or JavaScript worker you have moved away from is kept before it is shut down (default two minutes; `0` keeps it until the session ends) ([#17394](https://github.com/can1357/oh-my-pi/pull/17394) by [@sjawhar](https://github.com/sjawhar))
 - Pinned sessions show a pin beside their title in the status line and the band composer's title, and `/unpin [session id]` unpins a session ([#17848](https://github.com/can1357/oh-my-pi/pull/17848) by [@SuperUserA](https://github.com/SuperUserA))
 - Added a fullscreen extension link browser for picking links already in terminal scrollback: press Alt+O again (or Page Up) while link tags are shown, or Alt+O with no extension link on screen ([#16476](https://github.com/can1357/oh-my-pi/pull/16476) by [@materemias](https://github.com/materemias))
+
+### Changed
+
+- `omp worktree clear` now keeps a task-isolation sandbox that cannot prove it is finished (no owner marker, or one it cannot read) unless you pass `--all`, decides again for every entry at the moment it removes it (keeping one that changed since the scan), and `omp worktree list` and `clear` say why each kept entry is kept ([#17641](https://github.com/can1357/oh-my-pi/pull/17641) by [@sjawhar](https://github.com/sjawhar))
+
+### Fixed
+
+- An eval kernel you move away from is now shut down two minutes later instead of holding its memory for the life of the process: come back to that directory, session file or interpreter after that and your variables are gone, and so is work your cells left running (except a subprocess in its own session and a thread stuck in uninterruptible I/O), and the first cell there says so and names the directory. Coming back inside the two minutes keeps everything, and a kernel a running cell, a subagent or a second agent is still using is kept until they are done with it ([#17394](https://github.com/can1357/oh-my-pi/pull/17394) by [@sjawhar](https://github.com/sjawhar))
+- Fixed a subagent's retained eval kernel or isolation workspace being released while the child was still using it, and being held for the life of the host when a spawn ended before the child existed ([#17640](https://github.com/can1357/oh-my-pi/pull/17640) by [@sjawhar](https://github.com/sjawhar))
+- Fixed an isolated task's cleanup deleting untracked files its capture could not read, such as a file without read permission, a file whose name is not valid UTF-8, one in a directory git could not open, or one in a directory whose name git could not report in full; the capture now fails and the workspace is kept ([#17641](https://github.com/can1357/oh-my-pi/pull/17641) by [@sjawhar](https://github.com/sjawhar))
+- Fixed `omp worktree clear` deleting a task-isolation workspace that finished being created after the scan saw its directory empty, and an isolated task's cleanup deleting another run's workspace that had replaced its own during the capture (moved in, symlinked in, or claimed in place) ([#17641](https://github.com/can1357/oh-my-pi/pull/17641) by [@sjawhar](https://github.com/sjawhar))
+- Fixed `omp worktree clear` deleting files through a live overlay mount left by an isolated task that was killed during its teardown; the backend is now recorded before the mount and before the teardown ([#17641](https://github.com/can1357/oh-my-pi/pull/17641) by [@sjawhar](https://github.com/sjawhar))
+- Fixed an isolated task's saved changes altering a file whose content is not valid UTF-8, a file whose name holds a backslash, or an empty or binary file whose name holds a space, after which cleanup deleted the original; a name the patch cannot carry exactly (not valid UTF-8, a control character or a double quote) now fails the capture and the workspace is kept ([#17641](https://github.com/can1357/oh-my-pi/pull/17641) by [@sjawhar](https://github.com/sjawhar))
+- Fixed `omp worktree clear` deleting the files of a directory outside the worktree directory when an entry inside it was a symlink; such entries are now listed and kept, and no isolation path follows a name out of the worktree directory ([#17641](https://github.com/can1357/oh-my-pi/pull/17641) by [@sjawhar](https://github.com/sjawhar))
+- Fixed an isolated task's cleanup, a failed workspace start and `omp worktree clear` deleting the files of a mount nested inside the workspace, on every platform, including a disk image mounted inside the copy on macOS; nothing is stopped or removed while anything other than the workspace's own backend mount is mounted in it ([#17641](https://github.com/can1357/oh-my-pi/pull/17641) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.16.0] - 2026-11-02
 
