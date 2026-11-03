@@ -7968,7 +7968,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	setGoalModeState(state: GoalModeState | undefined): void {
-		this.#goalModeState = state;
+		this.#goalRuntime.setState(state);
 	}
 
 	getVibeModeState(): VibeModeState | undefined {
@@ -11851,8 +11851,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				keepFailure(error);
 			}
 		};
-		// The goal this interrupt stops (null: none); a goal created while it unwinds is later work.
-		const interruptedGoalId = this.#goalModeState?.goal?.id ?? null;
+		// A resume is later work even when it reuses the same goal id.
+		const interruptedGoalActivation = this.#goalRuntime.activeActivation;
+		const releaseGoalNotifications = this.#goalRuntime.holdNotifications();
+		let goalNotifications: Promise<void> | undefined;
 		let cleaning = true;
 		const endStateCleanup = (): void => {
 			if (!cleaning) return;
@@ -11860,6 +11862,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.#abortsInProgress--;
 			this.#notifyInterruptChange();
 			step(() => this.#drainStrandedQueuedMessages());
+			goalNotifications = releaseGoalNotifications().catch(keepFailure);
 		};
 		try {
 			step(() => {
@@ -11972,16 +11975,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					} else this.#recordWithoutTurn([message]);
 				});
 			}
-			// Goal accounting and the pause belong to the stopped turn, so they are committed before
-			// later work may start, and only the goal that was active when this interrupt began is
-			// paused. Their `goal_updated` notifications run extension handlers: they are sent once
-			// the cleanup is done, like the other outside work below.
-			let sendGoalNotifications: () => Promise<void> = async () => {};
+			// Commit accounting and the pause before admission reopens. All goal notifications,
+			// including accounting during agent_end, keep their commit order but cannot run
+			// extension handlers until endStateCleanup releases this interrupt's hold.
 			try {
-				sendGoalNotifications = await this.#goalRuntime.onTaskAborted({
+				await this.#goalRuntime.onTaskAborted({
 					reason: options?.goalReason ?? "interrupted",
-					goalId: interruptedGoalId,
-					holdNotifications: true,
+					activation: interruptedGoalActivation,
 				});
 			} catch (error) {
 				keepFailure(error);
@@ -11989,8 +11989,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// The session state is clean: later work may run. The remaining steps only wait on
 			// outside work (revocation acks, goal notifications, autolearn capture) and touch none of it.
 			endStateCleanup();
-			await Promise.all([computerControlRevocation, postPromptCancel.settled]);
-			await sendGoalNotifications().catch(keepFailure);
+			await Promise.all([goalNotifications, computerControlRevocation, postPromptCancel.settled]);
 			await this.#drainAutolearnCapture().catch(keepFailure);
 		} finally {
 			endStateCleanup();

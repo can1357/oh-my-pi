@@ -38,6 +38,11 @@ export interface GoalRuntimeSnapshot {
 
 export type GoalPromptKind = "active" | "continuation" | "budget-limit";
 
+interface GoalNotificationBatch {
+	ready: Promise<void>;
+	sent: Promise<void>[];
+}
+
 function cloneGoal(goal: Goal): Goal {
 	return { ...goal };
 }
@@ -121,12 +126,17 @@ export class GoalRuntime {
 	#wallClock: GoalWallClockSnapshot;
 	#budgetReportedFor: string | undefined;
 	#accountingTail: Promise<void> = Promise.resolve();
-	/** While set, `goal_updated` notifications are collected here instead of sent (see {@link onTaskAborted}). */
-	#heldNotifications: GoalRuntimeEvent[] | undefined;
+	#activeActivation: symbol | undefined;
+	#notificationTail: Promise<void> = Promise.resolve();
+	#emittingNotification = false;
+	#notificationHolds = new Set<GoalNotificationBatch>();
+	#accountingNotifications: GoalNotificationBatch | undefined;
 
 	constructor(host: GoalRuntimeHost) {
 		this.#host = host;
 		this.#wallClock = { lastAccountedAt: this.#now() };
+		const state = host.getState();
+		if (state?.enabled && state.goal.status === "active") this.#activeActivation = Symbol();
 	}
 
 	get snapshot(): GoalRuntimeSnapshot {
@@ -137,6 +147,43 @@ export class GoalRuntime {
 			wallClock: { ...this.#wallClock },
 			budgetReportedFor: this.#budgetReportedFor,
 		};
+	}
+
+	/** Ownership of the current activation, never of a paused or budget-limited goal. */
+	get activeActivation(): symbol | null {
+		const state = this.#host.getState();
+		return state?.enabled && state.goal.status === "active" ? (this.#activeActivation ?? null) : null;
+	}
+
+	/** Hold committed notifications in order; release after the caller's state cleanup, even on failure. */
+	holdNotifications(): () => Promise<void> {
+		const { promise, resolve } = Promise.withResolvers<void>();
+		const batch: GoalNotificationBatch = { ready: promise, sent: [] };
+		this.#notificationHolds.add(batch);
+		return () => {
+			this.#notificationHolds.delete(batch);
+			resolve();
+			return Promise.all(batch.sent).then(() => {});
+		};
+	}
+
+	#enqueueNotification(event: GoalRuntimeEvent): void {
+		const holds = [...this.#notificationHolds];
+		const accounting = this.#accountingNotifications;
+		const sent = this.#notificationTail.then(async () => {
+			await accounting?.ready;
+			for (const hold of holds) await hold.ready;
+			this.#emittingNotification = true;
+			try {
+				await this.#host.emit(event);
+			} finally {
+				this.#emittingNotification = false;
+			}
+		});
+		// A failed handler must not strand later committed events. Batches retain the original rejection.
+		this.#notificationTail = sent.catch(() => {});
+		accounting?.sent.push(sent);
+		for (const hold of holds) hold.sent.push(sent);
 	}
 
 	#now(): number {
@@ -156,11 +203,21 @@ export class GoalRuntime {
 			() => promise,
 		);
 		await previous.catch(() => {});
+		const notifications: GoalNotificationBatch = { ready: promise, sent: [] };
+		this.#accountingNotifications = notifications;
+		let result: T;
 		try {
-			return await fn();
+			result = await fn();
 		} finally {
+			this.#accountingNotifications = undefined;
 			resolve();
 		}
+		// Release accounting before extension work. Held mutations and mutations made during
+		// a notification return their committed state without waiting on that handler's queue.
+		if (this.#notificationHolds.size === 0 && !this.#emittingNotification) {
+			await Promise.all(notifications.sent);
+		}
+		return result;
 	}
 
 	#getStateClone(): GoalModeState | undefined {
@@ -168,19 +225,29 @@ export class GoalRuntime {
 		return state ? cloneState(state) : undefined;
 	}
 
-	async #commitState(
+	/** Restore caller-supplied state without journaling or notifying. */
+	setState(state: GoalModeState | undefined): void {
+		this.#commitState(state, { emit: false });
+	}
+
+	#commitState(
 		state: GoalModeState | undefined,
-		options?: { persist?: "goal" | "goal_paused" | "none"; emit?: boolean },
-	): Promise<void> {
+		options?: { persist?: "goal" | "goal_paused" | "none"; emit?: boolean; newActivation?: boolean },
+	): void {
+		const previous = this.#host.getState();
+		if (state?.enabled && state.goal.status === "active") {
+			if (options?.newActivation || this.activeActivation === null || previous?.goal.id !== state.goal.id) {
+				this.#activeActivation = Symbol();
+				this.#markActiveAccounting(state.goal, true);
+			}
+		} else {
+			this.#activeActivation = undefined;
+		}
 		this.#host.setState(state ? cloneState(state) : undefined);
-		if (options?.persist) {
-			this.#host.persist(options.persist, state);
-		}
 		if (options?.emit !== false) {
-			const event = { type: "goal_updated" as const, goal: state ? cloneGoal(state.goal) : null, state };
-			if (this.#heldNotifications) this.#heldNotifications.push(event);
-			else await this.#host.emit(event);
+			this.#enqueueNotification({ type: "goal_updated", goal: state ? cloneGoal(state.goal) : null, state });
 		}
+		if (options?.persist) this.#host.persist(options.persist, state);
 	}
 
 	#markActiveAccounting(goal: Goal, resetWallClock = false): void {
@@ -194,6 +261,7 @@ export class GoalRuntime {
 	}
 
 	#clearActiveAccounting(): void {
+		this.#activeActivation = undefined;
 		this.#wallClock = { lastAccountedAt: this.#now() };
 		if (this.#turnSnapshot) {
 			this.#turnSnapshot.activeGoalId = undefined;
@@ -245,77 +313,52 @@ export class GoalRuntime {
 		this.#turnSnapshot = undefined;
 	}
 
-	/**
-	 * The task in flight was aborted: account its usage and, for an interrupt, pause the active goal.
-	 * With `goalId`, the goal that was active when the interrupt began (null: none was): a different
-	 * goal (created while the interrupt unwound) is left alone. With `holdNotifications`, the state
-	 * changes are committed now and the `goal_updated` notifications they raise are returned for the
-	 * caller to send later, so extension handlers do not run inside the caller's critical section.
-	 */
-	async onTaskAborted(options?: {
-		reason?: "interrupted" | "internal";
-		goalId?: string | null;
-		holdNotifications?: boolean;
-	}): Promise<() => Promise<void>> {
-		const state = this.#host.getState();
-		const ownsGoal = options?.goalId === undefined || (state !== undefined && state.goal.id === options.goalId);
-		const needsAccounting = ownsGoal && state?.enabled && isAccountingStatus(state.goal);
-		const needsPause =
-			ownsGoal && options?.reason === "interrupted" && state?.enabled && state.goal.status === "active";
-		const held: GoalRuntimeEvent[] = [];
-		const send = async (): Promise<void> => {
-			for (const event of held) await this.#host.emit(event);
-		};
-		if (!needsAccounting && !needsPause) {
-			this.#turnSnapshot = undefined;
-			return send;
-		}
+	/** Account and pause only the still-active activation owned when the interrupt began. */
+	async onTaskAborted(options?: { reason?: "interrupted" | "internal"; activation?: symbol | null }): Promise<void> {
+		const activation = options?.activation === undefined ? this.activeActivation : options.activation;
+		if (activation === null) return;
 		await this.#withAccounting(async () => {
-			if (options?.holdNotifications) this.#heldNotifications = held;
-			try {
-				await this.#flushUsageLocked("suppressed", undefined, options?.reason === "internal");
-				this.#turnSnapshot = undefined;
-				if (options?.reason !== "interrupted") return;
-				const cloned = this.#getStateClone();
-				if (!cloned?.enabled || cloned.goal.status !== "active") return;
-				if (options.goalId !== undefined && cloned.goal.id !== options.goalId) return;
-				cloned.enabled = false;
-				cloned.goal.status = "paused";
-				cloned.goal.updatedAt = this.#now();
-				this.#clearActiveAccounting();
-				this.#budgetReportedFor = undefined;
-				await this.#commitState(cloned, { persist: "goal_paused" });
-			} finally {
-				this.#heldNotifications = undefined;
-			}
-		});
-		return send;
-	}
-
-	async onThreadResumed(options?: { preserveActiveGoal?: boolean }): Promise<GoalModeState | undefined> {
-		const state = this.#getStateClone();
-		if (!state) return undefined;
-		if (options?.preserveActiveGoal && state.enabled && state.goal.status === "active") {
-			this.#markActiveAccounting(state.goal, true);
-			await this.#commitState(state, { emit: true });
-			return state;
-		}
-		if (state.goal.status === "active") {
+			if (this.activeActivation !== activation) return;
+			await this.#flushUsageLocked("suppressed", undefined, options?.reason === "internal");
+			if (this.activeActivation !== activation) return;
+			this.#turnSnapshot = undefined;
+			if (options?.reason !== "interrupted") return;
+			const state = this.#getStateClone();
+			if (!state?.enabled || state.goal.status !== "active") return;
 			state.enabled = false;
 			state.goal.status = "paused";
 			state.goal.updatedAt = this.#now();
 			this.#clearActiveAccounting();
 			this.#budgetReportedFor = undefined;
-			await this.#commitState(state, { persist: "goal_paused" });
+			this.#commitState(state, { persist: "goal_paused" });
+		});
+	}
+
+	async onThreadResumed(options?: { preserveActiveGoal?: boolean }): Promise<GoalModeState | undefined> {
+		return this.#withAccounting(() => {
+			const state = this.#getStateClone();
+			if (!state) return undefined;
+			if (options?.preserveActiveGoal && state.enabled && state.goal.status === "active") {
+				this.#commitState(state, { emit: true, newActivation: true });
+				return state;
+			}
+			if (state.goal.status === "active") {
+				state.enabled = false;
+				state.goal.status = "paused";
+				state.goal.updatedAt = this.#now();
+				this.#clearActiveAccounting();
+				this.#budgetReportedFor = undefined;
+				this.#commitState(state, { persist: "goal_paused" });
+				return state;
+			}
+			if (state.enabled && isAccountingStatus(state.goal)) {
+				this.#markActiveAccounting(state.goal);
+			} else {
+				this.#clearActiveAccounting();
+			}
+			this.#commitState(state, { emit: true });
 			return state;
-		}
-		if (state.enabled && isAccountingStatus(state.goal)) {
-			this.#markActiveAccounting(state.goal);
-		} else {
-			this.#clearActiveAccounting();
-		}
-		await this.#commitState(state, { emit: true });
-		return state;
+		});
 	}
 
 	async onBudgetMutated(newBudget: number | undefined): Promise<GoalModeState | undefined> {
@@ -336,9 +379,8 @@ export class GoalRuntime {
 			} else if (state.goal.status === "budget-limited") {
 				state.goal.status = "active";
 				state.enabled = true;
-				this.#markActiveAccounting(state.goal);
 			}
-			await this.#commitState(state, { persist: state.enabled ? "goal" : "goal_paused" });
+			this.#commitState(state, { persist: state.enabled ? "goal" : "goal_paused" });
 			if (shouldSteer) {
 				await this.#sendBudgetLimitSteer(state.goal);
 			}
@@ -389,7 +431,7 @@ export class GoalRuntime {
 		// objective snapshots. Keep normal tool flushes in memory/UI only, but make wall-clock
 		// usage durable before internal session switches because the active runtime is leaving.
 		const shouldPersistUsage = tokenDelta > 0 || flippedToBudgetLimited || (persistWallClock && wallSeconds > 0);
-		await this.#commitState(state, { persist: shouldPersistUsage ? "goal" : undefined });
+		this.#commitState(state, { persist: shouldPersistUsage ? "goal" : undefined });
 
 		if (state.goal.status !== "budget-limited") {
 			this.#budgetReportedFor = undefined;
@@ -429,8 +471,7 @@ export class GoalRuntime {
 			}
 			const state = this.#createGoalState(objective, input.tokenBudget);
 			this.#budgetReportedFor = undefined;
-			this.#markActiveAccounting(state.goal);
-			await this.#commitState(state, { persist: "goal" });
+			this.#commitState(state, { persist: "goal" });
 			return state;
 		});
 	}
@@ -447,8 +488,7 @@ export class GoalRuntime {
 			await this.#flushUsageLocked("suppressed");
 			const state = this.#createGoalState(objective, input.tokenBudget);
 			this.#budgetReportedFor = undefined;
-			this.#markActiveAccounting(state.goal);
-			await this.#commitState(state, { persist: "goal" });
+			this.#commitState(state, { persist: "goal" });
 			return state;
 		});
 	}
@@ -464,8 +504,7 @@ export class GoalRuntime {
 			state.goal.status = "active";
 			state.goal.updatedAt = this.#now();
 			this.#budgetReportedFor = undefined;
-			this.#markActiveAccounting(state.goal);
-			await this.#commitState(state, { persist: "goal" });
+			this.#commitState(state, { persist: "goal", newActivation: true });
 			return state;
 		});
 	}
@@ -484,7 +523,7 @@ export class GoalRuntime {
 			state.goal.updatedAt = this.#now();
 			this.#clearActiveAccounting();
 			this.#budgetReportedFor = undefined;
-			await this.#commitState(state, { persist: "goal_paused" });
+			this.#commitState(state, { persist: "goal_paused" });
 			return state;
 		});
 	}
@@ -497,12 +536,12 @@ export class GoalRuntime {
 			const dropped = { ...state.goal, status: "dropped" as const, updatedAt: this.#now() };
 			this.#clearActiveAccounting();
 			this.#budgetReportedFor = undefined;
-			await this.#host.emit({
+			this.#enqueueNotification({
 				type: "goal_updated",
 				goal: dropped,
 				state: { ...state, enabled: false, goal: dropped },
 			});
-			await this.#commitState(undefined, { persist: "none", emit: false });
+			this.#commitState(undefined, { persist: "none", emit: false });
 			return dropped;
 		});
 	}
@@ -527,7 +566,7 @@ export class GoalRuntime {
 			state.reason = "completed";
 			this.#clearActiveAccounting();
 			this.#budgetReportedFor = undefined;
-			await this.#commitState(state, { persist: "goal" });
+			this.#commitState(state, { persist: "goal" });
 			return state.goal;
 		});
 	}

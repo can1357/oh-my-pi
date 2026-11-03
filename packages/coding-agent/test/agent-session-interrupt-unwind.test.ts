@@ -1,3 +1,4 @@
+import { type } from "@oh-my-pi/omptype";
 import { afterEach, beforeAll, expect, it } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
@@ -59,12 +60,14 @@ async function setup(responses: MockResponseSource, ttsrManager?: TtsrManager, w
 	const runtime = new ExtensionRuntime();
 	let hook: (() => Promise<void>) | undefined;
 	let goalHook: (() => Promise<void>) | undefined;
+	const goalEvents: string[] = [];
 	const extension = await loadExtensionFromFactory(
 		pi => {
 			pi.on("before_agent_start", async () => {
 				await hook?.();
 			});
 			pi.on("goal_updated", async event => {
+				if (event.goal) goalEvents.push(event.goal.status);
 				if (event.goal?.status === "paused") await goalHook?.();
 			});
 		},
@@ -156,6 +159,7 @@ async function setup(responses: MockResponseSource, ttsrManager?: TtsrManager, w
 		holdHook,
 		saved,
 		cancel,
+		goalEvents,
 		setGoalHook: (value?: () => Promise<void>) => {
 			goalHook = value;
 		},
@@ -616,6 +620,170 @@ it("an interrupt cannot pause a goal created while it waits for a revocation ack
 		expect(after?.enabled).toBe(true);
 	} finally {
 		control.close();
+	}
+});
+
+it("extensions receive the interrupt pause before a later resume, without waiting for revocation", async () => {
+	const h = await setup([{ content: ["seed"] }]);
+	await h.session.prompt("seed transcript");
+	await h.session.goalRuntime.createGoal({ objective: "keep working" });
+	h.goalEvents.length = 0;
+	const control = await revocation(h);
+	try {
+		const stopping = h.session.abort({ reason: USER_INTERRUPT_LABEL });
+		await control.ack.entered;
+		for (let i = 0; i < 1000 && h.session.getGoalModeState()?.goal.status !== "paused"; i++) {
+			const tick = Promise.withResolvers<void>();
+			setImmediate(tick.resolve);
+			await tick.promise;
+		}
+		expect(h.session.getGoalModeState()?.goal.status).toBe("paused");
+		await h.session.goalRuntime.resumeGoal();
+		const beforeAck = [...h.goalEvents];
+		control.ack.release();
+		await stopping;
+		expect(beforeAck).toEqual(["paused", "active"]);
+		expect(h.goalEvents).toEqual(["paused", "active"]);
+		expect(h.session.getGoalModeState()?.goal.status).toBe("active");
+	} finally {
+		control.close();
+	}
+});
+
+for (const initiallyPaused of [false, true]) {
+	it(`an interrupt does not undo a later activation of an ${initiallyPaused ? "already paused" : "active"} goal`, async () => {
+		const h = await setup(
+			[
+				{ content: ["seed"] },
+				{ content: [{ type: "toolCall", id: "hold", name: "mcp__probe_hold", arguments: {} }] },
+			],
+			undefined,
+			false,
+		);
+		const tool = h.gate();
+		await h.session.refreshMCPTools([
+			{
+				name: "mcp__probe_hold",
+				label: "hold",
+				description: "Hold interrupted work until released",
+				parameters: type({}),
+				mcpServerName: "probe",
+				mcpToolName: "hold",
+				loadMode: "essential",
+				execute: async () => {
+					await tool.wait();
+					return { content: [{ type: "text", text: "released" }] };
+				},
+			},
+		]);
+		await h.session.prompt("seed transcript");
+		await h.session.goalRuntime.createGoal({ objective: "same goal, different activation" });
+		if (initiallyPaused) await h.session.goalRuntime.pauseGoal();
+		const old = h.session.prompt("hold unrelated work");
+		await tool.entered;
+		const stopping = h.session.abort({ reason: USER_INTERRUPT_LABEL });
+		if (!initiallyPaused) await h.session.goalRuntime.pauseGoal();
+		await h.session.goalRuntime.resumeGoal();
+		const resumed = h.session.getGoalModeState();
+		tool.release();
+		await Promise.all([old, stopping]);
+		expect(h.session.getGoalModeState()).toEqual(resumed);
+		expect(h.session.getGoalModeState()?.goal.status).toBe("active");
+	});
+}
+
+it("interrupting unrelated work neither accounts nor republishes an already paused goal", async () => {
+	const h = await setup([
+		async (_ctx, opts) => {
+			await untilAborted(opts?.signal);
+			return { content: ["aborted unrelated work"], usage: { input: 17, output: 3 } };
+		},
+	]);
+	await h.session.goalRuntime.createGoal({ objective: "paused goal" });
+	await h.session.goalRuntime.pauseGoal();
+	const paused = h.session.getGoalModeState();
+	h.goalEvents.length = 0;
+	const started = Promise.withResolvers<void>();
+	const unsubscribe = h.session.subscribe(event => {
+		if (event.type === "agent_start") started.resolve();
+	});
+	try {
+		const old = h.session.prompt("unrelated work");
+		await started.promise;
+		await h.session.abort({ reason: USER_INTERRUPT_LABEL });
+		await old;
+		expect(h.session.getGoalModeState()).toEqual(paused);
+		expect(h.goalEvents).toEqual([]);
+	} finally {
+		unsubscribe();
+	}
+});
+
+it("nested interrupts of one activation pause it and notify extensions once", async () => {
+	const h = await setup([{ content: ["seed"] }]);
+	await h.session.prompt("seed transcript");
+	await h.session.goalRuntime.createGoal({ objective: "one activation" });
+	h.goalEvents.length = 0;
+	const first = h.session.abort({ reason: USER_INTERRUPT_LABEL });
+	const second = h.session.abort({ reason: USER_INTERRUPT_LABEL });
+	await Promise.all([first, second]);
+	expect(h.session.getGoalModeState()?.goal.status).toBe("paused");
+	expect(h.goalEvents).toEqual(["paused"]);
+	const modes = (await h.saved()).filter(entry => entry.type === "mode_change" && entry.mode === "goal_paused");
+	expect(modes).toHaveLength(1);
+});
+
+it("an active goal restored through the session state setter still belongs to its interrupt", async () => {
+	const h = await setup([{ content: ["seed"] }]);
+	await h.session.prompt("seed transcript");
+	const active = await h.session.goalRuntime.createGoal({ objective: "restored activation" });
+	await h.session.goalRuntime.pauseGoal();
+	h.session.setGoalModeState(active);
+	await h.session.abort({ reason: USER_INTERRUPT_LABEL });
+	expect(h.session.getGoalModeState()?.goal.status).toBe("paused");
+});
+
+it("a goal notification can resume the goal without waiting on its own ordered emission", async () => {
+	const h = await setup([{ content: ["seed"] }]);
+	await h.session.prompt("seed transcript");
+	await h.session.goalRuntime.createGoal({ objective: "resume from notification" });
+	h.goalEvents.length = 0;
+	const active = Promise.withResolvers<void>();
+	const unsubscribe = h.session.subscribe(event => {
+		if (event.type === "goal_updated" && event.goal?.status === "active") active.resolve();
+	});
+	h.setGoalHook(async () => {
+		await h.session.goalRuntime.resumeGoal();
+	});
+	try {
+		await Promise.all([h.session.abort({ reason: USER_INTERRUPT_LABEL }), active.promise]);
+		expect(h.goalEvents).toEqual(["paused", "active"]);
+		expect(h.session.getGoalModeState()?.goal.status).toBe("active");
+	} finally {
+		h.setGoalHook();
+		unsubscribe();
+	}
+});
+
+it("a failed pause persistence still releases its committed notification and rethrows the first failure", async () => {
+	const h = await setup([{ content: ["seed"] }, { content: ["next"] }]);
+	await h.session.prompt("seed transcript");
+	await h.session.goalRuntime.createGoal({ objective: "pause despite failed persistence" });
+	h.goalEvents.length = 0;
+	const original = h.manager.appendModeChange.bind(h.manager);
+	const failed = new Error("pause persistence failed");
+	h.manager.appendModeChange = (...args) => {
+		const result = original(...args);
+		if (args[0] === "goal_paused") throw failed;
+		return result;
+	};
+	try {
+		await expect(h.session.abort({ reason: USER_INTERRUPT_LABEL })).rejects.toBe(failed);
+		expect(h.goalEvents).toEqual(["paused"]);
+		await h.session.prompt("a failed cleanup must not keep admission closed");
+		expect(h.mock.calls).toHaveLength(2);
+	} finally {
+		h.manager.appendModeChange = original;
 	}
 });
 

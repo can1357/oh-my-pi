@@ -211,15 +211,17 @@ describe("AgentSession prompt admission racing abort", () => {
 			releaseAbort.resolve();
 			releaseTurn.resolve();
 		});
-		const onTaskAborted = session.goalRuntime.onTaskAborted.bind(session.goalRuntime);
-		session.goalRuntime.onTaskAborted = async (...args) => {
-			const sendNotifications = await onTaskAborted(...args);
+		const holdNotifications = session.goalRuntime.holdNotifications.bind(session.goalRuntime);
+		const spy = spyOn(session.goalRuntime, "holdNotifications").mockImplementation(() => {
+			const releaseNotifications = holdNotifications();
 			return async () => {
+				const notifications = releaseNotifications();
 				atAbortEnd.resolve();
 				await releaseAbort.promise;
-				await sendNotifications();
+				await notifications;
 			};
-		};
+		});
+		restores.push(() => spy.mockRestore());
 		// A steer that lands as the turn ends, after the agent loop's last look at its queue.
 		const steered = Promise.withResolvers<void>();
 		let agentEnds = 0;
