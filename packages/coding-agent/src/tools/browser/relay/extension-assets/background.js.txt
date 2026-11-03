@@ -21,7 +21,6 @@ async function ownedDebuggerTabs(targets, probe) {
 // packages/browser-relay/extension/download-pairing.ts
 var DOWNLOAD_PAIRING_MS = 5000;
 var DOWNLOAD_LOOKUP_MS = 60000;
-var MAX_REPORTS = 32;
 
 class DownloadPairing {
   #now;
@@ -33,19 +32,21 @@ class DownloadPairing {
   report(guid, url) {
     if (this.#pairs.has(guid) || this.#reports.some((report) => report.guid === guid))
       return;
+    this.#dropAgedReports();
     this.#reports.push({ guid, url, at: this.#now() });
-    if (this.#reports.length > MAX_REPORTS)
-      this.#reports.shift();
   }
   created(id, url) {
-    const oldest = this.#now() - DOWNLOAD_PAIRING_MS;
-    while (this.#reports.length > 0 && this.#reports[0].at < oldest)
-      this.#reports.shift();
+    this.#dropAgedReports();
     const index = this.#reports.findIndex((report) => report.url === url);
     if (index < 0)
       return;
     this.#pairs.set(this.#reports[index].guid, { id });
     this.#reports.splice(index, 1);
+  }
+  #dropAgedReports() {
+    const oldest = this.#now() - DOWNLOAD_PAIRING_MS;
+    while (this.#reports.length > 0 && this.#reports[0].at < oldest)
+      this.#reports.shift();
   }
   finished(id, state) {
     const now = this.#now();

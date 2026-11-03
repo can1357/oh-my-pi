@@ -9,8 +9,6 @@ export const DOWNLOAD_PAIRING_MS = 5_000;
  * a pair still here after this belongs to a tab that went away first.
  */
 export const DOWNLOAD_LOOKUP_MS = 60_000;
-/** Unpaired reports kept at most. */
-const MAX_REPORTS = 32;
 
 /**
  * Pairs a driven page's download reports (`Page.downloadWillBegin`, named by guid) with Chrome's download items
@@ -32,17 +30,22 @@ export class DownloadPairing {
 
 	report(guid: string, url: string): void {
 		if (this.#pairs.has(guid) || this.#reports.some(report => report.guid === guid)) return;
+		this.#dropAgedReports();
 		this.#reports.push({ guid, url, at: this.#now() });
-		if (this.#reports.length > MAX_REPORTS) this.#reports.shift();
 	}
 
 	created(id: number, url: string): void {
-		const oldest = this.#now() - DOWNLOAD_PAIRING_MS;
-		while (this.#reports.length > 0 && this.#reports[0]!.at < oldest) this.#reports.shift();
+		this.#dropAgedReports();
 		const index = this.#reports.findIndex(report => report.url === url);
 		if (index < 0) return;
 		this.#pairs.set(this.#reports[index]!.guid, { id });
 		this.#reports.splice(index, 1);
+	}
+
+	/** Reports are bounded by age alone: dropping a recent one would shift every later pairing of its URL. */
+	#dropAgedReports(): void {
+		const oldest = this.#now() - DOWNLOAD_PAIRING_MS;
+		while (this.#reports.length > 0 && this.#reports[0]!.at < oldest) this.#reports.shift();
 	}
 
 	/**
