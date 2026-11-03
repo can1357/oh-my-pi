@@ -177,6 +177,7 @@ export async function loadPage(url: string, options: LoadPageOptions = {}): Prom
 	const { timeout = 20, headers = {}, maxBytes = MAX_BYTES, signal, method = "GET", body } = options;
 
 	let lastError: string | undefined;
+	let lastBlockedResponse: LoadPageResult | undefined;
 	let retried429 = false;
 	// Header names are case-insensitive, so a caller's header replaces ours whatever its spelling.
 	const callerHeaders = new Headers(headers);
@@ -254,36 +255,27 @@ export async function loadPage(url: string, options: LoadPageOptions = {}): Prom
 
 			const content = decodeBody(responseBody.bytes, rawContentType);
 			const blockedBy = botWallOf(response, contentType, content);
-			if (blockedBy && !lastAgent) continue;
-
-			if (!response.ok) {
-				return {
-					content,
-					contentType,
-					finalUrl,
-					ok: false,
-					status: response.status,
-					truncated: responseBody.truncated,
-					blockedBy,
-				};
-			}
-
-			return {
+			const result: LoadPageResult = {
 				content,
 				contentType,
 				finalUrl,
-				ok: true,
+				ok: response.ok,
 				status: response.status,
 				truncated: responseBody.truncated,
 				blockedBy,
 			};
+			if (blockedBy && !lastAgent) {
+				lastBlockedResponse = result;
+				continue;
+			}
+			return result;
 		} catch (error) {
 			if (signal?.aborted) {
 				throw new ToolAbortError();
 			}
 			lastError = error instanceof Error ? error.message : String(error);
 			if (attempt === USER_AGENTS.length - 1) {
-				return { content: "", contentType: "", finalUrl: url, ok: false, error: lastError };
+				return lastBlockedResponse ?? { content: "", contentType: "", finalUrl: url, ok: false, error: lastError };
 			}
 		}
 	}
