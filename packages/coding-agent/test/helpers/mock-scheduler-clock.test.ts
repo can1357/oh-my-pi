@@ -1,6 +1,9 @@
-import { afterEach, describe, expect, test, vi } from "bun:test";
+import { describe, expect, vi } from "bun:test";
 import { scheduler } from "node:timers/promises";
 import { mockSchedulerWaitWithClock } from "./mock-scheduler-clock";
+import { trackTestLifetime } from "./test-lifetime";
+
+const { test, afterEach } = trackTestLifetime();
 
 // The real clock, captured before any test replaces it, so afterEach can put it back.
 const realPerformanceNow = performance.now;

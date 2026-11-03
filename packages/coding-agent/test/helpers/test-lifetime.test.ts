@@ -1,8 +1,11 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
+import { trackTestLifetime } from "./test-lifetime";
+
+const { test } = trackTestLifetime();
 
 const HELPER = path.join(import.meta.dir, "test-lifetime.ts");
 
@@ -23,7 +26,9 @@ async function runFixtures(files: Record<string, string>): Promise<FixtureRun> {
 	for (const [name, source] of Object.entries(files)) {
 		await Bun.write(path.join(dir.path(), name), source.replaceAll("HELPER", JSON.stringify(HELPER)));
 	}
-	const names = Object.keys(files).sort();
+	const names = Object.keys(files)
+		.filter(name => name.endsWith(".test.ts"))
+		.sort();
 	const result = await $`${process.execPath} test --reporter=junit --reporter-outfile=report.xml ${names}`
 		.cwd(dir.path())
 		.nothrow()
@@ -45,6 +50,22 @@ async function runFixtures(files: Record<string, string>): Promise<FixtureRun> {
 }
 
 const refusal = (name: string) => `"${name}" timed out and may still be running`;
+
+/** A tracked body or callback (`setup`) that times out and then writes, and a next test that passes only on that write. */
+function lateWriteAfter(setup: string): string {
+	return `
+		import { expect } from "bun:test";
+		import * as vm from "node:vm";
+		import { trackTestLifetime, noteTimeout } from HELPER;
+		const { test, onTestFinished } = trackTestLifetime();
+		const shared = { key: "initial" };
+		${setup}
+		test("passes only on the late write", async () => {
+			await Bun.sleep(900);
+			expect(shared.key).toBe("stale");
+		});
+	`;
+}
 
 describe("trackTestLifetime", () => {
 	test("refuses every later result after a body times out, including one that would pass on its late write", async () => {
@@ -169,5 +190,80 @@ describe("trackTestLifetime", () => {
 		expect(run.outcome("a synchronous test")).toBe("pass");
 		expect(run.outcome("a skipped test")).toBe("skip");
 		expect(run.exitCode).toBe(0);
+	}, 60_000);
+
+	test("refuses later results after a body whose promise comes from another realm times out", async () => {
+		const run = await runFixtures({
+			"realm.test.ts": lateWriteAfter(`
+				test("returns a promise from node:vm", () =>
+					vm.runInNewContext("new Promise(resolve => setTimeout(resolve, 400))", { setTimeout }).then(() => {
+						shared.key = "stale";
+					}), 100);
+			`),
+		});
+
+		expect(run.outcome("passes only on the late write")).toBe("fail");
+		expect(run.output).toContain(refusal("returns a promise from node:vm"));
+	}, 60_000);
+
+	test("refuses later results after an onTestFinished callback times out", async () => {
+		const run = await runFixtures({
+			"finished.test.ts": lateWriteAfter(`
+				test("registers a slow callback", () => {
+					onTestFinished(async () => {
+						await Bun.sleep(400);
+						shared.key = "stale";
+					}, { timeout: 100 });
+				});
+			`),
+		});
+
+		expect(run.outcome("passes only on the late write")).toBe("fail");
+		expect(run.output).toContain(refusal("an onTestFinished callback"));
+	}, 60_000);
+
+	test("notes a body that times out and finishes during a hook a helper registered before the file's own", async () => {
+		const run = await runFixtures({
+			// A helper module like fake-clock: imported first, its hook runs before the file's teardown hooks.
+			"slow-hook.ts": `
+				import { afterEach } from "bun:test";
+				import { noteTimeout } from HELPER;
+				afterEach(async () => {
+					noteTimeout();
+					await Bun.sleep(400);
+				});
+			`,
+			"helper-hook.test.ts": lateWriteAfter(`
+				test("finishes during the helper's hook", async () => {
+					await Bun.sleep(200);
+					shared.key = "stale";
+				}, 100);
+			`).replace('import { expect } from "bun:test";', 'import { expect } from "bun:test";\nimport "./slow-hook";'),
+		});
+
+		expect(run.outcome("passes only on the late write")).toBe("fail");
+		expect(run.output).toContain(refusal("finishes during the helper's hook"));
+	}, 60_000);
+
+	test("refuses a test or hook written in done-callback style instead of letting it pass before it is done", async () => {
+		const runs = await Promise.all(
+			['test("calls done", done => setTimeout(done, 50));', "beforeEach(done => setTimeout(done, 50));"].map(
+				declaration =>
+					runFixtures({
+						"callback.test.ts": `
+							import { trackTestLifetime } from HELPER;
+							const { test, beforeEach } = trackTestLifetime();
+							${declaration}
+							test("declared after it", () => {});
+						`,
+					}),
+			),
+		);
+
+		for (const run of runs) {
+			expect(run.output).toContain("takes no `done` callback; return a promise instead");
+			expect(run.outcome("declared after it")).not.toBe("pass");
+			expect(run.exitCode).not.toBe(0);
+		}
 	}, 60_000);
 });
