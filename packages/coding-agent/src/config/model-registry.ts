@@ -3519,7 +3519,7 @@ export class ModelRegistry {
 			.map(provider => provider.provider);
 	}
 
-	/** Canonical id of a configured or extension-backed discovery provider. */
+	/** Canonical id of a configured, built-in, or extension-backed discovery provider. */
 	getDiscoveryProviderId(requestedId: string): string | undefined {
 		const normalized = requestedId.toLowerCase();
 		for (const { provider } of this.#discoverableProviders) {
@@ -3527,6 +3527,12 @@ export class ModelRegistry {
 		}
 		for (const provider of this.#runtimeModelManagers.keys()) {
 			if (provider.toLowerCase() === normalized) return provider;
+		}
+		if (
+			Object.hasOwn(BUILT_IN_MODEL_MANAGER_PROVIDER_IDS, normalized) ||
+			Object.hasOwn(MODELS_DEV_CATALOG_PROVIDER_ID_LOOKUP, normalized)
+		) {
+			return normalized;
 		}
 		return undefined;
 	}
