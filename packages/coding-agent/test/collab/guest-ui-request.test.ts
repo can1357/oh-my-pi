@@ -250,6 +250,9 @@ async function makeHarness(opts?: { readOnly?: boolean }): Promise<GuestUiHarnes
 			resetTranscriptAnchors: () => {},
 		},
 		syncRunningSubagentBadge: () => {},
+		closeLinkBrowser: () => {},
+		rerenderInLinkBrowser: () => {},
+		rebuildTranscriptScrollback: () => {},
 		showHookSelector: (
 			title: string,
 			options: ExtensionUISelectItem[],
@@ -808,6 +811,7 @@ function makeAskHostContext(): InteractiveModeContext {
 		...base,
 		editorContainer: { clear: () => {}, addChild: () => {} },
 		editor: { getText: () => "", setText: () => {} },
+		closeLinkBrowser: () => {},
 		ui: {
 			requestRender: () => {},
 			setFocus: () => {},

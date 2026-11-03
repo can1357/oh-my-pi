@@ -11,7 +11,7 @@ const UPDATED_AT = 1_760_000_000_000;
 export const DECODE_VALUES = Array.from({ length: 32 }, (_, i) => Math.round(150 + i * 1.15 + (i % 3) * 2));
 
 export const decodeBench: JobWidgetView = {
-	title: "verb-bench · decode throughput",
+	title: "loadtest · decode throughput",
 	stage: "nvfp4 b1\trun 32/48",
 	headline: { text: "186 tok/s", label: "decode", trend: { text: "▲ 15%", tone: "success" } },
 	blocks: [
