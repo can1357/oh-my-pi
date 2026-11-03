@@ -2002,6 +2002,11 @@ async fn expand_prefix_assignments_in_scope(
 	assignments: &[&ast::Assignment],
 	stderr: &mut openfiles::OpenFile,
 ) -> Result<(), error::Error> {
+	// The names each `declare -n` name led to, as the shell held them before
+	// this command: the names that led to a target read as its value while
+	// the command runs, so a later assignment to one of them must still
+	// follow the names the shell holds, not that value.
+	let mut chains: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
 	for assignment in assignments {
 		if matches!(assignment.name, ast::AssignmentName::ArrayElementName(..)) {
 			let _ = writeln!(stderr, "`{}': not a valid identifier", assignment.name);
@@ -2013,7 +2018,13 @@ async fn expand_prefix_assignments_in_scope(
 		};
 		// A name that holds another name (`declare -n`) is assigned through:
 		// the command runs with the name it holds, as it does in Bash.
-		let chain = followed_names(shell, &written, stderr);
+		let chain = match chains.get(&written) {
+			Some(chain) => chain.clone(),
+			None => followed_names(shell, &written, stderr),
+		};
+		for (at, name) in std::iter::once(&written).chain(chain.iter()).enumerate() {
+			chains.entry(name.clone()).or_insert_with(|| chain[at..].to_vec());
+		}
 		let target = chain.last().cloned().unwrap_or_else(|| written.clone());
 		// Bash reports a readonly name before it expands the value, which it
 		// then does not, and gives the command no name of its own: it runs
