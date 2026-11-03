@@ -9,7 +9,10 @@ import { createTeardownFence } from "./helpers/teardown-fence";
 
 installMockRestores();
 
-/** Parks a body abandoned on timeout before it stubs `process.exit` or reaches the real one. */
+/**
+ * Parks a body abandoned on timeout before it installs a spy, stubs `process.exit` or reaches the
+ * real one. Every await a test makes before such an install goes through its `step` guard.
+ */
 const fence = createTeardownFence();
 
 let testAgentDir: TempDir | undefined;
@@ -235,9 +238,10 @@ describe("config CLI schema coverage", () => {
 		expect(parsed).toMatchObject({ modelRoles: { type: "record" } });
 	});
 	it("reports the value written to config.yml and the layer that still overrides it", async () => {
+		const step = fence.forThisTest();
 		if (!testAgentDir) throw new Error("Test agent directory was not initialized");
 		const overlayPath = path.join(testAgentDir.path(), "overlay.yml");
-		await Bun.write(overlayPath, "compaction:\n  enabled: false\n");
+		await step(() => Bun.write(overlayPath, "compaction:\n  enabled: false\n"));
 		const previousConfigFiles = process.env.PI_CONFIG_FILES;
 		process.env.PI_CONFIG_FILES = overlayPath;
 		try {
@@ -286,6 +290,8 @@ describe("config list --scope", () => {
 	});
 
 	afterEach(async () => {
+		// This hook runs before the file-level one, so it must end the fenced test first.
+		fence.close();
 		setProjectDir(originalProjectDir);
 		await projectDir?.remove().catch(() => {});
 		projectDir = undefined;
@@ -312,29 +318,34 @@ describe("config list --scope", () => {
 	}
 
 	it("lists only the keys the global file sets, path-scoped entries as written", async () => {
+		const step = fence.forThisTest();
 		if (!testAgentDir || !projectDir) throw new Error("Test directories were not initialized");
-		await Bun.write(
-			path.join(testAgentDir.path(), "config.yml"),
-			[
-				"enabledModels:",
-				"  - anthropic/claude-sonnet-4-5",
-				`  - path: ${projectDir.path()}`,
-				"    models: [openai/gpt-5]",
-				"compaction:",
-				"  enabled: false",
-				"hindsight:",
-				"  apiToken: secret-token",
-				"",
-			].join("\n"),
+		const agentDir = testAgentDir.path();
+		const project = projectDir.path();
+		await step(() =>
+			Bun.write(
+				path.join(agentDir, "config.yml"),
+				[
+					"enabledModels:",
+					"  - anthropic/claude-sonnet-4-5",
+					`  - path: ${project}`,
+					"    models: [openai/gpt-5]",
+					"compaction:",
+					"  enabled: false",
+					"hindsight:",
+					"  apiToken: secret-token",
+					"",
+				].join("\n"),
+			),
 		);
-		await Bun.write(path.join(projectDir.path(), ".omp", "config.yml"), "defaultThinkingLevel: high\n");
+		await step(() => Bun.write(path.join(project, ".omp", "config.yml"), "defaultThinkingLevel: high\n"));
 
 		const layer = await listLayer("global");
 
 		expect(Object.keys(layer).toSorted()).toEqual(["compaction.enabled", "enabledModels", "hindsight.apiToken"]);
 		expect(layer.enabledModels.value).toEqual([
 			"anthropic/claude-sonnet-4-5",
-			{ path: projectDir.path(), models: ["openai/gpt-5"] },
+			{ path: project, models: ["openai/gpt-5"] },
 		]);
 		expect(layer["compaction.enabled"]).toMatchObject({ value: false, type: "boolean" });
 		expect(layer["hindsight.apiToken"]).toEqual({
@@ -346,11 +357,16 @@ describe("config list --scope", () => {
 	});
 
 	it("lists the project layer of the current directory", async () => {
+		const step = fence.forThisTest();
 		if (!testAgentDir || !projectDir) throw new Error("Test directories were not initialized");
-		await Bun.write(path.join(testAgentDir.path(), "config.yml"), "compaction:\n  enabled: false\n");
-		await Bun.write(
-			path.join(projectDir.path(), ".omp", "config.yml"),
-			"defaultThinkingLevel: high\nenabledModels: [openai/gpt-5]\n",
+		const agentDir = testAgentDir.path();
+		const project = projectDir.path();
+		await step(() => Bun.write(path.join(agentDir, "config.yml"), "compaction:\n  enabled: false\n"));
+		await step(() =>
+			Bun.write(
+				path.join(project, ".omp", "config.yml"),
+				"defaultThinkingLevel: high\nenabledModels: [openai/gpt-5]\n",
+			),
 		);
 
 		const layer = await listLayer("project");
@@ -362,10 +378,14 @@ describe("config list --scope", () => {
 	});
 
 	it("prints the layer's keys in text output and masks credentials", async () => {
+		const step = fence.forThisTest();
 		if (!testAgentDir) throw new Error("Test directory was not initialized");
-		await Bun.write(
-			path.join(testAgentDir.path(), "config.yml"),
-			"compaction:\n  enabled: false\nhindsight:\n  apiToken: secret-token\n",
+		const agentDir = testAgentDir.path();
+		await step(() =>
+			Bun.write(
+				path.join(agentDir, "config.yml"),
+				"compaction:\n  enabled: false\nhindsight:\n  apiToken: secret-token\n",
+			),
 		);
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 
