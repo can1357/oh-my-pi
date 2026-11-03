@@ -75,7 +75,7 @@ import {
 	type OpenFileHolders,
 	openFileHolders,
 	type SoleOpenLease,
-	soleOpenLeaseIntact,
+	soleOpenLeaseStands,
 	takeSoleOpenLease,
 } from "../session/open-file-holders";
 import {
@@ -2121,9 +2121,13 @@ async function leaseLiveFiles(
 	return undefined;
 }
 
-/** Why a leased file shows the session in use now that the moves are made — another process opened it meanwhile — or undefined. */
+/**
+ * Why a leased file shows the session in use now that the moves are made —
+ * another process opened it meanwhile — or undefined. Throws when a lease
+ * cannot be asked about: that is a failure to check, not an open.
+ */
 function brokenLease(leased: readonly LeasedFile[]): string | undefined {
-	const opened = leased.find(file => !soleOpenLeaseIntact(file.handle.fd));
+	const opened = leased.find(file => !soleOpenLeaseStands(file.handle.fd));
 	if (!opened) return undefined;
 	return (
 		`${opened.path} was opened by another process while this run moved it into the archive — the kernel broke ` +
@@ -2605,7 +2609,8 @@ async function freeArchivedCopies(
 			// name: an open by name, this process's own included, breaks the
 			// lease that proves nothing else opened or truncated it.
 			const redundant = async (handle: fs.FileHandle): Promise<string | undefined> => {
-				if (!originalLease || !soleOpenLeaseIntact(originalLease.handle.fd)) {
+				if (!originalLease) return `${original} is not one this run leased, so what it holds was not checked`;
+				if (!soleOpenLeaseStands(originalLease.handle.fd)) {
 					return `${original} was opened or truncated by another process after it moved, so it may no longer hold what ${copy} holds`;
 				}
 				if (await handleBeginsWith(originalLease.handle, handle)) return undefined;
@@ -2617,8 +2622,12 @@ async function freeArchivedCopies(
 				judge: async (moved, handle) => {
 					if (!isCopy(moved)) return `${copy} is no longer the archived copy this run proved`;
 					if (!handle) return `${copy} could not be read where it was moved`;
-					if (takeSoleOpenLease(handle.fd).outcome !== "held") {
-						return `another process may hold ${copy} open, and could write to it after it went`;
+					const lease = takeSoleOpenLease(handle.fd);
+					if (lease.outcome === "open-elsewhere") {
+						return `another process holds ${copy} open (${lease.evidence}), and could write to it after it went`;
+					}
+					if (lease.outcome === "unproved") {
+						return `whether another process holds ${copy} open could not be told (${lease.evidence}: ${lease.meaning})`;
 					}
 					return await redundant(handle);
 				},
@@ -2627,7 +2636,7 @@ async function freeArchivedCopies(
 				// of either file blocks on its lease and shows here — writes the
 				// copy's bytes back rather than losing them.
 				confirm: async handle => {
-					if (!soleOpenLeaseIntact(handle.fd)) return `another process opened ${copy} as it went`;
+					if (!soleOpenLeaseStands(handle.fd)) return `another process opened ${copy} as it went`;
 					return await redundant(handle);
 				},
 			});
