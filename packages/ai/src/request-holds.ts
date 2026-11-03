@@ -77,17 +77,21 @@ function startLifetime(): { lifetime: Lifetime; end(): void } {
 	};
 }
 
-/** `Promise.prototype.then` as the runtime defines it, to tell a native promise's own `then` from one a subclass or accessor put in its place. */
+/** `Promise.prototype.then` as the runtime defines it: what `await` uses on a native promise whose constructor is `Promise`, whatever its `then` property says. */
 const nativeThen = Promise.prototype.then;
 
 /**
  * Ends `end` once `fn`'s result settles: when it returns, throws, or — for a
- * thenable result — when it settles. A result is followed as `await` follows
- * it: its `then` read once and called with a native promise's resolve and
- * reject, so a value it resolves with that is itself pending work is adopted
- * and followed too, and a promise from another realm or library, or a
- * callable thenable, lasts as long as a native one. A `then` that cannot be
- * read ends it at once; one that throws ends it as a rejection would.
+ * thenable result — when it settles, in the turn an `await` of it resumes. A
+ * result is followed as `await` follows it. A native promise whose
+ * constructor is `Promise` is awaited without reading its `then`: its own
+ * settlement is followed, through the runtime's `then`, so the exemption ends
+ * before an awaiter resumes even when a bound or wrapped `then` was put on it.
+ * Any other thenable (a subclass, a promise from another realm or library, a
+ * callable thenable) has its `then` read once and called with a native
+ * promise's resolve and reject, as `await` does, so a value it resolves with
+ * that is itself pending work is adopted and followed too. A `then` that
+ * cannot be read ends it at once; one that throws ends it as a rejection would.
  */
 function endWhenSettled<T>(fn: () => T, end: () => void): T {
 	let result: T;
@@ -97,11 +101,24 @@ function endWhenSettled<T>(fn: () => T, end: () => void): T {
 		end();
 		throw error;
 	}
+	if (result === null || (typeof result !== "object" && typeof result !== "function")) {
+		end();
+		return result;
+	}
+	try {
+		if (result instanceof Promise && result.constructor === Promise) {
+			nativeThen.call(result, end, end);
+			return result;
+		}
+	} catch {
+		// Not a promise after all, or its constructor cannot be read: `await` would
+		// reject, so the work counts as settled.
+		end();
+		return result;
+	}
 	let then: unknown;
 	try {
-		if (result !== null && (typeof result === "object" || typeof result === "function")) {
-			then = (result as { then?: unknown }).then;
-		}
+		then = (result as { then?: unknown }).then;
 	} catch {
 		// The thenable cannot be read: the work counts as settled.
 	}
@@ -111,13 +128,6 @@ function endWhenSettled<T>(fn: () => T, end: () => void): T {
 	}
 	const followed = then;
 	try {
-		if (result instanceof Promise && followed === nativeThen) {
-			// A native promise has already adopted whatever it was resolved with; its
-			// own `then`, as read above, ends the exemption in the turn its awaiters
-			// resume. A subclass's or an accessor's `then` is followed as any thenable's.
-			followed.call(result, end, end);
-			return result;
-		}
 		new Promise<unknown>((resolve, reject) => {
 			followed.call(result, resolve, reject);
 		}).then(end, end);
@@ -465,9 +475,10 @@ export function openRequestHolds(own?: { holds: RequestHolds; view: RequestHoldV
 	/**
 	 * The holds' promises this request reacts to, one reaction each however
 	 * many waits return them; each forwards to the current wait only if that
-	 * wait is waiting on it, and is gone once the promise settles.
+	 * wait is waiting on it. Held weakly: a promise no wait is on any more,
+	 * which its hold dropped, is not kept alive by this request.
 	 */
-	const watchedHelds = new Set<Promise<void>>();
+	const watchedHelds = new WeakSet<Promise<void>>();
 	const watchHeld = (held: Promise<void>) => {
 		if (watchedHelds.has(held)) return;
 		watchedHelds.add(held);
