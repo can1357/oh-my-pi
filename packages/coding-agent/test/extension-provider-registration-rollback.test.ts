@@ -316,7 +316,7 @@ describe("extension provider registration rollback", () => {
 			// The half-installed transport must not survive: a leaf session must
 			// not observe hasRemoteTransport() or route registry-miss sends out
 			// through an extension that never finished loading.
-			expect(IrcBus.global().hasRemoteTransport()).toBe(false);
+			expect(IrcBus.localForRegistry().hasRemoteTransport()).toBe(false);
 		} finally {
 			IrcBus.resetGlobalForTests();
 		}
@@ -366,7 +366,7 @@ describe("extension provider registration rollback", () => {
 
 			// Load #2's transport entry is rolled back, but load #1's is owner-scoped and untouched:
 			// its peer still routes through it.
-			const receipt = await IrcBus.global().send({ from: "Main", to: "@cluster-a/alice", body: "hi" });
+			const receipt = await IrcBus.localForRegistry().send({ from: "Main", to: "@cluster-a/alice", body: "hi" });
 			expect(receipt.outcome).toBe("injected");
 			expect(seenFirst).toEqual(["alice"]);
 		} finally {
@@ -551,7 +551,7 @@ describe("extension provider registration rollback", () => {
 			);
 
 			// Claimed + registered while the load is live.
-			expect(IrcBus.global().hasRemoteTransport()).toBe(true);
+			expect(IrcBus.localForRegistry().hasRemoteTransport()).toBe(true);
 			expect(AgentRegistry.global().get("@cluster-a/beatrice")?.kind).toBe("remote");
 
 			// The session's shutdown path releases the load's IRC state — with no session_shutdown
@@ -567,10 +567,10 @@ describe("extension provider registration rollback", () => {
 
 			// Transport + claim gone (namespace re-claimable), proxy unregistered — symmetric with the
 			// factory-failure rollback.
-			expect(IrcBus.global().hasRemoteTransport()).toBe(false);
+			expect(IrcBus.localForRegistry().hasRemoteTransport()).toBe(false);
 			expect(AgentRegistry.global().get("@cluster-a/beatrice")).toBeUndefined();
 			expect(() =>
-				IrcBus.global().setRemoteTransport(
+				IrcBus.localForRegistry().setRemoteTransport(
 					"cluster-a",
 					{
 						async send(message) {
@@ -631,8 +631,8 @@ describe("extension provider registration rollback", () => {
 			const { suspended } = runner.setSuspendedExtensions(extension => extension.path === "/ext/bridge.ts");
 			expect(suspended).toEqual([bridge]);
 			expect(runner.hasHandlers("session_shutdown")).toBe(false);
-			expect(IrcBus.global().hasClaimedNamespace()).toBe(false);
-			expect(IrcBus.global().hasRemoteTransport()).toBe(false);
+			expect(IrcBus.localForRegistry().hasClaimedNamespace()).toBe(false);
+			expect(IrcBus.localForRegistry().hasRemoteTransport()).toBe(false);
 			expect(AgentRegistry.global().get("@cluster-a/beatrice")).toBeUndefined();
 			const inbound = await irc!.deliverInbound({ from: "@cluster-a/beatrice", to: "Main", body: "still there?" });
 			expect(inbound.receipt).toMatchObject({ outcome: "failed", error: expect.stringContaining("released") });
@@ -645,13 +645,13 @@ describe("extension provider registration rollback", () => {
 					},
 				}),
 			).toThrow(/released/);
-			expect(IrcBus.global().hasClaimedNamespace()).toBe(false);
+			expect(IrcBus.localForRegistry().hasClaimedNamespace()).toBe(false);
 
 			// Shutdown with the bridge still out of the handler walk is clean: the runner's release pass
 			// covers every load — suspended or not — and is idempotent for the one already released.
 			runner.setSuspendedExtensions(extension => extension.path === "/ext/bridge.ts");
 			expect(await emitSessionShutdownEvent(runner)).toBe(false);
-			expect(IrcBus.global().hasClaimedNamespace()).toBe(false);
+			expect(IrcBus.localForRegistry().hasClaimedNamespace()).toBe(false);
 		} finally {
 			authStorage.close();
 			AgentRegistry.resetGlobalForTests();
@@ -692,7 +692,7 @@ describe("extension provider registration rollback", () => {
 				new ModelRegistry(authStorage),
 			);
 			await emitSessionShutdownEvent(runner);
-			expect(IrcBus.global().hasClaimedNamespace()).toBe(false);
+			expect(IrcBus.localForRegistry().hasClaimedNamespace()).toBe(false);
 			expect(AgentRegistry.global().get("@cluster-a/beatrice")).toBeUndefined();
 
 			// A post-teardown reconnect must not re-establish state no teardown will ever release:
@@ -702,8 +702,8 @@ describe("extension provider registration rollback", () => {
 			expect(irc?.registerRemotePeer?.({ name: "carol", displayName: "carol" })).toBeUndefined();
 			const inbound = await irc!.deliverInbound({ from: "@cluster-a/beatrice", to: "Main", body: "late" });
 			expect(inbound.receipt.outcome).toBe("failed");
-			expect(IrcBus.global().hasClaimedNamespace()).toBe(false);
-			expect(IrcBus.global().hasRemoteTransport()).toBe(false);
+			expect(IrcBus.localForRegistry().hasClaimedNamespace()).toBe(false);
+			expect(IrcBus.localForRegistry().hasRemoteTransport()).toBe(false);
 			expect(
 				AgentRegistry.global()
 					.list()
@@ -740,13 +740,13 @@ describe("extension provider registration rollback", () => {
 					"bridge-extension",
 				),
 			).rejects.toThrow("factory boom");
-			expect(IrcBus.global().hasClaimedNamespace()).toBe(false);
+			expect(IrcBus.localForRegistry().hasClaimedNamespace()).toBe(false);
 
 			// The rollback closed the discarded API's surface: the stranded callback is refused, so no
 			// claim with no loaded extension to release it ever exists.
 			expect(() => reconnect?.()).toThrow(/released/);
-			expect(IrcBus.global().hasClaimedNamespace()).toBe(false);
-			expect(IrcBus.global().hasRemoteTransport()).toBe(false);
+			expect(IrcBus.localForRegistry().hasClaimedNamespace()).toBe(false);
+			expect(IrcBus.localForRegistry().hasRemoteTransport()).toBe(false);
 		} finally {
 			AgentRegistry.resetGlobalForTests();
 			IrcBus.resetGlobalForTests();
@@ -792,8 +792,8 @@ describe("extension provider registration rollback", () => {
 			expect(await emitSessionShutdownEvent(runner)).toBe(true);
 
 			expect(cleared).toBe(true); // the extension's clear completed without throwing
-			expect(IrcBus.global().hasRemoteTransport()).toBe(false);
-			expect(IrcBus.global().hasClaimedNamespace()).toBe(false);
+			expect(IrcBus.localForRegistry().hasRemoteTransport()).toBe(false);
+			expect(IrcBus.localForRegistry().hasClaimedNamespace()).toBe(false);
 			expect(AgentRegistry.global().get("@cluster-a/beatrice")).toBeUndefined();
 		} finally {
 			authStorage.close();
@@ -837,11 +837,11 @@ describe("extension provider registration rollback", () => {
 
 			// The delayed (post-factory) claim is covered without any handler registration.
 			claim?.();
-			expect(IrcBus.global().hasClaimedNamespace()).toBe(true);
+			expect(IrcBus.localForRegistry().hasClaimedNamespace()).toBe(true);
 			expect(runner.hasHandlers("session_shutdown")).toBe(false);
 
 			await emitSessionShutdownEvent(runner);
-			expect(IrcBus.global().hasClaimedNamespace()).toBe(false);
+			expect(IrcBus.localForRegistry().hasClaimedNamespace()).toBe(false);
 			expect(AgentRegistry.global().get("@cluster-a/beatrice")).toBeUndefined();
 		} finally {
 			authStorage.close();
@@ -879,7 +879,7 @@ describe("extension provider registration rollback", () => {
 			const child = await claim({ kind: "sub", id: "0-Scout", name: "scout", depth: 1, parentId: "Main" });
 			expect(child).toBeDefined();
 			child.releaseIrc?.();
-			expect(IrcBus.global().hasRemoteTransport()).toBe(true);
+			expect(IrcBus.localForRegistry().hasRemoteTransport()).toBe(true);
 			// A genuinely DIFFERENT extension (path) claiming the same namespace is still rejected.
 			await expect(
 				loadExtensionFromFactory(

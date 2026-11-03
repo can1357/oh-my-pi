@@ -33,7 +33,7 @@ import {
 	isValidRemoteNamespace,
 	remoteNamespaceOf,
 } from "../../registry/remote-id";
-import { AgentRegistry } from "../../registry/agent-registry";
+import { AgentRegistry, type AgentRegistryApi } from "../../registry/agent-registry";
 import type { SendUserMessageOptions } from "../../session/agent-session";
 import type { CustomMessagePayload } from "../../session/messages";
 import type { FileDeleteFallbackHandler, FileWriteFallbackHandler } from "../../tools/file-write-fallback";
@@ -270,7 +270,7 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 					id: Snowflake.next(),
 				});
 			}
-			return IrcBus.forRegistry(this.registry).deliverInbound(msg, opts);
+			return IrcBus.localForRegistry(this.registry).deliverInbound(msg, opts);
 		},
 		setRemoteTransport: (namespace, transport) => {
 			if (!isValidRemoteNamespace(namespace)) {
@@ -283,7 +283,7 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 					`This extension already claimed IRC namespace "${this.#claimedNamespace}"; an extension load owns a single namespace.`,
 				);
 			}
-			const bus = IrcBus.forRegistry(this.registry);
+			const bus = IrcBus.localForRegistry(this.registry);
 			if (transport === undefined) {
 				// Clearing this load's transport (reconnect / teardown). A clear of a namespace this load
 				// never claimed stays a hard error, but a clear when the claim is already gone — the
@@ -330,7 +330,7 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 			// passenger no-op in setRemoteTransport) is read-only: its registration would clobber the
 			// owner's `@ns/name` ref (status/displayName) with its own copy (#7401 review). Return the
 			// composed id so a passenger's call still resolves to the shared peer.
-			if (!IrcBus.forRegistry(this.registry).isNamespaceOwner(namespace, this.ownerToken)) {
+			if (!IrcBus.localForRegistry(this.registry).isNamespaceOwner(namespace, this.ownerToken)) {
 				return id;
 			}
 			this.registry.register({
@@ -351,7 +351,7 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 			}
 			// Ownership-checked: a load may retract only proxies in the namespace it (co-)owns.
 			if (namespace === undefined || remoteNamespaceOf(id) !== namespace) return false;
-			if (!IrcBus.forRegistry(this.registry).isNamespaceOwner(namespace, this.ownerToken)) return false;
+			if (!IrcBus.localForRegistry(this.registry).isNamespaceOwner(namespace, this.ownerToken)) return false;
 			const ref = this.registry.get(id);
 			if (ref?.kind !== "remote") return false;
 			return this.registry.unregister(id);
@@ -380,7 +380,7 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		 * registers - and their teardown - target THIS registry, so an SDK embedder with a custom
 		 * per-session registry lists/receives its own peers instead of leaking into the global one.
 		 */
-		private readonly registry: AgentRegistry,
+		private readonly registry: AgentRegistryApi,
 		/**
 		 * The session's own agent id when it is the top-level root of its tree (agentKind "main"),
 		 * undefined for a subagent. Only a root may ORIGINATE a namespace claim via setRemoteTransport
@@ -653,8 +653,11 @@ function createExtension(extensionPath: string, resolvedPath: string): Extension
  * + idempotent, so sibling loads are untouched. Runs on factory-failure rollback, on suspension, and
  * on session shutdown, so a claim never outlives its load.
  */
-function releaseExtensionIrc(ownerToken: string, registry: AgentRegistry): void {
-	const freed = IrcBus.forRegistry(registry).releaseTransportsForOwner(ownerToken);
+function releaseExtensionIrc(ownerToken: string, registry: AgentRegistryApi): void {
+	// Claims live on main-thread buses only; a worker-homed load (behind a bus proxy) holds none.
+	const bus = IrcBus.forRegistry(registry);
+	if (!(bus instanceof IrcBus)) return;
+	const freed = bus.releaseTransportsForOwner(ownerToken);
 	if (freed.length === 0) return;
 	for (const ref of registry.list()) {
 		if (ref.kind !== "remote") continue;
@@ -727,7 +730,7 @@ async function bindExtension(
 	cwd: string,
 	eventBus: EventBus,
 	runtime: IExtensionRuntime,
-	registry: AgentRegistry,
+	registry: AgentRegistryApi,
 	agent: ExtensionAgentIdentity,
 ): Promise<{ extension: Extension | null; error: string | null }> {
 	const factory = imported.factory;
@@ -764,7 +767,7 @@ export async function loadExtensionFromFactory(
 	eventBus: EventBus,
 	runtime: IExtensionRuntime,
 	name = "<inline>",
-	registry: AgentRegistry = AgentRegistry.global(),
+	registry: AgentRegistryApi = AgentRegistry.global(),
 	agent: ExtensionAgentIdentity = TOP_LEVEL_AGENT,
 ): Promise<Extension> {
 	const extension = createExtension(name, name);
@@ -794,7 +797,7 @@ export async function loadExtensions(
 	cwd: string,
 	eventBus?: EventBus,
 	runtime?: IExtensionRuntime,
-	registry: AgentRegistry = AgentRegistry.global(),
+	registry: AgentRegistryApi = AgentRegistry.global(),
 	agent: ExtensionAgentIdentity = TOP_LEVEL_AGENT,
 ): Promise<LoadExtensionsResult> {
 	const preparedExtensions = await Promise.all(paths.map(extPath => importExtensionModule(extPath, cwd)));
@@ -811,7 +814,7 @@ export async function bindPreparedExtensions(
 	cwd: string,
 	eventBus?: EventBus,
 	runtime: IExtensionRuntime = new ExtensionRuntime(),
-	registry: AgentRegistry = AgentRegistry.global(),
+	registry: AgentRegistryApi = AgentRegistry.global(),
 	agent: ExtensionAgentIdentity = TOP_LEVEL_AGENT,
 ): Promise<LoadExtensionsResult> {
 	const extensions: Extension[] = [];
@@ -1049,7 +1052,7 @@ export async function discoverAndLoadExtensions(
 	eventBus?: EventBus,
 	disabledExtensionIds?: string[],
 	options: DiscoverExtensionPathOptions = {},
-	registry: AgentRegistry = AgentRegistry.global(),
+	registry: AgentRegistryApi = AgentRegistry.global(),
 	agent: ExtensionAgentIdentity = TOP_LEVEL_AGENT,
 ): Promise<LoadExtensionsResult> {
 	const paths = await discoverExtensionPaths(configuredPaths, cwd, disabledExtensionIds, options);

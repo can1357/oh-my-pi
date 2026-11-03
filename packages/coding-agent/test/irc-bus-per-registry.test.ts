@@ -23,9 +23,9 @@ describe("IrcBus.forRegistry (per-registry isolation)", () => {
 	it("memoizes one bus per registry; global() is the global registry's bus", () => {
 		const a = new AgentRegistry();
 		const b = new AgentRegistry();
-		expect(IrcBus.forRegistry(a)).toBe(IrcBus.forRegistry(a)); // same registry -> same bus
-		expect(IrcBus.forRegistry(a)).not.toBe(IrcBus.forRegistry(b)); // distinct registries -> distinct buses
-		expect(IrcBus.global()).toBe(IrcBus.forRegistry(AgentRegistry.global()));
+		expect(IrcBus.localForRegistry(a)).toBe(IrcBus.localForRegistry(a)); // same registry -> same bus
+		expect(IrcBus.localForRegistry(a)).not.toBe(IrcBus.localForRegistry(b)); // distinct registries -> distinct buses
+		expect(IrcBus.localForRegistry()).toBe(IrcBus.localForRegistry(AgentRegistry.global()));
 	});
 
 	it("delivers inbound into the addressed registry only", async () => {
@@ -33,12 +33,12 @@ describe("IrcBus.forRegistry (per-registry isolation)", () => {
 		const b = new AgentRegistry();
 		a.register({ id: "Main", displayName: "Main", kind: "main", session: null, status: "idle" });
 		// A's bus resolves "Main" (its waiter consumes the message).
-		const waitA = IrcBus.forRegistry(a).wait("Main", { from: "@cluster/peer" }, 1000);
-		const inA = await IrcBus.forRegistry(a).deliverInbound({ from: "@cluster/peer", to: "Main", body: "hi-a" });
+		const waitA = IrcBus.localForRegistry(a).wait("Main", { from: "@cluster/peer" }, 1000);
+		const inA = await IrcBus.localForRegistry(a).deliverInbound({ from: "@cluster/peer", to: "Main", body: "hi-a" });
 		expect(inA.receipt.outcome).not.toBe("failed");
 		expect((await waitA)?.body).toBe("hi-a");
 		// B never registered "Main" — the same address misses; registries share no refs.
-		const inB = await IrcBus.forRegistry(b).deliverInbound({ from: "@cluster/peer", to: "Main", body: "hi-b" });
+		const inB = await IrcBus.localForRegistry(b).deliverInbound({ from: "@cluster/peer", to: "Main", body: "hi-b" });
 		expect(inB.receipt.outcome).toBe("failed");
 		expect(inB.receipt.error).toMatch(/Unknown agent "Main"/);
 	});
@@ -53,11 +53,11 @@ describe("IrcBus.forRegistry (per-registry isolation)", () => {
 				return { to: message.to, outcome: "injected" };
 			},
 		};
-		IrcBus.forRegistry(a).setRemoteTransport("cluster-x", transport, "owner-a");
-		expect(IrcBus.forRegistry(a).hasRemoteTransport()).toBe(true);
-		expect(IrcBus.forRegistry(b).hasRemoteTransport()).toBe(false);
+		IrcBus.localForRegistry(a).setRemoteTransport("cluster-x", transport, "owner-a");
+		expect(IrcBus.localForRegistry(a).hasRemoteTransport()).toBe(true);
+		expect(IrcBus.localForRegistry(b).hasRemoteTransport()).toBe(false);
 		// B has no cluster-x transport, so an @cluster-x/* send fails locally and never touches A's.
-		const bReceipt = await IrcBus.forRegistry(b).send({ from: "Main", to: "@cluster-x/peer", body: "x" });
+		const bReceipt = await IrcBus.localForRegistry(b).send({ from: "Main", to: "@cluster-x/peer", body: "x" });
 		expect(bReceipt.outcome).toBe("failed");
 		expect(seenOnA).toBe(false);
 	});

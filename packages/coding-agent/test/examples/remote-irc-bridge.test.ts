@@ -169,11 +169,15 @@ describe("examples/extensions/remote-irc-bridge", () => {
 			expect(hello).toEqual({ type: "hello", agentId: "Main", namespace: "demo" });
 			expect(agentRegistry.get("@demo/leia")).toMatchObject({ kind: "remote", status: "running" });
 			expect(agentRegistry.get("@demo/han")).toMatchObject({ kind: "remote", status: "running" });
-			expect(IrcBus.forRegistry(agentRegistry).hasRemoteTransport()).toBe(true);
+			expect(IrcBus.localForRegistry(agentRegistry).hasRemoteTransport()).toBe(true);
 
 			// Outbound: the bus routes @demo/leia to the bridge, the bridge writes one line, the peer's
 			// ack is what the sender gets back as the receipt.
-			const sending = IrcBus.forRegistry(agentRegistry).send({ from: "Main", to: "@demo/leia", body: "hi leia" });
+			const sending = IrcBus.localForRegistry(agentRegistry).send({
+				from: "Main",
+				to: "@demo/leia",
+				body: "hi leia",
+			});
 			const outbound = await peer.next("outbound");
 			expect(outbound).toMatchObject({
 				from: "Main",
@@ -188,7 +192,11 @@ describe("examples/extensions/remote-irc-bridge", () => {
 			// A body far larger than one socket write can carry still arrives as one intact record
 			// (the bridge queues the unwritten suffix and flushes on drain), and the ack comes back.
 			const bigBody = "x".repeat(4 * 1024 * 1024);
-			const sendingBig = IrcBus.forRegistry(agentRegistry).send({ from: "Main", to: "@demo/han", body: bigBody });
+			const sendingBig = IrcBus.localForRegistry(agentRegistry).send({
+				from: "Main",
+				to: "@demo/han",
+				body: bigBody,
+			});
 			const big = await peer.next("outbound");
 			expect(big.toName).toBe("han");
 			expect(big.body.length).toBe(bigBody.length);
@@ -207,7 +215,7 @@ describe("examples/extensions/remote-irc-bridge", () => {
 
 			// A send in flight when the peer drops must fail with a receipt that still names the
 			// recipient, so the model's "Failed: … is not running" line is about the peer, not a message id.
-			const stranded = IrcBus.forRegistry(agentRegistry).send({
+			const stranded = IrcBus.localForRegistry(agentRegistry).send({
 				from: "Main",
 				to: "@demo/han",
 				body: "anyone there",

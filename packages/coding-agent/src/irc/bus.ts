@@ -138,6 +138,19 @@ export class IrcBus implements IrcBusApi {
 		return bus;
 	}
 
+	/**
+	 * The main-thread bus serving `registry`, where the cross-process seams live (inbound delivery,
+	 * outbound transports, namespace claims). Throws on a worker thread, whose global bus is a proxy
+	 * of main's: extension bridges claim and deliver from the main thread only.
+	 */
+	static localForRegistry(registry: AgentRegistryApi = AgentRegistry.global()): IrcBus {
+		const bus = IrcBus.forRegistry(registry);
+		if (!(bus instanceof IrcBus)) {
+			throw new Error("Cross-process IRC is served by the main thread's bus; this thread only has a proxy of it.");
+		}
+		return bus;
+	}
+
 	/** Install the process-global bus. Worker bootstrap only. */
 	static installGlobal(api: IrcBusApi): void {
 		IrcBus.#global = api;

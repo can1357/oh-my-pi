@@ -9,7 +9,13 @@ import { getRoleInfo } from "../config/model-roles";
 import type { Settings } from "../config/settings";
 import { IrcBus, type IrcBusApi } from "../irc/bus";
 import { type AgentLifecycleApi, AgentLifecycleManager } from "../registry/agent-lifecycle";
-import { type AgentRef, AgentRegistry, type AgentRegistryApi, hasLocalPresence, MAIN_AGENT_ID } from "../registry/agent-registry";
+import {
+	type AgentRef,
+	AgentRegistry,
+	type AgentRegistryApi,
+	hasLocalPresence,
+	MAIN_AGENT_ID,
+} from "../registry/agent-registry";
 import { registerPersistedSubagents, sessionFileBelongsToRoot } from "../registry/persisted-agents";
 import { normalizeAssistantUsage, parseSessionEntries } from "../session/session-loader";
 

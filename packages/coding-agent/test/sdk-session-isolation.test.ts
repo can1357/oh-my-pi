@@ -408,7 +408,7 @@ describe("createAgentSession session storage isolation", () => {
 			session: null,
 			status: "parked",
 		});
-		const lifecycle = AgentLifecycleManager.forRegistry(registry);
+		const lifecycle = AgentLifecycleManager.local(registry);
 		lifecycle.retainRoot("ScopedRoot");
 		lifecycle.adopt(child.id, { idleTtlMs: 0 });
 		try {

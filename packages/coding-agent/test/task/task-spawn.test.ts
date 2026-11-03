@@ -20,7 +20,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { createAgentsHubDeps } from "@oh-my-pi/pi-coding-agent/modes/agents-hub-deps";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
-import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import { AgentRegistry, type AgentRegistryApi } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
@@ -44,7 +44,7 @@ const taskAgent: AgentDefinition = {
 function createSession(options: {
 	manager?: AsyncJobManager;
 	settings?: Record<string, unknown>;
-	agentRegistry?: AgentRegistry;
+	agentRegistry?: AgentRegistryApi;
 }): ToolSession {
 	return {
 		cwd: "/tmp",
