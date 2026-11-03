@@ -52,6 +52,9 @@ describe.skipIf(!available)("browser implicit role selectors", () => {
 				<section id="aria-name-section" aria-labelledby="aria-name-heading"></section><h2 id="aria-name-heading" aria-label="Billing"></h2>
 				<article><aside id="aria-name-aside" aria-labelledby="aria-name-heading"></aside></article>
 				<section id="alt-name-section" aria-labelledby="alt-name-image"></section><img id="alt-name-image" alt="Logo" src="data:,">
+				<section id="input-button-section" aria-labelledby="input-button-label"></section><input id="input-button-label" type="button" value="Billing input">
+				<section id="text-input-section" aria-labelledby="text-input-label"></section><input id="text-input-label" value="Typed name">
+				<section id="area-name-section" aria-labelledby="area"></section>
 				<form id="form" aria-label="Named form"></form><form id="unnamed-form">Content</form>
 				<header id="header" aria-label="Header"></header><footer id="footer" aria-label="Footer"></footer>
 				${["article", "aside", "main", "nav", "section"].map(tag => `<${tag}><header id="${tag}-header" aria-label="${tag} header"></header><footer id="${tag}-footer" aria-label="${tag} footer"></footer></${tag}>`).join("")}
@@ -123,6 +126,8 @@ describe.skipIf(!available)("browser implicit role selectors", () => {
 			for (const query of [
 				'region[name="billing-worker" exact] >> role/combobox[name="REGION" exact]',
 				'region[name="billing-worker"][level=2]',
+				"region>>role/combobox",
+				"button.foo",
 			]) {
 				const puppeteerError = await page.$$eval(`role/${query}`, elements => elements.length).catch(String);
 				expect(String(puppeteerError)).toContain("role/ selectors do not chain");

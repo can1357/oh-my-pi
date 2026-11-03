@@ -163,6 +163,8 @@ describe("browser selector guard", () => {
 			normalizeSelector('role/region[name="billing-worker" exact] >> role/combobox[name="REGION" exact]'),
 		).toThrow(/role\/ selectors do not chain/);
 		expect(() => normalizeSelector("role/button[pressed=true]")).toThrow(/role\/ selectors do not chain/);
+		expect(() => normalizeSelector("role/region>>role/combobox")).toThrow(/role\/ selectors do not chain/);
+		expect(() => normalizeSelector("role/button.foo")).toThrow(/role\/ selectors do not chain/);
 		expect(normalizeSelector('role/region[name="billing-worker" exact]')).toBe(
 			'role/region[name="billing-worker" exact]',
 		);

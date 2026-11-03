@@ -100,7 +100,7 @@ export function queryByTitle(node: QueryNode, selector: string): Element[] {
 export function queryByRole(node: QueryNode, selector: string): Element[] {
 	const root = node as unknown as QueryRoot;
 	const parsed =
-		/^\s*([^\s[\]]+)\s*(?:\[\s*name\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\]\s]+))(?:\s+(exact))?\s*\])?\s*$/i.exec(
+		/^\s*([a-z][a-z0-9-]*)\s*(?:\[\s*name\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\]\s]+))(?:\s+(exact))?\s*\])?\s*$/i.exec(
 			selector,
 		);
 	if (!parsed) {
@@ -301,7 +301,7 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 				} else if (valueIsText) text += shown ? (control.value ?? "") : "";
 				else if (labelledBy) text += shown ? labelledBy : "";
 				else if (label) text += shown ? label : "";
-				else if (tag === "img") text += shown ? (childElement.getAttribute("alt") ?? "") : "";
+				else if (tag === "img" || tag === "area") text += shown ? (childElement.getAttribute("alt") ?? "") : "";
 				else if (inputButton) text += shown ? (control.value ?? "") : "";
 				else if (tag !== "input") walk(childElement, visibility === "any" ? "any" : style.visibility);
 				text += gap;
@@ -310,7 +310,11 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 		walk(start, visibility);
 		return text;
 	};
-	/** Text of the elements an `aria-labelledby` names (a hidden target read whole), without following their own references. */
+	/**
+	 * Text of the elements an `aria-labelledby` names (a hidden target read whole), without following their own
+	 * references. Each target is read as a node embedded in a label, so a control target gives its value and an image its
+	 * alt, as its descendants would.
+	 */
 	const idrefText = (element: Element): string => {
 		const labelledBy = element.getAttribute("aria-labelledby");
 		if (!labelledBy) return "";
@@ -320,17 +324,18 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 				.map(id => {
 					const target = element.ownerDocument?.getElementById(id);
 					if (!target) return "";
-					const label = normalizeSpace(target.getAttribute("aria-label") ?? "");
-					if (label) return label;
-					const tag = target.tagName.toLocaleLowerCase();
-					if (tag === "img" || tag === "area") return normalizeSpace(target.getAttribute("alt") ?? "");
 					// Hidden by visibility, `display: none`, or a `hidden`/`aria-hidden` ancestor: read the whole subtree.
 					const targetStyle = getComputedStyle(target);
 					const hidden =
 						targetStyle.visibility !== "visible" ||
 						targetStyle.display === "none" ||
 						target.closest("[hidden], [aria-hidden='true']") !== null;
-					return contentText(target, null, hidden ? "any" : "visible", false);
+					return contentText(
+						{ childNodes: [target] } as unknown as Element,
+						null,
+						hidden ? "any" : "visible",
+						false,
+					);
 				})
 				.join(" "),
 		);
