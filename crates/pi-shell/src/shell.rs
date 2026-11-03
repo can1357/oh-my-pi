@@ -6298,6 +6298,81 @@ mod tests {
 		mismatches
 	}
 
+	/// A background job's later words see every descriptor its earlier
+	/// redirections set, as they do in the child Bash forks, however they
+	/// name it: through a variable, a process substitution or `/dev/fd`, and
+	/// the last of two at one number.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn background_later_words_read_the_job_descriptors() {
+		let mismatches = rows_unlike_bash(&[
+			(
+				"a variable names it",
+				"printf 'DATA\\n' >data; fd=3; /bin/cat 3<data <<<\"$(cat <&$fd)\" >out & wait $!; \
+				 echo \"S=$?\"; cat out",
+				"S=0\nDATA\n",
+			),
+			(
+				"a process substitution reads it",
+				"printf 'DATA\\n' >data; /bin/cat 3<data < <(cat <&3) >out & wait $!; echo \"S=$?\"; \
+				 cat out",
+				"S=0\nDATA\n",
+			),
+			(
+				"an external command reads it by /dev/fd",
+				"printf 'DATA\\n' >data; fd=3; /bin/cat 3<data <<<\"$(/bin/cat /dev/fd/$fd)\" >out & \
+				 wait $!; echo \"S=$?\"; cat out",
+				"S=0\nDATA\n",
+			),
+			(
+				"a descriptor set twice",
+				"printf 'OLD\\n' >old; printf 'NEW\\n' >new; /bin/cat 3<old 3<new <<<\"$(cat <&3)\" \
+				 >out & wait $!; echo \"S=$?\"; cat out",
+				"S=0\nNEW\n",
+			),
+		])
+		.await;
+		assert!(mismatches.is_empty(), "{mismatches:#?}");
+	}
+
+	/// A child started while a background job's words expand takes each of
+	/// the job's descriptors at its number without this process duplicating
+	/// it: a duplicate per descriptor held twice as many here as the job has,
+	/// so 600 redirections and a later substitution reached the open-file
+	/// limit of 1024 the job itself runs within, where Bash runs the command.
+	#[cfg(target_os = "linux")]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn background_job_descriptors_are_not_duplicated_for_a_child() {
+		use std::fmt::Write as _;
+
+		// nextest runs each test in a process of its own, whose limit this is.
+		let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+		// SAFETY: plain calls on a structure this function owns.
+		unsafe {
+			assert_eq!(libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut limit), 0);
+			limit.rlim_cur = limit.rlim_max.min(1024);
+			assert_eq!(libc::setrlimit(libc::RLIMIT_NOFILE, &raw const limit), 0);
+		}
+		let redirections = (3..603).fold(String::new(), |mut words, fd| {
+			let _ = write!(words, "{fd}>/dev/null ");
+			words
+		});
+		let root = tempfile::tempdir().expect("scratch directory");
+		let (result, output) = run_command_capture_within(
+			Duration::from_secs(60),
+			&format!(
+				"/bin/true {redirections}603>\"$(/bin/sh -c '[ -w /dev/fd/602 ] && echo has602' \
+				 >held; echo /dev/null)\" & wait $!; echo \"S=$?\"; cat held"
+			),
+			Some(root.path()),
+			None,
+			CancelToken::default(),
+		)
+		.await
+		.expect("the job finishes");
+		assert_eq!((result.exit_code, output.as_str()), (Some(0), "S=0\nhas602\n"));
+	}
+
 	/// To choose between spawning a background command and running it in a
 	/// task, the shell expanded its command word, then the chosen path
 	/// expanded it again, so a substitution there ran twice. `log` gets one
