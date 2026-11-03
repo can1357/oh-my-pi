@@ -28,7 +28,7 @@ use brush_parser::{
 	ParserOptions,
 	ast::{
 		AndOr, Command, CommandPrefixOrSuffixItem, CompoundListItem, IoFileRedirectTarget,
-		IoRedirect, Pipeline, Program, SeparatorOperator, SimpleCommand, Word,
+		IoRedirect, Pipeline, Program, SeparatorOperator, SimpleCommand, SourceLocation, Word,
 	},
 };
 
@@ -46,6 +46,9 @@ pub struct ChainSegment {
 	/// shell reads a whole line before it runs any of it, so every segment of
 	/// a line is read with the aliases as they were when its line began.
 	pub starts_line:               bool,
+	/// Where the segment begins in the analyzed command, in characters. A line
+	/// in which a command begins with an alias runs from there as written.
+	pub source_start:              usize,
 }
 
 /// Outcome of analyzing a raw command string.
@@ -181,6 +184,7 @@ fn classify_chain(program: &Program) -> Option<CommandPlan> {
 				run_if_previous_succeeded,
 				suppress_errexit,
 				starts_line,
+				source_start: pipeline.location()?.start.index,
 			});
 			starts_line = false;
 
@@ -424,6 +428,7 @@ mod tests {
 					run_if_previous_succeeded: false,
 					suppress_errexit:          true,
 					starts_line:               true,
+					source_start:              0,
 				},
 				ChainSegment {
 					command:                   "git diff --name-only".to_string(),
@@ -432,6 +437,7 @@ mod tests {
 					run_if_previous_succeeded: true,
 					suppress_errexit:          false,
 					starts_line:               false,
+					source_start:              19,
 				},
 			])
 		);
@@ -450,6 +456,7 @@ mod tests {
 					run_if_previous_succeeded: false,
 					suppress_errexit:          false,
 					starts_line:               true,
+					source_start:              0,
 				},
 				ChainSegment {
 					command:                   "bun test".to_string(),
@@ -458,6 +465,7 @@ mod tests {
 					run_if_previous_succeeded: false,
 					suppress_errexit:          false,
 					starts_line:               false,
+					source_start:              13,
 				},
 			])
 		);
@@ -476,6 +484,7 @@ mod tests {
 					run_if_previous_succeeded: false,
 					suppress_errexit:          true,
 					starts_line:               true,
+					source_start:              0,
 				},
 				ChainSegment {
 					command:                   "echo no".to_string(),
@@ -484,6 +493,7 @@ mod tests {
 					run_if_previous_succeeded: true,
 					suppress_errexit:          false,
 					starts_line:               false,
+					source_start:              9,
 				},
 				ChainSegment {
 					command:                   "echo yes".to_string(),
@@ -492,6 +502,7 @@ mod tests {
 					run_if_previous_succeeded: false,
 					suppress_errexit:          false,
 					starts_line:               false,
+					source_start:              19,
 				},
 			])
 		);

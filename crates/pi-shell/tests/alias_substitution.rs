@@ -507,6 +507,22 @@ async fn here_document_body_begins_on_the_next_input_line() {
 	);
 }
 
+/// G51, G52, G53, G54, G55, G56: the blank after an alias's name stays in the
+/// input, read after the value: a value ending in a backslash escapes it, and
+/// a value that opens a quote takes it into the quoted text.
+#[tokio::test]
+async fn blank_after_an_alias_name_is_read_after_the_value() {
+	assert_eq!(with_aliases("q='echo Q\\'", "q word").await, "Q word\n");
+	assert_eq!(with_aliases("q='printf \"<%s>\\n\" \"'", "q word\"").await, "< word>\n");
+	assert_eq!(with_aliases("q='echo Q\\'", "q\tword").await, "Q\tword\n");
+	assert_eq!(with_aliases("q='echo Q\\'", "q ;echo NEXT").await, "Q \nNEXT\n");
+	assert_eq!(
+		run("shopt -s expand_aliases\nalias r='echo R\\'\nalias q='r '\nq word").await,
+		"R  word\n"
+	);
+	assert_eq!(with_aliases("q='echo Q\\'", "eval 'q word'").await, "Q word\n");
+}
+
 /// G26: `alias -p` lists the aliases, then handles its operands.
 #[tokio::test]
 async fn alias_p_lists_then_defines() {

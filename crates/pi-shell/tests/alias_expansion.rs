@@ -776,3 +776,26 @@ async fn line_reads_after_a_newline_in_an_alias_with_the_aliases_then() {
 		assert_eq!(out, "", "minimizer {minimizer}");
 	}
 }
+
+/// From a line in which a command begins with an alias, the input runs as
+/// written: a comment, a trailing backslash or a blank in the alias's value
+/// acts on the input after it as in Bash, with or without the minimizer.
+#[tokio::test]
+async fn input_after_an_alias_runs_as_written() {
+	let cases = [
+		("shopt -s expand_aliases\nalias -- q='echo Q #'\n", "q &&\necho END", "Q\nEND\n"),
+		("shopt -s expand_aliases\nalias -- q='false #'\n", "q &&\necho END", "END\n"),
+		("shopt -s expand_aliases\nalias -- q='echo Q \\'\n", "q\necho LAST", "Q echo LAST\n"),
+		(
+			"shopt -s expand_aliases\nalias -- q='echo Q\\'\n",
+			"git status --short 2>/dev/null; q word",
+			"Q word\n",
+		),
+	];
+	for (snapshot, command, expected) in cases {
+		for minimizer in [false, true] {
+			let out = run_with(command, Setup { snapshot: Some(snapshot), minimizer }).await;
+			assert_eq!(out, expected, "{snapshot:?} {command:?} minimizer {minimizer}");
+		}
+	}
+}

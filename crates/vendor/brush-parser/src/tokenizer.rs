@@ -1499,7 +1499,12 @@ impl<I: Iterator<Item = std::io::Result<char>>> Tokenizer<I> {
                     state.start_position.index += 1;
                 }
 
-                self.consume_char()?;
+                // A word dropped for an alias leaves the blank after it in the
+                // input, read after the alias's value as in Bash: a value that
+                // ends in a backslash or inside quotes takes it.
+                if self.cross_state.pending_alias.is_none() {
+                    self.consume_char()?;
+                }
             }
             //
             // N.B. We need to remember if we were recursively called in a variable
