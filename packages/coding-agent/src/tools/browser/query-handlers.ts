@@ -316,6 +316,14 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 		walk(start, visibility);
 		return text;
 	};
+	/** The host-language name of an element its descendants do not name: an optgroup's label, a fieldset's legend, a table's caption. */
+	const nativeName = (element: Element): string => {
+		const tag = element.tagName.toLocaleLowerCase();
+		if (tag === "optgroup") return normalizeSpace(element.getAttribute("label") ?? "");
+		if (tag !== "fieldset" && tag !== "table") return "";
+		const caption = element.querySelector(tag === "fieldset" ? ":scope > legend" : ":scope > caption");
+		return caption ? normalizeSpace(contentText(caption, null, "visible")) : "";
+	};
 	/**
 	 * Text of the elements an `aria-labelledby` names (a hidden target read whole), without following their own
 	 * references. Each target is read as a node embedded in a label, so a control target gives its value and an image its
@@ -336,6 +344,9 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 						targetStyle.visibility !== "visible" ||
 						targetStyle.display === "none" ||
 						target.closest("[hidden], [aria-hidden='true']") !== null;
+					// A table, fieldset or optgroup target is named by its caption, legend or label, not its contents.
+					const native = normalizeSpace(target.getAttribute("aria-label") ?? "") ? "" : nativeName(target);
+					if (native) return native;
 					const text = normalizeSpace(
 						contentText({ childNodes: [target] } as unknown as Element, null, hidden ? "any" : "visible", false),
 					);
@@ -350,6 +361,9 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 		if (labelledBy) return labelledBy;
 		const ariaLabel = normalizeSpace(element.getAttribute("aria-label") ?? "");
 		if (ariaLabel) return ariaLabel;
+		// Labels label form controls only, so an optgroup inside a labelled select keeps its own label.
+		const native = nativeName(element);
+		if (native || element.tagName.toLocaleLowerCase() === "optgroup") return native;
 		if (element.id) {
 			for (const label of element.ownerDocument?.querySelectorAll("label") ?? []) {
 				if (label.getAttribute("for") === element.id) {
@@ -360,14 +374,6 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 		const wrappingLabel = element.closest("label");
 		if (wrappingLabel) return normalizeSpace(contentText(wrappingLabel, element, "visible"));
 		const tag = element.tagName.toLocaleLowerCase();
-		if (tag === "optgroup") return normalizeSpace(element.getAttribute("label") ?? "");
-		if (tag === "fieldset" || tag === "table") {
-			const caption = element.querySelector(tag === "fieldset" ? ":scope > legend" : ":scope > caption");
-			if (caption) {
-				const name = normalizeSpace(contentText(caption, null, "visible"));
-				if (name) return name;
-			}
-		}
 		// An `<input>`'s type and value decide its name; other elements have neither.
 		const input = tag === "input" ? (element as unknown as { type: string; value: string }) : null;
 		const inputType = input?.type.toLocaleLowerCase();
