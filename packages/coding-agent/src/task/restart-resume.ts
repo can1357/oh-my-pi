@@ -6,9 +6,8 @@
  * Before the teardown, {@link recordRestartSubagents} writes one `restart_subagents`
  * entry into the root session's own file: each running subagent of this session, its
  * parent, the tool calls it is in, the background jobs it owns that die with the
- * process, the queued messages and job results it has not read, and why it cannot be
- * resumed when it cannot. The teardown then stops them as a shutdown does: the
- * transcript stays on disk, nothing is tombstoned.
+ * process, and the queued messages and job results it has not read. The teardown then
+ * stops them as a shutdown does: the transcript stays on disk, nothing is tombstoned.
  *
  * After the relaunch resumed the session, {@link resumeRestartedSubagents} consumes
  * that entry once (`restart_subagents_resumed`) and gives every interrupted subagent
@@ -16,20 +15,23 @@
  * the lifecycle reviver rebuilds it from its transcript, it gets one note saying the
  * process restarted and what was interrupted, and its result reaches the parent as the
  * ordinary `async-result` of a job with the id its first run's job had. Parents go
- * first, so a lane revives before its arms and receives their results.
+ * first, so a lane revives before its arms and receives their results. A subagent that
+ * cannot go on (isolated, killed, finished in the meantime, its job refused) is
+ * reported with the reason, never dropped silently.
  */
 import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { logger } from "@oh-my-pi/pi-utils";
 import { AsyncJobError } from "../async";
-import type { AsyncJobManager } from "../async/job-manager";
+import type { AsyncJobManagerApi } from "../async/job-manager";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
 import { ensurePersistedRoster, sessionFileBelongsToRoot } from "../registry/persisted-agents";
 import type { AgentSession } from "../session/agent-session";
-import { collectPendingToolCalls, summarizeToolArguments } from "../session/exit-diagnostics";
+import { type AgentSessionHandle, isLocalAgentSession } from "../session/agent-session-handle";
+import { summarizeToolArguments } from "../session/exit-diagnostics";
 import type { SessionEntry } from "../session/session-entries";
-import { extractSessionInit, SessionManager } from "../session/session-manager";
+import { type PersistedSessionInit, SessionManager } from "../session/session-manager";
 import { loadSessionFile } from "../session/session-loader";
 import type { EventBus } from "../utils/event-bus";
 import { runSubagentFollowUpTurn } from "./executor";
@@ -63,8 +65,6 @@ export interface RestartSubagent {
 	pendingMessages: string[];
 	/** Results of its jobs that finished but that it has not read. */
 	unreadResults: { id: string; text: string }[];
-	/** Why it cannot be resumed; absent when it can. */
-	notResumable?: string;
 }
 
 /** The `restart_subagents` entry. */
@@ -106,14 +106,26 @@ function queuedMessageText(message: AgentMessage): string {
 
 function describeRunningSubagent(
 	ref: AgentRef,
-	session: AgentSession,
-	manager: AsyncJobManager | undefined,
+	session: AgentSessionHandle,
+	manager: AsyncJobManagerApi | undefined,
 ): RestartSubagent {
-	const interruptedToolCalls = collectPendingToolCalls(session.sessionManager.getBranch()).map(call => ({
-		toolName: call.toolName,
-		...summarizeToolArguments(call.args),
-		...(call.intent ? { intent: call.intent } : {}),
-	}));
+	// The calls the loop dispatched and has not finished; their results do not exist yet.
+	const pending = session.agent.state.pendingToolCalls;
+	const interruptedToolCalls = session.messages.flatMap(message =>
+		message.role === "assistant"
+			? message.content.flatMap(part => {
+					if (part.type !== "toolCall" || !pending.has(part.id)) return [];
+					const intent = part.arguments && typeof part.arguments === "object" ? part.arguments.i : undefined;
+					return [
+						{
+							toolName: part.name,
+							...summarizeToolArguments(part.arguments),
+							...(typeof intent === "string" && intent ? { intent } : {}),
+						},
+					];
+				})
+			: [],
+	);
 	const owned = manager?.getAllJobs({ ownerId: ref.id }) ?? [];
 	const lostJobs = owned
 		// A running task job is a subagent of its own; it is recorded and resumed itself.
@@ -125,10 +137,13 @@ function describeRunningSubagent(
 			const text = job.resultText ?? job.errorText;
 			return text ? [{ id: job.id, text: clip(text) }] : [];
 		});
-	const pendingMessages = [...session.agent.peekSteeringQueue(), ...session.agent.peekFollowUpQueue()]
-		.map(queuedMessageText)
-		.filter(Boolean)
-		.map(clip);
+	// The queues are readable only on a session homed on this thread, which every in-process subagent is.
+	const pendingMessages = isLocalAgentSession(session)
+		? [...session.agent.peekSteeringQueue(), ...session.agent.peekFollowUpQueue()]
+				.map(queuedMessageText)
+				.filter(Boolean)
+				.map(clip)
+		: [];
 	return {
 		id: ref.id,
 		...(ref.parentId ? { parentId: ref.parentId } : {}),
@@ -136,9 +151,6 @@ function describeRunningSubagent(
 		lostJobs,
 		pendingMessages,
 		unreadResults,
-		...(extractSessionInit(session.sessionManager.getEntries())?.isolated === true
-			? { notResumable: "it ran in an isolated workspace, and an isolated run is never revived" }
-			: {}),
 	};
 }
 
@@ -344,10 +356,10 @@ export async function resumeRestartedSubagents(
 	for (const sub of order) {
 		const ref = registry.get(sub.id);
 		const file = transcriptOf(sub.id);
-		let reason: string | undefined = sub.notResumable;
-		if (!reason && (!ref || !file || ref.kind !== "sub")) reason = "its transcript was not found under this session";
-		else if (!reason && ref?.status === "aborted") reason = "it was killed";
-		else if (!reason && manager.getJob(sub.id)?.status === "running") reason = "it is already running again";
+		let reason: string | undefined;
+		if (!ref || !file || ref.kind !== "sub") reason = "its transcript was not found under this session";
+		else if (ref.status === "aborted") reason = "it was killed";
+		else if (manager.getJob(sub.id)?.status === "running") reason = "it is already running again";
 		if (!reason && file) {
 			const loaded = await loadSessionFile(file);
 			const entries = (loaded?.entries ?? []).filter((entry): entry is SessionEntry => entry.type !== "session");
@@ -356,54 +368,74 @@ export async function resumeRestartedSubagents(
 		if (reason) outcome.notResumed.push({ id: sub.id, reason });
 		else if (ref) plans.push({ sub, ref });
 	}
-	const notResumedById = new Map(outcome.notResumed.map(entry => [entry.id, entry.reason]));
-
+	const contracts: { sub: RestartSubagent; ref: AgentRef; init: PersistedSessionInit }[] = [];
 	for (const { sub, ref } of plans) {
+		const init = (await SessionManager.peekSessionInit(ref.sessionFile!))?.init;
+		if (!init) outcome.notResumed.push({ id: sub.id, reason: "its transcript has no session contract" });
+		else if (init.isolated)
+			outcome.notResumed.push({
+				id: sub.id,
+				reason: "it ran in an isolated workspace, and an isolated run is never revived",
+			});
+		else contracts.push({ sub, ref, init });
+	}
+	// Register without awaiting in between, so every outcome is settled before any
+	// job body reads it for its note.
+	for (const { sub, ref, init } of contracts) {
 		const sessionFileOfRef = ref.sessionFile!;
-		const peek = await SessionManager.peekSessionInit(sessionFileOfRef);
-		const init = peek?.init;
-		if (!init) {
-			outcome.notResumed.push({ id: sub.id, reason: "its transcript has no session contract" });
-			continue;
-		}
-		const children = record.subagents.filter(child => child.parentId === sub.id);
-		const resumedChildren = children.filter(child => !notResumedById.has(child.id)).map(child => child.id);
-		const notResumedChildren = children.flatMap(child => {
-			const reason = notResumedById.get(child.id);
-			return reason ? [{ id: child.id, reason }] : [];
-		});
 		const structured = init.tools.includes("yield");
-		manager.register(
-			"task",
-			sub.id,
-			async ({ signal }) => {
-				const live = await AgentLifecycleManager.global().ensureLive(sub.id);
-				const available = new Set([...live.getAllToolNames(), ...live.getMountedXdevToolNames()]);
-				const missingTools = init.tools.filter(name => !available.has(name));
-				const result = await runSubagentFollowUpTurn({
-					id: sub.id,
-					agent: persistedAgentDefinition(ref.displayName, init),
-					message: buildRestartNote({ subagent: sub, resumedChildren, notResumedChildren, missingTools }),
-					structured,
-					workPoolYieldItems: init.workPoolYieldItems,
-					outputSchema: init.outputSchema,
-					outputSchemaMode: init.outputSchemaMode,
-					signal,
-					eventBus: options.eventBus,
-					subagentEventBus: options.subagentEventBus,
-					artifactsDir: path.dirname(sessionFileOfRef),
-					maxRuntimeMs: cfgTaskMaxRuntimeMs.get(session.settings),
-				});
-				const text = formatTaskResultSummary(result, { totalDurationMs: result.durationMs });
-				const structuredOutput = result.structuredOutput;
-				if (result.aborted || result.exitCode !== 0 || result.error !== undefined) {
-					throw new AsyncJobError(text, structuredOutput);
-				}
-				return structuredOutput ? { text, structured: structuredOutput } : text;
-			},
-			{ id: sub.id, agentId: sub.id, ownerId: ref.parentId },
-		);
-		outcome.resumed.push(sub.id);
+		try {
+			manager.register(
+				"task",
+				sub.id,
+				async ({ signal }) => {
+					const live = await AgentLifecycleManager.global().ensureLive(sub.id);
+					// A revived subagent is homed on this thread; a remote handle exposes no tool list.
+					const available = isLocalAgentSession(live)
+						? new Set([...live.getAllToolNames(), ...live.getMountedXdevToolNames()])
+						: undefined;
+					const missingTools = available ? init.tools.filter(name => !available.has(name)) : [];
+					const children = record.subagents.filter(child => child.parentId === sub.id);
+					const result = await runSubagentFollowUpTurn({
+						id: sub.id,
+						agent: persistedAgentDefinition(ref.displayName, init),
+						message: buildRestartNote({
+							subagent: sub,
+							resumedChildren: children
+								.filter(child => outcome.resumed.includes(child.id))
+								.map(child => child.id),
+							notResumedChildren: outcome.notResumed.filter(entry =>
+								children.some(child => child.id === entry.id),
+							),
+							missingTools,
+						}),
+						structured,
+						workPoolYieldItems: init.workPoolYieldItems,
+						outputSchema: init.outputSchema,
+						outputSchemaMode: init.outputSchemaMode,
+						signal,
+						eventBus: options.eventBus,
+						subagentEventBus: options.subagentEventBus,
+						artifactsDir: path.dirname(sessionFileOfRef),
+						maxRuntimeMs: cfgTaskMaxRuntimeMs.get(session.settings),
+					});
+					const text = formatTaskResultSummary(result, { totalDurationMs: result.durationMs });
+					const structuredOutput = result.structuredOutput;
+					if (result.aborted || result.exitCode !== 0 || result.error !== undefined) {
+						throw new AsyncJobError(text, structuredOutput);
+					}
+					return structuredOutput ? { text, structured: structuredOutput } : text;
+				},
+				{ id: sub.id, agentId: sub.id, ownerId: ref.parentId },
+			);
+			outcome.resumed.push(sub.id);
+		} catch (error) {
+			// The background job limit, for one: the transcript stays revivable by a message.
+			outcome.notResumed.push({
+				id: sub.id,
+				reason: `its job could not start (${error instanceof Error ? error.message : String(error)}); send it a message to revive it`,
+			});
+		}
 	}
 	if (outcome.resumed.length > 0 || outcome.notResumed.length > 0) {
 		logger.info("Resumed subagents after restart", { resumed: outcome.resumed, notResumed: outcome.notResumed });

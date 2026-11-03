@@ -22,7 +22,6 @@ import { AgentRegistry, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
-import { collectPendingToolCalls } from "@oh-my-pi/pi-coding-agent/session/exit-diagnostics";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import { createPersistedSubagentReviverFactory } from "@oh-my-pi/pi-coding-agent/task/persisted-revive";
@@ -233,11 +232,7 @@ async function until(predicate: () => boolean, what: string, timeoutMs = 15_000)
 			const state = AgentRegistry.global()
 				.list()
 				.map(ref => {
-					const tail = ref.session?.sessionManager
-						.getBranch()
-						.filter(entry => entry.type === "message")
-						.slice(-2)
-						.map(entry => (entry.type === "message" ? JSON.stringify(entry.message).slice(0, 500) : ""));
+					const tail = ref.session?.messages.slice(-2).map(message => JSON.stringify(message).slice(0, 500));
 					return `${ref.id} ${ref.kind} ${ref.status} ${JSON.stringify(tail)}`;
 				});
 			throw new Error(`Timed out waiting for ${what}; registry:\n${state.join("\n")}`);
@@ -248,8 +243,12 @@ async function until(predicate: () => boolean, what: string, timeoutMs = 15_000)
 
 function inBash(id: string): boolean {
 	const session = AgentRegistry.global().get(id)?.session;
-	return Boolean(
-		session && collectPendingToolCalls(session.sessionManager.getBranch()).some(call => call.toolName === "bash"),
+	if (!session) return false;
+	const pending = session.agent.state.pendingToolCalls;
+	return session.messages.some(
+		message =>
+			message.role === "assistant" &&
+			message.content.some(part => part.type === "toolCall" && part.name === "bash" && pending.has(part.id)),
 	);
 }
 
