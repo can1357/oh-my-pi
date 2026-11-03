@@ -409,18 +409,18 @@ interface LeasedFile {
 /**
  * Lease the file open at `handle`, which `file` names, and read under the
  * lease what it holds and carries: the {@link LeasedFile}, or the clause
- * saying why it is not this run's to vouch for — the file is open through
- * another descriptor, or the kernel gives no lease here. A refused lease
- * says only that some other open of the file exists; it can be this
+ * saying why it is not this run's to vouch for — the file is open or mapped
+ * elsewhere, or the kernel gives no lease here. A refused lease says only
+ * that some other open or mapping of the file exists; it can be this
  * process's own, so the clause names no process. The caller closes `handle`.
  */
 async function leaseFile(file: string, handle: fs.FileHandle): Promise<LeasedFile | string> {
 	const lease = takeSoleOpenLease(handle.fd);
 	if (lease.outcome === "open-elsewhere") {
-		return `${file} is open through another descriptor, in this process or another (${lease.evidence})`;
+		return `${file} is open or mapped elsewhere (${lease.evidence}), by a process the kernel does not name, this one not excluded`;
 	}
 	if (lease.outcome === "unproved") {
-		return `${file} cannot be shown to be open through no other descriptor: ${lease.meaning} (${lease.evidence})`;
+		return `whether anything else holds ${file} open could not be told: ${lease.meaning} (${lease.evidence})`;
 	}
 	const { dev, ino } = await handle.stat();
 	return { handle, dev, ino, proof: await digestOfHandle(handle), metadata: await carriedMetadata(handle) };
@@ -901,11 +901,12 @@ async function settleExchange(
 }
 
 /**
- * How an open reached a leased file, as a phrase. A broken lease shows that
- * an open was made or tried, not which, and not by whom: it can be through
- * another descriptor of this very process.
+ * How something reached a leased file, as a phrase. A broken lease shows
+ * that an open was made or tried, or the file was truncated, not which, and
+ * not by whom: it can be this very process.
  */
-const OPENED = "was opened, or an open of it was tried, through another descriptor";
+const OPENED =
+	"was opened, or an open of it was tried, or it was truncated, by a process the kernel does not name, this one not excluded,";
 
 /**
  * Why `original`, exchanged to the scratch name, is no longer what was

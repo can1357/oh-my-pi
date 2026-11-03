@@ -2253,9 +2253,7 @@ describe("runGcCommand session compression", () => {
 				expect(state.nlink).toBe(1);
 				expect((await fs.readFile(copy!)).subarray(-17).toString()).toBe("ONLY WRITER BYTES");
 				expect(result.compressed).toBe(0);
-				expect(result.errors.join("\n")).toContain(
-					`${copy} cannot be shown to be open through no other descriptor`,
-				);
+				expect(result.errors.join("\n")).toContain(`whether anything else holds ${copy} open could not be told`);
 			});
 
 			// Round 3's review: a process that opened the scratch copy after its
@@ -2281,7 +2279,7 @@ describe("runGcCommand session compression", () => {
 				expect(state.nlink).toBe(1);
 				expect((await fs.readFile(copy!)).subarray(-17).toString()).toBe("ONLY WRITER BYTES");
 				expect(result.errors.join("\n")).toContain(
-					`${copy} was opened, or an open of it was tried, through another descriptor after this run proved it`,
+					`${copy} was opened, or an open of it was tried, or it was truncated, by a process the kernel does not name, this one not excluded, after this run proved it`,
 				);
 			});
 
@@ -2307,9 +2305,7 @@ describe("runGcCommand session compression", () => {
 				const state = await writer!.append();
 
 				expect(state.nlink).toBe(1);
-				expect(String(failure)).toContain(
-					`${probe} is open through another descriptor, in this process or another`,
-				);
+				expect(String(failure)).toContain(`${probe} is open or mapped elsewhere`);
 			});
 
 			// Round 13's review: an original this very process held open was
@@ -2330,7 +2326,8 @@ describe("runGcCommand session compression", () => {
 				expect((await fs.readFile(file)).subarray(-21).toString()).toBe("ONLY OWN WRITER BYTES");
 				expect(result.compressed).toBe(0);
 				const said = result.errors.join("\n");
-				expect(said).toContain(`${file} is open through another descriptor, in this process or another`);
+				expect(said).toContain(`${file} is open or mapped elsewhere`);
+				expect(said).toContain("by a process the kernel does not name, this one not excluded");
 				expect(said).not.toContain("another process");
 			});
 
@@ -2349,9 +2346,7 @@ describe("runGcCommand session compression", () => {
 				expect((await fs.stat(file)).ino).toBe(before.ino);
 				expect((await fs.readFile(file)).subarray(-26).toString()).toBe("ONLY ORIGINAL WRITER BYTES");
 				expect(result.compressed).toBe(0);
-				expect(result.errors.join("\n")).toContain(
-					`${file} is open through another descriptor, in this process or another`,
-				);
+				expect(result.errors.join("\n")).toContain(`${file} is open or mapped elsewhere`);
 			});
 
 			// Round 3's review: a write to the original by its name between gc's
@@ -2376,7 +2371,7 @@ describe("runGcCommand session compression", () => {
 				expect(bytes.subarray(0, 1024 * 1024)).toEqual(Buffer.alloc(1024 * 1024));
 				expect(bytes.subarray(1024 * 1024).toString()).toBe("ONLY ORIGINAL WRITER BYTES");
 				expect(result.errors.join("\n")).toContain(
-					`${file} was opened, or an open of it was tried, through another descriptor as it was compressed`,
+					`${file} was opened, or an open of it was tried, or it was truncated, by a process the kernel does not name, this one not excluded, as it was compressed`,
 				);
 			});
 
@@ -2796,7 +2791,7 @@ describe("runGcCommand session compression", () => {
 						const deadline = Date.now() + 10_000;
 						while (openFileHolders.soleOpenLeaseStands(fdOf(file)) && Date.now() < deadline) await Bun.sleep(20);
 					},
-					said: "the compressed copy was opened, or an open of it was tried, through another descriptor as it was given back",
+					said: "the compressed copy was opened, or an open of it was tried, or it was truncated, by a process the kernel does not name, this one not excluded, as it was given back",
 					kept: async (): Promise<boolean> => {
 						expect(await blockingWriter!.exited).toBe(0);
 						return (await filesUnder(root)).some(
