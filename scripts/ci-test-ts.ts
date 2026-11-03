@@ -3,7 +3,12 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { collectTestsUnder, testFilesWithoutBucket, workspacePackageDirs } from "./test-file-discovery";
+import {
+	collectTestsUnder,
+	namedTestFilesUnder,
+	testFilesWithoutBucket,
+	workspacePackageDirs,
+} from "./test-file-discovery";
 
 type Mode =
 	| "all"
@@ -234,10 +239,18 @@ function rustTestCommand(): TestCommand {
 	};
 }
 
+let scriptsTestFilesPromise: Promise<string[]> | null = null;
+
+// The script tests the scripts command names: every test file below `scripts` that `bun test`,
+// run from the repository root, runs when named (root `bunfig.toml` ignores included).
+function scriptsTestFiles(): Promise<string[]> {
+	scriptsTestFilesPromise ??= namedTestFilesUnder(path.join(repoRoot, "scripts"), repoRoot, repoRoot);
+	return scriptsTestFilesPromise;
+}
+
 // The repository's own tooling tests (release, install and CI helper scripts).
 async function scriptsTestCommand(extraArgs: string[] = []): Promise<TestCommand> {
-	// Collected as `bun test` selects them from the repository root, root `bunfig.toml` ignores included.
-	const files = await collectTestsUnder(path.join(repoRoot, "scripts"), repoRoot, repoRoot);
+	const files = await scriptsTestFiles();
 	return {
 		label: "scripts",
 		cwd: ".",
@@ -246,20 +259,20 @@ async function scriptsTestCommand(extraArgs: string[] = []): Promise<TestCommand
 	};
 }
 
-// Test files under a workspace package or `.omp/tests` that no command above
+// Test files under a workspace package, `scripts` or `.omp/tests` that no command above
 // runs. The modes CI and `bun run test` use refuse to start while any exists, so
 // a package added without a bucket fails CI instead of going untested.
 async function uncoveredTestFiles(): Promise<string[]> {
 	const inOwnDir = (pkg: string) => ({ path: pkg, cwd: pkg });
 	return testFilesWithoutBucket(
 		repoRoot,
-		[...(await workspacePackageDirs(repoRoot)), path.dirname(projectToolTestFile)],
+		[...(await workspacePackageDirs(repoRoot)), "scripts", path.dirname(projectToolTestFile)],
 		{
-			files: [{ path: projectToolTestFile, cwd: "." }],
-			dirs: [
-				...[...fastWorkspacePackages, ...nativeAndIntegrationPackages, codingAgentDir].map(inOwnDir),
-				{ path: "scripts", cwd: "." },
+			files: [
+				{ path: projectToolTestFile, cwd: "." },
+				...(await scriptsTestFiles()).map(file => ({ path: file, cwd: "." })),
 			],
+			dirs: [...fastWorkspacePackages, ...nativeAndIntegrationPackages, codingAgentDir].map(inOwnDir),
 		},
 	);
 }
