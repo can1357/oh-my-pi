@@ -288,6 +288,19 @@ impl DeclareCommand {
 
 			self.apply_attributes_after_update(var, verb)?;
 		} else {
+			// Bash's `make_local_variable` makes no local copy of a readonly
+			// global variable (a readonly local of a calling function may be
+			// copied): it reports it and the declaration fails.
+			if create_var_local
+				&& context
+					.shell
+					.env()
+					.get(name.as_str())
+					.is_some_and(|(scope, var)| var.is_readonly() && matches!(scope, EnvironmentScope::Global))
+			{
+				writeln!(context.stderr(), "{}: {name}: readonly variable", context.command_name)?;
+				return Ok(false);
+			}
 			let unset_type = if self.make_indexed_array.is_some() {
 				ShellValueUnsetType::IndexedArray
 			} else if self.make_associative_array.is_some() {

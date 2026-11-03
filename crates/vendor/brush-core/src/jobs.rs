@@ -245,6 +245,35 @@ pub struct JobManager {
 	/// (`freeze_jobs_list` in `execute_pipeline`): no cleanup point forgets a
 	/// job then, and `wait -n` returns at once.
 	frozen: bool,
+
+	/// The job `%+` and `%%` name, Bash's `js.j_current` (see
+	/// [`JobManager::set_current_job`]).
+	current: Option<usize>,
+
+	/// The job `%-` names, Bash's `js.j_previous`; the current job itself when
+	/// no other job qualifies.
+	previous: Option<usize>,
+}
+
+/// What a job spec names, as Bash's `get_job_spec` finds it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JobSpecMatch {
+	/// The job with this number.
+	Job(usize),
+	/// No job (`no such job`).
+	NoSuchJob,
+	/// A name that more than one process matches (`ambiguous job spec`).
+	Ambiguous,
+}
+
+impl JobSpecMatch {
+	/// The message Bash gives for a job spec that names no job.
+	pub const fn error_message(self) -> &'static str {
+		match self {
+			Self::Ambiguous => "ambiguous job spec",
+			Self::Job(_) | Self::NoSuchJob => "no such job",
+		}
+	}
 }
 
 /// Represents a task that is part of a job.
@@ -293,6 +322,31 @@ pub(crate) struct PipelineStop {
 	/// What a job-control signal reaches of every external stage, as each
 	/// started (see [`processes::ChildProcess::signal_target`]).
 	pub signal_targets: Vec<sys::process::ProcessId>,
+}
+
+/// One change a job's process reported: a stop, a continue or an exit.
+#[derive(Clone, Copy)]
+enum ProcessEvent {
+	/// The process stopped on this signal.
+	Stopped(u8),
+	/// The process continued.
+	Continued,
+	/// The process exited.
+	Exited,
+}
+
+/// What one child's status change did to its job, as Bash's `waitchld`
+/// reads it after `set_job_status_and_cleanup` (see
+/// [`JobManager::apply_status_changes`]).
+#[derive(Clone, Copy)]
+struct StatusChange {
+	/// Whether it asks for the current job to be chosen again: the job is, or
+	/// was, stopped.
+	counts:  bool,
+	/// Whether the job is stopped after it.
+	stopped: bool,
+	/// Whether every process of the job has ended.
+	dead:    bool,
 }
 
 /// How `kill` delivers a signal, as Bash's `kill_pid` decides it (see
@@ -439,121 +493,273 @@ impl JobManager {
 		Self::default()
 	}
 
-	/// Adds a job to the job manager and marks it as the current job;
-	/// returns an immutable reference to the job.
+	/// Adds a job to the job manager; returns an immutable reference to the
+	/// job.
+	///
+	/// As in Bash, a new job first takes the ended jobs `jobs` reported out of
+	/// the table, then takes the number after the highest one in use. A job
+	/// that starts in the background resets the current job
+	/// (`stop_pipeline` calls `reset_current`), so a stopped job stays
+	/// current; a foreground job that stopped becomes current
+	/// (`waitchld` calls `set_current_job`).
 	///
 	/// # Arguments
 	///
 	/// * `job` - The job to add.
 	/// * `job_control` - Whether job control is on, which `fg` and `bg`
 	///   require of the job (see [`Job::started_with_job_control`]).
-	#[allow(clippy::missing_panics_doc, reason = "push() guarantees the vector length is >= 1")]
+	#[allow(clippy::missing_panics_doc, reason = "the job was just pushed")]
 	pub fn add_as_current(&mut self, mut job: Job, job_control: bool) -> &Job {
-		// As in Bash, a new job first takes the ended jobs `jobs` reported out
-		// of the table. Then the current job becomes the previous one, the
-		// previous one loses its mark, and the new job takes the number after
-		// the highest one in use.
 		self.remove_reported_jobs();
-		for j in &mut self.jobs {
-			match j.annotation {
-				JobAnnotation::Current => j.annotation = JobAnnotation::Previous,
-				JobAnnotation::Previous => j.annotation = JobAnnotation::None,
-				JobAnnotation::None => {},
-			}
-		}
 
 		let id = self.jobs.iter().map(|j| j.id).max().unwrap_or(0) + 1;
 		job.id = id;
-		job.annotation = JobAnnotation::Current;
 		job.started_with_job_control = job_control;
 		// A pid this job's processes now hold no longer names the job that
 		// reported under it.
 		for pid in job.process_ids().chain(job.in_process_pid()) {
 			self.forget_reported(pid);
 		}
+		let stopped = matches!(job.state, JobState::Stopped);
 		self.jobs.push(job);
+		if stopped {
+			self.set_current_job(id);
+		} else {
+			self.reset_current();
+		}
 
-		#[allow(clippy::unwrap_used, reason = "we just pushed an element")]
-		self.jobs.last().unwrap()
+		#[allow(clippy::unwrap_used, reason = "the job was just pushed")]
+		self.jobs.iter().find(|job| job.id == id).unwrap()
+	}
+
+	/// Whether job `id` is in the table and stopped (Bash's `STOPPED`).
+	fn is_stopped_job(&self, id: Option<usize>) -> bool {
+		id.and_then(|id| self.jobs.iter().find(|job| job.id == id))
+			.is_some_and(|job| matches!(job.state, JobState::Stopped))
+	}
+
+	/// Whether job `id` is in the table and running (Bash's `RUNNING`).
+	fn is_running_job(&self, id: Option<usize>) -> bool {
+		id.and_then(|id| self.jobs.iter().find(|job| job.id == id))
+			.is_some_and(|job| matches!(job.state, JobState::Running))
+	}
+
+	/// The newest job older than job `before` that is stopped, or running,
+	/// as Bash's `job_last_stopped` and `job_last_running` find it
+	/// (`most_recent_job_in_state`); `None` for `before` means every job.
+	fn most_recent_job(&self, before: Option<usize>, stopped: bool) -> Option<usize> {
+		self.jobs
+			.iter()
+			.filter(|job| before.is_none_or(|before| job.id < before))
+			.filter(|job| {
+				if stopped {
+					matches!(job.state, JobState::Stopped)
+				} else {
+					matches!(job.state, JobState::Running)
+				}
+			})
+			.map(|job| job.id)
+			.max()
+	}
+
+	/// Makes job `id` current, as Bash's `set_current_job` does: the old
+	/// current job becomes previous if it is stopped; else the newest stopped
+	/// job older than a stopped current one; else the newest running job
+	/// older than a running current one, or the newest running job at all;
+	/// else the current job is previous too.
+	pub fn set_current_job(&mut self, id: usize) {
+		if self.current != Some(id) {
+			self.previous = self.current;
+			self.current = Some(id);
+		}
+		self.choose_previous();
+		self.apply_marks();
+	}
+
+	/// The previous-job choice of [`Self::set_current_job`].
+	fn choose_previous(&mut self) {
+		if self.previous != self.current && self.is_stopped_job(self.previous) {
+			return;
+		}
+		if self.is_stopped_job(self.current)
+			&& let Some(candidate) = self.most_recent_job(self.current, true)
+		{
+			self.previous = Some(candidate);
+			return;
+		}
+		let candidate = if self.is_running_job(self.current) {
+			self.most_recent_job(self.current, false)
+		} else {
+			self.most_recent_job(None, false)
+		};
+		self.previous = candidate.or(self.current);
+	}
+
+	/// Chooses the current job again, as Bash's `reset_current` does when a
+	/// job starts in the background, a current or previous job leaves the
+	/// table, or `bg` continues a job: a stopped current job stays; else a
+	/// stopped previous job, the newest stopped job, or the newest running
+	/// job becomes current (see [`Self::set_current_job`]); else there is
+	/// none.
+	pub fn reset_current(&mut self) {
+		let candidate = if self.is_stopped_job(self.current) {
+			self.current
+		} else if self.is_stopped_job(self.previous) {
+			self.previous
+		} else {
+			self.most_recent_job(None, true).or_else(|| self.most_recent_job(None, false))
+		};
+		match candidate {
+			Some(id) => self.set_current_job(id),
+			None => {
+				self.current = None;
+				self.previous = None;
+				self.apply_marks();
+			},
+		}
+	}
+
+	/// Marks each job `+`, `-` or neither as `jobs` lists it: the current job
+	/// `+`, a previous job that is not also current `-`.
+	fn apply_marks(&mut self) {
+		let (current, previous) = (self.current, self.previous);
+		for job in &mut self.jobs {
+			job.annotation = if Some(job.id) == current {
+				JobAnnotation::Current
+			} else if Some(job.id) == previous {
+				JobAnnotation::Previous
+			} else {
+				JobAnnotation::None
+			};
+		}
+	}
+
+	/// Applies the status changes the jobs' processes reported since the last
+	/// call, as Bash's `waitchld` does after it collected them: each change
+	/// that `set_job_status_and_cleanup` counts asks for the current job to be
+	/// chosen again; the last job a change left stopped becomes current, or,
+	/// when none did (a dead one no longer counts), the current job is chosen
+	/// again (see [`Job::take_status_changes`]).
+	fn apply_status_changes(&mut self) {
+		let mut call_set_current = false;
+		let mut last_stopped_job = None;
+		for job in &mut self.jobs {
+			for change in job.take_status_changes() {
+				call_set_current |= change.counts;
+				if change.stopped {
+					last_stopped_job = Some(job.id);
+				} else if change.dead && last_stopped_job == Some(job.id) {
+					last_stopped_job = None;
+				}
+			}
+		}
+		if call_set_current {
+			match last_stopped_job {
+				Some(id) => self.set_current_job(id),
+				None => self.reset_current(),
+			}
+		}
 	}
 
 	/// Returns the current job, if there is one.
 	pub fn current_job(&self) -> Option<&Job> {
-		self
-			.jobs
-			.iter()
-			.find(|j| matches!(j.annotation, JobAnnotation::Current))
+		let id = self.current?;
+		self.jobs.iter().find(|j| j.id == id)
 	}
 
 	/// Returns a mutable reference to the current job, if there is one.
 	pub fn current_job_mut(&mut self) -> Option<&mut Job> {
-		self
-			.jobs
-			.iter_mut()
-			.find(|j| matches!(j.annotation, JobAnnotation::Current))
+		let id = self.current?;
+		self.jobs.iter_mut().find(|j| j.id == id)
 	}
 
-	/// Returns the previous job, if there is one.
+	/// Returns the previous job, if there is one; the current job when no
+	/// other job qualifies.
 	pub fn prev_job(&self) -> Option<&Job> {
-		self
-			.jobs
-			.iter()
-			.find(|j| matches!(j.annotation, JobAnnotation::Previous))
+		let id = self.previous?;
+		self.jobs.iter().find(|j| j.id == id)
 	}
 
-	/// Returns a mutable reference to the previous job, if there is one.
-	pub fn prev_job_mut(&mut self) -> Option<&mut Job> {
-		self
-			.jobs
-			.iter_mut()
-			.find(|j| matches!(j.annotation, JobAnnotation::Previous))
+	/// What a job spec names, as Bash's `get_job_spec` reads it: an optional
+	/// leading `%`, then a job number (all digits); nothing, `%` or `+` (and
+	/// whatever follows it) for the current job; `-` for the previous one;
+	/// `?text` for the one job any of whose processes' command text holds
+	/// `text`, ignoring case; or else the one job whose process's command
+	/// text starts with the spec (`get_job_by_name`).
+	pub fn job_spec_match(&self, job_spec: &str) -> JobSpecMatch {
+		if job_spec.is_empty() {
+			return JobSpecMatch::NoSuchJob;
+		}
+		let word = job_spec.strip_prefix('%').unwrap_or(job_spec);
+		let found = |id: Option<usize>| match id {
+			Some(id) if self.jobs.iter().any(|job| job.id == id) => JobSpecMatch::Job(id),
+			_ => JobSpecMatch::NoSuchJob,
+		};
+		if !word.is_empty() && word.bytes().all(|b| b.is_ascii_digit()) {
+			return found(word.parse::<usize>().ok());
+		}
+		match word.as_bytes().first() {
+			None | Some(b'%' | b'+') => found(self.current),
+			Some(b'-') => found(self.previous),
+			Some(b'?') => self.job_by_name(&word[1..], true),
+			Some(_) => self.job_by_name(word, false),
+		}
 	}
 
-	/// Tries to resolve the given job specification to a job.
+	/// Bash's `get_job_by_name`: the jobs, newest first, whose process's
+	/// command text starts with `name` (or holds it, ignoring case, with
+	/// `substring`). Two matching jobs are ambiguous; so, as in Bash, is a
+	/// match on any process of a pipeline but its first, since Bash then
+	/// tests that process a second time.
+	fn job_by_name(&self, name: &str, substring: bool) -> JobSpecMatch {
+		let matches = |command: &str| {
+			if substring {
+				command.to_lowercase().contains(&name.to_lowercase())
+			} else {
+				command.starts_with(name)
+			}
+		};
+		let mut jobs: Vec<&Job> = self.jobs.iter().collect();
+		jobs.sort_by_key(|job| std::cmp::Reverse(job.id));
+		let mut found = None;
+		for job in jobs {
+			for (index, command) in job.process_commands.iter().enumerate() {
+				if !matches(command) {
+					continue;
+				}
+				if found.is_some() || index > 0 {
+					return JobSpecMatch::Ambiguous;
+				}
+				found = Some(job.id);
+				break;
+			}
+		}
+		found.map_or(JobSpecMatch::NoSuchJob, JobSpecMatch::Job)
+	}
+
+	/// Tries to resolve the given job specification to a job (see
+	/// [`Self::job_spec_match`]).
 	///
 	/// # Arguments
 	///
 	/// * `job_spec` - The job specification to resolve.
 	pub fn resolve_job_spec(&mut self, job_spec: &str) -> Option<&mut Job> {
-		let remainder = job_spec.strip_prefix('%')?;
-
-		match remainder {
-			"%" | "+" => self.current_job_mut(),
-			"-" => self.prev_job_mut(),
-			s if s.chars().all(char::is_numeric) => {
-				let id = s.parse::<usize>().ok()?;
-				self.jobs.iter_mut().find(|j| j.id == id)
-			},
-			_ => {
-				tracing::warn!(target: trace_categories::UNIMPLEMENTED, "unimplemented: job spec naming command: '{job_spec}'");
-				None
-			},
-		}
+		let JobSpecMatch::Job(id) = self.job_spec_match(job_spec) else {
+			return None;
+		};
+		self.jobs.iter_mut().find(|j| j.id == id)
 	}
 
-	/// Tries to resolve the given job specification to a wait selector.
+	/// Tries to resolve the given job specification to a wait selector (see
+	/// [`Self::job_spec_match`]).
 	///
 	/// # Arguments
 	///
 	/// * `job_spec` - The job specification to resolve.
 	pub fn resolve_job_spec_selector(&self, job_spec: &str) -> Option<JobSelector> {
-		let remainder = job_spec.strip_prefix('%')?;
-
-		match remainder {
-			"%" | "+" => self.current_job().map(|job| JobSelector::JobId(job.id)),
-			"-" => self.prev_job().map(|job| JobSelector::JobId(job.id)),
-			s if s.chars().all(char::is_numeric) => {
-				let id = s.parse::<usize>().ok()?;
-				self
-					.jobs
-					.iter()
-					.any(|job| job.id == id)
-					.then_some(JobSelector::JobId(id))
-			},
-			_ => {
-				tracing::warn!(target: trace_categories::UNIMPLEMENTED, "unimplemented: job spec naming command: '{job_spec}'");
-				None
-			},
+		match self.job_spec_match(job_spec) {
+			JobSpecMatch::Job(id) => Some(JobSelector::JobId(id)),
+			JobSpecMatch::NoSuchJob | JobSpecMatch::Ambiguous => None,
 		}
 	}
 
@@ -711,6 +917,7 @@ impl JobManager {
 		} else {
 			self.jobs[index].wait_with_policy(true).await
 		};
+		self.apply_status_changes();
 		self.remove_reported_jobs();
 		if let Some(job) = self.jobs.iter_mut().find(|job| job.id == id)
 			&& matches!(job.state, JobState::Done)
@@ -736,6 +943,8 @@ impl JobManager {
 		let Some(index) = self.jobs.iter().position(|job| job.id == id) else {
 			return Ok(None);
 		};
+		// Bash's `start_job` makes the job current before it continues it.
+		self.set_current_job(id);
 		self.jobs[index].move_to_foreground(take_terminal)?;
 		let waited = self.jobs[index].wait_with_job_control(false).await.map(|end| match end {
 			JobWaitEnd::Ended(result) => result,
@@ -745,6 +954,8 @@ impl JobManager {
 			self.remove(index);
 			self.remove_reported_jobs();
 		}
+		// A job that stops again is current (`waitchld`).
+		self.apply_status_changes();
 		waited.map(Some)
 	}
 
@@ -815,11 +1026,13 @@ impl JobManager {
 	/// Applies the stops and continues every job's processes reported since
 	/// the last look. Bash observes them only with job control on (its
 	/// `waitchld` asks for `WUNTRACED|WCONTINUED` only then); see
-	/// [`Job::observe_stops_and_continues`].
+	/// [`Job::observe_stops_and_continues`]. They move the current job as
+	/// `waitchld` does (see [`Self::apply_status_changes`]).
 	pub fn observe_stops_and_continues(&mut self) -> Result<(), error::Error> {
 		for job in &mut self.jobs {
 			job.observe_stops_and_continues()?;
 		}
+		self.apply_status_changes();
 		Ok(())
 	}
 
@@ -988,27 +1201,13 @@ impl JobManager {
 		self.jobs.iter().chain(&self.disowned)
 	}
 
-	/// Takes a job out of the table, and moves the current and previous marks
-	/// as Bash does when the job held one: the previous job becomes current,
-	/// and the most recent other job previous.
+	/// Takes a job out of the table; a job that was current or previous makes
+	/// the shell choose the current job again, as Bash's `delete_job` does
+	/// (see [`Self::reset_current`]).
 	fn remove(&mut self, index: usize) -> Job {
 		let job = self.jobs.remove(index);
-		if job.is_current() || job.is_prev() {
-			if self.current_job().is_none() {
-				let next = self
-					.jobs
-					.iter()
-					.position(Job::is_prev)
-					.or_else(|| self.jobs.len().checked_sub(1));
-				if let Some(next) = next {
-					self.jobs[next].annotation = JobAnnotation::Current;
-				}
-			}
-			if self.prev_job().is_none()
-				&& let Some(prev) = self.jobs.iter_mut().rev().find(|j| !j.is_current())
-			{
-				prev.annotation = JobAnnotation::Previous;
-			}
+		if Some(job.id) == self.current || Some(job.id) == self.previous {
+			self.reset_current();
 		}
 		job
 	}
@@ -1128,6 +1327,12 @@ pub struct Job {
 	/// The command line of the job.
 	pub command_line: String,
 
+	/// The command text of each of the job's processes, as Bash keeps it in
+	/// each process (`p->command`): each stage of a pipeline, or the whole
+	/// command line. A `%name` or `%?name` job spec matches against these
+	/// (see [`JobManager::job_spec_match`]).
+	process_commands: Vec<String>,
+
 	/// The current operational state of the job.
 	pub state: JobState,
 
@@ -1143,6 +1348,10 @@ pub struct Job {
 	/// with the signal that stopped it; see
 	/// [`Job::observe_stops_and_continues`].
 	stopped_processes: Vec<(sys::process::ProcessId, u8)>,
+
+	/// The status changes a look at the job's processes saw and the job
+	/// manager has yet to apply (see [`Job::take_status_changes`]).
+	status_changes: Vec<StatusChange>,
 
 	/// `WSTOPSIG` of the wait status of the job's first process once it has
 	/// ended (see [`stop_signal_word`]); see [`Job::stopped_status`].
@@ -1211,10 +1420,12 @@ impl Job {
 			pgid,
 			signal_targets,
 			annotation: JobAnnotation::None,
+			process_commands: vec![command_line.clone()],
 			command_line,
 			state,
 			listed: false,
 			stopped_processes: Vec::new(),
+			status_changes: Vec::new(),
 			first_process_word: None,
 			started_with_job_control: false,
 			in_process: None,
@@ -1276,6 +1487,14 @@ impl Job {
 	/// Returns the annotation of the job.
 	pub fn annotation(&self) -> JobAnnotation {
 		self.annotation.clone()
+	}
+
+	/// Sets the command text of each of the job's processes (see
+	/// [`Job::process_commands`]): the stages of a pipeline.
+	pub(crate) fn set_process_commands(&mut self, commands: Vec<String>) {
+		if !commands.is_empty() {
+			self.process_commands = commands;
+		}
 	}
 
 	/// Whether job control was on when the job started, as Bash's
@@ -1472,22 +1691,22 @@ impl Job {
 	}
 
 	/// Applies the stops, continues and exits the job's processes reported
-	/// since the last look, as Bash's `set_job_status_and_cleanup` does: any of
-	/// them is a change no listing has shown. A running job becomes stopped
-	/// when no process of it runs and one is stopped; a process that exited
-	/// does not run, so a pipeline with one stage stopped and the others ended
-	/// is stopped. A stopped job stays stopped while one of its processes is
-	/// stopped, though another runs (`jobs.c:4021-4040`: only a job that is
-	/// not stopped returns early while a process runs), so a foreground
-	/// pipeline this shell counted stopped while a stage still ran stays so
-	/// until it is continued; it runs again once none is stopped. Bash sees
-	/// stops and continues only with job control on, so only then do callers
-	/// look.
+	/// since the last look, one at a time, as Bash's `waitchld` runs
+	/// `set_job_status_and_cleanup` for each child it collects: any of them is
+	/// a change no listing has shown. A job that is not stopped stays as it is
+	/// while one of its processes runs; otherwise it is stopped while one is
+	/// stopped, runs when none is stopped and one runs, and is dead when none
+	/// does either (`jobs.c:4001-4060`). Each change is kept for the job
+	/// manager to move the current job (see [`Self::take_status_changes`]). A
+	/// process that exited does not run; one the kernel still holds, whose
+	/// own wait has yet to collect it, keeps the job running until then. Bash
+	/// sees stops and continues only with job control on, so only then do
+	/// callers look.
 	fn observe_stops_and_continues(&mut self) -> Result<(), error::Error> {
 		if self.is_done() {
 			return Ok(());
 		}
-		let mut changed = false;
+		let mut events = Vec::new();
 		for task in &self.tasks {
 			let JobTask::External(process) = task else {
 				continue;
@@ -1496,47 +1715,87 @@ impl Job {
 				continue;
 			};
 			match sys::signal::poll_for_stop_or_continue(pid)? {
-				Some(sys::signal::StopOrContinue::Stopped(signal)) => {
-					self.stopped_processes.retain(|&(stopped, _)| stopped != pid);
-					self.stopped_processes.push((pid, signal));
-					changed = true;
-				},
-				Some(sys::signal::StopOrContinue::Continued) => {
-					self.stopped_processes.retain(|&(stopped, _)| stopped != pid);
-					changed = true;
-				},
+				Some(sys::signal::StopOrContinue::Stopped(signal)) => events.push((pid, ProcessEvent::Stopped(signal))),
+				Some(sys::signal::StopOrContinue::Continued) => events.push((pid, ProcessEvent::Continued)),
 				None => {},
 			}
 		}
-		if changed {
-			self.listed = false;
+		// A stopped process that was continued and has since exited reports
+		// no continue any more; its exit ends the stop, as Bash's `waitchld`
+		// sees the exit at once. One that is exiting reports neither for a
+		// moment, and the system no longer shows it stopped: its stop is
+		// over too.
+		for &(pid, _) in &self.stopped_processes {
+			if events.iter().any(|&(event_pid, _)| event_pid == pid) {
+				continue;
+			}
+			if sys::signal::has_exited(pid) {
+				events.push((pid, ProcessEvent::Exited));
+			} else if sys::signal::is_stopped(pid) == Some(false) {
+				events.push((pid, ProcessEvent::Continued));
+			}
 		}
-		// Whether this look decides the job's state: a stop or continue it
-		// saw, or a stop an earlier look recorded that an exit may now settle.
-		// A stop a foreground wait saw itself is left as that wait set it.
-		let decides_state = changed || !self.stopped_processes.is_empty();
+		let live_before: Vec<_> = self.process_ids().collect();
 		self.refresh()?;
 		if self.is_done() {
+			self.listed = false;
 			self.stopped_processes.clear();
+			self.status_changes.push(StatusChange { counts: false, stopped: false, dead: true });
 			return Ok(());
 		}
-		if decides_state {
-			let live: Vec<_> = self.process_ids().collect();
-			self.stopped_processes.retain(|(pid, _)| live.contains(pid));
+		let live_after: Vec<_> = self.process_ids().collect();
+		for pid in live_before {
+			if !live_after.contains(&pid) && !events.iter().any(|&(event_pid, _)| event_pid == pid) {
+				events.push((pid, ProcessEvent::Exited));
+			}
+		}
+		if events.is_empty() {
+			return Ok(());
+		}
+		self.listed = false;
+		let mut exited = Vec::new();
+		for (pid, event) in events {
+			self.stopped_processes.retain(|&(stopped, _)| stopped != pid);
+			match event {
+				ProcessEvent::Stopped(signal) => self.stopped_processes.push((pid, signal)),
+				ProcessEvent::Continued => {},
+				ProcessEvent::Exited => exited.push(pid),
+			}
 			let any_stopped = !self.stopped_processes.is_empty();
 			let any_running = self.tasks.iter().any(|task| match task {
-				JobTask::External(process) => process
-					.pid()
-					.is_none_or(|pid| !self.stopped_processes.iter().any(|&(stopped, _)| stopped == pid)),
+				JobTask::External(process) => process.pid().is_none_or(|pid| {
+					!exited.contains(&pid) && !self.stopped_processes.iter().any(|&(stopped, _)| stopped == pid)
+				}),
 				JobTask::Internal(_) => true,
 			});
-			let stopped = match self.state {
-				JobState::Stopped => any_stopped,
-				_ => any_stopped && !any_running,
+			let stopped_before = matches!(self.state, JobState::Stopped);
+			let (counts, dead) = if any_running && !stopped_before {
+				(false, false)
+			} else if any_stopped {
+				self.state = JobState::Stopped;
+				(true, false)
+			} else if any_running {
+				self.state = JobState::Running;
+				(true, false)
+			} else {
+				// Every process has exited; the job runs until their waits
+				// collect them.
+				self.state = JobState::Running;
+				(false, true)
 			};
-			self.state = if stopped { JobState::Stopped } else { JobState::Running };
+			self.status_changes.push(StatusChange {
+				counts,
+				stopped: matches!(self.state, JobState::Stopped),
+				dead,
+			});
 		}
 		Ok(())
+	}
+
+	/// Takes the status changes [`Self::observe_stops_and_continues`] kept, in
+	/// the order it saw them.
+	fn take_status_changes(&mut self) -> Vec<StatusChange> {
+		std::mem::take(&mut self.status_changes)
 	}
 
 	/// Waits for the job as Bash's `wait_for` does with job control on: until

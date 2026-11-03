@@ -41,6 +41,11 @@ impl builtins::Command for WaitCommand {
 			context.shell.env_mut().unset(variable)?;
 		}
 		let job_control = context.shell.options().enable_job_control;
+		// With job control Bash has seen every stop and continue before it
+		// reads a job spec, which moves the current job.
+		if job_control && !self.ids.is_empty() {
+			context.shell.jobs_mut().observe_stops_and_continues()?;
+		}
 
 		if self.wait_for_first_or_next {
 			// As Bash's `set_waitlist` does, refuse each operand that names no

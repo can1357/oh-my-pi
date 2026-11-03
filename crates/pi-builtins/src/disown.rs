@@ -31,7 +31,11 @@ impl builtins::Command for DisownCommand {
 		context: brush_core::ExecutionContext<'_, SE>,
 	) -> Result<ExecutionResult, Self::Error> {
 		// Reap finished jobs first, so `-r` and the status a disowned job keeps
-		// are current.
+		// are current. With job control Bash has seen every stop and continue
+		// too, which moves the current job.
+		if context.shell.options().enable_job_control {
+			context.shell.jobs_mut().observe_stops_and_continues()?;
+		}
 		context.shell.jobs_mut().poll_preserving_completed()?;
 
 		// `-h` asks only that a job be spared the SIGHUP Bash forwards to its

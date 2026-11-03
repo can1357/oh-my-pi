@@ -119,6 +119,17 @@ pub struct ExecutionParameters {
 	/// then abandons the command being run instead of exiting a POSIX-mode
 	/// shell (`do_assignment_statements`). Defaults to `false`.
 	pub executing_command_builtin: bool,
+	/// Whether errexit is off for an `eval`, `source` or `command` that runs
+	/// where a failure is tested (`if`, `&&`, `!`), as Bash's
+	/// `builtin_ignoring_errexit` turns `exit_immediately_on_error` off for
+	/// everything that builtin runs: an error a variable binding reports then
+	/// does not exit the shell (see [`Shell::exits_on_reported_error`]).
+	/// Defaults to `false`.
+	pub ignoring_errexit: bool,
+	/// Whether this runs text `eval` reads, which Bash runs with
+	/// `parse_and_execute`: an abandoned command ends there with status 1
+	/// (see `ExecutionControlFlow::DiscardCommand`). Defaults to `false`.
+	pub reads_eval_text: bool,
 	/// Optional hook reporting spawned external children for scoped teardown.
 	spawn_observer:           Option<Arc<dyn SpawnObserver>>,
 	/// Optional hook mirroring the bytes that cross pipeline pipes.
@@ -522,9 +533,20 @@ impl Execute for ast::Program {
 			// An abandoned command (`DISCARD`) ends here, where Bash's
 			// `reader_loop` and `parse_and_execute` catch the jump: the text
 			// goes on with its next command. In a subshell the jump ends the
-			// subshell instead.
+			// subshell instead. The text `eval`, `source` or a trap handler
+			// reads ends the abandoned command with status 1
+			// (`parse_and_execute`); the shell's own input keeps the status the
+			// failure left, 1 for 0 (`reader_loop`).
 			if matches!(result.next_control_flow, ExecutionControlFlow::DiscardCommand) && !shell.is_subshell() {
 				result.next_control_flow = ExecutionControlFlow::Normal;
+				let nested = params.reads_eval_text
+					|| shell.call_stack().current_frame().is_some_and(|frame| {
+						matches!(frame.frame_type, crate::callstack::FrameType::TrapHandler(_))
+							|| frame.frame_type.is_sourced_script()
+					});
+				if nested || result.exit_code.is_success() {
+					result.exit_code = ExecutionExitCode::GeneralError;
+				}
 			}
 
 			// Update status
@@ -606,7 +628,7 @@ async fn spawn_async_ao_list_as_job<'a, SE: extensions::ShellExtensions>(
 
 	let direct_pipeline =
 		background_process_pipeline_for_async_job(ao_list, shell, &async_params).await?;
-	let job = if let Some((pipeline, detach_reparent)) = direct_pipeline {
+	let mut job = if let Some((pipeline, detach_reparent)) = direct_pipeline {
 		// A transparent background wrapper (e.g. `nohup cmd &`) was unwrapped to its
 		// operand. Reparent that operand out of the shell's descendant tree so it
 		// survives the host's descendant-walk teardown — the persistence agents
@@ -623,6 +645,13 @@ async fn spawn_async_ao_list_as_job<'a, SE: extensions::ShellExtensions>(
 	} else {
 		spawn_async_ao_list_in_task(ao_list, shell, &async_params)?
 	};
+	// Bash's processes keep the text of each stage of a pipeline, or of the
+	// whole list Bash runs in one child, for a `%name` job spec.
+	job.set_process_commands(if ao_list.additional.is_empty() {
+		ao_list.first.seq.iter().map(ToString::to_string).collect()
+	} else {
+		vec![ao_list.to_string()]
+	});
 
 	shell.set_last_background_pid(job.last_pid());
 	let job_control = shell.options().enable_job_control;
@@ -957,11 +986,19 @@ impl Execute for ast::Pipeline {
 		// We reuse `suppress_errexit` here because bash suppresses the ERR trap in
 		// exactly the same contexts it suppresses errexit (conditionals, `!`-prefixed
 		// pipelines, etc.).
-		if !result.is_success() && !params.suppress_errexit && !self.bang {
+		// A result that leaves the enclosing commands (an exit, an abandoned
+		// command) runs no ERR trap on its way out.
+		if !result.is_success() && result.is_normal_flow() && !params.suppress_errexit && !self.bang {
 			if shell.traps().handles(crate::traps::TrapSignal::Err) {
-				shell
+				let trap_result = shell
 					.invoke_trap_handler(crate::traps::TrapSignal::Err, &params)
 					.await?;
+				// A handler that exits the shell (`exit`, or an error that ends
+				// a non-interactive shell) ends it here, as Bash's
+				// `run_error_trap` does.
+				if matches!(trap_result.next_control_flow, ExecutionControlFlow::ExitShell) {
+					return Ok(trap_result);
+				}
 			}
 		}
 
@@ -1295,6 +1332,7 @@ async fn wait_for_pipeline_processes_and_update_status(
 		let job_control = shell.options().enable_job_control;
 		let interactive = shell.options().interactive;
 		let mut job = jobs::Job::new(stopped_children, pipeline.to_string(), jobs::JobState::Stopped);
+		job.set_process_commands(pipeline.seq.iter().map(ToString::to_string).collect());
 		job.record_pipeline_stop(stop);
 		let job = shell.jobs_mut().add_as_current(job, job_control);
 
@@ -1442,7 +1480,14 @@ impl Execute for ast::CompoundCommand {
 				};
 
 				// Preserve the subshell's exit code, but don't honor any of its requests to
-				// exit the shell, break out of loops, etc.
+				// exit the shell, break out of loops, etc. An abandoned command ends the
+				// subshell with the status it left, 1 for 0, as Bash's
+				// `execute_in_subshell` does for any jump but an exit.
+				if matches!(subshell_result.next_control_flow, ExecutionControlFlow::DiscardCommand)
+					&& subshell_result.exit_code.is_success()
+				{
+					return Ok(ExecutionResult::general_error());
+				}
 				Ok(ExecutionResult::from(subshell_result.exit_code))
 			},
 			Self::ForClause(f) => f.execute(shell, params).await,
@@ -1607,14 +1652,32 @@ impl Execute for ast::ForClauseCommand {
 				}
 			}
 
-			// Update the variable.
-			shell.env_mut().update_or_add(
+			// Update the variable. A readonly one is reported, which exits the
+			// shell under errexit (`report_error`); then the loop fails, and a
+			// non-interactive POSIX-mode shell exits (`execute_for_command`).
+			let updated = shell.env_mut().update_or_add(
 				&self.variable_name,
 				ShellValueLiteral::Scalar(value),
 				|_| Ok(()),
 				EnvironmentLookup::Anywhere,
 				EnvironmentScope::Global,
-			)?;
+			);
+			if let Err(err) = updated {
+				if !err.is_readonly_variable() {
+					return Err(err);
+				}
+				let mut stderr = params.stderr(shell);
+				let _ = shell.display_error(&mut stderr, &err).await;
+				if let Some(exit) = shell.exit_for_reported_error(params) {
+					return Ok(exit);
+				}
+				let mut failed = ExecutionResult::general_error();
+				if shell.options().posix_mode && !shell.options().interactive {
+					failed.next_control_flow = ExecutionControlFlow::ExitShell;
+				}
+				shell.set_last_exit_status(failed.exit_code.into());
+				return Ok(failed);
+			}
 
 			result = self.body.list.execute(shell, params).await?;
 			if result.is_return_or_exit() {
@@ -1835,7 +1898,24 @@ impl Execute for ast::ArithmeticCommand {
 		params: &ExecutionParameters,
 	) -> Result<ExecutionResult, error::Error> {
 		ensure_not_cancelled(params)?;
-		let value = self.expr.eval(shell, params, true).await?;
+		// An assignment to a readonly variable is reported, which exits the
+		// shell under errexit (`report_error`); else the expression fails
+		// with status 1 and the shell goes on, as Bash's `evalexp` does.
+		let value = match self.expr.eval(shell, params, true).await {
+			Ok(value) => value,
+			Err(err @ arithmetic::EvalError::ReadonlyVariable(_)) => {
+				let err = error::Error::from(err);
+				let mut stderr = params.stderr(shell);
+				let _ = shell.display_error(&mut stderr, &err).await;
+				if let Some(exit) = shell.exit_for_reported_error(params) {
+					return Ok(exit);
+				}
+				let failed = ExecutionResult::general_error();
+				shell.set_last_exit_status(failed.exit_code.into());
+				return Ok(failed);
+			},
+			Err(err) => return Err(err.into()),
+		};
 		let result = if value != 0 {
 			ExecutionResult::success()
 		} else {
@@ -2042,25 +2122,47 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 		let has_command = matches!(args.first(), Some(CommandArg::String(_)));
 		let mut temporary_environment = None;
 		if has_command {
-			// In POSIX mode an assignment error before a special builtin
-			// exits a non-interactive shell, and otherwise abandons the
-			// command being run (`DISCARD` in `do_assignment_statements`).
+			// A readonly variable is reported (`err_readonly`), which exits the
+			// shell at once under errexit (`report_error`). Then, in POSIX
+			// mode, the error exits a non-interactive shell before a special
+			// builtin, and otherwise abandons the command being run (`DISCARD`
+			// in `do_assignment_statements`); without POSIX mode the command
+			// runs on (`tempenv_assign_error`).
 			let posix_mode = context.shell.options().posix_mode;
 			let special_builtin = posix_mode
 				&& args.first().is_some_and(|name| is_special_builtin(&context.shell, &name.to_string()));
 			context.shell.env_mut().push_scope(EnvironmentScope::Command);
 			for &assignment in &pending_assignments {
-				if let Err(err) = apply_temporary_assignment(&mut context.shell, &params, assignment).await {
-					let _ = context.shell.env_mut().pop_scope(EnvironmentScope::Command);
-					let err = if special_builtin { err.into_fatal() } else { err };
-					let mut stderr = params.stderr(&context.shell);
+				let Err(err) = apply_temporary_assignment(&mut context.shell, &params, assignment).await else {
+					continue;
+				};
+				let mut stderr = params.stderr(&context.shell);
+				if err.is_readonly_variable() {
 					let _ = context.shell.display_error(&mut stderr, &err).await;
-					let mut result = err.into_result(&context.shell);
-					if posix_mode && result.is_normal_flow() {
-						result.next_control_flow = ExecutionControlFlow::DiscardCommand;
+					if let Some(exit) = context.shell.exit_for_reported_error(&params) {
+						let _ = context.shell.env_mut().pop_scope(EnvironmentScope::Command);
+						return Ok(exit.into());
 					}
+					if !posix_mode {
+						continue;
+					}
+					let _ = context.shell.env_mut().pop_scope(EnvironmentScope::Command);
+					let mut result = ExecutionResult::general_error();
+					result.next_control_flow = if special_builtin && !context.shell.options().interactive {
+						ExecutionControlFlow::ExitShell
+					} else {
+						ExecutionControlFlow::DiscardCommand
+					};
 					return Ok(result.into());
 				}
+				let _ = context.shell.env_mut().pop_scope(EnvironmentScope::Command);
+				let err = if special_builtin { err.into_fatal() } else { err };
+				let _ = context.shell.display_error(&mut stderr, &err).await;
+				let mut result = err.into_result(&context.shell);
+				if posix_mode && result.is_normal_flow() {
+					result.next_control_flow = ExecutionControlFlow::DiscardCommand;
+				}
+				return Ok(result.into());
 			}
 			// A redirection does not see the temporary environment
 			// (`expanding_redir` keeps `find_variable` out of it).
@@ -2080,16 +2182,21 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 				)
 				.await;
 				// An assignment statement that cannot assign (a readonly
-				// variable) abandons the command being run, and exits a
+				// variable, an element of a readonly array) is reported, which
+				// exits the shell at once under errexit (`report_error`). Then
+				// it abandons the command being run, and exits a
 				// non-interactive POSIX-mode shell unless it runs under
 				// `command` (`do_assignment_statements`).
 				if let Err(err) = applied {
-					if !matches!(err.kind(), error::ErrorKind::ReadonlyVariable) {
+					if !err.is_readonly_variable() {
 						return Err(err);
 					}
 					let mut stderr = params.stderr(&context.shell);
 					let _ = context.shell.display_error(&mut stderr, &err).await;
-					let mut result = err.into_result(&context.shell);
+					if let Some(exit) = context.shell.exit_for_reported_error(&params) {
+						return Ok(exit.into());
+					}
+					let mut result = ExecutionResult::general_error();
 					result.next_control_flow = if context.shell.options().posix_mode
 						&& !context.shell.options().interactive
 						&& !params.executing_command_builtin
@@ -2292,13 +2399,14 @@ fn takes_assignment_arguments(
 
 /// Puts one prefix assignment into the temporary environment of the command
 /// it precedes, as Bash's `assign_in_env` does: a readonly variable is
-/// refused before its value is expanded; without POSIX mode that is
-/// reported and the command runs on (`tempenv_assign_error`). The temporary
-/// variable is a plain exported string: the expanded value, or for `+=` on
-/// a variable the command sees, that variable's value with the expanded
-/// value appended as an assignment to it appends it (`make_variable_value`
-/// with `ASS_APPEND`: integer addition for an integer variable, the string
-/// joined otherwise). The variable itself is left as it is.
+/// refused before its value is expanded, with
+/// [`error::ErrorKind::ReadonlyVariable`], which the caller reports. The
+/// temporary variable is a plain exported string: the expanded value, or for
+/// `+=` on a variable the command sees, that variable's value with the
+/// expanded value appended as an assignment to it appends it
+/// (`make_variable_value` with `ASS_APPEND`: integer addition for an integer
+/// variable, the string joined otherwise). The variable itself is left as it
+/// is.
 async fn apply_temporary_assignment(
 	shell: &mut Shell<impl extensions::ShellExtensions>,
 	params: &ExecutionParameters,
@@ -2308,13 +2416,7 @@ async fn apply_temporary_assignment(
 		ast::AssignmentName::VariableName(name) | ast::AssignmentName::ArrayElementName(name, _) => name,
 	};
 	if shell.env().get(name).is_some_and(|(_, variable)| variable.is_readonly()) {
-		let error = error::Error::from(error::ErrorKind::ReadonlyVariable);
-		if shell.options().posix_mode {
-			return Err(error);
-		}
-		let mut stderr = params.stderr(shell);
-		shell.display_error(&mut stderr, &error).await?;
-		return Ok(());
+		return Err(error::ErrorKind::ReadonlyVariable.into());
 	}
 	let (ast::AssignmentName::VariableName(name), ast::AssignmentValue::Scalar(word)) =
 		(&assignment.name, &assignment.value)
@@ -2407,8 +2509,11 @@ async fn execute_command<SE: extensions::ShellExtensions>(
 	};
 	cmd.post_execute = Some(post_execute);
 
-	// Run through any pre-execution hooks as best effort.
-	let _ = commands::on_preexecute(&mut cmd).await;
+	// Run through any pre-execution hooks as best effort; a DEBUG trap that
+	// exits the shell ends it before the command runs.
+	if let Ok(Some(exit)) = commands::on_preexecute(&mut cmd).await {
+		return Ok(exit.into());
+	}
 
 	// Execute
 	// TODO(jobs): do we need to move self back to foreground on error here?

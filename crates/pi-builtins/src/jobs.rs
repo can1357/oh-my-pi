@@ -67,7 +67,8 @@ impl builtins::Command for JobsCommand {
 		} else {
 			for job_spec in &self.job_specs {
 				let Some(job) = resolve_job_spec(context.shell.jobs(), job_spec) else {
-					writeln!(context.stderr(), "{}: no such job: {}", context.command_name, job_spec)?;
+					let reason = context.shell.jobs().job_spec_match(job_spec).error_message();
+					writeln!(context.stderr(), "{}: {}: {reason}", context.command_name, job_spec)?;
 					exit_code = ExecutionResult::general_error();
 					continue;
 				};

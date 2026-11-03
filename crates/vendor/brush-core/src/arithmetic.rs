@@ -4,7 +4,7 @@ use std::borrow::Cow;
 
 use brush_parser::ast;
 
-use crate::{ExecutionParameters, Shell, env, expansion, extensions, variables};
+use crate::{ExecutionParameters, Shell, env, error, expansion, extensions, variables};
 
 /// Maximum recursion depth for arithmetic variable dereference chains
 /// (e.g., a=b, b=c, c=a would cycle through variable dereferences).
@@ -37,6 +37,10 @@ pub enum EvalError {
 	/// Failed to update the shell environment in an assignment operator.
 	#[error("failed to update environment")]
 	FailedToUpdateEnvironment,
+
+	/// An assignment operator's variable is readonly.
+	#[error("{0}: readonly variable")]
+	ReadonlyVariable(String),
 
 	/// Failed to parse an arithmetic expression.
 	#[error("failed to parse expression: {0}")]
@@ -369,6 +373,13 @@ fn assign(
 	value: i64,
 	depth: u32,
 ) -> Result<i64, EvalError> {
+	let failed = |name: &str, err: &error::Error| {
+		if err.is_readonly_variable() {
+			EvalError::ReadonlyVariable(name.to_owned())
+		} else {
+			EvalError::FailedToUpdateEnvironment
+		}
+	};
 	match lvalue {
 		ast::ArithmeticTarget::Variable(name) => {
 			shell
@@ -380,7 +391,7 @@ fn assign(
 					env::EnvironmentLookup::Anywhere,
 					env::EnvironmentScope::Global,
 				)
-				.map_err(|_err| EvalError::FailedToUpdateEnvironment)?;
+				.map_err(|err| failed(name, &err))?;
 		},
 		ast::ArithmeticTarget::ArrayElement(name, index_expr) => {
 			let index_str = eval_expr_impl(index_expr, shell, depth)?.to_string();
@@ -395,7 +406,7 @@ fn assign(
 					env::EnvironmentLookup::Anywhere,
 					env::EnvironmentScope::Global,
 				)
-				.map_err(|_err| EvalError::FailedToUpdateEnvironment)?;
+				.map_err(|err| failed(name, &err))?;
 		},
 	}
 

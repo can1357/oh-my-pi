@@ -16,6 +16,11 @@ pub struct Error {
 	/// Whether or not the error should be considered a "fatal" error that would
 	/// result in abnormal exit of a non-interactive shell.
 	fatal: bool,
+
+	/// Whether the error was already written where it happened, as Bash's
+	/// `report_error` writes it, so the code that gets it does not write it
+	/// again (see [`Error::into_reported`]).
+	reported: bool,
 }
 
 /// Monolithic error type for the shell
@@ -182,6 +187,16 @@ pub enum ErrorKind {
 	/// An attempt was made to modify a readonly variable.
 	#[error("cannot mutate readonly variable")]
 	ReadonlyVariable,
+
+	/// `${name:=word}` (or `${name=word}`) whose variable is readonly. Bash
+	/// abandons the command with `status` (`parameter_brace_expand_rhs`).
+	#[error("{name}: readonly variable")]
+	ReadonlyDefaultAssignment {
+		/// The parameter.
+		name:   String,
+		/// The exit status.
+		status: u8,
+	},
 
 	/// The indicated pattern is invalid.
 	#[error("invalid pattern: '{0}'")]
@@ -423,6 +438,7 @@ impl From<&ErrorKind> for results::ExecutionExitCode {
 			ErrorKind::FunctionNameShadowsSpecialBuiltin { .. } => Self::InvalidUsage,
 			ErrorKind::IoError(io_err) => io_err.into(),
 			ErrorKind::BuiltinError(inner, ..) => inner.as_exit_code(),
+			ErrorKind::ReadonlyDefaultAssignment { status, .. } => Self::from(*status),
 			_ => Self::GeneralError,
 		}
 	}
@@ -449,7 +465,7 @@ where
 	ErrorKind: From<T>,
 {
 	fn from(convertible_to_kind: T) -> Self {
-		Self { kind: convertible_to_kind.into(), fatal: false }
+		Self { kind: convertible_to_kind.into(), fatal: false, reported: false }
 	}
 }
 
@@ -466,9 +482,36 @@ impl Error {
 		self.fatal
 	}
 
+	/// Marks this error as already written to standard error where it
+	/// happened, while the redirections there were in effect: no later
+	/// display writes it again.
+	#[must_use]
+	pub const fn into_reported(mut self) -> Self {
+		self.reported = true;
+		self
+	}
+
+	/// Returns whether this error was already written where it happened.
+	pub const fn is_reported(&self) -> bool {
+		self.reported
+	}
+
 	/// Returns a reference to the error kind.
 	pub const fn kind(&self) -> &ErrorKind {
 		&self.kind
+	}
+
+	/// Whether this is a readonly variable's error, directly or as the error
+	/// a builtin returned.
+	pub fn is_readonly_variable(&self) -> bool {
+		match &self.kind {
+			ErrorKind::ReadonlyVariable | ErrorKind::EvalError(crate::arithmetic::EvalError::ReadonlyVariable(_)) => true,
+			ErrorKind::BuiltinError(inner, _) => {
+				let inner: &(dyn std::error::Error + 'static) = inner.as_ref();
+				inner.downcast_ref::<Self>().is_some_and(Self::is_readonly_variable)
+			},
+			_ => false,
+		}
 	}
 
 	/// Try to extract a reference to the underlying `std::io::Error`, if any.
@@ -515,7 +558,9 @@ impl Error {
 
 	/// Converts this error into the appropriate control flow based on the
 	/// shell's current state. This centralizes the logic for determining how
-	/// fatal errors should affect execution flow.
+	/// fatal errors should affect execution flow. A readonly variable a
+	/// `${name:=word}` expansion could not assign abandons the command being
+	/// run (`jump_to_top_level (DISCARD)` after `parameter_brace_expand_rhs`).
 	///
 	/// # Arguments
 	///
@@ -527,6 +572,8 @@ impl Error {
 	) -> results::ExecutionControlFlow {
 		if self.is_fatal() && !shell.options().interactive {
 			results::ExecutionControlFlow::ExitShell
+		} else if matches!(self.kind, ErrorKind::ReadonlyDefaultAssignment { .. }) {
+			results::ExecutionControlFlow::DiscardCommand
 		} else {
 			results::ExecutionControlFlow::Normal
 		}

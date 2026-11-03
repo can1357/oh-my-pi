@@ -420,7 +420,21 @@ static SET_O_OPTIONS: LazyLock<HashMap<&'static str, ShellOptionDef>> = LazyLock
 			"posix",
 			ShellOptionDef::new(
 				|options| options.posix_mode,
-				|options, value| options.posix_mode = value,
+				|options, value| {
+					// As Bash's `posix_initialize` does, POSIX mode turns
+					// `inherit_errexit` on, and turning it off restores the
+					// value it replaced.
+					if value && !options.posix_mode {
+						options.saved_posix_inherit_errexit = Some(options.command_subst_inherits_errexit);
+						options.command_subst_inherits_errexit = true;
+					} else if !value
+						&& options.posix_mode
+						&& let Some(saved) = options.saved_posix_inherit_errexit.take()
+					{
+						options.command_subst_inherits_errexit = saved;
+					}
+					options.posix_mode = value;
+				},
 			),
 		),
 		(

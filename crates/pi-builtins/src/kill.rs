@@ -159,15 +159,24 @@ impl builtins::Command for KillCommand {
 		let exists = |target: i32| target > 0 && running.contains(&target);
 
 		let job_control = context.shell.options().enable_job_control;
+		// Bash's `waitchld` has seen every stop and continue by now, which
+		// moves the current job (see `JobManager::observe_stops_and_continues`).
+		if job_control {
+			context.shell.jobs_mut().observe_stops_and_continues()?;
+		}
 		let mut had_failure = false;
 		for operand in operands {
 			if context.is_cancelled() {
 				return Ok(ExecutionExitCode::Interrupted.into());
 			}
 			if operand.starts_with('%') {
-				let Some(job) = context.shell.jobs_mut().resolve_job_spec(operand) else {
-					writeln!(context.stderr(), "{}: {}: no such job", context.command_name, operand)?;
+				let found = context.shell.jobs().job_spec_match(operand);
+				let jobs::JobSpecMatch::Job(id) = found else {
+					writeln!(context.stderr(), "{}: {}: {}", context.command_name, operand, found.error_message())?;
 					had_failure = true;
+					continue;
+				};
+				let Some(job) = context.shell.jobs_mut().jobs.iter_mut().find(|job| job.id == id) else {
 					continue;
 				};
 				job.clear_listed();

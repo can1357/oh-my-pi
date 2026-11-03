@@ -1209,9 +1209,35 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 					_ => {
 						let expanded_default_value =
 							String::from(self.expand_parameter_word(default_value).await?);
-						self
-							.assign_to_parameter(&parameter, expanded_default_value.clone())
-							.await?;
+						// A readonly variable is reported where it happens
+						// (`err_readonly`), which exits the shell under errexit
+						// (`report_error`); else the command is abandoned with
+						// status 2, or a non-interactive POSIX-mode shell exits
+						// (`parameter_brace_expand_rhs`).
+						if let Err(err) = self.assign_to_parameter(&parameter, expanded_default_value.clone()).await {
+							if !err.is_readonly_variable() {
+								return Err(err);
+							}
+							let name = match &parameter {
+								brush_parser::word::Parameter::NamedWithIndex { name, index } => {
+									std::format!("{name}[{index}]")
+								},
+								brush_parser::word::Parameter::Named(name) => name.clone(),
+								other => other.to_string(),
+							};
+							let (status, fatal) = if let Some(exit) = self.shell.exit_for_reported_error(self.params) {
+								(u8::from(exit.exit_code), true)
+							} else if self.shell.options().posix_mode && !self.shell.options().interactive {
+								(1, true)
+							} else {
+								(2, false)
+							};
+							let err = error::Error::from(error::ErrorKind::ReadonlyDefaultAssignment { name, status });
+							let mut stderr = self.params.stderr(self.shell);
+							let _ = self.shell.display_error(&mut stderr, &err).await;
+							let err = err.into_reported();
+							return Err(if fatal { err.into_fatal() } else { err });
+						}
 						Ok(Expansion::from(expanded_default_value))
 					},
 				}

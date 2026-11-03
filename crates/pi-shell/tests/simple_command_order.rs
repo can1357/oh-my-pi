@@ -99,6 +99,46 @@ async fn simple_commands_expand_assign_and_redirect_in_bash_order() {
 	assert_bash_rows(rows).await;
 }
 
+/// An assignment to a readonly variable through every entry point Bash has
+/// (a statement, `+=`, an element, a key, a list, a prefix before an
+/// external command, a function or a special builtin, `export`, `declare`,
+/// `readonly`, `local`, `read`, `printf -v`, `let`, `(( ))`, `for`,
+/// `${x:=v}`, `unset`), on a scalar, an indexed, an associative and an
+/// unset variable, at top level, after `||`, in a function, a nested
+/// function, a subshell, a subshell with `set -e`, `eval`, `if eval`,
+/// `command eval` and a command substitution, with and without `set -e`
+/// and POSIX mode; then `set -e` across functions, subshells, `eval`,
+/// `command` and an ERR trap, assignments in ERR and DEBUG trap handlers,
+/// and POSIX mode's fatal errors. Bash 5.2.21 reading each script
+/// on standard input printed every expected output in
+/// `fixtures/readonly_assignments.jsonl` (`bash -c` exits 127 instead of 1
+/// where POSIX mode or a failed expansion forces the shell's input to end).
+///
+/// As in Bash, a readonly variable is reported, which exits the shell at
+/// once under `set -e` (`report_error`), unless an `eval`, `source` or
+/// `command` run where a failure is tested turned errexit off; then the
+/// failure jumps as Bash's `do_assignment_statements`, `assign_in_env`,
+/// `parameter_brace_expand_rhs` and `execute_for_command` jump. An element
+/// of a readonly array is readonly too. Before this round `set -e` let the
+/// jump abandon the command instead of exiting, the element assignment
+/// succeeded, and an ERR or DEBUG handler's exit was dropped.
+#[tokio::test(flavor = "multi_thread")]
+async fn readonly_assignments_fail_and_jump_as_bash_does() {
+	let rows: Vec<(String, String, i32, String)> =
+		include_str!("fixtures/readonly_assignments.jsonl")
+			.lines()
+			.map(|line| {
+				let row: serde_json::Value = serde_json::from_str(line).expect("fixture row");
+				let field = |name: &str| row[name].as_str().expect("fixture field").to_owned();
+				let exit =
+					i32::try_from(row["exit"].as_i64().expect("fixture exit")).expect("exit status");
+				(field("id"), field("script"), exit, field("output"))
+			})
+			.collect();
+	assert_eq!(rows.len(), 1113);
+	assert_bash_rows(rows).await;
+}
+
 /// A failed assignment abandons the command being run, as Bash's
 /// `jump_to_top_level (DISCARD)` in `do_assignment_statements` does: every
 /// enclosing command ends, the callers of a function and the rest of its
@@ -111,10 +151,12 @@ async fn simple_commands_expand_assign_and_redirect_in_bash_order() {
 /// end with status 1. A POSIX-mode shell exits instead before a special
 /// builtin, and for an assignment statement unless it runs under `command`.
 /// Each script's first line runs with its standard error discarded. The
-/// error ended only the function it was in, and the caller ran on.
+/// error ended only the function it was in, and the caller ran on; and the
+/// trap rows passed without their handler running, since this shell refuses
+/// to signal itself.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_failed_assignment_abandons_the_command_as_bash_does() {
-	let rows: [(&str, &str, i32, &str); 29] = [
+	let rows: [(&str, &str, i32, &str); 30] = [
 		("top", r"set -o posix; readonly x=old; x=new /bin/true; echo same-line", 0, "next s=1\n"),
 		(
 			"function",
@@ -202,11 +244,20 @@ echo in-eval2'; echo after-eval",
 			0,
 			"next s=1\n",
 		),
+		// The handler prints `entered` first, so each row proves it ran: an
+		// abandoned command ends the handler alone, and the caller goes on;
+		// before a special builtin the shell exits.
 		(
 			"trap",
-			r"set -o posix; readonly x=old; trap 'x=new /bin/true; echo in-trap' USR1; kill -USR1 $$; echo after-trap",
+			r"set -o posix; readonly x=old; trap 'echo entered; x=new /bin/true; echo in-trap' ERR; false; echo after-trap",
 			0,
-			"after-trap\nnext s=0\n",
+			"entered\nafter-trap\nnext s=0\n",
+		),
+		(
+			"trap-special",
+			r"set -o posix; readonly x=old; trap 'echo entered; x=new :; echo in-trap' ERR; false; echo after-trap",
+			1,
+			"entered\n",
 		),
 		(
 			"special-in-function",
@@ -252,6 +303,8 @@ echo in-eval2'; echo after-eval",
 			0,
 			"same\nnext s=0\n",
 		),
+		// Bash reading the script on standard input, or from a file, exits 1
+		// here; `bash -c` exits 127.
 		("statement/posix/readonly", r"set -o posix; readonly x=1; x=2; echo same", 1, ""),
 		(
 			"statement/posix/readonly-fn",

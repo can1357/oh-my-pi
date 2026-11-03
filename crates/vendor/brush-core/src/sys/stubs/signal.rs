@@ -248,6 +248,16 @@ pub(crate) enum StopOrContinue {
 	Continued,
 }
 
+/// No platform behind these stubs reports stops, so no stop needs ending.
+pub(crate) const fn has_exited(_pid: sys::process::ProcessId) -> bool {
+	false
+}
+
+/// No platform behind these stubs tells whether a process is stopped.
+pub(crate) const fn is_stopped(_pid: sys::process::ProcessId) -> Option<bool> {
+	None
+}
+
 /// No platform behind these stubs reports stops or continues.
 pub(crate) fn poll_for_stop_or_continue(
 	_pid: sys::process::ProcessId,

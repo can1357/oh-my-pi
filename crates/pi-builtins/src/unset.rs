@@ -1,4 +1,4 @@
-use std::borrow::Cow;
+use std::{borrow::Cow, io::Write};
 
 use brush_core::{ExecutionResult, Shell, ShellValue, builtins, variables::ShellValueUnsetType};
 use clap::Parser;
@@ -51,6 +51,7 @@ impl builtins::Command for UnsetCommand {
 		}
 
 		let unspecified = self.name_interpretation.unspecified();
+		let mut failed = false;
 
 		#[expect(clippy::needless_continue)]
 		for name in &self.names {
@@ -64,10 +65,10 @@ impl builtins::Command for UnsetCommand {
 						brush_parser::word::Parameter::Positional(_) => continue,
 						brush_parser::word::Parameter::Special(_) => continue,
 						brush_parser::word::Parameter::Named(name) => {
-							context.shell.env_mut().unset(name.as_str())?.is_some()
+							context.shell.env_mut().unset(name.as_str()).map(|unset| unset.is_some())
 						},
 						brush_parser::word::Parameter::NamedWithIndex { name, index } => {
-							unset_array_index(context.shell, name.as_str(), index.as_str())?
+							unset_array_index(context.shell, name.as_str(), index.as_str())
 						},
 						brush_parser::word::Parameter::NamedWithAllIndices {
 							name: _,
@@ -75,8 +76,24 @@ impl builtins::Command for UnsetCommand {
 						} => continue,
 					};
 
-					if result {
-						continue;
+					match result {
+						Ok(true) => continue,
+						Ok(false) => {},
+						// As Bash's `unset_builtin` does, a readonly variable is
+						// reported, makes the builtin fail and leaves the other
+						// names to be unset: a plain failure, which does not end
+						// a POSIX-mode shell (`special_builtin_failed` is only
+						// set for a status above 256).
+						Err(error) if matches!(error.kind(), brush_core::ErrorKind::ReadonlyVariable) => {
+							writeln!(
+								context.stderr(),
+								"{}: {name}: cannot unset: readonly variable",
+								context.command_name
+							)?;
+							failed = true;
+							continue;
+						},
+						Err(error) => return Err(error),
 					}
 				}
 			}
@@ -89,7 +106,7 @@ impl builtins::Command for UnsetCommand {
 			}
 		}
 
-		Ok(ExecutionResult::success())
+		Ok(if failed { ExecutionResult::general_error() } else { ExecutionResult::success() })
 	}
 }
 fn unset_name_reference(

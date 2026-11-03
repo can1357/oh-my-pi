@@ -363,7 +363,8 @@ impl ShellVariable {
 
 	/// Assign the given value to the variable at the given index, conditionally
 	/// appending to the preexisting value present at that element within the
-	/// value.
+	/// value. A readonly variable refuses it, as Bash's `bind_array_variable`
+	/// and `bind_assoc_variable` do.
 	///
 	/// # Arguments
 	///
@@ -377,6 +378,9 @@ impl ShellVariable {
 		value: String,
 		append: bool,
 	) -> Result<(), error::Error> {
+		if self.is_readonly() {
+			return Err(error::ErrorKind::ReadonlyVariable.into());
+		}
 		match &self.value {
 			ShellValue::Unset(_) => {
 				self.assign(ShellValueLiteral::Array(ArrayLiteral(vec![])), false)?;

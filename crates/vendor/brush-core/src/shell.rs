@@ -386,6 +386,32 @@ impl<SE: extensions::ShellExtensions> Shell<SE> {
 		}
 	}
 
+	/// Whether an error a variable binding reports exits the shell, as Bash's
+	/// `report_error` does when `exit_immediately_on_error` is set: errexit
+	/// is on, and no `eval`, `source` or `command` run where a failure is
+	/// tested turned it off for what it runs (see
+	/// [`ExecutionParameters::ignoring_errexit`]). Unlike errexit after a
+	/// command fails, a function called by `if` or `&&` still exits.
+	pub const fn exits_on_reported_error(&self, params: &crate::ExecutionParameters) -> bool {
+		self.options.exit_on_nonzero_command_exit && !params.ignoring_errexit
+	}
+
+	/// The result that exits the shell after an error a variable binding
+	/// reported, when [`Self::exits_on_reported_error`]: Bash's
+	/// `report_error` exits with the last command's status, or 1 for 0.
+	pub(crate) fn exit_for_reported_error(&self, params: &crate::ExecutionParameters) -> Option<ExecutionResult> {
+		if !self.exits_on_reported_error(params) {
+			return None;
+		}
+		let status = match self.last_exit_status() {
+			0 => 1,
+			status => status,
+		};
+		let mut result = ExecutionResult::from(crate::ExecutionExitCode::from(status));
+		result.next_control_flow = ExecutionControlFlow::ExitShell;
+		Some(result)
+	}
+
 	/// Returns the keywords that are reserved by the shell.
 	pub(crate) fn get_keywords(&self) -> Vec<&str> {
 		if self.options.sh_mode {

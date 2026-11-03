@@ -2,7 +2,7 @@
 
 use std::io::Write;
 
-use brush_core::jobs::{Job, JobState};
+use brush_core::jobs::{Job, JobSpecMatch, JobState};
 
 /// What `fg` and `bg` do before they look at a job, as Bash's `fg_builtin`
 /// and `bg_builtin` do: without job control they refuse (`no job control`,
@@ -35,23 +35,23 @@ pub(crate) fn operands(
 
 /// The job an operand names, as Bash's `get_job_spec` reads it: no operand
 /// is the current job, and the leading `%` is optional. Reports `no such
-/// job` (naming `current` for a missing operand) when none matches.
+/// job` (naming `current` for a missing operand), or `ambiguous job spec`,
+/// when it names no one job.
 pub(crate) fn resolve<'a>(
 	jobs: &'a mut brush_core::jobs::JobManager,
 	operand: Option<&str>,
 	command_name: &str,
 	stderr: &mut impl Write,
 ) -> std::io::Result<Option<&'a mut Job>> {
-	let job = match operand {
-		None => jobs.current_job_mut(),
-		Some("") => None,
-		Some(spec) if spec.starts_with('%') => jobs.resolve_job_spec(spec),
-		Some(spec) => jobs.resolve_job_spec(&format!("%{spec}")),
+	let found = match operand {
+		None => jobs.current_job().map(|job| job.id).map_or(JobSpecMatch::NoSuchJob, JobSpecMatch::Job),
+		Some(spec) => jobs.job_spec_match(spec),
 	};
-	if job.is_none() {
-		writeln!(stderr, "{command_name}: {}: no such job", operand.unwrap_or("current"))?;
-	}
-	Ok(job)
+	let JobSpecMatch::Job(id) = found else {
+		writeln!(stderr, "{command_name}: {}: {}", operand.unwrap_or("current"), found.error_message())?;
+		return Ok(None);
+	};
+	Ok(jobs.jobs.iter_mut().find(|job| job.id == id))
 }
 
 /// Whether `job` may be resumed, as Bash's `fg_bg` and `start_job` check: a
@@ -88,8 +88,9 @@ pub(crate) fn background_line(job: &Job) -> String {
 /// Resumes the job `operand` names in the background, as Bash's `fg_bg`
 /// does for `bg`: `$!` becomes the job's process group, a job that runs
 /// stays as it is (`already in background`, which succeeds), and a stopped
-/// one is announced and continued (see [`Job::move_to_background`]).
-/// Returns whether it succeeded.
+/// one is announced and continued (see [`Job::move_to_background`]), after
+/// which the shell chooses the current job again (`start_job` calls
+/// `reset_current`). Returns whether it succeeded.
 pub(crate) fn resume_in_background<SE: brush_core::ShellExtensions>(
 	shell: &mut brush_core::Shell<SE>,
 	operand: Option<&str>,
@@ -104,11 +105,16 @@ pub(crate) fn resume_in_background<SE: brush_core::ShellExtensions>(
 		return Ok(false);
 	}
 	let group = job.process_group_id();
-	if matches!(job.state, JobState::Running) {
+	let continued = if matches!(job.state, JobState::Running) {
 		writeln!(stderr, "{command_name}: job {} already in background", job.id)?;
+		false
 	} else {
 		writeln!(stdout, "{}", background_line(job))?;
 		job.move_to_background()?;
+		true
+	};
+	if continued {
+		shell.jobs_mut().reset_current();
 	}
 	shell.set_last_background_pid(group);
 	Ok(true)

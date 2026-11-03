@@ -2396,3 +2396,66 @@ async fn fg_prints_nothing_for_a_job_that_stops_again_in_a_script() {
 	)])
 	.await;
 }
+
+/// Generated sequences of three jobs (a single process, one started through
+/// `env`, a two-stage pipeline) that start, stop, continue (by pid or `bg`)
+/// and end in random orders, with and without `set -m`: after each step the
+/// script prints which job each of `%%`, `%+`, `%-`, `%1` to `%3`, `%name`
+/// and `%?text` names (or `none`, or `amb` for an ambiguous one), and at the
+/// end it shows which job `kill -TERM %-` reaches. Bash 5.2.21 reading each
+/// script on standard input printed every expected output in
+/// `fixtures/job_specs.jsonl`.
+///
+/// The current and previous jobs follow Bash's `set_current_job` and
+/// `reset_current`: a job that starts in the background resets them, so a
+/// stopped job stays current; a job that stops becomes current; one that
+/// leaves the table, or that `bg` continues, has them chosen again; and
+/// `%-` is the current job when no other qualifies. `%name` and `%?text`
+/// match each process's own text, ignoring case for `%?`, and two matches
+/// are ambiguous. Before this round the newest job was always current and
+/// the one before it previous, `%-` named nothing for a single job, and a
+/// pipeline's later stages matched no `%name`; and a stopped process that
+/// had been continued and had exited kept its job stopped, so `wait PID`
+/// returned 147 at once.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn job_specs_name_the_jobs_bash_names() {
+	let rows: Vec<(String, String)> = include_str!("fixtures/job_specs.jsonl")
+		.lines()
+		.map(|line| {
+			let row: serde_json::Value = serde_json::from_str(line).expect("fixture row");
+			let field = |name: &str| row[name].as_str().expect("fixture field").to_owned();
+			(field("script"), field("output"))
+		})
+		.collect();
+	assert_eq!(rows.len(), 26);
+	let rows: Vec<(&str, &str)> = rows
+		.iter()
+		.map(|(script, output)| (script.as_str(), output.as_str()))
+		.collect();
+	assert_bash_outputs(&rows).await;
+}
+
+/// A stopped process that `kill -CONT PID` continued and that has since
+/// exited no longer holds its job stopped, as Bash's `waitchld` sees the exit
+/// at once: `wait` returns its status. The kernel reports no continue for a
+/// process that has exited, so its job stayed stopped and `wait` returned
+/// 147 at once.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_continued_stop_that_ended_lets_wait_return_the_exit_status() {
+	const START: &str = r#"d=$(mktemp -d); cd "$d"; set -m; /bin/sh -c 'while [ ! -e end ]; do /bin/sleep .02; done; exit 6' & q=$!; kill -STOP $q; until read -r _ _ s _ </proc/$q/stat && [ "$s" = T ]; do /bin/sleep .01; done; jobs >/dev/null; : >end; kill -CONT $q; /bin/sleep .5; "#;
+	let rows: Vec<String> = ["$q", "%1"]
+		.into_iter()
+		.map(|operand| {
+			format!(
+				r#"{START}wait {operand}; echo "wait=$?"; jobs; echo "jobs=$?"; cd /; rm -rf "$d""#
+			)
+		})
+		.collect();
+	let rows: Vec<(&str, &str)> = rows
+		.iter()
+		.map(|script| (script.as_str(), "wait=6\njobs=0\n"))
+		.collect();
+	assert_bash_outputs(&rows).await;
+}

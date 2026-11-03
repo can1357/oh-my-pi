@@ -143,6 +143,10 @@ pub struct RuntimeOptions {
 	pub send_sighup_to_all_jobs_on_exit: bool,
 	/// `inherit_errexit`
 	pub command_subst_inherits_errexit: bool,
+	/// The `inherit_errexit` value POSIX mode replaced when it was turned on,
+	/// restored when it is turned off (Bash's `posix_initialize` and
+	/// `set_posix_options`).
+	pub saved_posix_inherit_errexit: Option<bool>,
 	/// `interactive_comments`
 	pub interactive_comments: bool,
 	/// 'lastpipe'
@@ -250,6 +254,8 @@ impl RuntimeOptions {
 			glob_skip_dots: true,
 			patsub_replacement: true,
 			max_function_call_depth: create_options.max_function_call_depth,
+			// POSIX mode turns `inherit_errexit` on (`posix_initialize`).
+			command_subst_inherits_errexit: create_options.posix,
 			..Self::default()
 		};
 

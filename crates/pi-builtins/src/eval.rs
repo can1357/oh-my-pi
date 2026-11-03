@@ -30,10 +30,13 @@ impl builtins::Command for EvalCommand {
 			// Return the direct result of running the string; we intentionally
 			// pass through the result and honor its requested control flow. eval
 			// executes in the current environment, so all control flow (return,
-			// exit, break, continue) should propagate.
+			// exit, break, continue) should propagate. An abandoned command ends
+			// the string with status 1, as Bash's `parse_and_execute` ends it.
+			let mut params = context.params;
+			params.reads_eval_text = true;
 			context
 				.shell
-				.run_string(args_concatenated, &source_info, &context.params)
+				.run_string(args_concatenated, &source_info, &params)
 				.await
 		} else {
 			Ok(ExecutionResult::success())

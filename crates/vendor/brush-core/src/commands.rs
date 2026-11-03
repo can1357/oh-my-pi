@@ -453,9 +453,13 @@ pub async fn compose_std_command<S: AsRef<OsStr>, SE: extensions::ShellExtension
 	Ok(cmd)
 }
 
+/// Sets `BASH_COMMAND` and runs the DEBUG trap before a simple command.
+/// Returns the result that exits the shell when the trap handler exits it
+/// (`exit`, or an error that ends a non-interactive shell), as Bash's
+/// `run_debug_trap` does; the command then does not run.
 pub(crate) async fn on_preexecute(
 	cmd: &mut commands::SimpleCommand<'_, impl extensions::ShellExtensions>,
-) -> Result<(), error::Error> {
+) -> Result<Option<ExecutionResult>, error::Error> {
 	// Set BASH_COMMAND before invoking the DEBUG trap (and generally before
 	// executing commands).
 	let full_cmd = cmd.args.iter().map(|arg| arg.to_string()).join(" ");
@@ -469,13 +473,19 @@ pub(crate) async fn on_preexecute(
 
 	// Fire the DEBUG trap if one is registered.
 	if cmd.shell.traps().handles(traps::TrapSignal::Debug) {
-		let _ = cmd
+		let result = cmd
 			.shell
 			.invoke_trap_handler(traps::TrapSignal::Debug, &cmd.params)
 			.await?;
+		if matches!(result.next_control_flow, ExecutionControlFlow::ExitShell) {
+			if let Some(post_execute) = cmd.post_execute.take() {
+				let _ = post_execute(&mut cmd.shell);
+			}
+			return Ok(Some(result));
+		}
 	}
 
-	Ok(())
+	Ok(None)
 }
 
 /// Represents a simple command to be executed.
@@ -1090,11 +1100,29 @@ async fn execute_builtin_command<SE: extensions::ShellExtensions>(
 	context: ExecutionContext<'_, SE>,
 	args: Vec<CommandArg>,
 ) -> Result<ExecutionResult, error::Error> {
+	let ExecutionContext { shell, command_name, mut params } = context;
 	// In POSIX mode, special builtins that return errors are to be treated as
 	// fatal.
-	let mark_errors_fatal = builtin.special_builtin && context.shell.options().posix_mode;
+	let mark_errors_fatal = builtin.special_builtin && shell.options().posix_mode;
 
-	match (builtin.execute_func)(context, args).await {
+	// Bash's `execute_builtin` turns errexit off for all an `eval`, `source`
+	// or `command` runs where a failure is tested (`builtin_ignoring_errexit`).
+	if params.suppress_errexit && matches!(command_name.as_str(), "eval" | "source" | "." | "command") {
+		params.ignoring_errexit = true;
+	}
+	// A builtin that binds a variable through Bash's `bind_variable` reports
+	// a readonly one with `report_error`, which exits the shell at once under
+	// errexit, with the status the command before it left (see
+	// `Shell::exit_for_reported_error`). `declare`, `typeset`, `local` and
+	// `unset` report it as a builtin's own error instead.
+	let binds_variables = matches!(
+		command_name.as_str(),
+		"export" | "readonly" | "read" | "printf" | "let" | "getopts" | "mapfile" | "readarray" | "wait"
+	);
+	let reported_exit = if binds_variables { shell.exit_for_reported_error(&params) } else { None };
+	let error_params = reported_exit.is_some().then(|| params.clone());
+
+	match (builtin.execute_func)(ExecutionContext { shell: &mut *shell, command_name, params }, args).await {
 		Ok(result) => Ok(result),
 		Err(e) => {
 			// Broken pipe errors should silently return the appropriate exit code
@@ -1102,6 +1130,14 @@ async fn execute_builtin_command<SE: extensions::ShellExtensions>(
 				if io_err.kind() == std::io::ErrorKind::BrokenPipe {
 					return Ok(ExecutionExitCode::from(io_err).into());
 				}
+			}
+
+			if let (Some(exit), Some(error_params)) = (reported_exit, error_params)
+				&& e.is_readonly_variable()
+			{
+				let mut stderr = error_params.stderr(shell);
+				let _ = shell.display_error(&mut stderr, &e).await;
+				return Ok(exit);
 			}
 
 			Err(if mark_errors_fatal { e.into_fatal() } else { e })
@@ -1283,10 +1319,14 @@ async fn run_substitution_command(
 	// TODO(source-info): review this
 	let source_info = crate::SourceInfo::from("main");
 
-	// Handle the parse result using default shell behavior.
-	shell
-		.run_parsed_result(parse_result, &source_info, &params)
-		.await
+	// Handle the parse result using default shell behavior. An abandoned
+	// command ends the substitution with status 1, as Bash's
+	// `command_substitute` maps any jump but an exit.
+	let mut result = shell.run_parsed_result(parse_result, &source_info, &params).await?;
+	if matches!(result.next_control_flow, ExecutionControlFlow::DiscardCommand) {
+		result = ExecutionResult::general_error();
+	}
+	Ok(result)
 }
 
 // Detects a subshell command that consists solely of a single input redirection

@@ -161,6 +161,37 @@ pub(crate) fn poll_for_stop_or_continue(
 	}
 }
 
+/// Whether `pid` is stopped now, where the system says (`/proc` on Linux);
+/// `None` elsewhere. A process that was continued and is exiting reports
+/// neither a continue nor an exit for a moment; this tells its stop is over.
+pub(crate) fn is_stopped(pid: sys::process::ProcessId) -> Option<bool> {
+	#[cfg(target_os = "linux")]
+	{
+		let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+		let state = stat.rsplit_once(')')?.1.trim_start().chars().next()?;
+		Some(matches!(state, 'T' | 't'))
+	}
+	#[cfg(not(target_os = "linux"))]
+	{
+		let _ = pid;
+		None
+	}
+}
+
+/// Whether `pid` has exited or been killed, without reaping it (`WNOWAIT`):
+/// its own wait still collects the status. A stopped child that was
+/// continued and has exited reports no continue any more, so this tells a
+/// stop that is over from one that is not.
+pub(crate) fn has_exited(pid: sys::process::ProcessId) -> bool {
+	let flags = nix::sys::wait::WaitPidFlag::WEXITED
+		| nix::sys::wait::WaitPidFlag::WNOWAIT
+		| nix::sys::wait::WaitPidFlag::WNOHANG;
+	matches!(
+		waitid_child(pid, None, flags),
+		Ok(nix::sys::wait::WaitStatus::Exited(..) | nix::sys::wait::WaitStatus::Signaled(..))
+	)
+}
+
 fn drain_stopped(
 	mut wait: impl FnMut() -> Result<nix::sys::wait::WaitStatus, nix::errno::Errno>,
 	stops: &mut Vec<(sys::process::ProcessId, u8)>,
