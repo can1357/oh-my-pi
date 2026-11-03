@@ -398,11 +398,11 @@ const URL_SCHEME = /^[A-Za-z][A-Za-z0-9+.-]+:/;
  * `a/b`), even if missing, or a bare name of an existing entry. A leading `~`
  * is the user's home, as `expandTilde` reads it for every other tool path. An
  * exact application ID or native path (`listed`) keeps precedence over a
- * same-named entry; absolute paths, URLs and other names pass through to
- * native resolution.
+ * same-named entry and over `~`; absolute paths, URLs and other names pass
+ * through to native resolution.
  */
 async function sessionPath(value: string, cwd: string, listed: (value: string) => Promise<boolean>): Promise<string> {
-	if (value.startsWith("~")) return expandTilde(value);
+	if (value.startsWith("~")) return (await listed(value)) ? value : expandTilde(value);
 	if (path.isAbsolute(value) || URL_SCHEME.test(value)) return value;
 	const local = path.resolve(cwd, value);
 	const written = value.startsWith(".") || value.includes("/") || value.includes(path.sep);

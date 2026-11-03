@@ -4265,11 +4265,18 @@ describe("computer background fallback", () => {
 			]);
 		});
 
-		it("keeps an exact application ID over a same-named file in the session's folder", async () => {
+		it("keeps an exact application ID over a same-named file in the session's folder or under ~", async () => {
 			class ShadowedSession extends FileSession {
 				override async listApplications() {
 					return [
 						{ id: "computer.test.ts", name: "Editor", path: "/Applications/Editor.app", running: true, pid: 123 },
+						{
+							id: "~editor.desktop",
+							name: "Tilde Editor",
+							path: "/usr/share/applications/~editor.desktop",
+							running: true,
+							pid: 124,
+						},
 					];
 				}
 			}
@@ -4277,11 +4284,15 @@ describe("computer background fallback", () => {
 			const code = [
 				'await desktop.apps.open("computer.test.ts");',
 				'await desktop.apps.open("README.md", { app: "computer.test.ts" });',
+				'await desktop.apps.open("~editor.desktop");',
+				'await desktop.apps.open("README.md", { app: "~editor.desktop" });',
 			].join("\n");
 			expect((await run(native, code, "takeover")).ok).toBe(true);
 			expect(native.opened).toEqual([
 				{ id: "computer.test.ts", options: {} },
 				{ id: "README.md", options: { app: "computer.test.ts" } },
+				{ id: "~editor.desktop", options: {} },
+				{ id: "README.md", options: { app: "~editor.desktop" } },
 			]);
 		});
 
