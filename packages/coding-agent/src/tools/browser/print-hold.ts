@@ -61,7 +61,6 @@ function holdPrintInPage(
 		const clock: Function = Reflect.get(globalThis, clockKey);
 		const PrintEvent = Event;
 		const dispatchEvent = EventTarget.prototype.dispatchEvent;
-		const report: unknown = Reflect.get(globalThis, binding);
 		return new Proxy(print, {
 			apply(target, thisArg, args) {
 				// The popup retains the deadline object and clock even if its opener changes origin. Losing access
@@ -74,9 +73,11 @@ function holdPrintInPage(
 				}
 				const heldUntil: unknown = Reflect.get(hold, "until");
 				if (typeof heldUntil !== "number" || time >= heldUntil) return Reflect.apply(target, thisArg, args);
-				// Keep the callable binding, not a lookup through the opener's retargeted WindowProxy.
-				// A detached attachment can no longer report, but its remaining deadline still holds.
+				// Report through the popup's own session after its opener changes origin. Before omp reaches a
+				// freshly opened popup, its still-reachable opener supplies the binding instead.
 				try {
+					const local: unknown = Reflect.get(view, binding);
+					const report: unknown = typeof local === "function" ? local : Reflect.get(globalThis, binding);
 					if (typeof report === "function") Reflect.apply(report, undefined, [""]);
 				} catch {}
 				Reflect.apply(dispatchEvent, view, [new PrintEvent("beforeprint")]);
@@ -167,7 +168,7 @@ export class PrintHold {
 	/** A hold change the page has not had yet; made once the dialog closes. */
 	#stale = false;
 	/** Popup documents keep their hold reachable here after their opener changes origin. */
-	readonly #popups = new Set<Page>();
+	readonly #popups = new Map<Page, CDPSession>();
 
 	private constructor(page: Page, session: CDPSession, scope: PrintHoldScope) {
 		this.#page = page;
@@ -246,6 +247,10 @@ export class PrintHold {
 		this.#session.off("Runtime.bindingCalled", this.#onBindingCalled);
 		this.#session.off("Page.javascriptDialogOpening", this.#onDialogOpening);
 		await this.#session.detach();
+		for (const session of this.#popups.values()) {
+			session.off("Runtime.bindingCalled", this.#onBindingCalled);
+			void session.send("Runtime.removeBinding", { name: this.#binding }).catch(() => undefined);
+		}
 		this.#popups.clear();
 	}
 
@@ -280,7 +285,10 @@ export class PrintHold {
 
 	readonly #onPopup = (popup: Page | null): void => {
 		if (!popup) return;
-		this.#popups.add(popup);
+		const session = popup.mainFrame().client;
+		this.#popups.set(popup, session);
+		session.on("Runtime.bindingCalled", this.#onBindingCalled);
+		void session.send("Runtime.addBinding", { name: this.#binding }).catch(() => undefined);
 		void this.#setInFrames();
 	};
 
@@ -347,8 +355,9 @@ export class PrintHold {
 	async #setInFrames(): Promise<void> {
 		const mainFrame = this.#page.mainFrame();
 		const remaining = this.#remaining();
-		for (const popup of this.#popups) {
+		for (const [popup, session] of this.#popups) {
 			if (popup.isClosed()) {
+				session.off("Runtime.bindingCalled", this.#onBindingCalled);
 				this.#popups.delete(popup);
 				continue;
 			}
