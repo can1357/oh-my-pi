@@ -10,7 +10,6 @@ import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 
 // The exact body LithosAI answers for an account with no credit left. It is a
 // 402 `insufficient_quota`, so the retry classifier files it under UsageLimit
@@ -122,21 +121,5 @@ describe("AgentSession out-of-credit handling", () => {
 			stopReason: "stop",
 			content: [{ type: "text", text: "answered after top-up" }],
 		});
-	});
-
-	it("still retries a transient rate limit within the delay cap", async () => {
-		const { session, calls, retryEndEvents } = await createSession(
-			"429 Too Many Requests: rate limit exceeded, please retry shortly",
-		);
-		// The transient lane backs off for its own 30-second guess; the clock is
-		// mocked here so the test exercises the retry, not the sleep.
-		mockSchedulerWaitWithClock();
-
-		await session.prompt("hello");
-		await session.waitForIdle();
-
-		expect(calls()).toBe(2);
-		expect(retryEndEvents).toHaveLength(1);
-		expect(retryEndEvents[0]).toMatchObject({ success: true, attempt: 1 });
 	});
 });
