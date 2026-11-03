@@ -19,7 +19,7 @@
 
 ### Changed
 
-- In `UsageDashboardComponent` (`/usage`), Tab toggles between Overview and Details views bidirectionally ([#17962](https://github.com/can1357/oh-my-pi/pull/17962) by [@SuperUserA](https://github.com/SuperUserA))
+- Tab in the `/usage` Details view now switches back to Overview ([#17962](https://github.com/can1357/oh-my-pi/pull/17962) by [@SuperUserA](https://github.com/SuperUserA))
 
 ## [18.16.0] - 2026-11-02
 

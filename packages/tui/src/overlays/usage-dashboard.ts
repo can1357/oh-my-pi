@@ -1054,11 +1054,10 @@ export class UsageDashboardComponent implements Component {
 		const scrollHint = maxScroll > 0 ? `${editorKeys("tui.select.up", "tui.select.down")} scroll · ` : "";
 		const cancel = editorKey("tui.select.cancel");
 		const refreshHint = this.#options.refresh ? "r refresh · " : "";
-		const tabKey = formatKeyHint("tab");
 		const hint =
 			this.#view === "detail"
-				? `${scrollHint}${refreshHint}${tabKey} overview · ${cancel} back`
-				: `${scrollHint}${refreshHint}${tabKey} details · ${cancel} close`;
+				? `${scrollHint}${refreshHint}${formatKeyHint("tab")} overview · ${cancel} back`
+				: `${scrollHint}${refreshHint}${formatKeyHint("enter")} details · ${cancel} close`;
 		this.#panel.title = title;
 		this.#header.setLines([checkedText ? theme.fg("dim", checkedText) : ""]);
 		this.#body.setLines(contentSource.slice(this.#scroll, this.#scroll + contentRows));
