@@ -7,7 +7,7 @@
  * - mainFrame readiness is polled past the frameTree race.
  */
 
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, onTestFinished, test, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -856,6 +856,12 @@ describe("pickElectronTarget relay path", () => {
 	let relayJson: string;
 	let available = true;
 	let relayEntries = RELAY_ENTRIES;
+	const timeoutErrorName = Object.getOwnPropertyDescriptor(TimeoutError, "name")!;
+	// Registered before the async teardown below: if that hook times out, Bun skips every later
+	// `afterEach` hook and `onTestFinished` callback of the test.
+	afterEach(() => {
+		Object.defineProperty(TimeoutError, "name", timeoutErrorName);
+	});
 	beforeEach(() => {
 		available = true;
 		relayEntries = RELAY_ENTRIES;
@@ -1054,9 +1060,6 @@ describe("pickElectronTarget relay path", () => {
 		};
 		const puppeteerBrowser = await (await loadPuppeteer()).connect({ transport, defaultViewport: null });
 		const nameDescriptor = Object.getOwnPropertyDescriptor(TimeoutError, "name")!;
-		onTestFinished(() => {
-			Object.defineProperty(TimeoutError, "name", nameDescriptor);
-		});
 		// Release builds minify class names, so Puppeteer names its timeout like this there.
 		Object.defineProperty(TimeoutError, "name", { ...nameDescriptor, value: "Og" });
 		try {

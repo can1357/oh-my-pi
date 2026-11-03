@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, onTestFinished, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -214,6 +214,13 @@ describe("auth-broker import (broker-routed)", () => {
 		["OMP_AUTH_BROKER_URL", "OMP_AUTH_BROKER_TOKEN", "PI_CODING_AGENT_DIR", "OMP_PROFILE", "PI_PROFILE"],
 		{ afterPutBack: __resetDirsFromEnvForTests },
 	);
+	const realStdoutWrite = process.stdout.write;
+
+	// Registered before the async teardown below: if that hook times out, Bun skips every later
+	// `afterEach` hook and `onTestFinished` callback of the test.
+	afterEach(() => {
+		process.stdout.write = realStdoutWrite;
+	});
 
 	beforeEach(async () => {
 		const life = testLifetime();
@@ -259,10 +266,6 @@ describe("auth-broker import (broker-routed)", () => {
 			}),
 		);
 
-		const ORIGINAL_STDOUT = process.stdout.write;
-		onTestFinished(() => {
-			process.stdout.write = ORIGINAL_STDOUT;
-		});
 		let captured = "";
 		life.assertLive();
 		process.stdout.write = ((chunk: string | Uint8Array): boolean => {
@@ -305,10 +308,6 @@ describe("auth-broker import (broker-routed)", () => {
 			}),
 		);
 
-		const ORIGINAL_STDOUT = process.stdout.write;
-		onTestFinished(() => {
-			process.stdout.write = ORIGINAL_STDOUT;
-		});
 		life.assertLive();
 		process.stdout.write = (() => true) as typeof process.stdout.write;
 		await runAuthBrokerCommand({

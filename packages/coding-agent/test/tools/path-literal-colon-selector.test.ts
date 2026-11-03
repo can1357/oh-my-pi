@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, onTestFinished, spyOn, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -19,10 +19,9 @@ import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { runGrepCommand } from "../../src/cli/grep-cli";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { GrepTool } from "../../src/tools/grep";
+import { installMockRestores } from "../../../utils/test/helpers/mock-restores";
 
-afterEach(() => {
-	vi.restoreAllMocks();
-});
+installMockRestores();
 
 function getText(result: { content: Array<{ type: string; text?: string }> }): string {
 	return result.content
@@ -43,6 +42,13 @@ describe("literal colon filename resolution (issue #4618)", () => {
 	// Windows forbids `:` in filenames and reads `\` as a separator, not a shell
 	// escape, so the shell-escaped literal-name cases are POSIX-only.
 	const posixIt = it.skipIf(process.platform === "win32");
+	const realPlatform = Object.getOwnPropertyDescriptor(process, "platform")!;
+
+	// Registered before the async teardown below: if that hook times out, Bun skips every later
+	// `afterEach` hook and `onTestFinished` callback of the test.
+	afterEach(() => {
+		Object.defineProperty(process, "platform", realPlatform);
+	});
 
 	beforeEach(async () => {
 		tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "literal-colon-"));
@@ -96,10 +102,6 @@ describe("literal colon filename resolution (issue #4618)", () => {
 		it("uses only confirmed Windows literal paths", async () => {
 			const literal = "base.txt:1-2";
 			await Bun.write(path.join(tmpDir, literal), "stream\n");
-			const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
-			onTestFinished(() => {
-				Object.defineProperty(process, "platform", platform);
-			});
 			Object.defineProperty(process, "platform", { configurable: true, value: "win32" });
 
 			const expectedLiteral = { path: literal };
@@ -132,10 +134,6 @@ describe("literal colon filename resolution (issue #4618)", () => {
 			const realLstat = fs.promises.lstat;
 			const realLstatSync = fs.lstatSync;
 			const realBunFile = Bun.file.bind(Bun);
-			const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
-			onTestFinished(() => {
-				Object.defineProperty(process, "platform", platform);
-			});
 			Object.defineProperty(process, "platform", { configurable: true, value: "win32" });
 			spyOn(fs.promises, "lstat").mockImplementation((async (target: fs.PathLike) =>
 				String(target) === stream ? baseStat : await realLstat(target)) as typeof fs.promises.lstat);

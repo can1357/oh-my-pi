@@ -40,10 +40,10 @@ import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { installMockRestores } from "../../utils/test/helpers/mock-restores";
 
-afterEach(() => {
-	vi.restoreAllMocks();
-});
+installMockRestores();
+
 function observeAsyncResultEnqueue(session: AgentSession): Promise<void> {
 	const queued = Promise.withResolvers<void>();
 	const enqueue = session.yieldQueue.enqueueWithReceipt.bind(session.yieldQueue);

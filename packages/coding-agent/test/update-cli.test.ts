@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, type Mock, onTestFinished, spyOn, vi } from "bun:test";
+import { afterEach, describe, expect, it, type Mock, spyOn, vi } from "bun:test";
 import * as nodeFs from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -96,9 +96,6 @@ function withPlatform<T>(platform: NodeJS.Platform, fn: () => T): T {
  */
 async function withPlatformAsync<T>(platform: NodeJS.Platform, fn: () => Promise<T>): Promise<T> {
 	const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform")!;
-	onTestFinished(() => {
-		Object.defineProperty(process, "platform", platformDescriptor);
-	});
 	Object.defineProperty(process, "platform", { ...platformDescriptor, value: platform });
 	return await fn();
 }
@@ -127,6 +124,13 @@ function npmGlobalLayout(prefix: string): { binDir: string; nodeModulesDir: stri
 		? { binDir: prefix, nodeModulesDir: path.join(prefix, "node_modules") }
 		: { binDir: path.join(prefix, "bin"), nodeModulesDir: path.join(prefix, "lib", "node_modules") };
 }
+
+// Registered before the async teardown below: if that hook times out, Bun skips every later
+// `afterEach` hook and `onTestFinished` callback of the test.
+const realPlatform = Object.getOwnPropertyDescriptor(process, "platform")!;
+afterEach(() => {
+	Object.defineProperty(process, "platform", realPlatform);
+});
 
 afterEach(async () => {
 	vi.restoreAllMocks();
@@ -885,9 +889,6 @@ describe("migrateRenamedInstall transaction", () => {
 	it("uses the platform-aware PowerShell reinstall hint on Windows", async () => {
 		vi.spyOn(console, "log").mockImplementation(() => {});
 		const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform")!;
-		onTestFinished(() => {
-			Object.defineProperty(process, "platform", platformDescriptor);
-		});
 		Object.defineProperty(process, "platform", { ...platformDescriptor, value: "win32" });
 		const { steps } = scriptedSteps({ install: [0, 0], verify: [false, false] });
 		const promise = migrateRenamedInstall(release, steps);

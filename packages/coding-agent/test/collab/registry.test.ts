@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, onTestFinished, spyOn, vi } from "bun:test";
+import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as crypto from "node:crypto";
 import * as nodeFs from "node:fs";
 import * as fs from "node:fs/promises";
@@ -21,6 +21,13 @@ installMockRestores();
 const cleanupDirs: string[] = [];
 const openPublications: CollabHostPublication[] = [];
 const openServers: { server: IpcServer; connections: Set<IpcConnection> }[] = [];
+
+// Registered before the async teardown below: if that hook times out, Bun skips every later
+// `afterEach` hook and `onTestFinished` callback of the test.
+const realPlatform = Object.getOwnPropertyDescriptor(process, "platform")!;
+afterEach(() => {
+	Object.defineProperty(process, "platform", realPlatform);
+});
 
 afterEach(async () => {
 	vi.restoreAllMocks();
@@ -666,10 +673,6 @@ describe("collab registry", () => {
 		await Bun.write(bystander, "{not registry metadata");
 		const link = path.join(await tempDir(), "collab-hosts");
 		await fs.symlink(target, link, process.platform === "win32" ? "junction" : "dir");
-		const descriptor = Object.getOwnPropertyDescriptor(process, "platform")!;
-		onTestFinished(() => {
-			Object.defineProperty(process, "platform", descriptor);
-		});
 		// Exercise the Windows branch on Unix CI too; native Windows uses a junction.
 		for (const platform of new Set([process.platform, "win32"])) {
 			Object.defineProperty(process, "platform", { configurable: true, value: platform });

@@ -13,10 +13,9 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { logger, TempDir } from "@oh-my-pi/pi-utils";
+import { installMockRestores } from "../../utils/test/helpers/mock-restores";
 
-afterEach(() => {
-	vi.restoreAllMocks();
-});
+installMockRestores();
 
 /**
  * Regression: the per-turn supersede/useless prune pass rewrote the LIVE agent

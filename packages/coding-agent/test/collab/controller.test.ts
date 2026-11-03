@@ -10,7 +10,7 @@
  * real Unix-socket IPC is redirected into a temp dir via a spy on
  * `publishCollabHost`, exactly as in host-registry.test.ts.
  */
-import { afterEach, beforeEach, describe, expect, it, type Mock, onTestFinished, spyOn, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, type Mock, spyOn, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -281,6 +281,14 @@ describe("interactive collaboration startup", () => {
 	let mode: InteractiveMode | undefined;
 	let originalProject: string;
 	const remoteHosts: CollabHost[] = [];
+	const stdinIsTTY = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
+
+	// Registered before the async teardown below: if that hook times out, Bun skips every later
+	// `afterEach` hook and `onTestFinished` callback of the test.
+	afterEach(() => {
+		Reflect.deleteProperty(process.stdin, "isTTY");
+		if (stdinIsTTY) Object.defineProperty(process.stdin, "isTTY", stdinIsTTY);
+	});
 
 	beforeEach(async () => {
 		originalProject = getProjectDir();
@@ -461,11 +469,6 @@ describe("interactive collaboration startup", () => {
 		});
 		spyOn(ModelRegistry.prototype, "refreshInBackground").mockImplementation(() => {});
 		spyOn(pluginHelpers, "preloadPluginRoots").mockResolvedValue(undefined);
-		const originalIsTTY = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
-		onTestFinished(() => {
-			if (originalIsTTY) Object.defineProperty(process.stdin, "isTTY", originalIsTTY);
-			else Reflect.deleteProperty(process.stdin, "isTTY");
-		});
 		Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
 		const authStorage = await AuthStorage.create(path.join(tmp, "failed-join-auth.db"));
 		try {
@@ -803,11 +806,6 @@ describe("interactive collaboration startup", () => {
 			}
 			spyOn(ModelRegistry.prototype, "refreshInBackground").mockImplementation(() => {});
 			spyOn(pluginHelpers, "preloadPluginRoots").mockResolvedValue(undefined);
-			const originalIsTTY = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
-			onTestFinished(() => {
-				if (originalIsTTY) Object.defineProperty(process.stdin, "isTTY", originalIsTTY);
-				else Reflect.deleteProperty(process.stdin, "isTTY");
-			});
 			Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
 			const authStorage = await AuthStorage.create(path.join(tmp, "startup-auth.db"));
 			try {

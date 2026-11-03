@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, onTestFinished, vi } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -16,6 +16,14 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const cleanupDirs: string[] = [];
+const stdinIsTTY = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
+
+// Registered before the async teardown below: if that hook times out, Bun skips every later
+// `afterEach` hook and `onTestFinished` callback of the test.
+afterEach(() => {
+	Reflect.deleteProperty(process.stdin, "isTTY");
+	if (stdinIsTTY) Object.defineProperty(process.stdin, "isTTY", stdinIsTTY);
+});
 
 afterEach(async () => {
 	await Promise.all(cleanupDirs.splice(0).map(dir => removeWithRetries(dir)));
@@ -47,11 +55,6 @@ describe("discoverTitleSystemPromptFile", () => {
 
 describe("readPipedInput", () => {
 	it("reads redirected stdin when Bun reports isTTY as undefined", async () => {
-		const originalIsTTY = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
-		onTestFinished(() => {
-			if (originalIsTTY) Object.defineProperty(process.stdin, "isTTY", originalIsTTY);
-			else Reflect.deleteProperty(process.stdin, "isTTY");
-		});
 		const readText = vi.spyOn(Bun.stdin, "text").mockResolvedValue("piped prompt\n");
 		Object.defineProperty(process.stdin, "isTTY", { value: undefined, configurable: true });
 

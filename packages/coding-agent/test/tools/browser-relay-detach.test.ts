@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as rewriteImports from "@oh-my-pi/pi-coding-agent/eval/js/shared/rewrite-imports";
 import * as toolBridge from "@oh-my-pi/pi-coding-agent/eval/js/tool-bridge";
@@ -12,7 +12,7 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import puppeteer, { type Browser, type Page } from "puppeteer-core";
-import { installEnvRestores } from "../../../utils/test/helpers/mock-restores";
+import { installEnvRestores, installMockRestores } from "../../../utils/test/helpers/mock-restores";
 import { chromiumAvailable } from "./chromium-probe";
 
 /** The variable a cell sets if it runs after Chrome detached omp from its tab. */
@@ -20,10 +20,7 @@ const DETACH_PROBE = `OMP_DETACH_PROBE_${process.pid}`;
 // The async afterEach can time out, and Bun then skips `onTestFinished`; this owner still puts the
 // probe variable back at the next test and when the file ends.
 installEnvRestores([DETACH_PROBE]);
-
-afterEach(() => {
-	vi.restoreAllMocks();
-});
+installMockRestores();
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
 const TAB_ID = 1;

@@ -1583,6 +1583,517 @@ it("t", async () => {
 });`,
 		expected: [],
 	},
+	"named-iife-calling-itself-earns-no-individual-credit": {
+		body: `
+it("t", async () => {
+	let s: { mockRestore(): void };
+	(function install(key: "log" | "warn") {
+		s = spyOn(console, key).mockImplementation(() => {});
+		onTestFinished(() => s.mockRestore());
+		if (key === "log") install("warn");
+	})("log");
+	await Promise.resolve();
+	s!.mockRestore();
+});`,
+		expected: ["restore-mocks-in-hooks@12", "restore-mocks-in-hooks@7"],
+	},
+	"named-iife-run-once-covers": {
+		body: `
+it("t", async () => {
+	let s: { mockRestore(): void };
+	(function install(key: "log" | "warn") {
+		s = spyOn(console, key).mockImplementation(() => {});
+		onTestFinished(() => s.mockRestore());
+	})("log");
+	await Promise.resolve();
+	s!.mockRestore();
+});`,
+		expected: [],
+	},
+	"iife-returning-itself-earns-no-individual-credit": {
+		body: `
+it("t", async () => {
+	let s: { mockRestore(): void };
+	const again = (function install(key: "log" | "warn") {
+		s = spyOn(console, key).mockImplementation(() => {});
+		onTestFinished(() => s.mockRestore());
+		return install;
+	})("log");
+	again("warn");
+	await Promise.resolve();
+	s!.mockRestore();
+});`,
+		expected: ["restore-mocks-in-hooks@13", "restore-mocks-in-hooks@7"],
+	},
+	"generator-iife-calling-itself-earns-no-individual-credit": {
+		body: `
+it("t", async () => {
+	let s: { mockRestore(): void };
+	const iter = (function* install(key: "log" | "warn"): Generator<never, void> {
+		s = spyOn(console, key).mockImplementation(() => {});
+		onTestFinished(() => s.mockRestore());
+		if (key === "log") yield* install("warn");
+	})("log");
+	iter.next();
+	await Promise.resolve();
+	s!.mockRestore();
+});`,
+		expected: ["restore-mocks-in-hooks@13", "restore-mocks-in-hooks@7"],
+	},
+	"generator-iife-run-once-covers": {
+		body: `
+it("t", async () => {
+	let s: { mockRestore(): void };
+	const iter = (function* install(key: "log" | "warn"): Generator<never, void> {
+		s = spyOn(console, key).mockImplementation(() => {});
+		onTestFinished(() => s.mockRestore());
+	})("log");
+	iter.next();
+	await Promise.resolve();
+	s!.mockRestore();
+});`,
+		expected: [],
+	},
+	"iife-reading-arguments-earns-no-individual-credit": {
+		body: `
+it("t", async () => {
+	let s: { mockRestore(): void };
+	(function (key: "log" | "warn") {
+		s = spyOn(console, key).mockImplementation(() => {});
+		onTestFinished(() => s.mockRestore());
+		void arguments;
+	})("log");
+	await Promise.resolve();
+	s!.mockRestore();
+});`,
+		expected: ["restore-mocks-in-hooks@12", "restore-mocks-in-hooks@7"],
+	},
+	"named-test-callback-calling-itself-earns-no-individual-credit": {
+		body: `
+let s: { mockRestore(): void };
+let runs = 0;
+it("t", async function run() {
+	s = spyOn(console, runs === 0 ? "log" : "warn").mockImplementation(() => {});
+	onTestFinished(() => s.mockRestore());
+	if (runs++ === 0) void run();
+	await Promise.resolve();
+	s.mockRestore();
+});`,
+		expected: ["restore-mocks-in-hooks@11", "restore-mocks-in-hooks@7"],
+	},
+	"named-test-callback-writing-an-outer-spy-once-covers": {
+		body: `
+let s: { mockRestore(): void };
+it("t", async function run() {
+	s = spyOn(console, "log").mockImplementation(() => {});
+	onTestFinished(() => s.mockRestore());
+	await Promise.resolve();
+	s.mockRestore();
+});`,
+		expected: [],
+	},
+	"const-function-handing-out-its-own-name-earns-no-individual-credit": {
+		body: `
+it("t", async () => {
+	let s: { mockRestore(): void };
+	let again: (key: "log" | "warn") => void = () => {};
+	const install = function inner(key: "log" | "warn") {
+		s = spyOn(console, key).mockImplementation(() => {});
+		onTestFinished(() => s.mockRestore());
+		again = inner;
+	};
+	install("log");
+	again("warn");
+	await Promise.resolve();
+	s!.mockRestore();
+});`,
+		expected: ["restore-mocks-in-hooks@15", "restore-mocks-in-hooks@8"],
+	},
+	"const-function-called-once-covers": {
+		body: `
+it("t", async () => {
+	let s: { mockRestore(): void };
+	const install = function inner(key: "log" | "warn") {
+		s = spyOn(console, key).mockImplementation(() => {});
+		onTestFinished(() => s.mockRestore());
+	};
+	install("log");
+	await Promise.resolve();
+	s!.mockRestore();
+});`,
+		expected: [],
+	},
+	"exported-helper-earns-no-individual-credit": {
+		body: `
+let s: { mockRestore(): void };
+export function install(key: "log" | "warn") {
+	s = spyOn(console, key).mockImplementation(() => {});
+	onTestFinished(() => s.mockRestore());
+}
+it("t", async () => {
+	install("log");
+	await Promise.resolve();
+	s!.mockRestore();
+});`,
+		expected: ["restore-mocks-in-hooks@12", "restore-mocks-in-hooks@6"],
+	},
+	"helper-reachable-through-eval-earns-no-individual-credit": {
+		body: `
+it("t", async () => {
+	let s: { mockRestore(): void };
+	function install(key: "log" | "warn") {
+		s = spyOn(console, key).mockImplementation(() => {});
+		onTestFinished(() => s.mockRestore());
+	}
+	install("log");
+	eval('install("warn")');
+	await Promise.resolve();
+	s!.mockRestore();
+});`,
+		expected: ["restore-mocks-in-hooks@13", "restore-mocks-in-hooks@7"],
+	},
+	"inline-generator-finisher-does-not-cover": {
+		body: `
+it("t", async () => {
+	const s = spyOn(console, "log").mockImplementation(() => {});
+	onTestFinished(function* () { s.mockRestore(); });
+	await Promise.resolve();
+	s.mockRestore();
+});`,
+		expected: ["restore-mocks-in-hooks@5", "restore-mocks-in-hooks@8"],
+	},
+	"inline-function-expression-finisher-covers": {
+		body: `
+it("t", async () => {
+	const s = spyOn(console, "log").mockImplementation(() => {});
+	onTestFinished(function () { s.mockRestore(); });
+	await Promise.resolve();
+	s.mockRestore();
+});`,
+		expected: [],
+	},
+	"named-generator-finisher-does-not-cover": {
+		body: `
+it("t", async () => {
+	function* cleanup() { s.mockRestore(); }
+	const s = spyOn(console, "log").mockImplementation(() => {});
+	onTestFinished(cleanup);
+	await Promise.resolve();
+	s.mockRestore();
+});`,
+		expected: ["restore-mocks-in-hooks@6", "restore-mocks-in-hooks@9"],
+	},
+	"named-function-finisher-covers": {
+		body: `
+it("t", async () => {
+	function cleanup() { s.mockRestore(); }
+	const s = spyOn(console, "log").mockImplementation(() => {});
+	onTestFinished(cleanup);
+	await Promise.resolve();
+	s.mockRestore();
+});`,
+		expected: [],
+	},
+	"generator-after-each-does-not-cover": {
+		body: `
+afterEach(function* () { vi.restoreAllMocks(); });
+it("t", async () => {
+	const s = spyOn(console, "log").mockImplementation(() => {});
+	try { await Promise.resolve(); } finally { s.mockRestore(); }
+});`,
+		expected: ["restore-mocks-in-hooks@7"],
+	},
+	"function-expression-after-each-covers": {
+		body: `
+afterEach(function () { vi.restoreAllMocks(); });
+it("t", async () => {
+	const s = spyOn(console, "log").mockImplementation(() => {});
+	try { await Promise.resolve(); } finally { s.mockRestore(); }
+});`,
+		expected: [],
+	},
+	"named-generator-after-each-does-not-cover": {
+		body: `
+function* cleanup() { vi.restoreAllMocks(); }
+afterEach(cleanup);
+it("t", async () => {
+	const s = spyOn(console, "log").mockImplementation(() => {});
+	try { await Promise.resolve(); } finally { s.mockRestore(); }
+});`,
+		expected: ["restore-mocks-in-hooks@8"],
+	},
+	"generator-put-back-finisher-does-not-cover": {
+		body: `
+it("t", async () => {
+	const original = globalThis.fetch;
+	onTestFinished(function* () { globalThis.fetch = original; });
+	globalThis.fetch = (async () => new Response("")) as unknown as typeof fetch;
+	try { await Promise.resolve(); } finally { globalThis.fetch = original; }
+});`,
+		expected: ["put-back-on-test-finished@7"],
+	},
+	"function-expression-put-back-finisher-covers": {
+		body: `
+it("t", async () => {
+	const original = globalThis.fetch;
+	onTestFinished(function () { globalThis.fetch = original; });
+	globalThis.fetch = (async () => new Response("")) as unknown as typeof fetch;
+	await Promise.resolve();
+});`,
+		expected: [],
+	},
+	"generator-put-back-after-each-does-not-cover": {
+		body: `
+const original = globalThis.fetch;
+afterEach(function* () { globalThis.fetch = original; });
+it("t", async () => {
+	globalThis.fetch = (async () => new Response("")) as unknown as typeof fetch;
+	try { await Promise.resolve(); } finally { globalThis.fetch = original; }
+});`,
+		expected: ["put-back-on-test-finished@8"],
+	},
+	"function-expression-put-back-after-each-covers": {
+		body: `
+const original = globalThis.fetch;
+afterEach(function () { globalThis.fetch = original; });
+it("t", async () => {
+	globalThis.fetch = (async () => new Response("")) as unknown as typeof fetch;
+	await Promise.resolve();
+});`,
+		expected: [],
+	},
+	"restore-hook-after-an-async-hook-in-its-scope-does-not-cover": {
+		body: `
+afterEach(async () => { await Promise.resolve(); });
+afterEach(() => { vi.restoreAllMocks(); });
+it("t", async () => {
+	const s = spyOn(console, "log");
+	try { await Promise.resolve(); } finally { s.mockRestore(); }
+});`,
+		expected: ["restore-mocks-in-hooks@8"],
+	},
+	"restore-hook-before-an-async-hook-in-its-scope-covers": {
+		body: `
+afterEach(() => { vi.restoreAllMocks(); });
+afterEach(async () => { await Promise.resolve(); });
+it("t", async () => {
+	const s = spyOn(console, "log");
+	try { await Promise.resolve(); } finally { s.mockRestore(); }
+});`,
+		expected: [],
+	},
+	"outer-restore-hook-after-an-inner-async-hook-does-not-cover": {
+		body: `
+afterEach(() => { vi.restoreAllMocks(); });
+describe("d", () => {
+	afterEach(async () => { await Promise.resolve(); });
+	it("t", async () => {
+		const s = spyOn(console, "log");
+		try { await Promise.resolve(); } finally { s.mockRestore(); }
+	});
+});`,
+		expected: ["restore-mocks-in-hooks@9"],
+	},
+	"inner-restore-hook-before-an-outer-async-hook-covers": {
+		body: `
+afterEach(async () => { await Promise.resolve(); });
+describe("d", () => {
+	afterEach(() => { vi.restoreAllMocks(); });
+	it("t", async () => {
+		const s = spyOn(console, "log");
+		try { await Promise.resolve(); } finally { s.mockRestore(); }
+	});
+});`,
+		expected: [],
+	},
+	"restore-hook-after-a-done-callback-hook-does-not-cover": {
+		body: `
+afterEach(done => { done(); });
+afterEach(() => { vi.restoreAllMocks(); });
+it("t", async () => {
+	const s = spyOn(console, "log");
+	try { await Promise.resolve(); } finally { s.mockRestore(); }
+});`,
+		expected: ["restore-mocks-in-hooks@8"],
+	},
+	"restore-hook-after-a-hook-returning-a-call-does-not-cover": {
+		body: `
+afterEach(() => mod.cleanup());
+afterEach(() => { vi.restoreAllMocks(); });
+it("t", async () => {
+	const s = spyOn(console, "log");
+	try { await Promise.resolve(); } finally { s.mockRestore(); }
+});`,
+		expected: ["restore-mocks-in-hooks@8"],
+	},
+	"restore-hook-after-a-block-hook-returning-a-call-does-not-cover": {
+		body: `
+afterEach(() => { return mod.cleanup(); });
+afterEach(() => { vi.restoreAllMocks(); });
+it("t", async () => {
+	const s = spyOn(console, "log");
+	try { await Promise.resolve(); } finally { s.mockRestore(); }
+});`,
+		expected: ["restore-mocks-in-hooks@8"],
+	},
+	"restore-hook-after-a-void-expression-hook-covers": {
+		body: `
+afterEach(() => void mod.cleanup());
+afterEach(() => { vi.restoreAllMocks(); });
+it("t", async () => {
+	const s = spyOn(console, "log");
+	try { await Promise.resolve(); } finally { s.mockRestore(); }
+});`,
+		expected: [],
+	},
+	"restore-hook-after-a-generator-hook-covers": {
+		body: `
+afterEach(function* () {});
+afterEach(() => { vi.restoreAllMocks(); });
+it("t", async () => {
+	const s = spyOn(console, "log");
+	try { await Promise.resolve(); } finally { s.mockRestore(); }
+});`,
+		expected: [],
+	},
+	"restore-hook-after-a-helper-registered-async-hook-does-not-cover": {
+		body: `
+function useCleanup() { afterEach(async () => { await Promise.resolve(); }); }
+useCleanup();
+afterEach(() => { vi.restoreAllMocks(); });
+it("t", async () => {
+	const s = spyOn(console, "log");
+	try { await Promise.resolve(); } finally { s.mockRestore(); }
+});`,
+		expected: ["restore-mocks-in-hooks@9"],
+	},
+	"restore-hook-after-an-unresolved-named-hook-does-not-cover": {
+		body: `
+afterEach(mod.cleanup);
+afterEach(() => { vi.restoreAllMocks(); });
+it("t", async () => {
+	const s = spyOn(console, "log");
+	try { await Promise.resolve(); } finally { s.mockRestore(); }
+});`,
+		expected: ["restore-mocks-in-hooks@8"],
+	},
+	"finisher-restore-with-an-async-after-each-does-not-cover": {
+		body: `
+afterEach(async () => { await Promise.resolve(); });
+it("t", async () => {
+	const s = spyOn(console, "log");
+	onTestFinished(() => s.mockRestore());
+	await Promise.resolve();
+	s.mockRestore();
+});`,
+		expected: ["restore-mocks-in-hooks@6", "restore-mocks-in-hooks@9"],
+	},
+	"shared-helper-covers-with-an-async-after-each": {
+		body: `
+import { installMockRestores } from "./helpers/mock-restores";
+installMockRestores();
+afterEach(async () => { await Promise.resolve(); });
+it("t", async () => {
+	const s = spyOn(console, "log");
+	onTestFinished(() => s.mockRestore());
+	await Promise.resolve();
+	s.mockRestore();
+});`,
+		expected: [],
+	},
+	"finisher-restore-after-an-async-finisher-does-not-cover": {
+		body: `
+it("t", async () => {
+	onTestFinished(async () => { await Promise.resolve(); });
+	const s = spyOn(console, "log");
+	onTestFinished(() => s.mockRestore());
+	await Promise.resolve();
+	s.mockRestore();
+});`,
+		expected: ["restore-mocks-in-hooks@6", "restore-mocks-in-hooks@9"],
+	},
+	"finisher-restore-before-an-async-finisher-covers": {
+		body: `
+it("t", async () => {
+	const s = spyOn(console, "log");
+	onTestFinished(() => s.mockRestore());
+	onTestFinished(async () => { await Promise.resolve(); });
+	await Promise.resolve();
+	s.mockRestore();
+});`,
+		expected: [],
+	},
+	"sync-test-finisher-restore-with-an-async-after-each-does-not-cover": {
+		body: `
+afterEach(async () => { await Promise.resolve(); });
+it("t", () => {
+	const s = spyOn(console, "log");
+	onTestFinished(() => s.mockRestore());
+});`,
+		expected: ["restore-mocks-in-hooks@6"],
+	},
+	"sync-test-finisher-restore-with-a-sync-after-each-covers": {
+		body: `
+afterEach(() => { mod.cleanup(); });
+it("t", () => {
+	const s = spyOn(console, "log");
+	onTestFinished(() => s.mockRestore());
+});`,
+		expected: [],
+	},
+	"finisher-put-back-with-an-async-after-each-does-not-cover": {
+		body: `
+afterEach(async () => { await Promise.resolve(); });
+it("t", async () => {
+	const original = globalThis.fetch;
+	onTestFinished(() => { globalThis.fetch = original; });
+	globalThis.fetch = (async () => new Response("")) as unknown as typeof fetch;
+	await Promise.resolve();
+});`,
+		expected: ["put-back-on-test-finished@8"],
+	},
+	"put-back-hook-before-an-async-hook-covers": {
+		body: `
+const original = globalThis.fetch;
+afterEach(() => { globalThis.fetch = original; });
+afterEach(async () => { await Promise.resolve(); });
+it("t", async () => {
+	globalThis.fetch = (async () => new Response("")) as unknown as typeof fetch;
+	await Promise.resolve();
+});`,
+		expected: [],
+	},
+	"put-back-hook-after-an-async-hook-does-not-cover": {
+		body: `
+const original = globalThis.fetch;
+afterEach(async () => { await Promise.resolve(); });
+afterEach(() => { globalThis.fetch = original; });
+it("t", async () => {
+	globalThis.fetch = (async () => new Response("")) as unknown as typeof fetch;
+	try { await Promise.resolve(); } finally { globalThis.fetch = original; }
+});`,
+		expected: ["put-back-on-test-finished@8"],
+	},
+	"sync-test-finisher-put-back-with-an-async-after-each-does-not-cover": {
+		body: `
+afterEach(async () => { await Promise.resolve(); });
+it("t", () => {
+	const original = globalThis.fetch;
+	onTestFinished(() => { globalThis.fetch = original; });
+	globalThis.fetch = (async () => new Response("")) as unknown as typeof fetch;
+});`,
+		expected: ["put-back-on-test-finished@8"],
+	},
+	"sync-test-finally-put-back-with-an-async-after-each-covers": {
+		body: `
+afterEach(async () => { await Promise.resolve(); });
+it("t", () => {
+	const original = globalThis.fetch;
+	globalThis.fetch = (async () => new Response("")) as unknown as typeof fetch;
+	try { mod.run(); } finally { globalThis.fetch = original; }
+});`,
+		expected: [],
+	},
 };
 
 interface Diagnostic {
