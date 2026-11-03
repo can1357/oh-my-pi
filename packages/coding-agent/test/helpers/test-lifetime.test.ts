@@ -305,8 +305,8 @@ describe("trackTestLifetime", () => {
 		expect(run.output).not.toMatch(/error: "[^"]+" timed out/);
 	}, 60_000);
 
-	test("reads a body's settlement through the native then, not one the promise carries", async () => {
-		const [escape, resolved] = await Promise.all([
+	test("reads a body's settlement from the promise itself, whatever properties it or Promise.prototype carries", async () => {
+		const [ownThen, replacedPrototype, healthy] = await Promise.all([
 			runFixtures({
 				// A pending promise whose own then reports settlement at once.
 				"pending.test.ts": lateWriteAfter(`
@@ -320,24 +320,49 @@ describe("trackTestLifetime", () => {
 				`),
 			}),
 			runFixtures({
-				// A settled promise whose own then never calls back.
-				"resolved.test.ts": `
+				// Promise.prototype.then replaced while the body is pending.
+				"prototype.test.ts": lateWriteAfter(`
+					test("runs while Promise.prototype.then is replaced", () => {
+						const pending = Bun.sleep(400).then(() => {
+							shared.key = "stale";
+						});
+						const original = Promise.prototype.then;
+						Promise.prototype.then = function (onSettled) {
+							Promise.prototype.then = original;
+							onSettled?.(undefined);
+							return this;
+						};
+						return pending;
+					}, 100);
+				`),
+			}),
+			runFixtures({
+				// Healthy settled promises whose then, constructor or species a subscription would trip on.
+				"healthy.test.ts": `
 					import { trackTestLifetime } from HELPER;
 					const { test } = trackTestLifetime();
-					test("returns a settled promise with a silent then", () => {
-						const settled = Promise.resolve();
-						Object.defineProperty(settled, "then", { value: () => settled });
-						return settled;
+					test("silent then", () => Object.defineProperty(Promise.resolve(), "then", { value: () => undefined }));
+					test("null constructor", () => Object.defineProperty(Promise.resolve(), "constructor", { value: null }));
+					test("throwing species", () => {
+						class Odd extends Promise<void> {
+							static get [Symbol.species](): never {
+								throw new Error("species read");
+							}
+						}
+						return Odd.resolve();
 					});
-					test("healthy after it", () => {});
+					test("healthy after them", () => {});
 				`,
 			}),
 		]);
 
-		expect(escape.outcome("passes only on the late write")).toBe("fail");
-		expect(escape.output).toContain(refusal("returns a promise with its own then"));
-		expect(resolved.outcome("returns a settled promise with a silent then")).toBe("pass");
-		expect(resolved.outcome("healthy after it")).toBe("pass");
-		expect(resolved.exitCode).toBe(0);
+		expect(ownThen.outcome("passes only on the late write")).toBe("fail");
+		expect(ownThen.output).toContain(refusal("returns a promise with its own then"));
+		expect(replacedPrototype.outcome("passes only on the late write")).toBe("fail");
+		expect(replacedPrototype.output).toContain(refusal("runs while Promise.prototype.then is replaced"));
+		for (const name of ["silent then", "null constructor", "throwing species", "healthy after them"]) {
+			expect({ name, outcome: healthy.outcome(name) }).toEqual({ name, outcome: "pass" });
+		}
+		expect(healthy.exitCode).toBe(0);
 	}, 60_000);
 });

@@ -10,10 +10,11 @@ import {
 import { types } from "node:util";
 
 /**
- * Tests and hooks of tracked files that have not settled yet, each with its name. Bun shares one
- * module registry across the test files of a process, so this sees every tracked file in it.
+ * Promises of tracked tests and hooks not yet seen settled, each with its test or hook's name. Bun
+ * shares one module registry across the test files of a process, so this sees every tracked file
+ * in it.
  */
-const unsettled = new Map<object, string>();
+const running = new Map<Promise<unknown>, string>();
 
 /** The first tracked test or hook found still running when a later one started; it stays set. */
 let timedOut: string | undefined;
@@ -22,10 +23,18 @@ let timedOut: string | undefined;
  * Note a timeout: a tracked test or hook still running as another one starts has outlived its
  * timeout. Teardown counts: a body still running as its test's first `afterEach` starts timed out,
  * even if it settles before the next test does.
+ *
+ * Settlement is read from the promise's own state (`Bun.peek.status`), as Bun's runner reads it:
+ * subscribing through `then` would read properties a test can replace on its promise (`then`,
+ * `constructor`, `Symbol.species`).
  */
 function noteTimeout(): void {
 	if (timedOut !== undefined) return;
-	for (const name of unsettled.values()) {
+	for (const [promise, name] of running) {
+		if (Bun.peek.status(promise) !== "pending") {
+			running.delete(promise);
+			continue;
+		}
 		timedOut = name;
 		return;
 	}
@@ -50,25 +59,13 @@ function refuseAfterTimeout(): void {
 	}
 }
 
-/** The native `then`, taken before any test runs: a promise's own `then` may be replaced. */
-const nativeThen = Promise.prototype.then;
-
 /**
- * Run a test or hook body, and keep it in {@link unsettled} until the promise it returns settles.
- * Any native promise counts, also one from another realm (`node:vm`), which Bun awaits too, and its
- * settlement is read through the native `then`, as Bun reads it, not through a `then` the promise
- * may carry of its own.
+ * Run a test or hook body, and keep the promise it returns in {@link running}. Any native promise
+ * counts, also one from another realm (`node:vm`), which Bun awaits too.
  */
 function runTracked<T>(name: string, fn: (...args: unknown[]) => T, args: unknown[]): T {
 	const result = fn(...args);
-	if (types.isPromise(result)) {
-		const entry = {};
-		unsettled.set(entry, name);
-		const settle = (): void => {
-			unsettled.delete(entry);
-		};
-		Reflect.apply(nativeThen, result, [settle, settle]);
-	}
+	if (types.isPromise(result)) running.set(result as Promise<unknown>, name);
 	return result;
 }
 
