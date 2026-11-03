@@ -118,6 +118,12 @@ describe("read URL answered by a bot wall", () => {
 			note: "JavaScript challenge, HTTP 200",
 		},
 		{
+			reader: "the block page with no warning",
+			body: "Title: Reddit\n\nMarkdown Content:\nYou've been blocked by network security.\n\nTo continue, log in to your Reddit account or use your developer token",
+			method: "blocked",
+			note: "JavaScript challenge, HTTP 200",
+		},
+		{
 			reader: "a JavaScript gate",
 			body: "Title: Just a moment...\n\nMarkdown Content:\nJust a moment...\n\nEnable JavaScript and cookies to continue\n\nwww.reddit.com needs to review the security of your connection before proceeding.",
 			method: "blocked",
@@ -170,6 +176,7 @@ describe("read URL answered by a bot wall", () => {
 <script>const sample = '<input type="hidden" name="js_challenge">';</script>
 <textarea><input type="hidden" name="js_challenge"></textarea>
 <xmp><input type="hidden" name="js_challenge"></xmp>
+<input-example name="js_challenge"></input-example>
 </article></body></html>`;
 		const result = await read(
 			() => new Response(article, { headers: { "content-type": "text/html" } }),
