@@ -116,6 +116,7 @@ import {
 	discoverAndLoadExtensions,
 	discoverExtensionPaths,
 	EXTENSION_HANDLER_TIMEOUT_MS,
+	type Extension,
 	type ExtensionAgentIdentity,
 	type ExtensionContext,
 	type ExtensionFactory,
@@ -1238,7 +1239,15 @@ export async function loadSessionExtensions(
 			? await partitionStartupExtensions(storage, paths, cwd)
 			: { eager: paths, deferred: [] };
 	const result = await logger.time("loadExtensions", loadExtensions, eager, cwd, eventBus);
-	if (storage) await recordStartupVerdicts(storage, result.extensions);
+	if (storage) {
+		try {
+			await recordStartupVerdicts(storage, result.extensions);
+		} catch (error) {
+			// The caller never receives these loads, so nothing else would release what they registered.
+			for (const extension of result.extensions) extension.registrations?.release();
+			throw error;
+		}
+	}
 	for (const { path, error } of result.errors) {
 		logger.error("Failed to load extension", { path, error });
 	}
@@ -1265,14 +1274,20 @@ export async function loadCliExtensionProviders(
 ): Promise<void> {
 	const eventBus = new EventBus();
 	const extensionsResult = await loadSessionExtensions(options, cwd, settings, eventBus);
-	const activeSources = extensionsResult.extensions.map(extension => extension.path);
-	modelRegistry.syncExtensionSources(activeSources);
-	modelRegistry.clearSourceRegistrations(new Set(activeSources));
-	for (const { name, config, sourceId } of extensionsResult.runtime.pendingProviderRegistrations) {
-		modelRegistry.registerProvider(name, config, sourceId);
+	try {
+		const activeSources = extensionsResult.extensions.map(extension => extension.path);
+		modelRegistry.syncExtensionSources(activeSources);
+		modelRegistry.clearSourceRegistrations(new Set(activeSources));
+		for (const { name, config, sourceId } of extensionsResult.runtime.pendingProviderRegistrations) {
+			modelRegistry.registerProvider(name, config, sourceId);
+		}
+		extensionsResult.runtime.pendingProviderRegistrations = [];
+		if (options.discoverModels !== false) await modelRegistry.refreshRuntimeProviders();
+	} finally {
+		// Only their providers are wanted; no runner adopts these loads, so release what else they
+		// registered outside session state (process-wide; `auth-gateway-stdio` outlives this call).
+		for (const extension of extensionsResult.extensions) extension.registrations?.release();
 	}
-	extensionsResult.runtime.pendingProviderRegistrations = [];
-	if (options.discoverModels !== false) await modelRegistry.refreshRuntimeProviders();
 }
 
 /** Resolve prewalk with the same ordering before and after extension registration. */
@@ -1966,11 +1981,22 @@ export function createAutoLearnCaptureRunner(
  * ```
  */
 export async function createAgentSession(options: CreateAgentSessionOptions = {}): Promise<CreateAgentSessionResult> {
-	registerLocalInferenceApi();
-	const extensionRoots = options.extensionRoots?.();
-	const explicit = extensionRoots?.explicit ?? options.additionalExtensionPaths ?? [];
-	const mode = extensionRoots?.mode ?? (options.disableExtensionDiscovery ? "explicit-only" : "merge");
-	return await withOmpExtensionRootScope(explicit, mode, () => createAgentSessionScoped(options));
+	try {
+		registerLocalInferenceApi();
+		const extensionRoots = options.extensionRoots?.();
+		const explicit = extensionRoots?.explicit ?? options.additionalExtensionPaths ?? [];
+		const mode = extensionRoots?.mode ?? (options.disableExtensionDiscovery ? "explicit-only" : "merge");
+		return await withOmpExtensionRootScope(explicit, mode, () => createAgentSessionScoped(options));
+	} catch (error) {
+		// Preloaded loads belong to the caller, which may retry with them (interactive auto-resume
+		// does): a failed startup, wherever it fails, only suspends their registrations, and the runner
+		// that adopts them on a retry resumes them (their listeners hear of it once it is initialized).
+		// A failure once the session existed disposed it, which already shut them down
+		// (`session_shutdown`) and released them; suspending is then a no-op.
+		for (const extension of options.preloadedExtensions?.extensions ?? [])
+			extension.registrations?.setSuspended(true);
+		throw error;
+	}
 }
 
 async function createAgentSessionScoped(options: CreateAgentSessionOptions): Promise<CreateAgentSessionResult> {
@@ -2002,6 +2028,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	using startupCleanup = new DisposableStack();
 	if (restoreProviderToggles) startupCleanup.defer(restoreProviderToggles);
 	if (unbindSessionEffects) startupCleanup.defer(unbindSessionEffects);
+	// Loads the caller preloaded are its own: a failed startup leaves them to `createAgentSession`,
+	// which suspends them for a retry, instead of releasing them below.
+	const preloadedExtensions: readonly Extension[] = options.preloadedExtensions?.extensions ?? [];
 	// Snapshot this session's effective configured lane onto its invocation scope
 	// so startup sub-discovery sees the same complete policy that post-startup
 	// reloads and recursively spawned children consume.
@@ -2041,6 +2070,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// buffer — so we can't rely on it to catch startup events for the extension runner.
 	const startupCredentialDisabledEvents: CredentialDisabledEvent[] = [];
 	let credentialDisabledTarget: ExtensionRunner | undefined;
+	// The loads a startup failure must release itself when no session (and so no shutdown) follows;
+	// preloaded ones are only suspended (see `createAgentSession`).
+	let startupExtensions: readonly Extension[] = [];
 	// Set once the session exists; the built-in warning covers disables from then on.
 	let credentialNoticeSession: AgentSession | undefined;
 	const unsubscribeCredentialDisabled = authStorage.credentials.onDisabled(event => {
@@ -3115,6 +3147,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				logger.error("Failed to load extension", { path, error });
 			}
 		}
+		startupExtensions = extensionsResult.extensions;
 		// Forward the source-path list (NOT the loaded instances) so subagents
 		// rebuild their own session-scoped extensions.
 		toolSession.extensionPaths = extensionPaths;
@@ -6114,20 +6147,30 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					eventBus,
 					runtime,
 				);
-				const storage = settings.getStorage();
-				if (storage) await recordStartupVerdicts(storage, loaded.extensions);
-				for (const { path, error } of loaded.errors) logger.error("Failed to load extension", { path, error });
-				for (const message of formatExtensionLoadNotifications(loaded.errors)) {
-					session.emitNotice("warning", message, "extensions");
+				// The loads are this bind's until the runner adopts them. Any way out before that — the
+				// session went away, or a step below threw (a queued provider registration the registry
+				// rejects) — leaves them with no runner, so no shutdown releases what they registered.
+				let adopted = false;
+				try {
+					const storage = settings.getStorage();
+					if (storage) await recordStartupVerdicts(storage, loaded.extensions);
+					for (const { path, error } of loaded.errors) logger.error("Failed to load extension", { path, error });
+					for (const message of formatExtensionLoadNotifications(loaded.errors)) {
+						session.emitNotice("warning", message, "extensions");
+					}
+					if (session.isDisposed) return;
+					// Providers queue until the runner is initialized; drain them as session creation does.
+					for (const { name, config, sourceId } of runtime.pendingProviderRegistrations.splice(0)) {
+						modelRegistry.registerProvider(name, config, sourceId);
+					}
+					forwardedPreparedExtensions.push(...(loaded.preparedExtensions ?? []));
+					extensionPaths.push(...loaded.extensions.map(extension => extension.resolvedPath));
+					// `addExtensions` takes them into the runner synchronously, before its first await.
+					adopted = true;
+					await extensionRunner.addExtensions(loaded.extensions);
+				} finally {
+					if (!adopted) for (const extension of loaded.extensions) extension.registrations?.release();
 				}
-				if (session.isDisposed) return;
-				// Providers queue until the runner is initialized; drain them as session creation does.
-				for (const { name, config, sourceId } of runtime.pendingProviderRegistrations.splice(0)) {
-					modelRegistry.registerProvider(name, config, sourceId);
-				}
-				forwardedPreparedExtensions.push(...(loaded.preparedExtensions ?? []));
-				extensionPaths.push(...loaded.extensions.map(extension => extension.resolvedPath));
-				await extensionRunner.addExtensions(loaded.extensions);
 			});
 		}
 		startDeferredMCPDiscovery?.(session);
@@ -6151,6 +6194,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				if (hasRegistered) unregisterUnlessParked();
 			} else {
 				if (hasRegistered) unregisterUnlessParked();
+				for (const extension of startupExtensions) {
+					if (!preloadedExtensions.includes(extension)) extension.registrations?.release();
+				}
 				if (asyncJobManager) {
 					if (AsyncJobManager.instance() === asyncJobManager) {
 						AsyncJobManager.setInstance(undefined);
