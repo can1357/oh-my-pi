@@ -698,12 +698,16 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 
 	fn execute_via_builtin_in_owned_shell(
 		mut shell: Shell<SE>,
-		params: ExecutionParameters,
+		mut params: ExecutionParameters,
 		builtin: builtins::Registration<SE>,
 		command_name: String,
 		args: Vec<CommandArg>,
 	) -> ExecutionSpawnResult {
 		let last_arg = Self::take_last_arg(&args);
+		// The builtin runs in a subshell of its own (a pipeline stage or an
+		// asynchronous job), which ends as Bash's does (see `StageEnd`).
+		let end = interp::StageEnd::take(&mut params);
+		let mut stderr = params.stderr(&shell);
 
 		// An `async_io` builtin never blocks a worker, so it runs as a plain task.
 		// Every other builtin does synchronous descriptor I/O: it runs on a
@@ -718,7 +722,7 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 				// Update $_ after command execution.
 				shell.update_last_arg_variable(last_arg);
 
-				result
+				end.end(&shell, &mut stderr, result).await
 			})
 		} else {
 			tokio::task::spawn_blocking(move || {
@@ -729,7 +733,7 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 				// Update $_ after command execution.
 				shell.update_last_arg_variable(last_arg);
 
-				result
+				block_on_builtin(end.end(&shell, &mut stderr, result))
 			})
 		};
 
@@ -824,6 +828,10 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 				let mut shell = *target;
 				let command_name = self.command_name;
 				let args = self.args;
+				// The function runs in a subshell of its own, which ends as
+				// Bash's does (see `StageEnd`).
+				let end = interp::StageEnd::take(&mut params);
+				let mut stderr = params.stderr(&shell);
 				let join_handle = tokio::spawn(async move {
 					let cmd_context = ExecutionContext { shell: &mut shell, command_name, params };
 					let result =
@@ -833,12 +841,17 @@ impl<'a, SE: extensions::ShellExtensions> SimpleCommand<'a, SE> {
 					// parent-shell path below.
 					shell.update_last_arg_variable(last_arg);
 
-					match result?.wait().await? {
-						ExecutionWaitResult::Completed(result) => Ok(result),
-						ExecutionWaitResult::Stopped(_, signal) => {
-							Ok(ExecutionResult::new(128_u8.saturating_add(signal)))
+					let ran = match result {
+						Ok(spawned) => match spawned.wait().await {
+							Ok(ExecutionWaitResult::Completed(result)) => Ok(result),
+							Ok(ExecutionWaitResult::Stopped(_, signal)) => {
+								Ok(ExecutionResult::new(128_u8.saturating_add(signal)))
+							},
+							Err(error) => Err(error),
 						},
-					}
+						Err(error) => Err(error),
+					};
+					end.end(&shell, &mut stderr, ran).await
 				});
 				Ok(ExecutionSpawnResult::StartedTask(join_handle))
 			},

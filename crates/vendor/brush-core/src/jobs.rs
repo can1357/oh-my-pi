@@ -240,10 +240,42 @@ impl InProcessStage {
 	}
 
 	/// How the stage ended, or `None` while it runs.
-	fn status(&self) -> Option<ProcessStatus> {
+	pub(crate) fn status(&self) -> Option<ProcessStatus> {
 		match self.0.signal() {
 			Some(signal) => Some(ProcessStatus::Signaled { signal, core_dumped: false }),
 			None => *self.0.status.lock().unwrap_or_else(PoisonError::into_inner),
+		}
+	}
+
+	/// Whether the stage's token was cancelled: `kill` of its pid or of its
+	/// job, or the end of the run, ended it.
+	pub(crate) fn is_cancelled(&self) -> bool {
+		self.0.cancellation.is_cancelled()
+	}
+
+	/// Records how the stage ended, once its command returned `ran`: the
+	/// status `status_of` gives for a result, or the status of the error it
+	/// failed with (the status Bash's subshell exits with on that error).
+	/// The task that runs the stage calls this as its last step, so the
+	/// stage ends at that one claim of its state, and a `kill` of its pid
+	/// either claims the state first (the stage ends with the signal) or
+	/// finds it ended and fails, as `kill` of a process Bash has reaped does.
+	/// A stage whose token was cancelled ended by that cancellation, with the
+	/// signal `kill` gave it or its job, and records nothing more. Returns
+	/// 128 plus the signal for a stage `kill` ended, else `ran`.
+	pub(crate) fn end_with(
+		&self,
+		ran: Result<ExecutionResult, error::Error>,
+		status_of: impl FnOnce(&ExecutionResult) -> ProcessStatus,
+	) -> Result<ExecutionResult, error::Error> {
+		match &ran {
+			_ if self.is_cancelled() => {},
+			Ok(result) => self.finish(status_of(result)),
+			Err(error) => self.finish(ProcessStatus::Exited(u8::from(ExecutionExitCode::from(error)))),
+		}
+		match self.killed_by() {
+			Some(signal) => Ok(ExecutionResult::new(128_u8.saturating_add(signal))),
+			None => ran,
 		}
 	}
 
@@ -1045,41 +1077,43 @@ impl JobManager {
 		self.reporting = reporting;
 	}
 
-	/// Adds a job to the job manager and marks it as the current job;
-	/// returns an immutable reference to the job.
+	/// Adds a job to the job manager, and chooses the current and previous
+	/// jobs as Bash does for it; returns an immutable reference to the job.
 	///
 	/// # Arguments
 	///
 	/// * `job` - The job to add.
 	/// * `job_control` - Whether job control is on, which `fg` and `bg`
 	///   require of the job (see [`Job::started_with_job_control`]).
-	#[allow(clippy::missing_panics_doc, reason = "push() guarantees the vector length is >= 1")]
+	#[allow(clippy::missing_panics_doc, reason = "the job was just pushed")]
 	pub fn add_as_current(&mut self, mut job: Job, job_control: bool) -> &Job {
 		// As in Bash, a new job first takes the ended jobs `jobs` reported out
-		// of the table. Then the current job becomes the previous one, the
-		// previous one loses its mark, and the new job takes the number after
-		// the highest one in use.
+		// of the table, then takes the number after the highest one in use.
 		self.remove_reported_jobs();
-		for j in &mut self.jobs {
-			match j.annotation {
-				JobAnnotation::Current => j.annotation = JobAnnotation::Previous,
-				JobAnnotation::Previous => j.annotation = JobAnnotation::None,
-				JobAnnotation::None => {},
-			}
-		}
-
 		job.id = self.next_job_id();
-		job.annotation = JobAnnotation::Current;
 		job.started_with_job_control = job_control;
 		// A pid this job's processes now hold no longer names the job that
 		// reported under it.
 		for pid in job.process_ids().chain(job.in_process_pids()) {
 			self.forget_reported(pid);
 		}
+		let id = job.id;
+		let stopped = matches!(job.state, JobState::Stopped);
+		// The marks follow the states the table holds, as Bash's follow the
+		// children its `SIGCHLD` handler has reaped: an older job that has
+		// just ended still counts as running when the next one starts. An
+		// asynchronous job goes through `reset_current` (`stop_pipeline`),
+		// which keeps a stopped current job current; a job that stopped
+		// becomes current (`set_current_job` once `waitchld` sees the stop).
 		self.jobs.push(job);
+		if stopped {
+			self.set_current_job(id);
+		} else {
+			self.reset_current();
+		}
 
-		#[allow(clippy::unwrap_used, reason = "we just pushed an element")]
-		self.jobs.last().unwrap()
+		#[allow(clippy::unwrap_used, reason = "the job was just pushed")]
+		self.jobs.iter().find(|job| job.id == id).unwrap()
 	}
 
 	/// The number after the highest one a job holds, which Bash gives a new
@@ -1506,8 +1540,7 @@ impl JobManager {
 			JobWaitEnd::Stopped(status) => ExecutionExitCode::from_builtin_status(status).into(),
 		});
 		if self.jobs[index].is_done() {
-			let job = self.remove(index);
-			if !self.frozen {
+			if let Some(job) = self.delete(index) {
 				job.report_as_foreground(notice);
 			}
 			self.notify_and_cleanup(notice, None);
@@ -1544,7 +1577,7 @@ impl JobManager {
 			.position(|job| job.is_done() && !job.listed && selected(job))
 		{
 			self.notify(notice, None);
-			return self.take_waited(index).map(Some);
+			return self.take_waited(index);
 		}
 		loop {
 			if !self.jobs.iter().any(|job| matches!(job.state, JobState::Running)) {
@@ -1559,7 +1592,7 @@ impl JobManager {
 			}
 			if let Some(index) = self.jobs.iter().position(|job| job.is_done() && selected(job)) {
 				self.notify(notice, None);
-				return self.take_waited(index).map(Some);
+				return self.take_waited(index);
 			}
 		}
 	}
@@ -1574,14 +1607,16 @@ impl JobManager {
 	}
 
 	/// Takes the ended job at `index` out of the table for `wait -n`; its pid
-	/// keeps its status.
-	fn take_waited(&mut self, index: usize) -> Result<WaitedJob, error::Error> {
-		let identifier = self.jobs[index].wait_identifier();
-		let result = self.jobs[index].take_completed_result();
-		let job = self.remove(index);
-		let result = result?;
+	/// keeps its status. `None` while the table is frozen, when no job leaves
+	/// (see [`Self::delete`]).
+	fn take_waited(&mut self, index: usize) -> Result<Option<WaitedJob>, error::Error> {
+		let Some(mut job) = self.delete(index) else {
+			return Ok(None);
+		};
+		let identifier = job.wait_identifier();
+		let result = job.take_completed_result()?;
 		self.report(&job, u8::from(result.exit_code));
-		Ok(WaitedJob::from_job(job, result, identifier))
+		Ok(Some(WaitedJob::from_job(job, result, identifier)))
 	}
 
 	/// Applies the stops and continues every job's processes reported since
@@ -1595,9 +1630,13 @@ impl JobManager {
 		Ok(())
 	}
 
-	/// Polls all managed jobs for completion.
+	/// Polls all managed jobs for completion. Nothing leaves the table while
+	/// it is frozen (see [`Self::delete`]).
 	pub fn poll(&mut self) -> Result<Vec<JobResult>, error::Error> {
 		let mut results = vec![];
+		if self.frozen {
+			return Ok(results);
+		}
 
 		let mut i = 0;
 		while i != self.jobs.len() {
@@ -1611,7 +1650,9 @@ impl JobManager {
 					continue;
 				},
 			};
-			let job = self.remove(i);
+			let Some(job) = self.delete(i) else {
+				break;
+			};
 			if let Ok(result) = &result {
 				self.report(&job, u8::from(result.exit_code));
 			}
@@ -1747,18 +1788,20 @@ impl JobManager {
 			if job.listed || !job.is_done() {
 				continue;
 			}
-			// POSIX keeps the status of a background job that exited for a
-			// later `wait`; only a job a signal ended is reported here. Bash
-			// notifies of a foreground job however it ended.
-			if !job.foreground && job.raw_status().signal().is_none() {
-				continue;
-			}
 			match self.reporting {
+				// A command substitution prints nothing and forgets every
+				// ended job but `$!`'s, an exited background job too: Bash's
+				// rule below applies only to a shell reading a script
+				// (`startup_state == 0`).
 				JobReporting::Substitution => {
 					if job.last_pid() != notice.last_async_pid {
 						job.listed = true;
 					}
 				},
+				// POSIX keeps the status of a background job that exited for a
+				// later `wait`; only a job a signal ended is reported here.
+				JobReporting::Script if !job.foreground && job.raw_status().signal().is_none() => {},
+				// Bash notifies of a foreground job however it ended.
 				JobReporting::Script if job.foreground => {
 					job.report_as_foreground(notice);
 					job.listed = true;
@@ -1810,7 +1853,9 @@ impl JobManager {
 				index += 1;
 				continue;
 			}
-			let mut job = self.remove(index);
+			let Some(mut job) = self.delete(index) else {
+				return;
+			};
 			if let Ok(result) = job.take_completed_result() {
 				self.report(&job, u8::from(result.exit_code));
 			}
@@ -1827,30 +1872,38 @@ impl JobManager {
 	/// job spec, pid lookup, `jobs` listing or `wait` reaches it again, but it
 	/// keeps running, is reaped, and ends with the shell. As in Bash, its pid
 	/// keeps the status the job has so far (0 while it runs) for a later
-	/// `wait`. Returns `false` when no job matches.
+	/// `wait`. While the table is frozen the job stays, as Bash's
+	/// `delete_job` leaves it then (see [`Self::delete`]). Returns `false`
+	/// when no job matches.
 	pub fn disown(&mut self, selector: JobSelector) -> bool {
 		let Some(index) = self.jobs.iter().position(|job| job.matches_selector(selector)) else {
 			return false;
 		};
-		let job = self.remove(index);
-		self.report(&job, job.status_so_far());
-		self.keep_disowned(job);
+		if let Some(job) = self.delete(index) {
+			self.report(&job, job.status_so_far());
+			self.keep_disowned(job);
+		}
 		true
 	}
 
 	/// Takes every job, or with `running_only` every running job, out of job
-	/// control, as `disown -a` and `disown -r` do. As in Bash, their pids keep
-	/// no status for `wait`, and `disown -a` also forgets every status kept so
-	/// far.
+	/// control, as `disown -a` and `disown -r` do (`delete_all_jobs`): first
+	/// no job is current or previous any more, then each job leaves, none
+	/// while the table is frozen (see [`Self::delete`]). As in Bash, their
+	/// pids keep no status for `wait`, and `disown -a` also forgets every
+	/// status kept so far.
 	pub fn disown_all(&mut self, running_only: bool) {
+		self.set_marks(None, None);
 		let mut index = 0;
 		while index < self.jobs.len() {
-			if running_only && !matches!(self.jobs[index].state, JobState::Running) {
+			if running_only && !self.jobs[index].is_running() {
 				index += 1;
 				continue;
 			}
-			let job = self.remove(index);
-			self.keep_disowned(job);
+			match self.delete(index) {
+				Some(job) => self.keep_disowned(job),
+				None => index += 1,
+			}
 		}
 		if !running_only {
 			self.reported.clear();
@@ -1876,29 +1929,96 @@ impl JobManager {
 		self.jobs.iter().chain(&self.disowned)
 	}
 
-	/// Takes a job out of the table, and moves the current and previous marks
-	/// as Bash does when the job held one: the previous job becomes current,
-	/// and the most recent other job previous.
-	fn remove(&mut self, index: usize) -> Job {
+	/// Takes the job at `index` out of the table, as Bash's `delete_job`
+	/// does. While the table is frozen (`jobs_list_frozen`, a `lastpipe`
+	/// pipeline's last command running) no job leaves it, whatever asks
+	/// (`disown`, `wait`, a cleanup point): the job stays and `None` comes
+	/// back. This is what keeps the job of the pipeline's other processes,
+	/// which the pipeline waits for once its last command ends, in the table
+	/// for that wait. A job that held the current or previous mark leaves
+	/// [`Self::reset_current`] to choose them again.
+	fn delete(&mut self, index: usize) -> Option<Job> {
+		if self.frozen {
+			return None;
+		}
 		let job = self.jobs.remove(index);
 		if job.is_current() || job.is_prev() {
-			if self.current_job().is_none() {
-				let next = self
-					.jobs
-					.iter()
-					.position(Job::is_prev)
-					.or_else(|| self.jobs.len().checked_sub(1));
-				if let Some(next) = next {
-					self.jobs[next].annotation = JobAnnotation::Current;
-				}
-			}
-			if self.prev_job().is_none()
-				&& let Some(prev) = self.jobs.iter_mut().rev().find(|j| !j.is_current())
-			{
-				prev.annotation = JobAnnotation::Previous;
-			}
+			self.reset_current();
 		}
-		job
+		Some(job)
+	}
+
+	/// Chooses the current job and the previous one, as Bash's
+	/// `reset_current` does: the current job stays while it is stopped;
+	/// otherwise the first of the previous job if it is stopped, the newest
+	/// stopped job and the newest running one becomes current (see
+	/// [`Self::set_current_job`]), and with none of them no job is current.
+	fn reset_current(&mut self) {
+		let stopped = |job: &Job| matches!(job.state, JobState::Stopped);
+		let candidate = match self.current_job() {
+			Some(current) if stopped(current) => Some(current.id),
+			_ => self
+				.prev_job()
+				.filter(|previous| stopped(previous))
+				.map(|previous| previous.id)
+				.or_else(|| self.newest_job_in(None, stopped))
+				.or_else(|| self.newest_job_in(None, Job::is_running)),
+		};
+		match candidate {
+			Some(id) => self.set_current_job(id),
+			None => self.set_marks(None, None),
+		}
+	}
+
+	/// Makes the job `id` current, as Bash's `set_current_job` does, and
+	/// chooses the previous job: the job that was current, if it is another
+	/// one and stopped; else, when `id` is stopped, the newest stopped job
+	/// older than it; else the newest running job, older than `id` when `id`
+	/// runs; else `id` itself, which then holds both marks and shows `+`.
+	fn set_current_job(&mut self, id: usize) {
+		let stopped = |job: &Job| matches!(job.state, JobState::Stopped);
+		let current = self.current_job().map(|job| job.id);
+		let previous = if current == Some(id) { self.prev_job().map(|job| job.id) } else { current };
+		let is = |manager: &Self, id: Option<usize>, state: fn(&Job) -> bool| {
+			id.and_then(|id| manager.jobs.iter().find(|job| job.id == id)).is_some_and(state)
+		};
+		let previous = if previous != Some(id) && is(self, previous, stopped) {
+			previous
+		} else if let Some(older) = is(self, Some(id), stopped)
+			.then(|| self.newest_job_in(Some(id), stopped))
+			.flatten()
+		{
+			Some(older)
+		} else if is(self, Some(id), Job::is_running) {
+			self.newest_job_in(Some(id), Job::is_running)
+		} else {
+			self.newest_job_in(None, Job::is_running)
+		};
+		self.set_marks(Some(id), previous);
+	}
+
+	/// The newest job older than `older_than` (any job when `None`) for which
+	/// `state` holds, as Bash's `most_recent_job_in_state` finds one.
+	fn newest_job_in(&self, older_than: Option<usize>, state: fn(&Job) -> bool) -> Option<usize> {
+		self.jobs
+			.iter()
+			.filter(|job| older_than.is_none_or(|id| job.id < id) && state(job))
+			.map(|job| job.id)
+			.max()
+	}
+
+	/// Marks `current` with `+` and `previous` with `-`, and every other job
+	/// with neither; a job that is both shows `+`.
+	fn set_marks(&mut self, current: Option<usize>, previous: Option<usize>) {
+		for job in &mut self.jobs {
+			job.annotation = if Some(job.id) == current {
+				JobAnnotation::Current
+			} else if Some(job.id) == previous {
+				JobAnnotation::Previous
+			} else {
+				JobAnnotation::None
+			};
+		}
 	}
 
 	/// Keeps `status` for the job's last pid (its `$!`), so a later `wait` on
@@ -2731,6 +2851,12 @@ impl Job {
 		matches!(self.state, JobState::Done)
 	}
 
+	/// Whether the job runs, as Bash's `RUNNING` asks of its state: neither
+	/// stopped nor ended.
+	pub const fn is_running(&self) -> bool {
+		matches!(self.state, JobState::Running | JobState::Unknown)
+	}
+
 	/// What Bash's `wait_for` computes for a stopped job: 128 plus `WSTOPSIG`
 	/// of the status of the job's first process, which is the signal that
 	/// stopped it while it is stopped, and once it has ended its exit status,
@@ -3496,6 +3622,68 @@ mod registry_tests {
 	}
 }
 
+/// A stage's end and a `kill` of its pid claim one state, so whichever
+/// comes first decides: a stage that ended refuses the `kill`, as Bash's
+/// `kill` of a reaped process fails, and a `kill` that succeeded always gives
+/// the stage its signal.
+#[cfg(test)]
+mod stage_end_tests {
+	use super::{InProcessStage, ProcessStatus};
+	use crate::ExecutionResult;
+
+	fn exited(result: &ExecutionResult) -> ProcessStatus {
+		ProcessStatus::Exited(result.exit_code.into())
+	}
+
+	#[test]
+	fn an_ended_stage_refuses_a_kill() {
+		let (_, stage) = InProcessStage::held(None).expect("stage id");
+		let ran = stage.end_with(Ok(ExecutionResult::new(3)), exited).expect("result");
+		assert_eq!(u8::from(ran.exit_code), 3);
+		assert!(!stage.0.end(9), "the kill of an ended stage succeeded");
+		assert_eq!(stage.status(), Some(ProcessStatus::Exited(3)));
+	}
+
+	#[test]
+	fn a_killed_stage_ends_with_the_signal() {
+		let (_, stage) = InProcessStage::held(None).expect("stage id");
+		assert!(stage.0.end(9));
+		let ran = stage.end_with(Ok(ExecutionResult::new(0)), exited).expect("result");
+		assert_eq!(u8::from(ran.exit_code), 137);
+		assert_eq!(stage.status(), Some(ProcessStatus::Signaled { signal: 9, core_dumped: false }));
+	}
+
+	#[test]
+	fn an_error_ends_a_stage_with_its_status() {
+		let (_, stage) = InProcessStage::held(None).expect("stage id");
+		let error = crate::error::Error::from(crate::error::ErrorKind::ReadonlyVariable);
+		let status = u8::from(crate::ExecutionExitCode::from(&error));
+		let ran = stage.end_with(Err(error), exited);
+		assert!(ran.is_err());
+		assert_eq!(stage.status(), Some(ProcessStatus::Exited(status)));
+		assert!(!stage.0.end(1));
+	}
+
+	#[test]
+	fn a_racing_end_and_kill_agree() {
+		for _ in 0..500 {
+			let (_, stage) = InProcessStage::held(None).expect("stage id");
+			let killer = {
+				let stage = stage.clone();
+				std::thread::spawn(move || stage.0.end(9))
+			};
+			let ran = stage.end_with(Ok(ExecutionResult::new(0)), exited).expect("result");
+			let killed = killer.join().expect("killer");
+			if killed {
+				assert_eq!(u8::from(ran.exit_code), 137);
+				assert_eq!(stage.status(), Some(ProcessStatus::Signaled { signal: 9, core_dumped: false }));
+			} else {
+				assert_eq!(u8::from(ran.exit_code), 0);
+				assert_eq!(stage.status(), Some(ProcessStatus::Exited(0)));
+			}
+		}
+	}
+}
 
 /// Bash's `print_pipeline` text for statuses the shell tests cannot make
 /// happen on every machine: a process that dumped core, POSIX mode's

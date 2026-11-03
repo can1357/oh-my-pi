@@ -154,6 +154,75 @@ pub struct ExecutionParameters {
 	/// simple command of the script dispatches; see
 	/// [`commands::SimpleCommand::dispatches_simple_command`].
 	dispatches_simple_command: bool,
+	/// The pipeline stage with a pid of its own (of an in-process background
+	/// job or of a `lastpipe` job) whose command these parameters start; the
+	/// task that runs that command takes it to record how the stage ended
+	/// (see [`StageEnd`]). Each pipeline sets it for each of its stages.
+	stage:                    Option<jobs::InProcessStage>,
+}
+
+/// How a pipeline stage that runs in a subshell of its own ends, done by the
+/// task that runs the stage's command as its last step: an error that ends
+/// the stage is printed on the stage's standard error and the stage exits
+/// with its status, as Bash's forked subshell does, and the pipeline goes
+/// on; a stage with a pid of its own then records how it ended (see
+/// [`jobs::InProcessStage::end_with`]), also when the task panics or is
+/// dropped (status 1). A stage whose token was cancelled ends with that
+/// cancellation, unprinted: a stage `kill` ended returns 128 plus the
+/// signal, and the end of the run fails it as a cancelled command.
+pub(crate) struct StageEnd {
+	stage:    Option<jobs::InProcessStage>,
+	stand_in: Option<Arc<Mutex<Option<StandInProcess>>>>,
+	cancel:   Option<CancellationToken>,
+}
+
+impl StageEnd {
+	/// Takes the stage from `params`, which the stage's command then runs
+	/// with: nothing that command runs records the stage's end again.
+	pub(crate) fn take(params: &mut ExecutionParameters) -> Self {
+		Self {
+			stage:    params.stage.take(),
+			stand_in: params.stand_in_process.clone(),
+			cancel:   params.cancel_token(),
+		}
+	}
+
+	/// Ends the stage, whose command returned `ran`, in `shell`, the stage's
+	/// subshell, with `stderr` its standard error (see [`StageEnd`]).
+	pub(crate) async fn end(
+		mut self,
+		shell: &Shell<impl extensions::ShellExtensions>,
+		stderr: &mut openfiles::OpenFile,
+		ran: Result<ExecutionResult, error::Error>,
+	) -> Result<ExecutionResult, error::Error> {
+		let ran = match ran {
+			Err(error) if !self.cancel.as_ref().is_some_and(CancellationToken::is_cancelled) => {
+				shell.display_error(stderr, &error).await;
+				Ok(error.into_result(shell))
+			},
+			ran => ran,
+		};
+		match self.stage.take() {
+			Some(stage) => {
+				let stand_in = self.stand_in.take();
+				stage.end_with(ran, |result| match &stand_in {
+					Some(slot) => stage_status(slot, result),
+					None => processes::ProcessStatus::Exited(result.exit_code.into()),
+				})
+			},
+			None => ran,
+		}
+	}
+}
+
+impl Drop for StageEnd {
+	fn drop(&mut self) {
+		if let Some(stage) = self.stage.take()
+			&& !stage.is_cancelled()
+		{
+			stage.finish(processes::ProcessStatus::Exited(1));
+		}
+	}
 }
 
 /// The pipeline of a subshell's body that Bash runs in place of the subshell
@@ -1319,34 +1388,32 @@ fn stage_status(
 		.map_or(processes::ProcessStatus::Exited(result.exit_code.into()), |(_, status)| status)
 }
 
-/// Records how `stage`, a stage of an in-process background job, ended as
-/// soon as it ends, whatever stage before it the pipeline still waits for,
-/// as Bash's `SIGCHLD` handler marks a process of a job dead when it exits:
-/// `kill` of its pid then fails, a listing shows it ended, and no report
-/// gives it a signal that came later. A task that ended leaves its result
-/// (or its failure) for the pipeline's ordered wait.
+/// Collects the end of `stage`, a stage of an in-process background job,
+/// as soon as it comes, whatever stage before it the pipeline still waits
+/// for, as Bash's `SIGCHLD` handler marks a process of a job dead when it
+/// exits: `kill` of its pid then fails, a listing shows it ended, and no
+/// report gives it a signal that came later. An external process is reaped
+/// and its exit recorded here; a stage the shell ran recorded its own end
+/// (see `StageEnd`), and a task's result (or its failure) is kept for the
+/// pipeline's ordered wait.
 async fn record_stage_end(stage: &mut SpawnedStage, job_stage: &jobs::InProcessStage) {
-	let status = match &mut stage.spawn {
-		ExecutionSpawnResult::StartedProcess(child) => child.collect_exit().await,
-		ExecutionSpawnResult::Completed(result) => Some(stage_status(&stage.stand_in, result)),
-		ExecutionSpawnResult::StartedTask(handle) => {
-			let joined = handle.await;
-			match joined.map_err(error::Error::from).and_then(std::convert::identity) {
-				Ok(result) => {
-					let status = stage_status(&stage.stand_in, &result);
-					stage.spawn = ExecutionSpawnResult::Completed(result);
-					Some(status)
-				},
-				Err(error) => {
-					stage.failed = Some(error);
-					stage.spawn = ExecutionSpawnResult::Completed(ExecutionResult::general_error());
-					None
-				},
+	match &mut stage.spawn {
+		ExecutionSpawnResult::StartedProcess(child) => {
+			if let Some(status) = child.collect_exit().await {
+				job_stage.finish(status);
 			}
 		},
-	};
-	if let Some(status) = status {
-		job_stage.finish(status);
+		ExecutionSpawnResult::Completed(_) => {},
+		ExecutionSpawnResult::StartedTask(handle) => {
+			let joined = handle.await;
+			stage.spawn = match joined.map_err(error::Error::from).and_then(std::convert::identity) {
+				Ok(result) => ExecutionSpawnResult::Completed(result),
+				Err(error) => {
+					stage.failed = Some(error);
+					ExecutionSpawnResult::Completed(ExecutionResult::general_error())
+				},
+			};
+		},
 	}
 }
 
@@ -1379,7 +1446,8 @@ struct HeldStages {
 /// Hands the stages spawned so far, `stages`, each with its command and the
 /// shell-only pid and token it was given, to the job table as the job of a
 /// `lastpipe` pipeline's processes but the last (see [`HeldStages`]). A
-/// stage the shell runs as a task records how it ended when it ends.
+/// stage the shell runs as a task records how it ended as it ends (see
+/// `StageEnd`).
 fn hold_lastpipe_stages(
 	shell: &mut Shell<impl extensions::ShellExtensions>,
 	stages: VecDeque<SpawnedStage>,
@@ -1397,20 +1465,14 @@ fn hold_lastpipe_stages(
 			match spawn {
 				ExecutionSpawnResult::StartedProcess(child) => jobs::HeldProcess::External(child, command),
 				ExecutionSpawnResult::Completed(result) => {
-					jobs::HeldProcess::Ended(Some(pid), command, stage_status(&stand_in, &result))
+					let status = target.killed_by().map_or_else(
+						|| stage_status(&stand_in, &result),
+						|signal| processes::ProcessStatus::Signaled { signal, core_dumped: false },
+					);
+					jobs::HeldProcess::Ended(Some(pid), command, status)
 				},
 				ExecutionSpawnResult::StartedTask(handle) => {
-					let stage = target.clone();
-					let task = tokio::spawn(async move {
-						let joined = handle.await.map_err(error::Error::from).and_then(std::convert::identity);
-						if let Some(signal) = stage.killed_by() {
-							return Ok(ExecutionResult::new(128_u8.saturating_add(signal)));
-						}
-						let result = joined?;
-						stage.finish(stage_status(&stand_in, &result));
-						Ok(result)
-					});
-					jobs::HeldProcess::Task(AbortOnDropHandle::new(task), command, pid, target)
+					jobs::HeldProcess::Task(AbortOnDropHandle::new(handle), command, pid, target)
 				},
 			}
 		})
@@ -1546,15 +1608,25 @@ async fn spawn_pipeline_processes(
 		// A stage of an in-process background job runs with the stage's own
 		// token, which `kill` of the stage's pid fires; so does a stage of a
 		// `lastpipe` pipeline but its last, which joins the pipeline's job.
+		// Such a stage ends quietly once its token fires, as a process a
+		// signal kills prints nothing, and records how it ended as it ends:
+		// the task that runs its command takes it (see `StageEnd`); any other
+		// command starts no stage of these.
 		let job_stage = role.stages.and_then(|stages| stages.get(current_pipeline_index));
-		if let Some(stage) = job_stage {
+		let stage_target = match job_stage {
+			Some(stage) => Some(stage.clone()),
+			None if role.holds_lastpipe_job && !run_in_current_shell => {
+				let (pid, stage) = jobs::InProcessStage::held(params.cancel_token().as_ref())?;
+				held_targets.push((pid, stage.clone()));
+				Some(stage)
+			},
+			None => None,
+		};
+		if let Some(stage) = &stage_target {
 			cmd_params.set_cancel_token(stage.cancellation());
+			cmd_params.set_quiet_cancellation(true);
 		}
-		if role.holds_lastpipe_job && !run_in_current_shell {
-			let (pid, stage) = jobs::InProcessStage::held(params.cancel_token().as_ref())?;
-			cmd_params.set_cancel_token(stage.cancellation());
-			held_targets.push((pid, stage));
-		}
+		cmd_params.stage.clone_from(&stage_target);
 
 		// Install pipes.
 		if let Some(Some(reader)) = pipe_readers.pop() {
@@ -1564,6 +1636,11 @@ async fn spawn_pipeline_processes(
 			cmd_params.open_files.set_fd(OpenFiles::STDOUT_FD, writer);
 		}
 
+		// The stage's standard error, before its own redirections, where an
+		// error that ends it as it starts is printed, and its token (see
+		// below).
+		let stage_stderr = (!run_in_current_shell).then(|| cmd_params.stderr(shell));
+		let stage_token = cmd_params.cancel_token();
 		let pipeline_context = if !run_in_current_shell {
 			// Make sure that all commands in the pipeline are in the same process group.
 			if current_pipeline_index > 0 {
@@ -1586,19 +1663,40 @@ async fn spawn_pipeline_processes(
 			}
 		};
 
-		let spawn_result = match command
-			.execute_in_pipeline(pipeline_context, cmd_params)
-			.await
-		{
-			Ok(spawned) => spawned,
+		let spawned = command.execute_in_pipeline(pipeline_context, cmd_params).await;
+		let spawn_result = match (spawned, stage_stderr) {
+			(Ok(spawned), _) => spawned,
 			// A stage `kill` ended before or as it started ended as that
 			// signal ends a process, as Bash's forked stage would; the wait
 			// records its status (see `InProcessStage::killed_by`).
-			Err(_) if job_stage.is_some_and(|stage| stage.killed_by().is_some()) => {
+			(Err(_), _) if stage_target.as_ref().is_some_and(|stage| stage.killed_by().is_some()) => {
 				ExecutionSpawnResult::Completed(ExecutionResult::new(130))
 			},
-			Err(error) => return Err(error),
+			// A stage that runs in a subshell and fails as it starts (its
+			// words do not expand) ends that subshell as Bash's does: the
+			// error is printed and the stage exits with its status, and the
+			// pipeline goes on.
+			(Err(error), Some(mut stderr))
+				if !stage_token.as_ref().is_some_and(CancellationToken::is_cancelled) =>
+			{
+				shell.display_error(&mut stderr, &error).await;
+				ExecutionSpawnResult::Completed(error.into_result(shell))
+			},
+			// One that runs in this shell (a `lastpipe` last command) fails
+			// the pipeline; a stage with a pid of its own ended with the error.
+			(Err(error), _) => {
+				if let Some(stage) = stage_target.as_ref().filter(|stage| !stage.is_cancelled()) {
+					stage.finish(processes::ProcessStatus::Exited(u8::from(ExecutionExitCode::from(&error))));
+				}
+				return Err(error);
+			},
 		};
+		// A stage with a pid of its own that ran to its end as it started
+		// records how it ended now; one that runs as a task records it as
+		// that task's last step (see `StageEnd`).
+		if let (ExecutionSpawnResult::Completed(result), Some(stage)) = (&spawn_result, &stage_target) {
+			stage.finish(stage_status(&stand_in, result));
+		}
 
 		// Update the process group ID if something was spawned.
 		if let ExecutionSpawnResult::StartedProcess(child) = &spawn_result {
@@ -1771,7 +1869,15 @@ async fn wait_for_pipeline_processes_and_update_status(
 							stop_word: 0,
 						},
 					)),
-					(None, waited) => match waited? {
+					(None, Err(error)) => {
+						// A stage with a pid of its own that ended on an error
+						// records it, unless its token was cancelled.
+						if let Some(stage) = job_stage.filter(|stage| !stage.is_cancelled()) {
+							stage.finish(processes::ProcessStatus::Exited(u8::from(ExecutionExitCode::from(&error))));
+						}
+						return Err(error);
+					},
+					(None, Ok(waited)) => match waited {
 						(ExecutionWaitResult::Stopped(mut child, signal), _) => {
 							pipeline_stop = Some(signal);
 							stopped_pids.extend(child.take_reported_stops());
@@ -1982,13 +2088,20 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::Command {
 						let compound = compound.clone();
 						let redirects = redirects.clone();
 						let mut params = params;
+						let end = StageEnd::take(&mut params);
 						Ok(ExecutionSpawnResult::StartedTask(tokio::spawn(async move {
-							if let Some(redirects) = &redirects {
-								for redirect in &redirects.0 {
-									setup_redirect(&mut shell, &mut params, redirect).await?;
+							let ran = async {
+								if let Some(redirects) = &redirects {
+									for redirect in &redirects.0 {
+										setup_redirect(&mut shell, &mut params, redirect).await?;
+									}
 								}
+								execute_compound_in_frame(&compound, &mut shell, &params).await
 							}
-							execute_compound_in_frame(&compound, &mut shell, &params).await
+							.await;
+							// An error is printed with the stage's redirections.
+							let mut stderr = params.stderr(&shell);
+							end.end(&shell, &mut stderr, ran).await
 						})))
 					},
 					mut shell => {
@@ -4036,4 +4149,54 @@ fn setup_open_file_with_contents(
 	}
 
 	Ok(reader.into())
+}
+
+/// A stage whose task goes away before it records how it ended (it
+/// panicked, or was dropped) has ended with status 1, and its pid refuses a
+/// `kill`; one whose token was cancelled keeps the cancellation as its end.
+#[cfg(test)]
+mod stage_end_tests {
+	use super::{ExecutionParameters, StageEnd};
+	use crate::{jobs::InProcessStage, processes::ProcessStatus};
+
+	fn taken(stage: &InProcessStage) -> StageEnd {
+		let mut params = ExecutionParameters { stage: Some(stage.clone()), ..Default::default() };
+		let end = StageEnd::take(&mut params);
+		assert!(params.stage.is_none(), "the stage's command kept the stage");
+		end
+	}
+
+	#[tokio::test]
+	async fn a_stage_whose_task_panics_has_ended() {
+		let (_, stage) = InProcessStage::held(None).expect("stage id");
+		let end = taken(&stage);
+		let task = tokio::spawn(async move {
+			let _end = end;
+			panic!("stage task panicked");
+		});
+		assert!(task.await.is_err());
+		assert_eq!(stage.status(), Some(ProcessStatus::Exited(1)));
+	}
+
+	#[tokio::test]
+	async fn a_stage_whose_task_is_dropped_has_ended() {
+		let (_, stage) = InProcessStage::held(None).expect("stage id");
+		let end = taken(&stage);
+		let task = tokio::spawn(async move {
+			let _end = end;
+			std::future::pending::<()>().await;
+		});
+		task.abort();
+		assert!(task.await.is_err());
+		assert_eq!(stage.status(), Some(ProcessStatus::Exited(1)));
+	}
+
+	#[tokio::test]
+	async fn a_cancelled_stage_records_nothing_more() {
+		let (_, stage) = InProcessStage::held(None).expect("stage id");
+		let end = taken(&stage);
+		stage.cancellation().cancel();
+		drop(end);
+		assert_eq!(stage.status(), None);
+	}
 }
