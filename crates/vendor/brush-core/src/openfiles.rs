@@ -299,6 +299,16 @@ impl OpenFile {
 			Self::Vfs(_) => false,
 		}
 	}
+
+	/// Whether both are handles to one shared native file or pipe write end,
+	/// as clones and `>&` duplicates of an open file are.
+	pub(crate) fn is_same_file(&self, other: &Self) -> bool {
+		match (self, other) {
+			(Self::File(a), Self::File(b)) => Arc::ptr_eq(a, b),
+			(Self::PipeWriter(a), Self::PipeWriter(b)) => Arc::ptr_eq(a, b),
+			_ => false,
+		}
+	}
 }
 
 /// The handle in `shared` when no other clone holds it, otherwise a

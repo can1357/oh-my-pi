@@ -98,6 +98,18 @@ impl ChildProcess {
 			Some(CompletionMarker { output, end_marker_prefix, end_marker_suffix });
 	}
 
+	/// Reports the process finished only once `relays` have forwarded its
+	/// output (see [`crate::outputrelay::drain`]), so that output precedes
+	/// whatever the shell writes into the same sink next.
+	pub(crate) fn drain_output_relays_on_exit(&mut self, relays: Vec<crate::outputrelay::RelayWatch>) {
+		let exec = std::mem::replace(&mut self.exec_future, Box::pin(std::future::pending()));
+		self.exec_future = Box::pin(async move {
+			let output = exec.await;
+			crate::outputrelay::drain(relays).await;
+			output
+		});
+	}
+
 	/// Checks whether this process, or a stage in its pipeline, stopped.
 	fn poll_for_stop(&self) -> Result<bool, error::Error> {
 		let Some(pid) = self.pid else {

@@ -36,7 +36,7 @@ use crate::{
 	cancel::{AbortReason, AbortToken, CancelToken},
 	git::{GitLayers, git_builtin},
 	minimizer,
-	output_decode::OutputDecoder,
+	output_decode::{self, CaptureDecoder},
 	process,
 	taps::PipeTaps,
 };
@@ -1415,19 +1415,22 @@ async fn run_shell_command_once(
 ) -> Result<CommandRunOutput> {
 	let (reader_file, writer_file) = pipe_to_files("output")?;
 
-	let stdout_file = OpenFile::from(
-		writer_file
-			.try_clone()
-			.map_err(|err| Error::msg(format!("Failed to clone pipe: {err}")))?,
-	);
 	let mut diagnostics = writer_file
 		.try_clone()
 		.map_err(|err| Error::msg(format!("Failed to clone pipe: {err}")))?;
-	let stderr_file = OpenFile::from(writer_file);
+	// One open file behind both descriptors: a program writing both into the
+	// capture gets one output relay, which keeps their interleaving.
+	let output_file = OpenFile::from(writer_file);
 
 	params.set_fd(OpenFiles::STDIN_FD, null_file()?);
-	params.set_fd(OpenFiles::STDOUT_FD, stdout_file);
-	params.set_fd(OpenFiles::STDERR_FD, stderr_file);
+	params.set_fd(OpenFiles::STDOUT_FD, output_file.clone());
+	params.set_fd(OpenFiles::STDERR_FD, output_file.clone());
+	// Builtins write UTF-8 into the capture; external programs may not, so
+	// each one is decoded on its own way in (see `output_decode`).
+	if let Some(decoding) = output_decode::external_output_decoding() {
+		params.set_output_decoding(decoding);
+		params.add_text_sink(output_file);
+	}
 	params.process_group_policy = ProcessGroupPolicy::NewProcessGroup;
 	register_background_jobs(&session.shell, &spawn_registry);
 	params.set_cancel_token(cancel_token.clone());
@@ -2043,6 +2046,21 @@ struct BufferedOutput {
 	exceeded:    bool,
 }
 
+/// How long the capture reader waits for the rest of a held line before
+/// judging what it has (a prompt or progress text without a newline).
+#[cfg(not(unix))]
+const CAPTURE_LINE_IDLE: Duration = Duration::from_millis(50);
+
+/// Completes after [`CAPTURE_LINE_IDLE`] when `holds_line`, never otherwise.
+#[cfg(not(unix))]
+async fn capture_line_idle(holds_line: bool) {
+	if holds_line {
+		time::sleep(CAPTURE_LINE_IDLE).await;
+	} else {
+		std::future::pending::<()>().await;
+	}
+}
+
 async fn read_output(
 	reader: fs::File,
 	on_chunk: Option<Sender<String>>,
@@ -2051,7 +2069,7 @@ async fn read_output(
 ) {
 	const BUF: usize = 65536;
 	let mut buf = vec![0u8; BUF];
-	let mut decoder = OutputDecoder::new();
+	let mut decoder = CaptureDecoder::new();
 
 	#[cfg(unix)]
 	let Ok(reader) = register_nonblocking_pipe(reader) else {
@@ -2083,10 +2101,19 @@ async fn read_output(
 		let n = {
 			let read_future = reader.read(&mut buf);
 			tokio::pin!(read_future);
-			match tokio::select! {
-				res = &mut read_future => res,
-				() = cancel_token.cancelled() => break,
-			} {
+			let res = loop {
+				tokio::select! {
+					res = &mut read_future => break Some(res),
+					() = cancel_token.cancelled() => break None,
+					() = capture_line_idle(decoder.holds_line()) => {
+						emit_chunk(decoder.flush_line(), on_chunk.as_ref()).await;
+					}
+				}
+			};
+			let Some(res) = res else {
+				break;
+			};
+			match res {
 				Ok(0) => break, // EOF
 				Ok(n) => n,
 				Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
@@ -2123,7 +2150,7 @@ async fn read_output_buffered(
 	let mut captured = String::new();
 	let mut captured_bytes = 0usize;
 	let mut exceeded = false;
-	let mut decoder = OutputDecoder::new();
+	let mut decoder = CaptureDecoder::new();
 
 	#[cfg(unix)]
 	let Ok(reader) = register_nonblocking_pipe(reader) else {
@@ -2155,10 +2182,23 @@ async fn read_output_buffered(
 		let n = {
 			let read_future = reader.read(&mut buf);
 			tokio::pin!(read_future);
-			match tokio::select! {
-				res = &mut read_future => res,
-				() = cancel_token.cancelled() => break,
-			} {
+			let res = loop {
+				tokio::select! {
+					res = &mut read_future => break Some(res),
+					() = cancel_token.cancelled() => break None,
+					() = capture_line_idle(decoder.holds_line()) => {
+						let text = decoder.flush_line();
+						if !exceeded {
+							captured.push_str(&text);
+						}
+						emit_chunk(text, on_chunk.as_ref()).await;
+					}
+				}
+			};
+			let Some(res) = res else {
+				break;
+			};
+			match res {
 				Ok(0) => break,
 				Ok(n) => n,
 				Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
@@ -2633,6 +2673,140 @@ mod tests {
 		.expect("shell execution");
 		let output = rx.try_iter().collect();
 		(result, output)
+	}
+
+	/// Decodes each byte as Latin-1, so text a relay decoded (`E9` → `C3 A9`)
+	/// is told apart from a program's raw bytes. Each chunk takes `delay` to
+	/// decode, as when the capture's reader holds the relay back.
+	struct Latin1Decoding {
+		delay: Duration,
+	}
+
+	impl brush_core::OutputDecoding for Latin1Decoding {
+		fn decoder(&self) -> Box<dyn brush_core::ByteDecoder> {
+			Box::new(Latin1Decoder { delay: self.delay })
+		}
+	}
+
+	struct Latin1Decoder {
+		delay: Duration,
+	}
+
+	impl brush_core::ByteDecoder for Latin1Decoder {
+		fn push(&mut self, bytes: &[u8]) -> String {
+			std::thread::sleep(self.delay);
+			bytes.iter().map(|&byte| char::from(byte)).collect()
+		}
+
+		fn finish(&mut self) -> String {
+			String::new()
+		}
+	}
+
+	/// Latin-1 `café\n`, as a program writing a legacy code page emits it.
+	const PROGRAM_BYTES: &[u8] = b"caf\xe9\n";
+	/// `café\n` once a relay decoded `PROGRAM_BYTES`.
+	const DECODED: &[u8] = "café\n".as_bytes();
+	/// An external program writing `program.bin` to stdout unchanged.
+	#[cfg(windows)]
+	const PROGRAM: &str = "cmd.exe /c type program.bin";
+	#[cfg(not(windows))]
+	const PROGRAM: &str = "/bin/cat program.bin";
+	/// An external program copying stdin to stdout unchanged.
+	#[cfg(windows)]
+	const PASSTHROUGH: &str = "findstr '^'";
+	#[cfg(not(windows))]
+	const PASSTHROUGH: &str = "/bin/cat";
+
+	/// Runs `command` in a directory holding `program.bin`, with the capture
+	/// registered as a text sink and every external program's output decoded
+	/// as Latin-1 at `delay` per chunk. Returns the captured bytes and the
+	/// directory.
+	async fn run_with_decoded_programs(
+		command: &str,
+		delay: Duration,
+	) -> (Vec<u8>, tempfile::TempDir) {
+		let _guard = shell_test_lock().lock().await;
+		let dir = tempfile::tempdir().expect("temp dir");
+		std::fs::write(dir.path().join("program.bin"), PROGRAM_BYTES).expect("program bytes");
+		let config = ShellConfig {
+			session_env:   None,
+			snapshot_path: None,
+			minimizer:     None,
+			filesystem:    Fs::native(),
+		};
+		let mut session = create_session(&config).await.expect("create_session");
+		let (mut reader, writer) = pipe_to_files("relay").expect("pipe");
+		let output = OpenFile::from(writer);
+		let mut params = session.shell.default_exec_params();
+		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null stdin"));
+		params.set_fd(OpenFiles::STDOUT_FD, output.clone());
+		params.set_fd(OpenFiles::STDERR_FD, output.clone());
+		params.set_output_decoding(Arc::new(Latin1Decoding { delay }));
+		params.add_text_sink(output);
+		let reader = tokio::task::spawn_blocking(move || {
+			let mut captured = Vec::new();
+			std::io::Read::read_to_end(&mut reader, &mut captured).expect("read capture");
+			captured
+		});
+		let script = format!("cd {} && {command}", quote_arg(&dir.path().to_string_lossy()));
+		let result = session
+			.shell
+			.run_string(script, &SourceInfo::from("relay-test"), &params)
+			.await
+			.expect("run_string");
+		assert!(matches!(result.exit_code, ExecutionExitCode::Success), "{command}");
+		drop(params);
+		drop(session);
+		let captured = time::timeout(Duration::from_secs(10), reader)
+			.await
+			.expect("capture reaches EOF")
+			.expect("reader task");
+		(captured, dir)
+	}
+
+	/// A program's output into the capture is decoded, and lands before what
+	/// the next command writes even while its relay is slow to forward it; a
+	/// builtin's bytes are not decoded.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn program_output_into_capture_is_decoded_in_order() {
+		let (captured, _dir) = run_with_decoded_programs(
+			&format!("printf 'a\\n'; {PROGRAM}; printf 'b\\xeb\\n'"),
+			Duration::from_millis(300),
+		)
+		.await;
+		let mut expected = b"a\n".to_vec();
+		expected.extend_from_slice(DECODED);
+		expected.extend_from_slice(b"b\xeb\n");
+		assert_eq!(captured, expected);
+	}
+
+	/// A command substitution takes a program's output as shell text.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn program_output_into_command_substitution_is_decoded() {
+		let (captured, _dir) = run_with_decoded_programs(
+			&format!("x=$({PROGRAM}); printf '[%s]\\n' \"$x\""),
+			Duration::ZERO,
+		)
+		.await;
+		assert_eq!(captured, "[café]\n".as_bytes());
+	}
+
+	/// Pipes and files keep the program's bytes, whichever stage reads them.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn program_output_through_pipes_and_files_keeps_its_bytes() {
+		let (captured, dir) = run_with_decoded_programs(
+			&format!(
+				"{PROGRAM} > file.bin; {PROGRAM} | {PASSTHROUGH} > program.out; {PROGRAM} | cat > \
+				 builtin.out"
+			),
+			Duration::ZERO,
+		)
+		.await;
+		assert_eq!(captured, b"");
+		for name in ["file.bin", "program.out", "builtin.out"] {
+			assert_eq!(std::fs::read(dir.path().join(name)).expect(name), PROGRAM_BYTES, "{name}");
+		}
 	}
 
 	/// Shell initialization must recover when a long-running host's inherited
