@@ -270,4 +270,31 @@ describe("scoped prompt recall", () => {
 		state.setting = "repo";
 		expect(recall(editor)).toBe("SUBMITTED_FROM_EDITOR");
 	});
+
+	it.each([
+		{ setting: "global", sameDirectory: false, expected: "LATE_A" },
+		{ setting: "cwd", sameDirectory: true, expected: "LATE_A" },
+		{ setting: "cwd", sameDirectory: false, expected: "B_ONLY" },
+		{ setting: "repo", sameDirectory: false, expected: "LATE_A" },
+	] as const)(
+		"admits delayed writes only when $setting includes their provenance (same directory: $sameDirectory)",
+		async ({ setting, sameDirectory, expected }) => {
+			const repo = tempDir!.join("repo");
+			const child = path.join(repo, "child");
+			await fs.mkdir(child, { recursive: true });
+			await initGitFixture(repo);
+			const storage = HistoryStorage.open(tempDir!.join("history.db"));
+			const currentCwd = sameDirectory ? repo : child;
+			await storage.add("B_ONLY", currentCwd, "session-b");
+			const editor = bindEditor(storage, { setting, context: { sessionId: "session-b", cwd: currentCwd } });
+			setProjectDir(currentCwd);
+			editor.addToHistory("LATE_A", { sessionId: "session-a", cwd: repo });
+			editor.handleInput("\x1b[A");
+			expect(editor.getText()).toBe(expected);
+			expect(storage.getRecent(20).find(row => row.prompt === "LATE_A")).toMatchObject({
+				sessionId: "session-a",
+				cwd: repo,
+			});
+		},
+	);
 });

@@ -3,7 +3,7 @@ import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent, Usage } from "@oh-my-pi/pi-ai";
 import { getStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
-import { type Component, Text } from "@oh-my-pi/pi-tui";
+import { type Component, type HistoryContext, Text } from "@oh-my-pi/pi-tui";
 import { StatusNotice } from "@oh-my-pi/pi-tui/chrome/status-notice";
 import { QueuedMessagesBand } from "@oh-my-pi/pi-tui/prompt/queued-messages";
 import { logger } from "@oh-my-pi/pi-utils";
@@ -1332,7 +1332,7 @@ export class UiHelpers {
 		text: string,
 		mode: "steer" | "followUp",
 		images?: ImageContent[],
-		options?: { preserveDraft?: boolean; historyRecorded?: boolean },
+		options?: { preserveDraft?: boolean; historyRecorded?: boolean; historyContext?: HistoryContext },
 	): void {
 		if (this.ctx.collabGuest && guestRefusesSlashCommand(text)) {
 			this.ctx.showStatus(`${text.split(/\s+/, 1)[0]} is host-only during a collab session`);
@@ -1346,9 +1346,9 @@ export class UiHelpers {
 		// Queuing bypasses normal slash recording. Keep room keys and auth codes out of history.
 		const historyText = options?.historyRecorded || shouldSkipHistory(text) ? undefined : text;
 		if (options?.preserveDraft) {
-			if (historyText !== undefined) this.ctx.editor.addToHistory(historyText);
+			if (historyText !== undefined) this.ctx.editor.addToHistory(historyText, options.historyContext);
 		} else {
-			this.ctx.editor.clearDraft(historyText);
+			this.ctx.editor.clearDraft(historyText, options?.historyContext);
 		}
 		this.ctx.updatePendingMessagesDisplay();
 		this.ctx.showStatus(

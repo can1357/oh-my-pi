@@ -615,7 +615,7 @@ export class SelectorController {
 	 */
 	#historyScopeRing(): HistoryScope[] {
 		return historyScopeRing(cfgHistorySearchScope.get(this.ctx.settings), {
-			sessionId: this.ctx.sessionManager.getSessionId(),
+			sessionId: this.ctx.viewSession.sessionManager.getSessionId(),
 			cwd: getProjectDir(),
 		});
 	}

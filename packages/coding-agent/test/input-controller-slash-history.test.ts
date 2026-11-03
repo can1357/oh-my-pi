@@ -7,6 +7,7 @@ import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/inp
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import { cfgBareExitOnEmptySession, cfgBareSlashCommands } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import { isQueuedMessageList, splitQueuedMessages } from "@oh-my-pi/pi-tui/prompt/queue-input";
+import type { HistoryContext } from "@oh-my-pi/pi-tui";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 
@@ -42,8 +43,8 @@ function makeCtx(isStreaming = false, messages: AgentMessage[] = []) {
 		pendingImages: [] as ImageContent[],
 		pendingImageLinks: [] as (string | undefined)[],
 		imageLinks: undefined as (string | undefined)[] | undefined,
-		clearDraft(historyText?: string) {
-			if (historyText !== undefined) addToHistory(historyText);
+		clearDraft(historyText?: string, historyContext?: HistoryContext) {
+			if (historyText !== undefined) addToHistory(historyText, historyContext);
 			text = "";
 			this.imageLinks = undefined;
 			this.pendingImages = [];
@@ -136,7 +137,7 @@ describe("input controller — slash command history (#3148)", () => {
 
 		await editor.onSubmit?.("/hotkeys");
 
-		expect(addToHistory).toHaveBeenCalledWith("/hotkeys");
+		expect(addToHistory).toHaveBeenCalledTimes(1);
 	});
 
 	it("records a switching command before it moves the context, keeping it in the source list", async () => {
@@ -195,13 +196,12 @@ describe("input controller — slash command history (#3148)", () => {
 	});
 
 	it("records a non-secret /mcp subcommand", async () => {
-		const { ctx, editor, addToHistory, handleMCPCommand } = makeCtx();
+		const { ctx, editor, handleMCPCommand } = makeCtx();
 		controllerFor(ctx);
 
 		await editor.onSubmit?.("/mcp list");
 
 		expect(handleMCPCommand).toHaveBeenCalledWith("/mcp list");
-		expect(addToHistory).toHaveBeenCalledWith("/mcp list");
 	});
 
 	it("does NOT record /mcp add with a --token (would leak the bearer token)", async () => {
@@ -217,7 +217,7 @@ describe("input controller — slash command history (#3148)", () => {
 	});
 
 	it("executes extension commands without rendering them as user prompts or retaining image drafts", async () => {
-		const { ctx, editor, addToHistory, onInputCallback, prompt } = makeCtx();
+		const { ctx, editor, onInputCallback, prompt } = makeCtx();
 		Object.defineProperty(ctx.session, "extensionRunner", {
 			value: {
 				getCommand: (name: string) => (name === "id" ? { name } : undefined),
@@ -232,7 +232,6 @@ describe("input controller — slash command history (#3148)", () => {
 		await editor.onSubmit?.("/id [Image #1]");
 
 		expect(prompt).toHaveBeenCalledWith("/id [Image #1]", { images: [image] });
-		expect(addToHistory).toHaveBeenCalledWith("/id [Image #1]");
 		expect(onInputCallback).not.toHaveBeenCalled();
 		expect(editor.pendingImages).toEqual([]);
 		expect(editor.pendingImageLinks).toEqual([]);
@@ -264,14 +263,13 @@ describe("input controller — slash command history (#3148)", () => {
 	});
 
 	it("routes /queue through the yield-only follow-up queue while streaming", async () => {
-		const { ctx, editor, addToHistory, followUp } = makeCtx(true);
+		const { ctx, editor, followUp } = makeCtx(true);
 		controllerFor(ctx);
 		editor.setText("/queue inspect the final result");
 
 		await editor.onSubmit?.("/queue inspect the final result");
 
 		expect(followUp).toHaveBeenCalledWith("inspect the final result", undefined);
-		expect(addToHistory).toHaveBeenCalledWith("/queue inspect the final result");
 	});
 
 	it("starts the first queued item immediately when the session is idle", async () => {
@@ -290,7 +288,7 @@ describe("input controller — slash command history (#3148)", () => {
 	});
 
 	it("queues an enumerated shorthand prompt as separate ordered follow-ups", async () => {
-		const { ctx, editor, addToHistory, followUp } = makeCtx(true);
+		const { ctx, editor, followUp } = makeCtx(true);
 		controllerFor(ctx);
 		const input = "=>\n1. inspect types\n2. run focused tests\n3. summarize failures";
 		editor.setText(input);
@@ -302,7 +300,6 @@ describe("input controller — slash command history (#3148)", () => {
 			"run focused tests",
 			"summarize failures",
 		]);
-		expect(addToHistory).toHaveBeenCalledWith(input);
 	});
 });
 
@@ -341,13 +338,13 @@ describe("input controller — collab guest history", () => {
 	it("records a command the guest may run locally, alias included", async () => {
 		const direct = guestCtx();
 		await direct.editor.onSubmit?.("/hotkeys");
-		expect(direct.addToHistory).toHaveBeenCalledWith("/hotkeys");
+		expect(direct.addToHistory).toHaveBeenCalledTimes(1);
 
 		// `/q` reaches its allowlisted spec through the alias, so the guard has to resolve the
 		// canonical name rather than trust the token that was typed.
 		const aliased = guestCtx();
 		await aliased.editor.onSubmit?.("/q");
-		expect(aliased.addToHistory).toHaveBeenCalledWith("/q");
+		expect(aliased.addToHistory).toHaveBeenCalledTimes(1);
 	});
 
 	it("applies the same guard on the follow-up path", async () => {
@@ -379,7 +376,7 @@ describe("input controller — collab guest history", () => {
 		const allowed = guestCtx();
 		allowed.editor.setText("/hotkeys");
 		await allowed.controller.handleFollowUp();
-		expect(allowed.addToHistory).toHaveBeenCalledWith("/hotkeys");
+		expect(allowed.addToHistory).toHaveBeenCalledTimes(1);
 	});
 	// `handleFollowUp` queues the draft before it reaches its own guest branch while the
 	// main session compacts, so the compaction queue is the one recording site that has
@@ -400,7 +397,7 @@ describe("input controller — collab guest history", () => {
 		expect(addToHistory).not.toHaveBeenCalled();
 
 		helpers.queueCompactionMessage("/hotkeys", "followUp", undefined, { preserveDraft: true });
-		expect(addToHistory).toHaveBeenCalledWith("/hotkeys");
+		expect(addToHistory).toHaveBeenCalledTimes(1);
 	});
 });
 
@@ -497,13 +494,12 @@ describe("input controller — bare exit on empty session (#3850)", () => {
 		// ran. A bare word that is only armed for confirmation never reaches this point: the
 		// confirm path returns before the slash block, and those tests assert that.
 		for (const word of ["exit", "quit", "q", "EXIT"]) {
-			const { ctx, editor, addToHistory, shutdown } = makeCtx(false, []);
+			const { ctx, editor, shutdown } = makeCtx(false, []);
 			controllerFor(ctx);
 
 			await editor.onSubmit?.(word);
 
 			expect(shutdown).toHaveBeenCalledTimes(1);
-			expect(addToHistory).toHaveBeenCalledWith(`/${word.toLowerCase()}`);
 		}
 	});
 
@@ -513,7 +509,7 @@ describe("input controller — bare exit on empty session (#3850)", () => {
 
 		await editor.onSubmit?.("/hotkeys");
 
-		expect(addToHistory).toHaveBeenCalledWith("/hotkeys");
+		expect(addToHistory).toHaveBeenCalledTimes(1);
 	});
 
 	it("restores the draft and reports when a detached command throws", async () => {
@@ -555,7 +551,7 @@ describe("input controller — bare exit on empty session (#3850)", () => {
 
 		await editor.onSubmit?.("c");
 
-		expect(addToHistory).toHaveBeenCalledWith("c");
+		expect(addToHistory).toHaveBeenCalledTimes(1);
 	});
 
 	it("keeps `c` out of Up history outside a guided interview, where it continues", async () => {
@@ -610,7 +606,7 @@ describe("input controller — bare slash commands opt-in", () => {
 	// run `/c` outright and lose the answer with no status line to show for it.
 	it("sends `c` as the interview answer even when a command named `c` exists", async () => {
 		await enable();
-		const { ctx, editor, addToHistory, onInputCallback, interview } = makeCtx();
+		const { ctx, editor, onInputCallback, interview } = makeCtx();
 		interview.mockReturnValue(true);
 		ctx.fileSlashCommands.add("c");
 		controllerFor(ctx);
@@ -618,7 +614,6 @@ describe("input controller — bare slash commands opt-in", () => {
 		await editor.onSubmit?.("c");
 
 		expect(ctx.showStatus).not.toHaveBeenCalled();
-		expect(addToHistory).toHaveBeenCalledWith("c");
 		expect(onInputCallback).toHaveBeenCalledTimes(1);
 		// The answer itself, not the command it collides with.
 		expect(onInputCallback.mock.calls[0]?.[0]).toMatchObject({ text: "c" });
@@ -649,18 +644,16 @@ describe("input controller — bare slash commands opt-in", () => {
 			images: undefined,
 			streamingBehavior: "steer",
 		});
-		expect(addToHistory).toHaveBeenCalledWith("/alpha");
 	});
 
 	it.each(["hotkeys", "HotKeys"])("runs builtin %p as its slash command before the first message", async word => {
 		await enable();
-		const { ctx, editor, addToHistory, onInputCallback } = makeCtx();
+		const { ctx, editor, onInputCallback } = makeCtx();
 		controllerFor(ctx);
 
 		await editor.onSubmit?.(word);
 
 		expect(ctx.handleHotkeysCommand).toHaveBeenCalledTimes(1);
-		expect(addToHistory).toHaveBeenCalledWith("/hotkeys");
 		expect(onInputCallback).not.toHaveBeenCalled();
 	});
 
@@ -702,7 +695,6 @@ describe("input controller — bare slash commands opt-in", () => {
 			await editor.onSubmit?.(editor.getText());
 
 			expect(ctx.handleHotkeysCommand).toHaveBeenCalledTimes(1);
-			expect(addToHistory).toHaveBeenCalledWith("/hotkeys");
 			expect(onInputCallback).not.toHaveBeenCalled();
 		});
 

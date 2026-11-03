@@ -13,6 +13,7 @@ import type {
 	AutocompleteProvider,
 	Component,
 	EditorTheme,
+	HistoryContext,
 	KeyId,
 	LoaderMessageColorFn,
 	OverlayHandle,
@@ -2210,10 +2211,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		};
 		process.stdout.on("resize", this.#resizeHandler);
 		setWordPredictionHost(textPredictionBackend);
+		this.#focusController = new SessionFocusController(this);
 		try {
 			this.historyStorage = HistoryStorage.open();
 			this.#installHistoryStorage(this.editor);
-			this.historyStorage.setSessionResolver(() => this.sessionManager.getSessionId());
+			this.historyStorage.setSessionResolver(() => this.viewSession.sessionManager.getSessionId());
 			// The prediction daemon learns from history.db; nudge it once each prompt is durable.
 			this.historyStorage.setAddListener(syncTextPrediction);
 			this.historyStorage.setErrorListener(() => {
@@ -2301,7 +2303,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#todoCommandController = new TodoCommandController(this);
 		this.#liveCommandController = new LiveCommandController(this);
 		this.#selectorController = new SelectorController(this);
-		this.#focusController = new SessionFocusController(this);
 		this.#inputController = new InputController(this);
 		this.collabController = new CollabController(this);
 		this.session.setPromptDropped?.(prompt => this.#restoreDroppedPrompt(prompt));
@@ -8380,7 +8381,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	/** Context a configured recall scope resolves against: the live conversation and project. */
 	#historyScopeContext(): HistoryScopeContext {
-		return { sessionId: this.sessionManager.getSessionId(), cwd: getProjectDir() };
+		return { sessionId: this.viewSession.sessionManager.getSessionId(), cwd: getProjectDir() };
 	}
 
 	/** Recall scope for Up-arrow history, from the `history.scope` setting. */
@@ -8904,7 +8905,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		text: string,
 		mode: "steer" | "followUp",
 		images?: ImageContent[],
-		options?: { preserveDraft?: boolean; historyRecorded?: boolean },
+		options?: { preserveDraft?: boolean; historyRecorded?: boolean; historyContext?: HistoryContext },
 	): void {
 		this.#uiHelpers.queueCompactionMessage(text, mode, images, options);
 	}

@@ -673,8 +673,14 @@ interface HistoryEntry {
 	prompt: string;
 }
 
+/** Persistent owner and project captured when a host admits a submission. */
+export interface HistoryContext {
+	sessionId: string;
+	cwd: string;
+}
+
 interface HistoryStorage {
-	add(prompt: string, cwd?: string): Promise<void>;
+	add(prompt: string, cwd?: string, sessionId?: string): Promise<void>;
 	getRecent(limit: number): HistoryEntry[];
 }
 
@@ -922,7 +928,7 @@ export class Editor implements Component, Focusable {
 	#historyIndex: number = -1; // -1 = not browsing, 0 = most recent, 1 = older, etc.
 	#historyStorage?: HistoryStorage;
 	// Names the data set behind #historyStorage; a change re-seeds #history on the next browse.
-	#historySourceKey?: () => string;
+	#historySourceKey?: (context?: HistoryContext) => string;
 	#historySourceKeyValue?: string;
 	// Recalled payloads outlive browsing when an edit resets #historyIndex.
 	#historyDraftActive = false;
@@ -1199,9 +1205,10 @@ export class Editor implements Component, Focusable {
 	 * `sourceKey` names the data set behind `storage` (for a host, the resolved recall
 	 * scope). When it changes — a new conversation, another project, a settings change —
 	 * the editor re-seeds its list from `storage` at the start of the next navigation.
-	 * Omit it and the list stays fixed for the editor's lifetime.
+	 * Passing a submission context to the key resolves that owner's data set instead.
+	 * Omit the key and the list stays fixed for the editor's lifetime.
 	 */
-	setHistoryStorage(storage: HistoryStorage, sourceKey?: () => string): void {
+	setHistoryStorage(storage: HistoryStorage, sourceKey?: (context?: HistoryContext) => string): void {
 		this.#historyStorage = storage;
 		this.#historySourceKey = sourceKey;
 		this.#historySourceKeyValue = undefined;
@@ -1264,29 +1271,38 @@ export class Editor implements Component, Focusable {
 	/**
 	 * Add a prompt to history for up/down arrow navigation.
 	 *
-	 * Records under the context active at the call: a host that dispatches a command able to
-	 * switch the conversation or move the working directory calls this before dispatch, so the
-	 * entry is filed — in storage and in this list — where the prompt was typed.
+	 * Without `context`, records under the context active at the call. Hosts that await
+	 * dispatch capture the submission's owner first and pass it here, so later focus or
+	 * directory changes cannot move the write into the destination's history.
 	 */
-	addToHistory(text: string): void {
+	addToHistory(text: string, context?: HistoryContext): void {
 		const trimmed = text.trim();
 		if (!trimmed) return;
 
-		// A command can switch the conversation or the working directory without a browse in
-		// between: re-seed first, so the entry is filed under the context active now rather than
-		// the one the list was seeded for. Returning to a context then re-seeds again, because
-		// the stored key is the context this submission moved to. A failed seed leaves the stale
-		// list in place, and coming back to that context re-seeds nothing (its key was restored),
-		// so the entry must stay out of the list: the write below already filed it in storage.
+		// A command can change the conversation or working directory without a browse in
+		// between. Re-seed the current recall scope before considering local insertion;
+		// the write below independently uses the captured submission owner, when supplied.
+		// A failed seed leaves the stale list in place. Returning to its old scope may not
+		// re-seed, because that key never changed, so keep this entry out of the stale list
+		// even though storage still receives the write.
 		const seeded = this.#rehydrateHistory();
 
 		const stor = this.#historyStorage;
 		if (stor) {
-			stor.add(trimmed, getProjectDir()).catch(error => {
+			stor.add(trimmed, context?.cwd ?? getProjectDir(), context?.sessionId).catch(error => {
 				logger.error("HistoryStorage add failed", { error: String(error) });
 			});
 		}
 		if (!seeded) return;
+		if (context && this.#historySourceKey) {
+			try {
+				// Persist a late write for its owner without adding it to another scoped list.
+				if (this.#historySourceKey(context) !== this.#historySourceKeyValue) return;
+			} catch (error) {
+				logger.warn("History source resolution failed", { error: String(error) });
+				return;
+			}
+		}
 
 		// Don't add consecutive submitted duplicates; a draft owns separate state.
 		const previous = this.#history[0];

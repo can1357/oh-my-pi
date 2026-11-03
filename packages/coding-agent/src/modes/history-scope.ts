@@ -74,13 +74,11 @@ export function historyScopeRing(start: HistoryScopeKind, context: HistoryScopeC
 }
 
 /**
- * Storage shape a history editor consumes: reads resolved by the bound scope, and writes that
- * carry only the project directory. A prompt's conversation stays with the storage's own session
- * resolver, and a read's scope with the binding installed here — an adapter advertising either
- * would compile while silently ignoring what it was handed.
+ * Storage shape a history editor consumes: scope-bound reads and writes carrying the
+ * submission's project and persistent conversation, even when dispatch changes focus.
  */
 export type ScopedHistoryStorage = {
-	add(prompt: string, cwd?: string): Promise<void>;
+	add(prompt: string, cwd?: string, sessionId?: string): Promise<void>;
 	getRecent(limit: number): HistoryEntry[];
 };
 
@@ -93,7 +91,7 @@ export type ScopedHistoryStorage = {
  */
 export function bindHistoryScope(storage: HistoryStorage, scope: () => HistoryScope): ScopedHistoryStorage {
 	return {
-		add: (prompt, cwd) => storage.add(prompt, cwd),
+		add: (prompt, cwd, sessionId) => storage.add(prompt, cwd, sessionId),
 		getRecent: limit => storage.getRecentOrThrow(limit, scope()),
 	};
 }
@@ -101,8 +99,8 @@ export function bindHistoryScope(storage: HistoryStorage, scope: () => HistorySc
 /** A storage bound to a live scope, plus the key an editor re-seeds on when that scope changes. */
 export interface HistorySource {
 	storage: ScopedHistoryStorage;
-	/** Identity of the scope and its stored-directory membership, not a revision of prompt rows. */
-	sourceKey: () => string;
+	/** Identity of the live scope, or that scope resolved for a captured submission owner. */
+	sourceKey: (context?: HistoryScopeContext) => string;
 }
 
 /**
@@ -114,8 +112,9 @@ export interface HistorySource {
 export function bindHistorySource(storage: HistoryStorage, resolveScope: () => HistoryScope): HistorySource {
 	return {
 		storage: bindHistoryScope(storage, resolveScope),
-		sourceKey: () => {
-			const scope = resolveScope();
+		sourceKey: context => {
+			const liveScope = resolveScope();
+			const scope = context ? resolveHistoryScope(liveScope.kind, context) : liveScope;
 			const key = historyScopeKey(scope);
 			// Stored aliases or repository boundaries can move without a history write.
 			return scope.kind === "cwd" || scope.kind === "repo"

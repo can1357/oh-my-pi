@@ -6,6 +6,7 @@ import {
 	Editor,
 	type EditorTextDecorationContext,
 	type EditorTheme,
+	type HistoryContext,
 	type NativeEditorLayout,
 } from "../components/editor";
 import { addKeyAliases, canonicalKeyId, getKeybindings } from "../keybindings";
@@ -547,8 +548,8 @@ export class CustomEditor extends Editor {
 	/** Clear the composer draft: optionally commit `historyText` to history, then
 	 *  reset the editor text and all pending draft-image state. The shared tail of
 	 *  every "message submitted" path; pass no argument for a plain discard. */
-	clearDraft(historyText?: string): void {
-		if (historyText !== undefined) this.addToHistory(historyText);
+	clearDraft(historyText?: string, historyContext?: HistoryContext): void {
+		if (historyText !== undefined) this.addToHistory(historyText, historyContext);
 		this.setText("");
 		this.clearPasteState();
 		this.imageLinks = undefined;

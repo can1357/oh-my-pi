@@ -991,7 +991,7 @@ describe("interactive native input ingress", () => {
 			const focusedPrompt = vi.fn(async () => true);
 			Object.defineProperties(h.ctx, {
 				focusedAgentId: { value: "focused-task" },
-				viewSession: { value: { isStreaming: true, prompt: focusedPrompt } },
+				viewSession: { value: { sessionManager: h.ctx.sessionManager, isStreaming: true, prompt: focusedPrompt } },
 			});
 			h.editor.setText("focused chat");
 			await h.pressSubmit(key);

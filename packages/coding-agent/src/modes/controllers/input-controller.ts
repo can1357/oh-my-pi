@@ -7,6 +7,7 @@ import {
 	BRACKETED_PASTE_START,
 	type Component,
 	emergencyTerminalRestore,
+	type HistoryContext,
 	isKeyRelease,
 	isKeyRepeat,
 	matchesKey,
@@ -15,7 +16,7 @@ import {
 	type PasteOptions,
 	type SlashCommand,
 } from "@oh-my-pi/pi-tui";
-import { isEnoent, logger, postmortem, sanitizeText } from "@oh-my-pi/pi-utils";
+import { getProjectDir, isEnoent, logger, postmortem, sanitizeText } from "@oh-my-pi/pi-utils";
 import { formatDoubleTap } from "@oh-my-pi/pi-tui/app-keybindings";
 import { appKey, editorKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
 import { formatModelRoleAlias, roleCandidatePool } from "../../config/model-roles";
@@ -1114,6 +1115,8 @@ export class InputController {
 				await this.#submitToFocusedSession(text, "steer");
 				return;
 			}
+			// Main owns this submission even if focus changes while input hooks or dispatch await.
+			const historyContext = { sessionId: this.ctx.sessionManager.getSessionId(), cwd: getProjectDir() };
 
 			// Empty submit while streaming with queued (or live-steered) messages:
 			// abort the active turn and let the post-unwind drain deliver the
@@ -1183,6 +1186,7 @@ export class InputController {
 			if (queueBody !== undefined) {
 				await this.#queueForYield(queueBody, {
 					historyText: text,
+					historyContext,
 					images: inputImages,
 					imageLinks: inputImageLinks,
 				});
@@ -1224,7 +1228,7 @@ export class InputController {
 					!this.#guestRefusesSlash(text) &&
 					!this.#resolveSideFileCommand(text)
 				) {
-					this.ctx.editor.addToHistory(text);
+					this.ctx.editor.addToHistory(text, historyContext);
 					recordedHistoryText = text;
 				}
 				let slashResult: string | boolean;
@@ -1270,7 +1274,7 @@ export class InputController {
 				}
 				const images = inputImages && inputImages.length > 0 ? [...inputImages] : undefined;
 				if (this.ctx.collabGuest.sendPrompt(text, images)) {
-					this.ctx.editor.clearDraft(text);
+					this.ctx.editor.clearDraft(text, historyContext);
 				} else {
 					this.#dropSubmittedPending(submittedImages);
 					restoreDetachedDraft(this.ctx.editor, text, images, inputImageLinks);
@@ -1291,6 +1295,7 @@ export class InputController {
 						detach: () => this.#detachSideSubmission(draftText, submittedImages),
 						restore: () => this.#restoreResetSubmission(submittedText),
 					},
+					historyContext,
 					recordedHistoryText,
 				)
 			) {
@@ -1309,15 +1314,22 @@ export class InputController {
 				}
 				if (this.ctx.session.isCompacting) {
 					const images = inputImages && inputImages.length > 0 ? [...inputImages] : undefined;
-					this.ctx.queueCompactionMessage(
-						text,
-						"steer",
-						images,
-						text === recordedHistoryText ? { historyRecorded: true } : undefined,
-					);
+					this.ctx.queueCompactionMessage(text, "steer", images, {
+						historyRecorded: text === recordedHistoryText,
+						historyContext,
+					});
 					return;
 				}
-				if (await this.#invokeSkillCommand(text, "steer", recordedHistoryText, inputImages, inputImageLinks)) {
+				if (
+					await this.#invokeSkillCommand(
+						text,
+						"steer",
+						historyContext,
+						recordedHistoryText,
+						inputImages,
+						inputImageLinks,
+					)
+				) {
 					// The dispatch above ran the turn inline without resolving the input
 					// callback, so nothing re-enters `getUserInput` to arm the next
 					// iteration. Arm it here, now that the turn has settled.
@@ -1340,7 +1352,7 @@ export class InputController {
 						this.ctx.editor.setText(text);
 						return;
 					}
-					this.ctx.editor.addToHistory(text);
+					this.ctx.editor.addToHistory(text, historyContext);
 					await this.ctx.handleBashCommand(command, isExcluded);
 					this.ctx.isBashMode = false;
 					this.ctx.updateEditorBorderColor();
@@ -1361,7 +1373,7 @@ export class InputController {
 						this.ctx.editor.setText(text);
 						return;
 					}
-					this.ctx.editor.addToHistory(text);
+					this.ctx.editor.addToHistory(text, historyContext);
 					await this.ctx.handlePythonCommand(code, isExcluded);
 					this.ctx.isPythonMode = false;
 					this.ctx.updateEditorBorderColor();
@@ -1372,12 +1384,10 @@ export class InputController {
 			// Queue input during compaction
 			if (this.ctx.session.isCompacting) {
 				const images = inputImages && inputImages.length > 0 ? [...inputImages] : undefined;
-				this.ctx.queueCompactionMessage(
-					text,
-					"steer",
-					images,
-					text === recordedHistoryText ? { historyRecorded: true } : undefined,
-				);
+				this.ctx.queueCompactionMessage(text, "steer", images, {
+					historyRecorded: text === recordedHistoryText,
+					historyContext,
+				});
 				// An inline `/loop` body queued here arms the loop only when it is
 				// an actual model prompt. Skill/bash/python bodies never reach this
 				// branch, but an extension-command body would otherwise be retained
@@ -1391,7 +1401,7 @@ export class InputController {
 			// submission path creates an optimistic user message; otherwise a
 			// consumed command remains rendered like a prompt sent to the model.
 			if (this.#isLocalExtensionCommand(text)) {
-				this.ctx.editor.clearDraft(text === recordedHistoryText ? undefined : text);
+				this.ctx.editor.clearDraft(text === recordedHistoryText ? undefined : text, historyContext);
 				try {
 					await this.ctx.session.prompt(text, { images: inputImages });
 				} catch (error) {
@@ -1413,7 +1423,7 @@ export class InputController {
 			// If streaming, use prompt() with steer behavior
 			// This handles extension commands (execute immediately), prompt template expansion, and queueing
 			if (this.ctx.session.isStreaming) {
-				if (text !== recordedHistoryText) this.ctx.editor.addToHistory(text);
+				if (text !== recordedHistoryText) this.ctx.editor.addToHistory(text, historyContext);
 				// Enter already cleared the editor synchronously. A later clear here
 				// can erase the tail of an unbracketed paste arriving after Enter.
 				this.ctx.editor.imageLinks = undefined;
@@ -1533,7 +1543,7 @@ export class InputController {
 				this.ctx.updatePendingMessagesDisplay();
 				this.ctx.ui.requestRender();
 			}
-			if (text !== recordedHistoryText) this.ctx.editor.addToHistory(text);
+			if (text !== recordedHistoryText) this.ctx.editor.addToHistory(text, historyContext);
 		};
 		// A queued `/compact` waits for Enter input taken before it to reach the session (skill
 		// expansion, `/queue`, mode commands), the same as for the follow-up key.
@@ -1628,6 +1638,7 @@ export class InputController {
 	async #runSideFileCommand(
 		text: string,
 		draft: { detach?: () => void; restore: () => void },
+		historyContext: HistoryContext,
 		recordedHistoryText?: string,
 	): Promise<boolean> {
 		const invocation = this.#resolveSideFileCommand(text);
@@ -1641,7 +1652,7 @@ export class InputController {
 			this.ctx.showError(error instanceof Error ? error.message : String(error));
 			return true;
 		}
-		if (text !== recordedHistoryText) this.ctx.editor.addToHistory(text);
+		if (text !== recordedHistoryText) this.ctx.editor.addToHistory(text, historyContext);
 		draft.detach?.();
 		const args = invocation.args.trim();
 		await this.ctx.handleBtwCommand(question, undefined, args ? `/${command.name} ${args}` : `/${command.name}`);
@@ -1686,6 +1697,7 @@ export class InputController {
 	/** Submit editor text to the focused subagent session (chat and continue shortcuts only). */
 	async #submitToFocusedSession(text: string, streamingBehavior: "steer" | "followUp"): Promise<void> {
 		const target = this.ctx.viewSession;
+		const historyContext = { sessionId: target.sessionManager.getSessionId(), cwd: getProjectDir() };
 		const draftText = this.ctx.editor.getText();
 		const images = this.ctx.editor.pendingImages.length > 0 ? [...this.ctx.editor.pendingImages] : undefined;
 		const imageLinks =
@@ -1710,7 +1722,7 @@ export class InputController {
 				this.#recordSlashCommandUsage(text);
 				const input = images ? { images, imageLinks } : undefined;
 				if ((await executeBuiltinSlashCommand(text, { ctx: this.ctx, input })) === true) {
-					if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text);
+					if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text, historyContext);
 					return;
 				}
 			}
@@ -1720,10 +1732,14 @@ export class InputController {
 		if (
 			text &&
 			!this.#matchesBuiltinSlashCommand(text) &&
-			(await this.#runSideFileCommand(text, {
-				detach: () => this.#detachSideSubmission(draftText, images),
-				restore: () => this.#restoreResetSubmission(text),
-			}))
+			(await this.#runSideFileCommand(
+				text,
+				{
+					detach: () => this.#detachSideSubmission(draftText, images),
+					restore: () => this.#restoreResetSubmission(text),
+				},
+				historyContext,
+			))
 		) {
 			return;
 		}
@@ -1734,7 +1750,7 @@ export class InputController {
 			return; // editor text not cleared: Editor does not auto-clear on submit
 		}
 		const isContinueShortcut = streamingBehavior === "steer" && !images && (text === "." || text === "c");
-		this.ctx.editor.clearDraft(text);
+		this.ctx.editor.clearDraft(text, historyContext);
 		try {
 			if (isContinueShortcut) {
 				await target.resume();
@@ -1945,6 +1961,7 @@ export class InputController {
 	async #invokeSkillCommand(
 		text: string,
 		streamingBehavior: "steer" | "followUp",
+		historyContext: HistoryContext,
 		recordedHistoryText: string | undefined,
 		images?: ImageContent[],
 		imageLinks?: (string | undefined)[],
@@ -1973,9 +1990,9 @@ export class InputController {
 		// The wrapper is already filed; a distinct returned skill invocation is new input.
 		const historyText = text === recordedHistoryText ? undefined : text;
 		if (preserveDraft) {
-			if (historyText !== undefined) this.ctx.editor.addToHistory(historyText);
+			if (historyText !== undefined) this.ctx.editor.addToHistory(historyText, historyContext);
 		} else {
-			this.ctx.editor.clearDraft(historyText);
+			this.ctx.editor.clearDraft(historyText, historyContext);
 		}
 		try {
 			const dispatched = await invokeSkillCommandFromText(this.ctx, text, streamingBehavior, {
@@ -2033,6 +2050,7 @@ export class InputController {
 		text: string,
 		options: {
 			historyText?: string;
+			historyContext?: HistoryContext;
 			images?: ImageContent[];
 			imageLinks?: (string | undefined)[];
 			/** The submitted draft already left the editor; anything there now is newer. Restored on failure. */
@@ -2062,7 +2080,7 @@ export class InputController {
 			: images
 				? images.map(() => undefined)
 				: undefined;
-		if (options.detachedText === undefined) this.ctx.editor.clearDraft(options.historyText);
+		if (options.detachedText === undefined) this.ctx.editor.clearDraft(options.historyText, options.historyContext);
 
 		this.releaseStaleYieldCompaction();
 		if (this.ctx.session.isCompacting || this.ctx.yieldCompaction) {
@@ -2173,6 +2191,7 @@ export class InputController {
 			await this.#submitToFocusedSession(text, "followUp");
 			return;
 		}
+		const historyContext = { sessionId: this.ctx.sessionManager.getSessionId(), cwd: getProjectDir() };
 
 		// Detach before the first await: another Ctrl+Enter cannot submit the
 		// same draft, and later typing belongs to the next submission.
@@ -2210,7 +2229,7 @@ export class InputController {
 			} finally {
 				hooksDone.resolve();
 			}
-			await this.#dispatchFollowUp(text, images, imageLinks, origin, admitted);
+			await this.#dispatchFollowUp(text, images, imageLinks, origin, historyContext, admitted);
 		} finally {
 			admitted();
 		}
@@ -2221,6 +2240,7 @@ export class InputController {
 		text: string,
 		images: ImageContent[] | undefined,
 		imageLinks: (string | undefined)[] | undefined,
+		historyContext: HistoryContext,
 		recordedHistoryText?: string,
 	): boolean {
 		const guest = this.ctx.collabGuest;
@@ -2229,7 +2249,7 @@ export class InputController {
 			restoreDetachedDraft(this.ctx.editor, text, images, imageLinks);
 			this.ctx.showStatus("This collab link is read-only — prompting is disabled");
 		} else if (guest.sendPrompt(text, images)) {
-			if (text !== recordedHistoryText) this.ctx.editor.addToHistory(text);
+			if (text !== recordedHistoryText) this.ctx.editor.addToHistory(text, historyContext);
 		} else {
 			restoreDetachedDraft(this.ctx.editor, text, images, imageLinks);
 			this.ctx.showStatus("Collab prompt was not queued; returned it to the editor");
@@ -2243,6 +2263,7 @@ export class InputController {
 		images: ImageContent[] | undefined,
 		imageLinks: (string | undefined)[] | undefined,
 		origin: ConversationPosition,
+		historyContext: HistoryContext,
 		admitted: () => void,
 	): Promise<void> {
 		// Ctrl+Enter detached the draft before the first await, so a side command
@@ -2257,7 +2278,7 @@ export class InputController {
 			}
 			return;
 		}
-		if (this.#deliverFollowUpToGuest(text, images, imageLinks)) return;
+		if (this.#deliverFollowUpToGuest(text, images, imageLinks, historyContext)) return;
 
 		// Local compaction first: free text gets queued via
 		// `queueCompactionMessage`, and `/skill:*` rides the same queue so a
@@ -2272,11 +2293,11 @@ export class InputController {
 			if (
 				text &&
 				!this.#matchesBuiltinSlashCommand(text) &&
-				(await this.#runSideFileCommand(text, restoreSideDraft))
+				(await this.#runSideFileCommand(text, restoreSideDraft, historyContext))
 			) {
 				return;
 			}
-			this.ctx.queueCompactionMessage(text, "followUp", images, { preserveDraft: true });
+			this.ctx.queueCompactionMessage(text, "followUp", images, { preserveDraft: true, historyContext });
 			return;
 		}
 
@@ -2295,7 +2316,7 @@ export class InputController {
 					!this.#guestRefusesSlash(text) &&
 					!this.#resolveSideFileCommand(text)
 				) {
-					this.ctx.editor.addToHistory(text);
+					this.ctx.editor.addToHistory(text, historyContext);
 					recordedHistoryText = text;
 				}
 				const slashResult = await executeBuiltinSlashCommand(text, {
@@ -2318,7 +2339,7 @@ export class InputController {
 			}
 		}
 
-		if (text && (await this.#runSideFileCommand(text, restoreSideDraft, recordedHistoryText))) return;
+		if (text && (await this.#runSideFileCommand(text, restoreSideDraft, historyContext, recordedHistoryText))) return;
 
 		// The dispatcher can leave a skill or unknown slash command unconsumed for a guest.
 		// Refuse it without touching the composer: this submission was detached before the awaits.
@@ -2327,12 +2348,23 @@ export class InputController {
 			this.ctx.showStatus(`${text.split(/\s+/, 1)[0]} is host-only during a collab session`);
 			return;
 		}
-		if (this.#deliverFollowUpToGuest(text, images, imageLinks, recordedHistoryText)) return;
+		if (this.#deliverFollowUpToGuest(text, images, imageLinks, historyContext, recordedHistoryText)) return;
 
 		// Skill commands invoke through the custom-message path regardless of
 		// which keybinding submitted them. Enter routes them as `steer`;
 		// Ctrl+Enter (this handler) routes them as `followUp`.
-		if (text && (await this.#invokeSkillCommand(text, "followUp", recordedHistoryText, images, imageLinks, true))) {
+		if (
+			text &&
+			(await this.#invokeSkillCommand(
+				text,
+				"followUp",
+				historyContext,
+				recordedHistoryText,
+				images,
+				imageLinks,
+				true,
+			))
+		) {
 			return;
 		}
 
@@ -2345,7 +2377,7 @@ export class InputController {
 		};
 
 		if (this.ctx.session.isStreaming) {
-			if (text !== recordedHistoryText) this.ctx.editor.addToHistory(text);
+			if (text !== recordedHistoryText) this.ctx.editor.addToHistory(text, historyContext);
 			try {
 				await this.ctx.withLocalSubmission(
 					text,
@@ -2365,7 +2397,7 @@ export class InputController {
 		}
 
 		// Not streaming — just submit normally
-		if (text !== recordedHistoryText) this.ctx.editor.addToHistory(text);
+		if (text !== recordedHistoryText) this.ctx.editor.addToHistory(text, historyContext);
 		try {
 			await this.ctx.withLocalSubmission(
 				text,
