@@ -52,8 +52,8 @@ describe("wrapFetchForExtraCa", () => {
 
 	it("loads the CA bundle from a path and seeds the system root store", async () => {
 		const caPath = path.join(tmpDir, "corp.pem");
-		await Bun.write(caPath, SAMPLE_PEM);
 		Bun.env.NODE_EXTRA_CA_CERTS = caPath;
+		await Bun.write(caPath, SAMPLE_PEM);
 
 		const { fetchImpl, calls } = makeRecordingFetch();
 		const wrapped = wrapFetchForExtraCa(fetchImpl);
@@ -69,8 +69,8 @@ describe("wrapFetchForExtraCa", () => {
 
 	it("accepts an extensionless path per Node's NODE_EXTRA_CA_CERTS contract", async () => {
 		const caPath = path.join(tmpDir, "corp-ca");
-		await Bun.write(caPath, SAMPLE_PEM);
 		Bun.env.NODE_EXTRA_CA_CERTS = caPath;
+		await Bun.write(caPath, SAMPLE_PEM);
 
 		const { fetchImpl, calls } = makeRecordingFetch();
 		const wrapped = wrapFetchForExtraCa(fetchImpl);
@@ -91,8 +91,8 @@ describe("wrapFetchForExtraCa", () => {
 
 	it("appends to existing tls.ca without re-seeding system roots", async () => {
 		const caPath = path.join(tmpDir, "corp.pem");
-		await Bun.write(caPath, SAMPLE_PEM);
 		Bun.env.NODE_EXTRA_CA_CERTS = caPath;
+		await Bun.write(caPath, SAMPLE_PEM);
 
 		const { fetchImpl, calls } = makeRecordingFetch();
 		const wrapped = wrapFetchForExtraCa(fetchImpl);
@@ -106,8 +106,8 @@ describe("wrapFetchForExtraCa", () => {
 
 	it("invalidates the cache when the bundle file is rewritten", async () => {
 		const caPath = path.join(tmpDir, "rotating.pem");
-		await Bun.write(caPath, SAMPLE_PEM);
 		Bun.env.NODE_EXTRA_CA_CERTS = caPath;
+		await Bun.write(caPath, SAMPLE_PEM);
 
 		const { fetchImpl, calls } = makeRecordingFetch();
 		const wrapped = wrapFetchForExtraCa(fetchImpl);
@@ -136,8 +136,8 @@ describe("wrapFetchForExtraCa", () => {
 
 	it("is idempotent — wrapping a wrapped fetch returns the same reference", async () => {
 		const caPath = path.join(tmpDir, "corp.pem");
-		await Bun.write(caPath, SAMPLE_PEM);
 		Bun.env.NODE_EXTRA_CA_CERTS = caPath;
+		await Bun.write(caPath, SAMPLE_PEM);
 
 		const { fetchImpl } = makeRecordingFetch();
 		const once = wrapFetchForExtraCa(fetchImpl);

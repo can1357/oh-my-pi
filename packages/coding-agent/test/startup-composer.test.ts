@@ -49,6 +49,7 @@ import {
 	cfgTuiMaxInlineImages,
 	cfgTuiResizeScrollback,
 } from "@oh-my-pi/pi-coding-agent/modes/settings";
+import { testLifetime } from "../../utils/test/helpers/mock-restores";
 
 class CountingTerminal extends VirtualTerminal {
 	starts = 0;
@@ -104,6 +105,7 @@ afterEach(() => {
 
 describe("outer startup collaboration gate", () => {
 	it.each(["completes", "fails"] as const)("keeps guest mutations gated until outer startup %s", async result => {
+		const life = testLifetime();
 		const originalProject = getProjectDir();
 		const originalIsTTY = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
 		onTestFinished(() => {
@@ -169,6 +171,7 @@ describe("outer startup collaboration gate", () => {
 			outcome.resolve("agent");
 			return testSession.session;
 		});
+		life.assertLive();
 		Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
 		const authStorage = await AuthStorage.create(path.join(testSession.tempDir, "startup-auth.db"));
 		beginStartupComposer({

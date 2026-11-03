@@ -67,6 +67,7 @@ describe("SessionManager.continueRecent /new boundary", () => {
 	});
 
 	it("skips an explicit /new boundary on a different terminal and continues the latest non-empty session", async () => {
+		const life = testLifetime();
 		const old = SessionManager.create(cwd);
 		old.appendMessage({ role: "user", content: "pre-new work", timestamp: 1 });
 		old.appendMessage(makeAssistantMessage());
@@ -90,6 +91,7 @@ describe("SessionManager.continueRecent /new boundary", () => {
 		// Closing a terminal tab/window changes its TTY identity, so the next
 		// process has no breadcrumb pointing at the empty boundary: -c skips
 		// the 0-turn stub and continues the latest non-empty transcript.
+		life.assertLive();
 		process.env.TMUX_PANE = "%new-boundary-relaunched-terminal";
 		const relaunched = await SessionManager.continueRecent(cwd);
 		try {
@@ -131,6 +133,7 @@ describe("SessionManager.continueRecent /new boundary", () => {
 	});
 
 	it("-c skips an empty newest stub when the breadcrumb belongs to another project", async () => {
+		const life = testLifetime();
 		const old = SessionManager.create(cwd);
 		old.appendMessage({ role: "user", content: "real work", timestamp: 1 });
 		old.appendMessage(makeAssistantMessage());
@@ -141,6 +144,7 @@ describe("SessionManager.continueRecent /new boundary", () => {
 
 		// All writes below share one terminal, so the breadcrumb points at the
 		// foreign project while -c runs in cwd: the different-cwd branch.
+		life.assertLive();
 		process.env.TMUX_PANE = "%new-boundary-skip-empty-terminal";
 		const stubFile = SessionManager.createEmptySessionFile(cwd);
 		expect(fs.existsSync(stubFile)).toBe(true);

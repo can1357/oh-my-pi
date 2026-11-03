@@ -19,6 +19,7 @@ import { AuthStorage } from "@oh-my-pi/pi-ai";
 import { runModelsListing } from "@oh-my-pi/pi-coding-agent/cli/models-cli";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { getProjectAgentDir, TempDir } from "@oh-my-pi/pi-utils";
+import { testLifetime } from "../../utils/test/helpers/mock-restores";
 
 let tmp: TempDir;
 let extPath: string;
@@ -136,6 +137,7 @@ afterAll(async () => {
 });
 
 test("omp models surfaces extension-registered providers (issue #905)", async () => {
+	const life = testLifetime();
 	const authStorage = await AuthStorage.create(dbPath);
 	try {
 		const modelRegistry = new ModelRegistry(authStorage);
@@ -145,6 +147,7 @@ test("omp models surfaces extension-registered providers (issue #905)", async ()
 		onTestFinished(() => {
 			process.stdout.write = originalWrite;
 		});
+		life.assertLive();
 		process.stdout.write = ((chunk: string | Uint8Array) => {
 			captured.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"));
 			return true;
@@ -167,6 +170,7 @@ test("omp models surfaces extension-registered providers (issue #905)", async ()
 });
 
 test("omp models does not execute ambient hooks while retaining explicit providers", async () => {
+	const life = testLifetime();
 	const authStorage = await AuthStorage.create(":memory:");
 	try {
 		const modelRegistry = new ModelRegistry(authStorage);
@@ -175,6 +179,7 @@ test("omp models does not execute ambient hooks while retaining explicit provide
 		onTestFinished(() => {
 			process.stdout.write = originalWrite;
 		});
+		life.assertLive();
 		process.stdout.write = ((chunk: string | Uint8Array) => {
 			captured.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"));
 			return true;
@@ -217,6 +222,7 @@ test("omp models emits extension shutdown after listing (issue #6297)", async ()
 });
 
 test("omp models explicit-only mode resolves a package and excludes settings providers", async () => {
+	const life = testLifetime();
 	const authStorage = await AuthStorage.create(":memory:");
 	try {
 		const modelRegistry = new ModelRegistry(authStorage);
@@ -225,6 +231,7 @@ test("omp models explicit-only mode resolves a package and excludes settings pro
 		onTestFinished(() => {
 			process.stdout.write = originalWrite;
 		});
+		life.assertLive();
 		process.stdout.write = ((chunk: string | Uint8Array) => {
 			captured.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"));
 			return true;
@@ -250,6 +257,7 @@ test("omp models explicit-only mode resolves a package and excludes settings pro
 });
 
 test("omp models prints invalid models.yml schema errors before listing output", async () => {
+	const life = testLifetime();
 	const modelsPath = tmp.join("invalid-models.yml");
 	await fs.writeFile(
 		modelsPath,
@@ -280,6 +288,7 @@ test("omp models prints invalid models.yml schema errors before listing output",
 		onTestFinished(() => {
 			process.stdout.write = originalWrite;
 		});
+		life.assertLive();
 		Reflect.set(process.stdout, "write", (chunk: string | Uint8Array) => {
 			captured.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"));
 			return true;

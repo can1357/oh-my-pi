@@ -23,8 +23,11 @@
  * an export): a callback runs what a binding holds when it is called, not what it held when
  * registered.
  *
- * A put-back an async body can still run after an `await` is reported even when cleanup covers it,
- * unless `testLifetime().assertLive()` guards it: an abandoned body runs it during a later test.
+ * Cleanup does not make a late write safe. Every write an async body can run after an `await` is
+ * reported, the first install as much as a put-back, whenever the file has cleanup for that place:
+ * an abandoned body runs the write during a later test, after that cleanup has run, and leaves the
+ * value behind. Only `testLifetime().assertLive()` before the write, or a write the body reaches
+ * before its first `await`, earns silence. A place with no cleanup at all is left alone.
  *
  * A hook or `onTestFinished` cleanup also has to run at all. Bun 1.4.4 runs a test's `afterEach`
  * hooks innermost scope first, each scope in registration order, then its `onTestFinished`
@@ -698,7 +701,9 @@ function suspendsBefore(facts: FileFacts, flow: Flow, cleanup: Node, start?: Nod
 	if (awaitsIn(facts, flow.test, 0, flow.at.range[0])) return true;
 	for (const [i, helper] of flow.via.entries())
 		if (helper.async && awaitsIn(facts, helper, 0, (flow.calls[i - 1] ?? cleanup).range[0])) return true;
-	return flow.at.parent?.type === "AwaitExpression";
+	// `await helper()` by itself is not a suspension before the helper's own statements: the call
+	// runs them synchronously, up to the helper's first `await`, which the loop above covers.
+	return false;
 }
 
 /** A cleanup call must itself be an expression statement, not part of another expression. */
@@ -904,6 +909,20 @@ function guardedByLifetime(facts: FileFacts, write: Node): boolean {
 			return false;
 		return !awaitsIn(facts, fn, statement.range[1], write.range[0]);
 	});
+}
+
+/**
+ * Is a write a test reaches through same-file helpers guarded where the test calls them? A
+ * `life.assertLive()` before that call stops a body that outlived its test before it enters the
+ * helper, which is the only place the test can guard. It counts only while no helper in the chain
+ * suspends between the call and the write: after such an `await` the test can end with the helper
+ * still inside, and the guard at the call has already passed.
+ */
+function guardedAtCall(facts: FileFacts, flow: Flow, write: Node): boolean {
+	if (flow.via.length === 0) return false;
+	for (const [i, helper] of flow.via.entries())
+		if (helper.async && awaitsIn(facts, helper, 0, (flow.calls[i - 1] ?? write).range[0])) return false;
+	return guardedByLifetime(facts, flow.at);
 }
 
 /**
@@ -1295,6 +1314,31 @@ function writeRegisteredPromptly(facts: FileFacts, path: string, write: Node): b
 	);
 }
 
+/**
+ * Does any cleanup of `test` write `path`, however the rules judge it: a callback of an `afterEach`
+ * of a covering scope, or of an `onTestFinished` the test registers, `async` and generator
+ * callbacks included. Such cleanup names the place as one the test is expected to leave as it
+ * found it, which is what makes a write the body reaches after an `await` a leak into a later test.
+ */
+function cleanupWrites(facts: FileFacts, test: Node, path: string): boolean {
+	const writesPath = (callback: Node): boolean => {
+		let found = false;
+		walk(facts.context, callback, n => {
+			if (!found && sharedTargets(facts, n).includes(path)) found = true;
+		});
+		return found;
+	};
+	const scopes = coveringScopes(facts, test);
+	for (const call of facts.calls) {
+		if (testApi(facts.context, node(call.callee)) !== "afterEach") continue;
+		if (!scopes.includes(enclosingFunction(call))) continue;
+		if (registered(facts, call).some(writesPath)) return true;
+	}
+	return facts.finishers.some(
+		finisher => finisherApplies(facts, finisher, test) && registered(facts, finisher).some(writesPath),
+	);
+}
+
 /** Does no hook that can suspend run before `cleanup` for `test`? Records the first one in `block`. */
 function unblocked(facts: FileFacts, test: Node, cleanup: Node, block: HookBlock): boolean {
 	const before = suspendingHookBefore(facts, test, cleanup);
@@ -1658,17 +1702,20 @@ function judgePutBacks(facts: FileFacts): void {
 					hookPutsBack(facts, flow.test, write.path, block) ||
 					envOwnerPutsBack(facts, flow.test, write.path) ||
 					putBackRegisteredPromptly(facts, write.path, replaces, flow.test, block);
+				const late =
+					suspendsBefore(facts, flow, write.node, write.replaced) &&
+					!guardedByLifetime(facts, write.node) &&
+					!guardedAtCall(facts, flow, write.node);
 				if (covered) {
-					// Covered or not, a put-back the body reaches only after an `await` is a hazard: if the
-					// test times out, the abandoned body runs it during a later test and overwrites that
-					// test's value.
-					if (
-						write.putsBack &&
-						suspendsBefore(facts, flow, write.node, write.replaced) &&
-						!guardedByLifetime(facts, write.node)
-					)
+					// Cleanup that outlives the test does not make a late write safe: when the test times
+					// out, the abandoned body runs this write during a later test, after that cleanup has
+					// run, and replaces that test's value. A first install is as late as a put-back.
+					if (late)
 						// A later write of another value is a second install, not a put-back.
-						messageId = putsBackSaved(facts, write.node, write.path) ? "putBackRunsLate" : "writeRunsLate";
+						messageId =
+							write.putsBack && putsBackSaved(facts, write.node, write.path)
+								? "putBackRunsLate"
+								: "writeRunsLate";
 				} else if (write.putsBack) {
 					if (suspendsBefore(facts, flow, write.node, write.replaced))
 						messageId = block.hook ? "putBackSkippedByHook" : "putBackSkippedByTimeout";
@@ -1679,6 +1726,10 @@ function judgePutBacks(facts: FileFacts): void {
 					const registeredAs = putBackRegisteredAnywhere(facts, flow.test, write.path);
 					if (registeredAs === "registered") messageId = "putBackRegisteredLate";
 					else if (registeredAs === "generator") messageId = "putBackInGenerator";
+					// Cleanup the rules do not credit (an async hook, a late callback) still runs while the
+					// abandoned body is suspended, so this write lands in a later test with nothing left to
+					// undo it.
+					else if (late && cleanupWrites(facts, flow.test, write.path)) messageId = "writeRunsLate";
 				}
 			} else {
 				if (hookPutsBack(facts, flow.test, write.path, block) || envOwnerPutsBack(facts, flow.test, write.path))
@@ -1820,7 +1871,7 @@ export default {
 				putBackRunsLate:
 					"This put-back of `{{target}}` runs after an `await`. If the test times out, the abandoned body runs it during a later test and overwrites that test's value. Leave the put-back to the `onTestFinished`, `afterEach` or `installEnvRestores()` that already covers `{{target}}`, or create `const life = testLifetime()` before the test's first `await` and call `life.assertLive()` right before it.",
 				writeRunsLate:
-					"This write to `{{target}}` runs after an `await`. If the test times out, the abandoned body runs it during a later test and replaces that test's value. Create `const life = testLifetime()` before the test's first `await` and call `life.assertLive()` right before this write.",
+					"This write to `{{target}}` runs after an `await`. If the test times out, the abandoned body runs it during a later test and replaces that test's value, after the cleanup for `{{target}}` has already run. Write it before the test's first `await`, or create `const life = testLifetime()` before that `await` and call `life.assertLive()` right before this write.",
 				putBackWritesUnsavedValue:
 					"The cleanup registered for this write to `{{target}}` writes a value that was not saved from `{{target}}`, so it does not put the original back. Save it first (`const saved = {{target}}`) and restore that, or `delete` it.",
 				cleanupWritesUnsavedValue:

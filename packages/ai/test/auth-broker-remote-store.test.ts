@@ -43,7 +43,14 @@ async function waitUntil(predicate: () => boolean, timeoutMs = 2_000): Promise<v
 describe("RemoteAuthCredentialStore SSE integration", () => {
 	// The async afterEach can time out, and Bun then skips `onTestFinished` and the later hooks;
 	// these owners still put the variables and the spies back at the next test and when the scope ends.
-	installEnvRestores(["ANTHROPIC_API_KEY", "ANTHROPIC_OAUTH_TOKEN"]);
+	// The broker variables are the ones `withEnv(...)` sets around the discovery tests below.
+	installEnvRestores([
+		"ANTHROPIC_API_KEY",
+		"ANTHROPIC_OAUTH_TOKEN",
+		"OMP_AUTH_BROKER_URL",
+		"OMP_AUTH_BROKER_TOKEN",
+		"OMP_AUTH_BROKER_ACCOUNT_POOL_FILE",
+	]);
 	installMockRestores();
 	let tempDir = "";
 	let store: SqliteAuthCredentialStore | undefined;

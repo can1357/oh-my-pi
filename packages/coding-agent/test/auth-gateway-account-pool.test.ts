@@ -112,6 +112,7 @@ describe("auth-gateway account pool", () => {
 	});
 
 	test("check uses effective PI_CONFIG_FILES account policies", async () => {
+		const life = testLifetime();
 		const overlayPath = path.join(tempDir, "overlay.yml");
 		await Promise.all([
 			Bun.write(
@@ -141,6 +142,7 @@ describe("auth-gateway account pool", () => {
 				].join("\n"),
 			),
 		]);
+		life.assertLive();
 		process.env.PI_CONFIG_FILES = overlayPath;
 		resetSettingsForTest();
 		let output = "";

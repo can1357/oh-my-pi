@@ -6,6 +6,7 @@ import { __buildLegacyPiPackageRootOverrides } from "@oh-my-pi/pi-coding-agent/e
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { __renderLegacyPiVirtualModule, collectBundledPiEntries } from "../../scripts/legacy-pi-virtual-module";
 import type { BundledPiEntry } from "../../scripts/legacy-pi-virtual-module";
+import { testLifetime } from "../../../utils/test/helpers/mock-restores";
 
 const bundledEntries = await collectBundledPiEntries();
 const bundledModuleKeys = new Set(bundledEntries.map(entry => entry.key));
@@ -35,6 +36,7 @@ async function runRegistryProbe(entries: BundledPiEntry[], source: string): Prom
 // a generated registry or duplicate key list.
 describe("legacy pi compat compiled-mode subpath overrides (issue #3442)", () => {
 	it("does not evaluate unrelated host modules while loading the registry", async () => {
+		const life = testLifetime();
 		using tempDir = TempDir.createSync("@omp-legacy-pi-loaders-");
 		const alphaPath = path.join(tempDir.path(), "alpha.ts");
 		const betaPath = path.join(tempDir.path(), "beta.ts");
@@ -62,6 +64,7 @@ export const finalBeta = Reflect.get(globalThis, "__betaLoads") ?? 0;
 			Reflect.deleteProperty(globalThis, "__alphaLoads");
 			Reflect.deleteProperty(globalThis, "__betaLoads");
 		});
+		life.assertLive();
 		Reflect.deleteProperty(globalThis, "__alphaLoads");
 		Reflect.deleteProperty(globalThis, "__betaLoads");
 		// The generated registry has a runtime-selected temp path; importing it is the loading boundary under test.

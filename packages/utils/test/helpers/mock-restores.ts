@@ -11,6 +11,46 @@ let testGeneration = 0;
 /** Marks the start of a test or the end of a test file. Called by the test preload and the helper. */
 export function advanceTestGeneration(): void {
 	testGeneration++;
+	// A put-back Bun skipped (a hook of the test that just ended timed out) runs here instead,
+	// before the next test's body, exactly as `installEnvRestores()` puts its variables back.
+	runDeferredPutBacks();
+}
+
+/** The put-backs of overrides shared helpers installed, newest first; each runs at most once. */
+const deferredPutBacks: (() => void)[] = [];
+
+function runDeferredPutBacks(): void {
+	// Newest first: an inner override saved the value an outer one installed.
+	while (deferredPutBacks.length > 0) deferredPutBacks.pop()!();
+}
+
+/**
+ * Hands `putBack` to the test runtime, and returns the function that runs it where the helper's
+ * own body would have. A shared helper that replaces state around an awaited callback
+ * (`try { await fn() } finally { putBack() }`) cannot put it back on its own: when the test times
+ * out inside the callback, the `finally` runs during a later test, and deletes or overwrites that
+ * test's value instead.
+ *
+ * The returned function runs `putBack` once, whoever calls it first. The runtime calls it when the
+ * test ends (`onTestFinished`, after the test's `afterEach` hooks), at the start of the next test
+ * and at the end of the file (both through {@link advanceTestGeneration}), so a put-back survives
+ * a hook timeout that makes Bun skip `onTestFinished`. The helper calls it where its body reaches
+ * its own cleanup, and only while its test is still live, so two overrides in one test still nest.
+ */
+export function deferPutBack(putBack: () => void): () => void {
+	let done = false;
+	const run = (): void => {
+		if (done) return;
+		done = true;
+		putBack();
+	};
+	deferredPutBacks.push(run);
+	// A helper called from a `beforeAll`/`afterAll` hook has no test to finish; the next test's
+	// `advanceTestGeneration()` and the file's own end still run the put-back.
+	try {
+		onTestFinished(runDeferredPutBacks);
+	} catch {}
+	return run;
 }
 
 /**

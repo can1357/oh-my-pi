@@ -8,7 +8,7 @@ import type { MCPStdioServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { runPrintMode } from "@oh-my-pi/pi-coding-agent/modes/print-mode";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import { installEnvRestores, installMockRestores } from "../../utils/test/helpers/mock-restores";
+import { installEnvRestores, installMockRestores, testLifetime } from "../../utils/test/helpers/mock-restores";
 
 installMockRestores();
 // The async afterEach can time out, and Bun then skips the later hooks; this owner still puts
@@ -109,6 +109,7 @@ function printSession(manager: MCPManager, refreshGate?: Promise<void>, onRefres
 
 describe("headless MCP readiness", () => {
 	it("offers all three tools to the first print prompt, independent of a slow tools/call", async () => {
+		const life = testLifetime();
 		const { manager } = await startServers();
 		const slowConnection = manager.getConnection("slowcall");
 		if (!slowConnection) throw new Error("slowcall did not complete its handshake");
@@ -116,6 +117,7 @@ describe("headless MCP readiness", () => {
 		const refreshStarted = Promise.withResolvers<void>();
 		const refreshGate = Promise.withResolvers<void>();
 		const capture = printSession(manager, refreshGate.promise, refreshStarted.resolve);
+		life.assertLive();
 		Bun.env.OMP_MCP_TIMEOUT_MS = "2500";
 		delete Bun.env.OMP_MCP_REQUIRE_READY;
 		const run = runPrintMode(capture.session, { mode: "text", initialMessage: "use tools", mcpManager: manager });
@@ -130,8 +132,10 @@ describe("headless MCP readiness", () => {
 	}, 4_000);
 
 	it("names slowstart on stderr and skips the turn with exit 1 when strict readiness is required", async () => {
+		const life = testLifetime();
 		const { manager } = await startServers();
 		const capture = printSession(manager);
+		life.assertLive();
 		Bun.env.OMP_MCP_TIMEOUT_MS = "100";
 		Bun.env.OMP_MCP_REQUIRE_READY = "1";
 		const output: string[] = [];
@@ -153,8 +157,10 @@ describe("headless MCP readiness", () => {
 	}, 4_000);
 
 	it("warns but still prompts with available tools when strict mode is disabled", async () => {
+		const life = testLifetime();
 		const { manager } = await startServers();
 		const capture = printSession(manager);
+		life.assertLive();
 		Bun.env.OMP_MCP_TIMEOUT_MS = "80";
 		delete Bun.env.OMP_MCP_REQUIRE_READY;
 		const output: string[] = [];
@@ -174,10 +180,12 @@ describe("headless MCP readiness", () => {
 	}, 3_000);
 
 	it("reports a failed configured server and rejects strict print startup", async () => {
+		const life = testLifetime();
 		const manager = new MCPManager(import.meta.dir);
 		managers.push(manager);
 		await manager.connectServers({ broken: { type: "stdio", command: "" } }, {});
 		const capture = printSession(manager);
+		life.assertLive();
 		Bun.env.OMP_MCP_REQUIRE_READY = "1";
 		const output: string[] = [];
 		const stderrSpy = spyOn(process.stderr, "write").mockImplementation((chunk: string | Uint8Array) => {
@@ -248,6 +256,7 @@ describe("headless MCP readiness", () => {
 	}, 1_000);
 
 	it("dispatches a recovery builtin before the strict gate so reauth can attempt the failed server", async () => {
+		const life = testLifetime();
 		// Regression: the strict readiness gate used to skip every
 		// `promptTextFor` call, so `omp -p '/mcp reauth <name>'` exited before
 		// dispatching — the one command that could repair the failed server
@@ -266,6 +275,7 @@ describe("headless MCP readiness", () => {
 			},
 		);
 		const capture = printSession(manager);
+		life.assertLive();
 		Bun.env.OMP_MCP_TIMEOUT_MS = "100";
 		Bun.env.OMP_MCP_REQUIRE_READY = "1";
 		const output: string[] = [];

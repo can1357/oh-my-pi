@@ -20,6 +20,7 @@ import { formatBytes } from "@oh-my-pi/pi-tui/render/render-utils";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 import { cfgReadSummarizeEnabled, cfgToolsOutputMaxColumns } from "@oh-my-pi/pi-coding-agent/tools/settings";
+import { testLifetime } from "../../utils/test/helpers/mock-restores";
 
 function textOutput(result: AgentToolResult<ReadToolDetails>): string {
 	return result.content
@@ -126,6 +127,7 @@ describe("read tool single-pass file access", () => {
 	});
 
 	it("does not re-read a file it already materialized", async () => {
+		const life = testLifetime();
 		// Bracket context and the snapshot hash each used to pull the whole file
 		// through `Bun.file(path).text()`, so a ranged read of one file opened it
 		// four times. Any reintroduced whole-file re-read trips this counter.
@@ -139,6 +141,7 @@ describe("read tool single-pass file access", () => {
 		const originalFile: FileFactory = Bun.file;
 		const bunNamespace = Bun as unknown as { file: FileFactory };
 		let wholeFileReads = 0;
+		life.assertLive();
 		bunNamespace.file = ((target: Parameters<FileFactory>[0], ...rest: unknown[]) => {
 			const factory = originalFile as unknown as (t: unknown, ...r: unknown[]) => Bun.BunFile;
 			const handle = factory(target, ...rest);

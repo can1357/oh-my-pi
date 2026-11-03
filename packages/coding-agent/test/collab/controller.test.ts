@@ -427,6 +427,7 @@ describe("interactive collaboration startup", () => {
 	});
 
 	it("restores the local session and saved hosting policy after dedicated CLI join activation fails", async () => {
+		const life = testLifetime();
 		const finished = new Error("finished observing failed join");
 		testSession.sessionManager.appendMessage({ role: "user", content: "dedicated local transcript", timestamp: 0 });
 		await testSession.sessionManager.ensureOnDisk();
@@ -469,6 +470,7 @@ describe("interactive collaboration startup", () => {
 		});
 		spyOn(ModelRegistry.prototype, "refreshInBackground").mockImplementation(() => {});
 		spyOn(pluginHelpers, "preloadPluginRoots").mockResolvedValue(undefined);
+		life.assertLive();
 		Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
 		const authStorage = await AuthStorage.create(path.join(tmp, "failed-join-auth.db"));
 		try {

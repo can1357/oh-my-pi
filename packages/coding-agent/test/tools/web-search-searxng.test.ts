@@ -8,6 +8,7 @@ import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { searchSearXNG } from "@oh-my-pi/pi-coding-agent/web/search/providers/searxng";
 import { SearchProviderError } from "@oh-my-pi/pi-coding-agent/web/search/types";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { testLifetime } from "../../../utils/test/helpers/mock-restores";
 
 describe("SearXNG web search provider", () => {
 	afterEach(() => {
@@ -341,10 +342,12 @@ describe("SearXNG web search provider", () => {
 	});
 
 	it("falls back to SEARXNG_ENDPOINT/SEARXNG_TOKEN when config.yml leaves them blank or null", async () => {
+		const life = testLifetime();
 		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "searxng-blank-"));
 		try {
 			await Bun.write(path.join(agentDir, "config.yml"), ["searxng:", '  endpoint: ""', "  token:", ""].join("\n"));
 			await Settings.init({ agentDir });
+			life.assertLive();
 			process.env.SEARXNG_ENDPOINT = "https://searx-env.example.org";
 			process.env.SEARXNG_TOKEN = "env-token";
 

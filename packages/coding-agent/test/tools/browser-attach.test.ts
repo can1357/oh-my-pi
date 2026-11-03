@@ -41,7 +41,7 @@ import {
 	type Target,
 	TimeoutError,
 } from "puppeteer-core";
-import { installEnvRestores } from "../../../utils/test/helpers/mock-restores";
+import { installEnvRestores, testLifetime } from "../../../utils/test/helpers/mock-restores";
 import { rejectionOf } from "../helpers/rejection";
 import { chromiumAvailable } from "./chromium-probe";
 
@@ -1047,6 +1047,7 @@ describe("pickElectronTarget relay path", () => {
 	});
 
 	it("tells the model to retry when Puppeteer never sees the selected tab, with release-build class names", async () => {
+		const life = testLifetime();
 		// A connected browser with no targets, so Puppeteer's own wait times out and builds its own error.
 		const transport: ConnectionTransport = {
 			send(message) {
@@ -1061,6 +1062,7 @@ describe("pickElectronTarget relay path", () => {
 		const puppeteerBrowser = await (await loadPuppeteer()).connect({ transport, defaultViewport: null });
 		const nameDescriptor = Object.getOwnPropertyDescriptor(TimeoutError, "name")!;
 		// Release builds minify class names, so Puppeteer names its timeout like this there.
+		life.assertLive();
 		Object.defineProperty(TimeoutError, "name", { ...nameDescriptor, value: "Og" });
 		try {
 			const browser = Object.assign(makeBrowser([]), {

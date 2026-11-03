@@ -148,6 +148,7 @@ describe("handleSkillList", () => {
 	});
 
 	test("keeps stdout to TSV rows and sends warnings to stderr", async () => {
+		const life = testLifetime();
 		const directory = await fs.mkdtemp(path.join(os.tmpdir(), `omp-skills-list-${Snowflake.next()}-`));
 		for (const root of ["first", "second"]) {
 			await fs.mkdir(path.join(directory, root, "calendar"), { recursive: true });
@@ -165,6 +166,7 @@ describe("handleSkillList", () => {
 		let stderr = "";
 		const originalStdoutWrite = process.stdout.write;
 		const originalStderrWrite = process.stderr.write;
+		life.assertLive();
 		process.stdout.write = ((chunk: string | Uint8Array) => {
 			stdout += chunk.toString();
 			return true;

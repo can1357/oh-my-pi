@@ -502,7 +502,9 @@ it("t", async () => {
 });`,
 		expected: ["put-back-on-test-finished@15"],
 	},
-	"lifetime-created-in-a-helper-does-not-guard-its-put-back": {
+	// The write is reported first (one report per test and place); the put-back below is the same
+	// shape, and a lifetime a helper creates silences neither.
+	"lifetime-created-in-a-helper-guards-neither-its-write-nor-its-put-back": {
 		body: `
 import { testLifetime } from "./helpers/mock-restores";
 async function capture(): Promise<void> {
@@ -521,10 +523,9 @@ async function capture(): Promise<void> {
 	}
 }
 it("t", async () => {
-	await Promise.resolve();
 	await capture();
 });`,
-		expected: ["put-back-on-test-finished@17"],
+		expected: ["put-back-on-test-finished@12"],
 	},
 	"environment-owner-helper-covers-its-variables": {
 		body: `
@@ -540,6 +541,83 @@ it("t", async () => {
 	});
 });`,
 		expected: [],
+	},
+	"first-install-after-an-await-is-reported-although-the-owner-covers-it": {
+		body: `
+import { installEnvRestores } from "./helpers/mock-restores";
+installEnvRestores(["HOME"]);
+it("t", async () => {
+	const dir = await Promise.resolve("/tmp");
+	process.env.HOME = dir;
+});`,
+		expected: ["put-back-on-test-finished@8"],
+	},
+	"first-install-after-an-await-is-silent-when-a-lifetime-guards-it": {
+		body: `
+import { installEnvRestores, testLifetime } from "./helpers/mock-restores";
+installEnvRestores(["HOME"]);
+it("t", async () => {
+	const life = testLifetime();
+	const dir = await Promise.resolve("/tmp");
+	life.assertLive();
+	process.env.HOME = dir;
+});`,
+		expected: [],
+	},
+	"first-install-after-an-await-is-reported-when-an-async-hook-puts-it-back": {
+		body: `
+let saved: string | undefined;
+beforeEach(() => {
+	saved = process.env.HOME;
+});
+afterEach(async () => {
+	await Promise.resolve();
+	if (saved === undefined) delete process.env.HOME;
+	else process.env.HOME = saved;
+});
+it("t", async () => {
+	const dir = await Promise.resolve("/tmp");
+	process.env.HOME = dir;
+});`,
+		expected: ["put-back-on-test-finished@15"],
+	},
+	"first-install-after-an-await-is-silent-when-no-cleanup-names-the-place": {
+		body: `
+it("t", async () => {
+	const dir = await Promise.resolve("/tmp");
+	process.env.HOME = dir;
+});`,
+		expected: [],
+	},
+	"a-guard-at-the-call-covers-a-write-a-synchronous-helper-makes": {
+		body: `
+import { installEnvRestores, testLifetime } from "./helpers/mock-restores";
+installEnvRestores(["HOME"]);
+function useTemp(dir: string): void {
+	process.env.HOME = dir;
+}
+it("t", async () => {
+	const life = testLifetime();
+	const dir = await Promise.resolve("/tmp");
+	life.assertLive();
+	useTemp(dir);
+});`,
+		expected: [],
+	},
+	"a-guard-at-the-call-does-not-cover-a-write-after-the-helper-s-own-await": {
+		body: `
+import { installEnvRestores, testLifetime } from "./helpers/mock-restores";
+installEnvRestores(["HOME"]);
+async function useTemp(dir: string): Promise<void> {
+	await Promise.resolve();
+	process.env.HOME = dir;
+}
+it("t", async () => {
+	const life = testLifetime();
+	life.assertLive();
+	await useTemp("/tmp");
+});`,
+		expected: ["put-back-on-test-finished@8"],
 	},
 	"environment-owner-helper-does-not-cover-other-variables": {
 		body: `

@@ -5,25 +5,31 @@ import type { Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import { isEnoent } from "@oh-my-pi/pi-utils";
+import { deferPutBack, testLifetime } from "../../../utils/test/helpers/mock-restores";
 
+/**
+ * Runs `fn` with `overrides` applied to the environment, and puts every variable it names back.
+ *
+ * The put-back belongs to the test runtime ({@link deferPutBack}), not to this awaited body: a test
+ * that times out inside `fn` leaves a body that resumes during a later test, and a `finally` here
+ * would then delete or overwrite that test's value. The runtime puts the variables back when the
+ * test ends, and at the start of the next test when a hook timeout made Bun skip that.
+ *
+ * This body still puts them back as soon as `fn` returns, so two calls in one test nest, but only
+ * while its test is live. A caller that reaches `withEnv` only after an `await` still writes the
+ * variables late: guard such a call with `testLifetime().assertLive()`, or set the variables
+ * before the test's first `await`.
+ */
 export async function withEnv(
 	overrides: Record<string, string | undefined>,
 	fn: () => void | Promise<void>,
 ): Promise<void> {
+	const life = testLifetime();
 	const previous = new Map<string, string | undefined>();
 	for (const key of Object.keys(overrides)) {
 		previous.set(key, Bun.env[key]);
 	}
-	try {
-		for (const [key, value] of Object.entries(overrides)) {
-			if (value === undefined) {
-				delete Bun.env[key];
-			} else {
-				Bun.env[key] = value;
-			}
-		}
-		await fn();
-	} finally {
+	const putBack = deferPutBack(() => {
 		for (const [key, value] of previous.entries()) {
 			if (value === undefined) {
 				delete Bun.env[key];
@@ -31,6 +37,20 @@ export async function withEnv(
 				Bun.env[key] = value;
 			}
 		}
+	});
+	for (const [key, value] of Object.entries(overrides)) {
+		if (value === undefined) {
+			delete Bun.env[key];
+		} else {
+			Bun.env[key] = value;
+		}
+	}
+	try {
+		await fn();
+	} finally {
+		// An abandoned body resumes during a later test, whose values these are not; the runtime
+		// has already put this test's back.
+		if (!life.ended) putBack();
 	}
 }
 

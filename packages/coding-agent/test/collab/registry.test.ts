@@ -14,7 +14,7 @@ import {
 	resolveCollabHostLink,
 } from "@oh-my-pi/pi-coding-agent/collab/registry";
 import { IpcConnection, IpcServer, ipcEndpoint } from "@oh-my-pi/pi-natives";
-import { installMockRestores } from "../../../utils/test/helpers/mock-restores";
+import { installMockRestores, testLifetime } from "../../../utils/test/helpers/mock-restores";
 
 installMockRestores();
 
@@ -666,6 +666,7 @@ describe("collab registry", () => {
 	});
 
 	it("refuses a symlinked registry directory instead of listing or pruning through it", async () => {
+		const life = testLifetime();
 		// A planted symlink must not turn listing (which prunes malformed
 		// `*.json`) into a way to delete files in an unrelated directory.
 		const target = await tempDir();
@@ -675,6 +676,7 @@ describe("collab registry", () => {
 		await fs.symlink(target, link, process.platform === "win32" ? "junction" : "dir");
 		// Exercise the Windows branch on Unix CI too; native Windows uses a junction.
 		for (const platform of new Set([process.platform, "win32"])) {
+			life.assertLive();
 			Object.defineProperty(process, "platform", { configurable: true, value: platform });
 			await expect(listCollabHosts({ dir: link })).rejects.toThrow();
 			expect(await Bun.file(bystander).text()).toBe("{not registry metadata");

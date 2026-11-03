@@ -100,6 +100,7 @@ describe("rewriteImports", () => {
 			if (hasOriginal) globals.__omp_import__ = originalOmpImport;
 		});
 		if (hasOriginal) {
+			life.assertLive();
 			delete globals.__omp_import__;
 		}
 

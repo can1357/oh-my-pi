@@ -11,6 +11,7 @@ import {
 } from "../../src/dap/config";
 import type { DapResolvedAdapter } from "../../src/dap/types";
 import { injectPluginDirRoots } from "../../src/discovery/helpers";
+import { testLifetime } from "../../../utils/test/helpers/mock-restores";
 
 const tempDirs: string[] = [];
 const ORIGINAL_OMP_PLUGIN_DIR = process.env.OMP_PLUGIN_DIR;
@@ -193,6 +194,7 @@ describe("DAP adapter configuration", () => {
 	});
 
 	it("loads plugin DAP adapters from plugin config files", async () => {
+		const life = testLifetime();
 		const cwd = await makeTempDir("omp-dap-config-plugin-");
 		const pluginRoot = path.join(cwd, "plugins", "acme-debug");
 		await fs.mkdir(path.join(pluginRoot, ".claude-plugin"), { recursive: true });
@@ -212,6 +214,7 @@ describe("DAP adapter configuration", () => {
 				},
 			}),
 		);
+		life.assertLive();
 		process.env.OMP_PLUGIN_DIR = path.join(cwd, "plugins");
 		process.env.OMP_MARKETPLACE_DIR = path.join(cwd, "marketplaces");
 		await injectPluginDirRoots(cwd, [pluginRoot], cwd);

@@ -51,6 +51,7 @@ describe("getVertexAccessToken impersonated_service_account ADC", () => {
 
 	it("rejects a malformed service_account_impersonation_url before any network call", async () => {
 		const adcPath = path.join(tmpDir, "impersonated-bad-url.json");
+		Bun.env.GOOGLE_APPLICATION_CREDENTIALS = adcPath;
 		await Bun.write(
 			adcPath,
 			JSON.stringify({
@@ -66,7 +67,6 @@ describe("getVertexAccessToken impersonated_service_account ADC", () => {
 				},
 			}),
 		);
-		Bun.env.GOOGLE_APPLICATION_CREDENTIALS = adcPath;
 
 		const calls: string[] = [];
 		const fetchImpl: FetchImpl = async input => {

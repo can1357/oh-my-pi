@@ -52,6 +52,7 @@ function createHost() {
 }
 
 test("raises a main-frame wait past its timeout as Puppeteer's timeout, still named TimeoutError", async () => {
+	const life = testLifetime();
 	// The tab worker loads Puppeteer before any navigation; the timeout is built from that load.
 	await loadPuppeteer();
 	const events = new Set<string>();
@@ -64,6 +65,7 @@ test("raises a main-frame wait past its timeout as Puppeteer's timeout, still na
 	onTestFinished(() => {
 		Object.defineProperty(TimeoutError, "name", nameDescriptor);
 	});
+	life.assertLive();
 	Object.defineProperty(TimeoutError, "name", { ...nameDescriptor, value: "Og" });
 	// Real time on purpose: the wait polls the frame on a timer and must stop reading at its deadline.
 	const late = setTimeout(() => events.add("load"), 90);

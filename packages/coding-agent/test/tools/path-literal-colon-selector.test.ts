@@ -19,7 +19,7 @@ import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { runGrepCommand } from "../../src/cli/grep-cli";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { GrepTool } from "../../src/tools/grep";
-import { installMockRestores } from "../../../utils/test/helpers/mock-restores";
+import { installMockRestores, testLifetime } from "../../../utils/test/helpers/mock-restores";
 
 installMockRestores();
 
@@ -100,8 +100,10 @@ describe("literal colon filename resolution (issue #4618)", () => {
 		});
 
 		it("uses only confirmed Windows literal paths", async () => {
+			const life = testLifetime();
 			const literal = "base.txt:1-2";
 			await Bun.write(path.join(tmpDir, literal), "stream\n");
+			life.assertLive();
 			Object.defineProperty(process, "platform", { configurable: true, value: "win32" });
 
 			const expectedLiteral = { path: literal };
@@ -123,6 +125,7 @@ describe("literal colon filename resolution (issue #4618)", () => {
 		});
 
 		it("keeps the selector when Windows lstat falsely reports a missing stream as present", async () => {
+			const life = testLifetime();
 			// Windows can intermittently answer `lstat("file.md:1-40")` with the base
 			// file's metadata although that NTFS stream does not exist and `open`
 			// fails with ENOENT. The splitters dropped the selector and `read` opened
@@ -134,6 +137,7 @@ describe("literal colon filename resolution (issue #4618)", () => {
 			const realLstat = fs.promises.lstat;
 			const realLstatSync = fs.lstatSync;
 			const realBunFile = Bun.file.bind(Bun);
+			life.assertLive();
 			Object.defineProperty(process, "platform", { configurable: true, value: "win32" });
 			spyOn(fs.promises, "lstat").mockImplementation((async (target: fs.PathLike) =>
 				String(target) === stream ? baseStat : await realLstat(target)) as typeof fs.promises.lstat);

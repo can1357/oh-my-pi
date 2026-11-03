@@ -5,6 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { arFixture } from "./fixtures";
 import { extractArchive } from "../../src/ar/open";
+import { testLifetime } from "../helpers/mock-restores";
 
 const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
 
@@ -131,6 +132,7 @@ describe("extractArchive symlink handling", () => {
 	});
 
 	test.skipIf(process.platform === "win32")("refuses to follow an occupied symlink-copy destination", async () => {
+		const life = testLifetime();
 		const root = await fsPromises.mkdtemp(path.join(os.tmpdir(), "omp-ar-copy-link-collision-"));
 		const dest = path.join(root, "extract");
 		const target = path.join(root, "outside.txt");
@@ -140,6 +142,7 @@ describe("extractArchive symlink handling", () => {
 			await Bun.write(target, "existing outside content");
 			await fsPromises.symlink(target, occupied);
 			if (!platformDescriptor) throw new Error("process.platform descriptor is unavailable");
+			life.assertLive();
 			Object.defineProperty(process, "platform", { ...platformDescriptor, value: "win32" });
 			vi.spyOn(fsPromises, "symlink").mockRejectedValueOnce(
 				Object.assign(new Error("Symlink privilege denied"), { code: "EPERM" }),

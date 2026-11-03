@@ -15,6 +15,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { VcsGitRepo } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
+import { testLifetime } from "../../utils/test/helpers/mock-restores";
 
 const NUMSTAT = [{ path: "src/a.ts", added: 1, removed: 0 }];
 let authStorage: AuthStorage | undefined;
@@ -61,8 +62,10 @@ afterEach(() => {
 
 describe("runAgenticCommit fallback signalling (issue #7835)", () => {
 	it("reports usedFallback when the fallback commit path is forced", async () => {
+		const life = testLifetime();
 		mockModelResolution();
 		const commitCreateSpy = await setupRepoMocks();
+		life.assertLive();
 		process.env.PI_COMMIT_TEST_FALLBACK = "true";
 
 		const result = await runAgenticCommit({ noChangelog: true, push: false, dryRun: false });

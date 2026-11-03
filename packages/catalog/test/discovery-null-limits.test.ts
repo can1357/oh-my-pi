@@ -61,14 +61,13 @@ describe("discovery extra-CA fallback fetch", () => {
 
 	it("carries the NODE_EXTRA_CA_CERTS bundle on the fallback fetch", async () => {
 		const caPath = path.join(tmpDir, "corp.pem");
-		await Bun.write(caPath, SAMPLE_PEM);
 		Bun.env.NODE_EXTRA_CA_CERTS = caPath;
-
 		const inits: (RequestInit & { tls?: { ca?: string | string[] } })[] = [];
 		globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
 			inits.push((init ?? {}) as (typeof inits)[number]);
 			return new Response(MODELS_BODY, { status: 200, headers: { "Content-Type": "application/json" } });
 		}) as typeof globalThis.fetch;
+		await Bun.write(caPath, SAMPLE_PEM);
 
 		// No `fetch` injected — the wrapped globalThis.fetch fallback must be used.
 		const models = await fetchOpenAICompatibleModels({
@@ -85,8 +84,8 @@ describe("discovery extra-CA fallback fetch", () => {
 
 	it("leaves a caller-injected fetch untouched", async () => {
 		const caPath = path.join(tmpDir, "corp.pem");
-		await Bun.write(caPath, SAMPLE_PEM);
 		Bun.env.NODE_EXTRA_CA_CERTS = caPath;
+		await Bun.write(caPath, SAMPLE_PEM);
 
 		const inits: (RequestInit & { tls?: { ca?: string | string[] } })[] = [];
 		const injectedFetch = async (_input: string | URL | Request, init?: RequestInit) => {

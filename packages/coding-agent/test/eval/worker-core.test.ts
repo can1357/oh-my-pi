@@ -12,6 +12,7 @@ import type {
 	WorkerOutbound,
 } from "@oh-my-pi/pi-coding-agent/eval/js/worker-protocol";
 import { postmortem } from "@oh-my-pi/pi-utils";
+import { testLifetime } from "../../../utils/test/helpers/mock-restores";
 
 interface WorkerHarness {
 	send(message: WorkerInbound): void;
@@ -138,6 +139,7 @@ describe("WorkerCore", () => {
 	});
 
 	it("re-init while a same-realm run is live does not crash the process", async () => {
+		const life = testLifetime();
 		const first = createWorkerHarness();
 		const second = createWorkerHarness();
 		const cwd = process.cwd();
@@ -147,6 +149,7 @@ describe("WorkerCore", () => {
 		const gate = Promise.withResolvers<void>();
 		const entered = Promise.withResolvers<void>();
 		onTestFinished(() => Reflect.deleteProperty(globalThis, "__omp_worker_core_gate"));
+		life.assertLive();
 		(globalThis as { __omp_worker_core_gate?: { entered(): void; wait: Promise<void> } }).__omp_worker_core_gate = {
 			entered: () => entered.resolve(),
 			wait: gate.promise,
@@ -202,6 +205,7 @@ describe("WorkerCore", () => {
 	});
 
 	it("concurrent inits under a live same-realm run stay process-safe", async () => {
+		const life = testLifetime();
 		const first = createWorkerHarness();
 		const second = createWorkerHarness();
 		const third = createWorkerHarness();
@@ -213,6 +217,7 @@ describe("WorkerCore", () => {
 		const gate = Promise.withResolvers<void>();
 		const entered = Promise.withResolvers<void>();
 		onTestFinished(() => Reflect.deleteProperty(globalThis, "__omp_worker_core_gate"));
+		life.assertLive();
 		(globalThis as { __omp_worker_core_gate?: { entered(): void; wait: Promise<void> } }).__omp_worker_core_gate = {
 			entered: () => entered.resolve(),
 			wait: gate.promise,
@@ -289,6 +294,7 @@ describe("WorkerCore", () => {
 	});
 
 	it("first init while a same-realm run is live fails via init-failed and recovers", async () => {
+		const life = testLifetime();
 		const first = createWorkerHarness();
 		const second = createWorkerHarness(); // never initialized: no runtime exists yet
 		const cwd = process.cwd();
@@ -297,6 +303,7 @@ describe("WorkerCore", () => {
 		const gate = Promise.withResolvers<void>();
 		const entered = Promise.withResolvers<void>();
 		onTestFinished(() => Reflect.deleteProperty(globalThis, "__omp_worker_core_gate"));
+		life.assertLive();
 		(globalThis as { __omp_worker_core_gate?: { entered(): void; wait: Promise<void> } }).__omp_worker_core_gate = {
 			entered: () => entered.resolve(),
 			wait: gate.promise,
@@ -355,6 +362,7 @@ describe("WorkerCore", () => {
 	});
 
 	it("keeps the process cwd while another cell is mid-run", async () => {
+		const life = testLifetime();
 		const dirA = await fs.mkdtemp(path.join(os.tmpdir(), "omp-cwd-a-"));
 		const dirB = await fs.mkdtemp(path.join(os.tmpdir(), "omp-cwd-b-"));
 		const chdirs: string[] = [];
@@ -388,6 +396,7 @@ describe("WorkerCore", () => {
 		const gate = Promise.withResolvers<void>();
 		const entered = Promise.withResolvers<void>();
 		onTestFinished(() => Reflect.deleteProperty(globalThis, "__omp_worker_cwd_gate"));
+		life.assertLive();
 		(globalThis as { __omp_worker_cwd_gate?: { entered(): void; wait: Promise<void> } }).__omp_worker_cwd_gate = {
 			entered: () => entered.resolve(),
 			wait: gate.promise,
@@ -493,6 +502,7 @@ describe("WorkerCore", () => {
 	});
 
 	it("keeps a suspended run on its own artifact root while an overlapping run uses another", async () => {
+		const life = testLifetime();
 		const dirA = await fs.mkdtemp(path.join(os.tmpdir(), "omp-artifacts-a-"));
 		const dirB = await fs.mkdtemp(path.join(os.tmpdir(), "omp-artifacts-b-"));
 		await Bun.write(path.join(dirA, "5.eval.log"), "from A");
@@ -508,6 +518,7 @@ describe("WorkerCore", () => {
 			delete probe.__omp_roots_gate;
 			delete probe.__omp_roots_probe;
 		});
+		life.assertLive();
 		probe.__omp_roots_gate = { entered: () => entered.resolve(), wait: gate.promise };
 		probe.__omp_roots_probe = {};
 		const snapshot = (artifacts: string): SessionSnapshot => ({
