@@ -13,6 +13,10 @@ import { buildResponsesDeltaInput, isOpenAIResponsesStalePreviousResponseError }
 import { ResponsesWebSocketConnection, ResponsesWebSocketTransportError } from "./responses-websocket-connection";
 
 const IDLE_REUSE_MS = 30_000;
+/** Consecutive definite anchor rejections before a logical session stops sending continuation anchors (matches HTTP). */
+const STALE_ANCHOR_LIMIT = 3;
+/** Consecutive pre-send network failures before a logical session sticks to HTTP/SSE. */
+const CONNECT_FAILURE_LIMIT = 2;
 
 export interface ResponsesTransportScope {
 	url: string;
@@ -62,6 +66,8 @@ export class StandardResponsesWebSocketSession {
 			chain: boolean;
 			supportsImageDetailOriginal?: boolean;
 			onSseEvent?: (event: RawSseEvent) => void;
+			/** Reports whether a sent continuation anchor was accepted or definitely rejected as stale. */
+			onChainResult?: (accepted: boolean) => void;
 		},
 	): AsyncGenerator<ResponseStreamEvent> {
 		this.#completed = false;
@@ -106,6 +112,7 @@ export class StandardResponsesWebSocketSession {
 						if (status === undefined || status === 400 || status === 422) {
 							exchangeEnded = true;
 							staleRetry = true;
+							options.onChainResult?.(false);
 							break;
 						}
 					}
@@ -124,6 +131,7 @@ export class StandardResponsesWebSocketSession {
 					if (terminal) {
 						exchangeEnded = true;
 						this.#completed = true;
+						if (chained) options.onChainResult?.(true);
 						if ("response" in event && event.response && typeof event.response === "object") {
 							const response = event.response;
 							if (
@@ -186,13 +194,22 @@ interface TransportSession {
 	sessionId: string;
 	sseOnly: boolean;
 	activeLeases: number;
+	connectFailures: number;
+	staleAnchors: number;
+	chainDisabled: boolean;
 	connection?: SessionConnection;
 }
 
 export interface StandardResponsesWebSocketLease {
 	session: StandardResponsesWebSocketSession;
+	/** Whether repeated anchor rejections disabled continuation for this logical session. */
+	readonly chainDisabled: boolean;
 	/** Mark only the logical entry this lease acquired, never a replacement created after releaseSession/close. */
 	markSseOnly(): void;
+	/** Count a pre-send network failure; returns true once consecutive failures made SSE sticky. */
+	recordConnectFailure(): boolean;
+	/** Count an accepted (resets) or definitely stale (increments) continuation anchor. */
+	recordChainResult(accepted: boolean): void;
 	release(): void;
 }
 
@@ -211,7 +228,15 @@ export class OpenAIResponsesTransportSessions {
 	}
 
 	#discardUnused(key: string, entry: TransportSession): void {
-		if (!entry.sseOnly && entry.activeLeases === 0 && !entry.connection && this.#sessions.get(key) === entry) {
+		if (
+			!entry.sseOnly &&
+			!entry.chainDisabled &&
+			entry.connectFailures === 0 &&
+			entry.staleAnchors === 0 &&
+			entry.activeLeases === 0 &&
+			!entry.connection &&
+			this.#sessions.get(key) === entry
+		) {
 			this.#sessions.delete(key);
 		}
 	}
@@ -226,7 +251,14 @@ export class OpenAIResponsesTransportSessions {
 		const key = this.#key(args.scope);
 		let entry = key ? this.#sessions.get(key) : undefined;
 		if (key && !entry) {
-			entry = { sessionId: args.scope.sessionId!, sseOnly: false, activeLeases: 0 };
+			entry = {
+				sessionId: args.scope.sessionId!,
+				sseOnly: false,
+				activeLeases: 0,
+				connectFailures: 0,
+				staleAnchors: 0,
+				chainDisabled: false,
+			};
 			this.#sessions.set(key, entry);
 		}
 		let cached = entry?.connection;
@@ -262,17 +294,42 @@ export class OpenAIResponsesTransportSessions {
 		leased.busy = true;
 		this.#active.add(leased);
 		let released = false;
+		const current = (): TransportSession | undefined =>
+			key && entry && this.#sessions.get(key) === entry ? entry : undefined;
+		const markSseOnly = (): void => {
+			const owned = current();
+			if (!owned) return;
+			owned.sseOnly = true;
+			const idle = owned.connection;
+			if (idle && !idle.busy) {
+				clearTimeout(idle.timer);
+				idle.session.close();
+				owned.connection = undefined;
+			}
+		};
 		return {
 			session: leased.session,
-			markSseOnly: () => {
-				if (!key || !entry || this.#sessions.get(key) !== entry) return;
-				entry.sseOnly = true;
-				const idle = entry.connection;
-				if (idle && !idle.busy) {
-					clearTimeout(idle.timer);
-					idle.session.close();
-					entry.connection = undefined;
+			get chainDisabled() {
+				return current()?.chainDisabled === true;
+			},
+			markSseOnly,
+			recordConnectFailure: () => {
+				const owned = current();
+				if (!owned) return false;
+				owned.connectFailures++;
+				if (owned.connectFailures < CONNECT_FAILURE_LIMIT) return false;
+				markSseOnly();
+				return true;
+			},
+			recordChainResult: accepted => {
+				const owned = current();
+				if (!owned) return;
+				if (accepted) {
+					owned.staleAnchors = 0;
+					return;
 				}
+				owned.staleAnchors++;
+				if (owned.staleAnchors >= STALE_ANCHOR_LIMIT) owned.chainDisabled = true;
 			},
 			release: () => {
 				if (released) return;
@@ -280,6 +337,9 @@ export class OpenAIResponsesTransportSessions {
 				leased.busy = false;
 				this.#active.delete(leased);
 				if (entry) entry.activeLeases--;
+				// A completed exchange proves the transport; earlier connect failures were transient.
+				const owned = current();
+				if (owned && leased.session.reusable) owned.connectFailures = 0;
 				if (
 					retained &&
 					key &&

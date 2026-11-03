@@ -174,9 +174,13 @@ cannot claim per-generation request IDs or HTTP response-cache headers.
 A healthy retained socket can send incremental `previous_response_id` turns,
 including with `store: false`. Changed history/options, credentials, concurrent
 temporary sockets, or a replacement after the **30-second idle limit** require
-full input without an old socket's anchor. `statefulResponses: false` disables
-continuation. Official HTTP can already use stored stateful chaining independently
-of that socket lifetime; WS is not guaranteed to save traffic or latency there.
+full input without an old socket's anchor. Continuation follows the same opt-outs
+as HTTP chaining: `statefulResponses: false`, `PI_OPENAI_STATEFUL=0`, or a model's
+`compat.statefulResponses: false` sends full history on every WS turn, so set the
+compat flag for gateways that ignore `previous_response_id`. Three consecutive
+stale-anchor rejections stop sending anchors for the logical session. Official HTTP
+can already use stored stateful chaining independently of that socket lifetime; WS
+is not guaranteed to save traffic or latency there.
 
 Injected `previous_response_id` and `background: true` are rejected. A definite
 first-frame stale-anchor rejection permits one full-history resend on the same
@@ -189,8 +193,11 @@ recovery may start an SSE continuation under its own rules, retaining completed
 tool results and never executing incomplete arguments. Caller abort and protocol/
 queue errors do not mark transport incompatibility.
 
-Network downgrade is sticky for the logical session, endpoint and model until
-`releaseSession`/provider-state `close` or a new scope. Embedders retaining provider
+An upgrade rejection (404/405/426/501) or a post-send transport failure makes the
+SSE downgrade sticky for the logical session, endpoint and model until
+`releaseSession`/provider-state `close` or a new scope. A pre-send network failure or
+connect timeout falls back for that request only; a second consecutive one becomes
+sticky, and a completed WS exchange resets the count. Embedders retaining provider
 state must release finished sessions. Calls without a logical session ID do not
 share sticky state; without `providerSessionState`, it lasts only for that call.
 Normal idle retirement is not a downgrade. Codex's protocol and recovery remain

@@ -1277,7 +1277,7 @@ describe("standard OpenAI Responses WebSocket opt-in", () => {
 		});
 	}
 
-	it("bounds a pending handshake by the shorter first-event timeout and keeps its SSE choice", async () => {
+	it("bounds a pending handshake by the shorter first-event timeout and sticks to SSE after a repeat", async () => {
 		// Real Bun socket setup exercises the platform deadline; fake timers cannot drive the handshake.
 		const pendingUpgrade = Promise.withResolvers<Response>();
 		resources.push(async () => {
@@ -1285,14 +1285,49 @@ describe("standard OpenAI Responses WebSocket opt-in", () => {
 		});
 		const fixture = endpoint(undefined, { rejectUpgrade: () => pendingUpgrade.promise });
 		const options = { ...fixture.options, preferWebsockets: true, streamFirstEventTimeoutMs: 100 };
-		const first = await streamOpenAIResponses(fixture.model, fixture.context, options).result();
-		const second = await streamOpenAIResponses(fixture.model, fixture.context, options).result();
-		expect(first.stopReason).toBe("stop");
-		expect(second.stopReason).toBe("stop");
-		expect(fixture.upgrades).toHaveLength(1);
+		for (let call = 0; call < 3; call++) {
+			expect((await streamOpenAIResponses(fixture.model, fixture.context, options).result()).stopReason).toBe(
+				"stop",
+			);
+		}
+		// One timeout falls back for its own request only; the second consecutive one sticks.
+		expect(fixture.upgrades).toHaveLength(2);
 		expect(fixture.requests).toHaveLength(0);
+		expect(fixture.httpRequests).toHaveLength(3);
+	}, 2_000);
+
+	it("keeps WS after a single handshake timeout once a later exchange completes", async () => {
+		const pending: Array<PromiseWithResolvers<Response>> = [];
+		resources.push(async () => {
+			for (const upgrade of pending) upgrade.resolve(new Response("Late upgrade rejection", { status: 426 }));
+		});
+		let upgradeIndex = 0;
+		const fixture = endpoint((socket, _body, index) => send(socket, textEvents("WS", `resp_${index}`)), {
+			rejectUpgrade: () => {
+				upgradeIndex++;
+				if (upgradeIndex !== 1 && upgradeIndex !== 3) return undefined;
+				const upgrade = Promise.withResolvers<Response>();
+				pending.push(upgrade);
+				return upgrade.promise;
+			},
+		});
+		const options = {
+			...fixture.options,
+			preferWebsockets: true,
+			streamFirstEventTimeoutMs: 100,
+			cacheRetention: "none" as const,
+		};
+		const texts: string[] = [];
+		for (let call = 0; call < 4; call++) {
+			const result = await streamOpenAIResponses(fixture.model, fixture.context, options).result();
+			expect(result.stopReason).toBe("stop");
+			texts.push(result.content.map(block => (block.type === "text" ? block.text : "")).join(""));
+		}
+		// Timeout, WS success (resets the count), timeout, WS again: no sticky downgrade.
+		expect(texts).toEqual(["HTTP", "WS", "HTTP", "WS"]);
+		expect(fixture.upgrades).toHaveLength(4);
 		expect(fixture.httpRequests).toHaveLength(2);
-	}, 1_000);
+	}, 3_000);
 
 	it("does not turn a malformed WS frame into an HTTP replay or sticky downgrade", async () => {
 		const fixture = endpoint((socket, _body, index) => {
@@ -1358,5 +1393,51 @@ describe("standard OpenAI Responses WebSocket opt-in", () => {
 		expect(fixture.upgrades).toHaveLength(2);
 		expect(fixture.requests).toHaveLength(2);
 		expect(fixture.httpRequests).toHaveLength(1);
+	});
+
+	it("honors a compat statefulResponses:false opt-out for socket-local continuation", async () => {
+		const fixture = endpoint();
+		const model: Model<"openai-responses"> = {
+			...fixture.model,
+			compat: { ...fixture.model.compat, statefulResponses: false },
+		};
+		const options = { ...fixture.options, preferWebsockets: true };
+		const context: Context = { messages: [...fixture.context.messages] };
+		for (const turn of [1, 2]) {
+			if (turn > 1) context.messages.push({ role: "user", content: `Next ${turn}`, timestamp: turn });
+			const result = await streamSimple(model, context, options).result();
+			expect(result.stopReason).toBe("stop");
+			context.messages.push(result);
+		}
+		expect(fixture.requests).toHaveLength(2);
+		expect(fixture.requests[1]?.body.previous_response_id).toBeUndefined();
+		expect(fixture.requests[1]?.body.input).toHaveLength(3);
+		expect(fixture.upgrades).toHaveLength(1);
+	});
+
+	it("stops sending continuation anchors after three consecutive stale rejections", async () => {
+		const fixture = endpoint((socket, body, index) => {
+			if (body.previous_response_id !== undefined) {
+				send(socket, [
+					{ type: "error", error: { code: "previous_response_not_found", message: "Response expired" } },
+				]);
+				return;
+			}
+			send(socket, textEvents(`FULL ${index}`, `resp_${index}`));
+		});
+		const options = { ...fixture.options, preferWebsockets: true };
+		const context: Context = { messages: [...fixture.context.messages] };
+		for (const turn of [1, 2, 3, 4, 5]) {
+			if (turn > 1) context.messages.push({ role: "user", content: `Next ${turn}`, timestamp: turn });
+			const result = await streamSimple(fixture.model, context, options).result();
+			expect(result.stopReason).toBe("stop");
+			context.messages.push(result);
+		}
+		const anchored = fixture.requests.filter(request => request.body.previous_response_id !== undefined);
+		expect(anchored).toHaveLength(3);
+		// Turn 5 goes straight to full history; every anchored turn cost exactly one rejected frame.
+		expect(fixture.requests).toHaveLength(8);
+		expect(fixture.requests.at(-1)?.body.previous_response_id).toBeUndefined();
+		expect(fixture.upgrades).toHaveLength(1);
 	});
 });

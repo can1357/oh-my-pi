@@ -150,13 +150,14 @@ export interface OpenAIResponsesOptions extends StreamOptions {
 	maxTokensExplicit?: boolean;
 	disableReasoning?: boolean;
 	/**
-	 * Enables or disables `previous_response_id` chaining. WebSockets default to
-	 * socket-local continuation without forcing storage; false sends full history.
-	 * HTTP/SSE chaining forces `store: true` (the platform only resolves stored
-	 * responses). HTTP precedence: this option, then
-	 * `PI_OPENAI_STATEFUL`, then `compat.statefulResponses`, then ON against the
-	 * official OpenAI API and OFF elsewhere. Requires `sessionId` +
-	 * `providerSessionState`. Falls back to a full replay whenever history
+	 * Enables or disables `previous_response_id` chaining. Precedence: this
+	 * option, then `PI_OPENAI_STATEFUL`, then `compat.statefulResponses`, then a
+	 * transport default. WebSockets default ON with socket-local continuation and
+	 * no forced storage; HTTP/SSE defaults ON only against the official OpenAI API
+	 * and forces `store: true` (the platform only resolves stored responses).
+	 * Three consecutive stale-anchor rejections disable chaining for the session.
+	 * HTTP/SSE chaining requires `sessionId` + `providerSessionState`. Falls back
+	 * to a full replay whenever history
 	 * mutates or the server reports a stale id.
 	 */
 	statefulResponses?: boolean;
@@ -547,6 +548,19 @@ function isOpenAIResponsesStatefulEnabled(
 	return $flag("PI_OPENAI_STATEFUL", model.compat.statefulResponses ?? model.compat.officialEndpoint);
 }
 
+/**
+ * Socket-local continuation needs no stored responses, so the official-endpoint
+ * default does not apply. Explicit opt-outs (option, env, compat) still do: a
+ * gateway that ignores `previous_response_id` would silently drop prior turns.
+ */
+function isOpenAIResponsesWebSocketChainEnabled(
+	options: OpenAIResponsesOptions | undefined,
+	model: Model<"openai-responses">,
+): boolean {
+	if (options?.statefulResponses !== undefined) return options.statefulResponses;
+	return $flag("PI_OPENAI_STATEFUL", model.compat.statefulResponses ?? true);
+}
+
 function getOpenAIResponsesChainState(
 	providerSessionState: OpenAIResponsesProviderSessionState,
 	model: Model<"openai-responses">,
@@ -906,7 +920,10 @@ const streamOpenAIResponsesOnce = (
 							}
 							throw error;
 						}
-						webSocketLease.markSseOnly();
+						// A definite upgrade rejection proves the endpoint lacks WS; a network
+						// failure or timeout may be a blip, so only repeated ones stick.
+						if (upgrade?.status !== undefined) webSocketLease.markSseOnly();
+						else webSocketLease.recordConnectFailure();
 						attemptContext.mode = "sse";
 						useWebSocket = false;
 						if (providerSessionState && routingSessionId) {
@@ -961,12 +978,13 @@ const streamOpenAIResponsesOnce = (
 						if ("background" in requestParams && requestParams.background === true) {
 							throw new Error("OpenAI responses WebSocket requests do not support background: true");
 						}
-						const session = webSocketLease!.session;
-						return session.events(requestParams, {
+						const lease = webSocketLease!;
+						return lease.session.events(requestParams, {
 							signal: requestSignal,
-							chain: options?.statefulResponses !== false,
+							chain: isOpenAIResponsesWebSocketChainEnabled(options, model) && !lease.chainDisabled,
 							supportsImageDetailOriginal: model.compat.supportsImageDetailOriginal,
 							onSseEvent: rawSseObserver,
+							onChainResult: accepted => lease.recordChainResult(accepted),
 						});
 					}
 					const headersWithTimeout = { ...headers };

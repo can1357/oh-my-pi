@@ -486,7 +486,7 @@ export interface SessionAdvisorsHost {
 	yieldQueue: YieldQueue;
 	obfuscator(): SecretObfuscator | undefined;
 	providerSessionState: Map<string, ProviderSessionState>;
-	/** Codex-only request preference from the live session setting. */
+	/** Per-model WebSocket preference from the live transport settings (Codex and standard Responses). */
 	preferWebsockets(model: Model): boolean | undefined;
 	onPayload: SimpleStreamOptions["onPayload"] | undefined;
 	onResponse: SimpleStreamOptions["onResponse"] | undefined;

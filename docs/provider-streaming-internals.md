@@ -145,9 +145,10 @@ its separate bounded deadline, while Codex keeps its own channel deadlines.
 
 Logical entries count active leases independently of the retained connection.
 Idle retirement or release removes an entry only when it has no connection, no
-active lease and no sticky downgrade. Sticky entries remain until their existing
-session/provider owner releases them, so a temporary sibling cannot erase a later
-network downgrade or change the identity of an outstanding lease.
+active lease, no sticky downgrade and no pending failure counts (pre-send connect
+failures, stale-anchor rejections, or disabled continuation). Such entries remain
+until their existing session/provider owner releases them, so a temporary sibling
+cannot erase a later network downgrade or change the identity of an outstanding lease.
 
 ### OpenRouter native finish reasons
 
