@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed Wayland input waiting past the end of its `computer` run when the RemoteDesktop permission dialog went unanswered (GNOME can open it behind other windows): the wait now ends shortly before the run's deadline, closes the dialog and fails with `Timeout`
+- Fixed Wayland input waiting past the end of its `computer` run when the RemoteDesktop permission dialog went unanswered (GNOME can open it behind other windows): the wait now ends shortly before the run's deadline, closes the portal session and fails with `Timeout`
 
 ## [18.16.0] - 2026-11-02
 

@@ -120,8 +120,8 @@ pub(super) async fn cancellable<T>(future: impl Future<Output = T>) -> CoreResul
 
 /// Bounds a wait on a portal permission dialog by the current operation's
 /// deadline (the run's end or the caller's reply timeout). GNOME can open the
-/// dialog behind other windows; unbounded, the call outlives its run and the
-/// next run meets a second dialog.
+/// dialog behind other windows; unbounded, the call outlives the run that
+/// made it.
 pub(super) async fn until_deadline<T>(
 	prompt: &str,
 	future: impl Future<Output = T>,
@@ -134,8 +134,9 @@ pub(super) async fn until_deadline<T>(
 		.await
 		.map_err(|_| {
 			DesktopError::timeout(format!(
-				"the {prompt} permission dialog was not answered before the run's deadline, so it was \
-				 closed; it can open behind other windows. Retry and answer it"
+				"the {prompt} permission dialog was not answered before the run's deadline, so its \
+				 session was closed and nothing was sent; the dialog can open behind other windows, \
+				 and answering a stale one does nothing. Retry and answer the new one"
 			))
 		})
 }
