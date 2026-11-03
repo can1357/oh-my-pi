@@ -1,12 +1,14 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, vi } from "bun:test";
 import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { BashInterceptorRule } from "@oh-my-pi/pi-coding-agent/exec/settings";
-import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { DEFAULT_BASH_INTERCEPTOR_RULES } from "@oh-my-pi/pi-coding-agent/exec/settings";
+import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
+import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
+import type { Tool, ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool, type BashToolInput } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { checkBashInterception } from "@oh-my-pi/pi-coding-agent/tools/bash-interceptor";
-import { DEFAULT_BASH_INTERCEPTOR_RULES } from "@oh-my-pi/pi-coding-agent/exec/settings";
 
 function createBashTool(rules: BashInterceptorRule[]): BashTool {
 	const session = {
@@ -380,5 +382,54 @@ describe("BashTool argument validation", () => {
 		await expect(tool.execute("tool-call", args as unknown as BashToolInput)).rejects.toThrow(
 			"Async bash execution is disabled",
 		);
+	});
+});
+
+describe("pre-approval refusal gate", () => {
+	const createSession = (settingsOverrides: Record<string, unknown> = {}, toolNames = ["read", "grep", "bash"]) =>
+		({
+			cwd: process.cwd(),
+			hasUI: true,
+			getSessionFile: () => null,
+			isToolActive: (name: string) => toolNames.includes(name),
+			getToolContext: () => ({ toolNames, hasUI: true, ui: {} }) as unknown as AgentToolContext,
+			settings: Settings.isolated({
+				"async.enabled": true,
+				"launch.enabled": true,
+				"bashInterceptor.enabled": true,
+				"bashInterceptor.patterns": DEFAULT_BASH_INTERCEPTOR_RULES,
+				...settingsOverrides,
+			}),
+		}) as unknown as ToolSession;
+
+	const makeWrapper = (tool: BashTool, select: () => Promise<string>, hasUI = true, rewrittenCommand?: string) => {
+		const runner = {
+			hasHandlers: (event: string) => rewrittenCommand !== undefined && event === "tool_call",
+			emitToolCall: async () => (rewrittenCommand ? { input: { command: rewrittenCommand } } : undefined),
+			consumeToolCallEmitted: () => false,
+			hasUI: () => hasUI,
+			getUIContext: () => ({ select }),
+			hasSessionApproval: () => false,
+			sessionId: "bash-approval-test",
+			cwd: process.cwd(),
+			runScoped: <T>(fn: () => T): T => fn(),
+		} as unknown as ExtensionRunner;
+		return new ExtensionToolWrapper(tool as Tool, runner);
+	};
+
+	const alwaysAskCtx = {
+		settings: Settings.isolated({ "tools.approvalMode": "always-ask" }),
+		toolNames: ["read", "grep", "bash"],
+	} as unknown as AgentToolContext;
+
+	it("rejects an intercepted command in always-ask mode without prompting", async () => {
+		const select = vi.fn(async () => "Approve");
+		const wrapper = makeWrapper(new BashTool(createSession()), select);
+
+		await expect(
+			wrapper.execute("call-1", { command: "cat package.json" }, undefined, undefined, alwaysAskCtx),
+		).rejects.toThrow("Use the `read` tool instead of cat/head/tail");
+
+		expect(select).not.toHaveBeenCalled();
 	});
 });

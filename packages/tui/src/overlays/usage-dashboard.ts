@@ -649,8 +649,8 @@ export interface UsageDashboardOptions {
 export function formatActivityErrorDetail(error: string, homeDir = os.homedir()): string {
 	let text = replaceTabs(sanitizeText(error)).replace(/\s+/g, " ").trim();
 	if (homeDir) {
-		const escaped = homeDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-		const forward = homeDir.replaceAll("\\", "/").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+		const escaped = RegExp.escape(homeDir);
+		const forward = RegExp.escape(homeDir.replaceAll("\\", "/"));
 		text = text.replace(new RegExp(`${escaped}|${forward}`, "gi"), "~");
 	}
 	return text.replace(/\.+$/, "");

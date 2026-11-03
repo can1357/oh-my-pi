@@ -13,7 +13,7 @@
 
 import { type Type, type } from "@oh-my-pi/omptype";
 import { parseLocalRefPointer } from "@oh-my-pi/omptype";
-import { structuredCloneJSON } from "@oh-my-pi/pi-utils";
+import { isRecord, structuredCloneJSON } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import type { Tool, ToolCall } from "../types";
 import { upgradeJsonSchemaTo202012 } from "./schema/draft";
@@ -824,13 +824,16 @@ function normalizeOptionalNullsForSchema(
 	for (const [key, propertySchema] of Object.entries(properties)) {
 		if (!(key in nextValue)) continue;
 		const currentValue = nextValue[key];
-		const isNullish = currentValue === null || currentValue === "null";
+		const isNullish =
+			currentValue === null ||
+			(currentValue === "null" &&
+				!(Object.hasOwn(CONTENT_CARRYING_KEYS, key) && branchMatchesSchema(propertySchema, currentValue, root)));
 		const isInvalidEmptyString =
 			currentValue === "" && !required.has(key) && !branchMatchesSchema(propertySchema, currentValue, root);
 
-		// Strip null/string "null" from optional fields, and strip empty
-		// strings only when the property schema would reject the explicit value.
-		// LLMs sometimes output these placeholders to mean "no value".
+		// Strip optional null placeholders, but preserve literal "null" in content
+		// fields whose schema accepts it (e.g. JSON payloads).
+		// Strip empty strings only when the property schema rejects them.
 		if ((isNullish || isInvalidEmptyString) && !required.has(key)) {
 			if (!changed) {
 				nextValue = { ...nextValue };
@@ -861,7 +864,7 @@ function normalizeOptionalNullsForSchema(
 			currentValue,
 			false,
 			root,
-			insideContent || CONTENT_CARRYING_KEYS.has(key),
+			insideContent || Object.hasOwn(CONTENT_CARRYING_KEYS, key),
 			speculativeUnion,
 		);
 		if (!normalized.changed) continue;
@@ -1063,7 +1066,15 @@ const IDENTIFIER_STRING_KEYS: ReadonlySet<string> = new Set([
 	"label",
 ]);
 
-const CONTENT_CARRYING_KEYS: ReadonlySet<string> = new Set(["content", "input", "body", "text", "command", "code"]);
+const CONTENT_CARRYING_KEYS: Record<string, true> = {
+	content: true,
+	input: true,
+	body: true,
+	text: true,
+	command: true,
+	code: true,
+	payload: true,
+};
 
 const TRAILING_LINE_TERMINATOR_RE = /[\r\n]+$/;
 
@@ -1128,7 +1139,7 @@ function normalizeIdentifierStringWhitespace(
 	let out: Record<string, unknown> = source;
 	for (const [key, entry] of Object.entries(source)) {
 		let nextEntry = entry;
-		if (CONTENT_CARRYING_KEYS.has(key)) continue;
+		if (Object.hasOwn(CONTENT_CARRYING_KEYS, key)) continue;
 		if (IDENTIFIER_STRING_KEYS.has(key)) {
 			const trimmed = trimIdentifierStringLeaf(entry);
 			if (trimmed !== entry) nextEntry = trimmed;
@@ -1604,7 +1615,7 @@ function buildFlattenedPath(root: Record<string, unknown>, steps: FlattenedPathS
  * See https://github.com/can1357/oh-my-pi/issues/8886.
  */
 function normalizeFlattenedArrayProperties(value: unknown): { value: unknown; changed: boolean } {
-	if (!isPlainRecord(value)) return { value, changed: false };
+	if (!isRecord(value)) return { value, changed: false };
 	const source = value as Record<string, unknown>;
 	const out: Record<string, unknown> = {};
 	let changed = false;
@@ -1756,18 +1767,14 @@ type ContextValidationResult =
 	| { success: true; value: unknown }
 	| { success: false; flatIssues: FlatIssue[]; messages: string[] };
 
-function isPlainRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function preserveUnknownRootFields(input: unknown, parsed: unknown): unknown {
-	if (!isPlainRecord(input) || !isPlainRecord(parsed)) return parsed;
+	if (!isRecord(input) || !isRecord(parsed)) return parsed;
 	return { ...input, ...parsed };
 }
 
 /** Put root keys the unrecognized-key repair deleted back onto a validated value, never overwriting a key it kept. */
 function restoreDroppedRootKeys(value: unknown, dropped: ReadonlyMap<string, unknown> | undefined): unknown {
-	if (!dropped || dropped.size === 0 || !isPlainRecord(value)) return value;
+	if (!dropped || dropped.size === 0 || !isRecord(value)) return value;
 	const out: Record<string, unknown> = { ...value };
 	for (const [key, entry] of dropped) {
 		// Own-property check and define: `constructor`/`__proto__` must restore as plain fields.
@@ -1967,7 +1974,7 @@ function splitSpilledValue(text: string): SpillSplit | null {
  * whose string content legitimately contains tag-like text are never touched.
  */
 function healInbandArgSpill(value: unknown): { value: unknown; changed: boolean } {
-	if (!isPlainRecord(value)) return { value, changed: false };
+	if (!isRecord(value)) return { value, changed: false };
 	let changed = false;
 	const out: Record<string, unknown> = { ...value };
 	const recovered: [string, string][] = [];

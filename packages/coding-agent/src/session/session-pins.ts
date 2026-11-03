@@ -32,7 +32,7 @@ export async function loadPinnedSessionIds(agentDir: string = getAgentDir()): Pr
 
 /**
  * Set one session's pin from its current state and persist the set; returns
- * the new pinned state.
+ * whether it was pinned before the update.
  *
  * The read-modify-write runs under the shared cross-process file lock and
  * commits via write-temp-then-atomic-replace, mirroring the MCP config
@@ -51,7 +51,8 @@ async function updateSessionPin(
 	await fs.mkdir(agentDir, { recursive: true });
 	return withFileLock(filePath, async () => {
 		const pinned = await loadPinnedSessionIds(agentDir);
-		if (next(pinned.has(sessionId))) pinned.add(sessionId);
+		const wasPinned = pinned.has(sessionId);
+		if (next(wasPinned)) pinned.add(sessionId);
 		else pinned.delete(sessionId);
 		const tmpPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
 		try {
@@ -61,13 +62,13 @@ async function updateSessionPin(
 			await fs.rm(tmpPath, { force: true }).catch(() => {});
 			throw error;
 		}
-		return pinned.has(sessionId);
+		return wasPinned;
 	});
 }
 
 /** Toggle one session's pin; returns the new pinned state. */
-export function toggleSessionPin(sessionId: string, agentDir: string = getAgentDir()): Promise<boolean> {
-	return updateSessionPin(sessionId, pinned => !pinned, agentDir);
+export async function toggleSessionPin(sessionId: string, agentDir: string = getAgentDir()): Promise<boolean> {
+	return !(await updateSessionPin(sessionId, pinned => !pinned, agentDir));
 }
 
 /** Pin or unpin one session; a no-op when it is already in that state. */
@@ -77,6 +78,11 @@ export async function setSessionPinned(
 	agentDir: string = getAgentDir(),
 ): Promise<void> {
 	await updateSessionPin(sessionId, () => pinned, agentDir);
+}
+
+/** Unpin one session; returns whether it was pinned. */
+export function unpinSession(sessionId: string, agentDir: string = getAgentDir()): Promise<boolean> {
+	return updateSessionPin(sessionId, () => false, agentDir);
 }
 
 /**

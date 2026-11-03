@@ -187,6 +187,20 @@ test("Factory Droid rows carry the base credit rate and a credit-only model is n
 	expect(row("preview-credit-model")?.badges ?? []).not.toContainEqual({ text: "free", tone: "success" });
 });
 
+test("a dated Factory Droid credit rate keeps the narrow price column to the rate alone", () => {
+	const promoted = {
+		...model("factory-droid", "gpt-5.6-sol"),
+		factoryDroidCredits: 2,
+		factoryDroidCreditCards: [
+			{ effectiveFrom: Date.now() - 86_400_000, input: 1.6 },
+			{ effectiveFrom: Date.parse("2099-11-22T00:00:00Z"), input: 2 },
+		],
+	};
+	const hub = openHub({ assign: [], cancel: 0 }, [...MODELS, promoted]);
+	const items = props(hub.describe(withPicker)).items ?? [];
+	expect(items.find(entry => entry.id === "factory-droid/gpt-5.6-sol")?.facts?.price).toBe("$3·15 1.6×");
+});
+
 test("typing changes the order, hits, counts and head total but never the catalogue", () => {
 	const hub = openHub({ assign: [], cancel: 0 });
 	const before = props(hub.describe(withPicker));
