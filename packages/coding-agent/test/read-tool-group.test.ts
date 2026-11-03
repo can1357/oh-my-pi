@@ -58,7 +58,7 @@ describe("ReadToolGroupComponent", () => {
 		expect(rendered.toLowerCase()).not.toContain("ctrl+o");
 	});
 
-	it("uses the enabled dot for completed reads", () => {
+	it("marks a completed read with the green success glyph", () => {
 		const component = new ReadToolGroupComponent();
 		const examplePath = path.resolve("/tmp/example.ts");
 		component.updateArgs({ path: examplePath }, "read-success");
@@ -73,10 +73,8 @@ describe("ReadToolGroupComponent", () => {
 		const rendered = component.render(120).join("\n");
 		const plain = Bun.stripANSI(rendered);
 
-		expect(plain).toContain(themeModule.theme.status.enabled);
-		expect(plain).not.toContain(themeModule.theme.status.success);
-		expect(rendered).toContain(themeModule.theme.fg("text", themeModule.theme.status.enabled));
-		expect(rendered).not.toContain(themeModule.theme.fg("success", themeModule.theme.status.enabled));
+		expect(plain).toContain(`${themeModule.theme.status.success} Read`);
+		expect(rendered).toContain(themeModule.theme.fg("success", themeModule.theme.status.success));
 	});
 
 	it("omits duplicate success marks from multi-read child rows", () => {
@@ -93,8 +91,8 @@ describe("ReadToolGroupComponent", () => {
 		expect(plain).toContain("Read (2)");
 		expect(plain).toContain(`${themeModule.theme.tree.branch} ${onePath}`);
 		expect(plain).toContain(`${themeModule.theme.tree.last} ${twoPath}`);
-		expect(plain).not.toContain(`${themeModule.theme.tree.branch} ${themeModule.theme.status.enabled}`);
-		expect(plain).not.toContain(`${themeModule.theme.tree.last} ${themeModule.theme.status.enabled}`);
+		expect(plain).not.toContain(`${themeModule.theme.tree.branch} ${themeModule.theme.status.success}`);
+		expect(plain).not.toContain(`${themeModule.theme.tree.last} ${themeModule.theme.status.success}`);
 	});
 
 	it("nests one usage row beneath the last path from each read-only turn", () => {

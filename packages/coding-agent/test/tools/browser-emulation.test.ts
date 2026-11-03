@@ -13,7 +13,7 @@ const session: ToolSession = {
 	hasUI: false,
 	getSessionFile: () => null,
 	getSessionSpawns: () => "*",
-	getSessionId: () => OWNER_ID,
+	getEvalKernelOwnerId: () => OWNER_ID,
 	settings: Settings.isolated({
 		"browser.enabled": true,
 		"browser.headless": true,

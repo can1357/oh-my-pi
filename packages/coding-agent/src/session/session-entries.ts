@@ -127,6 +127,11 @@ export interface ModelUsageEntry extends SessionEntryBase {
 	usage: Usage;
 	stopReason: StopReason;
 	errorMessage?: string;
+	/**
+	 * A cache-warm refresh that answered for the conversation as it stood: when it was sent (a hit restarts
+	 * the cache lifetime then) and whether it read the cache. Absent on a failed, replaced or outdated refresh.
+	 */
+	cacheRefresh?: { sentAt: number; hit: boolean };
 }
 
 export interface ThinkingLevelChangeEntry extends SessionEntryBase {
@@ -277,6 +282,8 @@ export interface SessionInitEntry extends SessionEntryBase {
 	task: string;
 	/** Tools available to the agent */
 	tools: string[];
+	/** Names in `tools` presented as `xd://` devices instead of top-level tools (absent from older files). */
+	mountedTools?: string[];
 	/** Agent definition name (for example `scout` or `reviewer`). */
 	agent?: string;
 	/** Semantic model role declared by the agent, retained even after concrete model resolution. */

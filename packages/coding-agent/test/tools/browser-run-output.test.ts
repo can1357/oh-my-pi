@@ -108,12 +108,13 @@ describe("browser handle enrichment — guarded actions", () => {
 	// actionability probe), watches for the page receiving it, and then dispatches
 	// through the page mouse, so a stub stands in for those seams rather than a
 	// raw `click` method. The watch reports the click as delivered.
-	const clickableStub = (mouseClick: () => Promise<void>, extra: Record<string, unknown> = {}): ElementHandle =>
+	/** A clickable handle whose page's mouse press is `mousePress`; the move before it and the release succeed. */
+	const clickableStub = (mousePress: () => Promise<void>, extra: Record<string, unknown> = {}): ElementHandle =>
 		({
 			boundingBox: async () => ({ x: 10, y: 10, width: 20, height: 20 }),
 			evaluate: async () => ({ ok: true, x: 20, y: 20 }),
 			evaluateHandle: async () => ({ evaluate: async () => true, dispose: async () => {} }),
-			frame: { page: () => ({ mouse: { click: mouseClick } }) },
+			frame: { page: () => ({ mouse: { move: async () => {}, down: mousePress, up: async () => {} } }) },
 			type: async () => {},
 			dispose: async () => {},
 			...extra,

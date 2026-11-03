@@ -1,9 +1,10 @@
 /**
  * Contract: the `.`/`c` continue shortcut (`AgentSession.resume`) re-runs a
- * prompt the model has not answered yet without adding any message, and only
- * injects the hidden manual-continue directive after an answered turn.
+ * prompt the model has not answered yet without adding any message, injects
+ * the hidden manual-continue directive after an answered turn, and refuses to
+ * continue an empty conversation.
  */
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn } from "bun:test";
 import * as path from "node:path";
 import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { createMockModel, type MockHandler, type MockModel } from "@oh-my-pi/pi-ai/providers/mock";
@@ -58,7 +59,10 @@ describe("AgentSession.resume", () => {
 		tempDir.removeSync();
 	});
 
-	function createSession(responses: MockHandler[]): { session: AgentSession; mock: MockModel } {
+	function createSession(
+		responses: MockHandler[],
+		registry: ModelRegistry = modelRegistry,
+	): { session: AgentSession; mock: MockModel } {
 		const mock = createMockModel({ responses });
 		const agent = new Agent({
 			getApiKey: () => "test-key",
@@ -70,7 +74,7 @@ describe("AgentSession.resume", () => {
 			agent,
 			sessionManager: SessionManager.inMemory(),
 			settings: Settings.isolated({ "compaction.enabled": false }),
-			modelRegistry,
+			modelRegistry: registry,
 		});
 		return { session, mock };
 	}
@@ -112,6 +116,31 @@ describe("AgentSession.resume", () => {
 
 		// A focused subagent's result reaches its parent only when the observer sees the operator's prompt (#14428).
 		expect(observed).toEqual([["do the thing"]]);
+	});
+
+	it("returns an uncredentialed prompt for retry and refuses context-free resume", async () => {
+		const registry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
+		const getApiKey = spyOn(registry, "getApiKey").mockResolvedValue(undefined);
+		try {
+			const { session, mock } = createSession([{ content: ["answer"] }], registry);
+			const dropped: string[] = [];
+			session.setPromptDropped(prompt => dropped.push(prompt.text));
+
+			await expect(session.prompt("finish this request")).rejects.toThrow("No API key found for anthropic");
+			expect(dropped).toEqual(["finish this request"]);
+			await expect(session.resume()).rejects.toThrow("Nothing to resume");
+			expect(mock.calls).toHaveLength(0);
+			expect(session.agent.state.messages).toEqual([]);
+			getApiKey.mockResolvedValue("test-key");
+			await session.prompt(dropped[0]);
+			await session.waitForIdle();
+			expect(session.agent.state.messages.map(message => [message.role, textOf(message)])).toEqual([
+				["user", "finish this request"],
+				["assistant", "answer"],
+			]);
+		} finally {
+			getApiKey.mockRestore();
+		}
 	});
 
 	it("injects the continue directive after an answered turn", async () => {

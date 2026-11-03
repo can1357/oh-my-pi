@@ -5,7 +5,7 @@
  * follow-up or wake turn never reports a previous run's acceptance.
  */
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import { AgentRegistry, type AgentRegistryApi } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 
 /** Minimal session: the registry only reads `isStreaming` for liveness corroboration. */
@@ -14,7 +14,7 @@ function sessionStub(isStreaming: boolean): AgentSession {
 }
 
 describe("AgentRegistry final-result acceptance", () => {
-	let registry: AgentRegistry;
+	let registry: AgentRegistryApi;
 
 	beforeEach(() => {
 		AgentRegistry.resetGlobalForTests();
