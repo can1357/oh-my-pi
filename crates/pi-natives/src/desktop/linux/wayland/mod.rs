@@ -166,7 +166,7 @@ fn compositor_pid() -> Option<u32> {
 			&raw mut length,
 		)
 	};
-	(status == 0 && credentials.pid > 0).then(|| credentials.pid as u32)
+	(status == 0 && credentials.pid > 0).then_some(credentials.pid as u32)
 }
 
 /// The focused window that display keyboard input goes to. A native client's
