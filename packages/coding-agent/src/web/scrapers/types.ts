@@ -254,6 +254,7 @@ export async function loadPage(url: string, options: LoadPageOptions = {}): Prom
 
 			const content = decodeBody(responseBody.bytes, rawContentType);
 			const blockedBy = botWallOf(response, contentType, content);
+			if (blockedBy && !lastAgent) continue;
 
 			if (!response.ok) {
 				return {

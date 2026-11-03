@@ -64,6 +64,20 @@ describe("read URL refused for one user agent", () => {
 		expect(text).toContain("Revenue grew in the quarter");
 	});
 
+	it("reads the page from the next user agent when curl receives a 200 challenge page", async () => {
+		const server = serveRefusingCurl(
+			() =>
+				new Response('<html><body><form><input name="js_challenge" value="1"/></form></body></html>', {
+					headers: { "content-type": "text/html" },
+				}),
+		);
+
+		const { method, text } = await readText(server);
+
+		expect(method).not.toBe("blocked");
+		expect(text).toContain("Revenue grew in the quarter");
+	});
+
 	it("reads the page from the next user agent before waiting out a 429's Retry-After", async () => {
 		const server = serveRefusingCurl(
 			() => new Response("Too Many Requests", { status: 429, headers: { "retry-after": "10" } }),
