@@ -2007,19 +2007,80 @@ async fn expand_prefix_assignments_in_scope(
 			let _ = writeln!(stderr, "`{}': not a valid identifier", assignment.name);
 			continue;
 		}
-		let one = expand_assignment_once(assignment, shell, params).await?;
-		// `+=` appends to the value the command would otherwise see, which an
-		// enclosing command's own assignment may hold: the variable is copied
-		// here first, so that value is left where it is.
-		if one.append
-			&& let Some(existing) =
-				shell.env().get(one.name.as_str()).map(|(_, variable)| variable.clone())
-		{
-			shell.env_mut().set_in_current_scope(one.name.clone(), existing);
+		let mut one = expand_assignment_once(assignment, shell, params).await?;
+		// A name that holds another name (`declare -n`) is assigned through:
+		// the command runs with the name it holds, as it does in Bash.
+		one.name = followed_name(shell, one.name);
+		// What the command would otherwise see, which the shell keeps: the
+		// value `+=` appends to, and the attributes the temporary assignment
+		// does not carry. An integer one is kept while the value is
+		// appended, so that `declare -i a=5; a+=3` gives 8, as in Bash, and
+		// taken off again after.
+		let visible = shell.env().get(one.name.as_str()).map(|(_, variable)| {
+			(variable.value().to_cow_str(shell).into_owned(), variable.is_treated_as_integer(), variable.is_readonly())
+		});
+		if let Some((_, _, true)) = visible {
+			// Bash reports a readonly name, leaves the shell's value as it
+			// is, and runs the command with an empty one.
+			let _ = writeln!(stderr, "{}: readonly variable", one.name);
+			shell.env_mut().set_in_current_scope(one.name.clone(), empty_variable());
+			continue;
 		}
+		if one.append {
+			let (text, integer) = visible.map_or((String::new(), false), |(text, integer, _)| (text, integer));
+			let mut seed = ShellVariable::new(ShellValue::String(text));
+			if integer {
+				seed.treat_as_integer();
+			}
+			shell.env_mut().set_in_current_scope(one.name.clone(), seed);
+		}
+		let name = one.name.clone();
+		let appended = one.append;
 		assign_expanded(one, shell, true, Some(EnvironmentScope::Command), EnvironmentScope::Command)?;
+		if appended {
+			// The temporary assignment carries none of the attributes the
+			// name had, only the value they gave it.
+			let made = shell
+				.env()
+				.get(name.as_str())
+				.map(|(_, variable)| (variable.value().to_cow_str(shell).into_owned(), variable.is_exported()));
+			if let Some((text, exported)) = made {
+				let mut plain = ShellVariable::new(ShellValue::String(text));
+				if exported {
+					plain.export();
+				}
+				shell.env_mut().set_in_current_scope(name, plain);
+			}
+		}
 	}
 	Ok(())
+}
+
+/// The name a command's prefix assignment reaches: the one a `declare -n`
+/// name holds, as Bash follows it, and the name itself otherwise.
+fn followed_name(shell: &Shell<impl extensions::ShellExtensions>, name: String) -> String {
+	let mut name = name;
+	// A name that holds itself, or a ring of them, is followed only so far.
+	for _ in 0..32 {
+		let Some((_, variable)) = shell.env().get(name.as_str()) else { return name };
+		if !variable.is_treated_as_nameref() {
+			return name;
+		}
+		let held = variable.value().to_cow_str(shell).into_owned();
+		if held.is_empty() || held == name {
+			return name;
+		}
+		name = held;
+	}
+	name
+}
+
+/// A variable with nothing in it, which a command runs with where Bash
+/// leaves one.
+fn empty_variable() -> ShellVariable {
+	let mut variable = ShellVariable::new(ShellValue::String(String::new()));
+	variable.export();
+	variable
 }
 
 async fn execute_command(
