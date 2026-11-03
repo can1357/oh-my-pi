@@ -1951,7 +1951,7 @@ fn should_skip_env_var(key: &str) -> bool {
 	if key.starts_with("BASH_FUNC_") && key.ends_with("%%") {
 		return true;
 	}
-	if is_macos_malloc_stack_logging_var(key) {
+	if is_macos_malloc_stack_logging_var(key) || is_node_ipc_channel_var(key) {
 		return true;
 	}
 
@@ -2006,6 +2006,22 @@ fn should_skip_env_var(key: &str) -> bool {
 			| "HOSTNAME"
 			| "HOSTTYPE"
 	)
+}
+
+/// Node's IPC channel pointers describe the agent's own worker channel. A
+/// tool-call child that inherits them misinterprets fd 3 as its control
+/// channel — `bun run` inside a bash tool call then dies with
+/// `EBADF: Bad file descriptor (posix_spawn())`. Windows env names are
+/// case-insensitive, so `node_channel_fd` binds there like `NODE_CHANNEL_FD`.
+#[cfg(windows)]
+pub fn is_node_ipc_channel_var(key: &str) -> bool {
+	key.eq_ignore_ascii_case("NODE_CHANNEL_FD")
+		|| key.eq_ignore_ascii_case("NODE_CHANNEL_SERIALIZATION_MODE")
+}
+
+#[cfg(not(windows))]
+pub fn is_node_ipc_channel_var(key: &str) -> bool {
+	matches!(key, "NODE_CHANNEL_FD" | "NODE_CHANNEL_SERIALIZATION_MODE")
 }
 
 fn ensure_trailing_newline_for_heredoc(command: &mut String) {
@@ -2784,6 +2800,58 @@ mod tests {
 		assert!(value("GIT_WORK_TREE").is_none(), "GIT_WORK_TREE must not reach child commands");
 		assert!(value("GIT_INDEX_FILE").is_none(), "GIT_INDEX_FILE must not reach child commands");
 		assert_eq!(value("GIT_EDITOR").as_deref(), Some("true"), "unrelated git vars are kept");
+	}
+
+	/// The agent's IPC workers run with `NODE_CHANNEL_FD` set; the embedded
+	/// shell copies the host environment, and that pointer must not reach tool
+	/// commands — `bun run` inside a bash tool call reads it as its control
+	/// channel and dies with `EBADF: Bad file descriptor (posix_spawn())`.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn copy_env_skips_node_channel_vars() {
+		let mut shell = BrushShell::builder()
+			.do_not_inherit_env(true)
+			.profile(ProfileLoadBehavior::Skip)
+			.rc(RcLoadBehavior::Skip)
+			.builtins(default_builtins(BuiltinSet::BashMode))
+			.build()
+			.await
+			.expect("build shell");
+
+		let entries = vec![
+			(std::ffi::OsString::from("NODE_CHANNEL_FD"), std::ffi::OsString::from("3")),
+			(
+				std::ffi::OsString::from("NODE_CHANNEL_SERIALIZATION_MODE"),
+				std::ffi::OsString::from("advanced"),
+			),
+			(std::ffi::OsString::from("OMP_CHANNEL_PROBE"), std::ffi::OsString::from("kept")),
+		];
+		copy_env_into_shell(&mut shell, entries.into_iter()).expect("copy host env");
+
+		let value = |name: &str| {
+			shell
+				.env()
+				.get(name)
+				.and_then(|(_, var)| match var.value() {
+					ShellValue::String(value) => Some(value.clone()),
+					_ => None,
+				})
+		};
+		assert!(value("NODE_CHANNEL_FD").is_none(), "NODE_CHANNEL_FD must not reach child commands");
+		assert!(
+			value("NODE_CHANNEL_SERIALIZATION_MODE").is_none(),
+			"NODE_CHANNEL_SERIALIZATION_MODE must not reach child commands"
+		);
+		assert_eq!(value("OMP_CHANNEL_PROBE").as_deref(), Some("kept"), "unrelated vars are kept");
+	}
+
+	/// Exact names are always skipped; case variants only where the platform's
+	/// env names are case-insensitive (Windows).
+	#[test]
+	fn node_ipc_channel_vars_match_platform_case_rules() {
+		assert!(is_node_ipc_channel_var("NODE_CHANNEL_FD"));
+		assert!(is_node_ipc_channel_var("NODE_CHANNEL_SERIALIZATION_MODE"));
+		assert!(!is_node_ipc_channel_var("NODE_CHANNEL_OTHER"));
+		assert_eq!(is_node_ipc_channel_var("node_channel_fd"), cfg!(windows));
 	}
 
 	/// The per-session env overlay is built from the same host environment, so
