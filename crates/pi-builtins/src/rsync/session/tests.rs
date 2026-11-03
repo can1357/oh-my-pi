@@ -622,6 +622,111 @@ fn remote_shell_push_and_pull_against_reference_server() {
 	assert_same_tree(&src, &old);
 }
 
+/// A descriptor as the test host's stdin stream, so a run sees a real fd 0.
+#[cfg(unix)]
+struct FdStream(Arc<fs::File>);
+
+#[cfg(unix)]
+impl io::Read for FdStream {
+	fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+		(&*self.0).read(buf)
+	}
+}
+
+#[cfg(unix)]
+impl io::Write for FdStream {
+	fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+		(&*self.0).write(buf)
+	}
+
+	fn flush(&mut self) -> io::Result<()> {
+		Ok(())
+	}
+}
+
+#[cfg(unix)]
+impl brush_core::openfiles::Stream for FdStream {
+	fn clone_box(&self) -> Box<dyn brush_core::openfiles::Stream> {
+		Box::new(Self(Arc::clone(&self.0)))
+	}
+
+	fn try_clone_to_owned(&self) -> Result<std::os::fd::OwnedFd, brush_core::error::Error> {
+		Ok(std::os::fd::AsFd::as_fd(&*self.0).try_clone_to_owned()?)
+	}
+
+	fn try_borrow_as_fd(&self) -> Result<std::os::fd::BorrowedFd<'_>, brush_core::error::Error> {
+		Ok(std::os::fd::AsFd::as_fd(&*self.0))
+	}
+}
+
+/// rsync 3.5.1 pulls from the builtin run as `--server --sender` on real
+/// descriptors, FIFOs behind its remote shell, so the server's connection
+/// has the stdio probes and writes of `PIPE_BUF` bytes: the server and the
+/// client exit 0 and the copy is whole. Not checked: the server's byte
+/// totals, which take one frame header more than rsync 3.5.1's server here
+/// (three or four more on `main`), as the builtin cuts its output frames.
+#[cfg(unix)]
+#[test]
+fn a_reference_client_pulls_from_a_server_on_real_stdio() {
+	use std::os::unix::fs::PermissionsExt;
+	let Some(rsync) = reference() else { return };
+	if Command::new("python3").args(["-c", ""]).status().is_err() {
+		eprintln!("skipping: no python3 for the relay");
+		return;
+	}
+	let dir = tempfile::tempdir().unwrap();
+	make_tree(&dir.path().join("src"));
+	let (c2s, s2c, recorded) = (dir.path().join("c2s"), dir.path().join("s2c"), dir.path().join("argv"));
+	for fifo in [&c2s, &s2c] {
+		nix::unistd::mkfifo(fifo, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap();
+	}
+	// The remote shell records the server's command, a word a line, and
+	// relays the connection through the FIFOs. rsync's client leaves the
+	// shell's stdout non-blocking, which `cat` does not retry, so the relay
+	// clears that first; and a background job of a non-interactive `sh`
+	// reads `/dev/null`, so the client's end goes to it on fd 3.
+	let rsh = dir.path().join("fifo-rsh");
+	fs::write(
+		&rsh,
+		format!(
+			"#!/bin/sh\nshift\nprintf '%s\\n' \"$@\" > '{argv}.tmp' && mv '{argv}.tmp' '{argv}'\n\
+			 python3 -c 'import fcntl, os\nfor fd in 0, 1: fcntl.fcntl(fd, fcntl.F_SETFL, fcntl.fcntl(fd, fcntl.F_GETFL) & ~os.O_NONBLOCK)'\n\
+			 exec 3<&0\ncat <&3 > '{c2s}' &\nexec cat '{s2c}' 3<&-\n",
+			argv = recorded.display(),
+			c2s = c2s.display(),
+			s2c = s2c.display()
+		),
+	)
+	.unwrap();
+	fs::set_permissions(&rsh, fs::Permissions::from_mode(0o755)).unwrap();
+	let source = format!("h:{}/src/", dir.path().display());
+	let client = Command::new(&rsync)
+		.args(["-a", "--stats", "-e", rsh.to_str().unwrap(), &source, "got/"])
+		.current_dir(dir.path())
+		.stdout(std::process::Stdio::piped())
+		.stderr(std::process::Stdio::piped())
+		.spawn()
+		.unwrap();
+	let deadline = Instant::now() + Duration::from_secs(20);
+	while !recorded.exists() {
+		assert!(Instant::now() < deadline, "the remote shell never started");
+		thread::sleep(Duration::from_millis(10));
+	}
+	let argv: Vec<OsString> = fs::read_to_string(&recorded).unwrap().lines().map(OsString::from).collect();
+	assert_eq!(argv.get(1..3), Some(&[OsString::from("--server"), OsString::from("--sender")][..]), "{argv:?}");
+	let stdin = fs::File::open(&c2s).unwrap();
+	let stdout = fs::OpenOptions::new().write(true).open(&s2c).unwrap();
+	let (mut host, cap) = crate::host::Host::for_test_with_stdin("rsync", Box::new(FdStream(Arc::new(stdin))), dir.path());
+	host.set_test_stdout(stdout.into());
+	let code = super::run(&mut host, argv);
+	drop(host);
+	let pulled = client.wait_with_output().unwrap();
+	let client_err = String::from_utf8_lossy(&pulled.stderr);
+	assert_eq!(code, 0, "server: {}\nclient: {client_err}", cap.err());
+	assert!(pulled.status.success(), "{client_err}");
+	assert_same_tree(&dir.path().join("src"), &dir.path().join("got"));
+}
+
 /// A tree whose only file is unreadable (`m/file`, mode 000); false when running
 /// as root, where the file stays readable.
 #[cfg(unix)]
