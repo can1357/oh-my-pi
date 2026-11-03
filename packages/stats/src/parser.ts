@@ -171,7 +171,8 @@ function isFiniteCount(value: unknown): value is number {
 	return typeof value === "number" && Number.isFinite(value);
 }
 
-function finiteTokenCount(value: unknown): number {
+/** A persisted numeric field (token count or cost leg): anything but a finite number reads as zero. */
+export function finiteTokenCount(value: unknown): number {
 	return isFiniteCount(value) ? value : 0;
 }
 

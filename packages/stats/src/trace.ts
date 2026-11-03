@@ -14,8 +14,8 @@ import * as path from "node:path";
 import { pricingPeerFor } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { getBundledModel, type GeneratedProvider } from "@oh-my-pi/pi-catalog/models";
 import { getSessionsDir, isEnoent } from "@oh-my-pi/pi-utils";
-import { initDb, isScheduledCatalogModel } from "./db";
-import { extractFolderFromPath, parseAllSessionEntries, resolveUsageTotal } from "./parser";
+import { initDb, isScheduledCatalogModel, type RecordedRequest, repriceWithdrawnRateRequests } from "./db";
+import { extractFolderFromPath, finiteTokenCount, parseAllSessionEntries, resolveUsageTotal } from "./parser";
 import { getSessionRollups } from "./rollup";
 import type {
 	SessionEntry,
@@ -35,7 +35,7 @@ export class TracePathError extends Error {}
  * span assembly changes so browsers don't revalidate stale cached bodies
  * against an unchanged transcript mtime.
  */
-export const TRACE_ETAG_VERSION = 4;
+export const TRACE_ETAG_VERSION = 5;
 
 const MAX_TRACK_DEPTH = 6;
 const LABEL_MAX = 80;
@@ -87,15 +87,16 @@ interface MessageView {
 	completedAt?: number;
 	duration?: number;
 	ttft?: number;
+	// Transcripts are outside-controlled: any nested object may be `null`.
 	usage?: {
 		input?: unknown;
 		output?: unknown;
 		cacheRead?: unknown;
 		cacheWrite?: unknown;
 		totalTokens?: unknown;
-		orchestration?: { input?: unknown; output?: unknown; cacheRead?: unknown };
-		cost?: { total?: unknown };
-	};
+		orchestration?: { input?: unknown; output?: unknown; cacheRead?: unknown } | null;
+		cost?: { input?: unknown; output?: unknown; cacheRead?: unknown; cacheWrite?: unknown; total?: unknown } | null;
+	} | null;
 	model?: string;
 	provider?: string;
 	stopReason?: string;
@@ -274,6 +275,67 @@ function argsPreview(args: unknown): string | undefined {
 }
 
 /**
+ * The totals stats.db stores for this transcript's requests that a withdrawn
+ * rate card priced ({@link repriceWithdrawnRateRequests}), by entry id. Reads
+ * every assistant entry of the file, as stats.db keeps one row per entry, not
+ * only the active branch.
+ */
+function withdrawnRateTotals(views: readonly EntryView[]): Map<string, number> {
+	const groups = new Map<string, { provider: string; model: string; ids: string[]; requests: RecordedRequest[] }>();
+	for (const entry of views) {
+		const msg = entry.message;
+		if (entry.type !== "message" || typeof entry.id !== "string" || msg?.role !== "assistant") continue;
+		if (typeof msg.provider !== "string" || typeof msg.model !== "string") continue;
+		const usage = msg.usage;
+		const cost = usage?.cost;
+		if (!usage || typeof cost?.total !== "number" || !Number.isFinite(cost.total)) continue;
+		const orchestration = usage.orchestration;
+		const key = `${msg.provider}\u0000${msg.model}`;
+		let group = groups.get(key);
+		if (!group) {
+			group = { provider: msg.provider, model: msg.model, ids: [], requests: [] };
+			groups.set(key, group);
+		}
+		group.ids.push(entry.id);
+		group.requests.push({
+			tokens: {
+				input: finiteTokenCount(usage.input),
+				output: finiteTokenCount(usage.output),
+				cacheRead: finiteTokenCount(usage.cacheRead),
+				cacheWrite: finiteTokenCount(usage.cacheWrite),
+				...(orchestration &&
+					typeof orchestration === "object" && {
+						orchestration: {
+							input: finiteTokenCount(orchestration.input),
+							output: finiteTokenCount(orchestration.output),
+							cacheRead: finiteTokenCount(orchestration.cacheRead),
+						},
+					}),
+			},
+			cost: {
+				input: finiteTokenCount(cost.input),
+				output: finiteTokenCount(cost.output),
+				cacheRead: finiteTokenCount(cost.cacheRead),
+				cacheWrite: finiteTokenCount(cost.cacheWrite),
+				total: cost.total,
+			},
+			// The request timestamp stats.db stores: the message's, else the entry's.
+			timestamp:
+				typeof msg.timestamp === "number" && Number.isFinite(msg.timestamp) && msg.timestamp > 0
+					? msg.timestamp
+					: (toMs(entry.timestamp) ?? 0),
+		});
+	}
+	const totals = new Map<string, number>();
+	for (const { provider, model, ids, requests } of groups.values()) {
+		for (const [index, cost] of repriceWithdrawnRateRequests(provider, model, requests).entries()) {
+			if (cost) totals.set(ids[index]!, cost.total);
+		}
+	}
+	return totals;
+}
+
+/**
  * Scan one transcript into a track: model/tool/turn/background spans plus
  * markers, and the cross-track facts (task results, request counts).
  */
@@ -321,6 +383,8 @@ function scanTranscript(
 			if (typeof raw.resolvedModel === "string") initModel = raw.resolvedModel;
 		}
 	}
+
+	const withdrawnTotals = withdrawnRateTotals(views);
 
 	for (const entry of chain) {
 		const envelopeTs = toMs(entry.timestamp);
@@ -439,7 +503,11 @@ function scanTranscript(
 			if (typeof msg.model === "string") span.model = msg.model;
 			if (totalTokens > 0) span.tokens = totalTokens;
 
-			if (costTotal !== undefined) span.cost = costTotal;
+			if (costTotal !== undefined) {
+				// A cost a withdrawn rate card recorded shows at the catalog price
+				// stats.db stores; the transcript keeps what it recorded.
+				span.cost = (entry.id === undefined ? undefined : withdrawnTotals.get(entry.id)) ?? costTotal;
+			}
 			if (typeof msg.ttft === "number") span.ttft = msg.ttft;
 			if (msg.stopReason === "error" || msg.errorMessage) span.isError = true;
 			spans.push(span);

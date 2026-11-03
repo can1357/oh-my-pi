@@ -16,6 +16,9 @@ const EffectiveRate = Rates.and({
 	effectiveFrom: "-8640000000000000 <= number.integer <= 8640000000000000",
 	"longContext?": LongContext.or("undefined"),
 });
+const WithdrawnRates = EffectiveRate.array().narrow(
+	rates => new Set(rates.map(rate => rate.effectiveFrom)).size === rates.length,
+);
 /** Serialized time-based pricing schedule, as cached model rows carry it. */
 export const TimeBasedCostShape = type({
 	offPeakMultiplier: Rate,
@@ -32,15 +35,15 @@ export function isTimeBasedCost(value: unknown): value is TimeBasedCost {
 	return TimeBasedCostShape.allows(value);
 }
 
-function payload(value: unknown, keys: readonly string[], field: string): Record<string, unknown> {
+function payload(value: unknown, keys: readonly string[], axis: string, field: string): Record<string, unknown> {
 	if (!isRecord(value) || Object.keys(value).some(key => !keys.includes(key))) {
-		throw new Error(`Invalid time-based-cost ${field}`);
+		throw new Error(`Invalid ${axis} ${field}`);
 	}
 	return value;
 }
 
-function namedEntries(value: unknown, field: string): unknown[] {
-	if (!isRecord(value)) throw new Error(`Invalid time-based-cost ${field}: expected named objects`);
+function namedEntries(value: unknown, axis: string, field: string): unknown[] {
+	if (!isRecord(value)) throw new Error(`Invalid ${axis} ${field}: expected named objects`);
 	return Object.values(value);
 }
 
@@ -59,35 +62,44 @@ function parseUtcInstant(date: unknown, axis: string): number {
 	return instant;
 }
 
+/**
+ * Named KDL effective-rate cards with their `effective-from` instants parsed.
+ * Shapes and rates are left for the caller's schema check.
+ */
+function effectiveRateEntries(value: unknown, axis: string): Record<string, unknown>[] {
+	return namedEntries(value, axis, "effective-rates").map(entry => {
+		const rate = payload(
+			entry,
+			["effectiveFrom", "input", "output", "cacheRead", "cacheWrite", "longContext"],
+			axis,
+			"effective-rate",
+		);
+		const effectiveFrom = parseUtcInstant(rate.effectiveFrom, axis);
+		if (rate.longContext !== undefined) {
+			payload(
+				rate.longContext,
+				["inputThreshold", "inputThresholdInclusive", "input", "output", "cacheRead", "cacheWrite"],
+				axis,
+				"long-context",
+			);
+		}
+		return { ...rate, effectiveFrom };
+	});
+}
+
 /** KDL object children are named records; normalize them once while constructing the model. */
 export function materializeTimeBasedCost(value: unknown): TimeBasedCost {
-	const source = payload(value, ["offPeakMultiplier", "peakWindows", "effectiveRates"], "schedule");
-	const peakWindows = namedEntries(source.peakWindows, "peak-windows").map(entry => {
-		const window = payload(entry, ["weekdays", "startMinute", "endMinute"], "peak-window");
+	const axis = "time-based-cost";
+	const source = payload(value, ["offPeakMultiplier", "peakWindows", "effectiveRates"], axis, "schedule");
+	const peakWindows = namedEntries(source.peakWindows, axis, "peak-windows").map(entry => {
+		const window = payload(entry, ["weekdays", "startMinute", "endMinute"], axis, "peak-window");
 		if (typeof window.weekdays !== "string" || !/^[0-6](,[0-6])*$/.test(window.weekdays)) {
 			throw new Error("Invalid time-based-cost weekdays: expected comma-separated UTC weekday numbers");
 		}
 		return { ...window, weekdays: window.weekdays.split(",").map(Number) };
 	});
 	const effectiveRates =
-		source.effectiveRates === undefined
-			? undefined
-			: namedEntries(source.effectiveRates, "effective-rates").map(entry => {
-					const rate = payload(
-						entry,
-						["effectiveFrom", "input", "output", "cacheRead", "cacheWrite", "longContext"],
-						"effective-rate",
-					);
-					const effectiveFrom = parseUtcInstant(rate.effectiveFrom, "time-based-cost");
-					if (rate.longContext !== undefined) {
-						payload(
-							rate.longContext,
-							["inputThreshold", "inputThresholdInclusive", "input", "output", "cacheRead", "cacheWrite"],
-							"long-context",
-						);
-					}
-					return { ...rate, effectiveFrom };
-				});
+		source.effectiveRates === undefined ? undefined : effectiveRateEntries(source.effectiveRates, axis);
 	const schedule = {
 		offPeakMultiplier: source.offPeakMultiplier,
 		peakWindows,
@@ -96,6 +108,19 @@ export function materializeTimeBasedCost(value: unknown): TimeBasedCost {
 	if (!isTimeBasedCost(schedule))
 		throw new Error("Invalid time-based-cost schedule: invalid windows, rates, or multiplier");
 	return schedule;
+}
+
+/**
+ * Parse the compiled `withdrawn-rates` axis: named cards in the
+ * `time-based-cost` effective-rate shape, ascending by date. Throws on a
+ * malformed card, so a rule typo fails loudly instead of matching nothing.
+ */
+export function materializeWithdrawnRates(value: unknown): EffectiveTokenCost[] {
+	const cards = effectiveRateEntries(value, "withdrawn-rates");
+	if (!WithdrawnRates.allows(cards)) {
+		throw new Error("Invalid withdrawn-rates: each card needs a distinct effective-from and all four rates");
+	}
+	return cards.sort((a, b) => a.effectiveFrom - b.effectiveFrom);
 }
 
 /**

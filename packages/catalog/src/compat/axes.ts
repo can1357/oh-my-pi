@@ -636,6 +636,13 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	priority: { key: "priority", set: "catalog", shape: "scalar" },
 	"service-tier-cost": { key: "serviceTierCost", set: "catalog", shape: "object" },
 	"time-based-cost": { key: "timeBased", set: "catalog", shape: "object" },
+	/**
+	 * Dated rate cards a released catalog priced the model with and later
+	 * withdrew, as named `time-based-cost` effective rates. Not built into the
+	 * model's cost: read through `./withdrawn-rates`, so stats can recognise
+	 * and re-price a cost recorded at a withdrawn card.
+	 */
+	"withdrawn-rates": { key: "withdrawnRates", set: "catalog", shape: "object" },
 
 	// ── catalog: routed-subscription registry ──
 	// A gateway whose proxy fans one model out to several upstreams (Factory

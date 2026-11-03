@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Recorded the DeepSeek V4 Pro Flash card that v18.1.17 through v18.12.6 shipped as a withdrawn card (`withdrawn-rates`), so stats can re-price costs recorded at it ([#16875](https://github.com/can1357/oh-my-pi/issues/16875))
+
 ## [18.16.0] - 2026-11-02
 
 ### Added
