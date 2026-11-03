@@ -10,7 +10,7 @@ import {
 	ensureChromiumExecutable,
 	RENDERER_PRIORITY_ARGS,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
-import { acquireBrowser, releaseBrowser } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
+import { acquireBrowser, type BrowserHandle, releaseBrowser } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
 import { unpackedExtensionId } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/extension-files";
 import { waitForRelayExtension } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/probe";
 import { type RelayServer, startRelayServer } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/server";
@@ -30,6 +30,7 @@ import { WorkerCore } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-worker";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 import { getPuppeteerDir } from "@oh-my-pi/pi-utils";
 import puppeteer, { type Browser, type Page } from "puppeteer-core";
+import { rejectionOf } from "../helpers/rejection";
 import { chromiumAvailable } from "./chromium-probe";
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
@@ -79,6 +80,10 @@ interface RelayFixture extends RelayBrowser {
 	server: RelayServer;
 	cdpUrl: string;
 	origin: string;
+	/** The folder the fixture's browsers save downloads to. */
+	downloads: string;
+	/** The `index`-th request for `/held.csv`, whose body ends only once the test resolves it. */
+	heldDownload(index: number): Promise<PromiseWithResolvers<void>>;
 	/** Another Chromium with its own profile and the same extension, as a second browser on the relay. */
 	launchBrowser(): Promise<RelayBrowser>;
 	close(): Promise<void>;
@@ -96,15 +101,35 @@ async function launchRelayFixture(
 	const port = await findFreeCdpPort();
 	const server = startRelayServer({ port, group: false, log });
 	const extensionDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-relay-isolation-"));
+	// Every fixture browser saves downloads here, as the user's Chrome would its own folder (real names, " (1)" on a clash).
+	const downloads = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "omp-relay-downloads-")));
+	const profiles: string[] = [];
+	const held: Array<PromiseWithResolvers<void>> = [];
+	let heldArrived = Promise.withResolvers<void>();
 	const pages = Bun.serve({
 		port: 0,
 		fetch(request) {
 			const url = new URL(request.url);
 			const route = url.pathname;
-			if (route === "/report.csv") {
-				return new Response("a,b\n1,2\n", {
-					headers: { "Content-Type": "text/csv", "Content-Disposition": 'attachment; filename="report.csv"' },
+			const attachment = (name: string) => ({
+				"Content-Type": "text/csv",
+				"Content-Disposition": `attachment; filename="${name}"`,
+			});
+			if (route === "/report.csv") return new Response("a,b\n1,2\n", { headers: attachment("report.csv") });
+			if (route === "/held.csv") {
+				const release = Promise.withResolvers<void>();
+				held.push(release);
+				heldArrived.resolve();
+				heldArrived = Promise.withResolvers<void>();
+				const body = new ReadableStream<Uint8Array>({
+					async start(controller) {
+						controller.enqueue(new TextEncoder().encode("a,b\n"));
+						await release.promise;
+						controller.enqueue(new TextEncoder().encode("1,2\n"));
+						controller.close();
+					},
 				});
+				return new Response(body, { headers: attachment("held.csv") });
 			}
 			const html =
 				route === "/first"
@@ -114,26 +139,40 @@ async function launchRelayFixture(
 						: route === "/login"
 							? `<title>Login ${url.searchParams.get("who")}</title><input id="pw" type="password">`
 							: route === "/download"
-								? `<title>Download</title><a href="/report.csv">Report</a>`
-								: "<title>Human sentinel</title><h1>Keep me</h1>";
+								? `<title>Download</title><a id="report" href="/report.csv">Report</a><a id="held" href="/held.csv">Held</a>`
+								: route === "/framed"
+									? // Another site (localhost, not 127.0.0.1), so Chrome runs the frame in its own process and session.
+										`<title>Framed</title><iframe src="http://localhost:${url.port}/download"></iframe>`
+									: "<title>Human sentinel</title><h1>Keep me</h1>";
 			return new Response(html, { headers: { "Content-Type": "text/html" } });
 		},
 	});
 	const browsers: Browser[] = [];
 	async function close() {
+		// A failed test may leave a held download open; end it so the browser and server can stop.
+		for (const release of held) release.resolve();
 		try {
 			await Promise.all(browsers.map(browser => closeLaunchedBrowser(browser)));
 		} finally {
 			server.stop();
 			pages.stop(true);
 			await fs.rm(extensionDir, { recursive: true, force: true });
+			await fs.rm(downloads, { recursive: true, force: true });
+			for (const profile of profiles) await fs.rm(profile, { recursive: true, force: true });
 		}
 	}
 	async function launchBrowser(): Promise<RelayBrowser> {
+		const userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-relay-profile-"));
+		profiles.push(userDataDir);
+		await Bun.write(
+			path.join(userDataDir, "Default", "Preferences"),
+			JSON.stringify({ download: { default_directory: downloads, prompt_for_download: false } }),
+		);
 		const browser = await puppeteer.launch({
 			executablePath: await ensureChromiumExecutable(),
 			headless: true,
 			pipe: true,
+			userDataDir,
 			enableExtensions: [extensionDir, ...extensions],
 			args: ["--no-first-run", "--no-default-browser-check", "--use-mock-keychain", ...RENDERER_PRIORITY_ARGS],
 		});
@@ -218,6 +257,11 @@ ${background.replace(defaultPort, `var DEFAULT_PORT = ${port};`)}`,
 			server,
 			cdpUrl,
 			origin: `http://127.0.0.1:${pages.port}`,
+			downloads,
+			async heldDownload(index) {
+				while (held.length <= index) await heldArrived.promise;
+				return held[index]!;
+			},
 			launchBrowser,
 			close,
 		};
@@ -556,51 +600,88 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("relay tab ownership", () => {
 		}
 	}, 60_000);
 
-	it("reports a relay tab's download clicked before any wait, at the path Chrome saved it to", async () => {
+	async function waitForDownload(name: string): Promise<BrowserDownload> {
+		const result = await runInTab(name, {
+			code: "return await tab.waitForDownload({ timeout: 10000 });",
+			timeoutMs: 20_000,
+			session,
+		});
+		return result.returnValue as BrowserDownload;
+	}
+
+	it("reports a relay tab's downloads, from its page and a cross-site frame, at the path Chrome saved them to", async () => {
 		const fixture = await launchRelayFixture();
-		// Chrome's own folder for this browser, so the test never writes to the user's Downloads.
-		const saved = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "omp-relay-download-")));
-		const native = await fixture.browser.target().createCDPSession();
-		await native.send("Browser.setDownloadBehavior", { behavior: "allow", downloadPath: saved });
 		const relay = await acquireBrowser({ kind: "relay", cdpUrl: fixture.cdpUrl }, { cwd: process.cwd() });
 		const name = `relay-download-${process.pid}`;
 		try {
 			await acquireTab(name, relay, { url: `${fixture.origin}/download`, timeoutMs: 15_000 });
-			const result = await runInTab(name, {
-				code: "await tab.click('a'); const download = await tab.waitForDownload({ timeout: 10000 }); return { download, listed: await tab.downloads() };",
-				timeoutMs: 20_000,
-				session,
-			});
-			const { download, listed } = result.returnValue as { download: BrowserDownload; listed: BrowserDownload[] };
+			// Clicked before any wait: the tab tracks downloads from the moment it opens.
+			await runInTab(name, { code: "await tab.click('#report');", timeoutMs: 20_000, session });
+			const download = await waitForDownload(name);
 			expect(download).toEqual({
-				path: path.join(saved, "report.csv"),
+				path: path.join(fixture.downloads, "report.csv"),
 				suggestedFilename: "report.csv",
 				url: `${fixture.origin}/report.csv`,
 				bytes: 8,
 			});
 			expect(await Bun.file(download.path).text()).toBe("a,b\n1,2\n");
-			expect(listed).toEqual([download]);
+
+			await runInTab(name, {
+				code: `await tab.goto(${JSON.stringify(`${fixture.origin}/framed`)}); await (await tab.frame('iframe')).click('#report');`,
+				timeoutMs: 20_000,
+				session,
+			});
+			const framed = await waitForDownload(name);
+			expect(framed.url).toBe(`http://localhost:${new URL(fixture.origin).port}/report.csv`);
+			expect(framed.path).toBe(path.join(fixture.downloads, "report (1).csv"));
+			const listed = await runInTab(name, { code: "return await tab.downloads();", timeoutMs: 10_000, session });
+			expect(listed.returnValue).toEqual([download, framed]);
 		} finally {
 			await releaseTab(name).catch(() => undefined);
 			await releaseBrowser(relay, { kill: false });
-			await native.detach().catch(() => undefined);
 			await fixture.close();
-			await fs.rm(saved, { recursive: true, force: true });
 		}
 	}, 60_000);
 
-	it("refuses a downloads folder for a relay tab, which Chrome will not let the extension choose", async () => {
+	it("reports a relay download while a newer download of the same URL is still running", async () => {
+		const fixture = await launchRelayFixture();
+		const relay = await acquireBrowser({ kind: "relay", cdpUrl: fixture.cdpUrl }, { cwd: process.cwd() });
+		const name = `relay-download-held-${process.pid}`;
+		try {
+			await acquireTab(name, relay, { url: `${fixture.origin}/download`, timeoutMs: 15_000 });
+			await runInTab(name, { code: "await tab.click('#held');", timeoutMs: 20_000, session });
+			const first = await fixture.heldDownload(0);
+			await runInTab(name, { code: "await tab.click('#held');", timeoutMs: 20_000, session });
+			const second = await fixture.heldDownload(1);
+			first.resolve();
+			const done = await waitForDownload(name);
+			expect(done.path).toBe(path.join(fixture.downloads, "held.csv"));
+			expect(await Bun.file(done.path).text()).toBe("a,b\n1,2\n");
+			second.resolve();
+			expect((await waitForDownload(name)).path).toBe(path.join(fixture.downloads, "held (1).csv"));
+		} finally {
+			await releaseTab(name).catch(() => undefined);
+			await releaseBrowser(relay, { kill: false });
+			await fixture.close();
+		}
+	}, 60_000);
+
+	it("refuses a downloads folder for a relay tab before opening one in the user's Chrome", async () => {
 		const fixture = await launchRelayFixture();
 		const relay = await acquireBrowser({ kind: "relay", cdpUrl: fixture.cdpUrl }, { cwd: process.cwd() });
 		const name = `relay-download-folder-${process.pid}`;
+		const tabCount = () => fixture.inExtension("chrome.tabs.query({}).then(tabs => tabs.length)");
 		try {
-			await expect(
+			const before = await tabCount();
+			const error = await rejectionOf(
 				acquireTab(name, relay, {
 					url: `${fixture.origin}/download`,
 					downloadsPath: path.join(os.tmpdir(), "omp-relay-download-folder"),
 					timeoutMs: 15_000,
 				}),
-			).rejects.toThrow("cannot choose where Chrome saves downloads");
+			);
+			expect(String(error)).toContain("cannot choose where Chrome saves downloads");
+			expect(await tabCount()).toBe(before);
 		} finally {
 			await releaseTab(name).catch(() => undefined);
 			await releaseBrowser(relay, { kill: false });

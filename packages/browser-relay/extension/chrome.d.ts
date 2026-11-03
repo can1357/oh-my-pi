@@ -115,7 +115,12 @@ declare const chrome: {
 		onDetach: ChromeEvent<(source: ChromeDebuggerSession, reason: string) => void>;
 	};
 	downloads: {
-		search(query: { finalUrl?: string; orderBy?: string[]; limit?: number }): Promise<ChromeDownloadItem[]>;
+		search(query: {
+			finalUrl?: string;
+			state?: ChromeDownloadItem["state"];
+			orderBy?: string[];
+			limit?: number;
+		}): Promise<ChromeDownloadItem[]>;
 	};
 	storage: {
 		local: {

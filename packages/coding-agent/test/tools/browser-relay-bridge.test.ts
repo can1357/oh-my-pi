@@ -2741,7 +2741,7 @@ describe("RelayBridge download paths", () => {
 		return { cdp, id };
 	}
 
-	it("looks up where Chrome saved a download, and only in the tab's browser", async () => {
+	it("looks up where Chrome saved a completed download", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
 		hello(bridge, ext, 1);
@@ -2759,7 +2759,7 @@ describe("RelayBridge download paths", () => {
 			ack(bridge, ext, "findDownload", found);
 			await flush();
 			expect(pending.cdp.messages.find(m => m.id === pending.id)).toMatchObject({
-				error: { message: "Chrome lists no completed download of https://example.com/r.csv" },
+				error: { message: "Chrome lists no completed download of this URL" },
 			});
 		}
 	});

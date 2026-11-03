@@ -1883,6 +1883,12 @@ function sweepClosedTabUploads(): void {
 }
 
 async function buildInitPayload(browser: PuppeteerBrowserHandle, opts: AcquireTabOptions): Promise<WorkerInitPayload> {
+	// Chrome never lets an extension choose where downloads go; refused before a tab is opened in the user's Chrome.
+	if (browser.kind.kind === "relay" && opts.downloadsPath) {
+		throw new ToolError(
+			"The omp browser relay cannot choose where Chrome saves downloads: open the tab without `downloads`, and tab.waitForDownload() and tab.downloads() report where Chrome saved each file.",
+		);
+	}
 	const safeDir = getPuppeteerDir();
 	const uploadDir = newUploadStagingDir();
 	const browserWSEndpoint = browser.wsEndpoint;
@@ -1941,6 +1947,7 @@ async function buildInitPayload(browser: PuppeteerBrowserHandle, opts: AcquireTa
 		userAgent: opts.userAgent,
 		ignoreHttpsErrors: opts.ignoreHttpsErrors,
 		userDriven,
+		relay: browser.kind.kind === "relay",
 	};
 }
 
@@ -2155,6 +2162,7 @@ async function recycleTimedOutWorkerTab(
 		// otherwise init stalls, times out, and the tab gets force-killed.
 		recover: opts.recover ?? true,
 		userDriven: tab.kindTag === "connected" || tab.kindTag === "relay",
+		relay: tab.kindTag === "relay",
 	};
 	// A release can land while the new worker starts: it tore down the worker it saw, so a
 	// replacement published after it would drive a closed tab.

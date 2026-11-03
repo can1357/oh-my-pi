@@ -109,12 +109,9 @@ describe("browser open options CDP helpers", () => {
 			send,
 			detach: async () => undefined,
 		};
-		const browser = {
-			target: () => ({ createCDPSession: async () => session }),
-			targets: () => [{ type: () => "browser" }],
-		} as unknown as Browser;
+		const browser = { target: () => ({ createCDPSession: async () => session }) } as unknown as Browser;
 		const page = { frames: () => [{ _id: "frame" }], browserContext: () => ({}) } as unknown as Page;
-		const downloads = new DownloadManager(browser, page, "tab", { perTab });
+		const downloads = new DownloadManager(browser, page, "tab", { perTab, pageEvents: false });
 		const complete = async (
 			guid: unknown,
 			filePath: string | undefined,

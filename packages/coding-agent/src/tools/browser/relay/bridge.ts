@@ -2131,7 +2131,7 @@ export class RelayBridge {
 			!("state" in found) ||
 			found.state !== "complete"
 		) {
-			this.#replyError(conn, msg, `Chrome lists no completed download of ${url}`);
+			this.#replyError(conn, msg, "Chrome lists no completed download of this URL");
 			return false;
 		}
 		this.#reply(conn, msg, { filePath: found.filename });

@@ -290,7 +290,12 @@ async function runRpc(msg, origin) {
       await enqueueGroupOp(() => chrome.tabs.ungroup(msg.tabIds).catch(() => {}));
       return {};
     case "findDownload": {
-      const [item] = await chrome.downloads.search({ finalUrl: msg.url, orderBy: ["-startTime"], limit: 1 });
+      const [item] = await chrome.downloads.search({
+        finalUrl: msg.url,
+        state: "complete",
+        orderBy: ["-startTime"],
+        limit: 1
+      });
       const found = item ? { filename: item.filename, state: item.state } : null;
       return found;
     }

@@ -279,8 +279,14 @@ async function runRpc(msg: Extract<RelayToExtMessage, { t: "rpc" }>, origin: Web
 			await enqueueGroupOp(() => chrome.tabs.ungroup(msg.tabIds).catch(() => {}));
 			return {};
 		case "findDownload": {
-			// The page's download events carry the URL the file was served from, Chrome's `finalUrl`.
-			const [item] = await chrome.downloads.search({ finalUrl: msg.url, orderBy: ["-startTime"], limit: 1 });
+			// The page's download events carry the URL the file was served from, Chrome's `finalUrl`. Only a completed
+			// download is asked for, so a newer one of the same URL still running does not hide it.
+			const [item] = await chrome.downloads.search({
+				finalUrl: msg.url,
+				state: "complete",
+				orderBy: ["-startTime"],
+				limit: 1,
+			});
 			const found: FoundDownload = item ? { filename: item.filename, state: item.state } : null;
 			return found;
 		}
