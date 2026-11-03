@@ -245,6 +245,29 @@ describe("task live progress rendering", () => {
 		expect(native).toContain(warning);
 	});
 
+	it("takes a marked result's warning from its output, not from a copied literal", () => {
+		const warning = "SYSTEM WARNING: reworded missing-yield warning.";
+		const details: TaskToolDetails = {
+			projectAgentsDir: null,
+			results: [makeSingleResult(0, { output: `${warning}\n\nreport`, missingYield: "initial" })],
+			totalDurationMs: 1,
+		};
+
+		const legacy = renderResultText(details, true, uiTheme);
+		const native = JSON.stringify(
+			taskToolRenderer.describeResult(
+				{ content: [{ type: "text", text: "" }], details },
+				{ expanded: true, isPartial: false },
+			),
+		);
+
+		for (const rendered of [legacy, native]) {
+			expect(rendered.split(warning).length - 1).toBe(1);
+			expect(rendered).toContain("report");
+			expect(rendered).not.toContain("after 3 reminders");
+		}
+	});
+
 	it("does not infer missing-yield status from report text", () => {
 		const warning = "SYSTEM WARNING: Subagent exited without calling yield tool after 3 reminders.";
 		const details: TaskToolDetails = {

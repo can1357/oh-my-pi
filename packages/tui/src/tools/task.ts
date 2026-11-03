@@ -291,19 +291,20 @@ export function formatTaskId(id: string): string {
 	return segments.length < 2 ? sanitizedId : segments.join(">");
 }
 
-const MISSING_YIELD_WARNINGS = {
-	initial: "SYSTEM WARNING: Subagent exited without calling yield tool after 3 reminders.",
-	wake: "SYSTEM WARNING: Structured subagent replied without calling yield.",
-} as const;
-
+/**
+ * Split a marked result's output into its missing-yield warning and report.
+ * The executor writes the warning as the output's first paragraph whenever it
+ * sets `missingYield`, so the mark, not a copy of the warning text, decides.
+ */
 function extractMissingYieldWarning(
 	output: string,
 	missingYield: SingleResult["missingYield"],
 ): { warning?: string; rest: string } {
 	if (!missingYield) return { rest: output };
-	const warning = MISSING_YIELD_WARNINGS[missingYield];
-	const prefix = `${warning}\n\n`;
-	return { warning, rest: output.startsWith(prefix) ? output.slice(prefix.length) : output };
+	const end = output.indexOf("\n\n");
+	const warning = (end < 0 ? output : output.slice(0, end)).trim();
+	if (!warning) return { rest: output };
+	return { warning, rest: end < 0 ? "" : output.slice(end + 2) };
 }
 
 const BASH_WALL_TIME_NOTICE_RE = /^Wall time: \d+(?:\.\d+)? seconds$/u;

@@ -4,11 +4,6 @@ import { AgentLink, Badge, Note, Output, ResultText, Row } from "../parts";
 import type { ToolRenderer, ToolRenderHost, ToolRenderProps } from "../types";
 import { detailsRecord, isRecord, normalizeWs, num, str, truncate } from "../util";
 
-const MISSING_YIELD_WARNINGS = {
-	initial: "SYSTEM WARNING: Subagent exited without calling yield tool after 3 reminders.",
-	wake: "SYSTEM WARNING: Structured subagent replied without calling yield.",
-} as const;
-
 /** One spawned unit of work, normalized across the batch and flat/legacy arg shapes. */
 interface TaskItemView {
 	id: string | null;
@@ -99,12 +94,15 @@ function AgentResult({ res, host }: { res: Record<string, unknown>; host?: ToolR
 	const model = str(res.resolvedModel);
 	if (model) stats.push(model);
 
-	const missingYield = res.missingYield === "initial" || res.missingYield === "wake" ? res.missingYield : undefined;
-	const warning = missingYield ? MISSING_YIELD_WARNINGS[missingYield] : null;
+	// The executor writes the missing-yield warning as the output's first
+	// paragraph whenever it sets the mark, so the mark decides, not the text.
+	const missingYield = res.missingYield === "initial" || res.missingYield === "wake";
 	let output = str(res.output) ?? "";
-	if (warning) {
-		const prefix = `${warning}\n\n`;
-		if (output.startsWith(prefix)) output = output.slice(prefix.length);
+	let warning: string | null = null;
+	if (missingYield) {
+		const end = output.indexOf("\n\n");
+		warning = (end < 0 ? output : output.slice(0, end)).trim() || null;
+		if (warning) output = end < 0 ? "" : output.slice(end + 2);
 	}
 	const error = str(res.error);
 	const aborted = res.aborted === true;

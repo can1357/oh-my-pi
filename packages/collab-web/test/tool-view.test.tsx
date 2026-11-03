@@ -204,6 +204,21 @@ describe("ToolView task missing-yield provenance", () => {
 		}
 	});
 
+	it("takes a marked result's warning from its output, not from a copied literal", () => {
+		const warning = "SYSTEM WARNING: reworded missing-yield warning.";
+		const html = renderTask({
+			id: "reworded",
+			agent: "task",
+			exitCode: 0,
+			output: `${warning}\n\nreport`,
+			missingYield: "initial",
+		});
+		expect(html).toContain("tv-note--warn");
+		expect(html.split(warning).length - 1).toBe(1);
+		expect(html).toContain("report");
+		expect(html).not.toContain("after 3 reminders");
+	});
+
 	it("leaves warning-looking report text alone without provenance", () => {
 		const html = renderTask({
 			id: "yielded",
