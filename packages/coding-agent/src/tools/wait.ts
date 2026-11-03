@@ -9,6 +9,7 @@ import { formatDuration, prompt } from "@oh-my-pi/pi-utils";
 import { IrcBus } from "../irc/bus";
 import { agentMesh } from "../irc/mesh";
 import { parsePeerAddress } from "../irc/mesh-protocol";
+import { REMOTE_ID_PREFIX } from "../registry/remote-id";
 import waitDescription from "../prompts/tools/wait.md" with { type: "text" };
 import waitIdleTemplate from "../prompts/tools/wait-idle.md" with { type: "text" };
 import waitIdleForkTemplate from "../prompts/tools/wait-idle-fork.md" with { type: "text" };
@@ -162,6 +163,9 @@ function pendingReplies(messaging: WaitMessaging): PendingReplies {
 	const asked = new Set<string>();
 	const mesh = agentMesh();
 	for (const { to, sentAt, promised } of IrcBus.forRegistry(registry).unansweredSends(senderId, since)) {
+		// A bridged peer (`@ns/name`) is nothing the caller started: its turn is not visible here, so it
+		// can neither sustain a reply wait nor be reported as having stopped. Its reply arrives on its own.
+		if (to.startsWith(REMOTE_ID_PREFIX)) continue;
 		asked.add(to);
 		const peer = mesh && parsePeerAddress(to);
 		if (mesh && peer && !registry.get(to) && mesh.peer(peer.pid)) {
