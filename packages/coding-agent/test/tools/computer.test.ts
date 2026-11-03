@@ -2074,6 +2074,27 @@ describe("computer worker round trips", () => {
 		});
 	});
 
+	it("keeps an app-filter miss without scanning applications when windows have no process identity", async () => {
+		const transport = new MemoryTransport();
+		const native = new FakeNativeSession();
+		native.listWindows = async () => [{ ...windowFixture, pid: undefined }];
+		native.listApplications = async () => {
+			throw new Error("inventory must not run");
+		};
+		new ComputerWorkerCore(transport, () => native);
+		const result = await runWorker(
+			transport,
+			"no-window-process",
+			'const listed = await desktop.windows({ app: "org.example.missing" }); let miss; try { await desktop.window({ app: "org.example.missing" }); } catch (error) { miss = error.message; } return { listed, miss };',
+		);
+		expect(result.ok).toBe(true);
+		if (!result.ok) return;
+		expect(result.payload.returnValue).toMatchObject({
+			listed: [],
+			miss: expect.stringContaining("no window matches"),
+		});
+	});
+
 	describe("more windows than the listing cap", () => {
 		class CrowdedSession extends FakeNativeSession {
 			applicationListings = 0;

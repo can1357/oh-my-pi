@@ -13,6 +13,7 @@ const MAX_TITLE_CHARS = 80;
  */
 export type AppOpenRoute = "shows-window" | "launches";
 
+/** Matches a lowercased app-name substring or PID membership for a resolved application identity. */
 export function matchesWindowApp(window: DesktopWindow, app: string, pids?: ReadonlySet<number>): boolean {
 	return window.app.toLocaleLowerCase().includes(app) || (window.pid !== undefined && pids?.has(window.pid) === true);
 }
