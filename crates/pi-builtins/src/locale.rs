@@ -975,8 +975,8 @@ pub(crate) fn memcoll_pieces(
 	}
 }
 
-/// GNU `sort`'s collation in a locale ICU is not used for: `strcoll` in the
-/// `LC_COLLATE` locale, through a locale object.
+/// GNU `sort`'s collation: `strcoll` in the `LC_COLLATE` locale, through a
+/// locale object.
 #[cfg(unix)]
 pub(crate) struct LibcCollator(LocaleObject);
 
@@ -1011,11 +1011,46 @@ impl LibcCollator {
 			})
 		})
 	}
+
+	/// The `strxfrm_l` key of `s`, piece by piece between NULs and joined by
+	/// a NUL (which no key holds), so that two keys are equal exactly when
+	/// [`Self::compare`] finds the strings equal. GNU `sort -R` hashes this
+	/// form, so strings the locale equates hash the same.
+	pub(crate) fn transform(&self, s: &[u8]) -> Vec<u8> {
+		let mut key = Vec::new();
+		COLLATE_BUFS.with_borrow_mut(|(piece_c, _)| {
+			for (n, piece) in s.split(|&byte| byte == 0).enumerate() {
+				if n > 0 {
+					key.push(0);
+				}
+				piece_c.clear();
+				piece_c.extend_from_slice(piece);
+				piece_c.push(0);
+				let start = key.len();
+				let mut room = piece.len() * 4 + 16;
+				loop {
+					key.resize(start + room, 0);
+					// SAFETY: `piece_c` is a C string (a piece holds no NUL); the
+					// destination has `room` bytes; the locale object is live.
+					let need = unsafe {
+						strxfrm_l(key[start..].as_mut_ptr().cast(), piece_c.as_ptr().cast(), room, self.0.0)
+					};
+					if need < room {
+						key.truncate(start + need);
+						break;
+					}
+					room = need + 1;
+				}
+			}
+		});
+		key
+	}
 }
 
 #[cfg(unix)]
 unsafe extern "C" {
 	fn strcoll_l(a: *const libc::c_char, b: *const libc::c_char, locale: libc::locale_t) -> libc::c_int;
+	fn strxfrm_l(dest: *mut libc::c_char, src: *const libc::c_char, n: libc::size_t, locale: libc::locale_t) -> libc::size_t;
 }
 
 /// [`LibcCollator`] for the locale named `name` (the shell's `LC_COLLATE`),

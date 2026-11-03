@@ -1472,7 +1472,9 @@ mod tests {
 	}
 
 	/// The settings of a sort that compares collation keys, or None where ICU
-	/// has no collator for the locale.
+	/// has no collator for the locale. Only ICU, used where there is no
+	/// `strcoll_l`, makes such keys.
+	#[cfg(not(unix))]
 	fn collating_settings() -> Option<GlobalSettings> {
 		let locale = super::super::Locale::try_from_str("en").expect("locale");
 		let collator =
@@ -1497,6 +1499,7 @@ mod tests {
 	// collation keys allocated while the next chunk of short records grew
 	// its own vectors. Both held memory at once, but the budget counts the
 	// larger of the two.
+	#[cfg(not(unix))]
 	#[test]
 	fn a_chunk_after_collated_long_records_does_not_keep_their_keys() {
 		const BUDGET: usize = 1 << 20;
@@ -3469,8 +3472,13 @@ use std::{
 	num::IntErrorKind,
 	ops::Range,
 	path::{Path, PathBuf},
-	sync::{Arc, LazyLock, atomic::{AtomicBool, Ordering as AtomicOrdering}},
+	sync::{
+		Arc,
+		atomic::{AtomicBool, Ordering as AtomicOrdering},
+	},
 };
+#[cfg(not(unix))]
+use std::sync::LazyLock;
 
 use bigdecimal::BigDecimal;
 use brush_core::{ShellExtensions, builtins::Registration, openfiles::OpenFile};
@@ -3479,12 +3487,15 @@ use clap::{Arg, ArgAction, ArgMatches, Command, CommandFactory, FromArgMatches, 
 use custom_str_cmp::{FILTERED_KEYS, custom_str_cmp, filtered_key};
 use ext_sort::ext_sort;
 use foldhash::{HashMap, SharedSeed, fast::FoldHasher};
+#[cfg(not(unix))]
 use icu_collator::{
 	CollatorBorrowed,
 	options::{AlternateHandling, CollatorOptions, Strength},
 };
+#[cfg(not(unix))]
 use icu_locale_core::Locale;
 use numeric_str_cmp::{NumInfo, NumInfoParseSettings, human_numeric_str_cmp, numeric_str_cmp};
+#[cfg(not(unix))]
 use parking_lot::Mutex;
 use pi_vfs::{BlockingFs, File, OpenOptions};
 use rand::{RngExt as _, rng};
@@ -3510,12 +3521,14 @@ use uucore::i18n::datetime::get_locale_months;
 use crate::locale::{ShellLocale, shell_locale_initialises};
 use crate::{
 	host::{Host, Utility, format_usage, rayon_global_pool_available, util},
-	locale::{numeric_symbols, parse_locale_name, shell_locale},
+	locale::{numeric_symbols, shell_locale},
 	sort::{
 		buffer_hint::automatic_buffer_size,
 		tmp_dir::{TmpDirWrapper, TmpFile},
 	},
 };
+#[cfg(not(unix))]
+use crate::locale::parse_locale_name;
 
 type SortResult<T> = Result<T, SortError>;
 
@@ -3984,9 +3997,12 @@ impl GlobalSettings {
 		// The fast path compares precomputed collation keys, which ICU makes;
 		// libc collation compares each pair, as GNU `sort` does.
 		let locale_collation = self.collator.is_some();
+		#[cfg(not(unix))]
+		let icu = matches!(self.collator, Some(Collation::Icu(_)));
+		#[cfg(unix)]
+		let icu = false;
 		self.precomputed.fast_lexicographic = !locale_collation && self.can_use_fast_lexicographic();
-		self.precomputed.fast_locale_collation =
-			matches!(self.collator, Some(Collation::Icu(_))) && self.can_use_fast_lexicographic();
+		self.precomputed.fast_locale_collation = icu && self.can_use_fast_lexicographic();
 		self.precomputed.fast_ascii_insensitive = self.can_use_fast_ascii_insensitive();
 		self.precomputed.ctype = Arc::clone(&self.ctype);
 	}
@@ -4231,6 +4247,7 @@ impl<'a> Line<'a> {
 		token_buffer: &mut Vec<Field>,
 		settings: &GlobalSettings,
 	) -> Self {
+		#[cfg(not(unix))]
 		if settings.precomputed.fast_locale_collation
 			&& let Some(Collation::Icu(collator)) = &settings.collator
 		{
@@ -4947,29 +4964,30 @@ impl FieldSelector {
 /// Collators built so far, by locale. Building one resolves the locale's
 /// tailoring through ICU's fallback chain, which repeated calls skip. `None`
 /// records a locale ICU could not build a collator for.
+#[cfg(not(unix))]
 static COLLATORS: LazyLock<Mutex<HashMap<Locale, Option<Arc<CollatorBorrowed<'static>>>>>> =
 	LazyLock::new(Default::default);
 
 /// How text keys collate.
 #[derive(Clone, Debug)]
 pub(crate) enum Collation {
-	/// ICU, for a UTF-8 `LC_COLLATE` (uucore's rule).
+	/// ICU, for a UTF-8 `LC_COLLATE` where there is no `strcoll_l` (uucore's
+	/// rule).
+	#[cfg(not(unix))]
 	Icu(Arc<CollatorBorrowed<'static>>),
-	/// `strcoll` in the locale, as GNU `sort` collates, for any other
-	/// `LC_COLLATE` libc can load.
+	/// `strcoll` in the locale, as GNU `sort` collates.
 	#[cfg(unix)]
 	Libc(Arc<crate::locale::LibcCollator>),
 }
 
 impl Collation {
 	/// Compares two keys as the locale orders them, in NUL-separated pieces
-	/// as GNU's `memcoll0` does ([`crate::locale::memcoll_pieces`]). ICU finds
-	/// strings equal that glibc's `strcoll` tells apart (characters it ignores,
-	/// such as controls, and canonically equivalent spellings such as `É` and
-	/// `E` with a combining accent), so where ICU finds two keys equal their
-	/// bytes decide, and only identical keys are equal, as under `strcoll`.
+	/// as GNU's `memcoll0` does ([`crate::locale::memcoll_pieces`]). Under
+	/// ICU, which finds equal strings `strcoll` tells apart, the bytes decide
+	/// between keys it finds equal, so only identical keys are equal.
 	fn compare(&self, a: &[u8], b: &[u8]) -> Ordering {
 		match self {
+			#[cfg(not(unix))]
 			Self::Icu(collator) => {
 				crate::locale::memcoll_pieces(a, b, |a, b| collator.compare_utf8(a, b)).then_with(|| a.cmp(b))
 			},
@@ -4981,18 +4999,29 @@ impl Collation {
 
 /// The collation for the shell's LC_COLLATE, or `None` to compare text by
 /// bytes: C/POSIX, or a locale the system cannot load (GNU falls back to
-/// byte order then). A UTF-8 locale collates with ICU, as uucore does; any
-/// other with libc's `strcoll`, as GNU `sort` does.
+/// byte order then). On Unix it is libc's `strcoll` for that locale, as GNU
+/// `sort` compares, UTF-8 or not: ICU's tables order and equate text
+/// differently (it ignores controls, soft hyphens and zero-width joiners
+/// that glibc orders, and equates canonically equivalent spellings), and no
+/// tie-break can recover glibc's order from them. Elsewhere it is ICU for a
+/// UTF-8 locale, as uucore does.
 fn shell_collator(host: &Host, cancel: &AtomicBool) -> Option<Collation> {
 	let name = shell_locale(host, "LC_COLLATE")?;
 	if matches!(name, "C" | "POSIX") || locale_failed_to_set(host) {
 		return None;
 	}
 	#[cfg(unix)]
-	if !crate::locale::name_reads_as_utf8(name) {
-		return crate::locale::libc_collator(host, name, cancel).map(Collation::Libc);
+	return crate::locale::libc_collator(host, name, cancel).map(Collation::Libc);
+	#[cfg(not(unix))]
+	{
+		let _ = cancel;
+		icu_collator(name)
 	}
-	let _ = cancel;
+}
+
+/// ICU's collation for a UTF-8 locale name, or `None` for another charset.
+#[cfg(not(unix))]
+fn icu_collator(name: &str) -> Option<Collation> {
 	let (locale, utf8) = parse_locale_name(name)?;
 	if !utf8 {
 		return None;
@@ -6427,7 +6456,9 @@ fn sort_by<'a>(unsorted: &mut Vec<Line<'a>>, settings: &GlobalSettings, line_dat
 		}
 		compare_by(a, b, settings, line_data, line_data)
 	};
-	let stable = settings.stable || settings.unique;
+	// `strcoll` can find different lines equal (`Й` and `И` with a combining
+	// breve in fr_FR), which GNU's merge sort leaves in input order.
+	let stable = settings.stable || settings.unique || settings.collator.is_some();
 	// WASI has no threads (rayon's pool hits an unreachable trap there), and
 	// Windows leaves the global pool unavailable when pi-natives could not
 	// safely configure it under commit pressure; both sort sequentially.
@@ -6588,17 +6619,28 @@ fn compare_by<'a>(
 				) == Ordering::Equal
 				{
 					Ordering::Equal
-				} else if settings.ignore_case || settings.dictionary_order || settings.ignore_non_printing {
-					// GNU hashes the key as `-f`, `-d` and `-i` leave it, so keys
-					// they make equal hash equal and sort together (for `-u`).
-					FILTERED_KEYS.with_borrow_mut(|(a_key, b_key)| {
-						filtered_key(a_key, a_str, &global_settings.ctype, settings);
-						filtered_key(b_key, b_str, &global_settings.ctype, settings);
-						random_shuffle(a_key, b_key, &global_settings.salt.unwrap())
-					})
 				} else {
-					// Only if they are not equal compare by the hash
-					random_shuffle(a_str, b_str, &global_settings.salt.unwrap())
+					// GNU hashes the key as `-f`, `-d` and `-i` leave it and, in a
+					// collating locale, as `strxfrm` transforms it, so keys the
+					// options or the locale make equal hash equal and sort together
+					// (and `-u` keeps one).
+					FILTERED_KEYS.with_borrow_mut(|(a_key, b_key)| {
+						let filtered = settings.ignore_case || settings.dictionary_order || settings.ignore_non_printing;
+						let (a_key, b_key): (&[u8], &[u8]) = if filtered {
+							filtered_key(a_key, a_str, &global_settings.ctype, settings);
+							filtered_key(b_key, b_str, &global_settings.ctype, settings);
+							(a_key, b_key)
+						} else {
+							(a_str, b_str)
+						};
+						let salt = &global_settings.salt.unwrap();
+						#[cfg(unix)]
+						if let Some(Collation::Libc(collator)) = &global_settings.collator {
+							let (a_key, b_key) = (collator.transform(a_key), collator.transform(b_key));
+							return if a_key == b_key { Ordering::Equal } else { random_shuffle(&a_key, &b_key, salt) };
+						}
+						random_shuffle(a_key, b_key, salt)
+					})
 				}
 			},
 			SortMode::Numeric => {
@@ -6661,15 +6703,15 @@ fn compare_by<'a>(
 
 	// When the keys tie, GNU's last resort compares the whole lines, in the
 	// locale (`xmemcoll0`) when it collates, else by bytes; `-s`, `-u` and
-	// `-R` leave the tie. Bytes order lines the collation leaves equal, which
-	// GNU's merge leaves in input order.
+	// `-R` leave the tie. Lines the collation finds equal stay in input
+	// order, as in GNU's merge sort (the sort is stable then, see `sort_by`).
 	let cmp = if global_settings.mode == SortMode::Random
 		|| global_settings.stable
 		|| global_settings.unique
 	{
 		Ordering::Equal
 	} else if let Some(collator) = &global_settings.collator {
-		collator.compare(a.line, b.line).then_with(|| a.line.cmp(b.line))
+		collator.compare(a.line, b.line)
 	} else {
 		a.line.cmp(b.line)
 	};
@@ -7225,6 +7267,9 @@ mod tests {
 	/// Under locale collation `-f`, `-d` and `-i` filter and fold the keys,
 	/// then collate them, as GNU `keycompare` does: in `en_US.UTF-8`, `é`
 	/// sorts before `z` and `a` before `B`, which byte order reverses.
+	// The expected orders are glibc's `strcoll`, which the collation is on
+	// Unix; musl's compares bytes and macOS's code points.
+	#[cfg(any(not(unix), target_env = "gnu"))]
 	#[test]
 	fn filtered_keys_are_collated_in_the_locale() {
 		if !locale_installed("en_US.UTF-8") {
@@ -7250,6 +7295,7 @@ mod tests {
 	/// plain sort, a filtered key and a field key alike. ICU ignores U+0000,
 	/// so `a\0b` and `ab` collated equal and `-u` dropped `ab`. Each case is
 	/// GNU `sort` 9.4's output in `en_US.UTF-8` (and `fr_FR.UTF-8`, the same).
+	#[cfg(any(not(unix), target_env = "gnu"))]
 	#[test]
 	fn nul_pieces_collate_in_turn_in_the_locale() {
 		if !locale_installed("en_US.UTF-8") {
@@ -7278,6 +7324,7 @@ mod tests {
 	/// Each case is GNU `sort` 9.4's output in `en_US.UTF-8` (and
 	/// `fr_FR.UTF-8`, the same); bytes would put `A` before `a`, and `x z`
 	/// before `x é`.
+	#[cfg(any(not(unix), target_env = "gnu"))]
 	#[test]
 	fn tied_keys_fall_back_to_the_locale_order_of_the_lines() {
 		if !locale_installed("en_US.UTF-8") {
@@ -7302,34 +7349,79 @@ mod tests {
 		}
 	}
 
-	/// Keys ICU finds equal but glibc's `strcoll` tells apart stay apart, in
-	/// byte order: a control character ICU ignores (`a<U+0001>b` and `ab`)
-	/// and canonically equivalent spellings (`É` and `E` with a combining
-	/// accent). ICU alone made them equal, so `sort -fu` dropped one. Each
-	/// case is GNU `sort` 9.4's output in `en_US.UTF-8` (the same in
-	/// `fr_FR.UTF-8` and `C`).
+	/// Text ICU's collation equates or orders differently from glibc's
+	/// `strcoll` sorts as `strcoll` does: control characters, soft hyphens,
+	/// zero-width spaces and joiners and variation selectors that ICU ignores
+	/// (GNU puts `a<U+200C>b` before `ab` and keeps both), and canonically
+	/// equivalent spellings (`É` and `E` with a combining accent). ICU made
+	/// them equal, so `sort -fu` dropped one, and a byte tie-break put `ab`
+	/// first. Each case is GNU `sort` 9.4's output in `en_US.UTF-8` (the same
+	/// in `fr_FR.UTF-8`).
+	#[cfg(target_env = "gnu")]
 	#[test]
-	fn keys_icu_finds_equal_stay_apart_as_strcoll_keeps_them() {
+	fn keys_strcoll_tells_apart_sort_as_strcoll_orders_them() {
 		if !locale_installed("en_US.UTF-8") {
 			eprintln!("skipping: en_US.UTF-8 not installed");
 			return;
 		}
 		let decomposed = "E\u{301}\n\u{c9}\n";
-		for (args, input, expected) in [
-			(&["-fu"][..], "a\u{1}b\nab\n", "a\u{1}b\nab\n"),
-			(&["-fu"][..], "ab\na\u{1}b\n", "a\u{1}b\nab\n"),
-			(&["-u"][..], "a\u{1}b\nab\n", "a\u{1}b\nab\n"),
-			(&[][..], "ab\na\u{1}b\n", "a\u{1}b\nab\n"),
-			(&["-k1,1f", "-u"][..], "a\u{1}b\nab\n", "a\u{1}b\nab\n"),
-			(&["-cfu"][..], "a\u{1}b\nab\n", ""),
-			(&["-fu"][..], "\u{c9}\nE\u{301}\n", decomposed),
-			(&["-fu"][..], decomposed, decomposed),
-			(&["-u"][..], "\u{c9}\nE\u{301}\n", decomposed),
-			(&[][..], "\u{c9}\nE\u{301}\n", decomposed),
-		] {
-			let (code, out, err) = sort_in_locale("LC_ALL", "en_US.UTF-8", args, input);
-			assert_eq!((code, err.as_str()), (0, ""), "{args:?} {input:?}");
+		let mut cases = vec![
+			(&["-fu"][..], "a\u{1}b\nab\n".to_owned(), "a\u{1}b\nab\n".to_owned(), 0),
+			(&["-fu"][..], "ab\na\u{1}b\n".into(), "a\u{1}b\nab\n".into(), 0),
+			(&["-u"][..], "a\u{1}b\nab\n".into(), "a\u{1}b\nab\n".into(), 0),
+			(&[][..], "ab\na\u{1}b\n".into(), "a\u{1}b\nab\n".into(), 0),
+			(&["-k1,1f", "-u"][..], "a\u{1}b\nab\n".into(), "a\u{1}b\nab\n".into(), 0),
+			(&["-cfu"][..], "a\u{1}b\nab\n".into(), String::new(), 0),
+			(&["-fu"][..], "\u{c9}\nE\u{301}\n".into(), decomposed.into(), 0),
+			(&["-fu"][..], decomposed.into(), decomposed.into(), 0),
+			(&["-u"][..], "\u{c9}\nE\u{301}\n".into(), decomposed.into(), 0),
+			(&[][..], "\u{c9}\nE\u{301}\n".into(), decomposed.into(), 0),
+		];
+		for ignored in ['\u{200c}', '\u{ad}', '\u{200b}', '\u{200d}', '\u{fe0f}'] {
+			let first = format!("a{ignored}b\nab\n");
+			let second = format!("ab\na{ignored}b\n");
+			cases.extend([
+				(&[][..], second.clone(), first.clone(), 0),
+				(&[][..], first.clone(), first.clone(), 0),
+				(&["-u"][..], second.clone(), first.clone(), 0),
+				(&["-fu"][..], second.clone(), first.clone(), 0),
+				(&["-c"][..], first.clone(), String::new(), 0),
+				(&["-C"][..], second, String::new(), 1),
+			]);
+		}
+		for (args, input, expected, expected_code) in cases {
+			let (code, out, _) = sort_in_locale("LC_ALL", "en_US.UTF-8", args, &input);
+			assert_eq!(code, expected_code, "{args:?} {input:?}");
 			assert_eq!(out, expected, "{args:?} {input:?}");
+		}
+	}
+
+	/// Lines glibc's `strcoll` finds equal (`Й` and `И` with a combining
+	/// breve) are equal: GNU `sort` 9.4 keeps them in input order with and
+	/// without `-r` or `-s`, `-u` and `-Ru` keep the first, and `-cu` fails,
+	/// in `fr_FR.UTF-8` and `en_US.UTF-8`. Ordered by bytes they were kept
+	/// twice under `-u` and reordered.
+	#[cfg(target_env = "gnu")]
+	#[test]
+	fn lines_strcoll_equates_stay_in_input_order() {
+		let composed = "\u{419}\n";
+		let decomposed = "\u{418}\u{306}\n";
+		for locale in ["fr_FR.UTF-8", "en_US.UTF-8"] {
+			if !locale_installed(locale) {
+				eprintln!("skipping: {locale} not installed");
+				continue;
+			}
+			for (first, second) in [(composed, decomposed), (decomposed, composed)] {
+				let input = format!("{first}{second}");
+				for args in [&[][..], &["-r"], &["-s"], &["-c"]] {
+					let expected = if args == ["-c"] { String::new() } else { input.clone() };
+					assert_eq!(sort_in_locale("LC_ALL", locale, args, &input).1, expected, "{locale} {args:?} {input:?}");
+				}
+				for args in [&["-u"][..], &["-Ru"], &["-Rfu"]] {
+					assert_eq!(sort_in_locale("LC_ALL", locale, args, &input).1, first, "{locale} {args:?} {input:?}");
+				}
+				assert_eq!(sort_in_locale("LC_ALL", locale, &["-cu"], &input).0, 1, "{locale} -cu {input:?}");
+			}
 		}
 	}
 
@@ -7688,6 +7780,7 @@ mod tests {
 
 	// Failure mode: shifted collation at tertiary strength treated distinct
 	// punctuation-bearing paths as equal, so `sort -u` discarded records.
+	#[cfg(any(not(unix), target_env = "gnu"))]
 	#[test]
 	fn locale_unique_preserves_punctuation_unless_the_key_ignores_it() {
 		if !locale_installed("en_US.UTF-8") {
