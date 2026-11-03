@@ -140,18 +140,52 @@ test("token refreshes and persists a rotating local MCP OAuth grant", async () =
 	}
 }, 30_000);
 
-// PR #17795 review, rounds 7 and 8: `omp --no-mcp token` refreshed an MCP
-// credential, contacting the server's token endpoint, and printed a stored one.
-for (const { name, args, noMcp, stored, lead } of [
+// PR #17795 review, round 7: `omp --no-mcp token` refreshed an MCP credential,
+// contacting the server's token endpoint. MCP off refuses every refresh (an
+// expired token, `--force-refresh`), however the id is spelled (round 9:
+// `MCP_OAUTH:` skipped the managed-id checks); a stored, unexpired token is
+// printed as stored, since reading it contacts nothing.
+const storedId = "mcp_oauth:profile:default:https://mcp.example.test/mcp";
+for (const { name, args, noMcp, stored, lead, typed } of [
 	{ name: "PI_NO_MCP=1", args: ["--force-refresh"], noMcp: "1", stored: "expired" },
 	{ name: "--no-mcp", args: ["--force-refresh"], noMcp: "", stored: "expired", lead: ["--no-mcp"] },
+	{ name: "PI_NO_MCP=1, an expired token", args: [], noMcp: "1", stored: "expired" },
+	{
+		name: "PI_NO_MCP=1, MCP_OAUTH: spelling",
+		args: ["--force-refresh"],
+		noMcp: "1",
+		stored: "expired",
+		typed: storedId.toUpperCase(),
+	},
+	{
+		name: "--no-mcp, Mcp_oauth: spelling, --account 1",
+		args: ["--account", "1", "--force-refresh"],
+		noMcp: "",
+		stored: "expired",
+		lead: ["--no-mcp"],
+		typed: `Mcp_oauth${storedId.slice("mcp_oauth".length)}`,
+	},
 	{ name: "PI_NO_MCP=1, a valid stored token", args: [], noMcp: "1", stored: "valid" },
 	{ name: "--no-mcp, a valid stored token", args: [], noMcp: "", stored: "valid", lead: ["--no-mcp"] },
 	{ name: "PI_NO_MCP=1, --account 1", args: ["--account", "1"], noMcp: "1", stored: "valid" },
-] as Array<{ name: string; args: string[]; noMcp: string; stored: "expired" | "valid"; lead?: string[] }>) {
-	test(`token resolves no MCP credential under ${name}`, async () => {
+	{
+		name: "PI_NO_MCP=1, MCP_OAUTH: spelling, a valid stored token",
+		args: [],
+		noMcp: "1",
+		stored: "valid",
+		typed: storedId.toUpperCase(),
+	},
+] as Array<{
+	name: string;
+	args: string[];
+	noMcp: string;
+	stored: "expired" | "valid";
+	lead?: string[];
+	typed?: string;
+}>) {
+	test(`token ${stored === "valid" ? "prints the stored" : "refreshes no"} MCP credential under ${name}`, async () => {
 		using tempDir = TempDir.createSync("@omp-token-mcp-oauth-off-");
-		const provider = "mcp_oauth:profile:default:https://mcp.example.test/MCP";
+		const provider = storedId;
 		let requests = 0;
 		const tokenServer = Bun.serve({
 			hostname: "127.0.0.1",
@@ -174,7 +208,7 @@ for (const { name, args, noMcp, stored, lead } of [
 			await authStorage.credentials.set(provider, credential);
 			authStorage.close();
 
-			const proc = Bun.spawn([process.execPath, cliEntry, ...(lead ?? []), "token", provider, ...args], {
+			const proc = Bun.spawn([process.execPath, cliEntry, ...(lead ?? []), "token", typed ?? provider, ...args], {
 				cwd: path.resolve(import.meta.dir, "../../.."),
 				env: {
 					...process.env,
@@ -190,53 +224,63 @@ for (const { name, args, noMcp, stored, lead } of [
 			const [exitCode, stdout] = await Promise.all([proc.exited, new Response(proc.stdout).text()]);
 
 			expect(requests).toBe(0);
-			expect(stdout).not.toContain("access-");
-			expect(exitCode).not.toBe(0);
+			if (stored === "valid") {
+				expect(stdout).toBe("access-0\n");
+				expect(exitCode).toBe(0);
+			} else {
+				expect(stdout).not.toContain("access-");
+				expect(exitCode).not.toBe(0);
+			}
 		} finally {
 			tokenServer.stop(true);
 		}
 	}, 30_000);
 }
 
-test("token refuses a managed MCP id scoped to another profile", async () => {
-	using tempDir = TempDir.createSync("@omp-token-mcp-oauth-xprofile-");
-	// A non-expired row that the fall-through resolver WOULD hand back verbatim.
-	const foreignProvider = "mcp_oauth:profile:work:https://mcp.example.test/mcp";
-	const dbPath = tempDir.join("agent.db");
-	const store = await SqliteAuthCredentialStore.open(dbPath);
-	const authStorage = new AuthStorage(store);
-	await authStorage.credentials.reload();
-	await authStorage.credentials.set(foreignProvider, {
-		type: "oauth",
-		access: "work-access",
-		refresh: "work-refresh",
-		expires: Date.now() + 3_600_000,
-	});
-	authStorage.close();
+// An id typed in another case (`MCP_OAUTH:`) is looked up lowercased; it gets
+// the same profile check (PR #17795 review, round 9).
+for (const spelling of ["as stored", "MCP_OAUTH:"] as const) {
+	test(`token refuses a managed MCP id scoped to another profile, typed ${spelling}`, async () => {
+		using tempDir = TempDir.createSync("@omp-token-mcp-oauth-xprofile-");
+		// A non-expired row that the fall-through resolver WOULD hand back verbatim.
+		const foreignProvider = "mcp_oauth:profile:work:https://mcp.example.test/mcp";
+		const dbPath = tempDir.join("agent.db");
+		const store = await SqliteAuthCredentialStore.open(dbPath);
+		const authStorage = new AuthStorage(store);
+		await authStorage.credentials.reload();
+		await authStorage.credentials.set(foreignProvider, {
+			type: "oauth",
+			access: "work-access",
+			refresh: "work-refresh",
+			expires: Date.now() + 3_600_000,
+		});
+		authStorage.close();
 
-	const proc = Bun.spawn([process.execPath, cliEntry, "token", foreignProvider], {
-		cwd: path.resolve(import.meta.dir, "../../.."),
-		env: {
-			...process.env,
-			NO_COLOR: "1",
-			OMP_AUTH_BROKER_TOKEN: undefined,
-			OMP_AUTH_BROKER_URL: undefined,
-			OMP_PROFILE: undefined,
-			PI_PROFILE: undefined,
-			PI_CODING_AGENT_DIR: tempDir.path(),
-			// The test runner exports PI_NO_MCP=1, which refuses MCP credentials before the profile check.
-			PI_NO_MCP: "",
-		},
-		stdout: "pipe",
-		stderr: "pipe",
-	});
-	const [exitCode, stdout, stderr] = await Promise.all([
-		proc.exited,
-		new Response(proc.stdout).text(),
-		new Response(proc.stderr).text(),
-	]);
+		const typed = spelling === "MCP_OAUTH:" ? foreignProvider.toUpperCase() : foreignProvider;
+		const proc = Bun.spawn([process.execPath, cliEntry, "token", typed], {
+			cwd: path.resolve(import.meta.dir, "../../.."),
+			env: {
+				...process.env,
+				NO_COLOR: "1",
+				OMP_AUTH_BROKER_TOKEN: undefined,
+				OMP_AUTH_BROKER_URL: undefined,
+				OMP_PROFILE: undefined,
+				PI_PROFILE: undefined,
+				PI_CODING_AGENT_DIR: tempDir.path(),
+				// The test runner exports PI_NO_MCP=1, which refuses MCP credentials before the profile check.
+				PI_NO_MCP: "",
+			},
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const [exitCode, stdout, stderr] = await Promise.all([
+			proc.exited,
+			new Response(proc.stdout).text(),
+			new Response(proc.stderr).text(),
+		]);
 
-	expect(exitCode).toBe(1);
-	expect(stdout).not.toContain("work-access");
-	expect(stderr).toContain('profile "work"');
-}, 30_000);
+		expect(exitCode).toBe(1);
+		expect(stdout).not.toContain("work-access");
+		expect(stderr).toContain('profile "work"');
+	}, 30_000);
+}
