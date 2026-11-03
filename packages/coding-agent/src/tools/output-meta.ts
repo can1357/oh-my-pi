@@ -766,25 +766,54 @@ async function wrappedExecute(
 ): Promise<AgentToolResult> {
 	const originalExecute = this[kUnwrappedExecute];
 
+	let own: AgentToolResult;
+	let result: AgentToolResult;
 	try {
-		let result = await originalExecute.call(this, toolCallId, params, signal, onUpdate, context);
+		own = await originalExecute.call(this, toolCallId, params, signal, onUpdate, context);
 
 		// Spill large results to artifact, truncate to tail
-		result = await spillLargeResultToArtifact(result, this.name, context);
+		result = await spillLargeResultToArtifact(own, this.name, context);
 
 		// Append notices from meta
 		const meta: OutputMeta | undefined = result.details?.meta;
 		if (meta) {
-			return {
+			result = {
 				...result,
 				content: appendOutputNotice(result.content, meta),
 			};
 		}
-		return result;
 	} catch (e) {
 		// Re-throw with formatted message so agent-loop sets isError flag
 		throw new Error(renderError(e));
 	}
+	// The Spotlight experiment shapes what the agent's own calls return; calls a tool or script makes stay whole.
+	const shape = context?.spotlightShape;
+	if (shape && isAgentCall(this, toolCallId, context)) {
+		result = await shape({
+			tool: this.name,
+			toolCallId,
+			args: params,
+			own,
+			result,
+			signal,
+			targets: () => this.matcherPaths?.(params),
+		});
+	}
+	return result;
+}
+
+/**
+ * Whether call `toolCallId` of `tool` is one the agent made: the loop's batch lists it under this tool's name. Calls
+ * dispatched under another tool's call (an `xd://` device behind `write`) or outside the loop (eval's tool bridge, an
+ * advisor) are not.
+ */
+function isAgentCall(tool: AgentTool, toolCallId: string, context: AgentToolContext): boolean {
+	const calls = context.toolCall?.toolCalls;
+	if (!calls) return false;
+	for (const call of calls) {
+		if (call.id === toolCallId) return call.name === tool.name || call.name === tool.customWireName;
+	}
+	return false;
 }
 
 /**

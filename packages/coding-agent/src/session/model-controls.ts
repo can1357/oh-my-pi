@@ -57,6 +57,12 @@ import {
 } from "./settings";
 import { cfgDisabledProviders, cfgEnabledModels } from "../config/model-settings";
 
+/** Whether `model` takes effort per message, so changing it mid-conversation keeps the cached prefix. */
+function takesPerMessageEffort(model: Model): boolean {
+	const { compat } = model;
+	return compat !== undefined && "supportsPerMessageEffort" in compat && compat.supportsPerMessageEffort === true;
+}
+
 /** Capabilities borrowed from the owning AgentSession. */
 export interface ModelControlsHost {
 	agent: Agent;
@@ -685,6 +691,37 @@ export class ModelControls {
 			this.#thinkingLevelCeiling,
 		);
 		if (effort === undefined) return;
+		this.#resolveAutoThinkingLevel(effort);
+	}
+
+	/**
+	 * Apply a `chillax` keyword in `promptText`: drop effort to the model's
+	 * lowest supported level from the next request on. Only models that take
+	 * per-message effort qualify — they switch effort between steps without
+	 * rewriting the cached prefix, so a steer relaxes the running turn. In auto
+	 * mode the floor is this turn's resolution (later prompts reclassify); a
+	 * pinned level is re-pinned lower, never raised, and off stays off.
+	 * @returns Whether the keyword applied, so auto classification must not run for the turn.
+	 */
+	applyChillax(promptText: string): boolean {
+		if (!this.#host.magicKeywordEnabled("chillax") || !containsMagicKeyword(promptText, "chillax")) return false;
+		const model = this.#model;
+		if (!model?.reasoning || model.thinking?.unverified || !takesPerMessageEffort(model)) return false;
+		const floor = getSupportedEfforts(model)[0];
+		if (floor === undefined) return false;
+		if (this.#autoThinking) {
+			this.#resolveAutoThinkingLevel(floor);
+			return true;
+		}
+		const current = toReasoningEffort(this.#thinkingLevel);
+		if (current !== undefined && THINKING_EFFORTS.indexOf(floor) < THINKING_EFFORTS.indexOf(current)) {
+			this.setThinkingLevel(floor);
+		}
+		return true;
+	}
+
+	/** Publish `effort` as the turn's auto resolution; the transcript records only a changed level. */
+	#resolveAutoThinkingLevel(effort: Effort): void {
 		const shouldPersistResolution = this.#thinkingLevel !== effort;
 		this.#autoResolvedLevel = effort;
 		this.#thinkingLevel = effort;

@@ -20,7 +20,7 @@ use crate::{
 	interp::{self, Execute, ExternalCommandInfo, ExternalCommandOutputMarkers, ProcessGroupPolicy},
 	ioutils,
 	openfiles::{self, OpenFiles},
-	pathsearch, processes,
+	outputrelay, pathsearch, processes,
 	results::{ExecutionSpawnResult, ExecutionWaitResult},
 	sys, trace_categories, traps, variables,
 };
@@ -916,8 +916,8 @@ pub(crate) async fn execute_external_command(
 		trampoline_args.extend(cmd_args.iter().map(|arg| (*arg).clone()));
 		compose_std_command(&context, "/bin/sh", "sh", trampoline_args.as_slice(), false).await?
 	};
+	let output_relays = route_output_through_relays(&context, &mut cmd)?;
 	let mut marker_output = prepare_output_markers(&context, executable_path, cmd_args.as_slice());
-
 
 	// Set up process group/session state.
 	//
@@ -1004,6 +1004,7 @@ pub(crate) async fn execute_external_command(
 			}
 
 			let mut child_process = processes::ChildProcess::new(child, pid, actual_pgid);
+			child_process.set_output_relays(output_relays.into_handles());
 			if let Some((output, markers)) = marker_output.take() {
 				child_process.set_completion_marker(
 					output,
@@ -1036,6 +1037,32 @@ pub(crate) async fn execute_external_command(
 			}
 		},
 	}
+}
+
+/// Hands the command a relay pipe in place of each output that is a text
+/// sink (see [`crate::outputrelay`]). The returned relays must outlive the
+/// spawn and be released right after it, so the relays see EOF once the
+/// command and whatever it left running have closed their ends.
+fn route_output_through_relays<SE: extensions::ShellExtensions>(
+	context: &ExecutionContext<'_, SE>,
+	cmd: &mut std::process::Command,
+) -> Result<outputrelay::OutputRelays, error::Error> {
+	let mut relays = outputrelay::OutputRelays::default();
+	let Some(decoding) = context.params.output_decoding() else {
+		return Ok(relays);
+	};
+	let sinks = context.params.text_sinks();
+	if let Some(stdout) = context.try_fd(OpenFiles::STDOUT_FD)
+		&& let Some(relay) = relays.route(decoding, sinks, &stdout)?
+	{
+		cmd.stdout(relay.into_stdio()?);
+	}
+	if let Some(stderr) = context.try_fd(OpenFiles::STDERR_FD)
+		&& let Some(relay) = relays.route(decoding, sinks, &stderr)?
+	{
+		cmd.stderr(relay.into_stdio()?);
+	}
+	Ok(relays)
 }
 
 fn prepare_output_markers<SE: extensions::ShellExtensions>(
@@ -1182,7 +1209,11 @@ pub(crate) async fn invoke_command_in_subshell_and_get_output(
 
 	// Set up pipe so we can read the output.
 	let (reader, writer) = ioutils::pipe("command substitution")?;
-	params.set_fd(OpenFiles::STDOUT_FD, writer.into());
+	let writer = openfiles::OpenFile::from(writer);
+	if params.output_decoding().is_some() {
+		params.add_text_sink(writer.clone());
+	}
+	params.set_fd(OpenFiles::STDOUT_FD, writer);
 
 	let mut async_reader = sys::async_pipe::AsyncPipeReader::new(reader)?;
 

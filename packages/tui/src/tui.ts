@@ -309,6 +309,13 @@ export interface Component {
 	handleNativeEvent?(event: NativeUiEvent): void;
 
 	/**
+	 * Native transcript blocks drawn right after this one as siblings (a `TranscriptContainer` child only): notes
+	 * about the block that must show while it is collapsed, such as a tool card's Spotlight notice. The terminal
+	 * rows never show them. Return the same array while unchanged.
+	 */
+	nativeTrailers?(): readonly Component[];
+
+	/**
 	 * Pure preflight for focused input that must precede TUI-wide input listeners
 	 * and debug shortcuts. A true result routes the event to this component first.
 	 */
