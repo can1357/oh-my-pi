@@ -2128,28 +2128,29 @@ export class Agent {
 	appendMessage(m: AgentMessage) {
 		this.#state.messages.push(m);
 		// The transcript records the occurrence the model read: live steering the provider accepted, then input
-		// put into a request, then any other holder, so an undelivered copy of the same message object keeps
-		// its own state (its promotion, its place in the agent-steering wait).
-		const rank = (delivered: { accepted?: true; committed?: true }): number =>
-			delivered.accepted ? 0 : delivered.committed ? 1 : 2;
+		// put into a request. Live steering handed over and not settled is never what a request records, so it
+		// comes after both, and so does any undelivered holder. An undelivered copy of the same message object
+		// keeps its own state (its promotion, its place in the agent-steering wait).
+		const liveRank = (entry: LiveSteeredEntry): number => (entry.accepted ? 0 : entry.committed ? 2 : 3);
+		const recordRank = (delivery: QueuedMessageDelivery): number => (delivery.committed ? 1 : 3);
 		let live = -1;
 		for (let i = 0; i < this.#liveSteered.length; i++) {
 			const entry = this.#liveSteered[i];
 			if (entry.message !== m) continue;
-			if (live < 0 || rank(entry) < rank(this.#liveSteered[live])) live = i;
+			if (live < 0 || liveRank(entry) < liveRank(this.#liveSteered[live])) live = i;
 		}
-		if (live >= 0) {
+		let recorded: QueuedMessageDelivery | undefined;
+		for (const delivery of this.#queuedMessageDeliveries) {
+			if (delivery.messages[delivery.next] !== m) continue;
+			if (!recorded || recordRank(delivery) < recordRank(recorded)) recorded = delivery;
+		}
+		if (live >= 0 && (!recorded || liveRank(this.#liveSteered[live]) <= recordRank(recorded))) {
 			const [entry] = this.#liveSteered.splice(live, 1);
 			this.#recordTakenSteering(m, entry.unit);
 			// The message landed in the transcript, so it stops counting as
 			// queued pending input; snapshots shrink and listeners must hear it.
 			this.#emitQueueChanged();
 			return;
-		}
-		let recorded: QueuedMessageDelivery | undefined;
-		for (const delivery of this.#queuedMessageDeliveries) {
-			if (delivery.messages[delivery.next] !== m) continue;
-			if (!recorded || rank(delivery) < rank(recorded)) recorded = delivery;
 		}
 		this.#recordTakenSteering(m, recorded?.unit);
 		if (recorded && ++recorded.next === recorded.messages.length) this.#queuedMessageDeliveries.delete(recorded);

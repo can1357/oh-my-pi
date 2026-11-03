@@ -1916,4 +1916,32 @@ describe("steering invariants: the round-eleven reproductions", () => {
 		// The run's end put the unsettled, promoted occurrence back; it still goes ahead of a person's steer.
 		expect(texts(agent.peekNextSteering())).toEqual(["V"]);
 	});
+
+	it("the transcript records the occurrence a request carried, not an unsettled live copy of the same object", async () => {
+		const { agent, mock } = createAgent();
+		const v = card("V");
+		const requests: string[][] = [];
+		let first = true;
+		agent.streamFn = async (model, context, options) => {
+			requests.push(context.messages.map(message => messageText(message as AgentMessage)));
+			if (first && options?.liveSteering && options.signal) {
+				first = false;
+				agent.steer(v);
+				agent.prioritizeSteering([v]);
+				// The promoted occurrence is handed to the provider and never settled.
+				await options.liveSteering.claim(options.signal);
+				// The second occurrence is put into the next request at the stop boundary.
+				agent.steer(v);
+			}
+			return mock.stream(model, context, options);
+		};
+
+		await agent.prompt("start");
+		agent.steer(person("W"));
+
+		expect(requests.at(-1)).toEqual(["start", "ack", "V"]);
+		expect(transcriptTexts(agent)).toEqual(["start", "V"]);
+		// The run's end put the unsettled, promoted occurrence back; it still goes ahead of a person's steer.
+		expect(texts(agent.peekNextSteering())).toEqual(["V"]);
+	});
 });
