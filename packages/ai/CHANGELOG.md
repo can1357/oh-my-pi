@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Forced `tool_choice` rejections (HTTP 400) now downgrade to automatic tool selection and retry once instead of failing the turn, on Anthropic, OpenAI Completions and OpenAI Responses ([#13248](https://github.com/can1357/oh-my-pi/pull/13248) by [@jwaldrip](https://github.com/jwaldrip)).
 ### Added
 
 - Anthropic sessions on the official API now use message threads (`message-threads-2026-08-12`, as Claude Code does): after the first turn each request sends only the new messages, cutting time to first token in long conversations; a refused or expired thread replays the full conversation automatically. `statefulResponses: false` or `PI_ANTHROPIC_MESSAGE_THREADS=0` turns it off, `PI_ANTHROPIC_MESSAGE_THREADS=1` opts other endpoints in
