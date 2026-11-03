@@ -6653,53 +6653,97 @@ mod tests {
 				"x=orig; declare -n ref=x; ref+=more /bin/sh -c 'echo \"x=<$x>\"'; echo \"after=<$x>\"",
 				"x=<origmore>\nafter=<orig>\n",
 			),
-			("a lowercase name appended to, seen by a command", "declare -l a=AbC; a+=NeW /usr/bin/env | /bin/grep '^a='", "a=abcnew\n"),
-			("an uppercase name appended to, seen by a command", "declare -u a=AbC; a+=NeW /usr/bin/env | /bin/grep '^a='", "a=ABCNEW\n"),
-			("a lowercase name appended to, seen by a function", "declare -l a=AbC; f() { echo \"in=<$a>\"; }; a+=NeW f", "in=<abcnew>\n"),
+			(
+				"a lowercase name appended to, seen by a command",
+				"declare -l a=AbC; a+=NeW /usr/bin/env | /bin/grep '^a='",
+				"a=abcnew\n",
+			),
+			(
+				"an uppercase name appended to, seen by a command",
+				"declare -u a=AbC; a+=NeW /usr/bin/env | /bin/grep '^a='",
+				"a=ABCNEW\n",
+			),
+			(
+				"a lowercase name appended to, seen by a function",
+				"declare -l a=AbC; f() { echo \"in=<$a>\"; }; a+=NeW f",
+				"in=<abcnew>\n",
+			),
 			(
 				"a readonly name read by a later assignment",
-				"readonly a=old; a=new b=$a /bin/sh -c 'printf \"a=<%s> b=<%s>\\n\" \"$a\" \"$b\"'; echo \"after=<$a>\"",
+				"readonly a=old; a=new b=$a /bin/sh -c 'printf \"a=<%s> b=<%s>\\n\" \"$a\" \"$b\"'; \
+				 echo \"after=<$a>\"",
 				"a: readonly variable\na=<> b=<old>\nafter=<old>\n",
 			),
-			("an exported readonly name", "declare -rx a=old; a=new /bin/sh -c 'echo \"a=<$a>\"'", "a: readonly variable\na=<old>\n"),
+			(
+				"an exported readonly name",
+				"declare -rx a=old; a=new /bin/sh -c 'echo \"a=<$a>\"'",
+				"a: readonly variable\na=<old>\n",
+			),
 			(
 				"a readonly name before a function",
 				"readonly a=old; f() { echo \"in=<$a>\"; declare -p a; }; a=new f",
 				"a: readonly variable\nin=<old>\ndeclare -r a=\"old\"\n",
 			),
-			("a readonly name twice", "readonly a=old; a=one a=two /bin/echo RAN", "a: readonly variable\na: readonly variable\nRAN\n"),
-			("a readonly PATH", "readonly PATH; PATH=/invalid /usr/bin/env >out; /bin/grep -c '^PATH=/' out", "PATH: readonly variable\n1\n"),
+			(
+				"a readonly name twice",
+				"readonly a=old; a=one a=two /bin/echo RAN",
+				"a: readonly variable\na: readonly variable\nRAN\n",
+			),
+			(
+				"a readonly PATH",
+				"readonly PATH; PATH=/invalid /usr/bin/env >out; /bin/grep -c '^PATH=/' out",
+				"PATH: readonly variable\n1\n",
+			),
 			(
 				"a readonly name's value is not expanded",
-				"readonly a=old; n=0; a=${missing:?BOOM}$((n+=1)) /bin/echo RAN; echo \"status=$? after=<$a> n=$n\"",
+				"readonly a=old; n=0; a=${missing:?BOOM}$((n+=1)) /bin/echo RAN; echo \"status=$? \
+				 after=<$a> n=$n\"",
 				"a: readonly variable\nRAN\nstatus=0 after=<old> n=0\n",
 			),
 			(
 				"a readonly name is not in a function's environment",
-				"readonly a=old; f() { /usr/bin/env | /bin/grep '^a=' || echo no-a; echo \"in=<$a>\"; }; a=new f",
+				"readonly a=old; f() { /usr/bin/env | /bin/grep '^a=' || echo no-a; echo \"in=<$a>\"; \
+				 }; a=new f",
 				"a: readonly variable\nno-a\nin=<old>\n",
 			),
-			("a name that holds a readonly one", "readonly x=old; declare -n ref=x; ref=new /bin/echo RAN", "ref: readonly variable\nRAN\n"),
+			(
+				"a name that holds a readonly one",
+				"readonly x=old; declare -n ref=x; ref=new /bin/echo RAN",
+				"ref: readonly variable\nRAN\n",
+			),
 			(
 				"a name that holds another, read by a later assignment",
-				"x=original; declare -n ref=x; ref=3 b=$ref /usr/bin/env | /bin/grep -E '^(x|ref|b)=' | /usr/bin/sort",
+				"x=original; declare -n ref=x; ref=3 b=$ref /usr/bin/env | /bin/grep -E '^(x|ref|b)=' \
+				 | /usr/bin/sort",
 				"b=3\nx=3\n",
 			),
 			(
 				"a name that holds another, appended to and read",
-				"x=original; declare -n ref=x; ref+=3 b=$ref /usr/bin/env | /bin/grep -E '^(x|ref|b)=' | /usr/bin/sort",
+				"x=original; declare -n ref=x; ref+=3 b=$ref /usr/bin/env | /bin/grep -E \
+				 '^(x|ref|b)=' | /usr/bin/sort",
 				"b=original3\nx=original3\n",
 			),
 			(
 				"two names that hold others, read by a later assignment",
-				"x=original; declare -n mid=x; declare -n ref=mid; ref=3 b=$ref /usr/bin/env | /bin/grep -E '^(x|ref|mid|b)=' | /usr/bin/sort",
+				"x=original; declare -n mid=x; declare -n ref=mid; ref=3 b=$ref /usr/bin/env | \
+				 /bin/grep -E '^(x|ref|mid|b)=' | /usr/bin/sort",
 				"b=3\nx=3\n",
 			),
-			("a name that holds another, read in a function", "x=original; declare -n ref=x; f() { echo \"in=<$ref> x=<$x>\"; }; ref=3 f", "in=<3> x=<3>\n"),
-			("a name that holds an array element", "a=(zero one); declare -n ref='a[1]'; ref=new /usr/bin/env | /bin/grep -E '^(ref|a)'", "ref=new\n"),
+			(
+				"a name that holds another, read in a function",
+				"x=original; declare -n ref=x; f() { echo \"in=<$ref> x=<$x>\"; }; ref=3 f",
+				"in=<3> x=<3>\n",
+			),
+			(
+				"a name that holds an array element",
+				"a=(zero one); declare -n ref='a[1]'; ref=new /usr/bin/env | /bin/grep -E '^(ref|a)'",
+				"ref=new\n",
+			),
 			(
 				"a ring of names that hold each other",
-				"declare -n ref=second; declare -n second=third; declare -n third=ref; ref=new /bin/sh -c 'printf \"ref=<%s> second=<%s> third=<%s>\\n\" \"$ref\" \"$second\" \"$third\"'",
+				"declare -n ref=second; declare -n second=third; declare -n third=ref; ref=new \
+				 /bin/sh -c 'printf \"ref=<%s> second=<%s> third=<%s>\\n\" \"$ref\" \"$second\" \
+				 \"$third\"'",
 				"warning: ref: circular name reference\nref=<new> second=<> third=<>\n",
 			),
 			(
