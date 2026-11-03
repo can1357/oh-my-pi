@@ -58,6 +58,10 @@ export interface RestartInterruptedToolCall {
 export interface RestartSubagent {
 	id: string;
 	parentId?: string;
+	/** Its transcript, so a resume can find it even when the roster scan does not. */
+	sessionFile?: string;
+	/** Not running at the restart: recorded only to read results that had not reached it. */
+	idle?: boolean;
 	/** Tool calls that were running when the restart stopped its turn. */
 	interruptedToolCalls: RestartInterruptedToolCall[];
 	/** Its own background jobs, other than its subagents, which end with the process. */
@@ -75,6 +79,8 @@ export interface RestartSubagentsData {
 	sessionId: string;
 	recordedAt: string;
 	subagents: RestartSubagent[];
+	/** Results of the root's jobs that finished but that the root had not read. */
+	rootUnreadResults?: { id: string; text: string }[];
 }
 
 /**
@@ -172,6 +178,7 @@ function describeRunningSubagent(
 	return {
 		id: ref.id,
 		...(ref.parentId ? { parentId: ref.parentId } : {}),
+		...(ref.sessionFile ? { sessionFile: ref.sessionFile } : {}),
 		interruptedToolCalls,
 		lostJobs,
 		pendingMessages,
@@ -190,8 +197,10 @@ export function recordRestartSubagents(session: AgentSession): RestartSubagentsD
 	const rootFile = sessionManager.getSessionFile();
 	if (!rootFile || !sessionManager.isSessionOnDisk()) return undefined;
 	const manager = session.asyncJobManager;
+	const registry = AgentRegistry.global();
+	const rootId = session.getAgentId?.() ?? MAIN_AGENT_ID;
 	const subagents: RestartSubagent[] = [];
-	for (const ref of AgentRegistry.global().list()) {
+	for (const ref of registry.list()) {
 		if (ref.kind !== "sub" || !ref.sessionFile || !sessionFileBelongsToRoot(ref.sessionFile, rootFile)) continue;
 		const carried = resumesInFlight.get(ref.id);
 		const running = ref.status === "running" && ref.session;
@@ -208,12 +217,48 @@ export function recordRestartSubagents(session: AgentSession): RestartSubagentsD
 				unreadResults: mergeUnique(carried.unreadResults, live.unreadResults),
 			});
 	}
-	if (subagents.length === 0) return undefined;
+	// A finished job whose result its owner has not read yet dies with the process
+	// (its delivery is queued in memory): the idle subagent that owns it goes on to
+	// read it, and the root gets its own again after the relaunch.
+	const recorded = new Map(subagents.map(sub => [sub.id, sub]));
+	const rootUnreadResults: { id: string; text: string }[] = [];
+	for (const job of manager?.getAllJobs() ?? []) {
+		if (job.status === "running" || !job.ownerId || manager?.isJobResultConsumed(job.id)) continue;
+		const text = job.resultText ?? job.errorText;
+		if (!text) continue;
+		if (job.ownerId === rootId) {
+			rootUnreadResults.push({ id: job.id, text });
+			continue;
+		}
+		const owner = registry.get(job.ownerId);
+		if (!owner || owner.kind !== "sub" || !owner.sessionFile) continue;
+		if (!sessionFileBelongsToRoot(owner.sessionFile, rootFile)) continue;
+		const existing = recorded.get(owner.id);
+		if (existing) {
+			if (!existing.unreadResults.some(result => result.id === job.id))
+				existing.unreadResults.push({ id: job.id, text });
+			continue;
+		}
+		const idle: RestartSubagent = {
+			id: owner.id,
+			...(owner.parentId ? { parentId: owner.parentId } : {}),
+			sessionFile: owner.sessionFile,
+			idle: true,
+			interruptedToolCalls: [],
+			lostJobs: [],
+			pendingMessages: [],
+			unreadResults: [{ id: job.id, text }],
+		};
+		recorded.set(owner.id, idle);
+		subagents.push(idle);
+	}
+	if (subagents.length === 0 && rootUnreadResults.length === 0) return undefined;
 	const data: RestartSubagentsData = {
 		restartId: `${Date.now().toString(36)}-${process.pid}`,
 		sessionId: sessionManager.getSessionId(),
 		recordedAt: new Date().toISOString(),
 		subagents,
+		rootUnreadResults,
 	};
 	const file = `restart-subagents-${data.restartId}.json`;
 	const dir = rootFile.slice(0, -".jsonl".length);
@@ -308,7 +353,10 @@ export function buildRestartNote(args: {
 	const lines = [
 		"System note: the omp process was restarted (`/restart`) while you were working. This is a new process; your conversation above is intact. Go on with your task from where the transcript stops.",
 	];
-	if (subagent.interruptedToolCalls.length > 0) {
+	if (subagent.idle) {
+		lines[0] =
+			"System note: the omp process was restarted (`/restart`) while you were idle. This is a new process; your conversation above is intact.";
+	} else if (subagent.interruptedToolCalls.length > 0) {
 		lines.push(
 			`The restart stopped these tool calls while they ran; their results above hold the output they produced before they stopped. Run a step again if you need its outcome:\n${bulletList(subagent.interruptedToolCalls.map(describeToolCall))}`,
 		);
@@ -391,26 +439,41 @@ export async function resumeRestartedSubagents(
 	);
 	if (records.length === 0) return outcome;
 	const registry = AgentRegistry.global();
-	await ensurePersistedRoster(registry, sessionFile);
+	try {
+		await ensurePersistedRoster(registry, sessionFile);
+	} catch (error) {
+		logger.warn("Restart resume: persisted roster scan failed; using the recorded transcript paths", {
+			error: error instanceof Error ? error.message : String(error),
+		});
+	}
 	const transcriptOf = (id: string): string | undefined => {
 		const file = registry.get(id)?.sessionFile;
 		return file && sessionFileBelongsToRoot(file, sessionFile) ? file : undefined;
 	};
-	// Consume before anything runs: a resumed subagent that the next restart stops is
-	// recorded again by that restart, never resumed twice from these records.
-	for (const record of records) {
-		session.sessionManager.appendCustomEntry(RESTART_SUBAGENTS_RESUMED_CUSTOM_TYPE, { restartId: record.restartId });
-	}
+	// Every read below happens before the records are consumed, and a read that fails
+	// is reported for its subagent alone: one unreadable file must not cost the others
+	// their resume, nor leave the records half used.
+	const consume = (): void => {
+		for (const record of records) {
+			session.sessionManager.appendCustomEntry(RESTART_SUBAGENTS_RESUMED_CUSTOM_TYPE, {
+				restartId: record.restartId,
+			});
+		}
+	};
 	// A later record describes a subagent's later stop. A record whose file cannot be
 	// read still names its subagents.
 	const byId = new Map<string, RestartSubagent>();
+	const rootUnreadResults: { id: string; text: string }[] = [];
 	for (const record of records) {
 		let recorded: RestartSubagent[] | undefined;
 		try {
 			const data = JSON.parse(
 				fs.readFileSync(path.join(sessionFile.slice(0, -".jsonl".length), record.file), "utf8"),
 			) as Partial<RestartSubagentsData>;
-			if (data.restartId === record.restartId && Array.isArray(data.subagents)) recorded = data.subagents;
+			if (data.restartId === record.restartId && Array.isArray(data.subagents)) {
+				recorded = data.subagents;
+				if (Array.isArray(data.rootUnreadResults)) rootUnreadResults.push(...data.rootUnreadResults);
+			}
 		} catch (error) {
 			logger.warn("Restart record file unreadable", { file: record.file, error: String(error) });
 		}
@@ -425,9 +488,25 @@ export async function resumeRestartedSubagents(
 		outcome.notResumed = outcome.notResumed.filter(entry => !byId.has(entry.id));
 	}
 	const subagents = [...byId.values()];
+	// The roster scan stops at the first transcript it cannot read, so a recorded
+	// subagent past it may have no ref: register it from the path the record kept.
+	for (const sub of subagents) {
+		if (registry.get(sub.id) || !sub.sessionFile || !sessionFileBelongsToRoot(sub.sessionFile, sessionFile)) continue;
+		if (!fs.existsSync(sub.sessionFile)) continue;
+		registry.register({
+			id: sub.id,
+			displayName: sub.id,
+			kind: "sub",
+			...(sub.parentId ? { parentId: sub.parentId } : {}),
+			session: null,
+			sessionFile: sub.sessionFile,
+			status: "parked",
+		});
+	}
 	const manager = session.asyncJobManager;
 	const order = [...subagents].sort((a, b) => depthOf(a.id, byId) - depthOf(b.id, byId));
 	if (!manager) {
+		consume();
 		for (const sub of order) {
 			outcome.notResumed.push({
 				id: sub.id,
@@ -445,17 +524,30 @@ export async function resumeRestartedSubagents(
 		if (!ref || !file || ref.kind !== "sub") reason = "its transcript was not found under this session";
 		else if (ref.status === "aborted") reason = "it was killed";
 		else if (manager.getJob(sub.id)?.status === "running") reason = "it is already running again";
-		if (!reason && file) {
-			const loaded = await loadSessionFile(file);
-			const entries = (loaded?.entries ?? []).filter((entry): entry is SessionEntry => entry.type !== "session");
-			if (!transcriptWasInterrupted(entries)) reason = "it finished before the restart stopped it";
+		if (!reason && file && !sub.idle) {
+			try {
+				const loaded = await loadSessionFile(file);
+				const entries = (loaded?.entries ?? []).filter((entry): entry is SessionEntry => entry.type !== "session");
+				if (!transcriptWasInterrupted(entries)) reason = "it finished before the restart stopped it";
+			} catch (error) {
+				reason = `its transcript could not be read (${error instanceof Error ? error.message : String(error)})`;
+			}
 		}
 		if (reason) outcome.notResumed.push({ id: sub.id, reason });
 		else if (ref) plans.push({ sub, ref });
 	}
 	const contracts: { sub: RestartSubagent; ref: AgentRef; init: PersistedSessionInit }[] = [];
 	for (const { sub, ref } of plans) {
-		const init = (await SessionManager.peekSessionInit(ref.sessionFile!))?.init;
+		let init: PersistedSessionInit | null | undefined;
+		try {
+			init = (await SessionManager.peekSessionInit(ref.sessionFile!))?.init;
+		} catch (error) {
+			outcome.notResumed.push({
+				id: sub.id,
+				reason: `its transcript could not be read (${error instanceof Error ? error.message : String(error)})`,
+			});
+			continue;
+		}
 		if (!init) outcome.notResumed.push({ id: sub.id, reason: "its transcript has no session contract" });
 		else if (init.isolated)
 			outcome.notResumed.push({
@@ -463,6 +555,22 @@ export async function resumeRestartedSubagents(
 				reason: "it ran in an isolated workspace, and an isolated run is never revived",
 			});
 		else contracts.push({ sub, ref, init });
+	}
+	consume();
+	// The root's own unread results died with the old process's delivery queue.
+	const rootId = session.getAgentId?.() ?? MAIN_AGENT_ID;
+	const seenRootResults = new Set<string>();
+	for (const result of rootUnreadResults) {
+		if (seenRootResults.has(result.id)) continue;
+		seenRootResults.add(result.id);
+		manager.publishCompleted(
+			"task",
+			`${result.id} (result redelivered after restart)`,
+			{
+				text: `This result of job ${result.id} arrived before the restart and had not been read:\n\n${result.text}`,
+			},
+			{ ownerId: rootId },
+		);
 	}
 	// Register without awaiting in between, so every outcome is settled before any
 	// job body reads it for its note.

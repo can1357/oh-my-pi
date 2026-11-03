@@ -565,8 +565,13 @@ A record is resumed only by the session that wrote it (a fork copies the entry
 and ignores it), and a record a startup did not consume is resumed by the next
 one. The TUI names the subagents that go on and the ones that do not, with the
 reason: an isolated run (never revived), a subagent that finished before the
-teardown stopped it, one whose transcript or record file is missing, or one
-whose job could not start.
+teardown stopped it, one whose transcript or record file is missing or cannot be
+read (the others still go on), or one whose job could not start.
+
+A job result that finished but had not reached its owner yet would die with the
+old process's delivery queue too. `/restart` records an idle subagent that owns
+such a result, and the relaunch gives it a turn whose note carries the result; a
+result owed to the root is delivered to the root again.
 
 `/exit` and a crash are not covered: `/exit` records nothing, and a crash leaves
 transcripts that `omp --restore` already resumes.

@@ -460,6 +460,64 @@ it("delivers a resumed arm's result to the root when its lane cannot be revived"
 	}
 }, 60_000);
 
+it("resumes the healthy subagents when one transcript cannot be read, and names that one with the reason", async () => {
+	notesSeen.clear();
+	const { cwd, authStorage, open } = await harness();
+	try {
+		const mainFile = await runUntilRestart(open, cwd, true);
+		const alphaFile = path.join(mainFile.slice(0, -".jsonl".length), "Alpha.jsonl");
+		await fs.chmod(alphaFile, 0o000);
+		const second = await open(await SessionManager.open(mainFile));
+		try {
+			const outcome = await resumeRestartedSubagents(second);
+			expect([...outcome.resumed].sort()).toEqual(["Beta", "Lane", "Lane.Arm"]);
+			expect(outcome.notResumed.map(entry => entry.id)).toEqual(["Alpha"]);
+			expect(outcome.notResumed[0]!.reason).toContain("could not be read");
+			await Promise.all(["Beta", "Lane", "Lane.Arm"].map(id => second.asyncJobManager!.getJob(id)!.promise));
+			for (const name of ["Beta", "Arm"]) expect(notesSeen.get(name)).toContain(`echo partial-${name}`);
+		} finally {
+			await fs.chmod(alphaFile, 0o600);
+			await second.dispose();
+		}
+	} finally {
+		authStorage.close();
+	}
+}, 60_000);
+
+it("records an idle lane whose arm's result has not reached it when the next restart comes", async () => {
+	notesSeen.clear();
+	laneFinishesEarly = true;
+	const { cwd, authStorage, open } = await harness();
+	try {
+		const mainFile = await runUntilRestart(open, cwd, true, ["Alpha", "Beta", "Lane.Arm"]);
+		// Second process: the arm finishes its resumed turn; the restart comes before Lane reads its result.
+		const second = await open(await SessionManager.open(mainFile));
+		expect((await resumeRestartedSubagents(second)).resumed).toContain("Lane.Arm");
+		const manager = second.asyncJobManager!;
+		await manager.getJob("Lane.Arm")!.promise;
+		expect(manager.isJobResultConsumed("Lane.Arm")).toBe(false);
+		const record = recordRestartSubagents(second);
+		const lane = record?.subagents.find(sub => sub.id === "Lane");
+		expect(lane?.idle).toBe(true);
+		expect(lane?.unreadResults.map(result => result.id)).toEqual(["Lane.Arm"]);
+		await second.dispose();
+		resetProcessGlobals();
+		// Third process: Lane reads the arm's result.
+		const third = await open(await SessionManager.open(mainFile));
+		try {
+			expect((await resumeRestartedSubagents(third)).resumed).toContain("Lane");
+			await third.asyncJobManager!.getJob("Lane")!.promise;
+			expect(notesSeen.get("Lane")).toContain("while you were idle");
+			expect(notesSeen.get("Lane")).toContain("Arm resumed");
+		} finally {
+			await third.dispose();
+		}
+	} finally {
+		laneFinishesEarly = false;
+		authStorage.close();
+	}
+}, 90_000);
+
 it("without the restart record, no subagent continues after the relaunch (what `/restart` did before)", async () => {
 	notesSeen.clear();
 	const { cwd, authStorage, open } = await harness();
