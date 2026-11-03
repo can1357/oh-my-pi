@@ -345,12 +345,37 @@ describe("browser open options CDP helpers", () => {
 		});
 		main.client.listeners.get("Page.downloadProgress")!({ guid, state: "completed", receivedBytes: 5 });
 		await asked.promise;
-		// The lookup's rejection settles in the microtasks after the send.
-		for (let i = 0; i < 5; i++) await Promise.resolve();
+		// Let the lookup's rejection settle before anything waits.
+		await Bun.sleep(0);
 		const error = await rejectionOf(downloads.wait());
 		expect(error).toBeInstanceOf(ToolError);
 		expect((error as ToolError).message).toContain("predates download tracking");
 		expect(downloads.list()).toEqual([]);
+	});
+
+	it("gives waiters relay downloads in the order they ended while a lookup is still out", async () => {
+		const saved = path.join(await fs.mkdtemp(path.join(os.tmpdir(), "omp-relay-order-")), "a.csv");
+		tempDirs.push(path.dirname(saved));
+		await Bun.write(saved, "a");
+		const lookup = Promise.withResolvers<unknown>();
+		const { downloads, main } = fakePageDownloads(() => lookup.promise);
+		await downloads.start();
+		const first = downloads.wait();
+		const second = rejectionOf(downloads.wait());
+		const emit = (event: string, params: object) => main.client.listeners.get(`Page.${event}`)!(params);
+		for (const guid of ["a", "b"]) {
+			emit("downloadWillBegin", {
+				guid,
+				url: `https://example.com/${guid}.csv`,
+				suggestedFilename: guid,
+				frameId: "main",
+			});
+		}
+		emit("downloadProgress", { guid: "a", state: "completed", receivedBytes: 1 });
+		emit("downloadProgress", { guid: "b", state: "canceled", receivedBytes: 0 });
+		lookup.resolve({ filePath: saved });
+		expect((await first).path).toBe(saved);
+		expect(String(await second)).toContain("Download canceled: https://example.com/b.csv");
 	});
 
 	it("stops hearing a relay frame's session once the frame detaches", async () => {
