@@ -3,7 +3,7 @@
 ## [Unreleased]
 ### Fixed
 
-- Fixed the bash tool rejecting valid arithmetic `for` loops with adjacent semicolons, such as `for ((;;))` ([#17817](https://github.com/can1357/oh-my-pi/pull/17817) by [@sjawhar](https://github.com/sjawhar)).
+- Fixed the bash tool looping on newline-only arithmetic `for` conditions and ignoring invalid whitespace in arithmetic expressions ([#17817](https://github.com/can1357/oh-my-pi/pull/17817) by [@sjawhar](https://github.com/sjawhar)).
 
 ### Changed
 

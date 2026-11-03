@@ -660,13 +660,16 @@ impl Lower {
 				// The header's expressions are not commands: a zero value
 				// neither runs the ERR trap nor exits under `set -e`.
 				self.cond += 1;
-				if !f.init.src.trim_ascii().is_empty() {
+				if !f.init.src.is_empty() {
 					let a = self.arith(&f.init.src);
 					self.emit(Opcode::Arith, a, 0, id);
 				}
 				let enter = self.emit(Opcode::LoopEnter, 0, 0, id);
 				let cond = self.here();
-				if f.cond.src.trim_ascii().is_empty() {
+				// The parser removes leading spaces and tabs. A remaining
+				// newline is an expression evaluating to zero, not an omitted
+				// condition (which is true).
+				if f.cond.src.is_empty() {
 					self.emit(Opcode::SetStatus, 0, 0, id);
 				} else {
 					let a = self.arith(&f.cond.src);
@@ -677,7 +680,7 @@ impl Lower {
 				self.list(&f.body)?;
 				let step = self.emit(Opcode::LoopNote, 0, 0, id);
 				self.patch_b(enter, step);
-				if !f.step.src.trim_ascii().is_empty() {
+				if !f.step.src.is_empty() {
 					let a = self.arith(&f.step.src);
 					self.cond += 1;
 					self.emit(Opcode::Arith, a, 0, id);
