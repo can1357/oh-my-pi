@@ -30,7 +30,6 @@ import { WorkerCore } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-worker";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 import { getPuppeteerDir } from "@oh-my-pi/pi-utils";
 import puppeteer, { type Browser, type Page } from "puppeteer-core";
-import { rejectionOf } from "../helpers/rejection";
 import { chromiumAvailable } from "./chromium-probe";
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
@@ -643,7 +642,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("relay tab ownership", () => {
 		}
 	}, 60_000);
 
-	it("reports a relay download while a newer download of the same URL is still running", async () => {
+	it("reports each relay download's own file when a later download of the same URL finishes first", async () => {
 		const fixture = await launchRelayFixture();
 		const relay = await acquireBrowser({ kind: "relay", cdpUrl: fixture.cdpUrl }, { cwd: process.cwd() });
 		const name = `relay-download-held-${process.pid}`;
@@ -653,35 +652,14 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("relay tab ownership", () => {
 			const first = await fixture.heldDownload(0);
 			await runInTab(name, { code: "await tab.click('#held');", timeoutMs: 20_000, session });
 			const second = await fixture.heldDownload(1);
-			first.resolve();
-			const done = await waitForDownload(name);
-			expect(done.path).toBe(path.join(fixture.downloads, "held.csv"));
-			expect(await Bun.file(done.path).text()).toBe("a,b\n1,2\n");
+			// Chrome names the first `held.csv` and the second `held (1).csv`; the second finishes first.
 			second.resolve();
-			expect((await waitForDownload(name)).path).toBe(path.join(fixture.downloads, "held (1).csv"));
-		} finally {
-			await releaseTab(name).catch(() => undefined);
-			await releaseBrowser(relay, { kill: false });
-			await fixture.close();
-		}
-	}, 60_000);
-
-	it("refuses a downloads folder for a relay tab before opening one in the user's Chrome", async () => {
-		const fixture = await launchRelayFixture();
-		const relay = await acquireBrowser({ kind: "relay", cdpUrl: fixture.cdpUrl }, { cwd: process.cwd() });
-		const name = `relay-download-folder-${process.pid}`;
-		const tabCount = () => fixture.inExtension("chrome.tabs.query({}).then(tabs => tabs.length)");
-		try {
-			const before = await tabCount();
-			const error = await rejectionOf(
-				acquireTab(name, relay, {
-					url: `${fixture.origin}/download`,
-					downloadsPath: path.join(os.tmpdir(), "omp-relay-download-folder"),
-					timeoutMs: 15_000,
-				}),
-			);
-			expect(String(error)).toContain("cannot choose where Chrome saves downloads");
-			expect(await tabCount()).toBe(before);
+			const later = await waitForDownload(name);
+			expect(later.path).toBe(path.join(fixture.downloads, "held (1).csv"));
+			first.resolve();
+			const earlier = await waitForDownload(name);
+			expect(earlier.path).toBe(path.join(fixture.downloads, "held.csv"));
+			expect(await Bun.file(earlier.path).text()).toBe("a,b\n1,2\n");
 		} finally {
 			await releaseTab(name).catch(() => undefined);
 			await releaseBrowser(relay, { kill: false });

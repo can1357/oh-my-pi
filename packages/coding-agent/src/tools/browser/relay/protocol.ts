@@ -42,10 +42,13 @@ export type RelayRpcRequest =
 	| { op: "group"; tabIds: number[]; title: string; color: string }
 	/** Return tabs to their pre-omp group (or ungroup); no-op for tabs the relay never grouped. */
 	| { op: "ungroup"; tabIds: number[] }
-	/** Where Chrome saved its latest download of `url` (the URL the download was served from), as a {@link FoundDownload}. */
-	| { op: "findDownload"; url: string };
+	/**
+	 * Where Chrome saved the download a driven page reported as `guid` (`Page.downloadWillBegin`), as a
+	 * {@link FoundDownload}.
+	 */
+	| { op: "findDownload"; guid: string };
 
-/** The extension's answer to `findDownload`: null when Chrome has no download of that URL. */
+/** The extension's answer to `findDownload`: null when it paired no Chrome download with that report. */
 export type FoundDownload = { filename: string; state: "in_progress" | "interrupted" | "complete" } | null;
 
 /**

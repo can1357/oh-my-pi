@@ -2735,7 +2735,7 @@ describe("RelayBridge download paths", () => {
 		const id = ++msgSeq;
 		bridge.cdpMessage(
 			connId,
-			JSON.stringify({ id, sessionId, method: "OMP.downloadPath", params: { url: "https://example.com/r.csv" } }),
+			JSON.stringify({ id, sessionId, method: "OMP.downloadPath", params: { guid: "guid-1" } }),
 		);
 		await flush();
 		return { cdp, id };
@@ -2746,20 +2746,20 @@ describe("RelayBridge download paths", () => {
 		const ext = new FakeExtSocket();
 		hello(bridge, ext, 1);
 		const { cdp, id } = await askPath(bridge, ext);
-		expect(ext.pending("findDownload").map(rpc => rpc.url)).toEqual(["https://example.com/r.csv"]);
+		expect(ext.pending("findDownload").map(rpc => rpc.guid)).toEqual(["guid-1"]);
 		ack(bridge, ext, "findDownload", { filename: "/Users/me/Downloads/r (1).csv", state: "complete" });
 		await flush();
 		expect(cdp.messages.find(m => m.id === id)).toMatchObject({
 			result: { filePath: "/Users/me/Downloads/r (1).csv" },
 		});
 
-		// A download Chrome has not finished, or does not list, has no saved path yet.
+		// A download Chrome has not finished, or that the extension paired with no item of Chrome's, has no path yet.
 		for (const found of [{ filename: "/Users/me/Downloads/r.csv", state: "in_progress" }, null]) {
 			const pending = await askPath(bridge, ext);
 			ack(bridge, ext, "findDownload", found);
 			await flush();
 			expect(pending.cdp.messages.find(m => m.id === pending.id)).toMatchObject({
-				error: { message: "Chrome lists no completed download of this URL" },
+				error: { message: "Chrome has no completed download for this report" },
 			});
 		}
 	});

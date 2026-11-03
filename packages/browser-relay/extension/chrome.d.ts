@@ -65,6 +65,9 @@ interface ChromePageRoot {
 }
 
 interface ChromeDownloadItem {
+	id: number;
+	/** The URL the file was served from, after redirects. */
+	finalUrl: string;
 	/** Absolute path of the saved file; empty until Chrome has chosen it. */
 	filename: string;
 	state: "in_progress" | "interrupted" | "complete";
@@ -115,12 +118,8 @@ declare const chrome: {
 		onDetach: ChromeEvent<(source: ChromeDebuggerSession, reason: string) => void>;
 	};
 	downloads: {
-		search(query: {
-			finalUrl?: string;
-			state?: ChromeDownloadItem["state"];
-			orderBy?: string[];
-			limit?: number;
-		}): Promise<ChromeDownloadItem[]>;
+		search(query: { id?: number }): Promise<ChromeDownloadItem[]>;
+		onCreated: ChromeEvent<(item: ChromeDownloadItem) => void>;
 	};
 	storage: {
 		local: {

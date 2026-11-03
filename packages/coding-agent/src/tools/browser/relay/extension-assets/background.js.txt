@@ -290,12 +290,10 @@ async function runRpc(msg, origin) {
       await enqueueGroupOp(() => chrome.tabs.ungroup(msg.tabIds).catch(() => {}));
       return {};
     case "findDownload": {
-      const [item] = await chrome.downloads.search({
-        finalUrl: msg.url,
-        state: "complete",
-        orderBy: ["-startTime"],
-        limit: 1
-      });
+      const id = downloadIds.get(msg.guid);
+      const [item] = id === undefined ? [] : await chrome.downloads.search({ id });
+      if (item && item.state !== "in_progress")
+        downloadIds.delete(msg.guid);
       const found = item ? { filename: item.filename, state: item.state } : null;
       return found;
     }
@@ -361,9 +359,29 @@ async function connect() {
     socket.close();
   };
 }
+var MAX_UNPAIRED_REPORTS = 32;
+var downloadIds = new Map;
+var unpairedReports = [];
+function reportDownload(guid, url) {
+  if (downloadIds.has(guid) || unpairedReports.some((report) => report.guid === guid))
+    return;
+  unpairedReports.push({ guid, url });
+  if (unpairedReports.length > MAX_UNPAIRED_REPORTS)
+    unpairedReports.shift();
+}
+chrome.downloads.onCreated.addListener((item) => {
+  const index = unpairedReports.findIndex((report) => report.url === item.finalUrl);
+  if (index < 0)
+    return;
+  downloadIds.set(unpairedReports[index].guid, item.id);
+  unpairedReports.splice(index, 1);
+});
 chrome.debugger.onEvent.addListener((source, method, params) => {
   if (source.tabId === undefined)
     return;
+  if (method === "Page.downloadWillBegin" && typeof params?.guid === "string" && typeof params.url === "string") {
+    reportDownload(params.guid, params.url);
+  }
   post({ t: "cdpEvent", tabId: source.tabId, sessionId: source.sessionId, method, params });
 });
 chrome.debugger.onDetach.addListener((source, reason) => {

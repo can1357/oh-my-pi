@@ -2100,11 +2100,11 @@ export class RelayBridge {
 		return inst;
 	}
 
-	/** Answer `OMP.downloadPath` with the file Chrome saved for its latest completed download of `params.url`. */
+	/** Answer `OMP.downloadPath` with the file Chrome saved for the completed download the page reported as `params.guid`. */
 	async #replyDownloadPath(conn: CdpConnection, msg: CdpCommand, inst: ExtInstance): Promise<boolean> {
-		const url = msg.params?.url;
-		if (typeof url !== "string") {
-			this.#replyError(conn, msg, "OMP.downloadPath requires the download's url");
+		const guid = msg.params?.guid;
+		if (typeof guid !== "string") {
+			this.#replyError(conn, msg, "OMP.downloadPath requires the download's guid");
 			return false;
 		}
 		if (inst.info?.downloadsProtocol !== DOWNLOADS_PROTOCOL_VERSION) {
@@ -2117,7 +2117,7 @@ export class RelayBridge {
 		}
 		let found: unknown;
 		try {
-			found = await this.#rpc({ op: "findDownload", url }, inst);
+			found = await this.#rpc({ op: "findDownload", guid }, inst);
 		} catch (err) {
 			this.#replyError(conn, msg, err instanceof Error ? err.message : String(err));
 			return false;
@@ -2131,7 +2131,7 @@ export class RelayBridge {
 			!("state" in found) ||
 			found.state !== "complete"
 		) {
-			this.#replyError(conn, msg, "Chrome lists no completed download of this URL");
+			this.#replyError(conn, msg, "Chrome has no completed download for this report");
 			return false;
 		}
 		this.#reply(conn, msg, { filePath: found.filename });

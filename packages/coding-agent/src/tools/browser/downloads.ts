@@ -2,7 +2,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { hasFsCode, isEnoent, toError, untilAborted } from "@oh-my-pi/pi-utils";
-import type { Browser, CDPSession, Frame, Page } from "puppeteer-core";
+import type { Browser, CDPSession, Page } from "puppeteer-core";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { replaceFileAcrossDevices, replaceFileAtomically } from "../../utils/atomic-file";
 import { devtoolsFrameId } from "./frames";
@@ -43,6 +43,9 @@ interface DownloadWaiter {
 /** Chromium names an `allowAndName` download after its GUID, a lowercase UUID. */
 const DOWNLOAD_GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/** Page events that can add, replace or remove the CDP session of one of the page's frames. */
+const FRAME_SESSION_EVENTS = ["frameattached", "framenavigated", "framedetached"] as const;
+
 /** Owns tab-scoped Chromium download behavior and completion events. */
 export class DownloadManager {
 	readonly #browser: Browser;
@@ -58,10 +61,11 @@ export class DownloadManager {
 	#arming?: Promise<void>;
 	#session?: CDPSession;
 	readonly #pageSessions = new Set<CDPSession>();
-	#onFrame?: (frame: Frame) => void;
+	#onFrame?: () => void;
 	readonly #pending = new Map<string, PendingDownload>();
 	readonly #completed: BrowserDownload[] = [];
-	readonly #unclaimed: BrowserDownload[] = [];
+	/** Completed downloads no wait has taken yet, and relay downloads whose saved file could not be found. */
+	readonly #unclaimed: Array<BrowserDownload | ToolError> = [];
 	readonly #waiters: DownloadWaiter[] = [];
 	#willBegin?: (event: DownloadStarted & { frameId: string }) => void;
 	#progress?: (event: DownloadProgress) => void;
@@ -134,6 +138,7 @@ export class DownloadManager {
 			}
 		}
 		const ready = this.#unclaimed.shift();
+		if (ready instanceof ToolError) throw ready;
 		if (ready) return { ...ready };
 		if (signal?.aborted) throw signal.reason;
 		return await new Promise<BrowserDownload>((resolve, reject) => {
@@ -157,8 +162,7 @@ export class DownloadManager {
 	/** Detach event listeners and reject outstanding waits. */
 	async close(): Promise<void> {
 		if (this.#onFrame) {
-			this.#page.off("frameattached", this.#onFrame);
-			this.#page.off("framenavigated", this.#onFrame);
+			for (const event of FRAME_SESSION_EVENTS) this.#page.off(event, this.#onFrame);
 			this.#onFrame = undefined;
 			for (const session of this.#pageSessions) this.#unsubscribe(session, "Page");
 			this.#pageSessions.clear();
@@ -180,18 +184,27 @@ export class DownloadManager {
 		this.#session = session;
 	}
 
-	/** Hear the page's download events on the session of each of its frames: a cross-site frame has its own. */
+	/**
+	 * Hear the page's download events on the session of each of its frames. A cross-site frame has its own session,
+	 * replaced when it navigates to another site and gone when it detaches.
+	 */
 	#hearPage(): void {
 		if (this.#onFrame) return;
-		this.#onFrame = frame => {
-			if (this.#pageSessions.has(frame.client)) return;
-			this.#pageSessions.add(frame.client);
-			this.#subscribe(frame.client, "Page");
+		this.#onFrame = () => {
+			const live = new Set(this.#page.frames().map(frame => frame.client));
+			for (const session of this.#pageSessions) {
+				if (live.has(session)) continue;
+				this.#unsubscribe(session, "Page");
+				this.#pageSessions.delete(session);
+			}
+			for (const session of live) {
+				if (this.#pageSessions.has(session)) continue;
+				this.#pageSessions.add(session);
+				this.#subscribe(session, "Page");
+			}
 		};
-		this.#page.on("frameattached", this.#onFrame);
-		// A frame that navigates to another site moves to a new session.
-		this.#page.on("framenavigated", this.#onFrame);
-		for (const frame of this.#page.frames()) this.#onFrame(frame);
+		for (const event of FRAME_SESSION_EVENTS) this.#page.on(event, this.#onFrame);
+		this.#onFrame();
 	}
 
 	#subscribe(session: CDPSession, domain: "Browser" | "Page"): void {
@@ -224,12 +237,12 @@ export class DownloadManager {
 	}
 
 	/** Where Chrome saved a download its page reported, which the omp relay looks up in Chrome's download list. */
-	async #savedPath(url: string): Promise<string> {
+	async #savedPath(guid: string): Promise<string> {
 		// Puppeteer's protocol map cannot express the relay-private method; the send signature is otherwise identical.
 		const session = this.#page.mainFrame().client as unknown as {
-			send(method: string, params: { url: string }): Promise<unknown>;
+			send(method: string, params: { guid: string }): Promise<unknown>;
 		};
-		const reply = await session.send("OMP.downloadPath", { url });
+		const reply = await session.send("OMP.downloadPath", { guid });
 		if (reply && typeof reply === "object" && "filePath" in reply && typeof reply.filePath === "string") {
 			return reply.filePath;
 		}
@@ -238,11 +251,23 @@ export class DownloadManager {
 
 	async #complete(pending: PendingDownload, filePath: string | undefined): Promise<void> {
 		const directory = this.#directory ?? this.#defaultDirectory;
-		const source =
-			filePath ??
-			(this.#pageEvents
-				? await this.#savedPath(pending.url)
-				: path.join(directory, this.#perTab ? pending.guid : pending.suggestedFilename));
+		let source = filePath ?? path.join(directory, this.#perTab ? pending.guid : pending.suggestedFilename);
+		if (filePath === undefined && this.#pageEvents) {
+			try {
+				source = await this.#savedPath(pending.guid);
+			} catch (error) {
+				// A relay tab tracks downloads from the moment it opens, so this can fail before any wait: keep it for the next.
+				const failure = new ToolError(`Download failed: ${pending.url}: ${toError(error).message}`);
+				const waiter = this.#waiters.shift();
+				if (!waiter) {
+					this.#unclaimed.push(failure);
+					return;
+				}
+				if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener("abort", waiter.onAbort);
+				waiter.reject(failure);
+				return;
+			}
+		}
 		for (let attempt = 0; attempt < 100; attempt++) {
 			try {
 				await fs.stat(source);

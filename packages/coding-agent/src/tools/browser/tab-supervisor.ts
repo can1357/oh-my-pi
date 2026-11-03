@@ -1883,12 +1883,6 @@ function sweepClosedTabUploads(): void {
 }
 
 async function buildInitPayload(browser: PuppeteerBrowserHandle, opts: AcquireTabOptions): Promise<WorkerInitPayload> {
-	// Chrome never lets an extension choose where downloads go; refused before a tab is opened in the user's Chrome.
-	if (browser.kind.kind === "relay" && opts.downloadsPath) {
-		throw new ToolError(
-			"The omp browser relay cannot choose where Chrome saves downloads: open the tab without `downloads`, and tab.waitForDownload() and tab.downloads() report where Chrome saved each file.",
-		);
-	}
 	const safeDir = getPuppeteerDir();
 	const uploadDir = newUploadStagingDir();
 	const browserWSEndpoint = browser.wsEndpoint;

@@ -279,14 +279,9 @@ async function runRpc(msg: Extract<RelayToExtMessage, { t: "rpc" }>, origin: Web
 			await enqueueGroupOp(() => chrome.tabs.ungroup(msg.tabIds).catch(() => {}));
 			return {};
 		case "findDownload": {
-			// The page's download events carry the URL the file was served from, Chrome's `finalUrl`. Only a completed
-			// download is asked for, so a newer one of the same URL still running does not hide it.
-			const [item] = await chrome.downloads.search({
-				finalUrl: msg.url,
-				state: "complete",
-				orderBy: ["-startTime"],
-				limit: 1,
-			});
+			const id = downloadIds.get(msg.guid);
+			const [item] = id === undefined ? [] : await chrome.downloads.search({ id });
+			if (item && item.state !== "in_progress") downloadIds.delete(msg.guid);
 			const found: FoundDownload = item ? { filename: item.filename, state: item.state } : null;
 			return found;
 		}
@@ -356,10 +351,41 @@ async function connect(): Promise<void> {
 	};
 }
 
+// ---- downloads ----------------------------------------------------------------
+
+/** Unpaired page reports kept at most; one Chrome never creates an item for (a blocked download) is dropped in time. */
+const MAX_UNPAIRED_REPORTS = 32;
+/** Chrome's download id for each download a driven tab's page reported, by the report's guid. */
+const downloadIds = new Map<string, number>();
+/** Page reports (`Page.downloadWillBegin`) waiting for Chrome's item, oldest first. */
+const unpairedReports: Array<{ guid: string; url: string }> = [];
+
+/**
+ * Hold a driven page's download report until Chrome's download item for it appears. Neither names the other, but Chrome
+ * reports a download to the page's debugger right before it announces the item, so the item pairs with the oldest
+ * waiting report of its URL. A download in a tab omp does not drive has no report and pairs with nothing; if Chrome ever
+ * announced the item first, the lookup would find no pair and fail rather than name another download's file.
+ */
+function reportDownload(guid: string, url: string): void {
+	if (downloadIds.has(guid) || unpairedReports.some(report => report.guid === guid)) return;
+	unpairedReports.push({ guid, url });
+	if (unpairedReports.length > MAX_UNPAIRED_REPORTS) unpairedReports.shift();
+}
+
+chrome.downloads.onCreated.addListener(item => {
+	const index = unpairedReports.findIndex(report => report.url === item.finalUrl);
+	if (index < 0) return;
+	downloadIds.set(unpairedReports[index]!.guid, item.id);
+	unpairedReports.splice(index, 1);
+});
+
 // ---- event streaming ---------------------------------------------------------
 
 chrome.debugger.onEvent.addListener((source, method, params) => {
 	if (source.tabId === undefined) return;
+	if (method === "Page.downloadWillBegin" && typeof params?.guid === "string" && typeof params.url === "string") {
+		reportDownload(params.guid, params.url);
+	}
 	post({ t: "cdpEvent", tabId: source.tabId, sessionId: source.sessionId, method, params });
 });
 
