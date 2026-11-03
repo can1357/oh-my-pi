@@ -31,6 +31,8 @@ const DRAG_STEP_DELAY: Duration = Duration::from_millis(8);
 /// caller, so the dialog's own error still beats the run's timeout.
 const CONSENT_MARGIN: Duration =
 	crate::desktop::CLOSE_TIMEOUT.saturating_add(Duration::from_millis(500));
+/// `ei_text.utf8` carries at most 254 bytes (255 with the terminating NUL).
+const EI_TEXT_UTF8_MAX: usize = 254;
 
 #[derive(Clone, Copy)]
 struct DiscoveryTargets {
@@ -316,15 +318,21 @@ impl Libei {
 	fn handle_event(&mut self, event: EiEvent) -> CoreResult<()> {
 		match event {
 			EiEvent::SeatAdded(event) => {
-				event.seat.bind_capabilities(&[
-					DeviceCapability::PointerAbsolute,
-					DeviceCapability::Pointer,
-					DeviceCapability::Button,
-					DeviceCapability::Scroll,
-					DeviceCapability::Keyboard,
-				]);
+				event.seat.bind_capabilities(
+					DeviceCapability::PointerAbsolute
+						| DeviceCapability::Pointer
+						| DeviceCapability::Button
+						| DeviceCapability::Scroll
+						| DeviceCapability::Keyboard
+						| DeviceCapability::Text,
+				);
 			},
 			EiEvent::DeviceAdded(event) => {
+				// reis 0.7 negotiates ei_device v3, which holds the device back
+				// until the client acknowledges its configuration.
+				if event.device.device().version() >= 3 {
+					event.device.device().ready();
+				}
 				let layout = event.device.keymap().and_then(read_keymap);
 				self
 					.devices
@@ -378,7 +386,7 @@ impl Libei {
 				self.disconnected = true;
 				return Err(DesktopError::input_failed(format!(
 					"libei disconnected: {}",
-					event.explanation
+					event.explanation.as_deref().unwrap_or("no reason given")
 				)));
 			},
 			_ => {},
@@ -749,29 +757,50 @@ impl Libei {
 
 	pub(super) fn type_text(&mut self, text: &str) -> CoreResult<()> {
 		self.refresh_devices()?;
-		let device = self
+		let keyboard_index = self
 			.devices
-			.iter_mut()
-			.find(|device| device.resumed && device.device.has_capability(DeviceCapability::Keyboard))
+			.iter()
+			.position(|device| {
+				device.resumed && device.device.has_capability(DeviceCapability::Keyboard)
+			})
 			.ok_or_else(|| {
 				DesktopError::permission_denied("no resumed libei keyboard is available")
 			})?;
-		let strokes = graphemes_str(text)
-			.flat_map(str::chars)
-			.map(|character| {
-				control::check()?;
-				char_stroke(device.layout.as_mut(), character)
-			})
-			.collect::<CoreResult<Vec<_>>>()?;
-		let interface = device
-			.device
-			.interface::<ei::Keyboard>()
-			.ok_or_else(|| DesktopError::input_failed("libei keyboard interface is unavailable"))?;
+		// KWin announces ei_text on a device of its own; Mutter offers none.
+		let text_index = self.devices.iter().position(|device| {
+			device.resumed
+				&& device.device.seat() == self.devices[keyboard_index].device.seat()
+				&& device.device.has_capability(DeviceCapability::Text)
+		});
+		let plan = plan_typing(self.devices[keyboard_index].layout.as_mut(), text, text_index)?;
 		let serial = self
 			.connection
 			.as_ref()
 			.map_or(0, reis::event::Connection::serial);
 		let mut time = Self::timestamp()?;
+		let strokes = match plan {
+			TypingPlan::Keys(strokes) => strokes,
+			TypingPlan::Text { device, runs } => {
+				let device = &self.devices[device];
+				let interface = device
+					.device
+					.interface::<ei::Text>()
+					.ok_or_else(|| DesktopError::input_failed("libei text interface is unavailable"))?;
+				for run in runs {
+					control::check()?;
+					interface.utf8(&run);
+					device.device.device().frame(serial, time);
+					time = time.saturating_add(1);
+					flush_context(&self.context)?;
+				}
+				return Ok(());
+			},
+		};
+		let device = &self.devices[keyboard_index];
+		let interface = device
+			.device
+			.interface::<ei::Keyboard>()
+			.ok_or_else(|| DesktopError::input_failed("libei keyboard interface is unavailable"))?;
 		for stroke in strokes {
 			let mut held = 0;
 			let mut key_held = false;
@@ -810,6 +839,73 @@ fn flush_context(context: &ei::Context) -> CoreResult<()> {
 			"libei transport failed: {err}; delivery may be partial, do not retry blindly"
 		))
 	})
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum TypingPlan {
+	Keys(Vec<KeyStroke>),
+	/// `ei_text.utf8` payloads for the text device at `device`, each within the
+	/// per-request limit.
+	Text {
+		device: usize,
+		runs:   Vec<String>,
+	},
+}
+
+/// Text the active XKB group can type stays keystrokes. Text with a printable
+/// character it cannot produce goes out whole as `ei_text` UTF-8 when the EIS
+/// server offers a text device, and is refused before anything is sent when it
+/// does not. Whole, because the two routes are not ordered against each other:
+/// on KDE Plasma 6.8 with its input method running, Kate received every text
+/// commit of a mixed call before the keystrokes sent ahead of them.
+fn plan_typing(
+	mut layout: Option<&mut KeyboardLayout>,
+	text: &str,
+	text_device: Option<usize>,
+) -> CoreResult<TypingPlan> {
+	let mut strokes = Vec::new();
+	for character in graphemes_str(text).flat_map(str::chars) {
+		control::check()?;
+		let mut error = match char_stroke(layout.as_deref_mut(), character) {
+			Ok(stroke) => {
+				strokes.push(stroke);
+				continue;
+			},
+			Err(error) => error,
+		};
+		if character.is_control() {
+			return Err(error);
+		}
+		if let Some(device) = text_device {
+			return Ok(TypingPlan::Text { device, runs: text_runs(text)? });
+		}
+		error
+			.message
+			.push_str("; the EIS server offers no ei_text device to send it as text");
+		return Err(error);
+	}
+	Ok(TypingPlan::Keys(strokes))
+}
+
+/// Splits `text` at character boundaries into `ei_text.utf8` payloads. Control
+/// characters are refused: committed text is no key press, so a line break
+/// never submits and a tab never moves focus, and Kate dropped a commit that
+/// began with a line break.
+fn text_runs(text: &str) -> CoreResult<Vec<String>> {
+	let mut runs: Vec<String> = Vec::new();
+	for character in text.chars() {
+		if character.is_control() {
+			return Err(DesktopError::input_failed(format!(
+				"libei sends text the keyboard layout cannot type as ei_text, which cannot carry \
+				 {character:?}; press Enter or Tab between type() calls instead"
+			)));
+		}
+		match runs.last_mut() {
+			Some(run) if run.len() + character.len_utf8() <= EI_TEXT_UTF8_MAX => run.push(character),
+			_ => runs.push(character.to_string()),
+		}
+	}
+	Ok(runs)
 }
 
 fn plan_keys(device: &mut EiDevice, keys: &[KeyName]) -> CoreResult<Vec<u32>> {
@@ -1125,6 +1221,35 @@ mod tests {
 		let mut layout = KeyboardLayout::compile(include_str!("testdata/fr.xkb"))
 			.expect("French fixture must compile");
 		assert_eq!(char_stroke(Some(&mut layout), '\n').unwrap().keycode, 28);
+	}
+
+	#[test]
+	fn text_the_active_group_cannot_type_goes_out_whole_as_ei_text() {
+		let mut layout = KeyboardLayout::compile(include_str!("testdata/us-fr.xkb"))
+			.expect("US/French fixture must compile");
+		let key = |keycode| KeyStroke { keycode, modifiers: Vec::new() };
+
+		assert_eq!(
+			plan_typing(Some(&mut layout), "a b\n", Some(1)).unwrap(),
+			TypingPlan::Keys(vec![key(30), key(57), key(48), key(28)])
+		);
+		assert_eq!(
+			plan_typing(Some(&mut layout), "a ä日😀", Some(1)).unwrap(),
+			TypingPlan::Text { device: 1, runs: vec!["a ä日😀".into()] }
+		);
+		let refused = plan_typing(Some(&mut layout), "aä", None).unwrap_err();
+		assert!(refused.message.contains("'ä'"), "{}", refused.message);
+		for control in ["ä\n", "\tä", "ä\u{7}"] {
+			assert!(plan_typing(Some(&mut layout), control, Some(1)).is_err(), "{control:?}");
+		}
+	}
+
+	#[test]
+	fn ei_text_runs_stay_within_the_utf8_request_limit() {
+		assert_eq!(plan_typing(None, &"日".repeat(100), Some(0)).unwrap(), TypingPlan::Text {
+			device: 0,
+			runs:   vec!["日".repeat(84), "日".repeat(16)],
+		});
 	}
 
 	#[test]
