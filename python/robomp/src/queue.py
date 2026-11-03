@@ -9,7 +9,7 @@ import traceback
 from collections.abc import Callable
 from contextlib import suppress
 
-from robomp import tasks
+from robomp import pr_status, tasks
 from robomp.cancellation import clear_current_event, set_current_event
 from robomp.config import Settings
 from robomp.db import Database, EventRow
@@ -38,6 +38,9 @@ class WorkerPool:
         self.github = github
         self.sandbox = sandbox
         self.git_transport = git_transport
+        # Shared with the webhook handler (`app.state.bag`) so the queue and
+        # the server see ONE ladder + ONE set of per-key locks per app.
+        self.status_tracker = pr_status.StatusTracker()
         self._workers: list[asyncio.Task[None]] = []
         self._wakeup = asyncio.Event()
         self._stop = asyncio.Event()
@@ -305,6 +308,21 @@ class WorkerPool:
             elif row.delivery_id in self._cancelled:
                 log.info("event cancelled", extra={"delivery": row.delivery_id})
                 self.db.mark_event(row.delivery_id, "failed", error="cancelled by operator")
+                # Operator cancel is TERMINAL: the queue will not retry, so
+                # `retrying` ("will retry") would be a permanent lie. A fresh
+                # webhook delivery for the same head re-queues and resets the
+                # ladder on its own.
+                if row.event_type == "pull_request":
+                    head_sha = pr_status.head_sha_from_payload(row.payload)
+                    await pr_status.publish_pr_status(
+                        self.github,
+                        settings=self.settings,
+                        repo=row.repo or "",
+                        sha=head_sha,
+                        phase="failure",
+                        detail="cancelled by operator",
+                        tracker=self.status_tracker,
+                    )
             else:
                 tb = traceback.format_exc(limit=20)
                 err = f"{exc}\n{tb}"
@@ -443,6 +461,7 @@ class WorkerPool:
                 delivery_id=row.delivery_id,
                 attempts=row.attempts,
                 slot_uid=slot_uid,
+                status_tracker=self.status_tracker,
             )
         elif event == "pull_request_review_comment" and action == "created":
             await tasks.handle_review(

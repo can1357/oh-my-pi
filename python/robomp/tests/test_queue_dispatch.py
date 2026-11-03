@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from robomp import tasks
 from robomp.config import Settings
 from robomp.db import Database, EventRow
+from robomp.github_client import IssueInfo, PullRequestInfo, RepoInfo
 from robomp.queue import WorkerPool
 from robomp.slot_pool import SlotPool
 
@@ -150,3 +153,85 @@ async def test_dispatch_routes_completed_workflow_to_release_handler(
     await _make_pool(settings, db)._dispatch(row)  # noqa: SLF001
 
     assert seen == [("completed", 2)]
+
+
+@pytest.mark.asyncio
+async def test_pr_review_uses_pool_tracker_through_worker_inputs(
+    settings: Settings, db: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The WorkerPool-owned `StatusTracker` MUST reach BOTH `review_pr`
+    (dispatch) AND the `TaskInputs` the worker consumes (handoff contract):
+    the webhook's terminal posts and the worker's `reviewing`/`publishing`
+    posts have to share ONE ladder + per-key locks. A regressed handoff —
+    e.g. `TaskInputs` built with `status_tracker=None` while `review_pr` is
+    handed the pool's tracker — would let them post on separate trackers and
+    this identity assertion is the only test catching it."""
+    captured: dict[str, object] = {}
+
+    async def fake_run_task(*, inputs, **_kw) -> None:
+        # The `TaskInputs` the worker consumes is built inside `review_pr` —
+        # `run_task` is the handoff seam between dispatch and worker.
+        captured["inputs"] = inputs
+
+    monkeypatch.setattr(tasks, "run_task", fake_run_task)
+
+    repo = RepoInfo(
+        full_name="octo/widget",
+        default_branch="main",
+        clone_url="https://x/octo/widget.git",
+        private=False,
+    )
+    issue = IssueInfo(
+        repo="octo/widget",
+        number=7,
+        title="pr",
+        body="b",
+        state="open",
+        author="alice",
+        labels=(),
+        is_pull_request=True,
+    )
+    pr = PullRequestInfo(
+        repo="octo/widget",
+        number=7,
+        html_url="https://example/7",
+        head_ref="feat",
+        base_ref="main",
+        state="open",
+        head_sha="deadbeef",
+    )
+
+    async def _get_repo(_full):
+        return repo
+
+    async def _get_issue(_full, _n):
+        return issue
+
+    async def _get_pr(_full, _n):
+        return pr
+
+    github = SimpleNamespace(
+        get_repo=_get_repo,
+        get_issue=_get_issue,
+        get_pull_request=_get_pr,
+        create_commit_status=None,
+    )
+    sandbox = SimpleNamespace(
+        natives_cache=None,
+        ensure_workspace=lambda **_kw: SimpleNamespace(branch="farm/x/y", session_dir="/tmp/s"),
+    )
+
+    pool = _make_pool(settings, db)
+    monkeypatch.setattr(pool, "github", github)
+    monkeypatch.setattr(pool, "sandbox", sandbox)
+    row = _pr_row("opened")
+    # The real `review_pr` (not stubbed here) reads the repo from the payload.
+    row.payload["repository"] = {"full_name": "octo/widget"}
+    await pool._dispatch(row)  # noqa: SLF001
+
+    inputs = captured["inputs"]
+    assert inputs is not None
+    assert inputs.status_tracker is not None
+    # The dispatch seam and the worker seam carry the SAME instance the pool
+    # owns.
+    assert inputs.status_tracker is pool.status_tracker

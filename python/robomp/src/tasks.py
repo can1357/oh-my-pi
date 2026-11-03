@@ -7,9 +7,7 @@ import logging
 from collections.abc import Callable, Mapping
 from typing import Any, TypeVar
 
-import httpx
-
-from robomp import persona, pr_status
+from robomp import cancellation, persona, pr_status
 from robomp.config import Settings
 from robomp.db import Database, IssueRow, IssueState, issue_key
 from robomp.git_ops import rev_parse_head
@@ -28,6 +26,19 @@ from robomp.worker import DirectiveInfo, ReleaseTaskContext, TaskInputs, ThreadM
 log = logging.getLogger(__name__)
 
 _T = TypeVar("_T")
+
+
+def _cancel_status_reason() -> tuple[str, str]:
+    """Phase/detail for a `CancelledError` mid-task.
+
+    An operator cancel (`/api/cancel`) is terminal — the dispatcher will not
+    retry — so `retrying` ("will retry") would be a lie; a shutdown drain is
+    not (the row resumes via `--continue`).
+    """
+    ctx = cancellation._current_event.get()
+    if ctx is not None and ctx[1] in ctx[0]._cancelled:
+        return "failure", "cancelled by operator"
+    return "retrying", "interrupted"
 
 
 async def _run_workspace_op(func: Callable[..., _T], /, **kwargs: object) -> _T:
@@ -566,6 +577,7 @@ async def review_pr(
     delivery_id: str,
     attempts: int = 0,
     slot_uid: int | None = None,
+    status_tracker: pr_status.StatusTracker | None = None,
 ) -> None:
     pr_node = payload.get("pull_request") or {}
     pr_number = int(pr_node.get("number") or 0)
@@ -589,21 +601,28 @@ async def review_pr(
             sha=pr_status.head_sha_from_payload(payload),
             phase="error",
             detail=type(exc).__name__,
+            tracker=status_tracker,
         )
         return
     except asyncio.CancelledError:
+        # Operator cancel is terminal (the queue will not retry); a shutdown
+        # drain is not.
+        phase, detail = _cancel_status_reason()
         await pr_status.publish_pr_status(
             github,
             settings=settings,
             repo=repo_full,
             sha=pr_status.head_sha_from_payload(payload),
-            phase="retrying",
-            detail="interrupted",
+            phase=phase,
+            detail=detail,
+            tracker=status_tracker,
         )
         raise
-    except (httpx.ConnectError, httpx.TimeoutException) as exc:
-        # Transport failures re-raise, so the queue's retry predicate still
+    except Exception as exc:
+        # Any fetch failure re-raises, so the queue's retry predicate still
         # applies; mirror it instead of leaving the ladder stuck at `queued`.
+        # `httpx.HTTPError` alone would miss non-httpx transport errors (e.g.
+        # a raw `OSError` from a socket mid-read).
         await pr_status.publish_pr_status(
             github,
             settings=settings,
@@ -611,18 +630,29 @@ async def review_pr(
             sha=pr_status.head_sha_from_payload(payload),
             phase=pr_status.phase_for_failed_attempt(attempts, settings.event_max_retries),
             detail=type(exc).__name__,
+            tracker=status_tracker,
         )
         raise
 
     labels = {label.lower() for label in issue.labels}
     key = issue_key(repo.full_name, pr_number)
     review_labeled = "triaged" in labels or any(label.startswith("review:") for label in labels)
-    if db.has_successful_tool_call(key, "submit_pr_review"):
+    issue_row = db.get_issue(key)
+    # The shortcut is scoped to the CURRENT head: a review that landed on an
+    # older head says nothing about a new push, which still needs one.
+    reviewed_sha = issue_row.last_reviewed_sha if issue_row is not None else None
+    if reviewed_sha == pr.head_sha and db.has_successful_tool_call(key, "submit_pr_review"):
         log.info("skip: PR review already submitted", extra={"repo": repo_full, "pr": pr_number})
         # The review IS complete — resolve the pending status rather than
         # leaving the context stuck at `queued`.
         await pr_status.publish_pr_status(
-            github, settings=settings, repo=repo.full_name, sha=pr.head_sha, phase="success", detail="already reviewed"
+            github,
+            settings=settings,
+            repo=repo.full_name,
+            sha=pr.head_sha,
+            phase="success",
+            detail="already reviewed",
+            tracker=status_tracker,
         )
         return
     if review_labeled:
@@ -635,9 +665,20 @@ async def review_pr(
     # restart the phase ladder rather than resuming at a stale rank.
     retrying_attempt = attempts > 1
     pr_sha = pr.head_sha
+    # Mark the key active for the whole attempt: while set, webhook
+    # `queued` posts for this head (`reset=None`) must NOT restart the ladder
+    # under the in-flight review.
+    if status_tracker is not None:
+        status_tracker.begin_review(repo.full_name, pr_sha)
     try:
         await pr_status.publish_pr_status(
-            github, settings=settings, repo=repo.full_name, sha=pr_sha, phase="preparing", reset=retrying_attempt
+            github,
+            settings=settings,
+            repo=repo.full_name,
+            sha=pr_sha,
+            phase="preparing",
+            reset=retrying_attempt,
+            tracker=status_tracker,
         )
         db.upsert_issue(key=key, repo=repo.full_name, number=pr_number, state="reviewing", pr_number=pr_number)
         workspace = await _run_workspace_op(
@@ -674,13 +715,22 @@ async def review_pr(
             slot_uid=slot_uid,
             natives_cache=sandbox.natives_cache,
             pr_head_sha=pr_sha,
+            status_tracker=status_tracker,
         )
         await run_task(task_kind="review_pr", inputs=inputs, pr_number=pr_number, pr=pr)
     except asyncio.CancelledError:
-        # Operator cancel or shutdown drain. Shutdown leaves the row `running`
-        # for a `--continue` resume, so a terminal status would be a lie.
+        # Operator cancel is terminal (the queue will not retry); a shutdown
+        # drain leaves the row `running` for a `--continue` resume, so a
+        # terminal status would be a lie there.
+        phase, detail = _cancel_status_reason()
         await pr_status.publish_pr_status(
-            github, settings=settings, repo=repo.full_name, sha=pr_sha, phase="retrying", detail="interrupted"
+            github,
+            settings=settings,
+            repo=repo.full_name,
+            sha=pr_sha,
+            phase=phase,
+            detail=detail,
+            tracker=status_tracker,
         )
         raise
     except Exception as exc:
@@ -691,11 +741,36 @@ async def review_pr(
             sha=pr_sha,
             phase=pr_status.phase_for_failed_attempt(attempts, settings.event_max_retries),
             detail=type(exc).__name__,
+            tracker=status_tracker,
         )
         raise
-    submitted = db.has_successful_tool_call(key, "submit_pr_review")
+    finally:
+        if status_tracker is not None:
+            status_tracker.end_review(repo.full_name, pr_sha)
+    # Success is scoped to THIS run's terminal audit: an audit row from a
+    # prior run cannot prove the current review landed, and the ledger
+    # (`last_reviewed_sha`) only gets the current head when that run
+    # succeeded — which is exactly what the shortcut needs next time.
+    event_row = db.get_event(delivery_id)
+    submitted = db.has_successful_tool_call_since(
+        key, "submit_pr_review", event_row.started_at if event_row is not None else None
+    )
+    if submitted:
+        db.upsert_issue(
+            key=key,
+            repo=repo.full_name,
+            number=pr_number,
+            state="reviewing",
+            pr_number=pr_number,
+            last_reviewed_sha=pr_sha,
+        )
     await pr_status.publish_pr_status(
-        github, settings=settings, repo=repo.full_name, sha=pr_sha, phase="success" if submitted else "failure"
+        github,
+        settings=settings,
+        repo=repo.full_name,
+        sha=pr_sha,
+        phase="success" if submitted else "failure",
+        tracker=status_tracker,
     )
 
 
