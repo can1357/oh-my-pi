@@ -456,7 +456,8 @@ mod background {
 		ensure_integrity(id, root)?;
 		let kind = match event {
 			PointerEvent::Click { .. } | PointerEvent::Hold { .. } => EventKind::MouseClick,
-			PointerEvent::Move { .. } | PointerEvent::Drag { .. } => EventKind::MouseMove,
+			PointerEvent::Move { .. } => EventKind::MouseMove,
+			PointerEvent::Drag { .. } => EventKind::MouseDrag,
 			PointerEvent::Scroll { .. } => EventKind::MouseScroll,
 		};
 		let class = window::class_name(root);

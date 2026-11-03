@@ -13,7 +13,12 @@ import type { JobSnapshot } from "../tools/wait";
 import type { DaemonSnapshot } from "../tools/daemon";
 import { type CustomMessage, type FileMentionMessage, resolveAbortLabel, shouldRenderAbortReason } from "./messages";
 import { createIrcMessageCard } from "../tools/wait";
-import { formatArtifactErrorNotice, type OutputMeta } from "../tools/output-meta";
+import {
+	formatArtifactErrorNotice,
+	formatMinimizedMeta,
+	type MinimizedMeta,
+	type OutputMeta,
+} from "../tools/output-meta";
 import type { OutputArtifactError } from "../tools/streaming-output";
 import { formatStyledPath, replaceTabs, TRUNCATE_LENGTHS, truncateToWidth } from "../render/render-utils";
 import { canonicalizeMessage } from "./thinking-display";
@@ -67,7 +72,7 @@ export function buildAsyncResultBlock(message: CustomOrHookMessage): ToolActivit
 		const duration = typeof job.durationMs === "number" ? formatDuration(job.durationMs) : undefined;
 		rows.push({
 			parts: [
-				{ text: `${theme.status.done} Background job completed`, color: "success" },
+				{ text: `${theme.status.success} Background job completed`, color: "success" },
 				{ text: `[${type}]`, color: "dim" },
 				{ text: jobId, color: "accent" },
 				duration ? { text: `(${duration})`, color: "dim" } : undefined,
@@ -78,6 +83,7 @@ export function buildAsyncResultBlock(message: CustomOrHookMessage): ToolActivit
 			},
 		});
 		if (job.meta?.artifactError) rows.push(artifactErrorRow(job.meta.artifactError));
+		if (job.meta?.minimized) rows.push(minimizedRow(job.meta.minimized));
 	}
 	if (details?.meta?.artifactError) rows.push(artifactErrorRow(details.meta.artifactError));
 	return new ToolActivityContainer(new TranscriptStatusBlock(rows));
@@ -121,6 +127,12 @@ function artifactErrorRow(error: OutputArtifactError): TranscriptStatusRow {
 	return { parts: [{ text: notice, color: "warning" }], native: { tone: "warning", message: [span(notice)] } };
 }
 
+/** The dim row under a background job whose output the minimizer shortened. */
+function minimizedRow(minimized: MinimizedMeta): TranscriptStatusRow {
+	const fact = `Minimized: ${formatMinimizedMeta(minimized)}`;
+	return { parts: [{ text: fact, color: "dim" }], native: { tone: "info", message: [span(fact, "dim")] } };
+}
+
 /**
  * Native notice spans for a row's trailing facts (kind, id, duration): each
  * after a dim ` · `, absent ones skipped.
@@ -140,7 +152,7 @@ export function buildLaunchCompletionBlock(message: CustomOrHookMessage): ToolAc
 	const daemons = details?.daemons ?? [];
 	if (daemons.length === 0 && typeof message.content === "string") {
 		rows.push({
-			parts: [{ text: `${theme.status.done} ${message.content}`, color: "dim" }],
+			parts: [{ text: `${theme.status.success} ${message.content}`, color: "dim" }],
 			native: { tone: "success", message: [span(message.content)] },
 		});
 	}
@@ -156,7 +168,7 @@ export function buildLaunchCompletionBlock(message: CustomOrHookMessage): ToolAc
 			parts: [
 				failed
 					? { text: `${theme.status.error} ${label}`, color: "error" }
-					: { text: `${theme.status.done} ${label}`, color: "success" },
+					: { text: `${theme.status.success} ${label}`, color: "success" },
 				{ text: daemon.name, color: "accent" },
 				exit ? { text: `(${exit})`, color: "dim" } : undefined,
 				duration ? { text: `(${duration})`, color: "dim" } : undefined,
