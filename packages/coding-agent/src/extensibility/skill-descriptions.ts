@@ -2,7 +2,7 @@ import { Database, type Statement } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { type AgentTelemetry, instrumentedCompleteSimple } from "@oh-my-pi/pi-agent-core";
-import type { Api, Model } from "@oh-my-pi/pi-ai";
+import type { Api, AssistantMessage, Model } from "@oh-my-pi/pi-ai";
 import { transportFetch } from "@oh-my-pi/pi-ai/utils/transport-fetch";
 import {
 	getAgentDir,
@@ -21,7 +21,7 @@ import {
 	resolveRoleSelection,
 } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
-import type { CostGateApi } from "../session/cost-gate";
+import { CostCapError, type CostGateApi } from "../session/cost-gate";
 import compressDescriptionPrompt from "../prompts/skills/compress-description.md" with { type: "text" };
 import { Semaphore } from "../task/parallel";
 import type { Skill } from "./skills";
@@ -103,23 +103,40 @@ export function createSkillDescriptionCompressor(
 			if (!apiKey) throw new Error(`No credential for ${model.provider}/${model.id}`);
 			const gate = options.getCostGate?.();
 			gate?.admit();
-			const response = await instrumentedCompleteSimple(
-				model,
-				{
-					messages: [{ role: "user", content: request, timestamp: Date.now() }],
-				},
-				{
-					apiKey: registry.resolver(model, options.sessionId),
-					sessionId: options.sessionId,
-					maxTokens: 1024,
-					disableReasoning: true,
-					temperature: 0,
-					signal: AbortSignal.timeout(30_000),
-					fetch: gate ? transportFetch(model, undefined, () => gate.admit()) : undefined,
-					onAttempt: message => gate?.record(message.usage.cost.total),
-				},
-				{ telemetry: options.getTelemetry?.(), oneshotKind: "skill_description" },
-			);
+			// A refusal inside a provider's retry loop aborts the request, so no retry
+			// layer (`fetchWithRetry`, SDK clients) treats it as a transient network error.
+			const refused = new AbortController();
+			const refuseAttempt = (): void => {
+				const refusal = gate?.check();
+				if (!refusal) return;
+				const error = new CostCapError(refusal);
+				refused.abort(error);
+				throw error;
+			};
+			let response: AssistantMessage;
+			try {
+				response = await instrumentedCompleteSimple(
+					model,
+					{
+						messages: [{ role: "user", content: request, timestamp: Date.now() }],
+					},
+					{
+						apiKey: registry.resolver(model, options.sessionId),
+						sessionId: options.sessionId,
+						maxTokens: 1024,
+						disableReasoning: true,
+						temperature: 0,
+						signal: AbortSignal.any([AbortSignal.timeout(30_000), refused.signal]),
+						fetch: gate ? transportFetch(model, undefined, refuseAttempt) : undefined,
+						onAttempt: message => gate?.record(message.usage.cost.total),
+					},
+					{ telemetry: options.getTelemetry?.(), oneshotKind: "skill_description" },
+				);
+			} catch (error) {
+				if (refused.signal.aborted) throw refused.signal.reason;
+				throw error;
+			}
+			if (refused.signal.aborted) throw refused.signal.reason;
 			if (response.stopReason === "length") {
 				throw new SkillDescriptionLengthError("Model stopped: length");
 			}
