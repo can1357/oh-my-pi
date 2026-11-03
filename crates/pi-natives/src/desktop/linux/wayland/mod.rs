@@ -305,7 +305,9 @@ impl Backend for WaylandBackend {
 
 	fn windows(&mut self) -> CoreResult<Vec<DesktopWindow>> {
 		let mut windows = self.atspi_windows()?;
-		resolve_focus(&mut windows, self.compositor_pid);
+		if let Some(ax) = self.ax.as_ref() {
+			resolve_focus(&mut windows, self.compositor_pid, |window| ax.holds_focus(window));
+		}
 		Ok(windows.into_iter().map(|entry| entry.window).collect())
 	}
 

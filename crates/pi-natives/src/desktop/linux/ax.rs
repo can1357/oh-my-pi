@@ -33,10 +33,16 @@ pub struct AtSpiWindow {
 /// Active state at all times: the compositor's own frames (gnome-shell's "Main
 /// stage") and untitled frames (plasma-keyboard's). When several windows are
 /// active, the compositor's frames drop out first, then untitled ones, until
-/// one is left; a shell frame alone keeps focus, as in the GNOME overview. Two
+/// one is left; a shell frame alone keeps focus, as in the GNOME overview. When
+/// only untitled frames are left (an untitled app beside plasma-keyboard), the
+/// one that `holds_focus` (contains the keyboard-focused element) wins. Two
 /// active titled application windows leave none focused, rather than naming
 /// one at random.
-pub fn resolve_focus(windows: &mut [AtSpiWindow], compositor_pid: Option<u32>) {
+pub fn resolve_focus(
+	windows: &mut [AtSpiWindow],
+	compositor_pid: Option<u32>,
+	mut holds_focus: impl FnMut(&DesktopWindow) -> bool,
+) {
 	let mut active: Vec<usize> = (0..windows.len())
 		.filter(|&index| windows[index].window.focused)
 		.collect();
@@ -48,7 +54,19 @@ pub fn resolve_focus(windows: &mut [AtSpiWindow], compositor_pid: Option<u32>) {
 		active.retain(|&index| windows[index].window.pid != compositor_pid);
 	}
 	if active.len() > 1 {
-		active.retain(|&index| !windows[index].window.title.trim().is_empty());
+		let titled: Vec<usize> = active
+			.iter()
+			.copied()
+			.filter(|&index| !windows[index].window.title.trim().is_empty())
+			.collect();
+		active = if titled.is_empty() {
+			active
+				.into_iter()
+				.filter(|&index| holds_focus(&windows[index].window))
+				.collect()
+		} else {
+			titled
+		};
 	}
 	let focused = match active.as_slice() {
 		[only] => Some(*only),
@@ -153,6 +171,27 @@ impl AtSpiAx {
 				}
 			}
 			Ok(windows)
+		})
+	}
+
+	/// Whether the window's frame contains the keyboard-focused element. A
+	/// lookup that fails counts as not holding focus.
+	pub(crate) fn holds_focus(&self, window: &DesktopWindow) -> bool {
+		self.rt.block_on(async {
+			let Ok(app) = Self::app_for_window(&self.connection, window).await else {
+				return false;
+			};
+			let Ok(frames) = Self::frames(&self.connection, &app).await else {
+				return false;
+			};
+			for frame in frames {
+				if atspi_window_id(&frame) == window.id {
+					return Self::find_focused(self.connection.connection(), frame, 0)
+						.await
+						.is_ok_and(|found| found.is_some());
+				}
+			}
+			false
 		})
 	}
 
@@ -851,31 +890,45 @@ mod tests {
 				.collect()
 		};
 
+		// Only an all-untitled tie asks which frame holds keyboard focus.
+		let no_lookup = |_: &DesktopWindow| -> bool { panic!("focus lookup was not needed") };
+
 		// GNOME: gnome-shell (the compositor, pid 1) keeps its "Main stage"
 		// active.
 		let mut gnome = vec![frame("Main stage", 1, true), frame("notes.txt - gedit", 7, true)];
-		resolve_focus(&mut gnome, Some(1));
+		resolve_focus(&mut gnome, Some(1), no_lookup);
 		assert_eq!(focused(&gnome), ["notes.txt - gedit"]);
 
 		// KDE: plasma-keyboard's untitled frame stays active.
 		let mut kde = vec![frame("", 5, true), frame("notes.txt — Kate", 8, true)];
-		resolve_focus(&mut kde, None);
+		resolve_focus(&mut kde, None, no_lookup);
 		assert_eq!(focused(&kde), ["notes.txt — Kate"]);
 
 		// The GNOME overview: only the shell is active, and it keeps focus.
 		let mut overview = vec![frame("Main stage", 1, true), frame("notes.txt - gedit", 7, false)];
-		resolve_focus(&mut overview, Some(1));
+		resolve_focus(&mut overview, Some(1), no_lookup);
 		assert_eq!(focused(&overview), ["Main stage"]);
 
 		// Two active application windows: none is named.
 		let mut two = vec![frame("Main stage", 1, true), frame("A", 7, true), frame("B", 9, true)];
-		resolve_focus(&mut two, Some(1));
+		resolve_focus(&mut two, Some(1), no_lookup);
 		assert!(focused(&two).is_empty());
 
 		// An untitled application window still wins over gnome-shell's frame.
 		let mut untitled = vec![frame("Main stage", 1, true), frame("", 7, true)];
-		resolve_focus(&mut untitled, Some(1));
+		resolve_focus(&mut untitled, Some(1), no_lookup);
 		assert_eq!(focused(&untitled), [""]);
+
+		// KDE with an untitled app beside plasma-keyboard: the frame holding
+		// keyboard focus wins.
+		let mut kde_untitled = vec![frame("", 5, true), frame("", 8, true)];
+		resolve_focus(&mut kde_untitled, None, |window| window.pid == Some(8));
+		let ids: Vec<&str> = kde_untitled
+			.iter()
+			.filter(|w| w.window.focused)
+			.map(|w| w.window.id.as_str())
+			.collect();
+		assert_eq!(ids, ["-8"]);
 	}
 
 	#[test]
