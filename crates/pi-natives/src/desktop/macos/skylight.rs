@@ -1219,7 +1219,10 @@ pub(super) fn with_background_watch<T>(
 	));
 	// Sends the user's keys back to their app while the target holds the
 	// keyboard uninvited, until the guard below has put their app back.
-	let _reroute = previous.pid.and_then(|user| KeyReroute::arm(user, pid));
+	let _reroute = previous.pid.and_then(|user| {
+		let _setup = REROUTE_SETUP.lock();
+		KeyReroute::arm(user, pid)
+	});
 	let stopped = AtomicBool::new(false);
 	let visited = AtomicBool::new(false);
 	let start_failed = |error: std::io::Error| {
@@ -1819,13 +1822,24 @@ fn keeps_reroute(seen: Option<PickEvidence>) -> bool {
 	seen.is_none_or(|seen| seen.chord.is_none() && seen.panels.iter().all(Option::is_none))
 }
 
+/// Orders read and operation reroutes without owning cross-process input
+/// control during tap setup. An operation starting after the read's ownership
+/// check arms after the read, so its generation supersedes the read's.
+static REROUTE_SETUP: Mutex<()> = Mutex::new(());
+
 /// A [`KeyReroute`] from `browser` back to `user`, unless an operation owns
 /// desktop input/focus control: arming makes this the latest action, which
 /// would end that operation's own reroute.
 fn arm_reroute(user: pid_t, browser: pid_t) -> Option<KeyReroute> {
-	control::own_focus()
-		.ok()
-		.and_then(|_owner| KeyReroute::arm(user, browser))
+	arm_reroute_with(|| KeyReroute::arm(user, browser))
+}
+
+fn arm_reroute_with<T>(setup: impl FnOnce() -> Option<T>) -> Option<T> {
+	let _setup = REROUTE_SETUP.lock();
+	if control::own_focus().is_err() {
+		return None;
+	}
+	setup()
 }
 
 /// What the [`PickLog`] saw between the read of the user's app and the start
@@ -2725,6 +2739,27 @@ mod tests {
 	const COMMAND: u64 = 0x10_0108;
 	const OPTION: u64 = 0x8_0120;
 	const CONTROL: u64 = 0x4_0101;
+
+	#[test]
+	fn a_read_releases_desktop_control_before_reroute_setup() {
+		let _serial = control::OWNERSHIP_TEST.lock();
+		let reroute = arm_reroute_with(|| {
+			let _owner = control::own_focus().expect("tap setup must not own desktop control");
+			assert!(REROUTE_SETUP.try_lock().is_none(), "same-process setup stays serialized");
+			Some(())
+		});
+		assert!(reroute.is_some(), "the read sets up its reroute");
+	}
+
+	#[test]
+	fn a_read_does_not_replace_a_computer_tasks_reroute() {
+		let _serial = control::OWNERSHIP_TEST.lock();
+		let _owner = control::own_focus().unwrap();
+		let reroute = arm_reroute_with(|| -> Option<()> {
+			panic!("an operation's reroute must not be superseded by a read");
+		});
+		assert!(reroute.is_none());
+	}
 
 	/// Signals after `clicks` hardware clicks (left down and up), timed between
 	/// readings, with no key focus reading.
