@@ -7,6 +7,7 @@ import {
 } from "@oh-my-pi/pi-agent-core";
 import { formatDuration, prompt } from "@oh-my-pi/pi-utils";
 import { IrcBus } from "../irc/bus";
+import { REMOTE_ID_PREFIX } from "../registry/remote-id";
 import waitDescription from "../prompts/tools/wait.md" with { type: "text" };
 import waitIdleTemplate from "../prompts/tools/wait-idle.md" with { type: "text" };
 import type { ToolSession } from ".";
@@ -122,6 +123,9 @@ function pendingReplies(messaging: WaitMessaging): PendingReplies {
 	const replies: PendingReplies = { from: [], blocked: [], onUser: [], stopped: [] };
 	const since = registry.get(senderId)?.session?.runStartedAt ?? 0;
 	for (const { to, sentAt, promised } of IrcBus.forRegistry(registry).unansweredSends(senderId, since)) {
+		// A cross-process peer is nothing the caller started: its turn is not visible here, so it can
+		// neither sustain a reply wait nor be reported as having stopped. Its reply arrives on its own.
+		if (to.startsWith(REMOTE_ID_PREFIX)) continue;
 		const session = registry.get(to)?.session;
 		if (session && registry.awaits.blocksOn(to, senderId, sentAt)) replies.blocked.push(to);
 		else if (session && registry.awaits.blocksOn(to, USER_AWAIT_ID, sentAt)) replies.onUser.push(to);

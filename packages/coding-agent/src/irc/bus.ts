@@ -339,18 +339,25 @@ export class IrcBus implements IrcBusApi {
 		// delivered must still order after it.
 		const mark: SendMark = { ts: message.ts, seq: ++this.#sendSeq };
 		const receipt = await this.#deliver(message, opts);
-		if (receipt.outcome !== "failed") {
-			if (message.progress) {
-				this.#record(this.#lastProgress, message.from, message.to, mark);
-			} else {
-				this.#record(this.#lastSent, message.from, message.to, mark);
-				if (!message.broadcast) {
-					this.#record(this.#lastReply, message.from, message.to, mark);
-					if (!message.wakeRelay) this.#record(this.#lastDirect, message.from, message.to, mark);
-				}
-			}
-		}
+		if (receipt.outcome !== "failed") this.#recordDelivered(message, mark, !message.broadcast && !message.wakeRelay);
 		return receipt;
+	}
+
+	/**
+	 * Record a delivered message for reply tracking: progress promises a later reply, a
+	 * non-broadcast message answers what the recipient asked the sender before it (a broadcast
+	 * answers nothing), and a `request` also leaves the recipient owing the sender a reply (see
+	 * {@link unansweredSends}).
+	 */
+	#recordDelivered(message: IrcMessage, mark: SendMark, request: boolean): void {
+		if (message.progress) {
+			this.#record(this.#lastProgress, message.from, message.to, mark);
+			return;
+		}
+		this.#record(this.#lastSent, message.from, message.to, mark);
+		if (message.broadcast) return;
+		this.#record(this.#lastReply, message.from, message.to, mark);
+		if (request) this.#record(this.#lastDirect, message.from, message.to, mark);
 	}
 
 	#record(table: Map<string, Map<string, SendMark>>, from: string, to: string, mark: SendMark): void {
@@ -474,7 +481,7 @@ export class IrcBus implements IrcBusApi {
 	 */
 	async deliverInbound(
 		msg: Omit<IrcMessage, "id" | "ts">,
-		_opts?: { expectsReply?: boolean },
+		opts?: { expectsReply?: boolean },
 	): Promise<{ receipt: IrcDeliveryReceipt; id: string }> {
 		const message: IrcMessage = { ...msg, id: Snowflake.next(), ts: Date.now() };
 		// Inbound arrives FROM the mesh, so the sender MUST be a well-formed remote id
@@ -499,7 +506,17 @@ export class IrcBus implements IrcBusApi {
 				id: message.id,
 			};
 		}
+		// Taken before delivery, as in `send`: a reply sent while this message is still being
+		// delivered must order after it.
+		const mark: SendMark = { ts: message.ts, seq: ++this.#sendSeq };
 		const receipt = await this.#deliverToLocalRef(ref, message);
+		// Reply tracking as for a local peer's message: a non-broadcast one answers what the local
+		// agent asked the remote peer, and one that expects a reply leaves the local agent owing the
+		// remote peer one until a later non-progress `write agent://@ns/name` (routed through the
+		// transport) answers.
+		if (receipt.outcome !== "failed") {
+			this.#recordDelivered(message, mark, opts?.expectsReply === true && !message.broadcast && !message.wakeRelay);
+		}
 		return { receipt, id: message.id };
 	}
 
