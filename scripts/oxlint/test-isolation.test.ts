@@ -1116,6 +1116,72 @@ it("t", () => {
 });`,
 		expected: [],
 	},
+	"spy-variable-written-twice-earns-no-individual-credit": {
+		body: `
+it("t", async () => {
+	let s = spyOn(Date, "now").mockReturnValue(12345);
+	onTestFinished(() => s.mockRestore());
+	s = spyOn(Math, "random").mockReturnValue(0.5);
+	onTestFinished(() => s.mockRestore());
+	await Promise.resolve();
+	s.mockRestore();
+});`,
+		expected: ["restore-mocks-in-hooks@10", "restore-mocks-in-hooks@5", "restore-mocks-in-hooks@7"],
+	},
+	"spy-variable-assigned-once-after-declaration-covers": {
+		body: `
+it("t", async () => {
+	let s: { mockRestore(): void };
+	s = spyOn(Date, "now").mockReturnValue(12345);
+	onTestFinished(() => s.mockRestore());
+	await Promise.resolve();
+	s.mockRestore();
+});`,
+		expected: [],
+	},
+	"let-spy-never-reassigned-covers": {
+		body: `
+it("t", async () => {
+	let s = spyOn(Date, "now").mockReturnValue(12345);
+	onTestFinished(() => s.mockRestore());
+	await Promise.resolve();
+	s.mockRestore();
+});`,
+		expected: [],
+	},
+	"reassigned-function-declaration-finisher-does-not-cover": {
+		body: `
+it("t", async () => {
+	function cleanup() { s.mockRestore(); }
+	cleanup = () => {};
+	const s = spyOn(Date, "now").mockReturnValue(12345);
+	onTestFinished(cleanup);
+	await Promise.resolve();
+	s.mockRestore();
+});`,
+		expected: ["restore-mocks-in-hooks@10", "restore-mocks-in-hooks@7"],
+	},
+	"reassigned-function-declaration-hook-does-not-cover": {
+		body: `
+function cleanup() { vi.restoreAllMocks(); }
+cleanup = () => {};
+afterEach(cleanup);
+it("t", async () => {
+	const s = spyOn(Date, "now").mockReturnValue(12345);
+	try { await Promise.resolve(); } finally { s.mockRestore(); }
+});`,
+		expected: ["restore-mocks-in-hooks@9"],
+	},
+	"function-declaration-hook-covers": {
+		body: `
+function cleanup() { vi.restoreAllMocks(); }
+afterEach(cleanup);
+it("t", async () => {
+	const s = spyOn(Date, "now").mockReturnValue(12345);
+	try { await Promise.resolve(); } finally { s.mockRestore(); }
+});`,
+		expected: [],
+	},
 };
 
 interface Diagnostic {

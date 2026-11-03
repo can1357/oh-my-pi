@@ -11,8 +11,11 @@
  * Cleanup that survives a timeout is cleanup a timeout cannot interrupt: the shared, synchronous
  * `installMockRestores()` helper for spies, a synchronous `afterEach` that restores or puts back as
  * a direct statement, or `onTestFinished(<synchronous callback>)` registered before the test can
- * suspend. The rules credit only those shapes. They are an enforcement aid for new code, not a
- * proof: a shape they credit is safe by construction, and everything else is reported.
+ * suspend. A callback passed by name counts only through a function declaration or `const` the file
+ * never reassigns, and `x.mockRestore()` restores a known spy only when the file writes `x` once:
+ * a callback runs what a binding holds when it is called, not what it held when registered. The
+ * rules credit only those shapes. They are an enforcement aid for new code, not a proof: a shape
+ * they credit is safe by construction, and everything else is reported.
  *
  * The rules judge only what one file shows: writes and restores reached from a test body directly
  * or through a function declared in the same file, and hooks declared in the same file.
@@ -173,6 +176,71 @@ function functionOf(context: RuleContext, id: Node): Node | undefined {
 	if (def.type !== "Variable" || def.parent?.kind !== "const") return undefined;
 	const init = unwrap(node(def.node.init));
 	return isFunction(init) ? init : undefined;
+}
+
+/** The identifiers an assignment target binds: `x`, `[x, y]`, `{ a: x }`, `x = fallback`, `...x`. */
+function patternIdentifiers(target: Node | undefined): Node[] {
+	const n = unwrap(target);
+	if (!n) return [];
+	if (n.type === "Identifier") return [n];
+	if (n.type === "ArrayPattern") return nodes(n.elements).flatMap(element => patternIdentifiers(element));
+	if (n.type === "ObjectPattern")
+		return nodes(n.properties).flatMap(p =>
+			patternIdentifiers(node(p.type === "RestElement" ? p.argument : p.value)),
+		);
+	if (n.type === "AssignmentPattern") return patternIdentifiers(node(n.left));
+	if (n.type === "RestElement") return patternIdentifiers(node(n.argument));
+	return [];
+}
+
+/**
+ * How many values the file stores in `variable`: its initializer or function declaration, then each
+ * assignment and `++`/`--`. A loop that assigns it on every pass, a redeclaration, and a binding the
+ * rule cannot see written (a parameter, an import) count as many.
+ */
+function writeCount(facts: FileFacts, variable: Variable): number {
+	if (variable.defs.length !== 1) return Number.POSITIVE_INFINITY;
+	const def = variable.defs[0]!;
+	let count: number;
+	if (def.type === "FunctionName") count = 1;
+	else if (def.type === "Variable") {
+		const declaration = def.parent;
+		const loop = declaration?.parent;
+		// `for (var x of xs)` shares one binding across passes; `let`/`const` get a fresh one per pass.
+		if (
+			declaration?.kind === "var" &&
+			(loop?.type === "ForOfStatement" || loop?.type === "ForInStatement") &&
+			node(loop.left) === declaration
+		)
+			return Number.POSITIVE_INFINITY;
+		count = node(def.node.init) ? 1 : 0;
+	} else return Number.POSITIVE_INFINITY;
+	for (const write of facts.assignments) {
+		const loop = write.type === "ForOfStatement" || write.type === "ForInStatement";
+		const target =
+			write.type === "AssignmentExpression" || loop
+				? node(write.left)
+				: write.type === "UpdateExpression"
+					? node(write.argument)
+					: undefined;
+		for (const id of patternIdentifiers(target)) {
+			if (variableOf(facts.context, id) !== variable) continue;
+			if (loop) return Number.POSITIVE_INFINITY;
+			count++;
+		}
+	}
+	return count;
+}
+
+/**
+ * The function a name passed to a hook or `onTestFinished` is certain to run: a function declaration
+ * or `const` binding the file never reassigns. A callback registered by name runs whatever the
+ * binding holds when it is called, not what it held when registered.
+ */
+function creditedFunctionOf(facts: FileFacts, id: Node): Node | undefined {
+	const fn = functionOf(facts.context, id);
+	const variable = fn && variableOf(facts.context, id);
+	return variable && writeCount(facts, variable) <= 1 ? fn : undefined;
 }
 
 interface Registration {
@@ -549,7 +617,7 @@ function afterEachDoes(
 	for (const call of facts.calls) {
 		if (testApi(facts.context, node(call.callee)) !== "afterEach") continue;
 		if (enclosingFunction(call) !== scope || !isTopLevelStatement(facts, call, scope)) continue;
-		for (const hook of registered(facts, call)) {
+		for (const hook of creditedCallbacks(facts, call)) {
 			if (hook.async === true) continue;
 			const body = node(hook.body);
 			if (!body) continue;
@@ -603,7 +671,7 @@ function restoreKind(call: Node): "restoreAll" | "mockRestore" | undefined {
  */
 function realRestoreKind(facts: FileFacts, call: Node): "restoreAll" | "mockRestore" | undefined {
 	const kind = restoreKind(call);
-	if (kind === "mockRestore") return spyInstalls(facts, call).length > 0 ? kind : undefined;
+	if (kind === "mockRestore") return creditedSpyInstall(facts, call) ? kind : undefined;
 	if (kind !== "restoreAll") return undefined;
 	const receiver = unwrap(node(unwrap(node(call.callee))!.object));
 	if (receiver?.type !== "Identifier") return undefined;
@@ -672,26 +740,45 @@ function spyCallIn(facts: FileFacts, expression: Node | undefined): Node | undef
 	return undefined;
 }
 
-/**
- * The `spyOn(...)` calls that install the spy a `x.mockRestore()` call restores: `const x = spyOn(...)`,
- * `const x = await spyOn(...)`, or `let x; x = spyOn(...)`.
- */
-function spyInstalls(facts: FileFacts, call: Node): Node[] {
+/** The variable `x` of an `x.mockRestore()` call, and its declaration. */
+function restoredSpyVariable(facts: FileFacts, call: Node): { variable: Variable; declarator: Node } | undefined {
 	const callee = unwrap(node(call.callee));
 	const receiver = callee?.type === "MemberExpression" ? unwrap(node(callee.object)) : undefined;
-	if (receiver?.type !== "Identifier") return [];
+	if (receiver?.type !== "Identifier") return undefined;
 	const variable = variableOf(facts.context, receiver);
 	const def = variable?.defs[0];
-	if (def?.type !== "Variable") return [];
-	const installs = [spyCallIn(facts, node(def.node.init)) ?? []].flat();
+	return variable && def?.type === "Variable" ? { variable, declarator: def.node } : undefined;
+}
+
+/**
+ * Every `spyOn(...)` call stored in the variable of a `x.mockRestore()` call: `const x = spyOn(...)`,
+ * `const x = await spyOn(...)`, `let x; x = spyOn(...)`, and each later `x = spyOn(...)`.
+ */
+function spyInstalls(facts: FileFacts, call: Node): Node[] {
+	const spy = restoredSpyVariable(facts, call);
+	if (!spy) return [];
+	const installs = [spyCallIn(facts, node(spy.declarator.init)) ?? []].flat();
 	for (const write of facts.assignments) {
 		if (write.type !== "AssignmentExpression") continue;
 		const left = unwrap(node(write.left));
-		if (left?.type !== "Identifier" || variableOf(facts.context, left) !== variable) continue;
+		if (left?.type !== "Identifier" || variableOf(facts.context, left) !== spy.variable) continue;
 		const install = spyCallIn(facts, node(write.right));
 		if (install) installs.push(install);
 	}
 	return installs;
+}
+
+/**
+ * The one spy a `x.mockRestore()` call is certain to restore: `x` is a binding the file writes once,
+ * with a `spyOn(...)` (`const x = spyOn(...)`, `let x = spyOn(...)` never reassigned, or
+ * `let x; x = spyOn(...)`). A callback captures the binding, not the value it held when registered,
+ * so a binding written twice restores whichever spy it holds when the callback runs.
+ */
+function creditedSpyInstall(facts: FileFacts, call: Node): Node | undefined {
+	const spy = restoredSpyVariable(facts, call);
+	if (!spy || writeCount(facts, spy.variable) !== 1) return undefined;
+	const installs = spyInstalls(facts, call);
+	return installs.length === 1 ? installs[0] : undefined;
 }
 
 function inFinally(n: Node, boundary: Node): boolean {
@@ -706,6 +793,16 @@ function registered(facts: FileFacts, call: Node): Node[] {
 		if (isFunction(arg)) return [arg];
 		const id = unwrap(arg);
 		const fn = id?.type === "Identifier" ? functionOf(facts.context, id) : undefined;
+		return fn ? [fn] : [];
+	});
+}
+
+/** The functions a hook or `onTestFinished` call is certain to run: inline, or a never-reassigned name. */
+function creditedCallbacks(facts: FileFacts, call: Node): Node[] {
+	return nodes(call.arguments).flatMap(arg => {
+		if (isFunction(arg)) return [arg];
+		const id = unwrap(arg);
+		const fn = id?.type === "Identifier" ? creditedFunctionOf(facts, id) : undefined;
 		return fn ? [fn] : [];
 	});
 }
@@ -730,7 +827,7 @@ function promptCallback(
 	done: (expression: Node) => boolean,
 	branches = false,
 ): boolean {
-	return registered(facts, finisher).some(callback => {
+	return creditedCallbacks(facts, finisher).some(callback => {
 		if (callback.async === true) return false;
 		const body = node(callback.body);
 		if (!body) return false;
@@ -787,7 +884,7 @@ function spyRegisteredPromptly(facts: FileFacts, install: Node): boolean {
 			if (call?.type !== "CallExpression") return false;
 			const kind = realRestoreKind(facts, call);
 			if (kind === "restoreAll") return true;
-			return kind === "mockRestore" && spyInstalls(facts, call).includes(install);
+			return kind === "mockRestore" && creditedSpyInstall(facts, call) === install;
 		});
 	});
 }

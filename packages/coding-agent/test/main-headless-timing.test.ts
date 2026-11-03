@@ -57,11 +57,12 @@ describe("startup timing after a headless runner starts", () => {
 			if (savedTiming !== undefined) process.env.PI_TIMING = savedTiming;
 			else delete process.env.PI_TIMING;
 		});
-		// Every async step the fixtures hand to `runRootCommand` settles only while this test runs.
+		// Every await goes through `step`, so a body abandoned on timeout parks before it installs
+		// the quit spy or reaches `postmortem.quit` (see `fence`).
 		const step = fence.forThisTest();
 		const dir = TempDir.createSync("@pi-headless-timing-");
 		tempDirs.push(dir);
-		const authStorage = await AuthStorage.create(":memory:");
+		const authStorage = await step(() => AuthStorage.create(":memory:"));
 		const manager = SessionManager.create(dir.path(), `${dir.path()}/sessions`);
 		let recordedDuringPrompt: boolean | undefined;
 		const session = {
@@ -104,15 +105,17 @@ describe("startup timing after a headless runner starts", () => {
 	}, 15_000);
 
 	it("stops recording before the ACP server runs", async () => {
+		// Guarded too: a late `runRootCommand` would register CLI extension roots during a later test.
+		const step = fence.forThisTest();
 		const dir = TempDir.createSync("@pi-headless-timing-");
 		tempDirs.push(dir);
-		const authStorage = await AuthStorage.create(":memory:");
+		const authStorage = await step(() => AuthStorage.create(":memory:"));
 		let recordedWhileServing: boolean | undefined;
 		// The ACP server never returns; the stub stops it with a sentinel once it has observed.
 		const stopServing = new Error("stop ACP server");
 		try {
 			await runRootCommand(headlessArgs(["--mode", "acp"], dir.path()), ["--mode", "acp"], {
-				discoverAuthStorage: async () => authStorage,
+				discoverAuthStorage: () => step(async () => authStorage),
 				settings: Settings.isolated({ "marketplace.autoUpdate": "off" }),
 				runAcpMode: async () => {
 					recordedWhileServing = spanRecorded();

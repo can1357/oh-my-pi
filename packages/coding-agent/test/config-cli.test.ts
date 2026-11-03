@@ -5,8 +5,12 @@ import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { getConfigRootDir, getProjectDir, setAgentDir, setProjectDir, TempDir } from "@oh-my-pi/pi-utils";
 import { installMockRestores, testLifetime } from "../../utils/test/helpers/mock-restores";
+import { createTeardownFence } from "./helpers/teardown-fence";
 
 installMockRestores();
+
+/** Parks a body abandoned on timeout before it stubs `process.exit` or reaches the real one. */
+const fence = createTeardownFence();
 
 let testAgentDir: TempDir | undefined;
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -38,6 +42,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+	fence.close();
 	vi.restoreAllMocks();
 	AgentStorage.close();
 	resetSettingsForTest();
@@ -108,13 +113,13 @@ describe("config CLI schema coverage", () => {
 	});
 
 	it("rejects invalid provider in-flight request limit entries", async () => {
-		const life = testLifetime();
+		const step = fence.forThisTest();
 		vi.spyOn(console, "log").mockImplementation(() => {});
 		vi.spyOn(console, "error").mockImplementation(() => {});
-		// Load settings first: `runConfigCommand` then reaches `process.exit` without waiting on I/O,
-		// so a timeout cannot abandon it mid-load and let it call the real exit after the spy is gone.
-		await Settings.init();
-		life.assertLive();
+		// Load settings through the fence first: `runConfigCommand` then reaches the `process.exit` stub
+		// without waiting on I/O, and a body abandoned on timeout parks here instead of stubbing exit late,
+		// then reloading the Settings that afterEach reset and reaching the real exit.
+		await step(() => Settings.init());
 		const exitSpy = vi.spyOn(process, "exit").mockImplementation((() => {
 			throw new Error("process.exit");
 		}) as typeof process.exit);
@@ -149,12 +154,11 @@ describe("config CLI schema coverage", () => {
 	});
 
 	it("rejects unknown status line segment ids", async () => {
-		const life = testLifetime();
+		const step = fence.forThisTest();
 		vi.spyOn(console, "log").mockImplementation(() => {});
 		vi.spyOn(console, "error").mockImplementation(() => {});
-		// Load settings first, as above: the exit spy then meets `process.exit` before a timeout can.
-		await Settings.init();
-		life.assertLive();
+		// Load settings through the fence first, as above.
+		await step(() => Settings.init());
 		const exitSpy = vi.spyOn(process, "exit").mockImplementation((() => {
 			throw new Error("process.exit");
 		}) as typeof process.exit);
