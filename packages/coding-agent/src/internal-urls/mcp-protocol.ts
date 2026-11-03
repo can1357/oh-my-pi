@@ -137,7 +137,7 @@ function formatAvailableResources(mcpManager: MCPManagerApi): string {
 }
 
 /** Observe catalogs individually so a known exact URI never waits on an unrelated catalog. */
-async function loadConnectedCatalogs(mcpManager: MCPManager, uri: string, failures: Set<string>): Promise<boolean> {
+async function loadConnectedCatalogs(mcpManager: MCPManagerApi, uri: string, failures: Set<string>): Promise<boolean> {
 	const names = mcpManager.getConnectedServers();
 	if (names.length === 0) return false;
 
@@ -165,7 +165,7 @@ async function loadConnectedCatalogs(mcpManager: MCPManager, uri: string, failur
 }
 
 /** Load connected catalogs; a rejected catalog load or failed handshake is unknown, not URI absence. */
-async function settleExactCatalogs(mcpManager: MCPManager, uri: string): Promise<void> {
+async function settleExactCatalogs(mcpManager: MCPManagerApi, uri: string): Promise<void> {
 	const failures = new Set<string>();
 	if (await loadConnectedCatalogs(mcpManager, uri, failures)) return;
 	// Known servers that never appear connected after pending work settles had a

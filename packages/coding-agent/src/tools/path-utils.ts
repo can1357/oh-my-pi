@@ -790,7 +790,7 @@ export async function splitDelimitedPathEntry(
 	// ambiguous with a literal `;` in the resource name, so only anchored tails
 	// (absolute, `./`, `../`, `~`) fan out and the URL keeps literal precedence.
 	if (isInternalUrlPath(normalizedEntry)) {
-		return splitMixedUrlPathList(normalizedEntry, cwd, isInternalUrlPath, options.context);
+		return splitMixedUrlPathList(normalizedEntry, cwd, isInternalUrlPath, options.context, options.exclusionParts);
 	}
 	// A real POSIX file may contain a delimiter and a selector-shaped tail
 	// (`a;b:1-2`, `a b:1-2`). Preserve the raw entry whenever the full literal
@@ -866,6 +866,7 @@ export async function splitMixedUrlPathList(
 	cwd: string,
 	isUrl: (part: string) => boolean,
 	context?: ResolveContext,
+	exclusionParts = false,
 ): Promise<string[] | null> {
 	const normalizedEntry = normalizePathLikeInput(entry);
 	if (!normalizedEntry.includes(";") || !isUrl(normalizedEntry)) return null;
