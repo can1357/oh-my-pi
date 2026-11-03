@@ -11,6 +11,7 @@ import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
 import type { MessageCreateParams } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import { kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
+import { requestBodyText } from "@oh-my-pi/pi-ai/utils/request-body";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { convertToLlm, wrapSteeringForModel } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -4839,13 +4840,15 @@ describe("ExtensionRunner", () => {
 			const transformed = await runner.emitContext(messages);
 			let body: MessageCreateParams | undefined;
 			const fetchMock = (async (_input: string | URL | Request, init?: RequestInit) => {
-				body = JSON.parse(String(init?.body ?? "{}")) as MessageCreateParams;
+				// `requestBodyText`, not `String(init.body)`: a body past the provider's
+				// inline size is sent as bytes, and parsing "[object ReadableStream]"
+				// throws inside the mock, which the provider retries eight times.
+				body = JSON.parse(requestBodyText(init) ?? "{}") as MessageCreateParams;
 				return new Response(
 					JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "captured" } }),
 					{ status: 400, headers: { "Content-Type": "application/json" } },
 				);
 			}) as typeof fetch;
-
 			await streamAnthropic(
 				model,
 				{
@@ -4872,6 +4875,148 @@ describe("ExtensionRunner", () => {
 				);
 			});
 			expect(cachedTexts).toEqual(["persisted user", "persisted assistant"]);
+		});
+
+		// A context hook that pins a message inside the history (after the first
+		// message, where it was first placed) and rewrites it on every request,
+		// as a status line that depends on a slow remote read does.
+		const pinnedInsertExtension = (text: string) => `
+			let calls = 0;
+			export default function(pi) {
+				pi.on("context", async event => {
+					calls++;
+					const pinned = { role: "user", content: [{ type: "text", text: ${JSON.stringify(text)}.replace("{call}", String(calls)) }], timestamp: 0 };
+					return { messages: [event.messages[0], pinned, ...event.messages.slice(1)] };
+				});
+			}
+		`;
+
+		// A fresh file name per runner: two runners in one process must not share a
+		// loaded module, or the second one's hook is the first one's.
+		let pinnedCount = 0;
+		// Two messages pinned in different places, carrying the SAME bytes on the first
+		// request; on later requests the second one changes and the first does not.
+		const twoPlacesExtension = `
+			let calls = 0;
+			export default function(pi) {
+				pi.on("context", async event => {
+					calls++;
+					const same = { role: "user", content: [{ type: "text", text: "[pinned] same" }], timestamp: 0 };
+					const second = {
+						role: "user",
+						content: [{ type: "text", text: calls === 1 ? "[pinned] same" : "[pinned] changed " + calls }],
+						timestamp: 0,
+					};
+					return { messages: [event.messages[0], same, event.messages[1], second, ...event.messages.slice(2)] };
+				});
+			}
+		`;
+
+		const pinnedInsertRunner = async (text: string): Promise<ExtensionRunner> => {
+			pinnedCount++;
+			await Bun.write(path.join(extensionsDir, `pinned-${pinnedCount}.ts`), pinnedInsertExtension(text));
+			const result = await loadTestExtensions();
+			return new ExtensionRunner(result.extensions, result.runtime, tempDir.path(), sessionManager, modelRegistry);
+		};
+
+		/** Persisted history that grows by one user/assistant turn per request; earlier objects are reused. */
+		const growingHistory = (turns = 3): AgentMessage[][] => {
+			const history: AgentMessage[] = [];
+			const requests: AgentMessage[][] = [];
+			for (let turn = 1; turn <= turns; turn++) {
+				// Block content, as a tool loop's turns carry: a plain string would also
+				// change shape on the wire when the rolling breakpoint leaves it, which is
+				// a separate defect and not what these tests are about.
+				history.push({
+					role: "user",
+					content: [{ type: "text", text: `user ${turn}` }],
+					timestamp: turn * 10,
+				});
+				history.push(createAssistantMessage(`assistant ${turn}`));
+				requests.push([...history]);
+			}
+			return requests;
+		};
+
+		const anthropicWireBody = async (messages: AgentMessage[]): Promise<MessageCreateParams> => {
+			const model = getBundledModel<"anthropic-messages">("anthropic", "claude-sonnet-4-5");
+			if (!model) throw new Error("Expected bundled Anthropic model to exist");
+			let body: MessageCreateParams | undefined;
+			const fetchMock = (async (_input: string | URL | Request, init?: RequestInit) => {
+				body = JSON.parse(String(init?.body ?? "{}")) as MessageCreateParams;
+				return new Response(
+					JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "captured" } }),
+					{ status: 400, headers: { "Content-Type": "application/json" } },
+				);
+			}) as typeof fetch;
+			await streamAnthropic(
+				model,
+				{ systemPrompt: ["system"], messages: convertToLlm(wrapSteeringForModel(messages)) },
+				{ apiKey: "sk-ant-api-test", fetch: fetchMock },
+			)
+				.result()
+				.catch(() => undefined);
+			if (!body) throw new Error("Expected Anthropic wire body");
+			return body;
+		};
+
+		/** Indices of the wire messages carrying a cache breakpoint. */
+		const breakpointIndices = (body: MessageCreateParams): number[] =>
+			body.messages.flatMap((message, index) =>
+				Array.isArray(message.content) &&
+				message.content.some(block => "cache_control" in block && block.cache_control != null)
+					? [index]
+					: [],
+			);
+
+		/** The wire body of the second of two requests over the same history. */
+		const secondRequest = async (runner: ExtensionRunner, turns: number): Promise<MessageCreateParams> => {
+			const history = growingHistory(turns).at(-1)!;
+			await runner.emitContext([...history]);
+			return anthropicWireBody(await runner.emitContext([...history]));
+		};
+
+		// A message a hook pins inside the history cuts the reusable prefix at its own
+		// place: everything behind it is re-sent on every request. That is right while
+		// its bytes change, and pure loss while they repeat, which is the usual case
+		// (a bootstrap notice, a skill reminder). A breakpoint at wire index 0 is the
+		// provider placement that says "the reusable prefix ends at the pinned
+		// message"; without one, the breakpoints behind it cover the history.
+		// Marking too little only costs cache reuse; marking too much would claim a
+		// prefix is reusable past the point where its bytes diverged. So a place whose
+		// bytes changed must still cut the prefix, and two places must not be confused
+		// with each other: here they send IDENTICAL bytes on the first request, and on
+		// the second only the later one changes. The cut must move to that later place
+		// (a breakpoint on the message before it) and must not sit at the earlier one.
+		it("cuts at the pinned place whose bytes changed, not at the one that repeated", async () => {
+			await Bun.write(path.join(extensionsDir, "two-places.ts"), twoPlacesExtension);
+			const loaded = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				loaded.extensions,
+				loaded.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const history = growingHistory(4).at(-1)!;
+			await runner.emitContext([...history]);
+			const body = await anthropicWireBody(await runner.emitContext([...history]));
+			expect(JSON.stringify(body.messages[1])).toContain("[pinned] same");
+			expect(JSON.stringify(body.messages[3])).toContain("[pinned] changed 2");
+			// The reusable prefix ends just before the changed message, not before the
+			// repeated one.
+			expect(breakpointIndices(body)).toContain(2);
+			expect(breakpointIndices(body)).not.toContain(0);
+		});
+
+		it("does not cut the reusable prefix at a pinned message the hook sends unchanged", async () => {
+			const runner = await pinnedInsertRunner("[bootstrap] static");
+			const history = growingHistory(4).at(-1)!;
+			await runner.emitContext([...history]);
+			const body = await anthropicWireBody(await runner.emitContext([...history]));
+			// The hook's message reaches the model where the hook put it, either way.
+			expect(JSON.stringify(body.messages[1])).toContain("[bootstrap] static");
+			expect(breakpointIndices(body)).not.toContain(0);
 		});
 	});
 });

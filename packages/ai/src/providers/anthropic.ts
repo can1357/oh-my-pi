@@ -77,9 +77,11 @@ import { createAbortSourceTracker } from "../utils/abort";
 import {
 	clearStreamingPartialJson,
 	copyPerCallContextMessage,
+	copyRepeatedPerCallContextMessage,
 	type ConversationalUserCarrier,
 	isConversationalUser,
 	isPerCallContextMessage,
+	isRepeatedPerCallContextMessage,
 	isSyntheticUser,
 	kConversationalUser,
 	kStreamingBlockIndex,
@@ -4299,6 +4301,12 @@ function ensureMaxTokensForThinking(params: MessageCreateParamsStreaming, maxAll
 	thinking.budget_tokens = output.budgetTokens;
 }
 
+/** Carries both per-call marks onto a converted or projected message. */
+function copyPerCallAndRepeatedContextMessage(target: object, source: object): void {
+	copyPerCallContextMessage(target, source);
+	copyRepeatedPerCallContextMessage(target, source);
+}
+
 function applyCacheControlToLastBlock(blocks: ContentBlockParam[], cacheControl: AnthropicCacheControl): boolean {
 	for (let index = blocks.length - 1; index >= 0; index--) {
 		const block = blocks[index];
@@ -4421,7 +4429,13 @@ function applyPromptCaching(params: MessageCreateParamsStreaming, cacheControl?:
 	for (let index = messageEnd; index >= 0; index--) {
 		const message = params.messages[index];
 		if (!message) continue;
+		// A per-call message the host reports as repeated carries the bytes the
+		// last request sent in the same place, so a prefix spanning it matches
+		// that request's: it neither truncates the reusable prefix nor anchors
+		// one (its next copy may differ, and a boundary on it would be a write
+		// nothing reads).
 		if (message.clear_at === "next_user_message" || isPerCallContextMessage(message)) {
+			if (isRepeatedPerCallContextMessage(message) && message.clear_at !== "next_user_message") continue;
 			markIndex = index;
 			stableUserTurns = 0;
 			continue;
@@ -5895,7 +5909,7 @@ export function convertAnthropicMessages(
 				role: "assistant",
 				content: [compactionBlockParam(msg.providerPayload)],
 			};
-			copyPerCallContextMessage(compactionParam, msg);
+			copyPerCallAndRepeatedContextMessage(compactionParam, msg);
 			params.push(compactionParam);
 			// The block carries the verbatim API summary, so the message text
 			// (which holds the harness file lists) would be dropped with it.
@@ -5974,7 +5988,7 @@ export function convertAnthropicMessages(
 			if (msg.role === "user" && !agentAuthored && !isSyntheticUser(msg)) {
 				param[kConversationalUser] = true;
 			}
-			copyPerCallContextMessage(param, msg);
+			copyPerCallAndRepeatedContextMessage(param, msg);
 			params.push(param);
 		} else if (msg.role === "assistant") {
 			const blocks: ContentBlockParam[] = [];
@@ -6142,7 +6156,7 @@ export function convertAnthropicMessages(
 				role: "assistant",
 				content: blocks,
 			};
-			copyPerCallContextMessage(assistantParam, msg);
+			copyPerCallAndRepeatedContextMessage(assistantParam, msg);
 			params.push(assistantParam);
 			if (!blocks.some(block => block.type === "tool_use")) flushLegacyCompactionFiles();
 		} else if (msg.role === "toolResult") {
@@ -6157,14 +6171,14 @@ export function convertAnthropicMessages(
 
 			// Add the current tool result
 			toolResults.push(buildToolResultBlock(model, msg, hoistedImages));
-			copyPerCallContextMessage(toolResultParam, msg);
+			copyPerCallAndRepeatedContextMessage(toolResultParam, msg);
 
 			// Look ahead for consecutive toolResult messages
 			let j = i + 1;
 			while (j < transformedMessages.length && transformedMessages[j].role === "toolResult") {
 				const nextMsg = transformedMessages[j] as ToolResultMessage; // We know it's a toolResult
 				toolResults.push(buildToolResultBlock(model, nextMsg, hoistedImages));
-				copyPerCallContextMessage(toolResultParam, nextMsg);
+				copyPerCallAndRepeatedContextMessage(toolResultParam, nextMsg);
 				j++;
 			}
 
@@ -6246,7 +6260,7 @@ export function convertAnthropicMessages(
 						content: controlContent,
 						...(hasEffort ? { output_config: { effort: developer.payload?.effort } } : {}),
 					};
-					copyPerCallContextMessage(controlParam, params[idx]);
+					copyPerCallAndRepeatedContextMessage(controlParam, params[idx]);
 					params.splice(idx + 1, 0, controlParam);
 					continue;
 				}
