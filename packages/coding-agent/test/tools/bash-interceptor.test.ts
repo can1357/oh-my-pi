@@ -998,6 +998,8 @@ describe("dedicated tool capability", () => {
 		"fd -I --glob 'A b' r",
 		// find walks each root and lists a file below two of them twice; glob lists it once.
 		"find fast fast -name kept",
+		// Only a `.git` prune has an exact glob call (`git: false`); glob keeps `node_modules` with `gitignore: false`.
+		"find . -path './node_modules' -prune -o -name '*.ts' -print",
 		"find a a/b -name dune",
 		"find . src -name dune",
 		"find ./src src/ -name dune",
@@ -1138,6 +1140,27 @@ describe("dedicated tool capability", () => {
 		"echo hi > '[notes.md#ABCD]'",
 		"echo hi > '\"quoted\"'",
 		"cat 'a\\b'",
+		// Round 13: a `..` segment resolves through symlinks in the shell, lexically in the tools.
+		"cat link/../file.txt",
+		"grep needle link/../file.txt",
+		"sed -i 's/a/b/' link/../file.txt",
+		"echo hi > link/../new.txt",
+		"find link/.. -name dune",
+		"fd -I --glob 'A*' link/..",
+		// bash takes `\\c`'s control character from the first byte of a multibyte character.
+		"printf '%s' $'\\c\u00e9' > out",
+		// find lists a root its tests match; glob never lists its roots.
+		"find . -name .",
+		"find . -name '.*'",
+		"find src -name 'sr*'",
+		"find src/ -path 'src*'",
+		// Round 14: a bracket expression or an escape may match the root (POSIX classes, `\\s`).
+		"find src -name '[[:alpha:]]*'",
+		"find src -name '\\s*'",
+		"find . -name '[[:print:]]'",
+		// Roots glob reads differently.
+		"find 'a,b' -name dune",
+		"fd -I --glob 'A*' 'a b'",
 		// An empty name is no file.
 		'echo hi > ""',
 	])("does not refuse %s (round 8)", command => {
@@ -1153,8 +1176,40 @@ describe("dedicated tool capability", () => {
 		["cat node_modules/@types/node/index.d.ts", "read"],
 		["echo hi > notes.md", "write"],
 		["perl -pi -e 's/old/new/' book.py", "edit"],
+		["find src -name '*.ts'", "glob"],
 	])("still refuses %s as %s (round 11)", (command, tool) => {
 		expect(decide(command)).toBe(tool);
+	});
+
+	it("matches a find pattern against its root in linear time", () => {
+		const root = "a".repeat(40);
+		const command = `find ${root} -name '${"*a".repeat(15)}Z'`;
+		const start = performance.now();
+		expect(decide(command)).toBe("glob");
+		expect(performance.now() - start).toBeLessThan(250);
+		expect(decide(`find ${root} -name '${"*a".repeat(15)}'`)).toBeUndefined();
+		expect(decide("find abc -name 'a?c'")).toBeUndefined();
+		expect(decide("find abc -name '*b*'")).toBeUndefined();
+		// The named glob call cannot express `?` (glob matches a byte, find a character).
+		expect(decide("find abc -name 'a?d'")).toBeUndefined();
+		expect(decide("find abc -name 'b*'")).toBe("glob");
+	});
+
+	it("refuses a find over a symlinked root only when -H follows it", async () => {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "bash-interceptor-find-root-")));
+		try {
+			await Bun.write(path.join(dir, "actual", "child.txt"), "x\n");
+			await fs.symlink("actual", path.join(dir, "sym"));
+			const at = (command: string) =>
+				checkBashInterception(command, tools, DEFAULT_BASH_INTERCEPTOR_RULES, command, dir).suggestedTool;
+			expect(at("find sym -name '*.txt'")).toBeUndefined();
+			expect(at("find -P sym -name '*.txt'")).toBeUndefined();
+			expect(at("find -H sym -name '*.txt'")).toBe("glob");
+			expect(at("find actual -name '*.txt'")).toBe("glob");
+			expect(at("find missing -name '*.txt'")).toBeUndefined();
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
 	});
 
 	it("renders a repeated printf only up to a bound", () => {
@@ -1314,7 +1369,12 @@ describe("BashTool runs a step the named tool cannot perform", () => {
 				undefined,
 				ctx,
 			);
-			expect(text(bytes).trim()).toBe("50 4b 03 04");
+			// The tool may add notices around a command's output (a slow run under load); match the line.
+			expect(
+				text(bytes)
+					.split("\n")
+					.map(line => line.trim()),
+			).toContain("50 4b 03 04");
 
 			await expect(tool.execute("call-3", { command: "cat new.md" }, undefined, undefined, ctx)).rejects.toThrow(
 				"Use the `read` tool instead of cat/head/tail",

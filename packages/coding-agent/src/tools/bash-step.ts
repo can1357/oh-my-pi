@@ -147,6 +147,8 @@ function decodeAnsiC(body: string): { text: string; bytes: boolean } {
 			}
 			if (esc[0] === "c" && esc.length > 1) {
 				if (esc[1] === "?") return "\x7f";
+				// bash takes the control character from the first byte of a multibyte character.
+				if (esc.charCodeAt(1) >= 0x80) bytes = true;
 				const code = esc.charCodeAt(1) & 0x1f;
 				if (code === 0) bytes = true;
 				return String.fromCharCode(code);
@@ -1084,8 +1086,7 @@ const SAME_NAME_PATTERN = /^(?!@)(?:[A-Za-z0-9._+=@-]|\*(?!\*))+$/u;
  * symlinks), and not `/` (glob refuses to search it).
  */
 function isPlainRoot(root: string): boolean {
-	if (!toolsTakeLiterally(root)) return false;
-	return !root.split("/").includes("..") && root.replace(/\/+$/u, "") !== "";
+	return toolsTakeLiterally(root) && root.replace(/\/+$/u, "") !== "";
 }
 
 /**
@@ -1107,31 +1108,33 @@ function rootsDisjoint(roots: readonly string[]): boolean {
 	);
 }
 
-/** Whether the shell-style `pattern` matches `name`, as `find -name` (fnmatch without FNM_PERIOD) does. */
-function fnmatch(pattern: string, name: string): boolean {
-	let source = "";
-	for (let i = 0; i < pattern.length; i++) {
-		const ch = pattern[i];
-		if (ch === "*") source += "[^]*";
-		else if (ch === "?") source += "[^]";
-		else if (ch === "[") {
-			const close = pattern.indexOf("]", i + 2);
-			if (close < 0) source += "\\[";
-			else {
-				const body = pattern
-					.slice(i + 1, close)
-					.replace(/^!/u, "^")
-					.replace(/\\/gu, "\\\\");
-				source += `[${body}]`;
-				i = close;
-			}
-		} else source += ch.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+/**
+ * Whether the shell-style `pattern` may match `name`, as `find -name` (fnmatch without FNM_PERIOD)
+ * matches it. `*` and `?` are matched exactly, in time linear in the two lengths; a bracket
+ * expression or a backslash (POSIX classes, escapes) is not modelled, so such a pattern may match.
+ */
+function mayMatchName(pattern: string, name: string): boolean {
+	if (/[[\\]/u.test(pattern)) return true;
+	const p = Array.from(pattern);
+	const n = Array.from(name);
+	let i = 0;
+	let j = 0;
+	let star = -1;
+	let resume = 0;
+	while (j < n.length) {
+		if (i < p.length && (p[i] === "?" || (p[i] !== "*" && p[i] === n[j]))) {
+			i++;
+			j++;
+		} else if (i < p.length && p[i] === "*") {
+			star = i++;
+			resume = j;
+		} else if (star >= 0) {
+			i = star + 1;
+			j = ++resume;
+		} else return false;
 	}
-	try {
-		return new RegExp(`^${source}$`, "u").test(name);
-	} catch {
-		return true;
-	}
+	while (i < p.length && p[i] === "*") i++;
+	return i === p.length;
 }
 
 /** The glob path for `pattern` below `root`. */
@@ -1207,7 +1210,7 @@ function findAsGlob(command: SimpleCommand, filesystem: StepFilesystem | undefin
 		if (!isPlainRoot(root)) return undefined;
 		// find lists a root the patterns match, and prunes a `.git` root; glob never lists its roots.
 		const rootName = root.replace(/\/+$/u, "").split("/").pop() ?? root;
-		if (names.some(pattern => fnmatch(pattern, rootName))) return undefined;
+		if (names.some(pattern => mayMatchName(pattern, rootName))) return undefined;
 		if (!git && rootName === ".git") return undefined;
 		if (filesystem && filesystem.kind(root, followRoots) !== "directory") return undefined;
 	}
@@ -1687,10 +1690,11 @@ function pathsAre(
  * handling reads other characters differently: `:` (a URL scheme, a read selector, an archive
  * member or database table, a Windows drive, a stray leading colon), `,`, `;` and spaces (grep's
  * path lists), `!` (a grep exclude), `[…]` and `#` (a hashline header), quotes (stripped), `\`
- * (a separator), `%` (decoded in URLs), a leading `@` or `~` (shorthands for paths).
+ * (a separator), `%` (decoded in URLs), a leading `@` or `~` (shorthands for paths). Nor a `..`
+ * segment: the tools resolve it lexically, the shell through symlinks (`link/../f`).
  */
 function toolsTakeLiterally(path: string): boolean {
-	return /^(?![@~])[A-Za-z0-9._+=@/-]+$/u.test(path);
+	return /^(?![@~])[A-Za-z0-9._+=@/-]+$/u.test(path) && !path.split("/").includes("..");
 }
 
 /** A Jupyter notebook: the edit tool edits its cells, not its JSON text. */
