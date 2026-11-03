@@ -15,6 +15,12 @@ export interface YieldQueueOptions {
 	injectStreaming?(msg: AgentMessage): void;
 	injectIdle(messages: AgentMessage[]): Promise<void>;
 	scheduleIdleFlush(run: () => Promise<void>): void;
+	/**
+	 * Runs each call of a registered dispatcher's functions, which a host may supply (see
+	 * {@link YieldQueue.register}): the owning session runs them as its work. Absent, they are
+	 * called as they are.
+	 */
+	runDispatcher?: <T>(call: () => T) => T;
 }
 
 type YieldFlushMode = "streaming" | "idle";
@@ -51,9 +57,11 @@ export class YieldQueue {
 	}
 
 	register<P>(kind: string, dispatcher: YieldDispatcher<P>): () => void {
+		const run = this.#options.runDispatcher;
+		const call = <T>(fn: () => T): T => (run ? run(fn) : fn());
 		const stored: StoredDispatcher = {
-			...(dispatcher.isStale ? { isStale: entry => dispatcher.isStale?.(entry as P) ?? false } : {}),
-			build: survivors => dispatcher.build(survivors as P[]),
+			...(dispatcher.isStale ? { isStale: entry => call(() => dispatcher.isStale?.(entry as P) ?? false) } : {}),
+			build: survivors => call(() => dispatcher.build(survivors as P[])),
 			...(dispatcher.skipIdleFlush ? { skipIdleFlush: true } : {}),
 		};
 		this.#dispatchers.set(kind, stored);

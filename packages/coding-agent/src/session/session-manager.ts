@@ -2630,8 +2630,31 @@ export class SessionManager {
 	/**
 	 * Collab replication tap: invoked for every appended entry with the
 	 * in-memory (pre-blob-externalization) entry, so inline images survive.
+	 * Runs as the owning session's work (see {@link runInRequestContext}).
 	 */
 	onEntryAppended?: (entry: SessionEntry) => void;
+
+	/**
+	 * Enters the request context of the session that owns this manager: that
+	 * session sets it, so every host callback the manager calls — the
+	 * {@link onEntryAppended} tap, a rename, persistence failure and notice
+	 * observers, an atomic batch — runs as the session's work, whoever
+	 * triggers it, and every model request it starts waits for the session's
+	 * holds.
+	 */
+	runInRequestContext: (<T>(fn: () => T) => T) | undefined;
+	/**
+	 * The session that set {@link runInRequestContext}. A second live session
+	 * over this manager does not take it over; once the owner is disposed, the
+	 * manager's callbacks run as no session's work until another claims it.
+	 */
+	requestContextOwner: { readonly isDisposed: boolean } | undefined;
+
+	/** Runs `fn` as the owning session's work (see {@link runInRequestContext}). */
+	#asOwnerWork<T>(fn: () => T): T {
+		const run = this.requestContextOwner?.isDisposed ? undefined : this.runInRequestContext;
+		return run ? run(fn) : fn();
+	}
 
 	#turnBudgetTotal: number | null = null;
 	#turnBudgetHard = false;
@@ -2798,7 +2821,7 @@ export class SessionManager {
 	 */
 	#invokePersistenceObserver<T>(observer: (value: T) => void, value: T): void {
 		try {
-			observer(value);
+			this.#asOwnerWork(() => observer(value));
 		} catch (callbackError) {
 			logger.warn("Session persistence observer failed", {
 				error: toError(callbackError).message,
@@ -4337,7 +4360,7 @@ export class SessionManager {
 		const callback = this.onEntryAppended;
 		if (callback) {
 			try {
-				callback(entry);
+				this.#asOwnerWork(() => callback(entry));
 			} catch (err) {
 				logger.warn("collab entry hook failed", { error: String(err) });
 			}
@@ -4550,13 +4573,17 @@ export class SessionManager {
 	}
 
 	#notifySessionNameListeners(): void {
-		for (const callback of Array.from(this.#sessionNameChangedCallbacks)) {
-			try {
-				callback();
-			} catch (err) {
-				logger.warn("SessionManager: session name change hook failed", { error: String(err) });
+		const callbacks = Array.from(this.#sessionNameChangedCallbacks);
+		if (callbacks.length === 0) return;
+		this.#asOwnerWork(() => {
+			for (const callback of callbacks) {
+				try {
+					callback();
+				} catch (err) {
+					logger.warn("SessionManager: session name change hook failed", { error: String(err) });
+				}
 			}
-		}
+		});
 	}
 
 	static #cleanTitle(raw: string): string {
@@ -5233,7 +5260,7 @@ export class SessionManager {
 	}
 
 	async #appendEntriesAtomicallyLocked<T>(append: () => T): Promise<T> {
-		if (!this.#persist || !this.#sessionFile) return append();
+		if (!this.#persist || !this.#sessionFile) return this.#asOwnerWork(append);
 		if (this.#atomicEntryBatch) throw new Error("Atomic persistence lock ownership was violated.");
 		try {
 			await this.ensureOnDisk();
@@ -5257,7 +5284,7 @@ export class SessionManager {
 		let result!: T;
 		try {
 			try {
-				result = append();
+				result = this.#asOwnerWork(append);
 			} finally {
 				batch.collecting = false;
 			}
@@ -6407,9 +6434,14 @@ export class SessionManager {
 	 * the full-history display transcript, from the current leaf path.
 	 */
 	buildSessionContext(options?: BuildSessionContextOptions): SessionContext {
+		const resolveFrameData = options?.resolveFrameData;
 		return buildSessionContext(this.#entries, this.#index.leafId(), this.#index.entriesById(), {
 			resolveFrameData: data => this.resolveFrameData(data),
 			...options,
+			// A caller's resolver runs as the owning session's work.
+			...(resolveFrameData && {
+				resolveFrameData: (data: string) => this.#asOwnerWork(() => resolveFrameData(data)),
+			}),
 		});
 	}
 

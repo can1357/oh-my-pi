@@ -37,6 +37,7 @@ import { type Theme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { AsyncJobSnapshot, SendUserMessageOptions } from "../../session/agent-session";
 import { MAIN_AGENT_ID } from "../../registry/agent-registry";
 import type { SessionManager } from "../../session/session-manager";
+import { asSessionWork, membersAsSessionWork, type SessionWorkRun } from "../../session/session-work";
 import { addFileDeleteFallback, addFileWriteFallback } from "../../tools/file-write-fallback";
 import type { BranchHandler, NavigateTreeHandler, NewSessionHandler } from "../session-handler-types";
 import { accumulateToolCallResult, buildAggregatedToolCallResult, type SessionMovedEvent } from "../shared-events";
@@ -548,6 +549,7 @@ export class ExtensionRunner {
 	#sessionModes?: ExtensionContextActions["sessionModes"];
 	#getMemoryFn?: () => MemoryRuntimeContext | undefined;
 	#createAnnotations?: ExtensionAnnotationsFactory;
+	readonly #localProtocolOptions: LocalProtocolOptions | undefined;
 	#commandDiagnostics: Array<{ type: string; message: string; path: string }> = [];
 	/** Link schemes already reported as claimed by more than one extension. */
 	#warnedLinkSchemes = new Set<string>();
@@ -562,6 +564,12 @@ export class ExtensionRunner {
 	runInRequestContext: (<T>(fn: () => T) => T) | undefined;
 	/** The session that set {@link runInRequestContext}; a second live session may not take the runner over. */
 	requestContextOwner: { readonly isDisposed: boolean } | undefined;
+	/**
+	 * Runs `fn` in {@link runInRequestContext}, read at each call: every host function this runner
+	 * keeps — the session's actions and UI, its listeners, a tool preflight — runs as the session's
+	 * work, whoever triggers the call. Before a session sets it, `fn` runs as is.
+	 */
+	readonly #runAsSessionWork: SessionWorkRun = fn => (this.runInRequestContext ? this.runInRequestContext(fn) : fn());
 	#toolRegistrationBarrier: Promise<void> | undefined;
 	#initialized = false;
 	/** Full load order, captured on the first {@link setSuspendedExtensions} call. */
@@ -686,11 +694,11 @@ export class ExtensionRunner {
 	setNativeToolResolver(
 		resolve: (name: string) => { tool: AgentTool; makeContext: () => AgentToolContext } | undefined,
 	): void {
-		this.#nativeToolResolver = resolve;
+		this.#nativeToolResolver = asSessionWork(this.#runAsSessionWork, resolve);
 	}
 
 	setToolCallPreflight(preflight: ToolCallPreflight | undefined): void {
-		this.#toolCallPreflight = preflight;
+		this.#toolCallPreflight = preflight && membersAsSessionWork(this.#runAsSessionWork, preflight);
 	}
 
 	async runToolCallPreflightBefore(
@@ -732,7 +740,7 @@ export class ExtensionRunner {
 	 * it is per call chain (threaded from the caller), not session-global, so concurrent independent
 	 * delegations do not interfere.
 	 */
-	async invokeNativeTool<TDetails = unknown>(
+	invokeNativeTool<TDetails = unknown>(
 		name: string,
 		params: Record<string, unknown>,
 		options?: {
@@ -748,20 +756,23 @@ export class ExtensionRunner {
 			callerContext?: AgentToolContext;
 		},
 	): Promise<AgentToolResult<TDetails>> {
-		const resolved = this.#nativeToolResolver?.(name);
-		if (!resolved) throw new Error(`invokeTool: no native built-in named "${name}" to delegate to`);
-		const depth = options?.depth ?? 0;
-		if (depth >= 8) {
-			throw new Error(`invokeTool: delegation depth exceeded 8 (recursive invokeTool for "${name}"?)`);
-		}
-		const toolCallId = `invoke-${name}-${Date.now().toString(36)}-${depth}`;
-		return (await resolved.tool.execute(
-			toolCallId,
-			params as never,
-			options?.signal,
-			options?.onUpdate as never,
-			options?.callerContext ?? resolved.makeContext(),
-		)) as AgentToolResult<TDetails>;
+		// The resolver's context factory and the caller's progress callback are host functions too.
+		return this.#runAsSessionWork(async () => {
+			const resolved = this.#nativeToolResolver?.(name);
+			if (!resolved) throw new Error(`invokeTool: no native built-in named "${name}" to delegate to`);
+			const depth = options?.depth ?? 0;
+			if (depth >= 8) {
+				throw new Error(`invokeTool: delegation depth exceeded 8 (recursive invokeTool for "${name}"?)`);
+			}
+			const toolCallId = `invoke-${name}-${Date.now().toString(36)}-${depth}`;
+			return (await resolved.tool.execute(
+				toolCallId,
+				params as never,
+				options?.signal,
+				options?.onUpdate as never,
+				options?.callerContext ?? resolved.makeContext(),
+			)) as AgentToolResult<TDetails>;
+		});
 	}
 
 	constructor(
@@ -773,7 +784,7 @@ export class ExtensionRunner {
 		private readonly modelRegistry: ModelRegistry,
 		getMemory?: () => MemoryRuntimeContext | undefined,
 		private readonly settings?: Settings,
-		private readonly localProtocolOptions?: LocalProtocolOptions,
+		localProtocolOptions?: LocalProtocolOptions,
 		getAsyncJobSnapshot?: () => AsyncJobSnapshot | null,
 		/** Identity of the agent this runner's session runs; defaults to the top-level agent. */
 		private readonly agent: ExtensionAgentIdentity = TOP_LEVEL_AGENT,
@@ -781,9 +792,13 @@ export class ExtensionRunner {
 		createAnnotations?: ExtensionAnnotationsFactory,
 	) {
 		this.#uiContext = noOpUIContext;
-		this.#getMemoryFn = getMemory;
-		this.#createAnnotations = createAnnotations;
-		this.#getAsyncJobSnapshotFn = getAsyncJobSnapshot ?? (() => null);
+		this.#getMemoryFn = getMemory && asSessionWork(this.#runAsSessionWork, getMemory);
+		this.#createAnnotations = createAnnotations && asSessionWork(this.#runAsSessionWork, createAnnotations);
+		this.#getAsyncJobSnapshotFn = getAsyncJobSnapshot
+			? asSessionWork(this.#runAsSessionWork, getAsyncJobSnapshot)
+			: () => null;
+		this.#localProtocolOptions =
+			localProtocolOptions && membersAsSessionWork(this.#runAsSessionWork, localProtocolOptions);
 	}
 
 	/**
@@ -826,12 +841,18 @@ export class ExtensionRunner {
 	}
 
 	initialize(
-		actions: ExtensionActions,
-		contextActions: ExtensionContextActions,
-		commandContextActions?: ExtensionCommandContextActions,
+		hostActions: ExtensionActions,
+		hostContextActions: ExtensionContextActions,
+		hostCommandContextActions?: ExtensionCommandContextActions,
 		uiContext?: ExtensionUIContext,
 		mode: ExtensionMode = "print",
 	): void {
+		// The host's actions and UI run as the session's work, whoever calls
+		// them: an extension handler, a tool approval, a command, a timer.
+		const run = this.#runAsSessionWork;
+		const actions = membersAsSessionWork(run, hostActions);
+		const contextActions = membersAsSessionWork(run, hostContextActions);
+		const commandContextActions = hostCommandContextActions && membersAsSessionWork(run, hostCommandContextActions);
 		// Copy actions into the shared runtime (all extension APIs reference this)
 		this.runtime.sendMessage = actions.sendMessage;
 		this.runtime.sendUserMessage = actions.sendUserMessage;
@@ -868,7 +889,7 @@ export class ExtensionRunner {
 		if (contextActions.getPendingPlanReview) this.#getPendingPlanReviewFn = contextActions.getPendingPlanReview;
 		if (contextActions.openPlanReview) this.#openPlanReviewFn = contextActions.openPlanReview;
 		// Assigned unconditionally: a headless rebind must not inherit a previous host's controls.
-		this.#sessionModes = contextActions.sessionModes;
+		this.#sessionModes = contextActions.sessionModes && membersAsSessionWork(run, contextActions.sessionModes);
 		this.#getContextUsageFn = contextActions.getContextUsage;
 		this.#compactFn = contextActions.compact;
 		this.#getSystemPromptFn = contextActions.getSystemPrompt;
@@ -887,10 +908,8 @@ export class ExtensionRunner {
 			this.#compactFn = commandContextActions.compact;
 		}
 
-		this.#uiContext =
-			uiContext && this.#trackUserWait
-				? trackUserWaits(uiContext, this.#trackUserWait)
-				: (uiContext ?? noOpUIContext);
+		const ui = uiContext && membersAsSessionWork(run, uiContext);
+		this.#uiContext = ui && this.#trackUserWait ? trackUserWaits(ui, this.#trackUserWait) : (ui ?? noOpUIContext);
 		this.#mode = mode;
 		this.#initialized = true;
 
@@ -1018,9 +1037,10 @@ export class ExtensionRunner {
 	}
 	/** Registers the interactive transcript gate that must settle before a tool approval is presented. */
 	setToolApprovalPreviewWaiter(waiter: (toolCallId: string) => Promise<void>): () => void {
-		this.#toolApprovalPreviewWaiter = waiter;
+		const kept = asSessionWork(this.#runAsSessionWork, waiter);
+		this.#toolApprovalPreviewWaiter = kept;
 		return () => {
-			if (this.#toolApprovalPreviewWaiter === waiter) this.#toolApprovalPreviewWaiter = undefined;
+			if (this.#toolApprovalPreviewWaiter === kept) this.#toolApprovalPreviewWaiter = undefined;
 		};
 	}
 
@@ -1029,7 +1049,7 @@ export class ExtensionRunner {
 	 * wait for the user.
 	 */
 	setUserWaitTracker(track: UserWaitTracker): void {
-		this.#trackUserWait = track;
+		this.#trackUserWait = asSessionWork(this.#runAsSessionWork, track);
 	}
 
 	/** Waits until the interactive transcript can show the tool call being approved. */
@@ -1197,7 +1217,7 @@ export class ExtensionRunner {
 		const suspended: Extension[] = [];
 		const resumed: Extension[] = [];
 		for (const extension of this.#loadOrder) {
-			const suspend = shouldSuspend(extension);
+			const suspend = this.#runAsSessionWork(() => shouldSuspend(extension));
 			if (suspend === this.#suspendedExtensions.has(extension)) continue;
 			if (suspend) {
 				this.#suspendedExtensions.add(extension);
@@ -1210,7 +1230,11 @@ export class ExtensionRunner {
 		if (suspended.length > 0 || resumed.length > 0) {
 			const active = this.#loadOrder.filter(extension => !this.#suspendedExtensions.has(extension));
 			this.extensions.splice(0, this.extensions.length, ...active);
-			for (const listener of this.#suspensionListeners) listener();
+			if (this.#suspensionListeners.size > 0) {
+				this.#runAsSessionWork(() => {
+					for (const listener of this.#suspensionListeners) listener();
+				});
+			}
 		}
 		return { suspended, resumed };
 	}
@@ -1286,7 +1310,7 @@ export class ExtensionRunner {
 					const scope = this.#toolRegistrationScope.getStore();
 					const registrationSignal =
 						scope && !scope.closed ? scope.signal : AbortSignal.timeout(extensionHandlerTimeoutMs);
-					const pending = listener(tool, registrationSignal);
+					const pending = this.#runAsSessionWork(() => listener(tool, registrationSignal));
 					if (pending) trackRegistration(pending);
 				} catch (error) {
 					trackRegistration(Promise.reject(error));
@@ -1412,9 +1436,12 @@ export class ExtensionRunner {
 	}
 
 	emitError(error: ExtensionError): void {
-		for (const listener of this.#errorListeners) {
-			listener(error);
-		}
+		if (this.#errorListeners.size === 0) return;
+		this.#runAsSessionWork(() => {
+			for (const listener of this.#errorListeners) {
+				listener(error);
+			}
+		});
 	}
 
 	hasHandlers(eventType: string): boolean {
@@ -1513,7 +1540,12 @@ export class ExtensionRunner {
 		const event: LinkActivateEvent = { type: "link_activate", url, scheme };
 		const base = this.createContext();
 		const ctx: ExtensionContext =
-			ui && ui !== this.#uiContext ? Object.create(base, { ui: { value: ui }, hasUI: { value: true } }) : base;
+			ui && ui !== this.#uiContext
+				? Object.create(base, {
+						ui: { value: membersAsSessionWork(this.#runAsSessionWork, ui) },
+						hasUI: { value: true },
+					})
+				: base;
 		for (const handler of handlers) {
 			try {
 				await this.runScoped(() => handler(event, ctx));
@@ -1667,7 +1699,7 @@ export class ExtensionRunner {
 					}
 				: undefined,
 			startLive: this.#startLiveFn,
-			localProtocolOptions: this.localProtocolOptions,
+			localProtocolOptions: this.#localProtocolOptions,
 			memory: this.#getMemoryFn?.(),
 			// A getter, not a value: `createHandlerContext` scopes a handler via `Object.create(ctx)`, and
 			// `this` here is that receiver, so the overlay mounts through the handler's timeout-aware `ui`.

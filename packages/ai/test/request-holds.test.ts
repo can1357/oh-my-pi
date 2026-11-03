@@ -1,10 +1,12 @@
 import { describe, expect, it } from "bun:test";
+import { heapStats } from "bun:jsc";
 import { EventEmitter } from "node:events";
 import {
 	afterRequestHolds,
 	captureRequestHolds,
 	exemptFromRequestHolds,
 	type RequestHoldView,
+	type RequestHoldViews,
 	type RequestHolds,
 	RequestHoldsAlias,
 	type RequestHoldContext,
@@ -464,6 +466,291 @@ describe("what the last check covers", () => {
 		await during.result;
 		expect(during.sent).toBe(true);
 		done.resolve();
+	});
+
+	it("reads a native promise's `then` once, ending the exemption when it cannot be read again", async () => {
+		const holds = new TestHolds();
+		const done = Promise.withResolvers<void>();
+		const started = Promise.withResolvers<SentRequest>();
+		runWithRequestHolds(holds, () =>
+			runOutsideRequestHolds(holds, () => {
+				setImmediate(() => started.resolve(request()));
+				const promise = done.promise;
+				const nativeThen = promise.then.bind(promise);
+				let reads = 0;
+				// A read-once `then` on a native promise: the case under test.
+				// oxlint-disable-next-line unicorn/no-thenable
+				Object.defineProperty(promise, "then", {
+					get() {
+						reads++;
+						if (reads > 1) throw new Error("read twice");
+						return nativeThen;
+					},
+				});
+				return promise;
+			}),
+		);
+		const during = await started.promise;
+		await during.result;
+		// Still exempt while the promise is pending: its `then` was followed once.
+		expect(during.sent).toBe(true);
+		done.resolve();
+	});
+
+	it("fails a wait whose hold fails, with an alias in the context as without", async () => {
+		const failing: RequestHolds = {
+			open: () => ({ check: () => Promise.reject(new Error("hold failed")), release: () => {} }),
+		};
+		const alias = new RequestHoldsAlias();
+		alias.bind(captureRequestHolds());
+		const sent = runWithRequestHolds(failing, () => runWithRequestHolds(alias, () => request()));
+		await expect(sent.result!).rejects.toThrow("hold failed");
+		expect(sent.sent).toBe(false);
+	});
+
+	it("keeps an exemption while a Promise subclass whose `then` adopts pending work is pending", async () => {
+		class Subclass<T> extends Promise<T> {}
+		const holds = new TestHolds();
+		const done = Promise.withResolvers<void>();
+		const started = Promise.withResolvers<SentRequest>();
+		const result = Subclass.resolve<void>(undefined);
+		// Its own `then` resolves with pending work, which `await` would adopt.
+		// oxlint-disable-next-line unicorn/no-thenable
+		Object.defineProperty(result, "then", {
+			value(resolve: (value: unknown) => void) {
+				resolve(done.promise);
+			},
+		});
+		runWithRequestHolds(holds, () =>
+			runOutsideRequestHolds(holds, () => {
+				setImmediate(() => started.resolve(request()));
+				return result;
+			}),
+		);
+		const during = await started.promise;
+		await during.result;
+		expect(during.sent).toBe(true);
+		done.resolve();
+	});
+
+	it("wakes only the current wait: an earlier wait's end, or its carried request's, leaves the next wait alone", async () => {
+		const first = new TestHolds();
+		let failSecond: (error: Error) => void = () => {};
+		const failing = new Promise<void>((_, reject) => {
+			failSecond = reject;
+		});
+		const failingHolds: RequestHolds = {
+			open: () => ({ check: () => failing, release: () => {} }),
+		};
+		const alias = new RequestHoldsAlias();
+		alias.bind(runWithRequestHolds(first, captureRequestHolds));
+		const requestEnded = Promise.withResolvers<void>();
+		let views: RequestHoldViews | undefined;
+		let firstWait: Promise<void> | undefined;
+		const owner = runWithRequestHolds(alias, () =>
+			runWithRequestHoldView(first, first.open(), async () => {
+				views = openRequestHolds();
+				firstWait = views.check();
+				await requestEnded.promise;
+			}),
+		);
+		// The alias moves to holds that fail; the first wait wakes, the next waits on the failing hold.
+		first.armed = false;
+		alias.bind(runWithRequestHolds(failingHolds, captureRequestHolds));
+		await firstWait;
+		const next = views?.check();
+		if (!next) throw new Error("Expected the failing hold to hold");
+		let outcome = "pending";
+		void next.then(
+			() => {
+				outcome = "woken";
+			},
+			(error: Error) => {
+				outcome = error.message;
+			},
+		);
+		// The request that carried the first view ends: the next wait does not depend on it.
+		requestEnded.resolve();
+		await owner;
+		await turns();
+		expect(outcome).toBe("pending");
+		failSecond(new Error("hold failed"));
+		await turns();
+		expect(outcome).toBe("hold failed");
+		views?.release();
+		first.let();
+	});
+
+	it("keeps the next wait's rebind listener when an earlier wait it superseded settles", async () => {
+		const holds = new TestHolds();
+		const alias = new RequestHoldsAlias();
+		alias.bind(runWithRequestHolds(holds, captureRequestHolds));
+		const views = runWithRequestHolds(alias, () => openRequestHolds());
+		const earlier = views.check();
+		alias.bind(runWithRequestHolds(holds, captureRequestHolds));
+		const next = views.check();
+		if (!earlier || !next) throw new Error("Expected both checks to hold");
+		await earlier;
+		await turns();
+		let woken = false;
+		void next.then(() => {
+			woken = true;
+		});
+		// Rebinding must still wake the next wait.
+		alias.bind(runWithRequestHolds(holds, captureRequestHolds));
+		await turns();
+		expect(woken).toBe(true);
+		views.release();
+		holds.let();
+	});
+
+	for (const wrap of ["bound", "wrapped"] as const) {
+		it(`ends an exemption before an awaiter resumes, for a native promise with a ${wrap} \`then\``, async () => {
+			const holds = new TestHolds();
+			const done = Promise.withResolvers<void>();
+			const result = done.promise;
+			const own = Promise.prototype.then;
+			// `await` ignores a native promise's `then` property when its constructor is `Promise`.
+			// oxlint-disable-next-line unicorn/no-thenable
+			Object.defineProperty(result, "then", {
+				value:
+					wrap === "bound"
+						? own.bind(result)
+						: function (this: Promise<void>, ...args: Parameters<Promise<void>["then"]>) {
+								return own.apply(this, args);
+							},
+			});
+			let after: Promise<SentRequest> | undefined;
+			runWithRequestHolds(holds, () =>
+				runOutsideRequestHolds(holds, () => {
+					// An awaiter the exempt step itself leaves behind, registered after the step returned.
+					queueMicrotask(() => {
+						after = (async () => {
+							await result;
+							// Work after the exempt step settled is held again.
+							return request();
+						})();
+					});
+					return result;
+				}),
+			);
+			await turns(1);
+			done.resolve();
+			const sent = await after;
+			await turns();
+			expect(sent?.sent).toBe(false);
+			holds.let();
+			await sent?.result;
+			expect(sent?.sent).toBe(true);
+		});
+	}
+
+	it("keeps no hold promise alive that no wait is on any more", async () => {
+		const holds = new TestHolds();
+		const alias = new RequestHoldsAlias();
+		let produced = 0;
+		const live = new Set<WeakRef<Promise<void>>>();
+		// Each check gets a fresh pending promise the hold itself drops.
+		const fresh: RequestHolds = {
+			open: () => ({
+				check: () => {
+					produced++;
+					const promise = new Promise<void>(() => {});
+					live.add(new WeakRef(promise));
+					return promise;
+				},
+				release: () => {},
+			}),
+		};
+		alias.bind(runWithRequestHolds(fresh, captureRequestHolds));
+		const views = runWithRequestHolds(alias, () => openRequestHolds());
+		for (let i = 0; i < 2000; i++) {
+			const wait = views.check();
+			alias.bind(runWithRequestHolds(fresh, captureRequestHolds));
+			await wait;
+		}
+		for (let i = 0; i < 4; i++) {
+			Bun.gc(true);
+			await turns(1);
+		}
+		const alive = [...live].filter(ref => ref.deref() !== undefined).length;
+		views.release();
+		expect(produced).toBeGreaterThanOrEqual(2000);
+		// The current wait's promise may stay; the superseded ones must not.
+		expect(alive).toBeLessThan(50);
+		holds.let();
+	});
+
+	it("leaves nothing on a carried request's lifetime for waits that are over", async () => {
+		const holds = new TestHolds();
+		const collect = async (): Promise<number> => {
+			for (let i = 0; i < 4; i++) {
+				Bun.gc(true);
+				await turns(1);
+			}
+			return heapStats().objectTypeCounts.Promise ?? 0;
+		};
+		await runWithRequestHolds(holds, () =>
+			runWithRequestHoldView(holds, holds.open(), async () => {
+				const views = openRequestHolds();
+				const before = await collect();
+				for (let i = 0; i < 5000; i++) {
+					holds.armed = true;
+					holds.release = Promise.withResolvers<void>();
+					const wait = views.check();
+					holds.let();
+					await wait;
+				}
+				const after = await collect();
+				views.release();
+				// One reaction per completed wait would leave thousands behind.
+				expect(after - before).toBeLessThan(500);
+			}),
+		);
+	});
+
+	it("removes an aborted wait's rebind listeners, and adds no reaction per rebinding to a pending hold", async () => {
+		const holds = new TestHolds();
+		let registered = 0;
+		class CountingAlias extends RequestHoldsAlias {
+			override onRebind(listener: () => void): () => void {
+				registered++;
+				const remove = super.onRebind(listener);
+				return () => {
+					registered--;
+					remove();
+				};
+			}
+		}
+		const alias = new CountingAlias();
+		const empty = captureRequestHolds();
+		alias.bind(empty);
+		let checks = 0;
+		const counting: RequestHolds = {
+			open: () => {
+				const view = holds.open();
+				return {
+					check: () => {
+						checks++;
+						return view.check();
+					},
+					release: () => view.release(),
+				};
+			},
+		};
+		const controller = new AbortController();
+		const sent = runWithRequestHolds(counting, () => runWithRequestHolds(alias, () => request(controller.signal)));
+		await turns();
+		// Rebinding wakes the wait again and again; the pending hold is the same each time.
+		for (let rebind = 0; rebind < 100; rebind++) {
+			alias.bind(empty);
+			await turns(1);
+		}
+		expect(checks).toBeGreaterThan(100);
+		controller.abort();
+		await expect(sent.result!).rejects.toThrow();
+		expect(registered).toBe(0);
+		holds.let();
 	});
 
 	it("keeps nothing on a long-lived alias for waits that are over", async () => {

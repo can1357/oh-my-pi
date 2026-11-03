@@ -123,18 +123,21 @@ export class RegisteredToolAdapter implements AgentTool<any, any, any> {
 		// wrapper's own context, abort signal, and progress callback are inherited by the delegated
 		// call, so a bare `ctx.invokeTool(params)` keeps the caller's `toolCall`/provider metadata
 		// (write/edit LSP batching, computer safety acknowledgement), stops when the outer call is
-		// aborted, and still streams native progress.
-		return this.registeredTool.definition.execute(
-			toolCallId,
-			params,
-			signal,
-			onUpdate,
-			this.runner.createContext(undefined, {
-				toolName: this.registeredTool.definition.name,
-				context,
+		// aborted, and still streams native progress. The tool runs as the session's work, however
+		// it is called.
+		return this.runner.runScoped(() =>
+			this.registeredTool.definition.execute(
+				toolCallId,
+				params,
 				signal,
 				onUpdate,
-			}),
+				this.runner.createContext(undefined, {
+					toolName: this.registeredTool.definition.name,
+					context,
+					signal,
+					onUpdate,
+				}),
+			),
 		);
 	}
 }
@@ -231,7 +234,22 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		return target.restartForModeChange();
 	}
 
+	/**
+	 * Runs the call as the session's work (see {@link ExtensionRunner.runScoped}), however it
+	 * arrives — the agent loop, a nested `xd://` dispatch, a host executing the tool directly: its
+	 * hooks, the host's preflight and approval prompt, and the tool itself.
+	 */
 	async execute(
+		toolCallId: string,
+		params: Static<TParameters>,
+		signal?: AbortSignal,
+		onUpdate?: AgentToolUpdateCallback<TDetails, TParameters>,
+		context?: AgentToolContext,
+	): Promise<AgentToolResult<TDetails, TParameters>> {
+		return this.runner.runScoped(() => this.#execute(toolCallId, params, signal, onUpdate, context));
+	}
+
+	async #execute(
 		toolCallId: string,
 		params: Static<TParameters>,
 		signal?: AbortSignal,
@@ -498,14 +516,12 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		let executionError: Error | undefined;
 
 		try {
-			// Name the owning session for process-wide file-mutation fallbacks and
-			// expose its settings to registered tools and any fallback handlers they
-			// trigger. `sdk.ts` wraps the whole tool registry with this class whenever
-			// a runner exists.
-			result = await this.runner.runScoped(() =>
-				withFileMutationSession(this.runner.sessionId, () =>
-					this.tool.execute(toolCallId, effectiveParams, signal, onUpdate, context),
-				),
+			// Name the owning session for process-wide file-mutation fallbacks. The call
+			// already runs in the session's settings scope (see `execute`), which exposes
+			// its settings to registered tools and any fallback handlers they trigger.
+			// `sdk.ts` wraps the whole tool registry with this class whenever a runner exists.
+			result = await withFileMutationSession(this.runner.sessionId, () =>
+				this.tool.execute(toolCallId, effectiveParams, signal, onUpdate, context),
 			);
 		} catch (err) {
 			executionError = toError(err);

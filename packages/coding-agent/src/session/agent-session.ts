@@ -489,7 +489,7 @@ import { buildSessionMetadata } from "./session-metadata";
 import { SessionProviderBoundary, type SessionProviderBoundaryHost } from "./session-provider-boundary";
 import { SessionStatsTracker, type SessionStatsTrackerHost } from "./session-stats";
 import { SessionTools, type SessionToolsHost } from "./session-tools";
-import { registerSessionWork } from "./session-work";
+import { asSessionWork, membersAsSessionWork, registerSessionWork, type SessionWorkRun } from "./session-work";
 import {
 	artifactsMissingNotice,
 	noteResumedSessionFork,
@@ -995,23 +995,6 @@ function todoRetryMatches(failed: Record<string, unknown>, retry: Record<string,
 	return true;
 }
 
-/**
- * `config` with each function it carries wrapped to run in `agent`'s request
- * context (see `Agent.runInRequestContext`). The agent and every other value
- * are passed through as they are.
- */
-function callbacksAsWorkOf(agent: Agent, config: AgentSessionConfig): AgentSessionConfig {
-	const wrapped: Record<string, unknown> = { ...config };
-	for (const [key, value] of Object.entries(config)) {
-		if (typeof value !== "function") continue;
-		const callback = value as (...args: unknown[]) => unknown;
-		wrapped[key] = function (this: unknown, ...args: unknown[]) {
-			return agent.runInRequestContext(() => callback.apply(this, args));
-		};
-	}
-	return wrapped as unknown as AgentSessionConfig;
-}
-
 export class AgentSession implements SettingsScope {
 	readonly agent: Agent;
 	readonly sessionManager: SessionManager;
@@ -1022,8 +1005,8 @@ export class AgentSession implements SettingsScope {
 	/** False for a subagent, whose gate belongs to its session tree's root. */
 	readonly #ownsCostGate: boolean;
 	#costCapRefusal: CostCapRefusal | undefined;
-	/** Entries of tools mounted under `xd://`; empty when virtual devices are unmounted. */
-	getXdevToolEntries: () => Array<{ name: string; summary: string }>;
+	/** Entries of tools mounted under `xd://`, behind {@link getXdevToolEntries}. */
+	#getXdevToolEntries: () => Array<{ name: string; summary: string }>;
 	readonly yieldQueue: YieldQueue;
 	editStore?: EditStore;
 
@@ -1527,7 +1510,7 @@ export class AgentSession implements SettingsScope {
 			this.#endComputerTurn();
 		}
 		try {
-			return await dialog();
+			return await this.#runAsHostWork(dialog);
 		} finally {
 			if (--this.#userWaitCount === 0 && this.#promptInFlightCount > 0) {
 				if (!this.#userWaitEndedTurn) this.#beginComputerTurn();
@@ -2118,8 +2101,9 @@ export class AgentSession implements SettingsScope {
 		// Every host callback the session is given runs as the session's work,
 		// whenever and from wherever the session calls it — during construction,
 		// a prompt rebuild, a later rediscovery: a model request it starts waits
-		// for the session's holds.
-		const config = callbacksAsWorkOf(sessionConfig.agent, sessionConfig);
+		// for the session's holds. Every member the host's config exposes reads
+		// through, inherited and non-enumerable ones included.
+		const config = membersAsSessionWork(this.#runAsHostWork, sessionConfig);
 		this.agent = config.agent;
 		this.tokenRate = new TokenRateMeter(text => this.agent.tokenizer.countTokens(text));
 		this.#reseedTokenRate();
@@ -2128,6 +2112,27 @@ export class AgentSession implements SettingsScope {
 				isHiddenUserCompanion(previous) && (isHiddenUserCompanion(next) || isUserQueuedMessage(next)),
 		);
 		this.sessionManager = config.sessionManager;
+		// Every extension callback, and every host callback the runner or the
+		// manager keeps, is the session's work, whichever path calls it — so
+		// both are claimed before the session's first write. A runner answers to
+		// one live session: a second live session would put the first one's
+		// extension work outside the first one's holds. A manager two live
+		// sessions share stays with the first; the second does not take it over.
+		const runner = config.extensionRunner;
+		if (runner) {
+			const owner = runner.requestContextOwner;
+			if (owner && owner !== this && !owner.isDisposed) {
+				throw new Error("This extension runner already belongs to another live session");
+			}
+			runner.requestContextOwner = this;
+			runner.runInRequestContext = fn => this.#inLogContext(fn);
+		}
+		const managerOwner = this.sessionManager.requestContextOwner;
+		if (!managerOwner || managerOwner === this || managerOwner.isDisposed) {
+			this.sessionManager.requestContextOwner = this;
+			this.sessionManager.runInRequestContext = this.#runAsHostWork;
+		}
+		registerSessionWork(this, fn => this.#inLogContext(fn));
 		this.settings = config.settings;
 		this.#ownsCostGate = config.costGate === undefined;
 		this.#costGate = config.costGate ?? this.#createCostGate();
@@ -2306,18 +2311,6 @@ export class AgentSession implements SettingsScope {
 		this.#promptTemplates = config.promptTemplates ?? [];
 		this.#slashCommands = config.slashCommands ?? [];
 		this.#extensionRunner = config.extensionRunner;
-		// Every extension callback is the session's work, whichever path emits
-		// it. A runner answers to one live session: a second live session would
-		// put the first one's extension work outside the first one's holds.
-		if (this.#extensionRunner) {
-			const owner = this.#extensionRunner.requestContextOwner;
-			if (owner && owner !== this && !owner.isDisposed) {
-				throw new Error("This extension runner already belongs to another live session");
-			}
-			this.#extensionRunner.requestContextOwner = this;
-			this.#extensionRunner.runInRequestContext = fn => this.#inLogContext(fn);
-		}
-		registerSessionWork(this, fn => this.#inLogContext(fn));
 		// A move-off changes this session's id without anyone asking. Until it was
 		// announced, the only trace an extension could see was the id differing
 		// from the one it last read, with nothing to say the predecessor is still
@@ -2579,6 +2572,8 @@ export class AgentSession implements SettingsScope {
 			// A transition swaps the transcript under the agent: hold idle deliveries until it
 			// settles, so a result from the outgoing session cannot start a turn in the target.
 			isStreaming: () => this.isStreaming || this.isSessionTransitioning,
+			// A host registers dispatchers too (`session.yieldQueue.register`).
+			runDispatcher: this.#runAsHostWork,
 			injectIdle: async messages => {
 				const first = messages[0];
 				if (!first) return;
@@ -2685,7 +2680,7 @@ export class AgentSession implements SettingsScope {
 			return thunks;
 		});
 		this.#convertToLlm = config.convertToLlm ?? convertToLlm;
-		this.getXdevToolEntries = config.getXdevToolEntries ?? (() => []);
+		this.#getXdevToolEntries = config.getXdevToolEntries ?? (() => []);
 		const sessionToolsHost: SessionToolsHost = {
 			agent: this.agent,
 			sessionManager: this.sessionManager,
@@ -3207,7 +3202,7 @@ export class AgentSession implements SettingsScope {
 	 */
 	enableIdleMaintenance(options: IdleMaintenanceOptions = {}): void {
 		if (this.#isDisposed || this.#idleMaintenance) return;
-		const maintenance = new IdleMaintenance(this, options);
+		const maintenance = new IdleMaintenance(this, membersAsSessionWork(this.#runAsHostWork, options));
 		this.#idleMaintenance = maintenance;
 		this.addDisposer(() => maintenance.dispose());
 	}
@@ -3497,13 +3492,13 @@ export class AgentSession implements SettingsScope {
 	#sessionBeforeSwitchReconciler: (() => Promise<void>) | undefined;
 
 	setSessionBeforeSwitchReconciler(reconciler: (() => Promise<void>) | null): void {
-		this.#sessionBeforeSwitchReconciler = reconciler ?? undefined;
+		this.#sessionBeforeSwitchReconciler = reconciler ? this.#asWork(reconciler) : undefined;
 	}
 
 	#sessionSwitchReconciler: (() => Promise<void>) | undefined;
 
 	setSessionSwitchReconciler(reconciler: (() => Promise<void>) | null): void {
-		this.#sessionSwitchReconciler = reconciler ?? undefined;
+		this.#sessionSwitchReconciler = reconciler ? this.#asWork(reconciler) : undefined;
 	}
 
 	/**
@@ -3873,6 +3868,29 @@ export class AgentSession implements SettingsScope {
 		return this.agent.logContext ? logger.withContext(this.agent.logContext, inContext) : inContext();
 	}
 
+	/**
+	 * How a host function the session, its manager or its yield queue keeps runs: in the agent's
+	 * request context (`Agent.runInRequestContext`), where every model request it starts waits for
+	 * the session's holds, whoever triggers the call. Already in that context (the agent's own
+	 * turn), it adds no async-context frame, which keeps per-event listener fan-out cheap.
+	 */
+	readonly #runAsHostWork: SessionWorkRun = work => this.agent.runInRequestContext(work);
+
+	/** `fn` as this session's work whenever it is called (see `asSessionWork`): for a host function the session keeps. */
+	#asWork<F extends (...args: never[]) => unknown>(fn: F): F {
+		return asSessionWork(this.#runAsHostWork, fn);
+	}
+
+	/** Entries of tools mounted under `xd://`; empty when virtual devices are unmounted. */
+	get getXdevToolEntries(): () => Array<{ name: string; summary: string }> {
+		return this.#getXdevToolEntries;
+	}
+
+	/** A host's replacement runs as this session's work. */
+	set getXdevToolEntries(entries: () => Array<{ name: string; summary: string }>) {
+		this.#getXdevToolEntries = this.#asWork(entries);
+	}
+
 	async #admitSubmission<T>(work: () => Promise<T>): Promise<T> {
 		this.#admittedSubmissionCount++;
 		try {
@@ -4024,42 +4042,49 @@ export class AgentSession implements SettingsScope {
 	// Event Subscription
 	// =========================================================================
 
-	/** Emit an event to all listeners */
+	/** Emit an event to all listeners, as this session's work: a model request one starts waits for its holds. */
 	#emit(event: AgentSessionEvent): void {
 		// Listener array is copy-on-write (see `subscribe`), so iterating the
-		// current array is safe against (un)subscribes made by a listener.
-		for (const l of this.#eventListeners) {
-			try {
-				const result = l(event) as unknown;
-				// Listener may be an async function whose returned Promise we don't await;
-				// attach a catch so a rejection does not become an unhandled rejection.
-				if (isPromise(result)) {
-					result.catch(err => {
-						logger.warn("AgentSession listener rejected", {
-							error: err instanceof Error ? err.message : String(err),
+		// array read here is safe against (un)subscribes made by a listener.
+		const listeners = this.#eventListeners;
+		if (listeners.length === 0) return;
+		this.#runAsHostWork(() => {
+			for (const l of listeners) {
+				try {
+					const result = l(event) as unknown;
+					// Listener may be an async function whose returned Promise we don't await;
+					// attach a catch so a rejection does not become an unhandled rejection.
+					if (isPromise(result)) {
+						result.catch(err => {
+							logger.warn("AgentSession listener rejected", {
+								error: err instanceof Error ? err.message : String(err),
+							});
 						});
+					}
+				} catch (err) {
+					logger.warn("AgentSession listener threw", {
+						error: err instanceof Error ? err.message : String(err),
 					});
 				}
-			} catch (err) {
-				logger.warn("AgentSession listener threw", {
-					error: err instanceof Error ? err.message : String(err),
-				});
 			}
-		}
+		});
 	}
 
 	#emitRunState(state: "running" | "idle"): void {
 		if (state === "idle") this.#runStartedAt = undefined;
 		else this.#runStartedAt ??= Date.now();
-		for (const listener of this.#runStateListeners) {
-			try {
-				listener(state);
-			} catch (error) {
-				logger.warn("AgentSession run-state listener threw", {
-					error: error instanceof Error ? error.message : String(error),
-				});
+		if (this.#runStateListeners.size === 0) return;
+		this.#runAsHostWork(() => {
+			for (const listener of this.#runStateListeners) {
+				try {
+					listener(state);
+				} catch (error) {
+					logger.warn("AgentSession run-state listener threw", {
+						error: error instanceof Error ? error.message : String(error),
+					});
+				}
 			}
-		}
+		});
 	}
 
 	/**
@@ -6224,6 +6249,7 @@ export class AgentSession implements SettingsScope {
 	 * Subscribe to agent events.
 	 * Session persistence is handled internally (saves messages on message_end).
 	 * Multiple listeners can be added. Returns unsubscribe function for this listener.
+	 * Listeners run as this session's work (see {@link runInRequestContext}), whoever emits the event.
 	 */
 	subscribe(listener: AgentSessionEventListener): () => void {
 		// Copy-on-write: `#emit` iterates the array it read without copying it.
@@ -6401,13 +6427,16 @@ export class AgentSession implements SettingsScope {
 
 	#notifyCommandMetadataChanged(): void {
 		const listeners = [...this.#commandMetadataChangedListeners];
-		for (const listener of listeners) {
-			try {
-				void listener();
-			} catch (err) {
-				logger.error("Command metadata listener threw", { err });
+		if (listeners.length === 0) return;
+		this.#runAsHostWork(() => {
+			for (const listener of listeners) {
+				try {
+					void listener();
+				} catch (err) {
+					logger.error("Command metadata listener threw", { err });
+				}
 			}
-		}
+		});
 	}
 
 	/**
@@ -6503,13 +6532,17 @@ export class AgentSession implements SettingsScope {
 	}
 
 	#notifySessionChangeCallbacks(): void {
-		for (const callback of Array.from(this.#sessionChangeCallbacks)) {
-			try {
-				callback();
-			} catch (error) {
-				logger.warn("Session change callback failed", { error: String(error) });
+		const callbacks = Array.from(this.#sessionChangeCallbacks);
+		if (callbacks.length === 0) return;
+		this.#runAsHostWork(() => {
+			for (const callback of callbacks) {
+				try {
+					callback();
+				} catch (error) {
+					logger.warn("Session change callback failed", { error: String(error) });
+				}
 			}
-		}
+		});
 	}
 
 	/** Run one abortable auto-learn capture outside the primary agent loop. */
@@ -7487,7 +7520,7 @@ export class AgentSession implements SettingsScope {
 
 	/** Runs a registry/presentation mutation in this session's shared queue. */
 	runToolRegistryMutation<T>(mutation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
-		return this.#tools.runToolRegistryMutation(mutation, signal);
+		return this.#tools.runToolRegistryMutation(this.#asWork(mutation), signal);
 	}
 
 	/** Names of every registered tool. */
@@ -7646,7 +7679,7 @@ export class AgentSession implements SettingsScope {
 
 	/** Rebuilds the stable base prompt, optionally discarding a stale asynchronous rebuild. */
 	refreshBaseSystemPrompt(commitIf?: () => boolean): Promise<void> {
-		return this.#tools.refreshBaseSystemPrompt(commitIf);
+		return this.#tools.refreshBaseSystemPrompt(commitIf && this.#asWork(commitIf));
 	}
 
 	/** Replaces connected MCP tools and enables them immediately. */
@@ -7661,7 +7694,7 @@ export class AgentSession implements SettingsScope {
 	 * {@link refreshMCPTools} triggers when the instructions changed.
 	 */
 	setMcpServerInstructionsSource(source: (() => Map<string, string> | undefined) | undefined): void {
-		this.#setMcpServerInstructionsSource?.(source);
+		this.#setMcpServerInstructionsSource?.(source && this.#asWork(source));
 	}
 
 	/** Makes turns wait, bounded, for in-flight MCP discovery before building their system prompt. */
@@ -8074,7 +8107,7 @@ export class AgentSession implements SettingsScope {
 	}
 
 	setClientBridge(bridge: ClientBridge | undefined): void {
-		this.#clientBridge = bridge;
+		this.#clientBridge = bridge && membersAsSessionWork(this.#runAsHostWork, bridge);
 		this.#tools.refreshAcpPermissionGates();
 	}
 
@@ -9671,7 +9704,7 @@ export class AgentSession implements SettingsScope {
 			timestamp: submittedAt,
 			attribution: options?.attribution,
 			rawText: text,
-			onPromptQueued: options?.onPromptQueued,
+			onPromptQueued: options?.onPromptQueued && this.#asWork(options.onPromptQueued),
 		});
 	}
 
@@ -9692,12 +9725,13 @@ export class AgentSession implements SettingsScope {
 		// Stamp before image preprocessing so a queued image follow-up measures
 		// from the operator's submission, not after the vision-model description.
 		const submittedAt = Date.now();
+		const onPromptQueued = options?.onPromptQueued && this.#asWork(options.onPromptQueued);
 		if (!options?.synthetic) {
 			await this.#queueUserMessage(expandedText, images, "followUp", {
 				timestamp: submittedAt,
 				attribution: options?.attribution,
 				rawText: text,
-				onPromptQueued: options?.onPromptQueued,
+				onPromptQueued,
 			});
 			return;
 		}
@@ -9726,7 +9760,7 @@ export class AgentSession implements SettingsScope {
 			synthetic: true,
 		};
 		this.agent.followUp(directive);
-		options.onPromptQueued?.(imageDescriptionNotice ? [imageDescriptionNotice, directive] : [directive]);
+		onPromptQueued?.(imageDescriptionNotice ? [imageDescriptionNotice, directive] : [directive]);
 		this.#scheduleIdleQueueDrain();
 	}
 
@@ -9836,7 +9870,7 @@ export class AgentSession implements SettingsScope {
 	async runModeExitTeardown(teardown: () => Promise<void>): Promise<void> {
 		this.#modeExitDrainSuppressionDepth++;
 		try {
-			await teardown();
+			await this.#runAsHostWork(teardown);
 		} finally {
 			this.#modeExitDrainSuppressionDepth--;
 			if (this.#modeExitDrainSuppressionDepth === 0) {
@@ -11640,7 +11674,7 @@ export class AgentSession implements SettingsScope {
 	 *  prompt never reached the agent or the session file, so without this hook
 	 *  it would vanish; interactive mode restores it to the editor for editing. */
 	setPromptDropped(handler: ((prompt: DroppedPrompt) => void) | undefined): void {
-		this.#promptDropped = handler;
+		this.#promptDropped = handler && this.#asWork(handler);
 	}
 
 	/**
@@ -12958,7 +12992,8 @@ export class AgentSession implements SettingsScope {
 	// =========================================================================
 
 	/**
-	 * Execute a bash command and retain the session/branch that owned its start.
+	 * Execute a bash command and retain the session/branch that owned its start. It runs as this
+	 * session's work, `onChunk` and the `user_bash` hooks included, whoever calls it.
 	 * @param command The bash command to execute
 	 * @param onChunk Optional streaming callback for output
 	 * @param options.excludeFromContext If true, command output won't be sent to LLM (!! prefix)
@@ -12969,7 +13004,7 @@ export class AgentSession implements SettingsScope {
 		onChunk?: (chunk: string) => void,
 		options?: { excludeFromContext?: boolean; useUserShell?: boolean; pty?: BashPtyOptions },
 	): Promise<BashResult> {
-		return this.#bash.executeBash(command, onChunk, options);
+		return this.#inLogContext(() => this.#bash.executeBash(command, onChunk, options));
 	}
 
 	/** Record a bash result supplied outside executeBash in the current ownership scope. */
@@ -12998,7 +13033,8 @@ export class AgentSession implements SettingsScope {
 
 	/**
 	 * Execute Python code in the shared kernel.
-	 * Uses the same kernel session as eval's Python backend, allowing collaborative editing.
+	 * Uses the same kernel session as eval's Python backend, allowing collaborative editing. It runs
+	 * as this session's work, `onChunk` and the tools the cell calls included, whoever calls it.
 	 * @param code The Python code to execute
 	 * @param onChunk Optional streaming callback for output
 	 * @param options.excludeFromContext If true, execution won't be sent to LLM ($$ prefix)
@@ -13008,7 +13044,7 @@ export class AgentSession implements SettingsScope {
 		onChunk?: (chunk: string) => void,
 		options?: { excludeFromContext?: boolean },
 	): Promise<PythonResult> {
-		return this.#eval.executePython(code, onChunk, options);
+		return this.#inLogContext(() => this.#eval.executePython(code, onChunk, options));
 	}
 
 	assertEvalExecutionAllowed(): void {
@@ -13092,7 +13128,12 @@ export class AgentSession implements SettingsScope {
 	setIrcWakeTurnObserver(
 		observer: ((records: AgentMessage[]) => ((error?: unknown) => void | Promise<void>) | undefined) | undefined,
 	): void {
-		this.#ircWakeTurnObserver = observer;
+		this.#ircWakeTurnObserver = observer
+			? records => {
+					const finish = this.#runAsHostWork(() => observer(records));
+					return finish && this.#asWork(finish);
+				}
+			: undefined;
 	}
 
 	/**
@@ -13497,6 +13538,8 @@ export class AgentSession implements SettingsScope {
 		},
 	): Promise<boolean> {
 		const explicitModel = options?.model;
+		const onCwdChange = options?.onCwdChange && this.#asWork(options.onCwdChange);
+		const onModelFallback = options?.onModelFallback && this.#asWork(options.onModelFallback);
 		if (explicitModel && !this.#modelRegistry.hasConfiguredAuth(explicitModel)) {
 			throw new Error(`No API key for ${explicitModel.provider}/${explicitModel.id}`);
 		}
@@ -13617,13 +13660,13 @@ export class AgentSession implements SettingsScope {
 			if (options?.preserveLocalCwd) {
 				this.sessionManager.setCwdWithoutRelocation(previousSessionState.cwd);
 			} else {
-				if (!options?.onCwdChange && path.resolve(recordedCwd) !== path.resolve(previousSessionState.cwd)) {
+				if (!onCwdChange && path.resolve(recordedCwd) !== path.resolve(previousSessionState.cwd)) {
 					throw SESSION_CWD_CHANGE_REJECTED;
 				}
-				if (options?.onCwdChange) {
+				if (onCwdChange) {
 					if (path.resolve(newCwd) !== path.resolve(previousSessionState.cwd)) {
 						cwdChangeTarget = newCwd;
-						if (!(await options.onCwdChange(newCwd, previousSessionState.cwd))) {
+						if (!(await onCwdChange(newCwd, previousSessionState.cwd))) {
 							throw SESSION_CWD_CHANGE_REJECTED;
 						}
 					} else if (path.resolve(recordedCwd) !== path.resolve(previousSessionState.cwd)) {
@@ -13815,7 +13858,7 @@ export class AgentSession implements SettingsScope {
 			generationSettled.resolve();
 			this.#sessionGenerationSettled = previousSessionGenerationSettled;
 			if (modelFallbackWarning) {
-				if (options?.onModelFallback) options.onModelFallback(modelFallbackWarning);
+				if (onModelFallback) onModelFallback(modelFallbackWarning);
 				else this.emitNotice("warning", modelFallbackWarning);
 			}
 			// Last, because everything above can still throw into the rollback
@@ -13889,10 +13932,10 @@ export class AgentSession implements SettingsScope {
 					error: String(reconcileError),
 				});
 			}
-			if (cwdChangeTarget && error !== SESSION_CWD_CHANGE_REJECTED && options?.onCwdChange) {
+			if (cwdChangeTarget && error !== SESSION_CWD_CHANGE_REJECTED && onCwdChange) {
 				let rollbackFailure: string | undefined;
 				try {
-					if (!(await options.onCwdChange(previousSessionState.cwd, cwdChangeTarget))) {
+					if (!(await onCwdChange(previousSessionState.cwd, cwdChangeTarget))) {
 						rollbackFailure = "cwd rollback was rejected";
 					}
 				} catch (rollbackError) {
@@ -14605,7 +14648,7 @@ export class AgentSession implements SettingsScope {
 				this.agent.abort();
 			},
 			settings: this.settings,
-			ui: uiContext,
+			ui: membersAsSessionWork(this.#runAsHostWork, uiContext),
 			hasUI: true,
 		};
 	}
