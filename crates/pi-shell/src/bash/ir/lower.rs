@@ -1151,8 +1151,8 @@ impl Lower {
 			},
 			syn::WordPart::Arith(a) => out.push(Part::Arith { text: a.src.as_slice().into(), quoted }),
 			syn::WordPart::ProcSub(p) => {
-				let entry = self.block(&p.body)?;
-				out.push(Part::ProcSub { entry, output: p.output });
+				let text = self.str(&p.text);
+				out.push(Part::ProcSub { output: p.output, text });
 			},
 			syn::WordPart::Compound(elems) => out.push(Part::Compound(self.elems(elems)?)),
 			syn::WordPart::BadSubst(text) => out.push(Part::BadSubst(text.as_slice().into())),

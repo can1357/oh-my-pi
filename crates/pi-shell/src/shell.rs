@@ -32,7 +32,9 @@ use crate::{
 	git::is_git_repo_location_var,
 	minimizer,
 	output_decode::CaptureDecoder,
-	session::{Children, RunOptions, RunOutcome, RunStdio, Session, SessionConfig, SessionError},
+	session::{
+		Children, LinePart, RunOptions, RunOutcome, RunStdio, Session, SessionConfig, SessionError,
+	},
 	taps::PipeTaps,
 	vfs::VfsFs,
 };
@@ -976,6 +978,7 @@ impl CommandScope<'_> {
 				.map(|taps| Arc::clone(taps) as Arc<dyn crate::bash::PipeTap>),
 			reported_error,
 			text_capture: false,
+			line: LinePart::Whole,
 		}
 	}
 }
@@ -1115,9 +1118,16 @@ async fn run_shell_command_single(
 		minimizer::engine::MinimizerMode::SegmentedChain => CommandCaptureMode::Streaming,
 	};
 
-	let command_run =
-		run_shell_command_once(session, scope, options.command.clone(), cwd, on_chunk, capture_mode)
-			.await?;
+	let command_run = run_shell_command_once(
+		session,
+		scope,
+		options.command.clone(),
+		cwd,
+		on_chunk,
+		capture_mode,
+		LinePart::Whole,
+	)
+	.await?;
 	let status = command_run.outcome.status;
 
 	let mut minimized_out = None;
@@ -1219,10 +1229,24 @@ async fn run_shell_command_segmented_chain(
 		};
 
 		// Only the first segment moves the shell; later ones start wherever
-		// the earlier ones left it.
-		let command_run =
-			run_shell_command_once(session, scope, source, cwd.take(), on_chunk.clone(), capture_mode)
-				.await?;
+		// the earlier ones left it. The shell reads a whole input line before
+		// it runs any of it, so each segment is read with the aliases its
+		// line began with.
+		let line = if segment.starts_line {
+			LinePart::First
+		} else {
+			LinePart::Rest
+		};
+		let command_run = run_shell_command_once(
+			session,
+			scope,
+			source,
+			cwd.take(),
+			on_chunk.clone(),
+			capture_mode,
+			line,
+		)
+		.await?;
 
 		let exit = command_run.outcome.status;
 		previous_succeeded = exit == 0;
@@ -1295,7 +1319,8 @@ async fn run_shell_command_segmented_chain(
 }
 
 /// Run `command` once on the session, its stdout and stderr merged into one
-/// pipe that is decoded into `on_chunk`.
+/// pipe that is decoded into `on_chunk`; `line` says which part of an input
+/// line it is.
 async fn run_shell_command_once(
 	session: &mut ShellSessionCore,
 	scope: &CommandScope<'_>,
@@ -1303,6 +1328,7 @@ async fn run_shell_command_once(
 	cwd: Option<BString>,
 	on_chunk: Option<Sender<String>>,
 	capture_mode: CommandCaptureMode,
+	line: LinePart,
 ) -> Result<CommandRunOutput> {
 	let cancel_token = scope.cancel.clone();
 	let (reader_file, writer_file) = pipe_to_files("output")?;
@@ -1358,6 +1384,7 @@ async fn run_shell_command_once(
 	// Stdout and stderr are one pipe read as text: externals' output is
 	// decoded per program before it joins what the builtins wrote.
 	run.text_capture = true;
+	run.line = line;
 	let mut result = session
 		.session
 		.run_with(run, stdio, cancel_token.clone())

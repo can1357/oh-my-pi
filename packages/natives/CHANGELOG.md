@@ -4,9 +4,9 @@
 
 ### Fixed
 
-- Fixed the bash tool's shell expanding aliases while `expand_aliases` is off, and on the same line that defines or enables them; as in Bash, an alias now takes effect from the next line, and aliases from your shell snapshot still expand ([#17825](https://github.com/can1357/oh-my-pi/pull/17825) by [@sjawhar](https://github.com/sjawhar))
-- Fixed the bash tool's shell crashing on an alias whose value is empty ([#17825](https://github.com/can1357/oh-my-pi/pull/17825) by [@sjawhar](https://github.com/sjawhar))
-- Fixed the bash tool's shell rejecting an empty process substitution (`<()`), and `declare -f` printing a process substitution so that the printed function did not read back the same ([#17825](https://github.com/can1357/oh-my-pi/pull/17825) by [@sjawhar](https://github.com/sjawhar))
+- Fixed the bash tool's shell reading the aliases in a process substitution (`<(…)`, `>(…)`) when the command was read rather than when the substitution runs; as in Bash, its text is read again a command at a time when it runs, so an alias defined on one of its lines applies to the next ([#17825](https://github.com/can1357/oh-my-pi/pull/17825) by [@sjawhar](https://github.com/sjawhar))
+- Fixed the output minimizer letting a command on a `;` or `&&` line change the aliases and parser options of the commands after it on that line; as in Bash, the whole line is read with the aliases it began with ([#17825](https://github.com/can1357/oh-my-pi/pull/17825) by [@sjawhar](https://github.com/sjawhar))
+- Fixed an alias ending in a blank letting the next word expand as an alias when the alias that expanded to it ends in no blank (`alias a=b b='echo '`, then `a w`); as in Bash, the outermost alias decides ([#17825](https://github.com/can1357/oh-my-pi/pull/17825) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.16.0] - 2026-11-02
 

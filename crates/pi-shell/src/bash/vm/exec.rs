@@ -17,7 +17,7 @@ use super::{
 	proc::{
 		AssignValue, Atom, Bang, BangStage, Coproc, Depths, Frame, FrameKind, InlineStage, LastBg,
 		LoopKind, LoopRec, ParseSnapshot, PendingSub, PendingWrite, Probe, ProbeResult, Run, Saved,
-		Scratch, ScriptKind, Slot, TryEnd, Vproc,
+		Scratch, ScriptAux, ScriptKind, Slot, TryEnd, Vproc,
 	},
 	redir,
 	state::{self, Level, Root, Scope, Var, VarMap},
@@ -605,9 +605,13 @@ fn run_boundary(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> bool {
 		k.root.set_misc(cx.store, MiscKey::RunOrigin, flag);
 	}
 	let from_stdin = matches!(run.chain.links[0].origin, Origin::Stdin);
+	let read_as = run.read_as.take();
 	let mut kind = FrameKind::script(&run.src, Pos::START, ScriptKind::Run);
-	if let FrameKind::Script { stdin, .. } = &mut kind {
+	if let FrameKind::Script { stdin, aux, .. } = &mut kind {
 		*stdin = from_stdin;
+		if let Some(parse) = read_as {
+			*aux = Some(Box::new(ScriptAux { pending: None, parse: Some(parse) }));
+		}
 	}
 	vp.frames.push(Frame::new(None, 0, kind));
 	// zsh `parseargs`: commands read from standard input set `shinstdin`.
@@ -730,6 +734,18 @@ fn features(
 	Ok(f)
 }
 
+/// The parser state `vp` reads its next command with: the features its
+/// options select and the aliases in effect.
+pub fn read_state(
+	k: &mut Kernel,
+	cx: &mut Cx<'_>,
+	vp: &Vproc,
+) -> Result<ParseSnapshot, StoreError> {
+	let features = features(k, cx.store, vp)?;
+	let aliases = builtins::alias_table(k, cx, vp)?;
+	Ok(ParseSnapshot { features: features.bits(), aliases })
+}
+
 /// Parse and compile the next command of the top script frame; pop the
 /// frame at end of input. A script read from stdin first reads lines until
 /// the command is complete; `Some` is the wait key while fd 0 has none.
@@ -737,8 +753,10 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 	// zsh `parse_string`: a string (`eval`, a trap, `-c`) parses whole
 	// before it runs; its first command takes the snapshot the rest reuse.
 	let (snapped, snapshot) = match vp.frames.last().map(|f| &f.kind) {
-		_ if vp.mode.dialect() != Dialect::Zsh => (false, false),
+		// A zsh string's later commands, or a root script read with an
+		// earlier one's state (`Script::read_as`).
 		Some(FrameKind::Script { aux: Some(a), .. }) if a.parse.is_some() => (true, false),
+		_ if vp.mode.dialect() != Dialect::Zsh => (false, false),
 		Some(FrameKind::Script { pos, what, stdin: false, .. }) if pos.0 == 0 => {
 			let string = match what {
 				ScriptKind::Eval | ScriptKind::Trap { .. } => true,
@@ -755,15 +773,8 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 	let (feat, mut aliases) = if snapped {
 		(Features::NONE, None)
 	} else {
-		let feat = match features(k, cx.store, vp) {
-			Ok(f) => f,
-			Err(err) => {
-				k.fail(err);
-				return None;
-			},
-		};
-		match builtins::alias_table(k, cx, vp) {
-			Ok(a) => (feat, a),
+		match read_state(k, cx, vp) {
+			Ok(s) => (Features::from_bits(s.features), s.aliases),
 			Err(err) => {
 				k.fail(err);
 				return None;
@@ -1856,19 +1867,26 @@ fn top_level_end_line(vp: &Vproc) -> Option<u32> {
 	Some((unit.line + end_line(unit, op.node)).saturating_sub(f.line_shift))
 }
 
-/// Start the process substitution `<(…)` (`output`: `>(…)`) whose body is
-/// at `entry` of `unit`: a child vproc joined to this one by an in-memory
-/// pipe on the highest free fd below 64 (bash's `move_to_high_fd`). Returns
-/// the word it expands to, `/dev/fd/N`: builtins and redirections reach
-/// the pipe through the engine's fd table, externals inherit fd N. The fd
-/// closes when the current op's command is over ([`close_procsubs`]).
+/// Start the process substitution `<(…)` (`output`: `>(…)`) whose body's
+/// text is `strs` entry `text` of `unit`: a child vproc joined to this one
+/// by an in-memory pipe on the highest free fd below 64 (bash's
+/// `move_to_high_fd`). Returns the word it expands to, `/dev/fd/N`:
+/// builtins and redirections reach the pipe through the engine's fd table,
+/// externals inherit fd N. The fd closes when the current op's command is
+/// over ([`close_procsubs`]).
+///
+/// The child parses the text as bash's `process_substitute` does: a
+/// command at a time, with the aliases and options in effect as each is
+/// read, numbering its lines from `line`, the line of the command running
+/// it.
 pub fn start_procsub(
 	k: &mut Kernel,
 	vp: &mut Vproc,
 	cx: &mut Cx<'_>,
 	unit: &Arc<Unit>,
-	entry: u32,
 	output: bool,
+	text: u32,
+	line: u32,
 ) -> BString {
 	let (r, w) = mem::pipe();
 	let r = FdRef::mem(r);
@@ -1890,7 +1908,12 @@ pub fn start_procsub(
 			fds.set(sibling, None);
 		}
 	}
-	let child = vp.child(k, cx.store, Arc::clone(unit), entry, fds);
+	// Compiled units hold the text; restore checks the index (`frames::valid`).
+	let src = unit
+		.strs
+		.get(text as usize)
+		.map_or(&[][..], |s| s.as_slice());
+	let child = vp.child_text(k, cx.store, src, line, fds);
 	let vpid = child.vpid;
 	k.emit_op(cx, vp, 0, EventData::Subshell { child: vpid });
 	k.spawned.push(Box::new(child));

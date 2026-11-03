@@ -776,4 +776,7 @@ pub struct ProcSub {
 	pub output: bool,
 	/// Commands inside.
 	pub body:   List,
+	/// The text bash stores between the delimiters (re-printed from
+	/// `body`, as for `$(…)`) and reads again when the substitution runs.
+	pub text:   Vec<u8>,
 }

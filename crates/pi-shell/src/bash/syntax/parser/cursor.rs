@@ -74,8 +74,14 @@ impl<'s> Parser<'s> {
 			};
 			self.buf = frame.buf;
 			self.pos = frame.pos;
-			if frame.expand_next {
-				self.lx.alexpnext = true;
+			// bash `pop_string`: the end of an alias's text sets or clears the
+			// check of the next word by whether its value ends in a blank, so
+			// when expansions end together the outermost decides. Going on
+			// from the value to the space after it (`END_ALIAS_SPACE`) stays
+			// inside that text.
+			if !frame.alias.is_empty() && !core::ptr::eq(frame.buf.as_ptr(), END_ALIAS_SPACE.as_ptr())
+			{
+				self.lx.alexpnext = frame.expand_next;
 			}
 		}
 	}

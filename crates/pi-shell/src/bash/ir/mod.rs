@@ -77,7 +77,7 @@ use crate::bash::{
 };
 
 /// IR version; part of the frames header.
-pub const IR_VERSION: u32 = 13;
+pub const IR_VERSION: u32 = 14;
 
 /// Opcodes.
 #[derive(
@@ -493,12 +493,13 @@ pub enum Part {
 		/// Inside double quotes.
 		quoted: bool,
 	},
-	/// `<(…)` / `>(…)`.
+	/// `<(…)` / `>(…)`: bash parses the body's text again, a command at a
+	/// time, when the substitution runs.
 	ProcSub {
-		/// Entry pc of the body.
-		entry:  u32,
 		/// `>(…)`.
 		output: bool,
+		/// `strs` index of the body's text.
+		text:   u32,
 	},
 	/// `(…)` of a declaration-builtin argument (`declare -a a=(1 2)`).
 	Compound(Vec<ElemIr>),

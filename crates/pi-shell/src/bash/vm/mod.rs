@@ -44,7 +44,7 @@ pub use self::{
 	control::{ControlHandle, IoPoll, WakeToken},
 	frames::FRAMES_VERSION,
 	pattern::Cache as PatternCache,
-	proc::{Run, Vproc, vproc_layout},
+	proc::{ParseSnapshot, Run, Vproc, vproc_layout},
 	text::TextKind,
 	zsh::zpattern::Cache as ZshPatternCache,
 };
@@ -179,6 +179,12 @@ pub struct Script {
 	/// Shell variable names whose inherited bindings must not be exported in
 	/// the new subshell, including bindings hidden by local scopes.
 	pub unexport_env: Vec<BString>,
+	/// Parse every command of the script with this state rather than with
+	/// the shell's when each is read ([`Shell::read_state`]): bash reads a
+	/// whole input line before it runs any of it, so a host running one
+	/// line as several scripts gives the later ones what the first was read
+	/// with.
+	pub read_as:      Option<ParseSnapshot>,
 }
 
 impl Script {
@@ -195,6 +201,7 @@ impl Script {
 			env:          Vec::new(),
 			foreign_env:  Vec::new(),
 			unexport_env: Vec::new(),
+			read_as:      None,
 		}
 	}
 }
@@ -1319,6 +1326,7 @@ impl Shell {
 			env: Vec::new(),
 			started: false,
 			exit_trap_started: false,
+			read_as: script.read_as,
 		};
 		let stdio = match script.vproc {
 			VprocSel::Root => {
@@ -2109,6 +2117,17 @@ impl Shell {
 			.reported_signal
 			.filter(|(id, _)| *id == run)
 			.map(|(_, signal)| signal)
+	}
+
+	/// The parser state the root shell reads its next command with: the
+	/// features its options select and the aliases in effect (none while
+	/// `expand_aliases` is off). See [`Script::read_as`].
+	///
+	/// # Errors
+	///
+	/// The store's error.
+	pub fn read_state(&mut self, cx: &mut Cx<'_>) -> Result<ParseSnapshot, StoreError> {
+		exec::read_state(&mut self.k, cx, &self.procs[0])
 	}
 
 	/// Number of the root's background jobs that still wait for a running

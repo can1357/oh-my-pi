@@ -83,7 +83,7 @@ pub use crate::bash::{
 	snapshot::{ExternalizeReport, Lost, RestoreOpts, RestoreReport},
 	store::{Attrs, StateStore, StoreError, VarValue},
 	vm::{
-		Budget, CallOutcome, ControlHandle, Cx, IoPoll, RunStdio, Script, Shell, ShellApi, ShellInit,
-		Step, ToolCall, VprocSel, WakeToken, vproc_layout,
+		Budget, CallOutcome, ControlHandle, Cx, IoPoll, ParseSnapshot, RunStdio, Script, Shell,
+		ShellApi, ShellInit, Step, ToolCall, VprocSel, WakeToken, vproc_layout,
 	},
 };

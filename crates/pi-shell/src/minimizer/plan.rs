@@ -46,6 +46,10 @@ pub struct ChainSegment {
 	pub run_if_previous_succeeded: bool,
 	/// The segment is followed by `&&`, so its failure must not trip `errexit`.
 	pub suppress_errexit:          bool,
+	/// The segment begins an input line (a complete command). The shell
+	/// reads a whole line before it runs any of it, so every segment of a
+	/// line is read with the aliases as they were when its line began.
+	pub starts_line:               bool,
 }
 
 /// Outcome of analyzing a raw command string.
@@ -107,18 +111,26 @@ const fn is_async(sep: Sep) -> bool {
 }
 
 fn classify(program: &Program, src: &str) -> CommandPlan {
-	// Separator-separated top-level items across all complete commands.
-	let items: Vec<&ListItem> = program
+	// Separator-separated top-level items across all complete commands,
+	// each with whether it begins its complete command's line.
+	let items: Vec<(bool, &ListItem)> = program
 		.commands
 		.iter()
-		.flat_map(|complete| complete.list.items.iter())
+		.flat_map(|complete| {
+			complete
+				.list
+				.items
+				.iter()
+				.enumerate()
+				.map(|(index, item)| (index == 0, item))
+		})
 		.collect();
 
 	if let Some(chain) = classify_chain(&items, src) {
 		return chain;
 	}
 
-	let [item] = items.as_slice() else {
+	let [(_, item)] = items.as_slice() else {
 		// `a ; b` or `a & b` produces multiple list items.
 		return if items.is_empty() {
 			CommandPlan::Unsupported
@@ -137,10 +149,10 @@ fn classify(program: &Program, src: &str) -> CommandPlan {
 	classify_pipeline(&item.and_or.first, src).unwrap_or(CommandPlan::Unsupported)
 }
 
-fn classify_chain(items: &[&ListItem], src: &str) -> Option<CommandPlan> {
+fn classify_chain(items: &[(bool, &ListItem)], src: &str) -> Option<CommandPlan> {
 	let mut segments = Vec::new();
 
-	for item in items {
+	for &(item_starts_line, item) in items {
 		if is_async(item.sep) {
 			return None;
 		}
@@ -148,6 +160,7 @@ fn classify_chain(items: &[&ListItem], src: &str) -> Option<CommandPlan> {
 		let mut run_if_previous_succeeded = false;
 		let mut pipeline = &item.and_or.first;
 		let mut rest = item.and_or.rest.iter().peekable();
+		let mut starts_line = item_starts_line;
 
 		loop {
 			let (command, program) = simple_segment(pipeline, src)?;
@@ -158,7 +171,9 @@ fn classify_chain(items: &[&ListItem], src: &str) -> Option<CommandPlan> {
 				program,
 				run_if_previous_succeeded,
 				suppress_errexit,
+				starts_line,
 			});
+			starts_line = false;
 
 			match rest.next() {
 				None => break,
@@ -392,12 +407,14 @@ mod tests {
 					program:                   "git".to_string(),
 					run_if_previous_succeeded: false,
 					suppress_errexit:          true,
+					starts_line:               true,
 				},
 				ChainSegment {
 					command:                   "git diff --name-only".to_string(),
 					program:                   "git".to_string(),
 					run_if_previous_succeeded: true,
 					suppress_errexit:          false,
+					starts_line:               false,
 				},
 			])
 		);
@@ -414,12 +431,14 @@ mod tests {
 					program:                   "git".to_string(),
 					run_if_previous_succeeded: false,
 					suppress_errexit:          false,
+					starts_line:               true,
 				},
 				ChainSegment {
 					command:                   "bun test".to_string(),
 					program:                   "bun".to_string(),
 					run_if_previous_succeeded: false,
 					suppress_errexit:          false,
+					starts_line:               false,
 				},
 			])
 		);
@@ -436,18 +455,21 @@ mod tests {
 					program:                   "false".to_string(),
 					run_if_previous_succeeded: false,
 					suppress_errexit:          true,
+					starts_line:               true,
 				},
 				ChainSegment {
 					command:                   "echo no".to_string(),
 					program:                   "echo".to_string(),
 					run_if_previous_succeeded: true,
 					suppress_errexit:          false,
+					starts_line:               false,
 				},
 				ChainSegment {
 					command:                   "echo yes".to_string(),
 					program:                   "echo".to_string(),
 					run_if_previous_succeeded: false,
 					suppress_errexit:          false,
+					starts_line:               false,
 				},
 			])
 		);
@@ -478,6 +500,14 @@ mod tests {
 		assert_eq!(segments[0].program, "echo");
 		assert_eq!(segments[1].command, "FOO=\"x y\" printf '%s\\n' z");
 		assert_eq!(segments[1].program, "printf");
+	}
+
+	#[test]
+	fn segments_record_where_input_lines_begin() {
+		let segments =
+			chain_of(analyze("git status; bun test\ngit diff && echo done")).expect("expected Chain");
+		let starts: Vec<bool> = segments.iter().map(|segment| segment.starts_line).collect();
+		assert_eq!(starts, [true, false, true, false]);
 	}
 
 	#[test]

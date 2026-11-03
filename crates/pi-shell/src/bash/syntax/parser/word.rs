@@ -977,8 +977,8 @@ impl<'s> Parser<'s> {
 	fn procsub(&mut self, output: bool) -> PResult<WordPart> {
 		self.bump();
 		self.bump();
-		let (body, _) = self.comsub(b')', false)?;
-		Ok(WordPart::ProcSub(Box::new(ProcSub { output, body })))
+		let (body, text) = self.comsub(b')', false)?;
+		Ok(WordPart::ProcSub(Box::new(ProcSub { output, body, text })))
 	}
 
 	/// `"${a+'$('\'}"`: between the literal quotes of a `${…}` word inside

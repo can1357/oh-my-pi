@@ -917,13 +917,15 @@ impl<'e, 'c> Expander<'e, 'c> {
 				};
 				sink.value(v.format_into(&mut NumBuffer::new()).as_bytes(), inq || *quoted);
 			},
-			Part::ProcSub { entry, output } => {
+			Part::ProcSub { output, text } => {
 				// Logged, so a replay after a command substitution parks does
 				// not start it twice.
 				let path = if let Some(Atom::Str(Some(p))) = self.replay() {
 					p
 				} else {
-					let p = super::exec::start_procsub(self.k, self.vp, self.cx, unit, *entry, *output);
+					let p = super::exec::start_procsub(
+						self.k, self.vp, self.cx, unit, *output, *text, self.line,
+					);
 					self.note(|| Atom::Str(Some(p.clone())));
 					p
 				};

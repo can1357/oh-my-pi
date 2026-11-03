@@ -68,8 +68,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
 	bash::{
-		Budget, CallId, Cx, Engine, EngineConfig, EventMask, Fs, MemStore, PipeTap, RunId, Script,
-		Shell, ShellError, ShellInit, Signal, Step, ToolCall, VprocSel,
+		Budget, CallId, Cx, Engine, EngineConfig, EventMask, Fs, MemStore, ParseSnapshot, PipeTap,
+		RunId, Script, Shell, ShellError, ShellInit, Signal, Step, ToolCall, VprocSel,
 		store::{Key, MiscKey, Record},
 	},
 	host::{PiHost, SpawnObserver, TERM_GRACE},
@@ -141,6 +141,27 @@ pub struct RunOptions {
 	/// through one relay for both streams. Pipeline pipes and files are
 	/// never decoded.
 	pub text_capture:   bool,
+	/// Which part of an input line the command is, for a caller that runs
+	/// one line as several commands.
+	pub line:           LinePart,
+}
+
+/// Which part of an input line a command is ([`RunOptions::line`]).
+///
+/// bash reads a whole line before it runs any of it, so every part of a
+/// line is read with the aliases and parser options in force when the line
+/// began.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LinePart {
+	/// The whole line.
+	#[default]
+	Whole,
+	/// Its first part: read as a whole line is, and what it was read with
+	/// is kept for the parts after it.
+	First,
+	/// A later part: read with what the line's [`LinePart::First`] part was
+	/// read with.
+	Rest,
 }
 
 impl RunOptions {
@@ -153,6 +174,7 @@ impl RunOptions {
 			pipe_tap:       None,
 			reported_error: None,
 			text_capture:   false,
+			line:           LinePart::Whole,
 		}
 	}
 }
@@ -165,6 +187,7 @@ impl std::fmt::Debug for RunOptions {
 			.field("cwd", &self.cwd)
 			.field("pipe_tap", &self.pipe_tap.is_some())
 			.field("reported_error", &self.reported_error)
+			.field("line", &self.line)
 			.finish()
 	}
 }
@@ -325,7 +348,16 @@ impl Session {
 			.map_err(SessionError::Create)?;
 		// Nothing observes events: skip building them.
 		shell.set_event_mask(EventMask::NONE);
-		let driver = Driver { shell, store, host, bell, jobs: rx, children: children.clone(), tools };
+		let driver = Driver {
+			shell,
+			store,
+			host,
+			bell,
+			jobs: rx,
+			children: children.clone(),
+			tools,
+			line_read: None,
+		};
 		runtime.spawn(driver.serve());
 		Ok(Self { jobs: Some(jobs), waker, children })
 	}
@@ -515,14 +547,17 @@ struct Job {
 
 /// The driver task's state: the shell and everything it is stepped with.
 struct Driver {
-	shell:    Shell,
-	store:    MemStore,
-	host:     PiHost,
-	bell:     Arc<Bell>,
-	jobs:     flume::Receiver<Request>,
-	children: Children,
+	shell:     Shell,
+	store:     MemStore,
+	host:      PiHost,
+	bell:      Arc<Bell>,
+	jobs:      flume::Receiver<Request>,
+	children:  Children,
 	/// The host callouts in flight (`timeout`, `nohup`, `git`).
-	tools:    ToolCalls,
+	tools:     ToolCalls,
+	/// What the current input line's [`LinePart::First`] part was read
+	/// with, for the parts after it.
+	line_read: Option<ParseSnapshot>,
 }
 
 impl Driver {
@@ -558,7 +593,21 @@ impl Driver {
 	/// Run one job to completion and send its outcome.
 	async fn run(&mut self, job: Job) {
 		let Job { options, stdio, cancel, reply } = job;
-		let RunOptions { command, env, cwd, pipe_tap, reported_error, text_capture } = options;
+		let RunOptions { command, env, cwd, pipe_tap, reported_error, text_capture, line } = options;
+		let read_as = match line {
+			LinePart::Whole => {
+				self.line_read = None;
+				None
+			},
+			LinePart::First => {
+				// The shell's state now, before the line's first part runs.
+				// A store failure surfaces when that part is read.
+				let mut cx = Cx { host: &mut self.host, store: &mut self.store };
+				self.line_read = self.shell.read_state(&mut cx).ok();
+				None
+			},
+			LinePart::Rest => self.line_read.clone(),
+		};
 		self.host.set_pipe_tap(pipe_tap);
 		self.host.set_reported_error(reported_error);
 		// The values the overlay hides, restored after the run.
@@ -576,6 +625,7 @@ impl Driver {
 			cwd,
 			env,
 			vproc: VprocSel::Root,
+			read_as,
 			..Script::command(command.as_bytes())
 		});
 		let mut applied = 0;

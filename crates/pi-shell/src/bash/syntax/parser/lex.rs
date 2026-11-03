@@ -953,23 +953,22 @@ impl<'s> Parser<'s> {
 			.alias_uses
 			.push(AliasUse { name: text.to_vec(), value: value.to_vec() });
 		let expand_next = matches!(value.last(), Some(b' ' | b'\t'));
+		// Popping this frame ends the alias's text (bash `pop_string`).
+		let outer = Frame { buf: self.buf, pos: self.pos, alias: text.to_vec(), expand_next };
+		self.frames.push(outer);
 		// bash returns a space after the last character of the expansion
 		// (unless it ends in a blank, newline, metacharacter or unquoted
 		// backslash, or inside a quote) so the alias stays marked as in use
-		// while its last word is read.
+		// while its last word is read. The value goes on to that space inside
+		// the alias's text, so its frame names no alias.
 		if alias_needs_space(value) {
-			let outer = Frame {
-				buf:         self.buf,
-				pos:         self.pos,
-				alias:       text.to_vec(),
+			self.frames.push(Frame {
+				buf:         &cursor::END_ALIAS_SPACE,
+				pos:         0,
+				alias:       Vec::new(),
 				expand_next: false,
-			};
-			self.frames.push(outer);
-			self.buf = &cursor::END_ALIAS_SPACE;
-			self.pos = 0;
+			});
 		}
-		let outer = Frame { buf: self.buf, pos: self.pos, alias: text.to_vec(), expand_next };
-		self.frames.push(outer);
 		self.buf = value;
 		self.pos = 0;
 		true

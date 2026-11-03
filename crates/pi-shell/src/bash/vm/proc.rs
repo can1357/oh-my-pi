@@ -717,6 +717,8 @@ pub struct Run {
 	pub env:               Vec<(BString, BString)>,
 	pub started:           bool,
 	pub exit_trap_started: bool,
+	/// [`Script::read_as`](super::Script::read_as).
+	pub read_as:           Option<ParseSnapshot>,
 }
 
 /// What kind of activation a frame is.
@@ -764,12 +766,13 @@ pub struct ScriptAux {
 	pub pending: Option<(BString, Vec<BString>)>,
 	/// zsh `parse_string` (`eval`, traps, `-c`, substitutions): the whole
 	/// text is parsed before any of it runs, so every command parses with
-	/// the features and aliases of the first.
+	/// the features and aliases of the first. A root script given
+	/// [`Script::read_as`](super::Script::read_as) parses with that.
 	pub parse:   Option<ParseSnapshot>,
 }
 
-/// The parse context a zsh string keeps for all its commands
-/// ([`ScriptAux::parse`]).
+/// The parse context a zsh string keeps for all its commands, or a root
+/// script is given for its commands ([`ScriptAux::parse`]).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ParseSnapshot {
 	/// [`crate::bash::syntax::Features`] bits.
