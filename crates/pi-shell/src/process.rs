@@ -1404,10 +1404,13 @@ struct RegistryState {
 
 #[derive(Default)]
 pub struct SpawnRegistry {
-	state:    Mutex<RegistryState>,
+	state:      Mutex<RegistryState>,
 	/// Spawns brush announced that are not settled yet. Their processes can
 	/// already run although they are not recorded.
-	spawning: AtomicUsize,
+	spawning:   AtomicUsize,
+	/// Cancelled once the run's termination (TERM, its grace, the KILL waves)
+	/// has finished.
+	terminated: tokio_util::sync::CancellationToken,
 }
 
 impl SpawnRegistry {
@@ -1448,6 +1451,20 @@ impl SpawnRegistry {
 	#[must_use]
 	pub fn spawn_in_flight(&self) -> bool {
 		self.spawning.load(Ordering::SeqCst) > 0
+	}
+
+	/// Records that the run's termination has finished.
+	pub fn mark_terminated(&self) {
+		self.terminated.cancel();
+	}
+
+	/// Waits until the run's termination has finished, or for at most
+	/// `limit` (a caller that runs without the termination task must not wait
+	/// forever). Anything that would end a process sooner (closing its output,
+	/// dropping its handle) waits for this, so the termination's TERM grace is
+	/// the only one.
+	pub async fn wait_terminated(&self, limit: Duration) {
+		let _ = tokio::time::timeout(limit, self.terminated.cancelled()).await;
 	}
 
 	/// Record a freshly spawned child. Called from the spawn-observer hook.
