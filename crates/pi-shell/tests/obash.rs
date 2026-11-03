@@ -110,6 +110,45 @@ fn dollar_zero_and_positionals_follow_bash_c() {
 }
 
 #[test]
+fn scalar_words_keep_quoting_scope_and_replay() {
+	let script = r#"
+show() { printf '%s:' "$#"; printf '<%s>' "$@"; echo; }
+f() {
+	local x=$1
+	local -n ref=x
+	show "$x" "$ref" "$1" "${#1}"
+	ref=changed
+	show "$x"
+}
+x=global
+f 'a b'
+show "$x"
+set -- '' 'a b'
+a=$1; b=$2
+show "$1" "$2" "$a" "$b"
+IFS=ab
+show "$2" $2
+unset IFS missing
+show "$missing" "${missing-default}"
+set -- old
+show "$1" "$(set -- changed; printf sub)" "$1"
+set -u
+show "$1"
+"#;
+	let expected = b"4:<a b><a b><a b><3>\n1:<changed>\n1:<global>\n4:<><a b><><a b>\n3:<a b><>< >\n2:<><default>\n3:<old><sub><old>\n1:<old>\n";
+	for fault in [false, true] {
+		let mut cmd = obash();
+		if fault {
+			cmd.arg("--fault=1:7");
+		}
+		let out = output(cmd.args(["-c", script]));
+		assert_eq!(out.stdout, expected, "fault={fault}");
+		assert!(out.stderr.is_empty(), "{}", String::from_utf8_lossy(&out.stderr));
+		assert!(out.status.success());
+	}
+}
+
+#[test]
 fn script_file_errors_use_the_script_name() {
 	let dir = tempfile::tempdir().unwrap();
 	let script = dir.path().join("s.sh");
