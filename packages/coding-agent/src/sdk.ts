@@ -726,6 +726,13 @@ export interface CreateAgentSessionOptions {
 	 */
 	extensionRoots?: () => EffectiveExtensionRoots;
 	/**
+	 * The holds that stand for the session while it starts (see `RequestHoldsAlias`), for a host
+	 * that prepares session work before calling this — preloading extensions, say — and runs that
+	 * preparation in them. Bound to the session agent's context once the agent is built.
+	 * Default: fresh holds for this call.
+	 */
+	startupHolds?: RequestHoldsAlias;
+	/**
 	 * Pre-loaded extensions (skips file discovery and the per-session factory
 	 * call). Used by the CLI when extensions are loaded early to parse custom
 	 * flags — the same process owns the returned instances, so reusing them is
@@ -1927,8 +1934,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	// Everything built here is the session's work, though the session's agent
 	// does not exist yet: an extension factory's timer, a backend's first
 	// request. It runs in holds that stand for the agent's context and are
-	// bound to it once the agent is built (see `RequestHoldsAlias`).
-	const sessionHolds = new RequestHoldsAlias();
+	// bound to it once the agent is built (see `RequestHoldsAlias`); a host
+	// that prepared session work before this call passes the holds it ran in.
+	const sessionHolds = options.startupHolds ?? new RequestHoldsAlias();
 	return await runWithRequestHolds(sessionHolds, () =>
 		withOmpExtensionRootScope(explicit, mode, () => createAgentSessionScoped(options, sessionHolds)),
 	);

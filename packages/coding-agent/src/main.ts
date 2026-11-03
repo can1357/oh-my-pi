@@ -7,7 +7,7 @@
 import * as fsSync from "node:fs";
 import * as os from "node:os";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
-import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
+import { type ImageContent, type Model, RequestHoldsAlias, runWithRequestHolds } from "@oh-my-pi/pi-ai";
 import { getModelPricingStatus } from "@oh-my-pi/pi-catalog/models";
 import { isEnoent, isEnotdir, toError } from "@oh-my-pi/pi-utils";
 import {
@@ -582,9 +582,13 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 		const titleSystemPromptSource = discoverTitleSystemPromptFile(cwd);
 		const titleSystemPrompt = await resolvePromptInput(titleSystemPromptSource, "title system prompt");
 		const eventBus = new EventBus();
+		// Trusted extensions preloaded here are the new session's work before it exists.
+		const startupHolds = new RequestHoldsAlias();
 		const trustedExtensions =
 			args.parsedArgs.trustedExtensions && args.parsedArgs.trustedExtensions.length > 0
-				? await loadTrustedSessionExtensions(args.baseOptions, cwd, eventBus)
+				? await runWithRequestHolds(startupHolds, () =>
+						loadTrustedSessionExtensions(args.baseOptions, cwd, eventBus),
+					)
 				: undefined;
 		if (trustedExtensions && trustedExtensions.errors.length > 0) {
 			throw new Error(
@@ -598,6 +602,7 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 			...args.baseOptions,
 			cwd,
 			sessionManager: nextSessionManager,
+			startupHolds,
 			settings: nextSettings,
 			authStorage: args.authStorage,
 			modelRegistry: args.modelRegistry,
@@ -2522,6 +2527,10 @@ export async function runRootCommand(
 
 			const eventBus = new EventBus();
 			const subagentEventBus = new EventBus();
+			// The extensions preloaded here are the session's work, though the session does not
+			// exist yet: their factories' timers run in holds bound to its agent once it is built.
+			const startupHolds = new RequestHoldsAlias();
+			sessionOptions.startupHolds = startupHolds;
 			// Interactive launches bind startup-safe extensions after the composer accepts
 			// input; the first request waits for them instead. Kept eager when argv may
 			// carry extension flags (they must parse now), `--tools` must validate
@@ -2531,11 +2540,13 @@ export async function runRootCommand(
 				parsedArgs.unrecognizedFlags.length === 0 &&
 				!parsedArgs.tools?.length &&
 				!(parsedArgs.continue || parsedArgs.resume || parsedArgs.fork || parsedArgs.restore || foreignSource);
-			const extensionsResult = parsedArgs.trustedExtensions?.length
-				? { ...(await loadTrustedSessionExtensions(sessionOptions, cwd, eventBus)), deferredPaths: [] }
-				: await loadSessionExtensions(sessionOptions, cwd, settingsInstance, eventBus, {
-						deferStartupSafe: deferStartupSafeExtensions,
-					});
+			const extensionsResult = await runWithRequestHolds(startupHolds, async () =>
+				parsedArgs.trustedExtensions?.length
+					? { ...(await loadTrustedSessionExtensions(sessionOptions, cwd, eventBus)), deferredPaths: [] }
+					: await loadSessionExtensions(sessionOptions, cwd, settingsInstance, eventBus, {
+							deferStartupSafe: deferStartupSafeExtensions,
+						}),
+			);
 			const extensionFlagSink: ExtensionFlagSink = {
 				getFlags: () => ExtensionRunner.aggregateFlags(extensionsResult.extensions),
 				setFlagValue: (name, value) => {
@@ -2676,6 +2687,7 @@ export async function runRootCommand(
 				const startupDeadline = sessionOptions.deadline;
 				sessionOptions = await buildStartupSessionOptions(undefined);
 				sessionOptions.deadline = startupDeadline;
+				sessionOptions.startupHolds = startupHolds;
 				createdSession = await createSession({ ...sessionOptions, ...startupContext });
 				notifs.push({
 					kind: "warn",

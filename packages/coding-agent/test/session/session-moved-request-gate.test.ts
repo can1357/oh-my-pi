@@ -1,7 +1,13 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
-import { captureRequestHolds, completeSimple, type Model } from "@oh-my-pi/pi-ai";
+import {
+	captureRequestHolds,
+	completeSimple,
+	type Model,
+	RequestHoldsAlias,
+	runWithRequestHolds,
+} from "@oh-my-pi/pi-ai";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -623,6 +629,71 @@ describe("work a session left running, or started before it existed, waits for i
 					);
 				},
 			],
+			skills: [],
+			rules: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			toolNames: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+		});
+		cleanups.push(() => session.dispose());
+		const release = Promise.withResolvers<void>();
+		let held = true;
+		const reached = Promise.withResolvers<void>();
+		session.agent.addHold(() => ({
+			pending: () => {
+				if (!held) return undefined;
+				reached.resolve();
+				return release.promise;
+			},
+		}));
+		go.resolve();
+		await reached.promise;
+		await eventLoopTurns();
+		expect(server.requests).toEqual([]);
+		held = false;
+		release.resolve();
+		await work;
+		expect(server.requests).toEqual(["POST /v1/chat/completions"]);
+	}, 60_000);
+
+	it("holds a request that work a host prepared before the session, in its start-up holds, schedules", async () => {
+		const temp = tempDir("@gate-host-preload-");
+		const server = localModelServer();
+		cleanups.push(server.stop);
+		const auth = await AuthStorage.create(":memory:");
+		cleanups.push(() => auth.close());
+		const go = Promise.withResolvers<void>();
+		let work: Promise<unknown> | undefined;
+		// The host prepares session work (an extension preload, say) before it calls createAgentSession.
+		const startupHolds = new RequestHoldsAlias();
+		runWithRequestHolds(startupHolds, () => {
+			work = go.promise.then(() =>
+				completeSimple(
+					server.model,
+					{ messages: [{ role: "user", content: "preloaded", timestamp: 0 }] },
+					{ apiKey: "k" },
+				),
+			);
+		});
+		const { session } = await createAgentSession({
+			cwd: temp.path(),
+			agentDir: temp.path(),
+			authStorage: auth,
+			modelRegistry: new ModelRegistry(auth, path.join(temp.path(), "models.yml")),
+			sessionManager: SessionManager.inMemory(temp.path()),
+			model: server.model,
+			settings: Settings.isolated({
+				"advisor.enabled": false,
+				"compaction.enabled": false,
+				"retry.enabled": false,
+				"todo.enabled": false,
+			}),
+			disableExtensionDiscovery: true,
+			startupHolds,
 			skills: [],
 			rules: [],
 			contextFiles: [],

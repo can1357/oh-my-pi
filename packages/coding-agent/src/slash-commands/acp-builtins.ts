@@ -1,4 +1,5 @@
 import type { AvailableCommand } from "@oh-my-pi/pi-utils/acp";
+import { runAsSessionWork } from "../session/session-work";
 import { BUILTIN_SLASH_COMMANDS_INTERNAL, lookupBuiltinSlashCommand } from "./builtin-registry";
 import { parseSlashCommand } from "./helpers/parse";
 import type { AcpBuiltinSlashCommandResult, SlashCommandRuntime } from "./types";
@@ -65,7 +66,7 @@ export async function executeAcpBuiltinSlashCommand(
 	const handle = lookupBuiltinSlashCommand(parsed.name)?.handle;
 	if (!handle) return false;
 	// A command is the session's work: every model request it starts waits for the session's holds.
-	const result = await runtime.session.runInRequestContext(() => handle(parsed, runtime));
+	const result = await runAsSessionWork(runtime.session, () => handle(parsed, runtime));
 	if (result === undefined) return { consumed: true };
 	return result;
 }
