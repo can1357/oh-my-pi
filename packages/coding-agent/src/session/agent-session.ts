@@ -10003,7 +10003,23 @@ export class AgentSession implements SettingsScope {
 				this.#resetPromptMaintenanceState();
 			}
 			this.#recovery.setAcceptTerminalEmptyStop(acceptTerminalEmptyStop);
-			const run = this.agent.prompt(message);
+			// A triggered custom message starts a turn like a prompt does, so it gets the same
+			// before_agent_start preparation (extension system prompt and context messages).
+			const promptText =
+				typeof message.content === "string"
+					? message.content
+					: message.content.flatMap(part => (part.type === "text" ? [part.text] : [])).join("");
+			const preparation = await this.#prepareAgentStart(
+				message,
+				promptText,
+				undefined,
+				this.#promptGeneration,
+				undefined,
+				"direct",
+			);
+			const preparedMessages = preparation.commit();
+			if (!preparedMessages) return false;
+			const run = this.agent.prompt(preparedMessages.length > 0 ? [message, ...preparedMessages] : message);
 			// No dispatch-live wake here: an agent-initiated turn has no
 			// client promptTurn, so steers parked on a dispatching CLIENT
 			// prompt must keep parking through it — waking on this claim
@@ -10012,6 +10028,8 @@ export class AgentSession implements SettingsScope {
 			await this.#waitForPostPromptRecovery();
 			return true;
 		} finally {
+			// The per-turn before_agent_start override lives only for this turn.
+			this.#tools.clearTurnSystemPromptOverride();
 			this.#usagePreflightReadyForNextModelCall = false;
 			this.#recovery.setAcceptTerminalEmptyStop(false);
 			this.#endInFlight(inFlightEpoch);
