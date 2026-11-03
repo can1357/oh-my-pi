@@ -537,17 +537,12 @@ describe("dedicated tool capability", () => {
 		expect(decide(command)).toBeUndefined();
 	});
 
-	it.each([
-		"grep -rnI x .",
-		"grep -n x f | head",
-		"grep -nE 'a|b' -e x f",
-		"grep -rI --include='_CoqProject*' -e 'Proof Using' .",
-		"rg x",
-		"rg -tv x .",
-		"grep x < f",
-	])("refuses %s as a grep", command => {
-		expect(decide(command)).toBe("grep");
-	});
+	it.each(["grep -n x f | head", "grep -nE 'a|b' -e x f", "rg -n x src", "rg x", "rg -tv x .", "grep x < f"])(
+		"refuses %s as a grep",
+		command => {
+			expect(decide(command)).toBe("grep");
+		},
+	);
 
 	it.each([
 		// Case 6 of the refusal study: the glob tool has no depth limit.
@@ -966,6 +961,14 @@ describe("dedicated tool capability", () => {
 		"rg --max-columns=10 needle f",
 		// GNU grep reports binary matches in the directories it searches.
 		"grep -rn x .",
+		// Round 9: GNU grep over a directory decides binary files by content (NUL, invalid UTF-8),
+		// which only a walk could compare with the grep tool, so it runs; rg skips NUL files as the
+		// tool does and stays refused.
+		"grep -rnI x .",
+		"grep -rI --include='_CoqProject*' -e 'Proof Using' .",
+		"grep -RI needle symlink-root",
+		"grep -r -- -I binary-dir",
+		"grep -r -e -I binary-dir",
 		// An empty name is no file.
 		'echo hi > ""',
 	])("does not refuse %s (round 8)", command => {
@@ -997,6 +1000,37 @@ describe("dedicated tool capability", () => {
 			expect(at("perl -pi -e 's/a/b/' setuid")).toBeUndefined();
 			expect(at("perl -pi -e 's/a/b/' plain")).toBe("edit");
 		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("does not send invalid UTF-8, a read-only file or a directory to grep or edit", async () => {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "bash-interceptor-round9-")));
+		try {
+			await Bun.write(path.join(dir, "bad-utf8"), new Uint8Array([0x78, 0xff, 0x0a]));
+			await Bun.write(path.join(dir, "good"), "x\n");
+			await Bun.write(path.join(dir, "readonly"), "a\n");
+			await fs.chmod(path.join(dir, "readonly"), 0o444);
+			await fs.mkdir(path.join(dir, "src"));
+			const at = (command: string) =>
+				checkBashInterception(command, tools, DEFAULT_BASH_INTERCEPTOR_RULES, command, dir).suggestedTool;
+			for (const command of [
+				"grep x bad-utf8",
+				"grep -I x bad-utf8",
+				"grep --binary-files=without-match x bad-utf8",
+				"sed -i 's/a/b/' readonly",
+				"perl -pi -e 's/a/b/' readonly",
+				"grep x src",
+			]) {
+				expect(at(command)).toBeUndefined();
+			}
+			expect(at("grep x good")).toBe("grep");
+			// A dangling symlink: bash creates its target, the write tool would replace the link.
+			await fs.symlink(path.join(dir, "nowhere"), path.join(dir, "dangling"));
+			expect(at("echo hi > dangling")).toBeUndefined();
+			expect(at("rg x src")).toBe("grep");
+		} finally {
+			await fs.chmod(path.join(dir, "readonly"), 0o644);
 			await fs.rm(dir, { recursive: true, force: true });
 		}
 	});

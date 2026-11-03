@@ -779,7 +779,7 @@ const ANY = (): boolean => true;
 const COUNT = (value: string): boolean => /^\d+$/u.test(value);
 
 /** Splits `words` into options and operands; returns undefined when an option is outside `spec`. */
-function expressibleOperands(words: Word[], spec: OptionSpec): Word[] | undefined {
+function expressibleOperands(words: Word[], spec: OptionSpec, seen?: Set<string>): Word[] | undefined {
 	const operands: Word[] = [];
 	let optionsEnded = false;
 	for (let i = 0; i < words.length; i++) {
@@ -796,8 +796,10 @@ function expressibleOperands(words: Word[], spec: OptionSpec): Word[] | undefine
 		}
 		if (text.startsWith("--")) {
 			const eq = text.indexOf("=");
-			const kind = own(spec.long, text.slice(2, eq < 0 ? undefined : eq));
+			const name = text.slice(2, eq < 0 ? undefined : eq);
+			const kind = own(spec.long, name);
 			if (kind === undefined) return undefined;
+			seen?.add(`--${name}`);
 			if (kind === "flag") {
 				if (eq >= 0) return undefined;
 				continue;
@@ -816,6 +818,7 @@ function expressibleOperands(words: Word[], spec: OptionSpec): Word[] | undefine
 		if (spec.numeric && /^-\d+$/u.test(text)) continue;
 		for (let j = 1; j < text.length; j++) {
 			const letter = text[j];
+			seen?.add(`-${letter}`);
 			const valued = own(spec.valued, letter);
 			if (valued) {
 				let value = text.slice(j + 1);
@@ -1022,21 +1025,24 @@ const GREP_SPECS: Record<string, OptionSpec> = {
  * context width or cap matches, read patterns from a file, or search stdin, a heredoc or a
  * here-string.
  */
-function grepPaths(spec: OptionSpec, command: SimpleCommand): Word[] | undefined {
-	const options = command.words.slice(1);
-	const operands = expressibleOperands(options, spec);
+function grepPaths(spec: OptionSpec, command: SimpleCommand): { paths: Word[]; seen: Set<string> } | undefined {
+	const seen = new Set<string>();
+	const operands = expressibleOperands(command.words.slice(1), spec, seen);
 	if (!operands || hasOtherInputs(command)) return undefined;
 	const stdin = stdinFiles(command);
 	if (!stdin.every(namesOneFile)) return undefined;
-	const patternGiven = options.some(word => /^(?:-[^-]*e|--regexp)/u.test(word.value));
+	const patternGiven = seen.has("-e") || seen.has("--regexp");
 	const paths = patternGiven ? operands : operands.slice(1);
 	if (operands.some(word => word.computed) || paths.some(word => word.value === "-")) return undefined;
-	if (spec === GNU_GREP && paths.length === 0 && stdin.length === 0) {
-		// GNU grep without a file operand reads stdin unless it recurses.
-		const recursive = options.some(word => /^(?:-[^-]*[rR]|--(?:dereference-)?recursive$)/u.test(word.value));
-		if (!recursive) return undefined;
+	if (spec === GNU_GREP) {
+		// GNU grep treats a file with a NUL byte or invalid UTF-8 as binary and reports or skips it,
+		// which the grep tool does not; only a walk could show what a directory holds, so a GNU
+		// grep over a directory (recursive, or a directory operand) is not refused. Without a file
+		// operand it reads stdin or recurses into `.`.
+		const recursive = ["-r", "-R", "--recursive", "--dereference-recursive"].some(option => seen.has(option));
+		if (recursive || (paths.length === 0 && stdin.length === 0)) return undefined;
 	}
-	return [...paths, ...stdin];
+	return { paths: [...paths, ...stdin], seen };
 }
 
 // ── glob: find, fd ───────────────────────────────────────────────────────────
@@ -1460,9 +1466,13 @@ export interface FileFacts {
 	links: number;
 	/** Permission bits; `perl -i` keeps set-user-ID and set-group-ID bits, the edit tool clears them. */
 	mode: number;
-	/** The file may hold a NUL byte (or is over 4 MB, too large to check): grep and rg report a
-	 * binary match where the grep tool reports none. Reads the file on first use. */
+	/** The file may hold a NUL byte or invalid UTF-8 (or is over 4 MB, too large to check): grep
+	 * and rg treat it as binary or print its bytes, where the grep tool skips it or prints
+	 * replacement characters. Reads the file on first use. */
 	maybeBinary(): boolean;
+	/** The current user may write the file; the edit tool cannot change a read-only file that
+	 * `sed -i` and `perl -i` replace. */
+	writable: boolean;
 	/** At most 4 MB of valid UTF-8 with no byte-order mark and no carriage return: the edit tool
 	 * keeps a byte-order mark and CRLF line endings and refuses other encodings, which `sed -i`
 	 * does not. Reads the file on first use. */
@@ -1492,20 +1502,9 @@ function pathsAre(
 
 /** Whether `facts` describe a file with one link whose text the edit tool rewrites byte for byte. */
 function isPlainSingleFile(facts: FileFacts | undefined): boolean {
-	return facts !== undefined && facts.links === 1 && (facts.mode & 0o6000) === 0 && facts.plainText();
-}
-
-/** Whether GNU grep was told to skip binary files (`-I`, `--binary-files=without-match`). */
-function skipsBinaryFiles(command: SimpleCommand): boolean {
-	return command.words.some(word => /^(?:-[^-]*I|--binary-files=without-match$)/u.test(word.value));
-}
-
-/** Whether a GNU grep step searches a directory: it recurses, over a directory operand or none. */
-function searchesDirectories(command: SimpleCommand, paths: Word[], filesystem: StepFilesystem | undefined): boolean {
-	const recursive = command.words.some(word => /^(?:-[^-]*[rR]|--(?:dereference-)?recursive$)/u.test(word.value));
-	if (!recursive) return false;
-	if (paths.length === 0 || !filesystem) return true;
-	return paths.some(word => filesystem.kind(word.value, true) !== "file");
+	return (
+		facts !== undefined && facts.links === 1 && facts.writable && (facts.mode & 0o6000) === 0 && facts.plainText()
+	);
 }
 
 /** Options with which rg and ag match across lines. */
@@ -1542,11 +1541,12 @@ export function dedicatedToolCanPerformStep(
 		case "grep": {
 			const spec = own(GREP_SPECS, name);
 			if (!spec) return true;
-			const paths = outputReachesAgent(pipeline) ? grepPaths(spec, command) : undefined;
-			if (!paths || !pathsAre(paths, ["file", "directory", "missing"], true, filesystem)) return false;
-			// GNU grep reports a binary match in a directory it searches; the grep tool skips binary files.
-			if (spec === GNU_GREP && !skipsBinaryFiles(command) && searchesDirectories(command, paths, filesystem))
-				return false;
+			const searched = outputReachesAgent(pipeline) ? grepPaths(spec, command) : undefined;
+			if (!searched) return false;
+			const { paths } = searched;
+			// A GNU grep directory operand: see grepPaths.
+			const allowed: PathKind[] = spec === GNU_GREP ? ["file", "missing"] : ["file", "directory", "missing"];
+			if (!pathsAre(paths, allowed, true, filesystem)) return false;
 			// A named binary file: grep and rg report its match, the grep tool does not.
 			if (
 				filesystem &&
