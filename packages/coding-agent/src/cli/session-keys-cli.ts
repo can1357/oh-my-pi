@@ -5,8 +5,8 @@
  * {@link rollbackSessionRowKeys}). They open the database from the same
  * connection-string file as the configured storage, but never through
  * `SqlSessionStorage.create`, which refuses a table holding legacy keys.
- * Once the connection is open, everything they print (the plan, its row
- * keys, every database error) has the connection string's secrets redacted
+ * Once the connection is open, every value they print (a root, a row key)
+ * is redacted before it is quoted, and every database error is redacted
  * ({@link SessionSqlConnection.redact}).
  */
 import chalk from "@oh-my-pi/pi-utils/chalk";
@@ -37,13 +37,24 @@ export interface SessionKeysCommandArgs {
 	table?: string;
 }
 
-/** The plan and outcome for a person: what each key does, every refusal, and what changed. */
-function formatResult(args: SessionKeysCommandArgs, table: string, result: SessionKeyChangeResult): string {
+/**
+ * The plan and outcome for a person: what each key does, every refusal, and
+ * what changed. Each value it shows (a root, a row key) is rewritten by
+ * `redact` before it is quoted, so quoting cannot escape a secret into a
+ * spelling the redactor does not look for; the reasons came out of the plan
+ * redacted the same way.
+ */
+function formatResult(
+	args: SessionKeysCommandArgs,
+	table: string,
+	result: SessionKeyChangeResult,
+	redact: (text: string) => string,
+): string {
 	const { plan } = result;
 	const lines: string[] = [];
 	const title = args.direction === "migrate" ? "Migrate the row keys of" : "Roll back the row keys of";
 	const roots = args.direction === "migrate" ? "sessions roots" : "restore root";
-	lines.push(`${title} ${table} and ${table}_parts; ${roots}: ${args.roots.join(", ")}`);
+	lines.push(`${title} ${table} and ${table}_parts; ${roots}: ${args.roots.map(redact).join(", ")}`);
 	lines.push(
 		`Keys: ${plan.keys.files} in ${table}, ${plan.keys.parts} in ${table}_parts, ${plan.keys.distinct} distinct`,
 	);
@@ -54,14 +65,14 @@ function formatResult(args: SessionKeysCommandArgs, table: string, result: Sessi
 		lines.push(`  ${counts.absolute} legacy keys outside every sessions root to abs:…`);
 		lines.push(`  ${counts.respelled} of the legacy keys resolved from a non-canonical spelling`);
 	} else {
-		lines.push(`  ${counts.rootRelative} sessions/… keys to paths under ${args.roots[0]}`);
+		lines.push(`  ${counts.rootRelative} sessions/… keys to paths under ${redact(args.roots[0] ?? "")}`);
 		lines.push(`  ${counts.absolute} abs:… keys to their absolute paths`);
 	}
 	if (plan.refusals.length > 0) {
 		lines.push("Refused; nothing changed:");
 		for (const refusal of plan.refusals) {
 			lines.push(`  ${refusal.kind}: ${refusal.reason}`);
-			for (const key of refusal.keys) lines.push(`    ${JSON.stringify(key)}`);
+			for (const key of refusal.keys) lines.push(`    ${JSON.stringify(redact(key))}`);
 		}
 	} else if (args.dryRun) {
 		lines.push(`Dry run: ${plan.moves.size} keys would move; nothing changed.`);
@@ -79,17 +90,17 @@ function printError(message: string): void {
 }
 
 /**
- * Check the connection, run the key change, and print its plan and outcome;
- * the exit code. Everything it prints passes through `connection.redact`:
- * the plan quotes row keys, and a row key, like a database error, can quote
- * the connection string.
+ * Check `connection`, run the key change `args` asks for, and print its plan
+ * and outcome; the exit code. Every value it prints, and every database
+ * error, passes through `connection.redact`: a row key, like a database
+ * error, can quote the connection string. The caller closes the connection.
  */
-async function changeKeys(
+export async function runSessionKeysChange(
 	connection: SessionSqlConnection,
 	args: SessionKeysCommandArgs,
-	table: string,
 ): Promise<number> {
 	const { client, redact } = connection;
+	const table = sessionTableName(args.table);
 	try {
 		await client.unsafe("SELECT 1");
 	} catch (err) {
@@ -98,16 +109,17 @@ async function changeKeys(
 	}
 	let result: SessionKeyChangeResult;
 	try {
+		const options = { client, table, dryRun: args.dryRun, redact };
 		result =
 			args.direction === "migrate"
-				? await migrateSessionRowKeys({ client, table, roots: args.roots, dryRun: args.dryRun })
-				: await rollbackSessionRowKeys({ client, table, restoreRoot: args.roots[0] ?? "", dryRun: args.dryRun });
+				? await migrateSessionRowKeys({ ...options, roots: args.roots })
+				: await rollbackSessionRowKeys({ ...options, restoreRoot: args.roots[0] ?? "" });
 	} catch (err) {
 		// Every statement ran in one transaction, which a thrown error rolls back.
 		printError(`the key change failed and was rolled back: ${sessionDatabaseErrorDetail(connection, err)}`);
 		return 1;
 	}
-	process.stdout.write(redact(formatResult(args, table, result)));
+	process.stdout.write(formatResult(args, table, result, redact));
 	if (result.plan.refusals.length === 0) return 0;
 	printError("the key change was refused; nothing changed");
 	return 1;
@@ -122,7 +134,6 @@ async function changeKeys(
  * whole.
  */
 export async function runSessionKeysCommand(args: SessionKeysCommandArgs): Promise<number> {
-	const table = sessionTableName(args.table);
 	let connection: SessionSqlConnection;
 	try {
 		connection = await openSessionSqlClient({
@@ -136,7 +147,7 @@ export async function runSessionKeysCommand(args: SessionKeysCommandArgs): Promi
 	}
 	let exitCode = 1;
 	try {
-		exitCode = await changeKeys(connection, args, table);
+		exitCode = await runSessionKeysChange(connection, args);
 	} catch (err) {
 		printError(sessionDatabaseErrorDetail(connection, err));
 	}

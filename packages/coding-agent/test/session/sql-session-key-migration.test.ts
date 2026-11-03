@@ -12,7 +12,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
-import { runSessionKeysCommand } from "@oh-my-pi/pi-coding-agent/cli/session-keys-cli";
+import { runSessionKeysChange, runSessionKeysCommand } from "@oh-my-pi/pi-coding-agent/cli/session-keys-cli";
 import Session from "@oh-my-pi/pi-coding-agent/commands/session";
 import {
 	applySessionKeyMoves,
@@ -27,6 +27,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/session/sql-session-storage";
 import { getAgentDir, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import { SQL } from "bun";
+import { ESCAPABLE_PASSWORDS, expectNoSpelling, redactorFor } from "../helpers/connection-redaction";
 
 const BACKENDS: ReadonlyArray<{ adapter: SqlSessionStorageAdapter; url: string | undefined }> = [
 	{ adapter: "sqlite", url: "sqlite" },
@@ -1072,6 +1073,55 @@ for (const { adapter, url } of BACKENDS) {
 			},
 			TIMEOUT_MS,
 		);
+
+		for (const password of ESCAPABLE_PASSWORDS) {
+			it(
+				`redacts the password ${JSON.stringify(password)} in roots and row keys before quoting them`,
+				async () => {
+					await using db = await connectCommandDb();
+					// The redactor of a connection string with this password, over this test's database.
+					const secret = await redactorFor(password);
+					const client = new SQL(db.url, { max: 1 });
+					const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+					const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+					try {
+						for (const key of [`sessions/../${password}`, `relative/${password}.jsonl`]) {
+							await db.insertSession(key, ["safe\n"]);
+						}
+						const before = await db.snapshot();
+						const connection = { ...secret, client };
+						const base = { dryRun: false, cwd: process.cwd(), env: process.env, table: db.table };
+
+						const migrate = await runSessionKeysChange(connection, {
+							...base,
+							direction: "migrate",
+							roots: [ROOT, `/srv/${password}`],
+						});
+						const rollback = await runSessionKeysChange(connection, {
+							...base,
+							direction: "rollback",
+							roots: [`/srv/${password}`],
+							dryRun: true,
+						});
+
+						expect([migrate, rollback]).toEqual([1, 1]);
+						const printed = [...stdout.mock.calls, ...stderr.mock.calls].map(([chunk]) => String(chunk)).join("");
+						expect(printed).toContain(`sessions roots: ${ROOT}, /srv/<redacted>\n`);
+						expect(printed).toContain("restore root: /srv/<redacted>\n");
+						expect(printed).toContain('    "sessions/../<redacted>"\n');
+						expect(printed).toContain('    "relative/<redacted>.jsonl"\n');
+						expectNoSpelling("command output", printed, password);
+						expect(await db.snapshot()).toEqual(before);
+					} finally {
+						stdout.mockRestore();
+						stderr.mockRestore();
+						await client.end();
+						await secret.client.end();
+					}
+				},
+				TIMEOUT_MS,
+			);
+		}
 	});
 }
 

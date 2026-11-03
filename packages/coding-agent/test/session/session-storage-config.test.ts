@@ -28,6 +28,7 @@ import { SqlSessionStorage } from "@oh-my-pi/pi-coding-agent/session/sql-session
 import { setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { SQL } from "bun";
+import { ESCAPABLE_PASSWORDS, expectNoSpelling, redactorFor } from "../helpers/connection-redaction";
 import { beginSettingsTest, restoreSettingsTestState } from "../helpers/settings-test-state";
 
 const tempDirs: TempDir[] = [];
@@ -630,5 +631,49 @@ for (const { adapter, url } of STORE_BACKENDS) {
 			);
 			expectNoSecret("legacy-key refusal", printed, secrets);
 		});
+
+		for (const password of ESCAPABLE_PASSWORDS) {
+			it(`redacts a row key holding the password ${JSON.stringify(password)} before quoting it`, async () => {
+				await using own = new OwnTable(adapter, url ?? "");
+				// The redactor of a connection string with this password; the store's client
+				// is the test database's. Logging in with such a password is not the point:
+				// the point is the key the store quotes.
+				const secret = await redactorFor(password);
+				const client = new SQL(own.dsn, { max: 1 });
+				try {
+					const open = () => SqlSessionStorage.create({ client, table: own.table, redact: secret.redact });
+					const storage = await open();
+					const warned = vi.spyOn(logger, "warn").mockImplementation(() => {});
+					await own.sql(`INSERT INTO ${own.table} (path, content, mtime_ms, byte_len) VALUES (?, 'safe', 1, 4)`, [
+						`sessions/../${password}`,
+					]);
+					await storage.refresh();
+					const warning = warned.mock.calls.find(([message]) => String(message).includes("skipped rows"));
+					expect(warning?.[1]).toMatchObject({ example: "sessions/../<redacted>" });
+					// The logger writes its fields as JSON.
+					expectNoSpelling("skipped-row warning", JSON.stringify(warned.mock.calls), password);
+
+					await own.sql(`INSERT INTO ${own.table} (path, content, mtime_ms) VALUES (?, 'safe', 1)`, [
+						`sessions/${password}.jsonl`,
+					]);
+					const unmeasured = await failure(storage.refresh());
+					expect(String((unmeasured as Error).message)).toContain(
+						'row "sessions/<redacted>.jsonl" has no byte_len',
+					);
+					expectNoSpelling("unmeasured-row refusal", Bun.inspect(unmeasured), password);
+
+					await own.sql(`INSERT INTO ${own.table} (path, content, mtime_ms, byte_len) VALUES (?, 'safe', 1, 4)`, [
+						`/srv/${password}.jsonl`,
+					]);
+					const legacy = await failure(open());
+					expect(String((legacy as Error).message)).toContain('holds the row key "/srv/<redacted>.jsonl"');
+					expectNoSpelling("legacy-key refusal", Bun.inspect(legacy), password);
+				} finally {
+					vi.restoreAllMocks();
+					await client.end();
+					await secret.client.end();
+				}
+			});
+		}
 	});
 }

@@ -161,7 +161,7 @@ export interface SqlSessionStorageOptions {
 	 * and logs. A driver error (`SQL.SQLError`) then leaves as a
 	 * {@link SqlSessionStorageDatabaseError}, an `AggregateError` with its
 	 * errors rewritten, and an error or log field the store builds from a row
-	 * key has that text rewritten; every error the store raises on purpose
+	 * key has that key rewritten before it is quoted; every error the store raises on purpose
 	 * about a path its caller gave (a write conflict, `ENOENT`, `EEXIST`)
 	 * leaves as it is. Stored keys and content never change. Default: no
 	 * rewriting.
@@ -856,9 +856,18 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 		return this.#redact ? redactDatabaseError(err, this.#redact) : err;
 	}
 
-	/** `text`, a diagnostic built from a row key, rewritten by the `redact` option. */
-	#diagnostic(text: string): string {
-		return this.#redact ? this.#redact(text) : text;
+	/** `value`, a row key or a path a diagnostic shows, rewritten by the `redact` option. */
+	#redactValue(value: string): string {
+		return this.#redact ? this.#redact(value) : value;
+	}
+
+	/**
+	 * `value` as a diagnostic quotes it: rewritten by `redact` first, then
+	 * JSON-quoted. Quoting first would escape a secret holding `"`, `\` or a
+	 * control character into a spelling the redactor does not look for.
+	 */
+	#quote(value: string): string {
+		return JSON.stringify(this.#redactValue(value));
 	}
 
 	get sessionsRoot(): string {
@@ -926,11 +935,9 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 		const [legacy] = (await this.#client.unsafe(this.#q.findLegacyKey)) as Array<{ path: string }>;
 		if (!legacy) return;
 		throw new Error(
-			this.#diagnostic(
-				`SqlSessionStorage: ${this.#table} holds the row key ${JSON.stringify(legacy.path)}, which is neither ` +
-					`"${ROOT_KEY_PREFIX}…" nor "${ABSOLUTE_KEY_PREFIX}…". Stop every older Oh My Pi process that writes ` +
-					`the table, then migrate its keys with ${KEY_MIGRATION_COMMAND}.`,
-			),
+			`SqlSessionStorage: ${this.#table} holds the row key ${this.#quote(legacy.path)}, which is neither ` +
+				`"${ROOT_KEY_PREFIX}…" nor "${ABSOLUTE_KEY_PREFIX}…". Stop every older Oh My Pi process that writes ` +
+				`the table, then migrate its keys with ${KEY_MIGRATION_COMMAND}.`,
 		);
 	}
 
@@ -1020,10 +1027,8 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 			}
 			if (row.byte_len === null) {
 				throw new Error(
-					this.#diagnostic(
-						`SqlSessionStorage: ${this.#table} row ${JSON.stringify(row.path)} has no byte_len; ` +
-							`run the byte_len backfill in ${SCHEMA_DOCS}.`,
-					),
+					`SqlSessionStorage: ${this.#table} row ${this.#quote(row.path)} has no byte_len; ` +
+						`run the byte_len backfill in ${SCHEMA_DOCS}.`,
 				);
 			}
 			entries.push({
@@ -1039,7 +1044,8 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 			logger.warn("SqlSessionStorage skipped rows whose key it does not write", {
 				table: this.#table,
 				count: unmapped.length,
-				example: this.#diagnostic(unmapped[0] ?? ""),
+				// Raw, redacted: the logger quotes the fields it writes.
+				example: this.#redactValue(unmapped[0] ?? ""),
 				docs: KEY_MIGRATION_COMMAND,
 			});
 		}
@@ -1106,10 +1112,8 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 			}
 			if (row.byte_len === null) {
 				throw new Error(
-					this.#diagnostic(
-						`SqlSessionStorage: ${this.#table} row ${JSON.stringify(file)} has no byte_len; ` +
-							`run the byte_len backfill in ${SCHEMA_DOCS}.`,
-					),
+					`SqlSessionStorage: ${this.#table} row ${this.#quote(file)} has no byte_len; ` +
+						`run the byte_len backfill in ${SCHEMA_DOCS}.`,
 				);
 			}
 			size = rowNumber(row.byte_len);

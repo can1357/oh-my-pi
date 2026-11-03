@@ -103,6 +103,12 @@ export interface SessionKeyChangeOptions {
 	table?: string;
 	/** Plan only: read both tables and change nothing. */
 	dryRun: boolean;
+	/**
+	 * Rewrite each value (a key, a root) before a refusal reason or an error
+	 * quotes it, for example to remove the connection string. It runs on the
+	 * raw value, before quoting escapes it. Default: no rewriting.
+	 */
+	redact?: (text: string) => string;
 }
 
 export interface SessionKeyMigrationOptions extends SessionKeyChangeOptions {
@@ -149,12 +155,24 @@ function refuse(refusals: SessionKeyRefusal[], kind: SessionKeyRefusalKind, reas
 	if (keys.length > 0) refusals.push({ kind, reason, keys });
 }
 
+/** How a reason or an error quotes a value (`redact` it, then JSON-quote it). */
+type Quote = (value: string) => string;
+
+/**
+ * The {@link Quote} that runs `redact` on the raw value and then JSON-quotes
+ * it: quoting first would escape a secret holding `"`, `\` or a control
+ * character into a spelling the redactor does not look for.
+ */
+function quoter(redact: (text: string) => string = text => text): Quote {
+	return value => JSON.stringify(redact(value));
+}
+
 /**
  * The canonical form of each sessions root, refusing a root that is not
  * absolute, two roots that name one directory, and a root under another (a
  * key under both would have two new keys).
  */
-function canonicalRoots(roots: readonly string[], refusals: SessionKeyRefusal[]): string[] {
+function canonicalRoots(roots: readonly string[], refusals: SessionKeyRefusal[], quote: Quote): string[] {
 	if (roots.length === 0) refusals.push({ kind: "root", reason: "no sessions root was given", keys: [] });
 	refuse(
 		refusals,
@@ -168,10 +186,10 @@ function canonicalRoots(roots: readonly string[], refusals: SessionKeyRefusal[])
 	);
 	const canonical = [...spellings.keys()];
 	for (const [directory, listed] of spellings) {
-		if (listed.length > 1) refuse(refusals, "root", `these name one directory, ${JSON.stringify(directory)}`, listed);
+		if (listed.length > 1) refuse(refusals, "root", `these name one directory, ${quote(directory)}`, listed);
 		for (const other of canonical) {
 			if (!isUnder(other, directory)) continue;
-			refuse(refusals, "root", `nested: ${JSON.stringify(other)} lies under ${JSON.stringify(directory)}`, [
+			refuse(refusals, "root", `nested: ${quote(other)} lies under ${quote(directory)}`, [
 				...listed,
 				...(spellings.get(other) ?? []),
 			]);
@@ -187,11 +205,16 @@ function canonicalRoots(roots: readonly string[], refusals: SessionKeyRefusal[])
  * Keys already in the current layout stay, if every root's reader would read
  * them back. Refuses a relative legacy key, a current key some root's reader
  * skips, keys that would become one, a key longer than the column holds,
- * and bad roots.
+ * and bad roots. `redact` rewrites each value a refusal reason quotes.
  */
-export function planSessionKeyMigration(inventory: SessionKeyInventory, roots: readonly string[]): SessionKeyPlan {
+export function planSessionKeyMigration(
+	inventory: SessionKeyInventory,
+	roots: readonly string[],
+	redact?: (text: string) => string,
+): SessionKeyPlan {
+	const quote = quoter(redact);
 	const refusals: SessionKeyRefusal[] = [];
-	const canonical = canonicalRoots(roots, refusals);
+	const canonical = canonicalRoots(roots, refusals, quote);
 	const counts = emptyCounts();
 	const targets = new Map<string, string>();
 	const reserved: string[] = [];
@@ -250,7 +273,7 @@ export function planSessionKeyMigration(inventory: SessionKeyInventory, roots: r
 			"segment, or an abs: key that is not an absolute canonical path or lies under a listed root",
 		unreadable,
 	);
-	return finishPlan(inventory, targets, counts, refusals);
+	return finishPlan(inventory, targets, counts, refusals, quote);
 }
 
 /**
@@ -261,8 +284,14 @@ export function planSessionKeyMigration(inventory: SessionKeyInventory, roots: r
  * empty, `.` or `..` segment (the last one included), an `abs:` key that is
  * not an absolute canonical path, a key in neither layout, keys that would
  * become one, a key longer than the column holds, and a relative root.
+ * `redact` rewrites each value a refusal reason quotes.
  */
-export function planSessionKeyRollback(inventory: SessionKeyInventory, restoreRoot: string): SessionKeyPlan {
+export function planSessionKeyRollback(
+	inventory: SessionKeyInventory,
+	restoreRoot: string,
+	redact?: (text: string) => string,
+): SessionKeyPlan {
+	const quote = quoter(redact);
 	const refusals: SessionKeyRefusal[] = [];
 	const root = canonicalPath(restoreRoot);
 	if (root === undefined) refuse(refusals, "root", "not an absolute path", [restoreRoot]);
@@ -309,7 +338,7 @@ export function planSessionKeyRollback(inventory: SessionKeyInventory, restoreRo
 			"absolute canonical path",
 		unreadable,
 	);
-	return finishPlan(inventory, targets, counts, refusals);
+	return finishPlan(inventory, targets, counts, refusals, quote);
 }
 
 /** Refuse keys that would become one or not fit the column, and collect the moves. */
@@ -318,10 +347,11 @@ function finishPlan(
 	targets: ReadonlyMap<string, string>,
 	counts: SessionKeyCounts,
 	refusals: SessionKeyRefusal[],
+	quote: Quote,
 ): SessionKeyPlan {
 	const sources = groupBy(targets.keys(), key => targets.get(key) ?? key);
 	for (const [next, keys] of sources) {
-		if (keys.length > 1) refuse(refusals, "collision", `these would all become ${JSON.stringify(next)}`, keys);
+		if (keys.length > 1) refuse(refusals, "collision", `these would all become ${quote(next)}`, keys);
 	}
 	const moves = new Map<string, string>();
 	for (const [key, next] of targets) if (next !== key) moves.set(key, next);
@@ -358,7 +388,7 @@ function finishPlan(
 			refuse(
 				refusals,
 				"trailing-space",
-				`these would become keys that differ only in trailing spaces, which MySQL compares as equal: ${JSON.stringify(targetKeys)}`,
+				`these would become keys that differ only in trailing spaces, which MySQL compares as equal: [${targetKeys.map(quote).join(",")}]`,
 				targetKeys.flatMap(next => sources.get(next) ?? []),
 			);
 		}
@@ -519,6 +549,7 @@ function sameKeys(expected: ReadonlyMap<string, number>, actual: ReadonlyMap<str
  * with the same row counts. `before`, when given, is those keys as read
  * earlier in this transaction. No stored key may start with
  * {@link TEMPORARY_KEY_PREFIX}, and no two keys, old or new, may become one row.
+ * `redact` rewrites each key the error quotes.
  */
 export async function applySessionKeyMoves(
 	transaction: SqlSessionStorageTransaction,
@@ -527,9 +558,11 @@ export async function applySessionKeyMoves(
 		table?: string;
 		moves: ReadonlyMap<string, string>;
 		before?: SessionKeyInventory;
+		redact?: (text: string) => string;
 	},
 ): Promise<void> {
 	const { adapter, moves } = options;
+	const quote = quoter(options.redact);
 	const layout = await readLayout(transaction, adapter, sessionTableName(options.table));
 	const before = options.before ?? (await readInventory(transaction, adapter, layout));
 	const tables = layout.parts === undefined ? [layout.table] : [layout.table, layout.parts];
@@ -550,7 +583,7 @@ export async function applySessionKeyMoves(
 		const extra = [...current.keys()].filter(key => expected.get(key) !== current.get(key));
 		throw new Error(
 			`after the move ${table} does not hold the planned keys (missing or miscounted: ` +
-				`${JSON.stringify(missing.slice(0, 5))}; unexpected: ${JSON.stringify(extra.slice(0, 5))})`,
+				`[${missing.slice(0, 5).map(quote).join(",")}]; unexpected: [${extra.slice(0, 5).map(quote).join(",")}])`,
 		);
 	}
 }
@@ -559,7 +592,7 @@ async function changeKeys(
 	options: SessionKeyChangeOptions,
 	plan: (inventory: SessionKeyInventory) => SessionKeyPlan,
 ): Promise<SessionKeyChangeResult> {
-	const { client, dryRun } = options;
+	const { client, dryRun, redact } = options;
 	const adapter = options.adapter ?? detectAdapter(client);
 	const table = sessionTableName(options.table);
 	if (adapter === "sqlite") await ensureSqliteBusyTimeout(client);
@@ -571,7 +604,7 @@ async function changeKeys(
 		const planned = plan(before);
 		outcome.result = { plan: planned, applied: false };
 		if (dryRun || planned.refusals.length > 0 || planned.moves.size === 0) return;
-		await applySessionKeyMoves(transaction, { adapter, table, before, moves: planned.moves });
+		await applySessionKeyMoves(transaction, { adapter, table, before, moves: planned.moves, redact });
 		outcome.result = { plan: planned, applied: true };
 	});
 	if (!outcome.result) throw new Error("the key change transaction ended without a plan");
@@ -584,7 +617,7 @@ async function changeKeys(
  * a dry run. Stop every Oh My Pi process that writes the tables first.
  */
 export function migrateSessionRowKeys(options: SessionKeyMigrationOptions): Promise<SessionKeyChangeResult> {
-	return changeKeys(options, inventory => planSessionKeyMigration(inventory, options.roots));
+	return changeKeys(options, inventory => planSessionKeyMigration(inventory, options.roots, options.redact));
 }
 
 /**
@@ -593,5 +626,5 @@ export function migrateSessionRowKeys(options: SessionKeyMigrationOptions): Prom
  * A refused plan changes nothing; so does a dry run.
  */
 export function rollbackSessionRowKeys(options: SessionKeyRollbackOptions): Promise<SessionKeyChangeResult> {
-	return changeKeys(options, inventory => planSessionKeyRollback(inventory, options.restoreRoot));
+	return changeKeys(options, inventory => planSessionKeyRollback(inventory, options.restoreRoot, options.redact));
 }

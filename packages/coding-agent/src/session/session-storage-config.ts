@@ -150,6 +150,13 @@ function literalPattern(text: string): string {
  * where it stands as a token, every other secret wherever it occurs. The
  * longest secret wins, so one inside another goes whole, and a `<redacted>`
  * already in the text is kept as it is, so redacting twice changes nothing.
+ *
+ * Threat model: it removes the connection string and its parts as drivers
+ * and servers render them in their errors, and as omp itself quotes values,
+ * which omp redacts before quoting. A value that someone with write access
+ * stores in the database (a key, content, a trigger message) is data: a
+ * driver may re-encode it, for example MySQL's `\xHH` bytes, and omp does not
+ * redact that spelling; such a writer already knows what they stored.
  */
 function connectionStringRedactor(dsn: string): (text: string) => string {
 	/** Each secret, and whether it is replaced only as a token. */
