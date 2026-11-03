@@ -21,7 +21,7 @@ import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
 import type { TspFrame, TspNode, TspText } from "@oh-my-pi/pi-wire";
 import { DEFAULT_MAX_INLINE_IMAGES, ImageBudget } from "./components/image";
 import { TuiDebugServer } from "./debug-server";
-import { isKeyRelease, matchesKey } from "./keys";
+import { extractPrintableText, isKeyRelease, matchesKey } from "./keys";
 import { KITTY_PLACEHOLDER } from "./kitty-graphics";
 import { LoopWatchdog } from "./loop-watchdog";
 import { assumedTspHello, NativeBackend, type NativeHost } from "./native/backend";
@@ -212,7 +212,9 @@ export interface TUIStartOptions {
 	 * switches to raw input and replays the kernel-buffered keystrokes.
 	 *
 	 * A terminal expected to speak TSP needs raw input from the start, so it
-	 * gets it; its keystrokes are held instead (TSP events and the cell-size
+	 * gets it. Plain typing (printable text, Backspace) still edits the focused
+	 * component live, as the kernel echo shows it elsewhere; the first other key
+	 * and every key after it are held instead (TSP events and the cell-size
 	 * reply still apply) until {@link TUI.releaseHeldInput} replays them.
 	 */
 	deferInput?: boolean;
@@ -305,6 +307,13 @@ export interface Component {
 
 	/** User actions on nodes this component described (toggle, select, activate, custom). */
 	handleNativeEvent?(event: NativeUiEvent): void;
+
+	/**
+	 * Native transcript blocks drawn right after this one as siblings (a `TranscriptContainer` child only): notes
+	 * about the block that must show while it is collapsed, such as a tool card's Spotlight notice. The terminal
+	 * rows never show them. Return the same array while unchanged.
+	 */
+	nativeTrailers?(): readonly Component[];
 
 	/**
 	 * Pure preflight for focused input that must precede TUI-wide input listeners
@@ -1027,7 +1036,8 @@ export class TUI extends Container {
 	#inputDeferred = false;
 	/**
 	 * Keystrokes held since a TSP `deferInput` start, replayed by
-	 * releaseHeldInput(); undefined when not holding.
+	 * releaseHeldInput(); undefined when not holding, empty while plain typing
+	 * still goes through live.
 	 */
 	#heldInput: string[] | undefined;
 	/**
@@ -1323,6 +1333,11 @@ export class TUI extends Container {
 				const index = this.overlayStack.indexOf(entry);
 				if (index !== -1) {
 					this.overlayStack.splice(index, 1);
+					// Overlays opened over this one return focus to where it would have.
+					for (const other of this.overlayStack) {
+						if (other.preFocus && isOverlayFocusTarget(component, other.preFocus))
+							other.preFocus = entry.preFocus;
+					}
 					// Restore focus if this overlay or one of its owned targets had focus
 					if (isOverlayFocusTarget(component, this.#focusedComponent)) {
 						this.setFocus(this.#getKeyHolderOverlay()?.component ?? entry.preFocus);
@@ -2976,7 +2991,11 @@ export class TUI extends Container {
 		}
 		if (data.length === 0) return;
 
-		if (this.#heldInput !== undefined && this.#focusedComponent === this.#heldFocus) {
+		if (
+			this.#heldInput !== undefined &&
+			this.#focusedComponent === this.#heldFocus &&
+			!this.#typesThroughHold(data)
+		) {
 			this.#holdInput(data);
 			return;
 		}
@@ -3064,6 +3083,18 @@ export class TUI extends Container {
 		if (focused?.handleInput) return focused;
 		const holder = this.#getKeyHolderOverlay();
 		return holder?.component === focused ? holder.preFocus : null;
+	}
+
+	/**
+	 * Whether a keystroke typed during a TSP startup hold edits the focused
+	 * component now: plain typing (printable text, Backspace) and key releases,
+	 * while nothing is queued ahead of them. The draft then grows as it is typed,
+	 * like a cooked tty's echo; a shortcut waits for the handlers that act on it,
+	 * and whatever follows it waits behind it to keep typing order.
+	 */
+	#typesThroughHold(data: string): boolean {
+		if (this.#heldInput!.length > 0) return false;
+		return extractPrintableText(data) !== undefined || matchesKey(data, "backspace") || isKeyRelease(data);
 	}
 
 	/**

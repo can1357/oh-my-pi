@@ -1011,9 +1011,7 @@ mod tests {
 				.open(&path)
 				.expect("lock file")
 		};
-		// SAFETY: `file` owns a live descriptor; flock is nonblocking.
-		let lock =
-			|file: &File| unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 };
+		let lock = |file: &File| file.try_lock().is_ok();
 		let host = open();
 		assert!(lock(&host));
 		let ownership = host.try_clone().expect("shared lock");

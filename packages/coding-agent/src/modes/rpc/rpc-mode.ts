@@ -50,11 +50,13 @@ import {
 } from "@oh-my-pi/pi-tui/prompt/word-completion";
 import { requestTextPrediction, textPredictionBackend } from "../../predict/client";
 import { type AgentSession, type NavigateTreeResult, SessionBusyError } from "../../session/agent-session";
+import type { AgentSessionHandle } from "../../session/agent-session-handle";
 import type { MCPManager } from "../../mcp/manager";
 import { reconnectMcpManagerServer } from "../../mcp/oauth-reauth";
 import type { RestoredQueuedMessage } from "../../session/agent-session-types";
 import { CACHE_WARMING_MODES } from "../../session/cache-warmer";
 import { findMostRecentNonEmptySession, findRecentSessionContinuation } from "../../session/session-listing";
+import { probeSessionLeases } from "../../session/session-storage";
 import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
 import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
 import { buildAvailableSlashCommands } from "../../slash-commands/available-commands";
@@ -841,7 +843,7 @@ export async function handleRpcSteerSubagent(
 	const notRunning = `Subagent not running: ${subagentId}`;
 	const owned = resolveOwnedLiveSubagent(subagentRegistry, subagentId);
 	if (!owned) return notRunning;
-	let session: AgentSession;
+	let session: AgentSessionHandle;
 	try {
 		session = await AgentLifecycleManager.global().ensureLive(subagentId);
 	} catch {
@@ -2645,6 +2647,14 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 			case "get_session_stats": {
 				const stats = session.getSessionStats();
 				return success(id, "get_session_stats", stats);
+			}
+
+			case "get_session_lease": {
+				const { sessionIds } = command;
+				if (!Array.isArray(sessionIds) || !sessionIds.every(sessionId => typeof sessionId === "string")) {
+					return error(id, "get_session_lease", "sessionIds must be an array of strings");
+				}
+				return success(id, "get_session_lease", probeSessionLeases(sessionIds));
 			}
 
 			case "export_html": {

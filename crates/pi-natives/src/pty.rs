@@ -297,10 +297,9 @@ impl PtySession {
 			*guard = None;
 			drop(guard);
 
-			match run_result {
-				Ok(inner) => inner,
-				Err(err) => Err(Error::from_reason(format!("PTY execution task failed: {err}"))),
-			}
+			run_result
+				.map_err(|err| Error::from_reason(format!("PTY execution task failed: {err}")))
+				.flatten()
 		})
 	}
 

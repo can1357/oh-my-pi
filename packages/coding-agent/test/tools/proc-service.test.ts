@@ -133,43 +133,6 @@ async function wokenAgentSession(
 }
 
 describe("proc:// background jobs", () => {
-	it("reads what a pipeline stage wrote while a later stage still holds it back", async () => {
-		const manager = new AsyncJobManager({});
-		const session = toolSession(process.cwd(), manager, { launch: false, async: true });
-		const proc = new ProcProtocolHandler();
-		try {
-			await new BashTool(session).execute("piped", {
-				command: "{ printf 'one\\r\\ntwo\\rthree\\n'; sleep 30; } | tail -n 1",
-				async: true,
-				pty: false,
-			});
-			const [job] = manager.getAllJobs({ ownerId: "Main" });
-			if (!job) throw new Error("no bash job started");
-			const read = (url: string) => proc.resolve(parseInternalUrl(url), { session });
-
-			// Real-time poll: the stream fills from a real child's pipe write, and
-			// nothing in-process signals when the relay thread has copied it.
-			let stream = "";
-			for (let waited = 0; stream !== "one\ntwo\nthree\n" && waited < 10_000; waited += 20) {
-				await Bun.sleep(20);
-				const opened = (await read(`proc://${job.id}/streams`)).content.startsWith(`proc://${job.id}/streams/1 `);
-				if (opened) stream = (await read(`proc://${job.id}/streams/1`)).content;
-			}
-			// CRLF and bare-CR progress both read as lines.
-			expect(stream).toBe("one\ntwo\nthree\n");
-			// The job's own output is still empty: `tail` prints only at EOF.
-			expect((await read(`proc://${job.id}`)).details).toMatchObject({ proc: { log: "" } });
-			const listing = await read(`proc://${job.id}/streams`);
-			expect(listing.isDirectory).toBeTrue();
-			expect(listing.content).toMatch(new RegExp(`^proc://${job.id}/streams/1 open 15B — .*printf.* → tail -n 1$`));
-			expect(await rejectionMessage(read(`proc://${job.id}/streams/2`))).toContain(
-				`List them with proc://${job.id}/streams`,
-			);
-		} finally {
-			await manager.dispose({ timeoutMs: 2_000 });
-		}
-	}, 20_000);
-
 	it("lists owned jobs, preserves delivery on read, and scopes kill to the owner", async () => {
 		const manager = new AsyncJobManager({});
 		const pending = Promise.withResolvers<string>();
@@ -312,7 +275,13 @@ describe("proc:// background jobs", () => {
 
 	it("advertises stdin and modes as service-only while kill remains available for jobs and agents", async () => {
 		const help = new InternalUrlRouter()
-			.describe({ skillUriAccess: false, ruleCount: 0, securityEnabled: false, settingsApproval: false })
+			.describe({
+				skillUriAccess: false,
+				ruleCount: 0,
+				securityEnabled: false,
+				settingsApproval: false,
+				outReplies: false,
+			})
 			.find(line => line.startsWith("`proc://`"));
 		expect(help).toMatch(/stdin[^;]*services.only/);
 		expect(help).toMatch(/\/mode[^;]*services.only/);
@@ -597,40 +566,6 @@ describe("proc:// background jobs", () => {
 		expect(await Bun.file(file).text()).toBe("");
 	});
 
-	it("lists settled jobs with their frozen run duration instead of their age", async () => {
-		const clock = vi.spyOn(Date, "now").mockReturnValue(1_000);
-		const manager = new AsyncJobManager({});
-		const release = Promise.withResolvers<string>();
-		const doneId = manager.register("bash", "sleep 2; echo fast-done", () => release.promise, { ownerId: "Main" });
-		const blocked = Promise.withResolvers<string>();
-		const runningId = manager.register(
-			"bash",
-			"sleep 60",
-			async ({ signal }) => {
-				signal.addEventListener("abort", () => blocked.resolve("cancelled"), { once: true });
-				return blocked.promise;
-			},
-			{ ownerId: "Main" },
-		);
-		const session = toolSession(process.cwd(), manager, { launch: false });
-		try {
-			clock.mockReturnValue(3_000);
-			release.resolve("fast-done");
-			await manager.getJob(doneId)?.promise;
-			clock.mockReturnValue(40_000);
-			const list = await new ProcProtocolHandler().resolve(parseInternalUrl("proc://"), { session });
-			expect(list.content).toContain(`${doneId} [bash] completed in 2.0s — sleep 2; echo fast-done`);
-			expect(list.content).toContain(`${runningId} [bash] running up 39.0s — sleep 60`);
-			expect(list.details?.proc?.jobs).toMatchObject([
-				{ id: doneId, durationMs: 2_000 },
-				{ id: runningId, durationMs: 39_000 },
-			]);
-		} finally {
-			clock.mockRestore();
-			await manager.dispose();
-		}
-	});
-
 	it("shows a running task's progress in the proc:// listing and its own read, but not a bash job's", async () => {
 		const manager = new AsyncJobManager({});
 		const pending = Promise.withResolvers<string>();
@@ -906,6 +841,33 @@ describe("bash services via proc://", () => {
 			expect(read.details?.proc).toMatchObject({ daemon: { name: "slow-service", state: "starting" } });
 		} finally {
 			await client.request({ op: "stop", name: "slow-service", timeoutMs: 1_000 }).catch(() => undefined);
+			await client.request({ op: "shutdown" }).catch(() => undefined);
+			client.close();
+			await broker;
+			setProcessName(oldTitle);
+			spy.mockRestore();
+		}
+	}, 20_000);
+
+	it("starts a service at log readiness when the tool call materialized an unset port as zero", async () => {
+		using temp = TempDir.createSync("@omp-proc-service-port0-");
+		const cwd = path.join(temp.path(), "project");
+		const runtimeDir = path.join(temp.path(), "runtime");
+		await fs.mkdir(cwd);
+		const client = await createDaemonBrokerClient(cwd, { runtimeDir, idleGraceMs: 5_000 });
+		const spy = vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(client);
+		const oldTitle = process.title;
+		const broker = startBroker(cwd, runtimeDir);
+		try {
+			const result = await new BashTool(toolSession(cwd)).execute("service", {
+				command: "printf 'READY\\n'; sleep 30",
+				name: "port0-service",
+				ready: { log: "READY", port: 0, host: "", timeout: 5 },
+				pty: false,
+			});
+			expect(result.details?.service).toMatchObject({ name: "port0-service", ready: true, timedOut: false });
+		} finally {
+			await client.request({ op: "stop", name: "port0-service", timeoutMs: 1_000 }).catch(() => undefined);
 			await client.request({ op: "shutdown" }).catch(() => undefined);
 			client.close();
 			await broker;

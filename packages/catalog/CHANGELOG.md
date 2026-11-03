@@ -5,10 +5,82 @@
 ### Added
 
 - Added catalog-controlled standard Responses WebSockets, preferred on official OpenAI endpoints while gateways require explicit opt-in ([#17354](https://github.com/can1357/oh-my-pi/pull/17354) by [@TatsukiMeng](https://github.com/TatsukiMeng))
+- Added the `supports-message-threads` compat axis (`supportsMessageThreads`), enabled for Claude 4.5 and newer on the first-party Anthropic provider
+
+## [18.16.0] - 2026-11-02
+
+### Added
+
+- `/login mistral` now offers the Mistral Vibe browser sign-in beside `MISTRAL_API_KEY` ([#13875](https://github.com/can1357/oh-my-pi/pull/13875) by [@Gauthier-Huguenin](https://github.com/Gauthier-Huguenin), continued in [#17672](https://github.com/can1357/oh-my-pi/pull/17672) by [@abilliontokens](https://github.com/abilliontokens))
+- Added `revisionAtLeast` to `compat/revision` and exported `withOpenAICompatibleDiscoveryTimeout` from `discovery/openai-compatible`
+- Added the Factory Droid models droid 1.1.0 serves: GPT-6.1 Terra, GPT-6 Sol and Luna Fast Mode, GPT-6 Astra and GPT-6.1 Sol Ultra Fast (after the organization's high-cost opt-in), Nemotron 3.5 Super, Muse Spark Open, Muse Spark 1.2 and Beam 1.0, each listed once the account may use it ([#17766](https://github.com/can1357/oh-my-pi/pull/17766) by [@will-bogusz](https://github.com/will-bogusz))
+- Added Factory Droid's dated credit rates: the credit rate follows Factory's promotions, discounted from a promotion's start and back to the base rate at its end, using the same dated rate cards as dollar prices (currently GPT-5.6 Sol and Gemini 3.7/3.8 Flash) ([#16309](https://github.com/can1357/oh-my-pi/pull/16309) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Changed
+
+- Factory Droid lists Opus 5.5 Fast, GPT-6.1 Sol and MiniMax M3 without the feature flags Factory retired, and no longer routes GPT-5.5 to Snowflake ([#17766](https://github.com/can1357/oh-my-pi/pull/17766) by [@will-bogusz](https://github.com/will-bogusz))
+- Factory Droid Opus 5.5 now falls back to Opus 5 when Anthropic refuses a request, as droid does, while your account can use Opus 5 ([#17772](https://github.com/can1357/oh-my-pi/pull/17772) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
 
-- Fixed DeepSeek V4.1 Flash image attachments being stripped on publisher-namespaced ids such as `ds/deepseek-flash` ([#16470](https://github.com/can1357/oh-my-pi/pull/16470) by [@ZanDev32](https://github.com/ZanDev32))
+- GPT-3.5 and GPT-4 (Turbo) resolve the `cl100k` tokenizer, so their context estimates count in cl100k_base rather than the o200k_base default for models without one ([#17607](https://github.com/can1357/oh-my-pi/pull/17607) by [@will-bogusz](https://github.com/will-bogusz))
+- Added Scaleway Generative APIs as a built-in provider with 12 serverless chat models (glm-5.3 default), API-key login, and live model discovery ([#16687](https://github.com/can1357/oh-my-pi/pull/16687) by [@reda-maizate](https://github.com/reda-maizate))
+
+## [18.15.0] - 2026-11-01
+
+### Added
+
+- Added Modular Cloud (`modular`) as a provider: `/login modular` with an API key, models and prices from the models.dev `modular` entry, and per-model reasoning controls for MiniMax M3.1 Flash, MiniMax M3, and Gemma 4 31B ([#17334](https://github.com/can1357/oh-my-pi/pull/17334) by [@tommyjtl](https://github.com/tommyjtl))
+- SambaNova Cloud follow-up turns now reuse the provider's prefix cache, so multi-turn conversations stop re-processing earlier context ([#17555](https://github.com/can1357/oh-my-pi/pull/17555) by [@rjuez00](https://github.com/rjuez00))
+
+### Fixed
+
+- Fixed newly discovered OpenAI-compatible models ignoring provider-reported context and output token limits ([#17561](https://github.com/can1357/oh-my-pi/pull/17561) by [@wolfiesch](https://github.com/wolfiesch))
+
+## [18.14.2] - 2026-10-31
+
+### Breaking Changes
+
+- Removed `thinkingLoopGuard` from compat records; `thinking-loop-guard` is now a catalog axis that applies on every host, with `"semantic"` for Gemini, DeepSeek, and Grok and `"off"` for Claude
+
+### Fixed
+
+- Fixed GitHub Copilot Claude 5.x base models (`claude-opus-5`, `claude-opus-5.5`, `claude-sonnet-5`, `claude-sonnet-5.5`) reporting the 1M window of their `-1m` variants once the model list was read from cache; discovered limits now survive cached reads instead of reverting to bundled values ([#17481](https://github.com/can1357/oh-my-pi/issues/17481))
+
+## [18.14.1] - 2026-10-31
+
+### Changed
+
+- Clamping a requested thinking effort now resolves through the model's `effortMap` alias first, so the request lands on the tier the model serves instead of the nearest lower one ([#17395](https://github.com/can1357/oh-my-pi/pull/17395) by [@Maziar123](https://github.com/Maziar123))
+- Long image-heavy conversations on the official Anthropic API now keep up to 120 MB of inline images before evicting older ones, following the Messages API request limit increase from 32 MB to 128 MB
+- The official Anthropic API now records its 128 MB request limit (`request-body-byte-limit`), so the newest message's images can use the 8 MB reserve and long text cannot push images past the limit ([#17492](https://github.com/can1357/oh-my-pi/pull/17492) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Fixed
+
+- Fixed Cursor's DeepSeek V4.1 Flash 1017 reporting zero cost; every effort level now bills at Cursor's API rate of $0.30/$1.20 per million tokens, with cache reads at $0.006 ([#17390](https://github.com/can1357/oh-my-pi/pull/17390) by [@eggpeat](https://github.com/eggpeat))
+
+## [18.14.0] - 2026-10-29
+
+### Breaking Changes
+
+- Removed the raw `@oh-my-pi/pi-catalog/models.json` export; use the bundled model registry APIs instead.
+
+### Added
+
+- Added `nextBuildPriceChange(cost, now)` to identify when a model's dated pricing card may change, allowing callers to safely reuse earlier builds until that time.
+- Added the `selector-revision-suffix` catalog axis for Google Vertex, so `google-vertex/claude-opus-4-8` resolves exactly to `claude-opus-4-8@default`.
+
+### Changed
+
+- Reduced the bundled model catalog size and loading overhead.
+- Updated role defaults so Factory Droid image models are preferred for the `image` role, allowing `generate_image` to work with only a Factory login.
+- Updated `smol` and `slow` role defaults to use the currently bundled Cerebras and OpenAI Codex model identifiers.
+
+### Fixed
+
+- Fixed Mistral reasoning models so streamed thinking appears in the transcript and is preserved for subsequent turns.
+- Fixed later-turn HTTP 422 errors in Mistral-hosted DeepSeek conversations when assistant reasoning history is included.
+- Fixed DeepSeek V4.1 Flash image attachments being dropped for publisher-namespaced model IDs such as `ds/deepseek-flash`.
 
 ## [18.13.3] - 2026-10-28
 

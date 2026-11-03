@@ -4,8 +4,59 @@
 
 ### Added
 
-- `PI_INTENT_DESC` replaces the schema description of the injected `i` intent field
-- `AgentTool.approvalRestrictionPaths` reports paths a call reads, so restricted folders cover them without the approval being remembered per path ([#17133](https://github.com/can1357/oh-my-pi/pull/17133) by [@iliaal](https://github.com/iliaal))
+- Added `Agent.queuedMessageGate`, a synchronous `QueuedMessageGate` consulted before every queued-message delivery batch (it can drop candidates) and told when claimed messages go back undelivered
+
+## [18.16.0] - 2026-11-02
+
+### Changed
+
+- Deprecated `createFileOps`, `computeFileLists`, `formatFileOperations`, `upsertFileOperations`, `isUrlSchemePath` and `FileOperations` in `@oh-my-pi/pi-agent-core/compaction`; they now re-export `@oh-my-pi/snapcompact`, which callers should import directly
+
+### Fixed
+
+- Context estimates for a model without a known tokenizer family (Gemini, Grok and the like), and token counts made without a model (compress metrics, the legacy `estimateTokens` export), count text in o200k_base instead of guessing 4 bytes per token, which undercounted what those providers bill by 11–48% on code-heavy sessions and let compaction fire late after a switch to them ([#17607](https://github.com/can1357/oh-my-pi/pull/17607) by [@will-bogusz](https://github.com/will-bogusz))
+- Context estimates no longer charge a reader another model's thinking signatures or redacted thinking, which the request strips: a Claude session switched to Grok or Gemini, including Gemini through Factory, counted them as text ([#17607](https://github.com/can1357/oh-my-pi/pull/17607) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Removed
+
+- Removed `PI_TOKENIZER_ACCURATE`: every model is now counted with a native tokenizer ([#17607](https://github.com/can1357/oh-my-pi/pull/17607) by [@will-bogusz](https://github.com/will-bogusz))
+
+## [18.15.0] - 2026-11-01
+
+### Fixed
+
+- Fixed OpenAI remote compaction (`/responses/compact`) replaying backend-only `internal_chat_message_metadata_passthrough` metadata that Codex rejects as an unknown parameter ([#17590](https://github.com/can1357/oh-my-pi/pull/17590) by [@briankeefe](https://github.com/briankeefe))
+
+## [18.14.2] - 2026-10-31
+
+### Added
+
+- The soft steering signal a tool sees as `toolCall.steeringSignal` now aborts with the source of the queued message (`"user"`, `"irc"`, …) as its `reason`, so a tool can yield only to the sources it should ([#17537](https://github.com/can1357/oh-my-pi/issues/17537))
+
+### Fixed
+
+- Reject incomplete local compaction, turn-prefix, handoff, and branch summaries ending with `stopReason: "length"` instead of using truncated text as complete context. Omit incomplete display-only short summaries without discarding a completed full summary ([#17499](https://github.com/can1357/oh-my-pi/pull/17499) by [@Xytronix](https://github.com/Xytronix)).
+
+## [18.14.1] - 2026-10-31
+
+### Breaking Changes
+
+- `SentToolDefinitions.inactiveFor(messages, tools)` is replaced by `withInactiveTools(context)`, which also clears a stale `inactiveTools`; `transformProviderContext` now receives the request's `inactiveTools` ([#17492](https://github.com/can1357/oh-my-pi/pull/17492))
+
+### Fixed
+
+- Long tool-call intents no longer block tool execution when intent tracing is enabled ([#13140](https://github.com/can1357/oh-my-pi/issues/13140)).
+
+## [18.14.0] - 2026-10-29
+
+### Breaking Changes
+
+- Removed the Bun event-loop workaround utilities from `@oh-my-pi/pi-agent-core/utils/yield`; agent loops no longer insert cooperative sleeps while streaming or between tool calls.
+
+### Added
+
+- Added `AgentTool.approvalRestrictionPaths` so tools can report the paths they read, allowing restricted-folder approvals to cover those paths without remembering approval separately for each path.
+- Added `Agent.logContext`, which adds custom context fields to every log record written during an agent run.
 
 ## [18.13.3] - 2026-10-28
 

@@ -10,14 +10,17 @@ import { Text } from "../components/text";
 import { fileHyperlink, getTreeBranch, renderStatusLine, renderTreeList, uriHyperlink } from "../render";
 import {
 	createCachedComponent,
+	FILE_NAME_COLOR,
 	fitHeaderedRows,
 	formatCount,
 	formatEmptyMessage,
 	formatErrorMessage,
+	formatStyledPath,
 	PREVIEW_LIMITS,
 	replaceTabs,
 } from "../render/render-utils";
-import type { Theme, ThemeColor } from "../theme/theme";
+import { getLanguageFromPath } from "../lang-from-path";
+import { highlightCode, isHighlightLanguage, type Theme, type ThemeColor } from "../theme/theme";
 import type { Component } from "../tui";
 import type { OutputMeta } from "./output-meta";
 import type {
@@ -167,14 +170,19 @@ function renderHit(hit: FindHit, rangeLimit: number, cwd: string | undefined, ra
 		return absPath === undefined ? text : fileHyperlink(absPath, text, { line });
 	};
 	const coverage = hit.truncated ? `${hit.linesSeen} lines judged, partial` : `${hit.linesSeen} lines judged`;
-	const lines = [
-		`${gauge(hit.contentScore, theme)} ${theme.fg(scoreColor(hit.contentScore), hit.contentScore.toFixed(2))} ${link(theme.fg("accent", hit.rel))} ${theme.fg("dim", coverage)}`,
-	];
+	// URL hits show whole in the file-name color; file hits get the dim directory.
+	const label = isUrlHit ? theme.fg(FILE_NAME_COLOR, hit.rel) : formatStyledPath(hit.rel, theme);
+	const score = theme.fg(scoreColor(hit.contentScore), hit.contentScore.toFixed(2));
+	const lines = [`${gauge(hit.contentScore, theme)} ${score} ${link(label)} ${theme.fg("dim", coverage)}`];
 	const ranges = [...hit.ranges].sort((a, b) => b.p - a.p || a.start - b.start).slice(0, rangeLimit);
+	const lang = getLanguageFromPath(hit.rel);
 	ranges.forEach((range, index) => {
 		const span = range.start === range.end ? String(range.start) : `${range.start}-${range.end}`;
 		const ref = link(theme.fg("muted", `:${span}`), range.start);
-		const snippet = theme.fg("toolOutput", replaceTabs(range.snippet.trim()));
+		const source = replaceTabs(range.snippet.trim());
+		const snippet = isHighlightLanguage(lang)
+			? highlightCode(source, lang, theme).join("\n")
+			: theme.fg("toolOutput", source);
 		const branch = theme.fg("dim", getTreeBranch(index === ranges.length - 1, theme));
 		lines.push(`  ${branch} ${ref} ${theme.fg("dim", range.p.toFixed(2))} ${snippet}`);
 	});

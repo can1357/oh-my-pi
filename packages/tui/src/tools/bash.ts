@@ -13,6 +13,7 @@ import {
 	replaceTabs,
 } from "../render/render-utils";
 import {
+	formatMinimizedMeta,
 	formatStyledTruncationWarning,
 	type OutputMeta,
 	stripOutputNotice,
@@ -27,6 +28,7 @@ import type {
 	ToolRenderer,
 } from "./renderer";
 import { INTENT_FIELD, type TspTone } from "@oh-my-pi/pi-wire";
+import type { SpotlightDetails } from "../chat/spotlight";
 import { plainText } from "../native/spans";
 import { resultText, runBox, runFoot, runInput, runOutput, type RunState } from "./native-view";
 
@@ -69,6 +71,10 @@ export interface BashToolDetails {
 	exitCode?: number;
 	/** True when the command was killed by its timeout deadline (not a failure). */
 	timedOut?: boolean;
+	/** Text the command wrote to `out://`, oldest first; transcripts draw each as a reply after the call. */
+	replies?: string[];
+	/** What the session's Spotlight shaping did to the output. */
+	spotlight?: SpotlightDetails;
 	/** Live ACP update only; completed results refer to released terminals. */
 	terminalId?: string;
 	service?: {
@@ -349,6 +355,10 @@ function bashStatsParts(
 	if (artifactId) {
 		statsParts.push(`Artifact: ${artifactId}`);
 	}
+	const minimized = details?.meta?.minimized;
+	if (minimized) {
+		statsParts.push(`Minimized: ${formatMinimizedMeta(minimized)}`);
+	}
 	if (isError && typeof details?.exitCode === "number") {
 		statsParts.push(`Exit: ${details.exitCode}`);
 	}
@@ -398,6 +408,8 @@ function shellFootParts(details: BashToolDetails | undefined, artifactId: string
 		if (service.pid !== undefined) parts.push(`PID ${service.pid}`);
 	}
 	if (artifactId) parts.push(`Artifact ${artifactId}`);
+	const minimized = details?.meta?.minimized;
+	if (minimized) parts.push(`Minimized ${formatMinimizedMeta(minimized)}`);
 	return parts;
 }
 

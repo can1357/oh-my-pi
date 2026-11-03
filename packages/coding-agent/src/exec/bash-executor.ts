@@ -1,9 +1,9 @@
 /**
  * Bash command execution with streaming support and cancellation.
  *
- * Uses brush-core via native bindings for shell execution.
+ * Uses the embedded bash engine (pi-shell) through native bindings for shell
+ * execution.
  */
-import { ExponentialYield } from "@oh-my-pi/pi-agent-core/utils/yield";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import {
 	type MinimizerOptions,
@@ -16,6 +16,7 @@ import {
 import { $env } from "@oh-my-pi/pi-utils/env";
 import { isCmdShell, isExecutable, type ShellConfig } from "@oh-my-pi/pi-utils/procmgr";
 import { Settings } from "../config/settings";
+import type { MinimizedMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { type OutputArtifactError, OutputSink, type OutputSummary } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import {
 	resolveOutputMaxColumns,
@@ -53,7 +54,7 @@ export interface BashExecutorOptions {
 	sessionKey?: string;
 	/** Additional environment variables to inject */
 	env?: Record<string, string>;
-	/** Run through the configured user shell instead of brush parsing directly. */
+	/** Run through the configured user shell instead of the embedded shell parsing directly. */
 	useUserShell?: boolean;
 	/** Run supported user shells (zsh/fish) on a headless PTY; requires `useUserShell`. */
 	pty?: BashPtyOptions;
@@ -90,6 +91,11 @@ export interface BashExecutorOptions {
 	 * so the persistent shell it used is dropped instead of kept for a next call.
 	 */
 	isSessionCurrent?: () => boolean;
+	/**
+	 * `false` skips the shell output minimizer (`shellMinimizer.*`) for this run: the session's Spotlight
+	 * experiment shapes the output instead. Default: the setting decides.
+	 */
+	minimize?: boolean;
 	/** Artifact path/id for full output storage */
 	artifactPath?: string;
 	artifactId?: string;
@@ -134,6 +140,8 @@ export interface BashResult {
 	/** Bytes the artifact cap dropped from the saved file's middle (the artifact is a head/tail sample). */
 	artifactElidedBytes?: number;
 	artifactError?: OutputArtifactError;
+	/** The native minimizer's rewrite, set when its output replaced the raw stream. */
+	minimized?: MinimizedMeta;
 	workingDir?: string;
 	/** Terminal graphics extracted from raw stdout before sanitization or truncation. */
 	images?: ImageContent[];
@@ -320,7 +328,7 @@ export function releaseShellSessions(agentSessionKey: string | undefined): void 
 }
 
 function resolveShellCwd(cwd: string | undefined): string | undefined {
-	// Preserve the caller's logical cwd string. Brush uses this value to update `PWD` and its
+	// Preserve the caller's logical cwd string. The embedded shell uses this value to update `PWD` and its
 	// internal working directory, so realpathing here collapses symlinks before the shell sees them.
 	return cwd;
 }
@@ -572,7 +580,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 		supportsAutoUserShell(shell) &&
 		$env.PI_NO_PTY !== "1" &&
 		!isPersistentShellCdCommand(command);
-	const minimizer = buildMinimizerOptions(cfgShellMinimizer.get(settings));
+	const minimizer = options?.minimize === false ? undefined : buildMinimizerOptions(cfgShellMinimizer.get(settings));
 
 	const commandCwd = resolveShellCwd(options?.cwd);
 	const virtualCwd = commandCwd !== undefined && URL_CWD_RE.test(commandCwd);
@@ -600,7 +608,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 	const commandEnv = buildNonInteractiveEnv(preflight.env);
 	const runCdInPersistentShell = options?.useUserShell === true && !prefix && isPersistentShellCdCommand(command);
 	// Never wrap in cmd.exe: it is only the Windows no-bash fallback for spawn
-	// paths, and the embedded brush shell runs the POSIX line better directly.
+	// paths, and the embedded shell runs the POSIX line better directly.
 	const finalCommand =
 		options?.useUserShell === true && !bashShell && !isCmdShell(shell) && !runCdInPersistentShell
 			? buildUserShellCommand(shell, args, preflight.command)
@@ -774,8 +782,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 		);
 		options?.onStart?.(() => executionShell.pids());
 
-		const ey = new ExponentialYield();
-		const winner = await ey.race<
+		const winner = await Promise.race<
 			{ kind: "result"; result: ShellRunResult } | { kind: "timeout" } | { kind: "abort" }
 		>([
 			runPromise.then(result => ({ kind: "result" as const, result })),
@@ -853,15 +860,18 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 		// (or an unavailable allocator) must keep the raw stream rather than
 		// silently dropping the diagnostics the summary elided.
 		const minimized = winner.result.minimized;
+		let minimizedMeta: MinimizedMeta | undefined;
 		if (minimized && minimized.text !== minimized.originalText) {
+			const info = {
+				filter: minimized.filter,
+				inputBytes: minimized.inputBytes,
+				outputBytes: minimized.outputBytes,
+			};
 			const artifactId = options?.onMinimizedSave
-				? await options.onMinimizedSave(minimized.originalText, {
-						filter: minimized.filter,
-						inputBytes: minimized.inputBytes,
-						outputBytes: minimized.outputBytes,
-					})
+				? await options.onMinimizedSave(minimized.originalText, info)
 				: undefined;
 			if (artifactId) {
+				minimizedMeta = { ...info, artifactId };
 				// The decoder above already owns image extraction from the streamed
 				// lossless output. Scrub any graphics frames repeated by the native
 				// minimizer without feeding them back into that decoder.
@@ -878,6 +888,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			exitCode: winner.result.exitCode,
 			cancelled: false,
 			workingDir: winner.result.workingDir,
+			...(minimizedMeta ? { minimized: minimizedMeta } : {}),
 			...(await dump()),
 		};
 	} catch (err) {

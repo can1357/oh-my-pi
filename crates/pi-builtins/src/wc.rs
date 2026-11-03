@@ -567,7 +567,6 @@ use std::{
 	path::{Path, PathBuf},
 };
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::ValueParser};
 use thiserror::Error;
 use utf8::{BufReadDecoder, BufReadDecoderError};
@@ -583,7 +582,7 @@ use self::{
 	countable::WordCountable,
 	word_count::WordCount,
 };
-use crate::host::{Host, Utility, format_usage, matches_parser, os_bytes_lossy, util};
+use crate::host::{Host, Utility, format_usage, matches_parser, os_bytes_lossy};
 
 /// The minimum character width for formatting counts when reading from stdin.
 const MINIMUM_WIDTH: usize = 7;
@@ -625,8 +624,7 @@ impl Settings {
 
 		let total_when = matches
 			.get_one::<String>(options::TOTAL)
-			.map(Into::into)
-			.unwrap_or_default();
+			.map_or_default(Into::into);
 
 		let settings = Self {
 			show_bytes: matches.get_flag(options::BYTES),
@@ -1383,7 +1381,7 @@ fn validate_files0(items: Vec<InputIterItem>, source: &Input) -> Vec<InputIterIt
 		.into_iter()
 		.enumerate()
 		.map(|(index, item)| match item {
-			Ok(Input::Path(path)) if path.as_os_str().is_empty() => {
+			Ok(Input::Path(path)) if path.is_empty() => {
 				Err(WcError::zero_len(Some((source, index + 1))))
 			},
 			_ => item,
@@ -1547,7 +1545,7 @@ fn wc(inputs: &Inputs, settings: &Settings, host: &mut Host) {
 				record_error(
 					host,
 					WcError::Io {
-						context: format!("failed to print result for {}", title.to_string_lossy()),
+						context: format!("failed to print result for {}", title.display()),
 						source,
 					},
 				);
@@ -1604,11 +1602,6 @@ fn print_stats(
 	}
 	line.push(b'\n');
 	stdout.write_all(&line)
-}
-
-/// Creates the `wc` builtin registration.
-pub(crate) fn wc_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Wc, SE>()
 }
 
 #[cfg(test)]

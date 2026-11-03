@@ -101,6 +101,31 @@ async fn trailing_end_patch_closes_a_wrapped_insert_instead_of_being_inserted() 
 }
 
 #[tokio::test]
+async fn end_sentinels_close_put_bodies_but_stay_literal_in_find() {
+	for (before, input, expected) in [
+		// Models that close every body with `*** End …`: neither leaks into the
+		// file nor swallows the operations after it.
+		(
+			"one\ntwo\nthree\nfour\n",
+			"*** Edit File: a.txt\n*** Find\none\n*** Replace\nONE\n*** End Patch\n*** \
+			 Find\ntwo\n*** Replace\nTWO\n*** End\n*** Find\nthree\n*** Insert After\n3.5\n*** \
+			 End\n*** Find\nfour\n*** Replace\nFOUR\n*** End\n",
+			"ONE\nTWO\nthree\n3.5\nFOUR\n",
+		),
+		// A Find body is matched as written, so a literal sentinel line can be removed.
+		("a\n*** End\nb\n", "*** Edit File: a.txt\n*** Find\na\n*** End\n*** Replace\na\n", "a\nb\n"),
+	] {
+		let workspace = Workspace::new(EditMode::Sloppy);
+		workspace.write("a.txt", before);
+		workspace
+			.apply_json(&json!({ "input": input }), &DiskWriter::default())
+			.await
+			.expect("sentinel-closed payload");
+		assert_eq!(workspace.read("a.txt").unwrap(), expected, "{input:?}");
+	}
+}
+
+#[tokio::test]
 async fn after_requires_all_even_when_ambiguous_insertions_have_identical_outcomes() {
 	let workspace = Workspace::new(EditMode::Sloppy);
 	workspace.write("a.txt", "item\nitem\n");

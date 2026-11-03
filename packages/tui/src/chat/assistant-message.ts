@@ -5,6 +5,7 @@ import { Image, type ImageBudget } from "../components/image";
 import { ImageProtocol, TERMINAL } from "../terminal-capabilities";
 import {
 	type DefaultTextStyle,
+	endsInsideOpenFence,
 	holdPartialTableRow,
 	Markdown,
 	type MarkdownTheme,
@@ -245,6 +246,19 @@ function lerpHex(from: string, to: string, t: number): string {
 	const g = Math.round(fg + (tg - fg) * k);
 	const b = Math.round(fb + (tb - fb) * k);
 	return `#${((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1)}`;
+}
+
+/**
+ * Drop the closing border the renderer draws for a source that ends inside an
+ * open fence. That row is not part of the message yet: the live block reaches
+ * it only when the closer arrives, so publishing it would make the settled
+ * prefix disagree with the block render and freeze mid-stream retirement.
+ */
+function trimFabricatedCloser(rows: readonly string[], source: string): readonly string[] {
+	if (!endsInsideOpenFence(source)) return rows;
+	let last = rows.length;
+	while (last > 0 && rows[last - 1]!.trim() === "") last--;
+	return last > 0 ? rows.slice(0, last - 1) : rows;
 }
 
 /**
@@ -1425,12 +1439,12 @@ export class AssistantMessageComponent extends Container {
 		const renderer = role === "head" ? head : role === "replay" ? replay : head?.index === index ? head : replay;
 		if (renderer?.index === index && renderer.kind === kind) {
 			renderer.md.setText(trimmed);
-			return renderer.md.render(width);
+			return trimFabricatedCloser(renderer.md.render(width), trimmed);
 		}
 		const md = this.#createMarkdown(kind, trimmed);
 		if (role === "head") this.#stableHeadRenderer = { index, kind, md };
 		else if (role === "replay") this.#stableReplayRenderer = { index, kind, md };
-		return md.render(width);
+		return trimFabricatedCloser(md.render(width), trimmed);
 	}
 
 	/** Markdown for a text or thinking block; live children and stable-row renders share it so stable rows prefix the block render. */

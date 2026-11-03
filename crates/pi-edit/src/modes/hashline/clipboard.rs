@@ -129,13 +129,13 @@ fn write_register(
 	if let Some(register) = register {
 		clipboard
 			.named
-			.get_or_insert_with(Default::default)
+			.get_or_insert_default()
 			.insert(register.clone(), captured);
 	} else {
 		clipboard.lines = Some(captured);
 		clipboard
 			.pending_anon_cuts
-			.get_or_insert_with(Vec::new)
+			.get_or_insert_default()
 			.push(describe_cut(edit));
 	}
 	Ok(())
@@ -188,7 +188,7 @@ pub fn resolve_clipboard_edits<'e>(
 						if range.start.line == 0 || range.end.line as usize > file_lines.len() {
 							let register = register
 								.as_ref()
-								.map_or_else(String::new, |value| format!(" @{value}"));
+								.map_or_default(|value| format!(" @{value}"));
 							return Err(EditError::rejected(
 								Rejection::OutOfRange,
 								format!(
@@ -240,13 +240,13 @@ pub fn validate_clipboard_sequence(edits: &[Edit], clipboard: &Clipboard) -> Res
 				if let Some(register) = register {
 					fork
 						.named
-						.get_or_insert_with(Default::default)
+						.get_or_insert_default()
 						.insert(register.clone(), Vec::new());
 				} else {
 					fork.lines = Some(Vec::new());
 					fork
 						.pending_anon_cuts
-						.get_or_insert_with(Vec::new)
+						.get_or_insert_default()
 						.push(describe_cut(edit));
 				}
 			},

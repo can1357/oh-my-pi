@@ -92,6 +92,14 @@ interface PageShadowRoot {
 	elementFromPoint(x: number, y: number): PageElement | null;
 }
 
+/** An element on the way up to a contenteditable's editing host. */
+interface EditableAncestor {
+	isContentEditable: boolean;
+	parentElement: EditableAncestor | null;
+	focus(): void;
+	contains(other: unknown): boolean;
+}
+
 interface PageElement {
 	readonly tagName: string;
 	id: string;
@@ -158,13 +166,12 @@ export class ClickRefusedError extends ToolAbortError {
 }
 
 /**
- * Typing aborted after some keys reached the page; the field keeps those `typed` of `total` code points.
+ * Text entry aborted after input reached the page; `progress` says what the field may already hold.
  * The per-op timeout reports this instead of an actionability hint, since the element did take input.
  */
 export class TypingInterruptedError extends ToolAbortError {
 	constructor(
-		readonly typed: number,
-		readonly total: number,
+		readonly progress: string,
 		options?: ErrorOptions,
 	) {
 		super(undefined, options);
@@ -392,12 +399,7 @@ export async function clickElement(
 		}),
 	);
 	try {
-		await untilAborted(signal, () =>
-			handle.frame.page().mouse.click(point.x, point.y, {
-				button: options.button,
-				count: options.clickCount,
-			}),
-		);
+		await clickPoint(handle.frame.page(), point.x, point.y, options, signal);
 	} catch (error) {
 		// The page may be stuck; tidy up without waiting on it.
 		void watch
@@ -435,17 +437,32 @@ async function focusTextEntryTarget(
 	signal?: AbortSignal,
 ): Promise<void> {
 	const refusal = await untilAborted(signal, () =>
-		handle.evaluate(el => {
+		handle.evaluate((el, replacing) => {
 			const node = el as unknown as {
 				readOnly?: boolean;
+				isContentEditable?: boolean;
 				focus?: () => void;
 				matches(selector: string): boolean;
+				ownerDocument: {
+					createRange(): { selectNodeContents(node: unknown): void };
+					getSelection(): { removeAllRanges(): void; addRange(range: unknown): void } | null;
+				};
 			};
+			// Focusing a contenteditable puts the caret at its start, which an editor syncs into its own state
+			// and may apply back to the page a task later (Slate renders it), over the selection fill makes. A
+			// fill selects the contents first, so focusing keeps them selected and the editor syncs that.
+			if (replacing && node.isContentEditable) {
+				const range = node.ownerDocument.createRange();
+				range.selectNodeContents(node);
+				const selection = node.ownerDocument.getSelection();
+				selection?.removeAllRanges();
+				selection?.addRange(range);
+			}
 			node.focus?.();
 			if (node.matches(":disabled")) return "disabled";
 			if (node.readOnly) return "read-only";
 			return null;
-		}),
+		}, action === "fill"),
 	);
 	if (refusal) throw new ToolError(`Cannot ${action} a ${refusal} element`);
 }
@@ -473,7 +490,10 @@ async function typeKeys(
 		}
 	} catch (error) {
 		if (signal?.aborted && typed > 0) {
-			throw new TypingInterruptedError(typed, characters.length, { cause: signal.reason });
+			throw new TypingInterruptedError(
+				`typing stopped after ${typed} of ${characters.length} characters (the field keeps what was typed)`,
+				{ cause: signal.reason },
+			);
 		}
 		throw error;
 	}
@@ -508,7 +528,9 @@ const PICKER_INPUT_TYPES = Object.keys(PICKER_VALUE_EXAMPLES);
 
 /**
  * Focus a field that can take text, clear any existing value, then retype. A colour, date, time or
- * range input gets its value set the way its picker would, and refuses one it rejects.
+ * range input gets its value set the way its picker would, and refuses one it rejects. A
+ * contenteditable element has its contents selected and replaced by one text insertion (or deleted
+ * by Backspace for an empty value), as a paste would.
  *
  * Every step is a DOM evaluation or an input dispatch, so this works on tabs
  * that produce no animation frames — unlike Puppeteer's `Locator.fill`, whose
@@ -518,7 +540,7 @@ const PICKER_INPUT_TYPES = Object.keys(PICKER_VALUE_EXAMPLES);
  */
 export async function fillViaHandle(handle: ElementHandle, value: string, signal?: AbortSignal): Promise<void> {
 	await focusTextEntryTarget(handle, "fill", signal);
-	const picker = await untilAborted(signal, () =>
+	const prepared = await untilAborted(signal, () =>
 		handle.evaluate(
 			(el, wanted, pickerTypes) => {
 				const node = el as unknown as {
@@ -527,7 +549,9 @@ export async function fillViaHandle(handle: ElementHandle, value: string, signal
 					value?: string;
 					focus?: () => void;
 					isContentEditable?: boolean;
-					innerText?: string;
+					parentElement: EditableAncestor | null;
+					getRootNode(): { activeElement: { contains(other: unknown): boolean } | null };
+					contains(other: unknown): boolean;
 					getAttribute(name: string): string | null;
 					namespaceURI: string | null;
 					ownerDocument: {
@@ -535,6 +559,12 @@ export async function fillViaHandle(handle: ElementHandle, value: string, signal
 							namespace: string | null,
 							tag: "input",
 						): { value: string; setAttribute(name: string, value: string): void };
+						createRange(): {
+							readonly collapsed: boolean;
+							selectNodeContents(node: unknown): void;
+							getClientRects(): ArrayLike<{ width: number; height: number }>;
+						};
+						getSelection(): { removeAllRanges(): void; addRange(range: unknown): void } | null;
 					};
 					dispatchEvent(event: unknown): boolean;
 				};
@@ -620,27 +650,79 @@ export async function fillViaHandle(handle: ElementHandle, value: string, signal
 						write(wanted);
 						report();
 					}
-					return { kind, refused };
+					return { target: "picker" as const, kind, refused };
 				}
-				const before = node.isContentEditable ? node.innerText : node.value;
-				if (node.isContentEditable) node.innerText = "";
-				else if ("value" in node) write("");
+				if (node.isContentEditable) {
+					// An element inside an editing host is usually not focusable, so its host is focused. Input goes to
+					// whatever holds focus, so focus has to end on the host or on an element between it and the target;
+					// a host whose focus handler moved it elsewhere (or an inert one, which leaves it on the body) would
+					// have the replacement land outside it. The element's own root (its document, or a shadow root,
+					// closed ones included) says which of its elements holds focus.
+					let host: EditableAncestor | null = node.parentElement?.isContentEditable ? node.parentElement : null;
+					while (host?.parentElement?.isContentEditable) host = host.parentElement;
+					host?.focus();
+					const active = node.getRootNode().activeElement;
+					if (!active?.contains(node) || !(host ?? node).contains(active)) return { target: "unfocused" as const };
+					// Rich-text editors (Slate, Lexical) keep their own document and either undo a direct DOM write
+					// or stop tracking the element, so the old text is selected for the input that replaces it.
+					const range = node.ownerDocument.createRange();
+					range.selectNodeContents(node);
+					const selection = node.ownerDocument.getSelection();
+					selection?.removeAllRanges();
+					selection?.addRange(range);
+					// The browser keeps a deletion inside the editing host, so a host with any contents is cleared.
+					// Inside a host, Backspace over contents that draw nothing deletes the character before them, so
+					// an element there is cleared only when its contents draw something (text, an image).
+					const deletable = node.parentElement?.isContentEditable
+						? Array.from(range.getClientRects()).some(rect => rect.width > 0 && rect.height > 0)
+						: !range.collapsed;
+					return { target: "editable" as const, deletable };
+				}
+				const before = node.value;
+				if ("value" in node) write("");
 				// Typing a value fires its own input events; an empty value types nothing,
 				// so report the clear itself when there was something to clear.
 				if (wanted === "" && before) report();
-				return null;
+				return { target: "field" as const };
 			},
 			value,
 			PICKER_INPUT_TYPES,
 		),
 	);
-	if (picker?.refused) {
-		throw new ToolError(
-			`<input type=${picker.kind}> does not accept ${JSON.stringify(value)}; give its value format, e.g. ${PICKER_VALUE_EXAMPLES[picker.kind]}`,
-		);
+	const page = handle.frame.page();
+	switch (prepared.target) {
+		case "picker":
+			if (prepared.refused) {
+				throw new ToolError(
+					`<input type=${prepared.kind}> does not accept ${JSON.stringify(value)}; give its value format, e.g. ${PICKER_VALUE_EXAMPLES[prepared.kind]}`,
+				);
+			}
+			return;
+		case "unfocused":
+			throw new ToolError("Cannot fill an element that does not keep focus");
+		case "editable":
+			if (!value && !prepared.deletable) return;
+			throwIfAborted(signal);
+			try {
+				// One `Input.insertText` replaces the selection the way a paste does; the editor's own
+				// beforeinput handling applies it to its model. Backspace is a real deletion of the selection.
+				await untilAborted(signal, () =>
+					value ? page.keyboard.sendCharacter(value) : page.keyboard.press("Backspace"),
+				);
+			} catch (error) {
+				// The input was already sent and cannot be recalled, so the editor may hold its result.
+				if (signal?.aborted) {
+					throw new TypingInterruptedError(
+						`the ${value ? "replacement text" : "deletion"} was already sent and may have reached the editor`,
+						{ cause: signal.reason },
+					);
+				}
+				throw error;
+			}
+			return;
+		case "field":
+			await typeKeys(page, value, signal);
 	}
-	if (picker) return;
-	await typeKeys(handle.frame.page(), value, signal);
 }
 
 interface QueryCandidate {
@@ -842,6 +924,7 @@ export async function clickQueryHandlerText(
 	label: string,
 	timeoutMs: number,
 	signal?: AbortSignal,
+	options: ClickAtOptions = {},
 ): Promise<void> {
 	const timeoutSignal = AbortSignal.timeout(timeoutMs);
 	const clickSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
@@ -855,7 +938,7 @@ export async function clickQueryHandlerText(
 				await untilAborted(clickSignal, () => Bun.sleep(50));
 				continue;
 			}
-			await clickElement(target, label, clickSignal);
+			await clickElement(target, label, clickSignal, options);
 			return;
 		} finally {
 			if (target && !handles.includes(target)) await target.dispose().catch(() => undefined);
@@ -1540,14 +1623,109 @@ export async function prepareElementUpload(
 	return preparedUpload(sources, sig => deliverToDropZone(handle, sources, route, staging, label, sig));
 }
 
-/** Press a keyboard key without releasing it. */
+/** Press a keyboard key without releasing it; a press cut off on its way is released, not left held. */
 export async function keyDown(page: Page, key: KeyInput, signal?: AbortSignal): Promise<void> {
-	await untilAborted(signal, () => page.keyboard.down(key));
+	const pressed = trackPress(page.keyboard.down(key));
+	try {
+		await untilAborted(signal, () => pressed.press);
+	} catch (error) {
+		if (signal?.aborted && !pressed.refused) void page.keyboard.up(key).catch(() => {});
+		throw error;
+	}
 }
 
 /** Release a keyboard key previously pressed with keyDown. */
 export async function keyUp(page: Page, key: KeyInput, signal?: AbortSignal): Promise<void> {
 	await untilAborted(signal, () => page.keyboard.up(key));
+}
+
+/**
+ * A press handed to puppeteer. `refused` turns true once puppeteer rejects it (the button is already down, the key
+ * is unknown, the session is gone); until then it may have reached the page, so it is owed a release.
+ */
+function trackPress(press: Promise<void>): { press: Promise<void>; refused: boolean } {
+	const tracked = { press, refused: false };
+	press.catch(() => {
+		tracked.refused = true;
+	});
+	return tracked;
+}
+
+/**
+ * Release keys in order. Each release is awaited and one that fails does not stop the rest; once `signal` aborts,
+ * every release still owed is sent at once and not awaited: Chrome keeps input in order, and the page the call
+ * gave up on may not answer before this worker is replaced. The first failure, or the abort, is thrown once every
+ * release went out.
+ */
+async function releaseKeys(page: Page, keys: readonly KeyInput[], signal?: AbortSignal): Promise<void> {
+	let failure: { error: unknown } | undefined;
+	for (const [index, key] of keys.entries()) {
+		if (signal?.aborted) {
+			for (const owed of keys.slice(index)) void page.keyboard.up(owed).catch(() => {});
+			break;
+		}
+		try {
+			await untilAborted(signal, () => page.keyboard.up(key));
+		} catch (error) {
+			failure ??= { error };
+		}
+	}
+	if (failure) throw failure.error;
+	throwIfAborted(signal);
+}
+
+/**
+ * Where a cancelled press is released: off the page, so the press drops no drag (unless the page captured the
+ * pointer), at a point no real pointer reports, so {@link CANCELLED_RELEASE_GUARD} can tell the release apart.
+ */
+const CANCELLED_RELEASE_POINT = -7919;
+
+/**
+ * Swallows the `click`/`auxclick` Chrome fires on the document root for a release at
+ * {@link CANCELLED_RELEASE_POINT}: Chrome completes a click on the common ancestor of the press and release
+ * targets whatever CDP says, and a page's "click outside" handler would take it as the user's. Installed at
+ * document start, its capture listeners run before the page's. Chrome dispatches that click in the same task
+ * as the release, so the mark lapses with the task: a keyboard click later is never swallowed. One install per
+ * document, however many workers attach.
+ */
+const CANCELLED_RELEASE_GUARD = `(() => {
+	const installed = Symbol.for("omp.cancelledReleaseGuard");
+	if (globalThis[installed]) return;
+	Object.defineProperty(globalThis, installed, { value: true });
+	let cancelled = false;
+	addEventListener("mouseup", event => {
+		if (event.clientX !== ${CANCELLED_RELEASE_POINT} || event.clientY !== ${CANCELLED_RELEASE_POINT}) return;
+		cancelled = true;
+		setTimeout(() => { cancelled = false; });
+	}, true);
+	const swallow = event => {
+		if (!cancelled) return;
+		cancelled = false;
+		event.stopImmediatePropagation();
+		event.preventDefault();
+	};
+	addEventListener("click", swallow, true);
+	addEventListener("auxclick", swallow, true);
+})();`;
+
+/** Install {@link CANCELLED_RELEASE_GUARD} in this page's documents, current and future. */
+export async function installCancelledReleaseGuard(page: Page): Promise<void> {
+	await page.evaluateOnNewDocument(CANCELLED_RELEASE_GUARD);
+	await page
+		.mainFrame()
+		.mainRealm()
+		.evaluate(CANCELLED_RELEASE_GUARD)
+		.catch(() => undefined);
+}
+
+/**
+ * Release a mouse button off the page so the press activates nothing it pressed: the page gets its `mouseup`,
+ * and the click Chrome then fires on the document root is swallowed (see {@link CANCELLED_RELEASE_GUARD}). Sent
+ * at once and not awaited, for the same reason as {@link releaseKeys}.
+ */
+export function releaseButtonOffPage(page: Page, options: MouseButtonOptions): void {
+	void page.mouse.move(CANCELLED_RELEASE_POINT, CANCELLED_RELEASE_POINT).catch(() => {});
+	void page.mouse.up(options).catch(() => {});
 }
 
 /**
@@ -1583,27 +1761,46 @@ function editingCommand(keys: readonly string[]): string | undefined {
 
 /**
  * Press a key or a `+`-joined combo (`Enter`, `Shift+Tab`, `Meta+a`): the leading
- * keys go down in order, the last key is pressed with `options`, then the leading
- * keys are released in reverse.
+ * keys go down in order, the last key is pressed with `options`, then all of them
+ * are released in reverse. An aborted press sends no further key down and still
+ * releases each key whose press went out, so no modifier stays held for the user's
+ * next key.
  */
-export async function pressKey(page: Page, combo: string, options?: KeyPressOptions): Promise<void> {
+export async function pressKey(
+	page: Page,
+	combo: string,
+	options?: KeyPressOptions,
+	signal?: AbortSignal,
+): Promise<void> {
 	// Unchecked on purpose: puppeteer validates each name and throws `Unknown key: "…"`.
 	const keys = splitKeyCombo(combo) as KeyInput[];
-	const key = keys[keys.length - 1]!;
-	const held = keys.slice(0, -1);
 	const command = editingCommand(keys);
-	const pressed: KeyInput[] = [];
+	const pressed: { key: KeyInput; down: { press: Promise<void>; refused: boolean } }[] = [];
+	let failure: { error: unknown } | undefined;
 	try {
-		for (const modifier of held) {
-			await page.keyboard.down(modifier);
-			pressed.push(modifier);
+		for (const [index, key] of keys.entries()) {
+			throwIfAborted(signal);
+			// `commands` is @deprecated in puppeteer but still forwarded to Input.dispatchKeyEvent,
+			// and puppeteer never adds the macOS editing commands itself.
+			const down = trackPress(
+				index === keys.length - 1
+					? page.keyboard.down(key, command ? { ...options, commands: [command] } : options)
+					: page.keyboard.down(key),
+			);
+			pressed.push({ key, down });
+			await untilAborted(signal, () => down.press);
 		}
-		// `commands` is @deprecated in puppeteer but still forwarded to Input.dispatchKeyEvent,
-		// and puppeteer never adds the macOS editing commands itself.
-		await page.keyboard.press(key, command ? { ...options, commands: [command] } : options);
-	} finally {
-		for (const modifier of pressed.reverse()) await page.keyboard.up(modifier);
+		if (options?.delay) await untilAborted(signal, () => Bun.sleep(options.delay!));
+	} catch (error) {
+		failure = { error };
 	}
+	const owed = pressed.filter(({ down }) => !down.refused).map(({ key }) => key);
+	try {
+		await releaseKeys(page, owed.reverse(), signal);
+	} catch (error) {
+		failure ??= { error };
+	}
+	if (failure) throw failure.error;
 }
 
 /** Move the page pointer to viewport coordinates. */
@@ -1619,9 +1816,15 @@ export async function mouseMove(
 	await untilAborted(signal, () => page.mouse.move(x, y, options));
 }
 
-/** Press a mouse button at the current pointer position. */
+/** Press a mouse button at the current pointer position; a press cut off on its way is released off the page. */
 export async function mouseDown(page: Page, options: MouseButtonOptions = {}, signal?: AbortSignal): Promise<void> {
-	await untilAborted(signal, () => page.mouse.down(options));
+	const pressed = trackPress(page.mouse.down(options));
+	try {
+		await untilAborted(signal, () => pressed.press);
+	} catch (error) {
+		if (signal?.aborted && !pressed.refused) releaseButtonOffPage(page, options);
+		throw error;
+	}
 }
 
 /** Release a mouse button at the current pointer position. */
@@ -1639,12 +1842,71 @@ export async function clickAt(
 ): Promise<void> {
 	requireFiniteNumber(x, "clickAt x");
 	requireFiniteNumber(y, "clickAt y");
-	await untilAborted(signal, () =>
-		page.mouse.click(x, y, {
-			button: options.button,
-			count: options.clickCount,
-		}),
+	await clickPoint(page, x, y, options, signal);
+}
+
+/**
+ * Click at viewport coordinates, one press and release per click. puppeteer's `mouse.click` keeps sending its
+ * steps after the call gave up, so a click on a page that answers late landed after omp reported it failed;
+ * here an aborted click sends no further press.
+ */
+async function clickPoint(
+	page: Page,
+	x: number,
+	y: number,
+	options: ClickAtOptions,
+	signal?: AbortSignal,
+): Promise<void> {
+	const count = options.clickCount ?? 1;
+	if (count < 1) throw new ToolError("Click must occur a positive number of times.");
+	throwIfAborted(signal);
+	// Not awaited before the press, as in puppeteer's `mouse.click`: Chrome holds a pointer move until the page's
+	// next frame, which a background tab may not draw for seconds, and the press flushes it.
+	const moved = page.mouse.move(x, y);
+	moved.catch(() => {});
+	// As puppeteer's `mouse.click`: one press per click, numbered, the last carrying `count`.
+	for (let clickCount = 1; clickCount < count; clickCount++) {
+		await withButtonDown(page, { button: options.button, clickCount }, signal);
+	}
+	await withButtonDown(page, { button: options.button, clickCount: count }, signal);
+	await untilAborted(signal, () => moved);
+}
+
+/** Drag with the left button from `start` to `end`; cancellation before the final release drops off-page. */
+export async function dragBetween(
+	page: Page,
+	start: { x: number; y: number },
+	end: { x: number; y: number },
+	signal?: AbortSignal,
+): Promise<void> {
+	await untilAborted(signal, () => page.mouse.move(start.x, start.y));
+	await withButtonDown(page, {}, signal, () =>
+		untilAborted(signal, () => page.mouse.move(end.x, end.y, { steps: 12 })),
 	);
+}
+
+/**
+ * Press a button, run `gesture` (if any) while it is held, then release it where the pointer is. Cancellation
+ * before that release sends it off-page instead (see {@link releaseButtonOffPage}). Once a target release has
+ * been dispatched, Chrome owns it: aborting its wait cannot recall the release or prevent a late click/drop.
+ */
+async function withButtonDown(
+	page: Page,
+	options: MouseButtonOptions & { clickCount?: number },
+	signal?: AbortSignal,
+	gesture?: () => Promise<unknown>,
+): Promise<void> {
+	throwIfAborted(signal);
+	const pressed = trackPress(page.mouse.down(options));
+	let done = false;
+	try {
+		await untilAborted(signal, () => pressed.press);
+		await gesture?.();
+		done = true;
+	} finally {
+		if (done) await untilAborted(signal, () => page.mouse.up(options));
+		else if (!pressed.refused) releaseButtonOffPage(page, options);
+	}
 }
 
 /** Queue one raw mouse-wheel event without waiting for scroll settlement. */

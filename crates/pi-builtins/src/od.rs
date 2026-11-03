@@ -9,10 +9,9 @@
 
 use std::{
 	ffi::OsString,
-	io::{self, Read, Seek, SeekFrom, Write},
+	io::{self, Read, Seek, Write},
 };
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::ValueParser, parser::ValueSource};
 use pi_vfs::File;
 use uucore::{
@@ -23,7 +22,7 @@ use uucore::{
 	},
 };
 
-use crate::host::{Host, Utility, format_usage, matches_parser, strip_errno, util};
+use crate::host::{Host, Utility, format_usage, matches_parser, strip_errno};
 
 mod options {
 	pub const HELP: &str = "help";
@@ -254,11 +253,6 @@ impl Utility for Od {
 	}
 }
 
-/// Creates the `od` builtin registration.
-pub(crate) fn od_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Od, SE>()
-}
-
 // ── Numbers ────────────────────────────────────────────────────────────────
 
 /// Parses a BYTES argument of `option` (`-j`, `-N`, `-S`): decimal, `0`
@@ -373,8 +367,7 @@ struct Spec {
 fn decode_format(arg: &str, specs: &mut Vec<Spec>) -> Result<(), String> {
 	let quoted = arg.quote();
 	let mut s = arg.as_bytes();
-	while let Some(&c) = s.first() {
-		s = &s[1..];
+	while let Some(&c) = s.split_off_first() {
 		let (kind, size, width) = match c {
 			b'd' | b'o' | b'u' | b'x' => {
 				let size = match s.first() {
@@ -566,7 +559,7 @@ fn half_to_f32(bits: u16) -> f32 {
 
 /// Renders one datum of `spec` starting at `bytes`.
 fn render(spec: &Spec, bytes: &[u8], big_endian: bool, text: &mut String) {
-	use std::fmt::Write as _;
+	use std::fmt::{NumBuffer, Write as _};
 	let raw = if big_endian {
 		bytes.iter().fold(0u64, |acc, &b| acc << 8 | u64::from(b))
 	} else {
@@ -577,9 +570,9 @@ fn render(spec: &Spec, bytes: &[u8], big_endian: bool, text: &mut String) {
 	let _ = match spec.kind {
 		Kind::Signed => {
 			let shift = 64 - 8 * spec.size;
-			write!(text, "{}", ((raw << shift) as i64) >> shift)
+			text.write_str((((raw << shift) as i64) >> shift).format_into(&mut NumBuffer::new()))
 		},
-		Kind::Unsigned => write!(text, "{raw}"),
+		Kind::Unsigned => text.write_str(raw.format_into(&mut NumBuffer::new())),
 		Kind::Octal => write!(text, "{raw:0width$o}"),
 		Kind::Hex => write!(text, "{raw:0width$x}"),
 		Kind::Half => write!(text, "{}", float_to_str(f64::from(half_to_f32(raw as u16)), true)),
@@ -829,7 +822,7 @@ impl Inputs {
 				if size < n {
 					n -= size;
 				} else {
-					if let Err(err) = file.seek(SeekFrom::Current(n)) {
+					if let Err(err) = file.seek_relative(n) {
 						self.error = Some(err);
 					}
 					n = 0;
@@ -906,27 +899,22 @@ fn parse_inputs(matches: &ArgMatches, mut inputs: Vec<OsString>) -> Result<Comma
 		arg.to_str().and_then(|s| s.bytes().next()).is_some_and(|c| c == b'+' || (digit && c.is_ascii_digit()))
 	};
 	match inputs.len() {
-		1 if traditional || leads(&inputs[0], false) => {
-			if let Some(offset) = offset_operand(&inputs[0])? {
-				return Ok(CommandLineInputs::FileAndOffset(None, offset, None));
-			}
+		1 if (traditional || leads(&inputs[0], false)) && let Some(offset) = offset_operand(&inputs[0])? => {
+			return Ok(CommandLineInputs::FileAndOffset(None, offset, None));
 		},
-		2 if traditional || leads(&inputs[1], true) => {
-			if let Some(offset) = offset_operand(&inputs[1])? {
-				if traditional && let Some(start) = offset_operand(&inputs[0])? {
-					return Ok(CommandLineInputs::FileAndOffset(None, start, Some(offset)));
-				}
-				inputs.truncate(1);
-				return Ok(CommandLineInputs::FileAndOffset(inputs.pop(), offset, None));
+		2 if (traditional || leads(&inputs[1], true)) && let Some(offset) = offset_operand(&inputs[1])? => {
+			if traditional && let Some(start) = offset_operand(&inputs[0])? {
+				return Ok(CommandLineInputs::FileAndOffset(None, start, Some(offset)));
 			}
+			inputs.truncate(1);
+			return Ok(CommandLineInputs::FileAndOffset(inputs.pop(), offset, None));
 		},
-		3 if traditional => {
-			if let Some(offset) = offset_operand(&inputs[1])?
-				&& let Some(label) = offset_operand(&inputs[2])?
-			{
-				inputs.truncate(1);
-				return Ok(CommandLineInputs::FileAndOffset(inputs.pop(), offset, Some(label)));
-			}
+		3 if traditional
+			&& let Some(offset) = offset_operand(&inputs[1])?
+			&& let Some(label) = offset_operand(&inputs[2])? =>
+		{
+			inputs.truncate(1);
+			return Ok(CommandLineInputs::FileAndOffset(inputs.pop(), offset, Some(label)));
 		},
 		_ => {},
 	}

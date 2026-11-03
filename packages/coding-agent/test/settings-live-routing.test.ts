@@ -1,8 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { EventEmitter } from "node:events";
+import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import { resolveAgentModelSelection } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
+import { cfgModelRoles } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { createAuthStorageSettingsSync } from "@oh-my-pi/pi-coding-agent/session/auth-broker-config";
@@ -174,6 +177,55 @@ describe("live routing config files", () => {
 		expect(selection(settings).patterns).toEqual(["anthropic/second"]);
 		await Bun.write(second, YAML.stringify(routing("third")));
 		await waitFor(() => settings.getModelRole("smol") === "anthropic/third");
+	});
+
+	it("catches edits to a newly followed file before its existing directory watch is updated", async () => {
+		const first = tempDir.join("first.yml");
+		const second = tempDir.join("second.yml");
+		await Bun.write(first, YAML.stringify(routing("first")));
+		await Bun.write(second, YAML.stringify(routing("second")));
+		const managed = tempDir.join("managed", "current.yml");
+		await fs.mkdir(path.dirname(managed));
+		await fs.symlink(first, managed, "file");
+		const file = tempDir.join("routing.yml");
+		await fs.symlink(managed, file, "file");
+
+		// Control delivery so the target write lands during the reload, before
+		// reconciliation adds its basename to the existing directory watch.
+		const callbacks = new Map<string, (event: string, filename: string) => void>();
+		vi.spyOn(fsSync, "watch").mockImplementation(((dir: fsSync.PathLike, _options: unknown, callback: unknown) => {
+			callbacks.set(String(dir), callback as (event: string, filename: string) => void);
+			const watcher = new EventEmitter();
+			Object.assign(watcher, { close: () => {} });
+			return watcher as fsSync.FSWatcher;
+		}) as typeof fsSync.watch);
+
+		await start(file);
+		const managedDir = fsSync.realpathSync(path.dirname(managed));
+		const targetDir = fsSync.realpathSync(path.dirname(second));
+		const replacement = Promise.withResolvers<void>();
+		const recovered = Promise.withResolvers<void>();
+		const stop = settings.onEffectiveChange([cfgModelRoles], () => {
+			const model = settings.getModelRole("smol");
+			if (model === "anthropic/second") {
+				fsSync.writeFileSync(second, YAML.stringify(routing("third")));
+				callbacks.get(targetDir)?.("change", path.basename(second));
+				replacement.resolve();
+			} else if (model === "anthropic/third") {
+				recovered.resolve();
+			}
+		});
+		cleanups.push(stop);
+
+		await fs.symlink(second, `${managed}.next`, "file");
+		await fs.rename(`${managed}.next`, managed);
+		const onManagedEvent = callbacks.get(managedDir);
+		expect(onManagedEvent).toBeDefined();
+		expect(callbacks.has(targetDir)).toBe(true);
+		onManagedEvent!("rename", path.basename(managed));
+		await replacement.promise;
+		await recovered.promise;
+		expect(selection(settings).patterns).toEqual(["anthropic/third"]);
 	});
 
 	it("keeps last good routing on malformed target replacement and preserves runtime overrides on recovery", async () => {

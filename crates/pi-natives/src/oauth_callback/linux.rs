@@ -172,10 +172,7 @@ fn parse_default_entry(content: &str, mime_type: &str) -> anyhow::Result<(bool, 
 	for raw_line in content.split('\n') {
 		let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
 		let trimmed = line.trim();
-		if let Some(section) = trimmed
-			.strip_prefix('[')
-			.and_then(|value| value.strip_suffix(']'))
-		{
+		if let Some(section) = trimmed.strip_circumfix('[', ']') {
 			in_defaults = section == DEFAULT_APPLICATIONS_SECTION;
 			default_section_present |= in_defaults;
 			continue;
@@ -245,10 +242,7 @@ fn change_default(
 	for (index, raw_line) in lines.iter().enumerate() {
 		let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
 		let trimmed = line.trim();
-		if let Some(section) = trimmed
-			.strip_prefix('[')
-			.and_then(|value| value.strip_suffix(']'))
-		{
+		if let Some(section) = trimmed.strip_circumfix('[', ']') {
 			if in_defaults && section_end == lines.len() {
 				section_end = index;
 			}
@@ -315,10 +309,7 @@ fn default_section_ordinal_for_entry(content: &str, mime_type: &str) -> Option<u
 	for raw_line in content.split('\n') {
 		let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
 		let trimmed = line.trim();
-		if let Some(section) = trimmed
-			.strip_prefix('[')
-			.and_then(|value| value.strip_suffix(']'))
-		{
+		if let Some(section) = trimmed.strip_circumfix('[', ']') {
 			if section == DEFAULT_APPLICATIONS_SECTION {
 				current_ordinal = Some(next_ordinal);
 				next_ordinal += 1;

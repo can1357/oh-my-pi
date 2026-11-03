@@ -2,18 +2,10 @@ import { compactText, rowsText, styledSpans } from "../native/spans";
 import { node } from "../native/describe";
 import type { DescribeContext, NativeNode } from "../native/node";
 import type { Component } from "../tui";
-import { Ellipsis, getWidthConfigEpoch, replaceTabs, truncateToWidth, visibleWidth } from "../utils";
+import { Ellipsis, finiteWidth, getWidthConfigEpoch, singleLine, truncateToWidth, visibleWidth } from "../utils";
 
 function isComponent(body: Component | readonly string[]): body is Component {
 	return !Array.isArray(body);
-}
-
-function finiteWidth(width: number): number {
-	return Number.isFinite(width) ? Math.max(0, Math.trunc(width)) : 0;
-}
-
-function singleLine(text: string): string {
-	return replaceTabs(text).replace(/[\r\n]+/g, " ");
 }
 
 function fillCells(glyph: string, width: number): string {

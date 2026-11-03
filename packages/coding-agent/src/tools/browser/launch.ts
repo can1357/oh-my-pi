@@ -112,6 +112,8 @@ let puppeteerCwdFailed = false;
 let puppeteerCwdFailure: unknown;
 let jsHandleConstructor: typeof JSHandle | undefined;
 let timeoutErrorConstructor: typeof TimeoutError | undefined;
+/** Puppeteer exports `TargetCloseError` at runtime but leaves it out of its public types. */
+let targetCloseErrorConstructor: unknown;
 let knownDevices: Readonly<Record<string, Device>> | undefined;
 let predefinedNetworkConditions: Readonly<Record<string, NetworkConditions>> | undefined;
 
@@ -126,6 +128,11 @@ export function isPuppeteerHandle(value: unknown): value is JSHandle {
  */
 export function isPuppeteerTimeout(error: unknown): boolean {
 	return timeoutErrorConstructor !== undefined && error instanceof timeoutErrorConstructor;
+}
+
+/** Recognize Puppeteer's error for a command whose session closed under it, by class identity like {@link isPuppeteerTimeout}. */
+export function isPuppeteerTargetClose(error: unknown): boolean {
+	return typeof targetCloseErrorConstructor === "function" && error instanceof targetCloseErrorConstructor;
 }
 
 /**
@@ -163,6 +170,7 @@ async function importPuppeteerWithSafeCwd(safeDir: string): Promise<typeof Puppe
 			loaded = module.default;
 			jsHandleConstructor = module.JSHandle;
 			timeoutErrorConstructor = module.TimeoutError;
+			targetCloseErrorConstructor = Reflect.get(module, "TargetCloseError");
 			knownDevices = module.KnownDevices;
 			predefinedNetworkConditions = module.PredefinedNetworkConditions;
 		} catch (error) {

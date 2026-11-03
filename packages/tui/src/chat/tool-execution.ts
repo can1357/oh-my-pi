@@ -30,7 +30,7 @@ import {
 	rootToggleExpanded,
 } from "../native/node";
 import { plainText } from "../native/spans";
-import { diagnosticsSection, displayPath, toolHead } from "../tools/native-view";
+import { diagnosticsSection, displayPath, resultText, toolHead } from "../tools/native-view";
 import type { FileDiagnosticsResult } from "../tools/lsp";
 import { NativeImageCache, readMediaPath, shownMedia } from "../native/blobs";
 import { imageLinksEnabled, linkedImageText } from "../prompt/image-references";
@@ -50,6 +50,7 @@ import type { XdevMountedState } from "../tools/xdev";
 import { isFramedBlockComponent, markFramedBlockComponent, renderStatusLine, WidthAwareText } from "../render/index";
 import { cachedPngConversion, convertImageToPngShared, imagePayloadKey } from "./image-loading";
 import { FenceFigure } from "./fence-figure";
+import { SpotlightNotices } from "./spotlight";
 import { sanitizeWithOptionalSixelPassthrough } from "../render/sixel";
 import { renderDiff } from "../chrome/diff";
 import { type AnimationFrame, trimBlankEdges } from "../chrome/transcript-container";
@@ -236,7 +237,6 @@ export interface ToolExecutionHandle extends Component {
 	setArgsComplete(toolCallId?: string): void;
 	setExecutionStarted(toolCallId?: string): void;
 	setExpanded(expanded: boolean): void;
-	setToolActivityVisible(visible: boolean): void;
 	/** Mark the call parked: it returned, but stays tracked for async job frames. */
 	parkAsBackground(): void;
 	/** Seal the block as final history and stop its animations. */
@@ -464,6 +464,8 @@ export class ToolExecutionComponent extends Container {
 	// LSP diagnostics that arrived after the result (native only), shown in the frame.
 	#lateDiagnostics: readonly FileDiagnosticsResult[] | undefined;
 	readonly #nativeImages = new NativeImageCache();
+	// The Spotlight notice drawn after the card in a native transcript (see nativeTrailers).
+	readonly #spotlight = new SpotlightNotices();
 	// Wall clock captured whenever a task card is rebuilt.
 	#taskRenderNowMs = Date.now();
 	// Set on each `render()` when the last painted pending shape must be
@@ -654,6 +656,9 @@ export class ToolExecutionComponent extends Container {
 		this.#blockVersion++;
 		this.#isPartial = isPartial;
 		this.#displaceableByToolName = displaceableToolName(this.#toolName, result, isPartial);
+		if (!isPartial && this.#toolCallId !== undefined) {
+			this.#spotlight.set(this.#toolCallId, result.details, resultText(result));
+		}
 		// When tool is complete, ensure args are marked complete so spinner stops
 		if (!isPartial) {
 			this.#argsComplete = true;
@@ -972,6 +977,11 @@ export class ToolExecutionComponent extends Container {
 	handleNativeEvent(event: NativeUiEvent): void {
 		const expanded = rootToggleExpanded(event);
 		if (expanded !== undefined) this.setExpanded(expanded);
+	}
+
+	/** The result's Spotlight notice, a block of its own right after the card (visible while it is collapsed). */
+	nativeTrailers(): readonly Component[] {
+		return this.#spotlight.list();
 	}
 
 	/** The file paths this call targets (edit/write/apply_patch args), display-relative. */
@@ -1319,6 +1329,7 @@ export class ToolExecutionComponent extends Container {
 
 	setToolActivityVisible(visible: boolean): void {
 		this.#toolActivityVisible = visible;
+		this.#spotlight.setHidden(!visible);
 		super.invalidate();
 	}
 

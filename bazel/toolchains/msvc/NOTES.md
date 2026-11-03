@@ -6,23 +6,23 @@ exec hosts. Replaces cargo-xwin.
 
 ## Layout
 
-| Piece | Where | Why separate |
-| --- | --- | --- |
-| `@llvm_msvc_tools` | `//bazel/toolchains:llvm.bzl` (shared with the darwin toolchain) | LLVM 20.1.7 release archive for the fetching host, pruned to clang-cl/lld-link/llvm-lib/llvm-rc/llvm-mt + `lib/clang/*/include`. Downloads (~2 GiB) are sha256-pinned → Bazel repository cache. |
-| `@xwin_sysroot` | `sysroot.bzl` | xwin 0.6.5 (pinned per-host sha256) runs `splat` in the repo rule. The ~1 GiB CRT/SDK payload comes from the Microsoft CDN via xwin itself and is **not** in Bazel's repo cache — a cold output base re-downloads it. Keep `sysroot.bzl` stable. |
-| `@msvc_cc` | `cc.bzl` | Wrapper scripts + `cc_toolchain` + MSVC feature config (copied from the resolved rules_cc, like `@local_config_cc`). Cheap to regenerate — iterate flags here. |
-| `toolchain()`s | `//bazel/toolchains` (`msvc-cc-from-*`) | One per exec host (linux-x64/arm64, darwin-arm64/x64), all pointing at `@msvc_cc//:cc_toolchain`; only the local host's variant can resolve. `target_compatible_with = [windows, x86_64]` ⇒ can never shadow zig on linux. |
-| MODULE.bazel | `# --- msvc cross toolchain ---` section | `rules_cc` 0.2.17 (= Bazel 9.2's builtin pin) + the three `use_repo_rule` instantiations. Plus the target-suffixed toolchain-file key in the `opusic-sys` annotation (see below). |
+| Piece              | Where                                                            | Why separate                                                                                                                                                                                                                                     |
+| ------------------ | ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `@llvm_msvc_tools` | `//bazel/toolchains:llvm.bzl` (shared with the darwin toolchain) | LLVM 20.1.7 release archive for the fetching host, pruned to clang-cl/lld-link/llvm-lib/llvm-rc/llvm-mt + `lib/clang/*/include`. Downloads (~2 GiB) are sha256-pinned → Bazel repository cache.                                                  |
+| `@xwin_sysroot`    | `sysroot.bzl`                                                    | xwin 0.6.5 (pinned per-host sha256) runs `splat` in the repo rule. The ~1 GiB CRT/SDK payload comes from the Microsoft CDN via xwin itself and is **not** in Bazel's repo cache — a cold output base re-downloads it. Keep `sysroot.bzl` stable. |
+| `@msvc_cc`         | `cc.bzl`                                                         | Wrapper scripts + `cc_toolchain` + MSVC feature config (copied from the resolved rules_cc, like `@local_config_cc`). Cheap to regenerate — iterate flags here.                                                                                   |
+| `toolchain()`s     | `//bazel/toolchains` (`msvc-cc-from-*`)                          | One per exec host (linux-x64/arm64, darwin-arm64/x64), all pointing at `@msvc_cc//:cc_toolchain`; only the local host's variant can resolve. `target_compatible_with = [windows, x86_64]` ⇒ can never shadow zig on linux.                       |
+| MODULE.bazel       | `# --- msvc cross toolchain ---` section                         | `rules_cc` 0.2.17 (= Bazel 9.2's builtin pin) + the three `use_repo_rule` instantiations. Plus the target-suffixed toolchain-file key in the `opusic-sys` annotation (see below).                                                                |
 
 ## Design decisions
 
 - **No toolchains_llvm**: it wants to register full host cc toolchains, which
   risks shadowing the zig linux toolchains. Direct LLVM release fetch instead.
 - **Wrappers self-locate from `$0`** (execroot-relative sibling repos), so they
-  work from Bazel actions (cwd = execroot) *and* from build scripts, where
+  work from Bazel actions (cwd = execroot) _and_ from build scripts, where
   rules_rust `${pwd}`-expands `CC`/`AR` to absolute paths and cc-rs/cmake spawn
   tools from other cwds.
-- **CRT: static `/MT` for the shipped addon.** The toolchain *default* is
+- **CRT: static `/MT` for the shipped addon.** The toolchain _default_ is
   dynamic `/MD` (rules_cc's msvc branch default outside `dbg` without the
   `static_link_msvcrt` feature), matching what napi/cc-rs produced under
   cargo-xwin. But `//:natives-win32-x64-baseline` overrides to static CRT:
@@ -98,17 +98,17 @@ exec hosts. Replaces cargo-xwin.
   compiler/linker/rc/mt to the wrappers and selects the static release `/MT`
   runtime, matching the addon's static-CRT policy (issue #8439).
 
-## What to verify on can.internal (linux-x64)
+## What to verify on the Linux CI runners (linux-x64)
 
 1. `bazel build //:natives-win32-x64-baseline` end-to-end link; check the
    produced `pi_natives.win32-x64-baseline.node` imports (dumpbin/llvm-readobj):
    expect **no** `VCRUNTIME140.dll` and **no** `api-ms-win-crt-*` (static CRT);
    only core Windows system DLLs (kernel32, ntdll, advapi32, …) should remain.
 2. LLVM 20.1.7 Linux-X64 binaries are built on a newish Ubuntu: confirm the
-   kata runner image's glibc is ≥ 2.35-ish and has `libtinfo6`/`libstdc++6`
+   CI runner template's glibc is ≥ 2.35-ish and has `libtinfo6`/`libstdc++6`
    (usual LLVM release-binary runtime deps).
 3. `ninja` + `cmake` must be on the `opusic-sys` build-script PATH
-   (`/usr/local/bin:/usr/bin:/bin`) on the kata image.
+   (`/usr/local/bin:/usr/bin:/bin`) on the CI runner template.
 4. `opusic-sys` configure should report "Clang with MSVC-like command-line",
    take `toolchain.cmake`, and produce `opus.lib` with `/MT` objects.
 5. tree-sitter grammar compiles via cc-rs: wrapper is picked up as `CC`

@@ -184,13 +184,11 @@ impl OperationToken {
 	}
 
 	pub(crate) fn check(&self) -> CoreResult<()> {
-		if self.source.0.generation.load(Ordering::Acquire) == self.generation {
-			Ok(())
-		} else {
-			Err(DesktopError::cancelled(
+		(self.source.0.generation.load(Ordering::Acquire) == self.generation).ok_or_else(|| {
+			DesktopError::cancelled(
 				"desktop operation cancelled; input may be partial; inspect before retrying",
-			))
-		}
+			)
+		})
 	}
 
 	#[cfg(target_os = "linux")]
@@ -388,9 +386,7 @@ static ESCAPE_STOPS: LazyLock<Mutex<HashMap<String, Arc<AtomicU32>>>> =
 
 /// The shared count for `key`; a session without a key counts alone.
 pub(crate) fn escape_stop_counter(key: Option<&str>) -> Arc<AtomicU32> {
-	key.map_or_else(Arc::default, |key| {
-		Arc::clone(ESCAPE_STOPS.lock().entry(key.to_owned()).or_default())
-	})
+	key.map_or_default(|key| Arc::clone(ESCAPE_STOPS.lock().entry(key.to_owned()).or_default()))
 }
 
 pub(crate) fn escape_stops(key: &str) -> u32 {
@@ -462,6 +458,19 @@ impl Drop for ProcessLease {
 
 fn busy() -> DesktopError {
 	DesktopError::input_busy("another desktop operation owns input/focus control; no input was sent")
+}
+
+/// Owns input/focus control, without the emergency-stop monitor, for a focus
+/// correction that sends no input. Busy while another operation, in this
+/// process or another, owns control.
+#[cfg(target_os = "macos")]
+pub(crate) struct FocusOwner {
+	_owner: KernelOwner,
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn own_focus() -> CoreResult<FocusOwner> {
+	KernelOwner::acquire().map(|owner| FocusOwner { _owner: owner })
 }
 
 /// The kernel owner lives on its own thread: Windows mutex release must happen
@@ -757,10 +766,7 @@ impl KernelLease {
 	}
 
 	fn at(path: &std::path::Path) -> CoreResult<Self> {
-		use std::os::unix::{
-			fs::{MetadataExt, OpenOptionsExt},
-			io::AsRawFd,
-		};
+		use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 		let file = std::fs::OpenOptions::new()
 			.read(true)
 			.write(true)
@@ -786,15 +792,13 @@ impl KernelLease {
 				"desktop ownership file is not a private regular file",
 			));
 		}
-		// SAFETY: the descriptor remains owned by `file`; flock is nonblocking.
-		if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-			let error = std::io::Error::last_os_error();
-			if error.kind() == std::io::ErrorKind::WouldBlock {
-				return Err(busy());
-			}
-			return Err(DesktopError::input_failed(format!("cannot lock desktop ownership: {error}")));
+		match file.try_lock() {
+			Ok(()) => Ok(Self { file, shared: false }),
+			Err(std::fs::TryLockError::WouldBlock) => Err(busy()),
+			Err(std::fs::TryLockError::Error(error)) => {
+				Err(DesktopError::input_failed(format!("cannot lock desktop ownership: {error}")))
+			},
 		}
-		Ok(Self { file, shared: false })
 	}
 }
 
@@ -805,11 +809,7 @@ impl Drop for KernelLease {
 		// process another thread is spawning keeps a copy of the descriptor
 		// until it execs.
 		if !self.shared {
-			use std::os::fd::AsRawFd;
-			// SAFETY: this guard owns the live locked descriptor.
-			unsafe {
-				libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
-			}
+			let _ = self.file.unlock();
 		}
 	}
 }
@@ -1197,6 +1197,18 @@ mod tests {
 		assert!(ProcessLease::acquire().is_err());
 		drop(first);
 		assert!(ProcessLease::acquire().is_ok());
+	}
+
+	#[cfg(target_os = "macos")]
+	#[test]
+	fn a_focus_correction_is_busy_while_a_task_owns_control() {
+		let _serial = OWNERSHIP_TEST.lock();
+		let source = CancellationSource::default();
+		grant_for_test(&source);
+		assert!(own_focus().is_err());
+		source.release_control();
+		drop(own_focus().expect("free once the task releases control"));
+		remove_test_lock();
 	}
 
 	#[cfg(unix)]

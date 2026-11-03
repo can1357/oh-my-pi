@@ -691,6 +691,7 @@ class BashResult:
     artifact_id: str | None = None
     artifact_elided_bytes: int | None = None
     artifact_error: JsonObject | None = None
+    minimized: JsonObject | None = None
     working_dir: str | None = None
     images: tuple[ImageContent, ...] | None = None
 
@@ -1655,6 +1656,12 @@ class LiveConnectResult:
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
+class GetSessionLeaseResult:
+    held: tuple[str, ...]
+    unknown: tuple[str, ...]
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
 class LogoutResult:
     remaining_source: str | None = None
 
@@ -2040,6 +2047,7 @@ def parse_bash_result(value: object, path: str = "BashResult") -> BashResult:
         artifact_id=optional(payload, "artifactId", decode_str, path),
         artifact_elided_bytes=optional(payload, "artifactElidedBytes", decode_int, path),
         artifact_error=optional(payload, "artifactError", decode_json_object, path),
+        minimized=optional(payload, "minimized", decode_json_object, path),
         working_dir=optional(payload, "workingDir", decode_str, path),
         images=optional(payload, "images", array(parse_image_content), path),
     )
@@ -3136,6 +3144,14 @@ def parse_live_connect_result(value: object, path: str = "LiveConnectResult") ->
     )
 
 
+def parse_get_session_lease_result(value: object, path: str = "GetSessionLeaseResult") -> GetSessionLeaseResult:
+    payload = expect_object(value, path)
+    return GetSessionLeaseResult(
+        held=required(payload, "held", array(decode_str), path),
+        unknown=required(payload, "unknown", array(decode_str), path),
+    )
+
+
 def parse_logout_result(value: object, path: str = "LogoutResult") -> LogoutResult:
     payload = expect_object(value, path)
     return LogoutResult(
@@ -3560,6 +3576,12 @@ class WireClient:
         """Session statistics."""
         params: dict[str, object] = {}
         return parse_session_stats(self._command("get_session_stats", params), "get_session_stats")
+
+    def get_session_lease(self, session_ids: Sequence[str]) -> GetSessionLeaseResult:
+        """Which of these sessions a running process (this one included) owns, probed without taking ownership. Ids in neither list are free; `unknown` could not be probed."""
+        params: dict[str, object] = {}
+        params["sessionIds"] = list(session_ids)
+        return parse_get_session_lease_result(self._command("get_session_lease", params), "get_session_lease")
 
     def export_html(self, output_path: str | Path | None = None) -> Path:
         """Export the session as HTML; returns the written path."""
@@ -4005,6 +4027,7 @@ __all__ = [
     "FastModeResult",
     "FileMentionItem",
     "FileMentionMessage",
+    "GetSessionLeaseResult",
     "Goal",
     "GoalModeState",
     "GoalOp",
@@ -4193,6 +4216,7 @@ __all__ = [
     "parse_fast_mode_result",
     "parse_file_mention_item",
     "parse_file_mention_message",
+    "parse_get_session_lease_result",
     "parse_goal",
     "parse_goal_mode_state",
     "parse_goal_result",

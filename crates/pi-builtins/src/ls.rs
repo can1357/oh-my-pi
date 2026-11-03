@@ -18,7 +18,7 @@ use std::{
 	time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use brush_core::{ShellExtensions, builtins::Registration, openfiles::OpenFile};
+use crate::openfile::OpenFile;
 use clap::{
 	Arg, ArgAction, ArgMatches, Command,
 	builder::{NonEmptyStringValueParser, PossibleValue, ValueParser},
@@ -37,7 +37,7 @@ use uucore::{
 use crate::{
 	fsmeta::metadata_get_time,
 	host::{
-		Host, ShellPaths, StreamWriter, Utility, format_usage, matches_parser, os_bytes_lossy, util,
+		Host, ShellPaths, StreamWriter, Utility, format_usage, matches_parser, os_bytes_lossy,
 	},
 };
 
@@ -821,10 +821,9 @@ pub(crate) fn validate_ls_colors(ls_colors: &str) -> Result<(), LsColorsParseErr
 				}
 			},
 			_ => {
-				if idx + 1 >= bytes.len() {
+				let Some(&label) = bytes[idx..].first_chunk::<2>() else {
 					return Err(LsColorsParseError::InvalidSyntax);
-				}
-				let label = [bytes[idx], bytes[idx + 1]];
+				};
 				idx += 2;
 				if idx >= bytes.len() || bytes[idx] != b'=' {
 					return Err(LsColorsParseError::InvalidSyntax);
@@ -2485,7 +2484,7 @@ use std::{
 	borrow::Cow,
 	cell::LazyCell,
 	ffi::{OsStr, OsString},
-	fmt::Write as FmtWrite,
+	fmt::{NumBuffer, Write as FmtWrite},
 	io::Write,
 	iter,
 	sync::LazyLock,
@@ -2678,7 +2677,7 @@ fn push_basic_escape(buf: &mut String, byte: u8) {
 		b'\x1b' => buf.push_str("\\e"),
 		b'"' => buf.push('"'),
 		b'\'' => buf.push('\''),
-		b if (0x20..=0x7e).contains(&b) => buf.push(b as char),
+		b @ 0x20..=0x7e => buf.push(b as char),
 		_ => {
 			let _ = write!(buf, "\\{byte:03o}");
 		},
@@ -3090,7 +3089,7 @@ fn display_date(
 	};
 
 	let Ok(timestamp) = jiff::Timestamp::try_from(time) else {
-		out.extend(system_time_to_sec(time).0.to_string().as_bytes());
+		out.extend(system_time_to_sec(time).0.format_into(&mut NumBuffer::new()).as_bytes());
 		return Ok(());
 	};
 	let zoned = Zoned::new(timestamp, config.time_zone.clone());
@@ -4735,11 +4734,6 @@ pub fn uu_app() -> Command {
 		)
 }
 
-/// Creates the `ls` builtin registration.
-pub(crate) fn ls_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Ls, SE>()
-}
-
 /// Represents the possible values of [`PathData::display_name`]. The reason
 /// this is a separate enum is to avoid a self-referential struct, as it is
 /// moved in hot loops.
@@ -4789,8 +4783,7 @@ impl<'a> PathData<'a> {
 			PathDataDisplayName::Custom(
 				dir_entry
 					.as_ref()
-					.map(|entry| entry.file_name())
-					.unwrap_or_default()
+					.map_or_default(|entry| entry.file_name())
 					.into(),
 			)
 		};
@@ -5115,7 +5108,7 @@ pub fn list(locs: Vec<&Path>, config: &Config, out: StreamWriter) -> std::io::Re
 			// combinatorial explosion; we decrease it logarithmically here.
 			let (cap, len) = (state.stack.capacity(), state.stack.len());
 			if cap > (len + 4) * 2 {
-				state.stack.shrink_to(len + (cap - len) / 2);
+				state.stack.shrink_to(len.midpoint(cap));
 			}
 		}
 

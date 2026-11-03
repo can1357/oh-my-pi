@@ -723,6 +723,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	#subagentCount: number = 0;
 	#runningSubagentIds = new Set<string>();
 	#subagentTreeCost = 0;
+	#pinnedSessionIds = new Set<string>();
 	/**
 	 * Active-processing accounting for the `time_spent` segment, keyed per
 	 * {@link StatusLineSession} so the focus-controller mid-turn attach path
@@ -820,8 +821,6 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	#codexResetSnapshots = new Map<string, CodexResetUsageSnapshot>();
 	#onCodexResetFireworks: ((event: CodexResetFireworksEvent) => void) | undefined;
 	#onResetExpiryNotice: ((notice: string) => void) | undefined;
-	/** Conversations already warned about expiring saved resets: later refreshes stay quiet. */
-	#resetExpiryNoticedSessions = new Set<string>();
 	// Context-usage memo. The status line redraws on every agent event, so the
 	// hot path must not recompute context tokens unless an input changed.
 	// `getContextUsage()` anchors on the last assistant's real prompt-token
@@ -1232,12 +1231,30 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		this.#invalidateStatusLineRenderCache();
 	}
 
+	/** Mark one session pinned or unpinned; `session_name` shows the pin for the viewed session. */
+	setSessionPinned(sessionId: string, pinned: boolean): void {
+		if (this.#pinnedSessionIds.has(sessionId) === pinned) return;
+		if (pinned) this.#pinnedSessionIds.add(sessionId);
+		else this.#pinnedSessionIds.delete(sessionId);
+		this.#invalidateStatusLineRenderCache();
+	}
+
+	/** Replace the whole pinned-session set (a fresh read of the pins file). */
+	setPinnedSessionIds(sessionIds: ReadonlySet<string>): void {
+		this.#pinnedSessionIds = new Set(sessionIds);
+		this.#invalidateStatusLineRenderCache();
+	}
+
+	isSessionPinned(sessionId: string | undefined): boolean {
+		return sessionId !== undefined && this.#pinnedSessionIds.has(sessionId);
+	}
+
 	/** Set the callback that presents detected Codex reset celebrations, or clear it with `undefined`. */
 	setCodexResetFireworksHandler(handler: ((event: CodexResetFireworksEvent) => void) | undefined): void {
 		this.#onCodexResetFireworks = handler;
 	}
 
-	/** Set the callback that presents the first pool-wide saved-reset expiry warning, or clear it with `undefined`. */
+	/** Set the callback that presents pool-wide saved-reset expiry warnings, or clear it with `undefined`. */
 	setResetExpiryNoticeHandler(handler: ((notice: string) => void) | undefined): void {
 		this.#onResetExpiryNotice = handler;
 	}
@@ -2120,7 +2137,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	}
 
 	#noticeResetExpiry(session: TSession, reports: unknown): void {
-		// A focused subagent's view is not a conversation the user started; warn in their own.
+		// A focused subagent's view is not a conversation the user started; leave the warning for their own.
 		if (
 			this.#focusedAgentId !== undefined ||
 			!this.#onResetExpiryNotice ||
@@ -2129,8 +2146,6 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		) {
 			return;
 		}
-		const sessionId = session.sessionManager.getSessionId();
-		if (this.#resetExpiryNoticedSessions.has(sessionId)) return;
 		// fetchUsageReports supplies normalized rows; keep only entries shaped like reports.
 		const usageReports = reports.filter(
 			(report): report is UsageReport =>
@@ -2140,10 +2155,8 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 				"limits" in report &&
 				Array.isArray(report.limits),
 		);
-		const notice = this.host.resetExpiryNotice(usageReports, Date.now());
-		if (!notice) return;
-		this.#resetExpiryNoticedSessions.add(sessionId);
-		this.#onResetExpiryNotice(notice);
+		const notice = this.host.resetExpiryNotice(session, usageReports, Date.now());
+		if (notice) this.#onResetExpiryNotice(notice);
 	}
 
 	#observeLateUsageRefresh(session: TSession, reportsPromise: Promise<unknown>, sequence: number): void {
@@ -2602,6 +2615,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			focusedAgentId: this.#focusedAgentId,
 			sessionAccent: sessionAccentEnabled,
 			previewTitle,
+			isPinned: this.isSessionPinned(this.session.sessionManager?.getSessionId?.()),
 			activeRepo: activeRepoCache.activeRepo,
 			width,
 			options: segmentOptions ?? {},

@@ -1,4 +1,4 @@
-//! Brush-based shell execution exported via N-API.
+//! Embedded bash engine (pi-shell) shell execution exported via N-API.
 
 pub mod vfs;
 
@@ -34,7 +34,6 @@ pub fn expand_windows_long_path(path: String) -> String {
 	#[cfg(windows)]
 	{
 		pi_shell::expand_to_long_path(std::path::Path::new(&path))
-			.into_os_string()
 			.into_string()
 			.unwrap_or(path)
 	}
@@ -51,7 +50,6 @@ pub fn get_windows_short_path(path: String) -> String {
 	#[cfg(windows)]
 	{
 		pi_shell::get_short_path(std::path::Path::new(&path))
-			.into_os_string()
 			.into_string()
 			.unwrap_or(path)
 	}
@@ -232,7 +230,8 @@ impl PipeStreams {
 	}
 }
 
-/// Options for executing a shell command via brush-core.
+/// Options for executing a shell command via the embedded bash engine
+/// (pi-shell).
 #[napi(object, object_to_js = false)]
 pub struct ShellExecuteOptions<'env> {
 	/// Command string to execute in the shell.
@@ -322,7 +321,7 @@ impl From<CoreShellRunResult> for ShellRunResult {
 	}
 }
 
-/// Persistent brush-core shell session.
+/// Persistent embedded bash engine (pi-shell) shell session.
 #[napi]
 pub struct Shell {
 	inner: Arc<CoreShell>,
@@ -403,7 +402,7 @@ impl Shell {
 	}
 }
 
-/// Execute a brush shell command.
+/// Execute a command in the embedded bash engine (pi-shell).
 ///
 /// Creates a fresh session for each call. The `on_chunk` callback receives
 /// streamed stdout/stderr output. Returns the exit code when the command

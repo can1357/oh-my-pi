@@ -3,7 +3,9 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { Message } from "@oh-my-pi/pi-ai";
 import { textContent } from "@oh-my-pi/pi-tui/chat/transcript-entry";
+import type { SessionListing } from "@oh-my-pi/pi-tui/overlays/session-selector";
 import { getSessionsDir } from "@oh-my-pi/pi-utils/dirs";
+import { hasFsCode, isEacces, isEnoent, isEnotdir } from "@oh-my-pi/pi-utils/fs-error";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { parseJsonlLenient } from "@oh-my-pi/pi-utils/stream";
@@ -12,7 +14,7 @@ import { EVAL_STATE_CONTEXT_TYPE } from "../eval/state";
 import { visitEntriesFromFile } from "./session-loader";
 import { computeDefaultSessionDir } from "./session-paths";
 import { FileSessionStorage, type SessionStorage, type SessionStorageStat } from "./session-storage";
-import { lookupSessionTitle, recordSessionTitle } from "./session-index";
+import { listSessionTitles, lookupSessionTitle, recordSessionTitle, recordSessionTitles } from "./session-index";
 
 /**
  * Coarse lifecycle status of a session, derived from its last persisted message.
@@ -546,13 +548,16 @@ async function collectSessionsFromFiles(
 					)
 				).flat();
 
-	sessions.sort(
-		(a, b) =>
-			b.modified.getTime() - a.modified.getTime() ||
-			b.created.getTime() - a.created.getTime() ||
-			b.path.localeCompare(a.path),
+	return sessions.sort(compareNewestFirst);
+}
+
+/** Newest `modified` first; ties break on `created`, then path, so every listing orders alike. */
+function compareNewestFirst(a: SessionInfo, b: SessionInfo): number {
+	return (
+		b.modified.getTime() - a.modified.getTime() ||
+		b.created.getTime() - a.created.getTime() ||
+		b.path.localeCompare(a.path)
 	);
-	return sessions;
 }
 
 /**
@@ -615,15 +620,27 @@ export async function recoverOrphanedBackups(sessionDir: string, storage: Sessio
 	}
 }
 
+/**
+ * Session files of `sessionDir` plus `siblingDirs`, after promoting
+ * `sessionDir`'s orphaned backups. The siblings belong to other working
+ * directories (see `worktreeSessionDirs`), so their backups stay theirs.
+ */
+async function listSessionDirFiles(
+	sessionDir: string,
+	storage: SessionStorage,
+	siblingDirs: readonly string[] = [],
+): Promise<string[]> {
+	await recoverOrphanedBackups(sessionDir, storage);
+	return [sessionDir, ...siblingDirs].flatMap(dir => storage.listFilesSync(dir, "*.jsonl"));
+}
+
 async function scanSessionDir(
 	sessionDir: string,
 	storage: SessionStorage,
 	withStatus: boolean,
-	siblingDirs: readonly string[] = [],
 ): Promise<SessionInfo[]> {
 	try {
-		await recoverOrphanedBackups(sessionDir, storage);
-		const files = [sessionDir, ...siblingDirs].flatMap(dir => storage.listFilesSync(dir, "*.jsonl"));
+		const files = await listSessionDirFiles(sessionDir, storage);
 		return await collectSessionsFromFiles(files, storage, withStatus);
 	} catch {
 		return [];
@@ -645,16 +662,10 @@ async function scanSessionDirReadOnly(
 
 /**
  * List sessions in a resolved session directory (newest first), reading each
- * file's lifecycle {@link SessionStatus}. `siblingDirs` merge into the same
- * list; they belong to other working directories (see `worktreeSessionDirs`),
- * so orphaned-backup recovery runs on `sessionDir` only.
+ * file's lifecycle {@link SessionStatus}.
  */
-export function listSessions(
-	sessionDir: string,
-	storage: SessionStorage,
-	siblingDirs: readonly string[] = [],
-): Promise<SessionInfo[]> {
-	return scanSessionDir(sessionDir, storage, true, siblingDirs);
+export function listSessions(sessionDir: string, storage: SessionStorage): Promise<SessionInfo[]> {
+	return scanSessionDir(sessionDir, storage, true);
 }
 
 /**
@@ -697,8 +708,141 @@ export function isEmptySession(session: SessionInfo): boolean {
 }
 
 /** Picker-facing view of a session list: empties dropped, pinned sessions kept. */
-export function filterSessionsForPicker(sessions: SessionInfo[], pinnedIds: ReadonlySet<string>): SessionInfo[] {
+function filterSessionsForPicker(sessions: SessionInfo[], pinnedIds: ReadonlySet<string>): SessionInfo[] {
 	return sessions.filter(session => pinnedIds.has(session.id) || !isEmptySession(session));
+}
+
+/**
+ * A resume-picker listing in two passes (see {@link listSessionsForPicker}):
+ * `sessions` to show at once, `complete` with the full content scan.
+ */
+export interface PickerListing extends SessionListing<SessionInfo> {
+	/** The full scan's rows; resolves to `sessions` itself when those already are the full scan. */
+	complete: Promise<SessionInfo[]>;
+}
+
+/**
+ * Resume-picker listing of `sessionDir` plus `siblingDirs` (the folder's
+ * session directories in other worktrees). `sessions` holds the rows whose
+ * title history.db indexes, built without reading a session file, so the
+ * picker opens at once over thousands of sessions; `complete` settles with
+ * the full scan, newest first, untitled empties dropped unless pinned. With
+ * nothing indexed, `sessions` waits for the full scan.
+ */
+export async function listSessionsForPicker(
+	sessionDir: string,
+	storage: SessionStorage,
+	pinnedIds: ReadonlySet<string>,
+	siblingDirs: readonly string[] = [],
+): Promise<PickerListing> {
+	let files: string[];
+	try {
+		files = await listSessionDirFiles(sessionDir, storage, siblingDirs);
+	} catch {
+		return settledListing([]);
+	}
+	return pickerListing(files, storage, pinnedIds, () => collectSessionsFromFiles(files, storage, true));
+}
+
+/** {@link listSessionsForPicker} across every project directory under `sessionsRoot`. */
+export async function listAllSessionsForPicker(
+	storage: SessionStorage,
+	pinnedIds: ReadonlySet<string>,
+	sessionsRoot: string = getSessionsDir(),
+): Promise<PickerListing> {
+	let files: string[];
+	try {
+		files = await scanBucketFiles(sessionsRoot, "*.jsonl");
+	} catch {
+		return settledListing([]);
+	}
+	// Realpath dedupe costs a syscall per file, so only the full scan pays it;
+	// the indexed rows keep one row per session id instead.
+	return pickerListing(files, storage, pinnedIds, async () =>
+		collectSessionsFromFiles(await dedupeRealPaths(files), storage, true),
+	);
+}
+
+function settledListing(sessions: SessionInfo[]): PickerListing {
+	return { sessions, complete: Promise.resolve(sessions) };
+}
+
+/**
+ * Two-pass listing over `files`: indexed-title rows now, `scan`'s rows later.
+ * The full scan also syncs the index with the titles it read, so sessions
+ * titled before the index existed pre-populate the next listing.
+ */
+async function pickerListing(
+	files: readonly string[],
+	storage: SessionStorage,
+	pinnedIds: ReadonlySet<string>,
+	scan: () => Promise<SessionInfo[]>,
+): Promise<PickerListing> {
+	// The index is keyed by real session ids; in-memory test storages must not
+	// touch the process-wide history.db.
+	const useIndex = storage instanceof FileSessionStorage;
+	const titles = useIndex ? listSessionTitles() : new Map<string, string>();
+	const sessions = await indexedSessions(files, titles);
+	// Start the scan only now: its reads would otherwise queue ahead of the stats above.
+	const complete = scan().then(scanned => {
+		if (useIndex) indexScannedTitles(scanned, titles);
+		return filterSessionsForPicker(scanned, pinnedIds);
+	});
+	return sessions.length > 0 ? { sessions, complete } : settledListing(await complete);
+}
+
+/**
+ * Preliminary picker rows for the `files` whose session id has an indexed
+ * title, from the file name, `stat`, and the title alone. What only a content
+ * read yields stays neutral: no `cwd`, first message, or status. A titled
+ * session is never {@link isEmptySession} and each id gets one row, so the
+ * rows are a subset of the full scan's.
+ */
+async function indexedSessions(files: readonly string[], titles: ReadonlyMap<string, string>): Promise<SessionInfo[]> {
+	if (titles.size === 0) return [];
+	const titled = new Map<string, { file: string; title: string }>();
+	for (const file of files) {
+		const id = sessionIdFromSessionPath(file);
+		if (!id || titled.has(id)) continue;
+		const title = sanitizeSessionName(titles.get(id));
+		if (title) titled.set(id, { file, title });
+	}
+	const sessions = await Promise.all(
+		Array.from(titled, async ([id, { file, title }]): Promise<SessionInfo | undefined> => {
+			let stat: fs.Stats;
+			try {
+				stat = await fs.promises.stat(file);
+			} catch {
+				return undefined;
+			}
+			return {
+				path: file,
+				id,
+				cwd: "",
+				title,
+				created: sessionCreatedFromSessionPath(file) ?? stat.mtime,
+				modified: stat.mtime,
+				messageCount: 0,
+				size: stat.size,
+				firstMessage: "",
+				allMessagesText: "",
+			};
+		}),
+	);
+	return sessions.filter(session => session !== undefined).sort(compareNewestFirst);
+}
+
+/**
+ * Upsert the scanned titles history.db lacks or holds differently, e.g. of
+ * sessions titled before the index existed, so the next listing pre-populates them.
+ */
+function indexScannedTitles(sessions: readonly SessionInfo[], indexed: ReadonlyMap<string, string>): void {
+	const changed = new Map<string, string>();
+	for (const session of sessions) {
+		const title = sanitizeSessionName(session.title);
+		if (title && indexed.get(session.id) !== title) changed.set(session.id, title);
+	}
+	recordSessionTitles(changed);
 }
 
 /** Most recent session with resumable content, skipping 0-turn empties. Exported for testing. */
@@ -1157,6 +1301,14 @@ function activityReader(storage: SessionStorage): (copy: SessionInfo) => Promise
 	};
 }
 
+/** Creation time encoded in a `<file-safe-timestamp>_<id>.jsonl` filename (`2026-01-02T03-04-05-678Z_…`), if present. */
+function sessionCreatedFromSessionPath(file: string): Date | undefined {
+	const match = /^(\d{4}-\d{2}-\d{2}T\d{2})-(\d{2})-(\d{2})-(\d{3})Z_/.exec(path.basename(file));
+	if (!match) return undefined;
+	const created = new Date(`${match[1]}:${match[2]}:${match[3]}.${match[4]}Z`);
+	return Number.isNaN(created.getTime()) ? undefined : created;
+}
+
 /** Session id embedded in a `<file-safe-timestamp>_<id>.jsonl` filename, if present. */
 function sessionIdFromSessionPath(file: string): string | undefined {
 	const base = path.basename(file);
@@ -1206,20 +1358,33 @@ async function dedupeRealPaths(files: readonly string[]): Promise<string[]> {
  * twice when one bucket aliases another (#5385). The leaf scan inside a real
  * bucket does follow symlinks, which is what #15878 asks for: a transcript
  * staged in as a symlink is a transcript.
+ *
+ * Unavailable buckets are skipped individually. Unexpected enumeration errors
+ * propagate so callers can distinguish a failed scan from an empty result.
  */
 async function scanBucketFiles(root: string, pattern: string): Promise<string[]> {
 	let entries: fs.Dirent[];
 	try {
 		entries = await fs.promises.readdir(root, { withFileTypes: true });
-	} catch {
-		return [];
+	} catch (err) {
+		if (isEnoent(err) || isEnotdir(err)) return [];
+		throw err;
 	}
 	const out: string[] = [];
 	for (const entry of entries) {
 		if (entry.isSymbolicLink() || !entry.isDirectory()) continue;
 		const dir = path.join(root, entry.name);
-		for await (const name of new Bun.Glob(pattern).scan({ cwd: dir, followSymlinks: true })) {
-			out.push(path.join(dir, name));
+		const bucketStart = out.length;
+		try {
+			for await (const name of new Bun.Glob(pattern).scan({ cwd: dir, followSymlinks: true })) {
+				out.push(path.join(dir, name));
+			}
+		} catch (err) {
+			if (isEnoent(err) || isEacces(err) || hasFsCode(err, "EPERM") || isEnotdir(err)) {
+				out.length = bucketStart;
+				continue;
+			}
+			throw err;
 		}
 	}
 	return out;
@@ -1374,13 +1539,9 @@ export async function listRecentProjects(
  */
 export async function findSessionFiles(idPrefix: string, sessionsRoot: string = getSessionsDir()): Promise<string[]> {
 	if (!/^[\w-]+$/.test(idPrefix)) return [];
-	try {
-		const files = await dedupeRealPaths(await scanBucketFiles(sessionsRoot, `*_${idPrefix}*.jsonl`));
-		// `*_` can also match an underscore inside an id; keep true id-prefix matches only.
-		return files.filter(file => sessionIdFromSessionPath(file)?.startsWith(idPrefix));
-	} catch {
-		return [];
-	}
+	const files = await dedupeRealPaths(await scanBucketFiles(sessionsRoot, `*_${idPrefix}*.jsonl`));
+	// `*_` can also match an underscore inside an id; keep true id-prefix matches only.
+	return files.filter(file => sessionIdFromSessionPath(file)?.startsWith(idPrefix));
 }
 
 /**

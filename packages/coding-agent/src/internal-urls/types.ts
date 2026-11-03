@@ -18,7 +18,7 @@ import type { ShellFsDirEntry } from "@oh-my-pi/pi-natives";
 import type { Settings } from "../config/settings";
 import type { Rule } from "../capability/rule";
 import type { Skill } from "../extensibility/skills";
-import type { AgentRegistry } from "../registry/agent-registry";
+import type { AgentRegistryApi } from "../registry/agent-registry";
 import type { LocalProtocolOptions } from "./local-protocol";
 import type { SessionEntry } from "../session/session-entries";
 import type { ToolSession } from "../tools";
@@ -26,6 +26,7 @@ import type { CoordinationDetails } from "@oh-my-pi/pi-tui/tools/wait";
 import type { ProcReadDetails, ProcWriteDetails } from "@oh-my-pi/pi-tui/tools/proc-render";
 import type { CfgReadDetails, CfgWriteDetails } from "@oh-my-pi/pi-tui/tools/cfg-render";
 import type { XdevRenderDispatch } from "@oh-my-pi/pi-tui/tools/xdev";
+import type { SchemeWriteScope } from "@oh-my-pi/pi-tui/tools/url-scheme-host";
 
 /** Transcript-only render state a handler write attaches to the `write` tool result. */
 export interface InternalWriteDetails {
@@ -66,15 +67,6 @@ export type SchemeBacking = "file" | "virtual" | "remote" | "device";
  */
 export type SchemeSelectors = "lines" | "none" | "opaque";
 
-/**
- * Mutation class of a writable scheme; drives plan-mode and device-only `write` gates.
- * - `workspace`: mutates user/external state; blocked in plan mode and device-only sessions.
- * - `sandbox`: session scratch space (local://); allowed in plan mode and device-only sessions.
- * - `coordination`: peer messaging (agent://); always allowed. {@link SchemeWritePolicy.cancels} grants the same per URL.
- * - `device`: tool-device dispatch (xd://); always allowed, the device enforces its own policy.
- */
-export type SchemeWriteScope = "workspace" | "sandbox" | "coordination" | "device";
-
 /** Write policy for a writable scheme. Absent on read-only schemes. */
 export interface SchemeWritePolicy {
 	/**
@@ -91,9 +83,12 @@ export interface SchemeWritePolicy {
 	 * `verbatim`: raw payload (messages, stdin, setting values); neither transform applies.
 	 */
 	payload: "text" | "verbatim";
+	/** Mutation class; see {@link SchemeWriteScope}. */
 	scope: SchemeWriteScope;
 	/** Approval tier for `write`/`edit`/`ast_edit` targeting this URL. `session` is absent when approval is evaluated outside a tool session. */
 	tier(url: InternalUrl, content: string | undefined, session: ToolSession | undefined): ToolApprovalDecision;
+	/** Largest payload in UTF-8 bytes the scheme accepts; the shell refuses writes past it (EFBIG). Default: unbounded. */
+	maxBytes?: number;
 	/** True when `write` may omit `content` for this URL (`proc://<id>/kill`). */
 	contentOptional?(url: InternalUrl): boolean;
 	/**
@@ -159,6 +154,8 @@ export interface SchemeHost {
 	securityEnabled: boolean;
 	/** The user approves `cfg://` writes for this session (top-level TUI session). */
 	settingsApproval: boolean;
+	/** `out://` writes reach the user as transcript replies: `out.enabled` is on in the top-level TUI session. */
+	outReplies: boolean;
 }
 
 /**
@@ -279,7 +276,7 @@ export interface ResolveContext {
 	 */
 	seanceSourceArtifactsDir?: string;
 	/** Registry that owns the calling session; defaults to the process-wide registry. */
-	agentRegistry?: AgentRegistry;
+	agentRegistry?: AgentRegistryApi;
 	/** Settings of the calling session (used by `issue://`/`pr://` for cache TTLs). */
 	settings?: Settings;
 	/** Caller's abort signal. */
