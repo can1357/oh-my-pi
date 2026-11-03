@@ -23,7 +23,7 @@ use crate::{
 		Script, Shell, ShellApi, SigTarget, Signal, StateStore, Step, StoreError, UnitId, VarValue,
 		Vpid,
 		store::{
-			BlobSlot, Change, Elem, Job, JobState, Key, KeyBuf, LossyKind, MiscKey, OptId, Record,
+			BlobSlot, Change, Death, Elem, Job, JobState, Key, KeyBuf, LossyKind, MiscKey, OptId, Record,
 			Sticky, Table, TrapKey, Var, ZshScope,
 		},
 		zshopt::{ZshOpt, ZshOpts},
@@ -279,6 +279,7 @@ fn samples() -> Vec<(KeyBuf, Record)> {
 				nohup:     true,
 				inherited: false,
 				wd:        bytes(b"/t\xffmp"),
+				death:     None,
 				os_pid:    Some(4242),
 			}),
 		),
@@ -295,14 +296,20 @@ fn samples() -> Vec<(KeyBuf, Record)> {
 				nohup:     false,
 				inherited: false,
 				wd:        bytes(b"/"),
+				death:     Some(Death { signal: 9, core: false }),
 				os_pid:    None,
 			}),
 		),
 		(KeyBuf::Proc(Vpid(Vpid::BASE + 1)), Record::Proc {
 			parent: Some(Vpid(Vpid::BASE)),
 			status: None,
+			death:  None,
 		}),
-		(KeyBuf::Proc(Vpid(Vpid::BASE + 2)), Record::Proc { parent: None, status: Some(0) }),
+		(KeyBuf::Proc(Vpid(Vpid::BASE + 2)), Record::Proc {
+			parent: None,
+			status: Some(137),
+			death:  Some(Death { signal: 9, core: true }),
+		}),
 		(KeyBuf::DirStack, Record::DirStack(vec![bytes(b"/a"), bytes(b"/\xffb")])),
 		(KeyBuf::CmdHash(bytes(b"ls")), Record::CmdHash { path: bytes(b"/bin/ls"), hits: 3 }),
 		(

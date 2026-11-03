@@ -17,6 +17,7 @@ use super::{
 	CallOutcome, Cx, Kernel, ToolCall, assign_scope,
 	builtins::{self, Chunk, Control, Ctx, Lhs, Need},
 	exec::{self, Flow, expanding, line_of},
+	notify,
 	expand::{CompoundElem, Stop, compound_text},
 	probe::{self, Search, absolute, candidates},
 	proc::{
@@ -37,10 +38,10 @@ use crate::bash::{
 		StdioSpec, Via,
 	},
 	ids::{CallId, CmdTag, IntrinsicId, RunId},
-	ir::{self, AssignVal, Op, Part, Unit},
+	ir::{self, AssignVal, Op, Opcode, Part, Unit},
 	signal::SigSet,
 	snapshot::Lost,
-	store::{Attrs, Key, KeyBuf, MiscKey, Record, StateStore, StoreError, VarValue},
+	store::{Attrs, Death, Key, KeyBuf, MiscKey, Record, StateStore, StoreError, VarValue},
 	zshopt::ZshOpt,
 };
 
@@ -3046,6 +3047,9 @@ fn await_(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) ->
 				let shown = vp.shown_pid(v);
 				if let Some(s) = k.proc_collect(cx.store, v) {
 					last = s;
+					// bash `wait_for`: the job it waited for is reported, then
+					// forgotten (`wait_for_job` marks it notified).
+					report_waited(k, vp, cx, v);
 					forget_job(vp, v);
 					exec::reap_coproc(k, vp, cx, v);
 				} else if let (false, Some(JobState::Stopped(sig))) =
@@ -3068,35 +3072,33 @@ fn await_(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) ->
 			while let Some(&v) = st(vp).wait_for.first() {
 				if k.proc_collect(cx.store, v).is_some() {
 					exec::reap_coproc(k, vp, cx, v);
+					// bash `wait_for_background_pids` waits for each running
+					// job in turn: its `wait_for` reports the job and forgets it.
+					report_waited(k, vp, cx, v);
+					forget_job(vp, v);
 				} else if !matches!(vp.jobs.by_vpid(v).map(|j| j.state), Some(JobState::Stopped(_))) {
 					// A job stopped meanwhile is skipped (job control).
 					return Some(Flow::Block(WaitKey::Proc(v)));
 				}
 				st(vp).wait_for.remove(0);
 			}
-			// bash: `wait` forgets every finished job, except the one `$!`
-			// names when it finished before the wait (POSIX keeps the last
-			// async status until it is waited for or reported). A job this
-			// shell just killed is still being reaped when bash's `wait`
-			// looks, so that wait collects it (jobs.tests).
+			// bash: then `wait` forgets every job that had ended before it,
+			// unreported, except the one `$!` names (POSIX keeps the last
+			// async status until it is waited for or reported:
+			// `mark_dead_jobs_as_notified (1)`), and the statuses of the jobs
+			// it forgot earlier (`bgp_clear`).
 			let last = vp.last_bg;
 			let done: Vec<crate::bash::ids::Vpid> = vp
 				.jobs
 				.iter()
-				.filter(|j| match j.state {
-					JobState::Done(status) => {
-						!last.is(j.vpid)
-							|| status > 128
-							|| !matches!(k.proc_state(cx.store, j.vpid), Some(super::ProcState::Exited(_)))
-					},
-					_ => false,
-				})
+				.filter(|j| matches!(j.state, JobState::Done(_)) && !last.is(j.vpid))
 				.map(|j| j.vpid)
 				.collect();
 			for v in done {
 				k.proc_collect(cx.store, v);
 				forget_job(vp, v);
 			}
+			vp.jobs.saved = None;
 			st(vp).status
 		},
 		Some(Awaited::AnyJob) => {
@@ -3117,6 +3119,9 @@ fn await_(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) ->
 			};
 			let shown = vp.shown_pid(v);
 			k.proc_collect(cx.store, v);
+			// bash `wait_for_any_job`: `notify_of_job_status` for the job,
+			// then `delete_job`.
+			report_waited(k, vp, cx, v);
 			forget_job(vp, v);
 			st(vp).wait_for.clear();
 			exec::reap_coproc(k, vp, cx, v);
@@ -3147,7 +3152,9 @@ fn await_(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) ->
 			let replacing = matches!(st(vp).control, Some(Transfer::Exec));
 			let run = vp.runs.front().map(|run| run.id);
 			let mut tcx = Context::from_waker(&k.waker);
-			match &mut scratch(vp).live {
+			// The signal that ended the program, with its core dump.
+			let mut died: Option<Death> = None;
+			let status = match &mut scratch(vp).live {
 				Live::Ext(child) => match child.poll_wait(&mut tcx) {
 					Poll::Ready(ExitStatus::Exited(code)) => {
 						reaped = true;
@@ -3158,6 +3165,7 @@ fn await_(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) ->
 						if replacing && let Some(run) = run {
 							k.exec_signals.insert(run, i32::from(sig.number(platform)));
 						}
+						died = Some(Death { signal: sig.number(platform), core: child.core_dumped() });
 						sig.exit_status(platform)
 					},
 					Poll::Ready(ExitStatus::SignaledRaw(signal)) => {
@@ -3165,12 +3173,21 @@ fn await_(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) ->
 						if replacing && let Some(run) = run {
 							k.exec_signals.insert(run, signal);
 						}
+						died = u8::try_from(signal)
+							.ok()
+							.map(|signal| Death { signal, core: child.core_dumped() });
 						128 + signal
 					},
 					Poll::Pending => return Some(Flow::Block(WaitKey::Ext { pid })),
 				},
 				_ => lost(k, vp, cx, op, line, Lost::Ext { vpid: vp.vpid, pid }),
+			};
+			if let Some(death) = died
+				&& !replacing
+			{
+				program_died(k, vp, cx, op, pid, death);
 			}
+			status
 		},
 		None => st(vp).status,
 	};
@@ -3188,6 +3205,144 @@ fn await_(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) ->
 	s.status = status;
 	s.stage = Stage::Output;
 	None
+}
+
+/// Report the job led by `v`, which `wait` collected, if a signal ended it
+/// (bash `wait_for` → `notify_and_cleanup (job)`; the caller forgets it).
+fn report_waited(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, v: crate::bash::ids::Vpid) {
+	let Some(number) = vp.jobs.by_vpid(v).map(|j| j.number) else {
+		return;
+	};
+	let out = notify::mark(k, cx, vp, Some(number));
+	if !out.is_empty() {
+		vp.out
+			.push_back(PendingWrite { fd: 2, bytes: BString::from(out), off: 0 });
+	}
+}
+
+/// The external program `vp` ran in the foreground (`pid`, the command at
+/// `op`) was ended by `death`. Where bash would have run it in place of the
+/// subshell `vp` is (`exec`'d: a background job's or a pipeline stage's
+/// command, a subshell's last command), the vproc dies by the signal, and
+/// its parent reports it. Otherwise bash forked it and its wait for it
+/// reports it here (`notify_and_cleanup (job)` in `wait_for`), unless it
+/// was the last command of a `bash -c` string, which bash `exec`s too.
+fn program_died(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, pid: u32, death: Death) {
+	if stands_for_vproc(k, cx, vp, op) {
+		k.deaths.insert(vp.vpid, death);
+		return;
+	}
+	if oneshot(k, cx, vp, op) {
+		return;
+	}
+	let Some(unit) = vp.frames.last().and_then(|f| f.unit.clone()) else {
+		return;
+	};
+	let text = exec::job_text(k, cx, vp, &unit, op.node);
+	let procs = [notify::ProcLine { pid, text: &text, status: notify::ProcStatus::Signaled(death) }];
+	notify::report_foreground(k, cx, vp, &procs, Some(death));
+}
+
+/// Whether `vp` has a trap with an action for a signal, or an `EXIT` or
+/// `ERR` trap (bash `any_signals_trapped`, `signal_is_trapped (EXIT_TRAP)`,
+/// `signal_is_trapped (ERROR_TRAP)`): bash then forks its last command.
+fn traps_block_exec(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc) -> bool {
+	use crate::bash::store::TrapKey;
+	for key in [TrapKey::Exit, TrapKey::Err] {
+		if matches!(state::record(cx.store, vp, Key::Trap(key)), Ok(Some(Record::Trap { .. }))) {
+			return true;
+		}
+	}
+	vp.own_traps.signals().iter().any(|sig| {
+		match state::record(cx.store, vp, Key::Trap(TrapKey::Signal(sig))) {
+			Ok(Some(Record::Trap { action, .. })) => !action.is_empty(),
+			Ok(_) => false,
+			Err(err) => {
+				k.fail(err);
+				false
+			},
+		}
+	})
+}
+
+/// The command at `op` has redirections of its own.
+fn has_redirs(unit: &Unit, op: Op) -> bool {
+	op.code == Opcode::Exec && unit.cmds.get(op.a as usize).is_some_and(|c| c.redirs.is_some())
+}
+
+/// Whether the external `vp` awaits at `op` is what bash would have run in
+/// place of the subshell `vp` stands for: the vproc's last command (its
+/// `SubExit` follows), or one it `exec`s; in a `( … )` subshell only a
+/// command without redirections, with no `EXIT`, `ERR` or signal trap with
+/// an action set (bash `should_optimize_fork`).
+fn stands_for_vproc(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc, op: Op) -> bool {
+	if !vp.transient {
+		return false;
+	}
+	let [frame] = vp.frames.as_slice() else {
+		return false;
+	};
+	let Some(unit) = frame.unit.as_ref() else {
+		return false;
+	};
+	if frame.scratch.as_ref().and_then(|sc| sc.exec.as_ref()).is_some_and(|e| e.exec_as.is_some()) {
+		return true;
+	}
+	let last = unit
+		.ops
+		.get(frame.pc as usize + 1)
+		.is_some_and(|next| next.code == Opcode::SubExit);
+	if !last {
+		return false;
+	}
+	if frame.subshell_line.is_some() && has_redirs(unit, op) {
+		return false;
+	}
+	!traps_block_exec(k, cx, vp)
+}
+
+/// Whether the external at `op` is the last command of the root's run,
+/// which `bash -c` runs in place of itself (`should_suppress_fork`): a
+/// simple command without redirections that is the run's last top-level
+/// command (or the last of its `;`, `&&` and `||` list), outside any
+/// compound command, function, `eval` or trap, with no trap with an action,
+/// `EXIT` or `ERR` trap set, and without job control.
+fn oneshot(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc, op: Op) -> bool {
+	if vp.parent.is_some() {
+		return false;
+	}
+	let [frame] = vp.frames.as_slice() else {
+		return false;
+	};
+	let FrameKind::Script { what: ScriptKind::Run, stdin: false, src, pos, .. } = &frame.kind else {
+		return false;
+	};
+	if !src.get(pos.0 as usize..).is_some_and(|rest| rest.iter().all(u8::is_ascii_whitespace)) {
+		return false;
+	}
+	let Some(unit) = frame.unit.as_ref() else {
+		return false;
+	};
+	if unit.ops.get(frame.pc as usize + 1).is_none_or(|next| next.code != Opcode::End)
+		|| has_redirs(unit, op)
+	{
+		return false;
+	}
+	let Some(me) = unit.nodes.get(op.node as usize) else {
+		return false;
+	};
+	let nested = unit.nodes.iter().any(|n| {
+		!matches!(n.kind, NodeKind::AndOr | NodeKind::Pipeline | NodeKind::Simple | NodeKind::Assign | NodeKind::Word)
+			&& n.lo <= me.lo
+			&& me.hi <= n.hi
+	});
+	if nested {
+		return false;
+	}
+	if exec::job_control(k, cx, vp) {
+		return false;
+	}
+	!traps_block_exec(k, cx, vp)
 }
 
 /// Drop the job led by `v` from the table once it was waited for (bash

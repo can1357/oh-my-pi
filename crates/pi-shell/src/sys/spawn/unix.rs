@@ -112,7 +112,10 @@ fn watch(pid: i32, tracker: Arc<Tracker>) -> io::Result<()> {
 /// without work.
 fn waiter(mb: &Arc<Mailbox>) {
 	while let Some((pid, tracker)) = next_wait(mb) {
-		let status = wait_exit(pid);
+		let (status, core) = wait_exit(pid);
+		if core {
+			tracker.set_core();
+		}
 		if tracker.exited(status) {
 			reap(pid);
 		}
@@ -1121,7 +1124,7 @@ mod posix {
 /// `si_status` 17 after `SIGSTOP`), and with `WNOWAIT` the report would
 /// repeat; such a report is consumed with a non-reaping
 /// `waitid(WSTOPPED | WCONTINUED | WNOHANG)` and the wait goes on.
-fn wait_exit(pid: i32) -> ExitStatus {
+fn wait_exit(pid: i32) -> (ExitStatus, bool) {
 	loop {
 		// SAFETY: siginfo_t is plain data, valid zeroed.
 		let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
@@ -1133,8 +1136,9 @@ fn wait_exit(pid: i32) -> ExitStatus {
 			// SAFETY: waitid filled `info` for a CLD_* event.
 			let status = unsafe { info.si_status() };
 			match info.si_code {
-				libc::CLD_EXITED => return ExitStatus::Exited(status),
-				libc::CLD_KILLED | libc::CLD_DUMPED => return signaled(status),
+				libc::CLD_EXITED => return (ExitStatus::Exited(status), false),
+				libc::CLD_KILLED => return (signaled(status), false),
+				libc::CLD_DUMPED => return (signaled(status), true),
 				_ => {
 					// SAFETY: as above; without WEXITED this never reaps.
 					let mut seen: libc::siginfo_t = unsafe { std::mem::zeroed() };
@@ -1159,7 +1163,7 @@ fn wait_exit(pid: i32) -> ExitStatus {
 		if io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
 			// ECHILD: someone else reaped it (SIGCHLD set to SIG_IGN in the
 			// host). The status is lost; report the conventional failure.
-			return ExitStatus::Exited(127);
+			return (ExitStatus::Exited(127), false);
 		}
 	}
 }
@@ -1178,7 +1182,7 @@ fn pidfd_open(pid: i32) -> Option<OwnedFd> {
 /// The exit status of `pid` if it has exited, leaving it unreaped (Linux
 /// `waitid(WEXITED)` reports exits only).
 #[cfg(target_os = "linux")]
-fn exit_now(pid: i32) -> Option<ExitStatus> {
+fn exit_now(pid: i32) -> Option<(ExitStatus, bool)> {
 	// SAFETY: siginfo_t is plain data, valid zeroed.
 	let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
 	// SAFETY: `info` is writable; WNOWAIT leaves the child waitable.
@@ -1194,7 +1198,7 @@ fn exit_now(pid: i32) -> Option<ExitStatus> {
 		// ECHILD: someone else reaped it (as in `wait_exit`). EINTR: the
 		// pidfd stays readable, the next park returns at once.
 		return (io::Error::last_os_error().kind() != io::ErrorKind::Interrupted)
-			.then_some(ExitStatus::Exited(127));
+			.then_some((ExitStatus::Exited(127), false));
 	}
 	// SAFETY: waitid filled `info`, or left it zeroed (no exit yet: pid 0).
 	if unsafe { info.si_pid() } == 0 {
@@ -1203,8 +1207,9 @@ fn exit_now(pid: i32) -> Option<ExitStatus> {
 	// SAFETY: as above, for a CLD_* exit.
 	let status = unsafe { info.si_status() };
 	Some(match info.si_code {
-		libc::CLD_KILLED | libc::CLD_DUMPED => signaled(status),
-		_ => ExitStatus::Exited(status),
+		libc::CLD_KILLED => (signaled(status), false),
+		libc::CLD_DUMPED => (signaled(status), true),
+		_ => (ExitStatus::Exited(status), false),
 	})
 }
 
@@ -1251,9 +1256,12 @@ impl UnixProc {
 		if self.tracker.lock().has_exited() {
 			return true;
 		}
-		let Some(status) = exit_now(self.pid) else {
+		let Some((status, core)) = exit_now(self.pid) else {
 			return false;
 		};
+		if core {
+			self.tracker.set_core();
+		}
 		crate::sys::park::exits::forget(self.pid);
 		// The `ExtProc` is alive: nothing to reap yet.
 		let _ = self.tracker.exited(status);
@@ -1276,7 +1284,10 @@ impl UnixProc {
 	fn unpark(&mut self) {
 		crate::sys::park::exits::forget(self.pid);
 		if self.pidfd.take().is_some() && watch(self.pid, Arc::clone(&self.tracker)).is_err() {
-			let status = wait_exit(self.pid);
+			let (status, core) = wait_exit(self.pid);
+			if core {
+				self.tracker.set_core();
+			}
 			if self.tracker.exited(status) {
 				reap(self.pid);
 			}
@@ -1309,6 +1320,10 @@ impl ExtProc for UnixProc {
 
 	fn cont(&mut self) -> io::Result<()> {
 		self.scope.signal(Signal::Cont)
+	}
+
+	fn core_dumped(&self) -> bool {
+		self.tracker.core()
 	}
 }
 

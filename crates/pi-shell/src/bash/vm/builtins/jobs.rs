@@ -17,6 +17,7 @@ use crate::bash::{
 	store::OptId,
 	vm::{
 		exec::push_script,
+		notify,
 		expand::Stop,
 		proc::{Job, JobLookup, JobState, LastBg, ScriptKind},
 		quote,
@@ -135,28 +136,23 @@ fn print_job(ctx: &mut Ctx<'_, '_>, number: u32, form: Form, show: &Show<'_>) {
 	} else {
 		' '
 	};
-	let status = status_text(job, long, show.posix, show.platform);
 	let mut line = Vec::with_capacity(64);
 	let _ = write!(line, "[{number}]{mark} ");
-	if long {
-		let _ = write!(line, "{:5} ", job.pid());
-	} else {
+	if !long {
 		line.push(b' ');
 	}
-	line.extend_from_slice(status.as_bytes());
-	// C's `%*s` with a negative width pads to its absolute value.
-	let pad = (27 - i64::try_from(status.len()).unwrap_or(27)).unsigned_abs();
-	line.resize(line.len() + usize::try_from(pad).unwrap_or(0), b' ');
-	line.extend_from_slice(&job.text);
-	if job.state == JobState::Running {
-		line.extend_from_slice(b" &");
-	}
-	if job.wd != ctx.vp.cwd {
-		line.extend_from_slice(b"  (wd: ");
-		line.extend_from_slice(&dirstack::polite(show.home, &job.wd, false));
-		line.push(b')');
-	}
-	line.push(b'\n');
+	let wd = (job.wd != ctx.vp.cwd).then(|| dirstack::polite(show.home, &job.wd, false));
+	let look = notify::JobLook {
+		running:    job.state == JobState::Running,
+		stopped:    matches!(job.state, JobState::Stopped(_)),
+		background: true,
+		posix:      show.posix,
+		platform:   show.platform,
+		wd:         wd.as_ref().map(|w| w.as_slice()),
+	};
+	let procs = [notify::ProcLine { pid: job.pid(), text: &job.text, status: notify::job_status(job) }];
+	let format = if long { notify::Format::Long } else { notify::Format::Standard };
+	notify::print_pipeline(&mut line, &procs, format, &look);
 	ctx.out(&line);
 	if let Some(job) = ctx.vp.jobs.get_mut(number) {
 		job.notified = true;
@@ -259,6 +255,10 @@ pub fn jobs(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 			status = 1;
 		}
 	}
+	// bash `jobs` with operands ends with `notify_and_cleanup`: a job a
+	// signal ended that was not listed is reported now.
+	let report = notify::mark(ctx.k, ctx.cx, ctx.vp, None);
+	ctx.out_fd(2, &report);
 	cleanup(ctx);
 	done(status)
 }

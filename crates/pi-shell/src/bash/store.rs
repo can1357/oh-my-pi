@@ -407,6 +407,9 @@ pub enum Record {
 		parent: Option<Vpid>,
 		/// Exit status once it finished; `None` while it runs.
 		status: Option<i32>,
+		/// The signal that ended it, when one did ([`Death`]).
+		#[serde(default)]
+		death:  Option<Death>,
 	},
 	/// The directory stack.
 	DirStack(Vec<BString>),
@@ -529,6 +532,13 @@ pub struct Job {
 	pub inherited: bool,
 	/// Working directory it started in (`(wd: …)` when it differs).
 	pub wd:        BString,
+	/// The signal that ended the job's process (bash `WIFSIGNALED` of its
+	/// `raw_job_exit_status`): set with [`JobState::Done`] when the job died
+	/// by a signal rather than exiting with a status above 128. A job a
+	/// signal ended is reported by a line at the next notify point (bash
+	/// `notify_of_job_status`).
+	#[serde(default)]
+	pub death:     Option<Death>,
 	/// The OS pid of the program the job runs, once it spawned it: bash's
 	/// subshell for an asynchronous simple command `exec`s the program, so
 	/// a job whose lone command is an external (or whose body `exec`s one)
@@ -552,6 +562,15 @@ impl Job {
 	pub const fn named_by(&self, pid: u32) -> bool {
 		self.vpid.0 == pid || matches!(self.os_pid, Some(os) if os == pid)
 	}
+}
+
+/// How a process a signal ended died (bash `WTERMSIG`, `WCOREDUMP`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Death {
+	/// The signal's number on the platform the shell runs on.
+	pub signal: u8,
+	/// The kernel wrote a core dump (bash prints `(core dumped)`).
+	pub core:   bool,
 }
 
 /// A variable's value.

@@ -529,6 +529,12 @@ pub trait ExtProc: Send {
 	fn stop(&mut self) -> io::Result<()>;
 	/// Continue after [`ExtProc::stop`].
 	fn cont(&mut self) -> io::Result<()>;
+	/// Whether the process, once [`ExtProc::poll_wait`] reported it ended by
+	/// a signal, left a core dump (`WCOREDUMP`; bash prints `(core
+	/// dumped)`). `false` where the host cannot tell.
+	fn core_dumped(&self) -> bool {
+		false
+	}
 }
 
 /// Opens a [`PipeMirror`] per pipeline pipe ([`Host::pipe_tap`]).

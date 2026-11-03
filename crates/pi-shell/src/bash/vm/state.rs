@@ -2963,6 +2963,8 @@ pub fn load_root(
 			.and_then(|s| parse(&s))
 			.unwrap_or(0),
 		subshell: false,
+		comsub: false,
+		saved: None,
 	};
 	vp.getopts = decode_getopts(&words(store, MiscKey::Getopts)?);
 	vp.rlimits = decode_rlimits(&words(store, MiscKey::Rlimits)?);

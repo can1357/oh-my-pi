@@ -13,7 +13,7 @@ use bstr::{BStr, BString, ByteSlice};
 use super::{
 	Cx, Kernel, assign_scope, builtins, command,
 	expand::{Expander, Stop},
-	is_ident, probe,
+	is_ident, notify, probe,
 	proc::{
 		AssignValue, Atom, Bang, BangStage, Coproc, Depths, Frame, FrameKind, InlineStage, LastBg,
 		LoopKind, LoopRec, ParseSnapshot, PendingSub, PendingWrite, Probe, ProbeResult, Run, Saved,
@@ -31,7 +31,7 @@ use crate::bash::{
 	ir::{self, ComsubForm, Op, Opcode, SpawnKind, Unit},
 	mem::{self, Capture},
 	pattern::PatOpts,
-	store::{Attrs, Key, KeyBuf, MiscKey, OptId, Record, StateStore, StoreError, TrapKey},
+	store::{Attrs, Death, Key, KeyBuf, MiscKey, OptId, Record, StateStore, StoreError, TrapKey},
 	syntax::{CompleteCommand, Features, ParseError, ParseErrorKind, Parser, Pos, Resume},
 	zshopt::ZshOpt,
 };
@@ -734,6 +734,22 @@ fn features(
 /// frame at end of input. A script read from stdin first reads lines until
 /// the command is complete; `Some` is the wait key while fd 0 has none.
 fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitKey> {
+	// bash reports the jobs a signal ended each time it reads a line
+	// (`shell_getc` calls `notify_and_cleanup`): before the first command
+	// of a line, not between the commands of one. A string (`-c`, `eval`, a
+	// trap) has no line after its last newline; a script read from standard
+	// input also reads its end.
+	let line_read = match vp.frames.last().map(|f| &f.kind) {
+		Some(FrameKind::Script { src, pos, stdin, .. }) => {
+			let off = pos.0 as usize;
+			let line_start = off == 0 || src.get(off.wrapping_sub(1)) == Some(&b'\n');
+			line_start && (off < src.len() || *stdin)
+		},
+		_ => false,
+	};
+	if line_read {
+		super::notify::notify(k, cx, vp, None);
+	}
 	// zsh `parse_string`: a string (`eval`, a trap, `-c`) parses whole
 	// before it runs; its first command takes the snapshot the rest reuse.
 	let (snapped, snapshot) = match vp.frames.last().map(|f| &f.kind) {
@@ -1642,6 +1658,7 @@ pub fn start_sub(
 			// bash keeps job control and the job list in `$( )`: `jobs`
 			// lists the parent's jobs, `fg` finds no current job.
 			child.jobs = inherited_jobs(vp, vp.jobs.subshell);
+			child.jobs.comsub = true;
 			let vpid = child.vpid;
 			k.emit_op(cx, vp, 0, EventData::Subshell { child: vpid });
 			k.spawned.push(Box::new(child));
@@ -1704,6 +1721,7 @@ pub fn start_zsh_sub(
 	fds.set(1, Some(FdRef::mem(capture.clone())));
 	let mut child = vp.child_text(k, cx.store, text, line, fds);
 	child.jobs = inherited_jobs(vp, vp.jobs.subshell);
+	child.jobs.comsub = true;
 	let vpid = child.vpid;
 	k.emit_op(cx, vp, 0, EventData::Subshell { child: vpid });
 	k.spawned.push(Box::new(child));
@@ -3141,30 +3159,93 @@ fn spawn(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, op: 
 	}
 	for (vpid, status) in &mut sc.children {
 		if status.is_none() {
+			// The signal that ended it goes with its status (bash reports the
+			// command when the wait for it ends).
+			if let Some(death) = k.proc_death(cx.store, *vpid) {
+				k.deaths.insert(*vpid, death);
+			}
 			*status = k.proc_collect(cx.store, *vpid);
 		}
 	}
 	if let Some((vpid, _)) = sc.children.iter().find(|(_, s)| s.is_none()) {
 		return Flow::Block(WaitKey::Proc(*vpid));
 	}
-	let mut statuses: Vec<i32> = sc.children.iter().map(|(_, s)| s.unwrap_or(0)).collect();
-	if let Some(InlineStage::Done(last)) = sc.inline {
+	let children: Vec<(Vpid, i32)> = sc.children.iter().map(|&(v, s)| (v, s.unwrap_or(0))).collect();
+	let inline = sc.inline;
+	let mut statuses: Vec<i32> = children.iter().map(|&(_, s)| s).collect();
+	if let Some(InlineStage::Done(last)) = inline {
 		statuses.push(last);
 	}
 	clear_scratch(&mut k.root, cx.store, vp);
 	let pipefail = state::option(&mut k.root, cx.store, vp, OptId::Pipefail).unwrap_or(false);
-	vp.status = if pipefail {
-		statuses
-			.iter()
-			.rev()
-			.find(|&&s| s != 0)
-			.copied()
-			.unwrap_or(0)
+	// The process the status comes from (bash `raw_job_exit_status`).
+	let raw = if pipefail {
+		statuses.iter().rposition(|&s| s != 0).unwrap_or(statuses.len().saturating_sub(1))
 	} else {
-		statuses.last().copied().unwrap_or(0)
+		statuses.len().saturating_sub(1)
 	};
+	vp.status = statuses.get(raw).copied().unwrap_or(0);
 	vp.pipestatus = statuses;
+	let deaths: Vec<Option<Death>> = children.iter().map(|(v, _)| k.deaths.remove(v)).collect();
+	if inline.is_none() && matches!(info.kind, SpawnKind::Subshell | SpawnKind::Pipeline) {
+		report_children(k, vp, cx, unit, op, &children, &deaths, raw);
+	}
 	Flow::Jump(info.end)
+}
+
+/// The end of the wait for a foreground subshell or pipeline (bash
+/// `wait_for` → `notify_and_cleanup (job)`): its processes are reported
+/// when the one its status comes from (`raw`) was ended by a signal.
+#[expect(clippy::too_many_arguments, reason = "one call site, all inputs of one report")]
+fn report_children(
+	k: &mut Kernel,
+	vp: &mut Vproc,
+	cx: &mut Cx<'_>,
+	unit: &Arc<Unit>,
+	op: Op,
+	children: &[(Vpid, i32)],
+	deaths: &[Option<Death>],
+	raw: usize,
+) {
+	let Some(death) = deaths.get(raw).copied().flatten() else {
+		return;
+	};
+	let info = &unit.spawns[op.a as usize];
+	let texts: Vec<BString> = if info.kind == SpawnKind::Subshell {
+		vec![job_text(k, cx, vp, unit, op.node)]
+	} else {
+		(0..children.len()).map(|i| stage_job_text(k, cx, vp, unit, info, i)).collect()
+	};
+	let procs: Vec<notify::ProcLine<'_>> = children
+		.iter()
+		.zip(deaths)
+		.zip(&texts)
+		.map(|((&(v, status), death), text)| notify::ProcLine {
+			pid:    v.0,
+			text,
+			status: death.map_or(notify::ProcStatus::Exited(status), notify::ProcStatus::Signaled),
+		})
+		.collect();
+	notify::report_foreground(k, cx, vp, &procs, Some(death));
+}
+
+/// Stage `i`'s command as bash prints it (`make_command_string`).
+fn stage_job_text(
+	k: &mut Kernel,
+	cx: &mut Cx<'_>,
+	vp: &Vproc,
+	unit: &Unit,
+	info: &ir::SpawnIr,
+	i: usize,
+) -> BString {
+	let src = stage_text(unit, info, i);
+	let feat = features(k, cx.store, vp).unwrap_or(Features::NONE);
+	match crate::bash::syntax::parse_all(&src, feat) {
+		Ok(p) if p.commands.len() == 1 => {
+			BString::from(crate::bash::syntax::command_string(&p.commands[0].list))
+		},
+		_ => src,
+	}
 }
 
 /// Source text of syntax node `node`.
@@ -3180,7 +3261,7 @@ fn node_text(unit: &Unit, node: u32) -> BString {
 /// re-printed by bash's `make_command_string` (`( sleep 2; exit 4 )`, a
 /// `while` body indented on its own lines), or as written when the text
 /// does not parse alone.
-fn job_text(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc, unit: &Unit, node: u32) -> BString {
+pub(super) fn job_text(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc, unit: &Unit, node: u32) -> BString {
 	let src = node_text(unit, node);
 	let feat = features(k, cx.store, vp).unwrap_or(Features::NONE);
 	match crate::bash::syntax::parse_all(&src, feat) {

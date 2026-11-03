@@ -572,6 +572,10 @@ pub fn wait(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 			let child = ctx.vp.vpid_of(pid);
 			if is_child(ctx, child) {
 				list.push(child);
+			} else if let Some(saved) = ctx.vp.jobs.saved_status(pid) {
+				// bash `wait_for_single_pid`: the status of a background job
+				// it forgot (`bgp_search`), at once.
+				status = saved;
 			} else {
 				ctx.usage(format!("pid {pid} is not a child of this shell"));
 				status = 127;

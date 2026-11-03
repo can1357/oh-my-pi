@@ -222,6 +222,11 @@ impl OwnTraps {
 		}
 	}
 
+	/// The signals in the set.
+	pub const fn signals(self) -> SigSet {
+		self.signals
+	}
+
 	/// Whether `key` is in the set.
 	pub const fn has(self, key: crate::bash::store::TrapKey) -> bool {
 		match key {
@@ -277,7 +282,23 @@ pub struct JobTable {
 	/// it without job control and with an empty job table. A command
 	/// substitution keeps both (it lists its parent's jobs).
 	pub subshell: bool,
+	/// A command substitution's table (bash `SUBSHELL_COMSUB`): it reports
+	/// no job, and forgets each one that ended, but the one `$!` names
+	/// (`notify_of_job_status`).
+	#[serde(default)]
+	pub comsub:   bool,
+	/// The statuses of background jobs this shell forgot, by the pid `$!`
+	/// named (bash `bgpids`, filled by `delete_job`): `wait PID` returns the
+	/// status of such a job, 0 for one forgotten while it ran (`disown`).
+	/// Oldest first, at most [`SAVED_MAX`].
+	#[serde(default)]
+	pub saved:    Option<Box<Vec<(u32, i32)>>>,
 }
+
+/// How many forgotten jobs' statuses a shell keeps for `wait PID` (bash
+/// keeps `js.c_childmax` of them, the process limit `CHILD_MAX`; the
+/// smallest value POSIX allows is 25, Linux gives the `RLIMIT_NPROC`).
+pub const SAVED_MAX: usize = 1024;
 
 /// What a job spec names (bash `get_job_spec`), without its `%`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -349,17 +370,20 @@ impl JobTable {
 			nohup: false,
 			inherited: false,
 			wd,
+			death: None,
 			os_pid: None,
 		});
 		self.reset_current();
 		number
 	}
 
-	/// Remove job `number` (bash `delete_job`); a removed current or
-	/// previous job makes `reset_current` pick new ones.
+	/// Remove job `number` (bash `delete_job`), keeping its status for
+	/// `wait PID` ([`Self::saved`]); a removed current or previous job makes
+	/// `reset_current` pick new ones.
 	pub fn remove(&mut self, number: u32) -> Option<Job> {
 		let i = self.list.iter().position(|j| j.number == number)?;
 		let job = self.list.remove(i);
+		self.save(&job);
 		if self.current == Some(number) || self.previous == Some(number) {
 			self.reset_current();
 		}
@@ -370,14 +394,49 @@ impl JobTable {
 	pub fn remove_where(&mut self, mut pick: impl FnMut(&Job) -> bool) {
 		let mut reset = false;
 		let (current, previous) = (self.current, self.previous);
+		let mut gone_jobs = Vec::new();
 		self.list.retain(|j| {
 			let gone = pick(j);
 			reset |= gone && (current == Some(j.number) || previous == Some(j.number));
+			if gone && !j.inherited {
+				gone_jobs.push((j.pid(), j.state));
+			}
 			!gone
 		});
+		for (pid, state) in gone_jobs {
+			self.save_status(pid, state);
+		}
 		if reset {
 			self.reset_current();
 		}
+	}
+
+	/// Keep the status of `job`, being forgotten (bash `delete_job` adds the
+	/// last process of a background job to `bgpids`). A copy listed in a
+	/// command substitution is not this shell's child.
+	fn save(&mut self, job: &Job) {
+		if !job.inherited {
+			self.save_status(job.pid(), job.state);
+		}
+	}
+
+	fn save_status(&mut self, pid: u32, state: JobState) {
+		// bash `process_exit_status`: 0 for a process still running.
+		let status = match state {
+			JobState::Done(status) => status,
+			JobState::Running | JobState::Stopped(_) => 0,
+		};
+		let saved = self.saved.get_or_insert_with(Box::default);
+		saved.retain(|&(p, _)| p != pid);
+		if saved.len() >= SAVED_MAX {
+			saved.remove(0);
+		}
+		saved.push((pid, status));
+	}
+
+	/// The status of a forgotten job `$!` named `pid` (bash `bgp_search`).
+	pub fn saved_status(&self, pid: u32) -> Option<i32> {
+		self.saved.as_deref()?.iter().rev().find(|&&(p, _)| p == pid).map(|&(_, s)| s)
 	}
 
 	fn state(&self, number: Option<u32>) -> Option<JobState> {
@@ -1507,8 +1566,10 @@ impl Live {
 // Host lineage (`Vproc::lineage`, 8 B: a `u32` label and a flag) added at
 // most 8 B to that, still under 2,048. The resumable `mapfile -C` counter
 // (`ExecState::resumed`, 368 → 376 B): the bench measured 1,832 B per idle
-// vproc with both.
-const _: () = assert!(size_of::<Vproc>() <= 664, "Vproc grew (idle vproc ≤ 2 KiB)");
+// vproc with both. The job table's statuses of forgotten jobs (`JobTable::
+// saved`, bash `bgpids`, boxed: 8 B) and its command substitution flag:
+// 664 → 672 B.
+const _: () = assert!(size_of::<Vproc>() <= 672, "Vproc grew (idle vproc ≤ 2 KiB)");
 const _: () = assert!(size_of::<Frame>() <= 256, "Frame grew (idle vproc ≤ 2 KiB)");
 const _: () = assert!(size_of::<Scratch>() <= 216, "Scratch grew (idle vproc ≤ 2 KiB)");
 const _: () = assert!(size_of::<ExecState>() <= 376, "ExecState grew (idle vproc ≤ 2 KiB)");

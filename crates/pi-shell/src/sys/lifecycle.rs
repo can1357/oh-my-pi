@@ -219,6 +219,8 @@ impl Lifecycle {
 pub struct Tracker {
 	life:   Mutex<Lifecycle>,
 	cancel: AtomicBool,
+	/// The signal that ended the process left a core dump (`CLD_DUMPED`).
+	core:   AtomicBool,
 }
 
 impl Tracker {
@@ -227,7 +229,19 @@ impl Tracker {
 		Arc::new(Self {
 			life:   Mutex::new(Lifecycle::new(draining)),
 			cancel: AtomicBool::new(false),
+			core:   AtomicBool::new(false),
 		})
+	}
+
+	/// Record that the process left a core dump; set before
+	/// [`Self::exited`] makes the exit visible.
+	pub fn set_core(&self) {
+		self.core.store(true, Ordering::SeqCst);
+	}
+
+	/// Whether the process left a core dump.
+	pub fn core(&self) -> bool {
+		self.core.load(Ordering::SeqCst)
 	}
 
 	/// Lock the lifecycle. Signals that must not hit a reaped (recycled)

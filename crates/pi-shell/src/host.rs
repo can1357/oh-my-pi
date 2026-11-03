@@ -738,6 +738,10 @@ impl ExtProc for Observed {
 	fn cont(&mut self) -> io::Result<()> {
 		self.child.cont()
 	}
+
+	fn core_dumped(&self) -> bool {
+		self.child.core_dumped()
+	}
 }
 
 impl Drop for Observed {

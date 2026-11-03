@@ -19,6 +19,7 @@ mod glob;
 mod locale;
 mod mode;
 mod nested;
+pub mod notify;
 mod orphans;
 mod pattern;
 mod probe;
@@ -65,7 +66,8 @@ use crate::bash::{
 	ir::{self, Unit},
 	signal::{DefaultAction, SigTarget, Signal},
 	store::{
-		Attrs, Change, Key, KeyBuf, MiscKey, OptId, Record, StateStore, StoreError, Table, VarValue,
+		Attrs, Change, Death, Key, KeyBuf, MiscKey, OptId, Record, StateStore, StoreError, Table,
+		VarValue,
 	},
 };
 
@@ -428,6 +430,11 @@ pub struct Kernel {
 	pub exec_signals:    HashMap<RunId, i32>,
 	/// Signal death associated with the most recently reported run.
 	pub reported_signal: Option<(RunId, i32)>,
+	/// Child vprocs that die by a signal, as a process a signal kills does
+	/// (a virtual `kill`, or the external a vproc stands for, which bash
+	/// would have `exec`'d, dying by one): taken when the vproc exits and
+	/// written into its `Record::Proc`, where its parent reads it.
+	pub deaths:          HashMap<Vpid, Death>,
 	/// Background jobs whose pid is still to be settled
 	/// ([`proc::Bang`]): imaged (a restored job still decides).
 	pub bangs:           Vec<proc::Bang>,
@@ -498,6 +505,7 @@ impl Kernel {
 			callout_labels: Vec::new(),
 			exited: None,
 			exec_signals: HashMap::new(),
+			deaths: HashMap::new(),
 			reported_signal: None,
 			bangs: Vec::new(),
 			settled: Vec::new(),
@@ -615,9 +623,23 @@ impl Kernel {
 		vpid: Vpid,
 		parent: Option<Vpid>,
 		status: i32,
+		death: Option<Death>,
 	) {
-		let rec = Record::Proc { parent, status: Some(status) };
+		let rec = Record::Proc { parent, status: Some(status), death };
 		self.root.write(store, Change::Put(Key::Proc(vpid), rec));
+	}
+
+	/// The signal that ended finished child vproc `vpid`, if one did; read
+	/// before [`Self::proc_collect`] takes the record.
+	pub fn proc_death(&mut self, store: &mut dyn StateStore, vpid: Vpid) -> Option<Death> {
+		match store.get(Key::Proc(vpid)) {
+			Ok(Some(Record::Proc { death, .. })) => *death,
+			Ok(_) => None,
+			Err(err) => {
+				self.root.fail(err);
+				None
+			},
+		}
 	}
 
 	/// Child vproc `vpid`'s state: `None` unknown (never started here, or
@@ -1587,7 +1609,7 @@ impl Shell {
 	/// subshell vprocs that finished.
 	fn adopt(&mut self, cx: &mut Cx<'_>) {
 		for p in &self.k.spawned {
-			let rec = Record::Proc { parent: p.parent, status: None };
+			let rec = Record::Proc { parent: p.parent, status: None, death: None };
 			self
 				.k
 				.root
@@ -1604,10 +1626,11 @@ impl Shell {
 				// A job that ended undecided keeps its virtual pid.
 				self.k.settle_bang(p.vpid, None);
 				self.k.forget_deferral(p.vpid);
-				self.k.proc_exited(cx.store, p.vpid, p.parent, p.status);
+				let death = self.k.deaths.remove(&p.vpid);
+				self.k.proc_exited(cx.store, p.vpid, p.parent, p.status, death);
 				self.k.ctl.notify();
 				self.rr = 0;
-				self.reaped(cx, p.parent, p.vpid, p.status);
+				self.reaped(cx, p.parent, p.vpid, p.status, death);
 			} else {
 				i += 1;
 			}
@@ -1659,7 +1682,14 @@ impl Shell {
 	/// Child vproc `vpid` of `parent` ended with `status`: the parent's job
 	/// for it is done (`jobs`, `wait` see it) and a parent trapping
 	/// `SIGCHLD` owes one more run of the trap.
-	fn reaped(&mut self, cx: &mut Cx<'_>, parent: Option<Vpid>, vpid: Vpid, status: i32) {
+	fn reaped(
+		&mut self,
+		cx: &mut Cx<'_>,
+		parent: Option<Vpid>,
+		vpid: Vpid,
+		status: i32,
+		death: Option<Death>,
+	) {
 		// Its own children are orphans now.
 		if self.k.engine.config().end_orphan_jobs {
 			self.gone.push(vpid);
@@ -1671,6 +1701,7 @@ impl Shell {
 		let background = job.is_some();
 		if let Some(job) = job {
 			job.state = proc::JobState::Done(status);
+			job.death = death;
 			job.notified = false;
 		}
 		owe_chld(&mut self.k, cx, &mut self.procs[i], background);
@@ -1790,7 +1821,7 @@ impl Shell {
 						exec::finish_cancel(&mut self.k.root, cx.store, &mut self.procs[i], status);
 					}
 				} else {
-					self.kill(cx, i, sig, status);
+					self.kill(cx, i, sig, status, None);
 				}
 			}
 			// Calls of the cancelled vprocs are void; a detached tree's go on.
@@ -1850,8 +1881,14 @@ impl Shell {
 	}
 
 	/// Terminate vproc `i` with `status`: signal its task or external, end its
-	/// scripts. Transient vprocs are removed.
-	fn kill(&mut self, cx: &mut Cx<'_>, i: usize, sig: Signal, status: i32) {
+	/// scripts. Transient vprocs are removed. `death`: the vproc dies by the
+	/// signal as a process would (a virtual `kill`), so its parent can report
+	/// it; `None` for the host's cancellation and a store failure.
+	fn kill(&mut self, cx: &mut Cx<'_>, i: usize, sig: Signal, status: i32, death: Option<Death>) {
+		match death {
+			Some(death) => self.k.deaths.insert(self.procs[i].vpid, death),
+			None => self.k.deaths.remove(&self.procs[i].vpid),
+		};
 		let p = &mut self.procs[i];
 		for f in &mut p.frames {
 			if let Some(sc) = f.scratch.as_mut() {
@@ -1886,9 +1923,10 @@ impl Shell {
 			let p = self.procs.remove(i);
 			self.k.settle_bang(p.vpid, None);
 			self.k.forget_deferral(p.vpid);
-			self.k.proc_exited(cx.store, p.vpid, p.parent, status);
+			let death = self.k.deaths.remove(&p.vpid);
+			self.k.proc_exited(cx.store, p.vpid, p.parent, status, death);
 			self.rr = 0;
-			self.reaped(cx, p.parent, p.vpid, status);
+			self.reaped(cx, p.parent, p.vpid, status, death);
 		}
 	}
 
@@ -2044,7 +2082,10 @@ impl Shell {
 				continue;
 			}
 			match sig.default_action() {
-				DefaultAction::Terminate => self.kill(cx, i, sig, sig.exit_status(platform)),
+				DefaultAction::Terminate => {
+					let death = Death { signal: sig.number(platform), core: false };
+					self.kill(cx, i, sig, sig.exit_status(platform), Some(death));
+				},
 				DefaultAction::Stop | DefaultAction::Continue => {
 					let stop = sig.default_action() == DefaultAction::Stop;
 					let p = &mut self.procs[i];
@@ -2084,7 +2125,7 @@ impl Shell {
 			message: BStr::new(&message),
 		});
 		for i in (0..self.procs.len()).rev() {
-			self.kill(cx, i, Signal::Term, 1);
+			self.kill(cx, i, Signal::Term, 1, None);
 		}
 	}
 
