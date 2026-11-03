@@ -289,6 +289,9 @@ describe("persisted subagent revival", () => {
 		expect(emit).toHaveBeenCalledWith({ type: "session_start" });
 	});
 
+	// This revival runs the real createAgentSession with a real model registry and two loaded
+	// extensions: context, skill, rule and command discovery, extension loading and the system
+	// prompt. On a loaded machine that alone took 2.2 to 4.6 s, so bun's 5 s default fails it.
 	it("loads only extensions allowed by the live owner's root policy", async () => {
 		const cwd = makeTempDir("@pi-revive-owner-roots-");
 		const sessionFile = await createPersistedSession(cwd, false, "default");
@@ -345,7 +348,7 @@ describe("persisted subagent revival", () => {
 			await revived?.dispose();
 			authStorage.close();
 		}
-	});
+	}, 30_000);
 
 	it("rebinds owner policy hooks for restricted revival without widening its tools", async () => {
 		const cwd = makeTempDir("@pi-revive-restricted-policy-");
