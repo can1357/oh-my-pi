@@ -1,4 +1,5 @@
 #include <fcntl.h>
+#include <string.h>
 #include <signal.h>
 #include <stdlib.h>
 #include <sys/wait.h>
@@ -7,13 +8,16 @@
 /* Modes: "in" (the child starts in its own group and joins the parent's
  * group once the parent gets TERM), "out" (the child starts in the parent's
  * group and calls setsid() in its TERM handler), "exit" (as "out", and the
- * parent exits on TERM, leaving the child outside the tree and group), and
+ * parent exits on TERM, leaving the child outside the tree and group),
  * "orphan" (as "exit", but the group member is a grandchild whose own parent
- * exited at once, so it is not a descendant of the leader before TERM). */
+ * exited at once, so it is not a descendant of the leader before TERM), and
+ * "spawn" (as "exit", and the member's TERM handler also forks a child that
+ * writes its pid to "grandpid"). */
 static int notify_fd;
 static int move_out;
 static int exit_on_term;
 static int orphan;
+static int spawn_on_term;
 
 static void touch(const char *path) {
 	int fd = open(path, O_CREAT | O_WRONLY | O_APPEND, 0600);
@@ -25,8 +29,8 @@ static void append_term(void) {
 	touch("terms");
 }
 
-/* Writes `pid` in decimal to "childpid", in one write. */
-static void write_pid(pid_t pid) {
+/* Writes `pid` in decimal to `path`, in one write. */
+static void write_pid_to(const char *path, pid_t pid) {
 	char buf[32];
 	int n = 0;
 	unsigned value = pid;
@@ -39,9 +43,13 @@ static void write_pid(pid_t pid) {
 		buf[i] = buf[n - 1 - i];
 		buf[n - 1 - i] = swap;
 	}
-	int fd = open("childpid", O_CREAT | O_WRONLY, 0600);
+	int fd = open(path, O_CREAT | O_WRONLY, 0600);
 	(void)write(fd, buf, n);
 	close(fd);
+}
+
+static void write_pid(pid_t pid) {
+	write_pid_to("childpid", pid);
 }
 
 static void parent_term(int signal) {
@@ -52,18 +60,27 @@ static void parent_term(int signal) {
 	(void)write(notify_fd, "x", 1);
 }
 
-static void child_term(int signal) {
-	(void)signal;
+static void child_term(int signo) {
+	(void)signo;
 	if (move_out) {
 		setsid();
 	}
 	append_term();
+	if (spawn_on_term && fork() == 0) {
+		signal(SIGTERM, SIG_DFL);
+		write_pid_to("grandpid", getpid());
+		for (;;) {
+			pause();
+		}
+	}
 }
 
 int main(int argc, char **argv) {
-	move_out = argc > 1 && (argv[1][0] == 'o' || argv[1][0] == 'e');
-	exit_on_term = argc > 1 && (argv[1][0] == 'e' || argv[1][1] == 'r');
-	orphan = argc > 1 && argv[1][0] == 'o' && argv[1][1] == 'r';
+	const char *mode = argc > 1 ? argv[1] : "";
+	exit_on_term = !strcmp(mode, "exit") || !strcmp(mode, "orphan") || !strcmp(mode, "spawn");
+	move_out = exit_on_term || !strcmp(mode, "out");
+	orphan = !strcmp(mode, "orphan");
+	spawn_on_term = !strcmp(mode, "spawn");
 	int pipefd[2];
 	if (pipe(pipefd) != 0) {
 		return 1;

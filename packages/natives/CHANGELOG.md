@@ -16,7 +16,7 @@
 - Fixed cancelling a bash tool command, or `Process.killTree`/`terminateTree` on a process-group leader, sending TERM to the same process twice: a `trap … TERM` cleanup ran twice, the repeat stopped the commands the first run had started, and a cleanup near the one-second limit was killed before it finished ([#17855](https://github.com/can1357/oh-my-pi/pull/17855) by [@sjawhar](https://github.com/sjawhar))
 - Fixed cancelling a bash tool command just after it started killing the command at once instead of giving it the one-second TERM grace, so its `trap … TERM` cleanup never ran ([#17855](https://github.com/can1357/oh-my-pi/pull/17855) by [@sjawhar](https://github.com/sjawhar))
 - Fixed a cancelled bash tool command's TERM grace starting before omp sent TERM, so a `trap … TERM` cleanup could be killed with less than its full second; `timeout` on an in-process command now sends TERM to the commands it started before killing them ([#17855](https://github.com/can1357/oh-my-pi/pull/17855) by [@sjawhar](https://github.com/sjawhar))
-- Fixed `Process.terminateTree`, and cancelling a bash tool command, leaving a process running when it left its process group in its TERM handler after its group leader exited ([#17855](https://github.com/can1357/oh-my-pi/pull/17855) by [@sjawhar](https://github.com/sjawhar))
+- Fixed `Process.terminateTree`, and cancelling a bash tool command, leaving a process running when it left its process group in its TERM handler after its group leader exited, along with any child it started then ([#17855](https://github.com/can1357/oh-my-pi/pull/17855) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.15.0] - 2026-11-01
 

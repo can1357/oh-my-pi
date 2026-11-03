@@ -909,7 +909,7 @@ impl Process {
 		// handler) is in neither re-walk.
 		let mut wave = SignalWave::new(KILL_SIGNAL);
 		wave.tree(self, process_group, &protected);
-		wave.carry(&known);
+		wave.carry(&known, &protected);
 		let delivery;
 		(delivery, known) = wave.deliver_known();
 		groups = delivery.groups;
@@ -1045,16 +1045,22 @@ impl SignalWave {
 		Delivery { reached, groups }
 	}
 
-	/// Snapshot each of `carried` that is still running: processes an earlier
-	/// wave knew that may have left the recorded trees and groups since (a
-	/// `setsid()` in a TERM handler whose leader then exited). One that is
+	/// Snapshot each of `carried` that is still running, with its live
+	/// descendants (children first), sparing every `protected` subtree:
+	/// processes an earlier wave knew that may have left the recorded trees
+	/// and groups since (a `setsid()` in a TERM handler whose leader then
+	/// exited), and the children such a process started after it. One that is
 	/// still in a recorded group is reached through it; one that left is
 	/// signalled through its pin.
-	fn carry(&mut self, carried: &[Process]) {
+	fn carry(&mut self, carried: &[Process], protected: &HashSet<i32>) {
 		for process in carried {
-			if process.status() == ProcessStatus::Running {
-				self.add(process.clone());
+			if process.status() != ProcessStatus::Running || protected.contains(&process.pid()) {
+				continue;
 			}
+			for child in process.signalable_descendants(protected) {
+				self.add(child);
+			}
+			self.add(process.clone());
 		}
 	}
 
@@ -1335,7 +1341,7 @@ impl TerminationTargets {
 	/// `SignalWave::deliver_known`.
 	pub fn signal_carrying(&self, signal: i32, carried: &[Process]) -> Vec<Process> {
 		let mut wave = self.wave(signal);
-		wave.carry(carried);
+		wave.carry(carried, &host_protected_pids());
 		wave.deliver_known().1
 	}
 
@@ -1908,7 +1914,7 @@ pub(crate) mod tests {
 
 		let helper_root = tempfile::tempdir().expect("helper directory");
 		let helper = compile_group_move_helper(helper_root.path());
-		for mode in ["exit", "orphan"] {
+		for mode in ["exit", "orphan", "spawn"] {
 			let root = tempfile::tempdir().expect("group-move directory");
 			let mut parent = Command::new(&helper)
 				.arg(mode)
@@ -1934,7 +1940,36 @@ pub(crate) mod tests {
 			let _ = parent.wait();
 			assert!(exited, "{mode}: terminate_tree must finish the tree");
 			assert!(!child_alive, "{mode}: the member that left its group outlived terminate_tree");
+			if mode == "spawn" {
+				assert_spawned_child_gone(root.path());
+			}
 		}
+	}
+
+	/// The `spawn` member's TERM handler forked a child after it left its
+	/// group. That child must be gone (within 2 s, for callers that do not
+	/// wait after their last KILL wave); it is killed here otherwise.
+	#[cfg(target_os = "linux")]
+	pub(crate) fn assert_spawned_child_gone(dir: &std::path::Path) {
+		use std::{
+			thread,
+			time::{Duration, Instant},
+		};
+
+		let pid = wait_for_pid_file(&dir.join("grandpid"));
+		let Some(spawned) = Process::from_pid(pid) else {
+			return;
+		};
+		let deadline = Instant::now() + Duration::from_secs(2);
+		while spawned.status() == ProcessStatus::Running && Instant::now() < deadline {
+			thread::sleep(Duration::from_millis(10));
+		}
+		let alive = spawned.status() == ProcessStatus::Running;
+		let _ = spawned.signal(KILL_SIGNAL);
+		assert!(
+			!alive,
+			"spawn: the child the member forked after leaving its group outlived the kill"
+		);
 	}
 
 	/// A group member can join after the parent gets TERM, or create a new

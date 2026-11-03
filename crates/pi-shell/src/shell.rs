@@ -7951,7 +7951,7 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 
 		let helper_root = tempfile::tempdir().expect("helper directory");
 		let helper = process::tests::compile_group_move_helper(helper_root.path());
-		for mode in ["exit", "orphan"] {
+		for mode in ["exit", "orphan", "spawn"] {
 			let root = tempfile::tempdir().expect("group-move directory");
 			let mut parent = std::process::Command::new(&helper)
 				.arg(mode)
@@ -7982,6 +7982,9 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 			let _ = member.signal(process::KILL_SIGNAL);
 			let _ = parent.wait();
 			assert!(!member_alive, "{mode}: the member that left its group outlived the run's cancel");
+			if mode == "spawn" {
+				process::tests::assert_spawned_child_gone(root.path());
+			}
 		}
 	}
 
