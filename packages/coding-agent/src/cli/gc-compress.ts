@@ -769,8 +769,15 @@ async function swapRefusal(
 	return undefined;
 }
 
+/** What a name holds, by identity: the file's device and inode, and whether it is a regular file. */
+interface NameIdentity {
+	dev: number;
+	ino: number;
+	isFile: boolean;
+}
+
 /** The identity of what `name` holds now, or undefined when it holds nothing. Throws when it cannot be looked at. */
-async function identityAt(name: string): Promise<{ dev: number; ino: number; isFile: boolean } | undefined> {
+async function identityAt(name: string): Promise<NameIdentity | undefined> {
 	try {
 		const stat = await fs.lstat(name);
 		return { dev: stat.dev, ino: stat.ino, isFile: stat.isFile() };
@@ -780,7 +787,7 @@ async function identityAt(name: string): Promise<{ dev: number; ino: number; isF
 	}
 }
 
-const isHeld = (at: { dev: number; ino: number; isFile: boolean } | undefined, held: LeasedFile): boolean =>
+const isHeld = (at: NameIdentity | undefined, held: LeasedFile): boolean =>
 	at?.isFile === true && at.dev === held.dev && at.ino === held.ino;
 
 /**
@@ -856,7 +863,16 @@ async function settleExchange(
 		const why = await unlinkLeased(file, copyPath, original);
 		const notes = why ? [`${why}, so what ${file} held before it was compressed was left at ${copyPath}`] : [];
 		// The compressed copy counts only while the name still holds it.
-		const atNameNow = await identityAt(file);
+		let atNameNow: NameIdentity | undefined;
+		try {
+			atNameNow = await identityAt(file);
+		} catch (error) {
+			const removed = why === undefined ? "what it held before was removed at the scratch name, and " : "";
+			notes.push(
+				`${removed}whether ${file} still holds its compressed copy could not be checked (${errorMessage(error)}), so it was not counted`,
+			);
+			return { swapped: false, originalFreed: why === undefined, copyAtScratch: false, notes };
+		}
 		if (!isHeld(atNameNow, copy)) {
 			notes.push(
 				atNameNow

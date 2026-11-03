@@ -2844,6 +2844,37 @@ describe("runGcCommand session compression", () => {
 				});
 			}
 
+			// Round 12's review: a failure to look at the name once the original
+			// was removed was reported as both files left as they were. It says the
+			// original went and the name could not be checked, and is not counted.
+			test("a failure to look at the name after the original goes is reported as such, and not counted", async () => {
+				await metadataDitto(true);
+				const { file, candidate } = await privateZeros();
+				const unlink = fs.unlink;
+				let originalGone = false;
+				spyOn(fs, "unlink").mockImplementation(async target => {
+					await unlink(target);
+					if (String(target).includes(".omp-gc-compress-")) originalGone = true;
+				});
+				const lstat = fs.lstat;
+				spyOn(fs, "lstat").mockImplementation((async (target: string, ...rest: unknown[]) => {
+					if (originalGone && String(target) === file)
+						throw Object.assign(new Error("EIO: injected"), { code: "EIO" });
+					return await (lstat as (...args: unknown[]) => Promise<unknown>)(target, ...rest);
+				}) as typeof fs.lstat);
+
+				const result = await gcCompress.compressFilesInPlace([candidate], "apfs", new Set());
+
+				expect(originalGone).toBe(true);
+				expect(result.compressed).toBe(0);
+				const said = result.errors.join("\n");
+				expect(said).toContain("what it held before was removed at the scratch name");
+				expect(said).toContain(
+					`whether ${file} still holds its compressed copy could not be checked (EIO: injected)`,
+				);
+				expect(said).not.toContain("left as they are");
+			});
+
 			// Round 11's review: a failure to read the original's metadata, or its
 			// lease, after the exchange was taken for another process's reach of it,
 			// and gc gave it its name back — moving the copy, with whatever had
