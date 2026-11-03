@@ -163,7 +163,11 @@ function AgentProgressRow({ p, host }: { p: Record<string, unknown>; host?: Tool
 				</AgentLink>
 			}
 		>
-			<Badge tone={tone}>{status}</Badge> {description && <span>{truncate(normalizeWs(description), 96)}</span>}{" "}
+			<Badge tone={tone}>{status}</Badge>{" "}
+			{status === "completed" && (p.missingYield === "initial" || p.missingYield === "wake") && (
+				<Badge tone="warn">warning</Badge>
+			)}{" "}
+			{description && <span>{truncate(normalizeWs(description), 96)}</span>}{" "}
 			{intent && <span className="tv-muted">{truncate(normalizeWs(intent), 64)}</span>}{" "}
 			{bits.length > 0 && <span className="tv-faint">{bits.join(" · ")}</span>}
 		</Row>

@@ -161,6 +161,26 @@ describe("task live progress rendering", () => {
 		expect(renderProgressText(progress, false, uiTheme)).toContain("routed: pool b (quota)");
 	});
 
+	it("badges a settled background row whose run omitted yield", () => {
+		setViewportRows(40);
+		const progress: AgentProgress = { ...makeProgress([]), status: "completed", missingYield: "initial" };
+		const legacy = renderProgressText(progress, false, uiTheme);
+		const native = JSON.stringify(
+			taskToolRenderer.describeResult(
+				{
+					content: [{ type: "text", text: "" }],
+					details: { projectAgentsDir: null, results: [], totalDurationMs: 1, progress: [progress] },
+				},
+				{ expanded: false, isPartial: true },
+			),
+		);
+		expect(legacy).toContain("warning");
+		expect(native).toContain('"warning"');
+
+		const plain: AgentProgress = { ...makeProgress([]), status: "completed" };
+		expect(renderProgressText(plain, false, uiTheme)).not.toContain("warning");
+	});
+
 	it("strips bash footer notices from expanded subagent recent output", () => {
 		setViewportRows(40);
 		const chronological = [

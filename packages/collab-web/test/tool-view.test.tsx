@@ -247,6 +247,22 @@ describe("ToolView task missing-yield provenance", () => {
 		expect(html).not.toContain("tv-note--warn");
 		expect(html).toContain(initialWarning);
 	});
+
+	it("badges a settled background row whose run omitted yield", () => {
+		const renderProgress = (progress: Record<string, unknown>): string =>
+			renderToStaticMarkup(
+				<ToolView
+					name="task"
+					defaultOpen
+					args={{}}
+					result={{ content: [], details: { results: [], totalDurationMs: 1, progress: [progress] } }}
+				/>,
+			);
+		const marked = renderProgress({ id: "bg", agent: "task", status: "completed", missingYield: "wake" });
+		expect(marked).toContain(">warning<");
+		const plain = renderProgress({ id: "bg", agent: "task", status: "completed" });
+		expect(plain).not.toContain(">warning<");
+	});
 });
 
 describe("ToolView ask renderer", () => {

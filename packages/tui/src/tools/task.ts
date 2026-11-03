@@ -737,6 +737,8 @@ function renderAgentProgress(
 		statusBadge = ` ${formatBadge("retrying", "warning", theme)}`;
 	} else if (progress.retryFailure && (progress.status === "failed" || progress.status === "aborted")) {
 		statusBadge = ` ${formatBadge("rate-limited", "error", theme)}`;
+	} else if (progress.missingYield && progress.status === "completed") {
+		statusBadge = ` ${formatBadge("warning", "warning", theme)}`;
 	}
 	const row = renderAgentTreeRow(
 		{
@@ -1940,7 +1942,10 @@ function describeProgressAgent(progress: AgentProgress, state: AgentDescribeStat
 				...(running ? { age: runningAge(progress, nowMs) } : { took: progress.durationMs }),
 			},
 			retry,
-			badges: agentBadges(state.background, undefined),
+			badges:
+				progress.missingYield && progress.status === "completed"
+					? [...(agentBadges(state.background, undefined) ?? []), { text: "warning", tone: "warning" }]
+					: agentBadges(state.background, undefined),
 			depth: depth > 0 ? depth : undefined,
 			collapsible: true,
 			collapsed: !state.expanded,
@@ -2419,6 +2424,8 @@ export interface AgentProgress {
 	/** Cumulative billing cost in USD, accumulated incrementally from message_end events. */
 	cost: number;
 	durationMs: number;
+	/** The settled run's structured result protocol was not submitted (see {@link SingleResult.missingYield}). */
+	missingYield?: "initial" | "wake";
 	modelOverride?: string | string[];
 	/** Explicit pre-expansion model role alias selected for this run. */
 	modelRole?: string;
