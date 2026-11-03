@@ -90,6 +90,11 @@ export interface BashExecutorOptions {
 	 * so the persistent shell it used is dropped instead of kept for a next call.
 	 */
 	isSessionCurrent?: () => boolean;
+	/**
+	 * `false` skips the shell output minimizer (`shellMinimizer.*`) for this run: the session's Spotlight
+	 * experiment shapes the output instead. Default: the setting decides.
+	 */
+	minimize?: boolean;
 	/** Artifact path/id for full output storage */
 	artifactPath?: string;
 	artifactId?: string;
@@ -574,7 +579,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 		supportsAutoUserShell(shell) &&
 		$env.PI_NO_PTY !== "1" &&
 		!isPersistentShellCdCommand(command);
-	const minimizer = buildMinimizerOptions(cfgShellMinimizer.get(settings));
+	const minimizer = options?.minimize === false ? undefined : buildMinimizerOptions(cfgShellMinimizer.get(settings));
 
 	const commandCwd = resolveShellCwd(options?.cwd);
 	const virtualCwd = commandCwd !== undefined && URL_CWD_RE.test(commandCwd);
