@@ -18,7 +18,7 @@ use tokio::time;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-	PinnedProcess, SignalWave, SpawnLedger,
+	PinnedProcess, SpawnLedger,
 	host::{parse_duration, quote_arg},
 };
 
@@ -125,42 +125,29 @@ impl SpawnObserver for SpawnRecorder {
 		self.spawns.lock().record(pgid, process);
 	}
 
-	fn on_exit(&self, pid: i32) {
+	fn before_reap(&self, pid: i32, unreaped: bool) {
 		if let Some(parent) = &self.parent {
-			parent.on_exit(pid);
+			parent.before_reap(pid, unreaped);
 		}
-		// brush calls this only on Unix, before it reaps the child, so the
-		// zombie still holds the number of any group it led while the members
-		// are pinned.
-		self.spawns.lock().record_exiting_group_members(pid);
+		self.spawns.lock().before_reap(pid, unreaped);
 	}
 }
 
 impl SpawnRecorder {
 	/// Sends `signal` to every recorded child that is still there and, when
-	/// `group` is set, to every member of the groups those children were
-	/// recorded in. One wave delivers it: each pinned process takes it once.
-	/// A group is signalled through a live recorded anchor in it, or with none,
-	/// through its pinned leader on Linux 6.9 and later.
+	/// `group` is set, to the group each recorded leader leads: listed while
+	/// the shell has not reaped the leader, through the kernel's group signal
+	/// (Linux 6.9 and later) after that. One wave delivers it (see
+	/// [`crate::SignalWave`]), with the ledger locked, so the shell cannot
+	/// reap a leader while the wave lists its group.
 	fn signal(&self, signal: TrapSignal, group: bool) -> bool {
 		let Ok(signal) = i32::try_from(signal) else {
 			return false;
 		};
-		let entries = self.spawns.lock().entries().to_vec();
-		let mut wave = SignalWave::new(signal);
-		let mut sent = false;
-		if group {
-			let mut groups: Vec<i32> = entries.iter().filter_map(|entry| entry.group).collect();
-			groups.sort_unstable();
-			groups.dedup();
-			for group in groups {
-				sent |= wave.group_with(group, entries.iter().map(|entry| &entry.process));
-			}
-		}
-		for entry in &entries {
-			sent |= wave.process(&entry.process);
-		}
-		sent
+		let mut spawns = self.spawns.lock();
+		let wave = spawns.plan_wave(signal, group).deliver();
+		spawns.record_reached(&wave);
+		!wave.reached().is_empty() || !wave.members().is_empty() || !wave.kernel_leaders().is_empty()
 	}
 }
 

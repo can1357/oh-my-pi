@@ -85,11 +85,14 @@ pub trait SpawnObserver: Send + Sync {
 	/// shell's own group, which is never reported.
 	fn on_spawn(&self, pid: i32, pgid: Option<i32>);
 
-	/// Reports, on Unix, that a child reported by [`Self::on_spawn`] exited,
-	/// before the shell reaps it. Until this returns, the child's pid and the
-	/// number of any process group it leads stay held by the unreaped child.
-	/// Not called on other platforms.
-	fn on_exit(&self, _pid: i32) {}
+	/// Reports, on Unix, that the shell may reap a child reported by
+	/// [`Self::on_spawn`] once this returns: the child exited, or the shell
+	/// stopped waiting for it and drops its handle. Called once per child,
+	/// before any reap. With `unreaped`, the child is unreaped during the
+	/// call, so its pid and the number of any process group it leads are
+	/// still held by it; without, a failed check left that unknown. Not
+	/// called on other platforms.
+	fn before_reap(&self, _pid: i32, _unreaped: bool) {}
 }
 
 /// Parameters for execution.
