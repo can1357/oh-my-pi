@@ -52,15 +52,43 @@ const USER_AGENTS = [
  */
 const BLOCKED_STATUSES = new Set([403, 429, 503, 999]);
 
-/** True when the parsed page holds a `js_challenge` form input, not text quoting one. */
-async function hasChallengeForm(content: string): Promise<boolean> {
-	if (!content.includes("js_challenge")) return false;
-	// Lazy import keeps the DOM parser off the startup graph; only a page naming the form parses.
-	const { parseHTML } = await import("@oh-my-pi/pi-utils/dom");
-	// The parser reads a <textarea>'s text as markup, so an input inside one is quoted source.
-	return Array.from(parseHTML(content).document.querySelectorAll('input[name="js_challenge"]')).some(
-		input => !input.closest("textarea"),
-	);
+const CHALLENGE_INPUT_ATTR = 'name="js_challenge"';
+/** Occurrences of the attribute checked per page; a challenge page has one. */
+const MAX_CHALLENGE_CANDIDATES = 8;
+/** Elements whose content is text or inert, so an input inside one is quoted source, not a field. */
+const RAW_TEXT_TAGS = [
+	"script",
+	"style",
+	"textarea",
+	"title",
+	"xmp",
+	"iframe",
+	"noembed",
+	"noframes",
+	"noscript",
+	"plaintext",
+	"template",
+];
+
+/**
+ * True when the page holds a `js_challenge` `<input>` tag outside comments and raw-text elements.
+ * Each candidate costs a few linear string searches, so a hostile body cannot stall the read.
+ */
+function hasChallengeForm(content: string): boolean {
+	let at = content.indexOf(CHALLENGE_INPUT_ATTR);
+	if (at < 0) return false;
+	const lower = content.toLowerCase();
+	for (let seen = 0; at >= 0 && seen < MAX_CHALLENGE_CANDIDATES; seen++) {
+		const open = lower.lastIndexOf("<", at);
+		const inInputTag = open >= 0 && lower.startsWith("<input", open) && lower.indexOf(">", open) > at;
+		const inComment = lower.lastIndexOf("<!--", open) > lower.lastIndexOf("-->", open);
+		const inRawText = RAW_TEXT_TAGS.some(
+			tag => lower.lastIndexOf(`<${tag}`, open) > lower.lastIndexOf(`</${tag}`, open),
+		);
+		if (inInputTag && !inComment && !inRawText) return true;
+		at = content.indexOf(CHALLENGE_INPUT_ATTR, at + 1);
+	}
+	return false;
 }
 
 /**
@@ -68,10 +96,10 @@ async function hasChallengeForm(content: string): Promise<boolean> {
  * only from Cloudflare's header or a live challenge form, since an article can quote any marker
  * as text; vendor markers in the body count on an error status.
  */
-async function botWallOf(response: Response, contentType: string, content: string): Promise<string | undefined> {
+function botWallOf(response: Response, contentType: string, content: string): string | undefined {
 	if (!contentType.includes("html")) return undefined;
 	if (response.headers.get("cf-mitigated") === "challenge") return "Cloudflare";
-	if (await hasChallengeForm(content)) return "JavaScript challenge";
+	if (hasChallengeForm(content)) return "JavaScript challenge";
 	if (response.ok) return undefined;
 	if (content.includes("_cf_chl_opt")) return "Cloudflare";
 	if (content.includes("captcha-delivery.com")) return "DataDome";
@@ -214,7 +242,7 @@ export async function loadPage(url: string, options: LoadPageOptions = {}): Prom
 			}
 
 			const content = decodeBody(responseBody.bytes, rawContentType);
-			const blockedBy = await botWallOf(response, contentType, content);
+			const blockedBy = botWallOf(response, contentType, content);
 
 			if (!response.ok) {
 				return {
