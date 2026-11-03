@@ -139,9 +139,9 @@ Cells support top-level `await`, `async for`, and `async with` on a persistent a
 
 Environment is filtered before launching the runner:
 
-- Allowlist includes core vars like `PATH`, `HOME`, locale vars, `VIRTUAL_ENV`, `PYTHONPATH`, etc.
-- Allow-prefixes: `LC_`, `XDG_`, `PI_`
-- Denylist strips common API keys (OpenAI/Anthropic/Gemini/etc.)
+- The base environment comes from the same child-shell filter used by the bash tool, which removes launch-project dotenv values and inherited Git repository-location overrides.
+- Caller identity and CLI configuration variables are preserved, including custom names outside the `LC_`, `XDG_`, and `PI_` prefixes.
+- Python additionally strips the existing denylist of common API keys (OpenAI/Anthropic/Gemini/etc.).
 
 Runtime selection order (skipped entirely when the `python.interpreter` setting names an explicit executable):
 

@@ -11,13 +11,18 @@ import {
 import * as piUtils from "@oh-my-pi/pi-utils";
 
 describe("Python gateway environment filtering", () => {
-	it("filters sensitive and unknown variables from shell env", () => {
+	it("preserves caller identity and CLI configuration while removing API keys", () => {
 		const env: Record<string, string | undefined> = {
 			PATH: "/bin",
 			HOME: "/home/test",
 			OPENAI_API_KEY: "secret",
 			ANTHROPIC_API_KEY: "also-secret",
-			UNSAFE_TOKEN: "nope",
+			AGENT_ID: "test-agent",
+			GH_CONFIG_DIR: "/tmp/test-config/gh",
+			GIT_CONFIG_GLOBAL: "/tmp/test-config/gitconfig",
+			AGENT_CUSTOM: "caller-config",
+			EMPTY: "",
+			UNDEFINED: undefined,
 			PI_CUSTOM: "1",
 			LC_ALL: "en_US.UTF-8",
 			LD_LIBRARY_PATH: "/opt/conda/lib",
@@ -32,7 +37,41 @@ describe("Python gateway environment filtering", () => {
 		expect(filtered.LD_LIBRARY_PATH).toBe("/opt/conda/lib");
 		expect(filtered.OPENAI_API_KEY).toBeUndefined();
 		expect(filtered.ANTHROPIC_API_KEY).toBeUndefined();
-		expect(filtered.UNSAFE_TOKEN).toBeUndefined();
+		expect(filtered.AGENT_ID).toBe("test-agent");
+		expect(filtered.GH_CONFIG_DIR).toBe("/tmp/test-config/gh");
+		expect(filtered.GIT_CONFIG_GLOBAL).toBe("/tmp/test-config/gitconfig");
+		expect(filtered.AGENT_CUSTOM).toBe("caller-config");
+		expect(filtered.EMPTY).toBe("");
+		expect(Object.hasOwn(filtered, "UNDEFINED")).toBe(false);
+		expect(env.OPENAI_API_KEY).toBe("secret");
+	});
+
+	it("removes every denied API credential", () => {
+		const env = Object.fromEntries(
+			[
+				"OPENAI_API_KEY",
+				"ANTHROPIC_API_KEY",
+				"GOOGLE_API_KEY",
+				"GEMINI_API_KEY",
+				"OPENROUTER_API_KEY",
+				"PERPLEXITY_API_KEY",
+				"PERPLEXITY_COOKIES",
+				"EXA_API_KEY",
+				"AZURE_OPENAI_API_KEY",
+				"MISTRAL_API_KEY",
+			].map(key => [key, "secret"]),
+		);
+
+		expect(filterEnv(env)).toEqual({});
+	});
+
+	it("normalizes Windows PATH and credential names without renaming caller variables", () => {
+		if (process.platform !== "win32") return;
+
+		expect(filterEnv({ Path: "C:\\Windows", openai_api_key: "secret", Agent_Custom: "kept" })).toEqual({
+			PATH: "C:\\Windows",
+			Agent_Custom: "kept",
+		});
 	});
 
 	it("preserves XDG and LC prefixed variables", () => {
