@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { type AgentTelemetry, instrumentedCompleteSimple } from "@oh-my-pi/pi-agent-core";
 import type { Api, Model } from "@oh-my-pi/pi-ai";
+import { transportFetch } from "@oh-my-pi/pi-ai/utils/transport-fetch";
 import {
 	getAgentDir,
 	getSkillDescriptionsDbPath,
@@ -20,6 +21,7 @@ import {
 	resolveRoleSelection,
 } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
+import type { CostGateApi } from "../session/cost-gate";
 import compressDescriptionPrompt from "../prompts/skills/compress-description.md" with { type: "text" };
 import { Semaphore } from "../task/parallel";
 import type { Skill } from "./skills";
@@ -48,14 +50,18 @@ class SkillDescriptionLengthError extends Error {}
 /**
  * Resolve the fast role for each background request the way `/models` shows it — configured `smol`,
  * the inherited `default` when `smol` is unset, then the built-in chain — before a configured `tiny`.
- * Never uses the session's foreground model. `getTelemetry` supplies the telemetry handle for each
- * request's chat span.
+ * Never uses the session's foreground model. `ready` waits for the root session to own its gate;
+ * `getCostGate` follows that gate across new sessions and switches.
  */
 export function createSkillDescriptionCompressor(
 	registry: ModelRegistry,
 	settings: Settings,
-	sessionId?: string,
-	getTelemetry?: () => AgentTelemetry | undefined,
+	options: {
+		sessionId?: string;
+		getTelemetry?: () => AgentTelemetry | undefined;
+		getCostGate?: () => CostGateApi | undefined;
+		ready?: Promise<void>;
+	} = {},
 ): SkillDescriptionCompressor {
 	const select = (): Model<Api> | undefined => {
 		// The first exact provider/id match wins before every other matching phase.
@@ -90,24 +96,29 @@ export function createSkillDescriptionCompressor(
 			return model ? `${model.provider}/${model.id}` : undefined;
 		},
 		async compress(_name, _description, request) {
+			await options.ready;
 			const model = select();
 			if (!model) throw new Error("No smol or tiny model available");
-			const apiKey = await registry.getApiKey(model, sessionId);
+			const apiKey = await registry.getApiKey(model, options.sessionId);
 			if (!apiKey) throw new Error(`No credential for ${model.provider}/${model.id}`);
+			const gate = options.getCostGate?.();
+			gate?.admit();
 			const response = await instrumentedCompleteSimple(
 				model,
 				{
 					messages: [{ role: "user", content: request, timestamp: Date.now() }],
 				},
 				{
-					apiKey: registry.resolver(model, sessionId),
-					sessionId,
+					apiKey: registry.resolver(model, options.sessionId),
+					sessionId: options.sessionId,
 					maxTokens: 1024,
 					disableReasoning: true,
 					temperature: 0,
 					signal: AbortSignal.timeout(30_000),
+					fetch: gate ? transportFetch(model, undefined, () => gate.admit()) : undefined,
+					onAttempt: message => gate?.record(message.usage.cost.total),
 				},
-				{ telemetry: getTelemetry?.(), oneshotKind: "skill_description" },
+				{ telemetry: options.getTelemetry?.(), oneshotKind: "skill_description" },
 			);
 			if (response.stopReason === "length") {
 				throw new SkillDescriptionLengthError("Model stopped: length");
