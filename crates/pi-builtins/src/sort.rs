@@ -4234,7 +4234,16 @@ impl<'a> Line<'a> {
 		if settings.precomputed.fast_locale_collation
 			&& let Some(Collation::Icu(collator)) = &settings.collator
 		{
-			let Ok(()) = collator.write_sort_key_utf8_to(line, &mut line_data.collation_key_buffer);
+			// GNU collates the NUL-separated pieces in turn, which ICU would
+			// join ([`crate::locale::memcoll_pieces`]). ICU writes no zero
+			// byte inside a key, so the pieces' keys joined by one compare as
+			// the pieces do.
+			for (n, piece) in line.split(|&byte| byte == 0).enumerate() {
+				if n > 0 {
+					line_data.collation_key_buffer.push(0);
+				}
+				let Ok(()) = collator.write_sort_key_utf8_to(piece, &mut line_data.collation_key_buffer);
+			}
 			line_data
 				.collation_key_ends
 				.push(line_data.collation_key_buffer.len());
@@ -4953,10 +4962,11 @@ pub(crate) enum Collation {
 }
 
 impl Collation {
-	/// Compares two keys as the locale orders them.
+	/// Compares two keys as the locale orders them, in NUL-separated pieces
+	/// as GNU's `memcoll0` does ([`crate::locale::memcoll_pieces`]).
 	fn compare(&self, a: &[u8], b: &[u8]) -> Ordering {
 		match self {
-			Self::Icu(collator) => collator.compare_utf8(a, b),
+			Self::Icu(collator) => crate::locale::memcoll_pieces(a, b, |a, b| collator.compare_utf8(a, b)),
 			#[cfg(unix)]
 			Self::Libc(collator) => collator.compare(a, b),
 		}
@@ -6634,12 +6644,17 @@ fn compare_by<'a>(
 		}
 	}
 
-	// Call "last resort compare" if all selectors returned Equal
+	// When the keys tie, GNU's last resort compares the whole lines, in the
+	// locale (`xmemcoll0`) when it collates, else by bytes; `-s`, `-u` and
+	// `-R` leave the tie. Bytes order lines the collation leaves equal, which
+	// GNU's merge leaves in input order.
 	let cmp = if global_settings.mode == SortMode::Random
 		|| global_settings.stable
 		|| global_settings.unique
 	{
 		Ordering::Equal
+	} else if let Some(collator) = &global_settings.collator {
+		collator.compare(a.line, b.line).then_with(|| a.line.cmp(b.line))
 	} else {
 		a.line.cmp(b.line)
 	};
@@ -7215,6 +7230,63 @@ mod tests {
 		assert_eq!(out, "z\n\u{e9}\n");
 	}
 
+	/// Under locale collation an embedded NUL separates pieces that collate
+	/// in turn, as GNU's `memcoll0` does, through the precomputed keys of a
+	/// plain sort, a filtered key and a field key alike. ICU ignores U+0000,
+	/// so `a\0b` and `ab` collated equal and `-u` dropped `ab`. Each case is
+	/// GNU `sort` 9.4's output in `en_US.UTF-8` (and `fr_FR.UTF-8`, the same).
+	#[test]
+	fn nul_pieces_collate_in_turn_in_the_locale() {
+		if !locale_installed("en_US.UTF-8") {
+			eprintln!("skipping: en_US.UTF-8 not installed");
+			return;
+		}
+		for (args, input, expected) in [
+			(&["-u"][..], "a\0b\nab\n", "a\0b\nab\n"),
+			(&["-u"][..], "ab\na\0b\n", "a\0b\nab\n"),
+			(&[][..], "ab\na\0b\n", "a\0b\nab\n"),
+			(&["-fu"][..], "a\0b\nab\n", "a\0b\nab\n"),
+			(&["-k1,1f", "-u"][..], "a\0b\nab\n", "a\0b\nab\n"),
+			(&["-fs"][..], "ab\na\0b\n", "a\0b\nab\n"),
+			(&["-cfu"][..], "a\0b\nab\n", ""),
+			(&[][..], "a\0\na\n", "a\na\0\n"),
+			(&["-u"][..], "a\na\0\n", "a\na\0\n"),
+		] {
+			let (code, out, err) = sort_in_locale("LC_ALL", "en_US.UTF-8", args, input);
+			assert_eq!((code, err.as_str()), (0, ""), "{args:?} {input:?}");
+			assert_eq!(out, expected, "{args:?} {input:?}");
+		}
+	}
+
+	/// When the keys tie, GNU's last resort compares the whole lines in the
+	/// locale, not by bytes, unless `-s` or `-u` is given; `-r` reverses it.
+	/// Each case is GNU `sort` 9.4's output in `en_US.UTF-8` (and
+	/// `fr_FR.UTF-8`, the same); bytes would put `A` before `a`, and `x z`
+	/// before `x é`.
+	#[test]
+	fn tied_keys_fall_back_to_the_locale_order_of_the_lines() {
+		if !locale_installed("en_US.UTF-8") {
+			eprintln!("skipping: en_US.UTF-8 not installed");
+			return;
+		}
+		for (args, input, expected) in [
+			(&["-f"][..], "a\nA\n", "a\nA\n"),
+			(&["-f"][..], "A\na\n", "a\nA\n"),
+			(&["-cf"][..], "a\nA\n", ""),
+			(&["-sf"][..], "A\na\n", "A\na\n"),
+			(&["-rf"][..], "a\nA\n", "A\na\n"),
+			(&["-k1,1d"][..], "x z\nx \u{e9}\n", "x \u{e9}\nx z\n"),
+			(&["-k1,1f"][..], "x z\nx \u{e9}\n", "x \u{e9}\nx z\n"),
+			(&["-k1,1i"][..], "x z\nx \u{e9}\n", "x \u{e9}\nx z\n"),
+			(&["-k1,1"][..], "x z\nx \u{e9}\n", "x \u{e9}\nx z\n"),
+			(&["-s", "-k1,1"][..], "x z\nx \u{e9}\n", "x z\nx \u{e9}\n"),
+		] {
+			let (code, out, err) = sort_in_locale("LC_ALL", "en_US.UTF-8", args, input);
+			assert_eq!((code, err.as_str()), (0, ""), "{args:?} {input:?}");
+			assert_eq!(out, expected, "{args:?} {input:?}");
+		}
+	}
+
 	/// A non-UTF-8 `LC_COLLATE` collates with libc's `strcoll`, as GNU `sort`
 	/// does, where the builtin compared bytes: in a generated
 	/// `en_US.ISO-8859-1`, `é` (0xE9) sorts before `z`, and `-f` folds it to
@@ -7240,6 +7312,11 @@ mod tests {
 			assert_eq!(run(&["-k1,1"], b"z x\n\xe9 y\n"), b"\xe9 y\nz x\n");
 			// "a\0z" against "a\0b": the first pieces collate equal, so the second decide.
 			assert_eq!(run(&[], b"a\0z\na\0b\n"), b"a\0b\na\0z\n");
+			// "a\0b" against "ab": "a" collates before "ab", so both stay under -u.
+			assert_eq!(run(&["-fu"], b"a\0b\nab\n"), b"a\0b\nab\n");
+			// Tied keys: the whole lines collate, lowercase first, é before z.
+			assert_eq!(run(&["-f"], b"A\na\n"), b"a\nA\n");
+			assert_eq!(run(&["-k1,1d"], b"x z\nx \xe9\n"), b"x \xe9\nx z\n");
 			return;
 		}
 		let dir = tempfile::tempdir().unwrap();

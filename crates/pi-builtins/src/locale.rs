@@ -946,6 +946,35 @@ pub(crate) fn shell_sort_ctype(_host: &Host, _cancel: &AtomicBool) -> std::sync:
 	c_sort_ctype_shared()
 }
 
+/// gnulib `memcoll0`'s order over `cmp`, a collation of NUL-free pieces:
+/// equal bytes are equal; otherwise the NUL-separated pieces are collated in
+/// turn, and when every piece collates equal the string with pieces left
+/// over is greater. GNU `sort` compares text this way in every locale it
+/// collates in, so an embedded NUL separates, where a collation that ignores
+/// U+0000 (ICU) would join the pieces around it.
+pub(crate) fn memcoll_pieces(
+	a: &[u8],
+	b: &[u8],
+	mut cmp: impl FnMut(&[u8], &[u8]) -> std::cmp::Ordering,
+) -> std::cmp::Ordering {
+	use std::cmp::Ordering;
+	if a == b {
+		return Ordering::Equal;
+	}
+	let (mut pieces_a, mut pieces_b) = (a.split(|&byte| byte == 0), b.split(|&byte| byte == 0));
+	loop {
+		match (pieces_a.next(), pieces_b.next()) {
+			(Some(piece_a), Some(piece_b)) => match cmp(piece_a, piece_b) {
+				Ordering::Equal => {},
+				diff => return diff,
+			},
+			(None, None) => return Ordering::Equal,
+			(None, Some(_)) => return Ordering::Less,
+			(Some(_), None) => return Ordering::Greater,
+		}
+	}
+}
+
 /// GNU `sort`'s collation in a locale ICU is not used for: `strcoll` in the
 /// `LC_COLLATE` locale, through a locale object.
 #[cfg(unix)]
@@ -960,45 +989,26 @@ impl std::fmt::Debug for LibcCollator {
 
 #[cfg(unix)]
 thread_local! {
-	/// NUL-terminated copies of the two strings one comparison collates.
+	/// A NUL-terminated copy of each piece one comparison collates.
 	static COLLATE_BUFS: std::cell::RefCell<(Vec<u8>, Vec<u8>)> =
 		const { std::cell::RefCell::new((Vec::new(), Vec::new())) };
 }
 
 #[cfg(unix)]
 impl LibcCollator {
-	/// gnulib `memcoll0` with `strcoll_l`: equal bytes are equal; otherwise
-	/// the NUL-separated pieces are collated in turn, and when every piece
-	/// collates equal the string with pieces left over is greater.
+	/// gnulib `memcoll0` with `strcoll_l` ([`memcoll_pieces`]).
 	pub(crate) fn compare(&self, a: &[u8], b: &[u8]) -> std::cmp::Ordering {
-		use std::cmp::Ordering;
-		if a == b {
-			return Ordering::Equal;
-		}
 		COLLATE_BUFS.with_borrow_mut(|(sa, sb)| {
-			for (buf, text) in [(&mut *sa, a), (&mut *sb, b)] {
-				buf.clear();
-				buf.extend_from_slice(text);
-				buf.push(0);
-			}
-			let (mut pa, mut pb) = (&sa[..], &sb[..]);
-			loop {
-				// SAFETY: both slices end with a NUL inside them, so each is a
-				// C string; the locale object is live while borrowed.
-				let diff = unsafe { strcoll_l(pa.as_ptr().cast(), pb.as_ptr().cast(), self.0.0) };
-				if diff != 0 {
-					return diff.cmp(&0);
+			memcoll_pieces(a, b, |piece_a, piece_b| {
+				for (buf, piece) in [(&mut *sa, piece_a), (&mut *sb, piece_b)] {
+					buf.clear();
+					buf.extend_from_slice(piece);
+					buf.push(0);
 				}
-				let skip = |p: &[u8]| p.iter().position(|&b| b == 0).map_or(p.len(), |nul| nul + 1);
-				pa = &pa[skip(pa)..];
-				pb = &pb[skip(pb)..];
-				match (pa.is_empty(), pb.is_empty()) {
-					(true, true) => return Ordering::Equal,
-					(true, false) => return Ordering::Less,
-					(false, true) => return Ordering::Greater,
-					(false, false) => {},
-				}
-			}
+				// SAFETY: each buffer is a piece, which holds no NUL, and one NUL
+				// after it, so a C string; the locale object is live while borrowed.
+				unsafe { strcoll_l(sa.as_ptr().cast(), sb.as_ptr().cast(), self.0.0) }.cmp(&0)
+			})
 		})
 	}
 }
