@@ -70,9 +70,11 @@ describe.skipIf(!available)("browser implicit role selectors", () => {
 				<figure id="caption-figure"><img alt="Photo" src="data:,"><figcaption>Caption name</figcaption></figure>
 				<select><optgroup id="optgroup" label="Options"><option>One</option></optgroup></select>
 				<label>Category<select><optgroup id="wrapped-optgroup" label="Fruit"><option>Apple</option></optgroup></select></label>
+				<select><optgroup id="title-optgroup" title="Titled group"><option>Pear</option></optgroup></select>
 				<table><thead id="thead" aria-label="Head"><tr><th>H</th></tr></thead><tbody id="tbody" aria-label="Body"><tr><td>B</td></tr></tbody><tfoot id="tfoot" aria-label="Foot"><tr><td>F</td></tr></tfoot></table>
 				<table id="caption-table"><caption>Quarterly results</caption><tr><td>Profit</td></tr></table>
 				<section id="table-target-section" aria-labelledby="caption-table"></section>
+				<table id="aria-caption-table"><caption aria-label="Labelled caption">Visible caption</caption><tr><td>Cell</td></tr></table>
 				<dl><dt id="dt">Term</dt><dd id="dd" aria-label="Definition">Definition</dd></dl>
 				<img id="decorative" alt="" src="data:,"><img id="named-image" alt="" aria-label="Named image" src="data:,">
 				<img id="described-image" alt="" aria-describedby="description" src="data:,"><p id="description" aria-label="Description">Description</p>

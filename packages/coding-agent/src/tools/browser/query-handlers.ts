@@ -321,8 +321,16 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 		const tag = element.tagName.toLocaleLowerCase();
 		if (tag === "optgroup") return normalizeSpace(element.getAttribute("label") ?? "");
 		if (tag !== "fieldset" && tag !== "table") return "";
-		const caption = element.querySelector(tag === "fieldset" ? ":scope > legend" : ":scope > caption");
-		return caption ? normalizeSpace(contentText(caption, null, "visible")) : "";
+		const caption = element.querySelector(
+			tag === "fieldset" ? ":scope > legend" : ":scope > caption",
+		) as unknown as Element | null;
+		if (!caption) return "";
+		// The caption or legend is named as an element in its own right: its references, then its label, then its text.
+		return (
+			idrefText(caption) ||
+			normalizeSpace(caption.getAttribute("aria-label") ?? "") ||
+			normalizeSpace(contentText(caption, null, "visible"))
+		);
 	};
 	/**
 	 * Text of the elements an `aria-labelledby` names (a hidden target read whole), without following their own
@@ -361,18 +369,20 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 		if (labelledBy) return labelledBy;
 		const ariaLabel = normalizeSpace(element.getAttribute("aria-label") ?? "");
 		if (ariaLabel) return ariaLabel;
-		// Labels label form controls only, so an optgroup inside a labelled select keeps its own label.
 		const native = nativeName(element);
-		if (native || element.tagName.toLocaleLowerCase() === "optgroup") return native;
-		if (element.id) {
-			for (const label of element.ownerDocument?.querySelectorAll("label") ?? []) {
-				if (label.getAttribute("for") === element.id) {
-					return normalizeSpace(contentText(label, element, "visible"));
+		if (native) return native;
+		// Labels label form controls only, so an optgroup inside a labelled select keeps its own label (or title).
+		if (element.tagName.toLocaleLowerCase() !== "optgroup") {
+			if (element.id) {
+				for (const label of element.ownerDocument?.querySelectorAll("label") ?? []) {
+					if (label.getAttribute("for") === element.id) {
+						return normalizeSpace(contentText(label, element, "visible"));
+					}
 				}
 			}
+			const wrappingLabel = element.closest("label");
+			if (wrappingLabel) return normalizeSpace(contentText(wrappingLabel, element, "visible"));
 		}
-		const wrappingLabel = element.closest("label");
-		if (wrappingLabel) return normalizeSpace(contentText(wrappingLabel, element, "visible"));
 		const tag = element.tagName.toLocaleLowerCase();
 		// An `<input>`'s type and value decide its name; other elements have neither.
 		const input = tag === "input" ? (element as unknown as { type: string; value: string }) : null;
