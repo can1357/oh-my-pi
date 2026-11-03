@@ -2,15 +2,25 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Replaced `CustomEditor.modelMentionLabel` with `resolveModelMention`, which returns the chip label and the canonical selector the chip expands to; `collapseModelMentions` takes the same `{ label, selector }` callback, and `getModelMentionSuggestions` returns a `ModelMentionCompletion` (`unhandled`, `no-match`, or `matched` with the suggestions) instead of suggestions or `null` ([#17574](https://github.com/can1357/oh-my-pi/pull/17574) by [@a-glapinski](https://github.com/a-glapinski))
+
 ### Added
 
 - `StatusLineComponent.setSessionPinned()` / `setPinnedSessionIds()` / `isSessionPinned()` track pinned sessions; `session_name` prefixes the theme's pin icon for a pinned session ([#17848](https://github.com/can1357/oh-my-pi/pull/17848) by [@SuperUserA](https://github.com/SuperUserA))
 - `LinkBrowserComponent` (`overlays/link-browser`) replays a transcript fullscreen with extension link hint tags that each link keeps while it stays in view; `LinkHints` / `viewportLinkTargets()` (`render/link-hints`) share tag assignment (preferring the letters a label starts with) and painting with `Composer`; `ChatTranscriptBuilder` accepts `textRenderers` ([#16476](https://github.com/can1357/oh-my-pi/pull/16476) by [@materemias](https://github.com/materemias))
 - Added the `cache` status-line segment, `StatusLineSession.getPromptCacheStatus` (read once per status-line build into `SegmentContext.promptCache`), the `icon.cacheWarm` / `icon.cacheCold` symbols (a database and the same database struck through), the composer's `omp.composer.cache` fact (that glyph alone, in the warning tone when not cached, on the extras' right side with a two-line hover card and the `status.cache` click action), `promptCacheBrief` and `promptCacheDetails` ([#12677](https://github.com/can1357/oh-my-pi/issues/12677)) ([#17496](https://github.com/can1357/oh-my-pi/pull/17496) by [@will-bogusz](https://github.com/will-bogusz))
+- Added effort-level rows to `^` model mention autocomplete: after `:`, it lists the supported levels of the top three matching models below any model ids that contain the typed text, and typing `:` reopens a closed mention popup ([#17574](https://github.com/can1357/oh-my-pi/pull/17574) by [@a-glapinski](https://github.com/a-glapinski))
+- Added optional `AutocompleteProvider.trySyncModelMentionCompletion`, which returns a `ModelMentionCompletion`; the editor uses it to refresh a shown mention popup as you type, so Tab accepts a row for the current text ([#17574](https://github.com/can1357/oh-my-pi/pull/17574) by [@a-glapinski](https://github.com/a-glapinski))
 
 ### Fixed
 
 - Closing an overlay that others were opened over no longer leaves them returning focus to it once they close ([#16476](https://github.com/can1357/oh-my-pi/pull/16476))
+
+### Changed
+
+- Tab in the `/usage` Details view now switches back to Overview ([#17962](https://github.com/can1357/oh-my-pi/pull/17962) by [@SuperUserA](https://github.com/SuperUserA))
 
 ## [18.16.0] - 2026-11-02
 
@@ -19,6 +29,7 @@
 - `buildExecutionFrame` sets its loader into the new `bottomBorder` itself, so callers no longer add it as a row and must dispose it; `buildStatusFooter` no longer takes `status` or `exitCode`, and `executionStatusLabel` returns a settled run's `exit N` / `cancelled` marker for that border ([#17732](https://github.com/can1357/oh-my-pi/pull/17732) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - `SessionSelectorOptions.loadAllSessions` and `SessionPickerHost.loadAllSessions` resolve to a `SessionListing`, and `allSessions` takes one, so the all-projects scope can show preliminary rows before its complete listing
 - `Editor.prediction` is replaced by `Editor.predictions`, which returns every prediction for the next prompt, most likely first, and `Editor.onPredictionAccepted` receives the inserted prediction's index in that list ([#17796](https://github.com/can1357/oh-my-pi/pull/17796) by [@wolfiesch](https://github.com/wolfiesch))
+- `GradientHighlightSpec.lightness` maps the gradient position to a lightness, like `hue`, instead of taking one fixed percentage
 
 ### Added
 
@@ -39,6 +50,7 @@
 ### Fixed
 
 - An LSP result other than diagnostics, such as a raw `request` response, that contains the error glyph (`✘`, ASCII `[-]`) is shown as a response instead of as diagnostics reading "No issues" with the rest of its lines dropped ([#17732](https://github.com/can1357/oh-my-pi/pull/17732) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+- `MagicKeywordSpec.lightness` sweeps lightness across a keyword's gradient alongside its hue
 - `Editor.onPredictionAccepted` and `Editor.onPredictionShown` report when Tab or Right inserts the rest of the composer prediction and when a frame paints it (at least one cell in the terminal, or the ghost on a native editor node) ([#17739](https://github.com/can1357/oh-my-pi/pull/17739) by [@wolfiesch](https://github.com/wolfiesch))
 - Added `OutputMeta.minimized` (bash minimizer filter, raw and minimized byte counts, raw-output artifact), shown as a `Minimized` fact on bash result cards ([#16586](https://github.com/can1357/oh-my-pi/pull/16586) by [@will-bogusz](https://github.com/will-bogusz))
 - Added `isColumnTruncationNotice` and `hasColumnTruncationClause` to `tools/output-meta`, matching the `[Some lines truncated to …]` clause that `formatOutputNotice` emits alone or inside a longer notice, and `LimitsMeta.columnTruncated.rawByteCap`, which makes that notice name the byte cap a `:raw` read of the first cut line stops at ([#16595](https://github.com/can1357/oh-my-pi/pull/16595) by [@will-bogusz](https://github.com/will-bogusz))

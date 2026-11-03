@@ -49,7 +49,7 @@ import {
 	formatAdvisorContextPrompt,
 	formatAdvisorMemoryPrompt,
 } from "./advisor";
-import { AsyncJobManager } from "./async";
+import { AsyncJobManager, type AsyncJobManagerApi } from "./async";
 import { AutoLearnController, buildAutoLearnInstructions } from "./autolearn/controller";
 import { createAutoresearchExtension } from "./autoresearch";
 import { loadCapability, reset as resetCapabilities } from "./capability";
@@ -145,7 +145,7 @@ import {
 	setActiveSkills,
 } from "./extensibility/skills";
 import { type FileSlashCommand, loadSlashCommands as loadSlashCommandsInternal } from "./extensibility/slash-commands";
-import type { HindsightSessionState } from "./hindsight/state";
+import type { HindsightSessionStateApi } from "./hindsight/state";
 import { LocalProtocolHandler, type LocalProtocolOptions, outRepliesActive } from "./internal-urls";
 import { stripXdUrlPrefix } from "@oh-my-pi/pi-tui/tools/xd-url";
 import { holdSharedLsp } from "./lsp/client";
@@ -156,6 +156,7 @@ import {
 	getMCPToolOriginKey,
 	type MCPLoadResult,
 	MCPManager,
+	type MCPManagerApi,
 	MCPToolCache,
 	type MCPToolsLoadResult,
 	shouldFilterBrowserMCPForPrelude,
@@ -165,12 +166,18 @@ import { MCP_CONNECTION_STATUS_EVENT_CHANNEL, type McpConnectionStatusEvent } fr
 import { resolveMCPToolAlias } from "./mcp/tool-bridge";
 import { createSessionMemoryRuntimeContext, resolveMemoryBackend } from "./memory-backend";
 import { MEMORY_BACKEND_TOOL_NAMES } from "./memory-backend/tool-names";
-import type { MnemopiSessionState } from "./mnemopi/state";
+import type { MnemopiSessionStateApi } from "./mnemopi/state";
 import autolearnCaptureRefused from "./prompts/system/autolearn-capture-refused.md" with { type: "text" };
 import mcpXdevGuidanceTemplate from "./prompts/system/mcp-xdev-guidance.md" with { type: "text" };
 import lateDiagnosticTemplate from "./prompts/tools/lsp-late-diagnostic.md" with { type: "text" };
 import { AgentLifecycleManager } from "./registry/agent-lifecycle";
-import { type AgentKind, type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "./registry/agent-registry";
+import {
+	type AgentKind,
+	type AgentRef,
+	AgentRegistry,
+	type AgentRegistryApi,
+	MAIN_AGENT_ID,
+} from "./registry/agent-registry";
 import {
 	buildSecretObfuscator,
 	deobfuscateSessionContext,
@@ -193,7 +200,7 @@ import {
 	loadEffectiveAuthAccountPolicyConfig,
 } from "./session/auth-broker-config";
 import type { AuthStorage } from "./session/auth-storage";
-import { CostCapError, type CostGate, guardStreamFn } from "./session/cost-gate";
+import { CostCapError, type CostGateApi, guardStreamFn } from "./session/cost-gate";
 import {
 	CREDENTIAL_DISABLED_NOTICE_SOURCE,
 	formatCredentialDisabledNotice,
@@ -230,6 +237,10 @@ import { describeUsageFallback } from "./session/retry-fallback-reason";
 import { loadRuntimeIdentity } from "./session/runtime-identity";
 import { getRestorableSessionModels } from "./session/session-context";
 import { SessionManager } from "./session/session-manager";
+import { SHAPE_RULE } from "./spotlight/shape";
+import { buildCallContext } from "./spotlight/context";
+import { type CalledToolShaper, shapeCalledTool } from "./spotlight";
+import { SPOTLIGHT_INTENT_DESCRIPTION, SPOTLIGHT_INTENT_GUIDANCE, startSpotlightExperiment } from "./spotlight/session";
 import {
 	collectMountedMCPToolRoutes,
 	projectMountedMCPXdevGuidance,
@@ -237,7 +248,7 @@ import {
 } from "./session/session-tools";
 import { anthropicSlowModeHasNoSiblingHeadroom } from "./session/anthropic-slow-mode";
 import { CacheWarmer } from "./session/cache-warmer";
-import { createSettingsAwareStreamFn, resolveOpenAIWebsocketPreference } from "./session/settings-stream-fn";
+import { createSettingsAwareStreamFn } from "./session/settings-stream-fn";
 import { SnapcompactInlineTransformer } from "./session/snapcompact-inline";
 import { createSnapcompactSavingsRecorder } from "./session/snapcompact-savings-journal";
 import { createSpeculativeToolExecutionConfig } from "./speculation/host";
@@ -256,6 +267,7 @@ import { AgentOutputManager } from "./task/output-manager";
 import { wrapStreamFnWithProviderConcurrency } from "./task/provider-concurrency";
 import { sessionDelegationBias } from "./task/prompt-policy";
 import { isScoutSpawnable } from "./task/spawn-policy";
+import { isMainThread } from "./thread/identity";
 import type { StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
 import {
 	AUTO_THINKING,
@@ -708,7 +720,7 @@ export interface CreateAgentSessionOptions {
 	/** Absolute wall-clock deadline in Unix epoch milliseconds. */
 	deadline?: number;
 	/** Cost gate of the parent session tree; without one the session starts its own from `session.warnCost` / `session.maxCost`. */
-	costGate?: CostGate;
+	costGate?: CostGateApi;
 
 	/** Custom tools to register (in addition to built-in tools). Accepts both CustomTool and ToolDefinition. */
 	customTools?: (CustomTool | ToolDefinition)[];
@@ -815,7 +827,7 @@ export interface CreateAgentSessionOptions {
 	 */
 	enableMCP?: boolean;
 	/** Existing MCP manager to reuse when MCP is enabled (skips discovery, propagates to toolSession). */
-	mcpManager?: MCPManager;
+	mcpManager?: MCPManagerApi;
 	/**
 	 * MCP tools minted from a parent's shared manager (subagent proxies). They
 	 * register as manager-owned MCP tools — active from the start and replaced
@@ -863,9 +875,9 @@ export interface CreateAgentSessionOptions {
 	/** Task recursion depth (for subagent sessions). Default: 0 */
 	taskDepth?: number;
 	/** Parent Hindsight state to alias for subagent memory tools. */
-	parentHindsightSessionState?: HindsightSessionState;
+	parentHindsightSessionState?: HindsightSessionStateApi;
 	/** Parent Mnemopi state: subagents alias it; a top-level fork (`/tan`) inherits its delivered recall. */
-	parentMnemopiSessionState?: MnemopiSessionState;
+	parentMnemopiSessionState?: MnemopiSessionStateApi;
 	/** Pre-allocated agent identity for IRC routing. Default: "Main" for top-level, parentTaskPrefix-derived for sub. */
 	agentId?: string;
 	/** Display name for the agent in IRC. Default: "main" or "sub". */
@@ -876,7 +888,7 @@ export interface CreateAgentSessionOptions {
 	 */
 	agentName?: string;
 	/** Optional shared agent registry for IRC routing. Default: AgentRegistry.global(). */
-	agentRegistry?: AgentRegistry;
+	agentRegistry?: AgentRegistryApi;
 	/**
 	 * Registry generation authorized for this creation. `null` requires the id
 	 * to be absent; an AgentRef allows a parked revival to reuse only that ref.
@@ -887,7 +899,7 @@ export interface CreateAgentSessionOptions {
 	/** Parent task ID prefix for nested artifact naming (e.g., "Extensions") */
 	parentTaskPrefix?: string;
 	/** Parent's async jobs and delivery sinks; child sessions never resolve a process-global manager. */
-	asyncJobManager?: AsyncJobManager;
+	asyncJobManager?: AsyncJobManagerApi;
 	/**
 	 * Writes the specs of the root session's live job widgets. Defaults to the
 	 * `widget` model role; tests inject a fake. Ignored for child sessions,
@@ -2465,7 +2477,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// The session tree shares one cost gate: a subagent is given its parent's; a root
 	// session owns one that follows its session file. Read it per request, so a request
 	// lands on the gate of the session file it was sent for.
-	const currentCostGate = (): CostGate | undefined => session?.costGate ?? options.costGate;
+	const currentCostGate = (): CostGateApi | undefined => session?.costGate ?? options.costGate;
 	const enableLsp = options.enableLsp ?? !restrictToolNames;
 	const lspReadOnly = options.lspReadOnly ?? restrictToolNames;
 	// Every root owns its jobs and delivery sinks, even when another root is live.
@@ -2692,6 +2704,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getLastAssistantText: () => session?.getLastAssistantText(),
 			getYieldReportText: toolCallId => resolveYieldReportText(session?.messages ?? [], toolCallId),
 			getToolCallIntent: toolCallId => resolveToolCallIntent(session?.messages ?? [], toolCallId),
+			getCallContext: (toolCallId, source) => {
+				const messages = session?.messages ?? [];
+				return buildCallContext(messages, toolCallId, source, resolveToolCallIntent(messages, toolCallId));
+			},
+			getContextMessages: () => convertToLlm(session?.messages ?? []),
 			setWorkPoolYieldItems: items => session.setWorkPoolYieldItems(items),
 			getCheckpointState: () => session.getCheckpointState(),
 			setCheckpointState: state => session.setCheckpointState(state ?? undefined),
@@ -2731,6 +2748,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// Tools and nested subagents use this root's manager, never another root's singleton.
 			asyncJobManager: scopedAsyncJobManager,
 		};
+		// The Spotlight experiment starts before the first prompt build: its shaping rule rides the system prompt
+		// and its shaping replaces the native read summarizer / bash minimizer for the session.
+		// Helper sessions (security scan, spec generation) stay out of it. A task subagent's reads are edit-likely only
+		// once it read or edited the file.
+		const spotlightExperiment =
+			options.bindProcessState === false
+				? undefined
+				: startSpotlightExperiment(settings, sessionManager, { subagent: taskDepth > 0 });
+		if (spotlightExperiment) toolSession.spotlight = spotlightExperiment;
 		let browserPrelude: EvalPreludeDefinition | undefined;
 		let computerPrelude: EvalPreludeDefinition | undefined;
 		let ratchetPrelude: EvalPreludeDefinition | undefined;
@@ -2802,7 +2828,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 		// Restricted sessions cannot inherit or discover MCP capabilities.
 		const enableMCP = !restrictToolNames && (options.enableMCP ?? true);
-		let mcpManager: MCPManager | undefined = enableMCP ? options.mcpManager : undefined;
+		let mcpManager: MCPManagerApi | undefined = enableMCP ? options.mcpManager : undefined;
+		// A subagent worker thread never connects MCP servers itself: it reuses the main thread's manager.
+		if (enableMCP && !mcpManager && !isMainThread()) mcpManager = MCPManager.instance();
+		/** Manager this session created by running discovery (it owns its callbacks); unset when reused. */
+		let ownedMcpManager: MCPManager | undefined;
 		toolSession.mcpManager = mcpManager;
 		toolSession.enableMCP = enableMCP;
 		const deferMCPDiscoveryForUI = enableMCP && !mcpManager && options.hasUI === true;
@@ -2835,18 +2865,18 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			filterBrowser: initialBrowserPreludeAvailable,
 			extensionRoots: buildSessionExtensionRoots(),
 		};
-		if (enableMCP && !mcpManager) {
+		if (enableMCP && !mcpManager && isMainThread()) {
 			if (deferMCPDiscoveryForUI) {
 				const cacheStorage = settings.getStorage();
-				mcpManager = new MCPManager(cwd, cacheStorage ? new MCPToolCache(cacheStorage) : null);
-				mcpManager.setAuthStorage(authStorage);
-				toolSession.mcpManager = mcpManager;
+				const deferredMCPManager = new MCPManager(cwd, cacheStorage ? new MCPToolCache(cacheStorage) : null);
+				ownedMcpManager = deferredMCPManager;
+				mcpManager = deferredMCPManager;
+				deferredMCPManager.setAuthStorage(authStorage);
+				toolSession.mcpManager = deferredMCPManager;
 
 				if (cfgMcpNotifications.get(settings)) {
-					mcpManager.setNotificationsEnabled(true);
+					deferredMCPManager.setNotificationsEnabled(true);
 				}
-
-				const deferredMCPManager = mcpManager;
 				startDeferredMCPDiscovery = liveSession => {
 					const discovery = (async () => {
 						try {
@@ -2890,11 +2920,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					cacheStorage: settings.getStorage(),
 					authStorage,
 				});
-				mcpManager = mcpResult.manager;
-				toolSession.mcpManager = mcpManager;
+				const discoveredMCPManager = mcpResult.manager;
+				ownedMcpManager = discoveredMCPManager;
+				mcpManager = discoveredMCPManager;
+				toolSession.mcpManager = discoveredMCPManager;
 
 				if (cfgMcpNotifications.get(settings)) {
-					mcpManager.setNotificationsEnabled(true);
+					discoveredMCPManager.setNotificationsEnabled(true);
 				}
 				applyMCPEnvironment(mcpResult);
 
@@ -2914,7 +2946,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// receive the parent's manager via `options.mcpManager`, and reassigning
 		// the singleton to the same value is a no-op — keep the gate explicit
 		// to mirror the AsyncJobManager ownership rule.
-		if (mcpManager && !options.parentTaskPrefix) MCPManager.setInstance(mcpManager);
+		if (mcpManager instanceof MCPManager && !options.parentTaskPrefix) MCPManager.setInstance(mcpManager);
 
 		const builtInToolNames = [...toolRegistry.keys()];
 		let customToolPaths: ToolPathWithSource[] = [];
@@ -3740,6 +3772,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			void extensionRunner.emitCredentialDisabled(event);
 		}
 
+		// Every tool's result crosses the meta wrapper with this session's tool context, which carries the hook.
+		const spotlightShape: CalledToolShaper | undefined = spotlightExperiment
+			? call => shapeCalledTool(toolSession, call)
+			: undefined;
 		const getSessionContext = () => ({
 			sessionManager,
 			modelRegistry,
@@ -3752,6 +3788,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			settings,
 			localProtocolOptions,
 			autoApprove: options.autoApprove ?? false,
+			spotlightShape,
 		});
 		const toolContextStore = new ToolContextStore(getSessionContext, trackUserWait);
 		toolSession.getToolContext = () => toolContextStore.getContext();
@@ -4284,6 +4321,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			const appendParts: string[] = [];
 			if (memoryInstructions) appendParts.push(memoryInstructions);
 			if (autoLearnInstructions) appendParts.push(autoLearnInstructions);
+			if (spotlightExperiment) appendParts.push(SHAPE_RULE);
 			// List each mounted MCP tool once. A routed tool that the xd:// catalog
 			// would list carries its catalog summary on the route line and gets no
 			// catalog line; a tool the route bound omits keeps its catalog line.
@@ -4375,6 +4413,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				inlineToolDescriptors,
 				nativeTools,
 				intentField: cfgToolsIntentTracing.get(settings) ? INTENT_FIELD : undefined,
+				// Spotlight ranks output against the call's intent: experiment sessions ask what each call's output is for.
+				intentGuidance: spotlightExperiment ? SPOTLIGHT_INTENT_GUIDANCE : undefined,
 				eagerTasks: cfgTaskEager.get(settings) !== "default",
 				eagerTasksAlways: cfgTaskEager.get(settings) === "always",
 				taskBatch: cfgTaskBatch.get(settings),
@@ -4757,7 +4797,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				...streamOptions,
 				thinkingBudgets: streamOptions?.thinkingBudgets ?? cfgThinkingBudgets.get(settings),
 				kimiApiFormat: streamOptions?.kimiApiFormat ?? (kimiApiFormat === "auto" ? undefined : kimiApiFormat),
-				preferWebsockets: streamOptions?.preferWebsockets ?? resolveOpenAIWebsocketPreference(settings),
 			});
 		};
 		// Prompt-cache warmer for the main agent loop only: replays the last
@@ -4901,6 +4940,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			resolveFallbackTool: resolveDeviceTool,
 			suggestFallbackToolNames: suggestDeviceToolNames,
 			intentTracing: cfgToolsIntentTracing.get(settings),
+			intentDescription: spotlightExperiment ? SPOTLIGHT_INTENT_DESCRIPTION : undefined,
 			pruneToolDescriptions: resolveInlineToolDescriptors(),
 			// Per request against the model actually requested, so `tools.format`
 			// changes and model switches reach the next provider call.
@@ -5042,7 +5082,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const advisorContextPrompt = formatAdvisorContextPrompt(contextFiles);
 		// Owned only when this session created the manager; subagents receive a
 		// parent's manager via `options.mcpManager` and MUST NOT disconnect it.
-		const ownedMcpManager = options.mcpManager ? undefined : mcpManager;
 		// Advisor spend recorded before this resume is restored off the critical
 		// path below (issue #9553): a large advisor transcript would otherwise
 		// block createAgentSession for tens of seconds while the whole file is
@@ -5257,6 +5296,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// runs after the session is live, so `--resume` no longer scales with the
 		// advisor transcript size (issue #9553).
 		session.beginInitialAdvisorCostRestore();
+		// Lines already seen follow the live context on their own (`getContextMessages`); a new session file starts over.
+		if (spotlightExperiment) session.registerSessionChangeCallback(() => spotlightExperiment.onSessionChange());
 		// Extension factories normally register tools before session construction,
 		// but Pi-compatible extensions may discover them asynchronously from a
 		// session_start handler. Install those late registrations into the live
@@ -5716,6 +5757,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					// No fallback resolver: only `learn`/`manage_skill` execute here (the rest are refused
 					// copies), and the primary's resolver could reach main-session MCP tools.
 					intentTracing: agent.intentTracing,
+					intentDescription: agent.intentDescription,
 					pruneToolDescriptions: agent.pruneToolDescriptions,
 					dialect: resolveDialect(cfgToolsFormat.get(settings), captureModel),
 					abortOnFabricatedToolResult: cfgToolsAbortOnFabricatedResult.get(settings),
@@ -5766,8 +5808,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		//     an MCP manager (fresh OR reused) needs its own bridge to its own
 		//     `extensionRunner` so extensions loaded in that session receive frames.
 		//     Guarded only by `mcpManager` (see the second `if` below).
-		if (mcpManager && !options.mcpManager) {
-			mcpManager.setOnToolsChanged(async tools => {
+		if (ownedMcpManager) {
+			const ownedManager = ownedMcpManager;
+			ownedMcpManager.setOnToolsChanged(async tools => {
 				try {
 					await session.refreshMCPTools(tools);
 				} catch (error) {
@@ -5777,8 +5820,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				}
 			});
 			// Wire prompt refresh → rebuild MCP prompt slash commands
-			mcpManager.setOnPromptsChanged(serverName => {
-				const promptCommands = buildMCPPromptCommands(mcpManager);
+			ownedMcpManager.setOnPromptsChanged(serverName => {
+				const promptCommands = buildMCPPromptCommands(ownedManager);
 				session.setMCPPromptCommands(promptCommands);
 				logger.debug("MCP prompt commands refreshed", { path: `mcp:${serverName}` });
 			});
@@ -5794,7 +5837,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				clearDebounceTimers();
 				unregisterDebounceCleanup();
 			});
-			mcpManager.setOnResourcesChanged((serverName, uri) => {
+			ownedMcpManager.setOnResourcesChanged((serverName, uri) => {
 				logger.debug("MCP resources changed", { path: `mcp:${serverName}`, uri });
 				if (!cfgMcpNotifications.get(settings)) return;
 				const debounceMs = cfgMcpNotificationDebounceMs.get(settings);
@@ -5812,7 +5855,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				);
 			});
 			// Live resource subscribe/unsubscribe as `mcp.notifications` flips.
-			cfgMcpNotifications.listen(session, enabled => mcpManager.setNotificationsEnabled(enabled));
+			cfgMcpNotifications.listen(session, enabled => ownedManager.setNotificationsEnabled(enabled));
 		}
 
 		if (mcpManager) {
@@ -5838,10 +5881,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			);
 		}
 
-		if (mcpManager && !options.mcpManager) {
+		if (ownedMcpManager) {
 			// The owning session keeps project `.mcp.json` servers in step with
 			// `mcp.enableProjectConfig` without a `/mcp reload`.
-			const ownedMCPManager = mcpManager;
+			const ownedMCPManager = ownedMcpManager;
 			const owningSession = session;
 			cfgMcpEnableProjectConfig.listen(owningSession, async enabled => {
 				if (owningSession.isDisposed) return;
@@ -5897,7 +5940,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			session,
 			extensionsResult,
 			setToolUIContext,
-			mcpManager,
+			mcpManager: ownedMcpManager ?? (mcpManager instanceof MCPManager ? mcpManager : undefined),
 			modelFallbackMessage,
 			lspServers,
 			startBackgroundModelDiscovery: startRuntimeDiscovery,

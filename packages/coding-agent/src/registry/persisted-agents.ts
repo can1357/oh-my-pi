@@ -14,7 +14,7 @@ import {
 	type AgentHistorySummary,
 	type AgentMetricsSummary,
 	type AgentRef,
-	type AgentRegistry,
+	type AgentRegistryApi,
 	MAIN_AGENT_ID,
 } from "./agent-registry";
 import { getAgentTombstonePath } from "./agent-tombstone";
@@ -491,7 +491,7 @@ interface PersistedRosterLatch {
 	owned: Map<string, string>;
 }
 
-interface RegistryWithPersistedRosterLatches extends AgentRegistry {
+interface RegistryWithPersistedRosterLatches extends AgentRegistryApi {
 	[kPersistedRosterLatches]?: Map<string, PersistedRosterLatch>;
 	[kPersistedRosterScanTail]?: Promise<void>;
 }
@@ -503,7 +503,7 @@ interface RegistryWithPersistedRosterLatches extends AgentRegistry {
  * invalidates the latch, forcing a re-scan that restores this root's own
  * transcripts. Refs the scan did not restore are not this root's to police.
  */
-function latchOwnershipValid(registry: AgentRegistry, owned: Map<string, string>): boolean {
+function latchOwnershipValid(registry: AgentRegistryApi, owned: Map<string, string>): boolean {
 	for (const [id, sessionFile] of owned) {
 		const ref = registry.get(id);
 		if (!ref || ref.sessionFile !== sessionFile) return false;
@@ -511,7 +511,7 @@ function latchOwnershipValid(registry: AgentRegistry, owned: Map<string, string>
 	return true;
 }
 
-async function resolveRootSessionFile(registry: AgentRegistry, hint?: string | null): Promise<string | undefined> {
+async function resolveRootSessionFile(registry: AgentRegistryApi, hint?: string | null): Promise<string | undefined> {
 	const mainFile = registry.get(MAIN_AGENT_ID)?.sessionFile;
 	const candidate =
 		typeof hint === "string" && hint.endsWith(".jsonl")
@@ -569,7 +569,7 @@ export function isCurrentSessionRosterRef(
  * roster counts, never task startup, and remains retryable.
  */
 export async function ensurePersistedRoster(
-	registry: AgentRegistry,
+	registry: AgentRegistryApi,
 	sessionFileHint?: string | null,
 ): Promise<string | undefined> {
 	let root: string | undefined;
@@ -664,7 +664,7 @@ export async function ensurePersistedRoster(
 
 /** Register persisted subagent and advisor transcripts as parked registry refs. */
 export async function registerPersistedSubagents(
-	registry: AgentRegistry,
+	registry: AgentRegistryApi,
 	sessionFile: string | null | undefined,
 	options: {
 		shouldContinue?: () => boolean;
@@ -720,7 +720,7 @@ export async function registerPersistedSubagents(
 }
 
 async function registerPersistedSubagentsFromDir(
-	registry: AgentRegistry,
+	registry: AgentRegistryApi,
 	dir: string,
 	parentId: string | undefined,
 	vibeOwned: () => Promise<ReadonlySet<string>>,

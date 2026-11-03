@@ -118,8 +118,7 @@ import { frameDataBytesBudget, readerIncludesThinking } from "@oh-my-pi/snapcomp
 import type { AdvisorConfig } from "@oh-my-pi/pi-tui/overlays/advisor-config";
 import { formatUsageResetWindow } from "@oh-my-pi/pi-tui/overlays/usage-display";
 import { loadAdvisorTranscriptCosts } from "../advisor";
-import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, type AsyncJob, AsyncJobManager } from "../async";
-import type { JobWidgetRegistry } from "../job-widgets/types";
+import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, type AsyncJob, AsyncJobManager, type AsyncJobManagerApi } from "../async";
 import { classifyAutoPrewalk } from "../auto-prewalk/classifier";
 import { reset as resetCapabilities } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
@@ -239,6 +238,7 @@ import {
 import { isAttachmentOnlyTitleInput, isLowSignalTitleInput } from "../tiny/text";
 import type { ImageAttachmentEntry, ToolSession } from "../tools";
 import { resolveApproval } from "../tools/approval";
+import { type ApprovalGrantStore, getApprovalGrants } from "../tools/approval-cache";
 import { type AskToolDetails } from "@oh-my-pi/pi-tui/tools/ask";
 import { type AskToolInput, recoverAskQuestions } from "../tools/ask";
 import {
@@ -269,10 +269,14 @@ import { PROPOSE_DEVICE_NAME } from "@oh-my-pi/pi-tui/tools/resolve";
 import { supportsExternalThinking } from "../tools/think";
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { currentThreadId, isMainThread } from "../thread/identity";
+import { registerLocalSession } from "../thread/session-directory";
+import { prewarmSubagentWorker } from "../thread/subagent-worker";
+import { SubagentSpawnSignal } from "../thread/subagent-spawn-signal";
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
 import type { AgentDefinition } from "../task/types";
 import type { ModelMention } from "@oh-my-pi/pi-tui/prompt/model-mention-syntax";
-import { ModelMentionRegistry } from "./model-mentions";
+import { ModelMentionRegistry, type ResolvedModelMention } from "./model-mentions";
 import { parseCommandArgs } from "../utils/command-args";
 import type { EditMode } from "@oh-my-pi/pi-tui/tools/edit";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
@@ -291,12 +295,20 @@ import { generateSessionTitle, nerdGlyphsActive } from "../utils/title-generator
 import { buildNamedToolChoice, isToolChoiceActive } from "../utils/tool-choice";
 import type { VibeModeState } from "../vibe/state";
 import type { AgentSessionEvent, AgentSessionEventListener } from "./agent-session-events";
+import { type AgentViewSession, isLocalAgentSession } from "./agent-session-handle";
+import {
+	asyncJobSnapshot,
+	asyncJobTree,
+	cancelOwnedAsyncJob,
+	inspectAsyncJob,
+	requestJobTreeCaptions,
+	runningJobWidgets,
+} from "./async-job-views";
 import type {
 	AgentSessionConfig,
 	AgentSessionDisposeOptions,
 	AsyncJobInspection,
 	AsyncJobSnapshot,
-	AsyncJobSnapshotItem,
 	AsyncJobTree,
 	CommandMetadataChangedListener,
 	ContextUsageBreakdown,
@@ -367,7 +379,7 @@ import {
 	shouldEvaluateCodexAutoRedeem,
 	shouldPromptCodexAutoRedeem,
 } from "./codex-auto-reset";
-import { COST_GATE_NOTICE_SOURCE, type CostCapRefusal, CostGate } from "./cost-gate";
+import { COST_GATE_NOTICE_SOURCE, type CostCapRefusal, CostGate, type CostGateApi } from "./cost-gate";
 import { recordCredentialPin, seedCredentialPins } from "./credential-pin";
 import { isDateCwdReminderControl } from "./date-cwd-reminder";
 import { EvalRunner, type EvalRunnerHost } from "./eval-runner";
@@ -492,7 +504,7 @@ import { buildSessionMetadata } from "./session-metadata";
 import { SessionProviderBoundary, type SessionProviderBoundaryHost } from "./session-provider-boundary";
 import { SessionStatsTracker, type SessionStatsTrackerHost } from "./session-stats";
 import { promptDigestOfEntry, SessionTools, type SessionToolsHost } from "./session-tools";
-import { resolveOpenAIWebsocketPreference } from "./settings-stream-fn";
+import { resolveWebsocketPreference } from "./settings-stream-fn";
 import type { ShakeMode, ShakeResult } from "./shake-types";
 import { ToolChoiceQueue } from "./tool-choice-queue";
 import { planTurnPersistence, sameMessageContent, sessionMessagePersistenceKey } from "./turn-persistence";
@@ -510,23 +522,6 @@ const DEFERRED_TITLE_MIN_WORDS = 40;
 const TITLE_FORK_TIMEOUT_MS = 15_000;
 /** Cap on the judgment that decides whether a `title.refreshAfterPrompts` check regenerates the title. */
 const TITLE_DRIFT_JUDGE_TIMEOUT_MS = 15_000;
-
-/** The public summary of `job` (see {@link AsyncJobSnapshotItem}); its caption shows only while widgets are on. */
-function jobSnapshotItem(job: AsyncJob, widgets: JobWidgetRegistry | undefined): AsyncJobSnapshotItem {
-	return {
-		id: job.id,
-		type: job.type,
-		status: job.status,
-		label: job.label,
-		intent: job.intent,
-		caption: widgets?.caption(job),
-		command: job.process?.command,
-		startTime: job.startTime,
-		endTime: job.endTime,
-		agentId: job.agentId,
-		ownerId: job.ownerId,
-	};
-}
 
 import { LoopGuards, type StreamGuardsHost, StreamingEditGuard } from "./stream-guards";
 import { EAGER_TODO_PRELUDE_MESSAGE_TYPE, TodoTracker, type TodoTrackerHost } from "./todo-tracker";
@@ -560,7 +555,7 @@ import {
 	cfgProvidersAnthropicSlowMode,
 	type ResetAutoRedeemMode,
 } from "./settings";
-import { type AnthropicSlowModeController, anthropicSlowModeLanes, formatUsageLimitLabel } from "./anthropic-slow-mode";
+import { type AnthropicSlowModeLane, anthropicSlowModeLanes, formatUsageLimitLabel } from "./anthropic-slow-mode";
 import type { UsageLimitState } from "./usage-limit";
 import { cfgInterruptMode } from "../modes/settings";
 import { cfgFollowUpMode } from "../modes/settings";
@@ -972,7 +967,9 @@ function captureLiveDumpState(ref: AgentRef): SessionDumpLiveState | undefined {
 	if (!session) return undefined;
 	const state = session.agent.state;
 	let streamMessage = state.streamMessage;
-	const obfuscator = session.obfuscator;
+	// The secret obfuscator lives with the session; a session homed on another
+	// thread dumps its stream message as the provider saw it (placeholders).
+	const obfuscator = isLocalAgentSession(session) ? session.obfuscator : undefined;
 	if (streamMessage?.role === "assistant" && obfuscator?.hasSecrets()) {
 		streamMessage = { ...streamMessage, content: deobfuscateAssistantContent(obfuscator, streamMessage.content) };
 	}
@@ -1037,13 +1034,19 @@ function todoRetryMatches(failed: Record<string, unknown>, retry: Record<string,
 	return true;
 }
 
-export class AgentSession implements SettingsScope {
+export class AgentSession implements SettingsScope, AgentViewSession {
+	/**
+	 * Cross-thread identity token (`${homeThreadId}:${snowflake}`), unique per
+	 * session object across threads. Thread bridges encode a session by this key
+	 * and decode it back to the local object on its home thread.
+	 */
+	readonly instanceKey: string = `${currentThreadId()}:${Snowflake.next()}`;
 	readonly agent: Agent;
 	readonly sessionManager: SessionManager;
 	readonly settings: Settings;
 	/** Session-start policy, independent of the selected project memory backend. */
 	readonly memoryEnabled: boolean;
-	#costGate: CostGate;
+	#costGate: CostGateApi;
 	/** False for a subagent, whose gate belongs to its session tree's root. */
 	readonly #ownsCostGate: boolean;
 	#costCapRefusal: CostCapRefusal | undefined;
@@ -1145,6 +1148,11 @@ export class AgentSession implements SettingsScope {
 	/** Messages queued to be included with the next user prompt as context ("asides"). */
 	#pendingNextTurnMessages: CustomMessage[] = [];
 	#scheduledHiddenNextTurnGeneration: number | undefined = undefined;
+	/** Queued messages a session path took out of the agent queues to put back later (follow-ups
+	 *  parked behind an IRC wake turn, a session switch's rollback snapshot), in queue order. */
+	readonly #heldQueuedMessages = new Set<AgentMessage>();
+	/** Held messages the editor took back meanwhile; their holder does not put them back. */
+	readonly #withdrawnHeldMessages = new WeakSet<AgentMessage>();
 	/** Queued extension/agent messages that an editor-restoring interrupt withdrew
 	 *  (`clearQueue({ forInterrupt: true })`). The abort that follows takes them out of the
 	 *  queues and records them in the transcript without starting a turn. */
@@ -1227,7 +1235,7 @@ export class AgentSession implements SettingsScope {
 	/** Manager owned by this top-level session; subagents borrow but never dispose it. */
 	readonly #ownedAsyncJobManager: AsyncJobManager | undefined;
 	/** Manager of this session's root, used for its own job queries and deliveries. */
-	readonly #asyncJobManager: AsyncJobManager | undefined;
+	readonly #asyncJobManager: AsyncJobManagerApi | undefined;
 	/** Clears this session's owner delivery sink registration; set when a manager + agent id exist. */
 	#unregisterAsyncDeliverySink: (() => void) | undefined;
 	/**
@@ -1246,6 +1254,8 @@ export class AgentSession implements SettingsScope {
 	#ircWakeHolds = 0;
 	/** IRC wakes waiting out a context replacement (see {@link #wakeForIrc}). */
 	#ircWakesAwaitingCompaction = 0;
+	/** {@link subscribeIrcWakeHolds} listeners. */
+	readonly #ircWakeHoldListeners = new Set<() => void>();
 	/** Set while an `awaitingAssignment` session has not started its first prompt; see {@link #wakeForIrc}. */
 	#ircAwaitingAssignment = false;
 	/** The observation whose monitor is attached; at most one at a time. */
@@ -1295,6 +1305,8 @@ export class AgentSession implements SettingsScope {
 
 	// Model registry for API key resolution
 	#modelRegistry: ModelRegistry;
+	/** Main thread only: spots streaming spawning tool calls so a subagent worker boots ahead of dispatch. */
+	readonly #spawnSignal = isMainThread() ? new SubagentSpawnSignal() : undefined;
 	/** Creation-time permission for switchSession to keep the current model when a target's saved model is unrestorable. */
 	readonly #allowSessionModelFallback: boolean;
 	readonly #disableModelFallback: boolean;
@@ -1734,6 +1746,7 @@ export class AgentSession implements SettingsScope {
 			const promptGeneration = this.#promptGeneration;
 			const sessionGeneration = this.#sessionGeneration;
 			this.#ircWakesAwaitingCompaction++;
+			this.#notifyIrcWakeHolds();
 			void contextReplacement
 				.then(async () => {
 					// A transition (/new, /clear, a switch) aborts long before it replaces the transcript, so
@@ -1768,6 +1781,7 @@ export class AgentSession implements SettingsScope {
 				.catch(error => logger.warn("IRC wake after compaction failed", { error: String(error) }))
 				.finally(() => {
 					this.#ircWakesAwaitingCompaction--;
+					this.#notifyIrcWakeHolds();
 				});
 			return;
 		}
@@ -1792,6 +1806,7 @@ export class AgentSession implements SettingsScope {
 				: [];
 		const parkedQueueDrainBlocked = parkedFollowUps.length > 0 && this.#queuedMessageDrainBlocked;
 		if (parkedFollowUps.length > 0) {
+			this.#holdQueuedMessages(parkedFollowUps);
 			this.agent.replaceQueues([...this.agent.peekSteeringQueue()], []);
 			if (parkedQueueDrainBlocked) this.#queuedMessageDrainBlocked = false;
 		}
@@ -1864,7 +1879,7 @@ export class AgentSession implements SettingsScope {
 				if (parkedFollowUps.length > 0) {
 					this.agent.replaceQueues(
 						[...this.agent.peekSteeringQueue()],
-						[...parkedFollowUps, ...this.agent.peekFollowUpQueue()],
+						[...this.#releaseHeldQueuedMessages(parkedFollowUps), ...this.agent.peekFollowUpQueue()],
 					);
 					this.#queuedMessageDrainBlocked ||= parkedQueueDrainBlocked;
 				}
@@ -2787,7 +2802,7 @@ export class AgentSession implements SettingsScope {
 			yieldQueue: this.yieldQueue,
 			obfuscator: () => this.#obfuscator,
 			providerSessionState: this.#providerSessionState,
-			preferWebsockets: () => this.preferWebsockets,
+			preferWebsockets: model => resolveWebsocketPreference(this.settings, model),
 			onPayload: this.#onPayload,
 			onResponse: this.#onResponse,
 			onSseEvent: this.#onSseEvent,
@@ -2854,7 +2869,7 @@ export class AgentSession implements SettingsScope {
 			extensionRunner: this.#extensionRunner,
 			sideStreamFn: this.#sideStreamFn,
 			providerSessionState: this.#providerSessionState,
-			preferWebsockets: () => this.preferWebsockets,
+			preferWebsockets: model => resolveWebsocketPreference(this.settings, model),
 			model: () => this.model,
 			thinkingLevel: () => this.thinkingLevel,
 			isDisposed: () => this.#isDisposed,
@@ -3070,6 +3085,8 @@ export class AgentSession implements SettingsScope {
 		this.#watchWorkspaceAndPowerSettings();
 		this.#watchSessionSettings();
 		this.#watchModelAvailabilitySettings();
+		// Last: makes the session addressable by its instance key (and, on a worker, published to main).
+		registerLocalSession(this);
 	}
 
 	/** Registers teardown to run when this session is disposed (e.g. handle listeners bound to it). */
@@ -3270,7 +3287,7 @@ export class AgentSession implements SettingsScope {
 		return this.#modelRegistry;
 	}
 
-	get asyncJobManager(): AsyncJobManager | undefined {
+	get asyncJobManager(): AsyncJobManagerApi | undefined {
 		return this.#asyncJobManager;
 	}
 
@@ -3410,13 +3427,18 @@ export class AgentSession implements SettingsScope {
 		return this.#providerSessionState;
 	}
 
-	/** Hint forwarded to provider calls that support websocket transport; read live from `providers.openaiWebsockets`. */
+	/** Request preference from the live setting for the current model's API. */
 	get preferWebsockets(): boolean | undefined {
-		return resolveOpenAIWebsocketPreference(this.settings);
+		return resolveWebsocketPreference(this.settings, this.model);
 	}
 
 	getHindsightSessionState(): HindsightSessionState | undefined {
 		return this.#hindsightSessionState;
+	}
+
+	/** Whether the hindsight memory backend is active for this session. */
+	get hindsightActive(): boolean {
+		return this.#hindsightSessionState !== undefined;
 	}
 
 	setHindsightSessionState(state: HindsightSessionState | undefined): HindsightSessionState | undefined {
@@ -3471,14 +3493,7 @@ export class AgentSession implements SettingsScope {
 
 	getAsyncJobSnapshot(options?: { recentLimit?: number }): AsyncJobSnapshot | null {
 		const manager = this.#asyncJobManager;
-		if (!manager) return null;
-		const ownerFilter = this.#agentId ? { ownerId: this.#agentId } : undefined;
-		const running = manager.getRunningJobs(ownerFilter).map(job => jobSnapshotItem(job, manager.widgets));
-		const recent = manager
-			.getRecentJobs(options?.recentLimit ?? 5, ownerFilter)
-			.map(job => jobSnapshotItem(job, manager.widgets));
-		const delivery = manager.getDeliveryState(ownerFilter);
-		return { running, recent, delivery };
+		return manager ? asyncJobSnapshot(manager, this.#agentId, options) : null;
 	}
 
 	/**
@@ -3488,14 +3503,7 @@ export class AgentSession implements SettingsScope {
 	 */
 	getRunningJobWidgets(): JobWidgetEntry[] {
 		const manager = this.#asyncJobManager;
-		const widgets = manager?.widgets;
-		if (!manager || !widgets) return [];
-		const entries: JobWidgetEntry[] = [];
-		for (const job of manager.getRunningJobs(this.#agentId ? { ownerId: this.#agentId } : undefined)) {
-			const view = widgets.view(job);
-			if (view) entries.push({ id: job.id, type: job.type, view });
-		}
-		return entries;
+		return manager ? runningJobWidgets(manager, this.#agentId) : [];
 	}
 
 	/**
@@ -3507,26 +3515,7 @@ export class AgentSession implements SettingsScope {
 	 */
 	getAsyncJobTree(options?: { recentLimit?: number }): AsyncJobTree | null {
 		const manager = this.#asyncJobManager;
-		if (!manager) return null;
-		const rootId = this.#agentId;
-		const parents = this.#jobTreeParents();
-		const running = manager.getRunningJobs().filter(job => this.#inJobTree(job, parents));
-		const recent = manager
-			.getRecentJobs(Number.POSITIVE_INFINITY)
-			.filter(job => this.#inJobTree(job, parents))
-			.slice(0, options?.recentLimit ?? 10);
-		const agents = new Map<string, { id: string; parentId?: string }>();
-		for (const job of [...running, ...recent]) {
-			for (let id = job.ownerId; id !== undefined && id !== rootId && !agents.has(id); id = parents.get(id)) {
-				agents.set(id, { id, parentId: parents.get(id) });
-			}
-		}
-		return {
-			running: running.map(job => jobSnapshotItem(job, manager.widgets)),
-			recent: recent.map(job => jobSnapshotItem(job, manager.widgets)),
-			rootId,
-			agents: [...agents.values()],
-		};
+		return manager ? asyncJobTree(manager, this.#agentId, options) : null;
 	}
 
 	/**
@@ -3535,12 +3524,7 @@ export class AgentSession implements SettingsScope {
 	 */
 	requestJobCaptions(): void {
 		const manager = this.#asyncJobManager;
-		const widgets = manager?.widgets;
-		if (!manager || !widgets) return;
-		const parents = this.#jobTreeParents();
-		for (const job of manager.getRunningJobs()) {
-			if (this.#inJobTree(job, parents)) widgets.requestCaption(job);
-		}
+		if (manager) requestJobTreeCaptions(manager, this.#agentId);
 	}
 
 	/**
@@ -3549,63 +3533,14 @@ export class AgentSession implements SettingsScope {
 	 * unknown, owned outside the tree, or evicted.
 	 */
 	inspectAsyncJob(id: string): AsyncJobInspection | undefined {
-		const job = this.#asyncJobManager?.getJob(id);
-		if (!job || job.foreground || !this.#inJobTree(job, this.#jobTreeParents())) return undefined;
-		const details = job.latestDetails;
-		const reported = typeof details?.exitCode === "number" ? details.exitCode : undefined;
-		// Bash reports only non-zero exits; a completed command exited 0.
-		const exitCode = reported ?? (job.type === "bash" && job.status === "completed" ? 0 : undefined);
-		const output =
-			job.status === "running" ? job.progressText : (job.resultText ?? job.errorText ?? job.progressText);
-		return {
-			command: job.process?.command,
-			cwd: job.process?.cwd,
-			pids: job.status === "running" ? (job.process?.pids() ?? []) : [],
-			exitCode,
-			output,
-			artifactId: details?.meta?.truncation?.artifactId,
-			widget: this.#asyncJobManager?.widgets?.view(job),
-		};
+		const manager = this.#asyncJobManager;
+		return manager ? inspectAsyncJob(manager, this.#agentId, id) : undefined;
 	}
 
 	/** Cancel a running async job this session owns; false when there is none by that id. */
 	cancelAsyncJob(id: string): boolean {
-		const job = this.#ownedAsyncJob(id);
-		return job !== undefined && this.#asyncJobManager?.cancel(id, { ownerId: job.ownerId }) === true;
-	}
-
-	/** Each agent's parent: the registry's link, else the owner of the task job that runs it. */
-	#jobTreeParents(): Map<string, string> {
-		const parents = new Map<string, string>();
 		const manager = this.#asyncJobManager;
-		if (manager) {
-			for (const job of [...manager.getRunningJobs(), ...manager.getRecentJobs(Number.POSITIVE_INFINITY)]) {
-				if (job.agentId !== undefined && job.ownerId !== undefined) parents.set(job.agentId, job.ownerId);
-			}
-		}
-		for (const ref of AgentRegistry.global().list()) {
-			if (ref.parentId !== undefined) parents.set(ref.id, ref.parentId);
-		}
-		return parents;
-	}
-
-	/** Whether `job`'s owner is this agent or descends from it; every job when this session has no agent id. */
-	#inJobTree(job: AsyncJob, parents: ReadonlyMap<string, string>): boolean {
-		const rootId = this.#agentId;
-		if (!rootId) return true;
-		const seen = new Set<string>();
-		for (let id = job.ownerId; id !== undefined && !seen.has(id); id = parents.get(id)) {
-			if (id === rootId) return true;
-			seen.add(id);
-		}
-		return false;
-	}
-
-	/** A listed job by id, under the same owner scope as {@link getAsyncJobSnapshot}. */
-	#ownedAsyncJob(id: string): AsyncJob | undefined {
-		const job = this.#asyncJobManager?.getJob(id);
-		if (!job || job.foreground) return undefined;
-		return !this.#agentId || job.ownerId === this.#agentId ? job : undefined;
+		return manager !== undefined && cancelOwnedAsyncJob(manager, this.#agentId, id);
 	}
 
 	/**
@@ -3684,7 +3619,7 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/** The session tree's cost gate; a root session's is replaced on `/new` and on a switch to another saved session. */
-	get costGate(): CostGate {
+	get costGate(): CostGateApi {
 		return this.#costGate;
 	}
 
@@ -3773,7 +3708,12 @@ export class AgentSession implements SettingsScope {
 	 * follow-up, and settle only after the yield queue injects or discards it.
 	 * This keeps the job body recoverable through `proc://` while injection is pending.
 	 */
-	async #deliverAsyncJobResult(manager: AsyncJobManager, jobId: string, text: string, job?: AsyncJob): Promise<void> {
+	async #deliverAsyncJobResult(
+		manager: AsyncJobManagerApi,
+		jobId: string,
+		text: string,
+		job?: AsyncJob,
+	): Promise<void> {
 		if (this.#isDisposed) return;
 		if (manager.isDeliverySuppressed(jobId)) return;
 		// Snapshot the generation before the async format step: a `/new` during it
@@ -4075,6 +4015,11 @@ export class AgentSession implements SettingsScope {
 	 * by earlier runs (interrupted, host restarted) must not be revived as active.
 	 */
 	#runToolCallIds = new Set<string>();
+
+	/** Tool calls emitted by assistant turns of the current agent run (see `buildTranscriptSessionContext`). */
+	get runToolCallIds(): ReadonlySet<string> {
+		return this.#runToolCallIds;
+	}
 	/**
 	 * Terminal failure whose turn was pruned from history at settle: a classifier
 	 * refusal (#3591) or an abandoned length-stop recovery. Retained until the next
@@ -4666,6 +4611,10 @@ export class AgentSession implements SettingsScope {
 				if (deferred.words >= DEFERRED_TITLE_MIN_WORDS) this.#advanceDeferredTitle("replied");
 			}
 		}
+		// Spawning tool calls are streaming: boot a subagent worker they will need while their arguments stream.
+		const expectedSpawns =
+			event.type === "message_update" ? this.#spawnSignal?.observe(event.assistantMessageEvent) : undefined;
+		if (expectedSpawns) prewarmSubagentWorker(this.settings, this.#modelRegistry, expectedSpawns);
 		// Title the session once the reply to the operator's latest message starts
 		// a non-thinking block, synchronously: a title fork snapshots the streaming
 		// reply before its first await.
@@ -6808,6 +6757,7 @@ export class AgentSession implements SettingsScope {
 		for (const dispose of this.#disposers.splice(0)) dispose();
 		this.#eventListeners = [];
 		this.#runStateListeners.clear();
+		this.#ircWakeHoldListeners.clear();
 		this.#sessionChangeCallbacks.clear();
 
 		// A dispose triggered mid-turn (Ctrl-C / timeout / hard-killed subagent)
@@ -9010,11 +8960,27 @@ export class AgentSession implements SettingsScope {
 		const promptText = text.join("\n\n");
 		const preparationImages = images.length > 0 ? images : undefined;
 		// Steering amends the running task; only a follow-up starts a new one worth routing.
-		if (queue === "followUp" && userMessages.some(message => this.#isAutoPrewalkTask(message))) {
-			return this.#prepareQueuedAutoPrewalkTask(first, promptText, preparationImages, signal);
-		}
-		return this.#prepareAgentStart(first, promptText, preparationImages, this.#promptGeneration, signal, "queued");
+		const preparation =
+			queue === "followUp" && userMessages.some(message => this.#isAutoPrewalkTask(message))
+				? this.#prepareQueuedAutoPrewalkTask(first, promptText, preparationImages, signal)
+				: this.#prepareAgentStart(first, promptText, preparationImages, this.#promptGeneration, signal, "queued");
+		return this.#relaxOnDelivery(preparation, promptText);
 	};
+
+	/** Apply `chillax` when the batch is delivered, so a steer relaxes the running turn from its next request. */
+	async #relaxOnDelivery(
+		pending: Promise<QueuedMessagePreparation>,
+		promptText: string,
+	): Promise<QueuedMessagePreparation> {
+		const preparation = await pending;
+		return {
+			commit: () => {
+				const additional = preparation.commit();
+				if (additional !== undefined) this.#models.applyChillax(promptText);
+				return additional;
+			},
+		};
+	}
 
 	/**
 	 * A queued follow-up starts a new task: leave the previous task's auto handoff, judge this one alongside its
@@ -9327,7 +9293,9 @@ export class AgentSession implements SettingsScope {
 			// non-auto sessions are skipped. Never blocks the turn — failures fall
 			// back to a concrete level inside the helper.
 			const isUserTurn = message.role === "user" || (message.role === "custom" && isUserInvokedSkillPrompt(message));
-			if (this.isAutoThinking && isUserTurn) {
+			// `chillax` settles the turn's effort itself, so classification is skipped.
+			const relaxed = isUserTurn && this.#models.applyChillax(expandedText);
+			if (this.isAutoThinking && isUserTurn && !relaxed) {
 				await this.#models.applyAutoThinkingLevel(expandedText, generation, options?.solutionSpace);
 				if (this.#promptGeneration !== generation) {
 					return false;
@@ -10991,6 +10959,51 @@ export class AgentSession implements SettingsScope {
 		return undefined;
 	}
 
+	/** Queued messages currently held out of the agent queues to be put back later, in queue order. */
+	get heldQueuedMessages(): ReadonlySet<AgentMessage> {
+		return this.#heldQueuedMessages;
+	}
+
+	/**
+	 * Remove one queued user-authored message, by identity, together with its hidden companions
+	 * from whichever queue holds it, or keep its holder from putting it back (the editor took it
+	 * back); false when it is neither queued nor held, so it can never be delivered again.
+	 */
+	withdrawQueuedMessage(message: AgentMessage): boolean {
+		let queue: "steering" | "followUp" = "steering";
+		let pending = this.agent.peekSteeringQueue();
+		let index = pending.indexOf(message);
+		if (index < 0) {
+			queue = "followUp";
+			pending = this.agent.peekFollowUpQueue();
+			index = pending.indexOf(message);
+		}
+		if (index >= 0) {
+			this.agent.replaceQueue(queue, this.#withoutQueuedUserMessage(pending, index));
+			this.#reconcileQueuedMessageDrain();
+			return true;
+		}
+		if (!this.#heldQueuedMessages.has(message)) return false;
+		const held = [...this.#heldQueuedMessages];
+		const heldIndex = held.indexOf(message);
+		for (let i = this.#queuedUserGroupStart(held, heldIndex); i <= heldIndex; i++) {
+			this.#heldQueuedMessages.delete(held[i]);
+			this.#withdrawnHeldMessages.add(held[i]);
+		}
+		return true;
+	}
+
+	/** Hold `messages`, just taken out of the agent queues, until {@link #releaseHeldQueuedMessages}. */
+	#holdQueuedMessages(messages: readonly AgentMessage[]): void {
+		for (const message of messages) this.#heldQueuedMessages.add(message);
+	}
+
+	/** End the hold on `messages`; returns those the editor did not take back meanwhile. */
+	#releaseHeldQueuedMessages(messages: readonly AgentMessage[]): AgentMessage[] {
+		for (const message of messages) this.#heldQueuedMessages.delete(message);
+		return messages.filter(message => !this.#withdrawnHeldMessages.has(message));
+	}
+
 	get skillsSettings(): SkillsSettings | undefined {
 		return this.#tools.skillsSettings;
 	}
@@ -11053,9 +11066,9 @@ export class AgentSession implements SettingsScope {
 		return this.#modelMentions.mentions;
 	}
 
-	/** Resolve a model selector within the session picker's scope. */
-	findMentionableModel(selector: string): Model | undefined {
-		return this.#modelMentions.findMentionable(selector);
+	/** Resolve a `provider/id[:level]` mention within the session picker's scope. */
+	resolveModelMention(selector: string): ResolvedModelMention | undefined {
+		return this.#modelMentions.resolve(selector);
 	}
 
 	getTodoPhases(): TodoPhase[] {
@@ -12140,7 +12153,7 @@ export class AgentSession implements SettingsScope {
 	 * Slow-mode lane of the Claude account this session last used, or
 	 * undefined before its first Anthropic subscription request.
 	 */
-	getAnthropicSlowModeLane(): AnthropicSlowModeController | undefined {
+	getAnthropicSlowModeLane(): AnthropicSlowModeLane | undefined {
 		const lane = this.#anthropicSlowModeLane;
 		return lane === undefined ? undefined : anthropicSlowModeLanes.lane(lane);
 	}
@@ -13040,6 +13053,11 @@ export class AgentSession implements SettingsScope {
 		return this.#irc.hasQueuedFrom(from);
 	}
 
+	/** Senders with an IRC message still queued here for a turn of its own. */
+	queuedIrcSenders(): string[] {
+		return this.#irc.queuedSenders();
+	}
+
 	/** Registers an in-flight IRC wake-turn relay. */
 	trackIrcReply(pending: Promise<void>): void {
 		this.#irc.trackReply(pending);
@@ -13063,13 +13081,29 @@ export class AgentSession implements SettingsScope {
 	 */
 	holdIrcWakes(): () => void {
 		this.#ircWakeHolds++;
+		this.#notifyIrcWakeHolds();
 		let released = false;
 		return () => {
 			if (released) return;
 			released = true;
 			this.#ircWakeHolds--;
 			this.#resumeStrandedIrcAsides();
+			this.#notifyIrcWakeHolds();
 		};
+	}
+
+	/**
+	 * Observe changes of {@link ircWakesPending} that no session event carries: an IRC wake
+	 * hold taken or released, an idle compaction's waiting wakes settling. A worker-homed
+	 * session's publisher republishes on them, so main's lifecycle parks it once it may.
+	 */
+	subscribeIrcWakeHolds(listener: () => void): () => void {
+		this.#ircWakeHoldListeners.add(listener);
+		return () => this.#ircWakeHoldListeners.delete(listener);
+	}
+
+	#notifyIrcWakeHolds(): void {
+		for (const listener of this.#ircWakeHoldListeners) listener();
 	}
 
 	/**
@@ -13217,7 +13251,7 @@ export class AgentSession implements SettingsScope {
 				// conversation's, so the side request keeps its cached prefix.
 				parentSessionId: cacheSessionId,
 				promptCacheKey: this.getPromptCacheKeyForModel(model) ?? this.agent.sessionId,
-				preferWebsockets: this.preferWebsockets,
+				preferWebsockets: resolveWebsocketPreference(this.settings, model),
 				providerSessionState: this.#providerSessionState,
 				reasoning: toReasoningEffort(this.thinkingLevel),
 				minimizeEffort: args.minimizeEffort,
@@ -13525,6 +13559,7 @@ export class AgentSession implements SettingsScope {
 		const previousRewoundToolResultIds = new Set(this.#rewoundToolResultIds);
 
 		this.agent.clearAllQueues();
+		this.#holdQueuedMessages([...previousSteeringMessages, ...previousFollowUpMessages]);
 		// Same rationale as newSession: an aborted turn can skip its final aside poll,
 		// stranding IRC/extension asides meant for the outgoing transcript. Snapshot so a
 		// rolled-back switch (catch block below) restores them for the still-live session.
@@ -13751,6 +13786,7 @@ export class AgentSession implements SettingsScope {
 			// so the snapshotted old queues can no longer be restored.
 			this.#releaseTtsrReservations(previousSteeringMessages);
 			this.#releaseTtsrReservations(previousFollowUpMessages);
+			this.#releaseHeldQueuedMessages([...previousSteeringMessages, ...previousFollowUpMessages]);
 			if (previousSessionState.sessionId !== this.sessionManager.getSessionId()) {
 				this.#notifySessionChangeCallbacks();
 			}
@@ -13771,7 +13807,10 @@ export class AgentSession implements SettingsScope {
 			this.#memory.restorePromotionSnapshot(previousBaseSystemPromptBeforeMemoryPromotion);
 			this.agent.setSystemPrompt(previousSystemPrompt);
 			this.agent.replaceMessages(previousAgentMessages);
-			this.agent.replaceQueues(previousSteeringMessages, previousFollowUpMessages);
+			this.agent.replaceQueues(
+				this.#releaseHeldQueuedMessages(previousSteeringMessages),
+				this.#releaseHeldQueuedMessages(previousFollowUpMessages),
+			);
 			this.#irc.restorePending(previousIrcPending);
 			this.#sessionGeneration = previousSessionGeneration;
 			generationSettled.resolve();
@@ -15797,6 +15836,16 @@ export class AgentSession implements SettingsScope {
 	 */
 	get extensionRunner(): ExtensionRunner | undefined {
 		return this.#extensionRunner;
+	}
+
+	/** Whether the user approved approval scope `key` for the rest of this session (see {@link ExtensionRunner.hasSessionApproval}). */
+	hasSessionApproval(key: string): boolean {
+		return this.#extensionRunner?.hasSessionApproval(key) ?? false;
+	}
+
+	/** Remembered `always-ask-cached` grants this session's tool calls are checked against. */
+	getApprovalGrants(): ApprovalGrantStore {
+		return getApprovalGrants(this.settings.getAgentDir(), this.sessionManager.getSessionId());
 	}
 
 	/**
