@@ -739,7 +739,15 @@ describe("runSubprocess result acceptance", () => {
 				await finish?.(undefined);
 				const result = await waiting;
 				const job = result.details?.jobs?.[0];
-				expect(job?.status).toBe("failed");
+				expect(job?.status).toBe("completed");
+				expect(job?.resultText).toContain(`history://${AGENT_ID}`);
+				expect(job?.resultText).not.toContain("missing-yield");
+				if (alreadyMessaged) {
+					expect(job?.resultText).not.toContain("produced no output");
+					expect(job?.resultText).toContain(`${AGENT_ID} sent a message during this turn`);
+				} else {
+					expect(job?.resultText).toContain("produced no output");
+				}
 			} finally {
 				await manager.dispose({ timeoutMs: 1000 });
 			}
@@ -757,7 +765,7 @@ describe("runSubprocess result acceptance", () => {
 			session: harness.session,
 			status: "idle",
 		});
-		attachIrcWakeTurnMonitor(harness.session, { id: AGENT_ID, agent: baseAgent, structured: false });
+		attachIrcWakeTurnMonitor(harness.session, { id: AGENT_ID, agent: baseAgent });
 		const observer = harness.wakeObserver();
 		if (!observer) throw new Error("wake-turn observer was not registered");
 		const parent = {
@@ -789,7 +797,9 @@ describe("runSubprocess result acceptance", () => {
 			expect(result.details?.jobs?.[0]).toMatchObject({
 				id: AGENT_ID,
 				status: "completed",
-				resultText: "mask path fixed too",
+				resultText: expect.stringContaining(
+					"SYSTEM WARNING: Structured subagent replied without calling yield.\n\nmask path fixed too",
+				),
 			});
 			// The job carries the answer; a relay message would deliver it twice.
 			expect(IrcBus.global().take("Parent")).toBeUndefined();
@@ -845,7 +855,10 @@ describe("runSubprocess result acceptance", () => {
 			await manager.dispose({ timeoutMs: 1000 });
 		}
 	});
-	it("marks a parent-owned structured wake that replies without yield", async () => {
+	it.each([
+		["without an output schema", undefined],
+		["with an output schema", { type: "object", properties: { verdict: { type: "string" } }, required: ["verdict"] }],
+	] as const)("marks a parent-owned structured wake that replies without yield, %s", async (_label, outputSchema) => {
 		const manager = new AsyncJobManager({});
 		const harness = createHarness({ asyncJobManager: manager });
 		AgentRegistry.global().register({
@@ -856,7 +869,7 @@ describe("runSubprocess result acceptance", () => {
 			session: harness.session,
 			status: "idle",
 		});
-		attachIrcWakeTurnMonitor(harness.session, { id: AGENT_ID, agent: baseAgent, structured: true });
+		attachIrcWakeTurnMonitor(harness.session, { id: AGENT_ID, agent: baseAgent, structured: true, outputSchema });
 		const observer = harness.wakeObserver();
 		if (!observer) throw new Error("wake-turn observer was not registered");
 		const parent = {
@@ -884,16 +897,18 @@ describe("runSubprocess result acceptance", () => {
 			harness.emitAssistantText("Everything verified; writing the report now.");
 			await finish?.(undefined);
 
+			// A follow-up answer warns; it does not fail the wake, schema or not.
 			const job = (await waiting).details?.jobs?.[0];
 			expect(job?.status).toBe("completed");
-			expect(job?.resultText).toContain(warning);
-			expect(job?.resultText).toContain("Everything verified; writing the report now.");
+			expect(job?.resultText).toContain('status="completed"');
+			expect(job?.resultText).toContain('missing-yield="wake"');
+			expect(job?.resultText).toContain(`${warning}\n\nEverything verified; writing the report now.`);
 			expect(job?.resultText).not.toContain("after 3 reminders");
 		} finally {
 			await manager.dispose({ timeoutMs: 1000 });
 		}
 	});
-	it.each(["", " \n "])("fails an empty structured owner wake (%p)", async reply => {
+	it.each(["", " \n "])("reports an empty structured owner wake as before, unmarked (%p)", async reply => {
 		const manager = new AsyncJobManager({});
 		const harness = createHarness({ asyncJobManager: manager });
 		AgentRegistry.global().register({
@@ -932,17 +947,19 @@ describe("runSubprocess result acceptance", () => {
 			await finish?.(undefined);
 
 			const job = (await waiting).details?.jobs?.[0];
-			expect(job?.status).toBe("failed");
-			expect(job?.resultText).toBeUndefined();
+			expect(job?.status).toBe("completed");
+			expect(job?.resultText).toContain("produced no output");
+			expect(job?.resultText).toContain(`history://${AGENT_ID}`);
+			expect(job?.resultText).not.toContain("missing-yield");
 		} finally {
 			await manager.dispose({ timeoutMs: 1000 });
 		}
 	});
 	it.each([
-		["Everything verified; writing the report now.", "completed"],
-		["", "failed"],
-		[" \n ", "failed"],
-	] as const)("marks a structured wake that a parent steer joins mid-turn (%p)", async (reply, status) => {
+		["Everything verified; writing the report now.", true],
+		["", false],
+		[" \n ", false],
+	] as const)("marks a structured wake that a parent steer joins mid-turn (%p)", async (reply, marked) => {
 		const manager = new AsyncJobManager({});
 		const harness = createHarness({ asyncJobManager: manager });
 		const registry = AgentRegistry.global();
@@ -991,11 +1008,14 @@ describe("runSubprocess result acceptance", () => {
 			await finish?.(undefined);
 
 			const job = (await waiting).details?.jobs?.[0];
-			expect(job?.status).toBe(status);
-			if (status === "completed") {
+			expect(job?.status).toBe("completed");
+			if (marked) {
 				expect(job?.resultText).toContain('missing-yield="wake"');
 				expect(job?.resultText).toContain("SYSTEM WARNING: Structured subagent replied without calling yield.");
 				expect(job?.resultText).toContain(reply);
+			} else {
+				expect(job?.resultText).toContain("produced no output");
+				expect(job?.resultText).not.toContain("missing-yield");
 			}
 		} finally {
 			await manager.dispose({ timeoutMs: 1000 });

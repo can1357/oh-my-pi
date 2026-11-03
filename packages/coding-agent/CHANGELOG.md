@@ -9,7 +9,7 @@
 
 ### Fixed
 
-- Fixed structured subagent replies that omit `yield` looking like ordinary reports; omp now preserves their prose with a missing-yield warning ([#16928](https://github.com/can1357/oh-my-pi/pull/16928) by [@sjawhar](https://github.com/sjawhar))
+- Fixed structured subagent replies that omit `yield` looking like ordinary reports; omp now preserves their prose with a missing-yield warning, and a reply to the parent's follow-up message gets the same warning without changing its status ([#16928](https://github.com/can1357/oh-my-pi/pull/16928) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.16.0] - 2026-11-02
 

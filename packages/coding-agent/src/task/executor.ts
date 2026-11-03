@@ -875,11 +875,23 @@ export function finalizeSubprocessOutput(args: FinalizeSubprocessOutputArgs): Fi
 			stderr = missingYieldWarning;
 		} else if (exitCode === 0) {
 			const hasRawOutput = rawOutput.trim().length > 0;
-			resultMissingYield = args.missingYield ?? "initial";
-			rawOutput = rawOutput ? `${missingYieldWarning}\n\n${rawOutput}` : missingYieldWarning;
-			if (hasOutputSchema || !hasRawOutput) {
-				exitCode = 1;
-				stderr = missingYieldWarning;
+			if (args.missingYield === "wake") {
+				// A parent-owned wake answers a follow-up; its yielded result is
+				// already accepted. Prose is marked but keeps the turn's status,
+				// schema or not, and a turn with no prose (an IRC-only reply) is
+				// not marked: the wake relay reports it as before.
+				if (hasRawOutput) {
+					resultMissingYield = "wake";
+					rawOutput = `${missingYieldWarning}\n\n${rawOutput}`;
+					stderr = missingYieldWarning;
+				}
+			} else {
+				resultMissingYield = "initial";
+				rawOutput = rawOutput ? `${missingYieldWarning}\n\n${rawOutput}` : missingYieldWarning;
+				if (hasOutputSchema || !hasRawOutput) {
+					exitCode = 1;
+					stderr = missingYieldWarning;
+				}
 			}
 		}
 	}
