@@ -2182,6 +2182,8 @@ export interface GlobOptions {
    * mention them.
    */
   includeNodeModules?: boolean
+  /** List entries inside `.git` directories (default: false). */
+  includeGit?: boolean
   /** Abort signal for cancelling the operation. */
   signal?: unknown
   /** Timeout in milliseconds for the operation. */

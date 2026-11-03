@@ -566,29 +566,49 @@ describe("dedicated tool capability", () => {
 		"find a b -type f -name '*.v' | head -20",
 		"find . -type d -name x",
 		"find . -name x ! -path './build/*'",
-		"find . -name .git",
+		// A negation or a prune of anything but `.git` has no glob argument.
+		"find . -name '*.v' -not -path '*/.git/*'",
+		"find . -path ./node_modules -prune -o -name '*.ts' -print",
+		// Without `-print` find also prints the pruned `.git`.
+		"find . -name .git -prune -o -name '*.ts'",
+		// find lists a root the pattern matches; glob never lists its roots.
+		"find src -name src",
 		"find . -name '*.o' | xargs rm",
 		"locate foo -name",
 		"fd --type f Foo",
 		"fd foo",
 		"fd 'a.*b'",
+		// fd skips ignored files, which glob does only together with node_modules.
+		"fd --glob 'Foo*'",
+		"fd -H --glob 'Foo*'",
 	])("does not refuse %s as a glob", command => {
 		expect(decide(command)).toBeUndefined();
 	});
 
 	it.each([
-		"find . -name '*.v'",
-		"find a b -name '*.v' | head -20",
-		"find /srv/deploy -maxdepth 4 -name first-a | head",
-		"find . -name dune -maxdepth 2",
-		"fd --glob --max-depth 3 'Foo*'",
-		"find . \\( -name 'thermonuclear*' -o -name reviewer.md \\)",
-		"find . -name '*.v' -not -path '*/.git/*'",
-		"find . -path ./node_modules -prune -o -name '*.ts' -print",
-		"fd --glob 'Foo*'",
-		"fd --glob -s 'foo*'",
-	])("refuses %s as a glob", command => {
-		expect(decide(command)).toBe("glob");
+		["find . -name '*.v'", { path: "**/*.v", hidden: true, gitignore: false, git: true }],
+		["find a b -name '*.v' | head -20", { path: "a/**/*.v;b/**/*.v", hidden: true, gitignore: false, git: true }],
+		[
+			"find /srv/deploy -maxdepth 4 -name first-a | head",
+			{ path: "/srv/deploy/**/first-a", hidden: true, gitignore: false, git: true, depth: 4 },
+		],
+		["find . -name dune -maxdepth 2", { path: "**/dune", hidden: true, gitignore: false, git: true, depth: 2 }],
+		[
+			"find . \\( -name 'thermonuclear*' -o -name reviewer.md \\)",
+			{ path: "**/thermonuclear*;**/reviewer.md", hidden: true, gitignore: false, git: true },
+		],
+		["find . -name .git", { path: "**/.git", hidden: true, gitignore: false, git: true }],
+		[
+			"find . -name .git -prune -o -name '*.ts' -print",
+			{ path: "**/*.ts", hidden: true, gitignore: false, git: false },
+		],
+		["fd -I --glob --max-depth 3 'Foo*'", { path: "**/Foo*", hidden: false, gitignore: false, git: false, depth: 3 }],
+		["fd -u --glob -s 'foo*' src", { path: "src/**/foo*", hidden: true, gitignore: false, git: true }],
+		["fd -HI --glob Foo", { path: "**/Foo", hidden: true, gitignore: false, git: true }],
+	])("refuses %s as a glob and names the same glob call", (command, args) => {
+		const result = checkBashInterception(command, tools, DEFAULT_BASH_INTERCEPTOR_RULES);
+		expect(result.suggestedTool).toBe("glob");
+		expect(result.message).toContain(`The same listing: glob ${JSON.stringify(args)}`);
 	});
 
 	it.each([
@@ -913,6 +933,21 @@ describe("dedicated tool capability", () => {
 			// The shell cannot create a file in a missing directory; the write tool would create both.
 			expect(at("echo hi > missing/out")).toBeUndefined();
 			expect(at("cat link")).toBe("read");
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("does not send a find over a symlinked root to glob unless -H follows it", async () => {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "bash-interceptor-find-root-")));
+		try {
+			await Bun.write(path.join(dir, "real", "dune"), "x\n");
+			await fs.symlink(path.join(dir, "real"), path.join(dir, "alias"));
+			const at = (command: string) =>
+				checkBashInterception(command, tools, DEFAULT_BASH_INTERCEPTOR_RULES, command, dir).suggestedTool;
+			expect(at("find alias -name dune")).toBeUndefined();
+			expect(at("find -H alias -name dune")).toBe("glob");
+			expect(at("find real -name dune")).toBe("glob");
 		} finally {
 			await fs.rm(dir, { recursive: true, force: true });
 		}

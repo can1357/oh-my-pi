@@ -4,7 +4,7 @@
 
 ### Added
 
-- `glob()` takes `maxDepth` (the search root's children are depth 1) and stops its walk at that depth
+- `glob()` takes `maxDepth` (the search root's children are depth 1) and stops its walk at that depth, and `includeGit` to list inside `.git` directories
 
 ## [18.15.0] - 2026-11-01
 

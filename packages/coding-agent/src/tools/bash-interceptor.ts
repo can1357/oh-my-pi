@@ -8,7 +8,13 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { dedicatedToolCanPerformStep, type FileFacts, type PathKind, type StepFilesystem } from "./bash-step";
+import {
+	dedicatedToolCanPerformStep,
+	type FileFacts,
+	globArgsForStep,
+	type PathKind,
+	type StepFilesystem,
+} from "./bash-step";
 import { extractFlatShellCommandSegments } from "./shell-tokenize";
 import { type BashInterceptorRule, DEFAULT_BASH_INTERCEPTOR_RULES } from "../exec/settings";
 
@@ -245,18 +251,17 @@ export function checkBashInterception(
 		for (const candidate of Object.hasOwn(LEADING_STEP_TOOLS, rule.tool) ? leadingStep : everyStep) {
 			// A configured global or sticky regex carries state across calls.
 			regex.lastIndex = 0;
+			const view = filesystem && (candidate.leading ? filesystem : UNINSPECTABLE);
 			if (
 				regex.test(candidate.text) &&
-				dedicatedToolCanPerformStep(
-					rule.tool,
-					candidate.step,
-					availableTools,
-					filesystem && (candidate.leading ? filesystem : UNINSPECTABLE),
-				)
+				dedicatedToolCanPerformStep(rule.tool, candidate.step, availableTools, view)
 			) {
+				// A find or fd refusal names the glob call that lists exactly the same entries.
+				const globArgs = rule.tool === "glob" ? globArgsForStep(candidate.step, view) : undefined;
+				const sameStep = globArgs ? `\n\nThe same listing: glob ${JSON.stringify(globArgs)}` : "";
 				return {
 					block: true,
-					message: `Blocked: ${rule.message}\n\nOriginal command: ${originalCommand}`,
+					message: `Blocked: ${rule.message}${sameStep}\n\nOriginal command: ${originalCommand}`,
 					suggestedTool: rule.tool,
 				};
 			}

@@ -1027,109 +1027,197 @@ function grepPaths(spec: OptionSpec, command: SimpleCommand): Word[] | undefined
 
 // ── glob: find, fd ───────────────────────────────────────────────────────────
 
-/**
- * `find` primaries the glob tool expresses through its path patterns, each with its argument
- * count. `-type` is not among them: glob lists symlinks to files as files and cannot leave out
- * directories or symlinks, so `-type f`/`-type d` are not expressible.
- */
-const FIND_PRIMARIES: Record<string, number> = { "-name": 1, "-path": 1, "-wholename": 1, "-print": 0 };
-const FIND_OPERATORS: Record<string, true> = {
-	"(": true,
-	")": true,
-	"-o": true,
-	"-or": true,
-	"-a": true,
-	"-and": true,
-};
-/** A name or path test for a directory the glob tool never descends into (`.git`, `node_modules`). */
-const PRUNED_BY_GLOB = /^(?:\.\/|\*\/)?(?:\.git|node_modules)(?:\/\*?)?$|^\*\/(?:\.git|node_modules)\/\*$/u;
+/** The glob tool call that lists exactly what a `find` or `fd` step lists. */
+export interface GlobArgs {
+	/** `;`-separated glob paths, one per root and name pattern. */
+	path: string;
+	hidden: boolean;
+	gitignore: boolean;
+	git: boolean;
+	depth?: number;
+}
 
 /** A depth the glob tool's `depth` expresses: its search root's children are depth 1. */
 const GLOB_DEPTH = (value: string): boolean => /^[1-9]\d*$/u.test(value);
 
 /**
- * The glob tool matches path patterns under one or more roots and lists files, directories and
- * symlinks alike, to a `depth` (`-maxdepth N` for N ≥ 1). It never descends into `.git`, and into
- * `node_modules` only for a pattern that names it. It has no minimum depth, type,
- * case-insensitive, size, time or permission test, negation or pruning of other paths, or action
- * (`-exec`, `-delete`, `-printf`).
+ * A `find -name` pattern the glob tool reads the same way: `*`, `?` and bracket classes, with no
+ * braces (a glob alternation, literal to find), no `**`, no backslash escape and no slash.
  */
-function findCanPerform(command: SimpleCommand): boolean {
-	const words = command.words.slice(1);
-	if (words.some(word => word.computed)) return false;
+const SAME_NAME_PATTERN = /^(?:[^{}\\/*]|\*(?!\*))+$/u;
+
+/** Whether the shell-style `pattern` matches `name`, as `find -name` (fnmatch without FNM_PERIOD) does. */
+function fnmatch(pattern: string, name: string): boolean {
+	let source = "";
+	for (let i = 0; i < pattern.length; i++) {
+		const ch = pattern[i];
+		if (ch === "*") source += "[^]*";
+		else if (ch === "?") source += "[^]";
+		else if (ch === "[") {
+			const close = pattern.indexOf("]", i + 2);
+			if (close < 0) source += "\\[";
+			else {
+				const body = pattern
+					.slice(i + 1, close)
+					.replace(/^!/u, "^")
+					.replace(/\\/gu, "\\\\");
+				source += `[${body}]`;
+				i = close;
+			}
+		} else source += ch.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+	}
+	try {
+		return new RegExp(`^${source}$`, "u").test(name);
+	} catch {
+		return true;
+	}
+}
+
+/** The glob path for `pattern` below `root`. */
+function globPathUnder(root: string, pattern: string): string {
+	const base = root.replace(/\/+$/u, "");
+	if (base === ".") return `**/${pattern}`;
+	return `${base}/**/${pattern}`;
+}
+
+/** A `.git` prune: `-name .git -prune -o`, or `-path` with the pattern `<star>/.git`. */
+function isGitPrune(test: string | undefined, arg: string | undefined): boolean {
+	return (test === "-name" && arg === ".git") || ((test === "-path" || test === "-wholename") && arg === "*/.git");
+}
+
+/**
+ * The glob arguments that list exactly what `find` lists, or undefined when glob cannot. Accepted:
+ * literal roots (`.` when none), `-P` or `-H`, then `-maxdepth N` (N ≥ 1), one `-name P` or a
+ * parenthesized or top-level `-o` group of them, an optional leading `.git` prune with a trailing
+ * `-print`, and `-print`. find descends everything — dotfiles, ignored files, `node_modules` and
+ * `.git` — so glob gets `hidden`, `gitignore: false` and `git` (unless `.git` is pruned). A root
+ * the patterns match is listed by find but never by glob, and a symlinked root is not followed by
+ * find without `-H`, so neither is accepted. Glob lists files, directories and symlinks alike and
+ * has no type, size, time, permission or case-insensitive test, negation, other prune, or action.
+ */
+function findAsGlob(command: SimpleCommand, filesystem: StepFilesystem | undefined): GlobArgs | undefined {
+	const words = command.words.slice(1).map(word => (word.computed ? undefined : word.value));
+	if (words.some(word => word === undefined)) return undefined;
+	const args = words as string[];
 	let i = 0;
-	while (i < words.length && (words[i].value === "-P" || words[i].value === "-H")) i++;
-	for (; i < words.length; i++) {
-		const value = words[i].value;
-		if (value.startsWith("-") || value === "!" || own(FIND_OPERATORS, value)) break;
+	let followRoots = false;
+	for (; args[i] === "-P" || args[i] === "-H"; i++) followRoots = args[i] === "-H";
+	const roots: string[] = [];
+	for (; i < args.length && !args[i].startsWith("-") && args[i] !== "(" && args[i] !== "!"; i++) roots.push(args[i]);
+	if (roots.length === 0) roots.push(".");
+	let rest = args.slice(i);
+	let depth: number | undefined;
+	let git = true;
+	// Leading `-maxdepth N` options, wherever GNU find accepts them before the expression.
+	const withoutDepth: string[] = [];
+	for (let k = 0; k < rest.length; k++) {
+		if (rest[k] === "-maxdepth") {
+			if (!GLOB_DEPTH(rest[k + 1] ?? "")) return undefined;
+			depth = Number(rest[++k]);
+			continue;
+		}
+		withoutDepth.push(rest[k]);
 	}
-	let negated = false;
-	let prunedTest = false;
-	for (; i < words.length; i++) {
-		const value = words[i].value;
-		if (value === "!" || value === "-not") {
-			negated = true;
-			continue;
-		}
-		if (own(FIND_OPERATORS, value)) continue;
-		if (value === "-maxdepth") {
-			// `-maxdepth 0` lists only the roots themselves, which the glob tool never reports.
-			if (!GLOB_DEPTH(words[++i]?.value ?? "")) return false;
-			continue;
-		}
-		if (value === "-prune") {
-			// `-path ./node_modules -prune` restates the glob tool's own pruning.
-			if (!prunedTest) return false;
-			prunedTest = false;
-			continue;
-		}
-		const arity = own(FIND_PRIMARIES, value);
-		if (arity === undefined) return false;
-		const arg = arity === 1 ? words[++i] : undefined;
-		if (arity === 1 && !arg) return false;
-		prunedTest = value !== "-print" && PRUNED_BY_GLOB.test(arg?.value ?? "");
-		if (negated && !prunedTest) return false;
-		// The glob tool never lists `.git`, so a search for it is not expressible unless it is pruned.
-		if (!negated && prunedTest && arg?.value.includes(".git") && words[i + 1]?.value !== "-prune") return false;
-		negated = false;
+	rest = withoutDepth;
+	if (isGitPrune(rest[0], rest[1]) && rest[2] === "-prune" && (rest[3] === "-o" || rest[3] === "-or")) {
+		// Without a trailing `-print` find also prints the pruned `.git` itself.
+		if (rest[rest.length - 1] !== "-print") return undefined;
+		git = false;
+		rest = rest.slice(4);
 	}
-	return true;
+	if (rest[rest.length - 1] === "-print") rest = rest.slice(0, -1);
+	if (rest[0] === "(" && rest[rest.length - 1] === ")") rest = rest.slice(1, -1);
+	const names: string[] = [];
+	for (let k = 0; k < rest.length; k += 3) {
+		if (rest[k] !== "-name" || rest[k + 1] === undefined || !SAME_NAME_PATTERN.test(rest[k + 1])) return undefined;
+		names.push(rest[k + 1]);
+		const joiner = rest[k + 2];
+		if (joiner !== undefined && joiner !== "-o" && joiner !== "-or") return undefined;
+		if (joiner !== undefined && rest[k + 3] === undefined) return undefined;
+	}
+	if (names.length === 0) return undefined;
+	for (const root of roots) {
+		// find lists a root the patterns match; glob never lists its roots.
+		const rootName = root === "/" ? "/" : (root.replace(/\/+$/u, "").split("/").pop() ?? root);
+		if (names.some(pattern => fnmatch(pattern, rootName))) return undefined;
+		if (filesystem && filesystem.kind(root, followRoots) !== "directory") return undefined;
+	}
+	return {
+		path: roots.flatMap(root => names.map(pattern => globPathUnder(root, pattern))).join(";"),
+		hidden: true,
+		gitignore: false,
+		git,
+		...(depth === undefined ? {} : { depth }),
+	};
 }
 
 const FD: OptionSpec = {
-	// Not `-S` (`--size`), `-t` (`--type`: glob has no type filter) or `-L` (follows symlinks).
-	flags: "HIusga1",
-	valued: { e: ANY, j: COUNT, c: ANY, d: GLOB_DEPTH },
+	// Not `-S` (`--size`), `-t` (`--type`), `-e` (`--extension`), `-L` (follows symlinks), `-1` or
+	// `--max-results` (stop early), or `--no-ignore-vcs` (keeps `.ignore`/`.fdignore`).
+	flags: "HIusga",
+	valued: { j: COUNT, c: ANY, d: GLOB_DEPTH },
 	long: {
 		"absolute-path": "flag",
 		"case-sensitive": "flag",
 		color: ANY,
-		extension: ANY,
 		glob: "flag",
 		hidden: "flag",
 		"max-depth": GLOB_DEPTH,
-		"max-results": COUNT,
 		"no-ignore": "flag",
-		"no-ignore-vcs": "flag",
 		threads: COUNT,
 		unrestricted: "flag",
 	},
 };
 
 /**
- * `fd` matches a regular expression against names, case-insensitively for an all-lowercase pattern.
- * The glob tool can express a literal or `--glob` pattern under fd's case rule only.
+ * The glob arguments that list exactly what `fd` lists, or undefined. fd matches a regular
+ * expression against names, case-insensitively for an all-lowercase pattern; glob can express a
+ * literal or `--glob` pattern under fd's case rule only. fd skips ignored files, which glob does
+ * only together with `node_modules`, so fd is expressible only with `--no-ignore`/`-I` (or
+ * `-u`): then glob gets `gitignore: false`, and `hidden` and `git` follow fd's `--hidden`.
  */
-function fdCanPerform(command: SimpleCommand): boolean {
+function fdAsGlob(command: SimpleCommand, filesystem: StepFilesystem | undefined): GlobArgs | undefined {
 	const options = command.words.slice(1);
 	const operands = expressibleOperands(options, FD);
-	if (!operands || operands.some(word => word.computed)) return false;
-	const pattern = operands[0]?.value;
-	if (pattern === undefined || pattern === "") return true;
-	const globMode = options.some(word => /^(?:-[^-]*g|--glob$)/u.test(word.value));
-	if (!globMode && !/^[A-Za-z0-9_-]+$/u.test(pattern)) return false;
-	const caseSensitive = options.some(word => /^(?:-[^-]*s|--case-sensitive$)/u.test(word.value));
-	return caseSensitive || /[A-Z]/u.test(pattern);
+	if (!operands || operands.some(word => word.computed)) return undefined;
+	const has = (short: string, long: string): boolean =>
+		options.some(word => new RegExp(`^(?:-[^-]*${short}|--${long}$)`, "u").test(word.value));
+	const unrestricted = has("u", "unrestricted");
+	if (!unrestricted && !has("I", "no-ignore")) return undefined;
+	const hidden = unrestricted || has("H", "hidden");
+	const [patternWord, ...rootWords] = operands;
+	const pattern = patternWord?.value ?? "";
+	const globMode = has("g", "glob");
+	if (pattern !== "" && !globMode && !/^[A-Za-z0-9_-]+$/u.test(pattern)) return undefined;
+	if (pattern !== "" && !SAME_NAME_PATTERN.test(pattern)) return undefined;
+	if (pattern !== "" && !has("s", "case-sensitive") && !/[A-Z]/u.test(pattern)) return undefined;
+	const roots = rootWords.length > 0 ? rootWords.map(word => word.value) : ["."];
+	if (filesystem && roots.some(root => filesystem.kind(root, true) !== "directory")) return undefined;
+	let depthValue: string | undefined;
+	for (let k = 0; k < options.length; k++) {
+		const value = options[k].value;
+		if (value === "-d" || value === "--max-depth") depthValue = options[++k]?.value;
+		else depthValue = /^(?:-d|--max-depth=)(\d+)$/u.exec(value)?.[1] ?? depthValue;
+	}
+	const name = pattern === "" ? "*" : globMode ? pattern : `*${pattern}*`;
+	return {
+		path: roots.map(root => globPathUnder(root, name)).join(";"),
+		hidden,
+		gitignore: false,
+		git: hidden,
+		...(depthValue === undefined ? {} : { depth: Number(depthValue) }),
+	};
+}
+
+/** The exact glob arguments for a `find` or `fd` step, as the glob rule's message shows them. */
+export function globArgsForStep(text: string, filesystem?: StepFilesystem): GlobArgs | undefined {
+	const step = parseLeadingPipeline(text);
+	if (!step || !stepIsLiteral(step.pipeline, false) || !outputReachesAgent(step.pipeline)) return undefined;
+	const command = step.pipeline[0];
+	const name = commandName(command);
+	if (name === "find") return findAsGlob(command, filesystem);
+	if (name === "fd") return fdAsGlob(command, filesystem);
+	return undefined;
 }
 
 // ── write: echo, printf, cat ─────────────────────────────────────────────────
@@ -1562,7 +1650,7 @@ export function dedicatedToolCanPerformStep(
 		case "glob":
 			if (name === "locate") return false;
 			if (name !== "find" && name !== "fd") return true;
-			return outputReachesAgent(pipeline) && (name === "find" ? findCanPerform(command) : fdCanPerform(command));
+			return globArgsForStep(text, filesystem) !== undefined;
 		case "write":
 			return writeCanPerform(name, step, availableTools, filesystem);
 		default: {
