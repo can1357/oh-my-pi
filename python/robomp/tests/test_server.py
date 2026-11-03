@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -2958,10 +2959,13 @@ def _post_pr_opened(
 
 
 def _status_recording_transport(captured: list[httpx.Request], *, delay_seconds: float = 0.0) -> httpx.MockTransport:
-    def handler(request: httpx.Request) -> httpx.Response:
+    async def handler(request: httpx.Request) -> httpx.Response:
         if request.method == "POST" and request.url.path == "/repos/octo/widget/statuses/deadbeef":
             if delay_seconds:
-                time.sleep(delay_seconds)
+                # Async sleep so the delay YIELDS the app loop — a sync
+                # `time.sleep` here would block it and prevent the webhook
+                # ack from returning before the (slow) status POST.
+                await asyncio.sleep(delay_seconds)
             captured.append(request)
             return httpx.Response(201, json={})
         return httpx.Response(200, json={})
