@@ -150,6 +150,29 @@ async fn arithmetic_for_header_has_no_comments_or_extended_globs() {
 	assert!(out.stderr.contains("i=0*("), "the `i=0*(` expression must be reported: {}", out.stderr);
 }
 
+/// A `for ((` header keeps those rules wherever it stands: after a here tag on
+/// the same line, and inside the text of a bare `((` that turns out to open
+/// nested subshells, which Bash reads again as shell text.
+#[tokio::test]
+async fn arithmetic_for_header_rules_hold_after_here_tags_and_in_spaced_subshells() {
+	let out = run(concat!(
+		"(( for ((i=0; #c\n",
+		";i++)); do :; break; done ) )\n",
+		"echo \"rc=$?\"\n",
+		"cat <<EOF; for ((i=0; #c ;i++)); do echo never; done\n",
+		"doc\n",
+		"EOF\n",
+		"echo \"rc=$?\"\n",
+	))
+	.await;
+	assert_eq!(out.stdout, "rc=1\ndoc\nrc=1\n", "stderr: {}", out.stderr);
+	assert!(out.stderr.contains("#c"), "the `#c` expression must be reported: {}", out.stderr);
+
+	let out = run("cat <<EOF; for ((i=0;0;i+(;))); do :; done\ndoc\nEOF\necho ran\n").await;
+	assert_eq!(out.stdout, "", "the four-part header ran; stderr: {}", out.stderr);
+	assert_eq!(out.exit_code, Some(2), "stderr: {}", out.stderr);
+}
+
 /// Bash counts the parentheses of a `${...}` word toward the header of an
 /// arithmetic `for` loop around it, so a word that opens more than it closes
 /// is a syntax error there. A `${...}` word is text everywhere: a `((` in it

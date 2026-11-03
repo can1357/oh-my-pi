@@ -233,6 +233,10 @@ struct CrossTokenParseState {
     /// counted and balanced): any other `((` may group conditions inside `[[ ... ]]`, which the
     /// tokenizer cannot tell apart, so it is read as before.
     arithmetic_for_header: bool,
+    /// The depth of the bare `((` text around an arithmetic `for` header, while the header is
+    /// read. Bash reads that text again as shell text when it turns out to open nested
+    /// subshells, so a `for ((` header inside it is still a header.
+    outer_arithmetic_depth: Option<u32>,
     /// Are we scanning the word of a `${...}` parameter expansion? A `((` there is text: it does
     /// not start arithmetic text, and `<<` there does not start a here-document.
     in_parameter_word: bool,
@@ -393,6 +397,7 @@ impl TokenParseState {
                     reason,
                     token: Some(self.pop(&cross_token_state.cursor)),
                 };
+                cross_token_state.after_for_word = false;
 
                 cross_token_state.here_state = HereState::CurrentTokenIsHereTag {
                     remove_tabs,
@@ -412,6 +417,8 @@ impl TokenParseState {
                 }
 
                 cross_token_state.here_state = HereState::NextLineIsHereDoc;
+                // A here tag spelled `for` is not the keyword.
+                cross_token_state.after_for_word = false;
 
                 // Include the trailing \n in the here tag so it's easier to check against.
                 let tag = std::format!("{}\n", self.current_token().trim_ascii_start());
@@ -440,16 +447,17 @@ impl TokenParseState {
                     cross_token_state.here_state = HereState::NextLineIsHereDoc;
                 }
 
+                if cross_token_state.current_here_tags.is_empty() {
+                    return Err(TokenizerError::MissingHereTagForDocumentBody);
+                }
+                // Tokens after a here tag on its line are still read as shell text.
+                let token = self.pop(&cross_token_state.cursor);
+                cross_token_state.note_token(&token);
                 if let Some(last_here_tag) = cross_token_state.current_here_tags.last_mut() {
-                    let token = self.pop(&cross_token_state.cursor);
-                    let result = TokenizeResult {
+                    last_here_tag.pending_tokens_after.push(TokenizeResult {
                         reason,
                         token: Some(token),
-                    };
-
-                    last_here_tag.pending_tokens_after.push(result);
-                } else {
-                    return Err(TokenizerError::MissingHereTagForDocumentBody);
+                    });
                 }
 
                 return Ok(None);
@@ -617,6 +625,7 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                 arithmetic_expansion: false,
                 arithmetic_command_depth: None,
                 arithmetic_for_header: false,
+                outer_arithmetic_depth: None,
                 in_parameter_word: false,
                 parameter_word_parens: 0,
                 after_for_word: false,
@@ -672,9 +681,12 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                 self.cross_state.arithmetic_command_depth = Some(depth - 1);
             }
             Some(_) => {
-                self.cross_state.arithmetic_command_depth = None;
                 self.cross_state.arithmetic_for_header = false;
-                self.cross_state.arithmetic_expansion = false;
+                // A header read inside bare `((` text returns to that text.
+                self.cross_state.arithmetic_command_depth =
+                    self.cross_state.outer_arithmetic_depth.take();
+                self.cross_state.arithmetic_expansion =
+                    self.cross_state.arithmetic_command_depth.is_some();
             }
             None => (),
         }
@@ -956,7 +968,20 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                         //
 
                         if self.cross_state.arithmetic_command_depth.is_some() {
-                            self.note_arithmetic_command_paren(&state);
+                            if state.is_specific_operator("(")
+                                && c == '('
+                                && self.cross_state.after_for_word
+                                && !self.cross_state.arithmetic_for_header
+                                && !self.cross_state.in_parameter_word
+                            {
+                                // A `for ((` header inside bare `((` text: read it as a header,
+                                // then return to the text with its depth unchanged.
+                                self.cross_state.outer_arithmetic_depth =
+                                    self.cross_state.arithmetic_command_depth.replace(0);
+                                self.cross_state.arithmetic_for_header = true;
+                            } else {
+                                self.note_arithmetic_command_paren(&state);
+                            }
                         } else if state.is_specific_operator(")") && c == ')' {
                             self.cross_state.arithmetic_expansion = false;
                         }
@@ -1085,6 +1110,7 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                                 self.cross_state.arithmetic_expansion,
                                 self.cross_state.arithmetic_command_depth.take(),
                                 std::mem::take(&mut self.cross_state.arithmetic_for_header),
+                                self.cross_state.outer_arithmetic_depth.take(),
                                 std::mem::take(&mut self.cross_state.in_parameter_word),
                                 std::mem::take(&mut self.cross_state.parameter_word_parens),
                                 std::mem::take(&mut self.cross_state.after_for_word),
@@ -1097,6 +1123,7 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                                 self.cross_state.arithmetic_expansion,
                                 self.cross_state.arithmetic_command_depth,
                                 self.cross_state.arithmetic_for_header,
+                                self.cross_state.outer_arithmetic_depth,
                                 self.cross_state.in_parameter_word,
                                 self.cross_state.parameter_word_parens,
                                 self.cross_state.after_for_word,
@@ -1116,6 +1143,7 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                                 self.cross_state.arithmetic_expansion,
                                 self.cross_state.arithmetic_command_depth.take(),
                                 std::mem::take(&mut self.cross_state.arithmetic_for_header),
+                                self.cross_state.outer_arithmetic_depth.take(),
                             );
                             self.cross_state.arithmetic_expansion = true;
 
@@ -1125,6 +1153,7 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                                 self.cross_state.arithmetic_expansion,
                                 self.cross_state.arithmetic_command_depth,
                                 self.cross_state.arithmetic_for_header,
+                                self.cross_state.outer_arithmetic_depth,
                             ) = outer_arithmetic;
                         }
 
