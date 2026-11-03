@@ -17,10 +17,15 @@ import type { AgentRegistry } from "../registry/agent-registry";
 import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import type { CoordinationDetails } from "@oh-my-pi/pi-tui/tools/wait";
 import { throwIfAborted } from "./tool-errors";
+import { clampTimeout, TOOL_TIMEOUTS } from "./tool-timeouts";
 
-import { cfgLaunchEnabled } from "./settings";
+import { cfgLaunchEnabled, cfgToolsMaxTimeout } from "./settings";
 
-const waitSchema = type({});
+const WAIT_TIMEOUT_DESCRIPTION = `seconds to wait at most; with nothing owed, wait idles until a message, a job result or this deadline instead of returning at once; clamped to ${TOOL_TIMEOUTS.wait.min}-${TOOL_TIMEOUTS.wait.max}`;
+const waitSchema = type({
+	"timeout?": type("number").describe(WAIT_TIMEOUT_DESCRIPTION),
+});
+/** Safety cap of a wait called without `timeout`. */
 const WAIT_MAX_MS = 30 * 60_000;
 const PROGRESS_INTERVAL_MS = 500;
 
@@ -77,7 +82,7 @@ function noReplyText(replies: PendingReplies): string {
 	if (replies.stopped.length > 0) {
 		return `${ids(replies.stopped)} finished its turn without replying. Ask again, or finish without the answer.`;
 	}
-	return "no background job or service you started is running, and no agent you messaged this run owes a reply. Other agents' results and messages arrive on their own.";
+	return "no background job or service you started is running, and no agent you messaged this run owes a reply. Other agents' results and messages arrive on their own; to idle until one does, call `wait` with `timeout` instead of starting a sleep job.";
 }
 
 /** Whether `session` has the `wait` tool active, so prompts may point blocked callers at it. */
@@ -110,11 +115,17 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 
 	async execute(
 		_toolCallId: string,
-		_params: typeof waitSchema.infer,
+		params: typeof waitSchema.infer,
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback<CoordinationDetails>,
 	): Promise<AgentToolResult<CoordinationDetails>> {
 		const registry = this.session.agentRegistry;
+		// An explicit `timeout` replaces the safety cap, and with nothing owed
+		// turns "nothing to wait for" into an idle wait for the next message.
+		const capMs =
+			params.timeout === undefined
+				? undefined
+				: clampTimeout("wait", params.timeout, cfgToolsMaxTimeout.get(this.session.settings)) * 1000;
 		const senderId = this.session.getAgentId?.() ?? undefined;
 		const messaging = registry && senderId ? { registry, senderId } : undefined;
 		const manager = this.session.asyncJobManager;
@@ -151,6 +162,22 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 				// across it, unless an interrupt (news for the model) landed meanwhile
 				// or the text names an agent asked that can no longer answer.
 				const news = signal?.aborted || replies.blocked.length > 0 || replies.stopped.length > 0;
+				// Nothing owed and a deadline given: idle until a message, steer,
+				// job result or service exit arrives, or the deadline passes,
+				// instead of the dummy timer job a caller would otherwise start to
+				// hold the wait open.
+				if (capMs !== undefined && !news) {
+					return this.#blockUntilWake({
+						jobs,
+						manager,
+						messaging,
+						serviceRunning,
+						signal,
+						onUpdate,
+						capMs,
+						idle: true,
+					});
+				}
 				return {
 					content: [{ type: "text", text: `Nothing to wait for: ${noReplyText(replies)}` }],
 					details: { op: "wait", jobs: [] },
@@ -158,12 +185,14 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 				};
 			}
 		}
-		return this.#blockUntilWake({ jobs, manager, messaging, serviceRunning, signal, onUpdate });
+		return this.#blockUntilWake({ jobs, manager, messaging, serviceRunning, signal, onUpdate, capMs, idle: false });
 	}
 
 	/**
 	 * Block until an owned job settles, an owned service finishes, a message arrives, the cap elapses, or the call aborts.
 	 * With neither jobs nor a service, the block is a reply wait: it also ends once no agent asked can still reply.
+	 * An `idle` block (nothing owed, the caller gave a deadline) ends only on a message, an interrupt
+	 * (steering, an aside, a job result) or `capMs`.
 	 */
 	async #blockUntilWake(args: {
 		jobs: AsyncJob[];
@@ -172,8 +201,11 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 		serviceRunning: boolean;
 		signal: AbortSignal | undefined;
 		onUpdate: AgentToolUpdateCallback<CoordinationDetails> | undefined;
+		/** The caller's `timeout`; the 30-minute safety cap when absent. */
+		capMs: number | undefined;
+		idle: boolean;
 	}): Promise<AgentToolResult<CoordinationDetails>> {
-		const { jobs, manager, messaging, serviceRunning, signal, onUpdate } = args;
+		const { jobs, manager, messaging, serviceRunning, signal, onUpdate, capMs, idle } = args;
 		const watchedIds = jobs.map(job => job.id);
 		manager?.watchJobs(watchedIds);
 		const serviceAbort = new AbortController();
@@ -188,7 +220,7 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 		// A reply wait re-checks whether an agent asked can still answer on
 		// every block change, status change, and end of an asked agent's turn
 		// (after any automatic reply that turn owes has been sent).
-		const replyWait = messaging !== undefined && jobs.length === 0 && !serviceRunning;
+		const replyWait = !idle && messaging !== undefined && jobs.length === 0 && !serviceRunning;
 		let noReply: PendingReplies | undefined;
 		const replyGone = Promise.withResolvers<void>();
 		const unsubscribers: Array<() => void> = [];
@@ -220,7 +252,7 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 				? messaging.registry.awaits.hold(messaging.senderId, watchedAgents, { interruptible: true })
 				: undefined;
 		const { promise: timeout, resolve: timedOut } = Promise.withResolvers<void>();
-		const timer = setTimeout(timedOut, WAIT_MAX_MS);
+		const timer = setTimeout(timedOut, capMs ?? WAIT_MAX_MS);
 		const abort = Promise.withResolvers<void>();
 		const onAbort = () => abort.resolve();
 		if (signal) {
@@ -291,9 +323,11 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 								? "A service finished. Read proc:// for its status and output."
 								: wake === "unanswerable" && noReply
 									? noReplyText(noReply)
-									: replyWait
-										? "Wait limit reached with no reply. Ask again, or finish without the answer."
-										: "Wait limit reached; background work may still be running. Read proc:// for status.",
+									: idle
+										? "Deadline reached: no message, steer or job result arrived."
+										: replyWait
+											? "Wait limit reached with no reply. Ask again, or finish without the answer."
+											: "Wait limit reached; background work may still be running. Read proc:// for status.",
 					},
 				],
 				details: { op: "wait", jobs: [] },

@@ -499,4 +499,72 @@ describe("wait", () => {
 			expect(await idleText(childWait())).toContain("no agent you messaged this run owes a reply");
 		});
 	});
+
+	describe("with a timeout and nothing owed", () => {
+		// Callers waiting for another session's message used to start a dummy
+		// `sleep` job to hold `wait` open, because with nothing owed it returned
+		// at once. A `timeout` now idles the wait itself.
+		function registerMain(): void {
+			AgentRegistry.global().register({
+				id: "Main",
+				displayName: "Main",
+				kind: "main",
+				session: { isStreaming: true } as never,
+				status: "running",
+			});
+		}
+
+		test("idles until a message arrives and returns it", async () => {
+			registerMain();
+			const waiting = new WaitTool(session()).execute("idle-message", { timeout: 600 });
+			await Promise.resolve();
+			await IrcBus.global().send({ from: "Peer", to: "Main", body: "the schema changed" });
+			const result = await waiting;
+			expect(result.details?.waited).toMatchObject({ from: "Peer", body: "the schema changed" });
+		});
+
+		test("ends on a steer or aside interrupt like any wait", async () => {
+			registerMain();
+			const interrupt = new AbortController();
+			const waiting = new WaitTool(session()).execute("idle-interrupt", { timeout: 600 }, interrupt.signal);
+			await Promise.resolve();
+			interrupt.abort(TOOL_INTERRUPT_ABORT_REASON);
+			const result = await waiting;
+			expect(result.details).toMatchObject({ interrupted: true });
+			expect(result.useless).toBeUndefined();
+		});
+
+		test("returns at the deadline as an idle poll when nothing arrives", async () => {
+			registerMain();
+			vi.useFakeTimers();
+			const waiting = new WaitTool(session()).execute("idle-deadline", { timeout: 5 });
+			await Promise.resolve();
+			vi.advanceTimersByTime(5_000);
+			const result = await waiting;
+			expect(result.content[0]).toMatchObject({ text: expect.stringContaining("Deadline reached") });
+			expect(result.useless).toBe(true);
+		});
+
+		test("still returns at once without a timeout", async () => {
+			registerMain();
+			const result = await new WaitTool(session()).execute("no-timeout", {});
+			expect(result.content[0]).toMatchObject({ text: expect.stringContaining("Nothing to wait for") });
+			expect(result.useless).toBe(true);
+		});
+
+		test("caps a job wait at the timeout instead of the 30-minute safety cap", async () => {
+			registerMain();
+			vi.useFakeTimers();
+			const manager = new AsyncJobManager({ onJobComplete: () => {} });
+			const job = Promise.withResolvers<string>();
+			manager.register("bash", "build", async () => job.promise, { ownerId: "Main" });
+			const waiting = new WaitTool(session(manager)).execute("job-timeout", { timeout: 5 });
+			await Promise.resolve();
+			vi.advanceTimersByTime(5_000);
+			const result = await waiting;
+			expect(result.details?.jobs?.[0]).toMatchObject({ status: "running" });
+			job.resolve("done");
+			await manager.dispose({ timeoutMs: 1000 });
+		});
+	});
 });
