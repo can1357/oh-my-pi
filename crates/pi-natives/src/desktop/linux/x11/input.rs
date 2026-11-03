@@ -43,13 +43,10 @@ use crate::desktop::{
 	control,
 	error::{CoreResult, DesktopError, ErrorCode},
 	keys::KeyName,
+	linux::{CLICK_DELAY, pace_clicks},
 	types::Target,
 };
 
-const CLICK_DELAY: Duration = Duration::from_millis(12);
-/// Release → next press of an `XTest` multi-click. Chromium synthesizes
-/// `dblclick` only when the first pair reached it before the second.
-const MULTI_CLICK_GAP: Duration = Duration::from_millis(50);
 const DRAG_STEP_DELAY: Duration = Duration::from_millis(8);
 /// Activation budget of a foreground pointer action.
 const FOREGROUND_POINTER_SETTLE: Duration = Duration::from_millis(800);
@@ -635,19 +632,7 @@ impl X11Input {
 				let (x, y) = validate_xtest_point(*x, *y)?;
 				self.xtest_motion(x, y)?;
 				let detail = button_detail(*button);
-				let count = (*count).max(1);
-				for index in 0..count {
-					if index > 0 {
-						control::wait(MULTI_CLICK_GAP)?;
-					}
-					control::check()?;
-					let pressed = self
-						.xtest_button(detail, true)
-						.and_then(|()| control::sent_gap_wait(CLICK_DELAY, index + 1 == count));
-					let released = control::cleanup(|| self.xtest_button(detail, false));
-					pressed.and(released)?;
-				}
-				Ok(())
+				pace_clicks(*count, |pressed| self.xtest_button(detail, pressed))
 			},
 			PointerEvent::Hold { x, y, button, duration, .. } => {
 				let (x, y) = validate_xtest_point(*x, *y)?;

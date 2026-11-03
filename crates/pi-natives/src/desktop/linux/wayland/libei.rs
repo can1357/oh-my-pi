@@ -21,6 +21,7 @@ use crate::desktop::{
 	control,
 	error::{CoreResult, DesktopError},
 	keys::KeyName,
+	linux::pace_clicks,
 };
 
 const DEVICE_DISCOVERY_DRAIN_TIMEOUT: Duration = Duration::from_millis(500);
@@ -600,21 +601,27 @@ impl Libei {
 				PointerEvent::Click { x, y, count, .. } => {
 					move_to(x, y, &mut time)?;
 					if let (Some(code), Some(interface)) = (button, &button_interface) {
-						for _ in 0..count.max(1) {
-							control::check()?;
-							button_held = true;
-							interface.button(code, ei::button::ButtonState::Press);
+						pace_clicks(count, |pressed| {
+							time = Self::timestamp()?.max(time);
+							if pressed {
+								button_held = true;
+							}
+							interface.button(
+								code,
+								if pressed {
+									ei::button::ButtonState::Press
+								} else {
+									ei::button::ButtonState::Released
+								},
+							);
 							device.device.device().frame(serial, time);
 							time = time.saturating_add(1);
 							self.flush()?;
-							// A press is always released: a cancel stops the
-							// next press.
-							interface.button(code, ei::button::ButtonState::Released);
-							device.device.device().frame(serial, time);
-							time = time.saturating_add(1);
-							self.flush()?;
-							button_held = false;
-						}
+							if !pressed {
+								button_held = false;
+							}
+							Ok(())
+						})?;
 					}
 				},
 				PointerEvent::Hold { x, y, duration, .. } => {
