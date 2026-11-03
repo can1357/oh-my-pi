@@ -682,12 +682,14 @@ export async function launchHeadlessBrowser(opts: LaunchHeadlessOptions): Promis
 	// another process holds that port; over the pipe Chromium would run on
 	// without it, and the port would answer for the other process. Chromium
 	// reads the port only inline: after a bare switch the value is a URL to open.
-	const pipe = !launchArgs.some(arg => arg.startsWith("--remote-debugging-port="));
+	const pipe = !launchArgs.some(arg => arg.startsWith("--remote-debugging-port=") && Number(arg.split("=")[1]) > 0);
 	if (pipe) launchArgs.push("--remote-debugging-pipe", "--remote-debugging-port=0");
+	const activePortFile = path.join(profileDir, "DevToolsActivePort");
 	try {
+		// A reused profile can hold the file of a browser that was killed.
+		const staleActivePort = pipe ? await readActivePort(activePortFile) : undefined;
 		if (userDataDir) await seedOwnedProfilePreferences(userDataDir);
 		const executablePath = await ensureChromiumExecutable();
-		const launchedAt = Date.now();
 		const browser = await puppeteer.launch({
 			headless: opts.headless,
 			defaultViewport: opts.headless ? initialViewport : null,
@@ -699,7 +701,7 @@ export async function launchHeadlessBrowser(opts: LaunchHeadlessOptions): Promis
 			protocolTimeout: BROWSER_PROTOCOL_TIMEOUT_MS,
 		});
 		try {
-			const wsEndpoint = pipe ? await activePortEndpoint(profileDir, launchedAt) : browser.wsEndpoint();
+			const wsEndpoint = pipe ? await activePortEndpoint(activePortFile, staleActivePort) : browser.wsEndpoint();
 			return { browser, wsEndpoint, userDataDir };
 		} catch (error) {
 			await browser.close();
@@ -712,27 +714,30 @@ export async function launchHeadlessBrowser(opts: LaunchHeadlessOptions): Promis
 }
 
 /**
- * The browser WebSocket endpoint Chromium publishes in `<profileDir>/DevToolsActivePort`
- * (port, then browser target path) once its `--remote-debugging-port=0` server
- * listens. A file older than this launch is a previous browser's, left in a
- * reused profile when that browser was killed.
+ * The browser WebSocket endpoint Chromium publishes in `DevToolsActivePort` (port,
+ * then browser target path) once its `--remote-debugging-port=0` server listens.
+ * Every launch publishes a new browser target path, so `stale`, the file found
+ * before the launch, is never this browser's.
  */
-async function activePortEndpoint(profileDir: string, launchedAt: number): Promise<string> {
-	const file = path.join(profileDir, "DevToolsActivePort");
-	// Some filesystems keep whole-second modification times.
-	const notBefore = Math.floor(launchedAt / 1000) * 1000;
+async function activePortEndpoint(file: string, stale: string | undefined): Promise<string> {
 	const deadline = Date.now() + DEVTOOLS_ACTIVE_PORT_TIMEOUT_MS;
 	for (;;) {
-		try {
-			if ((await fs.promises.stat(file)).mtimeMs >= notBefore) {
-				const [port, browserPath] = (await Bun.file(file).text()).split("\n");
-				if (port && browserPath) return `ws://127.0.0.1:${port}${browserPath}`;
-			}
-		} catch (error) {
-			if (!isEnoent(error)) throw error;
+		const published = await readActivePort(file);
+		if (published !== undefined && published !== stale) {
+			const [port, browserPath] = published.split("\n");
+			if (port && browserPath) return `ws://127.0.0.1:${port}${browserPath}`;
 		}
 		if (Date.now() >= deadline) throw new Error(`Chromium did not publish its DevTools port in ${file}`);
 		await Bun.sleep(50);
+	}
+}
+
+async function readActivePort(file: string): Promise<string | undefined> {
+	try {
+		return await Bun.file(file).text();
+	} catch (error) {
+		if (isEnoent(error)) return undefined;
+		throw error;
 	}
 }
 

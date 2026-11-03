@@ -102,16 +102,18 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("process-local headless launch", () => {
 				stdout: "pipe",
 				stderr: "inherit",
 			});
-			let output = "";
-			const decoder = new TextDecoder();
-			for await (const chunk of owner.stdout) {
-				output += decoder.decode(chunk, { stream: true });
-				if (output.includes("\n")) break;
-			}
-			const { wsEndpoint, userDataDir }: { wsEndpoint: string; userDataDir: string } = JSON.parse(output);
+			let userDataDir: string | undefined;
 			try {
+				let output = "";
+				const decoder = new TextDecoder();
+				for await (const chunk of owner.stdout) {
+					output += decoder.decode(chunk, { stream: true });
+					if (output.includes("\n")) break;
+				}
+				const launched: { wsEndpoint: string; userDataDir: string } = JSON.parse(output);
+				userDataDir = launched.userDataDir;
 				const puppeteer = await loadPuppeteer();
-				const observer = await puppeteer.connect({ browserWSEndpoint: wsEndpoint });
+				const observer = await puppeteer.connect({ browserWSEndpoint: launched.wsEndpoint });
 				const disconnected = Promise.withResolvers<void>();
 				observer.once("disconnected", () => disconnected.resolve());
 				owner.stdin.write("kill\n");
@@ -122,7 +124,9 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("process-local headless launch", () => {
 				await disconnected.promise;
 				expect(observer.connected).toBe(false);
 			} finally {
-				await removeUserDataDir(userDataDir);
+				owner.kill("SIGKILL");
+				await owner.exited;
+				if (userDataDir) await removeUserDataDir(userDataDir);
 			}
 		},
 		30_000,
