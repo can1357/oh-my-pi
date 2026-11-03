@@ -82,7 +82,7 @@ export interface NativeDesktopSession {
 	holdDisplayUntilReleased(): void;
 	/** Let a turn's hold go now (activity outside a turn keeps its grace); later activity gets the grace again. */
 	releaseDisplayAwake(): void;
-	/** Sets when the current run ends, `remainingMs` from now; bounds how long input waits for the user to pause. */
+	/** Sets when the current run ends, `remainingMs` from now; bounds how long input waits for the user to pause (macOS) or for a Wayland permission prompt. */
 	setRunDeadline(remainingMs: number): void;
 	listApplications(options?: ApplicationQuery): Promise<Application[]>;
 	openApplication(id: string, options?: ApplicationOpenOptions): Promise<OpenedApplication>;
