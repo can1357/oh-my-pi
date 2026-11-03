@@ -107,9 +107,9 @@ it("keeps a rewrite that a write moving the session superseded, instead of repor
 });
 
 // The successor that superseded the rewrite must itself have published the
-// transcript: one that failed published nothing, so the rewrite's failure
-// still reaches its caller (prune, snapshot restore and the like restore
-// their change on it).
+// transcript: one that failed published nothing. The rewrite then writes the
+// transcript once itself; when that fails too, the failure reaches its caller
+// (prune, snapshot restore and the like restore their change on it).
 for (const [successor, moves, ends] of [
 	["a synchronous rewrite of the same file that fails", false, "conflict"],
 	["a synchronous rewrite that moves the session and fails to write the new file", true, "conflict"],
@@ -154,6 +154,50 @@ for (const [successor, moves, ends] of [
 			expect(notices.map(notice => notice.reason)).toEqual(moves ? ["contested"] : []);
 			// Nothing published the change: the original file still holds the old state.
 			expect(fs.readFileSync(original, "utf8")).toContain('"state":"before"');
+		} finally {
+			storage.failSyncWrites = false;
+			manager.seal();
+			await manager.close().catch(() => {});
+		}
+	});
+}
+
+// What the caller is told matches what storage holds, whichever write saved it.
+for (const [what, before] of [
+	["its successor failed but storage recovered before it settled, so its own write saved it", "recovered"],
+	["a durable successor saved it, though the session was then sealed", "sealed"],
+] as const) {
+	it(`keeps a superseded rewrite when ${what}`, async () => {
+		using tempDir = TempDir.createSync("@omp-rewrite-superseded-kept-");
+		const storage = new StorageTakenOverMidRewrite();
+		const manager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"), storage);
+		manager.onPersistenceError(() => {});
+		try {
+			manager.appendMessage({ role: "user", content: "a turn worth saving", timestamp: Date.now() });
+			manager.appendCustomEntry("marker", { state: "before" });
+			await manager.ensureOnDisk();
+			await manager.flush();
+			const original = manager.getSessionFile();
+			if (!original) throw new Error("Expected a persisted session");
+			const marker = manager.getEntries().find(entry => entry.type === "custom" && entry.customType === "marker");
+			if (marker?.type !== "custom") throw new Error("Expected the marker entry");
+			marker.data = { state: "after" };
+			const held = { file: original, reached: Promise.withResolvers<void>(), go: Promise.withResolvers<void>() };
+			storage.held = held;
+			const rewrite = manager.rewriteEntries().then(
+				() => "kept",
+				() => "failed",
+			);
+			await held.reached.promise;
+
+			if (before === "recovered") storage.failSyncWrites = true;
+			manager.appendCustomEntry("concurrent", {});
+			if (before === "recovered") storage.failSyncWrites = false;
+			else manager.seal();
+			held.go.resolve();
+
+			expect(await rewrite).toBe("kept");
+			expect(fs.readFileSync(original, "utf8")).toContain('"state":"after"');
 		} finally {
 			storage.failSyncWrites = false;
 			manager.seal();

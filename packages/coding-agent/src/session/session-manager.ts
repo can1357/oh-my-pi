@@ -2583,11 +2583,17 @@ export class SessionManager {
 	 */
 	#deferredPublishGen = 0;
 	/**
-	 * The latest synchronous rewrite: the disk epoch it started and whether its
-	 * body became durable (for a deferring backend, once the store confirms it).
-	 * An atomic rewrite it superseded reports its outcome in its place.
+	 * The highest body revision (see {@link #bodyRevision}) known durable: some
+	 * full body serialized at that revision or later reached storage, so every
+	 * in-place change made before it is saved.
 	 */
-	#syncRewriteOutcome: { epoch: number; durable: Promise<boolean> } | undefined;
+	#durableRevision = 0;
+	/**
+	 * Full-body publishes under way (atomic rewrites running, deferred
+	 * synchronous publishes awaiting confirmation): a superseded rewrite waits
+	 * for them before it decides (see {@link #settleSuperseded}).
+	 */
+	readonly #fullPublishesUnderWay = new Set<Promise<void>>();
 	/** Lazy gate crossed (ensureOnDisk / loaded file): every entry must persist from now on. */
 	#forceFileCreation = false;
 	/**
@@ -3516,7 +3522,7 @@ export class SessionManager {
 					landed = true;
 				}
 			}
-			if (landed) this.#recordFullRewrite(target, body.bytes);
+			if (landed) this.#recordFullRewrite(target, body);
 		} finally {
 			this.#endPublish(target);
 		}
@@ -3547,9 +3553,15 @@ export class SessionManager {
 	 * record (`#expectedDiskSize`) now describes; it also settles the move to
 	 * `target` (see {@link #recordMoveWritten}).
 	 */
-	#recordFullRewrite(target: string, bytes: number): void {
-		this.#expectedDiskSize = bytes;
+	#recordFullRewrite(target: string, body: SessionFileBody): void {
+		this.#expectedDiskSize = body.bytes;
+		this.#recordDurableRevision(body.stamp.revision);
 		this.#recordMoveWritten(target);
+	}
+
+	/** A full body serialized at `revision` reached storage. */
+	#recordDurableRevision(revision: number): void {
+		if (revision > this.#durableRevision) this.#durableRevision = revision;
 	}
 
 	/**
@@ -3775,15 +3787,13 @@ export class SessionManager {
 		let targetPath = this.#liveRelocationWritePath() ?? this.#sessionFile;
 		if (!targetPath) return;
 
-		// Whether this rewrite's body became durable: what an older rewrite it
-		// supersedes reports in its place (see `#runFencedAtomicRewrite`).
-		let durable: PromiseWithResolvers<boolean> | undefined;
+		// While a deferred publish of this body awaits its confirmation, an atomic
+		// rewrite it superseded waits for it (see `#settleSuperseded`).
+		let confirmation: PromiseWithResolvers<void> | undefined;
 		try {
 			if (this.#sessionOwnedElsewhere()) targetPath = this.#moveOffSessionFile("open-elsewhere");
 			let body = this.#serializeBody();
 			this.#diskEpoch++;
-			durable = Promise.withResolvers<boolean>();
-			this.#syncRewriteOutcome = { epoch: this.#diskEpoch, durable: durable.promise };
 			this.#diskTail = Promise.resolve();
 			this.#closeWriterEventually();
 			for (let recoveries = 0; ; recoveries++) {
@@ -3813,53 +3823,31 @@ export class SessionManager {
 				// The success handler below is the single place the replacement
 				// becomes durable state.
 				const generation = ++this.#deferredPublishGen;
-				const { bytes, stamp } = body;
 				const publishedPath = targetPath;
+				const queued = Promise.withResolvers<void>();
+				confirmation = queued;
+				this.#fullPublishesUnderWay.add(queued.promise);
+				const settleConfirmation = () => {
+					this.#fullPublishesUnderWay.delete(queued.promise);
+					queued.resolve();
+				};
 				const confirming = this.#confirmDeferredPublish(
 					publishedPath,
 					() => {
-						durable?.resolve(true);
-						// The body reached `publishedPath`: that move's file is written,
-						// whatever was queued since — to another moved file or this one.
-						this.#recordMoveWritten(publishedPath);
-						// A newer deferred publish owns the durability record now;
-						// this body may no longer be the backend's latest, so record no size.
-						if (generation !== this.#deferredPublishGen) return;
-						this.#recordFullRewrite(publishedPath, bytes);
-						const entries = this.#entries;
-						const bodyIsCurrent =
-							stamp.entries === entries &&
-							stamp.entryCount === entries.length &&
-							stamp.lastEntry === entries.at(-1) &&
-							stamp.revision === this.#bodyRevision &&
-							stamp.prefix === this.#titleSlotLine() + this.#lineFor(this.#header);
-						if (!bodyIsCurrent) {
-							// Entries raced the unconfirmed publish: the confirmed
-							// body predates them. Stay non-current and re-issue the
-							// full transcript instead of declaring it durable
-							// (rvEW); the re-issued publish carries the
-							// just-confirmed size token, so its queue-time check
-							// passes.
-							this.#fileIsCurrent = false;
-							this.#rewriteRequired = true;
-							this.#rewriteSynchronously();
-							return;
-						}
-						if (!this.#sessionFileRelocating || targetPath === this.#sessionFile) {
-							this.#fileIsCurrent = true;
-							this.#materializeBreadcrumb();
-							this.#rewriteRequired = false;
-							this.#hasTitleSlot = true;
+						try {
+							this.#confirmedDeferredRewrite(publishedPath, body, generation);
+						} finally {
+							// Settled after any re-issued publish has registered itself.
+							settleConfirmation();
 						}
 					},
-					() => durable?.resolve(false),
+					() => settleConfirmation(),
 				);
 				// A backend that cannot confirm is treated as never confirmed.
-				if (!confirming) durable.resolve(false);
+				if (!confirming) settleConfirmation();
 				return;
 			}
-			this.#recordFullRewrite(targetPath, body.bytes);
-			durable.resolve(true);
+			this.#recordFullRewrite(targetPath, body);
 			// Only mark the manager current when writing the active session path.
 			// Mid-move writes update the live relocation path; `#sessionFile` is
 			// still the pre-repoint source until moveTo repoints it.
@@ -3876,46 +3864,99 @@ export class SessionManager {
 				this.#hasTitleSlot = true;
 			}
 		} catch (err) {
-			durable?.resolve(false);
+			if (confirmation) {
+				this.#fullPublishesUnderWay.delete(confirmation.promise);
+				confirmation.resolve();
+			}
 			this.#noteDiskFailure(err);
 		}
 	}
 
-	/**
-	 * Whether the write that superseded an atomic rewrite persisted what that
-	 * rewrite carried: the latest advance of the disk epoch was a synchronous
-	 * rewrite, of the whole transcript, whose body became durable. A newer
-	 * advance while its outcome is awaited is followed to its own outcome. Any
-	 * other advance (a repair, the release) leaves it unconfirmed.
-	 */
-	async #supersedingWriteDurable(): Promise<boolean> {
-		for (;;) {
-			const outcome = this.#syncRewriteOutcome;
-			if (!outcome || outcome.epoch !== this.#diskEpoch) return false;
-			const durable = await outcome.durable;
-			if (outcome.epoch === this.#diskEpoch) return durable;
+	/** The backend confirmed a deferred full-body publish of `body` to `publishedPath` (see {@link #rewriteSynchronously}). */
+	#confirmedDeferredRewrite(publishedPath: string, body: SessionFileBody, generation: number): void {
+		const { stamp } = body;
+		// The body reached `publishedPath`: that move's file is written,
+		// whatever was queued since — to another moved file or this one —
+		// and every in-place change it carries is durable.
+		this.#recordMoveWritten(publishedPath);
+		this.#recordDurableRevision(stamp.revision);
+		// A newer deferred publish owns the durability record now;
+		// this body may no longer be the backend's latest, so record no size.
+		if (generation !== this.#deferredPublishGen) return;
+		this.#recordFullRewrite(publishedPath, body);
+		const entries = this.#entries;
+		const bodyIsCurrent =
+			stamp.entries === entries &&
+			stamp.entryCount === entries.length &&
+			stamp.lastEntry === entries.at(-1) &&
+			stamp.revision === this.#bodyRevision &&
+			stamp.prefix === this.#titleSlotLine() + this.#lineFor(this.#header);
+		if (!bodyIsCurrent) {
+			// Entries raced the unconfirmed publish: the confirmed
+			// body predates them. Stay non-current and re-issue the
+			// full transcript instead of declaring it durable
+			// (rvEW); the re-issued publish carries the
+			// just-confirmed size token, so its queue-time check
+			// passes.
+			this.#fileIsCurrent = false;
+			this.#rewriteRequired = true;
+			this.#rewriteSynchronously();
+			return;
+		}
+		if (!this.#sessionFileRelocating || publishedPath === this.#sessionFile) {
+			this.#fileIsCurrent = true;
+			this.#materializeBreadcrumb();
+			this.#rewriteRequired = false;
+			this.#hasTitleSlot = true;
 		}
 	}
 
 	/**
-	 * Settles an atomic rewrite that a newer write superseded: it counts as
-	 * kept when its own body landed (read back from `sessionFile`) or the
-	 * superseding write persisted the transcript; else `error` — its own
-	 * failure, or the superseding write's — reaches the caller, so a caller
-	 * that changed entries in place restores them.
+	 * Settles an atomic rewrite that a newer write superseded. It counts as kept
+	 * once the body revision it carried is durable — its own body, read back
+	 * from the session's current file, or any later full body (each body
+	 * carries every in-place change made before it was serialized). Its own
+	 * publish is over, so it first leaves the publishes under way (two
+	 * superseded rewrites must not wait for each other), then waits for the
+	 * ones still under way. When none is left and the change is still not
+	 * durable, it writes the transcript as it is now itself, once, as an append
+	 * would: the change is then saved, or that write's failure — else `error` —
+	 * reaches the caller, so a caller that changed entries in place restores
+	 * them knowing no write of this rewrite is left to land.
 	 */
-	async #settleSuperseded(sessionFile: string, body: SessionFileBody, error: unknown): Promise<false> {
-		let landed = false;
-		try {
-			if (textMatchesLines(await this.#storage.readText(sessionFile), body.lines)) {
-				this.#recordFullRewrite(sessionFile, body.bytes);
-				landed = true;
+	async #settleSuperseded(
+		revision: number,
+		own: PromiseWithResolvers<void>,
+		error: unknown,
+		landed?: { sessionFile: string; body: SessionFileBody },
+	): Promise<false> {
+		this.#fullPublishesUnderWay.delete(own.promise);
+		own.resolve();
+		if (landed) {
+			try {
+				if (textMatchesLines(await this.#storage.readText(landed.sessionFile), landed.body.lines)) {
+					// Landed in the session's current file: what it carried is saved. Landed
+					// in a file the session has since moved off: that move's file is written,
+					// but the current file does not hold the change.
+					if (landed.sessionFile === this.#sessionFile) this.#recordFullRewrite(landed.sessionFile, landed.body);
+					else this.#recordMoveWritten(landed.sessionFile);
+				}
+			} catch {
+				// Unreadable: whether the change is durable is decided by the other publishes.
 			}
-		} catch {
-			// Unreadable: whether it landed is decided by the superseding write alone.
 		}
-		if (landed || (await this.#supersedingWriteDurable())) return false;
-		throw error;
+		let wrote = false;
+		for (;;) {
+			if (this.#durableRevision >= revision) return false;
+			const underWay = [...this.#fullPublishesUnderWay];
+			if (underWay.length > 0) {
+				await Promise.race(underWay);
+				continue;
+			}
+			if (wrote || this.#released) throw this.#diskFailure ?? error;
+			wrote = true;
+			this.#rewriteSynchronously();
+		}
 	}
 
 	/**
@@ -3933,9 +3974,10 @@ export class SessionManager {
 		if (this.#released) return;
 
 		const startEpoch = this.#diskEpoch;
+		const revision = this.#bodyRevision;
 		await this.#scheduleDiskWork(
 			async () => {
-				if (await this.#runFencedAtomicRewrite(startEpoch)) {
+				if (await this.#runFencedAtomicRewrite(startEpoch, revision)) {
 					this.#fileIsCurrent = true;
 					this.#materializeBreadcrumb();
 					this.#rewriteRequired = false;
@@ -3952,13 +3994,18 @@ export class SessionManager {
 	 * the writer close and the full-file replace, and loops on
 	 * `#atomicRewriteDirty` so any fenced append that lands during the rewrite
 	 * is captured before the task resolves. Returns `false` when the disk epoch
-	 * moved so callers skip current-marking updates; a body that landed before
-	 * that change still advances the durable byte record after readback.
+	 * moved so callers skip current-marking updates — once the body revision it
+	 * was asked to save, `revision`, is durable; else it throws (see
+	 * {@link #settleSuperseded}).
 	 */
-	async #runFencedAtomicRewrite(epoch: number): Promise<boolean> {
+	async #runFencedAtomicRewrite(epoch: number, revision: number): Promise<boolean> {
 		if (this.#released) return false;
 		this.#atomicRewriteFenceEpoch = epoch;
 		let recoveries = 0;
+		const run = Promise.withResolvers<void>();
+		this.#fullPublishesUnderWay.add(run.promise);
+		const superseded = () =>
+			this.#diskFailure ?? new Error("Session rewrite superseded by a write that did not persist it");
 		try {
 			do {
 				this.#atomicRewriteDirty = false;
@@ -3966,7 +4013,7 @@ export class SessionManager {
 				if (this.#sessionOwnedElsewhere()) this.#moveOffSessionFile("open-elsewhere");
 				const sessionFile = this.#sessionFile;
 				if (!sessionFile) return false;
-				if (this.#diskEpoch !== epoch) return false;
+				if (this.#diskEpoch !== epoch) return await this.#settleSuperseded(revision, run, superseded());
 				const body = this.#serializeBody();
 				const options = {
 					expectedSize: this.#expectedDiskSize,
@@ -3979,22 +4026,22 @@ export class SessionManager {
 							? this.#storage.writeLinesAtomic(sessionFile, body.lines, options)
 							: this.#storage.writeTextAtomic(sessionFile, body.lines.join(""), options));
 					} catch (error) {
-						// A synchronous rewrite that ran while this one was on its way, and
-						// carried the transcript as it is now, wherever it lives now: this
-						// publish was superseded, not lost, once that rewrite's body is
-						// durable. A successor that failed (or a repair, or the release)
-						// published nothing for it, so this one's failure still stands.
-						const superseded = this.#diskEpoch !== epoch;
-						if (!superseded && (await this.#recoverFromWriteConflict(error, recoveries))) {
+						// A write that ran while this one was on its way and carried the
+						// transcript as it is now, wherever it lives now, superseded this
+						// publish: it is kept once what it carried is durable. A
+						// successor that failed (or a repair, or the release) published
+						// nothing for it, so this one's failure still stands.
+						const moved = this.#diskEpoch !== epoch;
+						if (!moved && (await this.#recoverFromWriteConflict(error, recoveries))) {
 							recoveries++;
 							// Publish the whole transcript against what the recovery found on the next pass.
 							this.#atomicRewriteDirty = true;
 							continue;
 						}
-						if (superseded) return await this.#settleSuperseded(sessionFile, body, error);
+						if (moved) return await this.#settleSuperseded(revision, run, error, { sessionFile, body });
 						try {
 							if (textMatchesLines(await this.#storage.readText(sessionFile), body.lines)) {
-								this.#recordFullRewrite(sessionFile, body.bytes);
+								this.#recordFullRewrite(sessionFile, body);
 							}
 						} catch {
 							// Preserve the publish error when durable state cannot be read back.
@@ -4004,14 +4051,9 @@ export class SessionManager {
 					if (this.#diskEpoch !== epoch) {
 						// The store returned, but a commit guard may have refused to
 						// publish once the epoch moved: that proves nothing landed.
-						return await this.#settleSuperseded(
-							sessionFile,
-							body,
-							this.#diskFailure ??
-								new Error(`Session rewrite superseded by a write that did not persist it: ${sessionFile}`),
-						);
+						return await this.#settleSuperseded(revision, run, superseded(), { sessionFile, body });
 					}
-					this.#recordFullRewrite(sessionFile, body.bytes);
+					this.#recordFullRewrite(sessionFile, body);
 				} finally {
 					this.#endPublish(sessionFile);
 				}
@@ -4025,6 +4067,8 @@ export class SessionManager {
 			// this stale rewrite was still awaiting storage. Clearing it here
 			// unconditionally would strand appends during the newer publish.
 			if (this.#atomicRewriteFenceEpoch === epoch) this.#atomicRewriteFenceEpoch = null;
+			this.#fullPublishesUnderWay.delete(run.promise);
+			run.resolve();
 		}
 	}
 
@@ -4185,7 +4229,8 @@ export class SessionManager {
 					await this.#storage.updateSessionTitle(sessionFile, update);
 					if (this.#diskEpoch === epoch) this.#fileIsCurrent = true;
 				} catch {
-					if (!(await this.#runFencedAtomicRewrite(epoch))) return;
+					// The title fallback carries no in-place change: nothing beyond what is durable to wait for.
+					if (!(await this.#runFencedAtomicRewrite(epoch, 0))) return;
 					this.#clearDiskError();
 					this.#fileIsCurrent = true;
 					this.#rewriteRequired = false;
