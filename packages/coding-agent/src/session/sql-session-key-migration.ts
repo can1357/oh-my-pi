@@ -462,18 +462,27 @@ async function readLayout(
 
 const utf8 = new TextDecoder("utf-8", { fatal: true });
 
-/** Each distinct key of `table` and its row count, grouped by exact bytes whatever the collation. */
+/**
+ * Each distinct key of `table` and its row count, grouped by exact bytes
+ * whatever the collation. With `lock` on MySQL the read is a locking read
+ * (`FOR UPDATE`): it reads the latest committed rows, not the transaction's
+ * snapshot, and locks every row and, under MySQL's default `REPEATABLE READ`,
+ * every gap it scans, so another client's insert waits for the commit.
+ * PostgreSQL refuses `FOR UPDATE` with `GROUP BY`; it reads after
+ * {@link lockTables} instead (see {@link changeKeys}).
+ */
 async function readKeys(
 	transaction: SqlSessionStorageTransaction,
 	adapter: SqlSessionStorageAdapter,
 	table: string | undefined,
+	lock: boolean,
 ): Promise<Map<string, number>> {
 	const keys = new Map<string, number>();
 	if (table === undefined) return keys;
 	// MySQL groups `path` by its PAD SPACE collation; its bytes group exactly.
 	const query =
 		adapter === "mysql"
-			? `SELECT CAST(path AS BINARY) AS key_bytes, count(*) AS n FROM ${table} GROUP BY key_bytes`
+			? `SELECT CAST(path AS BINARY) AS key_bytes, count(*) AS n FROM ${table} GROUP BY key_bytes${lock ? " FOR UPDATE" : ""}`
 			: `SELECT path AS key_bytes, count(*) AS n FROM ${table} GROUP BY path`;
 	const rows = (await transaction.unsafe(query)) as Array<{ key_bytes: string | Uint8Array; n: unknown }>;
 	for (const row of rows) {
@@ -483,23 +492,26 @@ async function readKeys(
 	return keys;
 }
 
+/** The keys of both tables; `lock` as for {@link readKeys}. */
 async function readInventory(
 	transaction: SqlSessionStorageTransaction,
 	adapter: SqlSessionStorageAdapter,
 	layout: TableLayout,
+	lock: boolean,
 ): Promise<SessionKeyInventory> {
 	return {
 		adapter,
-		files: await readKeys(transaction, adapter, layout.table),
-		parts: await readKeys(transaction, adapter, layout.parts),
+		files: await readKeys(transaction, adapter, layout.table, lock),
+		parts: await readKeys(transaction, adapter, layout.parts, lock),
 		maxKeyLength: layout.maxKeyLength,
 	};
 }
 
 /**
- * Keep every other writer off both tables until the transaction ends:
- * PostgreSQL locks them, MySQL locks every row and gap it scans, and a
- * SQLite transaction holds the database's write lock from `BEGIN IMMEDIATE`.
+ * Keep every other writer off both tables until the transaction ends. Only
+ * PostgreSQL needs a statement of its own for it, `LOCK TABLE`. On MySQL the
+ * locking reads of {@link readKeys} take the locks, and a SQLite transaction
+ * holds the database's write lock from `BEGIN IMMEDIATE`.
  */
 async function lockTables(
 	transaction: SqlSessionStorageTransaction,
@@ -508,9 +520,6 @@ async function lockTables(
 ): Promise<void> {
 	const tables = layout.parts === undefined ? [layout.table] : [layout.table, layout.parts];
 	if (adapter === "postgres") await transaction.unsafe(`LOCK TABLE ${tables.join(", ")} IN EXCLUSIVE MODE`);
-	else if (adapter === "mysql") {
-		for (const table of tables) await transaction.unsafe(`SELECT count(*) AS n FROM ${table} FOR UPDATE`);
-	}
 }
 
 /** Rewrite `table`'s keys per `pairs` (from → to), a bounded number of keys per statement, values bound. */
@@ -547,9 +556,10 @@ function sameKeys(expected: ReadonlyMap<string, number>, actual: ReadonlyMap<str
  * Then re-read both tables and throw, so that the transaction rolls back,
  * unless each holds exactly the keys it held before with `moves` applied,
  * with the same row counts. `before`, when given, is those keys as read
- * earlier in this transaction. No stored key may start with
+ * earlier in this transaction after its locks. No stored key may start with
  * {@link TEMPORARY_KEY_PREFIX}, and no two keys, old or new, may become one row.
- * `redact` rewrites each key the error quotes.
+ * `redact` rewrites each key the error quotes. Both reads are locking reads
+ * on MySQL ({@link readKeys}).
  */
 export async function applySessionKeyMoves(
 	transaction: SqlSessionStorageTransaction,
@@ -564,14 +574,14 @@ export async function applySessionKeyMoves(
 	const { adapter, moves } = options;
 	const quote = quoter(options.redact);
 	const layout = await readLayout(transaction, adapter, sessionTableName(options.table));
-	const before = options.before ?? (await readInventory(transaction, adapter, layout));
+	const before = options.before ?? (await readInventory(transaction, adapter, layout, true));
 	const tables = layout.parts === undefined ? [layout.table] : [layout.table, layout.parts];
 	const toTemporary = [...moves.keys()].map((key, index) => [key, temporaryKey(index)] as const);
 	const toFinal = [...moves.values()].map((next, index) => [temporaryKey(index), next] as const);
 	for (const table of tables) await rewriteKeys(transaction, adapter, table, toTemporary);
 	for (const table of tables) await rewriteKeys(transaction, adapter, table, toFinal);
 
-	const after = await readInventory(transaction, adapter, layout);
+	const after = await readInventory(transaction, adapter, layout, true);
 	for (const [table, previous, current] of [
 		[layout.table, before.files, after.files],
 		[`${layout.table}_parts`, before.parts, after.parts],
@@ -588,6 +598,16 @@ export async function applySessionKeyMoves(
 	}
 }
 
+/**
+ * Plan and, unless refused or a dry run, apply a key change in one
+ * transaction. Every key is read after the locks that keep other writers
+ * out, so a row another client commits while the change waits for them is
+ * planned too: PostgreSQL reads in `READ COMMITTED`, each statement seeing
+ * every commit before it, after `LOCK TABLE` (a server default of
+ * `REPEATABLE READ` would read the snapshot of the first statement, taken
+ * before the lock); MySQL reads with locking reads, which read the latest
+ * commits whatever the snapshot; SQLite reads after `BEGIN IMMEDIATE`.
+ */
 async function changeKeys(
 	options: SessionKeyChangeOptions,
 	plan: (inventory: SessionKeyInventory) => SessionKeyPlan,
@@ -598,9 +618,11 @@ async function changeKeys(
 	if (adapter === "sqlite") await ensureSqliteBusyTimeout(client);
 	const outcome: { result?: SessionKeyChangeResult } = {};
 	await runSqlTransaction(client, adapter, async transaction => {
+		// Before any query: the isolation level of a transaction is set by its first statement.
+		if (adapter === "postgres") await transaction.unsafe("SET TRANSACTION ISOLATION LEVEL READ COMMITTED");
 		const layout = await readLayout(transaction, adapter, table);
 		if (!dryRun) await lockTables(transaction, adapter, layout);
-		const before = await readInventory(transaction, adapter, layout);
+		const before = await readInventory(transaction, adapter, layout, !dryRun);
 		const planned = plan(before);
 		outcome.result = { plan: planned, applied: false };
 		if (dryRun || planned.refusals.length > 0 || planned.moves.size === 0) return;

@@ -24,8 +24,9 @@ import {
 	runSqlTransaction,
 	SqlSessionStorage,
 	type SqlSessionStorageAdapter,
+	type SqlSessionStorageClient,
 } from "@oh-my-pi/pi-coding-agent/session/sql-session-storage";
-import { getAgentDir, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
+import { getAgentDir, readLines, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import { SQL } from "bun";
 import { ESCAPABLE_PASSWORDS, expectNoSpelling, redactorFor } from "../helpers/connection-redaction";
 
@@ -516,6 +517,140 @@ afterEach(() => {
 	}
 });
 
+/** Wait until `query` returns a row, polling `client`; false after `timeoutMs`. */
+async function waitForRow(client: SQL, query: string, values: unknown[], timeoutMs = 60_000): Promise<boolean> {
+	const deadline = Date.now() + timeoutMs;
+	while (Date.now() < deadline) {
+		if (((await client.unsafe(query, values)) as unknown[]).length > 0) return true;
+		// The lock state of another session has no event to wait on; polling it orders nothing.
+		await Bun.sleep(50);
+	}
+	return false;
+}
+
+/** `promise`, or a rejection naming `what` after `timeoutMs`: a guard that turns a hang into a failure. */
+function withTimeout<T>(promise: Promise<T>, what: string, timeoutMs = 30_000): Promise<T> {
+	return Promise.race([
+		promise,
+		Bun.sleep(timeoutMs).then(() => Promise.reject(new Error(`${what} did not finish in ${timeoutMs} ms`))),
+	]);
+}
+
+/**
+ * Holds SQLite's write lock in another process, inserts the late row, and
+ * commits after `HOLD_MS`. A real delay, not a signal: Bun's SQLite runs on
+ * the test's thread, which the change's `BEGIN IMMEDIATE` blocks in the busy
+ * handler, so the test cannot tell the holder when to commit.
+ */
+const SQLITE_HOLDER = `
+import { Database } from "bun:sqlite";
+const db = new Database(process.env.DB_FILE);
+db.exec("BEGIN IMMEDIATE");
+db.run("INSERT INTO " + process.env.TABLE + " (path, content, mtime_ms, byte_len) VALUES (?, ?, 1, 5)", [process.env.LATE, "late\\n"]);
+console.log("held");
+await Bun.sleep(Number(process.env.HOLD_MS));
+const committedAt = Date.now();
+db.exec("COMMIT");
+console.log("committed " + committedAt);
+`;
+
+/**
+ * Start `change` while another client keeps it waiting for its lock, and
+ * have a row keyed `late` committed during that wait: on MySQL by a third
+ * client while the change waits for a row lock the holder keeps on `early`
+ * (the round-7 reviewer's race), on PostgreSQL by the holder whose insert
+ * the change's table lock waits for, on SQLite by a holder process with the
+ * write lock. Returns what `change` returned and whether the wait was seen.
+ */
+async function raceLateRow<T>(
+	db: Db,
+	early: string,
+	late: string,
+	change: () => Promise<T>,
+): Promise<{ outcome: T; waited: boolean }> {
+	if (db.adapter === "sqlite") {
+		const holder = Bun.spawn([process.execPath, "-e", SQLITE_HOLDER], {
+			env: {
+				PATH: process.env.PATH ?? "",
+				DB_FILE: db.url.slice("sqlite:".length),
+				TABLE: db.table,
+				LATE: late,
+				HOLD_MS: "2000",
+			},
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		try {
+			const lines = readLines(holder.stdout, AbortSignal.timeout(30_000));
+			const decoder = new TextDecoder();
+			const nextLine = async (): Promise<string> => {
+				const { value, done } = await lines.next();
+				if (!done) return decoder.decode(value);
+				holder.kill();
+				throw new Error(`the SQLite lock holder wrote no line: ${await new Response(holder.stderr).text()}`);
+			};
+			const held = await nextLine();
+			if (held !== "held") throw new Error(`the SQLite lock holder wrote ${JSON.stringify(held)}`);
+			const startedAt = Date.now();
+			const outcome = await change();
+			const committedAt = Number(/^committed (\d+)$/.exec(await nextLine())?.[1]);
+			// The change began before the late row committed, so it waited for the holder's write lock.
+			return { outcome, waited: startedAt < committedAt };
+		} finally {
+			holder.kill();
+			await holder.exited;
+		}
+	}
+	const holder = new SQL(db.url, { max: 1 });
+	const watcher = new SQL(db.url, { max: 1 });
+	const ready = Promise.withResolvers<void>();
+	const release = Promise.withResolvers<void>();
+	let running: Promise<T> | undefined;
+	const holding = holder.transaction(async transaction => {
+		if (db.adapter === "mysql") {
+			await transaction.unsafe(`SELECT path FROM ${db.table} WHERE path = ? FOR UPDATE`, [early]);
+		} else {
+			await transaction.unsafe(
+				`INSERT INTO ${db.table} (path, content, mtime_ms, byte_len) VALUES ($1, 'late\n', 1, 5)`,
+				[late],
+			);
+		}
+		ready.resolve();
+		await release.promise;
+	});
+	try {
+		await Promise.race([ready.promise, holding]);
+		running = change();
+		// MySQL: `performance_schema.data_locks` reads InnoDB's live lock table.
+		// `information_schema.innodb_trx` is a cache InnoDB refreshes only after
+		// 100 ms without a read, so polling it, here or from any other client of
+		// the server, can keep the wait out of it for good.
+		const waited =
+			db.adapter === "mysql"
+				? await waitForRow(
+						watcher,
+						"SELECT 1 FROM performance_schema.data_locks WHERE OBJECT_SCHEMA = DATABASE() AND OBJECT_NAME = ? AND LOCK_STATUS = 'WAITING'",
+						[db.table],
+					)
+				: await waitForRow(
+						watcher,
+						"SELECT 1 FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE 'LOCK TABLE %' AND position($1 in query) > 0",
+						[db.table],
+					);
+		// MySQL: the change waits on the holder's row lock, before it locks the gap the late row goes in.
+		if (db.adapter === "mysql") await withTimeout(db.insertRow(late, "late\n"), "the late insert");
+		release.resolve();
+		await holding;
+		return { outcome: await running, waited };
+	} finally {
+		release.resolve();
+		await holding.catch(() => undefined);
+		await running?.catch(() => undefined);
+		await holder.end();
+		await watcher.end();
+	}
+}
+
 for (const { adapter, url } of BACKENDS) {
 	describe.skipIf(!url)(`session row key migration (${adapter})`, () => {
 		const connect = (table?: string): Promise<Db> => Db.connect(adapter, url ?? "", table);
@@ -750,6 +885,102 @@ for (const { adapter, url } of BACKENDS) {
 			},
 			TIMEOUT_MS,
 		);
+
+		// The late row commits before the command holds its locks, so the command
+		// reads it and changes it with the rest; exiting 0 with it left would leave
+		// a row the next start (or an older Oh My Pi) cannot read.
+		for (const { direction, early, late, root, changed } of [
+			{
+				direction: "migrate",
+				early: `${ROOT}/early.jsonl`,
+				late: `${ROOT}/late.jsonl`,
+				root: ROOT,
+				changed: ["sessions/early.jsonl", "sessions/late.jsonl"],
+			},
+			{
+				direction: "rollback",
+				early: "sessions/early.jsonl",
+				late: "sessions/late.jsonl",
+				root: RESTORE,
+				changed: [`${RESTORE}early.jsonl`, `${RESTORE}late.jsonl`],
+			},
+		] as const) {
+			it(
+				`${direction === "migrate" ? "migrates" : "rolls back"} a row another client commits while the command waits for its lock`,
+				async () => {
+					await using db = await connect();
+					await db.insertRow(early, "early\n");
+					const client = new SQL(db.url, { max: 1 });
+					const connection = { client, source: "test", dsnFile: "test", redact: (text: string) => text };
+					const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+					const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+					try {
+						const { outcome: exitCode, waited } = await raceLateRow(db, early, late, () =>
+							runSessionKeysChange(connection, {
+								direction,
+								roots: [root],
+								dryRun: false,
+								cwd: process.cwd(),
+								env: process.env,
+								table: db.table,
+							}),
+						);
+						const errors = stderr.mock.calls.map(([chunk]) => String(chunk)).join("");
+						stdout.mockRestore();
+						stderr.mockRestore();
+
+						expect({ waited, exitCode, errors, keys: await db.keys() }).toEqual({
+							waited: true,
+							exitCode: 0,
+							errors: "",
+							keys: [...changed],
+						});
+						if (direction === "migrate") expect(await (await db.open(ROOT)).readText(late)).toBe("late\n");
+						else expect(await db.readByKey(changed[1])).toBe("late\n");
+					} finally {
+						stdout.mockRestore();
+						stderr.mockRestore();
+						await client.end();
+					}
+				},
+				TIMEOUT_MS,
+			);
+		}
+
+		if (adapter === "postgres") {
+			it(
+				"reads the keys after its table lock when transactions default to REPEATABLE READ",
+				async () => {
+					await using db = await connect();
+					const early = `${ROOT}/early.jsonl`;
+					const late = `${ROOT}/late.jsonl`;
+					await db.insertRow(early, "early\n");
+					const client = new SQL(db.url, { max: 1 });
+					// Each transaction begins as REPEATABLE READ, as on a server whose
+					// `default_transaction_isolation` is that. Set per transaction, it
+					// holds through a pooler in transaction mode too.
+					const repeatableRead: SqlSessionStorageClient = {
+						options: client.options,
+						unsafe: (query, values) => client.unsafe(query, values),
+						transaction: work => client.begin("ISOLATION LEVEL REPEATABLE READ", work),
+					};
+					try {
+						const { outcome, waited } = await raceLateRow(db, early, late, () =>
+							migrateSessionRowKeys({ client: repeatableRead, table: db.table, roots: [ROOT], dryRun: false }),
+						);
+
+						expect({ waited, applied: outcome.applied, keys: await db.keys() }).toEqual({
+							waited: true,
+							applied: true,
+							keys: ["sessions/early.jsonl", "sessions/late.jsonl"],
+						});
+					} finally {
+						await client.end();
+					}
+				},
+				TIMEOUT_MS,
+			);
+		}
 
 		it(
 			"keeps two keys apart that differ only in trailing spaces, refusing them on MySQL",
