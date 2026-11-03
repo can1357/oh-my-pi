@@ -4129,7 +4129,14 @@ describe("computer background fallback", () => {
 			},
 			{
 				code: 'await (await desktop.ref("e1")).perform(" Raise ")',
+				// Off macOS native is sent the name as given: UIA and AT-SPI match their own names.
 				call: "perform: Raise ",
+				route: "no raise is needed",
+			},
+			{
+				// Native runs any spelling of an element's action, so this one raises too.
+				code: 'await (await desktop.ref("e1")).perform("axraise")',
+				call: "perform:axraise",
 				route: "no raise is needed",
 			},
 			{
@@ -4296,8 +4303,9 @@ describe("computer background fallback", () => {
 					return { ...super.capabilities, backend: "quartz" };
 				}
 			}
-			// Native `action_name` runs exactly these two as AXOpen.
-			for (const action of ["AXOpen", "Open"]) {
+			// Native runs whichever of the element's actions matches with ASCII case folded, after
+			// trimming Unicode White_Space (U+0085 included), so every spelling of AXOpen is refused.
+			for (const action of ["AXOpen", "Open", "open", " Open ", "axopen", "AxOpen", "\u0085open", "open\u0085"]) {
 				const code = `await (await desktop.ref("e1")).perform(${JSON.stringify(action)})`;
 				const mac = new MacSession();
 				const refused = await run(mac, code, "refuse");
@@ -4310,17 +4318,25 @@ describe("computer background fallback", () => {
 				expect(refused.error.message, action).toContain("Use press() on a button that does the same");
 				expect(mac.calls, action).toEqual([]);
 
+				// Native is sent the spelling the refusal checked.
 				expect((await run(mac, code, "takeover")).ok, action).toBe(true);
-				expect(mac.calls, action).toEqual([`perform:${action}`]);
+				expect(mac.calls, action).toEqual(["perform:axopen"]);
 			}
 
-			// Other spellings reach native as other actions ("AXopen", "AX Open ").
+			// Names native runs as other actions still go through ("AX Open" names `AX Open`; U+FEFF is
+			// not White_Space, so native keeps it in the name).
 			const other = new MacSession();
-			const others = ['perform("open")', 'perform(" Open ")'].map(
-				call => `await (await desktop.ref("e1")).${call};`,
+			const otherActions = ["AX Open", "opener", "\ufeffopen", "open\ufeff"];
+			const others = otherActions.map(
+				action => `await (await desktop.ref("e1")).perform(${JSON.stringify(action)});`,
 			);
 			expect((await run(other, others.join("\n"), "refuse")).ok).toBe(true);
-			expect(other.calls).toEqual(["perform:open", "perform: Open "]);
+			expect(other.calls).toEqual([
+				"perform:ax open",
+				"perform:axopener",
+				"perform:ax\ufeffopen",
+				"perform:axopen\ufeff",
+			]);
 
 			const elsewhere = new ForegroundSession();
 			expect((await run(elsewhere, 'await (await desktop.ref("e1")).perform("AXOpen")', "refuse")).ok).toBe(true);
@@ -4351,27 +4367,37 @@ describe("computer background fallback", () => {
 			const menus: Array<{ code: string; call: string; named: string }> = [
 				{
 					code: `${el}.perform("AXShowMenu")`,
-					call: "perform:AXShowMenu",
+					call: "perform:axshowmenu",
 					named: 'perform("AXShowMenu") would open a context menu',
 				},
 				{
 					code: `${el}.perform(" showMenu ")`,
-					call: "perform: showMenu ",
+					call: "perform:axshowmenu",
 					named: 'perform(" showMenu ") would open a context menu',
 				},
 				{
 					code: `${el}.perform("show_menu")`,
-					call: "perform:show_menu",
+					call: "perform:axshowmenu",
 					named: 'perform("show_menu") would open a context menu',
 				},
 				{
+					code: `${el}.perform("axshowmenu")`,
+					call: "perform:axshowmenu",
+					named: 'perform("axshowmenu") would open a context menu',
+				},
+				{
+					code: `${el}.perform("AxShowMenu")`,
+					call: "perform:axshowmenu",
+					named: 'perform("AxShowMenu") would open a context menu',
+				},
+				{
 					code: `${el}.perform("AXShowMenu", { menu: ["Copy"] })`,
-					call: "perform:AXShowMenu",
+					call: "perform:axshowmenu",
 					named: "would open a context menu",
 				},
 				{
 					code: `${el}.perform("press", { menu: ["New Folder"] })`,
-					call: "perform:press",
+					call: "perform:axpress",
 					named: "perform with menu would open a menu",
 				},
 				{
@@ -4485,7 +4511,7 @@ describe("computer background fallback", () => {
 					"click:42:-",
 					"drag:42:-",
 					"perform:press",
-					"perform:AXIncrement",
+					"perform:axincrement",
 					"axClick:-",
 				]);
 
@@ -4562,14 +4588,20 @@ describe("computer background fallback", () => {
 					{
 						role: "AXPopUpButton",
 						code: `${el}.perform("AXPress")`,
-						call: "perform:AXPress",
+						call: "perform:axpress",
 						named: 'perform("AXPress") on an AXPopUpButton',
 					},
 					{
 						role: "AXMenuButton",
 						code: `${el}.perform(" Press ")`,
-						call: "perform: Press ",
+						call: "perform:axpress",
 						named: 'perform(" Press ") on an AXMenuButton',
+					},
+					{
+						role: "AXPopUpButton",
+						code: `${el}.perform("axpress")`,
+						call: "perform:axpress",
+						named: 'perform("axpress") on an AXPopUpButton',
 					},
 					{
 						role: "AXPopUpButton",
@@ -4619,13 +4651,13 @@ describe("computer background fallback", () => {
 						`${el}.click();`,
 					].join("\n");
 					expect((await run(button, code, "refuse")).ok).toBe(true);
-					expect(button.calls).toEqual(["perform:press", "perform:AXPress", "setValue:x", "axClick:true"]);
+					expect(button.calls).toEqual(["perform:press", "perform:axpress", "setValue:x", "axClick:true"]);
 
 					// A menu button's menu is a pull-down, so setValue and other actions do not open it.
 					const menuButton = new ControlSession("AXMenuButton");
 					const other = [`${el}.setValue("x");`, `${el}.perform("AXShowDefaultUI");`].join("\n");
 					expect((await run(menuButton, other, "refuse")).ok).toBe(true);
-					expect(menuButton.calls).toEqual(["setValue:x", "perform:AXShowDefaultUI"]);
+					expect(menuButton.calls).toEqual(["setValue:x", "perform:axshowdefaultui"]);
 
 					class ElsewhereSession extends ForegroundSession {
 						override async axNode(ref: string): Promise<AxNode> {
