@@ -6,6 +6,7 @@
  * the real `clearClaudePluginRootsCache` while tests supply a counter stub.
  */
 
+import * as nodeFs from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -17,7 +18,12 @@ import { normalizePluginRuntimeConfig, writePluginRuntimeConfig } from "../runti
 import type { PluginRuntimeConfig, PluginRuntimeState } from "../types";
 
 import { cachePlugin, getCachedPluginPath, isValidVersionForCache } from "./cache";
-import { removeCacheEntryUnlessLeased, sweepRetiredCacheEntries } from "./cache-lease";
+import {
+	leaseCacheEntry,
+	releaseInstallLease,
+	removeCacheEntryUnlessLeased,
+	sweepRetiredCacheEntries,
+} from "./cache-lease";
 import {
 	classifySource,
 	fetchMarketplace,
@@ -401,34 +407,18 @@ export class MarketplaceManager {
 			tmpDir: os.tmpdir(),
 		});
 
-		// The cache is keyed by marketplace/plugin/version and shared across scopes,
-		// so a forced reinstall replaces the copy the OTHER scope also references.
-		// Capture that scope's current runtime names from the cache before it is
-		// replaced, so a manifest rename can migrate its link/lockfile key too.
+		// Every install copies into a cache directory of its own (`cachePlugin`), so a reinstall
+		// changes nothing the other scope's entry names; that scope is only checked for collisions.
 		const otherScope: "user" | "project" = scope === "user" ? "project" : "user";
 		const otherRegistryPath =
 			otherScope === "project" ? this.#opts.projectInstalledRegistryPath : this.#opts.installedRegistryPath;
-		const otherScopeOldNames = new Map<string, string>();
 
-		// 5. Resolve registration identity before replacing an active cache. A
-		// forced reinstall can reuse the same cache key, so validation after
-		// cachePlugin would already have destroyed the prior contents on failure.
+		// 5. Resolve registration identity before writing the cache copy.
 		let version!: string;
 		let cachePath!: string;
 		let packageName!: string;
 		let previousPackageNames!: Set<string>;
-		let otherScopeEntries: readonly InstalledPluginEntry[] = [];
 		try {
-			// Inspecting the other scope reads its manifest and can throw on a
-			// malformed package.json; keep it inside the cleanup guard so the temp
-			// clone created by resolvePluginSource is still removed on failure.
-			otherScopeEntries = otherRegistryPath
-				? (getInstalledPlugin(await readInstalledPluginsRegistry(otherRegistryPath), pluginId) ?? [])
-				: [];
-			for (const entry of otherScopeEntries) {
-				otherScopeOldNames.set(entry.installPath, await this.#resolvePluginPackageName(entry.installPath, name));
-			}
-
 			version = (await this.#resolveCatalogVersion(pluginEntry, sourcePath)) ?? "0.0.0";
 			packageName = await this.#resolvePluginPackageName(sourcePath, name);
 			// Resolve the runtime names this plugin id currently owns BEFORE cachePlugin
@@ -444,14 +434,30 @@ export class MarketplaceManager {
 			// resolves to the same dir, so cachePlugin would clobber it. Reject before
 			// replacing the cache, checking both scopes' installed registries.
 			const prospectiveCachePath = getCachedPluginPath(this.#opts.pluginsCacheDir, marketplace, name, version);
-			const registriesToCheck =
+			const otherReg =
 				otherRegistryPath && otherRegistryPath !== registryPath
-					? [targetReg, await readInstalledPluginsRegistry(otherRegistryPath)]
-					: [targetReg];
-			this.#assertCachePathAvailable(prospectiveCachePath, pluginId, registriesToCheck);
-			cachePath = await cachePlugin(sourcePath, this.#opts.pluginsCacheDir, marketplace, name, version);
-			await this.#writeEmbeddedLspConfig(pluginEntry, cachePath);
-			await this.#writeEmbeddedDapConfig(pluginEntry, cachePath);
+					? await readInstalledPluginsRegistry(otherRegistryPath)
+					: undefined;
+			this.#assertCachePathAvailable(prospectiveCachePath, pluginId, otherReg ? [targetReg, otherReg] : [targetReg]);
+			// A first install in this scope shares the copy of the same version the other scope already
+			// uses, without writing to it. A reinstall or upgrade in this scope copies anew (below).
+			const shared =
+				existing && existing.length > 0
+					? undefined
+					: (otherReg ? getInstalledPlugin(otherReg, pluginId) : undefined)?.find(
+							entry => entry.version === version && nodeFs.existsSync(entry.installPath),
+						);
+			if (shared) {
+				cachePath = shared.installPath;
+			} else {
+				// Leased before anything is written there, so a concurrent sweep does not take the new
+				// copy for a retired one before the registry names it.
+				cachePath = await cachePlugin(sourcePath, this.#opts.pluginsCacheDir, marketplace, name, version, target =>
+					leaseCacheEntry(target, { forInstall: true }),
+				);
+				await this.#writeEmbeddedLspConfig(pluginEntry, cachePath);
+				await this.#writeEmbeddedDapConfig(pluginEntry, cachePath);
+			}
 		} finally {
 			// Clean up temp clone dirs created by resolvePluginSource; leave user-supplied local dirs alone
 			if (tempCloneRoot) {
@@ -494,6 +500,7 @@ export class MarketplaceManager {
 				existing.map(entry => entry.installPath).filter(installPath => installPath !== cachePath),
 			);
 		}
+		await releaseInstallLease(cachePath);
 
 		// Carry the renamed-from key's runtime state (feature selection + settings)
 		// so a case-only rename preserves the user's configuration.
@@ -512,24 +519,6 @@ export class MarketplaceManager {
 			wasDisabled ? false : undefined,
 			carried,
 		);
-
-		// If this reinstall renamed the runtime key and the other scope references
-		// the same (now-replaced) cache, migrate that scope's link and lockfile key
-		// too, so it does not resolve the new cache content under the stale name.
-		for (const entry of otherScopeEntries) {
-			if (entry.installPath !== cachePath) continue;
-			const oldName = otherScopeOldNames.get(entry.installPath);
-			if (oldName === undefined || oldName === packageName) continue;
-			const removed = await this.#removeRuntimePlugin(otherScope, oldName);
-			await this.#registerRuntimePlugin(
-				otherScope,
-				packageName,
-				cachePath,
-				entry.version,
-				entry.enabled === false ? false : undefined,
-				removed,
-			);
-		}
 
 		this.#clearCache();
 

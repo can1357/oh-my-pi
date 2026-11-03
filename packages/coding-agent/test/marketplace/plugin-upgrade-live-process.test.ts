@@ -1,6 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
-import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { listClaudePluginRoots } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
@@ -9,6 +8,7 @@ import {
 	readInstalledPluginsRegistry,
 } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/marketplace";
 import {
+	leaseCacheEntry,
 	removeCacheEntryUnlessLeased,
 	sweepRetiredCacheEntries,
 } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/marketplace/cache-lease";
@@ -157,7 +157,34 @@ describe("a plugin upgrade under another running omp process", () => {
 
 		expect(fs.existsSync(versionDir("demo", "1.0.0"))).toBe(false);
 		expect(fs.existsSync(versionDir("demo", "2.0.0"))).toBe(true);
-	});
+	}, 120_000);
+
+	it("a reinstall of the same version leaves the copy a running process loaded untouched", async () => {
+		await installDemo();
+		const holder = await startHolder();
+		const loadedSkill = path.join(versionDir("demo", "1.0.0"), "skills", "demo-skill", "SKILL.md");
+		fs.writeFileSync(
+			path.join(marketplaceDir, "plugins", "demo", "skills", "demo-skill", "SKILL.md"),
+			"---\nname: demo-skill\ndescription: Skill of demo.\n---\n\nrebuilt 1.0.0\n",
+		);
+
+		await manager.upgradePlugin("demo@mkt");
+
+		const registry = await readInstalledPluginsRegistry(path.join(pluginsDir(), "installed_plugins.json"));
+		const reinstalled = registry.plugins["demo@mkt"][0].installPath;
+		expect(reinstalled).toBe(`${versionDir("demo", "1.0.0")}___2`);
+		expect(fs.readFileSync(loadedSkill, "utf8")).toContain("demo 1.0.0");
+		expect(fs.readFileSync(path.join(reinstalled, "skills", "demo-skill", "SKILL.md"), "utf8")).toContain(
+			"rebuilt 1.0.0",
+		);
+
+		holder.kill("SIGKILL");
+		await holder.exited;
+		await manager.sweepRetiredPluginVersions();
+
+		expect(fs.existsSync(versionDir("demo", "1.0.0"))).toBe(false);
+		expect(fs.existsSync(reinstalled)).toBe(true);
+	}, 120_000);
 
 	it("keeps the upgraded plugin's place in the registry, so a same-named skill keeps its name", async () => {
 		await installDemo();
@@ -169,7 +196,7 @@ describe("a plugin upgrade under another running omp process", () => {
 		expect(Object.keys(registry.plugins)).toEqual(["demo@mkt", "other@mkt"]);
 		expect(registry.plugins["demo@mkt"]).toHaveLength(1);
 		expect(registry.plugins["demo@mkt"][0].installPath).toBe(versionDir("demo", "2.0.0"));
-	});
+	}, 120_000);
 
 	it("a process that reads the registries leases what they name, and no directory that is gone", async () => {
 		await installDemo();
@@ -181,8 +208,8 @@ describe("a plugin upgrade under another running omp process", () => {
 		const leases = path.join(pluginsDir(), "cache", "plugin-leases");
 		const ownLease = `${process.pid}-${Bun.hash((await processStartToken(process.pid))!).toString(36)}`;
 		expect(fs.readdirSync(path.join(leases, "mkt___demo___1.0.0"))).toEqual([ownLease]);
-		expect(fs.readdirSync(path.join(leases, "mkt___other___1.0.0"))).toEqual([]);
-	});
+		expect(fs.existsSync(path.join(leases, "mkt___other___1.0.0"))).toBe(false);
+	}, 120_000);
 });
 
 describe("plugin cache leases", () => {
@@ -220,22 +247,69 @@ describe("plugin cache leases", () => {
 		expect(fs.existsSync(leaseDir)).toBe(false);
 	});
 
-	it("puts the entry back when a live process leased it while the removal was starting", async () => {
-		const rename = fsp.rename;
-		const spy = spyOn(fsp, "rename").mockImplementation(async (from, to) => {
-			await rename(from, to);
-			if (from === entry) {
-				// Leased after the removal's first check, before its rename.
-				spy.mockRestore();
-				const token = await processStartToken(process.pid);
-				fs.writeFileSync(path.join(leaseDir, `${process.pid}-${Bun.hash(token!).toString(36)}`), "");
-			}
-		});
+	function ownLeaseName(token: string | null): string {
+		return `${process.pid}-${token === null ? "0" : Bun.hash(token).toString(36)}`;
+	}
 
-		expect(await removeCacheEntryUnlessLeased(entry)).toBe(false);
+	it("a live lease survives two removals at once", async () => {
+		const lease = path.join(leaseDir, ownLeaseName(await processStartToken(process.pid)));
+		fs.writeFileSync(lease, "");
+
+		const removed = await Promise.all([removeCacheEntryUnlessLeased(entry), removeCacheEntryUnlessLeased(entry)]);
+
+		expect(removed).toEqual([false, false]);
 		expect(fs.existsSync(path.join(entry, "skills"))).toBe(true);
-		expect(fs.readdirSync(cacheDir)).toEqual(["mkt___demo___1.0.0"]);
+		expect(fs.existsSync(lease)).toBe(true);
 		expect(fs.existsSync(path.join(leaseDir, "retired"))).toBe(true);
+	});
+
+	it("a lease taken while two removals run either keeps the entry or finds it gone and is not kept", async () => {
+		const token = await processStartToken(process.pid);
+		for (let round = 0; round < 20; round++) {
+			const roundEntry = path.join(cacheDir, `mkt___race___1.0.${round}`);
+			const roundLeases = path.join(tmpDir, "cache", "plugin-leases", `mkt___race___1.0.${round}`);
+			fs.mkdirSync(path.join(roundEntry, "skills"), { recursive: true });
+
+			const [, , present] = await Promise.all([
+				removeCacheEntryUnlessLeased(roundEntry),
+				removeCacheEntryUnlessLeased(roundEntry),
+				leaseCacheEntry(roundEntry),
+			]);
+
+			if (present) {
+				expect(fs.existsSync(path.join(roundEntry, "skills"))).toBe(true);
+				expect(fs.existsSync(path.join(roundLeases, ownLeaseName(token)))).toBe(true);
+			} else {
+				expect(fs.existsSync(roundEntry)).toBe(false);
+				expect(fs.existsSync(path.join(roundLeases, ownLeaseName(token)))).toBe(false);
+			}
+		}
+	});
+
+	it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+		"keeps the entry when its lease directory cannot be written",
+		async () => {
+			fs.chmodSync(leaseDir, 0o500);
+			try {
+				expect(await removeCacheEntryUnlessLeased(entry)).toBe(false);
+				expect(fs.existsSync(path.join(entry, "skills"))).toBe(true);
+			} finally {
+				fs.chmodSync(leaseDir, 0o700);
+			}
+		},
+	);
+
+	it("an install leases its new entry before it exists, so a sweep of a retired entry by that name keeps it", async () => {
+		const fresh = path.join(cacheDir, "mkt___demo___2.0.0");
+		const freshLeases = path.join(tmpDir, "cache", "plugin-leases", "mkt___demo___2.0.0");
+		fs.mkdirSync(freshLeases, { recursive: true });
+		fs.writeFileSync(path.join(freshLeases, "retired"), "");
+
+		expect(await leaseCacheEntry(fresh, { forInstall: true })).toBe(false);
+		fs.mkdirSync(fresh);
+		await sweepRetiredCacheEntries(cacheDir, () => false);
+
+		expect(fs.existsSync(fresh)).toBe(true);
 	});
 
 	it("sweeps a retired entry once unleased, keeps one a registry names again, and clears a dead removal", async () => {

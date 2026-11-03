@@ -1,7 +1,9 @@
 /**
  * Plugin cache management.
  *
- * Cache layout: `<cacheDir>/<marketplace>___<pluginName>___<version>/`
+ * Cache layout: `<cacheDir>/<marketplace>___<pluginName>___<version>/`, and
+ * `<cacheDir>/<marketplace>___<pluginName>___<version>___<n>/` for a later copy of a version
+ * whose directory still exists (see {@link cachePlugin}).
  *
  * All three components are validated before any filesystem operation:
  *   - marketplace / pluginName: isValidNameSegment (alnum + . - , max 64)
@@ -13,8 +15,6 @@
 import * as nodeFs from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-
-import { isEnoent, logger } from "@oh-my-pi/pi-utils";
 
 import { isValidNameSegment } from "./types";
 
@@ -55,13 +55,13 @@ export function getCachedPluginPath(
 }
 
 /**
- * Copy `sourcePath` into the cache, returning the absolute cache path.
- *
- * Idempotent: if the target already exists it is replaced, so a partial previous cache is never
- * silently reused. The copy is made beside the target and swapped in by two renames; the previous
- * copy is deleted only after the new one is in place, so a running session that reads the plugin
- * during a same-version reinstall finds it missing only between the two renames, not for the
- * whole recursive delete.
+ * Copy `sourcePath` into a new cache directory and return its absolute path. The first copy of a
+ * version goes to {@link getCachedPluginPath}; a copy of a version whose directory still exists
+ * goes to a fresh sibling, `<that path>___<n>`. So a reinstall never changes a file a running
+ * session reads from the existing copy: the registries move to the new copy, and the old one is
+ * retired under the lease rules (`cache-lease.ts`). `beforeCopy(targetPath)` runs before anything
+ * is written there (the installer leases the target). The copy is made beside the target and
+ * renamed into place, so a failed copy never leaves a partial directory at the target.
  */
 export async function cachePlugin(
 	sourcePath: string,
@@ -69,40 +69,22 @@ export async function cachePlugin(
 	marketplace: string,
 	pluginName: string,
 	version: string,
+	beforeCopy?: (targetPath: string) => Promise<unknown>,
 ): Promise<string> {
-	const targetPath = getCachedPluginPath(cacheDir, marketplace, pluginName, version);
-
-	// Ensure cache directory exists before writing into it
+	const basePath = getCachedPluginPath(cacheDir, marketplace, pluginName, version);
 	await fs.mkdir(cacheDir, { recursive: true });
+	let targetPath = basePath;
+	for (let n = 2; nodeFs.existsSync(targetPath); n++) targetPath = `${basePath}___${n}`;
+	await beforeCopy?.(targetPath);
 
-	// Copy to a staging directory first, then rename into place.
-	// This prevents destroying an active install if fs.cp fails mid-copy.
-	const suffix = Date.now();
-	const stagingPath = `${targetPath}.staging-${suffix}`;
-	const previousPath = `${targetPath}.previous-${suffix}`;
-	let movedAside = false;
+	const stagingPath = `${targetPath}.staging-${Date.now()}`;
 	try {
 		await fs.cp(sourcePath, stagingPath, { recursive: true });
-		try {
-			await fs.rename(targetPath, previousPath);
-			movedAside = true;
-		} catch (err) {
-			if (!isEnoent(err)) throw err;
-		}
 		await fs.rename(stagingPath, targetPath);
 	} catch (err) {
-		// Clean up staging dir on any failure; put an existing targetPath back
-		if (movedAside) await fs.rename(previousPath, targetPath).catch(() => {});
 		await fs.rm(stagingPath, { recursive: true, force: true }).catch(() => {});
 		throw err;
 	}
-	if (movedAside) {
-		// The new copy is in place, so the install succeeded: a leftover old copy only takes disk space.
-		await fs.rm(previousPath, { recursive: true, force: true }).catch(error => {
-			logger.warn("Could not remove the previous plugin cache copy", { path: previousPath, error });
-		});
-	}
-
 	return targetPath;
 }
 

@@ -9,7 +9,7 @@
 
 ### Fixed
 
-- `omp plugin upgrade` and `uninstall` no longer delete a plugin version that a running omp session still uses. Each process leases the version directories it reads from the plugin registries (`~/.omp/plugins/cache/plugin-leases/`), and a leased version is kept until its last holder exits; later installs, upgrades, uninstalls and session startups delete it then. Before, a running session lost the plugin's skill scripts, commands, agents, hooks and MCP server files until it restarted
+- `omp plugin upgrade`, reinstall and `uninstall` no longer delete or change a plugin copy that a running omp session still uses. Each process leases the cache directories it reads from the plugin registries (`~/.omp/plugins/cache/plugin-leases/`), and a leased directory is kept until its last holder exits; later installs, upgrades, uninstalls and session startups delete it then. A reinstall of a version already in the cache copies into a fresh directory instead of replacing the files in place. Before, a running session lost or saw changed skill scripts, commands, agents, hooks and MCP server files until it restarted
 - An upgrade keeps the plugin's place in `installed_plugins.json`. Moving it to the end gave a same-named skill of another plugin the bare name in running sessions, so `skill://<plugin>/<name>` failed with `Unknown skill` and the bare name read the other plugin's skill
 
 ## [18.16.0] - 2026-11-02

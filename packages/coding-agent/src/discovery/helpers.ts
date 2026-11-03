@@ -30,7 +30,7 @@ import {
 import type { Skill, SkillFrontmatter } from "../capability/skill";
 import type { LoadContext, LoadResult, SourceMeta } from "../capability/types";
 import { resolveClaudePaths } from "../config/claude-paths";
-import { leaseCacheEntry, releaseCacheEntryLease } from "../extensibility/plugins/marketplace/cache-lease";
+import { leaseCacheEntry } from "../extensibility/plugins/marketplace/cache-lease";
 import { getPluginsCacheDir } from "../extensibility/plugins/marketplace/registry";
 import type { MCPRequestIdFormat } from "../mcp/types";
 import { type ConfiguredThinkingLevel, parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
@@ -1378,25 +1378,13 @@ async function readPluginRoots(home: string, cwd: string | undefined, revalidate
 }
 
 /**
- * Lease, for this process, each root that is a version directory of the omp plugin cache
- * (`cache-lease.ts`), so that no upgrade or uninstall deletes a version this process uses.
- * False when a root is missing: removed after the registries were read.
+ * Lease, for this process, each root that is a copy in the omp plugin cache (`cache-lease.ts`), so
+ * that no upgrade, reinstall or uninstall deletes a copy this process uses. False when a root is
+ * missing: removed after the registries were read.
  */
 async function leaseCachedPluginRoots(roots: readonly ClaudePluginRoot[], pluginsCacheDir: string): Promise<boolean> {
 	const present = await Promise.all(
-		roots
-			.filter(root => path.dirname(root.path) === pluginsCacheDir)
-			.map(async root => {
-				const created = await leaseCacheEntry(root.path);
-				// Checked after the lease is written: a removal that started before it is seen here, and
-				// one that starts after it sees the lease and keeps the directory.
-				const exists = await fs.promises.stat(root.path).then(
-					() => true,
-					error => !isEnoent(error),
-				);
-				if (!exists && created) await releaseCacheEntryLease(root.path);
-				return exists;
-			}),
+		roots.filter(root => path.dirname(root.path) === pluginsCacheDir).map(root => leaseCacheEntry(root.path)),
 	);
 	return present.every(Boolean);
 }

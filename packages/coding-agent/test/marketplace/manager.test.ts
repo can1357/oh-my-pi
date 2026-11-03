@@ -522,37 +522,6 @@ describe("MarketplaceManager", () => {
 		expect(fs.realpathSync(linkedLink)).toBe(fs.realpathSync(linkedPackage));
 	});
 
-	it("migrates the other scope's runtime key when a shared-cache reinstall renames", async () => {
-		const marketplaceDir = buildNamedMarketplace(
-			path.join(ctx.tmpDir, "gadget-marketplace"),
-			"gadget-market",
-			"gadget",
-		);
-		const sourcePackage = path.join(marketplaceDir, "plugins", "gadget", "package.json");
-		fs.writeFileSync(sourcePackage, JSON.stringify({ name: "Gadget", version: "1.0.0" }));
-		await ctx.manager.addMarketplace(marketplaceDir);
-		// Same plugin+version in both scopes → both reference the one shared cache.
-		await ctx.manager.installPlugin("gadget", "gadget-market", { scope: "user" });
-		await ctx.manager.installPlugin("gadget", "gadget-market", { scope: "project" });
-		const projectRoot = path.join(ctx.tmpDir, "project");
-		expect(hasExactEntry(path.join(ctx.tmpDir, "node_modules"), "Gadget")).toBe(true);
-		expect(hasExactEntry(path.join(projectRoot, "node_modules"), "Gadget")).toBe(true);
-
-		// Force reinstall in the user scope with only the manifest name casing changed.
-		fs.writeFileSync(sourcePackage, JSON.stringify({ name: "gadget", version: "1.0.0" }));
-		await ctx.manager.installPlugin("gadget", "gadget-market", { scope: "user", force: true });
-
-		// Both scopes resolve the shared cache under the new name — no stale link or key.
-		expect(hasExactEntry(path.join(ctx.tmpDir, "node_modules"), "gadget")).toBe(true);
-		expect(hasExactEntry(path.join(ctx.tmpDir, "node_modules"), "Gadget")).toBe(false);
-		expect(hasExactEntry(path.join(projectRoot, "node_modules"), "gadget")).toBe(true);
-		expect(hasExactEntry(path.join(projectRoot, "node_modules"), "Gadget")).toBe(false);
-		const userConfig = await Bun.file(path.join(ctx.tmpDir, "omp-plugins.lock.json")).json();
-		expect(Object.keys(userConfig.plugins)).toEqual(["gadget"]);
-		const projectConfig = await Bun.file(path.join(projectRoot, "omp-plugins.lock.json")).json();
-		expect(Object.keys(projectConfig.plugins)).toEqual(["gadget"]);
-	});
-
 	it("rejects a catalog rename whose cache path case-collides with an installed plugin", async () => {
 		const marketplaceDir = buildNamedMarketplace(path.join(ctx.tmpDir, "case-marketplace"), "case-mkt", "Foo");
 		// Distinct runtime package names so the runtime-name guard does not fire —
@@ -997,7 +966,7 @@ describe("MarketplaceManager", () => {
 		);
 	});
 
-	it("installPlugin with force:true → replaces existing", async () => {
+	it("installPlugin with force:true → copies anew and drops the replaced copy", async () => {
 		await ctx.manager.addMarketplace(FIXTURE_DIR);
 		const first = await ctx.manager.installPlugin("hello-plugin", "test-marketplace");
 		await ctx.manager.setPluginEnabled("hello-plugin@test-marketplace", false);
@@ -1005,8 +974,9 @@ describe("MarketplaceManager", () => {
 			force: true,
 		});
 
-		expect(second.installPath).toBe(first.installPath);
+		expect(second.installPath).toBe(`${first.installPath}___2`);
 		expect(fs.existsSync(second.installPath)).toBe(true);
+		expect(fs.existsSync(first.installPath)).toBe(false);
 
 		const runtimeConfig = await Bun.file(path.join(ctx.tmpDir, "omp-plugins.lock.json")).json();
 		expect(runtimeConfig.plugins["hello-plugin"].enabled).toBe(false);
