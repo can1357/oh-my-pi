@@ -4265,7 +4265,7 @@ describe("computer background fallback", () => {
 			]);
 		});
 
-		it("keeps an exact application ID over a same-named file in the session's folder or under ~", async () => {
+		it("keeps an exact application ID or ~name over a same-named file in the session's folder or home", async () => {
 			class ShadowedSession extends FileSession {
 				override async listApplications() {
 					return [
@@ -4286,6 +4286,7 @@ describe("computer background fallback", () => {
 				'await desktop.apps.open("README.md", { app: "computer.test.ts" });',
 				'await desktop.apps.open("~editor.desktop");',
 				'await desktop.apps.open("README.md", { app: "~editor.desktop" });',
+				'await desktop.apps.open("~Editor");',
 			].join("\n");
 			expect((await run(native, code, "takeover")).ok).toBe(true);
 			expect(native.opened).toEqual([
@@ -4293,6 +4294,7 @@ describe("computer background fallback", () => {
 				{ id: "README.md", options: { app: "computer.test.ts" } },
 				{ id: "~editor.desktop", options: {} },
 				{ id: "README.md", options: { app: "~editor.desktop" } },
+				{ id: "~Editor", options: {} },
 			]);
 		});
 
