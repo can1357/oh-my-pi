@@ -16,12 +16,16 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { CustomTool } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/types";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { TanCommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/tan-command-controller";
+import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import { type CreateAgentSessionOptions, createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as settingsStream from "@oh-my-pi/pi-coding-agent/session/settings-stream-fn";
 import { ToolAllowList } from "@oh-my-pi/pi-coding-agent/tools/tool-allowlist";
 import { type } from "@oh-my-pi/omptype";
+import type { AsyncJobRun } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 
 let dir: string;
 let auth: AuthStorage;
@@ -127,16 +131,78 @@ describe("write is only the device transport when --tools does not list it", () 
 		expect(await attemptWrite(child, path.join(dir, "explicit-child.txt"))).toBe("ABSENT");
 	});
 
-	it("for a /tan-style clone of a parent's tool presentation", async () => {
-		const parent = await create({ toolNames: ["read", "task"], toolAllowList: policy, mcpTools: [fixtureDevice] });
-		const clone = await create({
-			toolNames: parent.getEnabledToolNames(),
-			mountedToolNames: parent.getMountedXdevToolNames(),
-			toolAllowList: parent.toolAllowList,
-			mcpTools: [fixtureDevice],
+	// The real `/tan` controller: the clone gets the parent's enabled names, which
+	// include `write` as the device transport, so without the parent's list it
+	// could write files.
+	it("for a /tan clone", async () => {
+		const parent = await create(
+			{ toolNames: ["read", "task"], toolAllowList: policy, mcpTools: [fixtureDevice] },
+			{ "async.enabled": true },
+		);
+		expect(parent.getEnabledToolNames()).toContain("write");
+		const target = path.join(dir, "tan-clone.txt");
+		let run: AsyncJobRun | undefined;
+		vi.spyOn(parent.asyncJobManager!, "register").mockImplementation((_type, _label, job) => {
+			run = job;
+			return "job-tan";
 		});
-		await clone.setActiveToolPresentation(parent.getEnabledToolNames(), parent.getMountedXdevToolNames());
-		expect(await attemptWrite(clone, path.join(dir, "tan-clone.txt"))).toBe("ABSENT");
+		vi.spyOn(parent, "sendCustomMessage").mockResolvedValue(true);
+		vi.spyOn(SessionManager, "forkFrom").mockResolvedValue(SessionManager.inMemory(dir));
+		const realCreate = sdkModule.createAgentSession;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			const result = await realCreate({
+				...options,
+				agentDir: dir,
+				agentRegistry: new AgentRegistry(),
+				disableExtensionDiscovery: true,
+				skills: [],
+				rules: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				skipPythonPreflight: true,
+				cacheWarming: false,
+			});
+			sessions.push(result.session);
+			result.session.agent.streamFn = createMockModel({
+				provider: "openai",
+				responses: [
+					{ content: [{ type: "toolCall", name: "write", arguments: { path: target, content: "tan write" } }] },
+					{ content: ["done"] },
+				],
+			}).stream;
+			return result;
+		});
+		const ctx = {
+			session: parent,
+			sessionManager: {
+				getHeader: () => undefined,
+				getSessionFile: () => path.join(dir, "tan-parent.jsonl"),
+				getCwd: () => dir,
+				getSessionDir: () => dir,
+				getArtifactsDir: () => path.join(dir, "tan-parent"),
+				getSessionId: () => "tan-parent",
+				ensureOnDisk: async () => {},
+				flush: async () => {},
+			},
+			settings: Settings.isolated({ "async.enabled": true }),
+			mcpManager: undefined,
+			showStatus: () => {},
+			showWarning: () => {},
+			showError: (message: string) => {
+				throw new Error(message);
+			},
+			rebuildChatFromMessages: () => {},
+		} as unknown as InteractiveModeContext;
+		expect(await new TanCommandController(ctx).start("write the marker")).toBe(true);
+		if (!run) throw new Error("/tan registered no job");
+		await run({
+			jobId: "job-tan",
+			signal: new AbortController().signal,
+			reportProgress: async () => {},
+			markRunning: () => {},
+		});
+		expect(await Bun.file(target).exists()).toBe(false);
 	});
 
 	it("but writes files when the list names write", async () => {

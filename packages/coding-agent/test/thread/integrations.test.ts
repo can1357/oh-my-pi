@@ -22,6 +22,7 @@ import { settingsThreadService } from "../../src/thread/services/settings";
 import type { IntegrationsProbe } from "../fixtures/integrations-worker";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 import { type ServiceWorker, startServiceWorker } from "../helpers/service-worker";
+import { ToolAllowList } from "../../src/tools/tool-allowlist";
 
 const FIXTURES = path.join(import.meta.dir, "..", "fixtures");
 
@@ -228,5 +229,17 @@ describe("integrations thread service", () => {
 		expect(local.extensions.flatMap(extension => [...extension.commands.keys()])).toEqual(["thread-main"]);
 
 		expect(await probe.bindExtensions([prepared], dir)).toEqual({ commands: ["thread-worker"], errors: [] });
+	}, 20_000);
+	// A subagent's options cross into a pooled worker; the thread RPC refuses a class
+	// instance it has no codec for, so a `--tools` list must cross as itself (PR #17970).
+	it("sends a --tools allow-list to a worker as an allow-list", async () => {
+		const list = ToolAllowList.parse(["read", "mcp:fixture"]);
+		expect(await probe.allowList(list)).toEqual({
+			isList: true,
+			entries: ["read", "mcp:fixture"],
+			write: false,
+			read: true,
+			mcp: true,
+		});
 	}, 20_000);
 });
