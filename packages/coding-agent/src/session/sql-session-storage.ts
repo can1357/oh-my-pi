@@ -113,13 +113,16 @@ interface DialectQueries {
 	hasParts: Statement;
 	deleteParts: Statement;
 	/**
-	 * Every session row, and every part, whose path starts with `@dir`: its
-	 * first `@len` characters equal it. A character comparison, not `LIKE`,
-	 * so `%` and `_` in a path stay literal and SQLite's ASCII-insensitive
-	 * `LIKE` cannot match another case.
+	 * Delete every session row whose path starts with `@dir` (its first `@len`
+	 * characters equal it; a character comparison, not `LIKE`, so `%` and `_`
+	 * stay literal and SQLite's ASCII-insensitive `LIKE` cannot match another
+	 * case) and exactly those rows' parts. PostgreSQL and MySQL do both in one
+	 * statement, so the parts deleted are those of the rows deleted: a row
+	 * another client commits between two statements would otherwise keep its
+	 * row and lose its parts under READ COMMITTED. SQLite runs the two
+	 * statements inside `BEGIN IMMEDIATE`, where no other writer runs.
 	 */
-	deleteRowsUnder: Statement;
-	deletePartsUnder: Statement;
+	deleteUnder: Statement[];
 	insertPart: Statement;
 	renameRow: Statement;
 	renameParts: Statement;
@@ -405,8 +408,24 @@ function buildQueries(adapter: SqlSessionStorageAdapter, table: string): Dialect
 		deleteRow: sql(`DELETE FROM ${table} WHERE path = @path`),
 		hasParts: sql(`SELECT 1 AS found FROM ${parts} WHERE path = @path LIMIT 1`),
 		deleteParts: sql(`DELETE FROM ${parts} WHERE path = @path`),
-		deleteRowsUnder: sql(`DELETE FROM ${table} WHERE substr(path, 1, @len) = @dir`),
-		deletePartsUnder: sql(`DELETE FROM ${parts} WHERE substr(path, 1, @len) = @dir`),
+		deleteUnder: {
+			postgres: [
+				sql(
+					`WITH gone AS (DELETE FROM ${table} WHERE substr(path, 1, @len) = @dir RETURNING path) ` +
+						`DELETE FROM ${parts} WHERE path IN (SELECT path FROM gone)`,
+				),
+			],
+			mysql: [
+				sql(
+					`DELETE r, p FROM ${table} AS r LEFT JOIN ${parts} AS p ON p.path = r.path ` +
+						`WHERE substr(r.path, 1, @len) = @dir`,
+				),
+			],
+			sqlite: [
+				sql(`DELETE FROM ${parts} WHERE substr(path, 1, @len) = @dir`),
+				sql(`DELETE FROM ${table} WHERE substr(path, 1, @len) = @dir`),
+			],
+		}[adapter],
 		insertPart: sql(`INSERT INTO ${parts} (path, start_offset, content) VALUES (@path, @offset, @content)`),
 		renameRow: sql(
 			`UPDATE ${table} SET path = @dst, mtime_ms = @mtime WHERE path = @src${mysql ? "" : " RETURNING path"}`,
@@ -903,9 +922,8 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 		await this.#transaction(async transaction => {
 			// Every row first: their locks must all be held before the first parts look (see #deleteParts).
 			for (const path of paths) await run(transaction, this.#q.deleteRow, { path });
-			if (under) await run(transaction, this.#q.deleteRowsUnder, under);
+			if (under) for (const query of this.#q.deleteUnder) await run(transaction, query, under);
 			for (const path of paths) await this.#deleteParts(transaction, path);
-			if (under) await run(transaction, this.#q.deletePartsUnder, under);
 		});
 	}
 

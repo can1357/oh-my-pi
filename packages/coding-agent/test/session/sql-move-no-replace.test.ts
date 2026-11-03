@@ -15,6 +15,8 @@ import { SessionManager, SessionMoveRefusedError } from "@oh-my-pi/pi-coding-age
 import {
 	SqlSessionStorage,
 	type SqlSessionStorageAdapter,
+	type SqlSessionStorageClient,
+	type SqlSessionStorageTransaction,
 } from "@oh-my-pi/pi-coding-agent/session/sql-session-storage";
 import { getSessionsDir, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "../helpers/settings-test-state";
@@ -55,11 +57,16 @@ async function seed(adapter: SqlSessionStorageAdapter, url: string) {
 	setAgentDir(tempDir.join("agent"));
 	const table = `omp_mvnr_${process.pid}_${Date.now().toString(36)}_${tableSeq++}`;
 	const databaseUrl = adapter === "sqlite" ? `sqlite:${tempDir.join("sessions.db")}` : url;
-	/** A client of the shared database, as each omp process holds its own. */
-	const connect = async (): Promise<{ client: SQL; storage: SqlSessionStorage }> => {
+	/**
+	 * A client of the shared database, as each omp process holds its own;
+	 * `wrap` puts a test hook between the store and the driver.
+	 */
+	const connect = async (
+		wrap?: (client: SQL) => SqlSessionStorageClient,
+	): Promise<{ client: SQL; storage: SqlSessionStorage }> => {
 		const client = new SQL(databaseUrl);
 		clients.push(client);
-		return { client, storage: await SqlSessionStorage.create({ client, table }) };
+		return { client, storage: await SqlSessionStorage.create({ client: wrap ? wrap(client) : client, table, adapter }) };
 	};
 	const { client, storage } = await connect();
 	cleanups.push(async () => {
@@ -309,3 +316,48 @@ for (const { adapter, url } of BACKENDS) {
 		});
 	});
 }
+
+// PostgreSQL runs each statement on its own READ COMMITTED snapshot, and a new
+// row's key takes no lock the delete holds, so another client can commit a
+// child between two statements of the delete. (MySQL's gap locks and SQLite's
+// write lock make such a client wait for the delete instead.)
+describe.skipIf(!process.env.OMP_TEST_SQL_POSTGRES_URL)("deleting a postgres-stored session", () => {
+	test("never keeps a child's row while deleting its parts", async () => {
+		const { manager, source, artifactsDir, connect, stored } = await seed(
+			"postgres",
+			process.env.OMP_TEST_SQL_POSTGRES_URL!,
+		);
+		await manager.close();
+		const fresh = path.join(artifactsDir, "Fresh.jsonl");
+		const creator = await connect();
+		let created = false;
+		// After each statement of the delete that matches the artifacts prefix,
+		// another client creates and commits a child there once.
+		const afterPrefixStatement = async (query: string): Promise<void> => {
+			if (created || !query.includes("substr(path, 1,")) return;
+			created = true;
+			await creator.storage.writeText(fresh, transcript("fresh"));
+			await creator.storage.drain();
+		};
+		const hooked = (transaction: SqlSessionStorageTransaction): SqlSessionStorageTransaction => ({
+			async unsafe(query, values) {
+				const result = await transaction.unsafe(query, values);
+				await afterPrefixStatement(query);
+				return result;
+			},
+		});
+		const deleter = await connect(client => ({
+			options: client.options,
+			unsafe: (query, values) => client.unsafe(query, values),
+			transaction: work => client.transaction(transaction => work(hooked(transaction))),
+		}));
+
+		await deleter.storage.deleteSessionWithArtifacts(source);
+		await deleter.storage.drain();
+
+		expect(created).toBe(true);
+		expect(await stored(source)).toBeNull();
+		// Committed after the delete's statement, the child is whole; it is never a row with no bytes.
+		expect(await stored(fresh)).toBe(transcript("fresh"));
+	});
+});
