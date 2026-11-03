@@ -130,6 +130,50 @@ fs.writeFileSync(${JSON.stringify(bodyFile)}, new Uint8Array(await Bun.stdin.arr
 		}
 	});
 
+	// The blob daemon runs the configurable FTP command for every session in the
+	// project; it must carry the requesting session's MCP choice (PR #17795
+	// review, round 5).
+	it("runs the FTP command with the upload request's environment overlay", async () => {
+		const temp = fs.mkdtempSync(path.join(os.tmpdir(), "omp-ftp-env-"));
+		try {
+			const envFile = path.join(temp, "env");
+			const executable = await compileFakeExecutable(
+				temp,
+				"fake-curl-env",
+				`import * as fs from "node:fs";
+fs.writeFileSync(${JSON.stringify(envFile)}, \`\${process.env.PI_NO_MCP ?? "unset"}|\${process.env.OMP_TEST_UPLOAD_OVERLAY ?? "unset"}\`);
+await Bun.stdin.arrayBuffer();
+`,
+			);
+			const uploader = requiredUploader(
+				createSelfHostedUploader(
+					"ftp",
+					configured(
+						{
+							protocol: "ftp",
+							host: "upload.test",
+							publicBaseUrl: "https://cdn.test/",
+							commandBinary: executable,
+						},
+						{ username: "alice", password: "p@ss" },
+					),
+				),
+			);
+			const previous = process.env.PI_NO_MCP;
+			process.env.PI_NO_MCP = "";
+			try {
+				// The marker cannot come from this process's launch environment.
+				await uploader.upload({ ...request, env: { PI_NO_MCP: "1", OMP_TEST_UPLOAD_OVERLAY: "request" } });
+			} finally {
+				if (previous === undefined) delete process.env.PI_NO_MCP;
+				else process.env.PI_NO_MCP = previous;
+			}
+			expect(fs.readFileSync(envFile, "utf8")).toBe("1|request");
+		} finally {
+			fs.rmSync(temp, { recursive: true, force: true });
+		}
+	});
+
 	it("does not mis-map an encoded shared-folder path or write outside its configured subtree", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-shared-uploader-"));
 		try {

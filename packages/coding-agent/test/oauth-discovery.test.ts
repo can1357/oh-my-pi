@@ -10,6 +10,10 @@ import {
 	rfc9728ProtectedResourceMetadataUrl,
 } from "@oh-my-pi/pi-coding-agent/mcp/oauth-discovery";
 import { type FetchInput, mockFetch } from "./helpers/fetch-mock";
+import { allowMCPInTests } from "./helpers/mcp-policy";
+
+// These tests drive MCP OAuth helpers against stubs; the test runner exports PI_NO_MCP=1.
+allowMCPInTests();
 
 describe("mcp oauth discovery", () => {
 	it("extracts Mcp-Auth-Server from transport error headers", () => {

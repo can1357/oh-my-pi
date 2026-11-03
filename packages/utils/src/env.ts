@@ -147,6 +147,40 @@ const inheritedEnvValues = new Map<string, string>();
 export function setInheritedEnv(name: string, value: string): void {
 	Bun.env[name] = value;
 	inheritedEnvValues.set(name, value);
+	installLiveSpawnEnvDefault();
+}
+
+let liveSpawnEnvDefaultInstalled = false;
+
+/**
+ * Bun starts a child that is given no `env` with the environment this process
+ * was launched with, not `process.env`: a value set at runtime never reaches
+ * it. Once this process exports a value at runtime ({@link setInheritedEnv}),
+ * `Bun.spawn` and `Bun.spawnSync` default to the live environment, as Node's
+ * `child_process` already does, so every child inherits the value.
+ */
+function installLiveSpawnEnvDefault(): void {
+	if (liveSpawnEnvDefaultInstalled) return;
+	liveSpawnEnvDefaultInstalled = true;
+	const spawn = Bun.spawn;
+	const spawnSync = Bun.spawnSync;
+	Bun.spawn = ((...args: unknown[]) =>
+		(spawn as (...args: unknown[]) => unknown)(...withLiveEnv(args))) as typeof Bun.spawn;
+	Bun.spawnSync = ((...args: unknown[]) =>
+		(spawnSync as (...args: unknown[]) => unknown)(...withLiveEnv(args))) as typeof Bun.spawnSync;
+}
+
+/** `Bun.spawn` arguments, in either call form, with `env: process.env` when they set none. */
+function withLiveEnv(args: unknown[]): unknown[] {
+	const [first, second] = args;
+	if (Array.isArray(first)) {
+		const options = (second ?? {}) as { env?: unknown };
+		return options.env === undefined ? [first, { ...options, env: process.env }, ...args.slice(2)] : args;
+	}
+	if (first !== null && typeof first === "object" && (first as { env?: unknown }).env === undefined) {
+		return [{ ...first, env: process.env }, ...args.slice(1)];
+	}
+	return args;
 }
 
 function expandDotenvValues(values: Record<string, string>, env: Record<string, string>): Record<string, string> {

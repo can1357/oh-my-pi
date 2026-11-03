@@ -318,6 +318,37 @@ describe("filterChildShellEnv", () => {
 		expect(JSON.parse(stdout)).toEqual({ inherited: "1", plain: null });
 	});
 
+	// Bun starts a child given no `env` with the environment this process was
+	// launched with, so a value set at runtime never reached it (PR #17795
+	// review, round 5: `--no-mcp` did not reach the external editor or Biome).
+	it("gives a child started without env the value this process set at runtime", async () => {
+		const envModulePath = path.join(import.meta.dir, "..", "src", "env.ts");
+		const probe = "process.stdout.write(process.env.PI_NO_MCP ?? 'unset')";
+		const script = [
+			`import { setInheritedEnv } from ${JSON.stringify(envModulePath)};`,
+			'setInheritedEnv("PI_NO_MCP", "1");',
+			`const array = Bun.spawnSync([process.execPath, "-e", ${JSON.stringify(probe)}]).stdout.toString();`,
+			`const object = Bun.spawnSync({ cmd: [process.execPath, "-e", ${JSON.stringify(probe)}] }).stdout.toString();`,
+			`const piped = await new Response(Bun.spawn([process.execPath, "-e", ${JSON.stringify(probe)}], { stdout: "pipe" }).stdout).text();`,
+			`const explicit = Bun.spawnSync([process.execPath, "-e", ${JSON.stringify(probe)}], { env: { PATH: process.env.PATH ?? "" } }).stdout.toString();`,
+			"process.stdout.write(JSON.stringify({ array, object, piped, explicit }));",
+		].join("\n");
+		const proc = Bun.spawn([process.execPath, "--no-install", "--eval", script], {
+			env: { ...process.env, PI_NO_MCP: "" },
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const [stdout, stderr, exitCode] = await Promise.all([
+			new Response(proc.stdout).text(),
+			new Response(proc.stderr).text(),
+			proc.exited,
+		]);
+
+		expect(exitCode, stderr).toBe(0);
+		// An explicit `env` stays exactly what the caller gave.
+		expect(JSON.parse(stdout)).toEqual({ array: "1", object: "1", piped: "1", explicit: "unset" });
+	});
+
 	it.skipIf(process.platform === "win32")(
 		"keeps filtering after the process working directory is deleted",
 		async () => {

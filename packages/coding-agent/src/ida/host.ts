@@ -211,12 +211,12 @@ class IdaHost {
 			case "flush": {
 				const worker = await this.#liveWorker();
 				if (!worker.needsSave) return { saved: false };
-				await worker.request("save", {}, { timeoutMs: FLUSH_TIMEOUT_MS });
+				await worker.request("save", {}, { timeoutMs: FLUSH_TIMEOUT_MS, env: request.env });
 				return { saved: true };
 			}
 			case "close": {
 				const worker = await this.#liveWorker();
-				await worker.close({ save: request.save });
+				await worker.close({ save: request.save, env: request.env });
 				return { closed: true };
 			}
 		}

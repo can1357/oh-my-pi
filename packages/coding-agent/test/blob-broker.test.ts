@@ -418,7 +418,7 @@ if (fs.statSync(file, { throwIfNoEntry: false })?.size) {
 			const config: BlobBrokerWorkerConfig = {
 				kind: "command",
 				options: {
-					command: `${process.execPath} -e "console.log('https://files.example/<' + (process.env.PI_NO_MCP ?? 'unset') + '>/' + process.argv.length)" {file}`,
+					command: `${process.execPath} -e "console.log('https://files.example/<' + (process.env.PI_NO_MCP ?? 'unset') + '|' + (process.env.OMP_TEST_UPLOAD_OVERLAY ?? 'unset') + '>/' + process.argv.length)" {file}`,
 				},
 				credentials: {},
 				bindHost: "127.0.0.1",
@@ -430,13 +430,14 @@ if (fs.statSync(file, { throwIfNoEntry: false })?.size) {
 					key: `mcp-policy-${daemon || "on"}`,
 					mimeType: "image/png",
 					data: Buffer.from("payload").toString("base64"),
-					env: { PI_NO_MCP: request },
+					// The marker cannot come from this process's launch environment.
+					env: { PI_NO_MCP: request, OMP_TEST_UPLOAD_OVERLAY: "request" },
 				};
 				const response = await handle(
 					new Request("http://blob/blob", { method: "POST", body: JSON.stringify(body) }),
 				);
 				const { publication } = (await response.json()) as EnsureBlobResponse;
-				expect(publication?.url).toContain(`/<${request}>/`);
+				expect(publication?.url).toContain(`/<${request}|request>/`);
 			} finally {
 				backend.stop();
 			}

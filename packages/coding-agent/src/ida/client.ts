@@ -234,12 +234,12 @@ export class IdaDatabase {
 
 	/** Save when the database has unsaved changes. */
 	async flush(): Promise<void> {
-		await this.#conn.call({ id: this.#conn.nextId(), op: "flush" });
+		await this.#conn.call({ id: this.#conn.nextId(), op: "flush", env: mcpPolicyEnv() });
 	}
 
 	/** Close the database (saving first when `save`); its host exits afterwards. */
 	async close(options: { save: boolean }): Promise<void> {
-		await this.#conn.call({ id: this.#conn.nextId(), op: "close", save: options.save });
+		await this.#conn.call({ id: this.#conn.nextId(), op: "close", save: options.save, env: mcpPolicyEnv() });
 	}
 
 	/** Drop this process's connection; the host keeps running. */

@@ -7,7 +7,7 @@
 - `acp` runtime validators (`zNewSessionResponse`, `zSessionNotification`, …) now report each failing field's path and reason in `error.issues` instead of a single `Invalid <label>`; `ValidationError` issue paths are typed `PropertyKey[]` ([#17699](https://github.com/can1357/oh-my-pi/pull/17699))
 ### Added
 
-- Added `setInheritedEnv()`: sets an environment variable this process decided at runtime, which child shells keep even when a project dotenv file names it
+- Added `setInheritedEnv()`: sets an environment variable this process decided at runtime, which child shells keep even when a project dotenv file names it. Once it has run, `Bun.spawn` and `Bun.spawnSync` calls that pass no `env` give the child the live environment (as Node's `child_process` does) instead of the one this process was launched with, so the value reaches every child
 - Added `isPidAlive` (signal-0 liveness probe) and `asStrictBytes` (a `Uint8Array` narrowed to its own `ArrayBuffer` for WebCrypto)
 
 ## [18.15.0] - 2026-11-01

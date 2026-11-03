@@ -12,6 +12,7 @@
  *    configured headers are attached only when the hop targets the configured
  *    origin. Method-changing redirects of non-GET requests are refused.
  */
+import { assertMCPEnabled } from "../policy";
 
 /** Header buckets for one MCP HTTP request. */
 interface MCPHeaderSources {
@@ -107,6 +108,8 @@ export async function mcpFetch(
 	sources: MCPHeaderSources,
 	originLocked: boolean,
 ): Promise<Response> {
+	// Exported for SDK hosts: every HTTP request to an MCP server goes through here.
+	assertMCPEnabled();
 	if (!originLocked) {
 		return fetch(url, { ...init, headers: mergeMCPHeaders(sources), timeout: false });
 	}

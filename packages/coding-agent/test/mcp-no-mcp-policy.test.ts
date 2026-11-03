@@ -10,6 +10,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as mcpClient from "@oh-my-pi/pi-coding-agent/mcp/client";
 import { callBuiltinSearchMCP, callMCP } from "@oh-my-pi/pi-coding-agent/mcp/json-rpc";
+import { discoverOAuthEndpoints, fetchResourceMetadataScopes } from "@oh-my-pi/pi-coding-agent/mcp/oauth-discovery";
+import { mcpFetch } from "@oh-my-pi/pi-coding-agent/mcp/transports/header-policy";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import * as mcpPolicy from "@oh-my-pi/pi-coding-agent/mcp/policy";
 import { resolveMcpOAuthEndpointsFromServer } from "@oh-my-pi/pi-coding-agent/mcp/oauth-reauth";
@@ -133,6 +135,33 @@ describe("PI_NO_MCP=1 and explicitly named MCP servers", () => {
 			const url = `http://127.0.0.1:${server.port}/mcp`;
 			await expect(callMCP(url, "initialize")).rejects.toThrow("MCP is disabled");
 			await expect(callBuiltinSearchMCP(url, "initialize")).rejects.toThrow("hosted search endpoints");
+			expect(requests).toBe(0);
+		} finally {
+			server.stop(true);
+		}
+	});
+
+	// Round-5 review: other exported helpers that contact an MCP server reached a
+	// loopback server under PI_NO_MCP=1.
+	it("contacts no server through the exported MCP HTTP and OAuth discovery helpers", async () => {
+		setNoMcpEnvForTest("1");
+		let requests = 0;
+		const server = Bun.serve({
+			port: 0,
+			fetch() {
+				requests += 1;
+				return Response.json({});
+			},
+		});
+		try {
+			const url = `http://127.0.0.1:${server.port}`;
+			await expect(
+				mcpFetch(`${url}/mcp`, { method: "POST", body: "{}" }, { generated: {}, configured: {} }, false),
+			).rejects.toThrow("MCP is disabled");
+			await expect(discoverOAuthEndpoints(`${url}/mcp`)).rejects.toThrow("MCP is disabled");
+			await expect(fetchResourceMetadataScopes(`${url}/.well-known/oauth-protected-resource`)).rejects.toThrow(
+				"MCP is disabled",
+			);
 			expect(requests).toBe(0);
 		} finally {
 			server.stop(true);

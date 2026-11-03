@@ -56,7 +56,8 @@ export const IDA_CALL_METHODS = ["view", "exec", "rename", "comment", "set_type"
 /** A method forwarded with `call`. */
 export type IdaCallMethod = (typeof IDA_CALL_METHODS)[number];
 
-const hostRequestSchema = type({ id: "number", op: "'ping' | 'open' | 'status' | 'flush'" })
+const hostRequestSchema = type({ id: "number", op: "'ping' | 'open' | 'status'" })
+	.or({ id: "number", op: "'flush'", "env?": "Record<string, string>" })
 	.or({
 		id: "number",
 		op: "'call'",
@@ -66,16 +67,16 @@ const hostRequestSchema = type({ id: "number", op: "'ping' | 'open' | 'status' |
 		"env?": "Record<string, string>",
 	})
 	.or({ id: "number", op: "'cancel'", target: "number" })
-	.or({ id: "number", op: "'close'", save: "boolean" });
+	.or({ id: "number", op: "'close'", save: "boolean", "env?": "Record<string, string>" });
 
 /**
  * One request frame sent to the host.
  * - `ping`: liveness probe, answered `"pong"` in any state.
  * - `open`: wait until the database is open; answers {@link IdaHostStatus} or the open failure.
  * - `status`: current {@link IdaHostStatus} without waiting.
- * - `call`: forward one worker request; `timeoutMs` covers the queue wait too. `env` is the
- *   caller's environment overlay (its MCP choice) for whatever that request runs: the host and
- *   its worker serve every omp process and keep the environment of the one that started them.
+ * - `call`: forward one worker request; `timeoutMs` covers the queue wait too. `env` (also on
+ *   `flush` and `close`) is the caller's environment overlay, its MCP choice: the host and its
+ *   worker serve every omp process and keep the environment of the one that started them.
  * - `cancel`: abort the caller's own pending `call` `target` (no answer).
  * - `flush`: save when there are unsaved changes; answers `{ saved }`.
  * - `close`: save (when `save`) and close; the host exits after answering.

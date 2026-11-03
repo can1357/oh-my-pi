@@ -758,30 +758,21 @@ def _close_and_exit(save):
     sys.exit(code)
 
 
-class _request_env:
-    """Apply a request's environment overlay (the calling omp session's MCP
-    choice) while it runs, then restore. The worker serves every omp process
-    but keeps the environment of the session that started it; a process the
-    request starts must inherit the caller's choice. Requests run one at a time."""
+# Environment variables whose "1" stays set for the worker's life once any
+# request carries it. The worker serves every omp process but keeps the
+# environment of the session that started it, and work a request schedules
+# (a thread, an atexit callback) can start a process after that request ends;
+# so once a session with MCP off (PI_NO_MCP=1) has used the worker, every
+# later process it starts has MCP off too. A request can never turn it back on.
+_STICKY_ON = ("PI_NO_MCP",)
 
-    def __init__(self, env):
-        self._env = env if isinstance(env, dict) else {}
-        self._saved = {}
 
-    def __enter__(self):
-        for key, value in self._env.items():
-            if isinstance(key, str) and isinstance(value, str):
-                self._saved[key] = os.environ.get(key)
-                os.environ[key] = value
-        return self
-
-    def __exit__(self, *exc):
-        for key, value in self._saved.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
-        return False
+def _apply_caller_env(env):
+    if not isinstance(env, dict):
+        return
+    for key in _STICKY_ON:
+        if env.get(key) == "1":
+            os.environ[key] = "1"
 
 
 def _handle(line):
@@ -794,6 +785,7 @@ def _handle(line):
         req_id = req.get("id")
         method = req.get("method")
         params = req.get("params") or {}
+        _apply_caller_env(req.get("env"))
         if method == "close":
             save = bool(params.get("save"))
             try:
@@ -813,8 +805,7 @@ def _handle(line):
     except BaseException as e:
         _send({"id": req_id, "ok": False, "error": _error(e)})
         return
-    with _request_env(req.get("env")):
-        ok, result = _run(req_id, handler, params)
+    ok, result = _run(req_id, handler, params)
     if ok:
         _send({"id": req_id, "ok": True, "result": result, "dirty": _DIRTY})
     else:
