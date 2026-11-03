@@ -47,7 +47,7 @@ use super::{Dir, Leftover, Sessions, Shared, child_end};
 use crate::{
 	bash::{
 		ChildRedir, ChildRedirs, EnvView, ExitStatus, ExtProc, OpenFlags, OsHandle, PgroupSpec,
-		Platform, Rlimit, SigSet, Signal, SpawnSpec,
+		Platform, Rlimit, SigSet, Signal, SpawnSpec, StdioSpec,
 	},
 	sys::{
 		lifecycle::{Abandon, Tracker},
@@ -433,6 +433,9 @@ struct Program<'a> {
 	ign:     SigSet,
 	/// `(resource, soft, hard)` set in the child before exec.
 	rlimits: &'a [(Rlimit, Option<u64>, Option<u64>)],
+	/// Targets the child gets closed ([`StdioSpec::Closed`]): each is
+	/// installed from a null-device placeholder, then closed.
+	closed:  &'a [i32],
 }
 
 /// A possible shell text file needs the engine's ENOEXEC retry. The child
@@ -494,13 +497,21 @@ pub(super) fn spawn(shared: &Arc<Shared>, spec: SpawnSpec<'_>) -> io::Result<Box
 	let mut pumps = Vec::new();
 	let mut feeds = Vec::new();
 	let mut fds = Vec::with_capacity(3 + extra_fds.len());
+	let mut closed = Vec::new();
 	let [stdin, stdout, stderr] = stdio;
-	fds.push((0, child_fd(shared, stdin, Dir::In, &mut pumps, &mut feeds)?));
-	fds.push((1, child_fd(shared, stdout, Dir::Out, &mut pumps, &mut feeds)?));
-	fds.push((2, child_fd(shared, stderr, Dir::Out, &mut pumps, &mut feeds)?));
+	for (target, spec, dir) in [(0, stdin, Dir::In), (1, stdout, Dir::Out), (2, stderr, Dir::Out)] {
+		if matches!(spec, StdioSpec::Closed) {
+			closed.push(target);
+		}
+		fds.push((target, child_fd(shared, spec, dir, &mut pumps, &mut feeds)?));
+	}
 	for (fd, s) in extra_fds {
 		if fd < 3 {
 			return Err(invalid(format!("extra fd {fd} overlaps stdio")));
+		}
+		if matches!(s, StdioSpec::Closed) {
+			// Not passed: the child has no such descriptor.
+			continue;
 		}
 		fds.push((fd, child_fd(shared, s, Dir::Probe, &mut pumps, &mut feeds)?));
 	}
@@ -509,7 +520,8 @@ pub(super) fn spawn(shared: &Arc<Shared>, spec: SpawnSpec<'_>) -> io::Result<Box
 	// Polled by the `ExtProc`; dropped (stopping every pump) on any failure
 	// below.
 	let pumps = Pumps::new(pumps, feeds, &tracker);
-	let program = Program { path, argv, env, cwd, umask, ign: sigmask_ign, rlimits };
+	let program =
+		Program { path, argv, env, cwd, umask, ign: sigmask_ign, rlimits, closed: &closed };
 	let launched = match &redirs {
 		Some(redirs) => fork_redirs(&program, &fds, place, redirs),
 		None => launch(&shared.state, &program, &fds, place),
@@ -564,7 +576,7 @@ fn launch(
 	#[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
 	if prog.rlimits.is_empty() && state.posix_eligible(prog.umask, prog.ign) {
 		let exec = Exec::new(prog)?;
-		return retry_join(place, |p| posix::spawn(&exec, fds, p, prog.ign));
+		return retry_join(place, |p| posix::spawn(&exec, fds, prog.closed, p, prog.ign));
 	}
 	#[cfg(not(any(target_os = "macos", all(target_os = "linux", target_env = "gnu"))))]
 	let _ = state;
@@ -694,6 +706,7 @@ fn fork_exec(prog: &Program<'_>, fds: &[(i32, OwnedFd)], place: Place) -> io::Re
 		.filter(|(t, _)| *t > 2)
 		.map(|(t, fd)| (*t, fd.as_raw_fd()))
 		.collect();
+	let closed = prog.closed.to_vec();
 	let ignore = ignored(prog.ign);
 	let mask = prog.umask as libc::mode_t;
 	let limits = limits(prog);
@@ -702,8 +715,8 @@ fn fork_exec(prog: &Program<'_>, fds: &[(i32, OwnedFd)], place: Place) -> io::Re
 		cmd.process_group(pgid);
 	}
 	// SAFETY: the hook runs in the forked child before exec and calls only
-	// async-signal-safe functions (umask, dup2, signal, setsid, execve) on
-	// data prepared before the fork, without allocating.
+	// async-signal-safe functions (umask, dup2, close, signal, setsid,
+	// execve) on data prepared before the fork, without allocating.
 	unsafe {
 		cmd.pre_exec(move || {
 			// Use the whole value: a closure naming only `exec.argv` would
@@ -715,6 +728,9 @@ fn fork_exec(prog: &Program<'_>, fds: &[(i32, OwnedFd)], place: Place) -> io::Re
 				if libc::dup2(src, target) < 0 {
 					return Err(io::Error::last_os_error());
 				}
+			}
+			for &target in &closed {
+				libc::close(target);
 			}
 			for (n, &ign) in ignore.iter().enumerate().skip(1) {
 				let n = n as i32;
@@ -820,6 +836,11 @@ fn child_fail(diag: &[u8], errno: i32, status: i32, texts: &[Vec<u8>]) -> ! {
 		.ok()
 		.and_then(|n| texts.get(n))
 		.map_or(&b"Unknown error"[..], Vec::as_slice);
+	child_fail_with(diag, text, status)
+}
+
+/// [`child_fail`] with the description `text`.
+fn child_fail_with(diag: &[u8], text: &[u8], status: i32) -> ! {
 	for part in [diag, text, b"\n"] {
 		// SAFETY: write(2) of a valid buffer; a failure is ignored (nowhere
 		// to report it).
@@ -832,6 +853,109 @@ fn child_fail(diag: &[u8], errno: i32, status: i32, texts: &[Vec<u8>]) -> ! {
 /// The last OS error number. Async-signal-safe.
 fn errno() -> i32 {
 	io::Error::last_os_error().raw_os_error().unwrap_or(0)
+}
+
+/// One past the highest descriptor this process may have open: its
+/// open-file limit, up to 1,048,576. Read before a fork.
+fn descriptor_bound() -> i32 {
+	const MOST: u64 = 1 << 20;
+	let limit = match rlimit::get(Rlimit::Nofile) {
+		Ok((Some(soft), _)) => soft.min(MOST),
+		_ => MOST,
+	};
+	i32::try_from(limit).unwrap_or(i32::MAX)
+}
+
+/// Close every descriptor marked close-on-exec, which `exec` would close.
+/// Lists the open ones in `/proc/self/fd` where it can, else checks each
+/// below `bound`. Async-signal-safe: for a forked child.
+fn close_descriptors_exec_closes(bound: i32) {
+	#[cfg(target_os = "linux")]
+	if close_listed_descriptors_exec_closes() {
+		return;
+	}
+	for fd in 0..bound {
+		close_if_closed_on_exec(fd, -1);
+	}
+}
+
+/// Close `fd` if it is marked close-on-exec and is not `keep`.
+fn close_if_closed_on_exec(fd: i32, keep: i32) {
+	if fd == keep {
+		return;
+	}
+	// SAFETY: plain descriptor calls; `fcntl` on a closed descriptor fails
+	// with `EBADF`.
+	unsafe {
+		let flags = libc::fcntl(fd, libc::F_GETFD);
+		if flags >= 0 && flags & libc::FD_CLOEXEC != 0 {
+			libc::close(fd);
+		}
+	}
+}
+
+/// [`close_descriptors_exec_closes`] over the descriptors `/proc/self/fd`
+/// lists; whether it listed them all.
+#[cfg(target_os = "linux")]
+fn close_listed_descriptors_exec_closes() -> bool {
+	// SAFETY: the path is NUL-terminated.
+	let dir = unsafe {
+		libc::open(c"/proc/self/fd".as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC)
+	};
+	if dir < 0 {
+		return false;
+	}
+	let listed = close_descriptors_listed_in(dir);
+	// SAFETY: `dir` is open and owned here.
+	unsafe { libc::close(dir) };
+	listed
+}
+
+/// Read the descriptor listing open at `dir` with `getdents64` into a
+/// buffer on the stack and close each descriptor it names that is marked
+/// close-on-exec, except `dir`. Whether it read the listing to its end: a
+/// failed read other than `EINTR`, or a record it cannot parse, leaves
+/// descriptors unchecked, and the caller checks them another way.
+#[cfg(target_os = "linux")]
+fn close_descriptors_listed_in(dir: i32) -> bool {
+	let mut buffer = [0u8; 4096];
+	loop {
+		// SAFETY: `buffer` is valid for its length; the kernel writes whole
+		// `linux_dirent64` records into it.
+		let read =
+			unsafe { libc::syscall(libc::SYS_getdents64, dir, buffer.as_mut_ptr(), buffer.len()) };
+		let Ok(read) = usize::try_from(read) else {
+			if errno() == libc::EINTR {
+				continue;
+			}
+			return false;
+		};
+		if read == 0 {
+			return true;
+		}
+		// Each record: inode (8 bytes), offset (8), length (2), type (1), name.
+		let mut at = 0;
+		while at < read {
+			if at + 19 > read {
+				return false;
+			}
+			let length = usize::from(u16::from_ne_bytes([buffer[at + 16], buffer[at + 17]]));
+			if length < 19 || at + length > read {
+				return false;
+			}
+			let name = &buffer[at + 19..at + length];
+			let fd = name
+				.iter()
+				.take_while(|b| b.is_ascii_digit())
+				.try_fold(0i32, |fd, d| fd.checked_mul(10)?.checked_add(i32::from(d - b'0')));
+			if name.first().is_some_and(u8::is_ascii_digit)
+				&& let Some(fd) = fd
+			{
+				close_if_closed_on_exec(fd, dir);
+			}
+			at += length;
+		}
+	}
 }
 
 /// The spawn of a process that applies redirections itself
@@ -858,6 +982,8 @@ fn fork_redirs(
 	let mask = prog.umask as libc::mode_t;
 	let limits = limits(prog);
 	let raw: Vec<(i32, RawFd)> = fds.iter().map(|(t, fd)| (*t, fd.as_raw_fd())).collect();
+	let closed = prog.closed;
+	let fd_bound = descriptor_bound();
 	// Every signal stays blocked across the fork: the child runs with the
 	// host's handlers until it resets them, and a signal delivered then (a
 	// `kill $!` right after the spawn) would run host code and be lost
@@ -905,6 +1031,15 @@ fn fork_redirs(
 					child_fail(&exec_diag, errno(), 126, texts);
 				}
 			}
+			for &target in closed {
+				libc::close(target);
+			}
+			// The redirections below run with only the command's own
+			// descriptors, as in the child bash forks: every host descriptor
+			// `exec` would close goes now, so a lowered open-file limit
+			// leaves room for their opens and a duplication of a descriptor
+			// the command lacks fails.
+			close_descriptors_exec_closes(fd_bound);
 			libc::umask(mask);
 			for (n, &ign) in ignore.iter().enumerate().skip(1) {
 				let n = n as i32;
@@ -926,7 +1061,13 @@ fn fork_redirs(
 					ChildStep::Open { fds, path, flags, mode, diag } => {
 						let fd = libc::open(path.as_ptr(), *flags, libc::c_uint::from(*mode));
 						if fd < 0 {
-							child_fail(diag, errno(), 1, texts);
+							let e = errno();
+							// `noclobber`'s exclusive create of an existing file:
+							// bash's own words (`Diag::NoClobber`).
+							if e == libc::EEXIST && *flags & libc::O_EXCL != 0 {
+								child_fail_with(diag, b"cannot overwrite existing file", 1);
+							}
+							child_fail(diag, e, 1, texts);
 						}
 						for &target in fds {
 							if target != fd && libc::dup2(fd, target) < 0 {
@@ -1000,15 +1141,26 @@ mod posix {
 		}
 	}
 
-	/// `posix_spawn` `exec` with `fds` installed, at `place`, with every
-	/// signal not in `ign` reset to its default.
-	pub fn spawn(exec: &Exec, fds: &[(i32, OwnedFd)], place: Place, ign: SigSet) -> io::Result<i32> {
+	/// `posix_spawn` `exec` with `fds` installed and the targets `closed`
+	/// closed after, at `place`, with every signal not in `ign` reset to its
+	/// default.
+	pub fn spawn(
+		exec: &Exec,
+		fds: &[(i32, OwnedFd)],
+		closed: &[i32],
+		place: Place,
+		ign: SigSet,
+	) -> io::Result<i32> {
 		let mut actions = FileActions::new()?;
 		for (target, fd) in fds {
 			// SAFETY: `actions` is initialized; both fds are plain integers.
 			check(unsafe {
 				libc::posix_spawn_file_actions_adddup2(actions.ptr(), fd.as_raw_fd(), *target)
 			})?;
+		}
+		for &target in closed {
+			// SAFETY: `actions` is initialized; `target` is a plain integer.
+			check(unsafe { libc::posix_spawn_file_actions_addclose(actions.ptr(), target) })?;
 		}
 		// SAFETY: `actions` is initialized; `cwd` outlives the spawn call.
 		check(unsafe { libc::posix_spawn_file_actions_addchdir_np(actions.ptr(), exec.cwd()) })?;

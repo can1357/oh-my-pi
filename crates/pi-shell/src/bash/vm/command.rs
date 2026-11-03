@@ -30,7 +30,7 @@ use super::{
 use crate::bash::{
 	diag::Diag,
 	event::{EventData, NodeKind, RedirKind, ResolvedKind, WaitKey},
-	fd::FdRef,
+	fd::{FdOrigin, FdRef},
 	fs::StatKind,
 	host::{
 		ChildRedirs, EnvView, ExitStatus, Invocation, PgroupSpec, ResolveCtx, Resolved, SpawnSpec,
@@ -840,8 +840,7 @@ fn cat_stdin(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32) -> Opti
 		Ok(_) => BString::default(),
 	};
 	let s = st(vp);
-	s.writes
-		.push_back(PendingWrite { fd: 1, bytes: text, off: 0 });
+	s.writes.push_back(PendingWrite::new(1, text));
 	s.stage = Stage::Output;
 	None
 }
@@ -1395,11 +1394,10 @@ fn lookup(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op) -> Option<Flo
 						let msg = format!("-{}: invalid option", argv[0][1] as char).into();
 						let line = line_of(vp, op.node);
 						k.diag(cx, vp, line, Diag::Usage { msg }.by("builtin"));
-						vp.out.push_back(PendingWrite {
-							fd:    2,
-							bytes: BString::from("builtin: usage: builtin [shell-builtin [arg ...]]\n"),
-							off:   0,
-						});
+						vp.out.push_back(PendingWrite::new(
+							2,
+							BString::from("builtin: usage: builtin [shell-builtin [arg ...]]\n"),
+						));
 						let s = st(vp);
 						s.status = 2;
 						s.stage = Stage::Finish;
@@ -2658,7 +2656,7 @@ fn run_builtin(
 						.as_mut()
 						.expect("exec")
 						.writes
-						.push_back(PendingWrite { fd, bytes: bytes.into(), off: 0 });
+						.push_back(PendingWrite::new(fd, bytes.into()));
 				}
 				let e = sc.exec.as_mut().expect("exec");
 				e.status = outcome.status;
@@ -2828,10 +2826,8 @@ fn exec_builtin(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32) -> O
 		let text = k.render_diag(cx, vp, line, &Diag::Usage { msg: msg.into() }.by("exec"));
 		let s = st(vp);
 		s.argv = argv;
-		s.writes
-			.push_back(PendingWrite { fd: 2, bytes: text.into(), off: 0 });
-		s.writes
-			.push_back(PendingWrite { fd: 2, bytes: USAGE.into(), off: 0 });
+		s.writes.push_back(PendingWrite::new(2, text.into()));
+		s.writes.push_back(PendingWrite::new(2, USAGE.into()));
 		s.status = 2;
 		s.stage = Stage::Output;
 		return None;
@@ -3255,9 +3251,7 @@ fn output(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32) -> Option<
 					// Through the command's own fd 2 (`2>&1 >&4`), while its
 					// redirections are in place.
 					let bytes = k.render_diag(cx, vp, line, &Diag::WriteError { cmd, err });
-					st(vp)
-						.writes
-						.push_back(PendingWrite { fd: 2, bytes: bytes.into(), off: 0 });
+					st(vp).writes.push_back(PendingWrite::new(2, bytes.into()));
 				}
 			},
 			Poll::Pending => return Some(Flow::Block(WaitKey::Write { fd })),
@@ -3339,7 +3333,7 @@ fn print_exit_value(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32
 		&& on(k, cx, vp, ZshOpt::Shinstdin)
 	{
 		let bytes = BString::from(format!("zsh: exit {status}\n"));
-		vp.out.push_back(PendingWrite { fd: 2, bytes, off: 0 });
+		vp.out.push_back(PendingWrite::new(2, bytes));
 	}
 }
 
@@ -3700,8 +3694,13 @@ fn spawn_error(name: BString, err: std::io::Error) -> (Diag, i32) {
 	}
 }
 
+/// How an external gets fd object `h`: a slot the script closed stays
+/// closed (bash's child inherits it so); an object a restore lost reads as
+/// the null device.
 fn stdio_spec(h: &FdRef) -> StdioSpec {
-	if !h.is_open() {
+	if h.origin() == FdOrigin::Closed {
+		StdioSpec::Closed
+	} else if !h.is_open() {
 		StdioSpec::Null
 	} else if let Some(os) = h.os_handle() {
 		StdioSpec::Inherit(os)
@@ -3710,10 +3709,12 @@ fn stdio_spec(h: &FdRef) -> StdioSpec {
 	}
 }
 
+/// The descriptors above 2 an external gets; one the script closed is not
+/// passed at all.
 fn extra_fds(vp: &Vproc) -> Vec<(i32, FdRef)> {
 	vp.fds
 		.iter()
-		.filter(|(fd, _)| *fd > 2)
+		.filter(|(fd, h)| *fd > 2 && h.origin() != FdOrigin::Closed)
 		.map(|(fd, h)| (fd, h.clone()))
 		.collect()
 }

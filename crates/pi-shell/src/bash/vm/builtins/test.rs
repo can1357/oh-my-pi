@@ -759,8 +759,7 @@ fn report(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, line: u32, chunks: Ve
 		match chunk {
 			Chunk::Diag(d) => k.diag(cx, vp, line, d),
 			Chunk::Out(fd, bytes) => {
-				vp.out
-					.push_back(PendingWrite { fd, bytes: bytes.into(), off: 0 });
+				vp.out.push_back(PendingWrite::new(fd, bytes.into()));
 			},
 		}
 	}

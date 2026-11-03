@@ -56,7 +56,7 @@ use crate::bash::{
 /// Version of the [`Image`] layout; part of the header and the build id.
 /// Also bumped when [`IntrinsicId`](crate::bash::ids::IntrinsicId) gains a
 /// variant: an exec target holds it by index.
-pub const FRAMES_VERSION: u32 = 29;
+pub const FRAMES_VERSION: u32 = 30;
 
 const MAGIC: [u8; 4] = *b"OBF1";
 
@@ -245,6 +245,8 @@ struct ProcImage {
 	/// A subshell's own state (`None` for the root vproc).
 	fields:        Option<Fields>,
 	out:           Vec<PendingWrite>,
+	/// Fd object index each queued write is bound to ([`PendingWrite::pin`]).
+	out_pins:      Vec<Option<u32>>,
 	pending_traps: SigSet,
 	stopped:       bool,
 	transient:     bool,
@@ -577,6 +579,11 @@ impl Shell {
 				fds: slots,
 				fields,
 				out: p.out.iter().cloned().collect(),
+				out_pins: p
+					.out
+					.iter()
+					.map(|w| w.pin.as_ref().map(|h| fds.fd(h)))
+					.collect(),
 				pending_traps: p.pending_traps,
 				stopped: p.stopped,
 				transient: p.transient,
@@ -803,6 +810,9 @@ impl Shell {
 				vp
 			};
 			vp.out = p.out.into();
+			for (w, pin) in vp.out.iter_mut().zip(p.out_pins) {
+				w.pin = pin.map(|i| objs.fd(cx.host, i));
+			}
 			vp.pending_traps = p.pending_traps;
 			vp.stopped = p.stopped;
 			vp.procsubs = p.procsubs;

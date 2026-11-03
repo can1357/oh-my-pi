@@ -231,7 +231,7 @@ impl Launcher {
 		match stdio {
 			StdioSpec::Inherit(os) => self.streams.is_text(*os).then_some(TextSink::Run),
 			StdioSpec::Pipe(fd) => fd.is_capture().then(|| TextSink::Capture(fd.clone())),
-			StdioSpec::Null | StdioSpec::File(_) => None,
+			StdioSpec::Null | StdioSpec::Closed | StdioSpec::File(_) => None,
 		}
 	}
 

@@ -674,7 +674,15 @@ fn unpark(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc) {
 pub fn flush_out(k: &Kernel, vp: &mut Vproc) -> Option<i32> {
 	let mut cx = Context::from_waker(&k.waker);
 	while let Some(w) = vp.out.front_mut() {
-		match vp.fds.handle(w.fd).poll_write(&mut cx, &w.bytes[w.off..]) {
+		let held;
+		let h = match &w.pin {
+			Some(pinned) => pinned,
+			None => {
+				held = vp.fds.handle(w.fd);
+				&held
+			},
+		};
+		match h.poll_write(&mut cx, &w.bytes[w.off..]) {
 			Poll::Ready(Ok(n)) if n > 0 => {
 				w.off += n;
 				if w.off >= w.bytes.len() {
@@ -1212,6 +1220,7 @@ pub fn drop_scratch(
 	}
 	if let Some(io) = sc.io.as_mut() {
 		for s in io.saved.drain(..).rev() {
+			vp.pin_pending(s.fd);
 			vp.fds.set(s.fd, s.prev);
 		}
 	}
@@ -1248,9 +1257,11 @@ pub fn unwind(root: &mut Root, store: &mut dyn StateStore, vp: &mut Vproc, keep:
 	}
 }
 
-/// Restore saved fds (latest first).
+/// Restore saved fds (latest first). A write still queued on one of them
+/// keeps going where it was produced ([`Vproc::pin_pending`]).
 pub fn restore(vp: &mut Vproc, saves: Vec<Saved>) {
 	for s in saves.into_iter().rev() {
+		vp.pin_pending(s.fd);
 		vp.fds.set(s.fd, s.prev);
 	}
 }
@@ -2398,9 +2409,7 @@ fn time_end(
 		end.sys.saturating_sub(start.sys),
 	];
 	match time_report(&format, times) {
-		Ok(text) => vp
-			.out
-			.push_back(PendingWrite { fd: 2, bytes: text.into(), off: 0 }),
+		Ok(text) => vp.out.push_back(PendingWrite::new(2, text.into())),
 		Err(c) => {
 			let msg = format!("TIMEFORMAT: `{}': invalid format character", char::from(c));
 			k.diag(cx, vp, line, Diag::Usage { msg: msg.into() });
@@ -2445,8 +2454,7 @@ fn zsh_time_end(
 		text.extend_from_slice(&zsh_time_report(&format, b"children", children));
 		text
 	};
-	vp.out
-		.push_back(PendingWrite { fd: 2, bytes: text.into(), off: 0 });
+	vp.out.push_back(PendingWrite::new(2, text.into()));
 }
 
 /// zsh's default `TIMEFMT` (`DEFAULT_TIMEFMT`).

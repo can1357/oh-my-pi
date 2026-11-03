@@ -9,6 +9,10 @@
 ### Fixed
 
 - Fixed associative arrays slowing down quadratically as they grow: 100,000 inserts and lookups took about 90 seconds and now take about a tenth of a second
+- Fixed the bash tool's shell writing a fatal expansion error (`${missing:?BOOM}`, an unset variable under `set -u`, a bad arithmetic word) from inside a redirected `{ }`, `if`, loop, `case`, function, `[[ ]]`, coprocess, process substitution or `eval` to its own standard error instead of through that redirection, as Bash does ([#17684](https://github.com/can1357/oh-my-pi/pull/17684) by [@sjawhar](https://github.com/sjawhar))
+- Fixed external commands getting the null device for a standard input, output or error the script closed (`cmd 2>&-`): the descriptor is now closed in the command, so its writes fail as in Bash ([#17684](https://github.com/can1357/oh-my-pi/pull/17684) by [@sjawhar](https://github.com/sjawhar))
+- Fixed `&>file` and `>&file` replacing an existing file under `set -o noclobber`, and `>fifo` being refused there; `noclobber` now refuses only an existing regular file, as in Bash ([#17684](https://github.com/can1357/oh-my-pi/pull/17684) by [@sjawhar](https://github.com/sjawhar))
+- Fixed a background command that opens a named pipe failing with `Too many open files` under a low `ulimit -n` and leaving the run waiting until its timeout, and such a command duplicating a descriptor of omp's own process; its redirections now run with only the command's descriptors, as in Bash ([#17684](https://github.com/can1357/oh-my-pi/pull/17684) by [@sjawhar](https://github.com/sjawhar))
 ### Fixed
 
 - Fixed `el.type` and `el.press(keys)` on Wayland moving focus inside the element's app (GNOME showed "… is ready") before refusing the call: they are now refused before anything reaches the app ([#17915](https://github.com/can1357/oh-my-pi/pull/17915) by [@will-bogusz](https://github.com/will-bogusz))

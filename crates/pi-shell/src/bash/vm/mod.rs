@@ -778,8 +778,7 @@ impl Kernel {
 	/// Queue a diagnostic on the vproc's stderr and emit a `Diag` event.
 	pub fn diag(&mut self, cx: &mut Cx<'_>, vp: &mut Vproc, line: u32, diag: Diag) {
 		let bytes = self.render_diag(cx, vp, line, &diag);
-		vp.out
-			.push_back(PendingWrite { fd: 2, bytes: bytes.into(), off: 0 });
+		vp.out.push_back(PendingWrite::new(2, bytes.into()));
 	}
 
 	/// The stderr bytes of a diagnostic; emits the `Diag` event. Builtins

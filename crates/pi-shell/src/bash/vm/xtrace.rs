@@ -130,7 +130,7 @@ pub fn emit(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, line: u32, body: &[
 	bytes.push(b'\n');
 	let fd = trace_fd(k, cx, vp);
 	vp.out
-		.push_back(PendingWrite { fd, bytes: BString::from(bytes), off: 0 });
+		.push_back(PendingWrite::new(fd, BString::from(bytes)));
 }
 
 /// `BASH_XTRACEFD` when it names an open descriptor, else 2.

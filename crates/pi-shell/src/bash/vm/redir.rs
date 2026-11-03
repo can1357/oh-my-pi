@@ -480,17 +480,8 @@ fn install(
 			}
 			if r.op == RedirKind::DupOut && matches!(r.fd, RedirFdIr::Default) {
 				// `>&file` is `&>file`.
-				return open_into(
-					k,
-					vp,
-					cx,
-					&[1, 2],
-					target,
-					OpenFlags::WRITE
-						.with(OpenFlags::CREATE)
-						.with(OpenFlags::TRUNC),
-					line,
-				);
+				let flags = open_flags(k, vp, cx, RedirKind::OutErr, target);
+				return open_into(k, vp, cx, &[1, 2], target, flags, line);
 			}
 			Err(fail(k, vp, cx, line, Diag::AmbiguousRedirect { word: target.clone() }))
 		},
@@ -530,7 +521,7 @@ fn install(
 				let mut msg = k.argv0.to_vec();
 				msg.extend_from_slice(b": redirection error: cannot duplicate fd: Invalid argument\n");
 				vp.out
-					.push_back(super::proc::PendingWrite { fd: 2, bytes: msg.into(), off: 0 });
+					.push_back(super::proc::PendingWrite::new(2, msg.into()));
 				let err = std::io::Error::from(std::io::ErrorKind::InvalidInput);
 				return Err(fail(k, vp, cx, line, Diag::Io { path: target.clone(), err }));
 			}
@@ -546,8 +537,11 @@ fn install(
 	}
 }
 
-/// How a file redirection `op` to `target` opens it (`set -o noclobber`
-/// makes `>` exclusive, but for `/dev/…`).
+/// How a file redirection `op` to `target` opens it. Under `set -o
+/// noclobber` a truncating `>`, `&>` or `>&file` refuses an existing regular
+/// file (an exclusive create) and opens anything else that exists (a FIFO,
+/// a device) as it is, without truncating it, as bash's `noclobber_open`
+/// does; `/dev/…` is never refused.
 fn open_flags(
 	k: &mut Kernel,
 	vp: &Vproc,
@@ -555,16 +549,21 @@ fn open_flags(
 	op: RedirKind,
 	target: &BString,
 ) -> OpenFlags {
-	let noclobber = op == RedirKind::Out
+	let write = OpenFlags::WRITE.with(OpenFlags::CREATE);
+	let noclobber = matches!(op, RedirKind::Out | RedirKind::OutErr)
 		&& !target.starts_with(b"/dev/")
 		&& state::option(&mut k.root, cx.store, vp, OptId::Noclobber).unwrap_or(false);
-	let write = OpenFlags::WRITE.with(OpenFlags::CREATE);
+	if noclobber {
+		let path = absolute(&vp.cwd, target);
+		return match cx.host.fs().stat(BStr::new(&path), true) {
+			FsPoll::Ready(Ok(st)) if st.kind != StatKind::File => OpenFlags::WRITE,
+			_ => write.with(OpenFlags::EXCL),
+		};
+	}
 	match op {
-		_ if noclobber => write.with(OpenFlags::EXCL),
 		RedirKind::In => OpenFlags::READ,
-		RedirKind::Out | RedirKind::Clobber => write.with(OpenFlags::TRUNC),
+		RedirKind::Out | RedirKind::Clobber | RedirKind::OutErr => write.with(OpenFlags::TRUNC),
 		RedirKind::Append | RedirKind::AppendErr => write.with(OpenFlags::APPEND),
-		RedirKind::OutErr => write.with(OpenFlags::TRUNC),
 		_ => write.with(OpenFlags::READ),
 	}
 }
@@ -701,10 +700,9 @@ fn collect(
 					.ok()
 					.and_then(|s| s.parse().ok())
 					.unwrap_or(-1);
-				if !child_fd_open(k, vp, src) {
-					let err = std::io::Error::other(crate::bash::fd::BadFd);
-					return Err(fail(k, vp, cx, line, Diag::Io { path: target.clone(), err }));
-				}
+				// A descriptor the process lacks fails there, in its turn, after
+				// the opens before it (a FIFO's reader still gets its end of
+				// file): the process has only its own descriptors by then.
 				let fd = fd_number(k, vp, cx, r, false, line)?;
 				let diag = diag_prefix(k, cx, vp, line, digits);
 				add.push(ChildRedir::Dup { fd, src, diag });
@@ -753,24 +751,6 @@ fn fd_number(
 	line: u32,
 ) -> Result<i32, Halt> {
 	target_fd(k, vp, cx, r, closing, line).map_err(|d| fail(k, vp, cx, line, d))
-}
-
-/// Whether `fd` is open in the process a command spawns at this point of
-/// its collected redirections: inherited from the vproc, or set by one
-/// collected before, and not closed since.
-fn child_fd_open(k: &Kernel, vp: &Vproc, fd: i32) -> bool {
-	let inherited = vp.fds.get(fd).is_some_and(FdRef::is_open);
-	let list = k
-		.deferrals
-		.iter()
-		.find(|d| d.vproc == vp.vpid)
-		.map_or(&[][..], |d| d.list.as_slice());
-	list.iter().fold(inherited, |open, redir| match redir {
-		ChildRedir::Open { fds, .. } if fds.contains(&fd) => true,
-		ChildRedir::Dup { fd: set, .. } if *set == fd => true,
-		ChildRedir::Close { fd: closed } if *closed == fd => false,
-		_ => open,
-	})
 }
 
 /// The open of `target` onto `fds` by the process ([`ChildRedir::Open`]),
