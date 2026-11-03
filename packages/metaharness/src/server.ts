@@ -503,10 +503,11 @@ export class ManagerServer {
 		}
 		const filterErrorTypes = opts.filterErrorTypes ?? erroredExceptionTypes(jobDir);
 		const gatewayToken = opts.gatewayToken ?? this.#gatewayTokens.get(jobName);
-		// The resume's own arguments are visible in the process list; none may repeat a token.
-		this.#refuseKnownGatewayTokens(filterErrorTypes, "filterErrorTypes", gatewayToken);
 		const argv = ["bun", "src/runner.ts", "--resume", jobName, "--jobs-dir", this.jobsDir];
 		for (const t of filterErrorTypes) argv.push("--filter-error-type", t);
+		// The resume's arguments, the job name and jobs dir included, are visible in the
+		// process list; none may repeat a token.
+		this.#refuseKnownGatewayTokens(argv, "the resume arguments", gatewayToken);
 		let prewalk: LaunchRequest["prewalk"];
 		try {
 			prewalk = run.prewalk ? (JSON.parse(run.prewalk) as { into?: string }) : undefined;

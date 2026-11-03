@@ -741,6 +741,8 @@ describe("manager", () => {
 				// A body id must not stand in for the URL id the update is stored under.
 				expect(await send(`/api/experiments/${token}`, { id: "safe-id", goal: "ordinary goal" }, "PUT")).toBe(400);
 				expect(await send("/api/runs/token-probe/resume", { filterErrorTypes: [token] })).toBe(400);
+				// The resume command line names the job; a token equal to it must not reach the process list.
+				expect(await send("/api/runs/token-probe/resume", { gatewayToken: "token-probe" })).toBe(400);
 				// Choosing another token for the request does not let it store a known one.
 				const otherToken = "review-other-bearer";
 				expect(
