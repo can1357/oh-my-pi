@@ -64,6 +64,7 @@ import type {
 	AsideBoundary,
 	AsideMessage,
 	PrepareQueuedMessages,
+	QueuedMessageGate,
 	QueuedMessageQueue,
 	SpeculativeToolExecutionConfig,
 	StreamFn,
@@ -842,6 +843,12 @@ export class Agent {
 	/** Prepare actual queue deliveries after dequeue gates; commit runs only while ownership remains valid. */
 	prepareQueuedMessages?: PrepareQueuedMessages;
 	/**
+	 * Consulted synchronously whenever queued messages are removed for delivery and
+	 * told about claimed messages that went back undelivered (see {@link QueuedMessageGate}).
+	 * Unset, batches are taken as they are.
+	 */
+	queuedMessageGate?: QueuedMessageGate;
+	/**
 	 * Hook invoked after tool arguments are validated and before execution.
 	 * Reassign at any time to swap the implementation (e.g. on extension reload).
 	 */
@@ -1368,7 +1375,7 @@ export class Agent {
 	 */
 	async #prepareQueuedMessageBatch(queue: QueuedMessageQueue, signal: AbortSignal): Promise<AgentMessage[]> {
 		if (this.#queuedMessageClaims[queue]) return [];
-		const taken = queue === "steering" ? this.#takeSteeringUnit() : this.#takeFollowUpUnit();
+		const taken = this.#takeDeliveryUnit(queue);
 		if (!taken) return [];
 		const { messages, promoted, allowance } = taken;
 		const prepare = this.prepareQueuedMessages;
@@ -1465,6 +1472,8 @@ export class Agent {
 		delete this.#queuedMessageClaims[queue];
 		// The claim never reached the run, so its unit gives its place back.
 		if (claim.allowance) this.#giveBackSteeringPlace(claim.allowance);
+		// The claimed messages left delivery undelivered: back in the pending queue or removed with it.
+		this.queuedMessageGate?.release(claim.messages);
 		this.#queueChangeHolds++;
 		try {
 			claim.controller.abort();
@@ -1486,6 +1495,7 @@ export class Agent {
 			delete this.#queuedMessageClaims[queue];
 			// The claim never reached the run, so its unit gives its place back.
 			if (claim.allowance) this.#giveBackSteeringPlace(claim.allowance);
+			this.queuedMessageGate?.release(claim.messages);
 			if (queue === "steering") {
 				// The claim was the oldest unit of its class (a person's messages or
 				// agent steering each leave the queue in arrival order), so the front
@@ -1538,6 +1548,9 @@ export class Agent {
 				restored[delivery.queue].push(delivery.messages[i]);
 				if (delivery.queue === "steering") promoted.push(delivery.promoted?.[i] === true);
 			}
+		}
+		if (restored.steering.length > 0 || restored.followUp.length > 0) {
+			this.queuedMessageGate?.release([...restored.steering, ...restored.followUp]);
 		}
 		if (restored.steering.length > 0) {
 			// What the run took is older than what remains of its own class, so the
@@ -1647,6 +1660,9 @@ export class Agent {
 				return false;
 			});
 		}
+		if (withdrawn.steering.length > 0 || withdrawn.followUp.length > 0) {
+			this.queuedMessageGate?.release([...withdrawn.steering, ...withdrawn.followUp]);
+		}
 		if (hadLiveSteered) this.#emitQueueChanged();
 		else this.#settleSteeringWait();
 		return withdrawn;
@@ -1671,9 +1687,12 @@ export class Agent {
 		const removed: Record<QueuedMessageQueue, AgentMessage[]> = { steering: [], followUp: [] };
 		// Each removed occurrence, by the steering unit it was taken in.
 		const removedByUnit = new Map<TakenSteeringUnit, AgentMessage[]>();
+		// Held messages the gate claimed for delivery, which now leave delivery undelivered.
+		const releasedHeld: AgentMessage[] = [];
 		let removedHeld = 0;
 		const unitLost = (unit: TakenSteeringUnit | undefined, message: AgentMessage): void => {
 			removedHeld++;
+			releasedHeld.push(message);
 			if (!unit) return;
 			const lost = removedByUnit.get(unit);
 			if (lost) lost.push(message);
@@ -1767,6 +1786,7 @@ export class Agent {
 			}
 		}
 		if (removed.steering.length > 0) this.#notifySteeringWaiters();
+		if (releasedHeld.length > 0) this.queuedMessageGate?.release(releasedHeld);
 		if (liveChanged || queuedChanged || removedHeld > 0) this.#emitQueueChanged();
 		return removed;
 	}
@@ -2381,11 +2401,17 @@ export class Agent {
 	}
 
 	clearAllQueues() {
+		// Input the run holds and has not recorded leaves delivery undelivered.
+		const held = [
+			...this.#liveSteered.map(entry => entry.message),
+			...[...this.#queuedMessageDeliveries].flatMap(delivery => delivery.messages.slice(delivery.next)),
+		];
 		this.#steering.clear();
 		this.#followUpQueue = [];
 		this.#liveSteered = [];
 		// A full clear also forgets input the run holds and has not recorded, so its end does not requeue it.
 		this.#queuedMessageDeliveries.clear();
+		if (held.length > 0) this.queuedMessageGate?.release(held);
 		this.#dropQueuedMessageClaim("steering");
 		this.#dropQueuedMessageClaim("followUp");
 		this.#notifySteeringWaiters();
@@ -2692,6 +2718,45 @@ export class Agent {
 		if (messages.length === 0) return undefined;
 		this.#followUpQueue = this.#followUpQueue.slice(messages.length);
 		return { messages };
+	}
+
+	/**
+	 * Take the unit of `queue` delivered next. With a {@link queuedMessageGate}, the gate sees each candidate
+	 * unit first: what it vetoes leaves the queue and the unit is recomputed, and candidates it claimed that
+	 * the final unit no longer holds are released again.
+	 */
+	#takeDeliveryUnit(queue: QueuedMessageQueue): TakenUnit | undefined {
+		const gate = this.queuedMessageGate;
+		const candidates = (): AgentMessage[] => {
+			if (queue === "followUp") return this.#dequeueMessages(this.#followUpQueue, this.#followUpMode);
+			const start = this.#nextSteeringUnitStart();
+			return this.#steering.messages.slice(start, this.#steeringUnitEnd(start));
+		};
+		let batch = gate ? candidates() : [];
+		let claimedEarlier: AgentMessage[] | undefined;
+		let dropped = false;
+		while (gate && batch.length > 0) {
+			const veto = gate.claim(queue, batch);
+			if (veto.length === 0) break;
+			const drop = new Set(veto);
+			const pending = queue === "steering" ? this.#steering.messages : this.#followUpQueue;
+			const kept = pending.filter(message => !drop.has(message));
+			if (kept.length === pending.length) break;
+			for (const message of batch) if (!drop.has(message)) (claimedEarlier ??= []).push(message);
+			if (queue === "steering") this.#steering.replace(kept, undefined);
+			else this.#followUpQueue = kept;
+			dropped = true;
+			batch = candidates();
+		}
+		if (claimedEarlier) {
+			const final = new Set(batch);
+			const stale = claimedEarlier.filter(message => !final.has(message));
+			if (stale.length > 0) gate?.release(stale);
+		}
+		const taken = queue === "steering" ? this.#takeSteeringUnit() : this.#takeFollowUpUnit();
+		// What the gate dropped left the queue; with nothing taken, no claim or record will announce it.
+		if (dropped && !taken) this.#emitQueueChanged();
+		return taken;
 	}
 
 	/**

@@ -42,7 +42,7 @@
 import { logger } from "@oh-my-pi/pi-utils";
 import type { BankScope } from "./bank";
 import type {
-	HindsightApi,
+	HindsightClientApi,
 	MentalModelListResponse,
 	MentalModelMode,
 	MentalModelSummary,
@@ -140,7 +140,7 @@ function dedupe<T>(items: T[]): T[] {
  * Existing models are NEVER modified. See module docstring.
  */
 export async function ensureMentalModels(
-	client: HindsightApi,
+	client: HindsightClientApi,
 	bankId: string,
 	seeds: MentalModelSeed[],
 	debug: boolean,
@@ -206,7 +206,7 @@ export type MentalModelsBlockLoadResult = { ok: true; block: string | undefined 
  * rendered snapshot when Hindsight is unavailable.
  */
 export async function tryLoadMentalModelsBlock(
-	client: HindsightApi,
+	client: HindsightClientApi,
 	bankId: string,
 	budgetChars: number = MENTAL_MODEL_RENDER_BUDGET_CHARS_DEFAULT,
 	visibleTags?: readonly string[],
@@ -245,7 +245,7 @@ export async function tryLoadMentalModelsBlock(
  * overflow leaves a `…` marker so the LLM can tell the snapshot is truncated.
  */
 export async function loadMentalModelsBlock(
-	client: HindsightApi,
+	client: HindsightClientApi,
 	bankId: string,
 	budgetChars: number = MENTAL_MODEL_RENDER_BUDGET_CHARS_DEFAULT,
 	visibleTags?: readonly string[],

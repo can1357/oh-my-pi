@@ -7,7 +7,7 @@
 //!
 //! Encoding is decided where its unit is known. Each external program writing
 //! into the capture or a command substitution writes into its own relay (see
-//! [`external_output_decoding`] and brush's output relays) and is decoded on
+//! [`external_output_decoding`] and the host's output relays) and is decoded on
 //! its own: UTF-8 until a complete invalid sequence, then, on Windows, the
 //! rest of that program's output from the process ANSI code page (`GetACP`)
 //! unless that page is already UTF-8. Builtins write into the capture
@@ -23,7 +23,7 @@
 
 use std::{str, sync::Arc};
 
-use brush_core::{ByteDecoder, OutputDecoding};
+use crate::sys::{ByteDecoder, OutputDecoding};
 
 const REPLACEMENT: &str = "\u{FFFD}";
 /// UTF-8 console / system code page. Fallback is a no-op: invalid UTF-8 stays
@@ -265,6 +265,10 @@ impl Default for CaptureDecoder {
 impl CaptureDecoder {
 	/// Judges lines against the host ANSI code page where one can decode what
 	/// UTF-8 cannot; UTF-8 alone otherwise.
+	#[cfg_attr(
+		not(windows),
+		expect(clippy::missing_const_for_fn, reason = "reads the ANSI code page on Windows")
+	)]
 	pub fn new() -> Self {
 		#[cfg(windows)]
 		{
@@ -304,6 +308,10 @@ impl CaptureDecoder {
 
 	/// Judges the held part of the line as if it ended here, except for an
 	/// incomplete UTF-8 character at its end, which waits for its next bytes.
+	#[cfg_attr(
+		not(windows),
+		expect(clippy::missing_const_for_fn, reason = "decodes the held line on Windows")
+	)]
 	pub fn flush_line(&mut self) -> String {
 		match &mut self.mode {
 			CaptureMode::Utf8(_) => String::new(),
