@@ -250,6 +250,106 @@ fn drive_alias_parts(bytes: &[u8]) -> Option<(u8, &[u8])> {
 	None
 }
 
+/// A handle on a directory, as a process holds the one it works in: the
+/// shell keeps one so that a name read from a directory that has been
+/// removed, renamed or moved reaches what the kernel reaches, which no name
+/// of that directory can. A system that gives no such handle (Windows, and
+/// the stubs) never makes one, and the shell reads names as it spells them.
+#[derive(Debug)]
+pub struct DirHandle {
+	#[cfg(unix)]
+	fd: std::os::fd::OwnedFd,
+}
+
+impl DirHandle {
+	/// Opens `path` as a handle, if this system gives one.
+	#[cfg(unix)]
+	pub fn open(path: &Path) -> Option<Self> {
+		use std::os::fd::{FromRawFd, OwnedFd};
+		let name = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).ok()?;
+		// SAFETY: `name` is a C string that lives across the call, and the
+		// descriptor it answers with is owned by the `OwnedFd` made of it.
+		let fd = unsafe { libc::open(name.as_ptr(), Self::FLAGS) };
+		(fd >= 0).then(|| Self { fd: unsafe { OwnedFd::from_raw_fd(fd) } })
+	}
+
+	/// Opens `path` as a handle, if this system gives one.
+	#[cfg(not(unix))]
+	pub fn open(path: &Path) -> Option<Self> {
+		let _ = path;
+		None
+	}
+
+	/// Opens `name`, read from this directory, as a handle of its own, as
+	/// `chdir` reads it from the directory a process holds.
+	#[cfg(unix)]
+	pub fn open_at(&self, name: &Path) -> std::io::Result<Self> {
+		use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+		let name = std::ffi::CString::new(name.as_os_str().as_encoded_bytes())
+			.map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+		// SAFETY: this handle is open for the whole call, `name` is a C
+		// string that lives across it, and the descriptor it answers with is
+		// owned by the `OwnedFd` made of it.
+		let fd = unsafe { libc::openat(self.fd.as_raw_fd(), name.as_ptr(), Self::FLAGS) };
+		if fd < 0 {
+			return Err(std::io::Error::last_os_error());
+		}
+		Ok(Self { fd: unsafe { OwnedFd::from_raw_fd(fd) } })
+	}
+
+	/// Opens `name`, read from this directory, as a handle of its own.
+	#[cfg(not(unix))]
+	pub fn open_at(&self, name: &Path) -> std::io::Result<Self> {
+		let _ = name;
+		Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+	}
+
+	/// The name this directory has now, as the kernel knows it. `None` where
+	/// it has been removed, which `getcwd` reports as a failure, or where
+	/// this system does not say.
+	#[cfg(target_os = "linux")]
+	pub fn path(&self) -> Option<PathBuf> {
+		use std::os::fd::AsRawFd;
+		let name = std::fs::read_link(format!("/proc/self/fd/{}", self.fd.as_raw_fd())).ok()?;
+		// `/proc` names a file that has been removed with this suffix.
+		(!name.as_os_str().as_encoded_bytes().ends_with(b" (deleted)")).then_some(name)
+	}
+
+	/// The name this directory has now, as the kernel knows it.
+	#[cfg(target_os = "macos")]
+	pub fn path(&self) -> Option<PathBuf> {
+		use std::os::{fd::AsRawFd, unix::ffi::OsStringExt};
+		let mut buffer = [0u8; libc::PATH_MAX as usize];
+		// SAFETY: this handle is open for the whole call, and the buffer
+		// takes the `PATH_MAX` bytes `F_GETPATH` writes.
+		let answered = unsafe {
+			libc::fcntl(self.fd.as_raw_fd(), libc::F_GETPATH, buffer.as_mut_ptr().cast::<i8>())
+		};
+		if answered < 0 {
+			return None;
+		}
+		let end = buffer.iter().position(|byte| *byte == 0).unwrap_or(buffer.len());
+		let name = PathBuf::from(std::ffi::OsString::from_vec(buffer[..end].to_vec()));
+		// A directory that has been removed keeps the name it had, which
+		// reaches nothing: the shell reports that as `getcwd` does.
+		std::fs::metadata(&name).is_ok().then_some(name)
+	}
+
+	/// The name this directory has now, as the kernel knows it.
+	#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+	pub fn path(&self) -> Option<PathBuf> {
+		None
+	}
+
+	/// What the handle is opened with: the directory itself and not the
+	/// reading of it, which a directory the user may not search still gives.
+	#[cfg(target_os = "linux")]
+	const FLAGS: i32 = libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC;
+	/// What the handle is opened with.
+	#[cfg(all(unix, not(target_os = "linux")))]
+	const FLAGS: i32 = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC;
+}
+
 pub use super::platform::fs::*;
 
 #[cfg(test)]

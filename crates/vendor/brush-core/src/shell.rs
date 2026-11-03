@@ -75,6 +75,14 @@ pub struct Shell<SE: extensions::ShellExtensions = extensions::DefaultShellExten
 	/// served by [`Shell::filesystem`].
 	working_dir: PathBuf,
 
+	/// A handle on the working directory, as a process holds the one it
+	/// works in, for the names its own name no longer reaches: it is gone
+	/// once the shell is, and a subshell holds the same one until it changes
+	/// directory itself. `None` for a virtual path, and on a system that
+	/// gives no handle.
+	#[cfg_attr(feature = "serde", serde(skip))]
+	working_dir_handle: Option<std::sync::Arc<crate::sys::fs::DirHandle>>,
+
 	/// Filesystem through which all shell-owned path access goes (redirects,
 	/// `cd`, tests, globbing, sourcing, command lookup). Native by default.
 	#[cfg_attr(feature = "serde", serde(skip))]
@@ -177,6 +185,7 @@ impl<SE: extensions::ShellExtensions> Clone for Shell<SE> {
 			traps: self.traps.clone(),
 			open_files: self.open_files.clone(),
 			working_dir: self.working_dir.clone(),
+			working_dir_handle: self.working_dir_handle.clone(),
 			filesystem: self.filesystem.clone(),
 			env: self.env.clone(),
 			funcs: self.funcs.clone(),
@@ -267,6 +276,10 @@ impl<SE: extensions::ShellExtensions> Shell<SE> {
 
 		// Add in any open files provided.
 		shell.open_files.update_from(options.fds.into_iter());
+
+		// The directory the shell starts in, held as a process holds it.
+		shell.working_dir_handle =
+			crate::sys::fs::DirHandle::open(&shell.working_dir).map(std::sync::Arc::new);
 
 		// TODO(patterns): Without this a script that sets extglob will fail because we
 		// parse the entire script with the same settings.
@@ -627,6 +640,7 @@ impl<SE: extensions::ShellExtensions> ShellState for Shell<SE> {
 		&mut self.working_dir
 	}
 
+
 	/// Returns the product display name for this shell.
 	pub fn product_display_str(&self) -> Option<&str> {
 		self.product_display_str.as_deref()
@@ -634,6 +648,18 @@ impl<SE: extensions::ShellExtensions> ShellState for Shell<SE> {
 }
 
 impl<SE: extensions::ShellExtensions> Shell<SE> {
+	/// Returns the handle the shell holds on its working directory, for the
+	/// names that directory's own name no longer reaches.
+	pub fn working_dir_handle(&self) -> Option<&crate::sys::fs::DirHandle> {
+		self.working_dir_handle.as_deref()
+	}
+
+	/// Records `handle` as the handle on the shell's working directory.
+	/// This is only accessible within the crate.
+	pub(crate) fn set_working_dir_handle(&mut self, handle: Option<crate::sys::fs::DirHandle>) {
+		self.working_dir_handle = handle.map(std::sync::Arc::new);
+	}
+
 	/// Returns a copy of this shell at the same depth and call stack (not a
 	/// subshell) for running a builtin off the async runtime. The copy has an
 	/// empty job table: jobs own their processes, so they never leave this

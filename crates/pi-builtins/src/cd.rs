@@ -1,6 +1,6 @@
 use std::{
 	io::Write,
-	path::{Component, Path, PathBuf},
+	path::{Path, PathBuf},
 };
 
 use brush_core::{ErrorKind, ExecutionContext, ExecutionResult, ShellExtensions, builtins};
@@ -133,8 +133,15 @@ impl builtins::Command for CdCommand {
 				},
 			},
 		};
-		let status = |entered: Entered| {
-			if matches!(entered, Entered::Lost) && lost_fails {
+		let status = |entered: Entered, context: &mut ExecutionContext<'_, SE>| {
+			let readonly = match &entered {
+				Entered::Changed(readonly) => readonly.clone(),
+				Entered::Lost => Vec::new(),
+			};
+			for name in &readonly {
+				let _ = writeln!(context.stderr(), "{name}: readonly variable");
+			}
+			if !readonly.is_empty() || (matches!(entered, Entered::Lost) && lost_fails) {
 				ExecutionResult::general_error()
 			} else {
 				ExecutionResult::success()
@@ -166,7 +173,7 @@ impl builtins::Command for CdCommand {
 							writeln!(context.stdout(), "{}", context.shell.working_dir().display())?;
 						}
 					}
-					return Ok(status(entered));
+					return Ok(status(entered, &mut context));
 				}
 			}
 		}
@@ -176,7 +183,7 @@ impl builtins::Command for CdCommand {
 				if print {
 					writeln!(context.stdout(), "{operand}")?;
 				}
-				return Ok(status(entered));
+				return Ok(status(entered, &mut context));
 			},
 			Err(reason) => reason,
 		};
@@ -188,7 +195,7 @@ impl builtins::Command for CdCommand {
 				Some(value) => match enter_named(&mut context, &value, physical).await {
 					Ok(entered) => {
 						writeln!(context.stdout(), "{value}")?;
-						return Ok(status(entered));
+						return Ok(status(entered, &mut context));
 					},
 					Err(reason) => reason,
 				},
@@ -240,14 +247,25 @@ fn cdpath_entries(cdpath: &str) -> impl Iterator<Item = &str> {
 }
 
 /// How a directory change ended.
-#[derive(Clone, Copy)]
 pub(crate) enum Entered {
-	/// The directory is the shell's working directory now.
-	Changed,
+	/// The directory is the shell's working directory now, with the names
+	/// that could not be written for it (a readonly `PWD` or `OLDPWD`).
+	Changed(Vec<&'static str>),
 	/// The working directory had been removed, and the directory named it
 	/// (`.`): it stays, under the name spelled after it, and that name cannot
 	/// be resolved, which `cd -P -e` reports as a failure.
 	Lost,
+}
+
+impl Entered {
+	/// The names that could not be written for the directory entered: a
+	/// readonly `PWD` or `OLDPWD`, which Bash reports and goes on from.
+	pub(crate) fn readonly(&self) -> &[&'static str] {
+		match self {
+			Self::Changed(readonly) => readonly,
+			Self::Lost => &[],
+		}
+	}
 }
 
 /// Makes `target` the shell's working directory as `chdir` would make it the
@@ -287,94 +305,59 @@ async fn enter_named<SE: ShellExtensions>(
 		PathBuf::from(target)
 	};
 	let reason = match change_directory(context, &spelled, physical).await {
-		Ok(()) => return Ok(Entered::Changed),
+		Ok(readonly) => return Ok(Entered::Changed(readonly)),
 		Err(reason) => reason,
 	};
-	// A name that starts with `.` and `..` is the one case the kernel still
-	// answers from a working directory that has been removed, because it
-	// holds that directory: `chdir(".")` stays there, and `chdir("..")`
-	// reaches the directory above, removed or not, and reads the rest of the
-	// name from there. A name that starts with a component of its own is not
-	// reached, as Bash reports. Nothing else here invents a directory.
+	// The shell holds the directory it works in, as a process holds it, so a
+	// name is still read from there once no name reaches that directory,
+	// because it has been removed, renamed or moved. The kernel reads the
+	// name from the directory itself, which is what Bash's `chdir` does,
+	// and says where it arrives.
 	let current = context.shell.working_dir().to_path_buf();
-	if !(context.shell.filesystem().is_native_local(&current)
-		&& !spelled.is_absolute()
-		&& !spelled.as_os_str().is_empty()
-		&& std::fs::metadata(&current).is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound))
+	if spelled.is_absolute()
+		|| spelled.as_os_str().is_empty()
+		|| !context.shell.filesystem().is_native_local(&current)
+		|| context.shell.filesystem().metadata(&current).await.is_ok()
 	{
 		return Err(reason);
 	}
-	let mut above = 0usize;
-	let mut rest = PathBuf::new();
-	for component in spelled.components() {
-		match component {
-			Component::CurDir if rest.as_os_str().is_empty() => {},
-			Component::ParentDir if rest.as_os_str().is_empty() => above += 1,
-			other => rest.push(other),
-		}
-	}
-	// A name of its own is read from the directory the kernel holds only
-	// after a `..` has led out of it, which is the only directory any name
-	// still reaches.
-	if above == 0 && !rest.as_os_str().is_empty() {
-		return Err(reason);
-	}
-	if above > 0 {
-		// Where the kernel arrives: the working directory as it really is,
-		// which the names above it still spell, less one for each `..`. The
-		// name the shell holds may lead through a symbolic link, which the
-		// kernel does not follow back, so the part of it that is still there
-		// is resolved first, in both modes, as Bash resolves it.
-		let mut arrived = resolved_working_dir(context, &current).await;
-		for _ in 0..above {
-			arrived.pop();
-		}
-		let target = arrived.join(&rest);
-		if change_directory(context, &target, physical).await.is_ok() {
-			return Ok(Entered::Changed);
-		}
-		if !rest.as_os_str().is_empty() {
-			return Err(reason);
-		}
-	}
-	// The directory the name reaches is gone too: the shell enters it under
-	// the name spelled after the one it holds, as `chdir` enters it, and
-	// `getcwd` then fails, as Bash reports. The shell records that name as
-	// its working directory, so that `pwd` and `$PWD` agree and every name
-	// read against it fails, as they do in Bash.
-	let lost = current.join(&spelled);
-	context.shell.set_unreachable_working_dir(lost).map_err(|error| error.to_string())?;
-	let _ = writeln!(
-		context.stderr(),
-		"cd: error retrieving current directory: getcwd: cannot access parent directories: No such \
-		 file or directory"
-	);
-	Ok(Entered::Lost)
-}
-
-/// The working directory as the names that are still there spell it: the
-/// longest part of `current` that exists, resolved, with the rest of the name
-/// after it. This is where `chdir("..")` leads from, which no name reaches
-/// once the directory is removed.
-async fn resolved_working_dir<SE: ShellExtensions>(
-	context: &ExecutionContext<'_, SE>,
-	current: &Path,
-) -> PathBuf {
-	let mut names = Vec::new();
-	let mut above = current.to_path_buf();
-	loop {
-		if let Ok(resolved) = context.shell.filesystem().canonicalize(&above).await {
-			let mut arrived = resolved;
-			arrived.extend(names.iter().rev());
-			return arrived;
-		}
-		let Some(name) = above.file_name().map(std::ffi::OsString::from) else {
-			return current.to_path_buf();
-		};
-		names.push(name);
-		if !above.pop() {
-			return current.to_path_buf();
-		}
+	let Some(handle) = context.shell.working_dir_handle() else { return Err(reason) };
+	let arrived = match handle.open_at(&spelled) {
+		Ok(arrived) => arrived,
+		// The name reaches nothing from there either. Bash reports what the
+		// kernel says when it reads the name itself, under `-P`, and what
+		// its own reading of the name says otherwise, which is that the
+		// working directory is not there.
+		Err(error) if physical => return Err(crate::host::strip_errno(&error)),
+		Err(_) => return Err(reason),
+	};
+	match arrived.path() {
+		// The directory it reaches has a name of its own: the shell works
+		// there, under that name, as `getcwd` answers for it.
+		Some(name) => {
+			let readonly =
+				context.shell.enter(name, Some(arrived)).map_err(|error| error.to_string())?;
+			Ok(Entered::Changed(readonly))
+		},
+		// It has been removed too: the shell works there under the name
+		// spelled after the one it holds, and `getcwd` then fails, as Bash
+		// reports. Every name read against it fails, as they do in Bash.
+		None => {
+			let lost = current.join(&spelled);
+			let readonly = context
+				.shell
+				.set_unreachable_working_dir(lost, Some(arrived))
+				.map_err(|error| error.to_string())?;
+			for name in readonly {
+				let _ = writeln!(context.stderr(), "{name}: readonly variable");
+			}
+			let _ = writeln!(
+				context.stderr(),
+				"cd: error retrieving current directory: getcwd: cannot access parent \
+				 directories: No such file or directory"
+			);
+			Ok(Entered::Lost)
+		},
 	}
 }
 
@@ -383,7 +366,7 @@ async fn change_directory<SE: ShellExtensions>(
 	context: &mut ExecutionContext<'_, SE>,
 	target: &Path,
 	physical: bool,
-) -> Result<(), String> {
+) -> Result<Vec<&'static str>, String> {
 	let absolute = context.shell.absolute_path(target);
 	let target = if physical {
 		context

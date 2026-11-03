@@ -23,7 +23,7 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 	pub async fn set_working_dir(
 		&mut self,
 		target_dir: impl AsRef<Path>,
-	) -> Result<(), error::Error> {
+	) -> Result<Vec<&'static str>, error::Error> {
 		let abs_path = self.absolute_path(target_dir.as_ref());
 
 		// Native directories are checked as spelled and then normalized (but
@@ -45,28 +45,46 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 			checked_path
 		};
 
-		let pwd = cleaned_path.to_string_lossy().to_string();
+		let handle = native.then(|| crate::sys::fs::DirHandle::open(&cleaned_path)).flatten();
+		self.enter(cleaned_path, handle)
+	}
 
-		// `OLDPWD` becomes what `PWD` held, which is the working directory
-		// unless the user has written something else there, as in Bash.
+	/// Records `target_dir`, which `handle` holds if the system gives one, as
+	/// the shell's working directory, and sets `PWD` and `OLDPWD` as Bash
+	/// sets them: `OLDPWD` takes what `PWD` held, which is the working
+	/// directory unless something else was written there. A name that may
+	/// not be written is reported and the directory is still entered, as in
+	/// Bash.
+	pub fn enter(
+		&mut self,
+		target_dir: PathBuf,
+		handle: Option<crate::sys::fs::DirHandle>,
+	) -> Result<Vec<&'static str>, error::Error> {
+		let pwd = target_dir.to_string_lossy().to_string();
 		let oldpwd = self.env_str("PWD").unwrap_or_default().to_string();
-		*self.working_dir_mut() = cleaned_path;
-		self.env.update_or_add(
-			"PWD",
-			variables::ShellValueLiteral::Scalar(pwd),
-			|_| Ok(()),
-			EnvironmentLookup::Anywhere,
-			EnvironmentScope::Global,
-		)?;
-		self.env.update_or_add(
-			"OLDPWD",
-			variables::ShellValueLiteral::Scalar(oldpwd),
-			|_| Ok(()),
-			EnvironmentLookup::Anywhere,
-			EnvironmentScope::Global,
-		)?;
-
-		Ok(())
+		*self.working_dir_mut() = target_dir;
+		self.set_working_dir_handle(handle);
+		let mut written = |name: &str, value: String| {
+			self.env.update_or_add(
+				name,
+				variables::ShellValueLiteral::Scalar(value),
+				|_| Ok(()),
+				EnvironmentLookup::Anywhere,
+				EnvironmentScope::Global,
+			)
+		};
+		// A readonly `PWD` or `OLDPWD` is named for the caller to report, and
+		// the shell works in the directory all the same, as Bash does.
+		let mut readonly = Vec::new();
+		for (name, value) in [("OLDPWD", oldpwd), ("PWD", pwd)] {
+			if let Err(error) = written(name, value) {
+				if !matches!(error.kind(), error::ErrorKind::ReadonlyVariable) {
+					return Err(error);
+				}
+				readonly.push(name);
+			}
+		}
+		Ok(readonly)
 	}
 
 	/// Records `target_dir` as the shell's working directory without looking
@@ -76,29 +94,18 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 	/// still enters as `chdir` does: a working directory that has been
 	/// removed, reached by `.`, and the removed directories above it,
 	/// reached by `..`. The shell keeps the name the change spelled, as Bash
-	/// keeps it.
+	/// keeps it, and the handle it now holds.
 	///
 	/// # Arguments
 	///
 	/// * `target_dir` - The path to record as the working directory.
-	pub fn set_unreachable_working_dir(&mut self, target_dir: PathBuf) -> Result<(), error::Error> {
-		let pwd = target_dir.to_string_lossy().to_string();
-		let oldpwd = self.env_str("PWD").unwrap_or_default().to_string();
-		*self.working_dir_mut() = target_dir;
-		self.env.update_or_add(
-			"PWD",
-			variables::ShellValueLiteral::Scalar(pwd),
-			|_| Ok(()),
-			EnvironmentLookup::Anywhere,
-			EnvironmentScope::Global,
-		)?;
-		self.env.update_or_add(
-			"OLDPWD",
-			variables::ShellValueLiteral::Scalar(oldpwd),
-			|_| Ok(()),
-			EnvironmentLookup::Anywhere,
-			EnvironmentScope::Global,
-		)
+	/// * `handle` - The directory that name stands for, if one is held.
+	pub fn set_unreachable_working_dir(
+		&mut self,
+		target_dir: PathBuf,
+		handle: Option<crate::sys::fs::DirHandle>,
+	) -> Result<Vec<&'static str>, error::Error> {
+		self.enter(target_dir, handle)
 	}
 
 	/// Tilde-shortens the given string, replacing the user's home directory with

@@ -35,7 +35,11 @@ impl builtins::Command for PushdCommand {
 			// `set -P` resolves symbolic links here too, as Bash's `pushd` changes
 			// directory as its `cd` does.
 			let physical = context.shell.options().do_not_resolve_symlinks_when_changing_dir;
-			if let Err(reason) = crate::cd::enter_directory(&mut context, dir, physical).await {
+			let entered = crate::cd::enter_directory(&mut context, dir, physical).await;
+			for name in entered.as_ref().map(crate::cd::Entered::readonly).unwrap_or_default() {
+				writeln!(context.stderr(), "{name}: readonly variable")?;
+			}
+			if let Err(reason) = entered {
 				writeln!(context.stderr(), "pushd: {}: {reason}", self.dir)?;
 				return Ok(ExecutionResult::general_error());
 			}

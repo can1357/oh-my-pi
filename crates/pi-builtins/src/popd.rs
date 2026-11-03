@@ -28,7 +28,13 @@ impl builtins::Command for PopdCommand {
 		// in Bash; `set -P` resolves symbolic links here, as `cd` does.
 		let physical = context.shell.options().do_not_resolve_symlinks_when_changing_dir;
 		if !self.no_directory_change
-			&& let Err(reason) = crate::cd::enter_directory(&mut context, &top, physical).await
+			&& let Err(reason) = {
+				let entered = crate::cd::enter_directory(&mut context, &top, physical).await;
+				for name in entered.as_ref().map(crate::cd::Entered::readonly).unwrap_or_default() {
+					let _ = writeln!(context.stderr(), "{name}: readonly variable");
+				}
+				entered.map(|_| ())
+			}
 		{
 			writeln!(context.stderr(), "popd: {}: {reason}", top.display())
 				.map_err(brush_core::Error::from)?;
