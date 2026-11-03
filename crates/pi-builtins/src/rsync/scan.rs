@@ -65,7 +65,7 @@ use crate::rsync::paths::{
 	push_rel,
 };
 use crate::rsync::session::Ctx;
-use crate::rsync::tree::{FakeLinks, Tree, TreeOpts};
+use crate::rsync::tree::{FakeLinks, Tree, TreeOpts, read_stored_link};
 use crate::rsync::wire::NdxCodec;
 use crate::rsync::xattr::{self, XattrCtx, XattrSender, XattrSet};
 
@@ -769,22 +769,9 @@ impl Scanner {
 					let fake = FakeLinks::for_run(self.ctx.opts.am_root, true) != FakeLinks::Off;
 					if fake && !self.ctx.fs.symlink_metadata(&path)?.is_symlink() {
 						// A stored symlink: its contents are the target, as
-						// upstream's do_readlink with am_root < 0 reads them (at
-						// most MAXPATHLEN - 1 bytes, up to a NUL); a real one
-						// reads as itself.
-						let mut target = vec![0u8; MAXPATHLEN - 1];
-						let mut file = self.ctx.fs.open(&path)?;
-						let len = loop {
-							match file.read(&mut target) {
-								Err(err) if err.kind() == io::ErrorKind::Interrupted => {},
-								read => break read?,
-							}
-						};
-						target.truncate(len);
-						if let Some(nul) = target.iter().position(|&b| b == 0) {
-							target.truncate(nul);
-						}
-						return Ok(target);
+						// upstream's do_readlink with am_root < 0 reads them; a
+						// real one reads as itself.
+						return read_stored_link(&mut self.ctx.fs.open(&path)?);
 					}
 					self.ctx.fs.read_link(path)?
 				}

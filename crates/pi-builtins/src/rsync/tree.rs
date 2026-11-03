@@ -353,6 +353,24 @@ impl<'a> Walk<'a> {
 	}
 }
 
+/// What upstream's do_readlink takes from a symlink stored as a regular
+/// file (`--fake-super`): one read of at most `MAXPATHLEN - 1` bytes, up to
+/// the first NUL (it keeps the target as a C string).
+pub(crate) fn read_stored_link(file: &mut impl Read) -> io::Result<Vec<u8>> {
+	let mut target = vec![0u8; MAXPATHLEN - 1];
+	let len = loop {
+		match file.read(&mut target) {
+			Err(err) if err.kind() == io::ErrorKind::Interrupted => {},
+			read => break read?,
+		}
+	};
+	target.truncate(len);
+	if let Some(nul) = target.iter().position(|&b| b == 0) {
+		target.truncate(nul);
+	}
+	Ok(target)
+}
+
 impl Tree {
 	/// Opens a transfer root. Native unix roots are opened as a directory fd:
 	/// an operator-named root (or one under `--confine-root`) through the
@@ -616,17 +634,7 @@ impl Tree {
 		if self.inner.opts.fake_links != FakeLinks::Off {
 			match self.open_read(rel, false) {
 				Ok(mut file) => {
-					let mut target = vec![0u8; MAXPATHLEN - 1];
-					let len = loop {
-						match file.read(&mut target) {
-							Err(err) if err.kind() == io::ErrorKind::Interrupted => {},
-							read => break read?,
-						}
-					};
-					target.truncate(len);
-					if let Some(nul) = target.iter().position(|&b| b == 0) {
-						target.truncate(nul);
-					}
+					let target = read_stored_link(&mut file)?;
 					return paths::bytes_path(&target).map(Path::to_path_buf);
 				},
 				Err(err) if err::is_looped(&err) => {

@@ -546,6 +546,11 @@ fn fake_super_stores_symlinks_as_files_holding_their_targets() {
 	assert_eq!((code, err.as_str()), (0, ""), "{out}");
 	assert!(out.contains("cL+++++++++ link -> f\n"), "{out}");
 	assert_eq!(stored(&dir.path().join("d2"), "link"), (0o100777, b"f".to_vec(), Some(record.clone())));
+	// Named as an operand, a stored symlink is read the same way.
+	let (code, out, err) = run(&["-ai", "--fake-super", "d1/link", "d3/"], dir.path());
+	assert_eq!((code, err.as_str()), (0, ""), "{out}");
+	assert!(out.contains("cL+++++++++ link -> f\n"), "{out}");
+	assert_eq!(stored(&dir.path().join("d3"), "link"), (0o100777, b"f".to_vec(), Some(record.clone())));
 
 	// A real symlink in the destination is replaced by a stored one; with its
 	// time as the source's, only the target is reported, and with another
