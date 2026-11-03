@@ -262,6 +262,7 @@ function modelVisibleForTags(model: MentalModelSummary, visibleTags?: readonly s
 }
 
 const TRUNCATION_MARKER = "\n\n…[mental-model snapshot truncated at render budget]";
+const SECTION_SEPARATOR = "\n\n";
 
 /**
  * Format a sorted list of models into the final `<mental_models>` wrapper,
@@ -305,7 +306,7 @@ export function renderMentalModelsBlock(models: MentalModelSummary[], budgetChar
 	const cleanOverhead = `<mental_models>\n\n</mental_models>`.length;
 	const innerBudget = Math.max(0, budgetChars - truncatedOverhead);
 	const headerCost = models.reduce((sum, m) => sum + sectionHeader(m).length, 0);
-	const separatorCost = 2 * Math.max(0, models.length - 1);
+	const separatorCost = SECTION_SEPARATOR.length * Math.max(0, models.length - 1);
 	const perModelBudget = Math.max(
 		120,
 		Math.floor((innerBudget - headerCost - separatorCost) / Math.max(1, models.length)),
@@ -320,8 +321,7 @@ export function renderMentalModelsBlock(models: MentalModelSummary[], budgetChar
 		const truncatedBody = truncateTo(body, perModelBudget);
 		if (truncatedBody.length < body.length) truncated = true;
 		const section = `${header}${truncatedBody}`;
-		// +2 for the section separator (`\n\n`) when this is not the first.
-		const sectionCost = section.length + (sections.length > 0 ? 2 : 0);
+		const sectionCost = section.length + (sections.length > 0 ? SECTION_SEPARATOR.length : 0);
 		if (consumed + sectionCost > innerBudget && sections.length > 0) {
 			truncated = true;
 			break;
@@ -331,7 +331,7 @@ export function renderMentalModelsBlock(models: MentalModelSummary[], budgetChar
 	}
 
 	const tail = truncated ? TRUNCATION_MARKER : "";
-	let assembled = `<mental_models>\n${sections.join("\n\n")}${tail}\n</mental_models>`;
+	let assembled = `<mental_models>\n${sections.join(SECTION_SEPARATOR)}${tail}\n</mental_models>`;
 
 	// Final hard-cap: if the careful per-model budgeting still slips past the
 	// requested ceiling (small budgets, long headings, etc.), brutally truncate
@@ -340,7 +340,7 @@ export function renderMentalModelsBlock(models: MentalModelSummary[], budgetChar
 	if (assembled.length > budgetChars) {
 		const overhead = truncated ? truncatedOverhead : cleanOverhead;
 		const room = Math.max(0, budgetChars - overhead);
-		const body = sections.join("\n\n").slice(0, room).trimEnd();
+		const body = sections.join(SECTION_SEPARATOR).slice(0, room).trimEnd();
 		assembled = `<mental_models>\n${body}${TRUNCATION_MARKER}\n</mental_models>`;
 	}
 	return assembled;
