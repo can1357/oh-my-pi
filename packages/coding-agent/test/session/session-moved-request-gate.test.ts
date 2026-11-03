@@ -746,6 +746,72 @@ describe("work a session left running, or started before it existed, waits for i
 		}, 60_000);
 	}
 
+	it("refuses start-up holds a start-up still running was given", async () => {
+		const temp = tempDir("@gate-startup-overlap-");
+		const server = localModelServer();
+		cleanups.push(server.stop);
+		const auth = await AuthStorage.create(":memory:");
+		cleanups.push(() => auth.close());
+		const startupHolds = new RequestHoldsAlias();
+		const first = createAgentSession({ ...minimalSessionOptions(temp, auth, server.model), startupHolds });
+		const second = createAgentSession({ ...minimalSessionOptions(temp, auth, server.model), startupHolds });
+		await expect(second).rejects.toThrow("These start-up holds already belong to another live session");
+		await (await first).session.dispose();
+	}, 60_000);
+
+	it("holds a request a host callback starts while the session is being built", async () => {
+		const temp = tempDir("@gate-constructor-callback-");
+		const server = localModelServer();
+		cleanups.push(server.stop);
+		const auth = await AuthStorage.create(":memory:");
+		cleanups.push(() => auth.close());
+		const agent = new Agent({
+			initialState: { model: server.model, systemPrompt: ["test"], messages: [], tools: [] },
+			getApiKey: () => "k",
+		});
+		const release = Promise.withResolvers<void>();
+		const reached = Promise.withResolvers<void>();
+		let held = true;
+		agent.addHold(() => ({
+			pending: () => {
+				if (!held) return undefined;
+				reached.resolve();
+				return release.promise;
+			},
+		}));
+		let work: Promise<unknown> | undefined;
+		const session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(temp.path()),
+			modelRegistry: new ModelRegistry(auth, path.join(temp.path(), "models.yml")),
+			settings: Settings.isolated({
+				"advisor.enabled": false,
+				"compaction.enabled": false,
+				"retry.enabled": false,
+				"todo.enabled": false,
+			}),
+			// Called while the session is constructed, outside any session work.
+			getEvalPreludes: () => {
+				work ??= completeSimple(
+					server.model,
+					{ messages: [{ role: "user", content: "from a callback", timestamp: 0 }] },
+					{ apiKey: "k" },
+				);
+				return [];
+			},
+		});
+		cleanups.push(() => session.dispose());
+		expect(work).toBeDefined();
+		// The callback's request asked the session's hold, and nothing went out while it held.
+		await reached.promise;
+		await eventLoopTurns();
+		expect(server.requests).toEqual([]);
+		held = false;
+		release.resolve();
+		await work;
+		expect(server.requests).toEqual(["POST /v1/chat/completions"]);
+	}, 60_000);
+
 	it("refuses start-up holds another live session was built with, and accepts them once it is disposed", async () => {
 		const temp = tempDir("@gate-startup-owner-");
 		const server = localModelServer();

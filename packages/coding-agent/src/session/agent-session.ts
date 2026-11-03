@@ -995,6 +995,23 @@ function todoRetryMatches(failed: Record<string, unknown>, retry: Record<string,
 	return true;
 }
 
+/**
+ * `config` with each function it carries wrapped to run in `agent`'s request
+ * context (see `Agent.runInRequestContext`). The agent and every other value
+ * are passed through as they are.
+ */
+function callbacksAsWorkOf(agent: Agent, config: AgentSessionConfig): AgentSessionConfig {
+	const wrapped: Record<string, unknown> = { ...config };
+	for (const [key, value] of Object.entries(config)) {
+		if (typeof value !== "function") continue;
+		const callback = value as (...args: unknown[]) => unknown;
+		wrapped[key] = function (this: unknown, ...args: unknown[]) {
+			return agent.runInRequestContext(() => callback.apply(this, args));
+		};
+	}
+	return wrapped as unknown as AgentSessionConfig;
+}
+
 export class AgentSession implements SettingsScope {
 	readonly agent: Agent;
 	readonly sessionManager: SessionManager;
@@ -2097,7 +2114,12 @@ export class AgentSession implements SettingsScope {
 	/** Live generation tok/s for the working row; fed by this session's own streamed deltas. */
 	readonly tokenRate: TokenRateMeter;
 
-	constructor(config: AgentSessionConfig) {
+	constructor(sessionConfig: AgentSessionConfig) {
+		// Every host callback the session is given runs as the session's work,
+		// whenever and from wherever the session calls it — during construction,
+		// a prompt rebuild, a later rediscovery: a model request it starts waits
+		// for the session's holds.
+		const config = callbacksAsWorkOf(sessionConfig.agent, sessionConfig);
 		this.agent = config.agent;
 		this.tokenRate = new TokenRateMeter(text => this.agent.tokenizer.countTokens(text));
 		this.#reseedTokenRate();
