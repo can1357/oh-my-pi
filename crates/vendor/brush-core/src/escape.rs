@@ -21,8 +21,24 @@ pub enum EscapeExpansionMode {
 ///
 /// * `s` - The string to expand.
 /// * `mode` - The mode to use for expansion.
-#[expect(clippy::too_many_lines)]
 pub fn expand_backslash_escapes(
+	s: &str,
+	mode: EscapeExpansionMode,
+) -> Result<(Vec<u8>, bool), error::Error> {
+	let (mut result, keep_going) = expand_backslash_escapes_keeping_nul(s, mode)?;
+	// In ANSI-C quotes, we crop the result at the first NUL.
+	if matches!(mode, EscapeExpansionMode::AnsiCQuotes)
+		&& let Some(nul_index) = result.iter().position(|&b| b == 0)
+	{
+		result.truncate(nul_index);
+	}
+	Ok((result, keep_going))
+}
+
+/// Expands backslash escapes as [`expand_backslash_escapes`] does, keeping a
+/// NUL an escape produced: the caller decides what it ends.
+#[expect(clippy::too_many_lines)]
+pub(crate) fn expand_backslash_escapes_keeping_nul(
 	s: &str,
 	mode: EscapeExpansionMode,
 ) -> Result<(Vec<u8>, bool), error::Error> {
@@ -137,8 +153,11 @@ pub fn expand_backslash_escapes(
 						break;
 					};
 
+					// As Bash's `ansicstr`, only a `{` right after `\x` opens
+					// the braced form.
 					if matches!(mode, EscapeExpansionMode::AnsiCQuotes)
 						&& !start_brace_consumed
+						&& hexits_consumed == 0
 						&& next_c == '{'
 					{
 						start_brace_consumed = true;
@@ -252,13 +271,6 @@ pub fn expand_backslash_escapes(
 				result.push(b'\\');
 				result.append(unknown.to_string().into_bytes().as_mut());
 			},
-		}
-	}
-
-	// In ANSI-C quotes, we crop the result at the first NUL.
-	if matches!(mode, EscapeExpansionMode::AnsiCQuotes) {
-		if let Some(nul_index) = result.iter().position(|&b| b == 0) {
-			result.truncate(nul_index);
 		}
 	}
 
@@ -516,5 +528,17 @@ mod tests {
 		assert_echo_expands_to(r"\xf0\x9f\x90\x8d", "🐍");
 		assert_echo_expands_to(r"\u2620", "☠");
 		assert_echo_expands_to(r"\U0001f602", "😂");
+	}
+
+	#[test]
+	fn ansi_c_hex_braces_open_only_right_after_x() {
+		let expand = |s: &str| expand_backslash_escapes(s, EscapeExpansionMode::AnsiCQuotes).unwrap().0;
+		assert_eq!(expand(r"\x24{x:-Y}"), b"${x:-Y}");
+		assert_eq!(expand(r"\x{24}{"), b"${");
+		assert_eq!(expand(r"a\0b"), b"a");
+		assert_eq!(
+			expand_backslash_escapes_keeping_nul(r"a\0b", EscapeExpansionMode::AnsiCQuotes).unwrap().0,
+			b"a\0b"
+		);
 	}
 }

@@ -38,6 +38,9 @@ pub struct ChildProcess {
 	pgid:        Option<sys::process::ProcessId>,
 	/// Every external process in this pipeline.
 	stop_pids:   Option<Arc<[sys::process::ProcessId]>>,
+	/// The stops the last wait consumed: each process of the stop scope that
+	/// stopped, with its `WSTOPSIG`.
+	reported_stops: Vec<(sys::process::ProcessId, u8)>,
 	/// Windows handle duplicated from the child process for safe termination.
 	#[cfg(windows)]
 	kill_handle: Option<OwnedHandle>,
@@ -59,6 +62,7 @@ impl ChildProcess {
 			pid,
 			pgid,
 			stop_pids: None,
+			reported_stops: Vec::new(),
 			reaped: false,
 			#[cfg(windows)]
 			kill_handle,
@@ -81,6 +85,32 @@ impl ChildProcess {
 		self.stop_pids = Some(pids);
 	}
 
+	/// Takes the stops the last wait consumed (see [`ProcessWaitResult::Stopped`]):
+	/// which processes of the stop scope stopped, each with its `WSTOPSIG`.
+	/// Empty when the shell itself got SIGTSTP.
+	pub(crate) fn take_reported_stops(&mut self) -> Vec<(sys::process::ProcessId, u8)> {
+		std::mem::take(&mut self.reported_stops)
+	}
+
+	/// The process's output once it has ended, waiting at most `grace` for
+	/// it, or `None` while it still runs. Unlike [`Self::wait`], it reports
+	/// no stop and leaves the process alone.
+	pub(crate) async fn finish_within(
+		&mut self,
+		grace: std::time::Duration,
+	) -> Result<Option<std::process::Output>, error::Error> {
+		let deadline = tokio::time::Instant::now() + grace;
+		loop {
+			if let Some(output) = self.poll() {
+				return output.map(Some);
+			}
+			if tokio::time::Instant::now() >= deadline {
+				return Ok(None);
+			}
+			tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+		}
+	}
+
 	/// Duplicates the process handle for termination use on Windows.
 	#[cfg(windows)]
 	pub fn duplicate_kill_handle(&self) -> Option<OwnedHandle> {
@@ -99,8 +129,9 @@ impl ChildProcess {
 	}
 
 	/// Checks whether this process, or a stage in its pipeline, stopped.
-	/// Returns the `WSTOPSIG` of the first stopped stage, or `None`.
-	fn poll_for_stop(&self) -> Result<Option<u8>, error::Error> {
+	/// Returns the `WSTOPSIG` of the first stopped stage, or `None`, and
+	/// keeps every stop it consumed (see [`Self::take_reported_stops`]).
+	fn poll_for_stop(&mut self) -> Result<Option<u8>, error::Error> {
 		let Some(pid) = self.pid else {
 			return Ok(None);
 		};
@@ -108,7 +139,10 @@ impl ChildProcess {
 			.stop_pids
 			.as_deref()
 			.unwrap_or_else(|| std::slice::from_ref(&pid));
-		sys::signal::poll_for_stopped_processes(pids, self.pgid)
+		let stops = sys::signal::poll_for_stopped_processes(pids, self.pgid)?;
+		let first = stops.first().map(|&(_, signal)| signal);
+		self.reported_stops.extend(stops);
+		Ok(first)
 	}
 
 	/// Waits for the process to exit.
@@ -122,6 +156,7 @@ impl ChildProcess {
 		let mut sigtstp = sys::signal::tstp_signal_listener()?;
 		#[allow(unused_mut, reason = "only mutated on some platforms")]
 		let mut sigchld = sys::signal::chld_signal_listener()?;
+		self.reported_stops.clear();
 
 		// A SIGCHLD delivered before the subscription above never reaches
 		// `sigchld`. Pipeline stages are all spawned before the first is
@@ -376,6 +411,7 @@ mod tests {
 			pid: None,
 			pgid: None,
 			stop_pids: None,
+			reported_stops: Vec::new(),
 			completion_marker: None,
 		};
 		child.set_completion_marker(

@@ -139,7 +139,15 @@ impl TryFrom<i32> for Signal {
 	}
 }
 
+/// No stub platform has process groups.
+pub(crate) fn process_groups(
+	_pids: impl IntoIterator<Item = sys::process::ProcessId>,
+) -> Vec<sys::process::ProcessId> {
+	Vec::new()
+}
+
 pub(crate) fn continue_process_groups(
+	_groups: &[sys::process::ProcessId],
 	_pids: impl IntoIterator<Item = sys::process::ProcessId>,
 ) -> Result<(), error::Error> {
 	Err(error::ErrorKind::NotSupportedOnThisPlatform("continuing process").into())
@@ -228,8 +236,8 @@ pub(crate) fn mask_sigttou() -> Result<(), error::Error> {
 pub(crate) fn poll_for_stopped_processes(
 	_pids: &[sys::process::ProcessId],
 	_pgid: Option<sys::process::ProcessId>,
-) -> Result<Option<u8>, error::Error> {
-	Ok(None)
+) -> Result<Vec<(sys::process::ProcessId, u8)>, error::Error> {
+	Ok(Vec::new())
 }
 
 /// The last stop or continue a child reported.

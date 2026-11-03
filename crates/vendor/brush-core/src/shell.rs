@@ -107,8 +107,8 @@ pub struct Shell<SE: extensions::ShellExtensions = extensions::DefaultShellExten
 	last_exit_status_change_count: usize,
 
 	/// The status of each command in the last pipeline, as `$PIPESTATUS`
-	/// exposes it. A stopped wait can be 256 (see
-	/// [`ExecutionExitCode::StoppedStatusLimit`]).
+	/// exposes it. A command's status can exceed 255 (see
+	/// [`ExecutionExitCode::StoppedJob`]).
 	last_pipeline_statuses: Vec<u16>,
 
 	/// Clone depth from the original ancestor shell.

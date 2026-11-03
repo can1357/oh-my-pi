@@ -590,7 +590,9 @@ pub fn decl_builtin<B: DeclarationCommand + Send + Sync, SE: extensions::ShellEx
 /// implementation is expected to implement clap's `Parser` trait solely
 /// for help/usage information. Arguments are passed directly to the command
 /// via `set_declarations`. This is primarily only expected to be used with
-/// select builtin commands that wrap other builtins (e.g., "builtin").
+/// select builtin commands that wrap other builtins (e.g., "builtin"). Such
+/// a command is not itself a declaration builtin: as in Bash, the words
+/// after it expand as ordinary words.
 pub fn raw_arg_builtin<
 	B: DeclarationCommand + Default + Send + Sync,
 	SE: extensions::ShellExtensions,
@@ -600,7 +602,7 @@ pub fn raw_arg_builtin<
 		content_func:        get_builtin_content::<B>,
 		disabled:            false,
 		special_builtin:     false,
-		declaration_builtin: true,
+		declaration_builtin: false,
 		transparent_background_wrapper: false,
 		async_io:            false,
 		stands_in_for_external_command: false,
@@ -693,7 +695,11 @@ async fn exec_declaration_builtin_impl<
 			{
 				options.push(s);
 			},
-			_ => declarations.push(arg),
+			CommandArg::String(s) => declarations.push(match literal_assignment(&s) {
+				Some(assignment) => CommandArg::Assignment(assignment),
+				None => CommandArg::String(s),
+			}),
+			CommandArg::Assignment(_) => declarations.push(arg),
 		}
 	}
 
@@ -709,6 +715,42 @@ async fn exec_declaration_builtin_impl<
 	command.set_declarations(declarations);
 
 	call_builtin(command, context).await
+}
+
+/// An argument of the form `name=value`, `name+=value` or
+/// `name[subscript]=value` that the parser did not mark as an assignment
+/// (it came from `command export x=$v`, say), which Bash's declaration
+/// builtins assign themselves (`assignment` in `declare_internal` and
+/// `set_or_show_attributes`). The value is used as it is, already expanded.
+fn literal_assignment(word: &str) -> Option<brush_parser::ast::Assignment> {
+	use brush_parser::ast;
+	let name_end = word.find(|c: char| !c.is_ascii_alphanumeric() && c != '_')?;
+	let name = &word[..name_end];
+	if !crate::env::valid_variable_name(name) {
+		return None;
+	}
+	let mut rest = &word[name_end..];
+	let index = match rest.strip_prefix('[') {
+		Some(after) => {
+			let close = after.find(']')?;
+			rest = &after[close + 1..];
+			Some(&after[..close])
+		},
+		None => None,
+	};
+	let (append, value) = match rest.strip_prefix("+=") {
+		Some(value) => (true, value),
+		None => (false, rest.strip_prefix('=')?),
+	};
+	Some(ast::Assignment {
+		name: match index {
+			Some(index) => ast::AssignmentName::ArrayElementName(name.to_owned(), index.to_owned()),
+			None => ast::AssignmentName::VariableName(name.to_owned()),
+		},
+		value: ast::AssignmentValue::Scalar(ast::Word::from(value.to_owned())),
+		append,
+		loc: brush_parser::SourceSpan::default(),
+	})
 }
 
 fn exec_raw_arg_builtin<

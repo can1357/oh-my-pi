@@ -273,10 +273,29 @@ enum JobWaitEnd {
 	Stopped(u32),
 }
 
+/// What a foreground pipeline's wait saw of its stages when it stopped (see
+/// [`Job::record_pipeline_stop`]).
+#[derive(Default)]
+pub(crate) struct PipelineStop {
+	/// The pipeline's first external pid.
+	pub first_pid:   Option<sys::process::ProcessId>,
+	/// The pipeline's last external pid.
+	pub last_pid:    Option<sys::process::ProcessId>,
+	/// The external pids of the stages that ended.
+	pub ended_pids:  Vec<sys::process::ProcessId>,
+	/// Each stopped stage's pid with the signal that stopped it.
+	pub stopped:     Vec<(sys::process::ProcessId, u8)>,
+	/// The `WSTOPSIG` value of the first stage's status, once it ended (see
+	/// [`stop_signal_word`]).
+	pub first_word:  Option<u8>,
+	/// The last stage's status, once it ended.
+	pub last_status: Option<ExecutionExitCode>,
+}
+
 /// `WSTOPSIG` of the wait status of a process that ended, which Bash's
 /// `wait_for` adds to 128 for a stopped job whose first process has ended:
 /// the exit status of a process that exited, 0 for one a signal killed.
-fn stop_signal_word(output: &std::process::Output) -> u8 {
+pub(crate) fn stop_signal_word(output: &std::process::Output) -> u8 {
 	output
 		.status
 		.code()
@@ -1021,6 +1040,12 @@ pub struct Job {
 	/// If available, the process group ID of the job's processes.
 	pgid: Option<sys::process::ProcessId>,
 
+	/// The process group of each external stage other than the shell's own,
+	/// as the job started: continuing the job signals each of them (see
+	/// [`Job::resume`]), since a group still holds a stage's children after
+	/// the stage has exited.
+	process_groups: Vec<sys::process::ProcessId>,
+
 	/// The annotation of the job (e.g., current, previous).
 	annotation: JobAnnotation,
 
@@ -1099,6 +1124,7 @@ impl Job {
 			JobTask::External(process) => process.pgid().or_else(|| process.pid()),
 			JobTask::Internal(_) => None,
 		});
+		let process_groups = sys::signal::process_groups(external_pids());
 		Self {
 			id: 0,
 			tasks,
@@ -1107,6 +1133,7 @@ impl Job {
 			representative_process_id,
 			last_process_id,
 			pgid,
+			process_groups,
 			annotation: JobAnnotation::None,
 			command_line,
 			state,
@@ -1335,13 +1362,35 @@ impl Job {
 	fn stopped_status(&self) -> u32 {
 		let first = self.representative_process_id;
 		let word = self
-			.stopped_processes
-			.iter()
-			.find(|&&(pid, _)| Some(pid) == first)
-			.map(|&(_, signal)| signal)
-			.or(self.first_process_word)
+			.first_process_word
+			.or_else(|| {
+				self.stopped_processes
+					.iter()
+					.find(|&&(pid, _)| Some(pid) == first)
+					.map(|&(_, signal)| signal)
+			})
 			.unwrap_or(0);
 		128 + u32::from(word)
+	}
+
+	/// Records what a foreground pipeline's wait saw before it became this
+	/// stopped job, which Bash keeps in the job (`stop_pipeline`): the
+	/// pipeline's first and last external pids name the job (`jobs -p`,
+	/// `wait -p`), an ended stage's pid still selects it (`wait PID`), each
+	/// stopped stage keeps its stop signal, the first stage's status once it
+	/// has ended gives the stopped status (see [`Job::stopped_status`]), and
+	/// the last stage's status once it has ended is the job's.
+	pub(crate) fn record_pipeline_stop(&mut self, stop: PipelineStop) {
+		self.representative_process_id = stop.first_pid.or(self.representative_process_id);
+		self.last_process_id = stop.last_pid.or(self.last_process_id);
+		self.completed_process_ids.extend(stop.ended_pids);
+		self.stopped_processes = stop.stopped;
+		if stop.first_word.is_some() {
+			self.first_process_word = stop.first_word;
+		}
+		if let Some(status) = stop.last_status {
+			self.completed_result = Some(Ok(ExecutionResult::from(status)));
+		}
 	}
 
 	/// Applies the stops, continues and exits the job's processes reported
@@ -1549,7 +1598,7 @@ impl Job {
 	/// shell detached leads its own), whether or not that succeeds, the job
 	/// runs, and continuing it counts as reported (`J_NOTIFIED`).
 	fn resume(&mut self) {
-		let _ = sys::signal::continue_process_groups(self.process_ids());
+		let _ = self.continue_processes();
 		self.state = JobState::Running;
 		self.stopped_processes.clear();
 		self.listed = true;
@@ -1580,7 +1629,7 @@ impl Job {
 
 	/// Sends SIGCONT to every process group of the job (see [`Self::resume`]).
 	pub fn continue_processes(&self) -> Result<(), error::Error> {
-		sys::signal::continue_process_groups(self.process_ids())
+		sys::signal::continue_process_groups(&self.process_groups, self.process_ids())
 	}
 
 	/// Kills the job.
@@ -1683,10 +1732,11 @@ impl Job {
 			})
 	}
 
-	fn wait_identifier(&self) -> String {
-		self
-			.representative_pid()
-			.map_or_else(|| self.id.to_string(), |pid| pid.to_string())
+	/// What `wait -p` assigns for the job: the pid Bash waits for, the last
+	/// of the pipeline (`find_last_pid` in `wait_for_job` and
+	/// `wait_for_any_job`), or the job number without one.
+	pub fn wait_identifier(&self) -> String {
+		self.last_pid().map_or_else(|| self.id.to_string(), |pid| pid.to_string())
 	}
 
 	/// Returns whether part of the job runs inside the shell process (a builtin,

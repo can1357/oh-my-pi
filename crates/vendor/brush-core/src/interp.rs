@@ -18,7 +18,7 @@ use crate::{
 	error, expansion, extendedtests, extensions, ioutils, jobs, openfiles,
 	openfiles::{OpenFile, OpenFiles},
 	pipetap::{self, PipeTap},
-	results::{ExecutionExitCode, ExecutionResult, ExecutionSpawnResult, ExecutionWaitResult},
+	results::{ExecutionControlFlow, ExecutionExitCode, ExecutionResult, ExecutionSpawnResult, ExecutionWaitResult},
 	shell::Shell,
 	sys, timing,
 	traps::JobSignals,
@@ -1101,6 +1101,11 @@ fn reap_reported_jobs(shell: &mut Shell<impl extensions::ShellExtensions>) {
 	}
 }
 
+/// How long a pipeline stage that did not stop itself may still take to end
+/// before the stop of another stage stops the pipeline without it (see
+/// `wait_for_pipeline_processes_and_update_status`).
+const STOPPED_STAGE_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
+
 async fn wait_for_pipeline_processes_and_update_status(
 	pipeline: &ast::Pipeline,
 	mut process_spawn_results: VecDeque<ExecutionSpawnResult>,
@@ -1111,9 +1116,10 @@ async fn wait_for_pipeline_processes_and_update_status(
 	let mut result = ExecutionResult::success();
 	let mut stopped_children = vec![];
 	let mut last_failure_exit_code: Option<ExecutionExitCode> = None;
-
-	// Clear our the pipeline status so we can start filling it out.
-	shell.last_pipeline_statuses_mut().clear();
+	let mut statuses = Vec::with_capacity(process_spawn_results.len());
+	// The `WSTOPSIG` value of the first stage's wait status (see
+	// `ExecutionSpawnResult::wait_with_stop_word`).
+	let mut first_stage_word = None;
 
 	// Use the exact external member set as the stop scope for a multi-process
 	// pipeline. A process group remains an additional scope because a detached
@@ -1133,49 +1139,124 @@ async fn wait_for_pipeline_processes_and_update_status(
 		}
 	}
 
-	while let Some(child) = process_spawn_results.pop_front() {
-		ensure_not_cancelled(params)?;
-		let wait_result = if !stopped_children.is_empty() {
-			child.poll().await?
-		} else {
-			child.wait_with_cancel(params.cancel_token()).await?
+	let external_pids: Vec<_> = process_spawn_results.iter().filter_map(external_pid).collect();
+	let mut stop = jobs::PipelineStop {
+		first_pid: external_pids.first().copied(),
+		last_pid: external_pids.last().copied(),
+		..jobs::PipelineStop::default()
+	};
+	let stage_count = process_spawn_results.len();
+
+	// The stages seen stopped, each with its `WSTOPSIG`. A wait ends when any
+	// stage of the pipeline stops (a wait on one stage consumes the stops of
+	// all of them), and the pipeline then counts as stopped: the stages left
+	// are not waited for. A stage that stopped is stopped; one that did not
+	// gets a short grace to end, since a stop usually follows the end of the
+	// stage before it (the pipe it read closed) and Bash's `wait_for` would
+	// have collected that end. Bash waits on while a process of the job runs,
+	// which would hang here when an earlier stage blocks writing to a later
+	// one that stopped.
+	let mut stopped_pids: Vec<(sys::process::ProcessId, u8)> = Vec::new();
+	// The signal that stopped the pipeline, once one did.
+	let mut pipeline_stop: Option<u8> = None;
+	for index in 0..stage_count {
+		let Some(stage) = process_spawn_results.pop_front() else {
+			break;
 		};
+		ensure_not_cancelled(params)?;
+		let pid = external_pid(&stage);
+		// The stage's own stop signal, when it stopped rather than still ran.
+		// When the shell itself got SIGTSTP, no stage reported a stop and all
+		// of them stopped.
+		let stopped_itself = |stopped_pids: &[(sys::process::ProcessId, u8)], signal: u8| {
+			if stopped_pids.is_empty() {
+				return Some(signal);
+			}
+			let pid = pid?;
+			stopped_pids
+				.iter()
+				.rev()
+				.find(|&&(stopped, _)| stopped == pid)
+				.map(|&(_, signal)| signal)
+		};
+		let stage = match (pipeline_stop, stage) {
+			(None, stage) => match stage.wait_with_stop_word(params.cancel_token()).await? {
+				(ExecutionWaitResult::Stopped(mut child, signal), _) => {
+					pipeline_stop = Some(signal);
+					stopped_pids.extend(child.take_reported_stops());
+					Err(child)
+				},
+				completed => Ok(completed),
+			},
+			(Some(_), ExecutionSpawnResult::StartedProcess(child)) => Err(child),
+			(Some(_), stage) => Ok((stage.poll().await?, 0)),
+		};
+		let (wait_result, word, own_stop) = match stage {
+			Ok((wait_result, word)) => (wait_result, word, None),
+			Err(mut child) => {
+				let signal = pipeline_stop.unwrap_or(0);
+				match stopped_itself(&stopped_pids, signal) {
+					Some(own) => (ExecutionWaitResult::Stopped(child, own), 0, Some(own)),
+					None => match child.finish_within(STOPPED_STAGE_GRACE).await? {
+						Some(output) => {
+							let word = jobs::stop_signal_word(&output);
+							(ExecutionWaitResult::Completed(ExecutionResult::from(output)), word, None)
+						},
+						None => (ExecutionWaitResult::Stopped(child, signal), 0, None),
+					},
+				}
+			},
+		};
+		if index == 0 {
+			// A first stage that still runs has no status Bash would know
+			// yet; the signal that stopped the pipeline stands in for it.
+			first_stage_word = Some(match &wait_result {
+				ExecutionWaitResult::Completed(_) => word,
+				ExecutionWaitResult::Stopped(_, signal) => *signal,
+			});
+		}
 
 		match wait_result {
 			ExecutionWaitResult::Completed(current_result) => {
 				result = current_result;
-				shell.set_last_exit_status(result.exit_code.status());
-				shell
-					.last_pipeline_statuses_mut()
-					.push(result.exit_code.status());
+				statuses.push(result.exit_code.status());
+				stop.ended_pids.extend(pid);
+				if index == 0 {
+					stop.first_word = Some(word);
+				}
+				if index + 1 == stage_count {
+					stop.last_status = Some(result.exit_code);
+				}
 
 				// Track the last failure for pipefail option
 				if !result.is_success() {
 					last_failure_exit_code = Some(result.exit_code);
 				}
 			},
-			ExecutionWaitResult::Stopped(child, signal) => {
-				// Bash's `wait_for` returns 128 plus `WSTOPSIG` of the first
-				// process. Once any stage stops, the rest are collected as
-				// `Stopped(_, 0)` from `poll`; only the first signal matters.
-				if stopped_children.is_empty() {
-					let status = 128_u16 + u16::from(signal);
-					result = ExecutionExitCode::from(status).into();
-					shell.set_last_exit_status(result.exit_code.status());
-				}
-				shell.last_pipeline_statuses_mut().push(result.exit_code.status());
-
+			ExecutionWaitResult::Stopped(child, _) => {
+				stop.stopped.extend(pid.zip(own_stop));
 				stopped_children.push(jobs::JobTask::External(child));
 			},
 		}
 	}
 
-	// Apply pipefail semantics if enabled
-	if shell.options().return_last_failure_from_pipeline {
-		if let Some(failure_exit_code) = last_failure_exit_code {
+	if stopped_children.is_empty() {
+		// Apply pipefail semantics if enabled
+		if shell.options().return_last_failure_from_pipeline
+			&& let Some(failure_exit_code) = last_failure_exit_code
+		{
 			result.exit_code = failure_exit_code;
 		}
+		*shell.last_pipeline_statuses_mut() = statuses;
+	} else {
+		// A stopped job's status is what Bash's `wait_for` returns: 128 plus
+		// the `WSTOPSIG` value of its first process's status, which is the
+		// signal that stopped it, or its exit status once it has exited (0
+		// for a signal that killed it). `PIPESTATUS` keeps its value, since
+		// `setjstatus` runs only for a job that ended.
+		result = ExecutionExitCode::stopped_job(first_stage_word.unwrap_or(0)).into();
 	}
+	shell.set_last_exit_status(result.exit_code.status());
 
 	if shell.options().interactive {
 		sys::terminal::move_self_to_foreground()?;
@@ -1185,18 +1266,22 @@ async fn wait_for_pipeline_processes_and_update_status(
 	// and hand it off to the job manager.
 	if !stopped_children.is_empty() {
 		let job_control = shell.options().enable_job_control;
-		let job = shell.jobs_mut().add_as_current(
-			jobs::Job::new(stopped_children, pipeline.to_string(), jobs::JobState::Stopped),
-			job_control,
-		);
+		let interactive = shell.options().interactive;
+		let mut job = jobs::Job::new(stopped_children, pipeline.to_string(), jobs::JobState::Stopped);
+		job.record_pipeline_stop(stop);
+		let job = shell.jobs_mut().add_as_current(job, job_control);
 
-		let formatted = job.to_string();
+		// Bash running a script prints nothing for a job that stopped
+		// (`notify_of_job_status`); `jobs` shows it.
+		if interactive {
+			let formatted = job.to_string();
 
-		// N.B. We use the '\r' to overwrite any ^Z output.
-		params
-			.stderr(shell)
-			.write_all_async(format!("\r{formatted}\n").as_bytes())
-			.await?;
+			// N.B. We use the '\r' to overwrite any ^Z output.
+			params
+				.stderr(shell)
+				.write_all_async(format!("\r{formatted}\n").as_bytes())
+				.await?;
+		}
 	}
 
 	Ok(result)
@@ -1843,16 +1928,11 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 			.as_ref()
 			.map(|won| CommandPrefixOrSuffixItem::Word(won.clone()));
 
-		// Bash expands every command word first, then each prefix assignment
-		// value, before it performs any redirection (`expand_words` in
-		// `execute_simple_command`). In particular an expansion error stops
-		// before a redirection can create a file or run its target's command
-		// substitution. Keep the unexpanded prefix assignments until after
-		// all words, then install the redirects in their source order.
+		// Bash expands every command word first (`expand_word_list_internal`),
+		// so an expansion error stops before an assignment or a redirection
+		// takes effect. The prefix assignments wait until after the words.
 		let mut pending_assignments: Vec<&ast::Assignment> = vec![];
-		let mut assignments: Vec<&ast::Assignment> = vec![];
 		let mut args: Vec<CommandArg> = vec![];
-		let mut command_takes_assignments = false;
 
 		// Capture the status change count before expansion, so we can detect
 		// if expansion (e.g., command substitution) set an exit status.
@@ -1860,6 +1940,7 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 
 		let items: Vec<&CommandPrefixOrSuffixItem> =
 			prefix_iter.chain(cmd_name_items.iter()).chain(suffix_iter).collect();
+		let command_takes_assignments = takes_assignment_arguments(&context.shell, &items);
 		for &item in &items {
 			ensure_not_cancelled(&params)?;
 			match item {
@@ -1899,37 +1980,23 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 					let mut next_args =
 						expansion::full_expand_and_split_word(&mut context.shell, &params, arg).await?;
 
-					if args.is_empty() {
-						if let Some(cmd_name) = next_args.first() {
-							if let Some(alias_value) = context.shell.aliases().get(cmd_name.as_str()) {
-								//
-								// TODO(#57): This is a total hack; aliases are supposed to be
-								// handled much earlier in the process.
-								//
-								let mut alias_pieces: Vec<_> = alias_value
-									.split_ascii_whitespace()
-									.map(|i| i.to_owned())
-									.collect();
+					if args.is_empty()
+						&& let Some(cmd_name) = next_args.first()
+						&& let Some(alias_value) = context.shell.aliases().get(cmd_name.as_str())
+					{
+						//
+						// TODO(#57): This is a total hack; aliases are supposed to be
+						// handled much earlier in the process.
+						//
+						let mut alias_pieces: Vec<_> = alias_value
+							.split_ascii_whitespace()
+							.map(|i| i.to_owned())
+							.collect();
 
-								next_args.remove(0);
-								alias_pieces.append(&mut next_args);
+						next_args.remove(0);
+						alias_pieces.append(&mut next_args);
 
-								next_args = alias_pieces;
-							}
-
-							let first_arg = next_args[0].as_str();
-
-							// Check if we're going to be invoking a special declaration builtin.
-							// That will change how we parse and process args.
-							if context
-								.shell
-								.builtins()
-								.get(first_arg)
-								.is_some_and(|r| !r.disabled && r.declaration_builtin)
-							{
-								command_takes_assignments = true;
-							}
-						}
+						next_args = alias_pieces;
 					}
 
 					let mut next_args = next_args.into_iter().map(CommandArg::String).collect();
@@ -1937,25 +2004,61 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 				},
 			}
 		}
-		for &assignment in &pending_assignments {
-			expand_assignment_value(&mut context.shell, &params, &assignment.value).await?;
-			assignments.push(assignment);
+		// Then each prefix assignment in turn, expanded and assigned once
+		// (`do_assignment_statements`): with a command name into its temporary
+		// environment (`assign_in_env`), else into the shell
+		// (`do_word_assignment`). Only then the redirections.
+		let has_command = matches!(args.first(), Some(CommandArg::String(_)));
+		let mut temporary_environment = None;
+		if has_command {
+			// In POSIX mode an assignment error before a special builtin
+			// exits the shell.
+			let special_builtin = context.shell.options().posix_mode
+				&& args.first().is_some_and(|name| is_special_builtin(&context.shell, &name.to_string()));
+			context.shell.env_mut().push_scope(EnvironmentScope::Command);
+			for &assignment in &pending_assignments {
+				if let Err(err) = apply_temporary_assignment(&mut context.shell, &params, assignment).await {
+					let _ = context.shell.env_mut().pop_scope(EnvironmentScope::Command);
+					let err = if special_builtin { err.into_fatal() } else { err };
+					let mut stderr = params.stderr(&context.shell);
+					let _ = context.shell.display_error(&mut stderr, &err).await;
+					return Ok(err.into_result(&context.shell).into());
+				}
+			}
+			// A redirection does not see the temporary environment
+			// (`expanding_redir` keeps `find_variable` out of it).
+			temporary_environment = Some(context.shell.env_mut().pop_scope_variables(EnvironmentScope::Command)?);
+		} else {
+			for &assignment in &pending_assignments {
+				forget_reported_jobs_for_compound_assignment(&mut context.shell, assignment);
+				// Apply the assignment. Don't mark as fatal - let errors be handled
+				// at the program level so multiple complete_commands can execute independently.
+				apply_assignment(
+					assignment,
+					&mut context.shell,
+					&params,
+					false,
+					None,
+					EnvironmentScope::Global,
+				)
+				.await?;
+			}
+			// Bash runs a null command in a child when one of its redirections
+			// reads standard input, which installs a job.
+			if null_command_forks(&items) {
+				context.shell.jobs_mut().remove_reported_jobs();
+			}
 		}
 		for &item in &items {
 			let CommandPrefixOrSuffixItem::IoRedirect(redirect) = item else {
 				continue;
 			};
 			if let Err(error) = setup_redirect(&mut context.shell, &mut params, redirect).await {
-				return fail_simple_command_redirect(
-					&mut context.shell,
-					&params,
-					&error,
-					&args,
-					assignments,
-					&items,
-				)
-				.await;
+				return fail_simple_command_redirect(&mut context.shell, &params, &error, &args).await;
 			}
+		}
+		if let Some(variables) = temporary_environment {
+			context.shell.env_mut().push_scope_variables(EnvironmentScope::Command, variables);
 		}
 
 		// If we have a command, then execute it.
@@ -1983,7 +2086,7 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 					in_pipeline: context.in_pipeline,
 				};
 
-			match execute_command(context, params, cmd_name, assignments, args).await {
+			match execute_command(context, params, cmd_name, args).await {
 				Ok(result) => Ok(result),
 				Err(err) => {
 					if !quiet_token.as_ref().is_some_and(CancellationToken::is_cancelled) {
@@ -1995,27 +2098,6 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 				},
 			}
 		} else {
-			// No command to run; assignments must be applied to this shell. Bash
-			// runs a null command in a child when one of its redirections reads
-			// standard input, which installs a job.
-			if null_command_forks(&items) {
-				context.shell.jobs_mut().remove_reported_jobs();
-			}
-			for &assignment in &assignments {
-				forget_reported_jobs_for_compound_assignment(&mut context.shell, assignment);
-				// Apply the assignment. Don't mark as fatal - let errors be handled
-				// at the program level so multiple complete_commands can execute independently.
-				apply_assignment(
-					&assignment,
-					&mut context.shell,
-					&params,
-					false,
-					None,
-					EnvironmentScope::Global,
-				)
-				.await?;
-			}
-
 			// Assignment-only statements clear $_ (set to empty string).
 			// This matches bash behavior where assignments don't have a "last
 			// argument".
@@ -2082,71 +2164,152 @@ fn null_command_forks(items: &[&CommandPrefixOrSuffixItem]) -> bool {
 }
 
 /// Finishes a simple command whose redirection failed. Every word and prefix
-/// assignment has already expanded, as Bash's `expand_words` requires. A
-/// command Bash runs as a child was forked before that child failed the
-/// redirection, which installs a job and so forgets the ended jobs that were
-/// reported (`stop_pipeline`); a builtin or function fails in the shell
-/// itself. With no command name the already-expanded assignments take effect,
-/// as Bash performs them after the redirection result.
+/// assignment has already taken effect, as Bash's `expand_words` does before
+/// the redirections. A command Bash runs as a child was forked before that
+/// child failed the redirection, which installs a job and so forgets the
+/// ended jobs that were reported (`stop_pipeline`); a builtin or function
+/// fails in the shell itself. In POSIX mode a special builtin's failure
+/// exits a non-interactive shell (`execute_simple_command`).
 async fn fail_simple_command_redirect(
 	shell: &mut Shell<impl extensions::ShellExtensions>,
 	params: &ExecutionParameters,
 	error: &error::Error,
 	args: &[CommandArg],
-	assignments: Vec<&ast::Assignment>,
-	items: &[&CommandPrefixOrSuffixItem],
 ) -> Result<ExecutionSpawnResult, error::Error> {
 	let words: Vec<String> = args.iter().map(ToString::to_string).collect();
-	if words.is_empty() {
-		if null_command_forks(items) {
-			shell.jobs_mut().remove_reported_jobs();
-		}
-		for &assignment in &assignments {
-			forget_reported_jobs_for_compound_assignment(shell, assignment);
-			apply_assignment(assignment, shell, params, false, None, EnvironmentScope::Global).await?;
-		}
-	} else if commands::command_starts_child(shell, &words) {
+	if !words.is_empty() && commands::command_starts_child(shell, &words) {
 		shell.jobs_mut().remove_reported_jobs();
 	}
 	let mut stderr = params.stderr(shell);
 	shell.display_error(&mut stderr, error).await?;
-	Ok(ExecutionResult::general_error().into())
+	let mut result = ExecutionResult::general_error();
+	if shell.options().posix_mode
+		&& !shell.options().interactive
+		&& words.first().is_some_and(|name| is_special_builtin(shell, name))
+	{
+		result.next_control_flow = ExecutionControlFlow::ExitShell;
+	}
+	Ok(result.into())
 }
 
-async fn execute_command(
-	mut context: PipelineExecutionContext<'_, impl extensions::ShellExtensions>,
+/// Whether `name` runs an enabled special builtin.
+fn is_special_builtin(shell: &Shell<impl extensions::ShellExtensions>, name: &str) -> bool {
+	shell.builtins().get(name).is_some_and(|builtin| !builtin.disabled && builtin.special_builtin)
+}
+
+/// Whether the assignment words among this command's arguments are
+/// assignments, as Bash's `fix_assignment_words` decides before it expands
+/// any word: the first word after the prefix assignments, past any
+/// `command` words in POSIX mode, must name a declaration builtin as it is
+/// written. So `command export x=$v` (outside POSIX mode), `builtin export
+/// x=$v` and `"export" x=$v` expand and split `x=$v` as any other word,
+/// and the builtin assigns what it receives.
+fn takes_assignment_arguments(
+	shell: &Shell<impl extensions::ShellExtensions>,
+	items: &[&CommandPrefixOrSuffixItem],
+) -> bool {
+	let mut words = items
+		.iter()
+		.filter(|item| !matches!(item, CommandPrefixOrSuffixItem::IoRedirect(_)))
+		.skip_while(|item| matches!(item, CommandPrefixOrSuffixItem::AssignmentWord(..)))
+		.map(|item| match item {
+			CommandPrefixOrSuffixItem::Word(word) | CommandPrefixOrSuffixItem::AssignmentWord(_, word) => {
+				Some(word.value.as_str())
+			},
+			_ => None,
+		});
+	let mut name = words.next().flatten();
+	if shell.options().posix_mode {
+		while name == Some("command") {
+			name = words.next().flatten();
+		}
+	} else if let Some(alias) = name.and_then(|name| shell.aliases().get(name)) {
+		// brush expands an alias as the command name is expanded.
+		name = alias.split_ascii_whitespace().next();
+	}
+	name.is_some_and(|name| {
+		shell.builtins().get(name).is_some_and(|builtin| !builtin.disabled && builtin.declaration_builtin)
+	})
+}
+
+/// Puts one prefix assignment into the temporary environment of the command
+/// it precedes, as Bash's `assign_in_env` does: a readonly variable is
+/// refused before its value is expanded; without POSIX mode that is
+/// reported and the command runs on (`tempenv_assign_error`).
+async fn apply_temporary_assignment(
+	shell: &mut Shell<impl extensions::ShellExtensions>,
+	params: &ExecutionParameters,
+	assignment: &ast::Assignment,
+) -> Result<(), error::Error> {
+	let name = match &assignment.name {
+		ast::AssignmentName::VariableName(name) | ast::AssignmentName::ArrayElementName(name, _) => name,
+	};
+	if shell.env().get(name).is_some_and(|(_, variable)| variable.is_readonly()) {
+		let error = error::Error::from(error::ErrorKind::ReadonlyVariable);
+		if shell.options().posix_mode {
+			return Err(error);
+		}
+		let mut stderr = params.stderr(shell);
+		shell.display_error(&mut stderr, &error).await?;
+		return Ok(());
+	}
+	// Ensure it's tagged as exported and created in the command scope.
+	apply_assignment(
+		assignment,
+		shell,
+		params,
+		true,
+		Some(EnvironmentScope::Command),
+		EnvironmentScope::Command,
+	)
+	.await
+}
+
+/// Ends a special builtin's temporary environment in POSIX mode as Bash's
+/// `merge_temporary_env` does (`push_posix_temp_var`): each variable in it
+/// is then assigned in the shell, as an assignment statement would, and
+/// stays exported.
+fn merge_temporary_environment<SE: extensions::ShellExtensions>(shell: &mut Shell<SE>) -> Result<(), error::Error> {
+	let variables = shell.env_mut().pop_scope_variables(EnvironmentScope::Command)?;
+	for (name, mut variable) in variables {
+		let value = match variable.value() {
+			ShellValue::String(value) => ShellValueLiteral::Scalar(value.clone()),
+			_ => {
+				variable.export();
+				shell.env_mut().add(name, variable, EnvironmentScope::Global)?;
+				continue;
+			},
+		};
+		shell.env_mut().update_or_add(
+			name,
+			value,
+			|variable| {
+				variable.export();
+				Ok(())
+			},
+			EnvironmentLookup::Anywhere,
+			EnvironmentScope::Global,
+		)?;
+	}
+	Ok(())
+}
+
+/// Runs the command; the caller has pushed its temporary environment scope
+/// and put the prefix assignments in it, and the command pops it when it
+/// has run.
+async fn execute_command<SE: extensions::ShellExtensions>(
+	mut context: PipelineExecutionContext<'_, SE>,
 	params: ExecutionParameters,
 	cmd_name: String,
-	assignments: Vec<&ast::Assignment>,
 	args: Vec<CommandArg>,
 ) -> Result<ExecutionSpawnResult, error::Error> {
-	// Push a new ephemeral environment scope for the duration of the command. We'll
-	// set command-scoped variable assignments after doing so, and revert them
-	// before returning.
-	let mut guard = crate::env::ScopeGuard::new(&mut context.shell, EnvironmentScope::Command);
-
-	for assignment in &assignments {
-		// Ensure it's tagged as exported and created in the command scope.
-		apply_assignment(
-			assignment,
-			guard.shell(),
-			&params,
-			true,
-			Some(EnvironmentScope::Command),
-			EnvironmentScope::Command,
-		)
-		.await?;
-	}
-
-	if guard.shell().options().print_commands_and_arguments {
-		guard
-			.shell()
+	if context.shell.options().print_commands_and_arguments {
+		context
+			.shell
 			.trace_command(&params, args.iter().map(|arg| arg.quote_for_tracing()).join(" "))
 			.await;
 	}
-
-	guard.detach();
-	drop(guard);
+	let merge = context.shell.options().posix_mode && is_special_builtin(&context.shell, &cmd_name);
 
 	// Construct the command struct.
 	let mut cmd = commands::SimpleCommand::new(context.shell, params, cmd_name, args);
@@ -2154,7 +2317,12 @@ async fn execute_command(
 	cmd.in_pipeline = context.in_pipeline;
 
 	// Arrange to pop off that ephemeral environment scope.
-	cmd.post_execute = Some(|shell| shell.env_mut().pop_scope(EnvironmentScope::Command));
+	let post_execute: fn(&mut Shell<SE>) -> Result<(), error::Error> = if merge {
+		merge_temporary_environment
+	} else {
+		|shell| shell.env_mut().pop_scope(EnvironmentScope::Command)
+	};
+	cmd.post_execute = Some(post_execute);
 
 	// Run through any pre-execution hooks as best effort.
 	let _ = commands::on_preexecute(&mut cmd).await;

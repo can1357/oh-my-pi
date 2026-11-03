@@ -5,7 +5,7 @@ use std::os::unix::process::ExitStatusExt;
 
 use tokio_util::sync::CancellationToken;
 
-use crate::{error, processes};
+use crate::{error, jobs, processes};
 
 /// Represents the result of executing a command or similar item.
 #[derive(Default)]
@@ -130,12 +130,13 @@ pub enum ExecutionExitCode {
 	Unimplemented,
 	/// A custom exit code.
 	Custom(u8),
-	/// 256, the one status above 255 that `$?` can hold: Bash's `wait` and
-	/// `fg` on a job that stopped return 128 plus the stop value of the
-	/// status of its first process (`wait_for`), and its `builtin_status`
-	/// turns every larger value into 1 or 2. A process exit keeps the low 8
-	/// bits, 0.
-	StoppedStatusLimit,
+	/// A status above 255, from 256 to 383: Bash's `wait_for` returns 128
+	/// plus the `WSTOPSIG` value of the status of a stopped job's first
+	/// process, which is its exit status once it has exited. A foreground
+	/// job keeps it whole in `$?`; `wait`, `fg` and `return` pass it through
+	/// `builtin_status`, which keeps only 256. A process exit keeps the low
+	/// 8 bits.
+	StoppedJob(u16),
 }
 
 impl ExecutionExitCode {
@@ -144,11 +145,20 @@ impl ExecutionExitCode {
 		matches!(self, Self::Success)
 	}
 
-	/// The status `$?` shows: 0 to 256.
+	/// The status `$?` shows: 0 to 383.
 	pub fn status(&self) -> u16 {
 		match self {
-			Self::StoppedStatusLimit => 256,
+			Self::StoppedJob(status) => *status,
 			code => u16::from(u8::from(code)),
+		}
+	}
+
+	/// The status of a stopped job, 128 plus `word` (see
+	/// [`ExecutionExitCode::StoppedJob`]).
+	pub fn stopped_job(word: u8) -> Self {
+		match 128 + u16::from(word) {
+			status @ 0..=255 => Self::from(u8::try_from(status).unwrap_or(u8::MAX)),
+			status => Self::StoppedJob(status),
 		}
 	}
 
@@ -158,7 +168,7 @@ impl ExecutionExitCode {
 	pub fn from_builtin_status(status: u32) -> Self {
 		match status {
 			0..=255 => Self::from(u8::try_from(status).unwrap_or(u8::MAX)),
-			256 => Self::StoppedStatusLimit,
+			256 => Self::StoppedJob(256),
 			257 | 258 => Self::InvalidUsage,
 			_ => Self::GeneralError,
 		}
@@ -166,7 +176,8 @@ impl ExecutionExitCode {
 }
 
 impl From<u16> for ExecutionExitCode {
-	/// Takes a status `$?` holds (see [`ExecutionExitCode::status`]).
+	/// Takes a status `$?` holds (see [`ExecutionExitCode::status`]) as a
+	/// builtin returns it (see [`ExecutionExitCode::from_builtin_status`]).
 	fn from(status: u16) -> Self {
 		Self::from_builtin_status(u32::from(status))
 	}
@@ -212,7 +223,7 @@ impl From<&ExecutionExitCode> for u8 {
 			ExecutionExitCode::Interrupted => 130,
 			ExecutionExitCode::BrokenPipe => 141,
 			ExecutionExitCode::Custom(code) => *code,
-			ExecutionExitCode::StoppedStatusLimit => 0,
+			ExecutionExitCode::StoppedJob(status) => status.to_le_bytes()[0],
 		}
 	}
 }
@@ -287,27 +298,43 @@ impl ExecutionSpawnResult {
 		self,
 		cancel_token: Option<CancellationToken>,
 	) -> Result<ExecutionWaitResult, error::Error> {
+		Ok(self.wait_with_stop_word(cancel_token).await?.0)
+	}
+
+	/// Waits as [`Self::wait_with_cancel`] does, with the `WSTOPSIG` of the
+	/// wait status of a command that completed, which Bash's `wait_for` adds
+	/// to 128 for a stopped job whose first process has ended: the exit
+	/// status of a process that exited, 0 for one a signal killed (see
+	/// [`jobs::stop_signal_word`]), and the status of a command the shell
+	/// ran itself, which Bash would have run as a child that exits with it.
+	/// For a command that stopped it is 0; its signal is in the result.
+	pub(crate) async fn wait_with_stop_word(
+		self,
+		cancel_token: Option<CancellationToken>,
+	) -> Result<(ExecutionWaitResult, u8), error::Error> {
+		let completed = |result: ExecutionResult| {
+			let word = u8::from(result.exit_code);
+			(ExecutionWaitResult::Completed(result), word)
+		};
 		let result = match self {
 			Self::StartedProcess(mut child) => {
 				// Wait for the process to exit or for a relevant signal, whichever happens
 				// first.
 				match child.wait(cancel_token).await? {
 					processes::ProcessWaitResult::Completed(output) => {
-						ExecutionWaitResult::Completed(ExecutionResult::from(output))
+						let word = jobs::stop_signal_word(&output);
+						(ExecutionWaitResult::Completed(ExecutionResult::from(output)), word)
 					},
 					processes::ProcessWaitResult::Stopped(signal) => {
-						ExecutionWaitResult::Stopped(child, signal)
+						(ExecutionWaitResult::Stopped(child, signal), 0)
 					},
 					processes::ProcessWaitResult::Cancelled => {
-						ExecutionWaitResult::Completed(ExecutionResult::new(130))
+						(ExecutionWaitResult::Completed(ExecutionResult::new(130)), 0)
 					},
 				}
 			},
-			Self::Completed(result) => ExecutionWaitResult::Completed(result),
-			Self::StartedTask(join_handle) => {
-				let result = join_handle.await?;
-				ExecutionWaitResult::Completed(result?)
-			},
+			Self::Completed(result) => completed(result),
+			Self::StartedTask(join_handle) => completed(join_handle.await??),
 		};
 
 		Ok(result)

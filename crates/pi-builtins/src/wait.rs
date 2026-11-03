@@ -116,7 +116,7 @@ impl builtins::Command for WaitCommand {
 					.jobs
 					.iter()
 					.find(|job| job.id == job_id)
-					.map(job_identifier),
+					.map(Job::wait_identifier),
 				JobSelector::ProcessId(pid) => Some(pid.to_string()),
 			};
 			// In POSIX mode Bash then forgets the ended jobs that were reported
@@ -233,8 +233,3 @@ fn assign_wait_variable(
 	)
 }
 
-fn job_identifier(job: &Job) -> String {
-	job
-		.representative_pid()
-		.map_or_else(|| job.id.to_string(), |pid| pid.to_string())
-}
