@@ -2283,8 +2283,17 @@ export class AgentSession implements SettingsScope {
 		this.#promptTemplates = config.promptTemplates ?? [];
 		this.#slashCommands = config.slashCommands ?? [];
 		this.#extensionRunner = config.extensionRunner;
-		// Every extension callback is the session's work, whichever path emits it.
-		if (this.#extensionRunner) this.#extensionRunner.runInRequestContext = fn => this.#inLogContext(fn);
+		// Every extension callback is the session's work, whichever path emits
+		// it. A runner answers to one live session: a second live session would
+		// put the first one's extension work outside the first one's holds.
+		if (this.#extensionRunner) {
+			const owner = this.#extensionRunner.requestContextOwner;
+			if (owner && owner !== this && !owner.isDisposed) {
+				throw new Error("This extension runner already belongs to another live session");
+			}
+			this.#extensionRunner.requestContextOwner = this;
+			this.#extensionRunner.runInRequestContext = fn => this.#inLogContext(fn);
+		}
 		// A move-off changes this session's id without anyone asking. Until it was
 		// announced, the only trace an extension could see was the id differing
 		// from the one it last read, with nothing to say the predecessor is still

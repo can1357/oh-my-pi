@@ -12,17 +12,20 @@ import {
 	type StreamFn,
 	type ThinkingLevel,
 } from "@oh-my-pi/pi-agent-core";
-import type {
-	Context,
-	CredentialDisabledEvent,
-	Effort,
-	Message,
-	Model,
-	ModelUsageHealth,
-	ProviderSessionState,
-	ServiceTier,
-	ServiceTierByFamily,
-	SimpleStreamOptions,
+import {
+	type Context,
+	type CredentialDisabledEvent,
+	captureRequestHolds,
+	type Effort,
+	type Message,
+	type Model,
+	type ModelUsageHealth,
+	type ProviderSessionState,
+	RequestHoldsAlias,
+	runWithRequestHolds,
+	type ServiceTier,
+	type ServiceTierByFamily,
+	type SimpleStreamOptions,
 } from "@oh-my-pi/pi-ai";
 import { resolveApiKeyOnce } from "@oh-my-pi/pi-ai/auth-retry";
 import type { DiscoverAuthStorageOptions } from "@oh-my-pi/pi-ai/auth-broker/discover";
@@ -1921,10 +1924,20 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const extensionRoots = options.extensionRoots?.();
 	const explicit = extensionRoots?.explicit ?? options.additionalExtensionPaths ?? [];
 	const mode = extensionRoots?.mode ?? (options.disableExtensionDiscovery ? "explicit-only" : "merge");
-	return await withOmpExtensionRootScope(explicit, mode, () => createAgentSessionScoped(options));
+	// Everything built here is the session's work, though the session's agent
+	// does not exist yet: an extension factory's timer, a backend's first
+	// request. It runs in holds that stand for the agent's context and are
+	// bound to it once the agent is built (see `RequestHoldsAlias`).
+	const sessionHolds = new RequestHoldsAlias();
+	return await runWithRequestHolds(sessionHolds, () =>
+		withOmpExtensionRootScope(explicit, mode, () => createAgentSessionScoped(options, sessionHolds)),
+	);
 }
 
-async function createAgentSessionScoped(options: CreateAgentSessionOptions): Promise<CreateAgentSessionResult> {
+async function createAgentSessionScoped(
+	options: CreateAgentSessionOptions,
+	sessionHolds: RequestHoldsAlias,
+): Promise<CreateAgentSessionResult> {
 	if (options.systemPromptTemplate !== undefined && options.customSystemPrompt !== undefined) {
 		throw new Error("systemPromptTemplate cannot be combined with a literal custom system prompt");
 	}
@@ -4914,6 +4927,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					: undefined
 				: undefined,
 		});
+		// From here on, what start-up left running is held by the agent's holds.
+		sessionHolds.bind(agent.runInRequestContext(captureRequestHolds));
 		// Catalog rows carry the registry settings' extended-window opt-ins; this
 		// session adopts every model with the window its own settings select (a
 		// subagent with a compaction override must not inherit the parent's).
@@ -5741,14 +5756,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// tools per run. The subscription lives for the session's lifetime; the
 		// reference is intentionally discarded (the listener retains it).
 		if (!restrictToolNames) {
-			// The memory backend's startup and the timers it arms (memories, mnemopi,
-			// sharpshooter consolidation) are the session's work: their model
-			// requests wait for the session's holds.
-			const startSessionMemoryBackend = () => session.runInRequestContext(startMemoryBackend);
+			// The memory backend starts inside the session's start-up, so its first
+			// requests and the timers it arms wait for the session's holds.
 			if (cfgAutolearnEnabled.get(settings) && taskDepth === 0) {
-				await logger.time("startMemoryStartupTask", startSessionMemoryBackend);
+				await logger.time("startMemoryStartupTask", startMemoryBackend);
 			} else {
-				void logger.time("startMemoryStartupTask", startSessionMemoryBackend);
+				void logger.time("startMemoryStartupTask", startMemoryBackend);
 			}
 			if (taskDepth === 0) {
 				new AutoLearnController({

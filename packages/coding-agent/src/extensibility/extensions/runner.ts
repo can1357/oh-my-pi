@@ -560,6 +560,8 @@ export class ExtensionRunner {
 	 * waits for the session's holds.
 	 */
 	runInRequestContext: (<T>(fn: () => T) => T) | undefined;
+	/** The session that set {@link runInRequestContext}; a second live session may not take the runner over. */
+	requestContextOwner: { readonly isDisposed: boolean } | undefined;
 	#toolRegistrationBarrier: Promise<void> | undefined;
 	#initialized = false;
 	/** Full load order, captured on the first {@link setSuspendedExtensions} call. */
