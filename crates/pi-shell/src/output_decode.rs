@@ -336,12 +336,28 @@ struct LineDecoder {
 	/// Whether `held` is only an incomplete UTF-8 character that a flush kept
 	/// for its next bytes, so there is nothing to judge until they come.
 	tail_kept: bool,
+	/// The encoding a partial flush chose for the current line; the rest of
+	/// the line keeps it until its newline.
+	line:      Option<LineEncoding>,
+}
+
+#[cfg(windows)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LineEncoding {
+	Utf8,
+	Ansi,
 }
 
 #[cfg(windows)]
 impl LineDecoder {
 	fn new(codepage: u32) -> Self {
-		Self { codepage, multibyte: max_char_size(codepage) > 1, held: Vec::new(), tail_kept: false }
+		Self {
+			codepage,
+			multibyte: max_char_size(codepage) > 1,
+			held: Vec::new(),
+			tail_kept: false,
+			line: None,
+		}
 	}
 
 	/// Emits ASCII as it comes and each line holding other bytes once it ends.
@@ -354,6 +370,9 @@ impl LineDecoder {
 					.iter()
 					.position(|byte| !byte.is_ascii())
 					.unwrap_or(bytes.len());
+				if bytes[..ascii].contains(&b'\n') {
+					self.line = None;
+				}
 				// SAFETY: ASCII is valid UTF-8.
 				out.push_str(unsafe { str::from_utf8_unchecked(&bytes[..ascii]) });
 				bytes = &bytes[ascii..];
@@ -369,8 +388,9 @@ impl LineDecoder {
 				return out;
 			};
 			self.held.extend_from_slice(&bytes[..end]);
-			out.push_str(&self.judge(&self.held));
+			out.push_str(&self.decode(&self.held, self.encoding_for(&self.held)));
 			self.held.clear();
+			self.line = None;
 			out.push('\n');
 			bytes = &bytes[end + 1..];
 		}
@@ -380,54 +400,79 @@ impl LineDecoder {
 		!self.held.is_empty() && !self.tail_kept
 	}
 
-	/// Judges the held bytes as if the line ended here, keeping back a
+	/// Decodes the held bytes as if the line ended here, keeping back a
 	/// character still incomplete in their encoding for its next bytes: an
-	/// incomplete UTF-8 sequence when they are UTF-8 so far, otherwise a DBCS
-	/// lead byte (`81` in CP936, which is no UTF-8 prefix).
+	/// incomplete UTF-8 sequence when they are UTF-8, otherwise a DBCS lead
+	/// byte (`81` in CP936, which is no UTF-8 prefix). The encoding chosen
+	/// holds for the rest of the line.
 	fn flush_complete(&mut self) -> String {
 		let utf8_tail = incomplete_utf8_tail(&self.held);
-		let keep = if str::from_utf8(&self.held[..self.held.len() - utf8_tail]).is_ok() {
+		let utf8 = match self.line {
+			Some(encoding) => encoding == LineEncoding::Utf8,
+			None => str::from_utf8(&self.held[..self.held.len() - utf8_tail]).is_ok(),
+		};
+		let keep = if utf8 {
 			utf8_tail
 		} else {
 			self.held.len() - complete_acp_len(self.codepage, &self.held, false)
 		};
 		let end = self.held.len() - keep;
-		let text = self.judge(&self.held[..end]);
+		let mut text = String::new();
+		if end > 0 {
+			let encoding = self.encoding_for(&self.held[..end]);
+			text = self.decode(&self.held[..end], encoding);
+			self.line = Some(encoding);
+		}
 		self.held.drain(..end);
 		self.tail_kept = !self.held.is_empty();
 		text
 	}
 
 	fn finish(&mut self) -> String {
-		let text = self.judge(&self.held);
+		let text = self.decode(&self.held, self.encoding_for(&self.held));
 		self.held.clear();
 		self.tail_kept = false;
+		self.line = None;
 		text
 	}
 
-	/// Decodes one line, or the part of it from its first non-ASCII byte.
+	fn encoding_for(&self, bytes: &[u8]) -> LineEncoding {
+		self.line.unwrap_or_else(|| self.judge(bytes))
+	}
+
+	fn decode(&self, bytes: &[u8], encoding: LineEncoding) -> String {
+		match encoding {
+			LineEncoding::Utf8 => String::from_utf8_lossy(bytes).into_owned(),
+			LineEncoding::Ansi => decode_codepage(self.codepage, bytes, 0)
+				.unwrap_or_else(|| String::from_utf8_lossy(bytes).into_owned()),
+		}
+	}
+
+	/// Judges one line, or the part of it from its first non-ASCII byte.
 	/// Valid UTF-8 is UTF-8. Otherwise it is ANSI text when it strict-decodes
 	/// in the code page and reads worse as UTF-8 — fewer valid multibyte
 	/// characters than invalid sequences — unless, in a multibyte page, its
 	/// only flaw is a character cut short at its end, as `cut -c` and
 	/// `head -c` leave. Anything else is UTF-8 with U+FFFD, so `ok\xeb` loses
 	/// one byte, not the lines after it.
-	fn judge(&self, bytes: &[u8]) -> String {
-		if let Ok(text) = str::from_utf8(bytes) {
-			return text.to_owned();
+	fn judge(&self, bytes: &[u8]) -> LineEncoding {
+		if str::from_utf8(bytes).is_ok() {
+			return LineEncoding::Utf8;
 		}
 		let shape = Utf8Shape::of(bytes);
 		let cut_short_only = self.multibyte && shape.invalid == 0 && shape.cut_tail;
 		if !cut_short_only
 			&& shape.multibyte < shape.invalid + usize::from(shape.cut_tail)
-			&& let Some(text) = decode_codepage(
+			&& decode_codepage(
 				self.codepage,
 				bytes,
 				windows_sys::Win32::Globalization::MB_ERR_INVALID_CHARS,
-			) {
-			return text;
+			)
+			.is_some()
+		{
+			return LineEncoding::Ansi;
 		}
-		String::from_utf8_lossy(bytes).into_owned()
+		LineEncoding::Utf8
 	}
 }
 
@@ -781,6 +826,15 @@ mod tests {
 		let mut decoder = CaptureDecoder::with_codepage(936);
 		assert_eq!(decoder.push(b"\xe4\xb8\xad"), "");
 		assert_eq!(decoder.flush_line(), "中");
+
+		// A line judged ANSI at an idle flush stays ANSI to its newline: GBK
+		// `D2 BB` (一) after it is valid UTF-8 (һ) but belongs to the line.
+		let mut decoder = CaptureDecoder::with_codepage(936);
+		assert_eq!(decoder.push(b"\xd6\xd0"), "");
+		assert_eq!(decoder.flush_line(), "中");
+		assert_eq!(decoder.push(b"\xd2\xbb\n"), "一\n");
+		// The next line is judged afresh.
+		assert_eq!(decoder.push("한\n".as_bytes()), "한\n");
 
 		let mut line = "é".as_bytes().to_vec();
 		line.resize(MAX_HELD_LINE - 1, b'a');

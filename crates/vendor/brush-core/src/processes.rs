@@ -452,7 +452,7 @@ mod relay_tests {
 		#[cfg(not(windows))]
 		let output = std::process::Command::new("sh").args(["-c", "exit 7"]).output();
 		let output = output.expect("run child");
-		let (forwarding, relay) = TestRelay::new(false);
+		let (forwarding, relay) = TestRelay::new(true);
 		let child = ChildProcess {
 			exec_future: Box::pin(async move { Ok(output) }),
 			reaped: false,
