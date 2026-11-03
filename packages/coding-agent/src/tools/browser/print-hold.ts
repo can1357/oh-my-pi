@@ -61,6 +61,7 @@ function holdPrintInPage(
 		const clock: Function = Reflect.get(globalThis, clockKey);
 		const PrintEvent = Event;
 		const dispatchEvent = EventTarget.prototype.dispatchEvent;
+		const report: unknown = Reflect.get(globalThis, binding);
 		return new Proxy(print, {
 			apply(target, thisArg, args) {
 				// The popup retains the deadline object and clock even if its opener changes origin. Losing access
@@ -73,10 +74,10 @@ function holdPrintInPage(
 				}
 				const heldUntil: unknown = Reflect.get(hold, "until");
 				if (typeof heldUntil !== "number" || time >= heldUntil) return Reflect.apply(target, thisArg, args);
-				// The old document's binding may be gone after navigation, but its popup still needs the hold.
+				// Keep the callable binding, not a lookup through the opener's retargeted WindowProxy.
+				// A detached attachment can no longer report, but its remaining deadline still holds.
 				try {
-					const report: unknown = Reflect.get(globalThis, binding);
-					if (typeof report === "function") report("");
+					if (typeof report === "function") Reflect.apply(report, undefined, [""]);
 				} catch {}
 				Reflect.apply(dispatchEvent, view, [new PrintEvent("beforeprint")]);
 				Reflect.apply(dispatchEvent, view, [new PrintEvent("afterprint")]);

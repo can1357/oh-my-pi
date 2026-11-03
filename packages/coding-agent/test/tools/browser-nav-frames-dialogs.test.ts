@@ -801,6 +801,9 @@ return await tab.evaluate(() => {
 								"afterprint",
 								"print returned",
 							]);
+							const notice = hold.takeNotice();
+							expect(notice).toContain("The page called window.print()");
+							expect(notice).toContain("tab.pdf()");
 							await hold.endCall();
 							await popup.mainFrame().mainRealm().evaluate("advanceClock(1_500)");
 							expect(await popup.mainFrame().mainRealm().evaluate(print)).toEqual(
