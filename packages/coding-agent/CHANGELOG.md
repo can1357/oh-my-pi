@@ -9,7 +9,7 @@
 
 ### Fixed
 
-- `computer.windows` and `computer.window` now find a running app's windows by its application ID or path when process identity is available.
+- `computer.windows` and `computer.window` now find a running app's windows by its application ID or path when process identity is available ([#17896](https://github.com/can1357/oh-my-pi/pull/17896) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.16.0] - 2026-11-02
 
