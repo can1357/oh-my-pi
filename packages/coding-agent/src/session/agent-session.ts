@@ -35,6 +35,7 @@ import {
 	type AgentToolResult,
 	type AgentTurnEndContext,
 	AppendOnlyContextManager,
+	ASIDE_MESSAGE_COMMIT,
 	type AsideMessage,
 	type BeforeToolCallContext,
 	type BeforeToolCallResult,
@@ -1178,7 +1179,8 @@ export class AgentSession implements SettingsScope {
 	#isDisposed = false;
 	/** Queue records admitted after disposal; only these may reach a later model call. */
 	#postDisposalQueuedMessages = new WeakSet<AgentMessage>();
-	/** Accepted steers and follow-ups beginDispose() took out of the queues; dispose() records them. */
+	/** Accepted input beginDispose() took out of the queues (steers, follow-ups, background
+	 *  results); dispose() records it before session_exit. */
 	#inputTakenAtDisposal: AgentMessage[] = [];
 	/** Ephemeral turns started while the session was live; beginDispose() aborts them. */
 	#ephemeralTurnAbortControllers = new Set<AbortController>();
@@ -6582,7 +6584,8 @@ export class AgentSession implements SettingsScope {
 	 *   completion. They start none; `dispose()` records their messages;
 	 * - session transitions in progress (`newSession`, `fork`, `switchSession`,
 	 *   `branch`, `branchFromBtw`): they stop before their commit and report a
-	 *   cancellation (`switchSession` rejects after its rollback);
+	 *   cancellation (`switchSession` rejects after its rollback); one that committed
+	 *   earlier completes but emits no `session_switch` or `session_branch`;
 	 * - ephemeral side turns (`runEphemeralTurn`): they reject with an `AbortError`,
 	 *   a request in flight is aborted, and no further text is delivered;
 	 * - the vision descriptions of that setup (`#imageDescriptionAbortControllers`);
@@ -6655,7 +6658,9 @@ export class AgentSession implements SettingsScope {
 		// An IRC message the session already accepted is written now, inside this call: its
 		// sender was told it was delivered, and dropping it would lose it. Nothing later adds one.
 		this.#irc.flushPending();
-		this.yieldQueue.clear();
+		// Background results waiting for the next model call or idle flush: accepted, so kept for
+		// the disposal record instead of being dropped; the running turn sends no request for them.
+		this.#inputTakenAtDisposal.push(...this.yieldQueue.takeAll());
 		this.agent.setAsideMessageProvider(undefined);
 		this.agent.hasIrcInterrupts = undefined;
 		this.agent.hasBackgroundCompletions = undefined;
@@ -6999,40 +7004,46 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/**
-	 * Takes the steers and follow-ups still queued out of the agent's queues, so no turn sends
-	 * a request for them. They were accepted (their `prompt()`/`steer()`/`followUp()` already
-	 * resolved), so they are not dropped: the displayable ones, with the hidden companions
-	 * queued just before each (keyword notices, image descriptions), are kept for
-	 * {@link #recordInputTakenAtDisposal}. Hidden context the user never sees (mode context,
+	 * Takes the steers and follow-ups the session accepted but has not run out of the agent, so
+	 * no turn sends a request for them. They were accepted (their `prompt()`/`steer()`/
+	 * `followUp()` already resolved), so they are not dropped: the displayable ones, with the
+	 * hidden companions queued just before each (keyword notices, image descriptions), are kept
+	 * for {@link #recordInputTakenAtDisposal}. Hidden context the user never sees (mode context,
 	 * developer directives, TTSR deliveries) is discarded, as an editor-restoring interrupt
-	 * discards it. `withdrawUndelivered` also takes input the run dequeued but never recorded
-	 * (live steering held for the in-flight response, a batch taken for its next model call),
-	 * ahead of the rest, as an editor-restoring interrupt does.
+	 * discards it.
+	 *
+	 * It withdraws what the run dequeued but never recorded (steering the in-flight response
+	 * holds, a batch taken for its next model call) as an editor-restoring interrupt does, and
+	 * keeps it ahead of what is still queued, which is the order the model would have seen.
+	 * Called at {@link beginDispose} and again at the disposal record, for what arrived since.
 	 */
-	#takeQueuedInputAtDisposal(options?: { withdrawUndelivered?: boolean }): void {
-		const withdrawn = options?.withdrawUndelivered ? this.agent.withdrawUndeliveredQueuedMessages() : undefined;
-		for (const queue of [
-			[...(withdrawn?.steering ?? []), ...this.agent.peekSteeringQueue()],
-			[...(withdrawn?.followUp ?? []), ...this.agent.peekFollowUpQueue()],
-		]) {
-			const kept = new Set<AgentMessage>();
-			let companionOfKept = false;
-			for (let i = queue.length - 1; i >= 0; i--) {
-				const message = queue[i]!;
-				const ttsr = message.role === "custom" && message.customType === "ttsr-injection";
-				if (message.role !== "developer" && !ttsr && isDisplayableQueuedMessage(message)) {
-					kept.add(message);
-					companionOfKept = true;
-				} else if (companionOfKept && !ttsr && isHiddenUserCompanion(message)) {
-					kept.add(message);
-				} else {
-					companionOfKept = false;
-				}
-			}
-			for (const message of queue) if (kept.has(message)) this.#inputTakenAtDisposal.push(message);
-			this.#releaseTtsrReservations(queue);
-		}
+	#takeQueuedInputAtDisposal(): void {
+		const withdrawn = this.agent.withdrawUndeliveredQueuedMessages();
+		this.#inputTakenAtDisposal.push(
+			...this.#keptQueuedInput([...withdrawn.steering, ...this.agent.peekSteeringQueue()]),
+			...this.#keptQueuedInput([...withdrawn.followUp, ...this.agent.peekFollowUpQueue()]),
+		);
 		this.agent.replaceQueues([], []);
+	}
+
+	/** The displayable messages of `queue`, each with the hidden companions queued just before it. */
+	#keptQueuedInput(queue: AgentMessage[]): AgentMessage[] {
+		const kept = new Set<AgentMessage>();
+		let companionOfKept = false;
+		for (let i = queue.length - 1; i >= 0; i--) {
+			const message = queue[i]!;
+			const ttsr = message.role === "custom" && message.customType === "ttsr-injection";
+			if (message.role !== "developer" && !ttsr && isDisplayableQueuedMessage(message)) {
+				kept.add(message);
+				companionOfKept = true;
+			} else if (companionOfKept && !ttsr && isHiddenUserCompanion(message)) {
+				kept.add(message);
+			} else {
+				companionOfKept = false;
+			}
+		}
+		this.#releaseTtsrReservations(queue);
+		return queue.filter(message => kept.has(message));
 	}
 
 	/**
@@ -7041,19 +7052,25 @@ export class AgentSession implements SettingsScope {
 	 * `session_exit`, so a resumed session has the messages in the order they would have run.
 	 * Besides what {@link beginDispose} took, it takes what arrived or came back since: steers
 	 * and follow-ups queued after `beginDispose()` that no turn ran, live steering the aborted
-	 * response held, background completions, and IRC records accepted after `beginDispose()`
-	 * flushed them or parked for a pooled worker.
+	 * response held, background results, displayable `nextTurn` messages waiting for a prompt,
+	 * and IRC records accepted after `beginDispose()` flushed them or parked for a pooled worker.
 	 */
 	#recordInputTakenAtDisposal(): void {
-		this.#takeQueuedInputAtDisposal({ withdrawUndelivered: true });
+		this.#takeQueuedInputAtDisposal();
+		this.#inputTakenAtDisposal.push(...this.yieldQueue.takeAll());
+		const nextTurn = this.#pendingNextTurnMessages.filter(message => isDisplayableQueuedMessage(message));
+		this.#pendingNextTurnMessages = [];
 		const irc = this.#irc.clearPending();
 		for (const message of [
 			...this.#inputTakenAtDisposal.splice(0),
+			...nextTurn,
 			...irc.interrupts,
 			...irc.asides,
 			...irc.deferredWakes,
 		]) {
 			this.#persistMessageEnd(message, this.#promptGeneration);
+			// A background result's delivery receipt settles once it is written.
+			(message as AgentMessage & { [ASIDE_MESSAGE_COMMIT]?: () => void })[ASIDE_MESSAGE_COMMIT]?.();
 		}
 	}
 
@@ -12053,7 +12070,13 @@ export class AgentSession implements SettingsScope {
 			advisorRecordersDetached = true;
 			await this.#advisors.drainAndDetachRecorders();
 			try {
-				if (this.#isDisposed) return false;
+				// Pending writes go out first. Nothing below is undone, so this is the last point
+				// at which disposal can still refuse the new session.
+				if (!(options?.drop && previousSessionFile)) await this.sessionManager.flush();
+				if (this.#isDisposed) {
+					this.#reconnectToAgent();
+					return false;
+				}
 				this.#releaseQueuedTtsrReservations();
 				this.agent.reset();
 				this.tokenRate.reset();
@@ -12063,8 +12086,6 @@ export class AgentSession implements SettingsScope {
 					} catch (err) {
 						logger.error("Failed to delete session during /delete", { err });
 					}
-				} else {
-					await this.sessionManager.flush();
 				}
 				await this.sessionManager.newSession({
 					...options,
@@ -12133,7 +12154,9 @@ export class AgentSession implements SettingsScope {
 
 			this.#reseedCostGate();
 			// Emit session_switch event with reason "new" to hooks
-			if (this.#extensionRunner) {
+			// A transition that committed before beginDispose() still completes, but a disposing
+			// session announces nothing (see beginDispose).
+			if (this.#extensionRunner && !this.#isDisposed) {
 				await this.#extensionRunner.emit({
 					type: "session_switch",
 					reason: "new",
@@ -12260,7 +12283,7 @@ export class AgentSession implements SettingsScope {
 			await this.#memory.resetContextForNewTranscript();
 
 			// Emit session_switch event with reason "fork" to hooks
-			if (this.#extensionRunner) {
+			if (this.#extensionRunner && !this.#isDisposed) {
 				await this.#extensionRunner.emit({
 					type: "session_switch",
 					reason: "fork",
@@ -13800,8 +13823,12 @@ export class AgentSession implements SettingsScope {
 		await this.#bash.flushPending();
 		// Flush pending writes before switching so restore snapshots reflect committed state.
 		await this.sessionManager.flush();
-		// Nothing is swapped yet; disposal finishes the teardown the abort above began.
-		if (this.#isDisposed) return false;
+		// Nothing is swapped yet. Reconnect the listeners the switch detached: a prompt submitted
+		// after beginDispose() still runs once, and its turn must still be recorded and announced.
+		if (this.#isDisposed) {
+			this.#reconnectToAgent();
+			return false;
+		}
 		const previousSessionState = this.sessionManager.captureState();
 		const bashTransition = this.#bash.beginSessionTransition();
 		// Only same-session reloads compare against the prior context to detect
@@ -13941,6 +13968,9 @@ export class AgentSession implements SettingsScope {
 				didSessionMessagesChange(previousSessionContext.messages, sessionContext.messages);
 			this.#rehydrateCheckpointRewindState();
 
+			// Disposal that began during the cwd or model awaits above: roll back before the
+			// outgoing jobs are cancelled and before any hook hears of the switch (see beginDispose).
+			if (this.#isDisposed) throw new Error("Session switch cancelled: the session is being disposed.");
 			// As on /new: the outgoing session's background jobs share this agent id, so their
 			// results would otherwise land in the resumed transcript. Cancelled after the cwd and
 			// model checks, so a rejected switch keeps them, and before hooks hear of the switch,
@@ -14318,7 +14348,7 @@ export class AgentSession implements SettingsScope {
 			const sessionContext = this.buildDisplaySessionContext();
 
 			// Emit session_branch event to hooks (after branch completes)
-			if (this.#extensionRunner) {
+			if (this.#extensionRunner && !this.#isDisposed) {
 				await this.#extensionRunner.emit({
 					type: "session_branch",
 					reason,
@@ -14448,7 +14478,7 @@ export class AgentSession implements SettingsScope {
 
 			const sessionContext = this.buildDisplaySessionContext();
 
-			if (this.#extensionRunner) {
+			if (this.#extensionRunner && !this.#isDisposed) {
 				await this.#extensionRunner.emit({
 					type: "session_branch",
 					reason: "btw",

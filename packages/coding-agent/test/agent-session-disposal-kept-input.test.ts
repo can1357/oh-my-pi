@@ -5,6 +5,7 @@ import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
@@ -51,7 +52,13 @@ let sessionDirs = 0;
 
 /** A file-backed session whose provider requests are counted. */
 async function createSession(
-	options: { streamFn?: StreamFn; sideStreamFn?: StreamFn; extension?: ExtensionFactory } = {},
+	options: {
+		streamFn?: StreamFn;
+		sideStreamFn?: StreamFn;
+		extension?: ExtensionFactory;
+		asyncJobManager?: AsyncJobManager;
+		agentId?: string;
+	} = {},
 ): Promise<{ session: AgentSession; manager: SessionManager; agent: Agent; requests: () => number }> {
 	const directory = path.join(tempDir.path(), `session-${++sessionDirs}`);
 	const manager = SessionManager.create(directory, directory);
@@ -85,6 +92,8 @@ async function createSession(
 		modelRegistry,
 		extensionRunner,
 		sideStreamFn: options.sideStreamFn,
+		asyncJobManager: options.asyncJobManager,
+		agentId: options.agentId,
 	});
 	sessions.push(session);
 	return { session, manager, agent, requests: () => requests };
@@ -354,4 +363,231 @@ test("a new session waiting on session_before_switch at beginDispose is not star
 	await session.dispose();
 	const shape = await persistedShape(manager);
 	expect(shape).toEqual(["user:the first task", "assistant:done", "session_exit"]);
+}, 30_000);
+
+test("a new session whose final flush outlasts beginDispose is not started and announces nothing", async () => {
+	const switches: string[] = [];
+	const { session, manager } = await createSession({
+		extension: pi => {
+			pi.on("session_switch", event => {
+				switches.push(event.reason);
+			});
+		},
+	});
+	await session.prompt("the first task");
+	const sessionFile = manager.getSessionFile();
+	const flush = manager.flush.bind(manager);
+	const entered = Promise.withResolvers<void>();
+	const release = Promise.withResolvers<void>();
+	let held = false;
+	vi.spyOn(manager, "flush").mockImplementation(async () => {
+		await flush();
+		if (held) return;
+		held = true;
+		entered.resolve();
+		await release.promise;
+	});
+
+	const started = session.newSession();
+	await withTimeout(entered.promise, 15_000, "newSession did not flush");
+	session.beginDispose();
+	release.resolve();
+
+	expect(await started).toBe(false);
+	expect(manager.getSessionFile()).toBe(sessionFile);
+	expect(switches).toEqual([]);
+}, 30_000);
+
+test("a session switch whose cwd change outlasts beginDispose rolls back and announces nothing", async () => {
+	const switches: string[] = [];
+	const { session, manager } = await createSession({
+		extension: pi => {
+			pi.on("session_switch", event => {
+				switches.push(event.reason);
+			});
+		},
+	});
+	await session.prompt("the first task");
+	const answer = session.messages.find(message => message.role === "assistant");
+	if (!answer) throw new Error("Expected an assistant answer");
+	const otherCwd = path.join(tempDir.path(), "switch-target-cwd");
+	const target = SessionManager.create(otherCwd, otherCwd);
+	target.appendMessage(answer);
+	await target.flush();
+	const targetFile = target.getSessionFile();
+	await target.close();
+	if (!targetFile) throw new Error("Expected a target session file");
+	const sessionFile = manager.getSessionFile();
+	const sessionId = manager.getSessionId();
+	const entered = Promise.withResolvers<void>();
+	const release = Promise.withResolvers<void>();
+	const cwdChanges: string[] = [];
+
+	const switched = session
+		.switchSession(targetFile, {
+			keepModel: true,
+			onCwdChange: async cwd => {
+				cwdChanges.push(cwd);
+				if (cwdChanges.length === 1) {
+					entered.resolve();
+					await release.promise;
+				}
+				return true;
+			},
+		})
+		.then(
+			value => ({ value }),
+			(error: unknown) => ({ error: error instanceof Error ? error.message : String(error) }),
+		);
+	await withTimeout(entered.promise, 15_000, "The cwd change did not start");
+	session.beginDispose();
+	release.resolve();
+
+	expect(await switched).toEqual({ error: "Session switch cancelled: the session is being disposed." });
+	expect(manager.getSessionFile()).toBe(sessionFile);
+	expect(manager.getSessionId()).toBe(sessionId);
+	expect(switches).toEqual([]);
+	// The rollback hands the cwd back to where the session was.
+	expect(cwdChanges).toHaveLength(2);
+}, 30_000);
+
+test("a session switch refused after its reconciler keeps the listeners for a prompt submitted afterwards", async () => {
+	const { session, manager } = await createSession();
+	await session.prompt("the first task");
+	const sessionFile = manager.getSessionFile();
+	if (!sessionFile) throw new Error("Expected a persisted session file");
+	const entered = Promise.withResolvers<void>();
+	const release = Promise.withResolvers<void>();
+	session.setSessionBeforeSwitchReconciler(async () => {
+		entered.resolve();
+		await release.promise;
+	});
+	const switched = session.switchSession(sessionFile);
+	await withTimeout(entered.promise, 15_000, "The reconciler did not run");
+	session.beginDispose();
+	release.resolve();
+	expect(await switched).toBe(false);
+	const events: string[] = [];
+	session.subscribe(event => events.push(event.type));
+
+	// Submitted after beginDispose(): it runs once, and its turn is still recorded and announced.
+	await session.prompt("submitted after the refused switch");
+	await session.dispose();
+
+	expect(events).toContain("agent_start");
+	expect(await persistedShape(manager)).toEqual([
+		"user:the first task",
+		"assistant:done",
+		"user:submitted after the refused switch",
+		"assistant:done",
+		"session_exit",
+	]);
+}, 30_000);
+
+test("a steer the live response held is recorded ahead of a steer queued after it", async () => {
+	const entered = Promise.withResolvers<void>();
+	const claimed = Promise.withResolvers<void>();
+	const { session, manager } = await createSession({
+		streamFn: async (_requestModel, _context, options) => {
+			entered.resolve();
+			const live = options?.liveSteering;
+			const signal = options?.signal;
+			if (!live || !signal) throw new Error("Expected the live steering capability");
+			const stream = new AssistantMessageEventStream();
+			signal.addEventListener("abort", () => stream.fail(new DOMException("aborted", "AbortError")), { once: true });
+			await live.wait(signal);
+			if (!(await live.claim(signal))) throw new Error("Expected the steer to be claimed");
+			claimed.resolve();
+			return stream;
+		},
+	});
+
+	const running = session.prompt("the running task").catch(() => undefined);
+	await withTimeout(entered.promise, 15_000, "The provider request did not start");
+	await session.steer("the older steer the response took");
+	await withTimeout(claimed.promise, 15_000, "Live steering did not take the steer");
+	await session.steer("the newer steer still queued");
+	session.beginDispose();
+	await session.dispose();
+	await running;
+
+	const shape = await persistedShape(manager);
+	expect(shape.filter(line => line.includes("steer"))).toEqual([
+		"user:the older steer the response took",
+		"user:the newer steer still queued",
+	]);
+	expect(shape.at(-1)).toBe("session_exit");
+}, 30_000);
+
+test("a displayable nextTurn message accepted during the turn is recorded at disposal", async () => {
+	const entered = Promise.withResolvers<void>();
+	const held = createMockModel({ responses: [{ content: ["held"], delayMs: 600_000 }] });
+	const { session, manager } = await createSession({
+		streamFn: (requestModel, context, options) => {
+			entered.resolve();
+			return held.stream(requestModel, context, options);
+		},
+	});
+
+	const running = session.prompt("the running task").catch(() => undefined);
+	await withTimeout(entered.promise, 15_000, "The provider request did not start");
+	await session.sendCustomMessage(
+		{ customType: "kept-next-turn", content: "accepted for the next turn", display: true },
+		{ deliverAs: "nextTurn" },
+	);
+	session.beginDispose();
+	await session.dispose();
+	await running;
+
+	const shape = await persistedShape(manager);
+	expect(shape).toContain("kept-next-turn:accepted for the next turn");
+	expect(shape.at(-1)).toBe("session_exit");
+}, 30_000);
+
+test("a finished background job's result waiting in the yield queue is recorded at disposal", async () => {
+	const entered = Promise.withResolvers<void>();
+	const held = createMockModel({ responses: [{ content: ["held"], delayMs: 600_000 }] });
+	const jobs = new AsyncJobManager({});
+	AsyncJobManager.setInstance(jobs);
+	try {
+		const { session, manager } = await createSession({
+			asyncJobManager: jobs,
+			agentId: "kept-input-owner",
+			streamFn: (requestModel, context, options) => {
+				entered.resolve();
+				return held.stream(requestModel, context, options);
+			},
+		});
+		const running = session.prompt("the running task").catch(() => undefined);
+		await withTimeout(entered.promise, 15_000, "The provider request did not start");
+		const enqueued = Promise.withResolvers<void>();
+		const enqueue = session.yieldQueue.enqueueWithReceipt.bind(session.yieldQueue);
+		vi.spyOn(session.yieldQueue, "enqueueWithReceipt").mockImplementation((kind, entry) => {
+			const receipt = enqueue(kind, entry);
+			if (kind === "async-result") enqueued.resolve();
+			return receipt;
+		});
+		// A real process: its result reaches the queue while the turn still streams.
+		jobs.register(
+			"bash",
+			"a job that finished during the turn",
+			async () => {
+				const child = Bun.spawn(["bash", "-c", "printf finished-job-output"], { stdout: "pipe", stderr: "pipe" });
+				const output = await new Response(child.stdout).text();
+				await child.exited;
+				return output;
+			},
+			{ id: "kept-input-job", ownerId: "kept-input-owner" },
+		);
+		await withTimeout(enqueued.promise, 15_000, "The job result did not reach the queue");
+		session.beginDispose();
+		await session.dispose();
+		await running;
+
+		const shape = await persistedShape(manager);
+		expect(shape.some(line => line.includes("finished-job-output"))).toBe(true);
+		expect(shape.at(-1)).toBe("session_exit");
+	} finally {
+		AsyncJobManager.resetForTests();
+	}
 }, 30_000);
