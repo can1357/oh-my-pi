@@ -2,7 +2,7 @@ use std::{ffi::OsString, io::Write, ops::ControlFlow};
 
 use brush_core::{Error, ErrorKind, ExecutionResult, builtins, escape, expansion};
 use clap::Parser;
-use uucore::format;
+use uucore::format::{self, FormatChar as _};
 
 /// Format a string.
 #[derive(Parser)]
@@ -58,32 +58,11 @@ impl builtins::Command for PrintfCommand {
 
 fn format(format_and_args: &[String], writer: impl Write) -> Result<(), brush_core::Error> {
 	match format_and_args {
-		// Special-case invocation of printf with %q-based format string from bash-completion.
-		// It has hard-coded expectation of backslash-style escaping instead of quoting.
-		[fmt, arg] if fmt == "%q" => format_special_case_for_percent_q(None, arg, writer),
-		[fmt, arg] if fmt == "~%q" => format_special_case_for_percent_q(Some("~"), arg, writer),
-		// Handle format string with arguments using uucore
 		[fmt, args @ ..] => format_via_uucore(fmt, args.iter(), writer),
 		// Handle case with no format string (we shouldn't be able to get here since clap will
 		// fail parsing when the format string is missing)
 		[] => Err(ErrorKind::PrintfInvalidUsage("missing operand".into()).into()),
 	}
-}
-
-fn format_special_case_for_percent_q(
-	prefix: Option<&str>,
-	arg: &str,
-	mut writer: impl Write,
-) -> Result<(), brush_core::Error> {
-	let mut result = escape::quote_if_needed(arg, escape::QuoteMode::BackslashEscape).to_string();
-
-	if let Some(prefix) = prefix {
-		result.insert_str(0, prefix);
-	}
-
-	write!(writer, "{result}")?;
-
-	Ok(())
 }
 
 fn format_via_uucore(
@@ -102,34 +81,55 @@ fn format_via_uucore(
 	// Wrap the format arguments.
 	let mut format_args_wrapper = format::FormatArguments::new(&format_args);
 
-	// Keep going until we've exhausted all format arguments. Also make sure to run
-	// at least once even if there's no format arguments.
-	while format_args.is_empty() || !format_args_wrapper.is_exhausted() {
-		// Process all format items, in order. We'll bail when we're told to stop.
+	// As in Bash, the format is written once, then again while arguments remain;
+	// a format that uses no argument (no conversion) is written once.
+	let uses_arguments = format_items
+		.iter()
+		.any(|item| matches!(item, format::FormatItem::Spec(_)));
+	loop {
 		for item in &format_items {
-			let control_flow =
-				item
-					.write(&mut writer, &mut format_args_wrapper)
-					.map_err(|e| match e {
-						// Propagate I/O errors directly so they can be handled appropriately
-						format::FormatError::IoError(io_err) => Error::from(io_err),
-						// Wrap other format errors
-						other => Error::from(ErrorKind::PrintfInvalidUsage(std::format!(
-							"printf formatting error: {other}"
-						))),
-					})?;
-
-			if control_flow == ControlFlow::Break(()) {
-				break;
+			match item {
+				// Bash quotes `%q` with backslashes (`a\ b`), not with single quotes.
+				format::FormatItem::Spec(format::Spec::QuotedString { position }) => {
+					let arg = format_args_wrapper.next_string(*position).to_string_lossy();
+					let quoted = escape::quote_if_needed(&arg, escape::QuoteMode::BackslashEscape);
+					writer.write_all(quoted.as_bytes())?;
+				},
+				// `\c` in a `%b` argument ends all output, as in Bash; uucore would
+				// end only the argument.
+				format::FormatItem::Spec(format::Spec::EscapedString { position }) => {
+					let arg = format_args_wrapper.next_string(*position);
+					for c in format::parse_escape_only(
+						arg.as_encoded_bytes(),
+						format::OctalParsing::ThreeDigits,
+					) {
+						if c.write(&mut writer)? == ControlFlow::Break(()) {
+							return Ok(());
+						}
+					}
+				},
+				// Nothing else ends output: the format's own `\c` is literal (see
+				// `parse_format_string`).
+				item => {
+					let _: ControlFlow<()> = item
+						.write(&mut writer, &mut format_args_wrapper)
+						.map_err(|e| match e {
+							// Propagate I/O errors directly so they can be handled appropriately
+							format::FormatError::IoError(io_err) => Error::from(io_err),
+							// Wrap other format errors
+							other => Error::from(ErrorKind::PrintfInvalidUsage(std::format!(
+								"printf formatting error: {other}"
+							))),
+						})?;
+				},
 			}
 		}
 
-		// Start next batch if not exhausted
-		if !format_args_wrapper.is_exhausted() {
-			format_args_wrapper.start_next_batch();
+		if !uses_arguments {
+			break;
 		}
-
-		if format_args.is_empty() {
+		format_args_wrapper.start_next_batch();
+		if format_args_wrapper.is_exhausted() {
 			break;
 		}
 	}
@@ -140,8 +140,16 @@ fn format_via_uucore(
 fn parse_format_string(
 	format_string: &str,
 ) -> Result<Vec<format::FormatItem<format::EscapedChar>>, brush_core::Error> {
-	let format_items: Result<Vec<_>, _> =
-		format::parse_spec_and_escape(format_string.as_bytes()).collect();
+	let format_items: Result<Vec<_>, _> = format::parse_spec_and_escape(format_string.as_bytes())
+		.map(|item| match item {
+			// Bash ends output at `\c` only in a `%b` argument; in the format it
+			// is the two characters as written.
+			Ok(format::FormatItem::Char(format::EscapedChar::End)) => {
+				Ok(format::FormatItem::Char(format::EscapedChar::Backslash(b'c')))
+			},
+			item => item,
+		})
+		.collect();
 
 	// Observe any errors we encountered along the way.
 	let format_items = format_items

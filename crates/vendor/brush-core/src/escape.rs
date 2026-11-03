@@ -302,8 +302,12 @@ pub(crate) fn quote<'a>(s: &'a str, options: &QuoteOptions) -> Cow<'a, str> {
 		return ansi_c_quote(s).into();
 	}
 
-	let use_default_quotes =
-		!use_ansi_c_quotes && (options.always_quote || s.is_empty() || s.contains(needs_escaping));
+	let use_default_quotes = !use_ansi_c_quotes
+		&& (options.always_quote
+			|| s.is_empty()
+			|| s.contains(needs_escaping)
+			|| (matches!(options.preferred_mode, QuoteMode::BackslashEscape)
+				&& has_positional_escape(s)));
 
 	if !use_default_quotes {
 		return s.into();
@@ -345,17 +349,41 @@ fn backslash_escape(s: &str) -> Cow<'_, str> {
 	if s.is_empty() {
 		// An empty string must be represented as '' to be a valid shell word.
 		Cow::Owned("''".to_string())
-	} else if !s.chars().any(needs_escaping) {
+	} else if !s.chars().any(needs_escaping) && !has_positional_escape(s) {
 		Cow::Borrowed(s)
 	} else {
 		let mut output = String::with_capacity(s.len());
+		let mut previous = None;
 		for c in s.chars() {
-			if needs_escaping(c) {
+			if needs_escaping(c) || escapes_where_it_stands(previous, c) {
 				output.push('\\');
 			}
 			output.push(c);
+			previous = Some(c);
 		}
 		Cow::Owned(output)
+	}
+}
+
+/// Whether `s` holds a character that Bash's backslash quoting (`printf %q`)
+/// escapes only where it stands (see `escapes_where_it_stands`).
+fn has_positional_escape(s: &str) -> bool {
+	let mut previous = None;
+	s.chars().any(|c| {
+		let escapes = escapes_where_it_stands(previous, c);
+		previous = Some(c);
+		escapes
+	})
+}
+
+/// Whether Bash's backslash quoting escapes `c` after `previous` (`None` at
+/// the start of the word): a `#` that begins the word would start a comment,
+/// and a `~` that begins it or follows `=` or `:` would be tilde-expanded.
+const fn escapes_where_it_stands(previous: Option<char>, c: char) -> bool {
+	match c {
+		'#' => previous.is_none(),
+		'~' => matches!(previous, None | Some('=' | ':')),
+		_ => false,
 	}
 }
 
@@ -467,6 +495,15 @@ mod tests {
 		assert_eq!(quote_if_needed("a", QuoteMode::BackslashEscape), "a");
 		assert_eq!(quote_if_needed("a b", QuoteMode::BackslashEscape), r"a\ b");
 		assert_eq!(quote_if_needed("", QuoteMode::BackslashEscape), "''");
+		// As in Bash 5.2.21's `printf %q`: `#` at the start, `~` at the start
+		// or after `=` or `:`.
+		assert_eq!(quote_if_needed("#x", QuoteMode::BackslashEscape), r"\#x");
+		assert_eq!(quote_if_needed("x#", QuoteMode::BackslashEscape), "x#");
+		assert_eq!(quote_if_needed("~x", QuoteMode::BackslashEscape), r"\~x");
+		assert_eq!(quote_if_needed("a=~x", QuoteMode::BackslashEscape), r"a=\~x");
+		assert_eq!(quote_if_needed("a:~x", QuoteMode::BackslashEscape), r"a:\~x");
+		assert_eq!(quote_if_needed("a~b", QuoteMode::BackslashEscape), "a~b");
+		assert_eq!(quote_if_needed("x=#", QuoteMode::BackslashEscape), "x=#");
 	}
 
 	#[test]
