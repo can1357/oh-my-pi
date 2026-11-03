@@ -4,7 +4,7 @@
 
 ### Added
 
-- `Agent.beginDispose()` refuses every provider request from then on, checked right before each send (so a run already streaming stops at its next request), and returns in one step the accepted input the transcript has not recorded: live steering, batches the loop dequeued or is still preparing, and both queues (`AgentDisposalInput`). `Agent.isDisposing` reports it, and `AgentLoopConfig.refuseModelCall` is the per-request hook behind it ([#17956](https://github.com/can1357/oh-my-pi/pull/17956) by [@sjawhar](https://github.com/sjawhar))
+- `Agent.beginDispose()` refuses every provider request from then on, checked as the last step before each request goes to the stream function, after the request's metadata, cwd and telemetry callbacks (so a run already streaming stops at its next request), and returns in one step the accepted input the transcript has not recorded: live steering, batches the loop dequeued or is still preparing, both queues, and asides the loop took and still holds (`AgentDisposalInput`). `Agent.isDisposing` reports it, and `AgentLoopConfig.refuseModelCall` is the per-request hook behind it ([#17956](https://github.com/can1357/oh-my-pi/pull/17956) by [@sjawhar](https://github.com/sjawhar))
 - Added `wireToolsFingerprint()`, a hash of the tool specs a request sends ([#17496](https://github.com/can1357/oh-my-pi/pull/17496) by [@will-bogusz](https://github.com/will-bogusz))
 - Added `Agent.queuedMessageGate`, a synchronous `QueuedMessageGate` consulted before every queued-message delivery batch (it can drop candidates) and told when claimed messages go back undelivered
 ### Fixed

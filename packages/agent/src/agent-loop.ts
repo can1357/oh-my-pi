@@ -2065,10 +2065,6 @@ async function streamAssistantResponse(
 	const apiKey = isApiKeyResolver(requestApiKey)
 		? seedApiKeyResolver(resolvedCredential ?? resolvedApiKey, requestApiKey)
 		: requestApiKey;
-	// The last await of the request's preparation is behind us: a refusal asked here holds
-	// for the send below, which no await separates from it.
-	const refusal = config.refuseModelCall?.();
-	if (refusal !== undefined) throw refusal;
 
 	// Re-resolve metadata after credential selection so the per-request value
 	// reflects the credential actually used, not the snapshot from AgentLoopConfig construction.
@@ -2169,6 +2165,11 @@ async function streamAssistantResponse(
 
 	try {
 		return await runInActiveSpan(chatSpan, async () => {
+			// The refusal is asked here, the last thing before the provider is invoked: after every
+			// await that prepares the request and after every synchronous callback on the way
+			// (metadata and cwd resolution, telemetry), any of which may begin disposal.
+			const refusal = config.refuseModelCall?.();
+			if (refusal !== undefined) throw refusal;
 			let response = await streamFunction(model, llmContext, {
 				...config,
 				apiKey,

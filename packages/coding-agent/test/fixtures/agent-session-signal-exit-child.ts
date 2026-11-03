@@ -17,6 +17,10 @@ if (!directory) throw new Error("Expected session directory");
 // the sessions a client asks for: postmortem runs registrations newest first, so the session's own
 // exit recorder then runs before the host begins disposal.
 const order = process.argv[3] ?? "host-after-session";
+// How the process ends once ready: "sigterm" waits for the parent's signal; "manual" runs the manual
+// cleanup pass that quit and relaunch run, then exits; "exit" starts the host's teardown and calls
+// process.exit() while its disposal drains.
+const ending = process.argv[4] ?? "sigterm";
 const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 if (!model) throw new Error("Expected bundled test model");
 const authStorage = await AuthStorage.create(path.join(directory, "auth.db"));
@@ -61,5 +65,15 @@ postmortem.installProcessHandlers();
 await session.prompt("answer one");
 const pending = session.prompt("held second answer").catch(() => undefined);
 await secondRequest.promise;
+await session.followUp("accepted before exit");
 process.stdout.write(`${JSON.stringify({ ready: true, sessionFile: manager.getSessionFile() })}\n`);
+if (ending === "manual") {
+	await postmortem.cleanup();
+	await pending;
+	process.exit(0);
+}
+if (ending === "exit") {
+	void teardown();
+	process.exit(0);
+}
 await pending;

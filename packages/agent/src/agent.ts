@@ -381,6 +381,12 @@ export interface AgentPromptOptions {
 export interface AgentDisposalInput {
 	steering: AgentMessage[];
 	followUp: AgentMessage[];
+	/**
+	 * Asides the loop took from the aside provider ({@link Agent.setAsideMessageProvider}) for
+	 * its next request that the transcript has not recorded: background results, peer messages
+	 * and any other message the provider handed out, oldest first.
+	 */
+	asides: AgentMessage[];
 }
 
 /** Buffered Cursor exec-channel tool result waiting to be emitted after the assistant message. */
@@ -454,6 +460,13 @@ export class Agent {
 		next: number;
 		additional: readonly AgentMessage[];
 	}>();
+	/**
+	 * Asides the loop took from {@link setAsideMessageProvider} (for a thunk, once the loop
+	 * called it) that the transcript has not recorded yet, oldest first. Like a dequeued batch,
+	 * an aside stays withdrawable until its `message_end` reaches {@link appendMessage}, not only
+	 * until the loop takes it: {@link beginDispose} takes back what the loop still holds.
+	 */
+	#heldAsides: { message: AgentMessage; controller: AbortController }[] = [];
 	/** Messages {@link withdrawUndeliveredQueuedMessages} took back, keyed to the run that must not record them. */
 	#withdrawnMessages = new WeakMap<AgentMessage, AbortController>();
 	#steeringWaiters = new Set<() => void>();
@@ -1226,9 +1239,12 @@ export class Agent {
 	 * It also takes back, in one step, every accepted input the transcript has not recorded:
 	 * steering live steering took for the in-flight response, each batch the loop dequeued for
 	 * its next request (with the context prepared for it), batches whose preparation is still
-	 * running, and both queues. The running loop neither records nor requeues what this
-	 * returns, so the caller owns each message exactly once and records it itself. Each list is
-	 * in the order the model would have seen it. Later calls return only what arrived since.
+	 * running, both queues, and the asides the loop took from the aside provider and still
+	 * holds (an aside the loop already built, waiting behind a later await of that step, is
+	 * the caller's until its transcript records it). The running loop neither records nor
+	 * requeues what this returns, so the caller owns each message exactly once and records it
+	 * itself. Each list is in the order the model would have seen it. Later calls return only
+	 * what arrived since.
 	 */
 	beginDispose(): AgentDisposalInput {
 		this.#disposing = true;
@@ -1241,8 +1257,14 @@ export class Agent {
 		const followUp = [...withdrawn.followUp, ...this.#followUpQueue];
 		this.#steeringQueue = [];
 		this.#followUpQueue = [];
+		const asides: AgentMessage[] = [];
+		for (const { message, controller } of this.#heldAsides) {
+			asides.push(message);
+			this.#withdrawnMessages.set(message, controller);
+		}
+		this.#heldAsides = [];
 		this.#emitQueueChanged();
-		return { steering, followUp };
+		return { steering, followUp, asides };
 	}
 
 	/** True once {@link beginDispose} ran: every provider request is refused. */
@@ -1318,6 +1340,22 @@ export class Agent {
 		fn: ((boundary: AsideBoundary) => AsideMessage[] | Promise<AsideMessage[]>) | undefined,
 	): void {
 		this.#asideMessageProvider = fn;
+	}
+
+	/**
+	 * An aside the provider handed out, as the thunk the loop resolves at its step boundary.
+	 * The message it yields is held ({@link #heldAsides}) until the transcript records it or
+	 * {@link beginDispose} takes it back. A thunk the loop resolves after disposal began still
+	 * takes the message from its source, so it is not lost, but yields nothing to the loop: the
+	 * next {@link beginDispose} call returns it.
+	 */
+	#holdAside(entry: AsideMessage, controller: AbortController): AsideMessage {
+		return () => {
+			const message = typeof entry === "function" ? entry() : entry;
+			if (!message) return null;
+			this.#heldAsides.push({ message, controller });
+			return this.#disposing ? null : message;
+		};
 	}
 
 	emitExternalEvent(event: AgentEvent) {
@@ -1466,6 +1504,12 @@ export class Agent {
 
 	appendMessage(m: AgentMessage) {
 		this.#state.messages.push(m);
+		// An aside the loop held is the transcript's from here (see #heldAsides).
+		const aside = this.#heldAsides.findIndex(entry => entry.message === m);
+		if (aside >= 0) {
+			this.#heldAsides.splice(aside, 1);
+			return;
+		}
 		const live = this.#liveSteered.findIndex(entry => entry.message === m);
 		if (live >= 0) {
 			this.#liveSteered.splice(live, 1);
@@ -2153,8 +2197,11 @@ export class Agent {
 			hasBackgroundCompletions: this.hasBackgroundCompletions,
 			hasQueuedAsides: this.hasQueuedAsides,
 			getFollowUpMessages: signal => this.#dequeueFollowUpMessagesAfterHooks(signal ?? loopSignal),
-			getAsideMessages: async boundary =>
-				this.#disposing ? [] : ((await this.#asideMessageProvider?.(boundary)) ?? []),
+			getAsideMessages: async boundary => {
+				if (this.#disposing) return [];
+				const entries = (await this.#asideMessageProvider?.(boundary)) ?? [];
+				return entries.map(entry => this.#holdAside(entry, loopAbortController));
+			},
 			onBeforeYield: () => this.#onBeforeYield?.(),
 			onDetachedToolUpdate: event => this.emitExternalEvent(event),
 			telemetry: this.#telemetry,
@@ -2377,6 +2424,11 @@ export class Agent {
 		} finally {
 			this.#isPaused = false;
 			this.#restoreUndeliveredQueuedMessages(loopAbortController);
+			// A run that ended without recording an aside it held drops it, as it always has. A
+			// disposing agent keeps them: the loop records none, and the next beginDispose() takes them.
+			if (!this.#disposing) {
+				this.#heldAsides = this.#heldAsides.filter(entry => entry.controller !== loopAbortController);
+			}
 			resolveRun?.();
 			if (this.#abortController === loopAbortController) {
 				this.#state.isStreaming = false;

@@ -1108,8 +1108,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#cancelExitRecorder?: () => void;
 	#cancelFatalRecoveryHint?: () => void;
 	#exitRecorded = false;
-	/** Settles once `session_exit` is recorded; a postmortem pass that found the session disposing waits on it. */
-	#exitRecordedSignal: PromiseWithResolvers<void> | undefined;
+	/** Set once {@link #writeFinalRecord} wrote a disposing session's last entries and sealed it. */
+	#finalRecordWritten = false;
+	/** Settles once the final record is written; a postmortem pass that found the session disposing waits on it. */
+	#finalRecordSignal: PromiseWithResolvers<void> | undefined;
 	/** Reason of a postmortem pass that left the marker to the disposal in progress; that disposal records it. */
 	#cleanupExitReason: postmortem.Reason | undefined;
 	/** Last observed `workspace.additionalDirectories`, diffed on change to add/remove only settings-seeded roots. */
@@ -3909,56 +3911,103 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	/**
-	 * Postmortem recorder of `session_exit`. The marker must follow the entries of the turn a
-	 * signal or crash interrupts, so on those reasons the recorder leaves the marker to the
-	 * disposal's drain and hands it the reason. A session no host has begun disposing yet starts
-	 * its own disposal here: postmortem runs registrations newest first, so a host whose teardown
-	 * registered before this session (ACP does) only reaches it afterwards. Past
-	 * {@link DISPOSAL_EXIT_RECORD_TIMEOUT_MS} the recorder writes the marker itself and seals the
-	 * session file, so nothing the drain appends later follows it. Process exit cannot wait, and
-	 * a manual pass (quit, relaunch) may keep the process alive, so both record at once.
+	 * Postmortem recorder of `session_exit`. On every exit path a disposing session's marker is
+	 * the last entry of its own file, after the turn the disposal aborts and the input it keeps:
+	 *
+	 * - a signal or crash leaves the marker to the disposal's drain and hands it the reason. A
+	 *   session no host has begun disposing yet starts its own disposal here: postmortem runs
+	 *   registrations newest first, so a host whose teardown registered before this session
+	 *   (ACP does) only reaches it afterwards;
+	 * - a manual pass (quit, relaunch) may keep the process alive, so it starts no disposal. It
+	 *   decides once every callback of the pass has started, since a host's teardown calls
+	 *   `beginDispose()` before its first await: a disposing session's marker is left to the
+	 *   drain as on a signal, a live session's is written at once;
+	 * - process exit runs no later task: a disposing session's final record
+	 *   ({@link #writeFinalRecord}) is written at once, and a live session's marker likewise.
+	 *
+	 * A pass that leaves the marker to the drain writes the final record itself past
+	 * {@link DISPOSAL_EXIT_RECORD_TIMEOUT_MS}; its seal drops whatever the drain appends later.
 	 */
 	#recordExitOnCleanup(reason: postmortem.Reason): Promise<void> | undefined {
+		if (reason === postmortem.Reason.EXIT) {
+			if (this.#isDisposed) this.#writeFinalRecord(reason);
+			else this.#recordSessionExit(reason);
+			return undefined;
+		}
+		if (this.#finalRecordWritten) return undefined;
 		const interrupting =
 			reason === postmortem.Reason.SIGINT ||
 			reason === postmortem.Reason.SIGTERM ||
 			reason === postmortem.Reason.SIGHUP ||
 			reason === postmortem.Reason.UNCAUGHT_EXCEPTION ||
 			reason === postmortem.Reason.UNHANDLED_REJECTION;
-		if (this.#exitRecorded || !interrupting) {
-			this.#recordSessionExit(reason);
-			return undefined;
-		}
+		if (!interrupting) return this.#recordExitOnManualCleanup(reason);
 		this.#cleanupExitReason ??= reason;
 		if (!this.#isDisposed) {
 			this.dispose().catch(error => {
 				logger.warn("Session disposal on process cleanup failed", { reason, error: String(error) });
 			});
 		}
-		return this.#awaitDisposalExitRecord(reason);
+		return this.#awaitFinalRecord(reason);
 	}
 
-	async #awaitDisposalExitRecord(reason: postmortem.Reason): Promise<void> {
-		this.#exitRecordedSignal ??= Promise.withResolvers<void>();
+	async #recordExitOnManualCleanup(reason: postmortem.Reason): Promise<void> {
+		// The pass invokes every callback synchronously before this resumes.
+		await Promise.resolve();
+		if (!this.#isDisposed) {
+			this.#recordSessionExit(reason);
+			return;
+		}
+		this.#cleanupExitReason ??= reason;
+		await this.#awaitFinalRecord(reason);
+	}
+
+	async #awaitFinalRecord(reason: postmortem.Reason): Promise<void> {
+		if (this.#finalRecordWritten) return;
+		this.#finalRecordSignal ??= Promise.withResolvers<void>();
 		const expired = Promise.withResolvers<void>();
 		const timer = setTimeout(expired.resolve, DISPOSAL_EXIT_RECORD_TIMEOUT_MS);
 		timer.unref?.();
 		try {
-			await Promise.race([this.#exitRecordedSignal.promise, expired.promise]);
+			await Promise.race([this.#finalRecordSignal.promise, expired.promise]);
 		} finally {
 			clearTimeout(timer);
 		}
-		if (this.#exitRecorded) return;
+		this.#writeFinalRecord(reason);
+	}
+
+	/**
+	 * A disposing session's last entries, then the seal, written once: by the drain
+	 * (`dispose()`), by a postmortem pass that outlived its wait for the drain, or by a process
+	 * exit during disposal. A switch still open (a hook that has not returned) left the writer
+	 * on its target, so first the writer goes back to this session with the input the switch
+	 * set aside, as the switch's rollback would; then the input disposal took, then
+	 * `session_exit`. The seal drops whatever is appended afterwards.
+	 */
+	#writeFinalRecord(reason: postmortem.Reason | "dispose"): void {
+		if (this.#finalRecordWritten) return;
+		this.#finalRecordWritten = true;
+		const switchRollback = this.#switchRollback;
+		if (switchRollback) {
+			this.#switchRollback = undefined;
+			this.sessionManager.restoreState(switchRollback.state);
+			this.#inputTakenAtDisposal.push(
+				...this.#keptQueuedInput(switchRollback.steering),
+				...this.#keptQueuedInput(switchRollback.followUp),
+				...switchRollback.nextTurn.filter(message => isDisplayableQueuedMessage(message)),
+			);
+			this.#irc.restorePending(switchRollback.irc);
+		}
 		this.#recordInputTakenAtDisposal();
 		this.#recordSessionExit(reason);
 		this.sessionManager.seal();
+		// A postmortem pass waiting on the drain resumes after this synchronous write.
+		this.#finalRecordSignal?.resolve();
 	}
 
 	#recordSessionExit(reason: postmortem.Reason | "dispose"): void {
 		if (this.#exitRecorded) return;
 		this.#exitRecorded = true;
-		// A postmortem pass waiting on the drain resumes after this synchronous write.
-		this.#exitRecordedSignal?.resolve();
 		const pendingToolCalls = collectPendingToolCalls(this.sessionManager.getBranch());
 		if (
 			pendingToolCalls.length === 0 &&
@@ -6548,7 +6597,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * one step, what no turn has recorded (queued and dequeued steers and follow-ups, live
 	 * steering, background results, `nextTurn` messages), and `dispose()` records it after the
 	 * running turn's entries and before `session_exit` (see `#takeAcceptedInputAtDisposal`).
-	 * IRC messages the session had queued are written inside this call.
+	 * IRC messages the session had queued are written inside this call, or by `dispose()`
+	 * once a session transition in flight has settled.
 	 *
 	 * The session ends the rest of its own in-flight work here: after this call that work
 	 * switches no model, appends no entry and emits no event that reports a result; the only
@@ -6569,9 +6619,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 *   completion. They start none; `dispose()` records their messages;
 	 * - session transitions in progress (`newSession`, `fork`, `switchSession`,
 	 *   `branch`, `branchFromBtw`, `resetSessionContext`): they stop before their commit
-	 *   and report a cancellation (`switchSession` rejects after its rollback); one that
-	 *   committed earlier completes but emits no `session_switch` or `session_branch`.
-	 *   `dispose()` waits, bounded, for them before it writes `session_exit`;
+	 *   and report a cancellation (`switchSession` rejects after its rollback). A new session
+	 *   or fork that disposal overtakes inside the session manager's own move is undone
+	 *   (see `#undoIdentityMoveIfDisposing`); one that committed earlier completes but emits
+	 *   no `session_switch` or `session_branch`. `dispose()` waits, bounded, for them before it
+	 *   writes `session_exit`;
 	 * - ephemeral side turns (`runEphemeralTurn`): they reject with an `AbortError`,
 	 *   a request in flight is aborted, and no further text is delivered;
 	 * - the vision descriptions of that setup (`#imageDescriptionAbortControllers`);
@@ -6632,8 +6684,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#titleGenerationAbortController.abort();
 		this.#abortAutolearnCapture();
 		// An IRC message the session already accepted is written now, inside this call: its
-		// sender was told it was delivered, and dropping it would lose it. Nothing later adds one.
-		this.#irc.flushPending();
+		// sender was told it was delivered, and dropping it would lose it. A transition in flight
+		// may have pointed the writer at another identity it has not committed or undone yet,
+		// so then the disposal record writes it, once the transition settles (#writeFinalRecord).
+		if (!this.isSessionTransitioning) this.#irc.flushPending();
 		this.agent.setAsideMessageProvider(undefined);
 		this.agent.hasIrcInterrupts = undefined;
 		this.agent.hasBackgroundCompletions = undefined;
@@ -6920,27 +6974,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// the run and its persistence handlers drained (or hit the deadline above), and
 		// right before the seal, which drops whatever a handler past the deadline still
 		// appends. Until here a signal or crash during teardown still records its own
-		// marker through the postmortem recorder. Steers and follow-ups beginDispose()
-		// took out of the queues go in just before it, after the turn they waited for.
-		// A switch still open past the wait above (a hook that has not returned) left the writer
-		// on its target: point it back at this session, as the switch's rollback would, and take
-		// back the input the switch set aside.
-		const switchRollback = this.#switchRollback;
-		if (switchRollback && this.#sessionTransitionSettled) {
-			this.#switchRollback = undefined;
-			this.sessionManager.restoreState(switchRollback.state);
-			this.#inputTakenAtDisposal.push(
-				...this.#keptQueuedInput(switchRollback.steering),
-				...this.#keptQueuedInput(switchRollback.followUp),
-				...switchRollback.nextTurn.filter(message => isDisplayableQueuedMessage(message)),
-			);
-			this.#irc.restorePending(switchRollback.irc);
-		}
-		this.#recordInputTakenAtDisposal();
-		this.#recordSessionExit(options.reason ?? this.#cleanupExitReason ?? "dispose");
+		// marker through the postmortem recorder. The input beginDispose() took goes in
+		// just before it, after the turn it waited for, in this session's own file even
+		// when a switch is still open past the wait above (see #writeFinalRecord).
+		this.#writeFinalRecord(options.reason ?? this.#cleanupExitReason ?? "dispose");
 		this.#cancelExitRecorder?.();
 		this.#cancelExitRecorder = undefined;
-		this.sessionManager.seal();
 		await this.sessionManager.close();
 
 		// Release retained conversation memory. dispose() is terminal, and every
@@ -7011,6 +7050,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 *   notices, image descriptions), are kept; hidden context the user never sees (mode context,
 	 *   developer directives, TTSR deliveries) is discarded, as an editor-restoring interrupt
 	 *   discards it;
+	 * - asides the loop took from the aside provider and still holds until their transcript
+	 *   record (a background result the loop already built, waiting behind a later await of
+	 *   its step): background results and peer messages are kept; hidden context the session
+	 *   made for that request (todo nudges, reminders) goes with the request;
 	 * - background results from the yield queue, those it already lent to the loop as thunks
 	 *   included (the thunks then return null);
 	 * - displayable `nextTurn` messages, those a prompt in setup took for its turn included
@@ -7023,6 +7066,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#inputTakenAtDisposal.push(
 			...this.#keptQueuedInput(taken.steering),
 			...this.#keptQueuedInput(taken.followUp),
+			...taken.asides.filter(
+				message =>
+					ASIDE_MESSAGE_COMMIT in message || (message.role !== "developer" && isDisplayableQueuedMessage(message)),
+			),
 			...this.yieldQueue.takeAll(),
 		);
 		const nextTurn = [...[...this.#nextTurnMessagesInSetup].flat(), ...this.#pendingNextTurnMessages];
@@ -12052,6 +12099,33 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	/**
+	 * Called right after a session manager operation moved this session to a new identity (file
+	 * and id) across awaits of its own (closing the outgoing writer, writing the new file). A
+	 * refusal before the call cannot cover those awaits, so a disposal that began during them
+	 * is undone here: the manager points back at the outgoing session and the successor's file
+	 * is removed, and disposal writes the input it kept and `session_exit` to the outgoing
+	 * session's own file. `beginDispose()` writes nothing while a transition is in flight, so
+	 * the successor holds nothing that belongs to this session.
+	 * @returns true when the move was undone.
+	 */
+	async #undoIdentityMoveIfDisposing(outgoing: SessionManagerStateSnapshot): Promise<boolean> {
+		if (!this.#isDisposed) return false;
+		const successor = this.sessionManager.getSessionFile();
+		this.sessionManager.restoreState(outgoing);
+		if (successor && successor !== outgoing.sessionFile) {
+			try {
+				await this.sessionManager.dropSession(successor);
+			} catch (error) {
+				logger.warn("Failed to remove the session file of a transition disposal undid", {
+					successor,
+					error: String(error),
+				});
+			}
+		}
+		return true;
+	}
+
+	/**
 	 * Start a new session, optionally with initial messages and parent tracking.
 	 * Clears all messages and starts a new session.
 	 * Listeners are preserved and will continue receiving events.
@@ -12090,8 +12164,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			advisorRecordersDetached = true;
 			await this.#advisors.drainAndDetachRecorders();
 			try {
-				// Pending writes go out first. Nothing below is undone, so this is the last point
-				// at which disposal can still refuse the new session.
+				// Pending writes go out first. Disposal that begins before this check refuses the
+				// new session; one that begins during the manager's move below undoes it.
 				if (!(options?.drop && previousSessionFile)) await this.sessionManager.flush();
 				if (this.#isDisposed) {
 					this.#reconnectToAgent();
@@ -12107,15 +12181,26 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 						logger.error("Failed to delete session during /delete", { err });
 					}
 				}
+				// A /delete already removed the outgoing file: there is nothing to go back to.
+				const outgoing = options?.drop && previousSessionFile ? undefined : this.sessionManager.captureState();
 				await this.sessionManager.newSession({
 					...options,
 					additionalDirectories: cfgWorkspaceAdditionalDirectories.get(this.settings),
 				});
+				if (outgoing && (await this.#undoIdentityMoveIfDisposing(outgoing))) {
+					this.#reconnectToAgent();
+					return false;
+				}
 				this.#bash.markSessionTransition(bashTransition);
 				// The new session owns the transcript from here, so the previous
 				// conversation's advisor spend is retired with it. Clearing at the commit
 				// point keeps the status line honest even if a later step below throws.
 				this.#advisors.clearCost();
+				// The outgoing session's pending nextTurn and IRC input is dropped with it (as
+				// below), at the commit itself: a disposal that begins during the awaits below
+				// must not record it in the new session's file.
+				this.#pendingNextTurnMessages = [];
+				this.#irc.clearPending();
 				sessionTransitioned = true;
 			} finally {
 				this.#bash.finishSessionTransition(bashTransition, sessionTransitioned);
@@ -12276,7 +12361,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					return false;
 				}
 				if (previousSessionFile) this.#promptGeneration++;
+				const outgoing = this.sessionManager.captureState();
 				forkResult = await this.sessionManager.fork();
+				if (await this.#undoIdentityMoveIfDisposing(outgoing)) forkResult = undefined;
 			} catch (error) {
 				this.#bash.finishSessionTransition(bashTransition, false);
 				throw error;
@@ -14358,7 +14445,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// old session (pending messages, async jobs, auto-learn capture) is discarded.
 		if (requireIdleFor) this.#assertIdleForSnapshot(requireIdleFor);
 
-		// Clear pending messages (bound to old session state)
+		// Clear pending messages (bound to old session state). A branch that disposal stops or
+		// undoes below gives them back, for the disposal record of the session they belong to.
+		const outgoingNextTurnMessages = this.#pendingNextTurnMessages;
 		this.#pendingNextTurnMessages = [];
 		this.#scheduledHiddenNextTurnGeneration = undefined;
 		this.#queuedMessageDrainBlocked = false;
@@ -14375,15 +14464,23 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			advisorRecordersDetached = true;
 			await this.#advisors.drainAndDetachRecorders();
 			try {
-				if (this.#isDisposed) return false;
+				if (this.#isDisposed) {
+					this.#pendingNextTurnMessages.unshift(...outgoingNextTurnMessages);
+					return false;
+				}
 				// A prompt admitted during the drain awaits above belongs to the history
 				// being replaced; the generation bump drops its pending setup.
 				this.#promptGeneration++;
 				if (!leafId) {
 					const title = this.sessionManager.getSessionName();
 					const titleSource = this.sessionManager.titleSource;
+					const outgoing = this.sessionManager.captureState();
 					await this.sessionManager.newSession({ parentSession: previousSessionFile });
 					if (title) await this.sessionManager.setSessionName(title, titleSource);
+					if (await this.#undoIdentityMoveIfDisposing(outgoing)) {
+						this.#pendingNextTurnMessages.unshift(...outgoingNextTurnMessages);
+						return false;
+					}
 				} else {
 					this.sessionManager.createBranchedSession(leafId, { copyArtifacts: options?.copyArtifacts });
 				}
@@ -14483,6 +14580,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		);
 		this.#assertIdleForSnapshot("branch /btw");
 
+		// Dropped with the old context; a branch that disposal stops below gives them back, for
+		// the disposal record of the session they belong to.
+		const outgoingNextTurnMessages = this.#pendingNextTurnMessages;
+		const outgoingSteering = [...this.agent.peekSteeringQueue()];
+		const outgoingFollowUp = [...this.agent.peekFollowUpQueue()];
 		this.#pendingNextTurnMessages = [];
 		this.#scheduledHiddenNextTurnGeneration = undefined;
 		this.#releaseQueuedTtsrReservations();
@@ -14505,7 +14607,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				if (this.sessionManager.getSessionId() !== sessionId || this.sessionManager.getLeafId() !== leafId) {
 					throw new Error("Cannot branch /btw: session changed since /btw started");
 				}
-				if (this.#isDisposed) return { cancelled: true, sessionFile: previousSessionFile };
+				if (this.#isDisposed) {
+					this.#pendingNextTurnMessages.unshift(...outgoingNextTurnMessages);
+					this.agent.replaceQueues(
+						[...outgoingSteering, ...this.agent.peekSteeringQueue()],
+						[...outgoingFollowUp, ...this.agent.peekFollowUpQueue()],
+					);
+					return { cancelled: true, sessionFile: previousSessionFile };
+				}
 				// A prompt may have been admitted during the flush/drain awaits
 				// after the idle check. It still belongs to the pre-branch context.
 				this.#promptGeneration++;

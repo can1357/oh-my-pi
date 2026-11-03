@@ -441,3 +441,148 @@ test("dispose() waits for a switch that rolls back during its wait, and records 
 	expect(outgoingRows.at(-1)).toBe("session_exit");
 	expect(await persistedRows(targetFile)).not.toContain("session_exit");
 }, 30_000);
+
+test("a background result the loop already built is recorded once when disposal begins while its step waits on a follow-up dequeue", async () => {
+	const jobs = new AsyncJobManager({});
+	AsyncJobManager.setInstance(jobs);
+	const { session, manager, agent, requests } = await createSession({
+		asyncJobManager: jobs,
+		agentId: "barrier-owner",
+	});
+	await session.prompt("initial");
+	const beforeYield = Promise.withResolvers<void>();
+	const releaseYield = Promise.withResolvers<void>();
+	agent.setOnBeforeYield(async () => {
+		beforeYield.resolve();
+		await releaseYield.promise;
+	});
+	const enqueued = Promise.withResolvers<void>();
+	let receipt = "pending";
+	const enqueue = session.yieldQueue.enqueueWithReceipt.bind(session.yieldQueue);
+	vi.spyOn(session.yieldQueue, "enqueueWithReceipt").mockImplementation((kind, entry) => {
+		const pending = enqueue(kind, entry);
+		void pending.then(
+			() => {
+				receipt = "resolved";
+			},
+			() => {
+				receipt = "rejected";
+			},
+		);
+		enqueued.resolve();
+		return pending;
+	});
+	// The loop calls the result's thunk (it is built and no longer the queue's), then waits on the
+	// hook of the follow-up dequeue in the same step.
+	const drainLazy = session.yieldQueue.drainLazy.bind(session.yieldQueue);
+	let built = false;
+	vi.spyOn(session.yieldQueue, "drainLazy").mockImplementation(() =>
+		drainLazy().map(thunk => () => {
+			const message = thunk();
+			if (message) built = true;
+			return message;
+		}),
+	);
+	const dequeueHeld = Promise.withResolvers<void>();
+	const releaseDequeue = Promise.withResolvers<void>();
+	agent.addBeforeQueuedMessageDequeueHook(async () => {
+		if (!built) return;
+		dequeueHeld.resolve();
+		await releaseDequeue.promise;
+	});
+	const running = session.prompt("active turn");
+	await withTimeout(beforeYield.promise, 15_000, "The turn did not reach its yield boundary");
+	await session.followUp("accepted behind the result");
+	jobs.register(
+		"bash",
+		"a job that finished at the boundary",
+		async () => {
+			const child = Bun.spawn(["bash", "-c", "printf built-real-process-result"], {
+				stdout: "pipe",
+				stderr: "pipe",
+			});
+			const output = await new Response(child.stdout).text();
+			await child.exited;
+			return output;
+		},
+		{ id: "barrier-built-job", ownerId: "barrier-owner" },
+	);
+	await withTimeout(enqueued.promise, 15_000, "The job result did not reach the queue");
+	releaseYield.resolve();
+	await withTimeout(dequeueHeld.promise, 15_000, "The follow-up dequeue did not wait behind the built result");
+	const file = sessionFileOf(manager);
+	session.beginDispose();
+	// The drain gives up on the held run before the hook returns.
+	await session.dispose({ drainTimeoutMs: 50 });
+	releaseDequeue.resolve();
+	await running;
+
+	expect(requests()).toBe(2);
+	const rows = await persistedRows(file);
+	expect(rows.filter(row => row.includes("built-real-process-result"))).toHaveLength(1);
+	expect(rows.filter(row => row === "user:accepted behind the result")).toHaveLength(1);
+	expect(rows.at(-1)).toBe("session_exit");
+	expect(receipt).toBe("resolved");
+}, 30_000);
+
+for (const operation of ["newSession", "fork"] as const) {
+	test(`disposal that begins inside the session manager's ${operation} undoes the move, so the kept input and session_exit stay in the outgoing file`, async () => {
+		const firstEntered = Promise.withResolvers<void>();
+		const firstRelease = Promise.withResolvers<void>();
+		const mock = createMockModel({ handler: () => ({ content: ["answer"] }) });
+		let calls = 0;
+		const { session, manager } = await createSession({
+			streamFn: async (requestModel, context, options) => {
+				if (++calls === 1) {
+					firstEntered.resolve();
+					await firstRelease.promise;
+				}
+				return mock.stream(requestModel, context, options);
+			},
+		});
+		const initial = session.prompt("initial");
+		await withTimeout(firstEntered.promise, 15_000, "The first request did not start");
+		await session.sendCustomMessage(
+			{ customType: "kept-transition-input", content: `accepted before ${operation}`, display: true },
+			{ deliverAs: "nextTurn" },
+		);
+		firstRelease.resolve();
+		await initial;
+		const outgoing = sessionFileOf(manager);
+		let atDisposal: string | undefined;
+		let successor: string | undefined;
+		// Disposal begins while the manager's own awaits are open: it closes the outgoing writer
+		// first, then writes the new file.
+		const beginDisposalInsideMove = <T>(moving: Promise<T>): Promise<T> => {
+			queueMicrotask(() => {
+				atDisposal = manager.getSessionFile();
+				session.beginDispose();
+			});
+			void moving.then(() => {
+				successor = manager.getSessionFile();
+			});
+			return moving;
+		};
+		if (operation === "newSession") {
+			const newSession = manager.newSession.bind(manager);
+			vi.spyOn(manager, "newSession").mockImplementation(options => beginDisposalInsideMove(newSession(options)));
+		} else {
+			const fork = manager.fork.bind(manager);
+			vi.spyOn(manager, "fork").mockImplementation(() => beginDisposalInsideMove(fork()));
+		}
+
+		const moved = operation === "newSession" ? await session.newSession() : await session.fork();
+		const after = manager.getSessionFile();
+		await session.dispose();
+
+		expect(moved).toBe(false);
+		expect(atDisposal).toBe(outgoing);
+		expect(successor).toBeDefined();
+		expect(successor).not.toBe(outgoing);
+		expect(after).toBe(outgoing);
+		const rows = await persistedRows(outgoing);
+		expect(rows.filter(row => row === `kept-transition-input:accepted before ${operation}`)).toHaveLength(1);
+		expect(rows.at(-1)).toBe("session_exit");
+		expect(await Bun.file(successor ?? outgoing).exists()).toBe(false);
+	}, 30_000);
+}
