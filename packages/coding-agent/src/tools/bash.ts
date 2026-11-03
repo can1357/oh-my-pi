@@ -837,9 +837,10 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			details.timedOut = true;
 			const message =
 				timeoutSec === undefined ? "Command timed out" : `Command timed out after ${timeoutSec} seconds`;
-			// executeBash has already emitted this leading sink notice. PTY output
-			// has not, so provide the LLM-facing annotation exactly once.
-			if (!normalizeResultOutput(result).startsWith(`[${message}]\n`)) {
+			// executeBash has already emitted this leading sink notice. PTY output has not, and output shaped from the
+			// artifact never carries it, so provide the LLM-facing annotation exactly once in the text sent.
+			const lead = outputLines[0];
+			if (lead !== `[${message}]` && !lead.startsWith(`[${message}]\n`)) {
 				outputLines.push("", `[${message}]`);
 			}
 			const timeoutOutputText = await enforceInlineByteCap(outputLines.join("\n"), inlineCap);

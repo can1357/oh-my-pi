@@ -851,6 +851,15 @@ describe("OutputSink head-retain mode", () => {
 		expect(formatOutputNotice(outputMeta().truncationFromSummary(dumped, { direction: "tail" }).get())).toContain(
 			`Showing lines 1-${batch(head)} and ${batch(tail)}-5200 of 5200`,
 		);
+
+		// A timeout notice the sink puts above the head is not a head line: the ranges stay the same.
+		const timedOut = new OutputSink({ headBytes: 20 * 1024 });
+		for (let at = 0; at < text.length; at += 4093) timedOut.push(text.slice(at, at + 4093));
+		const withNotice = await timedOut.dump("Command timed out after 1 seconds");
+		expect(withNotice.output.startsWith("[Command timed out after 1 seconds]\n")).toBe(true);
+		expect(formatOutputNotice(outputMeta().truncationFromSummary(withNotice, { direction: "tail" }).get())).toContain(
+			`Showing lines 1-${batch(head)} and ${batch(tail)}-5200 of 5200`,
+		);
 	});
 
 	test("head fills cleanly across chunks without elision when total fits", async () => {

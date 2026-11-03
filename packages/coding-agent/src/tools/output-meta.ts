@@ -229,8 +229,12 @@ export class OutputMetaBuilder {
 			const trailing = markerAt >= 0 && shown.length > markerAt + 1 && shown.at(-1) === "" ? 1 : 0;
 			const lastLine = totalLines - trailing;
 			const keptLines = Math.max(0, summary.outputLines - 1); // -1 for marker line
-			const headLines = markerAt >= 0 ? markerAt : Math.ceil(keptLines / 2);
-			const tailLines = markerAt >= 0 ? shown.length - markerAt - 1 - trailing : keptLines - headLines;
+			// Lines from the marker on are the marker and the tail; the rest of `outputLines` is the head. A notice
+			// `dump(notice)` put above the head is not in `outputLines`, so it never counts as a head line.
+			const tailLines =
+				markerAt >= 0 ? shown.length - markerAt - 1 - trailing : keptLines - Math.ceil(keptLines / 2);
+			const headLines =
+				markerAt >= 0 ? Math.max(0, summary.outputLines - (shown.length - markerAt)) : Math.ceil(keptLines / 2);
 			this.#meta.truncation = {
 				direction: "middle",
 				truncatedBy: "middle",

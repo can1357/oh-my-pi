@@ -590,6 +590,32 @@ describe("spotlight column-capped output", () => {
 		expect(trace?.savedTokens).toBe((trace?.plainTokens ?? 0) - (trace?.outTokens ?? 0));
 		expect(trace?.savedTokens).toBeLessThan(0);
 	});
+
+	it("still says a timed-out command timed out when its cut comes from the artifact", async () => {
+		const client = spotlightClient(fakeSpotlight({ score: item => (item.includes("on_hold") ? 1 : 0.05) }));
+		const { session, manager } = await experimentSession(client);
+		const artifactId = await manager.saveArtifact(FULL, "bash");
+		if (artifactId === undefined) throw new Error("the in-memory session keeps artifacts");
+		// The sink puts its timeout notice above the preview; the artifact holds only what the command printed.
+		const preview = `[Command timed out after 1 seconds]\n${FULL.slice(0, 768)}…`;
+		const timedOut: bashExecutor.BashResult = {
+			...bashOutput(preview),
+			exitCode: undefined,
+			timedOut: true,
+			artifactId,
+			totalBytes: FULL.length,
+			columnMax: 768,
+			columnTruncatedLines: 1,
+			columnTruncatedRange: { first: 1, last: 1 },
+		};
+		vi.spyOn(bashExecutor, "executeBash").mockResolvedValue(timedOut);
+
+		const result = await new BashTool(session).execute("b1", { command: "./orders.sh", timeout: 1 });
+
+		expect(result.details?.spotlight?.inChars).toBe(FULL.length);
+		expect(result.isError).toBe(true);
+		expect(resultText(result).match(/\[Command timed out after 1 seconds\]/g)).toHaveLength(1);
+	});
 });
 
 describe("spotlight score-free coin", () => {
