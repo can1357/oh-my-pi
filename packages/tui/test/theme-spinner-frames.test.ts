@@ -2,8 +2,12 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { sharedSpinnerFrame } from "@oh-my-pi/pi-tui/chat/tool-execution";
-import { SPINNER_ADVANCE_MS } from "@oh-my-pi/pi-tui/components/loader";
+import {
+	DEFAULT_SPINNER_INTERVAL_MS,
+	setSpinnerInterval,
+	sharedSpinnerFrame,
+	SPINNER_INTERVAL_STATIC,
+} from "@oh-my-pi/pi-tui/spinner-clock";
 import { getThemeByName } from "@oh-my-pi/pi-tui/theme";
 import { getConfigRootDir, getCustomThemesDir, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 
@@ -78,14 +82,25 @@ describe("theme symbols.spinnerFrames", () => {
 		await expect(getThemeByName("custom-empty-object")).resolves.toBeUndefined();
 	});
 
-	it("derives live tool spinner frames from a shared clock", () => {
+	it("derives live tool spinner frames from the shared clock at its live interval", () => {
 		const frameCount = 4;
-		const now = SPINNER_ADVANCE_MS * 3 + 12;
+		const now = DEFAULT_SPINNER_INTERVAL_MS * 3 + 12;
 
-		expect(sharedSpinnerFrame(frameCount, now + SPINNER_ADVANCE_MS)).toBe(
+		expect(sharedSpinnerFrame(frameCount, now + DEFAULT_SPINNER_INTERVAL_MS)).toBe(
 			(sharedSpinnerFrame(frameCount, now) + 1) % frameCount,
 		);
-		expect(sharedSpinnerFrame(frameCount, SPINNER_ADVANCE_MS * frameCount)).toBe(0);
+		expect(sharedSpinnerFrame(frameCount, DEFAULT_SPINNER_INTERVAL_MS * frameCount)).toBe(0);
 		expect(sharedSpinnerFrame(0, now)).toBe(0);
+
+		try {
+			// A slower interval advances once per new period; a static one is frame 0 at any time.
+			setSpinnerInterval(1000);
+			expect(sharedSpinnerFrame(frameCount, 2999)).toBe(2);
+			expect(sharedSpinnerFrame(frameCount, 3000)).toBe(3);
+			setSpinnerInterval(SPINNER_INTERVAL_STATIC);
+			expect(sharedSpinnerFrame(frameCount, 12_345)).toBe(0);
+		} finally {
+			setSpinnerInterval(DEFAULT_SPINNER_INTERVAL_MS);
+		}
 	});
 });

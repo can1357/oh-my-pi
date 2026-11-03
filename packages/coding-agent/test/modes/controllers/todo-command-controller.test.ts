@@ -5,7 +5,6 @@ import * as path from "node:path";
 import { TodoCommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/todo-command-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { type TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
-import { USER_TODO_EDIT_CUSTOM_TYPE } from "@oh-my-pi/pi-coding-agent/tools";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 function createContext(cwd: string, phases: TodoPhase[]): InteractiveModeContext {
@@ -15,10 +14,9 @@ function createContext(cwd: string, phases: TodoPhase[]): InteractiveModeContext
 		},
 		session: {
 			getTodoPhases: () => phases,
-			setTodoPhases: vi.fn(),
+			commitTodoPhases: vi.fn(),
 		},
 		sessionManager: {
-			appendCustomEntry: vi.fn(),
 			appendMessage: vi.fn(),
 			getBranch: () => [],
 			getCwd: () => cwd,
@@ -76,11 +74,8 @@ describe("TodoCommandController", () => {
 		await controller.handleTodoCommand("import");
 
 		const expected: TodoPhase[] = [{ name: "Imported", tasks: [{ content: "From cwd", status: "in_progress" }] }];
-		expect(ctx.session.setTodoPhases).toHaveBeenCalledWith(expected);
+		expect(ctx.session.commitTodoPhases).toHaveBeenCalledWith(expected);
 		expect(ctx.setTodos).toHaveBeenCalledWith(expected);
-		expect(ctx.sessionManager.appendCustomEntry).toHaveBeenCalledWith(USER_TODO_EDIT_CUSTOM_TYPE, {
-			phases: expected,
-		});
 		expect(ctx.agent.appendMessage).toHaveBeenCalledWith(expect.objectContaining({ role: "developer" }));
 		expect(ctx.sessionManager.appendMessage).toHaveBeenCalledWith(expect.objectContaining({ role: "developer" }));
 		expect(ctx.showStatus).toHaveBeenCalledWith(`Imported 1 phase(s), 1 task(s) from ${target}.`);
@@ -99,7 +94,7 @@ describe("TodoCommandController", () => {
 		const expected: TodoPhase[] = [
 			{ name: "Quoted", tasks: [{ content: "From quoted path", status: "in_progress" }] },
 		];
-		expect(ctx.session.setTodoPhases).toHaveBeenCalledWith(expected);
+		expect(ctx.session.commitTodoPhases).toHaveBeenCalledWith(expected);
 		expect(ctx.showStatus).toHaveBeenCalledWith(`Imported 1 phase(s), 1 task(s) from ${target}.`);
 		expect(ctx.showError).not.toHaveBeenCalled();
 	});
@@ -114,7 +109,7 @@ describe("TodoCommandController", () => {
 		await controller.handleTodoCommand("import");
 
 		expect(ctx.showError).toHaveBeenCalledWith(expect.stringContaining(`Could not parse ${target}:`));
-		expect(ctx.session.setTodoPhases).not.toHaveBeenCalled();
+		expect(ctx.session.commitTodoPhases).not.toHaveBeenCalled();
 		expect(ctx.setTodos).not.toHaveBeenCalled();
 	});
 
@@ -127,7 +122,7 @@ describe("TodoCommandController", () => {
 
 		expect(ctx.showError).toHaveBeenCalledWith(expect.stringContaining("Failed to read todos:"));
 		expect(ctx.showError).toHaveBeenCalledWith(expect.stringContaining("internal scheme"));
-		expect(ctx.session.setTodoPhases).not.toHaveBeenCalled();
+		expect(ctx.session.commitTodoPhases).not.toHaveBeenCalled();
 		expect(ctx.setTodos).not.toHaveBeenCalled();
 	});
 
