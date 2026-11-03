@@ -595,11 +595,14 @@ fn filter_node(mut node: WalkNode, all: bool) -> Option<WalkNode> {
 /// Characters of a label or value a line shows before cutting it.
 const SHOWN_CHARS: usize = 200;
 
-/// Writes `text` quoted, with escapes that keep its newlines and quotes
-/// readable. Past [`SHOWN_CHARS`] the line shows the start, how much it cut and
-/// the call that reads the whole text, unless that note would be longer than
-/// what it replaces.
+/// Writes `text` quoted. Only Quartz offers the full-text recovery note:
+/// AT-SPI may already have clipped its value before the formatter sees it.
+/// Other platforms keep their existing 80-character preview.
 fn push_quoted(line: &mut String, text: &str, reference: &str, accessor: &str) {
+	if !cfg!(target_os = "macos") {
+		text_preview(line, text);
+		return;
+	}
 	let total = text.chars().count();
 	let cut = total.checked_sub(SHOWN_CHARS).and_then(|hidden| {
 		let note = format!(
@@ -613,6 +616,24 @@ fn push_quoted(line: &mut String, text: &str, reference: &str, accessor: &str) {
 	if let Some(note) = cut {
 		line.push_str(&note);
 	}
+}
+
+/// The non-Quartz preview, without claiming the backend can recover a suffix.
+fn text_preview(line: &mut String, text: &str) {
+	line.push('"');
+	let mut chars = text.chars();
+	for ch in chars.by_ref().take(80) {
+		match ch {
+			'\\' => line.push_str("\\\\"),
+			'"' => line.push_str("\\\""),
+			'\n' => line.push(' '),
+			ch => line.push(ch),
+		}
+	}
+	if chars.next().is_some() {
+		line.push('…');
+	}
+	line.push('"');
 }
 
 /// Quotes untrusted window metadata without letting it add lines or an
@@ -693,6 +714,11 @@ const MAX_SHOWN_ACTIONS: usize = 16;
 /// [`MAX_SHOWN_ACTIONS`] the list ends with how many it left out and the call
 /// that lists them all, so no app can make one line arbitrarily long.
 fn shown_actions(props: &AxProps, reference: &str) -> Option<String> {
+	// Only Quartz accepts names with their AX prefix stripped. AT-SPI action
+	// names are provider-defined, even when they happen to start with AX.
+	if !cfg!(target_os = "macos") {
+		return None;
+	}
 	let role = props.role.as_str();
 	let mut seen = HashSet::new();
 	// Lowercased past an `AX` prefix in any case, as `perform()` takes it.
@@ -2143,6 +2169,7 @@ mod tests {
 			.trim_start()
 	}
 	#[test]
+	#[cfg(target_os = "macos")]
 	fn a_long_value_shows_its_start_and_names_the_call_that_reads_it_whole() {
 		let whole = format!("line one\n\"two\"\t{}", "x".repeat(14_415));
 		let mut note = p("textarea", None);
@@ -2339,6 +2366,7 @@ mod tests {
 		]);
 	}
 	#[test]
+	#[cfg(target_os = "macos")]
 	fn lines_list_the_actions_a_role_does_not_imply() {
 		let with = |role: &str, title: &str, actions: &[&str]| {
 			let mut props = p(role, Some(title));
@@ -2412,6 +2440,55 @@ mod tests {
 					.as_str()
 			)
 		);
+	}
+	#[test]
+	fn only_quartz_lines_offer_normalized_ax_actions() {
+		let mut image = p("image", Some("Document"));
+		image.actions = vec!["AXOpen".into()];
+		let mut m = Mock {
+			props: [(1, p("window", Some("Title"))), (2, image)].into(),
+			children: [(1, vec![2])].into(),
+			..Default::default()
+		};
+		let text = tree(&mut m);
+		let element =
+			element_line(&mut m, &mut AxRegistry::default(), "7", AxHandle::Test(2)).unwrap();
+		for rendered in [line(&text, "e2"), element.as_str()] {
+			if cfg!(target_os = "macos") {
+				assert!(rendered.ends_with(" actions=open"), "{rendered}");
+			} else {
+				// Main does not render non-Quartz actions. In particular,
+				// never suggest `open` for the literal AT-SPI name AXOpen.
+				assert!(!rendered.contains(" actions="), "{rendered}");
+			}
+		}
+		assert_eq!(find(&mut m, Some("image"), None)[0].actions, Some(vec!["AXOpen".into()]));
+	}
+	#[test]
+	#[cfg(not(target_os = "macos"))]
+	fn clipped_backend_values_never_offer_full_text_recovery() {
+		let mut document = p("textarea", Some("Document"));
+		// AT-SPI supplies only this prefix of a longer document.
+		document.value = Some("x".repeat(16_384));
+		let mut m = Mock {
+			props: [(1, p("window", Some("Title"))), (2, document)].into(),
+			children: [(1, vec![2])].into(),
+			..Default::default()
+		};
+		let text = tree(&mut m);
+		assert_eq!(
+			line(&text, "e2"),
+			format!("- textarea \"Document\" [ref=e2]: \"{}…\"", "x".repeat(80))
+		);
+		let element =
+			element_line(&mut m, &mut AxRegistry::default(), "7", AxHandle::Test(2)).unwrap();
+		assert_eq!(element, format!("- textarea \"Document\" [ref=e1]: \"{}…\"", "x".repeat(80)));
+		assert!(!text.contains("value()"));
+		assert!(!element.contains("value()"));
+		// Labels use the same platform preview, including main's escaping.
+		let mut preview = String::new();
+		push_quoted(&mut preview, "one\n\"two\"\\three", "e2", "title");
+		assert_eq!(preview, "\"one \\\"two\\\"\\\\three\"");
 	}
 	#[test]
 	fn a_window_control_named_only_by_its_subrole_takes_that_name() {
