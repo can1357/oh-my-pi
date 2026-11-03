@@ -159,6 +159,7 @@ import { modelMentionDisplayName } from "@oh-my-pi/pi-tui/prompt/model-mention-s
 import { modelMentionChipLabel, shiftImageMarkers } from "@oh-my-pi/pi-tui/prompt/composer-attachments";
 import { isTranscriptEntry, type SessionContext } from "../session/session-context";
 import type { SessionManager } from "../session/session-manager";
+import { loadPinnedSessionIds } from "../session/session-pins";
 import {
 	canAutoCreateWorktree,
 	planWorktreeExit,
@@ -1500,7 +1501,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (cfgComposerShape.get(settings) !== "band") return undefined;
 		const name = this.sessionManager.getSessionName();
 		if (!name) return undefined;
-		return `\x1b[2;3m${sanitizeStatusText(name)}\x1b[23;22m`;
+		const pin = this.statusLine.isSessionPinned(this.sessionManager.getSessionId()) && theme.icon.pin;
+		const title = sanitizeStatusText(name);
+		return `\x1b[2;3m${pin ? `${pin} ${title}` : title}\x1b[23;22m`;
 	}
 	/** Live gen tok/s for the working row: the viewed session's own meter, so a
 	 * focused subagent shows its own reading and the main session's survives
@@ -2666,6 +2669,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// Deliberately here rather than beside #applyVimMode in the constructor: that runs before
 		// #focusController exists, which updateEditorBorderColor dereferences.
 		this.#syncVimStatus(this.editor);
+		void this.#syncSessionPinned();
 		// Single side-effect point for title changes: every setSessionName caller
 		// (first-input titling, /rename, extension renames, plan seeding, replan
 		// refresh) gets the terminal title + accent updates from here. Registered
@@ -2687,7 +2691,10 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.#handleSessionAccentInputsChanged();
 			}),
 			// Fork and branch adopt a new session file without retitling.
-			this.session.registerSessionChangeCallback(reportTernSession),
+			this.session.registerSessionChangeCallback(() => {
+				reportTernSession();
+				void this.#syncSessionPinned();
+			}),
 		);
 		this.#syncEditorMaxHeight();
 		this.isInitialized = true;
@@ -6485,6 +6492,24 @@ export class InteractiveMode implements InteractiveModeContext {
 			editor.vimEnabled && editor.vimMode !== "insert" ? "block" : editor.vimEnabled ? "bar" : "default",
 		);
 		this.updateEditorBorderColor();
+	}
+
+	/** Bumped by every pin-state write so a slower pins-file read can't overwrite a newer update. */
+	#pinStateGeneration = 0;
+
+	/** Reload the pinned set from disk: at startup and on session switch, picking up other instances' pins. */
+	async #syncSessionPinned(): Promise<void> {
+		const generation = ++this.#pinStateGeneration;
+		const pinnedIds = await loadPinnedSessionIds();
+		if (generation !== this.#pinStateGeneration) return;
+		this.statusLine.setPinnedSessionIds(pinnedIds);
+		this.ui.requestRender();
+	}
+
+	applySessionPin(sessionId: string, pinned: boolean): void {
+		this.#pinStateGeneration++;
+		this.statusLine.setSessionPinned(sessionId, pinned);
+		this.ui.requestRender();
 	}
 
 	async #copyYankToClipboard(content: string): Promise<void> {
