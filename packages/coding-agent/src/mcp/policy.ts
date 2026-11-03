@@ -75,11 +75,15 @@ export function mcpPolicyArgs(): string[] {
 }
 
 /**
- * The MCP choice as environment for a process a long-lived broker starts on
- * this session's behalf (a shared language server). The broker's own
- * environment belongs to whichever session started it, so the requester's
- * choice travels with the request, both ways.
+ * The MCP choice as environment for a process a shared, long-lived host starts
+ * on this session's behalf: the launch broker (and every daemon it runs), the
+ * LSP mux, the IDA host, the blob broker. A host's own environment belongs to
+ * whichever session started it, so the requester's choice travels with each
+ * request that can make the host start a process, both ways.
+ *
+ * `env` is the request's own environment: an explicit `PI_NO_MCP=1` in it
+ * stays, but it can never turn MCP back on while this session has it off.
  */
-export function mcpPolicyEnv(): Record<string, string> {
-	return { [NO_MCP_ENV]: isMCPDisabled() ? "1" : "" };
+export function mcpPolicyEnv(env?: Readonly<Record<string, string>>): Record<string, string> {
+	return isMCPDisabled() ? { ...env, [NO_MCP_ENV]: "1" } : { [NO_MCP_ENV]: "", ...env };
 }

@@ -121,7 +121,7 @@ export function createControlHandler(
 				return json((publication ? { publication } : { missing: true }) satisfies EnsureBlobResponse);
 			}
 			const bytes = Buffer.from(body.data, "base64");
-			const publication = await backend.ensureBlob(body.key, body.mimeType, () => bytes);
+			const publication = await backend.ensureBlob(body.key, body.mimeType, () => bytes, undefined, body.env);
 			if (!publication) return json({ error: "unavailable" }, 503);
 			return json({ publication } satisfies EnsureBlobResponse);
 		}

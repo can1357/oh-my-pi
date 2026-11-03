@@ -38,6 +38,8 @@ export interface BlobUploadRequest {
 	extension: string;
 	/** Preferred remote filename when a backend supports naming. */
 	filename?: string;
+	/** Environment overlay for a user-configured upload command (the requesting session's MCP choice). */
+	env?: Readonly<Record<string, string>>;
 }
 
 /** A configured destination capable of publishing blobs. */

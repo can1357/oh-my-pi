@@ -8,7 +8,6 @@
 ### Added
 
 - Added `setInheritedEnv()`: sets an environment variable this process decided at runtime, which child shells keep even when a project dotenv file names it
-- `getDaemonRuntimeDir()` takes an optional scope, giving processes that must not share project daemons their own directory (`<hash>-<scope>`)
 - Added `isPidAlive` (signal-0 liveness probe) and `asStrictBytes` (a `Uint8Array` narrowed to its own `ArrayBuffer` for WebCrypto)
 
 ## [18.15.0] - 2026-11-01

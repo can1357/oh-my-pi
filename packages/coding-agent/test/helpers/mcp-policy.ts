@@ -9,10 +9,9 @@
  *   Only server starts are allowed; discovery stays off, so nothing the
  *   developer configured can be found and started.
  * - {@link allowMCPDiscoveryInTests}: the test exercises discovered servers.
- *   Discovery runs too, and every configuration root it reads (HOME, the agent
- *   dir, the project dir, the directory and extension roots a discovery call is
- *   given) must then be inside the OS temp dir, or the test fails before
- *   anything is read.
+ *   Discovery runs too: HOME, the agent dir and the project dir must be inside
+ *   the OS temp dir, and every server discovery returns must come from a file
+ *   there, or the test fails before any server starts.
  * - {@link setNoMcpEnvForTest}: a test of the disabled state, holding with or
  *   without the runner.
  *
@@ -24,6 +23,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as mcpConfig from "@oh-my-pi/pi-coding-agent/mcp/config";
+import type { LoadMCPConfigsResult } from "@oh-my-pi/pi-coding-agent/mcp/config";
 import * as mcpPolicy from "@oh-my-pi/pi-coding-agent/mcp/policy";
 import { getAgentDir, getProjectDir, setAgentDir, setProjectDir } from "@oh-my-pi/pi-utils";
 import { setNoMcpEnvForTest } from "./no-mcp-env";
@@ -39,17 +39,8 @@ function realOrResolved(target: string): string {
 	}
 }
 
-/** Every absolute path inside `value` (an options object, an extension-roots record). */
-function absolutePaths(value: unknown): string[] {
-	if (typeof value === "string") return path.isAbsolute(value) ? [value] : [];
-	if (Array.isArray(value)) return value.flatMap(absolutePaths);
-	if (value !== null && typeof value === "object") return Object.values(value).flatMap(absolutePaths);
-	return [];
-}
-
 /** Throw unless every root MCP discovery reads lies inside the OS temp dir. */
 function assertIsolatedMcpRoots(extra: Array<[string, string]> = []): void {
-	const temp = realOrResolved(os.tmpdir());
 	const roots: Array<[string, string]> = [
 		["HOME", os.homedir()],
 		["agent dir", getAgentDir()],
@@ -60,15 +51,38 @@ function assertIsolatedMcpRoots(extra: Array<[string, string]> = []): void {
 		const value = process.env[name];
 		if (value) roots.push([name, value]);
 	}
-	const outside = roots.filter(([, root]) => {
-		const resolved = realOrResolved(root);
-		return resolved !== temp && !resolved.startsWith(`${temp}${path.sep}`);
-	});
+	const outside = roots.filter(([, root]) => !insideTemp(root));
 	if (outside.length > 0) {
 		throw new Error(
 			`allowMCPDiscoveryInTests: MCP discovery would read ${outside
 				.map(([name, root]) => `${name}=${root}`)
-				.join(", ")}, outside ${temp}. Point them at a temp dir so the test cannot start your own servers.`,
+				.join(", ")}, outside ${os.tmpdir()}. Point them at a temp dir so the test cannot start your own servers.`,
+		);
+	}
+}
+
+function insideTemp(target: string): boolean {
+	const temp = realOrResolved(os.tmpdir());
+	const resolved = realOrResolved(target);
+	return resolved === temp || resolved.startsWith(`${temp}${path.sep}`);
+}
+
+/**
+ * Throw unless every server discovery found comes from a file inside the OS
+ * temp dir. Checked on the result, so it holds however discovery found the
+ * file: a relative or invocation-scoped extension root, a root from settings,
+ * a provider's own search path.
+ */
+function assertIsolatedDiscovery(result: LoadMCPConfigsResult): void {
+	const outside = Object.keys(result.configs).filter(name => {
+		const source = result.sources[name];
+		return !source || !insideTemp(source.path);
+	});
+	if (outside.length > 0) {
+		throw new Error(
+			`allowMCPDiscoveryInTests: MCP discovery found ${outside
+				.map(name => `"${name}" in ${result.sources[name]?.path ?? "an unknown source"}`)
+				.join(", ")}, outside ${os.tmpdir()}. A test may discover only servers it configured in a temp dir.`,
 		);
 	}
 }
@@ -110,13 +124,12 @@ export function allowMCPDiscoveryInTests(): void {
 		const loadAllMCPConfigs = mcpConfig.loadAllMCPConfigs;
 		const spies = [
 			vi.spyOn(os, "homedir").mockReturnValue(home),
-			// Discovery may read a directory a test passes in rather than the global ones.
-			vi.spyOn(mcpConfig, "loadAllMCPConfigs").mockImplementation((cwd, options) => {
-				assertIsolatedMcpRoots([
-					["discovery cwd", cwd],
-					...absolutePaths(options?.extensionRoots).map((root): [string, string] => ["extension root", root]),
-				]);
-				return loadAllMCPConfigs(cwd, options);
+			// No discovered server may come from outside the temp dir, wherever discovery looked.
+			vi.spyOn(mcpConfig, "loadAllMCPConfigs").mockImplementation(async (cwd, options) => {
+				assertIsolatedMcpRoots([["discovery cwd", cwd]]);
+				const result = await loadAllMCPConfigs(cwd, options);
+				assertIsolatedDiscovery(result);
+				return result;
 			}),
 			vi.spyOn(mcpPolicy, "isMCPDisabled").mockImplementation(allowWhenIsolated),
 			vi.spyOn(mcpPolicy, "refusesMCPServerStarts").mockImplementation(allowWhenIsolated),

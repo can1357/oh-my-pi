@@ -17,7 +17,7 @@ import { createHttpTransport } from "@oh-my-pi/pi-coding-agent/mcp/transports/ht
 import { createSseTransport } from "@oh-my-pi/pi-coding-agent/mcp/transports/sse";
 import { createStdioTransport, StdioTransport } from "@oh-my-pi/pi-coding-agent/mcp/transports/stdio";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import { getAgentDir, getMCPConfigPath, setAgentDir } from "@oh-my-pi/pi-utils";
+import { getAgentDir, getMCPConfigPath, getProjectDir, setAgentDir } from "@oh-my-pi/pi-utils";
 import { allowMCPDiscoveryInTests, allowMCPInTests } from "./helpers/mcp-policy";
 import { setNoMcpEnvForTest } from "./helpers/no-mcp-env";
 
@@ -117,8 +117,9 @@ describe("PI_NO_MCP=1 and explicitly named MCP servers", () => {
 		expect(await Bun.file(marker).exists()).toBe(false);
 	});
 
-	// Round-3 review: the exported JSON-RPC helper reached a caller-supplied server.
-	it("contacts no server through the exported callMCP; omp's own hosted search keeps working", async () => {
+	// Round-3 review: the exported JSON-RPC helper reached a caller-supplied server;
+	// round 4: so did the helper for omp's own hosted search.
+	it("contacts no caller-supplied server through callMCP or the hosted-search helper", async () => {
 		setNoMcpEnvForTest("1");
 		let requests = 0;
 		const server = Bun.serve({
@@ -131,12 +132,23 @@ describe("PI_NO_MCP=1 and explicitly named MCP servers", () => {
 		try {
 			const url = `http://127.0.0.1:${server.port}/mcp`;
 			await expect(callMCP(url, "initialize")).rejects.toThrow("MCP is disabled");
+			await expect(callBuiltinSearchMCP(url, "initialize")).rejects.toThrow("hosted search endpoints");
 			expect(requests).toBe(0);
-			await callBuiltinSearchMCP(url, "tools/list").catch(() => {});
-			expect(requests).toBe(1);
 		} finally {
 			server.stop(true);
 		}
+	});
+
+	it("keeps omp's own hosted search reachable with MCP off", async () => {
+		setNoMcpEnvForTest("1");
+		const reached: string[] = [];
+		const fetchStub = (async (input: string | URL | Request, init?: RequestInit) => {
+			reached.push(String(input));
+			const { id } = JSON.parse(String(init?.body)) as { id: string };
+			return Response.json({ jsonrpc: "2.0", id, result: { tools: [] } });
+		}) as typeof fetch;
+		await callBuiltinSearchMCP("https://mcp.exa.ai/mcp?tools=web_search_exa", "tools/list", {}, { fetch: fetchStub });
+		expect(reached).toEqual(["https://mcp.exa.ai/mcp?tools=web_search_exa"]);
 	});
 
 	it("contacts no server through the exported HTTP and SSE transports", async () => {
@@ -203,6 +215,24 @@ describe("allowMCPDiscoveryInTests", () => {
 
 	// Round-3 review: a discovery call given a project directory outside the
 	// temp dir found that project's server and ran its `!command`.
+	// Round-4 review: an extension root (relative here; invocation-scoped or from
+	// settings alike) outside the temp dir let discovery find a server there.
+	it("fails a test whose discovery finds a server outside the temp dir, however it was found", async () => {
+		const outside = path.join(import.meta.dir, "fixtures", "mcp-outside-temp-extension");
+		const manager = new MCPManager(getProjectDir());
+		await expect(
+			manager.discoverAndConnect({
+				startupTimeoutMs: 0,
+				extensionRoots: {
+					explicit: [path.relative(getProjectDir(), outside)],
+					mode: "explicit-only",
+					configuredLevel: "user",
+					configured: [],
+				},
+			}),
+		).rejects.toThrow("MCP discovery found");
+	});
+
 	it("fails a discovery call given a directory outside the temp dir", async () => {
 		const outside = path.join(path.parse(os.tmpdir()).root, "not-a-temp-root", "project");
 		await expect(new MCPManager(outside).discoverAndConnect()).rejects.toThrow("allowMCPDiscoveryInTests");

@@ -202,6 +202,7 @@ class IdaHost {
 					return await worker.request(request.method, request.params, {
 						signal: controller.signal,
 						timeoutMs: request.timeoutMs,
+						env: request.env,
 					});
 				} finally {
 					calls.delete(request.id);

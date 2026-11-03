@@ -758,6 +758,32 @@ def _close_and_exit(save):
     sys.exit(code)
 
 
+class _request_env:
+    """Apply a request's environment overlay (the calling omp session's MCP
+    choice) while it runs, then restore. The worker serves every omp process
+    but keeps the environment of the session that started it; a process the
+    request starts must inherit the caller's choice. Requests run one at a time."""
+
+    def __init__(self, env):
+        self._env = env if isinstance(env, dict) else {}
+        self._saved = {}
+
+    def __enter__(self):
+        for key, value in self._env.items():
+            if isinstance(key, str) and isinstance(value, str):
+                self._saved[key] = os.environ.get(key)
+                os.environ[key] = value
+        return self
+
+    def __exit__(self, *exc):
+        for key, value in self._saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        return False
+
+
 def _handle(line):
     _arm_sigint()
     req_id = None
@@ -787,7 +813,8 @@ def _handle(line):
     except BaseException as e:
         _send({"id": req_id, "ok": False, "error": _error(e)})
         return
-    ok, result = _run(req_id, handler, params)
+    with _request_env(req.get("env")):
+        ok, result = _run(req_id, handler, params)
     if ok:
         _send({"id": req_id, "ok": True, "result": result, "dirty": _DIRTY})
     else:

@@ -55,6 +55,8 @@ export interface IdaDatabaseInfo {
 export interface IdaRequestOptions {
 	signal?: AbortSignal;
 	timeoutMs?: number;
+	/** Environment overlay the worker applies while it runs this request (the caller's MCP choice). */
+	env?: Record<string, string>;
 }
 
 interface IdaOpenResult extends IdaDatabaseInfo {
@@ -256,7 +258,7 @@ export class IdaWorker {
 		try {
 			await this.#waitTurn(previous, signal, timeoutMs);
 			const remaining = deadline === undefined ? undefined : Math.max(1, deadline - Date.now());
-			const value = await this.#send(method, params, { signal, timeoutMs: remaining });
+			const value = await this.#send(method, params, { signal, timeoutMs: remaining, env: options.env });
 			if (method === "exec") this.#execSinceSave = true;
 			else if (method === "save") this.#execSinceSave = false;
 			// The worker answers with the JSON shape documented for `method`.
@@ -357,7 +359,7 @@ export class IdaWorker {
 		this.#current = { method, startedAt: Date.now() };
 		try {
 			// Serialize first: a non-serializable request is the caller's error and must not kill the worker.
-			const line = `${JSON.stringify({ id, method, params })}\n`;
+			const line = `${JSON.stringify({ id, method, params, env: options.env })}\n`;
 			try {
 				await this.#writeFrame(line);
 			} catch (error) {

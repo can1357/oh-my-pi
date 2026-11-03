@@ -63,6 +63,7 @@ const hostRequestSchema = type({ id: "number", op: "'ping' | 'open' | 'status' |
 		method: type.enumerated(...IDA_CALL_METHODS),
 		params: "object",
 		"timeoutMs?": "number",
+		"env?": "Record<string, string>",
 	})
 	.or({ id: "number", op: "'cancel'", target: "number" })
 	.or({ id: "number", op: "'close'", save: "boolean" });
@@ -72,7 +73,9 @@ const hostRequestSchema = type({ id: "number", op: "'ping' | 'open' | 'status' |
  * - `ping`: liveness probe, answered `"pong"` in any state.
  * - `open`: wait until the database is open; answers {@link IdaHostStatus} or the open failure.
  * - `status`: current {@link IdaHostStatus} without waiting.
- * - `call`: forward one worker request; `timeoutMs` covers the queue wait too.
+ * - `call`: forward one worker request; `timeoutMs` covers the queue wait too. `env` is the
+ *   caller's environment overlay (its MCP choice) for whatever that request runs: the host and
+ *   its worker serve every omp process and keep the environment of the one that started them.
  * - `cancel`: abort the caller's own pending `call` `target` (no answer).
  * - `flush`: save when there are unsaved changes; answers `{ saved }`.
  * - `close`: save (when `save`) and close; the host exits after answering.

@@ -2,19 +2,9 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { ipcEndpoint } from "@oh-my-pi/pi-natives";
 import { getDaemonRuntimeDir, hasFsCode, isEacces, isEisdir, isEnoent } from "@oh-my-pi/pi-utils";
-import { isMCPDisabled } from "../mcp/policy";
 
-/**
- * Resolve the private runtime directory shared by omp processes in one project
- * directory. Processes with MCP off (`--no-mcp`, `PI_NO_MCP=1`) get their own
- * (`<hash>-no-mcp`): a shared daemon (the launch broker and everything it starts,
- * the LSP mux, the IDA host, the blob broker) runs with the environment of the
- * session that started it, and every process it spawns inherits that, so a
- * session with MCP off must never reuse one a session with MCP on started.
- */
-export function daemonRuntimeDir(projectDir: string): string {
-	return getDaemonRuntimeDir(projectDir, isMCPDisabled() ? "no-mcp" : undefined);
-}
+/** Resolve the private runtime directory shared by omp processes in one project directory. */
+export { getDaemonRuntimeDir as daemonRuntimeDir };
 
 /** File in a broker runtime dir recording which project (or global service dir) owns the scope. */
 const SCOPE_FILE = "scope.json";

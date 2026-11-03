@@ -86,6 +86,8 @@ describe("IDA worker protocol", () => {
 		env.PYTHONPATH = stubs;
 		env.PYTHONUNBUFFERED = "1";
 		env.PYTHONIOENCODING = "utf-8";
+		// The worker's own environment: that of the omp session that started its host.
+		env.PI_NO_MCP = "";
 		const loc: IdbLocation = {
 			id: "stub",
 			dir,
@@ -129,5 +131,18 @@ describe("IDA worker protocol", () => {
 			expect(next).toMatchObject({ value: String(i + 1), error: null });
 		}
 		expect(worker.pid).toBe(pid);
+	});
+
+	// The host and its worker serve every omp process but keep the environment of
+	// the session that started them: a process a request starts must carry the
+	// requesting session's MCP choice (PR #17795 review, round 4).
+	it("runs each request under the caller's environment overlay, then restores the worker's own", async () => {
+		const child = `import os, subprocess, sys
+r = subprocess.run([sys.executable, "-c", "import os; print('<' + os.environ.get('PI_NO_MCP', 'unset') + '>')"], capture_output=True, text=True)
+r.stdout.strip() + "|" + "<" + os.environ.get("PI_NO_MCP", "unset") + ">"`;
+		const off = await worker.request<ExecResult>("exec", { code: child }, { env: { PI_NO_MCP: "1" } });
+		expect(off).toMatchObject({ value: "'<1>|<1>'", error: null });
+		const own = await worker.request<ExecResult>("exec", { code: child });
+		expect(own).toMatchObject({ value: "'<>|<>'", error: null });
 	});
 });

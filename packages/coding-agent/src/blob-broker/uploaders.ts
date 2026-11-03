@@ -104,7 +104,15 @@ export function createCommandUploader(template: string): BlobUploader {
 				if (!directoryIsEnterableSync(cwd)) {
 					throw new Error(`Project directory is not accessible: ${cwd}`);
 				}
-				const proc = Bun.spawn(argv, { stdin: "ignore", stdout: "pipe", stderr: "pipe", cwd });
+				// The daemon runs this for every session in the project; the command
+				// inherits the requesting session's MCP choice, not the daemon's.
+				const proc = Bun.spawn(argv, {
+					stdin: "ignore",
+					stdout: "pipe",
+					stderr: "pipe",
+					cwd,
+					env: { ...process.env, ...request.env },
+				});
 				const timeout = setTimeout(() => proc.kill(), UPLOAD_TIMEOUT_MS);
 				const [stdout, stderr, exitCode] = await Promise.all([
 					new Response(proc.stdout as ReadableStream<Uint8Array>).text(),

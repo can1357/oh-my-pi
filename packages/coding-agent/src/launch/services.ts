@@ -4,9 +4,9 @@ import { TERMINAL_STATES } from "@oh-my-pi/pi-tui/apps/ps-data";
 import type { DaemonSnapshot, DaemonSpec } from "@oh-my-pi/pi-tui/tools/daemon";
 import { formatDuration, replaceTabs } from "@oh-my-pi/pi-tui/render/render-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import { logger, sanitizeText } from "@oh-my-pi/pi-utils";
+import { getDaemonRuntimeDir, logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import { type DaemonBrokerClient, daemonClientForProject } from "./client";
-import { canonicalProjectDir, daemonRuntimeDir } from "./paths";
+import { canonicalProjectDir } from "./paths";
 import type { DaemonOperation, DaemonRpcResult } from "./protocol";
 import { renderTerminalOutputIsolated } from "./terminal-output-worker-client";
 import type { ToolSession } from "../tools";
@@ -159,7 +159,7 @@ export async function findService(
 
 export async function serviceLogPath(session: ToolSession, name: string): Promise<string> {
 	const canonical = await canonicalProjectDir(session.cwd);
-	return path.join(daemonRuntimeDir(canonical), "daemons", name, "output.log");
+	return path.join(getDaemonRuntimeDir(canonical), "daemons", name, "output.log");
 }
 
 /** Render legacy broker PTY bytes outside the client process. */

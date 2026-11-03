@@ -309,7 +309,7 @@ export function sharedLspConnectParams(opts: {
 		command: opts.command,
 		args: opts.args,
 		cwd: opts.cwd,
-		env: { ...opts.env, ...mcpPolicyEnv() },
+		env: mcpPolicyEnv(opts.env),
 		initializationOptions: opts.initializationOptions,
 	};
 }

@@ -173,15 +173,39 @@ export async function callMCP(
 	options?: CallMcpOptions,
 ): Promise<JsonRpcResponse> {
 	assertMCPEnabled();
-	return await callBuiltinSearchMCP(url, method, params, options);
+	return await postMcpJsonRpc(url, method, params, options);
 }
+
+/** Origins of omp's own hosted web-search MCP endpoints (Exa, Exa Websets, Parallel). */
+const BUILTIN_SEARCH_MCP_ORIGINS: ReadonlySet<string> = new Set([
+	"https://mcp.exa.ai",
+	"https://websetsmcp.exa.ai",
+	"https://search.parallel.ai",
+]);
 
 /**
  * {@link callMCP} for omp's own hosted web-search integrations (Exa, Parallel).
  * They are built-in tools, not configured or caller-supplied MCP servers, so
- * `--no-mcp` leaves them on.
+ * `--no-mcp` leaves them on. It reaches only those endpoints: any other URL is
+ * refused, so it is no way around `--no-mcp` to an arbitrary server.
  */
 export async function callBuiltinSearchMCP(
+	url: string,
+	method: string,
+	params?: Record<string, unknown>,
+	options?: CallMcpOptions,
+): Promise<JsonRpcResponse> {
+	let origin: string | undefined;
+	try {
+		origin = new URL(url).origin;
+	} catch {}
+	if (!origin || !BUILTIN_SEARCH_MCP_ORIGINS.has(origin)) {
+		throw new Error(`callBuiltinSearchMCP reaches only omp's hosted search endpoints, not ${redactUrlForLog(url)}`);
+	}
+	return await postMcpJsonRpc(url, method, params, options);
+}
+
+async function postMcpJsonRpc(
 	url: string,
 	method: string,
 	params?: Record<string, unknown>,
