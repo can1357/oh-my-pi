@@ -1,5 +1,8 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect } from "bun:test";
 import { TestCleanup } from "./test-cleanup";
+import { trackTestLifetime } from "./test-lifetime";
+
+const { test } = trackTestLifetime();
 
 describe("TestCleanup", () => {
 	test("runs every release before it awaits a disposal, so a disposal that hangs cannot keep a registration alive", async () => {

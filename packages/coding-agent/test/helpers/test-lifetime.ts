@@ -3,9 +3,11 @@ import {
 	afterEach as bunAfterEach,
 	beforeAll as bunBeforeAll,
 	beforeEach as bunBeforeEach,
+	onTestFinished as bunOnTestFinished,
 	test as bunTest,
 	type Test,
 } from "bun:test";
+import { types } from "node:util";
 
 /**
  * Tests and hooks of tracked files that have not settled yet, each with its name. Bun shares one
@@ -19,9 +21,11 @@ let timedOut: string | undefined;
 /**
  * Note a timeout: a tracked test or hook still running as another one starts has outlived its
  * timeout. Teardown counts: a body still running as its test's first `afterEach` starts timed out,
- * even if it settles before the next test does.
+ * even if it settles before the next test does. A helper module that registers its own hook in
+ * tracked files calls this first in that hook, since Bun runs a file's hooks in the order they were
+ * registered, and a helper's run before the file's own.
  */
-function noteTimeout(): void {
+export function noteTimeout(): void {
 	if (timedOut !== undefined) return;
 	for (const name of unsettled.values()) {
 		timedOut = name;
@@ -48,18 +52,31 @@ function refuseAfterTimeout(): void {
 	}
 }
 
-/** Run a test or hook body, and keep it in {@link unsettled} until the promise it returns settles. */
+/**
+ * Run a test or hook body, and keep it in {@link unsettled} until the promise it returns settles.
+ * Any native promise counts, also one from another realm (`node:vm`), which Bun awaits too.
+ */
 function runTracked<T>(name: string, fn: (...args: unknown[]) => T, args: unknown[]): T {
 	const result = fn(...args);
-	if (result instanceof Promise) {
+	if (types.isPromise(result)) {
 		const entry = {};
 		unsettled.set(entry, name);
 		const settle = (): void => {
 			unsettled.delete(entry);
 		};
-		result.then(settle, settle);
+		(result as Promise<unknown>).then(settle, settle);
 	}
 	return result;
+}
+
+/**
+ * Bun runs a test or hook whose function declares a parameter in callback style, and counts it done
+ * when it calls `done`, not when it returns. A tracked body is a promise, or nothing: refuse the other.
+ */
+function refuseDoneCallback(kind: string, fn: (...args: never[]) => unknown): void {
+	if (fn.length > 0) {
+		throw new Error(`trackTestLifetime: a tracked ${kind} takes no \`done\` callback; return a promise instead`);
+	}
 }
 
 type TestBody = (...args: unknown[]) => void | Promise<unknown>;
@@ -70,19 +87,22 @@ type Hook = typeof bunBeforeEach;
 const SERIAL_VARIANTS = ["only", "skip", "todo", "failing", "serial"] as const;
 const SERIAL_CONDITIONS = ["if", "skipIf", "todoIf", "failingIf", "serialIf"] as const;
 
-function trackTest(base: AnyTest): AnyTest {
-	const tracked = ((label: string, fn: TestBody, options?: number) =>
-		base(label, (...args: unknown[]) => runTracked(label, fn, args), options)) as unknown as AnyTest;
+function trackTest(base: AnyTest, rowArgs = false): AnyTest {
+	const tracked = ((label: string, fn: TestBody, options?: number) => {
+		// A `.each` body takes its row as arguments.
+		if (!rowArgs) refuseDoneCallback("test", fn);
+		return base(label, (...args: unknown[]) => runTracked(label, fn, args), options);
+	}) as unknown as AnyTest;
 	for (const variant of SERIAL_VARIANTS) {
-		Object.defineProperty(tracked, variant, { get: () => trackTest(base[variant]) });
+		Object.defineProperty(tracked, variant, { get: () => trackTest(base[variant], rowArgs) });
 	}
 	for (const condition of SERIAL_CONDITIONS) {
 		Object.defineProperty(tracked, condition, {
-			value: (when: boolean) => trackTest(base[condition](when)),
+			value: (when: boolean) => trackTest(base[condition](when), rowArgs),
 		});
 	}
 	Object.defineProperty(tracked, "each", {
-		value: (table: readonly unknown[]) => trackTest(base.each(table as unknown[][]) as AnyTest),
+		value: (table: readonly unknown[]) => trackTest(base.each(table as unknown[][]) as AnyTest, true),
 	});
 	for (const concurrent of ["concurrent", "concurrentIf"]) {
 		Object.defineProperty(tracked, concurrent, {
@@ -102,21 +122,23 @@ export interface TestLifetime {
 	afterEach: Hook;
 	beforeAll: Hook;
 	afterAll: Hook;
+	onTestFinished: typeof bunOnTestFinished;
 }
 
 /**
  * Declare a test file's tests and hooks so that no test result is produced on state a timed-out
  * body could have changed.
  *
- * Every test and hook declared through the returned functions is tracked until the promise it
- * returns settles. When one is still running as any later hook or test starts — its own test's
- * teardown included — it timed out, and every later test of every tracked file in the process
- * fails before its setup with that test's name (see {@link refuseAfterTimeout}). `afterEach` and
- * `afterAll` hooks still run, so a timed-out test's cleanup releases the processes and files it owns.
+ * Every test, hook and `onTestFinished` callback declared through the returned functions is tracked
+ * until the promise it returns settles. When one is still running as any later hook or test starts
+ * — its own test's teardown included — it timed out, and every later test of every tracked file in
+ * the process fails before its setup with that test's name (see {@link refuseAfterTimeout}).
+ * `afterEach`, `afterAll` and `onTestFinished` callbacks still run, so a timed-out test's cleanup
+ * releases the processes and files it owns.
  *
- * Call once at file scope, before the file declares any hook, and take every test and hook from
- * the result: the checks run in a `beforeEach` and an `afterEach` this registers, and at the start
- * of every tracked hook.
+ * Call once at file scope, before the file declares any hook, and take every test, hook and
+ * `onTestFinished` from the result: the checks run in a `beforeEach` and an `afterEach` this
+ * registers, and at the start of every tracked hook and callback.
  */
 export function trackTestLifetime(): TestLifetime {
 	bunBeforeEach(refuseAfterTimeout);
@@ -124,11 +146,20 @@ export function trackTestLifetime(): TestLifetime {
 	const test = trackTest(bunTest as AnyTest) as unknown as Test<[]>;
 	const hook =
 		(register: Hook, name: string, atStart: () => void): Hook =>
-		(fn, options) =>
-			register(() => {
+		(fn, options) => {
+			refuseDoneCallback(name.replace(/^an? /, ""), fn as (...args: never[]) => unknown);
+			return register(() => {
 				atStart();
 				return runTracked(name, fn as () => unknown, []);
 			}, options);
+		};
+	const onTestFinished: typeof bunOnTestFinished = (fn, options) => {
+		refuseDoneCallback("onTestFinished callback", fn as (...args: never[]) => unknown);
+		return bunOnTestFinished(() => {
+			noteTimeout();
+			return runTracked("an onTestFinished callback", fn as () => unknown, []);
+		}, options);
+	};
 	return {
 		test,
 		it: test,
@@ -136,5 +167,6 @@ export function trackTestLifetime(): TestLifetime {
 		afterEach: hook(bunAfterEach, "an afterEach hook", noteTimeout),
 		beforeAll: hook(bunBeforeAll, "a beforeAll hook", refuseAfterTimeout),
 		afterAll: hook(bunAfterAll, "an afterAll hook", noteTimeout),
+		onTestFinished,
 	};
 }

@@ -8,6 +8,10 @@
 - A turn whose provider key cannot be resolved for a while (the stored OAuth login was disabled by a failed refresh, the session's OAuth account pool has no account that can serve, or an OAuth refresh failed on a network error) is now retried by turn auto-retry instead of ending at once (a provider the user removed or logged out of still fails at once), and a prompt sent meanwhile starts instead of failing with "No API key found" ([#17764](https://github.com/can1357/oh-my-pi/pull/17764) by [@sjawhar](https://github.com/sjawhar))
 - `omp --restore` now resumes a turn, or a subagent's turn, that ended because its provider key could not be resolved even after its retries, also when its process exited normally afterwards, but not one the user cleared with `/clear` ([#17764](https://github.com/can1357/oh-my-pi/pull/17764) by [@sjawhar](https://github.com/sjawhar))
 - A stored GitHub Copilot credential is no longer removed when a turn failed because its key lookup produced no key ([#17764](https://github.com/can1357/oh-my-pi/pull/17764) by [@sjawhar](https://github.com/sjawhar))
+### Added
+
+- Pinned sessions show a pin beside their title in the status line and the band composer's title, and `/unpin [session id]` unpins a session ([#17848](https://github.com/can1357/oh-my-pi/pull/17848) by [@SuperUserA](https://github.com/SuperUserA))
+- Added a fullscreen extension link browser for picking links already in terminal scrollback: press Alt+O again (or Page Up) while link tags are shown, or Alt+O with no extension link on screen ([#16476](https://github.com/can1357/oh-my-pi/pull/16476) by [@materemias](https://github.com/materemias))
 
 ## [18.16.0] - 2026-11-02
 
