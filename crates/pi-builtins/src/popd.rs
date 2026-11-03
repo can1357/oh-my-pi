@@ -25,9 +25,10 @@ impl builtins::Command for PopdCommand {
 			return Ok(ExecutionResult::general_error());
 		};
 		// The entry stays on the stack when its directory cannot be entered, as
-		// in Bash.
+		// in Bash; `set -P` resolves symbolic links here, as `cd` does.
+		let physical = context.shell.options().do_not_resolve_symlinks_when_changing_dir;
 		if !self.no_directory_change
-			&& let Err(reason) = crate::cd::enter_directory(&mut context, &top, false).await
+			&& let Err(reason) = crate::cd::enter_directory(&mut context, &top, physical).await
 		{
 			writeln!(context.stderr(), "popd: {}: {reason}", top.display())
 				.map_err(brush_core::Error::from)?;

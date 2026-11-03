@@ -1,9 +1,13 @@
 use std::{
 	io::Write,
-	path::{Path, PathBuf},
+	path::{Component, Path, PathBuf},
 };
 
-use brush_core::{ErrorKind, ExecutionContext, ExecutionResult, ShellExtensions, builtins};
+use brush_core::{
+	ErrorKind, ExecutionContext, ExecutionResult, ShellExtensions, builtins,
+	env::{EnvironmentLookup, EnvironmentScope},
+	variables::ShellValueLiteral,
+};
 use clap::Parser;
 
 /// `cd`'s usage line, as Bash prints it.
@@ -102,69 +106,105 @@ impl builtins::Command for CdCommand {
 			writeln!(context.stderr(), "cd: too many arguments")?;
 			return Ok(ExecutionResult::general_error());
 		}
+		// The last of `-L` and `-P` wins; without either, `set -P` decides.
 		let physical = self.use_physical_dir
-			|| context
-				.shell
-				.options()
-				.do_not_resolve_symlinks_when_changing_dir;
+			|| (!self.force_follow_symlinks
+				&& context
+					.shell
+					.options()
+					.do_not_resolve_symlinks_when_changing_dir);
+		// `-e` matters only with `-P`, as in Bash.
+		let lost_fails = physical && self.exit_on_failed_cwd_resolution;
 
-		let (operand, print) = match self.target_dir.as_deref() {
-			// `cd -` is `cd "$OLDPWD"`, and prints where it went.
+		// Where the directory comes from: written as the operand, or `$OLDPWD`
+		// for `-` (printed once entered, as written), or `$HOME` without one.
+		// Only a written operand is looked for in `CDPATH`, and only it may name
+		// a variable under `cdable_vars`.
+		let (operand, written, print) = match self.target_dir.as_deref() {
 			Some("-") => match context.shell.env_str("OLDPWD") {
-				Some(oldpwd) => (oldpwd.to_string(), true),
+				Some(oldpwd) => (oldpwd.to_string(), false, true),
 				None => {
 					writeln!(context.stderr(), "cd: OLDPWD not set")?;
 					return Ok(ExecutionResult::general_error());
 				},
 			},
-			Some(operand) => (operand.to_owned(), false),
-			// `cd` alone is `cd "$HOME"`.
+			Some(operand) => (operand.to_owned(), true, false),
 			None => match context.shell.env_str("HOME") {
-				Some(home) => (home.to_string(), false),
+				Some(home) => (home.to_string(), false, false),
 				None => {
 					writeln!(context.stderr(), "cd: HOME not set")?;
 					return Ok(ExecutionResult::general_error());
 				},
 			},
 		};
-		// Bash 5.2 leaves the working directory as it is for an empty one.
-		if operand.is_empty() {
-			return Ok(ExecutionResult::success());
-		}
+		let status = |entered: Entered| {
+			if matches!(entered, Entered::Lost) && lost_fails {
+				ExecutionResult::general_error()
+			} else {
+				ExecutionResult::success()
+			}
+		};
 
-		// A relative directory is looked for in each `CDPATH` directory first;
-		// an empty entry is the working directory. Found through a non-empty
-		// one, the directory's absolute name is printed, as Bash prints it.
-		if let Some(cdpath) = context.shell.env_str("CDPATH").map(|cdpath| cdpath.to_string())
+		// A relative directory is looked for in each `CDPATH` entry first; an
+		// empty entry is the working directory. Found through a non-empty one,
+		// its name is printed: as the entry spells it under `-P`, else the
+		// working directory it now is, as Bash prints them.
+		if written
+			&& let Some(cdpath) = context.shell.env_str("CDPATH").map(|cdpath| cdpath.to_string())
 			&& !cdpath.is_empty()
 			&& searches_cdpath(&operand)
 		{
-			for entry in cdpath.split(':') {
+			for entry in cdpath_entries(&cdpath) {
 				let candidate =
 					if entry.is_empty() { PathBuf::from(&operand) } else { Path::new(entry).join(&operand) };
-				// Named before the change, which moves what a relative entry means.
-				let shown = pi_vfs::normalize_lexically(&context.shell.absolute_path(&candidate));
-				if enter_directory(&mut context, &candidate, physical).await.is_ok() {
+				if let Ok(entered) = enter_directory(&mut context, &candidate, physical).await {
 					if !entry.is_empty() {
-						writeln!(context.stdout(), "{}", shown.display())?;
+						if physical {
+							let separator = if entry.ends_with('/') { "" } else { "/" };
+							writeln!(context.stdout(), "{entry}{separator}{operand}")?;
+						} else {
+							writeln!(context.stdout(), "{}", context.shell.working_dir().display())?;
+						}
 					}
-					return Ok(ExecutionResult::success());
+					return Ok(status(entered));
 				}
 			}
 		}
 
-		match enter_directory(&mut context, Path::new(&operand), physical).await {
-			Ok(()) => {
+		// An empty directory is the working directory as it is spelled: the
+		// shell enters it again, so `OLDPWD` becomes it, and a working
+		// directory that has been removed fails. Bash's physical mode resolves
+		// the empty name itself, which always fails.
+		let target =
+			if operand.is_empty() && !physical { context.shell.working_dir().to_path_buf() } else { PathBuf::from(&operand) };
+		let reason = match enter_directory(&mut context, &target, physical).await {
+			Ok(entered) => {
 				if print {
-					writeln!(context.stdout(), "{}", context.shell.working_dir().display())?;
+					writeln!(context.stdout(), "{operand}")?;
 				}
-				Ok(ExecutionResult::success())
+				return Ok(status(entered));
 			},
-			Err(reason) => {
-				writeln!(context.stderr(), "cd: {operand}: {reason}")?;
-				Ok(ExecutionResult::general_error())
-			},
-		}
+			Err(reason) => reason,
+		};
+		// Under `cdable_vars`, a written operand that names no directory may
+		// name a variable whose value does; that value is printed once entered.
+		// The reason reported otherwise is the last attempt's, as in Bash.
+		let reason = if written && context.shell.options().cdable_vars {
+			match context.shell.env_str(&operand).map(|value| value.to_string()) {
+				Some(value) => match enter_directory(&mut context, Path::new(&value), physical).await {
+					Ok(entered) => {
+						writeln!(context.stdout(), "{value}")?;
+						return Ok(status(entered));
+					},
+					Err(reason) => reason,
+				},
+				None => reason,
+			}
+		} else {
+			reason
+		};
+		writeln!(context.stderr(), "cd: {operand}: {reason}")?;
+		Ok(ExecutionResult::general_error())
 	}
 }
 
@@ -180,13 +220,111 @@ fn searches_cdpath(operand: &str) -> bool {
 		|| operand.starts_with("../"))
 }
 
+/// `CDPATH`'s entries, split at `:` as Bash splits them, except the colon of
+/// an entry spelled as a provider URL (`scheme://…`), which is part of it:
+/// no entry of Bash's can be one.
+fn cdpath_entries(cdpath: &str) -> impl Iterator<Item = &str> {
+	let mut rest = Some(cdpath);
+	std::iter::from_fn(move || {
+		let text = rest?;
+		let root = if pi_vfs::is_virtual_path(Path::new(text)) {
+			text.find("://").map_or(0, |colon| colon + 3)
+		} else {
+			0
+		};
+		match text[root..].find(':') {
+			Some(colon) => {
+				rest = Some(&text[root + colon + 1..]);
+				Some(&text[..root + colon])
+			},
+			None => {
+				rest = None;
+				Some(text)
+			},
+		}
+	})
+}
+
+/// How a directory change ended.
+#[derive(Clone, Copy)]
+pub(crate) enum Entered {
+	/// The directory is the shell's working directory now.
+	Changed,
+	/// The working directory had been removed, and the directory named it
+	/// (`.`): it stays, under the name spelled after it, and that name cannot
+	/// be resolved, which `cd -P -e` reports as a failure.
+	Lost,
+}
+
 /// Makes `target` the shell's working directory as `chdir` would make it the
 /// process's: `physical` resolves symbolic links first, and a directory the
 /// shell may not search fails with `Permission denied`, as it does for
 /// `chdir`, though the shell only records the new directory. Otherwise the
 /// working directory stays as it is, and the `strerror` text of why is
 /// returned, for the caller to report as `NAME: DIR: TEXT`, as Bash does.
+///
+/// A working directory that has been removed is still reached by a name made
+/// of `.` components, as `chdir(".")` reaches it: as in Bash, `PWD` becomes
+/// that name spelled after it, `OLDPWD` the old `PWD`, and `getcwd`'s failure
+/// is reported.
 pub(crate) async fn enter_directory<SE: ShellExtensions>(
+	context: &mut ExecutionContext<'_, SE>,
+	target: &Path,
+	physical: bool,
+) -> Result<Entered, String> {
+	let reason = match change_directory(context, target, physical).await {
+		Ok(()) => return Ok(Entered::Changed),
+		Err(reason) => reason,
+	};
+	let current = context.shell.working_dir().to_path_buf();
+	let lost = context.shell.filesystem().is_native_local(&current)
+		&& std::fs::metadata(&current).is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
+	if !lost {
+		return Err(reason);
+	}
+	// The working directory has been removed, and nothing reaches it by name.
+	// Bash's `chdir` still resolves a relative directory from it, because the
+	// kernel keeps the directory it holds: a name that leads out of it is
+	// taken lexically, which is what `chdir` arrives at.
+	let lexical = pi_vfs::normalize_lexically(&context.shell.absolute_path(target));
+	if lexical != current && change_directory(context, &lexical, physical).await.is_ok() {
+		return Ok(Entered::Changed);
+	}
+	// A name of its own components (`.`) still reaches it, as `chdir(".")`
+	// does, and `getcwd` then fails, as Bash reports.
+	if !(!target.as_os_str().is_empty()
+		&& target.components().all(|component| component == Component::CurDir))
+	{
+		return Err(reason);
+	}
+	let old = context
+		.shell
+		.env_str("PWD")
+		.map_or_else(|| current.display().to_string(), |pwd| pwd.to_string());
+	let new = format!("{}/{}", current.display(), target.display());
+	for (name, value) in [("OLDPWD", old), ("PWD", new)] {
+		context
+			.shell
+			.env_mut()
+			.update_or_add(
+				name,
+				ShellValueLiteral::Scalar(value),
+				|_| Ok(()),
+				EnvironmentLookup::Anywhere,
+				EnvironmentScope::Global,
+			)
+			.map_err(|error| error.to_string())?;
+	}
+	let _ = writeln!(
+		context.stderr(),
+		"cd: error retrieving current directory: getcwd: cannot access parent directories: No such \
+		 file or directory"
+	);
+	Ok(Entered::Lost)
+}
+
+/// [`enter_directory`] for a directory that exists.
+async fn change_directory<SE: ShellExtensions>(
 	context: &mut ExecutionContext<'_, SE>,
 	target: &Path,
 	physical: bool,
@@ -213,4 +351,24 @@ pub(crate) async fn enter_directory<SE: ShellExtensions>(
 		ErrorKind::NotADirectory(_) => "Not a directory".to_owned(),
 		_ => error.as_io_error().map_or_else(|| error.to_string(), crate::host::strip_errno),
 	})
+}
+
+#[cfg(test)]
+mod tests {
+	use super::cdpath_entries;
+
+	/// `CDPATH` splits at every `:` but a provider URL's, and keeps empty
+	/// entries, which name the working directory.
+	#[test]
+	fn cdpath_keeps_a_provider_url_whole() {
+		let entries = |cdpath| cdpath_entries(cdpath).collect::<Vec<_>>();
+		assert_eq!(entries("a:b"), ["a", "b"]);
+		assert_eq!(entries(":a::b:"), ["", "a", "", "b", ""]);
+		assert_eq!(entries("probe://w/d"), ["probe://w/d"]);
+		assert_eq!(entries("probe://w/d:/tmp"), ["probe://w/d", "/tmp"]);
+		assert_eq!(entries("/tmp:probe://w/d:x"), ["/tmp", "probe://w/d", "x"]);
+		// A one-letter "scheme" is a drive or a directory, as `pi_vfs` reads it.
+		assert_eq!(entries("d://x"), ["d", "//x"]);
+		assert_eq!(entries("a:b://c"), ["a", "b", "//c"]);
+	}
 }

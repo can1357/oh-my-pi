@@ -32,7 +32,10 @@ impl builtins::Command for PushdCommand {
 			let prev_working_dir = context.shell.working_dir().to_path_buf();
 
 			let dir = std::path::Path::new(&self.dir);
-			if let Err(reason) = crate::cd::enter_directory(&mut context, dir, false).await {
+			// `set -P` resolves symbolic links here too, as Bash's `pushd` changes
+			// directory as its `cd` does.
+			let physical = context.shell.options().do_not_resolve_symlinks_when_changing_dir;
+			if let Err(reason) = crate::cd::enter_directory(&mut context, dir, physical).await {
 				writeln!(context.stderr(), "pushd: {}: {reason}", self.dir)?;
 				return Ok(ExecutionResult::general_error());
 			}
