@@ -1293,14 +1293,19 @@ export class AgentSession implements SettingsScope {
 	 *  session cannot land in a different session's queue after the transition. Deliberately
 	 *  distinct from #promptGeneration, which also changes on a plain abort() — asides must still
 	 *  enqueue and fold/resume normally across an in-session interrupt, only a session identity
-	 *  change should drop them. */
+	 *  change should drop them. Each change takes a fresh value from #sessionGenerationCounter, so
+	 *  a value never comes back except by a rolled-back switch restoring it, and a change that
+	 *  began after a record was sent always holds a greater value than the record captured. */
 	#sessionGeneration = 0;
+	/** Last value handed to #sessionGeneration; only ever grows. */
+	#sessionGenerationCounter = 0;
 	/** Latest `session_init` of the transcript the model calls ran on; `init` is null when it has none. */
 	#sessionInit: { sessionFile: string | undefined; init: PersistedSessionInit | null } | undefined;
-	/** Generation changes switchSession has made and not yet committed or rolled back; each settles at
-	 *  that point. Switches can overlap and settle in any order, so all of them are kept, not only the
-	 *  latest. newSession never rolls its generation back, so it does not delay stale aside/SDK calls. */
-	readonly #pendingGenerationChanges = new Set<Promise<void>>();
+	/** Generation changes switchSession has made and not yet committed or rolled back, each with the
+	 *  generation it set; each settles at that point. Switches can overlap and settle in any order, so
+	 *  all of them are kept, not only the latest. newSession never rolls its generation back, so it
+	 *  does not delay stale aside/SDK calls. */
+	readonly #pendingGenerationChanges = new Map<Promise<void>, number>();
 	/** Readiness barrier for the outermost session/transcript transition, including all
 	 *  hooks and rollback reconciliation, independently of when its generation settles. */
 	#sessionTransitionSettled: Promise<void> | undefined;
@@ -1554,17 +1559,21 @@ export class AgentSession implements SettingsScope {
 
 	/** Re-validates a #sessionGeneration snapshot captured before an aside/SDK call's await.
 	 *  A mismatch alone does not mean the record's source session is gone —
-	 *  switchSession() restores the exact prior generation on rollback — so recheck each time a
-	 *  generation change still pending (#pendingGenerationChanges) settles, in whatever order they
-	 *  settle. It must not wait for all of them: a switch can itself wait on this record (its
-	 *  reconciler sends it) after a nested switch has restored the record's generation. Returns
-	 *  true when the caller should drop its record (the generation still differs once none is
-	 *  pending); false once it matches again. */
+	 *  switchSession() restores the exact prior generation on rollback — and a match does not
+	 *  mean it stays: a switch begun after the record was sent can still move the generation. So
+	 *  wait until every generation change begun after the record (one that set a greater value
+	 *  than it captured) has settled, in whatever order, then compare. A change begun before the
+	 *  record is not waited for: the record was sent into its window, and it may itself wait on
+	 *  the record (its reconciler sends it). Returns true when the caller should drop its record. */
 	async #sessionGenerationChanged(sessionGeneration: number): Promise<boolean> {
-		while (this.#sessionGeneration !== sessionGeneration && this.#pendingGenerationChanges.size > 0) {
-			await Promise.race(this.#pendingGenerationChanges);
+		for (;;) {
+			const newer: Promise<void>[] = [];
+			for (const [settled, generation] of this.#pendingGenerationChanges) {
+				if (generation > sessionGeneration) newer.push(settled);
+			}
+			if (newer.length === 0) return this.#sessionGeneration !== sessionGeneration;
+			await Promise.all(newer);
 		}
-		return this.#sessionGeneration !== sessionGeneration;
 	}
 
 	/** Fire-and-forget wake turn for incoming IRC — idle delivery and stranded-aside resume both
@@ -6674,7 +6683,7 @@ export class AgentSession implements SettingsScope {
 		this.agent.reset();
 		// The cleared context is a new transcript: an aside or held message captured for the old one drops
 		// its record instead of landing here (mirrors newSession()).
-		this.#sessionGeneration++;
+		this.#sessionGeneration = ++this.#sessionGenerationCounter;
 		this.#pendingNextTurnMessages = [];
 		this.#experimentalContextNotesReminder = undefined;
 		this.#scheduledHiddenNextTurnGeneration = undefined;
@@ -11555,7 +11564,7 @@ export class AgentSession implements SettingsScope {
 			// the same breath so an aside-queueing call still awaiting normalization for the
 			// outgoing session also drops its record instead of landing in this new one.
 			this.#irc.clearPending();
-			this.#sessionGeneration++;
+			this.#sessionGeneration = ++this.#sessionGenerationCounter;
 			this.#scheduledHiddenNextTurnGeneration = undefined;
 			this.#queuedMessageDrainBlocked = false;
 			this.#usagePreflightReadyForNextModelCall = false;
@@ -12884,15 +12893,18 @@ export class AgentSession implements SettingsScope {
 	 * Whether IRC messages still wait here for a turn: under a {@link holdIrcWakes}
 	 * hold, behind a running idle compaction, queued (e.g. behind a pooled yield
 	 * contract), or held with every other delivery for an assignment still to be
-	 * prompted ({@link holdForAssignment}). The lifecycle must not park this
-	 * session yet, since parking would drop them.
+	 * prompted ({@link holdForAssignment}); or a hidden next-turn trigger waits for
+	 * a turn it was put off from (#resumeHeldHiddenTrigger), whose messages a pending
+	 * switch may be holding in its snapshot. The lifecycle must not park this session
+	 * yet, since parking would drop them.
 	 */
 	get ircWakesPending(): boolean {
 		return (
 			this.#ircWakeHolds > 0 ||
 			this.#ircWakesAwaitingCompaction > 0 ||
 			this.#irc.hasPending() ||
-			this.#awaitingAssignment
+			this.#awaitingAssignment ||
+			this.#hiddenNextTurnTriggerHeld
 		);
 	}
 
@@ -13346,9 +13358,10 @@ export class AgentSession implements SettingsScope {
 		// aside-queueing call still awaiting normalization when the switch started drops its
 		// record on success but stays valid if the switch is rolled back to this same session.
 		const previousIrcPending = this.#irc.clearPending();
-		const previousSessionGeneration = this.#sessionGeneration++;
+		const previousSessionGeneration = this.#sessionGeneration;
+		this.#sessionGeneration = ++this.#sessionGenerationCounter;
 		const generationSettled = Promise.withResolvers<void>();
-		this.#pendingGenerationChanges.add(generationSettled.promise);
+		this.#pendingGenerationChanges.set(generationSettled.promise, this.#sessionGeneration);
 		this.#pendingNextTurnMessages = [];
 		this.#scheduledHiddenNextTurnGeneration = undefined;
 		this.#queuedMessageDrainBlocked = false;

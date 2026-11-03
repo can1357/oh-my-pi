@@ -967,6 +967,98 @@ describe("a message delivered before the task's turn starts", () => {
 			harness.authStorage.close();
 		}
 	}, 30_000);
+
+	it.each([
+		{ order: [0, 1, 2] },
+		{ order: [0, 2, 1] },
+		{ order: [1, 0, 2] },
+		{ order: [1, 2, 0] },
+		{ order: [2, 0, 1] },
+		{ order: [2, 1, 0] },
+	])(
+		"delivers an aside sent before three overlapping switches only into its own session (refusals $order)",
+		async ({ order }) => {
+			const harness = await createHarness();
+			let endHold: (() => void) | undefined;
+			const switches: RefusedSwitch[] = [];
+			const normalized = Promise.withResolvers<void>();
+			try {
+				const session = await spawnIdle(harness);
+				const originalSessionId = session.sessionManager.getSessionId();
+				harness.beginPhase(FOLLOW_UP);
+				endHold = session.holdForAssignment();
+				const normalizing = Promise.withResolvers<void>();
+				vi.spyOn(imageLoading, "normalizeModelContextImages").mockImplementationOnce(async images => {
+					normalizing.resolve();
+					await normalized.promise;
+					return images;
+				});
+				const aside = session.sendCustomMessage(
+					{
+						customType: "test-plugin",
+						content: [
+							{ type: "text", text: BODY },
+							{ type: "image", data: PIXEL_PNG, mimeType: "image/png" },
+						],
+						display: false,
+					},
+					{ deliverAs: "aside" },
+				);
+				await normalizing.promise;
+				for (const name of ["outer", "middle", "inner"]) switches.push(await startRefusedSwitch(session, name));
+				normalized.resolve();
+				// Out-of-order rollbacks can pass through the aside's session and still end in another one.
+				for (const index of order) expect(await switches[index]!.refuse()).toBe(false);
+				await aside;
+				const retained = session.sessionManager.getSessionId() === originalSessionId;
+
+				await session.prompt(FOLLOW_UP, { assignment: true });
+				await session.waitForIdle();
+				const copies = session.messages.filter(message => messageText(message).includes(BODY)).length;
+				expect(copies).toBe(retained ? 1 : 0);
+			} finally {
+				normalized.resolve();
+				endHold?.();
+				await Promise.allSettled(switches.map(pending => pending.refuse()));
+				harness.authStorage.close();
+			}
+		},
+		30_000,
+	);
+
+	it("keeps a subagent whose released hidden trigger waits out a session switch from being parked", async () => {
+		const harness = await createHarness();
+		let followUp: ReturnType<typeof startHeldFollowUp> | undefined;
+		let switching: RefusedSwitch | undefined;
+		try {
+			const session = await spawnIdle(harness);
+			followUp = startHeldFollowUp(harness, session, FOLLOW_UP, { failInstall: true });
+			await followUp.installEntered;
+			await session.sendCustomMessage(
+				{ customType: "test-plugin", content: BODY, display: false },
+				{ deliverAs: "nextTurn", triggerTurn: true },
+			);
+			await session.waitForIdle();
+			switching = await startRefusedSwitch(session, "other");
+			// The follow-up gives up and releases its hold while the switch is pending.
+			followUp.release();
+			await expect(followUp.running).rejects.toThrow("install failed");
+			await session.waitForIdle();
+			expect(session.awaitingAssignment).toBe(false);
+			// The trigger waits for the switch; the idle timer must not park the subagent and drop it.
+			expect(session.ircWakesPending).toBe(true);
+
+			expect(await switching.refuse()).toBe(false);
+			await Promise.race([harness.bodySeen(), Bun.sleep(5_000)]);
+			await session.waitForIdle();
+			expect(session.ircWakesPending).toBe(false);
+			expect(session.messages.filter(message => messageText(message).includes(BODY))).toHaveLength(1);
+		} finally {
+			followUp?.release();
+			await Promise.allSettled([followUp?.running, switching?.refuse()]);
+			harness.authStorage.close();
+		}
+	}, 30_000);
 });
 
 /** Spawns the subagent, lets its first run finish, and returns its kept-alive idle session. */
