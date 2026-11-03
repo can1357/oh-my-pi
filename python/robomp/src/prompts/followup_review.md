@@ -6,6 +6,8 @@ Review comment on PR you opened.
 
 {{thread}}
 
+{{coalesced_section}}
+
 ## @{{comment.author}} — `{{comment.path}}`{{comment.line_range}}
 
 {{comment.body}}

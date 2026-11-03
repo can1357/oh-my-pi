@@ -8,6 +8,8 @@ Current PR state: `{{state.pr_status}}`.
 
 {{thread}}
 
+{{coalesced_section}}
+
 ## Directive from @{{directive.author}} ({{comment.created_at}})
 
 {{directive.body}}

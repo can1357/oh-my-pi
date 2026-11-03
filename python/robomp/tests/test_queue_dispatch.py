@@ -8,7 +8,7 @@ import pytest
 
 from robomp import tasks
 from robomp.config import Settings
-from robomp.db import Database, EventRow
+from robomp.db import Database, EventRow, coalesced_error_for
 from robomp.queue import WorkerPool
 from robomp.slot_pool import SlotPool
 
@@ -199,7 +199,9 @@ async def test_coalescing_keeps_newest_reviewer_bot_event(bot_settings: Settings
     assert row.payload["_robomp_directive"]["body"] == "leak here"
     skipped = {e.delivery_id: e for e in db.list_events()}["conv-1"]
     assert skipped.state == "skipped"
-    assert skipped.last_error == "coalesced: superseded by newer review event"
+    # The marker names the survivor this finding was folded into, so a later
+    # same-key event can't resurface it (see `list_coalesced_siblings`).
+    assert skipped.last_error == coalesced_error_for("inline-1")
 
     # The claimed row consumed the wakeup: the queue is now empty.
     assert await pool._claim_next_unique() is None  # noqa: SLF001
@@ -332,4 +334,4 @@ async def test_coalesced_sibling_produces_no_dispatch_run(bot_settings: Settings
 
     by_id = {e.delivery_id: e for e in db.list_events()}
     assert by_id["conv-1"].state == "skipped"
-    assert by_id["conv-1"].last_error == "coalesced: superseded by newer review event"
+    assert by_id["conv-1"].last_error == coalesced_error_for("inline-1")

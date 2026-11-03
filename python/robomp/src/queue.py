@@ -13,15 +13,13 @@ from typing import Any
 from robomp import tasks
 from robomp.cancellation import clear_current_event, set_current_event
 from robomp.config import Settings
-from robomp.db import Database, EventRow
+from robomp.db import Database, EventRow, coalesced_error_for
 from robomp.github_backend import GitHubBackend
 from robomp.github_events import payload_has_reviewer_bot_directive
 from robomp.sandbox import GitTransport, SandboxManager, _reap_slot
 from robomp.slot_pool import SlotPool
 
 log = logging.getLogger(__name__)
-
-_COALESCED_ERROR = "coalesced: superseded by newer review event"
 
 
 def _review_task_for_payload(event_type: str, payload: Mapping[str, Any]) -> str | None:
@@ -229,21 +227,29 @@ class WorkerPool:
         except Exception:
             log.exception("dispatch loop crashed")
 
-    def _coalesce_review_event(self, row: EventRow) -> bool:
-        """Whether `row` is a reviewer-bot review event superseded by a newer queued same-key sibling."""
+    def _coalesce_review_event(self, row: EventRow) -> str | None:
+        """Survivor delivery id if `row` is superseded by a newer queued sibling, else None.
+
+        The returned id is stamped into `row`'s skip marker so the survivor's
+        prompt hydration can attribute the stored finding to this specific run
+        instead of to every later same-key event (see `list_coalesced_siblings`).
+        """
         if _review_task_for_payload(row.event_type, row.payload) is None or not row.issue_key:
-            return False
+            return None
         reviewer_bots = self.settings.reviewer_bots
         if not payload_has_reviewer_bot_directive(row.payload, reviewer_bots):
-            return False
+            return None
         siblings = self.db.list_newer_queued_events(
             issue_key=row.issue_key, exclude_delivery=row.delivery_id, after_received_at=row.received_at
         )
-        return any(
-            _review_task_for_payload(s.event_type, s.payload) is not None
-            and payload_has_reviewer_bot_directive(s.payload, reviewer_bots)
-            for s in siblings
-        )
+        for sibling in siblings:
+            if _review_task_for_payload(
+                sibling.event_type, sibling.payload
+            ) is not None and payload_has_reviewer_bot_directive(sibling.payload, reviewer_bots):
+                # `list_newer_queued_events` is oldest-first, so this is the row the
+                # claim loop will pick up next: the direct survivor.
+                return sibling.delivery_id
+        return None
 
     async def _claim_next_unique(self) -> EventRow | None:
         """Claim the next event whose issue isn't already inflight, coalescing superseded review events."""
@@ -260,8 +266,11 @@ class WorkerPool:
                     # Sleep briefly so we don't spin.
                     await asyncio.sleep(0.5)
                     return None
-                if await asyncio.to_thread(self._coalesce_review_event, row):
-                    await asyncio.to_thread(self.db.mark_event, row.delivery_id, "skipped", error=_COALESCED_ERROR)
+                survivor = await asyncio.to_thread(self._coalesce_review_event, row)
+                if survivor is not None:
+                    await asyncio.to_thread(
+                        self.db.mark_event, row.delivery_id, "skipped", error=coalesced_error_for(survivor)
+                    )
                     log.info("review event coalesced", extra={"delivery": row.delivery_id, "key": key})
                     # Claim the newer sibling immediately: the loop below must not
                     # lose the wakeup that produced this claim.

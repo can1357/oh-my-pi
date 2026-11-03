@@ -6,6 +6,8 @@ Thread: {{origin.description}}. PR: `{{state.pr_status}}`.
 
 {{thread}}
 
+{{coalesced_section}}
+
 ---
 
 ## New comment: @{{comment.author}} ({{comment.created_at}})
