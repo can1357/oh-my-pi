@@ -263,7 +263,6 @@ async function scriptsTestCommand(extraArgs: string[] = []): Promise<TestCommand
 // runs. The modes CI and `bun run test` use refuse to start while any exists, so
 // a package added without a bucket fails CI instead of going untested.
 async function uncoveredTestFiles(): Promise<string[]> {
-	const inOwnDir = (pkg: string) => ({ path: pkg, cwd: pkg });
 	return testFilesWithoutBucket(
 		repoRoot,
 		[...(await workspacePackageDirs(repoRoot)), "scripts", path.dirname(projectToolTestFile)],
@@ -272,7 +271,9 @@ async function uncoveredTestFiles(): Promise<string[]> {
 				{ path: projectToolTestFile, cwd: "." },
 				...(await scriptsTestFiles()).map(file => ({ path: file, cwd: "." })),
 			],
-			dirs: [...fastWorkspacePackages, ...nativeAndIntegrationPackages, codingAgentDir].map(inOwnDir),
+			// Each package command is `bun test` in the package; the coding-agent chunks pass each
+			// collected file as a name filter, which selects what the package's `bun test` selects.
+			dirs: [...fastWorkspacePackages, ...nativeAndIntegrationPackages, codingAgentDir].map(pkg => ({ cwd: pkg })),
 		},
 	);
 }

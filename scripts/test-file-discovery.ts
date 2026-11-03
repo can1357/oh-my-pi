@@ -11,10 +11,25 @@ export const testFilePattern = /[._](test|spec)\.(?:[jt]sx?|[cm][jt]s)$/i;
 
 /** The `[test]` settings of a `bunfig.toml` that change which files `bun test` selects. */
 interface BunTestConfig {
-	/** `[test] root`: the directory `bun test` scans when the command names no file. Default: the working directory. */
+	/**
+	 * `[test] root`, resolved against the working directory, inside it or not: the directory `bun test`
+	 * scans when the command names no file. Default: the working directory.
+	 */
 	root: string;
-	/** `[test] pathIgnorePatterns`, one pattern or a list, matched against paths relative to the working directory. */
+	/**
+	 * `[test] pathIgnorePatterns`, one pattern or a list, matched against paths relative to the working
+	 * directory (`../` included when the root lies outside it).
+	 */
 	ignore: Bun.Glob[];
+	/**
+	 * How many times the walk enters one real directory along one path, so a cycle of links is walked
+	 * that often. `bun test` follows a cycle until a path fails with `ELOOP`, and a later spelling can
+	 * escape a pattern an earlier one matched (`loop/a.test.ts` for `a.test.ts`). A pattern of `m`
+	 * segments matches every spelling `prefix/unit^k/rest` with `k > m` alike: at least one copy of the
+	 * cycle's unit then lies wholly inside a `**`, which also absorbs one copy more or less. So `m + 1`
+	 * repetitions (`m + 2` entries) decide every spelling; with no pattern, one entry does.
+	 */
+	cycleVisits: number;
 }
 
 const bunTestConfigs = new Map<string, Promise<BunTestConfig>>();
@@ -60,6 +75,7 @@ async function readBunTestConfig(cwd: string): Promise<BunTestConfig> {
 	return {
 		root: typeof root === "string" ? path.resolve(cwd, root) : cwd,
 		ignore: patterns.map(pattern => new Bun.Glob(pattern)),
+		cycleVisits: patterns.length === 0 ? 1 : Math.max(...patterns.map(pattern => pattern.split("/").length)) + 2,
 	};
 }
 
@@ -79,20 +95,25 @@ interface WalkRules {
 	pruneDirectory?: (spelling: string) => boolean;
 	/** Skip a file by the path it was reached at; another path to the same real file can still take it. */
 	skipFile?: (spelling: string) => boolean;
+	/** How many times one real directory may appear on the walk's stack (see {@link BunTestConfig.cycleVisits}). Default 1. */
+	cycleVisits?: number;
 }
 
 /**
  * The test files below `start` by name, as `/`-separated paths relative to `baseDir`. Like
  * `bun test` it skips `node_modules` and dot-directories, follows symbolic links to files and
  * directories, and takes each real file once, by the first path `rules` does not skip. A link back
- * to a directory being walked (a cycle) is not followed; a dangling link and a missing `start` are
- * ignored.
+ * to a directory being walked (a cycle) is followed until that directory is on the walk's stack
+ * `rules.cycleVisits` times. Each extra time is a further pass that adds only files the passes
+ * before it did not take, so a file gets its path with the fewest turns of a cycle. A dangling link
+ * and a missing `start` are ignored.
  */
 async function walkTestFiles(start: string, baseDir: string, rules: WalkRules): Promise<string[]> {
 	const taken = new Set<string>();
-	const ancestors = new Set<string>();
 	const files: string[] = [];
-	const visit = async (dir: string): Promise<void> => {
+	const onStack = new Map<string, number>();
+	let cutCycle = false;
+	const visit = async (dir: string, limit: number): Promise<void> => {
 		let realDir: string;
 		try {
 			realDir = await fs.realpath(dir);
@@ -100,8 +121,12 @@ async function walkTestFiles(start: string, baseDir: string, rules: WalkRules): 
 			if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
 			throw error;
 		}
-		if (ancestors.has(realDir)) return;
-		ancestors.add(realDir);
+		const visits = onStack.get(realDir) ?? 0;
+		if (visits >= limit) {
+			cutCycle = true;
+			return;
+		}
+		onStack.set(realDir, visits + 1);
 		try {
 			const entries = await fs.readdir(dir, { withFileTypes: true });
 			for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
@@ -117,7 +142,7 @@ async function walkTestFiles(start: string, baseDir: string, rules: WalkRules): 
 				if (isDirectory) {
 					if (entry.name === "node_modules" || entry.name.startsWith(".")) continue;
 					if (rules.pruneDirectory?.(filePath)) continue;
-					await visit(filePath);
+					await visit(filePath, limit);
 					continue;
 				}
 				if (!isFile || !testFilePattern.test(entry.name) || rules.skipFile?.(filePath)) continue;
@@ -127,32 +152,49 @@ async function walkTestFiles(start: string, baseDir: string, rules: WalkRules): 
 				files.push(path.relative(baseDir, filePath).split(path.sep).join("/"));
 			}
 		} finally {
-			ancestors.delete(realDir);
+			if (visits === 0) onStack.delete(realDir);
+			else onStack.set(realDir, visits);
 		}
 	};
-	await visit(start);
+	for (let limit = 1; limit <= (rules.cycleVisits ?? 1); limit++) {
+		cutCycle = false;
+		await visit(start, limit);
+		if (!cutCycle) break;
+	}
 	return files;
 }
 
+function selectionRules(config: BunTestConfig, cwd: string): WalkRules {
+	const ignored = (spelling: string) => isIgnored(config, cwd, spelling);
+	// From a root above the working directory, `bun test` walks into neither the working directory
+	// nor any directory between them: their paths relative to it end in `.` or `..`.
+	const prune = (spelling: string) => isWithin(spelling, cwd) || ignored(spelling);
+	return { pruneDirectory: prune, skipFile: ignored, cycleVisits: config.cycleVisits };
+}
+
 /**
- * The test files below `dir` that `bun test`, run in `cwd` and naming no file (or only name filters),
- * selects, as `/`-separated paths relative to `baseDir`. It scans only inside `cwd`'s `[test] root`,
- * prunes directories and skips files `cwd`'s `pathIgnorePatterns` match, each judged by the path it
- * was reached at, so a link around an ignored directory still reaches its tests. Otherwise it walks
- * as {@link walkTestFiles} does.
+ * The test files `bun test`, run in `cwd` and naming no file (or only name filters), selects, as
+ * `/`-separated paths relative to `baseDir`; for a `dir` other than `cwd`, only those below `dir`.
+ * The command scans below `cwd`'s `[test] root`, inside `cwd` or outside it (a root above `cwd`, or
+ * beside it, gives paths starting `../`); a missing root selects nothing, and from a root above
+ * `cwd` it skips `cwd` and the directories between them. It prunes directories and skips files
+ * `cwd`'s `pathIgnorePatterns` match, each judged by the path it was reached at, so a link around
+ * an ignored directory still reaches its tests. Otherwise it walks as {@link walkTestFiles} does.
  */
 export async function collectTestsUnder(dir: string, baseDir: string, cwd = dir): Promise<string[]> {
 	const config = await bunTestConfig(cwd);
-	const start = isWithin(config.root, dir) ? dir : isWithin(dir, config.root) ? config.root : undefined;
-	if (start === undefined) return [];
-	const pruned = (spelling: string) => isIgnored(config, cwd, spelling);
-	// The directories between root and `start` are scanned on the way down, so their rules apply too.
-	let spelling = config.root;
-	for (const segment of path.relative(config.root, start).split(path.sep).filter(Boolean)) {
-		spelling = path.join(spelling, segment);
-		if (segment === "node_modules" || segment.startsWith(".") || pruned(spelling)) return [];
+	const rules = selectionRules(config, cwd);
+	if (path.resolve(dir) === path.resolve(cwd) || isWithin(dir, config.root)) {
+		return walkTestFiles(config.root, baseDir, rules);
 	}
-	return walkTestFiles(start, baseDir, { pruneDirectory: pruned, skipFile: pruned });
+	if (!isWithin(config.root, dir)) return [];
+	// The directories between root and `dir` are scanned on the way down, so their rules apply too.
+	let spelling = config.root;
+	for (const segment of path.relative(config.root, dir).split(path.sep).filter(Boolean)) {
+		spelling = path.join(spelling, segment);
+		if (segment === "node_modules" || segment.startsWith(".") || rules.pruneDirectory?.(spelling)) return [];
+	}
+	return walkTestFiles(dir, baseDir, rules);
 }
 
 /**
@@ -163,7 +205,7 @@ export async function collectTestsUnder(dir: string, baseDir: string, cwd = dir)
  */
 export async function namedTestFilesUnder(dir: string, baseDir: string, cwd: string): Promise<string[]> {
 	const config = await bunTestConfig(cwd);
-	return walkTestFiles(dir, baseDir, { skipFile: spelling => isIgnored(config, cwd, spelling) });
+	return walkTestFiles(dir, baseDir, { ...selectionRules(config, cwd), pruneDirectory: undefined });
 }
 
 /**
@@ -194,19 +236,51 @@ export async function workspacePackageDirs(repoRoot: string): Promise<string[]> 
 	return dirs.sort();
 }
 
-/** A path CI's commands cover, and the directory the covering `bun test` runs in (both relative to the repository). */
+/** A test file a command names: `bun test ./<path>` run in `cwd` (both relative to the repository). */
 export interface BucketEntry {
 	path: string;
 	cwd: string;
 }
 
+/** A command that names no file: `bun test` run in `cwd` (relative to the repository). */
+export interface BucketCommand {
+	cwd: string;
+}
+
 /**
- * What CI runs: test files its commands name (`bun test ./<file>`), and directories below which a
- * command naming no file (or only name filters) runs every test `bun test` selects.
+ * What CI runs: test files its commands name, and commands that name no file (or only name filters),
+ * each of which runs every test `bun test` selects in its working directory, below `[test] root`
+ * wherever that lies.
  */
 export interface Buckets {
 	files: BucketEntry[];
-	dirs: BucketEntry[];
+	dirs: BucketCommand[];
+}
+
+/**
+ * Groups of test files among `spellings` (relative to `repoRoot`) whose paths, or whose real paths,
+ * are equal but for letter case. `bun test` runs one file of such a group in place of the others,
+ * whether they differ in the file name or in a directory, and even when a command names another one.
+ */
+async function caseTwins(repoRoot: string, spellings: Iterable<string>): Promise<string[][]> {
+	const byKey = new Map<string, Map<string, string>>();
+	for (const file of spellings) {
+		const spelling = path.resolve(repoRoot, file);
+		const realFile = await fs.realpath(spelling).catch(() => undefined);
+		if (!realFile) continue;
+		for (const key of new Set([spelling.toLowerCase(), realFile.toLowerCase()])) {
+			let group = byKey.get(key);
+			if (!group) byKey.set(key, (group = new Map()));
+			if (!group.has(realFile)) group.set(realFile, file);
+		}
+	}
+	const groups = new Map<string, string[]>();
+	for (const group of byKey.values()) {
+		if (group.size < 2) continue;
+		const files = [...group.values()].sort();
+		groups.set(files.join("\n"), files);
+	}
+	return [...groups.values()];
 }
 
 /**
@@ -214,9 +288,11 @@ export interface Buckets {
  * are every test file by name: no `bunfig.toml` applies to them, because no command runs there to
  * read it. A candidate is run when its own path or its real path is that of a file a bucket command
  * runs: a file it names that its working directory's `pathIgnorePatterns` do not skip, or a file
- * {@link collectTestsUnder} finds below a bucketed directory from the command's working directory. A
- * link to a test CI runs is the same test; a link to a file the command skips is not covered. A
- * `bunfig.toml` that is not valid TOML throws, as `bun test` fails there too.
+ * {@link collectTestsUnder} finds for a command that names no file. A link to a test CI runs is the
+ * same test; a link to a file the command skips is not covered.
+ *
+ * It throws, naming the files, when a `bunfig.toml` a command reads is not valid TOML (`bun test`
+ * fails there too), and when test files differ only in letter case (`bun test` runs one of them).
  */
 export async function testFilesWithoutBucket(repoRoot: string, roots: string[], buckets: Buckets): Promise<string[]> {
 	const real = (file: string) => fs.realpath(path.join(repoRoot, file)).catch(() => undefined);
@@ -231,18 +307,24 @@ export async function testFilesWithoutBucket(repoRoot: string, roots: string[], 
 		const cwd = path.join(repoRoot, entry.cwd);
 		if (!isIgnored(await bunTestConfig(cwd), cwd, path.join(repoRoot, entry.path))) await add(entry.path);
 	}
-	for (const entry of buckets.dirs) {
-		const cwd = path.join(repoRoot, entry.cwd);
-		for (const file of await collectTestsUnder(path.join(repoRoot, entry.path), repoRoot, cwd)) await add(file);
+	for (const command of buckets.dirs) {
+		const cwd = path.join(repoRoot, command.cwd);
+		for (const file of await collectTestsUnder(cwd, repoRoot, cwd)) await add(file);
+	}
+	const candidates: string[] = [];
+	for (const root of roots) candidates.push(...(await testFilesByName(path.join(repoRoot, root), repoRoot)));
+	const twins = await caseTwins(repoRoot, [...candidates, ...spelled]);
+	if (twins.length > 0) {
+		throw new Error(
+			`These test files differ only in letter case, and \`bun test\` runs one file of each group in place of the others, so CI does not run them all. Rename them apart:\n${twins.map(group => group.join("  ")).join("\n")}`,
+		);
 	}
 	const missing: string[] = [];
-	for (const root of roots) {
-		for (const file of await testFilesByName(path.join(repoRoot, root), repoRoot)) {
-			if (spelled.has(file)) continue;
-			const realFile = await real(file);
-			if (realFile && realRun.has(realFile)) continue;
-			missing.push(file);
-		}
+	for (const file of candidates) {
+		if (spelled.has(file)) continue;
+		const realFile = await real(file);
+		if (realFile && realRun.has(realFile)) continue;
+		missing.push(file);
 	}
 	return missing;
 }

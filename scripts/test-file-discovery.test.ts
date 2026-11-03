@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
+	type Buckets,
 	collectTestsUnder,
 	namedTestFilesUnder,
 	testFilesWithoutBucket,
@@ -12,7 +13,8 @@ import {
 // CI runs the files `collectTestsUnder` returns and nothing else, and its guard reports a test file
 // no bucket runs. A name `bun test` discovers that the collector misses is a test CI never runs.
 // Bun matches names in any letter case. It runs only one of two files whose names differ only in
-// case (`a.test.ts`, `a.test.TS`), so the mixed-case names use stems of their own.
+// case (`a.test.ts`, `a.test.TS`), which the guard refuses, so the mixed-case names use stems of
+// their own.
 const lowerStems = ["a.test", "b_test", "c.spec", "d_spec", "etest", "f-test", "g.tests", "test", "h.test.d", "spec"];
 const lowerExtensions = ["js", "jsx", "ts", "tsx", "mjs", "cjs", "mts", "cts", "json", "txt", "d.ts"];
 const names = [
@@ -39,14 +41,14 @@ beforeAll(async () => {
 		for (const name of names) await Bun.write(path.join(root, directory, name), source(name));
 	}
 	// `bun test` follows links to files and directories and runs each real file once. A test reached
-	// only through a link, here one outside the tree, must be collected; a cycle and a dangling link
-	// must not hang or fail the collector.
+	// only through a link, here one outside the tree, must be collected; a dangling link must not fail
+	// the collector. A cycle is left out: `bun test` walks one until the kernel's link limit and then
+	// fails to load some of the files it found, so the collector's cycle tests below run no `bun test`.
 	await Bun.write(path.join(base, "outside", "o.test.ts"), source("o.test.ts"));
 	await Bun.write(path.join(base, "outside-dir", "p.spec.mts"), source("p.spec.mts"));
 	await fs.symlink(path.join(base, "outside", "o.test.ts"), path.join(root, "linked.test.ts"));
 	await fs.symlink(path.join(base, "outside-dir"), path.join(root, "linked-dir"));
 	await fs.symlink(path.join(root, "a.test.ts"), path.join(root, "sub", "again.test.ts"));
-	await fs.symlink("..", path.join(root, "sub", "deeper", "loop"));
 	await fs.symlink(path.join(root, "missing.test.ts"), path.join(root, "dangling.test.ts"));
 	// `bun test` reads the `[test] pathIgnorePatterns` of the bunfig.toml where it runs and skips a
 	// matching file, as the repository root's does for `**/dist/**`.
@@ -184,6 +186,74 @@ describe("collectTestsUnder", () => {
 				expect(await realPaths(dir, await collectTestsUnder(dir, dir))).toEqual(discovered.files);
 			}
 		}));
+
+	it("stops at a cycle of links and takes each real file once", () =>
+		withTempDir("test-file-cycle-", async tree => {
+			await writeTests(tree, ["a.test.ts", "sub/deeper/b.spec.ts"]);
+			await fs.symlink("..", path.join(tree, "sub/deeper/loop"));
+			await fs.symlink("..", path.join(tree, "sub/back"));
+
+			expect(await collectTestsUnder(tree, tree)).toEqual(["a.test.ts", "sub/deeper/b.spec.ts"]);
+		}));
+
+	it("takes a file through a cycle when the cycle gives its only path no pattern matches", () =>
+		withTempDir("test-file-cycle-ignore-", async tree => {
+			// `bun test` here runs a.test.ts as loop/a.test.ts and skip/b.test.ts as loop/skip/b.test.ts.
+			const file = path.join(tree, "file");
+			await Bun.write(path.join(file, "bunfig.toml"), '[test]\npathIgnorePatterns = ["a.test.ts"]\n');
+			await writeTests(file, ["a.test.ts"]);
+			await fs.symlink(".", path.join(file, "loop"));
+			const dir = path.join(tree, "dir");
+			await Bun.write(path.join(dir, "bunfig.toml"), '[test]\npathIgnorePatterns = ["skip", "**/x/**"]\n');
+			await writeTests(dir, ["skip/b.test.ts", "x/c.test.ts", "keep.test.ts"]);
+			await fs.symlink(".", path.join(dir, "loop"));
+
+			expect(await collectTestsUnder(file, file)).toEqual(["loop/a.test.ts"]);
+			expect(await namedTestFilesUnder(file, file, file)).toEqual(["loop/a.test.ts"]);
+			// `**/x/**` matches x/c.test.ts by every path, so no number of loops reaches it.
+			expect(await collectTestsUnder(dir, dir)).toEqual(["keep.test.ts", "loop/skip/b.test.ts"]);
+			expect(await testFilesWithoutBucket(tree, ["file"], { files: [], dirs: [{ cwd: "file" }] })).toEqual([]);
+		}));
+
+	it("selects below a `[test] root` beside or above the working directory, with patterns relative to it", () =>
+		withTempDir("test-file-outside-root-", async tree => {
+			const pkg = path.join(tree, "pkg");
+			await Bun.write(
+				path.join(pkg, "bunfig.toml"),
+				'[test]\nroot = "../other"\npathIgnorePatterns = ["**/skip/**", "../other/drop.test.ts"]\n',
+			);
+			await writeTests(tree, [
+				"other/a.test.ts",
+				"other/skip/b.test.ts",
+				"other/drop.test.ts",
+				"pkg/tests/k.test.ts",
+				"pkg/zz-unrun.test.ts",
+			]);
+			await fs.symlink("../pkg/tests", path.join(tree, "other/keep"));
+			const discovered = await bunTestRuns(pkg);
+			expect(discovered.exitCode, discovered.stderr).toBe(0);
+			const selected = await collectTestsUnder(pkg, tree, pkg);
+
+			expect(selected).toEqual(["other/a.test.ts", "other/keep/k.test.ts"]);
+			expect(await realPaths(tree, selected)).toEqual(discovered.files);
+			expect(await testFilesWithoutBucket(tree, ["pkg"], { files: [], dirs: [{ cwd: "pkg" }] })).toEqual([
+				"pkg/zz-unrun.test.ts",
+			]);
+
+			// From a root above the working directory, `bun test` skips the working directory and every
+			// directory between the two, and walks the rest.
+			const inner = path.join(tree, "up/mid/inner");
+			await Bun.write(path.join(inner, "bunfig.toml"), '[test]\nroot = "../.."\n');
+			await writeTests(tree, ["up/u.test.ts", "up/side/s.test.ts", "up/mid/m.test.ts", "up/mid/inner/i.test.ts"]);
+			const fromInner = await bunTestRuns(inner);
+			expect(fromInner.exitCode, fromInner.stderr).toBe(0);
+			const above = await collectTestsUnder(inner, tree, inner);
+			expect(above).toEqual(["up/side/s.test.ts", "up/u.test.ts"]);
+			expect(await realPaths(tree, above)).toEqual(fromInner.files);
+			expect(
+				(await testFilesWithoutBucket(tree, ["up"], { files: [], dirs: [{ cwd: "up/mid/inner" }] })).sort(),
+			).toEqual(["up/mid/inner/i.test.ts", "up/mid/m.test.ts"]);
+		}));
 });
 
 describe("namedTestFilesUnder", () => {
@@ -238,11 +308,13 @@ describe("testFilesWithoutBucket", () => {
 			await fs.symlink("../run/node_modules/dep/d.test.ts", path.join(repo, "packages/new/e-dep.test.ts"));
 
 			const missing = await testFilesWithoutBucket(repo, ["packages/run", "packages/new", ".omp/tests"], {
-				files: [{ path: ".omp/tests/tui.test.ts", cwd: "." }],
-				dirs: [
-					{ path: "packages/run", cwd: "packages/run" },
-					{ path: "scripts", cwd: "." },
+				// The scripts command names its files; the root bunfig.toml skips the dist one.
+				files: [
+					{ path: ".omp/tests/tui.test.ts", cwd: "." },
+					{ path: "scripts/s.test.ts", cwd: "." },
+					{ path: "scripts/dist/missed.test.ts", cwd: "." },
 				],
+				dirs: [{ cwd: "packages/run" }],
 			});
 			expect(missing.sort()).toEqual([
 				".omp/tests/zzz-new.test.ts",
@@ -264,7 +336,7 @@ describe("testFilesWithoutBucket", () => {
 
 			const missing = await testFilesWithoutBucket(repo, ["packages/rooted"], {
 				files: [],
-				dirs: [{ path: "packages/rooted", cwd: "packages/rooted" }],
+				dirs: [{ cwd: "packages/rooted" }],
 			});
 			expect(missing).toEqual(["packages/rooted/zz-missed.test.ts"]);
 		}));
@@ -284,7 +356,7 @@ describe("testFilesWithoutBucket", () => {
 
 			const missing = await testFilesWithoutBucket(repo, ["packages/run", "packages/wire"], {
 				files: [],
-				dirs: [{ path: "packages/run", cwd: "packages/run" }],
+				dirs: [{ cwd: "packages/run" }],
 			});
 			expect(missing.sort()).toEqual(["packages/wire/dist/d.test.ts", "packages/wire/zz-hidden.test.ts"]);
 		}));
@@ -299,9 +371,38 @@ describe("testFilesWithoutBucket", () => {
 
 			const guard = testFilesWithoutBucket(repo, ["packages/run"], {
 				files: [],
-				dirs: [{ path: "packages/run", cwd: "packages/run" }],
+				dirs: [{ cwd: "packages/run" }],
 			});
 			await expect(guard).rejects.toThrow(`${config} is not valid TOML`);
+		}));
+
+	it("stops with the files' names when test paths differ only in letter case", () =>
+		withTempDir("test-file-guard-case-", async repo => {
+			const pkg = path.join(repo, "packages/run");
+			await writeTests(pkg, ["a.test.ts", "a.test.TS", "x/b.test.ts", "y/B.test.ts"]);
+			// `bun test` there runs one of the two, not both.
+			const run = await bunTestRuns(pkg);
+			expect(run.exitCode, run.stderr).toBe(0);
+			expect(run.files.filter(file => path.basename(file).toLowerCase() === "a.test.ts")).toHaveLength(1);
+			const guard = (dirs: Buckets["dirs"], files: Buckets["files"] = []) =>
+				testFilesWithoutBucket(repo, ["packages/run"], { files, dirs });
+
+			await expect(guard([{ cwd: "packages/run" }])).rejects.toThrow(
+				"differ only in letter case, and `bun test` runs one file of each group in place of the others, so CI does not run them all. Rename them apart:\npackages/run/a.test.TS  packages/run/a.test.ts",
+			);
+			// Naming one of them does not help: `bun test ./a.test.ts` runs a.test.TS.
+			await expect(guard([], [{ path: "packages/run/a.test.ts", cwd: "packages/run" }])).rejects.toThrow(
+				"packages/run/a.test.TS  packages/run/a.test.ts",
+			);
+			// Two directories that differ only in case collide too.
+			await fs.rm(path.join(pkg, "a.test.TS"));
+			await writeTests(pkg, ["Dir/c.test.ts", "dir/c.test.ts"]);
+			await expect(guard([{ cwd: "packages/run" }])).rejects.toThrow(
+				"packages/run/Dir/c.test.ts  packages/run/dir/c.test.ts",
+			);
+			// Names that differ only in case in different directories do not.
+			await fs.rm(path.join(pkg, "Dir"), { recursive: true });
+			expect(await guard([{ cwd: "packages/run" }])).toEqual([]);
 		}));
 });
 
