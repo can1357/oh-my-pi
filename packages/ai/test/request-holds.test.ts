@@ -1,10 +1,12 @@
 import { describe, expect, it } from "bun:test";
+import { heapStats } from "bun:jsc";
 import { EventEmitter } from "node:events";
 import {
 	afterRequestHolds,
 	captureRequestHolds,
 	exemptFromRequestHolds,
 	type RequestHoldView,
+	type RequestHoldViews,
 	type RequestHolds,
 	RequestHoldsAlias,
 	type RequestHoldContext,
@@ -504,6 +506,130 @@ describe("what the last check covers", () => {
 		const sent = runWithRequestHolds(failing, () => runWithRequestHolds(alias, () => request()));
 		await expect(sent.result!).rejects.toThrow("hold failed");
 		expect(sent.sent).toBe(false);
+	});
+
+	it("keeps an exemption while a Promise subclass whose `then` adopts pending work is pending", async () => {
+		class Subclass<T> extends Promise<T> {}
+		const holds = new TestHolds();
+		const done = Promise.withResolvers<void>();
+		const started = Promise.withResolvers<SentRequest>();
+		const result = Subclass.resolve<void>(undefined);
+		// Its own `then` resolves with pending work, which `await` would adopt.
+		// oxlint-disable-next-line unicorn/no-thenable
+		Object.defineProperty(result, "then", {
+			value(resolve: (value: unknown) => void) {
+				resolve(done.promise);
+			},
+		});
+		runWithRequestHolds(holds, () =>
+			runOutsideRequestHolds(holds, () => {
+				setImmediate(() => started.resolve(request()));
+				return result;
+			}),
+		);
+		const during = await started.promise;
+		await during.result;
+		expect(during.sent).toBe(true);
+		done.resolve();
+	});
+
+	it("wakes only the current wait: an earlier wait's end, or its carried request's, leaves the next wait alone", async () => {
+		const first = new TestHolds();
+		let failSecond: (error: Error) => void = () => {};
+		const failing = new Promise<void>((_, reject) => {
+			failSecond = reject;
+		});
+		const failingHolds: RequestHolds = {
+			open: () => ({ check: () => failing, release: () => {} }),
+		};
+		const alias = new RequestHoldsAlias();
+		alias.bind(runWithRequestHolds(first, captureRequestHolds));
+		const requestEnded = Promise.withResolvers<void>();
+		let views: RequestHoldViews | undefined;
+		let firstWait: Promise<void> | undefined;
+		const owner = runWithRequestHolds(alias, () =>
+			runWithRequestHoldView(first, first.open(), async () => {
+				views = openRequestHolds();
+				firstWait = views.check();
+				await requestEnded.promise;
+			}),
+		);
+		// The alias moves to holds that fail; the first wait wakes, the next waits on the failing hold.
+		first.armed = false;
+		alias.bind(runWithRequestHolds(failingHolds, captureRequestHolds));
+		await firstWait;
+		const next = views?.check();
+		if (!next) throw new Error("Expected the failing hold to hold");
+		let outcome = "pending";
+		void next.then(
+			() => {
+				outcome = "woken";
+			},
+			(error: Error) => {
+				outcome = error.message;
+			},
+		);
+		// The request that carried the first view ends: the next wait does not depend on it.
+		requestEnded.resolve();
+		await owner;
+		await turns();
+		expect(outcome).toBe("pending");
+		failSecond(new Error("hold failed"));
+		await turns();
+		expect(outcome).toBe("hold failed");
+		views?.release();
+		first.let();
+	});
+
+	it("keeps the next wait's rebind listener when an earlier wait it superseded settles", async () => {
+		const holds = new TestHolds();
+		const alias = new RequestHoldsAlias();
+		alias.bind(runWithRequestHolds(holds, captureRequestHolds));
+		const views = runWithRequestHolds(alias, () => openRequestHolds());
+		const earlier = views.check();
+		alias.bind(runWithRequestHolds(holds, captureRequestHolds));
+		const next = views.check();
+		if (!earlier || !next) throw new Error("Expected both checks to hold");
+		await earlier;
+		await turns();
+		let woken = false;
+		void next.then(() => {
+			woken = true;
+		});
+		// Rebinding must still wake the next wait.
+		alias.bind(runWithRequestHolds(holds, captureRequestHolds));
+		await turns();
+		expect(woken).toBe(true);
+		views.release();
+		holds.let();
+	});
+
+	it("leaves nothing on a carried request's lifetime for waits that are over", async () => {
+		const holds = new TestHolds();
+		const collect = async (): Promise<number> => {
+			for (let i = 0; i < 4; i++) {
+				Bun.gc(true);
+				await turns(1);
+			}
+			return heapStats().objectTypeCounts.Promise ?? 0;
+		};
+		await runWithRequestHolds(holds, () =>
+			runWithRequestHoldView(holds, holds.open(), async () => {
+				const views = openRequestHolds();
+				const before = await collect();
+				for (let i = 0; i < 5000; i++) {
+					holds.armed = true;
+					holds.release = Promise.withResolvers<void>();
+					const wait = views.check();
+					holds.let();
+					await wait;
+				}
+				const after = await collect();
+				views.release();
+				// One reaction per completed wait would leave thousands behind.
+				expect(after - before).toBeLessThan(500);
+			}),
+		);
 	});
 
 	it("removes an aborted wait's rebind listeners, and adds no reaction per rebinding to a pending hold", async () => {
