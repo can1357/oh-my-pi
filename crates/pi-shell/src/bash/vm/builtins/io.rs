@@ -145,14 +145,18 @@ pub fn digits(text: &[u8], radix: u32, max: usize) -> (u32, usize) {
 	(value, count)
 }
 
-/// bash `sh_invalidnum`: `ARG: invalid number` (octal and hex spelled out).
-pub fn invalid_number(arg: &[u8]) -> String {
-	let what = match arg {
-		[b'0', d, ..] if d.is_ascii_digit() => "invalid octal number",
-		[b'0', b'x', ..] => "invalid hex number",
-		_ => "invalid number",
+/// bash `sh_invalidnum`: `ARG: invalid number` (octal and hex spelled out),
+/// with ARG's bytes as they are.
+pub fn invalid_number(arg: &[u8]) -> Diag {
+	let what: &[u8] = match arg {
+		[b'0', d, ..] if d.is_ascii_digit() => b"invalid octal number",
+		[b'0', b'x', ..] => b"invalid hex number",
+		_ => b"invalid number",
 	};
-	format!("{}: {what}", arg.as_bstr())
+	let mut msg = BString::from(arg);
+	msg.extend_from_slice(b": ");
+	msg.extend_from_slice(what);
+	Diag::Bytes { msg }
 }
 
 /// `name` or `name[subscript]` (bash `valid_identifier` /
@@ -609,7 +613,7 @@ pub fn read(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 			},
 			b'n' | b'N' => {
 				let Some(n) = count_arg(arg) else {
-					ctx.usage(invalid_number(arg));
+					ctx.err(invalid_number(arg));
 					return done(1);
 				};
 				nchars = Some(n);

@@ -4,7 +4,8 @@
 
 ### Fixed
 
-- Fixed the bash tool's shell dying on a `printf` field 65536 columns or wider: `printf '%70000s' x` panicked inside the conversion and took the whole run down with it ("Shell execution task failed"); a width or precision past what Rust's formatting holds is now written by the builtin itself, so `printf '%200000d'`, `'%.200000f'` and the rest write what Bash writes ([#17926](https://github.com/can1357/oh-my-pi/pull/17926) by [@sjawhar](https://github.com/sjawhar))
+- Fixed the bash tool's `printf` ending the whole run on a float precision of 65536 or more (`printf '%.200000f' 1.5`), and made its floats C `long double`s as in Bash (`printf '%.25f' 0.1`, `%a`, `1e400`), its diagnostics byte-exact, and `%Q`, `.-N` precisions and `-v` values match Bash ([#17926](https://github.com/can1357/oh-my-pi/pull/17926) by [@sjawhar](https://github.com/sjawhar))
+
 ### Changed
 
 - Made the bash tool's shell faster on string appends (`s+=x`), sourcing files full of function definitions (each body compiles on first call), quoted `"$var"`/`"$1"` arguments and file redirections

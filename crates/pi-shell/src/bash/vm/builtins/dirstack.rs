@@ -131,7 +131,7 @@ fn stack_error(ctx: &mut Ctx<'_, '_>, len: usize, arg: &[u8]) {
 /// `±N`: an invalid number is reported with the usage line.
 fn index_arg(ctx: &mut Ctx<'_, '_>, word: &[u8], usage: &[u8]) -> Result<i64, i32> {
 	number(&word[1..]).ok_or_else(|| {
-		ctx.usage(invalid_number(word));
+		ctx.err(invalid_number(word));
 		ctx.out_fd(2, usage);
 		2
 	})
