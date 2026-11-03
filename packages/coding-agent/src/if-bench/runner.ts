@@ -94,7 +94,10 @@ export interface IfBenchRunOptions {
 interface TurnOutcome {
 	message?: AssistantMessage;
 	text: string;
+	/** What the report shows: omp's display text, with the endpoint and request-dump path. */
 	error?: string;
+	/** The provider's own text; the refusal check reads this, never the display text. */
+	providerError?: string;
 	durationMs: number;
 }
 /**
@@ -283,7 +286,7 @@ async function requestTurnWithRefusalRetry(
 		const sessionId = options.randomSessionId();
 		const apiKey = options.runtime.modelRegistry.resolver(model, sessionId);
 		outcome = await requestTurn(model, context, sessionId, apiKey, providerSessionState, target, options);
-		if (!isCyberRefusal(outcome.error) || attempt === REFUSAL_MAX_ATTEMPTS) return outcome;
+		if (!isCyberRefusal(outcome.providerError) || attempt === REFUSAL_MAX_ATTEMPTS) return outcome;
 		logger.debug("if-bench: cyber refusal, retrying", { attempt, error: outcome.error });
 	}
 	return outcome;
@@ -321,7 +324,12 @@ async function requestTurn(
 		let message: AssistantMessage | undefined;
 		for await (const event of stream) {
 			if (event.type === "error") {
-				return { text: "", error: event.error.errorMessage ?? "request failed", durationMs: elapsed() };
+				return {
+					text: "",
+					error: errorDisplayText(event.error) ?? "request failed",
+					providerError: event.error.errorMessage,
+					durationMs: elapsed(),
+				};
 			}
 			if (event.type === "done") message = event.message;
 		}
@@ -331,6 +339,7 @@ async function requestTurn(
 				message,
 				text: "",
 				error: errorDisplayText(message) ?? "request failed",
+				providerError: message.errorMessage,
 				durationMs: elapsed(message),
 			};
 		}

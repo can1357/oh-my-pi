@@ -440,7 +440,7 @@ async function runBenchRequest(
 				firstTokenAt = now();
 			}
 			if (event.type === "error") {
-				return { ok: false, account, error: event.error.errorMessage ?? "request failed" };
+				return { ok: false, account, error: errorDisplayText(event.error) ?? "request failed" };
 			}
 			if (event.type === "done") {
 				message = event.message;

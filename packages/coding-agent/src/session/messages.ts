@@ -80,6 +80,7 @@ export function logProviderTurnError(msg: AssistantMessage): void {
 		provider: msg.provider,
 		model: msg.model,
 		errorMessage: msg.errorMessage,
+		errorDisplayMessage: msg.errorDisplayMessage,
 		errorStatus: msg.errorStatus,
 		errorId: msg.errorId,
 	});
