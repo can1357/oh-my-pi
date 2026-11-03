@@ -9,7 +9,7 @@ import type { ToolSession } from "../tools";
 import { isIrcEnabled } from "../irc/messaging";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { isCompletionProbeEnabled } from "./completion-probe";
-import { runSubagentFollowUpTurn } from "./executor";
+import { resolveSoftRequestBudget, runSubagentFollowUpTurn } from "./executor";
 import {
 	type EffectiveSubagentPolicy,
 	reserveStructuredSubagentId,
@@ -19,7 +19,13 @@ import { type AgentProgress, oneLineLabel, type SingleResult, type TaskToolDetai
 import { buildWorkPoolOutputSchema, type WorkPoolYieldItem } from "./workpool-yield";
 
 import { cfgEvalWorkpoolFreshAgents } from "../eval/settings";
-import { cfgTaskMaxConcurrency, cfgTaskMaxRuntimeMs } from "./settings";
+import {
+	cfgTaskAgentSoftRequestBudget,
+	cfgTaskMaxConcurrency,
+	cfgTaskMaxRuntimeMs,
+	cfgTaskSoftRequestBudget,
+	cfgTaskSoftRequestBudgetNotice,
+} from "./settings";
 
 /** One user-supplied unit tracked through a workpool batch. */
 export interface WorkPoolItem {
@@ -418,6 +424,12 @@ export class WorkPool {
 							artifactsDir: this.session.getSessionFile()?.slice(0, -6),
 							maxRuntimeMs: cfgTaskMaxRuntimeMs.get(this.session.settings),
 							completionProbe: isCompletionProbeEnabled(this.session.settings, this.session.taskDepth ?? 0),
+							softRequestBudget: resolveSoftRequestBudget(
+								this.policy.agent.name,
+								Math.max(0, Math.trunc(Number(cfgTaskSoftRequestBudget.get(this.session.settings)) || 0)),
+								cfgTaskAgentSoftRequestBudget.get(this.session.settings),
+							),
+							softRequestBudgetNotice: cfgTaskSoftRequestBudgetNotice.get(this.session.settings),
 						});
 					}
 				} catch (error) {
