@@ -291,101 +291,157 @@ pub(crate) struct CommandWords {
 	pub assignments: Vec<(String, String)>,
 	/// `-C`: the directory the command runs in.
 	pub chdir:       Option<String>,
+	/// Whether an argument after the command word holds a `${VARNAME}`
+	/// value not known before `env` runs; it stands empty in `command`.
+	pub unknown_arguments: bool,
 }
 
-/// A variable whose value cannot be known before `env` runs: an
-/// `--env0-from` stream may have set it.
+/// What `env` runs cannot be known before it runs: a `${VARNAME}` value that
+/// an `--env0-from` stream may set decides it, or its `-S` split grows past
+/// what the classifier follows.
 #[cfg(feature = "util.timeout")]
-pub(crate) struct UnknownVariable;
+pub(crate) struct Unknown;
 
 /// The command `env` runs for `argv` (its own name first): `-S` strings
 /// split (`${VARNAME}` from `lookup`, the environment `env` receives), then
 /// the words after the options, a leading `-` and the `NAME=VALUE`
-/// assignments. `None` when it runs none: it prints the environment, refuses
-/// its arguments, never stops splitting, is still splitting at `deadline`
-/// (when GNU `env`, which does at least as much work per round, would be too,
-/// and dies of the limit's signal), or splits a `${VARNAME}` whose value is
-/// unknown.
+/// assignments. `Ok(None)` when it runs none: it prints the environment,
+/// refuses its arguments, never stops splitting, or is still splitting at
+/// `deadline` (when GNU `env`, which does at least as much work per round,
+/// would be too, and dies of the limit's signal). [`Unknown`] when a value
+/// `lookup` cannot know reaches an option or the command word, or the
+/// argument list grows past what this follows.
 #[cfg(feature = "util.timeout")]
 pub(crate) fn command_words(
 	argv: &[String],
 	deadline: Option<std::time::Instant>,
-	mut lookup: impl FnMut(&str) -> Result<Option<String>, UnknownVariable>,
-) -> Option<CommandWords> {
-	/// An argument list past this many bytes cannot be exec'd on Linux
-	/// (`ARG_MAX` with the default stack limit), so `env` runs no command.
-	/// It also bounds the memory a growing split can take here.
+	lookup: impl Fn(&str) -> Result<Option<String>, Unknown>,
+) -> Result<Option<CommandWords>, Unknown> {
+	/// The argument list a split is followed to. It bounds the memory and
+	/// the time a growing split takes here; past it what `env` runs is
+	/// unknown (its own splitting has no bound).
 	const MAX_ARGV_BYTES: usize = 2 * 1024 * 1024;
 
-	let argv = Env::rewrite_argv(argv.iter().map(OsString::from).collect()).ok()?;
-	let matches = match <Env as clap::Parser>::try_parse_from(argv).ok()?.parsed {
-		Parsed::Matches(matches) => matches,
+	/// `env` runs nothing, unless a value not known before it runs could
+	/// change that.
+	fn runs_nothing(unknown: &[bool]) -> Result<Option<CommandWords>, Unknown> {
+		if unknown.contains(&true) { Err(Unknown) } else { Ok(None) }
+	}
+
+	let Ok(argv) = Env::rewrite_argv(argv.iter().map(OsString::from).collect()) else {
+		return Ok(None);
+	};
+	let Ok(env) = <Env as clap::Parser>::try_parse_from(argv) else {
+		return Ok(None);
+	};
+	// Which words of the split argument list hold a value `lookup` cannot
+	// know; it stands empty there, so the word keeps its place.
+	let mut unknown: Vec<bool> = Vec::new();
+	let (matches, split_argv) = match env.parsed {
+		Parsed::Matches(matches) => (matches, Vec::new()),
 		Parsed::SplitString(mut argv) => {
 			// Each round splits one `-S` and splices its words in where it
 			// was, as GNU's `getopt` rescan sees them. The options before it
 			// are already scanned, so what the rounds do next depends only on
-			// the state at that option boundary: the words from there on, and
-			// whether `-v` came before. With the variables fixed the rounds
-			// are deterministic, so a state seen before means they never stop.
-			// Brent's algorithm finds such a repeat exactly, comparing each
-			// state with one kept checkpoint.
+			// the state at that option boundary: the words from there on
+			// (which of them hold unknown values too), and whether `-v` came
+			// before. With the variables fixed the rounds are deterministic,
+			// so a state seen before means they never stop. Brent's algorithm
+			// finds such a repeat exactly, comparing each state with one kept
+			// checkpoint. An unknown value is never scanned as an option
+			// without the result being unknown, so a repeat holds for any
+			// value it takes.
+			unknown = vec![false; argv.len()];
 			let mut bytes: usize = argv.iter().map(|word| word.len()).sum();
 			let (mut start, mut debug) = (1, false);
-			let mut checkpoint: Option<(Vec<OsString>, bool)> = None;
+			let mut checkpoint: Option<(Vec<OsString>, Vec<bool>, bool)> = None;
 			let (mut power, mut since_checkpoint) = (1_usize, 0_usize);
 			while let Some(found) = scan_options_from(&argv, start, debug) {
 				let Found::SplitString(split) = found else {
-					return None;
+					return runs_nothing(&unknown);
 				};
-				if deadline.is_some_and(|at| std::time::Instant::now() >= at) {
-					return None;
+				// The options scanned up to this `-S`, its string included.
+				if unknown[start..split.index + split.words].contains(&true) {
+					return Err(Unknown);
 				}
-				let mut unknown = false;
+				if deadline.is_some_and(|at| std::time::Instant::now() >= at) {
+					return Ok(None);
+				}
+				let last_unknown = std::cell::Cell::new(false);
+				let mut expanded: usize = 0;
+				let mut unknown_words = Vec::new();
 				let words = split_string(
 					&split.string,
 					|name| {
-						lookup(name).unwrap_or_else(|UnknownVariable| {
-							unknown = true;
-							None
-						})
+						last_unknown.set(false);
+						// Past the bound the round's words are never used.
+						if expanded > MAX_ARGV_BYTES {
+							return None;
+						}
+						let value = lookup(name).unwrap_or_else(|Unknown| {
+							last_unknown.set(true);
+							Some(String::new())
+						});
+						expanded += value.as_ref().map_or(0, String::len);
+						value
 					},
-					|_, _| {},
-				)
-				.ok()?;
-				if unknown {
-					return None;
+					|_, value| {
+						if let Some((_, word)) = value
+							&& last_unknown.get()
+						{
+							unknown_words.push(word);
+						}
+					},
+				);
+				// `env` refuses the string whatever the values are.
+				let Ok(words) = words else {
+					return Ok(None);
+				};
+				if expanded > MAX_ARGV_BYTES {
+					return Err(Unknown);
 				}
 				let (index, resume_debug) = (split.index, split.debug);
 				let removed: usize = argv[index..index + split.words].iter().map(|word| word.len()).sum();
 				let added = split.prefix.as_ref().map_or(0, |prefix| prefix.len())
 					+ words.iter().map(Vec::len).sum::<usize>();
+				let mut inserted = vec![false; usize::from(split.prefix.is_some()) + words.len()];
+				let first_word = inserted.len() - words.len();
+				for word in unknown_words {
+					inserted[first_word + word] = true;
+				}
+				unknown.splice(index..index + split.words, inserted);
 				splice_split(&mut argv, split, &words);
 				bytes = bytes - removed + added;
 				if bytes > MAX_ARGV_BYTES {
-					return None;
+					return Err(Unknown);
 				}
 				(start, debug) = (index, resume_debug);
-				let tail = &argv[index..];
-				if checkpoint.as_ref().is_some_and(|(kept, kept_debug)| *kept_debug == debug && kept.as_slice() == tail) {
-					return None;
+				let (tail, tail_unknown) = (&argv[index..], &unknown[index..]);
+				if checkpoint.as_ref().is_some_and(|(kept, kept_unknown, kept_debug)| {
+					*kept_debug == debug && kept_unknown.as_slice() == tail_unknown && kept.as_slice() == tail
+				}) {
+					return Ok(None);
 				}
 				since_checkpoint += 1;
 				if since_checkpoint == power {
-					checkpoint = Some((tail.to_vec(), debug));
+					checkpoint = Some((tail.to_vec(), tail_unknown.to_vec(), debug));
 					power *= 2;
 					since_checkpoint = 0;
 				}
 			}
-			app().try_get_matches_from(argv).ok()?
+			let Ok(matches) = app().try_get_matches_from(&argv) else {
+				return runs_nothing(&unknown);
+			};
+			(matches, argv)
 		},
 	};
 	if matches.get_flag(options::NULL) {
-		return None;
+		return runs_nothing(&unknown);
 	}
-	let mut words: Vec<String> = matches
-		.get_many::<OsString>(options::VARS)?
-		.map(|word| word.to_string_lossy().into_owned())
-		.collect();
+	let Some(vars) = matches.get_many::<OsString>(options::VARS) else {
+		return runs_nothing(&unknown);
+	};
+	let mut words: Vec<String> = vars.map(|word| word.to_string_lossy().into_owned()).collect();
 	let mut clear_env = matches.get_flag(options::IGNORE_ENVIRONMENT);
 	if words.first().is_some_and(|word| word == "-") {
 		clear_env = true;
@@ -400,12 +456,30 @@ pub(crate) fn command_words(
 		})
 		.collect();
 	let command = words.split_off(assignment_count);
+	if command.is_empty() {
+		return runs_nothing(&unknown);
+	}
+	// The command ends the argument list. The words up to its name decide
+	// what runs; an unknown value after it is only an argument.
+	let unknown_arguments = unknown.contains(&true);
+	if unknown_arguments {
+		let name_at = split_argv.len().checked_sub(command.len()).filter(|&at| {
+			split_argv[at..]
+				.iter()
+				.zip(&command)
+				.all(|(word, expected)| word.to_string_lossy() == expected.as_str())
+		});
+		match name_at {
+			Some(at) if !unknown[..=at].contains(&true) => {},
+			_ => return Err(Unknown),
+		}
+	}
 	let string = |id: &str| {
 		matches
 			.get_one::<OsString>(id)
 			.map(|value| value.to_string_lossy().into_owned())
 	};
-	(!command.is_empty()).then(|| CommandWords {
+	Ok(Some(CommandWords {
 		command,
 		clear_env,
 		env0_from: string(options::ENV0_FROM),
@@ -417,7 +491,8 @@ pub(crate) fn command_words(
 			.collect(),
 		assignments,
 		chdir: string(options::CHDIR),
-	})
+		unknown_arguments,
+	}))
 }
 
 /// The environment `env` gives its command, built as [`Run`] builds it:
@@ -638,11 +713,13 @@ enum SignalOption {
 
 /// Splits a `-S` string into arguments. The variable lookup is explicit so
 /// `env` and callers that must identify its command can use the same parser.
-/// It accepts only `${VARNAME}` expansions, as GNU does.
+/// It accepts only `${VARNAME}` expansions, as GNU does. `on_expand` sees
+/// each expansion: the name, and the value with the index of the argument
+/// it went into (`None` when the variable is unset).
 fn split_string(
 	string: &[u8],
 	mut lookup: impl FnMut(&str) -> Option<String>,
-	mut on_expand: impl FnMut(&str, Option<&str>),
+	mut on_expand: impl FnMut(&str, Option<(&str, usize)>),
 ) -> Result<Vec<Vec<u8>>, String> {
 	fn start_arg<'a>(args: &'a mut Vec<Vec<u8>>, sep: &mut bool) -> &'a mut Vec<u8> {
 		if *sep {
@@ -718,10 +795,11 @@ fn split_string(
 				};
 				let name = String::from_utf8_lossy(name).into_owned();
 				let value = lookup(&name);
-				on_expand(&name, value.as_deref());
-				if let Some(value) = value {
+				let argument = value.as_deref().map(|value| {
 					start_arg(&mut args, &mut sep).extend(value.as_bytes());
-				}
+					(value, args.len() - 1)
+				});
+				on_expand(&name, argument);
 				// Past "${", the name, and "}".
 				i += name.len() + 3;
 				continue;
@@ -1007,7 +1085,7 @@ impl Run<'_> {
 			|name| host.var(name).map(str::to_owned),
 			|name, value| {
 				notes.push(match value {
-					Some(value) => format!("expanding ${{{name}}} into {}\n", value.quote()),
+					Some((value, _)) => format!("expanding ${{{name}}} into {}\n", value.quote()),
 					None => format!("replacing ${{{name}}} with empty string\n"),
 				});
 			},

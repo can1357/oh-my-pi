@@ -348,6 +348,10 @@ struct Follow<'a> {
 	/// A file not yet in `files` that the classification needs.
 	missing:      Option<PathBuf>,
 	inner:        Vec<InnerTimeout>,
+	/// Whether the arguments of the command the last `env` hands on hold
+	/// values not known before it runs, so a wrapper among them cannot be
+	/// followed.
+	unknown_arguments: bool,
 	/// When the limit fires: classification still under way then stops, as
 	/// GNU `env` still splitting then dies of the signal.
 	deadline:     Option<std::time::Instant>,
@@ -355,9 +359,10 @@ struct Follow<'a> {
 
 impl Follow<'_> {
 	/// The value of `name` in the environment the next `env` receives:
-	/// `None` when it is unset, an error when a stream may have set it.
+	/// `None` when it is unset, [`crate::env::Unknown`] when a stream may
+	/// have set it.
 	#[cfg(feature = "util.env")]
-	fn lookup(&self, name: &str) -> Result<Option<String>, crate::env::UnknownVariable> {
+	fn lookup(&self, name: &str) -> Result<Option<String>, crate::env::Unknown> {
 		let known = self.environment.iter().find_map(|entry| {
 			let value = entry.strip_prefix(name.as_bytes())?.strip_prefix(b"=")?;
 			Some(String::from_utf8_lossy(value).into_owned())
@@ -365,7 +370,7 @@ impl Follow<'_> {
 		match known {
 			Some(value) => Ok(Some(value)),
 			None if !self.unknown_rest || self.absent.iter().any(|absent| absent == name) => Ok(None),
-			None => Err(crate::env::UnknownVariable),
+			None => Err(crate::env::Unknown),
 		}
 	}
 
@@ -652,6 +657,7 @@ async fn classify_operand<SE: brush_core::ShellExtensions>(
 			files:        &files,
 			missing:      None,
 			inner:        Vec::new(),
+			unknown_arguments: false,
 			deadline,
 		};
 		let operand = classify_line(shell, words, &[], &mut follow);
@@ -802,10 +808,17 @@ fn classify_simple<SE: brush_core::ShellExtensions>(
 		},
 		#[cfg(feature = "util.env")]
 		Some(Handoff::Environment(command)) => match follow.apply(&command) {
-			Some(()) => (command.command, false),
+			Some(()) => {
+				follow.unknown_arguments = command.unknown_arguments;
+				(command.command, false)
+			},
 			// `env` refuses to run, or a file is still to be read.
 			None => return Operand::Utility,
 		},
+		// What the wrapper runs shows only when it runs. The limit's signal
+		// goes to the processes the operand started, as to a program, and
+		// with none to receive it the operand is cancelled.
+		Some(Handoff::Unknown) => return Operand::Program,
 		#[cfg(feature = "builtin.command")]
 		Some(Handoff::Simple(operand)) => (operand, false),
 		None if builtin.utility => return Operand::Utility,
@@ -841,6 +854,10 @@ enum Handoff {
 	/// As a simple command, whose lookup skips functions (`command`).
 	#[cfg(feature = "builtin.command")]
 	Simple(Vec<String>),
+	/// Not known before the wrapper runs: values only it reads (an
+	/// `--env0-from` stream) decide it, or its `env -S` split grows past
+	/// what the classifier follows.
+	Unknown,
 }
 
 /// The operand the builtin `words` names hands on, found by that builtin's
@@ -854,9 +871,10 @@ enum Handoff {
 /// utilities GNU runs as programs that exec their operand. The other
 /// utilities that run commands, `xargs`, `find -exec` and `ifne`, wait for
 /// them instead, and die of the signal themselves.
-#[cfg_attr(not(feature = "util.env"), allow(unused_variables, reason = "only `env` reads it"))]
 fn handoff(words: &[String], follow: &Follow<'_>) -> Option<Handoff> {
 	match words[0].as_str() {
+		// A wrapper's arguments decide what it runs.
+		"command" | "env" | "nohup" | "timeout" if follow.unknown_arguments => Some(Handoff::Unknown),
 		#[cfg(feature = "builtin.command")]
 		"command" => {
 			let command =
@@ -867,7 +885,10 @@ fn handoff(words: &[String], follow: &Follow<'_>) -> Option<Handoff> {
 			.then_some(Handoff::Simple(command.command_and_args))
 		},
 		#[cfg(feature = "util.env")]
-		"env" => crate::env::command_words(words, follow.deadline, |name| follow.lookup(name)).map(Handoff::Environment),
+		"env" => match crate::env::command_words(words, follow.deadline, |name| follow.lookup(name)) {
+			Ok(command) => command.map(Handoff::Environment),
+			Err(crate::env::Unknown) => Some(Handoff::Unknown),
+		},
 		#[cfg(feature = "util.nohup")]
 		"nohup" => <crate::nohup::NohupCommand as builtins::Command>::new(words.iter().cloned())
 			.ok()?
@@ -2538,6 +2559,70 @@ f() { /bin/sh -c "$r" | /bin/sh -c "$r; cat"; }
 		])
 		.await;
 		assert!(wrong.is_empty(), "{wrong:#?}");
+	}
+
+	/// What an `env` runs can depend on values only it reads, from an
+	/// `--env0-from` stream (GNU coreutils 9.4 has no `--env0-from`; its
+	/// analog assigns them). A streamed `P=/bin/sh` makes `env -S '${P}'` run
+	/// the program, whose TERM handler exits 3, from standard input (F1) or
+	/// a named pipe (F2). Such a value in an argument leaves the command word
+	/// to decide: `eval` is the shell, which the signal ends before `late`
+	/// (F3), while a wrapper's arguments decide what it runs, so `nohup` runs
+	/// the program (F4). `timeout` took an unknown value for an `env` that
+	/// runs nothing and cancelled the program (143) in F1, F2 and F4.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn a_command_only_a_streamed_environment_names_keeps_its_signal() {
+		let wrong = rows_unlike_gnu(&[
+			(
+				"F1",
+				r#"printf 'P=/bin/sh\0' | timeout --preserve-status -k 2 1 env --env0-from=- env -S '${P}' -c 'trap "exit 3" TERM; /bin/sleep 3'"#,
+				3,
+				"",
+			),
+			(
+				"F2",
+				r#"mkfifo f; printf 'P=/bin/sh\0' >f & timeout --preserve-status -k 2 1 env --env0-from=f env -S '${P}' -c 'trap "exit 3" TERM; /bin/sleep 3'"#,
+				3,
+				"",
+			),
+			(
+				"F3",
+				r#"printf 'X=1\0' | timeout --preserve-status -k 2 .3 env --env0-from=- env -S 'eval "/bin/sleep 2; echo late > marker; : ${X}"'; s=$?; if test -e marker; then printf marker-created\\n; fi; printf status:$s\\n"#,
+				0,
+				"status:143\n",
+			),
+			(
+				"F4",
+				r#"printf 'P=/bin/sh\0' | timeout --preserve-status -k 2 1 env --env0-from=- env -S 'nohup ${P} -c "trap \"exit 3\" TERM; /bin/sleep 3"'"#,
+				3,
+				"",
+			),
+		])
+		.await;
+		assert!(wrong.is_empty(), "{wrong:#?}");
+	}
+
+	/// The classifier follows `env -S` splits only while the argument list
+	/// stays under its bound; `env` itself splits without one. Twenty-one
+	/// splits of `-u` and a 100,000-byte name pass that bound on the way to
+	/// `/bin/sh`, which GNU `env` still runs, and whose TERM handler exits 3.
+	/// `timeout` took the bound for an `env` that runs nothing and cancelled
+	/// the program (143).
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn an_env_split_past_the_classifier_bound_keeps_its_signal() {
+		let unset = format!("-u {}", "x".repeat(100_000));
+		let splits = vec!["-S${S}"; 21].join(" ");
+		let command = format!(
+			r#"export S='{unset}' W='{splits} /bin/sh'; timeout --preserve-status -k 2 2 env -S '${{W}}' -c 'trap "exit 3" TERM; /bin/sleep 4'"#
+		);
+		let (status, stdout) = run_row(&command).await;
+		assert_eq!(
+			(status, stdout.as_str()),
+			(3, ""),
+			"F5: GNU `env` runs `/bin/sh`, whose TERM handler exits 3"
+		);
 	}
 
 	/// An `env -C` directory is the one the shell then runs in: checked as
