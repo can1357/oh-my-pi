@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Timed-out or aborted `read` JSON queries stop evaluating `jq` filters instead of continuing to consume CPU and memory in the background ([#17943](https://github.com/can1357/oh-my-pi/issues/17943)).
+
 ### Added
 
 - Pinned sessions show a pin beside their title in the status line and the band composer's title, and `/unpin [session id]` unpins a session ([#17848](https://github.com/can1357/oh-my-pi/pull/17848) by [@SuperUserA](https://github.com/SuperUserA))

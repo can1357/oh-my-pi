@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Aborted or timed-out built-in `jq` filters stop running even when they have not produced an output ([#17943](https://github.com/can1357/oh-my-pi/issues/17943)).
+
 ## [18.16.0] - 2026-11-02
 
 ### Added

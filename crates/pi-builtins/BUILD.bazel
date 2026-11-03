@@ -168,6 +168,7 @@ rust_library(
         "//crates/pi-vfs",
         "//crates/vendor/brush-core",
         "//crates/vendor/brush-parser",
+        "//crates/vendor/jaq-core",
         "//crates/vendor/grep-searcher",
     ],
 )
