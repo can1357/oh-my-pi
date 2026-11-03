@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed the bash tool's shell making a command's redirections before expanding its prefix assignments: `x=${missing:?err} cmd >file` created `file`, `x=$(cat f) cmd >f` read `f` after the redirection had emptied it, and the assignment's error went into the command's redirected standard error; a simple command now expands its words, then its prefix assignments, then its redirections, as Bash does, `set -x` traces it before the redirections, and a prefix assignment to an array element (`a[0]=x cmd`) is refused as not a valid identifier, as in Bash
+- Fixed the bash tool's shell making a command's redirections before expanding its prefix assignments: `x=${missing:?err} cmd >file` created `file`, `x=$(cat f) cmd >f` read `f` after the redirection had emptied it, and the assignment's error went into the command's redirected standard error; a simple command now expands its words, then its prefix assignments, then its redirections, as Bash does, `set -x` traces it before the redirections, and a prefix assignment to an array element (`a[0]=x cmd`) is refused as not a valid identifier, as in Bash ([#17899](https://github.com/can1357/oh-my-pi/pull/17899) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.16.0] - 2026-11-02
 
