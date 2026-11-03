@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `generate_image` edits with two or more input images failing on OpenAI-compatible endpoints: the images are now sent as `image[]` instead of a repeated `image` field, which the endpoint rejects as a duplicate parameter ([#17933](https://github.com/can1357/oh-my-pi/pull/17933) by [@zhanex](https://github.com/zhanex))
+
 ## [18.16.0] - 2026-11-02
 
 ### Added
