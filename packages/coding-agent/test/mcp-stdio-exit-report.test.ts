@@ -236,7 +236,8 @@ describe.skipIf(process.platform === "win32" || !PYTHON)("StdioTransport exit re
 	// Round 5: the advice took the report's room and the error then removed it,
 	// leaving no reason at all.
 	// Round 6: two or more hints left one to take the room, and the error then removed it.
-	for (const hints of [1, 2, 3]) {
+	// Round 7: hints enough to pass the internal buffer pushed the reason out of it.
+	for (const hints of [1, 2, 3, 420, 1_000]) {
 		it(
 			`keeps a long reason that ${hints} runtime-only fetch hint${hints === 1 ? "" : "s"} follow`,
 			async () => {

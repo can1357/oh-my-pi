@@ -27,6 +27,7 @@ import {
 	nonRetryableMCPTransportError,
 	normalizeMCPTransportError,
 	redactDiagnosticText,
+	stripTrailingFetchAdvice,
 } from "../errors";
 import { RequestIdAllocator } from "../request-id";
 import { routeProgressNotification, withProgressToken } from "../progress";
@@ -562,8 +563,9 @@ class StderrTail {
 	report(maxChars: number): string {
 		const current = this.#wordLength > 0 ? this.#redactWord() : "";
 		// Whole-text redaction again before choosing the tail: it also drops
-		// runtime-only advice at the end (fetch's `verbose: true` hint), which the
-		// error removes anyway, so the reason before it is not cut to make room.
+		// runtime-only advice at the end (fetch's `verbose: true` hint, which may
+		// end the word still being written), which the error removes anyway, so
+		// the reason before it is not cut to make room.
 		return lastLines(redactDiagnosticText(this.#redacted + current), maxChars);
 	}
 
@@ -604,7 +606,10 @@ class StderrTail {
 
 	#finishWord(): void {
 		if (this.#wordLength === 0) return;
-		this.#redacted += this.#redactWord();
+		// Drop a fetch hint as soon as it is complete: the error removes it anyway,
+		// and hints kept until the report could fill the buffer and push the
+		// reason out of it.
+		this.#redacted = stripTrailingFetchAdvice(this.#redacted + this.#redactWord());
 		if (this.#redacted.length > 2 * STDERR_TAIL_CHARS) this.#redacted = this.#redacted.slice(-STDERR_TAIL_CHARS);
 		const separator = this.#context.length === 0 ? "" : this.#separator;
 		this.#context.push(`${separator}${this.#word.slice(-STDERR_CONTEXT_WORD_CHARS)}`);

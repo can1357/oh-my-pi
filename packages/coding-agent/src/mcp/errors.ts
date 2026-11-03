@@ -38,14 +38,32 @@ const MAX_TRACE_ID_CHARS = 128;
 const MAX_DATA_STRING_CHARS = 256;
 const MAX_DATA_DEPTH = 5;
 const MAX_DATA_ENTRIES = 30;
+/** Bun's fetch hint, lowercased and without its final period. */
+const FETCH_VERBOSE_ADVICE = "for more information, pass `verbose: true` in the second argument to fetch()";
+
 /**
- * Bun's fetch hint at the end of an error, once or repeated (a stderr tail can
- * hold several): all of it goes in one pass, so redaction is idempotent and a
- * caller that budgets text after redacting it never loses room to a hint the
- * error later drops.
+ * `value` without Bun's fetch hint at its end, once or repeated (a stderr tail
+ * can hold several), with the whitespace around it: all of it goes in one pass,
+ * so redaction is idempotent and a caller that budgets text after redacting it
+ * never loses room to a hint the error later drops. Linear: it compares fixed
+ * suffixes only, so a long error with near-miss hints costs no backtracking.
  */
-const FETCH_VERBOSE_ADVICE =
-	/(?:\s*For more information, pass `verbose: true` in the second argument to fetch\(\)\.?)+\s*$/i;
+export function stripTrailingFetchAdvice(value: string): string {
+	let end = value.length;
+	let stripped = false;
+	for (;;) {
+		let cut = end;
+		while (cut > 0 && /\s/.test(value[cut - 1]!)) cut--;
+		if (cut > 0 && value[cut - 1] === ".") cut--;
+		const start = cut - FETCH_VERBOSE_ADVICE.length;
+		if (start < 0 || value.slice(start, cut).toLowerCase() !== FETCH_VERBOSE_ADVICE) break;
+		end = start;
+		stripped = true;
+	}
+	if (!stripped) return value;
+	while (end > 0 && /\s/.test(value[end - 1]!)) end--;
+	return value.slice(0, end);
+}
 // Substring match, not exact: compound names (`client_secret`, `clientSecret`,
 // `private_key`, `signingSecret`, `access_token`) must classify as secrets so
 // their values never reach the exposed `data:` diagnostic.
@@ -115,8 +133,7 @@ function errorCode(error: unknown): string | number | undefined {
  */
 export function redactDiagnosticText(value: string): string {
 	return (
-		value
-			.replace(FETCH_VERBOSE_ADVICE, "")
+		stripTrailingFetchAdvice(value)
 			// A credential is token68 and never contains `"`; `Bearer name="…"` is a
 			// WWW-Authenticate challenge whose params (resource_metadata, scope, error)
 			// drive OAuth discovery, so leave it intact.
