@@ -1028,7 +1028,7 @@ describe("kernel restart notice claim", () => {
 	});
 
 	for (const disposal of ["disposeAll", "disposeByOwner"] as const) {
-		it(`does not give the notice after ${disposal} restores a record whose shutdown was unconfirmed`, async () => {
+		it(`does not give the notice after ${disposal} when the kernel's shutdown was unconfirmed`, async () => {
 			const { kernels, registry, cell } = claimingRegistry({ unconfirmedShutdown: true });
 			try {
 				expect(await cell("first", { kernelOwnerId: "owner" })).toBe("none");
@@ -1043,4 +1043,33 @@ describe("kernel restart notice claim", () => {
 			}
 		});
 	}
+
+	it("tells no other agent its kernel died when an unconfirmed reclaim puts the record back", async () => {
+		// Failure mode: a reclaim whose shutdown did not confirm puts its session
+		// record back under its key, still remembering the reclaimed kernel as
+		// the one it served. A second agent's first cell on that key then read
+		// the replacement as a kernel that had died and was told its state was
+		// gone — state it never had. The owner the reclaim took state from is
+		// told by the reclaim line, once, and not by the restart line as well.
+		setSupersededKernelGraceMs(TEST_GRACE_MS);
+		const { kernels, registry, cell } = claimingRegistry({ unconfirmedShutdown: true });
+		try {
+			expect(await cell("owner's first cell", { kernelOwnerId: "owner" })).toBe("none");
+			// The owner moves away, and the kernel it left is reclaimed without a
+			// confirmed exit.
+			await registry.executeOnSession("elsewhere", "/tmp", { sessionId: "elsewhere", kernelOwnerId: "owner" });
+			await settleGrace();
+			expect(kernels[0]?.shutdowns).toBe(1);
+			expect(kernels[0]?.alive).toBe(false);
+
+			expect(await cell("another agent's first cell", { kernelOwnerId: "another" })).toBe("none");
+			const back = await cell("owner returns", { kernelOwnerId: "owner" });
+			expect(back).toStartWith("Kernel restarted: the previous Test kernel for /tmp was reclaimed");
+			expect(await cell("owner again", { kernelOwnerId: "owner" })).toBe("none");
+		} finally {
+			setSupersededKernelGraceMs();
+			for (const kernel of kernels) kernel.shutdown = FakeKernel.prototype.shutdown;
+			await registry.disposeAll();
+		}
+	});
 });

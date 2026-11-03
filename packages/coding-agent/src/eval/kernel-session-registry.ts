@@ -212,9 +212,10 @@ export function createKernelSessionRegistry<
 	const retained = new Set<TSession>();
 	/**
 	 * The kernel each session record's latest started cell ran on. A cell on a
-	 * different live kernel means the one before it died; an intentional
-	 * teardown — a reclaim, a disposal — drops the entry, so the replacement it
-	 * leads to is no surprise restart.
+	 * different kernel than the one recorded means that one died. A record a
+	 * disposal takes down is never served again, so it needs no forgetting; a
+	 * reclaim whose shutdown did not confirm puts its record back under its key
+	 * (see {@link keepUnconfirmed}), so a reclaim forgets the entry itself.
 	 */
 	const servedKernels = new WeakMap<TSession, TKernel>();
 
@@ -485,8 +486,9 @@ export function createKernelSessionRegistry<
 		// step, not after the shutdown, and nothing that settles later writes
 		// it again.
 		recordReclaimedKernel(key, session);
-		// A reclaim is intentional: its own line explains what follows, and the
-		// replacement it leads to is no surprise restart.
+		// A reclaim is intentional, and an unconfirmed one puts this record back
+		// under its key: a cell there must not read the replacement as a kernel
+		// that died. The owners it took state from are told by the reclaim line.
 		servedKernels.delete(session);
 		const result = await settleShutdown(session, false);
 		if (result.status === "fulfilled" && result.value?.confirmed !== false) return "settled";
@@ -542,8 +544,6 @@ export function createKernelSessionRegistry<
 	 * attempt and stays retained until that I/O completes or is aborted.
 	 */
 	async function shutdownForDisposal(session: TSession): Promise<boolean> {
-		// A disposal is intentional, so a later replacement is no surprise restart.
-		servedKernels.delete(session);
 		const result = await settleShutdown(session, false);
 		if (result.status === "fulfilled" && result.value?.confirmed !== false) return true;
 		logger.warn(`${descriptor.languageLabel} kernel shutdown not confirmed`, {
