@@ -390,3 +390,61 @@ async fn run_cwd_moves_the_shell_and_rejects_missing_directories() {
 		.expect_err("a missing cwd fails the run");
 	assert!(err.to_string().contains("Failed to set cwd"), "{err}");
 }
+
+/// IPC pointers from host workers must not become child control channels.
+#[test]
+fn copy_env_skips_node_channel_vars() {
+	let entries = [
+		("NODE_CHANNEL_FD", "3"),
+		("NODE_CHANNEL_SERIALIZATION_MODE", "advanced"),
+		("OMP_CHANNEL_PROBE", "kept"),
+		("node_channel_fd", "posix-alias"),
+	];
+	let mut vars = HashMap::new();
+	copy_env_into(&mut vars, entries.into_iter().map(|(k, v)| (k.into(), v.into())));
+	assert!(!vars.contains_key("NODE_CHANNEL_FD"));
+	assert!(!vars.contains_key("NODE_CHANNEL_SERIALIZATION_MODE"));
+	assert_eq!(vars.get("OMP_CHANNEL_PROBE").map(String::as_str), Some("kept"));
+	assert_eq!(vars.contains_key("node_channel_fd"), !cfg!(windows));
+}
+
+#[test]
+fn node_ipc_channel_vars_match_platform_case_rules() {
+	assert!(is_node_ipc_channel_var("NODE_CHANNEL_FD"));
+	assert!(is_node_ipc_channel_var("NODE_CHANNEL_SERIALIZATION_MODE"));
+	assert!(!is_node_ipc_channel_var("NODE_CHANNEL_OTHER"));
+	assert_eq!(is_node_ipc_channel_var("node_channel_fd"), cfg!(windows));
+}
+
+/// Session overlays and per-command env must not restore filtered IPC pointers.
+#[tokio::test(flavor = "multi_thread")]
+async fn session_env_does_not_export_node_channel_vars() {
+	let dir = tempfile::tempdir().expect("probe directory");
+	let out = dir.path().join("probe");
+	let env = HashMap::from([
+		("NODE_CHANNEL_FD".to_owned(), "3".to_owned()),
+		("NODE_CHANNEL_SERIALIZATION_MODE".to_owned(), "advanced".to_owned()),
+		("OMP_CHANNEL_PROBE".to_owned(), "kept".to_owned()),
+	]);
+	let config = ShellConfig {
+		session_env:   Some(env.clone()),
+		snapshot_path: None,
+		minimizer:     None,
+		filesystem:    Fs::native(),
+	};
+	let mut session = create_session(&config).await.expect("create_session");
+	let command = format!(
+		"printf '%s|%s|%s' \"${{NODE_CHANNEL_FD-unset}}\" \
+		 \"${{NODE_CHANNEL_SERIALIZATION_MODE-unset}}\" \"$OMP_CHANNEL_PROBE\" > {}",
+		quote_arg(out.to_str().expect("utf8 probe path"))
+	);
+	session
+		.run_test(command, &TestStdio::null())
+		.await
+		.expect("run probe");
+	assert_eq!(fs::read_to_string(&out).expect("probe output"), "unset|unset|kept");
+	assert_eq!(command_env(Some(&env)), vec![(
+		BString::from("OMP_CHANNEL_PROBE"),
+		BString::from("kept")
+	)]);
+}
