@@ -32,8 +32,6 @@ const BUS_CALL_TIMEOUT_S = 25;
 /** How long a queued scope job may take to move the broker before the attempt counts as failed. */
 const MOVE_SETTLE_MS = 10_000;
 const MOVE_POLL_MS = 50;
-/** Rounds of moving descendants that were forked while an earlier round ran. */
-const DESCENDANT_ROUNDS = 5;
 const RETRY_BASE_MS = 5_000;
 const RETRY_MAX_MS = 300_000;
 
@@ -116,9 +114,14 @@ export async function cgroupOf(pid: number): Promise<string | undefined> {
 	return undefined;
 }
 
-/** Descendants of `root` that are still in `cgroup`. */
-async function descendantsIn(root: number, cgroup: string): Promise<number[]> {
-	const children = new Map<number, number[]>();
+interface ProcEntry {
+	ppid: number;
+	sid: number;
+}
+
+/** Parent and session of every process, from `/proc/<pid>/stat`. */
+async function processTable(): Promise<Map<number, ProcEntry>> {
+	const table = new Map<number, ProcEntry>();
 	for (const entry of await fsp.readdir("/proc")) {
 		const pid = Number(entry);
 		if (!Number.isInteger(pid) || pid <= 0) continue;
@@ -128,18 +131,41 @@ async function descendantsIn(root: number, cgroup: string): Promise<number[]> {
 		} catch {
 			continue;
 		}
-		// `pid (comm) state ppid ...`; comm may hold spaces and parentheses.
-		const ppid = Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[1]);
+		// `pid (comm) state ppid pgrp session ...`; comm may hold spaces,
+		// parentheses and newlines, so read the fields after the last `)`.
+		const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+		table.set(pid, { ppid: Number(fields[1]), sid: Number(fields[3]) });
+	}
+	return table;
+}
+
+/**
+ * This broker's processes still in a cgroup it has left: its descendants, and
+ * any process in its session or in the session of one of its children (a
+ * service started detached leads its own session). The session test finds a
+ * service's worker that was reparented when its parent exited.
+ */
+export async function leftBehind(self: number, left: ReadonlySet<string>): Promise<number[]> {
+	const table = await processTable();
+	const children = new Map<number, number[]>();
+	for (const [pid, { ppid }] of table) {
 		const siblings = children.get(ppid);
 		if (siblings) siblings.push(pid);
 		else children.set(ppid, [pid]);
 	}
-	const found: number[] = [];
-	const stack = [...(children.get(root) ?? [])];
+	const ours = new Set<number>();
+	const stack = [...(children.get(self) ?? [])];
 	while (stack.length > 0) {
 		const pid = stack.pop() as number;
-		if ((await cgroupOf(pid)) === cgroup) found.push(pid);
+		ours.add(pid);
 		stack.push(...(children.get(pid) ?? []));
+	}
+	const sessions = new Set([self, ...(children.get(self) ?? [])]);
+	for (const [pid, { sid }] of table) if (pid !== self && sessions.has(sid)) ours.add(pid);
+	const found: number[] = [];
+	for (const pid of ours) {
+		const cgroup = await cgroupOf(pid);
+		if (cgroup !== undefined && left.has(cgroup)) found.push(pid);
 	}
 	return found;
 }
@@ -156,89 +182,116 @@ function sleepUnlessAborted(ms: number, signal: AbortSignal): Promise<void> {
 	return promise;
 }
 
-/** One attempt to move this process, and its descendants left in its old cgroup, into `unit`. */
-async function moveOnce(
+/** Ask the manager to start `unit` holding this process, and wait until the process is in it. */
+async function moveSelf(
 	prefix: readonly string[],
 	unit: string,
 	oomPolicy: boolean,
 	signal: AbortSignal,
 ): Promise<BusResult> {
-	const self = process.pid;
-	const before = await cgroupOf(self);
-	if (!before) return { ok: false, error: "cannot read /proc/self/cgroup" };
-	const started = await busCall(prefix, startScopeArgs(unit, self, oomPolicy), signal);
+	const started = await busCall(prefix, startScopeArgs(unit, process.pid, oomPolicy), signal);
 	if (!started.ok) return started;
 	const deadline = Date.now() + MOVE_SETTLE_MS;
-	while (!(await cgroupOf(self))?.endsWith(`/${unit}`)) {
+	while (!(await cgroupOf(process.pid))?.endsWith(`/${unit}`)) {
 		if (signal.aborted) return { ok: false, error: "aborted" };
 		if (Date.now() >= deadline) return { ok: false, error: `the ${unit} job did not move the broker` };
 		await sleepUnlessAborted(MOVE_POLL_MS, signal);
 	}
-	// Daemons the broker started before the move stayed in the old cgroup. A
-	// daemon forked during a round lands in the old cgroup too, so sweep again.
-	for (let round = 0; round < DESCENDANT_ROUNDS; round++) {
-		const left = await descendantsIn(self, before);
-		if (left.length === 0) break;
-		const attached = await busCall(
-			prefix,
-			["AttachProcessesToUnit", "ssau", unit, "", String(left.length), ...left.map(String)],
-			signal,
-		);
-		if (!attached.ok)
-			logger.debug("Daemon broker could not move a daemon into its scope", { unit, error: attached.error });
-	}
-	return { ok: true, error: "" };
+	return started;
 }
 
-/** A running move of the broker into its own scope; see {@link moveBrokerIntoOwnScope}. */
-export interface BrokerScopeMove {
-	/** Settles when the first attempt has succeeded or failed. */
-	firstAttempt: Promise<void>;
-	/** Settles when the broker has moved, or the signal stopped the retries. */
-	done: Promise<void>;
+/**
+ * Move one left-behind process into the broker's scope: through the manager
+ * first, then by writing the scope's delegated `cgroup.procs` directly, which
+ * also works for a process the manager refuses (systemd cannot read the stat
+ * of a process whose name holds a newline).
+ */
+async function attach(
+	prefix: readonly string[],
+	unit: string,
+	cgroup: string,
+	pid: number,
+	signal: AbortSignal,
+): Promise<BusResult> {
+	const viaManager = await busCall(prefix, ["AttachProcessesToUnit", "ssau", unit, "", "1", String(pid)], signal);
+	if (viaManager.ok) return viaManager;
+	try {
+		await fsp.writeFile(path.join("/sys/fs/cgroup", cgroup, "cgroup.procs"), String(pid));
+		return { ok: true, error: "" };
+	} catch (error) {
+		return {
+			ok: false,
+			error: `${viaManager.error}; cgroup.procs: ${error instanceof Error ? error.message : String(error)}`,
+		};
+	}
 }
 
 /**
  * Move this process — a dedicated broker that holds its scope's lease — into a
- * fresh transient systemd user scope, retrying with backoff until the user
- * manager answers or `signal` aborts. Undefined where no user manager can be
- * reached; the broker then stays where it started, as on other platforms.
+ * fresh transient systemd user scope, then move every process of its own that
+ * is still in a cgroup it has left ({@link leftBehind}). Both steps retry with
+ * backoff until they finish or `signal` aborts. Every cgroup the broker was in
+ * when an attempt began counts as left, so a move whose reply was lost (the
+ * broker landed in an earlier attempt's scope) still reconciles its daemons.
+ * Undefined where no user manager can be reached; the broker then stays where
+ * it started, as on other platforms.
  */
-export function moveBrokerIntoOwnScope(signal: AbortSignal): BrokerScopeMove | undefined {
+export function moveBrokerIntoOwnScope(signal: AbortSignal): Promise<void> | undefined {
 	const prefix = userManagerBusctl(process.env);
 	if (!prefix) return undefined;
-	const first = Promise.withResolvers<void>();
-	const done = (async () => {
+	return (async () => {
+		const left = new Set<string>();
+		let unit: string | undefined;
 		let oomPolicy = true;
 		let delay = RETRY_BASE_MS;
 		let warned = false;
-		try {
-			while (!signal.aborted) {
-				const unit = `${BROKER_SCOPE_UNIT_PREFIX}${process.pid}-${crypto.randomUUID().slice(0, 8)}.scope`;
-				const result = await moveOnce(prefix, unit, oomPolicy, signal);
-				first.resolve();
-				if (result.ok) {
-					logger.debug("Daemon broker moved into a systemd scope of its own", { unit });
-					return;
-				}
-				if (signal.aborted) return;
-				// systemd before 253 cannot set OOMPolicy on a scope.
-				if (oomPolicy && result.error.includes("OOMPolicy")) {
-					oomPolicy = false;
-					continue;
-				}
-				const log = warned ? logger.debug : logger.warn;
-				log("Daemon broker could not move into a systemd scope of its own; retrying", {
-					error: result.error,
-					retryInMs: delay,
-				});
-				warned = true;
-				await sleepUnlessAborted(delay, signal);
-				delay = Math.min(delay * 2, RETRY_MAX_MS);
+		const retryLater = async (message: string, error: string): Promise<void> => {
+			(warned ? logger.debug : logger.warn)(message, { error, retryInMs: delay });
+			warned = true;
+			await sleepUnlessAborted(delay, signal);
+			delay = Math.min(delay * 2, RETRY_MAX_MS);
+		};
+		while (!signal.aborted && unit === undefined) {
+			const current = await cgroupOf(process.pid);
+			if (current !== undefined) left.add(current);
+			const candidate = `${BROKER_SCOPE_UNIT_PREFIX}${process.pid}-${crypto.randomUUID().slice(0, 8)}.scope`;
+			const result = await moveSelf(prefix, candidate, oomPolicy, signal);
+			if (result.ok) {
+				unit = candidate;
+				break;
 			}
-		} finally {
-			first.resolve();
+			if (signal.aborted) return;
+			// systemd before 253 cannot set OOMPolicy on a scope.
+			if (oomPolicy && result.error.includes("OOMPolicy")) {
+				oomPolicy = false;
+				continue;
+			}
+			await retryLater("Daemon broker could not move into a systemd scope of its own; retrying", result.error);
+		}
+		if (unit === undefined) return;
+		delay = RETRY_BASE_MS;
+		warned = false;
+		// Daemons started before the move stayed behind, and a process forked
+		// there while this runs lands there too: sweep until none is left. The
+		// broker's own cgroup is read every round, because a scope request whose
+		// reply was lost can still be carried out after a later one.
+		while (!signal.aborted) {
+			const target = await cgroupOf(process.pid);
+			if (target === undefined) return;
+			left.delete(target);
+			const stragglers = await leftBehind(process.pid, left);
+			if (stragglers.length === 0) {
+				logger.debug("Daemon broker moved into a systemd scope of its own", { cgroup: target });
+				return;
+			}
+			const errors: string[] = [];
+			for (const pid of stragglers) {
+				const attached = await attach(prefix, path.basename(target), target, pid, signal);
+				if (!attached.ok) errors.push(`${pid}: ${attached.error}`);
+			}
+			left.add(target);
+			if (errors.length > 0)
+				await retryLater("Daemon broker could not move its daemons into its scope; retrying", errors.join("\n"));
 		}
 	})();
-	return { firstAttempt: first.promise, done };
 }

@@ -79,13 +79,13 @@ async function withSpawnedBroker(check: (broker: SpawnedBroker) => Promise<void>
 	}
 }
 
-async function startSleeper(broker: SpawnedBroker): Promise<number> {
+async function startSleeper(broker: SpawnedBroker, script = "sleep 60"): Promise<number> {
 	const started = await broker.client.request({
 		op: "start",
 		spec: {
 			name: "sleeper",
 			application: "/bin/sh",
-			args: ["-c", "sleep 60"],
+			args: ["-c", script],
 			env: {},
 			cwd: broker.projectDir,
 			pty: false,
@@ -220,4 +220,98 @@ describe.skipIf(!isLinux)("daemon broker scope", () => {
 		},
 		40_000,
 	);
+
+	it.skipIf(!userManagerAnswers() || !realBusctl)(
+		"moves a service's reparented worker, and moves processes the manager refuses through cgroup.procs",
+		async () => {
+			using tempDir = TempDir.createSync("@omp-broker-scope-orphan-");
+			const count = path.join(tempDir.path(), "calls");
+			// The first move fails; every AttachProcessesToUnit fails as it does for a process systemd
+			// cannot read; other calls reach the real manager.
+			const bin = await fakeBusctl(
+				path.join(tempDir.path(), "bin"),
+				[
+					`echo x >> '${count}'`,
+					`case "$*" in *AttachProcessesToUnit*) echo 'Invalid argument' >&2; exit 1;; esac`,
+					`[ "$(wc -l < '${count}')" -gt 1 ] && exec '${realBusctl}' "$@"`,
+					"echo 'Connection timed out' >&2; exit 1",
+				].join("\n"),
+			);
+			await withEnv({ PATH: `${bin}:${process.env.PATH ?? ""}` }, () =>
+				withSpawnedBroker(async broker => {
+					const own = await cgroupOf(process.pid);
+					// The subshell exits at once, so its `sleep 61` is reparented away from the service.
+					const leader = await startSleeper(broker, "(sleep 61 &); exec sleep 60");
+					const orphan = await until(
+						async () => (await sessionMember(leader, "sleep\u000061\u0000")) !== undefined,
+						5_000,
+					);
+					expect(orphan).toBe(true);
+					const worker = (await sessionMember(leader, "sleep\u000061\u0000")) as number;
+					expect(await cgroupOf(worker)).toBe(own);
+					const moved = await until(
+						async () => path.basename((await cgroupOf(broker.pid)) ?? "").startsWith(BROKER_SCOPE_UNIT_PREFIX),
+						20_000,
+					);
+					expect(moved).toBe(true);
+					const brokerCgroup = await cgroupOf(broker.pid);
+					expect(await until(async () => (await cgroupOf(leader)) === brokerCgroup, 5_000)).toBe(true);
+					expect(await until(async () => (await cgroupOf(worker)) === brokerCgroup, 5_000)).toBe(true);
+					process.kill(worker, "SIGKILL");
+				}),
+			);
+		},
+		40_000,
+	);
+
+	it.skipIf(!userManagerAnswers() || !realBusctl)(
+		"reconciles daemons when a move was carried out but its reply was lost",
+		async () => {
+			using tempDir = TempDir.createSync("@omp-broker-scope-lost-");
+			const count = path.join(tempDir.path(), "calls");
+			// The first call stalls, then reaches the real manager but reports a timeout.
+			const bin = await fakeBusctl(
+				path.join(tempDir.path(), "bin"),
+				[
+					`echo x >> '${count}'`,
+					`[ "$(wc -l < '${count}')" -gt 1 ] && exec '${realBusctl}' "$@"`,
+					`sleep 6; '${realBusctl}' "$@" >/dev/null 2>&1; echo 'Connection timed out' >&2; exit 1`,
+				].join("\n"),
+			);
+			await withEnv({ PATH: `${bin}:${process.env.PATH ?? ""}` }, () =>
+				withSpawnedBroker(async broker => {
+					const own = await cgroupOf(process.pid);
+					// The broker serves at once, before the stalled call lands.
+					const sleeper = await startSleeper(broker);
+					expect(await cgroupOf(sleeper)).toBe(own);
+					const settled = await until(async () => {
+						const brokerCgroup = await cgroupOf(broker.pid);
+						return (
+							(await fs.readFile(count, "utf8")).trim().split("\n").length > 1 &&
+							path.basename(brokerCgroup ?? "").startsWith(BROKER_SCOPE_UNIT_PREFIX) &&
+							(await cgroupOf(sleeper)) === brokerCgroup
+						);
+					}, 30_000);
+					expect(settled).toBe(true);
+				}),
+			);
+		},
+		50_000,
+	);
 });
+
+/** A process in `leader`'s session whose command line is `cmdline`. */
+async function sessionMember(leader: number, cmdline: string): Promise<number | undefined> {
+	for (const entry of await fs.readdir("/proc")) {
+		const pid = Number(entry);
+		if (!Number.isInteger(pid) || pid === leader) continue;
+		try {
+			if ((await fs.readFile(`/proc/${pid}/cmdline`, "utf8")) !== cmdline) continue;
+			const stat = await fs.readFile(`/proc/${pid}/stat`, "utf8");
+			if (Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[3]) === leader) return pid;
+		} catch {
+			// Gone.
+		}
+	}
+	return undefined;
+}

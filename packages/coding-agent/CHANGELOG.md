@@ -9,7 +9,7 @@
 
 ### Fixed
 
-- On Linux with a systemd user manager, the daemon broker now moves itself into a transient systemd scope of its own (`omp-daemon-broker-*.scope`) instead of staying in the cgroup of the omp session that started it. Before, stopping that session's scope (a terminal tab's or tmux pane's scope, a `systemd-run --scope` launcher, logind ending the login, `systemd-oomd`) killed the broker and every other session's named services with it, and the broker and those services counted against that one session's memory limit. When the user manager is slow, the broker serves at once and keeps retrying, taking the services it started meanwhile with it; without a user bus it stays where it started ([#17963](https://github.com/can1357/oh-my-pi/pull/17963) by [@sjawhar](https://github.com/sjawhar))
+- On Linux with a systemd user manager, the daemon broker now moves itself into a transient systemd scope of its own (`omp-daemon-broker-*.scope`), together with the services it already runs, instead of staying in the cgroup of the omp session that started it. Before, stopping that session's scope (a terminal tab's or tmux pane's scope, a `systemd-run --scope` launcher, logind ending the login, `systemd-oomd`) killed the broker and every other session's named services with it, and the broker and those services counted against that one session's memory limit. The move runs in the background and retries while the user manager is slow; without a user bus the broker stays where it started ([#17963](https://github.com/can1357/oh-my-pi/pull/17963) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.16.0] - 2026-11-02
 

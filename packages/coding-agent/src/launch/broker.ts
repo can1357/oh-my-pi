@@ -58,11 +58,6 @@ const RESTART_BACKOFF_BASE_MS = 1_000;
  */
 const ENDPOINT_CHECK_MS = 5_000;
 /**
- * How long a dedicated broker waits for its first move into a scope of its own
- * before it starts listening anyway (see `broker-scope.ts`).
- */
-const FIRST_SCOPE_ATTEMPT_WAIT_MS = 2_000;
-/**
  * Cap on terminal (exited/failed) daemons surfaced by `list`. Active daemons
  * are always shown in full; older history is truncated so the response stays
  * bounded over a long-lived project (issue #6517).
@@ -1658,20 +1653,18 @@ export async function startDaemonBrokerFromEnvironment(options: DaemonBrokerStar
 		restartBackoffBaseMs,
 		options.endpointCheckMs ?? ENDPOINT_CHECK_MS,
 	);
-	// A dedicated broker leaves the cgroup of the session that spawned it
-	// (broker-scope.ts). The first attempt normally lands before any client can
-	// start a daemon; a slow user manager only delays listening this long, and
-	// later attempts move the daemons started meanwhile.
+	// A dedicated broker leaves the cgroup of the session that spawned it, in the
+	// background so that a slow user manager never delays clients; daemons it
+	// starts before the move are moved after it (broker-scope.ts).
 	const scopeAbort = new AbortController();
 	const scopeMove = options.ownScope ? moveBrokerIntoOwnScope(scopeAbort.signal) : undefined;
-	if (scopeMove) await Promise.race([scopeMove.firstAttempt, Bun.sleep(FIRST_SCOPE_ATTEMPT_WAIT_MS)]);
 	const cancelCleanup = postmortem.register("daemon-broker", () => broker.shutdown());
 	try {
 		await broker.run(options.onListening);
 	} finally {
 		cancelCleanup();
 		scopeAbort.abort();
-		await scopeMove?.done;
+		await scopeMove;
 		await releaseBrokerLease(lease);
 	}
 }
