@@ -442,6 +442,22 @@ impl AsyncOut {
 		}
 	}
 
+	/// Applies the program's standard-output stdio `calls` (see
+	/// `Host::account_stdout_by_calls`), made after their bytes were written
+	/// here: a call that writes to the descriptor makes the pending bytes
+	/// owed at once, so a pipe with no reader kills the utility before it
+	/// goes on to its next action.
+	pub(crate) fn stdio_calls(&self, calls: &[crate::stdio_buffer::StdioCall]) {
+		let mut writes = false;
+		for &call in calls {
+			writes |= self.shared.gate.stdio_call(call);
+		}
+		if writes && !self.shared.pending.lock().is_empty() {
+			self.shared.at_once.store(true, Ordering::Release);
+			self.shared.owed.store(true, Ordering::Release);
+		}
+	}
+
 	/// Whether writes to this stream fail (see `OutputGate::fails`).
 	pub(crate) fn fails(&self) -> bool {
 		self.shared.gate.fails()

@@ -66,7 +66,11 @@ use brush_core::{
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::stdio::{AsyncOut, Source};
+pub(crate) use crate::stdio_buffer::StdioCall;
+use crate::{
+	stdio::{AsyncOut, Source},
+	stdio_buffer::StdioBuffer,
+};
 
 /// A command-line utility implemented as a shell builtin.
 ///
@@ -220,6 +224,11 @@ pub(crate) struct Host {
 	/// same serialized writer [`Host::stdout_writer`] returns, so interleaving
 	/// follows write order exactly.
 	pub stderr: StreamWriter,
+	/// The command's standard error as the file itself, outside the SIGPIPE
+	/// guard: what a child the utility starts writes (see
+	/// [`Host::child_env`]), whose failed write is the child's, not the
+	/// utility's.
+	child_stderr:          OpenFile,
 	/// Whether stdout is a regular file, sampled before the SIGPIPE guard hid
 	/// its descriptor; picks [`Host::stdout_writer`]'s buffering.
 	stdout_is_file:        bool,
@@ -360,9 +369,13 @@ pub(crate) struct Sigpipe {
 	/// [`Utility::STDOUT_BUFFER`] of the utility, 0 once it unbuffered its
 	/// standard output ([`Host::unbuffer_stdout`]).
 	stdout_buffer:   AtomicUsize,
-	/// Bytes in the program's standard-output buffer: written since its last
-	/// write to the descriptor (see [`Sigpipe::wrote_stdout`]).
-	stdout_buffered: AtomicUsize,
+	/// The program's standard-output buffer, packed (see
+	/// [`StdioBuffer::pack`]): which of its writes reach the descriptor.
+	stdout_stdio:    AtomicUsize,
+	/// The utility reports its standard-output stdio calls itself (see
+	/// [`Host::account_stdout_by_calls`]): bytes written to standard output
+	/// are not counted as calls.
+	calls_accounted: AtomicBool,
 	/// A write found standard output's reader gone: the program dies of it at
 	/// its next write to the descriptor (see [`Sigpipe::program_wrote`]).
 	stdout_broken:   AtomicBool,
@@ -408,7 +421,8 @@ impl Sigpipe {
 			hit: AtomicBool::new(false),
 			ignored: AtomicBool::new(ignored),
 			stdout_buffer: AtomicUsize::new(stdout_buffer),
-			stdout_buffered: AtomicUsize::new(0),
+			stdout_stdio: AtomicUsize::new(StdioBuffer::default().pack()),
+			calls_accounted: AtomicBool::new(false),
 			stdout_broken: AtomicBool::new(false),
 			stdout_failing: AtomicBool::new(false),
 			failed_ignored: AtomicU8::new(0),
@@ -454,40 +468,35 @@ impl Sigpipe {
 		}
 	}
 
-	/// The program flushed its standard output: a buffer holding bytes is
-	/// written to the descriptor now (see [`Sigpipe::program_wrote`]); an
-	/// empty one writes nothing.
+	/// The program flushed its standard output (see [`Sigpipe::stdio_call`]).
 	fn flushed_stdout(&self) {
-		if self.stdout_buffered.swap(0, Ordering::Relaxed) > 0 {
-			self.program_wrote();
-		}
+		self.stdio_call(StdioCall::Flush);
 	}
 
-	/// Counts `n` bytes the program wrote to standard output. glibc copies a
-	/// write into the buffer and writes the buffer to the descriptor once a
-	/// write overflows it (one that only fills it writes nothing yet), then
-	/// writes whole blocks of the rest at once and keeps the remainder
-	/// buffered. Returns whether the program writes to the descriptor now
-	/// (every write, for a program that writes unbuffered); see
-	/// [`Sigpipe::program_wrote`].
+	/// Counts `n` bytes the port wrote to standard output, as one `printf` of
+	/// the program; nothing when the utility reports its calls itself (see
+	/// [`Host::account_stdout_by_calls`]). Returns whether the program writes
+	/// to the descriptor now.
 	fn wrote_stdout(&self, n: usize) -> bool {
-		if n == 0 {
-			return false;
-		}
+		!self.calls_accounted.load(Ordering::Relaxed) && self.stdio_call(StdioCall::Printf(n))
+	}
+
+	/// Applies one stdio call of the program to its standard-output buffer
+	/// (see [`StdioBuffer`]); a call that writes to the descriptor is where a
+	/// pipe with no reader kills it (see [`Sigpipe::program_wrote`]). Returns
+	/// whether the call writes to the descriptor.
+	fn stdio_call(&self, call: StdioCall) -> bool {
 		let cap = self.stdout_buffer.load(Ordering::Relaxed);
-		let writes = cap == 0 || {
-			let mut overflowed = false;
-			let _ = self.stdout_buffered.try_update(Ordering::Relaxed, Ordering::Relaxed, |buffered| {
-				let total = buffered + n;
-				overflowed = total > cap;
-				Some(if overflowed { (total - cap) % cap } else { total })
-			});
-			overflowed
-		};
-		if writes {
+		let mut written = 0;
+		let _ = self.stdout_stdio.try_update(Ordering::Relaxed, Ordering::Relaxed, |word| {
+			let mut buffer = StdioBuffer::unpack(word);
+			written = buffer.apply(cap, call);
+			Some(buffer.pack())
+		});
+		if written > 0 {
 			self.program_wrote();
 		}
-		writes
+		written > 0
 	}
 
 	/// Ends the utility body at once after a write that killed it, as SIGPIPE
@@ -600,6 +609,13 @@ impl OutputGate {
 	/// [`Sigpipe::wrote_stdout`]).
 	pub fn wrote(&self, n: usize) -> bool {
 		matches!(self.stream, GuardedStream::Stdout) && self.sigpipe.wrote_stdout(n)
+	}
+
+	/// Applies the program's standard-output stdio `call` (see
+	/// [`Host::account_stdout_by_calls`]). Returns whether it writes to the
+	/// descriptor.
+	pub fn stdio_call(&self, call: StdioCall) -> bool {
+		matches!(self.stream, GuardedStream::Stdout) && self.sigpipe.stdio_call(call)
 	}
 
 	/// Notes a failed write, flipping the SIGPIPE state on a closed reader. A
@@ -1233,6 +1249,15 @@ impl Host {
 		self.sigpipe.stdout_buffer.store(0, Ordering::Relaxed);
 	}
 
+	/// The utility reports the program's standard-output stdio calls itself
+	/// (`fwrite`, `printf`, `fflush`, through [`AsyncOut::stdio_calls`]),
+	/// so a pipe with no reader kills it at the call glibc would write at
+	/// (GNU find's `-printf` literal of a whole block); the bytes it writes
+	/// are not counted. Call before the first write.
+	pub fn account_stdout_by_calls(&self) {
+		self.sigpipe.calls_accounted.store(true, Ordering::Relaxed);
+	}
+
 	/// Ends the utility as a program does that finds its standard output's
 	/// reader gone without writing to it (GNU `tail -f`'s `die_pipe`, which
 	/// raises SIGPIPE, then exits 1): SIGPIPE kills it (status 141), or, when
@@ -1407,7 +1432,8 @@ impl Host {
 					.map(|(k, v)| (k.clone(), v.clone()))
 					.collect(),
 			),
-			stderr: self.stderr.dup_file(),
+			stderr: self.child_stderr.clone(),
+			sigpipe: Arc::clone(&self.sigpipe),
 		}
 	}
 
@@ -2182,6 +2208,29 @@ pub(crate) struct ChildEnv {
 	filesystem: BlockingFs,
 	env:    Arc<Vec<(String, String)>>,
 	stderr: OpenFile,
+	/// The utility's SIGPIPE: the disposition its children start with (see
+	/// [`ChildEnv::command`]) and what a write to a child's pipe raises (see
+	/// [`ChildEnv::pipe_writer`]).
+	sigpipe: Arc<Sigpipe>,
+}
+
+/// A writer onto the pipe to a child's standard input, written by the utility
+/// itself (`sort`'s compressor): a write that finds the child gone raises
+/// SIGPIPE in the utility, as the program's own write does (see
+/// [`file_write_errors`]).
+pub struct ChildPipe<W> {
+	inner:        W,
+	write_errors: pi_vfs::WriteErrors,
+}
+
+impl<W: Write> Write for ChildPipe<W> {
+	fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+		self.inner.write(buf).inspect_err(|error| self.write_errors.report(error))
+	}
+
+	fn flush(&mut self) -> io::Result<()> {
+		self.inner.flush().inspect_err(|error| self.write_errors.report(error))
+	}
 }
 
 fn native_working_dir<'a>(filesystem: &BlockingFs, cwd: &'a Path) -> io::Result<&'a Path> {
@@ -2197,6 +2246,11 @@ impl ChildEnv {
 	/// environment, and with the command's standard error (see
 	/// [`ChildEnv`]).
 	///
+	/// The child starts with the utility's SIGPIPE disposition, as a forked
+	/// child inherits its parent's: ignored under `trap '' PIPE`, and once
+	/// the utility ignores it itself (rsync's remote shell), else the default
+	/// action. (Rust's `Command` resets it to the default otherwise.)
+	///
 	/// Stdin and stdout are left untouched for the caller to wire; they default
 	/// to inherited, so a caller that leaves them alone MUST redirect them.
 	pub fn command(&self, program: impl AsRef<std::ffi::OsStr>) -> io::Result<std::process::Command> {
@@ -2207,6 +2261,18 @@ impl ChildEnv {
 			.env_clear()
 			.envs(self.env.iter().map(|(k, v)| (k, v)))
 			.stderr(self.child_stderr());
+		#[cfg(unix)]
+		if self.sigpipe.ignored.load(Ordering::Relaxed) {
+			use std::os::unix::process::CommandExt;
+			// SAFETY: the hook runs in the forked child before `exec` and only
+			// calls `signal`, which is async-signal-safe.
+			unsafe {
+				command.pre_exec(|| {
+					libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+					Ok(())
+				});
+			}
+		}
 		Ok(command)
 	}
 
@@ -2222,21 +2288,108 @@ impl ChildEnv {
 		std::process::Stdio::piped()
 	}
 
-	/// Drains a child's piped stderr into the command's standard error on a
-	/// helper thread.
+	/// Wraps the utility's end of a pipe to a child's standard input (see
+	/// [`ChildPipe`]).
+	pub fn pipe_writer<W: Write>(&self, inner: W) -> ChildPipe<W> {
+		ChildPipe { inner, write_errors: file_write_errors(&self.sigpipe) }
+	}
+
+	/// Drains `child`'s piped stderr (see [`ChildEnv::child_stderr`]) into the
+	/// command's standard error on a helper thread; `None` when the child
+	/// writes the command's standard error itself.
+	///
+	/// A delivery that finds a pipe with no reader is where the child's own
+	/// write would have raised SIGPIPE: the child is sent SIGPIPE then, and
+	/// the pipe is closed so its later writes raise it too. A provider-backed
+	/// standard error gives the child no descriptor to write, so the write
+	/// the delivery fails for has already returned in the child, which may
+	/// have gone on before the signal reaches it.
 	///
 	/// The returned handle should be joined once the child has exited, so the
 	/// diagnostic lands before the utility reports its own result. Dropping the
 	/// handle detaches the thread, which is only correct if nothing downstream
 	/// depends on the ordering.
-	pub fn forward_stderr(
-		&self,
-		mut child_stderr: std::process::ChildStderr,
-	) -> std::thread::JoinHandle<()> {
+	pub fn forward_stderr(&self, child: &mut std::process::Child) -> Option<std::thread::JoinHandle<()>> {
+		let mut child_stderr = child.stderr.take()?;
+		let signal = ChildSignal::new(child);
 		let mut stderr = self.stderr.clone();
-		std::thread::spawn(move || {
-			let _ = io::copy(&mut child_stderr, &mut stderr);
-		})
+		Some(std::thread::spawn(move || {
+			let mut buf = [0_u8; 8192];
+			loop {
+				let n = match child_stderr.read(&mut buf) {
+					Ok(0) => return,
+					Ok(n) => n,
+					Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+					Err(_) => return,
+				};
+				match stderr.write_all(&buf[..n]).and_then(|()| stderr.flush()) {
+					Ok(()) => {},
+					Err(error) => {
+						if error.kind() == io::ErrorKind::BrokenPipe {
+							signal.sigpipe();
+						}
+						return;
+					},
+				}
+			}
+		}))
+	}
+}
+
+/// A handle to signal a child the utility started, valid until it is reaped
+/// (a pidfd on Linux, so a reaped child's reused pid is never signalled).
+struct ChildSignal {
+	#[cfg(target_os = "linux")]
+	pidfd: Option<std::os::fd::OwnedFd>,
+	#[cfg(all(unix, not(target_os = "linux")))]
+	pid:   libc::pid_t,
+}
+
+impl ChildSignal {
+	fn new(child: &std::process::Child) -> Self {
+		#[cfg(target_os = "linux")]
+		{
+			use std::os::fd::FromRawFd;
+			// SAFETY: `pidfd_open` takes a pid and flags and returns a new
+			// descriptor or -1; the child is unreaped, so the pid is its own.
+			let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, child.id() as libc::pid_t, 0) };
+			// SAFETY: a non-negative result is a descriptor this call opened.
+			let pidfd = (fd >= 0).then(|| unsafe { std::os::fd::OwnedFd::from_raw_fd(fd as i32) });
+			Self { pidfd }
+		}
+		#[cfg(all(unix, not(target_os = "linux")))]
+		{
+			Self { pid: child.id() as libc::pid_t }
+		}
+		#[cfg(not(unix))]
+		{
+			let _ = child;
+			Self {}
+		}
+	}
+
+	/// Sends the child SIGPIPE.
+	fn sigpipe(&self) {
+		#[cfg(target_os = "linux")]
+		if let Some(pidfd) = &self.pidfd {
+			use std::os::fd::AsRawFd;
+			// SAFETY: `pidfd_send_signal` on a descriptor we own, with no
+			// siginfo and no flags.
+			unsafe {
+				libc::syscall(
+					libc::SYS_pidfd_send_signal,
+					pidfd.as_raw_fd(),
+					libc::SIGPIPE,
+					std::ptr::null::<libc::siginfo_t>(),
+					0,
+				);
+			}
+		}
+		#[cfg(all(unix, not(target_os = "linux")))]
+		// SAFETY: `kill` with a pid and a signal number.
+		unsafe {
+			libc::kill(self.pid, libc::SIGPIPE);
+		}
 	}
 }
 
@@ -3194,6 +3347,7 @@ fn build_host<SE: ShellExtensions>(context: &ExecutionContext<'_, SE>, spec: Spe
 	let stdout = or_null(context.try_fd(OpenFiles::STDOUT_FD))?;
 	let stdout_handle = if checks_stdout_path { output_handle(&stdout) } else { None };
 	let stderr_file = or_null(context.try_fd(OpenFiles::STDERR_FD))?;
+	let child_stderr = stderr_file.clone();
 	// Classified before the SIGPIPE guard wraps them: the guard is an opaque
 	// stream, so a file behind it can no longer be told from a pipe on
 	// Windows, and one sample per stream serves every writer below.
@@ -3273,6 +3427,7 @@ fn build_host<SE: ShellExtensions>(context: &ExecutionContext<'_, SE>, spec: Spe
 		},
 		stdout,
 		stderr,
+		child_stderr,
 		stdout_is_file: stdout_destination.regular_file,
 		stdout_handle,
 		stdout_metadata: OnceLock::new(),
@@ -3493,7 +3648,7 @@ mod testing {
 			let stderr_writer = match &async_out {
 				Some(streams) => StreamWriter::Async(streams.stderr.clone()),
 				None => StreamWriter::line(SigpipeGuard::wrap(
-					stderr,
+					stderr.clone(),
 					GuardedStream::Stderr,
 					&sigpipe,
 					&command_cancel,
@@ -3512,6 +3667,7 @@ mod testing {
 					&command_cancel,
 				),
 				stderr:                stderr_writer,
+				child_stderr:          stderr,
 				stdout_is_file:        false,
 				stdout_handle:         None,
 				stdout_metadata:       Default::default(),

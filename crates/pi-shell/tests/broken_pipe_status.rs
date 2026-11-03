@@ -1621,7 +1621,7 @@ async fn a_utility_writes_its_buffer_when_a_write_overflows_it() {
 		r#": > v3; ( fill; find v3 -printf '%4095s' -delete >&3; echo "find-4095=$? $(made v3)" ) 3> >(true)"#,
 		r#": > v4; ( fill; find v4 -printf '%8192s' -delete >&3; echo "find-8192=$? $(made v4)" ) 3> >(true)"#,
 		r#"mkdir fl; : > fl/a; : > fl/b"#,
-		r#"( find fl/a fl/b -name a -printf 'abc\c' -exec sh -c 'while [ ! -e gone ]; do sleep 0.05; done' \; -o -name b -printf '%4093s' -delete >&3; echo "find-flush-then=$? $(made fl/b)" ) 3> >(head -c 3 > /dev/null; touch gone)"#,
+		r#"( find fl/a fl/b -name a -printf 'abc\c' -exec sh -c 'trap "" PIPE; while printf x 2>/dev/null; do sleep 0.05; done' \; -o -name b -printf '%4093s' -delete >&3; echo "find-flush-then=$? $(made fl/b)" ) 3> >(head -c 3 > /dev/null)"#,
 	])
 	.await;
 	assert_eq!(exit_code, Some(0), "{output}");
@@ -1790,4 +1790,240 @@ async fn rsync_pulls_end_at_a_dead_stderr_as_rsync_does() {
 			"ignored out rsync-pull=0 copied=40\n",
 		)
 	);
+}
+
+/// `find` writes its output as GNU find's stdio calls, so a pipe with no
+/// reader kills it at the call glibc writes at: a `-printf` literal is one
+/// `fwrite`, which writes a whole first block at once, while a directive is
+/// one `printf` of the literal before it and its value, which only fills the
+/// buffer; an escape or `%%` ends a literal's `fwrite`; `\c` writes, flushes
+/// and ends the format. The same for `-fprintf` to a file. Measured against
+/// findutils 4.9.0 under Bash 5.2.21 (`yes` is the victim kept, the death
+/// before `-delete`). Regression: every shape died only past a whole block,
+/// and `\c` went on with the rest of the format.
+#[tokio::test(flavor = "multi_thread")]
+async fn find_writes_its_output_as_gnu_finds_stdio_calls() {
+	let (exit_code, output) = run_in_tempdir(&[
+		r#"made() { [ -e "$1" ] && echo yes || echo no; }"#,
+		r#"xs() { /usr/bin/head -c "$1" /dev/zero | /usr/bin/tr '\0' x; }"#,
+		r#"for n in 4095 4096 4097 8192; do"#,
+		r#"  literal=$(xs "$n")"#,
+		r#"  for kind in stdout file; do"#,
+		r#"    : > victim"#,
+		r#"    ( fill"#,
+		r#"      if [ "$kind" = stdout ]; then find victim -printf "$literal" -delete >&3; else find victim -fprintf /dev/fd/3 "$literal" -delete; fi"#,
+		r#"      printf '%s ' "$(made victim)" ) 3> >(true) 2>/dev/null"#,
+		r#"    : > victim"#,
+		r#"    ( fill"#,
+		r#"      if [ "$kind" = stdout ]; then find victim -printf "%${n}s" -delete >&3; else find victim -fprintf /dev/fd/3 "%${n}s" -delete; fi"#,
+		r#"      printf '%s ' "$(made victim)" ) 3> >(true) 2>/dev/null"#,
+		r#"  done"#,
+		r#"done; echo"#,
+		r#"literal=$(xs 4095)"#,
+		r#": > victim; ( fill; find victim -printf "$literal\n" -delete >&3; printf '%s ' "$(made victim)" ) 3> >(true) 2>/dev/null"#,
+		r#": > victim; ( fill; find victim -printf "$literal%%" -delete >&3; printf '%s ' "$(made victim)" ) 3> >(true) 2>/dev/null"#,
+		r#": > victim; ( fill; find victim -printf "$literal%p" -delete >&3; printf '%s ' "$(made victim)" ) 3> >(true) 2>/dev/null"#,
+		r#": > victim; ( fill; find victim -printf "%p$(xs 4096)" -delete >&3; printf '%s ' "$(made victim)" ) 3> >(true) 2>/dev/null"#,
+		r#"echo; find . -maxdepth 0 -printf 'a\cb%p\n'; echo "<stop=$?""#,
+	])
+	.await;
+	assert_eq!(exit_code, Some(0), "{output}");
+	assert_eq!(
+		output,
+		concat!(
+			"no no no no yes no yes no yes yes yes yes yes yes yes yes \n",
+			"yes yes yes yes \n",
+			"a<stop=0\n",
+		)
+	);
+}
+
+/// `sed`'s `w` files follow glibc's `fwrite` (a line and its newline are two
+/// calls; one that only fills the buffer writes nothing; a first call of a
+/// whole block writes it at once), and at exit `sed` closes them newest
+/// first. Measured against sed 4.9 under Bash 5.2.21 (`status:bytes` of the
+/// live file). Regression: a full block was written at once, killing `sed`
+/// before its next `w`, and the files closed oldest first.
+#[tokio::test(flavor = "multi_thread")]
+async fn sed_w_files_follow_glibcs_fwrite() {
+	let (exit_code, output) = run_in_tempdir(&[
+		r#"xs() { /usr/bin/head -c "$1" /dev/zero | /usr/bin/tr '\0' x; }"#,
+		r#"for n in 4094 4095 4096 8192; do"#,
+		r#"  xs "$n" > input; printf '\n' >> input"#,
+		r#"  for disp in default ignored; do"#,
+		r#"    rm -f copy"#,
+		r#"    ( [ "$disp" = ignored ] && trap '' PIPE; fill; sed -n $'w /dev/fd/3\nw copy' input; printf '%s:%s ' "$?" "$(wc -c < copy)" ) 3> >(true) 2>/dev/null"#,
+		r#"  done"#,
+		r#"done; echo"#,
+		r#"for k in 2047 2048 2049; do"#,
+		r#"  /usr/bin/yes x | /usr/bin/head -n "$k" > input"#,
+		r#"  rm -f copy; ( fill; sed -n $'w /dev/fd/3\nw copy' input; printf '%s:%s ' "$?" "$(wc -c < copy)" ) 3> >(true) 2>/dev/null"#,
+		r#"done; echo"#,
+	])
+	.await;
+	assert_eq!(exit_code, Some(0), "{output}");
+	assert_eq!(
+		output,
+		concat!(
+			"141:4095 4:4095 141:4096 4:4096 141:0 4:0 141:0 4:0 \n",
+			"141:4094 141:4096 141:0 \n"
+		)
+	);
+}
+
+/// At exit `sed` closes its `w` files newest first, then standard output;
+/// `find` closes its output files in its table's hash order (`(st_dev ^
+/// st_ino) % 13`, computed here from `stat`), then standard output. A pipe
+/// with no reader kills them at its close, the files after it unwritten;
+/// with SIGPIPE ignored all are written. Measured against sed 4.9 and
+/// findutils 4.9.0 under Bash 5.2.21 (`status:bytes`, `hashed` when `copy`
+/// got its byte as the hash order says). Regression: both closed oldest
+/// first.
+#[tokio::test(flavor = "multi_thread")]
+async fn utilities_close_their_output_files_in_gnu_order() {
+	let (exit_code, output) = run_in_tempdir(&[
+		r#"for disp in default ignored; do"#,
+		r#"  for order in first last; do"#,
+		r#"    rm -f copy; printf 'x\n' > input"#,
+		r#"    ( [ "$disp" = ignored ] && trap '' PIPE; fill"#,
+		r#"      if [ "$order" = first ]; then sed -n $'w /dev/fd/3\nw copy' input; else sed -n $'w copy\nw /dev/fd/3' input; fi"#,
+		r#"      printf 'sed:%s:%s ' "$?" "$(wc -c < copy)" ) 3> >(true) 2>/dev/null"#,
+		r#"    : > copy; : > victim"#,
+		r#"    ( [ "$disp" = ignored ] && trap '' PIPE; fill"#,
+		r#"      set -- $(stat -L -c '%d %i' /dev/fd/3) $(stat -c '%d %i' copy)"#,
+		r#"      p=$(( ($1 ^ $2) % 13 )); c=$(( ($3 ^ $4) % 13 ))"#,
+		r#"      if [ "$order" = first ]; then"#,
+		r#"        find victim -fprintf /dev/fd/3 x -fprintf copy y -delete"#,
+		r#"        s=$?; [ "$c" -lt "$p" ] && e=1 || e=0"#,
+		r#"      else"#,
+		r#"        find victim -fprintf copy y -fprintf /dev/fd/3 x -delete"#,
+		r#"        s=$?; [ "$c" -le "$p" ] && e=1 || e=0"#,
+		r#"      fi"#,
+		r#"      [ "$disp" = ignored ] && e=1"#,
+		r#"      [ "$(wc -c < copy)" = "$e" ] && v=hashed || v="unhashed:$p:$c""#,
+		r#"      printf 'find:%s:%s ' "$s" "$v" ) 3> >(true) 2>/dev/null"#,
+		r#"  done"#,
+		r#"  rm -f copy; : > victim"#,
+		r#"  ( [ "$disp" = ignored ] && trap '' PIPE; fill; find victim -printf x -fprintf copy y -delete >&3; printf 'find-out:%s:%s ' "$?" "$(wc -c < copy)" ) 3> >(true) 2>/dev/null"#,
+		r#"  rm -f copy; printf 'x\n' > input"#,
+		r#"  ( [ "$disp" = ignored ] && trap '' PIPE; fill; sed -n $'w copy\np' input >&3; printf 'sed-out:%s:%s ' "$?" "$(wc -c < copy)" ) 3> >(true) 2>/dev/null"#,
+		r#"  echo"#,
+		r#"done"#,
+	])
+	.await;
+	assert_eq!(exit_code, Some(0), "{output}");
+	assert_eq!(
+		output,
+		concat!(
+			"sed:141:2 find:141:hashed sed:141:0 find:141:hashed find-out:141:1 sed-out:141:2 \n",
+			"sed:4:2 find:1:hashed sed:4:2 find:1:hashed find-out:1:1 sed-out:4:2 \n",
+		)
+	);
+}
+
+/// `sort --compress-program` ends as GNU sort does: its own write to a
+/// compressor that died raises SIGPIPE in it (141; with SIGPIPE ignored a
+/// write error, 2), a compressor a signal killed is "terminated abnormally"
+/// (2), and its diagnostic to a dead standard error kills it (141).
+/// Measured against coreutils 9.4 under Bash 5.2.21 (`status:marker:rows`).
+/// Regression: a compressor a signal killed counted as success, and sort
+/// reported empty output with status 0.
+#[tokio::test(flavor = "multi_thread")]
+async fn sort_ends_at_its_compressors_death_as_gnu_sort_does() {
+	let (exit_code, output) = run_in_tempdir(&[
+		r#"printf '#!/bin/sh\nset -e\nIFS= read -r first || exit 0\nprintf "compress diagnostic\\n" >&2\nprintf x >> compress-survived\nprintf "%%s\\n" "$first"\nexec /bin/cat\n' > compressor"#,
+		r#"printf '#!/bin/sh\ncat > /dev/null\nkill -TERM $$\n' > killed"#,
+		r#"printf '#!/bin/sh\ncat > /dev/null\nprintf "diagnostic\\n" >&2\nsleep 1\nprintf x > reads-all-survived\n' > reads-all"#,
+		r#"chmod +x compressor killed reads-all"#,
+		r#"seq 3000 -1 1 > numbers"#,
+		r#"for disp in default ignored; do"#,
+		r#"  rm -f compress-survived"#,
+		r#"  ( [ "$disp" = ignored ] && trap '' PIPE; fill; sort -S 1K --parallel=1 --compress-program="$PWD/compressor" numbers 2>&3 > sorted; s=$?"#,
+		r#"    m=no; [ -s compress-survived ] && m=yes; printf 'dead:%s:%s:%s ' "$s" "$m" "$(wc -l < sorted)" ) 3> >(true) 2>/dev/null"#,
+		r#"  ( [ "$disp" = ignored ] && trap '' PIPE; sort -S 1K --parallel=1 --compress-program="$PWD/killed" numbers > sorted 2>/dev/null"#,
+		r#"    printf 'killed:%s:%s ' "$?" "$(wc -l < sorted)" ) 2>/dev/null"#,
+		r#"  echo"#,
+		r#"done"#,
+		r#"rm -f reads-all-survived"#,
+		r#"( fill; sort -S 1K --parallel=1 --compress-program="$PWD/reads-all" numbers 2>&3 > sorted; s=$?"#,
+		r#"  m=no; [ -e reads-all-survived ] && m=yes; echo "reads-all:$s:$m" ) 3> >(true) 2>/dev/null"#,
+		r#"sort -S 1K --parallel=1 --compress-program="$PWD/compressor" numbers 2>/dev/null > sorted; echo "live:$?:$(wc -l < sorted)""#,
+	])
+	.await;
+	assert_eq!(exit_code, Some(0), "{output}");
+	assert_eq!(
+		output,
+		concat!(
+			"dead:141:no:0 killed:2:0 \n",
+			"dead:2:no:0 killed:2:0 \n",
+			"reads-all:141:no\n",
+			"live:0:3000\n"
+		)
+	);
+}
+
+/// A child a utility starts itself starts with the utility's SIGPIPE
+/// disposition, as a forked child inherits its parent's: `sort`'s compressor
+/// the shell's, rsync's remote shell ignored (rsync ignores SIGPIPE). Each
+/// child records its own from `/proc`. Measured against coreutils 9.4 and
+/// rsync 3.5.1 under Bash 5.2.21. Regression: every child started with the
+/// default action. The rsync half needs an `rsync` on `PATH` for the server
+/// side.
+#[tokio::test(flavor = "multi_thread")]
+async fn children_start_with_the_utilitys_sigpipe_disposition() {
+	let (exit_code, output) = run_in_tempdir(&[
+		r#"d=$PWD"#,
+		r#"printf '#!/bin/sh\nset -- $(grep SigIgn /proc/$$/status)\ncase $((0x$2 & 0x1000)) in 0) echo dfl ;; *) echo ign ;; esac > "$0.disp"\nexec /bin/cat\n' > compressor"#,
+		r#"printf '#!/bin/sh\nset -- $(grep SigIgn /proc/$$/status) "$@"\ncase $((0x$2 & 0x1000)) in 0) echo dfl ;; *) echo ign ;; esac > "%s/rsh.disp"\nshift 3\nexec "$@"\n' "$d" > rsh.sh"#,
+		r#"chmod +x compressor rsh.sh"#,
+		r#"seq 3000 -1 1 > numbers"#,
+		r#"mkdir src; printf 'x\n' > src/f"#,
+		r#"for disp in default ignored; do"#,
+		r#"  rm -f compressor.disp rsh.disp; rm -rf dst"#,
+		r#"  ( [ "$disp" = ignored ] && trap '' PIPE"#,
+		r#"    sort -S 1K --parallel=1 --compress-program="$PWD/compressor" numbers > sorted 2>/dev/null"#,
+		r#"    rsync -a -e "$d/rsh.sh" "localhost:$d/src/" dst/ > /dev/null 2>&1"#,
+		r#"    printf '%s:%s ' "$(cat compressor.disp 2>/dev/null)" "$(cat rsh.disp 2>/dev/null)" )"#,
+		r#"done; echo"#,
+	])
+	.await;
+	assert_eq!(exit_code, Some(0), "{output}");
+	let rsync_on_path = std::env::var_os("PATH")
+		.is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join("rsync").is_file()));
+	let expected = if rsync_on_path {
+		"dfl:ign ign:ign \n"
+	} else {
+		"dfl: ign: \n"
+	};
+	assert_eq!(output, expected);
+}
+
+/// A child whose standard error is the command's provider-backed file over
+/// a pipe with no reader cannot fail its own write there: its diagnostic
+/// goes to a pipe the shell drains, and the child is sent SIGPIPE once that
+/// delivery fails, before it goes on (here a compressor that writes a
+/// diagnostic, sleeps, then leaves a marker); `sort` then dies at its own
+/// message, as with a dead descriptor (measured against coreutils 9.4 under
+/// Bash 5.2.21: 141, no marker). Regression: the child's write succeeded and
+/// it left its marker.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_child_is_killed_when_its_provider_stderr_has_no_reader() {
+	use brush_core::openfiles::{OpenFile, OpenFiles};
+
+	let (code, dir) = run_on_provider_fds(
+		concat!(
+			r#"printf '#!/bin/sh\ncat > /dev/null\nprintf "diagnostic\\n" >&2\nsleep 1\nprintf x > reads-all-survived\n' > reads-all; "#,
+			r#"chmod +x reads-all; seq 3000 -1 1 > numbers; "#,
+			r#"sort -S 1K --parallel=1 --compress-program="$PWD/reads-all" numbers > sorted; echo "$?" > status"#,
+		),
+		vec![
+			(OpenFiles::STDOUT_FD, OpenFile::from(tempfile::tempfile().expect("stdout"))),
+			(OpenFiles::STDERR_FD, OpenFile::from(dead_provider_pipe())),
+		],
+	)
+	.await;
+	assert_eq!(code, 0);
+	let status = std::fs::read_to_string(dir.path().join("status")).expect("status");
+	assert_eq!(status, "141\n");
+	assert!(!dir.path().join("reads-all-survived").exists(), "the compressor went on");
 }

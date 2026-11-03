@@ -7666,6 +7666,7 @@ use brush_core::openfiles::{DescriptorPath, OpenFiles};
 use pi_vfs::{File, OpenOptions};
 use crate::host::{Host, ShellPaths};
 use crate::sed::fast_io::OutputBuffer;
+use crate::stdio_buffer::{StdioBuffer, StdioCall, file_buffer_size};
 
 use uucore::display::Quotable;
 use crate::sed::error_handling::SedResult;
@@ -7691,21 +7692,24 @@ enum Target {
 	Closed,
 }
 
-/// stdio's buffer for a `w` file: one block.
-const BLOCK: usize = 4096;
-
-/// A `w` file's buffer as GNU sed's stdio keeps it: each block is written as
-/// it fills, and the rest at a flush or at exit (see [`flush_at_exit`]), or
-/// lost when sed dies (see [`reset`]), as a killed process's buffers are.
+/// A `w` file's buffer as GNU sed's stdio keeps it (see [`StdioBuffer`]): each
+/// `write` is one `ck_fwrite`, which writes to the file only what glibc
+/// writes; the rest goes out at a flush or at exit (see [`flush_at_exit`]),
+/// or is lost when sed dies (see [`reset`]), as a killed process's buffers
+/// are.
 #[derive(Debug)]
 struct BlockWriter {
 	file:   File,
+	/// The buffer glibc gives the file.
+	cap:    usize,
+	model:  StdioBuffer,
 	buffer: Vec<u8>,
 }
 
 impl BlockWriter {
 	fn new(file: File) -> Self {
-		Self { file, buffer: Vec::with_capacity(BLOCK) }
+		let cap = file_buffer_size(&file);
+		Self { file, cap, model: StdioBuffer::default(), buffer: Vec::new() }
 	}
 
 	/// Writes out the buffer and returns the file.
@@ -7713,26 +7717,27 @@ impl BlockWriter {
 		self.flush()?;
 		Ok(self.file)
 	}
+
+	/// Applies `call` after its bytes were buffered: writes what glibc would.
+	fn apply(&mut self, call: StdioCall) -> io::Result<()> {
+		let written = self.model.apply(self.cap, call).min(self.buffer.len());
+		if written == 0 {
+			return Ok(());
+		}
+		let out: Vec<u8> = self.buffer.drain(..written).collect();
+		(&self.file).write_all(&out)
+	}
 }
 
 impl Write for BlockWriter {
 	fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-		let mut rest = buf;
-		while !rest.is_empty() {
-			let take = (BLOCK - self.buffer.len()).min(rest.len());
-			self.buffer.extend_from_slice(&rest[..take]);
-			rest = &rest[take..];
-			if self.buffer.len() == BLOCK {
-				self.flush()?;
-			}
-		}
+		self.buffer.extend_from_slice(buf);
+		self.apply(StdioCall::Write(buf.len()))?;
 		Ok(buf.len())
 	}
 
 	fn flush(&mut self) -> io::Result<()> {
-		let result = (&self.file).write_all(&self.buffer);
-		self.buffer.clear();
-		result
+		self.apply(StdioCall::Flush)
 	}
 }
 
@@ -7795,7 +7800,12 @@ impl NamedWriter {
 	) -> SedResult<()> {
 		let result = match &mut self.target {
 			Target::File(writer) => {
-				writeln!(writer, "{line}").and_then(|()| if unbuffered { writer.flush() } else { Ok(()) })
+				// GNU's `output_line`: one `ck_fwrite` of the text, one of the
+				// newline, then a flush under `-u`.
+				writer
+					.write_all(line.as_bytes())
+					.and_then(|()| writer.write_all(b"\n"))
+					.and_then(|()| if unbuffered { writer.flush() } else { Ok(()) })
 			},
 			Target::Stdout if in_place => writeln!(host.stdout, "{line}"),
 			Target::Stdout => output.write_str(format!("{line}\n")),
@@ -7836,14 +7846,16 @@ impl NamedWriter {
 }
 
 /// Flush buffered content to the files and close them, returning the first
-/// error. A failed close ends sed (GNU's `ck_fclose` panics), and its exit
-/// still writes the other files, so each is closed.
+/// error. GNU's `ck_fclose (NULL)` closes them newest first (it prepends each
+/// file it opens to its list). A failed close ends sed (GNU's `ck_fclose`
+/// panics), and its exit still writes the other files, so each is closed;
+/// one SIGPIPE kills ends the rest unwritten.
 // the registry is drained (not just
 // iterated) so open files do not outlive the invocation on a reused thread.
 pub fn flush_all() -> SedResult<()> {
 	FLUSH_LIST.with(|cell| {
 		let mut result = Ok(());
-		for handle in cell.borrow_mut().drain(..) {
+		for handle in cell.borrow_mut().drain(..).rev() {
 			let closed = handle.borrow_mut().close();
 			if result.is_ok() {
 				result = closed;

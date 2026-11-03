@@ -1609,7 +1609,7 @@ pub mod matchers {
 		use chrono::DateTime;
 		use pi_vfs::Metadata;
 
-		use super::{Matcher, MatcherIO, OutputFile, WalkEntry, write_output};
+		use super::{Matcher, MatcherIO, OutputFile, StdioCall, WalkEntry, write_output};
 
 		/// Formats mode bits as `-ls` does: directory/regular/other type marker
 		/// followed by the nine rwx permission bits.
@@ -1770,7 +1770,11 @@ pub mod matchers {
 					last_modified,
 					path,
 				);
-				match write_output(matcher_io.deps, self.output_file.as_ref(), line.as_bytes(), false).await {
+				// GNU's `list_file` writes the line in short `printf`s, `fputs`
+				// and `putc`s and the name in one `printf`, which glibc buffers
+				// as one `printf` of the whole line.
+				let calls = [StdioCall::Printf(line.len())];
+				match write_output(matcher_io.deps, self.output_file.as_ref(), line.as_bytes(), &calls).await {
 					Ok(()) => {},
 					Err(e) => {
 						if print_error_message {
@@ -2037,7 +2041,7 @@ pub mod matchers {
 
 		use std::io::Write;
 
-		use super::{Matcher, MatcherIO, OutputFile, WalkEntry, write_output};
+		use super::{Matcher, MatcherIO, OutputFile, StdioCall, WalkEntry, write_output};
 
 		pub enum PrintDelimiter {
 			Newline,
@@ -2066,7 +2070,13 @@ pub mod matchers {
 
 			async fn print(&self, file_info: &WalkEntry, matcher_io: &mut MatcherIO<'_>) {
 				let text = format!("{}{}", file_info.display_path().display(), self.delimiter);
-				match write_output(matcher_io.deps, self.output_file.as_ref(), text.as_bytes(), false).await
+				// GNU's `-print` is `fprintf ("%s\n")`; `-print0` is `fputs` and
+				// `putc (0)`.
+				let calls = match self.delimiter {
+					PrintDelimiter::Newline => vec![StdioCall::Printf(text.len())],
+					PrintDelimiter::Null => vec![StdioCall::Write(text.len() - 1), StdioCall::Write(1)],
+				};
+				match write_output(matcher_io.deps, self.output_file.as_ref(), text.as_bytes(), &calls).await
 				{
 					Ok(()) => {},
 					Err(e) => {
@@ -2114,7 +2124,9 @@ pub mod matchers {
 		use chrono::{DateTime, Local, format::StrftimeItems};
 		use pi_vfs::Metadata;
 
-		use super::{FileType, Matcher, MatcherIO, OutputFile, WalkEntry, WalkError, fs, write_output};
+		use super::{
+			FileType, Matcher, MatcherIO, OutputFile, StdioCall, WalkEntry, WalkError, fs, write_output,
+		};
 
 		/// A directive failure that can cross `.await` points.
 		type DynError = Box<dyn Error + Send + Sync>;
@@ -2233,6 +2245,12 @@ pub mod matchers {
 		#[derive(Debug, PartialEq, Eq)]
 		enum FormatComponent {
 			Literal(String),
+			/// Literal text that ends one of GNU find's plain segments (an
+			/// escape, `%%`, an unknown directive): GNU writes the segment's
+			/// text up to and with it in one `fwrite`.
+			SegmentEnd(String),
+			/// `\c`: the text before it is written with one `fwrite`, then
+			/// flushed, and the rest of the format is ignored, as in GNU find.
 			Flush,
 			Directive { directive: FormatDirective, width: Option<usize>, justify: Justify },
 		}
@@ -2285,7 +2303,7 @@ pub mod matchers {
 					// safe to unwrap: .peek() already succeeded above.
 					let octal = self.advance_by(OCTAL_LEN).unwrap();
 					return match char::from_u32(code) {
-						Some(c) => Ok(FormatComponent::Literal(c.to_string())),
+						Some(c) => Ok(FormatComponent::SegmentEnd(c.to_string())),
 						None => Err(format!("Invalid character value: \\{octal}").into()),
 					};
 				}
@@ -2308,7 +2326,7 @@ pub mod matchers {
 						c => return Err(format!("Invalid escape sequence: \\{c}").into()),
 					};
 
-					Ok(FormatComponent::Literal(c.to_string()))
+					Ok(FormatComponent::SegmentEnd(c.to_string()))
 				}
 			}
 
@@ -2367,7 +2385,7 @@ pub mod matchers {
 
 				let first = self.advance_one()?;
 				if first == '%' {
-					return Ok(FormatComponent::Literal("%".to_owned()));
+					return Ok(FormatComponent::SegmentEnd("%".to_owned()));
 				}
 
 				let directive = match first {
@@ -2401,7 +2419,7 @@ pub mod matchers {
 					'y' => FormatDirective::Type { follow_links: false },
 					'Y' => FormatDirective::Type { follow_links: true },
 					// TODO: %Z
-					_ => return Ok(FormatComponent::Literal(first.to_string())),
+					_ => return Ok(FormatComponent::SegmentEnd(first.to_string())),
 				};
 
 				Ok(FormatComponent::Directive { directive, width, justify })
@@ -2427,6 +2445,11 @@ pub mod matchers {
 						'%' => self.parse_format_specifier()?,
 						_ => panic!("{}", "Stopped at unexpected character: {self.string}"),
 					};
+					// GNU find ignores the format after `\c`.
+					if component == FormatComponent::Flush {
+						components.push(component);
+						return Ok(FormatString { components });
+					}
 					components.push(component);
 				}
 
@@ -2709,6 +2732,12 @@ pub mod matchers {
 			/// Prints the format for `file_info`; a directive that cannot be
 			/// rendered or a write that fails stops the line and is returned for
 			/// the caller to report.
+			///
+			/// The output goes out as GNU find's stdio calls for the format's
+			/// segments: one `printf` per directive, with the literal text before
+			/// it; one `fwrite` per segment that an escape or `%%` ends, and for
+			/// the text after the last directive; `\c` writes the text before it
+			/// and flushes.
 			async fn print(
 				&self,
 				file_info: &WalkEntry,
@@ -2717,12 +2746,28 @@ pub mod matchers {
 				let deps = matcher_io.deps;
 				let file = self.output_file.as_ref();
 				let mut buffer: Vec<u8> = Vec::new();
+				let mut calls = Vec::new();
+				// Bytes of the current segment's literal text.
+				let mut literal = 0;
+				let end_literal = |calls: &mut Vec<StdioCall>, literal: &mut usize| {
+					if *literal > 0 {
+						calls.push(StdioCall::Write(std::mem::take(literal)));
+					}
+				};
 				for component in &self.format.components {
 					match component {
-						FormatComponent::Literal(literal) => buffer.extend_from_slice(literal.as_bytes()),
+						FormatComponent::Literal(text) => {
+							buffer.extend_from_slice(text.as_bytes());
+							literal += text.len();
+						},
+						FormatComponent::SegmentEnd(text) => {
+							buffer.extend_from_slice(text.as_bytes());
+							literal += text.len();
+							end_literal(&mut calls, &mut literal);
+						},
 						FormatComponent::Flush => {
-							write_output(deps, file, &buffer, true).await?;
-							buffer.clear();
+							end_literal(&mut calls, &mut literal);
+							calls.push(StdioCall::Flush);
 						},
 						FormatComponent::Directive { directive, width, justify } => {
 							match format_directive(file_info, directive, &self.fs_cache).await {
@@ -2736,16 +2781,19 @@ pub mod matchers {
 										content.into_owned()
 									};
 									buffer.extend_from_slice(text.as_bytes());
+									calls.push(StdioCall::Printf(std::mem::take(&mut literal) + text.len()));
 								},
 								Err(e) => {
-									write_output(deps, file, &buffer, false).await?;
+									end_literal(&mut calls, &mut literal);
+									write_output(deps, file, &buffer, &calls).await?;
 									return Err(PrintError::Directive(e));
 								},
 							}
 						},
 					}
 				}
-				write_output(deps, file, &buffer, false).await?;
+				end_literal(&mut calls, &mut literal);
+				write_output(deps, file, &buffer, &calls).await?;
 				Ok(())
 			}
 		}
@@ -3790,6 +3838,9 @@ pub mod matchers {
 	use fs::FileSystemMatcher;
 	use ls::Ls;
 
+	pub(crate) use crate::stdio_buffer::StdioCall;
+	use crate::stdio_buffer::StdioBuffer;
+
 	#[cfg(unix)]
 	use self::stat::{InodeMatcher, LinksMatcher};
 	use self::{
@@ -4029,56 +4080,72 @@ pub mod matchers {
 		}
 	}
 
-	/// stdio's buffer for an output file: one block.
-	const OUTPUT_BLOCK: usize = 4096;
-
 	/// An `-fprint`/`-fprintf`/`-fprint0`/`-fls` output file, buffered as GNU
-	/// find's stdio buffers it: written once a write overflows its block, at
-	/// `\c`, and when the search ends (see [`OutputFile::close`]), so a pipe
-	/// with no reader there raises SIGPIPE where it does for find.
+	/// find's stdio buffers it (see [`StdioBuffer`]), so a pipe with no reader
+	/// there raises SIGPIPE at the call glibc writes at, and when the search
+	/// ends (see [`OutputFile::close`]).
 	#[derive(Clone)]
 	pub struct OutputFile(Arc<OutputFileInner>);
 
 	struct OutputFileInner {
-		file:   File,
-		buffer: Mutex<Vec<u8>>,
+		file:     File,
+		/// The stdio buffer glibc gives the file (see
+		/// [`crate::stdio_buffer::file_buffer_size`]).
+		cap:      usize,
+		buffered: Mutex<(StdioBuffer, Vec<u8>)>,
 	}
 
 	impl OutputFile {
 		pub fn new(file: File) -> Self {
-			Self(Arc::new(OutputFileInner { file, buffer: Mutex::new(Vec::new()) }))
+			let cap = crate::stdio_buffer::file_buffer_size(&file);
+			Self(Arc::new(OutputFileInner {
+				file,
+				cap,
+				buffered: Mutex::new((StdioBuffer::default(), Vec::new())),
+			}))
 		}
 
-		/// Buffers `bytes`; a write that overflows the block writes the block
-		/// and then the whole blocks of the rest, keeping the remainder, as
-		/// glibc does; `flush` writes everything.
-		async fn write(&self, bytes: &[u8], flush: bool) -> io::Result<()> {
-			let out: Vec<u8> = {
-				let mut buffer = self.0.buffer.lock().unwrap_or_else(PoisonError::into_inner);
-				buffer.extend_from_slice(bytes);
-				let total = buffer.len();
-				let len = if flush {
-					total
-				} else if total > OUTPUT_BLOCK {
-					total - (total - OUTPUT_BLOCK) % OUTPUT_BLOCK
-				} else {
-					0
+		/// Writes `bytes` through the program's stdio `calls` (their lengths add
+		/// up to it): the bytes each call writes to the descriptor go out now,
+		/// the rest stays buffered.
+		async fn write(&self, bytes: &[u8], calls: &[StdioCall]) -> io::Result<()> {
+			let mut rest = bytes;
+			for &call in calls {
+				let (call_bytes, after) = rest.split_at(call.len().min(rest.len()));
+				rest = after;
+				let out: Vec<u8> = {
+					let mut guard = self.0.buffered.lock().unwrap_or_else(PoisonError::into_inner);
+					let (model, pending) = &mut *guard;
+					pending.extend_from_slice(call_bytes);
+					let written = model.apply(self.0.cap, call).min(pending.len());
+					pending.drain(..written).collect()
 				};
-				buffer.drain(..len).collect()
-			};
-			if !out.is_empty() {
-				self.0.file.write_all_async(&out).await?;
-			}
-			if flush {
-				self.0.file.flush_async().await?;
+				if !out.is_empty() {
+					self.0.file.write_all_async(&out).await?;
+				}
+				if call == StdioCall::Flush {
+					self.0.file.flush_async().await?;
+				}
 			}
 			Ok(())
+		}
+
+		/// The file's identity (`st_dev`, `st_ino`), when it is a host file.
+		fn identity(&self) -> Option<(u64, u64)> {
+			#[cfg(unix)]
+			{
+				use std::os::unix::fs::MetadataExt;
+				let metadata = self.0.file.native()?.metadata().ok()?;
+				Some((metadata.dev(), metadata.ino()))
+			}
+			#[cfg(not(unix))]
+			None
 		}
 
 		/// Writes out the buffer and closes the file, once no other handle
 		/// shares it.
 		pub async fn close(self) -> io::Result<()> {
-			self.write(&[], true).await?;
+			self.write(&[], &[StdioCall::Flush]).await?;
 			match Arc::try_unwrap(self.0) {
 				Ok(inner) => inner.file.close_async().await,
 				Err(_) => Ok(()),
@@ -4086,23 +4153,51 @@ pub mod matchers {
 		}
 	}
 
-	/// Writes `bytes` to `file`, or to find's shared stdout when there is no file;
-	/// `flush` flushes the destination afterwards.
+	/// The order GNU find closes its output files in at exit: its `sharefile`
+	/// table, a gnulib hash table of 13 buckets keyed by `(st_dev ^ st_ino) %
+	/// 13`, freed bucket by bucket, each bucket's first file first and then
+	/// the others newest first. A file with no identity (not a host file)
+	/// closes after them, in open order. (gnulib grows the table past ten used
+	/// buckets, which would reorder it; find opens that many output files in
+	/// no realistic command.)
+	pub fn gnu_close_order(files: &[(String, OutputFile)]) -> Vec<usize> {
+		const BUCKETS: u64 = 13;
+		let mut buckets: Vec<Vec<usize>> = vec![Vec::new(); BUCKETS as usize];
+		let mut unknown = Vec::new();
+		for (index, (_, file)) in files.iter().enumerate() {
+			match file.identity() {
+				Some((dev, ino)) => {
+					let bucket = &mut buckets[((dev ^ ino) % BUCKETS) as usize];
+					// gnulib puts a new entry right after the bucket's head.
+					let at = bucket.len().min(1);
+					bucket.insert(at, index);
+				},
+				None => unknown.push(index),
+			}
+		}
+		buckets.into_iter().flatten().chain(unknown).collect()
+	}
+
+	/// Writes `bytes` to `file`, or to find's shared stdout when there is no
+	/// file, as the program's stdio `calls` (their lengths add up to `bytes`'s):
+	/// glibc decides which of them write to the descriptor, where a pipe with
+	/// no reader kills find.
 	async fn write_output(
 		deps: &dyn Dependencies,
 		file: Option<&OutputFile>,
 		bytes: &[u8],
-		flush: bool,
+		calls: &[StdioCall],
 	) -> io::Result<()> {
 		match file {
-			Some(file) => file.write(bytes, flush).await,
+			Some(file) => file.write(bytes, calls).await,
 			None => {
 				let mut out = deps.get_output().lock().unwrap_or_else(PoisonError::into_inner);
 				out.write_all(bytes)?;
-				if flush {
-					out.flush()?;
-					deps.flush_now();
-				}
+				// The bytes reach find's stdout buffer now, so a call that writes
+				// to the descriptor delivers them (see `AsyncOut::stdio_calls`).
+				out.flush()?;
+				drop(out);
+				deps.stdout_calls(calls);
 				Ok(())
 			},
 		}
@@ -4953,9 +5048,10 @@ impl Default for Config {
 pub trait Dependencies: Send + Sync {
 	fn get_output(&self) -> &Mutex<dyn Write + Send>;
 	fn now(&self) -> SystemTime;
-	/// GNU find's `fflush` of its standard output (`-printf '\c'`): the
-	/// output written so far is written at once (see `AsyncOut::flush_now`).
-	fn flush_now(&self) {}
+	/// The program's stdio `calls` on its standard output, made after their
+	/// bytes were written to [`Dependencies::get_output`] and flushed there
+	/// (see `AsyncOut::stdio_calls`).
+	fn stdout_calls(&self, _calls: &[matchers::StdioCall]) {}
 }
 
 /// Struct that holds the dependencies we use when run as the real executable.
@@ -4968,14 +5064,16 @@ struct StandardDependencies {
 impl StandardDependencies {
 	#[must_use]
 	fn new(host: &Host) -> Self {
+		let flusher = host.stdout_flusher();
+		// find reports its stdio calls (see `matchers::write_output`), so a
+		// pipe with no reader kills it at the call GNU find's write fails at.
+		if flusher.is_some() {
+			host.account_stdout_by_calls();
+		}
 		// Line-buffered on pipes (one write per printed path), block-buffered
 		// for files, and shared with stderr under 2>&1 so diagnostics stay in
 		// order.
-		Self {
-			output:  Arc::new(Mutex::new(host.stdout_writer())),
-			now:     SystemTime::now(),
-			flusher: host.stdout_flusher(),
-		}
+		Self { output: Arc::new(Mutex::new(host.stdout_writer())), now: SystemTime::now(), flusher }
 	}
 }
 
@@ -4985,9 +5083,9 @@ impl Dependencies for StandardDependencies {
 		self.output.as_ref()
 	}
 
-	fn flush_now(&self) {
+	fn stdout_calls(&self, calls: &[matchers::StdioCall]) {
 		if let Some(flusher) = &self.flusher {
-			flusher.flush_now();
+			flusher.stdio_calls(calls);
 		}
 	}
 
@@ -5236,7 +5334,13 @@ async fn do_find(
 	// The matchers hold the other clones of each output file; release them so
 	// closing the kept clone closes the file and reports write-back errors.
 	drop(matcher);
-	for (name, file) in config.output_files.drain(..) {
+	// GNU find closes them in its table's order (see `gnu_close_order`),
+	// before its standard output at exit; one SIGPIPE kills ends the rest
+	// unwritten.
+	let order = matchers::gnu_close_order(&config.output_files);
+	let mut files: Vec<_> = config.output_files.drain(..).map(Some).collect();
+	for index in order {
+		let Some((name, file)) = files[index].take() else { continue };
 		if let Err(error) = file.close().await {
 			let _ = writeln!(host.stderr, "find: {name}: {error}");
 			let _ = host.flush_output().await;

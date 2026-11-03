@@ -102,7 +102,9 @@ impl WriteErrors {
 		Self(Arc::new(report))
 	}
 
-	pub(crate) fn report(&self, error: &io::Error) {
+	/// Tells the hook of a failed write `error`, for a write a caller made
+	/// past the facade (to a child's pipe, say).
+	pub fn report(&self, error: &io::Error) {
 		(self.0)(error);
 	}
 }
