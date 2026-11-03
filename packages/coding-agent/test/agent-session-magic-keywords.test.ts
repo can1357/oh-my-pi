@@ -160,6 +160,38 @@ describe("AgentSession magic keyword settings", () => {
 		});
 	});
 
+	it("does not apply magic keyword notices to agent-attributed Collab prompts", async () => {
+		const created = await createMagicKeywordSession(modelRegistry);
+		session = created.session;
+		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
+
+		await session.promptCustomMessage({
+			customType: COLLAB_PROMPT_MESSAGE_TYPE,
+			content: "orchestrate workflowz review this",
+			display: true,
+			attribution: "agent",
+		});
+
+		const promptMessages = promptSpy.mock.calls[0]![0] as unknown as Array<{ customType?: string }>;
+		expect(promptMessages.map(message => message.customType).filter(Boolean)).toEqual([COLLAB_PROMPT_MESSAGE_TYPE]);
+	});
+
+	it("does not apply magic keyword notices to unrelated user-attributed custom messages", async () => {
+		const created = await createMagicKeywordSession(modelRegistry);
+		session = created.session;
+		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
+
+		await session.promptCustomMessage({
+			customType: "unrelated-message",
+			content: "orchestrate workflowz review this",
+			display: true,
+			attribution: "user",
+		});
+
+		const promptMessages = promptSpy.mock.calls[0]![0] as unknown as Array<{ customType?: string }>;
+		expect(promptMessages.map(message => message.customType).filter(Boolean)).toEqual(["unrelated-message"]);
+	});
+
 	it("queues keyword notices with user-attributed Collab steer prompts", async () => {
 		const created = await createMagicKeywordSession(modelRegistry);
 		session = created.session;

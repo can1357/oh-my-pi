@@ -38,6 +38,9 @@
 - Added `wireToolsFingerprint()`, returning a hash of the tool specs sent with a request.
 
 ## [18.16.0] - 2026-11-02
+### Added
+
+- Added `QueuedMessagePreparation.onDelivered(signal?, batch?)` to apply staged effects after the original queued messages are appended to agent state and before listeners are notified. `Agent.appendMessage(message, signal?, deliveryBatch?)` passes the optional abort signal and batch token to the callback. The internal `hasPendingQueuedDeliveryCallbacks` loop configuration enables input delivery acknowledgement before the next model call when callbacks are pending, unless aborted ([#17870](https://github.com/can1357/oh-my-pi/pull/17870) by [@andrewleech](https://github.com/andrewleech)).
 
 ### Changed
 
