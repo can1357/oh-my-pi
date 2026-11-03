@@ -118,14 +118,11 @@ pub(super) async fn cancellable<T>(future: impl Future<Output = T>) -> CoreResul
 	}
 }
 
-/// Bounds a wait on a portal permission dialog by the current operation's
-/// deadline (the run's end or the caller's reply timeout). GNOME can open the
-/// dialog behind other windows; unbounded, the call outlives the run that
-/// made it.
-pub(super) async fn until_deadline<T>(
-	prompt: &str,
-	future: impl Future<Output = T>,
-) -> CoreResult<T> {
+/// Bounds a wait on the `RemoteDesktop` permission dialog by the current
+/// operation's deadline (the run's end or the caller's reply timeout). GNOME
+/// can open the dialog behind other windows; unbounded, only the run's own
+/// timeout ends the wait, and the run fails without saying why.
+async fn until_deadline<T>(future: impl Future<Output = T>) -> CoreResult<T> {
 	let Some(deadline) = control::current_token().and_then(|token| token.deadline()) else {
 		return Ok(future.await);
 	};
@@ -133,11 +130,11 @@ pub(super) async fn until_deadline<T>(
 	tokio::time::timeout_at(give_up.into(), future)
 		.await
 		.map_err(|_| {
-			DesktopError::timeout(format!(
-				"the {prompt} permission dialog was not answered before the run's deadline, so its \
-				 session was closed and nothing was sent; the dialog can open behind other windows, \
-				 and answering a stale one does nothing. Retry and answer the new one"
-			))
+			DesktopError::timeout(
+				"the RemoteDesktop permission dialog was not answered before the call's deadline, so \
+				 nothing was sent and its portal session is being closed; the dialog can open behind \
+				 other windows. Retry and ask the user to answer the new dialog",
+			)
 		})
 }
 
@@ -216,7 +213,7 @@ impl Libei {
 			let session = cancellable(portal.create_session()).await?.map_err(|err| {
 				DesktopError::permission_denied(format!("RemoteDesktop CreateSession: {err}"))
 			})?;
-			let fd = cancellable(until_deadline("RemoteDesktop", async {
+			let fd = cancellable(until_deadline(async {
 				portal
 					.select_devices(
 						&session,
@@ -1018,6 +1015,8 @@ fn evdev_char(character: char) -> Option<(u32, bool)> {
 
 #[cfg(test)]
 mod tests {
+	use futures::FutureExt;
+
 	use super::*;
 
 	#[test]
@@ -1065,21 +1064,26 @@ mod tests {
 			.enable_time()
 			.build()
 			.unwrap();
-		// The run ends inside the margin, so the dialog wait is given up at once;
-		// an unbounded wait would never return here.
+		// The run ends inside the margin, so the dialog wait must give up on its
+		// first poll; an unbounded wait would still be pending.
 		let ending = control::CancellationSource::default();
 		ending.set_deadline(Some(std::time::Instant::now() + CONSENT_MARGIN / 2));
 		let error = control::with_token_for_test(&ending.token(), || {
-			runtime.block_on(until_deadline("RemoteDesktop", std::future::pending::<()>()))
+			runtime.block_on(async { until_deadline(std::future::pending::<()>()).now_or_never() })
 		})
+		.expect("the wait must end at once")
 		.unwrap_err();
 		assert_eq!(error.code.as_str(), "Timeout");
+		assert!(error.message.contains("RemoteDesktop permission dialog"), "{}", error.message);
 
-		// A run with time left lets an answered dialog through.
+		// A run with time left lets a dialog answered later through.
 		let running = control::CancellationSource::default();
 		running.set_deadline(Some(std::time::Instant::now() + Duration::from_secs(3600)));
 		let answered = control::with_token_for_test(&running.token(), || {
-			runtime.block_on(until_deadline("RemoteDesktop", async { 7 }))
+			runtime.block_on(until_deadline(async {
+				tokio::task::yield_now().await;
+				7
+			}))
 		});
 		assert_eq!(answered.unwrap(), 7);
 	}
