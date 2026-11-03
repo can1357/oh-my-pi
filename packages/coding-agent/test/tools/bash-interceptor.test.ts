@@ -969,6 +969,13 @@ describe("dedicated tool capability", () => {
 		"grep -RI needle symlink-root",
 		"grep -r -- -I binary-dir",
 		"grep -r -e -I binary-dir",
+		// Round 10: expanded paths, `rg -uuu`, and an fd operand after `--`.
+		"grep needle *.bin",
+		"rg needle src/*",
+		"rg -uuu needle .",
+		"rg --unrestricted --unrestricted --unrestricted needle .",
+		"rg -u -uu needle .",
+		"fd -- 'A(?:[0-9]{2})+B' --glob",
 		// An empty name is no file.
 		'echo hi > ""',
 	])("does not refuse %s (round 8)", command => {

@@ -1034,6 +1034,10 @@ function grepPaths(spec: OptionSpec, command: SimpleCommand): { paths: Word[]; s
 	const patternGiven = seen.has("-e") || seen.has("--regexp");
 	const paths = patternGiven ? operands : operands.slice(1);
 	if (operands.some(word => word.computed) || paths.some(word => word.value === "-")) return undefined;
+	// A path the shell expands (`*.bin`) names files whose content cannot be checked.
+	if (!paths.every(namesOneFile)) return undefined;
+	// `rg -uuu` searches binary files, which the grep tool skips.
+	if (spec === RIPGREP && repeatedFlag(command.words.slice(1), spec, "u", "unrestricted") >= 3) return undefined;
 	if (spec === GNU_GREP) {
 		// GNU grep treats a file with a NUL byte or invalid UTF-8 as binary and reports or skips it,
 		// which the grep tool does not; only a walk could show what a directory holds, so a GNU
@@ -1043,6 +1047,28 @@ function grepPaths(spec: OptionSpec, command: SimpleCommand): { paths: Word[]; s
 		if (recursive || (paths.length === 0 && stdin.length === 0)) return undefined;
 	}
 	return { paths: [...paths, ...stdin], seen };
+}
+
+/**
+ * How many times a flag is given before `--`: as the short `letter` in clusters (up to the first
+ * letter that takes a value) and as the long `--name`.
+ */
+function repeatedFlag(words: Word[], spec: OptionSpec, letter: string, long: string): number {
+	let count = 0;
+	for (let i = 0; i < words.length; i++) {
+		const text = words[i].value;
+		if (text === "--") break;
+		if (text === `--${long}`) count++;
+		if (!/^-[^-]/u.test(text)) continue;
+		for (let j = 1; j < text.length; j++) {
+			if (own(spec.valued, text[j])) {
+				if (j + 1 === text.length) i++;
+				break;
+			}
+			if (text[j] === letter) count++;
+		}
+	}
+	return count;
 }
 
 // ── glob: find, fd ───────────────────────────────────────────────────────────
@@ -1131,14 +1157,14 @@ const FD: OptionSpec = {
  * The glob tool can express a literal or `--glob` pattern under fd's case rule only.
  */
 function fdCanPerform(command: SimpleCommand): boolean {
-	const options = command.words.slice(1);
-	const operands = expressibleOperands(options, FD);
+	const seen = new Set<string>();
+	const operands = expressibleOperands(command.words.slice(1), FD, seen);
 	if (!operands || operands.some(word => word.computed)) return false;
 	const pattern = operands[0]?.value;
 	if (pattern === undefined || pattern === "") return true;
-	const globMode = options.some(word => /^(?:-[^-]*g|--glob$)/u.test(word.value));
+	const globMode = seen.has("-g") || seen.has("--glob");
 	if (!globMode && !/^[A-Za-z0-9_-]+$/u.test(pattern)) return false;
-	const caseSensitive = options.some(word => /^(?:-[^-]*s|--case-sensitive$)/u.test(word.value));
+	const caseSensitive = seen.has("-s") || seen.has("--case-sensitive");
 	return caseSensitive || /[A-Z]/u.test(pattern);
 }
 
@@ -1310,9 +1336,9 @@ function isLiteralSubstitution(script: string): boolean {
 }
 
 /**
- * `sed -i` the edit tool can do: in place without a backup suffix, scripts that only substitute,
- * transliterate or delete (no `r`/`w`/`e`, no `s///w`/`e`, no `-n`, no script file), on named
- * files. Returns the files it edits, or undefined when the edit tool cannot do the step.
+ * `sed -i` the edit tool can do: in place without a backup suffix, every script a literal-for-literal
+ * substitution (see {@link isLiteralSubstitution}), on named files. Returns the files it edits, or
+ * undefined when the edit tool cannot do the step.
  */
 function sedEditFiles(words: Word[]): Word[] | undefined {
 	const scripts: string[] = [];
