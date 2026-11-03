@@ -13,7 +13,6 @@
 
 ### Changed
 
-- Deprecated `createFileOps`, `computeFileLists`, `formatFileOperations`, `upsertFileOperations`, `isUrlSchemePath` and `FileOperations` in `@oh-my-pi/pi-agent-core/compaction`; they now re-export `@oh-my-pi/snapcompact`, which callers should import directly
 - `one-at-a-time` steering delivers the first queued unit holding a user-authored message ahead of agent-authored steering queued before it, and the oldest waiting agent unit goes next once `MAX_USER_UNITS_AHEAD_OF_AGENT_STEERING` (4) user units were taken while an agent unit waited, counting units live steering claims for a streaming response, so an agent unit with `k` agent units ahead of it is taken within `5 × (k + 1)` deliveries; `prioritizeSteering` still goes first; the mid-batch interrupt classifies that whole unit instead of the first queued message ([#17575](https://github.com/can1357/oh-my-pi/pull/17575) by [@sjawhar](https://github.com/sjawhar))
 - `onQueueChange` listeners are also called when `setSteeringMode`, `setSteeringPriority` or `setQueuedMessageGrouping` changes which queued steering is delivered next ([#17575](https://github.com/can1357/oh-my-pi/pull/17575) by [@sjawhar](https://github.com/sjawhar))
 
@@ -25,6 +24,15 @@
 - Fixed a `prioritizeSteering` promotion passing to another occurrence of the same message: a later unpromoted copy could go ahead of a person's steer, and a copy promoted while an earlier one was being dequeued could fall behind one; a promotion now belongs to the queued occurrence it was given to ([#17575](https://github.com/can1357/oh-my-pi/pull/17575) by [@sjawhar](https://github.com/sjawhar))
 - Fixed `replaceQueue`/`replaceQueues` forgetting steering the run had already taken and not recorded, which lost input a provider had received through live steering when the run was then aborted; that input now stays the run's and is put back when the run ends ([#17575](https://github.com/can1357/oh-my-pi/pull/17575) by [@sjawhar](https://github.com/sjawhar))
 - Fixed a run started by an `agent_end` subscriber making later subscribers see a streaming Agent, a foreign `agent_end` publishing queue changes before every subscriber received it, and a provider's pending live preparation outlasting its run's `agent_end`; the run waits until every subscriber has the end, `abort()` and `waitForIdle()` reach it from the `prompt()` or `continue()` call, and the end puts the pending input back ([#17575](https://github.com/can1357/oh-my-pi/pull/17575) by [@sjawhar](https://github.com/sjawhar))
+
+## [18.16.0] - 2026-11-02
+
+### Changed
+
+- Deprecated `createFileOps`, `computeFileLists`, `formatFileOperations`, `upsertFileOperations`, `isUrlSchemePath` and `FileOperations` in `@oh-my-pi/pi-agent-core/compaction`; they now re-export `@oh-my-pi/snapcompact`, which callers should import directly
+
+### Fixed
+
 - Context estimates for a model without a known tokenizer family (Gemini, Grok and the like), and token counts made without a model (compress metrics, the legacy `estimateTokens` export), count text in o200k_base instead of guessing 4 bytes per token, which undercounted what those providers bill by 11–48% on code-heavy sessions and let compaction fire late after a switch to them ([#17607](https://github.com/can1357/oh-my-pi/pull/17607) by [@will-bogusz](https://github.com/will-bogusz))
 - Context estimates no longer charge a reader another model's thinking signatures or redacted thinking, which the request strips: a Claude session switched to Grok or Gemini, including Gemini through Factory, counted them as text ([#17607](https://github.com/can1357/oh-my-pi/pull/17607) by [@will-bogusz](https://github.com/will-bogusz))
 
