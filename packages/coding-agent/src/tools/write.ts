@@ -626,8 +626,20 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		return key === undefined ? undefined : [key];
 	};
 	readonly label = "Write";
+	/**
+	 * Whether the session's `--tools` allow-list leaves `write` only as the device
+	 * transport: whatever path (re)registers `write` — a child session, a clone, a
+	 * device mount — it then writes no files.
+	 */
+	#deniedByAllowList(): boolean {
+		const allowList = this.session.toolAllowList;
+		return allowList !== undefined && !allowList.allows("write", undefined);
+	}
+
 	get description(): string {
-		const deviceOnly = this.session.deviceOnlyWrite === true && this.session.pendingFullWriteDescription !== true;
+		const deviceOnly =
+			(this.session.deviceOnlyWrite === true && this.session.pendingFullWriteDescription !== true) ||
+			this.#deniedByAllowList();
 		return prompt.render(deviceOnly ? writeDeviceOnlyDescription : writeDescription);
 	}
 	readonly parameters = writeSchema;
@@ -970,7 +982,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		// local:// sandbox proceed; every other target is rejected before any
 		// handler, guard, conflict resolver, or bridge sees it.
 		if (
-			this.session.deviceOnlyWrite === true &&
+			(this.session.deviceOnlyWrite === true || this.#deniedByAllowList()) &&
 			policy?.scope !== "device" &&
 			!touchesNoFiles &&
 			!(await targetsLocalSandbox(this.session, path, signal))

@@ -4126,6 +4126,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// bridge already passes one.
 			getCwd: () => sessionManager.getCwd(),
 			tools: toolRegistry,
+			isToolAllowed: toolAllowList ? name => toolAllowList.allows(name, toolRegistry.get(name)) : undefined,
 			getExecutableTool: resolveDeviceTool,
 			// `pi_edit` needs the `replace`-mode instance specifically, and the
 			// registry may still hold the session's own `edit` (any mode) when
@@ -5038,7 +5039,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// `bash`/`write` the user configured as `ask` or `deny`. Meta-notice
 		// first, matching the registry's wrap order.
 		const advisorTools: Tool[] = built
-			.filter((tool): tool is Tool => tool != null)
+			// The advisor's config selects from what the session's `--tools` allows, never past it.
+			.filter((tool): tool is Tool => tool != null && (!toolAllowList || toolAllowList.allows(tool.name, tool)))
 			.map(tool => new ExtensionToolWrapper(wrapToolWithMetaNotice(tool), extensionRunner, advisorAgent) as Tool);
 
 		const advisorWatchdogPrompts = [...watchdogFiles];
@@ -5683,6 +5685,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			primaryPromptCacheKey: model => session.getPromptCacheKeyForModel(model),
 			captureTools: () =>
 				(["manage_skill", "learn"] as const)
+					// The private capture offers only what the session's `--tools` allows.
+					.filter(name => !toolAllowList || toolAllowList.allows(name, session.getToolByName(name)))
 					.map(name => session.getToolByName(name))
 					.filter((tool): tool is AgentTool => tool !== undefined),
 			onPayload,
