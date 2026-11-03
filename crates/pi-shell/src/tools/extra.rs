@@ -344,8 +344,16 @@ struct Lookup {
 }
 
 impl Lookup {
-	/// How `command` runs; `NotFound` when nothing has its name,
-	/// `PermissionDenied` when only files that cannot be executed have it.
+	/// How `command` runs, or the error `execvp` gives for it. A name with a
+	/// slash fails as `execve` does on that path: `ENOENT` (`NotFound`),
+	/// `EACCES` for a directory or a file that may not be executed, or the
+	/// error of resolving the path (`ENAMETOOLONG`, `ELOOP`, `ENOTDIR`). A bare
+	/// name is searched in the command's `PATH` as glibc's `execvp` does: a
+	/// directory that lacks it, is not a directory, is stale, is on a missing
+	/// device or timed out moves the search on; `EACCES` moves it on too, and
+	/// is the error when no directory holds a program of that name; any other
+	/// error ends the search (a name longer than the file system allows:
+	/// `ENAMETOOLONG`).
 	fn program(&self, command: &ShellCommand) -> io::Result<Program> {
 		let name = command
 			.args()
@@ -353,11 +361,8 @@ impl Lookup {
 			.ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
 		let cwd = command.dir().unwrap_or(&self.cwd);
 		if has_separator(name) {
-			return match executable(&cwd.join(name)) {
-				Some(true) => Ok(Program::Path(cwd.join(name))),
-				Some(false) => Err(io::ErrorKind::PermissionDenied.into()),
-				None => Err(io::ErrorKind::NotFound.into()),
-			};
+			let path = cwd.join(name);
+			return exec_target(&path).map(|()| Program::Path(path));
 		}
 		if self.builtin(name) {
 			return Ok(Program::Builtin);
@@ -372,21 +377,17 @@ impl Lookup {
 				_ => path,
 			})
 			.unwrap_or(DEFAULT_PATH);
-		let mut denied = false;
+		let mut denied = None;
 		for dir in std::env::split_paths(OsStr::new(path)) {
 			let candidate = cwd.join(dir).join(name);
-			match executable(&candidate) {
-				Some(true) => return Ok(Program::Path(candidate)),
-				Some(false) => denied = true,
-				None => {},
+			match exec_target(&candidate) {
+				Ok(()) => return Ok(Program::Path(candidate)),
+				Err(error) if search_denied(&error) => denied = Some(error),
+				Err(error) if search_moves_on(&error) => {},
+				Err(error) => return Err(error),
 			}
 		}
-		let kind = if denied {
-			io::ErrorKind::PermissionDenied
-		} else {
-			io::ErrorKind::NotFound
-		};
-		Err(kind.into())
+		Err(denied.unwrap_or_else(|| io::ErrorKind::NotFound.into()))
 	}
 
 	/// Whether `name` runs in-process: an engine intrinsic, a tool or an
@@ -404,20 +405,55 @@ fn has_separator(name: &OsStr) -> bool {
 	bytes.contains(&b'/') || (cfg!(windows) && bytes.contains(&b'\\'))
 }
 
-/// `Some(true)` for an executable file at `path`, `Some(false)` for a file
-/// that is not executable, `None` for nothing (or a directory).
+/// What `execve` makes of `path`: nothing when it holds a program, else the
+/// error it fails with, `EACCES` for a directory or a file without execute
+/// permission.
 #[cfg(unix)]
-fn executable(path: &Path) -> Option<bool> {
+fn exec_target(path: &Path) -> io::Result<()> {
 	use std::os::unix::fs::PermissionsExt as _;
-	let meta = std::fs::metadata(path)
-		.ok()
-		.filter(std::fs::Metadata::is_file)?;
-	Some(meta.permissions().mode() & 0o111 != 0)
+	let meta = std::fs::metadata(path)?;
+	if meta.is_file() && meta.permissions().mode() & 0o111 != 0 {
+		Ok(())
+	} else {
+		Err(io::Error::from_raw_os_error(libc::EACCES))
+	}
 }
 
 #[cfg(not(unix))]
-fn executable(path: &Path) -> Option<bool> {
-	(path.is_file() || path.with_extension("exe").is_file()).then_some(true)
+fn exec_target(path: &Path) -> io::Result<()> {
+	if path.is_file() || path.with_extension("exe").is_file() {
+		Ok(())
+	} else {
+		Err(io::ErrorKind::NotFound.into())
+	}
+}
+
+/// Whether glibc's `execvp` notes `error` and searches on, reporting it
+/// when no directory holds a program: `EACCES`.
+#[cfg(unix)]
+fn search_denied(error: &io::Error) -> bool {
+	error.raw_os_error() == Some(libc::EACCES)
+}
+
+#[cfg(not(unix))]
+fn search_denied(error: &io::Error) -> bool {
+	error.kind() == io::ErrorKind::PermissionDenied
+}
+
+/// Whether glibc's `execvp` searches on after `error`: the directory lacks
+/// the name, is not a directory, is stale, is on a missing device or timed
+/// out.
+#[cfg(unix)]
+fn search_moves_on(error: &io::Error) -> bool {
+	matches!(
+		error.raw_os_error(),
+		Some(libc::ENOENT | libc::ENOTDIR | libc::ESTALE | libc::ENODEV | libc::ETIMEDOUT)
+	)
+}
+
+#[cfg(not(unix))]
+fn search_moves_on(error: &io::Error) -> bool {
+	error.kind() == io::ErrorKind::NotFound
 }
 
 #[cfg(test)]
