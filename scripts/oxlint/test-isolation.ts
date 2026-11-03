@@ -16,12 +16,13 @@
  * `const saved = x.y`, `Object.defineProperty` with the saved descriptor), deletes it, or splits
  * those across both branches of an `if/else`. A callback passed by name counts only through a
  * function declaration or `const` the file never reassigns, and `x.mockRestore()` restores a known
- * spy only when the file writes `x` once: a callback runs what a binding holds when it is called,
- * not what it held when registered. A put-back an async body can still run after an `await` is
- * reported even when cleanup covers it, unless `testLifetime().assertLive()` guards it: an abandoned
- * body runs it during a later test. The rules
- * credit only those shapes. They are an enforcement aid for new code, not a proof: a shape they
- * credit is safe by construction, and everything else is reported.
+ * spy only when one write stores it in `x` and that write runs once per test (not in a loop, an
+ * array-iteration callback, or a helper called more than once): a callback runs what a binding
+ * holds when it is called, not what it held when registered. A put-back an async body can still
+ * run after an `await` is reported even when cleanup covers it, unless `testLifetime().assertLive()`
+ * guards it: an abandoned body runs it during a later test. The rules credit only those shapes.
+ * They are an enforcement aid for new code, not a proof: a shape they credit is safe by
+ * construction, and everything else is reported.
  *
  * The rules judge only what one file shows: writes and restores reached from a test body directly
  * or through a function declared in the same file, and hooks declared in the same file.
@@ -204,15 +205,15 @@ function patternIdentifiers(target: Node | undefined): Node[] {
 }
 
 /**
- * How many values the file stores in `variable`: its initializer or function declaration, then each
- * assignment and `++`/`--`. A loop that assigns it on every pass, a redeclaration, and a binding the
- * rule cannot see written (a parameter, an import) count as many.
+ * The nodes that store a value in `variable`: its declarator with an initializer or its function
+ * declaration, then each assignment and `++`/`--`. Undefined when the rule cannot see every write:
+ * a redeclaration, a parameter or import, or a loop that assigns the binding on every pass.
  */
-function writeCount(facts: FileFacts, variable: Variable): number {
-	if (variable.defs.length !== 1) return Number.POSITIVE_INFINITY;
+function bindingWrites(facts: FileFacts, variable: Variable): Node[] | undefined {
+	if (variable.defs.length !== 1) return undefined;
 	const def = variable.defs[0]!;
-	let count: number;
-	if (def.type === "FunctionName") count = 1;
+	const writes: Node[] = [];
+	if (def.type === "FunctionName") writes.push(def.node);
 	else if (def.type === "Variable") {
 		const declaration = def.parent;
 		const loop = declaration?.parent;
@@ -222,9 +223,9 @@ function writeCount(facts: FileFacts, variable: Variable): number {
 			(loop?.type === "ForOfStatement" || loop?.type === "ForInStatement") &&
 			node(loop.left) === declaration
 		)
-			return Number.POSITIVE_INFINITY;
-		count = node(def.node.init) ? 1 : 0;
-	} else return Number.POSITIVE_INFINITY;
+			return undefined;
+		if (node(def.node.init)) writes.push(def.node);
+	} else return undefined;
 	for (const write of facts.assignments) {
 		const loop = write.type === "ForOfStatement" || write.type === "ForInStatement";
 		const target =
@@ -235,22 +236,114 @@ function writeCount(facts: FileFacts, variable: Variable): number {
 					: undefined;
 		for (const id of patternIdentifiers(target)) {
 			if (variableOf(facts.context, id) !== variable) continue;
-			if (loop) return Number.POSITIVE_INFINITY;
-			count++;
+			if (loop) return undefined;
+			writes.push(write);
 		}
 	}
-	return count;
+	return writes;
+}
+
+/** The node whose evaluation creates a fresh instance of the binding `def` declares. */
+function bindingScope(def: Variable["defs"][number]): Node | undefined {
+	const declaration = def.type === "Variable" ? def.parent : def.node;
+	let holder = declaration?.parent ?? undefined;
+	if (holder?.type === "ExportNamedDeclaration") holder = holder.parent ?? undefined;
+	if (def.type === "Variable" && declaration?.kind === "var") {
+		// `var` belongs to the whole enclosing function, or the file.
+		let cur: Node | undefined = declaration;
+		while (cur && !isFunction(cur) && cur.type !== "Program") cur = cur.parent ?? undefined;
+		return cur;
+	}
+	return holder;
+}
+
+/** Array methods that call their callback once per element. */
+const ITERATION_METHODS = new Set([
+	"every",
+	"filter",
+	"find",
+	"findIndex",
+	"findLast",
+	"findLastIndex",
+	"flatMap",
+	"forEach",
+	"map",
+	"reduce",
+	"reduceRight",
+	"some",
+]);
+
+/**
+ * The one call that runs a same-file function: it has exactly one call site, and its name appears
+ * nowhere else (passing it to `forEach` or storing it could run it again).
+ */
+function soleCaller(facts: FileFacts, fn: Node): Node | undefined {
+	const callers = facts.helpers.get(fn);
+	if (callers?.length !== 1) return undefined;
+	const name =
+		fn.type === "FunctionDeclaration"
+			? node(fn.id)
+			: fn.parent?.type === "VariableDeclarator"
+				? node(fn.parent.id)
+				: undefined;
+	if (name?.type !== "Identifier") return undefined;
+	const variable = variableOf(facts.context, name);
+	const uses = facts.references.filter(
+		id => id !== name && id.name === name.name && variableOf(facts.context, id) === variable,
+	);
+	const caller = callers[0]!;
+	return uses.length === 1 && uses[0] === unwrap(node(caller.callee)) ? caller : undefined;
+}
+
+/**
+ * Does `write` run at most once per test for each instance of the binding created at `scope`?
+ * Walking out from the write: a loop body, test or update repeats it (a `for` initializer or a
+ * `for-of`/`for-in` iterable does not); an array-iteration callback repeats it; another function
+ * runs it only when it is an IIFE, a test or hook callback (once per test), or a same-file function
+ * with a sole call site, which is then walked the same way. Anything else counts as repeating.
+ */
+function runsOncePerBinding(facts: FileFacts, write: Node, scope: Node, depth = 0): boolean {
+	let child = write;
+	for (let cur = write.parent; cur; child = cur, cur = cur.parent) {
+		if (cur === scope) return true;
+		if (cur.type === "WhileStatement" || cur.type === "DoWhileStatement") return false;
+		if (cur.type === "ForStatement" && node(cur.init) !== child) return false;
+		if ((cur.type === "ForOfStatement" || cur.type === "ForInStatement") && node(cur.right) !== child) return false;
+		if (!isFunction(cur)) continue;
+		const parent = cur.parent;
+		if (parent?.type === "CallExpression" && nodes(parent.arguments).includes(cur)) {
+			const callee = unwrap(node(parent.callee));
+			if (callee && ITERATION_METHODS.has(propertyName(callee) ?? "")) return false;
+		}
+		let caller: Node | undefined;
+		if (parent?.type === "CallExpression" && unwrap(node(parent.callee)) === cur) caller = parent;
+		else caller = facts.registrations.get(cur)?.call ?? (depth < HELPER_DEPTH ? soleCaller(facts, cur) : undefined);
+		return caller !== undefined && runsOncePerBinding(facts, caller, scope, depth + 1);
+	}
+	return false;
+}
+
+/**
+ * Does the file store exactly one value in each instance of `variable`: one write, run at most once
+ * per test for that instance? A callback captures the binding, not the value it held when registered,
+ * so a binding written twice, or by a write that repeats, holds only the last value when it runs.
+ */
+function writtenOnce(facts: FileFacts, variable: Variable): boolean {
+	const writes = bindingWrites(facts, variable);
+	if (writes?.length !== 1) return false;
+	const scope = bindingScope(variable.defs[0]!);
+	return scope !== undefined && runsOncePerBinding(facts, writes[0]!, scope);
 }
 
 /**
  * The function a name passed to a hook or `onTestFinished` is certain to run: a function declaration
- * or `const` binding the file never reassigns. A callback registered by name runs whatever the
- * binding holds when it is called, not what it held when registered.
+ * or `const` binding the file writes once. A callback registered by name runs whatever the binding
+ * holds when it is called, not what it held when registered.
  */
 function creditedFunctionOf(facts: FileFacts, id: Node): Node | undefined {
 	const fn = functionOf(facts.context, id);
 	const variable = fn && variableOf(facts.context, id);
-	return variable && writeCount(facts, variable) <= 1 ? fn : undefined;
+	return variable && writtenOnce(facts, variable) ? fn : undefined;
 }
 
 interface Registration {
@@ -269,6 +362,8 @@ interface FileFacts {
 	helpers: Map<Node, Node[]>;
 	/** `onTestFinished(...)` calls. */
 	finishers: Node[];
+	/** Identifiers that may name a binding (not member property names or object keys). */
+	references: Node[];
 	/** Flows of a node at depth 0, and the shared paths a node writes; filled on first use. */
 	flowCache: Map<Node, Flow[]>;
 	targetCache: Map<Node, string[]>;
@@ -342,6 +437,7 @@ function collect(context: RuleContext, program: Node): FileFacts {
 	const helpers = new Map<Node, Node[]>();
 	const declaredFunctions = new Set<Node>();
 	const finishers: Node[] = [];
+	const references: Node[] = [];
 	walk(context, program, n => {
 		if (n.type === "CallExpression") calls.push(n);
 		if (
@@ -353,6 +449,13 @@ function collect(context: RuleContext, program: Node): FileFacts {
 			assignments.push(n);
 		if (isFunction(n) && (n.type === "FunctionDeclaration" || n.parent?.type === "VariableDeclarator"))
 			declaredFunctions.add(n);
+		if (n.type === "Identifier") {
+			const parent = n.parent;
+			const memberName = parent?.type === "MemberExpression" && parent.property === n && parent.computed !== true;
+			const objectKey =
+				parent?.type === "Property" && parent.key === n && parent.computed !== true && parent.shorthand !== true;
+			if (!memberName && !objectKey) references.push(n);
+		}
 	});
 	for (const call of calls) {
 		const api = testApi(context, node(call.callee));
@@ -415,6 +518,7 @@ function collect(context: RuleContext, program: Node): FileFacts {
 		registrations,
 		helpers,
 		finishers,
+		references,
 		flowCache: new Map(),
 		targetCache: new Map(),
 	};
@@ -853,14 +957,15 @@ function spyInstalls(facts: FileFacts, call: Node): Node[] {
 }
 
 /**
- * The one spy a `x.mockRestore()` call is certain to restore: `x` is a binding the file writes once,
- * with a `spyOn(...)` (`const x = spyOn(...)`, `let x = spyOn(...)` never reassigned, or
- * `let x; x = spyOn(...)`). A callback captures the binding, not the value it held when registered,
- * so a binding written twice restores whichever spy it holds when the callback runs.
+ * The one spy a `x.mockRestore()` call is certain to restore: the file stores one `spyOn(...)` in
+ * each instance of `x`, by one write that runs at most once per test ({@link writtenOnce}):
+ * `const x = spyOn(...)`, `let x = spyOn(...)` never reassigned, `let x; x = spyOn(...)`, or a
+ * per-iteration `const` in a loop body. Not `var` or an outer `let` written inside a loop, nor an
+ * outer binding written by a helper called more than once.
  */
 function creditedSpyInstall(facts: FileFacts, call: Node): Node | undefined {
 	const spy = restoredSpyVariable(facts, call);
-	if (!spy || writeCount(facts, spy.variable) !== 1) return undefined;
+	if (!spy || !writtenOnce(facts, spy.variable)) return undefined;
 	const installs = spyInstalls(facts, call);
 	return installs.length === 1 ? installs[0] : undefined;
 }

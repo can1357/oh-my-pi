@@ -1489,6 +1489,100 @@ it("t", async () => {
 });`,
 		expected: [],
 	},
+	"var-spy-declared-in-a-loop-earns-no-individual-credit": {
+		body: `
+it("t", async () => {
+	for (const key of ["log", "warn"] as const) {
+		var s = spyOn(console, key).mockImplementation(() => {});
+		onTestFinished(() => s.mockRestore());
+	}
+	await Promise.resolve();
+	s!.mockRestore();
+});`,
+		expected: ["restore-mocks-in-hooks@10", "restore-mocks-in-hooks@6"],
+	},
+	"outer-let-spy-assigned-in-a-loop-earns-no-individual-credit": {
+		body: `
+it("t", async () => {
+	let s: { mockRestore(): void };
+	for (const key of ["log", "warn"] as const) {
+		s = spyOn(console, key).mockImplementation(() => {});
+		onTestFinished(() => s.mockRestore());
+	}
+	await Promise.resolve();
+	s!.mockRestore();
+});`,
+		expected: ["restore-mocks-in-hooks@11", "restore-mocks-in-hooks@7"],
+	},
+	"outer-let-spy-assigned-in-a-foreach-callback-earns-no-individual-credit": {
+		body: `
+it("t", async () => {
+	let s: { mockRestore(): void };
+	(["log", "warn"] as const).forEach(key => {
+		s = spyOn(console, key).mockImplementation(() => {});
+		onTestFinished(() => s.mockRestore());
+	});
+	await Promise.resolve();
+	s!.mockRestore();
+});`,
+		expected: ["restore-mocks-in-hooks@11"],
+	},
+	"outer-let-spy-assigned-by-a-helper-called-twice-earns-no-individual-credit": {
+		body: `
+it("t", async () => {
+	let s: { mockRestore(): void };
+	function install(key: "log" | "warn") {
+		s = spyOn(console, key).mockImplementation(() => {});
+		onTestFinished(() => s.mockRestore());
+	}
+	install("log");
+	install("warn");
+	await Promise.resolve();
+	s!.mockRestore();
+});`,
+		expected: ["restore-mocks-in-hooks@13", "restore-mocks-in-hooks@7"],
+	},
+	"outer-let-spy-assigned-by-a-helper-called-once-covers": {
+		body: `
+it("t", async () => {
+	let s: { mockRestore(): void };
+	function install() {
+		s = spyOn(Date, "now").mockReturnValue(12);
+		onTestFinished(() => s.mockRestore());
+	}
+	install();
+	await Promise.resolve();
+	s!.mockRestore();
+});`,
+		expected: [],
+	},
+	"helper-called-once-and-passed-to-foreach-earns-no-individual-credit": {
+		body: `
+it("t", async () => {
+	let s: { mockRestore(): void };
+	function install(key: "log" | "warn") {
+		s = spyOn(console, key).mockImplementation(() => {});
+		onTestFinished(() => s.mockRestore());
+	}
+	install("log");
+	(["warn"] as const).forEach(install);
+	await Promise.resolve();
+	s!.mockRestore();
+});`,
+		expected: ["restore-mocks-in-hooks@13", "restore-mocks-in-hooks@7"],
+	},
+	"per-iteration-const-spy-with-its-own-finisher-covers": {
+		body: `
+it("t", async () => {
+	for (const key of ["log", "warn"] as const) {
+		const s = spyOn(console, key).mockImplementation(() => {});
+		onTestFinished(() => s.mockRestore());
+		await Promise.resolve();
+		s.mockRestore();
+	}
+});`,
+		expected: [],
+	},
 };
 
 interface Diagnostic {
