@@ -7422,6 +7422,11 @@ mod tests {
 				}
 				assert_eq!(sort_in_locale("LC_ALL", locale, &["-cu"], &input).0, 1, "{locale} -cu {input:?}");
 			}
+			// Enough equal lines that an unstable sort would reorder them.
+			let many: String = (0..200u32).map(|n| if n.count_ones() % 2 == 0 { composed } else { decomposed }).collect();
+			for args in [&[][..], &["-r"]] {
+				assert!(sort_in_locale("LC_ALL", locale, args, &many).1 == many, "{locale} {args:?}: 200 equal lines reordered");
+			}
 		}
 	}
 
@@ -7757,6 +7762,7 @@ mod tests {
 	// Failure mode: collation used uucore's single collator, built from the
 	// omp process's locale, so `LC_ALL=sv_SE.UTF-8 sort` ordered text by the
 	// process locale (or by bytes) and `--debug` named the process locale.
+	#[cfg(any(not(unix), target_env = "gnu"))]
 	#[test]
 	fn collation_follows_the_shell_locale() {
 		// Swedish puts å and ä after z, å first; English keeps them beside a;
