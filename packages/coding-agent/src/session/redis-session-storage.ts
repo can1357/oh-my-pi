@@ -20,10 +20,8 @@ export interface RedisSessionStorageClient {
 	strlen(key: string): Promise<number>;
 	set(key: string, value: string): Promise<unknown>;
 	append(key: string, value: string): Promise<number>;
-	del(...keys: string[]): Promise<number>;
 	scan(cursor: string, ...args: string[]): Promise<[string, string[]]>;
 	hgetall(key: string): Promise<Record<string, string>>;
-	hdel(key: string, ...fields: string[]): Promise<unknown>;
 }
 
 export interface RedisSessionStorageOptions {
@@ -93,6 +91,39 @@ else
 	redis.call("HDEL", KEYS[4], ARGV[2])
 end
 return 1`;
+
+// One script, so finding the keys under a directory, deleting them and
+// deleting their mtime and title run with no other client's command between:
+// a child set after the scan cannot survive, and a replacement written after
+// the delete keeps its metadata. ARGV[1] is the file-key prefix, ARGV[2] a
+// SCAN pattern for the directory ("" for none), ARGV[3..] explicit paths.
+const REMOVE_SCRIPT = `-- OMP_REMOVE
+local prefix = ARGV[1]
+local paths = {}
+for i = 3, #ARGV do
+	paths[#paths + 1] = ARGV[i]
+end
+if ARGV[2] ~= "" then
+	local cursor = "0"
+	repeat
+		local reply = redis.call("SCAN", cursor, "MATCH", ARGV[2], "COUNT", 1000)
+		cursor = reply[1]
+		for _, key in ipairs(reply[2]) do
+			paths[#paths + 1] = string.sub(key, #prefix + 1)
+		end
+	until cursor == "0"
+end
+for _, path in ipairs(paths) do
+	redis.call("DEL", prefix .. path)
+	redis.call("HDEL", KEYS[1], path)
+	redis.call("HDEL", KEYS[2], path)
+end
+return #paths`;
+
+/** A `SCAN MATCH` glob for the keys starting with `prefix`, its glob characters escaped. */
+function keysStartingWith(prefix: string): string {
+	return `${prefix.replace(/[*?[\]\\]/g, "\\$&")}*`;
+}
 
 function encodeTitleMeta(title: SessionTitleUpdate): string {
 	return JSON.stringify(title);
@@ -248,18 +279,16 @@ class RedisSessionStorageBackend implements SessionStorageBackend {
 	}
 
 	async remove(paths: string[], dir?: string): Promise<void> {
-		const all = new Set(paths);
-		// Every key under the directory the server holds now, including ones
-		// another client set after this store last refreshed.
-		if (dir !== undefined) {
-			const filePrefix = this.#fileKey("");
-			for (const key of await this.#scanFileKeys(this.#fileKey(dir))) all.add(key.slice(filePrefix.length));
-		}
-		if (all.size === 0) return;
-		const removed = [...all];
-		await this.#client.del(...removed.map(path => this.#fileKey(path)));
-		await this.#client.hdel(this.#metaKey(), ...removed);
-		await this.#client.hdel(this.#titleMetaKey(), ...removed);
+		if (paths.length === 0 && dir === undefined) return;
+		await this.#client.send("EVAL", [
+			REMOVE_SCRIPT,
+			"2",
+			this.#metaKey(),
+			this.#titleMetaKey(),
+			this.#fileKey(""),
+			dir === undefined ? "" : keysStartingWith(this.#fileKey(dir)),
+			...paths,
+		]);
 	}
 
 	async move(src: string, dst: string, mtimeMs: number, noReplace = false): Promise<void> {
@@ -278,9 +307,9 @@ class RedisSessionStorageBackend implements SessionStorageBackend {
 		if (Number(moved) !== 1) throw eexist(dst);
 	}
 
-	/** Every file key starting with `keyPrefix`, matched literally. */
+	/** Every file key starting with `keyPrefix`. */
 	async #scanFileKeys(keyPrefix: string): Promise<Set<string>> {
-		const pattern = `${keyPrefix.replace(/[*?[\]\\]/g, "\\$&")}*`;
+		const pattern = keysStartingWith(keyPrefix);
 		const keys = new Set<string>();
 		let cursor = "0";
 		do {
