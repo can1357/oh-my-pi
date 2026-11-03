@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import * as path from "node:path";
-import { Agent } from "@oh-my-pi/pi-agent-core";
+import { Type } from "@oh-my-pi/omptype/typebox";
+import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import {
 	captureRequestHolds,
 	completeSimple,
@@ -10,12 +11,15 @@ import {
 } from "@oh-my-pi/pi-ai";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import type { EffectiveExtensionRoots } from "@oh-my-pi/pi-coding-agent/capability/types";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
+import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
 import { CodexLiveTransport } from "@oh-my-pi/pi-coding-agent/live/transport";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import type { AgentSessionConfig } from "@oh-my-pi/pi-coding-agent/session/agent-session-types";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
@@ -55,14 +59,16 @@ const SSE_REPLY = [
 	"",
 ].join("\n\n");
 
-/** A local OpenAI-compatible endpoint that records the requests it receives. */
+/** A local OpenAI-compatible endpoint that records the requests it receives; `arrived` settles at the first. */
 function localModelServer() {
 	const requests: string[] = [];
+	const arrived = Promise.withResolvers<void>();
 	const server = Bun.serve({
 		port: 0,
 		hostname: "127.0.0.1",
 		fetch: request => {
 			requests.push(`${request.method} ${new URL(request.url).pathname}`);
+			arrived.resolve();
 			return new Response(SSE_REPLY, { headers: { "Content-Type": "text/event-stream" } });
 		},
 	});
@@ -78,7 +84,7 @@ function localModelServer() {
 		contextWindow: 16_000,
 		maxTokens: 1024,
 	});
-	return { requests, model, stop: () => server.stop(true) };
+	return { requests, arrived: arrived.promise, model, stop: () => server.stop(true) };
 }
 
 /**
@@ -924,5 +930,309 @@ describe("work a session left running, or started before it existed, waits for i
 		release.resolve();
 		await run;
 		expect(server.requests).toEqual(["POST /v1/chat/completions"]);
+	}, 60_000);
+});
+
+describe("a host function the session, its manager or its runner keeps runs as the session's work", () => {
+	const settings = () =>
+		Settings.isolated({
+			"advisor.enabled": false,
+			"compaction.enabled": false,
+			"retry.enabled": false,
+			"todo.enabled": false,
+		});
+
+	/** Holds `agent`'s requests until `letGo`; `reached` settles once a request asks the hold. */
+	function holdUntilLetGo(agent: Agent): { reached: Promise<void>; letGo: () => void } {
+		const reached = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		let held = true;
+		agent.addHold(() => ({
+			pending: () => {
+				if (!held) return undefined;
+				reached.resolve();
+				return release.promise;
+			},
+		}));
+		const letGo = () => {
+			held = false;
+			release.resolve();
+		};
+		cleanups.push(letGo);
+		return { reached: reached.promise, letGo };
+	}
+
+	function requestFrom(model: Model): Promise<unknown> {
+		return completeSimple(
+			model,
+			{ messages: [{ role: "user", content: "from a host function", timestamp: 0 }] },
+			{ apiKey: "k" },
+		);
+	}
+
+	/** `work`'s request asked the session's hold and nothing went out while it held; once let go, exactly one went out. */
+	async function expectHeldThenSentOnce(
+		server: { requests: string[]; arrived: Promise<void> },
+		hold: { reached: Promise<void>; letGo: () => void },
+		work: Promise<unknown> | undefined,
+	): Promise<void> {
+		if (!work) throw new Error("The host function was never called");
+		// A request past the hold reaches the server: fail on it rather than wait for a hold it never asked.
+		await Promise.race([hold.reached, server.arrived]);
+		await eventLoopTurns();
+		expect(server.requests).toEqual([]);
+		hold.letGo();
+		await work;
+		expect(server.requests).toEqual(["POST /v1/chat/completions"]);
+	}
+
+	interface HostFunctionParts {
+		session: AgentSession;
+		manager: SessionManager;
+		runner: ExtensionRunner;
+		/** The host function under test: starts one model request, the first time it is called. */
+		callback: () => void;
+	}
+
+	/** A session over a file-backed manager whose extension's `user_bash` hook throws, held by one hold. */
+	async function hostFunctionSession(temp: TempDir) {
+		const server = localModelServer();
+		cleanups.push(server.stop);
+		const auth = await AuthStorage.create(":memory:");
+		cleanups.push(() => auth.close());
+		const registry = new ModelRegistry(auth, path.join(temp.path(), "models.yml"));
+		const manager = SessionManager.create(temp.path(), path.join(temp.path(), "sessions"), new FileSessionStorage());
+		const runtime = new ExtensionRuntime();
+		const extension = await loadExtensionFromFactory(
+			pi => {
+				pi.on("user_bash", () => {
+					throw new Error("hook failed");
+				});
+			},
+			temp.path(),
+			new EventBus(),
+			runtime,
+			"throwing-hook",
+		);
+		// The session's settings: a tool the host executes resolves its approval against them.
+		const sessionSettings = settings();
+		const runner = new ExtensionRunner(
+			[extension],
+			runtime,
+			temp.path(),
+			manager,
+			registry,
+			undefined,
+			sessionSettings,
+		);
+		const agent = new Agent({
+			initialState: { model: server.model, systemPrompt: ["test"], messages: [], tools: [] },
+			getApiKey: () => "k",
+		});
+		const session = new AgentSession({
+			agent,
+			sessionManager: manager,
+			modelRegistry: registry,
+			settings: sessionSettings,
+			extensionRunner: runner,
+		});
+		cleanups.push(() => session.dispose());
+		const hold = holdUntilLetGo(agent);
+		let work: Promise<unknown> | undefined;
+		const parts: HostFunctionParts = {
+			session,
+			manager,
+			runner,
+			callback: () => {
+				work ??= requestFrom(server.model);
+			},
+		};
+		return { parts, server, hold, work: () => work };
+	}
+
+	const probeTool: AgentTool = {
+		name: "probe",
+		label: "probe",
+		description: "probe",
+		parameters: Type.Object({}),
+		execute: async () => ({ content: [{ type: "text", text: "done" }], details: {} }),
+	};
+
+	// Each is registered after the session was built and triggered from outside any session work.
+	const registrations: Array<[string, (parts: HostFunctionParts) => Promise<unknown>]> = [
+		[
+			"a setter's reconciler (`setSessionSwitchReconciler`), on `newSession`",
+			({ session, callback }) => {
+				session.setSessionSwitchReconciler(async () => callback());
+				return session.newSession();
+			},
+		],
+		[
+			"a session-change callback (`registerSessionChangeCallback`), on `newSession`",
+			({ session, callback }) => {
+				session.registerSessionChangeCallback(callback);
+				return session.newSession();
+			},
+		],
+		[
+			"an event listener (`subscribe`), on a notice",
+			async ({ session, callback }) => {
+				session.subscribe(callback);
+				session.emitNotice("info", "probe");
+			},
+		],
+		[
+			"the manager's entry tap (`onEntryAppended`), the host appending to the manager",
+			async ({ manager, callback }) => {
+				manager.onEntryAppended = callback;
+				manager.appendCustomEntry("probe", {});
+			},
+		],
+		[
+			"a manager listener (`onSessionNameChanged`), on `setSessionName`",
+			({ session, manager, callback }) => {
+				manager.onSessionNameChanged(callback);
+				return session.setSessionName("probe");
+			},
+		],
+		[
+			"the runner's error listener (`onError`), after a `user_bash` hook throws",
+			({ session, runner, callback }) => {
+				runner.onError(callback);
+				return session.executeBash("printf 1");
+			},
+		],
+		[
+			"the runner's error listener (`onError`), after a `user_bash` hook the host emits through the runner throws",
+			({ manager, runner, callback }) => {
+				runner.onError(callback);
+				return runner.emitUserBash({
+					type: "user_bash",
+					command: "printf 1",
+					excludeFromContext: false,
+					cwd: manager.getCwd(),
+				});
+			},
+		],
+		[
+			"a tool preflight's `before` (`setToolCallPreflight`), the host executing the tool",
+			({ runner, callback }) => {
+				runner.setToolCallPreflight({
+					before: () => {
+						callback();
+						return undefined;
+					},
+				});
+				return new ExtensionToolWrapper(probeTool, runner).execute("probe-call", {});
+			},
+		],
+		[
+			"a tool preflight's `after` (`setToolCallPreflight`), the host executing the tool",
+			({ runner, callback }) => {
+				runner.setToolCallPreflight({
+					after: () => {
+						callback();
+						return undefined;
+					},
+				});
+				return new ExtensionToolWrapper(probeTool, runner).execute("probe-call", {});
+			},
+		],
+		[
+			"a yield dispatcher a host registers (`yieldQueue.register`), on a deliverability check",
+			async ({ session, callback }) => {
+				session.yieldQueue.register<string>("probe", {
+					isStale: () => {
+						callback();
+						return false;
+					},
+					build: () => null,
+					skipIdleFlush: true,
+				});
+				session.yieldQueue.enqueue("probe", "entry");
+				session.yieldQueue.hasDeliverable("probe");
+			},
+		],
+	];
+	for (const [registration, trigger] of registrations) {
+		it(`holds the model request of ${registration}`, async () => {
+			const { parts, server, hold, work } = await hostFunctionSession(tempDir("@gate-host-function-"));
+			await trigger(parts);
+			await expectHeldThenSentOnce(server, hold, work());
+		}, 60_000);
+	}
+
+	it("keeps a manager's host functions with the first live session over it, not a later one", async () => {
+		const temp = tempDir("@gate-manager-owner-");
+		const server = localModelServer();
+		cleanups.push(server.stop);
+		const auth = await AuthStorage.create(":memory:");
+		cleanups.push(() => auth.close());
+		const registry = new ModelRegistry(auth, path.join(temp.path(), "models.yml"));
+		const manager = SessionManager.inMemory(temp.path());
+		const build = () => {
+			const agent = new Agent({
+				initialState: { model: server.model, systemPrompt: ["test"], messages: [], tools: [] },
+				getApiKey: () => "k",
+			});
+			const session = new AgentSession({
+				agent,
+				sessionManager: manager,
+				modelRegistry: registry,
+				settings: settings(),
+			});
+			cleanups.push(() => session.dispose());
+			return agent;
+		};
+		const hold = holdUntilLetGo(build());
+		// A second live session over the manager, without holds: had it taken the manager over, the request would go out.
+		build();
+		let work: Promise<unknown> | undefined;
+		manager.onEntryAppended = () => {
+			work ??= requestFrom(server.model);
+		};
+		manager.appendCustomEntry("probe", {});
+		await expectHeldThenSentOnce(server, hold, work);
+	}, 60_000);
+
+	it("keeps every function a host's config exposes — own, inherited or non-enumerable — as the session's work", async () => {
+		const temp = tempDir("@gate-config-shapes-");
+		const auth = await AuthStorage.create(":memory:");
+		cleanups.push(() => auth.close());
+		const registry = new ModelRegistry(auth, path.join(temp.path(), "models.yml"));
+		for (const shape of ["own", "inherited", "non-enumerable"] as const) {
+			const server = localModelServer();
+			cleanups.push(server.stop);
+			const agent = new Agent({
+				initialState: { model: server.model, systemPrompt: ["test"], messages: [], tools: [] },
+				getApiKey: () => "k",
+			});
+			const hold = holdUntilLetGo(agent);
+			const roots: EffectiveExtensionRoots = {
+				explicit: [path.join(temp.path(), "host-only-extension")],
+				mode: "explicit-only",
+				configured: [],
+				configuredLevel: "user",
+			};
+			let work: Promise<unknown> | undefined;
+			const extensionRoots = () => {
+				work ??= requestFrom(server.model);
+				return roots;
+			};
+			const config: AgentSessionConfig = {
+				agent,
+				sessionManager: SessionManager.inMemory(temp.path()),
+				modelRegistry: registry,
+				settings: settings(),
+			};
+			if (shape === "own") Object.assign(config, { extensionRoots });
+			else if (shape === "inherited") Object.setPrototypeOf(config, { extensionRoots });
+			else Object.defineProperty(config, "extensionRoots", { value: extensionRoots, enumerable: false });
+			const session = new AgentSession(config);
+			cleanups.push(() => session.dispose());
+			// Read from outside any session work: the host's policy, its call held as the session's.
+			expect({ shape, roots: session.effectiveExtensionRoots }).toEqual({ shape, roots });
+			await expectHeldThenSentOnce(server, hold, work);
+		}
 	}, 60_000);
 });

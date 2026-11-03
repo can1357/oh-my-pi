@@ -1158,9 +1158,10 @@ describe("CursorExecHandlers mounted tool bridge", () => {
 			},
 		};
 		// The deny path throws inside resolveApproval before any handler runs;
-		// the stub only needs the loop-emission marker probe the wrapper always
-		// consults first.
+		// the stub only needs the session scope every call runs in and the
+		// loop-emission marker probe the wrapper always consults first.
 		const wrapped = new ExtensionToolWrapper(device, {
+			runScoped: <T>(fn: () => T) => fn(),
 			consumeToolCallEmitted: () => false,
 		} as unknown as ExtensionRunner);
 		const settings = Settings.isolated({ "tools.approval": { ast_edit: "deny" } });

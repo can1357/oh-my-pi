@@ -1,8 +1,11 @@
+/** How a session's work enters its request context (see `AgentSession.runInRequestContext`). */
+export type SessionWorkRun = <T>(fn: () => T) => T;
+
 /** Each live session's entry into its request context (see `AgentSession.runInRequestContext`). */
-const sessionRequestContexts = new WeakMap<object, <T>(fn: () => T) => T>();
+const sessionRequestContexts = new WeakMap<object, SessionWorkRun>();
 
 /** Registers `run` as how `session`'s work enters its request context; a session does this when it is built. */
-export function registerSessionWork(session: object, run: <T>(fn: () => T) => T): void {
+export function registerSessionWork(session: object, run: SessionWorkRun): void {
 	sessionRequestContexts.set(session, run);
 }
 
@@ -15,4 +18,66 @@ export function registerSessionWork(session: object, run: <T>(fn: () => T) => T)
 export function runAsSessionWork<T>(session: object | undefined, fn: () => T): T {
 	const run = session ? sessionRequestContexts.get(session) : undefined;
 	return run ? run(fn) : fn();
+}
+
+type Callable = (...args: unknown[]) => unknown;
+
+/**
+ * `fn` as session work: each call runs through `run`, with the `this` and the arguments it was
+ * called with. For a host function a session (or its manager or runner) keeps and calls later,
+ * from whatever path triggers it: a model request the function starts waits for the session's
+ * holds.
+ */
+export function asSessionWork<F extends (...args: never[]) => unknown>(run: SessionWorkRun, fn: F): F {
+	const callable = fn as unknown as Callable;
+	return function (this: unknown, ...args: unknown[]): unknown {
+		return run(() => callable.apply(this, args));
+	} as unknown as F;
+}
+
+/**
+ * `target` with every function it exposes run as session work through `run` (see
+ * {@link asSessionWork}): own and inherited members, enumerable or not, read when they are read,
+ * so a member the host replaces later is the one called. Every other member, and every way of
+ * inspecting the object (`in`, keys, descriptors, its prototype), passes through to `target`. A
+ * member keeps one wrapper while its value is unchanged; called as a member of the result, it runs
+ * on `target`, whose private fields the result lacks.
+ */
+export function membersAsSessionWork<T extends object>(run: SessionWorkRun, target: T): T {
+	const wrappers = new Map<PropertyKey, { value: Callable; wrapper: Callable }>();
+	const read = (key: PropertyKey): unknown => {
+		const value: unknown = Reflect.get(target, key, target);
+		if (typeof value !== "function") return value;
+		const cached = wrappers.get(key);
+		if (cached?.value === value) return cached.wrapper;
+		const callable = value as Callable;
+		const wrapper = function (this: unknown, ...args: unknown[]): unknown {
+			const self = this === proxy ? target : this;
+			return run(() => callable.apply(self, args));
+		};
+		wrappers.set(key, { value: callable, wrapper });
+		return wrapper;
+	};
+	// The proxy stands on an empty object rather than on `target`: a member `target` holds as
+	// non-configurable and read-only (a `defineProperty` without flags) may not read as anything
+	// but itself through a proxy of `target`, which would forbid its wrapper.
+	const stand = Object.create(null) as T;
+	const proxy: T = new Proxy(stand, {
+		get: (_stand, key) => read(key),
+		set: (_stand, key, value) => Reflect.set(target, key, value),
+		has: (_stand, key) => Reflect.has(target, key),
+		deleteProperty: (_stand, key) => Reflect.deleteProperty(target, key),
+		ownKeys: () => Reflect.ownKeys(target),
+		getOwnPropertyDescriptor(_stand, key) {
+			const descriptor = Reflect.getOwnPropertyDescriptor(target, key);
+			if (!descriptor) return undefined;
+			// Reported configurable: the stand lacks the member, and a proxy may report a member
+			// it lacks only as configurable.
+			const reported: PropertyDescriptor = { ...descriptor, configurable: true };
+			if ("value" in descriptor) reported.value = read(key);
+			return reported;
+		},
+		getPrototypeOf: () => Reflect.getPrototypeOf(target),
+	});
+	return proxy;
 }
