@@ -178,20 +178,26 @@ export class UsageService implements UsageApi {
 	 * namespace is retired before the swap — while its `cacheVersion` still
 	 * resolves — so in-flight probes of the old adapter cannot publish and a
 	 * remove→re-add cycle cannot reuse the old counters. Identity-equal
-	 * reloads, runtime-shadowed entries, and first registrations keep their
-	 * snapshots; the arriving adapter's own namespace is left intact.
+	 * reloads and first registrations keep their snapshots; the arriving
+	 * adapter's own namespace is left intact. A runtime-shadowed transition
+	 * keeps the runtime adapter's snapshot, but still retires the outgoing
+	 * configured adapter's own namespace so its rows cannot resurface once the
+	 * override is removed.
 	 */
 	replaceConfiguredProviders(providers: ReadonlyMap<Provider, UsageProvider>): void {
 		const next = new Map(providers);
 		const changed: Provider[] = [];
+		const shadowed: Array<{ provider: Provider; outgoing: UsageProvider }> = [];
 		for (const provider of new Set([...this.#configuredUsageProviders.keys(), ...next.keys()])) {
-			if (this.#runtimeUsageProviderOverrides.has(provider)) continue;
 			const previous = this.#configuredUsageProviders.get(provider) ?? this.#deps.usageProviders(provider);
 			const arriving = next.get(provider) ?? this.#deps.usageProviders(provider);
 			if (previous === undefined || previous === arriving) continue;
-			changed.push(provider);
+			const runtime = this.#runtimeUsageProviderOverrides.get(provider)?.provider;
+			if (runtime === undefined) changed.push(provider);
+			else if (runtime.cacheVersion !== previous.cacheVersion) shadowed.push({ provider, outgoing: previous });
 		}
 		for (const provider of changed) this.#deps.cache.invalidateForProvider(provider);
+		for (const { provider, outgoing } of shadowed) this.#deps.cache.retireNamespace(provider, outgoing.cacheVersion);
 		this.#configuredUsageProviders = next;
 	}
 
@@ -630,14 +636,15 @@ export class UsageService implements UsageApi {
 			if (providerImpl.usesRequestKey === true) {
 				// The pinned request key (runtime --api-key, then config apiKey) is
 				// what inference sends, so usage follows it and never falls back to
-				// stored or env credentials that the gateway would not see. An
-				// explicit empty runtime key, an unresolvable config value, or a
-				// failed resolution suppresses the probe.
-				const runtimeKey = this.#deps.overrides.runtimeKey(providerId);
+				// stored or env credentials that the gateway would not see. Like the
+				// inference cascade, an empty runtime key falls through to the config
+				// key; an unresolvable config value or a failed resolution suppresses
+				// the probe.
+				const runtimeKey = this.#deps.overrides.runtimeKey(providerId) || undefined;
 				const configKey = runtimeKey === undefined ? this.#deps.overrides.configKey(providerId) : undefined;
 				if (runtimeKey !== undefined || configKey !== undefined) {
 					let apiKey = runtimeKey;
-					if (apiKey === undefined && configKey !== undefined) {
+					if (configKey !== undefined) {
 						try {
 							apiKey = await this.#deps.overrides.resolve(configKey);
 						} catch {

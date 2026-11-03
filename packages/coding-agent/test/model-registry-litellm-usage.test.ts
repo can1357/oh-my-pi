@@ -273,9 +273,13 @@ describe("ModelRegistry LiteLLM usage registration", () => {
 			"gateway-a gateway-a:user:budget 20/100",
 			gatewayB,
 		]);
-		// An explicit empty runtime key suppresses the alias while the other alias still reports.
+		// An empty runtime key falls through to the config key, exactly as the inference cascade does.
 		authStorage.keys.setRuntime("gateway-a", "");
-		expect(budgetRows(await usageReports(authStorage, registry))).toEqual([gatewayB]);
+		expect(budgetRows(await usageReports(authStorage, registry))).toEqual([
+			"gateway-a gateway-a:user:budget 10/100",
+			gatewayB,
+		]);
+		expect(await authStorage.keys.peek("gateway-a")).toBe("cmd-key");
 		authStorage.keys.removeRuntime("gateway-a");
 
 		// Config keys that resolve to nothing suppress the probe instead of falling back.

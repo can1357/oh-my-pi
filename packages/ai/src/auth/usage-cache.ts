@@ -240,8 +240,7 @@ export class UsageCache {
 		return baseUrl?.trim().replace(/\/+$/, "") ?? "";
 	}
 
-	#usageCacheProviderKey(provider: Provider): string {
-		const cacheVersion = this.#usageProviders(provider)?.cacheVersion;
+	#usageCacheProviderKey(provider: Provider, cacheVersion = this.#usageProviders(provider)?.cacheVersion): string {
 		return cacheVersion === undefined ? provider : `${cacheVersion}:${provider}`;
 	}
 
@@ -294,14 +293,16 @@ export class UsageCache {
 	}
 
 	reportKey(request: UsageRequestDescriptor): string {
-		const baseUrl = this.#normalizeUsageBaseUrl(request.baseUrl) || "default";
-		const identity = usageCacheIdentity(request.credential);
-		const providerKey = this.#usageCacheProviderKey(request.provider);
-		const cacheKey = `${USAGE_REPORT_KEY_PREFIX}${providerKey}:${baseUrl}:${identity}`;
+		const cacheKey = this.#reportKeyFor(request, this.#usageCacheProviderKey(request.provider));
 		const cacheKeys = this.#usageReportCacheKeysByProvider.get(request.provider) ?? new Set<string>();
 		cacheKeys.add(cacheKey);
 		this.#usageReportCacheKeysByProvider.set(request.provider, cacheKeys);
 		return cacheKey;
+	}
+
+	#reportKeyFor(request: UsageRequestDescriptor, providerKey: string): string {
+		const baseUrl = this.#normalizeUsageBaseUrl(request.baseUrl) || "default";
+		return `${USAGE_REPORT_KEY_PREFIX}${providerKey}:${baseUrl}:${usageCacheIdentity(request.credential)}`;
 	}
 
 	reportsKey(requests: readonly UsageRequestDescriptor[]): string {
@@ -358,16 +359,31 @@ export class UsageCache {
 	invalidateForProvider(provider: Provider): void {
 		this.#epoch += 1;
 		this.#bumpRefreshEpoch(provider);
-		const expired = Date.now() - 1;
-		const prefix = `${USAGE_REPORT_KEY_PREFIX}${this.#usageCacheProviderKey(provider)}:`;
+		this.#expireNamespace(provider, this.#usageCacheProviderKey(provider));
+	}
+
+	/**
+	 * Drop the report snapshots a specific adapter version wrote for `provider`
+	 * without touching the adapter currently in effect. Used when a configured
+	 * adapter changes while a runtime override shadows it: the outgoing adapter
+	 * has no probe in flight, so no epoch moves, but its rows must not survive
+	 * for a successor sharing its namespace.
+	 */
+	retireNamespace(provider: Provider, cacheVersion: number | undefined): void {
+		this.#expireNamespace(provider, this.#usageCacheProviderKey(provider, cacheVersion));
+	}
+
+	#expireNamespace(provider: Provider, providerKey: string): void {
+		const prefix = `${USAGE_REPORT_KEY_PREFIX}${providerKey}:`;
 		if (this.deletePrefix(prefix)) return;
-		const cacheKeys = new Set(this.#usageReportCacheKeysByProvider.get(provider));
+		const expired = Date.now() - 1;
+		const cacheKeys = new Set<string>();
+		for (const cacheKey of this.#usageReportCacheKeysByProvider.get(provider) ?? []) {
+			if (cacheKey.startsWith(prefix)) cacheKeys.add(cacheKey);
+		}
 		for (const entry of this.#pool.entries(provider)) {
 			cacheKeys.add(
-				this.reportKey({
-					provider,
-					credential: buildUsageCredential(entry.credential),
-				}),
+				this.#reportKeyFor({ provider, credential: buildUsageCredential(entry.credential) }, providerKey),
 			);
 		}
 		for (const cacheKey of cacheKeys) {

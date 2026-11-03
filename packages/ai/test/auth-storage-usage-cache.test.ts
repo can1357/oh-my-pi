@@ -1666,6 +1666,35 @@ describe("AuthStorage usage cache: configured usage providers", () => {
 		expect(configuredA.calls).toBe(0);
 	});
 
+	it("retires a shadowed configured adapter's own namespace so its successor cannot inherit it", async () => {
+		// A (v1) caches, then a runtime adapter with another version shadows it; the
+		// configured entry becomes B (v1) underneath. Once the override goes, B shares
+		// A's namespace and must probe rather than read A's still-fresh counters.
+		const configuredA = countingUsageProvider("configured-a", 10, 1);
+		const configuredB = countingUsageProvider("configured-b", 20, 1);
+		const runtime = countingUsageProvider("runtime", 30, 2);
+		const store = makeStore([gatewayRow()]);
+		// Mirror the SQLite store: a namespace is retired by key prefix, so rows of
+		// another version are untouched (the in-memory fallback expires every key).
+		store.deleteCachePrefix = prefix => {
+			for (const key of store.cache.keys()) if (key.startsWith(prefix)) store.cache.delete(key);
+		};
+		const storage = await openStorage(store);
+		storage.usage.replaceConfiguredProviders(new Map([[GATEWAY_PROVIDER, configuredA]]));
+		expect(gatewayReading(await storage.usage.reports())).toEqual({ source: "configured-a", used: 10 });
+
+		storage.usage.setProvider(GATEWAY_PROVIDER, runtime);
+		expect(gatewayReading(await storage.usage.reports())).toEqual({ source: "runtime", used: 30 });
+		storage.usage.replaceConfiguredProviders(new Map([[GATEWAY_PROVIDER, configuredB]]));
+		// The runtime adapter's snapshot survives the shadowed transition.
+		expect(gatewayReading(await storage.usage.reports())).toEqual({ source: "runtime", used: 30 });
+		expect(runtime.calls).toBe(1);
+
+		storage.usage.removeProvider(GATEWAY_PROVIDER);
+		expect(gatewayReading(await storage.usage.reports())).toEqual({ source: "configured-b", used: 20 });
+		expect(configuredB.calls).toBe(1);
+	});
+
 	it("never serves a removed adapter's counters to a re-added adapter in the same namespace", async () => {
 		const configuredA = countingUsageProvider("configured-a", 10, 1);
 		const configuredB = countingUsageProvider("configured-b", 20, 1);
