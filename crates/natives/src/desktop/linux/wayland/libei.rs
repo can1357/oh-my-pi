@@ -28,12 +28,12 @@ use crate::desktop::{
 };
 
 const DEVICE_DISCOVERY_DRAIN_TIMEOUT: Duration = Duration::from_millis(500);
-const DRAG_STEP_DELAY: Duration = Duration::from_millis(8);
-/// `ei_text.utf8` carries at most 254 bytes (255 with the terminating NUL).
-const EI_TEXT_UTF8_MAX: usize = 254;
 const DEVICE_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
 const DEVICE_DISCOVERY_WAKE_INTERVAL: Duration = Duration::from_millis(100);
 const DEVICE_DISCOVERY_MAX_EVENTS: usize = 128;
+const DRAG_STEP_DELAY: Duration = Duration::from_millis(8);
+/// `ei_text.utf8` carries at most 254 bytes (255 with the terminating NUL).
+const EI_TEXT_UTF8_MAX: usize = 254;
 
 #[derive(Clone, Copy)]
 struct DiscoveryTargets {
@@ -292,9 +292,12 @@ impl Libei {
 					}));
 				}
 				let wake_deadline = (now + DEVICE_DISCOVERY_WAKE_INTERVAL).min(deadline);
-				let Ok(event) = tokio::time::timeout_at(wake_deadline, events.next()).await else {
-					// Messages can remain queued after handshake's separate block_on;
-					// drain them rather than waiting indefinitely for another readiness edge.
+				let Ok(event) =
+					cancellable(tokio::time::timeout_at(wake_deadline, events.next())).await?
+				else {
+					// Messages can remain queued after handshake's separate
+					// block_on; drain them rather than waiting
+					// indefinitely for another readiness edge.
 					self
 						.context
 						.read()
@@ -1151,11 +1154,10 @@ mod tests {
 		sync::{
 			Arc,
 			atomic::{AtomicBool, Ordering},
+			mpsc,
 		},
 		thread,
 	};
-
-	use futures::FutureExt;
 
 	use super::*;
 
@@ -1174,6 +1176,8 @@ mod tests {
 		with_devices: bool,
 		extra_seats: usize,
 		stop: Arc<AtomicBool>,
+		resume: mpsc::Receiver<()>,
+		queued: mpsc::Sender<()>,
 	) {
 		let context = reis::eis::Context::new(socket).unwrap();
 		let mut handshaker = reis::handshake::EisHandshaker::new(&context, 1);
@@ -1194,6 +1198,8 @@ mod tests {
 					continue;
 				};
 				let connection = response.connection;
+				context.flush().unwrap();
+				resume.recv_timeout(Duration::from_secs(5)).unwrap();
 				if with_devices {
 					let seat = connection.seat(1);
 					seat.capability(2 << 1, "ei_pointer_absolute");
@@ -1220,6 +1226,7 @@ mod tests {
 					}
 				}
 				context.flush().unwrap();
+				queued.send(()).unwrap();
 				while !stop.load(Ordering::Relaxed) {
 					let _ = context.read();
 					thread::sleep(Duration::from_millis(1));
@@ -1237,13 +1244,20 @@ mod tests {
 		let (client_socket, server_socket) = UnixStream::pair().unwrap();
 		let stop = Arc::new(AtomicBool::new(false));
 		let server_stop = Arc::clone(&stop);
-		let server =
-			thread::spawn(move || eis_fixture(server_socket, with_devices, extra_seats, server_stop));
+		let (resume, resumed) = mpsc::channel();
+		let (queued, ready) = mpsc::channel();
+		let server = thread::spawn(move || {
+			eis_fixture(server_socket, with_devices, extra_seats, server_stop, resumed, queued);
+		});
 		let runtime = test_runtime();
 		let context = ei::Context::new(client_socket).unwrap();
 		let (connection, events) = runtime
 			.block_on(context.handshake_tokio("omp-test", ei::handshake::ContextType::Sender))
 			.unwrap();
+		// Queue device bytes only after the handshake has stopped driving its
+		// reactor.
+		resume.send(()).unwrap();
+		ready.recv_timeout(Duration::from_secs(5)).unwrap();
 		let backend = Libei {
 			context,
 			devices: Vec::new(),
@@ -1251,12 +1265,14 @@ mod tests {
 			sequence: 1,
 			runtime,
 			events: None,
+			disconnected: false,
 			portal_session: None,
 		};
 		(backend, events, stop, server)
 	}
 
 	#[test]
+
 	fn drag_motions_and_release_are_spaced_for_event_consumers() {
 		use std::time::Instant;
 
@@ -1393,9 +1409,12 @@ mod tests {
 	#[test]
 	fn discovery_reads_prequeued_socket_events_after_handshake() {
 		let (mut backend, mut events, stop, server) = handshaken_fixture(true, 0);
+		// Leave the original I/O reactor idle to reproduce queued socket bytes
+		// that cannot deliver another readiness wake to discovery.
+		let discovery_runtime = test_runtime();
 		backend
 			.discover_devices_with_timeout(
-				backend.runtime,
+				discovery_runtime,
 				&mut events,
 				DiscoveryTargets::ALL,
 				Duration::from_secs(1),
@@ -1421,6 +1440,29 @@ mod tests {
 		assert!(error.to_string().contains("device discovery timed out"));
 		stop.store(true, Ordering::Relaxed);
 		server.join().unwrap();
+	}
+
+	#[test]
+	fn cancellation_interrupts_discovery_waiting_on_a_stalled_socket() {
+		let (mut backend, mut events, stop, server) = handshaken_fixture(false, 0);
+		let source = control::CancellationSource::default();
+		let token = source.token();
+		let cancellation = backend.runtime.spawn(async move {
+			tokio::time::sleep(Duration::from_millis(25)).await;
+			source.cancel();
+		});
+		let result = control::with_token_for_test(&token, || {
+			backend.discover_devices_with_timeout(
+				backend.runtime,
+				&mut events,
+				DiscoveryTargets::ALL,
+				Duration::from_secs(1),
+			)
+		});
+		backend.runtime.block_on(cancellation).unwrap();
+		stop.store(true, Ordering::Relaxed);
+		server.join().unwrap();
+		assert_eq!(result.unwrap_err().code, crate::desktop::error::ErrorCode::Cancelled);
 	}
 
 	#[test]
