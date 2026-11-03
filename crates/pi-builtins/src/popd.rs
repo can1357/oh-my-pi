@@ -1,3 +1,5 @@
+use std::io::Write;
+
 use brush_core::{ExecutionResult, builtins};
 use clap::Parser;
 
@@ -16,20 +18,34 @@ impl builtins::Command for PopdCommand {
 
 	async fn execute<SE: brush_core::ShellExtensions>(
 		&self,
-		context: brush_core::ExecutionContext<'_, SE>,
+		mut context: brush_core::ExecutionContext<'_, SE>,
 	) -> Result<brush_core::ExecutionResult, Self::Error> {
-		if let Some(popped) = context.shell.directory_stack_mut().pop() {
-			if !self.no_directory_change {
-				context.shell.set_working_dir(&popped).await?;
+		let Some(top) = context.shell.directory_stack().last().cloned() else {
+			writeln!(context.stderr(), "popd: directory stack empty").map_err(brush_core::Error::from)?;
+			return Ok(ExecutionResult::general_error());
+		};
+		// The entry stays on the stack when its directory cannot be entered, as
+		// in Bash; `set -P` resolves symbolic links here, as `cd` does.
+		let physical = context.shell.options().do_not_resolve_symlinks_when_changing_dir;
+		if !self.no_directory_change
+			&& let Err(reason) = {
+				let entered = crate::cd::enter_directory(&mut context, &top, physical).await;
+				for name in entered.as_ref().map(crate::cd::Entered::readonly).unwrap_or_default() {
+					let _ = writeln!(context.stderr(), "{name}: readonly variable");
+				}
+				entered.map(|_| ())
 			}
-
-			// Display dirs.
-			let dirs_cmd = crate::dirs::DirsCommand::default();
-			dirs_cmd.execute(context).await?;
-
-			Ok(ExecutionResult::success())
-		} else {
-			Err(crate::dirs::DirError::DirStackEmpty)
+		{
+			writeln!(context.stderr(), "popd: {}: {reason}", top.display())
+				.map_err(brush_core::Error::from)?;
+			return Ok(ExecutionResult::general_error());
 		}
+		context.shell.directory_stack_mut().pop();
+
+		// Display dirs.
+		let dirs_cmd = crate::dirs::DirsCommand::default();
+		dirs_cmd.execute(context).await?;
+
+		Ok(ExecutionResult::success())
 	}
 }

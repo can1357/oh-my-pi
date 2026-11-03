@@ -97,6 +97,7 @@ async fn set_shell_working_dir_if_changed(shell: &mut BrushShell, cwd: &str) -> 
 	shell
 		.set_working_dir(cwd)
 		.await
+		.map(|_readonly| ())
 		.map_err(|err| Error::msg(format!("Failed to set cwd: {err}")))
 }
 
@@ -6204,6 +6205,841 @@ mod tests {
 		path.push(format!("pi-shell-{prefix}-{}-{nonce}", std::process::id()));
 		std::fs::create_dir_all(&path).expect("create temp dir");
 		path
+	}
+
+	/// Every way `cd`, `pushd` and `popd` fail to change directory, and
+	/// `CDPATH`, against Bash 5.2.21: each row's output is Bash's, less the
+	/// `script: line N:` prefix Bash puts on a builtin's message, which this
+	/// shell puts on none. Each row runs in a fresh directory holding `file`,
+	/// `d/sub`, `link -> d` and `locked`, a directory with no search permission.
+	/// `cd` printed the shell's own error (`error: cd: i/o error: No such file
+	/// or directory (os error 2)`), which names no directory; it entered a
+	/// directory it may not search; it had no `CDPATH`; an unknown option, a
+	/// second directory or an empty one got its parser's message and status 2;
+	/// and `popd` dropped the entry it could not enter, and put `error: ` before
+	/// `directory stack empty`. `CDPATH` applies to a written directory only,
+	/// not to `$HOME` or `$OLDPWD`; `cd -` prints `$OLDPWD` as written; `-L`
+	/// overrides `set -P`, which `pushd` and `popd` follow; `cdable_vars` names
+	/// a directory by a variable; and a removed working directory is still `.`,
+	/// with Bash's `getcwd` message, which `cd -P -e` makes a failure.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn directory_changes_fail_as_bash_reports_them() {
+		const SETUP: &str = "unset CDPATH; top=$PWD; : >file; mkdir -p locked/inner d/sub; ln -s d \
+		                     link; chmod 000 locked; ";
+		const CLEANUP: &str = "; cd \"$top\"; chmod 755 locked";
+		let long = "a".repeat(300);
+		let nf = "No such file or directory";
+		let usage = "cd: usage: cd [-L|[-P [-e]] [-@]] [dir]";
+		let lost = "cd: error retrieving current directory: getcwd: cannot access parent \
+		            directories: No such file or directory\n";
+		let gone = "mkdir gone; cd gone; rmdir \"$top/gone\"; ";
+		let state = "echo \"S=$? PWD=<${PWD#$top}> OLDPWD=<${OLDPWD#$top}>\"";
+		let same = |name: &str| format!("[ \"$PWD\" = \"$top{name}\" ]");
+		// (row, script, what Bash prints, whether the row needs a directory the
+		// user may not search, which root may)
+		let rows: Vec<(&str, String, String, bool)> = vec![
+			(
+				"missing",
+				"cd /nonexistent/BOOM; echo \"S=$?\"".into(),
+				format!("cd: /nonexistent/BOOM: {nf}\nS=1\n"),
+				false,
+			),
+			(
+				"missing, relative",
+				"cd nosuch; echo \"S=$?\"".into(),
+				format!("cd: nosuch: {nf}\nS=1\n"),
+				false,
+			),
+			(
+				"a file",
+				"cd file; echo \"S=$?\"".into(),
+				"cd: file: Not a directory\nS=1\n".into(),
+				false,
+			),
+			(
+				"below a file",
+				"cd file/x; echo \"S=$?\"".into(),
+				"cd: file/x: Not a directory\nS=1\n".into(),
+				false,
+			),
+			(
+				"no search permission",
+				format!("cd locked; echo \"S=$?\"; {} && echo STAYED", same("")),
+				"cd: locked: Permission denied\nS=1\nSTAYED\n".into(),
+				true,
+			),
+			(
+				"below no search permission",
+				"cd locked/inner; echo \"S=$?\"".into(),
+				"cd: locked/inner: Permission denied\nS=1\n".into(),
+				true,
+			),
+			(
+				"two directories",
+				format!("cd d d; echo \"S=$?\"; {} && echo STAYED", same("")),
+				"cd: too many arguments\nS=1\nSTAYED\n".into(),
+				false,
+			),
+			(
+				"two after -",
+				"cd d; cd - -; echo \"S=$?\"".into(),
+				"cd: too many arguments\nS=1\n".into(),
+				false,
+			),
+			(
+				"OLDPWD unset",
+				"unset OLDPWD; cd -; echo \"S=$?\"".into(),
+				"cd: OLDPWD not set\nS=1\n".into(),
+				false,
+			),
+			(
+				"OLDPWD missing",
+				"OLDPWD=/nonexistent/old; cd -; echo \"S=$?\"".into(),
+				format!("cd: /nonexistent/old: {nf}\nS=1\n"),
+				false,
+			),
+			(
+				"HOME unset",
+				"unset HOME; cd; echo \"S=$?\"".into(),
+				"cd: HOME not set\nS=1\n".into(),
+				false,
+			),
+			(
+				"HOME missing",
+				"HOME=/nonexistent/home; cd; echo \"S=$?\"".into(),
+				format!("cd: /nonexistent/home: {nf}\nS=1\n"),
+				false,
+			),
+			(
+				"CDPATH misses",
+				"CDPATH=/tmp; cd nosuch; echo \"S=$?\"".into(),
+				format!("cd: nosuch: {nf}\nS=1\n"),
+				false,
+			),
+			(
+				"CDPATH finds and prints",
+				format!(
+					"CDPATH=$top/d; cd sub >\"$top/out\"; echo \"S=$?\"; [ \"$(cat \"$top/out\")\" = \
+					 \"$top/d/sub\" ] && echo PRINTED; {} && echo IN",
+					same("/d/sub")
+				),
+				"S=0\nPRINTED\nIN\n".into(),
+				false,
+			),
+			(
+				"CDPATH relative entry prints the absolute name",
+				"CDPATH=./d; cd sub >\"$top/out\"; echo \"S=$?\"; [ \"$(cat \"$top/out\")\" = \
+				 \"$top/d/sub\" ] && echo PRINTED"
+					.into(),
+				"S=0\nPRINTED\n".into(),
+				false,
+			),
+			(
+				"CDPATH empty entry is quiet",
+				format!(
+					"CDPATH=:$top/d; cd d >\"$top/out\"; echo \"S=$? out=<$(cat \"$top/out\")>\"; {} \
+					 && echo IN",
+					same("/d")
+				),
+				"S=0 out=<>\nIN\n".into(),
+				false,
+			),
+			(
+				"CDPATH skips a file",
+				format!(
+					"mkdir c2; : >c2/sub; CDPATH=$top/c2:$top/d; cd sub >/dev/null; echo \"S=$?\"; {} \
+					 && echo IN",
+					same("/d/sub")
+				),
+				"S=0\nIN\n".into(),
+				false,
+			),
+			(
+				"CDPATH falls back to the directory itself",
+				format!("CDPATH=/nonexistent; cd d; echo \"S=$?\"; {} && echo IN", same("/d")),
+				"S=0\nIN\n".into(),
+				false,
+			),
+			(
+				"CDPATH is not searched for ./",
+				"CDPATH=$top/d; cd ./sub; echo \"S=$?\"".into(),
+				format!("cd: ./sub: {nf}\nS=1\n"),
+				false,
+			),
+			(
+				"an empty directory",
+				format!("cd \"\"; echo \"S=$?\"; {} && echo STAYED", same("")),
+				"S=0\nSTAYED\n".into(),
+				false,
+			),
+			(
+				"an unknown option",
+				"cd -x; echo \"S=$?\"".into(),
+				format!("cd: -x: invalid option\n{usage}\nS=2\n"),
+				false,
+			),
+			(
+				"an unknown option after a known one",
+				"cd -Lx d; echo \"S=$?\"".into(),
+				format!("cd: -x: invalid option\n{usage}\nS=2\n"),
+				false,
+			),
+			(
+				"-- then -",
+				format!("cd d; cd -- - >/dev/null; echo \"S=$?\"; {} && echo BACK", same("")),
+				"S=0\nBACK\n".into(),
+				false,
+			),
+			(
+				"- prints",
+				"cd d; cd - >\"$top/out\"; echo \"S=$?\"; [ \"$(cat \"$top/out\")\" = \"$top\" ] && \
+				 echo PRINTED"
+					.into(),
+				"S=0\nPRINTED\n".into(),
+				false,
+			),
+			(
+				"a name too long",
+				format!("cd {long}; echo \"S=$?\""),
+				format!("cd: {long}: File name too long\nS=1\n"),
+				false,
+			),
+			(
+				"a loop of links",
+				"ln -s l2 l1; ln -s l1 l2; cd l1; echo \"S=$?\"".into(),
+				"cd: l1: Too many levels of symbolic links\nS=1\n".into(),
+				false,
+			),
+			(
+				"a loop of links, -P",
+				"ln -s l2 l1; ln -s l1 l2; cd -P l1; echo \"S=$?\"".into(),
+				"cd: l1: Too many levels of symbolic links\nS=1\n".into(),
+				false,
+			),
+			(
+				"a second failure",
+				"cd nosuch; cd nosuch2 && echo no; echo \"S=$?\"".into(),
+				format!("cd: nosuch: {nf}\ncd: nosuch2: {nf}\nS=1\n"),
+				false,
+			),
+			(
+				"pushd, missing",
+				"pushd /nonexistent/BOOM; echo \"S=$?\"".into(),
+				format!("pushd: /nonexistent/BOOM: {nf}\nS=1\n"),
+				false,
+			),
+			(
+				"pushd, a file",
+				"pushd file; echo \"S=$?\"".into(),
+				"pushd: file: Not a directory\nS=1\n".into(),
+				false,
+			),
+			(
+				"pushd, no search permission",
+				format!("pushd locked; echo \"S=$?\"; {} && echo STAYED", same("")),
+				"pushd: locked: Permission denied\nS=1\nSTAYED\n".into(),
+				true,
+			),
+			(
+				"popd, a removed directory",
+				"mkdir gone; pushd gone >/dev/null; pushd \"$top\" >/dev/null; rmdir \"$top/gone\"; \
+				 popd 2>\"$top/err\"; echo \"S=$?\"; case \"$(cat \"$top/err\")\" in *\"popd: \
+				 $top/gone: No such file or directory\") echo NAMED;; esac; dirs | wc -w | tr -d \" \""
+					.into(),
+				"S=1\nNAMED\n3\n".into(),
+				false,
+			),
+			(
+				"popd, an empty stack",
+				"popd; echo \"S=$?\"".into(),
+				"popd: directory stack empty\nS=1\n".into(),
+				false,
+			),
+			(
+				"HOME is not looked for in CDPATH",
+				format!("HOME=sub; CDPATH=d; cd; echo \"S=$?\"; {} && echo STAYED", same("")),
+				format!("cd: sub: {nf}\nS=1\nSTAYED\n"),
+				false,
+			),
+			(
+				"OLDPWD is not looked for in CDPATH",
+				format!("OLDPWD=sub; CDPATH=d; cd -; echo \"S=$?\"; {} && echo STAYED", same("")),
+				format!("cd: sub: {nf}\nS=1\nSTAYED\n"),
+				false,
+			),
+			(
+				"- prints OLDPWD as written",
+				format!("OLDPWD=d; cd -; echo \"S=$?\"; {} && echo IN", same("/d")),
+				"d\nS=0\nIN\n".into(),
+				false,
+			),
+			(
+				"an empty directory sets OLDPWD",
+				"unset OLDPWD; cd \"\"; echo \"S=$?\"; [ \"$OLDPWD\" = \"$top\" ] && echo OLDPWD-SET"
+					.into(),
+				"S=0\nOLDPWD-SET\n".into(),
+				false,
+			),
+			(
+				"an empty HOME sets OLDPWD",
+				format!(
+					"unset OLDPWD; HOME=; cd; echo \"S=$?\"; [ \"$OLDPWD\" = \"$top\" ] && echo \
+					 OLDPWD-SET; {} && echo STAYED",
+					same("")
+				),
+				"S=0\nOLDPWD-SET\nSTAYED\n".into(),
+				false,
+			),
+			(
+				"an empty directory is looked for in CDPATH",
+				format!(
+					"CDPATH=$top/d; cd \"\" >\"$top/out\"; echo \"S=$?\"; [ \"$(cat \"$top/out\")\" = \
+					 \"$top/d\" ] && echo PRINTED; {} && echo IN",
+					same("/d")
+				),
+				"S=0\nPRINTED\nIN\n".into(),
+				false,
+			),
+			(
+				"CDPATH under -P prints the entry's spelling",
+				format!("CDPATH=link; cd -P sub; echo \"S=$?\"; {} && echo PHYSICAL", same("/d/sub")),
+				"link/sub\nS=0\nPHYSICAL\n".into(),
+				false,
+			),
+			(
+				"CDPATH under -P, an entry ending in /",
+				"CDPATH=link/; cd -P sub; echo \"S=$?\"".into(),
+				"link/sub\nS=0\n".into(),
+				false,
+			),
+			(
+				"CDPATH under set -P",
+				"set -P; CDPATH=link; cd sub; echo \"S=$?\"".into(),
+				"link/sub\nS=0\n".into(),
+				false,
+			),
+			(
+				"CDPATH prints the logical directory",
+				"CDPATH=link; cd sub >\"$top/out\"; echo \"S=$?\"; [ \"$(cat \"$top/out\")\" = \
+				 \"$top/link/sub\" ] && echo LOGICAL"
+					.into(),
+				"S=0\nLOGICAL\n".into(),
+				false,
+			),
+			(
+				"-L overrides set -P",
+				format!("set -P; cd -L link; echo \"S=$?\"; {} && echo LOGICAL", same("/link")),
+				"S=0\nLOGICAL\n".into(),
+				false,
+			),
+			(
+				"set -P resolves links",
+				format!("set -P; cd link; echo \"S=$?\"; {} && echo PHYSICAL", same("/d")),
+				"S=0\nPHYSICAL\n".into(),
+				false,
+			),
+			(
+				"the last of -P and -L wins",
+				format!("cd -P -L link; echo \"S=$?\"; {} && echo LOGICAL", same("/link")),
+				"S=0\nLOGICAL\n".into(),
+				false,
+			),
+			(
+				"cdable_vars",
+				format!("shopt -s cdable_vars; aa=d; cd aa; echo \"S=$?\"; {} && echo IN", same("/d")),
+				"d\nS=0\nIN\n".into(),
+				false,
+			),
+			(
+				"cdable_vars, a value that is no directory",
+				"shopt -s cdable_vars; aa=nosuch; cd aa; echo \"S=$?\"".into(),
+				format!("cd: aa: {nf}\nS=1\n"),
+				false,
+			),
+			(
+				"cdable_vars, a directory comes first",
+				format!("shopt -s cdable_vars; d=sub; cd d; echo \"S=$?\"; {} && echo DIR", same("/d")),
+				"S=0\nDIR\n".into(),
+				false,
+			),
+			(
+				"no cdable_vars",
+				"aa=d; cd aa; echo \"S=$?\"".into(),
+				format!("cd: aa: {nf}\nS=1\n"),
+				false,
+			),
+			(
+				"pushd under set -P",
+				format!(
+					"set -P; pushd link >/dev/null; echo \"S=$?\"; {} && echo PHYSICAL",
+					same("/d")
+				),
+				"S=0\nPHYSICAL\n".into(),
+				false,
+			),
+			(
+				"popd under set -P",
+				format!(
+					"set -P; pushd -n link >/dev/null; popd >/dev/null; echo \"S=$?\"; {} && echo \
+					 PHYSICAL",
+					same("/d")
+				),
+				"S=0\nPHYSICAL\n".into(),
+				false,
+			),
+			(
+				"a removed directory, cd .",
+				format!("{gone}cd .; {state}"),
+				format!("{lost}S=0 PWD=</gone/.> OLDPWD=</gone>\n"),
+				false,
+			),
+			(
+				"a removed directory, cd ./.",
+				format!("{gone}cd ./.; {state}"),
+				format!("{lost}S=0 PWD=</gone/./.> OLDPWD=</gone>\n"),
+				false,
+			),
+			(
+				"a removed directory, cd -P .",
+				format!("{gone}cd -P .; {state}"),
+				format!("{lost}S=0 PWD=</gone/.> OLDPWD=</gone>\n"),
+				false,
+			),
+			(
+				"a removed directory, cd -P -e .",
+				format!("{gone}cd -P -e .; {state}"),
+				format!("{lost}S=1 PWD=</gone/.> OLDPWD=</gone>\n"),
+				false,
+			),
+			(
+				"a removed directory, cd -e . (logical)",
+				format!("{gone}cd -e .; {state}"),
+				format!("{lost}S=0 PWD=</gone/.> OLDPWD=</gone>\n"),
+				false,
+			),
+			(
+				"a removed directory, cd \"\"",
+				format!("{gone}cd \"\"; {state}"),
+				format!("cd: : {nf}\nS=1 PWD=</gone> OLDPWD=<>\n"),
+				false,
+			),
+			(
+				"a removed directory, its own name",
+				format!("{gone}cd \"$PWD\" 2>/dev/null; echo \"S=$?\""),
+				"S=1\n".into(),
+				false,
+			),
+			(
+				"a removed directory, cd ..",
+				format!("{gone}cd ..; echo \"S=$? PWD=<${{PWD#$top}}>\""),
+				"S=0 PWD=<>\n".into(),
+				false,
+			),
+			(
+				"a removed directory, pushd .",
+				format!(
+					"{gone}pushd . >/dev/null; echo \"S=$? PWD=<${{PWD#$top}}> n=$(dirs -p | wc -l)\""
+				),
+				format!("{lost}S=0 PWD=</gone/.> n=2\n"),
+				false,
+			),
+			(
+				"a removed directory, a name with a component",
+				"mkdir gone; cd gone; rmdir \"$top/gone\"; cd -P missing/../../d; echo \"S=$? \
+				 PWD=<${PWD#$top}> OLDPWD=<${OLDPWD#$top}>\""
+					.into(),
+				"cd: missing/../../d: No such file or directory\nS=1 PWD=</gone> OLDPWD=<>\n".into(),
+				false,
+			),
+			(
+				"a removed directory, a name through a file",
+				"mkdir gone; cd gone; rmdir \"$top/gone\"; cd \"$top/file/../d\" 2>\"$top/err\"; \
+				 s=$?; case \"$(cat \"$top/err\")\" in *\"cd: $top/file/../d: Not a directory\") echo \
+				 NAMED;; esac; echo \"S=$s PWD=<${PWD#$top}> OLDPWD=<${OLDPWD#$top}>\""
+					.into(),
+				"NAMED\nS=1 PWD=</gone> OLDPWD=<>\n".into(),
+				false,
+			),
+			(
+				"a removed directory, a missing name",
+				"mkdir gone; cd gone; rmdir \"$top/gone\"; cd nosuch; echo \"S=$? PWD=<${PWD#$top}> \
+				 OLDPWD=<${OLDPWD#$top}>\""
+					.into(),
+				"cd: nosuch: No such file or directory\nS=1 PWD=</gone> OLDPWD=<>\n".into(),
+				false,
+			),
+			(
+				"a removed directory, . twice",
+				"mkdir gone; cd gone; rmdir \"$top/gone\"; cd .; cd .; echo \"PWD=<${PWD#$top}> \
+				 OLDPWD=<${OLDPWD#$top}>\"; pwd | sed \"s#$top##\""
+					.into(),
+				"cd: error retrieving current directory: getcwd: cannot access parent directories: No \
+				 such file or directory\ncd: error retrieving current directory: getcwd: cannot \
+				 access parent directories: No such file or directory\nPWD=</gone/./.> \
+				 OLDPWD=</gone/.>\n/gone/./.\n"
+					.into(),
+				false,
+			),
+			(
+				"a removed directory, . then a name",
+				"mkdir gone; cd gone; rmdir \"$top/gone\"; cd .; cd d; echo \"S=$? PWD=<${PWD#$top}> \
+				 OLDPWD=<${OLDPWD#$top}>\""
+					.into(),
+				"cd: error retrieving current directory: getcwd: cannot access parent directories: No \
+				 such file or directory\ncd: d: No such file or directory\nS=1 PWD=</gone/.> \
+				 OLDPWD=</gone>\n"
+					.into(),
+				false,
+			),
+			(
+				"a removed directory, . then ..",
+				"mkdir gone; cd gone; rmdir \"$top/gone\"; cd .; cd ..; echo \"S=$? \
+				 PWD=<${PWD#$top}>\""
+					.into(),
+				"cd: error retrieving current directory: getcwd: cannot access parent directories: No \
+				 such file or directory\nS=0 PWD=<>\n"
+					.into(),
+				false,
+			),
+			(
+				"a removed directory, ../.. from below",
+				"mkdir -p gone/in; cd gone/in; rm -r \"$top/gone\"; cd ../..; echo \"S=$? \
+				 PWD=<${PWD#$top}>\""
+					.into(),
+				"S=0 PWD=<>\n".into(),
+				false,
+			),
+			(
+				"an empty CDPATH entry with an empty directory",
+				"mkdir -p c; CDPATH=:c; cd \"\" >\"$top/out\"; echo \"S=$? out=<$(cat \
+				 \"$top/out\")>\"; [ \"$PWD\" = \"$top\" ] && echo STAYED"
+					.into(),
+				"S=0 out=<>\nSTAYED\n".into(),
+				false,
+			),
+			(
+				"a CDPATH of one empty entry",
+				"CDPATH=:; cd \"\"; echo \"S=$?\"; [ \"$PWD\" = \"$top\" ] && echo STAYED".into(),
+				"S=0\nSTAYED\n".into(),
+				false,
+			),
+			(
+				"a CDPATH entry with an empty directory",
+				"CDPATH=$top/d; cd \"\" >\"$top/out\"; echo \"S=$?\"; [ \"$(cat \"$top/out\")\" = \
+				 \"$top/d\" ] && echo PRINTED; [ \"$PWD\" = \"$top/d\" ] && echo IN"
+					.into(),
+				"S=0\nPRINTED\nIN\n".into(),
+				false,
+			),
+			(
+				"cdable_vars with an empty value",
+				"unset OLDPWD; shopt -s cdable_vars; aa=; cd aa; echo \"S=$?\"; [ \"$PWD\" = \"$top\" \
+				 ] && echo STAYED; [ \"$OLDPWD\" = \"$top\" ] && echo OLDPWD-SET"
+					.into(),
+				"\nS=0\nSTAYED\nOLDPWD-SET\n".into(),
+				false,
+			),
+			(
+				"cdable_vars printing its value",
+				"shopt -s cdable_vars; aa=d; cd aa >\"$top/out\"; echo \"S=$?\"; cat \"$top/out\""
+					.into(),
+				"S=0\nd\n".into(),
+				false,
+			),
+			(
+				"cdable_vars with a missing directory",
+				"shopt -s cdable_vars; aa=nosuch; cd aa; echo \"S=$?\"".into(),
+				"cd: aa: No such file or directory\nS=1\n".into(),
+				false,
+			),
+			(
+				"cdable_vars naming a file",
+				"shopt -s cdable_vars; aa=file; cd aa; echo \"S=$?\"".into(),
+				"cd: aa: Not a directory\nS=1\n".into(),
+				false,
+			),
+			(
+				"a removed directory through a symbolic link, cd -P",
+				"mkdir -p real/parent/gone; ln -s real/parent via; cd via/gone; rmdir \
+				 \"$top/real/parent/gone\"; cd -P ../..; echo \"S=$? PWD=<${PWD#$top}>\""
+					.into(),
+				"S=0 PWD=</real>\n".into(),
+				false,
+			),
+			(
+				"a removed directory through a symbolic link, cd -L",
+				"mkdir -p real/parent/gone; ln -s real/parent via; cd via/gone; rmdir \
+				 \"$top/real/parent/gone\"; cd -L ../..; echo \"S=$? PWD=<${PWD#$top}>\""
+					.into(),
+				"S=0 PWD=</real>\n".into(),
+				false,
+			),
+			(
+				"a removed directory through a symbolic link, one up",
+				"mkdir -p real/parent/gone; ln -s real/parent via; cd via/gone; rmdir \
+				 \"$top/real/parent/gone\"; cd ..; echo \"S=$? PWD=<${PWD#$top}>\""
+					.into(),
+				"S=0 PWD=</real/parent>\n".into(),
+				false,
+			),
+			(
+				"a removed directory, a name after ..",
+				"mkdir gone; cd gone; rmdir \"$top/gone\"; cd -P ../d; echo \"S=$? PWD=<${PWD#$top}>\""
+					.into(),
+				"S=0 PWD=</d>\n".into(),
+				false,
+			),
+			(
+				"a removed directory, a name after .. logically",
+				"mkdir gone; cd gone; rmdir \"$top/gone\"; cd ../d; echo \"S=$? PWD=<${PWD#$top}>\""
+					.into(),
+				"S=0 PWD=</d>\n".into(),
+				false,
+			),
+			(
+				"a removed directory, a missing name after ..",
+				"mkdir gone; cd gone; rmdir \"$top/gone\"; cd ../nosuch; echo \"S=$? \
+				 PWD=<${PWD#$top}>\""
+					.into(),
+				"cd: ../nosuch: No such file or directory\nS=1 PWD=</gone>\n".into(),
+				false,
+			),
+			(
+				"a removed directory, a name after two ..",
+				"mkdir -p gone/in; cd gone/in; rm -r \"$top/gone\"; cd ../../d; echo \"S=$? \
+				 PWD=<${PWD#$top}>\""
+					.into(),
+				"S=0 PWD=</d>\n".into(),
+				false,
+			),
+			(
+				"a removed directory, a name after ./..",
+				"mkdir gone; cd gone; rmdir \"$top/gone\"; cd ./../d; echo \"S=$? PWD=<${PWD#$top}>\""
+					.into(),
+				"S=0 PWD=</d>\n".into(),
+				false,
+			),
+			(
+				"a removed tree, cd .. logically",
+				"mkdir -p gone/in; cd gone/in; rm -r \"$top/gone\"; cd -L ..; echo \"S=$? \
+				 PWD=<${PWD#$top}>\""
+					.into(),
+				"cd: error retrieving current directory: getcwd: cannot access parent directories: No \
+				 such file or directory\nS=0 PWD=</gone/in/..>\n"
+					.into(),
+				false,
+			),
+			(
+				"a removed tree, cd .. physically",
+				"mkdir -p gone/in; cd gone/in; rm -r \"$top/gone\"; cd -P ..; echo \"S=$? \
+				 PWD=<${PWD#$top}>\""
+					.into(),
+				"cd: error retrieving current directory: getcwd: cannot access parent directories: No \
+				 such file or directory\nS=0 PWD=</gone/in/..>\n"
+					.into(),
+				false,
+			),
+			(
+				"a removed tree, cd ../.. to a directory that is there",
+				"mkdir -p gone/in; cd gone/in; rm -r \"$top/gone\"; cd ../..; echo \"S=$? \
+				 PWD=<${PWD#$top}>\""
+					.into(),
+				"S=0 PWD=<>\n".into(),
+				false,
+			),
+			(
+				"a removed directory, a name of its own",
+				"mkdir gone; cd gone; rmdir \"$top/gone\"; cd d; echo \"S=$? PWD=<${PWD#$top}>\""
+					.into(),
+				"cd: d: No such file or directory\nS=1 PWD=</gone>\n".into(),
+				false,
+			),
+			(
+				"a removed directory, ./ before a name of its own",
+				"mkdir gone; cd gone; rmdir \"$top/gone\"; cd ./d; echo \"S=$? PWD=<${PWD#$top}>\""
+					.into(),
+				"cd: ./d: No such file or directory\nS=1 PWD=</gone>\n".into(),
+				false,
+			),
+			(
+				"OLDPWD is what PWD held",
+				"PWD=custom; cd d; echo \"S=$? OLDPWD=<$OLDPWD>\"".into(),
+				"S=0 OLDPWD=<custom>\n".into(),
+				false,
+			),
+			(
+				"OLDPWD with PWD unset",
+				"unset PWD; cd d; echo \"S=$? OLDPWD=<$OLDPWD>\"".into(),
+				"S=0 OLDPWD=<>\n".into(),
+				false,
+			),
+			(
+				"OLDPWD from a removed directory",
+				"mkdir gone; cd gone; rmdir \"$top/gone\"; PWD=custom; cd .; echo \"S=$? \
+				 OLDPWD=<$OLDPWD>\""
+					.into(),
+				"cd: error retrieving current directory: getcwd: cannot access parent directories: No \
+				 such file or directory\nS=0 OLDPWD=<custom>\n"
+					.into(),
+				false,
+			),
+			(
+				"OLDPWD after pushd",
+				"PWD=custom; pushd d >/dev/null; echo \"S=$? OLDPWD=<$OLDPWD>\"".into(),
+				"S=0 OLDPWD=<custom>\n".into(),
+				false,
+			),
+			(
+				"cd - after PWD was written",
+				"PWD=custom; cd d >/dev/null; cd - >/dev/null 2>&1; echo \"S=$? PWD=<${PWD#$top}>\""
+					.into(),
+				"S=1 PWD=</d>\n".into(),
+				false,
+			),
+			(
+				"a removed directory whose link is gone, cd -P",
+				"mkdir -p real/parent/gone; ln -s real/parent via; cd via/gone; rm \"$top/via\"; \
+				 rmdir \"$top/real/parent/gone\"; cd -P ../..; echo \"S=$? PWD=<${PWD#$top}>\""
+					.into(),
+				"S=0 PWD=</real>\n".into(),
+				false,
+			),
+			(
+				"a removed directory whose link is gone, cd -L",
+				"mkdir -p real/parent/gone; ln -s real/parent via; cd via/gone; rm \"$top/via\"; \
+				 rmdir \"$top/real/parent/gone\"; cd -L ../..; echo \"S=$? PWD=<${PWD#$top}>\""
+					.into(),
+				"S=0 PWD=</real>\n".into(),
+				false,
+			),
+			(
+				"a removed tree left by two cd ..",
+				"mkdir -p gone/in; cd gone/in; rm -r \"$top/gone\"; cd ..; cd ..; : >probe; echo \
+				 \"W=$?\"; [ -f \"$top/probe\" ] && echo HERE"
+					.into(),
+				"cd: error retrieving current directory: getcwd: cannot access parent directories: No \
+				 such file or directory\nW=0\nHERE\n"
+					.into(),
+				false,
+			),
+			(
+				"a removed tree left by cd ../..",
+				"mkdir -p gone/in; cd gone/in; rm -r \"$top/gone\"; cd ../..; : >probe; echo \
+				 \"W=$?\"; [ -f \"$top/probe\" ] && echo HERE"
+					.into(),
+				"W=0\nHERE\n".into(),
+				false,
+			),
+			(
+				"a removed directory, .. to a file",
+				"mkdir gone; cd gone; rmdir \"$top/gone\"; cd -P ../file; echo \"S=$? \
+				 PWD=<${PWD#$top}>\""
+					.into(),
+				"cd: ../file: Not a directory\nS=1 PWD=</gone>\n".into(),
+				false,
+			),
+			(
+				"a removed directory, .. to a file with a slash",
+				"mkdir gone; cd gone; rmdir \"$top/gone\"; cd ../file/; echo \"S=$? \
+				 PWD=<${PWD#$top}>\""
+					.into(),
+				"cd: ../file/: No such file or directory\nS=1 PWD=</gone>\n".into(),
+				false,
+			),
+			(
+				"a removed directory, a name through a file after ..",
+				"mkdir gone; cd gone; rmdir \"$top/gone\"; cd ../file/../d; echo \"S=$? \
+				 PWD=<${PWD#$top}>\""
+					.into(),
+				"cd: ../file/../d: No such file or directory\nS=1 PWD=</gone>\n".into(),
+				false,
+			),
+			(
+				"a moved working directory, cd .",
+				"mkdir -p from/here there; cd from/here; mv \"$top/from/here\" \"$top/there/here\"; \
+				 cd .; echo \"S=$? PWD=<${PWD#$top}>\""
+					.into(),
+				"S=0 PWD=</there/here>\n".into(),
+				false,
+			),
+			(
+				"a moved working directory, cd ..",
+				"mkdir -p from/here there; cd from/here; mv \"$top/from/here\" \"$top/there/here\"; \
+				 cd ..; echo \"S=$? PWD=<${PWD#$top}>\""
+					.into(),
+				"S=0 PWD=</there>\n".into(),
+				false,
+			),
+			(
+				"a readonly PWD and a CDPATH",
+				"mkdir -p a/d b/d; CDPATH=\"$top/a:$top/b\"; readonly PWD; cd d >/dev/null; : \
+				 >marker; for x in a b; do [ -f \"$top/$x/d/marker\" ] && echo \"MARKER=$x\"; done"
+					.into(),
+				"PWD: readonly variable\nMARKER=a\nPWD: readonly variable\n".into(),
+				false,
+			),
+			(
+				"a readonly PWD keeps OLDPWD",
+				"unset OLDPWD; PWD=custom; readonly PWD; cd d; echo \"OLDPWD=<$OLDPWD>\"".into(),
+				"PWD: readonly variable\nOLDPWD=<custom>\nPWD: readonly variable\n".into(),
+				false,
+			),
+			(
+				"a readonly OLDPWD",
+				"OLDPWD=kept; readonly OLDPWD; cd d; echo \"S=$? PWD=<${PWD#$top}> OLDPWD=<$OLDPWD>\""
+					.into(),
+				"OLDPWD: readonly variable\nS=1 PWD=</d> OLDPWD=<kept>\nOLDPWD: readonly variable\n"
+					.into(),
+				false,
+			),
+			(
+				"cd .. from one level under the root",
+				"cd /; cd ..; echo \"S=$? PWD=<$PWD>\"".into(),
+				"S=0 PWD=</>\n".into(),
+				false,
+			),
+			(
+				"cd past the root",
+				"cd /; cd ../../..; echo \"S=$? PWD=<$PWD>\"".into(),
+				"S=0 PWD=</>\n".into(),
+				false,
+			),
+			(
+				"a removed directory, .. with a name that is there",
+				"mkdir gone; cd gone; rmdir \"$top/gone\"; cd ../d/sub; echo \"S=$? \
+				 PWD=<${PWD#$top}>\""
+					.into(),
+				"S=0 PWD=</d/sub>\n".into(),
+				false,
+			),
+		];
+		// SAFETY: `geteuid` has no preconditions.
+		let root = unsafe { libc::geteuid() } == 0;
+		let mut failures = Vec::new();
+		for (name, script, bash, needs_permissions) in rows {
+			if needs_permissions && root {
+				continue;
+			}
+			let dir = tempfile::tempdir().expect("scratch directory");
+			let outcome = run_command_capture_within(
+				Duration::from_secs(15),
+				&format!("{SETUP}{script}{CLEANUP}"),
+				Some(dir.path()),
+				None,
+				CancelToken::default(),
+			)
+			.await;
+			match outcome {
+				Ok((result, output)) if result.exit_code == Some(0) && output == bash => {},
+				Ok((result, output)) => failures.push(format!(
+					"{name}: Bash prints {bash:?}; got status {:?}, output {output:?}",
+					result.exit_code
+				)),
+				Err(_) => failures.push(format!("{name}: did not finish within 15 s")),
+			}
+		}
+		assert!(failures.is_empty(), "{failures:#?}");
 	}
 
 	#[cfg(unix)]

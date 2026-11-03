@@ -5,10 +5,6 @@ use clap::Parser;
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum DirError {
-	/// Directory stack is empty.
-	#[error("directory stack is empty")]
-	DirStackEmpty,
-
 	/// A shell error occurred.
 	#[error(transparent)]
 	ShellError(#[from] brush_core::Error),
@@ -17,7 +13,6 @@ pub(crate) enum DirError {
 impl From<&DirError> for brush_core::ExecutionExitCode {
 	fn from(value: &DirError) -> Self {
 		match value {
-			DirError::DirStackEmpty => Self::GeneralError,
 			DirError::ShellError(e) => e.into(),
 		}
 	}

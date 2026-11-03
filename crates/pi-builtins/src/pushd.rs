@@ -1,3 +1,5 @@
+use std::io::Write;
+
 use brush_core::{ExecutionResult, builtins};
 use clap::Parser;
 
@@ -19,7 +21,7 @@ impl builtins::Command for PushdCommand {
 
 	async fn execute<SE: brush_core::ShellExtensions>(
 		&self,
-		context: brush_core::ExecutionContext<'_, SE>,
+		mut context: brush_core::ExecutionContext<'_, SE>,
 	) -> Result<brush_core::ExecutionResult, Self::Error> {
 		if self.no_directory_change {
 			context
@@ -30,7 +32,17 @@ impl builtins::Command for PushdCommand {
 			let prev_working_dir = context.shell.working_dir().to_path_buf();
 
 			let dir = std::path::Path::new(&self.dir);
-			context.shell.set_working_dir(dir).await?;
+			// `set -P` resolves symbolic links here too, as Bash's `pushd` changes
+			// directory as its `cd` does.
+			let physical = context.shell.options().do_not_resolve_symlinks_when_changing_dir;
+			let entered = crate::cd::enter_directory(&mut context, dir, physical).await;
+			for name in entered.as_ref().map(crate::cd::Entered::readonly).unwrap_or_default() {
+				writeln!(context.stderr(), "{name}: readonly variable")?;
+			}
+			if let Err(reason) = entered {
+				writeln!(context.stderr(), "pushd: {}: {reason}", self.dir)?;
+				return Ok(ExecutionResult::general_error());
+			}
 
 			context.shell.directory_stack_mut().push(prev_working_dir);
 		}

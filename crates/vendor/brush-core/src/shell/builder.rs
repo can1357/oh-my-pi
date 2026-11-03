@@ -255,6 +255,7 @@ impl<SE: extensions::ShellExtensions> Default for Shell<SE> {
 			traps: traps::TrapHandlerConfig::default(),
 			open_files: openfiles::OpenFiles::default(),
 			working_dir: PathBuf::default(),
+			working_dir_handle: None,
 			filesystem: pi_vfs::Fs::default(),
 			env: env::ShellEnvironment::default(),
 			funcs: functions::FunctionEnv::default(),
