@@ -7,6 +7,10 @@
 - Pinned sessions show a pin beside their title in the status line and the band composer's title, and `/unpin [session id]` unpins a session ([#17848](https://github.com/can1357/oh-my-pi/pull/17848) by [@SuperUserA](https://github.com/SuperUserA))
 - Added a fullscreen extension link browser for picking links already in terminal scrollback: press Alt+O again (or Page Up) while link tags are shown, or Alt+O with no extension link on screen ([#16476](https://github.com/can1357/oh-my-pi/pull/16476) by [@materemias](https://github.com/materemias))
 
+### Fixed
+
+- ACP: a `session/prompt` that arrives while omp runs a turn no client prompt owns (a background-job completion, an IRC message, or a scheduled continuation) now waits for that turn to end and then runs as its own turn, instead of failing at once with `session_busy` (`-32003`). The client sees a "Queued" thought while it waits, and Stop or closing the session releases the waiting prompt ([#10707](https://github.com/can1357/oh-my-pi/issues/10707))
+
 ## [18.16.0] - 2026-11-02
 
 ### Added
