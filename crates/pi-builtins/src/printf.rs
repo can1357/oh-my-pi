@@ -118,14 +118,14 @@ fn format_special_case_for_percent_q(
 /// Rust's formatter keeps a directive's width and precision in a `u16`: a
 /// larger one ends the process with "Formatting argument out of range". No
 /// shell may end that way, and Bash has no such limit, so a directive that
-/// reaches it is formatted here without it, and its result is padded or
-/// extended to what Bash prints.
+/// reaches one is written here instead of by uucore.
 const FORMATTER_LIMIT: usize = u16::MAX as usize;
 
-/// The precision uucore is given for a float whose own is larger: every
-/// `f64`'s decimal and hexadecimal expansion ends well inside this many
-/// digits, so the digits past it are zeroes, which [`write_wide`] appends.
-const FLOAT_DIGITS: usize = 2_000;
+/// The digits of an `f64`'s decimal expansion, which ends at the last digit
+/// of 2^-1074, 1074 places after the point: a precision past this asks for
+/// zeroes, which [`write_float`] appends. Rust's own formatting writes these
+/// digits exactly, where uucore's stops being exact after about a hundred.
+const EXACT_DIGITS: usize = 1_100;
 
 /// The largest width or precision Bash passes to `printf(3)`, which takes
 /// them as an `int`: a larger one written in the directive makes it write
@@ -142,85 +142,73 @@ enum Field {
 	Star,
 }
 
-/// A piece of a format string split by [`scan_wide_directives`].
-enum Piece {
-	/// Text with no directive in it but `%%`, which uucore writes for its
-	/// escapes.
-	Literal(String),
-	/// A directive uucore writes as it is spelled, with one argument.
-	Plain(String),
-	/// A directive whose width or precision is larger than uucore may be
-	/// given, or a `%c` with a precision, which uucore refuses and Bash
-	/// ignores.
-	Wide {
-		/// The directive as uucore may write it.
-		reduced:    String,
-		/// The width to pad the field to, when it is the large one.
-		width:      Option<usize>,
-		/// Whether `-` pads the field on the right.
-		left:       bool,
-		/// Whether `0` pads a number with zeroes.
-		zeroes:     bool,
-		/// The precision, when it is the large one: the digits an integer
-		/// takes at least, or the decimals a float takes.
-		precision:  Option<usize>,
-		/// The conversion's letter.
-		conversion: u8,
-	},
-	/// A directive whose width or precision is an argument: how large it is
-	/// is known only once that argument is read, so the directive is built
-	/// then, as [`Piece::Plain`] or as [`Piece::Wide`].
-	Star {
-		/// The flags between the `%` and the width.
-		flags:      String,
-		/// The width, which may be the `*`.
-		width:      Option<Field>,
-		/// The precision, which may be the `*`.
-		precision:  Option<Field>,
-		/// The conversion's letter.
-		conversion: u8,
-	},
-	/// A directive whose written width or precision is larger than Bash
-	/// passes to `printf(3)`: it writes nothing and takes its argument, as
-	/// Bash leaves it.
-	Nothing,
+/// A directive this writes itself.
+struct Spec {
+	/// The flags between the `%` and the width.
+	flags:      String,
+	/// The width, if one is written.
+	width:      Option<Field>,
+	/// The precision, if one is written.
+	precision:  Option<Field>,
+	/// The conversion's letter.
+	conversion: u8,
 }
 
-/// Splits `format_string` into literal text and directives when one of them
-/// carries a width or precision larger than uucore may be given, carries one
-/// as an argument (a `*`, whose size is known only then), or is a `%c` with a
-/// precision, which uucore refuses and Bash ignores. `None` leaves the whole
-/// string to uucore, as does a directive this cannot read, which uucore
-/// reports.
-fn scan_wide_directives(format_string: &str) -> Option<Vec<Piece>> {
+impl Spec {
+	/// Whether the flag `flag` is written.
+	fn has(&self, flag: char) -> bool {
+		self.flags.contains(flag)
+	}
+}
+
+/// A piece of a format string split by [`scan_directives`].
+enum Piece {
+	/// Text with no directive in it, with its escapes still in it.
+	Literal(String),
+	/// A directive uucore writes as it is spelled, with one argument.
+	Uucore(String),
+	/// A directive this writes itself.
+	Mine(Spec),
+	/// A directive this cannot read, which Bash reports before it stops.
+	Invalid(char),
+}
+
+/// Splits `format_string` into literal text and directives, when one of them
+/// is this builtin's to write: a width or precision larger than uucore may be
+/// given or read from an argument (`*`, whose size is known only then), a
+/// conversion uucore does not write as Bash writes it (a float, `%b`, `%c`,
+/// `%q`), or one that cannot be read at all. `None` leaves the whole string
+/// to uucore, which writes the rest as Bash writes them.
+fn scan_directives(format_string: &str) -> Option<Vec<Piece>> {
 	let bytes = format_string.as_bytes();
 	let mut pieces: Vec<Piece> = Vec::new();
-	let mut literal = String::new();
-	let mut wide = false;
+	let mut literal_start = 0;
+	let mut mine = false;
 	let mut at = 0;
+	// Holds the text before a directive until that directive is pushed, so
+	// that every piece is written in the order it is written in.
+	let flush = |pieces: &mut Vec<Piece>, from: usize, to: usize| {
+		if to > from && let Some(text) = format_string.get(from..to) {
+			pieces.push(Piece::Literal(text.to_owned()));
+		}
+	};
 	while at < bytes.len() {
 		if bytes[at] != b'%' {
-			literal.push(char::from(bytes[at]));
 			at += 1;
 			continue;
 		}
 		let start = at;
 		at += 1;
-		let mut left = false;
-		let mut zeroes = false;
-		while let Some(&flag) = bytes.get(at) {
-			match flag {
-				b'-' => left = true,
-				b'0' => zeroes = true,
-				b'+' | b' ' | b'#' | b'\'' => {},
-				_ => break,
+		let flags_start = at;
+		while let Some(flag) = bytes.get(at) {
+			if !matches!(flag, b'-' | b'0' | b'+' | b' ' | b'#' | b'\'') {
+				break;
 			}
 			at += 1;
 		}
-		let width_start = at;
+		let flags = format_string.get(flags_start..at)?.to_owned();
 		let width = eat_number(bytes, &mut at);
-		let width_end = at;
-		let has_width = width_end > width_start;
+		let has_width = width.is_some();
 		let has_precision = bytes.get(at) == Some(&b'.');
 		let precision = if has_precision {
 			at += 1;
@@ -230,97 +218,111 @@ fn scan_wide_directives(format_string: &str) -> Option<Vec<Piece>> {
 		};
 		let Some(&conversion) = bytes.get(at) else { return None };
 		at += 1;
-		let spelled = format_string.get(start..at)?.to_owned();
 		if conversion == b'%' {
-			literal.push_str(&spelled);
 			continue;
 		}
-		let width = width.unwrap_or(Some(Field::Fixed(0)));
-		let precision = precision.unwrap_or(Some(Field::Fixed(0)));
-		// A number this machine cannot hold is uucore's to report.
-		let (Some(width), Some(precision)) = (width, precision) else { return None };
-		// A `*` says the number is an argument: how large it is, and so
-		// whether uucore may be given it at all, is known only then.
-		if matches!(width, Field::Star) || matches!(precision, Field::Star) {
-			wide = true;
-			if !literal.is_empty() {
-				pieces.push(Piece::Literal(std::mem::take(&mut literal)));
-			}
-			pieces.push(Piece::Star {
-				flags: format_string.get(start + 1..width_start)?.to_owned(),
-				width: has_width.then_some(width),
-				precision: has_precision.then_some(precision),
-				conversion,
-			});
-			continue;
-		}
-		let (Field::Fixed(width), Field::Fixed(precision)) = (width, precision) else {
-			return None;
+		// A `*` that names its argument by position (`*2$`) is no directive
+		// Bash writes: it reports the character and stops.
+		let (Some(width), Some(precision)) = (width.unwrap_or(Some(Field::Fixed(0))), precision.unwrap_or(Some(Field::Fixed(0))))
+		else {
+			mine = true;
+			flush(&mut pieces, literal_start, start);
+			literal_start = at;
+			// Bash names the character after the `*`, which is where it
+			// stops reading the directive.
+			let star = format_string.get(start..at).and_then(|text| text.find('*'));
+			let named = star
+				.and_then(|star| bytes.get(start + star + 1).copied())
+				.unwrap_or(b'*');
+			pieces.push(Piece::Invalid(char::from(named)));
+			break;
 		};
-		// A width or precision larger than an `int` makes Bash write the
-		// directive as nothing at all, its argument taken.
-		if width > FIELD_LIMIT || (has_precision && precision > FIELD_LIMIT) {
-			wide = true;
-			if !literal.is_empty() {
-				pieces.push(Piece::Literal(std::mem::take(&mut literal)));
-			}
-			pieces.push(Piece::Nothing);
+		let large = |field: Field| matches!(field, Field::Fixed(number) if number > FORMATTER_LIMIT);
+		let star = matches!(width, Field::Star) || matches!(precision, Field::Star);
+		// uucore writes an integer and a plain string as Bash writes them, so
+		// long as the field fits its formatter and it takes the flags. Bash
+		// takes `#` and `'` for a decimal as no flag at all, where uucore
+		// refuses them. Everything else is written here: a float, whose
+		// digits uucore stops writing exactly well before Bash does; `%b`
+		// and `%c`, which carry bytes that are no text; and `%q`, which Bash
+		// escapes with backslashes.
+		let refused = flags.contains('\'')
+			|| (flags.contains('#') && matches!(conversion, b'd' | b'i' | b'u'));
+		let uucore_writes = matches!(conversion, b'd' | b'i' | b'o' | b'u' | b'x' | b'X' | b's')
+			&& !star
+			&& !refused
+			&& !large(width)
+			&& !(has_precision && large(precision));
+		if uucore_writes {
 			continue;
 		}
-		let float = matches!(conversion, b'e' | b'E' | b'f' | b'F' | b'g' | b'G' | b'a' | b'A');
-		let wide_width = width > FORMATTER_LIMIT;
-		let wide_precision =
-			has_precision && precision > if float { FLOAT_DIGITS } else { FORMATTER_LIMIT };
-		let ignored_precision = has_precision && conversion == b'c';
-		if !(wide_width || wide_precision || ignored_precision) {
-			pieces.push(Piece::Plain(spelled));
-			continue;
-		}
-		wide = true;
-		if !literal.is_empty() {
-			pieces.push(Piece::Literal(std::mem::take(&mut literal)));
-		}
-		// What uucore is given: the flags, the width unless it is too large,
-		// and the precision unless it is too large, dropped for `%c` or held
-		// to the digits a float's expansion needs.
-		let mut reduced = String::from("%");
-		reduced.push_str(format_string.get(start + 1..width_start)?);
-		if !wide_width {
-			reduced.push_str(format_string.get(width_start..width_end)?);
-		}
-		if has_precision && !ignored_precision {
-			if wide_precision {
-				reduced.push_str(".2000");
-			} else {
-				reduced.push_str(format_string.get(width_end..at - 1)?);
-			}
-		}
-		reduced.push(char::from(conversion));
-		pieces.push(Piece::Wide {
-			reduced,
-			width: wide_width.then_some(width),
-			left,
-			zeroes,
-			precision: wide_precision.then_some(precision),
+		mine = true;
+		flush(&mut pieces, literal_start, start);
+		literal_start = at;
+		pieces.push(Piece::Mine(Spec {
+			flags,
+			width: has_width.then_some(width),
+			precision: has_precision.then_some(precision),
 			conversion,
-		});
+		}));
 	}
-	if !wide {
+	if !mine {
 		return None;
 	}
-	if !literal.is_empty() {
-		pieces.push(Piece::Literal(literal));
+	flush(&mut pieces, literal_start, bytes.len());
+	// A directive uucore writes keeps its place: the text around it is a
+	// literal piece, and the directive itself is one of its own.
+	Some(split_uucore_directives(pieces))
+}
+
+/// Splits each literal piece at the directives uucore writes, so that every
+/// directive takes its argument in the order it is written.
+fn split_uucore_directives(pieces: Vec<Piece>) -> Vec<Piece> {
+	let mut split = Vec::with_capacity(pieces.len());
+	for piece in pieces {
+		let Piece::Literal(text) = piece else {
+			split.push(piece);
+			continue;
+		};
+		let bytes = text.as_bytes();
+		let mut literal_start = 0;
+		let mut at = 0;
+		while at < bytes.len() {
+			if bytes[at] != b'%' {
+				at += 1;
+				continue;
+			}
+			let start = at;
+			at += 1;
+			while bytes.get(at).is_some_and(|byte| {
+				matches!(byte, b'-' | b'0' | b'+' | b' ' | b'#' | b'\'' | b'.' | b'*')
+					|| byte.is_ascii_digit()
+			}) {
+				at += 1;
+			}
+			let Some(&conversion) = bytes.get(at) else { break };
+			at += 1;
+			if conversion == b'%' {
+				continue;
+			}
+			if start > literal_start {
+				split.push(Piece::Literal(text[literal_start..start].to_owned()));
+			}
+			split.push(Piece::Uucore(text[start..at].to_owned()));
+			literal_start = at;
+		}
+		if literal_start < text.len() {
+			split.push(Piece::Literal(text[literal_start..].to_owned()));
+		}
 	}
-	Some(pieces)
+	split
 }
 
 /// The width or precision written at `at`, if one is there: `Some(None)` for
-/// a number too large for this machine, or for a `*` that names its argument
-/// by position (`*2$`), which this does not read and uucore reports.
+/// a `*` that names its argument by position (`*2$`), which Bash reports.
 fn eat_number(bytes: &[u8], at: &mut usize) -> Option<Option<Field>> {
 	if bytes.get(*at) == Some(&b'*') {
 		*at += 1;
-		// A `*` may also name an argument by position (`*2$`).
 		let start = *at;
 		while bytes.get(*at).is_some_and(u8::is_ascii_digit) {
 			*at += 1;
@@ -345,196 +347,9 @@ fn eat_number(bytes: &[u8], at: &mut usize) -> Option<Option<Field>> {
 	Some(Some(Field::Fixed(digits.parse().unwrap_or(usize::MAX))))
 }
 
-/// Writes one directive whose width or precision is larger than uucore may be
-/// given: uucore writes it without that width or precision, and the text it
-/// leaves is extended to the digits the precision asks for and padded to the
-/// width, as Bash writes them.
-fn write_wide(
-	reduced: &str,
-	width: Option<usize>,
-	left: bool,
-	zeroes: bool,
-	precision: Option<usize>,
-	conversion: u8,
-	argument: Option<&OsString>,
-	writer: &mut dyn Write,
-) -> Result<(), brush_core::Error> {
-	let mut text = Vec::new();
-	write_uucore(reduced, argument.map(std::slice::from_ref).unwrap_or_default(), &mut text)?;
-	let mut text = String::from_utf8(text)
-		.map_err(|_| ErrorKind::PrintfInvalidUsage("invalid UTF-8 output".into()))?;
-
-	if let Some(precision) = precision {
-		let digits = matches!(conversion, b'd' | b'i' | b'o' | b'u' | b'x' | b'X');
-		let float = matches!(conversion, b'e' | b'E' | b'f' | b'F' | b'a' | b'A');
-		if digits {
-			// The value takes at least this many digits, zeroes before it,
-			// after any sign and any `0x`.
-			let head = body_starts_at(&text);
-			let body = text.len() - head;
-			if body < precision {
-				text.insert_str(head, &"0".repeat(precision - body));
-			}
-		} else if float && text.bytes().any(|byte| byte.is_ascii_digit()) {
-			// A float takes this many digits after the point, and uucore
-			// wrote the first `FLOAT_DIGITS` of them, which is past the end
-			// of the value's expansion, so the rest are zeroes; they go
-			// before the exponent. `%g` counts significant digits and drops
-			// trailing zeroes, so what uucore wrote is already what Bash
-			// writes. A value that is no number (`inf`, `nan`) has no digits
-			// at all, and Bash writes it as it is.
-			let mut exponent = text
-				.find(['e', 'E', 'p', 'P'])
-				.filter(|_| matches!(conversion, b'e' | b'E' | b'a' | b'A'))
-				.unwrap_or(text.len());
-			let point = text[..exponent].find('.');
-			let written = point.map_or(0, |point| exponent - point - 1);
-			if written < precision {
-				if point.is_none() {
-					text.insert(exponent, '.');
-					exponent += 1;
-				}
-				text.insert_str(exponent, &"0".repeat(precision - written));
-			}
-		}
-	}
-
-	let padding = width.unwrap_or(0).saturating_sub(text.len());
-	if padding == 0 {
-		writer.write_all(text.as_bytes())?;
-		return Ok(());
-	}
-	// The padding is written on its own, in pieces: a field may be as wide as
-	// an `int`, which is two gigabytes of it.
-	let (head, fill) = if left {
-		(text.len(), b' ')
-	} else if zeroes && !matches!(conversion, b'c' | b's' | b'b') {
-		// Zeroes go after the sign and any `0x`, as they do for a width
-		// uucore writes itself.
-		(body_starts_at(&text), b'0')
-	} else {
-		(0, b' ')
-	};
-	writer.write_all(text[..head].as_bytes())?;
-	let piece = [fill; 8 * 1024];
-	let mut left_to_write = padding;
-	while left_to_write > 0 {
-		let now = left_to_write.min(piece.len());
-		writer.write_all(&piece[..now])?;
-		left_to_write -= now;
-	}
-	writer.write_all(text[head..].as_bytes())?;
-	Ok(())
-}
-
-/// Where a number's own digits start in `text`: after a sign, a space held
-/// for one, and the `0x` of a hexadecimal.
-fn body_starts_at(text: &str) -> usize {
-	let body = text.trim_start_matches(['-', '+', ' ']);
-	let body = body.strip_prefix("0x").or_else(|| body.strip_prefix("0X")).unwrap_or(body);
-	text.len() - body.len()
-}
-
-/// Writes one directive whose width or precision is an argument: the numbers
-/// are read, and the directive is written with them in it, by uucore when it
-/// may be given them and by [`write_wide`] when it may not. An argument that
-/// is no number is reported and taken as zero, and one larger than an `int`
-/// is reported and held to it, as Bash reports and holds them.
-fn write_star<W: Write>(
-	flags: &str,
-	width: Option<Field>,
-	precision: Option<Field>,
-	conversion: u8,
-	arguments: &[OsString],
-	taken: &mut usize,
-	writer: &mut dyn Write,
-	report: &mut Report<W>,
-) -> Result<(), brush_core::Error> {
-	// A `%` with a `*` in it is written from its parts, never as it was
-	// spelled: uucore cannot be given a field this may have read.
-	let mut read = |field: Option<Field>, report: &mut Report<W>| match field {
-		Some(Field::Star) => {
-			let Some(argument) = arguments.get(*taken) else { return 0 };
-			*taken += 1;
-			let written = argument.to_string_lossy();
-			match read_number(written.trim()) {
-				Some(number) => number,
-				None => {
-					report.say(format_args!("{written}: invalid number"));
-					report.invalid = true;
-					0
-				},
-			}
-		},
-		Some(Field::Fixed(number)) => i64::try_from(number).unwrap_or(i64::MAX),
-		None => 0,
-	};
-	let width_number = read(width, report);
-	let precision_number = read(precision, report);
-	// A field larger than an `int` is held to one, which Bash reports against
-	// the argument the directive writes.
-	let held = i64::from(i32::MIN)..=i64::from(i32::MAX);
-	if !(held.contains(&width_number) && held.contains(&precision_number)) {
-		let written = arguments.get(*taken).map(|argument| argument.to_string_lossy());
-		report.say(format_args!(
-			"warning: {}: Numerical result out of range",
-			written.unwrap_or_default()
-		));
-	}
-	let width_number = width_number.clamp(i64::from(i32::MIN), i64::from(i32::MAX));
-	let precision_number = precision_number.clamp(i64::from(i32::MIN), i64::from(i32::MAX));
-	// A negative width is a left-justified one, as in C; a negative precision
-	// is none at all.
-	let left = flags.contains('-') || width_number < 0;
-	let width = width.map(|_| width_number.unsigned_abs() as usize);
-	let precision = precision.and_then(|_| usize::try_from(precision_number).ok());
-	let float = matches!(conversion, b'e' | b'E' | b'f' | b'F' | b'g' | b'G' | b'a' | b'A');
-	let wide_width = width.is_some_and(|width| width > FORMATTER_LIMIT);
-	let wide_precision = precision
-		.is_some_and(|precision| precision > if float { FLOAT_DIGITS } else { FORMATTER_LIMIT });
-	let ignored_precision = precision.is_some() && conversion == b'c';
-	// The directive as uucore may write it: the flags, with `-` for a
-	// negative width, and each number unless it is too large.
-	let mut reduced = String::from("%");
-	reduced.push_str(flags);
-	if left && !flags.contains('-') {
-		reduced.push('-');
-	}
-	match width {
-		Some(width) if !wide_width => reduced.push_str(&width.to_string()),
-		_ => {},
-	}
-	match precision {
-		Some(_) if ignored_precision => {},
-		Some(_) if wide_precision => reduced.push_str(".2000"),
-		Some(precision) => {
-			reduced.push('.');
-			reduced.push_str(&precision.to_string());
-		},
-		None => {},
-	}
-	reduced.push(char::from(conversion));
-	let argument = arguments.get(*taken);
-	*taken += usize::from(argument.is_some());
-	if !(wide_width || wide_precision || ignored_precision) {
-		return write_uucore(&reduced, argument.map(std::slice::from_ref).unwrap_or_default(), writer);
-	}
-	write_wide(
-		&reduced,
-		wide_width.then(|| width.unwrap_or(0)),
-		left,
-		flags.contains('0'),
-		wide_precision.then(|| precision.unwrap_or(0)),
-		conversion,
-		argument,
-		writer,
-	)
-}
-
-/// Writes `format_string`, whose directives are not all uucore's to write,
-/// one piece at a time, taking the arguments each takes and starting again
-/// while any are left, as Bash does.
-fn format_wide(
+/// Writes `format_string`'s pieces, taking the arguments each takes and
+/// starting again while any are left, as Bash does.
+fn write_pieces(
 	pieces: &[Piece],
 	arguments: &[OsString],
 	writer: &mut dyn Write,
@@ -546,42 +361,25 @@ fn format_wide(
 		for piece in pieces {
 			match piece {
 				Piece::Literal(text) => {
-					write_uucore(text, &[], writer)?;
+					if write_escaped(text.as_bytes(), false, writer)? {
+						return Ok(());
+					}
 				},
-				Piece::Plain(spelled) => {
+				Piece::Uucore(spelled) => {
 					let next = (taken + 1).min(arguments.len());
 					let used = arguments.get(taken..next).unwrap_or_default();
 					write_uucore(spelled, used, writer)?;
 					taken = next;
 				},
-				Piece::Wide { reduced, width, left, zeroes, precision, conversion } => {
-					let argument = arguments.get(taken);
-					taken += usize::from(argument.is_some());
-					write_wide(
-						reduced,
-						*width,
-						*left,
-						*zeroes,
-						*precision,
-						*conversion,
-						argument,
-						writer,
-					)?;
+				Piece::Mine(spec) => {
+					if write_field(spec, arguments, &mut taken, writer, report)? {
+						return Ok(());
+					}
 				},
-				Piece::Star { flags, width, precision, conversion } => {
-					write_star(
-						flags,
-						*width,
-						*precision,
-						*conversion,
-						arguments,
-						&mut taken,
-						writer,
-						report,
-					)?;
-				},
-				Piece::Nothing => {
-					taken = (taken + 1).min(arguments.len());
+				Piece::Invalid(character) => {
+					report.say(format_args!("`{character}': invalid format character"));
+					report.invalid = true;
+					return Ok(());
 				},
 			}
 		}
@@ -589,6 +387,551 @@ fn format_wide(
 			return Ok(());
 		}
 	}
+}
+
+/// Writes `text` with the escapes Bash expands in a format string, or in a
+/// `%b` argument when `argument` is set, where `\c` stops every later byte
+/// and `\nnn` is an octal character. Returns whether `\c` stopped it.
+fn write_escaped(
+	text: &[u8],
+	argument: bool,
+	writer: &mut dyn Write,
+) -> Result<bool, brush_core::Error> {
+	let mut out: Vec<u8> = Vec::with_capacity(text.len());
+	let mut at = 0;
+	let mut stopped = false;
+	while at < text.len() {
+		if text[at] != b'\\' || at + 1 == text.len() {
+			out.push(text[at]);
+			at += 1;
+			continue;
+		}
+		let escape = text[at + 1];
+		at += 2;
+		match escape {
+			b'a' => out.push(0x07),
+			b'b' => out.push(0x08),
+			b'e' | b'E' => out.push(0x1b),
+			b'f' => out.push(0x0c),
+			b'n' => out.push(b'\n'),
+			b'r' => out.push(b'\r'),
+			b't' => out.push(b'\t'),
+			b'v' => out.push(0x0b),
+			b'\\' => out.push(b'\\'),
+			b'c' if argument => {
+				stopped = true;
+				break;
+			},
+			b'"' | b'\'' if argument => out.push(escape),
+			b'0' | b'1'..=b'7' => {
+				// In a format string the octal digits follow a `0`; in a `%b`
+				// argument they may follow the backslash itself.
+				let mut digits = 0;
+				let mut value: u32 = 0;
+				if escape != b'0' {
+					value = u32::from(escape - b'0');
+					digits = 1;
+				}
+				while digits < 3 && text.get(at).is_some_and(|byte| (b'0'..=b'7').contains(byte)) {
+					value = value * 8 + u32::from(text[at] - b'0');
+					at += 1;
+					digits += 1;
+				}
+				out.push(u8::try_from(value & 0xff).unwrap_or(0));
+			},
+			b'x' => {
+				let mut digits = 0;
+				let mut value: u32 = 0;
+				while digits < 2 && text.get(at).is_some_and(u8::is_ascii_hexdigit) {
+					value = value * 16 + u32::from(char::from(text[at]).to_digit(16).unwrap_or(0));
+					at += 1;
+					digits += 1;
+				}
+				if digits == 0 {
+					out.extend_from_slice(b"\\x");
+				} else {
+					out.push(u8::try_from(value & 0xff).unwrap_or(0));
+				}
+			},
+			b'u' | b'U' => {
+				let places = if escape == b'u' { 4 } else { 8 };
+				let mut digits = 0;
+				let mut value: u32 = 0;
+				while digits < places && text.get(at).is_some_and(u8::is_ascii_hexdigit) {
+					value = value * 16 + u32::from(char::from(text[at]).to_digit(16).unwrap_or(0));
+					at += 1;
+					digits += 1;
+				}
+				match (digits, char::from_u32(value)) {
+					(0, _) | (_, None) => {
+						out.push(b'\\');
+						out.push(escape);
+					},
+					(_, Some(character)) => {
+						let mut buffer = [0u8; 4];
+						out.extend_from_slice(character.encode_utf8(&mut buffer).as_bytes());
+					},
+				}
+			},
+			other => {
+				out.push(b'\\');
+				out.push(other);
+			},
+		}
+	}
+	writer.write_all(&out)?;
+	Ok(stopped)
+}
+
+/// Writes one directive this builtin writes itself, taking the arguments it
+/// takes. Returns whether a `%b` argument's `\c` stopped every later byte.
+fn write_field<W: Write>(
+	spec: &Spec,
+	arguments: &[OsString],
+	taken: &mut usize,
+	writer: &mut dyn Write,
+	report: &mut Report<W>,
+) -> Result<bool, brush_core::Error> {
+	let mut read = |field: Option<Field>, report: &mut Report<W>| match field {
+		Some(Field::Star) => {
+			let Some(argument) = arguments.get(*taken) else { return 0 };
+			*taken += 1;
+			let written = argument.to_string_lossy();
+			match read_number(written.trim()) {
+				Ok(number) => number,
+				Err(ReadError::NotANumber) => {
+					report.say(format_args!("{written}: invalid number"));
+					report.invalid = true;
+					0
+				},
+				Err(ReadError::OutOfRange) => {
+					let value = arguments.get(*taken).map(|value| value.to_string_lossy());
+					report.say(format_args!(
+						"warning: {}: Numerical result out of range",
+						value.unwrap_or_default()
+					));
+					i64::MAX
+				},
+			}
+		},
+		Some(Field::Fixed(number)) => i64::try_from(number).unwrap_or(i64::MAX),
+		None => 0,
+	};
+	let written_width = matches!(spec.width, Some(Field::Fixed(_)));
+	let written_precision = matches!(spec.precision, Some(Field::Fixed(_)));
+	let width_number = read(spec.width, report);
+	let precision_number = read(spec.precision, report);
+	// A number read from an argument is held to what an `int` takes, as Bash
+	// holds it; a written one larger than that makes the directive write
+	// nothing at all, as Bash leaves it.
+	let over = |number: i64| number > i64::try_from(FIELD_LIMIT).unwrap_or(i64::MAX);
+	if (written_width && over(width_number)) || (written_precision && over(precision_number)) {
+		*taken = (*taken + 1).min(arguments.len());
+		return Ok(false);
+	}
+	if (!written_width && over(width_number)) || (!written_precision && over(precision_number)) {
+		let value = arguments.get(*taken).map(|value| value.to_string_lossy());
+		report.say(format_args!(
+			"warning: {}: Numerical result out of range",
+			value.unwrap_or_default()
+		));
+	}
+	let held = |number: i64| number.clamp(i64::from(i32::MIN), i64::from(i32::MAX));
+	let width_number = held(width_number);
+	let precision_number = held(precision_number);
+	// A negative width is a left-justified one, as in C; a negative precision
+	// is none at all.
+	let left = spec.has('-') || width_number < 0;
+	let width = spec.width.map_or(0, |_| width_number.unsigned_abs() as usize);
+	let precision = spec
+		.precision
+		.and_then(|_| usize::try_from(precision_number).ok());
+
+	let argument = arguments.get(*taken);
+	*taken += usize::from(argument.is_some());
+	let empty = OsString::new();
+	let argument = argument.unwrap_or(&empty);
+	let (mut text, stopped) = field_text(spec, precision, argument, report)?;
+
+	// The precision an integer carries is the digits it takes at least, and
+	// a string's is the bytes it keeps; a float's is already written. The
+	// digits an integer is short are written in pieces, like the padding
+	// below: a precision may be as large as an `int`.
+	let mut digits = 0;
+	if let Some(precision) = precision {
+		match spec.conversion {
+			b'd' | b'i' | b'o' | b'u' | b'x' | b'X' => {
+				digits = precision.saturating_sub(text.len() - body_starts_at(&text));
+			},
+			b's' | b'b' => text.truncate(precision),
+			_ => {},
+		}
+	}
+
+	// The zeroes of `0` go after the sign and any `0x`, as they do for a
+	// width uucore writes itself; an integer with a precision takes spaces
+	// instead, as it does in C, and so does a value that is no number
+	// (`inf`, `nan`), which has no digits to pad.
+	let numeric = !matches!(spec.conversion, b'c' | b's' | b'b' | b'q')
+		&& text.iter().any(u8::is_ascii_digit);
+	let zeroes = spec.has('0') && numeric && digits == 0;
+	let padding = width.saturating_sub(text.len() + digits);
+	// Where the field's own digits start, which the zeroes of a precision
+	// and of `0` are written before.
+	let head = if left || (padding == 0 && digits == 0) {
+		text.len()
+	} else if zeroes || digits > 0 {
+		body_starts_at(&text)
+	} else {
+		0
+	};
+
+	// Nothing here is built as one string: a field may be as wide as an
+	// `int`, which is two gigabytes of it.
+	let mut piece = [b' '; 8 * 1024];
+	let mut pour = |writer: &mut dyn Write, byte: u8, mut left: usize| -> std::io::Result<()> {
+		if byte != b' ' {
+			piece.fill(byte);
+		}
+		while left > 0 {
+			let now = left.min(piece.len());
+			writer.write_all(&piece[..now])?;
+			left -= now;
+		}
+		if byte != b' ' {
+			piece.fill(b' ');
+		}
+		Ok(())
+	};
+	if left {
+		writer.write_all(&text[..head])?;
+		pour(writer, b'0', digits)?;
+		writer.write_all(&text[head..])?;
+		pour(writer, b' ', padding)?;
+	} else {
+		if !zeroes {
+			pour(writer, b' ', padding)?;
+		}
+		writer.write_all(&text[..head])?;
+		if zeroes {
+			pour(writer, b'0', padding)?;
+		}
+		pour(writer, b'0', digits)?;
+		writer.write_all(&text[head..])?;
+	}
+	Ok(stopped)
+}
+
+/// The bytes one directive writes for `argument`, before its width pads them.
+/// Returns whether a `%b` argument's `\c` stopped every later byte.
+fn field_text(
+	spec: &Spec,
+	precision: Option<usize>,
+	argument: &OsString,
+	report: &mut Report<impl Write>,
+) -> Result<(Vec<u8>, bool), brush_core::Error> {
+	let written = argument.to_string_lossy();
+	match spec.conversion {
+		b's' => Ok((argument.as_encoded_bytes().to_vec(), false)),
+		b'b' => {
+			let mut text = Vec::new();
+			let stopped = write_escaped(argument.as_encoded_bytes(), true, &mut text)?;
+			Ok((text, stopped))
+		},
+		b'c' => {
+			let first = written.chars().next();
+			Ok((first.map(|c| c.to_string().into_bytes()).unwrap_or_default(), false))
+		},
+		b'q' => {
+			let quoted = escape::quote_if_needed(&written, escape::QuoteMode::BackslashEscape);
+			Ok((quoted.into_owned().into_bytes(), false))
+		},
+		b'e' | b'E' | b'f' | b'F' | b'g' | b'G' => {
+			Ok((write_float(spec, precision, &written, report), false))
+		},
+		b'a' | b'A' => Ok((write_hex_float(spec, precision, &written, report), false)),
+		_ => {
+			// An integer, which uucore writes as Bash writes it, without the
+			// field this pads itself. Bash takes `#` for an integer as no
+			// flag at all, where uucore refuses it.
+			let mut reduced = String::from("%");
+			for flag in spec.flags.chars() {
+				if flag != '#' || matches!(spec.conversion, b'o' | b'x' | b'X') {
+					reduced.push(flag);
+				}
+			}
+			reduced.push(char::from(spec.conversion));
+			let mut text = Vec::new();
+			write_uucore(&reduced, std::slice::from_ref(argument), &mut text)?;
+			Ok((text, false))
+		},
+	}
+}
+
+/// What `%e`, `%f` and `%g` write for `written`: Rust's own formatting, whose
+/// digits are exact, held to the digits an `f64` has and extended with the
+/// zeroes a larger precision asks for, as Bash writes them.
+fn write_float(
+	spec: &Spec,
+	precision: Option<usize>,
+	written: &str,
+	report: &mut Report<impl Write>,
+) -> Vec<u8> {
+	let value = read_float(written, report);
+	let upper = spec.conversion.is_ascii_uppercase();
+	let sign = if value.is_sign_negative() {
+		"-"
+	} else if spec.has('+') {
+		"+"
+	} else if spec.has(' ') {
+		" "
+	} else {
+		""
+	};
+	if !value.is_finite() {
+		let name = if value.is_nan() { "nan" } else { "inf" };
+		let name = if upper { name.to_uppercase() } else { name.to_owned() };
+		return format!("{sign}{name}").into_bytes();
+	}
+	let value = value.abs();
+	let precision = precision.unwrap_or(6);
+	let alternate = spec.has('#');
+	let body = match spec.conversion.to_ascii_lowercase() {
+		b'f' => {
+			let mut text = format!("{value:.*}", precision.min(EXACT_DIGITS));
+			let end = text.len();
+			extend_zeroes(&mut text, precision, end);
+			if precision == 0 && alternate {
+				text.push('.');
+			}
+			text
+		},
+		b'e' => exponent_form(value, precision, alternate, upper),
+		_ => {
+			// `%g` writes the shorter of the two forms, counting significant
+			// digits, and drops the zeroes at the end unless `#` keeps them.
+			let significant = precision.max(1);
+			let exponent = decimal_exponent(value, significant);
+			let mut text = if exponent < -4 || exponent >= i64::try_from(significant).unwrap_or(i64::MAX) {
+				exponent_form(value, significant - 1, alternate, upper)
+			} else {
+				let places = usize::try_from(i64::try_from(significant - 1).unwrap_or(0) - exponent)
+					.unwrap_or(0);
+				let mut text = format!("{value:.*}", places.min(EXACT_DIGITS));
+				let end = text.len();
+				extend_zeroes(&mut text, places, end);
+				if places == 0 && alternate {
+					text.push('.');
+				}
+				text
+			};
+			if !alternate {
+				strip_zeroes(&mut text);
+			}
+			text
+		},
+	};
+	format!("{sign}{body}").into_bytes()
+}
+
+/// What `%a` writes for `written`: uucore's hexadecimal digits, which are
+/// exact and few, with the zeroes a larger precision asks for.
+fn write_hex_float(
+	spec: &Spec,
+	precision: Option<usize>,
+	written: &str,
+	report: &mut Report<impl Write>,
+) -> Vec<u8> {
+	let value = read_float(written, report);
+	let mut reduced = String::from("%");
+	reduced.push_str(&spec.flags);
+	if let Some(precision) = precision.filter(|precision| *precision <= FORMATTER_LIMIT) {
+		reduced.push('.');
+		reduced.push_str(&precision.to_string());
+	}
+	reduced.push('a');
+	let mut text = Vec::new();
+	let _ = write_uucore(&reduced, &[OsString::from(value.to_string())], &mut text);
+	let mut text = String::from_utf8(text).unwrap_or_default();
+	if let Some(precision) = precision.filter(|precision| *precision > FORMATTER_LIMIT) {
+		let exponent = text.find(['p', 'P']).unwrap_or(text.len());
+		extend_zeroes(&mut text, precision, exponent);
+	}
+	if spec.conversion == b'A' {
+		text = text.to_uppercase();
+	}
+	text.into_bytes()
+}
+
+/// `value` in the form `%e` writes, with `places` digits after the point and
+/// an exponent of at least two digits, as C writes it.
+fn exponent_form(value: f64, places: usize, alternate: bool, upper: bool) -> String {
+	let written = format!("{value:.*e}", places.min(EXACT_DIGITS));
+	let (mantissa, exponent) = written.split_once('e').unwrap_or((written.as_str(), "0"));
+	let mut mantissa = mantissa.to_owned();
+	let end = mantissa.len();
+	extend_zeroes(&mut mantissa, places, end);
+	if places == 0 && alternate {
+		mantissa.push('.');
+	}
+	let exponent: i64 = exponent.parse().unwrap_or(0);
+	let marker = if upper { 'E' } else { 'e' };
+	let sign = if exponent < 0 { '-' } else { '+' };
+	format!("{mantissa}{marker}{sign}{:02}", exponent.unsigned_abs())
+}
+
+/// The power of ten `value` is written with when `%g` counts `significant`
+/// digits of it.
+fn decimal_exponent(value: f64, significant: usize) -> i64 {
+	if value == 0.0 {
+		return 0;
+	}
+	let written = format!("{value:.*e}", (significant - 1).min(EXACT_DIGITS));
+	written.split_once('e').and_then(|(_, exponent)| exponent.parse().ok()).unwrap_or(0)
+}
+
+/// Extends the digits after the point in `text` to `places` of them, where
+/// they end at `end`: Rust writes every digit an `f64` has, and the rest are
+/// zeroes.
+fn extend_zeroes(text: &mut String, places: usize, end: usize) {
+	let point = text[..end].find('.');
+	let written = point.map_or(0, |point| end - point - 1);
+	if written >= places {
+		return;
+	}
+	let mut zeroes = String::with_capacity(places - written + 1);
+	if point.is_none() {
+		zeroes.push('.');
+	}
+	for _ in written..places {
+		zeroes.push('0');
+	}
+	text.insert_str(end, &zeroes);
+}
+
+/// Drops the zeroes at the end of `text`'s digits, and the point with them,
+/// as `%g` drops them.
+fn strip_zeroes(text: &mut String) {
+	let Some(point) = text.find('.') else { return };
+	let end = text.find(['e', 'E']).unwrap_or(text.len());
+	let mut keep = end;
+	while keep > point + 1 && text.as_bytes()[keep - 1] == b'0' {
+		keep -= 1;
+	}
+	if keep == point + 1 {
+		keep = point;
+	}
+	text.replace_range(keep..end, "");
+}
+
+/// The number `written` holds, as Bash reads a `%f` argument: a decimal or
+/// hexadecimal float, or a character constant. One that is no number is
+/// reported and taken as zero, as Bash reports and takes it.
+fn read_float(written: &str, report: &mut Report<impl Write>) -> f64 {
+	let written = written.trim();
+	if written.is_empty() {
+		return 0.0;
+	}
+	if let Some(character) = written.strip_prefix('\'').or(written.strip_prefix('"')) {
+		return character.chars().next().map_or(0.0, |c| f64::from(u32::from(c)));
+	}
+	if let Ok(value) = written.parse::<f64>() {
+		return value;
+	}
+	if let Some(value) = read_hex_float(written) {
+		return value;
+	}
+	report.say(format_args!("{written}: invalid number"));
+	report.invalid = true;
+	0.0
+}
+
+/// The value of a hexadecimal float (`0x1p-1074`), which Rust does not parse.
+fn read_hex_float(written: &str) -> Option<f64> {
+	let (negative, rest) = match written.strip_prefix('-') {
+		Some(rest) => (true, rest),
+		None => (false, written.strip_prefix('+').unwrap_or(written)),
+	};
+	let rest = rest.strip_prefix("0x").or(rest.strip_prefix("0X"))?;
+	let (digits, exponent) = match rest.split_once(['p', 'P']) {
+		Some((digits, exponent)) => (digits, exponent.parse::<i32>().ok()?),
+		None => (rest, 0),
+	};
+	let (whole, fraction) = digits.split_once('.').unwrap_or((digits, ""));
+	if whole.is_empty() && fraction.is_empty() {
+		return None;
+	}
+	let mut value = 0.0f64;
+	for digit in whole.chars() {
+		value = value * 16.0 + f64::from(digit.to_digit(16)?);
+	}
+	let mut place = 1.0 / 16.0;
+	for digit in fraction.chars() {
+		value += f64::from(digit.to_digit(16)?) * place;
+		place /= 16.0;
+	}
+	// The power of two is taken in steps: the smallest `f64` is 2^-1074, and
+	// one step of `powi` past 2^-1022 is already zero.
+	let mut left = exponent;
+	while left != 0 {
+		let step = left.clamp(-500, 500);
+		value *= 2.0f64.powi(step);
+		left -= step;
+	}
+	Some(if negative { -value } else { value })
+}
+
+/// Why [`read_number`] could not read an argument.
+enum ReadError {
+	/// It is no number at all.
+	NotANumber,
+	/// It is a number larger than this machine holds.
+	OutOfRange,
+}
+
+/// The number `written` holds, as Bash reads a width, a precision or a `%d`
+/// argument: a decimal, a hexadecimal after `0x`, an octal after `0`, or the
+/// character after a quote, with a sign and nothing else around it.
+fn read_number(written: &str) -> Result<i64, ReadError> {
+	if written.is_empty() {
+		return Ok(0);
+	}
+	if let Some(character) = written.strip_prefix('\'').or(written.strip_prefix('"')) {
+		return Ok(character.chars().next().map_or(0, |c| i64::from(u32::from(c))));
+	}
+	let (negative, digits) = match written.strip_prefix('-') {
+		Some(digits) => (true, digits),
+		None => (false, written.strip_prefix('+').unwrap_or(written)),
+	};
+	let read = if let Some(hexadecimal) = digits.strip_prefix("0x").or(digits.strip_prefix("0X")) {
+		i64::from_str_radix(hexadecimal, 16)
+	} else if digits.len() > 1 && digits.starts_with('0') {
+		i64::from_str_radix(&digits[1..], 8)
+	} else {
+		digits.parse()
+	};
+	match read {
+		Ok(number) => Ok(if negative { -number } else { number }),
+		// A number past what this holds is still a number: Bash reports it as
+		// out of range and holds it to what an `int` takes.
+		Err(_) if digits.bytes().all(|byte| byte.is_ascii_hexdigit() || byte == b'x') => {
+			Err(ReadError::OutOfRange)
+		},
+		Err(_) => Err(ReadError::NotANumber),
+	}
+}
+
+/// Where a number's own digits start in `text`: after a sign, a space held
+/// for one, and the `0x` of a hexadecimal.
+fn body_starts_at(text: &[u8]) -> usize {
+	let mut head = 0;
+	while matches!(text.get(head), Some(b'-' | b'+' | b' ')) {
+		head += 1;
+	}
+	if matches!(text.get(head), Some(b'0')) && matches!(text.get(head + 1), Some(b'x' | b'X')) {
+		head += 2;
+	}
+	head
 }
 
 /// Writes `format_string` with `args`, the arguments printf was given.
@@ -604,43 +947,21 @@ fn format_via_uucore(
 
 /// [`format_via_uucore`] with the writer and the arguments as they are, so
 /// that the pieces of a format string this writes itself do not make another
-/// copy of it for every writer they pass on (see [`format_wide`]).
+/// copy of it for every writer they pass on (see [`write_pieces`]).
 ///
-/// A directive whose width or precision is larger than the formatter takes is
-/// written here, not by uucore, which would end the process.
+/// A directive whose field is larger than the formatter takes, or whose
+/// conversion uucore does not write as Bash writes it, is written here, not
+/// by uucore, which would end the process or write something else.
 fn write_with_uucore(
 	format_string: &str,
 	arguments: &[OsString],
 	writer: &mut dyn Write,
 	report: &mut Report<impl Write>,
 ) -> Result<(), brush_core::Error> {
-	match scan_wide_directives(format_string) {
-		Some(pieces) => format_wide(&pieces, arguments, writer, report),
+	match scan_directives(format_string) {
+		Some(pieces) => write_pieces(&pieces, arguments, writer, report),
 		None => write_uucore(format_string, arguments, writer),
 	}
-}
-
-/// The number `written` holds, as Bash reads a width, a precision or a `%d`
-/// argument: a decimal, a hexadecimal after `0x`, or an octal after `0`, with
-/// a sign and nothing else around it.
-fn read_number(written: &str) -> Option<i64> {
-	if written.is_empty() {
-		return Some(0);
-	}
-	let (negative, digits) = match written.strip_prefix('-') {
-		Some(digits) => (true, digits),
-		None => (false, written.strip_prefix('+').unwrap_or(written)),
-	};
-	let number = if let Some(hexadecimal) = digits.strip_prefix("0x").or(digits.strip_prefix("0X"))
-	{
-		i64::from_str_radix(hexadecimal, 16)
-	} else if digits.len() > 1 && digits.starts_with('0') {
-		i64::from_str_radix(&digits[1..], 8)
-	} else {
-		digits.parse()
-	}
-	.ok()?;
-	Some(if negative { -number } else { number })
 }
 
 /// [`write_with_uucore`] for a format string uucore is to write as it is,
@@ -664,6 +985,9 @@ fn write_uucore(
 
 	// Keep going until we've exhausted all format arguments. Also make sure to run
 	// at least once even if there's no format arguments.
+	// A format with no directive that takes an argument is written once, as
+	// Bash writes it: starting again would never reach the arguments.
+	let takes_arguments = format_items.iter().any(|item| matches!(item, format::FormatItem::Spec(_)));
 	while format_args.is_empty() || !format_args_wrapper.is_exhausted() {
 		// Process all format items, in order. We'll bail when we're told to stop.
 		for item in &format_items {
@@ -689,7 +1013,7 @@ fn write_uucore(
 			format_args_wrapper.start_next_batch();
 		}
 
-		if format_args.is_empty() {
+		if format_args.is_empty() || !takes_arguments {
 			break;
 		}
 	}
