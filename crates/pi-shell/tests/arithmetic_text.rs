@@ -180,9 +180,9 @@ async fn arithmetic_for_header_rules_hold_after_here_tags_and_in_spaced_subshell
 }
 
 /// Bash counts the parentheses of a `${...}` word toward the header of an
-/// arithmetic `for` loop around it, so a word that opens more than it closes
-/// is a syntax error there. A `${...}` word is text everywhere: a `((` in it
-/// keeps the rest of the line's comments, and a `<<` in it is not a
+/// arithmetic `for` loop around it, so a word whose parentheses do not
+/// balance is a syntax error there. A `${...}` word is text everywhere: a `((`
+/// in it keeps the rest of the line's comments, and a `<<` in it is not a
 /// here-document.
 #[tokio::test]
 async fn parameter_word_parentheses_follow_bash() {
@@ -212,6 +212,9 @@ async fn parameter_word_parentheses_follow_bash() {
 	for script in [
 		"v=1\nfor ((x=${v:?(};0;)); do :; done\necho after\n",
 		"v=1\nfor ((x=${v:-(};0;)); do :; done\necho after\n",
+		"v=0\nfor ((i=${v:-)};0;)); do :; done\necho after\n",
+		"v=0\nfor ((i=${v:-${w:-)}};0;)); do :; done\necho after\n",
+		"v=0\n(((( for ((i=${v:-)};0;)) << 2 )) ))\necho after\n",
 	] {
 		let out = run(script).await;
 		assert_eq!(out.stdout, "", "{script:?} ran; stderr: {}", out.stderr);

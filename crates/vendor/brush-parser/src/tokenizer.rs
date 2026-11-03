@@ -692,11 +692,11 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
         }
     }
 
-    /// Counts a `(` or `)` operator token toward the arithmetic text of a bare `((`, if any. The
-    /// parentheses of a `${...}` word count only toward an arithmetic `for` header, as Bash
-    /// counts them; elsewhere the `((` may group conditions, where they must not.
+    /// Counts a `(` or `)` operator token toward the arithmetic text of a bare `((`, if any.
+    /// A `${...}` word's parentheses are counted on the word instead: the parser sees the whole
+    /// word as one token, so applying them here would end the text where the parser does not.
     fn note_arithmetic_command_paren(&mut self, token: &TokenParseState) {
-        if self.cross_state.in_parameter_word && !self.cross_state.arithmetic_for_header {
+        if self.cross_state.in_parameter_word {
             return;
         }
         if let Some(depth) = self.cross_state.arithmetic_command_depth {
@@ -1239,18 +1239,17 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                             self.cross_state.in_parameter_word = outer_parameter_word;
                             // Bash counts the parentheses of a `${...}` word toward the header
                             // of an arithmetic `for` loop around it, but the parser balances the
-                            // header by its parenthesis tokens and cannot see into the word. A
-                            // word that opens more than it closes makes Bash end the header past
-                            // the tokens the parser would stop at; Bash then reports a syntax
-                            // error or reads text the parser cannot. (A word that closes more is
-                            // left to the parser, as on main.) Nested words count as part of the
-                            // outermost one.
+                            // header by its parenthesis tokens and sees the whole word as one.
+                            // A word whose parentheses do not balance moves the header's end
+                            // away from the token the parser stops at, so Bash reports a syntax
+                            // error or reads text the parser cannot. Nested words count as part
+                            // of the outermost one.
                             if let Some(saved) = outer_word_parens {
                                 let net = std::mem::replace(
                                     &mut self.cross_state.parameter_word_parens,
                                     saved,
                                 );
-                                if net > 0 && self.cross_state.arithmetic_for_header {
+                                if net != 0 && self.cross_state.arithmetic_for_header {
                                     return Err(TokenizerError::UnbalancedParameterWordInArithmetic);
                                 }
                             }
