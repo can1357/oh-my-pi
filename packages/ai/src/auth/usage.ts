@@ -412,6 +412,10 @@ export class UsageService implements UsageApi {
 		const recoveryEpoch = this.#deps.cache.recoveryEpoch(request.provider);
 		const promise = (async () => {
 			const report = await this.#fetchUsageUncached(request, timeoutMs);
+			// A provider disabled while this probe ran has no usage concept now:
+			// answer nothing and leave the store untouched (its older snapshot
+			// stays for re-enabling, this result is dropped).
+			if (this.#disabledProviders.has(request.provider)) return null;
 			// Block marks bump the generation too: a report racing a fresh 429 may
 			// predate it, so it answers this probe but is neither cached nor used
 			// to heal blocks.
@@ -790,6 +794,9 @@ export class UsageService implements UsageApi {
 		credential: AuthCredential,
 		options?: { baseUrl?: string; timeoutMs?: number; signal?: AbortSignal },
 	): Promise<UsageReport | null> {
+		// A disabled provider has no usage concept on any path: not the broker's
+		// per-credential hook, not a fresh cached snapshot.
+		if (this.#disabledProviders.has(provider)) return null;
 		// Store-level hook (e.g. `RemoteAuthCredentialStore`) is authoritative
 		// when present for OAuth: the broker already aggregates usage from a
 		// less-throttled IP, and falling back to the local per-credential fetch
@@ -901,10 +908,13 @@ export class UsageService implements UsageApi {
 				this.#usageReportsInFlight.set(overrideKey, shared);
 			}
 			const fetched = await raceSignal(shared, options?.signal, "usage fetch aborted");
-			const reports =
-				fetched && options?.provider !== undefined
-					? fetched.filter(report => report.provider === options.provider)
-					: fetched;
+			const reports = fetched
+				? fetched.filter(
+						report =>
+							(options?.provider === undefined || report.provider === options.provider) &&
+							!this.#disabledProviders.has(report.provider),
+					)
+				: fetched;
 			if (reports) this.#deps.blocks.reconcileReports(reports);
 			if (!reports) return reports;
 

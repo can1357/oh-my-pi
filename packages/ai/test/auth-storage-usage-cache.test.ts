@@ -21,6 +21,7 @@ import {
 	SqliteAuthCredentialStore,
 	type StoredAuthCredential,
 } from "@oh-my-pi/pi-ai/auth-storage";
+import type { UsageService } from "@oh-my-pi/pi-ai/auth/usage";
 import { usageCacheIdentity } from "@oh-my-pi/pi-ai/auth/usage-cache";
 import {
 	type UsageHistoryEntry,
@@ -1813,14 +1814,26 @@ describe("AuthStorage usage cache: configured usage providers", () => {
 	it("gives a disabled provider no usage at all, and re-enabling reuses its snapshot", async () => {
 		const builtIn = countingUsageProvider("built-in", 30, 1);
 		const runtime = countingUsageProvider("runtime", 40, 2);
-		const storage = await openStorage(makeStore([gatewayRow()]), builtIn);
+		const store = makeStore([gatewayRow()]);
+		const brokerHook = vi.fn(async (): Promise<UsageReport | null> => gatewayReport(GATEWAY_PROVIDER, "broker", 50));
+		store.getUsageReport = brokerHook;
+		const storage = await openStorage(store, builtIn);
+		// `report()` is the per-credential path health, rotation, and selection use; it is not on the public facade.
+		const usage = storage.usage as UsageService;
+		const row = gatewayRow();
 		expect(gatewayReading(await storage.usage.reports())).toEqual({ source: "built-in", used: 30 });
+		const direct = await usage.report(GATEWAY_PROVIDER, row.credential);
+		expect(gatewayReading(direct ? [direct] : null)).toEqual({ source: "built-in", used: 30 });
 
-		// Disabled: not enumerated, not probed with its stored key, no usage concept for callers.
+		// Disabled: not enumerated, not probed with its stored key, no usage concept for callers —
+		// including the per-credential path, which must neither serve the fresh snapshot nor ask the broker hook.
 		storage.usage.replaceDisabledProviders(new Set([GATEWAY_PROVIDER]));
 		expect(storage.usage.providerFor(GATEWAY_PROVIDER)).toBeUndefined();
 		expect(gatewayReading(await storage.usage.reports())).toBeUndefined();
 		expect(gatewayReading(await storage.usage.reports({ provider: GATEWAY_PROVIDER }))).toBeUndefined();
+		expect(await usage.report(GATEWAY_PROVIDER, row.credential)).toBeNull();
+		expect(await usage.report(GATEWAY_PROVIDER, { type: "oauth", access: "a", refresh: "r", expires: 0 })).toBeNull();
+		expect(brokerHook).not.toHaveBeenCalled();
 		// A runtime extension adapter for a disabled provider is gated the same way.
 		storage.usage.setProvider(GATEWAY_PROVIDER, runtime);
 		expect(gatewayReading(await storage.usage.reports())).toBeUndefined();
@@ -1831,6 +1844,58 @@ describe("AuthStorage usage cache: configured usage providers", () => {
 		storage.usage.replaceDisabledProviders(new Set());
 		expect(gatewayReading(await storage.usage.reports())).toEqual({ source: "built-in", used: 30 });
 		expect(builtIn.calls).toBe(1);
+	});
+
+	it("drops a broker's report for a disabled provider", async () => {
+		const store = makeStore([gatewayRow()]);
+		store.fetchUsageReports = async () => [
+			gatewayReport(GATEWAY_PROVIDER, "broker", 50),
+			gatewayReport("anthropic", "broker", 60),
+		];
+		const storage = await openStorage(store);
+		expect((await storage.usage.reports())?.map(report => report.provider)).toEqual([GATEWAY_PROVIDER, "anthropic"]);
+
+		storage.usage.replaceDisabledProviders(new Set([GATEWAY_PROVIDER]));
+		expect((await storage.usage.reports())?.map(report => report.provider)).toEqual(["anthropic"]);
+		expect(await storage.usage.reports({ provider: GATEWAY_PROVIDER })).toEqual([]);
+	});
+
+	it("discards a probe that straddles disabling without caching or recording it", async () => {
+		const store = makeStore([gatewayRow()]);
+		const recorded: UsageHistoryEntry[] = [];
+		store.recordUsageSnapshots = entries => {
+			recorded.push(...entries);
+		};
+		const started = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<UsageReport | null>();
+		const builtIn: CountingUsageProvider = {
+			id: GATEWAY_PROVIDER,
+			cacheVersion: 1,
+			calls: 0,
+			async fetchUsage() {
+				builtIn.calls += 1;
+				started.resolve();
+				return release.promise;
+			},
+		};
+		const storage = await openStorage(store, builtIn);
+		try {
+			const pending = storage.usage.reports();
+			await started.promise;
+			storage.usage.replaceDisabledProviders(new Set([GATEWAY_PROVIDER]));
+			release.resolve(gatewayReport(GATEWAY_PROVIDER, "built-in", 10));
+
+			expect(gatewayReading(await pending)).toBeUndefined();
+			const cachedSources = [...store.cache]
+				.filter(([key]) => key.startsWith("usage_cache:report:"))
+				.flatMap(
+					([, entry]) => cachedReportPayloadSchema.assert(JSON.parse(entry.value)).value?.metadata?.source ?? [],
+				);
+			expect(cachedSources).toEqual([]);
+			expect(recorded).toEqual([]);
+		} finally {
+			release.resolve(null);
+		}
 	});
 
 	it("keeps the disabled set across a store swap", async () => {
