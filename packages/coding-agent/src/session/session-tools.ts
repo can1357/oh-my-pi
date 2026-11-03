@@ -561,8 +561,16 @@ export class SessionTools {
 		return this.#baseSystemPrompt;
 	}
 
-	/** Replaces the controller-owned base prompt and its sources without applying it to the agent. */
-	setBaseSystemPrompt(prompt: string[], sources: SystemPromptSources | undefined): void {
+	/**
+	 * Replaces the controller-owned base prompt without applying it to the agent. Keeps the committed
+	 * sources: callers restore the pre-promotion base those sources were built for.
+	 */
+	setBaseSystemPrompt(prompt: string[]): void {
+		this.#baseSystemPrompt = prompt;
+	}
+
+	/** Restores a previously committed base prompt together with its sources (session-switch rollback). */
+	restoreBaseSystemPrompt(prompt: string[], sources: SystemPromptSources | undefined): void {
 		this.#baseSystemPrompt = prompt;
 		this.#systemPromptSources = sources;
 	}

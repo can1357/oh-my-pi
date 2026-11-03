@@ -125,43 +125,40 @@ function countBlocks(blocks: readonly string[]): Map<string, number> {
 }
 
 /**
- * Claims each source fragment in the effective prompt. A source is claimed only when its built
- * block is unchanged at its original index, unique in both the built and effective prompts, and
- * holds one fragment occurrence that overlaps no other source. `complete` is false when any source
- * stays unattributed.
+ * Claims each source fragment in the effective prompt. A source is claimed only when it occurs once
+ * in the built prompt, in a block that is unchanged at its original index and unique in the
+ * effective prompt, and overlaps no other source. A repeated fragment reserves every occurrence.
+ * `complete` is false when a source the effective prompt may still hold stays unattributed.
  */
 function claimPromptSources(
 	effective: readonly string[],
 	metadata: SystemPromptSources,
 ): { claims: Map<number, SourceClaim[]>; complete: boolean } {
 	let complete = true;
-	const builtCounts = countBlocks(metadata.blocks);
 	const effectiveCounts = countBlocks(effective);
 	const candidates = new Map<number, SourceClaim[]>();
 	for (const source of metadata.sources) {
-		const ambiguous = source.blockIndex < 0;
-		if (ambiguous) complete = false;
-		// A repeated fragment still reserves every location, so no other source can claim overlapping text.
-		const indices = ambiguous
-			? metadata.blocks.flatMap((block, index) => (block.includes(source.fragment) ? [index] : []))
-			: [source.blockIndex];
-		for (const index of indices) {
-			const block = metadata.blocks[index];
+		const { fragment } = source;
+		const located: { index: number; start: number }[] = [];
+		for (const [index, block] of metadata.blocks.entries())
+			for (let start = block.indexOf(fragment); start >= 0; start = block.indexOf(fragment, start + 1))
+				located.push({ index, start });
+		const ambiguous = located.length > 1;
+		let unattributed = located.length === 0 || ambiguous;
+		for (const { index, start } of located) {
+			const block = metadata.blocks[index]!;
 			// Never remap moved or changed blocks, even when the fragment text still appears.
-			if (
-				block === undefined ||
-				effective[index] !== block ||
-				builtCounts.get(block) !== 1 ||
-				effectiveCounts.get(block) !== 1
-			) {
-				complete = false;
+			if (effective[index] !== block || effectiveCounts.get(block) !== 1) {
+				unattributed = true;
 				continue;
 			}
 			const ranges = candidates.get(index) ?? [];
-			for (let start = block.indexOf(source.fragment); start >= 0; start = block.indexOf(source.fragment, start + 1))
-				ranges.push({ start, end: start + source.fragment.length, source, ambiguous });
+			ranges.push({ start, end: start + fragment.length, source, ambiguous });
 			candidates.set(index, ranges);
 		}
+		// Absent from the built prompt: the template omitted it, or whole-prompt formatting (an unclosed
+		// fence) changed it. Otherwise only a fragment the effective prompt still holds is left behind.
+		if (unattributed && (located.length === 0 || effective.some(text => text.includes(fragment)))) complete = false;
 	}
 	const claims = new Map<number, SourceClaim[]>();
 	for (const [index, ranges] of candidates) {
@@ -220,8 +217,6 @@ function appendSystemPromptEntries(session: AgentSession, state: SnapshotBuildSt
 		remaining.push(tail);
 		display.push(tail);
 		const remainingText = remaining.join("");
-		// A block made entirely of claimed fragments still shows its markers.
-		if (!remainingText && sourceMarkers.length === 0) continue;
 		appendEntry(state, "system-prompt", {
 			id: `system-prompt/${index}`,
 			label: `System Block ${index + 1}`,

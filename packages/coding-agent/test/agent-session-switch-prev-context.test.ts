@@ -291,7 +291,7 @@ describe("AgentSession.switchSession previous-context build", () => {
 			systemPrompt: [fragment],
 			sources: {
 				blocks: [fragment],
-				sources: [{ id: "rules", blockIndex: 0, kind: "instruction-files" as const, label: "rules", fragment }],
+				sources: [{ id: "rules", kind: "instruction-files" as const, label: "rules", fragment }],
 			},
 		});
 		const initial = built("previous rules");

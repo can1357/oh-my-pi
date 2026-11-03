@@ -2406,8 +2406,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			getMnemopiSessionState: () => this.getMnemopiSessionState(),
 			takeMnemopiSessionState: () => setMnemopiSessionState(this, undefined),
 			setBaseSystemPrompt: prompt => {
-				// Restores the pre-promotion base, which the committed sources were built for.
-				this.#tools.setBaseSystemPrompt(prompt, this.#tools.systemPromptSources);
+				this.#tools.setBaseSystemPrompt(prompt);
 				this.agent.setSystemPrompt(prompt);
 			},
 			refreshBaseSystemPrompt: () => this.#tools.refreshBaseSystemPrompt(),
@@ -13807,7 +13806,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.#syncAgentSessionId(previousSessionState.sessionId, false);
 			this.#memory.rekeyForCurrentSessionId();
 			this.agent.setTools(previousTools);
-			this.#tools.setBaseSystemPrompt(previousBaseSystemPrompt, previousSystemPromptSources);
+			this.#tools.restoreBaseSystemPrompt(previousBaseSystemPrompt, previousSystemPromptSources);
 			this.#memory.restorePromotionSnapshot(previousBaseSystemPromptBeforeMemoryPromotion);
 			this.agent.setSystemPrompt(previousSystemPrompt);
 			this.agent.replaceMessages(previousAgentMessages);
