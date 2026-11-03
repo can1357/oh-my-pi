@@ -202,7 +202,6 @@ import {
 	createSessionDateCwdReminderJournal,
 	type DateCwdReminderJournal,
 	DateCwdReminderInjector,
-	readOnlyDateCwdReminderJournal,
 } from "./session/date-cwd-reminder";
 import { createInterruptedToolResults, createInterruptedTurnAbortMessage } from "./session/exit-diagnostics";
 import { recoverInlineSloppyEdit } from "./session/inline-edit-recovery";
@@ -5680,13 +5679,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					cwdResolver: () => sessionManager.getCwd(),
 					convertToLlm: convertToLlmFinal,
 					transformContext: async messages => wrapSteeringForModel(messages),
-					// The primary's chain, snapcompact included: a capture that sent the tool results the primary
-					// rasterized as text would diverge from the primary prompt at the first frame. The reminder
-					// journal is read-only, so the capture repeats the primary's date/cwd placements (a session
-					// past midnight or a /move) without recording its own into the session.
-					transformProviderContext: createTransformProviderContext(
-						readOnlyDateCwdReminderJournal(createSessionDateCwdReminderJournal(sessionManager)),
-					),
+					// The primary's chain and reminder placements, so the capture matches its cached prompt.
+					transformProviderContext: createTransformProviderContext({
+						...createSessionDateCwdReminderJournal(sessionManager),
+						record: () => {},
+					}),
 					temperature: agent.temperature,
 					topP: agent.topP,
 					topK: agent.topK,

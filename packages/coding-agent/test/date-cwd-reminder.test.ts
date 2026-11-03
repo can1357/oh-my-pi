@@ -13,7 +13,6 @@ import {
 	type DateCwdReminderJournal,
 	type DateCwdReminderPlacement,
 	isDateCwdReminderControl,
-	readOnlyDateCwdReminderJournal,
 	renderDateCwdReminder,
 } from "@oh-my-pi/pi-coding-agent/session/date-cwd-reminder";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -721,33 +720,6 @@ describe("date-cwd-reminder", () => {
 						placement: "prefix",
 					},
 				]);
-			});
-
-			it("replays the main loop's placements through a read-only journal and records none", () => {
-				const { placements, journal } = createJournal();
-				const first: Message = { role: "user", content: "first", timestamp: 1 };
-				const reply = createAssistantMessage("a");
-				const second: Message = { role: "user", content: "second", timestamp: 3 };
-				const main = new DateCwdReminderInjector(journal);
-				main.transform({ systemPrompt: ["system"], messages: [first] }, "2026-08-14", "/work");
-				// The session crosses midnight: the second turn carries the new date.
-				const sent = main.transform(
-					{ systemPrompt: ["system"], messages: [first, reply, second] },
-					"2026-08-15",
-					"/work",
-				);
-				const recorded = [...placements];
-
-				// A side conversation (the auto-learn capture) replays the history and adds its own turn.
-				const nudge: Message = { role: "user", content: "nudge", timestamp: 5 };
-				const side = new DateCwdReminderInjector(readOnlyDateCwdReminderJournal(journal)).transform(
-					{ systemPrompt: ["system"], messages: [first, reply, second, createAssistantMessage("b"), nudge] },
-					"2026-08-15",
-					"/work",
-				);
-
-				expect(wireOf(side).slice(0, sent.messages.length)).toEqual(wireOf(sent));
-				expect(placements).toEqual(recorded);
 			});
 
 			it("dates the first turn today when the journal has no reminder for it", () => {

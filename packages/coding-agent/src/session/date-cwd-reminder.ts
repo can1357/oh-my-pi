@@ -123,15 +123,6 @@ function messageStartsWithReminder(message: UserMessage, reminder: string): bool
 	return message.content[0]?.type === "text" && message.content[0].text === reminder;
 }
 
-/** `journal` without its writes: a side conversation replays the placements and records none of its own. */
-export function readOnlyDateCwdReminderJournal(journal: DateCwdReminderJournal): DateCwdReminderJournal {
-	return {
-		load: () => journal.load(),
-		record: () => {},
-		scope: journal.scope ? () => journal.scope?.() : undefined,
-	};
-}
-
 function injectReminder(message: UserMessage, reminder: string): UserMessage {
 	const content: UserMessage["content"] =
 		typeof message.content === "string"
