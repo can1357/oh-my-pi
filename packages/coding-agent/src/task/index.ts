@@ -53,7 +53,7 @@ import {
 	type TaskToolSchemaInstance,
 } from "./types";
 import type { AgentProgress, SingleResult, TaskItem, TaskParams, TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
-import { AsyncJobError, type AsyncJobManagerApi } from "../async";
+import { AsyncJobError, type AsyncJobManagerApi, queuedJobNotice } from "../async";
 import { hasResolvableTranscript } from "../internal-urls/registry-helpers";
 import { sessionResolveContext } from "../internal-urls/context";
 import { InternalUrlRouter } from "../internal-urls/router";
@@ -1032,7 +1032,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	/**
 	 * Start a streamed item's run ahead of dispatch. Preflight and execution
 	 * mode mirror dispatch exactly; refuses (undefined) whenever dispatch would
-	 * reject the item, so a refusal halts further speculation for the call.
+	 * reject the item, or would queue its job at the background job cap (a
+	 * queued spawn must not run before its turn), so a refusal halts further
+	 * speculation for the call.
 	 */
 	async #startSpeculative(
 		toolCallId: string,
@@ -1053,6 +1055,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			cfgAsyncEnabled.get(this.session.settings) && this.session.asyncJobManager !== undefined && !blocking;
 		const agentId = await this.#outputManager().allocate(spawn.name?.trim() || generateTaskName());
 		if (signal.aborted) return undefined;
+		if (detached && this.session.asyncJobManager?.atCapacity) return undefined;
 		return this.#launch({ toolCallId, params: spawn, index, agentId, detached });
 	}
 
@@ -1413,8 +1416,11 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			failedSchedules.length > 0
 				? ` Failed to schedule ${failedSchedules.length} spawn${failedSchedules.length === 1 ? "" : "s"}: ${failedSchedules.join("; ")}.`
 				: "";
-		const renderSpawnFeedback = (mixed: boolean): string =>
-			prompt
+		// Spawns registered at the background job cap wait for a slot; the
+		// caller learns that now rather than reading a running job that never moves.
+		const queuedSummary = queuedJobNotice(started.map(({ jobId }) => manager.getJob(jobId)));
+		const renderSpawnFeedback = (mixed: boolean): string => {
+			const feedback = prompt
 				.render(taskSpawnFeedbackTemplate, {
 					mixed,
 					singular: started.length === 1,
@@ -1428,6 +1434,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					scheduleFailureSummary,
 				})
 				.trim();
+			return queuedSummary ? `${feedback}\n\n${queuedSummary}` : feedback;
+		};
 
 		if (syncSpawns.length === 0) {
 			if (spawns.length === 1) {
@@ -1629,6 +1637,12 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						update.content.find(part => part.type === "text")?.text ?? `Running background task ${agentId}...`;
 					await reportProgress(updateText, buildDetails() as unknown as Record<string, unknown>);
 				};
+				if (runSignal.aborted && !spawnRun) {
+					// Cancelled while queued at the background job cap: never launch the subagent.
+					progress.status = "aborted";
+					onSettled?.(true);
+					throw new Error("Aborted before execution");
+				}
 				const activeRun = (spawnRun ??= this.#launch({
 					toolCallId,
 					params: spawnParams,
@@ -1742,6 +1756,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				id: agentId,
 				agentId,
 				queued: true,
+				// A run started while the call streamed already executes; its job must not queue.
+				startImmediately: run !== undefined,
 				ownerId: this.session.getAgentId?.() ?? undefined,
 				widgetInputs: createTaskWidgetInputs({
 					manager,

@@ -122,6 +122,7 @@ export class RemoteAsyncJob implements AsyncJob {
 	readonly agentId?: string;
 	readonly agentOutputPublished?: boolean;
 	readonly queued?: boolean;
+	readonly waitingForSlot?: boolean;
 	readonly foreground?: boolean;
 	readonly process?: AsyncJobProcess;
 	readonly widgetInputs?: JobWidgetInputs;
@@ -146,6 +147,7 @@ export class RemoteAsyncJob implements AsyncJob {
 		this.agentId = wire.agentId;
 		this.agentOutputPublished = wire.agentOutputPublished;
 		this.queued = wire.queued;
+		this.waitingForSlot = wire.waitingForSlot;
 		this.foreground = wire.foreground;
 		const pids = wire.process?.pids ?? [];
 		this.process =
@@ -260,6 +262,7 @@ export class RemoteAsyncJobManager implements AsyncJobManagerApi {
 			agentId: options?.agentId,
 			onProgress: options?.onProgress,
 			queued: options?.queued,
+			startImmediately: options?.startImmediately,
 			foreground: options?.foreground,
 			intent: options?.intent,
 			feed: feed?.wire(),

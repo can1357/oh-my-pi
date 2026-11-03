@@ -77,7 +77,7 @@ export type CommandMetadataChangedListener = () => void | Promise<void>;
 /** Public summary of an asynchronous job. */
 export type AsyncJobSnapshotItem = Pick<
 	AsyncJob,
-	"id" | "type" | "status" | "label" | "intent" | "startTime" | "endTime" | "agentId" | "ownerId"
+	"id" | "type" | "status" | "label" | "intent" | "startTime" | "endTime" | "agentId" | "ownerId" | "queued"
 > & {
 	/** Full command line of a job that runs a process; `label` is cut to 120 characters. */
 	command?: string;

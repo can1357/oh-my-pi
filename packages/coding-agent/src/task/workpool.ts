@@ -205,7 +205,9 @@ export class WorkPool {
 					signal.removeEventListener("abort", onAbort);
 				}
 			},
-			{ id: this.name, ownerId: this.ownerId, queued: true },
+			// The pool job only coordinates its batch jobs and never takes a slot; it
+			// must not queue at the cap, or a cancel would never reach its onAbort.
+			{ id: this.name, ownerId: this.ownerId, queued: true, startImmediately: true },
 		);
 		if (id !== this.name) {
 			manager.cancel(id, { ownerId: this.ownerId });
@@ -368,6 +370,11 @@ export class WorkPool {
 			"task",
 			batch.id,
 			async ({ signal, reportProgress, markRunning }) => {
+				if (signal.aborted) {
+					// Cancelled while queued at the background job cap: settle the batch without a turn.
+					const output = "Cancelled before the batch started";
+					return this.#settleTurn(agent, batch, { exitCode: 1, output, error: output, aborted: true });
+				}
 				markRunning();
 				const onProgress = (progress: AgentProgress): void => {
 					if (progress.contextTokens !== undefined) agent.contextTokens = progress.contextTokens;

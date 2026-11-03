@@ -1,7 +1,7 @@
 import { formatDuration } from "@oh-my-pi/pi-tui/render/render-utils";
 import type { DaemonSnapshot } from "@oh-my-pi/pi-tui/tools/daemon";
 import { formatBytes, logger, sanitizeText, truncate } from "@oh-my-pi/pi-utils";
-import type { AsyncJob } from "../async";
+import { type AsyncJob, asyncJobStatusLabel } from "../async";
 import {
 	agentStaleNote,
 	cancelAgentRegistration,
@@ -187,13 +187,14 @@ export class ProcProtocolHandler implements ProtocolHandler {
 			const snapshots = snapshotJobs(session, jobs);
 			const rows = [
 				...jobs.map((job, index) => {
+					const status = asyncJobStatusLabel(job);
 					const duration =
-						job.endTime === undefined
-							? `up ${formatDuration(now - job.startTime)}`
-							: `in ${formatDuration(job.endTime - job.startTime)}`;
+						job.endTime !== undefined
+							? `in ${formatDuration(job.endTime - job.startTime)}`
+							: `${status === "queued" ? "for" : "up"} ${formatDuration(now - job.startTime)}`;
 					const progress = runningTaskProgressSuffix(snapshots[index], { duration: false });
 					const intent = job.intent ? `${job.intent} — ` : "";
-					return `${job.id} [${job.type}] ${job.status} ${duration} — ${intent}${job.label.replace(/\s+/g, " ")}${progress}`;
+					return `${job.id} [${job.type}] ${status} ${duration} — ${intent}${job.label.replace(/\s+/g, " ")}${progress}`;
 				}),
 				...runningAgentsOutsideJobs(session).map(
 					agent =>
@@ -226,8 +227,13 @@ export class ProcProtocolHandler implements ProtocolHandler {
 		if (job) {
 			const snapshot = snapshotJobs(session, [job])[0];
 			const lines = [
-				`${job.id} [${job.type}] — ${job.status} — ${job.intent ? `${job.intent} — ` : ""}${job.label}${runningTaskProgressSuffix(snapshot, { duration: true })}`,
+				`${job.id} [${job.type}] — ${asyncJobStatusLabel(job)} — ${job.intent ? `${job.intent} — ` : ""}${job.label}${runningTaskProgressSuffix(snapshot, { duration: true })}`,
 			];
+			if (job.waitingForSlot === true && job.status === "running") {
+				lines.push(
+					"Waiting for a slot: running background jobs fill the cap (`async.maxJobs`). It starts on its own when one ends.",
+				);
+			}
 			if (job.resultText) lines.push(job.resultText);
 			if (job.errorText) lines.push(`Error: ${job.errorText}`);
 			if (job.status === "running") {

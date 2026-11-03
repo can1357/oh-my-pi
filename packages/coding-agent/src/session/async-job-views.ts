@@ -24,6 +24,7 @@ function jobSnapshotItem(job: AsyncJob, widgets: JobWidgetRegistry | undefined):
 		endTime: job.endTime,
 		agentId: job.agentId,
 		ownerId: job.ownerId,
+		queued: job.queued,
 	};
 }
 

@@ -1373,6 +1373,13 @@ export class VibeSessionRegistry {
 			"task",
 			`vibe ${record.cli} ${record.id}: ${firstLine(message, 60)}`,
 			async ({ jobId: ownJobId, signal }) => {
+				if (signal.aborted) {
+					// Cancelled while queued at the background job cap: clear the turn without starting it.
+					await this.#finishTurn(session, manager, record, ownJobId);
+					throw new VibeTurnError(
+						`[vibe:${record.id} cli=${record.cli} turn=${turnIndex}] cancelled before the turn started`,
+					);
+				}
 				record.state = "running";
 				record.turnCount = turnIndex;
 				record.lastActivityAt = Date.now();

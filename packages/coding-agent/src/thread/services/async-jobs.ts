@@ -152,6 +152,7 @@ export function toJobWire(job: AsyncJob): AsyncJobWire {
 		agentId: job.agentId,
 		agentOutputPublished: job.agentOutputPublished,
 		queued: job.queued,
+		waitingForSlot: job.waitingForSlot,
 		foreground: job.foreground,
 		process: process
 			? {
@@ -182,6 +183,7 @@ function mainRegisterOptions(options: WireRegisterOptions | undefined, feed: Job
 		agentId: options?.agentId,
 		onProgress: options?.onProgress,
 		queued: options?.queued,
+		startImmediately: options?.startImmediately,
 		foreground: options?.foreground,
 		intent: options?.intent,
 		process: feed?.process,

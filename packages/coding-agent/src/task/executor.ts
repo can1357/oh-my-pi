@@ -3318,6 +3318,8 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 						id,
 						agentId: id,
 						ownerId,
+						// The woken turn already runs; queueing its job at the cap could not hold it back.
+						startImmediately: true,
 						widgetInputs: createTaskWidgetInputs({
 							manager,
 							agentId: id,

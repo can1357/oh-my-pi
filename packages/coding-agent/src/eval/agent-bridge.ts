@@ -218,6 +218,8 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 			"task",
 			id,
 			async ({ signal, reportProgress, markRunning }) => {
+				// Cancelled while queued at the background job cap: never start the agent.
+				if (signal.aborted) throw new ToolError("Cancelled before the agent started");
 				markRunning();
 				let latestProgress: AgentProgress | undefined;
 				try {

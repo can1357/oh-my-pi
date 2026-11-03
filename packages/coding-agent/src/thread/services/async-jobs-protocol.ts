@@ -52,6 +52,7 @@ export interface AsyncJobWire {
 	readonly agentId?: string;
 	readonly agentOutputPublished?: boolean;
 	readonly queued?: boolean;
+	readonly waitingForSlot?: boolean;
 	readonly foreground?: boolean;
 	/** The job's process: command line, start directory, and its live pids at projection time. */
 	readonly process?: { readonly command: string; readonly cwd: string; readonly pids: readonly number[] };
@@ -92,6 +93,7 @@ export interface WireRegisterOptions {
 	readonly agentId?: string;
 	readonly onProgress?: (text: string, details?: AsyncJobDetails) => void | Promise<void>;
 	readonly queued?: boolean;
+	readonly startImmediately?: boolean;
 	readonly foreground?: boolean;
 	readonly intent?: string;
 	readonly feed?: WireJobFeed;

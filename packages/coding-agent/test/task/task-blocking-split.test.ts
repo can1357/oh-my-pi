@@ -253,13 +253,12 @@ describe("task per-item blocking split", () => {
 			makeResult(options.id ?? "?", options.agent.name),
 		);
 
-		// A running non-queued filler job exhausts maxRunningJobs, so the
-		// worker spawn's registration throws while the scout still runs inline.
-		const filler = Promise.withResolvers<string>();
-		const manager = new AsyncJobManager({ maxRunningJobs: 1, onJobComplete: () => {} });
-		managers.push(manager);
-		manager.register("bash", "filler", () => filler.promise, { id: "filler" });
-
+		// A registration that throws (here, a manager that refuses it) fails the
+		// worker spawn's scheduling while the scout still runs inline.
+		const manager = createManager();
+		vi.spyOn(manager, "register").mockImplementation(() => {
+			throw new Error("registration refused");
+		});
 		const tool = await TaskTool.create(createSession({ manager }));
 		const result = await tool.execute("tc-mixed-schedfail", {
 			context: "ctx",
@@ -268,7 +267,6 @@ describe("task per-item blocking split", () => {
 				{ name: "WorkerThree", agent: "task", task: "Build." },
 			],
 		} as TaskParams);
-		filler.resolve("done");
 
 		const text = firstText(result);
 		expect(text).toContain('id="ScoutThree"');
@@ -277,5 +275,40 @@ describe("task per-item blocking split", () => {
 		expect(result.details?.results.map(r => r.id)).toEqual(["ScoutThree"]);
 		expect(result.details?.async?.state).toBe("failed");
 		expect(manager.getJob("WorkerThree")).toBeUndefined();
+	});
+
+	it("queues the async spawn of a mixed call at the background job cap and starts it when the cap frees", async () => {
+		mockDiscovery();
+		const started: string[] = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			started.push(options.id ?? "?");
+			return makeResult(options.id ?? "?", options.agent.name);
+		});
+		const filler = Promise.withResolvers<string>();
+		const manager = new AsyncJobManager({ maxRunningJobs: 1, onJobComplete: () => {} });
+		managers.push(manager);
+		manager.register("bash", "filler", () => filler.promise, { id: "filler" });
+
+		const tool = await TaskTool.create(createSession({ manager }));
+		const result = await tool.execute("tc-mixed-queued", {
+			context: "ctx",
+			tasks: [
+				{ name: "ScoutFour", agent: "scout", task: "Research." },
+				{ name: "WorkerFour", agent: "task", task: "Build." },
+			],
+		} as TaskParams);
+
+		const text = firstText(result);
+		expect(text).toContain('id="ScoutFour"');
+		expect(text).not.toContain("Failed to schedule");
+		expect(text).toContain("Job `WorkerFour` is queued");
+		expect(started).toEqual(["ScoutFour"]);
+		expect(manager.getJob("WorkerFour")).toMatchObject({ status: "running", queued: true, waitingForSlot: true });
+
+		filler.resolve("done");
+		await manager.waitForAll();
+		await manager.getJob("WorkerFour")?.promise;
+		expect(started).toEqual(["ScoutFour", "WorkerFour"]);
+		expect(manager.getJob("WorkerFour")?.status).toBe("completed");
 	});
 });

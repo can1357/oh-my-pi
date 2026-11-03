@@ -159,6 +159,8 @@ interface TrackedJobLike {
 	structured?: StructuredSubagentOutput;
 	/** See {@link AsyncJob.agentOutputPublished}. */
 	agentOutputPublished?: boolean;
+	/** See {@link AsyncJob.queued}. */
+	queued?: boolean;
 }
 
 export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobSnapshot[] {
@@ -245,6 +247,7 @@ export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobS
 			...(contextTokens !== undefined && running ? { contextTokens } : {}),
 			...(contextWindow !== undefined && running ? { contextWindow } : {}),
 			...(widget ? { widget } : {}),
+			...(running && latest.queued === true ? { queued: true } : {}),
 			...(!resultConsumed && latest.resultText ? { resultText: latest.resultText } : {}),
 			...(!resultConsumed && latest.errorText ? { errorText: latest.errorText } : {}),
 			...(!resultConsumed && latest.latestDetails?.meta ? { meta: latest.latestDetails.meta } : {}),
@@ -377,8 +380,9 @@ export function buildJobResult(
 		lines.push(`## Still Running (${running.length})\n`);
 		for (const j of running) {
 			const intent = j.intent ? `${j.intent} — ` : "";
+			const queued = j.queued ? " (queued: not started yet)" : "";
 			lines.push(
-				`- \`${j.id}\` [${j.type}] — ${intent}${j.label}${runningTaskProgressSuffix(j, { duration: true })}`,
+				`- \`${j.id}\` [${j.type}]${queued} — ${intent}${j.label}${runningTaskProgressSuffix(j, { duration: true })}`,
 			);
 		}
 	}

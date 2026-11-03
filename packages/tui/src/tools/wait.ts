@@ -50,6 +50,8 @@ export interface JobSnapshot {
 	id: string;
 	type: "bash" | "task" | "eval";
 	status: "running" | "completed" | "failed" | "cancelled";
+	/** Running job that has not started yet: it waits at the background job cap or behind its caller's gate. */
+	queued?: boolean;
 	label: string;
 	/** What the job is for, in the model's words (a process job's `label` is its command line). */
 	intent?: string;
@@ -489,11 +491,15 @@ function jobsRenderResult(
 									job.status === "running" ? options.spinnerFrame : undefined,
 								)}${job.exitCode === undefined ? "" : `${uiTheme.sep.dot}${uiTheme.fg(job.exitCode === 0 ? "muted" : "error", `exit ${job.exitCode}`)}`}`;
 								const typeBadge = formatBadge(job.type, statusToColor(job.status), uiTheme);
+								const queuedTag =
+									job.status === "running" && job.queued === true
+										? `${uiTheme.sep.dot}${uiTheme.fg("warning", "queued")}`
+										: "";
 								const completion =
 									job.status === "running" && job.completionPercent !== undefined
 										? `${uiTheme.sep.dot}${uiTheme.fg("accent", `${job.completionPercent}%`)}`
 										: "";
-								const durationSuffix = `${completion}${uiTheme.sep.dot}${uiTheme.fg("dim", formatDuration(job.durationMs))}`;
+								const durationSuffix = `${queuedTag}${completion}${uiTheme.sep.dot}${uiTheme.fg("dim", formatDuration(job.durationMs))}`;
 								const displayId = truncateToWidth(
 									replaceTabs(job.id).replace(/\s+/g, " "),
 									Math.max(0, rowWidth - visibleWidth(`${icon} ${typeBadge} ${durationSuffix}`)),
@@ -514,6 +520,9 @@ function jobsRenderResult(
 								const continuationWidth = Math.max(0, rowWidth - visibleWidth("  "));
 								if (job.widget?.state === "live") {
 									const meta = compact([
+										job.status === "running" && job.queued === true
+											? uiTheme.fg("warning", "queued")
+											: undefined,
 										job.status === "running" && job.completionPercent !== undefined
 											? uiTheme.fg("accent", `${job.completionPercent}%`)
 											: undefined,

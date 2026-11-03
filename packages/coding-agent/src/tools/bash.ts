@@ -19,7 +19,7 @@ import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { PipeStreams } from "@oh-my-pi/pi-natives";
 import { isEnoent, logger, prompt } from "@oh-my-pi/pi-utils";
 import { isPosixShell } from "@oh-my-pi/pi-utils/procmgr";
-import { raceJobSettlement, resolveAutoBackgroundWaitMs } from "../async";
+import { queuedJobNotice, raceJobSettlement, resolveAutoBackgroundWaitMs } from "../async";
 import type { Settings } from "../config/settings";
 import { applyDirenvPreflight, type BashResult, executeBash } from "../exec/bash-executor";
 import { InternalUrlRouter } from "../internal-urls";
@@ -943,6 +943,8 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		if (options.notices?.length) {
 			lines.push(...options.notices, "");
 		}
+		const queued = queuedJobNotice([this.session.asyncJobManager?.getJob(jobId)]);
+		if (queued) lines.push(queued, "");
 		lines.push(formatBackgroundNotice(jobId, timeoutSec));
 		return {
 			content: [{ type: "text", text: lines.join("\n") }],
@@ -1354,8 +1356,8 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		);
 
 		const autoBgManager = this.session.asyncJobManager;
-		// At the running-job cap, fall through to direct foreground execution
-		// instead of failing every bash call until a slot frees up.
+		// At the running-job cap (or with jobs already queued there), fall through to
+		// direct foreground execution: a foreground-backed job would queue behind them.
 		if (
 			cfgBashAutoBackgroundEnabled.get(this.session.settings) &&
 			!pty &&
