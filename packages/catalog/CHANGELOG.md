@@ -5,6 +5,7 @@
 ## [18.17.0] - 2026-11-06
 
 ### Added
+### Breaking Changes
 
 - Added `tool-name-prefix` compat axis for Responses hosts that reject certain tool names; Muse Code sets it to `_` ([#17435](https://github.com/can1357/oh-my-pi/issues/17435), [#17515](https://github.com/can1357/oh-my-pi/pull/17515) by [@harshav167](https://github.com/harshav167), continued in [#18053](https://github.com/can1357/oh-my-pi/pull/18053) by [@abilliontokens](https://github.com/abilliontokens))
 - Added `supports-message-threads` compat axis (`supportsMessageThreads`), enabled for Claude 4.5+ on first-party Anthropic
@@ -25,6 +26,7 @@
 - Added a standard Responses WebSocket capability rule for explicit opt-in through OMP settings or SDK preferences, disabled by default ([#17354](https://github.com/can1357/oh-my-pi/pull/17354) by [@TatsukiMeng](https://github.com/TatsukiMeng))
 - Added `normalizeLiteLLMManagementBaseUrl` to `wire/litellm` (moved out of `provider-models/openai-compat`), shared by discovery and usage reporting
 - Added `normalizeLiteLLMManagementBaseUrl` to `wire/litellm` (moved out of `provider-models/openai-compat`), shared by discovery and usage reporting ([#17873](https://github.com/can1357/oh-my-pi/pull/17873) by [@maykonmichel](https://github.com/maykonmichel))
+- Moved `normalizeLiteLLMManagementBaseUrl` from `provider-models/openai-compat` to `wire/litellm`; import it from `@oh-my-pi/pi-catalog/wire/litellm` ([#17873](https://github.com/can1357/oh-my-pi/pull/17873) by [@maykonmichel](https://github.com/maykonmichel))
 
 ## [18.16.0] - 2026-11-02
 
