@@ -29,8 +29,8 @@ This document describes operator-visible behavior for session export, sharing, c
 | `/fresh`                                  | Slash command (TUI/headless) | Yes (provider-facing in-memory id/state only) | No; keeps current session file/header                                                                                                                                        | None                                                                                |
 | `/clear`                                  | Interactive slash command    | Yes (clears live/model conversation context)  | Retains identity/file/history; a lazy session still follows the normal persistence gate                                                                                      | Appends `reset_boundary`                                                            |
 | `/delete`                                 | Interactive slash command    | Yes (starts an empty conversation)            | Attempts to delete the current persisted session and artifacts, then switches to a lazy successor (no empty file until content)                                              | None                                                                                |
-| `/fork`                                   | Interactive slash command    | Yes (active session identity changes)         | Creates new session file and switches current session to it (persistent mode only)                                                                                           | Copies artifact directory to new session namespace when present                     |
-| `/fork pane`, `/fork window`, `/fork tab` | Interactive slash command    | No (parent session retained)                  | Opens a child OMP process from the flushed current transcript in a multiplexer pane/group (tmux window, Zellij/Herdr/Orca tab, or CMUX workspace)                            | Child receives a separate forked session                                            |
+| `/fork`                                   | Interactive slash command    | Yes in place; no for a native Tern pane fork  | Creates a new session and switches to it, or asks Tern to open the fork beside the unchanged parent                                                                            | Copies artifact directory to new session namespace when present                     |
+| `/fork pane`, `/fork window`, `/fork tab` | Interactive slash command    | No (parent session retained)                  | Opens a child OMP process from the flushed current transcript in a multiplexer pane/group (tmux window, Zellij/Herdr/Tern/Orca tab, or CMUX workspace)                       | Child receives a separate forked session                                            |
 | `--fork <id\|path>`                       | CLI startup                  | Yes after session creation                    | Creates a new session fork from the selected source into current cwd/session dir                                                                                             | Copies source artifacts recursively by default                                      |
 | `/seance [id\|path] [--model sel]`        | Interactive slash command    | No (active session and model unchanged)       | Forks the source transcript into a read-only consultant subagent under the current session                                                                                   | None; the consultant reads the source's artifacts in place                          |
 | `/resume [id\|@claude\|@codex]`           | Interactive slash command    | Yes (active in-memory state replaced)         | Switches to a selected/matched session, or imports a selected foreign session                                                                                                | None                                                                                |
@@ -288,10 +288,12 @@ for keyboard controls, follow-ups, persistence, and migration safety.
 
 ## Fork
 
-Bare `/fork` creates a new session from the current one and switches the active
-session identity. `/fork pane` opens a separate OMP process in a new pane;
+Bare `/fork` normally creates a new session from the current one and switches the
+active session identity. Inside Tern, it first asks Tern's native fork API to open
+a pane beside the parent; if unavailable or refused, it falls back to an in-place
+fork. `/fork pane` explicitly opens a separate OMP process in a new pane;
 `/fork window` and `/fork tab` open it in a new multiplexer group (a tmux
-window, Zellij/Herdr/Orca tab, or CMUX workspace). The child starts from the current
+window, Zellij/Herdr/Tern/Orca tab, or CMUX workspace). The child starts from the current
 persisted transcript, while the parent session stays active and continues
 running.
 
@@ -299,11 +301,22 @@ Typing `/fork ` shows `[pane|window|tab]` as dim inline text, and Enter still
 runs the bare in-place fork. Typing a prefix (`/fork w`) opens the suggestions
 with the rest of the selected argument as dim inline text; Tab accepts it.
 
-Placement commands autodetect tmux, Zellij, Herdr, CMUX, or Orca from the terminal;
+Placement commands autodetect tmux, Zellij, Herdr, CMUX, Tern, or Orca from the terminal;
 `/fork auto` is not a subcommand (valid arguments are `pane`, `window`, and
-`tab`). `window` maps to a tmux window, a Zellij/Herdr/Orca tab, or a CMUX workspace.
+`tab`). `window` maps to a tmux window, a Zellij/Herdr/Tern/Orca tab, or a CMUX workspace.
 Plain terminals, `screen`, and `wmux` cannot host this fork placement and receive
 an explicit error; use bare `/fork` there instead.
+
+Tern's explicit placement commands use its CLI launch provider, not the native
+bare-fork shortcut. Pane forks split right; tab/window forks stay in the parent's
+Tern session even when it is not the visible session. They preserve command argv
+and cwd without typing shell input. A missing or unreachable Tern daemon reports
+an error rather than silently replacing the parent with an in-place fork.
+
+The live Tern launch regression can be repeated from a Tern pane with
+`OMP_TEST_TERN_LAUNCH=1 bun test packages/coding-agent/test/terminal-launch-tern.test.ts`.
+It briefly opens an isolated test session, verifies literal argv, cwd, pane/tab
+placement and parent liveness, then removes that session and restores focus.
 
 ### Preconditions and immediate guards
 

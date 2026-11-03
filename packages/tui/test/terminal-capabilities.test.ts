@@ -91,6 +91,25 @@ describe("terminal multiplexer classification", () => {
 		expect(classifyTerminalMultiplexer({ TERM: "screen-256color" })).toBe("screen");
 	});
 
+	it("recognizes Tern without overriding nested multiplexers or its rendering policy", () => {
+		const env = { TERN_PANE: "66013647339527", TERN_PANE_SOCKET: "/run/tern/daemon.sock" };
+		expect(classifyTerminalMultiplexer(env)).toBe("tern");
+		expect(isInsideTerminalMultiplexer(env)).toBe(false);
+		expect(classifyTerminalMultiplexer({ ...env, TMUX: "session" })).toBe("tmux");
+		expect(classifyTerminalMultiplexer({ ...env, ZELLIJ: "session" })).toBe("zellij");
+		expect(classifyTerminalMultiplexer({ ...env, TERM: "screen-256color" })).toBe("screen");
+		for (const incomplete of [
+			{ TERM_PROGRAM: "tern" },
+			{ TERN_PANE: env.TERN_PANE },
+			{ TERN_PANE_SOCKET: env.TERN_PANE_SOCKET },
+			{ ...env, TERN_PANE: "--help" },
+			{ ...env, TERN_PANE: "9007199254740992" },
+			{ ...env, TERN_PANE_SOCKET: " " },
+		]) {
+			expect(classifyTerminalMultiplexer(incomplete)).toBe(null);
+		}
+	});
+
 	it("classifies Orca after nested multiplexers without moving it off the direct render path", () => {
 		const orcaEnv = {
 			ORCA_PANE_KEY: "tab-1:12345678-1234-1234-1234-123456789abc",
