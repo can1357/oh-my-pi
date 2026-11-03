@@ -516,18 +516,20 @@ describe("SqlSessionStorage (SQLite concurrency)", () => {
 		const replacer = await SqlSessionStorage.create({ client: replacerClient });
 		// A wrapper around the second client still shares the file's turn.
 		const appender = await SqlSessionStorage.create({ client: recordQueries(appenderClient).client });
-		// The store set its busy timeout, so a collision here would block the thread for 5 s.
+		// The store sets its busy timeout, so a collision would block the thread for 5 s.
 		const [busy] = (await replacerClient.unsafe("PRAGMA busy_timeout")) as Array<{ timeout: number }>;
 		expect(busy?.timeout).toBe(5000);
+		// With no busy timeout a collision fails at once with `database is locked`
+		// instead of waiting, so the test detects one without timing anything.
+		await replacerClient.unsafe("PRAGMA busy_timeout = 0");
+		await appenderClient.unsafe("PRAGMA busy_timeout = 0");
 		await replacer.writeText("/sessions/p/replaced.jsonl", "r0\n");
 		const lines: string[] = [];
-		let slowest = 0;
 
 		for (let trial = 1; trial <= 20; trial++) {
 			const body = `r${trial} ${"😀".repeat(trial)}\n`;
 			const line = `a${trial}\n`;
 			const writer = appender.openWriter("/sessions/p/appended.jsonl");
-			const started = performance.now();
 			await Promise.all([
 				replacer.writeTextAtomic("/sessions/p/replaced.jsonl", body, {
 					expectedSize: replacer.statSync("/sessions/p/replaced.jsonl").size,
@@ -535,12 +537,10 @@ describe("SqlSessionStorage (SQLite concurrency)", () => {
 				writer.append(line),
 			]);
 			await writer.close();
-			slowest = Math.max(slowest, performance.now() - started);
 			lines.push(line);
 			expect(await readStoredSession(replacerClient, "omp_session_files", "/sessions/p/replaced.jsonl")).toBe(body);
 		}
 
-		expect(slowest).toBeLessThan(1000);
 		expect(await readStoredSession(replacerClient, "omp_session_files", "/sessions/p/appended.jsonl")).toBe(
 			lines.join(""),
 		);
