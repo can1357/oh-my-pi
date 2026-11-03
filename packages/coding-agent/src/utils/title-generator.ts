@@ -659,6 +659,7 @@ function writeTerminalTitle(title: string, recomposeStaticOnFailure = false): vo
 						terminalTitleRuntime.style,
 						$env as NodeJS.ProcessEnv,
 						true,
+						terminalTitleRuntime.brand,
 					);
 				if (latched === lastTerminalTitle) return;
 				writeTerminalSequence(`\x1b]0;${latched}\x07`);
@@ -832,6 +833,8 @@ const terminalTitleRuntime: {
 	state: TerminalTitleState;
 	frame: number;
 	enabled: boolean;
+	/** Lead the classic title with the `π` brand (driven by `tui.titleBrand`). */
+	brand: boolean;
 	style: TerminalTitleSpinnerStyle;
 	timer: NodeJS.Timeout | undefined;
 	/** A title an extension set via `setTitle()`. While set, it owns the terminal
@@ -867,6 +870,7 @@ const terminalTitleRuntime: {
 	state: "idle",
 	frame: 0,
 	enabled: true,
+	brand: true,
 	style: "braille",
 	timer: undefined,
 	extensionOverride: undefined,
@@ -884,6 +888,8 @@ const terminalTitleRuntime: {
  *   - `attention`:           `π ! label`;
  *   - disabled:              `π: label`.
  * Without a label the separator trails the brand (`π >`) so the state stays visible.
+ * With `brand` off the title starts at the separator (`> label`), or is the bare
+ * label when disabled; without a label it names the program (`> omp`, `omp`).
  * The `working` separator cycles `TERMINAL_TITLE_SPINNER_STYLES[style]`; `style`
  * defaults to `braille` so existing 5-arg callers keep the historical frames.
  */
@@ -896,8 +902,16 @@ export function buildTerminalTitleWithState(
 	style: TerminalTitleSpinnerStyle = "braille",
 	env: NodeJS.ProcessEnv = $env as NodeJS.ProcessEnv,
 	nativeTitleFailed = false,
+	brand = true,
 ): string {
-	if (!enabled) return label ? `${DEFAULT_TERMINAL_TITLE}: ${label}` : DEFAULT_TERMINAL_TITLE;
+	if (!brand) {
+		// Unbranded, the label is the only thing naming the tab: never leave it empty.
+		const name = label ?? NATIVE_TERMINAL_TITLE;
+		if (!enabled) return name;
+		label = name;
+	} else if (!enabled) {
+		return label ? `${DEFAULT_TERMINAL_TITLE}: ${label}` : DEFAULT_TERMINAL_TITLE;
+	}
 	const frames = TERMINAL_TITLE_SPINNER_STYLES[style] ?? TERMINAL_TITLE_SPINNER_STYLES.braille;
 	const staticHost = isStaticTitleHost(platform, env) || (platform === "win32" && nativeTitleFailed);
 	const separator =
@@ -908,7 +922,8 @@ export function buildTerminalTitleWithState(
 			: state === "attention"
 				? TITLE_ATTENTION_SEPARATOR
 				: TITLE_IDLE_SEPARATOR;
-	return label ? `${DEFAULT_TERMINAL_TITLE} ${separator} ${label}` : `${DEFAULT_TERMINAL_TITLE} ${separator}`;
+	const head = brand ? `${DEFAULT_TERMINAL_TITLE} ${separator}` : separator;
+	return label ? `${head} ${label}` : head;
 }
 
 /**
@@ -940,6 +955,7 @@ function emitTerminalTitle(): void {
 					terminalTitleRuntime.style,
 					$env as NodeJS.ProcessEnv,
 					terminalTitleRuntime.nativeTitleFailed,
+					terminalTitleRuntime.brand,
 				));
 	// The composed working title is the only write that can fail into an
 	// animated OSC frame: on native failure it re-pins static (`:`), while a
@@ -991,10 +1007,15 @@ export function setTerminalTitleState(state: TerminalTitleState): void {
 	emitTerminalTitle();
 }
 
-/** Enable/disable the run-state separator (driven by the `tui.titleState` setting). */
-export function setTerminalTitleStateEnabled(enabled: boolean): void {
-	terminalTitleRuntime.enabled = enabled;
-	if (enabled && terminalTitleRuntime.state === "working") startTerminalTitleSpinner();
+/**
+ * Apply the title layout settings together: the run-state separator
+ * (`tui.titleState`) and the `π` brand (`tui.titleBrand`). One emit after both
+ * are set, so turning both off never flashes a title that still has either.
+ */
+export function setTerminalTitleLayout(runState: boolean, brand: boolean): void {
+	terminalTitleRuntime.enabled = runState;
+	terminalTitleRuntime.brand = brand;
+	if (runState && terminalTitleRuntime.state === "working") startTerminalTitleSpinner();
 	else stopTerminalTitleSpinner();
 	emitTerminalTitle();
 }

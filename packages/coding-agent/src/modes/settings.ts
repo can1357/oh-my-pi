@@ -538,6 +538,18 @@ export const cfgTuiTitleState = register({
 	},
 });
 
+export const cfgTuiTitleBrand = register({
+	id: "tui.titleBrand",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Terminal Title Brand",
+		description: "Start the terminal title with the π brand; turn off to show only the run state and session name",
+	},
+});
+
 export const cfgTuiTitleSpinner = register({
 	id: "tui.titleSpinner",
 	type: "enum",
