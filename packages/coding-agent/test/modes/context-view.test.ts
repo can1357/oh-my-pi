@@ -7,9 +7,8 @@ import { Settings } from "../../src/config/settings";
 import { AgentSession } from "../../src/session/agent-session";
 import { SessionManager } from "../../src/session/session-manager";
 import { buildSessionContextView } from "../../src/session/context-view";
-import { buildSystemPrompt } from "../../src/system-prompt";
+import { buildSystemPrompt, type SystemPromptSources } from "../../src/system-prompt";
 import type { Skill } from "../../src/extensibility/skills";
-import { computeSessionContextBreakdown } from "../../src/session/context-usage-runtime";
 import type { ContextViewData } from "@oh-my-pi/pi-tui/chrome/context-view-model";
 
 const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
@@ -34,6 +33,7 @@ function tool(name: string): AgentTool {
 function sessionWith(
 	options: {
 		prompt?: string[];
+		sources?: SystemPromptSources;
 		skills?: Skill[];
 		messages?: AgentMessage[];
 		tools?: AgentTool[];
@@ -57,6 +57,7 @@ function sessionWith(
 		toolRegistry: new Map(tools.map(tool => [tool.name, tool])),
 		builtInToolNames: ["read"],
 		skills: options.skills,
+		systemPromptSources: options.sources,
 	});
 	sessions.push(session);
 	return session;
@@ -133,68 +134,128 @@ describe("context snapshot capacity and savings", () => {
 	});
 });
 
-describe("context snapshot system prompt and skills", () => {
-	it("retains effective system blocks and skill content without file I/O", async () => {
-		const skills: Skill[] = [
-			{
-				name: "fixture",
-				description: "Use <T> & {{literal}} without expansion",
-				filePath: "/nonexistent/SKILL.md",
-				baseDir: "/nonexistent",
-				source: "user",
-			},
-		];
-		const built = await buildSystemPrompt({
+describe("context snapshot prompt sources", () => {
+	const skills: Skill[] = [
+		{
+			name: "fixture",
+			description: "Use <T> & {{literal}} without expansion",
+			filePath: "/nonexistent/SKILL.md",
+			baseDir: "/nonexistent",
+			source: "user",
+		},
+	];
+	const instructionPath = "/nonexistent/instructions.md";
+	const buildFixturePrompt = (customPrompt?: string) =>
+		buildSystemPrompt({
 			cwd: import.meta.dir,
 			personality: "none",
 			activeRepoContext: null,
-			contextFiles: [{ path: "/nonexistent/instructions.md", content: "Unique instruction body" }],
+			customPrompt,
+			contextFiles: [{ path: instructionPath, content: "Unique instruction body" }],
 			skills,
 		});
+	const entryTexts = (data: ContextViewData, id: string) => category(data, id).entries.map(entry => entry.text);
+	const notice = "Some prompt sources could not be attributed; their content remains in System Prompt.";
+
+	it.each([
+		{ name: "bundled prompt", customPrompt: undefined, skill: "- fixture: Use <T> & {{literal}} without expansion" },
+		{
+			name: "literal custom prompt",
+			customPrompt: "Literal custom policy.",
+			skill: '<skill name="fixture">\nUse <T> & {{literal}} without expansion\n</skill>',
+		},
+	])("moves instruction files and skills out of System Prompt with the $name", async ({ customPrompt, skill }) => {
+		const built = await buildFixturePrompt(customPrompt);
 		const prompt = [...built.systemPrompt, "Additional effective policy"];
-		const session = sessionWith({ prompt, skills, tools: [tool("read")] });
+		const session = sessionWith({ prompt, sources: built.sources, skills, tools: [tool("read")] });
 		const file = vi.spyOn(Bun, "file");
 		const data = buildSessionContextView(session);
-		const system = category(data, "system-prompt");
-		expect(system.entries.map(entry => entry.text)).toEqual(prompt);
-		expect(system.entries.map(entry => entry.tokens)).toEqual(
-			prompt.map(block => session.agent.tokenizer.countTokens(block)),
-		);
-		const text = system.entries.map(entry => entry.text).join("\n");
-		expect(text).toContain("Unique instruction body");
-		expect(text).toContain("Use <T> & {{literal}} without expansion");
-		const shared = computeSessionContextBreakdown(session).categories.find(category => category.id === "skills")!;
-		expect(shared.tokens).toBeGreaterThan(0);
-		expect(category(data, "skills")).toMatchObject({ entries: [], tokens: shared.tokens });
-		const fullPromptTokens = system.entries.reduce((sum, entry) => sum + entry.tokens, 0);
-		expect(system.tokens).toBe(fullPromptTokens - shared.tokens);
-		expect(system.tokens + category(data, "skills").tokens).toBe(fullPromptTokens);
-		expect(totalTokens(data)).toBe(fullPromptTokens + category(data, "built-in-tools").tokens);
 		expect(file).not.toHaveBeenCalled();
-		file.mockRestore();
+		expect(data.notices).toEqual([]);
+		expect(category(data, "skills").entries).toMatchObject([
+			{ label: "fixture", path: "/nonexistent/SKILL.md", text: skill },
+		]);
+		const instruction = `<file path="${instructionPath}">\nUnique instruction body\n</file>`;
+		expect(category(data, "instruction-files").entries).toMatchObject([
+			{ label: instructionPath, path: undefined, text: instruction },
+		]);
+
+		// Each fragment becomes a marker at its original position; the remaining text carries the tokens.
+		const markers: Record<string, string> = {
+			skills: "[Shown in Skills: fixture]",
+			"instruction-files": `[Shown in Instruction Files: ${instructionPath}]`,
+		};
+		const system = category(data, "system-prompt");
+		expect(system.entries.map(entry => entry.text)).toEqual(
+			prompt.map(block => block.replace(skill, markers.skills).replace(instruction, markers["instruction-files"])),
+		);
+		for (const entry of system.entries) {
+			for (const marker of entry.sourceMarkers ?? [])
+				expect(entry.text.slice(marker.start, marker.end)).toBe(markers[marker.category]);
+			expect(entry.tokens).toBe(
+				session.agent.tokenizer.countTokens(
+					entry.text.replace(markers.skills, "").replace(markers["instruction-files"], ""),
+				),
+			);
+		}
+		expect(system.entries.flatMap(entry => entry.sourceMarkers ?? []).map(marker => marker.category)).toEqual([
+			"skills",
+			"instruction-files",
+		]);
 	});
 
-	it("clamps the System Prompt total when the shared Skills estimate exceeds the effective blocks", () => {
-		const session = sessionWith({
-			prompt: [""],
-			tools: [tool("read")],
-			skills: [
-				{
-					name: "fixture",
-					description: "A nonempty skill description",
-					filePath: "/nonexistent/SKILL.md",
-					baseDir: "/nonexistent",
-					source: "user",
+	it("keeps sources of changed or moved blocks in System Prompt with a notice", async () => {
+		const built = await buildFixturePrompt();
+		const [policy, project] = built.systemPrompt;
+		const changed = buildSessionContextView(
+			sessionWith({ prompt: [`${policy}\nhook addition`, project!], sources: built.sources, skills }),
+		);
+		expect(changed.notices).toEqual([notice]);
+		expect(entryTexts(changed, "skills")).toEqual([]);
+		expect(entryTexts(changed, "instruction-files")).toHaveLength(1);
+		expect(entryTexts(changed, "system-prompt")[0]).toContain("- fixture: Use <T>");
+
+		const moved = buildSessionContextView(
+			sessionWith({ prompt: [project!, policy!], sources: built.sources, skills }),
+		);
+		expect(moved.notices).toEqual([notice]);
+		expect(entryTexts(moved, "skills")).toEqual([]);
+		expect(entryTexts(moved, "instruction-files")).toEqual([]);
+		expect(entryTexts(moved, "system-prompt")).toEqual([project, policy]);
+	});
+
+	it("leaves overlapping sources and text reserved by repeated sources in System Prompt", () => {
+		const blocks = ["alpha beta gamma delta", "one two one"];
+		const source = (id: string, blockIndex: number, fragment: string) => ({
+			id,
+			blockIndex,
+			kind: id.startsWith("skill") ? ("skills" as const) : ("instruction-files" as const),
+			label: id,
+			fragment,
+		});
+		const data = buildSessionContextView(
+			sessionWith({
+				prompt: blocks,
+				sources: {
+					blocks,
+					sources: [
+						source("file-overlap", 0, "alpha beta"),
+						source("skill-overlap", 0, "beta gamma"),
+						source("skill-disjoint", 0, "delta"),
+						// Built in two places: never attributed, but its locations stay reserved.
+						source("skill-repeated", -1, "one"),
+						source("file-reserved", 1, "two one"),
+					],
 				},
-			],
-		});
-		const data = buildSessionContextView(session);
-		expect(category(data, "skills").tokens).toBeGreaterThan(0);
-		expect(category(data, "skills").entries).toEqual([]);
-		expect(category(data, "system-prompt")).toMatchObject({
-			tokens: 0,
-			entries: [{ id: "system-prompt/0", text: "", tokens: 0 }],
-		});
+			}),
+		);
+		expect(data.notices).toEqual([notice]);
+		expect(entryTexts(data, "skills")).toEqual(["delta"]);
+		expect(entryTexts(data, "instruction-files")).toEqual([]);
+		expect(entryTexts(data, "system-prompt")).toEqual([
+			"alpha beta gamma [Shown in Skills: skill-disjoint]",
+			"one two one",
+		]);
 	});
 });
 
