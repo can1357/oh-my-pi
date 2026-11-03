@@ -15,6 +15,7 @@ import {
 	parseKiroProfileArn,
 	validateKiroApiRegion,
 } from "../wire/kiro";
+import type { KiroCredential } from "../wire/kiro-credential";
 
 const ZERO_COST = Object.freeze({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
 const MANAGEMENT_TIMEOUT_MS = 10_000;
@@ -35,13 +36,6 @@ const SAFE_SCHEMA_PROPERTY = /^[A-Za-z_][A-Za-z0-9_-]{0,63}$/;
 const FORBIDDEN_PROPERTY_NAME =
 	/(authorization|cookie|secret|access_?token|refresh_?token|profile|account|email|user|arn)/i;
 const PROTOTYPE_PROPERTY_NAMES = new Set(["__proto__", "constructor", "prototype"]);
-
-export type KiroDiscoveryCredential =
-	| { type: "api_key"; token: string; apiEndpoint?: string }
-	// Builder ID signs in without an organization, so an OAuth bearer may carry no
-	// profile ARN; the runtime region then comes from `apiEndpoint`. `loginId`
-	// scopes the model cache to one login when the profile is shared or absent.
-	| { type: "oauth"; token: string; profileArn?: string; apiEndpoint?: string; loginId?: string };
 
 export interface KiroDiscoveryRoute {
 	apiRegion: string;
@@ -101,7 +95,7 @@ export interface KiroManagementRequestOptions {
 }
 
 export interface FetchKiroModelsOptions {
-	credential: KiroDiscoveryCredential;
+	credential: KiroCredential;
 	fetch?: FetchImpl;
 	signal?: AbortSignal;
 }
@@ -673,8 +667,8 @@ function routeForApiRegion(apiRegion: string, profileArn?: string): KiroDiscover
  * Resolve management/runtime routing from an already-selected discovery credential.
  * API keys without an endpoint require bootstrap probing in `fetchKiroModels`.
  */
-export function resolveKiroDiscoveryRoute(credential: KiroDiscoveryCredential): KiroDiscoveryRoute | null {
-	if (credential.type === "oauth") {
+export function resolveKiroDiscoveryRoute(credential: KiroCredential): KiroDiscoveryRoute | null {
+	if (credential.kind === "oauth") {
 		if (credential.profileArn !== undefined) {
 			const parsed = parseKiroProfileArn(credential.profileArn);
 			if (!parsed) return null;
@@ -735,7 +729,7 @@ export async function fetchKiroModels(options: FetchKiroModelsOptions): Promise<
 		let route: KiroDiscoveryRoute | null;
 		let payload: unknown;
 
-		if (credential.type === "api_key" && !credential.apiEndpoint) {
+		if (credential.kind === "api_key" && !credential.apiEndpoint) {
 			const probed = await probeKiroApiKeyBootstrap({
 				token: credential.token,
 				fetch: options.fetch,
@@ -754,7 +748,7 @@ export async function fetchKiroModels(options: FetchKiroModelsOptions): Promise<
 				return null;
 			}
 			const body =
-				credential.type === "oauth" ? { origin: "KIRO_CLI", profileArn: route.profileArn } : { origin: "KIRO_CLI" };
+				credential.kind === "oauth" ? { origin: "KIRO_CLI", profileArn: route.profileArn } : { origin: "KIRO_CLI" };
 			payload = await kiroManagementRequest({
 				apiRegion: route.apiRegion,
 				token: credential.token,

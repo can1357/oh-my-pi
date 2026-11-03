@@ -1,21 +1,25 @@
 import { describe, expect, test } from "bun:test";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { crc32, type EventStreamMessage } from "@oh-my-pi/pi-ai/providers/aws-eventstream";
-import {
-	type KiroRequest,
-	type KiroStreamCredential,
-	normalizeKiroFrame,
-	streamKiro,
-} from "@oh-my-pi/pi-ai/providers/kiro/index";
+import { type KiroRequest, normalizeKiroFrame, streamKiro } from "@oh-my-pi/pi-ai/providers/kiro/index";
 import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { AssistantMessageEvent, Context, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { encodeKiroCredential } from "@oh-my-pi/pi-catalog/wire/kiro-credential";
 
-const TEST_PROFILE: KiroStreamCredential["profileArn"] =
-	"arn:aws:codewhisperer:us-east-1:123456789012:profile/test-profile";
+const TEST_PROFILE = "arn:aws:codewhisperer:us-east-1:123456789012:profile/test-profile";
 const EU_PROFILE = "arn:aws:codewhisperer:eu-central-1:123456789012:profile/eu-profile";
+const US_RUNTIME_ENDPOINT = "https://runtime.us-east-1.kiro.dev/";
 const EU_RUNTIME_ENDPOINT = "https://runtime.eu-central-1.kiro.dev/";
+/** A raw API key, as `KIRO_API_KEY` supplies it. */
+const TEST_API_KEY = "ksk_kiro-token";
+
+/** An Identity Center login, encoded as auth hands it to the stream. */
+function oauthApiKey(token: string, profileArn: string): string {
+	const route = profileArn === EU_PROFILE ? EU_RUNTIME_ENDPOINT : US_RUNTIME_ENDPOINT;
+	return encodeKiroCredential({ kind: "oauth", token, apiEndpoint: route, loginId: "login-test", profileArn });
+}
 const TEST_CONTEXT: Context = {
 	messages: [{ role: "user", content: "Say hello", timestamp: 0 }],
 };
@@ -188,7 +192,7 @@ describe("Kiro stream transport", () => {
 		];
 		const fetch: FetchImpl = async () => responseForEvents(events);
 		const stream = streamKiro(createModel(), TEST_CONTEXT, {
-			apiKey: JSON.stringify({ token: "kiro-token", profileArn: TEST_PROFILE }),
+			apiKey: oauthApiKey("kiro-token", TEST_PROFILE),
 			fetch,
 		});
 		const emitted: string[] = [];
@@ -233,7 +237,7 @@ describe("Kiro stream transport", () => {
 			["toolUseEvent", { toolUseId: "tool-c", name: "third", input: "", stop: true }],
 		];
 		const stream = streamKiro(createModel(), TEST_CONTEXT, {
-			apiKey: "kiro-token",
+			apiKey: TEST_API_KEY,
 			fetch: async () => responseForEvents(events),
 		});
 		const emitted: AssistantMessageEvent[] = [];
@@ -266,7 +270,7 @@ describe("Kiro stream transport", () => {
 			["metadataEvent", { requestId: "metadata-request", stopReason: "MAX_TOKENS" }],
 		];
 		const result = await streamKiro(createModel(), TEST_CONTEXT, {
-			apiKey: "kiro-token",
+			apiKey: TEST_API_KEY,
 			fetch: async () => responseForEvents(events),
 		}).result();
 
@@ -283,7 +287,7 @@ describe("Kiro stream transport", () => {
 		view.setUint32(unknown.length - 4, crc32(unknown.subarray(0, unknown.length - 4)), false);
 		const bytes = concatFrames([unknown, encodeEventFrame("assistantResponseEvent", { content: "after unknown" })]);
 		const result = await streamKiro(createModel(), TEST_CONTEXT, {
-			apiKey: "kiro-token",
+			apiKey: TEST_API_KEY,
 			fetch: async () =>
 				new Response(streamFrom([bytes]), {
 					status: 200,
@@ -298,7 +302,7 @@ describe("Kiro stream transport", () => {
 	test("does not replay malformed tool input after tool visibility begins", async () => {
 		let attempts = 0;
 		const stream = streamKiro(createModel(), TEST_CONTEXT, {
-			apiKey: "kiro-token",
+			apiKey: TEST_API_KEY,
 			fetch: async () => {
 				attempts++;
 				return responseForEvents([
@@ -319,7 +323,7 @@ describe("Kiro stream transport", () => {
 	test("does not leak lifecycle events from a discarded metadata-only attempt", async () => {
 		let attempts = 0;
 		const stream = streamKiro(createModel(), TEST_CONTEXT, {
-			apiKey: "kiro-token",
+			apiKey: TEST_API_KEY,
 			fetch: async () => {
 				attempts++;
 				return attempts === 1
@@ -352,7 +356,7 @@ describe("Kiro stream transport", () => {
 			return responseForEvents([["assistantResponseEvent", { content: "recovered" }]]);
 		};
 		const result = await streamKiro(createModel(), TEST_CONTEXT, {
-			apiKey: "kiro-token",
+			apiKey: TEST_API_KEY,
 			fetch,
 			providerRetryWait: async delay => {
 				waits.push(delay);
@@ -385,7 +389,7 @@ describe("Kiro stream transport", () => {
 			return responseForEvents([["assistantResponseEvent", { content: "recovered" }]]);
 		};
 		const result = await streamKiro(createModel(), TEST_CONTEXT, {
-			apiKey: JSON.stringify({ token: "kiro-token", profileArn: TEST_PROFILE }),
+			apiKey: oauthApiKey("kiro-token", TEST_PROFILE),
 			fetch,
 			providerRetryWait: async () => {},
 		}).result();
@@ -409,7 +413,7 @@ describe("Kiro stream transport", () => {
 			);
 		};
 		const result = await streamKiro(createModel(), TEST_CONTEXT, {
-			apiKey: JSON.stringify({ token: "kiro-token", profileArn: TEST_PROFILE }),
+			apiKey: oauthApiKey("kiro-token", TEST_PROFILE),
 			fetch,
 			providerRetryWait: async () => {},
 		}).result();
@@ -439,7 +443,7 @@ describe("Kiro stream transport", () => {
 				{ status: 503, headers: { "content-type": "application/json" } },
 			);
 		const result = await streamKiro(createModel(), TEST_CONTEXT, {
-			apiKey: JSON.stringify({ token: "kiro-token", profileArn: TEST_PROFILE }),
+			apiKey: oauthApiKey("kiro-token", TEST_PROFILE),
 			fetch,
 			streamFirstEventTimeoutMs: 30,
 		}).result();
@@ -453,7 +457,7 @@ describe("Kiro stream transport", () => {
 		const fetch: FetchImpl = async () =>
 			Response.json({ __type: "AccessDeniedException", message: "not entitled" }, { status: 403 });
 		const result = await streamKiro(createModel(), TEST_CONTEXT, {
-			apiKey: JSON.stringify({ token: "kiro-token", profileArn: TEST_PROFILE }),
+			apiKey: oauthApiKey("kiro-token", TEST_PROFILE),
 			fetch,
 			streamFirstEventTimeoutMs: 2_000,
 		}).result();
@@ -503,7 +507,7 @@ describe("Kiro stream transport", () => {
 			conversationIds.push(payload.conversationState.conversationId);
 			return responseForEvents([["assistantResponseEvent", { content: "ok" }]]);
 		};
-		const options = { apiKey: "kiro-token", fetch, sessionId: "session-shared" };
+		const options = { apiKey: TEST_API_KEY, fetch, sessionId: "session-shared" };
 		await streamKiro(createModel(), TEST_CONTEXT, options).result();
 		await streamKiro(createModel(), TEST_CONTEXT, options).result();
 
@@ -517,8 +521,8 @@ describe("Kiro stream transport", () => {
 			conversationIds.push(payload.conversationState.conversationId);
 			return responseForEvents([["assistantResponseEvent", { content: "ok" }]]);
 		};
-		await streamKiro(createModel(), TEST_CONTEXT, { apiKey: "kiro-token", fetch, sessionId: "session-a" }).result();
-		await streamKiro(createModel(), TEST_CONTEXT, { apiKey: "kiro-token", fetch, sessionId: "session-b" }).result();
+		await streamKiro(createModel(), TEST_CONTEXT, { apiKey: TEST_API_KEY, fetch, sessionId: "session-a" }).result();
+		await streamKiro(createModel(), TEST_CONTEXT, { apiKey: TEST_API_KEY, fetch, sessionId: "session-b" }).result();
 
 		expect(conversationIds).toEqual(["session-a", "session-b"]);
 	});
@@ -535,7 +539,7 @@ describe("Kiro stream transport", () => {
 				: responseForEvents([["assistantResponseEvent", { content: "recovered" }]]);
 		};
 		const result = await streamKiro(createModel(), TEST_CONTEXT, {
-			apiKey: "kiro-token",
+			apiKey: TEST_API_KEY,
 			fetch,
 			providerRetryWait: async () => {},
 		}).result();
@@ -555,7 +559,7 @@ describe("Kiro stream transport", () => {
 			);
 		};
 		const overflow = await streamKiro(createModel(), TEST_CONTEXT, {
-			apiKey: "kiro-token",
+			apiKey: TEST_API_KEY,
 			fetch: contextFetch,
 		}).result();
 		expect(overflow.stopReason).toBe("error");
@@ -565,7 +569,7 @@ describe("Kiro stream transport", () => {
 		expect(fetchCalls).toBe(1);
 
 		const empty413 = await streamKiro(createModel(), TEST_CONTEXT, {
-			apiKey: "kiro-token",
+			apiKey: TEST_API_KEY,
 			fetch: async () => new Response(null, { status: 413 }),
 		}).result();
 		expect(empty413.stopReason).toBe("error");
@@ -573,7 +577,7 @@ describe("Kiro stream transport", () => {
 		expect(AIError.is(empty413.errorId, AIError.Flag.ContextOverflow)).toBe(true);
 
 		const nonOverflow413 = await streamKiro(createModel(), TEST_CONTEXT, {
-			apiKey: "kiro-token",
+			apiKey: TEST_API_KEY,
 			fetch: async () =>
 				Response.json({ __type: "ValidationException", message: "invalid request" }, { status: 413 }),
 		}).result();
@@ -585,13 +589,13 @@ describe("Kiro stream transport", () => {
 			throw new Error("fetch should not run for invalid routing");
 		};
 		const invalidEndpoint = await streamKiro(createModel("https://api.example.com/"), TEST_CONTEXT, {
-			apiKey: "kiro-token",
+			apiKey: TEST_API_KEY,
 			fetch: rejectingFetch,
 		}).result();
 		expect(invalidEndpoint.errorMessage).toContain("Invalid Kiro runtime endpoint");
 
 		const malformedCredential = await streamKiro(createModel(), TEST_CONTEXT, {
-			apiKey: JSON.stringify({ token: "kiro-token", apiEndpoint: 42 }),
+			apiKey: JSON.stringify({ kind: "api_key", token: TEST_API_KEY, apiEndpoint: 42 }),
 			fetch: rejectingFetch,
 		}).result();
 		expect(malformedCredential.errorMessage).toContain("Kiro credential projection is invalid");
@@ -602,10 +606,7 @@ describe("Kiro stream transport", () => {
 			return responseForEvents([["assistantResponseEvent", { content: "profile-routed" }]]);
 		};
 		const activeProfile = await streamKiro(createModel(), TEST_CONTEXT, {
-			apiKey: JSON.stringify({
-				token: "kiro-token",
-				profileArn: EU_PROFILE,
-			}),
+			apiKey: oauthApiKey("kiro-token", EU_PROFILE),
 			fetch: profileFetch,
 		}).result();
 		expect(activeProfile.stopReason).toBe("stop");
@@ -623,7 +624,7 @@ describe("Kiro stream transport", () => {
 			return promise;
 		};
 		const timedOut = await streamKiro(createModel(), TEST_CONTEXT, {
-			apiKey: "kiro-token",
+			apiKey: TEST_API_KEY,
 			fetch: timeoutFetch,
 			streamFirstEventTimeoutMs: 20,
 		}).result();
@@ -648,7 +649,7 @@ describe("Kiro stream transport", () => {
 		);
 		let bodyFetchCalls = 0;
 		const bodyTimeout = await streamKiro(createModel(), TEST_CONTEXT, {
-			apiKey: "kiro-token",
+			apiKey: TEST_API_KEY,
 			fetch: async () => {
 				bodyFetchCalls += 1;
 				return bodyResponse;
@@ -667,7 +668,7 @@ describe("Kiro stream transport", () => {
 		const controller = new AbortController();
 		controller.abort(new DOMException("caller cancelled", "AbortError"));
 		const aborted = await streamKiro(createModel(), TEST_CONTEXT, {
-			apiKey: "kiro-token",
+			apiKey: TEST_API_KEY,
 			fetch: timeoutFetch,
 			signal: controller.signal,
 		}).result();
@@ -695,7 +696,7 @@ describe("Kiro stream transport", () => {
 		);
 
 		const result = await streamKiro(createModel(), TEST_CONTEXT, {
-			apiKey: "kiro-token",
+			apiKey: TEST_API_KEY,
 			fetch: async () => bodyResponse,
 			streamFirstEventTimeoutMs: 20,
 			streamIdleTimeoutMs: 40,
@@ -720,7 +721,7 @@ describe("Kiro stream transport", () => {
 				: responseForEvents([["assistantResponseEvent", { content: "recovered" }]]);
 		};
 		const result = await streamKiro(createModel(), TEST_CONTEXT, {
-			apiKey: "kiro-token",
+			apiKey: TEST_API_KEY,
 			fetch,
 			providerRetryWait: async delay => {
 				waits.push(delay);
@@ -741,7 +742,7 @@ describe("Kiro stream transport", () => {
 			return responseForEvents([["initial-response", { requestId: `no-output-${attempts}` }]]);
 		};
 		const result = await streamKiro(createModel(), TEST_CONTEXT, {
-			apiKey: "kiro-token",
+			apiKey: TEST_API_KEY,
 			fetch,
 			providerRetryWait: async delay => {
 				waits.push(delay);
@@ -758,7 +759,7 @@ describe("Kiro stream transport", () => {
 		let attempts = 0;
 		const waits: number[] = [];
 		const result = await streamKiro(createModel(), TEST_CONTEXT, {
-			apiKey: "kiro-token",
+			apiKey: TEST_API_KEY,
 			fetch: async () => {
 				attempts++;
 				return responseForEvents([
@@ -794,7 +795,7 @@ describe("Kiro stream transport", () => {
 			});
 		};
 		const result = await streamKiro(createModel(), TEST_CONTEXT, {
-			apiKey: "kiro-token",
+			apiKey: TEST_API_KEY,
 			fetch,
 			providerRetryWait: async delay => {
 				waits.push(delay);
@@ -817,7 +818,7 @@ describe("Kiro stream transport", () => {
 			return responseForEvents([["assistantResponseEvent", { content: "public dispatch" }]]);
 		};
 		const result = await streamSimple(createModel(), TEST_CONTEXT, {
-			apiKey: JSON.stringify({ token: "kiro-token", profileArn: TEST_PROFILE }),
+			apiKey: oauthApiKey("kiro-token", TEST_PROFILE),
 			fetch,
 			reasoning: Effort.High,
 			maxTokens: 128,
@@ -845,18 +846,18 @@ describe("Kiro stream transport", () => {
 		const staleModel = createModel();
 
 		const oauthResult = await streamKiro(staleModel, TEST_CONTEXT, {
-			apiKey: JSON.stringify({ token: "oauth-token", profileArn: EU_PROFILE }),
+			apiKey: oauthApiKey("oauth-token", EU_PROFILE),
 			fetch,
 		}).result();
 		const apiKeyResult = await streamKiro(staleModel, TEST_CONTEXT, {
-			apiKey: JSON.stringify({ token: "api-key", apiEndpoint: EU_RUNTIME_ENDPOINT }),
+			apiKey: encodeKiroCredential({ kind: "api_key", token: "ksk_api-key", apiEndpoint: EU_RUNTIME_ENDPOINT }),
 			fetch,
 		}).result();
 
 		const previousRegion = Bun.env.KIRO_API_REGION;
 		try {
 			Bun.env.KIRO_API_REGION = "eu-central-1";
-			const envResult = await streamKiro(staleModel, TEST_CONTEXT, { apiKey: "env-token", fetch }).result();
+			const envResult = await streamKiro(staleModel, TEST_CONTEXT, { apiKey: "ksk_env-token", fetch }).result();
 			expect(envResult.stopReason).toBe("stop");
 		} finally {
 			if (previousRegion === undefined) delete Bun.env.KIRO_API_REGION;
@@ -878,7 +879,7 @@ describe("Kiro stream transport", () => {
 			["metadataEvent", { stopReason: "MAX_TOKENS" }],
 		];
 		const stream = streamKiro(createModel(), TEST_CONTEXT, {
-			apiKey: JSON.stringify({ token: "kiro-token", profileArn: TEST_PROFILE }),
+			apiKey: oauthApiKey("kiro-token", TEST_PROFILE),
 			fetch: async () => responseForEvents(events),
 		});
 		for await (const _event of stream) void _event;
@@ -898,7 +899,7 @@ describe("Kiro stream transport", () => {
 			["toolUseEvent", { toolUseId: "server/write", name: "write", input: '{"path":', stop: true }],
 		];
 		const stream = streamKiro(createModel(), TEST_CONTEXT, {
-			apiKey: JSON.stringify({ token: "kiro-token", profileArn: TEST_PROFILE }),
+			apiKey: oauthApiKey("kiro-token", TEST_PROFILE),
 			fetch: async () => responseForEvents(events),
 		});
 		for await (const _event of stream) void _event;

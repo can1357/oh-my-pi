@@ -5,6 +5,7 @@ import { providerEntry, seedModels } from "../compat/providers";
 import { type CodexModelDiscoveryResult, fetchCodexModels } from "../discovery/codex";
 import type { DevinModelDiscoveryOptions } from "../discovery/devin";
 import { fetchKiroModels } from "../discovery/kiro";
+import { decodeKiroCredential, type KiroCredential } from "../wire/kiro-credential";
 
 import {
 	type FactoryDroidModelDiscoveryOptions,
@@ -19,7 +20,7 @@ import type { Api, FetchImpl, Model, ModelSpec } from "../types";
 import { DEVIN_DEFAULT_BASE_URL } from "../wire/devin";
 import { unionAccountCatalogs } from "./account-access";
 import { toModelSpec } from "./bundled-references";
-import { parseKiroDiscoveryCredential, resolveModelCacheProviderId } from "./cache-provider-id";
+import { resolveModelCacheProviderId } from "./cache-provider-id";
 
 // ---------------------------------------------------------------------------
 // OpenAI Codex
@@ -469,7 +470,16 @@ export function kiroModelManagerOptions(config: KiroModelManagerConfig = {}): Mo
 		...(config.apiKey
 			? {
 					fetchDynamicModels: async () => {
-						const credential = parseKiroDiscoveryCredential(config.apiKey as string);
+						let credential: KiroCredential;
+						try {
+							credential = decodeKiroCredential(config.apiKey as string);
+						} catch (error) {
+							// Keep the last safe cache rather than failing the model refresh.
+							logger.warn("Kiro model discovery skipped: credential does not decode", {
+								error: error instanceof Error ? error.message : String(error),
+							});
+							return null;
+						}
 						return fetchKiroModels({ credential, fetch: config.fetch });
 					},
 				}

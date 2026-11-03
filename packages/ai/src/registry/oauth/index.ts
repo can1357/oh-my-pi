@@ -3,6 +3,7 @@
 // ============================================================================
 
 import { authPolicyFor } from "@oh-my-pi/pi-catalog/compat/auth";
+import { encodeKiroOAuthRow } from "@oh-my-pi/pi-catalog/wire/kiro-credential";
 import { assertNotNativeKiroRegistration } from "../../api-registry";
 import * as AIError from "../../error";
 import { jwtExpiryMs, NEVER_EXPIRES } from "../engine/common";
@@ -139,24 +140,24 @@ export async function getOAuthApiKey(
 		);
 	}
 	// Providers declaring `api-key-format "structured"` need request-time
-	// credential metadata, so the API key is the JSON-encoded credential.
+	// credential metadata, so the API key is the JSON-encoded credential. Kiro
+	// owns its encoding: the codec peek uses too, so both resolve one route and
+	// one model-cache scope per stored row.
 	const apiKey =
-		policy?.apiKeyFormat === "structured"
-			? JSON.stringify({
-					apiEndpoint: creds.apiEndpoint,
-					token: creds.access,
-					// Kiro: login stores the profile ARN in `orgId`; discovery
-					// (ListAvailableModels) and the runtime stream both require it
-					// as `profileArn`. Other structured consumers ignore the key.
-					...(creds.orgId ? { profileArn: creds.orgId } : {}),
-					enterpriseUrl: creds.enterpriseUrl,
-					projectId: creds.projectId,
-					refreshToken: creds.refresh,
-					expiresAt: creds.expires,
-					email: creds.email,
-					accountId: creds.accountId,
-				})
-			: creds.access;
+		provider === "kiro"
+			? encodeKiroOAuthRow(creds)
+			: policy?.apiKeyFormat === "structured"
+				? JSON.stringify({
+						apiEndpoint: creds.apiEndpoint,
+						token: creds.access,
+						enterpriseUrl: creds.enterpriseUrl,
+						projectId: creds.projectId,
+						refreshToken: creds.refresh,
+						expiresAt: creds.expires,
+						email: creds.email,
+						accountId: creds.accountId,
+					})
+				: creds.access;
 	return { newCredentials: creds, apiKey };
 }
 

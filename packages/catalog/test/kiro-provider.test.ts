@@ -8,16 +8,36 @@ import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
 import {
 	DEFAULT_MODEL_PER_PROVIDER,
 	PROVIDER_DESCRIPTORS,
-	parseKiroDiscoveryCredential,
 	resolveKiroModelCacheProviderId,
 	resolveModelCacheProviderId,
 } from "@oh-my-pi/pi-catalog/provider-models";
 import { kiroModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/special";
 import type { FetchImpl, ModelSpec } from "@oh-my-pi/pi-catalog/types";
+import { decodeKiroCredential, encodeKiroCredential } from "@oh-my-pi/pi-catalog/wire/kiro-credential";
 import { logger } from "@oh-my-pi/pi-utils";
 
 const PROFILE_ARN = "arn:aws:codewhisperer:us-east-1:123456789012:profile/kiro-default";
-const API_ENDPOINT = "https://management.us-east-1.kiro.dev/";
+const API_ENDPOINT = "https://runtime.us-east-1.kiro.dev/";
+const EU_API_ENDPOINT = "https://runtime.eu-central-1.kiro.dev/";
+
+/** An encoded `ksk_…` API-key credential, as `/login kiro` stores it. */
+function apiKeyCredential(token: string, apiEndpoint: string = API_ENDPOINT): string {
+	return encodeKiroCredential({ kind: "api_key", token: `ksk_${token}`, apiEndpoint });
+}
+
+/** An encoded OAuth credential, as peek and refresh project a stored login. */
+function oauthCredential(
+	token: string,
+	options: { loginId?: string; profileArn?: string; apiEndpoint?: string } = {},
+): string {
+	return encodeKiroCredential({
+		kind: "oauth",
+		token,
+		apiEndpoint: options.apiEndpoint ?? API_ENDPOINT,
+		loginId: options.loginId ?? "login-default",
+		...(options.profileArn ? { profileArn: options.profileArn } : {}),
+	});
+}
 
 function catalogResponse(
 	modelIds: readonly string[],
@@ -122,7 +142,7 @@ function payloadWithSchemas(entries: Array<[string, Record<string, unknown>]>): 
 
 function discover(payload: unknown) {
 	return kiroModelManagerOptions({
-		apiKey: JSON.stringify({ token: "test-token", apiEndpoint: API_ENDPOINT }),
+		apiKey: apiKeyCredential("test-token"),
 		fetch: jsonFetch(payload),
 	}).fetchDynamicModels?.();
 }
@@ -166,7 +186,7 @@ describe("Kiro provider discovery", () => {
 	test("preserves every exact live model ID and authoritative order", async () => {
 		const modelIds = ["auto", "provider/model-z", "provider/model-a", "provider/model-zeta"];
 		const options = kiroModelManagerOptions({
-			apiKey: JSON.stringify({ token: "catalog-token", apiEndpoint: API_ENDPOINT }),
+			apiKey: apiKeyCredential("catalog-token"),
 			fetch: jsonFetch(catalogResponse(modelIds, { defaultModel: { modelId: "auto" } })),
 		});
 
@@ -177,11 +197,11 @@ describe("Kiro provider discovery", () => {
 
 	test("maps TEXT and IMAGE supportedInputTypes in order without output metadata", async () => {
 		const textOptions = kiroModelManagerOptions({
-			apiKey: JSON.stringify({ token: "text-token", apiEndpoint: API_ENDPOINT }),
+			apiKey: apiKeyCredential("text-token"),
 			fetch: jsonFetch(catalogResponse(["text-model"], { inputTypes: ["TEXT"] })),
 		});
 		const multimodalOptions = kiroModelManagerOptions({
-			apiKey: JSON.stringify({ token: "image-token", apiEndpoint: API_ENDPOINT }),
+			apiKey: apiKeyCredential("image-token"),
 			fetch: jsonFetch(catalogResponse(["image-model"], { inputTypes: ["TEXT", "IMAGE"] })),
 		});
 
@@ -256,7 +276,7 @@ describe("Kiro provider discovery", () => {
 			model.additionalModelRequestFieldsSchema = gptReasoningSchema();
 		}
 		const options = kiroModelManagerOptions({
-			apiKey: JSON.stringify({ token: "gpt-catalog-token", apiEndpoint: API_ENDPOINT }),
+			apiKey: apiKeyCredential("gpt-catalog-token"),
 			fetch: jsonFetch(payload),
 		});
 
@@ -278,7 +298,7 @@ describe("Kiro provider discovery", () => {
 		const model = (payload.models as Array<Record<string, unknown>>)[0]!;
 		model.additionalModelRequestFieldsSchema = anthropicThinkingSchema(["adaptive"]);
 		const options = kiroModelManagerOptions({
-			apiKey: JSON.stringify({ token: "adaptive-only-token", apiEndpoint: API_ENDPOINT }),
+			apiKey: apiKeyCredential("adaptive-only-token"),
 			fetch: jsonFetch(payload),
 		});
 
@@ -358,7 +378,7 @@ describe("Kiro provider discovery", () => {
 		const model = (payload.models as Array<Record<string, unknown>>)[0]!;
 		model.additionalModelRequestFieldsSchema = gptReasoningSchema(true);
 		const options = kiroModelManagerOptions({
-			apiKey: JSON.stringify({ token: "legacy-gpt-token", apiEndpoint: API_ENDPOINT }),
+			apiKey: apiKeyCredential("legacy-gpt-token"),
 			fetch: jsonFetch(payload),
 		});
 
@@ -375,7 +395,7 @@ describe("Kiro provider discovery", () => {
 		(reasoning.properties as Record<string, unknown>).verbosity = { type: "string" };
 		model.additionalModelRequestFieldsSchema = schema;
 		const options = kiroModelManagerOptions({
-			apiKey: JSON.stringify({ token: "invalid-gpt-token", apiEndpoint: API_ENDPOINT }),
+			apiKey: apiKeyCredential("invalid-gpt-token"),
 			fetch: jsonFetch(payload),
 		});
 
@@ -393,7 +413,7 @@ describe("Kiro provider discovery", () => {
 			return Response.json(catalogResponse(["kiro-oauth-model"]));
 		};
 		const options = kiroModelManagerOptions({
-			apiKey: JSON.stringify({ token: "oauth-bearer", profileArn: PROFILE_ARN }),
+			apiKey: oauthCredential("oauth-bearer", { profileArn: PROFILE_ARN }),
 			fetch,
 		});
 
@@ -424,105 +444,84 @@ describe("Kiro provider discovery", () => {
 	test("uses a credential-scoped cache namespace without raw credential identity", () => {
 		const token = "kiro-api-key-with-sensitive-value";
 		const options = kiroModelManagerOptions({
-			apiKey: JSON.stringify({ token, apiEndpoint: API_ENDPOINT }),
+			apiKey: apiKeyCredential(token),
 		});
 		const namespace = options.cacheProviderId ?? "";
 
-		expect(namespace).toMatch(/^kiro:models-v1:/);
+		expect(namespace).toMatch(/^kiro:models-v2:/);
 		expect(namespace).not.toContain(token);
 		expect(namespace).not.toContain(PROFILE_ARN);
 	});
 
-	test("keeps cache identity profile-scoped and agrees with the lightweight resolver", () => {
-		const oauthProfileA = JSON.stringify({ token: "rotated-access-a", profileArn: PROFILE_ARN });
-		const oauthProfileARotated = JSON.stringify({ token: "new-access-a", profileArn: PROFILE_ARN });
-		const oauthProfileB = JSON.stringify({
-			token: "rotated-access-b",
-			profileArn: "arn:aws:codewhisperer:us-east-1:123456789012:profile/other",
-		});
-		const apiKeyEndpointA = JSON.stringify({ token: "api-key-a", apiEndpoint: API_ENDPOINT });
-		const apiKeyEndpointB = JSON.stringify({
-			token: "api-key-a",
-			apiEndpoint: "https://management.eu-west-1.kiro.dev/",
-		});
+	test("scopes the OAuth cache to the login and agrees with the lightweight resolver", () => {
+		// Identity Center profiles are shared org-wide and Builder ID logins have
+		// none, so two logins on one profile or endpoint must still get separate
+		// caches, while one login keeps its cache across access-token rotation.
+		const loginA = oauthCredential("access-a", { loginId: "login-a", profileArn: PROFILE_ARN });
+		const loginARotated = oauthCredential("access-a-rotated", { loginId: "login-a", profileArn: PROFILE_ARN });
+		const loginBSameProfile = oauthCredential("access-b", { loginId: "login-b", profileArn: PROFILE_ARN });
+		const builderA = oauthCredential("builder-a", { loginId: "builder-login-a" });
+		const builderB = oauthCredential("builder-b", { loginId: "builder-login-b" });
 
-		expect(resolveKiroModelCacheProviderId(oauthProfileA)).toBe(
-			resolveKiroModelCacheProviderId(oauthProfileARotated),
-		);
-		expect(resolveKiroModelCacheProviderId(oauthProfileA)).not.toBe(resolveKiroModelCacheProviderId(oauthProfileB));
-		expect(resolveKiroModelCacheProviderId(apiKeyEndpointA)).not.toBe(
-			resolveKiroModelCacheProviderId(apiKeyEndpointB),
-		);
-		expect(resolveModelCacheProviderId("kiro", { apiKey: oauthProfileA })).toBe(
-			resolveKiroModelCacheProviderId(oauthProfileA),
-		);
-		expect(resolveModelCacheProviderId("kiro")).toBe("kiro");
-		expect(resolveKiroModelCacheProviderId(oauthProfileA)).not.toContain(PROFILE_ARN);
-		expect(resolveKiroModelCacheProviderId(oauthProfileA)).not.toContain("rotated-access-a");
-	});
-
-	test("treats a profile-less OAuth bearer as OAuth, not as an API key", async () => {
-		// Builder ID signs in without an organization, so the credential carries no
-		// profileArn and `ksk_…` is the only thing that separates the two kinds.
-		// The classification decides the cache identity: an `api_key` identity embeds
-		// the raw token, so it would churn on every access-token refresh.
-		const builderCredential = JSON.stringify({ token: "builder-bearer-token", apiEndpoint: API_ENDPOINT });
-
-		expect(parseKiroDiscoveryCredential(builderCredential)).toEqual({
-			type: "oauth",
-			token: "builder-bearer-token",
-			apiEndpoint: API_ENDPOINT,
-		});
-		expect(parseKiroDiscoveryCredential(JSON.stringify({ token: "ksk_key", apiEndpoint: API_ENDPOINT }))).toEqual({
-			type: "api_key",
-			token: "ksk_key",
-			apiEndpoint: API_ENDPOINT,
-		});
-
-		// Discovery must still route and populate models without a profile ARN.
-		const payload = catalogResponse(["claude-sonnet-4-5"]);
-		const options = kiroModelManagerOptions({ apiKey: builderCredential, fetch: jsonFetch(payload) });
-		const models = await options.fetchDynamicModels?.();
-		expect(models?.map(model => model.id)).toEqual(["claude-sonnet-4-5"]);
-	});
-
-	test("keeps a profile-less OAuth cache namespace stable across token rotation", () => {
-		const builderA = JSON.stringify({ token: "builder-a", apiEndpoint: API_ENDPOINT });
-		const builderARotated = JSON.stringify({ token: "builder-a-rotated", apiEndpoint: API_ENDPOINT });
-		const builderB = JSON.stringify({
-			token: "builder-a",
-			apiEndpoint: "https://management.eu-west-1.kiro.dev/",
-		});
-
-		expect(resolveKiroModelCacheProviderId(builderA)).toBe(resolveKiroModelCacheProviderId(builderARotated));
+		expect(resolveKiroModelCacheProviderId(loginA)).toBe(resolveKiroModelCacheProviderId(loginARotated));
+		expect(resolveKiroModelCacheProviderId(loginA)).not.toBe(resolveKiroModelCacheProviderId(loginBSameProfile));
 		expect(resolveKiroModelCacheProviderId(builderA)).not.toBe(resolveKiroModelCacheProviderId(builderB));
-		expect(resolveKiroModelCacheProviderId(builderA)).not.toContain("builder-a");
+		expect(resolveModelCacheProviderId("kiro", { apiKey: loginA })).toBe(resolveKiroModelCacheProviderId(loginA));
+		expect(resolveModelCacheProviderId("kiro")).toBe("kiro");
+		for (const secret of [PROFILE_ARN, "login-a", "access-a"]) {
+			expect(resolveKiroModelCacheProviderId(loginA)).not.toContain(secret);
+		}
 	});
 
-	test("separates two logins that share an endpoint and keeps one across rotation", () => {
-		// Builder ID bearers carry no profile and two accounts on the same region
-		// resolve the same endpoint, so the endpoint alone cannot scope the cache.
-		const builderLoginA = JSON.stringify({ token: "builder-a", loginId: "login-a", apiEndpoint: API_ENDPOINT });
-		const builderLoginARotated = JSON.stringify({
-			token: "builder-a-rotated",
-			loginId: "login-a",
-			apiEndpoint: API_ENDPOINT,
-		});
-		const builderLoginB = JSON.stringify({ token: "builder-b", loginId: "login-b", apiEndpoint: API_ENDPOINT });
-
-		expect(resolveKiroModelCacheProviderId(builderLoginA)).not.toBe(resolveKiroModelCacheProviderId(builderLoginB));
-		expect(resolveKiroModelCacheProviderId(builderLoginA)).toBe(
-			resolveKiroModelCacheProviderId(builderLoginARotated),
+	test("scopes the API-key cache to the key and its endpoint", () => {
+		expect(resolveKiroModelCacheProviderId(apiKeyCredential("key-a"))).not.toBe(
+			resolveKiroModelCacheProviderId(apiKeyCredential("key-a", EU_API_ENDPOINT)),
 		);
-		expect(resolveKiroModelCacheProviderId(builderLoginA)).not.toContain("login-a");
-		expect(resolveKiroModelCacheProviderId(builderLoginA)).not.toContain("builder-a");
+		expect(resolveKiroModelCacheProviderId(apiKeyCredential("key-a"))).not.toBe(
+			resolveKiroModelCacheProviderId(apiKeyCredential("key-b")),
+		);
+	});
+
+	test("routes a profile-less Builder ID login by its endpoint", async () => {
+		const builderCredential = oauthCredential("builder-bearer-token", { loginId: "builder-login" });
+		let requestUrl = "";
+		let requestBody: unknown;
+		const fetch: FetchImpl = async (input, init) => {
+			requestUrl = String(input);
+			requestBody = JSON.parse(String(init?.body));
+			return Response.json(catalogResponse(["claude-sonnet-4-5"]));
+		};
+
+		const models = await kiroModelManagerOptions({ apiKey: builderCredential, fetch }).fetchDynamicModels?.();
+
+		expect(models?.map(model => model.id)).toEqual(["claude-sonnet-4-5"]);
+		expect(requestUrl).toBe("https://management.us-east-1.kiro.dev/");
+		expect(requestBody).toEqual({ origin: "KIRO_CLI" });
+	});
+
+	test("decodes only the encoded form or a raw ksk_ key", () => {
+		expect(decodeKiroCredential("ksk_raw", {})).toEqual({ kind: "api_key", token: "ksk_raw" });
+		// A bearer is never mistaken for an API key: it must arrive encoded.
+		expect(() => decodeKiroCredential("raw-bearer", {})).toThrow("ksk_");
+		expect(() =>
+			decodeKiroCredential(JSON.stringify({ kind: "api_key", token: "not-a-key", apiEndpoint: API_ENDPOINT }), {}),
+		).toThrow("ksk_");
+		expect(() =>
+			decodeKiroCredential(JSON.stringify({ kind: "oauth", token: "bearer", apiEndpoint: API_ENDPOINT }), {}),
+		).toThrow("login id");
+		expect(() =>
+			decodeKiroCredential(
+				JSON.stringify({ kind: "api_key", token: "ksk_a", apiEndpoint: "https://evil.example/" }),
+				{},
+			),
+		).toThrow("endpoint");
 	});
 
 	test("prunes static fallback models after a successful live catalog refresh", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-kiro-live-"));
 		try {
 			const options = kiroModelManagerOptions({
-				apiKey: JSON.stringify({ token: "live-token", apiEndpoint: API_ENDPOINT }),
+				apiKey: apiKeyCredential("live-token"),
 				fetch: jsonFetch(catalogResponse(["kiro-live-model"])),
 			});
 			const result = await resolveProviderModels(
@@ -545,7 +544,7 @@ describe("Kiro provider discovery", () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-kiro-failure-"));
 		const cacheDbPath = path.join(tempDir, "models.db");
 		try {
-			const credential = JSON.stringify({ token: "cached-token", apiEndpoint: API_ENDPOINT });
+			const credential = apiKeyCredential("cached-token");
 			const online = kiroModelManagerOptions({
 				apiKey: credential,
 				fetch: jsonFetch(catalogResponse(["kiro-cached-model"])),
@@ -573,7 +572,7 @@ describe("Kiro provider discovery", () => {
 	});
 	test("resolves exact tokenizers from model identity while keeping API context limits", async () => {
 		const options = kiroModelManagerOptions({
-			apiKey: JSON.stringify({ token: "tokenizer-token", apiEndpoint: API_ENDPOINT }),
+			apiKey: apiKeyCredential("tokenizer-token"),
 			fetch: jsonFetch(catalogResponse(["claude-opus-4-5", "gpt-5.6-luna"])),
 		});
 

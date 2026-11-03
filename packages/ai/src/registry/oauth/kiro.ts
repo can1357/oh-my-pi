@@ -26,6 +26,7 @@ import {
 	resolveKiroApiRegion,
 	validateKiroApiRegion,
 } from "@oh-my-pi/pi-catalog/wire/kiro";
+import { encodeKiroCredential } from "@oh-my-pi/pi-catalog/wire/kiro-credential";
 import { BoundedJsonReadError, readBoundedJson } from "@oh-my-pi/pi-utils/bounded-json";
 import { sanitizeText } from "@oh-my-pi/pi-utils/sanitize-text";
 import * as AIError from "../../error";
@@ -877,7 +878,7 @@ export async function loginKiroHook(ctrl: OAuthController): Promise<OAuthCredent
 		apiRegion: typeof Bun.env.KIRO_API_REGION === "string" ? Bun.env.KIRO_API_REGION : undefined,
 	});
 	throwIfCancelled(ctrl.signal);
-	return JSON.stringify({ token: result.key, apiEndpoint: result.apiEndpoint });
+	return encodeKiroCredential({ kind: "api_key", token: result.key, apiEndpoint: result.apiEndpoint });
 }
 
 /** `refresh hook="kiro-refresh"`: per-region OIDC refresh-token grant. */

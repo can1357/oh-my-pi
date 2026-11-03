@@ -1,13 +1,7 @@
 import type { SimpleStreamOptions } from "../../types";
 
-export interface KiroStreamCredential {
-	token: string;
-	profileArn?: string;
-	apiEndpoint?: string;
-}
-
 export interface KiroOptions extends SimpleStreamOptions {
-	/** Resolved bearer or the internal JSON projection produced by Kiro OAuth. */
+	/** A raw `ksk_…` key or the `encodeKiroCredential` string auth resolves for Kiro. */
 	apiKey?: string;
 }
 

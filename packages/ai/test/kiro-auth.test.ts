@@ -20,7 +20,9 @@ import type {
 	OAuthCredentials,
 	OAuthPrompt,
 } from "@oh-my-pi/pi-ai/registry/oauth/types";
+import { resolveKiroModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models";
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
+import { decodeKiroCredential } from "@oh-my-pi/pi-catalog/wire/kiro-credential";
 
 const PROFILE_ONE = "arn:aws:codewhisperer:us-east-1:123456789012:profile/one";
 const PROFILE_TWO = "arn:aws:codewhisperer:us-east-1:123456789012:profile/two";
@@ -688,22 +690,27 @@ describe("Kiro authentication", () => {
 		}
 	});
 
-	it("persists the resolved endpoint on a stored Kiro API key", async () => {
-		const endpoint = "https://runtime.eu-central-1.kiro.dev/";
+	it("stores an API-key login as the encoded credential that peek hands to Kiro", async () => {
 		const store = await SqliteAuthCredentialStore.open(":memory:");
 		const authStorage = new AuthStorage(store);
+		let calls = 0;
 		try {
-			await authStorage.credentials.set("kiro", { type: "api_key", key: "ksk_persisted", apiEndpoint: endpoint });
-			await authStorage.credentials.reload();
+			await authStorage.oauth.login("kiro", {
+				onAuth: () => {},
+				onPrompt: async () => (++calls === 1 ? "3" : "ksk_persisted"),
+				// Only eu-central-1 accepts the key, so the bootstrap probe resolves one route.
+				fetch: async input =>
+					String(input).includes("eu-central-1") ? json(modelCatalog()) : json({ message: "denied" }, 403),
+			});
 
-			// The endpoint is part of the credential's identity: it selects the Kiro
-			// model-cache namespace, so losing it across a reload would restore the
-			// wrong cache after a restart.
-			const stored = store.listAuthCredentials("kiro")[0]?.credential;
-			expect(stored).toMatchObject({ type: "api_key", key: "ksk_persisted", apiEndpoint: endpoint });
-			expect(await authStorage.keys.peek("kiro")).toBe(
-				JSON.stringify({ token: "ksk_persisted", apiEndpoint: endpoint }),
-			);
+			// The endpoint lives in the encoded key itself, so a reload cannot lose
+			// the route or the model-cache namespace it selects.
+			const peeked = await authStorage.keys.peek("kiro");
+			expect(decodeKiroCredential(peeked ?? "", {})).toEqual({
+				kind: "api_key",
+				token: "ksk_persisted",
+				apiEndpoint: "https://runtime.eu-central-1.kiro.dev/",
+			});
 		} finally {
 			authStorage.close();
 		}
@@ -998,23 +1005,51 @@ describe("Kiro authentication", () => {
 });
 
 describe("Kiro OAuth API-key projection", () => {
-	it("serializes structured credentials for the native runtime transport", async () => {
+	it("encodes the login's route and id, and never the refresh token", async () => {
 		const result = await getOAuthApiKey("kiro", {
-			kiro: {
+			kiro: kiroClientCredentials({
 				access: "access-token",
-				refresh: "refresh-token",
 				expires: Date.now() + 3_600_000,
 				apiEndpoint: "https://runtime.us-east-1.kiro.dev/",
-			},
+				orgId: PROFILE_ONE,
+				kiroLoginId: "login-one",
+			}),
 		});
 
-		expect(result).not.toBeNull();
-		expect(JSON.parse(result!.apiKey)).toMatchObject({
+		expect(decodeKiroCredential(result?.apiKey ?? "", {})).toEqual({
+			kind: "oauth",
 			token: "access-token",
 			apiEndpoint: "https://runtime.us-east-1.kiro.dev/",
-			refreshToken: "refresh-token",
+			loginId: "login-one",
+			profileArn: PROFILE_ONE,
 		});
-		expect(result!.newCredentials.access).toBe("access-token");
+		expect(result?.apiKey).not.toContain("refresh-token");
+		expect(result?.apiKey).not.toContain("client-secret");
+	});
+
+	it("resolves one model-cache scope from peek and getOAuthApiKey, fresh or expired", async () => {
+		const store = await SqliteAuthCredentialStore.open(":memory:");
+		const authStorage = new AuthStorage(store);
+		try {
+			const row = kiroClientCredentials({
+				access: "fresh-access",
+				expires: Date.now() + 3_600_000,
+				apiEndpoint: "https://runtime.us-east-1.kiro.dev/",
+				kiroLoginId: "builder-login",
+			});
+			await authStorage.credentials.set("kiro", { type: "oauth", ...row });
+			const viaRefresh = await getOAuthApiKey("kiro", { kiro: row });
+			const scope = resolveKiroModelCacheProviderId(viaRefresh?.apiKey);
+			expect(resolveKiroModelCacheProviderId(await authStorage.keys.peek("kiro"))).toBe(scope);
+
+			// After expiry the peek still names the same login, so discovery keeps
+			// the login's cache instead of falling back to a shared namespace.
+			await authStorage.credentials.set("kiro", { type: "oauth", ...row, access: "expired-access", expires: 1 });
+			const expiredPeek = await authStorage.keys.peek("kiro", { includeExpired: true });
+			expect(resolveKiroModelCacheProviderId(expiredPeek)).toBe(scope);
+		} finally {
+			authStorage.close();
+		}
 	});
 });
 

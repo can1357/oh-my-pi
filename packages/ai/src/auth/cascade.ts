@@ -1,4 +1,5 @@
 import { authPolicyFor } from "@oh-my-pi/pi-catalog/compat/auth";
+import { encodeKiroOAuthRow } from "@oh-my-pi/pi-catalog/wire/kiro-credential";
 import { $env, $envExact, logger } from "@oh-my-pi/pi-utils";
 import { type ApiKeyResolver, createOAuthProvenance, markAfterSiblingWait, type ResolvedApiKey } from "../auth-retry";
 import { getEnvApiKey, getEnvApiKeyName } from "../env-api-key";
@@ -26,27 +27,6 @@ import type {
 async function defaultConfigValueResolver(config: string): Promise<string | undefined> {
 	const envValue = $envExact(config);
 	return envValue || config;
-}
-/**
- * Project a Kiro credential for discovery/transport: the token plus its runtime
- * endpoint and, for OAuth logins, the profile ARN (stored as `orgId`) that
- * `ListAvailableModels` and `SendMessage` both require.
- */
-function projectKiroApiKey(
-	token: string | undefined,
-	metadata?: { apiEndpoint?: string; profileArn?: string; loginId?: string },
-): string | undefined {
-	if (!token) return token;
-	const apiEndpoint = metadata?.apiEndpoint;
-	const profileArn = metadata?.profileArn;
-	const loginId = metadata?.loginId;
-	if (!apiEndpoint && !profileArn && !loginId) return token;
-	return JSON.stringify({
-		token,
-		...(profileArn ? { profileArn } : {}),
-		...(apiEndpoint ? { apiEndpoint } : {}),
-		...(loginId ? { loginId } : {}),
-	});
 }
 
 /** Runtime (--api-key) and config (models.yml) key overrides plus the config-value resolver. */
@@ -310,14 +290,10 @@ export class KeyCascade implements KeysApi {
 					apiEndpoint: oauthSelection.credential.apiEndpoint,
 				});
 			}
-			// Kiro: discovery needs the profile ARN (`orgId`) alongside the bearer;
-			// mirror the structured projection `getOAuthApiKey` builds for refreshes.
+			// Kiro: the same codec `getOAuthApiKey` uses, so a peek and a refresh
+			// of one stored row route and cache identically.
 			if (provider === "kiro") {
-				return projectKiroApiKey(oauthSelection.credential.access, {
-					apiEndpoint: oauthSelection.credential.apiEndpoint,
-					profileArn: oauthSelection.credential.orgId,
-					loginId: oauthSelection.credential.kiroLoginId,
-				});
+				return encodeKiroOAuthRow(oauthSelection.credential);
 			}
 			return oauthSelection.credential.access;
 		}
@@ -332,11 +308,7 @@ export class KeyCascade implements KeysApi {
 				!this.isKeylessFallback(provider, credential),
 		);
 		if (loginApiKeySelection) {
-			const key = await this.#deps.overrides.resolve(loginApiKeySelection.credential.key);
-			if (provider === "kiro") {
-				return projectKiroApiKey(key, { apiEndpoint: loginApiKeySelection.credential.apiEndpoint });
-			}
-			return key;
+			return this.#deps.overrides.resolve(loginApiKeySelection.credential.key);
 		}
 
 		const fallbackKey = this.#deps.overrides.fallbackKey(provider);
@@ -347,11 +319,7 @@ export class KeyCascade implements KeysApi {
 
 		const apiKeySelection = this.#deps.selector.selectByType(provider, "api_key");
 		if (apiKeySelection) {
-			const key = await this.#deps.overrides.resolve(apiKeySelection.credential.key);
-			if (provider === "kiro") {
-				return projectKiroApiKey(key, { apiEndpoint: apiKeySelection.credential.apiEndpoint });
-			}
-			return key;
+			return this.#deps.overrides.resolve(apiKeySelection.credential.key);
 		}
 		return undefined;
 	}

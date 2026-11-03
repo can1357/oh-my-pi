@@ -7,6 +7,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { kiroModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models";
+import { encodeKiroCredential } from "@oh-my-pi/pi-catalog/wire/kiro-credential";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
@@ -33,8 +34,20 @@ describe("ModelRegistry Kiro cache isolation", () => {
 	test("restores only the selected credential's cache and ignores a bare legacy row", async () => {
 		const profileA = "arn:aws:codewhisperer:us-east-1:123456789012:profile/profile-a";
 		const profileB = "arn:aws:codewhisperer:us-east-1:123456789012:profile/profile-b";
-		const credentialA = JSON.stringify({ token: "kiro-token-a", profileArn: profileA });
-		const credentialB = JSON.stringify({ token: "kiro-token-b", profileArn: profileB });
+		const credentialA = encodeKiroCredential({
+			kind: "oauth",
+			token: "kiro-token-a",
+			apiEndpoint: "https://runtime.us-east-1.kiro.dev/",
+			loginId: "login-a",
+			profileArn: profileA,
+		});
+		const credentialB = encodeKiroCredential({
+			kind: "oauth",
+			token: "kiro-token-b",
+			apiEndpoint: "https://runtime.us-east-1.kiro.dev/",
+			loginId: "login-b",
+			profileArn: profileB,
+		});
 		const discoveredModelId = "kiro-profile-a-model";
 		const bareModelId = "kiro-bare-legacy-model";
 		let discoveryCalls = 0;
@@ -94,10 +107,11 @@ describe("ModelRegistry Kiro cache isolation", () => {
 		expect(discoveryCalls).toBe(1);
 	});
 
-	test("restores the cache selected by a persisted Kiro API-key endpoint", async () => {
+	test("restores the cache selected by the endpoint in a stored Kiro API-key login", async () => {
 		const endpointA = "https://runtime.eu-central-1.kiro.dev/";
 		const endpointB = "https://runtime.us-east-1.kiro.dev/";
-		const credentialA = JSON.stringify({ token: "kiro-api-key", apiEndpoint: endpointA });
+		const credentialA = encodeKiroCredential({ kind: "api_key", token: "ksk_kiro-api-key", apiEndpoint: endpointA });
+		const credentialB = encodeKiroCredential({ kind: "api_key", token: "ksk_kiro-api-key", apiEndpoint: endpointB });
 		const discoveredModelId = "kiro-api-key-model";
 		let discoveryCalls = 0;
 
@@ -125,12 +139,7 @@ describe("ModelRegistry Kiro cache isolation", () => {
 		expect(seeded.models.map(model => model.id)).toEqual([discoveredModelId]);
 		expect(discoveryCalls).toBe(1);
 
-		await authStorage.credentials.set("kiro", {
-			type: "api_key",
-			key: "kiro-api-key",
-			apiEndpoint: endpointA,
-			source: "login",
-		});
+		await authStorage.credentials.set("kiro", { type: "api_key", key: credentialA, source: "login" });
 		expect(await authStorage.keys.peek("kiro")).toBe(credentialA);
 
 		let offlineCalls = 0;
@@ -143,12 +152,7 @@ describe("ModelRegistry Kiro cache isolation", () => {
 		expect(endpointARegistry.find("kiro", discoveredModelId)?.name).toBe("API key model");
 		expect(offlineCalls).toBe(0);
 
-		await authStorage.credentials.set("kiro", {
-			type: "api_key",
-			key: "kiro-api-key",
-			apiEndpoint: endpointB,
-			source: "login",
-		});
+		await authStorage.credentials.set("kiro", { type: "api_key", key: credentialB, source: "login" });
 		const endpointBRegistry = new ModelRegistry(authStorage, modelsPath, { fetch: offlineFetch });
 		await endpointBRegistry.refreshProvider("kiro", "offline");
 		expect(endpointBRegistry.find("kiro", discoveredModelId)).toBeUndefined();

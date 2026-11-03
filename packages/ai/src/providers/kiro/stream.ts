@@ -1,10 +1,6 @@
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
-import {
-	kiroRuntimeBaseUrl,
-	parseKiroEndpoint,
-	parseKiroProfileArn,
-	validateKiroApiRegion,
-} from "@oh-my-pi/pi-catalog/wire/kiro";
+import { kiroRuntimeBaseUrl, parseKiroEndpoint, parseKiroProfileArn } from "@oh-my-pi/pi-catalog/wire/kiro";
+import { decodeKiroCredential, type KiroCredential } from "@oh-my-pi/pi-catalog/wire/kiro-credential";
 import * as AIError from "../../error";
 import type {
 	AssistantMessage,
@@ -36,7 +32,7 @@ import {
 import { mergeKiroUsage, normalizeKiroFrame } from "./event-normalizer";
 import { KiroToolAssembler } from "./tool-assembler";
 import { transformKiroRequest } from "./transform";
-import type { KiroNormalizedEvent, KiroOptions, KiroStreamCredential, KiroUsageMetrics } from "./types";
+import type { KiroNormalizedEvent, KiroOptions, KiroUsageMetrics } from "./types";
 
 const KIRO_RUNTIME_TARGET = "KiroRuntimeService.GenerateAssistantResponse";
 const KIRO_USER_AGENT = "oh-my-pi/kiro-api";
@@ -104,25 +100,10 @@ function emptyOutput(model: Model, timestamp: number): AssistantMessage {
 	};
 }
 
-function parseCredential(value: string | undefined): KiroStreamCredential {
+function parseCredential(value: string | undefined): KiroCredential {
 	if (!value) throw new KiroApiError("Kiro credential is missing", 401, { code: "AUTH_MISSING" });
-	if (!value.startsWith("{")) return { token: value };
 	try {
-		const parsed: unknown = JSON.parse(value);
-		if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new Error("not an object");
-		const credential = parsed as Record<string, unknown>;
-		if (typeof credential.token !== "string" || credential.token.length === 0) throw new Error("token missing");
-		if (credential.profileArn !== undefined && typeof credential.profileArn !== "string") {
-			throw new Error("profileArn invalid");
-		}
-		if (credential.apiEndpoint !== undefined && typeof credential.apiEndpoint !== "string") {
-			throw new Error("apiEndpoint invalid");
-		}
-		return {
-			token: credential.token,
-			...(typeof credential.profileArn === "string" ? { profileArn: credential.profileArn } : {}),
-			...(typeof credential.apiEndpoint === "string" ? { apiEndpoint: credential.apiEndpoint } : {}),
-		};
+		return decodeKiroCredential(value);
 	} catch (error) {
 		throw new KiroApiError("Kiro credential projection is invalid", 401, {
 			code: "AUTH_INVALID",
@@ -131,8 +112,8 @@ function parseCredential(value: string | undefined): KiroStreamCredential {
 	}
 }
 
-function resolveKiroRuntimeBaseUrl(model: Model, credential: KiroStreamCredential): string {
-	if (credential.profileArn !== undefined) {
+function resolveKiroRuntimeBaseUrl(model: Model, credential: KiroCredential): string {
+	if (credential.kind === "oauth" && credential.profileArn !== undefined) {
 		const profile = parseKiroProfileArn(credential.profileArn);
 		if (!profile) {
 			throw new KiroApiError("Invalid Kiro profile ARN", 0, { code: "INVALID_PROFILE" });
@@ -140,22 +121,9 @@ function resolveKiroRuntimeBaseUrl(model: Model, credential: KiroStreamCredentia
 		return kiroRuntimeBaseUrl(profile.apiRegion);
 	}
 
-	if (credential.apiEndpoint !== undefined) {
-		const endpoint = parseKiroEndpoint(credential.apiEndpoint);
-		if (endpoint?.kind !== "runtime") {
-			throw new KiroApiError("Invalid Kiro runtime endpoint", 0, { code: "INVALID_ENDPOINT" });
-		}
-		return endpoint.baseUrl;
-	}
-
-	const configuredRegion = Bun.env.KIRO_API_REGION;
-	if (configuredRegion !== undefined) {
-		const apiRegion = validateKiroApiRegion(configuredRegion);
-		if (!apiRegion) {
-			throw new KiroApiError("KIRO_API_REGION is not a valid AWS region", 0, { code: "INVALID_REGION" });
-		}
-		return kiroRuntimeBaseUrl(apiRegion);
-	}
+	// The codec validated the endpoint and applied `KIRO_API_REGION` to an API
+	// key without one, matching the route discovery resolves.
+	if (credential.apiEndpoint !== undefined) return credential.apiEndpoint;
 
 	const modelEndpoint = parseKiroEndpoint(model.baseUrl);
 	if (modelEndpoint?.kind !== "runtime") {
@@ -425,7 +393,7 @@ export function streamKiro(model: Model, context: Context, options: KiroOptions 
 					maxTokens: options.maxTokens,
 					conversationId,
 				});
-				if (credential.profileArn) payload.profileArn = credential.profileArn;
+				if (credential.kind === "oauth" && credential.profileArn) payload.profileArn = credential.profileArn;
 				const replacement = await options.onPayload?.(payload, model);
 				if (replacement !== undefined) payload = replacement as typeof payload;
 				const watchdog = armPreResponseTimeout(options.signal, firstEventTimeoutMs);
