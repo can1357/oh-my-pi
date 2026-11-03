@@ -546,6 +546,14 @@ class SteeringQueue {
 		return this.#messages.pop();
 	}
 
+	/** Remove the occurrences at `indices`; their promotions go with them. */
+	removeAt(indices: ReadonlySet<number>): void {
+		if (indices.size === 0) return;
+		for (const index of indices) if (this.#promoted[index]) this.#promotedCount--;
+		this.#messages = this.#messages.filter((_, index) => !indices.has(index));
+		this.#promoted = this.#promoted.filter((_, index) => !indices.has(index));
+	}
+
 	clear(): void {
 		this.#messages = [];
 		this.#promoted = [];
@@ -735,6 +743,8 @@ export class Agent {
 	#takenBack = new WeakMap<AbortController, Map<AgentMessage, number>>();
 	/** The live-steered entries each live hand-over committed, by the list it handed, so a declined one releases exactly those. */
 	#liveCommits = new WeakMap<readonly AgentMessage[], LiveSteeredEntry[]>();
+	/** The delivery record each handed batch came from, by the list handed over, so a live take adopts its own. */
+	#batchRecords = new WeakMap<readonly AgentMessage[], QueuedMessageDelivery>();
 	/** The live-steered entries each live take adopted, by the list the take returned. */
 	#adoptedBy = new WeakMap<readonly AgentMessage[], LiveSteeredEntry[]>();
 	/**
@@ -742,11 +752,6 @@ export class Agent {
 	 * holder it is (none for prepared context and asides), so {@link appendMessage} records exactly that holder.
 	 */
 	#recordLedger = new WeakMap<AbortController, RecordedOccurrence[]>();
-	/**
-	 * Messages the run's loop reported and {@link appendMessage} has not recorded yet (a subclass may defer
-	 * or reorder them), so each such record ends the occurrence the run delivered. Cleared when a run ends.
-	 */
-	#loopRecords: AgentMessage[] = [];
 	#steeringWaiters = new Set<() => void>();
 	#queuedMessageGrouping?: (previous: AgentMessage, next: AgentMessage) => boolean;
 	/**
@@ -1457,7 +1462,9 @@ export class Agent {
 		if (!this.#queuedMessageDeliveries.has(record)) return [];
 		record.handed = true;
 		const pending = record.next === 0 ? record.messages : record.messages.slice(record.next);
-		return record.additional.length > 0 ? [...pending, ...record.additional] : pending;
+		const batch = record.additional.length > 0 ? [...pending, ...record.additional] : pending;
+		this.#batchRecords.set(batch, record);
+		return batch;
 	}
 
 	/**
@@ -1514,7 +1521,6 @@ export class Agent {
 
 	#restoreUndeliveredQueuedMessages(controller: AbortController): void {
 		this.#recordLedger.delete(controller);
-		this.#loopRecords = [];
 		// A preparation the run started and did not wait for (a provider's live claim) ends with the run; its
 		// late completion finds the claim gone and delivers nothing. Restored first: it was taken last.
 		if (this.#queuedMessageClaims.steering?.run === controller) this.#restoreQueuedMessageClaim("steering");
@@ -1565,8 +1571,8 @@ export class Agent {
 
 	/**
 	 * Move steering live steering took out of the queue-delivery records into {@link #liveSteered}: one
-	 * occurrence per taken message, from the newest record first (the take's own), never from a record a
-	 * request already carries, which is delivered.
+	 * occurrence per taken message, from the take's own record (then the newest first), never from a record
+	 * a request already carries, which is delivered.
 	 */
 	#adoptLiveSteering(taken: readonly AgentMessage[]): void {
 		let adopted = false;
@@ -1579,7 +1585,12 @@ export class Agent {
 			wanted.set(message, count - 1);
 			return true;
 		};
-		for (const delivery of [...this.#queuedMessageDeliveries].reverse()) {
+		// The take's own record first: another take of the same message may have dequeued since.
+		const own = this.#batchRecords.get(taken);
+		const records = [...this.#queuedMessageDeliveries].reverse();
+		const ownAt = own ? records.indexOf(own) : -1;
+		if (ownAt > 0) records.unshift(...records.splice(ownAt, 1));
+		for (const delivery of records) {
 			if (delivery.committed) continue;
 			const adopting = new Set<number>();
 			for (let i = delivery.next; i < delivery.messages.length; i++) {
@@ -2257,25 +2268,25 @@ export class Agent {
 	}
 
 	/**
-	 * Add `m` to the transcript. A record of a message the run's loop reported ({@link #recordLoopMessage})
-	 * ends the occurrence the run delivered, even when a subclass defers or reorders this call. Any other
-	 * record is a host's: a new occurrence, which ends no occurrence the Agent holds for delivery.
+	 * Add `m` to the transcript as a host's record: a new occurrence, which ends no occurrence the Agent holds
+	 * for delivery. The run records the messages its loop reports itself ({@link #recordLoopMessage}), without
+	 * this method, so overriding it neither sees nor changes those records.
 	 */
 	appendMessage(m: AgentMessage) {
 		this.#state.messages.push(m);
-		const loopRecord = this.#loopRecords.indexOf(m);
-		if (loopRecord < 0) return;
-		this.#loopRecords.splice(loopRecord, 1);
+	}
+
+	/**
+	 * The run's loop reported `m` as recorded: end the occurrence the run delivered (the holder its request
+	 * wrote down, else live steering the provider accepted; prompt input and other records end nothing) and
+	 * add `m` to the transcript.
+	 */
+	#recordLoopMessage(m: AgentMessage): void {
 		const ended = this.#recordFromLedger(m) ?? this.#recordAcceptedLiveSteering(m);
+		this.#state.messages.push(m);
 		// A live-steered occurrence ended: it stops counting as queued pending input, and listeners hear it
 		// now that the message is in the transcript.
 		if (ended === "live") this.#emitQueueChanged();
-	}
-
-	/** The run's loop reported `m` as recorded. */
-	#recordLoopMessage(m: AgentMessage): void {
-		this.#loopRecords.push(m);
-		this.appendMessage(m);
 	}
 
 	/**
@@ -2722,36 +2733,57 @@ export class Agent {
 
 	/**
 	 * Take the unit of `queue` delivered next. With a {@link queuedMessageGate}, the gate sees each candidate
-	 * unit first: what it vetoes leaves the queue and the unit is recomputed, and candidates it claimed that
-	 * the final unit no longer holds are released again.
+	 * unit first: the occurrences it vetoes leave the queue (only those, not other occurrences of the same
+	 * message) and the unit is recomputed, and candidates it claimed that the final unit no longer holds are
+	 * released again, once each.
 	 */
 	#takeDeliveryUnit(queue: QueuedMessageQueue): TakenUnit | undefined {
 		const gate = this.queuedMessageGate;
-		const candidates = (): AgentMessage[] => {
-			if (queue === "followUp") return this.#dequeueMessages(this.#followUpQueue, this.#followUpMode);
+		// The candidate unit by queue position.
+		const candidates = (): { start: number; end: number } => {
+			if (queue === "followUp") {
+				return { start: 0, end: this.#dequeueMessages(this.#followUpQueue, this.#followUpMode).length };
+			}
 			const start = this.#nextSteeringUnitStart();
-			return this.#steering.messages.slice(start, this.#steeringUnitEnd(start));
+			return { start, end: this.#steeringUnitEnd(start) };
 		};
-		let batch = gate ? candidates() : [];
-		let claimedEarlier: AgentMessage[] | undefined;
+		const pending = (): readonly AgentMessage[] =>
+			queue === "steering" ? this.#steering.messages : this.#followUpQueue;
+		// The most occurrences of each message the gate claimed in one call.
+		const claimedMost = new Map<AgentMessage, number>();
 		let dropped = false;
-		while (gate && batch.length > 0) {
-			const veto = gate.claim(queue, batch);
-			if (veto.length === 0) break;
-			const drop = new Set(veto);
-			const pending = queue === "steering" ? this.#steering.messages : this.#followUpQueue;
-			const kept = pending.filter(message => !drop.has(message));
-			if (kept.length === pending.length) break;
-			for (const message of batch) if (!drop.has(message)) (claimedEarlier ??= []).push(message);
-			if (queue === "steering") this.#steering.replace(kept, undefined);
-			else this.#followUpQueue = kept;
+		let unit = gate ? candidates() : { start: 0, end: 0 };
+		while (gate && unit.start < unit.end) {
+			const batch = pending().slice(unit.start, unit.end);
+			const veto = new Map<AgentMessage, number>();
+			for (const message of gate.claim(queue, batch)) veto.set(message, (veto.get(message) ?? 0) + 1);
+			const claimed = new Map<AgentMessage, number>();
+			const removed = new Set<number>();
+			batch.forEach((message, offset) => {
+				const vetoed = veto.get(message);
+				if (vetoed) {
+					veto.set(message, vetoed - 1);
+					removed.add(unit.start + offset);
+					return;
+				}
+				const count = (claimed.get(message) ?? 0) + 1;
+				claimed.set(message, count);
+				claimedMost.set(message, Math.max(claimedMost.get(message) ?? 0, count));
+			});
+			if (removed.size === 0) break;
+			if (queue === "steering") this.#steering.removeAt(removed);
+			else this.#followUpQueue = this.#followUpQueue.filter((_, index) => !removed.has(index));
 			dropped = true;
-			batch = candidates();
+			unit = candidates();
 		}
-		if (claimedEarlier) {
-			const final = new Set(batch);
-			const stale = claimedEarlier.filter(message => !final.has(message));
-			if (stale.length > 0) gate?.release(stale);
+		if (gate && dropped) {
+			const final = new Map<AgentMessage, number>();
+			for (const message of pending().slice(unit.start, unit.end)) final.set(message, (final.get(message) ?? 0) + 1);
+			const stale: AgentMessage[] = [];
+			for (const [message, count] of claimedMost) {
+				for (let n = final.get(message) ?? 0; n < count; n++) stale.push(message);
+			}
+			if (stale.length > 0) gate.release(stale);
 		}
 		const taken = queue === "steering" ? this.#takeSteeringUnit() : this.#takeFollowUpUnit();
 		// What the gate dropped left the queue; with nothing taken, no claim or record will announce it.
@@ -3382,7 +3414,7 @@ export class Agent {
 						(c.type === "toolCall" && c.name.trim().length > 0),
 				);
 				if (!onlyEmpty) {
-					this.appendMessage(partial);
+					this.#recordLoopMessage(partial);
 				} else {
 					if (loopSignal.aborted) {
 						throw new Error("Request was aborted");
@@ -3454,14 +3486,14 @@ export class Agent {
 					this.#emit({ type: "message_start", message: errorMsg });
 				}
 				this.#state.streamMessage = null;
-				this.appendMessage(errorMsg);
+				this.#recordLoopMessage(errorMsg);
 				this.#state.error = errorMessage;
 				this.#emit({ type: "message_end", message: errorMsg });
 				const toolResults: ToolResultMessage[] = [];
 				this.#cursorToolResultBuffer = [];
 				const bufferedCursorToolCallIds = new Set(bufferedCursorResults.map(({ toolCallId }) => toolCallId));
 				for (const toolResult of bufferedCursorResults) {
-					this.appendMessage(toolResult);
+					this.#recordLoopMessage(toolResult);
 					this.#emit({ type: "message_start", message: toolResult });
 					this.#emit({ type: "message_end", message: toolResult });
 					toolResults.push(toolResult);
@@ -3484,7 +3516,7 @@ export class Agent {
 						result: { content: toolResult.content, details: toolResult.details },
 						isError: true,
 					});
-					this.appendMessage(toolResult);
+					this.#recordLoopMessage(toolResult);
 					this.#emit({ type: "message_start", message: toolResult });
 					this.#emit({ type: "message_end", message: toolResult });
 					toolResults.push(toolResult);
@@ -3506,7 +3538,7 @@ export class Agent {
 					this.#emit({ type: "message_start", message: errorMsg });
 				}
 				this.#state.streamMessage = null;
-				this.appendMessage(errorMsg);
+				this.#recordLoopMessage(errorMsg);
 				this.#state.error = errorMessage;
 				this.#emit({ type: "message_end", message: errorMsg });
 				this.#emit({ type: "turn_end", message: errorMsg, toolResults: [] });
@@ -3611,12 +3643,12 @@ export class Agent {
 			if (pending.length > 0) await Promise.all(pending);
 
 			this.#state.streamMessage = null;
-			this.appendMessage(assistantMessage);
+			this.#recordLoopMessage(assistantMessage);
 			this.#emit({ type: "message_end", message: assistantMessage });
 
 			for (const { toolResult } of buffer) {
 				this.#emit({ type: "message_start", message: toolResult });
-				this.appendMessage(toolResult);
+				this.#recordLoopMessage(toolResult);
 				this.#emit({ type: "message_end", message: toolResult });
 			}
 			const additionalContext = joinAdditionalContext(buffer.map(entry => entry.additionalContext));
@@ -3635,7 +3667,7 @@ export class Agent {
 	#emitCursorAdditionalContext(text: string): AgentMessage {
 		const message = createAdditionalContextMessage(text);
 		this.#emit({ type: "message_start", message });
-		this.appendMessage(message);
+		this.#recordLoopMessage(message);
 		this.#emit({ type: "message_end", message });
 		return message;
 	}

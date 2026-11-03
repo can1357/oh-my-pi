@@ -2232,15 +2232,17 @@ describe("steering invariants: the round-fifteen and round-sixteen reproductions
 	}
 
 	for (const reverse of [false, true]) {
-		it(`a grouped request's records ${reverse ? "in reverse order" : "in order"} leave nothing held`, async () => {
+		it(`an appendMessage override that ${reverse ? "reorders" : "buffers"} the run's records changes nothing the run holds`, async () => {
 			const a = person("A");
 			const b = person("B");
 			const requests: string[][] = [];
-			// A host that records the run's own input events once both arrive, in either order.
+			// A host that would record the run's own input events once both arrive, in either order.
 			class RecordingAgent extends Agent {
+				seen = 0;
 				#buffered: AgentMessage[] = [];
 				override appendMessage(message: AgentMessage): void {
 					if (this.#buffered.length < 2 && (message === a || message === b)) {
+						this.seen++;
 						this.#buffered.push(message);
 						if (this.#buffered.length === 2) {
 							for (const item of reverse ? [...this.#buffered].reverse() : this.#buffered)
@@ -2271,7 +2273,9 @@ describe("steering invariants: the round-fifteen and round-sixteen reproductions
 
 			await agent.prompt("start");
 
-			expect(transcriptTexts(agent)).toEqual(reverse ? ["start", "B", "A"] : ["start", "A", "B"]);
+			// The run records its loop's messages itself, so the override never sees them.
+			expect(agent.seen).toBe(0);
+			expect(transcriptTexts(agent)).toEqual(["start", "A", "B"]);
 			expect(agent.peekUndeliveredQueuedMessages()).toEqual([]);
 			expect(agent.peekSteeringQueue()).toEqual([]);
 			expect(requests).toHaveLength(1);
@@ -2281,11 +2285,11 @@ describe("steering invariants: the round-fifteen and round-sixteen reproductions
 
 /**
  * Only the run's own records end an occurrence the Agent holds, and each ends the occurrence its request
- * delivered, at the moment the loop reports it. A subclass that defers or reorders `appendMessage`, or a
- * host record of the same object, changes only the transcript.
+ * delivered, at the moment the loop reports it. The run makes those records itself, so an `appendMessage`
+ * override never sees them, and a host's own record of the same object is a new occurrence that ends nothing.
  */
 describe("steering invariants: the round-seventeen reproductions", () => {
-	/** An Agent whose subclass defers the transcript records of `held` until `flush()`. */
+	/** An Agent whose subclass would defer `appendMessage` records of `held` until `flush()`. */
 	function createDeferringAgent(held: AgentMessage, stream: Agent["streamFn"]) {
 		const mock = createMockModel({ handler: () => ({ content: ["ack"] }) });
 		class DeferringAgent extends Agent {
@@ -2398,7 +2402,7 @@ describe("steering invariants: the round-seventeen reproductions", () => {
 		expect(agent.peekUndeliveredQueuedMessages()).toEqual([]);
 	});
 
-	it("a loop record a subclass drops leaves the occurrence unrecorded, so the run's end puts it back", async () => {
+	it("an appendMessage override cannot drop the run's records", async () => {
 		const v = person("V");
 		let first = true;
 		const { agent, mock } = createDeferringAgent(v, async (model, context, options) => {
@@ -2411,8 +2415,169 @@ describe("steering invariants: the round-seventeen reproductions", () => {
 
 		await agent.prompt("start");
 
-		// The record of V never reached the transcript (the subclass held it back), so V is queued again.
-		expect(transcriptTexts(agent)).toEqual(["start"]);
-		expect(texts(agent.peekSteeringQueue())).toEqual(["V"]);
+		expect(transcriptTexts(agent)).toEqual(["start", "V"]);
+		expect(agent.peekSteeringQueue()).toEqual([]);
 	});
+});
+
+/**
+ * Overlapping live takes each adopt their own occurrence, and a `queuedMessageGate` veto removes the
+ * occurrences of the unit it saw, not other occurrences of the same message; each claimed message it no
+ * longer delivers is released once.
+ */
+describe("steering invariants: the round-eighteen reproductions", () => {
+	for (const concurrent of [false, true]) {
+		for (const alias of [false, true]) {
+			for (const accepted of [0, 1]) {
+				it(`${concurrent ? "overlapping" : "sequential"} live takes of ${alias ? "the same object" : "two messages"} keep each occurrence's promotion (accepting take ${accepted})`, async () => {
+					const { agent, mock } = createAgent();
+					const v = person("V");
+					const later = alias ? v : person("later V");
+					let first = true;
+					agent.streamFn = async (model, context, options) => {
+						if (first && options?.liveSteering && options.signal) {
+							first = false;
+							agent.steer(v);
+							agent.prioritizeSteering([v]);
+							agent.steer(later);
+							const live = options.liveSteering;
+							const signal = options.signal;
+							const claims = concurrent
+								? await Promise.all([live.claim(signal), live.claim(signal)])
+								: [await live.claim(signal), await live.claim(signal)];
+							expect(claims.every(claim => claim !== undefined)).toBe(true);
+							claims[accepted]?.accept();
+						}
+						return mock.stream(model, context, options);
+					};
+
+					await agent.prompt("start");
+					const w = person("W");
+					agent.steer(w);
+					agent.setSteeringPriority(message => message === w);
+
+					// The promoted first V goes ahead of W only while it is the one still queued.
+					expect(texts(agent.peekSteeringQueue())).toEqual([
+						accepted === 0 ? (alias ? "V" : "later V") : "V",
+						"W",
+					]);
+					expect(texts(agent.peekNextSteering())).toEqual([accepted === 0 ? "W" : "V"]);
+				});
+			}
+		}
+	}
+
+	for (const alias of [false, true]) {
+		for (const queue of ["steering", "followUp"] as const) {
+			it(`a ${queue} gate veto drops only the unit it saw (${alias ? "same object queued twice" : "two messages"})`, async () => {
+				const { agent } = createAgent();
+				const v = person("V");
+				const later = alias ? v : person("later V");
+				const claims: string[][] = [];
+				let first = true;
+				agent.queuedMessageGate = {
+					claim: (_queue, batch) => {
+						claims.push(texts(batch));
+						if (!first) return [];
+						first = false;
+						return [batch[0]];
+					},
+					release: () => {},
+				};
+				if (queue === "steering") {
+					agent.steer(v);
+					agent.steer(later);
+				} else {
+					agent.followUp(v);
+					agent.followUp(later);
+				}
+
+				await agent.prompt("start");
+
+				expect(claims).toEqual([["V"], [alias ? "V" : "later V"]]);
+				expect(transcriptTexts(agent)).toEqual(["start", alias ? "V" : "later V"]);
+			});
+		}
+	}
+
+	it("a gate that vetoes across recomputed units releases each displaced occurrence once", async () => {
+		const { agent } = createAgent();
+		const agentMessage = (text: string): AgentMessage => ({ ...person(text), attribution: "agent" }) as AgentMessage;
+		const [a, b, c, d] = [agentMessage("A"), agentMessage("B"), person("C"), person("D")];
+		agent.setQueuedMessageGrouping(
+			(previous, next) => (previous === a && (next === b || next === c)) || (previous === b && next === c),
+		);
+		for (const message of [a, b, c, d]) agent.steer(message);
+		const released: string[] = [];
+		let pass = 0;
+		agent.queuedMessageGate = {
+			claim: () => {
+				pass++;
+				return pass === 1 ? [b] : pass === 2 ? [c] : [];
+			},
+			release: messages => released.push(...texts(messages)),
+		};
+
+		await agent.prompt("start");
+
+		expect(released).toEqual(["A", "C"]);
+		expect(transcriptTexts(agent)).toEqual(["start", "D", "A"]);
+	});
+
+	for (const queue of ["steering", "followUp"] as const) {
+		for (const path of [
+			"prepare-throw",
+			"prepare-cancel",
+			"replace-claim",
+			"remove-claim",
+			"clear-claim",
+			"abort-delivery",
+			"withdraw-delivery",
+			"remove-delivery",
+			"clear-delivery",
+		] as const) {
+			it(`a ${queue} message the gate claimed is released exactly once when it leaves delivery (${path})`, async () => {
+				const { agent } = createAgent();
+				const v = person("V");
+				const released: string[][] = [];
+				let acted = false;
+				let notifications = 0;
+				agent.queuedMessageGate = { claim: () => [], release: messages => released.push(texts(messages)) };
+				if (path.endsWith("claim") || path.startsWith("prepare")) {
+					agent.prepareQueuedMessages = async () => {
+						if (path === "prepare-throw") throw new Error("preparation failed");
+						if (path === "prepare-cancel") return { commit: () => undefined };
+						return undefined;
+					};
+				}
+				agent.onQueueChange(() => {
+					notifications++;
+					if (acted) return;
+					const held = agent.peekUndeliveredQueuedMessages().includes(v);
+					const claimed = agent.state.isStreaming && !held && notifications > 1;
+					if (path.endsWith("claim") && claimed) {
+						acted = true;
+						if (path === "replace-claim") agent.replaceQueue(queue, []);
+						if (path === "remove-claim") agent.removeQueuedMessages(message => message === v);
+						if (path === "clear-claim") agent.clearAllQueues();
+					}
+					if (path.endsWith("delivery") && held) {
+						acted = true;
+						if (path === "abort-delivery") agent.abort();
+						if (path === "withdraw-delivery") agent.withdrawUndeliveredQueuedMessages();
+						if (path === "remove-delivery") agent.removeQueuedMessages(message => message === v);
+						if (path === "clear-delivery") agent.clearAllQueues();
+					}
+				});
+				if (queue === "steering") agent.steer(v);
+				else agent.followUp(v);
+
+				await agent.prompt("start");
+
+				// An abort while V is held for the next request still delivers it before the run ends.
+				expect(released).toEqual(path === "abort-delivery" ? [] : [["V"]]);
+				expect(agent.peekUndeliveredQueuedMessages()).toEqual([]);
+			});
+		}
+	}
 });

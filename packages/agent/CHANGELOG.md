@@ -4,6 +4,7 @@
 
 ### Breaking Changes
 
+- The run records the messages its loop reports without calling `Agent.appendMessage`, so an override of it no longer sees, defers or drops them; listen to `message_end` instead. A host's own `appendMessage` is a new occurrence and no longer ends a queued or in-flight occurrence of the same message ([#17575](https://github.com/can1357/oh-my-pi/pull/17575) by [@sjawhar](https://github.com/sjawhar))
 - `Agent.emitExternalEvent` no longer accepts `agent_end` and throws if given one: only the run that owns a lifecycle reports its untagged end. Forward another producer's end with the new `Agent.emitExternalAgentEnd(event, source)`, which tags it with `source` and throws while this Agent's own run is in flight or holds input it took, so no subscriber sees an end while the Agent still streams ([#17575](https://github.com/can1357/oh-my-pi/pull/17575) by [@sjawhar](https://github.com/sjawhar))
 
 ### Added
@@ -15,7 +16,6 @@
 
 - `one-at-a-time` steering delivers the first queued unit holding a user-authored message ahead of agent-authored steering queued before it, and the oldest waiting agent unit goes next once `MAX_USER_UNITS_AHEAD_OF_AGENT_STEERING` (4) user units were taken while an agent unit waited, counting units live steering claims for a streaming response, so an agent unit with `k` agent units ahead of it is taken within `5 × (k + 1)` deliveries; `prioritizeSteering` still goes first; the mid-batch interrupt classifies that whole unit instead of the first queued message ([#17575](https://github.com/can1357/oh-my-pi/pull/17575) by [@sjawhar](https://github.com/sjawhar))
 - `onQueueChange` listeners are also called when `setSteeringMode`, `setSteeringPriority` or `setQueuedMessageGrouping` changes which queued steering is delivered next ([#17575](https://github.com/can1357/oh-my-pi/pull/17575) by [@sjawhar](https://github.com/sjawhar))
-- A host's own `appendMessage` adds a new occurrence to the transcript and no longer ends a queued or in-flight occurrence of the same message; only the record of a message the run's loop reported ends the occurrence the run delivered, also when a subclass defers or reorders that `appendMessage` call ([#17575](https://github.com/can1357/oh-my-pi/pull/17575) by [@sjawhar](https://github.com/sjawhar))
 
 ### Fixed
 
