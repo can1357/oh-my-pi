@@ -56,7 +56,7 @@ import {
 	screenStateNotice,
 	type ToolReply,
 } from "./protocol";
-import { describeWindowMiss } from "./window-miss";
+import { describeWindowMiss, matchesWindowApp } from "./window-miss";
 
 /** A native input call; resolves to its takeover focus report when it took over. */
 type InputCall = Promise<DesktopFocusReturn | null | void>;
@@ -334,13 +334,13 @@ function strictObject(value: unknown, allowed: string[], label: string): asserts
 	}
 }
 
-function matchesFilter(window: DesktopWindow, filter?: WindowFilter): boolean {
+function matchesFilter(window: DesktopWindow, filter?: WindowFilter, appPids?: ReadonlySet<number>): boolean {
 	if (!filter) return true;
 	const app = filter.app?.toLocaleLowerCase();
 	const title = filter.title?.toLocaleLowerCase();
 	return (
 		(filter.id === undefined || window.id === String(filter.id)) &&
-		(!app || window.app.toLocaleLowerCase().includes(app)) &&
+		(!app || matchesWindowApp(window, app, appPids)) &&
 		(!title || window.title.toLocaleLowerCase().includes(title))
 	);
 }
@@ -1705,6 +1705,24 @@ export class ComputerWorkerCore {
 		const getContext = this.#currentRunContext;
 		const makeWin = (window: DesktopWindow): Win => new Win(session, getContext, window);
 		const el = (node: AxNode): El => new El(session, getContext, node);
+		const listWindows = async (filter: WindowFilter | undefined, signal: AbortSignal) => {
+			const windows = await nativeCall(signal, () => session.listWindows());
+			let appPids: Set<number> | undefined;
+			if (filter?.app) {
+				const app = filter.app.toLocaleLowerCase();
+				const applications = await nativeCall(signal, () => session.listApplications({ runningOnly: true }));
+				appPids = new Set<number>();
+				for (const application of applications) {
+					if (
+						application.pid !== undefined &&
+						(application.id.toLocaleLowerCase() === app || application.path.toLocaleLowerCase() === app)
+					) {
+						appPids.add(application.pid);
+					}
+				}
+			}
+			return { windows, appPids, matches: windows.filter(window => matchesFilter(window, filter, appPids)) };
+		};
 		const desktopTarget = new Win(session, getContext, {
 			id: "desktop",
 			app: "desktop",
@@ -1840,9 +1858,8 @@ export class ComputerWorkerCore {
 			},
 			windows: async (filter?: WindowFilter): Promise<DesktopWindow[]> => {
 				const { signal } = getContext();
-				return (await nativeCall(signal, () => session.listWindows()))
-					.filter(window => matchesFilter(window, filter))
-					.slice(0, MAX_LISTED_WINDOWS);
+				const { matches } = await listWindows(filter, signal);
+				return matches.slice(0, MAX_LISTED_WINDOWS);
 			},
 			window: async (selector: string | number | WindowFilter): Promise<Win> => {
 				const { signal } = getContext();
@@ -1852,11 +1869,10 @@ export class ComputerWorkerCore {
 				const deadline = performance.now() + wait;
 				let windows: DesktopWindow[];
 				let matches: DesktopWindow[];
+				let appPids: ReadonlySet<number> | undefined;
 				for (;;) {
-					windows = await nativeCall(signal, () => session.listWindows());
-					matches = windows.filter(window =>
-						id !== undefined ? window.id === id : matchesFilter(window, selector as WindowFilter),
-					);
+					const listed = await listWindows(id === undefined ? (selector as WindowFilter) : { id }, signal);
+					({ windows, matches, appPids } = listed);
 					// The last interval sleeps only what is left, so the final listing lands at the deadline.
 					const remaining = deadline - performance.now();
 					if (matches.length > 0 || remaining <= 0) break;
@@ -1874,7 +1890,7 @@ export class ComputerWorkerCore {
 					const lead = unfiltered
 						? `${unfiltered}, and none is open`
 						: `no window matches ${JSON.stringify(selector)}`;
-					throw new ToolError(`${lead}\n${describeWindowMiss(windows, app, route)}`);
+					throw new ToolError(`${lead}\n${describeWindowMiss(windows, app, route, appPids)}`);
 				}
 				if (matches.length > 1) {
 					const candidates = matches
