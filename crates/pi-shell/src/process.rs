@@ -950,11 +950,16 @@ impl Process {
 /// - The kernel signals one group at a time, so a process that moves from one
 ///   recorded group to another between their two group signals, including a
 ///   move the first group's signal causes, gets the signal from both.
-/// - The members a wave returns for a later wave to carry are pinned just
-///   before and just after the group signal. A member forked after the first
-///   scan that leaves its group in its TERM handler before the second scan
-///   reads it, and that no known process has as a descendant, is not carried;
-///   once its leader has exited, a later wave does not reach it.
+/// - A wave reaches a process only through a recorded group, a known process's
+///   descendants, or a process an earlier wave knew. A process that leaves its
+///   group (`setsid()`) and is no longer a descendant of any process the wave
+///   knows, because its parent exited or it double-forked, before a wave sees
+///   it, is not reached. Measured shapes: a member forked between the scans
+///   around the group signal that leaves its group before the second scan reads
+///   it; a member that leaves its group and then double-forks; a member that
+///   leaves its group, forks a child and exits. Main leaks these the same way.
+///   Closing them needs containment that outlives the process tree (a cgroup
+///   per run, or a subreaper), which changes the shared host's process model.
 ///
 /// The harness's own group is never recorded.
 struct SignalWave {
