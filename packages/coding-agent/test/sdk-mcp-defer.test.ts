@@ -183,7 +183,8 @@ describe("createAgentSession MCP catalog handoff", () => {
 			);
 			const changeToolsDuringLoad: ExtensionFactory = async () => {
 				tools = next;
-				await MCPManager.instance()?.refreshServerTools(SERVER);
+				const manager = MCPManager.instance();
+				if (manager instanceof MCPManager) await manager.refreshServerTools(SERVER);
 			};
 			const authStorage = createInMemoryAuthStorage();
 			const { session } = await createAgentSession({

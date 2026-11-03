@@ -142,7 +142,7 @@ export function resolveBasicShell(): string | undefined {
  * Resolve the external shell to advertise on Windows.
  *
  * A host bash is OPTIONAL: bash tool commands always execute in the embedded
- * brush-core shell. The resolved binary only serves the spawn-a-shell paths
+ * bash engine (pi-shell). The resolved binary only serves the spawn-a-shell paths
  * (interactive PTY sessions, ACP client terminals, SHELL env), so this
  * prefers a real Git Bash when one exists and otherwise falls back to
  * cmd.exe — it never fails.

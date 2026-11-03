@@ -12,6 +12,7 @@ import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { getAgentDir } from "@oh-my-pi/pi-utils/dirs";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { localSession } from "../helpers/local-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 
 const mode = process.argv[2] ?? "collision";
@@ -148,18 +149,19 @@ try {
 	}
 	const child = AgentRegistry.global().get(childId);
 	assert.ok(child?.session, "B's task did not leave a live child");
+	const childSession = localSession(child.session);
 	console.log("child", {
 		parentId: child.parentId,
-		sharesAManager: a ? child.session.asyncJobManager === a.asyncJobManager : undefined,
-		sharesBManager: child.session.asyncJobManager === b.asyncJobManager,
+		sharesAManager: a ? childSession.asyncJobManager === a.asyncJobManager : undefined,
+		sharesBManager: childSession.asyncJobManager === b.asyncJobManager,
 		status: child.status,
 	});
 	assert.equal(child.status, "idle");
 	const receipt = await IrcBus.global().send({ from: "ReproPeerB", to: childId, body: marker });
 	console.log("IRC", receipt);
 	assert.equal(receipt.outcome, "woken");
-	await child.session.waitForIdle();
-	const asyncManager = child.session.asyncJobManager;
+	await childSession.waitForIdle();
+	const asyncManager = childSession.asyncJobManager;
 	assert.ok(asyncManager);
 	await asyncManager.waitForOwnerJobs(child.parentId!);
 	await asyncManager.drainDeliveries({ filter: { ownerId: child.parentId } });

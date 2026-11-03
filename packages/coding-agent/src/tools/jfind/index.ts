@@ -14,6 +14,7 @@ import { sessionResolveContext } from "../../internal-urls/context";
 import { InternalUrlFilesystem } from "../../internal-urls/url-filesystem";
 import { hasNativeJudge, journalJudgmentUsage, resolveJudge, sharedJudgmentCache } from "../../judgment";
 import findDescription from "../../prompts/tools/find.md" with { type: "text" };
+import { SPOTLIGHT_ENTRY } from "../../spotlight/types";
 import type { ToolSession } from "..";
 import { resolveToolTier } from "../approval";
 import {
@@ -75,7 +76,7 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 	constructor(private readonly session: ToolSession) {}
 
 	async execute(
-		_toolCallId: string,
+		toolCallId: string,
 		params: FindToolInput,
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback<FindToolDetails>,
@@ -107,6 +108,7 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 			cache: sharedJudgmentCache(),
 			costGate: this.session.costGate,
 		});
+		const experiment = this.session.spotlight;
 		const started = performance.now();
 		const timeout = AbortSignal.timeout(FIND_TIMEOUT_MS);
 		let result: CascadeResult;
@@ -117,6 +119,7 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 				query,
 				extraKeywords: params.grep_keywords,
 				judge,
+				spotlight: experiment ? { client: experiment.client, thinking: experiment.thinking } : undefined,
 				includeHidden: false,
 				signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
 				onProgress: message => onUpdate?.({ content: [{ type: "text", text: message }] }),
@@ -128,7 +131,22 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 			throw error;
 		}
 		const elapsedMs = performance.now() - started;
-		const { stats, threshold, keywords, coverage } = result;
+		const { stats, threshold, keywords, coverage, ranking } = result;
+		experiment?.log(SPOTLIGHT_ENTRY.find, {
+			toolCallId,
+			ranker: ranking.ranker,
+			candidates: ranking.candidates,
+			read: ranking.read,
+			hits: result.hits.length,
+			spotlightMs: ranking.spotlight?.ms,
+			spotlightTokens: ranking.spotlight?.inputTokens,
+			spotlightCostUsd: ranking.spotlight?.costUsd,
+			spotlightError: ranking.spotlight?.error,
+			judgeRequests: stats.requests,
+			judgeRequestsSaved: ranking.judgeRequestsSaved,
+			judgeCostUsd: stats.cost - (ranking.spotlight?.costUsd ?? 0),
+			elapsedMs: Math.round(elapsedMs),
+		});
 		// Cascade paths are root-relative; the model and renderer want paths
 		// `read` resolves (cwd-relative files, URLs under URL scopes, including
 		// with `:start-end` selectors) without knowing the scope.

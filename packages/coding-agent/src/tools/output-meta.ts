@@ -38,6 +38,9 @@ import {
 	cfgToolsOutputMaxColumns,
 } from "./settings";
 
+/** The sink's middle-elision marker line (`formatMiddleElisionMarker`): head lines above it, tail lines below. */
+const MIDDLE_ELISION_MARKER = /^\[…\d+(?:ln|B) elided…\]$/;
+
 /** Input for {@link OutputMetaBuilder.limits}. `columnUnit` defaults to `chars`. */
 export interface LimitsInput {
 	matchLimit?: number;
@@ -217,21 +220,30 @@ export class OutputMetaBuilder {
 		// A capped artifact holds only a head/tail sample; the notice must say so.
 		const artifactElidedBytes = artifactId ? summary.artifactElidedBytes : undefined;
 
-		// Middle elision: the sink retained head + tail with an elision marker.
+		// Middle elision: the sink retained head + tail with an elision marker; the marker's line splits them.
 		if (summary.elidedBytes != null && summary.elidedBytes > 0) {
 			const elidedLines = summary.elidedLines ?? Math.max(0, totalLines - summary.outputLines);
+			const shown = summary.output.split("\n");
+			const markerAt = shown.findIndex(line => MIDDLE_ELISION_MARKER.test(line));
+			// Output ending in a newline has no line after it, though the counts carry an empty one.
+			const trailing = markerAt >= 0 && shown.length > markerAt + 1 && shown.at(-1) === "" ? 1 : 0;
+			const lastLine = totalLines - trailing;
 			const keptLines = Math.max(0, summary.outputLines - 1); // -1 for marker line
-			const headLines = Math.ceil(keptLines / 2);
-			const tailLines = keptLines - headLines;
+			// Lines from the marker on are the marker and the tail; the rest of `outputLines` is the head. A notice
+			// `dump(notice)` put above the head is not in `outputLines`, so it never counts as a head line.
+			const tailLines =
+				markerAt >= 0 ? shown.length - markerAt - 1 - trailing : keptLines - Math.ceil(keptLines / 2);
+			const headLines =
+				markerAt >= 0 ? Math.max(0, summary.outputLines - (shown.length - markerAt)) : Math.ceil(keptLines / 2);
 			this.#meta.truncation = {
 				direction: "middle",
 				truncatedBy: "middle",
-				totalLines,
+				totalLines: lastLine,
 				totalBytes: summary.totalBytes,
 				outputLines: summary.outputLines,
 				outputBytes: summary.outputBytes,
 				headRange: headLines > 0 ? { start: 1, end: headLines } : undefined,
-				tailRange: tailLines > 0 ? { start: totalLines - tailLines + 1, end: totalLines } : undefined,
+				tailRange: tailLines > 0 ? { start: lastLine - tailLines + 1, end: lastLine } : undefined,
 				elidedBytes: summary.elidedBytes,
 				elidedLines,
 				artifactId,
@@ -766,25 +778,54 @@ async function wrappedExecute(
 ): Promise<AgentToolResult> {
 	const originalExecute = this[kUnwrappedExecute];
 
+	let own: AgentToolResult;
+	let result: AgentToolResult;
 	try {
-		let result = await originalExecute.call(this, toolCallId, params, signal, onUpdate, context);
+		own = await originalExecute.call(this, toolCallId, params, signal, onUpdate, context);
 
 		// Spill large results to artifact, truncate to tail
-		result = await spillLargeResultToArtifact(result, this.name, context);
+		result = await spillLargeResultToArtifact(own, this.name, context);
 
 		// Append notices from meta
 		const meta: OutputMeta | undefined = result.details?.meta;
 		if (meta) {
-			return {
+			result = {
 				...result,
 				content: appendOutputNotice(result.content, meta),
 			};
 		}
-		return result;
 	} catch (e) {
 		// Re-throw with formatted message so agent-loop sets isError flag
 		throw new Error(renderError(e));
 	}
+	// The Spotlight experiment shapes what the agent's own calls return; calls a tool or script makes stay whole.
+	const shape = context?.spotlightShape;
+	if (shape && isAgentCall(this, toolCallId, context)) {
+		result = await shape({
+			tool: this.name,
+			toolCallId,
+			args: params,
+			own,
+			result,
+			signal,
+			targets: () => this.matcherPaths?.(params),
+		});
+	}
+	return result;
+}
+
+/**
+ * Whether call `toolCallId` of `tool` is one the agent made: the loop's batch lists it under this tool's name. Calls
+ * dispatched under another tool's call (an `xd://` device behind `write`) or outside the loop (eval's tool bridge, an
+ * advisor) are not.
+ */
+function isAgentCall(tool: AgentTool, toolCallId: string, context: AgentToolContext): boolean {
+	const calls = context.toolCall?.toolCalls;
+	if (!calls) return false;
+	for (const call of calls) {
+		if (call.id === toolCallId) return call.name === tool.name || call.name === tool.customWireName;
+	}
+	return false;
 }
 
 /**

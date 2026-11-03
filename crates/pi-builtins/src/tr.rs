@@ -4,11 +4,10 @@
 
 use std::{ffi::OsString, io::{BufReader, Write}};
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command, value_parser};
 use uucore::display::Quotable;
 
-use crate::host::{Host, Utility, format_usage, matches_parser, os_bytes, util};
+use crate::host::{Host, Utility, format_usage, matches_parser, os_bytes};
 use operation::{
 	DeleteOperation, Sequence, SqueezeOperation, SymbolTranslator, TranslateOperation, flush_output,
 	translate_input,
@@ -1024,11 +1023,6 @@ fn app() -> Command {
 				.num_args(1..)
 				.value_parser(value_parser!(OsString)),
 		)
-}
-
-/// Creates the `tr` builtin registration.
-pub(crate) fn tr_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Tr, SE>()
 }
 
 #[cfg(test)]
