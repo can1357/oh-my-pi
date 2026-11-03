@@ -26,7 +26,7 @@ use crate::bash::{
 	vm::{
 		Cx, Kernel,
 		expand::{Expander, Stop},
-		proc::{PendingWrite, Probe, ProbeResult, Vproc},
+		proc::{Probe, ProbeResult, Vproc},
 		state,
 		zsh::{arith, math::Number, params},
 	},
@@ -520,9 +520,7 @@ fn read_input(
 				if part == 0
 					&& let Some(p) = prompt
 				{
-					ctx.vp
-						.out
-						.push_back(PendingWrite { fd: 2, bytes: p.into(), off: 0 });
+					ctx.vp.queue_out(2, p);
 				}
 				return Err(need);
 			},

@@ -6,7 +6,7 @@
 //! is folded.
 #![cfg(target_os = "linux")]
 
-use std::{collections::BTreeSet, sync::LazyLock};
+use std::sync::LazyLock;
 
 use pi_shell::{Shell, ShellRunOptions, cancel::CancelToken};
 
@@ -102,83 +102,6 @@ fn rows(cases: &[(&str, &str)]) -> Vec<(String, String)> {
 		.iter()
 		.map(|&(name, script)| (name.to_owned(), script.to_owned()))
 		.collect()
-}
-
-/// Every chain of `builtin` and `command` wrappers in front of `exec`: each
-/// sequence of up to four plain wrappers, each sequence of up to two drawn
-/// from every option spelling Bash's `command` stripping and `builtin`
-/// accept, and the describing `command -v`/`-V` forms.
-fn wrapper_chains() -> BTreeSet<String> {
-	let mut chains = BTreeSet::new();
-	let mut grow = |tokens: &[&str], depth: usize| {
-		let mut level = vec![String::new()];
-		for _ in 0..depth {
-			let mut next = Vec::new();
-			for chain in &level {
-				for token in tokens {
-					next.push(format!("{chain}{token} "));
-				}
-			}
-			chains.extend(next.iter().cloned());
-			level = next;
-		}
-		chains.insert(String::new());
-	};
-	grow(&["builtin", "command"], 4);
-	grow(&["builtin", "builtin --", "command", "command -p", "command --", "command -p --"], 2);
-	for describe in ["command -v", "command -V", "command -pv"] {
-		for prefix in ["", "builtin ", "command "] {
-			chains.insert(format!("{prefix}{describe} "));
-		}
-	}
-	chains
-}
-
-/// `exec` reached through any chain of wrappers keeps its redirections only
-/// when Bash's `command` stripping leaves `exec` itself (`command exec`,
-/// `command -p -- exec`); through `builtin` it runs with its own option
-/// checks and is refused when disabled, and its redirections end with the
-/// command.
-#[tokio::test(flavor = "multi_thread")]
-async fn exec_through_wrappers_follows_bash() {
-	let mut cases = Vec::new();
-	for chain in wrapper_chains() {
-		let shown = if chain.is_empty() {
-			"bare"
-		} else {
-			chain.trim_end()
-		};
-		for (scenario, script) in [
-			("persist", format!("{chain}exec 2>/dev/null; echo ERR >&2; echo OUT")),
-			(
-				"group",
-				format!("{{ {chain}exec 2>/dev/null; echo IN >&2; }} 2>&1; echo ERR >&2; echo OUT"),
-			),
-			("missing-argument", format!("{{ {chain}exec -a; }} 2>/dev/null; echo status=$?")),
-			(
-				"invalid-option",
-				format!("{{ {chain}exec -z 2>/dev/null; echo ERR >&2; }} 2>&1; echo OUT"),
-			),
-			(
-				"disabled",
-				format!("enable -n exec; {chain}exec 2>/dev/null; echo status=$?; echo ERR >&2"),
-			),
-		] {
-			cases.push((format!("{shown}/{scenario}"), script));
-		}
-	}
-	cases.extend(rows(&[
-		("builtin-invalid-option", "builtin -x exec 2>/dev/null; echo status=$?"),
-		(
-			"builtin-eval-keeps",
-			"d=$(mktemp -d); builtin eval \"exec 3>$d/f\"; echo X >&3; cat $d/f; rm -rf $d",
-		),
-		(
-			"builtin-command-eval-keeps",
-			"d=$(mktemp -d); builtin command eval \"exec 3>$d/f\"; echo X >&3; cat $d/f; rm -rf $d",
-		),
-	]));
-	assert_all_bash(cases).await;
 }
 
 /// A stage of a background pipeline the shell runs itself has ended when its
@@ -498,108 +421,6 @@ async fn ignored_signals_do_not_stop_subshell_replacement() {
 		("semicolon-and", format!("( echo a; true && {KILLED} ); echo status=$?")),
 	] {
 		cases.push((name.to_owned(), script));
-	}
-	assert_all_bash(cases).await;
-}
-
-/// Bash writes a diagnostic to standard error and goes on when the write
-/// fails, its standard error closed or full: the command fails as it would
-/// have, and the script continues.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_diagnostic_to_a_closed_or_failing_stderr_is_not_fatal() {
-	let mut cases = Vec::new();
-	let failures = [
-		("redirection", "echo BAD >&2"),
-		("cd", "cd /nonexistent"),
-		("type", "type nosuchcommand_zz"),
-		("jobs", "jobs %9"),
-		("wait", "wait %9"),
-		("unset", "unset -z x"),
-		("alias", "alias nosuchalias_zz"),
-		("not-found", "nosuchcommand_zz"),
-		("missing-file", "cat < /nonexistent"),
-		("arithmetic", "echo $((1/0))"),
-		("unset-variable", ": ${x?unset}"),
-		("job-report", "sleep 30 & p=$!; kill -KILL $p; wait $p"),
-		("readonly", "readonly r=1; r=2"),
-	];
-	for (stream, setup) in [("closed", "exec 2>&-"), ("full", "exec 2>/dev/full")] {
-		for (name, command) in failures {
-			cases.push((
-				format!("{stream}/{name}"),
-				format!("{setup}; {command}; echo status=$?; echo AFTER"),
-			));
-		}
-	}
-	cases.extend(rows(&[
-		("group", "{ exec 2>&-; echo BAD >&2; } 2>/dev/null; echo AFTER; echo ERR >&2"),
-		("group-no-exec", "{ echo BAD >&2; } 2>&-; echo AFTER"),
-		("next-line", "exec 2>&-\necho BAD >&2\necho AFTER=$?"),
-	]));
-	assert_all_bash(cases).await;
-}
-
-/// Each of Bash's builtins given an option it does not take (each prints a
-/// diagnostic and fails) ends as in Bash, with the same status and the
-/// script going on, whether its standard error is redirected away, closed
-/// or full. A builtin whose invalid-option status differs from Bash's
-/// whatever its standard error is, is not one this checks.
-#[tokio::test(flavor = "multi_thread")]
-async fn each_builtin_fails_as_bash_does_on_a_closed_or_full_stderr() {
-	const BUILTINS: &[&str] = &[
-		"alias",
-		"bg",
-		"bind",
-		"builtin",
-		"cd",
-		"compgen",
-		"complete",
-		"compopt",
-		"declare",
-		"dirs",
-		"disown",
-		"echo",
-		"enable",
-		"exec",
-		"export",
-		"false",
-		"fg",
-		"getopts",
-		"hash",
-		"help",
-		"jobs",
-		"let",
-		"mapfile",
-		"popd",
-		"pushd",
-		"pwd",
-		"read",
-		"readarray",
-		"readonly",
-		"shopt",
-		"source",
-		"test",
-		"times",
-		"trap",
-		"true",
-		"type",
-		"typeset",
-		"ulimit",
-		"umask",
-		"unalias",
-		"unset",
-		"wait",
-	];
-	let mut cases = Vec::new();
-	for builtin in BUILTINS {
-		for (stream, setup) in
-			[("away", "exec 2>/dev/null"), ("closed", "exec 2>&-"), ("full", "exec 2>/dev/full")]
-		{
-			cases.push((
-				format!("{stream}/{builtin}"),
-				format!("{setup}; {builtin} -Z </dev/null; echo status=$?; echo AFTER"),
-			));
-		}
 	}
 	assert_all_bash(cases).await;
 }

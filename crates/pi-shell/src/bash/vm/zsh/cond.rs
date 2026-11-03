@@ -35,7 +35,7 @@ use crate::bash::{
 		builtins::{Chunk, Ctx, Need, Outcome, R, done, zsh_args::zx as with_ex},
 		exec::{Flow, expanding},
 		probe::{self, absolute},
-		proc::{PendingWrite, Probe, ProbeResult, Slot, Vproc},
+		proc::{Probe, ProbeResult, Slot, Vproc},
 		zsh::{arith, math::Number, params, subscript, zglob, zpattern},
 	},
 	zshopt::ZshOpt,
@@ -610,8 +610,7 @@ fn report(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, line: u32, chunks: Ve
 		match chunk {
 			Chunk::Diag(d) => k.diag(cx, vp, line, d),
 			Chunk::Out(fd, bytes) => {
-				vp.out
-					.push_back(PendingWrite { fd, bytes: bytes.into(), off: 0 });
+				vp.queue_out(fd, bytes);
 			},
 		}
 	}

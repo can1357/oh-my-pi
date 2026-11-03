@@ -233,6 +233,15 @@ impl fmt::Debug for FdRef {
 	}
 }
 
+/// Handles are equal when they hold the same fd object ([`FdRef::key`]).
+impl PartialEq for FdRef {
+	fn eq(&self, other: &Self) -> bool {
+		Arc::ptr_eq(&self.0, &other.0)
+	}
+}
+
+impl Eq for FdRef {}
+
 /// Per-vproc fd table.
 #[derive(Clone, Debug, Default)]
 pub struct FdTable {

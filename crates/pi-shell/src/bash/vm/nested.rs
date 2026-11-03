@@ -62,8 +62,7 @@ pub fn in_subshell(store: &mut dyn StateStore, vp: &Vproc) -> bool {
 /// Finish the command with `bytes` written to its `fd` and `status`.
 fn reply(vp: &mut Vproc, fd: i32, bytes: Vec<u8>, status: i32) -> Option<Flow> {
 	let s = st(vp);
-	s.writes
-		.push_back(PendingWrite { fd, bytes: bytes.into(), off: 0 });
+	s.writes.push_back(PendingWrite::new(fd, bytes));
 	s.status = status;
 	s.stage = Stage::Output;
 	None
@@ -253,14 +252,10 @@ fn launch(
 		},
 	};
 	if let Some(text) = args.listing_text() {
-		child
-			.out
-			.push_back(PendingWrite { fd: 1, bytes: text.into(), off: 0 });
+		child.queue_out(1, text);
 	}
 	if !notes.is_empty() {
-		child
-			.out
-			.push_back(PendingWrite { fd: 2, bytes: notes.into(), off: 0 });
+		child.queue_out(2, notes);
 	}
 	let mut kind = FrameKind::script(src, crate::bash::syntax::Pos::START, ScriptKind::Run);
 	if let FrameKind::Script { stdin: s, .. } = &mut kind {

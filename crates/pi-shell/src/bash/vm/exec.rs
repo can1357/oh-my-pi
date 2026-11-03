@@ -16,8 +16,8 @@ use super::{
 	is_ident, notify, probe,
 	proc::{
 		AssignValue, Atom, Bang, BangStage, Coproc, Depths, Frame, FrameKind, InlineStage, LastBg,
-		LoopKind, LoopRec, ParseSnapshot, PendingSub, PendingWrite, Probe, ProbeResult, Run, Saved,
-		Scratch, ScriptKind, Slot, TryEnd, Vproc,
+		LoopKind, LoopRec, ParseSnapshot, PendingSub, Probe, ProbeResult, Run, Saved, Scratch,
+		ScriptKind, Slot, TryEnd, Vproc,
 	},
 	redir,
 	state::{self, Level, Root, Scope, Var, VarMap},
@@ -669,12 +669,18 @@ fn unpark(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc) {
 	}
 }
 
-/// Write queued diagnostics; the fd that would block, if any. Write errors
+/// Write queued diagnostics, each to the fd object it was queued for
+/// ([`Vproc::queue_out`]); the fd that would block, if any. Write errors
 /// on a diagnostic stream are dropped, as bash does.
 pub fn flush_out(k: &Kernel, vp: &mut Vproc) -> Option<i32> {
 	let mut cx = Context::from_waker(&k.waker);
 	while let Some(w) = vp.out.front_mut() {
-		match vp.fds.handle(w.fd).poll_write(&mut cx, &w.bytes[w.off..]) {
+		let bytes = &w.bytes[w.off..];
+		let polled = match &w.to {
+			Some(h) => h.poll_write(&mut cx, bytes),
+			None => vp.fds.handle(w.fd).poll_write(&mut cx, bytes),
+		};
+		match polled {
 			Poll::Ready(Ok(n)) if n > 0 => {
 				w.off += n;
 				if w.off >= w.bytes.len() {
@@ -2425,9 +2431,7 @@ fn time_end(
 		end.sys.saturating_sub(start.sys),
 	];
 	match time_report(&format, times) {
-		Ok(text) => vp
-			.out
-			.push_back(PendingWrite { fd: 2, bytes: text.into(), off: 0 }),
+		Ok(text) => vp.queue_out(2, text),
 		Err(c) => {
 			let msg = format!("TIMEFORMAT: `{}': invalid format character", char::from(c));
 			k.diag(cx, vp, line, Diag::Usage { msg: msg.into() });
@@ -2472,8 +2476,7 @@ fn zsh_time_end(
 		text.extend_from_slice(&zsh_time_report(&format, b"children", children));
 		text
 	};
-	vp.out
-		.push_back(PendingWrite { fd: 2, bytes: text.into(), off: 0 });
+	vp.queue_out(2, text);
 }
 
 /// zsh's default `TIMEFMT` (`DEFAULT_TIMEFMT`).

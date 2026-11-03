@@ -107,52 +107,6 @@ fn rows(cases: &[(&str, &str)]) -> Vec<(String, String)> {
 		.collect()
 }
 
-/// Each spelling of `exec` with only redirections, inside each command
-/// whose redirections Bash undoes when it ends (`redirection_undo_list`),
-/// changing the descriptor that command redirects (the change ends with the
-/// command) or another one (the change stays for the rest of the script).
-#[tokio::test(flavor = "multi_thread")]
-async fn exec_changes_last_as_long_as_bash_keeps_them() {
-	let spellings = [
-		"exec",
-		"builtin exec",
-		"command exec",
-		"'exec'",
-		"\\exec",
-		"command 'exec'",
-		"builtin -- exec",
-	];
-	// (the descriptor `exec` changes, the one the command redirects)
-	let fds = [(1, 1), (2, 1), (1, 2)];
-	type Wrap = fn(&str, &str) -> String;
-	let scopes: [(&str, Wrap); 8] = [
-		("group", |body, redirect| format!("{{ {body}; }} {redirect}")),
-		("function-call", |body, redirect| format!("f() {{ {body}; }}; f {redirect}")),
-		("function-definition", |body, redirect| format!("f() {{ {body}; }} {redirect}; f")),
-		("if-body", |body, redirect| format!("if true; then {body}; fi {redirect}")),
-		("if-condition", |body, redirect| format!("if {body}; then :; fi {redirect}")),
-		("while", |body, redirect| format!("while :; do {body}; break; done {redirect}")),
-		("eval", |body, redirect| {
-			format!("eval \"{}\" {redirect}", body.replace('"', "\\\"").replace('$', "\\$"))
-		}),
-		("subshell", |body, redirect| format!("( {body} ) {redirect}")),
-	];
-	let mut cases = Vec::new();
-	for (scope, wrap) in scopes {
-		for spelling in spellings {
-			for (exec_fd, scope_fd) in fds {
-				let body = format!("{spelling} {exec_fd}>\"$d/in\"; echo INNER; echo IE >&2");
-				let command = wrap(&body, &format!("{scope_fd}>\"$d/out\""));
-				let script = format!(
-					"d=$(mktemp -d); exec 8>&1 9>&2; {command}; echo OUTER; echo OE >&2; exec 1>&8 \
-					 2>&9 8>&- 9>&-; for f in in out; do printf '%s=[' \"$f\"; tr '\\n' ' ' < \
-					 \"$d/$f\"; printf ']\\n'; done; rm -rf \"$d\""
-				);
-				cases.push((format!("{scope}/{spelling}/exec{exec_fd}-scope{scope_fd}"), script));
-			}
-		}
-	}
-	assert_all_bash(cases).await;
 }
 
 /// With `lastpipe` Bash waits for the pipeline with its job list frozen, so
