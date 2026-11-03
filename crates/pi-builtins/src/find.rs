@@ -4844,10 +4844,9 @@ use std::{
 	time::SystemTime,
 };
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::OsStringValueParser};
 
-use crate::host::{AsyncUtility, Host, async_util, matches_parser};
+use crate::host::{AsyncUtility, Host, matches_parser};
 use matchers::{Follow, WalkEntry};
 
 pub struct Config {
@@ -5362,11 +5361,6 @@ impl AsyncUtility for Find {
 	}
 }
 
-/// Creates the `find` builtin registration.
-pub(crate) fn find_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	async_util::<Find, SE>()
-}
-
 #[cfg(test)]
 mod tests {
 	use std::{fs, path::PathBuf};
@@ -5499,7 +5493,8 @@ mod tests {
 	async fn exec_uses_shell_cwd_and_captures_child_stdout() {
 		let (_dir, root) = fixture();
 		let (code, out, err) =
-			crate::host::run_script("find . -maxdepth 0 -exec /bin/pwd ';'", "", &root).await;
+			crate::host::run_extra(&["find", ".", "-maxdepth", "0", "-exec", "/bin/pwd", ";"], "", &root, &[])
+				.await;
 		assert_eq!(code, 0, "stderr: {err}");
 		assert_eq!(err, "");
 		assert_eq!(out, format!("{}\n", root.display()));
@@ -5513,14 +5508,15 @@ mod tests {
 		let (_dir, root) = fixture();
 		fs::create_dir(root.join("sub")).unwrap();
 		fs::write(root.join("sub/d.txt"), b"x").unwrap();
-		let (code, out, err) = crate::host::run_script(
-			"find . -name d.txt -execdir pwd ';' && find sub -name d.txt -exec wc -c {} +",
-			"",
-			&root,
-		)
-		.await;
+		let (code, out, err) =
+			crate::host::run_extra(&["find", ".", "-name", "d.txt", "-execdir", "pwd", ";"], "", &root, &[]).await;
 		assert_eq!(code, 0, "stderr: {err}");
-		assert_eq!(out, format!("{}\n1 sub/d.txt\n", root.join("sub").display()));
+		assert_eq!(out, format!("{}\n", root.join("sub").display()));
+		let (code, out, err) =
+			crate::host::run_extra(&["find", "sub", "-name", "d.txt", "-exec", "wc", "-c", "{}", "+"], "", &root, &[])
+				.await;
+		assert_eq!(code, 0, "stderr: {err}");
+		assert_eq!(out, "1 sub/d.txt\n");
 	}
 
 	#[tokio::test(flavor = "multi_thread")]
@@ -5802,7 +5798,7 @@ mod tests {
 	#[cfg(unix)]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn printf_into_closed_pipe_stops_without_panicking() {
-		use brush_core::openfiles::OpenFile;
+		use crate::openfile::OpenFile;
 
 		let (_dir, root) = fixture();
 		let (mut host, capture) = crate::host::Host::for_test("find", "", &root);
@@ -5822,7 +5818,7 @@ mod tests {
 	#[cfg(unix)]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn diagnostic_into_closed_pipe_does_not_panic() {
-		use brush_core::openfiles::OpenFile;
+		use crate::openfile::OpenFile;
 
 		use crate::host::StreamWriter;
 

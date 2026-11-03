@@ -11,7 +11,6 @@ use std::{
 	time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{ArgAction, Parser, ValueEnum};
 use globset::{GlobBuilder, GlobMatcher};
 use pi_walker::{
@@ -22,7 +21,7 @@ use pi_walker::{
 use pi_vfs::Metadata;
 use regex::{Regex, RegexBuilder};
 
-use crate::host::{AsyncUtility, Host, async_util, forward_slash_display};
+use crate::host::{AsyncUtility, Host, forward_slash_display};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -33,7 +32,7 @@ use crate::host::{AsyncUtility, Host, async_util, forward_slash_display};
 	max_term_width = 98,
 	args_override_self = true
 )]
-struct FdCli {
+pub(crate) struct FdCli {
 	/// Include hidden directories and files in the search results.
 	#[arg(short = 'H', long, overrides_with = "no_hidden")]
 	hidden: bool,
@@ -601,11 +600,6 @@ impl AsyncUtility for FdCli {
 			},
 		}
 	}
-}
-
-/// Creates the `fd` builtin registration.
-pub(crate) fn fd_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	async_util::<FdCli, SE>()
 }
 
 async fn search(cli: FdCli, base_dir: PathBuf, host: &mut Host) -> io::Result<SearchState> {
@@ -1388,7 +1382,7 @@ mod tests {
 	/// against this seed.
 	fn seeded_tree(tag: &str) -> TempDir {
 		let tree = Builder::new()
-			.prefix(&format!("brush-fd-cancel-{tag}-"))
+			.prefix(&format!("pi-fd-cancel-{tag}-"))
 			.tempdir()
 			.expect("temp tree should be created");
 		fs::write(tree.path().join("haystack.txt"), b"needle\n")

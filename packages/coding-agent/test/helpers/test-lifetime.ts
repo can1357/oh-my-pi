@@ -4,16 +4,20 @@ import {
 	beforeAll as bunBeforeAll,
 	beforeEach as bunBeforeEach,
 	onTestFinished as bunOnTestFinished,
+	setDefaultTimeout as bunSetDefaultTimeout,
 	test as bunTest,
 	type Test,
 } from "bun:test";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { types } from "node:util";
 
 /**
- * Tests and hooks of tracked files that have not settled yet, each with its name. Bun shares one
- * module registry across the test files of a process, so this sees every tracked file in it.
+ * Promises of tracked tests and hooks not yet seen settled, each with its test or hook's name. Bun
+ * shares one module registry across the test files of a process, so this sees every tracked file
+ * in it.
  */
-const unsettled = new Map<object, string>();
+const running = new Map<Promise<unknown>, string>();
 
 /** The first tracked test or hook found still running when a later one started; it stays set. */
 let timedOut: string | undefined;
@@ -22,10 +26,18 @@ let timedOut: string | undefined;
  * Note a timeout: a tracked test or hook still running as another one starts has outlived its
  * timeout. Teardown counts: a body still running as its test's first `afterEach` starts timed out,
  * even if it settles before the next test does.
+ *
+ * Settlement is read from the promise's own state (`Bun.peek.status`), as Bun's runner reads it:
+ * subscribing through `then` would read properties a test can replace on its promise (`then`,
+ * `constructor`, `Symbol.species`).
  */
 function noteTimeout(): void {
 	if (timedOut !== undefined) return;
-	for (const name of unsettled.values()) {
+	for (const [promise, name] of running) {
+		if (Bun.peek.status(promise) !== "pending") {
+			running.delete(promise);
+			continue;
+		}
 		timedOut = name;
 		return;
 	}
@@ -50,24 +62,81 @@ function refuseAfterTimeout(): void {
 	}
 }
 
-/** The native `then`, taken before any test runs: a promise's own `then` may be replaced. */
-const nativeThen = Promise.prototype.then;
+/**
+ * The process's default timeout of tests and hooks: `bun test --timeout <ms>`, read from the
+ * process's own command line since Bun leaves its test flags out of `Bun.argv`; else `[test]
+ * timeout` in the working directory's `bunfig.toml`; else Bun's 5000. Undefined where the command
+ * line cannot be read. A file changes its own default with the tracked {@link TestLifetime.setDefaultTimeout}.
+ */
+const processDefaultTimeoutMs: number | undefined = (() => {
+	let argv: string[];
+	try {
+		argv = fs.readFileSync("/proc/self/cmdline", "utf8").split("\0");
+	} catch {
+		return undefined;
+	}
+	for (const [index, arg] of argv.entries()) {
+		const value = arg === "--timeout" ? argv[index + 1] : arg.startsWith("--timeout=") ? arg.slice(10) : undefined;
+		if (value !== undefined) return Number(value);
+	}
+	try {
+		const config = Bun.TOML.parse(fs.readFileSync(path.join(process.cwd(), "bunfig.toml"), "utf8")) as {
+			test?: { timeout?: unknown };
+		};
+		if (typeof config.test?.timeout === "number") return config.test.timeout;
+	} catch {
+		// No bunfig.toml, or not one Bun could read either.
+	}
+	return 5000;
+})();
+
+/** The timeout Bun applies to a test or hook declared with `options` while its file's default is `fileDefault`. */
+function timeoutOf(options: unknown, fileDefault: number | undefined): number | undefined {
+	if (typeof options === "number") return options;
+	if (typeof options === "object" && options !== null && "timeout" in options && typeof options.timeout === "number") {
+		return options.timeout;
+	}
+	return fileDefault;
+}
 
 /**
- * Run a test or hook body, and keep it in {@link unsettled} until the promise it returns settles.
- * Any native promise counts, also one from another realm (`node:vm`), which Bun awaits too, and its
- * settlement is read through the native `then`, as Bun reads it, not through a `then` the promise
- * may carry of its own.
+ * A cell no one ever notifies: `Atomics.waitAsync` on it is a wait that only real time ends. Bun's
+ * fake timers move `setTimeout` and `Bun.sleep` deadlines, so they cannot keep a deadline.
  */
-function runTracked<T>(name: string, fn: (...args: unknown[]) => T, args: unknown[]): T {
+const neverNotified = new Int32Array(new SharedArrayBuffer(4));
+
+/** Note `promise` as timed out if it is still pending at `deadlineNs` (`Bun.nanoseconds`, real time). */
+function checkAtDeadline(promise: Promise<unknown>, name: string, deadlineNs: number): void {
+	const remainingMs = Math.ceil((deadlineNs - Bun.nanoseconds()) / 1e6);
+	if (remainingMs > 0) {
+		const wait = Atomics.waitAsync(neverNotified, 0, 0, remainingMs);
+		// Re-checked against the real clock: the wait cannot end early, but a deadline is not taken on trust.
+		if (wait.async) void wait.value.then(() => checkAtDeadline(promise, name, deadlineNs));
+		else checkAtDeadline(promise, name, deadlineNs);
+		return;
+	}
+	if (timedOut === undefined && Bun.peek.status(promise) === "pending") timedOut = name;
+}
+
+/**
+ * Run a test or hook body, and keep the promise it returns in {@link running}. Any native promise
+ * counts, also one from another realm (`node:vm`), which Bun awaits too.
+ *
+ * A body still pending at its deadline has timed out, whatever runs next: Bun gives up on it then,
+ * and it may settle before any later tracked test or hook starts (during the next file's module
+ * setup, say), where a pending check would no longer see it. The deadline runs from the body's
+ * entry, as Bun's does, so synchronous work before its first `await` counts.
+ */
+function runTracked<T>(name: string, fn: (...args: unknown[]) => T, args: unknown[], timeoutMs?: number): T {
+	const startNs = Bun.nanoseconds();
 	const result = fn(...args);
 	if (types.isPromise(result)) {
-		const entry = {};
-		unsettled.set(entry, name);
-		const settle = (): void => {
-			unsettled.delete(entry);
-		};
-		Reflect.apply(nativeThen, result, [settle, settle]);
+		const promise = result as Promise<unknown>;
+		running.set(promise, name);
+		if (timeoutMs !== undefined && Number.isFinite(timeoutMs) && timeoutMs > 0) {
+			// Just past Bun's own deadline for the same body.
+			checkAtDeadline(promise, name, startNs + (timeoutMs + 1) * 1e6);
+		}
 	}
 	return result;
 }
@@ -98,8 +167,12 @@ function rowArity(row: unknown): number {
 	return Array.isArray(row) ? row.length : 1;
 }
 
-/** `rows` is the table of a `.each`, whose body takes its row as arguments; undefined for a plain test. */
-function trackTest(base: AnyTest, rows?: readonly unknown[]): AnyTest {
+/**
+ * `rows` is the table of a `.each`, whose body takes its row as arguments; undefined for a plain
+ * test. `fileDefault` is the file's default timeout as of each registration, which is when Bun
+ * applies `setDefaultTimeout`.
+ */
+function trackTest(base: AnyTest, fileDefault: () => number | undefined, rows?: readonly unknown[]): AnyTest {
 	const tracked = ((label: string, fn: TestBody | undefined, options?: number) => {
 		// A bodyless `.todo` or `.skip` declares a test that never runs.
 		if (typeof fn !== "function") return base(label, fn as never, options);
@@ -107,18 +180,19 @@ function trackTest(base: AnyTest, rows?: readonly unknown[]): AnyTest {
 		if (fn.length > params) {
 			throw new Error("trackTestLifetime: a tracked test takes no `done` callback; return a promise instead");
 		}
-		return base(label, (...args: unknown[]) => runTracked(label, fn, args), options);
+		const timeoutMs = timeoutOf(options, fileDefault());
+		return base(label, (...args: unknown[]) => runTracked(label, fn, args, timeoutMs), options);
 	}) as unknown as AnyTest;
 	for (const variant of SERIAL_VARIANTS) {
-		Object.defineProperty(tracked, variant, { get: () => trackTest(base[variant], rows) });
+		Object.defineProperty(tracked, variant, { get: () => trackTest(base[variant], fileDefault, rows) });
 	}
 	for (const condition of SERIAL_CONDITIONS) {
 		Object.defineProperty(tracked, condition, {
-			value: (when: boolean) => trackTest(base[condition](when), rows),
+			value: (when: boolean) => trackTest(base[condition](when), fileDefault, rows),
 		});
 	}
 	Object.defineProperty(tracked, "each", {
-		value: (table: readonly unknown[]) => trackTest(base.each(table as unknown[][]) as AnyTest, table),
+		value: (table: readonly unknown[]) => trackTest(base.each(table as unknown[][]) as AnyTest, fileDefault, table),
 	});
 	for (const concurrent of ["concurrent", "concurrentIf"]) {
 		Object.defineProperty(tracked, concurrent, {
@@ -170,6 +244,8 @@ export interface TestLifetime {
 	beforeAll: Hook;
 	afterAll: Hook;
 	onTestFinished: typeof bunOnTestFinished;
+	/** Bun's `setDefaultTimeout` for this file, which tracked tests and hooks registered after it time out by too. */
+	setDefaultTimeout: typeof bunSetDefaultTimeout;
 }
 
 /**
@@ -177,34 +253,40 @@ export interface TestLifetime {
  * body could have changed.
  *
  * Every test, hook and `onTestFinished` callback declared through the returned functions is tracked
- * until the promise it returns settles. When one is still running as any later hook or test starts
- * — its own test's teardown included — it timed out, and every later test of every tracked file in
- * the process fails before its setup with that test's name (see {@link refuseAfterTimeout}).
- * `afterEach`, `afterAll` and `onTestFinished` callbacks still run, so a timed-out test's cleanup
- * releases the processes and files it owns.
+ * until the promise it returns settles. One still pending at its deadline (its own timeout, else the
+ * file's default), or still running as any later hook or test starts — its own test's teardown
+ * included — timed out, and every later test of every tracked file in the process fails before its
+ * setup with that test's name (see {@link refuseAfterTimeout}). `afterEach`, `afterAll` and
+ * `onTestFinished` callbacks still run, so a timed-out test's cleanup releases the processes and
+ * files it owns.
  *
- * Call once at file scope, before the file declares any hook, and take every test, hook and
- * `onTestFinished` from the result: the checks run in a `beforeEach` and an `afterEach` this
- * registers, and at the start of every tracked hook and callback.
+ * Call once at file scope, before the file declares any hook, and take every test, hook,
+ * `onTestFinished` and `setDefaultTimeout` from the result: the checks run in a `beforeEach` and an
+ * `afterEach` this registers, at the start of every tracked hook and callback, and at each tracked
+ * body's deadline.
  */
 export function trackTestLifetime(): TestLifetime {
 	bunBeforeEach(startTest);
 	bunAfterEach(noteTeardown);
-	const test = trackTest(bunTest as AnyTest) as unknown as Test<[]>;
+	let fileDefaultMs = processDefaultTimeoutMs;
+	const fileDefault = () => fileDefaultMs;
+	const test = trackTest(bunTest as AnyTest, fileDefault) as unknown as Test<[]>;
 	const hook =
 		(register: Hook, name: string, atStart: () => void): Hook =>
 		(fn, options) => {
 			refuseDoneCallback(name.replace(/^an? /, ""), fn as (...args: never[]) => unknown);
+			const timeoutMs = timeoutOf(options, fileDefaultMs);
 			return register(() => {
 				atStart();
-				return runTracked(name, fn as () => unknown, []);
+				return runTracked(name, fn as () => unknown, [], timeoutMs);
 			}, options);
 		};
 	const onTestFinished: typeof bunOnTestFinished = (fn, options) => {
 		refuseDoneCallback("onTestFinished callback", fn as (...args: never[]) => unknown);
+		const timeoutMs = timeoutOf(options, fileDefaultMs);
 		return bunOnTestFinished(() => {
 			noteTeardown();
-			return runTracked("an onTestFinished callback", fn as () => unknown, []);
+			return runTracked("an onTestFinished callback", fn as () => unknown, [], timeoutMs);
 		}, options);
 	};
 	return {
@@ -215,5 +297,9 @@ export function trackTestLifetime(): TestLifetime {
 		beforeAll: hook(bunBeforeAll, "a beforeAll hook", refuseAfterTimeout),
 		afterAll: hook(bunAfterAll, "an afterAll hook", noteTimeout),
 		onTestFinished,
+		setDefaultTimeout: milliseconds => {
+			bunSetDefaultTimeout(milliseconds);
+			fileDefaultMs = milliseconds;
+		},
 	};
 }

@@ -22,11 +22,10 @@ use pi_vfs::BlockingFs;
 use pi_vfs::OpenOptions;
 use uucore::{display::Quotable, parser::shortcut_value_parser::ShortcutValueParser};
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use thiserror::Error as ThisError;
 
 use crate::{
-	host::{Host, Utility, format_usage, matches_parser, util},
+	host::{Host, Utility, format_usage, matches_parser},
 	time_zone::shell_time_zone,
 };
 
@@ -929,11 +928,6 @@ fn pathbuf_from_stdout() -> Result<PathBuf, TouchError> {
 	{
 		Ok(PathBuf::from("/dev/stdout"))
 	}
-}
-
-/// Creates the `touch` builtin registration.
-pub(crate) fn touch_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Touch, SE>()
 }
 
 #[cfg(test)]

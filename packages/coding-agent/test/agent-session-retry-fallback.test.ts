@@ -9006,6 +9006,89 @@ describe("AgentSession retry fallback", () => {
 		expect(finalAssistant.content).toEqual([{ type: "text", text: "Recovered on the same model." }]);
 	});
 
+	// A request whose `!command` apiKey produced nothing sent nothing, and the same model serves once
+	// the command prints a key again. It retries that model when the retry will run (budget left, the
+	// command's backoff under `retry.maxDelayMs`), and walks the fallback chain otherwise.
+	const keyCommandCases = [
+		{
+			name: "retries the same model while its apiKey command produces no key",
+			keyBackAfter: 1,
+			retryAfterMs: 0,
+			maxDelayMs: 60_000,
+			resolves: ["primary", "primary"],
+			answeredBy: "anthropic",
+		},
+		{
+			name: "walks the fallback chain once the retries run out while its apiKey command produces no key",
+			keyBackAfter: Number.POSITIVE_INFINITY,
+			retryAfterMs: 0,
+			maxDelayMs: 60_000,
+			resolves: ["primary", "primary", "primary", "fallback"],
+			answeredBy: "openai",
+		},
+		{
+			name: "walks the fallback chain at once when the apiKey command's backoff exceeds retry.maxDelayMs",
+			keyBackAfter: 1,
+			retryAfterMs: 30_000,
+			maxDelayMs: 1000,
+			resolves: ["primary", "fallback"],
+			answeredBy: "openai",
+		},
+	];
+	for (const { name, keyBackAfter, retryAfterMs, maxDelayMs, resolves, answeredBy } of keyCommandCases) {
+		it(name, async () => {
+			const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+			const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+			if (!primaryModel || !fallbackModel) throw new Error("Expected bundled test models to exist");
+			const primarySelector = `${primaryModel.provider}/${primaryModel.id}`;
+			const fallbackSelector = `${fallbackModel.provider}/${fallbackModel.id}`;
+			const selectorOf = { primary: primarySelector, fallback: fallbackSelector };
+
+			const keyResolves: string[] = [];
+			let primaryKeyFailures = 0;
+			const agent = new Agent({
+				getApiKey: model => {
+					const selector = `${model.provider}/${model.id}`;
+					keyResolves.push(selector);
+					if (selector === primarySelector && primaryKeyFailures < keyBackAfter) {
+						primaryKeyFailures++;
+						const hint = retryAfterMs > 0 ? ` retry-after-ms=${retryAfterMs}` : "";
+						throw new AIError.CredentialUnavailableError(
+							`The apiKey command for provider ${model.provider} produced no key${hint}`,
+						);
+					}
+					return `${model.provider}-test-key`;
+				},
+				initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: model => recoveredTextStream(model, `Answered by ${model.provider}.`),
+			});
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"retry.baseDelayMs": 0,
+				"retry.maxRetries": 2,
+				"retry.maxDelayMs": maxDelayMs,
+				"retry.modelFallback": true,
+				"retry.fallbackChains": { default: [fallbackSelector] },
+			});
+			settings.setModelRole("default", primarySelector);
+			session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+			const fallbackApplied: string[] = [];
+			session.subscribe(event => {
+				if (event.type === "retry_fallback_applied") fallbackApplied.push(event.to);
+			});
+			mockSchedulerWaitWithClock();
+
+			await session.prompt("Answer");
+			await session.waitForIdle();
+
+			expect(keyResolves).toEqual(resolves.map(which => selectorOf[which as keyof typeof selectorOf]));
+			expect(fallbackApplied).toEqual(resolves.includes("fallback") ? [fallbackSelector] : []);
+			expect(getLastAssistantMessage(session).content).toEqual([
+				{ type: "text", text: `Answered by ${answeredBy}.` },
+			]);
+		});
+	}
+
 	it("does not reset the retry budget for a chain entry that resolves to the failing model", async () => {
 		const primaryModel = getBundledModel("openrouter", "z-ai/glm-5.2");
 		if (!primaryModel) {

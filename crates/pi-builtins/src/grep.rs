@@ -17,7 +17,6 @@ use std::{
 	},
 };
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use futures::{StreamExt, stream};
 use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, ValueEnum, parser::ValueSource};
 use globset::{Glob, GlobMatcher};
@@ -34,7 +33,7 @@ use pi_walker::{
 	walk,
 };
 use crate::bre;
-use crate::host::{AsyncUtility, Host, async_util};
+use crate::host::{AsyncUtility, Host};
 use crate::stdio;
 
 /// Exit status of a `grep` or `rg` run: 0 when a line was selected, 1 when
@@ -1802,11 +1801,6 @@ impl AsyncUtility for Grep {
 }
 }
 
-/// Creates the GNU `grep` builtin registration.
-pub(crate) fn grep_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	async_util::<Grep, SE>()
-}
-
 #[cfg(test)]
 mod tests {
 	use std::{
@@ -1817,7 +1811,7 @@ mod tests {
 	use parking_lot::Mutex;
 
 	use super::*;
-	use brush_core::openfiles;
+	use crate::openfile as openfiles;
 	use crate::host::{Host, run_async_util};
 	#[cfg(unix)]
 	use crate::host::tree_with_sparse_file;
@@ -1879,26 +1873,7 @@ mod tests {
 		}
 	}
 
-	impl openfiles::Stream for SnapshottingStdin {
-		fn clone_box(&self) -> Box<dyn openfiles::Stream> {
-			Box::new(Self {
-				pos:      self.pos,
-				snapped:  self.snapped,
-				stdout:   Arc::clone(&self.stdout),
-				snapshot: Arc::clone(&self.snapshot),
-			})
-		}
-
-		#[cfg(unix)]
-		fn try_clone_to_owned(&self) -> Result<std::os::fd::OwnedFd, brush_core::Error> {
-			Err(brush_core::error::ErrorKind::CannotConvertToNativeFd.into())
-		}
-
-		#[cfg(unix)]
-		fn try_borrow_as_fd(&self) -> Result<std::os::fd::BorrowedFd<'_>, brush_core::Error> {
-			Err(brush_core::error::ErrorKind::CannotConvertToNativeFd.into())
-		}
-	}
+	impl openfiles::Stream for SnapshottingStdin {}
 
 	async fn run(args: &[&str], stdin: &str) -> (i32, String, String) {
 		let (code, capture) = run_async_util::<Grep>(args, stdin, "/").await;
