@@ -165,9 +165,12 @@ pub struct GlobOptions {
 	pub sort_by_mtime:        bool,
 	/// Descend into `node_modules`; `None` does so when the pattern names it.
 	pub include_node_modules: Option<bool>,
+	/// Descend into `.git` directories (default: pruned).
+	pub include_git:          bool,
 	/// Traversal: `hidden`, `gitignore`, `follow_links`, `cache`, `workers`
-	/// are honoured; `.git` is always pruned, and detail, depth, and
-	/// `node_modules` pruning follow the pattern and the options above.
+	/// are honoured; `.git` is pruned unless [`Self::include_git`], and
+	/// detail, depth, and `node_modules` pruning follow the pattern and the
+	/// options above.
 	pub walk:                 walk::Options,
 }
 
@@ -223,7 +226,7 @@ pub async fn glob(fs: &Fs, root: &Path, opts: &GlobOptions) -> Result<Vec<GlobMa
 		(a, b) => a.or(b),
 	};
 	let wopts = walk::Options {
-		skip_git: true,
+		skip_git: !opts.include_git,
 		skip_node_modules: !opts.include_node_modules.unwrap_or(selector.node_modules),
 		detail: if opts.sort_by_mtime {
 			Detail::Full
@@ -488,6 +491,20 @@ mod tests {
 				.expect("compile")
 				.mentions_node_modules()
 		);
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn git_directories_are_listed_only_when_included() {
+		let dir = TempDir::new();
+		dir.write(".git/HEAD");
+		dir.write("sub/.git/config");
+		dir.write("src/HEAD");
+		assert_eq!(paths(&run(dir.path(), &options("HEAD")).await), ["src/HEAD"]);
+		let included = GlobOptions { include_git: true, ..options("*") };
+		let result = run(dir.path(), &included).await;
+		let found = paths(&result);
+		assert!(found.contains(&".git/HEAD"), "{found:?}");
+		assert!(found.contains(&"sub/.git/config"), "{found:?}");
 	}
 
 	#[tokio::test(flavor = "multi_thread")]

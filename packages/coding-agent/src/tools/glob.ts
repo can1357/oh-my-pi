@@ -38,6 +38,7 @@ const findSchema = type({
 	"path?": "string",
 	"hidden?": "boolean",
 	"gitignore?": "boolean",
+	"git?": "boolean",
 	"limit?": "number",
 	"depth?": "number",
 });
@@ -71,8 +72,10 @@ export interface GlobOperationsOptions {
 	limit: number;
 	/** Include dotfiles. Resolved from the caller's `hidden`, defaulting to true. */
 	hidden: boolean;
-	/** Honour gitignore files. Resolved from the caller's `gitignore`, defaulting to true. */
+	/** Honour gitignore files and skip `node_modules`. Resolved from the caller's `gitignore`, defaulting to true. */
 	gitignore: boolean;
+	/** List inside `.git` directories. Resolved from the caller's `git`, defaulting to false. */
+	git: boolean;
 	/** Restrict matches to this entry type, including symlinks to that type. */
 	fileType?: natives.FileType;
 	/** Deepest entry depth to report below the search root (its children are depth 1); unlimited when absent. */
@@ -197,7 +200,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 		onUpdate?: AgentToolUpdateCallback<GlobToolDetails>,
 		_context?: AgentToolContext,
 	): Promise<AgentToolResult<GlobToolDetails>> {
-		const { path: pathInput, limit, hidden, gitignore, depth } = params;
+		const { path: pathInput, limit, hidden, gitignore, git, depth } = params;
 
 		throwIfAborted(signal);
 		// Preparation still rejects immediately on caller abort. Once every
@@ -292,6 +295,8 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 			if (depth !== undefined && !(Number.isInteger(depth) && depth >= 1)) {
 				throw new ToolError("`depth` must be a positive integer (1 = the search root's direct children)");
 			}
+			// Native depth is 32-bit; anything deeper is unlimited in practice.
+			const walkDepth = depth === undefined ? undefined : Math.min(depth, 0xffff_ffff);
 			// A request above the hard cap is silently reduced today; say so up
 			// front so `limit=1000` no longer reads as "200 is all there is" (#13263).
 			const clampNotice =
@@ -300,6 +305,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 					: undefined;
 			const includeHidden = hidden ?? true;
 			const useGitignore = gitignore ?? true;
+			const includeGit = git ?? false;
 			const timeoutMs = this.#timeoutMs;
 			const timeoutSignal = AbortSignal.timeout(timeoutMs);
 			const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
@@ -446,12 +452,16 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 						const results = await runCustom(
 							Promise.resolve(
 								customOps.glob(target.globPattern, target.searchPath, {
-									ignore: ["**/node_modules/**", "**/.git/**"],
+									ignore: [
+										...(useGitignore ? ["**/node_modules/**"] : []),
+										...(includeGit ? [] : ["**/.git/**"]),
+									],
 									limit: effectiveLimit,
 									hidden: includeHidden,
 									gitignore: useGitignore,
+									git: includeGit,
 									fileType,
-									maxDepth: depth,
+									maxDepth: walkDepth,
 									signal: combinedSignal,
 								}),
 							),
@@ -459,12 +469,16 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 						if (results.timedOut) return [] as string[];
 						// A backend that ignores `maxDepth` must not widen the search past it.
 						const withinDepth = (matchPath: string): boolean => {
-							if (depth === undefined) return true;
+							if (walkDepth === undefined) return true;
 							const resolved = resolveSearchResultPath(target.searchPath, matchPath);
-							const relative = relativeSearchResultPath(target.searchPath, resolved);
-							// Below an internal-URL root the result keeps its URL; the backend owns its depth.
-							if (relative === resolved) return true;
-							return relative.replace(/\/+$/, "").split("/").length <= depth;
+							let relative = relativeSearchResultPath(target.searchPath, resolved);
+							// Below an internal-URL root the result can keep its URL; measure it from the root.
+							if (relative === resolved) {
+								const base = target.searchPath.endsWith("/") ? target.searchPath : `${target.searchPath}/`;
+								if (!resolved.startsWith(base)) return false;
+								relative = resolved.slice(base.length);
+							}
+							return relative.replace(/\/+$/, "").split("/").length <= walkDepth;
 						};
 						const inDepth = results.value.filter(withinDepth);
 						return inDepth.map(matchPath => formatMatchPath(matchPath, target.searchPath, fileType));
@@ -596,9 +610,12 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 							fileType: target.directoryOnly ? natives.FileType.Dir : undefined,
 							hidden: includeHidden,
 							maxResults: effectiveLimit,
-							maxDepth: depth,
+							maxDepth: walkDepth,
 							sortByMtime: true,
 							gitignore: useGitignore,
+							// Without gitignore the walk keeps `node_modules` too, as `find` does.
+							includeNodeModules: useGitignore ? undefined : true,
+							includeGit,
 							// parseFindPattern explicitly prepends "**/" when the user's
 							// pattern begins with a glob (so `*.ts` becomes `**/*.ts`).
 							// Anything that arrives here without "**/" was scoped to a

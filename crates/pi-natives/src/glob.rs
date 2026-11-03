@@ -98,6 +98,8 @@ pub struct GlobOptions<'env> {
 	/// Include `node_modules` entries when the pattern does not explicitly
 	/// mention them.
 	pub include_node_modules: Option<bool>,
+	/// List entries inside `.git` directories (default: false).
+	pub include_git:          Option<bool>,
 	/// Abort signal for cancelling the operation.
 	pub signal:               Option<Unknown<'env>>,
 	/// Timeout in milliseconds for the operation.
@@ -163,6 +165,7 @@ pub fn glob<'env>(
 		sort_by_mtime,
 		cache,
 		include_node_modules,
+		include_git,
 		timeout_ms,
 		signal,
 		filesystem,
@@ -176,6 +179,7 @@ pub fn glob<'env>(
 		max_results: max_results.map(|value| value as usize),
 		sort_by_mtime: sort_by_mtime.unwrap_or(false),
 		include_node_modules,
+		include_git: include_git.unwrap_or(false),
 		walk: pi_walker::walk::Options {
 			hidden: hidden.unwrap_or(false),
 			gitignore: gitignore.unwrap_or(true),
