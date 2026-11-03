@@ -6210,22 +6210,30 @@ mod tests {
 	/// `CDPATH`, against Bash 5.2.21: each row's output is Bash's, less the
 	/// `script: line N:` prefix Bash puts on a builtin's message, which this
 	/// shell puts on none. Each row runs in a fresh directory holding `file`,
-	/// `d/sub` and `locked`, a directory with no search permission. `cd` printed
-	/// the shell's own error (`error: cd: i/o error: No such file or directory
-	/// (os error 2)`), which names no directory; it entered a directory it may
-	/// not search; it had no `CDPATH`; an unknown option, a second directory or
-	/// an empty one got its parser's message and status 2; and `popd` dropped
-	/// the entry it could not enter, and put `error: ` before `directory stack
-	/// empty`.
+	/// `d/sub`, `link -> d` and `locked`, a directory with no search permission.
+	/// `cd` printed the shell's own error (`error: cd: i/o error: No such file
+	/// or directory (os error 2)`), which names no directory; it entered a
+	/// directory it may not search; it had no `CDPATH`; an unknown option, a
+	/// second directory or an empty one got its parser's message and status 2;
+	/// and `popd` dropped the entry it could not enter, and put `error: ` before
+	/// `directory stack empty`. `CDPATH` applies to a written directory only,
+	/// not to `$HOME` or `$OLDPWD`; `cd -` prints `$OLDPWD` as written; `-L`
+	/// overrides `set -P`, which `pushd` and `popd` follow; `cdable_vars` names
+	/// a directory by a variable; and a removed working directory is still `.`,
+	/// with Bash's `getcwd` message, which `cd -P -e` makes a failure.
 	#[cfg(unix)]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn directory_changes_fail_as_bash_reports_them() {
-		const SETUP: &str =
-			"unset CDPATH; top=$PWD; : >file; mkdir -p locked/inner d/sub; chmod 000 locked; ";
+		const SETUP: &str = "unset CDPATH; top=$PWD; : >file; mkdir -p locked/inner d/sub; ln -s d \
+		                     link; chmod 000 locked; ";
 		const CLEANUP: &str = "; cd \"$top\"; chmod 755 locked";
 		let long = "a".repeat(300);
 		let nf = "No such file or directory";
 		let usage = "cd: usage: cd [-L|[-P [-e]] [-@]] [dir]";
+		let lost = "cd: error retrieving current directory: getcwd: cannot access parent \
+		            directories: No such file or directory\n";
+		let gone = "mkdir gone; cd gone; rmdir \"$top/gone\"; ";
+		let state = "echo \"S=$? PWD=<${PWD#$top}> OLDPWD=<${OLDPWD#$top}>\"";
 		let same = |name: &str| format!("[ \"$PWD\" = \"$top{name}\" ]");
 		// (row, script, what Bash prints, whether the row needs a directory the
 		// user may not search, which root may)
@@ -6445,6 +6453,194 @@ mod tests {
 				"popd, an empty stack",
 				"popd; echo \"S=$?\"".into(),
 				"popd: directory stack empty\nS=1\n".into(),
+				false,
+			),
+			(
+				"HOME is not looked for in CDPATH",
+				format!("HOME=sub; CDPATH=d; cd; echo \"S=$?\"; {} && echo STAYED", same("")),
+				format!("cd: sub: {nf}\nS=1\nSTAYED\n"),
+				false,
+			),
+			(
+				"OLDPWD is not looked for in CDPATH",
+				format!("OLDPWD=sub; CDPATH=d; cd -; echo \"S=$?\"; {} && echo STAYED", same("")),
+				format!("cd: sub: {nf}\nS=1\nSTAYED\n"),
+				false,
+			),
+			(
+				"- prints OLDPWD as written",
+				format!("OLDPWD=d; cd -; echo \"S=$?\"; {} && echo IN", same("/d")),
+				"d\nS=0\nIN\n".into(),
+				false,
+			),
+			(
+				"an empty directory sets OLDPWD",
+				"unset OLDPWD; cd \"\"; echo \"S=$?\"; [ \"$OLDPWD\" = \"$top\" ] && echo OLDPWD-SET"
+					.into(),
+				"S=0\nOLDPWD-SET\n".into(),
+				false,
+			),
+			(
+				"an empty HOME sets OLDPWD",
+				format!(
+					"unset OLDPWD; HOME=; cd; echo \"S=$?\"; [ \"$OLDPWD\" = \"$top\" ] && echo \
+					 OLDPWD-SET; {} && echo STAYED",
+					same("")
+				),
+				"S=0\nOLDPWD-SET\nSTAYED\n".into(),
+				false,
+			),
+			(
+				"an empty directory is looked for in CDPATH",
+				format!(
+					"CDPATH=$top/d; cd \"\" >\"$top/out\"; echo \"S=$?\"; [ \"$(cat \"$top/out\")\" = \
+					 \"$top/d\" ] && echo PRINTED; {} && echo IN",
+					same("/d")
+				),
+				"S=0\nPRINTED\nIN\n".into(),
+				false,
+			),
+			(
+				"CDPATH under -P prints the entry's spelling",
+				format!("CDPATH=link; cd -P sub; echo \"S=$?\"; {} && echo PHYSICAL", same("/d/sub")),
+				"link/sub\nS=0\nPHYSICAL\n".into(),
+				false,
+			),
+			(
+				"CDPATH under -P, an entry ending in /",
+				"CDPATH=link/; cd -P sub; echo \"S=$?\"".into(),
+				"link/sub\nS=0\n".into(),
+				false,
+			),
+			(
+				"CDPATH under set -P",
+				"set -P; CDPATH=link; cd sub; echo \"S=$?\"".into(),
+				"link/sub\nS=0\n".into(),
+				false,
+			),
+			(
+				"CDPATH prints the logical directory",
+				"CDPATH=link; cd sub >\"$top/out\"; echo \"S=$?\"; [ \"$(cat \"$top/out\")\" = \
+				 \"$top/link/sub\" ] && echo LOGICAL"
+					.into(),
+				"S=0\nLOGICAL\n".into(),
+				false,
+			),
+			(
+				"-L overrides set -P",
+				format!("set -P; cd -L link; echo \"S=$?\"; {} && echo LOGICAL", same("/link")),
+				"S=0\nLOGICAL\n".into(),
+				false,
+			),
+			(
+				"set -P resolves links",
+				format!("set -P; cd link; echo \"S=$?\"; {} && echo PHYSICAL", same("/d")),
+				"S=0\nPHYSICAL\n".into(),
+				false,
+			),
+			(
+				"the last of -P and -L wins",
+				format!("cd -P -L link; echo \"S=$?\"; {} && echo LOGICAL", same("/link")),
+				"S=0\nLOGICAL\n".into(),
+				false,
+			),
+			(
+				"cdable_vars",
+				format!("shopt -s cdable_vars; aa=d; cd aa; echo \"S=$?\"; {} && echo IN", same("/d")),
+				"d\nS=0\nIN\n".into(),
+				false,
+			),
+			(
+				"cdable_vars, a value that is no directory",
+				"shopt -s cdable_vars; aa=nosuch; cd aa; echo \"S=$?\"".into(),
+				format!("cd: aa: {nf}\nS=1\n"),
+				false,
+			),
+			(
+				"cdable_vars, a directory comes first",
+				format!("shopt -s cdable_vars; d=sub; cd d; echo \"S=$?\"; {} && echo DIR", same("/d")),
+				"S=0\nDIR\n".into(),
+				false,
+			),
+			(
+				"no cdable_vars",
+				"aa=d; cd aa; echo \"S=$?\"".into(),
+				format!("cd: aa: {nf}\nS=1\n"),
+				false,
+			),
+			(
+				"pushd under set -P",
+				format!(
+					"set -P; pushd link >/dev/null; echo \"S=$?\"; {} && echo PHYSICAL",
+					same("/d")
+				),
+				"S=0\nPHYSICAL\n".into(),
+				false,
+			),
+			(
+				"popd under set -P",
+				format!(
+					"set -P; pushd -n link >/dev/null; popd >/dev/null; echo \"S=$?\"; {} && echo \
+					 PHYSICAL",
+					same("/d")
+				),
+				"S=0\nPHYSICAL\n".into(),
+				false,
+			),
+			(
+				"a removed directory, cd .",
+				format!("{gone}cd .; {state}"),
+				format!("{lost}S=0 PWD=</gone/.> OLDPWD=</gone>\n"),
+				false,
+			),
+			(
+				"a removed directory, cd ./.",
+				format!("{gone}cd ./.; {state}"),
+				format!("{lost}S=0 PWD=</gone/./.> OLDPWD=</gone>\n"),
+				false,
+			),
+			(
+				"a removed directory, cd -P .",
+				format!("{gone}cd -P .; {state}"),
+				format!("{lost}S=0 PWD=</gone/.> OLDPWD=</gone>\n"),
+				false,
+			),
+			(
+				"a removed directory, cd -P -e .",
+				format!("{gone}cd -P -e .; {state}"),
+				format!("{lost}S=1 PWD=</gone/.> OLDPWD=</gone>\n"),
+				false,
+			),
+			(
+				"a removed directory, cd -e . (logical)",
+				format!("{gone}cd -e .; {state}"),
+				format!("{lost}S=0 PWD=</gone/.> OLDPWD=</gone>\n"),
+				false,
+			),
+			(
+				"a removed directory, cd \"\"",
+				format!("{gone}cd \"\"; {state}"),
+				format!("cd: : {nf}\nS=1 PWD=</gone> OLDPWD=<>\n"),
+				false,
+			),
+			(
+				"a removed directory, its own name",
+				format!("{gone}cd \"$PWD\" 2>/dev/null; echo \"S=$?\""),
+				"S=1\n".into(),
+				false,
+			),
+			(
+				"a removed directory, cd ..",
+				format!("{gone}cd ..; echo \"S=$? PWD=<${{PWD#$top}}>\""),
+				"S=0 PWD=<>\n".into(),
+				false,
+			),
+			(
+				"a removed directory, pushd .",
+				format!(
+					"{gone}pushd . >/dev/null; echo \"S=$? PWD=<${{PWD#$top}}> n=$(dirs -p | wc -l)\""
+				),
+				format!("{lost}S=0 PWD=</gone/.> n=2\n"),
 				false,
 			),
 		];
