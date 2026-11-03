@@ -863,11 +863,12 @@ export class InputController {
 
 	/**
 	 * Keyboard link picking. `app.links.hint` enters link-hint mode, which then owns the keyboard
-	 * while the editor has focus: a lowercase letter narrows the tags, and any other key cancels and
-	 * is swallowed so a stray Esc or Enter does nothing else. Ctrl+C and a paste cancel and still do
-	 * what they always do. Key releases and repeats (the hint key's own) are ignored; mouse reports
-	 * pass through untouched. Keys the TUI routes before input listeners (a space held for
-	 * push-to-talk) never reach this.
+	 * while the editor has focus: a lowercase letter narrows the tags, the hint key again or Page Up
+	 * opens the fullscreen link browser (for links scrolled into terminal scrollback), and any other
+	 * key cancels and is swallowed so a stray Esc or Enter does nothing else. Ctrl+C and a paste
+	 * cancel and still do what they always do. Key releases and repeats (the hint key's own) are
+	 * ignored; mouse reports pass through untouched. Keys the TUI routes before input listeners (a
+	 * space held for push-to-talk) never reach this.
 	 */
 	#handleLinkHintInput(data: string): { consume?: boolean } | undefined {
 		// Overlays and editor-area dialogs (ask, selectors, hook input) own the keyboard.
@@ -885,6 +886,11 @@ export class InputController {
 		if (matchesKey(data, "ctrl+c") || data.startsWith("\x1b[200~")) {
 			this.ctx.cancelLinkHints();
 			return undefined;
+		}
+		if (this.ctx.keybindings.matches(data, "app.links.hint") || matchesKey(data, "pageUp")) {
+			// Leaves link-hint mode whether or not the browser opens.
+			if (!this.ctx.openLinkBrowser()) this.ctx.showStatus("No extension links in the transcript");
+			return { consume: true };
 		}
 		const key = parseKey(data);
 		if (key !== undefined && /^[a-z]$/.test(key)) this.ctx.typeLinkHint(key);
@@ -1780,18 +1786,14 @@ export class InputController {
 		try {
 			// SIGSTOP — not SIGTSTP — to the foreground process group (pid=0).
 			//
-			// SIGTSTP: brush-core (the embedded shell behind every bash tool call)
-			// installs a tokio SIGTSTP listener on `Process::wait` to detect when
-			// its children have been stopped (`crates/vendor/brush-core/src/sys/
-			// unix/signal.rs::tstp_signal_listener` → `tokio::signal::unix::
-			// signal(SIGTSTP)`). Per tokio's documented contract, the first call
-			// for a given SignalKind permanently replaces the kernel-default
-			// handler for the lifetime of the process. So once the user has
-			// issued even one bash command — e.g. `/usr/bin/true` — SIGTSTP no
-			// longer stops omp: tokio swallows it and the TUI ends up torn down
-			// while the process keeps running with no live terminal (issue
-			// [#3461]). SIGSTOP cannot be caught, blocked, or ignored, so the
-			// kernel stops the process regardless of installed handlers.
+			// SIGTSTP can be caught: any in-process listener (a tokio
+			// `signal(SIGTSTP)` registration permanently replaces the
+			// kernel-default handler for the lifetime of the process) swallows
+			// it, and the TUI ends up torn down while the process keeps running
+			// with no live terminal (issue [#3461], hit when the previous
+			// embedded shell registered such a listener on its first command).
+			// SIGSTOP cannot be caught, blocked, or ignored, so the kernel stops
+			// the process regardless of installed handlers.
 			//
 			// pid=0 (foreground process group, not just our PID): omp is not
 			// always the shell's direct child. Package-manager launchers (`npx`,
@@ -1805,8 +1807,9 @@ export class InputController {
 			// group keeps the shell's job-control view consistent. Long-lived
 			// children that must survive the suspend (Linux/other POSIX MCP stdio
 			// servers via the platform-specific `detached: true` spawn in
-			// `mcp/transports/stdio.ts`, every brush external command via brush's
-			// per-child `setsid` in `crates/vendor/brush-core/src/commands.rs`) are
+			// `mcp/transports/stdio.ts`, every external the embedded bash engine
+			// runs via `Sessions::Detach` in `crates/pi-shell/src/host.rs`, which
+			// `setsid`s the child in `crates/pi-shell/src/sys/spawn/unix.rs`) are
 			// their own sessions, so pgid=0 does not reach them.
 			process.kill(0, "SIGSTOP");
 		} catch (err) {

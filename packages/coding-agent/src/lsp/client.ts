@@ -96,6 +96,7 @@ interface SharedLspHold {
 	enabled: boolean;
 }
 const sharedLspHolds: SharedLspHold[] = [];
+const sharedLspListeners = new Set<(enabled: boolean) => void>();
 
 /** Whether a client cold start attaches to a broker-shared language server. */
 export function isSharedLspEnabled(): boolean {
@@ -105,16 +106,50 @@ export function isSharedLspEnabled(): boolean {
 /** Hold the shared-LSP mode at `enabled` until released; `set` follows later setting changes. */
 export function holdSharedLsp(enabled: boolean): { set(enabled: boolean): void; release(): void } {
 	const hold: SharedLspHold = { enabled };
-	sharedLspHolds.push(hold);
+	updateSharedLspHolds(() => sharedLspHolds.push(hold));
 	return {
 		set(next) {
-			hold.enabled = next;
+			updateSharedLspHolds(() => {
+				hold.enabled = next;
+			});
 		},
 		release() {
-			const index = sharedLspHolds.indexOf(hold);
-			if (index !== -1) sharedLspHolds.splice(index, 1);
+			updateSharedLspHolds(() => {
+				const index = sharedLspHolds.indexOf(hold);
+				if (index !== -1) sharedLspHolds.splice(index, 1);
+			});
 		},
 	};
+}
+
+/**
+ * Call `listener` with the new value whenever {@link isSharedLspEnabled} changes
+ * (subagent worker threads follow the main thread's mode); returns the unsubscribe.
+ */
+export function onSharedLspChange(listener: (enabled: boolean) => void): () => void {
+	sharedLspListeners.add(listener);
+	return () => {
+		sharedLspListeners.delete(listener);
+	};
+}
+
+/** Apply `mutate` to the hold stack and notify change listeners when the effective mode flipped. */
+function updateSharedLspHolds(mutate: () => void): void {
+	if (sharedLspListeners.size === 0) {
+		mutate();
+		return;
+	}
+	const before = isSharedLspEnabled();
+	mutate();
+	const after = isSharedLspEnabled();
+	if (before === after) return;
+	for (const listener of sharedLspListeners) {
+		try {
+			listener(after);
+		} catch (error) {
+			logger.warn("Shared LSP mode listener threw", { error });
+		}
+	}
 }
 
 /**

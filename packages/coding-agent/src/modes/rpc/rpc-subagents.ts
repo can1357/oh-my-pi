@@ -1,7 +1,7 @@
 import * as fs from "node:fs/promises";
 import { isEnoent } from "@oh-my-pi/pi-utils";
 import { type AgentRef, AgentRegistry } from "../../registry/agent-registry";
-import type { AgentSession } from "../../session/agent-session";
+import type { AgentSessionHandle } from "../../session/agent-session-handle";
 import type { FileEntry, SessionMessageEntry } from "../../session/session-entries";
 import { parseSessionEntries } from "../../session/session-loader";
 import { type AgentProgress } from "@oh-my-pi/pi-tui/tools/task";
@@ -281,7 +281,7 @@ export class RpcSubagentRegistry {
 /** A running subagent from this session's roster, bound to its live registry ref. */
 export interface RpcOwnedSubagent {
 	ref: AgentRef;
-	session: AgentSession;
+	session: AgentSessionHandle;
 }
 
 /**

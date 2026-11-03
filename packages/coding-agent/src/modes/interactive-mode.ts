@@ -47,7 +47,7 @@ import {
 	jobWidgetSummary,
 	latestJobWidget,
 } from "@oh-my-pi/pi-tui/tools/job-widget";
-import type { AsyncJobManager } from "../async/job-manager";
+import type { AsyncJobManagerApi } from "../async/job-manager";
 import type { JobWidgetRegistry } from "../job-widgets/types";
 import { sameItems } from "@oh-my-pi/pi-tui/native/memo";
 import { describeSegmentTrack, renderSegmentTrack, type TrackSegment } from "@oh-my-pi/pi-tui/chrome/segment-track";
@@ -82,9 +82,11 @@ import { formatModelString, type ResolvedModelRoleValue } from "../config/model-
 import { isSettingsInitialized, Settings, settings } from "../config/settings";
 import { clearClaudePluginRootsCache } from "../discovery/helpers";
 import type {
+	AssistantTextRenderer,
 	AutocompleteProviderFactory,
 	ContextUsage,
 	ExtensionCustomOptions,
+	ExtensionRunner,
 	ExtensionUIContext,
 	ExtensionUIDialogOptions,
 	ExtensionUISelectItem,
@@ -145,6 +147,7 @@ import {
 	type ResolvedRoleModel,
 	SHUTDOWN_CONSOLIDATE_BUDGET_MS,
 } from "../session/agent-session";
+import type { AgentViewSession } from "../session/agent-session-handle";
 import type { CompactMode } from "../session/compact-modes";
 import type { ForeignSessionSource } from "../session/foreign-session-store";
 import { HistoryStorage } from "../session/history-storage";
@@ -153,10 +156,10 @@ import { setWordPredictionHost } from "@oh-my-pi/pi-tui/prompt/word-completion";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
 import { resolveMarkdownLinkHrefs } from "../internal-urls/hyperlink-targets";
 import type { ResolveContext } from "../internal-urls/index";
-import { modelMentionDisplayName } from "@oh-my-pi/pi-tui/prompt/model-mention-syntax";
 import { modelMentionChipLabel, shiftImageMarkers } from "@oh-my-pi/pi-tui/prompt/composer-attachments";
-import type { SessionContext } from "../session/session-context";
+import { isTranscriptEntry, type SessionContext } from "../session/session-context";
 import type { SessionManager } from "../session/session-manager";
+import { loadPinnedSessionIds } from "../session/session-pins";
 import {
 	canAutoCreateWorktree,
 	planWorktreeExit,
@@ -186,6 +189,7 @@ import {
 	FEED_MODEL_BADGE_WIDTH,
 	formatFeedModelBadge,
 	formatMoreItems,
+	formatStatusIcon,
 	isFeedModelBadgeEnabled,
 	previewLine,
 	replaceTabs,
@@ -280,6 +284,9 @@ import { PlanSaveOverlay, type PlanSaveOverlayResult } from "@oh-my-pi/pi-tui/ov
 import { ServedModelTracker } from "@oh-my-pi/pi-tui/chat/served-model-marker";
 import { SessionInfoOverlay } from "@oh-my-pi/pi-tui/overlays/session-info-overlay";
 import { JobsSheet } from "@oh-my-pi/pi-tui/overlays/jobs-panel";
+import { hasSpotlightOriginal, SpotlightSheet } from "@oh-my-pi/pi-tui/overlays/spotlight-sheet";
+import type { SpotlightDetails } from "@oh-my-pi/pi-tui/chat/spotlight";
+import { readArtifactText } from "../spotlight/sink";
 import { SkillMessageComponent } from "@oh-my-pi/pi-tui/chat/skill-message";
 import { StatusLineComponent } from "@oh-my-pi/pi-tui/status-line";
 import { statusLineHost } from "./status-line-host";
@@ -287,6 +294,9 @@ import { stopSharedSpinnerTicker, type ToolExecutionHandle } from "@oh-my-pi/pi-
 import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { Composer, type ComposerPreferences, type ComposerStatusCache } from "@oh-my-pi/pi-tui/prompt/composer";
 import { PINNED_HUD_TOGGLE_ID } from "../task/output-manager";
+import { isUserRequestEntry, type TranscriptEntryLike } from "@oh-my-pi/pi-tui/chat/transcript-entry";
+import { LinkBrowserComponent, type LinkBrowserDeps } from "@oh-my-pi/pi-tui/overlays/link-browser";
+import { getAssistantMessageLinkTargets } from "@oh-my-pi/pi-tui/prompt/interactive-context-helpers";
 import { setMagicKeywords } from "@oh-my-pi/pi-tui/prompt/magic-keywords";
 import { MAGIC_KEYWORDS } from "./magic-keywords";
 import { sharedComposerCache } from "@oh-my-pi/pi-tui/prompt/composer-cache";
@@ -1187,10 +1197,7 @@ function renderSubagentToolPreview(session: ObservableSession, width: number): s
 	const elapsedWidth = visibleWidth(elapsedLabel);
 	const hook = `${theme.fg("dim", theme.tree.hook)} `;
 	// Between calls the row keeps the last call, marked with how it ended.
-	const status =
-		!currentTool && recent
-			? `${theme.styledSymbol(recent.isError ? "status.error" : "status.success", recent.isError ? "error" : "success")} `
-			: "";
+	const status = !currentTool && recent ? `${formatStatusIcon(recent.isError ? "error" : "success", theme)} ` : "";
 	const prefixWidth = visibleWidth(hook) + visibleWidth(status);
 	// Reserve the elapsed marker first, then cap the tool name; the detail gets whatever is left.
 	const shortTool = truncateToWidth(replaceTabs(tool), Math.max(0, width - prefixWidth - elapsedWidth), "");
@@ -1229,7 +1236,7 @@ export function renderSubagentHudLines(
 	// rows budgeted to the full terminal width would wrap.
 	const contentColumns = Math.max(0, columns - getPaddingX(1) * 2);
 	const layout = layoutPinnedHud(running.length, expanded);
-	const dot = theme.styledSymbol("status.done", "accent");
+	const dot = formatStatusIcon("running", theme);
 	const items = running.slice(0, layout.itemRows);
 	const showModelBadge = isFeedModelBadgeEnabled();
 	const outerIndent = " ";
@@ -1440,10 +1447,10 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * which flips to the destination before `reloadTodos` refreshes during
 	 * focus attach.
 	 */
-	#todoPhasesOwner?: AgentSession;
+	#todoPhasesOwner?: AgentViewSession;
 	#todoHudHidden = false;
 	hideThinkingBlock = false;
-	#sessionsWithDisplayableThinkingContent = new WeakSet<AgentSession>();
+	#sessionsWithDisplayableThinkingContent = new WeakSet<AgentViewSession>();
 	/** Whether the visible session has produced thinking content the user can reveal. */
 	get hasDisplayableThinkingContent(): boolean {
 		return this.#sessionsWithDisplayableThinkingContent.has(this.viewSession);
@@ -1497,7 +1504,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (cfgComposerShape.get(settings) !== "band") return undefined;
 		const name = this.sessionManager.getSessionName();
 		if (!name) return undefined;
-		return `\x1b[2;3m${sanitizeStatusText(name)}\x1b[23;22m`;
+		const pin = this.statusLine.isSessionPinned(this.sessionManager.getSessionId()) && theme.icon.pin;
+		const title = sanitizeStatusText(name);
+		return `\x1b[2;3m${pin ? `${pin} ${title}` : title}\x1b[23;22m`;
 	}
 	/** Live gen tok/s for the working row: the viewed session's own meter, so a
 	 * focused subagent shows its own reading and the main session's survives
@@ -1519,6 +1528,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		const title = this.#workingTitleTrailer();
 		if (rate && title) return `${rate}  ${title}`;
 		return rate ?? title;
+	}
+	#resolveModelMentionChip(selector: string): { label: string; selector: string } | undefined {
+		const resolved = this.session.resolveModelMention(selector);
+		return resolved && { label: modelMentionChipLabel(resolved.name), selector: resolved.selector };
 	}
 	/** Idle stand-in for the working row: the last tok/s reading and the
 	 * band-mode title stay readable between turns, docked where the loader's
@@ -1548,7 +1561,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	/** The job widget registry this mode repaints on, and how to stop listening to it. */
 	#jobWidgetsListener: { registry: JobWidgetRegistry; unsubscribe: () => void } | undefined;
 	/** The job manager whose settled jobs repaint the running counts, and how to stop listening to it. */
-	#jobSettleListener: { manager: AsyncJobManager; unsubscribe: () => void } | undefined;
+	#jobSettleListener: { manager: AsyncJobManagerApi; unsubscribe: () => void } | undefined;
 	/**
 	 * Repaint whenever a shown job widget changes (the HUD jobs segment, the
 	 * status line's glance), following the root job manager's current registry.
@@ -1778,6 +1791,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	#planReviewOverlayHandle: OverlayHandle | undefined;
 	#sessionInfoOverlayHandle: OverlayHandle | undefined;
 	#jobsSheetHandle: OverlayHandle | undefined;
+	#spotlightSheetHandle: OverlayHandle | undefined;
 	/** Re-renders the open jobs sheet so output tails and pids stay live. */
 	#jobsSheetTimer: NodeJS.Timeout | undefined;
 	#planReviewOwner: object | undefined;
@@ -1830,14 +1844,14 @@ export class InteractiveMode implements InteractiveModeContext {
 	readonly #focusController: SessionFocusController;
 	/** Sessions retain this small activity record, not the terminal and its transcript, after the view leaves. */
 	readonly #idleMaintenanceActivity: {
-		target: AgentSession | undefined;
+		target: AgentViewSession | undefined;
 		ready: boolean;
 		isComposing: boolean;
-		scheduledTurn: ((target: AgentSession) => boolean) | undefined;
+		scheduledTurn: ((target: AgentViewSession) => boolean) | undefined;
 		presentRecap: ((recap: string) => void) | undefined;
 	} = { target: undefined, ready: false, isComposing: false, scheduledTurn: undefined, presentRecap: undefined };
 
-	syncIdleMaintenanceView(target: AgentSession | null = this.viewSession): void {
+	syncIdleMaintenanceView(target: AgentViewSession | null = this.viewSession): void {
 		const activity = this.#idleMaintenanceActivity;
 		const previous = activity.target;
 		if (target === null) {
@@ -1861,7 +1875,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (previous !== target) previous?.refreshIdleMaintenance();
 		target.refreshIdleMaintenance();
 	}
-	get viewSession(): AgentSession {
+	get viewSession(): AgentViewSession {
 		return this.#focusController.target ?? this.session;
 	}
 	get assistantImagesVisible(): boolean {
@@ -1981,6 +1995,27 @@ export class InteractiveMode implements InteractiveModeContext {
 	#mouseCapture = false;
 	/** A link-scheme change awaits its transcript rebuild; any rebuild before it covers it. */
 	#extensionLinkRebuildPending = false;
+	/** The fullscreen extension link browser while it is shown. */
+	#linkBrowser: { component: LinkBrowserComponent; handle: OverlayHandle } | undefined;
+	/**
+	 * The start of the viewed branch the link browser last found no extension link in: its first
+	 * `checked` entries, the last of them `lastId`. They end where a user turn starts, so no later
+	 * entry changes how they draw (as a tool result does its call's card). The next check replays
+	 * only the entries after them, until the session, the link schemes, the width or the renderers
+	 * change. It holds the session by id and the renderers weakly, so a finished subagent's
+	 * session and extensions stay collectable.
+	 */
+	#linkBrowserMiss:
+		| {
+				sessionId: string;
+				key: string;
+				renderers: readonly WeakRef<AssistantTextRenderer>[];
+				checked: number;
+				lastId: string | undefined;
+		  }
+		| undefined;
+	/** A rebuild of the transcript's terminal scrollback held back until the link browser closes. */
+	#scrollbackRebuildPending = false;
 	#observerUiSyncTimer?: NodeJS.Timeout;
 	/** Repaints the subagent HUD so live-preview elapsed markers advance between progress events. */
 	#subagentPreviewTickTimer?: NodeJS.Timeout;
@@ -2050,10 +2085,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.editor.onToggleDictation = () => void this.#toggleComposerDictation();
 		this.editor.imageReferenceHyperlink = imageReferenceHyperlink;
 		this.editor.skillFilePath = name => this.skillCommands.get(`skill:${name}`)?.filePath;
-		this.editor.modelMentionLabel = selector => {
-			const model = this.session.findMentionableModel(selector);
-			return model ? modelMentionChipLabel(modelMentionDisplayName(model)) : undefined;
-		};
+		this.editor.resolveModelMention = selector => this.#resolveModelMentionChip(selector);
 		this.editor.modelMentionSelector = agent => this.session.modelMentions.find(m => m.agent === agent)?.selector;
 		this.editor.fileHyperlink = (filePath, text) => fileHyperlink(filePath, text, { line: 1 });
 		this.#ownsStartedUi = wasStarted;
@@ -2576,6 +2608,9 @@ export class InteractiveMode implements InteractiveModeContext {
 						(error: unknown) =>
 							this.showWarning(`Copy failed: ${error instanceof Error ? error.message : String(error)}`),
 					);
+					return;
+				case "spotlight":
+					void this.#showSpotlightSheet(action.spotlight, action.reduced);
 			}
 		});
 
@@ -2642,6 +2677,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// Deliberately here rather than beside #applyVimMode in the constructor: that runs before
 		// #focusController exists, which updateEditorBorderColor dereferences.
 		this.#syncVimStatus(this.editor);
+		void this.#syncSessionPinned();
 		// Single side-effect point for title changes: every setSessionName caller
 		// (first-input titling, /rename, extension renames, plan seeding, replan
 		// refresh) gets the terminal title + accent updates from here. Registered
@@ -2663,7 +2699,10 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.#handleSessionAccentInputsChanged();
 			}),
 			// Fork and branch adopt a new session file without retitling.
-			this.session.registerSessionChangeCallback(reportTernSession),
+			this.session.registerSessionChangeCallback(() => {
+				reportTernSession();
+				void this.#syncSessionPinned();
+			}),
 		);
 		this.#syncEditorMaxHeight();
 		this.isInitialized = true;
@@ -4262,6 +4301,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		// Components take the extension text renderers when built; the rebuild keeps the streaming
 		// reply's components, so hand them the new set directly.
 		if (any("extensionRenderers.assistantText")) {
+			// The browser replays with the renderers it opened with: close it rather than show them stale.
+			this.closeLinkBrowser();
 			this.#applyExtensionLinks();
 			this.#eventController.applyAssistantTextRenderers();
 			rebuildChat = true;
@@ -4363,8 +4404,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#redrawExtensionLinks();
 	}
 
-	/** Redraw the transcript so renderers reading `getLinkClicksAvailable()` switch form now. */
+	/**
+	 * Redraw the transcript so renderers reading `getLinkClicksAvailable()` switch form now, and close
+	 * the link browser, whose copy was drawn with the renderers and links of before.
+	 */
 	#redrawExtensionLinks(): void {
+		this.closeLinkBrowser();
 		// The rebuild keeps the live reply's components; re-run their renderers rather than waiting
 		// for the next streaming update.
 		this.#eventController.applyAssistantTextRenderers();
@@ -4386,9 +4431,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		});
 	}
 
-	/** Raise `link_activate` for `url` on the viewed session's extension runner. */
-	#activateLink(url: string): boolean {
-		const runner = this.viewSession.extensionRunner;
+	/** Raise `link_activate` for `url` on `runner`, the extension runner of the transcript it was drawn in. */
+	#activateLink(url: string, runner: ExtensionRunner | undefined): boolean {
 		if (!runner) return false;
 		// A focused subagent's runner is headless: hand its handler the UI drawing that transcript.
 		runner.emitLinkActivate(url, this.session.extensionRunner?.getUIContext()).catch((error: unknown) => {
@@ -4399,13 +4443,14 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	activateViewportLink(index: number, col: number): boolean {
 		const url = this.composer.viewportLinkAt(index, col)?.url;
-		return url !== undefined && this.#activateLink(url);
+		return url !== undefined && this.#activateLink(url, this.viewSession.extensionRunner);
 	}
 
 	startLinkHints(): boolean {
 		if (!extensionLinksRouted()) return false;
 		if (this.composer.viewportLinkCount() === 0) {
-			this.showStatus("No extension links on screen");
+			// Links may still be drawn in terminal scrollback, out of the tags' reach: browse for them.
+			if (!this.openLinkBrowser()) this.showStatus("No extension links in the transcript");
 			return true;
 		}
 		this.composer.startLinkHints(reason => {
@@ -4427,7 +4472,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	typeLinkHint(letter: string): void {
 		const picked = this.composer.typeLinkHint(letter);
-		if (typeof picked === "object") this.#activateLink(picked.url);
+		if (typeof picked === "object") this.#activateLink(picked.url, this.viewSession.extensionRunner);
 		this.ui.requestRender();
 	}
 
@@ -4435,6 +4480,110 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.composer.cancelLinkHints();
 	}
 
+	openLinkBrowser(): boolean {
+		this.composer.cancelLinkHints();
+		if (this.#linkBrowser || !extensionLinksRouted()) return false;
+		const view = this.viewSession;
+		const renderers = view.extensionRunner?.getAssistantTextRenderers() ?? [];
+		const columns = this.ui.terminal.columns;
+		const key = `${extensionLinksVersion()}\0${columns}`;
+		const entries: TranscriptEntryLike[] = view.sessionManager.getBranch().filter(isTranscriptEntry);
+		const committed = entries.length;
+		const sessionId = view.sessionManager.getSessionId();
+		const miss = this.#linkBrowserMiss;
+		const checked =
+			miss?.sessionId === sessionId &&
+			miss.key === key &&
+			miss.renderers.length === renderers.length &&
+			miss.renderers.every((renderer, index) => renderer.deref() === renderers[index]) &&
+			entries[miss.checked - 1]?.id === miss.lastId
+				? miss.checked
+				: 0;
+		// A reply still streaming is drawn as far as it has come; the browser keeps that snapshot.
+		const streaming = view.isStreaming ? this.streamingMessage : undefined;
+		if (streaming) {
+			entries.push({
+				type: "message",
+				id: "omp:link-browser-streaming-reply",
+				parentId: null,
+				timestamp: new Date(streaming.timestamp).toISOString(),
+				message: streaming,
+			});
+		}
+		const deps: LinkBrowserDeps = {
+			ui: this.ui,
+			getTool: name => view.getToolByName(name),
+			isBuiltInTool: name => view.hasBuiltInTool(name),
+			getMessageRenderer: type => view.extensionRunner?.getMessageRenderer(type),
+			cwd: view.sessionManager.getCwd(),
+			hideThinkingBlock: () => this.effectiveHideThinkingBlock,
+			proseOnlyThinking: () => this.proseOnlyThinking,
+			expandThinkingBlocks: () => this.expandThinkingBlocks,
+			linkTargets: getAssistantMessageLinkTargets(this),
+			textRenderers: renderers,
+			requestRender: () => this.ui.requestRender(),
+			// The runner whose transcript the browser draws, even if the view changes while it is open.
+			onActivate: url => this.#activateLink(url, view.extensionRunner),
+			onClose: () => this.closeLinkBrowser(),
+		};
+		let component = new LinkBrowserComponent(entries.slice(checked), deps);
+		if (!component.hasLinks(columns)) {
+			component.dispose();
+			// Cache up to the last user turn start; the turn from there may still change.
+			let settled = committed - 1;
+			while (settled > checked && !isUserRequestEntry(entries[settled]!)) settled--;
+			if (settled > checked) {
+				this.#linkBrowserMiss = {
+					sessionId,
+					key,
+					renderers: renderers.map(renderer => new WeakRef(renderer)),
+					checked: settled,
+					lastId: entries[settled - 1]!.id,
+				};
+			}
+			return false;
+		}
+		if (checked > 0) {
+			// The link is in the entries after the cached part: open on the whole branch.
+			component.dispose();
+			component = new LinkBrowserComponent(entries, deps);
+		}
+		const handle = this.ui.showOverlay(component, {
+			anchor: "bottom-center",
+			width: "100%",
+			maxHeight: "100%",
+			margin: 0,
+			fullscreen: true,
+		});
+		this.#linkBrowser = { component, handle };
+		return true;
+	}
+
+	closeLinkBrowser(): void {
+		const open = this.#linkBrowser;
+		if (!open) return;
+		this.#linkBrowser = undefined;
+		// Hiding hands focus back to the editor area it was opened from, or leaves it with an
+		// overlay a link handler opened on top.
+		open.handle.hide();
+		open.component.dispose();
+		if (this.#scrollbackRebuildPending) this.rebuildTranscriptScrollback();
+		this.ui.requestRender();
+	}
+
+	rerenderInLinkBrowser(timestamp: number): void {
+		// The redrawn reply may now draw a link.
+		this.#linkBrowserMiss = undefined;
+		this.#linkBrowser?.component.rerenderMessage(timestamp);
+	}
+
+	rebuildTranscriptScrollback(): void {
+		// The browser covers the screen: rebuild once, when it closes, rather than under it.
+		this.#scrollbackRebuildPending = this.#linkBrowser !== undefined;
+		if (this.#scrollbackRebuildPending) return;
+		this.chatContainer.resetStableEmission();
+		this.ui.resetDisplay();
+	}
 	/** Coalesce status-cache writes; `stop()` flushes a pending one synchronously. */
 	#scheduleComposerStatusPersist(): void {
 		if (this.#composerStatusPersistTimer) return;
@@ -4644,6 +4793,8 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	rebuildChatFromMessages(options: { reuseSettledComponents?: boolean } = {}): void {
 		this.#extensionLinkRebuildPending = false;
+		// A transcript setting may draw links it did not before.
+		this.#linkBrowserMiss = undefined;
 		// Mid-stream rebuilds (e.g. `/shake`, theme/setting changes that touch the
 		// transcript) replay only committed `state.messages`. The agent's in-flight
 		// `streamMessage` and its still-pending tool calls live OUTSIDE
@@ -4881,7 +5032,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 	}
 
-	#syncTodoHudState(owner: AgentSession): void {
+	#syncTodoHudState(owner: AgentViewSession): void {
 		this.#cancelTodoAutoClearTimer();
 		const phases = this.todoPhases;
 		const persisted = getTodoHudVisibility(owner.sessionManager.getBranch(), phases);
@@ -5289,7 +5440,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		return [...leadingLines, combinedLine];
 	}
 
-	async #loadTodoList(source: AgentSession = this.session): Promise<void> {
+	async #loadTodoList(source: AgentViewSession = this.session): Promise<void> {
 		this.todoPhases = source.getTodoPhases();
 		this.#todoPhasesOwner = source;
 		this.#syncTodoHudState(source);
@@ -6349,6 +6500,24 @@ export class InteractiveMode implements InteractiveModeContext {
 			editor.vimEnabled && editor.vimMode !== "insert" ? "block" : editor.vimEnabled ? "bar" : "default",
 		);
 		this.updateEditorBorderColor();
+	}
+
+	/** Bumped by every pin-state write so a slower pins-file read can't overwrite a newer update. */
+	#pinStateGeneration = 0;
+
+	/** Reload the pinned set from disk: at startup and on session switch, picking up other instances' pins. */
+	async #syncSessionPinned(): Promise<void> {
+		const generation = ++this.#pinStateGeneration;
+		const pinnedIds = await loadPinnedSessionIds();
+		if (generation !== this.#pinStateGeneration) return;
+		this.statusLine.setPinnedSessionIds(pinnedIds);
+		this.ui.requestRender();
+	}
+
+	applySessionPin(sessionId: string, pinned: boolean): void {
+		this.#pinStateGeneration++;
+		this.statusLine.setSessionPinned(sessionId, pinned);
+		this.ui.requestRender();
 	}
 
 	async #copyYankToClipboard(content: string): Promise<void> {
@@ -8230,10 +8399,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		nextEditor.attachmentChips = previousEditor.attachmentChips;
 		nextEditor.imageReferenceHyperlink = imageReferenceHyperlink;
 		nextEditor.skillFilePath = name => this.skillCommands.get(`skill:${name}`)?.filePath;
-		nextEditor.modelMentionLabel = selector => {
-			const model = this.session.findMentionableModel(selector);
-			return model ? modelMentionChipLabel(modelMentionDisplayName(model)) : undefined;
-		};
+		nextEditor.resolveModelMention = selector => this.#resolveModelMentionChip(selector);
 		nextEditor.modelMentionSelector = agent => this.session.modelMentions.find(m => m.agent === agent)?.selector;
 		nextEditor.fileHyperlink = (filePath, text) => fileHyperlink(filePath, text, { line: 1 });
 		nextEditor.onAutocompleteCancel = () => {
@@ -8363,6 +8529,44 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#jobsSheetHandle = this.ui.showOverlay(sheet, { anchor: "center", width: "90%", maxHeight: "90%" });
 		this.#jobsSheetTimer = setInterval(() => this.ui.requestRender(), JOBS_SHEET_REFRESH_MS);
 		this.ui.setFocus(sheet);
+		this.ui.requestRender();
+	}
+
+	/**
+	 * The Spotlight sheet of a shaped tool result (its notice's click): the original, loaded from the session
+	 * artifact its trace names, beside the text the model saw; for a held-out or gated result, beside the would-be text
+	 * its `shapedUrl` names. One at a time; Esc closes it.
+	 */
+	async #showSpotlightSheet(spotlight: SpotlightDetails, reduced: string): Promise<void> {
+		if (this.#spotlightSheetHandle || !hasSpotlightOriginal(spotlight)) return;
+		const sessionManager = this.viewSession.sessionManager;
+		const original = await readArtifactText(sessionManager, spotlight.original.url);
+		if (original === null) {
+			this.showWarning(`The original of this result is gone (${spotlight.original.url}).`);
+			return;
+		}
+		if (spotlight.holdout || spotlight.gated) {
+			const shapedUrl = spotlight.original.shapedUrl;
+			const shaped = shapedUrl ? await readArtifactText(sessionManager, shapedUrl) : null;
+			if (shaped === null) {
+				this.showWarning(`The would-be text of this held-out result is gone (${shapedUrl ?? "never saved"}).`);
+				return;
+			}
+			reduced = shaped;
+		}
+		if (this.#spotlightSheetHandle) return;
+		const sheet = new SpotlightSheet({ spotlight, original, reduced, close: () => this.#hideSpotlightSheet() });
+		this.#spotlightSheetHandle = this.ui.showOverlay(sheet, { anchor: "center", width: "100%", maxHeight: "100%" });
+		this.ui.setFocus(sheet);
+		this.ui.requestRender();
+	}
+
+	#hideSpotlightSheet(): void {
+		const handle = this.#spotlightSheetHandle;
+		this.#spotlightSheetHandle = undefined;
+		if (!handle) return;
+		handle.hide();
+		this.#selectorController.focusActiveEditorArea();
 		this.ui.requestRender();
 	}
 
@@ -9501,7 +9705,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.ui.requestRender();
 	}
 
-	async reloadTodos(source: AgentSession = this.session): Promise<void> {
+	async reloadTodos(source: AgentViewSession = this.session): Promise<void> {
 		await this.#loadTodoList(source);
 		this.ui.requestRender();
 	}
