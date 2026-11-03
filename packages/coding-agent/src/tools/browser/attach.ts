@@ -201,7 +201,7 @@ function findCdpPortInArgs(args: string[]): number | null {
 	return null;
 }
 
-function findUserDataDirInArgs(args: string[] | undefined): string | null {
+export function findUserDataDirInArgs(args: string[] | undefined): string | null {
 	if (!args) return null;
 	let result: string | null = null;
 	const inlinePrefix = "--user-data-dir=";
