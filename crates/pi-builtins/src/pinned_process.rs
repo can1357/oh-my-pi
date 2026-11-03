@@ -8,7 +8,7 @@
 //! exited. `pi-shell`'s process references wrap this type, and the `timeout`
 //! builtin records its operand's children with it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use smallvec::SmallVec;
 
@@ -844,6 +844,69 @@ fn leads_host_group(pgid: i32) -> bool {
 	host_group > 0 && host_group == pgid
 }
 
+/// Pids a cancellation sweep must never signal: the harness process itself.
+///
+/// On Unix the descendant walk is identity-pinned (pidfd / start-time), so the
+/// host can never appear as a false descendant and this set is a harmless
+/// no-op safety net. On Windows the descendant tree is derived from raw
+/// `th32ParentProcessID` values that survive their recorded parent's death: a
+/// freshly spawned child whose recycled pid matches the harness's stale parent
+/// pid makes the harness enumerate as a false descendant, so cancelling a
+/// timed-out bash run would `TerminateProcess` the host with no cleanup and no
+/// `session_exit` record (#7452, related #4605).
+///
+/// Do not walk the host's numeric parent chain here. On Windows the host's
+/// recorded parent pid can itself have been recycled onto the cancellation
+/// target; treating that raw pid as protected would spare the hung command and
+/// prune all of its descendants from cleanup.
+#[must_use]
+pub fn host_protected_pids() -> HashSet<i32> {
+	i32::try_from(std::process::id()).into_iter().collect()
+}
+
+/// True when `pid` is itself protected or descends — within the enumerated
+/// `parents` map (pid -> recorded parent pid) — from a protected pid. Used to
+/// prune a whole protected subtree from a cancellation sweep so a false
+/// descendant of the harness cannot drag the harness's real children into the
+/// kill set (#7452).
+#[must_use]
+pub fn pid_in_protected_subtree(pid: i32, protected: &HashSet<i32>, parents: &HashMap<i32, i32>) -> bool {
+	let mut current = pid;
+	// Bound the walk against a corrupted or cyclic parent chain.
+	for _ in 0..256 {
+		if protected.contains(&current) {
+			return true;
+		}
+		match parents.get(&current) {
+			Some(&parent) if parent != current => current = parent,
+			_ => return false,
+		}
+	}
+	false
+}
+
+/// The live descendants of `root` with every protected subtree pruned, not
+/// just the exact protected pids.
+///
+/// The flattened descendant list can contain a protected node (the harness,
+/// on a Windows PID-reuse false-descendant) *together with* that node's real
+/// children, which were collected by recursing through it. Skipping only the
+/// exact protected pid would still terminate those unrelated worker/tool
+/// subprocesses, so drop every node whose recorded parent chain — within the
+/// enumerated set — passes through a protected pid (#7452 review).
+#[must_use]
+pub fn signalable_descendants(root: &PinnedProcess, protected: &HashSet<i32>) -> Vec<PinnedProcess> {
+	let descendants = root.descendants();
+	let parents: HashMap<i32, i32> = descendants
+		.iter()
+		.filter_map(|descendant| descendant.parent_pid().map(|parent| (descendant.pid(), parent)))
+		.collect();
+	descendants
+		.into_iter()
+		.filter(|descendant| !pid_in_protected_subtree(descendant.pid(), protected, &parents))
+		.collect()
+}
+
 /// SIGKILL, and the hard-termination sentinel on Windows.
 const KILL_SIGNAL: i32 = 9;
 
@@ -885,9 +948,15 @@ pub enum GroupProof {
 /// the direct ones after them, so a target whose handler for the direct
 /// signal joins a signalled group does not take the group's signal too. A
 /// process that changes its process group while the wave runs may still
-/// receive the wave's signal twice, or not at all; the next wave, or the
-/// SIGKILL, reaches it. SIGKILL is always also sent directly: a second
-/// SIGKILL changes nothing a process can observe.
+/// receive the wave's signal twice, or not at all. The next wave, or the
+/// SIGKILL, reaches it when it is pinned by then: listed in a group before a
+/// delivery, recorded, or a descendant of a recorded process. A process
+/// forked between a group's listing and its signal is not pinned: when it
+/// leaves the group before the next wave and its parent is gone, nothing
+/// reaches it again. Signals offer no atomic way to list a group and signal
+/// it, and stopping the group first would make the shell see a stopped job.
+/// SIGKILL is always also sent directly: a second SIGKILL changes nothing a
+/// process can observe.
 pub struct SignalWave {
 	signal:  i32,
 	groups:  Vec<(PinnedProcess, GroupProof)>,
@@ -1183,11 +1252,6 @@ pub struct LedgerWave<'a> {
 }
 
 impl LedgerWave<'_> {
-	/// Adds `process` as a direct target of the wave.
-	pub fn process(&mut self, process: &PinnedProcess) {
-		self.wave.process(process);
-	}
-
 	/// Delivers the wave, and returns it for its outcome.
 	pub fn deliver(mut self) -> SignalWave {
 		self.wave.deliver();
@@ -1254,19 +1318,27 @@ impl SpawnLedger {
 		}
 	}
 
-	/// Plans a wave of `signal` to every recorded process and, with `groups`,
-	/// to the group each recorded leader leads, under the proof its reap state
-	/// gives. The wave is delivered through the returned value, which borrows
-	/// this ledger: keep the ledger behind the lock that [`Self::before_reap`]
-	/// takes until it is delivered.
+	/// Plans a wave of `signal` to every recorded process and its live
+	/// descendants (the harness's own subtree pruned, see
+	/// [`signalable_descendants`]) and, with `groups`, to the group each
+	/// recorded leader leads, under the proof its reap state gives. The
+	/// descendants are walked on every wave, so a child a recorded process
+	/// forked after its group leader was reaped is still reached when the
+	/// group can no longer be signalled. The wave is delivered through the
+	/// returned value, which borrows this ledger: keep the ledger behind the
+	/// lock that [`Self::before_reap`] takes until it is delivered.
 	#[must_use]
 	pub fn plan_wave(&self, signal: i32, groups: bool) -> LedgerWave<'_> {
+		let protected = host_protected_pids();
 		let mut wave = SignalWave::new(signal);
 		for entry in &self.entries {
 			if groups && entry.leads() {
 				wave.group(&entry.process, entry.proof());
 			}
 			wave.process(&entry.process);
+			for descendant in signalable_descendants(&entry.process, &protected) {
+				wave.process(&descendant);
+			}
 		}
 		LedgerWave { _ledger: self, wave }
 	}
@@ -1344,6 +1416,50 @@ impl SpawnLedger {
 #[cfg(test)]
 pub(crate) mod tests {
 	use super::*;
+
+	/// The harness pid must be the only protected pid. Including its recorded
+	/// parent would be unsafe on Windows: that stale numeric pid can have been
+	/// recycled onto the timed-out command, causing cancellation to spare the
+	/// hung target and its whole subtree.
+	#[test]
+	fn host_protected_pids_includes_self() {
+		let self_pid = i32::try_from(std::process::id()).expect("self pid fits in i32");
+		assert_eq!(
+			host_protected_pids(),
+			HashSet::from([self_pid]),
+			"only the harness pid may be protected from cancellation sweeps",
+		);
+	}
+
+	/// Regression test for the #7453 review: pruning a protected node must drop
+	/// its whole subtree, not just the exact protected pid. A Windows PID-reuse
+	/// false-descendant collects the harness together with the harness's real
+	/// children (LSP servers, worker/tool subprocesses); skipping only the host
+	/// pid would still terminate those. `pid_in_protected_subtree` walks the
+	/// enumerated parent map so any node under a protected pid is excluded.
+	#[test]
+	fn protected_subtree_is_pruned_not_just_the_pid() {
+		// root(1) -> host(2, protected) -> worker(3); root(1) -> real_child(4).
+		let parents: HashMap<i32, i32> = HashMap::from([(2, 1), (3, 2), (4, 1)]);
+		let protected: HashSet<i32> = HashSet::from([2]);
+
+		assert!(
+			pid_in_protected_subtree(2, &protected, &parents),
+			"the protected node itself must be excluded",
+		);
+		assert!(
+			pid_in_protected_subtree(3, &protected, &parents),
+			"a child collected through the protected node must be excluded too",
+		);
+		assert!(
+			!pid_in_protected_subtree(4, &protected, &parents),
+			"a real child of the sweep root must still be signalled",
+		);
+		assert!(
+			!pid_in_protected_subtree(1, &protected, &parents),
+			"the sweep root must not be pruned",
+		);
+	}
 
 	/// Ends what a test started when the test ends, passed or failed: the
 	/// group of a leader the test has not reaped (the unreaped leader holds the
@@ -1772,7 +1888,10 @@ while True:
 	#[cfg(unix)]
 	#[test]
 	fn ledger_prunes_exited_entries() {
-		use std::{thread, time::Duration};
+		use std::{
+			thread,
+			time::{Duration, Instant},
+		};
 
 		let mut ledger = SpawnLedger::default();
 
@@ -1785,15 +1904,14 @@ while True:
 				.expect("spawn true");
 			let pid = i32::try_from(child.id()).expect("child pid fits in i32");
 			let pinned = PinnedProcess::from_pid(pid);
-			// Give the kernel a moment to mark the pidfd readable so `status()`
-			// reports Exited when the pruner probes.
-			for _ in 0..200 {
-				if pinned
-					.as_ref()
-					.is_some_and(|process| process.status() == ProcessStatus::Exited)
-				{
-					break;
-				}
+			// Wait until the pidfd reports the exit, so the pruner sees an
+			// exited process; a loaded machine can take seconds to run `true`.
+			let deadline = Instant::now() + Duration::from_secs(30);
+			while pinned
+				.as_ref()
+				.is_some_and(|process| process.status() != ProcessStatus::Exited)
+			{
+				assert!(Instant::now() < deadline, "`true` {pid} did not exit within 30 s");
 				thread::sleep(Duration::from_millis(5));
 			}
 			ledger.record(None, pinned);
