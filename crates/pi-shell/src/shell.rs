@@ -2827,37 +2827,6 @@ mod tests {
 		}
 	}
 
-	#[tokio::test(flavor = "multi_thread")]
-	async fn zz_smoke_forced_cp936() {
-		let dir = tempfile::tempdir().expect("dir");
-		let big = b"\xd6\xd0\xce\xc4 line\r\n".repeat(200_000);
-		std::fs::write(dir.path().join("big.bin"), &big).expect("big");
-		std::fs::write(dir.path().join("gbk.bin"), b"\xd6\xd0\xce\xc4\r\n").expect("gbk");
-		let cd = quote_arg(&dir.path().to_string_lossy());
-		for _ in 0..3 {
-			let started = std::time::Instant::now();
-			let (result, output) =
-				execute_captured(format!("cd {cd} && cmd.exe /c type big.bin; printf 'END\\n'")).await;
-			let lines = output.matches("中文 line\r\n").count();
-			eprintln!(
-				"SMOKE big exit={:?} lines={lines} ends_with_END={} replacement={} took={:?}",
-				result.exit_code,
-				output.ends_with("中文 line\r\nEND\n"),
-				output.contains('\u{FFFD}'),
-				started.elapsed()
-			);
-		}
-		for command in [
-			"cmd.exe /c type gbk.bin; printf 'ok\\n\\xeb\\n\u{d55c}\u{ae00}\\n'; cmd.exe /c type gbk.bin",
-			"x=$(cmd.exe /c type gbk.bin); echo \"[$x]\"",
-			"for i in 1 2 3; do cmd.exe /c type gbk.bin; printf \"$i\\n\"; done",
-		] {
-			let started = std::time::Instant::now();
-			let (result, output) = execute_captured(format!("cd {cd} && {command}")).await;
-			eprintln!("SMOKE {command:?} exit={:?} -> {output:?} took={:?}", result.exit_code, started.elapsed());
-		}
-	}
-
 	/// Shell initialization must recover when a long-running host's inherited
 	/// working directory is deleted. This runs in a child process because cwd is
 	/// process-global.
