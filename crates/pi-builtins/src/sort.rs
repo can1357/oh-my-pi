@@ -652,7 +652,7 @@ impl ChunkCost {
 			derived_per_byte += COLLATION_KEY_BYTES_PER_BYTE;
 			per_record += size_of::<usize>() + COLLATION_KEY_FIXED_BYTES;
 		}
-		if settings.stable || settings.unique {
+		if settings.sorts_stably() {
 			// rayon's stable sort copies the lines into a scratch vector.
 			per_record += size_of::<Line>();
 		}
@@ -3951,6 +3951,13 @@ impl GlobalSettings {
 		})
 	}
 
+	/// Whether a chunk sorts stably. `strcoll` can find different lines equal
+	/// (`Й` and `И` with a combining breve in fr_FR), which GNU's merge sort
+	/// leaves in input order.
+	const fn sorts_stably(&self) -> bool {
+		self.stable || self.unique || self.collator.is_some()
+	}
+
 	/// Precompute some data needed for sorting.
 	/// This function **must** be called before starting to sort, and
 	/// `GlobalSettings` may not be altered afterwards.
@@ -6456,9 +6463,7 @@ fn sort_by<'a>(unsorted: &mut Vec<Line<'a>>, settings: &GlobalSettings, line_dat
 		}
 		compare_by(a, b, settings, line_data, line_data)
 	};
-	// `strcoll` can find different lines equal (`Й` and `И` with a combining
-	// breve in fr_FR), which GNU's merge sort leaves in input order.
-	let stable = settings.stable || settings.unique || settings.collator.is_some();
+	let stable = settings.sorts_stably();
 	// WASI has no threads (rayon's pool hits an unreachable trap there), and
 	// Windows leaves the global pool unavailable when pi-natives could not
 	// safely configure it under commit pressure; both sort sequentially.
@@ -7422,10 +7427,25 @@ mod tests {
 				}
 				assert_eq!(sort_in_locale("LC_ALL", locale, &["-cu"], &input).0, 1, "{locale} -cu {input:?}");
 			}
-			// Enough equal lines that an unstable sort would reorder them.
-			let many: String = (0..200u32).map(|n| if n.count_ones() % 2 == 0 { composed } else { decomposed }).collect();
-			for args in [&[][..], &["-r"]] {
-				assert!(sort_in_locale("LC_ALL", locale, args, &many).1 == many, "{locale} {args:?}: 200 equal lines reordered");
+			// Equal lines among lines the sort must move: on input that is one
+			// sorted run an unstable sort moves nothing.
+			let first_letter = "\u{410}\n";
+			let many: Vec<&str> = (0..300u32)
+				.map(|n| match (n % 3, n.count_ones() % 2) {
+					(0, _) => first_letter,
+					(_, 0) => composed,
+					_ => decomposed,
+				})
+				.collect();
+			let (firsts, equals): (Vec<&str>, Vec<&str>) = many.iter().copied().partition(|line| *line == first_letter);
+			let input = many.concat();
+			let forward = [firsts.as_slice(), equals.as_slice()].concat().concat();
+			let reversed = [equals.as_slice(), firsts.as_slice()].concat().concat();
+			for (args, expected) in [(&[][..], forward), (&["-r"][..], reversed)] {
+				assert!(
+					sort_in_locale("LC_ALL", locale, args, &input).1 == expected,
+					"{locale} {args:?}: equal lines reordered"
+				);
 			}
 		}
 	}
