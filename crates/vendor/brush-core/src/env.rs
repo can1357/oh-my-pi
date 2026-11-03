@@ -129,10 +129,30 @@ impl ShellEnvironment {
 	/// * `expected_scope_type` - The type of scope that is expected to be atop
 	///   the stack.
 	pub fn pop_scope(&mut self, expected_scope_type: EnvironmentScope) -> Result<(), error::Error> {
+		self.take_scope(expected_scope_type).map(|_| ())
+	}
+
+	/// Pops the top-most scope off the environment's scope stack and returns
+	/// the variables it holds, for a caller that puts them back later: a
+	/// command's prefix assignments, which are expanded before its
+	/// redirections and in force only while it runs (see
+	/// [`Self::set_in_current_scope`]).
+	///
+	/// # Arguments
+	///
+	/// * `expected_scope_type` - The type of scope that is expected to be atop
+	///   the stack.
+	pub fn take_scope(
+		&mut self,
+		expected_scope_type: EnvironmentScope,
+	) -> Result<ShellVariableMap, error::Error> {
 		// TODO(env): Should we panic instead on failure? It's effectively a broken
 		// invariant.
 		match self.scopes.pop() {
-			Some((actual_scope_type, _)) if actual_scope_type == expected_scope_type => Ok(()),
+			Some((actual_scope_type, variables)) if actual_scope_type == expected_scope_type => {
+				self.entry_count = self.entry_count.saturating_sub(variables.iter().count());
+				Ok(variables)
+			},
 			Some((actual_scope_type, _)) => Err(
 				error::ErrorKind::UnexpectedScopeType {
 					expected: expected_scope_type,
@@ -141,6 +161,20 @@ impl ShellEnvironment {
 				.into(),
 			),
 			None => Err(error::ErrorKind::MissingScope.into()),
+		}
+	}
+
+	/// Sets a variable in the top-most scope, as it stands.
+	///
+	/// # Arguments
+	///
+	/// * `name` - The name of the variable to set.
+	/// * `var` - The variable to set.
+	pub fn set_in_current_scope<N: Into<String>>(&mut self, name: N, var: ShellVariable) {
+		if let Some((_, variables)) = self.scopes.last_mut()
+			&& variables.set(name, var).is_none()
+		{
+			self.entry_count += 1;
 		}
 	}
 

@@ -1967,9 +1967,13 @@ async fn setup_collected_redirects(
 	Ok(None)
 }
 
-/// Expands a simple command's prefix assignments in order, each in force while
-/// the later ones expand, as Bash expands them, after the command's words and
-/// before its redirections. None is in force once this returns, so the
+/// Expands a simple command's prefix assignments in order, as Bash expands
+/// them, after the command's words and before its redirections, and returns
+/// the variables they leave, which the command runs with. Each is in force
+/// while the later ones expand, and what one of those expansions does to an
+/// earlier one (`a=1 b=$((a+=1))`) is in what this returns; `+=` appends to
+/// the value the command would otherwise see, in these variables and not
+/// where that value is. None is in force once this returns, so the
 /// redirection words do not see them. An assignment to an array element is
 /// not one a command takes: as Bash does, it is reported as not a valid
 /// identifier on the standard error from before the redirections, its index
@@ -1978,53 +1982,65 @@ async fn expand_prefix_assignments(
 	shell: &mut Shell<impl extensions::ShellExtensions>,
 	params: &ExecutionParameters,
 	assignments: &[&ast::Assignment],
-) -> Result<Vec<ExpandedAssignment>, error::Error> {
+) -> Result<Option<crate::env::ShellVariableMap>, error::Error> {
 	if assignments.is_empty() {
-		return Ok(Vec::new());
+		return Ok(None);
 	}
 	let mut stderr = params.stderr(shell);
-	let mut guard = crate::env::ScopeGuard::new(shell, EnvironmentScope::Command);
-	let mut expanded = Vec::with_capacity(assignments.len());
+	shell.env_mut().push_scope(EnvironmentScope::Command);
+	let expanded = expand_prefix_assignments_in_scope(shell, params, assignments, &mut stderr).await;
+	let variables = shell.env_mut().take_scope(EnvironmentScope::Command);
+	expanded?;
+	variables.map(Some)
+}
+
+/// [`expand_prefix_assignments`] with the command scope already pushed, which
+/// its caller takes back whether this returns an error or not.
+async fn expand_prefix_assignments_in_scope(
+	shell: &mut Shell<impl extensions::ShellExtensions>,
+	params: &ExecutionParameters,
+	assignments: &[&ast::Assignment],
+	stderr: &mut openfiles::OpenFile,
+) -> Result<(), error::Error> {
 	for assignment in assignments {
 		if matches!(assignment.name, ast::AssignmentName::ArrayElementName(..)) {
 			let _ = writeln!(stderr, "`{}': not a valid identifier", assignment.name);
 			continue;
 		}
-		let one = expand_assignment_once(assignment, guard.shell(), params).await?;
-		assign_expanded(
-			one.clone(),
-			guard.shell(),
-			true,
-			Some(EnvironmentScope::Command),
-			EnvironmentScope::Command,
-		)?;
-		expanded.push(one);
+		let one = expand_assignment_once(assignment, shell, params).await?;
+		// `+=` appends to the value the command would otherwise see, which an
+		// enclosing command's own assignment may hold: the variable is copied
+		// here first, so that value is left where it is.
+		if one.append
+			&& let Some(existing) =
+				shell.env().get(one.name.as_str()).map(|(_, variable)| variable.clone())
+		{
+			shell.env_mut().set_in_current_scope(one.name.clone(), existing);
+		}
+		assign_expanded(one, shell, true, Some(EnvironmentScope::Command), EnvironmentScope::Command)?;
 	}
-	Ok(expanded)
+	Ok(())
 }
 
 async fn execute_command(
 	mut context: PipelineExecutionContext<'_, impl extensions::ShellExtensions>,
 	params: ExecutionParameters,
 	cmd_name: String,
-	assignments: Vec<ExpandedAssignment>,
+	assignments: Option<crate::env::ShellVariableMap>,
 	args: Vec<CommandArg>,
 ) -> Result<ExecutionSpawnResult, error::Error> {
 	// Push a new ephemeral environment scope for the duration of the command. We'll
 	// set command-scoped variable assignments after doing so, and revert them
-	// before returning. They were expanded already (see
-	// `expand_prefix_assignments`), and are not expanded again.
+	// before returning. They are the variables the prefix assignments left (see
+	// `expand_prefix_assignments`), put back as they are: nothing is expanded,
+	// evaluated or appended a second time.
 	let mut guard = crate::env::ScopeGuard::new(&mut context.shell, EnvironmentScope::Command);
 
-	for assignment in assignments {
-		// Ensure it's tagged as exported and created in the command scope.
-		assign_expanded(
-			assignment,
-			guard.shell(),
-			true,
-			Some(EnvironmentScope::Command),
-			EnvironmentScope::Command,
-		)?;
+	for (name, variable) in assignments.iter().flat_map(crate::env::ShellVariableMap::iter) {
+		guard
+			.shell()
+			.env_mut()
+			.set_in_current_scope(name.clone(), variable.clone());
 	}
 
 	guard.detach();
