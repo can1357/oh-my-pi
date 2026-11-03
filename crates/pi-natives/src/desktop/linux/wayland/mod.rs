@@ -5,6 +5,7 @@ mod portal;
 mod xkb;
 
 use std::{
+	cell::OnceCell,
 	os::{fd::AsRawFd, unix::net::UnixStream},
 	path::PathBuf,
 };
@@ -140,8 +141,8 @@ pub struct WaylandBackend {
 	ax_error:          Option<DesktopError>,
 	input:             Option<libei::Libei>,
 	/// Why native input can never work here, probed once without a prompt;
-	/// `Some(None)` when it may.
-	input_unavailable: Option<Option<String>>,
+	/// `None` when it may.
+	input_unavailable: OnceCell<Option<String>>,
 	displays:          Vec<DesktopDisplay>,
 	/// The PID that listens on the Wayland socket: gnome-shell on GNOME, whose
 	/// own AT-SPI frames never count as the focused application window. On
@@ -188,16 +189,16 @@ impl WaylandBackend {
 			ax,
 			ax_error,
 			input: None,
-			input_unavailable: None,
+			input_unavailable: OnceCell::new(),
 			displays: Vec::new(),
 			compositor_pid: compositor_pid(),
 		}
 	}
 
-	fn input_unavailable(&mut self) -> Option<&str> {
+	fn input_unavailable(&self) -> Option<&str> {
 		self
 			.input_unavailable
-			.get_or_insert_with(portal::input_unavailable_reason)
+			.get_or_init(portal::input_unavailable_reason)
 			.as_deref()
 	}
 
@@ -507,7 +508,7 @@ mod tests {
 			ax:                None,
 			ax_error:          None,
 			input:             None,
-			input_unavailable: Some(None),
+			input_unavailable: OnceCell::from(None),
 			displays:          Vec::new(),
 			compositor_pid:    None,
 		}
@@ -565,7 +566,7 @@ mod tests {
 	#[test]
 	fn a_desktop_without_a_remote_desktop_portal_reports_and_refuses_input() {
 		let mut backend = backend_without_services();
-		backend.input_unavailable = Some(Some("no RemoteDesktop portal".to_owned()));
+		backend.input_unavailable = OnceCell::from(Some("no RemoteDesktop portal".to_owned()));
 		let capabilities = backend.capabilities();
 		assert!(!capabilities.input);
 		assert!(!capabilities.held_input);

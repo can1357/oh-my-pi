@@ -147,7 +147,7 @@ mod tests {
 	}
 
 	/// Only a portal frontend that reports the interface missing turns input
-	/// off; any other failure leaves the lazy RemoteDesktop request to decide.
+	/// off; any other failure leaves the lazy `RemoteDesktop` request to decide.
 	#[test]
 	fn only_a_missing_remote_desktop_portal_makes_input_unavailable() {
 		let missing = ashpd::Error::PortalNotFound(
