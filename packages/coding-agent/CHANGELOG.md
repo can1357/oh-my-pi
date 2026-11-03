@@ -11,6 +11,7 @@
 ### Fixed
 
 - Fixed `omp -p` and other starts exiting with `database is locked` while other omp processes write `agent.db`: a start that finds the agent and memory schema current no longer writes to it ([#17968](https://github.com/can1357/oh-my-pi/pull/17968))
+- Fixed the judgment cache staying open after `close()` until the process exited, where its final checkpoint took the shared store's write lock ([#17968](https://github.com/can1357/oh-my-pi/pull/17968))
 
 ## [18.16.0] - 2026-11-02
 

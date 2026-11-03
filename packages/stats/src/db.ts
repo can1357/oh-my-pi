@@ -10,7 +10,13 @@ import {
 	hasRecurringTariff,
 } from "@oh-my-pi/pi-catalog/models";
 import type { ModelCost } from "@oh-my-pi/pi-catalog/types";
-import { getConfigRootDir, getStatsDbPath, initializeSqliteSchema, VERSION } from "@oh-my-pi/pi-utils";
+import {
+	getConfigRootDir,
+	getStatsDbPath,
+	initializeSqliteSchema,
+	openSqliteDatabase,
+	VERSION,
+} from "@oh-my-pi/pi-utils";
 import { ChunkedInsert } from "./chunked-insert";
 import { classifyAgentType, type ParseSessionResult, type SessionParserState } from "./parser";
 import { ensureRollupSchema, getDailyActivityFromRollup } from "./rollup";
@@ -123,16 +129,38 @@ const CATALOG_COST_BACKFILL_KEY = "catalog_cost_backfill";
 function shouldResetBackfill(value: string | undefined): boolean {
 	return value !== BACKFILL_COMPLETE && value !== BACKFILL_PENDING;
 }
+/** The open in flight, so concurrent callers share one connection. */
+let opening: Promise<Database> | null = null;
+
 /**
  * Initialize the database and create tables.
  */
 export async function initDb(): Promise<Database> {
 	if (db) return db;
+	opening ??= openStatsDb().finally(() => {
+		opening = null;
+	});
+	return opening;
+}
 
+async function openStatsDb(): Promise<Database> {
 	// Ensure directory exists
 	await fs.mkdir(getConfigRootDir(), { recursive: true });
 
-	db = new Database(getStatsDbPath());
+	// The shared opener retries SQLITE_BUSY (a peer's migration or WAL recovery) within its budget.
+	return openSqliteDatabase(getStatsDbPath(), database => {
+		db = database;
+		try {
+			initializeStatsDb(database);
+			return database;
+		} catch (error) {
+			db = null;
+			throw error;
+		}
+	});
+}
+
+function initializeStatsDb(db: Database): void {
 	// Install the busy handler BEFORE any lock-taking statement. See
 	// https://github.com/can1357/oh-my-pi/issues/2421.
 	db.run("PRAGMA busy_timeout = 5000");
@@ -154,7 +182,7 @@ export async function initDb(): Promise<Database> {
 	const messagesTableExisted =
 		db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'messages'").get() !== null;
 	// A current schema is only read: a sync running beside this one never fails it with SQLITE_BUSY.
-	initializeSqliteSchema(db, () => applySchema(db!, messagesTableExisted));
+	initializeSqliteSchema(db, () => applySchema(db, messagesTableExisted));
 	backfillUserMessages(db);
 	backfillToolCalls(db);
 	backfillReingestCosts(db);
@@ -166,7 +194,6 @@ export async function initDb(): Promise<Database> {
 	backfillNoCacheInputCosts(db);
 	backfillForkDuplicates(db);
 	ensureRollupSchema(db);
-	return db;
 }
 
 /** Creates and migrates the stats tables; idempotent, and only reads when they are current. */
