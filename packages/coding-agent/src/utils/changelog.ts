@@ -4,6 +4,7 @@ import { Lexer } from "@oh-my-pi/pi-utils/marked";
 import type { BunFile } from "bun";
 import bundledChangelogPath from "../../CHANGELOG.md" with { type: "file" };
 import changelogReviewTemplate from "../prompts/changelog-review.md" with { type: "text" };
+import { getChangelogPath } from "../config";
 import type { SettingValueOf } from "../config/registry";
 
 import type { cfgStartupChangelogMode } from "../modes/settings";
@@ -521,7 +522,6 @@ export async function resolveStartupChangelogForDisplay(options: {
 	return startupChangelog.markdown ? startupChangelog : undefined;
 }
 
-import { getChangelogPath } from "../config";
 export { getChangelogPath };
 
 /**
