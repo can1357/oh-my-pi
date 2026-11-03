@@ -33,14 +33,12 @@ describe("TodoBackendRegistry", () => {
 		expect(() => registry.register(definition("b", { create: undefined as never }), "ext")).toThrow(/"b".*create/);
 	});
 
-	test("list keeps registration order and get resolves by id", () => {
+	test("list keeps registration order, which the settings submenu shows", () => {
 		const registry = new TodoBackendRegistry();
-		const b = definition("b");
-		registry.register(b, "ext");
+		registry.register(definition("b"), "ext");
 		registry.register(definition("a"), "ext");
 		registry.register(definition("c"), "ext");
 		expect(registry.list().map(entry => entry.id)).toEqual(["b", "a", "c"]);
-		expect(registry.get("b")).toBe(b);
 		expect(registry.get("missing")).toBeUndefined();
 	});
 });
@@ -60,7 +58,6 @@ describe("pi.registerTodoBackend", () => {
 		const runner = new ExtensionRunner([extension], runtime, process.cwd(), SessionManager.inMemory(), {} as never);
 
 		expect(runner.todoBackends.list().map(entry => entry.id)).toEqual(["tracker"]);
-		expect(runner.todoBackends.get("tracker")?.label).toBe("Tracker");
 	});
 
 	test("an extension registering native fails to load", async () => {

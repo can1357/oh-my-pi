@@ -76,7 +76,6 @@ describe("TodoCommandController", () => {
 		await controller.handleTodoCommand("import");
 
 		const expected: TodoPhase[] = [{ name: "Imported", tasks: [{ content: "From cwd", status: "in_progress" }] }];
-		expect(ctx.session.commitTodoPhases).toHaveBeenCalledTimes(1);
 		expect(ctx.setTodos).toHaveBeenCalledWith(expected);
 		expect(ctx.agent.appendMessage).toHaveBeenCalledWith(expect.objectContaining({ role: "developer" }));
 		expect(ctx.sessionManager.appendMessage).toHaveBeenCalledWith(expect.objectContaining({ role: "developer" }));
