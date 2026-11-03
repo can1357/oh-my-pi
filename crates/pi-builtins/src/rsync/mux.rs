@@ -190,6 +190,12 @@ pub(crate) struct WriteConfig {
 	pub timeout: Option<Duration>,
 	/// Cancellation flag observed while sleeping for `--bwlimit`.
 	pub cancel: Option<Arc<AtomicBool>>,
+	/// The end of this side (a client's: the host's cancellation). Once it
+	/// rises the output thread writes no further job and fails with the
+	/// cancellation, as rsync 3.5.1's signal handler ends the process before
+	/// it sends anything more; a job already being written finishes, as a
+	/// write made before the signal would have.
+	pub stop: Option<Arc<AtomicBool>>,
 }
 
 /// Upstream `sleep_for_bwlimit`: writes are cut to `writemax` bytes and the
@@ -403,6 +409,7 @@ fn out_loop(
 	mut inner: Box<dyn Write + Send>,
 	mut bw: Option<BwLimit>,
 	counters: &IoCounters,
+	stop: Option<&AtomicBool>,
 ) {
 	loop {
 		let job = {
@@ -420,7 +427,10 @@ fn out_loop(
 				o = pipe.cond.wait(o).unwrap_or_else(PoisonError::into_inner);
 			}
 		};
+		let stopped = stop.is_some_and(|stop| stop.load(Ordering::Relaxed));
 		let (res, done, spent) = match job {
+			OutJob::Data { buf, start, .. } if stopped => (Err(RsyncError::cancelled_io()), buf.len() - start, Some(buf)),
+			OutJob::Flush if stopped => (Err(RsyncError::cancelled_io()), 0, None),
 			OutJob::Data { buf, start, count } => {
 				let res = write_out(pipe, &mut *inner, &buf[start..], bw.as_mut(), counters, count);
 				(res, buf.len() - start, Some(buf))
@@ -630,9 +640,10 @@ impl MuxWriter {
 		let worker = Arc::clone(&out);
 		let worker_counters = counters.clone();
 		let bw = cfg.bwlimit.and_then(BwLimit::new);
+		let stop = cfg.stop.clone();
 		let spawned = thread::Builder::new()
 			.name("rsync-io-write".into())
-			.spawn(move || out_loop(&worker, inner, bw, &worker_counters));
+			.spawn(move || out_loop(&worker, inner, bw, &worker_counters, stop.as_deref()));
 		if let Err(err) = spawned {
 			lock(&out.state).failed = Some(err);
 		}
@@ -2844,6 +2855,26 @@ mod tests {
 		assert_eq!(RsyncError::from_io(&err, RERR_STREAMIO).code, RERR_SIGNAL);
 		let out = sink.take();
 		assert!(out.len() >= 8 && out.chunks(4).all(|c| c == [0, 0, 0, 7]), "{out:?}");
+	}
+
+	/// Once the side's stop rises (a client's host cancellation), nothing
+	/// more goes out, and the write fails with the cancellation: rsync 3.5.1's
+	/// signal handler ends the process before it sends anything else. Before,
+	/// data queued after the cancellation still reached the peer, so a local
+	/// copy's server half could receive a file list that rsync's client,
+	/// stopped in its log write, never sent.
+	#[test]
+	fn nothing_goes_out_after_the_side_stops() {
+		let sink = Sink::default();
+		let stop = Arc::new(AtomicBool::new(false));
+		let mut w = writer(&sink, WriteConfig { stop: Some(Arc::clone(&stop)), ..WriteConfig::default() });
+		w.write_all(b"before").unwrap();
+		w.flush().unwrap();
+		assert_eq!(sink.take(), b"before");
+		stop.store(true, Ordering::Relaxed);
+		let err = w.write_all(b"after").and_then(|()| w.flush()).unwrap_err();
+		assert_eq!(RsyncError::from_io(&err, RERR_STREAMIO).code, RERR_SIGNAL, "{err}");
+		assert!(sink.take().is_empty(), "written after the stop");
 	}
 
 	#[test]

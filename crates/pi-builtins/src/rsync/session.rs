@@ -1089,11 +1089,15 @@ struct Streams {
 	counters: IoCounters,
 }
 
+/// The connection's streams. `stop` ends this side's output (a client's:
+/// the host's cancellation, see [`WriteConfig::stop`]); the server half of a
+/// local copy has none, as its exit line still goes out after its stop.
 fn make_streams(
 	conn_reader: Box<dyn Read + Send>,
 	conn_writer: Box<dyn Write + Send>,
 	probe: Option<ReadProbe>,
 	abort: &Arc<AtomicBool>,
+	stop: Option<&Arc<AtomicBool>>,
 	opts: &Options,
 ) -> Streams {
 	let counters = IoCounters::default();
@@ -1102,6 +1106,7 @@ fn make_streams(
 		bwlimit: (opts.bwlimit > 0).then(|| opts.bwlimit as u64),
 		timeout,
 		cancel: Some(Arc::clone(abort)),
+		stop: stop.cloned(),
 	};
 	let writer = MuxWriter::new(conn_writer, counters.clone(), wcfg);
 	let mut reader = MuxReader::new(conn_reader, counters.clone(), Arc::clone(abort), ReadConfig { timeout });
@@ -1397,7 +1402,7 @@ fn client_start(
 				(reader, writer, probe, peer)
 			}
 		};
-	let streams = make_streams(conn_reader, conn_writer, probe, &abort, &opts);
+	let streams = make_streams(conn_reader, conn_writer, probe, &abort, Some(&io.host_cancel), &opts);
 	let end = ClientRun {
 		io,
 		opts,
@@ -1941,7 +1946,7 @@ fn server_main(io: &HostIo, opts: Options, local: Option<LocalServer>) -> i32 {
 			Some(LocalServer { conn, client_info, filters }) => (conn.reader, conn.writer, conn.probe, client_info, Some(filters)),
 			None => (Box::new(io.stdin.clone()), Box::new(io.stdout_raw.clone()), None, Vec::new(), None),
 		};
-	let mut streams = make_streams(conn_reader, conn_writer, probe, &abort, &opts);
+	let mut streams = make_streams(conn_reader, conn_writer, probe, &abort, None, &opts);
 	let mut opts = opts;
 	if opts.secluded_pending() {
 		let argv = match handshake::read_secluded_args(&mut streams.reader, &io.fs, &io.cwd, opts.max_alloc) {
