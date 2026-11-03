@@ -56,7 +56,7 @@ The catalog file lives at either `.omp-plugin/marketplace.json` or `.claude-plug
 | `plugins`              | yes      | Array of plugin entries (see below)                                                                                                                        |
 | `metadata.description` | no       | Short description of the marketplace                                                                                                                       |
 | `metadata.version`     | no       | Catalog metadata version string                                                                                                                            |
-| `metadata.pluginRoot`  | no       | Directory that bare-name plugin sources resolve under; no effect on sources that start with `./`                                                           |
+| `metadata.pluginRoot`  | no       | Directory for bare-name sources and the legacy fallback for `./` sources missing from the marketplace root |
 | extra top-level fields | no       | Preserved by the parser but not used by marketplace install/runtime logic                                                                                  |
 
 ### Plugin entry fields

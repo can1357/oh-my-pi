@@ -118,6 +118,18 @@ describe("resolvePluginSource", () => {
 		expect(resolved).toBe(path.join(root, "plugins", "team", "plugin"));
 	});
 
+	it("rejects a failed primary probe instead of returning an unverified source", async () => {
+		const root = path.join(tmpDir, "marketplace");
+		fs.mkdirSync(path.join(root, "plugins", "loop"), { recursive: true });
+		fs.symlinkSync("loop", path.join(root, "loop"), "dir");
+		await expect(
+			validatePluginSource(makeEntry("./loop"), {
+				marketplaceClonePath: root,
+				catalogMetadata: { pluginRoot: "plugins" },
+			}),
+		).rejects.toMatchObject({ code: "ELOOP" });
+	});
+
 	it("falls back to pluginRoot when the marketplace is reached through a symlink", async () => {
 		const real = path.join(tmpDir, "real");
 		fs.mkdirSync(path.join(real, "plugins", "foo"), { recursive: true });

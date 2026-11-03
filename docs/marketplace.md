@@ -134,6 +134,8 @@ A marketplace catalog lives at `.omp-plugin/marketplace.json` in the repository 
 
 Top-level `metadata.description`, `metadata.version`, and `metadata.pluginRoot` are optional. `metadata.pluginRoot` names the directory that bare-name plugin sources (`"my-plugin"`) resolve under; a source that starts with `./` resolves from the marketplace root. Catalogs written for omp's earlier rule, where `pluginRoot` was prefixed to `./` sources, keep installing: a `./` source missing from the root is tried under `pluginRoot`.
 
+Permission errors, symlink loops, and other filesystem errors stop source validation; only missing or non-directory paths trigger the legacy fallback.
+
 Install version resolution tries catalog `version`, `.claude-plugin/plugin.json`, root `plugin.json`, then `package.json`; it then falls back to the source definition's first seven SHA characters or `0.0.0`. Versions used in cache paths must be 1–128 ASCII letters/digits or `._+-` and cannot contain `..`.
 
 ### Plugin entry fields

@@ -67,7 +67,7 @@ export interface MarketplaceCatalogOwner {
 export interface MarketplaceCatalogMetadata {
 	description?: string;
 	version?: string;
-	/** Directory that bare-name sources resolve under; `./` sources ignore it. */
+	/** Directory for bare-name sources and the legacy fallback for missing `./` sources. */
 	pluginRoot?: string;
 }
 

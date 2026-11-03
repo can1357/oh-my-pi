@@ -136,12 +136,12 @@ async function resolveRelativeSourceDir(
 	context: Pick<ResolveContext, "marketplaceClonePath" | "catalogMetadata">,
 ): Promise<string> {
 	const resolved = resolveRelativeSourcePath(source, context);
-	if (!(await directoryIsMissing(resolved))) return resolved;
+	if (!(await directoryIsMissing(resolved, { strict: true }))) return resolved;
 	// Catalogs written for omp's earlier rule (`./foo` meaning `<pluginRoot>/foo`) keep installing.
 	const pluginRoot = context.catalogMetadata?.pluginRoot;
 	if (pluginRoot && source.startsWith("./")) {
 		const legacy = resolveInsideMarketplace(path.join(pluginRoot, source), source, context);
-		if (!(await directoryIsMissing(legacy))) return legacy;
+		if (!(await directoryIsMissing(legacy, { strict: true }))) return legacy;
 	}
 	throw new Error(`Plugin source directory does not exist: "${resolved}"`);
 }
@@ -222,5 +222,5 @@ async function resolveObjectSource(
 // ── Helpers ─────────────────────────────────────────────────────────
 
 async function verifyDirExists(dirPath: string, errorMessage: string): Promise<void> {
-	if (await directoryIsMissing(dirPath)) throw new Error(errorMessage);
+	if (await directoryIsMissing(dirPath, { strict: true })) throw new Error(errorMessage);
 }

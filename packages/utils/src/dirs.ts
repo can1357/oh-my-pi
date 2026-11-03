@@ -269,12 +269,14 @@ export function __resetProjectDirCacheForTests(): void {
 	projectDir = undefined;
 }
 
-/** Whether a path is absent or not a directory. Other stat failures return false. */
-export async function directoryIsMissing(dir: string): Promise<boolean> {
+/** Whether a path is absent or not a directory; `strict` propagates other stat failures. */
+export async function directoryIsMissing(dir: string, options?: { strict?: boolean }): Promise<boolean> {
 	try {
 		return !(await fs.promises.stat(dir)).isDirectory();
 	} catch (error) {
-		return isEnoent(error) || isEnotdir(error);
+		if (isEnoent(error) || isEnotdir(error)) return true;
+		if (options?.strict) throw error;
+		return false;
 	}
 }
 
