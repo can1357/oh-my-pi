@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the bash tool's shell reporting a failed `cd` as `error: cd: i/o error: No such file or directory (os error 2)`, which names no directory: `cd`, `pushd` and `popd` now print `cd: DIR: reason` as Bash does; `cd` refuses a directory it may not search, looks a relative directory up in `CDPATH`, and reports an unknown option or a second directory in Bash's words, and a `popd` that cannot enter its directory keeps it on the stack
+
 ## [18.16.0] - 2026-11-02
 
 ### Added
