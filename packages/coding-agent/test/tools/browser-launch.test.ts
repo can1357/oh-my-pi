@@ -1,9 +1,9 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, onTestFinished } from "bun:test";
 
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { findFreeCdpPort } from "@oh-my-pi/pi-coding-agent/tools/browser/attach";
+import { findFreeCdpPort, gracefulKillTreeOnce } from "@oh-my-pi/pi-coding-agent/tools/browser/attach";
 import {
 	chromiumExecutableProbeForTest,
 	closeLaunchedBrowser,
@@ -17,11 +17,14 @@ import {
 import { readJsonl, TempDir } from "@oh-my-pi/pi-utils";
 import { BrowserPlatform, computeExecutablePath, detectBrowserPlatform } from "@oh-my-pi/pi-utils/browsers";
 import { APP_NAME } from "@oh-my-pi/pi-utils/dirs";
+import type { Browser } from "puppeteer-core";
 import { PUPPETEER_REVISIONS } from "puppeteer-core/internal/revisions.js";
 import { chromiumAvailable } from "./chromium-probe";
 
 const EXECUTABLE_PROBE = path.resolve(import.meta.dir, "../fixtures/browser-executable-probe.ts");
 const HEADLESS_OWNER = path.resolve(import.meta.dir, "../fixtures/headless-browser-owner.ts");
+/** What the owner fixture prints about the browser it launched. */
+type OwnerReport = { wsEndpoint: string; userDataDir: string; pid?: number };
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
 
 /**
@@ -103,28 +106,30 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("process-local headless launch", () => {
 				stdout: "pipe",
 				stderr: "inherit",
 			});
-			let userDataDir: string | undefined;
-			try {
-				const first = await readJsonl<{ wsEndpoint: string; userDataDir: string }>(owner.stdout).next();
-				if (first.done) throw new Error("The owner exited before reporting its browser");
-				const launched = first.value;
-				userDataDir = launched.userDataDir;
-				const puppeteer = await loadPuppeteer();
-				const observer = await puppeteer.connect({ browserWSEndpoint: launched.wsEndpoint });
-				const disconnected = Promise.withResolvers<void>();
-				observer.once("disconnected", () => disconnected.resolve());
-				owner.stdin.write("kill\n");
-				await owner.stdin.flush();
-				await owner.exited;
-				expect(owner.signalCode).toBe("SIGKILL");
-				// Chromium closing its DevTools socket is it exiting; a survivor keeps this pending.
-				await disconnected.promise;
-				expect(observer.connected).toBe(false);
-			} finally {
+			let observer: Browser | undefined;
+			let launched: OwnerReport | undefined;
+			// Runs when the case times out too: a Chrome that survived its owner is the failure under test.
+			onTestFinished(async () => {
 				owner.kill("SIGKILL");
 				await owner.exited;
-				if (userDataDir) await removeUserDataDir(userDataDir);
-			}
+				observer?.disconnect();
+				if (launched?.pid !== undefined) await gracefulKillTreeOnce(launched.pid);
+				if (launched) await removeUserDataDir(launched.userDataDir);
+			});
+			const first = await readJsonl<OwnerReport>(owner.stdout).next();
+			if (first.done) throw new Error("The owner exited before reporting its browser");
+			launched = first.value;
+			const puppeteer = await loadPuppeteer();
+			observer = await puppeteer.connect({ browserWSEndpoint: launched.wsEndpoint });
+			const disconnected = Promise.withResolvers<void>();
+			observer.once("disconnected", () => disconnected.resolve());
+			owner.stdin.write("kill\n");
+			await owner.stdin.flush();
+			await owner.exited;
+			expect(owner.signalCode).toBe("SIGKILL");
+			// Chromium closing its DevTools socket is it exiting; a survivor keeps this pending.
+			await disconnected.promise;
+			expect(observer.connected).toBe(false);
 		},
 		30_000,
 	);
