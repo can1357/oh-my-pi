@@ -226,6 +226,27 @@ describe("model presets", () => {
 		expect(result).toMatchObject({ kind: "failed", reason: "metadata refresh failed" });
 	});
 
+	it("does not apply preset effort or report success after a superseded live switch", async () => {
+		const settings = Settings.isolated();
+		cfgModelPresets.setEntry(settings, "opus", {
+			modelRoles: { default: OPUS },
+			defaultThinkingLevel: Effort.Low,
+		});
+		const session = createSession(settings);
+		session.setThinkingLevel(Effort.High);
+		const selection = Promise.withResolvers<{ switched: boolean }>();
+		vi.spyOn(session, "setModel").mockReturnValue(selection.promise);
+		const setThinkingLevel = vi.spyOn(session, "setThinkingLevel");
+
+		const pending = applyModelPreset(settings, session, "opus");
+		selection.resolve({ switched: false });
+		const result = await pending;
+
+		expect(result.kind).toBe("failed");
+		expect(setThinkingLevel).not.toHaveBeenCalled();
+		expect(session.thinkingLevel).toBe(Effort.High);
+	});
+
 	it("saves only the named entry globally and never copies project presets", async () => {
 		const settings = await projectSettings({
 			project: `modelPresets:\n  team:\n    modelRoles:\n      default: ${SONNET}\n`,

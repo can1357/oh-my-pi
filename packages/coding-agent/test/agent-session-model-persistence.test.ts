@@ -115,7 +115,7 @@ describe("AgentSession model persistence", () => {
 		selectInitialModel?: (availableModels: Model<Api>[]) => Model<Api>;
 		modelRoles?: Record<string, string>;
 		persist?: boolean;
-		scopedModels?: Array<{ model: Model<Api> }>;
+		scopedModels?: Array<{ model: Model<Api>; thinkingLevel?: Effort }>;
 		settings?: Settings;
 	}): Promise<{ modelRegistry: ModelRegistry; settings: Settings; session: AgentSession }> {
 		const modelRegistry = sharedModelRegistry;
@@ -398,9 +398,260 @@ describe("AgentSession model persistence", () => {
 		},
 	);
 
-	it.each((["global", "project"] as const).flatMap(scope => [false, true].map(auto => ({ scope, auto }))))(
-		"model hub persists a durable $scope default (auto: $auto) after an ephemeral takeover without stale effort or status",
-		async ({ scope, auto }) => {
+	it.each(
+		(["global", "project"] as const).flatMap(persistScope =>
+			(["reload", "switch"] as const).flatMap(transition =>
+				(["none", "before", "after"] as const).map(newer => ({ persistScope, transition, newer })),
+			),
+		),
+	)(
+		"a published $persistScope save across $transition respects a newer save $newer the transition",
+		async ({ persistScope, transition, newer }) => {
+			const source = getAnthropicModelOrThrow("claude-sonnet-4-5");
+			const older = getAnthropicModelOrThrow("claude-sonnet-4-6");
+			const latest = getAnthropicModelOrThrow("claude-haiku-4-5");
+			const created = await createSession({
+				initialModel: source,
+				persist: true,
+				modelRoles: { default: modelValue(source) },
+			});
+			if (persistScope === "project") created.settings.setProjectModelRole("default", modelValue(source));
+			const manager = created.session.sessionManager;
+			manager.appendModelChange(modelValue(source), "default");
+			manager.appendMessage({ role: "user", content: "origin transcript", timestamp: Date.now() });
+			manager.appendMessage(createAssistantMessage("ready"));
+			await manager.flush();
+			const targetFile = await writeRoleModelSession(modelValue(source), modelValue(source), "default");
+			const entered = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			const reconcile = SessionTools.prototype.reconcileThinkTool;
+			let held = false;
+			const reconciliation = vi
+				.spyOn(SessionTools.prototype, "reconcileThinkTool")
+				.mockImplementation(async function (this: SessionTools, ...args) {
+					if (!held && created.session.model?.id === older.id) {
+						held = true;
+						entered.resolve();
+						await release.promise;
+					}
+					return reconcile.apply(this, args);
+				});
+			const pending = created.session.setModel(older, "default", { persist: true, persistScope });
+			let result: unknown;
+			try {
+				await entered.promise;
+				if (newer === "before") {
+					await created.session.setModel(latest, "default", { persist: true, persistScope });
+				}
+				if (transition === "reload") await created.session.reload();
+				else expect(await created.session.switchSession(targetFile)).toBe(true);
+				if (newer === "after") {
+					await created.session.setModel(latest, "default", { persist: true, persistScope });
+				}
+			} finally {
+				release.resolve();
+				result = await pending;
+				reconciliation.mockRestore();
+			}
+			expect(result).toEqual({ switched: false });
+			const expected = newer !== "none" ? latest : persistScope === "global" ? older : source;
+			expect(
+				persistScope === "global"
+					? created.settings.getGlobalModelRole("default")
+					: created.settings.getProjectModelRole("default"),
+			).toBe(modelValue(expected));
+			if (persistScope === "project") {
+				expect(created.settings.getGlobalModelRole("default")).toBe(modelValue(source));
+			}
+			expect(created.session.model?.id).not.toBe(older.id);
+			expect(
+				manager.getBranch().some(entry => entry.type === "model_change" && entry.model === modelValue(older)),
+			).toBe(false);
+		},
+	);
+
+	it.each(
+		(["global", "project"] as const).flatMap(persistScope =>
+			[false, true].map(sameLevel => ({ persistScope, sameLevel })),
+		),
+	)(
+		"a newer persisted effort owns the global preference without canceling an older $persistScope Auto role save (same level: $sameLevel)",
+		async ({ persistScope, sameLevel }) => {
+			const source = getAnthropicModelOrThrow("claude-sonnet-4-5");
+			const target = getAnthropicModelOrThrow("claude-sonnet-4-6");
+			const created = await createSession({ initialModel: source, modelRoles: { default: modelValue(source) } });
+			cfgDefaultThinkingLevel.set(created.settings, Effort.High);
+			if (sameLevel) created.session.setThinkingLevel(Effort.Low);
+			const entered = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			const reconcile = SessionTools.prototype.reconcileThinkTool;
+			let held = false;
+			const reconciliation = vi
+				.spyOn(SessionTools.prototype, "reconcileThinkTool")
+				.mockImplementation(async function (this: SessionTools, ...args) {
+					if (!held && created.session.model?.id === target.id) {
+						held = true;
+						entered.resolve();
+						await release.promise;
+					}
+					return reconcile.apply(this, args);
+				});
+			const pending = created.session.setModel(target, "default", {
+				persist: true,
+				persistScope,
+				persistAutoThinking: true,
+			});
+			let result: unknown;
+			try {
+				await entered.promise;
+				created.session.setThinkingLevel(Effort.Low, true);
+			} finally {
+				release.resolve();
+				result = await pending;
+				reconciliation.mockRestore();
+			}
+			expect(result).toEqual({ switched: false });
+			expect(created.session.model?.id).toBe(target.id);
+			expect(created.session.configuredThinkingLevel()).toBe(Effort.Low);
+			expect(created.session.agent.state.thinkingLevel).toBe(Effort.Low);
+			expect(cfgDefaultThinkingLevel.get(created.settings)).toBe(Effort.Low);
+			expect(
+				persistScope === "project"
+					? created.settings.getProjectModelRole("default")
+					: created.settings.getGlobalModelRole("default"),
+			).toBe(modelValue(target));
+			if (persistScope === "project") {
+				expect(created.settings.getGlobalModelRole("default")).toBe(modelValue(source));
+			}
+			expect(
+				created.session.sessionManager.getBranch().findLast(entry => entry.type === "model_change"),
+			).toMatchObject({
+				model: modelValue(target),
+			});
+		},
+	);
+
+	it.each(["global", "project"] as const)(
+		"a newer %s model-only save does not cancel an older global Auto preference",
+		async scope => {
+			const source = getAnthropicModelOrThrow("claude-sonnet-4-5");
+			const older = getAnthropicModelOrThrow("claude-sonnet-4-6");
+			const newer = getAnthropicModelOrThrow("claude-haiku-4-5");
+			const created = await createSession({ initialModel: source });
+			cfgDefaultThinkingLevel.set(created.settings, Effort.High);
+			const entered = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			const reconcile = SessionTools.prototype.reconcileThinkTool;
+			let held = false;
+			const reconciliation = vi
+				.spyOn(SessionTools.prototype, "reconcileThinkTool")
+				.mockImplementation(async function (this: SessionTools, ...args) {
+					if (!held && created.session.model?.id === older.id) {
+						held = true;
+						entered.resolve();
+						await release.promise;
+					}
+					return reconcile.apply(this, args);
+				});
+			const pending = created.session.setModel(older, "default", {
+				persist: true,
+				persistAutoThinking: true,
+			});
+			try {
+				await entered.promise;
+				await created.session.setModel(newer, "default", { persist: true, persistScope: scope });
+			} finally {
+				release.resolve();
+				await pending;
+				reconciliation.mockRestore();
+			}
+			expect(await pending).toEqual({ switched: false });
+			expect(created.session.model?.id).toBe(newer.id);
+			expect(cfgDefaultThinkingLevel.get(created.settings)).toBe(AUTO_THINKING);
+			expect(created.settings.getGlobalModelRole("default")).toBe(modelValue(scope === "global" ? newer : older));
+			if (scope === "project") expect(created.settings.getProjectModelRole("default")).toBe(modelValue(newer));
+		},
+	);
+
+	it.each(
+		(["setModel", "scoped cycle", "available cycle"] as const).flatMap(publication =>
+			[false, true].flatMap(newSession => [false, true].map(takeover => ({ publication, takeover, newSession }))),
+		),
+	)(
+		"$publication reapplies its effort only without a newer selection (takeover: $takeover, newSession: $newSession)",
+		async ({ publication, takeover, newSession }) => {
+			const source = getAnthropicModelOrThrow("claude-sonnet-4-5");
+			const bundled = getAnthropicModelOrThrow("claude-sonnet-4-6");
+			if (!bundled.thinking) throw new Error("Expected a model with configurable thinking");
+			const target = { ...bundled, thinking: { ...bundled.thinking, defaultLevel: Effort.Low } };
+			const created = await createSession({
+				initialModel: source,
+				scopedModels:
+					publication === "scoped cycle"
+						? [{ model: source }, { model: target, thinkingLevel: Effort.Low }]
+						: undefined,
+			});
+			created.session.setThinkingLevel(Effort.High);
+			const entered = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			const reconcile = SessionTools.prototype.reconcileThinkTool;
+			let held = false;
+			const reconciliation = vi
+				.spyOn(SessionTools.prototype, "reconcileThinkTool")
+				.mockImplementation(async function (this: SessionTools, ...args) {
+					if (!held && created.session.model?.id === target.id) {
+						held = true;
+						entered.resolve();
+						await release.promise;
+					}
+					return reconcile.apply(this, args);
+				});
+			const syncing = vi.spyOn(SessionTools.prototype, "syncAfterModelChange");
+			const availableModels =
+				publication === "available cycle"
+					? vi.spyOn(sharedModelRegistry, "getAvailable").mockReturnValue([source, target])
+					: undefined;
+			const pending = publication === "setModel" ? created.session.setModel(target) : created.session.cycleModel();
+			let result: unknown;
+			let syncCount = 0;
+			try {
+				await entered.promise;
+				if (newSession) expect(await created.session.newSession()).toBe(true);
+				if (takeover) created.session.setThinkingLevel(Effort.Medium);
+			} finally {
+				release.resolve();
+				result = await pending;
+				syncCount = syncing.mock.calls.length;
+				reconciliation.mockRestore();
+				availableModels?.mockRestore();
+				syncing.mockRestore();
+			}
+			const effort = takeover ? Effort.Medium : publication === "available cycle" ? Effort.High : Effort.Low;
+			expect(created.session.model?.id).toBe(target.id);
+			expect(created.session.configuredThinkingLevel()).toBe(effort);
+			expect(created.session.agent.state.thinkingLevel).toBe(effort);
+			expect(
+				created.session.sessionManager.getBranch().findLast(entry => entry.type === "thinking_level_change"),
+			).toMatchObject({ thinkingLevel: effort, configured: effort });
+			expect(
+				created.session.sessionManager.getBranch().findLast(entry => entry.type === "model_change"),
+			).toMatchObject({
+				model: modelValue(target),
+			});
+			expect(syncCount).toBeGreaterThan(0);
+			if (publication === "setModel") expect(result).toEqual({ switched: !takeover });
+			else if (takeover) expect(result).toBeUndefined();
+			else expect(result).toMatchObject({ model: { id: target.id }, thinkingLevel: effort });
+		},
+	);
+
+	it.each(
+		(["global", "project"] as const).flatMap(scope =>
+			[false, true].flatMap(auto => (["ephemeral", "effort"] as const).map(takeover => ({ scope, auto, takeover }))),
+		),
+	)(
+		"model hub persists a durable $scope default (auto: $auto) after an $takeover takeover without stale effort or status",
+		async ({ scope, auto, takeover }) => {
 			await Settings.init({ inMemory: true });
 			await initTheme(false);
 			const source = getAnthropicModelOrThrow("claude-sonnet-4-5");
@@ -477,8 +728,9 @@ describe("AgentSession model persistence", () => {
 			});
 			try {
 				await entered.promise;
-				await created.session.setModelTemporary(ephemeral, Effort.Max, { ephemeral: true });
-				expect(created.session.configuredThinkingLevel()).toBe(Effort.Max);
+				if (takeover === "effort") created.session.setThinkingLevel(Effort.Low, true);
+				else await created.session.setModelTemporary(ephemeral, Effort.Max, { ephemeral: true });
+				expect(created.session.configuredThinkingLevel()).toBe(takeover === "effort" ? Effort.Low : Effort.Max);
 				takenOver = true;
 			} finally {
 				release.resolve();
@@ -489,8 +741,9 @@ describe("AgentSession model persistence", () => {
 				unsubscribe();
 				hub.handleInput?.("\x1b");
 			}
-			expect(created.session.model?.id).toBe(ephemeral.id);
-			expect(created.session.configuredThinkingLevel()).toBe(Effort.Max);
+			expect(created.session.model?.id).toBe(takeover === "effort" ? durable.id : ephemeral.id);
+			expect(created.session.configuredThinkingLevel()).toBe(takeover === "effort" ? Effort.Low : Effort.Max);
+			expect(created.session.agent.state.thinkingLevel).toBe(takeover === "effort" ? Effort.Low : Effort.Max);
 			expect(showStatus).not.toHaveBeenCalled();
 			expect(staleThinkingEvents).toBe(0);
 			expect(diskSettings.getModelRole("default")).toBe(
@@ -499,7 +752,9 @@ describe("AgentSession model persistence", () => {
 			await diskSettings.flush();
 			const reloaded = await Settings.loadReadOnly({ cwd: tempDir.path(), agentDir });
 			expect(reloaded.getModelRole("default")).toBe(diskSettings.getModelRole("default"));
-			expect(cfgDefaultThinkingLevel.get(reloaded)).toBe(auto ? AUTO_THINKING : Effort.High);
+			expect(cfgDefaultThinkingLevel.get(reloaded)).toBe(
+				takeover === "effort" ? Effort.Low : auto ? AUTO_THINKING : Effort.High,
+			);
 			if (scope === "project") {
 				expect(reloaded.getProjectModelRole("default")).toBe(modelValue(durable));
 				expect(reloaded.getGlobalModelRole("default")).toBe(`${modelValue(source)}:high`);
@@ -1034,19 +1289,19 @@ describe("AgentSession model persistence", () => {
 					? vi.spyOn(sharedModelRegistry, "getAvailable").mockReturnValue([source, durable])
 					: undefined;
 			const pending = publishReceipt(created.session, publication, durable);
-			let result: unknown;
 			try {
 				await entered.promise;
 				expect(await created.session.newSession()).toBe(true);
 			} finally {
 				release.resolve();
-				result = await pending;
+				await pending;
 				reconciliation.mockRestore();
 				availableModels?.mockRestore();
 			}
+			const result = await pending;
 			if (publication === "setModel") expect(result).toEqual({ switched: true });
-			if (publication === "scoped cycle" || publication === "available cycle") {
-				expect(result).toMatchObject({ model: { id: durable.id }, isScoped: publication === "scoped cycle" });
+			else if (publication === "scoped cycle" || publication === "available cycle") {
+				expect(result).toMatchObject({ model: durable });
 			}
 			expect(formatModelStringWithRouting(created.session.model!)).toBe(`${selector}@google`);
 			expect(

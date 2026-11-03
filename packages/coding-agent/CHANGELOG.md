@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Fixed published global model saves being lost across reloads or session switches while keeping project saves bound to their original session scope ([#17292](https://github.com/can1357/oh-my-pi/pull/17292) by [@taibenvenuti](https://github.com/taibenvenuti))
+- Fixed delayed model saves overwriting a newer saved thinking preference with Auto, and model-hub callbacks or scoped cycles applying stale effort or status after an effort-only selection, without treating `/new` effort restoration as a new selection ([#17292](https://github.com/can1357/oh-my-pi/pull/17292) by [@taibenvenuti](https://github.com/taibenvenuti))
 - Fixed saved global and project default models and automatic-thinking preferences being lost when a session-only model switch overtakes their selection ([#17292](https://github.com/can1357/oh-my-pi/pull/17292) by [@taibenvenuti](https://github.com/taibenvenuti))
 - Fixed overlapping model cycles overriding a newer temporary model's thinking effort or reporting a stale model selection ([#17292](https://github.com/can1357/oh-my-pi/pull/17292) by [@taibenvenuti](https://github.com/taibenvenuti))
 - Fixed `/prewalk restart` silently cancelling after a superseded planning-model selection or a changed arm; it now explains the cancellation and reports the current model ([#17292](https://github.com/can1357/oh-my-pi/pull/17292) by [@taibenvenuti](https://github.com/taibenvenuti))

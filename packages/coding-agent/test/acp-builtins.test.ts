@@ -79,7 +79,8 @@ interface FakeAcpBuiltinSession {
 		getAll(): Array<{ provider: string; id: string; contextWindow?: number }>;
 		getAvailable(): Array<{ provider: string; id: string; contextWindow?: number }>;
 	};
-	setModel(model: unknown): Promise<void>;
+	setModel(model: unknown): Promise<{ switched: boolean }>;
+	setThinkingLevel(level: string): void;
 	setModelTemporary(model: unknown, thinkingLevel?: string): Promise<void>;
 	listResetCredits: () => Promise<ResetCreditAccountStatus[]>;
 	redeemResetCredit: (target: ResetCreditTarget) => Promise<ResetCreditRedeemOutcome>;
@@ -188,7 +189,10 @@ function createRuntime() {
 			getAll: () => session.getAvailableModels(),
 			getAvailable: () => session.getAvailableModels(),
 		},
-		async setModel(_model: unknown) {},
+		async setModel(_model: unknown) {
+			return { switched: true };
+		},
+		setThinkingLevel(_level: string) {},
 		async setModelTemporary(_model: unknown, _thinkingLevel?: string) {},
 	};
 	const typedSession = session as unknown as AgentSession & FakeAcpBuiltinSession;
@@ -772,7 +776,7 @@ describe("ACP builtin slash commands", () => {
 		runtime.notifyConfigChanged = () => {
 			configNotified++;
 		};
-		const setModelSpy = spyOn(session, "setModel").mockResolvedValue(undefined);
+		const setModelSpy = spyOn(session, "setModel").mockResolvedValue({ switched: true });
 
 		const result = await executeAcpBuiltinSlashCommand("/model claude-3-5-sonnet", runtime);
 
@@ -781,6 +785,34 @@ describe("ACP builtin slash commands", () => {
 		expect(output[0]).toContain("Model set to anthropic/claude-3-5-sonnet");
 		expect(titleNotified).toBe(1);
 		expect(configNotified).toBe(1);
+	});
+
+	it("model: suppresses effort, success output, and notifications after a superseded selection", async () => {
+		const { output, runtime, session } = createRuntime();
+		const available = [{ provider: "anthropic", id: "claude-3-5-sonnet", contextWindow: 200_000 }];
+		session.getAvailableModels = () => available;
+		let titleNotified = 0;
+		let configNotified = 0;
+		runtime.notifyTitleChanged = () => {
+			titleNotified++;
+		};
+		runtime.notifyConfigChanged = () => {
+			configNotified++;
+		};
+		const selection = Promise.withResolvers<{ switched: boolean }>();
+		const setModelSpy = spyOn(session, "setModel").mockReturnValue(selection.promise);
+		const setThinkingLevelSpy = spyOn(session, "setThinkingLevel");
+
+		const pending = executeAcpBuiltinSlashCommand("/model claude-3-5-sonnet:low", runtime);
+		selection.resolve({ switched: false });
+		const result = await pending;
+
+		expect(result).toEqual({ consumed: true });
+		expect(setModelSpy).toHaveBeenCalledWith(available[0]);
+		expect(setThinkingLevelSpy).not.toHaveBeenCalled();
+		expect(output).toEqual([]);
+		expect(titleNotified).toBe(0);
+		expect(configNotified).toBe(0);
 	});
 
 	it("model: does not emit config change when id is unknown", async () => {
@@ -804,7 +836,7 @@ describe("ACP builtin slash commands", () => {
 		];
 		session.getAvailableModels = () => available;
 		const temporarySpy = spyOn(session, "setModelTemporary").mockResolvedValue(undefined);
-		const setModelSpy = spyOn(session, "setModel").mockResolvedValue(undefined);
+		const setModelSpy = spyOn(session, "setModel").mockResolvedValue({ switched: true });
 
 		const result = await executeAcpBuiltinSlashCommand("/switch opus:low", runtime);
 

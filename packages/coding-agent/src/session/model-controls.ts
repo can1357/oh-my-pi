@@ -108,6 +108,9 @@ export class ModelControls {
 	#selectionGeneration = 0;
 	#automaticInvalidation = 0;
 	#modelPublication = 0;
+	// Global preferences outlive transcript scopes and have independent model/effort owners.
+	#globalSettingsPublication = 0;
+	#thinkingSettingsGeneration = 0;
 	// /clear and /new keep published model owners; a rejected transcript switch restores them.
 	#publicationScope: ModelPublicationScope = {
 		preparation: {},
@@ -223,9 +226,8 @@ export class ModelControls {
 		return this.#serviceTierByFamily;
 	}
 
-	/** Restores thinking state from a transcript without persisting a new entry. */
+	/** Restores thinking state without claiming a new selection or persisting an entry. */
 	restoreThinkingLevel(level: ConfiguredThinkingLevel | undefined): void {
-		this.#selectionGeneration++;
 		this.#autoThinking = level === AUTO_THINKING;
 		this.#autoResolvedLevel = undefined;
 		this.#thinkingLevel =
@@ -310,42 +312,64 @@ export class ModelControls {
 
 		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(targetModel));
 		this.#host.clearActiveRetryFallback();
+		const roleValue = options?.persist
+			? formatRoleModelValue(
+					this.#host.settings,
+					this.#host.modelRegistry,
+					role,
+					targetModel,
+					options.selector,
+					options.thinkingLevel,
+				)
+			: undefined;
 		let publication = 0;
+		let selectionGeneration = 0;
+		let thinkingSettingsGeneration = 0;
 		await this.#host.setModelWithProviderSessionReset(targetModel, "explicit", () => {
-			this.#selectionGeneration++;
+			selectionGeneration = ++this.#selectionGeneration;
 			publication = scope.livePublication = ++this.#modelPublication;
 			if (role !== EPHEMERAL_MODEL_CHANGE_ROLE) scope.resumePublication = publication;
-			if (options?.persist) scope.settingsPublication = publication;
+			if (options?.persist) {
+				if (options.persistScope === "project") scope.settingsPublication = publication;
+				else this.#globalSettingsPublication = publication;
+				if (options.persistAutoThinking) thinkingSettingsGeneration = ++this.#thinkingSettingsGeneration;
+			}
 		});
 		await this.#recordModelReceipt(targetModel, role, publication, scope);
-		if (this.#publicationScope !== scope) return { switched: false };
-		if (options?.persist && scope.settingsPublication === publication) {
-			const value = formatRoleModelValue(
-				this.#host.settings,
-				this.#host.modelRegistry,
-				role,
-				targetModel,
-				options.selector,
-				options.thinkingLevel,
-			);
-			if (options.persistScope === "project") {
-				this.#host.settings.setProjectModelRole(role, value);
+		const ownsSettings =
+			options?.persistScope === "project"
+				? this.#publicationScope === scope && scope.settingsPublication === publication
+				: this.#globalSettingsPublication === publication;
+		if (roleValue !== undefined && ownsSettings) {
+			if (options?.persistScope === "project") {
+				this.#host.settings.setProjectModelRole(role, roleValue);
 			} else {
-				this.#host.settings.setModelRole(role, value);
-			}
-			if (options.persistAutoThinking) {
-				cfgDefaultThinkingLevel.set(this.#host.settings, AUTO_THINKING);
+				this.#host.settings.setModelRole(role, roleValue);
 			}
 		}
-		if (scope.livePublication === publication) {
-			// Re-apply thinking only while this publication still owns the live model.
+		if (
+			options?.persist &&
+			options.persistAutoThinking &&
+			thinkingSettingsGeneration === this.#thinkingSettingsGeneration
+		) {
+			cfgDefaultThinkingLevel.set(this.#host.settings, AUTO_THINKING);
+		}
+		if (this.#publicationScope !== scope) return { switched: false };
+		if (scope.livePublication === publication && this.#selectionGeneration === selectionGeneration) {
+			// Re-apply defaults only while this publication still owns the effort selection.
+			selectionGeneration++;
 			this.#reapplyThinkingLevel(targetModel.thinking?.defaultLevel);
 		}
 		await this.#host.syncAfterModelChange(previousEditMode);
 		while (this.#publicationScope !== scope && this.#host.sessionGenerationSettled()) {
 			await this.#host.sessionGenerationSettled();
 		}
-		return { switched: this.#publicationScope === scope && scope.livePublication === publication };
+		return {
+			switched:
+				this.#publicationScope === scope &&
+				scope.livePublication === publication &&
+				this.#selectionGeneration === selectionGeneration,
+		};
 	}
 
 	/**
@@ -593,23 +617,31 @@ export class ModelControls {
 		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(next.model));
 		this.#host.clearActiveRetryFallback();
 		let publication = 0;
+		let selectionGeneration = 0;
 		await this.#host.setModelWithProviderSessionReset(next.model, "explicit", () => {
-			this.#selectionGeneration++;
+			selectionGeneration = ++this.#selectionGeneration;
 			publication = scope.livePublication = ++this.#modelPublication;
 			scope.resumePublication = publication;
 		});
 		await this.#recordModelReceipt(next.model, undefined, publication, scope);
 		if (this.#publicationScope !== scope) return undefined;
 
-		if (scope.livePublication === publication) {
+		if (scope.livePublication === publication && this.#selectionGeneration === selectionGeneration) {
 			// Apply the scoped model's configured thinking level, preserving auto.
+			selectionGeneration++;
 			this.setThinkingLevel(this.#autoThinking ? AUTO_THINKING : next.thinkingLevel);
 		}
 		await this.#host.syncAfterModelChange(previousEditMode);
 		while (this.#publicationScope !== scope && this.#host.sessionGenerationSettled()) {
 			await this.#host.sessionGenerationSettled();
 		}
-		if (this.#publicationScope !== scope || scope.livePublication !== publication) return undefined;
+		if (
+			this.#publicationScope !== scope ||
+			scope.livePublication !== publication ||
+			this.#selectionGeneration !== selectionGeneration
+		) {
+			return undefined;
+		}
 
 		return { model: next.model, thinkingLevel: this.thinkingLevel, isScoped: true };
 	}
@@ -641,22 +673,30 @@ export class ModelControls {
 		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(nextModel));
 		this.#host.clearActiveRetryFallback();
 		let publication = 0;
+		let selectionGeneration = 0;
 		await this.#host.setModelWithProviderSessionReset(nextModel, "explicit", () => {
-			this.#selectionGeneration++;
+			selectionGeneration = ++this.#selectionGeneration;
 			publication = scope.livePublication = ++this.#modelPublication;
 			scope.resumePublication = publication;
 		});
 		await this.#recordModelReceipt(nextModel, undefined, publication, scope);
 		if (this.#publicationScope !== scope) return undefined;
-		if (scope.livePublication === publication) {
+		if (scope.livePublication === publication && this.#selectionGeneration === selectionGeneration) {
 			// Re-apply the current thinking level (or auto) for the newly selected model.
+			selectionGeneration++;
 			this.#reapplyThinkingLevel();
 		}
 		await this.#host.syncAfterModelChange(previousEditMode);
 		while (this.#publicationScope !== scope && this.#host.sessionGenerationSettled()) {
 			await this.#host.sessionGenerationSettled();
 		}
-		if (this.#publicationScope !== scope || scope.livePublication !== publication) return undefined;
+		if (
+			this.#publicationScope !== scope ||
+			scope.livePublication !== publication ||
+			this.#selectionGeneration !== selectionGeneration
+		) {
+			return undefined;
+		}
 
 		return { model: nextModel, thinkingLevel: this.thinkingLevel, isScoped: false };
 	}
@@ -689,6 +729,7 @@ export class ModelControls {
 	 */
 	setThinkingLevel(level: ConfiguredThinkingLevel | undefined, persist: boolean = false): void {
 		this.#selectionGeneration++;
+		if (persist) this.#thinkingSettingsGeneration++;
 		this.#setThinkingLevel(level, persist);
 	}
 
@@ -733,13 +774,13 @@ export class ModelControls {
 
 		this.#thinkingLevel = effectiveLevel;
 		this.#applyThinkingLevelToAgent(effectiveLevel);
+		if (persist && effectiveLevel !== undefined && effectiveLevel !== ThinkingLevel.Off) {
+			cfgDefaultThinkingLevel.set(this.#host.settings, effectiveLevel);
+		}
 
 		if (isChanging) {
 			this.#host.clearInheritedProviderPromptCacheKey();
 			this.#host.sessionManager.appendThinkingLevelChange(effectiveLevel, effectiveLevel);
-			if (persist && effectiveLevel !== undefined && effectiveLevel !== ThinkingLevel.Off) {
-				cfgDefaultThinkingLevel.set(this.#host.settings, effectiveLevel);
-			}
 			this.#host.emit({ type: "thinking_level_changed", thinkingLevel: effectiveLevel });
 		}
 	}

@@ -11699,7 +11699,12 @@ export class AgentSession implements SettingsScope {
 	 * model, the next prompt's compaction/error path owns that recovery instead
 	 * of leaving the session pinned to the old model.
 	 * With persist, writes global model roles unless persistScope is "project".
-	 * A temporary takeover does not discard a still-owned durable settings write.
+	 * Published global saves survive reload/session switches unless a newer global save owns them;
+	 * project model-role saves remain bound to their originating session scope. Temporary takeovers do not
+	 * discard still-owned model-role saves. A newer persisted effort independently supersedes
+	 * persistAutoThinking without canceling the model-role save.
+	 * @returns Whether this call still owns the live model and effort in the current session scope;
+	 * false does not imply that a still-owned durable save was discarded.
 	 * @throws Error if no API key available for the model
 	 */
 	async setModel(
@@ -11709,7 +11714,7 @@ export class AgentSession implements SettingsScope {
 			selector?: string;
 			thinkingLevel?: ThinkingLevel;
 			persist?: boolean;
-			/** With persist, saves the global auto preference without changing live thinking. */
+			/** With persist, saves global Auto unless a newer persisted effort supersedes it; never changes live thinking. */
 			persistAutoThinking?: boolean;
 			persistScope?: "global" | "project";
 		},

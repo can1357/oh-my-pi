@@ -371,7 +371,8 @@ async function applyModelPresetLocked(
 	const live = resolveLiveDefault(settings, session, candidates, preset);
 	if (typeof live === "string") return { kind: "failed", reason: live, shadowed };
 	try {
-		await session.setModel(live.model, "default", { persist: false });
+		const { switched } = await session.setModel(live.model, "default", { persist: false });
+		if (!switched) return { kind: "failed", reason: "superseded by a newer selection", shadowed };
 	} catch (error) {
 		return { kind: "failed", reason: errorMessage(error), shadowed };
 	}

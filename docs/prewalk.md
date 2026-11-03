@@ -147,6 +147,10 @@ An ephemeral fallback can become active while an earlier resume-eligible selecti
 
 Receipt ownership transfers only when model assignment succeeds. Opening a saved session or reloading it gives that transcript its own receipt ownership; delayed completions from the outgoing transcript cannot journal into it. `/clear` keeps model-selection ownership while discarding queued conversation work. A rolled-back switch restores the original ownership, so selections made in the rejected session cannot suppress the original session's eligible receipt, and a selection still completing keeps the thinking level it requested unless a later selection replaced it.
 
+Durable model settings have separate ownership from session receipts. Once published, a global saved-model selection still saves after a successful reload or session switch, unless a newer global saved-model selection supersedes it. Project model-role saves remain bound to the originating session scope; their global Auto preference saves remain independent of that scope. Neither kind of delayed model-role save writes an obsolete model receipt into the opened transcript.
+
+The global thinking preference has its own latest-persisted-choice ownership: a newer saved effort prevents an older model selection from saving Auto, without canceling that selection's still-owned model-role save. A newer effort selected while a model switch or cycle finishes also keeps its live effort; the stale operation reports no current selection, so callers cannot apply stale Auto, scoped effort, or status. Same-session model changes still synchronize model-dependent prompt instructions.
+
 `/new` inherits the active model, so an already-published selection can finish recording its routed selector in the new session. Selections still loading metadata or credentials are canceled before publication.
 
 Switching to a different saved session discards the outgoing task's automatic handoff without restoring its planning model into the opened session. A cancelled or failed switch keeps the outgoing task's restoration intact.
