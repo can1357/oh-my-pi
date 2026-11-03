@@ -692,6 +692,7 @@ describe("runSubprocess soft request budget", () => {
 			id: "PeerAgent",
 			displayName: "PeerAgent",
 			kind: "sub",
+			session: null,
 			status: "idle",
 		});
 		registerRunning(id, handle.session);

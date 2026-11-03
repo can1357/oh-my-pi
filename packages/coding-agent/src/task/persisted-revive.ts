@@ -55,10 +55,7 @@ import {
 	PerCallModelUnavailableError,
 	type PerCallModelGrants,
 } from "./model-approval";
-import {
-	cfgTaskAgentAccountPools,
-	cfgTaskMaxEffort,
-} from "./settings";
+import { cfgTaskAgentAccountPools, cfgTaskMaxEffort } from "./settings";
 import { type RestoredSeanceSession, restoreSeanceSession } from "./seance";
 import { seanceIsolationOptions } from "./seance-policy";
 import type { AgentDefinition } from "./types";

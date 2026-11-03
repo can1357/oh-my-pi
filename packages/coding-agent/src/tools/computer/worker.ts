@@ -403,7 +403,8 @@ const URL_SCHEME = /^[A-Za-z][A-Za-z0-9+.-]+:/;
  * resolution.
  */
 async function sessionPath(value: string, cwd: string, listed: (value: string) => Promise<boolean>): Promise<string> {
-	if (value === "~" || value.startsWith("~/") || value.startsWith(`~${path.sep}`)) return path.resolve(expandTilde(value));
+	if (value === "~" || value.startsWith("~/") || value.startsWith(`~${path.sep}`))
+		return path.resolve(expandTilde(value));
 	if (path.isAbsolute(value) || URL_SCHEME.test(value)) return value;
 	const local = path.resolve(cwd, value);
 	const written = value.startsWith(".") || value.includes("/") || value.includes(path.sep);
