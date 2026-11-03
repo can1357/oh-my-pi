@@ -45,6 +45,9 @@ pub struct ChildProcess {
 	/// Relays carrying this process's output into shell text; see
 	/// [`crate::outputrelay`].
 	output_relays: Vec<crate::outputrelay::RelayHandle>,
+	/// The exit [`Self::poll`] reaped while the relays still forwarded the
+	/// process's output; reported once they have.
+	exited: Option<std::process::Output>,
 }
 
 impl ChildProcess {
@@ -67,6 +70,7 @@ impl ChildProcess {
 			kill_handle,
 			completion_marker: None,
 			output_relays: Vec::new(),
+			exited: None,
 		}
 	}
 
@@ -128,6 +132,10 @@ impl ChildProcess {
 		&mut self,
 		cancel_token: Option<CancellationToken>,
 	) -> Result<ProcessWaitResult, error::Error> {
+		if let Some(output) = self.exited.take() {
+			return Ok(self.complete(output, cancel_token.as_ref()).await);
+		}
+
 		#[allow(unused_mut, reason = "only mutated on some platforms")]
 		let mut sigtstp = sys::signal::tstp_signal_listener()?;
 		#[allow(unused_mut, reason = "only mutated on some platforms")]
@@ -154,18 +162,8 @@ impl ChildProcess {
 		loop {
 			tokio::select! {
 				output = &mut self.exec_future => {
-					let output = output?;
-					let marker_exit_code = completion_exit_code(&output.status);
 					self.reaped = true;
-					// The exit status is known from here on: a cancellation
-					// while the output drains only stops waiting for it.
-					let relays = std::mem::take(&mut self.output_relays);
-					tokio::select! {
-						() = crate::outputrelay::drain(relays) => {},
-						() = &mut cancelled => {},
-					}
-					self.write_completion_marker(marker_exit_code);
-					break Ok(ProcessWaitResult::Completed(output))
+					break Ok(self.complete(output?, cancel_token.as_ref()).await)
 				},
 				_ = &mut cancelled => {
 					// The embedding host terminates the process group/tree. Allow
@@ -229,6 +227,29 @@ impl ChildProcess {
 		}
 	}
 
+	/// Reports the exited process once its relays have forwarded its output.
+	/// The exit status is known by then, so a cancellation only stops the
+	/// waiting.
+	async fn complete(
+		&mut self,
+		output: std::process::Output,
+		cancel_token: Option<&CancellationToken>,
+	) -> ProcessWaitResult {
+		let relays = std::mem::take(&mut self.output_relays);
+		let cancelled = async {
+			match cancel_token {
+				Some(token) => token.cancelled().await,
+				None => std::future::pending().await,
+			}
+		};
+		tokio::select! {
+			() = crate::outputrelay::drain(relays) => {},
+			() = cancelled => {},
+		}
+		self.write_completion_marker(completion_exit_code(&output.status));
+		ProcessWaitResult::Completed(output)
+	}
+
 	fn write_completion_marker(&mut self, exit_code: i32) {
 		if let Some(mut marker) = self.completion_marker.take() {
 			let _ = write!(
@@ -240,17 +261,25 @@ impl ChildProcess {
 		}
 	}
 
+	/// Reports the exit without waiting, once the process exited and its
+	/// relays have forwarded its output, as [`Self::wait`] does; until then
+	/// it reports nothing.
 	pub(crate) fn poll(&mut self) -> Option<Result<std::process::Output, error::Error>> {
-		let result = self.exec_future.as_mut().now_or_never()?;
-		Some(match result {
-			Ok(output) => {
-				let marker_exit_code = completion_exit_code(&output.status);
-				self.reaped = true;
-				self.write_completion_marker(marker_exit_code);
-				Ok(output)
-			},
-			Err(err) => Err(err.into()),
-		})
+		if self.exited.is_none() {
+			match self.exec_future.as_mut().now_or_never()? {
+				Ok(output) => {
+					self.reaped = true;
+					self.exited = Some(output);
+				},
+				Err(err) => return Some(Err(err.into())),
+			}
+		}
+		if !crate::outputrelay::drained_now(&mut self.output_relays) {
+			return None;
+		}
+		let output = self.exited.take()?;
+		self.write_completion_marker(completion_exit_code(&output.status));
+		Some(Ok(output))
 	}
 }
 
@@ -393,6 +422,7 @@ mod tests {
 			stop_pids: None,
 			completion_marker: None,
 			output_relays: Vec::new(),
+			exited: None,
 		};
 		child.set_completion_marker(
 			OpenFile::from(marker.try_clone().expect("marker writer")),
@@ -414,17 +444,16 @@ mod relay_tests {
 	use super::*;
 	use crate::outputrelay::TestRelay;
 
-	/// Cancelling while an exited command's output still drains keeps the
-	/// status the command exited with.
-	#[tokio::test]
-	async fn cancellation_while_output_drains_keeps_the_exit_status() {
+	/// A process that exited with status 7, its output still forwarding
+	/// through a relay until the returned feed finishes.
+	fn exited_with_forwarding_relay() -> (TestRelay, ChildProcess) {
 		#[cfg(windows)]
 		let output = std::process::Command::new("cmd").args(["/C", "exit 7"]).output();
 		#[cfg(not(windows))]
 		let output = std::process::Command::new("sh").args(["-c", "exit 7"]).output();
 		let output = output.expect("run child");
-		let (_forwarding, relay) = TestRelay::new(false);
-		let mut child = ChildProcess {
+		let (forwarding, relay) = TestRelay::new(false);
+		let child = ChildProcess {
 			exec_future: Box::pin(async move { Ok(output) }),
 			reaped: false,
 			pid: None,
@@ -434,7 +463,16 @@ mod relay_tests {
 			kill_handle: None,
 			completion_marker: None,
 			output_relays: vec![relay],
+			exited: None,
 		};
+		(forwarding, child)
+	}
+
+	/// Cancelling while an exited command's output still drains keeps the
+	/// status the command exited with.
+	#[tokio::test]
+	async fn cancellation_while_output_drains_keeps_the_exit_status() {
+		let (_forwarding, mut child) = exited_with_forwarding_relay();
 		let cancel = CancellationToken::new();
 		let trigger = cancel.clone();
 		tokio::spawn(async move {
@@ -443,6 +481,30 @@ mod relay_tests {
 		});
 		let Ok(ProcessWaitResult::Completed(output)) = child.wait(Some(cancel)).await else {
 			panic!("an exited command reported as cancelled");
+		};
+		assert_eq!(output.status.code(), Some(7));
+	}
+
+	/// The background reaper's poll reports an exited job only once its
+	/// output is forwarded, and a wait after such a poll still completes.
+	#[tokio::test]
+	async fn poll_reports_exit_only_after_relays_drain() {
+		let (forwarding, mut child) = exited_with_forwarding_relay();
+		assert!(child.poll().is_none(), "reported while its output still forwards");
+		forwarding.finish();
+		let Some(Ok(output)) = child.poll() else {
+			panic!("drained exit not reported");
+		};
+		assert_eq!(output.status.code(), Some(7));
+
+		let (forwarding, mut child) = exited_with_forwarding_relay();
+		assert!(child.poll().is_none());
+		tokio::spawn(async move {
+			tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+			forwarding.finish();
+		});
+		let Ok(ProcessWaitResult::Completed(output)) = child.wait(None).await else {
+			panic!("a polled exit not completed by wait");
 		};
 		assert_eq!(output.status.code(), Some(7));
 	}

@@ -70,10 +70,15 @@ struct RelayProgress {
 /// One relay as its command's drain sees it.
 pub(crate) struct RelayHandle {
 	/// Closed once the relay finished.
-	progress: watch::Receiver<RelayProgress>,
+	progress:   watch::Receiver<RelayProgress>,
 	/// The relay's read end, to size what the command left in it; the relay
 	/// thread owns it, so it closes when the relay ends.
-	pipe:     Weak<PipeReader>,
+	pipe:       Weak<PipeReader>,
+	/// Bytes the relay has to read to have everything the exited command
+	/// wrote, once sized.
+	target:     Option<u64>,
+	/// Since when the relay has sat in a read without progress.
+	idle_since: Option<tokio::time::Instant>,
 }
 
 struct Relay {
@@ -119,7 +124,7 @@ impl OutputRelays {
 		self.relays.push(Relay {
 			sink: target.clone(),
 			writer: writer.clone(),
-			handle: RelayHandle { progress, pipe },
+			handle: RelayHandle::new(progress, pipe),
 		});
 		Ok(Some(writer))
 	}
@@ -169,38 +174,59 @@ fn relay(
 /// command left running, as it comes, as they would writing straight into the
 /// sink.
 pub(crate) async fn drain(relays: Vec<RelayHandle>) {
-	for relay in relays {
-		relay.drain().await;
+	for mut relay in relays {
+		while !relay.drained_now() {
+			match tokio::time::timeout(DRAIN_IDLE, relay.progress.changed()).await {
+				Ok(Ok(())) | Err(_) => {},
+				// The relay finished: every writer is gone and all is forwarded.
+				Ok(Err(_)) => break,
+			}
+		}
 	}
 }
 
+/// Drops the relays that have forwarded what their exited command wrote, as
+/// far as can be told without waiting; true once none is left.
+pub(crate) fn drained_now(relays: &mut Vec<RelayHandle>) -> bool {
+	relays.retain_mut(|relay| !relay.drained_now());
+	relays.is_empty()
+}
+
 impl RelayHandle {
-	async fn drain(mut self) {
+	const fn new(progress: watch::Receiver<RelayProgress>, pipe: Weak<PipeReader>) -> Self {
+		Self { progress, pipe, target: None, idle_since: None }
+	}
+
+	/// Whether the relay has forwarded what its exited command wrote: it
+	/// finished, or it read all of it and its decoder holds none of it back,
+	/// or it has sat in a read for [`DRAIN_IDLE`] (a process the command left
+	/// running holds the pipe open). A relay still forwarding, however slowly,
+	/// has not.
+	fn drained_now(&mut self) -> bool {
+		let changed = match self.progress.has_changed() {
+			Ok(changed) => changed,
+			Err(_) => return true,
+		};
 		// The command has exited: what it wrote is what the relay consumed
 		// plus what is still in the pipe. Sizing the pipe first can only
 		// overcount (by bytes the relay reads in between), which the idle
-		// check below then settles.
-		let pending = self.pipe.upgrade().and_then(|pipe| pipe_bytes_available(&pipe));
-		let target =
-			pending.map_or(u64::MAX, |pending| self.progress.borrow().consumed.saturating_add(pending));
-		loop {
-			let progress = *self.progress.borrow_and_update();
-			// Everything read is forwarded only once the decoder holds none of
-			// it; held bytes wait for the end of the stream, which the relay
-			// reports by finishing.
-			if progress.reading && !progress.holding && progress.consumed >= target {
-				return;
-			}
-			match tokio::time::timeout(DRAIN_IDLE, self.progress.changed()).await {
-				Ok(Ok(())) => {},
-				// The relay finished: every writer is gone and all is forwarded.
-				Ok(Err(_)) => return,
-				// A relay idle in a read has forwarded all there was; one that
-				// is still forwarding (a slow sink) is waited for.
-				Err(_) if self.progress.borrow().reading => return,
-				Err(_) => {},
-			}
+		// check settles.
+		let target = *self.target.get_or_insert_with(|| {
+			let pending = self.pipe.upgrade().and_then(|pipe| pipe_bytes_available(&pipe));
+			pending.map_or(u64::MAX, |pending| self.progress.borrow().consumed.saturating_add(pending))
+		});
+		let progress = *self.progress.borrow_and_update();
+		if changed || !progress.reading {
+			self.idle_since = None;
 		}
+		if !progress.reading {
+			return false;
+		}
+		if !progress.holding && progress.consumed >= target {
+			return true;
+		}
+		let now = tokio::time::Instant::now();
+		now.duration_since(*self.idle_since.get_or_insert(now)) >= DRAIN_IDLE
 	}
 }
 
@@ -219,7 +245,7 @@ impl TestRelay {
 	/// pipe the drain cannot size.
 	pub(crate) fn new(reading: bool) -> (Self, RelayHandle) {
 		let (progress, handle) = watch::channel(RelayProgress { reading, consumed: 0, holding: false });
-		(Self { progress, _pipe: None }, RelayHandle { progress: handle, pipe: Weak::new() })
+		(Self { progress, _pipe: None }, RelayHandle::new(handle, Weak::new()))
 	}
 
 	/// A relay that has read everything in its (empty) pipe and waits in a
@@ -231,7 +257,7 @@ impl TestRelay {
 		let pipe = Arc::downgrade(&reader);
 		let (progress, handle) =
 			watch::channel(RelayProgress { reading: true, consumed: 0, holding: true });
-		(Self { progress, _pipe: Some((reader, writer)) }, RelayHandle { progress: handle, pipe })
+		(Self { progress, _pipe: Some((reader, writer)) }, RelayHandle::new(handle, pipe))
 	}
 
 	/// Reports the relay finished.
