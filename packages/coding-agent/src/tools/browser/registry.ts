@@ -57,6 +57,8 @@ interface BrowserHandleCommon {
 export interface PuppeteerBrowserHandle extends BrowserHandleCommon {
 	kind: PuppeteerBrowserKind;
 	browser: Browser;
+	/** Browser-level WebSocket endpoint tab workers attach through. */
+	wsEndpoint: string;
 	cdpUrl?: string;
 	pid?: number;
 	/** OMP-owned temp Chromium profile directory removed on dispose (process-local headless launches). */
@@ -230,7 +232,7 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 		if (isCompiledBinary() || workerHostEntry() !== null) {
 			return await openSharedHeadlessHandle(kind, opts);
 		}
-		const { browser, userDataDir } = await launchHeadlessBrowser({
+		const { browser, wsEndpoint, userDataDir } = await launchHeadlessBrowser({
 			headless: kind.headless,
 			viewport: opts.viewport,
 			ignoreHttpsErrors: kind.ignoreHttpsErrors,
@@ -240,6 +242,7 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 			key: browserKey(kind),
 			kind,
 			browser,
+			wsEndpoint,
 			userDataDir,
 			refCount: 0,
 			stealth: { browserSession: null, override: null },
@@ -258,6 +261,7 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 			key: browserKey(kind),
 			kind,
 			browser,
+			wsEndpoint: browser.wsEndpoint(),
 			cdpUrl,
 			refCount: 0,
 			stealth: { browserSession: null, override: null },
@@ -321,6 +325,7 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 			key: browserKey(kind),
 			kind,
 			browser,
+			wsEndpoint: browser.wsEndpoint(),
 			cdpUrl,
 			refCount: 0,
 			stealth: { browserSession: null, override: null },
@@ -381,6 +386,7 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 		key: browserKey(kind),
 		kind,
 		browser,
+		wsEndpoint: browser.wsEndpoint(),
 		cdpUrl,
 		pid,
 		subprocess,
@@ -524,6 +530,7 @@ async function openSharedHeadlessHandle(
 			key: browserKey(kind),
 			kind,
 			browser,
+			wsEndpoint: shared.wsEndpoint,
 			sharedDaemon: { name: shared.daemonName, projectDir: shared.projectDir },
 			refCount: 0,
 			stealth: { browserSession: null, override: null },

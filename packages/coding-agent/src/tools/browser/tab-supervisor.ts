@@ -1849,8 +1849,7 @@ function sweepClosedTabUploads(): void {
 async function buildInitPayload(browser: PuppeteerBrowserHandle, opts: AcquireTabOptions): Promise<WorkerInitPayload> {
 	const safeDir = getPuppeteerDir();
 	const uploadDir = newUploadStagingDir();
-	const browserWSEndpoint = browser.browser.wsEndpoint();
-	if (!browserWSEndpoint) throw new ToolError("Browser websocket endpoint is unavailable");
+	const browserWSEndpoint = browser.wsEndpoint;
 	if (browser.kind.kind === "headless") {
 		return {
 			mode: "headless",
@@ -2091,8 +2090,7 @@ async function recycleTimedOutWorkerTab(
 	const startedAt = performance.now();
 	const oldWorker = tab.worker;
 	await oldWorker.terminate().catch(() => undefined);
-	const browserWSEndpoint = tab.browser.browser.wsEndpoint();
-	if (!browserWSEndpoint) throw new ToolError("Browser websocket endpoint is unavailable");
+	const browserWSEndpoint = tab.browser.wsEndpoint;
 	const payload: WorkerInitPayload = {
 		mode: "attach",
 		browserWSEndpoint,

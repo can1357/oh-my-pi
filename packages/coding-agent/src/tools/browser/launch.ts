@@ -102,6 +102,8 @@ const STEALTH_ACCEPT_LANGUAGE = "en-US,en";
 
 const USER_AGENT_TARGET_TIMEOUT_MS = 5_000;
 const USER_AGENT_TARGET_TYPES = new Set(["page", "webview", "background_page"]);
+/** How long a pipe-launched Chromium may take to publish its DevTools port after launch. */
+const DEVTOOLS_ACTIVE_PORT_TIMEOUT_MS = 10_000;
 
 /**
  * Lazy-import puppeteer while hiding the user's cwd from cosmiconfig. The
@@ -595,6 +597,8 @@ export interface LaunchHeadlessOptions extends HeadlessLaunchFeatures {
 /** Result of a headless Chromium launch. */
 export interface LaunchHeadlessResult {
 	browser: Browser;
+	/** Browser-level WebSocket endpoint for other CDP clients, such as tab workers. */
+	wsEndpoint: string;
 	/**
 	 * OMP-owned temporary Chromium profile directory to remove after the browser
 	 * process tree exits, or `undefined` when the caller supplied its own
@@ -664,10 +668,17 @@ export async function launchHeadlessBrowser(opts: LaunchHeadlessOptions): Promis
 	// unhandled EBUSY when Chromium still holds the profile lock on Windows
 	// (issue #7058). `removeUserDataDir` cleans it up on our terms instead.
 	let userDataDir: string | undefined;
-	if (!launchArgs.some(arg => arg.startsWith("--user-data-dir"))) {
+	let profileDir = launchArgs.find(arg => arg.startsWith("--user-data-dir="))?.slice("--user-data-dir=".length);
+	if (!profileDir) {
 		userDataDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-chrome-profile-"));
+		profileDir = userDataDir;
 		launchArgs.push(`--user-data-dir=${userDataDir}`);
 	}
+	// Puppeteer picks the pipe transport from `--remote-debugging-pipe`. Chromium
+	// exits when the pipe closes, so it dies with this process even on SIGKILL;
+	// over a WebSocket it runs detached in its own process group and outlives
+	// it. The port serves the WebSocket that tab workers attach through.
+	launchArgs.push("--remote-debugging-pipe", "--remote-debugging-port=0");
 	try {
 		if (userDataDir) await seedOwnedProfilePreferences(userDataDir);
 		const executablePath = await ensureChromiumExecutable();
@@ -681,10 +692,35 @@ export async function launchHeadlessBrowser(opts: LaunchHeadlessOptions): Promis
 			],
 			protocolTimeout: BROWSER_PROTOCOL_TIMEOUT_MS,
 		});
-		return { browser, userDataDir };
+		try {
+			return { browser, wsEndpoint: await readDevToolsEndpoint(profileDir), userDataDir };
+		} catch (error) {
+			await browser.close();
+			throw error;
+		}
 	} catch (error) {
 		if (userDataDir) await removeUserDataDir(userDataDir);
 		throw error;
+	}
+}
+
+/**
+ * The browser WebSocket endpoint a Chromium started with `--remote-debugging-port`
+ * publishes in `<profileDir>/DevToolsActivePort` (port, then browser target path)
+ * once that server listens.
+ */
+async function readDevToolsEndpoint(profileDir: string): Promise<string> {
+	const file = path.join(profileDir, "DevToolsActivePort");
+	const deadline = Date.now() + DEVTOOLS_ACTIVE_PORT_TIMEOUT_MS;
+	for (;;) {
+		try {
+			const [port, browserPath] = (await Bun.file(file).text()).split("\n");
+			if (port && browserPath) return `ws://127.0.0.1:${port}${browserPath}`;
+		} catch (error) {
+			if (!isEnoent(error)) throw error;
+		}
+		if (Date.now() >= deadline) throw new Error(`Chromium did not publish its DevTools port in ${file}`);
+		await Bun.sleep(50);
 	}
 }
 

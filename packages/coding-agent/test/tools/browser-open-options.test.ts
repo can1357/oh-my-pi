@@ -404,7 +404,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser open options", () => {
 		const later = serveUntrusted();
 		// Launched without --ignore-certificate-errors and attached over app.cdp_url, as the shared
 		// browser is: only the tab's CDP override can accept the certificate.
-		const { browser, userDataDir } = await launchHeadlessBrowser({ headless: true });
+		const { browser, wsEndpoint, userDataDir } = await launchHeadlessBrowser({ headless: true });
 		try {
 			const [page] = await browser.pages();
 			if (!page) throw new Error("Expected the launched browser to expose a page");
@@ -414,7 +414,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser open options", () => {
 				action: "open",
 				name,
 				url: server.url.href,
-				app: { cdp_url: `http://${new URL(browser.wsEndpoint()).host}` },
+				app: { cdp_url: `http://${new URL(wsEndpoint).host}` },
 				ignore_https_errors: true,
 			});
 			expect(

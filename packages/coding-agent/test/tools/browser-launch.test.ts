@@ -5,6 +5,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
 	chromiumExecutableProbeForTest,
+	loadPuppeteer,
+	removeUserDataDir,
 	resolveSharedBrowserLaunchSpec,
 	stealthIgnoreDefaultArgs,
 	systemChromiumCandidatesForTest,
@@ -13,8 +15,11 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 import { BrowserPlatform, computeExecutablePath, detectBrowserPlatform } from "@oh-my-pi/pi-utils/browsers";
 import { APP_NAME } from "@oh-my-pi/pi-utils/dirs";
 import { PUPPETEER_REVISIONS } from "puppeteer-core/internal/revisions.js";
+import { chromiumAvailable } from "./chromium-probe";
 
 const EXECUTABLE_PROBE = path.resolve(import.meta.dir, "../fixtures/browser-executable-probe.ts");
+const HEADLESS_OWNER = path.resolve(import.meta.dir, "../fixtures/headless-browser-owner.ts");
+const CHROMIUM_AVAILABLE = await chromiumAvailable();
 
 /**
  * The parent's environment without the variables that relocate omp's directories or pick a browser.
@@ -83,6 +88,35 @@ describe("shared browser launch", () => {
 			else process.env.PUPPETEER_EXECUTABLE_PATH = previousExecutable;
 		}
 	});
+});
+
+// SIGKILL and process groups are POSIX semantics; Windows never detached Chromium.
+describe.skipIf(!CHROMIUM_AVAILABLE || process.platform === "win32")("process-local headless launch", () => {
+	it("exits with the process that launched it, even when that process is SIGKILLed", async () => {
+		const owner = Bun.spawn([process.execPath, HEADLESS_OWNER], { stdin: "pipe", stdout: "pipe", stderr: "inherit" });
+		let output = "";
+		const decoder = new TextDecoder();
+		for await (const chunk of owner.stdout) {
+			output += decoder.decode(chunk, { stream: true });
+			if (output.includes("\n")) break;
+		}
+		const { wsEndpoint, userDataDir }: { wsEndpoint: string; userDataDir: string } = JSON.parse(output);
+		try {
+			const puppeteer = await loadPuppeteer();
+			const observer = await puppeteer.connect({ browserWSEndpoint: wsEndpoint });
+			const disconnected = Promise.withResolvers<void>();
+			observer.once("disconnected", () => disconnected.resolve());
+			owner.stdin.write("kill\n");
+			await owner.stdin.flush();
+			await owner.exited;
+			expect(owner.signalCode).toBe("SIGKILL");
+			// Chromium closing its DevTools socket is it exiting; a survivor keeps this pending.
+			await disconnected.promise;
+			expect(observer.connected).toBe(false);
+		} finally {
+			await removeUserDataDir(userDataDir);
+		}
+	}, 30_000);
 });
 
 const UNGOOGLED_CHROMIUM_FLATPAK_ID = "io.github.ungoogled_software.ungoogled_chromium";
