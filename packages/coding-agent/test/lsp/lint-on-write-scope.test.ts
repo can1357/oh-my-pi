@@ -538,20 +538,44 @@ process.exit(0);
 		expect(await aliveAfter(pid)).toBe(false);
 	}, 40_000);
 
-	/** A launcher that starts a SIGTERM-ignoring child on its own output, then kills itself with SIGTERM. */
-	function selfSignallingLauncher(pidFile: string): string {
+	/**
+	 * A launcher that starts a SIGTERM-ignoring child on its own output, then kills
+	 * itself with SIGTERM. With `newSession` the child also leaves the launcher's
+	 * process group and session, as a daemonizing tool would.
+	 */
+	function selfSignallingLauncher(pidFile: string, newSession = false): string {
 		return writeFakeExecutable(
 			root,
 			"signalled-launcher",
 			`const child = Bun.spawn([process.execPath, "-e", ${JSON.stringify(
 				`process.on("SIGTERM", () => {}); require("node:fs").writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setInterval(() => {}, 1 << 30);`,
-			)}], { stdout: "inherit", stderr: "inherit" });
+			)}], { stdout: "inherit", stderr: "inherit", detached: ${newSession} });
 child.unref();
 setTimeout(() => process.kill(process.pid, "SIGTERM"), 50);
 setInterval(() => {}, 1 << 30);
 `,
 		);
 	}
+
+	it.skipIf(process.platform !== "linux")(
+		"kills a child that left the run's process group and session, once its launcher died",
+		async () => {
+			const pidFile = path.join(root, "grandchild.pid");
+			const command = selfSignallingLauncher(pidFile, true);
+			const controller = new AbortController();
+			const outcome = runLinterCli(command, ["lint"], root, controller.signal).then(
+				() => new Error("run finished without the abort"),
+				(error: unknown) => error,
+			);
+			const pid = await waitForPid(pidFile);
+
+			controller.abort(new Error("user abort"));
+
+			expect(String(await outcome)).toContain("user abort");
+			expect(await aliveAfter(pid)).toBe(false);
+		},
+		40_000,
+	);
 
 	it("kills the group on abort after its launcher died from a signal", async () => {
 		const pidFile = path.join(root, "grandchild.pid");
