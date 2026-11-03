@@ -372,8 +372,9 @@ export async function writeExclusive(file: string, text: string, mode: number): 
 	try {
 		const { dev, ino } = await handle.stat();
 		held = { handle, dev, ino };
-		await handle.writeFile(text);
-		return { ...held, bytes: Buffer.from(text) };
+		const bytes = Buffer.from(text);
+		await writeAllAt(handle, bytes, 0);
+		return { ...held, bytes };
 	} catch (error) {
 		// What it holds after a failed write is not known, so this one is
 		// recognised by the held descriptor alone.
@@ -679,11 +680,30 @@ export async function removeFileOthersMayWrite(file: string, rule: OthersMayWrit
 }
 
 /**
+ * Write all of `bytes` through `handle` at `position`, however many calls
+ * the kernel takes: `write(2)` may write less than it was given — a file size
+ * limit, a full disk, a signal — and says how much in `bytesWritten`. A write
+ * that cannot go on throws (`EFBIG`, `ENOSPC`, …); a call that writes nothing
+ * and reports no error throws too, rather than loop.
+ */
+export async function writeAllAt(handle: fs.FileHandle, bytes: Uint8Array, position: number): Promise<void> {
+	for (let done = 0; done < bytes.byteLength;) {
+		const { bytesWritten } = await handle.write(bytes, done, bytes.byteLength - done, position + done);
+		if (bytesWritten === 0) throw new Error(`a write at offset ${position + done} wrote nothing`);
+		done += bytesWritten;
+	}
+}
+
+/**
  * Write the bytes of a file {@link removeFileOthersMayWrite} unlinked and then
  * judged should have stayed, read through `handle`, the descriptor it still
  * holds on it, into a new file with its mode: at `file`, or at `aside` when
  * `file` is taken, each made with `O_EXCL` so nothing is written over. Says
- * where they are, or where they could not be put, after `why`.
+ * where they are, or where they could not be put, after `why`. Only a file
+ * that holds every byte is reported written back: a write the kernel cuts
+ * short is carried on, and one that cannot finish leaves what it wrote at
+ * the name and says the rest was lost, since the kernel lets no process give
+ * an unlinked file a name again.
  */
 async function writeBack(file: string, aside: string, handle: fs.FileHandle, was: Stats, why: string): Promise<string> {
 	for (const target of [file, aside]) {
@@ -692,20 +712,26 @@ async function writeBack(file: string, aside: string, handle: fs.FileHandle, was
 			written = await createExclusive(target, was.mode & 0o7777);
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code === "EEXIST") continue;
-			return `${why}; its bytes could not be written back to ${target} (${errorText(error)}), and are only in this run's memory`;
+			return `${why}; its bytes could not be written back to ${target} (${errorText(error)}), and were lost with the unlinked file`;
 		}
+		let at = 0;
 		try {
 			const window = Buffer.allocUnsafe(64 * 1024);
-			for (let at = 0; ;) {
+			for (;;) {
 				const { bytesRead } = await handle.read(window, 0, window.length, at);
 				if (bytesRead === 0) break;
-				await written.write(window, 0, bytesRead);
+				await writeAllAt(written, window.subarray(0, bytesRead), at);
 				at += bytesRead;
 			}
 			await written.chmod(was.mode & 0o7777);
 			await written.sync();
+		} catch (error) {
+			return (
+				`${why}; writing its bytes back to ${target} stopped after ${at} bytes (${errorText(error)}): ${target} ` +
+				`holds only those, and the rest was lost with the unlinked file`
+			);
 		} finally {
-			await written.close();
+			await written.close().catch(() => undefined);
 		}
 		return `${why}, so its bytes were written back to ${target}`;
 	}

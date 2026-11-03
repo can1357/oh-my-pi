@@ -44,6 +44,7 @@ import {
 	removeFileOthersMayWrite,
 	removeHeldDirectory,
 	renameRefusal,
+	writeAllAt,
 	writeExclusive,
 } from "./regular-file";
 import { SESSION_TITLE_SLOT_BYTES } from "./session-entries";
@@ -321,20 +322,26 @@ async function createRestoreRecord(record: string, text: string): Promise<OwnRes
 		throw error;
 	}
 	try {
-		await handle.writeFile(text);
+		const bytes = Buffer.from(text);
+		await writeAllAt(handle, bytes, 0);
 		const { dev, ino } = await handle.stat();
-		return { path: record, handle, dev, ino, text: Buffer.from(text) };
+		return { path: record, handle, dev, ino, text: bytes };
 	} catch (error) {
 		await handle.close().catch(() => undefined);
 		throw error;
 	}
 }
 
-/** Put `text` in this run's record, through its descriptor: never through a name. */
+/**
+ * Put `text` in this run's record, through its descriptor: never through a
+ * name, and all of it — see `writeAllAt` — so what this run later takes the
+ * record to hold is what it does hold.
+ */
 async function rewriteOwnRestoreRecord(own: OwnRestoreRecord, text: string): Promise<void> {
+	const bytes = Buffer.from(text);
 	await own.handle.truncate(0);
-	await own.handle.write(text, 0);
-	own.text = Buffer.from(text);
+	await writeAllAt(own.handle, bytes, 0);
+	own.text = bytes;
 }
 
 /**
@@ -832,10 +839,7 @@ export async function copyHandleWithDigest(source: fs.FileHandle, destination: f
 	let size = 0;
 	for await (const chunk of bytesOfHandle(source)) {
 		hasher.update(chunk);
-		for (let written = 0; written < chunk.byteLength;) {
-			const { bytesWritten } = await destination.write(chunk, written, chunk.byteLength - written, size + written);
-			written += bytesWritten;
-		}
+		await writeAllAt(destination, chunk, size);
 		size += chunk.byteLength;
 	}
 	return { hash: hasher.digest("hex"), size };
@@ -869,10 +873,7 @@ export async function inflateIntoHandleWithDigest(
 	await pipeline(source as AsyncIterable<Uint8Array>, createGunzip(), async (inflated: NodeJS.ReadableStream) => {
 		for await (const chunk of inflated as AsyncIterable<Uint8Array>) {
 			hasher.update(chunk);
-			for (let written = 0; written < chunk.byteLength;) {
-				const put = await destination.write(chunk, written, chunk.byteLength - written, size + written);
-				written += put.bytesWritten;
-			}
+			await writeAllAt(destination, chunk, size);
 			size += chunk.byteLength;
 		}
 	});
