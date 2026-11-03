@@ -29,6 +29,7 @@ import type {
 	PointerOptions,
 } from "@oh-my-pi/pi-natives";
 import { isEnoent } from "@oh-my-pi/pi-utils/fs-error";
+import { expandTilde } from "@oh-my-pi/pi-utils/path";
 import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
 import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
 import { JsRuntime, type RuntimeHooks } from "../../eval/js/shared/runtime";
@@ -394,12 +395,15 @@ const URL_SCHEME = /^[A-Za-z][A-Za-z0-9+.-]+:/;
 /**
  * `apps.open`'s target or `app` selector, against the session's folder
  * `cwd` when it names a path there: one written as a relative path (`./a`,
- * `a/b`), even if missing, or a bare name of an existing entry. An exact
+ * `a/b`), even if missing, or a bare name of an existing entry. `~` and a
+ * leading `~/` are the user's home ([`expandTilde`]); `~name` stays a name or
+ * ID, since application IDs and names can start with `~`. An exact
  * application ID or native path (`listed`) keeps precedence over a same-named
  * entry; absolute paths, URLs and other names pass through to native
  * resolution.
  */
 async function sessionPath(value: string, cwd: string, listed: (value: string) => Promise<boolean>): Promise<string> {
+	if (value === "~" || value.startsWith("~/") || value.startsWith(`~${path.sep}`)) return expandTilde(value);
 	if (path.isAbsolute(value) || URL_SCHEME.test(value)) return value;
 	const local = path.resolve(cwd, value);
 	const written = value.startsWith(".") || value.includes("/") || value.includes(path.sep);

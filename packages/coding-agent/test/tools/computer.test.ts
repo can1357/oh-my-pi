@@ -1,5 +1,6 @@
 import { afterAll, afterEach, describe, expect, it, vi } from "bun:test";
 import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
+import * as os from "node:os";
 import * as path from "node:path";
 import { inspect } from "node:util";
 import { createContext, runInContext } from "node:vm";
@@ -4296,11 +4297,34 @@ describe("computer background fallback", () => {
 			]);
 		});
 
-		it("keeps an exact application ID over a same-named file in the session's folder", async () => {
+		it("opens a path under ~ in the user's home, for the target and the app", async () => {
+			const native = new FileSession();
+			const code = [
+				'await desktop.apps.open("~/Desktop/Bench/Inbox");',
+				'await desktop.apps.open("~/notes.txt", { app: "~/Applications/Editor.app" });',
+				'await desktop.apps.open("~");',
+			].join("\n");
+			expect((await run(native, code, "takeover")).ok).toBe(true);
+			const home = os.homedir();
+			expect(native.opened).toEqual([
+				{ id: path.join(home, "Desktop/Bench/Inbox"), options: {} },
+				{ id: path.join(home, "notes.txt"), options: { app: path.join(home, "Applications/Editor.app") } },
+				{ id: home, options: {} },
+			]);
+		});
+
+		it("keeps an exact application ID or ~name over a same-named file in the session's folder or home", async () => {
 			class ShadowedSession extends FileSession {
 				override async listApplications() {
 					return [
 						{ id: "computer.test.ts", name: "Editor", path: "/Applications/Editor.app", running: true, pid: 123 },
+						{
+							id: "~editor.desktop",
+							name: "Tilde Editor",
+							path: "/usr/share/applications/~editor.desktop",
+							running: true,
+							pid: 124,
+						},
 					];
 				}
 			}
@@ -4308,11 +4332,17 @@ describe("computer background fallback", () => {
 			const code = [
 				'await desktop.apps.open("computer.test.ts");',
 				'await desktop.apps.open("README.md", { app: "computer.test.ts" });',
+				'await desktop.apps.open("~editor.desktop");',
+				'await desktop.apps.open("README.md", { app: "~editor.desktop" });',
+				'await desktop.apps.open("~Editor");',
 			].join("\n");
 			expect((await run(native, code, "takeover")).ok).toBe(true);
 			expect(native.opened).toEqual([
 				{ id: "computer.test.ts", options: {} },
 				{ id: "README.md", options: { app: "computer.test.ts" } },
+				{ id: "~editor.desktop", options: {} },
+				{ id: "README.md", options: { app: "~editor.desktop" } },
+				{ id: "~Editor", options: {} },
 			]);
 		});
 

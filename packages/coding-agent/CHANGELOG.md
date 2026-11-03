@@ -70,6 +70,10 @@
 
 - Fixed `computer` runs on Wayland ending in a generic `Computer code execution timed out` when the RemoteDesktop permission dialog went unanswered: the input call now fails with `Timeout` naming the dialog before the run's deadline ([#17932](https://github.com/can1357/oh-my-pi/pull/17932) by [@will-bogusz](https://github.com/will-bogusz))
 
+### Fixed
+
+- `computer.apps.open("~/…")` and its `app` option open from your home folder instead of failing with "must identify an existing .app bundle" ([#17931](https://github.com/can1357/oh-my-pi/pull/17931) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.16.0] - 2026-11-02
 
 ### Added
