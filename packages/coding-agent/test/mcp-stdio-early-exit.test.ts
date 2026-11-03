@@ -87,7 +87,8 @@ describe("MCP stdio server that exits before responding", () => {
 	// after a long reason left the failure event with the exit code alone.
 	it("keeps the reason in the failure event when fetch hints follow it", async () => {
 		const advice = "For more information, pass `verbose: true` in the second argument to fetch()";
-		const reason = `${REFUSAL} ${"word ".repeat(150)}FINAL_REASON_CANARY`;
+		// Fits the report alone, not with a hint after it.
+		const reason = `REFUSED: ${"word ".repeat(175)}FINAL_REASON_CANARY`;
 		const script = `process.stderr.write(${JSON.stringify(`${reason}\n${advice}F${advice}`)}, () => process.exit(77));`;
 		const failed = Promise.withResolvers<string>();
 		manager = new MCPManager(root);
