@@ -495,44 +495,48 @@ export function remember(beam: BeamMemoryState, content: string, options: StoreR
 	}
 
 	const memoryId = options.memoryId ?? options.memory_id ?? generateId(content, new Date(timestamp));
-	beam.db.run(
-		`
-			INSERT INTO working_memory
-			(id, content, embed_text, source, timestamp, session_id, importance, metadata_json, valid_until, scope,
-			 author_id, author_type, channel_id, veracity, memory_type, trust_tier)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		`,
-		[
-			memoryId,
-			content,
-			storedEmbeddingText(content, embedText),
-			source,
-			timestamp,
-			beam.sessionId,
-			importance,
-			metadataJson(metadata),
-			validUntil,
-			scope,
-			authorId,
-			authorType,
-			channelId,
-			veracity,
-			memoryType,
-			trustTier,
-		],
-	);
-	addTemporalAnnotations(beam, memoryId, timestamp, source);
 	// `extractText` lets a caller decouple "what gets stored" from "what facts are
 	// mined". coding-agent retains full multi-author transcripts but wants
 	// fact/entity heuristics to read only the user-authored turns (issue #3372).
 	const extractionSource = options.extractText ?? options.extract_text ?? content;
-	proactiveLinkIfEnabled(
-		beam,
-		memoryId,
-		extractionSource,
-		Boolean(options.extractEntities ?? options.extract_entities),
-	);
-	trimWorkingMemory(beam);
+	// One commit for the row, its annotations, graph links and the working-memory trim: each
+	// autocommit statement was its own transaction (and WAL sync) on a store shared by every omp process.
+	transaction(beam.db, () => {
+		beam.db.run(
+			`
+				INSERT INTO working_memory
+				(id, content, embed_text, source, timestamp, session_id, importance, metadata_json, valid_until, scope,
+				 author_id, author_type, channel_id, veracity, memory_type, trust_tier)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			`,
+			[
+				memoryId,
+				content,
+				storedEmbeddingText(content, embedText),
+				source,
+				timestamp,
+				beam.sessionId,
+				importance,
+				metadataJson(metadata),
+				validUntil,
+				scope,
+				authorId,
+				authorType,
+				channelId,
+				veracity,
+				memoryType,
+				trustTier,
+			],
+		);
+		addTemporalAnnotations(beam, memoryId, timestamp, source);
+		proactiveLinkIfEnabled(
+			beam,
+			memoryId,
+			extractionSource,
+			Boolean(options.extractEntities ?? options.extract_entities),
+		);
+		trimWorkingMemory(beam);
+	});
 	emitEvent(beam, "MEMORY_ADDED", {
 		memoryId,
 		content,

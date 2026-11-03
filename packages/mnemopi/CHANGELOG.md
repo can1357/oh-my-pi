@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Retaining a memory commits once (the row, its annotations, graph links and the working-memory trim), and file banks use `synchronous=NORMAL` (WAL synced at checkpoints, not on every commit), cutting the disk syncs each turn makes on memory banks shared by every omp process
+
 ## [18.14.2] - 2026-10-31
 
 ### Fixed
