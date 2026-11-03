@@ -1144,7 +1144,7 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		expect(notices[0]).toContain("## Schema");
 	});
 
-	it("defers a mount delta queued after its pre-prompt preview", async () => {
+	it("reprepares and sizes a mount delta added after its pre-prompt preview for the same request", async () => {
 		const { session, contexts } = newSession(async toolNames => `tools:${toolNames.join(",")}`, {
 			xdev: createTestXdevState(),
 			responses: [{ content: ["ok"] }, { content: ["ok"] }],
@@ -1155,9 +1155,7 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		const fetch = createMcpCustomTool("mcp__nucleus_fetch", "nucleus", "fetch", "Fetch nucleus");
 		await session.refreshMCPTools([search]);
 
-		// The first prompt previews search for context maintenance. Fetch arrives
-		// during that await, after the only context-size check; consuming the now
-		// larger notice would add unbudgeted inline docs to this request.
+		// Fetch arrives during sizing. The claim must reject the old preview and size both devices before delivery.
 		const maintenanceSpy = vi
 			.spyOn(SessionMaintenance.prototype, "runPrePromptCompactionIfNeeded")
 			.mockImplementationOnce(async () => {
@@ -1165,20 +1163,20 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 			});
 		await session.prompt("first");
 
-		expect(mountNoticesIn(contexts[0])).toHaveLength(0);
-		maintenanceSpy.mockRestore();
-
-		// The complete coalesced delta survives and is previewed afresh on the next
-		// user turn, so both devices and their inline docs are delivered together.
-		await session.prompt("second");
-		const notices = mountNoticesIn(contexts[1]);
+		expect(JSON.stringify(maintenanceSpy.mock.calls[1]?.[0])).toContain("xd://mcp__nucleus_fetch");
+		const notices = mountNoticesIn(contexts[0]);
 		expect(notices).toHaveLength(1);
 		expect(notices[0]).toContain("xd://mcp__nucleus_search");
 		expect(notices[0]).toContain("xd://mcp__nucleus_fetch");
 		expect(notices[0]).toContain("## Schema");
+		maintenanceSpy.mockRestore();
+
+		// Later requests retain the one delivered notice rather than append it twice.
+		await session.prompt("second");
+		expect(mountNoticesIn(contexts[1])).toHaveLength(1);
 	});
 
-	it("defers a mount notice whose docs change via a same-name schema replacement", async () => {
+	it("reprepares changed same-name mount docs before sizing and delivering the same request", async () => {
 		const { session, contexts } = newSession(async toolNames => `tools:${toolNames.join(",")}`, {
 			xdev: createTestXdevState(),
 			responses: [{ content: ["ok"] }, { content: ["ok"] }],
@@ -1194,26 +1192,25 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		);
 		await session.refreshMCPTools([search]);
 
-		// The preview estimates the notice for the original schema. During the await
-		// a same-named tool reconnects with different docs: the mount set and the
-		// schema-excluding applied signature are unchanged, so the revision never
-		// moves, but the rendered docs differ. The notice must defer rather than
-		// slip its (potentially XDEV_DOCS_TOTAL_BUDGET-sized) docs past the estimate.
+		// The same mount reconnects with different docs while sizing. Even an unchanged name must invalidate the preview.
 		const maintenanceSpy = vi
 			.spyOn(SessionMaintenance.prototype, "runPrePromptCompactionIfNeeded")
 			.mockImplementationOnce(async () => {
 				await session.refreshMCPTools([searchReconnected]);
 			});
 		await session.prompt("first");
-		expect(mountNoticesIn(contexts[0])).toHaveLength(0);
-		maintenanceSpy.mockRestore();
-
-		// The next user turn re-previews against the new schema and delivers it.
-		await session.prompt("second");
-		const notices = mountNoticesIn(contexts[1]);
+		expect(JSON.stringify(maintenanceSpy.mock.calls[1]?.[0])).toContain(
+			"reconnected with a different documented schema",
+		);
+		const notices = mountNoticesIn(contexts[0]);
 		expect(notices).toHaveLength(1);
 		expect(notices[0]).toContain("xd://mcp__nucleus_search");
 		expect(notices[0]).toContain("reconnected with a different documented schema");
+		maintenanceSpy.mockRestore();
+
+		// The next turn keeps the delivered docs without a duplicate notice.
+		await session.prompt("second");
+		expect(mountNoticesIn(contexts[1])).toHaveLength(1);
 	});
 
 	it("drops a mount delta that cancels out before the next prompt", async () => {

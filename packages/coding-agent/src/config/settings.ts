@@ -1037,6 +1037,16 @@ export class Settings {
 		};
 	}
 
+	/** Observe writes and scope changes here or in any live overlay parent. */
+	onRevisionChange(listener: () => void): () => void {
+		const own = this.onLayersChange(listener);
+		const parent = this.#parent?.onRevisionChange(listener);
+		return () => {
+			own();
+			parent?.();
+		};
+	}
+
 	/** Replays `write` on the main instance behind this mirror and adopts the resulting state. */
 	#forward(mirror: SettingsMirrorSource, write: SettingsMirrorWrite): void {
 		this.applyMirrorState(mirror.write(write));

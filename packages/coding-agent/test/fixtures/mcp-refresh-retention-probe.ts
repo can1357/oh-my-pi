@@ -64,6 +64,7 @@ const host: SessionToolsHost = {
 	captureMemoryPromotionSnapshot: () => {},
 	emitNotice: () => {},
 	notifyCommandMetadataChanged: () => {},
+	contextChanged: () => {},
 	localProtocolOptions: () => ({}),
 	evalPreludes: () => [],
 	sessionAgents: () => [],

@@ -66,6 +66,7 @@ function setup(error: Error = new HindsightError("recall request timed out after
 	const session = {
 		sessionId: "s",
 		emitNotice: (level: string, message: string, source?: string) => notices.push({ level, message, source }),
+		invalidateContext: () => {},
 	} as object as AgentSession;
 	const client = new FailingRecallApi(error);
 	const state = new HindsightSessionState({

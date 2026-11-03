@@ -36,6 +36,8 @@ export type StreamFn = (
 export interface QueuedMessagePreparation {
 	/** Append context after the originals; undefined stops this attempt, retaining originals unless explicitly removed. */
 	commit(): readonly AgentMessage[] | undefined;
+	/** Re-stage superseded sources while retaining this claim; the producer must bound its retries. */
+	retry?(): Promise<QueuedMessagePreparation>;
 }
 
 /** Which agent queue a batch came from: steering amends the running task, follow-ups start the next one. */

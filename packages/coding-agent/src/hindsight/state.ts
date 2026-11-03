@@ -332,7 +332,10 @@ export class HindsightSessionState implements HindsightSessionStateApi {
 	}
 
 	setSessionId(sessionId: string): void {
-		if (this.sessionId !== sessionId) this.#recallGeneration++;
+		if (this.sessionId !== sessionId) {
+			this.#recallGeneration++;
+			this.session.invalidateContext();
+		}
 		this.sessionId = sessionId;
 		this.#lastRetainedMessageIndex = 0;
 		this.#cachedTranscript = "";
@@ -341,6 +344,7 @@ export class HindsightSessionState implements HindsightSessionStateApi {
 
 	resetConversationTracking(): void {
 		this.#recallGeneration++;
+		this.session.invalidateContext();
 		this.lastRetainedTurn = 0;
 		this.hasRecalledForFirstTurn = false;
 		this.lastRecallSnippet = undefined;
@@ -541,13 +545,13 @@ export class HindsightSessionState implements HindsightSessionStateApi {
 		const latestPrompt = promptText.trim();
 		if (!latestPrompt) return undefined;
 		const generation = ++this.#recallGeneration;
+		this.session.invalidateContext(true);
 		// Reuse this transcript's recall so a resumed session sends the same prompt. Hindsight
 		// memories cannot be looked up by id, so changes since are not reported.
 		const persisted = findPersistedRecall(this.session.sessionManager, this.#recallScope());
 		if (persisted !== undefined) {
 			return {
 				context: persisted.text || undefined,
-				isCurrent: () => this.#recallGeneration === generation,
 				commit: () => this.#commitRecall(generation, persisted.text, false),
 			};
 		}
@@ -561,7 +565,6 @@ export class HindsightSessionState implements HindsightSessionStateApi {
 
 		return {
 			context: context ?? undefined,
-			isCurrent: () => this.#recallGeneration === generation,
 			commit: () => this.#commitRecall(generation, context ?? "", true),
 		};
 	}
@@ -570,6 +573,7 @@ export class HindsightSessionState implements HindsightSessionStateApi {
 	#commitRecall(generation: number, context: string, persist: boolean): boolean {
 		if (this.#recallGeneration !== generation) return false;
 		this.hasRecalledForFirstTurn = true;
+		this.session.invalidateContext(true);
 		if (context) this.lastRecallSnippet = context;
 		if (persist) persistRecall(this.session.sessionManager, this.#recallScope(), { text: context, memories: [] });
 		return true;
@@ -646,6 +650,7 @@ export class HindsightSessionState implements HindsightSessionStateApi {
 		).catch(error => {
 			if (generation === this.#mentalModelsLoadGeneration) {
 				this.mentalModelsSnippet = previousSnippet;
+				this.session.invalidateContext();
 				this.mentalModelsLoadedAt = Date.now();
 			}
 			logger.debug("Hindsight: mental-model transcript reload failed", { error: String(error) });
@@ -669,6 +674,7 @@ export class HindsightSessionState implements HindsightSessionStateApi {
 		// so a queued publication cannot rewrite the prefix after this deadline.
 		this.#mentalModelsLoadGeneration++;
 		this.mentalModelsSnippet = previousSnippet;
+		this.session.invalidateContext();
 		this.mentalModelsLoadedAt = Date.now();
 	}
 
@@ -690,12 +696,16 @@ export class HindsightSessionState implements HindsightSessionStateApi {
 		}
 
 		this.mentalModelsSnippet = result.block;
+		this.session.invalidateContext();
 		const published = await this.#refreshBaseSystemPromptAfter(
 			reason,
 			() => generation === this.#mentalModelsLoadGeneration,
 		);
 		if (generation !== this.#mentalModelsLoadGeneration) return;
-		if (!published) this.mentalModelsSnippet = previousSnippet;
+		if (!published) {
+			this.mentalModelsSnippet = previousSnippet;
+			this.session.invalidateContext();
+		}
 		this.mentalModelsLoadedAt = Date.now();
 	}
 
@@ -730,6 +740,7 @@ export class HindsightSessionState implements HindsightSessionStateApi {
 
 	dispose(): void {
 		this.#recallGeneration++;
+		this.session.invalidateContext();
 		this.#mentalModelsLoadGeneration++;
 		this.unsubscribe?.();
 		this.unsubscribe = undefined;
