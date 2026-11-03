@@ -1,5 +1,6 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import { setNativeRendering } from "../src/native/state";
+import { DEFAULT_SPINNER_INTERVAL_MS, SPINNER_INTERVAL_STATIC, setSpinnerInterval } from "../src/spinner-clock";
 import { StatusLineComponent } from "../src/status-line/component";
 import type { StatusLineHost, StatusLineSession } from "../src/status-line/host";
 import type { StatusLineSettings } from "../src/status-line/types";
@@ -53,6 +54,7 @@ describe("status line active-window repaint ticker", () => {
 	afterEach(() => {
 		vi.useRealTimers();
 		setNativeRendering(false);
+		setSpinnerInterval(DEFAULT_SPINNER_INTERVAL_MS);
 	});
 	beforeAll(async () => {
 		await initTheme();
@@ -141,5 +143,36 @@ describe("status line active-window repaint ticker", () => {
 		expect(repaint.mock.calls.length).toBe(1);
 
 		component.dispose();
+	});
+
+	it("follows the spinner clock: a slower or static spinner stops the 4 Hz wakeups, live", () => {
+		vi.useFakeTimers();
+		const { component, repaint } = createComponent();
+
+		// A spinner slower than the safety net sets the pace.
+		setSpinnerInterval(500);
+		component.markActivityStart();
+		vi.advanceTimersByTime(1000);
+		expect(repaint.mock.calls.length).toBe(2);
+
+		// Static spinners (`tui.motion: none`): only the one-second turn timer still moves, and the
+		// armed ticker re-paces at once rather than at the next turn.
+		setSpinnerInterval(SPINNER_INTERVAL_STATIC);
+		repaint.mockClear();
+		vi.advanceTimersByTime(999);
+		expect(repaint.mock.calls.length).toBe(0);
+		vi.advanceTimersByTime(2001);
+		expect(repaint.mock.calls.length).toBe(3);
+
+		// Back to the default cadence: the 250 ms safety net returns mid-turn.
+		setSpinnerInterval(DEFAULT_SPINNER_INTERVAL_MS);
+		repaint.mockClear();
+		vi.advanceTimersByTime(1000);
+		expect(repaint.mock.calls.length).toBe(4);
+
+		component.dispose();
+		setSpinnerInterval(SPINNER_INTERVAL_STATIC);
+		vi.advanceTimersByTime(2000);
+		expect(repaint.mock.calls.length).toBe(4);
 	});
 });
