@@ -6,6 +6,12 @@
 
 - Fixed stats attributing requests that a forked, branched or seance session copied to the copy instead of the original session, which also changed recorded costs, when both transcripts were created in the same clock tick or parsed by parallel workers
 
+## [18.16.0] - 2026-11-02
+
+### Fixed
+
+- Fixed Stats staying at an empty snapshot when the final ingest update arrives during an in-flight dashboard request ([#17754](https://github.com/can1357/oh-my-pi/issues/17754)).
+
 ## [18.14.2] - 2026-10-31
 
 ### Added

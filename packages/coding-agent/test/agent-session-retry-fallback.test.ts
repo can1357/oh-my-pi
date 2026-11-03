@@ -2092,7 +2092,10 @@ describe("AgentSession retry fallback", () => {
 			modelRegistry,
 		});
 
+		const dropped: string[] = [];
+		session.setPromptDropped(prompt => dropped.push(prompt.text));
 		await expect(session.prompt("No model configured")).rejects.toThrow("No model selected");
+		expect(dropped).toEqual(["No model configured"]);
 		expect(agent.state.isStreaming).toBe(false);
 	});
 
