@@ -141,7 +141,7 @@ Environment is filtered before launching the runner:
 
 - The base environment comes from the same child-shell filter used by the bash tool, which removes launch-project dotenv values and inherited Git repository-location overrides.
 - Caller identity and CLI configuration variables are preserved, including custom names outside the `LC_`, `XDG_`, and `PI_` prefixes.
-- Python additionally strips a fixed list of credential variables: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, `GEMINI_API_KEY`, `OPENROUTER_API_KEY`, `PERPLEXITY_API_KEY`, `PERPLEXITY_COOKIES`, `EXA_API_KEY`, `AZURE_OPENAI_API_KEY`, `MISTRAL_API_KEY`, `GROQ_API_KEY`, `XAI_API_KEY`, `DEEPSEEK_API_KEY`, `GH_TOKEN`, `GITHUB_TOKEN`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, and `OP_SERVICE_ACCOUNT_TOKEN`, plus names beginning with `OP_SESSION_`. Matching is case-insensitive on Windows.
+- Python additionally strips a fixed list of credential variables: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, `GEMINI_API_KEY`, `OPENROUTER_API_KEY`, `PERPLEXITY_API_KEY`, `PERPLEXITY_COOKIES`, `EXA_API_KEY`, `AZURE_OPENAI_API_KEY`, `MISTRAL_API_KEY`, `GROQ_API_KEY`, `XAI_API_KEY`, `DEEPSEEK_API_KEY`, `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `OP_SERVICE_ACCOUNT_TOKEN`, and `OP_CONNECT_TOKEN`, plus names beginning with `OP_SESSION_`. Matching is case-insensitive on Windows.
 
 This is a fixed denylist, not a general secret filter. Unrecognized credentials
 such as custom token variables still pass through. Loader configuration such as
