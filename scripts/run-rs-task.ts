@@ -32,6 +32,8 @@ const VENDORED_FORK_EXCLUDES = [
 	"--exclude",
 	"cfg_aliases",
 	"--exclude",
+	"jaq-core",
+	"--exclude",
 	"napi",
 ] as const satisfies readonly string[];
 // grep-searcher's upstream ripgrep code predates the workspace clippy policy, but
