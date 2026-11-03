@@ -626,6 +626,56 @@ fn a_refused_conversion_fails_before_the_protocol_exchange() {
 	);
 }
 
+/// A received name the `--iconv` conversion refuses becomes empty, as in
+/// rsync 3.5.1's recv_file_entry, so nothing is created under the name as
+/// sent. Captured from rsync 3.5.1 under `LC_ALL=C` (20 runs, always so):
+/// with `é` and `plain` at the top, `--iconv=UTF-8,` reports the name, copies
+/// `plain` and exits 23; with `sub/é2` in an incremental list the empty name
+/// is outside `sub`, which aborts the transfer (exit 4) as the receiver,
+/// once.
+#[test]
+fn a_received_name_the_conversion_refuses_creates_nothing() {
+	let eilseq = crate::rsync::log::strerror(&std::io::Error::from_raw_os_error(libc::EILSEQ));
+	let dir = tempfile::tempdir().unwrap();
+	let src = dir.path().join("src");
+	fs::create_dir_all(&src).unwrap();
+	fs::write(src.join("\u{e9}"), b"x").unwrap();
+	fs::write(src.join("plain"), b"y").unwrap();
+	let (code, out, err) = run(&["-ai", "--iconv=UTF-8,", "src/", "d1/"], dir.path());
+	assert_eq!(code, 23, "{out}{err}");
+	assert!(out.contains(">f+++++++++ plain\n"), "{out}");
+	assert!(err.starts_with(&format!("[Receiver] cannot convert filename: \\#303\\#251 ({eilseq})\n")), "{err}");
+	let names: Vec<_> = fs::read_dir(dir.path().join("d1")).unwrap().map(|e| e.unwrap().file_name()).collect();
+	assert_eq!(names, [std::ffi::OsString::from("plain")]);
+
+	fs::create_dir_all(src.join("sub")).unwrap();
+	fs::write(src.join("sub/\u{e9}2"), b"z").unwrap();
+	let (code, out, err) = run(&["-ai", "--iconv=UTF-8,", "src/", "d2/"], dir.path());
+	assert_eq!(code, 4, "{out}{err}");
+	assert!(err.contains(&format!("[receiver] cannot convert filename: sub/\\#303\\#2512 ({eilseq})\n")), "{err}");
+	assert_eq!(err.matches("ABORTING due to invalid path from sender: /\n").count(), 1, "{err}");
+	assert!(err.ends_with("rsync error: requested action not supported (code 4) at flist.c(3230) [receiver=3.5.1]\n"), "{err}");
+	let made: Vec<_> = walkdir_names(&dir.path().join("d2"));
+	assert!(made.iter().all(|name| !name.contains('\u{e9}') && !name.contains("\\#")), "{made:?}");
+}
+
+/// Every path below `root`, relative to it.
+fn walkdir_names(root: &Path) -> Vec<String> {
+	let mut names = Vec::new();
+	let mut stack = vec![root.to_path_buf()];
+	while let Some(dir) = stack.pop() {
+		let Ok(entries) = fs::read_dir(&dir) else { continue };
+		for entry in entries {
+			let path = entry.unwrap().path();
+			names.push(path.strip_prefix(root).unwrap().to_string_lossy().into_owned());
+			if path.is_dir() {
+				stack.push(path);
+			}
+		}
+	}
+	names
+}
+
 /// Protocol 33 MSG_BLOCK_STATS: the receiving half's 4 KiB block count reaches
 /// the sending client's --stats (rsync 3.5.1 prints 1 for this delta).
 #[test]

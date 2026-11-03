@@ -2720,6 +2720,9 @@ impl SideRun {
 		gen_filters.set_role(Role::Generator);
 		let gen_ctx = rctx.with_role(Role::Generator);
 		let recv_ctx = rctx.with_role(Role::Receiver);
+		// The receiver reads the incremental lists from here on, as upstream's
+		// forked receiver does.
+		fr.set_role(Role::Receiver);
 		// --read-batch: the generator's output pipe. It stays open until both
 		// threads are done: the generator still writes its goodbye after the
 		// receiver has stopped reading (upstream lets that output go nowhere).

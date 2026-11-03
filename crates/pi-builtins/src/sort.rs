@@ -1487,7 +1487,7 @@ mod tests {
 			)
 			.expect("the whole line"),
 		];
-		settings.collator = Some(std::sync::Arc::new(collator));
+		settings.collator = Some(super::super::Collation::Icu(std::sync::Arc::new(collator)));
 		settings.init_precomputed();
 		assert!(settings.precomputed.fast_locale_collation);
 		Some(settings)
@@ -1661,6 +1661,24 @@ pub fn custom_str_cmp(
 			},
 		}
 	}
+}
+
+/// GNU `keycompare`'s copy of a key for locale collation: `key` with the
+/// bytes `-d` and `-i` drop removed and the rest folded by `-f` with the
+/// locale's `toupper`, written to `out`.
+pub fn filtered_key(out: &mut Vec<u8>, key: &[u8], ctype: &SortCtype, settings: &super::KeySettings) {
+	out.clear();
+	out.extend(
+		key.iter()
+			.filter(|&&c| filter_char(c, ctype, settings.ignore_non_printing, settings.dictionary_order))
+			.map(|&c| if settings.ignore_case { ctype.fold[usize::from(c)] } else { c }),
+	);
+}
+
+thread_local! {
+	/// The two keys [`filtered_key`] writes for one comparison, kept so that
+	/// comparisons reuse their memory.
+	pub static FILTERED_KEYS: std::cell::RefCell<(Vec<u8>, Vec<u8>)> = const { std::cell::RefCell::new((Vec::new(), Vec::new())) };
 }
 
 }
@@ -3458,7 +3476,7 @@ use bigdecimal::BigDecimal;
 use brush_core::{ShellExtensions, builtins::Registration, openfiles::OpenFile};
 use chunks::LineData;
 use clap::{Arg, ArgAction, ArgMatches, Command, CommandFactory, FromArgMatches, builder::ValueParser};
-use custom_str_cmp::custom_str_cmp;
+use custom_str_cmp::{FILTERED_KEYS, custom_str_cmp, filtered_key};
 use ext_sort::ext_sort;
 use foldhash::{HashMap, SharedSeed, fast::FoldHasher};
 use icu_collator::{
@@ -3820,8 +3838,8 @@ pub struct GlobalSettings {
 	compress:                Option<Compressor>,
 	merge_batch_size:        usize,
 	numeric_locale:          NumericLocaleSettings,
-	/// ICU collator for the shell's LC_COLLATE; `None` compares text by bytes.
-	collator:                Option<Arc<CollatorBorrowed<'static>>>,
+	/// The collation of the shell's LC_COLLATE; `None` compares text by bytes.
+	collator:                Option<Collation>,
 	parallelism:             Parallelism,
 	precomputed:             Precomputed,
 	cancel:                  Arc<AtomicBool>,
@@ -3963,10 +3981,12 @@ impl GlobalSettings {
 		self.precomputed.tokenize_allow_unit_after_blank =
 			self.precomputed.tokenize_blank_thousands_sep && uses_human_numeric;
 
+		// The fast path compares precomputed collation keys, which ICU makes;
+		// libc collation compares each pair, as GNU `sort` does.
 		let locale_collation = self.collator.is_some();
 		self.precomputed.fast_lexicographic = !locale_collation && self.can_use_fast_lexicographic();
 		self.precomputed.fast_locale_collation =
-			locale_collation && self.can_use_fast_lexicographic();
+			matches!(self.collator, Some(Collation::Icu(_))) && self.can_use_fast_lexicographic();
 		self.precomputed.fast_ascii_insensitive = self.can_use_fast_ascii_insensitive();
 		self.precomputed.ctype = Arc::clone(&self.ctype);
 	}
@@ -3996,6 +4016,7 @@ impl GlobalSettings {
 	fn can_use_fast_ascii_insensitive(&self) -> bool {
 		self.mode == SortMode::Default
 			&& self.ctype.folds_ascii()
+			&& self.collator.is_none()
 			&& self.ignore_case
 			&& !self.dictionary_order
 			&& !self.ignore_non_printing
@@ -4211,7 +4232,7 @@ impl<'a> Line<'a> {
 		settings: &GlobalSettings,
 	) -> Self {
 		if settings.precomputed.fast_locale_collation
-			&& let Some(collator) = &settings.collator
+			&& let Some(Collation::Icu(collator)) = &settings.collator
 		{
 			let Ok(()) = collator.write_sort_key_utf8_to(line, &mut line_data.collation_key_buffer);
 			line_data
@@ -4920,12 +4941,44 @@ impl FieldSelector {
 static COLLATORS: LazyLock<Mutex<HashMap<Locale, Option<Arc<CollatorBorrowed<'static>>>>>> =
 	LazyLock::new(Default::default);
 
-/// The collator for the shell's LC_COLLATE, or `None` to compare text by
-/// bytes: the locale must be UTF-8 (uucore's rule) and loadable by the system
-/// (GNU falls back to byte order otherwise).
-fn shell_collator(host: &Host) -> Option<Arc<CollatorBorrowed<'static>>> {
-	let (locale, utf8) = parse_locale_name(shell_locale(host, "LC_COLLATE")?)?;
-	if !utf8 || locale_failed_to_set(host) {
+/// How text keys collate.
+#[derive(Clone, Debug)]
+pub(crate) enum Collation {
+	/// ICU, for a UTF-8 `LC_COLLATE` (uucore's rule).
+	Icu(Arc<CollatorBorrowed<'static>>),
+	/// `strcoll` in the locale, as GNU `sort` collates, for any other
+	/// `LC_COLLATE` libc can load.
+	#[cfg(unix)]
+	Libc(Arc<crate::locale::LibcCollator>),
+}
+
+impl Collation {
+	/// Compares two keys as the locale orders them.
+	fn compare(&self, a: &[u8], b: &[u8]) -> Ordering {
+		match self {
+			Self::Icu(collator) => collator.compare_utf8(a, b),
+			#[cfg(unix)]
+			Self::Libc(collator) => collator.compare(a, b),
+		}
+	}
+}
+
+/// The collation for the shell's LC_COLLATE, or `None` to compare text by
+/// bytes: C/POSIX, or a locale the system cannot load (GNU falls back to
+/// byte order then). A UTF-8 locale collates with ICU, as uucore does; any
+/// other with libc's `strcoll`, as GNU `sort` does.
+fn shell_collator(host: &Host, cancel: &AtomicBool) -> Option<Collation> {
+	let name = shell_locale(host, "LC_COLLATE")?;
+	if matches!(name, "C" | "POSIX") || locale_failed_to_set(host) {
+		return None;
+	}
+	#[cfg(unix)]
+	if !crate::locale::name_reads_as_utf8(name) {
+		return crate::locale::libc_collator(host, name, cancel).map(Collation::Libc);
+	}
+	let _ = cancel;
+	let (locale, utf8) = parse_locale_name(name)?;
+	if !utf8 {
 		return None;
 	}
 	COLLATORS
@@ -4942,6 +4995,7 @@ fn shell_collator(host: &Host) -> Option<Arc<CollatorBorrowed<'static>>> {
 				.map(Arc::new)
 		})
 		.clone()
+		.map(Collation::Icu)
 }
 
 /// Decimal point and thousands separator for the shell's LC_NUMERIC.
@@ -6038,7 +6092,7 @@ fn uu_sort(host: &mut Host, matches: &ArgMatches, legacy_warnings: &[LegacyKeyWa
 		settings.parallelism = invocation_parallelism(requested);
 	}
 
-	settings.collator = shell_collator(host);
+	settings.collator = shell_collator(host, &settings.cancel);
 	if settings.debug {
 		let global_flags = GlobalOptionFlags::from_matches(matches);
 		emit_debug_warnings(host, &settings, &global_flags, legacy_warnings);
@@ -6549,19 +6603,27 @@ fn compare_by<'a>(
 			SortMode::Month => month_compare(a_str, b_str, global_settings.month_names.as_deref()),
 			SortMode::Version => version_cmp(a_str, b_str),
 			SortMode::Default => {
-				// Locale collation only applies when no custom filtering flags
-				// alter the compared byte sequences.
 				if settings.ignore_case || settings.dictionary_order || settings.ignore_non_printing {
-					custom_str_cmp(
-						a_str,
-						b_str,
-						&global_settings.ctype,
-						settings.ignore_non_printing,
-						settings.dictionary_order,
-						settings.ignore_case,
-					)
+					match &global_settings.collator {
+						// GNU keycompare under locale collation: copies of the
+						// keys with `-d` and `-i` bytes dropped and `-f` folded,
+						// then collated.
+						Some(collator) => FILTERED_KEYS.with_borrow_mut(|(a_key, b_key)| {
+							filtered_key(a_key, a_str, &global_settings.ctype, settings);
+							filtered_key(b_key, b_str, &global_settings.ctype, settings);
+							collator.compare(a_key, b_key)
+						}),
+						None => custom_str_cmp(
+							a_str,
+							b_str,
+							&global_settings.ctype,
+							settings.ignore_non_printing,
+							settings.dictionary_order,
+							settings.ignore_case,
+						),
+					}
 				} else if let Some(collator) = &global_settings.collator {
-					collator.compare_utf8(a_str, b_str)
+					collator.compare(a_str, b_str)
 				} else {
 					a_str.cmp(b_str)
 				}
@@ -7110,14 +7172,94 @@ mod tests {
 			assert_eq!(code, 0, "{locale} {args:?}");
 			assert_eq!(out, expected, "{locale} {args:?} {input:?}");
 		}
-		// Bytes that start no UTF-8 character take a column each.
-		let (mut host, capture) = Host::for_test("sort", b"\xff\xfe x\n".to_vec(), "/");
-		host.set_test_var("LC_ALL", "C.UTF-8");
-		let parsed = <Sort as clap::Parser>::try_parse_from(["sort", "--debug", "-k2,2"]).expect("parse");
-		if locale_installed("C.UTF-8") {
+		// Bytes that start no UTF-8 character take a column each; an
+		// incomplete character at the end of a key takes one for all its
+		// bytes (GNU `sort` 9.4: `e3 81` under one underscore).
+		let raw: [(&[u8], &[&str], &[u8]); 2] = [
+			(b"\xff\xfe x\n", &["--debug", "-k2,2"], b"\xff\xfe x\n  __\n____\n"),
+			(b"\xe3\x81\n", &["--debug"], b"\xe3\x81\n_\n"),
+		];
+		for (input, args, expected) in raw {
+			if !locale_installed("C.UTF-8") {
+				break;
+			}
+			let (mut host, capture) = Host::for_test("sort", input.to_vec(), "/");
+			host.set_test_var("LC_ALL", "C.UTF-8");
+			let argv = std::iter::once("sort").chain(args.iter().copied());
+			let parsed = <Sort as clap::Parser>::try_parse_from(argv).expect("parse");
 			assert_eq!(parsed.run(&mut host), 0);
-			assert_eq!(capture.stdout(), b"\xff\xfe x\n  __\n____\n".to_vec());
+			assert_eq!(capture.stdout(), expected.to_vec(), "{args:?} {input:?}");
 		}
+	}
+
+	/// Under locale collation `-f`, `-d` and `-i` filter and fold the keys,
+	/// then collate them, as GNU `keycompare` does: in `en_US.UTF-8`, `é`
+	/// sorts before `z` and `a` before `B`, which byte order reverses.
+	#[test]
+	fn filtered_keys_are_collated_in_the_locale() {
+		if !locale_installed("en_US.UTF-8") {
+			eprintln!("skipping: en_US.UTF-8 not installed");
+			return;
+		}
+		for (args, input, expected) in [
+			(&["-f"][..], "z\n\u{e9}\n", "\u{e9}\nz\n"),
+			(&["-d"][..], "B\na\n", "a\nB\n"),
+			(&["-i"][..], "B\na\n", "a\nB\n"),
+			(&["-f", "-k1,1"][..], "z\n\u{e9}\n", "\u{e9}\nz\n"),
+		] {
+			let (code, out, err) = sort_in_locale("LC_ALL", "en_US.UTF-8", args, input);
+			assert_eq!((code, err.as_str()), (0, ""), "{args:?}");
+			assert_eq!(out, expected, "{args:?}");
+		}
+		let (_, out, _) = sort_in_locale("LC_ALL", "C", &["-f"], "z\n\u{e9}\n");
+		assert_eq!(out, "z\n\u{e9}\n");
+	}
+
+	/// A non-UTF-8 `LC_COLLATE` collates with libc's `strcoll`, as GNU `sort`
+	/// does, where the builtin compared bytes: in a generated
+	/// `en_US.ISO-8859-1`, `é` (0xE9) sorts before `z`, and `-f` folds it to
+	/// `É` first (GNU `sort` 9.4 prints `é`, then `z`, for both). An embedded
+	/// NUL splits a key into pieces collated in turn. libc finds generated
+	/// locales only through a `LOCPATH` the process was started with, so the
+	/// check runs in a copy of this test binary started with one.
+	#[cfg(all(target_os = "linux", target_env = "gnu"))]
+	#[test]
+	fn a_non_utf8_locale_collates_with_libc() {
+		const LOCALES: &str = "OMP_SORT_TEST_LATIN1_LOCALES";
+		if std::env::var_os(LOCALES).is_some() {
+			let run = |args: &[&str], input: &[u8]| {
+				let (mut host, capture) = Host::for_test("sort", input.to_vec(), "/");
+				host.set_test_var("LC_ALL", "en_US.ISO-8859-1");
+				let argv = std::iter::once("sort").chain(args.iter().copied());
+				let parsed = <Sort as clap::Parser>::try_parse_from(argv).expect("parse");
+				assert_eq!(parsed.run(&mut host), 0, "{args:?}");
+				capture.stdout()
+			};
+			assert_eq!(run(&[], b"z\n\xe9\n"), b"\xe9\nz\n");
+			assert_eq!(run(&["-f"], b"z\n\xe9\n"), b"\xe9\nz\n");
+			assert_eq!(run(&["-k1,1"], b"z x\n\xe9 y\n"), b"\xe9 y\nz x\n");
+			// "a\0z" against "a\0b": the first pieces collate equal, so the second decide.
+			assert_eq!(run(&[], b"a\0z\na\0b\n"), b"a\0b\na\0z\n");
+			return;
+		}
+		let dir = tempfile::tempdir().unwrap();
+		let locale = dir.path().join("en_US.ISO-8859-1");
+		let _ = std::process::Command::new("localedef")
+			.args(["-c", "-i", "en_US", "-f", "ISO-8859-1"])
+			.arg(&locale)
+			.output();
+		if !locale.join("LC_COLLATE").exists() {
+			eprintln!("skipping: localedef could not generate en_US.ISO-8859-1");
+			return;
+		}
+		let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+			.args(["--exact", "sort::tests::a_non_utf8_locale_collates_with_libc"])
+			.env("LOCPATH", dir.path())
+			.env(LOCALES, dir.path())
+			.output()
+			.expect("the test binary runs");
+		let stdout = String::from_utf8_lossy(&output.stdout);
+		assert!(output.status.success() && stdout.contains(" 1 passed;"), "{stdout}{}", String::from_utf8_lossy(&output.stderr));
 	}
 
 	/// `-d`, `-i` and `-f` keep and fold by the locale's tables, so in a

@@ -430,7 +430,10 @@ fn receiver_flags_paths_outside_the_announced_dir() {
 	let mut fr = FlistReceiver::new(&rctx, None);
 	let err = fr.recv_extra(&mut input, &flists, 0).unwrap_err();
 	assert_eq!(err.code, RERR_UNSUPPORTED);
-	assert_eq!(err.message.as_deref(), Some("ABORTING due to invalid path from sender: c/x"));
+	// The abort line is printed where it is found, with the name's bytes; the
+	// error carries only the trailer, so it is not printed a second time.
+	assert_eq!(err.message, None);
+	assert_eq!(err.site, Some(("flist.c", 3230)));
 }
 
 #[test]

@@ -1,7 +1,6 @@
 //! The receiving side of the file-list exchange (upstream recv_file_list,
 //! recv_additional_file_list, and the dir-index checks of read_ndx_and_attrs).
 
-use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
@@ -28,11 +27,28 @@ use crate::rsync::session::Ctx;
 use crate::rsync::wire::NdxCodec;
 use crate::rsync::xattr::XattrReceiver;
 
-/// A name as the local side spells it (`--iconv`); unconvertible names stay as sent.
-fn local_name(ic: Option<&Iconv>, name: &[u8]) -> Vec<u8> {
-	match ic {
-		Some(ic) => ic.from_wire_io(name).unwrap_or_else(|_| name.to_vec()),
-		None => name.to_vec(),
+/// upstream recv_file_entry's `--iconv` step: `name` in the local charset, or
+/// empty when the conversion fails, which is reported on `logger` (the role
+/// reading the list) and counted as an I/O error. Every later check sees the
+/// result.
+fn convert_received_name(ctx: &Ctx, logger: Option<&crate::rsync::log::Logger>, ic: &Iconv, name: &[u8]) -> Vec<u8> {
+	match ic.from_wire_io(name) {
+		Ok(local) => local,
+		Err(err) => {
+			ctx.io_error.fetch_or(IOERR_GENERAL, Ordering::Relaxed);
+			let logger = logger.unwrap_or(&ctx.logger);
+			let who = logger.role().name();
+			logger.rprintf(
+				LogCode::ErrorUtf8,
+				&[
+					format!("[{who}] cannot convert filename: ").as_bytes(),
+					name,
+					format!(" ({})\n", crate::rsync::log::strerror(&err)).as_bytes(),
+				]
+				.concat(),
+			);
+			Vec::new()
+		},
 	}
 }
 
@@ -92,6 +108,17 @@ impl FlistReceiver {
 		self.checks_installed = false;
 	}
 
+	/// The role reading the lists from now on: the receiving side's receiver
+	/// once it has split from the generator (upstream's forked receiver reads
+	/// the incremental lists, and its messages say `[receiver]`).
+	pub(crate) fn set_role(&mut self, role: crate::rsync::log::Role) {
+		self.ctx = self.ctx.with_role(role);
+		self.dec.set_logger(self.ctx.logger.clone());
+		self.ids.set_logger(self.ctx.logger.clone());
+		lock(&self.xattrs).set_role(role);
+		lock(&self.acls).set_role(role);
+	}
+
 	/// The read-direction ndx codec for the sender's stream (shared with the receiver).
 	pub(crate) fn ndx_codec(&mut self) -> &mut NdxCodec {
 		let proto = self.ctx.proto;
@@ -112,32 +139,34 @@ impl FlistReceiver {
 		}
 		self.checks_installed = true;
 		let o = &self.ctx.opts;
-		let ic = self.ctx.iconv.clone();
 		let mut checks = RecvChecks::default();
+		if let Some(ic) = self.ctx.iconv.clone() {
+			let ctx = self.ctx.clone();
+			checks.convert_name = Some(Box::new(move |name: &[u8], logger: Option<&crate::rsync::log::Logger>| {
+				convert_received_name(&ctx, logger, &ic, name)
+			}));
+		}
 		if let Some(f) = &self.filters {
 			let guard = lock(f);
 			let active = !o.trust_sender_filter && !guard.saw_dir_merge() && !guard.is_empty();
 			drop(guard);
 			if active {
 				let f = Arc::clone(f);
-				let ic = ic.clone();
 				checks.excluded = Some(Box::new(move |name: &[u8], is_dir: bool| {
-					let name = local_name(ic.as_deref(), name);
-					lock(&f).check(&name, is_dir, Side::Sender) == Verdict::Exclude
+					lock(&f).check(name, is_dir, Side::Sender) == Verdict::Exclude
 				}));
 			}
 		}
 		if let Some(imp) = &self.implied {
 			let a = Arc::clone(imp);
-			let ic2 = ic.clone();
 			checks.requested = Some(Box::new(move |name: &[u8], is_dir: bool| {
 				let list = lock(&a);
-				list.is_empty() || list.check(&local_name(ic2.as_deref(), name), is_dir) == Verdict::Include
+				list.is_empty() || list.check(name, is_dir) == Verdict::Include
 			}));
 			let b = Arc::clone(imp);
 			checks.implied_parent = Some(Box::new(move |name: &[u8]| {
 				let list = lock(&b);
-				!list.is_empty() && list.is_implied_parent_dir(&local_name(ic.as_deref(), name))
+				!list.is_empty() && list.is_implied_parent_dir(name)
 			}));
 		}
 		self.dec.set_checks(checks);
@@ -272,7 +301,6 @@ impl FlistReceiver {
 		let ic = ctx.iconv.clone();
 		let convert_links = symlink_iconv(&ctx);
 		let mut received: Vec<(FileEntry, ())> = Vec::new();
-		let mut dir_cache: HashMap<Vec<u8>, Arc<[u8]>> = HashMap::new();
 		let mut counts = (0i32, 0i32, 0i32, 0i32, 0i64);
 		let mut good_dir: Option<Vec<u8>> = None;
 		loop {
@@ -281,32 +309,8 @@ impl FlistReceiver {
 				break;
 			};
 			let who = logger.role().name();
+			// The name was converted as it was read (RecvChecks::convert_name).
 			if let Some(ic) = ic.as_deref() {
-				let wire_name = e.name();
-				let dir = if e.dirname.is_empty() {
-					Ok(Vec::new())
-				} else {
-					ic.from_wire_io(&e.dirname)
-				};
-				match dir.and_then(|d| ic.from_wire_io(&e.basename).map(|b| (d, b))) {
-					Ok((d, b)) => {
-						let shared = dir_cache.entry(d.clone()).or_insert_with(|| Arc::from(d.as_slice()));
-						e.dirname = Arc::clone(shared);
-						e.basename = b.into();
-					},
-					Err(err) => {
-						ctx.io_error.fetch_or(IOERR_GENERAL, Ordering::Relaxed);
-						logger.rprintf(
-							LogCode::ErrorUtf8,
-							&[
-								format!("[{who}] cannot convert filename: ").as_bytes(),
-								&wire_name,
-								format!(" ({})\n", crate::rsync::log::strerror(&err)).as_bytes(),
-							]
-							.concat(),
-						);
-					},
-				}
 				if convert_links
 					&& let Some(link) = &e.link
 					&& !link.is_empty()
@@ -353,9 +357,11 @@ impl FlistReceiver {
 				}
 				if good_dir.as_deref() != Some(cur) {
 					if cur != want_dir.as_slice() {
+						// Printed here with the name's own bytes; the error carries
+						// only the trailer, so the abort is reported once.
 						let text = [&b"ABORTING due to invalid path from sender: "[..], cur, b"/", &e.basename].concat();
 						logger.rprintf(LogCode::Error, &[&text[..], b"\n"].concat());
-						return Err(RsyncError::new(RERR_UNSUPPORTED, String::from_utf8_lossy(&text)).at("flist.c", 3230));
+						return Err(RsyncError::new(RERR_UNSUPPORTED, "").at("flist.c", 3230));
 					}
 					good_dir = Some(cur.to_vec());
 				}

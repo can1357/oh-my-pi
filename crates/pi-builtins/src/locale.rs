@@ -771,8 +771,9 @@ impl SortCtype {
 
 /// gnulib `mbsnwidth` with no flags, in the locale `object`: printable ASCII
 /// takes one column; otherwise `mbrtowc` and `wcwidth`, a byte no character
-/// starts taking one column, a character `wcwidth` cannot measure one unless
-/// it is a control character.
+/// starts taking one column, an incomplete character at the end one column
+/// for all its bytes, a character `wcwidth` cannot measure one unless it is a
+/// control character.
 #[cfg(unix)]
 fn multibyte_width(object: &LocaleObject, text: &[u8]) -> usize {
 	// SAFETY: the object is a live locale for as long as it is borrowed; the
@@ -791,12 +792,17 @@ fn multibyte_width(object: &LocaleObject, text: &[u8]) -> usize {
 			}
 			let mut wc: libc::wchar_t = 0;
 			let used = mbrtowc(&mut wc, rest.as_ptr().cast(), rest.len(), &mut state);
-			if used == usize::MAX || used == usize::MAX - 1 {
-				// Invalid or incomplete: one column for the byte (gnulib).
+			if used == usize::MAX {
+				// Invalid: one column for the byte (gnulib).
 				state = MbState([0; 128]);
 				width += 1;
 				rest = &rest[1..];
 				continue;
+			}
+			if used == usize::MAX - 1 {
+				// Incomplete at the end: one column for the rest (gnulib).
+				width += 1;
+				break;
 			}
 			let used = used.max(1);
 			let columns = wcwidth(wc);
@@ -910,6 +916,103 @@ pub(crate) fn shell_sort_ctype(host: &Host, cancel: &AtomicBool) -> std::sync::A
 #[cfg(not(unix))]
 pub(crate) fn shell_sort_ctype(_host: &Host, _cancel: &AtomicBool) -> std::sync::Arc<SortCtype> {
 	c_sort_ctype_shared()
+}
+
+/// GNU `sort`'s collation in a locale ICU is not used for: `strcoll` in the
+/// `LC_COLLATE` locale, through a locale object.
+#[cfg(unix)]
+pub(crate) struct LibcCollator(LocaleObject);
+
+#[cfg(unix)]
+impl std::fmt::Debug for LibcCollator {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("LibcCollator").finish_non_exhaustive()
+	}
+}
+
+#[cfg(unix)]
+thread_local! {
+	/// NUL-terminated copies of the two strings one comparison collates.
+	static COLLATE_BUFS: std::cell::RefCell<(Vec<u8>, Vec<u8>)> =
+		const { std::cell::RefCell::new((Vec::new(), Vec::new())) };
+}
+
+#[cfg(unix)]
+impl LibcCollator {
+	/// gnulib `memcoll0` with `strcoll_l`: equal bytes are equal; otherwise
+	/// the NUL-separated pieces are collated in turn, and when every piece
+	/// collates equal the string with pieces left over is greater.
+	pub(crate) fn compare(&self, a: &[u8], b: &[u8]) -> std::cmp::Ordering {
+		use std::cmp::Ordering;
+		if a == b {
+			return Ordering::Equal;
+		}
+		COLLATE_BUFS.with_borrow_mut(|(sa, sb)| {
+			for (buf, text) in [(&mut *sa, a), (&mut *sb, b)] {
+				buf.clear();
+				buf.extend_from_slice(text);
+				buf.push(0);
+			}
+			let (mut pa, mut pb) = (&sa[..], &sb[..]);
+			loop {
+				// SAFETY: both slices end with a NUL inside them, so each is a
+				// C string; the locale object is live while borrowed.
+				let diff = unsafe { strcoll_l(pa.as_ptr().cast(), pb.as_ptr().cast(), self.0.0) };
+				if diff != 0 {
+					return diff.cmp(&0);
+				}
+				let skip = |p: &[u8]| p.iter().position(|&b| b == 0).map_or(p.len(), |nul| nul + 1);
+				pa = &pa[skip(pa)..];
+				pb = &pb[skip(pb)..];
+				match (pa.is_empty(), pb.is_empty()) {
+					(true, true) => return Ordering::Equal,
+					(true, false) => return Ordering::Less,
+					(false, true) => return Ordering::Greater,
+					(false, false) => {},
+				}
+			}
+		})
+	}
+}
+
+#[cfg(unix)]
+unsafe extern "C" {
+	fn strcoll_l(a: *const libc::c_char, b: *const libc::c_char, locale: libc::locale_t) -> libc::c_int;
+}
+
+/// [`LibcCollator`] for the locale named `name` (the shell's `LC_COLLATE`),
+/// loaded with `newlocale` through [`libc_locale_load`] with `cancel`; `None`
+/// when libc cannot load it, where GNU `sort` compares bytes. A lookup that
+/// succeeds is kept for the life of the process, per name.
+#[cfg(unix)]
+pub(crate) fn libc_collator(host: &Host, name: &str, cancel: &AtomicBool) -> Option<std::sync::Arc<LibcCollator>> {
+	static READ: Mutex<Vec<(String, std::sync::Arc<LibcCollator>)>> = Mutex::new(Vec::new());
+	if let Some((_, known)) = READ.lock().unwrap_or_else(PoisonError::into_inner).iter().find(|(read, _)| read == name) {
+		return Some(std::sync::Arc::clone(known));
+	}
+	let name_c = std::ffi::CString::new(name).ok()?;
+	// SAFETY: the name is a valid NUL-terminated string; the object is owned
+	// by the collator from here on.
+	let load = move || unsafe {
+		let object = libc::newlocale(libc::LC_COLLATE_MASK, name_c.as_ptr(), std::ptr::null_mut());
+		(!object.is_null()).then(|| LibcCollator(LocaleObject(object)))
+	};
+	match libc_locale_load(cancel, load) {
+		Ok(Some(collator)) => {
+			let mut read = READ.lock().unwrap_or_else(PoisonError::into_inner);
+			if let Some((_, known)) = read.iter().find(|(known, _)| known == name) {
+				return Some(std::sync::Arc::clone(known));
+			}
+			let collator = std::sync::Arc::new(collator);
+			read.push((name.to_owned(), std::sync::Arc::clone(&collator)));
+			Some(collator)
+		},
+		Ok(None) => None,
+		Err(why) => {
+			host.warn(format!("warning: cannot read the collation of the locale \"{name}\": {why}"));
+			None
+		},
+	}
 }
 
 /// `MB_CUR_MAX` for this thread's locale.
