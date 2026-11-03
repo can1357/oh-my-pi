@@ -4,7 +4,7 @@
  * Stores tool definitions per server in agent.db for fast startup.
  */
 import { isRecord, logger, stableStringifyJson } from "@oh-my-pi/pi-utils";
-import type { AgentStorage } from "../session/agent-storage";
+import type { AgentStorageApi } from "../session/agent-storage";
 import { DEFAULT_MCP_TIMEOUT_MS } from "./timeout";
 import { MCP_CONFIG_AS_WRITTEN, type MCPRequestIdFormat, type MCPServerConfig, type MCPToolDefinition } from "./types";
 
@@ -214,7 +214,7 @@ function cacheKey(serverName: string): string {
 }
 
 export class MCPToolCache {
-	constructor(private storage: AgentStorage) {}
+	constructor(private storage: AgentStorageApi) {}
 
 	async get(serverName: string, config: MCPServerConfig): Promise<MCPToolDefinition[] | null> {
 		const key = cacheKey(serverName);

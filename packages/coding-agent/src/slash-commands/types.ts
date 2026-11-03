@@ -138,6 +138,7 @@ export interface SlashCommandRuntime {
 	 */
 	syncTestedMcpServer?: (name: string) => Promise<TestedServerSync>;
 	notifyTitleChanged?: () => Promise<void> | void;
+	notifySessionPinChanged?: (sessionId: string, pinned: boolean) => Promise<void> | void;
 	/**
 	 * Push the host's view of the session config (model, thinking level, mode).
 	 *
