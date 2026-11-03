@@ -56,8 +56,17 @@ const DAY_MS = 24 * HOUR_MS;
 const ROLLUP_VERSION = "2";
 const ROLLUP_VERSION_KEY = "rollup_version";
 /** Bump when the dirty-marking triggers change; they are then recreated in place. */
-const TRIGGER_VERSION = "3";
+const TRIGGER_VERSION = "4";
 const TRIGGER_VERSION_KEY = "rollup_triggers_version";
+/**
+ * `tool_agent_rollup` (tool-result characters per hour and agent type) is built
+ * on its own dirty set, so adding it never rebuilds the other rollups. Bump to
+ * rebuild just this table.
+ */
+const TOOL_AGENT_VERSION = "1";
+const TOOL_AGENT_VERSION_KEY = "tool_agent_rollup_version";
+/** Before this, timestamps are sentinels (0) or garbage: their hours are seeded one by one, not as a range. */
+const SANE_TIMESTAMP_MS = Date.UTC(2000, 0, 1);
 
 /** Above this many dirty hours, reads use stale rollup rows instead of scanning dirty hours raw. */
 const EXACT_DIRTY_LIMIT = 96;
@@ -142,11 +151,22 @@ function hourOf(column: string): string {
  * Trigger statements marking a row's hour and transcript dirty (`row` is
  * `NEW` or `OLD`), without any conflict clause.
  */
-function markDirty(row: "NEW" | "OLD"): string {
+function markDirty(row: "NEW" | "OLD", table: "messages" | "tool_calls"): string {
+	const toolAgent =
+		table === "tool_calls"
+			? `INSERT INTO tool_agent_dirty (bucket)
+		SELECT h FROM (SELECT ${hourOf(`${row}.timestamp`)} AS h) WHERE h NOT IN (SELECT bucket FROM tool_agent_dirty);`
+			: "";
 	return `INSERT INTO rollup_dirty (bucket)
 		SELECT h FROM (SELECT ${hourOf(`${row}.timestamp`)} AS h) WHERE h NOT IN (SELECT bucket FROM rollup_dirty);
 	INSERT INTO session_dirty (session_file)
-		SELECT ${row}.session_file WHERE ${row}.session_file NOT IN (SELECT session_file FROM session_dirty);`;
+		SELECT ${row}.session_file WHERE ${row}.session_file NOT IN (SELECT session_file FROM session_dirty);
+	${toolAgent}`;
+}
+
+/** Additive per-bucket tool-result facts per agent type (columns of `tool_calls`). */
+function toolAgentFacts(bucketExpr: string): string {
+	return `${bucketExpr} AS bucket, agent_type, SUM(COALESCE(result_chars, 0)) AS result_chars`;
 }
 
 /** Per-transcript facts over `messages` (qualified by `p`); tool calls counted by subquery. */
@@ -182,9 +202,10 @@ export function ensureRollupSchema(database: Database): void {
 	const readMeta = (key: string) =>
 		(database.query("SELECT value FROM meta WHERE key = ?").get(key) as { value: string } | undefined)?.value;
 	const fresh = readMeta(ROLLUP_VERSION_KEY) !== ROLLUP_VERSION;
+	const toolAgentFresh = fresh || readMeta(TOOL_AGENT_VERSION_KEY) !== TOOL_AGENT_VERSION;
 	// Steady state touches no schema: DDL on every open would contend with
 	// other omp processes writing the same database.
-	if (!fresh && readMeta(TRIGGER_VERSION_KEY) === TRIGGER_VERSION) return;
+	if (!fresh && !toolAgentFresh && readMeta(TRIGGER_VERSION_KEY) === TRIGGER_VERSION) return;
 	database
 		.transaction(() => {
 			if (fresh) {
@@ -193,6 +214,10 @@ export function ensureRollupSchema(database: Database): void {
 				database.run("DROP TABLE IF EXISTS rollup_dirty");
 				database.run("DROP TABLE IF EXISTS session_rollup");
 				database.run("DROP TABLE IF EXISTS session_dirty");
+			}
+			if (toolAgentFresh) {
+				database.run("DROP TABLE IF EXISTS tool_agent_rollup");
+				database.run("DROP TABLE IF EXISTS tool_agent_dirty");
 			}
 			database.run(`
 			CREATE TABLE IF NOT EXISTS message_rollup (
@@ -256,17 +281,24 @@ export function ensureRollupSchema(database: Database): void {
 				tool_calls INTEGER NOT NULL
 			) WITHOUT ROWID;
 			CREATE TABLE IF NOT EXISTS session_dirty (session_file TEXT PRIMARY KEY) WITHOUT ROWID;
+			CREATE TABLE IF NOT EXISTS tool_agent_rollup (
+				bucket INTEGER NOT NULL,
+				agent_type TEXT NOT NULL,
+				result_chars INTEGER NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_tool_agent_rollup_bucket ON tool_agent_rollup(bucket);
+			CREATE TABLE IF NOT EXISTS tool_agent_dirty (bucket INTEGER PRIMARY KEY) WITHOUT ROWID;
 		`);
 			// A tool share reads its assistant message, so message changes dirty the
 			// hour for both rollups (tool calls share their message's timestamp).
 			// Triggers must not use `OR IGNORE`: a trigger statement inherits the
 			// outer statement's conflict policy, and the UPSERTs in
 			// `insertMessageStats` would turn a duplicate dirty mark into a failed ingest.
-			for (const table of ["messages", "tool_calls"]) {
+			for (const table of ["messages", "tool_calls"] as const) {
 				const triggers = {
-					insert: `AFTER INSERT ON ${table} BEGIN ${markDirty("NEW")} END`,
-					delete: `AFTER DELETE ON ${table} BEGIN ${markDirty("OLD")} END`,
-					update: `AFTER UPDATE ON ${table} BEGIN ${markDirty("OLD")} ${markDirty("NEW")} END`,
+					insert: `AFTER INSERT ON ${table} BEGIN ${markDirty("NEW", table)} END`,
+					delete: `AFTER DELETE ON ${table} BEGIN ${markDirty("OLD", table)} END`,
+					update: `AFTER UPDATE ON ${table} BEGIN ${markDirty("OLD", table)} ${markDirty("NEW", table)} END`,
 				};
 				for (const [event, body] of Object.entries(triggers)) {
 					database.run(`DROP TRIGGER IF EXISTS rollup_dirty_${table}_${event}`);
@@ -290,6 +322,26 @@ export function ensureRollupSchema(database: Database): void {
 					.query("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
 					.run(ROLLUP_VERSION_KEY, ROLLUP_VERSION);
 			}
+			if (toolAgentFresh) {
+				// Every hour between the first and last call, seeded from two index lookups
+				// instead of a scan; hours without calls refresh to nothing.
+				database.run(`
+				WITH RECURSIVE h(bucket) AS (
+					SELECT ${hourOf("MIN(timestamp)")} FROM tool_calls WHERE timestamp >= ${SANE_TIMESTAMP_MS}
+					UNION ALL
+					SELECT bucket + ${HOUR_MS} FROM h
+					WHERE bucket + ${HOUR_MS} <= (SELECT MAX(timestamp) FROM tool_calls)
+				)
+				INSERT OR IGNORE INTO tool_agent_dirty (bucket) SELECT bucket FROM h WHERE bucket IS NOT NULL
+			`);
+				database.run(`
+				INSERT OR IGNORE INTO tool_agent_dirty (bucket)
+				SELECT DISTINCT ${hourOf("timestamp")} FROM tool_calls WHERE timestamp < ${SANE_TIMESTAMP_MS}
+			`);
+				database
+					.query("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
+					.run(TOOL_AGENT_VERSION_KEY, TOOL_AGENT_VERSION);
+			}
 		})
 		.immediate();
 }
@@ -309,7 +361,8 @@ export function getRollupStatus(): RollupStatus {
 	if (!database) return { dirtyHours: 0, dirtySessions: 0 };
 	return database
 		.query(
-			"SELECT (SELECT COUNT(*) FROM rollup_dirty) AS dirtyHours, (SELECT COUNT(*) FROM session_dirty) AS dirtySessions",
+			`SELECT MAX((SELECT COUNT(*) FROM rollup_dirty), (SELECT COUNT(*) FROM tool_agent_dirty)) AS dirtyHours,
+			 (SELECT COUNT(*) FROM session_dirty) AS dirtySessions`,
 		)
 		.get() as RollupStatus;
 }
@@ -350,6 +403,23 @@ export function refreshRollupBatch(limit: number): number {
 			clean.run(bucket);
 		}
 
+		const agentBuckets = database
+			.query("SELECT bucket FROM tool_agent_dirty ORDER BY bucket DESC LIMIT ?")
+			.all(limit) as { bucket: number }[];
+		const clearAgent = database.query("DELETE FROM tool_agent_rollup WHERE bucket = ?");
+		const fillAgent = database.query(`
+			INSERT INTO tool_agent_rollup (bucket, agent_type, result_chars)
+			SELECT ${toolAgentFacts("?1")}
+			FROM tool_calls WHERE timestamp >= ?1 AND timestamp < ?1 + ${HOUR_MS}
+			GROUP BY agent_type
+		`);
+		const cleanAgent = database.query("DELETE FROM tool_agent_dirty WHERE bucket = ?");
+		for (const { bucket } of agentBuckets) {
+			clearAgent.run(bucket);
+			fillAgent.run(bucket);
+			cleanAgent.run(bucket);
+		}
+
 		// Transcripts are cheap (indexed by session_file); roll many per hour-batch.
 		const sessions = database
 			.query("SELECT session_file FROM session_dirty LIMIT ?")
@@ -367,7 +437,7 @@ export function refreshRollupBatch(limit: number): number {
 			fillSession.run(session_file);
 			cleanSession.run(session_file);
 		}
-		return buckets.length + sessions.length;
+		return buckets.length + agentBuckets.length + sessions.length;
 	});
 	return run.immediate();
 }
@@ -969,4 +1039,127 @@ export function getToolTimeSeries({ cutoff, bucketMs }: RangeWindow): ToolTimeSe
 		`${seriesBucket(bucketMs)} AS bucket, f.tool_name AS tool_name, SUM(f.calls) AS calls, SUM(f.errors) AS errors`,
 		"GROUP BY 1, f.tool_name ORDER BY 1",
 	).map(row => ({ timestamp: row.bucket, tool: row.tool_name, calls: row.calls, errors: row.errors }));
+}
+
+// ---------------------------------------------------------------------------
+// Context facts (Spotlight tool-output share)
+// ---------------------------------------------------------------------------
+
+/** Per-bucket context facts of every transcript of one agent type: tool-result characters and output tokens. */
+export interface ContextFactPoint {
+	bucket: number;
+	agentType: AgentType;
+	resultChars: number;
+	outputTokens: number;
+}
+
+/** Tool-result characters per hour and agent type over `[cutoff, now]`; same union shape as {@link toolSource}. */
+function toolAgentSource(database: Database, cutoff: number | null, fine: boolean): Source {
+	if (fine) {
+		return {
+			sql: `SELECT ${toolAgentFacts("(timestamp / 300000) * 300000")} FROM tool_calls WHERE timestamp >= ? GROUP BY 1, agent_type`,
+			params: [cutoff ?? 0],
+		};
+	}
+	const hi = cutoff === null ? null : Math.ceil(cutoff / HOUR_MS) * HOUR_MS;
+	const { n } = database
+		.query(`SELECT COUNT(*) AS n FROM (SELECT 1 FROM tool_agent_dirty LIMIT ${EXACT_DIRTY_LIMIT + 1})`)
+		.get() as { n: number };
+	const exact = n <= EXACT_DIRTY_LIMIT;
+	const parts: string[] = [];
+	const params: number[] = [];
+	parts.push(
+		`SELECT bucket, agent_type, result_chars FROM tool_agent_rollup
+		 WHERE ${exact ? "bucket NOT IN (SELECT bucket FROM tool_agent_dirty)" : "1"}${hi !== null ? " AND bucket >= ?" : ""}`,
+	);
+	if (hi !== null) params.push(hi);
+	if (cutoff !== null && hi !== null && cutoff < hi) {
+		parts.push(
+			`SELECT ${toolAgentFacts(hourOf("timestamp"))} FROM tool_calls
+			 WHERE timestamp >= ? AND timestamp < ? GROUP BY 1, agent_type`,
+		);
+		params.push(cutoff, hi);
+	}
+	if (exact) {
+		parts.push(
+			`SELECT d.bucket AS bucket, t.agent_type AS agent_type, SUM(COALESCE(t.result_chars, 0)) AS result_chars
+			 FROM tool_agent_dirty d JOIN tool_calls t ON t.timestamp >= d.bucket AND t.timestamp < d.bucket + ${HOUR_MS}
+			 ${hi !== null ? "WHERE d.bucket >= ?" : ""}
+			 GROUP BY d.bucket, t.agent_type`,
+		);
+		if (hi !== null) params.push(hi);
+	}
+	return { sql: parts.join(" UNION ALL "), params };
+}
+
+/** {@link ContextFactPoint}s over a window, from the rollups (exact while few hours are dirty). */
+export function getContextFactSeries(database: Database, { cutoff, bucketMs }: RangeWindow): ContextFactPoint[] {
+	const fine = bucketMs < HOUR_MS;
+	const normalized = normalizeCutoff(cutoff);
+	const tools = toolAgentSource(database, normalized, fine);
+	const messages = messageSource(database, normalized, fine);
+	const points = new Map<string, ContextFactPoint>();
+	const point = (bucket: number, agentType: AgentType) => {
+		const key = `${bucket}:${agentType}`;
+		let p = points.get(key);
+		if (!p) {
+			p = { bucket, agentType, resultChars: 0, outputTokens: 0 };
+			points.set(key, p);
+		}
+		return p;
+	};
+	type Row = { bucket: number; agent_type: AgentType; n: number | null };
+	const toolRows = database
+		.query(
+			`SELECT ${seriesBucket(bucketMs)} AS bucket, f.agent_type AS agent_type, SUM(f.result_chars) AS n
+			 FROM (${tools.sql}) f GROUP BY 1, 2`,
+		)
+		.all(...tools.params) as Row[];
+	for (const row of toolRows) point(row.bucket, row.agent_type).resultChars += row.n ?? 0;
+	const messageRows = database
+		.query(
+			`SELECT ${seriesBucket(bucketMs)} AS bucket, f.agent_type AS agent_type, SUM(f.output_tokens) AS n
+			 FROM (${messages.sql}) f GROUP BY 1, 2`,
+		)
+		.all(...messages.params) as Row[];
+	for (const row of messageRows) point(row.bucket, row.agent_type).outputTokens += row.n ?? 0;
+	return [...points.values()].sort((a, b) => a.bucket - b.bucket);
+}
+
+/** A transcript's request span and its first request's prompt (input + cache read + cache write). */
+export interface SessionSpan {
+	sessionFile: string;
+	startedAt: number;
+	endedAt: number;
+	firstPrompt: number;
+}
+
+/**
+ * Spans of the transcripts with a request at or after `endedAfter` (all when null), from `session_rollup` with
+ * the same exactness rule as {@link getSessionRollups}.
+ */
+export function getSessionSpans(database: Database, endedAfter: number | null): SessionSpan[] {
+	const { n } = database
+		.query(`SELECT COUNT(*) AS n FROM (SELECT 1 FROM session_dirty LIMIT ${EXACT_DIRTY_SESSIONS + 1})`)
+		.get() as { n: number };
+	const exact = n <= EXACT_DIRTY_SESSIONS;
+	const parts = [
+		`SELECT session_file, started_at, ended_at FROM session_rollup
+		 WHERE ended_at >= ?1${exact ? " AND session_file NOT IN (SELECT session_file FROM session_dirty)" : ""}`,
+	];
+	if (exact) {
+		parts.push(
+			`SELECT m.session_file, MIN(m.timestamp), MAX(m.timestamp + COALESCE(m.duration, 0))
+			 FROM session_dirty d JOIN messages m ON m.session_file = d.session_file
+			 GROUP BY m.session_file HAVING MAX(m.timestamp + COALESCE(m.duration, 0)) >= ?1`,
+		);
+	}
+	return database
+		.query(
+			`SELECT s.session_file AS sessionFile, s.started_at AS startedAt, s.ended_at AS endedAt,
+			 COALESCE((SELECT m.input_tokens + m.cache_read_tokens + m.cache_write_tokens FROM messages m
+			   WHERE m.timestamp = s.started_at AND m.session_file = s.session_file LIMIT 1), 0) AS firstPrompt
+			 FROM (${parts.join(" UNION ALL ")}) s`,
+		)
+		.all(endedAfter ?? 0) as SessionSpan[];
 }

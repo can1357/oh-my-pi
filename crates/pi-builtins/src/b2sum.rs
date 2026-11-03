@@ -2,13 +2,12 @@
 //!
 //! Ported from uutils coreutils 0.8.0.
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::ArgMatches;
 use uucore::checksum::{AlgoKind, BlakeLength, parse_blake_length};
 
 use crate::{
 	cksum,
-	host::{Host, Utility, matches_parser, util},
+	host::{Host, Utility, matches_parser},
 };
 
 /// Parsed `b2sum` invocation.
@@ -41,11 +40,6 @@ impl Utility for B2sum {
 
 fn app() -> clap::Command {
 	cksum::command(B2sum::NAME, true)
-}
-
-/// Creates the `b2sum` builtin registration.
-pub(crate) fn b2sum_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<B2sum, SE>()
 }
 
 #[cfg(test)]

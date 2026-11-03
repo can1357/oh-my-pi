@@ -199,7 +199,7 @@ _[观看录屏 ↗](https://omp.sh/clips/web.mp4)_
 
 ### 09 · 毫不妥协的原生实现，Windows 上也一样。
 
-其他智能体会调用外部的 rg、grep、find 和 bash。很多机器上根本没有这些程序；即便有，每次调用也要付出一次 fork-exec 的往返开销。omp 把真正的实现直接链接进进程：ripgrep、glob、find 全部在进程内运行。brush 就是 bash——会话可跨调用保持，58 个命令行工具（ls、sed、sort、xargs，甚至 jq）被移植进 builtins crate 并在进程内运行，零 fork/exec。同一个 omp 二进制可运行于 macOS、Linux 和 Windows——无需 WSL 桥接。
+其他智能体会调用外部的 rg、grep、find 和 bash。很多机器上根本没有这些程序；即便有，每次调用也要付出一次 fork-exec 的往返开销。omp 把真正的实现直接链接进进程：ripgrep、glob、find 全部在进程内运行。bash 是我们自己的 bash 5.3 引擎——会话可跨调用保持，58 个命令行工具（ls、sed、sort、xargs，甚至 jq）被移植进 builtins crate 并在进程内运行，零 fork/exec。同一个 omp 二进制可运行于 macOS、Linux 和 Windows——无需 WSL 桥接。
 
 ### 10 · 带优先级和结论的代码评审
 
@@ -317,9 +317,10 @@ Eval 的 `computer` 辅助方法——`computer.window(...)`、`win.screenshot()
 
 ### 提示词控制
 
-三个独立的小写单词可以让某一轮启用特定的智能体行为：
+以下独立的小写单词可以让某一轮启用特定的智能体行为：
 
 - `ultrathink` — 要求进行仔细的多步推理，并使用支持的最高自动思考强度。
+- `chillax` — 要求简短推理；在支持逐消息思考强度的模型上，将思考强度降到最低，回合进行中也会生效。
 - `orchestrate` — 通过并行子智能体完成大量相互独立的工作，并逐阶段验证。
 - `workflowz` — 使用当前的 `task` 工具构建确定性的多子智能体工作流。
 
@@ -452,7 +453,7 @@ Exa 也可以通过 `/login exa` 存储 API 密钥；显式选择无密钥模式
 
 ## 约 **80,000** 行 Rust，干的是其他智能体框架要调用外部程序才能做的活。
 
-六个 crate，一个按平台打包的 N-API 插件。搜索、shell、AST、语法高亮、PTY、桌面控制、图像解码、BPE 计数——全部在 libuv 线程池中进程内完成。热路径上没有 fork/exec。另外还内置了约 8 万行第三方代码：brush 的 bash 分支，以及 58 个命令行工具——coreutils、findutils、sed、jq、基于 ripgrep 的 grep、fd、diff、moreutils——它们被移植进 builtins crate，直接编译进 shell。
+六个 crate，一个按平台打包的 N-API 插件。搜索、shell、AST、语法高亮、PTY、桌面控制、图像解码、BPE 计数——全部在 libuv 线程池中进程内完成。热路径上没有 fork/exec。shell 是我们自己的 bash 5.3 引擎，58 个命令行工具——coreutils、findutils、sed、jq、基于 ripgrep 的 grep、fd、diff、moreutils——被移植进 builtins crate，直接编译进 shell。
 
 - Crate：`pi-natives`、`pi-shell`、`pi-ast`、`pi-iso`、`pi-voice`、`pi-walker`
 - 平台：`linux-x64`、`linux-arm64`、`darwin-x64`、`darwin-arm64`、`win32-x64`、`win32-arm64`——x64 同时提供 AVX2 和基线两种二进制
@@ -668,14 +669,13 @@ bun dev -- --version
 | Crate                                      | 说明                                                                                     |
 | ------------------------------------------ | ---------------------------------------------------------------------------------------- |
 | **[pi-natives](crates/pi-natives)**        | `@oh-my-pi/pi-natives` 使用的核心 Rust 原生插件（N-API `cdylib`）；聚合下列各 crate      |
-| **[pi-shell](crates/pi-shell)**            | 从 `pi-natives` 拆分出的内嵌 shell / PTY / 进程管理（封装 `brush-*`）                    |
+| **[pi-shell](crates/pi-shell)**            | 内嵌的 bash 5.3 引擎（解析器、虚拟机、进程创建、会话）、PTY 和进程管理                   |
 | **[pi-ast](crates/pi-ast)**                | 基于 tree-sitter 的代码摘要器和 AST 工具（50+ 种语言语法）                               |
 | **[pi-iso](crates/pi-iso)**                | 任务隔离后端解析器：APFS 克隆、btrfs/zfs reflink、overlayfs、projfs、rcopy               |
 | **[pi-voice](crates/pi-voice)**            | 音频采集/播放、Opus 编解码和实时 WebRTC 流式传输基础组件                                 |
 | **[pi-walker](crates/pi-walker)**          | 为 natives 和 shell 提供并行的 ignore 感知遍历器、目录列表缓存、glob 和内容搜索          |
 | **[pi-edit](crates/pi-edit)**              | `edit` 工具背后的编辑引擎：基于行锚点的 patch/hashline 模式、流式预览、原子化应用        |
-| **[brush-core](crates/vendor/brush-core)** | 内置（vendored）的 [brush-shell](https://github.com/reubeno/brush) 分支，用于内嵌执行 bash |
-| **[pi-builtins](crates/pi-builtins)**      | Bash 内建命令（cd、echo、test、printf、read、export……）以及 67 个进程内命令行工具        |
+| **[pi-builtins](crates/pi-builtins)**      | 67 个进程内命令行工具以及进程内建命令（ps、top、pgrep、pkill 等）                        |
 
 ## 参与贡献
 
@@ -687,7 +687,7 @@ Issue 和 Pull Request 向所有人开放。开放 PR 目前处于**试行**阶�
 
 OMP 基于 [MIT 许可证](LICENSE) 发布。
 
-第三方代码和内置（vendored）的上游代码，包括 `crates/vendor/brush-core` 以及 `crates/pi-builtins/LICENSE` 中标明的第三方部分，仍遵循各自上游的许可证。每个发布的组件都附带自己的 `THIRD-PARTY-NOTICES.txt`：CLI（`packages/coding-agent`）、原生插件（`packages/natives`）和 robomp（`python/robomp`）。`omp --license` 会打印 CLI 和原生插件的许可声明。
+第三方代码和内置（vendored）的上游代码，包括 `crates/pi-builtins/LICENSE` 中标明的第三方部分，仍遵循各自上游的许可证。每个发布的组件都附带自己的 `THIRD-PARTY-NOTICES.txt`：CLI（`packages/coding-agent`）、原生插件（`packages/natives`）和 robomp（`python/robomp`）。`omp --license` 会打印 CLI 和原生插件的许可声明。
 
 © 2025 Mario Zechner  
 © 2025-2026 Can Bölük  
