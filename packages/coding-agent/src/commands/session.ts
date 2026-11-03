@@ -1,18 +1,23 @@
 /**
- * Hand a session to another machine, or check who owns it.
+ * Hand a session to another machine, check who owns it, or rebuild the index
+ * that finds sessions by id.
  *
  * `omp session pack <session> <out.tar>` writes a self-contained archive,
  * `omp session unpack <archive.tar> --cwd <dir>` lands it in `<dir>`'s session
  * directory (printing the session file path as the only stdout line),
  * `omp session moved <session> --to <label>` marks the copy left behind stale
- * so resuming it forks instead of continuing it, and
+ * so resuming it forks instead of continuing it,
  * `omp session lease --json -- <id>...` reports which sessions a running omp owns
- * without taking their ownership leases.
+ * without taking their ownership leases, and
+ * `omp session reindex [<root>]` rewrites the session index of a sessions root
+ * (default: every root a lookup consults) from the session files under it.
  */
+import * as path from "node:path";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { Args, CliUsageError, Command, Flags } from "@oh-my-pi/pi-utils/cli";
 import { sessionHelp as commandHelp } from "../cli/command-help";
-import { resolveSessionFileArg } from "../cli/session-arg";
+import { applySessionExtraRootsSetting, resolveSessionFileArg } from "../cli/session-arg";
+import { rebuildSessionLocator, sessionLocatorRoots } from "../session/session-locator";
 import { SessionMoveRefusedError } from "../session/session-manager";
 import { probeSessionLeases } from "../session/session-storage";
 import {
@@ -23,7 +28,7 @@ import {
 	type UnpackMode,
 } from "../session/session-transfer";
 
-const ACTIONS = ["pack", "unpack", "moved", "lease"] as const;
+const ACTIONS = ["pack", "unpack", "moved", "lease", "reindex"] as const;
 type SessionAction = (typeof ACTIONS)[number];
 
 const USAGE: Record<SessionAction, string> = {
@@ -31,6 +36,7 @@ const USAGE: Record<SessionAction, string> = {
 	unpack: "omp session unpack <archive.tar> --cwd <dir>",
 	moved: "omp session moved <session> --to <label>",
 	lease: "omp session lease [--json] -- <session-id>...",
+	reindex: "omp session reindex [<sessions-root>]",
 };
 
 const UNPACK_NOTE: Record<UnpackMode, string> = {
@@ -58,17 +64,38 @@ function printSessionLeases(sessionIds: string[], json: boolean): void {
 	for (const id of report.unknown) process.stdout.write(`unknown\t${id}\n`);
 }
 
+/**
+ * Rebuild the session index snapshot of `root`, or of every root a lookup
+ * consults (this profile's sessions root and archive, `session.extraRoots`,
+ * and every other profile's root and archive). This is the one command that
+ * walks the sessions tree; lookups by id read only the index files.
+ */
+async function reindexSessionRoots(root: string | undefined): Promise<void> {
+	if (root === undefined) await applySessionExtraRootsSetting(process.cwd());
+	const roots = root === undefined ? sessionLocatorRoots() : [path.resolve(root)];
+	for (const target of roots) {
+		const result = await rebuildSessionLocator(target);
+		for (const { bucket, error } of result.unreadable) {
+			process.stderr.write(
+				`${chalk.yellow(`warning: ${bucket} could not be read; the index keeps what it recorded there before: ${error}`)}\n`,
+			);
+		}
+		process.stdout.write(`${result.indexed}\t${result.root}\n`);
+	}
+}
+
 export default class Session extends Command {
 	static description = commandHelp.description;
 
 	static args = {
 		action: Args.string({
-			description: "pack, unpack, moved, or lease",
+			description: "pack, unpack, moved, lease, or reindex",
 			required: true,
 			options: ACTIONS,
 		}),
 		source: Args.string({
-			description: "Session .jsonl path or id (pack, moved); archive path (unpack); session ids (lease)",
+			description:
+				"Session .jsonl path or id (pack, moved); archive path (unpack); session ids (lease); sessions root (reindex)",
 			required: false,
 		}),
 		output: Args.string({
@@ -88,6 +115,7 @@ export default class Session extends Command {
 		"# Unpack it on another machine; prints the session file path\n  omp session unpack /tmp/session.tar --cwd ~/src/project",
 		"# Mark the local copy stale; resuming it later forks it\n  omp session moved <file>.jsonl --to cloud",
 		"# List which of these sessions a running omp owns, without taking ownership (`--` keeps ids starting with `-` from parsing as options)\n  omp session lease --json -- <id> <id>",
+		"# Rebuild the index that finds sessions by id, after an upgrade or a manual move; prints <sessions indexed>\\t<root> per root\n  omp session reindex",
 	];
 
 	async run(): Promise<void> {
@@ -105,6 +133,14 @@ export default class Session extends Command {
 			return;
 		}
 		if (flags.json) throw new CliUsageError(`--json only applies to lease. Usage: ${usage}`);
+		if (action === "reindex") {
+			if (flags.cwd !== undefined || flags.to !== undefined) {
+				throw new CliUsageError(`--cwd and --to do not apply to reindex. Usage: ${usage}`);
+			}
+			if (argv.length > 2) throw new CliUsageError(`Unexpected argument "${argv.at(-1)}". Usage: ${usage}`);
+			await reindexSessionRoots(args.source);
+			return;
+		}
 		if (argv.length > (action === "pack" ? 3 : 2)) {
 			throw new CliUsageError(`Unexpected argument "${argv.at(-1)}". Usage: ${usage}`);
 		}

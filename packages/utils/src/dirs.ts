@@ -999,6 +999,44 @@ export function getSessionsDir(agentDir?: string): string {
 	return dirs.agentSubdir(agentDir, "sessions", "data");
 }
 
+/**
+ * Sessions roots of every omp profile on this machine: this process's own root
+ * first, then the default profile's and each named profile's found under
+ * `~/.omp/profiles` or `$XDG_DATA_HOME/omp/profiles`. Lists one directory per
+ * profile family, never a sessions tree. A process whose agent directory is
+ * overridden (`PI_CODING_AGENT_DIR`, `setAgentDir`) is outside the profile
+ * family and gets only its own root.
+ */
+export function getProfileSessionsDirs(): string[] {
+	const roots = [getSessionsDir()];
+	if (dirs.agentDir !== path.join(dirs.configRoot, "agent")) return roots;
+	const profileParents = [path.join(getBaseConfigRoot(), "profiles")];
+	const xdgData = process.env.XDG_DATA_HOME;
+	if (xdgData && (process.platform === "linux" || process.platform === "darwin")) {
+		profileParents.push(path.join(xdgData, APP_NAME, "profiles"));
+	}
+	const names = new Set<string | undefined>([undefined]);
+	for (const parent of profileParents) {
+		let entries: fs.Dirent[];
+		try {
+			entries = fs.readdirSync(parent, { withFileTypes: true });
+		} catch {
+			continue;
+		}
+		for (const entry of entries) if (entry.isDirectory()) names.add(entry.name);
+	}
+	for (const name of names) {
+		let root: string;
+		try {
+			root = new DirResolver({ profile: name }).agentSubdir(undefined, "sessions", "data");
+		} catch {
+			continue; // Not a valid profile name: nothing omp would have written there.
+		}
+		if (!roots.includes(root)) roots.push(root);
+	}
+	return roots;
+}
+
 /** Get the content-addressed blob store directory (~/.omp/agent/blobs). */
 export function getBlobsDir(agentDir?: string): string {
 	return dirs.agentSubdir(agentDir, "blobs", "data");

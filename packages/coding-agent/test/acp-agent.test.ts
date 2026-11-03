@@ -29,6 +29,7 @@ import type {
 import { SILENT_ABORT_MARKER, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import type { ClientBridge } from "@oh-my-pi/pi-coding-agent/session/client-bridge";
 import { closeSessionIndex } from "@oh-my-pi/pi-coding-agent/session/session-index";
+import { rebuildSessionLocator } from "@oh-my-pi/pi-coding-agent/session/session-locator";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -1815,6 +1816,8 @@ describe("ACP agent", () => {
 		const sessionsRoot = path.dirname(cwdDerivedDir);
 		const hashedDir = path.join(sessionsRoot, `home-cwd-a-${"a".repeat(64)}`);
 		await fs.promises.rename(cwdDerivedDir, hashedDir);
+		// That era's omp kept no session index: `omp session reindex` is what finds its sessions.
+		await rebuildSessionLocator(sessionsRoot);
 
 		const loaded = await harness.agent.loadSession({
 			sessionId,

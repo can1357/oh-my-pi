@@ -10,6 +10,7 @@
 import { getAgentDir, isEnoent } from "@oh-my-pi/pi-utils";
 import { Args, Command, Flags } from "@oh-my-pi/pi-utils/cli";
 import { shareHelp as commandHelp } from "../cli/command-help";
+import { applySessionExtraRootsSetting } from "../cli/session-arg";
 import { Settings } from "../config/settings";
 import { shareSession } from "../export/share";
 import { buildSecretObfuscator } from "../secrets";
@@ -40,6 +41,7 @@ export default class Share extends Command {
 		const sessionArg = args.session ?? "";
 		let sessionPath: string | undefined = sessionArg;
 		if (!sessionArg.includes("/") && !sessionArg.includes("\\") && !sessionArg.endsWith(".jsonl")) {
+			await applySessionExtraRootsSetting(process.cwd());
 			const match = await resolveResumableSession(sessionArg, process.cwd());
 			sessionPath = match?.session.path;
 		}

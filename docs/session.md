@@ -628,11 +628,43 @@ Discovery helpers live in `session-listing.ts`; `SessionManager` exposes project
 - `listSessionsReadOnly(...)` -> same metadata without backup recovery
 - `listAllSessions(storage)` / `SessionManager.listAll()` -> project buckets under the managed sessions root, not arbitrary custom directories
 - `SessionManager.listForPicker(...)` / `listAllForPicker()` -> pinned-first lists with untitled, prompt-less zero-turn stubs removed; pinned stubs remain selectable
-- `resolveResumableSession(...)` -> local lookup then optional global fallback
+- `resolveResumableSession(...)` -> local lookup, then (optionally) the session index of every root; see [Finding a session by id](#finding-a-session-by-id)
+- `findSessionFiles(idPrefix)` / `locateSessions(idPrefix)` (`session-locator.ts`) -> session files by recorded id, from the session indexes
 
 `getRecentSessions()` sorts file stats and first looks up titles in `history.db`'s `session_titles` index; unindexed files fall back to content scanning and backfill their title. `findMostRecentSession()` reads a 4 KiB prefix. Status-enabled full/non-empty scans read that prefix plus a bounded 32 KiB tail. Scans are stat-keyed and cached; large full lists use bounded parallel workers. Normal per-directory scans also recover the newest orphaned EPERM backup when its primary JSONL is missing.
 
-`SessionManager.list()`/`listAll()` sort pinned sessions first; raw listing helpers sort newest first. Empty filtering is picker/continue-specific, not applied to id lookup or maintenance. Resume matching is case-insensitive and accepts session id prefixes, full filename prefixes, or the id suffix after the timestamp. Explicit `sessionDir` disables global fallback unless `allowGlobalFallback: true` is requested.
+`SessionManager.list()`/`listAll()` sort pinned sessions first; raw listing helpers sort newest first. Empty filtering is picker/continue-specific, not applied to id lookup or maintenance. Resume matching is case-insensitive and accepts session id prefixes, full filename prefixes, or the id suffix after the timestamp. Explicit `sessionDir` disables the cross-project lookup unless `allowGlobalFallback: true` is requested.
+
+## Finding a session by id
+
+Resolving a session id (`omp --resume <id>`, `--fork <id>`, `/resume <id>`, `/pin <id>`, `/seance <id>`, `omp render`/`share`/`session pack <id>`, the history archive tool, ACP `session/load`, `omp session unpack`'s search for local copies) first lists the current project's session directory (or `--session-dir`). Anything else is found through the session index, never by walking a sessions tree.
+
+Each sessions root holds up to two files of `<id>\t<path>` lines, the path relative to that root, or absolute for a file outside every root (a `--session-dir` session is recorded in the default root's index); `%`, tab, CR and LF in a path are percent-encoded.
+
+- `.session-index.tsv` is the log. `SessionManager` appends a line the first time a session is durably written at a path: a new session, a fork, a subagent transcript in its parent's artifact directory, a session moved to another project (with every transcript its artifact tree carried). `omp session unpack` records the unpacked session's tree, and `omp gc` records an archived session's tree in the archive's own log. Each line is one `O_APPEND` write that starts with its own newline, so a crash loses at most that line and a torn line never spoils the next. Nothing rewrites, renames or truncates the log, so no append is ever lost.
+- `.session-index.base.tsv` is the snapshot `omp session reindex` writes from the files under the root. It adds what the log lacks and removes nothing.
+
+A lookup reads both files of every root, in order:
+
+1. this process's sessions root (`~/.omp/agent/sessions`) and its archive (`~/.omp/agent/archive/sessions`);
+2. `session.extraRoots` (or `PI_SESSION_EXTRA_ROOTS`);
+3. every other profile's sessions root and archive (`~/.omp/agent`, `~/.omp/profiles/<name>/agent`, and their `$XDG_DATA_HOME/omp` forms). A process with an overridden agent directory (`PI_CODING_AGENT_DIR`) consults only its own root, its archive and the extra roots.
+
+Each matching line names candidate paths: its relative path, then that path plus `.gz` (how `omp gc` stores a compressed transcript), under its own root first and then under every other root. The first that exists and still holds the recorded id (its header's, or for a `.jsonl.gz` the id in its name) is the match, so a line whose path now holds another session never answers for the old one. Lookups read index files, stat candidates and read their headers; they never list a directory. The newest match wins. A key outside `[A-Za-z0-9_-]` matches nothing. Commands that resolve an id without starting the settings stack (`omp session`, `omp share`, `omp render`) apply the persisted `session.extraRoots` first.
+
+A transcript `omp gc` compressed into the archive (`.jsonl.gz`) is found but not opened in place: resolution fails with `ArchivedSessionError`, naming the archived file and the path to decompress it to. Subagent transcripts in an archived session's artifact tree stay plain `.jsonl` and resolve where they lie.
+
+`omp session reindex [<root>]` rewrites a root's snapshot from the files under it (every root a lookup consults when no root is given): each bucket's top-level `*.jsonl`/`*.jsonl.gz` and every `*.jsonl` in their artifact trees, by header id. It is the one operation that walks a tree. The snapshot is staged and renamed into place; the log is never touched, so concurrent appends and lines for files the walk cannot see (a `--session-dir` session, a symlinked bucket, a bucket moved to another root) all stay. Run it once after upgrading to an omp with the session index, since sessions an older omp wrote are in no index; until then a lookup that finds nothing says so.
+
+### Moving or archiving a sessions tree
+
+Because index paths are relative to their root, a tree moves with one top-level move and stays findable:
+
+- Move the whole root (`mv ~/.omp/agent/sessions /mnt/durable/omp-sessions`), then either leave a symlink at the old path or add the new path to `session.extraRoots`. The index travels inside the tree.
+- Move single project buckets out to another root that keeps the same layout (`<root>/<bucket>/...`) and list that root in `session.extraRoots`: the line the original root kept is looked up under every root, so the moved bucket is found without rewriting any index.
+- Move an archive root the same way and list it in `session.extraRoots`; it carries the index `omp gc` wrote.
+
+A tree copied or moved by hand into a root without its index needs `omp session reindex <root>` once. `--session-dir` and `PI_CODING_AGENT_SESSION_DIR` keep their meaning: they choose the directory a session is written to and listed from, and a lookup with an explicit directory stays inside it unless the caller asks for the cross-project fallback.
 
 ## Related but Distinct: Prompt History Storage
 

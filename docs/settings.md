@@ -381,6 +381,23 @@ separate, run `omp config set session.worktreeScope directory` (or choose
 The all-projects tab still shows sessions across every directory, including
 sessions in deleted worktrees; this setting only narrows the current-folder list.
 
+## Session roots searched by id
+
+`omp --resume <id>`, `--fork <id>`, `/resume <id>` and `/seance <id>` find a
+session outside the current project through the session index each sessions
+root keeps (see [Finding a session by id](./session.md#finding-a-session-by-id)),
+never by walking the tree. `session.extraRoots` lists further roots to consult
+the same way, for example a sessions tree moved to another disk:
+
+```yaml
+# ~/.omp/agent/config.yml
+session:
+  extraRoots:
+    - /mnt/durable/omp-sessions
+```
+
+`PI_SESSION_EXTRA_ROOTS` (a `PATH`-style list) overrides it for one process.
+
 ## Settings catalog
 
 The catalog below highlights common settings; it is not the complete schema. `omp config list` is the authoritative reference for every key, current value, type, and description. Defaults and enum values shown here come from the schema. Settings that accept an env or flag override are noted; those overrides are process-local and not persisted.

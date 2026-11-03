@@ -12,6 +12,7 @@ import { parseJsonlLenient } from "@oh-my-pi/pi-utils/stream";
 import { toError } from "@oh-my-pi/pi-utils/type-guards";
 import { EVAL_STATE_CONTEXT_TYPE } from "../eval/state";
 import { visitEntriesFromFile } from "./session-loader";
+import { type LocatedSession, locateSessions } from "./session-locator";
 import { computeDefaultSessionDir } from "./session-paths";
 import { FileSessionStorage, type SessionStorage, type SessionStorageStat } from "./session-storage";
 import { listSessionTitles, lookupSessionTitle, recordSessionTitle, recordSessionTitles } from "./session-index";
@@ -1131,29 +1132,45 @@ export async function resolveResumeTarget(
 
 /**
  * For a resume key that matched no listed session: the copy to resume of a
- * session whose file, found by `idPrefix` in its generated name, no longer
- * reads as a session (it was replaced; see {@link findSessionContinuation}).
- * The session listing skips such a file, but the copies that continue it
- * still name its id. Looks in `sessionDir` (else `cwd`'s default session
- * directory) and then, when the global fallback applies, in every project
- * directory, as {@link resolveResumableSession} does.
+ * session whose file, found by the id its generated name records, no longer
+ * holds that session (it was replaced, or no longer reads as a session; see
+ * {@link findSessionContinuation}). The listing does not offer such a file
+ * for the key, but the copies that continue it still name its id. The key is
+ * an id prefix or a generated file name spelled past its timestamp, in any
+ * case. Looks in `sessionDir` (else `cwd`'s default session directory) and
+ * then, when the global fallback applies, through the session index, as
+ * {@link resolveResumableSession} does.
  */
 async function findUnlistedSessionContinuation(
-	idPrefix: string,
+	sessionArg: string,
 	cwd: string,
 	sessionDir: string | undefined,
 	options: ResolveResumableSessionOptions,
 	storage: SessionStorage = new FileSessionStorage(),
 ): Promise<SessionContinuation | undefined> {
-	const prefix = idPrefix.toLowerCase();
-	if (!/^[\w-]+$/.test(prefix)) return undefined;
+	const key = sessionArg.toLowerCase();
+	if (!/^[\w-]+$/.test(key)) return undefined;
+	// `<timestamp>_<id prefix>`: the id the key names follows the timestamp.
+	const spelledName = /^\d{4}-\d{2}-\d{2}t\d{2}-\d{2}-\d{2}-\d{3}z_(.+)$/.exec(key);
+	const idPrefix = spelledName ? spelledName[1] : key;
+	const namesKey = (file: string): boolean => {
+		const recordedId = parseSessionFileName(file)?.id.toLowerCase();
+		if (recordedId === undefined || !recordedId.startsWith(idPrefix)) return false;
+		return !spelledName || path.basename(file).toLowerCase().startsWith(key);
+	};
 	const localDir = sessionDir ?? computeDefaultSessionDir(cwd, storage);
 	const globalToo = !sessionDir || options.allowGlobalFallback === true;
 	for (const scope of globalToo ? ["local", "global"] : ["local"]) {
+		// Wanted by the name it records: the file holds another session now, so
+		// the index's header check would hide exactly the file this looks for.
 		const files =
-			scope === "local" ? storage.listFilesSync(localDir, `*_${prefix}*.jsonl`) : await findSessionFiles(prefix);
+			scope === "local"
+				? storage.listFilesSync(localDir, "*_*.jsonl")
+				: (await locateSessions(idPrefix, { verifyHeader: false, matchFileName: true }))
+						.filter(hit => !hit.archived)
+						.map(hit => hit.path);
 		for (const file of files) {
-			if (!parseSessionFileName(file)?.id.startsWith(prefix)) continue;
+			if (!namesKey(file)) continue;
 			const continuation = await findSessionContinuation(file, storage, { matchedByFileName: true });
 			if (continuation) return continuation;
 		}
@@ -1533,15 +1550,15 @@ export async function listRecentProjects(
 }
 
 /**
- * Session files under every project directory whose session id starts with
- * `idPrefix`, located by filename without reading content. Prefixes outside
- * `[A-Za-z0-9_-]` match nothing, so the prefix is never interpreted as a glob.
+ * Session files whose recorded session id starts with `idPrefix`, newest
+ * first: top-level transcripts and nested subagent transcripts alike, in
+ * every root the session index covers ({@link locateSessions}). Reads index
+ * files, never lists a directory. Archived `.jsonl.gz` transcripts are left
+ * out: no caller opens one. Prefixes outside `[A-Za-z0-9_-]` match nothing.
  */
-export async function findSessionFiles(idPrefix: string, sessionsRoot: string = getSessionsDir()): Promise<string[]> {
-	if (!/^[\w-]+$/.test(idPrefix)) return [];
-	const files = await dedupeRealPaths(await scanBucketFiles(sessionsRoot, `*_${idPrefix}*.jsonl`));
-	// `*_` can also match an underscore inside an id; keep true id-prefix matches only.
-	return files.filter(file => sessionIdFromSessionPath(file)?.startsWith(idPrefix));
+export async function findSessionFiles(idPrefix: string, roots?: readonly string[]): Promise<string[]> {
+	const located = await locateSessions(idPrefix, { roots });
+	return dedupeRealPaths(located.filter(hit => !hit.archived).map(hit => hit.path));
 }
 
 /**
@@ -1588,23 +1605,60 @@ function sessionMatchesResumeArg(session: SessionInfo, sessionArg: string): bool
 	}
 
 	const fileName = path.basename(session.path, ".jsonl").toLowerCase();
+	// The id a name records: a generated `<timestamp>_<id>` name's whole id
+	// (which may hold underscores), else whatever follows the last `_`.
+	const generatedId = parseSessionFileName(session.path)?.id.toLowerCase();
+	const separator = fileName.lastIndexOf("_");
+	const fileSessionId = generatedId ?? (separator >= 0 ? fileName.slice(separator + 1) : undefined);
+	// The name's id matches only as the id of the session the file holds. A
+	// file replaced under a name that records another session is not the
+	// session the key asks for: `resolveResumeTarget` follows the copies that
+	// continue the named session instead, and `share`/`session pack` must never
+	// hand out the occupant.
+	const suffixIsAnotherSession = fileSessionId !== undefined && !normalizedId.startsWith(fileSessionId);
+	// A key that spells out a generated name past its timestamp names that id the same way.
+	if (
+		suffixIsAnotherSession &&
+		generatedId !== undefined &&
+		normalizedArg.length > fileName.length - generatedId.length &&
+		fileName.startsWith(normalizedArg)
+	) {
+		return false;
+	}
 	if (fileName.startsWith(normalizedArg)) {
 		return true;
 	}
-
-	const separator = fileName.lastIndexOf("_");
-	if (separator < 0) {
-		return false;
-	}
-
-	const fileSessionId = fileName.slice(separator + 1);
-	return fileSessionId.startsWith(normalizedArg);
+	if (suffixIsAnotherSession) return false;
+	// As before, the text after the last `_` also matches (an id that holds underscores).
+	return (
+		(fileSessionId?.startsWith(normalizedArg) ?? false) ||
+		(separator >= 0 && fileName.slice(separator + 1).startsWith(normalizedArg))
+	);
 }
 
 /** Controls cross-directory fallback for resumable session lookup. */
 export interface ResolveResumableSessionOptions {
-	/** Search default global session buckets after the active/custom session directory misses. */
+	/** Search the session index of every root after the active/custom session directory misses. */
 	allowGlobalFallback?: boolean;
+}
+
+/**
+ * A resume key that names only a session `omp gc` moved into the archive as a
+ * `.jsonl.gz`, which omp does not open in place.
+ */
+export class ArchivedSessionError extends Error {
+	constructor(
+		readonly sessionArg: string,
+		readonly archivePath: string,
+		readonly livePath: string | undefined,
+	) {
+		const artifacts = archivePath.slice(0, -".jsonl.gz".length);
+		const restore = livePath
+			? `decompress it to ${livePath} and move ${artifacts} (its subagent transcripts and artifacts, when present) back to ${livePath.slice(0, -".jsonl".length)}`
+			: `decompress it into a sessions directory beside its artifacts directory ${artifacts}`;
+		super(`Session "${sessionArg}" is archived: \`omp gc\` moved it to ${archivePath}. To resume it, ${restore}.`);
+		this.name = "ArchivedSessionError";
+	}
 }
 
 function isSessionStorage(value: SessionStorage | ResolveResumableSessionOptions): value is SessionStorage {
@@ -1631,11 +1685,19 @@ export async function resolveResumableSession(
 		return undefined;
 	}
 
-	const globalSessions = await listAllSessions(storage);
-	const globalMatch = globalSessions.find(session => sessionMatchesResumeArg(session, sessionArg));
-	if (!globalMatch) {
-		return undefined;
+	// Everywhere else omp put a session, through the session index of each
+	// root: nested subagent transcripts, other profiles, the archive. Never a
+	// walk of the sessions tree.
+	let archived: LocatedSession | undefined;
+	for (const hit of await locateSessions(sessionArg, { matchFileName: true })) {
+		if (hit.archived) {
+			archived ??= hit;
+			continue;
+		}
+		const [session] = await collectSessionsFromFiles([hit.path], storage, true);
+		// The index names the file; its header decides whether it is still that session.
+		if (session && sessionMatchesResumeArg(session, sessionArg)) return { session, scope: "global" };
 	}
-
-	return { session: globalMatch, scope: "global" };
+	if (archived) throw new ArchivedSessionError(sessionArg, archived.path, archived.livePath);
+	return undefined;
 }

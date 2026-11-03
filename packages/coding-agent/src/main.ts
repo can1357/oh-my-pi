@@ -120,6 +120,7 @@ import {
 import type { ForeignSessionInfo, ForeignSessionSource, ForeignSessionStore } from "./session/foreign-session-store";
 import { loadRuntimeIdentity } from "./session/runtime-identity";
 import {
+	ArchivedSessionError,
 	findSessionContinuation,
 	type PickerListing,
 	readSessionInfo,
@@ -128,6 +129,7 @@ import {
 	type SessionContinuation,
 	type SessionInfo,
 } from "./session/session-listing";
+import { sessionLocatorMayBeIncomplete } from "./session/session-locator";
 import { ForkSourceNotFoundError, SessionManager, SessionMoveRefusedError } from "./session/session-manager";
 import { forkIfMovedAway } from "./session/session-transfer";
 import { shouldShowStartupSplash } from "./startup-splash";
@@ -1237,6 +1239,29 @@ export function normalizeContinueSessionArgs(parsed: Args, rawArgs?: readonly st
 const SESSION_NOT_FOUND_HINT =
 	"Run `omp --resume` without an argument to pick from recent sessions, or `omp` to start a new one.";
 
+/**
+ * `Session "<key>" not found.` with what to do next. When this sessions root's
+ * index was never rebuilt from the tree, sessions an older omp created in
+ * another project may be missing from it, so the hint names the command that
+ * indexes them.
+ */
+async function sessionNotFoundError(sessionArg: string): Promise<SessionResolutionError> {
+	const hint = (await sessionLocatorMayBeIncomplete())
+		? `${SESSION_NOT_FOUND_HINT} A session created in another project by an omp older than the session index is found once \`omp session reindex\` has run.`
+		: SESSION_NOT_FOUND_HINT;
+	return new SessionResolutionError(`Session "${sessionArg}" not found.`, hint);
+}
+
+/** Runs a session-key lookup, reporting a key that names only an archived session as a resolution error. */
+async function resolveSessionKey<T>(lookup: () => Promise<T>): Promise<T> {
+	try {
+		return await lookup();
+	} catch (err) {
+		if (err instanceof ArchivedSessionError) throw new SessionResolutionError(err.message);
+		throw err;
+	}
+}
+
 function validateSessionPersistenceArgs(parsed: Pick<Args, "continue" | "noSession" | "resume">): void {
 	if (!parsed.noSession) return;
 	if (parsed.resume !== undefined) {
@@ -1281,9 +1306,9 @@ export async function createSessionManager(
 				throw err;
 			}
 		}
-		const match = await resolveResumableSession(forkSource, cwd, parsed.sessionDir);
+		const match = await resolveSessionKey(() => resolveResumableSession(forkSource, cwd, parsed.sessionDir));
 		if (!match) {
-			throw new SessionResolutionError(`Session "${forkSource}" not found.`, SESSION_NOT_FOUND_HINT);
+			throw await sessionNotFoundError(forkSource);
 		}
 		try {
 			return await SessionManager.forkFrom(match.session.path, cwd, parsed.sessionDir, undefined, {
@@ -1331,9 +1356,9 @@ export async function createSessionManager(
 			// A copy whose conversation moved to another machine continues as a fork.
 			return await forkIfMovedAway(manager, parsed.sessionDir);
 		}
-		const target = await resolveResumeTarget(sessionArg, cwd, parsed.sessionDir);
+		const target = await resolveSessionKey(() => resolveResumeTarget(sessionArg, cwd, parsed.sessionDir));
 		if (!target) {
-			throw new SessionResolutionError(`Session "${sessionArg}" not found.`, SESSION_NOT_FOUND_HINT);
+			throw await sessionNotFoundError(sessionArg);
 		}
 		const { session, continuation } = target;
 		if (continuation) options.onSessionContinuation?.(continuation);

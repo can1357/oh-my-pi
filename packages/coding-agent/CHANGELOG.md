@@ -6,6 +6,12 @@
 
 - Pinned sessions show a pin beside their title in the status line and the band composer's title, and `/unpin [session id]` unpins a session ([#17848](https://github.com/can1357/oh-my-pi/pull/17848) by [@SuperUserA](https://github.com/SuperUserA))
 - Added a fullscreen extension link browser for picking links already in terminal scrollback: press Alt+O again (or Page Up) while link tags are shown, or Alt+O with no extension link on screen ([#16476](https://github.com/can1357/oh-my-pi/pull/16476) by [@materemias](https://github.com/materemias))
+- `omp session reindex [<root>]` rebuilds the session index that finds sessions by id (every sessions root a lookup consults when no root is given). Run it once after upgrading: sessions an older omp wrote are found from another project only after that ([#17919](https://github.com/can1357/oh-my-pi/pull/17919) by [@sjawhar](https://github.com/sjawhar))
+- Added `session.extraRoots` (and `PI_SESSION_EXTRA_ROOTS`): extra sessions roots, such as a sessions tree moved to another disk, that a lookup by session id consults through their index ([#17919](https://github.com/can1357/oh-my-pi/pull/17919) by [@sjawhar](https://github.com/sjawhar))
+
+### Fixed
+
+- Fixed `omp --resume <id>`, `--fork <id>`, `/resume <id>`, `/seance <id>`, `omp session pack <id>` and ACP `session/load` listing every project directory of the sessions root to find a session from another project (one such tree held 408,711 entries, and a walk of it took 957 s) and still missing subagent transcripts, other profiles' sessions and sessions `omp gc` archived. Each sessions root now keeps an append-only `.session-index.tsv` that omp adds to whenever it creates, forks, moves, unpacks or archives a session file, and a lookup reads those indexes instead of listing directories, taking a recorded path only while the file there still holds that session. An archived session is reported with the path to decompress it to. A sessions tree moved with one top-level move stays findable: its index moves with it, and the new location can be listed in `session.extraRoots` ([#17919](https://github.com/can1357/oh-my-pi/pull/17919) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.16.0] - 2026-11-02
 
