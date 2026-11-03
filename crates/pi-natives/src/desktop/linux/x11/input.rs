@@ -230,7 +230,7 @@ impl X11Input {
 	/// Persistent activation: the target stays active afterwards.
 	pub(crate) fn raise_window(&self, window: Window) -> CoreResult<()> {
 		if let Some(mpx) = &self.mpx {
-			mpx.release_focus();
+			mpx.release_focus(window)?;
 		}
 		let wm = self.wm();
 		wm.request_activation(window, wm.active_window())
@@ -336,7 +336,7 @@ impl X11Input {
 		// The activation's core `FocusIn` reaches the target and its window
 		// manager only when no other keyboard focuses it.
 		if let Some(mpx) = &self.mpx {
-			mpx.release_focus();
+			mpx.release_focus(window)?;
 		}
 		let wm = self.wm();
 		let ewmh = wm.tracks_active_window();
