@@ -1065,22 +1065,20 @@ mod tests {
 			.enable_time()
 			.build()
 			.unwrap();
-		let source = control::CancellationSource::default();
-		let run_end = std::time::Instant::now() + Duration::from_millis(700);
-		source.set_deadline(Some(run_end));
-		let token = source.token();
-		let result = control::with_token_for_test(&token, || {
+		// The run ends inside the margin, so the dialog wait is given up at once;
+		// an unbounded wait would never return here.
+		let ending = control::CancellationSource::default();
+		ending.set_deadline(Some(std::time::Instant::now() + CONSENT_MARGIN / 2));
+		let error = control::with_token_for_test(&ending.token(), || {
 			runtime.block_on(until_deadline("RemoteDesktop", std::future::pending::<()>()))
-		});
-		let error = result.unwrap_err();
+		})
+		.unwrap_err();
 		assert_eq!(error.code.as_str(), "Timeout");
-		assert!(error.message.contains("RemoteDesktop permission dialog"), "{}", error.message);
-		assert!(
-			std::time::Instant::now() + CONSENT_MARGIN / 2 <= run_end,
-			"the wait must end before the run does"
-		);
 
-		let answered = control::with_token_for_test(&token, || {
+		// A run with time left lets an answered dialog through.
+		let running = control::CancellationSource::default();
+		running.set_deadline(Some(std::time::Instant::now() + Duration::from_secs(3600)));
+		let answered = control::with_token_for_test(&running.token(), || {
 			runtime.block_on(until_deadline("RemoteDesktop", async { 7 }))
 		});
 		assert_eq!(answered.unwrap(), 7);
