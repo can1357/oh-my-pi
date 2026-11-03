@@ -240,33 +240,52 @@ struct CrossTokenParseState {
     in_conditional: bool,
     /// Could the next word start a command (so a `[[` there opens a conditional)?
     at_command_start: bool,
+    /// Was the last word a `time` that started a command (so a `-p` keeps the command start)?
+    after_time_keyword: bool,
 }
 
 impl CrossTokenParseState {
     /// Notes a completed token for `[[ ... ]]` tracking: a `[[` word that can start a command
     /// opens a conditional, and `]]` or a separator a conditional cannot contain closes it. A
-    /// conditional may span lines, so a newline does not close it. Scans that keep blanks in their
-    /// tokens (the body of a command substitution) yield words with blanks around them, and
-    /// blank-only words; neither changes what the next word is.
+    /// conditional may span lines, so a newline does not close it. A reserved word or prefix keeps
+    /// the command start only where it starts a command itself (`echo time [[` opens nothing).
+    /// Arithmetic text and parameter words hold no commands and are not tracked. Scans that keep
+    /// blanks in their tokens (the body of a command substitution) yield words with blanks around
+    /// them, and blank-only words; neither changes what the next word is.
     fn note_token_for_conditional(&mut self, token: &Token) {
-        if self.in_parameter_word {
+        if self.in_parameter_word || self.arithmetic_expansion {
             return;
         }
+        let after_time = std::mem::take(&mut self.after_time_keyword);
         match token {
             Token::Word(word, _) => {
                 let word = word.trim_matches(|c| c == ' ' || c == '\t');
                 if word.is_empty() {
+                    self.after_time_keyword = after_time;
                     return;
                 }
-                if word == "[[" && self.at_command_start {
+                let at_start = self.at_command_start;
+                if word == "[[" && at_start {
                     self.in_conditional = true;
                 } else if word == "]]" {
                     self.in_conditional = false;
                 }
-                self.at_command_start = matches!(
-                    word,
-                    "if" | "then" | "else" | "elif" | "do" | "while" | "until" | "!" | "{" | "time"
-                );
+                self.at_command_start = (at_start
+                    && matches!(
+                        word,
+                        "if" | "then"
+                            | "else"
+                            | "elif"
+                            | "do"
+                            | "while"
+                            | "until"
+                            | "!"
+                            | "{"
+                            | "time"
+                            | "coproc"
+                    ))
+                    || (after_time && word == "-p");
+                self.after_time_keyword = at_start && word == "time";
             }
             Token::Operator(op, _) => {
                 if matches!(op.as_str(), ";" | ";;" | ";&" | ";;&" | "&" | "|" | "|&") {
@@ -639,6 +658,7 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                 in_dollar_arithmetic: false,
                 in_conditional: false,
                 at_command_start: true,
+                after_time_keyword: false,
             },
         }
     }
@@ -1104,6 +1124,7 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                                 ),
                                 std::mem::take(&mut self.cross_state.in_conditional),
                                 std::mem::replace(&mut self.cross_state.at_command_start, true),
+                                std::mem::take(&mut self.cross_state.after_time_keyword),
                             );
                             self.cross_state.arithmetic_expansion = is_arithmetic;
 
@@ -1117,6 +1138,7 @@ impl<'a, R: ?Sized + std::io::BufRead> Tokenizer<'a, R> {
                                 self.cross_state.in_dollar_arithmetic,
                                 self.cross_state.in_conditional,
                                 self.cross_state.at_command_start,
+                                self.cross_state.after_time_keyword,
                             ) = outer_state;
                         }
 

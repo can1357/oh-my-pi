@@ -193,8 +193,9 @@ async fn parameter_word_parentheses_follow_bash() {
 
 /// Inside `[[ ... ]]`, `((` groups conditions and is not arithmetic text: its
 /// words keep extended globs and are not balanced against it, also in a command
-/// substitution and in one a here-document runs. A `[[` that is only an
-/// argument opens no conditional.
+/// substitution, in one a here-document runs, and after the `time -p` prefix.
+/// A `[[` that is only an argument, even after an argument spelled like a
+/// reserved word, or that sits in arithmetic text, opens no conditional.
 #[tokio::test]
 async fn conditional_groups_are_not_arithmetic_text() {
 	let out = run(concat!(
@@ -209,10 +210,19 @@ async fn conditional_groups_are_not_arithmetic_text() {
 		"$( [[ (( ${v:-(} )) ]] && printf doc )\n",
 		"EOF\n",
 		"echo [[ ; for ((;;)); do echo in; break; done\n",
+		"echo time [[\n",
+		"(( x=2 << 1 ))\n",
+		"echo \"x=$x\"\n",
 	))
 	.await;
 	assert_eq!(out.stderr, "");
-	assert_eq!(out.stdout, "rc=0\nrc=0\nsub\ndoc\n[[\nin\n");
+	assert_eq!(out.stdout, "rc=0\nrc=0\nsub\ndoc\n[[\nin\ntime [[\nx=4\n");
+
+	let out = run("(( [[ ))\n(( y=2 << 1 ))\necho \"y=$y\"\n").await;
+	assert_eq!(out.stdout, "y=4\n", "stderr: {}", out.stderr);
+
+	let out = run("time -p [[ (( a == @(a) )) ]]\necho \"rc=$?\"\n").await;
+	assert_eq!(out.stdout, "rc=0\n", "stderr: {}", out.stderr);
 }
 
 /// An arithmetic expression of only blanks and newlines is 0, as in Bash; a
