@@ -36,11 +36,19 @@ impl builtins::Command for PushdCommand {
 			// directory as its `cd` does.
 			let physical = context.shell.options().do_not_resolve_symlinks_when_changing_dir;
 			let entered = crate::cd::enter_directory(&mut context, dir, physical).await;
-			for name in entered.as_ref().map(crate::cd::Entered::readonly).unwrap_or_default() {
+			let readonly: Vec<&str> =
+				entered.as_ref().map(crate::cd::Entered::readonly).unwrap_or_default().to_vec();
+			for name in &readonly {
 				writeln!(context.stderr(), "{name}: readonly variable")?;
 			}
 			if let Err(reason) = entered {
 				writeln!(context.stderr(), "pushd: {}: {reason}", self.dir)?;
+				return Ok(ExecutionResult::general_error());
+			}
+			// A name that may not be written leaves the stack as it was and
+			// the command failed, though the directory is entered, as in
+			// Bash.
+			if !readonly.is_empty() {
 				return Ok(ExecutionResult::general_error());
 			}
 

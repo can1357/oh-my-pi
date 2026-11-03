@@ -134,14 +134,11 @@ impl builtins::Command for CdCommand {
 			},
 		};
 		let status = |entered: Entered, context: &mut ExecutionContext<'_, SE>| {
-			let readonly = match &entered {
-				Entered::Changed(readonly) => readonly.clone(),
-				Entered::Lost => Vec::new(),
-			};
+			let readonly = entered.readonly().to_vec();
 			for name in &readonly {
 				let _ = writeln!(context.stderr(), "{name}: readonly variable");
 			}
-			if !readonly.is_empty() || (matches!(entered, Entered::Lost) && lost_fails) {
+			if !readonly.is_empty() || (matches!(entered, Entered::Lost(_)) && lost_fails) {
 				ExecutionResult::general_error()
 			} else {
 				ExecutionResult::success()
@@ -253,8 +250,9 @@ pub(crate) enum Entered {
 	Changed(Vec<&'static str>),
 	/// The working directory had been removed, and the directory named it
 	/// (`.`): it stays, under the name spelled after it, and that name cannot
-	/// be resolved, which `cd -P -e` reports as a failure.
-	Lost,
+	/// be resolved, which `cd -P -e` reports as a failure, with the names
+	/// that could not be written for it.
+	Lost(Vec<&'static str>),
 }
 
 impl Entered {
@@ -262,8 +260,7 @@ impl Entered {
 	/// readonly `PWD` or `OLDPWD`, which Bash reports and goes on from.
 	pub(crate) fn readonly(&self) -> &[&'static str] {
 		match self {
-			Self::Changed(readonly) => readonly,
-			Self::Lost => &[],
+			Self::Changed(readonly) | Self::Lost(readonly) => readonly,
 		}
 	}
 }
@@ -348,15 +345,12 @@ async fn enter_named<SE: ShellExtensions>(
 				.shell
 				.set_unreachable_working_dir(lost, Some(arrived))
 				.map_err(|error| error.to_string())?;
-			for name in readonly {
-				let _ = writeln!(context.stderr(), "{name}: readonly variable");
-			}
 			let _ = writeln!(
 				context.stderr(),
 				"cd: error retrieving current directory: getcwd: cannot access parent \
 				 directories: No such file or directory"
 			);
-			Ok(Entered::Lost)
+			Ok(Entered::Lost(readonly))
 		},
 	}
 }

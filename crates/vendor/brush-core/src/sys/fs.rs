@@ -294,7 +294,20 @@ impl DirHandle {
 		if fd < 0 {
 			return Err(std::io::Error::last_os_error());
 		}
-		Ok(Self { fd: unsafe { OwnedFd::from_raw_fd(fd) } })
+		// SAFETY: `openat` made `fd`, which nothing else owns.
+		let opened = Self { fd: unsafe { OwnedFd::from_raw_fd(fd) } };
+		// A directory the user may not search is one `chdir` refuses, which
+		// `O_PATH` does not: the directory opened is asked about once it is
+		// known to be one, so that a file is still not a directory and the
+		// shell enters only what the kernel would let it work in.
+		// SAFETY: `opened` is open for the whole call and the name is a C
+		// string literal.
+		let searchable =
+			unsafe { libc::faccessat(opened.fd.as_raw_fd(), c".".as_ptr(), libc::X_OK, libc::AT_EACCESS) };
+		if searchable < 0 {
+			return Err(std::io::Error::last_os_error());
+		}
+		Ok(opened)
 	}
 
 	/// Opens `name`, read from this directory, as a handle of its own.
@@ -309,10 +322,22 @@ impl DirHandle {
 	/// this system does not say.
 	#[cfg(target_os = "linux")]
 	pub fn path(&self) -> Option<PathBuf> {
-		use std::os::fd::AsRawFd;
+		use std::os::{fd::AsRawFd, linux::fs::MetadataExt};
 		let name = std::fs::read_link(format!("/proc/self/fd/{}", self.fd.as_raw_fd())).ok()?;
-		// `/proc` names a file that has been removed with this suffix.
-		(!name.as_os_str().as_encoded_bytes().ends_with(b" (deleted)")).then_some(name)
+		// `/proc` names a directory that has been removed with a ` (deleted)`
+		// suffix, which a directory may also be named: the name is kept only
+		// when it still reaches this very directory.
+		let named = std::fs::metadata(&name).ok()?;
+		// SAFETY: this handle is open for the whole call, and the buffer is
+		// written by the kernel and read only where it answers that it did.
+		let mut held = std::mem::MaybeUninit::<libc::stat>::uninit();
+		let answered = unsafe { libc::fstat(self.fd.as_raw_fd(), held.as_mut_ptr()) };
+		if answered < 0 {
+			return None;
+		}
+		// SAFETY: `fstat` answered that it wrote the whole structure.
+		let held = unsafe { held.assume_init() };
+		(named.st_dev() == held.st_dev && named.st_ino() == held.st_ino).then_some(name)
 	}
 
 	/// The name this directory has now, as the kernel knows it.

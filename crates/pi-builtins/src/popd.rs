@@ -27,10 +27,13 @@ impl builtins::Command for PopdCommand {
 		// The entry stays on the stack when its directory cannot be entered, as
 		// in Bash; `set -P` resolves symbolic links here, as `cd` does.
 		let physical = context.shell.options().do_not_resolve_symlinks_when_changing_dir;
+		let mut readonly: Vec<&str> = Vec::new();
 		if !self.no_directory_change
 			&& let Err(reason) = {
 				let entered = crate::cd::enter_directory(&mut context, &top, physical).await;
-				for name in entered.as_ref().map(crate::cd::Entered::readonly).unwrap_or_default() {
+				readonly =
+					entered.as_ref().map(crate::cd::Entered::readonly).unwrap_or_default().to_vec();
+				for name in &readonly {
 					let _ = writeln!(context.stderr(), "{name}: readonly variable");
 				}
 				entered.map(|_| ())
@@ -38,6 +41,11 @@ impl builtins::Command for PopdCommand {
 		{
 			writeln!(context.stderr(), "popd: {}: {reason}", top.display())
 				.map_err(brush_core::Error::from)?;
+			return Ok(ExecutionResult::general_error());
+		}
+		// A name that may not be written leaves the stack as it was and the
+		// command failed, though the directory is entered, as in Bash.
+		if !readonly.is_empty() {
 			return Ok(ExecutionResult::general_error());
 		}
 		context.shell.directory_stack_mut().pop();
