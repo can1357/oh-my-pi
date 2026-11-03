@@ -183,10 +183,14 @@ export function describeOpenFileHolder(holder: OpenFileHolder): string {
 
 /**
  * How many descriptors this process holds on the file `identity` names, by
- * `/proc/self/fd`; undefined where that cannot be read. A lease is refused
- * while any other open of the file exists — this process's own included —
- * so a caller holding one descriptor of its own, and asking why the kernel
- * refused, reads more than one as this process holding the file elsewhere.
+ * `/proc/self/fd`; undefined where that cannot be read in full. A lease is
+ * refused while any other open of the file exists — this process's own
+ * included — so a caller holding one descriptor of its own, and asking why
+ * the kernel refused, reads more than one as this process holding the file
+ * elsewhere. A descriptor whose lookup fails for any reason but its closing
+ * meanwhile (`ENOENT`) makes the count unknown, not smaller: a review made one
+ * lookup fail with `EIO`, and the count left out the very descriptor that
+ * held the file. A mapping holds no descriptor and is not counted.
  */
 export async function ownDescriptorCount(identity: { dev: number; ino: number }): Promise<number | undefined> {
 	if (process.platform !== "linux") return undefined;
@@ -198,8 +202,14 @@ export async function ownDescriptorCount(identity: { dev: number; ino: number })
 	}
 	let count = 0;
 	for (const descriptor of descriptors) {
-		const held = await fs.stat(`/proc/self/fd/${descriptor}`).catch(() => undefined);
-		if (held && held.dev === identity.dev && held.ino === identity.ino) count++;
+		let held: Stats;
+		try {
+			held = await fs.stat(`/proc/self/fd/${descriptor}`);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+			return undefined;
+		}
+		if (held.dev === identity.dev && held.ino === identity.ino) count++;
 	}
 	return count;
 }

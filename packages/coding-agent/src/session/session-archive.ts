@@ -595,8 +595,11 @@ export async function inflateArchivedTranscript(
 			throw new Error(`${ground.file} was replaced while the transcript was being written`);
 		}
 		await fs.link(ground.file, destination);
-		if (!(await publishedIsStaged(destination, ground.created, holdsCopied(written)))) {
-			throw new Error(`${destination} is not the transcript this restore wrote, so it was left as it is`);
+		const unconfirmed = await publishedIsStaged(destination, ground.created, holdsCopied(written));
+		if (unconfirmed) {
+			throw new Error(
+				`${destination} is not confirmed as the transcript this restore wrote (${unconfirmed}), so it was left as it is`,
+			);
 		}
 		return written.size;
 	} catch (error) {
@@ -927,26 +930,53 @@ export async function* bytesOfRegularFile(file: string): AsyncGenerator<Uint8Arr
  * reporting a publication whose name, when this run last looked, held
  * somebody else's file, or whose bytes, when this run read them, were not
  * what it wrote.
+ *
+ * Returns undefined when every look found the staged file, or why not —
+ * saying what was seen when a look saw something else, and that the look
+ * failed when it did: a failed look says nothing about what stands there,
+ * and a review saw `EIO` from one reported as somebody else's file.
  */
 export async function publishedIsStaged(
 	destination: string,
 	staged: Stats,
 	holds: (published: fs.FileHandle) => Promise<boolean>,
-): Promise<boolean> {
-	const isStaged = (entry: Stats | undefined): boolean =>
-		entry?.isFile() === true && entry.dev === staged.dev && entry.ino === staged.ino;
-	const published = await openRegularFile(destination).catch(() => undefined);
-	if (!published) return false;
+): Promise<string | undefined> {
+	const seen = (entry: Stats | undefined, where: string): string | undefined => {
+		if (!entry) return `nothing stands at ${destination}`;
+		if (!entry.isFile()) return `${where} is not a regular file`;
+		if (entry.dev !== staged.dev || entry.ino !== staged.ino) return `${where} is another file than the one staged`;
+		return undefined;
+	};
+	const look = async (what: string, step: () => Promise<string | undefined>): Promise<string | undefined> => {
+		try {
+			return await step();
+		} catch (error) {
+			return `${what} could not be checked (${errorText(error)})`;
+		}
+	};
+	let published: fs.FileHandle | undefined;
 	try {
-		if (!isStaged(await published.stat())) return false;
-		if (!isStaged(await fs.lstat(destination).catch(() => undefined))) return false;
-		if (!(await holds(published))) return false;
-	} catch {
-		return false;
-	} finally {
-		await published.close().catch(() => undefined);
+		published = await openRegularFile(destination);
+	} catch (error) {
+		if (error instanceof NotARegularFile) return `${destination} is not a regular file`;
+		return `${destination} could not be opened to be checked (${errorText(error)})`;
 	}
-	return isStaged(await fs.lstat(destination).catch(() => undefined));
+	if (!published) return `nothing stands at ${destination}`;
+	const handle = published;
+	try {
+		const why =
+			(await look(`what ${destination} holds`, async () => seen(await handle.stat(), "what was opened there"))) ??
+			(await look(`what stands at ${destination}`, async () =>
+				seen(await lstatIfPresent(destination), destination),
+			)) ??
+			(await look(`the bytes at ${destination}`, async () =>
+				(await holds(handle)) ? undefined : `${destination} does not hold the bytes this run wrote`,
+			));
+		if (why) return why;
+	} finally {
+		await handle.close().catch(() => undefined);
+	}
+	return await look(`what stands at ${destination}`, async () => seen(await lstatIfPresent(destination), destination));
 }
 
 /** A `holds` for {@link publishedIsStaged}: exactly the bytes a copy wrote. */
@@ -1381,11 +1411,23 @@ async function copyEntryDereferenced(
 				// had files land there instead: said, not taken for a restore.
 				// This comparison only reports and decides nothing, since by the
 				// time it is read it is already stale.
-				const standing = await fs.lstat(destination).catch(() => undefined);
+				// A lookup that fails is said as a lookup that failed: a review
+				// made it fail with `EIO`, and "something moved it" described a
+				// move that never happened.
+				let standing: Stats | undefined;
+				try {
+					standing = await lstatIfPresent(destination);
+				} catch (error) {
+					throw new Error(
+						`whether ${destination} is still the directory this restore made for ${source} could not be ` +
+							`checked (${errorText(error)}), so what was restored into it is not confirmed to be there`,
+					);
+				}
 				if (!standing || standing.dev !== held.dev || standing.ino !== held.ino) {
 					throw new Error(
-						`${destination} is no longer the directory this restore made for ${source}: something moved it ` +
-							`while it was being filled, so what was restored into it may be elsewhere`,
+						`${destination} is no longer the directory this restore made for ${source}: ` +
+							`${standing ? "another entry stands at its name" : "nothing stands at its name"}, so what was ` +
+							`restored into it may be elsewhere`,
 					);
 				}
 			}
@@ -1466,8 +1508,11 @@ async function copyEntryDereferenced(
 		// over it without anyone asking. `EEXIST` sends this entry down the
 		// "already holds something else" road on the next attempt instead.
 		await fs.link(ground.file, destination);
-		if (!(await publishedIsStaged(destination, ground.created, holdsCopied(written)))) {
-			throw new Error(`${destination} is not the copy of ${source} this restore wrote, so it was left as it is`);
+		const unconfirmed = await publishedIsStaged(destination, ground.created, holdsCopied(written));
+		if (unconfirmed) {
+			throw new Error(
+				`${destination} is not confirmed as the copy of ${source} this restore wrote (${unconfirmed}), so it was left as it is`,
+			);
 		}
 		onFile?.();
 	} finally {
@@ -1827,7 +1872,15 @@ export async function mintStagingGround(target: string, ledger: string, mode = 0
 			// it made — and a directory at that name that no record names is one
 			// a later restore carries home as somebody's artifact. So while
 			// anything stands at the name, the record stays, and says so.
-			const standing = codeOf(error) === "EEXIST" ? undefined : await fs.lstat(dir).catch(() => undefined);
+			// A lookup that fails cannot show the name empty, so it counts as standing.
+			let standing = false;
+			if (codeOf(error) !== "EEXIST") {
+				try {
+					standing = (await lstatIfPresent(dir)) !== undefined;
+				} catch {
+					standing = true;
+				}
+			}
 			if (standing) {
 				await release();
 				throw failed(error, [
@@ -2540,6 +2593,9 @@ async function ownerSignature(owners: () => Promise<(string | undefined)[]>): Pr
  *
  * See {@link sourceIsPrefixOfDestination} for what "holds" means and why the
  * title slot is the one span that may differ.
+ * A read that fails throws, as it came: a failed read says nothing about
+ * whether the two are one session, and a review saw one reported as "a
+ * different session file".
  */
 export async function archiveIsPrefixOfLive(archiveFile: string, sessionPath: string): Promise<boolean> {
 	// Non-blocking, so a FIFO at the live name is a refusal rather than a hang.
@@ -2555,8 +2611,6 @@ export async function archiveIsPrefixOfLive(archiveFile: string, sessionPath: st
 			holds = await recordsAreCarried(linesOf(source as AsyncIterable<Uint8Array>), linesOfHandle(live));
 		});
 		return holds;
-	} catch {
-		return false;
 	} finally {
 		await live.close();
 	}
@@ -2591,8 +2645,6 @@ export async function archivedHandleIsPrefixOfLive(archived: fs.FileHandle, live
 			holds = await recordsAreCarried(linesOf(source as AsyncIterable<Uint8Array>), linesOfHandle(live));
 		});
 		return holds;
-	} catch {
-		return false;
 	} finally {
 		await live.close();
 	}
@@ -2607,6 +2659,7 @@ export async function archivedHandleIsPrefixOfLive(archived: fs.FileHandle, live
  * is of the file rather than of whatever its name points at by then. It is
  * only ever an answer about what was read: the caller writes over nothing on
  * the strength of it, and publishes only where there is nothing to replace.
+ * A read that fails throws, as it came, rather than read as "does not hold".
  */
 export async function archivedHandleIsHeldBy(
 	archived: fs.FileHandle,
@@ -2625,8 +2678,6 @@ export async function archivedHandleIsHeldBy(
 		if (await sourceIsPrefixOfDestination(bytesOfHandle(archived), candidate, transcript)) return true;
 		if (!transcript) return false;
 		return await recordsAreCarried(linesOfHandle(archived), linesOfHandle(candidate));
-	} catch {
-		return false;
 	} finally {
 		await candidate.close();
 	}
@@ -2681,9 +2732,13 @@ async function inflateArchivedHeaderId(archiveFile: string): Promise<string | un
 				bytes += chunk.byteLength;
 			}
 		});
-	} catch {
-		// Unreadable or damaged: the archive error paths report that on their own.
-		return undefined;
+	} catch (error) {
+		// Damaged gzip or gone: the archive error paths report that on their
+		// own. A read that fails is a failed owner check, not an archive with
+		// no owner — the refusal says so (see `tryAcquireRestoreLeases`).
+		const code = codeOf(error);
+		if (isEnoent(error) || code?.startsWith("Z_") || code === "ERR_STREAM_PREMATURE_CLOSE") return undefined;
+		throw error;
 	}
 	return sessionHeaderIdFromBytes(Buffer.concat(head, bytes));
 }
@@ -2710,28 +2765,36 @@ async function inflateArchivedHeaderId(archiveFile: string): Promise<string | un
  * when one finds nothing new; a tree that never settles is refused rather
  * than chased.
  *
- * Null, with everything taken so far released, when any of them is live.
+ * Each refusal says what was seen: a live owner, an owner check that failed,
+ * or a tree that did not settle. Only the first is a process owning the
+ * session; a review made one owner read fail with `EIO` on a later pass and
+ * saw "a running process owns this session" with no other process running.
  */
 const RESTORE_LEASE_PASSES = 8;
 
+/** Why the owners of a session's tree could not all be leased. */
+type RestoreLeaseRefusal =
+	| { kind: "owned" }
+	| { kind: "unprobed"; error: string }
+	| { kind: "unsettled"; passes: number };
+
 interface RestoreLeases {
-	/** Take the set again, for owners that have appeared since. False when one is live. */
-	refresh(): Promise<boolean>;
+	/** Take the set again, for owners that have appeared since; why not, when it cannot. */
+	refresh(): Promise<RestoreLeaseRefusal | undefined>;
 	release(): void;
 }
 
 async function tryAcquireRestoreLeases(
 	owners: () => Promise<(string | undefined)[]>,
 	observeOnly = false,
-): Promise<RestoreLeases | { unprobed: string } | null> {
-	let unprobed: string | undefined;
+): Promise<RestoreLeases | RestoreLeaseRefusal> {
 	const leases: FileLockHandle[] = [];
 	const leased = new Set<string>();
 	const release = (): void => {
 		for (const held of leases) held.release();
 		leases.length = 0;
 	};
-	const refresh = async (): Promise<boolean> => {
+	const refresh = async (): Promise<RestoreLeaseRefusal | undefined> => {
 		try {
 			for (let pass = 0; pass < RESTORE_LEASE_PASSES; pass += 1) {
 				let added = false;
@@ -2742,30 +2805,49 @@ async function tryAcquireRestoreLeases(
 						// a session opened meanwhile fork its turn into a new one.
 						const held = isSessionLeaseHeld(id);
 						if (held === null) throw new Error(`the ownership lease of session ${id} could not be probed`);
-						if (held) return false;
+						if (held) return { kind: "owned" };
 					} else {
 						const lease = tryAcquireSessionLease(id);
-						if (!lease) return false;
+						if (!lease) return { kind: "owned" };
 						leases.push(lease);
 					}
 					leased.add(id);
 					added = true;
 				}
-				if (!added) return true;
+				if (!added) return undefined;
 			}
-			return false;
+			return { kind: "unsettled", passes: RESTORE_LEASE_PASSES };
 		} catch (error) {
-			// A probe that throws says nothing about who owns what, and holding
-			// what it took would read as a live owner to everything after it.
-			// Kept, so the refusal says the look failed rather than that a
-			// process owns the session.
-			unprobed = errorText(error);
-			return false;
+			// A probe that throws says nothing about who owns what: the refusal
+			// says the look failed, not that a process owns the session.
+			return { kind: "unprobed", error: errorText(error) };
 		}
 	};
-	if (await refresh()) return { refresh, release };
+	const first = await refresh();
+	if (first === undefined) return { refresh, release };
 	release();
-	return unprobed === undefined ? null : { unprobed };
+	return first;
+}
+
+/** A restore's refusal for `why`, worded for what was seen, ending with what to do. */
+function restoreLeaseRefusalText(archiveFile: string, why: RestoreLeaseRefusal, restoreCommand: string): string {
+	switch (why.kind) {
+		case "owned":
+			return (
+				`Cannot restore "${archiveFile}": a running process owns this session or one of its subagent sessions. ` +
+				`Close it and run \`${restoreCommand}\` again.`
+			);
+		case "unprobed":
+			return (
+				`Cannot restore "${archiveFile}": a file of this session could not be read (${why.error}), so whether ` +
+				`a running process owns it is not known. Once it can be read, run \`${restoreCommand}\` again.`
+			);
+		case "unsettled":
+			return (
+				`Cannot restore "${archiveFile}": new subagent sessions kept appearing under it through ${why.passes} ` +
+				`passes, so not all of them could be leased. Once they stop, run \`${restoreCommand}\` again.`
+			);
+	}
 }
 
 /**
@@ -2895,7 +2977,7 @@ async function moveReclaimedHome(move: ReclaimedMove, restoreCommand: string): P
 			? `${move.to} appeared while this restore ran, so ${move.from} was not moved home over it; look at both, ` +
 					`move ${move.to} aside, and run \`${restoreCommand}\` again`
 			: moved.outcome === "absent"
-				? `${move.from} was moved away by another process while this restore ran, so it was not moved home`
+				? `${move.from} was no longer there while this restore ran, so it was not moved home`
 				: `${move.from} could not be moved home to ${move.to}: ${moved.why}, and a rename that may replace what ` +
 					`has that name could remove another file there; nothing was moved`,
 	);
@@ -3002,19 +3084,14 @@ export async function restoreArchivedSessionLocked(
 	// artifacts took twenty seconds with nothing on the screen.
 	if (!plan) progress?.(`Bringing session ${target} back from the archive…`);
 	const acquired = await tryAcquireRestoreLeases(owners, plan !== undefined);
-	if (acquired && "unprobed" in acquired) {
-		throw new Error(
-			`Cannot restore "${archiveFile}": a file of this session could not be read (${acquired.unprobed}), so whether ` +
-				`a running process owns it is not known. Once it can be read, run \`${restoreCommand}\` again.`,
-		);
-	}
+	if ("kind" in acquired) throw new Error(restoreLeaseRefusalText(archiveFile, acquired, restoreCommand));
 	const leases = acquired;
-	const noOwners = (): Error =>
-		new Error(
-			`Cannot restore "${archiveFile}": a running process owns this session or one of its subagent sessions. ` +
-				`Close it and run \`${restoreCommand}\` again.`,
-		);
-	if (!leases) throw noOwners();
+	// Taken again around the artifact copy; a refusal then says what it saw,
+	// as the first one does.
+	const refreshLeases = async (): Promise<void> => {
+		const why = await leases.refresh();
+		if (why) throw new Error(restoreLeaseRefusalText(archiveFile, why, restoreCommand));
+	};
 	// Nothing between taking a lease and releasing it may run outside the
 	// guard. The record's own creation is work like any other: a `mkdir`
 	// that fails or a write that runs out of space left the restore
@@ -3122,7 +3199,7 @@ export async function restoreArchivedSessionLocked(
 		// which an operator runs by name and acknowledges, stays the only
 		// step that takes a copy away; until someone asks, the space is not
 		// given back, which is the cost this feature can afford.
-		if (!(await leases.refresh())) throw noOwners();
+		await refreshLeases();
 		const leasedOwners = await ownerSignature(owners);
 		if (hasArtifacts) {
 			try {
@@ -3151,7 +3228,7 @@ export async function restoreArchivedSessionLocked(
 					plan,
 					onFile,
 				);
-				if (!(await leases.refresh())) throw noOwners();
+				await refreshLeases();
 				if ((await ownerSignature(owners)) !== leasedOwners) {
 					throw new Error(
 						`the subagent sessions below ${archiveArtifacts} changed while it was being restored; ` +

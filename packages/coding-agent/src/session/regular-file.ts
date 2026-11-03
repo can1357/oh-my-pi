@@ -662,11 +662,11 @@ export async function removeFileOthersMayWrite(file: string, rule: OthersMayWrit
 				return { outcome: "kept", ...(await writeBack(file, aside, handle, standing, late)) };
 			}
 			if (removal !== "failed") {
+				// What was seen, not who did it: a name changed, by whom is not known.
 				why =
 					removal === "replaced"
-						? `${aside}, where ${file} was moved to be removed, was taken by another process's file before it ` +
-							`could be removed`
-						: `${file} was moved away from ${aside} by another process before it could be removed`;
+						? `${aside}, where ${file} was moved to be removed, held another file before it could be removed`
+						: `${file} was no longer at ${aside}, where it was moved to be removed, before it could be removed`;
 			}
 			// Replaced, the name already holds its replacement, and what is at
 			// the private name stays there; otherwise it goes back.
@@ -717,29 +717,46 @@ async function writeBack(
 	was: Stats,
 	why: string,
 ): Promise<{ note: string; lost?: true }> {
-	// Its size, for the report only: a failure to read it must not stop the
-	// write-back, which copies until a read finds the end.
+	// Its size, for the report and for telling a short copy from a whole one;
+	// a failure to read it must not stop the write-back, which copies until a
+	// read finds the end.
+	let size: number | undefined;
 	let its: string;
 	try {
-		its = `its ${(await handle.stat()).size} bytes`;
+		size = (await handle.stat()).size;
+		its = `its ${size} bytes`;
 	} catch (error) {
 		its = `its bytes (its size could not be read: ${errorText(error)})`;
 	}
+	// Lost only where a loss is shown: fewer bytes put back than it held. A
+	// failed look is said as a failed look — a review failed the read that
+	// would have found the end, after every byte was written back, and saw
+	// the whole copy reported lost.
+	const shortOf = (holds: number | undefined): boolean => holds !== undefined && size !== undefined && holds < size;
+	const nothingPutBack = (target: string, cause: string): { note: string; lost?: true } =>
+		size === 0
+			? { note: `${why}; it was empty, so nothing was lost, though ${target} could not be made (${cause})` }
+			: size === undefined
+				? {
+						note: `${why}; nothing could be written back to ${target} (${cause}), and whether it held any bytes is not known`,
+					}
+				: {
+						note: `${why}; none of ${its} could be written back to ${target} (${cause}), and they were lost with the unlinked file`,
+						lost: true,
+					};
 	for (const target of [file, aside]) {
 		let written: fs.FileHandle;
 		try {
 			written = await createExclusive(target, was.mode & 0o7777);
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code === "EEXIST") continue;
-			return {
-				note: `${why}; none of ${its} could be written back to ${target} (${errorText(error)}), and they were lost with the unlinked file`,
-				lost: true,
-			};
+			return nothingPutBack(target, errorText(error));
 		}
+		let at = 0;
 		let whole = false;
 		try {
 			const window = Buffer.allocUnsafe(64 * 1024);
-			for (let at = 0; ;) {
+			for (;;) {
 				const { bytesRead } = await handle.read(window, 0, window.length, at);
 				if (bytesRead === 0) break;
 				await writeAllAt(written, window.subarray(0, bytesRead), at);
@@ -754,22 +771,32 @@ async function writeBack(
 			}
 			const holds = await written
 				.stat()
-				.then(stat => `${stat.size}`)
-				.catch(() => "an unknown number");
+				.then(stat => stat.size)
+				.catch(() => undefined);
+			const counted = holds === undefined ? "an unknown number" : `${holds}`;
+			if (shortOf(holds)) {
+				return {
+					note:
+						`${why}; writing its bytes back to ${target} stopped (${errorText(error)}): ${target} holds ` +
+						`${counted} of ${its}, and the rest was lost with the unlinked file`,
+					lost: true,
+				};
+			}
 			return {
 				note:
-					`${why}; writing its bytes back to ${target} stopped (${errorText(error)}): ${target} holds ` +
-					`${holds} of ${its}, and the rest was lost with the unlinked file`,
-				lost: true,
+					`${why}; ${target} holds ${counted} of ${its}, written back, but writing back stopped ` +
+					`(${errorText(error)}) before it could be confirmed that nothing followed them`,
 			};
 		} finally {
 			await written.close().catch(() => undefined);
 		}
 		return { note: `${why}, so its bytes were written back to ${target}` };
 	}
+	if (size === 0)
+		return { note: `${why}; it was empty, so nothing was lost, though ${file} and ${aside} are both taken` };
 	return {
-		note: `${why}; ${file} and ${aside} are both taken, so ${its} could not be written back and were lost with the unlinked file`,
-		lost: true,
+		note: `${why}; ${file} and ${aside} are both taken, so ${its} could not be written back${size === undefined ? "" : " and were lost with the unlinked file"}`,
+		...(size === undefined ? {} : { lost: true as const }),
 	};
 }
 
@@ -868,7 +895,7 @@ export async function putBack(file: string, aside: string, why: string): Promise
 		if (back.outcome === "taken")
 			return `${why}, and something else took its name meanwhile, so it was left at ${aside}`;
 		if (back.outcome === "absent") {
-			return `${why}, and nothing was left at ${aside} to put back: another process moved it`;
+			return `${why}, and nothing was left at ${aside} to put back: it had been moved or removed meanwhile`;
 		}
 		return `${why}, and it could not be put back (${back.why}), so it was left at ${aside}`;
 	} catch (error) {
