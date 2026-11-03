@@ -5,8 +5,9 @@
  * {@link rollbackSessionRowKeys}). They open the database from the same
  * connection-string file as the configured storage, but never through
  * `SqlSessionStorage.create`, which refuses a table holding legacy keys.
- * Every database error they print has the connection string's secrets
- * redacted ({@link sessionDatabaseErrorDetail}).
+ * Once the connection is open, everything they print (the plan, its row
+ * keys, every database error) has the connection string's secrets redacted
+ * ({@link SessionSqlConnection.redact}).
  */
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { Settings } from "../config/settings";
@@ -77,13 +78,18 @@ function printError(message: string): void {
 	process.stderr.write(`${chalk.red(`error: ${message}`)}\n`);
 }
 
-/** Check the connection, run the key change, and print its plan and outcome; the exit code. */
+/**
+ * Check the connection, run the key change, and print its plan and outcome;
+ * the exit code. Everything it prints passes through `connection.redact`:
+ * the plan quotes row keys, and a row key, like a database error, can quote
+ * the connection string.
+ */
 async function changeKeys(
 	connection: SessionSqlConnection,
 	args: SessionKeysCommandArgs,
 	table: string,
 ): Promise<number> {
-	const { client } = connection;
+	const { client, redact } = connection;
 	try {
 		await client.unsafe("SELECT 1");
 	} catch (err) {
@@ -101,7 +107,7 @@ async function changeKeys(
 		printError(`the key change failed and was rolled back: ${sessionDatabaseErrorDetail(connection, err)}`);
 		return 1;
 	}
-	process.stdout.write(formatResult(args, table, result));
+	process.stdout.write(redact(formatResult(args, table, result)));
 	if (result.plan.refusals.length === 0) return 0;
 	printError("the key change was refused; nothing changed");
 	return 1;

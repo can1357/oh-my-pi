@@ -17,6 +17,17 @@ export const ROOT_KEY_PREFIX = "sessions/";
 export const ABSOLUTE_KEY_PREFIX = "abs:";
 
 /**
+ * `file`'s path relative to `dir`, slash-separated on every platform, when
+ * `file` lies strictly under `dir`; otherwise `undefined`. Both are resolved.
+ */
+function pathUnder(dir: string, file: string): string | undefined {
+	const relative = path.relative(dir, file);
+	const inside =
+		relative !== "" && relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+	return inside ? relative.split(path.sep).join("/") : undefined;
+}
+
+/**
  * The row key of the session file `file`. A file under `sessionsRoot` is keyed
  * `sessions/` followed by its path relative to that root, slash-separated on
  * every platform, so the key names the same session whatever the home
@@ -26,12 +37,27 @@ export const ABSOLUTE_KEY_PREFIX = "abs:";
  * path.
  */
 export function sessionRowKey(file: string, sessionsRoot: string = getSessionsDir()): string {
-	const root = path.resolve(sessionsRoot);
 	const resolved = path.resolve(file);
-	const relative = path.relative(root, resolved);
-	const inside =
-		relative !== "" && relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
-	return inside ? ROOT_KEY_PREFIX + relative.split(path.sep).join("/") : ABSOLUTE_KEY_PREFIX + resolved;
+	const relative = pathUnder(path.resolve(sessionsRoot), resolved);
+	return relative === undefined ? ABSOLUTE_KEY_PREFIX + resolved : ROOT_KEY_PREFIX + relative;
+}
+
+/**
+ * The key prefixes that together cover the row of every file under the local
+ * directory `dir`. The keys of its files decide them, not the key of `dir`
+ * with `/` appended: the sessions root itself is `sessions/`, a directory
+ * under it `sessions/<path under the root>/`, and any other directory
+ * `abs:<dir>/`, with `sessions/` beside it when the root lies under `dir`
+ * (its files under the root are keyed `sessions/…`).
+ */
+export function sessionRowDirPrefixes(dir: string, sessionsRoot: string = getSessionsDir()): string[] {
+	const root = path.resolve(sessionsRoot);
+	const resolved = path.resolve(dir);
+	if (resolved === root) return [ROOT_KEY_PREFIX];
+	const relative = pathUnder(root, resolved);
+	if (relative !== undefined) return [`${ROOT_KEY_PREFIX}${relative}/`];
+	const absolute = `${ABSOLUTE_KEY_PREFIX}${resolved.endsWith(path.sep) ? resolved : resolved + path.sep}`;
+	return pathUnder(resolved, root) === undefined ? [absolute] : [absolute, ROOT_KEY_PREFIX];
 }
 
 /**
@@ -129,20 +155,23 @@ export interface SqlSessionStorageOptions {
 	 */
 	sessionsRoot?: string;
 	/**
-	 * Rewrite the text of every database error that leaves the store, for
-	 * example to remove the connection string: a database error can quote any
-	 * text, and the session layer prints the errors of its storage. A driver
-	 * error (`SQL.SQLError`) then leaves as a {@link SqlSessionStorageDatabaseError},
-	 * and an `AggregateError` with its errors rewritten; every error the store
-	 * raises on purpose (a write conflict, `ENOENT`, `EEXIST`, a refusal)
-	 * leaves as it is. Default: errors leave as the driver raised them.
+	 * Rewrite the text of every diagnostic the store builds, for example to
+	 * remove the connection string: a database error can quote any text, so
+	 * can a row key, and the session layer prints the errors of its storage
+	 * and logs. A driver error (`SQL.SQLError`) then leaves as a
+	 * {@link SqlSessionStorageDatabaseError}, an `AggregateError` with its
+	 * errors rewritten, and an error or log field the store builds from a row
+	 * key has that text rewritten; every error the store raises on purpose
+	 * about a path its caller gave (a write conflict, `ENOENT`, `EEXIST`)
+	 * leaves as it is. Stored keys and content never change. Default: no
+	 * rewriting.
 	 */
-	redactError?: (text: string) => string;
+	redact?: (text: string) => string;
 }
 
 /**
- * A database driver error as it leaves a store given `redactError`: the
- * driver's `name`, `code`, `errno`, `sqlState` and `severity` as they were, its
+ * A database driver error as it leaves a store given `redact`: the driver's
+ * `name`, `code`, `errno`, `sqlState` and `severity` as they were, its
  * message and its `detail`, `hint` and `where` redacted, and no cause.
  */
 export class SqlSessionStorageDatabaseError extends Error {
@@ -172,7 +201,7 @@ export class SqlSessionStorageDatabaseError extends Error {
 	}
 }
 
-/** `err` with its database errors' text rewritten by `redact` (see {@link SqlSessionStorageOptions.redactError}). */
+/** `err` with its database errors' text rewritten by `redact` (see {@link SqlSessionStorageOptions.redact}). */
 function redactDatabaseError(err: unknown, redact: (text: string) => string): unknown {
 	if (err instanceof AggregateError) {
 		return new AggregateError(
@@ -805,7 +834,7 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 	/** The shared call queue for this client's SQLite database; unset on other dialects. */
 	readonly #sqliteQueue: SqliteQueue | undefined;
 	readonly #sessionsRoot: string;
-	readonly #redactError: ((text: string) => string) | undefined;
+	readonly #redact: ((text: string) => string) | undefined;
 
 	constructor(options: SqlSessionStorageOptions) {
 		this.#client = options.client;
@@ -815,7 +844,7 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 		this.#createTable = options.createTable !== false;
 		this.#sqliteQueue = this.#adapter === "sqlite" ? sqliteQueue(options.client) : undefined;
 		this.#sessionsRoot = path.resolve(options.sessionsRoot ?? getSessionsDir());
-		this.#redactError = options.redactError;
+		this.#redact = options.redact;
 	}
 
 	/**
@@ -824,7 +853,12 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 	 * it throws through here, so no method lets an unredacted one out.
 	 */
 	#outward(err: unknown): unknown {
-		return this.#redactError ? redactDatabaseError(err, this.#redactError) : err;
+		return this.#redact ? redactDatabaseError(err, this.#redact) : err;
+	}
+
+	/** `text`, a diagnostic built from a row key, rewritten by the `redact` option. */
+	#diagnostic(text: string): string {
+		return this.#redact ? this.#redact(text) : text;
 	}
 
 	get sessionsRoot(): string {
@@ -892,9 +926,11 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 		const [legacy] = (await this.#client.unsafe(this.#q.findLegacyKey)) as Array<{ path: string }>;
 		if (!legacy) return;
 		throw new Error(
-			`SqlSessionStorage: ${this.#table} holds the row key ${JSON.stringify(legacy.path)}, which is neither ` +
-				`"${ROOT_KEY_PREFIX}…" nor "${ABSOLUTE_KEY_PREFIX}…". Stop every older Oh My Pi process that writes ` +
-				`the table, then migrate its keys with ${KEY_MIGRATION_COMMAND}.`,
+			this.#diagnostic(
+				`SqlSessionStorage: ${this.#table} holds the row key ${JSON.stringify(legacy.path)}, which is neither ` +
+					`"${ROOT_KEY_PREFIX}…" nor "${ABSOLUTE_KEY_PREFIX}…". Stop every older Oh My Pi process that writes ` +
+					`the table, then migrate its keys with ${KEY_MIGRATION_COMMAND}.`,
+			),
 		);
 	}
 
@@ -984,8 +1020,10 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 			}
 			if (row.byte_len === null) {
 				throw new Error(
-					`SqlSessionStorage: ${this.#table} row ${JSON.stringify(row.path)} has no byte_len; ` +
-						`run the byte_len backfill in ${SCHEMA_DOCS}.`,
+					this.#diagnostic(
+						`SqlSessionStorage: ${this.#table} row ${JSON.stringify(row.path)} has no byte_len; ` +
+							`run the byte_len backfill in ${SCHEMA_DOCS}.`,
+					),
 				);
 			}
 			entries.push({
@@ -1001,7 +1039,7 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 			logger.warn("SqlSessionStorage skipped rows whose key it does not write", {
 				table: this.#table,
 				count: unmapped.length,
-				example: unmapped[0],
+				example: this.#diagnostic(unmapped[0] ?? ""),
 				docs: KEY_MIGRATION_COMMAND,
 			});
 		}
@@ -1068,8 +1106,10 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 			}
 			if (row.byte_len === null) {
 				throw new Error(
-					`SqlSessionStorage: ${this.#table} row ${JSON.stringify(file)} has no byte_len; ` +
-						`run the byte_len backfill in ${SCHEMA_DOCS}.`,
+					this.#diagnostic(
+						`SqlSessionStorage: ${this.#table} row ${JSON.stringify(file)} has no byte_len; ` +
+							`run the byte_len backfill in ${SCHEMA_DOCS}.`,
+					),
 				);
 			}
 			size = rowNumber(row.byte_len);
@@ -1171,14 +1211,18 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 
 	async remove(files: string[], dirFile?: string): Promise<void> {
 		const paths = files.map(file => this.#key(file));
-		// The rows under the local directory `dirFile` are keyed under its key:
-		// `sessions/<dir under the root>/` or `abs:<dir>/`.
-		const dir = dirFile === undefined ? undefined : `${this.#key(dirFile)}/`;
-		const under = dir === undefined ? undefined : { dir, len: [...dir].length };
+		// The rows under the local directory `dirFile` are keyed under the
+		// prefixes its files' keys share, which its own key does not give.
+		const ranges = (dirFile === undefined ? [] : sessionRowDirPrefixes(dirFile, this.#sessionsRoot)).map(dir => ({
+			dir,
+			len: [...dir].length,
+		}));
 		await this.#transaction(async transaction => {
 			// Every row first: their locks must all be held before the first parts look (see #deleteParts).
 			for (const path of paths) await run(transaction, this.#q.deleteRow, { path });
-			if (under) for (const query of this.#q.deleteUnder) await run(transaction, query, under);
+			for (const range of ranges) {
+				for (const query of this.#q.deleteUnder) await run(transaction, query, range);
+			}
 			for (const path of paths) await this.#deleteParts(transaction, path);
 		});
 	}

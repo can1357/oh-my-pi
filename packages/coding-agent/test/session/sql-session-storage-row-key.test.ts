@@ -15,6 +15,8 @@ import { moveTranscriptTree } from "@oh-my-pi/pi-coding-agent/session/session-tr
 import {
 	SqlSessionStorage,
 	type SqlSessionStorageAdapter,
+	sessionRowDirPrefixes,
+	sessionRowKey,
 } from "@oh-my-pi/pi-coding-agent/session/sql-session-storage";
 import { SQL } from "bun";
 
@@ -277,6 +279,47 @@ for (const { adapter, url } of BACKENDS) {
 			expect(await db.keys(`${db.table}_parts`)).toEqual(["sessions/-p/s2/keep.jsonl"]);
 		});
 
+		for (const { name, parent, children, late, kept } of [
+			{
+				// Round-5 review: a session file beside the root, whose artifacts directory is the root.
+				name: "is the sessions root",
+				parent: `${ROOT_A}.jsonl`,
+				children: [path.join(ROOT_A, "early.jsonl")],
+				late: [path.join(ROOT_B, "late.jsonl")],
+				kept: [`${ROOT_A}x/keep.jsonl`],
+			},
+			{
+				name: "holds the sessions root",
+				parent: `${path.dirname(ROOT_A)}.jsonl`,
+				children: [path.join(path.dirname(ROOT_A), "drafts", "d.txt"), path.join(ROOT_A, "-p", "early.jsonl")],
+				late: [path.join(path.dirname(ROOT_A), "drafts", "late.txt"), path.join(ROOT_B, "-p", "late.jsonl")],
+				kept: [`${path.dirname(ROOT_A)}x/keep.jsonl`],
+			},
+		]) {
+			it(`deletes every row under an artifacts directory that ${name}, late ones included`, async () => {
+				await using db = connect();
+				const storage = await db.open(ROOT_A);
+				const other = await db.open(ROOT_B);
+				for (const file of [parent, ...children, ...kept]) await storage.writeText(file, `${file}\n`);
+				await storage.drain();
+				const refresh = storage.refresh.bind(storage);
+				vi.spyOn(storage, "refresh").mockImplementation(async () => {
+					await refresh();
+					// Committed by another client after the delete's refresh: only the key range finds them.
+					for (const file of late) await other.writeText(file, `${file}\n`);
+					await other.drain();
+				});
+
+				await storage.deleteSessionWithArtifacts(parent);
+
+				const keptKeys = kept.map(file => `abs:${file}`);
+				expect(await db.keys()).toEqual(keptKeys);
+				expect(await db.keys(`${db.table}_parts`)).toEqual(keptKeys);
+				await other.refresh();
+				expect(other.listAllSync()).toEqual(kept);
+			});
+		}
+
 		it("refuses to move a transcript onto a key another home's client holds, naming the local path", async () => {
 			await using db = connect();
 			const storage = await db.open(ROOT_A);
@@ -301,3 +344,45 @@ for (const { adapter, url } of BACKENDS) {
 		});
 	});
 }
+
+describe("sessionRowDirPrefixes", () => {
+	const agent = path.dirname(ROOT_A);
+	const cases: ReadonlyArray<[dir: string, root: string, prefixes: string[]]> = [
+		[ROOT_A, ROOT_A, ["sessions/"]],
+		[`${ROOT_A}/`, ROOT_A, ["sessions/"]],
+		[`${ROOT_A}/-p/s`, ROOT_A, ["sessions/-p/s/"]],
+		[`${ROOT_A}//-p/./s/`, `${ROOT_A}/`, ["sessions/-p/s/"]],
+		["/srv/x", ROOT_A, ["abs:/srv/x/"]],
+		[`${ROOT_A}x`, ROOT_A, [`abs:${ROOT_A}x/`]],
+		[agent, ROOT_A, [`abs:${agent}/`, "sessions/"]],
+		["/", ROOT_A, ["abs:/", "sessions/"]],
+		["/", "/", ["sessions/"]],
+	];
+	for (const [dir, root, prefixes] of cases) {
+		it(`gives ${JSON.stringify(prefixes)} for ${dir} under the root ${root}`, () => {
+			expect(sessionRowDirPrefixes(dir, root)).toEqual(prefixes);
+		});
+	}
+
+	it("covers the key of every file under the directory, and of no file outside it", () => {
+		const files = [
+			`${ROOT_A}/a.jsonl`,
+			`${ROOT_A}/-p/s/A.jsonl`,
+			`${ROOT_A}/-p/s2/B.jsonl`,
+			`${ROOT_A}x/c.jsonl`,
+			`${agent}/drafts/d.txt`,
+			`${agent}x/e.txt`,
+			"/srv/x/f.jsonl",
+			"/srv/xy/g.jsonl",
+		];
+		for (const [dir, root] of cases) {
+			const prefixes = sessionRowDirPrefixes(dir, root);
+			const resolved = path.resolve(dir);
+			for (const file of files) {
+				const under = file.startsWith(resolved === "/" ? "/" : `${resolved}/`);
+				const covered = prefixes.some(prefix => sessionRowKey(file, root).startsWith(prefix));
+				expect({ dir, root, file, covered }).toEqual({ dir, root, file, covered: under });
+			}
+		}
+	});
+});

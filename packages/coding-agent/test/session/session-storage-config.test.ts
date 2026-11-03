@@ -19,7 +19,9 @@ import {
 } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import {
 	openSessionSqlClient,
+	openSessionSqlStorage,
 	resolveSessionStorage,
+	type SessionSqlConnection,
 	SessionStorageConfigError,
 } from "@oh-my-pi/pi-coding-agent/session/session-storage-config";
 import { SqlSessionStorage } from "@oh-my-pi/pi-coding-agent/session/sql-session-storage";
@@ -231,139 +233,197 @@ describe("resolveSessionStorage", () => {
 
 	it("redacts every spelling of the connection string's secrets from a database error's text", async () => {
 		const dsn = "postgres://app%2Duser:p%40ss%3Aw0rd@db.example:5432/sessions?sslpassword=k3y%2Bpass";
-		const short = "mysql://bob:pw@db.example/sessions";
 		const open = async (contents: string) =>
 			openSessionSqlClient({
 				settings: Settings.isolated(),
 				env: { OMP_SESSION_SQL_DSN_FILE: await writeDsnFile(`${contents}\n`) },
 			});
 		const full = await open(dsn);
-		const weak = await open(short);
+		const dotted = await open("postgres://app:x.y@db.example/sessions");
+		const two = await open("mysql://bob:pw@db.example/sessions");
 		try {
 			expect(full.redact(`could not reach ${dsn}.`)).toBe("could not reach <redacted>.");
 			expect(full.redact("password p%40ss%3Aw0rd and p@ss:w0rd")).toBe("password <redacted> and <redacted>");
 			expect(full.redact("login app-user:p@ss:w0rd@db.example")).toBe("login <redacted>@db.example");
 			expect(full.redact("login app%2Duser:p%40ss%3Aw0rd@db")).toBe("login <redacted>@db");
 			expect(full.redact("ssl key k3y%2Bpass, k3y+pass")).toBe("ssl key <redacted>, <redacted>");
+			// A password of 4 or more characters goes wherever it occurs, a row key included.
+			expect(full.redact('row "sessions/p@ss:w0rd.jsonl"')).toBe('row "sessions/<redacted>.jsonl"');
 			// The user and the host alone are not secrets.
 			expect(full.redact("role app-user on db.example")).toBe("role app-user on db.example");
-			// A two-character password would match ordinary text; only `user:password` goes.
-			expect(weak.redact("bob:pw@db.example rejected pwd")).toBe("<redacted>@db.example rejected pwd");
-			expect(weak.redact(short)).toBe("<redacted>");
+			// Redacting twice changes nothing more.
+			expect(full.redact(full.redact(`at ${dsn}`))).toBe("at <redacted>");
+
+			// A shorter password goes where it stands as a token: no letter, digit or `_` beside it.
+			for (const [text, redacted] of [
+				["password x.y", "password <redacted>"],
+				["the password is x.y.", "the password is <redacted>."],
+				["'x.y' (x.y) «x.y» =x.y,", "'<redacted>' (<redacted>) «<redacted>» =<redacted>,"],
+				["sessions/x.y/a.jsonl", "sessions/<redacted>/a.jsonl"],
+				["app:x.y@db.example", "<redacted>@db.example"],
+				// Inside a longer word it is ordinary text, and reveals nothing there.
+				["ax.y x.yz x.y_1 éx.y", "ax.y x.yz x.y_1 éx.y"],
+			] as const) {
+				expect({ text, redacted: dotted.redact(text) }).toEqual({ text, redacted });
+			}
+			expect(two.redact("bob:pw@db.example rejected pwd, pw: pw")).toBe(
+				"<redacted>@db.example rejected pwd, <redacted>: <redacted>",
+			);
+			expect(two.redact("mysql://bob:pw@db.example/sessions")).toBe("<redacted>");
 		} finally {
-			await full.client.end();
-			await weak.client.end();
+			for (const connection of [full, dotted, two]) await connection.client.end();
 		}
 	});
 });
 
-/**
- * Each database, with a session table whose start-up backfill fails with an
- * error that quotes the connection string and its password. A server test
- * isolates the default table `resolveSessionStorage` opens, since the shared
- * test database holds one this test does not own: PostgreSQL in a schema of
- * its own, selected by the connection string's `search_path` (a transaction
- * pooler routes only the databases it is configured with), MySQL in a
- * database of its own.
- */
-const STARTUP_BACKENDS: ReadonlyArray<{ adapter: "sqlite" | "postgres" | "mysql"; url: string | undefined }> = [
+type Dialect = "sqlite" | "postgres" | "mysql";
+
+/** SQLite always; PostgreSQL and MySQL when their throwaway test database is named. */
+const STORE_BACKENDS: ReadonlyArray<{ adapter: Dialect; url: string | undefined }> = [
 	{ adapter: "sqlite", url: "sqlite" },
 	{ adapter: "postgres", url: process.env.OMP_TEST_SQL_POSTGRES_URL },
 	{ adapter: "mysql", url: process.env.OMP_TEST_SQL_MYSQL_URL },
 ];
 
-let namespaceSeq = 0;
+let tableSeq = 0;
 
 /**
- * A connection string of a namespace of its own on `adapter`'s server `url`,
- * that namespace's name, and statements that create and drop it there.
+ * One test's session table and its fixture client, opened the way the
+ * configured storage opens the database: a server test shares the test
+ * database, so it uses a table of its own there, with no connection-string
+ * option (a startup `search_path` would stay on a transaction pooler's
+ * server connection after the test); SQLite uses a file of its own. Each
+ * fixture object is dropped, in reverse order, when the test ends.
  */
-function isolatedDatabase(
-	adapter: "sqlite" | "postgres" | "mysql",
-	url: string,
-): { dsn: string; name: string; create?: string; drop?: string } {
-	const name = `omp_cfg_${process.pid}_${Date.now().toString(36)}_${namespaceSeq++}`;
-	if (adapter === "sqlite") {
-		return { dsn: `sqlite:${path.join(makeTempDir("@pi-session-storage-startup-"), "sessions.db")}`, name };
+class OwnTable implements AsyncDisposable {
+	readonly table = `omp_cfg_${process.pid}_${Date.now().toString(36)}_${tableSeq++}`;
+	readonly dsn: string;
+	readonly client: SQL;
+	readonly #drops: string[] = [];
+
+	constructor(
+		readonly adapter: Dialect,
+		url: string,
+	) {
+		this.dsn =
+			adapter === "sqlite" ? `sqlite:${path.join(makeTempDir("@pi-session-storage-own-"), "sessions.db")}` : url;
+		this.client = new SQL(this.dsn, { max: 1 });
+		this.dropAtEnd(`DROP TABLE IF EXISTS ${this.table}_parts`, `DROP TABLE IF EXISTS ${this.table}`);
 	}
-	const parsed = new URL(url);
-	if (adapter === "postgres") {
-		parsed.searchParams.set("options", `-csearch_path=${name}`);
-		return { dsn: parsed.href, name, create: `CREATE SCHEMA ${name}`, drop: `DROP SCHEMA IF EXISTS ${name} CASCADE` };
+
+	/** The password of the connection string, when it has one. */
+	get password(): string {
+		return new URL(this.dsn).password;
 	}
-	parsed.pathname = `/${name}`;
-	return { dsn: parsed.href, name, create: `CREATE DATABASE ${name}`, drop: `DROP DATABASE IF EXISTS ${name}` };
-}
 
-for (const { adapter, url } of STARTUP_BACKENDS) {
-	describe.skipIf(!url)(`resolveSessionStorage start-up refusal (${adapter})`, () => {
-		it("prints a failed start-up statement's error without the connection string or its password", async () => {
-			const { dsn, name, create, drop } = isolatedDatabase(adapter, url ?? "");
-			const admin = create === undefined ? undefined : new SQL(url ?? "", { max: 1 });
-			if (create) await admin?.unsafe(create);
-			const client = new SQL(dsn, { max: 1 });
-			try {
-				// Never the shared database's own session table: the connection must be in the namespace.
-				if (adapter !== "sqlite") {
-					const [row] = (await client.unsafe(
-						adapter === "postgres" ? "SELECT current_schema() AS name" : "SELECT DATABASE() AS name",
-					)) as Array<{ name: string | null }>;
-					expect(row?.name).toBe(name);
-				}
-				await (await SqlSessionStorage.create({ client })).drain();
-				// A row from before `byte_len`: start-up backfills it, and the backfill fails.
-				await client.unsafe(
-					"INSERT INTO omp_session_files (path, content, mtime_ms) VALUES ('sessions/-p/a.jsonl', 'a', 1)",
-				);
-				const password = new URL(dsn).password;
-				const leak = `connect to ${dsn}${password ? ` as ${password}` : ""}`.replaceAll("'", "''");
-				if (adapter === "sqlite") {
-					await client.unsafe(
-						`CREATE TRIGGER omp_cfg_refuse BEFORE UPDATE ON omp_session_files BEGIN SELECT RAISE(ABORT, '${leak}'); END`,
-					);
-				} else if (adapter === "mysql") {
-					await client.unsafe(
-						`CREATE TRIGGER omp_cfg_refuse BEFORE UPDATE ON omp_session_files FOR EACH ROW ` +
-							`SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = '${leak}'`,
-					);
-				} else {
-					await client.unsafe(
-						"CREATE FUNCTION omp_cfg_refuse() RETURNS trigger LANGUAGE plpgsql AS " +
-							`$$ BEGIN RAISE EXCEPTION USING MESSAGE = '${leak}'; END $$`,
-					);
-					await client.unsafe(
-						"CREATE TRIGGER omp_cfg_refuse BEFORE UPDATE ON omp_session_files FOR EACH ROW EXECUTE FUNCTION omp_cfg_refuse()",
-					);
-				}
-				const dsnFile = await writeDsnFile(`${dsn}\n`);
+	/** The connection string and its password: what no printed text may contain. */
+	get secrets(): string[] {
+		return this.password ? [this.dsn, this.password] : [this.dsn];
+	}
 
-				const error = await rejection(
-					resolveSessionStorage({
-						settings: Settings.isolated(),
-						env: { OMP_SESSION_STORAGE: "sql", OMP_SESSION_SQL_DSN_FILE: dsnFile },
-					}),
-				);
-
-				expect(error.message).toStartWith(
-					`OMP_SESSION_SQL_DSN_FILE names ${dsnFile}, but the session database could not be opened: connect to <redacted>`,
-				);
-				// The fatal handler prints the error with its causes.
-				for (const printed of [error.message, Bun.inspect(error)]) {
-					expect(printed).not.toContain(dsn);
-					if (password) expect(printed).not.toContain(password);
-				}
-			} finally {
-				await client.end();
-				if (admin) {
-					if (drop) await admin.unsafe(drop);
-					await admin.end();
-				}
-			}
+	/** The configured storage's client of this database, from a connection-string file. */
+	async connect(): Promise<SessionSqlConnection> {
+		return openSessionSqlClient({
+			settings: Settings.isolated(),
+			env: { OMP_SESSION_SQL_DSN_FILE: await writeDsnFile(`${this.dsn}\n`) },
 		});
-	});
-}
+	}
 
-type Dialect = "sqlite" | "postgres" | "mysql";
+	/** Fixture SQL written with `?` placeholders. */
+	sql(query: string, values: unknown[] = []): Promise<unknown> {
+		let n = 0;
+		return this.client.unsafe(this.adapter === "postgres" ? query.replace(/\?/g, () => `$${++n}`) : query, values);
+	}
+
+	/** Run `statements`, then drop what they made with `drops` when the test ends. */
+	async run(statements: readonly string[], ...drops: string[]): Promise<void> {
+		for (const statement of statements) await this.sql(statement);
+		this.dropAtEnd(...drops);
+	}
+
+	/** Drop objects when the test ends; give the drops in creation order, as they run last first. */
+	dropAtEnd(...drops: string[]): void {
+		this.#drops.push(...drops);
+	}
+
+	/** Make every INSERT and UPDATE of the session table fail with `message`. */
+	refuseWrites(message: string): Promise<void> {
+		const literal = `'${message.replaceAll("'", "''")}'`;
+		const name = `${this.table}_refuse`;
+		if (this.adapter === "postgres") {
+			return this.run(
+				[
+					`CREATE FUNCTION ${name}() RETURNS trigger LANGUAGE plpgsql AS ` +
+						`$$ BEGIN RAISE EXCEPTION USING MESSAGE = ${literal}; END $$`,
+					`CREATE TRIGGER ${name} BEFORE INSERT OR UPDATE ON ${this.table} FOR EACH ROW EXECUTE FUNCTION ${name}()`,
+				],
+				`DROP FUNCTION IF EXISTS ${name}() CASCADE`,
+			);
+		}
+		return this.run(
+			["INSERT", "UPDATE"].map(event =>
+				this.adapter === "sqlite"
+					? `CREATE TRIGGER ${name}_${event} BEFORE ${event} ON ${this.table} BEGIN SELECT RAISE(ABORT, ${literal}); END`
+					: `CREATE TRIGGER ${name}_${event} BEFORE ${event} ON ${this.table} FOR EACH ROW ` +
+						`SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = ${literal}`,
+			),
+		);
+	}
+
+	/** Put a view in the session table's place whose rows fail to read with an error quoting `message`. */
+	failReads(message: string): Promise<void> {
+		const real = `${this.table}_real`;
+		const fail = `${this.table}_fail`;
+		const view = (expression: string): string =>
+			`CREATE VIEW ${this.table} AS SELECT path, mtime_ms, ${expression} AS byte_len, title, title_source, ` +
+			`title_updated_at, content FROM ${real}`;
+		if (this.adapter === "sqlite") {
+			// A view over a table dropped since fails to read, naming that table.
+			const named = `"${message.replaceAll('"', '""')}"`;
+			return this.run(
+				[
+					`ALTER TABLE ${this.table} RENAME TO ${real}`,
+					`CREATE TABLE ${named} (path TEXT, mtime_ms INTEGER, byte_len INTEGER, title TEXT, ` +
+						"title_source TEXT, title_updated_at TEXT, content TEXT)",
+					`CREATE VIEW ${this.table} AS SELECT * FROM ${named}`,
+					`DROP TABLE ${named}`,
+				],
+				`DROP TABLE IF EXISTS ${real}`,
+				`DROP VIEW IF EXISTS ${this.table}`,
+			);
+		}
+		const literal = `'${message.replaceAll("'", "''")}'`;
+		if (this.adapter === "mysql") {
+			return this.run(
+				[
+					`RENAME TABLE ${this.table} TO ${real}`,
+					`CREATE FUNCTION ${fail}(v BIGINT) RETURNS BIGINT DETERMINISTIC BEGIN ` +
+						`SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = ${literal}; RETURN v; END`,
+					view(`${fail}(byte_len)`),
+				],
+				`DROP TABLE IF EXISTS ${real}`,
+				`DROP FUNCTION IF EXISTS ${fail}`,
+				`DROP VIEW IF EXISTS ${this.table}`,
+			);
+		}
+		return this.run(
+			[
+				`ALTER TABLE ${this.table} RENAME TO ${real}`,
+				`CREATE FUNCTION ${fail}(v bigint) RETURNS bigint LANGUAGE plpgsql AS ` +
+					`$$ BEGIN RAISE EXCEPTION USING MESSAGE = ${literal}; END $$`,
+				view(`${fail}(byte_len)`),
+			],
+			`DROP TABLE IF EXISTS ${real}`,
+			`DROP FUNCTION IF EXISTS ${fail}(bigint)`,
+			`DROP VIEW IF EXISTS ${this.table}`,
+		);
+	}
+
+	async [Symbol.asyncDispose](): Promise<void> {
+		for (const drop of this.#drops.reverse()) await this.client.unsafe(drop);
+		await this.client.end();
+	}
+}
 
 /** The rejection of `promise`, which must reject. */
 async function failure(promise: Promise<unknown>): Promise<unknown> {
@@ -375,56 +435,9 @@ async function failure(promise: Promise<unknown>): Promise<unknown> {
 	throw new Error("expected the call to fail");
 }
 
-/** Statements that make every INSERT and UPDATE of the session table fail with `message`. */
-function refuseWritesStatements(adapter: Dialect, message: string): string[] {
-	const literal = `'${message.replaceAll("'", "''")}'`;
-	if (adapter === "postgres") {
-		return [
-			"CREATE FUNCTION omp_cfg_refuse_write() RETURNS trigger LANGUAGE plpgsql AS " +
-				`$$ BEGIN RAISE EXCEPTION USING MESSAGE = ${literal}; END $$`,
-			"CREATE TRIGGER omp_cfg_refuse_write BEFORE INSERT OR UPDATE ON omp_session_files " +
-				"FOR EACH ROW EXECUTE FUNCTION omp_cfg_refuse_write()",
-		];
-	}
-	return ["INSERT", "UPDATE"].map(event =>
-		adapter === "sqlite"
-			? `CREATE TRIGGER omp_cfg_refuse_${event} BEFORE ${event} ON omp_session_files BEGIN SELECT RAISE(ABORT, ${literal}); END`
-			: `CREATE TRIGGER omp_cfg_refuse_${event} BEFORE ${event} ON omp_session_files FOR EACH ROW ` +
-				`SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = ${literal}`,
-	);
-}
-
-/** Statements that put a view in the session table's place whose rows fail to read with an error quoting `message`. */
-function failReadsStatements(adapter: Dialect, message: string): string[] {
-	if (adapter === "sqlite") {
-		// A view over a table dropped since fails to read, naming that table.
-		const table = `"${message.replaceAll('"', '""')}"`;
-		return [
-			"ALTER TABLE omp_session_files RENAME TO omp_session_files_real",
-			`CREATE TABLE ${table} (path TEXT, mtime_ms INTEGER, byte_len INTEGER, title TEXT, ` +
-				"title_source TEXT, title_updated_at TEXT, content TEXT)",
-			`CREATE VIEW omp_session_files AS SELECT * FROM ${table}`,
-			`DROP TABLE ${table}`,
-		];
-	}
-	const literal = `'${message.replaceAll("'", "''")}'`;
-	const view =
-		"CREATE VIEW omp_session_files AS SELECT path, mtime_ms, omp_cfg_fail(byte_len) AS byte_len, title, " +
-		"title_source, title_updated_at, content FROM omp_session_files_real";
-	if (adapter === "mysql") {
-		return [
-			"RENAME TABLE omp_session_files TO omp_session_files_real",
-			"CREATE FUNCTION omp_cfg_fail(v BIGINT) RETURNS BIGINT DETERMINISTIC BEGIN " +
-				`SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = ${literal}; RETURN v; END`,
-			view,
-		];
-	}
-	return [
-		"ALTER TABLE omp_session_files RENAME TO omp_session_files_real",
-		"CREATE FUNCTION omp_cfg_fail(v bigint) RETURNS bigint LANGUAGE plpgsql AS " +
-			`$$ BEGIN RAISE EXCEPTION USING MESSAGE = ${literal}; END $$`,
-		view,
-	];
+/** `printed`, which must hold none of `secrets`, as a value whose mismatch names `label`. */
+function expectNoSecret(label: string, printed: string, secrets: readonly string[]): void {
+	for (const secret of secrets) expect({ label, leaks: printed.includes(secret) }).toEqual({ label, leaks: false });
 }
 
 const DRIVER_CODES: Record<Dialect, RegExp> = {
@@ -433,57 +446,62 @@ const DRIVER_CODES: Record<Dialect, RegExp> = {
 	mysql: /^ERR_MYSQL_/,
 };
 
-for (const { adapter, url } of STARTUP_BACKENDS) {
-	describe.skipIf(!url)(`the configured SQL storage after start-up (${adapter})`, () => {
+for (const { adapter, url } of STORE_BACKENDS) {
+	describe.skipIf(!url)(`the configured SQL storage's diagnostics (${adapter})`, () => {
+		it("refuses a failed start-up statement without the connection string or its password", async () => {
+			await using own = new OwnTable(adapter, url ?? "");
+			const setup = await own.connect();
+			try {
+				await (await SqlSessionStorage.create({ client: setup.client, table: own.table })).drain();
+			} finally {
+				await setup.client.end();
+			}
+			// A row from before `byte_len`: start-up backfills it, and the backfill fails.
+			await own.sql(`INSERT INTO ${own.table} (path, content, mtime_ms) VALUES ('sessions/-p/a.jsonl', 'a', 1)`);
+			await own.refuseWrites(`connect to ${own.dsn}${own.password ? ` as ${own.password}` : ""}`);
+			const connection = await own.connect();
+
+			const error = await failure(openSessionSqlStorage(connection, { table: own.table }));
+
+			expect(error).toBeInstanceOf(SessionStorageConfigError);
+			expect(String((error as Error).message)).toStartWith(
+				`OMP_SESSION_SQL_DSN_FILE names ${connection.dsnFile}, but the session database could not be opened: connect to <redacted>`,
+			);
+			// The fatal handler prints the error with its causes.
+			expectNoSecret("start-up refusal", Bun.inspect(error), own.secrets);
+		});
+
 		it("raises database errors without the connection string or its password, and its own errors unchanged", async () => {
 			const settingsState = beginSettingsTest();
-			const { dsn, name, create, drop } = isolatedDatabase(adapter, url ?? "");
-			const admin = create === undefined ? undefined : new SQL(url ?? "", { max: 1 });
-			if (create) await admin?.unsafe(create);
-			const setup = new SQL(dsn, { max: 1 });
-			const bind = (n: number): string => (adapter === "postgres" ? `$${n}` : "?");
+			await using own = new OwnTable(adapter, url ?? "");
+			const connection = await own.connect();
 			try {
-				if (adapter !== "sqlite") {
-					const [row] = (await setup.unsafe(
-						adapter === "postgres" ? "SELECT current_schema() AS name" : "SELECT DATABASE() AS name",
-					)) as Array<{ name: string | null }>;
-					expect(row?.name).toBe(name);
-				}
 				setAgentDir(makeTempDir("@pi-session-storage-agent-"));
-				const storage = await resolveSessionStorage({
-					settings: Settings.isolated(),
-					env: { OMP_SESSION_STORAGE: "sql", OMP_SESSION_SQL_DSN_FILE: await writeDsnFile(`${dsn}\n`) },
-				});
-				if (!(storage instanceof SqlSessionStorage)) throw new Error("expected the SQL storage");
+				const storage = await openSessionSqlStorage(connection, { table: own.table });
 				const dir = "/review/root/-p";
 				for (const file of ["kept", "other", "conflict"])
 					await storage.writeText(`${dir}/${file}.jsonl`, `${file}\n`);
 				await storage.drain();
-				const password = new URL(dsn).password;
-				const secrets = password ? [dsn, password] : [dsn];
-				const leak = `connect to ${dsn}${password ? ` as ${password}` : ""}`;
+				const leak = `connect to ${own.dsn}${own.password ? ` as ${own.password}` : ""}`;
 				const warned = vi.spyOn(logger, "warn").mockImplementation(() => {});
 				const logged = vi.spyOn(logger, "error").mockImplementation(() => {});
 
 				// Errors the store raises on purpose leave as they are: another client changed
 				// the row behind this store's view, and another client took the destination key.
-				await setup.unsafe(`UPDATE omp_session_files SET byte_len = 999 WHERE path = ${bind(1)}`, [
-					`abs:${dir}/conflict.jsonl`,
-				]);
+				await own.sql(`UPDATE ${own.table} SET byte_len = 999 WHERE path = ?`, [`abs:${dir}/conflict.jsonl`]);
 				expect(
 					await failure(storage.writeTextAtomic(`${dir}/conflict.jsonl`, "x\n", { expectedSize: 9 })),
 				).toBeInstanceOf(SessionWriteConflictError);
-				await setup.unsafe(
-					`INSERT INTO omp_session_files (path, content, mtime_ms, byte_len) VALUES (${bind(1)}, 'taken', 1, 5)`,
-					[`abs:${dir}/taken.jsonl`],
-				);
+				await own.sql(`INSERT INTO ${own.table} (path, content, mtime_ms, byte_len) VALUES (?, 'taken', 1, 5)`, [
+					`abs:${dir}/taken.jsonl`,
+				]);
 				expect(await failure(storage.renameNoReplace(`${dir}/kept.jsonl`, `${dir}/taken.jsonl`))).toMatchObject({
 					code: "EEXIST",
 					path: `${dir}/taken.jsonl`,
 				});
 
 				// The database's own errors quote the connection string and the password.
-				for (const statement of refuseWritesStatements(adapter, leak)) await setup.unsafe(statement);
+				await own.refuseWrites(leak);
 				const writer = storage.openWriter(`${dir}/kept.jsonl`);
 				const errors: Record<string, unknown> = {
 					append: await failure(writer.append("appended\n")),
@@ -510,7 +528,7 @@ for (const { adapter, url } of STARTUP_BACKENDS) {
 				expect(persistence.length).toBeGreaterThan(0);
 				errors["SessionManager persistence"] = persistence[0];
 
-				for (const statement of failReadsStatements(adapter, leak)) await setup.unsafe(statement);
+				await own.failReads(leak);
 				errors.refresh = await failure(storage.refresh());
 				// The picker and the listings refresh first, and list nothing when that fails.
 				expect(await listSessions(dir, storage)).toEqual([]);
@@ -529,22 +547,88 @@ for (const { adapter, url } of STARTUP_BACKENDS) {
 						operation,
 						redacted: true,
 					});
-					for (const secret of secrets) {
-						expect({ operation, leaks: printed.includes(secret) }).toEqual({ operation, leaks: false });
-					}
+					expectNoSecret(operation, printed, own.secrets);
 				}
 				// The persistence notice is logged once; no warning quotes the connection string.
 				const logs = JSON.stringify([...warned.mock.calls, ...logged.mock.calls]);
 				expect(logs).toContain("connect to <redacted>");
-				for (const secret of secrets) expect(logs.includes(secret)).toBe(false);
+				expectNoSecret("logs", logs, own.secrets);
 			} finally {
 				restoreSettingsTestState(settingsState);
-				await setup.end();
-				if (admin) {
-					if (drop) await admin.unsafe(drop);
-					await admin.end();
-				}
+				await connection.client.end();
 			}
 		}, 60_000);
+
+		/**
+		 * The configured storage over a table that holds `key`, and the
+		 * diagnostic `provoke` gets from it, printed as the logs and the fatal
+		 * handler print it. The stored key never changes.
+		 */
+		async function rowDiagnostic(
+			key: (own: OwnTable) => string,
+			byteLen: number | null,
+			provoke: (storage: SqlSessionStorage, connection: SessionSqlConnection, own: OwnTable) => Promise<unknown>,
+		): Promise<{ printed: string; secrets: string[] }> {
+			await using own = new OwnTable(adapter, url ?? "");
+			const connection = await own.connect();
+			try {
+				const storage = await openSessionSqlStorage(connection, { table: own.table });
+				const stored = key(own);
+				await own.sql(`INSERT INTO ${own.table} (path, content, mtime_ms, byte_len) VALUES (?, 'safe', 1, ?)`, [
+					stored,
+					byteLen,
+				]);
+				const printed = await provoke(storage, connection, own);
+				const keys = (await own.sql(`SELECT path FROM ${own.table}`)) as Array<{ path: string }>;
+				expect(keys.map(row => row.path)).toEqual([stored]);
+				return { printed: typeof printed === "string" ? printed : Bun.inspect(printed), secrets: own.secrets };
+			} finally {
+				vi.restoreAllMocks();
+				await connection.client.end();
+			}
+		}
+
+		it("logs a skipped row key that quotes the connection string redacted", async () => {
+			const { printed, secrets } = await rowDiagnostic(
+				own => `sessions/../${own.dsn}`,
+				4,
+				async storage => {
+					const warned = vi.spyOn(logger, "warn").mockImplementation(() => {});
+					await storage.refresh();
+					const warning = warned.mock.calls.find(([message]) => String(message).includes("skipped rows"));
+					expect(warning?.[1]).toMatchObject({ count: 1, example: "sessions/../<redacted>" });
+					return JSON.stringify(warned.mock.calls);
+				},
+			);
+			expectNoSecret("skipped-row warning", printed, secrets);
+		});
+
+		it("refuses a row with no byte_len whose key quotes a secret, redacted", async () => {
+			const { printed, secrets } = await rowDiagnostic(
+				own => (adapter === "sqlite" ? `sessions/${own.dsn}` : `sessions/${own.password}.jsonl`),
+				null,
+				async storage => {
+					const refusal = await failure(storage.refresh());
+					expect(String((refusal as Error).message)).toContain('row "sessions/<redacted>');
+					return refusal;
+				},
+			);
+			expectNoSecret("unmeasured-row refusal", printed, secrets);
+		});
+
+		it("refuses at start-up a legacy row key that quotes the connection string, redacted", async () => {
+			const { printed, secrets } = await rowDiagnostic(
+				own => own.dsn,
+				4,
+				async (_storage, connection, own) => {
+					const refusal = await failure(
+						SqlSessionStorage.create({ client: connection.client, table: own.table, redact: connection.redact }),
+					);
+					expect(String((refusal as Error).message)).toContain('holds the row key "<redacted>"');
+					return refusal;
+				},
+			);
+			expectNoSecret("legacy-key refusal", printed, secrets);
+		});
 	});
 }

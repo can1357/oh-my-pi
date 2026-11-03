@@ -1034,6 +1034,44 @@ for (const { adapter, url } of BACKENDS) {
 			},
 			TIMEOUT_MS,
 		);
+
+		it(
+			"prints row keys that quote the connection string or its password redacted, changing nothing",
+			async () => {
+				await using db = await connectCommandDb();
+				const dir = await configure(db);
+				try {
+					const password = new URL(db.url).password;
+					const keys = [`sessions/../${db.url}`, ...(password ? [`relative/${password}.jsonl`] : [])];
+					for (const key of keys) await db.insertSession(key, ["safe\n"]);
+					const before = await db.snapshot();
+
+					for (const [action, dryRun] of [
+						["migrate-keys", false],
+						["rollback-keys", true],
+					] as const) {
+						const result = await run(db, action, [ROOT], dryRun);
+
+						expect({ action, exitCode: result.exitCode }).toEqual({ action, exitCode: 1 });
+						expect(result.stdout).toContain('    "sessions/../<redacted>"\n');
+						if (action === "migrate-keys" && password) {
+							expect(result.stdout).toContain('    "relative/<redacted>.jsonl"\n');
+						}
+						const printed = result.stdout + result.stderr;
+						expect({ action, leaksUrl: printed.includes(db.url) }).toEqual({ action, leaksUrl: false });
+						if (password)
+							expect({ action, leaksPassword: printed.includes(password) }).toEqual({
+								action,
+								leaksPassword: false,
+							});
+					}
+					expect(await db.snapshot()).toEqual(before);
+				} finally {
+					dir.removeSync();
+				}
+			},
+			TIMEOUT_MS,
+		);
 	});
 }
 

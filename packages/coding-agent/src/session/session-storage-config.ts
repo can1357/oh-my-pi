@@ -65,10 +65,28 @@ export async function resolveSessionStorage({ settings, env }: ResolveSessionSto
 		throw new SessionStorageConfigError(`${source} is ${JSON.stringify(kind)}; expected "file" or "sql"`);
 	}
 
-	const connection = await openSessionSqlClient({ settings, env });
+	return openSessionSqlStorage(await openSessionSqlClient({ settings, env }));
+}
+
+/**
+ * The store `session.storage: sql` opens on `connection`. Every database
+ * error it raises, and every diagnostic it builds from a row key, has the
+ * connection string's secrets redacted ({@link SessionSqlConnection.redact}),
+ * because notices, logs and the fatal handler print them. A failure to start
+ * closes the client and refuses as {@link sessionDatabaseError}. `table`
+ * overrides the default table, for a test that shares its database with
+ * other clients.
+ */
+export async function openSessionSqlStorage(
+	connection: SessionSqlConnection,
+	options: { table?: string } = {},
+): Promise<SqlSessionStorage> {
 	try {
-		// The store's later database errors reach notices and logs; none may quote the connection string.
-		return await SqlSessionStorage.create({ client: connection.client, redactError: connection.redact });
+		return await SqlSessionStorage.create({
+			client: connection.client,
+			table: options.table,
+			redact: connection.redact,
+		});
 	} catch (err) {
 		void connection.client.end().catch(() => undefined);
 		throw sessionDatabaseError(connection, err);
@@ -85,15 +103,28 @@ export interface SessionSqlConnection {
 	/**
 	 * `text` with the connection string's secrets replaced by `<redacted>`
 	 * (see {@link connectionStringRedactor}). Every message built from an
-	 * error of `client` goes through it, because a database error can quote
-	 * any text, the connection string included.
+	 * error of `client` or from its rows goes through it, because a database
+	 * error or a row can quote any text, the connection string included.
 	 */
 	redact: (text: string) => string;
 }
 
 const REDACTED = "<redacted>";
-/** A password shorter than this would match ordinary words, so it is replaced only as `user:password`. */
-const MIN_BARE_PASSWORD_LENGTH = 4;
+/**
+ * A password at least this long is replaced wherever it occurs. A shorter one
+ * would also match inside ordinary words (`pw` in `pwd`), so it is replaced
+ * where it stands as a token (see {@link WORD_CHARACTER}).
+ */
+const MIN_SUBSTRING_PASSWORD_LENGTH = 4;
+/**
+ * The characters that may not touch a short password for it to count as a
+ * token: a Unicode letter, mark or digit, or `_`. Any other character ends a
+ * token: space, a quote, `=`, `:`, `/`, `@`, `,`, `-`, and `.`, so that a
+ * password ending a sentence (`password is x.y.`) is still replaced. Error
+ * text quotes a password between such characters; one directly beside a
+ * letter or digit is part of a longer word, which reveals nothing of it.
+ */
+const WORD_CHARACTER = "[\\p{L}\\p{M}\\p{N}_]";
 
 /** `text` as written and, when that differs and is valid, percent-decoded (`+` read as a space when `plus`). */
 function spellings(text: string, plus = false): string[] {
@@ -105,17 +136,24 @@ function spellings(text: string, plus = false): string[] {
 	}
 }
 
+/** `text` as a regular-expression pattern (`u` flag) that matches it literally. */
+function literalPattern(text: string): string {
+	return text.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
+}
+
 /**
  * Replace, in one pass over a message, every spelling of the secrets in the
  * connection string `dsn`: the string itself, and when it parses as a URL,
  * its normalized form, its password and any `…pass…` query parameter, each
- * as written and percent-decoded, and `user:password` in each spelling. The
- * longest secret wins, so one inside another goes whole, and the marker a
- * replacement writes is never searched again. A password shorter than
- * {@link MIN_BARE_PASSWORD_LENGTH} is replaced only as `user:password`.
+ * as written and percent-decoded, and `user:password` in each spelling. A
+ * password shorter than {@link MIN_SUBSTRING_PASSWORD_LENGTH} is replaced
+ * where it stands as a token, every other secret wherever it occurs. The
+ * longest secret wins, so one inside another goes whole, and a `<redacted>`
+ * already in the text is kept as it is, so redacting twice changes nothing.
  */
 function connectionStringRedactor(dsn: string): (text: string) => string {
-	const secrets = new Set<string>([dsn]);
+	/** Each secret, and whether it is replaced only as a token. */
+	const secrets = new Map<string, boolean>([[dsn, false]]);
 	let url: URL | undefined;
 	try {
 		url = new URL(dsn);
@@ -123,7 +161,7 @@ function connectionStringRedactor(dsn: string): (text: string) => string {
 		url = undefined;
 	}
 	if (url) {
-		secrets.add(url.href);
+		secrets.set(url.href, false);
 		const passwords = url.password ? spellings(url.password) : [];
 		for (const parameter of url.search.slice(1).split("&")) {
 			const separator = parameter.indexOf("=");
@@ -132,18 +170,17 @@ function connectionStringRedactor(dsn: string): (text: string) => string {
 			if (/pass/i.test(name)) passwords.push(...spellings(parameter.slice(separator + 1), true));
 		}
 		for (const password of passwords) {
-			if (password.length >= MIN_BARE_PASSWORD_LENGTH) secrets.add(password);
-			for (const user of spellings(url.username)) secrets.add(`${user}:${password}`);
+			if (!secrets.has(password)) secrets.set(password, [...password].length < MIN_SUBSTRING_PASSWORD_LENGTH);
+			for (const user of spellings(url.username)) secrets.set(`${user}:${password}`, false);
 		}
 	}
-	const pattern = new RegExp(
-		[...secrets]
-			.filter(secret => secret.length > 0)
-			.sort((a, b) => b.length - a.length)
-			.map(secret => secret.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
-			.join("|"),
-		"g",
-	);
+	const alternatives = [...secrets]
+		.filter(([secret]) => secret.length > 0)
+		.sort(([a], [b]) => b.length - a.length)
+		.map(([secret, token]) =>
+			token ? `(?<!${WORD_CHARACTER})${literalPattern(secret)}(?!${WORD_CHARACTER})` : literalPattern(secret),
+		);
+	const pattern = new RegExp([literalPattern(REDACTED), ...alternatives].join("|"), "gu");
 	return text => text.replace(pattern, REDACTED);
 }
 
