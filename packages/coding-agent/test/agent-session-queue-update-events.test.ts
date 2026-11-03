@@ -377,7 +377,12 @@ describe("AgentSession queue_update events", () => {
 			// The claim counts as pending display input while preparation runs; the
 			// last announced snapshot must include it, never the transient empty queue
 			// from the dequeue that happened before the claim existed.
-			expect(target.getQueuedMessages()).toEqual({ steering: ["STEER_CUSTOM"], followUp: [], liveSteered: 0 });
+			expect(target.getQueuedMessages()).toEqual({
+				steering: ["STEER_CUSTOM"],
+				followUp: [],
+				liveSteered: 0,
+				agentSteeringNext: false,
+			});
 			expect(updates.at(-1)).toEqual(target.getQueuedMessages());
 
 			// A different queue arriving mid-preparation must not freeze the claimed
@@ -387,6 +392,7 @@ describe("AgentSession queue_update events", () => {
 				steering: ["STEER_CUSTOM"],
 				followUp: ["FOLLOW_CUSTOM"],
 				liveSteered: 0,
+				agentSteeringNext: false,
 			});
 
 			preparation.release();
@@ -394,14 +400,24 @@ describe("AgentSession queue_update events", () => {
 
 			// The steer is now delivered into the transcript, so it is no longer
 			// pending input. The follow-up queued during preparation still is.
-			expect(target.getQueuedMessages()).toEqual({ steering: [], followUp: ["FOLLOW_CUSTOM"], liveSteered: 0 });
+			expect(target.getQueuedMessages()).toEqual({
+				steering: [],
+				followUp: ["FOLLOW_CUSTOM"],
+				liveSteered: 0,
+				agentSteeringNext: false,
+			});
 			expect(updates.at(-1)).toEqual(target.getQueuedMessages());
 			expect(updates.at(-1)!.steering).toEqual([]);
 
 			releaseSecondCall.resolve();
 			await running;
 
-			expect(target.getQueuedMessages()).toEqual({ steering: [], followUp: [], liveSteered: 0 });
+			expect(target.getQueuedMessages()).toEqual({
+				steering: [],
+				followUp: [],
+				liveSteered: 0,
+				agentSteeringNext: false,
+			});
 			expect(updates.at(-1)).toEqual(target.getQueuedMessages());
 			expect(customOccurrences(target)).toEqual(["STEER_CUSTOM", "FOLLOW_CUSTOM"]);
 		} finally {
