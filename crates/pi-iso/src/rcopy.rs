@@ -11,7 +11,20 @@
 //! file-system magic; the caller pays full filesystem-copy cost up front
 //! and an `rm -rf` on teardown.
 
-use std::{fs::FileType, path::Path};
+use std::{
+	ffi::OsStr,
+	fmt,
+	fs::FileType,
+	io::{self, Write as _},
+	path::Path,
+	process::{Child, ChildStdin, Command, Output, Stdio},
+	sync::{
+		Arc, Mutex, PoisonError,
+		mpsc::{self, Receiver},
+	},
+	thread,
+	time::{Duration, Instant},
+};
 
 use async_trait::async_trait;
 
@@ -77,46 +90,20 @@ fn is_git_worktree(path: &Path) -> bool {
 }
 
 fn git_worktree_add(lower: &Path, merged: &Path) -> IsoResult<()> {
-	let output = std::process::Command::new("git")
-		.arg("-C")
-		.arg(lower)
-		.args(["worktree", "add", "--detach"])
-		.arg(merged)
-		.arg("HEAD")
-		.stdin(std::process::Stdio::null())
-		.stdout(std::process::Stdio::piped())
-		.stderr(std::process::Stdio::piped())
-		.output()
-		.map_err(|err| {
-			if err.kind() == std::io::ErrorKind::NotFound {
-				IsoError::unavailable(
-					"`git` not on PATH; rcopy cannot materialise a worktree from a git source",
-				)
-			} else {
-				IsoError::other(format!("spawn git worktree add: {err}"))
-			}
-		})?;
-	if output.status.success() {
-		return Ok(());
-	}
-	Err(command_failed("git worktree add", output.status.code().unwrap_or(-1), &output.stderr))
+	let args = [
+		OsStr::new("worktree"),
+		OsStr::new("add"),
+		OsStr::new("--detach"),
+		merged.as_os_str(),
+		OsStr::new("HEAD"),
+	];
+	checked("git worktree add", run_git(lower, &args, None)?).map(drop)
 }
 
 fn git_worktree_remove(merged: &Path) -> IsoResult<()> {
-	let output = std::process::Command::new("git")
-		.arg("-C")
-		.arg(merged)
-		.args(["worktree", "remove", "--force"])
-		.arg(merged)
-		.stdin(std::process::Stdio::null())
-		.stdout(std::process::Stdio::piped())
-		.stderr(std::process::Stdio::piped())
-		.output()
-		.map_err(|err| IsoError::other(format!("spawn git worktree remove: {err}")))?;
-	if output.status.success() {
-		return Ok(());
-	}
-	Err(command_failed("git worktree remove", output.status.code().unwrap_or(-1), &output.stderr))
+	let args =
+		[OsStr::new("worktree"), OsStr::new("remove"), OsStr::new("--force"), merged.as_os_str()];
+	checked("git worktree remove", run_git(merged, &args, None)?).map(drop)
 }
 
 /// Replicate `lower`'s live working tree on top of a freshly-checked-out
@@ -136,13 +123,13 @@ fn git_worktree_remove(merged: &Path) -> IsoResult<()> {
 /// contract ("merged mirrors lower's live working tree") holds for
 /// rcopy on git inputs too.
 fn seed_dirty_state(lower: &Path, merged: &Path) -> IsoResult<()> {
-	let staged = git_capture(lower, &["diff", "--binary", "--no-color", "--cached"])?;
+	let staged = Arc::new(git_capture(lower, &["diff", "--binary", "--no-color", "--cached"])?);
 	if !staged.is_empty() {
 		git_apply(merged, &staged, &["--cached"])?;
 		git_apply(merged, &staged, &[])?;
 	}
 
-	let unstaged = git_capture(lower, &["diff", "--binary", "--no-color"])?;
+	let unstaged = Arc::new(git_capture(lower, &["diff", "--binary", "--no-color"])?);
 	if !unstaged.is_empty() {
 		git_apply(merged, &unstaged, &[])?;
 	}
@@ -167,94 +154,224 @@ fn seed_dirty_state(lower: &Path, merged: &Path) -> IsoResult<()> {
 }
 
 fn git_capture(cwd: &Path, args: &[&str]) -> IsoResult<Vec<u8>> {
-	let output = std::process::Command::new("git")
+	checked(format_args!("git {}", args.join(" ")), run_git(cwd, args, None)?)
+}
+
+fn git_apply(cwd: &Path, patch: &Arc<Vec<u8>>, extra: &[&str]) -> IsoResult<()> {
+	let mut args = vec!["apply", "--binary", "--whitespace=nowarn"];
+	args.extend_from_slice(extra);
+	checked("git apply", run_git(cwd, &args, Some(Arc::clone(patch)))?).map(drop)
+}
+
+/// Stdout of a successful `output`; [`command_failed`] labelled `what`
+/// otherwise.
+fn checked(what: impl fmt::Display, output: Output) -> IsoResult<Vec<u8>> {
+	if output.status.success() {
+		return Ok(output.stdout);
+	}
+	Err(command_failed(what, output.status.code().unwrap_or(-1), &output.stderr))
+}
+
+/// Deadlines for one `git` invocation, see [`GIT_LIMITS`].
+#[derive(Clone, Copy)]
+struct Limits {
+	/// How long the child may run before it is killed.
+	exit:  Duration,
+	/// How long stdout/stderr may stay open once the child has exited.
+	drain: Duration,
+}
+
+/// Limits for every rcopy `git` call.
+///
+/// `exit` is generous because a Windows checkout of a very large repository
+/// legitimately takes minutes; it exists so a `git` that never exits fails the
+/// isolation instead of parking a blocking thread, and the task that awaits
+/// it, forever (#17901). `drain` covers pipes that outlive the child: every
+/// process holding an inherited write end keeps them open, whether a lingering
+/// git grandchild or, on Windows, where handle inheritance is process-wide, an
+/// unrelated child the host spawned while the pipes were inheritable. The
+/// child's output is complete once it exits, so EOF is not awaited past
+/// `drain`.
+const GIT_LIMITS: Limits = Limits { exit: Duration::from_mins(10), drain: Duration::from_secs(5) };
+
+/// Exit-status poll interval while waiting under [`Limits::exit`].
+const EXIT_POLL: Duration = Duration::from_millis(10);
+
+/// Run `git -C <cwd> <args>` under [`GIT_LIMITS`], feeding `stdin` when
+/// given. A non-zero exit is returned, not raised; see [`run_program`] for
+/// the errors.
+fn run_git(
+	cwd: &Path,
+	args: &[impl AsRef<OsStr>],
+	stdin: Option<Arc<Vec<u8>>>,
+) -> IsoResult<Output> {
+	run_program(Path::new("git"), cwd, args, stdin, GIT_LIMITS)
+}
+
+/// [`run_git`] with an explicit program and limits.
+///
+/// # Errors
+/// - [`IsoError::Unavailable`] when `program` is not on `PATH`.
+/// - [`IsoError::Other`] when the child cannot be spawned or waited on, its
+///   pipe threads cannot start, it is still running after `limits.exit` (it is
+///   killed; on Windows its descendants may survive), or it exits 0 without
+///   consuming all of `stdin`.
+fn run_program(
+	program: &Path,
+	cwd: &Path,
+	args: &[impl AsRef<OsStr>],
+	stdin: Option<Arc<Vec<u8>>>,
+	limits: Limits,
+) -> IsoResult<Output> {
+	let label = || {
+		let mut label = String::from("git");
+		for arg in args {
+			label.push(' ');
+			label.push_str(&arg.as_ref().to_string_lossy());
+		}
+		label
+	};
+	let mut child = Command::new(program)
 		.arg("-C")
 		.arg(cwd)
 		.args(args)
-		.stdin(std::process::Stdio::null())
-		.stdout(std::process::Stdio::piped())
-		.stderr(std::process::Stdio::piped())
-		.output()
-		.map_err(|err| {
-			if err.kind() == std::io::ErrorKind::NotFound {
-				IsoError::unavailable(
-					"`git` not on PATH; rcopy cannot seed dirty state from a git source",
-				)
-			} else {
-				IsoError::other(format!("spawn git {}: {err}", args.first().unwrap_or(&"<args>")))
-			}
-		})?;
-	if !output.status.success() {
-		return Err(command_failed(
-			format_args!("git {}", args.join(" ")),
-			output.status.code().unwrap_or(-1),
-			&output.stderr,
-		));
-	}
-	Ok(output.stdout)
-}
-
-fn git_apply(cwd: &Path, patch: &[u8], extra: &[&str]) -> IsoResult<()> {
-	git_apply_with_program(Path::new("git"), cwd, patch, extra)
-}
-
-fn git_apply_with_program(
-	program: &Path,
-	cwd: &Path,
-	patch: &[u8],
-	extra: &[&str],
-) -> IsoResult<()> {
-	use std::io::{Read as _, Write as _};
-	let mut child = std::process::Command::new(program)
-		.arg("-C")
-		.arg(cwd)
-		.args(["apply", "--binary", "--whitespace=nowarn"])
-		.args(extra)
-		.stdin(std::process::Stdio::piped())
-		.stdout(std::process::Stdio::null())
-		.stderr(std::process::Stdio::piped())
+		.stdin(if stdin.is_some() {
+			Stdio::piped()
+		} else {
+			Stdio::null()
+		})
+		.stdout(Stdio::piped())
+		.stderr(Stdio::piped())
 		.spawn()
 		.map_err(|err| {
-			if err.kind() == std::io::ErrorKind::NotFound {
+			if err.kind() == io::ErrorKind::NotFound {
 				IsoError::unavailable(
-					"`git` not on PATH; rcopy cannot seed dirty state from a git source",
+					"`git` not on PATH; rcopy cannot materialise a worktree from a git source",
 				)
 			} else {
-				IsoError::other(format!("spawn git apply: {err}"))
+				IsoError::other(format!("spawn {}: {err}", label()))
 			}
 		})?;
-	let mut stderr = child
-		.stderr
-		.take()
-		.ok_or_else(|| IsoError::other("git apply: child stderr was not piped".to_string()))?;
-	let stderr_reader = std::thread::Builder::new()
-		.name("pi-iso-git-apply-stderr".to_string())
-		.spawn(move || {
-			let mut bytes = Vec::new();
-			stderr.read_to_end(&mut bytes).map(|_| bytes)
-		})
-		.map_err(|err| IsoError::other(format!("spawn git apply stderr reader: {err}")))?;
-	let write_result = {
-		let mut stdin = child
-			.stdin
-			.take()
-			.ok_or_else(|| IsoError::other("git apply: child stdin was not piped".to_string()))?;
-		let result = stdin.write_all(patch);
-		drop(stdin);
-		result
+	let pipes = Pipes::attach(&mut child, stdin).map_err(|err| {
+		reap(&mut child);
+		IsoError::other(format!("{}: start pipe threads: {err}", label()))
+	})?;
+	let started = Instant::now();
+	let status = loop {
+		match child.try_wait() {
+			Ok(Some(status)) => break status,
+			Ok(None) if started.elapsed() < limits.exit => thread::sleep(EXIT_POLL),
+			Ok(None) => {
+				reap(&mut child);
+				return Err(IsoError::other(format!(
+					"{} did not exit within {:?}; killed it",
+					label(),
+					limits.exit
+				)));
+			},
+			Err(err) => {
+				reap(&mut child);
+				return Err(IsoError::other(format!("wait {}: {err}", label())));
+			},
+		}
 	};
-	let status = child
-		.wait()
-		.map_err(|err| IsoError::other(format!("wait git apply: {err}")))?;
-	let stderr = stderr_reader
-		.join()
-		.map_err(|_| IsoError::other("wait git apply: stderr reader panicked".to_string()))?
-		.map_err(|err| IsoError::other(format!("read git apply stderr: {err}")))?;
-	if status.success() {
-		write_result.map_err(|err| IsoError::other(format!("write patch to git apply: {err}")))?;
-		return Ok(());
+	let deadline = Instant::now() + limits.drain;
+	let stdout = pipes.stdout.collect(deadline);
+	let stderr = pipes.stderr.collect(deadline);
+	if status.success()
+		&& let Some(written) = pipes.stdin
+	{
+		match written.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+			Ok(Ok(())) => {},
+			Ok(Err(err)) => return Err(IsoError::other(format!("write stdin to {}: {err}", label()))),
+			Err(_) => {
+				return Err(IsoError::other(format!("{} exited before reading all of stdin", label())));
+			},
+		}
 	}
-	Err(command_failed("git apply", status.code().unwrap_or(-1), &stderr))
+	Ok(Output { status, stdout, stderr })
+}
+
+/// Kill `child` and reap it. Only the direct child: on Windows a killed `git`
+/// launcher leaves its descendants running.
+fn reap(child: &mut Child) {
+	let _ = child.kill();
+	let _ = child.wait();
+}
+
+/// Helper threads that own a child's pipes, so a pipe that never closes parks
+/// only its thread, never the caller.
+struct Pipes {
+	stdout: Drain,
+	stderr: Drain,
+	/// Result of writing stdin, when the child was given any.
+	stdin:  Option<Receiver<io::Result<()>>>,
+}
+
+impl Pipes {
+	fn attach(child: &mut Child, stdin: Option<Arc<Vec<u8>>>) -> io::Result<Self> {
+		let stdout = Drain::spawn("pi-iso-git-stdout", child.stdout.take())?;
+		let stderr = Drain::spawn("pi-iso-git-stderr", child.stderr.take())?;
+		let stdin = match (stdin, child.stdin.take()) {
+			(Some(bytes), Some(pipe)) => Some(feed(pipe, bytes)?),
+			_ => None,
+		};
+		Ok(Self { stdout, stderr, stdin })
+	}
+}
+
+/// Write `bytes` to `pipe` on a helper thread, then close it.
+fn feed(mut pipe: ChildStdin, bytes: Arc<Vec<u8>>) -> io::Result<Receiver<io::Result<()>>> {
+	let (tx, rx) = mpsc::channel();
+	thread::Builder::new()
+		.name("pi-iso-git-stdin".into())
+		.spawn(move || {
+			// A child that exits early closes the pipe; its exit status is the
+			// answer, so the receiver may already be gone.
+			let _ = tx.send(pipe.write_all(&bytes));
+		})?;
+	Ok(rx)
+}
+
+/// One child output stream, accumulated on a helper thread.
+struct Drain {
+	bytes: Arc<Mutex<Vec<u8>>>,
+	/// Disconnects when the thread reaches EOF.
+	eof:   Receiver<()>,
+}
+
+impl Drain {
+	fn spawn(name: &str, stream: Option<impl io::Read + Send + 'static>) -> io::Result<Self> {
+		let bytes = Arc::new(Mutex::new(Vec::new()));
+		let (done, eof) = mpsc::channel();
+		if let Some(mut stream) = stream {
+			let sink = Arc::clone(&bytes);
+			thread::Builder::new().name(name.into()).spawn(move || {
+				let _done = done;
+				let mut buf = [0u8; 8 * 1024];
+				loop {
+					match stream.read(&mut buf) {
+						Ok(0) => break,
+						Ok(n) => sink
+							.lock()
+							.unwrap_or_else(PoisonError::into_inner)
+							.extend_from_slice(&buf[..n]),
+						Err(err) if err.kind() == io::ErrorKind::Interrupted => {},
+						Err(_) => break,
+					}
+				}
+			})?;
+		}
+		Ok(Self { bytes, eof })
+	}
+
+	/// Everything read by EOF or `deadline`, whichever comes first.
+	fn collect(self, deadline: Instant) -> Vec<u8> {
+		let _ = self
+			.eof
+			.recv_timeout(deadline.saturating_duration_since(Instant::now()));
+		std::mem::take(&mut *self.bytes.lock().unwrap_or_else(PoisonError::into_inner))
+	}
 }
 
 /// Copy a single path (regular file, symlink, or directory) from `src`
@@ -444,26 +561,75 @@ mod tests {
 		}
 	}
 
+	/// An executable stub standing in for `git`.
 	#[cfg(unix)]
-	#[test]
-	fn git_apply_drains_stderr_while_writing_stdin() {
+	fn stub(root: &TempDirGuard, script: &str) -> PathBuf {
 		use std::os::unix::fs::PermissionsExt as _;
 
-		let root = TempDirGuard::new();
-		let fake_git = root.path().join("git");
-		fs::write(
-			&fake_git,
-			"#!/bin/sh\nprintf 'simulated apply failure\\n' >&2\nyes x | head -c 4194304 >&2\ncat \
-			 >/dev/null\nexit 42\n",
-		)
-		.expect("write fake git");
-		fs::set_permissions(&fake_git, fs::Permissions::from_mode(0o755))
-			.expect("make fake git executable");
+		let path = root.path().join("git");
+		fs::write(&path, format!("#!/bin/sh\n{script}\n")).expect("write stub git");
+		fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("make stub executable");
+		path
+	}
 
-		let patch = vec![b'p'; 4 * 1024 * 1024];
-		let err = git_apply_with_program(&fake_git, root.path(), &patch, &[])
-			.expect_err("fake git apply should fail after consuming stdin");
-		let message = err.to_string();
-		assert!(message.starts_with("git apply (exit 42): simulated apply failure"));
+	#[cfg(unix)]
+	#[test]
+	fn run_program_drains_stderr_while_writing_stdin() {
+		let root = TempDirGuard::new();
+		let git = stub(
+			&root,
+			"printf 'simulated apply failure\\n' >&2\nyes x | head -c 4194304 >&2\ncat \
+			 >/dev/null\nexit 42",
+		);
+
+		let patch = Arc::new(vec![b'p'; 4 * 1024 * 1024]);
+		let output = run_program(&git, root.path(), &["apply"], Some(patch), GIT_LIMITS)
+			.expect("stub consumes stdin and exits");
+		let err = checked("git apply", output).expect_err("exit 42 is a failure");
+		assert!(
+			err.to_string()
+				.starts_with("git apply (exit 42): simulated apply failure")
+		);
+	}
+
+	/// A `git` that never exits is killed at the deadline instead of blocking
+	/// isolation setup forever (#17901).
+	#[cfg(unix)]
+	#[test]
+	fn run_program_kills_a_child_that_never_exits() {
+		let root = TempDirGuard::new();
+		let git = stub(&root, "exec sleep 30");
+		let limits = Limits { exit: Duration::from_millis(200), drain: Duration::from_secs(5) };
+
+		let started = Instant::now();
+		let err = run_program(&git, root.path(), &["worktree", "add"], None, limits)
+			.expect_err("stalled child must fail");
+		assert!(started.elapsed() < Duration::from_secs(10), "took {:?}", started.elapsed());
+		assert!(err.to_string().contains("did not exit within 200ms"), "{err}");
+	}
+
+	/// Output pipes that another process still holds after `git` exits must not
+	/// keep the caller waiting for EOF (#17901).
+	#[cfg(unix)]
+	#[test]
+	fn run_program_returns_when_pipes_outlive_the_child() {
+		let root = TempDirGuard::new();
+		let pid_file = root.path().join("holder.pid");
+		let git = stub(
+			&root,
+			&format!("printf out\nsleep 30 &\necho $! > '{}'\nexit 0", pid_file.display()),
+		);
+		let limits = Limits { exit: Duration::from_secs(10), drain: Duration::from_millis(200) };
+
+		let started = Instant::now();
+		let result = run_program(&git, root.path(), &["worktree", "add"], None, limits);
+		let elapsed = started.elapsed();
+		if let Ok(pid) = fs::read_to_string(&pid_file) {
+			let _ = Command::new("kill").arg(pid.trim()).status();
+		}
+		let output = result.expect("child exited 0");
+		assert!(elapsed < Duration::from_secs(10), "took {elapsed:?}");
+		assert!(output.status.success());
+		assert_eq!(output.stdout, b"out");
 	}
 }
