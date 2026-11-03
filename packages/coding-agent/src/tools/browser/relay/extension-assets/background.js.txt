@@ -18,6 +18,45 @@ async function ownedDebuggerTabs(targets, probe) {
   return owned.filter((tabId) => tabId !== undefined);
 }
 
+// packages/browser-relay/extension/download-pairing.ts
+var DOWNLOAD_PAIRING_MS = 5000;
+var MAX_REPORTS = 32;
+var MAX_PAIRED = 256;
+
+class DownloadPairing {
+  #now;
+  #ids = new Map;
+  #reports = [];
+  constructor(now = Date.now) {
+    this.#now = now;
+  }
+  report(guid, url) {
+    if (this.#ids.has(guid) || this.#reports.some((report) => report.guid === guid))
+      return;
+    this.#reports.push({ guid, url, at: this.#now() });
+    if (this.#reports.length > MAX_REPORTS)
+      this.#reports.shift();
+  }
+  created(id, url) {
+    const oldest = this.#now() - DOWNLOAD_PAIRING_MS;
+    while (this.#reports.length > 0 && this.#reports[0].at < oldest)
+      this.#reports.shift();
+    const index = this.#reports.findIndex((report) => report.url === url);
+    if (index < 0)
+      return;
+    this.#ids.set(this.#reports[index].guid, id);
+    this.#reports.splice(index, 1);
+    if (this.#ids.size > MAX_PAIRED)
+      this.#ids.delete(this.#ids.keys().next().value);
+  }
+  idFor(guid) {
+    return this.#ids.get(guid);
+  }
+  forget(guid) {
+    this.#ids.delete(guid);
+  }
+}
+
 // packages/browser-relay/extension/foreign-frames.ts
 var RETRY_DELAYS_MS = [50, 100, 200, 400];
 var sweeps = new Map;
@@ -290,10 +329,10 @@ async function runRpc(msg, origin) {
       await enqueueGroupOp(() => chrome.tabs.ungroup(msg.tabIds).catch(() => {}));
       return {};
     case "findDownload": {
-      const id = downloadIds.get(msg.guid);
+      const id = downloads.idFor(msg.guid);
       const [item] = id === undefined ? [] : await chrome.downloads.search({ id });
       if (item && item.state !== "in_progress")
-        downloadIds.delete(msg.guid);
+        downloads.forget(msg.guid);
       const found = item ? { filename: item.filename, state: item.state } : null;
       return found;
     }
@@ -359,28 +398,13 @@ async function connect() {
     socket.close();
   };
 }
-var MAX_UNPAIRED_REPORTS = 32;
-var downloadIds = new Map;
-var unpairedReports = [];
-function reportDownload(guid, url) {
-  if (downloadIds.has(guid) || unpairedReports.some((report) => report.guid === guid))
-    return;
-  unpairedReports.push({ guid, url });
-  if (unpairedReports.length > MAX_UNPAIRED_REPORTS)
-    unpairedReports.shift();
-}
-chrome.downloads.onCreated.addListener((item) => {
-  const index = unpairedReports.findIndex((report) => report.url === item.finalUrl);
-  if (index < 0)
-    return;
-  downloadIds.set(unpairedReports[index].guid, item.id);
-  unpairedReports.splice(index, 1);
-});
+var downloads = new DownloadPairing;
+chrome.downloads.onCreated.addListener((item) => downloads.created(item.id, item.finalUrl));
 chrome.debugger.onEvent.addListener((source, method, params) => {
   if (source.tabId === undefined)
     return;
   if (method === "Page.downloadWillBegin" && typeof params?.guid === "string" && typeof params.url === "string") {
-    reportDownload(params.guid, params.url);
+    downloads.report(params.guid, params.url);
   }
   post({ t: "cdpEvent", tabId: source.tabId, sessionId: source.sessionId, method, params });
 });
