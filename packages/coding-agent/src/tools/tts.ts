@@ -110,6 +110,7 @@ async function synthesizeCloud(
 			text: params.text,
 			format: codec,
 			...(params.voice_id !== undefined ? { voice: params.voice_id } : {}),
+			...(model.api === "xai-tts" ? { language: params.language } : {}),
 			...(model.api === "xai-tts" && params.sample_rate !== undefined ? { sampleRate: params.sample_rate } : {}),
 			...(model.api === "xai-tts" && params.bit_rate !== undefined ? { bitRate: params.bit_rate } : {}),
 		},
