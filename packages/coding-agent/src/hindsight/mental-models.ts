@@ -296,7 +296,12 @@ export function renderMentalModelsBlock(models: MentalModelSummary[], budgetChar
 	const truncatedOverhead = `<mental_models>\n${TRUNCATION_MARKER}\n</mental_models>`.length;
 	const cleanOverhead = `<mental_models>\n\n</mental_models>`.length;
 	const innerBudget = Math.max(0, budgetChars - truncatedOverhead);
-	const perModelBudget = Math.max(120, Math.floor(innerBudget / Math.max(1, models.length)));
+	const headerCost = models.reduce((sum, m) => sum + `# ${m.name}\n`.length, 0);
+	const separatorCost = 2 * Math.max(0, models.length - 1);
+	const perModelBudget = Math.max(
+		120,
+		Math.floor((innerBudget - headerCost - separatorCost) / Math.max(1, models.length)),
+	);
 
 	const sections: string[] = [];
 	let consumed = 0;
