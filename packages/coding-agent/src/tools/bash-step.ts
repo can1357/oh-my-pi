@@ -1109,32 +1109,25 @@ function rootsDisjoint(roots: readonly string[]): boolean {
 }
 
 /**
- * Whether the shell-style `pattern` may match `name`, as `find -name` (fnmatch without FNM_PERIOD)
- * matches it. `*` and `?` are matched exactly, in time linear in the two lengths; a bracket
- * expression or a backslash (POSIX classes, escapes) is not modelled, so such a pattern may match.
+ * Whether a pattern of literal text and `*` matches `name` as `find -name` (fnmatch) does: the
+ * first and last pieces anchor the ends and each middle piece is found leftmost, in order. Each
+ * piece is one `indexOf` from where the last one ended, so the work is linear in the lengths.
  */
 function mayMatchName(pattern: string, name: string): boolean {
-	if (/[[\\]/u.test(pattern)) return true;
-	const p = Array.from(pattern);
-	const n = Array.from(name);
-	let i = 0;
-	let j = 0;
-	let star = -1;
-	let resume = 0;
-	while (j < n.length) {
-		if (i < p.length && (p[i] === "?" || (p[i] !== "*" && p[i] === n[j]))) {
-			i++;
-			j++;
-		} else if (i < p.length && p[i] === "*") {
-			star = i++;
-			resume = j;
-		} else if (star >= 0) {
-			i = star + 1;
-			j = ++resume;
-		} else return false;
+	const pieces = pattern.split("*");
+	if (pieces.length === 1) return pattern === name;
+	const first = pieces[0];
+	const last = pieces[pieces.length - 1];
+	if (name.length < first.length + last.length || !name.startsWith(first) || !name.endsWith(last)) return false;
+	let from = first.length;
+	const end = name.length - last.length;
+	for (const piece of pieces.slice(1, -1)) {
+		if (piece === "") continue;
+		const at = name.indexOf(piece, from);
+		if (at < 0 || at + piece.length > end) return false;
+		from = at + piece.length;
 	}
-	while (i < p.length && p[i] === "*") i++;
-	return i === p.length;
+	return true;
 }
 
 /** The glob path for `pattern` below `root`. */
