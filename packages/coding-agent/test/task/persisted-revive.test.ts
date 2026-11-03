@@ -1,7 +1,8 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
+import * as connectionPrewarm from "@oh-my-pi/pi-ai/providers/connection-prewarm";
 import { createMockModel, type MockResponse, type MockResponseSource } from "@oh-my-pi/pi-ai/providers/mock";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
@@ -51,12 +52,41 @@ import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { type IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
-import { TempDir } from "@oh-my-pi/pi-utils";
+import { __resetDirsFromEnvForTests, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import { createSessionDefaults } from "../helpers/session-defaults";
 
 import { cfgAdvisorEnabled } from "@oh-my-pi/pi-coding-agent/advisor/settings";
 
 const tempDirs: TempDir[] = [];
+// Revivals here run the real createAgentSession, which discovers commands, skills, rules and
+// context from the home and agent directories and opens the model's API connection ahead of the
+// first request. Point both directories at an empty one and keep the prewarm off the network, so
+// each test measures only the fixture it builds.
+const isolatedHome = TempDir.createSync("@pi-revive-home-");
+const originalEnv = {
+	HOME: process.env.HOME,
+	PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR,
+	OMP_PROFILE: process.env.OMP_PROFILE,
+	PI_PROFILE: process.env.PI_PROFILE,
+};
+
+beforeEach(() => {
+	process.env.HOME = isolatedHome.path();
+	setAgentDir(path.join(isolatedHome.path(), ".omp", "agent"));
+	vi.spyOn(connectionPrewarm, "prewarmModelConnection").mockResolvedValue(undefined);
+});
+
+afterEach(() => {
+	for (const [key, value] of Object.entries(originalEnv)) {
+		if (value === undefined) delete process.env[key];
+		else process.env[key] = value;
+	}
+	__resetDirsFromEnvForTests();
+});
+
+afterAll(() => {
+	isolatedHome.removeSync();
+});
 
 function makeTempDir(prefix: string): string {
 	const dir = TempDir.createSync(prefix);
