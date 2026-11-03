@@ -6,6 +6,7 @@ import { runEvalWait } from "@oh-my-pi/pi-coding-agent/eval/handle-bridge";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import * as daemonClient from "@oh-my-pi/pi-coding-agent/launch/client";
 import type { DaemonBrokerClient } from "@oh-my-pi/pi-coding-agent/launch/client";
+import * as servicesModule from "@oh-my-pi/pi-coding-agent/launch/services";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -565,6 +566,24 @@ describe("wait", () => {
 			expect(result.details?.jobs?.[0]).toMatchObject({ status: "running" });
 			job.resolve("done");
 			await manager.dispose({ timeoutMs: 1000 });
+		});
+
+		test("bounds the whole call, a slow service refresh included", async () => {
+			// The deadline is the caller's: a broker that answers slowly must not
+			// stretch a 1 s wait to its own 30 s request timeout. Real time here:
+			// the refresh's deadline is an AbortSignal.timeout, which fake timers
+			// do not drive.
+			registerMain();
+			vi.spyOn(servicesModule, "listServicesTolerant").mockImplementation(async (_session, signal) => {
+				const { promise, reject } = Promise.withResolvers<never>();
+				if (signal?.aborted) reject(signal.reason);
+				else signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+				return promise;
+			});
+			const started = Date.now();
+			const result = await new WaitTool(session(undefined, "Main", true)).execute("slow-refresh", { timeout: 1 });
+			expect(Date.now() - started).toBeLessThan(10_000);
+			expect(result.content[0]).toMatchObject({ text: expect.stringContaining("Deadline reached") });
 		});
 	});
 });

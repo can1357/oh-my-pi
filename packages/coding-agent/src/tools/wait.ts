@@ -21,7 +21,7 @@ import { clampTimeout, TOOL_TIMEOUTS } from "./tool-timeouts";
 
 import { cfgLaunchEnabled, cfgToolsMaxTimeout } from "./settings";
 
-const WAIT_TIMEOUT_DESCRIPTION = `seconds to wait at most; with nothing owed, wait idles until a message, a job result or this deadline instead of returning at once; clamped to ${TOOL_TIMEOUTS.wait.min}-${TOOL_TIMEOUTS.wait.max}`;
+const WAIT_TIMEOUT_DESCRIPTION = `seconds the whole call may take; with nothing owed, wait idles until a message, a job result or this deadline instead of returning at once; clamped to ${TOOL_TIMEOUTS.wait.min}-${TOOL_TIMEOUTS.wait.max} and to tools.maxTimeout`;
 const waitSchema = type({
 	"timeout?": type("number").describe(WAIT_TIMEOUT_DESCRIPTION),
 });
@@ -122,10 +122,15 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 		const registry = this.session.agentRegistry;
 		// An explicit `timeout` replaces the safety cap, and with nothing owed
 		// turns "nothing to wait for" into an idle wait for the next message.
+		// It bounds the whole call: the deadline is fixed here, before any
+		// await, and every later step gets only what remains of it.
 		const capMs =
 			params.timeout === undefined
 				? undefined
 				: clampTimeout("wait", params.timeout, cfgToolsMaxTimeout.get(this.session.settings)) * 1000;
+		const deadline = capMs === undefined ? undefined : Date.now() + capMs;
+		const remainingMs = (): number | undefined =>
+			deadline === undefined ? undefined : Math.max(0, deadline - Date.now());
 		const senderId = this.session.getAgentId?.() ?? undefined;
 		const messaging = registry && senderId ? { registry, senderId } : undefined;
 		const manager = this.session.asyncJobManager;
@@ -135,13 +140,19 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 		// Refreshes owned-service tracking only; jobs are in-process, so a hung
 		// broker must not turn every wait into an error.
 		if (cfgLaunchEnabled.get(this.session.settings)) {
+			const refreshDeadline = deadline === undefined ? undefined : AbortSignal.timeout(remainingMs()!);
+			const refreshSignal =
+				refreshDeadline && signal ? AbortSignal.any([signal, refreshDeadline]) : (refreshDeadline ?? signal);
 			try {
-				await listServicesTolerant(this.session, signal);
+				await listServicesTolerant(this.session, refreshSignal);
 			} catch (error) {
 				// An interrupt landing during the refresh (most often the notice
 				// of the job this wait is for) ends the wait as one landing just
-				// after it does: the checks below and the aborted wake path.
-				if (signal?.reason !== TOOL_INTERRUPT_ABORT_REASON) throw error;
+				// after it does: the checks below and the aborted wake path. A
+				// deadline passing during it does too: the block below finds no
+				// budget left and returns at once with what tracking it has.
+				const deadlinePassed = refreshDeadline?.aborted === true && signal?.aborted !== true;
+				if (!deadlinePassed && signal?.reason !== TOOL_INTERRUPT_ABORT_REASON) throw error;
 			}
 			const queued = takeQueuedMessage(messaging);
 			if (queued && messaging) return messageResult(messaging.senderId, queued);
@@ -174,7 +185,7 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 						serviceRunning,
 						signal,
 						onUpdate,
-						capMs,
+						capMs: remainingMs(),
 						idle: true,
 					});
 				}
@@ -185,7 +196,16 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 				};
 			}
 		}
-		return this.#blockUntilWake({ jobs, manager, messaging, serviceRunning, signal, onUpdate, capMs, idle: false });
+		return this.#blockUntilWake({
+			jobs,
+			manager,
+			messaging,
+			serviceRunning,
+			signal,
+			onUpdate,
+			capMs: remainingMs(),
+			idle: false,
+		});
 	}
 
 	/**
