@@ -2874,23 +2874,9 @@ export class ModelRegistry {
 		options: ModelManagerOptions<Api>,
 		strategy: ModelRefreshStrategy,
 	): Promise<BuiltInDiscoveryResult> {
-		// The manager turns a throwing fetcher into a stale fallback; capture the
-		// error so it reaches the discovery state and the log (issue #17925).
-		const fetcher = options.fetchDynamicModels;
-		let fetchError: unknown;
-		const fetchDynamicModels =
-			fetcher &&
-			(async () => {
-				try {
-					return await fetcher();
-				} catch (error) {
-					fetchError = error;
-					throw error;
-				}
-			});
 		let failure: string | undefined;
 		try {
-			const manager = createModelManager({ ...options, fetchDynamicModels, cacheDbPath: this.#cacheDbPath });
+			const manager = createModelManager({ ...options, cacheDbPath: this.#cacheDbPath });
 			const result = await withModelDiscoveryTimeout(RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS, () =>
 				manager.refresh(strategy),
 			);
@@ -2907,9 +2893,8 @@ export class ModelRegistry {
 							: result.models.length > 0
 								? "ok"
 								: "empty";
-			if (fetchError !== undefined) {
-				failure = fetchError instanceof Error ? fetchError.message : String(fetchError);
-			}
+			// A throwing fetcher still resolves (cache or bundled), but the failure must reach the state and the log.
+			failure = result.fetchError;
 			this.#providerDiscoveryStates.set(options.providerId, {
 				provider: options.providerId,
 				status,
