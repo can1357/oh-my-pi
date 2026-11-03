@@ -1743,7 +1743,12 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 			.as_ref()
 			.map(|won| CommandPrefixOrSuffixItem::Word(won.clone()));
 
+		// Bash expands a simple command's words first, in order, then its prefix
+		// assignments, then its redirections, in order: an assignment's side
+		// effects come before the redirections, and a failing one makes none of
+		// them. The redirections are collected here and made below.
 		let mut assignments = vec![];
+		let mut redirects = vec![];
 		let mut args: Vec<CommandArg> = vec![];
 		let mut command_takes_assignments = false;
 
@@ -1754,13 +1759,7 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 		for item in prefix_iter.chain(cmd_name_items.iter()).chain(suffix_iter) {
 			ensure_not_cancelled(&params)?;
 			match item {
-				CommandPrefixOrSuffixItem::IoRedirect(redirect) => {
-					if let Err(e) = setup_redirect(&mut context.shell, &mut params, redirect).await {
-						let mut stderr = params.stderr(&context.shell);
-						context.shell.display_error(&mut stderr, &e).await?;
-						return Ok(ExecutionResult::general_error().into());
-					}
-				},
+				CommandPrefixOrSuffixItem::IoRedirect(redirect) => redirects.push(redirect),
 				CommandPrefixOrSuffixItem::ProcessSubstitution(kind, subshell_command) => {
 					params.disable_command_output_marking();
 					let (installed_fd_num, substitution_file) =
@@ -1844,10 +1843,41 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 
 		// If we have a command, then execute it.
 		if let Some(CommandArg::String(cmd_name)) = args.first().cloned() {
-			let mut stderr = params.stderr(&context.shell);
 			// The token that leaves this command's end unreported, if any; see
 			// `ExecutionParameters::set_quiet_cancellation`.
 			let quiet_token = params.quiet_cancellation.then(|| params.cancel_token()).flatten();
+
+			// The assignments are in force while each later one expands, and not
+			// while the redirection words do; `execute_command` assigns them
+			// again, as expanded. A failing one is reported on this shell's own
+			// standard error, as none of the redirections is made.
+			let assignments =
+				match expand_prefix_assignments(&mut context.shell, &params, &assignments).await {
+					Ok(assignments) => assignments,
+					Err(err) => {
+						if !quiet_token.as_ref().is_some_and(CancellationToken::is_cancelled) {
+							let mut stderr = params.stderr(&context.shell);
+							let _ = context.shell.display_error(&mut stderr, &err).await;
+						}
+						return Ok(err.into_result(&context.shell).into());
+					},
+				};
+
+			// `set -x` traces the command before its redirections, on this
+			// shell's standard error.
+			if context.shell.options().print_commands_and_arguments {
+				context
+					.shell
+					.trace_command(&params, args.iter().map(|arg| arg.quote_for_tracing()).join(" "))
+					.await;
+			}
+
+			if let Some(failed) = setup_collected_redirects(&mut context.shell, &mut params, &redirects).await?
+			{
+				return Ok(failed.into());
+			}
+
+			let mut stderr = params.stderr(&context.shell);
 
 			let (owned_shell, parent_shell) = match context.shell {
 				commands::ShellForCommand::ParentShell(shell) => (None, shell),
@@ -1879,7 +1909,8 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 				},
 			}
 		} else {
-			// No command to run; assignments must be applied to this shell.
+			// No command to run; assignments must be applied to this shell, before
+			// the redirections, whose words see them.
 			for assignment in assignments {
 				// Apply the assignment. Don't mark as fatal - let errors be handled
 				// at the program level so multiple complete_commands can execute independently.
@@ -1892,6 +1923,10 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 					EnvironmentScope::Global,
 				)
 				.await?;
+			}
+			if let Some(failed) = setup_collected_redirects(&mut context.shell, &mut params, &redirects).await?
+			{
+				return Ok(failed.into());
 			}
 
 			// Assignment-only statements clear $_ (set to empty string).
@@ -1914,36 +1949,82 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 	}
 }
 
+/// Makes a simple command's `redirects`, in order. The first that cannot be
+/// made is reported on the standard error the ones before it leave, and its
+/// result is returned; the rest are not made.
+async fn setup_collected_redirects(
+	shell: &mut Shell<impl extensions::ShellExtensions>,
+	params: &mut ExecutionParameters,
+	redirects: &[&ast::IoRedirect],
+) -> Result<Option<ExecutionResult>, error::Error> {
+	for redirect in redirects {
+		if let Err(e) = setup_redirect(shell, params, redirect).await {
+			let mut stderr = params.stderr(shell);
+			shell.display_error(&mut stderr, &e).await?;
+			return Ok(Some(ExecutionResult::general_error()));
+		}
+	}
+	Ok(None)
+}
+
+/// Expands a simple command's prefix assignments in order, each in force while
+/// the later ones expand, as Bash expands them, after the command's words and
+/// before its redirections. None is in force once this returns, so the
+/// redirection words do not see them. An assignment to an array element is
+/// not one a command takes: as Bash does, it is reported as not a valid
+/// identifier on the standard error from before the redirections, its index
+/// is not evaluated, and the command runs without it.
+async fn expand_prefix_assignments(
+	shell: &mut Shell<impl extensions::ShellExtensions>,
+	params: &ExecutionParameters,
+	assignments: &[&ast::Assignment],
+) -> Result<Vec<ExpandedAssignment>, error::Error> {
+	if assignments.is_empty() {
+		return Ok(Vec::new());
+	}
+	let mut stderr = params.stderr(shell);
+	let mut guard = crate::env::ScopeGuard::new(shell, EnvironmentScope::Command);
+	let mut expanded = Vec::with_capacity(assignments.len());
+	for assignment in assignments {
+		if matches!(assignment.name, ast::AssignmentName::ArrayElementName(..)) {
+			let _ = writeln!(stderr, "`{}': not a valid identifier", assignment.name);
+			continue;
+		}
+		let one = expand_assignment_once(assignment, guard.shell(), params).await?;
+		assign_expanded(
+			one.clone(),
+			guard.shell(),
+			true,
+			Some(EnvironmentScope::Command),
+			EnvironmentScope::Command,
+		)?;
+		expanded.push(one);
+	}
+	Ok(expanded)
+}
+
 async fn execute_command(
 	mut context: PipelineExecutionContext<'_, impl extensions::ShellExtensions>,
 	params: ExecutionParameters,
 	cmd_name: String,
-	assignments: Vec<&ast::Assignment>,
+	assignments: Vec<ExpandedAssignment>,
 	args: Vec<CommandArg>,
 ) -> Result<ExecutionSpawnResult, error::Error> {
 	// Push a new ephemeral environment scope for the duration of the command. We'll
 	// set command-scoped variable assignments after doing so, and revert them
-	// before returning.
+	// before returning. They were expanded already (see
+	// `expand_prefix_assignments`), and are not expanded again.
 	let mut guard = crate::env::ScopeGuard::new(&mut context.shell, EnvironmentScope::Command);
 
-	for assignment in &assignments {
+	for assignment in assignments {
 		// Ensure it's tagged as exported and created in the command scope.
-		apply_assignment(
+		assign_expanded(
 			assignment,
 			guard.shell(),
-			&params,
 			true,
 			Some(EnvironmentScope::Command),
 			EnvironmentScope::Command,
-		)
-		.await?;
-	}
-
-	if guard.shell().options().print_commands_and_arguments {
-		guard
-			.shell()
-			.trace_command(&params, args.iter().map(|arg| arg.quote_for_tracing()).join(" "))
-			.await;
+		)?;
 	}
 
 	guard.detach();
@@ -2035,15 +2116,37 @@ async fn expand_assignment_value(
 	Ok(expanded)
 }
 
-#[expect(clippy::too_many_lines)]
+/// An assignment expanded once: its variable, the index of the element it
+/// names (evaluated, for an indexed array), its value and whether it appends.
+/// [`assign_expanded`] assigns it again without expanding anything.
+#[derive(Clone, Debug)]
+struct ExpandedAssignment {
+	name:   String,
+	index:  Option<String>,
+	value:  ShellValueLiteral,
+	append: bool,
+}
+
 async fn apply_assignment(
 	assignment: &ast::Assignment,
 	shell: &mut Shell<impl extensions::ShellExtensions>,
 	params: &ExecutionParameters,
-	mut export: bool,
+	export: bool,
 	required_scope: Option<EnvironmentScope>,
 	creation_scope: EnvironmentScope,
 ) -> Result<(), error::Error> {
+	let expanded = expand_assignment_once(assignment, shell, params).await?;
+	assign_expanded(expanded, shell, export, required_scope, creation_scope)
+}
+
+/// Expands `assignment` as assigning it does: its element's index and its
+/// value, which it traces under `set -x`; and evaluates the index of an
+/// element of an indexed array. Nothing is assigned.
+async fn expand_assignment_once(
+	assignment: &ast::Assignment,
+	shell: &mut Shell<impl extensions::ShellExtensions>,
+	params: &ExecutionParameters,
+) -> Result<ExpandedAssignment, error::Error> {
 	// Figure out if we are trying to assign to a variable or assign to an element
 	// of an existing array.
 	let mut array_index;
@@ -2121,6 +2224,27 @@ async fn apply_assignment(
 		}
 	}
 
+	Ok(ExpandedAssignment {
+		name:   variable_name.clone(),
+		index:  array_index,
+		value:  new_value,
+		append: assignment.append,
+	})
+}
+
+/// Assigns `assignment`, expanded already: to the variable where it is
+/// (`required_scope` limits where), else as a new one in `creation_scope`;
+/// exported when `export` or `allexport` says so.
+fn assign_expanded(
+	assignment: ExpandedAssignment,
+	shell: &mut Shell<impl extensions::ShellExtensions>,
+	mut export: bool,
+	required_scope: Option<EnvironmentScope>,
+	creation_scope: EnvironmentScope,
+) -> Result<(), error::Error> {
+	let ExpandedAssignment { name: variable_name, index: array_index, value: new_value, append } =
+		assignment;
+
 	// Read option before taking mutable borrow on env.
 	let export_variables_on_modification = shell.options().export_variables_on_modification;
 
@@ -2132,7 +2256,7 @@ async fn apply_assignment(
 			if let Some(array_index) = array_index {
 				match new_value {
 					ShellValueLiteral::Scalar(s) => {
-						existing_value.assign_at_index(array_index, s, assignment.append)?;
+						existing_value.assign_at_index(array_index, s, append)?;
 					},
 					ShellValueLiteral::Array(_) => {
 						return Err(error::ErrorKind::AssigningListToArrayMember.into());
@@ -2146,7 +2270,7 @@ async fn apply_assignment(
 					export = true;
 				}
 
-				existing_value.assign(new_value, assignment.append)?;
+				existing_value.assign(new_value, append)?;
 			}
 
 			if export {
