@@ -294,6 +294,81 @@ async fn lastpipe_jobs_live_in_the_job_table() {
 	assert_all_bash(cases).await;
 }
 
+/// Bash installs the job of a `lastpipe` pipeline's processes but its last
+/// before the last command runs (`stop_pipeline` with the table frozen), so
+/// the last command sees it: `jobs` lists it without ` &`, `wait %1` waits
+/// for it (and counts as reporting it), `kill %1` signals it, `wait` with
+/// no operand passes over it, `wait -n` returns at once, and `$!` is not
+/// its. Each first stage runs long enough to be running when the last
+/// command looks, or has ended by then through a child the last command
+/// waited for: a process that has just started may or may not have run by
+/// then, in Bash too.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_lastpipe_job_is_in_the_table_while_its_last_command_runs() {
+	let firsts = ["/bin/sleep 0.5", "/bin/sleep 0.5 | /bin/sleep 0.5", "sleep 0.5"];
+	let insides = [
+		"jobs",
+		"jobs -l",
+		"jobs %1",
+		"jobs -n",
+		"jobs -l; jobs -l",
+		"wait %1; echo w=$?",
+		"wait %1; jobs -l",
+		"wait -n; echo w=$?",
+		"wait; echo w=$?",
+		"echo \"bang=$!\"",
+		"kill %1; echo k=$?",
+		"kill -0 %1; echo k=$?",
+		"kill %1; wait %1; echo w=$?",
+		"kill -HUP %1; wait %1; echo w=$?",
+		"/bin/sleep 0.05; jobs -l",
+	];
+	let mut cases = Vec::new();
+	for first in firsts {
+		for inside in insides {
+			cases.push((
+				format!("{first} | {{ {inside}; }}"),
+				format!(
+					"shopt -s lastpipe; {first} | {{ {inside}; }}; echo st=$?; jobs -l; echo after"
+				),
+			));
+		}
+	}
+	cases.extend(rows(&[
+		(
+			"ended-first/after-a-child",
+			"shopt -s lastpipe; /bin/true | { /bin/sleep 0.1; jobs -l; wait %1; echo w=$?; }; jobs \
+			 -l; echo after",
+		),
+		(
+			"killed-first/after-a-child",
+			"shopt -s lastpipe; /bin/sh -c 'kill -KILL $$' | { /bin/sleep 0.1; jobs -l; wait %1; \
+			 echo w=$?; }; jobs -l; echo after",
+		),
+		(
+			"background-before",
+			"sleep 30 & b=$!; shopt -s lastpipe; /bin/sleep 0.5 | { jobs -l; [ \"$!\" = \"$b\" ] && \
+			 echo same; }; kill -KILL $b; wait $b 2>/dev/null; jobs -l; echo after",
+		),
+		(
+			"stage-pid",
+			"shopt -s lastpipe; d=$(mktemp -d); sleep 0.5 | { jobs -p > $d/p; read p < $d/p; kill \
+			 $p; echo k=$?; wait %1; echo w=$?; }; rm -rf $d; echo after",
+		),
+		(
+			"pipefail",
+			"set -o pipefail; shopt -s lastpipe; /bin/sleep 0.5 | { kill %1; }; echo st=$? \
+			 \"${PIPESTATUS[*]}\"; jobs -l; echo after",
+		),
+		(
+			"next-line",
+			"set -o pipefail; shopt -s lastpipe; /bin/sleep 0.5 | { kill -HUP %1; }; echo \
+			 st=$?\necho next",
+		),
+	]));
+	assert_all_bash(cases).await;
+}
+
 /// Every process of a foreground pipeline a signal ended is printed with a
 /// pid, also a stage the shell runs itself. No stage writes to the pipe: a
 /// write after the last stage died would end it with SIGPIPE, or not,

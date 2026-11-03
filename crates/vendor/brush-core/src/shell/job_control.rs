@@ -76,7 +76,7 @@ impl<SE: extensions::ShellExtensions> crate::Shell<SE> {
 		if self.jobs.is_frozen() {
 			if let Some(foreground) = foreground {
 				let origin = JobOrigin::of(self);
-				self.jobs.keep_foreground(foreground.clone(), origin, None);
+				self.jobs.keep_foreground(foreground.clone(), origin);
 			}
 			return;
 		}

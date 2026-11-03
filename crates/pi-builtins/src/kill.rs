@@ -201,6 +201,12 @@ impl builtins::Command for KillCommand {
 					}
 					continue;
 				}
+				// A stage of a `lastpipe` pipeline's job that the shell runs
+				// itself has no process: the signal ends it as it would end the
+				// child Bash forks for it.
+				for pid in job.held_stage_pids().collect::<Vec<_>>() {
+					signal_in_process_pid(pid, signal);
+				}
 				#[cfg(unix)]
 				{
 					// Bash's `kill_pid` for the job (see `Job::kill_delivery`).

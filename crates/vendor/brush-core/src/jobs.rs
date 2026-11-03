@@ -246,6 +246,44 @@ impl InProcessStage {
 			None => *self.0.status.lock().unwrap_or_else(PoisonError::into_inner),
 		}
 	}
+
+	/// A stage of a `lastpipe` pipeline but its last, which Bash forks: it
+	/// takes a shell-only pid and runs with a token of its own, a child of
+	/// `parent`, so `kill` of that pid, or of the job it joins (see
+	/// [`JobManager::hold_lastpipe_job`]), ends it as a signal ends a process.
+	/// It traps nothing, as a forked stage resets its traps. Fails with
+	/// [`error::ErrorKind::OutOfJobIds`] once the ids are spent (see
+	/// [`allocate_in_process_pid_from`]).
+	pub(crate) fn held(
+		parent: Option<&CancellationToken>,
+	) -> Result<(sys::process::ProcessId, Self), error::Error> {
+		let pid = allocate_in_process_pid_from(&NEXT_IN_PROCESS_PID)?;
+		let cancellation = parent.map_or_else(CancellationToken::new, CancellationToken::child_token);
+		let target = InProcessTarget {
+			abort: OnceLock::new(),
+			stage: true,
+			cancellation,
+			state: Arc::new(AtomicU8::new(TASK_RUNNING)),
+			status: Mutex::new(None),
+			signals: Arc::new(JobSignals::default()),
+		};
+		Ok((pid, Self(Arc::new(target))))
+	}
+}
+
+/// A process of a `lastpipe` pipeline but its last, as the job Bash installs
+/// for them before the last command runs takes it (see
+/// [`JobManager::hold_lastpipe_job`]).
+pub(crate) enum HeldProcess {
+	/// An external process, with its command text.
+	External(processes::ChildProcess, String),
+	/// A stage the shell runs itself as a task, with its command text, its
+	/// shell-only pid and what `kill` reaches of it. The task records how
+	/// the stage ended in the stage when it ends.
+	Task(JobJoinHandle, String, sys::process::ProcessId, InProcessStage),
+	/// A stage that had already ended when the job was installed, with its
+	/// pid, command text and status.
+	Ended(Option<sys::process::ProcessId>, String, ProcessStatus),
 }
 
 /// The pid of a job that runs inside the shell process, and its entry in
@@ -326,12 +364,6 @@ pub struct JobManager {
 	/// command ran in the shell (a builtin that stands in for an external
 	/// command, a subshell, a command not found).
 	foreground_child: bool,
-
-	/// The job numbers taken for `lastpipe` pipelines whose last command
-	/// still runs, as Bash's pipeline job takes its number before the last
-	/// command runs (`stop_pipeline` in `execute_pipeline`); see
-	/// [`JobManager::reserve_job_id`].
-	reserved_ids: Vec<usize>,
 }
 
 /// Represents a task that is part of a job.
@@ -520,6 +552,11 @@ impl JobProcess {
 	) -> Self {
 		Self { pid, command, status }
 	}
+
+	/// How the process ended, or that it runs.
+	pub(crate) const fn status(&self) -> ProcessStatus {
+		self.status
+	}
 }
 
 /// What a job records of the shell that starts it, as Bash's `stop_pipeline`
@@ -562,31 +599,28 @@ impl ForegroundJob {
 		raw_status(self.processes.iter().map(|process| process.status), self.pipefail)
 	}
 
-	/// The jobs Bash keeps for a pipeline whose last command ran in the shell
-	/// (`lastpipe`): the pipeline job, whose last process is the shell itself,
+	/// What Bash makes of the last command of a pipeline that ran in the
+	/// shell (`lastpipe`), the last process here: the shell itself,
 	/// `shell_pid`, with the status the last command returned and the text
-	/// of the last command the shell started, `printed_command`
-	/// (`append_process` in `execute_pipeline`), and, when the last command
-	/// was one Bash forks (`last_forked`), that child's job.
-	pub(crate) fn split_lastpipe(
+	/// of the last command the shell started, `printed_command`, which joins
+	/// the pipeline's job (`append_process` in `execute_pipeline`, see
+	/// [`JobManager::finish_held_job`]), and, when the last command was one
+	/// Bash forks (`last_forked`), that child's job.
+	pub(crate) fn lastpipe_tail(
 		mut self,
 		shell_pid: sys::process::ProcessId,
 		printed_command: String,
 		last_forked: bool,
-	) -> (Self, Option<Self>) {
-		let Some(last) = self.processes.pop() else {
-			return (self, None);
+	) -> (JobProcess, Option<Self>) {
+		let last = self.processes.pop();
+		let returned = match last.as_ref().map(|last| last.status) {
+			Some(ProcessStatus::Signaled { signal, .. }) => 128_u8.saturating_add(signal),
+			Some(ProcessStatus::Exited(status)) => status,
+			Some(ProcessStatus::Running) | None => 0,
 		};
-		let returned = match last.status {
-			ProcessStatus::Signaled { signal, .. } => 128_u8.saturating_add(signal),
-			ProcessStatus::Exited(status) => status,
-			ProcessStatus::Running => 0,
-		};
-		self
-			.processes
-			.push(JobProcess::ended(Some(shell_pid), printed_command, ProcessStatus::Exited(returned)));
-		let last_child = last_forked.then(|| Self::new(vec![last], false));
-		(self, last_child)
+		let shell = JobProcess::ended(Some(shell_pid), printed_command, ProcessStatus::Exited(returned));
+		let last_child = last.filter(|_| last_forked).map(|last| Self::new(vec![last], false));
+		(shell, last_child)
 	}
 
 	/// Bash's report of a foreground job a signal ended; see
@@ -637,7 +671,7 @@ fn report_foreground(
 		return;
 	};
 	if notice.reports(signal) {
-		let state = PipelineState { running: false, stopped: false };
+		let state = PipelineState { running: false, stopped: false, foreground: true };
 		let _ = write_processes(
 			&mut *notice.out,
 			rows,
@@ -763,8 +797,11 @@ pub enum JobListFormat {
 /// The job state a listing shows besides each process's own.
 #[derive(Clone, Copy)]
 struct PipelineState {
-	running: bool,
-	stopped: bool,
+	running:    bool,
+	stopped:    bool,
+	/// A foreground job's listing ends without ` &` while it runs
+	/// (`IS_FOREGROUND` in `print_pipeline`).
+	foreground: bool,
 }
 
 /// One process line of a listing.
@@ -845,7 +882,7 @@ fn write_processes(
 		}
 		out.write_all(row.command.as_bytes())?;
 		if is_last {
-			if state.running {
+			if state.running && !state.foreground {
 				out.write_all(b" &")?;
 			}
 			if let Some(wd) = wd_note {
@@ -1045,66 +1082,101 @@ impl JobManager {
 		self.jobs.last().unwrap()
 	}
 
-	/// The number after the highest one a job holds or a `lastpipe`
-	/// pipeline took (see [`Self::reserve_job_id`]), which Bash gives a new
+	/// The number after the highest one a job holds, which Bash gives a new
 	/// job (`stop_pipeline` takes the slot after the last one in use).
 	fn next_job_id(&self) -> usize {
-		self.jobs
-			.iter()
-			.map(|job| job.id)
-			.chain(self.reserved_ids.iter().copied())
-			.max()
-			.unwrap_or(0)
-			+ 1
-	}
-
-	/// Takes the number of the job of a `lastpipe` pipeline, whose last
-	/// command is about to run in the shell: Bash installs that job, the
-	/// pipeline's other processes, before the last command runs (`stop_pipeline`
-	/// in `execute_pipeline`), so the jobs the last command starts number
-	/// after it. [`Self::keep_foreground`] installs it once the pipeline has
-	/// ended; [`Self::release_job_id`] gives the number back otherwise.
-	pub(crate) fn reserve_job_id(&mut self) -> usize {
-		let id = self.next_job_id();
-		self.reserved_ids.push(id);
-		id
-	}
-
-	/// Gives back a number [`Self::reserve_job_id`] took.
-	pub(crate) fn release_job_id(&mut self, id: usize) {
-		self.reserved_ids.retain(|&reserved| reserved != id);
+		self.jobs.iter().map(|job| job.id).max().unwrap_or(0) + 1
 	}
 
 	/// Keeps `job`, a foreground job that ended while the job table was
 	/// frozen, in the table, as Bash's job stays there unnotified until the
 	/// next notify point: `jobs` lists it, `wait` returns its status, and the
-	/// notify point reports it as a foreground job and forgets it. It takes
-	/// the number `reserved` names (see [`Self::reserve_job_id`]), or the
-	/// next one; `origin` is the shell it started in.
-	pub(crate) fn keep_foreground(
+	/// notify point reports it as a foreground job and forgets it. `origin`
+	/// is the shell it started in.
+	pub(crate) fn keep_foreground(&mut self, job: ForegroundJob, origin: JobOrigin) {
+		self.install_foreground(Job::ended_foreground(job, origin));
+	}
+
+	/// Installs the processes of a `lastpipe` pipeline but its last as a job,
+	/// as Bash's `stop_pipeline` does with the table frozen before the last
+	/// command runs (`execute_pipeline`): a foreground job, so it is neither
+	/// current nor previous, `wait` with no operand passes over it and no
+	/// listing ends it with ` &`. While the last command runs, `jobs` lists
+	/// it, `wait %N` waits for it and `kill %N` signals it. Returns its
+	/// number, which [`Self::wait_held_job`] and [`Self::finish_held_job`]
+	/// take once the last command has ended.
+	pub(crate) fn hold_lastpipe_job(&mut self, processes: Vec<HeldProcess>, origin: JobOrigin) -> usize {
+		self.install_foreground(Job::held_lastpipe(processes, origin))
+	}
+
+	/// Waits for the processes of the job [`Self::hold_lastpipe_job`]
+	/// installed, as Bash's `wait_for (lastpid)` does once the last command
+	/// has ended, and returns them with how each ended; `None` when the job
+	/// left the table or was finished. Once `cancel` fires the job's
+	/// processes are ended and the wait fails as a cancelled command does.
+	pub(crate) async fn wait_held_job(
 		&mut self,
-		job: ForegroundJob,
-		origin: JobOrigin,
-		reserved: Option<usize>,
-	) {
-		let id = match reserved {
-			Some(id) => {
-				self.release_job_id(id);
-				id
-			},
-			None => self.next_job_id(),
+		id: usize,
+		cancel: Option<CancellationToken>,
+	) -> Result<Option<Vec<JobProcess>>, error::Error> {
+		let Some(job) = self.jobs.iter_mut().find(|job| job.id == id && job.held_open) else {
+			return Ok(None);
 		};
-		let mut job = Job::ended_foreground(job, origin);
+		let waited = match cancel {
+			Some(token) => {
+				tokio::select! {
+					waited = job.wait_with_policy(true) => Some(waited),
+					() = token.cancelled() => None,
+				}
+			},
+			None => Some(job.wait_with_policy(true).await),
+		};
+		match waited {
+			Some(waited) => {
+				waited?;
+			},
+			None => {
+				// Dropping an external process's handle kills it.
+				job.abort_internal_tasks();
+				job.tasks.clear();
+				job.state = JobState::Done;
+				return Err(error::ErrorKind::Interrupted.into());
+			},
+		}
+		Ok(Some(
+			(0..job.processes.len())
+				.map(|index| JobProcess {
+					pid:     job.processes[index].pid,
+					command: job.processes[index].command.clone(),
+					status:  job.process_status(index),
+				})
+				.collect(),
+		))
+	}
+
+	/// Appends the shell itself, `last`, to the job
+	/// [`Self::hold_lastpipe_job`] installed, as Bash's `append_process` with
+	/// `$$` does once the last command has ended. The job has then ended,
+	/// with the status its processes give (`job_exit_status`), and stays in
+	/// the table for the next notify point, unless a `wait %N` in the last
+	/// command already counted as reporting it.
+	pub(crate) fn finish_held_job(&mut self, id: usize, last: JobProcess) {
+		if let Some(job) = self.jobs.iter_mut().find(|job| job.id == id && job.held_open) {
+			job.finish_lastpipe(last);
+		}
+	}
+
+	/// Adds a foreground job to the table with the next number, without
+	/// marking it current or previous.
+	fn install_foreground(&mut self, mut job: Job) -> usize {
+		let id = self.next_job_id();
 		job.id = id;
-		for pid in job.completed_process_ids.clone() {
+		let pids: Vec<_> = job.completed_process_ids.iter().copied().chain(job.in_process_pids()).collect();
+		for pid in pids.into_iter().chain(job.process_ids().collect::<Vec<_>>()) {
 			self.forget_reported(pid);
 		}
-		let index = self
-			.jobs
-			.iter()
-			.position(|other| other.id > id)
-			.unwrap_or(self.jobs.len());
-		self.jobs.insert(index, job);
+		self.jobs.push(job);
+		id
 	}
 
 	/// Returns the current job, if there is one.
@@ -1285,12 +1357,14 @@ impl JobManager {
 		job_control: bool,
 		mut notice: Option<&mut JobNotice<'_>>,
 	) -> Result<Vec<(usize, Option<sys::process::ProcessId>)>, error::Error> {
-		// A job that ended before this call is not one it waits for.
+		// A job that ended before this call is not one it waits for, nor is a
+		// foreground job (a `lastpipe` pipeline's, while its last command
+		// runs): Bash waits only for the background jobs that run.
 		self.poll_preserving_completed()?;
 		let mut waited_for: Vec<usize> = self
 			.jobs
 			.iter()
-			.filter(|job| !job.is_done())
+			.filter(|job| !job.is_done() && !job.foreground)
 			.map(|job| job.id)
 			.collect();
 		let mut stopped_notices = Vec::new();
@@ -1302,7 +1376,7 @@ impl JobManager {
 					if matches!(job.state, JobState::Stopped) {
 						stopped_notices.push((job.id, job.last_pid()));
 					}
-					if matches!(job.state, JobState::Running) {
+					if matches!(job.state, JobState::Running) && !job.foreground {
 						running = Some(index);
 						break;
 					}
@@ -1984,11 +2058,23 @@ pub struct Job {
 	/// What the job recorded of the shell that started it.
 	origin: JobOrigin,
 
-	/// Whether this is a foreground job the table kept because it ended
-	/// while the table was frozen (see [`JobManager::keep_foreground`]): it
-	/// is reported as a foreground job, whatever ended it, and its pid keeps
-	/// no status once it leaves.
+	/// Whether this is a foreground job: one the table kept because it ended
+	/// while the table was frozen (see [`JobManager::keep_foreground`]), or
+	/// a `lastpipe` pipeline's (see [`JobManager::hold_lastpipe_job`]). It
+	/// is reported as a foreground job, whatever ended it, `wait` with no
+	/// operand passes over it, no listing ends it with ` &`, and its pid
+	/// keeps no status once it leaves.
 	foreground: bool,
+
+	/// The stages of a `lastpipe` pipeline's job that the shell runs
+	/// itself, each with the index of its process, its shell-only pid and
+	/// what `kill` reaches of it (see [`HeldProcess::Task`]).
+	held_stages: Vec<(usize, InProcess)>,
+
+	/// Whether this is a `lastpipe` pipeline's job whose last command still
+	/// runs, so the shell itself is not yet among its processes (see
+	/// [`JobManager::finish_held_job`]).
+	held_open: bool,
 }
 
 /// The job as `jobs` lists it (Bash's `print_pipeline`), as the notice of a
@@ -2064,7 +2150,70 @@ impl Job {
 			processes,
 			origin,
 			foreground: false,
+			held_stages: Vec::new(),
+			held_open: false,
 		}
+	}
+
+	/// The job Bash installs for the processes of a `lastpipe` pipeline but
+	/// its last, before the last command runs (see
+	/// [`JobManager::hold_lastpipe_job`]), started in `origin`.
+	fn held_lastpipe(held: Vec<HeldProcess>, origin: JobOrigin) -> Self {
+		let mut tasks = Vec::new();
+		let mut processes = Vec::with_capacity(held.len());
+		let mut held_stages = Vec::new();
+		for (index, process) in held.into_iter().enumerate() {
+			match process {
+				HeldProcess::External(child, command) => {
+					processes.push(JobProcess::running(child.pid(), command.clone()));
+					tasks.push((JobTask::External(child), command));
+				},
+				HeldProcess::Task(handle, command, pid, stage) => {
+					in_process_jobs().insert(pid, Arc::clone(&stage.0));
+					processes.push(JobProcess::running(Some(pid), command.clone()));
+					tasks.push((JobTask::Internal(handle), command));
+					held_stages.push((index, InProcess { pid, target: stage.0 }));
+				},
+				HeldProcess::Ended(pid, command, status) => {
+					processes.push(JobProcess::ended(pid, command, status));
+				},
+			}
+		}
+		let command_line = processes
+			.iter()
+			.map(|process| process.command.as_str())
+			.collect::<Vec<_>>()
+			.join(" | ");
+		let state = if tasks.is_empty() { JobState::Done } else { JobState::Running };
+		let mut job = Self::new(tasks, command_line, state, origin);
+		job.completed_process_ids = processes
+			.iter()
+			.filter(|process| process.status != ProcessStatus::Running)
+			.filter_map(|process| process.pid)
+			.collect();
+		job.representative_process_id = processes.first().and_then(|process| process.pid);
+		job.last_process_id = processes.last().and_then(|process| process.pid);
+		job.processes = processes;
+		job.held_stages = held_stages;
+		job.foreground = true;
+		job.held_open = true;
+		job
+	}
+
+	/// Appends the shell itself, `last`, to a `lastpipe` pipeline's job
+	/// once the last command has ended (see [`JobManager::finish_held_job`]).
+	fn finish_lastpipe(&mut self, last: JobProcess) {
+		self.held_open = false;
+		self.last_process_id = last.pid;
+		self.completed_process_ids.extend(last.pid);
+		self.processes.push(last);
+		self.state = JobState::Done;
+		let status = match self.raw_status() {
+			ProcessStatus::Signaled { signal, .. } => 128_u8.saturating_add(signal),
+			ProcessStatus::Exited(status) => status,
+			ProcessStatus::Running => 0,
+		};
+		self.completed_result = Some(Ok(ExecutionResult::new(status)));
 	}
 
 	/// The table's entry for `job`, a foreground job that ended while the
@@ -2436,8 +2585,17 @@ impl Job {
 	/// How the job's process at `index` ended, or that it runs. A stage of an
 	/// in-process pipeline job reports what it recorded, or the signal `kill`
 	/// sent it; one still running when `kill` ended the whole job ended with
-	/// that signal, and one the task never recorded exited 0.
+	/// that signal, and one the task never recorded exited 0. A stage of a
+	/// `lastpipe` pipeline's job that the shell runs itself reports what it
+	/// recorded, or the signal `kill` sent it.
 	fn process_status(&self, index: usize) -> ProcessStatus {
+		if let Some((_, held)) = self.held_stages.iter().find(|(held, _)| *held == index) {
+			return match InProcessStage(Arc::clone(&held.target)).status() {
+				Some(status) => status,
+				None if self.is_done() => ProcessStatus::Exited(0),
+				None => ProcessStatus::Running,
+			};
+		}
 		let Some(stage) = self.stages.get(index) else {
 			return match self.in_process_signal() {
 				Some(signal) => ProcessStatus::Signaled { signal, core_dumped: false },
@@ -2473,8 +2631,9 @@ impl Job {
 			})
 			.collect();
 		let state = PipelineState {
-			running: matches!(self.state, JobState::Running | JobState::Unknown),
-			stopped: matches!(self.state, JobState::Stopped),
+			running:    matches!(self.state, JobState::Running | JobState::Unknown),
+			stopped:    matches!(self.state, JobState::Stopped),
+			foreground: self.foreground,
 		};
 		(rows, state)
 	}
@@ -2979,10 +3138,19 @@ impl Job {
 		self.in_process.as_ref().map(|in_process| in_process.pid)
 	}
 
-	/// Whether the job is an in-process pipeline whose stages each have a pid
-	/// `kill` ends alone (see [`Job::spawn_in_process_pipeline`]).
+	/// Whether the job has stages the shell runs itself, each with a pid
+	/// `kill` ends alone: an in-process pipeline job (see
+	/// [`Job::spawn_in_process_pipeline`]), or a `lastpipe` pipeline's job
+	/// with such stages (see [`JobManager::hold_lastpipe_job`]).
 	pub fn runs_stages_in_process(&self) -> bool {
-		!self.stages.is_empty()
+		!self.stages.is_empty() || !self.held_stages.is_empty()
+	}
+
+	/// The shell-only pids of the stages of a `lastpipe` pipeline's job that
+	/// the shell runs itself, which `kill %N` signals besides the job's
+	/// processes, as Bash signals each process of the job.
+	pub fn held_stage_pids(&self) -> impl Iterator<Item = sys::process::ProcessId> + '_ {
+		self.held_stages.iter().map(|(_, stage)| stage.pid)
 	}
 
 	/// Every shell-only pid the job holds: its own and its stages'.
@@ -2990,6 +3158,7 @@ impl Job {
 		self.in_process_pid()
 			.into_iter()
 			.chain(self.stages.iter().map(|stage| stage.pid))
+			.chain(self.held_stage_pids())
 	}
 
 	/// Leaves `signal` pending when this running job trapped it.
@@ -3343,7 +3512,7 @@ mod listing_tests {
 		String::from_utf8(out).expect("utf-8")
 	}
 
-	const DONE: PipelineState = PipelineState { running: false, stopped: false };
+	const DONE: PipelineState = PipelineState { running: false, stopped: false, foreground: false };
 
 	#[test]
 	fn a_process_that_dumped_core_says_so_after_its_status() {

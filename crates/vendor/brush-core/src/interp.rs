@@ -8,7 +8,7 @@ use std::{
 use brush_parser::ast::{self, CommandPrefixOrSuffixItem};
 use itertools::Itertools;
 
-use tokio_util::sync::CancellationToken;
+use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 
 use crate::{
 	ShellFd,
@@ -952,7 +952,8 @@ async fn try_spawn_pipeline_as_job<SE: extensions::ShellExtensions>(
 	subshell.options_mut().interactive = false;
 
 	let spawn_results =
-		spawn_pipeline_processes(pipeline, &mut subshell, params, &PipelineRole::default()).await?;
+		spawn_pipeline_processes(pipeline, &mut subshell, params, &PipelineRole::default(), &mut None)
+			.await?;
 	let mut tasks = VecDeque::new();
 
 	// Each stage keeps the text of the command it runs, as Bash's `PROCESS`
@@ -1123,13 +1124,14 @@ impl Execute for ast::Pipeline {
 			.in_process_stages
 			.take()
 			.filter(|stages| stages.len() == self.seq.len());
-		let role = PipelineRole {
-			stages:            stages.as_deref(),
-			replaces_subshell: params
+		let mut role = PipelineRole {
+			stages:             stages.as_deref(),
+			replaces_subshell:  params
 				.exec_in_place
 				.take()
 				.filter(|target| target.pipeline == std::ptr::from_ref(self).addr() && target.applies(shell))
 				.map(|target| target.slot),
+			holds_lastpipe_job: false,
 		};
 
 		// If this pipeline is negated, suppress errexit for commands within it
@@ -1145,19 +1147,24 @@ impl Execute for ast::Pipeline {
 		let frozen_before = (role.stages.is_none() && runs_last_command_in_shell(self, shell))
 			.then(|| shell.jobs_mut().freeze());
 		// Bash installs the job of such a pipeline, its processes but the
-		// last, before the last command runs (`stop_pipeline`): it takes its
-		// number then, and records the shell's directory and `pipefail`.
-		let lastpipe_job = frozen_before
-			.is_some()
-			.then(|| (shell.jobs_mut().reserve_job_id(), jobs::JobOrigin::of(shell)));
+		// last, before the last command runs (`stop_pipeline`).
+		role.holds_lastpipe_job = frozen_before.is_some();
+		let mut held = None;
 
 		// Spawn all the processes required for the pipeline, connecting outputs/inputs
 		// with pipes as needed, then wait for them. Waiting also has a side
 		// effect of updating pipeline status.
 		let waited = async {
-			let spawn_results = spawn_pipeline_processes(self, shell, &params, &role).await?;
-			wait_for_pipeline_processes_and_update_status(self, spawn_results, shell, &params, &role)
-				.await
+			let spawn_results = spawn_pipeline_processes(self, shell, &params, &role, &mut held).await?;
+			wait_for_pipeline_processes_and_update_status(
+				self,
+				spawn_results,
+				shell,
+				&params,
+				&role,
+				held.as_ref(),
+			)
+			.await
 		}
 		.await;
 		let last_in_shell = frozen_before.is_some();
@@ -1183,8 +1190,8 @@ impl Execute for ast::Pipeline {
 		let (mut result, foreground) = match waited {
 			Ok((result, foreground)) => (result, foreground),
 			Err(error) => {
-				if let Some((id, _)) = lastpipe_job {
-					shell.jobs_mut().release_job_id(id);
+				if let Some(held) = &held {
+					finish_held_stages_after(shell, held, &error, &params).await;
 				}
 				if notifies {
 					shell.notify_and_cleanup_jobs(&params).await;
@@ -1194,7 +1201,7 @@ impl Execute for ast::Pipeline {
 		};
 		if notifies {
 			shell.notify_and_cleanup_jobs_with(&params, Some(&foreground)).await;
-		} else if let Some((id, origin)) = lastpipe_job {
+		} else if let Some(held) = &held {
 			// Bash's pipeline job holds the last command as the shell itself,
 			// with the status that command returned and the text of the last
 			// command the shell started (`append_process` with `$$`), and the
@@ -1202,12 +1209,11 @@ impl Execute for ast::Pipeline {
 			// the table for the next notify point, `jobs` and `wait`.
 			let shell_pid = sys::process::ProcessId::try_from(std::process::id()).unwrap_or_default();
 			let printed_command = shell.printed_command().to_owned();
-			let (pipeline_job, last_child) =
-				foreground.split_lastpipe(shell_pid, printed_command, started_child);
-			shell.jobs_mut().keep_foreground(pipeline_job, origin, Some(id));
+			let (last, last_child) = foreground.lastpipe_tail(shell_pid, printed_command, started_child);
+			shell.jobs_mut().finish_held_job(held.id, last);
 			if let Some(last_child) = last_child {
 				let origin = jobs::JobOrigin::of(shell);
-				shell.jobs_mut().keep_foreground(last_child, origin, None);
+				shell.jobs_mut().keep_foreground(last_child, origin);
 			}
 		}
 		// Every stage of a pipeline of two or more runs in a subshell, the
@@ -1350,6 +1356,80 @@ struct PipelineRole<'a> {
 	/// (see [`ExecInPlace`]): the pipeline's one stage records its process
 	/// there.
 	replaces_subshell: Option<Arc<Mutex<Option<StandInProcess>>>>,
+	/// Whether the pipeline is a foreground `lastpipe` one, whose processes
+	/// but the last Bash installs as a job before the last command runs (see
+	/// [`HeldStages`]).
+	holds_lastpipe_job: bool,
+}
+
+/// The job of a `lastpipe` pipeline's processes but the last, installed in
+/// the table before the last command runs, as Bash's `stop_pipeline` does
+/// in `execute_pipeline` (see [`jobs::JobManager::hold_lastpipe_job`]).
+struct HeldStages {
+	/// The job's number.
+	id:  usize,
+	/// How many stages the job holds: every one but the last.
+	len: usize,
+}
+
+/// Hands the stages spawned so far, `stages`, each with its command and the
+/// shell-only pid and token it was given, to the job table as the job of a
+/// `lastpipe` pipeline's processes but the last (see [`HeldStages`]). A
+/// stage the shell runs as a task records how it ended when it ends.
+fn hold_lastpipe_stages(
+	shell: &mut Shell<impl extensions::ShellExtensions>,
+	stages: VecDeque<SpawnedStage>,
+	targets: Vec<(sys::process::ProcessId, jobs::InProcessStage)>,
+	commands: &[ast::Command],
+) -> HeldStages {
+	let len = stages.len();
+	let held = stages
+		.into_iter()
+		.zip(targets)
+		.zip(commands)
+		.map(|((stage, (pid, target)), command)| {
+			let command = command_text::command(command);
+			let SpawnedStage { spawn, stand_in, .. } = stage;
+			match spawn {
+				ExecutionSpawnResult::StartedProcess(child) => jobs::HeldProcess::External(child, command),
+				ExecutionSpawnResult::Completed(result) => {
+					jobs::HeldProcess::Ended(Some(pid), command, stage_status(&stand_in, &result))
+				},
+				ExecutionSpawnResult::StartedTask(handle) => {
+					let stage = target.clone();
+					let task = tokio::spawn(async move {
+						let joined = handle.await.map_err(error::Error::from).and_then(std::convert::identity);
+						if let Some(signal) = stage.killed_by() {
+							return Ok(ExecutionResult::new(128_u8.saturating_add(signal)));
+						}
+						let result = joined?;
+						stage.finish(stage_status(&stand_in, &result));
+						Ok(result)
+					});
+					jobs::HeldProcess::Task(AbortOnDropHandle::new(task), command, pid, target)
+				},
+			}
+		})
+		.collect();
+	let origin = jobs::JobOrigin::of(shell);
+	let id = shell.jobs_mut().hold_lastpipe_job(held, origin);
+	HeldStages { id, len }
+}
+
+/// Waits, after the last command of a `lastpipe` pipeline failed, for the
+/// processes of the job `held` names, and appends the shell to it with the
+/// status of `error`, as Bash's job holds the last command whatever it did.
+async fn finish_held_stages_after(
+	shell: &mut Shell<impl extensions::ShellExtensions>,
+	held: &HeldStages,
+	error: &error::Error,
+	params: &ExecutionParameters,
+) {
+	let _ = shell.jobs_mut().wait_held_job(held.id, params.cancel_token()).await;
+	let shell_pid = sys::process::ProcessId::try_from(std::process::id()).unwrap_or_default();
+	let status = processes::ProcessStatus::Exited(u8::from(ExecutionExitCode::from(error)));
+	let last = jobs::JobProcess::ended(Some(shell_pid), shell.printed_command().to_owned(), status);
+	shell.jobs_mut().finish_held_job(held.id, last);
 }
 
 async fn spawn_pipeline_processes(
@@ -1357,12 +1437,16 @@ async fn spawn_pipeline_processes(
 	shell: &mut Shell<impl extensions::ShellExtensions>,
 	params: &ExecutionParameters,
 	role: &PipelineRole<'_>,
+	held: &mut Option<HeldStages>,
 ) -> Result<VecDeque<SpawnedStage>, error::Error> {
 	ensure_not_cancelled(params)?;
 	let pipeline_len = pipeline.seq.len();
 	let mut pipe_readers = vec![];
 	let mut pipe_writers = vec![];
 	let mut spawn_results = VecDeque::new();
+	// The shell-only pid and token of each stage of a `lastpipe` pipeline
+	// but the last (see `hold_lastpipe_stages`).
+	let mut held_targets = Vec::new();
 	let mut process_group_id: Option<i32> = None;
 
 	// Create pipes to use between commands, but only bother doing so if there's
@@ -1410,6 +1494,13 @@ async fn spawn_pipeline_processes(
 		// subshell): that child is a job of its own (see `Pipeline::execute`).
 		if run_in_current_shell && pipeline_len > 1 {
 			shell.jobs_mut().take_child_started();
+			// Bash installs the job of the other stages now, with the table
+			// frozen (`stop_pipeline` in `execute_pipeline`).
+			if role.holds_lastpipe_job {
+				let stages = std::mem::take(&mut spawn_results);
+				let targets = std::mem::take(&mut held_targets);
+				*held = Some(hold_lastpipe_stages(shell, stages, targets, &pipeline.seq));
+			}
 		}
 
 		// Set up parameters appropriate for this command.
@@ -1427,10 +1518,16 @@ async fn spawn_pipeline_processes(
 			.unwrap_or_else(|| Arc::new(Mutex::new(None)));
 		cmd_params.set_stand_in_slot(Arc::clone(&stand_in));
 		// A stage of an in-process background job runs with the stage's own
-		// token, which `kill` of the stage's pid fires.
+		// token, which `kill` of the stage's pid fires; so does a stage of a
+		// `lastpipe` pipeline but its last, which joins the pipeline's job.
 		let job_stage = role.stages.and_then(|stages| stages.get(current_pipeline_index));
 		if let Some(stage) = job_stage {
 			cmd_params.set_cancel_token(stage.cancellation());
+		}
+		if role.holds_lastpipe_job && !run_in_current_shell {
+			let (pid, stage) = jobs::InProcessStage::held(params.cancel_token().as_ref())?;
+			cmd_params.set_cancel_token(stage.cancellation());
+			held_targets.push((pid, stage));
 		}
 
 		// Install pipes.
@@ -1521,6 +1618,7 @@ async fn wait_for_pipeline_processes_and_update_status(
 	shell: &mut Shell<impl extensions::ShellExtensions>,
 	params: &ExecutionParameters,
 	role: &PipelineRole<'_>,
+	held: Option<&HeldStages>,
 ) -> Result<(ExecutionResult, jobs::ForegroundJob), error::Error> {
 	ensure_not_cancelled(params)?;
 	let mut result = ExecutionResult::success();
@@ -1567,7 +1665,9 @@ async fn wait_for_pipeline_processes_and_update_status(
 	// foreground command a signal ended: its pid, its own command text, and
 	// how it ended.
 	let mut processes = Vec::with_capacity(stage_count);
-	let mut stage_commands = pipeline.seq.iter();
+	// The stages a `lastpipe` pipeline's job holds are waited for there,
+	// after its last command, as Bash does (`wait_for (lastpid)`).
+	let mut stage_commands = pipeline.seq.iter().skip(held.map_or(0, |held| held.len));
 
 	// The stages seen stopped, each with its `WSTOPSIG`. A wait ends when any
 	// stage of the pipeline stops (a wait on one stage consumes the stops of
@@ -1738,6 +1838,31 @@ async fn wait_for_pipeline_processes_and_update_status(
 		}
 	}
 
+	// A `lastpipe` pipeline's other stages are waited for in its job, once
+	// its last command has ended, and come first in its statuses.
+	if let Some(held) = held {
+		let held_processes = shell
+			.jobs_mut()
+			.wait_held_job(held.id, params.cancel_token())
+			.await?
+			.unwrap_or_default();
+		let held_statuses: Vec<u16> = held_processes
+			.iter()
+			.map(|process| match process.status() {
+				processes::ProcessStatus::Signaled { signal, .. } => 128 + u16::from(signal),
+				processes::ProcessStatus::Exited(status) => u16::from(status),
+				processes::ProcessStatus::Running => 0,
+			})
+			.chain(std::iter::repeat(0))
+			.take(held.len)
+			.collect();
+		if last_failure_exit_code.is_none() {
+			last_failure_exit_code =
+				held_statuses.iter().rev().find(|&&status| status != 0).map(|&status| status.into());
+		}
+		statuses.splice(0..0, held_statuses);
+		processes.splice(0..0, held_processes);
+	}
 	if stopped_children.is_empty() {
 		// Apply pipefail semantics if enabled
 		if shell.options().return_last_failure_from_pipeline
