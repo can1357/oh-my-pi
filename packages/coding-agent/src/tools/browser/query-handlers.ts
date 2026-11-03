@@ -301,8 +301,9 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 				} else if (valueIsText) text += shown ? (control.value ?? "") : "";
 				else if (labelledBy) text += shown ? labelledBy : "";
 				else if (label) text += shown ? label : "";
-				else if (tag === "img" || tag === "area") text += shown ? (childElement.getAttribute("alt") ?? "") : "";
-				else if (inputButton) text += shown ? (control.value ?? "") : "";
+				else if (tag === "img" || tag === "area" || inputType === "image") {
+					text += shown ? (childElement.getAttribute("alt") ?? "") : "";
+				} else if (inputButton) text += shown ? (control.value ?? "") : "";
 				else if (tag !== "input") walk(childElement, visibility === "any" ? "any" : style.visibility);
 				text += gap;
 			}
@@ -330,12 +331,11 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 						targetStyle.visibility !== "visible" ||
 						targetStyle.display === "none" ||
 						target.closest("[hidden], [aria-hidden='true']") !== null;
-					return contentText(
-						{ childNodes: [target] } as unknown as Element,
-						null,
-						hidden ? "any" : "visible",
-						false,
+					const text = normalizeSpace(
+						contentText({ childNodes: [target] } as unknown as Element, null, hidden ? "any" : "visible", false),
 					);
+					// A target that yields no text is named by its tooltip, as the root of its own name computation.
+					return text || normalizeSpace(target.getAttribute("title") ?? "");
 				})
 				.join(" "),
 		);
