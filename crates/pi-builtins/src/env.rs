@@ -367,49 +367,40 @@ pub(crate) fn command_words(
 				if deadline.is_some_and(|at| std::time::Instant::now() >= at) {
 					return Ok(None);
 				}
-				let last_unknown = std::cell::Cell::new(false);
 				let mut expanded: usize = 0;
-				let mut unknown_words = Vec::new();
-				let words = split_string(
+				let split_words = split_string(
 					&split.string,
 					|name| {
-						last_unknown.set(false);
 						// Past the bound the round's words are never used.
 						if expanded > MAX_ARGV_BYTES {
-							return None;
+							return Expansion::Unset;
 						}
-						let value = lookup(name).unwrap_or_else(|Unknown| {
-							last_unknown.set(true);
-							Some(String::new())
-						});
-						expanded += value.as_ref().map_or(0, String::len);
-						value
-					},
-					|_, value| {
-						if let Some((_, word)) = value
-							&& last_unknown.get()
-						{
-							unknown_words.push(word);
+						match lookup(name) {
+							Ok(Some(value)) => {
+								expanded += value.len();
+								Expansion::Value(value)
+							},
+							Ok(None) => Expansion::Unset,
+							Err(Unknown) => Expansion::Unknown,
 						}
 					},
+					|_, _| {},
 				);
-				// `env` refuses the string whatever the values are.
-				let Ok(words) = words else {
+				// Up to where an unknown value could decide it, the string
+				// splits alike for every value, so `env` refuses it whatever
+				// the values are.
+				let Ok(Split { args: words, unknown: words_unknown, undecided }) = split_words else {
 					return Ok(None);
 				};
-				if expanded > MAX_ARGV_BYTES {
+				if expanded > MAX_ARGV_BYTES || undecided {
 					return Err(Unknown);
 				}
 				let (index, resume_debug) = (split.index, split.debug);
 				let removed: usize = argv[index..index + split.words].iter().map(|word| word.len()).sum();
 				let added = split.prefix.as_ref().map_or(0, |prefix| prefix.len())
 					+ words.iter().map(Vec::len).sum::<usize>();
-				let mut inserted = vec![false; usize::from(split.prefix.is_some()) + words.len()];
-				let first_word = inserted.len() - words.len();
-				for word in unknown_words {
-					inserted[first_word + word] = true;
-				}
-				unknown.splice(index..index + split.words, inserted);
+				let prefix = split.prefix.is_some().then_some(false);
+				unknown.splice(index..index + split.words, prefix.into_iter().chain(words_unknown));
 				splice_split(&mut argv, split, &words);
 				bytes = bytes - removed + added;
 				if bytes > MAX_ARGV_BYTES {
@@ -711,51 +702,85 @@ enum SignalOption {
 	Block,
 }
 
+/// What a `${VARNAME}` in a `-S` string expands to.
+enum Expansion {
+	/// The variable's value.
+	Value(String),
+	/// An unset variable: nothing, which starts no argument.
+	Unset,
+	/// A value not known before `env` runs: unset, or any value. It stands
+	/// empty in its argument, which [`Split::unknown`] marks.
+	#[cfg_attr(not(feature = "util.timeout"), allow(dead_code, reason = "only the classifier has unknown values"))]
+	Unknown,
+}
+
+/// The arguments a `-S` string splits into.
+struct Split {
+	args:      Vec<Vec<u8>>,
+	/// Which of `args` hold an [`Expansion::Unknown`].
+	#[cfg_attr(not(feature = "util.timeout"), allow(dead_code, reason = "only the classifier has unknown values"))]
+	unknown:   Vec<bool>,
+	/// Whether an unknown value decides the split's own syntax: when it may
+	/// be all that comes before a `#`, that `#` comments out the rest if the
+	/// variable is unset and is a literal character otherwise. The split
+	/// stops there.
+	#[cfg_attr(not(feature = "util.timeout"), allow(dead_code, reason = "only the classifier has unknown values"))]
+	undecided: bool,
+}
+
 /// Splits a `-S` string into arguments. The variable lookup is explicit so
 /// `env` and callers that must identify its command can use the same parser.
 /// It accepts only `${VARNAME}` expansions, as GNU does. `on_expand` sees
-/// each expansion: the name, and the value with the index of the argument
-/// it went into (`None` when the variable is unset).
+/// each expansion's name and value (`None` when there is none).
 fn split_string(
 	string: &[u8],
-	mut lookup: impl FnMut(&str) -> Option<String>,
-	mut on_expand: impl FnMut(&str, Option<(&str, usize)>),
-) -> Result<Vec<Vec<u8>>, String> {
-	fn start_arg<'a>(args: &'a mut Vec<Vec<u8>>, sep: &mut bool) -> &'a mut Vec<u8> {
+	mut lookup: impl FnMut(&str) -> Expansion,
+	mut on_expand: impl FnMut(&str, Option<&str>),
+) -> Result<Split, String> {
+	fn start_arg<'a>(args: &'a mut Vec<Vec<u8>>, unknown: &mut Vec<bool>, sep: &mut bool) -> &'a mut Vec<u8> {
 		if *sep {
 			*sep = false;
+			unknown.push(false);
 			return args.push_mut(Vec::new());
 		}
 		args.last_mut().expect("started")
 	}
 
 	let mut args: Vec<Vec<u8>> = Vec::new();
+	let mut unknown: Vec<bool> = Vec::new();
 	let (mut dq, mut sq, mut sep) = (false, false, true);
+	// Whether the current argument holds only unknown values, so it may not
+	// exist (each of them unset).
+	let mut maybe_absent = false;
 	let mut i = 0;
 	while i < string.len() {
 		let mut newc = string[i];
 		match newc {
 			b'\'' if !dq => {
 				sq = !sq;
-				start_arg(&mut args, &mut sep);
+				start_arg(&mut args, &mut unknown, &mut sep);
+				maybe_absent = false;
 				i += 1;
 				continue;
 			},
 			b'"' if !sq => {
 				dq = !dq;
-				start_arg(&mut args, &mut sep);
+				start_arg(&mut args, &mut unknown, &mut sep);
+				maybe_absent = false;
 				i += 1;
 				continue;
 			},
 			c if C_ISSPACE_CHARS.contains(&c) && !(sq || dq) => {
 				sep = true;
+				maybe_absent = false;
 				while string.get(i).is_some_and(|c| C_ISSPACE_CHARS.contains(c)) {
 					i += 1;
 				}
 				continue;
 			},
 			// '#' starting an argument comments out the rest.
-			b'#' if sep => return Ok(args),
+			b'#' if sep => return Ok(Split { args, unknown, undecided: false }),
+			b'#' if maybe_absent => return Ok(Split { args, unknown, undecided: true }),
 			b'\\' if !(sq && !matches!(string.get(i + 1), Some(b'\\' | b'\''))) => {
 				i += 1;
 				let Some(&escaped) = string.get(i) else {
@@ -766,13 +791,14 @@ fn split_string(
 					b'_' if !dq => {
 						i += 1;
 						sep = true;
+						maybe_absent = false;
 						continue;
 					},
 					b'_' => b' ',
 					b'c' if dq => {
 						return Err("'\\c' must not appear in double-quoted -S string".to_owned());
 					},
-					b'c' => return Ok(args),
+					b'c' => return Ok(Split { args, unknown, undecided: false }),
 					b'f' => b'\x0c',
 					b'n' => b'\n',
 					b'r' => b'\r',
@@ -794,25 +820,34 @@ fn split_string(
 					));
 				};
 				let name = String::from_utf8_lossy(name).into_owned();
-				let value = lookup(&name);
-				let argument = value.as_deref().map(|value| {
-					start_arg(&mut args, &mut sep).extend(value.as_bytes());
-					(value, args.len() - 1)
-				});
-				on_expand(&name, argument);
+				match lookup(&name) {
+					Expansion::Value(value) => {
+						on_expand(&name, Some(&value));
+						start_arg(&mut args, &mut unknown, &mut sep).extend(value.as_bytes());
+						maybe_absent = false;
+					},
+					Expansion::Unset => on_expand(&name, None),
+					Expansion::Unknown => {
+						on_expand(&name, None);
+						maybe_absent |= sep;
+						start_arg(&mut args, &mut unknown, &mut sep);
+						*unknown.last_mut().expect("started") = true;
+					},
+				}
 				// Past "${", the name, and "}".
 				i += name.len() + 3;
 				continue;
 			},
 			_ => {},
 		}
-		start_arg(&mut args, &mut sep).push(newc);
+		start_arg(&mut args, &mut unknown, &mut sep).push(newc);
+		maybe_absent = false;
 		i += 1;
 	}
 	if dq || sq {
 		return Err("no terminating quote in -S string".to_owned());
 	}
-	Ok(args)
+	Ok(Split { args, unknown, undecided: false })
 }
 
 impl Run<'_> {
@@ -1087,13 +1122,13 @@ impl Run<'_> {
 			// the signal mid-split.
 			|name| {
 				if host.is_cancelled() {
-					return None;
+					return Expansion::Unset;
 				}
-				host.var(name).map(str::to_owned)
+				host.var(name).map_or(Expansion::Unset, |value| Expansion::Value(value.to_owned()))
 			},
 			|name, value| {
 				notes.push(match value {
-					Some((value, _)) => format!("expanding ${{{name}}} into {}\n", value.quote()),
+					Some(value) => format!("expanding ${{{name}}} into {}\n", value.quote()),
 					None => format!("replacing ${{{name}}} with empty string\n"),
 				});
 			},
@@ -1104,7 +1139,7 @@ impl Run<'_> {
 		for note in &notes {
 			self.vmsg(note);
 		}
-		split.map_err(|message| self.die(&message))
+		split.map(|split| split.args).map_err(|message| self.die(&message))
 	}
 
 	/// Reads `--env0-from` entries: NUL-terminated, from a file or `-`

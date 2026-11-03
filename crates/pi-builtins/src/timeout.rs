@@ -2568,8 +2568,12 @@ f() { /bin/sh -c "$r" | /bin/sh -c "$r; cat"; }
 	/// a named pipe (F2). Such a value in an argument leaves the command word
 	/// to decide: `eval` is the shell, which the signal ends before `late`
 	/// (F3), while a wrapper's arguments decide what it runs, so `nohup` runs
-	/// the program (F4). `timeout` took an unknown value for an `env` that
-	/// runs nothing and cancelled the program (143) in F1, F2 and F4.
+	/// the program (F4). An unknown value can also decide the split's syntax:
+	/// unset, `${U}` starts no argument, so the `#` after it comments out the
+	/// rest, an unterminated quote included; set, the `#` is a literal and the
+	/// quote makes `env` refuse. Here `U` is unset, so `env` runs the program
+	/// (F6). `timeout` took an unknown value for an `env` that runs nothing
+	/// and cancelled the program (143) in F1, F2, F4 and F6.
 	#[cfg(unix)]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn a_command_only_a_streamed_environment_names_keeps_its_signal() {
@@ -2595,6 +2599,12 @@ f() { /bin/sh -c "$r" | /bin/sh -c "$r; cat"; }
 			(
 				"F4",
 				r#"printf 'P=/bin/sh\0' | timeout --preserve-status -k 2 1 env --env0-from=- env -S 'nohup ${P} -c "trap \"exit 3\" TERM; /bin/sleep 3"'"#,
+				3,
+				"",
+			),
+			(
+				"F6",
+				r#"printf 'X=1\0' | timeout --preserve-status -k 2 1 env -i --env0-from=- env -S '/bin/sh -c "trap \"exit 3\" TERM; /bin/sleep 3" ${U}# "'"#,
 				3,
 				"",
 			),
