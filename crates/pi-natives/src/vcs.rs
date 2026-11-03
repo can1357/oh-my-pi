@@ -146,6 +146,30 @@ pub struct VcsCommitAuthor {
 	pub email: String,
 	pub date:  Option<String>,
 }
+/// An untracked listing with what it cannot answer for.
+#[napi(object)]
+pub struct LsFilesWithWarnings {
+	/// The untracked paths git listed.
+	pub paths:       Vec<String>,
+	/// Directories git reported it could not open, so the listing is short.
+	pub unreadable:  Vec<String>,
+	/// Entries git listed whose names are not UTF-8. A JS string cannot hold
+	/// such a name, so `paths` leaves them out and no path API reaches them.
+	/// Each is written for a person: a byte outside a UTF-8 character as
+	/// `\xNN`, a backslash doubled.
+	pub undecodable: Vec<String>,
+}
+
+impl From<pi_vcs::LsFilesReport> for LsFilesWithWarnings {
+	fn from(report: pi_vcs::LsFilesReport) -> Self {
+		Self {
+			paths:       report.paths,
+			unreadable:  report.unreadable,
+			undecodable: report.undecodable,
+		}
+	}
+}
+
 /// Commit metadata.
 #[napi(object)]
 pub struct VcsCommitDetails {
@@ -697,6 +721,21 @@ impl VcsRepo {
 			repo.ls_files(others, exclude_standard)
 		})
 	}
+
+	/// Untracked paths, plus what the listing cannot answer for.
+	#[napi]
+	pub fn ls_files_with_warnings(
+		&self,
+		others: bool,
+		exclude_standard: bool,
+		signal: Option<Unknown>,
+	) -> Promise<LsFilesWithWarnings> {
+		repo_blocking("vcs.lsFilesWithWarnings", self.inner.clone(), signal, move |repo| {
+			Ok(repo
+				.ls_files_with_warnings(others, exclude_standard)?
+				.into())
+		})
+	}
 }
 
 /// In-process Git repository handle.
@@ -994,6 +1033,24 @@ impl VcsGitRepo {
 	) -> Promise<Vec<String>> {
 		blocking("vcs.lsFiles", self.inner.clone(), signal, move |r| {
 			r.ls_files(others, exclude_standard)
+		})
+	}
+
+	/// Untracked paths, plus what the listing cannot answer for.
+	///
+	/// `git ls-files --others` warns and exits 0 when it cannot open a
+	/// directory, so the list alone cannot say whether it is complete; and a
+	/// name that is not UTF-8 has no JS string. A caller that deletes a
+	/// workspace on the strength of the list needs all three.
+	#[napi]
+	pub fn ls_files_with_warnings(
+		&self,
+		others: bool,
+		exclude_standard: bool,
+		signal: Option<Unknown>,
+	) -> Promise<LsFilesWithWarnings> {
+		blocking("vcs.lsFilesWithWarnings", self.inner.clone(), signal, move |r| {
+			Ok(r.ls_files_with_warnings(others, exclude_standard)?.into())
 		})
 	}
 

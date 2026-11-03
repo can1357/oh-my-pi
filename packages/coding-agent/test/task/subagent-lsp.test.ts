@@ -155,6 +155,7 @@ function mockIsolation(): void {
 	};
 	const isolationHandle: IsolationHandle = {
 		mergedDir: "/tmp/isolated-subagent",
+		generation: "test",
 		backend: worktreeModule.parseIsolationBackend("rcopy")!,
 		fellBack: false,
 		fallbackReason: null,

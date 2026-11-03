@@ -111,23 +111,23 @@ impl GitRepo {
 		}
 		let mut selected = collect_stage_paths(self, &requested, all)?;
 		for entry in index.entries() {
-			let path = entry.path(&index).to_str_lossy().into_owned();
+			let path = entry.path(&index);
 			if (all
 				|| requested
 					.iter()
-					.any(|wanted| stage_path_matches(&path, wanted)))
-				&& fs::symlink_metadata(self.root().join(&path)).is_ok()
+					.any(|wanted| stage_path_matches(path, wanted)))
+				&& gix::path::try_from_bstr(path)
+					.is_ok_and(|relative| fs::symlink_metadata(self.root().join(relative)).is_ok())
 			{
-				selected.insert(path);
+				selected.insert(path.to_owned());
 			}
 		}
 		index.remove_entries(|_, path, _| {
-			let path = path.to_str_lossy();
 			(all
 				|| requested
 					.iter()
-					.any(|wanted| stage_path_matches(&path, wanted)))
-				&& !selected.contains(path.as_ref())
+					.any(|wanted| stage_path_matches(path, wanted)))
+				&& !selected.contains(path)
 		});
 		let (mut filter, filter_index) = repo
 			.filter_pipeline(None)
@@ -137,13 +137,14 @@ impl GitRepo {
 		let mut replaced = std::collections::HashSet::<BString>::new();
 		let mut staged = Vec::new();
 		for path in selected {
-			match stage_one(self.root(), &mut filter, &filter_index, &path, staging_started)? {
+			match stage_one(self.root(), &mut filter, &filter_index, path.as_bstr(), staging_started)?
+			{
 				Staged::Entry(entry) => {
-					replaced.insert(path.into());
+					replaced.insert(path);
 					staged.push(entry);
 				},
 				Staged::Removed => {
-					replaced.insert(path.into());
+					replaced.insert(path);
 				},
 				Staged::Kept => {},
 			}
@@ -1288,17 +1289,24 @@ fn index_for_tree(
 	}
 }
 
+/// The untracked paths `git add` would take, by the bytes of their names: a
+/// name that is not UTF-8 is staged as itself, as git stages it.
 fn collect_stage_paths(
 	repo: &GitRepo,
 	requested: &BTreeSet<String>,
 	all: bool,
-) -> Result<BTreeSet<String>> {
-	let untracked = if all || requested.contains("") {
-		repo.ls_files(true, true)?
+) -> Result<BTreeSet<BString>> {
+	let listing = if all || requested.contains("") {
+		repo.ls_files_at_paths(true, true, &BTreeSet::new())?
 	} else {
 		repo.ls_files_at_paths(true, true, requested)?
 	};
-	Ok(untracked.into_iter().collect())
+	Ok(listing
+		.paths
+		.into_iter()
+		.map(BString::from)
+		.chain(listing.undecodable)
+		.collect())
 }
 
 fn normalize_stage_path(path: &str) -> String {
@@ -1314,7 +1322,7 @@ fn normalize_stage_path(path: &str) -> String {
 	}
 }
 
-fn stage_path_matches(path: &str, wanted: &str) -> bool {
+fn stage_path_matches(path: &[u8], wanted: &str) -> bool {
 	wanted.is_empty() || path_matches(path, wanted)
 }
 
@@ -1425,16 +1433,17 @@ enum Staged {
 	Kept,
 }
 
-/// Write the filtered worktree content at `path` into the object database.
+/// Write the filtered worktree content at `rela_path` into the object
+/// database.
 fn stage_one(
 	root: &Path,
 	filter: &mut gix::filter::Pipeline<'_>,
 	filter_index: &gix::index::State,
-	path: &str,
+	rela_path: &gix::bstr::BStr,
 	staging_started: u64,
 ) -> Result<Staged> {
 	use gix::objs::tree::EntryKind;
-	let rela_path = path.as_bytes().as_bstr();
+	let path = gix::path::try_from_bstr(rela_path).map_err(|err| Error::backend("git add", err))?;
 	// Stat before reading, as `git add` does, so the entry keeps a valid stat
 	// cache: a write landing after the stat changes the file's stat and later
 	// status calls re-hash it. A file last changed in the second staging
@@ -1463,18 +1472,10 @@ fn stage_one(
 
 fn copy_index_paths(dest: &mut gix::index::File, source: &gix::index::File, files: &[String]) {
 	let all = files.is_empty();
-	dest.remove_entries(|_, path, _| {
-		all || files
-			.iter()
-			.any(|wanted| path_matches(&path.to_str_lossy(), wanted))
-	});
+	dest.remove_entries(|_, path, _| all || files.iter().any(|wanted| path_matches(path, wanted)));
 	for entry in source.entries() {
 		let path = entry.path(source);
-		if all
-			|| files
-				.iter()
-				.any(|wanted| path_matches(&path.to_str_lossy(), wanted))
-		{
+		if all || files.iter().any(|wanted| path_matches(path, wanted)) {
 			dest.dangerously_push_entry(entry.stat, entry.id, entry.flags, entry.mode, path);
 		}
 	}
@@ -1700,7 +1701,11 @@ fn restore_index_paths(
 	let mut filter = WorktreeFilter::staging(repo, "git restore")?;
 	for entry in index.entries() {
 		let path = entry.path(index).to_str_lossy();
-		if files.is_empty() || files.iter().any(|wanted| path_matches(&path, wanted)) {
+		if files.is_empty()
+			|| files
+				.iter()
+				.any(|wanted| path_matches(path.as_bytes(), wanted))
+		{
 			let object = repo
 				.find_object(entry.id)
 				.map_err(|e| Error::backend("git restore", e))?;
@@ -1717,12 +1722,12 @@ fn restore_index_paths(
 	Ok(())
 }
 
-fn path_matches(path: &str, wanted: &str) -> bool {
-	let wanted = wanted.trim_end_matches('/');
+fn path_matches(path: &[u8], wanted: &str) -> bool {
+	let wanted = wanted.trim_end_matches('/').as_bytes();
 	path == wanted
 		|| path
 			.strip_prefix(wanted)
-			.is_some_and(|r| r.starts_with('/'))
+			.is_some_and(|r| r.starts_with(b"/"))
 }
 
 fn set_config_file(path: &Path, key: &str, value: &str) -> Result<()> {
@@ -2326,6 +2331,45 @@ mod tests {
 		assert!(
 			status.contains("tests/e2e/visible.txt"),
 			"unignored sibling should be staged:\n{status}"
+		);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn stage_all_takes_names_that_are_not_utf8_as_git_add_does() {
+		// Failure mode: names were decoded lossily before staging. A tracked
+		// one matched no file on disk, so `git add -A` staged its deletion; an
+		// untracked one named a file that does not exist, so it was never
+		// added.
+		use std::os::unix::ffi::OsStrExt;
+		let (temp, _) = fixture();
+		let root = temp.path();
+		let tracked = OsStr::from_bytes(b"tracked-\xff.txt");
+		let untracked = OsStr::from_bytes(b"untracked-\xfe.txt");
+		fs::write(root.join(tracked), "kept\n").unwrap();
+		let added = Command::new("git")
+			.arg("-C")
+			.arg(root)
+			.arg("add")
+			.arg(tracked)
+			.status()
+			.unwrap();
+		assert!(added.success(), "git add of the raw name failed");
+		git(root, &["commit", "-qm", "raw name"]);
+		fs::write(root.join(untracked), "new\n").unwrap();
+
+		GitRepo::require(root).unwrap().stage_files(&[]).unwrap();
+		let status = Command::new("git")
+			.arg("-C")
+			.arg(root)
+			.args(["status", "--porcelain=v1", "-z"])
+			.output()
+			.unwrap();
+		assert_eq!(
+			status.stdout,
+			b"A  untracked-\xfe.txt\0",
+			"{}",
+			String::from_utf8_lossy(&status.stdout)
 		);
 	}
 

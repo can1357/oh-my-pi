@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { scheduler } from "node:timers/promises";
 import {
 	applyNestedPatches,
 	captureBaseline,
@@ -17,10 +18,19 @@ import {
 	mergeTaskBranches,
 	parseIsolationBackend,
 } from "@oh-my-pi/pi-coding-agent/task/worktree";
-import { readRetainedMountBackend } from "@oh-my-pi/pi-coding-agent/task/isolation-ownership";
 import * as natives from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { removeWithRetries, setWorktreesDir } from "@oh-my-pi/pi-utils";
+import * as isolationFs from "@oh-my-pi/pi-coding-agent/task/isolation-fs";
+import * as lateCleanup from "@oh-my-pi/pi-coding-agent/utils/late-cleanup";
+import { leaseIsolationWorkspace } from "@oh-my-pi/pi-coding-agent/task/isolation-lease";
+import * as ownership from "@oh-my-pi/pi-coding-agent/task/isolation-ownership";
+import {
+	ISOLATION_OWNER_FILE,
+	readRetainedMountBackend,
+	resolveSandboxIdentity,
+	writeIsolationOwner,
+} from "@oh-my-pi/pi-coding-agent/task/isolation-ownership";
+import { removeWithRetries, setWorktreesDir, tryAcquireFileLock } from "@oh-my-pi/pi-utils";
 
 const tempDirs: string[] = [];
 
@@ -76,25 +86,536 @@ describe("worktree isolation helpers", () => {
 		expect(parseIsolationBackend("rcopy")).toBe(natives.IsoBackendKind.Rcopy);
 	});
 
-	// #17644: a failed unmount used to be followed by `rm -rf` through the live mount.
-	it("retains a mount workspace with its backend sidecar when native stop fails", async () => {
-		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-cleanup-"));
-		tempDirs.push(root);
-		const stopError = new Error("fusermount3 -u -z (exit 1): Device or resource busy");
-		vi.spyOn(natives, "isoStop").mockRejectedValue(stopError);
+	// #17644: a failed unmount used to be followed by `rm -rf` through the live
+	// mount. A teardown here can fail its stop on three paths — after retiring
+	// the directory, in place when a live mount refuses the rename, and after
+	// leaving a slow stop to settle on its own — and each must keep the
+	// workspace and record its backend, so `omp worktree clear` unmounts it
+	// before it removes anything.
+	describe("a teardown whose backend stop fails", () => {
+		/** A workspace this run claimed, as `ensureIsolation` leaves it. */
+		async function mountWorkspace(): Promise<{
+			root: string;
+			sandbox: string;
+			mergedDir: string;
+			generation: string;
+		}> {
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-cleanup-"));
+			tempDirs.push(root);
+			const created = path.join(root, "overlay");
+			await fs.mkdir(path.join(created, "m"), { recursive: true });
+			await fs.mkdir(path.join(created, "upper"));
+			await fs.writeFile(path.join(created, "upper", "work.txt"), "the user's work\n");
+			const sandbox = await resolveSandboxIdentity(created);
+			const generation = await writeIsolationOwner(sandbox, "teardown-test");
+			return { root, sandbox, mergedDir: path.join(sandbox, "m"), generation };
+		}
 
-		const mounted = path.join(root, "overlay");
-		await fs.mkdir(path.join(mounted, "m"), { recursive: true });
-		await fs.mkdir(path.join(mounted, "upper"));
+		/** A live mount pins its directory: the retiring rename is refused. */
+		function refuseRename(sandbox: string): void {
+			const rename = isolationFs.rename;
+			vi.spyOn(isolationFs, "rename").mockImplementation((async (from: string, to: string) => {
+				if (path.resolve(from) === sandbox) {
+					throw Object.assign(new Error(`EBUSY: resource busy or locked, rename '${from}'`), { code: "EBUSY" });
+				}
+				return await rename(from, to);
+			}) as typeof isolationFs.rename);
+		}
+
+		/**
+		 * The one directory left under `root`, wherever the teardown put it. A
+		 * platform without abstract sockets keeps the sandbox lock as a
+		 * `.lock` file beside it, which is not a workspace.
+		 */
+		async function onlyEntry(root: string): Promise<string> {
+			const entries = (await fs.readdir(root)).filter(name => !name.endsWith(".lock"));
+			expect(entries).toHaveLength(1);
+			return path.join(root, entries[0] ?? "");
+		}
+
+		async function expectRetained(kept: string): Promise<void> {
+			expect(await readRetainedMountBackend(kept)).toBe(natives.IsoBackendKind.Overlayfs);
+			expect(await fs.readFile(path.join(kept, "upper", "work.txt"), "utf8")).toBe("the user's work\n");
+		}
+
+		it("keeps a retired workspace and records its backend", async () => {
+			const { root, mergedDir, generation } = await mountWorkspace();
+			vi.spyOn(natives, "isoStop").mockRejectedValue(
+				new Error("fusermount3 -u -z (exit 1): Device or resource busy"),
+			);
+
+			await cleanupIsolation({
+				mergedDir,
+				generation,
+				backend: natives.IsoBackendKind.Overlayfs,
+				fellBack: false,
+				fallbackReason: null,
+			});
+
+			await expectRetained(await onlyEntry(root));
+		});
+
+		it("keeps a workspace torn down in place and records its backend", async () => {
+			const { root, sandbox, mergedDir, generation } = await mountWorkspace();
+			refuseRename(sandbox);
+			vi.spyOn(natives, "isoStop").mockRejectedValue(
+				new Error("fusermount3 -u -z (exit 1): Device or resource busy"),
+			);
+
+			await cleanupIsolation({
+				mergedDir,
+				generation,
+				backend: natives.IsoBackendKind.Overlayfs,
+				fellBack: false,
+				fallbackReason: null,
+			});
+
+			const kept = await onlyEntry(root);
+			expect(await resolveSandboxIdentity(kept)).toBe(sandbox);
+			await expectRetained(kept);
+		});
+
+		it("keeps a workspace whose stop outran the teardown and then failed, and records its backend", async () => {
+			const { root, sandbox, mergedDir, generation } = await mountWorkspace();
+			refuseRename(sandbox);
+			const stop = Promise.withResolvers<void>();
+			vi.spyOn(natives, "isoStop").mockReturnValue(stop.promise);
+			// The teardown's stop bound has passed the moment it is asked.
+			vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+			// The stop settles after the teardown returned, so the record is
+			// written by its continuation: this is the signal that it ran.
+			const recorded = Promise.withResolvers<void>();
+			const writeRetainedBackend = ownership.writeRetainedBackend;
+			vi.spyOn(ownership, "writeRetainedBackend").mockImplementation(async (dir, backend) => {
+				await writeRetainedBackend(dir, backend);
+				recorded.resolve();
+			});
+
+			await cleanupIsolation({
+				mergedDir,
+				generation,
+				backend: natives.IsoBackendKind.Overlayfs,
+				fellBack: false,
+				fallbackReason: null,
+			});
+			stop.reject(new Error("fusermount3 -u -z (exit 1): Device or resource busy"));
+			await recorded.promise;
+
+			await expectRetained(await onlyEntry(root));
+		});
+
+		it("still removes a workspace whose backend mounts nothing", async () => {
+			const { root, mergedDir, generation } = await mountWorkspace();
+			vi.spyOn(natives, "isoStop").mockRejectedValue(new Error("rcopy stop failed"));
+
+			await cleanupIsolation({
+				mergedDir,
+				generation,
+				backend: natives.IsoBackendKind.Rcopy,
+				fellBack: false,
+				fallbackReason: null,
+			});
+
+			expect((await fs.readdir(root)).filter(name => !name.endsWith(".lock"))).toEqual([]);
+		});
+
+		it("has its backend on disk before the stop a killed teardown would die in", async () => {
+			// Failure mode: the retired directory got its backend record only
+			// after a stop had failed. A teardown killed during the stop left a
+			// retired directory with no record, and `omp worktree clear` then
+			// removed a file through the live mount. What a kill leaves is what
+			// is on disk when the stop starts.
+			const { mergedDir, generation } = await mountWorkspace();
+			let recordedAtStop: number | undefined;
+			vi.spyOn(natives, "isoStop").mockImplementation(async (_backend, merged) => {
+				recordedAtStop = await readRetainedMountBackend(path.dirname(merged));
+				throw new Error("killed during the stop");
+			});
+
+			await cleanupIsolation({
+				mergedDir,
+				generation,
+				backend: natives.IsoBackendKind.Overlayfs,
+				fellBack: false,
+				fallbackReason: null,
+			});
+
+			expect(recordedAtStop).toBe(natives.IsoBackendKind.Overlayfs);
+		});
+		/**
+		 * The mount table as these tests set it: `rel` are mount points relative
+		 * to the sandbox, wherever the teardown has moved it, and `own` drops
+		 * out once the backend's stop has run.
+		 */
+		function mountTable(rel: string[], ownStopped: () => boolean): (dir: string) => Promise<string[]> {
+			return async dir => {
+				let base = dir;
+				while (!path.basename(base).startsWith("overlay")) {
+					const up = path.dirname(base);
+					if (up === base) return [];
+					base = up;
+				}
+				return rel
+					.filter(mount => !(mount === "m" && ownStopped()))
+					.map(mount => path.join(base, mount))
+					.filter(mount => mount === dir || mount.startsWith(`${dir}${path.sep}`));
+			};
+		}
+
+		// Every native stop removes a tree — rcopy deletes the merged copy,
+		// overlayfs deletes `upper` and `work` after it unmounts — so none may
+		// run while something other than the backend's own mount is in the
+		// workspace. The check after the stop came too late: the stop itself
+		// had already deleted the mount's source.
+		it("does not stop an rcopy copy with a mount nested in it, and keeps its files", async () => {
+			const { root, mergedDir, generation } = await mountWorkspace();
+			await fs.writeFile(path.join(mergedDir, "copy.txt"), "the task's copy\n");
+			vi.spyOn(isolationFs, "liveMountsUnder").mockImplementation(mountTable(["m/nested"], () => false));
+
+			// The real rcopy stop: it removes the merged directory if it runs.
+			await cleanupIsolation({
+				mergedDir,
+				generation,
+				backend: natives.IsoBackendKind.Rcopy,
+				fellBack: false,
+				fallbackReason: null,
+			});
+
+			const kept = await onlyEntry(root);
+			expect(await fs.readFile(path.join(kept, "m", "copy.txt"), "utf8")).toBe("the task's copy\n");
+		});
+
+		it("does not stop an overlay with a mount below its upper directory", async () => {
+			const { root, mergedDir, generation } = await mountWorkspace();
+			vi.spyOn(isolationFs, "liveMountsUnder").mockImplementation(mountTable(["m", "upper/nested"], () => false));
+			const isoStop = vi.spyOn(natives, "isoStop").mockResolvedValue(undefined);
+
+			await cleanupIsolation({
+				mergedDir,
+				generation,
+				backend: natives.IsoBackendKind.Overlayfs,
+				fellBack: false,
+				fallbackReason: null,
+			});
+
+			expect(isoStop).not.toHaveBeenCalled();
+			expect(await fs.readFile(path.join(await onlyEntry(root), "upper", "work.txt"), "utf8")).toBe(
+				"the user's work\n",
+			);
+		});
+
+		it("still stops and removes an overlay whose only mount is its own", async () => {
+			// The negative case: the backend's own mount at the merged directory is
+			// what the stop is for, and must not keep the workspace for ever.
+			const { root, mergedDir, generation } = await mountWorkspace();
+			let stopped = false;
+			vi.spyOn(isolationFs, "liveMountsUnder").mockImplementation(mountTable(["m"], () => stopped));
+			const isoStop = vi.spyOn(natives, "isoStop").mockImplementation(async () => {
+				stopped = true;
+			});
+
+			await cleanupIsolation({
+				mergedDir,
+				generation,
+				backend: natives.IsoBackendKind.Overlayfs,
+				fellBack: false,
+				fallbackReason: null,
+			});
+
+			expect(isoStop).toHaveBeenCalledTimes(1);
+			expect((await fs.readdir(root)).filter(name => !name.endsWith(".lock"))).toEqual([]);
+		});
+	});
+
+	// Ownership is proved before the capture, and the capture can run for
+	// minutes. The directory removed afterwards must be the one proved, and
+	// still claimed by this run, or nothing is removed.
+	describe("a teardown whose sandbox is replaced during its capture", () => {
+		const shapes = [
+			"another claimed sandbox",
+			"a symlink to another claimed sandbox",
+			"a new claim in place",
+		] as const;
+		for (const shape of shapes) {
+			it(`removes nothing it did not prove its own: ${shape}`, async () => {
+				// Failure mode: after the capture the teardown checked only that
+				// it still held the path's lock, which says nothing about what
+				// the path now names, and it deleted the other run's workspace.
+				const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-replaced-"));
+				tempDirs.push(root);
+				const base = path.join(root, "sandbox");
+				await fs.mkdir(path.join(base, "m"), { recursive: true });
+				await fs.writeFile(path.join(base, "m", "original.txt"), "this run's work\n");
+				const generation = await writeIsolationOwner(base, "this-run");
+				const foreign = path.join(root, "foreign");
+				await fs.mkdir(path.join(foreign, "m"), { recursive: true });
+				await fs.writeFile(path.join(foreign, "m", "foreign.txt"), "another run's work\n");
+				await writeIsolationOwner(foreign, "other-run");
+
+				await cleanupIsolation(
+					{
+						mergedDir: path.join(base, "m"),
+						generation,
+						backend: natives.IsoBackendKind.Rcopy,
+						fellBack: false,
+						fallbackReason: null,
+					},
+					{
+						capture: async () => {
+							if (shape === "a new claim in place") {
+								await writeIsolationOwner(base, "other-run");
+								await fs.writeFile(path.join(base, "m", "foreign.txt"), "another run's work\n");
+								return;
+							}
+							await fs.rename(base, path.join(root, "moved"));
+							if (shape === "another claimed sandbox") await fs.rename(foreign, base);
+							else await fs.symlink(foreign, base);
+						},
+					},
+				);
+
+				const theirs = shape === "a symlink to another claimed sandbox" ? foreign : base;
+				expect(await fs.readFile(path.join(theirs, "m", "foreign.txt"), "utf8")).toBe("another run's work\n");
+			});
+		}
+	});
+
+	it("records a mount backend before the backend can mount, and clears it with a backend that was unavailable", async () => {
+		// Failure mode: the record was written only by a teardown, so a run
+		// killed while its overlay was mounted left a live mount with no record,
+		// and `omp worktree clear` removed through it. A record left behind by a
+		// backend that never mounted would instead send `clear` to stop a mount
+		// that is not there, for ever.
+		const repo = await createGitRepo();
+		await runGit(repo, ["config", "user.email", "src@example.com"]);
+		await runGit(repo, ["config", "user.name", "Source User"]);
+		await fs.writeFile(path.join(repo, "tracked.txt"), "base\n");
+		await runGit(repo, ["add", "tracked.txt"]);
+		await runGit(repo, ["commit", "-q", "-m", "base"]);
+		vi.spyOn(natives, "isoResolve").mockResolvedValue({
+			kind: natives.IsoBackendKind.Overlayfs,
+			candidates: [natives.IsoBackendKind.Overlayfs, natives.IsoBackendKind.Rcopy],
+			fellBack: false,
+			reason: undefined,
+		});
+		let recordedAtMount: number | undefined;
+		const isoStart = natives.isoStart;
+		vi.spyOn(natives, "isoStart").mockImplementation(async (kind, source, merged) => {
+			if (kind !== natives.IsoBackendKind.Overlayfs) return await isoStart(kind, source, merged);
+			recordedAtMount = await readRetainedMountBackend(path.dirname(merged));
+			throw new Error("ISO_UNAVAILABLE: overlay is not available here");
+		});
+		const worktreeBase = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mount-record-"));
+		tempDirs.push(worktreeBase);
+		const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
+		delete process.env.OMP_WORKTREE_DIR;
+		setWorktreesDir(worktreeBase);
+		try {
+			const handle = await ensureIsolation(repo, "mount-record");
+
+			expect(recordedAtMount).toBe(natives.IsoBackendKind.Overlayfs);
+			expect(handle.backend).toBe(natives.IsoBackendKind.Rcopy);
+			expect(await readRetainedMountBackend(path.dirname(handle.mergedDir))).toBeUndefined();
+			await cleanupIsolation(handle);
+		} finally {
+			setWorktreesDir(undefined);
+			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
+			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
+		}
+	});
+	it("stops a mount a failed overlay start left behind before it clears the record", async () => {
+		// Failure mode: isoStart established an overlay mount and then failed; the
+		// cleanup removed the backend record while the mount stayed live, and
+		// `omp worktree clear` later deleted a task's files through it. The mount
+		// is stopped before the record goes.
+		const repo = await createGitRepo();
+		await runGit(repo, ["config", "user.email", "src@example.com"]);
+		await runGit(repo, ["config", "user.name", "Source User"]);
+		await fs.writeFile(path.join(repo, "tracked.txt"), "base\n");
+		await runGit(repo, ["add", "tracked.txt"]);
+		await runGit(repo, ["commit", "-q", "-m", "base"]);
+		vi.spyOn(natives, "isoResolve").mockResolvedValue({
+			kind: natives.IsoBackendKind.Overlayfs,
+			candidates: [natives.IsoBackendKind.Overlayfs, natives.IsoBackendKind.Rcopy],
+			fellBack: false,
+			reason: undefined,
+		});
+		const isoStart = natives.isoStart;
+		let overlayMerged: string | undefined;
+		vi.spyOn(natives, "isoStart").mockImplementation(async (kind, source, merged) => {
+			if (kind !== natives.IsoBackendKind.Overlayfs) return await isoStart(kind, source, merged);
+			await fs.mkdir(merged, { recursive: true });
+			overlayMerged = merged;
+			throw new Error("ISO_UNAVAILABLE: overlay mounted then failed");
+		});
+		// The overlay's merged dir reads as mounted until its stop runs.
+		let stopped = false;
+		vi.spyOn(isolationFs, "liveMountsUnder").mockImplementation(async dir =>
+			!stopped &&
+			overlayMerged !== undefined &&
+			(overlayMerged === dir || overlayMerged.startsWith(`${dir}${path.sep}`))
+				? [overlayMerged]
+				: [],
+		);
+		const stoppedOverlays: string[] = [];
+		vi.spyOn(natives, "isoStop").mockImplementation(async (kind, merged) => {
+			if (kind === natives.IsoBackendKind.Overlayfs) stoppedOverlays.push(merged);
+			stopped = true;
+		});
+		const worktreeBase = await fs.mkdtemp(path.join(os.tmpdir(), "omp-failed-start-"));
+		tempDirs.push(worktreeBase);
+		const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
+		delete process.env.OMP_WORKTREE_DIR;
+		setWorktreesDir(worktreeBase);
+		try {
+			const handle = await ensureIsolation(repo, "failed-start");
+
+			expect(handle.backend).toBe(natives.IsoBackendKind.Rcopy);
+			if (overlayMerged === undefined) throw new Error("the overlay start never ran");
+			expect(stoppedOverlays).toEqual([overlayMerged]);
+			await cleanupIsolation(handle);
+		} finally {
+			setWorktreesDir(undefined);
+			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
+			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
+		}
+	});
+	it("neither stops nor empties a failed start with something else mounted in it", async () => {
+		// Failure mode: the failed-start cleanup stopped the overlay — whose stop
+		// deletes `upper` — while another mount sat below `upper`, and the stop
+		// deleted that mount's source. With a foreign mount present nothing is
+		// stopped or emptied, and the start fails rather than build beside it.
+		const repo = await createGitRepo();
+		await runGit(repo, ["config", "user.email", "src@example.com"]);
+		await runGit(repo, ["config", "user.name", "Source User"]);
+		await fs.writeFile(path.join(repo, "tracked.txt"), "base\n");
+		await runGit(repo, ["add", "tracked.txt"]);
+		await runGit(repo, ["commit", "-q", "-m", "base"]);
+		vi.spyOn(natives, "isoResolve").mockResolvedValue({
+			kind: natives.IsoBackendKind.Overlayfs,
+			candidates: [natives.IsoBackendKind.Overlayfs, natives.IsoBackendKind.Rcopy],
+			fellBack: false,
+			reason: undefined,
+		});
+		let mounts: string[] = [];
+		let keep: string | undefined;
+		vi.spyOn(natives, "isoStart").mockImplementation(async (_kind, _source, merged) => {
+			const nested = path.join(path.dirname(merged), "upper", "nested");
+			await fs.mkdir(merged, { recursive: true });
+			await fs.mkdir(nested, { recursive: true });
+			keep = path.join(nested, "keep.txt");
+			await fs.writeFile(keep, "another tree's file\n");
+			mounts = [merged, nested];
+			throw new Error("ISO_UNAVAILABLE: overlay mounted then failed");
+		});
+		vi.spyOn(isolationFs, "liveMountsUnder").mockImplementation(async dir =>
+			mounts.filter(mount => mount === dir || mount.startsWith(`${dir}${path.sep}`)),
+		);
+		const isoStop = vi.spyOn(natives, "isoStop").mockResolvedValue(undefined);
+		const worktreeBase = await fs.mkdtemp(path.join(os.tmpdir(), "omp-failed-start-foreign-"));
+		tempDirs.push(worktreeBase);
+		const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
+		delete process.env.OMP_WORKTREE_DIR;
+		setWorktreesDir(worktreeBase);
+		try {
+			await expect(ensureIsolation(repo, "failed-start-foreign")).rejects.toThrow("refusing to clear it");
+
+			expect(isoStop).not.toHaveBeenCalled();
+			if (keep === undefined) throw new Error("the overlay start never ran");
+			expect(await fs.readFile(keep, "utf8")).toBe("another tree's file\n");
+		} finally {
+			setWorktreesDir(undefined);
+			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
+			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
+		}
+	});
+
+	it("stops and removes only the directory it retired, not a replacement swapped in during the stop", async () => {
+		// Failure mode: after the teardown retired the sandbox, the stop and the
+		// removal acted on that pathname without rechecking it. A replacement
+		// claimed at the retired name during the stop's filesystem look was
+		// stopped (rcopy stop deletes the tree) and its only copy lost.
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-retired-swap-"));
+		tempDirs.push(root);
+		const base = path.join(root, "sandbox");
+		await fs.mkdir(path.join(base, "m"), { recursive: true });
+		await fs.writeFile(path.join(base, "m", "old"), "old");
+		const generation = await writeIsolationOwner(base, "old");
+		const realLstat = isolationFs.lstatLookup;
+		let swappedParent = "";
+		vi.spyOn(isolationFs, "lstatLookup").mockImplementation(async p => {
+			const result = await realLstat(p);
+			// The first look at the retired mount dir is the teardown's symlink
+			// check; swap the retired sandbox for a fresh claim at that instant.
+			if (swappedParent === "" && String(p).includes(".retiring-") && path.basename(String(p)) === "m") {
+				swappedParent = path.dirname(String(p));
+				await fs.rename(swappedParent, `${swappedParent}-saved`);
+				await fs.mkdir(path.join(swappedParent, "m"), { recursive: true });
+				await writeIsolationOwner(swappedParent, "new");
+				await fs.writeFile(path.join(swappedParent, "m", "only-copy"), "NEW OWNER\n");
+			}
+			return result;
+		});
+
 		await cleanupIsolation({
-			mergedDir: path.join(mounted, "m"),
-			backend: natives.IsoBackendKind.Overlayfs,
+			mergedDir: path.join(base, "m"),
+			generation,
+			backend: natives.IsoBackendKind.Rcopy,
 			fellBack: false,
 			fallbackReason: null,
 		});
-		expect((await fs.readdir(mounted)).sort()).toEqual([".omp-retained-backend.json", "m", "upper"]);
-		expect(await readRetainedMountBackend(mounted)).toBe(natives.IsoBackendKind.Overlayfs);
+
+		expect(await fs.readFile(path.join(swappedParent, "m", "only-copy"), "utf8")).toBe("NEW OWNER\n");
 	});
+
+	it("a late in-place backend stop does not erase a new claim made in the directory while it ran", async () => {
+		// Failure mode: a stop that outran its bound was left running in place;
+		// its settlement removed the directory by device and inode alone. A
+		// successor that claimed the same path (same inode) while the stop ran
+		// had its only copy deleted.
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-late-stop-"));
+		tempDirs.push(root);
+		const base = path.join(root, "sandbox");
+		await fs.mkdir(path.join(base, "m"), { recursive: true });
+		const generation = await writeIsolationOwner(base, "old");
+		const stop = Promise.withResolvers<void>();
+		const realRename = isolationFs.rename;
+		const realWait = scheduler.wait;
+		// The sandbox cannot be renamed aside, so the teardown stops it in place.
+		vi.spyOn(isolationFs, "rename").mockImplementation((async (from: string, to: string) => {
+			if (from === base) throw Object.assign(new Error("EBUSY"), { code: "EBUSY" });
+			return await realRename(from, to);
+		}) as typeof isolationFs.rename);
+		// The stop bound elapses at once; every other wait is real.
+		vi.spyOn(scheduler, "wait").mockImplementation(((ms: number, opts?: { signal?: AbortSignal }) =>
+			ms === 10_000 ? Promise.resolve() : realWait(ms, opts)) as typeof scheduler.wait);
+		vi.spyOn(natives, "isoStop").mockReturnValue(stop.promise);
+		// The teardown hands its settlement to late cleanup; capture it so the
+		// test awaits the real decision rather than guessing at a duration.
+		const settling: Promise<void>[] = [];
+		const realTrack = lateCleanup.trackLateCleanup;
+		vi.spyOn(lateCleanup, "trackLateCleanup").mockImplementation((work, context) => {
+			settling.push(work);
+			realTrack(work, context);
+		});
+
+		await cleanupIsolation({
+			mergedDir: path.join(base, "m"),
+			generation,
+			backend: natives.IsoBackendKind.Rcopy,
+			fellBack: false,
+			fallbackReason: null,
+		});
+		// The slot is free in place; a successor claims it and writes its work.
+		await ownership.withSandboxLock(base, "successor claim", async () => {
+			await writeIsolationOwner(base, "new");
+			await fs.writeFile(path.join(base, "m", "only-copy"), "NEW OWNER\n");
+		});
+		stop.resolve();
+		await Promise.all(settling);
+
+		expect(await fs.readFile(path.join(base, "m", "only-copy"), "utf8")).toBe("NEW OWNER\n");
+	}, 20_000);
 
 	// Regression for #8939: baseline capture buffered every untracked byte into
 	// one in-memory string, so a multi-GB working tree OOM'd and trapped the
@@ -295,7 +816,12 @@ describe("worktree isolation helpers", () => {
 
 				expect(mergedLeaf).toBe("m");
 				expect(isolationSegment).not.toContain(longTaskId);
-				expect(isolationSegment.length).toBeLessThanOrEqual(12);
+				// Compact, and unique per materialisation: the digest names the
+				// repository and task, and the 128 bits after it name this one,
+				// so no path is ever handed out twice — not even after the
+				// directory has been reclaimed, which is what a surviving
+				// descendant needs.
+				expect(isolationSegment.length).toBeLessThanOrEqual(48);
 			} finally {
 				if (originalWorktreeDir === undefined) {
 					delete process.env.OMP_WORKTREE_DIR;
@@ -1026,6 +1552,481 @@ describe("detachGitDir", () => {
 			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
 		}
 	});
+
+	it("leaves an isolation workspace a later run has claimed, and still tears down its own", async () => {
+		// The workspace path is derived from the task id, so a replacement spawn
+		// — or a second omp process — materialises the same directory. A
+		// teardown that outlived its run (a release past its lifecycle
+		// manager's deadline) must not delete the successor's workspace.
+		const { wt } = await makeLinkedWorktree();
+		vi.spyOn(natives, "isoResolve").mockResolvedValue({
+			kind: natives.IsoBackendKind.Rcopy,
+			candidates: [natives.IsoBackendKind.Rcopy],
+			fellBack: false,
+			reason: undefined,
+		});
+		const worktreeBase = await fs.mkdtemp(path.join(os.tmpdir(), "omp-generation-wtbase-"));
+		tempDirs.push(worktreeBase);
+		const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
+		delete process.env.OMP_WORKTREE_DIR;
+		setWorktreesDir(worktreeBase);
+		try {
+			const stale = await ensureIsolation(wt, "generation-guard");
+			const baseDir = path.dirname(stale.mergedDir);
+			// The successor claims the same path, as a second `ensureIsolation`
+			// for this id does.
+			const generation = await writeIsolationOwner(baseDir, "generation-guard");
+			await fs.writeFile(path.join(stale.mergedDir, "successor.txt"), "owned by a later run\n");
+
+			await cleanupIsolation(stale);
+			expect(await Bun.file(path.join(stale.mergedDir, "successor.txt")).exists()).toBe(true);
+
+			// The run that holds the current claim still tears it down.
+			await cleanupIsolation({ ...stale, generation });
+			expect(await Bun.file(path.join(stale.mergedDir, "successor.txt")).exists()).toBe(false);
+		} finally {
+			setWorktreesDir(undefined);
+			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
+			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
+		}
+	});
+
+	for (const damage of ["missing", "truncated", "malformed", "no-generation", "unreadable"] as const) {
+		it(`leaves a successor's workspace alone when the marker is ${damage}`, async () => {
+			// A teardown proves ownership from the marker. A marker it cannot
+			// read proves nothing, so it cannot authorise deleting whatever is
+			// in the directory now — that is a reclamation problem for
+			// `omp worktree clear`, which judges liveness, not a licence.
+			const { wt } = await makeLinkedWorktree();
+			vi.spyOn(natives, "isoResolve").mockResolvedValue({
+				kind: natives.IsoBackendKind.Rcopy,
+				candidates: [natives.IsoBackendKind.Rcopy],
+				fellBack: false,
+				reason: undefined,
+			});
+			const worktreeBase = await fs.mkdtemp(path.join(os.tmpdir(), "omp-marker-damage-"));
+			tempDirs.push(worktreeBase);
+			const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
+			delete process.env.OMP_WORKTREE_DIR;
+			setWorktreesDir(worktreeBase);
+			try {
+				const stale = await ensureIsolation(wt, "marker-damage");
+				const successor = await ensureIsolation(wt, "marker-damage");
+				expect(successor.generation).not.toBe(stale.generation);
+				const live = path.join(successor.mergedDir, "live.txt");
+				await fs.writeFile(live, "owned by the successor\n");
+				const marker = path.join(path.dirname(successor.mergedDir), ISOLATION_OWNER_FILE);
+				if (damage === "missing") await fs.unlink(marker);
+				if (damage === "truncated") await fs.truncate(marker, 0);
+				if (damage === "malformed") await fs.writeFile(marker, '{"generation":');
+				if (damage === "no-generation") {
+					await fs.writeFile(marker, JSON.stringify({ pid: process.pid, id: "marker-damage" }));
+				}
+				if (damage === "unreadable") await fs.chmod(marker, 0);
+
+				await cleanupIsolation(stale);
+
+				expect(await Bun.file(live).exists()).toBe(true);
+			} finally {
+				setWorktreesDir(undefined);
+				if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
+				else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
+			}
+		});
+	}
+
+	it("does not destroy a predecessor's workspace when its own claim fails to land", async () => {
+		// Materialisation has to empty the directory it is taking over. Doing
+		// that before the claim is written leaves a window where a crash — or a
+		// full disk — destroys a live predecessor and materialises nothing.
+		const { wt } = await makeLinkedWorktree();
+		vi.spyOn(natives, "isoResolve").mockResolvedValue({
+			kind: natives.IsoBackendKind.Rcopy,
+			candidates: [natives.IsoBackendKind.Rcopy],
+			fellBack: false,
+			reason: undefined,
+		});
+		const worktreeBase = await fs.mkdtemp(path.join(os.tmpdir(), "omp-claim-first-"));
+		tempDirs.push(worktreeBase);
+		const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
+		delete process.env.OMP_WORKTREE_DIR;
+		setWorktreesDir(worktreeBase);
+		try {
+			const live = await ensureIsolation(wt, "claim-first");
+			const kept = path.join(live.mergedDir, "live.txt");
+			await fs.writeFile(kept, "owned by the live run\n");
+			let starts = 0;
+			const isoStart = natives.isoStart;
+			vi.spyOn(natives, "isoStart").mockImplementation(async (...args) => {
+				starts += 1;
+				return await isoStart(...args);
+			});
+			const write = Bun.write.bind(Bun);
+			vi.spyOn(Bun, "write").mockImplementation((destination, input, options) =>
+				String(destination).includes(ISOLATION_OWNER_FILE)
+					? Promise.reject(new Error("claim write failed"))
+					: write(destination as Parameters<typeof write>[0], input as Parameters<typeof write>[1], options),
+			);
+
+			await expect(ensureIsolation(wt, "claim-first")).rejects.toThrow("claim write failed");
+
+			expect(starts).toBe(0);
+			expect(await Bun.file(kept).exists()).toBe(true);
+		} finally {
+			setWorktreesDir(undefined);
+			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
+			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
+		}
+	});
+
+	it("keeps a workspace a descendant is still working in until that descendant ends", async () => {
+		// A nested child spawned from an isolated parent inherits its cwd
+		// without materialising anything, so the owner's teardown has to
+		// account for it rather than delete the ground it is standing on.
+		const { wt } = await makeLinkedWorktree();
+		vi.spyOn(natives, "isoResolve").mockResolvedValue({
+			kind: natives.IsoBackendKind.Rcopy,
+			candidates: [natives.IsoBackendKind.Rcopy],
+			fellBack: false,
+			reason: undefined,
+		});
+		const worktreeBase = await fs.mkdtemp(path.join(os.tmpdir(), "omp-lease-"));
+		tempDirs.push(worktreeBase);
+		const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
+		delete process.env.OMP_WORKTREE_DIR;
+		setWorktreesDir(worktreeBase);
+		try {
+			const handle = await ensureIsolation(wt, "leased-workspace");
+			const nested = path.join(handle.mergedDir, "nested");
+			await fs.mkdir(nested, { recursive: true });
+			const data = path.join(nested, "descendant.txt");
+			await fs.writeFile(data, "written by a descendant\n");
+			const descendant = await leaseIsolationWorkspace(nested);
+
+			await cleanupIsolation(handle);
+			expect(await Bun.file(data).exists()).toBe(true);
+
+			// The owner's teardown is not cancelled, only deferred: it runs when
+			// the last descendant ends.
+			await descendant();
+			await scheduler.wait(50);
+			expect(await Bun.file(data).exists()).toBe(false);
+		} finally {
+			setWorktreesDir(undefined);
+			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
+			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
+		}
+	});
+
+	it("gives the sandbox lock back when an in-place teardown cannot remove the directory", async () => {
+		// The in-place path (a mount refuses the rename) holds the lock across
+		// the teardown. A removal that throws must still hand it back, or this
+		// id can never be materialised again while the process lives.
+		const { wt } = await makeLinkedWorktree();
+		vi.spyOn(natives, "isoResolve").mockResolvedValue({
+			kind: natives.IsoBackendKind.Rcopy,
+			candidates: [natives.IsoBackendKind.Rcopy],
+			fellBack: false,
+			reason: undefined,
+		});
+		const worktreeBase = await fs.mkdtemp(path.join(os.tmpdir(), "omp-lock-release-"));
+		tempDirs.push(worktreeBase);
+		const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
+		delete process.env.OMP_WORKTREE_DIR;
+		setWorktreesDir(worktreeBase);
+		try {
+			const handle = await ensureIsolation(wt, "lock-release");
+			const baseDir = path.dirname(handle.mergedDir);
+			const rename = fs.rename;
+			vi.spyOn(fs, "rename").mockImplementation(async (from, to) => {
+				if (String(from) === baseDir) throw Object.assign(new Error("EBUSY"), { code: "EBUSY" });
+				return await rename(from, to);
+			});
+			const remove = fs.rm;
+			vi.spyOn(fs, "rm").mockImplementation(async (target, options) => {
+				if (String(target) === baseDir) throw Object.assign(new Error("EIO"), { code: "EIO" });
+				return await remove(target, options);
+			});
+
+			await cleanupIsolation(handle);
+
+			const lock = tryAcquireFileLock(await resolveSandboxIdentity(baseDir));
+			expect(lock).not.toBeNull();
+			lock?.release();
+		} finally {
+			setWorktreesDir(undefined);
+			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
+			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
+		}
+	});
+
+	it("keeps a workspace whose capture cannot be completed, and captures under the lock before removing", async () => {
+		// Capture and the authority to delete are one span: a capture that
+		// cannot finish refuses the deletion rather than releasing it, because
+		// a surviving workspace costs disk while a lost patch costs work.
+		const { wt } = await makeLinkedWorktree();
+		vi.spyOn(natives, "isoResolve").mockResolvedValue({
+			kind: natives.IsoBackendKind.Rcopy,
+			candidates: [natives.IsoBackendKind.Rcopy],
+			fellBack: false,
+			reason: undefined,
+		});
+		const worktreeBase = await fs.mkdtemp(path.join(os.tmpdir(), "omp-capture-lock-"));
+		tempDirs.push(worktreeBase);
+		const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
+		delete process.env.OMP_WORKTREE_DIR;
+		setWorktreesDir(worktreeBase);
+		try {
+			const refused = await ensureIsolation(wt, "capture-refuses");
+			const data = path.join(refused.mergedDir, "work.txt");
+			await fs.writeFile(data, "the user's work\n");
+			await cleanupIsolation(refused, {
+				capture: async () => {
+					throw new Error("capture failed");
+				},
+			});
+			expect(await Bun.file(data).exists()).toBe(true);
+
+			// A capture that completes runs while the lock is still held, and
+			// the removal follows it.
+			let lockedDuringCapture = false;
+			await cleanupIsolation(refused, {
+				capture: async () => {
+					lockedDuringCapture =
+						tryAcquireFileLock(await resolveSandboxIdentity(path.dirname(refused.mergedDir))) === null;
+				},
+			});
+			expect(lockedDuringCapture).toBe(true);
+			expect(await Bun.file(data).exists()).toBe(false);
+		} finally {
+			setWorktreesDir(undefined);
+			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
+			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
+		}
+	});
+
+	it("holds the workspace and the lock until an overrunning capture stops", async () => {
+		// Releasing the lock at a deadline while the capture keeps writing hands
+		// the pathname to the next materialisation: the capture then lands in,
+		// or moves, a successor's workspace. The deadline decides the outcome
+		// — keep the workspace — never the holding.
+		const { wt } = await makeLinkedWorktree();
+		vi.spyOn(natives, "isoResolve").mockResolvedValue({
+			kind: natives.IsoBackendKind.Rcopy,
+			candidates: [natives.IsoBackendKind.Rcopy],
+			fellBack: false,
+			reason: undefined,
+		});
+		const worktreeBase = await fs.mkdtemp(path.join(os.tmpdir(), "omp-capture-deadline-"));
+		tempDirs.push(worktreeBase);
+		const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
+		delete process.env.OMP_WORKTREE_DIR;
+		setWorktreesDir(worktreeBase);
+		try {
+			const handle = await ensureIsolation(wt, "capture-overruns");
+			const baseDir = await resolveSandboxIdentity(path.dirname(handle.mergedDir));
+			const data = path.join(handle.mergedDir, "work.txt");
+			await fs.writeFile(data, "the user's work\n");
+			const finishCapture = Promise.withResolvers<void>();
+			let lockedWhileOverrunning = false;
+
+			const cleaning = cleanupIsolation(handle, {
+				capture: async () => {
+					await finishCapture.promise;
+				},
+			});
+			await scheduler.wait(300);
+			lockedWhileOverrunning = tryAcquireFileLock(baseDir) === null;
+			finishCapture.resolve();
+			await cleaning;
+
+			expect(lockedWhileOverrunning).toBe(true);
+			expect(await Bun.file(data).exists()).toBe(false);
+		} finally {
+			setWorktreesDir(undefined);
+			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
+			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
+		}
+	});
+
+	it("explains who holds a sandbox when the wait runs out", async () => {
+		const held = await fs.mkdtemp(path.join(os.tmpdir(), "omp-lock-message-"));
+		tempDirs.push(held);
+		const lock = tryAcquireFileLock(await resolveSandboxIdentity(held));
+		expect(lock).not.toBeNull();
+		try {
+			await expect(
+				cleanupIsolation({
+					mergedDir: path.join(held, "m"),
+					generation: "gen",
+					backend: natives.IsoBackendKind.Rcopy,
+					fellBack: false,
+					fallbackReason: null,
+				}),
+			).rejects.toThrow(/patch is being saved/);
+		} finally {
+			lock?.release();
+		}
+	}, 120_000);
+
+	it("never hands the same sandbox path to two materialisations of one task", async () => {
+		// A descendant that outlives its owner — a git hook child still running
+		// after the owner died — writes into the path it was given. If that
+		// path can be handed out again, it reads and overwrites a successor's
+		// workspace; if it cannot, the worst case is a directory the sweeper
+		// takes.
+		const { wt } = await makeLinkedWorktree();
+		vi.spyOn(natives, "isoResolve").mockResolvedValue({
+			kind: natives.IsoBackendKind.Rcopy,
+			candidates: [natives.IsoBackendKind.Rcopy],
+			fellBack: false,
+			reason: undefined,
+		});
+		const worktreeBase = await fs.mkdtemp(path.join(os.tmpdir(), "omp-unique-slot-"));
+		tempDirs.push(worktreeBase);
+		const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
+		delete process.env.OMP_WORKTREE_DIR;
+		setWorktreesDir(worktreeBase);
+		try {
+			const first = await ensureIsolation(wt, "same-task");
+			const childFile = path.join(first.mergedDir, "child.txt");
+			await fs.writeFile(childFile, "written by a live child\n");
+			const user = await leaseIsolationWorkspace(first.mergedDir, { agentId: "Nested-Child" });
+
+			const second = await ensureIsolation(wt, "same-task");
+
+			expect(second.mergedDir).not.toBe(first.mergedDir);
+			expect(second.generation).not.toBe(first.generation);
+			// The first materialisation's workspace — and the session working in
+			// it — are untouched by the second.
+			expect(await Bun.file(childFile).exists()).toBe(true);
+			await user();
+		} finally {
+			setWorktreesDir(undefined);
+			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
+			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
+		}
+	});
+
+	it("raises a canonicalisation failure instead of falling back to the alias", async () => {
+		// Both paths would then be lockable at once, which is the state the
+		// identity exists to prevent.
+		const real = await fs.mkdtemp(path.join(os.tmpdir(), "omp-identity-fail-"));
+		tempDirs.push(real);
+		vi.spyOn(fs, "realpath").mockImplementation(async () => {
+			throw Object.assign(new Error("EIO"), { code: "EIO" });
+		});
+
+		await expect(resolveSandboxIdentity(real)).rejects.toThrow("EIO");
+	});
+
+	it("resolves a sandbox reached through a symlink to the same identity", async () => {
+		// A lock is a name. Two paths that reach one directory through
+		// different symlinks hash to different names, so each would believe it
+		// had exclusive access to the same files.
+		const real = await fs.mkdtemp(path.join(os.tmpdir(), "omp-identity-"));
+		tempDirs.push(real);
+		const alias = path.join(path.dirname(real), `${path.basename(real)}-alias`);
+		await fs.symlink(real, alias);
+		tempDirs.push(alias);
+
+		expect(await resolveSandboxIdentity(path.join(alias, "sandbox"))).toBe(
+			path.join(await fs.realpath(real), "sandbox"),
+		);
+	});
+
+	it("finds a filesystem mounted under a tree off Linux by its device number, and does not descend into it", async () => {
+		// Failure mode: off Linux the mount check answered "nothing mounted"
+		// unconditionally, so an rcopy or clone teardown removed the files of a
+		// disk image an unprivileged user had mounted inside the copy. Off Linux
+		// there is no portable mount table; a mounted filesystem has its own
+		// device number, which is what the walk reads.
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-devwalk-"));
+		tempDirs.push(root);
+		await fs.mkdir(path.join(root, "keep", "deep"), { recursive: true });
+		await fs.mkdir(path.join(root, "mnt", "inside"), { recursive: true });
+		const mounted = path.join(root, "mnt");
+		const realLstat = fs.lstat;
+		// `mnt` is the root of another filesystem: the same directory, another
+		// device. `liveMountsUnder` always asks with `{ bigint: true }`.
+		vi.spyOn(fs, "lstat").mockImplementation((async (target: string) => {
+			const stat = await realLstat(target, { bigint: true });
+			if (String(target) !== mounted) return stat;
+			return Object.assign(Object.create(Object.getPrototypeOf(stat)), stat, { dev: stat.dev + 1n });
+		}) as unknown as typeof fs.lstat);
+		const platform = Object.getOwnPropertyDescriptor(process, "platform");
+		Object.defineProperty(process, "platform", { value: "darwin" });
+		try {
+			expect(await isolationFs.liveMountsUnder(root)).toEqual([mounted]);
+		} finally {
+			if (platform) Object.defineProperty(process, "platform", platform);
+		}
+	});
+
+	it("finds a filesystem mounted at the root of the tree off Linux, by its parent's device number", async () => {
+		// Failure mode: the walk took the root's own device as its baseline and
+		// checked only what is below it. A filesystem mounted at the sandbox
+		// itself gave every descendant that same device, the walk found nothing,
+		// and an rcopy teardown deleted the mounted filesystem's files.
+		const outer = await fs.mkdtemp(path.join(os.tmpdir(), "omp-devroot-"));
+		tempDirs.push(outer);
+		const root = path.join(outer, "sandbox");
+		await fs.mkdir(path.join(root, "m", "deep"), { recursive: true });
+		const realLstat = fs.lstat;
+		// `sandbox` and everything under it are one mounted filesystem; its parent
+		// is not. `liveMountsUnder` always asks with `{ bigint: true }`.
+		vi.spyOn(fs, "lstat").mockImplementation((async (target: string) => {
+			const stat = await realLstat(target, { bigint: true });
+			const name = String(target);
+			if (name !== root && !name.startsWith(`${root}${path.sep}`)) return stat;
+			return Object.assign(Object.create(Object.getPrototypeOf(stat)), stat, { dev: stat.dev + 1n });
+		}) as unknown as typeof fs.lstat);
+		const platform = Object.getOwnPropertyDescriptor(process, "platform");
+		Object.defineProperty(process, "platform", { value: "darwin" });
+		try {
+			expect(await isolationFs.liveMountsUnder(root)).toEqual([root]);
+		} finally {
+			if (platform) Object.defineProperty(process, "platform", platform);
+		}
+	});
+
+	it("refuses a name inside the worktree directory that resolves outside it", async () => {
+		// Failure mode: an alias in the worktree directory named a sandbox
+		// elsewhere, every caller resolved through it, and `omp worktree clear`
+		// deleted the files of a directory outside the worktree directory.
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-contain-"));
+		tempDirs.push(root);
+		const worktrees = path.join(root, "wt");
+		const outside = path.join(root, "outside");
+		await fs.mkdir(path.join(worktrees, "real"), { recursive: true });
+		await fs.mkdir(outside);
+		await fs.symlink(outside, path.join(worktrees, "alias"));
+		await fs.symlink(worktrees, path.join(root, "wt-link"));
+		const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
+		delete process.env.OMP_WORKTREE_DIR;
+		try {
+			setWorktreesDir(worktrees);
+			await expect(resolveSandboxIdentity(path.join(worktrees, "alias", "sandbox"))).rejects.toThrow(
+				"outside the worktree directory",
+			);
+			// A name that stays inside is the directory it names.
+			expect(await resolveSandboxIdentity(path.join(worktrees, "real"))).toBe(
+				path.join(await fs.realpath(worktrees), "real"),
+			);
+			// The worktree directory may itself be reached through a symlink.
+			setWorktreesDir(path.join(root, "wt-link"));
+			expect(await resolveSandboxIdentity(path.join(root, "wt-link", "real"))).toBe(
+				path.join(await fs.realpath(worktrees), "real"),
+			);
+			await expect(resolveSandboxIdentity(path.join(root, "wt-link", "alias"))).rejects.toThrow(
+				"outside the worktree directory",
+			);
+		} finally {
+			setWorktreesDir(undefined);
+			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
+			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
+		}
+	});
 });
 
 describe("captureIsolationBaseline", () => {
@@ -1051,6 +2052,334 @@ describe("captureIsolationBaseline", () => {
 
 		const baseline = await captureIsolationBaseline(iso, repo);
 		expect(baseline.nested.map(n => n.relativePath)).toEqual([path.join("vendor", "lib")]);
+	});
+});
+
+describe("a capture that could not read everything", () => {
+	it("raises instead of reporting an empty patch", async () => {
+		// The native diff of a file this process cannot read throws. Smoothed
+		// into an empty patch, it told the teardown there was nothing to save
+		// and the file went with the workspace: `{patchEmpty:true,
+		// present:false}`. A capture that could not read something has not
+		// captured it.
+		const repo = await createGitRepo();
+		await runGit(repo, ["config", "user.email", "src@example.com"]);
+		await runGit(repo, ["config", "user.name", "Source User"]);
+		await fs.writeFile(path.join(repo, "tracked.txt"), "base\n");
+		await runGit(repo, ["add", "tracked.txt"]);
+		await runGit(repo, ["commit", "-q", "-m", "base"]);
+		const baseline = await captureBaseline(repo);
+
+		const unreadable = path.join(repo, "must-preserve.txt");
+		await fs.writeFile(unreadable, "work nobody else has\n");
+		await fs.chmod(unreadable, 0o000);
+		try {
+			await expect(captureDeltaPatch(repo, baseline)).rejects.toThrow(/Could not read 1 untracked file/);
+		} finally {
+			// Restored so the fixture can be removed.
+			await fs.chmod(unreadable, 0o600);
+		}
+	});
+
+	it("captures a run whose gitignored directory is unreadable", async () => {
+		// git never looks inside an ignored directory, so nothing is at risk
+		// and the run must still hand back its work. A pre-walk of the tree
+		// refused these — `target/`, `.venv`, `dist/`, `__pycache__` are all
+		// ignored in this repository alone.
+		const repo = await createGitRepo();
+		await runGit(repo, ["config", "user.email", "src@example.com"]);
+		await runGit(repo, ["config", "user.name", "Source User"]);
+		await fs.writeFile(path.join(repo, ".gitignore"), "build/\n");
+		await fs.writeFile(path.join(repo, "tracked.txt"), "base\n");
+		await runGit(repo, ["add", ".gitignore", "tracked.txt"]);
+		await runGit(repo, ["commit", "-q", "-m", "base"]);
+		// Unreadable *before* the baseline as well, which is the ordering the
+		// walk refused: a run whose ignored directory is already locked must
+		// still start and still hand back its work.
+		const ignored = path.join(repo, "build", "cache");
+		await fs.mkdir(ignored, { recursive: true });
+		await fs.chmod(ignored, 0o000);
+		const baseline = await captureBaseline(repo);
+		await fs.writeFile(path.join(repo, "work.txt"), "the run's real change\n");
+
+		try {
+			const delta = await captureDeltaPatch(repo, baseline);
+			expect(delta.rootPatch).toContain("work.txt");
+		} finally {
+			await fs.chmod(ignored, 0o700);
+		}
+	});
+
+	it("raises when git could not open a directory, instead of reporting an empty patch", async () => {
+		// `git ls-files --others` skips a directory it cannot open, warns on
+		// stderr and exits 0, and the binding returns only the array — so a
+		// short listing arrives as a complete one, the capture names nothing,
+		// and the teardown removed the workspace with the only copy in it.
+		const repo = await createGitRepo();
+		await runGit(repo, ["config", "user.email", "src@example.com"]);
+		await runGit(repo, ["config", "user.name", "Source User"]);
+		await fs.writeFile(path.join(repo, "tracked.txt"), "base\n");
+		await runGit(repo, ["add", "tracked.txt"]);
+		await runGit(repo, ["commit", "-q", "-m", "base"]);
+		const baseline = await captureBaseline(repo);
+		const locked = path.join(repo, "locked");
+		await fs.mkdir(locked);
+		await fs.writeFile(path.join(locked, "only-copy.txt"), "work nobody else has\n");
+		await fs.chmod(locked, 0o000);
+
+		try {
+			await expect(captureDeltaPatch(repo, baseline)).rejects.toThrow(/git could not read/);
+		} finally {
+			await fs.chmod(locked, 0o700);
+		}
+		// Still there, because the capture refused rather than reporting none.
+		expect(await Bun.file(path.join(locked, "only-copy.txt")).exists()).toBe(true);
+	});
+
+	it("raises on untracked files whose names are not UTF-8, instead of reporting an empty patch", async () => {
+		// git lists such a name with its raw bytes, exits 0 and says nothing on
+		// stderr. Decoded lossily, the name pointed at a file that does not
+		// exist; its diff read as empty, the capture succeeded with an empty
+		// patch, and the teardown deleted the only copy. The shapes: a byte no
+		// UTF-8 text has, a Latin-1 name, a multi-byte sequence cut short, and
+		// a directory whose name is the undecodable part.
+		if (process.platform === "win32") return;
+		const repo = await createGitRepo();
+		await runGit(repo, ["config", "user.email", "src@example.com"]);
+		await runGit(repo, ["config", "user.name", "Source User"]);
+		await fs.writeFile(path.join(repo, "tracked.txt"), "base\n");
+		await runGit(repo, ["add", "tracked.txt"]);
+		await runGit(repo, ["commit", "-q", "-m", "base"]);
+		const baseline = await captureBaseline(repo);
+		const raw = (...parts: (string | number[])[]): Buffer =>
+			Buffer.concat([Buffer.from(`${repo}${path.sep}`), ...parts.map(part => Buffer.from(part))]);
+		const files = [
+			raw("ordinary-", [0xff], ".txt"),
+			raw("caf", [0xe9], ".txt"),
+			raw("trunc-", [0xe2, 0x82], ".txt"),
+			raw("latin-dir-", [0xe9], "/inner.txt"),
+		];
+		await fs.mkdir(raw("latin-dir-", [0xe9]));
+		for (const file of files) await fs.writeFile(file, "work nobody else has\n");
+
+		await expect(captureDeltaPatch(repo, baseline)).rejects.toThrow(
+			/listed 4 untracked file\(s\) .* not UTF-8.*: caf\\xe9\.txt, latin-dir-\\xe9\/inner\.txt, ordinary-\\xff\.txt, trunc-\\xe2\\x82\.txt$/,
+		);
+		// Still there, because the capture refused rather than reporting none.
+		for (const file of files) expect(await fs.readFile(file, "utf8")).toBe("work nobody else has\n");
+	});
+
+	it("raises when a listed untracked file renders an empty diff", async () => {
+		// A listed file always has a header to show, even when it is empty, so
+		// an empty diff is a read that found nothing, not a file with nothing
+		// in it. Dropped as one, it never reached the refusal, and the file went
+		// with the workspace.
+		const repo = await createGitRepo();
+		await runGit(repo, ["config", "user.email", "src@example.com"]);
+		await runGit(repo, ["config", "user.name", "Source User"]);
+		await fs.writeFile(path.join(repo, "tracked.txt"), "base\n");
+		await runGit(repo, ["add", "tracked.txt"]);
+		await runGit(repo, ["commit", "-q", "-m", "base"]);
+		const baseline = await captureBaseline(repo);
+		await fs.writeFile(path.join(repo, "must-preserve.txt"), "work nobody else has\n");
+		// Every other call reaches git: only the diff of the listed file is empty.
+		const requireGit = vcs.requireGit;
+		vi.spyOn(vcs, "requireGit").mockImplementation(dir => {
+			const actual = requireGit(dir);
+			return new Proxy(actual, {
+				get(target, key) {
+					if (key === "diffNoIndex") return async () => "";
+					const value: unknown = Reflect.get(target, key);
+					return typeof value === "function" ? value.bind(target) : value;
+				},
+			});
+		});
+
+		await expect(captureDeltaPatch(repo, baseline)).rejects.toThrow(
+			/Could not read 1 untracked file.*: must-preserve\.txt$/,
+		);
+	});
+
+	it("captures names and bytes exactly: the patch rebuilds the same tree", async () => {
+		// Failure mode: the capture rendered a name or a byte lossily, the patch
+		// applied, and the teardown deleted the only copy. `caf\xe9` came back
+		// as `caf\xef\xbf\xbd`, `a\b.txt` as `a/b.txt`, and an empty file or a
+		// binary one whose name held a space was created under another name.
+		if (process.platform === "win32") return;
+		const repo = await createGitRepo();
+		await runGit(repo, ["config", "user.email", "src@example.com"]);
+		await runGit(repo, ["config", "user.name", "Source User"]);
+		await fs.writeFile(path.join(repo, "tracked.txt"), "base\n");
+		await runGit(repo, ["add", "tracked.txt"]);
+		await runGit(repo, ["commit", "-q", "-m", "base"]);
+		const restored = await createGitRepo();
+		await runGit(restored, ["fetch", "-q", repo, "HEAD"]);
+		await runGit(restored, ["reset", "-q", "--hard", "FETCH_HEAD"]);
+		const baseline = await captureBaseline(repo);
+		await fs.writeFile(path.join(repo, "latin.txt"), Buffer.from([0x63, 0x61, 0x66, 0xe9, 0x0a]));
+		await fs.writeFile(path.join(repo, "a\\b.txt"), "backslash\n");
+		await fs.writeFile(path.join(repo, "my notes.txt"), "");
+		await fs.writeFile(path.join(repo, "my file.bin"), Buffer.from([0, 255, 42, 0, 128]));
+		await fs.writeFile(path.join(repo, "staged latin.txt"), Buffer.from([0xe9, 0x74, 0xe9, 0x0a]));
+		await runGit(repo, ["add", "staged latin.txt"]);
+		await fs.writeFile(path.join(repo, "tracked.txt"), Buffer.from([0x62, 0xe2, 0x73, 0x65, 0x0a]));
+
+		const { rootPatch } = await captureDeltaPatch(repo, baseline);
+		await vcs.requireGit(restored).applyPatch(rootPatch, { cached: true });
+		await runGit(repo, ["add", "-A"]);
+
+		expect(await runGit(restored, ["ls-files", "-s"])).toBe(await runGit(repo, ["ls-files", "-s"]));
+	});
+
+	it("refuses a staged, unstaged or committed name it cannot carry, and keeps the file", async () => {
+		// Untracked names that are not UTF-8 were already refused; staged ones
+		// were rendered lossily. `raw-\xff.txt` became `raw-\xef\xbf\xbd.txt`,
+		// the capture succeeded, and the original was deleted.
+		if (process.platform === "win32") return;
+		for (const where of ["staged", "unstaged", "committed"] as const) {
+			const repo = await createGitRepo();
+			await runGit(repo, ["config", "user.email", "src@example.com"]);
+			await runGit(repo, ["config", "user.name", "Source User"]);
+			await fs.writeFile(path.join(repo, "tracked.txt"), "base\n");
+			const raw = Buffer.concat([Buffer.from(`${repo}${path.sep}raw-`), Buffer.from([0xff]), Buffer.from(".txt")]);
+			if (where !== "staged") await fs.writeFile(raw, "base\n");
+			await runGit(repo, ["add", "-A"]);
+			await runGit(repo, ["commit", "-q", "-m", "base"]);
+			const baseline = await captureBaseline(repo);
+			await fs.writeFile(raw, "work nobody else has\n");
+			if (where !== "unstaged") await runGit(repo, ["add", "-A"]);
+			if (where === "committed") await runGit(repo, ["commit", "-q", "-m", "work"]);
+
+			await expect(captureDeltaPatch(repo, baseline)).rejects.toThrow(/so a patch cannot carry it/);
+			expect(await fs.readFile(raw, "utf8")).toBe("work nobody else has\n");
+		}
+	});
+
+	it("captures a readable untracked file in the same shape", async () => {
+		const repo = await createGitRepo();
+		await runGit(repo, ["config", "user.email", "src@example.com"]);
+		await runGit(repo, ["config", "user.name", "Source User"]);
+		await fs.writeFile(path.join(repo, "tracked.txt"), "base\n");
+		await runGit(repo, ["add", "tracked.txt"]);
+		await runGit(repo, ["commit", "-q", "-m", "base"]);
+		const baseline = await captureBaseline(repo);
+		await fs.writeFile(path.join(repo, "must-preserve.txt"), "work nobody else has\n");
+
+		const delta = await captureDeltaPatch(repo, baseline);
+
+		expect(delta.rootPatch).toContain("must-preserve.txt");
+	});
+});
+
+describe("a capture in a process that inherited another repository's git environment", () => {
+	// omp started from a git hook, `git submodule foreach` or a CI job inherits
+	// `GIT_DIR` and `GIT_WORK_TREE`, and `git -C` does not override
+	// `GIT_WORK_TREE`. The capture has to list the workspace it was given, and
+	// it has to hear git's warning about that workspace, or the teardown
+	// deletes work on the strength of another tree's listing. Run in a child
+	// process because Bun does not hand `process.env` writes to native code:
+	// only a real environment reaches the native git runner.
+	const worktreeModule = path.join(import.meta.dir, "..", "..", "src", "task", "worktree.ts");
+	const script =
+		`import * as fs from "node:fs/promises";` +
+		`import * as path from "node:path";` +
+		`import { captureBaseline, captureDeltaPatch } from ${JSON.stringify(worktreeModule)};` +
+		`const repo = process.env.OMP_TEST_CAPTURE_REPO;` +
+		`const baseline = await captureBaseline(repo);` +
+		`const locked = process.env.OMP_TEST_CAPTURE_LOCK === "1";` +
+		`const dir = locked ? path.join(repo, "locked") : repo;` +
+		`await fs.mkdir(dir, { recursive: true });` +
+		`await fs.writeFile(path.join(dir, "only-copy.txt"), "work nobody else has\\n");` +
+		`if (locked) await fs.chmod(dir, 0o000);` +
+		`let result;` +
+		`try { result = { rootPatch: (await captureDeltaPatch(repo, baseline)).rootPatch }; }` +
+		`catch (error) { result = { error: String(error instanceof Error ? error.message : error) }; }` +
+		`finally { if (locked) await fs.chmod(dir, 0o700); }` +
+		`process.stdout.write(JSON.stringify(result));`;
+
+	async function captureUnderForeignGitEnv(lock: boolean): Promise<{ rootPatch?: string; error?: string }> {
+		const repo = await createGitRepo();
+		await runGit(repo, ["config", "user.email", "src@example.com"]);
+		await runGit(repo, ["config", "user.name", "Source User"]);
+		await fs.writeFile(path.join(repo, "tracked.txt"), "base\n");
+		await runGit(repo, ["add", "tracked.txt"]);
+		await runGit(repo, ["commit", "-q", "-m", "base"]);
+		// Another tree with nothing untracked: a listing of it is empty.
+		const other = await createGitRepo();
+		await runGit(other, ["config", "user.email", "src@example.com"]);
+		await runGit(other, ["config", "user.name", "Source User"]);
+		await fs.writeFile(path.join(other, "theirs.txt"), "theirs\n");
+		await runGit(other, ["add", "theirs.txt"]);
+		await runGit(other, ["commit", "-q", "-m", "theirs"]);
+
+		const child = Bun.spawn([process.execPath, "--eval", script], {
+			cwd: path.join(import.meta.dir, ".."),
+			env: {
+				...process.env,
+				GIT_DIR: path.join(other, ".git"),
+				GIT_WORK_TREE: other,
+				OMP_TEST_CAPTURE_REPO: repo,
+				OMP_TEST_CAPTURE_LOCK: lock ? "1" : "0",
+			},
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const [stdout, stderr, exitCode] = await Promise.all([
+			new Response(child.stdout).text(),
+			new Response(child.stderr).text(),
+			child.exited,
+		]);
+		// The child restores the mode itself; this covers a child that died.
+		if (lock) await fs.chmod(path.join(repo, "locked"), 0o700).catch(() => {});
+		expect({ exitCode, stderr: exitCode === 0 ? "" : stderr }).toEqual({ exitCode: 0, stderr: "" });
+		if (lock) expect(await Bun.file(path.join(repo, "locked", "only-copy.txt")).exists()).toBe(true);
+		return JSON.parse(stdout) as { rootPatch?: string; error?: string };
+	}
+
+	it("lists the workspace it was given, not the tree GIT_DIR and GIT_WORK_TREE name", async () => {
+		const result = await captureUnderForeignGitEnv(false);
+
+		expect(result.error).toBeUndefined();
+		expect(result.rootPatch).toContain("only-copy.txt");
+	});
+
+	it("still refuses on git's warning about a directory in the workspace", async () => {
+		const result = await captureUnderForeignGitEnv(true);
+
+		expect(result.rootPatch).toBeUndefined();
+		expect(result.error).toMatch(/git could not read 1 director.*: locked$/);
+	});
+});
+
+describe("a capture that could not look everywhere", () => {
+	it("records, rather than raises, a directory the nested scan cannot list", async () => {
+		// A directory the walk could not list may hold a nested repo whose
+		// work the capture then misses entirely, and the teardown deletes on
+		// the strength of that capture.
+		const repo = await createGitRepo();
+		await runGit(repo, ["config", "user.email", "src@example.com"]);
+		await runGit(repo, ["config", "user.name", "Source User"]);
+		await fs.writeFile(path.join(repo, "tracked.txt"), "base\n");
+		await runGit(repo, ["add", "tracked.txt"]);
+		await runGit(repo, ["commit", "-q", "-m", "base"]);
+		const nested = path.join(repo, "vendor", "lib");
+		await fs.mkdir(nested, { recursive: true });
+		await initRepo(nested);
+
+		const real = fs.readdir;
+		const spy = vi.spyOn(fs, "readdir");
+		spy.mockImplementation((async (target: unknown, ...rest: unknown[]) => {
+			if (String(target) === path.join(repo, "vendor")) {
+				throw Object.assign(new Error("EIO: i/o error"), { code: "EIO" });
+			}
+			return await (real as (...a: unknown[]) => Promise<unknown>)(target, ...rest);
+		}) as unknown as typeof fs.readdir);
+
+		// Recorded rather than raised: git decides what the capture can see,
+		// and the capture refuses on git's own report at delta time.
+		const baseline = await captureBaseline(repo);
+		spy.mockRestore();
+		expect(baseline.nested.map(entry => entry.relativePath)).toEqual([]);
 	});
 });
 
