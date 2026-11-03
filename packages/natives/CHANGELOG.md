@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed the bash tool's shell making a command's redirections before expanding its prefix assignments: `x=${missing:?err} cmd >file` created `file`, `x=$(cat f) cmd >f` read `f` after the redirection had emptied it, and the assignment's error went into the command's redirected standard error; a simple command now expands its words, then its prefix assignments, then its redirections, as Bash does, `set -x` traces it before the redirections, and a prefix assignment to an array element (`a[0]=x cmd`) is refused as not a valid identifier, as in Bash ([#17899](https://github.com/can1357/oh-my-pi/pull/17899) by [@sjawhar](https://github.com/sjawhar))
+- Fixed the bash tool's shell making a command's prefix assignments (`x=1 cmd`) unlike Bash: a readonly name's value was expanded and its message printed after the command, into its redirected standard error; a name that holds another (`declare -n`) was followed without Bash's warnings and depth limit; `declare -i a; a=3+4 cmd` gave `7` instead of `3+4`; `a=(x y) cmd` passed an array instead of the text `(x y)`; `a=1 b=$((a+=1)) cmd` ran with `a=1`; an arithmetic error in `+=` ran the rest of the line; `set -x` traced the assignments out of order; and `x=1 export` listed `x` ([#17899](https://github.com/can1357/oh-my-pi/pull/17899) by [@sjawhar](https://github.com/sjawhar))
 ### Changed
 
 - Made the bash tool's shell faster on string appends (`s+=x`), sourcing files full of function definitions (each body compiles on first call), quoted `"$var"`/`"$1"` arguments and file redirections
