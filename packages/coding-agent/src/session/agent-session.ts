@@ -9017,82 +9017,88 @@ export class AgentSession implements SettingsScope {
 			if (this.#promptGeneration !== generation) {
 				return false;
 			}
-			if (autoPrewalk) {
-				const decision = await autoPrewalk;
-				if (this.#promptGeneration !== generation) {
-					return false;
-				}
-				// Synchronous from here to dispatch, so the arm and its plan nudge travel with this task.
-				const planMessage = this.#prewalk.applyAuto(decision);
-				if (planMessage) {
-					messages.push(planMessage);
-					// The first-turn eager todo reminder was built before this task armed. Like a configured
-					// prewalk (#10510), the plan nudge owns todo creation, so the reminder would contradict it.
-					this.#toolChoiceQueue.removeByLabel("eager-todo");
-					const eager = messages.findIndex(
-						candidate => candidate.role === "custom" && candidate.customType === EAGER_TODO_PRELUDE_MESSAGE_TYPE,
-					);
-					if (eager >= 0) messages.splice(eager, 1);
-				}
+			const prewalkDecision = autoPrewalk ? await autoPrewalk : undefined;
+			if (autoPrewalk && this.#promptGeneration !== generation) {
+				return false;
 			}
-			// Consume the xd:// notice only when its previewed revision still holds.
-			// A mount delta or catalog rebuild during the await invalidates it: any
-			// additions carried by the delivered base are recorded as announced,
-			// while remaining notice content waits for the next context check.
-			// The roster notice is re-derived from the live delta here and always
-			// delivered, keeping the model's stated availability in lockstep with
-			// the wire tool list even when a roster change landed during maintenance.
-			const xdevMountNotice = previewXdevMountNotice
-				? this.#tools.takePendingXdevMountNotice({
-						baseCatalogDelivered: baseXdevCatalogDelivered,
-						expectedContentKey: previewXdevMountNotice.contentKey,
-					})
-				: undefined;
-			const toolRosterNotice = isUserQueuedMessage(message)
-				? this.#tools.takePendingToolRosterNotice({ baseDelivered: baseXdevCatalogDelivered })
-				: undefined;
-			const evalPreludeNotice = isUserQueuedMessage(message) ? this.#tools.takeEvalPreludeNotice() : undefined;
-			const sessionAgentNotice = isUserQueuedMessage(message) ? this.#tools.takeSessionAgentNotice() : undefined;
-			if (xdevMountNotice || toolRosterNotice || evalPreludeNotice || sessionAgentNotice) {
-				messages.splice(
-					xdevMountNoticeIndex,
-					0,
-					...(xdevMountNotice ? [xdevMountNotice] : []),
-					...(toolRosterNotice ? [toolRosterNotice] : []),
-					...(evalPreludeNotice ? [evalPreludeNotice] : []),
-					...(sessionAgentNotice ? [sessionAgentNotice] : []),
-				);
-			}
-
 			const agentPromptOptions = options?.toolChoice ? { toolChoice: options.toolChoice } : undefined;
-			const nonMessageTokens = computeNonMessageTokens(this, this.agent.tokenizer, this.settings.revision);
-			const contextWindow = this.model?.contextWindow ?? 0;
-			const breakdown = this.getContextBreakdown({ contextWindow, pendingMessages: messages });
-			const promptTokens =
-				breakdown?.usedTokens ??
-				nonMessageTokens +
-					this.agent.tokenizer.countMessages(this.messages) +
-					this.agent.tokenizer.countMessages(messages);
-			this.#stats.setPendingSnapshot({
-				promptTokens,
-				nonMessageTokens,
-				cutoffCount: this.messages.length + messages.length,
-			});
-			// Commit the plan-reference delivery flag only now that the message is
-			// actually handed to agent.prompt. Every pre-send setup step above can
-			// return (generation-bail) or throw (@-mention reads, before_agent_start
-			// hooks, pre-prompt compaction) before this point; setting the flag at
-			// construction time (#buildPlanReferenceMessage) stranded it `true` with
-			// nothing delivered, so the retry skipped re-injection and the executor
-			// lost the approved plan (issue #4094). The compaction-success resets
-			// (issue #1246) still clear it for re-injection on the next turn.
-			if (planReferenceMessage) {
-				this.#planReferenceSent = true;
-			}
+			// Everything this prompt delivers with its request is committed here, at the claim: the
+			// prewalk arm and its plan nudge, the consumed notices, and the plan-reference flag. It
+			// runs only once the agent is free to take the prompt, synchronously before the claim,
+			// so a prompt that waits behind another run and is then cancelled commits none of it.
+			const commitDelivery = (): AgentMessage[] => {
+				if (prewalkDecision !== undefined) {
+					const planMessage = this.#prewalk.applyAuto(prewalkDecision);
+					if (planMessage) {
+						messages.push(planMessage);
+						// The first-turn eager todo reminder was built before this task armed. Like a configured
+						// prewalk (#10510), the plan nudge owns todo creation, so the reminder would contradict it.
+						this.#toolChoiceQueue.removeByLabel("eager-todo");
+						const eager = messages.findIndex(
+							candidate =>
+								candidate.role === "custom" && candidate.customType === EAGER_TODO_PRELUDE_MESSAGE_TYPE,
+						);
+						if (eager >= 0) messages.splice(eager, 1);
+					}
+				}
+				// Consume the xd:// notice only when its previewed revision still holds.
+				// A mount delta or catalog rebuild during the await invalidates it: any
+				// additions carried by the delivered base are recorded as announced,
+				// while remaining notice content waits for the next context check.
+				// The roster notice is re-derived from the live delta here and always
+				// delivered, keeping the model's stated availability in lockstep with
+				// the wire tool list even when a roster change landed during maintenance.
+				const xdevMountNotice = previewXdevMountNotice
+					? this.#tools.takePendingXdevMountNotice({
+							baseCatalogDelivered: baseXdevCatalogDelivered,
+							expectedContentKey: previewXdevMountNotice.contentKey,
+						})
+					: undefined;
+				const toolRosterNotice = isUserQueuedMessage(message)
+					? this.#tools.takePendingToolRosterNotice({ baseDelivered: baseXdevCatalogDelivered })
+					: undefined;
+				const evalPreludeNotice = isUserQueuedMessage(message) ? this.#tools.takeEvalPreludeNotice() : undefined;
+				const sessionAgentNotice = isUserQueuedMessage(message) ? this.#tools.takeSessionAgentNotice() : undefined;
+				if (xdevMountNotice || toolRosterNotice || evalPreludeNotice || sessionAgentNotice) {
+					messages.splice(
+						xdevMountNoticeIndex,
+						0,
+						...(xdevMountNotice ? [xdevMountNotice] : []),
+						...(toolRosterNotice ? [toolRosterNotice] : []),
+						...(evalPreludeNotice ? [evalPreludeNotice] : []),
+						...(sessionAgentNotice ? [sessionAgentNotice] : []),
+					);
+				}
+				const nonMessageTokens = computeNonMessageTokens(this, this.agent.tokenizer, this.settings.revision);
+				const contextWindow = this.model?.contextWindow ?? 0;
+				const breakdown = this.getContextBreakdown({ contextWindow, pendingMessages: messages });
+				const promptTokens =
+					breakdown?.usedTokens ??
+					nonMessageTokens +
+						this.agent.tokenizer.countMessages(this.messages) +
+						this.agent.tokenizer.countMessages(messages);
+				this.#stats.setPendingSnapshot({
+					promptTokens,
+					nonMessageTokens,
+					cutoffCount: this.messages.length + messages.length,
+				});
+				// Commit the plan-reference delivery flag only now that the message is
+				// actually handed to agent.prompt. Every pre-send setup step above can
+				// return (generation-bail) or throw (@-mention reads, before_agent_start
+				// hooks, pre-prompt compaction) before this point; setting the flag at
+				// construction time (#buildPlanReferenceMessage) stranded it `true` with
+				// nothing delivered, so the retry skipped re-injection and the executor
+				// lost the approved plan (issue #4094). The compaction-success resets
+				// (issue #1246) still clear it for re-injection on the next turn.
+				if (planReferenceMessage) {
+					this.#planReferenceSent = true;
+				}
+				return messages;
+			};
 			let dispatched: boolean;
 			try {
 				const run = this.#recovery.promptAgentWithIdleRetry(
-					messages,
+					commitDelivery,
 					agentPromptOptions,
 					() => {
 						handedToAgent = true;
