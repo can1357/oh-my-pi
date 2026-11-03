@@ -1028,6 +1028,10 @@ describe("dedicated tool capability", () => {
 		"find . -name '.*'",
 		"find src -name 'sr*'",
 		"find src/ -path 'src*'",
+		// Round 14: a bracket expression or an escape may match the root (POSIX classes, `\\s`).
+		"find src -name '[[:alpha:]]*'",
+		"find src -name '\\s*'",
+		"find . -name '[[:print:]]'",
 		// Roots glob reads differently.
 		"find 'a,b' -name dune",
 		"fd -I --glob 'A*' 'a b'",
@@ -1050,6 +1054,36 @@ describe("dedicated tool capability", () => {
 		["find . -path './node_modules' -prune -o -name '*.ts' -print", "glob"],
 	])("still refuses %s as %s (round 11)", (command, tool) => {
 		expect(decide(command)).toBe(tool);
+	});
+
+	it("matches a find pattern against its root in linear time", () => {
+		const root = "a".repeat(40);
+		const command = `find ${root} -name '${"*a".repeat(15)}Z'`;
+		const start = performance.now();
+		expect(decide(command)).toBe("glob");
+		expect(performance.now() - start).toBeLessThan(250);
+		expect(decide(`find ${root} -name '${"*a".repeat(15)}'`)).toBeUndefined();
+		expect(decide("find abc -name 'a?c'")).toBeUndefined();
+		expect(decide("find abc -name '*b*'")).toBeUndefined();
+		expect(decide("find abc -name 'a?d'")).toBe("glob");
+		expect(decide("find abc -name 'b*'")).toBe("glob");
+	});
+
+	it("refuses a find over a symlinked root only when -H follows it", async () => {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "bash-interceptor-find-root-")));
+		try {
+			await Bun.write(path.join(dir, "actual", "child.txt"), "x\n");
+			await fs.symlink("actual", path.join(dir, "sym"));
+			const at = (command: string) =>
+				checkBashInterception(command, tools, DEFAULT_BASH_INTERCEPTOR_RULES, command, dir).suggestedTool;
+			expect(at("find sym -name '*.txt'")).toBeUndefined();
+			expect(at("find -P sym -name '*.txt'")).toBeUndefined();
+			expect(at("find -H sym -name '*.txt'")).toBe("glob");
+			expect(at("find actual -name '*.txt'")).toBe("glob");
+			expect(at("find missing -name '*.txt'")).toBeUndefined();
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
 	});
 
 	it("renders a repeated printf only up to a bound", () => {
@@ -1209,7 +1243,12 @@ describe("BashTool runs a step the named tool cannot perform", () => {
 				undefined,
 				ctx,
 			);
-			expect(text(bytes).trim()).toBe("50 4b 03 04");
+			// The tool may add notices around a command's output (a slow run under load); match the line.
+			expect(
+				text(bytes)
+					.split("\n")
+					.map(line => line.trim()),
+			).toContain("50 4b 03 04");
 
 			await expect(tool.execute("call-3", { command: "cat new.md" }, undefined, undefined, ctx)).rejects.toThrow(
 				"Use the `read` tool instead of cat/head/tail",

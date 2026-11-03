@@ -1081,10 +1081,13 @@ const PRUNED_BY_GLOB = /^(?:\.\/|\*\/)?(?:\.git|node_modules)(?:\/\*?)?$|^\*\/(?
  * that names it. It has no depth limit, type, case-insensitive, size, time or permission test,
  * negation or pruning of other paths, or action (`-exec`, `-delete`, `-printf`).
  */
-function findCanPerform(command: SimpleCommand): boolean {
+function findCanPerform(command: SimpleCommand, filesystem: StepFilesystem | undefined): boolean {
 	const words = command.words.slice(1);
 	let i = 0;
-	while (i < words.length && (words[i].value === "-P" || words[i].value === "-H")) i++;
+	let followRoots = false;
+	for (; i < words.length && (words[i].value === "-P" || words[i].value === "-H"); i++) {
+		followRoots = words[i].value === "-H";
+	}
 	const roots: string[] = [];
 	for (; i < words.length; i++) {
 		const value = words[i].value;
@@ -1093,6 +1096,8 @@ function findCanPerform(command: SimpleCommand): boolean {
 	}
 	if (roots.length === 0) roots.push(".");
 	if (!roots.every(toolsTakeLiterally)) return false;
+	// find does not descend a symlinked root without `-H`; glob always does.
+	if (filesystem && roots.some(root => filesystem.kind(root, followRoots) !== "directory")) return false;
 	const tests: Array<{ test: string; pattern: string }> = [];
 	let negated = false;
 	let prunedTest = false;
@@ -1123,35 +1128,37 @@ function findCanPerform(command: SimpleCommand): boolean {
 	// find tests its roots too and lists one a test matches (`find . -name .`); glob never lists its roots.
 	return roots.every(root => {
 		const name = root.replace(/\/+$/u, "").split("/").pop() || root;
-		return !tests.some(({ test, pattern }) => fnmatch(pattern, test === "-name" ? name : root));
+		return !tests.some(({ test, pattern }) => mayMatchName(pattern, test === "-name" ? name : root));
 	});
 }
 
-/** Whether the shell-style `pattern` matches `name`, as `find -name` (fnmatch without FNM_PERIOD) does. */
-function fnmatch(pattern: string, name: string): boolean {
-	let source = "";
-	for (let i = 0; i < pattern.length; i++) {
-		const ch = pattern[i];
-		if (ch === "*") source += "[^]*";
-		else if (ch === "?") source += "[^]";
-		else if (ch === "[") {
-			const close = pattern.indexOf("]", i + 2);
-			if (close < 0) source += "\\[";
-			else {
-				const body = pattern
-					.slice(i + 1, close)
-					.replace(/^!/u, "^")
-					.replace(/\\/gu, "\\\\");
-				source += `[${body}]`;
-				i = close;
-			}
-		} else source += ch.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+/**
+ * Whether the shell-style `pattern` may match `name`, as `find -name` (fnmatch without FNM_PERIOD)
+ * matches it. `*` and `?` are matched exactly, in time linear in the two lengths; a bracket
+ * expression or a backslash (POSIX classes, escapes) is not modelled, so such a pattern may match.
+ */
+function mayMatchName(pattern: string, name: string): boolean {
+	if (/[[\\]/u.test(pattern)) return true;
+	const p = Array.from(pattern);
+	const n = Array.from(name);
+	let i = 0;
+	let j = 0;
+	let star = -1;
+	let resume = 0;
+	while (j < n.length) {
+		if (i < p.length && (p[i] === "?" || (p[i] !== "*" && p[i] === n[j]))) {
+			i++;
+			j++;
+		} else if (i < p.length && p[i] === "*") {
+			star = i++;
+			resume = j;
+		} else if (star >= 0) {
+			i = star + 1;
+			j = ++resume;
+		} else return false;
 	}
-	try {
-		return new RegExp(`^${source}$`, "u").test(name);
-	} catch {
-		return true;
-	}
+	while (i < p.length && p[i] === "*") i++;
+	return i === p.length;
 }
 
 const FD: OptionSpec = {
@@ -1636,7 +1643,10 @@ export function dedicatedToolCanPerformStep(
 			if (name !== "find" && name !== "fd") return true;
 			// An input redirection opens something (a FIFO waits for its writer) that glob never opens.
 			if (hasOtherInputs(command) || stdinFiles(command).length > 0) return false;
-			return outputReachesAgent(pipeline) && (name === "find" ? findCanPerform(command) : fdCanPerform(command));
+			return (
+				outputReachesAgent(pipeline) &&
+				(name === "find" ? findCanPerform(command, filesystem) : fdCanPerform(command))
+			);
 		case "write":
 			return writeCanPerform(name, step, availableTools, filesystem);
 		default: {
