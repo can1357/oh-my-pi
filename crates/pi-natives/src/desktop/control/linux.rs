@@ -1,6 +1,7 @@
 //! Event-driven XI2 Escape observation. Wayland has no portable physical-key
 //! monitor and uses the host interrupt/native cancellation path instead.
 use std::{
+	collections::HashMap,
 	os::{fd::AsRawFd, unix::net::UnixStream},
 	thread::{self, JoinHandle},
 };
@@ -82,8 +83,10 @@ fn poll(descriptors: &mut [libc::pollfd]) -> std::io::Result<()> {
 }
 
 struct X11 {
-	conn:   RustConnection,
-	escape: u8,
+	conn:    RustConnection,
+	/// Escape keycode in each source keyboard's own keymap, `None` when it
+	/// has none.
+	escapes: HashMap<u16, Option<u8>>,
 }
 impl X11 {
 	fn new() -> CoreResult<Self> {
@@ -94,7 +97,22 @@ impl X11 {
 			.reply()
 			.map_err(failed)?;
 		let setup = conn.setup();
-		let escape = escape_keycode(&conn)?;
+		let mapping = conn
+			.get_keyboard_mapping(
+				setup.min_keycode,
+				setup
+					.max_keycode
+					.saturating_sub(setup.min_keycode)
+					.saturating_add(1),
+			)
+			.map_err(failed)?
+			.reply()
+			.map_err(failed)?;
+		if mapping.keysyms_per_keycode == 0 {
+			return Err(failed("the X11 keyboard map is empty"));
+		}
+		escape_in(setup.min_keycode, mapping.keysyms_per_keycode, &mapping.keysyms)
+			.ok_or_else(|| failed("the X11 keymap has no Escape key"))?;
 		conn
 			.xinput_xi_select_events(setup.roots[screen].root, &[x11rb::protocol::xinput::EventMask {
 				deviceid: Device::ALL_MASTER.into(),
@@ -104,7 +122,7 @@ impl X11 {
 			.check()
 			.map_err(failed)?;
 		conn.flush().map_err(failed)?;
-		Ok(Self { conn, escape })
+		Ok(Self { conn, escapes: HashMap::new() })
 	}
 
 	fn run(mut self, stopped: &UnixStream, emergency: &EmergencyStop) {
@@ -126,7 +144,7 @@ impl X11 {
 						return;
 					},
 				};
-				match step(&mut self.escape, &event, || escape_keycode(&self.conn).ok()) {
+				match step(&mut self.escapes, &event, |device| device_escape(&self.conn, device)) {
 					Step::Next => {},
 					Step::Escape(source) => {
 						let devices = self
@@ -176,30 +194,47 @@ enum Step {
 	Stop,
 }
 
-/// `keymap` reads the Escape keycode of the current core keymap.
-fn step(escape: &mut u8, event: &Event, keymap: impl FnOnce() -> Option<u8>) -> Step {
+/// A raw press reports its keycode in the source device's keymap, so Escape
+/// is looked up there: the core keymap follows whichever device typed last,
+/// and takeover's next XTEST key can switch it before a user's press is read.
+/// `read` reads a device's Escape keycode; failing to read it stops.
+fn step(
+	escapes: &mut HashMap<u16, Option<u8>>,
+	event: &Event,
+	read: impl FnOnce(u16) -> CoreResult<Option<u8>>,
+) -> Step {
 	match event {
-		Event::XinputRawKeyPress(event) if event.detail == u32::from(*escape) => {
-			Step::Escape(event.sourceid)
+		Event::XinputRawKeyPress(event) => {
+			let escape = match escapes.get(&event.sourceid) {
+				Some(&escape) => escape,
+				None => match read(event.sourceid) {
+					Ok(escape) => *escapes.entry(event.sourceid).or_insert(escape),
+					Err(_) => return Step::Stop,
+				},
+			};
+			if escape.is_some_and(|escape| event.detail == u32::from(escape)) {
+				Step::Escape(event.sourceid)
+			} else {
+				Step::Next
+			}
 		},
 		// Xorg sends the core keymap again each time the core keyboard switches
 		// source device, as the takeover's own first XTEST key does after the
-		// user typed; only a keymap without Escape ends the stop.
-		Event::MappingNotify(event) if event.request == Mapping::KEYBOARD => match keymap() {
-			Some(keycode) => {
-				*escape = keycode;
-				Step::Next
-			},
-			None => Step::Stop,
+		// user typed; a device's own keymap may have changed with it.
+		Event::MappingNotify(event) if event.request == Mapping::KEYBOARD => {
+			escapes.clear();
+			Step::Next
 		},
 		_ => Step::Next,
 	}
 }
 
-fn escape_keycode(conn: &RustConnection) -> CoreResult<u8> {
+/// The Escape keycode of `device`'s own keymap, `None` when it has none.
+fn device_escape(conn: &RustConnection, device: u16) -> CoreResult<Option<u8>> {
 	let setup = conn.setup();
 	let mapping = conn
-		.get_keyboard_mapping(
+		.xinput_get_device_key_mapping(
+			u8::try_from(device).map_err(failed)?,
 			setup.min_keycode,
 			setup
 				.max_keycode
@@ -209,16 +244,18 @@ fn escape_keycode(conn: &RustConnection) -> CoreResult<u8> {
 		.map_err(failed)?
 		.reply()
 		.map_err(failed)?;
-	let width = usize::from(mapping.keysyms_per_keycode);
+	Ok(escape_in(setup.min_keycode, mapping.keysyms_per_keycode, &mapping.keysyms))
+}
+
+fn escape_in(min_keycode: u8, keysyms_per_keycode: u8, keysyms: &[u32]) -> Option<u8> {
+	let width = usize::from(keysyms_per_keycode);
 	if width == 0 {
-		return Err(failed("the X11 keyboard map is empty"));
+		return None;
 	}
-	mapping
-		.keysyms
+	keysyms
 		.chunks(width)
 		.position(|row| row.contains(&0xff1b))
-		.and_then(|row| setup.min_keycode.checked_add(u8::try_from(row).ok()?))
-		.ok_or_else(|| failed("the X11 keymap has no Escape key"))
+		.and_then(|row| min_keycode.checked_add(u8::try_from(row).ok()?))
 }
 
 #[cfg(test)]
@@ -228,18 +265,26 @@ mod tests {
 	use super::*;
 
 	#[test]
-	fn a_core_keymap_switch_keeps_the_escape_stop_on_the_new_keymap() {
-		let mapping =
-			|request| Event::MappingNotify(MappingNotifyEvent { request, ..Default::default() });
-		let press = |detail| {
-			Event::XinputRawKeyPress(RawKeyPressEvent { detail, sourceid: 8, ..Default::default() })
+	fn escape_is_read_in_the_pressing_devices_keymap() {
+		let press = |sourceid, detail| {
+			Event::XinputRawKeyPress(RawKeyPressEvent { detail, sourceid, ..Default::default() })
 		};
-		let mut escape = 9;
+		let keyboard = Event::MappingNotify(MappingNotifyEvent {
+			request: Mapping::KEYBOARD,
+			..Default::default()
+		});
+		// The user's keyboard (8) puts Escape on 9, XTEST (4) on 66.
+		let keymaps = |device| Ok(Some(if device == 8 { 9 } else { 66 }));
+		let unreadable = |_| Err(failed("no keymap"));
+		let mut escapes = HashMap::new();
 
-		assert!(matches!(step(&mut escape, &mapping(Mapping::KEYBOARD), || Some(66)), Step::Next));
-		assert!(matches!(step(&mut escape, &press(9), || None), Step::Next));
-		assert!(matches!(step(&mut escape, &press(66), || None), Step::Escape(8)));
-		assert!(matches!(step(&mut escape, &mapping(Mapping::MODIFIER), || None), Step::Next));
-		assert!(matches!(step(&mut escape, &mapping(Mapping::KEYBOARD), || None), Step::Stop));
+		assert!(matches!(step(&mut escapes, &press(4, 66), keymaps), Step::Escape(4)));
+		assert!(matches!(step(&mut escapes, &keyboard, keymaps), Step::Next));
+		assert!(matches!(step(&mut escapes, &press(8, 9), keymaps), Step::Escape(8)));
+		assert!(matches!(step(&mut escapes, &press(8, 66), unreadable), Step::Next), "cached");
+		assert!(matches!(step(&mut escapes, &keyboard, unreadable), Step::Next));
+		assert!(matches!(step(&mut escapes, &press(8, 9), |_| Ok(None)), Step::Next));
+		assert!(matches!(step(&mut escapes, &keyboard, unreadable), Step::Next));
+		assert!(matches!(step(&mut escapes, &press(8, 9), unreadable), Step::Stop));
 	}
 }
