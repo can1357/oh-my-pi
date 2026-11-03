@@ -224,6 +224,10 @@ impl ByteDecoder for OutputDecoder {
 		Self::push(self, bytes)
 	}
 
+	fn holds_bytes(&self) -> bool {
+		!self.pending.is_empty()
+	}
+
 	fn finish(&mut self) -> String {
 		Self::finish(self)
 	}

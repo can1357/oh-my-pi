@@ -41,6 +41,8 @@ pub trait OutputDecoding: Send + Sync {
 pub trait ByteDecoder: Send {
 	/// Decodes the next chunk; bytes of an incomplete character stay held.
 	fn push(&mut self, bytes: &[u8]) -> String;
+	/// Whether bytes are held for more input or for [`Self::finish`].
+	fn holds_bytes(&self) -> bool;
 	/// Flushes held bytes at end of stream.
 	fn finish(&mut self) -> String;
 }
@@ -60,6 +62,9 @@ struct RelayProgress {
 	reading:  bool,
 	/// Bytes read from the command so far.
 	consumed: u64,
+	/// Whether its decoder holds read bytes back, which only more bytes or
+	/// the end of the stream releases.
+	holding:  bool,
 }
 
 /// One relay as its command's drain sees it.
@@ -104,7 +109,7 @@ impl OutputRelays {
 		let from = Arc::new(reader);
 		let pipe = Arc::downgrade(&from);
 		let (progress_tx, progress) =
-			watch::channel(RelayProgress { reading: false, consumed: 0 });
+			watch::channel(RelayProgress { reading: false, consumed: 0, holding: false });
 		let decoder = decoding.decoder();
 		let to = target.clone();
 		std::thread::Builder::new()
@@ -137,7 +142,7 @@ fn relay(
 	let mut buf = vec![0; RELAY_CHUNK];
 	let mut consumed = 0u64;
 	loop {
-		progress.send_replace(RelayProgress { reading: true, consumed });
+		progress.send_replace(RelayProgress { reading: true, consumed, holding: decoder.holds_bytes() });
 		let read = match from.read(&mut buf) {
 			Ok(0) => break,
 			Ok(read) => read,
@@ -145,12 +150,14 @@ fn relay(
 			Err(_) => break,
 		};
 		consumed += read as u64;
-		progress.send_replace(RelayProgress { reading: false, consumed });
+		progress.send_replace(RelayProgress { reading: false, consumed, holding: decoder.holds_bytes() });
 		let text = decoder.push(&buf[..read]);
 		if !text.is_empty() && to.write_all(text.as_bytes()).is_err() {
 			return;
 		}
 	}
+	// Flushing what the decoder held is forwarding too, not an idle read.
+	progress.send_modify(|progress| progress.reading = false);
 	let rest = decoder.finish();
 	if !rest.is_empty() {
 		let _ = to.write_all(rest.as_bytes());
@@ -178,7 +185,10 @@ impl RelayHandle {
 			pending.map_or(u64::MAX, |pending| self.progress.borrow().consumed.saturating_add(pending));
 		loop {
 			let progress = *self.progress.borrow_and_update();
-			if progress.reading && progress.consumed >= target {
+			// Everything read is forwarded only once the decoder holds none of
+			// it; held bytes wait for the end of the stream, which the relay
+			// reports by finishing.
+			if progress.reading && !progress.holding && progress.consumed >= target {
 				return;
 			}
 			match tokio::time::timeout(DRAIN_IDLE, self.progress.changed()).await {
@@ -197,19 +207,36 @@ impl RelayHandle {
 /// A relay without a thread, for tests: it stays as created until it
 /// finishes.
 #[cfg(test)]
-pub(crate) struct TestRelay(watch::Sender<RelayProgress>);
+pub(crate) struct TestRelay {
+	progress: watch::Sender<RelayProgress>,
+	/// An empty pipe the drain sizes, kept open with both ends.
+	_pipe:    Option<(Arc<PipeReader>, std::io::PipeWriter)>,
+}
 
 #[cfg(test)]
 impl TestRelay {
-	/// A relay idle in a read (`reading`) or forwarding bytes it read.
+	/// A relay idle in a read (`reading`) or forwarding bytes it read, on a
+	/// pipe the drain cannot size.
 	pub(crate) fn new(reading: bool) -> (Self, RelayHandle) {
-		let (progress_tx, progress) = watch::channel(RelayProgress { reading, consumed: 0 });
-		(Self(progress_tx), RelayHandle { progress, pipe: Weak::new() })
+		let (progress, handle) = watch::channel(RelayProgress { reading, consumed: 0, holding: false });
+		(Self { progress, _pipe: None }, RelayHandle { progress: handle, pipe: Weak::new() })
+	}
+
+	/// A relay that has read everything in its (empty) pipe and waits in a
+	/// read while its decoder still holds bytes back for the end of the
+	/// stream.
+	fn holding() -> (Self, RelayHandle) {
+		let (reader, writer) = std::io::pipe().expect("pipe");
+		let reader = Arc::new(reader);
+		let pipe = Arc::downgrade(&reader);
+		let (progress, handle) =
+			watch::channel(RelayProgress { reading: true, consumed: 0, holding: true });
+		(Self { progress, _pipe: Some((reader, writer)) }, RelayHandle { progress: handle, pipe })
 	}
 
 	/// Reports the relay finished.
 	pub(crate) fn finish(self) {
-		drop(self.0);
+		drop(self.progress);
 	}
 }
 
@@ -268,6 +295,22 @@ mod tests {
 		let started = tokio::time::Instant::now();
 		drain(vec![idle, busy]).await;
 		assert!(started.elapsed() >= FORWARDING, "drained after {:?}", started.elapsed());
+		finish.await.expect("finish relay");
+	}
+
+	/// Bytes the decoder holds for the end of the stream are not forwarded
+	/// yet, though the relay has read all there was.
+	#[tokio::test]
+	async fn drain_waits_for_bytes_the_decoder_holds() {
+		const FLUSHING: Duration = Duration::from_millis(50);
+		let (feed, relay) = TestRelay::holding();
+		let finish = tokio::spawn(async move {
+			tokio::time::sleep(FLUSHING).await;
+			feed.finish();
+		});
+		let started = tokio::time::Instant::now();
+		drain(vec![relay]).await;
+		assert!(started.elapsed() >= FLUSHING, "drained after {:?}", started.elapsed());
 		finish.await.expect("finish relay");
 	}
 }

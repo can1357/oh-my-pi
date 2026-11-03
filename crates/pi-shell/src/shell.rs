@@ -2676,30 +2676,48 @@ mod tests {
 	}
 
 	/// Decodes each byte as Latin-1, so text a relay decoded (`E9` → `C3 A9`)
-	/// is told apart from a program's raw bytes. Each chunk takes `delay` to
-	/// decode, as when the capture's reader holds the relay back.
+	/// is told apart from a program's raw bytes. It holds the last byte read
+	/// back until more come or the stream ends, as a decoder holds an
+	/// incomplete character, and each step takes `delay`, as when the
+	/// capture's reader holds the relay back.
 	struct Latin1Decoding {
 		delay: Duration,
 	}
 
 	impl brush_core::OutputDecoding for Latin1Decoding {
 		fn decoder(&self) -> Box<dyn brush_core::ByteDecoder> {
-			Box::new(Latin1Decoder { delay: self.delay })
+			Box::new(Latin1Decoder { delay: self.delay, held: None })
 		}
 	}
 
 	struct Latin1Decoder {
 		delay: Duration,
+		held:  Option<u8>,
 	}
 
 	impl brush_core::ByteDecoder for Latin1Decoder {
 		fn push(&mut self, bytes: &[u8]) -> String {
 			std::thread::sleep(self.delay);
-			bytes.iter().map(|&byte| char::from(byte)).collect()
+			let Some((&last, rest)) = bytes.split_last() else {
+				return String::new();
+			};
+			let text = self
+				.held
+				.iter()
+				.chain(rest)
+				.map(|&byte| char::from(byte))
+				.collect();
+			self.held = Some(last);
+			text
+		}
+
+		fn holds_bytes(&self) -> bool {
+			self.held.is_some()
 		}
 
 		fn finish(&mut self) -> String {
-			String::new()
+			std::thread::sleep(self.delay);
+			self.held.take().map(char::from).into_iter().collect()
 		}
 	}
 
