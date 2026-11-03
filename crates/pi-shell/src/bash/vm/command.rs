@@ -71,6 +71,7 @@ impl ExecState {
 			exec_as: None,
 			wait_into: None,
 			via_command: false,
+			via_builtin: false,
 			resume: false,
 			resumed: 0,
 		}
@@ -102,6 +103,7 @@ impl ExecState {
 			exec_as,
 			wait_into,
 			via_command,
+			via_builtin,
 			resume,
 			resumed,
 		} = self;
@@ -128,6 +130,7 @@ impl ExecState {
 		*exec_as = None;
 		*wait_into = None;
 		*via_command = false;
+		*via_builtin = false;
 		*resume = false;
 		*resumed = 0;
 	}
@@ -840,8 +843,7 @@ fn cat_stdin(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32) -> Opti
 		Ok(_) => BString::default(),
 	};
 	let s = st(vp);
-	s.writes
-		.push_back(PendingWrite { fd: 1, bytes: text, off: 0 });
+	s.writes.push_back(PendingWrite::new(1, text));
 	s.stage = Stage::Output;
 	None
 }
@@ -1312,6 +1314,7 @@ fn lookup(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op) -> Option<Flo
 		let posix = state::option(&mut k.root, cx.store, vp, crate::bash::store::OptId::Posix)
 			.unwrap_or(false);
 		let mut via = Via::Plain;
+		let mut through_builtin = false;
 		let target = loop {
 			// Borrowed (the resolution only reads `vp`): no copy of the
 			// name per command.
@@ -1395,17 +1398,14 @@ fn lookup(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op) -> Option<Flo
 						let msg = format!("-{}: invalid option", argv[0][1] as char).into();
 						let line = line_of(vp, op.node);
 						k.diag(cx, vp, line, Diag::Usage { msg }.by("builtin"));
-						vp.out.push_back(PendingWrite {
-							fd:    2,
-							bytes: BString::from("builtin: usage: builtin [shell-builtin [arg ...]]\n"),
-							off:   0,
-						});
+						vp.queue_out(2, "builtin: usage: builtin [shell-builtin [arg ...]]\n");
 						let s = st(vp);
 						s.status = 2;
 						s.stage = Stage::Finish;
 						return None;
 					}
 					via = Via::Builtin;
+					through_builtin = true;
 				},
 				_ if via == Via::Builtin && !matches!(resolved, Resolved::Intrinsic(_)) => {
 					let name = argv[0].clone();
@@ -1431,6 +1431,7 @@ fn lookup(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op) -> Option<Flo
 		let s = st(vp);
 		s.target = Some(target);
 		s.via_command = matches!(via, Via::Command | Via::CommandP);
+		s.via_builtin = through_builtin;
 	}
 	if st(vp).target == Some(Target::Search) {
 		// File-system probes: `CmdExpanded` reads the clock after them.
@@ -2658,7 +2659,7 @@ fn run_builtin(
 						.as_mut()
 						.expect("exec")
 						.writes
-						.push_back(PendingWrite { fd, bytes: bytes.into(), off: 0 });
+						.push_back(PendingWrite::new(fd, bytes));
 				}
 				let e = sc.exec.as_mut().expect("exec");
 				e.status = outcome.status;
@@ -2780,8 +2781,9 @@ fn builtin_zsh_stop(
 }
 
 /// `exec [-cl] [-a name] [command [arg …]]`: without a command its
-/// redirections stay in effect; with one, the command (an external, found
-/// on `PATH`) replaces the shell, which exits with its status.
+/// redirections stay in effect (not when reached through `builtin`); with
+/// one, the command (an external, found on `PATH`) replaces the shell,
+/// which exits with its status.
 fn exec_builtin(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32) -> Option<Flow> {
 	const USAGE: &[u8] =
 		b"exec: usage: exec [-cl] [-a name] [command [argument ...]] [redirection ...]\n";
@@ -2828,17 +2830,19 @@ fn exec_builtin(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32) -> O
 		let text = k.render_diag(cx, vp, line, &Diag::Usage { msg: msg.into() }.by("exec"));
 		let s = st(vp);
 		s.argv = argv;
-		s.writes
-			.push_back(PendingWrite { fd: 2, bytes: text.into(), off: 0 });
-		s.writes
-			.push_back(PendingWrite { fd: 2, bytes: USAGE.into(), off: 0 });
+		s.writes.push_back(PendingWrite::new(2, text));
+		s.writes.push_back(PendingWrite::new(2, USAGE));
 		s.status = 2;
 		s.stage = Stage::Output;
 		return None;
 	}
 	let Some(name) = argv.get(i).cloned() else {
-		// No command: the redirections stay in effect.
-		if let Some(io) = scratch(vp).io.as_mut() {
+		// No command: the redirections stay in effect, unless `exec` was
+		// reached through `builtin` (`builtin exec 2>f`, `command builtin
+		// exec 2>f`): bash undoes those when the command ends.
+		if !st(vp).via_builtin
+			&& let Some(io) = scratch(vp).io.as_mut()
+		{
 			io.saved.clear();
 		}
 		let s = st(vp);
@@ -3255,9 +3259,7 @@ fn output(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32) -> Option<
 					// Through the command's own fd 2 (`2>&1 >&4`), while its
 					// redirections are in place.
 					let bytes = k.render_diag(cx, vp, line, &Diag::WriteError { cmd, err });
-					st(vp)
-						.writes
-						.push_back(PendingWrite { fd: 2, bytes: bytes.into(), off: 0 });
+					st(vp).writes.push_back(PendingWrite::new(2, bytes));
 				}
 			},
 			Poll::Pending => return Some(Flow::Block(WaitKey::Write { fd })),
@@ -3339,7 +3341,7 @@ fn print_exit_value(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32
 		&& on(k, cx, vp, ZshOpt::Shinstdin)
 	{
 		let bytes = BString::from(format!("zsh: exit {status}\n"));
-		vp.out.push_back(PendingWrite { fd: 2, bytes, off: 0 });
+		vp.queue_out(2, bytes);
 	}
 }
 

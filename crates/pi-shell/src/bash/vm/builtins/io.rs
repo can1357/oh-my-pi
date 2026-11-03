@@ -16,7 +16,7 @@ use crate::bash::{
 		is_ident,
 		locale::{self, Charset},
 		probe,
-		proc::{AssignValue, LoopKind, PendingWrite, Probe, ProbeResult, Vproc},
+		proc::{AssignValue, LoopKind, Probe, ProbeResult, Vproc},
 		state::{self, Level, Var},
 	},
 };
@@ -507,9 +507,7 @@ fn read_line(
 				if part == 0
 					&& let Some(p) = prompt
 				{
-					ctx.vp
-						.out
-						.push_back(PendingWrite { fd: 2, bytes: p.into(), off: 0 });
+					ctx.vp.queue_out(2, p);
 				}
 				return Err(need);
 			},
@@ -840,8 +838,7 @@ pub fn select_next(
 				}
 				let ps3 = if zsh { "?# " } else { "#? " };
 				text.extend_from_slice(&scalar_of(k, cx, vp, b"PS3").unwrap_or_else(|| ps3.into()));
-				vp.out
-					.push_back(PendingWrite { fd: 2, bytes: text.into(), off: 0 });
+				vp.queue_out(2, text);
 			}
 			match probe::perform(k, cx, vp, &mut sc, &p) {
 				Ok(r) => r,
@@ -862,12 +859,10 @@ pub fn select_next(
 				// loop's status is its last command's.
 				let reply = Some(Var::scalar(BString::default(), crate::bash::store::Attrs::NONE));
 				state::store_var(&mut k.root, cx.store, vp, b"REPLY", reply, Level::Dynamic);
-				vp.out
-					.push_back(PendingWrite { fd: 2, bytes: BString::from("\n"), off: 0 });
+				vp.queue_out(2, "\n");
 				break None;
 			}
-			vp.out
-				.push_back(PendingWrite { fd: 1, bytes: BString::from("\n"), off: 0 });
+			vp.queue_out(1, "\n");
 			if let Some(rec) = vp.frames.last_mut().and_then(|f| f.loops.last_mut()) {
 				rec.status = 1;
 			}

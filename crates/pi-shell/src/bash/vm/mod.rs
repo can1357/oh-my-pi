@@ -50,7 +50,7 @@ pub use self::{
 };
 use self::{
 	control::{CANCEL, Ctl, PAUSE, RESUME, SIGNAL, SUSPEND},
-	proc::{Frame, FrameKind, Live, PendingWrite, ScriptKind},
+	proc::{Frame, FrameKind, Live, ScriptKind},
 	state::{Overlay, Root, Var},
 };
 use crate::bash::{
@@ -778,8 +778,7 @@ impl Kernel {
 	/// Queue a diagnostic on the vproc's stderr and emit a `Diag` event.
 	pub fn diag(&mut self, cx: &mut Cx<'_>, vp: &mut Vproc, line: u32, diag: Diag) {
 		let bytes = self.render_diag(cx, vp, line, &diag);
-		vp.out
-			.push_back(PendingWrite { fd: 2, bytes: bytes.into(), off: 0 });
+		vp.queue_out(2, bytes);
 	}
 
 	/// The stderr bytes of a diagnostic; emits the `Diag` event. Builtins

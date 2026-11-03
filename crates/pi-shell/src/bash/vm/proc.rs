@@ -152,6 +152,17 @@ impl VprocZsh {
 }
 
 impl Vproc {
+	/// Queue `bytes` for `fd` as the fd table has it now: bash writes a
+	/// diagnostic (an xtrace line, a prompt) at once, so a redirection
+	/// undone before the queue drains (the command, the compound command or
+	/// the subshell ends) does not move it.
+	pub fn queue_out(&mut self, fd: i32, bytes: impl Into<BString>) {
+		let to = Some(self.fds.handle(fd));
+		self
+			.out
+			.push_back(PendingWrite { fd, bytes: bytes.into(), off: 0, to });
+	}
+
 	/// zsh's current sticky emulation.
 	pub fn sticky(&self) -> Option<&crate::bash::store::Sticky> {
 		self.zsh.as_ref().and_then(|z| z.sticky.as_ref())
@@ -983,6 +994,19 @@ pub struct PendingWrite {
 	pub fd:    i32,
 	pub bytes: BString,
 	pub off:   usize,
+	/// The object `fd` named when the write was queued on [`Vproc::out`]
+	/// ([`Vproc::queue_out`]); `None`: whatever `fd` names when it is
+	/// written (a command's own output, written while its redirections are
+	/// in place). Not serialized: a restored write goes to `fd`.
+	#[serde(skip)]
+	pub to:    Option<FdRef>,
+}
+
+impl PendingWrite {
+	/// `bytes` for `fd` as the fd table has it when they are written.
+	pub fn new(fd: i32, bytes: impl Into<BString>) -> Self {
+		Self { fd, bytes: bytes.into(), off: 0, to: None }
+	}
 }
 
 /// One logged expansion step (see `expand`): replaying the log reproduces
@@ -1293,6 +1317,11 @@ pub struct ExecState {
 	/// Run through `command`: a special builtin's failure does not end a
 	/// posix shell.
 	pub via_command: bool,
+	/// Reached through the `builtin` builtin (any wrapper chain with
+	/// `builtin` in it): `exec` without a command keeps no redirection, as
+	/// bash's `execute_builtin_or_function` keeps them only when the
+	/// command's own builtin is `exec` (or `command` running `exec`).
+	pub via_builtin: bool,
 	/// The awaited frame was pushed by the builtin, which runs again when
 	/// it returns ([`Control::Resume`](super::builtins::Control::Resume)).
 	pub resume:      bool,
