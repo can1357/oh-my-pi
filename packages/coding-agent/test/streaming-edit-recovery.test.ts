@@ -50,9 +50,6 @@ function createHarness(opts: RecoveryHarnessOptions = {}): RecoveryHarness {
 				appended.push(message as Record<string, unknown>);
 			},
 			waitForIdle: async () => {},
-			continue: async () => {
-				continueCount++;
-			},
 		} as unknown as Agent,
 		settings: state.settings,
 		sessionManager: {
@@ -69,6 +66,9 @@ function createHarness(opts: RecoveryHarnessOptions = {}): RecoveryHarness {
 		},
 		schedulePostPromptTask(task) {
 			tasks.push(task);
+		},
+		continueAgent: async (signal, prepare) => {
+			if (!signal.aborted && prepare()) continueCount++;
 		},
 		discardAssistantTurn() {},
 	});

@@ -1,6 +1,5 @@
 import {
 	type Agent,
-	AgentBusyError,
 	type AgentMessage,
 	isSyntheticToolResultMessage,
 	type ThinkingLevel,
@@ -14,7 +13,6 @@ import type {
 	Model,
 	ModelUsageHealth,
 	TextContent,
-	ToolChoice,
 	AnthropicFallbackCreditHandle,
 } from "@oh-my-pi/pi-ai";
 import { calculateRateLimitBackoffMs, parseRateLimitReason } from "@oh-my-pi/pi-ai";
@@ -299,6 +297,7 @@ export interface TurnRecoveryHost {
 		delayMs?: number;
 		generation?: number;
 		shouldContinue?: () => boolean;
+		onSkip?: () => void;
 		onError?: (error: unknown) => void;
 	}): void;
 	waitForSessionMessagePersistence(message: AssistantMessage): Promise<void>;
@@ -401,6 +400,8 @@ export class TurnRecovery {
 	#requestBodyReadTimeoutRecoveryPromptSequence: number | undefined;
 	#retryPromise: Promise<void> | undefined;
 	#retryResolve: (() => void) | undefined;
+	/** Identifies the latest saga even after agent_end resolves its promise. */
+	#retrySagaGeneration = 0;
 	#activeRetryFallback: ActiveRetryFallbackState | undefined;
 	#activeFallbackCreditRedemption?: {
 		targetSelector: string;
@@ -862,17 +863,6 @@ export class TurnRecovery {
 		return (await recorded).switchedCredential;
 	}
 
-	/** Prompts after transient overlap with a prior agent run. `onClaimed` fires synchronously
-	 *  right after a successful `agent.prompt` claim (before the run is awaited), letting the
-	 *  caller mark the exact moment its own run went live. */
-	promptAgentWithIdleRetry(
-		messages: AgentMessage[],
-		options?: { toolChoice?: ToolChoice },
-		onClaimed?: () => void,
-	): Promise<void> {
-		return this.#promptAgentWithIdleRetry(messages, options, onClaimed);
-	}
-
 	/** Parses provider retry and rate-limit reset hints into a delay. */
 	parseRetryAfterMsFromError(errorMessage: string): number | undefined {
 		return this.#parseRetryAfterMsFromError(errorMessage);
@@ -912,6 +902,7 @@ export class TurnRecovery {
 		end: RetrySagaEnd,
 		record: { terminalTurn?: AssistantMessage; retryErrors?: RetryErrorCompletion },
 	): Promise<void> {
+		const retrySagaGeneration = this.#retrySagaGeneration;
 		let retryErrors: RetryErrorUpdate[] | undefined;
 		try {
 			if (record.terminalTurn) await this.persistTerminalEmptyErrorTurn(record.terminalTurn);
@@ -924,9 +915,11 @@ export class TurnRecovery {
 					...(retryErrors ? { retryErrors } : {}),
 				});
 			} finally {
-				this.#clearPendingRetryErrors();
-				this.#retryAttempt = 0;
-				this.resolveRetry();
+				if (this.#retrySagaGeneration === retrySagaGeneration) {
+					this.#clearPendingRetryErrors();
+					this.#retryAttempt = 0;
+					this.resolveRetry();
+				}
 			}
 		}
 	}
@@ -2677,6 +2670,7 @@ export class TurnRecovery {
 		// Create retry promise on first attempt so waitForRetry() can await it
 		// Ensure only one promise exists (avoid orphaned promises from concurrent calls)
 		if (!this.#retryPromise) {
+			this.#retrySagaGeneration++;
 			const { promise, resolve } = Promise.withResolvers<void>();
 			this.#retryPromise = promise;
 			this.#retryResolve = resolve;
@@ -3175,11 +3169,20 @@ export class TurnRecovery {
 		// continuation that still fails locally must close the retry saga —
 		// otherwise auto_retry_end never fires, retryPromise stays pending, and
 		// the in-flight prompt() (and the TUI retry indicator) hang forever.
+		const retryPromise = this.#retryPromise;
 		this.#host.scheduleAgentContinue({
 			source: "automatic-retry",
 			delayMs: 1,
 			generation,
 			shouldContinue: () => this.#retryAttempt > 0,
+			onSkip: () => {
+				if (!retryPromise || this.#retryPromise !== retryPromise) return;
+				void this.#endCancelledRetry().catch(error =>
+					logger.error("Closing a retry saga after a skipped continuation threw", {
+						error: error instanceof Error ? error.message : String(error),
+					}),
+				);
+			},
 			onError: error =>
 				void this.#failRetryAfterLocalContinueError(message, error).catch(failure =>
 					logger.error("Closing a retry saga after a failed local continuation threw", {
@@ -3191,19 +3194,12 @@ export class TurnRecovery {
 		return true;
 	}
 
-	/** Closes a retry saga whose credential wait or backoff sleep was aborted. */
+	/** Closes a retry saga whose wait or scheduled continuation was cancelled. */
 	async #endCancelledRetry(): Promise<false> {
 		const attempt = this.#retryAttempt;
 		this.#retryAttempt = 0;
 		this.#retryAbortController = undefined;
-		await this.#host.emitSessionEvent({
-			type: "auto_retry_end",
-			success: false,
-			attempt,
-			finalError: "Retry cancelled",
-		});
-		this.#clearPendingRetryErrors();
-		this.resolveRetry();
+		await this.#closeRetrySaga({ success: false, attempt, finalError: "Retry cancelled" }, {});
 		return false;
 	}
 
@@ -3303,44 +3299,6 @@ export class TurnRecovery {
 		this.#retryAbortController?.abort();
 		// Note: _retryAttempt is reset in the catch block of _autoRetry
 		this.resolveRetry();
-	}
-
-	async #promptAgentWithIdleRetry(
-		messages: AgentMessage[],
-		options?: { toolChoice?: ToolChoice },
-		onClaimed?: () => void,
-	): Promise<void> {
-		const deadline = Date.now() + 30_000;
-		for (;;) {
-			// A claim whose synchronous prefix throws (busy agent, missing
-			// model) returns an already-rejected promise. Probe for that
-			// before firing `onClaimed`: a busy-retry parked behind an
-			// autonomous run must not report that run's streaming as ours
-			// going live. The rejection handler rethrows, so the error
-			// still surfaces at the await below.
-			let claimFailed = false;
-			try {
-				const claim = this.#host.agent.prompt(messages, options).then(undefined, error => {
-					claimFailed = true;
-					throw error;
-				});
-				// One microtask turn: an already-rejected promise's reaction
-				// job is queued ahead of this await's continuation, so
-				// `claimFailed` is settled by the time we resume.
-				await Promise.resolve();
-				if (!claimFailed) onClaimed?.();
-				await claim;
-				return;
-			} catch (err) {
-				if (!(err instanceof AgentBusyError)) {
-					throw err;
-				}
-				if (Date.now() >= deadline) {
-					throw new Error("Timed out waiting for prior agent run to finish before prompting.");
-				}
-				await this.#host.agent.waitForIdle();
-			}
-		}
 	}
 
 	/** Whether auto-retry is currently in progress */

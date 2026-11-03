@@ -163,6 +163,8 @@ describe("async speculative compaction", () => {
 			setModelTemporary: async () => {},
 			abort: async () => {},
 			abortHandoff: () => {},
+			takeInterruptedTurnResume: () => false,
+			resumeInterruptedTurn: () => {},
 		} as unknown as SessionMaintenanceHost;
 		return new SessionMaintenance(host);
 	}

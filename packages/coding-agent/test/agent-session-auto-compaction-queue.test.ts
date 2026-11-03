@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { scheduler } from "node:timers/promises";
 import { Agent, AgentBusyError, type AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { CompactionCancelledError } from "@oh-my-pi/pi-agent-core/compaction";
+import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -13,6 +14,7 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionMaintenance } from "@oh-my-pi/pi-coding-agent/session/session-maintenance";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import * as unexpectedStopClassifier from "@oh-my-pi/pi-coding-agent/session/unexpected-stop-classifier";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import * as imageLoading from "@oh-my-pi/pi-coding-agent/utils/image-loading";
@@ -24,7 +26,9 @@ import { flush as flushEventLoop, until } from "./helpers/fake-clock";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 
 import {
+	cfgCompactionAsyncEnabled,
 	cfgCompactionAutoContinue,
+	cfgCompactionEnabled,
 	cfgCompactionDropUseless,
 	cfgCompactionKeepRecentTokens,
 	cfgCompactionMethodOrder,
@@ -57,7 +61,7 @@ function getRuntimeSignals(): string[] {
 }
 
 /** Parks a prompt inside its awaited `before_agent_start` hook. */
-type AgentStartGate = { entered: PromiseWithResolvers<void>; release: PromiseWithResolvers<void> };
+type AgentStartGate = { entered: PromiseWithResolvers<void>; release: PromiseWithResolvers<void>; prompt?: string };
 
 /** Hooks for the `/park` fixture command: run `action` synchronously, then await `gate` (if set). */
 type ParkCommandGlobals = typeof globalThis & { __ompParkGate?: Promise<void>; __ompParkAction?: () => void };
@@ -108,10 +112,10 @@ describe("AgentSession auto-compaction queue resume", () => {
 						},
 					};
 				});
-				pi.on("before_agent_start", async () => {
+				pi.on("before_agent_start", async event => {
 					const gate = (globalThis as typeof globalThis & { __ompAgentStartGate?: AgentStartGate })
 						.__ompAgentStartGate;
-					if (!gate) return;
+					if (!gate || (gate.prompt !== undefined && event.prompt !== gate.prompt)) return;
 					gate.entered.resolve();
 					await gate.release.promise;
 				});
@@ -169,6 +173,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 				tools: [],
 				messages: [],
 			},
+			convertToLlm,
 		});
 
 		// Seed a minimal session branch so prepareCompaction() returns a preparation.
@@ -1212,6 +1217,165 @@ describe("AgentSession auto-compaction queue resume", () => {
 		expect(prompted[0]?.some(message => message.synthetic === true)).toBe(false);
 	});
 
+	it("lets input admitted before maintenance while loading extensions supersede the interrupted continuation", async () => {
+		vi.useRealTimers();
+		cfgCompactionEnabled.set(session.settings, false);
+		cfgCompactionAutoContinue.override(session.settings, true);
+		cfgCompactionKeepRecentTokens.set(session.settings, 1);
+		const firstRequest = Promise.withResolvers<void>();
+		const mock = createMockModel({
+			responses: [
+				() => {
+					firstRequest.resolve();
+					return { content: ["interrupted"], delayMs: 60_000 };
+				},
+			],
+			handler: { content: ["new task answered"] },
+		});
+		session.agent.streamFn = mock.stream;
+		session.agent.getApiKey = () => "test-key";
+		sessionManager.appendMessage(createAssistantMessage("previous answer"));
+		session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+		const first = session.prompt("initial running task");
+		await firstRequest.promise;
+		const loaderEntered = Promise.withResolvers<void>();
+		const releaseLoader = Promise.withResolvers<void>();
+		session.setDeferredExtensionLoader(async () => {
+			loaderEntered.resolve();
+			await releaseLoader.promise;
+		});
+		const next = session.prompt("NEW_USER_INTENT").catch(error => error);
+		await loaderEntered.promise;
+		const compactGate = Promise.withResolvers<void>();
+		(globalThis as typeof globalThis & { __ompManualCompactGate?: Promise<void> }).__ompManualCompactGate =
+			compactGate.promise;
+		const compacted = session.compact();
+		await until(() => getRuntimeSignals().includes("before_compact:enter"), "manual compaction hook");
+		const setupGate: AgentStartGate = {
+			entered: Promise.withResolvers<void>(),
+			release: Promise.withResolvers<void>(),
+			prompt: "NEW_USER_INTENT",
+		};
+		(globalThis as typeof globalThis & { __ompAgentStartGate?: AgentStartGate }).__ompAgentStartGate = setupGate;
+		try {
+			releaseLoader.resolve();
+			await scheduler.yield();
+			compactGate.resolve();
+			await compacted;
+			await Promise.race([setupGate.entered.promise, next]);
+			await scheduler.yield();
+			expect(mock.calls).toHaveLength(1);
+		} finally {
+			releaseLoader.resolve();
+			compactGate.resolve();
+			setupGate.release.resolve();
+			await Promise.all([first, next, compacted]);
+			await session.waitForIdle();
+		}
+		expect(await next).toBe(true);
+		expect(mock.calls).toHaveLength(2);
+		expect(JSON.stringify(mock.calls[1]?.context.messages)).toContain("NEW_USER_INTENT");
+	});
+
+	it("skips a queued retry superseded by input doing pre-turn automatic compaction", async () => {
+		vi.useRealTimers();
+		cfgCompactionAsyncEnabled.set(session.settings, false);
+		cfgCompactionThresholdTokens.set(session.settings, 1_000);
+		cfgCompactionKeepRecentTokens.set(session.settings, 1);
+		cfgCompactionMethodOrder.set(session.settings, ["soft"]);
+		cfgContextPromotionEnabled.set(session.settings, false);
+		cfgRetryEnabled.set(session.settings, false);
+		sessionManager.appendMessage({ role: "user", content: "OLD_HISTORY ".repeat(3_000), timestamp: Date.now() });
+		const previous = createAssistantMessage("previous answer");
+		sessionManager.appendMessage({
+			...previous,
+			usage: { ...previous.usage, input: 10_000, totalTokens: 10_000 },
+		});
+		sessionManager.appendMessage({ role: "user", content: "failed request", timestamp: Date.now() });
+		sessionManager.appendMessage({
+			...createAssistantMessage(""),
+			stopReason: "error",
+			errorMessage: "deliberate failed turn",
+		});
+		session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+		const retryTick = Promise.withResolvers<void>();
+		const releaseCompaction = Promise.withResolvers<void>();
+		const releaseResponse = Promise.withResolvers<void>();
+		const wait = scheduler.wait.bind(scheduler);
+		vi.spyOn(scheduler, "wait").mockImplementation((delay, options) =>
+			delay === 1 ? retryTick.promise : wait(delay, options),
+		);
+		(globalThis as typeof globalThis & { __ompManualCompactGate?: Promise<void> }).__ompManualCompactGate =
+			releaseCompaction.promise;
+		const mock = createMockModel({
+			handler: async () => {
+				await releaseResponse.promise;
+				return { content: ["new task answered"] };
+			},
+		});
+		session.agent.streamFn = mock.stream;
+		session.agent.getApiKey = () => "test-key";
+		expect(await session.retry()).toBe(true);
+		const prompted = session.prompt("new task");
+		try {
+			await until(() => getRuntimeSignals().includes("before_compact:enter"), "pre-turn compaction hook");
+			retryTick.resolve();
+			await scheduler.yield();
+			expect(mock.calls).toHaveLength(0);
+		} finally {
+			retryTick.resolve();
+			releaseCompaction.resolve();
+			releaseResponse.resolve();
+			await prompted;
+			await session.waitForIdle();
+		}
+		expect(mock.calls).toHaveLength(1);
+		const request = JSON.stringify(mock.calls[0]?.context.messages);
+		expect(request).toContain("new task");
+		expect(request).toContain("compacted");
+		expect(request).not.toContain("OLD_HISTORY");
+	});
+
+	it("releases prompt setup ownership when handoff begins during an awaited start hook", async () => {
+		vi.useRealTimers();
+		cfgCompactionKeepRecentTokens.set(session.settings, 1);
+		sessionManager.appendMessage(createAssistantMessage("previous answer"));
+		sessionManager.appendMessage({ role: "user", content: "next unfinished task", timestamp: Date.now() });
+		session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+		const setupGate: AgentStartGate = {
+			entered: Promise.withResolvers<void>(),
+			release: Promise.withResolvers<void>(),
+		};
+		(globalThis as typeof globalThis & { __ompAgentStartGate?: AgentStartGate }).__ompAgentStartGate = setupGate;
+		const mock = createMockModel({ handler: { content: ["next answer"] } });
+		session.agent.streamFn = mock.stream;
+		session.agent.getApiKey = () => "test-key";
+		const prompted = session.promptCustomMessage({ customType: "late-setup", content: "late setup", display: false });
+		await setupGate.entered.promise;
+		expect(session.isStreaming).toBe(true);
+		const handoffEntered = Promise.withResolvers<void>();
+		const releaseHandoff = Promise.withResolvers<string>();
+		vi.spyOn(compactionModule, "generateHandoffFromContext").mockImplementation(() => {
+			handoffEntered.resolve();
+			return releaseHandoff.promise;
+		});
+		const handoff = session.handoff();
+		await handoffEntered.promise;
+		try {
+			setupGate.release.resolve();
+			await scheduler.yield();
+			// Handoff does not abort setup or reset its epoch: waiting for its history must relinquish ownership.
+			expect(session.isStreaming).toBe(false);
+			expect(mock.calls).toHaveLength(0);
+		} finally {
+			setupGate.release.resolve();
+			releaseHandoff.resolve("HANDOFF_SUMMARY");
+			await Promise.all([prompted, handoff]);
+		}
+		expect(mock.calls).toHaveLength(1);
+		expect(JSON.stringify(mock.calls[0]?.context.messages)).toContain("HANDOFF_SUMMARY");
+	});
+
 	it("holds text and image input until idle compaction finishes", async () => {
 		// Admission uses a real event-loop yield, not a timer boundary; the surrounding suite freezes timers.
 		vi.useRealTimers();
@@ -1250,15 +1414,6 @@ describe("AgentSession auto-compaction queue resume", () => {
 		const compacted = session.runIdleCompaction();
 		await entered.promise;
 
-		// Observe entry into admission, then yield an event-loop turn without guessing a wall-clock duration.
-		const admissionEntered = Promise.withResolvers<void>();
-		const waitForCleanup = SessionMaintenance.prototype.waitForMaintenanceCleanup;
-		vi.spyOn(SessionMaintenance.prototype, "waitForMaintenanceCleanup").mockImplementation(
-			function (this: SessionMaintenance) {
-				admissionEntered.resolve();
-				return waitForCleanup.call(this);
-			},
-		);
 		const prompted = session.prompt("after idle compaction", {
 			onPromptAdmitted: () => order.push("prompt admitted"),
 			images: [
@@ -1270,7 +1425,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 			],
 		});
 		try {
-			await admissionEntered.promise;
+			expect(session.hasAdmittedSubmission).toBe(true);
 			await scheduler.yield();
 			expect(requests).toHaveLength(0);
 			expect(order).toEqual([]);
@@ -1567,6 +1722,28 @@ describe("AgentSession auto-compaction queue resume", () => {
 		await delivered;
 		await session.waitForIdle();
 		expect(held.order).toEqual(["compaction ended", "agent_start"]);
+	});
+
+	it("gives input admitted during history replacement priority over an earlier waiting completion", async () => {
+		const held = await holdIdleCompaction();
+		const delivered = queueLaunchCompletion(session);
+		await scheduler.yield();
+		const prompted = session.prompt("typed while completion waits");
+		await held.finish();
+		expect(await prompted).toBe(true);
+		await delivered;
+		await session.waitForIdle();
+		expect(held.order).toEqual(["compaction ended", "agent_start"]);
+		expect(
+			session.agent.state.messages.some(
+				message => message.role === "user" && textOf(message) === "typed while completion waits",
+			),
+		).toBe(true);
+		expect(
+			session.sessionManager
+				.getBranch()
+				.some(entry => entry.type === "custom_message" && entry.customType === "launch-completion"),
+		).toBe(true);
 	});
 
 	it("lets input typed while an IRC wake waits out idle compaction start its turn, carrying the IRC message", async () => {

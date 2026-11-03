@@ -1,21 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { scheduler } from "node:timers/promises";
 import { Agent, CompactionCancelledError } from "@oh-my-pi/pi-agent-core";
-import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { type } from "@oh-my-pi/omptype";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import {
-	type AsyncResultEntry,
-	buildAsyncResultBatchMessage,
-} from "@oh-my-pi/pi-coding-agent/session/async-job-delivery";
-import { SessionMaintenance } from "@oh-my-pi/pi-coding-agent/session/session-maintenance";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { loadEntriesFromFile } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import {
 	ContextNotesTool,
 	GrepTool,
@@ -25,7 +23,8 @@ import {
 	type ToolSession,
 } from "@oh-my-pi/pi-coding-agent/tools";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
-import { TempDir, withTimeout } from "@oh-my-pi/pi-utils";
+import { TempDir } from "@oh-my-pi/pi-utils";
+import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 
 import {
 	cfgCompactionAutoContinue,
@@ -55,7 +54,12 @@ describe.each([false, true])("AgentSession compaction cancellation source (exper
 		vi.restoreAllMocks();
 	});
 
-	async function createSession(mode: HookMode, entered?: () => void, gate?: Promise<void>): Promise<AgentSession> {
+	async function createSession(
+		mode: HookMode,
+		entered?: () => void,
+		gate?: Promise<void>,
+		manager?: AsyncJobManager,
+	): Promise<AgentSession> {
 		const runtime = new ExtensionRuntime();
 		const extension = await loadExtensionFromFactory(
 			pi => {
@@ -79,7 +83,9 @@ describe.each([false, true])("AgentSession compaction cancellation source (exper
 			runtime,
 			"compaction-cancellation-source",
 		);
-		const sessionManager = SessionManager.inMemory(tempDir.path());
+		const sessionManager = manager
+			? SessionManager.create(tempDir.path(), tempDir.path())
+			: SessionManager.inMemory(tempDir.path());
 		const modelRegistry = new ModelRegistry(authStorage);
 		const extensionRunner = new ExtensionRunner([extension], runtime, tempDir.path(), sessionManager, modelRegistry);
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
@@ -138,6 +144,8 @@ describe.each([false, true])("AgentSession compaction cancellation source (exper
 			builtInToolNames: tools.map(tool => tool.name),
 			modelRegistry,
 			extensionRunner,
+			agentId: "Main",
+			ownedAsyncJobManager: manager,
 		});
 	}
 
@@ -213,67 +221,68 @@ describe.each([false, true])("AgentSession compaction cancellation source (exper
 		expect(agentPrompt).toHaveBeenCalledTimes(1);
 	});
 
-	if (!experimental) {
-		it("delivers an idle async result after manual compaction on the persisted compacted context", async () => {
-			const entered = Promise.withResolvers<void>();
-			const gate = Promise.withResolvers<void>();
-			session = await createSession("park", entered.resolve, gate.promise);
-			const model = createMockModel({ responses: [{ content: ["result acknowledged"] }] });
-			const requests: string[] = [];
-			session.agent.streamFn = (activeModel, context, options) => {
-				requests.push(JSON.stringify(context));
-				return model.stream(activeModel, context, options);
-			};
-			session.agent.getApiKey = () => "test-key";
-			session.yieldQueue.register<AsyncResultEntry>("async-result-repro", {
-				build: buildAsyncResultBatchMessage,
-			});
-			const originalWait = SessionMaintenance.prototype.waitForContextReplacement;
-			const flushStarted = Promise.withResolvers<void>();
-			vi.spyOn(SessionMaintenance.prototype, "waitForContextReplacement").mockImplementation(
-				function (this: SessionMaintenance) {
-					flushStarted.resolve();
-					return originalWait.call(this);
-				},
-			);
-
-			const compaction = session.compact();
-			await entered.promise;
-			const receipt = session.yieldQueue.enqueueWithReceipt<AsyncResultEntry>("async-result-repro", {
-				jobId: "job-during-compact",
-				result: "JOB_DELIVERY_MARKER",
-				job: undefined,
-				durationMs: 0,
-				epoch: 0,
-			});
-			let delivered = false;
-			void receipt.then(() => {
-				delivered = true;
-			});
-			try {
-				await withTimeout(flushStarted.promise, 2_000, "Idle flush did not reach the compaction barrier");
-				await scheduler.yield();
-				expect(requests).toHaveLength(0);
-				expect(delivered).toBe(false);
-			} finally {
-				gate.resolve();
-				await compaction;
-			}
-			await withTimeout(receipt, 2_000, "Async result was not delivered after compaction");
-			await session.waitForIdle();
-			expect(session.sessionManager.getBranch()).toContainEqual(
-				expect.objectContaining({
-					type: "custom_message",
-					customType: "async-result",
-					content: expect.stringContaining("JOB_DELIVERY_MARKER"),
-				}),
-			);
-			expect(requests).toHaveLength(1);
-			expect(requests[0]).toContain("compacted");
-			expect(requests[0]).not.toContain("first turn");
-			expect(requests[0]).toContain("JOB_DELIVERY_MARKER");
+	it("delivers an owned async result only after manual compaction reconnects, preserving it in the next request and transcript", async () => {
+		mockSchedulerWaitWithClock();
+		const entered = Promise.withResolvers<void>();
+		const gate = Promise.withResolvers<void>();
+		const manager = new AsyncJobManager({});
+		session = await createSession("park", entered.resolve, gate.promise, manager);
+		cfgCompactionAutoContinue.override(session.settings, false);
+		const mock = createMockModel({
+			responses: [{ content: [{ type: "toolCall", name: "probe", arguments: {} }] }, { content: ["delivered"] }],
 		});
-	}
+		session.agent.getApiKey = () => "test-key";
+		session.agent.streamFn = mock.stream;
+		session.agent.setTools([
+			{
+				name: "probe",
+				label: "Probe",
+				description: "Exercise the next request in the same loop",
+				parameters: type({}),
+				execute: async () => ({ content: [{ type: "text", text: "probe result" }] }),
+			},
+		]);
+		const compaction = session.compact();
+		await entered.promise;
+		let delivered = false;
+		manager.register("bash", "owned completion", async () => "OWNED_RESULT", { ownerId: "Main" });
+		await manager.waitForAll();
+		const delivery = manager.drainDeliveries().then(result => {
+			delivered = true;
+			return result;
+		});
+		try {
+			// Observe the real scheduled idle flush; do not replace Agent.prompt or the delivery sink.
+			await scheduler.yield();
+			expect(mock.calls).toHaveLength(0);
+			expect(delivered).toBe(false);
+		} finally {
+			gate.resolve();
+			await compaction;
+			await delivery;
+			await session.waitForIdle();
+			await manager.dispose();
+		}
+		expect(mock.calls).toHaveLength(2);
+		for (const call of mock.calls) {
+			const request = JSON.stringify(call.context.messages);
+			expect(request).toContain("compacted");
+			expect(request).toContain("OWNED_RESULT");
+			expect(request).not.toContain("first turn");
+		}
+		await session.sessionManager.flush();
+		const sessionFile = session.sessionManager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected a durable session");
+		const persisted = await loadEntriesFromFile(sessionFile);
+		expect(
+			persisted.some(
+				entry =>
+					entry.type === "custom_message" &&
+					entry.customType === "async-result" &&
+					JSON.stringify(entry.content).includes("OWNED_RESULT"),
+			),
+		).toBe(true);
+	});
 
 	it("resumes the interrupted turn when compaction rejects after the entry is appended", async () => {
 		// The entry lands, then post-append bookkeeping in #commitCompactionEntry
