@@ -66,8 +66,12 @@ pub(crate) fn wire_detail(err: &io::Error) -> Option<&WireError> {
 	err.get_ref().and_then(|inner| inner.downcast_ref::<WireError>())
 }
 
-/// Recreates an equivalent io::Error (io::Error is not Clone).
+/// Recreates an equivalent io::Error (io::Error is not Clone). The command's
+/// cancellation stays the cancellation.
 pub(crate) fn clone_io_error(err: &io::Error) -> io::Error {
+	if crate::rsync::exit::RsyncError::is_cancellation(err) {
+		return crate::rsync::exit::RsyncError::cancelled_io();
+	}
 	match wire_detail(err) {
 		Some(w) => wire_error(err.kind(), w.code, w.message.clone(), w.site),
 		None => match err.raw_os_error() {
