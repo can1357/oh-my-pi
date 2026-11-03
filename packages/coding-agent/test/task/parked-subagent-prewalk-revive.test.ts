@@ -21,6 +21,7 @@ import * as settingsStream from "@oh-my-pi/pi-coding-agent/session/settings-stre
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
+import { localSession } from "../helpers/local-session";
 
 const AGENT_ID = "HandedOff";
 const MOCK_API_SOURCE = "test/parked-subagent-prewalk-revive";
@@ -177,15 +178,16 @@ it.each(["model", "upstream route"] as const)(
 			});
 			expect(result).toMatchObject({ exitCode: 0 });
 
-			const live = AgentRegistry.global().get(AGENT_ID)?.session;
-			if (!live) throw new Error("Expected a kept-alive subagent session");
+			const handle = AgentRegistry.global().get(AGENT_ID)?.session;
+			if (!handle) throw new Error("Expected a kept-alive subagent session");
+			const live = localSession(handle);
 			const liveModel = live.model;
 			if (!liveModel) throw new Error("Expected a model for the kept-alive subagent session");
 			expect(formatModelStringWithRouting(liveModel)).toBe(targetSelector);
 			expect(live.configuredThinkingLevel()).toBe(Effort.High);
 
 			await AgentLifecycleManager.global().park(AGENT_ID);
-			const revived = await AgentLifecycleManager.global().ensureLive(AGENT_ID);
+			const revived = localSession(await AgentLifecycleManager.global().ensureLive(AGENT_ID));
 
 			const revivedModel = revived.model;
 			if (!revivedModel) throw new Error("Expected a model for the revived subagent session");
@@ -256,15 +258,16 @@ it("revives a parked per-call worker on its exact model, not on a session-local 
 		});
 		expect(result.exitCode).toBe(0);
 
-		const live = AgentRegistry.global().get(AGENT_ID)?.session;
-		if (!live) throw new Error("Expected a kept-alive subagent session");
+		const handle = AgentRegistry.global().get(AGENT_ID)?.session;
+		if (!handle) throw new Error("Expected a kept-alive subagent session");
+		const live = localSession(handle);
 		expect(live.model?.id).toBe(PLANNER);
 		// A focused worker can still be switched by hand; that persists a session-local model change.
 		await live.setModelTemporary(switched);
 		expect(live.sessionManager.getSessionLocalModelChange()?.model).toBe(`mock/${TARGET}`);
 
 		await AgentLifecycleManager.global().park(AGENT_ID);
-		const revived = await AgentLifecycleManager.global().ensureLive(AGENT_ID);
+		const revived = localSession(await AgentLifecycleManager.global().ensureLive(AGENT_ID));
 
 		expect(revived.model?.id).toBe(PLANNER);
 		expect(revived.configuredThinkingLevel()).toBe(Effort.Medium);

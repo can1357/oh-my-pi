@@ -32,6 +32,7 @@ import type { Skill } from "../extensibility/skills";
 import type { MCPManager } from "../mcp";
 import type { PlanApprovalDetails } from "../plan-mode/approved-plan";
 import type { AgentSession } from "../session/agent-session";
+import type { AgentViewSession } from "../session/agent-session-handle";
 import type { CompactMode } from "../session/compact-modes";
 import type { ForeignSessionSource } from "../session/foreign-session-store";
 import type { HistoryStorage } from "../session/history-storage";
@@ -183,6 +184,8 @@ export interface InteractiveModeContext {
 	hookWidgetContainerAbove: Container;
 	hookWidgetContainerBelow: Container;
 	statusLine: StatusLineComponent;
+	/** Show a pin change already written to the pins file; supersedes any in-flight pins-file reload. */
+	applySessionPin(sessionId: string, pinned: boolean): void;
 	syncComposerShape(): void;
 	/**
 	 * Push the extension link schemes to the markdown renderer; redraws the transcript when that
@@ -198,9 +201,9 @@ export interface InteractiveModeContext {
 	/** The current session display name / title. */
 	readonly sessionName: string | undefined;
 	/** Session the transcript/editor/status are attached to: the focused agent's, else `session`. */
-	readonly viewSession: AgentSession;
+	readonly viewSession: AgentViewSession;
 	/** Bind idle maintenance to the given view (default: the current one), or release the UI activity binding on null. */
-	syncIdleMaintenanceView(target?: AgentSession | null): void;
+	syncIdleMaintenanceView(target?: AgentViewSession | null): void;
 	/** Id of the focused agent, undefined when the main session is attached. */
 	readonly focusedAgentId: string | undefined;
 	/** Set while a tool-approval dialog owns the composer: its drafts steer the main session awaiting that approval, even from a focused agent's view. */
@@ -533,7 +536,7 @@ export interface InteractiveModeContext {
 	updateEditorBorderColor(): void;
 	rebuildChatFromMessages(options?: { reuseSettledComponents?: boolean }): void;
 	setTodos(todos: TodoItem[] | TodoPhase[]): void;
-	reloadTodos(source?: AgentSession): Promise<void>;
+	reloadTodos(source?: AgentViewSession): Promise<void>;
 	toggleTodoExpansion(): void;
 	setTodoExpanded(expanded: boolean): void;
 	// Command handling

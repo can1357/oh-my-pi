@@ -616,6 +616,14 @@ export interface AnthropicCompat {
 	 */
 	supportsServerCompaction?: boolean;
 	/**
+	 * Whether the model supports message threads (`message-threads-2026-08-12`):
+	 * later turns continue a server-held conversation and send only new
+	 * messages. Enabled on Claude 4.5+ for the first-party provider; the
+	 * transport still requires the official endpoint unless the caller opts in.
+	 * Default: false.
+	 */
+	supportsMessageThreads?: boolean;
+	/**
 	 * Whether the model is served by the first-party Anthropic provider (its
 	 * default route is the official API). Rule-owned on the provider; the
 	 * compaction transport pairs it with a per-request effective-URL check
@@ -1760,7 +1768,7 @@ export interface Model<TApi extends Api = Api> {
 	 * dispatch is redirected.
 	 */
 	transport?: "pi-native";
-	/** Hint that websocket transport should be preferred when supported by the provider implementation. */
+	/** Standard Responses is opt-in and catalog-gated; either model/request false vetoes true. Codex keeps its independent policy. */
 	preferWebsockets?: boolean;
 	/** Codex Responses Lite transport: send the lite marker and carry instructions/tools as input items (mirrors codex-rs `use_responses_lite`). */
 	useResponsesLite?: boolean;

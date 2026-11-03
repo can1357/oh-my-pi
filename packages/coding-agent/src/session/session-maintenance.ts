@@ -408,8 +408,8 @@ export interface SessionMaintenanceHost {
 	extensionRunner: ExtensionRunner | undefined;
 	sideStreamFn: StreamFn;
 	providerSessionState: Map<string, ProviderSessionState>;
-	/** Live `providers.openaiWebsockets` hint for provider calls. */
-	preferWebsockets(): boolean | undefined;
+	/** Codex-only request preference from the live session setting. */
+	preferWebsockets(model: Model): boolean | undefined;
 	model(): Model | undefined;
 	thinkingLevel(): ThinkingLevel | undefined;
 	isDisposed(): boolean;
@@ -2748,16 +2748,8 @@ export class SessionMaintenance {
 		);
 		// The live summary, not one rebuilt from the entry: a resumed session's
 		// archive frames are blob references only the session manager resolves.
-		// Context notes can precede it. An archive with frames but no source text
-		// (written before `Archive.text`) cannot be re-rendered into the new one,
-		// so its frames are not counted as replaced: crediting them would let a
-		// smaller candidate drop the only copy of that history.
-		const previousArchive = snapcompact.getPreservedArchive(preparation.previousPreserveData);
-		const carriesStandingSummary =
-			!previousArchive ||
-			previousArchive.frames.length === 0 ||
-			snapcompact.archiveSourceText(previousArchive) !== undefined;
-		const standingSummary = carriesStandingSummary
+		// Context notes can precede it.
+		const standingSummary = this.#replacesStandingSummary(preparation)
 			? this.#host.messages().find(message => message.role === "compactionSummary")
 			: undefined;
 		if (standingSummary) tokens += this.#tokenizer.countMessage(standingSummary);
@@ -2765,6 +2757,18 @@ export class SessionMaintenance {
 		tokens += this.#tokenizer.countMessages(preparation.turnPrefixMessages, opts);
 		tokens += this.#tokenizer.countMessages(preparation.recentMessages, opts);
 		return tokens;
+	}
+
+	/**
+	 * Whether a new snapcompact archive replaces the standing summary. An archive
+	 * with frames but no source text (written before `Archive.text`) cannot be
+	 * re-rendered into the new one: its text edges carry over, its imaged middle
+	 * does not. Its summary is not counted as replaced: crediting it would let a
+	 * smaller candidate drop the only copy of that history.
+	 */
+	#replacesStandingSummary(preparation: CompactionPreparation): boolean {
+		const previousArchive = snapcompact.getPreservedArchive(preparation.previousPreserveData);
+		return !previousArchive || previousArchive.frames.length === 0 || previousArchive.text !== undefined;
 	}
 
 	async runPrePromptCompactionIfNeeded(messages: AgentMessage[]): Promise<void> {
@@ -3753,7 +3757,7 @@ export class SessionMaintenance {
 						promptCacheKey: this.#host.getPromptCacheKeyForModel(candidate),
 						remotePromptCacheKey: this.#host.getPromptCacheKeyForModel(remoteCompactionPolicyModel(candidate)),
 						providerSessionState: this.#host.providerSessionState,
-						preferWebsockets: this.#host.preferWebsockets(),
+						preferWebsockets: this.#host.preferWebsockets(candidate),
 						codexAccessPrograms: cfgProvidersOpenaiCodexDaybreak.get(this.#host.settings),
 						// Route every summarization HTTP request through the
 						// session's side-stream transport so the provider
@@ -5638,9 +5642,23 @@ export class SessionMaintenance {
 									excludeEncryptedReasoning: true,
 								},
 							);
+							// A stored trigger estimate counts the whole standing summary; take
+							// back one a new archive cannot replace, as the local baseline does
+							// (which also prices the prepared region when that is set).
+							const unreplacedSummary =
+								options.triggerContextTokens !== undefined &&
+								options.preparedContextTokens === undefined &&
+								!this.#replacesStandingSummary(preparation)
+									? this.#host.messages().find(message => message.role === "compactionSummary")
+									: undefined;
 							const reductionBaseline =
 								options.triggerContextTokens !== undefined
-									? Math.max(0, options.triggerContextTokens - (options.pendingContextTokens ?? 0))
+									? Math.max(
+											0,
+											options.triggerContextTokens -
+												(options.pendingContextTokens ?? 0) -
+												(unreplacedSummary ? this.#tokenizer.countMessage(unreplacedSummary) : 0),
+										)
 									: this.#projectPreSnapcompactContextTokens(preparation);
 							const preparedReductionBaseline =
 								options.preparedContextTokens === undefined
@@ -5828,7 +5846,7 @@ export class SessionMaintenance {
 										remoteCompactionPolicyModel(candidate),
 									),
 									providerSessionState: this.#host.providerSessionState,
-									preferWebsockets: this.#host.preferWebsockets(),
+									preferWebsockets: this.#host.preferWebsockets(candidate),
 									codexAccessPrograms: cfgProvidersOpenaiCodexDaybreak.get(this.#host.settings),
 									codexCompaction,
 									// This loop already retries the whole compaction attempt on
