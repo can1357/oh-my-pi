@@ -206,6 +206,7 @@ Choose the setting by the desired outcome:
    - PTY uses native `PtySession.start()`.
    - Client-terminal mode delegates process execution to the connected client terminal capability.
    - Named services run in the project-scoped launch broker and retain logs/status for `proc://`.
+   - The broker belongs to no session. The first omp process in the project that needs it starts it detached (its own session and process group, so a hang-up or signal to that omp never reaches it), and it outlives that process while any client or persistent daemon remains; with no clients it shuts down after `OMP_DAEMON_IDLE_GRACE_MS` and stops its non-detached services. On Linux with a systemd user manager it also starts through `systemd-run --user --scope` in a transient `omp-daemon-broker-*.scope` of its own, with `OOMPolicy=continue`, and its services inherit that scope; so stopping the starting session's cgroup (a terminal or tmux scope, a `systemd-run --scope` launcher, a logind session, `systemd-oomd`) cannot kill other sessions' services, and they do not count against that session's memory limit. Where no user manager answers, or `systemd-run` fails or has not started the broker within 5 s, the broker starts without its own scope (`launch/broker-launch.ts`).
 - Session state
    - Reads session settings for async, auto-background, interceptor, direnv, global timeout cap, tool availability, and shell configuration.
    - Registers jobs with `session.asyncJobManager` for explicit/auto background runs.
