@@ -36,6 +36,8 @@ function pathKindIn(cwd: string, target: string, follow: boolean): PathKind {
 	const joined = joinPhysically(cwd, target);
 	try {
 		const stat = follow ? fs.statSync(joined) : fs.lstatSync(joined);
+		// Unfollowed, any symlink (a dangling one too) is `other`: the shell writes through it, the tools replace it.
+		if (stat.isSymbolicLink()) return "other";
 		if (SPECIAL_ROOT.test(fs.realpathSync.native(joined))) return "other";
 		return stat.isFile() ? "file" : stat.isDirectory() ? "directory" : "other";
 	} catch (error) {
@@ -72,14 +74,47 @@ function fileFactsIn(cwd: string, target: string): FileFacts | undefined {
 		return undefined;
 	}
 	let plainText: boolean | undefined;
+	let maybeBinary: boolean | undefined;
 	return {
 		size: stat.size,
 		links: stat.nlink,
+		mode: stat.mode,
+		writable: isWritable(joined),
 		plainText: () => {
 			plainText ??= isPlainText(joined, stat.size);
 			return plainText;
 		},
+		maybeBinary: () => {
+			maybeBinary ??= mayHoldNul(joined, stat.size);
+			return maybeBinary;
+		},
 	};
+}
+
+/** Whether the current user may write `file`. */
+function isWritable(file: string): boolean {
+	try {
+		fs.accessSync(file, fs.constants.W_OK);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Whether grep may treat the file as binary: it holds a NUL byte or invalid UTF-8, it cannot be
+ * read, or it is over 4 MB (too large to check on each call).
+ */
+function mayHoldNul(file: string, size: number): boolean {
+	if (size > PLAIN_TEXT_LIMIT) return true;
+	try {
+		const bytes = fs.readFileSync(file);
+		if (bytes.includes(0)) return true;
+		new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+		return false;
+	} catch {
+		return true;
+	}
 }
 
 /** Whether the file is at most 4 MB of valid UTF-8 with no byte-order mark and no carriage return. */

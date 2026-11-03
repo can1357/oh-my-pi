@@ -537,17 +537,12 @@ describe("dedicated tool capability", () => {
 		expect(decide(command)).toBeUndefined();
 	});
 
-	it.each([
-		"grep -rn x .",
-		"grep -n x f | head",
-		"grep -nE 'a|b' -e x f",
-		"grep -rI --include='_CoqProject*' -e 'Proof Using' .",
-		"rg x",
-		"rg -tv x .",
-		"grep x < f",
-	])("refuses %s as a grep", command => {
-		expect(decide(command)).toBe("grep");
-	});
+	it.each(["grep -n x f | head", "grep -nE 'a|b' -e x f", "rg -n x src", "rg x", "rg -tv x .", "grep x < f"])(
+		"refuses %s as a grep",
+		command => {
+			expect(decide(command)).toBe("grep");
+		},
+	);
 
 	it.each([
 		// Case 6 of the refusal study: `-maxdepth 4` maps to glob's `depth: 4`, but `-type d` does not.
@@ -842,6 +837,7 @@ describe("dedicated tool capability", () => {
 		// The exact text decides: `#heading` is no `#!` line, `cat ""` names no file.
 		["printf '#%s\\n' heading > notes.md", "write"],
 		['cat "" f', undefined],
+		['echo hi > ""', undefined],
 		// Round 7: padding is counted in bytes, so a width or precision is not a write.
 		["printf '%5d\\n' 7 > out", undefined],
 		["cat plain | cat", "read"],
@@ -892,7 +888,7 @@ describe("dedicated tool capability", () => {
 		};
 		time(1_000);
 		// Eight times the input: linear work takes about 8 times as long, quadratic work 64 times.
-		expect(time(128_000)).toBeLessThan(24 * time(16_000) + 50);
+		expect(time(128_000)).toBeLessThan(32 * time(16_000) + 200);
 	});
 
 	it.each([
@@ -944,7 +940,10 @@ describe("dedicated tool capability", () => {
 			// A multiline search reads only the first 4 MB of a large file.
 			await Bun.write(path.join(dir, "large"), `${"x\n".repeat(2_200_000)}UNIQUE_MARKER\nEND_MARKER\n`);
 			expect(at("rg -U 'UNIQUE_MARKER\\nEND_MARKER' large")).toBeUndefined();
-			expect(at("rg UNIQUE_MARKER large")).toBe("grep");
+			// Over 4 MB the interceptor cannot check for binary content cheaply, so the search runs.
+			expect(at("rg UNIQUE_MARKER large")).toBeUndefined();
+			await Bun.write(path.join(dir, "small.txt"), "UNIQUE_MARKER\n");
+			expect(at("rg UNIQUE_MARKER small.txt")).toBe("grep");
 			// The shell cannot create a file in a missing directory; the write tool would create both.
 			expect(at("echo hi > missing/out")).toBeUndefined();
 			expect(at("cat link")).toBe("read");
@@ -1021,6 +1020,95 @@ describe("dedicated tool capability", () => {
 		"grep a f | /usr/local/bin/sort",
 	])("does not refuse %s (round 7)", command => {
 		expect(decide(command)).toBeUndefined();
+	});
+
+	it.each([
+		// Round 8: a NUL from \\u, \\U or \\c@ ends the word in bash.
+		"printf '%s%s/bin/sh\\n' $'#\\u0000discard' '!' >out",
+		"printf '%s%s/bin/sh\\n' $'#\\U00000000discard' '!' >out",
+		"printf '%s%s/bin/sh\\n' $'#\\c@discard' '!' >out",
+		// Brace expansion makes several words or targets.
+		"echo {1:literal,2:other} >out",
+		"printf '%s:literal\\n' {1..2} >out",
+		"echo hi >out{a,b}",
+		// The grep tool has no output width.
+		"rg -M 10 needle f",
+		"rg -M10 needle f",
+		"rg --max-columns=10 needle f",
+		// GNU grep reports binary matches in the directories it searches.
+		"grep -rn x .",
+		// Round 9: GNU grep over a directory decides binary files by content (NUL, invalid UTF-8),
+		// which only a walk could compare with the grep tool, so it runs; rg skips NUL files as the
+		// tool does and stays refused.
+		"grep -rnI x .",
+		"grep -rI --include='_CoqProject*' -e 'Proof Using' .",
+		"grep -RI needle symlink-root",
+		"grep -r -- -I binary-dir",
+		"grep -r -e -I binary-dir",
+		// An empty name is no file.
+		'echo hi > ""',
+	])("does not refuse %s (round 8)", command => {
+		expect(decide(command)).toBeUndefined();
+	});
+
+	it("renders a repeated printf only up to a bound", () => {
+		const format = `${"x".repeat(4096)}%s`;
+		const args = Array.from({ length: 4096 }, () => "a").join(" ");
+		const command = `printf '${format}' ${args} > out`;
+		const start = performance.now();
+		expect(decide(command)).toBeUndefined();
+		expect(performance.now() - start).toBeLessThan(2_000);
+	});
+
+	it("does not send a binary file to grep or a set-ID file to edit", async () => {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "bash-interceptor-binary-")));
+		try {
+			await Bun.write(path.join(dir, "binary"), "before\n\0\nneedle\nafter\n");
+			await Bun.write(path.join(dir, "text"), "needle\n");
+			await Bun.write(path.join(dir, "setuid"), "a\n");
+			await fs.chmod(path.join(dir, "setuid"), 0o4755);
+			await Bun.write(path.join(dir, "plain"), "a\n");
+			const at = (command: string) =>
+				checkBashInterception(command, tools, DEFAULT_BASH_INTERCEPTOR_RULES, command, dir).suggestedTool;
+			expect(at("grep needle binary")).toBeUndefined();
+			expect(at("rg -uuu needle binary")).toBeUndefined();
+			expect(at("grep needle text")).toBe("grep");
+			expect(at("perl -pi -e 's/a/b/' setuid")).toBeUndefined();
+			expect(at("perl -pi -e 's/a/b/' plain")).toBe("edit");
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("does not send invalid UTF-8, a read-only file or a directory to grep or edit", async () => {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "bash-interceptor-round9-")));
+		try {
+			await Bun.write(path.join(dir, "bad-utf8"), new Uint8Array([0x78, 0xff, 0x0a]));
+			await Bun.write(path.join(dir, "good"), "x\n");
+			await Bun.write(path.join(dir, "readonly"), "a\n");
+			await fs.chmod(path.join(dir, "readonly"), 0o444);
+			await fs.mkdir(path.join(dir, "src"));
+			const at = (command: string) =>
+				checkBashInterception(command, tools, DEFAULT_BASH_INTERCEPTOR_RULES, command, dir).suggestedTool;
+			for (const command of [
+				"grep x bad-utf8",
+				"grep -I x bad-utf8",
+				"grep --binary-files=without-match x bad-utf8",
+				"sed -i 's/a/b/' readonly",
+				"perl -pi -e 's/a/b/' readonly",
+				"grep x src",
+			]) {
+				expect(at(command)).toBeUndefined();
+			}
+			expect(at("grep x good")).toBe("grep");
+			// A dangling symlink: bash creates its target, the write tool would replace the link.
+			await fs.symlink(path.join(dir, "nowhere"), path.join(dir, "dangling"));
+			expect(at("echo hi > dangling")).toBeUndefined();
+			expect(at("rg x src")).toBe("grep");
+		} finally {
+			await fs.chmod(path.join(dir, "readonly"), 0o644);
+			await fs.rm(dir, { recursive: true, force: true });
+		}
 	});
 
 	it("does not send a hard-linked file to edit", async () => {

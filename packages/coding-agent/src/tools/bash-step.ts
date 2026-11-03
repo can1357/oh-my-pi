@@ -131,7 +131,8 @@ function decodeAnsiC(body: string): { text: string; bytes: boolean } {
 			if ((esc[0] === "u" || esc[0] === "U") && esc.length > 1) {
 				const code = Number.parseInt(esc.slice(1), 16);
 				// A surrogate or a code point past U+10FFFF is not valid UTF-8 text; bash emits its bytes anyway.
-				if (code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) {
+				// A NUL ends the word when bash passes it to a command.
+				if (code === 0 || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) {
 					bytes = true;
 					return "";
 				}
@@ -143,7 +144,12 @@ function decodeAnsiC(body: string): { text: string; bytes: boolean } {
 				if (code >= 0x80 || code === 0) bytes = true;
 				return String.fromCharCode(code);
 			}
-			if (esc[0] === "c") return esc[1] === "?" ? "\x7f" : String.fromCharCode(esc.charCodeAt(1) & 0x1f);
+			if (esc[0] === "c") {
+				if (esc[1] === "?") return "\x7f";
+				const code = esc.charCodeAt(1) & 0x1f;
+				if (code === 0) bytes = true;
+				return String.fromCharCode(code);
+			}
 			return own(simple, esc) ?? `\\${esc}`;
 		},
 	);
@@ -164,6 +170,8 @@ function readWord(text: string, start: number): { word: Word; end: number } | un
 	let glob = false;
 	let computed = false;
 	let quoted = false;
+	// An unquoted `{` seen in this word: a later unquoted `}` makes a brace expansion.
+	let braceOpen = false;
 	let i = start;
 	/** Consumes a `$…` expansion or backtick at `i`; false when there is none there. */
 	const expansion = (): boolean | undefined => {
@@ -267,6 +275,9 @@ function readWord(text: string, start: number): { word: Word; end: number } | un
 		}
 		if (WORD_END.test(ch)) break;
 		if (ch === "*" || ch === "?" || ch === "[") glob = true;
+		// `{a,b}` and `{1..3}` expand to several words, which neither text nor one path can stand for.
+		if (ch === "{") braceOpen = true;
+		else if (ch === "}" && braceOpen) computed = true;
 		value += ch;
 		i++;
 	}
@@ -768,7 +779,7 @@ const ANY = (): boolean => true;
 const COUNT = (value: string): boolean => /^\d+$/u.test(value);
 
 /** Splits `words` into options and operands; returns undefined when an option is outside `spec`. */
-function expressibleOperands(words: Word[], spec: OptionSpec): Word[] | undefined {
+function expressibleOperands(words: Word[], spec: OptionSpec, seen?: Set<string>): Word[] | undefined {
 	const operands: Word[] = [];
 	let optionsEnded = false;
 	for (let i = 0; i < words.length; i++) {
@@ -785,8 +796,10 @@ function expressibleOperands(words: Word[], spec: OptionSpec): Word[] | undefine
 		}
 		if (text.startsWith("--")) {
 			const eq = text.indexOf("=");
-			const kind = own(spec.long, text.slice(2, eq < 0 ? undefined : eq));
+			const name = text.slice(2, eq < 0 ? undefined : eq);
+			const kind = own(spec.long, name);
 			if (kind === undefined) return undefined;
+			seen?.add(`--${name}`);
 			if (kind === "flag") {
 				if (eq >= 0) return undefined;
 				continue;
@@ -805,6 +818,7 @@ function expressibleOperands(words: Word[], spec: OptionSpec): Word[] | undefine
 		if (spec.numeric && /^-\d+$/u.test(text)) continue;
 		for (let j = 1; j < text.length; j++) {
 			const letter = text[j];
+			seen?.add(`-${letter}`);
 			const valued = own(spec.valued, letter);
 			if (valued) {
 				let value = text.slice(j + 1);
@@ -913,7 +927,8 @@ const GNU_GREP: OptionSpec = {
 
 const RIPGREP: OptionSpec = {
 	flags: "isSFwxnNHIUPu.",
-	valued: { e: ANY, g: ANY, t: ANY, T: ANY, M: COUNT, j: COUNT },
+	// Not `-M`/`--max-columns`: the grep tool has no output width.
+	valued: { e: ANY, g: ANY, t: ANY, T: ANY, j: COUNT },
 	long: {
 		"case-sensitive": "flag",
 		color: "optional",
@@ -927,7 +942,6 @@ const RIPGREP: OptionSpec = {
 		"ignore-case": "flag",
 		"line-number": "flag",
 		"line-regexp": "flag",
-		"max-columns": COUNT,
 		multiline: "flag",
 		"multiline-dotall": "flag",
 		"no-filename": "flag",
@@ -1011,21 +1025,24 @@ const GREP_SPECS: Record<string, OptionSpec> = {
  * context width or cap matches, read patterns from a file, or search stdin, a heredoc or a
  * here-string.
  */
-function grepPaths(spec: OptionSpec, command: SimpleCommand): Word[] | undefined {
-	const options = command.words.slice(1);
-	const operands = expressibleOperands(options, spec);
+function grepPaths(spec: OptionSpec, command: SimpleCommand): { paths: Word[]; seen: Set<string> } | undefined {
+	const seen = new Set<string>();
+	const operands = expressibleOperands(command.words.slice(1), spec, seen);
 	if (!operands || hasOtherInputs(command)) return undefined;
 	const stdin = stdinFiles(command);
 	if (!stdin.every(namesOneFile)) return undefined;
-	const patternGiven = options.some(word => /^(?:-[^-]*e|--regexp)/u.test(word.value));
+	const patternGiven = seen.has("-e") || seen.has("--regexp");
 	const paths = patternGiven ? operands : operands.slice(1);
 	if (operands.some(word => word.computed) || paths.some(word => word.value === "-")) return undefined;
-	if (spec === GNU_GREP && paths.length === 0 && stdin.length === 0) {
-		// GNU grep without a file operand reads stdin unless it recurses.
-		const recursive = options.some(word => /^(?:-[^-]*[rR]|--(?:dereference-)?recursive$)/u.test(word.value));
-		if (!recursive) return undefined;
+	if (spec === GNU_GREP) {
+		// GNU grep treats a file with a NUL byte or invalid UTF-8 as binary and reports or skips it,
+		// which the grep tool does not; only a walk could show what a directory holds, so a GNU
+		// grep over a directory (recursive, or a directory operand) is not refused. Without a file
+		// operand it reads stdin or recurses into `.`.
+		const recursive = ["-r", "-R", "--recursive", "--dereference-recursive"].some(option => seen.has(option));
+		if (recursive || (paths.length === 0 && stdin.length === 0)) return undefined;
 	}
-	return [...paths, ...stdin];
+	return { paths: [...paths, ...stdin], seen };
 }
 
 // ── glob: find, fd ───────────────────────────────────────────────────────────
@@ -1276,6 +1293,12 @@ export function globArgsForStep(text: string, filesystem?: StepFilesystem): Glob
 /** An unescaped `$` or backtick: the shell expands it inside an unquoted-delimiter heredoc. */
 const HEREDOC_EXPANSION = /(?:^|[^\\])(?:\\\\)*[$`]/u;
 
+/**
+ * Longest text the interceptor renders to compare a write with the write tool. A longer write runs:
+ * rendering it would cost memory the shell itself never spends.
+ */
+const WRITE_TEXT_LIMIT = 1024 * 1024;
+
 /** A decimal integer `printf %d`/`%i` prints as given and accepts without error. */
 const PRINTF_INTEGER = /^(?:0|-?[1-9]\d{0,17})$/u;
 
@@ -1292,6 +1315,8 @@ const PRINTF_ESCAPES: Record<string, string> = { n: "\n", t: "\t", "\\": "\\", '
 function printfText(args: Word[]): string | undefined {
 	const format = args[0]?.value;
 	if (format === undefined || format.startsWith("-")) return undefined;
+	// The format repeats once per argument group; deciding must stay linear in the command.
+	const limit = WRITE_TEXT_LIMIT;
 	const values = args.slice(1).map(word => word.value);
 	let out = "";
 	let next = 0;
@@ -1322,7 +1347,9 @@ function printfText(args: Word[]): string | undefined {
 			else if (value === undefined) out += "0";
 			else if (PRINTF_INTEGER.test(value)) out += value;
 			else return undefined;
+			if (out.length > limit) return undefined;
 		}
+		if (out.length > limit) return undefined;
 		// printf reuses the format while arguments remain; with no conversion it prints once.
 		if (!converted) break;
 	} while (next < values.length);
@@ -1395,7 +1422,7 @@ function writeCanPerform(
 	if (output.op !== ">" && output.op !== ">|" && !(output.op === ">>" && availableTools.includes("edit")))
 		return false;
 	const target = output.target;
-	if (!target || target.computed || target.glob || SPECIAL_PATH.test(target.value)) return false;
+	if (!target || !namesOneFile(target) || SPECIAL_PATH.test(target.value)) return false;
 	if (filesystem && filesystem.kind(target.value, false) !== "missing") return false;
 	const args = command.words.slice(1);
 	if (args.some(word => word.computed || word.glob)) return false;
@@ -1583,6 +1610,15 @@ export interface FileFacts {
 	size: number;
 	/** Hard links to the file: `sed -i` replaces the one named, the edit tool writes through all. */
 	links: number;
+	/** Permission bits; `perl -i` keeps set-user-ID and set-group-ID bits, the edit tool clears them. */
+	mode: number;
+	/** The file may hold a NUL byte or invalid UTF-8 (or is over 4 MB, too large to check): grep
+	 * and rg treat it as binary or print its bytes, where the grep tool skips it or prints
+	 * replacement characters. Reads the file on first use. */
+	maybeBinary(): boolean;
+	/** The current user may write the file; the edit tool cannot change a read-only file that
+	 * `sed -i` and `perl -i` replace. */
+	writable: boolean;
 	/** At most 4 MB of valid UTF-8 with no byte-order mark and no carriage return: the edit tool
 	 * keeps a byte-order mark and CRLF line endings and refuses other encodings, which `sed -i`
 	 * does not. Reads the file on first use. */
@@ -1612,7 +1648,9 @@ function pathsAre(
 
 /** Whether `facts` describe a file with one link whose text the edit tool rewrites byte for byte. */
 function isPlainSingleFile(facts: FileFacts | undefined): boolean {
-	return facts !== undefined && facts.links === 1 && facts.plainText();
+	return (
+		facts !== undefined && facts.links === 1 && facts.writable && (facts.mode & 0o6000) === 0 && facts.plainText()
+	);
 }
 
 /** Options with which rg and ag match across lines. */
@@ -1649,8 +1687,22 @@ export function dedicatedToolCanPerformStep(
 		case "grep": {
 			const spec = own(GREP_SPECS, name);
 			if (!spec) return true;
-			const paths = outputReachesAgent(pipeline) ? grepPaths(spec, command) : undefined;
-			if (!paths || !pathsAre(paths, ["file", "directory", "missing"], true, filesystem)) return false;
+			const searched = outputReachesAgent(pipeline) ? grepPaths(spec, command) : undefined;
+			if (!searched) return false;
+			const { paths } = searched;
+			// A GNU grep directory operand: see grepPaths.
+			const allowed: PathKind[] = spec === GNU_GREP ? ["file", "missing"] : ["file", "directory", "missing"];
+			if (!pathsAre(paths, allowed, true, filesystem)) return false;
+			// A named binary file: grep and rg report its match, the grep tool does not.
+			if (
+				filesystem &&
+				paths.some(
+					word =>
+						filesystem.kind(word.value, true) === "file" && filesystem.facts(word.value)?.maybeBinary() !== false,
+				)
+			) {
+				return false;
+			}
 			// A multiline search reads only a file's first 4 MB.
 			if (!filesystem || !command.words.slice(1).some(word => MULTILINE_OPTION.test(word.value))) return true;
 			return paths.every(
