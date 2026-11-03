@@ -8564,6 +8564,421 @@ mod tests {
 				 tail=<${x: -14}>\"",
 				"S=0 n=70000 head=<yyyyyyyyyyyyyy> tail=<yyyyyyyyyyyyyy>\n",
 			),
+			(
+				"an integer argument, %d of '0xffffffffffffffff'",
+				"out=$(printf '%d' '0xffffffffffffffff' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:14}> \
+				 tail=<${out: -14}> err=<$e>\"",
+				"S=0 n=19 head=<92233720368547> tail=<72036854775807> err=<warning: \
+				 0xffffffffffffffff: Numerical result out of range>\n",
+			),
+			(
+				"an integer argument, %d of '0x10000000000000000'",
+				"out=$(printf '%d' '0x10000000000000000' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:14}> \
+				 tail=<${out: -14}> err=<$e>\"",
+				"S=0 n=19 head=<92233720368547> tail=<72036854775807> err=<warning: \
+				 0x10000000000000000: Numerical result out of range>\n",
+			),
+			(
+				"an integer argument, %d of '0xfg'",
+				"out=$(printf '%d' '0xfg' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:14}> tail=<${out: -14}> \
+				 err=<$e>\"",
+				"S=1 n=2 head=<15> tail=<> err=<0xfg: invalid hex number>\n",
+			),
+			(
+				"an integer argument, %d of '0x'",
+				"out=$(printf '%d' '0x' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: }; \
+				 e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:14}> tail=<${out: -14}> \
+				 err=<$e>\"",
+				"S=1 n=1 head=<0> tail=<> err=<0x: invalid hex number>\n",
+			),
+			(
+				"an integer argument, %d of '019'",
+				"out=$(printf '%d' '019' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:14}> tail=<${out: -14}> \
+				 err=<$e>\"",
+				"S=1 n=1 head=<1> tail=<> err=<019: invalid octal number>\n",
+			),
+			(
+				"an integer argument, %d of '0778'",
+				"out=$(printf '%d' '0778' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:14}> tail=<${out: -14}> \
+				 err=<$e>\"",
+				"S=1 n=2 head=<63> tail=<> err=<0778: invalid octal number>\n",
+			),
+			(
+				"an integer argument, %d of '12x'",
+				"out=$(printf '%d' '12x' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:14}> tail=<${out: -14}> \
+				 err=<$e>\"",
+				"S=1 n=2 head=<12> tail=<> err=<12x: invalid number>\n",
+			),
+			(
+				"an integer argument, %d of '-0x10'",
+				"out=$(printf '%d' '-0x10' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:14}> tail=<${out: -14}> \
+				 err=<$e>\"",
+				"S=0 n=3 head=<-16> tail=<> err=<>\n",
+			),
+			(
+				"an integer argument, %d of '99999999999999999999'",
+				"out=$(printf '%d' '99999999999999999999' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:14}> \
+				 tail=<${out: -14}> err=<$e>\"",
+				"S=0 n=19 head=<92233720368547> tail=<72036854775807> err=<warning: \
+				 99999999999999999999: Numerical result out of range>\n",
+			),
+			(
+				"an integer argument, %d of '-1'",
+				"out=$(printf '%d' '-1' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: }; \
+				 e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:14}> tail=<${out: -14}> \
+				 err=<$e>\"",
+				"S=0 n=2 head=<-1> tail=<> err=<>\n",
+			),
+			(
+				"an integer argument, %d of '12 '",
+				"out=$(printf '%d' '12 ' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:14}> tail=<${out: -14}> \
+				 err=<$e>\"",
+				"S=1 n=2 head=<12> tail=<> err=<12 : invalid number>\n",
+			),
+			(
+				"an integer argument, %d of \"'A\"",
+				"out=$(printf '%d' ''\\''A' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:14}> \
+				 tail=<${out: -14}> err=<$e>\"",
+				"S=0 n=2 head=<65> tail=<> err=<>\n",
+			),
+			(
+				"an integer argument, %d of '1e3'",
+				"out=$(printf '%d' '1e3' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:14}> tail=<${out: -14}> \
+				 err=<$e>\"",
+				"S=1 n=1 head=<1> tail=<> err=<1e3: invalid number>\n",
+			),
+			(
+				"an integer argument, %u of '0xffffffffffffffff'",
+				"out=$(printf '%u' '0xffffffffffffffff' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:14}> \
+				 tail=<${out: -14}> err=<$e>\"",
+				"S=0 n=20 head=<18446744073709> tail=<44073709551615> err=<>\n",
+			),
+			(
+				"an integer argument, %u of '0x10000000000000000'",
+				"out=$(printf '%u' '0x10000000000000000' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:14}> \
+				 tail=<${out: -14}> err=<$e>\"",
+				"S=0 n=20 head=<18446744073709> tail=<44073709551615> err=<warning: \
+				 0x10000000000000000: Numerical result out of range>\n",
+			),
+			(
+				"an integer argument, %u of '0xfg'",
+				"out=$(printf '%u' '0xfg' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:14}> tail=<${out: -14}> \
+				 err=<$e>\"",
+				"S=1 n=2 head=<15> tail=<> err=<0xfg: invalid hex number>\n",
+			),
+			(
+				"an integer argument, %u of '0x'",
+				"out=$(printf '%u' '0x' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: }; \
+				 e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:14}> tail=<${out: -14}> \
+				 err=<$e>\"",
+				"S=1 n=1 head=<0> tail=<> err=<0x: invalid hex number>\n",
+			),
+			(
+				"an integer argument, %u of '019'",
+				"out=$(printf '%u' '019' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:14}> tail=<${out: -14}> \
+				 err=<$e>\"",
+				"S=1 n=1 head=<1> tail=<> err=<019: invalid octal number>\n",
+			),
+			(
+				"an integer argument, %u of '0778'",
+				"out=$(printf '%u' '0778' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:14}> tail=<${out: -14}> \
+				 err=<$e>\"",
+				"S=1 n=2 head=<63> tail=<> err=<0778: invalid octal number>\n",
+			),
+			(
+				"an integer argument, %u of '12x'",
+				"out=$(printf '%u' '12x' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:14}> tail=<${out: -14}> \
+				 err=<$e>\"",
+				"S=1 n=2 head=<12> tail=<> err=<12x: invalid number>\n",
+			),
+			(
+				"an integer argument, %u of '-0x10'",
+				"out=$(printf '%u' '-0x10' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:14}> tail=<${out: -14}> \
+				 err=<$e>\"",
+				"S=0 n=20 head=<18446744073709> tail=<44073709551600> err=<>\n",
+			),
+			(
+				"an integer argument, %u of '99999999999999999999'",
+				"out=$(printf '%u' '99999999999999999999' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:14}> \
+				 tail=<${out: -14}> err=<$e>\"",
+				"S=0 n=20 head=<18446744073709> tail=<44073709551615> err=<warning: \
+				 99999999999999999999: Numerical result out of range>\n",
+			),
+			(
+				"an integer argument, %u of '-1'",
+				"out=$(printf '%u' '-1' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: }; \
+				 e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:14}> tail=<${out: -14}> \
+				 err=<$e>\"",
+				"S=0 n=20 head=<18446744073709> tail=<44073709551615> err=<>\n",
+			),
+			(
+				"an integer argument, %u of '12 '",
+				"out=$(printf '%u' '12 ' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:14}> tail=<${out: -14}> \
+				 err=<$e>\"",
+				"S=1 n=2 head=<12> tail=<> err=<12 : invalid number>\n",
+			),
+			(
+				"an integer argument, %u of \"'A\"",
+				"out=$(printf '%u' ''\\''A' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:14}> \
+				 tail=<${out: -14}> err=<$e>\"",
+				"S=0 n=2 head=<65> tail=<> err=<>\n",
+			),
+			(
+				"an integer argument, %u of '1e3'",
+				"out=$(printf '%u' '1e3' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:14}> tail=<${out: -14}> \
+				 err=<$e>\"",
+				"S=1 n=1 head=<1> tail=<> err=<1e3: invalid number>\n",
+			),
+			(
+				"an integer argument, %x of '0xffffffffffffffff'",
+				"out=$(printf '%x' '0xffffffffffffffff' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:14}> \
+				 tail=<${out: -14}> err=<$e>\"",
+				"S=0 n=16 head=<ffffffffffffff> tail=<ffffffffffffff> err=<>\n",
+			),
+			(
+				"an integer argument, %x of '0x10000000000000000'",
+				"out=$(printf '%x' '0x10000000000000000' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:14}> \
+				 tail=<${out: -14}> err=<$e>\"",
+				"S=0 n=16 head=<ffffffffffffff> tail=<ffffffffffffff> err=<warning: \
+				 0x10000000000000000: Numerical result out of range>\n",
+			),
+			(
+				"an integer argument, %x of '0xfg'",
+				"out=$(printf '%x' '0xfg' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:14}> tail=<${out: -14}> \
+				 err=<$e>\"",
+				"S=1 n=1 head=<f> tail=<> err=<0xfg: invalid hex number>\n",
+			),
+			(
+				"an integer argument, %x of '0x'",
+				"out=$(printf '%x' '0x' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: }; \
+				 e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:14}> tail=<${out: -14}> \
+				 err=<$e>\"",
+				"S=1 n=1 head=<0> tail=<> err=<0x: invalid hex number>\n",
+			),
+			(
+				"an integer argument, %x of '019'",
+				"out=$(printf '%x' '019' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:14}> tail=<${out: -14}> \
+				 err=<$e>\"",
+				"S=1 n=1 head=<1> tail=<> err=<019: invalid octal number>\n",
+			),
+			(
+				"an integer argument, %x of '0778'",
+				"out=$(printf '%x' '0778' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:14}> tail=<${out: -14}> \
+				 err=<$e>\"",
+				"S=1 n=2 head=<3f> tail=<> err=<0778: invalid octal number>\n",
+			),
+			(
+				"an integer argument, %x of '12x'",
+				"out=$(printf '%x' '12x' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:14}> tail=<${out: -14}> \
+				 err=<$e>\"",
+				"S=1 n=1 head=<c> tail=<> err=<12x: invalid number>\n",
+			),
+			(
+				"an integer argument, %x of '-0x10'",
+				"out=$(printf '%x' '-0x10' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:14}> tail=<${out: -14}> \
+				 err=<$e>\"",
+				"S=0 n=16 head=<ffffffffffffff> tail=<fffffffffffff0> err=<>\n",
+			),
+			(
+				"an integer argument, %x of '99999999999999999999'",
+				"out=$(printf '%x' '99999999999999999999' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:14}> \
+				 tail=<${out: -14}> err=<$e>\"",
+				"S=0 n=16 head=<ffffffffffffff> tail=<ffffffffffffff> err=<warning: \
+				 99999999999999999999: Numerical result out of range>\n",
+			),
+			(
+				"an integer argument, %x of '-1'",
+				"out=$(printf '%x' '-1' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: }; \
+				 e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:14}> tail=<${out: -14}> \
+				 err=<$e>\"",
+				"S=0 n=16 head=<ffffffffffffff> tail=<ffffffffffffff> err=<>\n",
+			),
+			(
+				"an integer argument, %x of '12 '",
+				"out=$(printf '%x' '12 ' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:14}> tail=<${out: -14}> \
+				 err=<$e>\"",
+				"S=1 n=1 head=<c> tail=<> err=<12 : invalid number>\n",
+			),
+			(
+				"an integer argument, %x of \"'A\"",
+				"out=$(printf '%x' ''\\''A' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:14}> \
+				 tail=<${out: -14}> err=<$e>\"",
+				"S=0 n=2 head=<41> tail=<> err=<>\n",
+			),
+			(
+				"an integer argument, %x of '1e3'",
+				"out=$(printf '%x' '1e3' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:14}> tail=<${out: -14}> \
+				 err=<$e>\"",
+				"S=1 n=1 head=<1> tail=<> err=<1e3: invalid number>\n",
+			),
+			(
+				"an integer argument, %o of '0xffffffffffffffff'",
+				"out=$(printf '%o' '0xffffffffffffffff' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:14}> \
+				 tail=<${out: -14}> err=<$e>\"",
+				"S=0 n=22 head=<17777777777777> tail=<77777777777777> err=<>\n",
+			),
+			(
+				"an integer argument, %o of '0x10000000000000000'",
+				"out=$(printf '%o' '0x10000000000000000' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:14}> \
+				 tail=<${out: -14}> err=<$e>\"",
+				"S=0 n=22 head=<17777777777777> tail=<77777777777777> err=<warning: \
+				 0x10000000000000000: Numerical result out of range>\n",
+			),
+			(
+				"an integer argument, %o of '0xfg'",
+				"out=$(printf '%o' '0xfg' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:14}> tail=<${out: -14}> \
+				 err=<$e>\"",
+				"S=1 n=2 head=<17> tail=<> err=<0xfg: invalid hex number>\n",
+			),
+			(
+				"an integer argument, %o of '0x'",
+				"out=$(printf '%o' '0x' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: }; \
+				 e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:14}> tail=<${out: -14}> \
+				 err=<$e>\"",
+				"S=1 n=1 head=<0> tail=<> err=<0x: invalid hex number>\n",
+			),
+			(
+				"an integer argument, %o of '019'",
+				"out=$(printf '%o' '019' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:14}> tail=<${out: -14}> \
+				 err=<$e>\"",
+				"S=1 n=1 head=<1> tail=<> err=<019: invalid octal number>\n",
+			),
+			(
+				"an integer argument, %o of '0778'",
+				"out=$(printf '%o' '0778' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:14}> tail=<${out: -14}> \
+				 err=<$e>\"",
+				"S=1 n=2 head=<77> tail=<> err=<0778: invalid octal number>\n",
+			),
+			(
+				"an integer argument, %o of '12x'",
+				"out=$(printf '%o' '12x' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:14}> tail=<${out: -14}> \
+				 err=<$e>\"",
+				"S=1 n=2 head=<14> tail=<> err=<12x: invalid number>\n",
+			),
+			(
+				"an integer argument, %o of '-0x10'",
+				"out=$(printf '%o' '-0x10' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:14}> tail=<${out: -14}> \
+				 err=<$e>\"",
+				"S=0 n=22 head=<17777777777777> tail=<77777777777760> err=<>\n",
+			),
+			(
+				"an integer argument, %o of '99999999999999999999'",
+				"out=$(printf '%o' '99999999999999999999' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:14}> \
+				 tail=<${out: -14}> err=<$e>\"",
+				"S=0 n=22 head=<17777777777777> tail=<77777777777777> err=<warning: \
+				 99999999999999999999: Numerical result out of range>\n",
+			),
+			(
+				"an integer argument, %o of '-1'",
+				"out=$(printf '%o' '-1' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: }; \
+				 e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:14}> tail=<${out: -14}> \
+				 err=<$e>\"",
+				"S=0 n=22 head=<17777777777777> tail=<77777777777777> err=<>\n",
+			),
+			(
+				"an integer argument, %o of '12 '",
+				"out=$(printf '%o' '12 ' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:14}> tail=<${out: -14}> \
+				 err=<$e>\"",
+				"S=1 n=2 head=<14> tail=<> err=<12 : invalid number>\n",
+			),
+			(
+				"an integer argument, %o of \"'A\"",
+				"out=$(printf '%o' ''\\''A' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:14}> \
+				 tail=<${out: -14}> err=<$e>\"",
+				"S=0 n=3 head=<101> tail=<> err=<>\n",
+			),
+			(
+				"an integer argument, %o of '1e3'",
+				"out=$(printf '%o' '1e3' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:14}> tail=<${out: -14}> \
+				 err=<$e>\"",
+				"S=1 n=1 head=<1> tail=<> err=<1e3: invalid number>\n",
+			),
+			(
+				"a star argument '12x' for [%*s]",
+				"out=$(printf '[%*s]' '12x' 'z' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:14}> \
+				 tail=<${out: -14}> err=<$e>\"",
+				"S=1 n=14 head=<[           z]> tail=<[           z]> err=<12x: invalid number>\n",
+			),
+			(
+				"a star argument '0x5g' for [%*s]",
+				"out=$(printf '[%*s]' '0x5g' 'z' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:14}> \
+				 tail=<${out: -14}> err=<$e>\"",
+				"S=1 n=7 head=<[    z]> tail=<> err=<0x5g: invalid hex number>\n",
+			),
+			(
+				"a star argument '019' for [%*s]",
+				"out=$(printf '[%*s]' '019' 'z' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:14}> \
+				 tail=<${out: -14}> err=<$e>\"",
+				"S=1 n=3 head=<[z]> tail=<> err=<019: invalid octal number>\n",
+			),
+			(
+				"a star argument '3 ' for [%*s]",
+				"out=$(printf '[%*s]' '3 ' 'z' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:14}> \
+				 tail=<${out: -14}> err=<$e>\"",
+				"S=1 n=5 head=<[  z]> tail=<> err=<3 : invalid number>\n",
+			),
+			(
+				"a star argument '12x' for [%.*s]",
+				"out=$(printf '[%.*s]' '12x' 'abcdefghijklmnop' 2>\"$top/err\"); s=$?; \
+				 e=$(<\"$top/err\"); e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} \
+				 head=<${out:0:14}> tail=<${out: -14}> err=<$e>\"",
+				"S=1 n=14 head=<[abcdefghijkl]> tail=<[abcdefghijkl]> err=<12x: invalid number>\n",
+			),
+			(
+				"a star argument '0x5g' for [%.*s]",
+				"out=$(printf '[%.*s]' '0x5g' 'abcdefghijklmnop' 2>\"$top/err\"); s=$?; \
+				 e=$(<\"$top/err\"); e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} \
+				 head=<${out:0:14}> tail=<${out: -14}> err=<$e>\"",
+				"S=1 n=7 head=<[abcde]> tail=<> err=<0x5g: invalid hex number>\n",
+			),
 		];
 		let mut failures = Vec::new();
 		for (name, script, bash) in rows {
