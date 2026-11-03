@@ -8,6 +8,10 @@
 - Added a fullscreen extension link browser for picking links already in terminal scrollback: press Alt+O again (or Page Up) while link tags are shown, or Alt+O with no extension link on screen ([#16476](https://github.com/can1357/oh-my-pi/pull/16476) by [@materemias](https://github.com/materemias))
 - Added a `:level` suffix to `^` model tags, such as `^openai-codex/gpt-6-astra:high`, that sets the tagged subagent's initial effort. Typing `:` after a mention lists the model's supported levels. The task tool's `effort` hint and `task.maxEffort` do not override the tagged level, and a per-call `model` for that agent fails as a conflict ([#17574](https://github.com/can1357/oh-my-pi/pull/17574) by [@a-glapinski](https://github.com/a-glapinski))
 
+### Fixed
+
+- Fixed a session that is being closed (Ctrl+D, `/exit`, a signal, a cancelled subagent) still sending model requests, writing entries after its `session_exit`, or losing or duplicating input it had already accepted. From `AgentSession.beginDispose()` on the agent sends no request, a turn that was streaming stops at its next request, every queued, dequeued or live-steered message, background result and `nextTurn` message is written once before `session_exit`, and `session_exit` is the last entry of the session's own file, also while a session switch or context reset is in flight. A prompt, steer, follow-up or extension message submitted after `beginDispose()` is now refused (`PromptDroppedError` with `sessionDisposed: true`, or `false`) instead of running once, and so is a side turn (`/btw`) ([#17956](https://github.com/can1357/oh-my-pi/pull/17956) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.16.0] - 2026-11-02
 
 ### Added

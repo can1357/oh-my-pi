@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `Agent.beginDispose()` refuses every provider request from then on, checked right before each send (so a run already streaming stops at its next request), and returns in one step the accepted input the transcript has not recorded: live steering, batches the loop dequeued or is still preparing, and both queues (`AgentDisposalInput`). `Agent.isDisposing` reports it, and `AgentLoopConfig.refuseModelCall` is the per-request hook behind it ([#17956](https://github.com/can1357/oh-my-pi/pull/17956) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.16.0] - 2026-11-02
 
 ### Changed

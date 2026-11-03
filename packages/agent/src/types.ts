@@ -419,6 +419,17 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	beforeModelCall?: AgentBeforeModelCall;
 
 	/**
+	 * Asked immediately before each provider request, after every await that prepares it
+	 * (context sync, `beforeModelCall`, credential resolution), so no await separates the
+	 * answer from the send. Returning a value refuses that request: the loop sends nothing and
+	 * throws the returned value. The loop asks again before every request of a run, including
+	 * continuations after tools, steering or follow-ups and Harmony re-samples, so a refusal
+	 * that starts mid-run stops the next request. The request already handed to the provider
+	 * is not affected.
+	 */
+	refuseModelCall?: () => unknown;
+
+	/**
 	 * Optional transform applied to tool call arguments before execution.
 	 * Use for deobfuscating secrets or rewriting arguments.
 	 */

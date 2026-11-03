@@ -474,6 +474,7 @@ import {
 	extractSessionInit,
 	type PersistedSessionInit,
 	type SessionManager,
+	type SessionManagerStateSnapshot,
 } from "./session-manager";
 import { SessionMemory, type SessionMemoryHost } from "./session-memory";
 import { buildSessionMetadata } from "./session-metadata";
@@ -633,6 +634,15 @@ class AgentStartPolicyChangedError extends Error {
 
 /** A missing model or credential rejects a prompt before it reaches the agent. */
 class PromptPreflightError extends Error {}
+
+/** The outgoing session a switch set aside, which dispose() restores if the switch is still open. */
+interface SwitchRollbackForDisposal {
+	state: SessionManagerStateSnapshot;
+	steering: AgentMessage[];
+	followUp: AgentMessage[];
+	nextTurn: CustomMessage[];
+	irc: { interrupts: AgentMessage[]; asides: AgentMessage[]; deferredWakes: AgentMessage[] };
+}
 
 /**
  * Rejection from {@link AgentSession.prompt} when the prompt was dropped before
@@ -1151,13 +1161,16 @@ export class AgentSession implements SettingsScope {
 	#autolearnCaptureAbortController: AbortController | undefined;
 	#autolearnCaptureTask: Promise<void> | undefined;
 	#isDisposed = false;
-	/** Queue records admitted after disposal; only these may reach a later model call. */
-	#postDisposalQueuedMessages = new WeakSet<AgentMessage>();
-	/** Accepted input beginDispose() took out of the queues (steers, follow-ups, background
-	 *  results); dispose() records it before session_exit. */
+	/** Accepted input beginDispose() took back (steers, follow-ups, background results,
+	 *  `nextTurn` messages); dispose() records it before session_exit. */
 	#inputTakenAtDisposal: AgentMessage[] = [];
-	/** Ephemeral turns started while the session was live; beginDispose() aborts them. */
+	/** `nextTurn` messages a prompt in setup took for its turn and has not handed to the agent
+	 *  yet; beginDispose() takes them back with the rest of the accepted input. */
+	#nextTurnMessagesInSetup = new Set<CustomMessage[]>();
+	/** Ephemeral turns in flight; beginDispose() aborts them. */
 	#ephemeralTurnAbortControllers = new Set<AbortController>();
+	/** What a switch that has not committed or rolled back yet set aside of the outgoing session. */
+	#switchRollback: SwitchRollbackForDisposal | undefined;
 	#modelDiscoveryAbortController = new AbortController();
 	/** Process-wide by default (double-spend safety across sessions); injectable for tests. */
 	#resetCoordinator: CodexAutoRedeemCoordinator;
@@ -6309,36 +6322,37 @@ export class AgentSession implements SettingsScope {
 	 * call this before their first await — otherwise work started in that async
 	 * gap slips past the disposal guards.
 	 *
-	 * It also ends the work the session has in flight that has not reached the
-	 * agent. After this call that work switches no model, appends no entry,
-	 * sends no request and emits no event that reports a result; the only
-	 * events it still emits are the end events of its own cancellation (an
-	 * aborted compaction, a cancelled retry), which close start events that
-	 * listeners already received. Input the session accepted is not lost: this
-	 * call itself writes the IRC messages it had queued, before it returns, and
-	 * `dispose()` writes the rest of the accepted input no turn ran (see
-	 * `#recordInputTakenAtDisposal`) after the running turn's entries and before
-	 * `session_exit`. Every controller of that work is aborted here, and each
-	 * continuation checks its controller, or the disposed flag, after every await:
+	 * Two guarantees hold from this call on. First, the agent sends no provider request:
+	 * {@link Agent.beginDispose} makes its loop refuse every request, per call, so a turn
+	 * already streaming ends at its next request and nothing submitted later sends one.
+	 * Second, every input the session accepted is kept exactly once: this call takes back, in
+	 * one step, what no turn has recorded (queued and dequeued steers and follow-ups, live
+	 * steering, background results, `nextTurn` messages), and `dispose()` records it after the
+	 * running turn's entries and before `session_exit` (see `#takeAcceptedInputAtDisposal`).
+	 * IRC messages the session had queued are written inside this call.
+	 *
+	 * The session ends the rest of its own in-flight work here: after this call that work
+	 * switches no model, appends no entry and emits no event that reports a result; the only
+	 * events it still emits are the end events of its own cancellation (an aborted
+	 * compaction, a cancelled retry), which close start events that listeners already
+	 * received. Every controller of that work is aborted here, and each continuation checks
+	 * its controller, or the disposed flag, after its awaits:
 	 *
 	 * - prompt setup: `#promptSetupAbortController`, and the `#promptGeneration`
 	 *   bump that every setup step compares. A prompt still in setup is dropped,
 	 *   and `prompt()` rejects with {@link PromptDroppedError};
-	 * - prompts submitted before this call that still wait to be dispatched or
-	 *   queued (deferred-extension load, the maintenance barrier, commands, image
-	 *   preparation): they are dropped at their next step, and `prompt()`, `steer()`
-	 *   and `followUp()` reject with {@link PromptDroppedError};
-	 * - custom messages submitted before this call (`sendCustomMessage`,
-	 *   `promptCustomMessage`, asides and `triggerTurn` sends among them): they are
-	 *   dropped at their next step, start no turn, and resolve `false`;
-	 * - steers and follow-ups already queued for the running turn: taken out of the
-	 *   queues here, so the turn sends no request for them; `dispose()` records them;
+	 * - submissions (`prompt()`, `steer()`, `followUp()`, `promptCustomMessage()`,
+	 *   `sendCustomMessage()`), whether made before this call and still waiting to be
+	 *   dispatched or queued, or made after it: they are dropped, `prompt()`, `steer()`
+	 *   and `followUp()` reject with {@link PromptDroppedError} (`sessionDisposed: true`),
+	 *   and the custom-message APIs resolve `false`;
 	 * - turns the session would start on its own: an IRC wake, an idle background
 	 *   completion. They start none; `dispose()` records their messages;
 	 * - session transitions in progress (`newSession`, `fork`, `switchSession`,
-	 *   `branch`, `branchFromBtw`): they stop before their commit and report a
-	 *   cancellation (`switchSession` rejects after its rollback); one that committed
-	 *   earlier completes but emits no `session_switch` or `session_branch`;
+	 *   `branch`, `branchFromBtw`, `resetSessionContext`): they stop before their commit
+	 *   and report a cancellation (`switchSession` rejects after its rollback); one that
+	 *   committed earlier completes but emits no `session_switch` or `session_branch`.
+	 *   `dispose()` waits, bounded, for them before it writes `session_exit`;
 	 * - ephemeral side turns (`runEphemeralTurn`): they reject with an `AbortError`,
 	 *   a request in flight is aborted, and no further text is delivered;
 	 * - the vision descriptions of that setup (`#imageDescriptionAbortControllers`);
@@ -6356,11 +6370,9 @@ export class AgentSession implements SettingsScope {
 	 * - cache warming, title generation, autolearn capture, local memory startup,
 	 *   model discovery and the advisor runtimes.
 	 *
-	 * This does not stop every request after disposal. A prompt submitted after
-	 * this call still runs once on the current model, and a turn the agent is
-	 * already running continues until `dispose()` aborts the agent after
-	 * `session_shutdown`. Model fallback, primary restoration, prewalk switches and
-	 * automatic compaction refuse a disposed session in both cases.
+	 * The provider request already in flight when this is called is not cut: that response
+	 * (and its tools) runs on until `dispose()` aborts the agent after `session_shutdown`, and
+	 * retries the provider makes inside that one request belong to it.
 	 */
 	beginDispose(): void {
 		if (this.#isDisposed) return;
@@ -6388,12 +6400,10 @@ export class AgentSession implements SettingsScope {
 			this.#cacheWarmer.onRefreshEnd = undefined;
 			this.#cacheWarmer.cancel();
 		}
-		// A queued steer/follow-up has not reached a model call yet. Take it out of the queues
-		// before the still-running turn consumes it and sends another request during the
-		// wrapper's teardown gap; dispose() records it after that turn (#takeQueuedInputAtDisposal).
-		// The installed preparation gate recognizes only later arrivals explicitly marked as
-		// post-disposal submissions.
-		this.#takeQueuedInputAtDisposal();
+		// One synchronous step: the agent refuses every provider request from here on, and every
+		// accepted input no turn recorded comes back to the session, which records it before
+		// session_exit (#takeAcceptedInputAtDisposal).
+		this.#takeAcceptedInputAtDisposal();
 		for (const controller of this.#ephemeralTurnAbortControllers) controller.abort();
 		this.#detachUsageBeforeQueueDequeue?.();
 		this.#detachUsageBeforeQueueDequeue = undefined;
@@ -6405,9 +6415,6 @@ export class AgentSession implements SettingsScope {
 		// An IRC message the session already accepted is written now, inside this call: its
 		// sender was told it was delivered, and dropping it would lose it. Nothing later adds one.
 		this.#irc.flushPending();
-		// Background results waiting for the next model call or idle flush: accepted, so kept for
-		// the disposal record instead of being dropped; the running turn sends no request for them.
-		this.#inputTakenAtDisposal.push(...this.yieldQueue.takeAll());
 		this.agent.setAsideMessageProvider(undefined);
 		this.agent.hasIrcInterrupts = undefined;
 		this.agent.hasBackgroundCompletions = undefined;
@@ -6595,6 +6602,18 @@ export class AgentSession implements SettingsScope {
 		}
 		await this.#drainAutolearnCapture();
 		await this.#memory.transition;
+		// A session transition beginDispose() refused may still be rolling back to this session
+		// (a switch that already pointed the writer at its target): let it finish, bounded, so the
+		// input record and `session_exit` below land in this session's own file.
+		try {
+			await withTimeout(
+				this.waitForSessionTransition(),
+				options.drainTimeoutMs ?? POST_PROMPT_DRAIN_TIMEOUT_MS,
+				"Timed out waiting for a session transition to settle during dispose",
+			);
+		} catch (error) {
+			logger.warn("Session transition still settling at dispose deadline", { error: String(error) });
+		}
 
 		const hindsightState = this.getHindsightSessionState();
 		const mnemopiState = setMnemopiSessionState(this, undefined);
@@ -6683,6 +6702,20 @@ export class AgentSession implements SettingsScope {
 		// appends. Until here a signal or crash during teardown still records its own
 		// marker through the postmortem recorder. Steers and follow-ups beginDispose()
 		// took out of the queues go in just before it, after the turn they waited for.
+		// A switch still open past the wait above (a hook that has not returned) left the writer
+		// on its target: point it back at this session, as the switch's rollback would, and take
+		// back the input the switch set aside.
+		const switchRollback = this.#switchRollback;
+		if (switchRollback && this.#sessionTransitionSettled) {
+			this.#switchRollback = undefined;
+			this.sessionManager.restoreState(switchRollback.state);
+			this.#inputTakenAtDisposal.push(
+				...this.#keptQueuedInput(switchRollback.steering),
+				...this.#keptQueuedInput(switchRollback.followUp),
+				...switchRollback.nextTurn.filter(message => isDisplayableQueuedMessage(message)),
+			);
+			this.#irc.restorePending(switchRollback.irc);
+		}
 		this.#recordInputTakenAtDisposal();
 		this.#recordSessionExit(options.reason ?? this.#cleanupExitReason ?? "dispose");
 		this.#cancelExitRecorder?.();
@@ -6747,26 +6780,35 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/**
-	 * Takes the steers and follow-ups the session accepted but has not run out of the agent, so
-	 * no turn sends a request for them. They were accepted (their `prompt()`/`steer()`/
-	 * `followUp()` already resolved), so they are not dropped: the displayable ones, with the
-	 * hidden companions queued just before each (keyword notices, image descriptions), are kept
-	 * for {@link #recordInputTakenAtDisposal}. Hidden context the user never sees (mode context,
-	 * developer directives, TTSR deliveries) is discarded, as an editor-restoring interrupt
-	 * discards it.
+	 * Takes back, in one synchronous step, every input the session accepted that no turn has
+	 * recorded, so nothing the agent or the session holds can reach a model call, and keeps it
+	 * for {@link #recordInputTakenAtDisposal}:
 	 *
-	 * It withdraws what the run dequeued but never recorded (steering the in-flight response
-	 * holds, a batch taken for its next model call) as an editor-restoring interrupt does, and
-	 * keeps it ahead of what is still queued, which is the order the model would have seen.
+	 * - from the agent ({@link Agent.beginDispose}, which from then on refuses every provider
+	 *   request): steering live steering took, batches the loop dequeued for its next request,
+	 *   batches still in preparation, and both queues, in the order the model would have seen
+	 *   them. The displayable ones, with the hidden companions queued just before each (keyword
+	 *   notices, image descriptions), are kept; hidden context the user never sees (mode context,
+	 *   developer directives, TTSR deliveries) is discarded, as an editor-restoring interrupt
+	 *   discards it;
+	 * - background results from the yield queue, those it already lent to the loop as thunks
+	 *   included (the thunks then return null);
+	 * - displayable `nextTurn` messages, those a prompt in setup took for its turn included
+	 *   (that setup is superseded and dispatches nothing).
+	 *
 	 * Called at {@link beginDispose} and again at the disposal record, for what arrived since.
 	 */
-	#takeQueuedInputAtDisposal(): void {
-		const withdrawn = this.agent.withdrawUndeliveredQueuedMessages();
+	#takeAcceptedInputAtDisposal(): void {
+		const taken = this.agent.beginDispose();
 		this.#inputTakenAtDisposal.push(
-			...this.#keptQueuedInput([...withdrawn.steering, ...this.agent.peekSteeringQueue()]),
-			...this.#keptQueuedInput([...withdrawn.followUp, ...this.agent.peekFollowUpQueue()]),
+			...this.#keptQueuedInput(taken.steering),
+			...this.#keptQueuedInput(taken.followUp),
+			...this.yieldQueue.takeAll(),
 		);
-		this.agent.replaceQueues([], []);
+		const nextTurn = [...[...this.#nextTurnMessagesInSetup].flat(), ...this.#pendingNextTurnMessages];
+		this.#nextTurnMessagesInSetup.clear();
+		this.#pendingNextTurnMessages = [];
+		this.#inputTakenAtDisposal.push(...nextTurn.filter(message => isDisplayableQueuedMessage(message)));
 	}
 
 	/** The displayable messages of `queue`, each with the hidden companions queued just before it. */
@@ -6793,20 +6835,15 @@ export class AgentSession implements SettingsScope {
 	 * Records the input the session accepted but never ran, as transcript entries that start
 	 * no turn. Disposal calls it after the running turn's entries settled and before
 	 * `session_exit`, so a resumed session has the messages in the order they would have run.
-	 * Besides what {@link beginDispose} took, it takes what arrived or came back since: steers
-	 * and follow-ups queued after `beginDispose()` that no turn ran, live steering the aborted
-	 * response held, background results, displayable `nextTurn` messages waiting for a prompt,
-	 * and IRC records accepted after `beginDispose()` flushed them or parked for a pooled worker.
+	 * Besides what {@link beginDispose} took ({@link #takeAcceptedInputAtDisposal}), it takes
+	 * what arrived or came back since, and IRC records accepted after `beginDispose()` flushed
+	 * them or parked for a pooled worker.
 	 */
 	#recordInputTakenAtDisposal(): void {
-		this.#takeQueuedInputAtDisposal();
-		this.#inputTakenAtDisposal.push(...this.yieldQueue.takeAll());
-		const nextTurn = this.#pendingNextTurnMessages.filter(message => isDisplayableQueuedMessage(message));
-		this.#pendingNextTurnMessages = [];
+		this.#takeAcceptedInputAtDisposal();
 		const irc = this.#irc.clearPending();
 		for (const message of [
 			...this.#inputTakenAtDisposal.splice(0),
-			...nextTurn,
 			...irc.interrupts,
 			...irc.asides,
 			...irc.deferredWakes,
@@ -6865,7 +6902,8 @@ export class AgentSession implements SettingsScope {
 	 * clears the conversation.
 	 *
 	 * Returns `undefined` without mutating anything while a response is
-	 * streaming or a foreground bash/python execution is in flight.
+	 * streaming or a foreground bash/python execution is in flight, or once the
+	 * session is disposing (also when disposal begins before the reset clears it).
 	 */
 	async resetSessionContext(): Promise<ResetSessionContextResult | undefined> {
 		using _transition = this.#beginSessionTransition();
@@ -6875,7 +6913,7 @@ export class AgentSession implements SettingsScope {
 		// streaming, so a command finishing after the reset would land its output
 		// after the boundary and re-enter the supposedly empty context. The
 		// sibling boundary op (branchFromBtw) guards on the same predicates.
-		if (this.isStreaming || this.isBashRunning || this.isEvalRunning) return undefined;
+		if (this.isStreaming || this.isBashRunning || this.isEvalRunning || this.#isDisposed) return undefined;
 		const droppedCount = this.agent.state.messages.length;
 
 		// Tear down the same per-turn runtime state that newSession() resets across
@@ -6890,6 +6928,9 @@ export class AgentSession implements SettingsScope {
 		//     (mirrors newSession()).
 		this.#promptGeneration++;
 		await this.#cancelPostPromptTasks();
+		// The last await before the reset clears the agent and its queues: a session that began
+		// disposing during it keeps that input for the disposal record (see beginDispose).
+		if (this.#isDisposed) return undefined;
 		this.#cancelOwnAsyncJobs();
 
 		// Drop the conversation: messages, queued steers/follow-ups, pending tool
@@ -8394,11 +8435,9 @@ export class AgentSession implements SettingsScope {
 	 * being disposed always rejects with it (`sessionDisposed: true`).
 	 */
 	async prompt(text: string, options?: PromptOptions): Promise<boolean> {
-		// Captured before any await: a prompt submitted while the session is live is dropped, not
-		// dispatched or queued, if disposal begins while it waits; one submitted after
-		// beginDispose() runs once (see beginDispose).
-		const submittedLive = !this.#isDisposed;
-		return this.#admitSubmission(() => this.#prompt(text, options, submittedLive));
+		// A prompt that finds the session disposing, now or after an await on its way to
+		// dispatch or a queue, is dropped and rejects (see beginDispose).
+		return this.#admitSubmission(() => this.#prompt(text, options));
 	}
 
 	/**
@@ -8443,7 +8482,7 @@ export class AgentSession implements SettingsScope {
 		this.#toolChoiceQueue.removeByLabel("plan-mode-decision");
 	}
 
-	async #prompt(text: string, options: PromptOptions | undefined, submittedLive: boolean): Promise<boolean> {
+	async #prompt(text: string, options?: PromptOptions): Promise<boolean> {
 		// Stamp the operator's submission instant before ANY async preprocessing —
 		// command execution, image normalization, vision-model description — so the
 		// prompt→yield delta includes the whole wait, whatever path the prompt takes.
@@ -8468,9 +8507,9 @@ export class AgentSession implements SettingsScope {
 			// Locally handled commands and failed dispatches release that claim.
 			const release = await this.#maintenance.waitForMaintenanceCleanup();
 			const outcome: PromptDispatchOutcome = { sessionClaimed: false };
-			if (!release) return await this.#dispatchPrompt(text, options, submittedAt, outcome, submittedLive);
+			if (!release) return await this.#dispatchPrompt(text, options, submittedAt, outcome);
 			try {
-				return await this.#dispatchPrompt(text, options, submittedAt, outcome, submittedLive);
+				return await this.#dispatchPrompt(text, options, submittedAt, outcome);
 			} finally {
 				release(outcome.sessionClaimed);
 			}
@@ -8494,14 +8533,13 @@ export class AgentSession implements SettingsScope {
 		options: PromptOptions | undefined,
 		submittedAt: number,
 		outcome: PromptDispatchOutcome,
-		submittedLive: boolean,
 	): Promise<boolean> {
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
 		// Slash/custom-command handling below rewrites `text`; keep the original
 		// so a dropped prompt is handed back exactly as the user typed it.
 		const typedText = text;
 		// Deferred-extension load and the maintenance barrier ran before this.
-		this.#throwIfDroppedByDisposal(submittedLive, typedText, options, outcome);
+		this.#throwIfDroppedByDisposal(typedText, options, outcome);
 		// Handle extension commands first (execute immediately, even during streaming)
 		if (expandPromptTemplates && text.startsWith("/")) {
 			if (options?.runCommands !== false) {
@@ -8527,7 +8565,7 @@ export class AgentSession implements SettingsScope {
 			}
 		}
 		// Commands ran across awaits of their own.
-		this.#throwIfDroppedByDisposal(submittedLive, typedText, options, outcome);
+		this.#throwIfDroppedByDisposal(typedText, options, outcome);
 
 		// Expand file-based prompt templates if requested
 		const templated = expandPromptTemplates ? expandPromptTemplate(text, [...this.#promptTemplates]) : text;
@@ -8574,7 +8612,7 @@ export class AgentSession implements SettingsScope {
 				promptGeneration: queueGeneration,
 			});
 			outcome.sessionClaimed = queued;
-			if (!queued) this.#throwIfDroppedByDisposal(submittedLive, typedText, options, outcome);
+			if (!queued) this.#throwIfDroppedByDisposal(typedText, options, outcome);
 			if (!queued && this.#promptGeneration !== queueGeneration && !options?.synthetic) {
 				this.#promptDropped?.({ text: typedText, images: options?.images });
 			}
@@ -8619,7 +8657,7 @@ export class AgentSession implements SettingsScope {
 		// would dispatch a brand-new turn as if the abort never happened. Drop the
 		// prompt here instead — same contract as #promptWithMessage's own
 		// generation-race checks further down.
-		this.#throwIfDroppedByDisposal(submittedLive, typedText, options, outcome);
+		this.#throwIfDroppedByDisposal(typedText, options, outcome);
 		if (this.#promptGeneration !== preflightGeneration) {
 			outcome.sessionClaimed = false;
 			if (!options?.synthetic) {
@@ -8654,7 +8692,7 @@ export class AgentSession implements SettingsScope {
 				onPromptAdmitted: options?.onPromptAdmitted,
 				onPromptQueued: options?.onPromptQueued,
 			});
-			if (!queued) this.#throwIfDroppedByDisposal(submittedLive, typedText, options, outcome);
+			if (!queued) this.#throwIfDroppedByDisposal(typedText, options, outcome);
 			outcome.sessionClaimed = true;
 			return true;
 		}
@@ -8744,25 +8782,23 @@ export class AgentSession implements SettingsScope {
 			const refusal = this.#costCapRefusal !== refusalBeforeDispatch ? this.#costCapRefusal : undefined;
 			this.#promptDropped?.({ text: typedText, images: options?.images, reason: refusal?.message });
 		}
-		// A prompt submitted before disposal has no later turn to carry it and may have no host
-		// left to hand it back to, so its drop is reported to every caller, not only one that opted in.
-		if (!dispatched && submittedLive && this.#isDisposed) throw new PromptDroppedError({ sessionDisposed: true });
+		// A disposing session has no later turn to carry the prompt and may have no host left to
+		// hand it back to, so its drop is reported to every caller, not only one that opted in.
+		if (!dispatched && this.#isDisposed) throw new PromptDroppedError({ sessionDisposed: true });
 		if (!dispatched && options?.throwOnDrop) throw new PromptDroppedError();
 		return true;
 	}
 
 	/**
-	 * Drops a prompt submitted while the session was live that finds it disposing after an await
-	 * on its way to dispatch or a queue: it reaches neither and rejects like a prompt dropped in
-	 * setup. A prompt submitted after {@link beginDispose} passes, and runs once.
+	 * Drops a prompt that finds the session disposing, at submission or after an await on its
+	 * way to dispatch or a queue: it reaches neither and rejects like a prompt dropped in setup.
 	 */
 	#throwIfDroppedByDisposal(
-		submittedLive: boolean,
 		typedText: string,
 		options: PromptOptions | undefined,
 		outcome: PromptDispatchOutcome,
 	): void {
-		if (!submittedLive || !this.#isDisposed) return;
+		if (!this.#isDisposed) return;
 		outcome.sessionClaimed = false;
 		if (!options?.synthetic) this.#promptDropped?.({ text: typedText, images: options?.images });
 		throw new PromptDroppedError({ sessionDisposed: true });
@@ -8784,8 +8820,7 @@ export class AgentSession implements SettingsScope {
 		},
 	): Promise<boolean> {
 		// Same disposal contract as prompt(), reported through this method's own drop result (false).
-		const submittedLive = !this.#isDisposed;
-		return this.#admitSubmission(() => this.#promptCustomMessage(message, options, submittedLive));
+		return this.#admitSubmission(() => this.#promptCustomMessage(message, options));
 	}
 
 	async #promptCustomMessage<T = unknown>(
@@ -8797,16 +8832,15 @@ export class AgentSession implements SettingsScope {
 					onPromptQueued?: PromptOptions["onPromptQueued"];
 			  })
 			| undefined,
-		submittedLive: boolean,
 	): Promise<boolean> {
 		// Same barrier/claim protocol as prompt(): skill invocations, collab peer
 		// prompts and the CLI initial message must not start during idle/manual
 		// compaction or before a handoff commits its history.
 		const release = await this.#maintenance.waitForMaintenanceCleanup();
 		const outcome: PromptDispatchOutcome = { sessionClaimed: false };
-		if (!release) return this.#dispatchCustomPrompt(message, options, outcome, submittedLive);
+		if (!release) return this.#dispatchCustomPrompt(message, options, outcome);
 		try {
-			return await this.#dispatchCustomPrompt(message, options, outcome, submittedLive);
+			return await this.#dispatchCustomPrompt(message, options, outcome);
 		} finally {
 			release(outcome.sessionClaimed);
 		}
@@ -8822,10 +8856,9 @@ export class AgentSession implements SettingsScope {
 			  })
 			| undefined,
 		outcome: PromptDispatchOutcome,
-		submittedLive: boolean,
 	): Promise<boolean> {
 		// Deferred-extension load and the maintenance barrier ran before this.
-		if (submittedLive && this.#isDisposed) return false;
+		if (this.#isDisposed) return false;
 		const textContent =
 			typeof message.content === "string"
 				? message.content
@@ -8888,8 +8921,8 @@ export class AgentSession implements SettingsScope {
 		const descriptionNotice = hasSkillImages
 			? await this.#buildSkillImageDescriptionNotice(preparedMessage)
 			: undefined;
-		// Disposal during that preparation drops a skill submitted while the session was live.
-		if (hasSkillImages && submittedLive && this.#isDisposed) return false;
+		// Disposal during that preparation drops the skill.
+		if (hasSkillImages && this.#isDisposed) return false;
 		// Same drop as #dispatchPrompt: abort() during normalization or the vision
 		// description must not publish the skill or start a turn afterwards.
 		if (hasSkillImages && this.#promptGeneration !== preparationGeneration) {
@@ -8944,7 +8977,6 @@ export class AgentSession implements SettingsScope {
 		const userMessages = messages.filter(isUserAuthoredQueuedMessage);
 		const first = userMessages[0];
 		if (!first) return undefined;
-		const postDisposalSubmission = userMessages.every(message => this.#postDisposalQueuedMessages.has(message));
 		const text: string[] = [];
 		const images: ImageContent[] = [];
 		for (const message of userMessages) {
@@ -8965,21 +8997,8 @@ export class AgentSession implements SettingsScope {
 		// Steering amends the running task; only a follow-up starts a new one worth routing.
 		const preparation =
 			queue === "followUp" && userMessages.some(message => this.#isAutoPrewalkTask(message))
-				? this.#prepareQueuedAutoPrewalkTask(
-						first,
-						promptText,
-						preparationImages,
-						signal,
-						postDisposalSubmission ? "post-disposal-queued" : "queued",
-					)
-				: this.#prepareAgentStart(
-						first,
-						promptText,
-						preparationImages,
-						this.#promptGeneration,
-						signal,
-						postDisposalSubmission ? "post-disposal-queued" : "queued",
-					);
+				? this.#prepareQueuedAutoPrewalkTask(first, promptText, preparationImages, signal)
+				: this.#prepareAgentStart(first, promptText, preparationImages, this.#promptGeneration, signal, "queued");
 		return this.#relaxOnDelivery(preparation, promptText);
 	};
 
@@ -9007,12 +9026,11 @@ export class AgentSession implements SettingsScope {
 		prompt: string,
 		images: ImageContent[] | undefined,
 		signal: AbortSignal,
-		origin: "queued" | "post-disposal-queued",
 	): Promise<QueuedMessagePreparation> {
 		const generation = this.#promptGeneration;
 		await this.#prewalk.beginAutoTask();
 		const autoPrewalk = this.#prewalk.classifyAuto(prompt, signal);
-		const preparation = await this.#prepareAgentStart(message, prompt, images, generation, signal, origin);
+		const preparation = await this.#prepareAgentStart(message, prompt, images, generation, signal, "queued");
 		const decision = await autoPrewalk;
 		return {
 			commit: () => {
@@ -9035,8 +9053,7 @@ export class AgentSession implements SettingsScope {
 	 * Stage extension results; committing them must remain synchronous with delivery validation.
 	 *
 	 * `signal` cancels awaited setup (memory auto-recall) for both direct and queued turns.
-	 * `origin` distinguishes a pre-disposal queued turn, which never starts after disposal, from
-	 * direct and explicitly marked post-disposal queue submissions, which run once.
+	 * `origin` is "queued" for a queued batch, whose failure blocks the queued settle drain.
 	 */
 	async #prepareAgentStart(
 		message: AgentMessage,
@@ -9044,15 +9061,12 @@ export class AgentSession implements SettingsScope {
 		images: ImageContent[] | undefined,
 		generation: number,
 		signal: AbortSignal | undefined,
-		origin: "direct" | "queued" | "post-disposal-queued",
+		origin: "direct" | "queued",
 	): Promise<QueuedMessagePreparation & { baseXdevCatalogDelivered: boolean }> {
 		const sessionGeneration = this.#sessionGeneration;
-		const alreadyDisposing = this.#isDisposed && origin !== "queued";
+		// beginDispose() bumps the prompt generation, so a disposing session is never current.
 		const isCurrent = () =>
-			this.#promptGeneration === generation &&
-			this.#sessionGeneration === sessionGeneration &&
-			(!this.#isDisposed || alreadyDisposing) &&
-			!signal?.aborted;
+			this.#promptGeneration === generation && this.#sessionGeneration === sessionGeneration && !signal?.aborted;
 		const cancelled = { baseXdevCatalogDelivered: false, commit: () => undefined };
 		if (this.hasPendingDeferredExtensions) await this.loadDeferredExtensions();
 		const pendingMCPDiscovery = this.#pendingMCPDiscovery;
@@ -9176,6 +9190,7 @@ export class AgentSession implements SettingsScope {
 		// abort() and beginDispose() bump the generation and abort this controller: a prompt
 		// still in setup is dropped at the next check, before it writes or sends anything.
 		const superseded = () => this.#promptGeneration !== generation || setupAbort.signal.aborted;
+		let nextTurnMessages: CustomMessage[] | undefined;
 		try {
 			options?.onPromptAdmitted?.();
 			await this.#recovery.maybeRestoreRetryFallbackPrimary(setupAbort.signal);
@@ -9285,11 +9300,12 @@ export class AgentSession implements SettingsScope {
 			// it subsumes, avoiding a contradictory materialized notice.
 			const xdevMountNoticeIndex = messages.length;
 			messages.push(message);
-			// Inject any pending "nextTurn" messages as context alongside the user message
-			for (const msg of this.#pendingNextTurnMessages) {
-				messages.push(msg);
-			}
+			// Inject any pending "nextTurn" messages as context alongside the user message. Until
+			// they reach the agent this setup holds them, and beginDispose() can take them back.
+			nextTurnMessages = this.#pendingNextTurnMessages;
 			this.#pendingNextTurnMessages = [];
+			this.#nextTurnMessagesInSetup.add(nextTurnMessages);
+			messages.push(...nextTurnMessages);
 
 			// Auto-read @filepath mentions
 			const fileMentions = extractFileMentions(expandedText);
@@ -9433,6 +9449,8 @@ export class AgentSession implements SettingsScope {
 			if (planReferenceMessage) {
 				this.#planReferenceSent = true;
 			}
+			// From here the agent's run records them (it may be a run disposal refuses).
+			if (nextTurnMessages) this.#nextTurnMessagesInSetup.delete(nextTurnMessages);
 			try {
 				const run = this.#recovery.promptAgentWithIdleRetry(messages, agentPromptOptions, () => {
 					// `agent.prompt` claims streaming synchronously before its
@@ -9459,6 +9477,7 @@ export class AgentSession implements SettingsScope {
 			// against zero.
 			this.#endInFlight(inFlightEpoch);
 			if (this.#promptSetupAbortController === setupAbort) this.#promptSetupAbortController = undefined;
+			if (nextTurnMessages) this.#nextTurnMessagesInSetup.delete(nextTurnMessages);
 		}
 	}
 
@@ -9643,15 +9662,14 @@ export class AgentSession implements SettingsScope {
 		// Stamp before image preprocessing so a queued image steer measures from
 		// the operator's submission, not after the vision-model description.
 		const submittedAt = Date.now();
-		const submittedLive = !this.#isDisposed;
 		const queued = await this.#queueUserMessage(expandedText, images, "steer", {
 			timestamp: submittedAt,
 			attribution: options?.attribution,
 			rawText: text,
 			onPromptQueued: options?.onPromptQueued,
 		});
-		// Submitted while live, then disposal began during image preparation: never queued.
-		if (!queued && submittedLive && this.#isDisposed) throw new PromptDroppedError({ sessionDisposed: true });
+		// Disposal began before it was queued: never queued.
+		if (!queued && this.#isDisposed) throw new PromptDroppedError({ sessionDisposed: true });
 	}
 
 	/**
@@ -9671,7 +9689,6 @@ export class AgentSession implements SettingsScope {
 		// Stamp before image preprocessing so a queued image follow-up measures
 		// from the operator's submission, not after the vision-model description.
 		const submittedAt = Date.now();
-		const submittedLive = !this.#isDisposed;
 		if (!options?.synthetic) {
 			const queued = await this.#queueUserMessage(expandedText, images, "followUp", {
 				timestamp: submittedAt,
@@ -9679,7 +9696,7 @@ export class AgentSession implements SettingsScope {
 				rawText: text,
 				onPromptQueued: options?.onPromptQueued,
 			});
-			if (!queued && submittedLive && this.#isDisposed) throw new PromptDroppedError({ sessionDisposed: true });
+			if (!queued && this.#isDisposed) throw new PromptDroppedError({ sessionDisposed: true });
 			return;
 		}
 		// Synthetic branch: agent-initiated hidden developer message. Bypass
@@ -9695,7 +9712,7 @@ export class AgentSession implements SettingsScope {
 			? await this.#buildImageDescriptionNotice(normalizedImages)
 			: undefined;
 		// Agent-initiated: a disposal that began during image preparation drops it quietly.
-		if (submittedLive && this.#isDisposed) return;
+		if (this.#isDisposed) return;
 		this.#allowQueuedMessageDrainRetry();
 		if (imageDescriptionNotice) this.agent.followUp(imageDescriptionNotice);
 		const directive: AgentMessage = {
@@ -9891,9 +9908,6 @@ export class AgentSession implements SettingsScope {
 		// description was in flight and drop a record that would otherwise land in a
 		// different session's queue.
 		const sessionGeneration = this.#sessionGeneration;
-		// A message submitted while the session was live is not queued once disposal began during
-		// the image awaits below; one queued after beginDispose() keeps the prompt exception.
-		const submittedLive = !this.#isDisposed;
 		// A queued user message (RPC/SDK/collab steer or follow-up, or a typed message
 		// while streaming) is a deliberate resume; re-enable advisor auto-resume that
 		// a user interrupt suppressed. An aside is non-interrupting by design — it must
@@ -9918,7 +9932,7 @@ export class AgentSession implements SettingsScope {
 			: normalizedImages?.length
 				? await this.#buildImageDescriptionNotice(normalizedImages)
 				: undefined;
-		if (submittedLive && this.#isDisposed) return false;
+		if (this.#isDisposed) return false;
 		if (options?.promptGeneration !== undefined && this.#promptGeneration !== options.promptGeneration) {
 			return false;
 		}
@@ -9940,7 +9954,7 @@ export class AgentSession implements SettingsScope {
 		}
 		if (mode === "aside") {
 			if (await this.#sessionGenerationChanged(sessionGeneration)) return false;
-			if (submittedLive && this.#isDisposed) return false;
+			if (this.#isDisposed) return false;
 			const records: AgentMessage[] = [...prependMessages, ...attachmentSourceNotices];
 			if (imageDescriptionNotice) records.push(imageDescriptionNotice);
 			const userMessage: AgentMessage = { role: "user", content, attribution, timestamp: timestamp ?? Date.now() };
@@ -9971,7 +9985,6 @@ export class AgentSession implements SettingsScope {
 				timestamp: timestamp ?? Date.now(),
 			};
 			this.#queuedMessageRawText.set(userMessage, rawText);
-			if (!submittedLive) this.#postDisposalQueuedMessages.add(userMessage);
 			this.agent.followUp(userMessage);
 		} else {
 			for (const notice of prependMessages) this.agent.steer(notice);
@@ -9985,7 +9998,6 @@ export class AgentSession implements SettingsScope {
 				timestamp: timestamp ?? Date.now(),
 			};
 			this.#queuedMessageRawText.set(userMessage, rawText);
-			if (!submittedLive) this.#postDisposalQueuedMessages.add(userMessage);
 			this.agent.steer(userMessage);
 			// Wake any listener parked on steering arrival (the ACP permission
 			// gate): the message is on the queue now, so its wait ends even
@@ -10342,18 +10354,16 @@ export class AgentSession implements SettingsScope {
 	/** @returns true iff `agent.prompt` was actually invoked. An abort or session-generation
 	 *  change racing the usage-aware preflight can return before dispatch — callers that treat
 	 *  this as proof of agent work (e.g. suppressing a local prompt_result because agent events
-	 *  are expected) must not assume dispatch happened just because this was awaited. A message
-	 *  submitted while the session was live (`submittedLive`) starts no turn once disposal began
-	 *  during the preflight; one submitted after beginDispose() runs once (see beginDispose). */
+	 *  are expected) must not assume dispatch happened just because this was awaited. A
+	 *  disposal that began during the preflight starts no turn (see beginDispose). */
 	async #promptAgentInitiatedMessage(
 		message: CustomMessage,
-		submittedLive: boolean,
 		options?: { acceptTerminalEmptyStop?: boolean },
 	): Promise<boolean> {
 		const inFlightEpoch = this.#beginInFlight();
 		try {
 			if (!(await this.#runUsageAwarePreflightForNextModelCall())) return false;
-			if (submittedLive && this.#isDisposed) return false;
+			if (this.#isDisposed) return false;
 			const acceptTerminalEmptyStop = options?.acceptTerminalEmptyStop === true;
 			if (acceptTerminalEmptyStop) {
 				this.#resetPromptMaintenanceState();
@@ -10395,7 +10405,6 @@ export class AgentSession implements SettingsScope {
 	): Promise<boolean> {
 		// Captured before the normalization await below — see #sessionGeneration's doc comment.
 		const sessionGeneration = this.#sessionGeneration;
-		const submittedLive = !this.#isDisposed;
 		const details =
 			options?.queueChipText !== undefined
 				? ({
@@ -10425,10 +10434,10 @@ export class AgentSession implements SettingsScope {
 		const descriptionNotice = preprocessed
 			? preprocessed.descriptionNotice
 			: await this.#buildSkillImageDescriptionNotice(normalizedAppMessage);
-		if (submittedLive && this.#isDisposed) return false;
+		if (this.#isDisposed) return false;
 		if (deliverAs === "aside") {
 			if (await this.#sessionGenerationChanged(sessionGeneration)) return false;
-			if (submittedLive && this.#isDisposed) return false;
+			if (this.#isDisposed) return false;
 			// Non-interrupting: rides the same step-boundary aside poll as
 			// sendCustomMessage's streaming aside branch — not an agent-core queue
 			// entry, so no drain-retry latch and no idle-queue drain scheduling.
@@ -10447,7 +10456,6 @@ export class AgentSession implements SettingsScope {
 		}
 		this.#allowQueuedMessageDrainRetry();
 		// Keyword notices and their user message must enter the queue in one synchronous phase.
-		if (!submittedLive) this.#postDisposalQueuedMessages.add(normalizedAppMessage);
 		if (deliverAs === "followUp") {
 			for (const notice of prependMessages) this.agent.followUp(notice);
 			if (descriptionNotice) this.agent.followUp(descriptionNotice);
@@ -10488,10 +10496,9 @@ export class AgentSession implements SettingsScope {
 			acceptTerminalEmptyStop?: boolean;
 		},
 	): Promise<boolean> {
-		// A message submitted while the session was live appends nothing, and starts no turn, once
-		// disposal began while it waited (see prompt()).
-		const submittedLive = !this.#isDisposed;
-		return this.#admitSubmission(() => this.#sendCustomMessage(message, options, submittedLive));
+		// A message that finds the session disposing, now or after an await on its way, appends
+		// nothing and starts no turn (see beginDispose).
+		return this.#admitSubmission(() => this.#sendCustomMessage(message, options));
 	}
 
 	async #sendCustomMessage<T = unknown>(
@@ -10504,7 +10511,6 @@ export class AgentSession implements SettingsScope {
 					acceptTerminalEmptyStop?: boolean;
 			  }
 			| undefined,
-		submittedLive: boolean,
 	): Promise<boolean> {
 		// An extension command parked on a manual compaction may fire this
 		// (`pi.sendMessage(..., { triggerTurn: true })`) and return without awaiting
@@ -10514,9 +10520,9 @@ export class AgentSession implements SettingsScope {
 		// live agent turn this message was queued into, counts as a claim.
 		const release = this.#maintenance.claimPendingResume();
 		const outcome: PromptDispatchOutcome = { sessionClaimed: false };
-		if (!release) return this.#dispatchCustomMessage(message, options, outcome, submittedLive);
+		if (!release) return this.#dispatchCustomMessage(message, options, outcome);
 		try {
-			return await this.#dispatchCustomMessage(message, options, outcome, submittedLive);
+			return await this.#dispatchCustomMessage(message, options, outcome);
 		} finally {
 			release(outcome.sessionClaimed);
 		}
@@ -10533,9 +10539,8 @@ export class AgentSession implements SettingsScope {
 			  }
 			| undefined,
 		outcome: PromptDispatchOutcome,
-		submittedLive: boolean,
 	): Promise<boolean> {
-		if (submittedLive && this.#isDisposed) return false;
+		if (this.#isDisposed) return false;
 		// Captured before the awaits below — see #sessionGeneration's doc comment.
 		const sessionGeneration = this.#sessionGeneration;
 		// A turn-triggering message waits out context replacement; plain appends do not.
@@ -10583,7 +10588,7 @@ export class AgentSession implements SettingsScope {
 			timestamp: Date.now(),
 		};
 		const normalizedAppMessage = await this.#normalizeAgentMessageImages(appMessage);
-		if (submittedLive && this.#isDisposed) return false;
+		if (this.#isDisposed) return false;
 		if (this.isStreaming) {
 			// Queued into a turn the agent owns: that turn holds the session. Busy only
 			// from another prompt's setup claims nothing (that prompt decides).
@@ -10594,7 +10599,7 @@ export class AgentSession implements SettingsScope {
 			}
 			if (options?.deliverAs === "aside") {
 				if (await this.#sessionGenerationChanged(sessionGeneration)) return false;
-				if (submittedLive && this.#isDisposed) return false;
+				if (this.#isDisposed) return false;
 				// Non-interrupting: the agent loop's step-boundary poll (see the setAsideMessageProvider
 				// registration in the constructor) picks this up without interrupting the current tool
 				// batch. Not an agent-core queue entry, so no drain-retry latch and no idle-queue drain
@@ -10603,7 +10608,6 @@ export class AgentSession implements SettingsScope {
 				return false;
 			}
 			this.#allowQueuedMessageDrainRetry();
-			if (!submittedLive) this.#postDisposalQueuedMessages.add(normalizedAppMessage);
 
 			if (options?.deliverAs === "followUp") {
 				this.agent.followUp(normalizedAppMessage);
@@ -10620,7 +10624,7 @@ export class AgentSession implements SettingsScope {
 					this.#queueHiddenNextTurnMessage(normalizedAppMessage, false);
 					return false;
 				}
-				outcome.sessionClaimed = await this.#promptAgentInitiatedMessage(normalizedAppMessage, submittedLive, {
+				outcome.sessionClaimed = await this.#promptAgentInitiatedMessage(normalizedAppMessage, {
 					acceptTerminalEmptyStop: options.acceptTerminalEmptyStop === true,
 				});
 				return outcome.sessionClaimed;
@@ -10638,7 +10642,7 @@ export class AgentSession implements SettingsScope {
 
 		if (options?.deliverAs === "aside") {
 			if (await this.#sessionGenerationChanged(sessionGeneration)) return false;
-			if (submittedLive && this.#isDisposed) return false;
+			if (this.#isDisposed) return false;
 			if (this.#planModeState?.enabled) {
 				// Plan mode stays user-driven: fold into context without an autonomous turn, same as
 				// IrcBridge.deliver()/#resumeStrandedIrcAsides do in plan mode. Routed through the
@@ -10670,7 +10674,7 @@ export class AgentSession implements SettingsScope {
 				this.#irc.queueAside([normalizedAppMessage]);
 				return false;
 			}
-			outcome.sessionClaimed = await this.#promptAgentInitiatedMessage(normalizedAppMessage, submittedLive, {
+			outcome.sessionClaimed = await this.#promptAgentInitiatedMessage(normalizedAppMessage, {
 				acceptTerminalEmptyStop: options.acceptTerminalEmptyStop === true,
 			});
 			return outcome.sessionClaimed;
@@ -10681,7 +10685,7 @@ export class AgentSession implements SettingsScope {
 				this.#queueHiddenNextTurnMessage(normalizedAppMessage, false);
 				return false;
 			}
-			outcome.sessionClaimed = await this.#promptAgentInitiatedMessage(normalizedAppMessage, submittedLive);
+			outcome.sessionClaimed = await this.#promptAgentInitiatedMessage(normalizedAppMessage);
 			return outcome.sessionClaimed;
 		}
 
@@ -13175,13 +13179,14 @@ export class AgentSession implements SettingsScope {
 	 * streaming assistant text so the model sees the half-finished response
 	 * rather than missing context.
 	 *
-	 * A turn started while the session is live ends at {@link beginDispose}: it
-	 * rejects with an `AbortError` and sends no request, or stops the one in
-	 * flight. One started after `beginDispose()` runs, as a prompt does.
+	 * A side turn sends no request once the session is disposing: one in flight at
+	 * {@link beginDispose} rejects with an `AbortError` and its request is aborted, and one
+	 * started after it rejects at once.
 	 */
 	async runEphemeralTurn(args: EphemeralTurnOptions): Promise<EphemeralTurnResult> {
 		const disposal = new AbortController();
-		if (!this.#isDisposed) this.#ephemeralTurnAbortControllers.add(disposal);
+		if (this.#isDisposed) disposal.abort(new DOMException("The session is being disposed", "AbortError"));
+		else this.#ephemeralTurnAbortControllers.add(disposal);
 		try {
 			return await this.#runEphemeralTurn(
 				args,
@@ -13568,8 +13573,8 @@ export class AgentSession implements SettingsScope {
 		await this.#bash.flushPending();
 		// Flush pending writes before switching so restore snapshots reflect committed state.
 		await this.sessionManager.flush();
-		// Nothing is swapped yet. Reconnect the listeners the switch detached: a prompt submitted
-		// after beginDispose() still runs once, and its turn must still be recorded and announced.
+		// Nothing is swapped yet. Reconnect the listeners the switch detached: the turn the
+		// aborted run ends with must still be recorded and announced.
 		if (this.#isDisposed) {
 			this.#reconnectToAgent();
 			return false;
@@ -13635,6 +13640,16 @@ export class AgentSession implements SettingsScope {
 		this.#queuedMessageDrainBlocked = false;
 		this.#usagePreflightReadyForNextModelCall = false;
 		this.#usagePreflightReadyModel = undefined;
+		// Until the switch commits or rolls back, dispose() may need the outgoing session back:
+		// its file for the last entries, and the input this switch set aside (see #doDispose).
+		const rollbackForDisposal: SwitchRollbackForDisposal = {
+			state: previousSessionState,
+			steering: previousSteeringMessages,
+			followUp: previousFollowUpMessages,
+			nextTurn: previousPendingNextTurnMessages,
+			irc: previousIrcPending,
+		};
+		this.#switchRollback = rollbackForDisposal;
 
 		let cwdChangeTarget: string | undefined;
 		try {
@@ -13859,9 +13874,11 @@ export class AgentSession implements SettingsScope {
 				if (options?.onModelFallback) options.onModelFallback(modelFallbackWarning);
 				else this.emitNotice("warning", modelFallbackWarning);
 			}
+			if (this.#switchRollback === rollbackForDisposal) this.#switchRollback = undefined;
 			return true;
 		} catch (error) {
 			this.sessionManager.restoreState(previousSessionState);
+			if (this.#switchRollback === rollbackForDisposal) this.#switchRollback = undefined;
 			this.#freshProviderSessionId = previousFreshProviderSessionId;
 			this.#syncAgentSessionId(previousSessionState.sessionId, false);
 			this.#memory.rekeyForCurrentSessionId();

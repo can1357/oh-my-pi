@@ -376,6 +376,12 @@ export interface AgentPromptOptions {
 	toolChoice?: ToolChoice;
 }
 
+/** Accepted input {@link Agent.beginDispose} took back, each list in the order the model would have seen it. */
+export interface AgentDisposalInput {
+	steering: AgentMessage[];
+	followUp: AgentMessage[];
+}
+
 /** Buffered Cursor exec-channel tool result waiting to be emitted after the assistant message. */
 interface CursorToolResultEntry {
 	toolResult: ToolResultMessage;
@@ -482,6 +488,8 @@ export class Agent {
 
 	#runningPrompt?: Promise<void>;
 	#isPaused = false;
+	/** Set by {@link beginDispose}; never cleared. */
+	#disposing = false;
 
 	/** True while this unfinished turn is safely parked by the process pause gate. */
 	get isPaused(): boolean {
@@ -1033,15 +1041,17 @@ export class Agent {
 	}
 
 	async #dequeueSteeringMessagesAfterHooks(signal: AbortSignal): Promise<AgentMessage[]> {
-		if (signal.aborted || this.#steeringQueue.length === 0) return [];
+		if (signal.aborted || this.#disposing || this.#steeringQueue.length === 0) return [];
 		await this.#runBeforeQueuedMessageDequeueHooks(signal);
-		return signal.aborted ? [] : this.#prepareQueuedMessageBatch("steering", signal);
+		// Disposal took the queues while the hooks ran; whatever was queued since is the
+		// disposal record's, never a request's.
+		return signal.aborted || this.#disposing ? [] : this.#prepareQueuedMessageBatch("steering", signal);
 	}
 
 	async #dequeueFollowUpMessagesAfterHooks(signal: AbortSignal): Promise<AgentMessage[]> {
-		if (signal.aborted || this.#followUpQueue.length === 0) return [];
+		if (signal.aborted || this.#disposing || this.#followUpQueue.length === 0) return [];
 		await this.#runBeforeQueuedMessageDequeueHooks(signal);
-		return signal.aborted ? [] : this.#prepareQueuedMessageBatch("followUp", signal);
+		return signal.aborted || this.#disposing ? [] : this.#prepareQueuedMessageBatch("followUp", signal);
 	}
 
 	async #prepareQueuedMessageBatch(queue: QueuedMessageQueue, signal: AbortSignal): Promise<AgentMessage[]> {
@@ -1189,6 +1199,39 @@ export class Agent {
 		this.#queuedMessageDeliveries.clear();
 		if (hadLiveSteered) this.#emitQueueChanged();
 		return withdrawn;
+	}
+
+	/**
+	 * Start disposal. From this call on the agent sends no provider request: the loop asks
+	 * {@link isDisposing} right before every request (see `AgentLoopConfig.refuseModelCall`),
+	 * so a run that is streaming now ends at its next request, and a run started later ends at
+	 * its first. A refused request is never sent; its run ends as aborted.
+	 *
+	 * It also takes back, in one step, every accepted input the transcript has not recorded:
+	 * steering live steering took for the in-flight response, each batch the loop dequeued for
+	 * its next request (with the context prepared for it), batches whose preparation is still
+	 * running, and both queues. The running loop neither records nor requeues what this
+	 * returns, so the caller owns each message exactly once and records it itself. Each list is
+	 * in the order the model would have seen it. Later calls return only what arrived since.
+	 */
+	beginDispose(): AgentDisposalInput {
+		this.#disposing = true;
+		// A claimed batch still in preparation goes back to the front of its queue, and its
+		// preparation, which checks the claim after every await, commits nothing.
+		this.#cancelQueuedMessagePreparation("steering", true);
+		this.#cancelQueuedMessagePreparation("followUp", true);
+		const withdrawn = this.withdrawUndeliveredQueuedMessages();
+		const steering = [...withdrawn.steering, ...this.#steeringQueue];
+		const followUp = [...withdrawn.followUp, ...this.#followUpQueue];
+		this.#steeringQueue = [];
+		this.#followUpQueue = [];
+		this.#emitQueueChanged();
+		return { steering, followUp };
+	}
+
+	/** True once {@link beginDispose} ran: every provider request is refused. */
+	get isDisposing(): boolean {
+		return this.#disposing;
 	}
 
 	/** Steering live steering took for the streaming response; the transcript records it once
@@ -1618,7 +1661,9 @@ export class Agent {
 	 * tool watcher never survives the tool batch that owns it.
 	 */
 	#waitForSteeringMessages(signal?: AbortSignal): Promise<void> {
-		if (this.#steeringQueue.length > 0 || signal?.aborted) return Promise.resolve();
+		if (signal?.aborted) return Promise.resolve();
+		// A disposing agent hands out no steering, so a waiter that woke for it would spin.
+		if (this.#steeringQueue.length > 0 && !this.#disposing) return Promise.resolve();
 		const { promise, resolve } = Promise.withResolvers<void>();
 		const onAbort = (): void => resolve();
 		this.#steeringWaiters.add(resolve);
@@ -1630,6 +1675,8 @@ export class Agent {
 	}
 
 	#notifySteeringWaiters(): void {
+		// Waiters wake to take steering; a disposing agent gives none (see #waitForSteeringMessages).
+		if (this.#disposing) return;
 		const waiters = [...this.#steeringWaiters];
 		for (const resolve of waiters) resolve();
 	}
@@ -1992,6 +2039,14 @@ export class Agent {
 							return undefined;
 						}
 					: undefined,
+			// The one point that refuses a request after beginDispose(): the loop asks right before
+			// every send. Aborting the run first makes the refusal end it as aborted, not failed.
+			refuseModelCall: () => {
+				if (!this.#disposing) return undefined;
+				const reason = new DOMException("Agent is disposing", "AbortError");
+				loopAbortController.abort(reason);
+				return reason;
+			},
 			cursorExecHandlers: this.#cursorExecHandlers,
 			cursorOnToolResult,
 			cwd: this.#cwd,
@@ -2035,12 +2090,15 @@ export class Agent {
 				}
 				return this.#dequeueSteeringMessagesAfterHooks(signal ?? loopSignal);
 			},
+			// A disposing agent hands out no steering, so none may interrupt a tool batch either.
 			hasSteeringMessages: () =>
 				steeringQueueState(
 					this.#steeringQueue,
-					this.#steeringMode === "one-at-a-time"
-						? Math.min(1, this.#steeringQueue.length)
-						: this.#steeringQueue.length,
+					this.#disposing
+						? 0
+						: this.#steeringMode === "one-at-a-time"
+							? Math.min(1, this.#steeringQueue.length)
+							: this.#steeringQueue.length,
 				),
 			waitForSteeringMessages: signal => this.#waitForSteeringMessages(signal),
 			onLiveSteeringTaken: messages => this.#adoptLiveSteering(messages),
@@ -2048,7 +2106,8 @@ export class Agent {
 			hasBackgroundCompletions: this.hasBackgroundCompletions,
 			hasQueuedAsides: this.hasQueuedAsides,
 			getFollowUpMessages: signal => this.#dequeueFollowUpMessagesAfterHooks(signal ?? loopSignal),
-			getAsideMessages: async boundary => (await this.#asideMessageProvider?.(boundary)) ?? [],
+			getAsideMessages: async boundary =>
+				this.#disposing ? [] : ((await this.#asideMessageProvider?.(boundary)) ?? []),
 			onBeforeYield: () => this.#onBeforeYield?.(),
 			onDetachedToolUpdate: event => this.emitExternalEvent(event),
 			telemetry: this.#telemetry,

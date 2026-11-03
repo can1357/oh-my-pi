@@ -202,7 +202,7 @@ test("beginDispose sends no request for an accepted follow-up and steer, and dis
 	]);
 }, 30_000);
 
-test("a follow-up submitted after beginDispose reaches one later model request", async () => {
+test("a follow-up submitted after beginDispose is refused, and the running turn sends no further request", async () => {
 	const manager = SessionManager.inMemory(tempDir.path());
 	const registry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
 	const firstRequestStarted = Promise.withResolvers<void>();
@@ -234,32 +234,26 @@ test("a follow-up submitted after beginDispose reaches one later model request",
 	const running = session.prompt("turn already running");
 	await withTimeout(firstRequestStarted.promise, 15_000, "First provider request did not start");
 	session.beginDispose();
-	await session.followUp("queued after disposal");
-	expect(session.queuedMessageCount).toBe(1);
+	await expect(session.followUp("queued after disposal")).rejects.toMatchObject({
+		name: "PromptDroppedError",
+		sessionDisposed: true,
+	});
+	expect(session.queuedMessageCount).toBe(0);
 	releaseFirstRequest.resolve();
 
-	await withTimeout(running, 15_000, "Post-disposal follow-up did not settle");
-	expect(requestCount).toBe(2);
+	await withTimeout(running, 15_000, "The running turn did not settle");
+	expect(requestCount).toBe(1);
 }, 30_000);
 
-test("dispose does not re-abort a prompt admitted after beginDispose", async () => {
+test("a prompt submitted after beginDispose is refused before setup and sends nothing", async () => {
 	const manager = SessionManager.inMemory(tempDir.path());
 	const registry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
-	const beforeAgentStart = Promise.withResolvers<void>();
-	const releaseBeforeAgentStart = Promise.withResolvers<void>();
-	const shutdownStarted = Promise.withResolvers<void>();
-	const releaseShutdown = Promise.withResolvers<void>();
-	const providerStarted = Promise.withResolvers<void>();
+	let setupRan = false;
 	const runtime = new ExtensionRuntime();
 	const extension = await loadExtensionFromFactory(
 		pi => {
 			pi.on("before_agent_start", async () => {
-				beforeAgentStart.resolve();
-				await releaseBeforeAgentStart.promise;
-			});
-			pi.on("session_shutdown", async () => {
-				shutdownStarted.resolve();
-				await releaseShutdown.promise;
+				setupRan = true;
 			});
 		},
 		tempDir.path(),
@@ -268,12 +262,7 @@ test("dispose does not re-abort a prompt admitted after beginDispose", async () 
 		"post-disposal-prompt",
 	);
 	const extensionRunner = new ExtensionRunner([extension], runtime, tempDir.path(), manager, registry);
-	const mock = createMockModel({
-		handler: async () => {
-			providerStarted.resolve();
-			return { content: ["held"], delayMs: 600_000 };
-		},
-	});
+	const mock = createMockModel({ responses: [{ content: ["should not be sent"] }] });
 	const agent = new Agent({
 		getApiKey: () => "test-key",
 		initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
@@ -288,20 +277,13 @@ test("dispose does not re-abort a prompt admitted after beginDispose", async () 
 	});
 
 	session.beginDispose();
-	const prompt = session.prompt("submitted after disposal");
-	await withTimeout(beforeAgentStart.promise, 15_000, "Post-disposal prompt did not enter setup");
-	const closing = session.dispose();
-	try {
-		await withTimeout(shutdownStarted.promise, 15_000, "session_shutdown did not start");
-		releaseBeforeAgentStart.resolve();
-		await withTimeout(providerStarted.promise, 15_000, "Post-disposal prompt did not reach the provider");
-		expect(mock.calls).toHaveLength(1);
-	} finally {
-		releaseBeforeAgentStart.resolve();
-		releaseShutdown.resolve();
-		await closing;
-		await prompt.catch(() => undefined);
-	}
+	await expect(session.prompt("submitted after disposal")).rejects.toMatchObject({
+		name: "PromptDroppedError",
+		sessionDisposed: true,
+	});
+	expect(setupRan).toBe(false);
+	expect(mock.calls).toHaveLength(0);
+	expect(session.messages.some(message => message.role === "user")).toBe(false);
 }, 30_000);
 
 /** A session whose provider requests are counted; `hold` keeps the first one streaming until aborted. */

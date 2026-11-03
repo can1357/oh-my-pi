@@ -176,10 +176,10 @@ test("an IRC message parked for a pooled worker is kept when the session is disp
 	expect(shape.at(-1)).toBe("session_exit");
 }, 30_000);
 
-test("a steer and follow-up queued after beginDispose that no turn ran are kept at dispose", async () => {
+test("a steer and follow-up submitted after beginDispose are refused, sent nowhere and not recorded", async () => {
 	const held = createMockModel({ responses: [{ content: ["held"], delayMs: 600_000 }] });
 	const entered = Promise.withResolvers<void>();
-	const { session, manager } = await createSession({
+	const { session, manager, requests } = await createSession({
 		streamFn: (requestModel, context, options) => {
 			entered.resolve();
 			return held.stream(requestModel, context, options);
@@ -189,18 +189,18 @@ test("a steer and follow-up queued after beginDispose that no turn ran are kept 
 	const running = session.prompt("the running task").catch(() => undefined);
 	await withTimeout(entered.promise, 15_000, "The provider request did not start");
 	session.beginDispose();
-	// Submitted after beginDispose(): each may run once, but dispose() aborts the turn first.
-	await session.steer("steer after disposal began");
-	await session.followUp("follow-up after disposal began");
+	// Not accepted: the session is disposing, so the callers learn it at once.
+	const refused = { name: "PromptDroppedError", sessionDisposed: true };
+	await expect(session.steer("steer after disposal began")).rejects.toMatchObject(refused);
+	await expect(session.followUp("follow-up after disposal began")).rejects.toMatchObject(refused);
 	await session.dispose();
 	await running;
 
+	expect(requests()).toBe(1);
 	const shape = await persistedShape(manager);
-	const marker = shape.indexOf("session_exit");
-	expect(marker).toBe(shape.length - 1);
-	expect(shape.slice(0, marker)).toEqual(
-		expect.arrayContaining(["user:steer after disposal began", "user:follow-up after disposal began"]),
-	);
+	expect(shape.at(-1)).toBe("session_exit");
+	expect(shape).not.toContain("user:steer after disposal began");
+	expect(shape).not.toContain("user:follow-up after disposal began");
 }, 30_000);
 
 test("a steer held by live steering when disposal aborts the response is kept", async () => {
@@ -451,8 +451,8 @@ test("a session switch whose cwd change outlasts beginDispose rolls back and ann
 	expect(cwdChanges).toHaveLength(2);
 }, 30_000);
 
-test("a session switch refused after its reconciler keeps the listeners for a prompt submitted afterwards", async () => {
-	const { session, manager } = await createSession();
+test("a session switch refused after its reconciler leaves the session intact, and a later prompt is refused", async () => {
+	const { session, manager, requests } = await createSession();
 	await session.prompt("the first task");
 	const sessionFile = manager.getSessionFile();
 	if (!sessionFile) throw new Error("Expected a persisted session file");
@@ -470,18 +470,17 @@ test("a session switch refused after its reconciler keeps the listeners for a pr
 	const events: string[] = [];
 	session.subscribe(event => events.push(event.type));
 
-	// Submitted after beginDispose(): it runs once, and its turn is still recorded and announced.
-	await session.prompt("submitted after the refused switch");
+	// Submitted after beginDispose(): refused, so it sends nothing and records nothing.
+	await expect(session.prompt("submitted after the refused switch")).rejects.toMatchObject({
+		name: "PromptDroppedError",
+		sessionDisposed: true,
+	});
 	await session.dispose();
 
-	expect(events).toContain("agent_start");
-	expect(await persistedShape(manager)).toEqual([
-		"user:the first task",
-		"assistant:done",
-		"user:submitted after the refused switch",
-		"assistant:done",
-		"session_exit",
-	]);
+	expect(requests()).toBe(1);
+	expect(events).not.toContain("agent_start");
+	expect(manager.getSessionFile()).toBe(sessionFile);
+	expect(await persistedShape(manager)).toEqual(["user:the first task", "assistant:done", "session_exit"]);
 }, 30_000);
 
 test("a steer the live response held is recorded ahead of a steer queued after it", async () => {
