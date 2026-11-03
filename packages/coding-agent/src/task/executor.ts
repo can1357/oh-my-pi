@@ -9,6 +9,7 @@ import path from "node:path";
 import type { AgentEvent, AgentIdentity, AgentMessage, AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
 import { AgentBusyError, recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
 import type { Api, Model, ServiceTierByFamily, Usage } from "@oh-my-pi/pi-ai";
+import { errorDisplayText } from "@oh-my-pi/pi-ai/error";
 import { isCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { isRecord, logger, popLoopPhase, prompt, pushLoopPhase, sanitizeText, untilAborted } from "@oh-my-pi/pi-utils";
 import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, AsyncJobError, AsyncJobManager, type AsyncJobRunResult } from "../async";
@@ -2732,7 +2733,7 @@ async function driveSessionToResult(
 				}
 			} else if (lastAssistant.stopReason === "error") {
 				exitCode = 1;
-				error ??= attributeSubagentError(lastAssistant.errorMessage, lastAssistant);
+				error ??= attributeSubagentError(errorDisplayText(lastAssistant), lastAssistant);
 			}
 		}
 
@@ -3391,7 +3392,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 			// into another agent's model context is noise, not signal.
 			const providerError =
 				lastAssistant?.stopReason === "error"
-					? attributeSubagentError(lastAssistant.errorMessage, lastAssistant)
+					? attributeSubagentError(errorDisplayText(lastAssistant), lastAssistant)
 					: undefined;
 			const thrown = providerError === undefined && turnError !== undefined && !yielded ? turnError : undefined;
 			const error =

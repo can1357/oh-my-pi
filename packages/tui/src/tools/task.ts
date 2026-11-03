@@ -1273,7 +1273,8 @@ function renderAgentResult(
 
 	// A retry failure is the task's terminal reason. Show its decoded provider
 	// message instead of the generic result error, which often starts with the
-	// same raw JSON envelope.
+	// same raw JSON envelope; expanded, the full diagnostic (dump path,
+	// endpoint) follows it.
 	if (result.retryFailure) {
 		const reason = `auto-retry gave up after ${result.retryFailure.attempt} ${pluralize(
 			"attempt",
@@ -1282,6 +1283,9 @@ function renderAgentResult(
 		lines.push(
 			`${continuePrefix}${theme.fg("error", clipCollapsed(flattenLine(sanitizeText(reason)), 80, expanded))}`,
 		);
+		if (expanded && result.error) {
+			lines.push(`${continuePrefix}${theme.fg("error", flattenLine(sanitizeText(result.error)))}`);
+		}
 	} else if (result.error && (!success || mergeFailed) && (!aborted || result.error !== result.abortReason)) {
 		lines.push(
 			`${continuePrefix}${theme.fg(mergeFailed ? "warning" : "error", clipCollapsed(flattenLine(sanitizeText(result.error)), 70, expanded))}`,

@@ -1222,6 +1222,28 @@ describe("runSubprocess yield reminders", () => {
 		expect(result.stderr).toBe("[openai/mock] Connect error invalid_argument: Error");
 	});
 
+	it("reports a failed turn's shown text, with its endpoint and request-dump path", async () => {
+		const session = createMockSession(({ emit, state }) => {
+			const failed: AssistantMessage = {
+				...createAssistantStopMessage(""),
+				stopReason: "error",
+				errorMessage: "HTTP 400\nbad parameter",
+				errorDisplayMessage:
+					"HTTP 400 from http://localhost:11434/api/chat\nbad parameter\nraw-http-request=/tmp/omp/1.json",
+			};
+			state.messages.push(failed);
+			emit({ type: "message_end", message: failed });
+		});
+
+		mockCreateAgentSession(session);
+
+		const result = await runSubprocess({ ...baseOptions, id: "subagent-provider-error-display" });
+
+		expect(result.exitCode).toBe(1);
+		expect(result.error).toContain("http://localhost:11434/api/chat");
+		expect(result.error).toContain("raw-http-request=/tmp/omp/1.json");
+	});
+
 	it("surfaces the assistant abort message instead of 'Cancelled by caller' on an internal turn abort", async () => {
 		// No caller signal and no runtime limit: the subagent's own turn ended with
 		// stopReason "aborted" (e.g. a merged request-signal abort). abortReason is

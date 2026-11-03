@@ -928,6 +928,40 @@ describe("task progress rendering", () => {
 		expect(text).toContain("auto-retry gave up after 10 attempts: 400 Your credit balance is too low");
 		expect(text).not.toContain("invalid_request_error");
 	});
+
+	it("keeps the full diagnostic, with its request-dump path, in an expanded retry failure", async () => {
+		const theme = (await getThemeByName("dark"))!;
+		const text = Bun.stripANSI(
+			taskToolRenderer
+				.renderResult(
+					{
+						content: [],
+						details: {
+							projectAgentsDir: null,
+							totalDurationMs: 0,
+							results: [
+								finishedResult({
+									exitCode: 1,
+									error: creditBalanceDisplayError,
+									retryFailure: {
+										attempt: 10,
+										errorMessage: creditBalanceProviderError,
+									},
+								}),
+							],
+						},
+					},
+					{ expanded: true, isPartial: false },
+					theme,
+				)
+				.render(400)
+				.join("\n"),
+		);
+
+		expect(text).toContain("auto-retry gave up after 10 attempts: 400 Your credit balance is too low");
+		expect(text).toContain("raw-http-request=/tmp/omp");
+		expect(text).toContain("http-400-requests/1.json");
+	});
 });
 
 describe("task result detail-less state", () => {
