@@ -3,7 +3,7 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
-import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import { AgentRegistry, type AgentRegistryApi } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { createTools, type Tool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
@@ -15,7 +15,7 @@ import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 const READ_ONLY_AGENT_TOOLS = ["read", "grep", "glob", "yield"];
 
 const received = new Map<string, IrcMessage[]>();
-let registry: AgentRegistry;
+let registry: AgentRegistryApi;
 
 function registerPeer(id: string, status: "running" | "idle" = "running"): void {
 	const messages: IrcMessage[] = [];
