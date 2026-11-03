@@ -1,4 +1,4 @@
-import { afterAll, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, it } from "bun:test";
 import type { AuthStorage, FetchImpl } from "@oh-my-pi/pi-ai";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { getSearchProvider } from "@oh-my-pi/pi-coding-agent/web/search/provider";
@@ -17,9 +17,12 @@ beforeEach(() => {
 	delete process.env.KEENABLE_API_KEY;
 });
 
-afterAll(() => {
+afterEach(() => {
 	if (savedEnvKey === undefined) delete process.env.KEENABLE_API_KEY;
 	else process.env.KEENABLE_API_KEY = savedEnvKey;
+});
+
+afterAll(() => {
 	keyedStorage.close();
 	keylessStorage.close();
 });
@@ -183,5 +186,32 @@ describe("Keenable web search provider", () => {
 		expect(await provider.isAvailable(keylessStorage)).toBe(false);
 		expect(await provider.isExplicitlyAvailable(keylessStorage)).toBe(true);
 		expect(await provider.isAvailable(keyedStorage)).toBe(true);
+	});
+
+	it("searches the host for a site-only query instead of echoing site:", async () => {
+		const captured: Captured[] = [];
+		await searchKeenable({
+			...makeParams("site:docs.rs", keylessStorage),
+			fetch: mockFetch(captured, RESULTS),
+		});
+
+		expect(captured[0].body).toEqual({ query: "docs.rs", max_results: 10, site: "docs.rs" });
+	});
+
+	it("rotates keyed credentials through withAuth on 401", async () => {
+		const captured: Captured[] = [];
+		let calls = 0;
+		const fetchImpl: FetchImpl = async (input, init) => {
+			calls++;
+			captured.push({ url: String(input), headers: new Headers(init?.headers), body: {} });
+			return new Response(JSON.stringify(calls === 1 ? { detail: "bad key" } : RESULTS), {
+				status: calls === 1 ? 401 : 200,
+				headers: { "Content-Type": "application/json" },
+			});
+		};
+		const result = searchKeenable({ ...makeParams("bun", keyedStorage), fetch: fetchImpl });
+		// Either a retry succeeds or the auth error surfaces; it must never fall back to the public endpoint.
+		await result.catch(() => undefined);
+		expect(captured.every(c => c.url === "https://api.keenable.ai/v1/search")).toBe(true);
 	});
 });

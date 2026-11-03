@@ -9,7 +9,7 @@
  * POST https://api.keenable.ai/v1/search/public (X-Keenable-Title).
  * Docs: https://docs.keenable.ai/api-reference/search
  */
-import { type AuthStorage, type FetchImpl, getEnvApiKey } from "@oh-my-pi/pi-ai";
+import { type AuthStorage, type FetchImpl, resolveApiKeyOnce, seedApiKeyResolver, withAuth } from "@oh-my-pi/pi-ai";
 import type { StructuredQuery } from "../query";
 import { formatQuery, parseSearchQuery } from "../query";
 import type { SearchResponse, SearchSource } from "../types";
@@ -58,12 +58,6 @@ interface KeenableSearchResponse {
 	results?: unknown;
 }
 
-/** Resolve a Keenable API key from AuthStorage, then the environment. */
-async function resolveKeenableKey(params: SearchParamsWithFetch): Promise<string | undefined> {
-	const stored = await params.authStorage.keys.get("keenable", params.sessionId, { signal: params.signal });
-	return stored?.trim() || getEnvApiKey("keenable")?.trim() || undefined;
-}
-
 /**
  * Build the request body. Keenable takes plain keywords and quoted phrases;
  * a single `site:` host maps to the native `site` filter, and date bounds map
@@ -78,9 +72,12 @@ export function buildKeenableBody(
 	const query = parsed.hasDirectives
 		? formatQuery({ ...parsed, sites: [], excludedSites: [], after: undefined, before: undefined }, { phrases: true })
 		: parsed.raw.trim();
-	const body: KeenableSearchBody = { query: query || parsed.raw.trim(), max_results: maxResults };
 	const sites = siteHosts(parsed.sites);
-	if (sites.length === 1) body.site = sites[0];
+	const site = sites.length === 1 ? sites[0] : undefined;
+	// A site-only query has no keywords left once `site:` moves to the native
+	// filter; search the host name rather than echoing `site:` in the query.
+	const body: KeenableSearchBody = { query: query || site || parsed.raw.trim(), max_results: maxResults };
+	if (site) body.site = site;
 	const after = parsed.after ?? (recency ? RECENCY_DELTAS[recency] : undefined);
 	if (after) body.published_after = after;
 	if (parsed.before) body.published_before = parsed.before;
@@ -142,8 +139,24 @@ export async function searchKeenable(params: SearchParamsWithFetch): Promise<Sea
 	);
 	const parsed = params.parsedQuery ?? parseSearchQuery(params.query);
 	const body = buildKeenableBody(parsed, params.recency, maxResults);
-	const apiKey = await resolveKeenableKey(params);
-	const data = await callKeenableSearch(apiKey, body, params);
+	const keyResolver = params.authStorage.keys.resolver("keenable", { sessionId: params.sessionId });
+	const apiKey = await resolveApiKeyOnce(keyResolver, params.signal);
+	let data: KeenableSearchResponse;
+	if (apiKey) {
+		// Reuse the preflight credential, then let withAuth force-refresh / rotate on 401/402.
+		data = await withAuth(seedApiKeyResolver(apiKey, keyResolver), key => callKeenableSearch(key, body, params), {
+			signal: params.signal,
+		});
+	} else {
+		// A failed credential lookup must not silently downgrade to anonymous search.
+		if (params.authStorage.keys.source("keenable") !== undefined) {
+			throw new SearchProviderError(
+				"keenable",
+				"Keenable credentials could not be resolved. Check your configured API key or credential helper.",
+			);
+		}
+		data = await callKeenableSearch(undefined, body, params);
+	}
 
 	if (!Array.isArray(data.results)) {
 		throw new SearchProviderError("keenable", "Keenable search API returned an unexpected response shape", 500);
@@ -183,7 +196,7 @@ export class KeenableProvider extends SearchProvider {
 
 	/** The auto chain admits Keenable only when a key is configured. */
 	isAvailable(authStorage: AuthStorage): boolean {
-		return authStorage.keys.source("keenable") !== undefined || !!getEnvApiKey("keenable");
+		return authStorage.keys.source("keenable") !== undefined;
 	}
 
 	/** An explicit `web/keenable` selection works without a key via the public endpoint. */
