@@ -824,13 +824,16 @@ function normalizeOptionalNullsForSchema(
 	for (const [key, propertySchema] of Object.entries(properties)) {
 		if (!(key in nextValue)) continue;
 		const currentValue = nextValue[key];
-		const isNullish = currentValue === null || currentValue === "null";
+		const isNullish =
+			currentValue === null ||
+			(currentValue === "null" &&
+				!(Object.hasOwn(CONTENT_CARRYING_KEYS, key) && branchMatchesSchema(propertySchema, currentValue, root)));
 		const isInvalidEmptyString =
 			currentValue === "" && !required.has(key) && !branchMatchesSchema(propertySchema, currentValue, root);
 
-		// Strip null/string "null" from optional fields, and strip empty
-		// strings only when the property schema would reject the explicit value.
-		// LLMs sometimes output these placeholders to mean "no value".
+		// Strip optional null placeholders, but preserve literal "null" in content
+		// fields whose schema accepts it (e.g. JSON payloads).
+		// Strip empty strings only when the property schema rejects them.
 		if ((isNullish || isInvalidEmptyString) && !required.has(key)) {
 			if (!changed) {
 				nextValue = { ...nextValue };
@@ -861,7 +864,7 @@ function normalizeOptionalNullsForSchema(
 			currentValue,
 			false,
 			root,
-			insideContent || CONTENT_CARRYING_KEYS.has(key),
+			insideContent || Object.hasOwn(CONTENT_CARRYING_KEYS, key),
 			speculativeUnion,
 		);
 		if (!normalized.changed) continue;
@@ -1063,7 +1066,15 @@ const IDENTIFIER_STRING_KEYS: ReadonlySet<string> = new Set([
 	"label",
 ]);
 
-const CONTENT_CARRYING_KEYS: ReadonlySet<string> = new Set(["content", "input", "body", "text", "command", "code"]);
+const CONTENT_CARRYING_KEYS: Record<string, true> = {
+	content: true,
+	input: true,
+	body: true,
+	text: true,
+	command: true,
+	code: true,
+	payload: true,
+};
 
 const TRAILING_LINE_TERMINATOR_RE = /[\r\n]+$/;
 
@@ -1128,7 +1139,7 @@ function normalizeIdentifierStringWhitespace(
 	let out: Record<string, unknown> = source;
 	for (const [key, entry] of Object.entries(source)) {
 		let nextEntry = entry;
-		if (CONTENT_CARRYING_KEYS.has(key)) continue;
+		if (Object.hasOwn(CONTENT_CARRYING_KEYS, key)) continue;
 		if (IDENTIFIER_STRING_KEYS.has(key)) {
 			const trimmed = trimIdentifierStringLeaf(entry);
 			if (trimmed !== entry) nextEntry = trimmed;

@@ -13,12 +13,11 @@ use std::{
 	time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use brush_core::{ExecutionContext, ExecutionExitCode, ExecutionResult, builtins};
 use clap::Parser;
 use jiff::{Timestamp, fmt::strtime, tz::TimeZone};
 
 use crate::{
-	host::ShellPaths,
+	host::{INTERRUPTED_EXIT_CODE, ProcContext, Process, ShellPaths},
 	proc_select::{parse_group_list, parse_i32_list, parse_terminal_list, parse_user_list},
 	proc_snapshot::{ProcInfo, ThreadInfo},
 };
@@ -353,33 +352,28 @@ impl PsProcessRow {
 	}
 }
 
-impl builtins::Command for PsCommand {
-	type Error = brush_core::Error;
+impl Process for PsCommand {
+	const USES_PATHS: bool = true;
 
-	fn execute<SE: brush_core::ShellExtensions>(
-		&self,
-		context: ExecutionContext<'_, SE>,
-	) -> impl Future<Output = std::result::Result<ExecutionResult, brush_core::Error>> + Send {
-		let argv = self.argv.clone();
-		let paths = ShellPaths::new(&context);
+	fn run(&self, context: &ProcContext) -> impl Future<Output = io::Result<i32>> + Send {
 		async move {
-			let options = match parse_ps_args(&argv, &paths) {
+			let options = match parse_ps_args(&self.argv, context.paths()) {
 				Ok(ParsePsResult::Options(options)) => *options,
 				Ok(ParsePsResult::Help) => {
 					write_ps_help(context.stdout())?;
-					return Ok(ExecutionResult::success());
+					return Ok(0);
 				},
 				Ok(ParsePsResult::Version) => {
 					writeln!(context.stdout(), "ps {}", env!("CARGO_PKG_VERSION"))?;
-					return Ok(ExecutionResult::success());
+					return Ok(0);
 				},
 				Err((code, message)) => {
 					writeln!(context.stderr(), "ps: {message}")?;
-					return Ok(ExecutionResult::new(code));
+					return Ok(code.into());
 				},
 			};
 			if context.is_cancelled() {
-				return Ok(ExecutionExitCode::Interrupted.into());
+				return Ok(INTERRUPTED_EXIT_CODE);
 			}
 
 			let mut processes = ProcInfo::all();
@@ -425,16 +419,21 @@ impl builtins::Command for PsCommand {
 			sort_ps_rows(&mut rows, &options.sort);
 			let columns = ps_columns(&options);
 			let output = render_ps_table(&rows, &columns, options.no_headers);
-			if let Err(err) = write!(context.stdout(), "{output}") {
+			let write_result = context.stdout().write_all(output.as_bytes());
+			let written = match write_result {
+				Ok(()) => context.flush_output().await,
+				Err(err) => Err(err),
+			};
+			if let Err(err) = written {
 				if err.kind() == io::ErrorKind::BrokenPipe {
-					return Ok(ExecutionResult::new(crate::host::SIGPIPE_EXIT_CODE as u8));
+					return Ok(crate::host::SIGPIPE_EXIT_CODE);
 				}
-				return Err(err.into());
+				return Err(err);
 			}
 			Ok(if rows.is_empty() {
-				ExecutionResult::new(1)
+				1
 			} else {
-				ExecutionResult::success()
+				0
 			})
 		}
 	}

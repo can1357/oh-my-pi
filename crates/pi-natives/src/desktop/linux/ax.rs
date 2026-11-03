@@ -29,6 +29,54 @@ pub struct AtSpiWindow {
 	pub position_known: bool,
 }
 
+/// Leaves `focused` set on at most one window. Shell surfaces report the
+/// Active state at all times: the compositor's own frames (gnome-shell's "Main
+/// stage") and untitled frames (plasma-keyboard's). When several windows are
+/// active, the compositor's frames drop out first, then untitled ones, until
+/// one is left; a shell frame alone keeps focus, as in the GNOME overview. When
+/// only untitled frames are left (an untitled app beside plasma-keyboard), the
+/// one that `holds_focus` (contains the keyboard-focused element) wins. Two
+/// active titled application windows leave none focused, rather than naming
+/// one at random.
+pub fn resolve_focus(
+	windows: &mut [AtSpiWindow],
+	compositor_pid: Option<u32>,
+	mut holds_focus: impl FnMut(&DesktopWindow) -> bool,
+) {
+	let mut active: Vec<usize> = (0..windows.len())
+		.filter(|&index| windows[index].window.focused)
+		.collect();
+	if active.len() < 2 {
+		return;
+	}
+	let all_active = active.clone();
+	if compositor_pid.is_some() {
+		active.retain(|&index| windows[index].window.pid != compositor_pid);
+	}
+	if active.len() > 1 {
+		let titled: Vec<usize> = active
+			.iter()
+			.copied()
+			.filter(|&index| !windows[index].window.title.trim().is_empty())
+			.collect();
+		active = if titled.is_empty() {
+			active
+				.into_iter()
+				.filter(|&index| holds_focus(&windows[index].window))
+				.collect()
+		} else {
+			titled
+		};
+	}
+	let focused = match active.as_slice() {
+		[only] => Some(*only),
+		_ => None,
+	};
+	for index in all_active {
+		windows[index].window.focused = Some(index) == focused;
+	}
+}
+
 impl AtSpiAx {
 	pub(crate) fn new() -> CoreResult<Self> {
 		let rt = Builder::new_current_thread()
@@ -123,6 +171,27 @@ impl AtSpiAx {
 				}
 			}
 			Ok(windows)
+		})
+	}
+
+	/// Whether the window's frame contains the keyboard-focused element. A
+	/// lookup that fails counts as not holding focus.
+	pub(crate) fn holds_focus(&self, window: &DesktopWindow) -> bool {
+		self.rt.block_on(async {
+			let Ok(app) = Self::app_for_window(&self.connection, window).await else {
+				return false;
+			};
+			let Ok(frames) = Self::frames(&self.connection, &app).await else {
+				return false;
+			};
+			for frame in frames {
+				if atspi_window_id(&frame) == window.id {
+					return Self::find_focused(self.connection.connection(), frame, 0)
+						.await
+						.is_ok_and(|found| found.is_some());
+				}
+			}
+			false
 		})
 	}
 
@@ -229,19 +298,23 @@ impl AtSpiAx {
 			.map_err(|err| err.to_string())
 	}
 
+	/// `object`'s `Action` proxy, without zbus's property cache: the cache
+	/// reads properties with `GetAll`, which Qt refuses, so `NActions` would
+	/// fail on every Qt element.
 	async fn action<'a>(
-		connection: &'a atspi::AccessibilityConnection,
+		connection: &'a atspi::zbus::Connection,
 		object: &'a ObjectRefOwned,
 	) -> Result<atspi::proxy::action::ActionProxy<'a>, String> {
 		let name = object
 			.name()
 			.ok_or_else(|| "AT-SPI object has no bus name".to_string())?
 			.clone();
-		atspi::proxy::action::ActionProxy::builder(connection.connection())
+		atspi::proxy::action::ActionProxy::builder(connection)
 			.destination(name)
 			.map_err(|err| err.to_string())?
 			.path(object.path().clone())
 			.map_err(|err| err.to_string())?
+			.cache_properties(atspi::zbus::proxy::CacheProperties::No)
 			.build()
 			.await
 			.map_err(|err| err.to_string())
@@ -328,6 +401,53 @@ fn action_index<'a>(
 				})
 				.flatten()
 		})
+}
+
+/// The most actions read of one element: the count comes from the app.
+const MAX_ACTIONS: i32 = 256;
+
+/// The machine names of an element's actions, by index (`press`, `click`,
+/// `activate`): what libatspi's `atspi_action_get_action_name` reads.
+/// `GetActions` returns localized names instead: Firefox reports each as `;;`,
+/// Chromium, Electron and the GTK3 build of `LibreOffice` as empty strings, and
+/// every toolkit translates them under a non-English locale.
+async fn action_names(
+	proxy: &atspi::proxy::action::ActionProxy<'_>,
+) -> atspi::zbus::Result<Vec<String>> {
+	let count = proxy.n_actions().await?.clamp(0, MAX_ACTIONS);
+	futures::future::try_join_all((0..count).map(|index| proxy.get_name(index))).await
+}
+
+/// The index of `action` among `proxy`'s actions, matched by machine name. A
+/// generic press of a checkbox, radio button or toggle button falls back on
+/// `check` or `uncheck`, the only activation Chromium and Electron give them.
+async fn resolve_action(
+	proxy: &atspi::proxy::action::ActionProxy<'_>,
+	accessible: &atspi::proxy::accessible::AccessibleProxy<'_>,
+	action: &str,
+) -> CoreResult<i32> {
+	let names = action_names(proxy)
+		.await
+		.map_err(|err| DesktopError::ax_failed(format!("AT-SPI actions: {err}")))?;
+	let names = || names.iter().map(String::as_str);
+	let mut index = action_index(names(), action);
+	if index.is_none()
+		&& action.eq_ignore_ascii_case("press")
+		&& matches!(
+			accessible.get_role().await,
+			Ok(Role::CheckBox
+				| Role::CheckMenuItem
+				| Role::RadioButton
+				| Role::RadioMenuItem
+				| Role::ToggleButton)
+		) {
+		index = names().position(|name| {
+			name.eq_ignore_ascii_case("check") || name.eq_ignore_ascii_case("uncheck")
+		});
+	}
+	let index = index
+		.ok_or_else(|| DesktopError::ax_failed(format!("AT-SPI action '{action}' is unavailable")))?;
+	i32::try_from(index).map_err(|err| DesktopError::ax_failed(err.to_string()))
 }
 
 impl AxBackend for AtSpiAx {
@@ -463,14 +583,8 @@ impl AxBackend for AtSpiAx {
 			} else {
 				None
 			};
-			let actions = match Self::action(&self.connection, &object).await {
-				Ok(action) => action
-					.get_actions()
-					.await
-					.unwrap_or_default()
-					.into_iter()
-					.map(|a| a.name)
-					.collect(),
+			let actions = match Self::action(self.connection.connection(), &object).await {
+				Ok(action) => action_names(&action).await.unwrap_or_default(),
 				Err(_) => Vec::new(),
 			};
 			let child_count = proxy.child_count().await.unwrap_or(0).max(0) as u32;
@@ -534,29 +648,14 @@ impl AxBackend for AtSpiAx {
 	fn perform(&mut self, h: &AxHandle, action: &str) -> CoreResult<()> {
 		let object = Self::object(h).clone();
 		self.rt.block_on(async {
-			let proxy = Self::action(&self.connection, &object)
+			let proxy = Self::action(self.connection.connection(), &object)
 				.await
 				.map_err(DesktopError::ax_failed)?;
-			let actions = proxy
-				.get_actions()
+			let accessible = object
+				.as_accessible_proxy(self.connection.connection())
 				.await
-				.map_err(|err| DesktopError::ax_failed(format!("AT-SPI actions: {err}")))?;
-			let mut names = actions.iter().map(|item| item.name.as_str());
-			let mut index = action_index(names.clone(), action);
-			if index.is_none() && action.eq_ignore_ascii_case("press") {
-				let accessible = object
-					.as_accessible_proxy(self.connection.connection())
-					.await
-					.map_err(|err| DesktopError::ax_failed(err.to_string()))?;
-				if matches!(accessible.get_role().await, Ok(Role::CheckBox | Role::CheckMenuItem)) {
-					index = names.position(|name| {
-						name.eq_ignore_ascii_case("check") || name.eq_ignore_ascii_case("uncheck")
-					});
-				}
-			}
-			let index = index.ok_or_else(|| {
-				DesktopError::ax_failed(format!("AT-SPI action '{action}' is unavailable"))
-			})? as i32;
+				.map_err(|err| DesktopError::ax_failed(err.to_string()))?;
+			let index = resolve_action(&proxy, &accessible, action).await?;
 			proxy
 				.do_action(index)
 				.await
@@ -764,6 +863,60 @@ impl AxBackend for AtSpiAx {
 	}
 }
 
+/// An element's own focus state and the toolkit reporting it, which decides
+/// what that state means.
+pub struct ElementFocus {
+	pub focused: bool,
+	/// The application's `toolkit_name`, such as `gtk`, `GTK` or `Chromium`;
+	/// empty when the application does not report it.
+	pub toolkit: String,
+	/// The application's (deprecated) `Version`; empty when not reported.
+	pub version: String,
+}
+
+impl AtSpiAx {
+	/// The element's focus state, and its application's toolkit as far as the
+	/// application reports it: missing toolkit metadata leaves the toolkit
+	/// unknown rather than failing the read.
+	pub(crate) fn element_focus(&self, h: &AxHandle) -> CoreResult<ElementFocus> {
+		fn failed(error: impl std::fmt::Display) -> DesktopError {
+			DesktopError::ax_failed(format!("AT-SPI focus state: {error}"))
+		}
+		let object = Self::object(h).clone();
+		self.rt.block_on(async {
+			let connection = self.connection.connection();
+			let proxy = object
+				.as_accessible_proxy(connection)
+				.await
+				.map_err(failed)?;
+			let focused = proxy
+				.get_state()
+				.await
+				.map_err(failed)?
+				.contains(State::Focused);
+			let app = proxy.get_application().await.map_err(failed)?;
+			let toolkit = async {
+				let app = atspi::proxy::application::ApplicationProxy::builder(connection)
+					.destination(app.name()?.clone())
+					.ok()?
+					.path(app.path().clone())
+					.ok()?
+					// atk-bridge answers `Get` for these properties, not `GetAll`.
+					.cache_properties(zbus::proxy::CacheProperties::No)
+					.build()
+					.await
+					.ok()?;
+				let toolkit = app.toolkit_name().await.ok()?;
+				let version = app.version().await.unwrap_or_default();
+				Some((toolkit, version))
+			}
+			.await;
+			let (toolkit, version) = toolkit.unwrap_or_default();
+			Ok(ElementFocus { focused, toolkit, version })
+		})
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -795,6 +948,71 @@ mod tests {
 		assert!(native_window_for_frame(&windows, 30, "Document").is_err());
 		windows.push(window("3", 20));
 		assert!(native_window_for_frame(&windows, 20, "Document").is_err());
+	}
+
+	#[test]
+	fn shell_frames_yield_focus_to_the_active_application_window() {
+		let frame = |title: &str, pid: u32, focused: bool| AtSpiWindow {
+			window:         DesktopWindow {
+				id: format!("{title}-{pid}"),
+				pid: Some(pid),
+				title: title.into(),
+				app: "app".into(),
+				x: 0,
+				y: 0,
+				width: 100,
+				height: 100,
+				focused,
+			},
+			position_known: false,
+		};
+		let focused = |windows: &[AtSpiWindow]| -> Vec<String> {
+			windows
+				.iter()
+				.filter(|w| w.window.focused)
+				.map(|w| w.window.title.clone())
+				.collect()
+		};
+
+		// Only an all-untitled tie asks which frame holds keyboard focus.
+		let no_lookup = |_: &DesktopWindow| -> bool { panic!("focus lookup was not needed") };
+
+		// GNOME: gnome-shell (the compositor, pid 1) keeps its "Main stage"
+		// active.
+		let mut gnome = vec![frame("Main stage", 1, true), frame("notes.txt - gedit", 7, true)];
+		resolve_focus(&mut gnome, Some(1), no_lookup);
+		assert_eq!(focused(&gnome), ["notes.txt - gedit"]);
+
+		// KDE: plasma-keyboard's untitled frame stays active.
+		let mut kde = vec![frame("", 5, true), frame("notes.txt — Kate", 8, true)];
+		resolve_focus(&mut kde, None, no_lookup);
+		assert_eq!(focused(&kde), ["notes.txt — Kate"]);
+
+		// The GNOME overview: only the shell is active, and it keeps focus.
+		let mut overview = vec![frame("Main stage", 1, true), frame("notes.txt - gedit", 7, false)];
+		resolve_focus(&mut overview, Some(1), no_lookup);
+		assert_eq!(focused(&overview), ["Main stage"]);
+
+		// Two active application windows: none is named.
+		let mut two = vec![frame("Main stage", 1, true), frame("A", 7, true), frame("B", 9, true)];
+		resolve_focus(&mut two, Some(1), no_lookup);
+		assert!(focused(&two).is_empty());
+
+		// An untitled application window still wins over gnome-shell's frame.
+		let mut untitled = vec![frame("Main stage", 1, true), frame("", 7, true)];
+		resolve_focus(&mut untitled, Some(1), no_lookup);
+		assert_eq!(focused(&untitled), [""]);
+
+		// KDE with an untitled app beside plasma-keyboard: the frame holding
+		// keyboard focus wins.
+		let mut kde_untitled = vec![frame("", 5, true), frame("", 8, true)];
+		resolve_focus(&mut kde_untitled, None, |window| window.pid == Some(8));
+		let ids: Vec<&str> = kde_untitled
+			.iter()
+			.filter(|w| w.window.focused)
+			.map(|w| w.window.id.as_str())
+			.collect();
+		assert_eq!(ids, ["-8"]);
 	}
 
 	#[test]
@@ -861,5 +1079,142 @@ mod tests {
 				.as_deref(),
 			Some("/focus")
 		);
+	}
+
+	#[test]
+	fn actions_match_by_machine_name_not_localized_name() {
+		use atspi::zbus::{
+			MessageStream, connection::Builder as ConnectionBuilder, message::Type, zvariant::Value,
+		};
+		use futures::StreamExt;
+
+		/// Path, localized names (`GetActions`), machine names (`GetName`),
+		/// `NActions`, role, requested action and the index it must resolve to.
+		type Case = (
+			&'static str,
+			&'static [&'static str],
+			&'static [&'static str],
+			i32,
+			Role,
+			&'static str,
+			Option<i32>,
+		);
+		const CASES: [Case; 7] = [
+			// Firefox.
+			("/firefox", &[";;"], &["press"], 1, Role::Button, "press", Some(0)),
+			// A GTK app under a German locale.
+			("/german", &["Klicken"], &["click"], 1, Role::Button, "press", Some(0)),
+			// Chromium's checkbox and radio button, and VS Code's Toggle Panel: a
+			// toggle button.
+			(
+				"/checkbox",
+				&["", ""],
+				&["uncheck", "showContextMenu"],
+				2,
+				Role::CheckBox,
+				"press",
+				Some(0),
+			),
+			(
+				"/radio",
+				&["", ""],
+				&["check", "showContextMenu"],
+				2,
+				Role::RadioButton,
+				"press",
+				Some(0),
+			),
+			(
+				"/toggle",
+				&["", ""],
+				&["check", "showContextMenu"],
+				2,
+				Role::ToggleButton,
+				"press",
+				Some(0),
+			),
+			// No activation at all is still refused.
+			("/menu_only", &["Show menu"], &["showMenu"], 1, Role::Button, "press", None),
+			// An app reporting a nonsense count is read only up to the cap.
+			("/huge", &[], &["press"], i32::MAX, Role::Button, "press", Some(0)),
+		];
+		const PEER: &str = ":1.7";
+
+		/// Answers like the apps, `GetAll` refused as Qt refuses it, so a proxy
+		/// that caches properties cannot read `NActions`.
+		async fn app(server: atspi::zbus::Connection) {
+			let mut stream = MessageStream::from(&server);
+			while let Some(Ok(message)) = stream.next().await {
+				if message.message_type() != Type::MethodCall {
+					continue;
+				}
+				let header = message.header();
+				let path = header.path().unwrap().to_string();
+				let member = header.member().unwrap().to_string();
+				let Some(case) = CASES.iter().find(|case| case.0 == path) else {
+					server
+						.reply_error(&header, "org.freedesktop.DBus.Error.UnknownObject", &"")
+						.await
+						.unwrap();
+					continue;
+				};
+				match member.as_str() {
+					"Get" => {
+						let (_, property): (String, String) = message.body().deserialize().unwrap();
+						assert_eq!(property, "NActions");
+						server.reply(&header, &Value::from(case.3)).await.unwrap();
+					},
+					"GetName" => {
+						let index: i32 = message.body().deserialize().unwrap();
+						let name = usize::try_from(index)
+							.ok()
+							.and_then(|index| case.2.get(index))
+							.copied()
+							.unwrap_or("");
+						server.reply(&header, &name).await.unwrap();
+					},
+					"GetActions" => {
+						let actions: Vec<_> = case.1.iter().map(|name| (*name, "", "")).collect();
+						server.reply(&header, &actions).await.unwrap();
+					},
+					"GetRole" => server.reply(&header, &(case.4 as u32)).await.unwrap(),
+					_ => server
+						.reply_error(&header, "org.freedesktop.DBus.Error.UnknownInterface", &"")
+						.await
+						.unwrap(),
+				}
+			}
+		}
+
+		let rt = Builder::new_current_thread().enable_all().build().unwrap();
+		let (results, huge) = rt.block_on(async {
+			let (client, server) = tokio::net::UnixStream::pair().unwrap();
+			let server = ConnectionBuilder::unix_stream(server)
+				.server(atspi::zbus::Guid::generate())
+				.unwrap()
+				.p2p()
+				.build();
+			let client = ConnectionBuilder::unix_stream(client).p2p().build();
+			let (server, client) = tokio::try_join!(server, client).unwrap();
+			let reads = async {
+				let mut results = Vec::new();
+				for (path, .., requested, _) in CASES {
+					let object = ObjectRefOwned::from_static_str_unchecked(PEER, path);
+					let accessible = object.as_accessible_proxy(&client).await.unwrap();
+					let action = AtSpiAx::action(&client, &object).await.unwrap();
+					results.push(resolve_action(&action, &accessible, requested).await.ok());
+				}
+				let object = ObjectRefOwned::from_static_str_unchecked(PEER, "/huge");
+				let action = AtSpiAx::action(&client, &object).await.unwrap();
+				(results, action_names(&action).await.unwrap().len())
+			};
+			tokio::select! {
+				reads = reads => reads,
+				() = app(server) => unreachable!("the app stopped answering"),
+			}
+		});
+		let expected: Vec<_> = CASES.iter().map(|case| case.6).collect();
+		assert_eq!(results, expected);
+		assert_eq!(huge, MAX_ACTIONS as usize);
 	}
 }

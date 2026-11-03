@@ -24,16 +24,7 @@ const TRUNKS = ["upstream/main", "origin/main"] as const satisfies readonly stri
 // the workspace's pedantic/nursery lints in its own manifest (most of it is
 // ported third-party code), it is held to default clippy and to zero rustc
 // warnings like everything else.
-const VENDORED_FORK_EXCLUDES = [
-	"--exclude",
-	"brush-core",
-	"--exclude",
-	"brush-parser",
-	"--exclude",
-	"cfg_aliases",
-	"--exclude",
-	"napi",
-] as const satisfies readonly string[];
+const VENDORED_FORK_EXCLUDES = ["--exclude", "cfg_aliases", "--exclude", "napi"] as const satisfies readonly string[];
 // grep-searcher's upstream ripgrep code predates the workspace clippy policy, but
 // the fork's own `search_push` (src/searcher/push.rs, see its README.md) carries
 // tests, so it is exempt from the lint gates only and still runs under test:rs.

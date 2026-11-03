@@ -783,6 +783,14 @@ if "__omp_prelude_loaded__" not in globals():
         __slots__ = ()
         kind = "completion"
 
+        @property
+        def attempts(self):
+            snapshot = _bridge_call(
+                "__status__",
+                {"item": {"kind": self.kind, "id": self.id}},
+            )
+            return snapshot.get("attempts", []) if isinstance(snapshot, dict) else []
+
         def __repr__(self):
             return f"<completion {self.id}>"
 

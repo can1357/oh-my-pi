@@ -2,21 +2,66 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Made the bash tool's shell faster on string appends (`s+=x`), sourcing files full of function definitions (each body compiles on first call), quoted `"$var"`/`"$1"` arguments and file redirections
+
 ### Fixed
 
-- Fixed the bash tool failing with `JoinHandle polled after completion` after `wait` for a background job or coprocess that hit an error; background jobs, coprocesses and process substitutions now print their own errors, and an `exit` or `break` in one no longer ends the shell that waits for it ([#17684](https://github.com/can1357/oh-my-pi/pull/17684) by [@sjawhar](https://github.com/sjawhar))
-- Fixed the bash tool's shell sending an error where Bash does not: an error from `[[ … ]]` or from a later redirection now goes into the file the command redirects standard error to, a simple command's expansion error no longer creates that command's files, a function definition's redirections now expand with the function's arguments, and a redirection that cannot be opened on `{ …; }` or `[[ … ]]`, or with standard error closed, now fails only its command instead of ending the command line ([#17684](https://github.com/can1357/oh-my-pi/pull/17684) by [@sjawhar](https://github.com/sjawhar))
-- Fixed the bash tool's shell losing the error of a background command whose standard error goes to a named pipe when one of its redirections fails or the command is not found; the error now reaches that pipe byte for byte, or the standard error in effect where the redirection failed, and a failed redirection ends the command with status 1, as in Bash ([#17684](https://github.com/can1357/oh-my-pi/pull/17684) by [@sjawhar](https://github.com/sjawhar))
-- Fixed the bash tool's shell failing a background command that reads or writes a named pipe when `ulimit -n` is 10 or lower, or when the pipe is on a descriptor above 9 (`cmd 12<fifo &` waited for ever); the command now opens the pipe itself, without `/bin/sh` ([#17684](https://github.com/can1357/oh-my-pi/pull/17684) by [@sjawhar](https://github.com/sjawhar))
-- Fixed the bash tool's shell letting an external command use the host's own standard input, output or error after the script closed it (`cmd 2>&-`), so the command's output bypassed the shell; the descriptor is now closed in the command too ([#17684](https://github.com/can1357/oh-my-pi/pull/17684) by [@sjawhar](https://github.com/sjawhar))
-- Fixed the bash tool's shell aborting an external command started after `ulimit -n` lowered the open-file limit below a descriptor the script holds (`{ ulimit -n 9; cat /dev/fd/12; } 12<file`); the command now gets that descriptor, as in Bash ([#17684](https://github.com/can1357/oh-my-pi/pull/17684) by [@sjawhar](https://github.com/sjawhar))
-- Fixed the bash tool's shell not making the redirections of a background command that fails before it runs (`nosuch >fifo &`); its named pipes are now opened, `$!` names it and `wait` returns its status, under the script's `ulimit` settings, as in Bash ([#17684](https://github.com/can1357/oh-my-pi/pull/17684) by [@sjawhar](https://github.com/sjawhar))
-- Fixed the bash tool's shell waiting for ever on a named pipe when a later redirection of the same background command was a here-document, a here-string, a process substitution or a `noclobber` file, and opening a later file although an earlier redirection had failed; every redirection after the pipe is now made in order in the command's own process, and `wait` gets the status of `nohup cmd >fifo &` when the command is not found ([#17684](https://github.com/can1357/oh-my-pi/pull/17684) by [@sjawhar](https://github.com/sjawhar))
-- Fixed the bash tool's shell sending the output of a command substitution or process substitution in a background command's here-document, here-string or redirection into that command's named pipe, which lost the output or left the command waiting for ever ([#17684](https://github.com/can1357/oh-my-pi/pull/17684) by [@sjawhar](https://github.com/sjawhar))
-- Fixed the bash tool's shell replacing an existing file with `&>file` or `>&file` under `set -o noclobber`; it now refuses, as for `>file` and in Bash ([#17684](https://github.com/can1357/oh-my-pi/pull/17684) by [@sjawhar](https://github.com/sjawhar))
-- Fixed the bash tool's shell losing a background command's process-substitution input when another of its redirections set descriptor 63 (`cmd >fifo 63>file < <(…) &`), and letting a command substitution in its later here-string read an earlier here-string through descriptor 63 ([#17684](https://github.com/can1357/oh-my-pi/pull/17684) by [@sjawhar](https://github.com/sjawhar))
-- Fixed the bash tool's shell failing a background command with `Bad file descriptor` when, after a named pipe, it set descriptor 63 to a provider file, here-string or here-document (`cmd >fifo 63<<<text &`), or set 62 while the script held 63 ([#17684](https://github.com/can1357/oh-my-pi/pull/17684) by [@sjawhar](https://github.com/sjawhar))
-- Fixed the bash tool's shell hanging, or losing an error or output, when a background command it took for an external one ran as a builtin or function (`${c[n++]} >fifo &`); the command now makes its named-pipe redirections, reports its errors through them, and the `eval` string or function it runs makes its own redirections once, as in Bash ([#17684](https://github.com/can1357/oh-my-pi/pull/17684) by [@sjawhar](https://github.com/sjawhar))
+- Fixed associative arrays slowing down quadratically as they grow: 100,000 inserts and lookups took about 90 seconds and now take about a tenth of a second
+### Fixed
+
+- Fixed `el.type` and `el.press(keys)` on Wayland moving focus inside the element's app (GNOME showed "… is ready") before refusing the call: they are now refused before anything reaches the app ([#17915](https://github.com/can1357/oh-my-pi/pull/17915) by [@will-bogusz](https://github.com/will-bogusz))
+### Fixed
+
+- Fixed Windows background drags in Tk apps (Python's tkinter, IDLE) reporting success while nothing happened; they now follow `computer.backgroundFallback` ([#17913](https://github.com/can1357/oh-my-pi/pull/17913) by [@will-bogusz](https://github.com/will-bogusz))
+### Fixed
+
+- The bash tool's built-in `rsync` now reports a `--log-file` it cannot open as rsync 3.5.1 does: its client names itself `[client]` and a remote server `[server]` in `failed to open log-file …`, and an empty `--log-file=` sends the log to syslog with no message instead of failing on the current directory ([#17980](https://github.com/can1357/oh-my-pi/pull/17980) by [@sjawhar](https://github.com/sjawhar))
+### Fixed
+
+- Fixed X11 takeover and `raise()` failing on a window that background typing had targeted, under window managers such as Openbox ([#17910](https://github.com/can1357/oh-my-pi/pull/17910) by [@will-bogusz](https://github.com/will-bogusz))
+### Fixed
+
+- Fixed X11 background typing, shortcuts and keys held during drags into Qt 5/6 apps reporting success while the app received no keys; the `computer` tool now runs them in takeover, or refuses them when `computer.backgroundFallback` is `refuse` ([#17911](https://github.com/can1357/oh-my-pi/pull/17911) by [@will-bogusz](https://github.com/will-bogusz))
+### Fixed
+
+- Fixed Wayland double and triple clicks (`doubleClick`, `click` with `count`) landing as a single click in Qt apps on KDE Plasma, such as Kate ([#17903](https://github.com/can1357/oh-my-pi/pull/17903) by [@will-bogusz](https://github.com/will-bogusz))
+### Fixed
+
+- Fixed `press()`, `perform()` and `menu.select()` refusing on Linux in Firefox, Chromium, VS Code and LibreOffice, and in apps under a non-English locale, with "AT-SPI action 'press' is unavailable"; `actions()` now lists the actions' untranslated names (`press`, `click`) instead of empty or translated labels, and `press()` toggles toggle buttons and selects radio buttons as it does checkboxes ([#17936](https://github.com/can1357/oh-my-pi/pull/17936) by [@will-bogusz](https://github.com/will-bogusz))
+### Fixed
+
+- Fixed `computer.focusedWindow()` on GNOME and KDE Wayland always naming a shell surface (gnome-shell's "Main stage", an untitled plasma-keyboard frame) instead of the application window that has focus; desktop and display `ax()` and `observe()` now read that application too ([#17922](https://github.com/can1357/oh-my-pi/pull/17922) by [@will-bogusz](https://github.com/will-bogusz))
+### Fixed
+
+- Fixed takeover keys into iPhone Mirroring and Screen Sharing keeping Fn (Globe) held after a Delete, arrow or function key, which dropped Shift and lost later letters ([#17909](https://github.com/can1357/oh-my-pi/pull/17909) by [@will-bogusz](https://github.com/will-bogusz))
+### Fixed
+
+- Fixed a Wayland `computer` run timing out without a reason when the RemoteDesktop permission dialog went unanswered (GNOME can open it behind other windows): the input call now fails with `Timeout` naming the dialog shortly before the run's deadline, and nothing is sent ([#17932](https://github.com/can1357/oh-my-pi/pull/17932) by [@will-bogusz](https://github.com/will-bogusz))
+### Fixed
+
+- Fixed X11 takeover typing and shortcuts stopping with `Cancelled` partway through whenever you had last typed on your own keyboard ([#17912](https://github.com/can1357/oh-my-pi/pull/17912) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed pressing Escape during X11 takeover input ending only that call, so the agent went on, instead of stopping computer use for the rest of the turn ([#17912](https://github.com/can1357/oh-my-pi/pull/17912) by [@will-bogusz](https://github.com/will-bogusz))
+### Fixed
+
+- Fixed X11 background `el.type` and `el.press` bringing the element's window to the front and taking your keyboard; an element that does not already hold a GTK 3 window's focus now runs in takeover instead ([#17921](https://github.com/can1357/oh-my-pi/pull/17921) by [@will-bogusz](https://github.com/will-bogusz))
+
+## [18.16.0] - 2026-11-02
+
+### Added
+
+- Added `macOSFrontApp()`, which reads the app macOS has in front and can put it back in front for a while (`keepInFront`) without stopping for the user's typing ([#16284](https://github.com/can1357/oh-my-pi/pull/16284) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Changed
+
+- Replaced the embedded shell interpreter behind `Shell` and `executeShell` with pi's own bash engine, now part of `pi-shell`: bash 5.3 semantics, including alias bodies with pipes, subshells and separators
+
+### Fixed
+
+- Fixed iPhone Mirroring clicks, scrolls and keys reporting success while the mirror showed a connection screen such as "iPhone in Use" instead of the phone; they now fail and quote that screen ([#17755](https://github.com/can1357/oh-my-pi/pull/17755) by [@will-bogusz](https://github.com/will-bogusz))
+- `parseKey`/`matchesKey` now recognize the parameterless `CSI P`/`CSI Q`/`CSI S` (and `CSI 1 <letter>`) forms that kitty-protocol terminals such as Ghostty send for unmodified F1/F2/F4, and modified F2–F9 no longer match other keys (e.g. Ctrl+PageDown as Ctrl+F8) ([#17812](https://github.com/can1357/oh-my-pi/issues/17812)).
+- Added `installSqliteLockShim()` (Linux), which moves Bun's SQLite record locks onto open-file-description locks that no other close of the file releases, and `heldFileKind(path)`, which reports a file this process holds open and locked. Both are also on `@oh-my-pi/pi-natives/sqlite-locks`, which loads the addon on first call ([#15586](https://github.com/can1357/oh-my-pi/issues/15586))
 
 ## [18.15.0] - 2026-11-01
 
