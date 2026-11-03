@@ -31,30 +31,30 @@ pub struct AtSpiWindow {
 
 /// Leaves `focused` set on at most one window. Shell surfaces report the
 /// Active state at all times: the compositor's own frames (gnome-shell's "Main
-/// stage") and untitled frames (plasma-keyboard's). One of them therefore
-/// counts as focused only while no application window is active, as in the
-/// GNOME overview. Two active application windows leave none focused, rather
-/// than naming one at random.
+/// stage") and untitled frames (plasma-keyboard's). When several windows are
+/// active, the compositor's frames drop out first, then untitled ones, until
+/// one is left; a shell frame alone keeps focus, as in the GNOME overview. Two
+/// active titled application windows leave none focused, rather than naming
+/// one at random.
 pub fn resolve_focus(windows: &mut [AtSpiWindow], compositor_pid: Option<u32>) {
-	let is_shell = |window: &DesktopWindow| {
-		window.title.trim().is_empty() || (compositor_pid.is_some() && window.pid == compositor_pid)
-	};
-	let active: Vec<usize> = (0..windows.len())
+	let mut active: Vec<usize> = (0..windows.len())
 		.filter(|&index| windows[index].window.focused)
 		.collect();
 	if active.len() < 2 {
 		return;
 	}
-	let apps: Vec<usize> = active
-		.iter()
-		.copied()
-		.filter(|&index| !is_shell(&windows[index].window))
-		.collect();
-	let focused = match apps.as_slice() {
+	let all_active = active.clone();
+	if compositor_pid.is_some() {
+		active.retain(|&index| windows[index].window.pid != compositor_pid);
+	}
+	if active.len() > 1 {
+		active.retain(|&index| !windows[index].window.title.trim().is_empty());
+	}
+	let focused = match active.as_slice() {
 		[only] => Some(*only),
 		_ => None,
 	};
-	for index in active {
+	for index in all_active {
 		windows[index].window.focused = Some(index) == focused;
 	}
 }
@@ -871,6 +871,11 @@ mod tests {
 		let mut two = vec![frame("Main stage", 1, true), frame("A", 7, true), frame("B", 9, true)];
 		resolve_focus(&mut two, Some(1));
 		assert!(focused(&two).is_empty());
+
+		// An untitled application window still wins over gnome-shell's frame.
+		let mut untitled = vec![frame("Main stage", 1, true), frame("", 7, true)];
+		resolve_focus(&mut untitled, Some(1));
+		assert_eq!(focused(&untitled), [""]);
 	}
 
 	#[test]

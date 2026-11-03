@@ -139,8 +139,9 @@ pub struct WaylandBackend {
 	ax_error:       Option<DesktopError>,
 	input:          Option<libei::Libei>,
 	displays:       Vec<DesktopDisplay>,
-	/// The compositor's PID, whose own AT-SPI frames never count as the
-	/// focused application window.
+	/// The PID that listens on the Wayland socket: gnome-shell on GNOME, whose
+	/// own AT-SPI frames never count as the focused application window. On
+	/// Plasma it is `kwin_wayland_wrapper`, which owns no frames.
 	compositor_pid: Option<u32>,
 }
 
@@ -167,23 +168,6 @@ fn compositor_pid() -> Option<u32> {
 		)
 	};
 	(status == 0 && credentials.pid > 0).then_some(credentials.pid as u32)
-}
-
-/// The focused window that display keyboard input goes to. A native client's
-/// position is unknowable, but with one monitor the focused surface is on it,
-/// which is all display keyboard input needs to know.
-fn keyboard_window(windows: Vec<AtSpiWindow>, display_count: usize) -> CoreResult<DesktopWindow> {
-	let entry = windows
-		.into_iter()
-		.find(|entry| entry.window.focused)
-		.ok_or_else(|| DesktopError::invalid_target("no focused Wayland window was found"))?;
-	if !entry.position_known && display_count != 1 {
-		return Err(DesktopError::invalid_target(
-			"the focused Wayland surface has no known global position; cannot safely target display \
-			 keyboard input",
-		));
-	}
-	Ok(entry.window)
 }
 
 impl WaylandBackend {
@@ -236,7 +220,7 @@ impl WaylandBackend {
 	}
 
 	fn atspi_windows(&self) -> CoreResult<Vec<AtSpiWindow>> {
-		let mut windows = self
+		self
 			.ax
 			.as_ref()
 			.ok_or_else(|| {
@@ -245,9 +229,7 @@ impl WaylandBackend {
 					.clone()
 					.unwrap_or_else(DesktopError::ax_unsupported)
 			})?
-			.windows()?;
-		resolve_focus(&mut windows, self.compositor_pid);
-		Ok(windows)
+			.windows()
 	}
 }
 
@@ -322,16 +304,29 @@ impl Backend for WaylandBackend {
 	}
 
 	fn windows(&mut self) -> CoreResult<Vec<DesktopWindow>> {
-		Ok(self
-			.atspi_windows()?
-			.into_iter()
-			.map(|entry| entry.window)
-			.collect())
+		let mut windows = self.atspi_windows()?;
+		resolve_focus(&mut windows, self.compositor_pid);
+		Ok(windows.into_iter().map(|entry| entry.window).collect())
 	}
 
+	/// Reads the unresolved list. A native app's frame has no known position,
+	/// so it must keep failing this check until the real outputs are counted;
+	/// resolving focus here would refuse GNOME display typing that `main` allows
+	/// through the shell frame, or, with a one-monitor shortcut, type on a
+	/// monitor the agent cannot see.
 	fn focused_keyboard_window(&mut self) -> CoreResult<DesktopWindow> {
-		let windows = self.atspi_windows()?;
-		keyboard_window(windows, self.displays.len())
+		let entry = self
+			.atspi_windows()?
+			.into_iter()
+			.find(|entry| entry.window.focused)
+			.ok_or_else(|| DesktopError::invalid_target("no focused Wayland window was found"))?;
+		if !entry.position_known {
+			return Err(DesktopError::invalid_target(
+				"the focused Wayland surface has no known global position; cannot safely target \
+				 display keyboard input",
+			));
+		}
+		Ok(entry.window)
 	}
 
 	fn capture(
@@ -669,21 +664,6 @@ mod tests {
 			},
 			position_known,
 		}
-	}
-
-	#[test]
-	fn display_keyboard_input_takes_a_focused_native_window_only_on_one_monitor() {
-		let focused = || {
-			let mut window = portal_window(0, 0, 900, 700, false);
-			window.window.focused = true;
-			vec![portal_window(0, 0, 100, 100, false), window]
-		};
-		assert_eq!(keyboard_window(focused(), 1).unwrap().width, 900);
-		assert!(
-			keyboard_window(focused(), 2).is_err(),
-			"two monitors: the window's monitor is unknown"
-		);
-		assert!(keyboard_window(vec![portal_window(0, 0, 100, 100, false)], 1).is_err());
 	}
 
 	#[test]
