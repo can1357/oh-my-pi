@@ -88,6 +88,7 @@ interface ModelPublicationScope {
 	preparation: object;
 	livePublication: number;
 	resumePublication: number;
+	settingsPublication: number;
 }
 
 interface ModelPublicationSnapshot {
@@ -108,7 +109,12 @@ export class ModelControls {
 	#automaticInvalidation = 0;
 	#modelPublication = 0;
 	// /clear and /new keep published model owners; a rejected transcript switch restores them.
-	#publicationScope: ModelPublicationScope = { preparation: {}, livePublication: 0, resumePublication: 0 };
+	#publicationScope: ModelPublicationScope = {
+		preparation: {},
+		livePublication: 0,
+		resumePublication: 0,
+		settingsPublication: 0,
+	};
 	#serviceTierByFamily: ServiceTierByFamily;
 
 	constructor(
@@ -149,7 +155,7 @@ export class ModelControls {
 	/** A transcript switch starts a fresh scope; the returned snapshot reinstates the origin if the switch rolls back. */
 	beginPublicationScope(): ModelPublicationSnapshot {
 		const snapshot = { scope: this.#publicationScope, selectionGeneration: this.#selectionGeneration };
-		this.#publicationScope = { preparation: {}, livePublication: 0, resumePublication: 0 };
+		this.#publicationScope = { preparation: {}, livePublication: 0, resumePublication: 0, settingsPublication: 0 };
 		return snapshot;
 	}
 
@@ -309,11 +315,11 @@ export class ModelControls {
 			this.#selectionGeneration++;
 			publication = scope.livePublication = ++this.#modelPublication;
 			if (role !== EPHEMERAL_MODEL_CHANGE_ROLE) scope.resumePublication = publication;
+			if (options?.persist) scope.settingsPublication = publication;
 		});
 		await this.#recordModelReceipt(targetModel, role, publication, scope);
 		if (this.#publicationScope !== scope) return { switched: false };
-		const settingsOwner = role === EPHEMERAL_MODEL_CHANGE_ROLE ? scope.livePublication : scope.resumePublication;
-		if (options?.persist && settingsOwner === publication) {
+		if (options?.persist && scope.settingsPublication === publication) {
 			const value = formatRoleModelValue(
 				this.#host.settings,
 				this.#host.modelRegistry,

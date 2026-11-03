@@ -329,12 +329,16 @@ describe("AgentSession model persistence", () => {
 		}
 	});
 
-	it.each(["global", "project"] as const)(
-		"a later durable publication supersedes pending %s persistence",
-		async persistScope => {
+	it.each(
+		(["global", "project"] as const).flatMap(persistScope =>
+			(["temporary", "persistent"] as const).map(takeover => ({ persistScope, takeover })),
+		),
+	)(
+		"a later $takeover publication preserves the latest durable $persistScope selection",
+		async ({ persistScope, takeover }) => {
 			const source = getAnthropicModelOrThrow("claude-sonnet-4-5");
-			const older = getAnthropicModelOrThrow("claude-haiku-4-5");
-			const newer = getAnthropicModelOrThrow("claude-sonnet-4-6");
+			const older = getAnthropicModelOrThrow("claude-sonnet-4-6");
+			const newer = getAnthropicModelOrThrow("claude-opus-4-6");
 			const agentDir = path.join(tempDir.path(), "config");
 			const diskSettings = await Settings.loadIsolated({ cwd: tempDir.path(), agentDir });
 			cfgDefaultThinkingLevel.set(diskSettings, Effort.High);
@@ -361,8 +365,12 @@ describe("AgentSession model persistence", () => {
 			});
 			try {
 				await entered.promise;
-				await created.session.setModel(newer, "default", { persist: true, persistScope });
-				created.session.setThinkingLevel(Effort.Low, true);
+				if (takeover === "temporary") {
+					await created.session.setModelTemporary(newer, Effort.Max);
+				} else {
+					await created.session.setModel(newer, "default", { persist: true, persistScope });
+					created.session.setThinkingLevel(Effort.Low, true);
+				}
 			} finally {
 				release.resolve();
 				await pending;
@@ -370,11 +378,23 @@ describe("AgentSession model persistence", () => {
 			}
 			expect(await pending).toEqual({ switched: false });
 			expect(created.session.model?.id).toBe(newer.id);
-			expect(created.settings.getModelRole("default")).toBe(modelValue(newer));
+			const expectedModel = modelValue(takeover === "temporary" ? older : newer);
+			const expectedEffort = takeover === "temporary" ? Effort.Max : Effort.Low;
+			expect(created.session.configuredThinkingLevel()).toBe(expectedEffort);
+			expect(created.session.agent.state.thinkingLevel).toBe(expectedEffort);
+			expect(created.settings.getModelRole("default")).toBe(expectedModel);
+			expect(
+				persistScope === "project"
+					? created.settings.getProjectModelRole("default")
+					: created.settings.getGlobalModelRole("default"),
+			).toBe(expectedModel);
+			expect(
+				created.session.sessionManager.getBranch().findLast(entry => entry.type === "model_change"),
+			).toMatchObject({ model: modelValue(newer) });
 			await diskSettings.flush();
 			const reloaded = await Settings.loadReadOnly({ cwd: tempDir.path(), agentDir });
-			expect(reloaded.getModelRole("default")).toBe(modelValue(newer));
-			expect(cfgDefaultThinkingLevel.get(reloaded)).toBe(Effort.Low);
+			expect(reloaded.getModelRole("default")).toBe(expectedModel);
+			expect(cfgDefaultThinkingLevel.get(reloaded)).toBe(takeover === "temporary" ? AUTO_THINKING : Effort.Low);
 		},
 	);
 
