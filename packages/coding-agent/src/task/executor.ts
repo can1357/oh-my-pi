@@ -3806,7 +3806,12 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 	const session = await AgentLifecycleManager.forRegistry(options.registry ?? AgentRegistry.global()).ensureLive(
 		options.id,
 	);
-	if (!isLocalAgentSession(session)) return runFollowUpTurnOnHome(session, options);
+	if (!isLocalAgentSession(session)) {
+		// Only global-registry sessions are homed off-thread (see runSubprocess); the home thread's
+		// own global registry stands in for it, so the registry object never crosses the link.
+		const { registry: _global, ...routed } = options;
+		return runFollowUpTurnOnHome(session, routed);
+	}
 	// A turn of a main-homed session loads the main thread like a placed run.
 	const endMainRun = isMainThread() ? existingSubagentWorkerPool()?.beginMainRun() : undefined;
 	try {
@@ -4363,10 +4368,18 @@ function createWarmSubagentReviver(capture: WarmReviveCapture): AgentReviver {
  * by how many subagents run at once; otherwise — worker mode off, or already inside a
  * worker, so nested spawns stay in their worker — it runs on this thread. Worker mode is
  * read from `options.settings`; a call without settings runs here.
+ *
+ * Workers serve the process-global registry, IRC bus, and lifecycle, so only a subagent of
+ * the global registry is placed: one of an isolated session registry stays on this thread,
+ * where it registers and messages in its own world. A placed run leaves `agentRegistry` implicit
+ * (a worker's global registry is the proxy of main's), so the registry object never crosses
+ * the link.
  */
 export async function runSubprocess(options: ExecutorOptions): Promise<SingleResult> {
-	const pool = isMainThread() && options.settings ? subagentWorkerPool(options.settings) : undefined;
-	return pool ? runSubprocessPlaced(pool, options, runSubprocessOnThisThread) : runSubprocessOnThisThread(options);
+	const { agentRegistry, ...placeable } = options;
+	const isolated = agentRegistry !== undefined && agentRegistry !== AgentRegistry.global();
+	const pool = !isolated && isMainThread() && options.settings ? subagentWorkerPool(options.settings) : undefined;
+	return pool ? runSubprocessPlaced(pool, placeable, runSubprocessOnThisThread) : runSubprocessOnThisThread(options);
 }
 
 /** A routed {@link runSubprocess} call as it crosses into a worker. */
