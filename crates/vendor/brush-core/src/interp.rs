@@ -303,13 +303,14 @@ impl ExecutionParameters {
 	/// order, each once the one before it is made, as the child Bash forks
 	/// makes them. A file this process carries at a spare descriptor is given
 	/// to the stub at the descriptor it is for. Each descriptor the stub sets
-	/// comes back, and is put here at the same number while `read` says a
-	/// word that can read one is still to expand, so that those words see
-	/// the descriptors the command will have, as they do in Bash's child; a
+	/// comes back, and is put here at the same number while a word still to
+	/// expand names it (`later` is what those words are written as), so that
+	/// such a word sees the descriptor the command will have, as it does in
+	/// Bash's child; a
 	/// descriptor it closes is closed here. The error of the first one the
 	/// stub cannot make is returned, and the rest are dropped.
 	#[cfg(unix)]
-	pub(crate) async fn flush_to_stub(&mut self, read: bool) -> Result<(), error::Error> {
+	pub(crate) async fn flush_to_stub(&mut self, later: &str) -> Result<(), error::Error> {
 		use std::os::fd::AsRawFd as _;
 
 		use crate::jobstub::StepFailure;
@@ -374,7 +375,7 @@ impl ExecutionParameters {
 			};
 			match (&redirect, descriptor) {
 				(DeferredRedirect::Close { fd }, _) => drop(self.open_files.remove_fd(*fd)),
-				(_, Some(descriptor)) if read => drop(
+				(_, Some(descriptor)) if expansion_may_read_descriptor(later, redirect.fd()) => drop(
 					self
 						.open_files
 						.set_fd(redirect.fd(), OpenFile::from(std::fs::File::from(descriptor))),
@@ -803,37 +804,36 @@ async fn setup_simple_command_redirects(
 			setup_redirect(shell, params, redirect).await?;
 			#[cfg(unix)]
 			{
-				// The descriptors the stub sets are kept here only while a
-				// word that can read one is still to expand: a command may
-				// have hundreds of redirections, and holding every one of
-				// their descriptors would reach the open-file limit the
-				// command itself is given.
-				let read = items[index + 1..].iter().any(|item| expansion_may_read_descriptors(item));
-				params.flush_to_stub(read).await?;
+				// A descriptor the stub sets is kept here only while a word
+				// that names it is still to expand, and only if that word
+				// runs something that can read it: a command may have
+				// hundreds of redirections, and holding every one of their
+				// descriptors would reach the open-file limit the command
+				// itself is given.
+				let later: String = items[index + 1..].iter().map(|item| format!("{item:?}")).collect();
+				params.flush_to_stub(&later).await?;
 			}
 		}
 	}
 	Ok(())
 }
 
-/// Whether expanding `item`'s words can read a descriptor the command will
-/// have: only a command substitution or a process substitution runs code
-/// that reads one, and both are spelled.
-fn expansion_may_read_descriptors(item: &CommandPrefixOrSuffixItem) -> bool {
-	let reads = |text: &str| {
-		text.contains("$(") || text.contains('`') || text.contains("<(") || text.contains(">(")
-	};
-	match item {
-		CommandPrefixOrSuffixItem::Word(word) => reads(&word.flatten()),
-		CommandPrefixOrSuffixItem::AssignmentWord(_, word) => reads(&word.flatten()),
-		CommandPrefixOrSuffixItem::IoRedirect(redirect) => match redirect {
-			ast::IoRedirect::File(_, _, ast::IoFileRedirectTarget::Filename(word))
-			| ast::IoRedirect::HereString(_, word) => reads(&word.flatten()),
-			ast::IoRedirect::File(..) | ast::IoRedirect::HereDocument(..) => false,
-			_ => true,
-		},
-		CommandPrefixOrSuffixItem::ProcessSubstitution(..) => true,
-	}
+/// Whether a word still to expand can read the descriptor `fd` the command
+/// will have: `later` is what those words are written as, and only a command
+/// or process substitution in them runs something that reads a descriptor.
+/// What it runs is given the standard three as they are, and reads any other
+/// one only by naming it (`&fd`, `/dev/fd/fd`); a command with hundreds of
+/// redirections would otherwise hold every one of their descriptors here and
+/// reach the open-file limit the command itself is given.
+fn expansion_may_read_descriptor(later: &str, fd: ShellFd) -> bool {
+	let runs = later.contains("$(")
+		|| later.contains('`')
+		|| later.contains("<(")
+		|| later.contains(">(");
+	runs
+		&& (fd <= 2
+			|| later.contains(&format!("&{fd}"))
+			|| later.contains(&format!("/dev/fd/{fd}")))
 }
 
 /// Where a simple command reports an error that ends it before its command
