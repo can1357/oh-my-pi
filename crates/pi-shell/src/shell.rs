@@ -6621,6 +6621,90 @@ mod tests {
 				"a=1 b=$a /bin/sh -c 'echo \"b=<$b>\"'",
 				"b=<1>\n",
 			),
+			(
+				"a readonly name",
+				"readonly a=old; a=new /bin/sh -c 'echo \"a=<$a>\"'; echo \"S=$? after=<$a>\"",
+				"a: readonly variable\na=<>\nS=0 after=<old>\n",
+			),
+			(
+				"a readonly name appended to",
+				"readonly a=old; a+=new /bin/sh -c 'echo \"a=<$a>\"'; echo \"S=$? after=<$a>\"",
+				"a: readonly variable\na=<>\nS=0 after=<old>\n",
+			),
+			(
+				"a readonly name with another after it",
+				"readonly a=old; a=new b=2 /bin/sh -c 'echo \"a=<$a> b=<$b>\"'; echo \"S=$?\"",
+				"a: readonly variable\na=<> b=<2>\nS=0\n",
+			),
+			(
+				"a readonly name with a redirection",
+				"readonly a=old; a=new /bin/echo RAN >out 2>err; echo \"S=$?\"; cat out; [ -f err ] \
+				 && echo HAS-ERR",
+				"a: readonly variable\nS=0\nRAN\nHAS-ERR\n",
+			),
+			(
+				"a name that holds another",
+				"x=original; declare -n ref=x; ref=changed /bin/sh -c 'echo \"x=<$x> ref=<$ref>\"'; \
+				 echo \"after=<$x>\"",
+				"x=<changed> ref=<>\nafter=<original>\n",
+			),
+			(
+				"a name that holds another, appended to",
+				"x=orig; declare -n ref=x; ref+=more /bin/sh -c 'echo \"x=<$x>\"'; echo \"after=<$x>\"",
+				"x=<origmore>\nafter=<orig>\n",
+			),
+			(
+				"an integer name",
+				"declare -i a=0; a=3+4 /bin/sh -c 'echo \"a=<$a>\"'; echo \"after=<$a>\"",
+				"a=<3+4>\nafter=<0>\n",
+			),
+			(
+				"an integer name appended to",
+				"declare -i a=5; a+=3 /bin/sh -c 'echo \"a=<$a>\"'; echo \"after=<$a>\"",
+				"a=<8>\nafter=<5>\n",
+			),
+			(
+				"an integer name in a function",
+				"declare -i a=0; f() { a+=1; echo \"in=<$a>\"; }; a+=3 f; echo \"after=<$a>\"",
+				"in=<31>\nafter=<0>\n",
+			),
+			(
+				"an array name appended to",
+				"a=(\"\" 2); f() { printf \"in=<%s>\\n\" \"${a[@]}\"; }; a+=3 f; printf \
+				 \"after=<%s>\\n\" \"${a[@]}\"",
+				"in=<3>\nafter=<>\nafter=<2>\n",
+			),
+			(
+				"an array name appended to, seen by a command",
+				"a=(x y); a+=3 /bin/sh -c 'echo \"a=<$a>\"'",
+				"a=<x3>\n",
+			),
+			(
+				"a lowercase name appended to",
+				"declare -l a=; f() { a=DEF; echo \"in=<$a>\"; }; a+=abc f; echo \"after=<$a>\"",
+				"in=<DEF>\nafter=<>\n",
+			),
+			(
+				"an uppercase name",
+				"declare -u a=; f() { echo \"in=<$a>\"; a=def; echo \"in2=<$a>\"; }; a=abc f",
+				"in=<abc>\nin2=<def>\n",
+			),
+			(
+				"an exported name",
+				"declare -x a=old; a=new /bin/sh -c 'echo \"a=<$a>\"'; echo \"after=<$a>\"",
+				"a=<new>\nafter=<old>\n",
+			),
+			(
+				"a local name appended to",
+				"f() { local a=in; a+=X /bin/sh -c 'echo \"a=<$a>\"'; echo \"in=<$a>\"; }; a=out; f; \
+				 echo \"after=<$a>\"",
+				"a=<inX>\nin=<in>\nafter=<out>\n",
+			),
+			(
+				"an associative name appended to",
+				"declare -A a=([k]=v); a+=3 /bin/sh -c 'echo \"a=<$a>\"'",
+				"a=<3>\n",
+			),
 		];
 		let mut failures = Vec::new();
 		for &(name, script, bash) in rows {
