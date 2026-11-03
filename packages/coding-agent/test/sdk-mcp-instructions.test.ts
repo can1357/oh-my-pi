@@ -242,7 +242,7 @@ describe("createAgentSession MCP server instructions (deferred UI)", () => {
 			agentDir: tempDir,
 			modelRegistry,
 			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated({}),
+			settings: Settings.isolated({ "mcp.startupTimeoutMs": 0 }),
 			model: getBundledModel("openai", "gpt-4o-mini"),
 			disableExtensionDiscovery: true,
 			skills: [],
@@ -255,9 +255,10 @@ describe("createAgentSession MCP server instructions (deferred UI)", () => {
 			appendSystemPrompt: USER_APPEND_MARKER,
 		});
 		try {
-			// Without `hasUI`, MCP discovery is not deferred: the fixture connects during
-			// session creation, so the first prompt already carries both the server
-			// instructions and the user's append prompt — nothing to wait for.
+			// Without `hasUI`, MCP discovery is not deferred, and a zero startup window
+			// waits for the fixture to connect during session creation (the default
+			// window can end first on a loaded host), so the first prompt already
+			// carries both the server instructions and the user's append prompt.
 			const prompt = session.systemPrompt.join("\n");
 
 			expect(prompt).toContain(SERVER_INSTRUCTIONS);
