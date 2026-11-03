@@ -398,7 +398,10 @@ impl Logger {
 			return;
 		}
 		match crate::rsync::paths::create_operator_file(fs, &path, true, insecure, cancel) {
-			Ok(file) => self.set_log_file(Box::new(file)),
+			// A line the cancellation finds waiting is lost with the rest of
+			// the run's output (see `Outputs::cut`); one logged after it, such
+			// as the exit line, waits for the log as rsync's does.
+			Ok(file) => self.set_log_file(Box::new(file.waiting_after_cancel())),
 			Err(err) if RsyncError::is_cancellation(&err) => {},
 			Err(err) => {
 				let mut text = b"failed to open log-file ".to_vec();

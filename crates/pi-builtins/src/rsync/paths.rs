@@ -1082,13 +1082,18 @@ pub(crate) fn create_operator_file_with(
 /// An operator file opened for writing ([`create_operator_file`]). A FIFO
 /// is written without blocking, each write first waiting for room in slices
 /// that check the command's cancellation, so a FIFO nobody reads does not
-/// hold up a cancelled command; once cancelled, every write fails with
-/// [`RsyncError::cancelled_io`].
+/// hold up a cancelled command: a write the cancellation finds waiting
+/// fails with [`RsyncError::cancelled_io`], as rsync 3.5.1's signal handler
+/// ends a process blocked in it. A write that starts after the cancellation
+/// fails the same way, unless [`Self::waiting_after_cancel`] lets it wait
+/// like any other.
 pub(crate) struct OperatorOutput {
-	file:   pi_vfs::File,
-	cancel: Arc<AtomicBool>,
+	file:         pi_vfs::File,
+	cancel:       Arc<AtomicBool>,
 	/// Whether the file is a FIFO, made non-blocking at the open.
-	fifo:   bool,
+	fifo:         bool,
+	/// Whether a write that starts after the cancellation waits for room.
+	after_cancel: bool,
 }
 
 impl OperatorOutput {
@@ -1103,41 +1108,54 @@ impl OperatorOutput {
 		};
 		#[cfg(not(unix))]
 		let fifo = false;
-		Ok(Self { file, cancel: Arc::clone(cancel), fifo })
+		Ok(Self { file, cancel: Arc::clone(cancel), fifo, after_cancel: false })
+	}
+
+	/// Writes that start after the cancellation wait for room and report
+	/// their own failures, as the `--log-file` writes of rsync 3.5.1's exit
+	/// path do: its signal handler logs the exit line before it prints it,
+	/// and that write waits until the log takes it.
+	pub(crate) const fn waiting_after_cancel(mut self) -> Self {
+		self.after_cancel = true;
+		self
 	}
 
 	fn cancelled(&self) -> bool {
 		self.cancel.load(Ordering::Relaxed)
 	}
-
-	/// A failure once the command is cancelled is the cancellation.
-	fn mapped(&self, err: io::Error) -> io::Error {
-		if self.cancelled() { RsyncError::cancelled_io() } else { err }
-	}
 }
 
 impl io::Write for OperatorOutput {
 	fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-		if self.cancelled() {
+		// Whether the cancellation can still cut this write short: then a
+		// failure once it has come is the cancellation.
+		let cuttable = !self.cancelled();
+		if !cuttable && !self.after_cancel {
 			return Err(RsyncError::cancelled_io());
 		}
+		let flag = &self.cancel;
+		let mapped = |err: io::Error| {
+			if cuttable && flag.load(Ordering::Relaxed) { RsyncError::cancelled_io() } else { err }
+		};
 		#[cfg(unix)]
 		if self.fifo
 			&& let Some(mut native) = self.file.native()
 		{
+			let never = AtomicBool::new(false);
+			let cancel: &AtomicBool = if cuttable { &self.cancel } else { &never };
 			loop {
-				wait_writable(native.as_fd(), &self.cancel).map_err(|err| self.mapped(err))?;
+				wait_writable(native.as_fd(), cancel).map_err(mapped)?;
 				match io::Write::write(&mut native, buf) {
 					Err(err) if err.kind() == io::ErrorKind::WouldBlock => {},
-					written => return written.map_err(|err| self.mapped(err)),
+					written => return written.map_err(mapped),
 				}
 			}
 		}
-		io::Write::write(&mut self.file, buf).map_err(|err| self.mapped(err))
+		io::Write::write(&mut self.file, buf).map_err(mapped)
 	}
 
 	fn flush(&mut self) -> io::Result<()> {
-		io::Write::flush(&mut self.file).map_err(|err| self.mapped(err))
+		io::Write::flush(&mut self.file)
 	}
 }
 
@@ -1896,6 +1914,24 @@ mod tests {
 			drop(out);
 			assert!(drainer.join().unwrap() == data, "insecure={insecure}: the data arrived changed");
 		}
+		// Asked to, as the log file is, a write that starts after the
+		// cancellation waits for room like any other, and then succeeds.
+		let late = base.join("late");
+		nix::unistd::mkfifo(&late, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap();
+		let mut reader = fs::OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK).open(&late).unwrap();
+		{
+			let mut filler = fs::OpenOptions::new().write(true).custom_flags(libc::O_NONBLOCK).open(&late).unwrap();
+			while filler.write(&[b'x'; 4096]).is_ok() {}
+		}
+		let cancel = Arc::new(AtomicBool::new(false));
+		let mut out = create_operator_file(&vfs, &late, true, false, &cancel).unwrap().waiting_after_cancel();
+		cancel.store(true, Ordering::Relaxed);
+		let writer = std::thread::spawn(move || out.write_all(b"exit line\n"));
+		std::thread::sleep(Duration::from_millis(300));
+		assert!(!writer.is_finished(), "a write after the cancellation gave up");
+		let mut buf = vec![0u8; 1 << 16];
+		while reader.read(&mut buf).is_ok_and(|n| n > 0) {}
+		writer.join().unwrap().unwrap();
 	}
 	}
 }
