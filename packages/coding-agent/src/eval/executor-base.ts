@@ -1,4 +1,4 @@
-import { describeError, inheritsFrom, logger, toError } from "@oh-my-pi/pi-utils";
+import { describeError, inheritsFrom, logger, observeRejection, toError } from "@oh-my-pi/pi-utils";
 import { Settings } from "../config/settings";
 import { type OutputArtifactError, OutputSink } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { statusEventKey } from "@oh-my-pi/pi-tui/tools/eval";
@@ -151,7 +151,8 @@ export class OutputConsumerGuard {
 	): ((value: T) => void) | undefined {
 		if (!consumer) return undefined;
 		const record = (err: unknown): void => {
-			if (this.#failure) return;
+			// Only the first failure is reported; a later one can still be a rejected promise.
+			if (this.#failure) return observeRejection(err);
 			this.#failure = outputConsumerFailure(callback, err);
 			logger.warn(`${this.languageLabel} eval output consumer failed`, { callback, error: this.#failure.message });
 		};

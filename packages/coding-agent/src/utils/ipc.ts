@@ -1,5 +1,5 @@
 import { types } from "node:util";
-import { describeError, logger } from "@oh-my-pi/pi-utils";
+import { describeError, logger, observeRejection } from "@oh-my-pi/pi-utils";
 
 // Captured when this module loads: code running in the same realm can replace the globals.
 const reflectApply = Reflect.apply;
@@ -73,6 +73,8 @@ function observe(value: unknown, onRejected: (reason: unknown) => void, onSettle
 	try {
 		then = reflectGet(value, "then");
 		if (typeof then !== "function") {
+			// A `then` getter may return a rejected promise instead of a function.
+			observeRejection(then);
 			settle();
 			return;
 		}
@@ -82,16 +84,19 @@ function observe(value: unknown, onRejected: (reason: unknown) => void, onSettle
 		return;
 	}
 	// The built-in `then` returns a promise that rejects only when a callback throws, and these do not.
-	if (then === promiseThen) return;
+	if (then === promiseThen || !types.isPromise(returned)) return;
 	try {
-		// Only a native promise reports an unhandled rejection. The built-in `then`
-		// observes one without calling any `then` it overrides; given anything
-		// else, it throws before running any code, and nothing can go unhandled.
-		reflectApply(promiseThen, returned, [undefined, reject]);
-	} catch {
-		// Not a native promise.
+		// Only a native promise reports an unhandled rejection. The built-in `then` observes
+		// one without calling any `then` it overrides; its fulfilment value is ignored, so
+		// nothing is forwarded into a child promise.
+		reflectApply(promiseThen, returned, [ignoreFulfilment, reject]);
+	} catch (error) {
+		// The returned promise's `constructor` or species refused: reported, as above.
+		reject(error);
 	}
 }
+
+function ignoreFulfilment(): void {}
 
 /** Hands every rejection `value` can produce to `onRejected` (see {@link observe}). Never throws. */
 export function catchRejection(value: unknown, onRejected: (reason: unknown) => void): void {

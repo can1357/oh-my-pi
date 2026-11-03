@@ -5,6 +5,7 @@ import {
 	isErrorValue,
 	isRecord,
 	logger,
+	observeRejection,
 	Snowflake,
 	workerHostEntry,
 } from "@oh-my-pi/pi-utils";
@@ -779,7 +780,8 @@ function deliverRunOutput(
 	deliver: () => unknown,
 ): void {
 	const record = (err: unknown): void => {
-		if (runState.consumerFailure) return;
+		// Only the first failure is reported; a later one can still be a rejected promise.
+		if (runState.consumerFailure) return observeRejection(err);
 		runState.consumerFailure = outputConsumerFailure(callback, err);
 		logger.warn("JS eval output callback failed", { callback, error: runState.consumerFailure.message });
 	};

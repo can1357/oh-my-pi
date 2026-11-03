@@ -144,14 +144,17 @@ export function isErrorValue(value: unknown): value is Error {
 function walkPrototypes(value: unknown, matches: (proto: object) => boolean): object | undefined {
 	if (value === null || (typeof value !== "object" && typeof value !== "function")) return undefined;
 	try {
+		// A Proxy's `getPrototypeOf` trap may return a rejected promise as the prototype.
 		let proto = reflectGetPrototypeOf(value);
+		observeRejection(proto);
 		for (let depth = 0; proto !== null && depth < PROTOTYPE_DEPTH_LIMIT; depth++) {
 			if (matches(proto)) return proto;
 			proto = reflectGetPrototypeOf(proto);
+			observeRejection(proto);
 		}
 	} catch (thrown) {
 		// A Proxy's `getPrototypeOf` trap threw; what it threw may be a rejected promise.
-		observeQuietly(thrown);
+		observeRejection(thrown);
 	}
 	return undefined;
 }
@@ -172,27 +175,30 @@ function bounded(text: string, limit: number): string {
  */
 function readField(object: object, key: string): unknown {
 	const field: unknown = reflectGet(object, key);
-	observeQuietly(field);
+	observeRejection(field);
 	return field;
 }
 
 /**
  * Marks a native promise's rejection as handled, through the built-in `then`
  * captured at load. Applied to everything a description reads or catches: the
- * described value, each field read, each throw. A promise whose `constructor`
- * or species refuses even that stays unobserved; such a promise is outside what
- * a description can handle. Never throws.
+ * described value, each field read, each throw. Both callbacks ignore their
+ * value, so observing a fulfilled promise forwards nothing into a child, and a
+ * rejection whose reason is itself a rejected promise has that reason observed
+ * too. A promise whose `constructor` or species refuses even that stays
+ * unobserved; such a promise is outside what a description can handle. Never
+ * throws.
  */
-function observeQuietly(value: unknown): void {
+export function observeRejection(value: unknown): void {
 	if (!isPromise(value)) return;
 	try {
-		reflectApply(promiseThen, value, [undefined, ignoreRejection]);
+		reflectApply(promiseThen, value, [ignoreFulfilment, observeRejection]);
 	} catch {
 		// The promise's `constructor` getter or species constructor threw.
 	}
 }
 
-function ignoreRejection(): void {}
+function ignoreFulfilment(): void {}
 
 /** `object[key]` when it is text, read once; `undefined` when it is not text or reading it throws. */
 function textProperty(object: object, key: string, limit: number): string | undefined {
@@ -200,7 +206,7 @@ function textProperty(object: object, key: string, limit: number): string | unde
 		const field = readField(object, key);
 		return typeof field === "string" ? bounded(field, limit) : undefined;
 	} catch (thrown) {
-		observeQuietly(thrown);
+		observeRejection(thrown);
 		return undefined;
 	}
 }
@@ -211,7 +217,7 @@ function convertedText(value: unknown): string | undefined {
 		const text: unknown = toText(value);
 		return typeof text === "string" ? bounded(text, DESCRIBED_TEXT_LIMIT) : undefined;
 	} catch (thrown) {
-		observeQuietly(thrown);
+		observeRejection(thrown);
 		return undefined;
 	}
 }
@@ -247,7 +253,7 @@ function fallbackText(value: unknown, errorClass: ErrorClassName | undefined): s
  */
 export function describeError(value: unknown): DescribedError {
 	// A thrown or rejected value can itself be a rejected promise; describing it observes it.
-	observeQuietly(value);
+	observeRejection(value);
 	let errorClass = errorClassOf(value);
 	// An error made in another realm (a `node:vm` context, say) has that realm's prototypes.
 	if (errorClass === undefined && isNativeError(value)) errorClass = "Error";
@@ -263,7 +269,7 @@ export function describeError(value: unknown): DescribedError {
 			message = typeof field === "string" ? bounded(field, DESCRIBED_TEXT_LIMIT) : primitiveText(field);
 		} catch (thrown) {
 			// The message getter or a Proxy trap threw; what it threw may be a rejected promise.
-			observeQuietly(thrown);
+			observeRejection(thrown);
 		}
 		name = textProperty(error, "name", DESCRIBED_FIELD_LIMIT);
 		stack = textProperty(error, "stack", DESCRIBED_TEXT_LIMIT);

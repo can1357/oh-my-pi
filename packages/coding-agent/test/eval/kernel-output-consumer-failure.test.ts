@@ -16,7 +16,8 @@ import { disposeAllKernelSessions, executePython } from "@oh-my-pi/pi-coding-age
 import { PythonKernel } from "@oh-my-pi/pi-coding-agent/eval/py/kernel";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import type { JsStatusEvent } from "@oh-my-pi/pi-coding-agent/eval/js/shared/types";
-import { describeError, logger, TempDir } from "@oh-my-pi/pi-utils";
+import { catchRejection } from "@oh-my-pi/pi-coding-agent/utils/ipc";
+import { describeError, logger, postmortem, TempDir } from "@oh-my-pi/pi-utils";
 
 type Language = "py" | "js";
 const LANGUAGES = ["py", "js"] as const;
@@ -850,6 +851,35 @@ describe("eval output consumer failure", () => {
 				120_000,
 			);
 		}
+
+		it.skipIf(skipped(language))(
+			`${language}: a consumer that fails once, then throws rejected promises, leaves nothing unhandled`,
+			async () => {
+				const unhandled: unknown[] = [];
+				const onUnhandled = (reason: unknown): void => {
+					unhandled.push(reason);
+				};
+				process.on("unhandledRejection", onUnhandled);
+				try {
+					const session = makeSession(`consumer-later-promise-${language}-${crypto.randomUUID()}`);
+					const cell = await run(session, language, TWO_LINES[language], {
+						onChunk: chunk => {
+							if (printsLine(chunk, "one")) throw new Error("the first failure");
+							throw Promise.reject(new Error("a later failure's promise rejected"));
+						},
+					});
+					// Unhandled rejections are reported after the microtask queue drains.
+					await Bun.sleep(50);
+					expect(cell.exitCode).toBe(0);
+					expect(printsLine(cell.output, "two")).toBe(true);
+					expectConsumerFailure(cell, "stream", "the first failure");
+					expect(unhandled).toEqual([]);
+				} finally {
+					process.off("unhandledRejection", onUnhandled);
+				}
+			},
+			120_000,
+		);
 
 		for (const shape of PROMISE_CARRYING_THROWS) {
 			it.skipIf(skipped(language))(
@@ -1713,6 +1743,31 @@ describe("cancellation checks and descriptions read a thrown value or abort reas
 			}
 			expect(describeError(error).message).toBe("[object Error]");
 			// Unhandled rejections are reported after the microtask queue drains.
+			await Bun.sleep(50);
+			expect(unhandled).toEqual([]);
+		} finally {
+			process.off("unhandledRejection", onUnhandled);
+		}
+	});
+
+	it("leaves no rejection unhandled for promises one plain read reaches: a nested reason, a then field, a prototype, a cleanup cause", async () => {
+		const unhandled: unknown[] = [];
+		const onUnhandled = (reason: unknown): void => {
+			unhandled.push(reason);
+		};
+		process.on("unhandledRejection", onUnhandled);
+		try {
+			const rejected = (label: string): Promise<never> => Promise.reject(new Error(label));
+			// A rejection whose reason is itself a rejected promise.
+			describeError(Promise.reject(rejected("nested reason")));
+			// A thenable whose `then` getter returns a rejected promise instead of a function.
+			catchRejection(Object.defineProperty({}, "then", { get: () => rejected("then field") }), () => {});
+			// A Proxy whose `getPrototypeOf` trap returns a rejected promise.
+			describeError(new Proxy({}, { getPrototypeOf: () => rejected("prototype") }));
+			// A cleanup check whose `cause` getter returns a rejected promise.
+			const error = new Error("unused");
+			Object.defineProperty(error, "cause", { get: () => rejected("cleanup cause") });
+			postmortem.isExpectedCleanupError(error);
 			await Bun.sleep(50);
 			expect(unhandled).toEqual([]);
 		} finally {

@@ -10,7 +10,7 @@ import * as fs from "node:fs";
 import { APP_NAME } from "./dirs";
 import * as logger from "./logger";
 import { restoreTerminalStderr } from "./stderr-guard";
-import { type DescribedError, describeError } from "./thrown";
+import { type DescribedError, describeError, observeRejection } from "./thrown";
 import { toError } from "./type-guards";
 
 // Cleanup reasons, in order of priority/meaning.
@@ -557,11 +557,16 @@ function hasExpectedCleanupMarker(reason: unknown): boolean {
 		for (let depth = 0; depth < 8 && current !== null && typeof current === "object"; depth++) {
 			if (visited.has(current)) break;
 			visited.add(current);
-			if (Reflect.get(current, EXPECTED_CLEANUP) === true) return true;
+			const marker: unknown = Reflect.get(current, EXPECTED_CLEANUP);
+			// A getter may return a rejected promise; reading it must not leave that unhandled.
+			observeRejection(marker);
+			if (marker === true) return true;
 			current = Reflect.get(current, "cause");
+			observeRejection(current);
 		}
-	} catch {
+	} catch (thrown) {
 		// A Proxy's `get` trap threw: nothing marked it as expected cleanup.
+		observeRejection(thrown);
 	}
 	return false;
 }

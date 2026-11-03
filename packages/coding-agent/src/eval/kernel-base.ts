@@ -1,5 +1,13 @@
 import type { EvalStatusEvent, EvalView } from "@oh-my-pi/pi-tui/tools/eval";
-import { describeError, isErrorValue, isRecord, logger, readLines, Snowflake } from "@oh-my-pi/pi-utils";
+import {
+	describeError,
+	isErrorValue,
+	isRecord,
+	logger,
+	observeRejection,
+	readLines,
+	Snowflake,
+} from "@oh-my-pi/pi-utils";
 import type { Subprocess } from "bun";
 import { settled } from "../utils/ipc";
 import type { ShadowBarrier, ShadowControlNode, ShadowOperation } from "./speculation/types";
@@ -655,7 +663,8 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 		deliver: () => Promise<void> | void,
 	): Promise<void> {
 		const record = (err: unknown): void => {
-			if (pending.consumerFailure) return;
+			// Only the first failure is reported; a later one can still be a rejected promise.
+			if (pending.consumerFailure) return observeRejection(err);
 			pending.consumerFailure = outputConsumerFailure(callback, err);
 			logger.warn(`${this.#options.languageName} execution output callback failed`, {
 				kernelId: this.id,
