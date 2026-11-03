@@ -4,8 +4,13 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+/* Modes: "in" (the child starts in its own group and joins the parent's
+ * group once the parent gets TERM), "out" (the child starts in the parent's
+ * group and calls setsid() in its TERM handler), and "exit" (as "out", and
+ * the parent exits on TERM, leaving the child outside the tree and group). */
 static int notify_fd;
 static int move_out;
+static int exit_on_term;
 
 static void touch(const char *path) {
 	int fd = open(path, O_CREAT | O_WRONLY | O_APPEND, 0600);
@@ -19,6 +24,9 @@ static void append_term(void) {
 
 static void parent_term(int signal) {
 	(void)signal;
+	if (exit_on_term) {
+		_exit(0);
+	}
 	(void)write(notify_fd, "x", 1);
 }
 
@@ -31,7 +39,8 @@ static void child_term(int signal) {
 }
 
 int main(int argc, char **argv) {
-	move_out = argc > 1 && argv[1][0] == 'o';
+	move_out = argc > 1 && (argv[1][0] == 'o' || argv[1][0] == 'e');
+	exit_on_term = argc > 1 && argv[1][0] == 'e';
 	int pipefd[2];
 	if (pipe(pipefd) != 0) {
 		return 1;

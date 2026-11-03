@@ -900,8 +900,20 @@ impl Process {
 
 		// Hard wave. Re-walk the tree so any grandchild spawned during the grace
 		// period — or any process re-parented to the root — is signalled too.
+		// Every process the polite wave knew that is still alive is added by
+		// its pin: one that left the tree and its group after TERM (`setsid()`
+		// in a handler whose parent then exited) is in neither re-walk.
 		let mut wave = SignalWave::new(KILL_SIGNAL);
-		descendants = wave.tree(self, process_group, &protected);
+		let mut known = wave.tree(self, process_group, &protected);
+		for process in descendants {
+			if process.status() == ProcessStatus::Running
+				&& !known.iter().any(|seen| seen.pid() == process.pid())
+			{
+				wave.add(process.clone());
+				known.push(process);
+			}
+		}
+		descendants = known;
 		groups = wave.deliver().groups;
 
 		wait_for_exit(
@@ -926,20 +938,23 @@ impl Process {
 ///
 /// The wave first records its groups and snapshots its known processes
 /// (descendants, then roots), each with the group it is in, before it sends
-/// anything. Delivery then signals, through its pin, every snapshot process
-/// whose group is not a recorded group, and only after that sends each
-/// recorded group one kernel group signal. The kernel signals every member of
+/// anything. Delivery then sends each recorded group one kernel group signal,
+/// and only after that signals, through its pin, every snapshot process whose
+/// snapshot group is not a recorded group. The kernel signals every member of
 /// a group at one instant, including a child a member is forking at that
-/// moment. Members are never also signalled directly, so a member the group
-/// signal makes leave its group (`setsid()` in a TERM handler) does not get a
-/// second signal, and a process the direct signal makes join a group got its
-/// signal before the group did. Commands a TERM trap starts after the group
+/// moment. Members are never also signalled directly, and nothing is sent
+/// after the direct signals, so a move the wave's own signal causes cannot
+/// bring a second one: a member the group signal makes leave its group
+/// (`setsid()` in a TERM handler) gets nothing more, a non-member that joins a
+/// group because of the group signal was not reached by it and gets its one
+/// direct signal, and a non-member that joins a group because of its direct
+/// signal gets nothing after it. Commands a TERM trap starts after the group
 /// signal are not reached.
 ///
-/// Boundary: a process that changes group on its own between the snapshot
-/// and the group signal may miss this wave's signal or get it twice; the next
-/// wave, or the KILL wave, reaches it. The harness's own group is never
-/// recorded.
+/// Boundary: a process that changes group on its own, not because of this
+/// wave's signal, between the snapshot and the group signal may miss this
+/// wave's signal or get it twice; the next wave, or the KILL wave, reaches it.
+/// The harness's own group is never recorded.
 struct SignalWave {
 	signal:  i32,
 	groups:  Vec<i32>,
@@ -999,23 +1014,31 @@ impl SignalWave {
 		descendants
 	}
 
-	/// Signal every snapshot process outside the recorded groups through its
-	/// pin, then each recorded group once.
+	/// Signal each recorded group once, then every snapshot process outside
+	/// the recorded groups through its pin.
 	fn deliver(&mut self) -> Delivery {
-		let mut reached = 0;
 		let mut members: HashMap<i32, u32> = HashMap::new();
+		let mut direct = Vec::new();
 		for (target, group) in self.targets.drain(..) {
 			match group.filter(|pgid| self.groups.contains(pgid)) {
-				Some(pgid) => *members.entry(pgid).or_default() += 1,
-				None => reached += u32::from(target.inner.kill(self.signal)),
+				Some(pgid) => {
+					if target.status() == ProcessStatus::Running {
+						*members.entry(pgid).or_default() += 1;
+					}
+				},
+				None => direct.push(target),
 			}
 		}
+		let mut reached = 0;
 		let mut groups = Vec::new();
 		for &pgid in &self.groups {
 			if kill_process_group(pgid, self.signal) {
 				reached += members.get(&pgid).copied().unwrap_or(0);
 				groups.push(pgid);
 			}
+		}
+		for target in direct {
+			reached += u32::from(target.inner.kill(self.signal));
 		}
 		Delivery { reached, groups }
 	}
@@ -1794,6 +1817,64 @@ mod tests {
 		assert_eq!(trap_runs_after_exit(child, dir.path()), "x");
 	}
 
+	/// Compiles `tests/fixtures/group-move.c` into `dir` and returns its path.
+	#[cfg(target_os = "linux")]
+	fn compile_group_move_helper(dir: &std::path::Path) -> std::path::PathBuf {
+		let fixture =
+			std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/group-move.c");
+		let helper = dir.join("group-move");
+		let compiled = std::process::Command::new("cc")
+			.args(["-O2", "-Wall", "-o"])
+			.arg(&helper)
+			.arg(&fixture)
+			.status()
+			.expect("run C compiler");
+		assert!(compiled.success(), "compile group-move helper");
+		helper
+	}
+
+	/// A member's TERM handler creates a new session and keeps running, and
+	/// the leader exits on TERM. The KILL wave re-walks from the dead leader
+	/// and the signalled group, and finds the member in neither; it must still
+	/// kill it before `terminate_tree` reports the tree gone.
+	#[cfg(target_os = "linux")]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn terminate_tree_kills_a_member_that_left_its_group_on_term() {
+		use std::{
+			os::unix::process::CommandExt,
+			process::Command,
+			time::{Duration, Instant},
+		};
+
+		let helper_root = tempfile::tempdir().expect("helper directory");
+		let helper = compile_group_move_helper(helper_root.path());
+		let root = tempfile::tempdir().expect("group-move directory");
+		let mut parent = Command::new(&helper)
+			.arg("exit")
+			.current_dir(root.path())
+			.process_group(0)
+			.spawn()
+			.expect("spawn group-move helper");
+		let deadline = Instant::now() + Duration::from_secs(5);
+		while !root.path().join("ready").exists() {
+			assert!(Instant::now() < deadline, "group-move child never became ready");
+			tokio::time::sleep(Duration::from_millis(5)).await;
+		}
+		let child_pid = wait_for_pid_file(&root.path().join("childpid"));
+		let child = Process::from_pid(child_pid).expect("pin group-move child");
+		let leader = Process::from_pid(i32::try_from(parent.id()).expect("pid fits"))
+			.expect("pin group-move parent");
+		let exited = leader
+			.terminate_tree(true, 300, 2_000, CancelToken::default())
+			.await
+			.expect("terminate group-move parent");
+		let child_alive = child.status() == ProcessStatus::Running;
+		let _ = child.signal(KILL_SIGNAL);
+		let _ = parent.wait();
+		assert!(exited, "terminate_tree must finish the tree");
+		assert!(!child_alive, "the member that left its group outlived terminate_tree");
+	}
+
 	/// A group member can join after the parent gets TERM, or create a new
 	/// session in its TERM handler. Each pinned member of one wave gets TERM
 	/// exactly once in both shapes. The old group broadcast plus live-pgid
@@ -1803,22 +1884,13 @@ mod tests {
 	fn group_members_that_move_during_term_are_signalled_once() {
 		use std::{
 			os::unix::process::CommandExt,
-			path::PathBuf,
 			process::Command,
 			thread,
 			time::{Duration, Instant},
 		};
 
-		let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/group-move.c");
 		let helper_root = tempfile::tempdir().expect("helper directory");
-		let helper = helper_root.path().join("group-move");
-		let compiled = Command::new("cc")
-			.args(["-O2", "-Wall", "-o"])
-			.arg(&helper)
-			.arg(&fixture)
-			.status()
-			.expect("run C compiler");
-		assert!(compiled.success(), "compile group-move helper");
+		let helper = compile_group_move_helper(helper_root.path());
 		for mode in ["in", "out"] {
 			for _ in 0..20 {
 				let root = tempfile::tempdir().expect("group-move directory");
