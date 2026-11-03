@@ -2,6 +2,7 @@
 
 use std::{
 	collections::{HashMap, HashSet},
+	sync::atomic::{AtomicUsize, Ordering},
 	time::Duration,
 };
 
@@ -240,6 +241,20 @@ mod platform {
 			.filter_map(Process::from_pid)
 			.collect()
 	}
+
+	/// Pinned processes that currently belong to `pgid`. Each pid is checked
+	/// with `getpgid` first, so only members are pinned (a scan that pinned
+	/// every process on a busy host delayed the TERM wave past the grace);
+	/// membership is checked again through the pin.
+	pub fn group_members(pgid: i32) -> Vec<Process> {
+		sys::pids()
+			// SAFETY: `getpgid` takes a pid by value and reads only kernel
+			// state; a pid that exited or was reused fails the pinned check.
+			.filter(|&pid| unsafe { libc::getpgid(pid) } == pgid)
+			.filter_map(Process::from_pid)
+			.filter(|process| process.group_id() == Some(pgid))
+			.collect()
+	}
 }
 
 #[cfg(target_os = "macos")]
@@ -473,6 +488,15 @@ mod platform {
 			.filter_map(Process::from_pid)
 			.collect()
 	}
+
+	/// Pinned processes that currently belong to `pgid`.
+	pub fn group_members(pgid: i32) -> Vec<Process> {
+		sys::pids()
+			.into_iter()
+			.filter_map(Process::from_pid)
+			.filter(|process| process.group_id() == Some(pgid))
+			.collect()
+	}
 }
 #[cfg(target_os = "windows")]
 mod platform {
@@ -644,6 +668,11 @@ mod platform {
 			.filter_map(|entry| Process::from_pid(i32::try_from(entry.pid).ok()?))
 			.collect()
 	}
+
+	/// Windows has no Unix-style process groups.
+	pub const fn group_members(_pgid: i32) -> Vec<Process> {
+		Vec::new()
+	}
 }
 
 /// Stable process reference.
@@ -752,13 +781,22 @@ impl Process {
 
 	/// Wait until this process exits, optionally bounded by `timeout`.
 	pub async fn wait_for_exit(&self, timeout: Option<Duration>, ct: CancelToken) -> Result<bool> {
-		wait_for_exit(self, &[], timeout, ct).await
+		wait_for_exit(self, &[], &[], timeout, ct).await
 	}
 }
 
 impl Process {
 	const fn from_inner(inner: platform::Process) -> Self {
 		Self { inner }
+	}
+
+	/// Pinned snapshot of processes in a Unix process group. On Windows this is
+	/// empty because the platform has no process-group signal primitive.
+	fn group_members(pgid: i32) -> Vec<Self> {
+		platform::group_members(pgid)
+			.into_iter()
+			.map(Self::from_inner)
+			.collect()
 	}
 
 	/// Walk the live descendant tree from scratch. Cheap and idempotent — call
@@ -778,7 +816,7 @@ impl Process {
 	}
 
 	/// Signal this process and its live descendants (children first), skipping
-	/// any pid in `protected`.
+	/// any pid in `protected`, and return how many of them the signal reached.
 	///
 	/// `protected` shields the harness itself: a run-cancellation sweep must
 	/// never hard-kill the host. On Windows the
@@ -788,25 +826,16 @@ impl Process {
 	/// as a false descendant; `TerminateProcess`-ing it drops the whole session
 	/// with no cleanup and no `session_exit` record (#7452, related #4605).
 	fn signal_tree_excluding(&self, signal: i32, protected: &HashSet<i32>) -> u32 {
-		let descendants = self.signalable_descendants(protected);
-		let mut signaled = 0u32;
-		// If self leads its own process group, also signal the group — this
-		// catches grandchildren reparented to init when their immediate parent
-		// died inside the descendant walk.
-		if let Some(pgid) = self.group_id()
-			&& pgid == self.inner.pid()
-		{
-			let _ = kill_process_group(pgid, signal);
-		}
-		for child in &descendants {
-			if child.inner.kill(signal) {
-				signaled += 1;
-			}
-		}
-		if !protected.contains(&self.pid()) && self.inner.kill(signal) {
-			signaled += 1;
-		}
-		signaled
+		let mut wave = SignalWave::new(signal);
+		wave.tree(self, self.led_group(), protected);
+		wave.deliver().reached
+	}
+
+	/// The process group this process leads, if any. Signalling it as well
+	/// catches grandchildren reparented to init when their immediate parent
+	/// died inside the descendant walk.
+	fn led_group(&self) -> Option<i32> {
+		self.group_id().filter(|&pgid| pgid == self.pid())
 	}
 
 	/// Live descendants with every protected subtree pruned, not just the exact
@@ -845,16 +874,16 @@ impl Process {
 		let protected = host_protected_pids();
 
 		// Polite wave: SIGTERM the group, every live descendant, then the root.
-		if let Some(pgid) = process_group {
-			let _ = kill_process_group(pgid, TERM_SIGNAL);
-		}
-		let mut descendants = self.signalable_descendants(&protected);
-		for child in &descendants {
-			let _ = child.inner.kill(TERM_SIGNAL);
-		}
-		if !protected.contains(&self.pid()) {
-			let _ = self.inner.kill(TERM_SIGNAL);
-		}
+		// It returns every process it knew (its snapshot and its groups'
+		// members, pinned before and after the group signal). The waits below
+		// cover those processes and every group the wave signalled, so a
+		// member forked during the wave, or one that left its group on TERM,
+		// keeps the tree "running" until it is gone and cannot be skipped by
+		// an early return.
+		let mut wave = SignalWave::new(TERM_SIGNAL);
+		wave.tree(self, process_group, &protected);
+		let (delivery, mut known) = wave.deliver_known();
+		let mut groups = delivery.groups;
 
 		// Optional grace wait. A negative `graceful_ms` skips the wait entirely
 		// (we still emit the polite signal so cleanup handlers can run before
@@ -862,7 +891,8 @@ impl Process {
 		if graceful_ms >= 0 {
 			let exited = wait_for_exit(
 				self,
-				&descendants,
+				&known,
+				&groups,
 				Some(Duration::from_millis(graceful_ms as u64)),
 				ct.clone(),
 			)
@@ -873,20 +903,198 @@ impl Process {
 		}
 
 		// Hard wave. Re-walk the tree so any grandchild spawned during the grace
-		// period — or any process re-parented to the root — is signalled too.
-		if let Some(pgid) = process_group {
-			let _ = kill_process_group(pgid, KILL_SIGNAL);
-		}
-		descendants = self.signalable_descendants(&protected);
-		for child in &descendants {
-			let _ = child.inner.kill(KILL_SIGNAL);
-		}
-		if !protected.contains(&self.pid()) {
-			let _ = self.inner.kill(KILL_SIGNAL);
-		}
+		// period — or any process re-parented to the root — is signalled too,
+		// and carry every process the polite wave knew that is still alive:
+		// one that left the tree and its group after TERM (`setsid()` in a
+		// handler) is in neither re-walk.
+		let mut wave = SignalWave::new(KILL_SIGNAL);
+		wave.tree(self, process_group, &protected);
+		wave.carry(&known, &protected);
+		let delivery;
+		(delivery, known) = wave.deliver_known();
+		groups = delivery.groups;
 
-		wait_for_exit(self, &descendants, Some(Duration::from_millis(u64::from(timeout_ms))), ct)
+		wait_for_exit(self, &known, &groups, Some(Duration::from_millis(u64::from(timeout_ms))), ct)
 			.await
+	}
+}
+
+/// One delivery of a signal. Each process the wave knows of gets it once,
+/// unless it changes process group on its own during the wave (below).
+///
+/// A wave reaches processes through recorded process groups and recorded
+/// process trees, and those overlap: a group's leader and its descendants are
+/// usually members of the group. A shell runs its trap once for each TERM it
+/// takes, so a TERM delivered twice runs a TERM trap twice, and a second group
+/// signal also reaches the commands the first run of the trap started.
+///
+/// The wave first records its groups and snapshots its known processes
+/// (descendants, then roots), each with the group it is in, before it sends
+/// anything. Delivery then sends each recorded group one kernel group signal,
+/// and only after that signals, through its pin, every snapshot process whose
+/// snapshot group is not a recorded group. The kernel signals every member of
+/// a group at one instant, including a child a member is forking at that
+/// moment. Members are never also signalled directly, and nothing is sent
+/// after the direct signals, so a move the wave's own signal causes cannot
+/// bring a second one: a member the group signal makes leave its group
+/// (`setsid()` in a TERM handler) gets nothing more, a non-member that joins a
+/// group because of the group signal was not reached by it and gets its one
+/// direct signal, and a non-member that joins a group because of its direct
+/// signal gets nothing after it. Commands a TERM trap starts after the group
+/// signal are not reached.
+///
+/// Boundaries:
+/// - A process that changes group on its own, not because of this wave's
+///   signal, between the snapshot and the group signal may miss this wave's
+///   signal or get it twice; the next wave, or the KILL wave, reaches it.
+/// - The kernel signals one group at a time, so a process that moves from one
+///   recorded group to another between their two group signals, including a
+///   move the first group's signal causes, gets the signal from both.
+/// - A wave reaches a process only through a recorded group, a known process's
+///   descendants, or a process an earlier wave knew. A process that leaves its
+///   group (`setsid()`) and is no longer a descendant of any process the wave
+///   knows, because its parent exited or it double-forked, before a wave sees
+///   it, is not reached. Measured shapes: a member forked between the scans
+///   around the group signal that leaves its group before the second scan reads
+///   it; a member that leaves its group and then double-forks; a member that
+///   leaves its group, forks a child and exits. Main leaks these the same way.
+///   Closing them needs containment that outlives the process tree (a cgroup
+///   per run, or a subreaper), which changes the shared host's process model.
+///
+/// The harness's own group is never recorded.
+struct SignalWave {
+	signal:  i32,
+	groups:  Vec<i32>,
+	pids:    HashSet<i32>,
+	/// Snapshot processes with the group each was in when it was recorded.
+	targets: Vec<(Process, Option<i32>)>,
+}
+
+/// What a delivered wave reached.
+struct Delivery {
+	/// Known processes the signal reached, directly or through their group.
+	reached: u32,
+	/// Recorded groups the kernel group signal reached.
+	groups:  Vec<i32>,
+}
+
+impl SignalWave {
+	fn new(signal: i32) -> Self {
+		Self { signal, groups: Vec::new(), pids: HashSet::new(), targets: Vec::new() }
+	}
+
+	/// Record process group `pgid`. The harness's own group is refused:
+	/// signalling it would terminate the host.
+	fn group(&mut self, pgid: i32) {
+		if pgid > 0 && !self.groups.contains(&pgid) && !is_self_process_group(pgid) {
+			self.groups.push(pgid);
+		}
+	}
+
+	/// Snapshot `process` with its current group, unless the wave holds it.
+	fn add(&mut self, process: Process) {
+		if self.pids.insert(process.pid()) {
+			let group = process.group_id();
+			self.targets.push((process, group));
+		}
+	}
+
+	/// Record `group`, then snapshot `root`'s live descendants (children
+	/// first) and `root`, sparing every `protected` subtree. Returns the
+	/// descendants.
+	fn tree(
+		&mut self,
+		root: &Process,
+		group: Option<i32>,
+		protected: &HashSet<i32>,
+	) -> Vec<Process> {
+		if let Some(pgid) = group {
+			self.group(pgid);
+		}
+		let descendants = root.signalable_descendants(protected);
+		for child in &descendants {
+			self.add(child.clone());
+		}
+		if !protected.contains(&root.pid()) {
+			self.add(root.clone());
+		}
+		descendants
+	}
+
+	/// Signal each recorded group once, then every snapshot process outside
+	/// the recorded groups through its pin.
+	fn deliver(&mut self) -> Delivery {
+		let mut members: HashMap<i32, u32> = HashMap::new();
+		let mut direct = Vec::new();
+		for (target, group) in self.targets.drain(..) {
+			match group.filter(|pgid| self.groups.contains(pgid)) {
+				Some(pgid) => {
+					if target.status() == ProcessStatus::Running {
+						*members.entry(pgid).or_default() += 1;
+					}
+				},
+				None => direct.push(target),
+			}
+		}
+		let mut reached = 0;
+		let mut groups = Vec::new();
+		for &pgid in &self.groups {
+			if kill_process_group(pgid, self.signal) {
+				reached += members.get(&pgid).copied().unwrap_or(0);
+				groups.push(pgid);
+			}
+		}
+		for target in direct {
+			reached += u32::from(target.inner.kill(self.signal));
+		}
+		Delivery { reached, groups }
+	}
+
+	/// Snapshot each of `carried` that is still running, with its live
+	/// descendants (children first), sparing every `protected` subtree:
+	/// processes an earlier wave knew that may have left the recorded trees
+	/// and groups since (a `setsid()` in a TERM handler whose leader then
+	/// exited), and the children such a process started after it. One that is
+	/// still in a recorded group is reached through it; one that left is
+	/// signalled through its pin.
+	fn carry(&mut self, carried: &[Process], protected: &HashSet<i32>) {
+		for process in carried {
+			if process.status() != ProcessStatus::Running || protected.contains(&process.pid()) {
+				continue;
+			}
+			for child in process.signalable_descendants(protected) {
+				self.add(child);
+			}
+			self.add(process.clone());
+		}
+	}
+
+	/// Delivers the wave and returns, with what it reached, every process it
+	/// knew of: its snapshot, the recorded groups' members pinned just before
+	/// the group signals, and the signalled groups' members pinned just after
+	/// them. A later wave carries them, so a member that leaves its group
+	/// because of this signal is still reached. A member that leaves before
+	/// the scan after the group signal reads it, and that no known process has
+	/// as a descendant, is not known.
+	fn deliver_known(&mut self) -> (Delivery, Vec<Process>) {
+		fn pin_members(groups: &[i32], known: &mut Vec<Process>) {
+			for &pgid in groups {
+				for member in Process::group_members(pgid) {
+					if !known.iter().any(|seen| seen.pid() == member.pid()) {
+						known.push(member);
+					}
+				}
+			}
+		}
+		let mut known: Vec<Process> = self
+			.targets
+			.iter()
+			.map(|(process, _)| process.clone())
+			.collect();
+		pin_members(&self.groups, &mut known);
+		let delivery = self.deliver();
+		pin_members(&delivery.groups, &mut known);
+		(delivery, known)
 	}
 }
 
@@ -934,25 +1142,36 @@ fn pid_in_protected_subtree(
 	false
 }
 
+/// Waits until `root`, every one of `descendants` and every member of each of
+/// `groups` has exited. A group signal reaches members the descendant
+/// snapshot never saw (a child forked during the wave, an orphan reparented
+/// away), so they count too.
 async fn wait_for_exit(
 	root: &Process,
 	descendants: &[Process],
+	groups: &[i32],
 	timeout: Option<Duration>,
 	ct: CancelToken,
 ) -> Result<bool> {
+	let all_exited = || {
+		root.status() != ProcessStatus::Running
+			&& descendants
+				.iter()
+				.all(|process| process.status() != ProcessStatus::Running)
+			&& groups
+				.iter()
+				.all(|&pgid| Process::group_members(pgid).is_empty())
+	};
 	ct.heartbeat()?;
-	if root.status() != ProcessStatus::Running
-		&& descendants
-			.iter()
-			.all(|process| process.status() != ProcessStatus::Running)
-	{
+	if all_exited() {
 		return Ok(true);
 	}
 
 	// A lone process is awaited through the OS exit notification. Polling woke
 	// every waiter 20 times a second, and IPC workers wait on their parent for
-	// their whole life. Trees still poll: their membership changes.
+	// their whole life. Trees and groups still poll: their membership changes.
 	if descendants.is_empty()
+		&& groups.is_empty()
 		&& let Some(result) = wait_for_root_exit(root, timeout, &ct).await
 	{
 		return result;
@@ -970,11 +1189,7 @@ async fn wait_for_exit(
 		tokio::time::sleep(sleep_for).await;
 		elapsed += sleep_for;
 
-		if root.status() != ProcessStatus::Running
-			&& descendants
-				.iter()
-				.all(|process| process.status() != ProcessStatus::Running)
-		{
+		if all_exited() {
 			return Ok(true);
 		}
 	}
@@ -1116,16 +1331,35 @@ impl TerminationTargets {
 		self.pgids.is_empty() && self.processes.is_empty()
 	}
 
-	/// Send `signal` to every recorded target. Failures are swallowed:
-	/// targets routinely exit between collection and signalling, and
-	/// the caller's policy is "best effort".
+	/// Send `signal` to every recorded target exactly once: collect every
+	/// group member and tree process first, then signal each. Failures are
+	/// swallowed: targets routinely exit between collection and signalling,
+	/// and the caller's policy is "best effort".
 	pub fn signal(&self, signal: i32) {
+		self.wave(signal).deliver();
+	}
+
+	/// Like [`signal`](Self::signal), and also signals each of `carried`
+	/// that is still running (processes an earlier wave returned, which may
+	/// have left the recorded trees and groups since). Returns every process
+	/// this wave knew of, for the next wave to carry; see
+	/// `SignalWave::deliver_known`.
+	pub fn signal_carrying(&self, signal: i32, carried: &[Process]) -> Vec<Process> {
+		let mut wave = self.wave(signal);
+		wave.carry(carried, &host_protected_pids());
+		wave.deliver_known().1
+	}
+
+	fn wave(&self, signal: i32) -> SignalWave {
+		let mut wave = SignalWave::new(signal);
 		for &pgid in &self.pgids {
-			let _ = kill_process_group(pgid, signal);
+			wave.group(pgid);
 		}
+		let protected = host_protected_pids();
 		for process in &self.processes {
-			let _ = process.signal_tree(signal);
+			wave.tree(process, process.led_group(), &protected);
 		}
+		wave
 	}
 }
 
@@ -1170,7 +1404,13 @@ struct RegistryState {
 
 #[derive(Default)]
 pub struct SpawnRegistry {
-	state: Mutex<RegistryState>,
+	state:      Mutex<RegistryState>,
+	/// Spawns brush announced that are not settled yet. Their processes can
+	/// already run although they are not recorded.
+	spawning:   AtomicUsize,
+	/// Cancelled once the run's termination (TERM, its grace, the KILL waves)
+	/// has finished.
+	terminated: tokio_util::sync::CancellationToken,
 }
 
 impl SpawnRegistry {
@@ -1194,6 +1434,37 @@ impl SpawnRegistry {
 	#[must_use]
 	pub fn new() -> Self {
 		Self::default()
+	}
+
+	/// Count a spawn that has started and is not recorded yet.
+	pub fn begin_spawn(&self) {
+		self.spawning.fetch_add(1, Ordering::SeqCst);
+	}
+
+	/// End a spawn that [`begin_spawn`](Self::begin_spawn) counted.
+	pub fn end_spawn(&self) {
+		self.spawning.fetch_sub(1, Ordering::SeqCst);
+	}
+
+	/// True while a counted spawn is not settled: its process can run before
+	/// it is recorded.
+	#[must_use]
+	pub fn spawn_in_flight(&self) -> bool {
+		self.spawning.load(Ordering::SeqCst) > 0
+	}
+
+	/// Records that the run's termination has finished.
+	pub fn mark_terminated(&self) {
+		self.terminated.cancel();
+	}
+
+	/// Waits until the run's termination has finished, or for at most
+	/// `limit` (a caller that runs without the termination task must not wait
+	/// forever). Anything that would end a process sooner (closing its output,
+	/// dropping its handle) waits for this, so the termination's TERM grace is
+	/// the only one.
+	pub async fn wait_terminated(&self, limit: Duration) {
+		let _ = tokio::time::timeout(limit, self.terminated.cancelled()).await;
 	}
 
 	/// Record a freshly spawned child. Called from the spawn-observer hook.
@@ -1350,7 +1621,7 @@ const fn platform_process_group_alive(_pgid: i32) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
 	use super::*;
 
 	/// The harness pid must be the only protected pid. Including its recorded
@@ -1505,6 +1776,425 @@ mod tests {
 			!kill_process_group(0, TERM_SIGNAL),
 			"kill_process_group must reject non-positive pgids",
 		);
+	}
+
+	/// A public target set can name the harness's process group. The group
+	/// path must reject it before enumerating its members: direct pidfd
+	/// delivery would otherwise terminate the embedding host.
+	#[cfg(unix)]
+	#[test]
+	fn termination_targets_spare_the_harness_group() {
+		use std::{process::Command, thread, time::Duration};
+
+		let mut child = Command::new("sleep")
+			.arg("30")
+			.spawn()
+			.expect("spawn shared-group child");
+		let child_pid = i32::try_from(child.id()).expect("child pid fits");
+		// SAFETY: `getpgid` reads the kernel's process-group table only.
+		let self_pgid = unsafe { libc::getpgid(0) };
+		assert!(self_pgid > 0, "getpgid(0) failed");
+		// SAFETY: `getpgid` reads the kernel's process-group table only.
+		assert_eq!(unsafe { libc::getpgid(child_pid) }, self_pgid, "child shares harness group");
+
+		let mut targets = TerminationTargets::new();
+		targets.add_pgid(self_pgid);
+		targets.signal(TERM_SIGNAL);
+		thread::sleep(Duration::from_millis(50));
+		assert_eq!(child.try_wait().expect("poll child"), None, "self group must not be signalled");
+
+		let _ = child.kill();
+		let _ = child.wait();
+	}
+
+	/// `terminate_tree(true, ...)` must still terminate an ordinary child in
+	/// the harness's group without signalling the harness in its TERM or KILL
+	/// waves. A child that ignores TERM forces the hard wave.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn terminate_tree_spares_the_harness_group() {
+		use std::process::Command;
+
+		// The loop ends when the harness is gone, so a regression that kills
+		// the harness leaves no orphan behind.
+		let mut child = Command::new("sh")
+			.args(["-c", "trap '' TERM; while kill -0 $PPID 2>/dev/null; do :; done"])
+			.spawn()
+			.expect("spawn shared-group child");
+		let child_pid = i32::try_from(child.id()).expect("child pid fits");
+		let process = Process::from_pid(child_pid).expect("pin child");
+		// SAFETY: `getpgid` reads the kernel's process-group table only.
+		let child_pgid = unsafe { libc::getpgid(child_pid) };
+		// SAFETY: `getpgid` reads the kernel's process-group table only.
+		let self_pgid = unsafe { libc::getpgid(0) };
+		assert_eq!(child_pgid, self_pgid, "child shares harness group");
+		assert!(
+			process
+				.terminate_tree(true, 10, 1_000, CancelToken::default())
+				.await
+				.expect("terminate child"),
+			"hard wave must reap TERM-ignoring child"
+		);
+		let _ = child.wait();
+	}
+	/// Starts `sh` leading its own process group, with a TERM trap that
+	/// appends one `x` to `runs` each time it runs, and waits for its loop.
+	#[cfg(unix)]
+	fn spawn_term_trap_group_leader(dir: &std::path::Path) -> (std::process::Child, Process) {
+		use std::{
+			os::unix::process::CommandExt,
+			process::Command,
+			thread,
+			time::{Duration, Instant},
+		};
+
+		let child = Command::new("sh")
+			.args([
+				"-c",
+				"trap 'printf x >> runs; sleep 0.3; exit 0' TERM; : > ready; while :; do :; done",
+			])
+			.current_dir(dir)
+			.process_group(0)
+			.spawn()
+			.expect("spawn trap shell");
+		let pid = i32::try_from(child.id()).expect("child pid fits in i32");
+		let process = Process::from_pid(pid).expect("pin trap shell");
+		let deadline = Instant::now() + Duration::from_secs(5);
+		while !dir.join("ready").exists() {
+			assert!(Instant::now() < deadline, "trap shell never became ready");
+			thread::sleep(Duration::from_millis(10));
+		}
+		(child, process)
+	}
+
+	/// Reaps `child` within 5 s and returns what its TERM trap wrote.
+	#[cfg(unix)]
+	fn trap_runs_after_exit(mut child: std::process::Child, dir: &std::path::Path) -> String {
+		use std::{
+			thread,
+			time::{Duration, Instant},
+		};
+
+		let deadline = Instant::now() + Duration::from_secs(5);
+		while child.try_wait().expect("poll trap shell").is_none() {
+			if Instant::now() >= deadline {
+				let _ = child.kill();
+				let _ = child.wait();
+				panic!("trap shell did not exit after TERM");
+			}
+			thread::sleep(Duration::from_millis(10));
+		}
+		std::fs::read_to_string(dir.join("runs")).expect("TERM trap ran")
+	}
+
+	/// A shell runs its TERM trap once for each TERM it takes, so a wave that
+	/// reaches a process through its process group must not signal it again
+	/// directly.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn terminate_tree_signals_a_group_leader_once() {
+		let dir = tempfile::tempdir().expect("trap directory");
+		let (child, process) = spawn_term_trap_group_leader(dir.path());
+		let exited = process
+			.terminate_tree(true, 5_000, 1_000, CancelToken::default())
+			.await
+			.expect("terminate trap shell");
+		assert!(exited, "the trap shell must exit inside the TERM grace");
+		assert_eq!(trap_runs_after_exit(child, dir.path()), "x");
+	}
+
+	/// Compiles `tests/fixtures/group-move.c` into `dir` and returns its path.
+	#[cfg(target_os = "linux")]
+	pub(crate) fn compile_group_move_helper(dir: &std::path::Path) -> std::path::PathBuf {
+		let fixture =
+			std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/group-move.c");
+		let helper = dir.join("group-move");
+		let compiled = std::process::Command::new("cc")
+			.args(["-O2", "-Wall", "-o"])
+			.arg(&helper)
+			.arg(&fixture)
+			.status()
+			.expect("run C compiler");
+		assert!(compiled.success(), "compile group-move helper");
+		helper
+	}
+
+	/// A member's TERM handler creates a new session and keeps running, and
+	/// the leader exits on TERM. The KILL wave re-walks from the dead leader
+	/// and the signalled group, and finds the member in neither; it must still
+	/// kill it before `terminate_tree` reports the tree gone. In `orphan` mode
+	/// the member was never the leader's descendant (a double fork left it in
+	/// the group), so only the TERM wave's pinned group members know it.
+	#[cfg(target_os = "linux")]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn terminate_tree_kills_a_member_that_left_its_group_on_term() {
+		use std::{
+			os::unix::process::CommandExt,
+			process::Command,
+			time::{Duration, Instant},
+		};
+
+		let helper_root = tempfile::tempdir().expect("helper directory");
+		let helper = compile_group_move_helper(helper_root.path());
+		for mode in ["exit", "orphan", "spawn"] {
+			let root = tempfile::tempdir().expect("group-move directory");
+			let mut parent = Command::new(&helper)
+				.arg(mode)
+				.current_dir(root.path())
+				.process_group(0)
+				.spawn()
+				.expect("spawn group-move helper");
+			let deadline = Instant::now() + Duration::from_secs(5);
+			while !root.path().join("ready").exists() {
+				assert!(Instant::now() < deadline, "{mode}: group-move child never became ready");
+				tokio::time::sleep(Duration::from_millis(5)).await;
+			}
+			let child_pid = wait_for_pid_file(&root.path().join("childpid"));
+			let child = Process::from_pid(child_pid).expect("pin group-move child");
+			let leader = Process::from_pid(i32::try_from(parent.id()).expect("pid fits"))
+				.expect("pin group-move parent");
+			let exited = leader
+				.terminate_tree(true, 300, 2_000, CancelToken::default())
+				.await
+				.expect("terminate group-move parent");
+			let child_alive = child.status() == ProcessStatus::Running;
+			let _ = child.signal(KILL_SIGNAL);
+			let _ = parent.wait();
+			assert!(exited, "{mode}: terminate_tree must finish the tree");
+			assert!(!child_alive, "{mode}: the member that left its group outlived terminate_tree");
+			if mode == "spawn" {
+				assert_spawned_child_gone(root.path());
+			}
+		}
+	}
+
+	/// The `spawn` member's TERM handler forked a child after it left its
+	/// group. That child must be gone (within 2 s, for callers that do not
+	/// wait after their last KILL wave); it is killed here otherwise.
+	#[cfg(target_os = "linux")]
+	pub(crate) fn assert_spawned_child_gone(dir: &std::path::Path) {
+		use std::{
+			thread,
+			time::{Duration, Instant},
+		};
+
+		let pid = wait_for_pid_file(&dir.join("grandpid"));
+		let Some(spawned) = Process::from_pid(pid) else {
+			return;
+		};
+		let deadline = Instant::now() + Duration::from_secs(2);
+		while spawned.status() == ProcessStatus::Running && Instant::now() < deadline {
+			thread::sleep(Duration::from_millis(10));
+		}
+		let alive = spawned.status() == ProcessStatus::Running;
+		let _ = spawned.signal(KILL_SIGNAL);
+		assert!(
+			!alive,
+			"spawn: the child the member forked after leaving its group outlived the kill"
+		);
+	}
+
+	/// A group member can join after the parent gets TERM, or create a new
+	/// session in its TERM handler. Each pinned member of one wave gets TERM
+	/// exactly once in both shapes. The old group broadcast plus live-pgid
+	/// check missed joiners and sent leavers a second TERM.
+	#[cfg(target_os = "linux")]
+	#[test]
+	fn group_members_that_move_during_term_are_signalled_once() {
+		use std::{
+			os::unix::process::CommandExt,
+			process::Command,
+			thread,
+			time::{Duration, Instant},
+		};
+
+		let helper_root = tempfile::tempdir().expect("helper directory");
+		let helper = compile_group_move_helper(helper_root.path());
+		for mode in ["in", "out"] {
+			for _ in 0..20 {
+				let root = tempfile::tempdir().expect("group-move directory");
+				let mut parent = Command::new(&helper)
+					.arg(mode)
+					.current_dir(root.path())
+					.process_group(0)
+					.spawn()
+					.expect("spawn group-move helper");
+				let deadline = Instant::now() + Duration::from_secs(3);
+				let child_pid = loop {
+					let pid = std::fs::read_to_string(root.path().join("childpid"))
+						.ok()
+						.and_then(|text| text.parse::<i32>().ok());
+					if let Some(pid) = pid
+						&& root.path().join("ready").exists()
+					{
+						break pid;
+					}
+					assert!(Instant::now() < deadline, "group-move child never became ready");
+					thread::sleep(Duration::from_millis(1));
+				};
+				let child = Process::from_pid(child_pid).expect("pin group-move child");
+				let mut targets = TerminationTargets::new();
+				let parent_pid = i32::try_from(parent.id()).expect("parent pid fits");
+				targets.add_pgid(parent_pid);
+				targets.add_process(Process::from_pid(parent_pid).expect("pin group-move parent"));
+				targets.signal(TERM_SIGNAL);
+				let terms = root.path().join("terms");
+				let wait_for_terms = |count: usize| {
+					let deadline = Instant::now() + Duration::from_secs(5);
+					loop {
+						let seen = std::fs::read_to_string(&terms).unwrap_or_default();
+						if seen.len() >= count || Instant::now() >= deadline {
+							return seen;
+						}
+						thread::sleep(Duration::from_millis(5));
+					}
+				};
+				wait_for_terms(1);
+				// A duplicate is delivered within microseconds of the first TERM;
+				// leave it time to land before counting.
+				thread::sleep(Duration::from_millis(200));
+				assert_eq!(
+					std::fs::read_to_string(&terms).unwrap_or_default(),
+					"x",
+					"{mode}: group member did not receive exactly one TERM"
+				);
+				assert!(child.signal(TERM_SIGNAL), "{mode}: direct TERM control");
+				assert_eq!(wait_for_terms(2), "xx", "{mode}: child handler did not remain alive");
+				let _ = child.signal(KILL_SIGNAL);
+				let _ = parent.kill();
+				let _ = parent.wait();
+			}
+		}
+	}
+
+	/// Writes `scripts` (name, text) into `dir`, starts `sh leader.sh` leading
+	/// its own process group, and waits for it to create `ready`.
+	#[cfg(unix)]
+	fn spawn_group_leader_script(
+		dir: &std::path::Path,
+		scripts: &[(&str, &str)],
+	) -> (std::process::Child, Process) {
+		use std::{
+			os::unix::process::CommandExt,
+			process::Command,
+			thread,
+			time::{Duration, Instant},
+		};
+
+		for (name, text) in scripts {
+			std::fs::write(dir.join(name), text).expect("write script");
+		}
+		let child = Command::new("sh")
+			.arg("leader.sh")
+			.current_dir(dir)
+			.process_group(0)
+			.spawn()
+			.expect("spawn leader shell");
+		let pid = i32::try_from(child.id()).expect("leader pid fits");
+		let process = Process::from_pid(pid).expect("pin leader shell");
+		let deadline = Instant::now() + Duration::from_secs(5);
+		while !dir.join("ready").exists() {
+			assert!(Instant::now() < deadline, "leader shell never became ready");
+			thread::sleep(Duration::from_millis(5));
+		}
+		(child, process)
+	}
+
+	/// Polls `path` for up to 5 s until it holds a pid.
+	#[cfg(unix)]
+	pub(crate) fn wait_for_pid_file(path: &std::path::Path) -> i32 {
+		use std::{
+			thread,
+			time::{Duration, Instant},
+		};
+
+		let deadline = Instant::now() + Duration::from_secs(5);
+		loop {
+			if let Some(pid) = std::fs::read_to_string(path)
+				.ok()
+				.and_then(|text| text.trim().parse::<i32>().ok())
+			{
+				return pid;
+			}
+			assert!(Instant::now() < deadline, "{} never held a pid", path.display());
+			thread::sleep(Duration::from_millis(5));
+		}
+	}
+
+	/// A group member forks a child after the wave took its snapshot and
+	/// before it signals. The child is in the group when the group is
+	/// signalled, so it must get the signal. A wave that signalled only its
+	/// pinned snapshot never reached it.
+	#[cfg(unix)]
+	#[test]
+	fn child_forked_inside_a_wave_gets_the_group_signal() {
+		use std::{
+			thread,
+			time::{Duration, Instant},
+		};
+
+		let dir = tempfile::tempdir().expect("script directory");
+		let (mut leader, process) = spawn_group_leader_script(dir.path(), &[
+			("leader.sh", "trap 'sh child.sh &' USR1\n: > ready\nwhile :; do :; done\n"),
+			(
+				"child.sh",
+				"trap 'printf x >> terms; exit 0' TERM\necho $$ > forked\nwhile :; do :; done\n",
+			),
+		]);
+		let mut wave = SignalWave::new(TERM_SIGNAL);
+		wave.tree(&process, process.led_group(), &host_protected_pids());
+		assert!(process.signal(libc::SIGUSR1), "ask the leader to fork");
+		let child_pid = wait_for_pid_file(&dir.path().join("forked"));
+		wave.deliver();
+
+		let terms_path = dir.path().join("terms");
+		let deadline = Instant::now() + Duration::from_secs(5);
+		while std::fs::read_to_string(&terms_path)
+			.unwrap_or_default()
+			.is_empty()
+			&& Instant::now() < deadline
+		{
+			thread::sleep(Duration::from_millis(5));
+		}
+		// Leave a duplicate time to land before counting.
+		thread::sleep(Duration::from_millis(200));
+		let terms = std::fs::read_to_string(&terms_path).unwrap_or_default();
+		if let Some(child) = Process::from_pid(child_pid) {
+			let _ = child.signal(KILL_SIGNAL);
+		}
+		let _ = leader.kill();
+		let _ = leader.wait();
+		assert_eq!(terms, "x", "the child forked inside the wave must get TERM once");
+	}
+
+	/// `terminate_tree(true, …)` reports the tree gone only once every
+	/// member of the group it signalled is gone. Here the leader's TERM trap
+	/// starts a TERM-ignoring child in the group and exits: the early return
+	/// used to see only the exited leader and skip the KILL wave, leaving
+	/// the child running.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn terminate_tree_waits_for_the_signalled_group() {
+		let dir = tempfile::tempdir().expect("script directory");
+		let (mut leader, process) = spawn_group_leader_script(dir.path(), &[
+			("leader.sh", "trap 'sh child.sh & exit 0' TERM\n: > ready\nwhile :; do :; done\n"),
+			("child.sh", "trap '' TERM\necho $$ > forked\nexec sleep 10\n"),
+		]);
+		let exited = process
+			.terminate_tree(true, 500, 2_000, CancelToken::default())
+			.await
+			.expect("terminate leader");
+		let _ = leader.wait();
+		let child_pid = wait_for_pid_file(&dir.path().join("forked"));
+		let child = Process::from_pid(child_pid);
+		let child_alive = child
+			.as_ref()
+			.is_some_and(|child| child.status() == ProcessStatus::Running);
+		if let Some(child) = &child {
+			let _ = child.signal(KILL_SIGNAL);
+		}
+		assert!(exited, "terminate_tree must kill the TERM-ignoring group member");
+		assert!(!child_alive, "a group member outlived terminate_tree");
 	}
 
 	/// Regression test for the macOS `proc_listchildpids` brokenness: on

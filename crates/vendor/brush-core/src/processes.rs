@@ -19,6 +19,48 @@ struct CompletionMarker {
 	end_marker_suffix: String,
 }
 
+/// How long a process gets between the TERM a cancelled wait sends and the
+/// kill that follows it.
+pub const CANCEL_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// How long a wait whose process the host terminates waits for it before
+/// ending the process itself. It is well past the host's own sequence (its
+/// wait for spawns in flight, the TERM grace, the KILL waves), so it only
+/// ends a process the host was never told about.
+pub const HOST_TERMINATION_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// What cancels a wait for a child process, and who then ends the process.
+///
+/// `token` cancels the wait. When `host` is set and is cancelled by the time
+/// the wait notices, the embedding host is terminating every process of the
+/// run (TERM, a grace counted from that TERM, then KILL), so the wait leaves
+/// the process to it. Otherwise the wait ends the process itself: a `kill %N`
+/// or a `timeout` that cancels its own token is not a host termination.
+#[derive(Clone, Default)]
+pub struct ChildCancel {
+	token: Option<CancellationToken>,
+	host:  Option<CancellationToken>,
+}
+
+impl ChildCancel {
+	/// A wait cancelled by `token`, where a cancelled `host` token means the
+	/// host terminates the process.
+	#[must_use]
+	pub const fn new(token: Option<CancellationToken>, host: Option<CancellationToken>) -> Self {
+		Self { token, host }
+	}
+
+	fn host_terminates(&self) -> bool {
+		self.host.as_ref().is_some_and(CancellationToken::is_cancelled)
+	}
+}
+
+impl From<Option<CancellationToken>> for ChildCancel {
+	fn from(token: Option<CancellationToken>) -> Self {
+		Self { token, host: None }
+	}
+}
+
 /// A waitable future that will yield the results of a child process's
 /// execution.
 pub(crate) type WaitableChildProcess = std::pin::Pin<
@@ -112,11 +154,18 @@ impl ChildProcess {
 
 	/// Waits for the process to exit.
 	///
-	/// Cancellation gives the process a bounded TERM grace before killing it.
+	/// When `cancel` fires, one party ends the process: the embedding host
+	/// when the cancellation is the host's (see [`ChildCancel`]), which then
+	/// sends TERM, counts the grace from that TERM and kills, so this wait only
+	/// keeps waiting, for at most [`HOST_TERMINATION_LIMIT`]; otherwise (or if
+	/// the host has not ended the process by then) this wait sends TERM
+	/// itself, gives the process [`CANCEL_GRACE`] from that TERM, and then
+	/// kills it.
 	pub async fn wait(
 		&mut self,
-		cancel_token: Option<CancellationToken>,
+		cancel: impl Into<ChildCancel>,
 	) -> Result<ProcessWaitResult, error::Error> {
+		let cancel = cancel.into();
 		#[allow(unused_mut, reason = "only mutated on some platforms")]
 		let mut sigtstp = sys::signal::tstp_signal_listener()?;
 		#[allow(unused_mut, reason = "only mutated on some platforms")]
@@ -132,7 +181,7 @@ impl ChildProcess {
 		}
 
 		let cancelled = async {
-			match &cancel_token {
+			match &cancel.token {
 				Some(token) => token.cancelled().await,
 				None => std::future::pending().await,
 			}
@@ -150,19 +199,28 @@ impl ChildProcess {
 					break Ok(ProcessWaitResult::Completed(output))
 				},
 				_ = &mut cancelled => {
-					// The embedding host terminates the process group/tree. Allow
-					// its TERM wave to finish without sending a duplicate TERM or
-					// racing it with an immediate hard kill.
-					#[cfg(unix)]
-					{
-						if let Ok(Ok(_)) = tokio::time::timeout(
-							std::time::Duration::from_secs(1),
-							&mut self.exec_future,
-						).await {
-							self.reaped = true;
+					// The host's waves own TERM, its grace and KILL for this run;
+					// a timer of ours would cut that grace short. The limit only
+					// ends a process the host never knew of.
+					let host_ended = cancel.host_terminates()
+						&& matches!(
+							tokio::time::timeout(HOST_TERMINATION_LIMIT, &mut self.exec_future).await,
+							Ok(Ok(_))
+						);
+					if host_ended {
+						self.reaped = true;
+					} else {
+						self.terminate();
+						#[cfg(unix)]
+						{
+							if let Ok(Ok(_)) =
+								tokio::time::timeout(CANCEL_GRACE, &mut self.exec_future).await
+							{
+								self.reaped = true;
+							}
 						}
+						self.kill();
 					}
-					self.kill();
 					self.write_completion_marker(130);
 					break Ok(ProcessWaitResult::Cancelled)
 				},
@@ -180,6 +238,21 @@ impl ChildProcess {
 					// terminated (in which case we'll see the child exit).
 				},
 			}
+		}
+	}
+
+	/// Sends TERM to this process (not its group: each pipeline stage's wait
+	/// signals its own process once) if it has not been reaped.
+	fn terminate(&self) {
+		if self.reaped {
+			return;
+		}
+		#[cfg(unix)]
+		if let Some(pid) = self.pid {
+			let _ = nix::sys::signal::kill(
+				nix::unistd::Pid::from_raw(pid),
+				nix::sys::signal::Signal::SIGTERM,
+			);
 		}
 	}
 

@@ -15,7 +15,7 @@ use crate::{
 	arithmetic::{self, ExpandAndEvaluate},
 	commands::{self, CommandArg},
 	env::{EnvironmentLookup, EnvironmentScope, valid_variable_name},
-	error, expansion, extendedtests, extensions, ioutils, jobs, openfiles,
+	error, expansion, extendedtests, extensions, ioutils, jobs, openfiles, processes,
 	openfiles::{OpenFile, OpenFiles},
 	pipetap::{self, PipeTap},
 	results::{ExecutionExitCode, ExecutionResult, ExecutionSpawnResult, ExecutionWaitResult},
@@ -78,6 +78,20 @@ pub trait ExternalCommandOutputMarker: Send + Sync {
 /// deliberately escape the shell's descendant tree (e.g. `nohup cmd &`) and
 /// must survive teardown, so they are intentionally left unowned.
 pub trait SpawnObserver: Send + Sync {
+	/// Announces that the shell is about to spawn an external child, before
+	/// the child has a pid. The child can run before
+	/// [`on_spawn`](Self::on_spawn) reports it, so an embedder that tears down
+	/// a run's processes can wait for the spawns under way instead of missing
+	/// them. Each call that returns is followed by exactly one
+	/// [`spawn_settled`](Self::spawn_settled) call; if this method panics,
+	/// the spawn is abandoned and no settlement call follows.
+	fn spawn_started(&self) {}
+
+	/// Ends the spawn that [`spawn_started`](Self::spawn_started) announced:
+	/// [`on_spawn`](Self::on_spawn) has reported its child, or no child was
+	/// started.
+	fn spawn_settled(&self) {}
+
 	/// Reports a freshly spawned external child. `pgid` is the child's process
 	/// group id when known (always its own pid under `NewProcessGroup`).
 	fn on_spawn(&self, pid: i32, pgid: Option<i32>);
@@ -97,6 +111,9 @@ pub struct ExecutionParameters {
 	pub detach_reparent: bool,
 	/// Optional cancellation token shared with callers.
 	cancel_token:             Option<CancellationToken>,
+	/// The run's cancellation that the embedding host answers by terminating
+	/// the run's processes itself (see [`processes::ChildCancel`]).
+	host_cancel_token:        Option<CancellationToken>,
 	/// Optional command-output marker hook.
 	command_output_marker:    Option<Arc<dyn ExternalCommandOutputMarker>>,
 	/// Whether command-output marking was disabled by shell syntax that can
@@ -229,6 +246,23 @@ impl ExecutionParameters {
 	/// Returns the cancellation token, if present.
 	pub fn cancel_token(&self) -> Option<CancellationToken> {
 		self.cancel_token.clone()
+	}
+
+	/// Assigns `token` as this execution's cancellation and records that the
+	/// embedding host answers it by terminating every process the run spawns
+	/// (reported through the spawn observer): it sends TERM, counts the grace
+	/// from that TERM and kills. A wait cancelled through it then leaves the
+	/// process to the host instead of sending TERM and starting its own kill
+	/// timer. Tokens derived from it (background jobs, coprocesses) keep the
+	/// record, but cancelling only them is not a host termination.
+	pub fn set_host_terminated_cancel_token(&mut self, token: CancellationToken) {
+		self.cancel_token = Some(token.clone());
+		self.host_cancel_token = Some(token);
+	}
+
+	/// How a wait for a child of this execution reacts to cancellation.
+	pub fn child_cancel(&self) -> processes::ChildCancel {
+		processes::ChildCancel::new(self.cancel_token.clone(), self.host_cancel_token.clone())
 	}
 
 	/// Returns true when cancellation has been requested.
@@ -961,7 +995,9 @@ async fn spawn_pipeline_processes(
 	}
 
 	for (current_pipeline_index, command) in pipeline.seq.iter().enumerate() {
-		ensure_not_cancelled(params)?;
+		if params.is_cancelled() {
+			return Err(interrupted_after_waiting(spawn_results, params).await);
+		}
 		//
 		// We run a command directly in the current shell if either of the following is
 		// true:
@@ -1030,13 +1066,29 @@ async fn spawn_pipeline_processes(
 	Ok(spawn_results)
 }
 
+/// Ends a cancelled pipeline without killing the processes it already
+/// started. Each is awaited under the cancellation, as a process the cancel
+/// finds running is, so it gets the same TERM grace instead of the SIGKILL
+/// its dropped handle would send.
+async fn interrupted_after_waiting(
+	spawn_results: VecDeque<ExecutionSpawnResult>,
+	params: &ExecutionParameters,
+) -> error::Error {
+	for spawn_result in spawn_results {
+		let _ = spawn_result.wait_with_cancel(params.child_cancel()).await;
+	}
+	error::ErrorKind::Interrupted.into()
+}
+
 async fn wait_for_pipeline_processes_and_update_status(
 	pipeline: &ast::Pipeline,
 	mut process_spawn_results: VecDeque<ExecutionSpawnResult>,
 	shell: &mut Shell<impl extensions::ShellExtensions>,
 	params: &ExecutionParameters,
 ) -> Result<ExecutionResult, error::Error> {
-	ensure_not_cancelled(params)?;
+	if params.is_cancelled() {
+		return Err(interrupted_after_waiting(process_spawn_results, params).await);
+	}
 	let mut result = ExecutionResult::success();
 	let mut stopped_children = vec![];
 	let mut last_failure_exit_code: Option<ExecutionExitCode> = None;
@@ -1063,11 +1115,14 @@ async fn wait_for_pipeline_processes_and_update_status(
 	}
 
 	while let Some(child) = process_spawn_results.pop_front() {
-		ensure_not_cancelled(params)?;
+		if params.is_cancelled() {
+			process_spawn_results.push_front(child);
+			return Err(interrupted_after_waiting(process_spawn_results, params).await);
+		}
 		let wait_result = if !stopped_children.is_empty() {
 			child.poll().await?
 		} else {
-			child.wait_with_cancel(params.cancel_token()).await?
+			child.wait_with_cancel(params.child_cancel()).await?
 		};
 
 		match wait_result {
@@ -1317,13 +1372,13 @@ impl Execute for ast::CoprocessCommand {
 			.set_fd(OpenFiles::STDOUT_FD, stdout_writer.into());
 
 		let body = self.body.clone();
-		let cancel_token = child_params.cancel_token();
+		let cancel = child_params.child_cancel();
 		// Give the coprocess its own cancellation flag so `kill %N` ends it at its
 		// next interpreter check, even when the body never yields; a child of the
 		// run's token, as for a background job.
-		let cancellation = cancel_token
-			.as_ref()
-			.map_or_else(CancellationToken::new, CancellationToken::child_token);
+		let cancellation = child_params
+			.cancel_token()
+			.map_or_else(CancellationToken::new, |token| token.child_token());
 		child_params.set_cancel_token(cancellation.clone());
 		let join_handle = tokio::spawn(async move {
 			let pipeline_context = PipelineExecutionContext {
@@ -1334,7 +1389,7 @@ impl Execute for ast::CoprocessCommand {
 			let spawn_result = body
 				.execute_in_pipeline(pipeline_context, child_params)
 				.await?;
-			match spawn_result.wait_with_cancel(cancel_token).await? {
+			match spawn_result.wait_with_cancel(cancel).await? {
 				ExecutionWaitResult::Completed(result) => Ok(result),
 				ExecutionWaitResult::Stopped(_) => Ok(ExecutionResult::stopped()),
 			}

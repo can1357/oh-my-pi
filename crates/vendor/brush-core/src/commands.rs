@@ -866,6 +866,14 @@ pub(crate) async fn execute_external_command(
 	argv0_override: Option<&str>,
 	args: &[CommandArg],
 ) -> Result<ExecutionSpawnResult, error::Error> {
+	// Announce the spawn before the child can exist, then give up if the run
+	// is already cancelled: an embedder that cancelled and saw no spawn under
+	// way has already chosen the processes it terminates.
+	let _spawn = SpawnAnnouncement::start(&context.params);
+	if context.params.is_cancelled() {
+		return Err(error::ErrorKind::Interrupted.into());
+	}
+
 	// Filter out the args; we only want strings.
 	let cmd_args = args
 		.iter()
@@ -1035,6 +1043,34 @@ pub(crate) async fn execute_external_command(
 				Err(error::ErrorKind::FailedToExecuteCommand(context.command_name, spawn_err).into())
 			}
 		},
+	}
+}
+
+/// A spawn announced to the run's [`interp::SpawnObserver`]: started when it
+/// is made, settled when it is dropped, after the child has been reported or
+/// the spawn has failed. Reparented launches are not announced, as they are
+/// not reported.
+struct SpawnAnnouncement(Option<std::sync::Arc<dyn interp::SpawnObserver>>);
+
+impl SpawnAnnouncement {
+	fn start(params: &ExecutionParameters) -> Self {
+		let observer = if params.detach_reparent {
+			None
+		} else {
+			params.spawn_observer().cloned()
+		};
+		if let Some(observer) = &observer {
+			observer.spawn_started();
+		}
+		Self(observer)
+	}
+}
+
+impl Drop for SpawnAnnouncement {
+	fn drop(&mut self) {
+		if let Some(observer) = &self.0 {
+			observer.spawn_settled();
+		}
 	}
 }
 
