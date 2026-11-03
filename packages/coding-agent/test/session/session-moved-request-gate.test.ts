@@ -14,6 +14,9 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
+import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
+import { createPersistedSubagentReviverFactory } from "@oh-my-pi/pi-coding-agent/task/persisted-revive";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 /**
@@ -72,8 +75,11 @@ function localModelServer() {
 	return { requests, model, stop: () => server.stop(true) };
 }
 
-/** A session opened on a file another process owns, with a `session_moved` handler held until `finish`. */
-async function movableSession(temp: TempDir) {
+/**
+ * A session opened on a file another process owns, with a `session_moved` handler held until `finish`.
+ * `onMoved` runs inside the handler, before it waits.
+ */
+async function movableSession(temp: TempDir, onMoved?: () => void) {
 	const dir = path.join(temp.path(), "sessions");
 	const seed = SessionManager.create(temp.path(), dir, new FileSessionStorage());
 	seed.appendMessage({ role: "user", content: "seed", timestamp: Date.now() });
@@ -90,6 +96,7 @@ async function movableSession(temp: TempDir) {
 	const extension = await loadExtensionFromFactory(
 		pi => {
 			pi.on("session_moved", async () => {
+				onMoved?.();
 				moved.resolve();
 				await finish.promise;
 			});
@@ -402,7 +409,18 @@ describe("session work started outside a prompt still waits for the session's ho
 			pi => {
 				pi.on("user_bash", async () => {
 					await request();
-					return { result: { output: "intercepted", exitCode: 0, cancelled: false, truncated: false } };
+					return {
+						result: {
+							output: "intercepted",
+							exitCode: 0,
+							cancelled: false,
+							truncated: false,
+							totalLines: 1,
+							totalBytes: 11,
+							outputLines: 1,
+							outputBytes: 11,
+						},
+					};
 				});
 			},
 			temp.path(),
@@ -474,4 +492,263 @@ describe("session work started outside a prompt still waits for the session's ho
 			expect(server.requests).toEqual(["POST /v1/chat/completions"]);
 		}, 60_000);
 	}
+});
+
+describe("work a session left running, or started before it existed, waits for its holds", () => {
+	it("holds a request a finished `session_moved` handler left behind, once a new hold is added", async () => {
+		const temp = tempDir("@gate-left-behind-");
+		const server = localModelServer();
+		cleanups.push(server.stop);
+		const later = Promise.withResolvers<void>();
+		// Wrapped: resolving with the request itself would wait for it.
+		const started = Promise.withResolvers<{ work: Promise<unknown> }>();
+		const parts = await movableSession(temp, () => {
+			// Work the handler schedules for after it is done.
+			void later.promise.then(() =>
+				started.resolve({
+					work: completeSimple(
+						server.model,
+						{ messages: [{ role: "user", content: "later", timestamp: 0 }] },
+						{ apiKey: "k" },
+					),
+				}),
+			);
+		});
+		const mock = createMockModel({ responses: [{ content: ["done"] }] });
+		const agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["test"], messages: [], tools: [] },
+			streamFn: mock.stream,
+		});
+		const session = new AgentSession({
+			agent,
+			sessionManager: parts.manager,
+			modelRegistry: parts.registry,
+			settings: Settings.isolated({
+				"advisor.enabled": false,
+				"compaction.enabled": false,
+				"retry.enabled": false,
+				"todo.enabled": false,
+			}),
+			extensionRunner: parts.runner,
+		});
+		cleanups.push(
+			() => parts.auth.close(),
+			() => session.dispose(),
+		);
+		parts.manager.appendCustomEntry("move", {});
+		await parts.moved.promise;
+		parts.finish.resolve();
+		await eventLoopTurns();
+		// The handler is done; a new hold arrives, then the work it left runs.
+		const release = Promise.withResolvers<void>();
+		const reached = Promise.withResolvers<void>();
+		let held = true;
+		agent.addHold(() => ({
+			pending: () => {
+				if (!held) return undefined;
+				reached.resolve();
+				return release.promise;
+			},
+		}));
+		later.resolve();
+		const { work } = await started.promise;
+		// The request asked the new hold, and nothing went out while it held.
+		await reached.promise;
+		await eventLoopTurns();
+		expect(server.requests).toEqual([]);
+		held = false;
+		release.resolve();
+		await work;
+		expect(server.requests).toEqual(["POST /v1/chat/completions"]);
+	}, 60_000);
+
+	it("refuses a second live session on an extension runner another live session owns", async () => {
+		const temp = tempDir("@gate-shared-runner-");
+		const auth = await AuthStorage.create(":memory:");
+		cleanups.push(() => auth.close());
+		const registry = new ModelRegistry(auth);
+		const manager = SessionManager.inMemory(temp.path());
+		const runner = new ExtensionRunner([], new ExtensionRuntime(), temp.path(), manager, registry);
+		const mock = createMockModel({ responses: [] });
+		const build = () =>
+			new AgentSession({
+				agent: new Agent({ initialState: { model: mock.model, systemPrompt: ["test"], messages: [], tools: [] } }),
+				sessionManager: manager,
+				modelRegistry: registry,
+				settings: Settings.isolated({
+					"advisor.enabled": false,
+					"compaction.enabled": false,
+					"todo.enabled": false,
+				}),
+				extensionRunner: runner,
+			});
+		const first = build();
+		expect(build).toThrow("This extension runner already belongs to another live session");
+		await first.dispose();
+		// Once the first is disposed, the runner can move on.
+		const second = build();
+		await second.dispose();
+	}, 60_000);
+
+	it("holds a request an extension factory scheduled at start-up, before the session existed", async () => {
+		const temp = tempDir("@gate-factory-");
+		const server = localModelServer();
+		cleanups.push(server.stop);
+		const auth = await AuthStorage.create(":memory:");
+		cleanups.push(() => auth.close());
+		const go = Promise.withResolvers<void>();
+		let work: Promise<unknown> | undefined;
+		const { session } = await createAgentSession({
+			cwd: temp.path(),
+			agentDir: temp.path(),
+			authStorage: auth,
+			modelRegistry: new ModelRegistry(auth, path.join(temp.path(), "models.yml")),
+			sessionManager: SessionManager.inMemory(temp.path()),
+			model: server.model,
+			settings: Settings.isolated({
+				"advisor.enabled": false,
+				"compaction.enabled": false,
+				"retry.enabled": false,
+				"todo.enabled": false,
+			}),
+			disableExtensionDiscovery: true,
+			extensions: [
+				() => {
+					work = go.promise.then(() =>
+						completeSimple(
+							server.model,
+							{ messages: [{ role: "user", content: "factory", timestamp: 0 }] },
+							{ apiKey: "k" },
+						),
+					);
+				},
+			],
+			skills: [],
+			rules: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			toolNames: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+		});
+		cleanups.push(() => session.dispose());
+		const release = Promise.withResolvers<void>();
+		let held = true;
+		const reached = Promise.withResolvers<void>();
+		session.agent.addHold(() => ({
+			pending: () => {
+				if (!held) return undefined;
+				reached.resolve();
+				return release.promise;
+			},
+		}));
+		go.resolve();
+		await reached.promise;
+		await eventLoopTurns();
+		expect(server.requests).toEqual([]);
+		held = false;
+		release.resolve();
+		await work;
+		expect(server.requests).toEqual(["POST /v1/chat/completions"]);
+	}, 60_000);
+
+	it("holds a cold-revived subagent by its live parent's holds, whoever revives it", async () => {
+		AgentRegistry.resetGlobalForTests();
+		cleanups.push(() => AgentRegistry.resetGlobalForTests());
+		const temp = tempDir("@gate-revive-");
+		const server = localModelServer();
+		cleanups.push(server.stop);
+		const auth = await AuthStorage.create(":memory:");
+		cleanups.push(() => auth.close());
+		auth.keys.setRuntime("openai", "k");
+		const registry = new ModelRegistry(auth, path.join(temp.path(), "models.yml"));
+		registry.registerProvider("openai", {
+			baseUrl: server.model.baseUrl,
+			apiKey: "k",
+			api: "openai-completions",
+			models: [
+				{
+					id: "local",
+					name: "local",
+					reasoning: false,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 16_000,
+					maxTokens: 1024,
+				},
+			],
+		});
+		const settings = Settings.isolated({
+			"advisor.enabled": false,
+			"compaction.enabled": false,
+			"retry.enabled": false,
+			"todo.enabled": false,
+			modelRoles: { default: "openai/local" },
+		});
+		const agent = new Agent({
+			initialState: { model: server.model, systemPrompt: ["parent"], messages: [], tools: [] },
+			getApiKey: () => "k",
+		});
+		const parent = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(temp.path()),
+			modelRegistry: registry,
+			settings,
+		});
+		cleanups.push(() => parent.dispose());
+		const seed = SessionManager.create(temp.path(), path.join(temp.path(), "sessions"));
+		seed.appendSessionInit({
+			systemPrompt: ["child"],
+			task: "revive",
+			tools: [],
+			restrictToolNames: true,
+			resolvedModel: "openai/local",
+		});
+		seed.appendMessage({ role: "user", content: "seed", timestamp: 0 });
+		await seed.ensureOnDisk();
+		await seed.flush();
+		const file = seed.getSessionFile();
+		if (!file) throw new Error("Expected a persisted subagent transcript");
+		await seed.close();
+		const ref = AgentRegistry.global().register({
+			id: "ReviveChild",
+			displayName: "ReviveChild",
+			kind: "sub",
+			parentId: "Main",
+			session: null,
+			sessionFile: file,
+			status: "parked",
+		});
+		const revive = await createPersistedSubagentReviverFactory({
+			session: parent,
+			authStorage: auth,
+			modelRegistry: registry,
+			settings,
+			enableLsp: false,
+		})(ref);
+		if (!revive) throw new Error("Expected a reviver");
+		// Revived from outside any of the parent's work.
+		const child = await revive(ref);
+		cleanups.push(() => child.dispose());
+		const release = Promise.withResolvers<void>();
+		let held = true;
+		const reached = Promise.withResolvers<void>();
+		agent.addHold(() => ({
+			pending: () => {
+				if (!held) return undefined;
+				reached.resolve();
+				return release.promise;
+			},
+		}));
+		const run = child.prompt("revived work");
+		await reached.promise;
+		await eventLoopTurns();
+		expect(server.requests).toEqual([]);
+		held = false;
+		release.resolve();
+		await run;
+		expect(server.requests).toEqual(["POST /v1/chat/completions"]);
+	}, 60_000);
 });
