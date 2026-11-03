@@ -3192,6 +3192,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// captured them, so subagents and forks still inherit them.
 		if (deferredExtensionPaths.length > 0) extensionsResult.preparedExtensions ??= [];
 		toolSession.preparedExtensions = extensionsResult.preparedExtensions;
+		// Every load of this session (deferred ones too) shares the runtime, so its store is the session's.
+		toolSession.expectedReplies = extensionsResult.runtime.expectedReplies;
 
 		// Process provider registrations queued during extension loading.
 		// This must happen before the runner is created so that models registered by
@@ -5217,6 +5219,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// their own configured tool slate, so a selected write is always full.
 			deviceOnlyWrite: undefined,
 			pendingFullWriteDescription: undefined,
+			// Replies the primary's extensions expect are owed to the primary's agent: an advisor
+			// granted `wait` must not block on them.
+			expectedReplies: undefined,
 			get cwd() {
 				return sessionManager.getCwd();
 			},
@@ -5361,6 +5366,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			promptTemplates,
 			slashCommands,
 			extensionRunner,
+			expectedReplies: toolSession.expectedReplies,
 			getEvalPreludes,
 			evalToolSession: toolSession,
 			customCommands: customCommandsResult.commands,

@@ -38,6 +38,7 @@ import type { TtsrManager } from "../export/ttsr";
 import type { LoadedCustomCommand } from "../extensibility/custom-commands";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import type { ExtensionRunner, PreparedExtension } from "../extensibility/extensions";
+import type { ExpectedReplies } from "../extensibility/extensions/expected-replies";
 import type { CacheWarmer } from "./cache-warmer";
 import type { ContextUsage } from "../extensibility/extensions/types";
 import type { SkillDescriptionCatalog } from "../extensibility/skill-descriptions";
@@ -251,6 +252,11 @@ export interface AgentSessionConfig {
 	slashCommands?: FileSlashCommand[];
 	/** Extension runner created with wrapped tools. */
 	extensionRunner?: ExtensionRunner;
+	/**
+	 * Replies this session's extensions expect (`pi.replies.expect`); the session drops them where it
+	 * replaces or cuts back its conversation.
+	 */
+	expectedReplies?: ExpectedReplies;
 	/**
 	 * Prompt-cache warmer owned by the main agent loop. The session arms it per
 	 * main-loop request, settles it when the agent run finishes, and invalidates
