@@ -22,7 +22,7 @@ import { DEFAULT_USAGE_PROVIDERS } from "../usage/registry";
 import { raceSignal } from "./abort";
 import type { SessionAffinity } from "./affinity";
 import type { CredentialBlocks } from "./blocks";
-import type { KeyOverrides } from "./cascade";
+import { isKeylessFallbackCredential, type KeyOverrides } from "./cascade";
 import {
 	buildUsageCredential,
 	oauthUsageRequest,
@@ -687,6 +687,41 @@ export class UsageService implements UsageApi {
 					if (!providerImpl.supports || providerImpl.supports(request)) requests.push(request);
 				}
 				continue;
+			}
+
+			if (providerImpl.usesRequestKey === true) {
+				// Past the pinned tiers, keep following the cascade: a /login key
+				// row, then the config fallback, then the env key, and only then a
+				// stored static row (which may be a stale copy for another gateway).
+				const loginEntries = entries.filter(
+					entry =>
+						entry.credential.type === "api_key" &&
+						entry.credential.source === "login" &&
+						!isKeylessFallbackCredential(providerId, entry.credential),
+				);
+				if (loginEntries.length > 0) {
+					entries = loginEntries;
+				} else {
+					const fallbackKey = this.#deps.overrides.fallbackKey(providerId);
+					let apiKey: string | undefined;
+					if (fallbackKey !== undefined) {
+						try {
+							apiKey = await this.#deps.overrides.resolve(fallbackKey);
+						} catch {
+							this.logger?.debug("Usage request key resolution failed", { provider });
+							continue;
+						}
+					} else {
+						apiKey = getEnvApiKey(providerId);
+					}
+					if (fallbackKey !== undefined || apiKey) {
+						if (!apiKey) continue;
+						const request = usageRequest(provider, { type: "api_key", apiKey }, baseUrl);
+						if (providerImpl.supports && !providerImpl.supports(request)) continue;
+						requests.push(request);
+						continue;
+					}
+				}
 			}
 
 			if (entries.length === 0) {

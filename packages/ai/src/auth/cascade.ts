@@ -151,6 +151,24 @@ export interface KeyCascadeDeps {
 	sourceLabel?: string;
 }
 
+/**
+ * True when a stored credential is the provider's KDL `empty-fallback`
+ * keyless-mode marker — what an empty paste at an "Optional: paste API key"
+ * login prompt stores (e.g. `lm-studio-local` for lm-studio). The wire layer
+ * never sends these as a bearer (`isDiscoveryBearerApiKey` strips them), so
+ * auth-status surfaces must not count them either; otherwise the model hub
+ * and `/login` report the provider as authenticated while every request
+ * goes out bare (issue #12281). The credential itself stays stored: `/logout`
+ * can still remove it, and availability treats the provider as keyless.
+ */
+export function isKeylessFallbackCredential(provider: string, credential: AuthCredential): boolean {
+	if (credential.type !== "api_key") return false;
+	const login = authPolicyFor(provider)?.login;
+	if (login?.kind !== "api-key") return false;
+	const fallback = login.emptyFallback;
+	return fallback !== undefined && fallback !== "" && credential.key === fallback;
+}
+
 /** The provider auth precedence cascade (runtime → config → OAuth → login key → env → stored key). */
 export class KeyCascade implements KeysApi {
 	#deps: KeyCascadeDeps;
@@ -159,22 +177,9 @@ export class KeyCascade implements KeysApi {
 		this.#deps = deps;
 	}
 
-	/**
-	 * True when a stored credential is the provider's KDL `empty-fallback`
-	 * keyless-mode marker — what an empty paste at an "Optional: paste API key"
-	 * login prompt stores (e.g. `lm-studio-local` for lm-studio). The wire layer
-	 * never sends these as a bearer (`isDiscoveryBearerApiKey` strips them), so
-	 * auth-status surfaces must not count them either; otherwise the model hub
-	 * and `/login` report the provider as authenticated while every request
-	 * goes out bare (issue #12281). The credential itself stays stored: `/logout`
-	 * can still remove it, and availability treats the provider as keyless.
-	 */
+	/** See {@link isKeylessFallbackCredential}. */
 	isKeylessFallback(provider: string, credential: AuthCredential): boolean {
-		if (credential.type !== "api_key") return false;
-		const login = authPolicyFor(provider)?.login;
-		if (login?.kind !== "api-key") return false;
-		const fallback = login.emptyFallback;
-		return fallback !== undefined && fallback !== "" && credential.key === fallback;
+		return isKeylessFallbackCredential(provider, credential);
 	}
 
 	/** Stored credentials that carry real auth — keyless-fallback markers excluded. */

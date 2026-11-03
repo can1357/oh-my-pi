@@ -839,4 +839,53 @@ describe("LiteLLM usage provider: cached reports", () => {
 			}
 		});
 	});
+
+	it("follows the inference cascade past the pinned tiers: login row, then env key, then stored rows", async () => {
+		const spendByBearer: Record<string, number> = {
+			"Bearer sk-env": 11,
+			"Bearer sk-login": 22,
+			"Bearer sk-stale": 33,
+		};
+		const bearers: string[] = [];
+		const usageFetch = Object.assign(
+			async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+				const bearer = new Headers(init?.headers).get("authorization") ?? "";
+				bearers.push(bearer);
+				if (!String(input).endsWith("/v2/user/info")) return Response.json({}, { status: 404 });
+				return Response.json({ user_id: "u1", spend: spendByBearer[bearer], max_budget: 100 });
+			},
+			{ preconnect: fetch.preconnect },
+		);
+		await withEnv({ LITELLM_API_KEY: "sk-env", LITELLM_BASE_URL: undefined }, async () => {
+			const store = new SqliteAuthCredentialStore(new Database(":memory:"));
+			const authStorage = new AuthStorage(store, {
+				usageFetch,
+				usageProviderResolver: provider => (provider === "litellm" ? litellmUsageProvider : undefined),
+			});
+			const userSpend = async () => {
+				bearers.length = 0;
+				await authStorage.usage.invalidate("litellm");
+				const reports = await authStorage.usage.reports({ baseUrlResolver: () => ALIAS_BASE_URL });
+				return reports?.filter(report => report.provider === "litellm").map(r => r.limits[0]?.amount.used);
+			};
+			try {
+				// A stale static row loses to the env key, exactly as inference does.
+				await authStorage.credentials.set("litellm", { type: "api_key", key: "sk-stale" });
+				expect(await userSpend()).toEqual([11]);
+				expect(new Set(bearers)).toEqual(new Set(["Bearer sk-env"]));
+				expect(await authStorage.keys.get("litellm")).toBe("sk-env");
+
+				// A /login row beats both the env key and the static row.
+				await authStorage.credentials.set("litellm", [
+					{ type: "api_key", key: "sk-stale" },
+					{ type: "api_key", key: "sk-login", source: "login" },
+				]);
+				expect(await userSpend()).toEqual([22]);
+				expect(new Set(bearers)).toEqual(new Set(["Bearer sk-login"]));
+				expect(await authStorage.keys.get("litellm")).toBe("sk-login");
+			} finally {
+				authStorage.close();
+			}
+		});
+	});
 });
