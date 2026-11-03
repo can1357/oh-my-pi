@@ -67,6 +67,8 @@ export class DownloadManager {
 	/** Completed downloads no wait has taken yet, and relay downloads whose saved file could not be found. */
 	readonly #unclaimed: Array<BrowserDownload | ToolError> = [];
 	readonly #waiters: DownloadWaiter[] = [];
+	/** Ended downloads, settled one after another. */
+	#settling: Promise<void> = Promise.resolve();
 	#willBegin?: (event: DownloadStarted & { frameId: string }) => void;
 	#progress?: (event: DownloadProgress) => void;
 
@@ -219,12 +221,16 @@ export class DownloadManager {
 			pending.receivedBytes = event.receivedBytes;
 			if (event.state === "inProgress") return;
 			this.#pending.delete(event.guid);
-			if (event.state === "canceled") {
-				this.#rejectNext(new ToolError(`Download canceled: ${pending.url}`));
-				return;
-			}
-			void this.#complete(pending, event.filePath).catch(error => {
-				this.#rejectNext(new ToolError(`Download failed: ${pending.url}: ${toError(error).message}`));
+			// Settle downloads in the order they ended: finding a relay download's file takes a round trip, and a later
+			// cancellation must not take the waiter of a completion still being looked up.
+			this.#settling = this.#settling.then(async () => {
+				if (event.state === "canceled") {
+					this.#rejectNext(new ToolError(`Download canceled: ${pending.url}`));
+					return;
+				}
+				await this.#complete(pending, event.filePath).catch(error => {
+					this.#rejectNext(new ToolError(`Download failed: ${pending.url}: ${toError(error).message}`));
+				});
 			});
 		};
 		session.on(`${domain}.downloadWillBegin`, this.#willBegin);
