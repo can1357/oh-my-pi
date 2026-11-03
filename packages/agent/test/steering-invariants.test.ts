@@ -2140,17 +2140,23 @@ describe("steering invariants: the round-fifteen and round-sixteen reproductions
 	// Round sixteen: live input that never reached the provider, host records, and record order.
 	for (const conversion of ["image", "throws", "empty", "reject"] as const) {
 		it(`the next request owns promoted live input that ${conversion === "reject" ? "the provider declined" : `failed to convert (${conversion})`}`, async () => {
-			const v = person("V");
-			if (conversion === "image") {
-				v.content = [
-					{ type: "text", text: "V" },
-					{
-						type: "image",
-						data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aV1cAAAAASUVORK5CYII=",
-						mimeType: "image/png",
-					},
-				];
-			}
+			// The image variant is a steer live steering cannot hand over.
+			const v: AgentMessage =
+				conversion === "image"
+					? {
+							role: "user",
+							content: [
+								{ type: "text", text: "V" },
+								{
+									type: "image",
+									data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aV1cAAAAASUVORK5CYII=",
+									mimeType: "image/png",
+								},
+							],
+							attribution: "user",
+							timestamp: 1,
+						}
+					: person("V");
 			const mock = createMockModel({ handler: () => ({ content: ["ack"] }) });
 			const agent = new Agent({
 				initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
