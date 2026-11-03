@@ -42,9 +42,9 @@ pub struct ChildProcess {
 	#[cfg(windows)]
 	kill_handle: Option<OwnedHandle>,
 	completion_marker: Option<CompletionMarker>,
-	/// Observer told when the child exits, before the shell reaps it.
+	/// Observer told before the shell may reap the child.
 	exit_observer: Option<Arc<dyn SpawnObserver>>,
-	/// Whether the exit observer has run, so the child may be reaped.
+	/// Whether the observer has been told, so the child may be reaped.
 	exit_reported: bool,
 }
 
@@ -72,9 +72,9 @@ impl ChildProcess {
 		}
 	}
 
-	/// Sets the observer told about this child's exit before it is reaped.
-	/// Only Unix has that state: an exited, unreaped child keeps its pid and
-	/// the number of a process group it leads. Elsewhere nothing is reported.
+	/// Sets the observer told before the shell may reap this child. Only Unix
+	/// has that boundary: an exited, unreaped child keeps its pid and the
+	/// number of a process group it leads. Elsewhere nothing is reported.
 	pub(crate) fn set_exit_observer(&mut self, observer: Option<Arc<dyn SpawnObserver>>) {
 		#[cfg(unix)]
 		{
@@ -85,23 +85,39 @@ impl ChildProcess {
 		let _ = observer;
 	}
 
-	/// Runs the exit observer once the child has exited but before it is
-	/// reaped. Returns whether the shell may now reap it.
-	fn report_exit_if_exited(&mut self) -> bool {
+	/// Tells the observer, once, that the shell may reap the child from now
+	/// on: the child has exited, or `force` (the handle is being dropped).
+	/// Returns whether the shell may now reap it.
+	fn report_reap_boundary(&mut self, force: bool) -> bool {
 		if self.exit_reported {
 			return true;
 		}
+		// Unreaped now: it exited and waits to be reaped, or it still runs
+		// (only when `force`). A failed check other than an interrupted one
+		// leaves that unknown, so the observer is told not to rely on it.
 		#[cfg(unix)]
-		if let Some(pid) = self.pid
-			&& matches!(sys::signal::exited_unreaped(pid), Ok(false))
-		{
-			return false;
-		}
+		let unreaped = match self.pid.map(sys::signal::exited_unreaped) {
+			Some(Ok(true)) => true,
+			Some(Ok(false)) if force => true,
+			Some(Ok(false)) => return false,
+			Some(Err(_)) | None => false,
+		};
+		// Elsewhere the observer is never set (see `set_exit_observer`).
+		#[cfg(not(unix))]
+		let unreaped = {
+			let _ = force;
+			false
+		};
 		if let (Some(observer), Some(pid)) = (self.exit_observer.take(), self.pid) {
-			observer.on_exit(pid);
+			observer.before_reap(pid, unreaped);
 		}
 		self.exit_reported = true;
 		true
+	}
+
+	/// [`Self::report_reap_boundary`] for a child that may have exited.
+	fn report_exit_if_exited(&mut self) -> bool {
+		self.report_reap_boundary(false)
 	}
 
 	/// Returns the process's ID.
@@ -286,6 +302,9 @@ impl ChildProcess {
 
 impl Drop for ChildProcess {
 	fn drop(&mut self) {
+		// The child is still unreaped here, and may be reaped by the runtime
+		// once this handle is gone: tell the observer first.
+		self.report_reap_boundary(true);
 		// Ensure we do not leave an unreaped child running when the handle is dropped.
 		self.kill();
 	}

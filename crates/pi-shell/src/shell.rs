@@ -1775,16 +1775,13 @@ impl SpawnObserver for process::SpawnRegistry {
 		// On Windows an open handle keeps the pid slot reserved for the lifetime
 		// of the handle; on Linux the pidfd carries identity; on macOS the
 		// recorded start-time triple detects impersonation. Deferring the open
-		// to `build_targets` (as the old code did) let a recycled pid resolve
+		// to cancellation time (as the old code did) let a recycled pid resolve
 		// to an unrelated process — issue #4605.
-		let process = process::Process::from_pid(pid);
-		self.record(pgid, process);
+		self.record_spawn(pid, pgid);
 	}
 
-	fn on_exit(&self, pid: i32) {
-		// brush calls this before reaping `pid`: the zombie still holds the
-		// number of any group it led, so that group's members are ours.
-		self.record_exit(pid);
+	fn before_reap(&self, pid: i32, unreaped: bool) {
+		Self::before_reap(self, pid, unreaped);
 	}
 }
 
@@ -1799,19 +1796,16 @@ async fn terminate_run(registry: &process::SpawnRegistry) {
 	const WAVES: u32 = 3;
 	let mut saw_targets = false;
 	for wave in 0..WAVES {
-		let targets = registry.build_targets();
-		if targets.is_empty() {
-			if saw_targets || wave + 1 == WAVES {
-				return;
-			}
-		} else {
+		if registry.reaches_anything() {
 			saw_targets = true;
 			let signal = if wave == 0 {
 				process::TERM_SIGNAL
 			} else {
 				process::KILL_SIGNAL
 			};
-			targets.signal(signal);
+			registry.signal(signal);
+		} else if saw_targets || wave + 1 == WAVES {
+			return;
 		}
 		if wave + 1 < WAVES {
 			if wave == 0 {
@@ -1832,7 +1826,7 @@ async fn wait_for_term_grace(registry: &process::SpawnRegistry) {
 	#[cfg(unix)]
 	{
 		let deadline = time::Instant::now() + TERM_GRACE;
-		while !registry.build_targets().is_empty() {
+		while registry.reaches_anything() {
 			let now = time::Instant::now();
 			if now >= deadline {
 				break;
@@ -1853,8 +1847,9 @@ fn register_background_jobs(shell: &BrushShell, registry: &process::SpawnRegistr
 		let Some(pid) = job.process_ids().next() else {
 			continue;
 		};
-		let process = process::Process::from_pid(pid);
-		registry.record(job.process_group_id(), process);
+		// The job's child reports its reap boundary to the run that spawned
+		// it, not to this one, so it proves its group only while it runs.
+		registry.record_job(pid, job.process_group_id());
 	}
 }
 
@@ -7703,7 +7698,7 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 		let mut child = command.kill_on_drop(true).spawn().expect("child");
 		let pid = i32::try_from(child.id().expect("child pid")).expect("pid fits");
 		let registry = process::SpawnRegistry::new();
-		registry.record(None, process::Process::from_pid(pid));
+		registry.record_spawn(pid, None);
 		let started = time::Instant::now();
 		let ((), status) = tokio::join!(terminate_run(&registry), child.wait());
 		assert!(status.is_ok(), "terminated child must be reaped");

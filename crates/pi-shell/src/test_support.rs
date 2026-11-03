@@ -183,6 +183,7 @@ pub fn recycle_pid(pid: i32) -> Option<process::Child> {
 	if i32::try_from(sleeper.id()) == Ok(pid) {
 		return Some(sleeper);
 	}
+	eprintln!("recycle_pid: wanted pid {pid}, the new process got {}", sleeper.id());
 	let _ = sleeper.kill();
 	let _ = sleeper.wait();
 	None

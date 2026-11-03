@@ -360,7 +360,9 @@ pub use proc_snapshot::sys as proc_sys;
 	feature = "util.procs",
 	any(target_os = "linux", target_os = "macos", target_os = "windows")
 ))]
-pub use pinned_process::{PinnedProcess, SignalWave, SpawnEntry, SpawnLedger};
+pub use pinned_process::{
+	GroupProof, LedgerWave, PinnedProcess, SignalWave, SpawnEntry, SpawnLedger, kernel_group_runs,
+};
 
 /// Macro to define a struct that represents a shell built-in flag argument that
 /// can be enabled or disabled by specifying an option with a leading '+' or '-'
