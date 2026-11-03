@@ -206,8 +206,11 @@ export class PrintHold {
 				source: printHold.#source(bootstrapHoldMs, null),
 			});
 			printHold.#bootstrapId = identifier;
-			await printHold.#attachWindows();
-			await printHold.#apply(scope === "tab" ? null : Date.now() + SETUP_HOLD_MS);
+			// The loaded document is armed at once; attaching windows takes round trips it must not wait on.
+			await Promise.all([
+				printHold.#apply(scope === "tab" ? null : Date.now() + SETUP_HOLD_MS),
+				printHold.#attachWindows(),
+			]);
 		} catch (error) {
 			await printHold.dispose().catch(() => undefined);
 			throw error;
@@ -280,7 +283,10 @@ export class PrintHold {
 		} catch {
 			this.#windows = undefined;
 			await windows.detach().catch(() => undefined);
+			return;
 		}
+		// A hold disposed while this was in flight, as when arming the page failed, lets go of the windows it attached.
+		if (this.#disposed) this.#releaseWindows();
 	}
 
 	/**
@@ -335,6 +341,9 @@ export class PrintHold {
 		if (!windows || !session) return;
 		const { openerId, targetId } = event.targetInfo;
 		if (this.#disposed || openerId === undefined || !this.#openers.has(openerId)) {
+			// Letting go here frees only this session's wait: Chrome starts a window in a renderer of its own once every
+			// session waiting on it has let it go, so another tab's hold still gets its script in first. A window sharing
+			// its opener's renderer runs on at the first resume, which the page-side `open()` wrapper covers.
 			void session.send("Runtime.runIfWaitingForDebugger").catch(() => undefined);
 			void windows.send("Target.detachFromTarget", { sessionId: event.sessionId }).catch(() => undefined);
 			return;
