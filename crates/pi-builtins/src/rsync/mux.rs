@@ -1031,6 +1031,13 @@ impl MuxWriter {
 		// keepalive that has not reached the connection yet is not doubled.
 		let out_waiting = {
 			let o = lock(&sh.out.state);
+			// A write that finished after the check above moved the clock
+			// (write_out stores it before out_loop clears `busy` under this
+			// lock): read it again here, or the keepalive just written is
+			// followed by another.
+			if idle_secs(now, sh.counters.last_out.load(Ordering::Relaxed)) < lull {
+				return Ok(());
+			}
 			!o.queue.is_empty() || o.busy
 		};
 		if st.pending() == 0 && !out_waiting {
@@ -2995,6 +3002,34 @@ mod tests {
 			let gap = pair[1] - pair[0];
 			assert!(gap >= Duration::from_millis(1500), "keepalives {gap:?} apart: {landed:?}");
 		}
+	}
+
+	/// A write that finishes while a keepalive decision is under way is not
+	/// followed by another keepalive: the decision reads the output clock
+	/// again under the output lock. Here the decision starts with a clock
+	/// that never ticked, so its first check passes, and waits for the output
+	/// lock while a write finishes; without the second read it queued a
+	/// keepalive right after that write (1 to 3 ms apart, 15 of 15 times, over
+	/// a real socket in review).
+	#[test]
+	fn a_write_finished_during_the_decision_holds_the_keepalive() {
+		let sink = Sink::default();
+		let w = writer(&sink, WriteConfig { timeout: Some(Duration::from_secs(4)), ..WriteConfig::default() });
+		w.start_multiplex().unwrap();
+		w.set_role(Role::Sender);
+		assert_eq!(w.shared.counters.last_out.load(Ordering::Relaxed), 0);
+		let held = lock(&w.shared.out.state);
+		let decider = {
+			let w = w.clone();
+			thread::spawn(move || w.maybe_keepalive(0))
+		};
+		// The decision passes the clock check and waits for the output lock.
+		thread::sleep(Duration::from_millis(300));
+		// A write finishes, recorded as write_out records it.
+		w.shared.counters.last_out.store(clock_ms(), Ordering::Relaxed);
+		drop(held);
+		decider.join().unwrap().unwrap();
+		assert_eq!(sink.take(), b"", "a keepalive followed the write");
 	}
 
 	/// Input that keeps arriving, here the peer's own keepalives (empty
