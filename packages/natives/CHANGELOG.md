@@ -9,7 +9,7 @@
 ### Fixed
 
 - Fixed associative arrays slowing down quadratically as they grow: 100,000 inserts and lookups took about 90 seconds and now take about a tenth of a second
-- Fixed the bash tool and the `!` terminal sometimes returning a command's exit status with none of its output, or without its last bytes, when the machine was busy or the output was read slowly; a run now returns only after every byte already written to its output has been delivered, and fails with "Command output was not all delivered" when its output callback stops taking output instead of waiting for it forever or reporting success ([#17858](https://github.com/can1357/oh-my-pi/pull/17858) by [@sjawhar](https://github.com/sjawhar))
+- Fixed the bash tool and the `!` terminal sometimes returning a command's exit status with none of its output, or without its last bytes, when the machine was busy or the output was read slowly; a run now returns only after every byte already written to its output has been delivered, and fails with "Command output was not all delivered" when its output callback fails or stops taking output, instead of waiting for it forever or reporting success or cancellation ([#17858](https://github.com/can1357/oh-my-pi/pull/17858) by [@sjawhar](https://github.com/sjawhar))
 ### Fixed
 
 - Fixed `el.type` and `el.press(keys)` on Wayland moving focus inside the element's app (GNOME showed "… is ready") before refusing the call: they are now refused before anything reaches the app ([#17915](https://github.com/can1357/oh-my-pi/pull/17915) by [@will-bogusz](https://github.com/will-bogusz))

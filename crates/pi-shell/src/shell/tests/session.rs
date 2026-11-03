@@ -1886,7 +1886,8 @@ async fn read_output_stops_when_cancelled_before_pipe_eof() {
 	time::timeout(Duration::from_millis(100), handle)
 		.await
 		.expect("reader task should stop after cancellation")
-		.expect("reader task should not panic");
+		.expect("reader task should not panic")
+		.expect("reader should read its pipe");
 }
 
 /// A pipe holding `bytes` whose writer stays open, as when a background job
@@ -1921,7 +1922,8 @@ async fn cancelled_readers_deliver_the_bytes_already_in_the_pipe() {
 	let (activity_tx, _activity_rx) = flume::bounded(1);
 	time::timeout(bound, read_output(reader, Some(tx), cancelled(), activity_tx))
 		.await
-		.expect("streaming reader should stop");
+		.expect("streaming reader should stop")
+		.expect("streaming reader should read its pipe");
 	assert_eq!(rx.drain().collect::<String>(), expected, "streaming reader");
 
 	let (reader, _writer) = pipe_holding(expected.as_bytes());
@@ -1932,7 +1934,8 @@ async fn cancelled_readers_deliver_the_bytes_already_in_the_pipe() {
 		read_output_buffered(reader, Some(tx), cancelled(), activity_tx, usize::MAX),
 	)
 	.await
-	.expect("buffered reader should stop");
+	.expect("buffered reader should stop")
+	.expect("buffered reader should read its pipe");
 	assert_eq!(rx.drain().collect::<String>(), expected, "buffered reader's stream");
 	assert_eq!(buffered.text, expected, "buffered reader's capture");
 	assert_eq!(buffered.input_bytes, expected.len());
@@ -1942,7 +1945,8 @@ async fn cancelled_readers_deliver_the_bytes_already_in_the_pipe() {
 	let (activity_tx, _activity_rx) = flume::bounded(1);
 	time::timeout(bound, read_output_bytes(reader, Some(tx), cancelled(), activity_tx))
 		.await
-		.expect("byte reader should stop");
+		.expect("byte reader should stop")
+		.expect("byte reader should read its pipe");
 	let bytes: Vec<u8> = rx.drain().flat_map(|chunk| chunk.to_vec()).collect();
 	assert_eq!(bytes, expected.as_bytes(), "byte reader");
 }
@@ -1966,7 +1970,8 @@ async fn cancelled_reader_stops_while_its_writer_keeps_writing() {
 	time::timeout(Duration::from_secs(10), reader)
 		.await
 		.expect("cancelled reader should stop")
-		.expect("reader task should not panic");
+		.expect("reader task should not panic")
+		.expect("reader should read its pipe");
 	flood.join().expect("flood thread");
 }
 

@@ -583,9 +583,11 @@ pub(crate) fn undelivered_output_error(end: PumpEnd) -> Option<Error> {
 /// Normal completion and errors drain without a deadline to preserve every
 /// accepted chunk, and a run whose pump dropped output because a callback
 /// stalled or failed, or whose pump panicked, fails rather than resolve as if
-/// its output had all arrived. Cancellation and timeout are bounded because
-/// an orphaned pipe reader can otherwise keep a sender alive forever;
-/// aborting the pump drops its `flume::Receiver`, disconnecting that reader.
+/// its output had all arrived. That failure names the callback, which is the
+/// cause even when the shell also reported the output it could not hand over.
+/// Cancellation and timeout are bounded because an orphaned pipe reader can
+/// otherwise keep a sender alive forever; aborting the pump drops its
+/// `flume::Receiver`, disconnecting that reader.
 async fn await_drain(
 	handle: Option<napi::tokio::task::JoinHandle<PumpEnd>>,
 	result: Result<ShellRunResult>,
@@ -596,7 +598,7 @@ async fn await_drain(
 	if !matches!(&result, Ok(result) if result.cancelled || result.timed_out) {
 		let end = handle.await.unwrap_or(PumpEnd::Panicked);
 		return match undelivered_output_error(end) {
-			Some(error) => result.and(Err(error)),
+			Some(error) => Err(error),
 			None => result,
 		};
 	}

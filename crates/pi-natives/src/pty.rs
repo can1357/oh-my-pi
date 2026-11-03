@@ -565,6 +565,9 @@ fn run_pty_sync(
 
 	let mut timed_out = false;
 	let mut cancelled = false;
+	// The output callback failed first: the command is stopped, and the run
+	// fails because its output was not all delivered, not as cancelled.
+	let mut callback_failed = false;
 	// Set when termination starts: SIGKILL is due at `kill_at` (or as soon as
 	// the child exits, for the rest of its group), and the run stops waiting
 	// for an exit status at `give_up_at`.
@@ -593,7 +596,7 @@ fn run_pty_sync(
 			},
 			// The first termination cause decides `cancelled`/`timed_out`.
 			Ok(ControlMessage::JsGone) if give_up_at.is_none() => {
-				cancelled = true;
+				callback_failed = true;
 				true
 			},
 			Ok(ControlMessage::Cancelled { timed_out: by_timeout }) if give_up_at.is_none() => {
@@ -677,6 +680,7 @@ fn run_pty_sync(
 	// blocking, so it cannot tell a read in flight from a wait either.
 	#[cfg(not(unix))]
 	let unread = || 0;
+	let interrupted = cancelled || timed_out;
 	let pump_end = await_pty_output_drain(
 		pump_done_rx,
 		reader_thread,
@@ -684,15 +688,14 @@ fn run_pty_sync(
 		&progress,
 		&decoder,
 		unread,
-		cancelled || timed_out,
+		interrupted || callback_failed,
 		|| abort_pump.abort(),
 	);
 	drop(pump_task);
 	// The pump dropped output after a callback stalled or failed: the run must
-	// not resolve as if all of it had arrived.
-	if !(cancelled || timed_out)
-		&& let Some(error) = pump_end.and_then(undelivered_output_error)
-	{
+	// not resolve as if all of it had arrived, or as if it were cancelled.
+	let pump_end = if callback_failed { Some(PumpEnd::ConsumerGone) } else { pump_end };
+	if !interrupted && let Some(error) = pump_end.and_then(undelivered_output_error) {
 		return Err(error);
 	}
 	Ok(PtyRunResult { exit_code, cancelled, timed_out })
