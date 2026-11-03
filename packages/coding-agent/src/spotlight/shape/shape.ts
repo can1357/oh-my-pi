@@ -32,7 +32,7 @@ import { lineIndex, matchLine } from "./align";
 import { isPageBack, isTestRun, namesSource, printsFiles, runsProgram, SOURCE_PATH } from "./command";
 import { foldBashDocs, foldReadDoc } from "./docs";
 import { shapeDumpOutput, shapeDumpRead } from "./dumps";
-import { AGAIN_CHARS, indentOfFirst, MARKER, norm, WITNESS_CHARS } from "./lines";
+import { AGAIN_CHARS, indentOfFirst, MARKER, norm, words } from "./lines";
 import { outlineBash, outlineRead } from "./outline";
 import { alignedTo, bump, headTail, noteRank, noteWhy, type Origin, type Run, scoreLines } from "./run";
 import { noteCall, noteShown, type ShapeState } from "./state";
@@ -78,6 +78,11 @@ const SEEN_RUN = 4;
  */
 const SHORT_SEEN_RUN = 3;
 const SEEN_MARGIN = 80;
+/**
+ * A word of the call's intent names a line for keeping when it is in at most this many of the result's lines: a word
+ * in more says nothing about which line the agent wants.
+ */
+const INTENT_LINES = 6;
 /** The valve's budget: a cut result shows about this many characters. */
 const WINDOW_BUDGET = 3_000;
 /** A result holding at least this many lines a cut hid before is the agent asking again: shown whole. */
@@ -266,7 +271,42 @@ function runLines(spans: readonly Span[] | null, i: number, j: number): [number,
 	return (spans && runSpan(spans, i, j)) ?? [i + 1, j];
 }
 
-const seenMarker = (count: number) => `… [${count} lines as shown before]`;
+/** A collapsed run of already-seen lines, with where they are, so the agent never has to run the call again. */
+const seenMarker = (count: number, [a, z]: [number, number]) => `… [${count} lines as shown before: ${a}-${z}]`;
+
+/** The footer of a result with hidden lines: where its numbered gaps are. */
+const cutFooter = (url: string) => `[cut: … [A-B] are lines A-B of ${url} (read ${url}:A-B)]`;
+
+/**
+ * Lines no seen-collapse hides: a line holding a word of the call's intent that few lines hold (the agent asked for
+ * that line now, beside this result), and for command output its last line, which says how the run ended. An output
+ * matching an earlier one but cut short otherwise collapses whole and reads as the earlier run.
+ */
+function seenKeeps(run: Run, lines: readonly string[]): boolean[] {
+	const keep = Array.from<boolean>({ length: lines.length }).fill(false);
+	const terms = words(run.ctx.intent);
+	if (terms.size) {
+		const hits = new Map<string, number[]>();
+		lines.forEach((line, i) => {
+			if (MARKER.test(line)) return;
+			for (const w of words(line)) {
+				if (!terms.has(w)) continue;
+				const at = hits.get(w);
+				if (at) at.push(i);
+				else hits.set(w, [i]);
+			}
+		});
+		for (const at of hits.values()) if (at.length <= INTENT_LINES) for (const i of at) keep[i] = true;
+	}
+	if (!run.input.read) {
+		for (let i = lines.length - 1; i >= 0; i--) {
+			if (!lines[i].trim() || MARKER.test(lines[i])) continue;
+			keep[i] = true;
+			break;
+		}
+	}
+	return keep;
+}
 
 /** `mask` without the runs whose text (newlines included) is shorter than their marker plus {@link SEEN_MARGIN}. */
 function payingRuns(lines: readonly string[], mask: readonly boolean[]): boolean[] {
@@ -279,7 +319,7 @@ function payingRuns(lines: readonly string[], mask: readonly boolean[]): boolean
 		let j = i;
 		let chars = 0;
 		while (j < lines.length && out[j]) chars += lines[j++].length + 1;
-		if (chars < seenMarker(j - i).length + 1 + SEEN_MARGIN) out.fill(false, i, j);
+		if (chars < seenMarker(j - i, [i + 1, j]).length + 1 + SEEN_MARGIN) out.fill(false, i, j);
 		i = j;
 	}
 	return out;
@@ -287,16 +327,18 @@ function payingRuns(lines: readonly string[], mask: readonly boolean[]): boolean
 
 /**
  * A short result's view with every run of ≥ 3 already-seen lines that pays for its marker ({@link payingRuns})
- * collapsed to one marker.
+ * collapsed to one marker naming where the lines are, under the cut footer.
  */
-function collapseSeen(run: Run, view: View, steps: string[]): View {
-	const mask = payingRuns(view.lines, witnessedMask(view.lines, run.state.seen, SHORT_SEEN_RUN));
+async function collapseSeen(run: Run, view: View, steps: string[]): Promise<View> {
+	const keep = seenKeeps(run, view.lines);
+	const mask = payingRuns(view.lines, witnessedMask(view.lines, run.state.seen, SHORT_SEEN_RUN, keep));
 	if (!mask.includes(true)) return view;
 	noteWhy(
 		run,
 		viewOrigin(run, view) ?? alignedTo(run, view.lines),
 		mask.map(m => (m ? "r" : undefined)),
 	);
+	const target = await cutTarget(run, view);
 	const lines: string[] = [];
 	const spans: Span[] = [];
 	let omitted = 0;
@@ -309,11 +351,13 @@ function collapseSeen(run: Run, view: View, steps: string[]): View {
 		}
 		let j = i;
 		while (j < view.lines.length && mask[j]) j++;
-		lines.push(seenMarker(j - i));
+		lines.push(`${indentOfFirst(view.lines.slice(i, j))}${seenMarker(j - i, runLines(target.spans, i, j))}`);
 		spans.push(view.spans && runSpan(view.spans, i, j));
 		omitted += j - i;
 		i = j;
 	}
+	lines.push(cutFooter(target.url));
+	spans.push(null);
 	bump(run, "seenLines", omitted);
 	steps.push("seen");
 	return { lines, spans: view.spans && spans };
@@ -362,7 +406,8 @@ async function shapeSubject(run: Run, subject: Subject): Promise<{ view: View; s
 	}
 	if (again) bump(run, "reasks");
 
-	const witnessed = witnessedMask(lines, state.seen, again ? Math.min(SEEN_RUN, 2) : SEEN_RUN);
+	const keep = seenKeeps(run, lines);
+	const witnessed = witnessedMask(lines, state.seen, again ? Math.min(SEEN_RUN, 2) : SEEN_RUN, keep);
 	const width = lines.map(l => (!again && l.length > MAX_LINE ? LINE_KEEP + 36 : l.length));
 	let shown = 0;
 	lines.forEach((_, i) => {
@@ -384,8 +429,9 @@ async function shapeSubject(run: Run, subject: Subject): Promise<{ view: View; s
 	if (cut) {
 		const spot = await lineScores(run, lines, origin);
 		const density = densityScores(lines, spot);
-		// Earlier shaping's markers are cheap and say what is where: chosen first.
-		const scores = density.map((s, i) => (MARKER.test(lines[i]) && lines[i].length < 200 ? 10 : s));
+		// Earlier shaping's markers are cheap and say what is where, and lines the intent names are what the agent
+		// asked for: chosen first.
+		const scores = density.map((s, i) => ((MARKER.test(lines[i]) && lines[i].length < 200) || keep[i] ? 10 : s));
 		const chosen = frameLines(width, lines, witnessed, scores, {
 			budget: WINDOW_BUDGET * scale,
 			ctx: 1,
@@ -406,8 +452,9 @@ async function shapeSubject(run: Run, subject: Subject): Promise<{ view: View; s
 	}
 
 	if (cut && lines[0]?.startsWith("[display only:")) lines[0] = lines[0].replace(VERBATIM, "]");
-	const target = cut || capped ? await cutTarget(run, { lines, spans }) : undefined;
-	if (target) keepUnaddressed(why, target.spans, witnessed);
+	// Every line hidden past here gets an address, seen ones included: a marker the agent cannot follow costs a rerun.
+	const target = await cutTarget(run, { lines, spans });
+	keepUnaddressed(why, target.spans, witnessed);
 	noteWhy(run, origin, why);
 	if (frame) {
 		noteRank(run, origin, {
@@ -430,7 +477,7 @@ async function shapeSubject(run: Run, subject: Subject): Promise<{ view: View; s
 		if (show(i)) {
 			const l = lines[i];
 			if (!again && l.length > MAX_LINE) {
-				const at = target?.spans?.[i]?.[0] ?? i + 1;
+				const at = target.spans?.[i]?.[0] ?? i + 1;
 				out.push(
 					`${l.slice(0, LINE_KEEP)} …[+${(l.length - LINE_KEEP).toLocaleString("en-US")} chars: line ${at}]`,
 				);
@@ -442,27 +489,27 @@ async function shapeSubject(run: Run, subject: Subject): Promise<{ view: View; s
 		}
 		let j = i;
 		while (j < lines.length && !show(j)) j++;
+		// A run the window hid holds a line not seen before, short ones included: it is a gap, not "as shown before".
 		let fresh = false;
 		for (let k = i; k < j; k++) {
-			if (witnessed[k] || norm(lines[k]).length < WITNESS_CHARS) continue;
+			if (witnessed[k]) continue;
 			fresh = true;
 			if (norm(lines[k]).length >= AGAIN_CHARS) run.hid.add(norm(lines[k]));
 		}
-		if (fresh && target) {
-			const [a, z] = runLines(target.spans, i, j);
-			out.push(`${indentOfFirst(lines.slice(i, j))}… [${a}-${z}]`);
+		const [a, z] = runLines(target.spans, i, j);
+		const indent = indentOfFirst(lines.slice(i, j));
+		if (fresh) {
+			out.push(`${indent}… [${a}-${z}]`);
 			hidden += j - i;
 		} else {
-			out.push(`… [${j - i} lines as shown before]`);
+			out.push(`${indent}${seenMarker(j - i, [a, z])}`);
 			omitted += j - i;
 		}
 		outSpans.push(spans && runSpan(spans, i, j));
 		i = j;
 	}
-	if (target) {
-		out.push(`[cut: … [A-B] are lines A-B of ${target.url} (read ${target.url}:A-B)]`);
-		outSpans.push(null);
-	}
+	out.push(cutFooter(target.url));
+	outSpans.push(null);
 	if (cut) {
 		bump(run, "windowed");
 		bump(run, "windowHiddenLines", hidden);
@@ -487,9 +534,10 @@ async function shapeSubject(run: Run, subject: Subject): Promise<{ view: View; s
  * A changed text saving fewer than {@link MIN_SAVED_TOKENS} tokens against the input is dropped (`stats.reverted`).
  * `plain` is the unshaped text for the call (default: the input), which can be far less than the full output shaping
  * reads. A changed text saving fewer than {@link MIN_SAVED_TOKENS} tokens against it is capped: the outcome keeps the
- * would-be text, adds the `plain-cap` step and sets `capped`. With `holdout`, a changed text is the cut shaping would
- * make. Either way, and for a text shaping keeps, the agent is shown `plain`'s text: `state` records that, not what
- * the cut hid.
+ * would-be text, adds the `plain-cap` step and sets `capped`. A `plain` whose lines the sink cut to its column cap
+ * (`widthCut`) lost text only a read of the saved output brings back, so a cut up to {@link VALVE_OVER} characters is
+ * applied even when longer than it. With `holdout`, a changed text is the cut shaping would make. Either way, and for
+ * a text shaping keeps, the agent is shown `plain`'s text: `state` records that, not what the cut hid.
  */
 export async function shapeResult(
 	input: ShapeInput,
@@ -499,7 +547,7 @@ export async function shapeResult(
 	sink: ShapeSink,
 	signal?: AbortSignal,
 	holdout = false,
-	plain?: { text: string; tokens: number },
+	plain?: { text: string; tokens: number; widthCut?: boolean },
 ): Promise<ShapeOutcome> {
 	const stats: Record<string, number> = { charsIn: input.text.length };
 	const inTokens = countTokens(input.text);
@@ -537,7 +585,7 @@ export async function shapeResult(
 	else if (short) {
 		bump(run, "short");
 		if (subject) {
-			const view = collapseSeen(run, subject.view, steps);
+			const view = await collapseSeen(run, subject.view, steps);
 			if (steps.length) text = view.lines.join("\n");
 		}
 	} else if (subject) {
@@ -548,7 +596,10 @@ export async function shapeResult(
 	let outTokens = text === input.text ? inTokens : countTokens(text);
 	let capped = false;
 	if (inTokens - outTokens >= MIN_SAVED_TOKENS) {
-		capped = plain !== undefined && plain.tokens - outTokens < MIN_SAVED_TOKENS;
+		capped =
+			plain !== undefined &&
+			plain.tokens - outTokens < MIN_SAVED_TOKENS &&
+			!(plain.widthCut && text.length <= VALVE_OVER);
 		if (capped) {
 			bump(run, "plainCapped");
 			steps.push("plain-cap");

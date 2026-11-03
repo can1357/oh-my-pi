@@ -43,6 +43,8 @@ export interface ShapeRequest extends Omit<ShapeInput, "cwd"> {
 	 * page): what savings count against. Defaults to `text`.
 	 */
 	plain?: string;
+	/** Whether `plain`'s lines were cut to the sink's column cap: a short cut may then be longer than `plain`. */
+	plainWidthCut?: boolean;
 }
 
 /** Whether the experiment replaces pi's own read summarizer and bash minimizer: whenever it is on, for every tool. */
@@ -89,8 +91,9 @@ export interface ShapedText {
  *
  * A cut saving fewer than `MIN_SAVED_TOKENS` against the plain text is never applied (nor held out, since applying it
  * would show the plain text too): the text stays unchanged, `steps` ends with `plain-cap`, and
- * `cappedChars`/`cappedTokens` size the would-be cut. Every result the model gets plain (kept or capped) has the
- * plain text's `outChars`/`outTokens`.
+ * `cappedChars`/`cappedTokens` size the would-be cut. A short cut of a result whose plain text was cut to the column
+ * cap (`plainWidthCut`) is applied anyway, and its `savedTokens` is negative when it is longer than plain. Every result
+ * the model gets plain (kept or capped) has the plain text's `outChars`/`outTokens`.
  */
 export async function shapeToolText(
 	session: ToolSession,
@@ -107,7 +110,7 @@ export async function shapeToolText(
 	const coins = experiment.drawCoins(editLikely === true);
 	const scorer = new RecordingScorer(experiment.client, experiment.thinking);
 	const started = performance.now();
-	const { source, plain: plainText, ...input } = request;
+	const { source, plain: plainText, plainWidthCut, ...input } = request;
 	const plain = plainText ?? request.text;
 	const plainTokens = plain !== request.text ? countTokens(plain) : undefined;
 	let outcome: ShapeOutcome | undefined;
@@ -128,7 +131,7 @@ export async function shapeToolText(
 			signal,
 			// A gated read, like a held-out result, shows `plain`: the cut is traced, not applied.
 			coins.holdout || coins.gate,
-			plainTokens === undefined ? undefined : { text: plain, tokens: plainTokens },
+			plainTokens === undefined ? undefined : { text: plain, tokens: plainTokens, widthCut: plainWidthCut },
 		);
 	} catch (caught) {
 		error = caught instanceof Error ? caught.message : String(caught);
@@ -179,9 +182,9 @@ export async function shapeToolText(
 		outTokens,
 		plainChars: plain.length,
 		plainTokens: plainTokensOrIn,
-		// A result the model got plain (kept, capped or gated) saves nothing; a held-out one is traced with
-		// the saving it would have made.
-		savedTokens: cut && !gated ? Math.max(0, plainTokensOrIn - outTokens) : 0,
+		// A result the model got plain (kept, capped or gated) saves nothing; a held-out one is traced with the saving
+		// it would have made. A cut longer than plain (a width-cut plain) saves negative tokens.
+		savedTokens: cut && !gated ? plainTokensOrIn - outTokens : 0,
 		...traceFields,
 	};
 	const lines = outcome?.lines;

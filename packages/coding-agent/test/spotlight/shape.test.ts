@@ -479,13 +479,97 @@ describe("spotlight shaping", () => {
 		);
 		expect(out.steps).toEqual(["seen"]);
 		expect(out.text).toBe(
-			["Applying migrations to staging", "… [12 lines as shown before]", "Done: 12 applied, 0 failed"].join("\n"),
+			[
+				"Applying migrations to staging",
+				"… [12 lines as shown before: 2-13]",
+				"Done: 12 applied, 0 failed",
+				"[cut: … [A-B] are lines A-B of artifact://1 (read artifact://1:A-B)]",
+			].join("\n"),
 		);
 		// The twelve lines are hidden as seen before, under the marker; nothing decided on the two around them.
 		const trace = traceOf(out, again);
 		expect(trace.why.join("")).toBe(`-${"r".repeat(12)}-`);
-		expect(trace.map).toEqual([1, [2, 13], 14]);
+		expect(trace.map).toEqual([1, [2, 13], 14, null]);
 		expect(trace.rank).toBeUndefined();
+	});
+
+	it("keeps the last line of output that repeats an earlier run but stops short of it", async () => {
+		const state = newShapeState();
+		const first = migrations(30);
+		await shapeResult(
+			bash("bin/migrate --dry-run", first.join("\n")),
+			context(),
+			scorer(() => 0.5),
+			state,
+			sink(),
+		);
+		const store = sink();
+
+		const out = await shapeResult(
+			bash("bin/migrate", first.slice(0, 25).join("\n")),
+			context(),
+			scorer(() => 0.5),
+			state,
+			store,
+		);
+
+		const lines = out.text.split("\n");
+		expect(lines[0]).toBe("… [24 lines as shown before: 1-24]");
+		expect(lines[1]).toBe(first[24]);
+		expect(store.saved.get("artifact://1")?.split("\n").slice(0, 24)).toEqual(first.slice(0, 24));
+	});
+
+	it("shows a seen line the call's intent names, and still collapses lines a generic intent word names", async () => {
+		const first = migrations(30);
+		const again = ["Applying migrations to staging", ...first, "Done: 30 applied, 0 failed"];
+		const shape = async (intent: string) => {
+			const state = newShapeState();
+			await shapeResult(
+				bash("bin/migrate --dry-run", first.join("\n")),
+				context(),
+				scorer(() => 0.5),
+				state,
+				sink(),
+			);
+			return shapeResult(
+				bash("bin/migrate", again.join("\n")),
+				context({ intent }),
+				scorer(() => 0.5),
+				state,
+				sink(),
+			);
+		};
+
+		const named = await shape("which migration added ledger_5_amount");
+		const generic = await shape("did every migration apply");
+
+		expect(named.text.split("\n").slice(0, 4)).toEqual([
+			"Applying migrations to staging",
+			"… [5 lines as shown before: 2-6]",
+			first[5],
+			"… [24 lines as shown before: 8-31]",
+		]);
+		expect(generic.text).not.toContain(first[5]);
+	});
+
+	it("numbers the short rows a cut hid as a gap, never as shown before, when nothing was shown yet", async () => {
+		const items = Array.from({ length: 400 }, (_, i) => ({
+			id: i,
+			name: `item${i}`,
+			flag: i === 317 ? "on_hold" : "ok",
+		}));
+
+		const out = await shapeResult(
+			bash("./orders.sh", JSON.stringify({ items })),
+			context({ intent: "which order is on hold" }),
+			scorer(item => (item.includes("on_hold") ? 1 : 0.05)),
+			newShapeState(),
+			sink(),
+		);
+
+		expect(out.text).toContain("317|item317|on_hold");
+		expect(out.text).not.toContain("as shown before");
+		expect(cutGaps(out.text).gaps.length).toBeGreaterThan(0);
 	});
 
 	it("leaves a source read and an ASCII picture whole, but cuts command output of the same size", async () => {

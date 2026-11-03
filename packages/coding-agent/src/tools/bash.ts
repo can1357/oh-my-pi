@@ -866,10 +866,12 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 
 	/**
 	 * The command's output under the session's Spotlight shaping, or undefined when the session does not shape: `text`
-	 * when shaping changed it, and the trace for the result's details. A spilled output is shaped whole from its
-	 * artifact (`whole`), up to {@link SPOTLIGHT_FULL_OUTPUT_MAX_BYTES}; its savings still count against the capped
-	 * text `plain` shows, truncation notice included, and a cut longer than that is not applied. A result shaping does
-	 * not cut (kept, held out, capped) stays as the sink built it, as under `plain`.
+	 * when shaping changed it, and the trace for the result's details. A spilled output, or one whose long lines the sink
+	 * cut to its column cap, is shaped whole from its artifact (`whole`), up to {@link SPOTLIGHT_FULL_OUTPUT_MAX_BYTES}:
+	 * shaping a capped line would only cut the preview further, past anything the cap dropped. Its savings still count
+	 * against the capped text `plain` shows, truncation notice included, and a cut longer than that is not applied,
+	 * except a short one when the column cap cut `plain` (`plainWidthCut`): the cap's preview leaves the rest to a read
+	 * of the artifact. A result shaping does not cut (kept, held out, capped) stays as the sink built it, as under `plain`.
 	 */
 	async #shapeOutput(
 		result: BashResult | BashInteractiveResult,
@@ -881,8 +883,9 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		const built = this.#formatResultOutput(result);
 		let text = built;
 		let whole = false;
+		const widthCut = (result.columnTruncatedLines ?? 0) > 0;
 		if (
-			result.truncated &&
+			(result.truncated || widthCut) &&
 			result.artifactId &&
 			!result.artifactElidedBytes &&
 			!result.artifactError &&
@@ -898,6 +901,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			tool: "bash",
 			text,
 			plain: built + formatOutputNotice(outputMeta().truncationFromSummary(result, { direction: "tail" }).get()),
+			plainWidthCut: whole && widthCut,
 			command,
 			exitCode: result.exitCode,
 			source: command,

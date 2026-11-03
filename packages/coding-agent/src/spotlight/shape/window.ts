@@ -6,12 +6,20 @@
 import { reasonShows, type SpotlightReason } from "@oh-my-pi/pi-tui/chat/spotlight";
 import { MARKER, norm, WITNESS_CHARS } from "./lines";
 
-/** Lines inside runs of ≥ `run` already-seen lines (short lines inside a run don't break it; a run ends on a seen line). */
-export function witnessedMask(lines: readonly string[], seen: ReadonlySet<string>, run: number): boolean[] {
+/**
+ * Lines inside runs of ≥ `run` already-seen lines (short lines inside a run don't break it; a run ends on a seen line).
+ * A line `keep` marks never counts as seen and ends any run it is in.
+ */
+export function witnessedMask(
+	lines: readonly string[],
+	seen: ReadonlySet<string>,
+	run: number,
+	keep?: readonly boolean[],
+): boolean[] {
 	const mask = Array.from({ length: lines.length }, () => false);
-	const isSeen = (l: string) => !MARKER.test(l) && seen.has(norm(l));
+	const isSeen = (i: number) => !keep?.[i] && !MARKER.test(lines[i]) && seen.has(norm(lines[i]));
 	for (let i = 0; i < lines.length;) {
-		if (!isSeen(lines[i])) {
+		if (!isSeen(i)) {
 			i++;
 			continue;
 		}
@@ -20,9 +28,10 @@ export function witnessedMask(lines: readonly string[], seen: ReadonlySet<string
 		let count = 0;
 		while (
 			j < lines.length &&
-			(isSeen(lines[j]) || (!MARKER.test(lines[j]) && norm(lines[j]).length < WITNESS_CHARS))
+			!keep?.[j] &&
+			(isSeen(j) || (!MARKER.test(lines[j]) && norm(lines[j]).length < WITNESS_CHARS))
 		) {
-			if (isSeen(lines[j])) {
+			if (isSeen(j)) {
 				count++;
 				last = j;
 			}

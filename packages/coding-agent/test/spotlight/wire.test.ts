@@ -558,6 +558,41 @@ describe("spotlight plain baseline", () => {
 	});
 });
 
+describe("spotlight column-capped output", () => {
+	const ITEMS = Array.from({ length: 400 }, (_, i) => ({
+		id: i,
+		name: `item${i}`,
+		flag: i === 317 ? "on_hold" : "ok",
+	}));
+	const FULL = JSON.stringify({ items: ITEMS });
+
+	it("gives a short cut of the whole artifact over the column cap's preview, counting what it costs", async () => {
+		const client = spotlightClient(fakeSpotlight({ score: item => (item.includes("on_hold") ? 1 : 0.05) }));
+		const { session, manager } = await experimentSession(client);
+		const artifactId = await manager.saveArtifact(FULL, "bash");
+		if (artifactId === undefined) throw new Error("the in-memory session keeps artifacts");
+		const preview = `${FULL.slice(0, 768)}…`;
+		const capped: bashExecutor.BashResult = {
+			...bashOutput(preview),
+			artifactId,
+			totalBytes: FULL.length,
+			columnMax: 768,
+			columnTruncatedLines: 1,
+			columnTruncatedRange: { first: 1, last: 1 },
+		};
+		vi.spyOn(bashExecutor, "executeBash").mockResolvedValue(capped);
+
+		const result = await new BashTool(session).execute("b1", { command: "./orders.sh" });
+
+		const trace = result.details?.spotlight;
+		expect(trace?.inChars).toBe(FULL.length);
+		expect(resultText(result)).toContain("317|item317|on_hold");
+		expect(trace?.steps).not.toContain("plain-cap");
+		expect(trace?.savedTokens).toBe((trace?.plainTokens ?? 0) - (trace?.outTokens ?? 0));
+		expect(trace?.savedTokens).toBeLessThan(0);
+	});
+});
+
 describe("spotlight score-free coin", () => {
 	it("draws holdout, then the edit gate for edit-likely reads only, then score-free, stopping at the first landed", async () => {
 		const draws: number[] = [];
@@ -865,7 +900,12 @@ describe("spotlight shaping of any tool", () => {
 		const again = await agentCall(fakeTool("board", NEXT_BOARD), run, "t2");
 
 		expect(resultText(again)).toBe(
-			["board: 10 open, 2 done", "… [10 lines as shown before]", "- [done] add the edit gate setting"].join("\n"),
+			[
+				"board: 10 open, 2 done",
+				"… [10 lines as shown before: 2-11]",
+				"- [done] add the edit gate setting",
+				"[cut: … [A-B] are lines A-B of artifact://0 (read artifact://0:A-B)]",
+			].join("\n"),
 		);
 		const entry = entries(run.manager, SPOTLIGHT_ENTRY.shape)[1];
 		expect(entry).toMatchObject({ toolCallId: "t2", steps: ["seen"], stats: { short: 1, seenLines: 10 } });
@@ -912,7 +952,7 @@ describe("spotlight shaping of any tool", () => {
 		const board = fakeTool("board", BOARD.join("\n"));
 		const next = fakeTool("board", NEXT_BOARD);
 		context.push(shown("t1", await agentCall(board, run, "t1")), call("t2"));
-		expect(resultText(await agentCall(next, run, "t2"))).toContain("… [10 lines as shown before]");
+		expect(resultText(await agentCall(next, run, "t2"))).toContain("… [10 lines as shown before: 2-11]");
 
 		// A compaction leaves its summary and the new turn: the boards are gone from the context.
 		context = [{ role: "user", content: "Summary: the board was triaged.", timestamp: 0 }, call("t3")];
@@ -929,7 +969,7 @@ describe("spotlight shaping of any tool", () => {
 		await agentCall(fakeTool("board", BOARD.join("\n")), run, "t1");
 		const sibling = await agentCall(fakeTool("board", NEXT_BOARD), run, "t2");
 
-		expect(resultText(sibling)).toContain("… [10 lines as shown before]");
+		expect(resultText(sibling)).toContain("… [10 lines as shown before: 2-11]");
 	});
 
 	it("shapes and journals only the tools spotlight.experiment.tools names", async () => {
