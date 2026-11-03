@@ -480,11 +480,12 @@ export interface ToolSession {
 	/** Replace cached todo phases for this session. */
 	setTodoPhases?: (phases: TodoPhase[]) => void;
 	/**
-	 * Record todo phases on the session branch. Direct `todo` calls persist via
-	 * their toolResult entry; callers that produce none (the eval bridge) use this
-	 * so branch rehydration agrees with the in-memory list.
+	 * Replace the todo list from outside the `todo` tool: update the cache and
+	 * record it on the session branch. Direct `todo` calls persist via their
+	 * toolResult entry; callers that produce none (the eval bridge, Cursor sync)
+	 * use this so branch rehydration agrees with the in-memory list.
 	 */
-	persistTodoPhases?: (phases: TodoPhase[]) => void;
+	commitTodoPhases?: (phases: TodoPhase[]) => void;
 	/** Active workpool items whose incremental yields complete the current turn. */
 	getWorkPoolYieldItems?: () => readonly WorkPoolYieldItem[];
 	/**
