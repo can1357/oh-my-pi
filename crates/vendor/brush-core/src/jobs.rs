@@ -1390,12 +1390,24 @@ impl JobManager {
 	/// Collects the exit of every job process the kernel reports ended, so
 	/// the polls that follow see it, as Bash's `SIGCHLD` handler has before
 	/// any of its notify points or listings (see
-	/// [`processes::ChildProcess::settle`]).
+	/// [`processes::ChildProcess::settle`]). An in-process pipeline job every
+	/// stage of which has ended is, in Bash, a job all of whose processes are
+	/// dead; only the tail of its task (the pipeline's wait) is left, so it is
+	/// given up to [`INTERNAL_TASK_UNWIND_LIMIT`] to return.
 	pub async fn settle_ended(&mut self) {
 		for job in self.jobs.iter_mut().chain(self.disowned.iter_mut()) {
 			for task in &mut job.tasks {
 				if let JobTask::External(process) = task {
 					process.settle().await;
+				}
+			}
+			if let Some(in_process) = &job.in_process
+				&& !job.stages.is_empty()
+				&& job.stages.iter().all(|stage| !stage.target.is_running())
+			{
+				let deadline = tokio::time::Instant::now() + INTERNAL_TASK_UNWIND_LIMIT;
+				while !in_process.target.task_finished() && tokio::time::Instant::now() < deadline {
+					tokio::time::sleep(Duration::from_millis(1)).await;
 				}
 			}
 		}

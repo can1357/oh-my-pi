@@ -1292,7 +1292,8 @@ async fn spawn_pipeline_processes(
 		cmd_params.set_stand_in_slot(Arc::clone(&stand_in));
 		// A stage of an in-process background job runs with the stage's own
 		// token, which `kill` of the stage's pid fires.
-		if let Some(stage) = role.stages.and_then(|stages| stages.get(current_pipeline_index)) {
+		let job_stage = role.stages.and_then(|stages| stages.get(current_pipeline_index));
+		if let Some(stage) = job_stage {
 			cmd_params.set_cancel_token(stage.cancellation());
 		}
 
@@ -1326,9 +1327,19 @@ async fn spawn_pipeline_processes(
 			}
 		};
 
-		let spawn_result = command
+		let spawn_result = match command
 			.execute_in_pipeline(pipeline_context, cmd_params)
-			.await?;
+			.await
+		{
+			Ok(spawned) => spawned,
+			// A stage `kill` ended before or as it started ended as that
+			// signal ends a process, as Bash's forked stage would; the wait
+			// records its status (see `InProcessStage::killed_by`).
+			Err(_) if job_stage.is_some_and(|stage| stage.killed_by().is_some()) => {
+				ExecutionSpawnResult::Completed(ExecutionResult::new(130))
+			},
+			Err(error) => return Err(error),
+		};
 
 		// Update the process group ID if something was spawned.
 		if let ExecutionSpawnResult::StartedProcess(child) = &spawn_result {

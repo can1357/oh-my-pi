@@ -56,18 +56,22 @@ async fn run_bash(script: &str) -> (Option<i32>, String) {
 	.expect("join")
 }
 
+/// A pid where a job line prints one, with its `%5ld` padding: first on a
+/// line, or after a listing's `[N]+ `, and followed by a space.
 static PID: LazyLock<regex::Regex> =
-	LazyLock::new(|| regex::Regex::new(r"( *)\b\d{4,}\b").expect("pid"));
+	LazyLock::new(|| regex::Regex::new(r"(?m)^(\[\d+\][+ -] )?( *)(\d+) ").expect("pid"));
 static PREFIX: LazyLock<regex::Regex> =
 	LazyLock::new(|| regex::Regex::new(r"(?m)^bash: line \d+: ").expect("prefix"));
 
-/// Writes every pid, with the padding `%5ld` gave it, as `PID`, and drops
-/// Bash's `bash: line N: ` prefix.
+/// Writes every pid, of any length and with the padding `%5ld` gave it, as
+/// `PID`, and drops Bash's `bash: line N: ` prefix.
 fn normalize(output: &str) -> String {
 	let output = PREFIX.replace_all(output, "");
 	PID.replace_all(&output, |caps: &regex::Captures<'_>| {
-		let spaces = caps[1].len();
-		format!("{}PID", " ".repeat(spaces.saturating_sub(5)))
+		let listing = caps.get(1).map_or("", |prefix| prefix.as_str());
+		let spaces = caps[2].len();
+		let pad = 5_usize.saturating_sub(caps[3].len()).min(spaces);
+		format!("{listing}{}PID ", " ".repeat(spaces - pad))
 	})
 	.into_owned()
 }
@@ -206,20 +210,40 @@ async fn lastpipe_defers_a_signal_report_until_the_next_notify_point() {
 	.await;
 }
 
+/// Waits, without starting a child, until the process `$1` names runs
+/// `sleep`: a signal Bash's forked child receives before it runs the
+/// command lands in Bash's own handler, and the command then runs on. A
+/// pid with no `/proc` entry (one of a job this shell runs itself) returns
+/// at once.
+const STARTED: &str = "started() { local c; while read -r c 2>/dev/null < /proc/$1/comm; do [[ $c \
+                       == sleep ]] && return 0; done; }; ";
+
 /// A script that leaves early (`exit`, `set -e`, a fatal expansion error)
 /// reads no more input, so the read at its end that would report a job never
 /// happens.
 #[tokio::test(flavor = "multi_thread")]
 async fn early_exit_does_not_read_the_end_of_input() {
-	assert_all_bash(rows(&[
-		("exit", "sleep 30 & kill -HUP $!; echo before; exit 0"),
-		("errexit", "set -e; sleep 30 & kill -HUP $!; echo before; false; echo after"),
-	]))
+	assert_all_bash(vec![
+		(
+			"exit".to_owned(),
+			format!("{STARTED}sleep 30 & started $!; kill -HUP $!; echo before; exit 0"),
+		),
+		(
+			"errexit".to_owned(),
+			format!(
+				"{STARTED}set -e; sleep 30 & started $!; kill -HUP $!; echo before; false; echo after"
+			),
+		),
+	])
 	.await;
 
 	// The shell's own text for the expansion error differs from Bash's
 	// (`undefined_var: boom`), so that line is left out of the comparison.
-	let script = "sleep 30 & kill -HUP $!; echo before; : ${undefined_var?boom}; echo after";
+	let script = format!(
+		"{STARTED}sleep 30 & started $!; kill -HUP $!; echo before; : ${{undefined_var?boom}}; echo \
+		 after"
+	);
+	let script = script.as_str();
 	let without_error = |(status, output): (Option<i32>, String)| {
 		let mut kept = String::new();
 		for line in normalize(&output)
@@ -240,20 +264,52 @@ async fn early_exit_does_not_read_the_end_of_input() {
 /// alone.
 #[tokio::test(flavor = "multi_thread")]
 async fn background_pipelines_report_every_stage() {
-	assert_all_bash(rows(&[
+	assert_all_bash(vec![
+		// `sleep 0.1` lets the first stage write before its reader dies (a
+		// stage the shell runs itself has no `/proc` entry for `started`), and
+		// `started` lets Bash's forked stage run `sleep` before the signal.
 		(
-			"last-stage-killed",
-			"echo x | sleep 30 & p=$!; sleep 0.1; kill -HUP $p; sleep 0.1; /bin/true; echo after",
+			"last-stage-killed".to_owned(),
+			format!(
+				"{STARTED}echo x | sleep 30 & p=$!; sleep 0.1; started $p; kill -HUP $p; sleep 0.5; \
+				 /bin/true; echo after"
+			),
 		),
-		("job-killed", "sleep 30 | /bin/cat & p=$!; sleep 0.1; kill -KILL %1; wait %1; echo st=$?"),
 		(
-			"other-stage-runs-on",
-			"sleep 0.3 | sleep 30 & p=$!; sleep 0.1; kill -HUP $p; wait %1; echo st=$?",
+			"job-killed".to_owned(),
+			"sleep 30 | /bin/cat & p=$!; sleep 0.1; kill -KILL %1; wait %1; echo st=$?".to_owned(),
 		),
-		("jobs-l", "sleep 30 | sleep 30 & sleep 0.1; jobs -l; kill -KILL %1; wait %1; echo st=$?"),
-		("exit-status", "false & sleep 0.1; jobs; jobs -l"),
-		("pipeline-exit-status", "true | false & sleep 0.1; jobs; jobs -l"),
-	]))
+		(
+			"other-stage-runs-on".to_owned(),
+			format!(
+				"{STARTED}sleep 0.3 | sleep 30 & p=$!; started $p; kill -HUP $p; wait %1; echo st=$?"
+			),
+		),
+		(
+			"jobs-l".to_owned(),
+			"sleep 30 | sleep 30 & sleep 0.1; jobs -l; kill -KILL %1; wait %1; echo st=$?".to_owned(),
+		),
+		// The job runs a moment before it fails, so it is alive when the shell
+		// makes it, and the shell polls `jobs -l` until it has ended, waiting
+		// between polls with a read that times out on a process substitution,
+		// which is no job: in Bash a job whose processes all ended before the
+		// job was made, or a foreground child started after they ended, takes
+		// the `+` from it. The last listing is printed.
+		(
+			"exit-status".to_owned(),
+			"t=$(mktemp); (sleep 0.1; false) & while jobs -l > \"$t\"; IFS= read -r l < \"$t\"; [[ \
+			 $l == *Running* ]]; do read -t 0.05 -u 9 9< <(sleep 1); done; while IFS= read -r l; do \
+			 echo \"$l\"; done < \"$t\"; rm -f \"$t\""
+				.to_owned(),
+		),
+		(
+			"pipeline-exit-status".to_owned(),
+			"t=$(mktemp); sleep 0.1 | false & while jobs -l > \"$t\"; IFS= read -r l < \"$t\"; [[ $l \
+			 == *Running* ]]; do read -t 0.05 -u 9 9< <(sleep 1); done; while IFS= read -r l; do \
+			 echo \"$l\"; done < \"$t\"; rm -f \"$t\""
+				.to_owned(),
+		),
+	])
 	.await;
 }
 

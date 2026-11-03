@@ -66,21 +66,25 @@ async fn run(script: String) -> (Option<i32>, String) {
 	(result.exit_code, rx.drain().collect())
 }
 
+/// A pid where a job line prints one, with its `%5ld` padding: first on a
+/// line, or after a listing's `[N]+ `, and followed by a space.
 static PID: LazyLock<regex::Regex> =
-	LazyLock::new(|| regex::Regex::new(r"( *)\b(\d{4,})\b").expect("pid pattern"));
+	LazyLock::new(|| regex::Regex::new(r"(?m)^(\[\d+\][+ -] )?( *)(\d+) ").expect("pid pattern"));
 static PREFIX: LazyLock<regex::Regex> =
 	LazyLock::new(|| regex::Regex::new(r"(?m)^bash: line \d+: ").expect("prefix pattern"));
 
 /// Folds the differences the module comment names: `bash: line N: `, the
-/// `(core dumped) ` text, and each pid, with the padding `%5ld` gave it.
+/// `(core dumped) ` text, and each pid, of any length, with the padding
+/// `%5ld` gave it.
 fn normalize(output: &str) -> String {
 	let output = PREFIX.replace_all(output, "");
 	let output = output.replace("(core dumped) ", "");
 	PID.replace_all(&output, |caps: &regex::Captures<'_>| {
-		let spaces = caps[1].len();
-		let digits = caps[2].len();
+		let listing = caps.get(1).map_or("", |prefix| prefix.as_str());
+		let spaces = caps[2].len();
+		let digits = caps[3].len();
 		let pad = 5_usize.saturating_sub(digits).min(spaces);
-		format!("{}PID", " ".repeat(spaces - pad))
+		format!("{listing}{}PID ", " ".repeat(spaces - pad))
 	})
 	.into_owned()
 }
@@ -239,11 +243,15 @@ fn matrix(kind: &str, job: impl Fn(&str) -> (String, String)) -> Vec<(String, St
 
 /// A background external process a signal ends. A shell without job
 /// control starts a background job with SIGINT and SIGQUIT ignored, so for
-/// those two the job restores the default action and signals itself.
+/// those two the job restores the default action and signals itself, after a
+/// pause: a job that ended before the shell ran the rest of its line (the
+/// `disown` right after `&`) would make that row depend on scheduling, in
+/// Bash as here.
 fn external_job(signal: &str) -> (String, String) {
 	if matches!(signal, "INT" | "QUIT") {
-		let command =
-			format!(r#"perl -e '$SIG{{{signal}}}="DEFAULT"; kill "{signal}", $$; sleep 5'"#);
+		let command = format!(
+			r#"perl -e '$SIG{{{signal}}}="DEFAULT"; select undef, undef, undef, 0.3; kill "{signal}", $$; sleep 5'"#
+		);
 		let start = format!("{command} & p=$!; dead $p");
 		return (command, start);
 	}
@@ -251,6 +259,7 @@ fn external_job(signal: &str) -> (String, String) {
 	let start = format!("{command} & p=$!; started $p; kill -s {signal} $p; dead $p");
 	(command, start)
 }
+
 /// Each non-core-dumping signal ends a background external process: the
 /// report, when Bash prints one, comes at the next notify point, and the job
 /// is gone after. QUIT, ABRT and SEGV have environment-dependent core-dump
