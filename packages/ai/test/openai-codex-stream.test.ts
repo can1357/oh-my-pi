@@ -6501,35 +6501,39 @@ describe("openai-codex streaming", () => {
 			.value?.connection;
 		if (!connection) throw new Error("Prewarm did not create a websocket connection");
 		const connect = connection.connect.bind(connection);
-		vi.spyOn(connection, "connect").mockImplementation(signal => {
+		const connectSpy = vi.spyOn(connection, "connect").mockImplementation(signal => {
 			const joined = connect(signal);
 			handshakeJoined.resolve();
 			return joined;
 		});
-		const streamResult = streamOpenAICodexResponses(model, createCodexTestContext(), {
-			fetch: fetchMock as FetchImpl,
-			apiKey: token,
-			sessionId: "ws-join-session",
-			providerSessionState,
-		}).result();
+		try {
+			const streamResult = streamOpenAICodexResponses(model, createCodexTestContext(), {
+				fetch: fetchMock as FetchImpl,
+				apiKey: token,
+				sessionId: "ws-join-session",
+				providerSessionState,
+			}).result();
 
-		// Open only after the second caller has joined the pending handshake.
-		await Promise.race([handshakeJoined.promise, prewarmPromise]);
-		for (const socket of sockets) socket.open();
+			// Open only after the second caller has joined the pending handshake.
+			await Promise.race([handshakeJoined.promise, prewarmPromise]);
+			for (const socket of sockets) socket.open();
 
-		await prewarmPromise;
-		const result = await streamResult;
+			await prewarmPromise;
+			const result = await streamResult;
 
-		expect(constructorCount).toBe(1);
-		expect(result.stopReason).toBe("stop");
-		expect(result.errorMessage).toBeUndefined();
-		expect(result.content).toEqual([expect.objectContaining({ type: "text", text: "Joined" })]);
-		const details = getOpenAICodexTransportDetails(model, {
-			sessionId: "ws-join-session",
-			providerSessionState,
-		});
-		expect(details.websocketDisabled).toBe(false);
-		expect(fetchMock).not.toHaveBeenCalled();
+			expect(constructorCount).toBe(1);
+			expect(result.stopReason).toBe("stop");
+			expect(result.errorMessage).toBeUndefined();
+			expect(result.content).toEqual([expect.objectContaining({ type: "text", text: "Joined" })]);
+			const details = getOpenAICodexTransportDetails(model, {
+				sessionId: "ws-join-session",
+				providerSessionState,
+			});
+			expect(details.websocketDisabled).toBe(false);
+			expect(fetchMock).not.toHaveBeenCalled();
+		} finally {
+			connectSpy.mockRestore();
+		}
 	});
 
 	it("surfaces a whitespace flood arriving after a delivered tool call instead of replaying", async () => {

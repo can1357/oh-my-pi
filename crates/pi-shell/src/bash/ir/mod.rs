@@ -8,6 +8,12 @@
 //! engine. Every op is a safepoint: the VM checks the control word before it
 //! dispatches one.
 //!
+//! Runtime function definitions retain their validated source, or serialized
+//! alias-expanded syntax when source replay is not possible. Their IR is
+//! lowered on first call. This input and its original source positions survive
+//! snapshots; materialization retains the same unit id.
+//! `obash --ir` continues to lower all bodies eagerly.
+//!
 //! Every [`Op`] is 16 bytes: `code` (u8), `flags` (u8: [`Op::COND`] marks code
 //! whose failure does not trigger `set -e`), `ev` (u16: the [`EventKind`]s,
 //! as [`EventMask`] bits 0–15, the op may emit; the dispatch loop ANDs it
@@ -68,8 +74,8 @@ use serde::{Deserialize, Serialize};
 
 use self::lower::lower;
 pub(crate) use self::lower::{
-	ANON, abort_unit, ansi_c, ansi_c_with, function_from_source, lower_compound, lower_text,
-	syntax_unit,
+	ANON, abort_unit, ansi_c, ansi_c_with, function_from_source, lower_compound, lower_deferred,
+	lower_text, materialize, syntax_unit,
 };
 use crate::bash::{
 	event::{EventKind, EventMask, NodeKind, RedirKind},
@@ -77,7 +83,7 @@ use crate::bash::{
 };
 
 /// IR version; part of the frames header.
-pub const IR_VERSION: u32 = 13;
+pub const IR_VERSION: u32 = 14;
 
 /// Opcodes.
 #[derive(
@@ -213,46 +219,50 @@ impl Op {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Unit {
 	/// Content address.
-	pub id:       UnitId,
+	pub id:              UnitId,
 	/// Mode it was parsed in.
-	pub mode:     ModeId,
+	pub mode:            ModeId,
 	/// [`crate::bash::syntax::Features`] bits it was parsed with.
-	pub features: u32,
+	pub features:        u32,
 	/// Unit source bytes (node spans are relative to them).
-	pub source:   BString,
+	pub source:          BString,
 	/// Alias substitutions applied while parsing.
-	pub aliases:  Vec<(BString, BString)>,
+	pub aliases:         Vec<(BString, BString)>,
 	/// For a function body: the node id of the function definition in
 	/// `source` (function units share their defining unit's source and ids).
-	pub root:     Option<u32>,
+	pub root:            Option<u32>,
 	/// 1-based script line of the first byte of `source`.
-	pub line:     u32,
+	pub line:            u32,
+	/// Deferred function input, retained in snapshots. An empty string means
+	/// reparse `source`; otherwise this encodes `(source_offset, Command)` to
+	/// preserve alias-expanded syntax that the source alone cannot reproduce.
+	pub(crate) deferred: Option<BString>,
 	/// Code.
-	pub ops:      Vec<Op>,
+	pub ops:             Vec<Op>,
 	/// Syntax nodes by [`AstNodeId`].
-	pub nodes:    Vec<NodeInfo>,
+	pub nodes:           Vec<NodeInfo>,
 	/// Word operands.
-	pub words:    Vec<Word>,
+	pub words:           Vec<Word>,
 	/// Word lists (indexes into `words`).
-	pub lists:    Vec<Vec<u32>>,
+	pub lists:           Vec<Vec<u32>>,
 	/// Simple commands.
-	pub cmds:     Vec<Cmd>,
+	pub cmds:            Vec<Cmd>,
 	/// Variable names.
-	pub names:    Vec<BString>,
+	pub names:           Vec<BString>,
 	/// Diagnostic texts.
-	pub strs:     Vec<BString>,
+	pub strs:            Vec<BString>,
 	/// Redirection lists.
-	pub redirs:   Vec<Vec<RedirIr>>,
+	pub redirs:          Vec<Vec<RedirIr>>,
 	/// Subshells, pipelines and background jobs.
-	pub spawns:   Vec<SpawnIr>,
+	pub spawns:          Vec<SpawnIr>,
 	/// `case` arm pattern lists (indexes into `words`).
-	pub pats:     Vec<Vec<u32>>,
+	pub pats:            Vec<Vec<u32>>,
 	/// Arithmetic texts (`(( ))`, `for (( ))`).
-	pub ariths:   Vec<BString>,
+	pub ariths:          Vec<BString>,
 	/// `[[ ]]` primaries.
-	pub conds:    Vec<CondIr>,
+	pub conds:           Vec<CondIr>,
 	/// Function definitions.
-	pub funcs:    Vec<FuncIr>,
+	pub funcs:           Vec<FuncIr>,
 }
 
 impl Unit {
@@ -266,6 +276,7 @@ impl Unit {
 			aliases: Vec::new(),
 			root: None,
 			line: 1,
+			deferred: None,
 			ops: Vec::new(),
 			nodes: Vec::new(),
 			words: Vec::new(),
@@ -285,9 +296,11 @@ impl Unit {
 	/// Recompute [`Unit::id`] from the content that defines the parse (and,
 	/// for units without a syntax tree, from their code tables).
 	pub(crate) fn seal(&mut self) {
-		for w in &mut self.words {
-			w.classify();
-		}
+		self.seal_from(self.source_hasher());
+	}
+
+	/// Hash the source context shared by a command and its function bodies.
+	pub(crate) fn source_hasher(&self) -> blake3::Hasher {
 		let mut h = blake3::Hasher::new();
 		h.update(&IR_VERSION.to_le_bytes());
 		h.update(<&'static str>::from(self.mode).as_bytes());
@@ -301,6 +314,14 @@ impl Unit {
 			h.update(value);
 		}
 		h.update(&self.line.to_le_bytes());
+		h
+	}
+
+	/// Seal using the hash of this unit's source context.
+	pub(crate) fn seal_from(&mut self, mut h: blake3::Hasher) {
+		for word in &mut self.words {
+			word.classify();
+		}
 		match self.root {
 			Some(root) => {
 				h.update(b"fn");
@@ -309,6 +330,12 @@ impl Unit {
 			None => {
 				h.update(b"top");
 			},
+		}
+		if let Some(tree) = &self.deferred {
+			h.update(b"deferred");
+			h.update(tree);
+			self.id = UnitId(*h.finalize().as_bytes());
+			return;
 		}
 		// The code itself: commands read from alias text left over by the
 		// previous command share their source span (the bytes after the
@@ -325,11 +352,18 @@ impl Unit {
 			&self.pats,
 			&self.ariths,
 			&self.conds,
-			&self.funcs,
 		);
 		let bytes = postcard::to_stdvec(&code).expect("IR tables serialize");
 		h.update(&(bytes.len() as u64).to_le_bytes());
 		h.update(&bytes);
+		// A body is already content-addressed. Hash its identity rather than
+		// serializing all of its tables again in every enclosing definition.
+		h.update(&(self.funcs.len() as u64).to_le_bytes());
+		for function in &self.funcs {
+			h.update(&(function.name.len() as u64).to_le_bytes());
+			h.update(&function.name);
+			h.update(&function.body.id.0);
+		}
 		self.id = UnitId(*h.finalize().as_bytes());
 	}
 
@@ -341,6 +375,7 @@ impl Unit {
 	/// Approximate heap size, for the engine's unit cache budget.
 	pub(crate) fn weight(&self) -> usize {
 		self.source.len()
+			+ self.deferred.as_ref().map_or(0, |tree| tree.len())
 			+ self.ops.len() * size_of::<Op>()
 			+ self.nodes.len() * size_of::<NodeInfo>()
 			+ self.words.len() * 64

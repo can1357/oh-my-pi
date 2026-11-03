@@ -13,6 +13,7 @@ import { safeSend as safeSendIpc } from "../../utils/ipc";
 import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP } from "../bridge-timeout";
 import { getEnabledEvalPreludes } from "../preludes";
 import {
+	abortReasonError,
 	attachSessionOwner,
 	EvalKernelNotRunningError,
 	formatKernelRestartNotice,
@@ -254,7 +255,7 @@ export async function invokeJsTool(
 		if (pending.settled) return;
 		pending.aborted = true;
 		pending.settled = true;
-		const error = reasonToError(options.signal?.reason, "Tool invocation aborted");
+		const error = abortReasonError(options.signal?.reason, "Tool invocation aborted");
 		for (const controller of pending.toolCalls.values()) controller.abort(error);
 		reject(error);
 	};
@@ -531,7 +532,7 @@ async function runOnce(
 
 	const onAbort = (): void => {
 		const reason = options.runState.signal?.reason;
-		const abortError = reasonToError(reason, "Execution aborted");
+		const abortError = abortReasonError(reason, "Execution aborted");
 		// Stop delegated work at once — this is what kills spawned subagents —
 		// and refuse further bridge calls so the drain below stays bounded to
 		// phases that had already started.
@@ -928,12 +929,6 @@ function safeSend(session: JsSession, msg: WorkerInbound): void {
 	} catch (err) {
 		logger.debug("js worker send failed", { error: err instanceof Error ? err.message : String(err) });
 	}
-}
-
-function reasonToError(reason: unknown, fallback: string): Error {
-	if (reason instanceof Error) return reason;
-	if (typeof reason === "string") return new ToolAbortError(reason);
-	return new ToolAbortError(fallback);
 }
 
 function errorFromPayload(payload: RunErrorPayload): Error {

@@ -649,7 +649,7 @@ fn param_of(name: &[u8], var: &Var, scope: Option<usize>, plain: Option<Special>
 			}
 		},
 		VarValue::Indexed(items) => PValue::Array(dense(items).0),
-		VarValue::Assoc(items) => PValue::Hash(items.clone()),
+		VarValue::Assoc(items) => PValue::Hash(items.to_vec()),
 	};
 	let mut p = Param {
 		name: BString::from(name),
@@ -1326,7 +1326,7 @@ fn store_param(ex: &mut Expander<'_, '_>, pm: &Param) -> X<()> {
 		},
 		PValue::Hash(h) => {
 			attrs = attrs.with_base(pm.attrs.base());
-			VarValue::Assoc(h.clone())
+			VarValue::Assoc(h.clone().into())
 		},
 	};
 	if attrs.contains(Attrs::EXPORT) && !matches!(value, VarValue::Str(_)) {
@@ -2515,7 +2515,7 @@ pub fn createparam(
 		let attrs = pm.attrs.with(Attrs::INVISIBLE);
 		let value = match flags.type_bits() {
 			PmFlags::ARRAY => VarValue::Indexed(Vec::new()),
-			PmFlags::HASHED => VarValue::Assoc(Vec::new()),
+			PmFlags::HASHED => VarValue::Assoc(Default::default()),
 			_ => VarValue::Str(BString::default()),
 		};
 		state::store_var(&mut ex.k.root, ex.cx.store, ex.vp, name, Some(Var { attrs, value }), level);
@@ -2524,7 +2524,7 @@ pub fn createparam(
 	let value = match &pm.value {
 		PValue::Scalar(s) => VarValue::Str(s.clone()),
 		PValue::Array(_) => VarValue::Indexed(Vec::new()),
-		PValue::Hash(_) => VarValue::Assoc(Vec::new()),
+		PValue::Hash(_) => VarValue::Assoc(Default::default()),
 	};
 	state::store_var(
 		&mut ex.k.root,
@@ -2556,7 +2556,7 @@ pub fn createparam_at(
 	let attrs = base_flags.to_attrs(width, base);
 	let value = match base_flags.type_bits() {
 		PmFlags::ARRAY => VarValue::Indexed(Vec::new()),
-		PmFlags::HASHED => VarValue::Assoc(Vec::new()),
+		PmFlags::HASHED => VarValue::Assoc(Default::default()),
 		_ => VarValue::Str(BString::default()),
 	};
 	state::scope_set(&mut ex.k.root, ex.cx.store, ex.vp, i, name, Some(Var { attrs, value }));
