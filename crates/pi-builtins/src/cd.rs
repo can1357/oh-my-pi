@@ -290,35 +290,58 @@ async fn enter_named<SE: ShellExtensions>(
 		Ok(()) => return Ok(Entered::Changed),
 		Err(reason) => reason,
 	};
-	// A name of only `.` and `..` components is the one case the kernel still
+	// A name that starts with `.` and `..` is the one case the kernel still
 	// answers from a working directory that has been removed, because it
 	// holds that directory: `chdir(".")` stays there, and `chdir("..")`
-	// reaches its parent. A name with a component of its own is not reached,
-	// as Bash reports. Nothing else here invents a directory.
+	// reaches the directory above, removed or not, and reads the rest of the
+	// name from there. A name that starts with a component of its own is not
+	// reached, as Bash reports. Nothing else here invents a directory.
 	let current = context.shell.working_dir().to_path_buf();
-	let dots = !spelled.as_os_str().is_empty()
-		&& spelled
-			.components()
-			.all(|component| matches!(component, Component::CurDir | Component::ParentDir));
-	if !(dots
-		&& context.shell.filesystem().is_native_local(&current)
+	if !(context.shell.filesystem().is_native_local(&current)
+		&& !spelled.is_absolute()
+		&& !spelled.as_os_str().is_empty()
 		&& std::fs::metadata(&current).is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound))
 	{
 		return Err(reason);
 	}
-	// `..` leads out of it, to where the name says lexically, which is where
-	// `chdir` arrives.
-	if spelled.components().any(|component| component == Component::ParentDir) {
-		let lexical = pi_vfs::normalize_lexically(&context.shell.absolute_path(&spelled));
-		return match change_directory(context, &lexical, physical).await {
-			Ok(()) => Ok(Entered::Changed),
-			Err(_) => Err(reason),
-		};
+	let mut above = 0usize;
+	let mut rest = PathBuf::new();
+	for component in spelled.components() {
+		match component {
+			Component::CurDir if rest.as_os_str().is_empty() => {},
+			Component::ParentDir if rest.as_os_str().is_empty() => above += 1,
+			other => rest.push(other),
+		}
 	}
-	// `.` stays there, under the name spelled after it, and `getcwd` then
-	// fails, as Bash reports. The shell records that name as its working
-	// directory, so that `pwd` and `$PWD` agree and every name read against
-	// it fails, as they do in Bash.
+	// A name of its own is read from the directory the kernel holds only
+	// after a `..` has led out of it, which is the only directory any name
+	// still reaches.
+	if above == 0 && !rest.as_os_str().is_empty() {
+		return Err(reason);
+	}
+	if above > 0 {
+		// Where the kernel arrives: the working directory as it really is,
+		// which the names above it still spell, less one for each `..`. The
+		// name the shell holds may lead through a symbolic link, which the
+		// kernel does not follow back, so the part of it that is still there
+		// is resolved first, in both modes, as Bash resolves it.
+		let mut arrived = resolved_working_dir(context, &current).await;
+		for _ in 0..above {
+			arrived.pop();
+		}
+		let target = arrived.join(&rest);
+		if change_directory(context, &target, physical).await.is_ok() {
+			return Ok(Entered::Changed);
+		}
+		if !rest.as_os_str().is_empty() {
+			return Err(reason);
+		}
+	}
+	// The directory the name reaches is gone too: the shell enters it under
+	// the name spelled after the one it holds, as `chdir` enters it, and
+	// `getcwd` then fails, as Bash reports. The shell records that name as
+	// its working directory, so that `pwd` and `$PWD` agree and every name
+	// read against it fails, as they do in Bash.
 	let lost = current.join(&spelled);
 	context.shell.set_unreachable_working_dir(lost).map_err(|error| error.to_string())?;
 	let _ = writeln!(
@@ -327,6 +350,32 @@ async fn enter_named<SE: ShellExtensions>(
 		 file or directory"
 	);
 	Ok(Entered::Lost)
+}
+
+/// The working directory as the names that are still there spell it: the
+/// longest part of `current` that exists, resolved, with the rest of the name
+/// after it. This is where `chdir("..")` leads from, which no name reaches
+/// once the directory is removed.
+async fn resolved_working_dir<SE: ShellExtensions>(
+	context: &ExecutionContext<'_, SE>,
+	current: &Path,
+) -> PathBuf {
+	let mut names = Vec::new();
+	let mut above = current.to_path_buf();
+	loop {
+		if let Ok(resolved) = context.shell.filesystem().canonicalize(&above).await {
+			let mut arrived = resolved;
+			arrived.extend(names.iter().rev());
+			return arrived;
+		}
+		let Some(name) = above.file_name().map(std::ffi::OsString::from) else {
+			return current.to_path_buf();
+		};
+		names.push(name);
+		if !above.pop() {
+			return current.to_path_buf();
+		}
+	}
 }
 
 /// [`enter_directory`] for a directory that exists.

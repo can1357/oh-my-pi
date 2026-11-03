@@ -47,6 +47,10 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 
 		let pwd = cleaned_path.to_string_lossy().to_string();
 
+		// `OLDPWD` becomes what `PWD` held, which is the working directory
+		// unless the user has written something else there, as in Bash.
+		let oldpwd = self.env_str("PWD").unwrap_or_default().to_string();
+		*self.working_dir_mut() = cleaned_path;
 		self.env.update_or_add(
 			"PWD",
 			variables::ShellValueLiteral::Scalar(pwd),
@@ -54,11 +58,9 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 			EnvironmentLookup::Anywhere,
 			EnvironmentScope::Global,
 		)?;
-		let oldpwd = std::mem::replace(self.working_dir_mut(), cleaned_path);
-
 		self.env.update_or_add(
 			"OLDPWD",
-			variables::ShellValueLiteral::Scalar(oldpwd.to_string_lossy().to_string()),
+			variables::ShellValueLiteral::Scalar(oldpwd),
 			|_| Ok(()),
 			EnvironmentLookup::Anywhere,
 			EnvironmentScope::Global,
@@ -70,16 +72,19 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 	/// Records `target_dir` as the shell's working directory without looking
 	/// for it, and sets `PWD` and `OLDPWD` as a change to it does.
 	///
-	/// This is for a working directory that has been removed, which a name of
-	/// its own components (`.`) still reaches, as `chdir(".")` reaches it: no
-	/// name finds it, and the shell keeps the one the change spelled, as Bash
-	/// does.
+	/// This is for a directory no name reaches any more, which the shell
+	/// still enters as `chdir` does: a working directory that has been
+	/// removed, reached by `.`, and the removed directories above it,
+	/// reached by `..`. The shell keeps the name the change spelled, as Bash
+	/// keeps it.
 	///
 	/// # Arguments
 	///
 	/// * `target_dir` - The path to record as the working directory.
 	pub fn set_unreachable_working_dir(&mut self, target_dir: PathBuf) -> Result<(), error::Error> {
 		let pwd = target_dir.to_string_lossy().to_string();
+		let oldpwd = self.env_str("PWD").unwrap_or_default().to_string();
+		*self.working_dir_mut() = target_dir;
 		self.env.update_or_add(
 			"PWD",
 			variables::ShellValueLiteral::Scalar(pwd),
@@ -87,10 +92,9 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 			EnvironmentLookup::Anywhere,
 			EnvironmentScope::Global,
 		)?;
-		let oldpwd = std::mem::replace(self.working_dir_mut(), target_dir);
 		self.env.update_or_add(
 			"OLDPWD",
-			variables::ShellValueLiteral::Scalar(oldpwd.to_string_lossy().to_string()),
+			variables::ShellValueLiteral::Scalar(oldpwd),
 			|_| Ok(()),
 			EnvironmentLookup::Anywhere,
 			EnvironmentScope::Global,
