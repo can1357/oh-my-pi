@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed Gemini and Vertex `MALFORMED_RESPONSE` finishes showing as "Unhandled stop reason" and dropping that turn's token usage; RPC prompt errors now report them as retryable
+- Fixed Gemini `MALFORMED_RESPONSE` finishes failing with "Unhandled stop reason" and losing the turn's token usage; they now count as transient errors on every Gemini transport ([#17976](https://github.com/can1357/oh-my-pi/pull/17976) by [@breakwaterlabs](https://github.com/breakwaterlabs))
 
 ## [18.16.0] - 2026-11-02
 
