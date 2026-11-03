@@ -10,9 +10,10 @@ use capture::X11Capture;
 use image::RgbaImage;
 use input::X11Input;
 
-use super::ax::AtSpiAx;
+use super::ax::{AtSpiAx, ElementFocus};
 use crate::desktop::{
-	backend::{AxBackend, Backend, DeliveryMode, PointerEvent},
+	ax::AxHandle,
+	backend::{AxBackend, Backend, DeliveryMode, ElementDelivery, ElementInput, PointerEvent},
 	control::OperationToken,
 	error::{CoreResult, DesktopError},
 	frame::FrameGeometry,
@@ -164,7 +165,78 @@ impl Backend for X11Backend {
 		self.input.raise_window(window)
 	}
 
+	/// Background keys go to an element only when they reach it through its
+	/// window's keyboard: an AT-SPI focus request makes GTK and Chromium
+	/// present the window, which takes the user's focus.
+	fn element_input(
+		&mut self,
+		element: &AxHandle,
+		input: &ElementInput,
+		mode: DeliveryMode,
+		token: &OperationToken,
+	) -> CoreResult<ElementDelivery> {
+		let windows = self.windows()?;
+		let ax = self.ax.as_mut().ok_or_else(DesktopError::ax_unsupported)?;
+		let window = ax.window_id(element, &windows)?;
+		if mode == DeliveryMode::Background {
+			if let Some(refusal) = background_element_refusal(&window, &ax.element_focus(element)?) {
+				return Err(refusal);
+			}
+		} else {
+			ax.focus(element)?;
+		}
+		let target = Target::Window(window);
+		match input {
+			ElementInput::Text(text) => self.type_text(&target, text, mode, token)?,
+			ElementInput::Chord(keys) => self.key_chord(&target, keys, mode, token)?,
+		}
+		Ok(ElementDelivery::Delivered)
+	}
+
 	fn ax(&mut self) -> Option<&mut dyn AxBackend> {
 		self.ax.as_mut().map(|ax| ax as &mut dyn AxBackend)
+	}
+}
+
+/// Why background keys sent to `window` would miss an element reporting
+/// `focus`. GTK 3 reports `Focused` only for its window's focus widget
+/// (`gtkwidgetaccessible.c`); Chromium reports its page's focused node while
+/// the omnibox or another view holds the window's keyboard.
+fn background_element_refusal(window: &str, focus: &ElementFocus) -> Option<DesktopError> {
+	let gtk3 = focus.toolkit.eq_ignore_ascii_case("gtk") && focus.version.starts_with("3.");
+	let reason = if !gtk3 {
+		format!(
+			"keys sent to window {window} may not reach the element, since its {} toolkit does not \
+			 report which element holds the window's keyboard",
+			focus.toolkit
+		)
+	} else if !focus.focused {
+		format!("the element does not hold the keyboard focus of window {window}")
+	} else {
+		return None;
+	};
+	Some(DesktopError::background_unavailable(format!(
+		"{reason}, and focusing it would bring that window to the front; no input was sent"
+	)))
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::desktop::error::ErrorCode;
+
+	#[test]
+	fn background_element_keys_go_only_to_a_gtk3_window_focus_widget() {
+		let focus = |focused, toolkit: &str, version: &str| ElementFocus {
+			focused,
+			toolkit: toolkit.to_owned(),
+			version: version.to_owned(),
+		};
+		assert!(background_element_refusal("42", &focus(true, "gtk", "3.24.41")).is_none());
+		for refused in [focus(false, "gtk", "3.24.41"), focus(true, "Chromium", "1.0")] {
+			let error = background_element_refusal("42", &refused).expect("refused");
+			assert_eq!(error.code, ErrorCode::BackgroundUnavailable);
+			assert!(error.message.ends_with("; no input was sent"), "{}", error.message);
+		}
 	}
 }

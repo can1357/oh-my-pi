@@ -764,6 +764,54 @@ impl AxBackend for AtSpiAx {
 	}
 }
 
+/// An element's own focus state and the toolkit reporting it, which decides
+/// what that state means.
+pub struct ElementFocus {
+	pub focused: bool,
+	/// The application's `toolkit_name`, such as `gtk`, `GTK` or `Chromium`.
+	pub toolkit: String,
+	pub version: String,
+}
+
+impl AtSpiAx {
+	pub(crate) fn element_focus(&self, h: &AxHandle) -> CoreResult<ElementFocus> {
+		fn failed(error: impl std::fmt::Display) -> DesktopError {
+			DesktopError::ax_failed(format!("AT-SPI focus state: {error}"))
+		}
+		let object = Self::object(h).clone();
+		self.rt.block_on(async {
+			let connection = self.connection.connection();
+			let proxy = object
+				.as_accessible_proxy(connection)
+				.await
+				.map_err(failed)?;
+			let focused = proxy
+				.get_state()
+				.await
+				.map_err(failed)?
+				.contains(State::Focused);
+			let app = proxy.get_application().await.map_err(failed)?;
+			let name = app
+				.name()
+				.ok_or_else(|| failed("the application has no bus name"))?
+				.clone();
+			let app = atspi::proxy::application::ApplicationProxy::builder(connection)
+				.destination(name)
+				.map_err(failed)?
+				.path(app.path().clone())
+				.map_err(failed)?
+				// atk-bridge answers `Get` for these properties, not `GetAll`.
+				.cache_properties(zbus::proxy::CacheProperties::No)
+				.build()
+				.await
+				.map_err(failed)?;
+			let toolkit = app.toolkit_name().await.map_err(failed)?;
+			let version = app.version().await.map_err(failed)?;
+			Ok(ElementFocus { focused, toolkit, version })
+		})
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
