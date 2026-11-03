@@ -6206,6 +6206,413 @@ mod tests {
 		path
 	}
 
+	/// A simple command's words are expanded first, then its prefix
+	/// assignments, each in force while the later ones expand, then its
+	/// redirections, whose words do not see the assignments: as Bash 5.2.21
+	/// does, for an external command, a builtin, a function and `command`
+	/// before either, in the foreground and the background, and with no
+	/// command word at all (when the assignments are made in the shell first).
+	/// Each row's output is Bash's, each row runs in an empty directory. The
+	/// shell made the redirections first and expanded the assignments last: a
+	/// failing assignment still made the redirection's file and reported into
+	/// its standard error, an assignment's substitution read the file after the
+	/// redirection had emptied it, and its side effects came after the
+	/// redirection's. A prefix assignment to an array element is refused, as
+	/// Bash refuses it, on the shell's own standard error, without evaluating
+	/// its index; the shell made it.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn prefix_assignments_expand_before_redirections() {
+		// (row, script, what Bash prints)
+		let rows: &[(&str, &str, &str)] = &[
+			(
+				"an external command: the redirection word sees the old value",
+				"x=foo; x=bar /bin/sh -c 'printf \"x=<%s> b=<%s> args=<%s>\\n\" \"$x\" \"$b\" \"$*\"' \
+				 sh >\"$x\"; ls; cat foo",
+				"foo\nx=<bar> b=<> args=<>\n",
+			),
+			(
+				"an external command: a failing assignment makes no redirection",
+				"( x=${missing:?BOOM} /bin/sh -c 'printf \"x=<%s> b=<%s> args=<%s>\\n\" \"$x\" \"$b\" \
+				 \"$*\"' sh >newfile ) 2>/dev/null; echo \"S=$?\"; ls",
+				"S=1\n",
+			),
+			(
+				"an external command: the assignment reads the target first",
+				"printf old >f2; x=$(cat f2) /bin/sh -c 'printf \"x=<%s> b=<%s> args=<%s>\\n\" \"$x\" \
+				 \"$b\" \"$*\"' sh >f2; cat f2",
+				"x=<old> b=<> args=<>\n",
+			),
+			(
+				"an external command: an assignment's side effect comes first",
+				"n=0; x=$((n+=1)) /bin/sh -c 'printf \"x=<%s> b=<%s> args=<%s>\\n\" \"$x\" \"$b\" \
+				 \"$*\"' sh >\"f$n\"; ls",
+				"f1\n",
+			),
+			(
+				"an external command: the words come before the assignments",
+				"n=0; x=$((n+=1)) /bin/sh -c 'printf \"x=<%s> b=<%s> args=<%s>\\n\" \"$x\" \"$b\" \
+				 \"$*\"' sh \"$n\"",
+				"x=<1> b=<> args=<0>\n",
+			),
+			(
+				"an external command: a later assignment sees an earlier one",
+				"a=0; x=$a a=1 b=$a /bin/sh -c 'printf \"x=<%s> b=<%s> args=<%s>\\n\" \"$x\" \"$b\" \
+				 \"$*\"' sh",
+				"x=<0> b=<1> args=<>\n",
+			),
+			(
+				"an external command: substitutions run assignment first",
+				"x=$(echo A >>log) /bin/sh -c 'printf \"x=<%s> b=<%s> args=<%s>\\n\" \"$x\" \"$b\" \
+				 \"$*\"' sh >\"$(echo R >>log; echo out)\"; cat log",
+				"A\nR\n",
+			),
+			(
+				"an external command: a failing assignment reports on the shell's standard error",
+				"( x=${missing:?BOOM} /bin/sh -c 'printf \"x=<%s> b=<%s> args=<%s>\\n\" \"$x\" \"$b\" \
+				 \"$*\"' sh 2>err ) 2>/dev/null; echo \"S=$?\"; [ -s err ] && echo IN-ERR || echo \
+				 NOT-IN-ERR",
+				"S=1\nNOT-IN-ERR\n",
+			),
+			(
+				"an external command: a failing redirection comes after the assignment",
+				"x=$(echo A >>log) /bin/sh -c 'printf \"x=<%s> b=<%s> args=<%s>\\n\" \"$x\" \"$b\" \
+				 \"$*\"' sh 2>/dev/null >/nonexistent/dir/f; echo \"S=$?\"; cat log",
+				"S=1\nA\n",
+			),
+			(
+				"an external command: in the background",
+				"x=foo; x=bar /bin/sh -c 'printf \"x=<%s> b=<%s> args=<%s>\\n\" \"$x\" \"$b\" \"$*\"' \
+				 sh >\"$x\" & wait $!; ls; cat foo",
+				"foo\nx=<bar> b=<> args=<>\n",
+			),
+			(
+				"a builtin: the redirection word sees the old value",
+				"x=foo; x=bar printf 'x=<%s> b=<%s> args=<%s>\\n' \"$x\" \"$b\" >\"$x\"; ls; cat foo",
+				"foo\nx=<foo> b=<> args=<>\n",
+			),
+			(
+				"a builtin: a failing assignment makes no redirection",
+				"( x=${missing:?BOOM} printf 'x=<%s> b=<%s> args=<%s>\\n' \"$x\" \"$b\" >newfile ) \
+				 2>/dev/null; echo \"S=$?\"; ls",
+				"S=1\n",
+			),
+			(
+				"a builtin: the assignment reads the target first",
+				"printf old >f2; x=$(cat f2) printf 'x=<%s> b=<%s> args=<%s>\\n' \"$x\" \"$b\" >f2; \
+				 cat f2",
+				"x=<> b=<> args=<>\n",
+			),
+			(
+				"a builtin: an assignment's side effect comes first",
+				"n=0; x=$((n+=1)) printf 'x=<%s> b=<%s> args=<%s>\\n' \"$x\" \"$b\" >\"f$n\"; ls",
+				"f1\n",
+			),
+			(
+				"a builtin: the words come before the assignments",
+				"n=0; x=$((n+=1)) printf 'x=<%s> b=<%s> args=<%s>\\n' \"$x\" \"$b\" \"$n\"",
+				"x=<> b=<> args=<0>\n",
+			),
+			(
+				"a builtin: a later assignment sees an earlier one",
+				"a=0; x=$a a=1 b=$a printf 'x=<%s> b=<%s> args=<%s>\\n' \"$x\" \"$b\"",
+				"x=<> b=<> args=<>\n",
+			),
+			(
+				"a builtin: substitutions run assignment first",
+				"x=$(echo A >>log) printf 'x=<%s> b=<%s> args=<%s>\\n' \"$x\" \"$b\" >\"$(echo R \
+				 >>log; echo out)\"; cat log",
+				"A\nR\n",
+			),
+			(
+				"a builtin: a failing assignment reports on the shell's standard error",
+				"( x=${missing:?BOOM} printf 'x=<%s> b=<%s> args=<%s>\\n' \"$x\" \"$b\" 2>err ) \
+				 2>/dev/null; echo \"S=$?\"; [ -s err ] && echo IN-ERR || echo NOT-IN-ERR",
+				"S=1\nNOT-IN-ERR\n",
+			),
+			(
+				"a builtin: a failing redirection comes after the assignment",
+				"x=$(echo A >>log) printf 'x=<%s> b=<%s> args=<%s>\\n' \"$x\" \"$b\" 2>/dev/null \
+				 >/nonexistent/dir/f; echo \"S=$?\"; cat log",
+				"S=1\nA\n",
+			),
+			(
+				"a builtin: in the background",
+				"x=foo; x=bar printf 'x=<%s> b=<%s> args=<%s>\\n' \"$x\" \"$b\" >\"$x\" & wait $!; \
+				 ls; cat foo",
+				"foo\nx=<foo> b=<> args=<>\n",
+			),
+			(
+				"a function: the redirection word sees the old value",
+				"g() { printf 'x=<%s> b=<%s> args=<%s>\\n' \"$x\" \"$b\" \"$*\"; }; x=foo; x=bar g \
+				 >\"$x\"; ls; cat foo",
+				"foo\nx=<bar> b=<> args=<>\n",
+			),
+			(
+				"a function: a failing assignment makes no redirection",
+				"g() { printf 'x=<%s> b=<%s> args=<%s>\\n' \"$x\" \"$b\" \"$*\"; }; ( \
+				 x=${missing:?BOOM} g >newfile ) 2>/dev/null; echo \"S=$?\"; ls",
+				"S=1\n",
+			),
+			(
+				"a function: the assignment reads the target first",
+				"g() { printf 'x=<%s> b=<%s> args=<%s>\\n' \"$x\" \"$b\" \"$*\"; }; printf old >f2; \
+				 x=$(cat f2) g >f2; cat f2",
+				"x=<old> b=<> args=<>\n",
+			),
+			(
+				"a function: an assignment's side effect comes first",
+				"g() { printf 'x=<%s> b=<%s> args=<%s>\\n' \"$x\" \"$b\" \"$*\"; }; n=0; x=$((n+=1)) \
+				 g >\"f$n\"; ls",
+				"f1\n",
+			),
+			(
+				"a function: the words come before the assignments",
+				"g() { printf 'x=<%s> b=<%s> args=<%s>\\n' \"$x\" \"$b\" \"$*\"; }; n=0; x=$((n+=1)) \
+				 g \"$n\"",
+				"x=<1> b=<> args=<0>\n",
+			),
+			(
+				"a function: a later assignment sees an earlier one",
+				"g() { printf 'x=<%s> b=<%s> args=<%s>\\n' \"$x\" \"$b\" \"$*\"; }; a=0; x=$a a=1 \
+				 b=$a g",
+				"x=<0> b=<1> args=<>\n",
+			),
+			(
+				"a function: substitutions run assignment first",
+				"g() { printf 'x=<%s> b=<%s> args=<%s>\\n' \"$x\" \"$b\" \"$*\"; }; x=$(echo A >>log) \
+				 g >\"$(echo R >>log; echo out)\"; cat log",
+				"A\nR\n",
+			),
+			(
+				"a function: a failing assignment reports on the shell's standard error",
+				"g() { printf 'x=<%s> b=<%s> args=<%s>\\n' \"$x\" \"$b\" \"$*\"; }; ( \
+				 x=${missing:?BOOM} g 2>err ) 2>/dev/null; echo \"S=$?\"; [ -s err ] && echo IN-ERR \
+				 || echo NOT-IN-ERR",
+				"S=1\nNOT-IN-ERR\n",
+			),
+			(
+				"a function: a failing redirection comes after the assignment",
+				"g() { printf 'x=<%s> b=<%s> args=<%s>\\n' \"$x\" \"$b\" \"$*\"; }; x=$(echo A >>log) \
+				 g 2>/dev/null >/nonexistent/dir/f; echo \"S=$?\"; cat log",
+				"S=1\nA\n",
+			),
+			(
+				"a function: in the background",
+				"g() { printf 'x=<%s> b=<%s> args=<%s>\\n' \"$x\" \"$b\" \"$*\"; }; x=foo; x=bar g \
+				 >\"$x\" & wait $!; ls; cat foo",
+				"foo\nx=<bar> b=<> args=<>\n",
+			),
+			(
+				"command and an external command: the redirection word sees the old value",
+				"x=foo; x=bar command /bin/sh -c 'printf \"x=<%s> b=<%s> args=<%s>\\n\" \"$x\" \"$b\" \
+				 \"$*\"' sh >\"$x\"; ls; cat foo",
+				"foo\nx=<bar> b=<> args=<>\n",
+			),
+			(
+				"command and an external command: a failing assignment makes no redirection",
+				"( x=${missing:?BOOM} command /bin/sh -c 'printf \"x=<%s> b=<%s> args=<%s>\\n\" \
+				 \"$x\" \"$b\" \"$*\"' sh >newfile ) 2>/dev/null; echo \"S=$?\"; ls",
+				"S=1\n",
+			),
+			(
+				"command and an external command: the assignment reads the target first",
+				"printf old >f2; x=$(cat f2) command /bin/sh -c 'printf \"x=<%s> b=<%s> \
+				 args=<%s>\\n\" \"$x\" \"$b\" \"$*\"' sh >f2; cat f2",
+				"x=<old> b=<> args=<>\n",
+			),
+			(
+				"command and an external command: an assignment's side effect comes first",
+				"n=0; x=$((n+=1)) command /bin/sh -c 'printf \"x=<%s> b=<%s> args=<%s>\\n\" \"$x\" \
+				 \"$b\" \"$*\"' sh >\"f$n\"; ls",
+				"f1\n",
+			),
+			(
+				"command and an external command: the words come before the assignments",
+				"n=0; x=$((n+=1)) command /bin/sh -c 'printf \"x=<%s> b=<%s> args=<%s>\\n\" \"$x\" \
+				 \"$b\" \"$*\"' sh \"$n\"",
+				"x=<1> b=<> args=<0>\n",
+			),
+			(
+				"command and an external command: a later assignment sees an earlier one",
+				"a=0; x=$a a=1 b=$a command /bin/sh -c 'printf \"x=<%s> b=<%s> args=<%s>\\n\" \"$x\" \
+				 \"$b\" \"$*\"' sh",
+				"x=<0> b=<1> args=<>\n",
+			),
+			(
+				"command and an external command: substitutions run assignment first",
+				"x=$(echo A >>log) command /bin/sh -c 'printf \"x=<%s> b=<%s> args=<%s>\\n\" \"$x\" \
+				 \"$b\" \"$*\"' sh >\"$(echo R >>log; echo out)\"; cat log",
+				"A\nR\n",
+			),
+			(
+				"command and an external command: a failing assignment reports on the shell's \
+				 standard error",
+				"( x=${missing:?BOOM} command /bin/sh -c 'printf \"x=<%s> b=<%s> args=<%s>\\n\" \
+				 \"$x\" \"$b\" \"$*\"' sh 2>err ) 2>/dev/null; echo \"S=$?\"; [ -s err ] && echo \
+				 IN-ERR || echo NOT-IN-ERR",
+				"S=1\nNOT-IN-ERR\n",
+			),
+			(
+				"command and an external command: a failing redirection comes after the assignment",
+				"x=$(echo A >>log) command /bin/sh -c 'printf \"x=<%s> b=<%s> args=<%s>\\n\" \"$x\" \
+				 \"$b\" \"$*\"' sh 2>/dev/null >/nonexistent/dir/f; echo \"S=$?\"; cat log",
+				"S=1\nA\n",
+			),
+			(
+				"command and an external command: in the background",
+				"x=foo; x=bar command /bin/sh -c 'printf \"x=<%s> b=<%s> args=<%s>\\n\" \"$x\" \"$b\" \
+				 \"$*\"' sh >\"$x\" & wait $!; ls; cat foo",
+				"foo\nx=<bar> b=<> args=<>\n",
+			),
+			(
+				"command and a builtin: the redirection word sees the old value",
+				"x=foo; x=bar command printf 'x=<%s> b=<%s> args=<%s>\\n' \"$x\" \"$b\" >\"$x\"; ls; \
+				 cat foo",
+				"foo\nx=<foo> b=<> args=<>\n",
+			),
+			(
+				"command and a builtin: a failing assignment makes no redirection",
+				"( x=${missing:?BOOM} command printf 'x=<%s> b=<%s> args=<%s>\\n' \"$x\" \"$b\" \
+				 >newfile ) 2>/dev/null; echo \"S=$?\"; ls",
+				"S=1\n",
+			),
+			(
+				"command and a builtin: the assignment reads the target first",
+				"printf old >f2; x=$(cat f2) command printf 'x=<%s> b=<%s> args=<%s>\\n' \"$x\" \
+				 \"$b\" >f2; cat f2",
+				"x=<> b=<> args=<>\n",
+			),
+			(
+				"command and a builtin: an assignment's side effect comes first",
+				"n=0; x=$((n+=1)) command printf 'x=<%s> b=<%s> args=<%s>\\n' \"$x\" \"$b\" >\"f$n\"; \
+				 ls",
+				"f1\n",
+			),
+			(
+				"command and a builtin: the words come before the assignments",
+				"n=0; x=$((n+=1)) command printf 'x=<%s> b=<%s> args=<%s>\\n' \"$x\" \"$b\" \"$n\"",
+				"x=<> b=<> args=<0>\n",
+			),
+			(
+				"command and a builtin: a later assignment sees an earlier one",
+				"a=0; x=$a a=1 b=$a command printf 'x=<%s> b=<%s> args=<%s>\\n' \"$x\" \"$b\"",
+				"x=<> b=<> args=<>\n",
+			),
+			(
+				"command and a builtin: substitutions run assignment first",
+				"x=$(echo A >>log) command printf 'x=<%s> b=<%s> args=<%s>\\n' \"$x\" \"$b\" \
+				 >\"$(echo R >>log; echo out)\"; cat log",
+				"A\nR\n",
+			),
+			(
+				"command and a builtin: a failing assignment reports on the shell's standard error",
+				"( x=${missing:?BOOM} command printf 'x=<%s> b=<%s> args=<%s>\\n' \"$x\" \"$b\" 2>err \
+				 ) 2>/dev/null; echo \"S=$?\"; [ -s err ] && echo IN-ERR || echo NOT-IN-ERR",
+				"S=1\nNOT-IN-ERR\n",
+			),
+			(
+				"command and a builtin: a failing redirection comes after the assignment",
+				"x=$(echo A >>log) command printf 'x=<%s> b=<%s> args=<%s>\\n' \"$x\" \"$b\" \
+				 2>/dev/null >/nonexistent/dir/f; echo \"S=$?\"; cat log",
+				"S=1\nA\n",
+			),
+			(
+				"command and a builtin: in the background",
+				"x=foo; x=bar command printf 'x=<%s> b=<%s> args=<%s>\\n' \"$x\" \"$b\" >\"$x\" & \
+				 wait $!; ls; cat foo",
+				"foo\nx=<foo> b=<> args=<>\n",
+			),
+			(
+				"no command: the assignments come first",
+				"x=$(echo A >>log) >\"$(echo R >>log; echo out)\"; cat log; ls",
+				"A\nR\nlog\nout\n",
+			),
+			(
+				"no command: a failing assignment makes no redirection",
+				"( x=${missing:?BOOM} >newfile ) 2>/dev/null; echo \"S=$?\"; ls",
+				"S=1\n",
+			),
+			(
+				"no command: the redirection word sees the assignment",
+				"x=foo; x=bar >\"$x\"; ls; echo \"x=<$x>\"",
+				"bar\nx=<bar>\n",
+			),
+			(
+				"no command: a failing redirection keeps the assignment",
+				"x=1 2>/dev/null >/nonexistent/dir/f; echo \"S=$? x=<$x>\"",
+				"S=1 x=<1>\n",
+			),
+			(
+				"no command: two assignments",
+				"a=0; a=1 b=$a >\"f$a$b\"; ls; echo \"a=<$a> b=<$b>\"",
+				"f11\na=<1> b=<1>\n",
+			),
+			(
+				"the words come before a redirection written first",
+				">\"$(echo R >>log; echo out)\" /bin/echo \"$(echo W >>log)\" >/dev/null; cat log",
+				"W\nR\n",
+			),
+			(
+				"words, then assignments, then redirections",
+				"x=$(echo A >>log) /bin/echo \"$(echo W >>log)\" >\"$(echo R >>log; echo out)\"; cat \
+				 log",
+				"W\nA\nR\n",
+			),
+			(
+				"an array element is not a valid identifier, and the command runs",
+				"a[0]=x /bin/sh -c 'echo ran'; echo \"S=$? a=<${a[0]}>\"",
+				"`a[0]': not a valid identifier\nran\nS=0 a=<>\n",
+			),
+			(
+				"an array element's index is not evaluated",
+				"i=0; a[i++]=x /bin/true; echo \"S=$? i=<$i>\"",
+				"`a[i++]': not a valid identifier\nS=0 i=<0>\n",
+			),
+			(
+				"an array element beside a scalar",
+				"a[0]=x y=1 /bin/sh -c 'echo \"ran y=<$y>\"'; echo \"S=$?\"",
+				"`a[0]': not a valid identifier\nran y=<1>\nS=0\n",
+			),
+			(
+				"an array element before a function",
+				"g() { echo \"ran a=<${a[0]}>\"; }; a[0]=x g; echo \"S=$? a=<${a[0]}>\"",
+				"`a[0]': not a valid identifier\nran a=<>\nS=0 a=<>\n",
+			),
+			(
+				"an array element's message is not redirected",
+				"a[0]=x /bin/true 2>err; echo \"S=$?\"; [ -s err ] && echo IN-ERR || echo NOT-IN-ERR",
+				"`a[0]': not a valid identifier\nS=0\nNOT-IN-ERR\n",
+			),
+			(
+				"an array element with no command is assigned",
+				"a[0]=x; echo \"S=$? a=<${a[0]}>\"",
+				"S=0 a=<x>\n",
+			),
+		];
+		let mut failures = Vec::new();
+		for &(name, script, bash) in rows {
+			let dir = tempfile::tempdir().expect("scratch directory");
+			let outcome = run_command_capture_within(
+				Duration::from_secs(15),
+				script,
+				Some(dir.path()),
+				None,
+				CancelToken::default(),
+			)
+			.await;
+			match outcome {
+				Ok((result, output)) if result.exit_code == Some(0) && output == bash => {},
+				Ok((result, output)) => failures.push(format!(
+					"{name}: Bash prints {bash:?}; got status {:?}, output {output:?}",
+					result.exit_code
+				)),
+				Err(_) => failures.push(format!("{name}: did not finish within 15 s")),
+			}
+		}
+		assert!(failures.is_empty(), "{failures:#?}");
+	}
+
 	#[cfg(unix)]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn uutils_diff_reads_process_substitution_fds() {
