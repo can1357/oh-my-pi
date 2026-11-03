@@ -1790,7 +1790,7 @@ export class UsageDashboardComponent implements Component {
 		) {
 			return;
 		}
-		if (matchesSelectCancel(data) || matchesKey(data, "q")) {
+		if (matchesSelectCancel(data) || matchesKey(data, "escape") || matchesKey(data, "q")) {
 			this.#close();
 			return;
 		}
@@ -1798,12 +1798,12 @@ export class UsageDashboardComponent implements Component {
 			void this.#refresh();
 			return;
 		}
-		if (
-			matchesKey(data, "tab") ||
-			(this.#view === "overview" && (matchesKey(data, "return") || matchesKey(data, "d"))) ||
-			(this.#view === "detail" && (matchesKey(data, "return") || matchesKey(data, "o")))
-		) {
+		if (matchesKey(data, "tab")) {
 			this.#setView(this.#view === "overview" ? "detail" : "overview");
+			return;
+		}
+		if (this.#view === "overview" && (matchesKey(data, "return") || matchesKey(data, "d"))) {
+			this.#setView("detail");
 			return;
 		}
 		if (matchesSelectUp(data)) this.#scrollBy(-1);

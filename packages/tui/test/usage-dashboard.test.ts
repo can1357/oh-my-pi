@@ -585,20 +585,29 @@ describe("UsageDashboardComponent", () => {
 	});
 
 	it("closes immediately on escape or q from both overview and detail views", () => {
-		let closed = 0;
-		const component = dashboard([], [], () => {
-			closed++;
-		});
-		try {
-			component.handleInput("\t"); // enter detail
-			component.handleInput("\x1b"); // escape should close directly, not return to overview
-			expect(closed).toBe(1);
+		for (const key of ["\x1b", "q"]) {
+			let overviewClosed = 0;
+			const overviewComponent = dashboard([], [], () => {
+				overviewClosed++;
+			});
+			try {
+				overviewComponent.handleInput(key);
+				expect(overviewClosed).toBe(1);
+			} finally {
+				overviewComponent.dispose();
+			}
 
-			component.handleInput("\t"); // enter detail
-			component.handleInput("q"); // q should close directly
-			expect(closed).toBe(2);
-		} finally {
-			component.dispose();
+			let detailClosed = 0;
+			const detailComponent = dashboard([], [], () => {
+				detailClosed++;
+			});
+			try {
+				detailComponent.handleInput("\t");
+				detailComponent.handleInput(key);
+				expect(detailClosed).toBe(1);
+			} finally {
+				detailComponent.dispose();
+			}
 		}
 	});
 	it("displays tab and cancel close shortcuts in both overview and detail footer hints", () => {
