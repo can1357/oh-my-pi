@@ -25,6 +25,9 @@
 ### Fixed
 
 - Fixed `rerank()` requests leaving out the model's configured headers, including `models.yml` `headers`, so a rerank endpoint that needs its own header or `Authorization` rejected every call ([#17974](https://github.com/can1357/oh-my-pi/pull/17974) by [@breakwaterlabs](https://github.com/breakwaterlabs))
+### Fixed
+
+- The OpenAI-wire transport and provider-level retry loops (OpenAI Responses, Anthropic) no longer replay a response marked `x-should-retry: false`, so a retrying gateway's terminal 5xx is no longer multiplied by in-provider retries ([#17920](https://github.com/can1357/oh-my-pi/issues/17920))
 
 ## [18.16.0] - 2026-11-02
 
