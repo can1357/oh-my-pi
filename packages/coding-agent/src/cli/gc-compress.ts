@@ -22,7 +22,7 @@ import { dlopen, FFIType, ptr } from "bun:ffi";
 import { COMPRESS_SCRATCH_PREFIX } from "@oh-my-pi/omp-stats/parser";
 import { isEexist, isEnoent } from "@oh-my-pi/pi-utils";
 import { errnoName, isErrno, type Libc, libc, renameExchange } from "../session/libc";
-import { leaseCallUnavailable, soleOpenLeaseIntact, takeSoleOpenLease } from "../session/open-file-holders";
+import { leaseCallUnavailable, soleOpenLeaseStands, takeSoleOpenLease } from "../session/open-file-holders";
 import {
 	extendedAttributeNames,
 	type HeldFile,
@@ -297,7 +297,8 @@ async function removeScratch(scratch: Scratch): Promise<string[]> {
 		const removal = await removeHeldDirectory(scratch.dir, scratch.held);
 		if (removal === "kept") notes.push(`${scratch.dir} is not the directory this run made, so it was left as it is`);
 		if (removal === "not-empty") {
-			notes.push(`${scratch.dir} holds something this run did not make there, so it was left as it is`);
+			// What this run left there is in the notes before this one; the rest is not its.
+			notes.push(`${scratch.dir} is not empty, so it was left as it is`);
 		}
 	} catch (error) {
 		notes.push(`${scratch.dir} could not be removed, so it was left as it is: ${errorMessage(error)}`);
@@ -390,7 +391,7 @@ function metadataDifference(original: CarriedMetadata, copy: CarriedMetadata): s
  * `takeSoleOpenLease` (`open-file-holders.ts`) — which is granted only while
  * no other process holds the file open, however it came by its descriptor,
  * and is broken by any later open or truncation, which
- * {@link soleOpenLeaseIntact} sees. While it stands nothing but this run
+ * {@link soleOpenLeaseStands} sees. While it stands nothing but this run
  * reaches the file's bytes, so `proof`, what they were once the lease was
  * taken, is what they are. Its metadata is another matter: a `chmod`,
  * `chown`, `setxattr` or `utimes` by name opens nothing and leaves a lease
@@ -435,9 +436,13 @@ async function leaseFile(file: string, handle: fs.FileHandle): Promise<LeasedFil
  * saying why not.
  */
 async function unlinkLeased(file: string, aside: string, held: LeasedFile): Promise<string | undefined> {
-	if (!soleOpenLeaseIntact(held.handle.fd)) return `${file} ${OPENED} after this run proved it`;
-	const changed = await changedSince(held);
-	if (changed) return `${file} ${changed} after this run proved it`;
+	try {
+		if (!soleOpenLeaseStands(held.handle.fd)) return `${file} ${OPENED} after this run proved it`;
+		const changed = await changedSince(held);
+		if (changed) return `${file} ${changed} after this run proved it`;
+	} catch (error) {
+		return `${file} could not be checked again (${errorMessage(error)})`;
+	}
 	let removal: StillMovedRemoval;
 	try {
 		removal = await unlinkStillMoved(aside, held);
@@ -751,8 +756,8 @@ async function swapRefusal(
 	}
 	const carried = metadataDifference(original.metadata, copy.metadata);
 	if (carried) return `the compressed copy of ${file} carries ${carried}`;
-	if (!soleOpenLeaseIntact(original.handle.fd)) return `${file} ${OPENED} while it was checked`;
-	if (!soleOpenLeaseIntact(copy.handle.fd)) {
+	if (!soleOpenLeaseStands(original.handle.fd)) return `${file} ${OPENED} while it was checked`;
+	if (!soleOpenLeaseStands(copy.handle.fd)) {
 		return `the compressed copy of ${file}, ${copyPath}, ${OPENED} after this run proved it`;
 	}
 	const links = (await copy.handle.stat()).nlink;
@@ -851,8 +856,13 @@ async function settleExchange(
 		const why = await unlinkLeased(file, copyPath, original);
 		const notes = why ? [`${why}, so what ${file} held before it was compressed was left at ${copyPath}`] : [];
 		// The compressed copy counts only while the name still holds it.
-		if (!isHeld(await identityAt(file), copy)) {
-			notes.push(`another process put a file at ${file}, or removed it, as it was compressed, and it was left so`);
+		const atNameNow = await identityAt(file);
+		if (!isHeld(atNameNow, copy)) {
+			notes.push(
+				atNameNow
+					? `another process put a file at ${file} as it was compressed, and it was left there`
+					: `another process removed ${file} as it was compressed`,
+			);
 			return { swapped: false, originalFreed: why === undefined, copyAtScratch: false, notes };
 		}
 		return { swapped: true, originalFreed: why === undefined, copyAtScratch: false, notes };
@@ -880,7 +890,7 @@ const OPENED = "was opened, or an open of it was tried, by another process";
  * `setxattr` or `utimes` by name opens nothing and leaves its lease standing.
  */
 async function originalChanged(file: string, original: LeasedFile): Promise<string | undefined> {
-	if (!soleOpenLeaseIntact(original.handle.fd)) return `${file} ${OPENED} as it was compressed`;
+	if (!soleOpenLeaseStands(original.handle.fd)) return `${file} ${OPENED} as it was compressed`;
 	if ((await original.handle.stat()).nlink !== 1) return `${file} was given another name as it was compressed`;
 	const changed = await changedSince(original);
 	return changed && `${file} ${changed} as it was compressed`;
@@ -892,7 +902,7 @@ async function originalChanged(file: string, original: LeasedFile): Promise<stri
  * once it does not, they are read again.
  */
 async function copyWritten(copy: LeasedFile): Promise<string | undefined> {
-	if (soleOpenLeaseIntact(copy.handle.fd)) return undefined;
+	if (soleOpenLeaseStands(copy.handle.fd)) return undefined;
 	const now = await digestOfHandle(copy.handle);
 	if (now.hash === copy.proof.hash && now.size === copy.proof.size) return undefined;
 	return "was written to by another process";
@@ -905,22 +915,21 @@ async function copyWritten(copy: LeasedFile): Promise<string | undefined> {
  * or a change to what it carries.
  */
 async function copyReached(file: string, copy: LeasedFile): Promise<string | undefined> {
-	if (!soleOpenLeaseIntact(copy.handle.fd)) return OPENED;
+	if (!soleOpenLeaseStands(copy.handle.fd)) return OPENED;
 	const links = (await copy.handle.stat()).nlink;
 	if (links === 0) return "lost its name to another process";
 	if (links !== 1) return `was given another name besides ${file}`;
 	return await changedSince(copy);
 }
 
-/** How the metadata of `held` has changed since it was proved, as a phrase ("now has mode 644, not 600"); undefined when it has not. */
+/**
+ * How the metadata of `held` has changed since it was proved, as a phrase
+ * ("now has mode 644, not 600"); undefined when it has not. Throws when it
+ * cannot be read: a failure to look is no sign that another process changed
+ * it, and no step may be taken on it as one.
+ */
 async function changedSince(held: LeasedFile): Promise<string | undefined> {
-	let now: CarriedMetadata;
-	try {
-		now = await carriedMetadata(held.handle);
-	} catch (error) {
-		return `could not be read again (${errorMessage(error)})`;
-	}
-	const difference = metadataDifference(held.metadata, now);
+	const difference = metadataDifference(held.metadata, await carriedMetadata(held.handle));
 	return difference && `now has ${difference}`;
 }
 

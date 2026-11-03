@@ -174,6 +174,19 @@ export function soleOpenLeaseIntact(fd: number): boolean {
 	return libc().fcntl?.(fd, F_GETLEASE, 0) === F_WRLCK;
 }
 
+/**
+ * {@link soleOpenLeaseIntact}, except that a failure to ask is not taken for
+ * a broken lease: it throws, saying why. For a caller that must not read
+ * "could not look" as "another process opened it".
+ */
+export function soleOpenLeaseStands(fd: number): boolean {
+	const lib = libc();
+	if (!lib.fcntl) throw new Error("whether its lease still stands cannot be asked here (no fcntl)");
+	const state = lib.fcntl(fd, F_GETLEASE, 0);
+	if (state < 0) throw new Error(`whether its lease still stands could not be read (${errnoName(lib.errno())})`);
+	return state === F_WRLCK;
+}
+
 /** One process holding one of the files asked about. */
 export interface OpenFileHolder {
 	pid: number;

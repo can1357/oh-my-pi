@@ -1966,7 +1966,7 @@ describe("runGcCommand session compression", () => {
 
 		expect(planted).toBeDefined();
 		expect(await Bun.file(planted!).text()).toBe("ONLY COPY");
-		expect(String(failure)).toContain(`${path.dirname(planted!)} holds something this run did not make there`);
+		expect(String(failure)).toContain(`${path.dirname(planted!)} is not empty, so it was left as it is`);
 		expect(await scratchIn(root)).toEqual([path.basename(path.dirname(planted!))]);
 		expect(await fs.readdir(path.dirname(planted!))).toEqual(["somebodys-notes.txt"]);
 	});
@@ -2148,9 +2148,9 @@ describe("runGcCommand session compression", () => {
 
 			/** Run `act` with the copy's scratch path the first time gc asks whether the copy's lease stands: its last look before the copy goes in place. */
 			function onCopyLeaseCheck(act: (copy: string) => void): void {
-				const intact = openFileHolders.soleOpenLeaseIntact;
+				const intact = openFileHolders.soleOpenLeaseStands;
 				let done = false;
-				spyOn(openFileHolders, "soleOpenLeaseIntact").mockImplementation(fd => {
+				spyOn(openFileHolders, "soleOpenLeaseStands").mockImplementation(fd => {
 					const held = fsSync.readlinkSync(`/proc/self/fd/${fd}`);
 					if (!done && isScratchCopy(held)) {
 						done = true;
@@ -2809,28 +2809,110 @@ describe("runGcCommand session compression", () => {
 			}
 
 			// Round 7's review: a file renamed onto the name after gc's last look
-			// in a swap that otherwise went through was counted as compressed. It
-			// keeps the name, and the swap is not counted.
-			test("a file renamed onto the session file's name as the swap ends is not counted as compressed", async () => {
-				await metadataDitto(true);
-				const { file, candidate } = await privateZeros();
-				const unlink = fs.unlink;
-				spyOn(fs, "unlink").mockImplementation(async target => {
-					await unlink(target);
-					if (String(target).includes(".omp-gc-compress-")) {
+			// in a swap that otherwise went through was counted as compressed; round
+			// 11's, that the run then could not say whether the name was removed or
+			// replaced. Neither is counted, and the run says which.
+			for (const [what, act, said] of [
+				[
+					"a file renamed onto",
+					(file: string) => {
 						const fresh = path.join(path.dirname(file), "fresh.tmp");
 						fsSync.writeFileSync(fresh, "ONLY NEW PUBLISHED SESSION");
 						fsSync.renameSync(fresh, file);
-					}
+					},
+					(file: string) => `another process put a file at ${file} as it was compressed, and it was left there`,
+				],
+				[
+					"a removal of",
+					(file: string) => fsSync.unlinkSync(file),
+					(file: string) => `another process removed ${file} as it was compressed`,
+				],
+			] as const) {
+				test(`${what} the session file's name as the swap ends is not counted as compressed, and is said`, async () => {
+					await metadataDitto(true);
+					const { file, candidate } = await privateZeros();
+					const unlink = fs.unlink;
+					spyOn(fs, "unlink").mockImplementation(async target => {
+						await unlink(target);
+						if (String(target).includes(".omp-gc-compress-")) act(file);
+					});
+
+					const result = await gcCompress.compressFilesInPlace([candidate], "apfs", new Set());
+
+					expect(result.compressed).toBe(0);
+					expect(result.errors.join("\n")).toContain(said(file));
+				});
+			}
+
+			// Round 11's review: a failure to read the original's metadata, or its
+			// lease, after the exchange was taken for another process's reach of it,
+			// and gc gave it its name back — moving the copy, with whatever had
+			// reached it at the name since, into the scratch directory. A failure to
+			// look moves nothing: both files stay where the exchange put them.
+			for (const [what, fail] of [
+				[
+					"inode flags",
+					(isOriginal: (fd: number) => boolean) => {
+						const flags = regularFile.inodeFlags;
+						spyOn(regularFile, "inodeFlags").mockImplementation(fd => {
+							if (isOriginal(fd)) throw new Error("EIO: injected");
+							return flags(fd);
+						});
+					},
+				],
+				[
+					"lease",
+					(isOriginal: (fd: number) => boolean) => {
+						const stands = openFileHolders.soleOpenLeaseStands;
+						spyOn(openFileHolders, "soleOpenLeaseStands").mockImplementation(fd => {
+							if (isOriginal(fd)) throw new Error("EIO: injected");
+							return stands(fd);
+						});
+					},
+				],
+			] as const) {
+				test(`a failure to read the original's ${what} after the exchange moves nothing, and is said`, async () => {
+					await metadataDitto(true);
+					const { file, candidate } = await privateZeros();
+					let exchanges = 0;
+					let exchanged = false;
+					const exchange = libc.renameExchange;
+					spyOn(libc, "renameExchange").mockImplementation(async (a, b) => {
+						exchanges += 1;
+						const done = await exchange(a, b);
+						exchanged = done.outcome === "exchanged";
+						return done;
+					});
+					// After the exchange the original is at the scratch name.
+					fail(fd => exchanged && isScratchCopy(fsSync.readlinkSync(`/proc/self/fd/${fd}`)));
+
+					const result = await gcCompress.compressFilesInPlace([candidate], "apfs", new Set());
+
+					expect(exchanges).toBe(1);
+					expect(await fs.readFile(file)).toEqual(Buffer.alloc(1024 * 1024));
+					expect(result.compressed).toBe(0);
+					const said = result.errors.join("\n");
+					expect(said).toContain(`${file} could not be checked (EIO: injected) after it was exchanged`);
+					expect(said).not.toContain("another process");
+				});
+			}
+
+			// Round 11's review: a copy cleanup could not remove was reported as
+			// something this run did not make. The scratch directory's report says
+			// only that it is not empty; the note before it says what was left.
+			test("a copy cleanup cannot remove is reported as such, and the scratch directory as not empty", async () => {
+				await metadataDitto(false);
+				const { candidate } = await privateZeros();
+				spyOn(fs, "unlink").mockImplementation(async target => {
+					throw Object.assign(new Error(`EIO: injected, unlink '${String(target)}'`), { code: "EIO" });
 				});
 
 				const result = await gcCompress.compressFilesInPlace([candidate], "apfs", new Set());
 
-				expect(await Bun.file(file).text()).toBe("ONLY NEW PUBLISHED SESSION");
-				expect(result.compressed).toBe(0);
-				expect(result.errors.join("\n")).toContain(
-					`another process put a file at ${file}, or removed it, as it was compressed`,
-				);
+				const said = result.errors.join("\n");
+				expect(said).toContain("could not be removed (EIO: injected");
+				expect(said).toContain("is not empty, so it was left as it is");
+				expect(said).not.toContain("did not make");
 			});
 
 			// Round 6's review: a `link` of the session file made just before the
