@@ -128,6 +128,7 @@ import {
 	tryAcquireSessionLease,
 } from "./session-storage";
 import { type SessionTitleUpdate, serializeTitleSlot } from "./session-title-slot";
+import type { SessionWorkRun } from "./session-work";
 import {
 	additionalWorkspaceDirectories,
 	normalizeSessionWorkspace,
@@ -2594,30 +2595,51 @@ export class SessionManager {
 	/**
 	 * Collab replication tap: invoked for every appended entry with the
 	 * in-memory (pre-blob-externalization) entry, so inline images survive.
-	 * Runs as the owning session's work (see {@link runInRequestContext}).
+	 * Runs as the work of every live session over this manager (see {@link addRequestContextOwner}).
 	 */
 	onEntryAppended?: (entry: SessionEntry) => void;
 
 	/**
-	 * Enters the request context of the session that owns this manager: that
-	 * session sets it, so every host callback the manager calls — the
-	 * {@link onEntryAppended} tap, a rename, persistence failure and notice
-	 * observers, an atomic batch — runs as the session's work, whoever
-	 * triggers it, and every model request it starts waits for the session's
-	 * holds.
+	 * The live sessions over this manager, oldest first, each with how its
+	 * work enters its request context (see {@link addRequestContextOwner}).
 	 */
-	runInRequestContext: (<T>(fn: () => T) => T) | undefined;
-	/**
-	 * The session that set {@link runInRequestContext}. A second live session
-	 * over this manager does not take it over; once the owner is disposed, the
-	 * manager's callbacks run as no session's work until another claims it.
-	 */
-	requestContextOwner: { readonly isDisposed: boolean } | undefined;
+	readonly #requestContextOwners: Array<{
+		readonly owner: { readonly isDisposed: boolean };
+		readonly run: SessionWorkRun;
+	}> = [];
 
-	/** Runs `fn` as the owning session's work (see {@link runInRequestContext}). */
+	/**
+	 * Makes every host callback the manager calls — the {@link onEntryAppended}
+	 * tap, a rename, persistence failure and notice observers, an atomic batch
+	 * — run as `owner`'s work too, whoever triggers it: every model request it
+	 * starts waits for `owner`'s holds, besides those of every other live
+	 * session over this manager. A session does this when it is built; it
+	 * stops once `owner` is disposed or the returned function is called.
+	 */
+	addRequestContextOwner(owner: { readonly isDisposed: boolean }, run: SessionWorkRun): () => void {
+		const entry = { owner, run };
+		this.#requestContextOwners.push(entry);
+		return () => {
+			const index = this.#requestContextOwners.indexOf(entry);
+			if (index !== -1) this.#requestContextOwners.splice(index, 1);
+		};
+	}
+
+	/** Runs `fn` as the work of every live session over this manager (see {@link addRequestContextOwner}). */
 	#asOwnerWork<T>(fn: () => T): T {
-		const run = this.requestContextOwner?.isDisposed ? undefined : this.runInRequestContext;
-		return run ? run(fn) : fn();
+		const owners = this.#requestContextOwners;
+		let work = fn;
+		// Innermost last: the oldest session's context is the outermost.
+		for (let index = owners.length - 1; index >= 0; index--) {
+			const { owner, run } = owners[index];
+			if (owner.isDisposed) {
+				owners.splice(index, 1);
+				continue;
+			}
+			const inner = work;
+			work = () => run(inner);
+		}
+		return work();
 	}
 
 	#turnBudgetTotal: number | null = null;
