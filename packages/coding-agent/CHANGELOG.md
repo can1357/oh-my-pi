@@ -26,6 +26,10 @@
 - On macOS, starting a bash tool session no longer briefly sets pi's umask to 022, which could give files created at that moment the wrong permissions
 - In the bash tool, an executable script without a `#!` line started in the background with its input from a FIFO (`./script < fifo &`) runs as a bash script instead of failing with `Exec format error`
 
+### Fixed
+
+- Fixed Anthropic requests writing the whole cached conversation again on every turn after the date or working directory changed, in a session where an extension `context` handler adds its own message to each request (such as a status block at the end): the new date/cwd reminder moved with that message to the end of every request and took the prompt-cache breakpoint from the history; it now stays after the conversation's last turn ([#17991](https://github.com/can1357/oh-my-pi/pull/17991) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.16.0] - 2026-11-02
 
 ### Added
