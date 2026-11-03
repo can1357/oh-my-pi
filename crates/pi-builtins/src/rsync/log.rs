@@ -199,6 +199,11 @@ struct Outputs {
 	log: LogTarget,
 	/// Guards against logging recursion while writing the log file.
 	in_block: bool,
+	/// A log-file write the command's cancellation cut short (a FIFO nobody
+	/// reads). rsync 3.5.1's signal handler runs inside that write, with
+	/// `in_block` set, so `rwrite` drops its trailer and the process exits:
+	/// that message and every later one are dropped here too.
+	cut: bool,
 }
 
 struct Inner {
@@ -291,7 +296,7 @@ impl Logger {
 			tz,
 			remote,
 			deleted: Mutex::new(None),
-			outputs: Mutex::new(Outputs { out, err, log: LogTarget::Off, in_block: false }),
+			outputs: Mutex::new(Outputs { out, err, log: LogTarget::Off, in_block: false, cut: false }),
 			got_xfer_error: AtomicBool::new(false),
 			receiver_symlink_times: AtomicBool::new(cfg.receiver_symlink_times),
 			needs_newline: AtomicU8::new(0),
@@ -691,6 +696,9 @@ impl Logger {
 		// performs in the file-list layer; display filtering is the same either way.
 		let _ = is_utf8;
 		let mut outputs = lock(&inner.outputs);
+		if outputs.cut {
+			return;
+		}
 		if code == LogCode::Client {
 			code = LogCode::Info;
 		} else if !matches!(outputs.log, LogTarget::Off) {
@@ -698,8 +706,12 @@ impl Logger {
 				outputs.in_block = true;
 				let text = &buf[..buf.len().min(LOG_MSG_MAX)];
 				let info = matches!(code, LogCode::Info | LogCode::Log);
-				write_log(&mut outputs.log, text, info, &inner.tz);
+				let cut = write_log(&mut outputs.log, text, info, &inner.tz);
 				outputs.in_block = false;
+				if cut {
+					outputs.cut = true;
+					return;
+				}
 			}
 			if code == LogCode::Log {
 				return;
@@ -810,14 +822,15 @@ fn filter_into(out: &mut Vec<u8>, data: &[u8], escape_unprintable: bool, escape_
 	}
 }
 
-/// logit: one log-file line `YYYY/MM/DD hh:mm:ss [pid] message` (or a syslog record).
-fn write_log(target: &mut LogTarget, text: &[u8], info: bool, tz: &jiff::tz::TimeZone) {
+/// logit: one log-file line `YYYY/MM/DD hh:mm:ss [pid] message` (or a syslog
+/// record). Returns whether the command's cancellation cut the write short.
+fn write_log(target: &mut LogTarget, text: &[u8], info: bool, tz: &jiff::tz::TimeZone) -> bool {
 	let (body, trailing) = match text.last() {
 		Some(&last @ (b'\n' | b'\r')) => (&text[..text.len() - 1], Some(last)),
 		_ => (text, None),
 	};
 	match target {
-		LogTarget::Off => {}
+		LogTarget::Off => false,
 		LogTarget::File(file) => {
 			let mut line = format!(
 				"{} [{}] ",
@@ -827,10 +840,13 @@ fn write_log(target: &mut LogTarget, text: &[u8], info: bool, tz: &jiff::tz::Tim
 			.into_bytes();
 			filter_into(&mut line, body, false, true);
 			line.extend(trailing);
-			let _ = file.write_all(&line);
-			let _ = file.flush();
-		}
-		LogTarget::Syslog => syslog(body, info),
+			let written = file.write_all(&line).and_then(|()| file.flush());
+			written.is_err_and(|err| RsyncError::is_cancellation(&err))
+		},
+		LogTarget::Syslog => {
+			syslog(body, info);
+			false
+		},
 	}
 }
 

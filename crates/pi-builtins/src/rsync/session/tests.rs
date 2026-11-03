@@ -679,6 +679,68 @@ fn a_cancelled_client_lets_its_remote_shell_report_sigusr1() {
 	);
 }
 
+/// Cancelling a copy whose `--log-file`, `--write-batch` file or batch
+/// script is a FIFO a reader holds but empties nothing from (filled before
+/// the start) ends as rsync 3.5.1 does. Captured from rsync 3.5.1 under
+/// `LC_ALL=C`, SIGTERM 0.6 s in, three runs of each, always the same: exit
+/// 20 and exactly these lines. A trailer due while the client's log write is
+/// blocked is lost, as `rwrite` drops it, so only the server half's shows.
+/// Before, each write stayed blocked until someone read the FIFO.
+#[cfg(unix)]
+#[test]
+fn cancelling_a_write_to_a_full_fifo_ends_as_rsync_does() {
+	use std::os::unix::fs::OpenOptionsExt;
+
+	use clap::Parser as _;
+	let cases: [(&str, &str, &[&str], &str); 3] = [
+		(
+			"log file",
+			"logfifo",
+			&["-a", "--log-file=logfifo", "src/", "dst/"],
+			"rsync error: received SIGUSR1 (code 19) at main.c(1687) [Receiver=3.5.1]\n",
+		),
+		(
+			"batch file",
+			"batch",
+			&["-a", "--write-batch=batch", "src/", "dst/"],
+			"rsync error: received SIGINT, SIGTERM, or SIGHUP (code 20) at rsync.c(874) [Receiver=3.5.1]\n",
+		),
+		(
+			"batch script",
+			"b.sh",
+			&["-a", "--write-batch=b", "src/", "dst/"],
+			"rsync error: received SIGINT, SIGTERM, or SIGHUP (code 20) at rsync.c(874) [sender=3.5.1]\n\
+			 rsync error: received SIGUSR1 (code 19) at main.c(1687) [Receiver=3.5.1]\n",
+		),
+	];
+	for (case, fifo_name, args, expected) in cases {
+		let dir = tempfile::tempdir().unwrap();
+		make_tree(&dir.path().join("src"));
+		let fifo = dir.path().join(fifo_name);
+		assert!(Command::new("mkfifo").arg(&fifo).status().unwrap().success());
+		let reader = fs::OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK).open(&fifo).unwrap();
+		{
+			let mut filler = fs::OpenOptions::new().write(true).custom_flags(libc::O_NONBLOCK).open(&fifo).unwrap();
+			while std::io::Write::write(&mut filler, &[b'x'; 4096]).is_ok() {}
+		}
+		let rescue = release_fifo_after(fifo.clone(), Duration::from_secs(10));
+		let (mut host, cap) = crate::host::Host::for_test_owning("rsync", Vec::new(), dir.path());
+		let cancel = host.cancel_flag_for_test();
+		let canceller = std::thread::spawn(move || {
+			std::thread::sleep(Duration::from_millis(300));
+			cancel.store(true, Ordering::Relaxed);
+		});
+		let parsed = Rsync::try_parse_from(["rsync", "--"].into_iter().chain(args.iter().copied())).unwrap();
+		let started = Instant::now();
+		let code = crate::host::run_caught::<Rsync>(parsed, &mut host);
+		let took = started.elapsed();
+		canceller.join().unwrap();
+		drop((rescue, reader));
+		assert!(took < Duration::from_secs(5), "{case}: {took:?}");
+		assert_eq!((code, cap.err().as_str()), (RERR_SIGNAL, expected), "{case}");
+	}
+}
+
 /// A cancelled run ends with upstream's signal exit (code 20).
 #[test]
 fn cancelled_run_exits_20() {
