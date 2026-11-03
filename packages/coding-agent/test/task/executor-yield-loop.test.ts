@@ -50,7 +50,7 @@ function createMockSession(
 		promptIndex: number;
 		emit: (event: AgentSessionEvent) => void;
 		pushMessage: (message: unknown) => void;
-	}) => "dropped" | "disposed" | void | Promise<"dropped" | "disposed" | void>,
+	}) => "dropped" | void | Promise<"dropped" | void>,
 ): MockSessionHandle {
 	const listeners: Array<(event: AgentSessionEvent) => void> = [];
 	const messages: unknown[] = [];
@@ -84,9 +84,7 @@ function createMockSession(
 			promptIndex += 1;
 			prompts.push({ text, options });
 			const outcome = await onPrompt({ promptIndex, emit, pushMessage: message => messages.push(message) });
-			// Mirrors AgentSession.prompt(): a dropped prompt resolves `true` unless the caller opted into
-			// rejection, and a prompt a disposing session drops always rejects.
-			if (outcome === "disposed") throw new PromptDroppedError({ sessionDisposed: true });
+			// Mirrors AgentSession.prompt(): a dropped prompt resolves `true` unless the caller opted into rejection.
 			if (outcome === "dropped" && options?.throwOnDrop) throw new PromptDroppedError();
 			return true;
 		},
@@ -274,19 +272,6 @@ describe("runSubprocess incremental yield loops", () => {
 		expect(handle.prompts.map(({ text }) => text)).toEqual(Array(4).fill("inventory the api surface"));
 		expect(result.exitCode).toBe(1);
 		expect(result.error).toContain("initial prompt dropped before provider dispatch after 4 attempts");
-	});
-
-	it("sends no second attempt when a disposing session drops the assignment", async () => {
-		const id = "DisposedScout";
-		const handle = createMockSession(() => "disposed");
-		mockCreateAgentSession(handle.session);
-		registerRunning(id, handle.session);
-
-		const result = await drive(runSubprocess(baseOptions(id, 0)));
-
-		// A retry would be a fresh prompt into the disposing session, which still runs one.
-		expect(handle.prompts.map(({ text }) => text)).toEqual(["inventory the api surface"]);
-		expect(result.exitCode).toBe(1);
 	});
 
 	it("delivers an assignment on the fourth attempt", async () => {

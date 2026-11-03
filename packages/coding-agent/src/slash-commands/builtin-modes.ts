@@ -779,7 +779,7 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 					target.model,
 					target.thinkingLevel,
 				);
-				if (result === "rejected" || result === "disposed") return commandConsumed();
+				if (result === "rejected") return commandConsumed();
 				const sourceLabel = `${from} (${source.model.provider}/${source.model.id})`;
 				await runtime.output(
 					result === "armed"

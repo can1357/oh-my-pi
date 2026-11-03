@@ -33,11 +33,7 @@ import { editVariantForModel } from "@oh-my-pi/pi-coding-agent/utils/edit-mode";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
-import {
-	AgentSession,
-	type AgentSessionEvent,
-	PromptDroppedError,
-} from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import {
 	type ServingModel,
@@ -1672,7 +1668,7 @@ describe("AgentSession retry fallback", () => {
 		}
 	});
 
-	it("commits no missing-credential fallback once the session is disposing, and reports the drop", async () => {
+	it("commits no missing-credential fallback once the session is disposing, and drops the prompt quietly", async () => {
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
 		if (!primaryModel || !fallbackModel) throw new Error("Expected bundled missing-credential disposal models");
@@ -1718,9 +1714,9 @@ describe("AgentSession retry fallback", () => {
 		await probeStarted.promise;
 		session.beginDispose();
 		releaseProbe.resolve();
-		// Disposal refused the fallback. The primary's key was never the problem, so the
-		// caller hears that the session dropped the prompt, not "No API key found".
-		await expect(prompt).rejects.toMatchObject({ name: "PromptDroppedError", sessionDisposed: true });
+		// Disposal refused the fallback; the primary's key was never the problem, so no
+		// "No API key found" error reaches the caller.
+		await prompt;
 
 		expect(requestedModels).toEqual([]);
 		expect(fallbackApplied).toEqual([]);
@@ -1763,9 +1759,7 @@ describe("AgentSession retry fallback", () => {
 			if (event.type === "retry_fallback_applied") current.beginDispose();
 		});
 
-		await expect(current.prompt("dispose while the usage-aware fallback commits")).rejects.toBeInstanceOf(
-			PromptDroppedError,
-		);
+		await current.prompt("dispose while the usage-aware fallback commits");
 
 		expect(requestedModels).toEqual([]);
 	});
@@ -1802,9 +1796,7 @@ describe("AgentSession retry fallback", () => {
 			if (event.type === "retry_fallback_applied") current.beginDispose();
 		});
 
-		await expect(current.prompt("dispose while the missing-credential fallback commits")).rejects.toBeInstanceOf(
-			PromptDroppedError,
-		);
+		await current.prompt("dispose while the missing-credential fallback commits");
 
 		expect(requestedModels).toEqual([]);
 	});

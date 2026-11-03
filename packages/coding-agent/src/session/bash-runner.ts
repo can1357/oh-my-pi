@@ -47,20 +47,6 @@ export interface BashSessionTransition {
 	resolveNew: (destination: BashAppendDestination) => void;
 }
 
-/** What a command the disposing session will not run, or stopped, reports to its caller. */
-function disposedBashResult(): BashResult {
-	return {
-		output: "",
-		exitCode: undefined,
-		cancelled: true,
-		truncated: false,
-		totalLines: 0,
-		totalBytes: 0,
-		outputLines: 0,
-		outputBytes: 0,
-	};
-}
-
 /** Capabilities the bash runner borrows from its owning session. */
 export interface BashRunnerHost {
 	agent: Agent;
@@ -75,7 +61,6 @@ export class BashRunner {
 	readonly #host: BashRunnerHost;
 	#abortControllers = new Set<AbortController>();
 	#pendingMessages: PendingBashMessage[] = [];
-	#disposed = false;
 	#sessionTarget: BashSessionTarget;
 
 	constructor(host: BashRunnerHost) {
@@ -98,7 +83,6 @@ export class BashRunner {
 		const excludeFromContext = options?.excludeFromContext === true;
 		const cwd = this.#host.sessionManager.getCwd();
 		try {
-			if (this.#disposed) return disposedBashResult();
 			const extensionRunner = this.#host.extensionRunner();
 			if (extensionRunner?.hasHandlers("user_bash")) {
 				const hookResult = await extensionRunner.emitUserBash({
@@ -107,9 +91,6 @@ export class BashRunner {
 					excludeFromContext,
 					cwd,
 				});
-				// A hook that resumes after disposal began neither launches the command
-				// nor records what it returned.
-				if (this.#disposed) return disposedBashResult();
 				if (hookResult?.result) {
 					targetTransferred = true;
 					await this.#recordResultForTarget(target, command, hookResult.result, options);
@@ -154,8 +135,6 @@ export class BashRunner {
 			} finally {
 				this.#abortControllers.delete(abortController);
 			}
-			// beginDispose() aborted the command; its result reaches the caller only.
-			if (this.#disposed) return result;
 			targetTransferred = true;
 			await this.#recordResultForTarget(target, command, result, options);
 			return result;
@@ -166,7 +145,6 @@ export class BashRunner {
 
 	/** Records a bash result supplied outside executeBash in the current ownership scope. */
 	recordBashResult(command: string, result: BashResult, options?: { excludeFromContext?: boolean }): void {
-		if (this.#disposed) return;
 		const target = this.#captureSessionTarget();
 		const message = this.#createMessage(command, result, options);
 		if (this.#host.isStreaming() && target === this.#sessionTarget) {
@@ -191,19 +169,6 @@ export class BashRunner {
 		for (const abortController of this.#abortControllers) abortController.abort();
 	}
 
-	/**
-	 * Ends user Bash at session disposal entry: running commands are aborted, a
-	 * command or `user_bash` hook still pending launches nothing afterwards, and
-	 * no result is appended to the session from here on.
-	 */
-	beginDispose(): void {
-		this.#disposed = true;
-		this.abort();
-		const pending = this.#pendingMessages;
-		this.#pendingMessages = [];
-		for (const { target } of pending) void this.#releaseSessionTarget(target);
-	}
-
 	/** Whether a bash command is currently running. */
 	get isRunning(): boolean {
 		return this.#abortControllers.size > 0;
@@ -214,10 +179,7 @@ export class BashRunner {
 		return this.#pendingMessages.length > 0;
 	}
 
-	/**
-	 * Flushes deferred bash results without changing their captured ownership. Disposal
-	 * landing mid-flush is handled by `#appendOwnedMessage`, which then only releases.
-	 */
+	/** Flushes deferred bash results without changing their captured ownership. */
 	async flushPending(): Promise<void> {
 		if (this.#pendingMessages.length === 0) return;
 		const pending = this.#pendingMessages;
@@ -376,7 +338,6 @@ export class BashRunner {
 		try {
 			const destination = target.destination ?? (await target.pending);
 			if (!destination) throw new Error("Bash session target has no append destination");
-			if (this.#disposed) return;
 			this.#appendMessage(destination, message);
 		} finally {
 			await this.#releaseSessionTarget(target);

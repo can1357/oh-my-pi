@@ -1,5 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import { PromptDroppedError } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import {
 	RpcExtensionUserMessageTracker,
@@ -527,26 +526,6 @@ describe("reportPromptResult", () => {
 				sessionSettled: true,
 				error: { message: "No model selected.", retryable: false },
 			},
-		]);
-	});
-
-	// A disposing session rejects the prompts it drops, even for a caller that did not ask.
-	// The prompt started no run: the host owes the same `aborted` result a resolved drop gets.
-	test("reports a prompt dropped by a disposing session as aborted, not as an error", async () => {
-		const { frames, results } = createHarness();
-		const reported: Error[] = [];
-
-		reportPromptResult({
-			ticket: results.begin("req_1"),
-			prompt: Promise.reject(new PromptDroppedError({ sessionDisposed: true })),
-			results,
-			onError: error => reported.push(error),
-		});
-		await flushFrames();
-
-		expect(reported).toEqual([]);
-		expect(frames).toEqual([
-			{ type: "prompt_result", id: "req_1", agentInvoked: true, status: "aborted", sessionSettled: true },
 		]);
 	});
 });

@@ -14,7 +14,6 @@
 - Fixed an SDK session built without an agent id spinning at full speed while another agent's background job ran, starving terminal input ([#17400](https://github.com/can1357/oh-my-pi/pull/17400) by [@sjawhar](https://github.com/sjawhar))
 - Fixed the status line and OSC 7501 record naming an approval that was already answered while another dialog stayed open ([#17400](https://github.com/can1357/oh-my-pi/pull/17400) by [@sjawhar](https://github.com/sjawhar))
 - Fixed an approval on a host with no approval dialog (RPC, ACP, extension hosts) being reported as a question ([#17400](https://github.com/can1357/oh-my-pi/pull/17400) by [@sjawhar](https://github.com/sjawhar))
-- Fixed a session that is being closed still switching models (a prewalk restore among them), saving a compaction or tree summary, recording a running `!`/`$` command, firing an extension timer, running a side turn (`/btw`), or sending or queueing a prompt or extension message submitted before it closed: closing it now cancels that work, `AgentSession.prompt()` rejects with `PromptDroppedError` (`sessionDisposed: true`) for a prompt it dropped that way, messages already queued are kept in the transcript instead of being sent, a retry that was starting no longer leaves its prompt waiting forever, and a session stopped by a signal (under ACP too) keeps `session_exit` as its last entry ([#17400](https://github.com/can1357/oh-my-pi/pull/17400) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.16.0] - 2026-11-02
 

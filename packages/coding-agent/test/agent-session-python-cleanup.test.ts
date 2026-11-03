@@ -10,7 +10,7 @@ import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry
 import { createAgentSession, type ExtensionFactory, type WorkspaceTree } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { Snowflake, TempDir, withTimeout } from "@oh-my-pi/pi-utils";
+import { Snowflake, TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 const OK_EXECUTION = { status: "ok", cancelled: false, timedOut: false, stdinRequested: false } as const;
@@ -25,6 +25,7 @@ class FakeKernel {
 	blockedCode: string | undefined;
 	blockedExecution: Promise<typeof OK_EXECUTION> | undefined;
 	blockedExecutionStarted: (() => void) | undefined;
+	blockedExecutionReject: ((error: Error) => void) | undefined;
 	abortBlockedExecution = true;
 
 	isAlive(): boolean {
@@ -65,6 +66,7 @@ class FakeKernel {
 		this.shutdownCalls += 1;
 		this.alive = false;
 		this.#death.resolve();
+		this.blockedExecutionReject?.(new Error("Kernel shut down during execution"));
 		return { confirmed: true };
 	});
 }
@@ -335,47 +337,79 @@ describe("AgentSession python cleanup", () => {
 		expect(unrelatedKernel.execute).toHaveBeenCalledTimes(2);
 	});
 
-	it("aborts active SDK Python work before releasing a shared retained kernel", async () => {
+	it("waits for active SDK session Python work before releasing a shared retained kernel", async () => {
 		const { tempDir, cwd } = createTempProject();
 		tempDirs.push(tempDir);
 		const kernel = new FakeKernel();
 		const blockedExecution = Promise.withResolvers<typeof OK_EXECUTION>();
 		const blockedExecutionStarted = Promise.withResolvers<void>();
+		let blockedExecutionSettled = false;
+		blockedExecution.promise.then(
+			() => {
+				blockedExecutionSettled = true;
+			},
+			() => {
+				blockedExecutionSettled = true;
+			},
+		);
 		kernel.blockedCode = "print('first')";
 		kernel.blockedExecution = blockedExecution.promise;
 		kernel.blockedExecutionStarted = () => blockedExecutionStarted.resolve();
+		kernel.blockedExecutionReject = error => blockedExecution.reject(error);
 		vi.spyOn(pythonKernel, "checkPythonKernelAvailability").mockResolvedValue({ ok: true });
 		const startSpy = vi
 			.spyOn(pythonKernel.PythonKernel, "start")
 			.mockResolvedValue(kernel as unknown as PythonKernelInstance);
 		const firstSession = await createSession(tempDir, cwd);
 		const secondSession = await createSession(tempDir, cwd);
+		expect(startSpy).toHaveBeenCalledTimes(0);
 		let firstDisposed = false;
 
 		try {
-			// Keep a second owner on the retained kernel: disposing the first session
-			// must abort its work, without discarding the other session's kernel.
-			await secondSession.executePython("print('owner-b warmup')");
 			const firstExecution = firstSession.executePython("print('first')");
+			let firstExecutionSettled = false;
+			const observedFirstExecution = firstExecution.finally(() => {
+				firstExecutionSettled = true;
+			});
 			await blockedExecutionStarted.promise;
 
-			firstSession.beginDispose();
-			await expect(
-				withTimeout(firstExecution, 10_000, "beginDispose did not abort the first session's Python"),
-			).resolves.toMatchObject({ cancelled: true, stdinRequested: false });
-			expect(kernel.shutdownCalls).toBe(0);
-			await firstSession.dispose();
-			firstDisposed = true;
-			expect(kernel.shutdownCalls).toBe(0);
-			expect(startSpy).toHaveBeenCalledTimes(1);
+			const disposeFirst = firstSession.dispose().then(() => {
+				expect(blockedExecutionSettled).toBe(true);
+				expect(firstExecutionSettled).toBe(true);
+				firstDisposed = true;
+			});
+			await Bun.sleep(0);
+			expect(firstDisposed).toBe(false);
+			expect(blockedExecutionSettled).toBe(false);
+			expect(firstExecutionSettled).toBe(false);
 
-			await secondSession.executePython("print('second')");
+			const secondExecution = secondSession.executePython("print('second')");
+			await Bun.sleep(0);
+
+			expect(firstDisposed).toBe(false);
+			expect(blockedExecutionSettled).toBe(false);
+			expect(firstExecutionSettled).toBe(false);
+			expect(kernel.shutdownCalls).toBe(0);
+
+			blockedExecution.resolve(OK_EXECUTION);
+			await Promise.all([observedFirstExecution, secondExecution, disposeFirst]);
+
 			expect(startSpy).toHaveBeenCalledTimes(1);
-			expect(kernel.executeCalls).toEqual(["print('owner-b warmup')", "print('first')", "print('second')"]);
+			expect(kernel.shutdownCalls).toBe(0);
+			expect(kernel.executeCalls).toEqual(["print('first')", "print('second')"]);
+
+			await secondSession.executePython("print('third')");
+
+			expect(startSpy).toHaveBeenCalledTimes(1);
+			expect(kernel.executeCalls).toEqual(["print('first')", "print('second')", "print('third')"]);
 		} finally {
-			if (!firstDisposed) await firstSession.dispose();
+			if (!firstDisposed) {
+				await firstSession.dispose();
+			}
 			await secondSession.dispose();
 		}
+
+		expect(kernel.shutdownCalls).toBe(1);
 	});
 	it("aborts tracked eval execution during session dispose after warmup completes", async () => {
 		const { tempDir, cwd } = createTempProject();
@@ -711,19 +745,16 @@ describe("AgentSession python cleanup", () => {
 
 		const session = await createSession(tempDir, cwd);
 
-		// Both direct user executions are aborted at beginDispose, rather than
-		// waiting for the former three-second retained-kernel grace period.
+		// Two concurrent blocked executions on the shared kernel session: both must
+		// be tracked when dispose runs so abortEval cancels every signal.
 		const firstExecution = session.executePython("print('blocked')");
 		const secondExecution = session.executePython("print('blocked')");
 		await bothStarted.promise;
+		const sleepSpy = mockPositiveSleepsImmediate();
 
-		session.beginDispose();
-		const [firstResult, secondResult] = await withTimeout(
-			Promise.all([firstExecution, secondExecution]),
-			10_000,
-			"beginDispose did not abort every running Python execution",
-		);
 		await session.dispose();
+		expectSleepNear(sleepSpy, 3000);
+		const [firstResult, secondResult] = await Promise.all([firstExecution, secondExecution]);
 
 		expect(firstResult.cancelled).toBe(true);
 		expect(secondResult.cancelled).toBe(true);

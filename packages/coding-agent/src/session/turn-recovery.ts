@@ -800,14 +800,13 @@ export class TurnRecovery {
 	}
 
 	/**
-	 * Restores the configured primary after fallback cooldown expiry. Nothing is
-	 * restored once `signal` aborts or the host is disposed.
+	 * Restores the configured primary after fallback cooldown expiry.
 	 * @returns true when the active model was actually switched back to the
 	 * primary, so callers can re-run the pre-send context-fit check against the
 	 * reverted (possibly smaller) window before issuing the next request.
 	 */
-	maybeRestoreRetryFallbackPrimary(signal?: AbortSignal): Promise<boolean> {
-		return this.#maybeRestoreRetryFallbackPrimary(signal);
+	maybeRestoreRetryFallbackPrimary(): Promise<boolean> {
+		return this.#maybeRestoreRetryFallbackPrimary();
 	}
 
 	/** Applies model fallback policy from live usage health before a turn starts. */
@@ -2089,8 +2088,6 @@ export class TurnRecovery {
 	 */
 	async applyMissingCredentialFallback(signal: AbortSignal): Promise<boolean> {
 		if (!cfgRetryModelFallback.get(this.#host.settings) || this.#host.modelFallbackDisabled?.()) return false;
-		// It would end in applyRetryFallbackCandidate's refusal; probe nothing on the way there.
-		if (signal.aborted || this.#host.isDisposed()) return false;
 		const currentModel = this.#host.model();
 		if (!currentModel) return false;
 		const currentSelector = formatRetryFallbackSelector(currentModel, this.#host.thinkingLevel());
@@ -2306,9 +2303,7 @@ export class TurnRecovery {
 		if (options?.signal?.aborted || this.#host.isDisposed()) {
 			this.#fallbackRoutedFor = routedBeforeSwap;
 			if (this.#activeRetryFallback) this.#activeRetryFallback.served = servedBeforeSwap;
-			// An abort undoes the swap. Disposal does not: switching back would be one
-			// more model switch on a session that is going away.
-			if (!this.#host.isDisposed() && previousModel && this.#host.model() === candidate) {
+			if (previousModel && this.#host.model() === candidate) {
 				await this.#host.setModelWithProviderSessionReset(previousModel);
 			}
 			return false;
@@ -2334,8 +2329,6 @@ export class TurnRecovery {
 			this.#activeRetryFallback.pinned = this.#activeRetryFallback.pinned || options?.pinFallback === true;
 		}
 		await this.#host.syncAfterModelChange(previousEditMode, { retryFallback: true });
-		// The swap and its entry landed before disposal began; announcing them now would not.
-		if (this.#host.isDisposed()) return false;
 		await this.#host.emitSessionEvent({
 			type: "retry_fallback_applied",
 			from: currentSelector,
@@ -2602,19 +2595,16 @@ export class TurnRecovery {
 		const baseModel = this.#host.modelRegistry.find("fireworks", toFireworksBaseModelId(model.id));
 		if (!baseModel) return false;
 		const apiKey = await this.#host.modelRegistry.getApiKey(baseModel, this.#host.sessionId());
-		if (!apiKey || this.#host.isDisposed()) return false;
+		if (!apiKey) return false;
 		const baseSelector = formatModelStringWithRouting(baseModel);
 		const previousEditMode = this.#host.resolveActiveEditMode();
 		// A capability degrade is fallback routing too, even though it arms no
 		// chain: the base model must not be reported as the configured primary.
 		this.#markFallbackRouted();
 		await this.#host.setModelWithProviderSessionReset(baseModel);
-		// As in applyRetryFallbackCandidate: after disposal, no entry and no event.
-		if (this.#host.isDisposed()) return false;
 		this.#host.sessionManager.appendModelChange(baseSelector, EPHEMERAL_MODEL_CHANGE_ROLE, true);
 		this.#host.settings.getStorage()?.recordModelUsage(baseSelector);
 		await this.#host.syncAfterModelChange(previousEditMode, { retryFallback: true });
-		if (this.#host.isDisposed()) return false;
 		await this.#host.emitSessionEvent({
 			type: "retry_fallback_applied",
 			from: currentSelector,
@@ -2625,8 +2615,7 @@ export class TurnRecovery {
 		return true;
 	}
 
-	async #maybeRestoreRetryFallbackPrimary(signal?: AbortSignal): Promise<boolean> {
-		if (signal?.aborted || this.#host.isDisposed()) return false;
+	async #maybeRestoreRetryFallbackPrimary(): Promise<boolean> {
 		if (!this.#activeRetryFallback) return false;
 		if (this.#activeRetryFallback.pinned) return false;
 		if (this.#getRetryFallbackRevertPolicy() !== "cooldown-expiry") return false;
@@ -2667,8 +2656,7 @@ export class TurnRecovery {
 			resolvedPrimary.model ?? this.#host.modelRegistry.find(originalSelector.provider, originalSelector.id);
 		if (!primaryModel) return false;
 		const apiKey = await this.#host.modelRegistry.getApiKey(primaryModel, this.#host.sessionId());
-		// A disposing session switches no model, and a cancelled caller wants none.
-		if (signal?.aborted || this.#host.isDisposed() || !apiKey) return false;
+		if (!apiKey) return false;
 
 		const currentThinkingLevel = this.#host.configuredThinkingLevel();
 		const thinkingToApply =
@@ -2681,8 +2669,6 @@ export class TurnRecovery {
 		// as fallback-served.
 		this.clearActiveRetryFallback();
 		await this.#host.setModelWithProviderSessionReset(primaryModel);
-		// Disposal began during the swap's own awaits: record nothing more on a session going away.
-		if (this.#host.isDisposed()) return false;
 		this.#host.sessionManager.appendModelChange(primarySelector, EPHEMERAL_MODEL_CHANGE_ROLE);
 		this.#host.settings.getStorage()?.recordModelUsage(primarySelector);
 		this.#host.setThinkingLevel(thinkingToApply);
@@ -3189,7 +3175,7 @@ export class TurnRecovery {
 			errorMessage,
 			errorId: message.errorId,
 		});
-		if (this.#host.abortInProgress() || this.#host.isDisposed() || this.#host.promptGeneration() !== generation) {
+		if (this.#host.abortInProgress() || this.#host.promptGeneration() !== generation) {
 			return this.#endCancelledRetry();
 		}
 

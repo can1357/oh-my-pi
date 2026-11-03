@@ -19,9 +19,8 @@ interface SentMessage {
 
 /**
  * How the fake session answers `prompt`. `dropped` mirrors AgentSession: a
- * prompt dropped before dispatch (abort, usage preflight denial) resolves
- * `true` unless `throwOnDrop` asks for a {@link PromptDroppedError}. A drop
- * that disposal causes always rejects; steering passes `throwOnDrop` anyway.
+ * prompt dropped before dispatch (abort, disposal, usage preflight denial)
+ * resolves `true` unless `throwOnDrop` asks for a {@link PromptDroppedError}.
  */
 type Delivery = "queued" | "turn-started" | "dropped";
 

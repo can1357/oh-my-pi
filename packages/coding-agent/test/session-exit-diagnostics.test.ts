@@ -3,7 +3,6 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
-import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -140,68 +139,6 @@ describe("session exit diagnostics", () => {
 				},
 			],
 		});
-	});
-
-	it("writes the exit marker after the entries of a turn that disposal aborts", async () => {
-		tempDir = TempDir.createSync("@pi-session-exit-last-");
-		authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
-		authStorage.keys.setRuntime("anthropic", "test-key");
-		const modelRegistry = new ModelRegistry(authStorage);
-		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
-		if (!model) throw new Error("Expected built-in anthropic model to exist");
-		const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
-		// The second response is held until an abort ends it, as a slow provider holds a turn.
-		const mock = createMockModel({
-			responses: [{ content: ["the first answer"] }, { content: ["never delivered"], delayMs: 600_000 }],
-		});
-		let requests = 0;
-		const secondRequest = Promise.withResolvers<void>();
-		const agent = new Agent({
-			getApiKey: () => "test-key",
-			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
-			convertToLlm,
-			streamFn: (requestModel, context, options) => {
-				if (++requests === 2) secondRequest.resolve();
-				return mock.stream(requestModel, context, options);
-			},
-		});
-		session = new AgentSession({
-			agent,
-			sessionManager,
-			settings: Settings.isolated({ "compaction.enabled": false }),
-			modelRegistry,
-		});
-		await session.prompt("answer once");
-		const held = session.prompt("this answer is still streaming at exit").catch(() => undefined);
-		await secondRequest.promise;
-
-		// A normal exit (Ctrl+D) while the provider still holds the response.
-		await session.dispose();
-		session = undefined;
-		await held;
-
-		const sessionFile = sessionManager.getSessionFile();
-		if (!sessionFile) throw new Error("Expected a persisted session file");
-		const reopened = await SessionManager.open(sessionFile, tempDir.path());
-		const entries = reopened.getEntries();
-		await reopened.close();
-		const exitIndex = entries.findIndex(
-			entry => entry.type === "custom" && entry.customType === SESSION_EXIT_CUSTOM_TYPE,
-		);
-		expect(exitIndex).toBeGreaterThanOrEqual(0);
-		// A reader may take "the last entry is session_exit" as a clean exit: nothing follows it.
-		expect(entries.slice(exitIndex + 1).map(entry => entry.type)).toEqual([]);
-		// The aborted turn is on disk, ahead of the marker.
-		expect(
-			entries
-				.slice(0, exitIndex)
-				.some(
-					entry =>
-						entry.type === "message" &&
-						entry.message.role === "assistant" &&
-						entry.message.stopReason === "aborted",
-				),
-		).toBe(true);
 	});
 
 	it("signal teardown persists the postmortem reason, not the generic dispose", async () => {

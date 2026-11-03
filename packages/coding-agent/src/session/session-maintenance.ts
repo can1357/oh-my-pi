@@ -3027,8 +3027,6 @@ export class SessionMaintenance {
 	): Promise<CompactionCheckResult> {
 		// Skip if message was aborted (user cancelled) - unless skipAbortedCheck is false
 		if (skipAbortedCheck && assistantMessage.stopReason === "aborted") return COMPACTION_CHECK_NONE;
-		// A disposing session starts no compaction of its own (see AgentSession.beginDispose).
-		if (this.#host.isDisposed()) return COMPACTION_CHECK_NONE;
 		const contextWindow = this.#model?.contextWindow ?? 0;
 		const generation = this.#host.promptGeneration();
 		// A delivered turn means the incomplete-recovery loop broke through: clear
@@ -5110,7 +5108,6 @@ export class SessionMaintenance {
 			excludeMediaMethods?: boolean;
 		} = {},
 	): Promise<CompactionCheckResult> {
-		if (this.#host.isDisposed()) return COMPACTION_CHECK_NONE;
 		const compactionSettings = this.#compactionSettings;
 		// An explicit model-requested rollover bypasses the Auto-Compact toggle;
 		// automatic threshold rollover stays gated exactly as before.

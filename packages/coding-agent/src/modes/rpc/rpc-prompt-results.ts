@@ -13,7 +13,7 @@ import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { stripRawHttpRequestDiagnostics } from "@oh-my-pi/pi-ai/utils/http-inspector";
 import { toError } from "@oh-my-pi/pi-utils";
-import { type AgentSessionEvent, PromptDroppedError } from "../../session/agent-session";
+import type { AgentSessionEvent } from "../../session/agent-session";
 import type { CostCapRefusal } from "../../session/cost-gate";
 import { isSessionSettled, type SessionSettleState } from "../../session/session-settle";
 import type { RpcScheduledTurnProbe } from "./rpc-session-settle";
@@ -303,9 +303,6 @@ export class RpcExtensionUserMessageTracker {
  * Route a started prompt's resolution into its `prompt_result`: `false` without
  * extension-scheduled agent work completes locally, agent work settles through
  * the run, and a rejection is reported via `onError` and as a failed result.
- * A {@link PromptDroppedError} is no failure: the prompt started no run, and it
- * settles as `aborted`, as a drop that resolves does (a disposing session
- * rejects every prompt it drops).
  */
 export function reportPromptResult(input: {
 	ticket: RpcPromptTicket;
@@ -322,10 +319,6 @@ export function reportPromptResult(input: {
 			else input.results.completeLocal(input.ticket);
 		})
 		.catch(cause => {
-			if (cause instanceof PromptDroppedError) {
-				input.results.settle(input.ticket);
-				return;
-			}
 			const error = toError(cause);
 			input.onError(error);
 			input.results.fail(input.ticket, error.message);

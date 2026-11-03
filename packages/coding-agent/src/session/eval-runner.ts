@@ -33,8 +33,6 @@ export class EvalRunner {
 	readonly #host: EvalRunnerHost;
 	readonly #kernelOwnerId: string;
 	#abortControllers = new Set<AbortController>();
-	/** The user's own executions (`$` shortcuts, RPC); tool-owned eval stays with the agent turn that runs it. */
-	#userAbortControllers = new Set<AbortController>();
 	#pendingMessages: PythonExecutionMessage[] = [];
 	#activeExecutions = new Set<Promise<unknown>>();
 	#disposing = false;
@@ -54,7 +52,6 @@ export class EvalRunner {
 		const cwd = this.#host.sessionManager.getCwd();
 		this.assertExecutionAllowed();
 		const abortController = new AbortController();
-		this.#userAbortControllers.add(abortController);
 		const execution = (async (): Promise<PythonResult> => {
 			const extensionRunner = this.#host.extensionRunner();
 			if (extensionRunner?.hasHandlers("user_python")) {
@@ -83,11 +80,7 @@ export class EvalRunner {
 			this.recordPythonResult(code, result, options);
 			return result;
 		})();
-		try {
-			return await this.trackExecution(execution, abortController);
-		} finally {
-			this.#userAbortControllers.delete(abortController);
-		}
+		return await this.trackExecution(execution, abortController);
 	}
 
 	/** Rejects new eval work once session disposal begins. */
@@ -112,9 +105,8 @@ export class EvalRunner {
 		return execution;
 	}
 
-	/** Records a Python execution result in session history; a disposing session records none. */
+	/** Records a Python execution result in session history. */
 	recordPythonResult(code: string, result: PythonResult, options?: { excludeFromContext?: boolean }): void {
-		if (this.#disposing) return;
 		const meta = outputMeta().truncationFromSummary(result, { direction: "tail" }).get();
 		const message: PythonExecutionMessage = {
 			role: "pythonExecution",
@@ -169,16 +161,9 @@ export class EvalRunner {
 		this.#pendingMessages = [];
 	}
 
-	/**
-	 * Ends user Python at session disposal entry: new executions are rejected,
-	 * the user's running ones are aborted, results already waiting for the
-	 * turn's persistence boundary are dropped, and none is recorded from here
-	 * on. Eval a running agent turn owns is aborted with that turn by `dispose()`.
-	 */
+	/** Prevents new Python executions before asynchronous disposal starts. */
 	beginDispose(): void {
 		this.#disposing = true;
-		this.#pendingMessages = [];
-		for (const abortController of this.#userAbortControllers) abortController.abort();
 	}
 
 	/** Waits for active work and disposes every retained eval kernel owned by the session. */

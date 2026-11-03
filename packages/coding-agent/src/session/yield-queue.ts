@@ -199,26 +199,6 @@ export class YieldQueue {
 		return thunks;
 	}
 
-	/**
-	 * Remove every queued entry, of every kind, and build each kind's message now, for a
-	 * caller that records them instead of delivering them (a disposing session writes them to
-	 * its transcript). Stale entries are dropped as a drain drops them. Each message carries the
-	 * usual commit/discard hooks: the caller commits it once written, which settles the receipts.
-	 */
-	takeAll(): AgentMessage[] {
-		const messages: AgentMessage[] = [];
-		for (const [kind, dispatcher] of this.#dispatchers) {
-			const entries = this.#drain(kind);
-			if (entries.length === 0) continue;
-			const built = this.#build(kind, dispatcher, entries);
-			if (!built) continue;
-			this.#attachEntrySettlement(built);
-			messages.push(built.message);
-		}
-		this.#idleFlushPending = false;
-		return messages;
-	}
-
 	/** Drop queued entries. With `kind`, drop only that kind's entries (leaving
 	 *  any pending idle-flush for other kinds intact); otherwise drop everything. */
 	clear(kind?: string): void {
