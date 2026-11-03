@@ -363,6 +363,118 @@ async fn declare_f_here_document_reads_back() {
 	);
 }
 
+/// G27, G28, G29, G30: a word that holds a newline (a here-document in a
+/// command substitution, a quoted string, a here-string) and a nested process
+/// substitution keep their text inside a compound command when a process
+/// substitution is read again with aliases.
+#[tokio::test]
+async fn process_substitution_words_with_newlines_survive_reading_again() {
+	assert_eq!(
+		run(
+			"shopt -s expand_aliases\nalias say='echo said'\ncat <(if true; then\necho $(cat \
+			 <<EOF\nif-subst\nEOF\n)\nsay\nfi)"
+		)
+		.await,
+		"if-subst\nsaid\n"
+	);
+	let unused = "shopt -s expand_aliases\nalias unused=:\n";
+	assert_eq!(run(&format!("{unused}cat <(if true; then echo \"a\nb\"; fi\n)")).await, "a\nb\n");
+	assert_eq!(run(&format!("{unused}cat <(if true; then cat <<<\"a\nb\"; fi\n)")).await, "a\nb\n");
+	assert_eq!(run(&format!("{unused}cat <(cat <(cat <<EOF\ninner\nEOF\n))")).await, "inner\n");
+	assert_eq!(
+		run(&format!("{unused}cat <(if true; then cat <(cat <<EOF\ndeep\nEOF\n); fi\n)")).await,
+		"deep\n"
+	);
+	assert_eq!(run(&format!("{unused}cat <(echo $(cat <<EOF\nsub\nEOF\n))")).await, "sub\n");
+}
+
+/// G31, G32, G33, G34: a here-document in the condition of `if`, `elif`,
+/// `while` and `until` ends at its delimiter when a process substitution is
+/// read again with aliases.
+#[tokio::test]
+async fn process_substitution_condition_here_documents_survive_reading_again() {
+	let unused = "shopt -s expand_aliases\nalias unused=:\n";
+	assert_eq!(
+		run(&format!("{unused}cat <(if cat <<EOF\nbody\nEOF\nthen echo yes; fi\n)")).await,
+		"body\nyes\n"
+	);
+	assert_eq!(
+		run(&format!(
+			"{unused}cat <(if false; then :; elif cat <<EOF\nbody\nEOF\nthen echo yes; fi\n)"
+		))
+		.await,
+		"body\nyes\n"
+	);
+	assert_eq!(
+		run(&format!("{unused}cat <(while cat <<EOF\nbody\nEOF\ndo break; done\n)")).await,
+		"body\n"
+	);
+	assert_eq!(
+		run(&format!("{unused}cat <(until cat <<EOF\nbody\nEOF\ndo break; done\n)")).await,
+		"body\n"
+	);
+}
+
+/// G35, G36, G37: `declare -f` writes words that hold newlines as they are,
+/// and a here-document in a condition before `then`, so the printed function
+/// reads back.
+#[tokio::test]
+async fn declare_f_words_and_conditions_read_back() {
+	assert_eq!(
+		run(
+			"f() {\nif true; then\necho $(cat <<EOF\nin-subst\nEOF\n)\nfi\n}\neval \"$(declare -f \
+			 f)\"\nf"
+		)
+		.await,
+		"in-subst\n"
+	);
+	assert_eq!(
+		run("f() {\nif true; then\necho \"x\ny\"\nfi\n}\neval \"$(declare -f f)\"\nf").await,
+		"x\ny\n"
+	);
+	assert_eq!(
+		run("f() { if cat <<EOF\nbody\nEOF\nthen echo yes; fi; }\neval \"$(declare -f f)\"; f").await,
+		"body\nyes\n"
+	);
+}
+
+/// G38, G39: an alias in a process substitution can begin a here-document
+/// whose body is on the lines after it.
+#[tokio::test]
+async fn process_substitution_alias_begins_a_here_document() {
+	assert_eq!(
+		run("shopt -s expand_aliases\nalias q='cat <<EOF'\ncat <(q\nBODY\nEOF\n)").await,
+		"BODY\n"
+	);
+	assert_eq!(
+		run("shopt -s expand_aliases\ncat <(alias q='cat <<EOF'\nq\nBODY\nEOF\n)").await,
+		"BODY\n"
+	);
+}
+
+/// G40, G41, G42: a here-document whose redirection comes from an alias's
+/// value takes its body from the input; the rest of the value is read after
+/// it.
+#[tokio::test]
+async fn here_document_body_comes_from_the_input() {
+	assert_eq!(
+		with_aliases("q=$'cat <<EOF\\necho AFTER'", "q\nbody\nEOF\necho DONE").await,
+		"body\nAFTER\nDONE\n"
+	);
+	// The rest of the value, `from-alias`, then runs and is not found.
+	assert_eq!(
+		without_error_reports(
+			&with_aliases("q=$'cat <<EOF\\nfrom-alias'", "q\nfrom-input\nEOF\necho next").await
+		),
+		"from-input\nnext\n"
+	);
+	assert_eq!(
+		with_aliases("q=$'cat <<EOF\\necho AFTER'", "if true; then\nq\nbody\nEOF\nfi\necho DONE")
+			.await,
+		"body\nAFTER\nDONE\n"
+	);
+}
+
 // --- BASH_ALIASES assignment ---
 
 /// G15, G16, G17: a list without subscripts alternates names and values; a
@@ -463,5 +575,36 @@ async fn alias_p_lists_then_defines() {
 	assert_eq!(
 		run("alias a=1; alias -p x=new; echo \"st=$?\"; alias").await,
 		"alias a='1'\nst=0\nalias a='1'\nalias x='new'\n"
+	);
+}
+
+/// G43 to G50: `+=` to `BASH_ALIASES` appends where Bash appends: an element
+/// (`[q]+=`), and a scalar through `declare`; a list, and a scalar assignment,
+/// replace.
+#[tokio::test]
+async fn bash_aliases_append_as_bash_does() {
+	assert_eq!(run("alias q=old; BASH_ALIASES+=([q]=new); alias q").await, "alias q='new'\n");
+	assert_eq!(run("alias q=old; BASH_ALIASES[q]+=new; alias q").await, "alias q='oldnew'\n");
+	assert_eq!(run("alias 0=old; BASH_ALIASES+=new; alias 0").await, "alias 0='new'\n");
+	assert_eq!(run("alias q=old; BASH_ALIASES+=(q new); alias q").await, "alias q='new'\n");
+	assert_eq!(
+		run("alias q=old; declare BASH_ALIASES[q]+=new; alias q").await,
+		"alias q='oldnew'\n"
+	);
+	assert_eq!(run("alias 0=old; declare BASH_ALIASES+=new; alias 0").await, "alias 0='oldnew'\n");
+	assert_eq!(
+		run("alias q=old; declare BASH_ALIASES+=([q]=new); alias q").await,
+		"alias q='new'\n"
+	);
+	assert_eq!(run("BASH_ALIASES[q]+=new; alias q").await, "alias q='new'\n");
+}
+
+/// G51: an assignment to `BASH_ALIASES` before a command is the command's own
+/// variable, and defines no alias.
+#[tokio::test]
+async fn assignment_before_a_command_defines_no_alias() {
+	assert_eq!(
+		run("alias 0=old; BASH_ALIASES=new true; BASH_ALIASES=([q]=x) true; alias").await,
+		"alias 0='old'\n"
 	);
 }

@@ -61,9 +61,6 @@ version = "3.9.1"
 [dependencies.cached]
 version = "0.59.0"
 
-[dependencies.indenter]
-version = "0.3.4"
-
 [dependencies.insta]
 version = "1.47.1"
 features = ["redactions"]

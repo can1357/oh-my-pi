@@ -13,29 +13,52 @@ thread_local! {
     static DEFERRED_HERE_DOCUMENTS: std::cell::RefCell<Option<Vec<String>>> =
         const { std::cell::RefCell::new(None) };
 
-    /// Whether a here-document's body is being written: its lines are not
-    /// indented (see `write_indented`).
+    /// Whether a here-document's body is being written: a line it begins is
+    /// not indented (see `Indented`).
     static WRITING_HERE_DOCUMENT_BODY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+
+    /// Whether a word is being written: a newline inside it (in quotes, or in
+    /// a command substitution) begins no line of commands (see `Indented`).
+    static WRITING_WORD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// Writes `item` one level deeper: each line it writes is indented, except the
-/// lines of here-document bodies. The shell reads a body, and the delimiter
-/// that ends it, as written, so an indented copy would not end where it began.
+/// A writer that indents each line of commands written through it by one
+/// level, as Bash prints them. A line of commands begins after a newline
+/// written outside a word; it is not indented when a here-document's body
+/// begins it. The shell reads a word's text and a body, with the delimiter
+/// that ends it, as written, so an indented copy would mean something else.
+struct Indented<'a, 'b> {
+    inner: &'a mut std::fmt::Formatter<'b>,
+    indent_next: bool,
+}
+
+impl Write for Indented<'_, '_> {
+    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        for (index, piece) in s.split('\n').enumerate() {
+            if index > 0 {
+                self.inner.write_char('\n')?;
+                self.indent_next = !WRITING_WORD.get();
+            }
+            if !piece.is_empty() {
+                if std::mem::take(&mut self.indent_next) && !WRITING_HERE_DOCUMENT_BODY.get() {
+                    self.inner.write_str(DISPLAY_INDENT)?;
+                }
+                self.inner.write_str(piece)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Writes `item`, which begins a line, one level deeper (see `Indented`).
 fn write_indented(f: &mut std::fmt::Formatter<'_>, item: &dyn Display) -> std::fmt::Result {
     write!(
-        indenter::indented(f).with_format(indenter::Format::Custom {
-            inserter: &mut indent_line,
-        }),
+        Indented {
+            inner: f,
+            indent_next: true,
+        },
         "{item}"
     )
-}
-
-fn indent_line(_line: usize, f: &mut dyn std::fmt::Write) -> std::fmt::Result {
-    if WRITING_HERE_DOCUMENT_BODY.get() {
-        Ok(())
-    } else {
-        f.write_str(DISPLAY_INDENT)
-    }
 }
 
 /// Writes a here-document's body and closing delimiter, unindented.
@@ -274,6 +297,43 @@ impl AndOrList {
     /// Returns an iterator over the pipelines in this `AndOrList`.
     pub fn iter(&self) -> AndOrListIter<'_> {
         self.into_iter()
+    }
+
+    /// Whether a command of this list carries a here-document redirection of
+    /// its own (not one inside a compound command's body), so that the
+    /// here-document's body follows the line this list is written on.
+    pub(crate) fn has_here_document(&self) -> bool {
+        fn redirects_have_here_document(redirects: Option<&RedirectList>) -> bool {
+            redirects.is_some_and(|list| {
+                list.0
+                    .iter()
+                    .any(|redirect| matches!(redirect, IoRedirect::HereDocument(..)))
+            })
+        }
+
+        fn command_has_here_document(command: &Command) -> bool {
+            match command {
+                Command::Simple(simple) => simple
+                    .prefix
+                    .iter()
+                    .flat_map(|prefix| prefix.0.iter())
+                    .chain(simple.suffix.iter().flat_map(|suffix| suffix.0.iter()))
+                    .any(|item| {
+                        matches!(
+                            item,
+                            CommandPrefixOrSuffixItem::IoRedirect(IoRedirect::HereDocument(..))
+                        )
+                    }),
+                Command::Compound(_, redirects) | Command::ExtendedTest(_, redirects) => {
+                    redirects_have_here_document(redirects.as_ref())
+                }
+                Command::Function(function) => redirects_have_here_document(function.body.1.as_ref()),
+            }
+        }
+
+        self.iter()
+            .flat_map(|(_, pipeline)| pipeline.seq.iter())
+            .any(command_has_here_document)
     }
 }
 
@@ -644,13 +704,23 @@ impl SubshellCommand {
 
     /// Writes this command as a process substitution (`<(...)` or `>(...)`),
     /// one line per line the shell reads (`line_starts`), so that reading the
-    /// text again yields the same lines.
+    /// text again yields the same lines. A closing `)` after a here-document
+    /// goes on a line of its own, after the delimiter.
     fn fmt_process_substitution(
         &self,
         kind: &ProcessSubstitutionKind,
         f: &mut std::fmt::Formatter<'_>,
     ) -> std::fmt::Result {
-        write!(f, "{kind}({})", self.process_substitution_lines().join("\n"))
+        let mut text = self.process_substitution_lines().join("\n");
+        if self.list.0.last().is_some_and(|item| item.0.has_here_document()) {
+            text.push('\n');
+        }
+        // The substitution is one word of the command around it: a newline in
+        // its text begins no line of that command (see `Indented`).
+        let outer = WRITING_WORD.replace(true);
+        let written = write!(f, "{kind}({text})");
+        WRITING_WORD.set(outer);
+        written
     }
 }
 
@@ -918,7 +988,9 @@ impl SourceLocation for IfClauseCommand {
 
 impl Display for IfClauseCommand {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "if {}; then", self.condition)?;
+        write!(f, "if {}", self.condition)?;
+        write_after_condition(f, &self.condition, "then")?;
+        writeln!(f)?;
         write_indented(f, &self.then)?;
         if let Some(elses) = &self.elses {
             for else_clause in elses {
@@ -930,6 +1002,21 @@ impl Display for IfClauseCommand {
         write!(f, "fi")?;
 
         Ok(())
+    }
+}
+
+/// Writes `word` (`then`, `do`) after a condition: after `; ` on the
+/// condition's last line, or on a line of its own when that line ends with a
+/// here-document's body, as Bash prints it.
+fn write_after_condition(
+    f: &mut std::fmt::Formatter<'_>,
+    condition: &CompoundList,
+    word: &str,
+) -> std::fmt::Result {
+    if condition.0.last().is_some_and(|item| item.0.has_here_document()) {
+        write!(f, "\n{word}")
+    } else {
+        write!(f, "; {word}")
     }
 }
 
@@ -955,7 +1042,9 @@ impl Display for ElseClause {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f)?;
         if let Some(condition) = &self.condition {
-            writeln!(f, "elif {condition}; then")?;
+            write!(f, "elif {condition}")?;
+            write_after_condition(f, condition, "then")?;
+            writeln!(f)?;
         } else {
             writeln!(f, "else")?;
         }
@@ -1096,7 +1185,14 @@ impl SourceLocation for WhileOrUntilClauseCommand {
 
 impl Display for WhileOrUntilClauseCommand {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}; {}", self.0, self.1)
+        write!(f, "{}", self.0)?;
+        // The do group writes `do`; only the separator before it is chosen here.
+        if self.0.0.last().is_some_and(|item| item.0.has_here_document()) {
+            writeln!(f)?;
+        } else {
+            write!(f, "; ")?;
+        }
+        write!(f, "{}", self.1)
     }
 }
 
@@ -2104,7 +2200,11 @@ impl SourceLocation for Word {
 
 impl Display for Word {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.value)
+        // A newline inside the word's text is part of the word (see `Indented`).
+        let outer = WRITING_WORD.replace(true);
+        let written = f.write_str(&self.value);
+        WRITING_WORD.set(outer);
+        written
     }
 }
 

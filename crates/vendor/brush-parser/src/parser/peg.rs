@@ -752,7 +752,7 @@ fn process_substitution_lines(lines: Vec<(ast::CompoundList, bool)>) -> (ast::Co
             let starts_line = (index == 0 && !runs_on)
                 || items
                     .last()
-                    .is_some_and(|previous| item_has_here_document(&previous.0));
+                    .is_some_and(|previous| previous.0.has_here_document());
             if starts_line && !items.is_empty() {
                 line_starts.push(items.len());
             }
@@ -761,44 +761,6 @@ fn process_substitution_lines(lines: Vec<(ast::CompoundList, bool)>) -> (ast::Co
         runs_on = explicit_end;
     }
     (ast::CompoundList(items), line_starts)
-}
-
-/// Whether a command of `and_or` carries a here-document redirection.
-fn item_has_here_document(and_or: &ast::AndOrList) -> bool {
-    fn redirects_have_here_document(redirects: Option<&ast::RedirectList>) -> bool {
-        redirects.is_some_and(|list| {
-            list.0
-                .iter()
-                .any(|redirect| matches!(redirect, ast::IoRedirect::HereDocument(..)))
-        })
-    }
-
-    fn command_has_here_document(command: &ast::Command) -> bool {
-        match command {
-            ast::Command::Simple(simple) => simple
-                .prefix
-                .iter()
-                .flat_map(|prefix| prefix.0.iter())
-                .chain(simple.suffix.iter().flat_map(|suffix| suffix.0.iter()))
-                .any(|item| {
-                    matches!(
-                        item,
-                        ast::CommandPrefixOrSuffixItem::IoRedirect(ast::IoRedirect::HereDocument(..))
-                    )
-                }),
-            ast::Command::Compound(_, redirects) | ast::Command::ExtendedTest(_, redirects) => {
-                redirects_have_here_document(redirects.as_ref())
-            }
-            ast::Command::Function(function) => redirects_have_here_document(function.body.1.as_ref()),
-        }
-    }
-
-    std::iter::once(&and_or.first)
-        .chain(and_or.additional.iter().map(|next| match next {
-            ast::AndOr::And(pipeline) | ast::AndOr::Or(pipeline) => pipeline,
-        }))
-        .flat_map(|pipeline| pipeline.seq.iter())
-        .any(command_has_here_document)
 }
 
 // add `2>&1` to the command if the pipeline is `|&`

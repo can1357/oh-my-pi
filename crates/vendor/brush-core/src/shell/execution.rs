@@ -256,7 +256,8 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 	/// Reads `input` one complete command at a time and runs each, as Bash
 	/// does: a complete command is read with the aliases as the commands
 	/// before it left them, or with the aliases its caller read the line with
-	/// ([`ExecutionParameters::set_aliases_at_read`]). A syntax error is
+	/// ([`ExecutionParameters::set_aliases_at_read`]) until a newline inside an
+	/// alias's value ends a command within that line. A syntax error is
 	/// reported, and nothing after it is read.
 	pub(crate) async fn read_and_run(
 		&mut self,
@@ -268,9 +269,10 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 		let aliases_at_read = params.take_aliases_at_read();
 		let mut reader = brush_parser::CommandReader::new(input, &self.parser_options());
 		let mut result = ExecutionResult::success();
+		let mut first = true;
 		loop {
 			let aliases = match &aliases_at_read {
-				Some(at_read) => at_read.table(),
+				Some(at_read) => at_read.table_for_command(first, self.aliases_for_reading()),
 				None => self.aliases_for_reading(),
 			};
 			let program = match reader.next_program(&self.parser_options(), aliases) {
@@ -280,6 +282,10 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 					return Ok(self.report_parse_error(parse_err, source_info, &params).await);
 				},
 			};
+			if !first && let Some(at_read) = &aliases_at_read {
+				at_read.end_line();
+			}
+			first = false;
 			result = match interp::execute_program(program, self, &params).await {
 				Ok(result) => result,
 				Err(err) => return Ok(self.report_error(err, &params).await),

@@ -848,7 +848,6 @@ dependencies = [
  "bon",
  "cached",
  "getrandom 0.4.3",
- "indenter",
  "insta",
  "miette",
  "peg",
@@ -4774,12 +4773,6 @@ dependencies = [
  "proc-macro2",
  "quote",
 ]
-
-[[package]]
-name = "indenter"
-version = "0.3.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "964de6e86d545b246d84badc0fef527924ace5134f30641c203ef52ba83f58d5"
 
 [[package]]
 name = "indexmap"

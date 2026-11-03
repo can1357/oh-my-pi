@@ -259,13 +259,19 @@ pub(crate) struct Tokenizer<I: Iterator<Item = std::io::Result<char>>> {
     char_reader: std::iter::Peekable<I>,
     /// Alias values being read in place of their names, innermost last.
     pushed: Vec<PushedAlias>,
+    /// Whether the rest of an input line is held while the here-documents
+    /// now being read take their bodies from the input.
+    line_held: bool,
     cross_state: CrossTokenParseState,
     options: TokenizerOptions,
 }
 
-/// An alias's value, read in place of the word that named it.
+/// An alias's value, read in place of the word that named it; or the rest of
+/// an input line held back while a here-document's body is read (see
+/// `Tokenizer::hold_rest_of_line`).
 struct PushedAlias {
-    name: String,
+    /// The alias's name; `None` for a held input line.
+    name: Option<String>,
     chars: Vec<char>,
     position: usize,
     /// Whether the value ends in a blank, so the next word is looked up too.
@@ -283,12 +289,27 @@ impl PushedAlias {
             !matches!(last, ' ' | '\t' | '\n' | '\\' | '(' | ')' | '<' | '>' | ';' | '&' | '|')
         }) && !ends_inside_quotes(&chars);
         Self {
-            name,
+            name: Some(name),
             expand_next: matches!(chars.last(), Some(' ' | '\t')),
             chars,
             position: 0,
             end_blank,
         }
+    }
+
+    const fn held_line(chars: Vec<char>) -> Self {
+        Self {
+            name: None,
+            chars,
+            position: 0,
+            expand_next: false,
+            end_blank: false,
+        }
+    }
+
+    /// Whether text of it is still to be read.
+    const fn unread(&self) -> bool {
+        self.position < self.chars.len() || self.end_blank
     }
 }
 
@@ -722,6 +743,7 @@ impl<I: Iterator<Item = std::io::Result<char>>> Tokenizer<I> {
             options: options.clone(),
             char_reader: chars.peekable(),
             pushed: vec![],
+            line_held: false,
             cross_state: CrossTokenParseState {
                 cursor: SourcePosition {
                     index: 0,
@@ -776,12 +798,12 @@ impl<I: Iterator<Item = std::io::Result<char>>> Tokenizer<I> {
     /// Drops alias values read to their end (after their trailing blank).
     fn pop_finished_aliases(&mut self) {
         while let Some(top) = self.pushed.last() {
-            if top.position < top.chars.len() || top.end_blank {
+            if top.unread() {
                 break;
             }
             let finished = self.pushed.pop().expect("checked above");
-            if let Some(reading) = self.cross_state.reading.as_mut() {
-                reading.alias_ended(&finished.name, finished.expand_next);
+            if let (Some(name), Some(reading)) = (finished.name, self.cross_state.reading.as_mut()) {
+                reading.alias_ended(&name, finished.expand_next);
             }
         }
     }
@@ -800,23 +822,70 @@ impl<I: Iterator<Item = std::io::Result<char>>> Tokenizer<I> {
         }
     }
 
-    fn next_char(&mut self) -> Result<Option<char>, TokenizerError> {
+    /// Whether the next char is read from an alias's value. A here-document's
+    /// body is read from the input itself, as in Bash, even when its
+    /// redirection came from a value: from the next input line on, while the
+    /// rest of the value, then the rest of the current input line, are read
+    /// after it (see `hold_rest_of_line`).
+    fn reading_alias_value(&mut self) -> Result<bool, TokenizerError> {
+        if matches!(self.cross_state.here_state, HereState::InHereDocs) {
+            if !self.line_held && self.pushed.iter().any(PushedAlias::unread) {
+                self.hold_rest_of_line()?;
+            }
+            return Ok(false);
+        }
+        self.line_held = false;
         self.pop_finished_aliases();
-        let (c, from_alias) = if let Some(top) = self.pushed.last_mut() {
+        Ok(!self.pushed.is_empty())
+    }
+
+    /// Reads the rest of the current input line, and holds it to be read
+    /// after the alias values now pending. Its chars move the cursor now, as
+    /// input; read again, they move it no further.
+    fn hold_rest_of_line(&mut self) -> Result<(), TokenizerError> {
+        let mut chars = vec![];
+        while let Some(c) = self
+            .char_reader
+            .next()
+            .transpose()
+            .map_err(TokenizerError::ReadError)?
+        {
+            self.advance_cursor(c);
+            chars.push(c);
+            if c == '\n' {
+                break;
+            }
+        }
+        self.pushed.insert(0, PushedAlias::held_line(chars));
+        self.line_held = true;
+        Ok(())
+    }
+
+    /// Moves the cursor past `c`, read from the input itself.
+    const fn advance_cursor(&mut self, c: char) {
+        if c == '\n' {
+            self.cross_state.cursor.line += 1;
+            self.cross_state.cursor.column = 1;
+        } else {
+            self.cross_state.cursor.column += 1;
+        }
+    }
+
+    fn next_char(&mut self) -> Result<Option<char>, TokenizerError> {
+        let from_alias = self.reading_alias_value()?;
+        let c = if let Some(top) = self.pushed.last_mut().filter(|_| from_alias) {
             if let Some(&c) = top.chars.get(top.position) {
                 top.position += 1;
-                (Some(c), true)
+                Some(c)
             } else {
                 top.end_blank = false;
-                (Some(' '), true)
+                Some(' ')
             }
         } else {
-            let c = self
-                .char_reader
+            self.char_reader
                 .next()
                 .transpose()
-                .map_err(TokenizerError::ReadError)?;
-            (c, false)
+                .map_err(TokenizerError::ReadError)?
         };
 
         if let Some(ch) = c {
@@ -826,12 +895,7 @@ impl<I: Iterator<Item = std::io::Result<char>>> Tokenizer<I> {
             // in the index, which tells adjacent tokens (`2>`) from separate
             // ones (`2 >`).
             if !from_alias {
-                if ch == '\n' {
-                    self.cross_state.cursor.line += 1;
-                    self.cross_state.cursor.column = 1;
-                } else {
-                    self.cross_state.cursor.column += 1;
-                }
+                self.advance_cursor(ch);
             }
             self.cross_state.cursor.index += 1;
         }
@@ -845,8 +909,9 @@ impl<I: Iterator<Item = std::io::Result<char>>> Tokenizer<I> {
     }
 
     fn peek_char(&mut self) -> Result<Option<char>, TokenizerError> {
-        self.pop_finished_aliases();
-        if let Some(top) = self.pushed.last() {
+        if self.reading_alias_value()?
+            && let Some(top) = self.pushed.last()
+        {
             return Ok(Some(top.chars.get(top.position).copied().unwrap_or(' ')));
         }
         match self.char_reader.peek() {

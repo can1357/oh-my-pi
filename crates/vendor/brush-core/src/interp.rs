@@ -2116,10 +2116,15 @@ async fn apply_assignment(
 		}
 	}
 
-	// While BASH_ALIASES is the view of the alias table, assigning to it defines
-	// aliases (see `Shell::assign_to_alias_table`). The variable stays the view.
-	if variable_name == "BASH_ALIASES" && shell.bash_aliases_is_alias_table() {
-		let skipped = shell.assign_to_alias_table(array_index, new_value, assignment.append)?;
+	// While BASH_ALIASES is the view of the alias table, an assignment statement
+	// to it defines aliases (see `Shell::assign_to_alias_table`); the variable
+	// stays the view. As in Bash, an assignment before a command (`required_scope`)
+	// is the command's own variable and defines none.
+	if required_scope.is_none() && variable_name == "BASH_ALIASES" && shell.bash_aliases_is_alias_table()
+	{
+		// As in Bash, only an element assignment (`BASH_ALIASES[q]+=v`) appends.
+		let append = assignment.append && array_index.is_some();
+		let skipped = shell.assign_to_alias_table(array_index, new_value, append)?;
 		for error in &skipped {
 			let mut stderr = params.stderr(shell);
 			let _ = shell.display_error(&mut stderr, error).await;
@@ -2745,23 +2750,25 @@ fn setup_process_substitution(
 
 	// Asynchronously spawn off the subshell; we intentionally don't block on its
 	// completion. Bash keeps a process substitution as the text it prints for
-	// it and reads that text again, one line at a time, when it runs it, so
-	// each line is read with the aliases the lines before it left. Without
-	// aliases to substitute, reading a line again gives the commands already
-	// parsed, which run as they are.
+	// it and reads that text again when it runs it, one complete command at a
+	// time, so each line is read with the aliases the lines before it left.
+	// Without aliases to substitute, reading a line again gives the commands
+	// already parsed, which run as they are. From the first line read while
+	// there are aliases, the rest of the text is read as one input, so an alias
+	// can begin a here-document whose body is on the lines after it.
 	let units = alias_expansion::split_into_read_units(subshell_cmd);
 	let lines = subshell_cmd.process_substitution_lines();
 	tokio::spawn(async move {
 		// Intentionally ignore the result of the subshell command.
-		for (unit, line) in units.into_iter().zip(lines) {
-			let result = if subshell.aliases_for_reading().is_some_and(|aliases| !aliases.is_empty()) {
-				subshell
-					.run_string(line, &crate::SourceInfo::from("process substitution"), &child_params)
-					.await
-			} else {
-				unit.execute(&mut subshell, &child_params).await
-			};
-			match result {
+		for (index, unit) in units.into_iter().enumerate() {
+			if subshell.aliases_for_reading().is_some_and(|aliases| !aliases.is_empty()) {
+				let rest: String = lines[index..].iter().flat_map(|line| [line.as_str(), "\n"]).collect();
+				let _ = subshell
+					.run_string(rest, &crate::SourceInfo::from("process substitution"), &child_params)
+					.await;
+				break;
+			}
+			match unit.execute(&mut subshell, &child_params).await {
 				Ok(result) if result.is_normal_flow() => {},
 				_ => break,
 			}
