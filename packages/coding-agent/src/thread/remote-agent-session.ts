@@ -125,6 +125,7 @@ export function emptyMirrorState(): SessionMirrorState {
 		isStreaming: false,
 		runStartedAt: undefined,
 		ircWakesPending: false,
+		asyncWakePending: false,
 		ircQueuedFrom: [],
 		isPaused: false,
 		streamMessage: null,
@@ -381,6 +382,10 @@ export class RemoteAgentSession implements AgentViewSession {
 
 	get ircWakesPending(): boolean {
 		return this.#state.ircWakesPending;
+	}
+
+	get asyncWakePending(): boolean {
+		return this.#state.asyncWakePending;
 	}
 
 	get messages(): AgentMessage[] {

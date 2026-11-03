@@ -13037,6 +13037,16 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.#ircWakeHolds > 0 || this.#ircWakesAwaitingCompaction > 0 || this.#irc.hasPending();
 	}
 
+	/**
+	 * Whether background work this agent owns still owes it a turn: a running job
+	 * whose result will wake it, or a delivered result not yet injected. The
+	 * lifecycle must not park this session yet, since parking disposes it, which
+	 * cancels those jobs and drops their results.
+	 */
+	get asyncWakePending(): boolean {
+		return this.#hasPendingAsyncWake();
+	}
+
 	/** Emits an IRC relay observation for UI rendering without persisting it. */
 	emitIrcRelayObservation(record: CustomMessage): void {
 		this.#irc.emitRelayObservation(record);

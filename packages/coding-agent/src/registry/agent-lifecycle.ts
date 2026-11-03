@@ -759,10 +759,12 @@ export class AgentLifecycleManager implements AgentLifecycleApi {
 		clearTimeout(adopted.timer);
 		const timer = setTimeout(() => {
 			adopted.timer = undefined;
-			// A session still owing turns to IRC messages (held by a run publishing
-			// its result, or queued) would drop them when parked. Try again once the
-			// TTL passes anew.
-			if (adopted.ref.session?.ircWakesPending) {
+			// A session still owing turns would lose them when parked: IRC messages
+			// (held by a run publishing its result, or queued) would be dropped, and
+			// the dispose would cancel the background jobs it owns (its `task`
+			// children) and drop their results. Try again once the TTL passes anew.
+			const session = adopted.ref.session;
+			if (session?.ircWakesPending || session?.asyncWakePending) {
 				this.#armTimer(id, adopted);
 				return;
 			}

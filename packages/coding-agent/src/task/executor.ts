@@ -3557,6 +3557,37 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 }
 
 /**
+ * Whether the end of a run leaves the subagent's background jobs (its `task`
+ * children, its background bash) running. They belong to the agent, not to one
+ * run of it: when the run ends and the agent stays live (its request budget, its
+ * wall-clock limit, a terminal error or a loop guard ended the run, or the run
+ * finished), each job goes on and its result reaches the agent as a later turn,
+ * as a background job's result reaches the root session. The jobs stop with the
+ * agent: an explicit cancel of the run (`proc://<id>/kill`, a kill from the Agent
+ * Hub or RPC, the parent's own call being aborted), a process shutdown, a
+ * one-shot or isolated agent (its worktree is captured and removed right after
+ * the run), and an agent the lifecycle does not keep. Session disposal (park,
+ * release, shutdown) cancels whatever the agent still owns.
+ */
+export function ownerJobsOutliveRun(args: {
+	id: string;
+	session: AgentSession;
+	aborted: boolean;
+	abortKind?: AbortReason;
+	keepAlive: boolean;
+	isolated: boolean;
+	reviveSession: AgentReviver | null;
+}): boolean {
+	if (!args.keepAlive || args.isolated) return false;
+	if (args.abortKind === "signal" || args.abortKind === "shutdown") return false;
+	const ref = AgentRegistry.global().get(args.id);
+	if (!ref || ref.session !== args.session || ref.status === "aborted") return false;
+	// The same rule finalizeSubagentLifecycle applies: an aborted run keeps the
+	// agent only when it can be revived from its transcript.
+	return !args.aborted || args.reviveSession !== null;
+}
+
+/**
  * Settle a subagent's registry lifecycle after a run: unregister for one-shot
  * helpers, idle + lifecycle adoption for kept-alive agents. An aborted run
  * (caller cancel, user interrupt, wall-clock timeout, soft budget) only stops
@@ -5267,7 +5298,20 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 				unsubscribe = null;
 			}
 			const jobManager = options.asyncJobManager;
-			if (jobManager) {
+			const session = monitor.takeActiveSession();
+			const keepAlive = options.keepAlive !== false && (!preparedSession || readyAt !== undefined);
+			const keepOwnerJobs =
+				session !== null &&
+				ownerJobsOutliveRun({
+					id,
+					session,
+					aborted,
+					abortKind: monitor.abortKind(),
+					keepAlive,
+					isolated: worktree !== undefined,
+					reviveSession,
+				});
+			if (jobManager && !keepOwnerJobs) {
 				const reap = await jobManager.cancelAndReapOwnerJobs(id, cleanupDeadlineAt);
 				if (!reap.settled) {
 					deferCleanup(reap.completion);
@@ -5277,18 +5321,15 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 					});
 				}
 			}
-			const session = monitor.takeActiveSession();
 			if (session) {
 				monitor.captureSalvage(session);
-				if (options.keepAlive !== false && (!preparedSession || readyAt !== undefined)) {
-					attachIrcWakeTurnMonitor(session, wakeOptions);
-				}
+				if (keepAlive) attachIrcWakeTurnMonitor(session, wakeOptions);
 				await finalizeSubagentLifecycle({
 					id,
 					session,
 					aborted,
 					abortKind: monitor.abortKind(),
-					keepAlive: options.keepAlive !== false && (!preparedSession || readyAt !== undefined),
+					keepAlive,
 					isolated: worktree !== undefined,
 					agentIdleTtlMs,
 					reviveSession,
@@ -5300,7 +5341,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 					},
 				});
 			}
-			if (jobManager) {
+			if (jobManager && !keepOwnerJobs) {
 				if (deferredSessionShutdown) {
 					const finalReap = Promise.allSettled([deferredSessionShutdown]).then(async () => {
 						const reap = await jobManager.cancelAndReapOwnerJobs(id, Date.now());
