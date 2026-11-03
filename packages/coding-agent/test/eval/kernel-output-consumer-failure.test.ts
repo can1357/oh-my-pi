@@ -1,5 +1,4 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as vm from "node:vm";
 import { type } from "@oh-my-pi/omptype";
@@ -427,44 +426,32 @@ const NATIVE_PROMISE_SHAPES: ReadonlyArray<{ label: string; make: () => Promise<
 	},
 ];
 
-/**
- * A child omp-like host: the CLI's process handlers, then one cell whose stream consumer returns a
- * rejected native promise whose `constructor` getter throws. No built-in can attach a handler to
- * such a promise, so its rejection surfaces as unhandled and only postmortem can take it over;
- * bun test reports every unhandled rejection itself, which is why this runs in its own process.
- */
-const CONSTRUCTOR_PROMISE_HOST = `
-import { postmortem } from "@oh-my-pi/pi-utils";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { executeJs } from "@oh-my-pi/pi-coding-agent/eval/js/executor";
-import { disposeAllVmContexts } from "@oh-my-pi/pi-coding-agent/eval/js/context-manager";
-import { disposeAllKernelSessions, executePython } from "@oh-my-pi/pi-coding-agent/eval/py/executor";
-postmortem.installProcessHandlers();
-const language = process.env.HOST_LANGUAGE;
-const id = "constructor-promise-" + crypto.randomUUID();
-const session = { cwd: process.cwd(), hasUI: false, settings: Settings.isolated({ "async.enabled": false, "eval.autoProvision": false }), getSessionFile: () => null, getSessionSpawns: () => null, getEvalSessionId: () => id };
-const onChunk = chunk => {
-	if (!chunk.split("\\n").includes("one")) return;
-	const promise = Promise.reject(new Error("the consumer's promise rejected"));
-	Object.defineProperty(promise, "constructor", { get() { throw new Error("the constructor getter refused"); } });
-	return promise;
-};
-const code = language === "py" ? "import time\\nprint('one', flush=True)\\ntime.sleep(0.5)\\nprint('two')" : "print('one');\\nawait new Promise(resolve => setTimeout(resolve, 500));\\nprint('two');";
-const options = { cwd: session.cwd, sessionId: id, onChunk, timeoutMs: 20000 };
-const result = language === "py" ? await executePython(code, { ...options, toolSession: session }) : await executeJs(code, { ...options, session });
-await new Promise(resolve => setTimeout(resolve, 200));
-console.log("RESULT " + JSON.stringify({ exitCode: result.exitCode, cancelled: result.cancelled, output: result.output }));
-await Promise.all([disposeAllKernelSessions(), disposeAllVmContexts()]);
-process.exit(0);
-`;
-
-/** Runs {@link CONSTRUCTOR_PROMISE_HOST}, written to `HOST_FILE`, on a worker thread, where postmortem installs no handlers. */
-const WORKER_LAUNCHER = `
-const worker = new Worker(process.env.HOST_FILE);
-worker.addEventListener("error", event => console.log("WORKER_ERROR " + event.message));
-await new Promise(resolve => worker.addEventListener("close", resolve));
-process.exit(0);
-`;
+/** Thrown values that carry a rejected native promise one plain read reaches: describing each must observe it. */
+const PROMISE_CARRYING_THROWS: ReadonlyArray<{ label: string; make: () => unknown }> = [
+	{ label: "a rejected promise", make: () => Promise.reject(new Error("the thrown promise rejected")) },
+	{
+		label: "an error whose message getter returns a rejected promise",
+		make: () => {
+			const error = new Error("unused");
+			Object.defineProperty(error, "message", {
+				get: () => Promise.reject(new Error("the message promise rejected")),
+			});
+			return error;
+		},
+	},
+	{
+		label: "an error whose message getter throws a rejected promise",
+		make: () => {
+			const error = new Error("unused");
+			Object.defineProperty(error, "message", {
+				get() {
+					throw Promise.reject(new Error("the thrown message promise rejected"));
+				},
+			});
+			return error;
+		},
+	},
+];
 
 /**
  * What a Python exception's own code can raise while the kernel describes the
@@ -864,44 +851,30 @@ describe("eval output consumer failure", () => {
 			);
 		}
 
-		for (const thread of ["main thread", "worker thread"] as const) {
+		for (const shape of PROMISE_CARRYING_THROWS) {
 			it.skipIf(skipped(language))(
-				`${language}: a consumer that returns a rejected native promise whose constructor getter throws is reported, and a host on its ${thread} goes on`,
+				`${language}: a consumer that throws ${shape.label} is reported, and nothing is left unhandled`,
 				async () => {
-					const packageDir = path.resolve(import.meta.dir, "../..");
-					// A worker needs a module file; this one lives beside the test so its imports resolve.
-					const hostFile = path.join(import.meta.dir, `.constructor-promise-host-${crypto.randomUUID()}.ts`);
-					await Bun.write(hostFile, CONSTRUCTOR_PROMISE_HOST);
+					const unhandled: unknown[] = [];
+					const onUnhandled = (reason: unknown): void => {
+						unhandled.push(reason);
+					};
+					process.on("unhandledRejection", onUnhandled);
 					try {
-						const script = thread === "main thread" ? CONSTRUCTOR_PROMISE_HOST : WORKER_LAUNCHER;
-						const child = Bun.spawn([process.execPath, "-e", script], {
-							cwd: packageDir,
-							env: { ...Bun.env, HOST_LANGUAGE: language, HOST_FILE: hostFile },
-							stdout: "pipe",
-							stderr: "pipe",
+						const session = makeSession(`consumer-promise-throw-${language}-${crypto.randomUUID()}`);
+						const cell = await run(session, language, TWO_LINES[language], {
+							onChunk: chunk => {
+								if (printsLine(chunk, "one")) throw shape.make();
+							},
 						});
-						const [stdout, stderr, exitCode] = await Promise.all([
-							new Response(child.stdout).text(),
-							new Response(child.stderr).text(),
-							child.exited,
-						]);
-						const context = `stdout:\n${stdout}\nstderr:\n${stderr}`;
-						expect(exitCode, context).toBe(0);
-						expect(stdout + stderr, context).not.toContain("Unhandled Rejection");
-						expect(stdout, context).not.toContain("WORKER_ERROR");
-						const line = stdout.split("\n").find(entry => entry.startsWith("RESULT "));
-						expect(line, context).toBeDefined();
-						const result = JSON.parse(line!.slice("RESULT ".length)) as {
-							exitCode: number;
-							cancelled: boolean;
-							output: string;
-						};
-						expect(result.cancelled, context).toBe(false);
-						expect(result.exitCode, context).toBe(0);
-						expect(printsLine(result.output, "two"), context).toBe(true);
-						expect(result.output, context).toContain("The stream output consumer failed:");
+						// Unhandled rejections are reported after the microtask queue drains.
+						await Bun.sleep(50);
+						expect(cell.exitCode).toBe(0);
+						expect(printsLine(cell.output, "two")).toBe(true);
+						expect(cell.output).toContain("The stream output consumer failed:");
+						expect(unhandled).toEqual([]);
 					} finally {
-						await fs.rm(hostFile, { force: true });
+						process.off("unhandledRejection", onUnhandled);
 					}
 				},
 				120_000,
@@ -909,26 +882,37 @@ describe("eval output consumer failure", () => {
 		}
 
 		it.skipIf(skipped(language))(
-			`${language}: a consumer that throws an error whose message getter returns a rejected promise is reported, and nothing is left unhandled`,
+			`${language}: hostile consumers leave the host's own unhandledRejection and uncaughtException listeners as they were`,
 			async () => {
-				const session = makeSession(`consumer-getter-promise-${language}-${crypto.randomUUID()}`);
-				const cell = await run(session, language, TWO_LINES[language], {
-					onChunk: chunk => {
-						if (!printsLine(chunk, "one")) return;
-						const error = new Error("unused");
-						Object.defineProperty(error, "message", {
-							get: () => Promise.reject(new Error("the message getter's promise rejected")),
-						});
-						throw error;
-					},
-				});
-				// An unhandled rejection surfaces after a turn; give it one before the test ends.
-				await Bun.sleep(50);
-				expect(cell.exitCode).toBe(0);
-				expect(printsLine(cell.output, "two")).toBe(true);
-				expect(cell.output).toContain("The stream output consumer failed:");
+				const rejectionListeners = process.listeners("unhandledRejection");
+				const exceptionListeners = process.listeners("uncaughtException");
+				const session = makeSession(`consumer-listeners-${language}-${crypto.randomUUID()}`);
+				const refusingPromise = (): Promise<never> => {
+					const refusing = Promise.reject(new Error("the refusing promise rejected"));
+					// Handled here: this row checks the listeners, not this promise's fate (outside the guarantee).
+					refusing.catch(() => {});
+					Object.defineProperty(refusing, "constructor", {
+						get() {
+							throw new Error("the constructor getter refused");
+						},
+					});
+					return refusing;
+				};
+				// Each value is made when the consumer returns it, as a real consumer would.
+				const factories: Array<() => unknown> = [
+					...NATIVE_PROMISE_SHAPES.map(shape => shape.make),
+					refusingPromise,
+					...PROMISE_CARRYING_THROWS.map(shape => () => Promise.reject(shape.make())),
+				];
+				for (const make of factories) {
+					await run(session, language, TWO_LINES[language], {
+						onChunk: chunk => (printsLine(chunk, "one") ? make() : undefined),
+					});
+				}
+				expect(process.listeners("unhandledRejection")).toEqual(rejectionListeners);
+				expect(process.listeners("uncaughtException")).toEqual(exceptionListeners);
 			},
-			120_000,
+			240_000,
 		);
 
 		it.skipIf(skipped(language))(

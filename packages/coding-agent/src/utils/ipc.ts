@@ -1,5 +1,5 @@
 import { types } from "node:util";
-import { describeError, logger, postmortem } from "@oh-my-pi/pi-utils";
+import { describeError, logger } from "@oh-my-pi/pi-utils";
 
 // Captured when this module loads: code running in the same realm can replace the globals.
 const reflectApply = Reflect.apply;
@@ -16,11 +16,10 @@ const promiseThen = Promise.prototype.then;
  * of its code) is observed through the built-in `then`, whatever its own `then`
  * says: an own `then` set to `null` or to a function that drops its callbacks
  * would otherwise leave its rejection unhandled. The built-in `then` reads the
- * promise's `constructor`; when that throws, the throw is reported as a
- * rejection, and the promise's own rejection is handed to postmortem
- * ({@link postmortem.adoptRejection}), which delivers it here instead of ending
- * the process. Such a promise counts as settled at once, since nothing can
- * observe it settle.
+ * promise's `constructor` (and calls the species constructor it names); when
+ * that throws, the throw is reported as a rejection and the value counts as
+ * settled. Such a promise's own rejection stays unobserved: a promise whose
+ * `constructor` or species refuses observation is outside what this can handle.
  *
  * Any other thenable has its `then` read once (a getter can answer differently
  * on a second read) and called with both callbacks; a `then` that throws counts
@@ -31,8 +30,9 @@ const promiseThen = Promise.prototype.then;
  * per rejection the value reports. A throw from either callback is dropped:
  * they report a failure, and the report must not become a failure of its own.
  *
- * Not covered: a thenable that is not a native promise and whose `then` never
- * calls back and returns nothing that settles never settles.
+ * Not covered: a native promise whose `constructor` or species refuses
+ * observation (above); a thenable that is not a native promise and whose `then`
+ * never calls back and returns nothing that settles never settles.
  */
 function observe(value: unknown, onRejected: (reason: unknown) => void, onSettled?: () => void): void {
 	let settled = false;
@@ -62,9 +62,8 @@ function observe(value: unknown, onRejected: (reason: unknown) => void, onSettle
 			reflectApply(promiseThen, value, [settle, reject]);
 		} catch (error) {
 			// Its `constructor` getter, or the species constructor it names, threw before the
-			// built-in `then` attached the callbacks: report that, and let postmortem deliver
-			// the promise's own rejection when it surfaces as unhandled.
-			postmortem.adoptRejection(value, reject);
+			// built-in `then` attached the callbacks. That is reported; the promise itself
+			// cannot be observed by any built-in, so its own rejection is not.
 			reject(error);
 		}
 		return;

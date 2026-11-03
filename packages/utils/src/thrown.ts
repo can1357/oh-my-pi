@@ -149,8 +149,9 @@ function walkPrototypes(value: unknown, matches: (proto: object) => boolean): ob
 			if (matches(proto)) return proto;
 			proto = reflectGetPrototypeOf(proto);
 		}
-	} catch {
-		// A Proxy's `getPrototypeOf` trap threw.
+	} catch (thrown) {
+		// A Proxy's `getPrototypeOf` trap threw; what it threw may be a rejected promise.
+		observeQuietly(thrown);
 	}
 	return undefined;
 }
@@ -177,9 +178,10 @@ function readField(object: object, key: string): unknown {
 
 /**
  * Marks a native promise's rejection as handled, through the built-in `then`
- * captured at load. A promise whose `constructor` or species refuses even that
- * stays as it was: that is code the value runs after it is observed, outside
- * what a description can bound. Never throws.
+ * captured at load. Applied to everything a description reads or catches: the
+ * described value, each field read, each throw. A promise whose `constructor`
+ * or species refuses even that stays unobserved; such a promise is outside what
+ * a description can handle. Never throws.
  */
 function observeQuietly(value: unknown): void {
 	if (!isPromise(value)) return;
@@ -197,7 +199,8 @@ function textProperty(object: object, key: string, limit: number): string | unde
 	try {
 		const field = readField(object, key);
 		return typeof field === "string" ? bounded(field, limit) : undefined;
-	} catch {
+	} catch (thrown) {
+		observeQuietly(thrown);
 		return undefined;
 	}
 }
@@ -207,7 +210,8 @@ function convertedText(value: unknown): string | undefined {
 	try {
 		const text: unknown = toText(value);
 		return typeof text === "string" ? bounded(text, DESCRIBED_TEXT_LIMIT) : undefined;
-	} catch {
+	} catch (thrown) {
+		observeQuietly(thrown);
 		return undefined;
 	}
 }
@@ -242,6 +246,8 @@ function fallbackText(value: unknown, errorClass: ErrorClassName | undefined): s
  * kept is at most {@link DESCRIBED_TEXT_LIMIT} characters.
  */
 export function describeError(value: unknown): DescribedError {
+	// A thrown or rejected value can itself be a rejected promise; describing it observes it.
+	observeQuietly(value);
 	let errorClass = errorClassOf(value);
 	// An error made in another realm (a `node:vm` context, say) has that realm's prototypes.
 	if (errorClass === undefined && isNativeError(value)) errorClass = "Error";
@@ -255,8 +261,9 @@ export function describeError(value: unknown): DescribedError {
 		try {
 			const field = readField(error, "message");
 			message = typeof field === "string" ? bounded(field, DESCRIBED_TEXT_LIMIT) : primitiveText(field);
-		} catch {
-			// The message getter or a Proxy trap threw.
+		} catch (thrown) {
+			// The message getter or a Proxy trap threw; what it threw may be a rejected promise.
+			observeQuietly(thrown);
 		}
 		name = textProperty(error, "name", DESCRIBED_FIELD_LIMIT);
 		stack = textProperty(error, "stack", DESCRIBED_TEXT_LIMIT);
