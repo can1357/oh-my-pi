@@ -98,6 +98,8 @@ function holdPrintInPage(
 				try {
 					const openedPrint: unknown = opened === null ? undefined : Reflect.get(Object(opened), "print");
 					if (typeof openedPrint === "function") {
+						Reflect.set(Object(opened), deadline, hold);
+						Reflect.set(Object(opened), clockKey, Reflect.get(globalThis, clockKey));
 						Reflect.set(Object(opened), "print", holdPrintOf(Object(opened), openedPrint));
 					}
 				} catch {}
@@ -163,6 +165,8 @@ export class PrintHold {
 	readonly #onStop = new Set<() => void>();
 	/** A hold change the page has not had yet; made once the dialog closes. */
 	#stale = false;
+	/** Popup documents keep their hold reachable here after their opener changes origin. */
+	readonly #popups = new Set<Page>();
 
 	private constructor(page: Page, session: CDPSession, scope: PrintHoldScope) {
 		this.#page = page;
@@ -176,6 +180,7 @@ export class PrintHold {
 		session.on("Page.frameNavigated", this.#onFrameNavigated);
 		session.on("Page.javascriptDialogOpening", this.#onDialogOpening);
 		session.on("Page.javascriptDialogClosed", this.#onDialogClosed);
+		page.on("popup", this.#onPopup);
 	}
 
 	/**
@@ -231,6 +236,7 @@ export class PrintHold {
 
 	/** Takes the hold off the page and detaches. A page stopped in a dialog is left with the deadline it has. */
 	async dispose(): Promise<void> {
+		this.#page.off("popup", this.#onPopup);
 		this.#session.off("Page.frameNavigated", this.#onFrameNavigated);
 		this.#session.off("Page.javascriptDialogClosed", this.#onDialogClosed);
 		// Detaching works on a stopped page and drops the session's script and binding with it. The deadline left in
@@ -239,6 +245,7 @@ export class PrintHold {
 		this.#session.off("Runtime.bindingCalled", this.#onBindingCalled);
 		this.#session.off("Page.javascriptDialogOpening", this.#onDialogOpening);
 		await this.#session.detach();
+		this.#popups.clear();
 	}
 
 	async #release(): Promise<void> {
@@ -268,6 +275,11 @@ export class PrintHold {
 	/** Sets the current deadline in a document back from the back/forward cache, or one that predates the hold. */
 	readonly #onFrameNavigated = (event: Protocol.Page.FrameNavigatedEvent): void => {
 		if (event.type === "BackForwardCacheRestore") void this.#setInFrames();
+	};
+
+	readonly #onPopup = (popup: Page): void => {
+		this.#popups.add(popup);
+		void this.#setInFrames();
 	};
 
 	readonly #onDialogOpening = (): void => {
@@ -329,12 +341,37 @@ export class PrintHold {
 		return this.#unlessStopped(applied);
 	}
 
-	/** Updates the documents already loaded in the tab's own renderer: the main frame and its same-site iframes. */
+	/** Updates the tab's same-process frames and retained popup deadlines. */
 	async #setInFrames(): Promise<void> {
 		const mainFrame = this.#page.mainFrame();
 		const remaining = this.#remaining();
-		await Promise.all(
-			this.#page
+		const popups: Promise<void>[] = [];
+		for (const popup of this.#popups) {
+			if (popup.isClosed()) {
+				this.#popups.delete(popup);
+				continue;
+			}
+			popups.push(
+				popup
+					.mainFrame()
+					.mainRealm()
+					.evaluate(
+						(holdKey, remaining) => {
+							const hold: unknown = Reflect.get(globalThis, Symbol.for(`${holdKey}.until`));
+							if (typeof hold !== "object" || hold === null) return;
+							const clock: Function = Reflect.get(globalThis, Symbol.for("omp.printHold.clock"));
+							const now = Number(Reflect.apply(clock, undefined, []));
+							Reflect.set(hold, "until", remaining === null ? Number.POSITIVE_INFINITY : now + remaining);
+						},
+						this.#holdKey,
+						remaining,
+					)
+					.catch(() => undefined),
+			);
+		}
+		await Promise.all([
+			...popups,
+			...this.#page
 				.frames()
 				.filter(frame => frame.client === mainFrame.client)
 				.map(async frame => {
@@ -352,6 +389,6 @@ export class PrintHold {
 						if (frame === mainFrame) this.#clockOffset = pageNow - Date.now();
 					} catch {}
 				}),
-		);
+		]);
 	}
 }

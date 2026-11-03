@@ -777,9 +777,10 @@ return await tab.evaluate(() => {
 					const real = Date.now;
 					let elapsed = 0;
 					${PRINT_HOLD_CLOCK} = () => real() + elapsed;
-					globalThis.advanceClock = () => { elapsed += 60_000; };
+					globalThis.advanceClock = ms => { elapsed += ms; };
 				}`);
 					const hold = await PrintHold.install(page, scope);
+					let disposed = false;
 					try {
 						await hold.beginCall(30_000);
 						const popupTarget = user.waitForTarget(target => target.opener() === page.target());
@@ -800,15 +801,19 @@ return await tab.evaluate(() => {
 								"afterprint",
 								"print returned",
 							]);
-							await popup.mainFrame().mainRealm().evaluate("advanceClock()");
+							await hold.endCall();
+							await popup.mainFrame().mainRealm().evaluate("advanceClock(1_500)");
 							expect(await popup.mainFrame().mainRealm().evaluate(print)).toEqual(
 								scope === "calls" ? ["print returned"] : ["afterprint", "print returned"],
 							);
+							await hold.dispose();
+							disposed = true;
+							expect(await popup.mainFrame().mainRealm().evaluate(print)).toEqual(["print returned"]);
 						} finally {
 							await popup.close();
 						}
 					} finally {
-						await hold.dispose();
+						if (!disposed) await hold.dispose();
 					}
 				} finally {
 					await user.disconnect();
