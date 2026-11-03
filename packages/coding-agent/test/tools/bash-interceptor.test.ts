@@ -1098,6 +1098,13 @@ describe("dedicated tool capability", () => {
 		"find . . -name x",
 		"find src src/lib -name x",
 		"find / -name '*o*'",
+		// Round 17: the same for fd, and a trailing slash, which the shell keeps and the tools drop.
+		"fd --glob -s x actual actual",
+		"fd --glob -s x actual actual/sub",
+		"fd --glob -s passwd /",
+		"echo hi > f/",
+		"sed -i 's/a/b/' f/",
+		"perl -pi -e 's/a/b/' f/",
 		// glob reads `?`, brackets and backslashes differently from find.
 		"find abc -name 'a?d'",
 		"find src -name '[ab]*'",
@@ -1112,6 +1119,23 @@ describe("dedicated tool capability", () => {
 		"find . -name .git -prune -o -name '*.ts' -print",
 	])("still refuses %s as glob", command => {
 		expect(decide(command)).toBe("glob");
+	});
+
+	it("does not send a path with a trailing slash past a file to a tool", async () => {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "bash-interceptor-slash-")));
+		try {
+			await Bun.write(path.join(dir, "f"), "ORIGINAL\n");
+			await fs.mkdir(path.join(dir, "src"));
+			const at = (command: string) =>
+				checkBashInterception(command, tools, DEFAULT_BASH_INTERCEPTOR_RULES, command, dir).suggestedTool;
+			expect(at("cat f/")).toBeUndefined();
+			expect(at("grep ORIGINAL f/")).toBeUndefined();
+			expect(at("cat f/x")).toBeUndefined();
+			expect(at("cat f")).toBe("read");
+			expect(at("cat src/")).toBe("read");
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
 	});
 
 	it("refuses a find over a symlinked root only when -H follows it", async () => {

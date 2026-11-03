@@ -26,6 +26,12 @@ const SPECIAL_ROOT = /^\/(?:dev|proc|sys)(?:\/|$)/u;
  * the JavaScript one normalizes it first.
  */
 function pathKindIn(cwd: string, target: string, follow: boolean): PathKind {
+	const kind = pathKindOf(cwd, target, follow);
+	// `f/` names a directory to the shell (`cat f/` and `> f/` fail), while the tools drop the slash.
+	return target.endsWith("/") && kind !== "directory" && kind !== "unknown" ? "other" : kind;
+}
+
+function pathKindOf(cwd: string, target: string, follow: boolean): PathKind {
 	if (URL_PATH.test(cwd) || URL_PATH.test(target)) return "unknown";
 	const joined = joinPhysically(cwd, target);
 	try {
@@ -38,7 +44,9 @@ function pathKindIn(cwd: string, target: string, follow: boolean): PathKind {
 		return stat.isFile() ? "file" : stat.isDirectory() ? "directory" : "other";
 	} catch (error) {
 		const code = (error as NodeJS.ErrnoException).code;
-		if (code !== "ENOENT" && code !== "ENOTDIR") return "unknown";
+		// ENOTDIR: a file stands where the path needs a directory (`f/x`, `f/`); the shell fails there.
+		if (code === "ENOTDIR") return "other";
+		if (code !== "ENOENT") return "unknown";
 		try {
 			// A missing name is created where its directory really is; with no directory there the
 			// shell fails, while the write tool would create one.

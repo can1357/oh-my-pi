@@ -1310,7 +1310,12 @@ const FD: OptionSpec = {
 function fdCanPerform(command: SimpleCommand): boolean {
 	const seen = new Map<string, number>();
 	const operands = expressibleOperands(command.words.slice(1), FD, seen);
-	if (!operands || !operands.slice(1).every(root => toolsTakeLiterally(root.value))) return false;
+	if (!operands) return false;
+	const roots = operands.slice(1).map(word => word.value);
+	// Same roots as find: literal, not `/` (glob refuses it), and not overlapping (fd lists a file
+	// below two roots twice, glob once).
+	if (!roots.every(root => toolsTakeLiterally(root) && root.replace(/\/+$/u, "") !== "")) return false;
+	if (!rootsDisjoint(roots)) return false;
 	const pattern = operands[0]?.value;
 	if (pattern === undefined || pattern === "") return true;
 	const globMode = seen.has("-g") || seen.has("--glob");
@@ -1453,7 +1458,9 @@ function writeCanPerform(
 	if (output.op !== ">" && output.op !== ">|" && !(output.op === ">>" && availableTools.includes("edit")))
 		return false;
 	const target = output.target;
-	if (!target || !namesOneFile(target) || !toolsTakeLiterally(target.value)) return false;
+	// `> f/` fails in the shell; the write tool drops the slash and writes `f`.
+	if (!target || !namesOneFile(target) || !toolsTakeLiterally(target.value) || target.value.endsWith("/"))
+		return false;
 	if (SPECIAL_PATH.test(target.value) || NOTEBOOK.test(target.value)) return false;
 	if (filesystem && filesystem.kind(target.value, false) !== "missing") return false;
 	const args = command.words.slice(1);
@@ -1775,7 +1782,8 @@ export function dedicatedToolCanPerformStep(
 		default: {
 			const files = editCanPerform(name, pipeline);
 			if (!files || !pathsAre(files, ["file", "missing"], false, filesystem)) return false;
-			if (files.some(word => NOTEBOOK.test(word.value))) return false;
+			// A notebook is edited as cells; `f/` fails in the shell, while the edit tool drops the slash.
+			if (files.some(word => NOTEBOOK.test(word.value) || word.value.endsWith("/"))) return false;
 			return (
 				!filesystem ||
 				files.every(
