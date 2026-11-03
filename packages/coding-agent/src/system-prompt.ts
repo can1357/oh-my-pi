@@ -624,15 +624,13 @@ export interface BuildSystemPromptOptions {
 	subagent?: boolean;
 }
 
-/** A context file or skill fragment rendered by one build, located in its built block. */
+/** A context file or skill fragment rendered by one build. */
 export interface SystemPromptSource {
 	readonly id: string;
-	/** Index of the built block holding the fragment, or -1 when it occurs more than once. */
-	readonly blockIndex: number;
 	readonly kind: "instruction-files" | "skills";
 	readonly label: string;
 	readonly path?: string;
-	/** Rendered prompt text of this source. */
+	/** Rendered prompt text of this source, in the post-render form the built blocks hold. */
 	readonly fragment: string;
 }
 
@@ -646,7 +644,7 @@ export interface SystemPromptSources {
 export interface BuildSystemPromptResult {
 	/** Ordered system prompt blocks. Providers should preserve entries as distinct messages/blocks. */
 	systemPrompt: string[];
-	/** Context file and skill fragments located in `systemPrompt`; absent for prompts not built from templates. */
+	/** Context file and skill fragments rendered into `systemPrompt`; absent for prompts not built from templates. */
 	sources?: SystemPromptSources;
 	/**
 	 * Names of `xd://` devices whose catalog/protocol section this prompt renders.
@@ -664,30 +662,15 @@ const renderContextFile = prompt.compile(contextFileTemplate.trimEnd());
 const renderContextSkill = prompt.compile(contextSkillTemplate.trimEnd());
 const renderCustomContextSkill = prompt.compile(customContextSkillTemplate.trimEnd());
 
-/** Index of the only block containing `fragment` exactly once; -1 when repeated, undefined when absent. */
-function locateFragment(blocks: readonly string[], fragment: string): number | undefined {
-	let found: number | undefined;
-	for (const [index, block] of blocks.entries()) {
-		const start = block.indexOf(fragment);
-		if (start < 0) continue;
-		if (found !== undefined || block.includes(fragment, start + 1)) return -1;
-		found = index;
-	}
-	return found;
-}
-
 function collectPromptSources(
 	blocks: readonly string[],
-	candidates: readonly Omit<SystemPromptSource, "blockIndex">[],
+	candidates: readonly SystemPromptSource[],
 ): SystemPromptSources {
 	const sources: SystemPromptSource[] = [];
 	for (const candidate of candidates) {
 		// The rendered template applies post-render formatting to the whole prompt; match that form.
-		const fragment = prompt.format(candidate.fragment, { renderPhase: "post-render" }).trim();
-		if (!fragment) continue;
-		// A template that omits the source leaves nothing to attribute.
-		const blockIndex = locateFragment(blocks, fragment);
-		if (blockIndex !== undefined) sources.push({ ...candidate, blockIndex, fragment });
+		const fragment = normalizePromptBlock(candidate.fragment);
+		if (fragment) sources.push({ ...candidate, fragment });
 	}
 	return { blocks: blocks.slice(), sources };
 }
@@ -1050,7 +1033,10 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	const injectedAlwaysApplyRules = dedupeAlwaysApplyRules(alwaysApplyRules, promptSources);
 
 	const renderedContextFiles = contextFiles.map(file => ({ ...file, fragment: renderContextFile(file) }));
-	const renderSkill = resolvedCustomPrompt ? renderCustomContextSkill : renderContextSkill;
+	// Each outer template renders skills through its own fragment wrapper; select them together.
+	const { template: selectedTemplate, renderSkill } = resolvedCustomPrompt
+		? { template: customSystemPromptTemplate, renderSkill: renderCustomContextSkill }
+		: { template: resolvedSystemPromptTemplate ?? systemPromptTemplate, renderSkill: renderContextSkill };
 	const renderedSkills = filteredSkills.map(skill => ({
 		...skill,
 		fragment: renderSkill({ name: skill.name, description: skill.description }),
@@ -1106,9 +1092,6 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		writeTransportOnly,
 		subagent,
 	};
-	const selectedTemplate = resolvedCustomPrompt
-		? customSystemPromptTemplate
-		: (resolvedSystemPromptTemplate ?? systemPromptTemplate);
 	let rendered: string;
 	try {
 		rendered = prompt.render(selectedTemplate, data);

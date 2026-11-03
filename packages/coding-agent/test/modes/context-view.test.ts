@@ -145,13 +145,16 @@ describe("context snapshot prompt sources", () => {
 		},
 	];
 	const instructionPath = "/nonexistent/instructions.md";
-	const buildFixturePrompt = (customPrompt?: string) =>
+	const buildFixturePrompt = (
+		customPrompt?: string,
+		contextFiles = [{ path: instructionPath, content: "Unique instruction body" }],
+	) =>
 		buildSystemPrompt({
 			cwd: import.meta.dir,
 			personality: "none",
 			activeRepoContext: null,
 			customPrompt,
-			contextFiles: [{ path: instructionPath, content: "Unique instruction body" }],
+			contextFiles,
 			skills,
 		});
 	const entryTexts = (data: ContextViewData, id: string) => category(data, id).entries.map(entry => entry.text);
@@ -224,11 +227,32 @@ describe("context snapshot prompt sources", () => {
 		expect(entryTexts(moved, "system-prompt")).toEqual([project, policy]);
 	});
 
+	it("shows no notice when a replacement prompt drops every source, and keeps empty blocks listed", async () => {
+		const built = await buildFixturePrompt();
+		const data = buildSessionContextView(
+			sessionWith({ prompt: ["Replacement policy", ""], sources: built.sources, skills }),
+		);
+		expect(data.notices).toEqual([]);
+		expect(entryTexts(data, "instruction-files")).toEqual([]);
+		expect(entryTexts(data, "system-prompt")).toEqual(["Replacement policy", ""]);
+	});
+
+	it("notices a source whole-prompt formatting changed after an unclosed fence", async () => {
+		// Inside the earlier file's open fence the table row keeps its padding; formatted alone it is compacted.
+		const built = await buildFixturePrompt(undefined, [
+			{ path: "/nonexistent/a.md", content: "```\nunclosed" },
+			{ path: "/nonexistent/b.md", content: "| a   | b |" },
+		]);
+		expect(built.systemPrompt.join("\n")).toContain("| a   | b |");
+		const data = buildSessionContextView(sessionWith({ prompt: built.systemPrompt, sources: built.sources, skills }));
+		expect(data.notices).toEqual([notice]);
+		expect(category(data, "instruction-files").entries.map(entry => entry.label)).toEqual(["/nonexistent/a.md"]);
+	});
+
 	it("leaves overlapping sources and text reserved by repeated sources in System Prompt", () => {
 		const blocks = ["alpha beta gamma delta", "one two one"];
-		const source = (id: string, blockIndex: number, fragment: string) => ({
+		const source = (id: string, fragment: string) => ({
 			id,
-			blockIndex,
 			kind: id.startsWith("skill") ? ("skills" as const) : ("instruction-files" as const),
 			label: id,
 			fragment,
@@ -239,12 +263,12 @@ describe("context snapshot prompt sources", () => {
 				sources: {
 					blocks,
 					sources: [
-						source("file-overlap", 0, "alpha beta"),
-						source("skill-overlap", 0, "beta gamma"),
-						source("skill-disjoint", 0, "delta"),
+						source("file-overlap", "alpha beta"),
+						source("skill-overlap", "beta gamma"),
+						source("skill-disjoint", "delta"),
 						// Built in two places: never attributed, but its locations stay reserved.
-						source("skill-repeated", -1, "one"),
-						source("file-reserved", 1, "two one"),
+						source("skill-repeated", "one"),
+						source("file-reserved", "two one"),
 					],
 				},
 			}),
