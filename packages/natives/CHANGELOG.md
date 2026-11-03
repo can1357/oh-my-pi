@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed X11 takeover typing and shortcuts stopping with `Cancelled` partway through whenever you had last typed on your own keyboard
+- Fixed pressing Escape during X11 takeover input ending only that call, so the agent went on, instead of stopping computer use for the rest of the turn
+
 ## [18.16.0] - 2026-11-02
 
 ### Added

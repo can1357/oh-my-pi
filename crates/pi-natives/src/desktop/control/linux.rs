@@ -10,7 +10,7 @@ use x11rb::{
 	protocol::{
 		Event,
 		xinput::{ConnectionExt as _, Device, DeviceType, XIEventMask},
-		xproto::ConnectionExt as _,
+		xproto::{ConnectionExt as _, Mapping},
 	},
 	rust_connection::RustConnection,
 };
@@ -94,27 +94,7 @@ impl X11 {
 			.reply()
 			.map_err(failed)?;
 		let setup = conn.setup();
-		let mapping = conn
-			.get_keyboard_mapping(
-				setup.min_keycode,
-				setup
-					.max_keycode
-					.saturating_sub(setup.min_keycode)
-					.saturating_add(1),
-			)
-			.map_err(failed)?
-			.reply()
-			.map_err(failed)?;
-		let width = usize::from(mapping.keysyms_per_keycode);
-		if width == 0 {
-			return Err(failed("the X11 keyboard map is empty"));
-		}
-		let escape = mapping
-			.keysyms
-			.chunks(width)
-			.position(|row| row.contains(&0xff1b))
-			.and_then(|row| setup.min_keycode.checked_add(u8::try_from(row).ok()?))
-			.ok_or_else(|| failed("the X11 keymap has no Escape key"))?;
+		let escape = escape_keycode(&conn)?;
 		conn
 			.xinput_xi_select_events(setup.roots[screen].root, &[x11rb::protocol::xinput::EventMask {
 				deviceid: Device::ALL_MASTER.into(),
@@ -127,7 +107,7 @@ impl X11 {
 		Ok(Self { conn, escape })
 	}
 
-	fn run(self, stopped: &UnixStream, emergency: &EmergencyStop) {
+	fn run(mut self, stopped: &UnixStream, emergency: &EmergencyStop) {
 		let mut descriptors = [
 			libc::pollfd { fd: stopped.as_raw_fd(), events: libc::POLLIN, revents: 0 },
 			libc::pollfd {
@@ -138,13 +118,20 @@ impl X11 {
 		];
 		loop {
 			loop {
-				match self.conn.poll_for_event() {
-					Ok(Some(Event::XinputRawKeyPress(event)))
-						if event.detail == u32::from(self.escape) =>
-					{
+				let event = match self.conn.poll_for_event() {
+					Ok(Some(event)) => event,
+					Ok(None) => break,
+					Err(_) => {
+						emergency.cancel();
+						return;
+					},
+				};
+				match step(&mut self.escape, &event, || escape_keycode(&self.conn).ok()) {
+					Step::Next => {},
+					Step::Escape(source) => {
 						let devices = self
 							.conn
-							.xinput_xi_query_device(event.sourceid)
+							.xinput_xi_query_device(source)
 							.ok()
 							.and_then(|cookie| cookie.reply().ok());
 						let Some(devices) = devices else {
@@ -160,13 +147,7 @@ impl X11 {
 							emergency.escape();
 						}
 					},
-					Ok(Some(Event::MappingNotify(_))) => {
-						emergency.cancel();
-						return;
-					},
-					Ok(Some(_)) => {},
-					Ok(None) => break,
-					Err(_) => {
+					Step::Stop => {
 						emergency.cancel();
 						return;
 					},
@@ -184,5 +165,81 @@ impl X11 {
 				return;
 			}
 		}
+	}
+}
+
+/// What the monitor does with one X event.
+enum Step {
+	Next,
+	/// The Escape keycode was pressed on this source device.
+	Escape(u16),
+	Stop,
+}
+
+/// `keymap` reads the Escape keycode of the current core keymap.
+fn step(escape: &mut u8, event: &Event, keymap: impl FnOnce() -> Option<u8>) -> Step {
+	match event {
+		Event::XinputRawKeyPress(event) if event.detail == u32::from(*escape) => {
+			Step::Escape(event.sourceid)
+		},
+		// Xorg sends the core keymap again each time the core keyboard switches
+		// source device, as the takeover's own first XTEST key does after the
+		// user typed; only a keymap without Escape ends the stop.
+		Event::MappingNotify(event) if event.request == Mapping::KEYBOARD => match keymap() {
+			Some(keycode) => {
+				*escape = keycode;
+				Step::Next
+			},
+			None => Step::Stop,
+		},
+		_ => Step::Next,
+	}
+}
+
+fn escape_keycode(conn: &RustConnection) -> CoreResult<u8> {
+	let setup = conn.setup();
+	let mapping = conn
+		.get_keyboard_mapping(
+			setup.min_keycode,
+			setup
+				.max_keycode
+				.saturating_sub(setup.min_keycode)
+				.saturating_add(1),
+		)
+		.map_err(failed)?
+		.reply()
+		.map_err(failed)?;
+	let width = usize::from(mapping.keysyms_per_keycode);
+	if width == 0 {
+		return Err(failed("the X11 keyboard map is empty"));
+	}
+	mapping
+		.keysyms
+		.chunks(width)
+		.position(|row| row.contains(&0xff1b))
+		.and_then(|row| setup.min_keycode.checked_add(u8::try_from(row).ok()?))
+		.ok_or_else(|| failed("the X11 keymap has no Escape key"))
+}
+
+#[cfg(test)]
+mod tests {
+	use x11rb::protocol::{xinput::RawKeyPressEvent, xproto::MappingNotifyEvent};
+
+	use super::*;
+
+	#[test]
+	fn a_core_keymap_switch_keeps_the_escape_stop_on_the_new_keymap() {
+		let mapping =
+			|request| Event::MappingNotify(MappingNotifyEvent { request, ..Default::default() });
+		let press = |detail| {
+			Event::XinputRawKeyPress(RawKeyPressEvent { detail, sourceid: 8, ..Default::default() })
+		};
+		let mut escape = 9;
+
+		assert!(matches!(step(&mut escape, &mapping(Mapping::KEYBOARD), || Some(66)), Step::Next));
+		assert!(matches!(step(&mut escape, &press(9), || None), Step::Next));
+		assert!(matches!(step(&mut escape, &press(66), || None), Step::Escape(8)));
+		assert!(matches!(step(&mut escape, &mapping(Mapping::MODIFIER), || None), Step::Next));
+		assert!(matches!(step(&mut escape, &mapping(Mapping::KEYBOARD), || None), Step::Stop));
 	}
 }
