@@ -64,6 +64,9 @@ const FOREGROUND_POLL: Duration = Duration::from_millis(15);
 const FOREGROUND_RESTORE_SETTLE: Duration = Duration::from_millis(150);
 /// Bound on re-activating the user's window after a foreground action.
 const FOREGROUND_RESTORE_BUDGET: Duration = Duration::from_millis(400);
+/// Why background keys, typed or held, cannot reach a Qt window.
+const QT_CORE_KEYBOARD: &str =
+	"its Qt toolkit reads core keyboard events, which the XI2-MPX virtual keyboard does not send";
 
 pub struct X11Input {
 	conn:             Arc<RustConnection>,
@@ -166,6 +169,16 @@ impl X11Input {
 						));
 					}
 					return self.pointer_send_event(window, &event);
+				}
+				// Qt reads modifiers off the XI2 pointer events; other held keys
+				// only as core key events.
+				let holds_keys = matches!(
+					&event,
+					PointerEvent::Hold { keys, .. } | PointerEvent::Drag { keys, .. }
+						if keys.iter().any(|key| !key.is_modifier())
+				);
+				if holds_keys && self.reads_core_keyboard(window) {
+					return Err(background_unavailable(id, event_kind(&event), QT_CORE_KEYBOARD));
 				}
 				let reason = match ensure_mpx(&mut self.mpx, &mut self.mpx_unavailable) {
 					Ok(mpx) => {
@@ -273,10 +286,14 @@ impl X11Input {
 			let steps = keys.plan(&self.keymap)?;
 			return self.send_key_steps(window, &steps, keys.duration());
 		}
+		let pid = self.wm().owning_pid(window);
+		// Empty text plans no keys, so it stays the no-op it is everywhere.
+		if pid.is_some_and(toolkit::process_reads_core_keyboard) && !matches!(keys, Keys::Text("")) {
+			return Err(background_unavailable(id, keys.kind(), QT_CORE_KEYBOARD));
+		}
 		let reason = match ensure_mpx(&mut self.mpx, &mut self.mpx_unavailable) {
 			Ok(mpx) => {
 				let wm = Wm { conn: &self.conn, root: self.root, atoms: &self.atoms };
-				let pid = wm.owning_pid(window);
 				if let Some(pid) = pid
 					&& let Some(popup) = wm.grab_popup_of(pid)
 				{
@@ -998,6 +1015,15 @@ impl X11Input {
 			}
 		}
 		Ok(())
+	}
+
+	/// Whether `window`'s process takes keys only as core events
+	/// ([`toolkit::process_reads_core_keyboard`]).
+	fn reads_core_keyboard(&self, window: Window) -> bool {
+		self
+			.wm()
+			.owning_pid(window)
+			.is_some_and(toolkit::process_reads_core_keyboard)
 	}
 
 	fn requires_core_events(&self, window: Window) -> bool {

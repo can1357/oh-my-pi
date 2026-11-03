@@ -21,6 +21,9 @@
 ### Fixed
 
 - Fixed X11 takeover and `raise()` failing on a window that background typing had targeted, under window managers such as Openbox ([#17910](https://github.com/can1357/oh-my-pi/pull/17910) by [@will-bogusz](https://github.com/will-bogusz))
+### Fixed
+
+- Fixed X11 background typing, shortcuts and keys held during drags into Qt 5/6 apps reporting success while the app received no keys; the `computer` tool now runs them in takeover, or refuses them when `computer.backgroundFallback` is `refuse` ([#17911](https://github.com/can1357/oh-my-pi/pull/17911) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.16.0] - 2026-11-02
 
