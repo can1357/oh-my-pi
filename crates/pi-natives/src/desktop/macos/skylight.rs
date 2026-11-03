@@ -27,7 +27,7 @@ use super::{
 		types::DesktopFocusReturn,
 	},
 	ax, capture,
-	key_reroute::KeyReroute,
+	key_reroute::{Armed, KeyReroute},
 	permission, process,
 	release::Route,
 	release_guard,
@@ -1545,22 +1545,25 @@ pub(in super::super) struct FrontApp {
 /// setting up its taps can stall the sampler past what the watch tolerates.
 pub(in super::super) fn front_app(browser: Option<pid_t>) -> Option<FrontApp> {
 	let spi = FOREGROUND.as_ref()?;
-	let (read_at, picks, rearm) = if let Some(browser) = browser {
-		let ((read_at, picks), rearm) = rearm_for_front(
-			|| {
-				let read_at = Instant::now();
-				let picks = Picks::read(spi);
-				Some((psn_pid(&picks.front?)?, (read_at, picks)))
-			},
-			|user| rearm(browser, user, Instant::now()),
-		)?;
-		(read_at, picks, rearm)
-	} else {
-		(Instant::now(), Picks::read(spi), Rearm::Replace(None))
-	};
-	let psn = picks.front?;
-	watch_picks(spi, picks, read_at, rearm);
-	Some(FrontApp { psn, read_at })
+	loop {
+		let (read_at, picks, rearm) = if let Some(browser) = browser {
+			let ((read_at, picks), rearm) = rearm_for_front(
+				|| {
+					let read_at = Instant::now();
+					let picks = Picks::read(spi);
+					Some((psn_pid(&picks.front?)?, (read_at, picks)))
+				},
+				|user| rearm(browser, user, Instant::now()),
+			)?;
+			(read_at, picks, rearm)
+		} else {
+			(Instant::now(), Picks::read(spi), Rearm::Replace(None))
+		};
+		let psn = picks.front?;
+		if watch_picks(spi, picks, read_at, rearm) {
+			return Some(FrontApp { psn, read_at });
+		}
+	}
 }
 
 /// Tap setup may block while the user switches apps. Only publish a snapshot
@@ -1693,6 +1696,28 @@ static PICK_LOG: Mutex<PickLog> = Mutex::new(PickLog {
 });
 
 impl PickLog {
+	/// Validate reuse and extend its lifetime in the same critical section.
+	/// The sampler may have expired the candidate while setup read the OS.
+	fn watch_read(&mut self, picks: Picks, now: Instant, rearm: Rearm) -> bool {
+		match rearm {
+			Rearm::Keep(armed) => {
+				if !self.reroute.as_ref().is_some_and(|(at, reroute)| {
+					reroute.armed() == armed && keeps_reroute(self.since(*at, now))
+				}) {
+					return false;
+				}
+			},
+			Rearm::Replace(reroute) => self.reroute = reroute.map(|reroute| (now, reroute)),
+		}
+		self.record(picks, now);
+		self.watch_until = Some(
+			self
+				.watch_until
+				.map_or(now + PICK_WATCH, |until| until.max(now + PICK_WATCH)),
+		);
+		true
+	}
+
 	fn record(&mut self, picks: Picks, now: Instant) {
 		// Progress and each signal are monotonic even when concurrent reads
 		// finish out of order. Older positive evidence must not be discarded.
@@ -1764,18 +1789,13 @@ impl PickLog {
 /// Records `picks`, read at `now`, applies `rearm` to the read's reroute,
 /// and keeps the [`PickLog`] sampling until [`PICK_WATCH`] after it, starting
 /// its sampler unless one runs.
-fn watch_picks(spi: &'static ForegroundSpi, picks: Picks, now: Instant, rearm: Rearm) {
+fn watch_picks(spi: &'static ForegroundSpi, picks: Picks, now: Instant, rearm: Rearm) -> bool {
 	let mut log = PICK_LOG.lock();
-	log.record(picks, now);
-	log.watch_until = Some(
-		log.watch_until
-			.map_or(now + PICK_WATCH, |until| until.max(now + PICK_WATCH)),
-	);
-	if let Rearm::Replace(reroute) = rearm {
-		log.reroute = reroute.map(|reroute| (now, reroute));
+	if !log.watch_read(picks, now, rearm) {
+		return false;
 	}
 	if mem::replace(&mut log.sampling, true) {
-		return;
+		return true;
 	}
 	log.watch_from = Some(now);
 	drop(log);
@@ -1799,12 +1819,13 @@ fn watch_picks(spi: &'static ForegroundSpi, picks: Picks, now: Instant, rearm: R
 	if sampler.is_err() {
 		PICK_LOG.lock().lose_sampler();
 	}
+	true
 }
 
 /// What a read does with the [`PickLog`]'s reroute.
 enum Rearm {
 	/// The one an earlier read set up serves this read too.
-	Keep,
+	Keep(Armed),
 	/// A new one, or none.
 	Replace(Option<KeyReroute>),
 }
@@ -1824,8 +1845,11 @@ fn rearm(browser: pid_t, user: pid_t, now: Instant) -> Rearm {
 	};
 	// Outside the log's lock: reading the mouse buttons asks `WindowServer`,
 	// and the sampler waits on that lock.
-	if held.is_some_and(|(armed, seen)| keeps_reroute(seen) && armed.covers_now(user, browser)) {
-		return Rearm::Keep;
+	if let Some((armed, seen)) = held
+		&& keeps_reroute(seen)
+		&& armed.covers_now(user, browser)
+	{
+		return Rearm::Keep(armed);
 	}
 	Rearm::Replace(arm_reroute(user, browser))
 }
@@ -4578,5 +4602,32 @@ mod tests {
 		assert!(!ended.load(Ordering::Acquire));
 		log.lock().lose_sampler();
 		assert!(ended.load(Ordering::Acquire), "only the watch ends the retained reroute");
+	}
+
+	#[test]
+	fn keeping_a_reroute_revalidates_and_extends_the_watch_atomically() {
+		let start = Instant::now();
+		let boundary = start + PICK_WATCH;
+		let now = boundary.checked_sub(SWITCH_SAMPLE).unwrap();
+		let picks = Picks { flags: 0, front: Some(HOLD_USER), key_focus: Some(HOLD_USER) };
+		for expired in [false, true] {
+			let mut log = pick_log(Some((start, boundary)));
+			log.sampled_at = Some(now);
+			let (reroute, _) = KeyReroute::unwatched_for_test();
+			let candidate = reroute.armed();
+			log.reroute = Some((start, reroute));
+			if expired {
+				// The sampler reached the old deadline after the reuse decision.
+				log.lose_sampler();
+			}
+			assert_eq!(log.watch_read(picks, now, Rearm::Keep(candidate)), !expired);
+			if expired {
+				assert!(log.watch_from.is_none(), "stale reuse must not publish an unprotected watch");
+				assert!(log.reroute.is_none());
+			} else {
+				assert_eq!(log.watch_until, Some(now + PICK_WATCH));
+				assert!(log.reroute.is_some(), "the old deadline no longer ends the retained tap");
+			}
+		}
 	}
 }
