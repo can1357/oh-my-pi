@@ -1044,10 +1044,23 @@ export interface GlobArgs {
 const GLOB_DEPTH = (value: string): boolean => /^[1-9]\d*$/u.test(value);
 
 /**
- * A `find -name` pattern the glob tool reads the same way: `*`, `?` and bracket classes, with no
- * braces (a glob alternation, literal to find), no `**`, no backslash escape and no slash.
+ * A `find -name` pattern the glob tool reads the same way: printable ASCII and `*` only. Not `?`
+ * (find matches one character, glob one byte), bracket classes (POSIX classes, unmatched
+ * brackets), braces (a glob alternation, literal to find), `**`, backslashes, `;` (glob's path
+ * separator), slashes, or surrounding spaces (glob trims its paths).
  */
-const SAME_NAME_PATTERN = /^(?:[^{}\\/*]|\*(?!\*))+$/u;
+const SAME_NAME_PATTERN = /^(?! )(?!.*\/)(?:[!-)+-:<->@-Z^-z|~ ]|\*(?!\*))+(?<! )$/u;
+
+/**
+ * A `find` root glob reads as the same directory: a relative or absolute path of printable ASCII
+ * without glob characters, `;`, surrounding spaces, or a `..` segment (glob resolves it
+ * lexically, find through symlinks), and not `/` (glob refuses to search it).
+ */
+function isPlainRoot(root: string): boolean {
+	if (!/^(?! )[!-)+-:<->@-Z^-z|~ ]+(?<! )$/u.test(root)) return false;
+	if (root.replace(/\/+$/u, "") === "") return false;
+	return !root.split("/").includes("..");
+}
 
 /** Whether the shell-style `pattern` matches `name`, as `find -name` (fnmatch without FNM_PERIOD) does. */
 function fnmatch(pattern: string, name: string): boolean {
@@ -1128,8 +1141,13 @@ function findAsGlob(command: SimpleCommand, filesystem: StepFilesystem | undefin
 		git = false;
 		rest = rest.slice(4);
 	}
-	if (rest[rest.length - 1] === "-print") rest = rest.slice(0, -1);
-	if (rest[0] === "(" && rest[rest.length - 1] === ")") rest = rest.slice(1, -1);
+	let printed = false;
+	if (rest[rest.length - 1] === "-print") {
+		rest = rest.slice(0, -1);
+		printed = true;
+	}
+	const grouped = rest[0] === "(" && rest[rest.length - 1] === ")";
+	if (grouped) rest = rest.slice(1, -1);
 	const names: string[] = [];
 	for (let k = 0; k < rest.length; k += 3) {
 		if (rest[k] !== "-name" || rest[k + 1] === undefined || !SAME_NAME_PATTERN.test(rest[k + 1])) return undefined;
@@ -1139,10 +1157,14 @@ function findAsGlob(command: SimpleCommand, filesystem: StepFilesystem | undefin
 		if (joiner !== undefined && rest[k + 3] === undefined) return undefined;
 	}
 	if (names.length === 0) return undefined;
+	// `-print` binds to the last `-name` alone unless the alternatives are parenthesized.
+	if (printed && names.length > 1 && !grouped) return undefined;
 	for (const root of roots) {
-		// find lists a root the patterns match; glob never lists its roots.
-		const rootName = root === "/" ? "/" : (root.replace(/\/+$/u, "").split("/").pop() ?? root);
+		if (!isPlainRoot(root)) return undefined;
+		// find lists a root the patterns match, and prunes a `.git` root; glob never lists its roots.
+		const rootName = root.replace(/\/+$/u, "").split("/").pop() ?? root;
 		if (names.some(pattern => fnmatch(pattern, rootName))) return undefined;
+		if (!git && rootName === ".git") return undefined;
 		if (filesystem && filesystem.kind(root, followRoots) !== "directory") return undefined;
 	}
 	return {
@@ -1183,8 +1205,8 @@ function fdAsGlob(command: SimpleCommand, filesystem: StepFilesystem | undefined
 	const options = command.words.slice(1);
 	const operands = expressibleOperands(options, FD);
 	if (!operands || operands.some(word => word.computed)) return undefined;
-	const has = (short: string, long: string): boolean =>
-		options.some(word => new RegExp(`^(?:-[^-]*${short}|--${long}$)`, "u").test(word.value));
+	const given = fdOptions(options);
+	const has = (short: string, long: string): boolean => given.has(`-${short}`) || given.has(`--${long}`);
 	const unrestricted = has("u", "unrestricted");
 	if (!unrestricted && !has("I", "no-ignore")) return undefined;
 	const hidden = unrestricted || has("H", "hidden");
@@ -1195,13 +1217,9 @@ function fdAsGlob(command: SimpleCommand, filesystem: StepFilesystem | undefined
 	if (pattern !== "" && !SAME_NAME_PATTERN.test(pattern)) return undefined;
 	if (pattern !== "" && !has("s", "case-sensitive") && !/[A-Z]/u.test(pattern)) return undefined;
 	const roots = rootWords.length > 0 ? rootWords.map(word => word.value) : ["."];
+	if (!roots.every(isPlainRoot)) return undefined;
 	if (filesystem && roots.some(root => filesystem.kind(root, true) !== "directory")) return undefined;
-	let depthValue: string | undefined;
-	for (let k = 0; k < options.length; k++) {
-		const value = options[k].value;
-		if (value === "-d" || value === "--max-depth") depthValue = options[++k]?.value;
-		else depthValue = /^(?:-d|--max-depth=)(\d+)$/u.exec(value)?.[1] ?? depthValue;
-	}
+	const depthValue = given.get("--max-depth") ?? given.get("-d");
 	const name = pattern === "" ? "*" : globMode ? pattern : `*${pattern}*`;
 	return {
 		path: roots.map(root => globPathUnder(root, name)).join(";"),
@@ -1210,6 +1228,36 @@ function fdAsGlob(command: SimpleCommand, filesystem: StepFilesystem | undefined
 		git: hidden,
 		...(depthValue === undefined ? {} : { depth: Number(depthValue) }),
 	};
+}
+
+/**
+ * The options an `fd` command line gives, read as fd reads them: short flags may cluster, a valued
+ * option (`-c`, `-d`, `-j`) takes the rest of its word or the next word, and `--` ends options.
+ * Each maps to its value, or "" for a flag.
+ */
+function fdOptions(words: Word[]): Map<string, string> {
+	const given = new Map<string, string>();
+	for (let i = 0; i < words.length; i++) {
+		const text = words[i].value;
+		if (text === "--") break;
+		if (text === "-" || !text.startsWith("-")) continue;
+		if (text.startsWith("--")) {
+			const eq = text.indexOf("=");
+			const name = text.slice(0, eq < 0 ? undefined : eq);
+			const valued = typeof own(FD.long, name.slice(2)) === "function";
+			given.set(name, eq >= 0 ? text.slice(eq + 1) : valued ? (words[++i]?.value ?? "") : "");
+			continue;
+		}
+		for (let j = 1; j < text.length; j++) {
+			const letter = text[j];
+			if (own(FD.valued, letter)) {
+				given.set(`-${letter}`, j + 1 < text.length ? text.slice(j + 1) : (words[++i]?.value ?? ""));
+				break;
+			}
+			given.set(`-${letter}`, "");
+		}
+	}
+	return given;
 }
 
 /** The exact glob arguments for a `find` or `fd` step, as the glob rule's message shows them. */

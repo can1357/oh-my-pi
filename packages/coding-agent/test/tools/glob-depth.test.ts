@@ -73,6 +73,18 @@ describe("glob depth", () => {
 		expect(await files({ path: "proofs/**/dune", depth: 4_294_967_296 })).toHaveLength(4);
 	});
 
+	it("pages past the limit with skip, in one order", async () => {
+		for (let i = 0; i < 12; i++) await Bun.write(path.join(dir, "many", `f${String(i).padStart(2, "0")}.txt`), "x\n");
+		const page = async (skip?: number) =>
+			(await new GlobTool(session).execute("glob-skip", { path: "many/*.txt", limit: 5, gitignore: false, skip }))
+				.details?.files ?? [];
+		const pages = [await page(), await page(5), await page(10)];
+		expect(pages.map(p => p.length)).toEqual([5, 5, 2]);
+		expect(new Set(pages.flat()).size).toBe(12);
+		const past = await new GlobTool(session).execute("glob-skip-past", { path: "many/*.txt", skip: 50 });
+		expect(past.content.find(c => c.type === "text")?.text).toContain("past the end");
+	});
+
 	it("bounds a custom backend's URL-rooted results by depth", async () => {
 		const tool = new GlobTool(session, {
 			operations: {

@@ -953,6 +953,41 @@ describe("dedicated tool capability", () => {
 		}
 	});
 
+	it.each([
+		// #17840 round 2: `-print` binds to the last alternative unless they are grouped.
+		"find r -name A -o -name B -print",
+		// Glob characters, `;` or `..` in a root, and `/` (glob refuses to search it).
+		"find 'r[1]' -name dune",
+		"find 'a;b' -name dune",
+		"find deep-link/.. -name dune",
+		"find / -maxdepth 1 -name bin",
+		// Patterns glob reads differently: classes, `?`, unmatched brackets, `;`, trailing spaces.
+		"find r -name '[[:upper:]]*'",
+		"find r -name '?x'",
+		"find r -name '[x'",
+		"find r -name 'a;b'",
+		"find r -name 'name '",
+		// find prunes a `.git` root.
+		"find r/.git -name .git -prune -o -name dune -print",
+		// fd's valued options take the rest of their word.
+		"fd -cauto --glob 'A*' r",
+		"fd -calways --glob 'a*' r",
+	])("does not refuse %s (#17840 round 2)", command => {
+		expect(decide(command)).toBeUndefined();
+	});
+
+	it.each([
+		[
+			"find r \\( -name A -o -name B \\) -print",
+			{ path: "r/**/A;r/**/B", hidden: true, gitignore: false, git: true },
+		],
+		["fd -Id2 --glob 'A*' r", { path: "r/**/A*", hidden: false, gitignore: false, git: false, depth: 2 }],
+		["fd -Hd2 -I --glob 'A*' r", { path: "r/**/A*", hidden: true, gitignore: false, git: true, depth: 2 }],
+	])("names the glob call for %s", (command, args) => {
+		const result = checkBashInterception(command, tools, DEFAULT_BASH_INTERCEPTOR_RULES);
+		expect(result.message).toContain(`The same listing: glob ${JSON.stringify(args)}`);
+	});
+
 	it("does not send a find over a symlinked root to glob unless -H follows it", async () => {
 		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "bash-interceptor-find-root-")));
 		try {

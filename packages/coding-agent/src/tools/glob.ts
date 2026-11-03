@@ -40,6 +40,7 @@ const findSchema = type({
 	"gitignore?": "boolean",
 	"git?": "boolean",
 	"limit?": "number",
+	"skip?": "number",
 	"depth?": "number",
 });
 
@@ -200,7 +201,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 		onUpdate?: AgentToolUpdateCallback<GlobToolDetails>,
 		_context?: AgentToolContext,
 	): Promise<AgentToolResult<GlobToolDetails>> {
-		const { path: pathInput, limit, hidden, gitignore, git, depth } = params;
+		const { path: pathInput, limit, skip, hidden, gitignore, git, depth } = params;
 
 		throwIfAborted(signal);
 		// Preparation still rejects immediately on caller abort. Once every
@@ -297,6 +298,12 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 			}
 			// Native depth is 32-bit; anything deeper is unlimited in practice.
 			const walkDepth = depth === undefined ? undefined : Math.min(depth, 0xffff_ffff);
+			if (skip !== undefined && !(Number.isInteger(skip) && skip >= 0)) {
+				throw new ToolError("`skip` must be a non-negative integer");
+			}
+			const skipCount = skip ?? 0;
+			// Each page asks the walk for every entry before it, so pages stay in one order.
+			const window = effectiveLimit + skipCount;
 			// A request above the hard cap is silently reduced today; say so up
 			// front so `limit=1000` no longer reads as "200 is all there is" (#13263).
 			const clampNotice =
@@ -346,12 +353,27 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 					return toolResult(details).text(parts.join("\n")).useless().done();
 				}
 
-				const listLimit = applyListLimit(files, { limit: effectiveLimit });
+				const listLimit = applyListLimit(files.slice(skipCount), { limit: effectiveLimit });
 				const limited = listLimit.items;
 				const limitMeta = listLimit.meta;
+				if (limited.length === 0) {
+					const text = `No more files (skip=${skipCount} is past the end of ${files.length})`;
+					const empty: GlobToolDetails = {
+						scopePath,
+						fileCount: 0,
+						files: [],
+						truncated: false,
+						cwd: this.session.cwd,
+					};
+					return toolResult(empty).text(text).useless().done();
+				}
 				const baseOutput = formatGroupedPaths(limited);
 				const trailingNotes: string[] = [];
 				if (notice) trailingNotes.push(notice);
+				// A full page may have more after it.
+				if (limited.length === effectiveLimit && !opts?.timedOut) {
+					trailingNotes.push(`Next page: skip=${skipCount + limited.length}`);
+				}
 				if (clampNotice) trailingNotes.push(clampNotice);
 				if (missingPathsNote) trailingNotes.push(missingPathsNote);
 				const rawOutput = trailingNotes.length > 0 ? `${baseOutput}\n\n${trailingNotes.join("\n")}` : baseOutput;
@@ -456,7 +478,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 										...(useGitignore ? ["**/node_modules/**"] : []),
 										...(includeGit ? [] : ["**/.git/**"]),
 									],
-									limit: effectiveLimit,
+									limit: window,
 									hidden: includeHidden,
 									gitignore: useGitignore,
 									git: includeGit,
@@ -609,7 +631,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 							path: target.searchPath,
 							fileType: target.directoryOnly ? natives.FileType.Dir : undefined,
 							hidden: includeHidden,
-							maxResults: effectiveLimit,
+							maxResults: window,
 							maxDepth: walkDepth,
 							sortByMtime: true,
 							gitignore: useGitignore,
