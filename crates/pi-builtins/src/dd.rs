@@ -167,6 +167,8 @@ matches_parser!(Dd, app);
 
 impl Utility for Dd {
 	const NAME: &'static str = "dd";
+	/// GNU `dd` writes each output block at once.
+	const STDOUT_BUFFER: usize = 0;
 
 	fn run(self, host: &mut Host) -> i32 {
 		let operands: Vec<OsString> = self

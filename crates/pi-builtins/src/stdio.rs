@@ -57,9 +57,11 @@ const READ_CHUNK: usize = 64 * 1024;
 /// destination (`2>&1`) keep write order. The emulated-SIGPIPE and
 /// cancellation rules of the descriptor-backed writers hold: once the command
 /// is cancelled, writes and pending bytes are dropped; once a drain hit a
-/// closed reader, stderr output is discarded and stdout writes fail. A
-/// standard-error handle (see [`AsyncOut::as_stderr`]) also dies at once at a
-/// write to a pipe whose reader has gone.
+/// closed reader, stderr output is discarded, and stdout output is dropped
+/// until the utility's output buffer would be written, then fails (see
+/// `OutputGate::record`). A standard-error handle (see
+/// [`AsyncOut::as_stderr`]) also dies at once at a write to a pipe whose
+/// reader has gone.
 #[derive(Clone)]
 pub(crate) struct AsyncOut {
 	shared: Arc<Shared>,
@@ -227,10 +229,15 @@ impl AsyncOut {
 	/// destination is not a regular file, else only once 64 KiB are pending.
 	/// Returns at once when nothing is due.
 	///
-	/// A closed reader surfaces as [`io::ErrorKind::BrokenPipe`] and flips the
-	/// SIGPIPE state; a cancelled command drops the bytes silently.
+	/// A closed reader flips the SIGPIPE state and surfaces as
+	/// [`io::ErrorKind::BrokenPipe`], unless the death it raises is deferred
+	/// (see `Shared::delivered`); a cancelled command drops the bytes silently.
 	pub async fn drain(&self, full: bool) -> io::Result<()> {
 		if !self.shared.due(full) {
+			// Nothing pending: nothing is owed either.
+			if full {
+				self.shared.owed.store(false, Ordering::Release);
+			}
 			return Ok(());
 		}
 		match &self.shared.sink {
@@ -246,7 +253,12 @@ impl Shared {
 		pending > 0 && (full || !self.regular_file || pending >= FILE_DRAIN_THRESHOLD)
 	}
 
-	fn append(&self, buf: &[u8]) -> io::Result<()> {
+	/// Appends the bytes of a write; one the utility made to standard output
+	/// is `counted` toward its output buffer (see `OutputGate::wrote`).
+	fn append(&self, buf: &[u8], counted: bool) -> io::Result<()> {
+		if counted {
+			self.gate.wrote(buf.len());
+		}
 		if self.gate.discards() {
 			return Ok(());
 		}
@@ -257,16 +269,17 @@ impl Shared {
 		Ok(())
 	}
 
-	/// Makes a standard-error write act as an unbuffered one would, at once:
-	/// SIGPIPE is raised when the destination is a pipe whose reader has
-	/// gone. A native descriptor is checked without writing (the bytes go
-	/// out at the next drain); a provider file, which has no such check, gets
-	/// the pending bytes written now through its synchronous API where the
-	/// runtime allows a blocking call (see [`sync_io_allowed`]), else they
-	/// are owed (see [`AsyncOut::owes_delivery`]).
+	/// Makes a standard-error write act as an unbuffered one would, at once.
+	/// A native descriptor is checked without writing, raising SIGPIPE when
+	/// it is a pipe whose reader has gone, and its bytes are owed (see
+	/// [`AsyncOut::owes_delivery`]): the runtime's thread must not block on a
+	/// descriptor. A provider file, which has no such check, gets the pending
+	/// bytes written now through its synchronous API where the runtime allows
+	/// a blocking call (see [`sync_io_allowed`]); else they are owed.
 	fn deliver_unbuffered(&self) {
 		match &self.sink {
 			Sink::Native(_) => {
+				self.owed.store(true, Ordering::Release);
 				#[cfg(unix)]
 				if !self.regular_file
 					&& let Ok(fd) = self.handle.try_borrow_as_fd()
@@ -292,7 +305,7 @@ impl Shared {
 				let result = writer.write_all(&bytes).and_then(|()| writer.flush());
 				self.recycle(bytes);
 				if let Err(error) = &result {
-					self.gate.record(error);
+					self.gate.record_unbuffered(error);
 				}
 			},
 		}
@@ -310,9 +323,29 @@ impl Shared {
 		}
 	}
 
+	/// Notes how a delivery ended, returning its result as the utility sees
+	/// it. One that carried a standard-error write (`owed`) failed as an
+	/// unbuffered write does, killing the utility at once even on a
+	/// destination standard output shares (`2>&1`). A standard-output
+	/// delivery whose death SIGPIPE defers (its buffer is not full yet)
+	/// succeeds, as the program's write into its buffer does.
+	fn delivered(&self, result: io::Result<()>, owed: bool) -> io::Result<()> {
+		if let Err(error) = &result {
+			if owed {
+				self.gate.record_unbuffered(error);
+			} else {
+				self.gate.record(error);
+			}
+			if self.gate.discards() {
+				return Ok(());
+			}
+		}
+		result
+	}
+
 	async fn drain_provider(&self, order: &tokio::sync::Mutex<()>) -> io::Result<()> {
 		let _order = order.lock().await;
-		self.owed.store(false, Ordering::Release);
+		let owed = self.owed.swap(false, Ordering::AcqRel);
 		let bytes = std::mem::take(&mut *self.pending.lock());
 		let Some(file) = self.handle.as_vfs() else {
 			return Ok(());
@@ -326,15 +359,13 @@ impl Shared {
 			file.flush_async().await
 		}
 		.await;
-		if let Err(error) = &result {
-			self.gate.record(error);
-		}
 		self.recycle(bytes);
-		result
+		self.delivered(result, owed)
 	}
 
 	async fn drain_native(&self, native: &tokio::sync::Mutex<Native>) -> io::Result<()> {
 		let mut native = native.lock().await;
+		let owed = self.owed.swap(false, Ordering::AcqRel);
 		let bytes = std::mem::take(&mut *self.pending.lock());
 		if bytes.is_empty() {
 			return Ok(());
@@ -347,17 +378,14 @@ impl Shared {
 			*native = Native::open(&self.handle, self.regular_file);
 		}
 		let (bytes, result) = native.write_all(bytes).await;
-		if let Err(error) = &result {
-			self.gate.record(error);
-		}
 		self.recycle(bytes);
-		result
+		self.delivered(result, owed)
 	}
 }
 
 impl Write for AsyncOut {
 	fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-		self.shared.append(buf)?;
+		self.shared.append(buf, !self.unbuffered)?;
 		if self.unbuffered {
 			self.shared.deliver_unbuffered();
 		}
@@ -365,7 +393,7 @@ impl Write for AsyncOut {
 	}
 
 	fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
-		self.shared.append(buf)?;
+		self.shared.append(buf, !self.unbuffered)?;
 		if self.unbuffered {
 			self.shared.deliver_unbuffered();
 		}

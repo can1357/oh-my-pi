@@ -120,6 +120,9 @@ impl From<std::process::Output> for ExecutionResult {
 
 		#[cfg(unix)]
 		if let Some(signal) = output.status.signal() {
+			if signal == nix::sys::signal::Signal::SIGPIPE as i32 {
+				return ExecutionExitCode::BrokenPipe.into();
+			}
 			#[expect(clippy::cast_sign_loss)]
 			return Self::new((signal & 0xff) as u8 + 128);
 		}
@@ -145,7 +148,10 @@ pub enum ExecutionExitCode {
 	NotFound,
 	/// Indicates execution was interrupted.
 	Interrupted,
-	/// Indicates a broken pipe (SIGPIPE) was encountered.
+	/// SIGPIPE killed the command (a process, or a shell or builtin that
+	/// stands in for one): status 141. A command that exits with status 141
+	/// has [`ExecutionExitCode::Custom`] instead, so whoever waits for it can
+	/// tell a signal from an exit, as `waitpid` does.
 	BrokenPipe,
 	/// Indicates unimplemented functionality was encountered.
 	Unimplemented,
@@ -175,7 +181,6 @@ impl From<u8> for ExecutionExitCode {
 			126 => Self::CannotExecute,
 			127 => Self::NotFound,
 			130 => Self::Interrupted,
-			141 => Self::BrokenPipe,
 			code => Self::Custom(code),
 		}
 	}

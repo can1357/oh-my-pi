@@ -2375,7 +2375,7 @@ mod follow {
 						// Stop once the reader of our stdout pipe has gone away.
 						#[cfg(unix)]
 						if stdout_reader_gone(stdout) {
-							return Ok(());
+							return Err(TailError::OutputGone);
 						}
 						if !sleep_interval(&observer.cancel, settings.sleep_sec) {
 							break;
@@ -2455,7 +2455,7 @@ mod follow {
 						// Stop once the reader of our stdout pipe has gone away.
 						#[cfg(unix)]
 						if stdout_reader_gone(stdout) {
-							return Ok(());
+							return Err(TailError::OutputGone);
 						}
 					},
 					Err(e) => {
@@ -3075,6 +3075,9 @@ use paths::{FileExtTail, HeaderPrinter, Input, InputKind};
 pub(crate) enum TailError {
 	Io(io::Error),
 	Message(String),
+	/// The reader of standard output has gone while `tail -f` waited (see
+	/// [`Host::die_of_closed_stdout`]).
+	OutputGone,
 }
 
 impl TailError {
@@ -3088,6 +3091,7 @@ impl std::fmt::Display for TailError {
 		match self {
 			Self::Io(error) => error.fmt(f),
 			Self::Message(message) => f.write_str(message),
+			Self::OutputGone => f.write_str("standard output: reader gone"),
 		}
 	}
 }
@@ -3238,6 +3242,7 @@ impl Utility for Tail {
 
 		match tail_main(&settings, host) {
 			Ok(()) => host.exit_code(),
+			Err(TailError::OutputGone) => host.die_of_closed_stdout(),
 			Err(error) => {
 				let _ = writeln!(host.stderr, "tail: {error}");
 				1
@@ -3415,6 +3420,10 @@ fn tail_main(settings: &Settings, host: &mut Host) -> TailResult<()> {
 }
 
 fn uu_tail(settings: &Settings, host: &mut Host) -> TailResult<()> {
+	// GNU `tail -f` flushes each write: a broken pipe kills it there.
+	if settings.follow.is_some() {
+		host.unbuffer_stdout();
+	}
 	let mut printer = HeaderPrinter::new(settings.verbose, true);
 	let mut observer = Observer::from(
 		settings,
@@ -4106,7 +4115,8 @@ mod tests {
 
 	// Failure mode: the idle broken-pipe check polled the host process's own
 	// fd 1 instead of the command's stdout, so `tail -f log | grep -m1 x`
-	// kept running after grep exited until the log was written again.
+	// kept running after grep exited until the log was written again. It
+	// then ends as GNU `tail -f` does, killed by the SIGPIPE it raises.
 	#[cfg(unix)]
 	#[test]
 	fn follow_stops_once_stdout_reader_is_gone() {
@@ -4130,7 +4140,7 @@ mod tests {
 		}
 		let stopped = tail.is_finished();
 		cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-		assert_eq!(tail.join().unwrap(), 0);
+		assert_eq!(tail.join().unwrap(), crate::host::SIGPIPE_EXIT_CODE);
 		assert!(stopped, "tail -f kept following after its reader exited");
 	}
 }

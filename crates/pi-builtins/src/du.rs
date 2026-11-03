@@ -476,7 +476,7 @@ impl Walker<'_> {
 	}
 
 	fn check_stop(&mut self) -> bool {
-		if !self.stopped && (self.host.is_cancelled() || self.host.sigpipe_hit()) {
+		if !self.stopped && (self.host.is_cancelled() || self.host.sigpipe_killed()) {
 			self.stopped = true;
 		}
 		self.stopped

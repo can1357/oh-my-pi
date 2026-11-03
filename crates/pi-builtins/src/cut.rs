@@ -771,7 +771,7 @@ where
 		match result {
 			Ok(()) => {},
 			Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {
-				return crate::host::SIGPIPE_EXIT_CODE;
+				return crate::host::BROKEN_WRITE;
 			},
 			Err(error) => {
 				let _ = writeln!(host.stderr, "cut: {error}");
@@ -783,7 +783,7 @@ where
 	match out.flush() {
 		Ok(()) => {},
 		Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {
-			return crate::host::SIGPIPE_EXIT_CODE;
+			return crate::host::BROKEN_WRITE;
 		},
 		Err(error) => {
 			let _ = writeln!(host.stderr, "cut: write error: {error}");

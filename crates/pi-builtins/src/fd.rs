@@ -593,7 +593,7 @@ impl AsyncUtility for FdCli {
 			},
 			// Abort the walk; the host maps the BrokenPipe status.
 			Err(err) if err.kind() == io::ErrorKind::BrokenPipe => {
-				crate::host::SIGPIPE_EXIT_CODE
+				crate::host::BROKEN_WRITE
 			},
 			Err(err) => {
 				let _ = writeln!(host.stderr, "fd: {err}");

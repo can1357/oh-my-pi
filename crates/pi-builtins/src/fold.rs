@@ -139,7 +139,7 @@ fn host_cancel(host: &Host) -> impl Fn() -> bool + use<> {
 
 fn write_failure(host: &mut Host, error: &io::Error) -> i32 {
 	if error.kind() == io::ErrorKind::BrokenPipe {
-		return crate::host::SIGPIPE_EXIT_CODE;
+		return crate::host::BROKEN_WRITE;
 	}
 	let _ = writeln!(host.stderr, "fold: write error: {}", strip_errno(error));
 	1

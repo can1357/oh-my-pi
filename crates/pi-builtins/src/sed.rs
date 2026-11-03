@@ -9372,6 +9372,10 @@ impl Utility for Sed {
 			let _ = write!(host.stdout, "{}", uu_app().render_help());
 			return 1;
 		}
+		// GNU sed -u writes each line unbuffered: a broken pipe kills it there.
+		if self.matches.get_flag("unbuffered") {
+			host.unbuffer_stdout();
+		}
 		match sed_main(&self.matches, host) {
 			Ok(()) => host.exit_code(),
 			Err(error) => {

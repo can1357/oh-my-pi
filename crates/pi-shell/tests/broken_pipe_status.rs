@@ -888,18 +888,20 @@ async fn a_builtin_on_a_provider_file_keeps_the_shells_caught_sigpipe() {
 	assert_eq!((u8::from(result.exit_code), written.as_str()), (0, "caught\nAFTER\n"));
 }
 
-/// Runs `find missing victim -delete` with standard error a provider-backed
-/// file over a pipe with no reader; returns the status and whether `victim`
-/// survived.
-async fn find_on_a_provider_pipe() -> (u8, bool) {
-	use brush_core::openfiles::{OpenFile, OpenFiles};
-
-	let dir = tempfile::tempdir().expect("tempdir");
-	let victim = dir.path().join("victim");
-	std::fs::write(&victim, b"").expect("victim");
+/// A provider-backed file over a pipe whose reader has gone.
+fn dead_provider_pipe() -> pi_vfs::File {
 	let (reader, writer) = std::io::pipe().expect("pipe");
 	drop(reader);
 	let pipe = pi_vfs::File::from(std::fs::File::from(std::os::fd::OwnedFd::from(writer)));
+	pi_vfs::File::from_handle(ProviderFile(pipe))
+}
+
+/// Runs `script` in a fresh directory with standard error the
+/// provider-backed `stderr`; returns the status and the directory.
+async fn run_on_provider_stderr(script: &str, stderr: pi_vfs::File) -> (u8, tempfile::TempDir) {
+	use brush_core::openfiles::{OpenFile, OpenFiles};
+
+	let dir = tempfile::tempdir().expect("tempdir");
 	let mut shell = brush_core::Shell::builder()
 		.profile(brush_core::ProfileLoadBehavior::Skip)
 		.rc(brush_core::RcLoadBehavior::Skip)
@@ -912,18 +914,23 @@ async fn find_on_a_provider_pipe() -> (u8, bool) {
 	}
 	let mut params = shell.default_exec_params();
 	params.set_fd(OpenFiles::STDOUT_FD, OpenFile::from(tempfile::tempfile().expect("stdout")));
-	params
-		.set_fd(OpenFiles::STDERR_FD, OpenFile::from(pi_vfs::File::from_handle(ProviderFile(pipe))));
+	params.set_fd(OpenFiles::STDERR_FD, OpenFile::from(stderr));
 	let source = brush_core::SourceInfo::from("broken-pipe-provider");
 	let result = shell
-		.run_string(
-			format!("cd '{}' && find missing victim -delete", dir.path().display()),
-			&source,
-			&params,
-		)
+		.run_string(format!("cd '{}' && {script}", dir.path().display()), &source, &params)
 		.await
-		.expect("find");
-	(u8::from(result.exit_code), victim.exists())
+		.expect("script");
+	(u8::from(result.exit_code), dir)
+}
+
+/// Runs `find missing victim -delete` with standard error a provider-backed
+/// file over a pipe with no reader; returns the status and whether `victim`
+/// survived.
+async fn find_on_a_provider_pipe() -> (u8, bool) {
+	let (code, dir) =
+		run_on_provider_stderr(": > victim && find missing victim -delete", dead_provider_pipe())
+			.await;
+	(code, dir.path().join("victim").exists())
 }
 
 /// An async utility whose standard error is a provider-backed file over a
@@ -941,6 +948,46 @@ async fn an_async_utility_dies_at_a_diagnostic_on_a_provider_pipe() {
 #[tokio::test(flavor = "current_thread")]
 async fn an_async_utility_dies_at_a_provider_diagnostic_on_a_current_thread_runtime() {
 	assert_eq!(find_on_a_provider_pipe().await, (141, true));
+}
+
+/// Within one entry too: the diagnostic `find` writes for one action is
+/// delivered before its next action runs (here `-fprint`, after a failed
+/// `-delete`), on a current-thread runtime. Measured against Bash 5.2.21:
+/// status 141, `printed` empty. Regression: `find` wrote the entry first.
+#[tokio::test(flavor = "current_thread")]
+async fn an_async_utility_dies_at_a_provider_diagnostic_within_one_entry() {
+	let (code, dir) = run_on_provider_stderr(
+		"mkdir block && : > block/x && find block -maxdepth 0 -delete -o -fprint printed",
+		dead_provider_pipe(),
+	)
+	.await;
+	let printed = std::fs::read(dir.path().join("printed")).expect("printed");
+	assert_eq!((code, printed.as_slice()), (141, b"".as_slice()));
+}
+
+/// An async utility (here `grep`) delivers a diagnostic to a provider-backed
+/// standard error before it waits for its input, on a current-thread runtime
+/// too, as a process writes its standard error unbuffered: the diagnostic is
+/// there while `grep` still waits. Regression: it stayed pending until the
+/// input ended.
+#[tokio::test(flavor = "current_thread")]
+async fn an_async_utility_delivers_a_provider_diagnostic_before_it_waits() {
+	let log = tempfile::NamedTempFile::new().expect("log");
+	let file = std::fs::OpenOptions::new()
+		.write(true)
+		.open(log.path())
+		.expect("open log");
+	let stderr = pi_vfs::File::from_handle(ProviderFile(pi_vfs::File::from(file)));
+	// `sleep` is a program, which needs a descriptor for its standard error.
+	let shell =
+		run_on_provider_stderr("/bin/sleep 3 2>/dev/null | grep x /definitely/missing -", stderr);
+	let early = async {
+		tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+		std::fs::read_to_string(log.path()).expect("read log")
+	};
+	let ((code, _dir), early) = tokio::join!(shell, early);
+	assert_eq!(code, 2, "{early}");
+	assert!(early.contains("grep: /definitely/missing: No such file or directory"), "{early:?}");
 }
 
 /// A pipeline command that started before a later command's DEBUG trap
@@ -996,16 +1043,215 @@ async fn an_ignored_sigpipe_fails_utilities_whose_output_hits_a_dead_pipe() {
 	assert_eq!(output, "cat=1\ncut=1\nhead=1\nfold=1\nod=1\nyes=1\ngrep=2\n");
 }
 
-/// `ps` and `top` end with status 0 when their output hits a pipe with no
-/// reader, whatever the shell's SIGPIPE disposition, as procps does (it
-/// catches SIGPIPE and exits 0). Regression: they reported 141.
+/// `ps` and `top` end as procps ends them when a write finds a pipe with no
+/// reader, whatever the shell's SIGPIPE disposition and whichever stream it
+/// is: `ps` catches SIGPIPE and exits 0 at once; `top` catches it and goes on
+/// to its own status, 0, or 1 for an invalid option. Their help and version
+/// go to standard output with status 0. Measured against Bash 5.2.21 and
+/// procps-ng, per command: standard output, standard error, both.
+/// Regression: they reported 141, or 1 or 2.
 #[tokio::test(flavor = "multi_thread")]
-async fn ps_and_top_end_with_zero_at_a_dead_pipe() {
+async fn ps_and_top_end_as_procps_does_at_a_dead_pipe() {
 	let (exit_code, output) = run_in_tempdir(&[
-		r#"( fill; ps >&3; echo "ps=$?"; top -b -n 1 >&3; echo "top=$?" ) 3> >(true) 2>/dev/null"#,
-		r#"( trap '' PIPE; fill; ps >&3; echo "ps-ignored=$?"; top -b -n 1 >&3; echo "top-ignored=$?" ) 3> >(true) 2>/dev/null"#,
+		r#"for disp in default ignored; do"#,
+		r#"  for cmd in "ps" "ps --help" "ps --version" "ps --bogus" "top -b -n 1" "top --help" "top -h" "top --version" "top --bogus"; do"#,
+		r#"    for stream in out err both; do"#,
+		r#"      ( [ "$disp" = ignored ] && trap '' PIPE; fill"#,
+		r#"        case $stream in out) $cmd >&3 2>/dev/null ;; err) $cmd 2>&3 >/dev/null ;; both) $cmd >&3 2>&3 ;; esac"#,
+		r#"        printf '%s ' "$?" ) 3> >(true) 2>/dev/null"#,
+		r#"    done"#,
+		r#"  done; echo"#,
+		r#"done"#,
 	])
 	.await;
 	assert_eq!(exit_code, Some(0), "{output}");
-	assert_eq!(output, "ps=0\ntop=0\nps-ignored=0\ntop-ignored=0\n");
+	let per_disposition = "0 0 0 0 0 0 0 0 0 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 1 1 \n";
+	assert_eq!(output, per_disposition.repeat(2));
+}
+
+/// A utility buffers its standard output to a pipe, as GNU's stdio does, so
+/// a write that finds the reader gone kills it only once that buffer would
+/// be written (a pipe block, when it starts a command, or at exit): it
+/// finishes its other operands first. One that writes unbuffered (`tee`,
+/// `dd`) dies at once, before it writes its files or a summary, and a
+/// diagnostic, which a process writes unbuffered, kills it at once when it
+/// shares the dead destination. Measured against Bash 5.2.21. Regression:
+/// every utility died at its first failed write and skipped the rest.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_buffered_utility_dies_once_its_output_buffer_would_be_written() {
+	let (exit_code, output) = run_in_tempdir(&[
+		r#"made() { [ -e "$1" ] && echo yes || echo no; }"#,
+		r#"mkdir src e1 e2; : > r1; : > r2; : > src/c1; : > src/c2; : > v1; : > v2"#,
+		r#"( fill; rm -v r1 r2 >&3; cp -v src/c1 src/c2 . >&3; mkdir -v d1 d2 >&3; mv -v v1 v2 src/ >&3; rmdir -v e1 e2 >&3; echo "rmdir=$?" ) 3> >(true)"#,
+		r#"echo "r2=$(made r2) c2=$(made c2) d2=$(made d2) v2=$(made src/v2) e2=$(made e2)""#,
+		r#"mkdir fd1; : > fd1/a; : > fd1/b; ( fill; find fd1 -type f -print -delete >&3; echo "find=$?" ) 3> >(true); echo "left=$(ls fd1 | wc -l)""#,
+		r#"( fill; printf 'abc\n' | tee out0 >&3; echo "tee=$? $([ -s out0 ] && echo full || echo empty)" ) 3> >(true)"#,
+		r#"( fill; printf 'abc\n' | dd status=noxfer >&3; echo "dd=$?" ) 3> >(true)"#,
+		r#": > m1; ( fill; rm -v nonexist m1 >&3 2>&3; echo "rm-merged=$?" ) 3> >(true); echo "kept=$(made m1)""#,
+		r#": > blockf; ( fill; mkdir -v n1 blockf n2 >&3 2>&3; echo "mkdir-merged=$?" ) 3> >(true); echo "n2=$(made n2)""#,
+	])
+	.await;
+	assert_eq!(exit_code, Some(0), "{output}");
+	assert_eq!(
+		output,
+		concat!(
+			"rmdir=141\n",
+			"r2=no c2=yes d2=yes v2=yes e2=no\n",
+			"find=141\n",
+			"left=0\n",
+			"tee=141 empty\n",
+			"dd=141\n",
+			"rm-merged=141\n",
+			"kept=yes\n",
+			"mkdir-merged=141\n",
+			"n2=no\n",
+		)
+	);
+}
+
+/// With SIGPIPE ignored, a write that finds a pipe with no reader fails with
+/// `EPIPE`; a GNU utility goes on with its work and, checking its streams at
+/// exit, fails with its error status (1; 2 for `ls`, `grep`, `sort`; 125 for
+/// `env`). A command `env` ran in its place keeps its own status, as after
+/// `execvp`, and `xargs` runs no command after its trace failed. Measured
+/// against Bash 5.2.21. Regression: they reported success, `env` replaced
+/// its command's status with 125, and `xargs` ran its command.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_ignored_sigpipe_fails_a_utility_when_it_exits() {
+	let (exit_code, output) = run_in_tempdir(&[
+		r#"made() { [ -e "$1" ] && echo yes || echo no; }"#,
+		r#"mkdir src e1 e2; : > r1; : > r2; : > src/c1; : > src/c2; : > v1; : > v2"#,
+		r#"( trap '' PIPE; fill"#,
+		r#"  rm -v r1 r2 >&3; echo "rm=$?""#,
+		r#"  cp -v src/c1 src/c2 . >&3; echo "cp=$?""#,
+		r#"  mkdir -v d1 d2 >&3; echo "mkdir=$?""#,
+		r#"  mv -v v1 v2 src/ >&3; echo "mv=$?""#,
+		r#"  rmdir -v e1 e2 >&3; echo "rmdir=$?""#,
+		r#"  ls >&3; echo "ls=$?""#,
+		r#"  printf 'abc\n' | grep -c x >&3; echo "grep-c=$?""#,
+		r#"  printf 'b\na\n' | sort >&3; echo "sort=$?""#,
+		r#"  date >&3; echo "date=$?""#,
+		r#"  printf 'a\n' | uniq >&3; echo "uniq=$?""#,
+		r#"  : > m5; rm -v nonexist m5 >&3 2>&3; echo "rm-merged=$? $(made m5)""#,
+		r#"  env -v nosuchcmd 2>&3; echo "env-missing=$?""#,
+		r#"  env -v /bin/sh -c 'touch env-child; exit 141' 2>&3; echo "env=$? $(made env-child)""#,
+		r#"  env -v /bin/sh -c 'exit 3' 2>&3; echo "env3=$?""#,
+		r#"  nohup /bin/sh -c 'exit 141' >&3; echo "nohup=$?""#,
+		r#"  timeout 5 /bin/sh -c 'exit 141' >&3; echo "timeout=$?""#,
+		r#"  xargs -t touch xargs-child <<< arg 2>&3; echo "xargs=$? $(made xargs-child)""#,
+		r#") 3> >(true) 2>/dev/null"#,
+		r#"echo "r2=$(made r2) c2=$(made c2) d2=$(made d2) v2=$(made src/v2) e2=$(made e2)""#,
+	])
+	.await;
+	assert_eq!(exit_code, Some(0), "{output}");
+	assert_eq!(
+		output,
+		concat!(
+			"rm=1\n",
+			"cp=1\n",
+			"mkdir=1\n",
+			"mv=1\n",
+			"rmdir=1\n",
+			"ls=2\n",
+			"grep-c=2\n",
+			"sort=2\n",
+			"date=1\n",
+			"uniq=1\n",
+			"rm-merged=1 no\n",
+			"env-missing=125\n",
+			"env=141 yes\n",
+			"env3=3\n",
+			"nohup=141\n",
+			"timeout=141\n",
+			"xargs=1 no\n",
+			"r2=no c2=yes d2=yes v2=yes e2=no\n",
+		)
+	);
+}
+
+/// `tee` writes standard output first and unbuffered, as GNU `tee` does; at
+/// a pipe with no reader an `--output-error` mode (`-p` is `warn-nopipe`),
+/// or an ignored SIGPIPE, drops that output silently (status 0), warns
+/// (status 1), or exits before it writes its files (`exit`, status 1).
+/// Measured against Bash 5.2.21. Regression: a dropped pipe failed `tee`,
+/// and `exit` mode wrote its files before it exited.
+#[tokio::test(flavor = "multi_thread")]
+async fn tee_follows_its_output_error_mode_at_a_dead_pipe() {
+	let (exit_code, output) = run_in_tempdir(&[
+		r#"( fill; printf 'abc\n' | tee -p >&3; echo "p=$?" ) 3> >(true) 2>/dev/null"#,
+		r#"for mode in warn warn-nopipe exit exit-nopipe; do"#,
+		r#"  ( fill; printf 'abc\n' | tee --output-error=$mode out1 >&3; echo "$mode=$? $([ -s out1 ] && echo full || echo empty)" ) 3> >(true) 2>/dev/null"#,
+		r#"done"#,
+		r#"( fill; printf 'abc\n' | tee --output-error >&3; echo "output-error=$?" ) 3> >(true) 2>/dev/null"#,
+		r#"( trap '' PIPE; fill; printf 'abc\n' | tee >&3; echo "ignored=$?" ) 3> >(true) 2>/dev/null"#,
+	])
+	.await;
+	assert_eq!(exit_code, Some(0), "{output}");
+	assert_eq!(
+		output,
+		concat!(
+			"p=0\n",
+			"warn=1 full\n",
+			"warn-nopipe=0 full\n",
+			"exit=1 empty\n",
+			"exit-nopipe=0 full\n",
+			"output-error=0\n",
+			"ignored=0\n",
+		)
+	);
+}
+
+/// A command `xargs` runs, its default `echo` too, dies alone when SIGPIPE
+/// kills it, and `xargs` reports the signal with status 125, as for a
+/// process a signal killed; a command that exits with status 141 is a failed
+/// command (123). Measured against Bash 5.2.21. Regression: the default
+/// `echo` killed `xargs` itself (141), it printed its options as text, and an
+/// `echo` command counted as a failed one (123).
+#[tokio::test(flavor = "multi_thread")]
+async fn xargs_reports_a_command_sigpipe_killed() {
+	let (exit_code, output) = run_in_tempdir(&[
+		r#"( fill; printf 'a\nb\n' | xargs >&3; echo "default=$?" ) 3> >(true) 2>/dev/null"#,
+		r#"( fill; printf 'a\nb\n' | xargs -n1 >&3; echo "default-n1=$?" ) 3> >(true) 2>/dev/null"#,
+		r#"( fill; printf 'a\nb\n' | xargs -n1 echo >&3; echo "echo=$?" ) 3> >(true) 2>/dev/null"#,
+		r#"printf 'a\n' | xargs /bin/sh -c 'exit 141' 2>/dev/null; echo "exit=$?""#,
+		r#"printf 'a\n' | xargs env /bin/sh -c 'exit 141' 2>/dev/null; echo "env-exit=$?""#,
+		r#"printf -- '-n\nx\n' | xargs; echo "<""#,
+	])
+	.await;
+	assert_eq!(exit_code, Some(0), "{output}");
+	assert_eq!(output, "default=125\ndefault-n1=125\necho=125\nexit=123\nenv-exit=123\nx<\n");
+}
+
+/// An async utility (here `grep`) delivers a diagnostic before it goes on to
+/// wait for its input, as a process writes its standard error unbuffered, so
+/// the diagnostic survives the `timeout` that ends the wait. Measured against
+/// Bash 5.2.21. Regression: it stayed buffered until the input ended, and the
+/// cancellation dropped it.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_async_utility_delivers_a_diagnostic_before_it_waits() {
+	let (exit_code, output) = run(
+		"/bin/sleep 2 | timeout 0.5 grep x /definitely/missing - 2>&1; echo \"grep=$?\"".to_string(),
+	)
+	.await;
+	assert_eq!(exit_code, Some(0), "{output}");
+	assert!(
+		output.starts_with("grep: /definitely/missing: No such file or directory"),
+		"{output:?}"
+	);
+	assert!(output.ends_with("\ngrep=124\n"), "{output:?}");
+}
+
+/// `tail -f` whose reader goes away ends as GNU `tail -f` does, raising
+/// SIGPIPE: status 141, or 1 with SIGPIPE ignored. Measured against Bash
+/// 5.2.21. Regression: it reported success.
+#[tokio::test(flavor = "multi_thread")]
+async fn tail_follow_raises_sigpipe_when_its_reader_goes() {
+	let (exit_code, output) = run_in_tempdir(&[
+		r#"printf 'line\n' > log"#,
+		r#"tail -f log | head -n 1; echo "tail=${PIPESTATUS[0]}""#,
+		r#"( trap '' PIPE; tail -f log | head -n 1; echo "tail-ignored=${PIPESTATUS[0]}" ) 2>/dev/null"#,
+	])
+	.await;
+	assert_eq!(exit_code, Some(0), "{output}");
+	assert_eq!(output, "line\ntail=141\nline\ntail-ignored=1\n");
 }

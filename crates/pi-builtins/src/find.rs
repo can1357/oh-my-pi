@@ -3990,12 +3990,17 @@ pub mod matchers {
 	}
 
 	impl<'a> dyn Matcher + 'a {
-		/// Evaluates the matcher, answering synchronously when it can.
+		/// Evaluates the matcher, answering synchronously when it can. A
+		/// diagnostic the matcher wrote is delivered before anything else runs
+		/// (the next matcher may delete or write a file), as an unbuffered
+		/// write is: one that finds a pipe with no reader kills `find` here.
 		pub async fn eval(&self, entry: &WalkEntry, matcher_io: &mut MatcherIO<'_>) -> bool {
-			match self.eval_pure(entry, matcher_io) {
+			let matched = match self.eval_pure(entry, matcher_io) {
 				Some(matched) => matched,
 				None => self.matches(entry, matcher_io).await,
-			}
+			};
+			matcher_io.host().deliver_owed_output().await;
+			matched
 		}
 	}
 
@@ -5114,7 +5119,7 @@ async fn process_dir_walk_request(
 						)
 						.await;
 						let _ = host.flush_output().await;
-						if host.sigpipe_hit() {
+						if host.sigpipe_killed() {
 							break;
 						}
 						if should_quit {

@@ -2074,7 +2074,7 @@ async fn execute_search<M: Matcher<Captures: Send> + Clone + Send + Sync + 'stat
 			match searched {
 				Ok(matched) => any_match |= matched,
 				Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {
-					return crate::host::SIGPIPE_EXIT_CODE;
+					return crate::host::BROKEN_WRITE;
 				},
 				Err(error) => {
 					had_error = true;
@@ -2127,7 +2127,7 @@ async fn execute_search<M: Matcher<Captures: Send> + Clone + Send + Sync + 'stat
 						had_error |= outcome.had_error;
 					},
 					Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {
-						return crate::host::SIGPIPE_EXIT_CODE;
+						return crate::host::BROKEN_WRITE;
 					},
 					Err(error) => {
 						had_error = true;
@@ -2174,7 +2174,7 @@ async fn execute_search<M: Matcher<Captures: Send> + Clone + Send + Sync + 'stat
 						had_error |= outcome.had_error;
 					},
 					Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {
-						return crate::host::SIGPIPE_EXIT_CODE;
+						return crate::host::BROKEN_WRITE;
 					},
 					Err(error) => {
 						had_error = true;
@@ -2202,11 +2202,11 @@ async fn execute_search<M: Matcher<Captures: Send> + Clone + Send + Sync + 'stat
 		if write_json_summary(out, &stats)
 			.is_err_and(|error| error.kind() == io::ErrorKind::BrokenPipe)
 		{
-			return crate::host::SIGPIPE_EXIT_CODE;
+			return crate::host::BROKEN_WRITE;
 		}
 	}
 	if out.flush().is_err_and(|error| error.kind() == io::ErrorKind::BrokenPipe) {
-		return crate::host::SIGPIPE_EXIT_CODE;
+		return crate::host::BROKEN_WRITE;
 	}
 	exit_status(opts.quiet, any_match, had_error)
 }
@@ -2241,6 +2241,8 @@ impl AsyncUtility for Rg {
 		return 2;
 	}
 	let mut out = if cli.line_buffered && !cli.no_line_buffered {
+		// ripgrep flushes each line it writes: a broken pipe kills it there.
+		host.unbuffer_stdout();
 		StreamWriter::line(host.stdout_clone())
 	} else if cli.no_line_buffered {
 		StreamWriter::block(host.stdout_clone())

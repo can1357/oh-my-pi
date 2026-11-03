@@ -51,6 +51,8 @@ matches_parser!(Tee, app);
 
 impl Utility for Tee {
 	const NAME: &'static str = "tee";
+	/// GNU `tee` writes its standard output unbuffered.
+	const STDOUT_BUFFER: usize = 0;
 
 	fn run(self, host: &mut Host) -> i32 {
 		let output_error = self
@@ -71,6 +73,9 @@ impl Utility for Tee {
 		if output_error.is_some() {
 			host.ignore_sigpipe();
 		}
+		// Each failed write to standard output is handled below, as GNU `tee`
+		// clears the stream's error, so the check at exit does not count it.
+		host.checks_own_stdout();
 		let files = self
 			.matches
 			.get_many::<OsString>(options::FILE)
@@ -81,12 +86,10 @@ impl Utility for Tee {
 			output_error,
 		};
 
+		// Every failure is reported where it happens.
 		match tee(&options, host) {
 			Ok(()) => 0,
-			Err(err) => {
-				let _ = writeln!(host.stderr, "tee: {err}");
-				1
-			},
+			Err(_) => 1,
 		}
 	}
 }
@@ -143,13 +146,15 @@ fn tee(options: &Options, host: &mut Host) -> io::Result<()> {
 	}
 }
 
-fn copy(mut input: impl Read, mut output: impl Write, stderr: &mut impl Write) -> io::Result<usize> {
+/// Copies `input` to every output until it ends or, as GNU `tee` does, until
+/// no output is left.
+fn copy(mut input: impl Read, output: &mut MultiWriter, stderr: &mut impl Write) -> io::Result<usize> {
 	const FIRST_BUF_SIZE: usize = 8 * 1024;
 	let mut buffer = [0_u8; FIRST_BUF_SIZE];
 	let mut len = 0;
-	loop {
+	while !output.writers.is_empty() {
 		match input.read(&mut buffer) {
-			Ok(0) => return Ok(len),
+			Ok(0) => break,
 			Ok(received) => {
 				output.write_all(&buffer[..received])?;
 				output.flush()?;
@@ -162,6 +167,7 @@ fn copy(mut input: impl Read, mut output: impl Write, stderr: &mut impl Write) -
 			},
 		}
 	}
+	Ok(len)
 }
 
 fn open(fs: &BlockingFs, name: &OsString, path: &Path, append: bool) -> io::Result<NamedWriter> {
@@ -219,36 +225,31 @@ impl MultiWriter {
 		aborted.map_or(Ok(()), Err)
 	}
 
+	/// Writes `buf` (or flushes) to each output in order, standard output
+	/// first. An output that fails is dropped, reported as the mode says; an
+	/// error the mode makes fatal ends `tee` at once, before it writes the
+	/// outputs after it, as GNU `tee` exits there.
 	fn process(&mut self, flush: bool, buf: &[u8]) -> io::Result<()> {
 		let mode = self.output_error_mode.clone();
-		let mut aborted = None;
-		let mut errors = 0;
-		let stderr = &mut self.stderr;
-		self.writers.retain_mut(|writer| {
+		let mut index = 0;
+		while index < self.writers.len() {
+			let writer = &mut self.writers[index];
 			let result = if flush { writer.flush() } else { writer.write_all(buf) };
-			match result {
-				Ok(()) => true,
-				Err(err) => {
-					let (report, exit) = error_policy(mode.as_ref(), &err);
-					if report {
-						let _ = writeln!(stderr, "tee: {}: {err}", writer.name.maybe_quote());
-						errors += 1;
-					}
-					if exit && aborted.is_none() {
-						aborted = Some(err);
-					}
-					false
-				},
+			let Err(err) = result else {
+				index += 1;
+				continue;
+			};
+			let (report, exit) = error_policy(mode.as_ref(), &err);
+			if report {
+				let _ = writeln!(self.stderr, "tee: {}: {err}", writer.name.maybe_quote());
+				self.ignored_errors += 1;
 			}
-		});
-		self.ignored_errors += errors;
-		if let Some(err) = aborted {
-			Err(err)
-		} else if self.writers.is_empty() {
-			Err(Error::other("all outputs failed"))
-		} else {
-			Ok(())
+			if exit {
+				return Err(err);
+			}
+			self.writers.remove(index);
 		}
+		Ok(())
 	}
 }
 
