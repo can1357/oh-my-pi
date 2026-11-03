@@ -199,14 +199,16 @@ mod platform {
 			sys::pidfd_send_signal(self.pidfd.as_fd(), signal)
 		}
 
+		/// The group this process is in, read through [`sys::process_group`] so
+		/// that a security module which refuses `getpgid` falls back to the
+		/// `/proc` line instead of losing the group: a pin whose group cannot
+		/// be read is pinned by nothing and its members are never reached.
 		pub fn group_id(&self) -> Option<i32> {
 			if self.status() != ProcessStatus::Running {
 				return None;
 			}
 
-			// SAFETY: `getpgid` takes a scalar pid and reads no caller-owned
-			// memory; for a pid nobody holds it reports failure.
-			let pgid = unsafe { libc::getpgid(self.pid) };
+			let pgid = sys::process_group(self.pid)?;
 			// Still running after the read, the process held its pid throughout,
 			// so the group read is its own and not that of a process that took
 			// the pid after it exited.
@@ -1124,18 +1126,29 @@ impl SignalWave {
 	}
 }
 
-/// Whether the group `leader` led still has a running member, as seen through
-/// the kernel's group probe on its pin (Linux 6.9 and later). The probe also
-/// succeeds for a group of zombies, so the running members are counted too;
-/// while the probe succeeds the group's number names that group, so reading
-/// the process table by number is exact here. Reading only: nothing is
-/// signalled by number. `table` holds the process table across the entries
-/// of one sweep, which would otherwise read it once per entry.
-fn kernel_group_runs_in(leader: &PinnedProcess, table: &mut Option<GroupTable>) -> bool {
-	leader.signal_group(0) && !list_group(table, leader.pid()).is_empty()
+/// Whether the kernel still has the group `leader` led, as it answers on the
+/// leader's pin (Linux 6.9 and later): the probe succeeds while anything is
+/// in the group, a process that has exited but is not reaped among them. It
+/// is the only answer a record is dropped on. A listing of the process table
+/// cannot take its place: a member that exits after the table is read leaves
+/// a listing that says "empty" about a group a replacement member still
+/// holds, and a record dropped on that answer is never signalled again.
+#[must_use]
+pub fn kernel_group_exists(leader: &PinnedProcess) -> bool {
+	leader.signal_group(0)
 }
 
-/// [`kernel_group_runs_in`] for a single leader.
+/// Whether the group `leader` led still has a running member: the kernel has
+/// the group, and the process table read now lists a member of it that runs.
+/// This answers what is left to signal, which a group of processes that have
+/// exited is not; a record is never dropped on it (see
+/// [`kernel_group_exists`]). `table` holds the process table across the
+/// entries of one question, which would otherwise read it once per entry.
+fn kernel_group_runs_in(leader: &PinnedProcess, table: &mut Option<GroupTable>) -> bool {
+	kernel_group_exists(leader) && !list_group(table, leader.pid()).is_empty()
+}
+
+/// [`kernel_group_runs_in`] for a single leader, reading the table for it.
 #[must_use]
 pub fn kernel_group_runs(leader: &PinnedProcess) -> bool {
 	kernel_group_runs_in(leader, &mut None)
@@ -1215,10 +1228,10 @@ impl SpawnEntry {
 		}
 	}
 
-	/// Whether this entry can still reach a process: its own, on Windows the
-	/// process's descendants, or the group it leads through the kernel's
-	/// group probe (Linux 6.9 and later). `table` holds the process table
-	/// across the entries of one sweep.
+	/// Whether a wave sent now could still reach a running process: this
+	/// entry's own, on Windows the process's descendants, or a running member
+	/// of the group it leads. `table` holds the process table across the
+	/// entries of one question.
 	fn reaches_anything(&self, table: &mut Option<GroupTable>) -> bool {
 		if self.process.status() == ProcessStatus::Running {
 			return true;
@@ -1231,9 +1244,21 @@ impl SpawnEntry {
 	}
 
 	/// Whether the ledger must keep this entry. A child the shell has not yet
-	/// reported stays, so that its report can pin its group's members.
-	fn is_live(&self, table: &mut Option<GroupTable>) -> bool {
-		self.reap == Reap::Pending || self.reaches_anything(table)
+	/// reported stays, so that its report can pin its group's members. A
+	/// leader whose group the kernel still has stays as well, whether or not
+	/// a listing of the process table finds a member of it running: the
+	/// listing is what a member that exits after it is read makes wrong, and
+	/// an entry dropped is never signalled again (see
+	/// [`kernel_group_exists`]).
+	fn is_live(&self) -> bool {
+		if self.reap == Reap::Pending || self.process.status() == ProcessStatus::Running {
+			return true;
+		}
+		#[cfg(target_os = "windows")]
+		if !self.process.descendants().is_empty() {
+			return true;
+		}
+		self.leads() && kernel_group_exists(&self.process)
 	}
 }
 
@@ -1400,16 +1425,20 @@ impl SpawnLedger {
 	/// Drops every entry the ledger no longer needs, and schedules the next
 	/// record-time sweep `PRUNE_THRESHOLD` records past the entries that
 	/// remain: comparing against the post-sweep size, not the pre-sweep one,
-	/// keeps a large surviving set from being swept on every record.
+	/// keeps a large surviving set from being swept on every record. An entry
+	/// goes only on the kernel's own answer about its group, never on a
+	/// listing of the process table (see [`kernel_group_exists`]).
 	pub fn prune(&mut self) {
-		let mut table: Option<GroupTable> = None;
-		self.entries.retain(|entry| entry.is_live(&mut table));
+		self.entries.retain(SpawnEntry::is_live);
 		self.next_sweep_at = self.entries.len() + Self::PRUNE_THRESHOLD;
 	}
 
-	/// Whether a wave could still reach a process: a recorded process runs,
-	/// a recorded leader's group still has members the kernel can reach, or
-	/// an unreported leader's group still has members.
+	/// Whether a wave could still reach a running process: a recorded process
+	/// runs, a recorded leader's group has a running member, or an unreported
+	/// leader's group has a member besides the leader itself. The members are
+	/// read from the process table, which answers for the instant it was
+	/// read: a caller sends another wave on it, and no entry is dropped for
+	/// it.
 	#[must_use]
 	pub fn reaches_anything(&self) -> bool {
 		let mut table: Option<GroupTable> = None;
@@ -1587,6 +1616,85 @@ pub(crate) mod tests {
 			String::from_utf8_lossy(&output.stderr),
 		);
 		false
+	}
+
+	/// The variable naming the test whose body runs with `getpgid` refused.
+	#[cfg(target_os = "linux")]
+	const NO_GETPGID_TEST: &str = "PI_BUILTINS_NO_GETPGID_TEST";
+
+	/// Whether the test `name` runs its body now. Otherwise this re-runs that
+	/// test of this binary under a seccomp filter that makes `getpgid` fail
+	/// with `EPERM`, as a security module that refuses the call does, checks
+	/// that the re-run passed, and returns false.
+	#[cfg(target_os = "linux")]
+	fn without_getpgid(name: &str) -> bool {
+		if std::env::var(NO_GETPGID_TEST).as_deref() == Ok(name) {
+			refuse_getpgid();
+			return true;
+		}
+		let (_, module) = module_path!().split_once("::").expect("module path below the crate");
+		let output = std::process::Command::new(std::env::current_exe().expect("test binary path"))
+			.args(["--exact", &format!("{module}::{name}"), "--nocapture"])
+			.env(NO_GETPGID_TEST, name)
+			.output()
+			.expect("re-run the test with getpgid refused");
+		let stdout = String::from_utf8_lossy(&output.stdout);
+		assert!(
+			output.status.success() && stdout.contains("test result: ok. 1 passed"),
+			"{name} with getpgid refused: {}\n{stdout}\n{}",
+			output.status,
+			String::from_utf8_lossy(&output.stderr),
+		);
+		false
+	}
+
+	/// Installs the seccomp filter for [`without_getpgid`].
+	#[cfg(target_os = "linux")]
+	fn refuse_getpgid() {
+		let mut filter = [
+			libc::sock_filter {
+				code: (libc::BPF_LD | libc::BPF_W | libc::BPF_ABS) as u16,
+				jt:   0,
+				jf:   0,
+				k:    0,
+			},
+			libc::sock_filter {
+				code: (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16,
+				jt:   0,
+				jf:   1,
+				k:    libc::SYS_getpgid as u32,
+			},
+			libc::sock_filter {
+				code: (libc::BPF_RET | libc::BPF_K) as u16,
+				jt:   0,
+				jf:   0,
+				k:    libc::SECCOMP_RET_ERRNO | libc::EPERM as u32,
+			},
+			libc::sock_filter {
+				code: (libc::BPF_RET | libc::BPF_K) as u16,
+				jt:   0,
+				jf:   0,
+				k:    libc::SECCOMP_RET_ALLOW,
+			},
+		];
+		let program = libc::sock_fprog { len: filter.len() as u16, filter: filter.as_mut_ptr() };
+		// SAFETY: prctl takes scalar arguments. seccomp(2) reads the filter
+		// program, valid for the duration of the call; TSYNC applies it to
+		// every thread of this process.
+		unsafe {
+			assert_eq!(libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0), 0, "no_new_privs");
+			assert_eq!(
+				libc::syscall(
+					libc::SYS_seccomp,
+					libc::SECCOMP_SET_MODE_FILTER,
+					libc::SECCOMP_FILTER_FLAG_TSYNC,
+					&raw const program,
+				),
+				0,
+				"install seccomp filter: {}",
+				std::io::Error::last_os_error(),
+			);
+		}
 	}
 
 	/// Signalling the host's own process group ends the host along with its
@@ -1955,6 +2063,114 @@ while True:
 			"pruning must bound retained entries below the sweep threshold once the pinned processes \
 			 have exited; got {retained} retained (threshold {})",
 			SpawnLedger::PRUNE_THRESHOLD
+		);
+	}
+
+	/// A group whose listed member exits leaves a listing that says the group
+	/// is empty while the kernel still has it — the member may have forked a
+	/// replacement that the listing never saw. The ledger drops an entry only
+	/// on the kernel's own answer, so the leader of such a group is kept and
+	/// the next wave still reaches it. A member that exited without being
+	/// reaped stands for the listed member here: the group holds it, no
+	/// listing of running processes reports it.
+	#[cfg(target_os = "linux")]
+	#[test]
+	fn prune_keeps_a_leader_whose_group_the_kernel_still_has() {
+		use std::{
+			os::unix::process::CommandExt as _,
+			process::Command,
+			thread,
+			time::{Duration, Instant},
+		};
+
+		let leader = Command::new("/bin/sleep")
+			.arg("600")
+			.process_group(0)
+			.spawn()
+			.expect("start the group leader");
+		let group = i32::try_from(leader.id()).expect("leader pid fits");
+		let leader_pin = PinnedProcess::from_pid(group).expect("pin the leader");
+		let mut guard = ProcessGuard::new(leader);
+		let mut member = Command::new("/bin/true")
+			.process_group(group)
+			.spawn()
+			.expect("start a member of the leader's group");
+		let member_pid = i32::try_from(member.id()).expect("member pid fits");
+		let deadline = Instant::now() + Duration::from_secs(5);
+		while PinnedProcess::from_pid(member_pid)
+			.is_some_and(|pin| pin.status() == ProcessStatus::Running)
+		{
+			assert!(Instant::now() < deadline, "the member never exited");
+			thread::sleep(Duration::from_millis(5));
+		}
+
+		let mut ledger = SpawnLedger::default();
+		ledger.record(Some(group), Some(leader_pin.clone()));
+		ledger.before_reap(group, true);
+		guard.leader().kill().expect("end the leader");
+		assert!(guard.leader().wait().is_ok(), "reap the leader");
+		// The exited member holds the group: the kernel answers for it, a
+		// listing of running processes does not.
+		assert!(
+			leader_pin.signal_group(0),
+			"the kernel must still have the group the exited member holds"
+		);
+
+		ledger.prune();
+
+		assert!(
+			ledger.entries().iter().any(|entry| entry.process.same_identity(&leader_pin)),
+			"the leader of a group the kernel still has must survive the sweep"
+		);
+		let _ = member.wait();
+	}
+
+	/// A security module may refuse `getpgid`. The group of a pinned process
+	/// is then read from its `/proc` line instead, so the members of a group
+	/// a command led are still pinned before the command is reaped: without
+	/// the fallback the group reads as unknown and every member escapes the
+	/// waves that follow.
+	#[cfg(target_os = "linux")]
+	#[test]
+	fn a_refused_getpgid_falls_back_to_proc_for_a_pins_group() {
+		use std::{
+			io::{BufRead as _, BufReader},
+			os::unix::process::CommandExt as _,
+			process::{Command, Stdio},
+		};
+
+		if !without_getpgid("a_refused_getpgid_falls_back_to_proc_for_a_pins_group") {
+			return;
+		}
+		// SAFETY: `getpgid` takes a scalar pid; the filter is installed.
+		assert_eq!(unsafe { libc::getpgid(0) }, -1, "the filter must refuse getpgid");
+
+		let mut leader = Command::new("/bin/sh")
+			.args(["-c", "/bin/sleep 600 & echo \"$!\"; /bin/sleep 600"])
+			.process_group(0)
+			.stdout(Stdio::piped())
+			.spawn()
+			.expect("start the group leader");
+		let mut output = BufReader::new(leader.stdout.take().expect("leader stdout"));
+		let group = i32::try_from(leader.id()).expect("leader pid fits");
+		let leader_pin = PinnedProcess::from_pid(group).expect("pin the leader");
+		let mut guard = ProcessGuard::new(leader);
+		let mut line = String::new();
+		output.read_line(&mut line).expect("read the member pid");
+		let member_pid: i32 = line.trim().parse().expect("member pid");
+		let member = PinnedProcess::from_pid(member_pid).expect("pin the member");
+		guard.pin(&member);
+
+		assert_eq!(
+			leader_pin.group_id(),
+			Some(group),
+			"a pin's group must be read from /proc when getpgid is refused"
+		);
+		assert_eq!(member.group_id(), Some(group), "the member's group must read the same way");
+		let members = leader_pin.members_before_reap();
+		assert!(
+			members.iter().any(|pinned| pinned.same_identity(&member)),
+			"the group's members must be pinned before the reap with getpgid refused"
 		);
 	}
 
