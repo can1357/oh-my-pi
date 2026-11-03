@@ -30,7 +30,11 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
-import { testLifetime } from "../../utils/test/helpers/mock-restores";
+import { installEnvRestores, testLifetime } from "../../utils/test/helpers/mock-restores";
+
+// The async afterEach can time out, and Bun then skips `onTestFinished`; this owner still puts
+// PI_EDIT_VARIANT back at the next test and when the file ends.
+installEnvRestores(["PI_EDIT_VARIANT"]);
 
 function createAssistantMessage(content: AssistantMessage["content"], stopReason: StopReason): AssistantMessage {
 	return {
@@ -234,14 +238,6 @@ it("multi-entry edit on an auto-generated file surfaces isError + error text ins
 	// through to the streaming preview (which displays the *proposed* diff and
 	// looks identical to success).
 	const life = testLifetime();
-	const originalVariant = Bun.env.PI_EDIT_VARIANT;
-	onTestFinished(() => {
-		if (originalVariant === undefined) {
-			delete Bun.env.PI_EDIT_VARIANT;
-		} else {
-			Bun.env.PI_EDIT_VARIANT = originalVariant;
-		}
-	});
 	const generatedPath = path.join(tempDir, "generated.ts");
 	await Bun.write(
 		generatedPath,

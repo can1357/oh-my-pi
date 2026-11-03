@@ -1,32 +1,28 @@
-import { afterEach, beforeEach, describe, expect, onTestFinished, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import { type AuthBrokerServerHandle, startAuthBroker } from "@oh-my-pi/pi-ai/auth-broker";
 import { runAuthBrokerCommand } from "@oh-my-pi/pi-coding-agent/cli/auth-broker-cli";
-import { getAgentDbPath, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
+import { __resetDirsFromEnvForTests, getAgentDbPath, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
+import { installEnvRestores, installMockRestores, testLifetime } from "../../utils/test/helpers/mock-restores";
+
+// Restores the stdout spy below at the next test and when the file ends, even after a timeout.
+installMockRestores();
 
 const TEAM_ORG = "org-team-1111";
 
 async function runMigrateCapturingStdout(): Promise<string> {
-	const originalWrite = process.stdout.write.bind(process.stdout);
-	onTestFinished(() => {
-		process.stdout.write = originalWrite;
-	});
 	let captured = "";
-	process.stdout.write = ((chunk: string | Uint8Array): boolean => {
+	spyOn(process.stdout, "write").mockImplementation((chunk: string | Uint8Array): boolean => {
 		captured += typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk);
 		return true;
-	}) as typeof process.stdout.write;
-	try {
-		await runAuthBrokerCommand({
-			action: "migrate",
-			flags: { fromLocal: true, includeOauth: true },
-		});
-	} finally {
-		process.stdout.write = originalWrite;
-	}
+	});
+	await runAuthBrokerCommand({
+		action: "migrate",
+		flags: { fromLocal: true, includeOauth: true },
+	});
 	return captured;
 }
 
@@ -37,13 +33,19 @@ describe("auth-broker migrate", () => {
 	let brokerStorage: AuthStorage | undefined;
 	let handle: AuthBrokerServerHandle | undefined;
 	const token = "broker-migrate-bearer";
-	const savedEnv: Record<string, string | undefined> = {};
+	// The async afterEach can time out, and Bun then skips `onTestFinished` and the later hooks; this
+	// owner still puts the variables back at the next test and when the scope ends.
+	// `setAgentDir()` writes PI_CODING_AGENT_DIR and clears the profile variables.
+	installEnvRestores(
+		["OMP_AUTH_BROKER_URL", "OMP_AUTH_BROKER_TOKEN", "PI_CODING_AGENT_DIR", "OMP_PROFILE", "PI_PROFILE"],
+		{ afterPutBack: __resetDirsFromEnvForTests },
+	);
 
 	beforeEach(async () => {
-		savedEnv.OMP_AUTH_BROKER_URL = process.env.OMP_AUTH_BROKER_URL;
-		savedEnv.OMP_AUTH_BROKER_TOKEN = process.env.OMP_AUTH_BROKER_TOKEN;
+		const life = testLifetime();
 		agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-migrate-client-"));
 		brokerAgentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-migrate-broker-"));
+		life.assertLive();
 		setAgentDir(agentDir);
 
 		brokerStore = await SqliteAuthCredentialStore.open(path.join(brokerAgentDir, "agent.db"));
@@ -55,6 +57,7 @@ describe("auth-broker migrate", () => {
 			bearerTokens: [token],
 			disableRefresher: true,
 		});
+		life.assertLive();
 		process.env.OMP_AUTH_BROKER_URL = handle.url;
 		process.env.OMP_AUTH_BROKER_TOKEN = token;
 	});
@@ -65,10 +68,6 @@ describe("auth-broker migrate", () => {
 		brokerStore?.close();
 		await removeWithRetries(agentDir);
 		await removeWithRetries(brokerAgentDir);
-		for (const key of ["OMP_AUTH_BROKER_URL", "OMP_AUTH_BROKER_TOKEN"] as const) {
-			if (savedEnv[key] === undefined) delete process.env[key];
-			else process.env[key] = savedEnv[key];
-		}
 	});
 
 	test("rerun skips an already-migrated org-only row instead of re-uploading a stale refresh token", async () => {

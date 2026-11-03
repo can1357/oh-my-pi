@@ -141,7 +141,7 @@ test("omp models surfaces extension-registered providers (issue #905)", async ()
 		const modelRegistry = new ModelRegistry(authStorage);
 
 		const captured: string[] = [];
-		const originalWrite = process.stdout.write.bind(process.stdout);
+		const originalWrite = process.stdout.write;
 		onTestFinished(() => {
 			process.stdout.write = originalWrite;
 		});
@@ -150,17 +150,13 @@ test("omp models surfaces extension-registered providers (issue #905)", async ()
 			return true;
 		}) as typeof process.stdout.write;
 
-		try {
-			await runModelsListing({
-				modelRegistry,
-				cwd: tmp.path(),
-				action: "ls",
-				additionalExtensionPaths: [extPath],
-				disableExtensionDiscovery: true,
-			});
-		} finally {
-			process.stdout.write = originalWrite;
-		}
+		await runModelsListing({
+			modelRegistry,
+			cwd: tmp.path(),
+			action: "ls",
+			additionalExtensionPaths: [extPath],
+			disableExtensionDiscovery: true,
+		});
 
 		const output = captured.join("");
 		expect(output).toContain("test-gw");
@@ -175,7 +171,7 @@ test("omp models does not execute ambient hooks while retaining explicit provide
 	try {
 		const modelRegistry = new ModelRegistry(authStorage);
 		const captured: string[] = [];
-		const originalWrite = process.stdout.write.bind(process.stdout);
+		const originalWrite = process.stdout.write;
 		onTestFinished(() => {
 			process.stdout.write = originalWrite;
 		});
@@ -184,16 +180,12 @@ test("omp models does not execute ambient hooks while retaining explicit provide
 			return true;
 		}) as typeof process.stdout.write;
 
-		try {
-			await runModelsListing({
-				modelRegistry,
-				cwd: tmp.path(),
-				action: "ls",
-				additionalExtensionPaths: [explicitPackagePath],
-			});
-		} finally {
-			process.stdout.write = originalWrite;
-		}
+		await runModelsListing({
+			modelRegistry,
+			cwd: tmp.path(),
+			action: "ls",
+			additionalExtensionPaths: [explicitPackagePath],
+		});
 
 		const output = captured.join("");
 		expect(output).toContain("explicit-gw");
@@ -229,7 +221,7 @@ test("omp models explicit-only mode resolves a package and excludes settings pro
 	try {
 		const modelRegistry = new ModelRegistry(authStorage);
 		const captured: string[] = [];
-		const originalWrite = process.stdout.write.bind(process.stdout);
+		const originalWrite = process.stdout.write;
 		onTestFinished(() => {
 			process.stdout.write = originalWrite;
 		});
@@ -238,18 +230,14 @@ test("omp models explicit-only mode resolves a package and excludes settings pro
 			return true;
 		}) as typeof process.stdout.write;
 
-		try {
-			await runModelsListing({
-				modelRegistry,
-				cwd: tmp.path(),
-				action: "ls",
-				additionalExtensionPaths: [explicitPackagePath],
-				settingsExtensions: [ambientExtPath],
-				disableExtensionDiscovery: true,
-			});
-		} finally {
-			process.stdout.write = originalWrite;
-		}
+		await runModelsListing({
+			modelRegistry,
+			cwd: tmp.path(),
+			action: "ls",
+			additionalExtensionPaths: [explicitPackagePath],
+			settingsExtensions: [ambientExtPath],
+			disableExtensionDiscovery: true,
+		});
 
 		const output = captured.join("");
 		expect(output).toContain("explicit-gw");
@@ -297,17 +285,13 @@ test("omp models prints invalid models.yml schema errors before listing output",
 			return true;
 		});
 
-		try {
-			await runModelsListing({
-				modelRegistry,
-				cwd: tmp.path(),
-				action: "ls",
-				pattern: "myprovider",
-				disableExtensionDiscovery: true,
-			});
-		} finally {
-			process.stdout.write = originalWrite;
-		}
+		await runModelsListing({
+			modelRegistry,
+			cwd: tmp.path(),
+			action: "ls",
+			pattern: "myprovider",
+			disableExtensionDiscovery: true,
+		});
 
 		const output = captured.join("");
 		expect(output).toContain("Warning: models.yml validation failed — custom providers disabled");

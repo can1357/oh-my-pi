@@ -10,6 +10,7 @@
  * `stderr`) instead of throwing or blocking.
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -21,13 +22,14 @@ let binDir: string;
 let originalPath: string | undefined;
 
 beforeAll(async () => {
-	binDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-ssh-timeout-"));
+	// PATH goes in before the first await: a timed-out hook cannot install it later.
+	binDir = fsSync.mkdtempSync(path.join(os.tmpdir(), "omp-ssh-timeout-"));
+	originalPath = process.env.PATH;
+	process.env.PATH = `${binDir}${path.delimiter}${originalPath ?? ""}`;
 	// Fake `ssh` that traps SIGTERM and sleeps far past any test bound.
 	// Simulates a wedged control-master / unreachable host.
 	const fake = path.join(binDir, "ssh");
 	await fs.writeFile(fake, "#!/usr/bin/env bash\ntrap '' TERM\nsleep 300\n", { mode: 0o755 });
-	originalPath = process.env.PATH;
-	process.env.PATH = `${binDir}${path.delimiter}${originalPath ?? ""}`;
 });
 
 afterAll(async () => {

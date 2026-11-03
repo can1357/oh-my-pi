@@ -3,9 +3,13 @@ import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { Mnemopi } from "@oh-my-pi/pi-mnemopi/core/memory";
 import { resetEmbeddingProviderForTests, setEmbeddingProviderForTests } from "@oh-my-pi/pi-mnemopi/core/embeddings";
 import { currentLoopPhase, TempDir } from "@oh-my-pi/pi-utils";
-import { installMockRestores } from "../../utils/test/helpers/mock-restores";
+import { installEnvRestores, installMockRestores } from "../../utils/test/helpers/mock-restores";
 
 installMockRestores();
+const featureEnv = ["MNEMOPI_POLYPHONIC_RECALL", "MNEMOPI_ENHANCED_RECALL", "MNEMOPI_PROACTIVE_LINKING"];
+// The async afterEach can time out, and Bun then skips the later hooks; this owner still puts the
+// variables back at the next test and when the file ends.
+installEnvRestores(featureEnv);
 
 let checking = false;
 let monitoredExecutions = 0;
@@ -13,8 +17,6 @@ let violations: { method: string; sql: string; stack: string | undefined }[] = [
 const spies: { mockRestore(): void }[] = [];
 let memory: Mnemopi | undefined;
 let root: TempDir | undefined;
-const featureEnv = ["MNEMOPI_POLYPHONIC_RECALL", "MNEMOPI_ENHANCED_RECALL", "MNEMOPI_PROACTIVE_LINKING"];
-let savedEnv: (string | undefined)[] = [];
 
 function record(method: string, sql: string): void {
 	if (!checking) return;
@@ -77,7 +79,6 @@ beforeEach(() => {
 	checking = false;
 	monitoredExecutions = 0;
 	violations = [];
-	savedEnv = featureEnv.map(key => process.env[key]);
 	for (const key of featureEnv) delete process.env[key];
 	spyOnSql();
 	expect(currentLoopPhase()).toBeUndefined();
@@ -110,10 +111,6 @@ afterEach(async () => {
 		memory = undefined;
 		restoreSqlSpies();
 		resetEmbeddingProviderForTests();
-		for (const [index, key] of featureEnv.entries()) {
-			if (savedEnv[index] === undefined) delete process.env[key];
-			else process.env[key] = savedEnv[index];
-		}
 		await root?.remove();
 		root = undefined;
 	}

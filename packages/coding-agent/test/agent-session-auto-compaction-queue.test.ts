@@ -191,13 +191,14 @@ describe("AgentSession auto-compaction queue resume", () => {
 		});
 	});
 
-	// Put the fixture's gates back in a synchronous hook: a timeout cannot stop it partway.
+	// Put the fixture's gates back in a synchronous hook: a timeout cannot stop it partway. None exists
+	// outside these tests, so putting one back is deleting it.
 	afterEach(() => {
-		(globalThis as typeof globalThis & { __ompManualCompactGate?: Promise<void> }).__ompManualCompactGate = undefined;
-		(globalThis as typeof globalThis & { __ompAgentStartGate?: AgentStartGate }).__ompAgentStartGate = undefined;
-		(globalThis as ParkCommandGlobals).__ompParkGate = undefined;
-		(globalThis as ParkCommandGlobals).__ompParkAction = undefined;
-		(globalThis as typeof globalThis & { __ompManualCompactCancel?: boolean }).__ompManualCompactCancel = undefined;
+		Reflect.deleteProperty(globalThis, "__ompManualCompactGate");
+		Reflect.deleteProperty(globalThis, "__ompAgentStartGate");
+		Reflect.deleteProperty(globalThis, "__ompParkGate");
+		Reflect.deleteProperty(globalThis, "__ompParkAction");
+		Reflect.deleteProperty(globalThis, "__ompManualCompactCancel");
 	});
 
 	afterEach(async () => {
@@ -983,8 +984,8 @@ describe("AgentSession auto-compaction queue resume", () => {
 
 		// Second manual pass while the command is still pending. Nothing is
 		// streaming, so it interrupts nothing of its own; the branch already ends
-		// in a compaction entry, so it may also reject as already compacted.
-		(globalThis as typeof globalThis & { __ompManualCompactGate?: Promise<void> }).__ompManualCompactGate = undefined;
+		// in a compaction entry, so it may also reject as already compacted. The
+		// gate is already resolved, so this pass does not wait on it.
 		await session.compact().catch(() => undefined);
 		await session.waitForIdle();
 		expect(prompted).toHaveLength(0);
@@ -1044,6 +1045,10 @@ describe("AgentSession auto-compaction queue resume", () => {
 			compactGate.promise;
 		const parkGate = Promise.withResolvers<void>();
 		(globalThis as ParkCommandGlobals).__ompParkGate = parkGate.promise;
+		// The veto is read through a getter installed now, before the first await, and armed later
+		// through a local: a body abandoned on timeout cannot install it during another test.
+		let vetoSecondPass = false;
+		Object.defineProperty(globalThis, "__ompManualCompactCancel", { configurable: true, get: () => vetoSecondPass });
 		const compacted = session.compact();
 		while (!getRuntimeSignals().includes("before_compact:enter")) {
 			await Promise.resolve();
@@ -1055,10 +1060,9 @@ describe("AgentSession auto-compaction queue resume", () => {
 		expect(prompted).toHaveLength(0);
 
 		// Give the second pass something to compact so it reaches the hook, then
-		// veto it there.
+		// veto it there. The gate is already resolved, so it does not wait on it.
 		appendAssistant("next answer");
-		(globalThis as typeof globalThis & { __ompManualCompactGate?: Promise<void> }).__ompManualCompactGate = undefined;
-		(globalThis as typeof globalThis & { __ompManualCompactCancel?: boolean }).__ompManualCompactCancel = true;
+		vetoSecondPass = true;
 		await expect(session.compact(undefined, options)).rejects.toBeInstanceOf(CompactionCancelledError);
 		await session.waitForIdle();
 		expect(prompted).toHaveLength(0);

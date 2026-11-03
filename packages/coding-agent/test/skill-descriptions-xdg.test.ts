@@ -20,6 +20,7 @@ import {
 import type { Skill } from "../src/extensibility/skills";
 import type { AuthStorage } from "../src/session/auth-storage";
 import { createAssistantMessage, createInMemoryAuthStorage } from "./helpers/agent-session-setup";
+import { testLifetime } from "../../utils/test/helpers/mock-restores";
 
 const ENV_KEYS = ["PI_CONFIG_DIR", "PI_CODING_AGENT_DIR", "XDG_DATA_HOME"] as const;
 
@@ -33,6 +34,7 @@ describe.skipIf(process.platform !== "linux" && process.platform !== "darwin")(
 		let originalEnv: Partial<Record<(typeof ENV_KEYS)[number], string>> = {};
 
 		beforeEach(async () => {
+			const life = testLifetime();
 			originalAgentDir = getAgentDir();
 			originalEnv = {};
 			for (const key of ENV_KEYS) originalEnv[key] = process.env[key];
@@ -45,6 +47,7 @@ describe.skipIf(process.platform !== "linux" && process.platform !== "darwin")(
 			xdgData = path.join(tempRoot, "data");
 			await fs.promises.mkdir(path.join(xdgData, "omp"), { recursive: true });
 			await fs.promises.mkdir(agentDir, { recursive: true });
+			life.assertLive();
 			process.env.PI_CONFIG_DIR = ".omp";
 			delete process.env.PI_CODING_AGENT_DIR;
 			__resetProfileSnapshotForTests();

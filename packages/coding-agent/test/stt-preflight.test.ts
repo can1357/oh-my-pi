@@ -9,6 +9,7 @@ import * as downloader from "@oh-my-pi/pi-coding-agent/stt/downloader";
 import { STTController, type STTControllerDependencies } from "@oh-my-pi/pi-coding-agent/stt/stt-controller";
 import { getTinyModelsCacheDir, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
+import { testLifetime } from "../../utils/test/helpers/mock-restores";
 
 const WHISPER_BASE_REPO = "onnx-community/whisper-base";
 const NEMOTRON_REPO = "csukuangfj2/sherpa-onnx-nemotron-speech-streaming-en-0.6b-160ms-int8-2026-04-25";
@@ -37,8 +38,10 @@ describe("isSttModelCached completeness", () => {
 	let cacheDir = "";
 
 	beforeEach(async () => {
+		const life = testLifetime();
 		state = beginSettingsTest();
 		tmp = await fs.mkdtemp(path.join(os.tmpdir(), "omp-stt-cache-"));
+		life.assertLive();
 		setAgentDir(tmp);
 		cacheDir = getTinyModelsCacheDir();
 	});

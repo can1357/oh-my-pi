@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, onTestFinished, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { disposeAllVmContexts } from "@oh-my-pi/pi-coding-agent/eval/js/context-manager";
@@ -6,6 +6,7 @@ import { createBrowserPrelude } from "@oh-my-pi/pi-coding-agent/tools/browser";
 import { releaseAllTabs } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import type { ScreenshotResult } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-protocol";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
+import { installEnvRestores } from "../../../utils/test/helpers/mock-restores";
 import { chromiumAvailable } from "./chromium-probe";
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
@@ -42,6 +43,9 @@ afterAll(async () => {
 });
 
 describe.skipIf(!CHROMIUM_AVAILABLE)("browser screenshot parity", () => {
+	// Backend overrides would send an open to a relay or cmux surface instead of headless Chromium.
+	// This owner puts them back at the end of each test, at the next test, and when the scope ends.
+	installEnvRestores(["PI_BROWSER_RELAY", "PI_BROWSER_CMUX", "PI_BROWSER_TERN"]);
 	test("annotates observed ids, detects pixel changes, writes JPEG screenshots, and prints PDF", async () => {
 		const invoke = createHost();
 		const name = `screenshot-plus-${crypto.randomUUID()}`;
@@ -214,11 +218,6 @@ button { margin: 80px; width: 180px; height: 60px; }
 	test.each([1.25, 2, 0])(
 		"the screenshot note maps image coordinates to clickAt at device scale %p",
 		async scale => {
-			// Backend overrides would send this open to a relay or cmux surface instead of headless Chromium.
-			const savedEnv = { ...process.env };
-			onTestFinished(() => {
-				Object.assign(process.env, savedEnv);
-			});
 			for (const key of ["PI_BROWSER_RELAY", "PI_BROWSER_CMUX", "PI_BROWSER_TERN"]) delete process.env[key];
 			const invoke = createHost();
 			const name = `screenshot-click-factor-${crypto.randomUUID()}`;

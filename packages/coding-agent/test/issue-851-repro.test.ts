@@ -9,6 +9,7 @@ import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { restoreEnvValue } from "./helpers/settings-test-state";
 import "@oh-my-pi/pi-coding-agent/discovery/claude-plugins";
 import type { MCPServer } from "@oh-my-pi/pi-coding-agent/capability/mcp";
+import { testLifetime } from "../../utils/test/helpers/mock-restores";
 
 describe("issue-851: claude-plugins loads flat .mcp.json shape", () => {
 	let tempDir: string;
@@ -16,6 +17,7 @@ describe("issue-851: claude-plugins loads flat .mcp.json shape", () => {
 	let originalClaudeConfigDir: string | undefined;
 
 	beforeEach(async () => {
+		const life = testLifetime();
 		clearClaudePluginRootsCache();
 		clearFsCache();
 		originalClaudeConfigDir = process.env.CLAUDE_CONFIG_DIR;
@@ -23,6 +25,7 @@ describe("issue-851: claude-plugins loads flat .mcp.json shape", () => {
 		delete Bun.env.CLAUDE_CONFIG_DIR;
 		originalHome = process.env.HOME;
 		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "issue-851-"));
+		life.assertLive();
 		process.env.HOME = tempDir;
 		vi.spyOn(os, "homedir").mockReturnValue(tempDir);
 		enableUserSource("claude");

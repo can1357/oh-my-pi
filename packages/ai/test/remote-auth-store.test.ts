@@ -15,6 +15,7 @@ import { snapshotResponseSchema } from "@oh-my-pi/pi-ai/auth-broker/wire-schemas
 import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
 import type { UsageLimit, UsageProvider, UsageReport } from "@oh-my-pi/pi-ai/usage";
 import * as claudeUsage from "@oh-my-pi/pi-ai/usage/claude";
+import { installEnvRestores, installMockRestores } from "../../utils/test/helpers/mock-restores";
 
 function requireLimit(report: UsageReport, id: string): UsageLimit {
 	const limit = report.limits.find(candidate => candidate.id === id);
@@ -23,9 +24,12 @@ function requireLimit(report: UsageReport, id: string): UsageLimit {
 }
 
 const ANTHROPIC_ENV = ["ANTHROPIC_API_KEY", "ANTHROPIC_OAUTH_TOKEN"] as const;
-const savedEnv: Partial<Record<(typeof ANTHROPIC_ENV)[number], string | undefined>> = {};
 
 describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
+	// The async afterEach can time out, and Bun then skips `onTestFinished` and the later hooks;
+	// these owners still put the variables and the spies back at the next test and when the scope ends.
+	installEnvRestores(["ANTHROPIC_API_KEY", "ANTHROPIC_OAUTH_TOKEN"]);
+	installMockRestores();
 	let serverStore: SqliteAuthCredentialStore | undefined;
 	let serverStorage: AuthStorage | undefined;
 	let handle: AuthBrokerServerHandle | undefined;
@@ -34,10 +38,7 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 
 	beforeEach(async () => {
 		testUsageProviders = undefined;
-		for (const key of ANTHROPIC_ENV) {
-			savedEnv[key] = process.env[key];
-			delete process.env[key];
-		}
+		for (const key of ANTHROPIC_ENV) delete process.env[key];
 		serverStore = new SqliteAuthCredentialStore(new Database(":memory:"));
 		await serverStore.saveOAuth("anthropic", {
 			access: "server-access-1",
@@ -65,14 +66,9 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 
 	afterEach(async () => {
 		testUsageProviders = undefined;
-		vi.restoreAllMocks();
 		await handle?.close();
 		serverStorage?.close();
 		serverStore?.close();
-		for (const key of ANTHROPIC_ENV) {
-			if (savedEnv[key] === undefined) delete process.env[key];
-			else process.env[key] = savedEnv[key];
-		}
 	});
 
 	test("client-side AuthStorage refreshes via broker override, never via local OAuth path", async () => {

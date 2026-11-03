@@ -12,6 +12,7 @@ import { loadCapability } from "@oh-my-pi/pi-coding-agent/discovery";
 import { cfgPersonality } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { testLifetime } from "../../../utils/test/helpers/mock-restores";
 
 describe("Codex config.toml settings", () => {
 	let root = "";
@@ -20,12 +21,14 @@ describe("Codex config.toml settings", () => {
 	let originalHome: string | undefined;
 
 	beforeEach(async () => {
+		const life = testLifetime();
 		clearFsCache();
 		resetSettingsForTest();
 		originalHome = process.env.HOME;
 		root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-codex-settings-"));
 		home = path.join(root, "home");
 		project = path.join(root, "project");
+		life.assertLive();
 		process.env.HOME = home;
 		vi.spyOn(os, "homedir").mockReturnValue(home);
 		await fs.mkdir(path.join(project, ".git"), { recursive: true });

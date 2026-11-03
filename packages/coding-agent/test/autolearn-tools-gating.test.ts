@@ -13,6 +13,7 @@ import { LearnTool } from "@oh-my-pi/pi-coding-agent/tools/learn";
 import { ManageSkillTool } from "@oh-my-pi/pi-coding-agent/tools/manage-skill";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { getAgentDir, setAgentDir } from "@oh-my-pi/pi-utils/dirs";
+import { testLifetime } from "../../utils/test/helpers/mock-restores";
 
 function makeSession(settingsOverrides: Record<string, unknown> = {}, extra: Partial<ToolSession> = {}): ToolSession {
 	return {
@@ -119,9 +120,11 @@ describe("manage_skill execute", () => {
 	let originalAgentDir: string;
 
 	beforeEach(async () => {
+		const life = testLifetime();
 		originalAgentDir = getAgentDir();
 		tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "omp-manage-skill-"));
 		spyOn(os, "homedir").mockReturnValue(tempHome);
+		life.assertLive();
 		setAgentDir(path.join(tempHome, ".omp", "agent"));
 	});
 
@@ -212,9 +215,11 @@ describe("learn execute", () => {
 	}
 
 	beforeEach(async () => {
+		const life = testLifetime();
 		originalAgentDir = getAgentDir();
 		tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "omp-learn-"));
 		spyOn(os, "homedir").mockReturnValue(tempHome);
+		life.assertLive();
 		setAgentDir(path.join(tempHome, ".omp", "agent"));
 		remembered = [];
 	});

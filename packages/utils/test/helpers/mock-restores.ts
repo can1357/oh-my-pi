@@ -37,6 +37,45 @@ export function installMockRestores(): void {
 	});
 }
 
+export interface EnvRestoreOptions {
+	/** Runs after every put-back, to rebuild state cached from the variables (e.g. a directory resolver). */
+	afterPutBack?: () => void;
+}
+
+/**
+ * Makes the calling file or `describe` scope the one owner of the environment variables `names`.
+ * Call it at the top level of that scope, before its own hooks; no outer hook may set the variables.
+ *
+ * It saves their values once, when the scope is collected, and puts them back at the end of each
+ * test (`onTestFinished`, after the scope's `afterEach` hooks, so teardown still sees the test's
+ * values), at the start of each test (Bun skips `onTestFinished` when an `afterEach` times out),
+ * and when the scope ends (the scope's last test has no next test). Every put-back is synchronous.
+ * The scope's own hooks and tests then only set the variables; none of them puts one back.
+ *
+ * A variable that was unset is assigned `""` before it is deleted: Bun's `fetch` keeps a proxy
+ * variable (`HTTP_PROXY`, `NO_PROXY`, ...) it has read until the next assignment, and a bare
+ * `delete` would leave every later fetch in the process routed to the test's proxy.
+ */
+export function installEnvRestores(names: readonly string[], options: EnvRestoreOptions = {}): void {
+	const saved = names.map(name => [name, process.env[name]] as const);
+	const putBack = (): void => {
+		for (const [name, value] of saved) {
+			if (value === undefined) {
+				process.env[name] = "";
+				delete process.env[name];
+			} else {
+				process.env[name] = value;
+			}
+		}
+		options.afterPutBack?.();
+	};
+	beforeEach(() => {
+		putBack();
+		onTestFinished(putBack);
+	});
+	afterAll(putBack);
+}
+
 export interface TestLifetime {
 	readonly ended: boolean;
 	/** Throws once the test that created this lifetime has finished or a later test has started. */

@@ -5,7 +5,8 @@ import * as path from "node:path";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import { type AuthBrokerServerHandle, startAuthBroker } from "@oh-my-pi/pi-ai/auth-broker";
 import { runAuthBrokerCommand } from "@oh-my-pi/pi-coding-agent/cli/auth-broker-cli";
-import { getAgentDbPath, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
+import { __resetDirsFromEnvForTests, getAgentDbPath, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
+import { installEnvRestores, testLifetime } from "../../utils/test/helpers/mock-restores";
 
 const ORIGINAL_STDOUT_WRITE = process.stdout.write.bind(process.stdout);
 
@@ -19,19 +20,25 @@ function silenceStdout(): () => string {
 }
 
 describe("auth-broker import (CLIProxyAPI)", () => {
+	// The async afterEach can time out, and Bun then skips `onTestFinished` and the later hooks; this
+	// owner still puts the variables back at the next test and when the scope ends.
+	// `setAgentDir()` writes PI_CODING_AGENT_DIR and clears the profile variables.
+	installEnvRestores(
+		["OMP_AUTH_BROKER_URL", "OMP_AUTH_BROKER_TOKEN", "PI_CODING_AGENT_DIR", "OMP_PROFILE", "PI_PROFILE"],
+		{ afterPutBack: __resetDirsFromEnvForTests },
+	);
 	let agentDir = "";
 	let cliproxyDir = "";
 	let originalAgentDir: string | undefined;
-	const savedEnv: Record<string, string | undefined> = {};
 
 	beforeEach(async () => {
+		const life = testLifetime();
 		originalAgentDir = process.env.OMP_AGENT_DIR;
-		savedEnv.OMP_AUTH_BROKER_URL = process.env.OMP_AUTH_BROKER_URL;
-		savedEnv.OMP_AUTH_BROKER_TOKEN = process.env.OMP_AUTH_BROKER_TOKEN;
 		delete process.env.OMP_AUTH_BROKER_URL;
 		delete process.env.OMP_AUTH_BROKER_TOKEN;
 		agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-import-agent-"));
 		cliproxyDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-import-cliproxy-"));
+		life.assertLive();
 		setAgentDir(agentDir);
 	});
 
@@ -41,10 +48,6 @@ describe("auth-broker import (CLIProxyAPI)", () => {
 		else process.env.OMP_AGENT_DIR = originalAgentDir;
 		await removeWithRetries(agentDir);
 		await removeWithRetries(cliproxyDir);
-		for (const key of ["OMP_AUTH_BROKER_URL", "OMP_AUTH_BROKER_TOKEN"] as const) {
-			if (savedEnv[key] === undefined) delete process.env[key];
-			else process.env[key] = savedEnv[key];
-		}
 	});
 
 	async function writeCliProxyJson(name: string, body: Record<string, unknown>): Promise<string> {
@@ -204,14 +207,20 @@ describe("auth-broker import (broker-routed)", () => {
 	let brokerStorage: AuthStorage | undefined;
 	let handle: AuthBrokerServerHandle | undefined;
 	const token = "broker-import-bearer";
-	const savedEnv: Record<string, string | undefined> = {};
+	// The async afterEach can time out, and Bun then skips `onTestFinished` and the later hooks; this
+	// owner still puts the variables back at the next test and when the scope ends.
+	// `setAgentDir()` writes PI_CODING_AGENT_DIR and clears the profile variables.
+	installEnvRestores(
+		["OMP_AUTH_BROKER_URL", "OMP_AUTH_BROKER_TOKEN", "PI_CODING_AGENT_DIR", "OMP_PROFILE", "PI_PROFILE"],
+		{ afterPutBack: __resetDirsFromEnvForTests },
+	);
 
 	beforeEach(async () => {
-		savedEnv.OMP_AUTH_BROKER_URL = process.env.OMP_AUTH_BROKER_URL;
-		savedEnv.OMP_AUTH_BROKER_TOKEN = process.env.OMP_AUTH_BROKER_TOKEN;
+		const life = testLifetime();
 		agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-import-client-"));
 		brokerAgentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-import-broker-"));
 		cliproxyDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-import-cliproxy-broker-"));
+		life.assertLive();
 		setAgentDir(agentDir);
 
 		brokerStore = await SqliteAuthCredentialStore.open(path.join(brokerAgentDir, "agent.db"));
@@ -223,6 +232,7 @@ describe("auth-broker import (broker-routed)", () => {
 			bearerTokens: [token],
 			disableRefresher: true,
 		});
+		life.assertLive();
 		process.env.OMP_AUTH_BROKER_URL = handle.url;
 		process.env.OMP_AUTH_BROKER_TOKEN = token;
 	});
@@ -234,13 +244,10 @@ describe("auth-broker import (broker-routed)", () => {
 		await removeWithRetries(agentDir);
 		await removeWithRetries(brokerAgentDir);
 		await removeWithRetries(cliproxyDir);
-		for (const key of ["OMP_AUTH_BROKER_URL", "OMP_AUTH_BROKER_TOKEN"] as const) {
-			if (savedEnv[key] === undefined) delete process.env[key];
-			else process.env[key] = savedEnv[key];
-		}
 	});
 
 	test("uploads CLIProxyAPI JSONs to the broker when configured, not the local store", async () => {
+		const life = testLifetime();
 		await Bun.write(
 			path.join(cliproxyDir, "claude-foo@bar.json"),
 			JSON.stringify({
@@ -252,23 +259,20 @@ describe("auth-broker import (broker-routed)", () => {
 			}),
 		);
 
-		const ORIGINAL_STDOUT = process.stdout.write.bind(process.stdout);
+		const ORIGINAL_STDOUT = process.stdout.write;
 		onTestFinished(() => {
 			process.stdout.write = ORIGINAL_STDOUT;
 		});
 		let captured = "";
+		life.assertLive();
 		process.stdout.write = ((chunk: string | Uint8Array): boolean => {
 			captured += typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk);
 			return true;
 		}) as typeof process.stdout.write;
-		try {
-			await runAuthBrokerCommand({
-				action: "import",
-				flags: { source: cliproxyDir },
-			});
-		} finally {
-			process.stdout.write = ORIGINAL_STDOUT;
-		}
+		await runAuthBrokerCommand({
+			action: "import",
+			flags: { source: cliproxyDir },
+		});
 
 		// The broker received it (and persisted the real refresh token).
 		const persisted = brokerStore!.getOAuth("anthropic");
@@ -289,6 +293,7 @@ describe("auth-broker import (broker-routed)", () => {
 	});
 
 	test("dry-run does not upload even when broker is configured", async () => {
+		const life = testLifetime();
 		await Bun.write(
 			path.join(cliproxyDir, "claude-dry.json"),
 			JSON.stringify({
@@ -300,19 +305,16 @@ describe("auth-broker import (broker-routed)", () => {
 			}),
 		);
 
-		const ORIGINAL_STDOUT = process.stdout.write.bind(process.stdout);
+		const ORIGINAL_STDOUT = process.stdout.write;
 		onTestFinished(() => {
 			process.stdout.write = ORIGINAL_STDOUT;
 		});
+		life.assertLive();
 		process.stdout.write = (() => true) as typeof process.stdout.write;
-		try {
-			await runAuthBrokerCommand({
-				action: "import",
-				flags: { source: cliproxyDir, dryRun: true },
-			});
-		} finally {
-			process.stdout.write = ORIGINAL_STDOUT;
-		}
+		await runAuthBrokerCommand({
+			action: "import",
+			flags: { source: cliproxyDir, dryRun: true },
+		});
 
 		expect(brokerStore!.listAuthCredentials()).toHaveLength(0);
 	});

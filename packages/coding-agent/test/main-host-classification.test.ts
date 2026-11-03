@@ -19,9 +19,10 @@ it("classifies an interactive host before opening auth storage", async () => {
 	const parsed = parseArgs([]);
 	parsed.noExtensions = true;
 	// An interactive launch needs a terminal on stdin; without one it exits 2.
-	const originalIsTTY = process.stdin.isTTY;
+	const originalIsTTY = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
 	onTestFinished(() => {
-		Object.defineProperty(process.stdin, "isTTY", { value: originalIsTTY, configurable: true });
+		if (originalIsTTY) Object.defineProperty(process.stdin, "isTTY", originalIsTTY);
+		else Reflect.deleteProperty(process.stdin, "isTTY");
 	});
 	Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
 
@@ -35,7 +36,6 @@ it("classifies an interactive host before opening auth storage", async () => {
 			}),
 		).rejects.toBe(stop);
 	} finally {
-		Object.defineProperty(process.stdin, "isTTY", { value: originalIsTTY, configurable: true });
 		setInteractiveHost(previous);
 	}
 

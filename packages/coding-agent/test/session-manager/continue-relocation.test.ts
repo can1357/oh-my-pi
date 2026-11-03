@@ -12,6 +12,7 @@ import { getTerminalId } from "@oh-my-pi/pi-tui";
 import { getConfigRootDir, getTerminalSessionsDir, setAgentDir } from "@oh-my-pi/pi-utils";
 
 import { makeAssistantMessage } from "./helpers";
+import { testLifetime } from "../../../utils/test/helpers/mock-restores";
 
 function getHeader(entries: unknown[]): SessionHeader | undefined {
 	return entries.find(
@@ -53,9 +54,11 @@ describe("SessionManager.continueRecent relocation", () => {
 	const fallbackAgentDir = path.join(getConfigRootDir(), "agent");
 
 	beforeEach(async () => {
+		const life = testLifetime();
 		// Force a deterministic, non-TTY terminal id so breadcrumb read/write is stable.
 		process.env.TMUX_PANE = "%relocation-test";
 		testAgentDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-reloc-test-"));
+		life.assertLive();
 		setAgentDir(testAgentDir);
 		cwdA = path.join(testAgentDir, "worktree-old");
 		cwdB = path.join(testAgentDir, "worktree-new");

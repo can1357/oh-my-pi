@@ -13,6 +13,7 @@ import type { ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
 import { __resetDirsFromEnvForTests, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import * as ar from "@oh-my-pi/pi-utils/ar";
 import { restoreEnvValue } from "../helpers/settings-test-state";
+import { testLifetime } from "../../../utils/test/helpers/mock-restores";
 
 const MEMBER = "folder/sample document.pdf";
 const SENTINEL = "Archive PDF text sentinel";
@@ -69,11 +70,13 @@ describe("PDF archive members", () => {
 	let originalPiProfile: string | undefined;
 
 	beforeEach(async () => {
+		const life = testLifetime();
 		temp = await TempDir.create("@read-archive-pdf-");
 		pdf = textPdf();
 		originalAgentDir = process.env.PI_CODING_AGENT_DIR;
 		originalOmpProfile = process.env.OMP_PROFILE;
 		originalPiProfile = process.env.PI_PROFILE;
+		life.assertLive();
 		setAgentDir(temp.join("agent"));
 	});
 

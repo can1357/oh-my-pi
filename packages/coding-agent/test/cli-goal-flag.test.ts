@@ -54,9 +54,10 @@ async function launchInteractive(rawArgs: string[]): Promise<{ thrown: unknown; 
 	parsed.noRules = true;
 	parsed.noLsp = true;
 	const previousHost = setInteractiveHost(false);
-	const originalIsTTY = process.stdin.isTTY;
+	const originalIsTTY = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
 	onTestFinished(() => {
-		Object.defineProperty(process.stdin, "isTTY", { value: originalIsTTY, configurable: true });
+		if (originalIsTTY) Object.defineProperty(process.stdin, "isTTY", originalIsTTY);
+		else Reflect.deleteProperty(process.stdin, "isTTY");
 	});
 	Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
 	vi.spyOn(process, "exit").mockImplementation(((code?: number) => {
@@ -85,7 +86,6 @@ async function launchInteractive(rawArgs: string[]): Promise<{ thrown: unknown; 
 	} catch (error) {
 		return { thrown: error, touched };
 	} finally {
-		Object.defineProperty(process.stdin, "isTTY", { value: originalIsTTY, configurable: true });
 		setInteractiveHost(previousHost);
 		authStorage.close();
 	}

@@ -19,6 +19,7 @@ import {
 	setProfile,
 } from "@oh-my-pi/pi-utils/dirs";
 import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
+import { testLifetime } from "./helpers/mock-restores";
 
 async function readStream(stream: ReadableStream<Uint8Array>): Promise<string> {
 	const reader = stream.getReader();
@@ -50,6 +51,7 @@ describe("profile directories", () => {
 	let originalXdgCacheHome: string | undefined;
 
 	beforeEach(async () => {
+		const life = testLifetime();
 		originalAgentDir = getAgentDir();
 		originalProfile = getActiveProfile();
 		originalAgentDirEnv = process.env.PI_CODING_AGENT_DIR;
@@ -62,6 +64,7 @@ describe("profile directories", () => {
 		tempRoot = path.join(os.tmpdir(), "pi-utils-profiles", Snowflake.next());
 		configDir = `.omp-profile-test-${Snowflake.next()}`;
 		await fs.mkdir(tempRoot, { recursive: true });
+		life.assertLive();
 		process.env.PI_CONFIG_DIR = configDir;
 		// Other suites that run before this one (e.g. dirs-python-gateway) may have
 		// called `setAgentDir`, which permanently mutates the module-level

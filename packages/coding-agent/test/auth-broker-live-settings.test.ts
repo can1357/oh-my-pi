@@ -7,6 +7,7 @@ import { discoverAuthStorage } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { createAuthStorageSettingsSync } from "@oh-my-pi/pi-coding-agent/session/auth-broker-config";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { installEnvRestores } from "../../utils/test/helpers/mock-restores";
 
 import { cfgAuthBrokerUrl } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 
@@ -30,15 +31,13 @@ describe("auth broker settings take effect live", () => {
 	let tempDir: TempDir;
 	const brokers: Broker[] = [];
 	const cleanups: Array<() => void> = [];
-	const savedEnv: Partial<Record<(typeof BROKER_ENV)[number], string>> = {};
+	// The async afterEach can time out, and Bun then skips `onTestFinished` and the later hooks; this
+	// owner still puts the variables back at the next test and when the scope ends.
+	installEnvRestores(["OMP_AUTH_BROKER_URL", "OMP_AUTH_BROKER_TOKEN", "OMP_AUTH_BROKER_SNAPSHOT_TTL_MS"]);
 
 	beforeEach(() => {
 		tempDir = TempDir.createSync("@pi-auth-broker-live-");
-		for (const key of BROKER_ENV) {
-			const value = process.env[key];
-			if (value !== undefined) savedEnv[key] = value;
-			delete process.env[key];
-		}
+		for (const key of BROKER_ENV) delete process.env[key];
 		// No snapshot cache: every connection must hit its broker.
 		process.env.OMP_AUTH_BROKER_SNAPSHOT_TTL_MS = "0";
 	});
@@ -48,11 +47,6 @@ describe("auth broker settings take effect live", () => {
 		for (const broker of brokers.splice(0)) {
 			await broker.handle.close();
 			broker.storage.close();
-		}
-		for (const key of BROKER_ENV) {
-			delete process.env[key];
-			const value = savedEnv[key];
-			if (value !== undefined) process.env[key] = value;
 		}
 		// `Settings.loadIsolated` opened `<agentDir>/agent.db`; Windows cannot delete it while open.
 		AgentStorage.close();

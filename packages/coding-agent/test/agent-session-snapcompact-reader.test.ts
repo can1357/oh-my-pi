@@ -10,6 +10,7 @@
  * The original stays intact for other readers.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
+import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -112,7 +113,8 @@ describe("snapcompact archive read by another model", () => {
 	const sessions: AgentSession[] = [];
 
 	beforeAll(async () => {
-		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-snapcompact-reader-"));
+		// The agent dir goes in before the first await: a timed-out hook cannot install it later.
+		tempDir = fsSync.mkdtempSync(path.join(os.tmpdir(), "omp-snapcompact-reader-"));
 		setAgentDir(path.join(tempDir, "agent"));
 		authStorage = await AuthStorage.create(":memory:");
 		authStorage.keys.setRuntime("anthropic", "test-key");

@@ -23,6 +23,7 @@ import {
 	createMcpManagerStub,
 	type McpManagerOverrides,
 } from "./helpers/interactive-mode-context";
+import { testLifetime } from "../../utils/test/helpers/mock-restores";
 
 const RAW_SERVER_URL = `https://\${MCP_HOST}/mcp`;
 const EXPANDED_SERVER_URL = "https://mcp.example.com/mcp";
@@ -109,10 +110,12 @@ describe("/mcp auth commands", () => {
 	});
 
 	beforeEach(async () => {
+		const life = testLifetime();
 		projectDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-reauth-project-"));
 		agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-reauth-agent-"));
 		configPath = path.join(projectDir, ".mcp.json");
 		originalMcpHost = Bun.env.MCP_HOST;
+		life.assertLive();
 		Bun.env.MCP_HOST = "mcp.example.com";
 		process.env.MCP_HOST = "mcp.example.com";
 		setProjectDir(projectDir);

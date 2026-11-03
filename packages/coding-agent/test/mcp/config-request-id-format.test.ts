@@ -26,6 +26,7 @@ import { clearCache as clearFsCache } from "@oh-my-pi/pi-coding-agent/capability
 import { loadAllMCPConfigs } from "@oh-my-pi/pi-coding-agent/mcp/config";
 import { getConfigRootDir, logger, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import mcpSchema from "../../src/config/mcp-schema.json" with { type: "json" };
+import { testLifetime } from "../../../utils/test/helpers/mock-restores";
 
 const originalAgentDirEnv = process.env.PI_CODING_AGENT_DIR;
 const fallbackAgentDir = path.join(getConfigRootDir(), "agent");
@@ -36,10 +37,12 @@ let tempHome = "";
 let originalHome: string | undefined;
 
 beforeEach(async () => {
+	const life = testLifetime();
 	originalHome = process.env.HOME;
 	tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-reqid-home-"));
 	tempAgentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-reqid-agent-"));
 	tempCwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-reqid-cwd-"));
+	life.assertLive();
 	process.env.HOME = tempHome;
 	vi.spyOn(os, "homedir").mockReturnValue(tempHome);
 	setAgentDir(tempAgentDir);

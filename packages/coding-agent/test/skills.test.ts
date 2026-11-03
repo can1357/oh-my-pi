@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, onTestFinished, spyOn, vi } from "bun:test";
+import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -73,8 +74,9 @@ let isolatedHome = "";
 // `os.homedir` spy restores the real function, not this one.
 const isolateHomedir = () => spyOn(os, "homedir").mockReturnValue(isolatedHome);
 
-beforeAll(async () => {
-	isolatedHome = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "pi-skills-home-")));
+// Synchronous, so a timed-out hook cannot install the isolated home later.
+beforeAll(() => {
+	isolatedHome = fsSync.realpathSync(fsSync.mkdtempSync(path.join(os.tmpdir(), "pi-skills-home-")));
 	isolateHomedir();
 	for (const key of ["HOME", "USERPROFILE"] as const) {
 		process.env[key] = isolatedHome;
@@ -244,9 +246,10 @@ describe("skills", () => {
 				const previousWslDistroName = process.env.WSL_DISTRO_NAME;
 				const previousWslInterop = process.env.WSL_INTEROP;
 				const previousUserProfile = process.env.USERPROFILE;
-				const previousPlatform = process.platform;
+				const previousPlatform = Object.getOwnPropertyDescriptor(process, "platform");
 				onTestFinished(() => {
-					Object.defineProperty(process, "platform", { value: previousPlatform });
+					if (previousPlatform) Object.defineProperty(process, "platform", previousPlatform);
+					else Reflect.deleteProperty(process, "platform");
 				});
 				onTestFinished(() => {
 					if (previousWslDistroName === undefined) delete process.env.WSL_DISTRO_NAME;

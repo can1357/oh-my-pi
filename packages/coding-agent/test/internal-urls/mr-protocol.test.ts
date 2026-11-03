@@ -14,6 +14,7 @@ import { resetDefaultGitlabProjectMemoForTests } from "@oh-my-pi/pi-coding-agent
 import { resetForTests as resetCacheForTests } from "@oh-my-pi/pi-coding-agent/tools/github-cache";
 import { gitlab } from "@oh-my-pi/pi-coding-agent/utils/gitlab";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { testLifetime } from "../../../utils/test/helpers/mock-restores";
 
 const diffText = `diff --git a/src/one.ts b/src/one.ts
 --- a/src/one.ts
@@ -44,9 +45,11 @@ const savedEnv: Partial<Record<(typeof ENV_KEYS)[number], string>> = {};
 let tempDir: string;
 
 beforeEach(async () => {
+	const life = testLifetime();
 	tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "mr-protocol-"));
 	for (const key of ENV_KEYS) {
 		savedEnv[key] = process.env[key];
+		life.assertLive();
 		delete process.env[key];
 	}
 	process.env.OMP_GITHUB_CACHE_DB = path.join(tempDir, "github-cache.db");

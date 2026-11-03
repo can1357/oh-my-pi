@@ -20,12 +20,14 @@ import { initializeWithSettings, reset as resetDiscoveryCache } from "@oh-my-pi/
 import { readMCPConfigFile, setMcpServerEnabled, setServerDisabled } from "@oh-my-pi/pi-coding-agent/mcp/config-writer";
 import { loadAllExtensions } from "@oh-my-pi/pi-coding-agent/modes/components/extensions/state-manager";
 import { __resetDirsFromEnvForTests, getMCPConfigPath, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
+import { testLifetime } from "../../utils/test/helpers/mock-restores";
 
 describe("loadAllExtensions MCP parity with /mcp list (issue #3827)", () => {
 	let projectDir = "";
 	let userAgentDir = "";
 
 	beforeEach(async () => {
+		const life = testLifetime();
 		resetSettingsForTest();
 		projectDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-3827-project-"));
 		userAgentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-3827-user-"));
@@ -33,6 +35,7 @@ describe("loadAllExtensions MCP parity with /mcp list (issue #3827)", () => {
 		// Redirect user-scoped mcp.json (resolved via getAgentDir() at the call
 		// site) into the per-test temp directory so neither the discovery loader
 		// nor the denylist reader touches the real user profile.
+		life.assertLive();
 		setAgentDir(userAgentDir);
 
 		await fs.mkdir(path.join(projectDir, ".omp"), { recursive: true });

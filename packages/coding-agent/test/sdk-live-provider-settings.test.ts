@@ -9,6 +9,7 @@ import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { installEnvRestores } from "../../utils/test/helpers/mock-restores";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
 
 import {
@@ -19,14 +20,14 @@ import {
 import { cfgToolsFormat } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 
 describe("primary-agent provider settings changed mid-session", () => {
+	// The async afterEach can time out, and Bun then skips the later hooks; this owner still puts
+	// the variable back at the next test and when the scope ends.
+	installEnvRestores(["PI_DIALECT"]);
 	const sessions: Array<{ dispose(): Promise<void> }> = [];
-	const previousDialectEnv = Bun.env.PI_DIALECT;
 
 	afterEach(async () => {
 		clearCustomApis();
 		for (const session of sessions.splice(0)) await session.dispose();
-		if (previousDialectEnv === undefined) delete Bun.env.PI_DIALECT;
-		else Bun.env.PI_DIALECT = previousDialectEnv;
 	});
 
 	it("applies thinking budgets, Kimi format, websocket policy, and tool format on the next request", async () => {

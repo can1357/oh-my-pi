@@ -18,6 +18,7 @@ import {
 import { getBlobsDir, getConfigRootDir, setAgentDir } from "@oh-my-pi/pi-utils";
 import { readArchiveEntries, writeArchive } from "@oh-my-pi/pi-utils/ar";
 import { makeAssistantMessage } from "./session-manager/helpers";
+import { testLifetime } from "../../utils/test/helpers/mock-restores";
 
 const IMAGE_DATA = Buffer.alloc(4096, 7).toString("base64");
 
@@ -49,6 +50,7 @@ describe("omp session pack/unpack archive", () => {
 	const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
 
 	beforeEach(async () => {
+		const life = testLifetime();
 		root = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-session-transfer-"));
 		agentA = path.join(root, "agent-a");
 		agentB = path.join(root, "agent-b");
@@ -56,6 +58,7 @@ describe("omp session pack/unpack archive", () => {
 		cwdB = path.join(root, "cloud", "project");
 		fs.mkdirSync(cwdA, { recursive: true });
 		fs.mkdirSync(cwdB, { recursive: true });
+		life.assertLive();
 		setAgentDir(agentA);
 	});
 

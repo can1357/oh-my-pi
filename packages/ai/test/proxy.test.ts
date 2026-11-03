@@ -15,6 +15,7 @@ import {
 	shouldBypassProxy,
 	wrapFetchForProxy,
 } from "@oh-my-pi/pi-ai/utils/proxy";
+import { testLifetime } from "../../utils/test/helpers/mock-restores";
 
 const PROXY = "http://127.0.0.1:24560";
 
@@ -354,6 +355,7 @@ describe("installGlobalProxyFetch", () => {
 	it.skipIf(process.platform === "win32")(
 		"reaches a Unix-socket service instead of sending it to PI_PROXY",
 		async () => {
+			const life = testLifetime();
 			const socket = path.join(os.tmpdir(), `omp-proxy-${process.pid}.sock`);
 			const connections = new Set<net.Socket>();
 			const server = net.createServer(connection => {
@@ -367,6 +369,7 @@ describe("installGlobalProxyFetch", () => {
 			await listening.promise;
 
 			try {
+				life.assertLive();
 				Bun.env.PI_PROXY = PROXY;
 				globalThis.fetch = nativeFetch;
 				installGlobalProxyFetch();

@@ -21,14 +21,21 @@ import {
 } from "@oh-my-pi/pi-coding-agent/tools/github-cache";
 import { github } from "@oh-my-pi/pi-coding-agent/utils/github";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { installEnvRestores, testLifetime } from "../../../utils/test/helpers/mock-restores";
+
+// The async afterEach can time out, and Bun then skips `onTestFinished`; this owner still puts
+// GH_HOST back at the next test and when the file ends.
+installEnvRestores(["GH_HOST"]);
 
 let tempDir: string;
 let originalEnv: string | undefined;
 
 let originalGhToken: string | undefined;
 beforeEach(async () => {
+	const life = testLifetime();
 	tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "issue-pr-protocol-"));
 	originalEnv = process.env.OMP_GITHUB_CACHE_DB;
+	life.assertLive();
 	process.env.OMP_GITHUB_CACHE_DB = path.join(tempDir, "github-cache.db");
 	originalGhToken = process.env.GH_TOKEN;
 	process.env.GH_TOKEN = "test-token";
@@ -391,14 +398,6 @@ describe("pr:// protocol handler", () => {
 			return prPayload(81, "pr body") as never;
 		});
 
-		const saved = process.env.GH_HOST;
-		onTestFinished(() => {
-			if (saved === undefined) {
-				delete process.env.GH_HOST;
-			} else {
-				process.env.GH_HOST = saved;
-			}
-		});
 		process.env.GH_HOST = "ghe.example.com";
 		const router = InternalUrlRouter.instance();
 		await router.resolve("pr://owner/example/81");

@@ -56,21 +56,15 @@ import {
 	cfgStartupSetupWizard,
 	cfgStartupShowSplash,
 } from "@oh-my-pi/pi-coding-agent/modes/settings";
-import { installMockRestores } from "../../../utils/test/helpers/mock-restores";
+import { installEnvRestores, installMockRestores, testLifetime } from "../../../utils/test/helpers/mock-restores";
 
 installMockRestores();
-
-const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
-const originalPiProfile = process.env.PI_PROFILE;
-const originalOmpProfile = process.env.OMP_PROFILE;
-
-function restoreEnv(key: string, value: string | undefined): void {
-	if (value === undefined) {
-		delete process.env[key];
-	} else {
-		process.env[key] = value;
-	}
-}
+// The async afterEach hooks can time out, and Bun then skips the later hooks and `onTestFinished`;
+// this owner still puts the variables back at the next test and when the file ends.
+// `setAgentDir()` writes PI_CODING_AGENT_DIR and clears the profile variables.
+installEnvRestores(["PI_CODING_AGENT_DIR", "PI_PROFILE", "OMP_PROFILE"], {
+	afterPutBack: utils.__resetDirsFromEnvForTests,
+});
 
 const RELAY_URL = "ws://localhost:8788";
 const WEB_URL = "https://collab.example";
@@ -241,7 +235,9 @@ const publishWaiters: (() => void)[] = [];
 let capturedSockets: FakeWebSocket[] = [];
 
 beforeEach(async () => {
+	const life = testLifetime();
 	tmp = await fs.mkdtemp(path.join(os.tmpdir(), "omp-collabctl-"));
+	life.assertLive();
 	utils.setAgentDir(path.join(tmp, "agent"));
 	installInMemoryRelay();
 	// Record every fake socket so a test can drive a terminal close on the host's transport.
@@ -270,10 +266,6 @@ afterEach(async () => {
 	publishSpy?.mockRestore();
 	// `runRootCommand` registers the CLI's extension roots (`--no-extensions` → explicit-only) process-wide.
 	clearOmpExtensionCliRoots();
-	restoreEnv("PI_CODING_AGENT_DIR", originalAgentDir);
-	restoreEnv("PI_PROFILE", originalPiProfile);
-	restoreEnv("OMP_PROFILE", originalOmpProfile);
-	utils.__resetDirsFromEnvForTests();
 	// InteractiveMode and the CLI open process-wide agent.db, history.db (prompt history and
 	// session index), and models.db under tmp/agent; Windows cannot delete open files.
 	AgentStorage.close();
@@ -469,9 +461,10 @@ describe("interactive collaboration startup", () => {
 		});
 		spyOn(ModelRegistry.prototype, "refreshInBackground").mockImplementation(() => {});
 		spyOn(pluginHelpers, "preloadPluginRoots").mockResolvedValue(undefined);
-		const originalIsTTY = process.stdin.isTTY;
+		const originalIsTTY = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
 		onTestFinished(() => {
-			Object.defineProperty(process.stdin, "isTTY", { value: originalIsTTY, configurable: true });
+			if (originalIsTTY) Object.defineProperty(process.stdin, "isTTY", originalIsTTY);
+			else Reflect.deleteProperty(process.stdin, "isTTY");
 		});
 		Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
 		const authStorage = await AuthStorage.create(path.join(tmp, "failed-join-auth.db"));
@@ -810,9 +803,10 @@ describe("interactive collaboration startup", () => {
 			}
 			spyOn(ModelRegistry.prototype, "refreshInBackground").mockImplementation(() => {});
 			spyOn(pluginHelpers, "preloadPluginRoots").mockResolvedValue(undefined);
-			const originalIsTTY = process.stdin.isTTY;
+			const originalIsTTY = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
 			onTestFinished(() => {
-				Object.defineProperty(process.stdin, "isTTY", { value: originalIsTTY, configurable: true });
+				if (originalIsTTY) Object.defineProperty(process.stdin, "isTTY", originalIsTTY);
+				else Reflect.deleteProperty(process.stdin, "isTTY");
 			});
 			Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
 			const authStorage = await AuthStorage.create(path.join(tmp, "startup-auth.db"));

@@ -5,7 +5,7 @@ import { type MacAppearanceObserver, MacOSAppearance } from "@oh-my-pi/pi-native
 import type { Terminal, TerminalAppearance } from "@oh-my-pi/pi-tui";
 import { getTerminalBackgroundColor, setTerminalBackgroundColor } from "@oh-my-pi/pi-tui/terminal-capabilities";
 
-const originalPlatform = process.platform;
+const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform");
 const originalColorfgbg = Bun.env.COLORFGBG;
 const originalZellij = Bun.env.ZELLIJ;
 
@@ -18,11 +18,8 @@ type ThemeTestGlobals = {
 /** Set the platform, COLORFGBG and ZELLIJ for the rest of the test; the describe's afterEach puts the variables back. */
 const setThemeTestGlobals = (globals: ThemeTestGlobals = {}) => {
 	const restorePlatform = () => {
-		Object.defineProperty(process, "platform", {
-			value: originalPlatform,
-			configurable: true,
-			writable: true,
-		});
+		if (originalPlatform) Object.defineProperty(process, "platform", originalPlatform);
+		else Reflect.deleteProperty(process, "platform");
 	};
 	onTestFinished(restorePlatform);
 	Object.defineProperty(process, "platform", {

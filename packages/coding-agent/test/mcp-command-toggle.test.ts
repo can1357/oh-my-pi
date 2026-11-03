@@ -15,6 +15,7 @@ import {
 	setProjectDir,
 } from "@oh-my-pi/pi-utils";
 import { createInteractiveModeContext, createMcpManagerStub } from "./helpers/interactive-mode-context";
+import { testLifetime } from "../../utils/test/helpers/mock-restores";
 
 const originalProjectDir = getProjectDir();
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -74,9 +75,11 @@ describe("/mcp enable and disable", () => {
 	});
 
 	beforeEach(async () => {
+		const life = testLifetime();
 		projectDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-toggle-project-"));
 		agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-toggle-agent-"));
 		setProjectDir(projectDir);
+		life.assertLive();
 		setAgentDir(agentDir);
 	});
 

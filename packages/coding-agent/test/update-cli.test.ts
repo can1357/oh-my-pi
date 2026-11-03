@@ -90,18 +90,17 @@ function withPlatform<T>(platform: NodeJS.Platform, fn: () => T): T {
 	}
 }
 
-/** Async {@link withPlatform}: keeps the override until the returned promise settles. */
+/**
+ * Async {@link withPlatform}: keeps the override for the rest of the test. The test's end puts the
+ * platform back; a put-back after `await fn()` would run late in a body abandoned on timeout.
+ */
 async function withPlatformAsync<T>(platform: NodeJS.Platform, fn: () => Promise<T>): Promise<T> {
 	const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform")!;
 	onTestFinished(() => {
 		Object.defineProperty(process, "platform", platformDescriptor);
 	});
 	Object.defineProperty(process, "platform", { ...platformDescriptor, value: platform });
-	try {
-		return await fn();
-	} finally {
-		Object.defineProperty(process, "platform", platformDescriptor);
-	}
+	return await fn();
 }
 
 /** A checked build service answer offering `content` as `version`, without a patch unless overridden. */

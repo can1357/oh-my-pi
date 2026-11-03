@@ -32,7 +32,7 @@ import { AUTO_THINKING } from "@oh-my-pi/pi-tui/thinking";
 import * as clipboard from "@oh-my-pi/pi-coding-agent/utils/clipboard";
 import { setKeybindings } from "@oh-my-pi/pi-tui";
 import { formatNumber, TempDir } from "@oh-my-pi/pi-utils";
-import { testLifetime } from "../../utils/test/helpers/mock-restores";
+import { installEnvRestores, testLifetime } from "../../utils/test/helpers/mock-restores";
 
 import { cfgPlanAutosave, cfgPlanAutosaveDir } from "@oh-my-pi/pi-coding-agent/plan-mode/settings";
 
@@ -147,6 +147,9 @@ function planReviewRecorder(
 }
 
 describe("InteractiveMode plan review rendering", () => {
+	// The async afterEach can time out, and Bun then skips `onTestFinished`; this owner still puts
+	// the variables back at the next test and when the scope ends.
+	installEnvRestores(["EDITOR", "VISUAL"]);
 	// Per-test, mutated by tests (planMode flags, spies, model roles, dispose/recreate).
 	let tempDir: TempDir;
 	let session: AgentSession;
@@ -1144,8 +1147,6 @@ describe("InteractiveMode plan review rendering", () => {
 			'await Bun.write(process.argv[2]!, "- add rollback command\\n- include smoke test\\n");\n',
 		);
 		const editorPath = `"${process.execPath}" "${editorScriptPath}"`;
-		const previousEditor = Bun.env.EDITOR;
-		const previousVisual = Bun.env.VISUAL;
 		const keybindings = KeybindingsManager.inMemory({
 			"app.editor.external": "ctrl+e",
 			"tui.select.cancel": "ctrl+g",
@@ -1162,12 +1163,6 @@ describe("InteractiveMode plan review rendering", () => {
 		const { promise: editorApplied, resolve: markEditorApplied } = Promise.withResolvers<void>();
 		vi.spyOn(mode.ui, "start").mockImplementation(() => markEditorApplied());
 
-		onTestFinished(() => {
-			if (previousEditor === undefined) delete Bun.env.EDITOR;
-			else Bun.env.EDITOR = previousEditor;
-			if (previousVisual === undefined) delete Bun.env.VISUAL;
-			else Bun.env.VISUAL = previousVisual;
-		});
 		life.assertLive();
 		Bun.env.EDITOR = editorPath;
 		delete Bun.env.VISUAL;

@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { __resetDirsFromEnvForTests, getAgentDir, getNativesDir } from "@oh-my-pi/pi-utils/dirs";
+import { testLifetime } from "./helpers/mock-restores";
 
 const ENV_KEYS = [
 	"HOME",
@@ -24,6 +25,7 @@ describe("native directory override", () => {
 	let originalEnv: Partial<Record<(typeof ENV_KEYS)[number], string>> = {};
 
 	beforeEach(async () => {
+		const life = testLifetime();
 		originalEnv = {};
 		for (const key of ENV_KEYS) {
 			originalEnv[key] = process.env[key];
@@ -32,6 +34,7 @@ describe("native directory override", () => {
 		tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-utils-natives-dir-"));
 		home = path.join(tempRoot, "home");
 		await fs.mkdir(home);
+		life.assertLive();
 		process.env.HOME = home;
 		process.env.USERPROFILE = home;
 		vi.spyOn(os, "homedir").mockReturnValue(home);

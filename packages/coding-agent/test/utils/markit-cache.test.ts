@@ -14,6 +14,7 @@ import { Markit } from "@oh-my-pi/pi-coding-agent/markit";
 import { convertBufferWithMarkit, convertFileWithMarkit } from "@oh-my-pi/pi-coding-agent/utils/markit";
 import { pruneMarkitConversionCache } from "@oh-my-pi/pi-coding-agent/utils/markit-cache";
 import { __resetDirsFromEnvForTests, getAgentDir, Snowflake, setAgentDir } from "@oh-my-pi/pi-utils";
+import { testLifetime } from "../../../utils/test/helpers/mock-restores";
 
 function restoreEnv(key: string, value: string | undefined): void {
 	if (value === undefined) {
@@ -31,12 +32,14 @@ describe("document conversion cache", () => {
 	let originalXdgCacheHome: string | undefined;
 
 	beforeEach(async () => {
+		const life = testLifetime();
 		originalPiCodingAgentDir = process.env.PI_CODING_AGENT_DIR;
 		originalOmpProfile = process.env.OMP_PROFILE;
 		originalPiProfile = process.env.PI_PROFILE;
 		originalXdgCacheHome = process.env.XDG_CACHE_HOME;
 		testDir = path.join(os.tmpdir(), `markit-cache-${Snowflake.next()}`);
 		await fs.mkdir(testDir, { recursive: true });
+		life.assertLive();
 		setAgentDir(path.join(testDir, "agent"));
 	});
 

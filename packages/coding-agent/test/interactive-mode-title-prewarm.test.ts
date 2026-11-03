@@ -9,6 +9,7 @@ import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { tinyTitleClient } from "@oh-my-pi/pi-coding-agent/tiny/title-client";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { installEnvRestores } from "../../utils/test/helpers/mock-restores";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 // Issue #6462: the first submit used to spawn the local tiny-title worker
@@ -21,9 +22,10 @@ describe("InteractiveMode tiny-title prewarm", () => {
 	let mode: InteractiveMode;
 	let session: AgentSession;
 	let tempDir: TempDir;
-	// Titling (and thus the prewarm gate) is disabled when PI_NO_TITLE is set,
-	// which the test env exports globally. Clear it per-test and restore after.
-	let previousNoTitle: string | undefined;
+	// Titling (and thus the prewarm gate) is disabled when PI_NO_TITLE is set, which the test env
+	// exports globally; each test clears it. The async afterEach can time out, and Bun then skips the
+	// later hooks; this owner still puts it back at the next test and when the scope ends.
+	installEnvRestores(["PI_NO_TITLE"]);
 
 	beforeAll(() => {
 		initTheme();
@@ -43,7 +45,6 @@ describe("InteractiveMode tiny-title prewarm", () => {
 			vi.spyOn(process.stdin, "setRawMode").mockReturnValue(process.stdin);
 		}
 
-		previousNoTitle = Bun.env.PI_NO_TITLE;
 		delete Bun.env.PI_NO_TITLE;
 
 		resetSettingsForTest();
@@ -85,8 +86,6 @@ describe("InteractiveMode tiny-title prewarm", () => {
 		vi.restoreAllMocks();
 		await session?.dispose();
 		resetSettingsForTest();
-		if (previousNoTitle === undefined) delete Bun.env.PI_NO_TITLE;
-		else Bun.env.PI_NO_TITLE = previousNoTitle;
 	});
 
 	afterAll(() => {

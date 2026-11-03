@@ -16,6 +16,7 @@ import {
 	type SessionWorktreeState,
 	type WorktreeExitAction,
 } from "../../src/session/session-worktree";
+import { testLifetime } from "../../../utils/test/helpers/mock-restores";
 
 const clean: SessionWorktreeState = { dirty: false, moved: false, offBranch: false };
 
@@ -84,11 +85,13 @@ describe("session worktree helpers (real git)", () => {
 	const branch = "wt/test-session";
 
 	beforeEach(async () => {
+		const life = testLifetime();
 		root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "omp-session-wt-")));
 		repo = path.join(root, "repo");
 		await fs.mkdir(repo);
 		savedEnv = process.env.OMP_WORKTREE_DIR;
 		savedCwd = process.cwd();
+		life.assertLive();
 		delete process.env.OMP_WORKTREE_DIR;
 		setWorktreesDir(path.join(root, "wt"));
 		git(repo, "init", "-q", "-b", "main");

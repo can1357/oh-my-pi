@@ -1,6 +1,11 @@
-import { afterEach, describe, expect, it, onTestFinished, spyOn, vi } from "bun:test";
+import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import { Mnemopi } from "@oh-my-pi/pi-mnemopi/core/memory";
 import type { MnemopiLlmCompletion } from "@oh-my-pi/pi-mnemopi/core/runtime-options";
+import { installEnvRestores } from "../../utils/test/helpers/mock-restores";
+
+// The async afterEach can time out, and Bun then skips `onTestFinished`; this owner still puts the
+// variables back at the next test and when the file ends.
+installEnvRestores(["MNEMOPI_LLM_ENABLED", "MNEMOPI_LLM_BASE_URL"]);
 
 const instances: Mnemopi[] = [];
 
@@ -108,8 +113,6 @@ describe("remember(extract) wires the LLM fact extractor", () => {
 	});
 
 	it("uses a runtime-configured remote LLM in background extraction", async () => {
-		const previousEnabled = process.env.MNEMOPI_LLM_ENABLED;
-		const previousBaseUrl = process.env.MNEMOPI_LLM_BASE_URL;
 		let requestedUrl = "";
 		let requestedBody = "";
 		const fetchMock: typeof fetch = Object.assign(
@@ -128,12 +131,6 @@ describe("remember(extract) wires the LLM fact extractor", () => {
 			{ preconnect: () => {} },
 		);
 		const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(fetchMock);
-		onTestFinished(() => {
-			if (previousEnabled === undefined) delete process.env.MNEMOPI_LLM_ENABLED;
-			else process.env.MNEMOPI_LLM_ENABLED = previousEnabled;
-			if (previousBaseUrl === undefined) delete process.env.MNEMOPI_LLM_BASE_URL;
-			else process.env.MNEMOPI_LLM_BASE_URL = previousBaseUrl;
-		});
 		process.env.MNEMOPI_LLM_ENABLED = "true";
 		delete process.env.MNEMOPI_LLM_BASE_URL;
 		const memory = new Mnemopi({

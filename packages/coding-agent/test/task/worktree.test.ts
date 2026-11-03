@@ -21,7 +21,7 @@ import { readRetainedMountBackend } from "@oh-my-pi/pi-coding-agent/task/isolati
 import * as natives from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { removeWithRetries, setWorktreesDir } from "@oh-my-pi/pi-utils";
-import { testLifetime } from "../../../utils/test/helpers/mock-restores";
+import { installEnvRestores, testLifetime } from "../../../utils/test/helpers/mock-restores";
 
 const tempDirs: string[] = [];
 
@@ -59,6 +59,10 @@ async function createGitRepo(): Promise<string> {
 	await initRepo(repo);
 	return repo;
 }
+
+// The async afterEach below can time out, and Bun then skips `onTestFinished`; this owner still
+// puts OMP_WORKTREE_DIR back at the next test and when the file ends.
+installEnvRestores(["OMP_WORKTREE_DIR"]);
 
 afterEach(async () => {
 	vi.restoreAllMocks();
@@ -276,11 +280,6 @@ describe("worktree isolation helpers", () => {
 
 		it("uses compact isolation paths that do not embed long task ids", async () => {
 			const life = testLifetime();
-			const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
-			onTestFinished(() => {
-				if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
-				else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
-			});
 			const worktreeBase = await fs.mkdtemp(path.join(os.tmpdir(), "omp-worktree-base-"));
 			tempDirs.push(worktreeBase);
 			life.assertLive();
@@ -851,11 +850,6 @@ describe("detachGitDir", () => {
 
 	it("isolates recursive submodule git state from a linked worktree", async () => {
 		const life = testLifetime();
-		const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
-		onTestFinished(() => {
-			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
-			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
-		});
 		const leaf = await createGitRepo();
 		await runGit(leaf, ["config", "user.email", "src@example.com"]);
 		await runGit(leaf, ["config", "user.name", "Source User"]);
@@ -955,11 +949,6 @@ describe("detachGitDir", () => {
 
 	it("preserves commits in a submodule added inside the isolation", async () => {
 		const life = testLifetime();
-		const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
-		onTestFinished(() => {
-			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
-			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
-		});
 		const leaf = await createGitRepo();
 		await runGit(leaf, ["config", "user.email", "src@example.com"]);
 		await runGit(leaf, ["config", "user.name", "Source User"]);
@@ -1004,11 +993,6 @@ describe("detachGitDir", () => {
 
 	it("keeps ensureIsolation from mutating a linked-worktree parent (rcopy backend)", async () => {
 		const life = testLifetime();
-		const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
-		onTestFinished(() => {
-			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
-			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
-		});
 		const { wt, baseSha } = await makeLinkedWorktree();
 		vi.spyOn(natives, "isoResolve").mockResolvedValue({
 			kind: natives.IsoBackendKind.Rcopy,

@@ -12,7 +12,14 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import puppeteer, { type Browser, type Page } from "puppeteer-core";
+import { installEnvRestores } from "../../../utils/test/helpers/mock-restores";
 import { chromiumAvailable } from "./chromium-probe";
+
+/** The variable a cell sets if it runs after Chrome detached omp from its tab. */
+const DETACH_PROBE = `OMP_DETACH_PROBE_${process.pid}`;
+// The async afterEach can time out, and Bun then skips `onTestFinished`; this owner still puts the
+// probe variable back at the next test and when the file ends.
+installEnvRestores([DETACH_PROBE]);
 
 afterEach(() => {
 	vi.restoreAllMocks();
@@ -481,10 +488,7 @@ describe("relay tabs Chrome detaches omp from", () => {
 				await compiled.promise;
 				return await wrapCode(code);
 			});
-			const probe = `OMP_DETACH_PROBE_${process.pid}`;
-			onTestFinished(() => {
-				delete process.env[probe];
-			});
+			const probe = DETACH_PROBE;
 			try {
 				const code = `process.env.${probe} = "ran"; return await page.evaluate(() => window.mark);`;
 				const next = invoke({ action: "run", code, timeout: 10 }).catch((error: unknown) => error);

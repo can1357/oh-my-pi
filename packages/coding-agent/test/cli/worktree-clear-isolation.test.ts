@@ -11,6 +11,7 @@ import {
 	writeRetainedBackend,
 } from "@oh-my-pi/pi-coding-agent/task/isolation-ownership";
 import { setWorktreesDir } from "@oh-my-pi/pi-utils";
+import { testLifetime } from "../../../utils/test/helpers/mock-restores";
 
 /**
  * Regression for #6761: `omp worktree clear` (no `--all`) must delete only
@@ -22,8 +23,10 @@ describe("worktree clear task-isolation ownership", () => {
 	let savedEnv: string | undefined;
 
 	beforeEach(async () => {
+		const life = testLifetime();
 		base = await fs.mkdtemp(path.join(os.tmpdir(), "omp-wt-clear-"));
 		savedEnv = process.env.OMP_WORKTREE_DIR;
+		life.assertLive();
 		delete process.env.OMP_WORKTREE_DIR;
 		setWorktreesDir(base);
 		vi.spyOn(console, "log").mockImplementation(() => {});

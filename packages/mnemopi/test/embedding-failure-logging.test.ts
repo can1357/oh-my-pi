@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, onTestFinished, spyOn, vi } from "bun:test";
+import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import {
 	embed,
 	resetEmbeddingProviderForTests,
@@ -6,6 +6,7 @@ import {
 } from "@oh-my-pi/pi-mnemopi/core/embeddings";
 import { withMnemopiRuntimeOptions } from "@oh-my-pi/pi-mnemopi/core/runtime-options";
 import { logger } from "@oh-my-pi/pi-utils";
+import { installEnvRestores } from "../../utils/test/helpers/mock-restores";
 
 const ENV_KEYS = [
 	"NODE_ENV",
@@ -19,21 +20,12 @@ const ENV_KEYS = [
 	"OPENAI_API_KEY",
 ] as const;
 
-type EnvKey = (typeof ENV_KEYS)[number];
+// Puts the variables back at the end of each test, at the next test, and when the file ends.
+installEnvRestores(ENV_KEYS, { afterPutBack: resetEmbeddingProviderForTests });
 
-/** Force the local-fastembed path: not a test runtime, local model, no API config. */
+/** Force the local-fastembed path for the rest of the test: not a test runtime, local model, no API config. */
 async function withLocalModelEnv<T>(fn: () => Promise<T>): Promise<T> {
-	const snapshot: Partial<Record<EnvKey, string>> = {};
-	onTestFinished(() => {
-		for (const key of ENV_KEYS) delete process.env[key];
-		Object.assign(process.env, snapshot);
-		resetEmbeddingProviderForTests();
-	});
-	for (const key of ENV_KEYS) {
-		const value = process.env[key];
-		if (value !== undefined) snapshot[key] = value;
-		delete process.env[key];
-	}
+	for (const key of ENV_KEYS) delete process.env[key];
 	process.env.MNEMOPI_EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5";
 	resetEmbeddingProviderForTests();
 	return await fn();

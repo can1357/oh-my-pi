@@ -18,6 +18,7 @@ import { clearCache as clearFsCache } from "@oh-my-pi/pi-coding-agent/capability
 import { loadAllMCPConfigs } from "@oh-my-pi/pi-coding-agent/mcp/config";
 import { getConfigRootDir, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import "@oh-my-pi/pi-coding-agent/discovery";
+import { testLifetime } from "../../utils/test/helpers/mock-restores";
 
 const originalAgentDirEnv = process.env.PI_CODING_AGENT_DIR;
 const fallbackAgentDir = path.join(getConfigRootDir(), "agent");
@@ -35,10 +36,12 @@ describe("MCP scope filtering precedes connection-equivalence deduplication", ()
 	let originalHome: string | undefined;
 
 	beforeEach(async () => {
+		const life = testLifetime();
 		originalHome = process.env.HOME;
 		tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-scope-home-"));
 		projectDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-scope-project-"));
 		userAgentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-scope-agent-"));
+		life.assertLive();
 		process.env.HOME = tempHome;
 		vi.spyOn(os, "homedir").mockReturnValue(tempHome);
 		setAgentDir(userAgentDir);

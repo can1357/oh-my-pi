@@ -6,6 +6,7 @@ import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { getProjectAgentDir, setAgentDir, setProjectDir, TempDir } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
+import { testLifetime } from "../../utils/test/helpers/mock-restores";
 
 const PROVIDER = "commit-extension-fixture";
 const MODEL = "deepseek-v4-flash";
@@ -16,10 +17,12 @@ let tmp: TempDir;
 let settingsState: SettingsTestState | undefined;
 
 beforeEach(async () => {
+	const life = testLifetime();
 	settingsState = beginSettingsTest();
 	tmp = await TempDir.create("@commit-extension-provider-");
 	agentTmp = await TempDir.create("@commit-extension-provider-agent-");
 	setProjectDir(tmp.path());
+	life.assertLive();
 	setAgentDir(agentTmp.path());
 
 	const extensionPath = tmp.join("provider.ts");

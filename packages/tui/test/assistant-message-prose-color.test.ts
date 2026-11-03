@@ -7,6 +7,7 @@ import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-messa
 import { getThemeByName, initTheme, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
 import { setTerminalImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui";
 import { getConfigRootDir, getCustomThemesDir, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
+import { testLifetime } from "../../utils/test/helpers/mock-restores";
 
 const RENDER_WIDTH = 80;
 const PROSE = "Assistant prose must be themeable.";
@@ -76,7 +77,9 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
+	const life = testLifetime();
 	tmpAgentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-prose-color-"));
+	life.assertLive();
 	setAgentDir(tmpAgentDir);
 	setTerminalImageProtocol(null);
 });

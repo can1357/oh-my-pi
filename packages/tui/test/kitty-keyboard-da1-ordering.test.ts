@@ -28,7 +28,7 @@ const originalSshConnection = Bun.env.SSH_CONNECTION;
 const originalSshTty = Bun.env.SSH_TTY;
 const originalSshClient = Bun.env.SSH_CLIENT;
 const originalTmux = Bun.env.TMUX;
-const originalTerminalId = TERMINAL.id;
+const originalTerminalId = Object.getOwnPropertyDescriptor(TERMINAL, "id");
 
 function restoreEnv(name: "SSH_CONNECTION" | "SSH_TTY" | "SSH_CLIENT" | "TMUX", value: string | undefined): void {
 	if (value === undefined) {
@@ -48,7 +48,8 @@ describe("ProcessTerminal kitty keyboard progressive-enhancement ordering", () =
 		restoreEnv("SSH_TTY", originalSshTty);
 		restoreEnv("SSH_CLIENT", originalSshClient);
 		restoreEnv("TMUX", originalTmux);
-		Object.defineProperty(TERMINAL, "id", { value: originalTerminalId, configurable: true });
+		if (originalTerminalId) Object.defineProperty(TERMINAL, "id", originalTerminalId);
+		else Reflect.deleteProperty(TERMINAL, "id");
 	});
 
 	it("requests alternate keys when the kitty reply arrives before the DA1 sentinel", async () => {

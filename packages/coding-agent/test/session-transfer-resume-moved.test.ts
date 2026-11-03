@@ -16,6 +16,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/session/session-transfer";
 import { getConfigRootDir, setAgentDir } from "@oh-my-pi/pi-utils";
 import { makeAssistantMessage } from "./session-manager/helpers";
+import { testLifetime } from "../../utils/test/helpers/mock-restores";
 
 describe("resuming a session that moved away", () => {
 	let root: string;
@@ -23,9 +24,11 @@ describe("resuming a session that moved away", () => {
 	const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
 
 	beforeEach(async () => {
+		const life = testLifetime();
 		root = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-session-moved-resume-"));
 		cwd = path.join(root, "project");
 		fs.mkdirSync(cwd, { recursive: true });
+		life.assertLive();
 		setAgentDir(path.join(root, "agent"));
 	});
 

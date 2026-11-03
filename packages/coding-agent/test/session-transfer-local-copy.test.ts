@@ -16,6 +16,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/session/session-transfer";
 import { getConfigRootDir, setAgentDir } from "@oh-my-pi/pi-utils";
 import { makeAssistantMessage } from "./session-manager/helpers";
+import { testLifetime } from "../../utils/test/helpers/mock-restores";
 
 function headerOf(entries: FileEntry[]): SessionHeader {
 	const header = entries[0];
@@ -50,6 +51,7 @@ describe("omp session unpack against a local copy", () => {
 	const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
 
 	beforeEach(async () => {
+		const life = testLifetime();
 		root = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-session-transfer-copy-"));
 		laptopAgent = path.join(root, "laptop-agent");
 		cloudAgent = path.join(root, "cloud-agent");
@@ -57,6 +59,7 @@ describe("omp session unpack against a local copy", () => {
 		cloudCwd = path.join(root, "cloud", "project");
 		fs.mkdirSync(laptopCwd, { recursive: true });
 		fs.mkdirSync(cloudCwd, { recursive: true });
+		life.assertLive();
 		setAgentDir(laptopAgent);
 	});
 

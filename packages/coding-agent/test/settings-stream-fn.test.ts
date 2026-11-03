@@ -7,7 +7,7 @@
  * OpenRouter sticky-routing / response caching behaves the same on advisor turns
  * (can1357/oh-my-pi#3639).
  */
-import { describe, expect, it, onTestFinished } from "bun:test";
+import { describe, expect, it } from "bun:test";
 import type { StreamFn } from "@oh-my-pi/pi-agent-core";
 import { type Context, type Model, type SimpleStreamOptions, streamSimple } from "@oh-my-pi/pi-ai";
 import { configureProviderStoreResponses } from "@oh-my-pi/pi-ai/providers/openai-responses-state";
@@ -18,7 +18,7 @@ import { bindEffects } from "@oh-my-pi/pi-coding-agent/config/registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { cfgProvidersMuseCodeStoreResponses } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { createSettingsAwareStreamFn } from "@oh-my-pi/pi-coding-agent/session/settings-stream-fn";
-import { testLifetime } from "../../utils/test/helpers/mock-restores";
+import { installEnvRestores } from "../../utils/test/helpers/mock-restores";
 
 function captureBase(): { fn: StreamFn; calls: Array<{ options?: SimpleStreamOptions }> } {
 	const calls: Array<{ options?: SimpleStreamOptions }> = [];
@@ -438,6 +438,8 @@ describe("createSettingsAwareStreamFn", () => {
 	});
 
 	describe("providers.muse-code.storeResponses (opt-in)", () => {
+		// Puts the variable back at the end of each test, at the next test, and when the scope ends.
+		installEnvRestores(["PI_MUSE_STORE_RESPONSES"]);
 		const museModel = getBundledModel("muse-code", "muse-spark-1.3");
 		if (!museModel) throw new Error("Expected bundled muse-code model");
 		const museCredential = JSON.stringify({ oauthAccessToken: "meta-access", apiKey: "LLM|key" });
@@ -472,20 +474,11 @@ describe("createSettingsAwareStreamFn", () => {
 
 		const context: Context = { messages: [{ role: "user", content: "hi", timestamp: 0 }] };
 
-		/**
-		 * Send one real request via `send` with a capturing fetch; return the wire `store` field.
-		 * The variable goes back after the request so a second call starts from the same value.
-		 */
+		/** Send one real request via `send` with a capturing fetch; return the wire `store` field. */
 		async function wireStore(
 			env: string | undefined,
 			send: (options: SimpleStreamOptions) => Promise<unknown>,
 		): Promise<unknown> {
-			const life = testLifetime();
-			const previous = process.env.PI_MUSE_STORE_RESPONSES;
-			onTestFinished(() => {
-				if (previous === undefined) delete process.env.PI_MUSE_STORE_RESPONSES;
-				else process.env.PI_MUSE_STORE_RESPONSES = previous;
-			});
 			if (env === undefined) delete process.env.PI_MUSE_STORE_RESPONSES;
 			else process.env.PI_MUSE_STORE_RESPONSES = env;
 			const bodies: Array<Record<string, unknown>> = [];
@@ -494,9 +487,6 @@ describe("createSettingsAwareStreamFn", () => {
 				return new Response(sseBody, { headers: { "content-type": "text/event-stream" } });
 			}) as FetchImpl;
 			await send({ apiKey: museCredential, fetch });
-			life.assertLive();
-			if (previous === undefined) delete process.env.PI_MUSE_STORE_RESPONSES;
-			else process.env.PI_MUSE_STORE_RESPONSES = previous;
 			return bodies[0]?.store;
 		}
 
@@ -528,7 +518,6 @@ describe("createSettingsAwareStreamFn", () => {
 		it("applies to direct side requests through the bound settings", async () => {
 			// Titles, commit messages, and memories call `completeSimple`/`streamSimple`
 			// without the settings-aware stream; the process-wide effect covers them.
-			const life = testLifetime();
 			const settings = Settings.isolated();
 			const release = bindEffects(settings);
 			const direct = (options: SimpleStreamOptions) => streamSimple(museModel, context, options).result();
@@ -536,7 +525,6 @@ describe("createSettingsAwareStreamFn", () => {
 				expect(await wireStore(undefined, direct)).toBe(false);
 				// Turning the setting on mid-process reaches the next direct request.
 				cfgProvidersMuseCodeStoreResponses.set(settings, true);
-				life.assertLive();
 				expect(await wireStore(undefined, direct)).toBe(true);
 			} finally {
 				release();

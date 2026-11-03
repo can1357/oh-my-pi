@@ -6,28 +6,37 @@ import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import { type AuthBrokerServerHandle, startAuthBroker } from "@oh-my-pi/pi-ai/auth-broker";
 import { runAuthGatewayCommand } from "@oh-my-pi/pi-coding-agent/cli/auth-gateway-cli";
 import { resetSettingsForTest } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { getAgentDir, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
+import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
+import { installEnvRestores, installMockRestores, testLifetime } from "../../utils/test/helpers/mock-restores";
 
 const BROKER_TOKEN = "gateway-account-pool-token";
-const ENV_KEYS = [
-	"OMP_AUTH_BROKER_URL",
-	"OMP_AUTH_BROKER_TOKEN",
-	"OMP_AUTH_BROKER_ACCOUNT_POOL_FILE",
-	"PI_CODING_AGENT_DIR",
-	"PI_CONFIG_FILES",
-] as const;
-const originalAgentDir = getAgentDir();
 
 describe("auth-gateway account pool", () => {
+	// The async afterEach can time out, and Bun then skips `onTestFinished` and the later hooks; these
+	// owners still put the variables and the spies back at the next test and when the scope ends.
+	// `setAgentDir()` writes PI_CODING_AGENT_DIR and clears the profile variables.
+	installEnvRestores(
+		[
+			"OMP_AUTH_BROKER_URL",
+			"OMP_AUTH_BROKER_TOKEN",
+			"OMP_AUTH_BROKER_ACCOUNT_POOL_FILE",
+			"PI_CODING_AGENT_DIR",
+			"PI_CONFIG_FILES",
+			"OMP_PROFILE",
+			"PI_PROFILE",
+		],
+		{ afterPutBack: __resetDirsFromEnvForTests },
+	);
+	installMockRestores();
 	let tempDir = "";
 	let brokerStore: SqliteAuthCredentialStore | undefined;
 	let brokerStorage: AuthStorage | undefined;
 	let handle: AuthBrokerServerHandle | undefined;
-	let savedEnv: Record<(typeof ENV_KEYS)[number], string | undefined>;
 
 	beforeEach(async () => {
-		savedEnv = Object.fromEntries(ENV_KEYS.map(key => [key, process.env[key]])) as typeof savedEnv;
+		const life = testLifetime();
 		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-auth-gateway-pool-"));
+		life.assertLive();
 		process.env.PI_CODING_AGENT_DIR = tempDir;
 		setAgentDir(tempDir);
 		resetSettingsForTest();
@@ -54,24 +63,18 @@ describe("auth-gateway account pool", () => {
 		});
 		const poolPath = path.join(tempDir, "account-pool.json");
 		await Bun.write(poolPath, JSON.stringify({ anthropic: ["email:allowed@example.com"] }));
+		life.assertLive();
 		process.env.OMP_AUTH_BROKER_URL = handle.url;
 		process.env.OMP_AUTH_BROKER_TOKEN = BROKER_TOKEN;
 		process.env.OMP_AUTH_BROKER_ACCOUNT_POOL_FILE = poolPath;
 	});
 
 	afterEach(async () => {
-		vi.restoreAllMocks();
 		resetSettingsForTest();
 		await handle?.close();
 		brokerStorage?.close();
 		brokerStore?.close();
 		if (tempDir) await removeWithRetries(tempDir);
-		for (const key of ENV_KEYS) {
-			const value = savedEnv[key];
-			if (value === undefined) delete process.env[key];
-			else process.env[key] = value;
-		}
-		setAgentDir(originalAgentDir);
 	});
 
 	test("check probes only credentials selected by the environment pool", async () => {

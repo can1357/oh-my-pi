@@ -1,20 +1,24 @@
-import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { runConfigCommand } from "@oh-my-pi/pi-coding-agent/cli/config-cli";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
-import { getConfigRootDir, getProjectDir, setAgentDir, setProjectDir, TempDir } from "@oh-my-pi/pi-utils";
-import { installMockRestores, testLifetime } from "../../utils/test/helpers/mock-restores";
+import { __resetDirsFromEnvForTests, getProjectDir, setAgentDir, setProjectDir, TempDir } from "@oh-my-pi/pi-utils";
+import { installEnvRestores, installMockRestores, testLifetime } from "../../utils/test/helpers/mock-restores";
 import { createTeardownFence } from "./helpers/teardown-fence";
 
 installMockRestores();
+// An async afterEach can time out, and Bun then skips the later hooks (this file's afterEach too)
+// and `onTestFinished`; this owner still puts the variables back at the next test and when the
+// file ends. `setAgentDir()` writes PI_CODING_AGENT_DIR and clears the profile variables.
+installEnvRestores(["PI_CODING_AGENT_DIR", "OMP_PROFILE", "PI_PROFILE", "PI_CONFIG_FILES"], {
+	afterPutBack: __resetDirsFromEnvForTests,
+});
 
 /** Parks a body abandoned on timeout before it stubs `process.exit` or reaches the real one. */
 const fence = createTeardownFence();
 
 let testAgentDir: TempDir | undefined;
-const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
-const fallbackAgentDir = path.join(getConfigRootDir(), "agent");
 const cliEntry = path.join(import.meta.dir, "..", "src", "cli.ts");
 
 interface CliProcessResult {
@@ -46,12 +50,6 @@ afterEach(async () => {
 	vi.restoreAllMocks();
 	AgentStorage.close();
 	resetSettingsForTest();
-	if (originalAgentDir) {
-		setAgentDir(originalAgentDir);
-	} else {
-		setAgentDir(fallbackAgentDir);
-		delete process.env.PI_CODING_AGENT_DIR;
-	}
 	if (testAgentDir) {
 		try {
 			await testAgentDir.remove();
@@ -236,11 +234,6 @@ describe("config CLI schema coverage", () => {
 	});
 	it("reports the value written to config.yml and the layer that still overrides it", async () => {
 		const life = testLifetime();
-		const previousConfigFiles = process.env.PI_CONFIG_FILES;
-		onTestFinished(() => {
-			if (previousConfigFiles === undefined) delete process.env.PI_CONFIG_FILES;
-			else process.env.PI_CONFIG_FILES = previousConfigFiles;
-		});
 		if (!testAgentDir) throw new Error("Test agent directory was not initialized");
 		const overlayPath = path.join(testAgentDir.path(), "overlay.yml");
 		await Bun.write(overlayPath, "compaction:\n  enabled: false\n");

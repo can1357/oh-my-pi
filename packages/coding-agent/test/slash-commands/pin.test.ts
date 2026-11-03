@@ -8,6 +8,7 @@ import { loadPinnedSessionIds } from "@oh-my-pi/pi-coding-agent/session/session-
 import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
 import { getConfigRootDir, setAgentDir } from "@oh-my-pi/pi-utils";
+import { testLifetime } from "../../../utils/test/helpers/mock-restores";
 
 let tempDir: string;
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -15,7 +16,9 @@ const fallbackAgentDir = path.join(getConfigRootDir(), "agent");
 const storage = new FileSessionStorage();
 
 beforeEach(async () => {
+	const life = testLifetime();
 	tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-pin-command-"));
+	life.assertLive();
 	setAgentDir(path.join(tempDir, "agent"));
 });
 

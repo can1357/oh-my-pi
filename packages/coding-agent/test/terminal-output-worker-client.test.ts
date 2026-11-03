@@ -1,5 +1,6 @@
 import { expect, onTestFinished, test } from "bun:test";
 import { renderTerminalOutputIsolated } from "../src/launch/terminal-output-worker-client";
+import { testLifetime } from "../../utils/test/helpers/mock-restores";
 
 class CleanExitWorker extends EventTarget {
 	postMessage(): void {
@@ -10,6 +11,7 @@ class CleanExitWorker extends EventTarget {
 }
 
 test("legacy replay rejects when its worker exits before responding", async () => {
+	const life = testLifetime();
 	const originalWorkerDescriptor = Object.getOwnPropertyDescriptor(globalThis, "Worker");
 	const restoreWorker = () => {
 		Reflect.deleteProperty(globalThis, "Worker");
@@ -35,6 +37,7 @@ test("legacy replay rejects when its worker exits before responding", async () =
 		expect(outcome.error).toBeInstanceOf(Error);
 		expect((outcome.error as Error).message).toBe("Terminal output worker exited before responding");
 	} finally {
+		life.assertLive();
 		Reflect.deleteProperty(globalThis, "Worker");
 		if (originalWorkerDescriptor) Object.defineProperty(globalThis, "Worker", originalWorkerDescriptor);
 	}

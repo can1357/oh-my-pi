@@ -2969,9 +2969,10 @@ describe("lsp regressions", () => {
 	});
 
 	it("detects Ruff in Windows virtualenv Scripts directories", async () => {
-		const originalPlatform = process.platform;
+		const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform");
 		onTestFinished(() => {
-			Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true, writable: true });
+			if (originalPlatform) Object.defineProperty(process, "platform", originalPlatform);
+			else Reflect.deleteProperty(process, "platform");
 		});
 		Object.defineProperty(process, "platform", { value: "win32", configurable: true, writable: true });
 
@@ -2994,9 +2995,10 @@ describe("lsp regressions", () => {
 	});
 
 	it("detects Ruff in Windows virtualenv Scripts directories for Ruff-only roots", async () => {
-		const originalPlatform = process.platform;
+		const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform");
 		onTestFinished(() => {
-			Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true, writable: true });
+			if (originalPlatform) Object.defineProperty(process, "platform", originalPlatform);
+			else Reflect.deleteProperty(process, "platform");
 		});
 		Object.defineProperty(process, "platform", { value: "win32", configurable: true, writable: true });
 		const whichSpy = vi.spyOn(Bun, "which").mockReturnValue(null);
@@ -3020,9 +3022,10 @@ describe("lsp regressions", () => {
 	});
 
 	it("detects pyright and pylsp in Windows virtualenv Scripts for Python-only roots", async () => {
-		const originalPlatform = process.platform;
+		const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform");
 		onTestFinished(() => {
-			Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true, writable: true });
+			if (originalPlatform) Object.defineProperty(process, "platform", originalPlatform);
+			else Reflect.deleteProperty(process, "platform");
 		});
 		Object.defineProperty(process, "platform", { value: "win32", configurable: true, writable: true });
 		const whichSpy = vi.spyOn(Bun, "which").mockReturnValue(null);

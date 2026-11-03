@@ -15,10 +15,10 @@ import {
 } from "@oh-my-pi/pi-ai/auth-broker";
 import { removeWithRetries } from "../../utils/src/temp";
 import { withEnv } from "./helpers";
+import { installEnvRestores, installMockRestores } from "../../utils/test/helpers/mock-restores";
 
 const ANTHROPIC_ENV = ["ANTHROPIC_API_KEY", "ANTHROPIC_OAUTH_TOKEN"] as const;
 const AUTH_BROKER_MODULE = path.resolve(import.meta.dir, "../src/auth-broker/index.ts");
-const savedEnv: Partial<Record<(typeof ANTHROPIC_ENV)[number], string | undefined>> = {};
 
 function mintOAuthCredential(suffix: string, expires: number) {
 	return {
@@ -41,6 +41,10 @@ async function waitUntil(predicate: () => boolean, timeoutMs = 2_000): Promise<v
 }
 
 describe("RemoteAuthCredentialStore SSE integration", () => {
+	// The async afterEach can time out, and Bun then skips `onTestFinished` and the later hooks;
+	// these owners still put the variables and the spies back at the next test and when the scope ends.
+	installEnvRestores(["ANTHROPIC_API_KEY", "ANTHROPIC_OAUTH_TOKEN"]);
+	installMockRestores();
 	let tempDir = "";
 	let store: SqliteAuthCredentialStore | undefined;
 	let storage: AuthStorage | undefined;
@@ -49,10 +53,7 @@ describe("RemoteAuthCredentialStore SSE integration", () => {
 	const token = "remote-store-bearer";
 
 	beforeEach(async () => {
-		for (const key of ANTHROPIC_ENV) {
-			savedEnv[key] = process.env[key];
-			delete process.env[key];
-		}
+		for (const key of ANTHROPIC_ENV) delete process.env[key];
 		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "auth-broker-remote-store-"));
 		store = new SqliteAuthCredentialStore(new Database(":memory:"));
 		await store.saveOAuth("anthropic", mintOAuthCredential("a", Date.now() + 60_000));
@@ -67,16 +68,11 @@ describe("RemoteAuthCredentialStore SSE integration", () => {
 	});
 
 	afterEach(async () => {
-		vi.restoreAllMocks();
 		remote?.close();
 		await handle?.close();
 		storage?.close();
 		store?.close();
 		await removeWithRetries(tempDir);
-		for (const key of ANTHROPIC_ENV) {
-			if (savedEnv[key] === undefined) delete process.env[key];
-			else process.env[key] = savedEnv[key];
-		}
 	});
 
 	test("consumes initial snapshot, upsert, and removal over SSE without manual refresh", async () => {

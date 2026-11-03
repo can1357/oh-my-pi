@@ -5,8 +5,12 @@ import { type AuthBrokerServerHandle, startAuthBroker } from "@oh-my-pi/pi-ai/au
 import { runUsageCommand } from "@oh-my-pi/pi-coding-agent/cli/usage-cli";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
+import { installEnvRestores, installMockRestores } from "../../utils/test/helpers/mock-restores";
 
-const BROKER_ENV = ["OMP_AUTH_BROKER_URL", "OMP_AUTH_BROKER_TOKEN"] as const;
+// The async afterEach can time out, and Bun then skips the later hooks; these owners still put
+// the variables and the spies back at the next test and when the file ends.
+installEnvRestores(["OMP_AUTH_BROKER_URL", "OMP_AUTH_BROKER_TOKEN"]);
+installMockRestores();
 const HOUR_MS = 60 * 60 * 1000;
 
 function snapshot(provider: string, recordedAt: number, usedFraction: number): UsageHistoryEntry {
@@ -25,10 +29,8 @@ function snapshot(provider: string, recordedAt: number, usedFraction: number): U
 let brokerStore: SqliteAuthCredentialStore;
 let localStore: SqliteAuthCredentialStore;
 let handle: AuthBrokerServerHandle;
-const savedEnv: Record<string, string | undefined> = {};
 
 beforeEach(() => {
-	for (const key of BROKER_ENV) savedEnv[key] = process.env[key];
 	brokerStore = new SqliteAuthCredentialStore(new Database(":memory:"));
 	localStore = new SqliteAuthCredentialStore(new Database(":memory:"));
 	handle = startAuthBroker({
@@ -44,13 +46,8 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
-	vi.restoreAllMocks();
 	await handle.close();
 	brokerStore.close();
-	for (const key of BROKER_ENV) {
-		if (savedEnv[key] === undefined) delete process.env[key];
-		else process.env[key] = savedEnv[key];
-	}
 });
 
 test("omp usage --history reads the broker host's record, not the client's own store", async () => {

@@ -8,6 +8,7 @@ import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config
 import { initializeWithSettings, loadCapability } from "@oh-my-pi/pi-coding-agent/discovery";
 import { clearClaudePluginRootsCache } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { testLifetime } from "../../../utils/test/helpers/mock-restores";
 
 describe("Claude Code custom tool discovery", () => {
 	let root = "";
@@ -17,6 +18,7 @@ describe("Claude Code custom tool discovery", () => {
 	let originalClaudeConfigDir: string | undefined;
 
 	beforeEach(async () => {
+		const life = testLifetime();
 		resetSettingsForTest();
 		clearClaudePluginRootsCache();
 		clearFsCache();
@@ -26,6 +28,7 @@ describe("Claude Code custom tool discovery", () => {
 		root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-claude-tools-"));
 		home = path.join(root, "home");
 		project = path.join(root, "project");
+		life.assertLive();
 		process.env.HOME = home;
 		vi.spyOn(os, "homedir").mockReturnValue(home);
 		await fs.mkdir(path.join(project, ".git"), { recursive: true });

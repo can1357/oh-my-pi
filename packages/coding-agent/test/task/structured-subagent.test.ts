@@ -44,6 +44,7 @@ import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { SingleResult, TaskParams } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
+import { installEnvRestores, installMockRestores } from "../../../utils/test/helpers/mock-restores";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 
 import { cfgRetryModelFallback } from "@oh-my-pi/pi-coding-agent/session/settings";
@@ -132,8 +133,10 @@ function mockDiscovery(agent: AgentDefinition = AGENT) {
 	return vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [agent], projectAgentsDir: null });
 }
 
+// Restores the spies even when a scope's async afterEach times out and Bun skips the later hooks.
+installMockRestores();
+
 afterEach(() => {
-	vi.restoreAllMocks();
 	resetRegisteredArtifactDirsForTests();
 });
 
@@ -1278,22 +1281,13 @@ describe("structured subagent primitive", () => {
 
 describe("agent frontmatter structured opt-in", () => {
 	const MOCK_API_SOURCE = "test/structured-subagent-opt-in";
-	const ENV_KEYS = ["HOME", "PI_CODING_AGENT_DIR", "OMP_PROFILE", "PI_PROFILE"] as const;
-	// Captured once, so a put-back skipped by a timed-out afterEach cannot become the next test's baseline.
-	const savedEnv: Record<string, string | undefined> = Object.fromEntries(
-		ENV_KEYS.map(key => [key, process.env[key]]),
-	);
+	// The async afterEach below can time out, and Bun then skips `onTestFinished` and the later hooks;
+	// this owner still puts the variables back at the next test and when the scope ends.
+	// `setAgentDir()` writes PI_CODING_AGENT_DIR and clears the profile variables.
+	installEnvRestores(["HOME", "PI_CODING_AGENT_DIR", "OMP_PROFILE", "PI_PROFILE"], {
+		afterPutBack: __resetDirsFromEnvForTests,
+	});
 	let root: string;
-
-	function restoreEnvValue(key: string, value: string | undefined): void {
-		if (value === undefined) {
-			delete process.env[key];
-			delete Bun.env[key];
-			return;
-		}
-		process.env[key] = value;
-		Bun.env[key] = value;
-	}
 
 	/** A user agent whose `output` requires `verdict`; only the frontmatter `structured` flag varies. */
 	function agentFile(name: string, structured: boolean): string {
@@ -1318,15 +1312,10 @@ describe("agent frontmatter structured opt-in", () => {
 
 	// Synchronous, so a timed-out hook cannot resume later and install HOME during another test.
 	beforeEach(() => {
-		// Runs after afterEach: disposal still sees the test root and the homedir spy is restored.
-		onTestFinished(() => {
-			for (const key of ENV_KEYS) restoreEnvValue(key, savedEnv[key]);
-			__resetDirsFromEnvForTests();
-		});
 		root = fsSync.mkdtempSync(path.join(os.tmpdir(), "omp-structured-opt-in-"));
 		const home = path.join(root, "home");
 		fsSync.mkdirSync(home, { recursive: true });
-		restoreEnvValue("HOME", home);
+		process.env.HOME = home;
 		vi.spyOn(os, "homedir").mockReturnValue(home);
 		setAgentDir(path.join(home, ".omp", "agent"));
 		AgentRegistry.resetGlobalForTests();
@@ -1334,7 +1323,7 @@ describe("agent frontmatter structured opt-in", () => {
 		registerMockApi(MOCK_API_SOURCE);
 	});
 
-	// Disposal only: the environment put-back above does not wait for it to finish.
+	// Disposal only: the environment and the spies are put back by the owners above.
 	afterEach(async () => {
 		await AgentLifecycleManager.global().dispose();
 		AgentLifecycleManager.resetGlobalForTests();

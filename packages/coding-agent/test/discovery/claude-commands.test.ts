@@ -7,6 +7,7 @@ import { type SlashCommand, slashCommandCapability } from "@oh-my-pi/pi-coding-a
 import { resetSettingsForTest } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { loadCapability } from "@oh-my-pi/pi-coding-agent/discovery";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { testLifetime } from "../../../utils/test/helpers/mock-restores";
 
 async function writeFile(filePath: string, content: string): Promise<void> {
 	await fs.mkdir(path.dirname(filePath), { recursive: true });
@@ -21,6 +22,7 @@ describe("Claude Code slash command discovery", () => {
 	let originalClaudeConfigDir: string | undefined;
 
 	beforeEach(async () => {
+		const life = testLifetime();
 		clearFsCache();
 		resetSettingsForTest();
 		originalHome = process.env.HOME;
@@ -29,6 +31,7 @@ describe("Claude Code slash command discovery", () => {
 		root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-claude-commands-"));
 		home = path.join(root, "home");
 		project = path.join(root, "project");
+		life.assertLive();
 		process.env.HOME = home;
 		vi.spyOn(os, "homedir").mockReturnValue(home);
 		await fs.mkdir(path.join(project, ".git"), { recursive: true });

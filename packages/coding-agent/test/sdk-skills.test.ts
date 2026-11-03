@@ -10,8 +10,9 @@ import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
-import { getAgentDir, setAgentDir } from "@oh-my-pi/pi-utils/dirs";
+import { __resetDirsFromEnvForTests, removeSyncWithRetries } from "@oh-my-pi/pi-utils";
+import { setAgentDir } from "@oh-my-pi/pi-utils/dirs";
+import { installEnvRestores } from "../../utils/test/helpers/mock-restores";
 import { cleanupTempHome } from "./helpers/temp-home-cleanup";
 
 import { cfgAutolearnEnabled } from "@oh-my-pi/pi-coding-agent/autolearn/settings";
@@ -43,11 +44,15 @@ function createExtensionSkill(packageDir: string, skillName: string): void {
 }
 
 describe("createAgentSession skills option", () => {
+	// The sessions' async afterEach can time out, and Bun then skips `onTestFinished`; this owner
+	// still puts the variables back at the next test and when the scope ends. `setAgentDir()` writes
+	// PI_CODING_AGENT_DIR and clears the profile variables.
+	installEnvRestores(["HOME", "PI_CODING_AGENT_DIR", "OMP_PROFILE", "PI_PROFILE"], {
+		afterPutBack: __resetDirsFromEnvForTests,
+	});
 	let tempDir: string;
 	let skillsDir: string;
 	let tempHomeDir = "";
-	// Captured once, so a put-back skipped by a timed-out afterEach cannot become the next test's baseline.
-	const originalHome = process.env.HOME;
 	// Auth storage (SQLite DB) and the model registry are immutable across these tests: skill
 	// discovery never touches models, and building them per test would make createAgentSession call
 	// modelRegistry.refreshInBackground(), whose online model discovery saturates the event loop and
@@ -73,8 +78,8 @@ describe("createAgentSession skills option", () => {
 		// Create skill in .omp/skills/ for native project-level discovery
 		skillsDir = path.join(tempDir, ".omp", "skills", "test-skill");
 		fs.mkdirSync(skillsDir, { recursive: true });
-		// Runs after afterEach has disposed the sessions, which still see the temp home.
-		onTestFinished(removeTempHome);
+		// Runs after afterEach has disposed the sessions, which still see the temp dirs.
+		onTestFinished(removeTempDirs);
 		tempHomeDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-sdk-home-"));
 		process.env.HOME = tempHomeDir;
 		const nativeUserSkillsDir = path.join(tempHomeDir, ".omp", "agent", "skills");
@@ -118,7 +123,7 @@ Loaded via symbolic link.
 		sessions.push(created.session);
 		return created;
 	};
-	const removeTempHome = cleanupTempHome(() => ({ tempDir, tempHomeDir, originalHome }));
+	const removeTempDirs = cleanupTempHome(() => ({ tempDir, tempHomeDir }));
 
 	afterEach(async () => {
 		for (const session of sessions.splice(0)) {
@@ -153,10 +158,6 @@ Loaded via symbolic link.
 			JSON.stringify({ name: "omp-plugins", dependencies: { "sdk-installed-extension": "1.0.0" } }),
 		);
 
-		const previousAgentDir = getAgentDir();
-		onTestFinished(() => {
-			setAgentDir(previousAgentDir);
-		});
 		setAgentDir(path.join(tempHomeDir, ".omp", "agent"));
 		const baseSessionOptions = {
 			cwd: tempDir,
@@ -293,10 +294,6 @@ This skill is added after session creation.
 	});
 
 	it("manage_skill hot-registers managed skills in the active session", async () => {
-		const originalAgentDir = getAgentDir();
-		onTestFinished(() => {
-			setAgentDir(originalAgentDir);
-		});
 		const managedAgentDir = path.join(tempHomeDir, ".omp", "agent");
 		setAgentDir(managedAgentDir);
 		const settings = createIsolatedSkillsSettings();
@@ -352,10 +349,6 @@ This skill is added after session creation.
 	});
 
 	it("learn hot-registers minted managed skills in the active session", async () => {
-		const originalAgentDir = getAgentDir();
-		onTestFinished(() => {
-			setAgentDir(originalAgentDir);
-		});
 		const managedAgentDir = path.join(tempHomeDir, ".omp", "agent");
 		setAgentDir(managedAgentDir);
 		const settings = Settings.isolated({

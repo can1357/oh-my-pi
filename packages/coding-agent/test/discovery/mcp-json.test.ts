@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { type MCPServer, mcpCapability } from "@oh-my-pi/pi-coding-agent/capability/mcp";
 import { loadCapability } from "@oh-my-pi/pi-coding-agent/discovery";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { installEnvRestores, testLifetime } from "../../../utils/test/helpers/mock-restores";
 
 async function loadStandaloneMcpConfig(cwd: string): Promise<MCPServer[]> {
 	const result = await loadCapability<MCPServer>(mcpCapability.id, {
@@ -19,20 +20,24 @@ function envPlaceholder(name: string): string {
 }
 
 describe("standalone mcp.json oauth env expansion", () => {
+	// The async afterEach can time out, and Bun then skips the put-backs after its await; this owner
+	// puts the variables back at the end of each test, at the next test, and when the scope ends.
+	installEnvRestores([
+		"PI_OAUTH_TOKEN_URL",
+		"PI_OAUTH_CLIENT_ID",
+		"PI_OAUTH_CLIENT_SECRET",
+		"PI_OAUTH_REDIRECT_URI",
+		"PI_OAUTH_CALLBACK_PATH",
+		"PI_MCP_HEADER",
+		"PI_MCP_URL",
+		"PI_MCP_ENV",
+	]);
 	let tempDir = "";
-	const originalEnv = {
-		PI_OAUTH_TOKEN_URL: process.env.PI_OAUTH_TOKEN_URL,
-		PI_OAUTH_CLIENT_ID: process.env.PI_OAUTH_CLIENT_ID,
-		PI_OAUTH_CLIENT_SECRET: process.env.PI_OAUTH_CLIENT_SECRET,
-		PI_OAUTH_REDIRECT_URI: process.env.PI_OAUTH_REDIRECT_URI,
-		PI_OAUTH_CALLBACK_PATH: process.env.PI_OAUTH_CALLBACK_PATH,
-		PI_MCP_HEADER: process.env.PI_MCP_HEADER,
-		PI_MCP_URL: process.env.PI_MCP_URL,
-		PI_MCP_ENV: process.env.PI_MCP_ENV,
-	};
 
 	beforeEach(async () => {
+		const life = testLifetime();
 		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-json-"));
+		life.assertLive();
 		process.env.PI_OAUTH_TOKEN_URL = "https://provider.example/token";
 		process.env.PI_OAUTH_CLIENT_ID = "oauth-client-id";
 		process.env.PI_OAUTH_CLIENT_SECRET = "oauth-client-secret";
@@ -45,13 +50,6 @@ describe("standalone mcp.json oauth env expansion", () => {
 
 	afterEach(async () => {
 		await removeWithRetries(tempDir);
-		for (const [key, value] of Object.entries(originalEnv)) {
-			if (value === undefined) {
-				delete process.env[key];
-			} else {
-				process.env[key] = value;
-			}
-		}
 	});
 
 	test("expands standalone auth and oauth fields alongside existing env-expanded fields", async () => {

@@ -8,6 +8,7 @@ import {
 	loadSystemPromptFiles,
 	type SystemPromptToolMetadata,
 } from "@oh-my-pi/pi-coding-agent/system-prompt";
+import { installEnvRestores } from "../../utils/test/helpers/mock-restores";
 import { cleanupTempHome } from "./helpers/temp-home-cleanup";
 
 function escapeRegExp(text: string): string {
@@ -27,18 +28,17 @@ const READ_TOOL = new Map<string, SystemPromptToolMetadata>([
 ]);
 
 describe("SYSTEM.md prompt assembly", () => {
+	installEnvRestores(["HOME"]);
 	let tempDir = "";
 	let tempHomeDir = "";
-	let originalHome: string | undefined;
 
 	beforeEach(() => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-system-prompt-"));
 		tempHomeDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-system-home-"));
-		originalHome = process.env.HOME;
 		process.env.HOME = tempHomeDir;
 	});
 
-	afterEach(cleanupTempHome(() => ({ tempDir, tempHomeDir, originalHome })));
+	afterEach(cleanupTempHome(() => ({ tempDir, tempHomeDir })));
 
 	it("keeps per-request date/cwd out of the system prompt footer", async () => {
 		// The date/cwd line was moved out of the system prompt and onto the first

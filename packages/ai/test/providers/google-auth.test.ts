@@ -5,6 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { __resetVertexTokenCache, getVertexAccessToken, userAdcPath } from "../../src/providers/google-auth";
 import type { FetchImpl } from "../../src/types";
+import { testLifetime } from "../../../utils/test/helpers/mock-restores";
 
 const CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform";
 const JWT_BEARER_GRANT = "urn:ietf:params:oauth:grant-type:jwt-bearer";
@@ -224,9 +225,11 @@ describe("Workforce Identity Federation ADC", () => {
 	let originalEnv: Record<string, string | undefined>;
 
 	beforeEach(async () => {
+		const life = testLifetime();
 		__resetVertexTokenCache();
 		originalEnv = Object.fromEntries(envKeys.map(key => [key, Bun.env[key]]));
 		tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-vertex-workforce-"));
+		life.assertLive();
 		for (const key of envKeys) delete Bun.env[key];
 		Bun.env.GOOGLE_APPLICATION_CREDENTIALS = path.join(tmpDir, "adc.json");
 	});

@@ -17,6 +17,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/skillshare/manifest";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { getAgentDir, setAgentDir } from "@oh-my-pi/pi-utils/dirs";
+import { testLifetime } from "../../../utils/test/helpers/mock-restores";
 
 function lockEntry(scope: string, name: string, version: string) {
 	return {
@@ -41,11 +42,13 @@ describe("skillshare discovery provider", () => {
 	let originalAgentDir: string;
 
 	beforeEach(async () => {
+		const life = testLifetime();
 		originalAgentDir = getAgentDir();
 		tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "omp-skillshare-disco-"));
 		project = path.join(tempHome, "work", "proj");
 		await fs.mkdir(path.join(project, ".git"), { recursive: true });
 		vi.spyOn(os, "homedir").mockReturnValue(tempHome);
+		life.assertLive();
 		setAgentDir(path.join(tempHome, ".omp", "agent"));
 	});
 

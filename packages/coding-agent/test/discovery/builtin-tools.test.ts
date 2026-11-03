@@ -11,6 +11,7 @@ import { discoverCustomToolPaths, loadCustomTools } from "@oh-my-pi/pi-coding-ag
 import { __closeExtensionParseCacheForTests } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/legacy-pi-compat";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { restoreEnvValue } from "../helpers/settings-test-state";
+import { testLifetime } from "../../../utils/test/helpers/mock-restores";
 
 function toolSource(name: string): string {
 	return `export default api => ({
@@ -32,6 +33,7 @@ describe("native executable custom tool discovery", () => {
 	let originalPiProfileEnv: string | undefined;
 
 	beforeEach(async () => {
+		const life = testLifetime();
 		resetSettingsForTest();
 		clearClaudePluginRootsCache();
 		clearFsCache();
@@ -44,6 +46,7 @@ describe("native executable custom tool discovery", () => {
 		project = path.join(root, "project");
 		projectTools = path.join(project, ".omp", "tools");
 		userTools = path.join(home, ".omp", "agent", "tools");
+		life.assertLive();
 		process.env.HOME = home;
 		vi.spyOn(os, "homedir").mockReturnValue(home);
 		setAgentDir(path.dirname(userTools));

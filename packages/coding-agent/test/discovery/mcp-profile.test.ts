@@ -20,6 +20,7 @@ import { clearCache as clearFsCache } from "@oh-my-pi/pi-coding-agent/capability
 import { type MCPServer, mcpCapability } from "@oh-my-pi/pi-coding-agent/capability/mcp";
 import { loadCapability } from "@oh-my-pi/pi-coding-agent/discovery";
 import { getConfigRootDir, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
+import { testLifetime } from "../../../utils/test/helpers/mock-restores";
 
 const originalAgentDirEnv = process.env.PI_CODING_AGENT_DIR;
 const fallbackAgentDir = path.join(getConfigRootDir(), "agent");
@@ -41,9 +42,11 @@ describe("native user-level MCP discovery follows the active profile", () => {
 	let originalHome: string | undefined;
 
 	beforeEach(async () => {
+		const life = testLifetime();
 		originalHome = process.env.HOME;
 		tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-profile-home-"));
 		projectDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-profile-project-"));
+		life.assertLive();
 		process.env.HOME = tempHome;
 		vi.spyOn(os, "homedir").mockReturnValue(tempHome);
 		clearFsCache();

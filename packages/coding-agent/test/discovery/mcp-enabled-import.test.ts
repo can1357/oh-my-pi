@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { type MCPServer, mcpCapability } from "@oh-my-pi/pi-coding-agent/capability/mcp";
 import { loadCapability } from "@oh-my-pi/pi-coding-agent/discovery";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { testLifetime } from "../../../utils/test/helpers/mock-restores";
 
 async function loadMcp(cwd: string, provider: string): Promise<MCPServer[]> {
 	const result = await loadCapability<MCPServer>(mcpCapability.id, {
@@ -96,9 +97,11 @@ describe("translated MCP importers propagate enabled: false", () => {
 	let originalHome: string | undefined;
 
 	beforeEach(async () => {
+		const life = testLifetime();
 		originalHome = process.env.HOME;
 		tempCwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-enabled-cwd-"));
 		tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-enabled-home-"));
+		life.assertLive();
 		process.env.HOME = tempHome;
 		vi.spyOn(os, "homedir").mockReturnValue(tempHome);
 	});

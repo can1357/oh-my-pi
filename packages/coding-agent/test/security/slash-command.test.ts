@@ -11,6 +11,7 @@ import type { ToolSession } from "../../src/tools";
 import { SecurityScanTool } from "../../src/tools/security-scan";
 
 import { cfgSecurityEnabled } from "@oh-my-pi/pi-coding-agent/tools/settings";
+import { testLifetime } from "../../../utils/test/helpers/mock-restores";
 
 const SARIF_FIXTURE = path.join(import.meta.dir, "..", "fixtures", "security", "generic-results.sarif");
 let temporaryRoot = "";
@@ -20,10 +21,12 @@ let settings: Settings;
 let output: string[] = [];
 
 beforeEach(async () => {
+	const life = testLifetime();
 	temporaryRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-security-slash-"));
 	repositoryRoot = path.join(temporaryRoot, "repo");
 	await fs.mkdir(repositoryRoot);
 	previousStateHome = process.env.XDG_STATE_HOME;
+	life.assertLive();
 	process.env.XDG_STATE_HOME = path.join(temporaryRoot, "xdg-state");
 	refreshDirsFromEnv();
 	settings = Settings.isolated({ "security.enabled": true });

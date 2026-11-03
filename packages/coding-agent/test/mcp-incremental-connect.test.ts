@@ -18,6 +18,7 @@ import {
 	type MCPToggleSession,
 } from "@oh-my-pi/pi-coding-agent/modes/components/extensions/mcp-runtime";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
+import { installEnvRestores } from "../../utils/test/helpers/mock-restores";
 import { MANY_TOOL_COUNT, manyToolName } from "./fixtures/many-tools-mcp";
 
 const FIXTURE_PATH = path.join(import.meta.dir, "fixtures", "many-tools-mcp.ts");
@@ -64,30 +65,22 @@ async function waitForTools(manager: MCPManager, servers: string[]): Promise<voi
 }
 
 describe("MCP incremental connectServers", () => {
+	// The async afterEach can time out, and Bun then skips the later hooks; this owner still puts
+	// the variables back at the next test and when the scope ends.
+	installEnvRestores(["OMP_MCP_STARTUP_TIMEOUT_MS", "OMP_MCP_TIMEOUT_MS"]);
 	let workDir: string;
 	let manager: MCPManager;
-	let originalStartupTimeout: string | undefined;
-	let originalRequestTimeout: string | undefined;
 
 	beforeEach(() => {
-		originalStartupTimeout = Bun.env.OMP_MCP_STARTUP_TIMEOUT_MS;
 		delete Bun.env.OMP_MCP_STARTUP_TIMEOUT_MS;
-		originalRequestTimeout = Bun.env.OMP_MCP_TIMEOUT_MS;
 		delete Bun.env.OMP_MCP_TIMEOUT_MS;
 		workDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-mcp-incremental-"));
 		manager = new MCPManager(workDir);
 	});
 
 	afterEach(async () => {
-		try {
-			await manager.disconnectAll();
-			removeSyncWithRetries(workDir);
-		} finally {
-			if (originalStartupTimeout === undefined) delete Bun.env.OMP_MCP_STARTUP_TIMEOUT_MS;
-			else Bun.env.OMP_MCP_STARTUP_TIMEOUT_MS = originalStartupTimeout;
-			if (originalRequestTimeout === undefined) delete Bun.env.OMP_MCP_TIMEOUT_MS;
-			else Bun.env.OMP_MCP_TIMEOUT_MS = originalRequestTimeout;
-		}
+		await manager.disconnectAll();
+		removeSyncWithRetries(workDir);
 	});
 
 	it("keeps server A tools after incrementally connecting server B", async () => {

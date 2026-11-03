@@ -9,6 +9,7 @@ import { getLatestRelease, runUpdateCommand } from "../../src/cli/update-cli";
 import { cfgUpdateChannel } from "../../src/modes/settings";
 import { AgentStorage } from "../../src/session/agent-storage";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "../helpers/settings-test-state";
+import { testLifetime } from "../../../utils/test/helpers/mock-restores";
 
 const npmjs = fixedNpmRegistry();
 
@@ -24,10 +25,12 @@ describe("runUpdateCommand version source", () => {
 	// is never read, and drop the singleton afterwards so later files get a
 	// fresh `Settings.init()`.
 	beforeEach(async () => {
+		const life = testLifetime();
 		settingsState = beginSettingsTest();
 		const scratch = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "omp-update-settings-")));
 		dirs.push(scratch);
 		setProjectDir(scratch);
+		life.assertLive();
 		setAgentDir(path.join(scratch, "agent"));
 	});
 

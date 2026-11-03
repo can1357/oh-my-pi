@@ -12,6 +12,7 @@ import {
 	setProfile,
 } from "@oh-my-pi/pi-utils/dirs";
 import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
+import { testLifetime } from "./helpers/mock-restores";
 
 const ENV_KEYS = [
 	"OMP_PROFILE",
@@ -33,6 +34,7 @@ describe("XDG-aware runtime paths", () => {
 	let originalEnv: Partial<Record<(typeof ENV_KEYS)[number], string>> = {};
 
 	beforeEach(async () => {
+		const life = testLifetime();
 		originalAgentDir = getAgentDir();
 		originalProfile = process.env.OMP_PROFILE ?? process.env.PI_PROFILE;
 		originalEnv = {};
@@ -41,6 +43,7 @@ describe("XDG-aware runtime paths", () => {
 		configDir = `.omp-dirs-xdg-${Snowflake.next()}`;
 		defaultAgentDir = path.join(os.homedir(), configDir, "agent");
 		await fs.mkdir(tempRoot, { recursive: true });
+		life.assertLive();
 		process.env.PI_CONFIG_DIR = configDir;
 		delete process.env.PI_CODING_AGENT_DIR;
 		delete process.env.XDG_DATA_HOME;

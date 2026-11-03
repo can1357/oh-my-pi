@@ -12,15 +12,18 @@ import {
 } from "@oh-my-pi/pi-coding-agent/autolearn/managed-skills";
 import { parseFrontmatter, removeWithRetries } from "@oh-my-pi/pi-utils";
 import { getAgentDir, setAgentDir } from "@oh-my-pi/pi-utils/dirs";
+import { testLifetime } from "../../utils/test/helpers/mock-restores";
 
 describe("managed-skills primitives", () => {
 	let tempHome: string;
 
 	let originalAgentDir: string;
 	beforeEach(async () => {
+		const life = testLifetime();
 		originalAgentDir = getAgentDir();
 		tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "omp-managed-skills-"));
 		spyOn(os, "homedir").mockReturnValue(tempHome);
+		life.assertLive();
 		setAgentDir(path.join(tempHome, ".omp", "agent"));
 	});
 

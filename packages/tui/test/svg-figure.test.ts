@@ -16,6 +16,7 @@ import { TUI } from "@oh-my-pi/pi-tui/tui";
 import { withoutTerminalMultiplexer } from "./helpers/terminal-multiplexer";
 import { VirtualRenderScheduler } from "./virtual-render-scheduler";
 import { VirtualTerminal } from "./virtual-terminal";
+import { testLifetime } from "../../utils/test/helpers/mock-restores";
 
 withoutTerminalMultiplexer();
 
@@ -170,6 +171,7 @@ describe("SvgFigure", () => {
 	// Regression: the viewport default refit the drawn image to a shorter
 	// terminal at once, blanking a SIXEL until its re-encode landed.
 	it("keeps the drawn image while a shorter terminal's redraw is on its way", async () => {
+		const life = testLifetime();
 		const rows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
 		const restoreRows = () => {
 			Reflect.deleteProperty(process.stdout, "rows");
@@ -186,6 +188,7 @@ describe("SvgFigure", () => {
 		expect(drawn.length).toBeGreaterThan(9);
 
 		landed = Promise.withResolvers<void>();
+		life.assertLive();
 		Object.defineProperty(process.stdout, "rows", { configurable: true, value: 12 });
 		expect(svg.render(76)).toBe(drawn);
 		await landed.promise;

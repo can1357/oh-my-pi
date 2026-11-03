@@ -16,6 +16,7 @@ import * as titleDriftClassifier from "@oh-my-pi/pi-coding-agent/session/title-d
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { TodoTool } from "@oh-my-pi/pi-coding-agent/tools";
 import { setInteractiveHost, TempDir } from "@oh-my-pi/pi-utils";
+import { installEnvRestores } from "../../utils/test/helpers/mock-restores";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
 
 type ObservedPromptCall = {
@@ -96,6 +97,9 @@ function getMessageText(message: AgentMessage): string {
 }
 
 describe("AgentSession eager todo enforcement", () => {
+	// The async afterEach can time out, and Bun then skips the later hooks; this owner still puts
+	// PI_NO_TITLE back at the next test and when the scope ends.
+	installEnvRestores(["PI_NO_TITLE"]);
 	let tempDir: TempDir;
 	let session: AgentSession;
 	let streamCallCount = 0;
@@ -103,7 +107,6 @@ describe("AgentSession eager todo enforcement", () => {
 	let sharedDir: TempDir;
 	let sharedAuthStorage: AuthStorage;
 	let sharedModelRegistry: ModelRegistry;
-	let previousNoTitle: string | undefined;
 	const observedCalls: ObservedPromptCall[] = [];
 
 	async function createSession(
@@ -228,7 +231,6 @@ describe("AgentSession eager todo enforcement", () => {
 	});
 
 	beforeEach(async () => {
-		previousNoTitle = Bun.env.PI_NO_TITLE;
 		delete Bun.env.PI_NO_TITLE;
 		tempDir = TempDir.createSync("@pi-agent-session-eager-todo-");
 		streamCallCount = 0;
@@ -242,8 +244,6 @@ describe("AgentSession eager todo enforcement", () => {
 			await session.dispose();
 		}
 		vi.restoreAllMocks();
-		if (previousNoTitle === undefined) delete Bun.env.PI_NO_TITLE;
-		else Bun.env.PI_NO_TITLE = previousNoTitle;
 		tempDir.removeSync();
 	});
 

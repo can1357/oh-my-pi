@@ -105,9 +105,10 @@ afterEach(() => {
 describe("outer startup collaboration gate", () => {
 	it.each(["completes", "fails"] as const)("keeps guest mutations gated until outer startup %s", async result => {
 		const originalProject = getProjectDir();
-		const originalIsTTY = process.stdin.isTTY;
+		const originalIsTTY = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
 		onTestFinished(() => {
-			Object.defineProperty(process.stdin, "isTTY", { value: originalIsTTY, configurable: true });
+			if (originalIsTTY) Object.defineProperty(process.stdin, "isTTY", originalIsTTY);
+			else Reflect.deleteProperty(process.stdin, "isTTY");
 		});
 		resetSettingsForTest();
 		await initTheme();

@@ -65,12 +65,8 @@ describe("parseArgs — --max-time flag", () => {
 			return true;
 		});
 
-		try {
-			await runCli(["--max-time", "5d", "--print", "hello"]);
-			observedExitCode = process.exitCode;
-		} finally {
-			process.exitCode = previousExitCode ?? 0;
-		}
+		await runCli(["--max-time", "5d", "--print", "hello"]);
+		observedExitCode = process.exitCode;
 
 		const stderr = captured.join("");
 		expect(observedExitCode).toBe(2);

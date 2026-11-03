@@ -14,10 +14,13 @@ import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-sessi
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { logger, postmortem, TempDir } from "@oh-my-pi/pi-utils";
-import { installMockRestores, testLifetime } from "../../utils/test/helpers/mock-restores";
+import { installEnvRestores, installMockRestores, testLifetime } from "../../utils/test/helpers/mock-restores";
 import { createTeardownFence } from "./helpers/teardown-fence";
 
 installMockRestores();
+// The async afterEach can time out, and Bun then skips `onTestFinished`; this owner still puts
+// PI_TIMING back at the next test and when the file ends.
+installEnvRestores(["PI_TIMING"]);
 
 const tempDirs: TempDir[] = [];
 /** Parks a body abandoned on timeout before `runRootCommand` reaches the real `postmortem.quit`. */
@@ -52,11 +55,6 @@ describe("startup timing after a headless runner starts", () => {
 	it("stops recording before print mode runs the prompt", async () => {
 		const life = testLifetime();
 		// Print mode intentionally keeps recording under PI_TIMING; this case covers the default.
-		const savedTiming = process.env.PI_TIMING;
-		onTestFinished(() => {
-			if (savedTiming !== undefined) process.env.PI_TIMING = savedTiming;
-			else delete process.env.PI_TIMING;
-		});
 		// Every await goes through `step`, so a body abandoned on timeout parks before it installs
 		// the quit spy or reaches `postmortem.quit` (see `fence`).
 		const step = fence.forThisTest();

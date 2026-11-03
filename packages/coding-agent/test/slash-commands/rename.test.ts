@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, onTestFinished, vi } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -17,6 +17,11 @@ import { tinyTitleClient } from "@oh-my-pi/pi-coding-agent/tiny/title-client";
 import { cfgTitleIcons } from "@oh-my-pi/pi-coding-agent/utils/title-settings";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 import { createInteractiveModeContext } from "../helpers/interactive-mode-context";
+import { installEnvRestores } from "../../../utils/test/helpers/mock-restores";
+
+// The async afterEach can time out, and Bun then skips `onTestFinished`; this owner still puts
+// PI_NO_TITLE back at the next test and when the file ends.
+installEnvRestores(["PI_NO_TITLE"]);
 
 let session: AgentSession | undefined;
 let authStorage: AuthStorage | undefined;
@@ -491,11 +496,6 @@ it.each(["TUI", "headless"] as const)(
 	"keeps a manual %s rename after an older automatic title completes",
 	async mode => {
 		const { session, sessionManager, execute } = createRuntime(mode);
-		const previousNoTitle = Bun.env.PI_NO_TITLE;
-		onTestFinished(() => {
-			if (previousNoTitle === undefined) delete Bun.env.PI_NO_TITLE;
-			else Bun.env.PI_NO_TITLE = previousNoTitle;
-		});
 		delete Bun.env.PI_NO_TITLE;
 		const automatic = Promise.withResolvers<string | null>();
 		const manual = Promise.withResolvers<string | null>();

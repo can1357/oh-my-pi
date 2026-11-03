@@ -25,6 +25,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/session/codex-auto-reset";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { __resetDirsFromEnvForTests, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
+import { installEnvRestores } from "../../utils/test/helpers/mock-restores";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 
 import { cfgClaudeResetsAutoRedeem } from "@oh-my-pi/pi-coding-agent/session/settings";
@@ -101,6 +102,12 @@ function withInventory(report: UsageReport, status: ResetCreditAccountStatus): U
 }
 
 describe("Claude saved-reset trigger integration", () => {
+	// The async afterEach can time out, and Bun then skips `onTestFinished`; this owner still puts
+	// the variables back at the next test and when the scope ends.
+	// `setAgentDir()` writes PI_CODING_AGENT_DIR and clears the profile variables.
+	installEnvRestores(["PI_CODING_AGENT_DIR", "OMP_PROFILE", "PI_PROFILE"], {
+		afterPutBack: __resetDirsFromEnvForTests,
+	});
 	let authStorage: AuthStorage;
 	let modelRegistry: ModelRegistry;
 	let sessions: AgentSession[];
@@ -726,20 +733,6 @@ describe("Claude saved-reset trigger integration", () => {
 	});
 
 	it("adopts a reset `omp usage reset` just spent instead of spending again", async () => {
-		const originalEnv = {
-			PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR,
-			OMP_PROFILE: process.env.OMP_PROFILE,
-			PI_PROFILE: process.env.PI_PROFILE,
-		};
-		onTestFinished(() => {
-			if (originalEnv.PI_CODING_AGENT_DIR === undefined) delete process.env.PI_CODING_AGENT_DIR;
-			else process.env.PI_CODING_AGENT_DIR = originalEnv.PI_CODING_AGENT_DIR;
-			if (originalEnv.OMP_PROFILE === undefined) delete process.env.OMP_PROFILE;
-			else process.env.OMP_PROFILE = originalEnv.OMP_PROFILE;
-			if (originalEnv.PI_PROFILE === undefined) delete process.env.PI_PROFILE;
-			else process.env.PI_PROFILE = originalEnv.PI_PROFILE;
-			__resetDirsFromEnvForTests();
-		});
 		setAgentDir(tempDir.path());
 		try {
 			const status = claudeStatus(true);

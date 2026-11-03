@@ -76,9 +76,10 @@ describe("runRootCommand — unreachable auth broker at startup", () => {
 		const parsed = parseArgs([]);
 		parsed.noExtensions = true;
 		// An interactive launch needs a terminal on stdin; without one it exits 2.
-		const originalIsTTY = process.stdin.isTTY;
+		const originalIsTTY = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
 		onTestFinished(() => {
-			Object.defineProperty(process.stdin, "isTTY", { value: originalIsTTY, configurable: true });
+			if (originalIsTTY) Object.defineProperty(process.stdin, "isTTY", originalIsTTY);
+			else Reflect.deleteProperty(process.stdin, "isTTY");
 		});
 		Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
 
@@ -103,7 +104,6 @@ describe("runRootCommand — unreachable auth broker at startup", () => {
 		} catch (err) {
 			thrown = err;
 		} finally {
-			Object.defineProperty(process.stdin, "isTTY", { value: originalIsTTY, configurable: true });
 			setInteractiveHost(previous);
 		}
 

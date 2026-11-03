@@ -9,7 +9,7 @@ import { clearClaudePluginRootsCache } from "@oh-my-pi/pi-coding-agent/discovery
 import { loadAllMCPConfigs } from "@oh-my-pi/pi-coding-agent/mcp/config";
 import { __resetDirsFromEnvForTests, logger, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import "@oh-my-pi/pi-coding-agent/discovery/claude-plugins";
-import { installMockRestores } from "../../../utils/test/helpers/mock-restores";
+import { installMockRestores, testLifetime } from "../../../utils/test/helpers/mock-restores";
 
 installMockRestores();
 
@@ -23,6 +23,7 @@ describe("Claude plugin MCP timeout compatibility", () => {
 	let originalClaudeConfigDir: string | undefined;
 
 	beforeEach(async () => {
+		const life = testLifetime();
 		clearClaudePluginRootsCache();
 		clearFsCache();
 		originalHome = process.env.HOME;
@@ -33,6 +34,7 @@ describe("Claude plugin MCP timeout compatibility", () => {
 		delete process.env.CLAUDE_CONFIG_DIR;
 		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "claude-plugins-test-"));
 		testAgentDir = await fs.mkdtemp(path.join(os.tmpdir(), "claude-plugins-test-agent-"));
+		life.assertLive();
 		process.env.HOME = tempDir;
 		vi.spyOn(os, "homedir").mockReturnValue(tempDir);
 		// Point the agent dir at a temp dir so user-scope discovery (native MCP

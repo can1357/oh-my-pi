@@ -8,27 +8,21 @@ import type { MCPStdioServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { runPrintMode } from "@oh-my-pi/pi-coding-agent/modes/print-mode";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import { installMockRestores } from "../../utils/test/helpers/mock-restores";
+import { installEnvRestores, installMockRestores } from "../../utils/test/helpers/mock-restores";
 
 installMockRestores();
+// The async afterEach can time out, and Bun then skips the later hooks; this owner still puts
+// the variables back at the next test and when the file ends.
+installEnvRestores(["OMP_MCP_TIMEOUT_MS", "OMP_MCP_STARTUP_TIMEOUT_MS", "OMP_MCP_REQUIRE_READY"]);
 
 const FIXTURE = path.join(import.meta.dir, "fixtures", "readiness-mcp.ts");
 const SLOW_START_MS = 1_100;
 const expectedTools = ["mcp__instant_marker", "mcp__slowcall_marker", "mcp__slowstart_marker"];
 const managers: MCPManager[] = [];
-const originalTimeout = Bun.env.OMP_MCP_TIMEOUT_MS;
-const originalStartup = Bun.env.OMP_MCP_STARTUP_TIMEOUT_MS;
-const originalStrict = Bun.env.OMP_MCP_REQUIRE_READY;
 
 afterEach(async () => {
 	vi.restoreAllMocks();
 	await Promise.all(managers.splice(0).map(manager => manager.disconnectAll()));
-	if (originalTimeout === undefined) delete Bun.env.OMP_MCP_TIMEOUT_MS;
-	else Bun.env.OMP_MCP_TIMEOUT_MS = originalTimeout;
-	if (originalStartup === undefined) delete Bun.env.OMP_MCP_STARTUP_TIMEOUT_MS;
-	else Bun.env.OMP_MCP_STARTUP_TIMEOUT_MS = originalStartup;
-	if (originalStrict === undefined) delete Bun.env.OMP_MCP_REQUIRE_READY;
-	else Bun.env.OMP_MCP_REQUIRE_READY = originalStrict;
 });
 
 function server(name: string, startupMs = 0, callMs = 0): MCPStdioServerConfig {

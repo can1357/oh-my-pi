@@ -6,7 +6,7 @@ import { type MCPServer, mcpCapability } from "@oh-my-pi/pi-coding-agent/capabil
 import { type Settings, settingsCapability } from "@oh-my-pi/pi-coding-agent/capability/settings";
 import { loadCapability } from "@oh-my-pi/pi-coding-agent/discovery";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
-import { testLifetime } from "../../../utils/test/helpers/mock-restores";
+import { installEnvRestores, testLifetime } from "../../../utils/test/helpers/mock-restores";
 
 async function loadOpenCodeMcpConfig(cwd: string): Promise<MCPServer[]> {
 	const result = await loadCapability<MCPServer>(mcpCapability.id, {
@@ -25,6 +25,9 @@ async function loadOpenCodeSettings(cwd: string): Promise<Settings[]> {
 }
 
 describe("OpenCode MCP discovery", () => {
+	// The async afterEach can time out, and Bun then skips `onTestFinished`; this owner still puts
+	// the variables back at the next test and when the scope ends.
+	installEnvRestores(["OMP_TEST_MCP_KEY", "OMP_TEST_MCP_PATH", "OMP_TEST_MCP_ABSENT"]);
 	let tempDir = "";
 
 	beforeEach(async () => {
@@ -325,10 +328,6 @@ describe("OpenCode MCP discovery", () => {
 
 	test("expands OpenCode {env:VAR} and {file:path} substitutions", async () => {
 		const life = testLifetime();
-		onTestFinished(() => {
-			delete Bun.env.OMP_TEST_MCP_KEY;
-			delete Bun.env.OMP_TEST_MCP_PATH;
-		});
 		const secretFile = path.join(tempDir, "mcp-key.txt");
 		await fs.writeFile(secretFile, "file-token\n");
 		await fs.writeFile(

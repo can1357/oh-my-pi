@@ -7,6 +7,7 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { getConfigRootDir, setAgentDir } from "@oh-my-pi/pi-utils";
 
 import { makeAssistantMessage } from "./helpers";
+import { testLifetime } from "../../../utils/test/helpers/mock-restores";
 
 describe("SessionManager.continueRecent /new boundary", () => {
 	let testAgentDir: string;
@@ -16,9 +17,11 @@ describe("SessionManager.continueRecent /new boundary", () => {
 	const fallbackAgentDir = path.join(getConfigRootDir(), "agent");
 
 	beforeEach(async () => {
+		const life = testLifetime();
 		// Deterministic, non-TTY terminal id so breadcrumb read/write is stable.
 		process.env.TMUX_PANE = "%new-boundary-test";
 		testAgentDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-new-boundary-"));
+		life.assertLive();
 		setAgentDir(testAgentDir);
 		cwd = path.join(testAgentDir, "project");
 		fs.mkdirSync(cwd, { recursive: true });

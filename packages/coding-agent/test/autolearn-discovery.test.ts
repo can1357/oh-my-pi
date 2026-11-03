@@ -9,6 +9,7 @@ import { loadSkills } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { getAgentDir, setAgentDir } from "@oh-my-pi/pi-utils/dirs";
 import { restoreEnvValue } from "./helpers/settings-test-state";
+import { testLifetime } from "../../utils/test/helpers/mock-restores";
 
 async function writeSkill(dir: string, name: string, description: string): Promise<void> {
 	const file = path.join(dir, name, "SKILL.md");
@@ -25,6 +26,7 @@ describe("managed-skills discovery", () => {
 
 	let originalAgentDir: string;
 	beforeEach(async () => {
+		const life = testLifetime();
 		originalClaudeConfigDir = process.env.CLAUDE_CONFIG_DIR;
 		delete process.env.CLAUDE_CONFIG_DIR;
 		delete Bun.env.CLAUDE_CONFIG_DIR;
@@ -35,6 +37,7 @@ describe("managed-skills discovery", () => {
 		tempCwd = path.join(tempHome, "work");
 		await fs.mkdir(tempCwd, { recursive: true });
 		spyOn(os, "homedir").mockReturnValue(tempHome);
+		life.assertLive();
 		setAgentDir(path.join(tempHome, ".omp", "agent"));
 		managedDir = getManagedSkillsDir();
 		// Authored user skills live in the sibling `skills/` dir under .../agent.

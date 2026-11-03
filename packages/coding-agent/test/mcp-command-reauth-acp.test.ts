@@ -29,6 +29,7 @@ import {
 	setAgentDir,
 	setProjectDir,
 } from "@oh-my-pi/pi-utils";
+import { testLifetime } from "../../utils/test/helpers/mock-restores";
 
 const RAW_SERVER_URL = `https://\${MCP_HOST}/mcp`;
 const EXPANDED_SERVER_URL = "https://mcp.example.com/mcp";
@@ -154,12 +155,14 @@ describe("/mcp reauth (ACP dispatcher)", () => {
 	}
 
 	beforeEach(async () => {
+		const life = testLifetime();
 		outputs.length = 0;
 		outputWaiters.length = 0;
 		projectDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-reauth-acp-project-"));
 		agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-reauth-acp-agent-"));
 		configPath = getMCPConfigPath("project", projectDir);
 		originalMcpHost = Bun.env.MCP_HOST;
+		life.assertLive();
 		Bun.env.MCP_HOST = "mcp.example.com";
 		process.env.MCP_HOST = "mcp.example.com";
 		setProjectDir(projectDir);

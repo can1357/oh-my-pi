@@ -42,7 +42,8 @@ describe("--no-context-files", () => {
 	const originalEnv = Object.fromEntries(ENV_KEYS.map(key => [key, process.env[key]]));
 
 	beforeAll(async () => {
-		tempDir = await TempDir.create("@cli-no-context-files-");
+		// Synchronous up to the installs: a timed-out hook cannot install the fixture later.
+		tempDir = TempDir.createSync("@cli-no-context-files-");
 		// User-level discovery reads the process-global agent dir and home: point both at the
 		// fixture so neither run picks up the developer's own config.
 		setAgentDir(tempDir.join("home/.omp/agent"));

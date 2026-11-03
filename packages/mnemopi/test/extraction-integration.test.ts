@@ -4,6 +4,7 @@ import { extractFacts } from "@oh-my-pi/pi-mnemopi/core/extraction";
 import { type ChatMessage, ExtractionClient } from "@oh-my-pi/pi-mnemopi/core/extraction/client";
 import { getExtractionStats, resetExtractionStats } from "@oh-my-pi/pi-mnemopi/core/extraction/diagnostics";
 import { resetHostLlmBackendForTests } from "@oh-my-pi/pi-mnemopi/core/llm-backends";
+import { testLifetime } from "../../utils/test/helpers/mock-restores";
 
 const OLD_ENV = { ...process.env };
 
@@ -105,6 +106,7 @@ describe("extraction integration", () => {
 	});
 
 	it("uses millisecond-scale rate-limit and fallback backoff delays", async () => {
+		const life = testLifetime();
 		const originalSetTimeout = globalThis.setTimeout;
 		onTestFinished(() => {
 			globalThis.setTimeout = originalSetTimeout;
@@ -134,6 +136,7 @@ describe("extraction integration", () => {
 			const client = new RateLimitedClient({ model: "primary", apiKey: "sk-test", baseUrl: "http://remote.test" });
 			expect(await client.chat([{ role: "user", content: "Ada prefers deterministic tests." }])).toBe("");
 		} finally {
+			life.assertLive();
 			globalThis.setTimeout = originalSetTimeout;
 		}
 

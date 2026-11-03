@@ -20,10 +20,13 @@ import { stripOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { outputMeta } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { installEnvRestores } from "../../utils/test/helpers/mock-restores";
+
+// The async afterEach can time out, and Bun then skips the later hooks; this owner still puts
+// the variables back at the next test and when the file ends.
+installEnvRestores(["PI_FORCE_IMAGE_PROTOCOL", "PI_ALLOW_SIXEL_PASSTHROUGH"]);
 
 const createdTempDirs: string[] = [];
-const originalForceProtocol = Bun.env.PI_FORCE_IMAGE_PROTOCOL;
-const originalAllowPassthrough = Bun.env.PI_ALLOW_SIXEL_PASSTHROUGH;
 
 async function createTempDir(): Promise<string> {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "streaming-output-test-"));
@@ -40,10 +43,6 @@ afterEach(async () => {
 	for (const dir of createdTempDirs.splice(0)) {
 		await removeWithRetries(dir);
 	}
-	if (originalForceProtocol === undefined) delete Bun.env.PI_FORCE_IMAGE_PROTOCOL;
-	else Bun.env.PI_FORCE_IMAGE_PROTOCOL = originalForceProtocol;
-	if (originalAllowPassthrough === undefined) delete Bun.env.PI_ALLOW_SIXEL_PASSTHROUGH;
-	else Bun.env.PI_ALLOW_SIXEL_PASSTHROUGH = originalAllowPassthrough;
 });
 
 describe("truncateTailBytes", () => {

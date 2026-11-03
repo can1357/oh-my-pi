@@ -1,8 +1,8 @@
-import { afterEach, describe, expect, it, onTestFinished, vi } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import { testLifetime } from "../../utils/test/helpers/mock-restores";
+import { installEnvRestores, testLifetime } from "../../utils/test/helpers/mock-restores";
 import { checkPythonSetup } from "../src/cli/setup-cli";
 import { Settings } from "../src/config/settings";
 
@@ -61,21 +61,10 @@ async function runSetup(cwd: string, ...setupArgs: string[]): Promise<CliProcess
  * Hide any activated Python environment from the in-process probe for the
  * rest of the test. The resolver reads the live env (`resolveVenvPath`) and
  * the process-wide cached shell env (`Settings#getShellConfig().env`), so both
- * are covered. The test's end puts the variables back; the spy is undone by
- * `vi.restoreAllMocks()` in `afterEach`.
+ * are covered. The caller's scope owns the variables (`installEnvRestores`);
+ * the spy is undone by `vi.restoreAllMocks()` in `afterEach`.
  */
 function hideActivePythonEnv(): void {
-	const previousVirtualEnv = process.env.VIRTUAL_ENV;
-	const previousCondaPrefix = process.env.CONDA_PREFIX;
-	const previousCondaDefaultEnv = process.env.CONDA_DEFAULT_ENV;
-	onTestFinished(() => {
-		if (previousVirtualEnv === undefined) delete process.env.VIRTUAL_ENV;
-		else process.env.VIRTUAL_ENV = previousVirtualEnv;
-		if (previousCondaPrefix === undefined) delete process.env.CONDA_PREFIX;
-		else process.env.CONDA_PREFIX = previousCondaPrefix;
-		if (previousCondaDefaultEnv === undefined) delete process.env.CONDA_DEFAULT_ENV;
-		else process.env.CONDA_DEFAULT_ENV = previousCondaDefaultEnv;
-	});
 	delete process.env.VIRTUAL_ENV;
 	delete process.env.CONDA_PREFIX;
 	delete process.env.CONDA_DEFAULT_ENV;
@@ -88,6 +77,9 @@ function hideActivePythonEnv(): void {
 }
 
 describe("omp setup python", () => {
+	// The async afterEach can time out, and Bun then skips `onTestFinished`; this owner still puts
+	// the variables back at the next test and when the scope ends.
+	installEnvRestores(["VIRTUAL_ENV", "CONDA_PREFIX", "CONDA_DEFAULT_ENV", "PI_PYTHON_SKIP_CHECK"]);
 	let projectDir: TempDir | undefined;
 
 	afterEach(async () => {
@@ -137,11 +129,6 @@ describe("omp setup python", () => {
 	});
 	it.skipIf(process.platform === "win32")("does not let the global probe bypass skip setup validation", async () => {
 		const life = testLifetime();
-		const previousSkipCheck = process.env.PI_PYTHON_SKIP_CHECK;
-		onTestFinished(() => {
-			if (previousSkipCheck === undefined) delete process.env.PI_PYTHON_SKIP_CHECK;
-			else process.env.PI_PYTHON_SKIP_CHECK = previousSkipCheck;
-		});
 		projectDir = TempDir.createSync("@omp-setup-python-");
 		const cwd = projectDir.path();
 		const interpreter = path.join(cwd, "configured-python");

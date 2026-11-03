@@ -22,9 +22,12 @@ import {
 	update,
 } from "@oh-my-pi/pi-mnemopi/core/memory";
 import { openDatabase } from "@oh-my-pi/pi-mnemopi/db";
+import { installEnvRestores } from "../../utils/test/helpers/mock-restores";
+
+// Puts MNEMOPI_DATA_DIR back at the end of each test, at the next test, and when the file ends.
+installEnvRestores(["MNEMOPI_DATA_DIR"]);
 
 const roots: string[] = [];
-let previousDataDir: string | undefined;
 
 function tempRoot(): string {
 	const root = mkdtempSync(join(tmpdir(), "mnemopi-memory-facade-"));
@@ -34,19 +37,12 @@ function tempRoot(): string {
 
 function useTempDataDir(): string {
 	const root = tempRoot();
-	previousDataDir = process.env.MNEMOPI_DATA_DIR;
 	process.env.MNEMOPI_DATA_DIR = root;
 	return root;
 }
 
 afterEach(() => {
 	resetDefaultInstanceForTests();
-	if (previousDataDir === undefined) {
-		delete process.env.MNEMOPI_DATA_DIR;
-	} else {
-		process.env.MNEMOPI_DATA_DIR = previousDataDir;
-	}
-	previousDataDir = undefined;
 	for (;;) {
 		const root = roots.pop();
 		if (root === undefined) break;

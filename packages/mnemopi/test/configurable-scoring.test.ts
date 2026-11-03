@@ -1,18 +1,20 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { normalizedRecallWeights } from "@oh-my-pi/pi-mnemopi/config";
 import { BeamMemory } from "@oh-my-pi/pi-mnemopi/core/beam";
-import { testLifetime } from "../../utils/test/helpers/mock-restores";
+import { installEnvRestores, testLifetime } from "../../utils/test/helpers/mock-restores";
+
+// Puts the weights back at the end of each test, at the next test, and when the file ends.
+installEnvRestores([
+	"MNEMOPI_VEC_WEIGHT",
+	"MNEMOPI_FTS_WEIGHT",
+	"MNEMOPI_IMPORTANCE_WEIGHT",
+	"MNEMOPI_TOOL_WEIGHT",
+	"MNEMOPI_UNKNOWN_WEIGHT",
+	"MNEMOPI_TIER1_WEIGHT",
+	"MNEMOPI_TIER2_WEIGHT",
+]);
 
 const beams: BeamMemory[] = [];
-const ORIGINAL_ENV = {
-	MNEMOPI_VEC_WEIGHT: process.env.MNEMOPI_VEC_WEIGHT,
-	MNEMOPI_FTS_WEIGHT: process.env.MNEMOPI_FTS_WEIGHT,
-	MNEMOPI_IMPORTANCE_WEIGHT: process.env.MNEMOPI_IMPORTANCE_WEIGHT,
-	MNEMOPI_TOOL_WEIGHT: process.env.MNEMOPI_TOOL_WEIGHT,
-	MNEMOPI_UNKNOWN_WEIGHT: process.env.MNEMOPI_UNKNOWN_WEIGHT,
-	MNEMOPI_TIER1_WEIGHT: process.env.MNEMOPI_TIER1_WEIGHT,
-	MNEMOPI_TIER2_WEIGHT: process.env.MNEMOPI_TIER2_WEIGHT,
-};
 
 function makeBeam(): BeamMemory {
 	const beam = new BeamMemory({ sessionId: "scoring", dbPath: ":memory:" });
@@ -22,20 +24,6 @@ function makeBeam(): BeamMemory {
 
 afterEach(() => {
 	while (beams.length > 0) beams.pop()?.close();
-	if (ORIGINAL_ENV.MNEMOPI_VEC_WEIGHT === undefined) delete process.env.MNEMOPI_VEC_WEIGHT;
-	else process.env.MNEMOPI_VEC_WEIGHT = ORIGINAL_ENV.MNEMOPI_VEC_WEIGHT;
-	if (ORIGINAL_ENV.MNEMOPI_FTS_WEIGHT === undefined) delete process.env.MNEMOPI_FTS_WEIGHT;
-	else process.env.MNEMOPI_FTS_WEIGHT = ORIGINAL_ENV.MNEMOPI_FTS_WEIGHT;
-	if (ORIGINAL_ENV.MNEMOPI_IMPORTANCE_WEIGHT === undefined) delete process.env.MNEMOPI_IMPORTANCE_WEIGHT;
-	else process.env.MNEMOPI_IMPORTANCE_WEIGHT = ORIGINAL_ENV.MNEMOPI_IMPORTANCE_WEIGHT;
-	if (ORIGINAL_ENV.MNEMOPI_TOOL_WEIGHT === undefined) delete process.env.MNEMOPI_TOOL_WEIGHT;
-	else process.env.MNEMOPI_TOOL_WEIGHT = ORIGINAL_ENV.MNEMOPI_TOOL_WEIGHT;
-	if (ORIGINAL_ENV.MNEMOPI_UNKNOWN_WEIGHT === undefined) delete process.env.MNEMOPI_UNKNOWN_WEIGHT;
-	else process.env.MNEMOPI_UNKNOWN_WEIGHT = ORIGINAL_ENV.MNEMOPI_UNKNOWN_WEIGHT;
-	if (ORIGINAL_ENV.MNEMOPI_TIER1_WEIGHT === undefined) delete process.env.MNEMOPI_TIER1_WEIGHT;
-	else process.env.MNEMOPI_TIER1_WEIGHT = ORIGINAL_ENV.MNEMOPI_TIER1_WEIGHT;
-	if (ORIGINAL_ENV.MNEMOPI_TIER2_WEIGHT === undefined) delete process.env.MNEMOPI_TIER2_WEIGHT;
-	else process.env.MNEMOPI_TIER2_WEIGHT = ORIGINAL_ENV.MNEMOPI_TIER2_WEIGHT;
 });
 
 describe("configurable recall scoring", () => {

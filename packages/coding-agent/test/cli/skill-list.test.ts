@@ -7,6 +7,7 @@ import { resetSettingsForTest } from "../../src/config/settings";
 import { AgentStorage } from "../../src/session/agent-storage";
 import { getAgentDir, removeWithRetries, setAgentDir, Snowflake } from "@oh-my-pi/pi-utils";
 import { CliUsageError } from "@oh-my-pi/pi-utils/cli";
+import { testLifetime } from "../../../utils/test/helpers/mock-restores";
 
 // Every test below discovers skills through the real capability loader, which
 // walks `os.homedir()` and `getAgentDir()` for user-level providers (native
@@ -18,9 +19,11 @@ let tempHome: string;
 let originalAgentDir: string;
 
 beforeEach(async () => {
+	const life = testLifetime();
 	originalAgentDir = getAgentDir();
 	tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "omp-skill-list-home-"));
 	spyOn(os, "homedir").mockReturnValue(tempHome);
+	life.assertLive();
 	setAgentDir(path.join(tempHome, ".omp", "agent"));
 });
 
@@ -167,11 +170,11 @@ describe("handleSkillList", () => {
 			stderr += chunk.toString();
 			return true;
 		}) as typeof process.stderr.write;
+		// The streams stay replaced until `onTestFinished` puts them back: a put-back here would run
+		// after the await, so a body abandoned on timeout would undo a later test's replacement.
 		try {
 			expect(await handleSkillList([], directory, false)).toBe(0);
 		} finally {
-			process.stdout.write = originalStdoutWrite;
-			process.stderr.write = originalStderrWrite;
 			await removeWithRetries(directory);
 		}
 

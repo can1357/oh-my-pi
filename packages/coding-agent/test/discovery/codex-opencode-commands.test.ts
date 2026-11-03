@@ -13,6 +13,7 @@ import { applyFilter } from "@oh-my-pi/pi-tui/overlays/extensions/state-manager"
 import type { Extension } from "@oh-my-pi/pi-tui/overlays/extensions/types";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { testLifetime } from "../../../utils/test/helpers/mock-restores";
 
 const COMMAND_FILE = `---
 description: Deploy a service
@@ -53,12 +54,14 @@ describe("Codex and OpenCode slash-command frontmatter", () => {
 	let originalHome: string | undefined;
 
 	beforeEach(async () => {
+		const life = testLifetime();
 		clearFsCache();
 		resetSettingsForTest();
 		originalHome = process.env.HOME;
 		root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-provider-commands-"));
 		home = path.join(root, "home");
 		project = path.join(root, "project");
+		life.assertLive();
 		process.env.HOME = home;
 		vi.spyOn(os, "homedir").mockReturnValue(home);
 		await fs.mkdir(path.join(project, ".git"), { recursive: true });

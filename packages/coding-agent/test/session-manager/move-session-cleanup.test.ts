@@ -7,6 +7,7 @@ import { cleanupEmptyMoveSession, SessionManager } from "@oh-my-pi/pi-coding-age
 import { getConfigRootDir, setAgentDir } from "@oh-my-pi/pi-utils";
 
 import { makeAssistantMessage } from "./helpers";
+import { testLifetime } from "../../../utils/test/helpers/mock-restores";
 
 describe("move-session cleanup tracking", () => {
 	let testAgentDir: string;
@@ -15,7 +16,9 @@ describe("move-session cleanup tracking", () => {
 	const fallbackAgentDir = path.join(getConfigRootDir(), "agent");
 
 	beforeEach(async () => {
+		const life = testLifetime();
 		testAgentDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-move-cleanup-"));
+		life.assertLive();
 		setAgentDir(testAgentDir);
 		cwd = path.join(testAgentDir, "project");
 		fs.mkdirSync(cwd, { recursive: true });

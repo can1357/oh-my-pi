@@ -29,8 +29,9 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { getAgentDir, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
+import { __resetDirsFromEnvForTests, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
+import { installEnvRestores, installMockRestores } from "../../utils/test/helpers/mock-restores";
 import { rejectionOf } from "./helpers/rejection";
 
 describe("AgentSession snapcompact no-reduction guard", () => {
@@ -384,7 +385,13 @@ describe("AgentSession snapcompact no-reduction guard on a resumed session that 
 	// Large enough that persistence moves it to the blob store, as it does real frames.
 	const persistedFrame = { ...frame, data: Buffer.alloc(2_048, 1).toString("base64"), font: "8x13", variant: "bw" };
 	const PREVIOUS_FRAMES = 10;
-	const originalAgentDir = getAgentDir();
+	// The async afterEach can time out, and Bun then skips the later hooks; these owners still put
+	// the variables and the spies back at the next test and when the scope ends.
+	// `setAgentDir()` writes PI_CODING_AGENT_DIR and clears the profile variables.
+	installEnvRestores(["PI_CODING_AGENT_DIR", "OMP_PROFILE", "PI_PROFILE"], {
+		afterPutBack: __resetDirsFromEnvForTests,
+	});
+	installMockRestores();
 	let tempDir: TempDir | undefined;
 	let session: AgentSession | undefined;
 	let authStorage: AuthStorage | undefined;
@@ -392,8 +399,6 @@ describe("AgentSession snapcompact no-reduction guard on a resumed session that 
 	afterEach(async () => {
 		await session?.dispose();
 		authStorage?.close();
-		vi.restoreAllMocks();
-		setAgentDir(originalAgentDir);
 		// The model registry opened `<agentDir>/models.db`; Windows cannot delete an open database.
 		closeModelCache();
 		await tempDir?.remove();

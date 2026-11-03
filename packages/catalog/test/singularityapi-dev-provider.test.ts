@@ -9,6 +9,7 @@ import {
 	SINGULARITYAPI_DEV_API_BASE_URL,
 	normalizeSingularityApiBaseUrl,
 } from "@oh-my-pi/pi-catalog/wire/singularityapi";
+import { testLifetime } from "../../utils/test/helpers/mock-restores";
 
 afterEach(() => {
 	vi.restoreAllMocks();
@@ -169,6 +170,7 @@ describe("SingularityAPI universal gateway support", () => {
 	});
 
 	test("pastes a key through the login selector after models-endpoint validation", async () => {
+		const life = testLifetime();
 		const provider = getOAuthProviders().find(item => item.id === "singularityapi-dev");
 		expect(provider?.name).toBe("SingularityAPI");
 		const login = getProviderDefinition("singularityapi-dev")?.login;
@@ -189,6 +191,7 @@ describe("SingularityAPI universal gateway support", () => {
 				}),
 			).resolves.toBe("sk-sapi-test");
 		} finally {
+			life.assertLive();
 			globalThis.fetch = previousFetch;
 		}
 		expect(onAuth).toHaveBeenCalledWith({

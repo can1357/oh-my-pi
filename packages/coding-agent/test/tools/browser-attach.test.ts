@@ -41,12 +41,17 @@ import {
 	type Target,
 	TimeoutError,
 } from "puppeteer-core";
+import { installEnvRestores } from "../../../utils/test/helpers/mock-restores";
 import { rejectionOf } from "../helpers/rejection";
 import { chromiumAvailable } from "./chromium-probe";
 
 afterEach(() => {
 	vi.restoreAllMocks();
 });
+
+// The proxy tests route fetch through a local proxy; this owner puts the variables back at the end
+// of each test, at the next test and when the file ends (assigning "" first, see the helper).
+installEnvRestores(["HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy"]);
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
 let sharedHeadless: BrowserHandle | undefined;
@@ -1289,23 +1294,6 @@ it("uses relay metadata through a proxy without corrupting UTF-8 titles", async 
 			return new Response("Bad Gateway", { status: 502 });
 		},
 	});
-	const saved = {
-		HTTP_PROXY: process.env.HTTP_PROXY,
-		http_proxy: process.env.http_proxy,
-		NO_PROXY: process.env.NO_PROXY,
-		no_proxy: process.env.no_proxy,
-	};
-	// Bun's fetch never unlearns a deleted proxy var, so assign "" before deleting.
-	onTestFinished(() => {
-		process.env.HTTP_PROXY = saved.HTTP_PROXY ?? "";
-		process.env.http_proxy = saved.http_proxy ?? "";
-		process.env.NO_PROXY = saved.NO_PROXY ?? "";
-		process.env.no_proxy = saved.no_proxy ?? "";
-		if (saved.HTTP_PROXY === undefined) delete process.env.HTTP_PROXY;
-		if (saved.http_proxy === undefined) delete process.env.http_proxy;
-		if (saved.NO_PROXY === undefined) delete process.env.NO_PROXY;
-		if (saved.no_proxy === undefined) delete process.env.no_proxy;
-	});
 	process.env.HTTP_PROXY = `http://127.0.0.1:${proxy.port}`;
 	process.env.http_proxy = process.env.HTTP_PROXY;
 	process.env.NO_PROXY = "";
@@ -1371,17 +1359,6 @@ describe("probeCdpStatus", () => {
 	test("returns the loopback status even when HTTP_PROXY 502s the request", async () => {
 		const cdp = Bun.serve({ port: 0, fetch: () => new Response("{}", { status: 200 }) });
 		const proxy = Bun.serve({ port: 0, fetch: () => new Response("Bad Gateway", { status: 502 }) });
-		const saved = { HTTP_PROXY: process.env.HTTP_PROXY, http_proxy: process.env.http_proxy };
-		// Bun's fetch never unlearns a deleted proxy var: `delete process.env.X`
-		// (or assigning undefined) leaves the proxy active process-wide, silently
-		// routing every later fetch in the suite to the stopped proxy port. Only
-		// assignment flushes it, so write "" first, then restore the JS view.
-		onTestFinished(() => {
-			process.env.HTTP_PROXY = saved.HTTP_PROXY ?? "";
-			process.env.http_proxy = saved.http_proxy ?? "";
-			if (saved.HTTP_PROXY === undefined) delete process.env.HTTP_PROXY;
-			if (saved.http_proxy === undefined) delete process.env.http_proxy;
-		});
 		process.env.HTTP_PROXY = `http://127.0.0.1:${proxy.port}`;
 		process.env.http_proxy = `http://127.0.0.1:${proxy.port}`;
 		try {

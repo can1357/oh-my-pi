@@ -25,6 +25,7 @@ import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type { Browser } from "puppeteer-core";
 import { TimeoutError } from "puppeteer-core";
+import { installEnvRestores, installMockRestores } from "../../../utils/test/helpers/mock-restores";
 import { rejectionOf } from "../helpers/rejection";
 
 function makeSession(): ToolSession {
@@ -62,10 +63,12 @@ async function drainAllTabs(): Promise<void> {
 	}
 }
 
-let prevSocketPath: string | undefined;
+// The async afterEach can time out, and Bun then skips the later hooks; these owners still put
+// the variable and the spies back at the next test and when the file ends.
+installEnvRestores(["CMUX_SOCKET_PATH"]);
+installMockRestores();
 
 beforeEach(() => {
-	prevSocketPath = process.env.CMUX_SOCKET_PATH;
 	// Unique per test so the module-global browsers map (keyed by socket path)
 	// never carries a handle across tests.
 	process.env.CMUX_SOCKET_PATH = `/tmp/omp-open-lease-${process.pid}-${Math.random().toString(36).slice(2)}.sock`;
@@ -74,9 +77,6 @@ beforeEach(() => {
 afterEach(async () => {
 	vi.useRealTimers();
 	await drainAllTabs().catch(() => undefined);
-	vi.restoreAllMocks();
-	if (prevSocketPath === undefined) delete process.env.CMUX_SOCKET_PATH;
-	else process.env.CMUX_SOCKET_PATH = prevSocketPath;
 });
 
 describe("browser open — requested timeout bounds the whole acquisition (#6365)", () => {

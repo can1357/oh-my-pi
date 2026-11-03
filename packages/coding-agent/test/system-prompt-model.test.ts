@@ -12,6 +12,7 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { buildSystemPrompt } from "@oh-my-pi/pi-coding-agent/system-prompt";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
+import { installEnvRestores } from "../../utils/test/helpers/mock-restores";
 import { cleanupTempHome } from "./helpers/temp-home-cleanup";
 
 const EMPTY_TREE = {
@@ -77,18 +78,17 @@ try {
 }
 
 describe("system prompt model identifier", () => {
+	installEnvRestores(["HOME"]);
 	let tempDir = "";
 	let tempHomeDir = "";
-	let originalHome: string | undefined;
 
 	beforeEach(() => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-prompt-model-"));
 		tempHomeDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-prompt-model-home-"));
-		originalHome = process.env.HOME;
 		process.env.HOME = tempHomeDir;
 	});
 
-	afterEach(cleanupTempHome(() => ({ tempDir, tempHomeDir, originalHome })));
+	afterEach(cleanupTempHome(() => ({ tempDir, tempHomeDir })));
 
 	it("renders the model identifier into the workstation block when provided", async () => {
 		const { systemPrompt } = await buildSystemPrompt({

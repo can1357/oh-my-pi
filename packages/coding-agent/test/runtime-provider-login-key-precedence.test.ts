@@ -7,6 +7,7 @@ import { unregisterOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { ModelRegistry, type ProviderConfigInput } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { testLifetime } from "../../utils/test/helpers/mock-restores";
 
 // Extension providers (e.g. nexos-pi-provider) register `apiKey: "<ENV_NAME>"`
 // alongside a `/login` flow. With the env var unset, the name resolves to its
@@ -24,11 +25,13 @@ describe("runtime provider apiKey vs /login credential", () => {
 	let discoveryKeys: Array<string | undefined>;
 
 	beforeEach(async () => {
+		const life = testLifetime();
 		tempDir = path.join(os.tmpdir(), `pi-test-login-key-${Snowflake.next()}`);
 		fs.mkdirSync(tempDir, { recursive: true });
 		authStorage = await AuthStorage.create(":memory:");
 		registry = new ModelRegistry(authStorage, path.join(tempDir, "models.json"), { fetch: offlineFetch });
 		discoveryKeys = [];
+		life.assertLive();
 		delete process.env[envName];
 	});
 

@@ -47,9 +47,10 @@ describe("discoverTitleSystemPromptFile", () => {
 
 describe("readPipedInput", () => {
 	it("reads redirected stdin when Bun reports isTTY as undefined", async () => {
-		const originalIsTTY = process.stdin.isTTY;
+		const originalIsTTY = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
 		onTestFinished(() => {
-			Object.defineProperty(process.stdin, "isTTY", { value: originalIsTTY, configurable: true });
+			if (originalIsTTY) Object.defineProperty(process.stdin, "isTTY", originalIsTTY);
+			else Reflect.deleteProperty(process.stdin, "isTTY");
 		});
 		const readText = vi.spyOn(Bun.stdin, "text").mockResolvedValue("piped prompt\n");
 		Object.defineProperty(process.stdin, "isTTY", { value: undefined, configurable: true });

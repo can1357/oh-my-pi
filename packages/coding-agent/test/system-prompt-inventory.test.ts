@@ -12,6 +12,7 @@ import {
 	type SystemPromptToolMetadata,
 } from "@oh-my-pi/pi-coding-agent/system-prompt";
 import { createTools, type Tool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { installEnvRestores } from "../../utils/test/helpers/mock-restores";
 import { cleanupTempHome } from "./helpers/temp-home-cleanup";
 
 const EMPTY_TREE = {
@@ -73,18 +74,17 @@ function emptyMetadataGetterCounts(): MetadataGetterCounts {
 }
 
 describe("system prompt tool inventory", () => {
+	installEnvRestores(["HOME"]);
 	let tempDir = "";
 	let tempHomeDir = "";
-	let originalHome: string | undefined;
 
 	beforeEach(() => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-prompt-inv-"));
 		tempHomeDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-prompt-inv-home-"));
-		originalHome = process.env.HOME;
 		process.env.HOME = tempHomeDir;
 	});
 
-	afterEach(cleanupTempHome(() => ({ tempDir, tempHomeDir, originalHome })));
+	afterEach(cleanupTempHome(() => ({ tempDir, tempHomeDir })));
 
 	async function render(opts: { nativeTools: boolean; inlineToolDescriptors: boolean }): Promise<string> {
 		const { systemPrompt } = await buildSystemPrompt({

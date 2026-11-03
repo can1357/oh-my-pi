@@ -13,6 +13,7 @@ import {
 	createMcpManagerStub,
 	type ContextOverrides,
 } from "./helpers/interactive-mode-context";
+import { testLifetime } from "../../utils/test/helpers/mock-restores";
 
 const originalProjectDir = getProjectDir();
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -42,9 +43,11 @@ describe("interactive /mcp test", () => {
 	});
 
 	beforeEach(async () => {
+		const life = testLifetime();
 		projectDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-issue-956-project-"));
 		agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-issue-956-agent-"));
 		setProjectDir(projectDir);
+		life.assertLive();
 		setAgentDir(agentDir);
 
 		await fs.writeFile(

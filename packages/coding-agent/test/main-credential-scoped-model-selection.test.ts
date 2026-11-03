@@ -22,14 +22,17 @@ import { runRootCommand } from "@oh-my-pi/pi-coding-agent/main";
 import type { CreateAgentSessionOptions } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { __resetDirsFromEnvForTests, getModelDbPath, setAgentDir } from "@oh-my-pi/pi-utils";
+import { testLifetime } from "../../utils/test/helpers/mock-restores";
 
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
 let agentDirRoot: string | undefined;
 
 beforeEach(async () => {
+	const life = testLifetime();
 	agentDirRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-14075-agent-dir-"));
 	const agentDir = path.join(agentDirRoot, "agent");
 	await fsp.mkdir(agentDir);
+	life.assertLive();
 	setAgentDir(agentDir);
 });
 

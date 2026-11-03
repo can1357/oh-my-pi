@@ -23,7 +23,7 @@ import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-sessi
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
-import { installMockRestores } from "../../../utils/test/helpers/mock-restores";
+import { installEnvRestores, installMockRestores, testLifetime } from "../../../utils/test/helpers/mock-restores";
 
 const AGENT_ID = "ParkedRelease";
 const MOCK_API_SOURCE = "test/parked-subagent-session-release";
@@ -34,8 +34,12 @@ const MOCK_API_SOURCE = "test/parked-subagent-session-release";
 // so the deadline only bounds how long a real leak takes to fail.
 const COLLECT_DEADLINE_MS = 15_000;
 
-const ENV_KEYS = ["HOME", "PI_CODING_AGENT_DIR", "OMP_PROFILE", "PI_PROFILE"] as const;
-let savedEnv: Record<string, string | undefined> = {};
+// Bun skips `onTestFinished` and the later hooks when the async afterEach times out; this owner
+// still puts the variables back at the next test and when the file ends.
+// `setAgentDir()` writes PI_CODING_AGENT_DIR and clears the profile variables.
+installEnvRestores(["HOME", "PI_CODING_AGENT_DIR", "OMP_PROFILE", "PI_PROFILE"], {
+	afterPutBack: __resetDirsFromEnvForTests,
+});
 let root: string;
 
 function restoreEnvValue(key: string, value: string | undefined): void {
@@ -51,10 +55,11 @@ function restoreEnvValue(key: string, value: string | undefined): void {
 installMockRestores();
 
 beforeEach(async () => {
-	savedEnv = Object.fromEntries(ENV_KEYS.map(key => [key, process.env[key]]));
+	const life = testLifetime();
 	root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-parked-release-"));
 	const home = path.join(root, "home");
 	await fs.mkdir(home, { recursive: true });
+	life.assertLive();
 	restoreEnvValue("HOME", home);
 	vi.spyOn(os, "homedir").mockReturnValue(home);
 	setAgentDir(path.join(home, ".omp", "agent"));
@@ -68,8 +73,6 @@ afterEach(async () => {
 	AgentLifecycleManager.resetGlobalForTests();
 	AgentRegistry.resetGlobalForTests();
 	unregisterCustomApis(MOCK_API_SOURCE);
-	for (const key of ENV_KEYS) restoreEnvValue(key, savedEnv[key]);
-	__resetDirsFromEnvForTests();
 	// The subagent session opened agent.db and models.db under root; Windows cannot delete open files.
 	AgentStorage.close();
 	closeModelCache();

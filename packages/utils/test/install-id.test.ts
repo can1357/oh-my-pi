@@ -11,6 +11,7 @@ import {
 	setProfile,
 } from "@oh-my-pi/pi-utils/dirs";
 import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
+import { testLifetime } from "./helpers/mock-restores";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -20,6 +21,7 @@ describe("getInstallId", () => {
 	let originalConfigDir: string | undefined;
 
 	beforeEach(async () => {
+		const life = testLifetime();
 		originalAgentDir = getAgentDir();
 		originalConfigDir = process.env.PI_CONFIG_DIR;
 		const slug = `omp-install-id-${Snowflake.next()}`;
@@ -28,6 +30,7 @@ describe("getInstallId", () => {
 		// Point the resolver's config root at the temp dir. Using PI_CONFIG_DIR
 		// keeps the parent equal to os.homedir() but flips the basename, so the
 		// install-id file lands inside our temp tree.
+		life.assertLive();
 		process.env.PI_CONFIG_DIR = path.relative(os.homedir(), tempRoot);
 		setAgentDir(path.join(tempRoot, "agent"));
 		__resetInstallIdCacheForTests();

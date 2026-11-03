@@ -7,6 +7,7 @@ import { openRpcSession, type RpcOpenSessionSession } from "@oh-my-pi/pi-coding-
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { getConfigRootDir, setAgentDir } from "@oh-my-pi/pi-utils";
 import { makeAssistantMessage } from "./session-manager/helpers";
+import { testLifetime } from "../../utils/test/helpers/mock-restores";
 
 /** AgentSession stand-in whose session transitions run against a real SessionManager. */
 function sessionOver(manager: SessionManager): { session: RpcOpenSessionSession; transitions: string[] } {
@@ -47,7 +48,9 @@ describe("openRpcSession", () => {
 	const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
 
 	beforeEach(async () => {
+		const life = testLifetime();
 		root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-rpc-open-session-"));
+		life.assertLive();
 		setAgentDir(path.join(root, "agent"));
 		cwd = path.join(root, "project");
 		threadDir = path.join(root, "threads", "thread-a");

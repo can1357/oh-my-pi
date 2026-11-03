@@ -27,6 +27,7 @@ import { withRepoLock } from "@oh-my-pi/pi-coding-agent/utils/repo-lock";
 import type { VcsGitRepo } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { getAgentDir, hashPath, normalizePathForComparison, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
+import { installEnvRestores } from "../../../utils/test/helpers/mock-restores";
 
 const TINY_PNG_BASE64 =
 	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==";
@@ -1690,20 +1691,14 @@ describe("github tool on a GitHub Enterprise host", () => {
 	const ENTERPRISE_REPO = "ghe.example.com/acme/widgets";
 
 	// A host-less repo belongs to whatever `GH_HOST` names, so these tests pin
-	// it themselves instead of inheriting the developer's value. Restored per
-	// test to keep later files unaffected.
-	let savedGhHost: string | undefined;
+	// it themselves instead of inheriting the developer's value. The owner puts it
+	// back at the end of each test, at the next test, and when the scope ends.
+	installEnvRestores(["GH_HOST"]);
 	beforeEach(() => {
-		savedGhHost = process.env.GH_HOST;
 		delete process.env.GH_HOST;
 	});
 
 	afterEach(() => {
-		if (savedGhHost === undefined) {
-			delete process.env.GH_HOST;
-		} else {
-			process.env.GH_HOST = savedGhHost;
-		}
 		vi.restoreAllMocks();
 	});
 

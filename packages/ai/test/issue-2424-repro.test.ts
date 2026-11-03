@@ -15,6 +15,7 @@ import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test
 import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@oh-my-pi/pi-ai/registry/oauth/types";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
+import { installEnvRestores } from "../../utils/test/helpers/mock-restores";
 
 const BUNDLED_CLIENT_ID = "da4edff2e6ebd2bc3208611e2768bc1c1dd7be791dc5ff26ca34ca9ee44f7d4b";
 const provider = getProviderDefinition("gitlab-duo");
@@ -40,21 +41,15 @@ function tokenResponse(): Response {
 }
 
 describe("gitlab-duo OAuth env overrides (issue #2424)", () => {
-	let originalClientId: string | undefined;
-	let originalRedirectUri: string | undefined;
+	// Puts the overrides back at the end of each test, at the next test, and when the scope ends.
+	installEnvRestores(["GITLAB_CLIENT_ID", "GITLAB_REDIRECT_URI"]);
 
 	beforeEach(() => {
-		originalClientId = process.env.GITLAB_CLIENT_ID;
-		originalRedirectUri = process.env.GITLAB_REDIRECT_URI;
 		delete process.env.GITLAB_CLIENT_ID;
 		delete process.env.GITLAB_REDIRECT_URI;
 	});
 
 	afterEach(() => {
-		if (originalClientId === undefined) delete process.env.GITLAB_CLIENT_ID;
-		else process.env.GITLAB_CLIENT_ID = originalClientId;
-		if (originalRedirectUri === undefined) delete process.env.GITLAB_REDIRECT_URI;
-		else process.env.GITLAB_REDIRECT_URI = originalRedirectUri;
 		vi.restoreAllMocks();
 	});
 

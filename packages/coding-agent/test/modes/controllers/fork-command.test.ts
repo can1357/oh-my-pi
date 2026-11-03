@@ -16,6 +16,7 @@ import {
 	type TerminalLaunchRequest,
 	type TerminalLaunchResult,
 } from "../../../src/subprocess/terminal-launch";
+import { installEnvRestores } from "../../../../utils/test/helpers/mock-restores";
 import { type FakeAnswer, type FakeDaemon, startFakeDaemon } from "../../tools/tern-fake-daemon";
 
 let tempDirectory: string;
@@ -419,25 +420,18 @@ describe("/fork terminal placement", () => {
 });
 
 describe("/fork inside Tern", () => {
-	const TERN_ENV_KEYS = ["TERN_PANE_SOCKET", "TERN_PANE"] as const;
-	let savedEnv: Map<string, string | undefined>;
+	// The async afterEach can time out, and Bun then skips the later hooks; this owner still puts
+	// the variables back at the next test and when the scope ends.
+	installEnvRestores(["TERN_PANE_SOCKET", "TERN_PANE"]);
 	let daemon: FakeDaemon | undefined;
 
 	beforeAll(async () => {
 		await initTheme(false);
 	});
 
-	beforeEach(() => {
-		savedEnv = new Map(TERN_ENV_KEYS.map(key => [key, process.env[key]]));
-	});
-
 	afterEach(async () => {
 		await daemon?.close();
 		daemon = undefined;
-		for (const [key, value] of savedEnv) {
-			if (value === undefined) delete process.env[key];
-			else process.env[key] = value;
-		}
 	});
 
 	async function startTern(fork: () => FakeAnswer): Promise<FakeDaemon> {

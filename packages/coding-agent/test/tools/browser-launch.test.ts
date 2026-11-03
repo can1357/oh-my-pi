@@ -13,6 +13,7 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 import { BrowserPlatform, computeExecutablePath, detectBrowserPlatform } from "@oh-my-pi/pi-utils/browsers";
 import { APP_NAME } from "@oh-my-pi/pi-utils/dirs";
 import { PUPPETEER_REVISIONS } from "puppeteer-core/internal/revisions.js";
+import { testLifetime } from "../../../utils/test/helpers/mock-restores";
 
 const EXECUTABLE_PROBE = path.resolve(import.meta.dir, "../fixtures/browser-executable-probe.ts");
 
@@ -166,6 +167,7 @@ describe("browser executable selection", () => {
 	);
 
 	it("does not launch the candidate to probe its version off Linux (#8445)", async () => {
+		const life = testLifetime();
 		for (const platform of ["win32", "darwin"] as const) {
 			const tempDir = TempDir.createSync(`@browser-probe-${platform}-`);
 			try {
@@ -180,10 +182,12 @@ describe("browser executable selection", () => {
 				onTestFinished(() => {
 					Object.defineProperty(process, "platform", platformDescriptor);
 				});
+				life.assertLive();
 				Object.defineProperty(process, "platform", { value: platform, configurable: true });
 				try {
 					await expect(chromiumExecutableProbeForTest(fakeChrome)).resolves.toBe(true);
 				} finally {
+					life.assertLive();
 					Object.defineProperty(process, "platform", platformDescriptor);
 				}
 

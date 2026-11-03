@@ -22,6 +22,7 @@ import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { __resetDirsFromEnvForTests, removeSyncWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
+import { installEnvRestores, installMockRestores } from "../../utils/test/helpers/mock-restores";
 import { cleanupTempHome } from "./helpers/temp-home-cleanup";
 
 const SKILL = "upgrade-skill";
@@ -33,13 +34,15 @@ const SKILL = "upgrade-skill";
  * discovered its skills before the upgrade must keep reading them.
  */
 describe("a plugin upgrade that replaces the plugin's version directory under a running session", () => {
+	// The sessions' async afterEach can time out, and Bun then skips `onTestFinished`; these owners
+	// still put the variables and the `os.homedir` spy back at the next test and when the scope ends.
+	// `setAgentDir()` writes PI_CODING_AGENT_DIR and clears the profile variables.
+	installEnvRestores(["HOME", "PI_CODING_AGENT_DIR", "OMP_PROFILE", "PI_PROFILE"], {
+		afterPutBack: __resetDirsFromEnvForTests,
+	});
+	installMockRestores();
 	let tempDir = "";
 	let tempHomeDir = "";
-	// Captured once, so a put-back skipped by a timed-out afterEach cannot become the next test's baseline.
-	const originalHome = process.env.HOME;
-	const originalAgentDirEnv = process.env.PI_CODING_AGENT_DIR;
-	const originalOmpProfile = process.env.OMP_PROFILE;
-	const originalPiProfile = process.env.PI_PROFILE;
 	let sharedDir: string;
 	let sharedAuthStorage: AuthStorage;
 	let sharedModelRegistry: ModelRegistry;
@@ -61,18 +64,10 @@ describe("a plugin upgrade that replaces the plugin's version directory under a 
 		discoveryHelpers.clearClaudePluginRootsCache();
 		clearFsCache();
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-skill-upgrade-project-"));
-		// Runs after afterEach has disposed the sessions (which still see the temp home) and restored the spies.
+		// Runs after afterEach has disposed the sessions, which still see the temp dirs.
 		onTestFinished(() => {
-			if (originalAgentDirEnv === undefined) delete process.env.PI_CODING_AGENT_DIR;
-			else process.env.PI_CODING_AGENT_DIR = originalAgentDirEnv;
-			// setAgentDir() below also clears the profile variables.
-			if (originalOmpProfile === undefined) delete process.env.OMP_PROFILE;
-			else process.env.OMP_PROFILE = originalOmpProfile;
-			if (originalPiProfile === undefined) delete process.env.PI_PROFILE;
-			else process.env.PI_PROFILE = originalPiProfile;
-			cleanupTempHome(() => ({ tempDir, tempHomeDir, originalHome }))();
+			cleanupTempHome(() => ({ tempDir, tempHomeDir }))();
 			for (const dir of extraDirs.splice(0)) removeSyncWithRetries(dir);
-			__resetDirsFromEnvForTests();
 		});
 		tempHomeDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-skill-upgrade-home-"));
 		process.env.HOME = tempHomeDir;
@@ -86,7 +81,6 @@ describe("a plugin upgrade that replaces the plugin's version directory under a 
 		for (const session of sessions.splice(0)) await session.dispose();
 		discoveryHelpers.clearClaudePluginRootsCache();
 		clearFsCache();
-		vi.restoreAllMocks();
 	});
 
 	function pluginDir(version: string): string {

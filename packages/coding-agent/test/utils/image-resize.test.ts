@@ -12,6 +12,7 @@ import {
 	type ScreenshotArea,
 } from "@oh-my-pi/pi-coding-agent/utils/image-resize";
 import { encodeRawPng } from "@oh-my-pi/pi-coding-agent/utils/png-encode";
+import { testLifetime } from "../../../utils/test/helpers/mock-restores";
 
 describe("formatScreenshot", () => {
 	function fakeResized(
@@ -561,10 +562,12 @@ describe("resizeImage env wiring", () => {
 	});
 
 	it("treats OMP_NO_WEBP='' / '0' as NOT excluded", async () => {
+		const life = testLifetime();
 		Bun.env.OMP_NO_WEBP = "";
 		const empty = await resizeImage({ type: "image", data: smallWebp, mimeType: "image/webp" });
 		expect(empty.mimeType).toBe("image/webp");
 
+		life.assertLive();
 		Bun.env.OMP_NO_WEBP = "0";
 		const zero = await resizeImage({ type: "image", data: smallWebp, mimeType: "image/webp" });
 		expect(zero.mimeType).toBe("image/webp");

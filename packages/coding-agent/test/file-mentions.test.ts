@@ -7,6 +7,7 @@ import { encodeArchive } from "@oh-my-pi/pi-utils/ar";
 import { extractFileMentions, generateFileMentionMessages } from "@oh-my-pi/pi-coding-agent/utils/file-mentions";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { restoreEnvValue } from "./helpers/settings-test-state";
+import { testLifetime } from "../../utils/test/helpers/mock-restores";
 
 const tempDirs: string[] = [];
 let originalAgentDir: string | undefined;
@@ -14,10 +15,12 @@ let originalOmpProfile: string | undefined;
 let originalPiProfile: string | undefined;
 
 beforeEach(async () => {
+	const life = testLifetime();
 	originalAgentDir = process.env.PI_CODING_AGENT_DIR;
 	originalOmpProfile = process.env.OMP_PROFILE;
 	originalPiProfile = process.env.PI_PROFILE;
 	const agentDir = await createTempDir();
+	life.assertLive();
 	setAgentDir(agentDir);
 });
 

@@ -9,6 +9,7 @@ import { getTerminalId } from "@oh-my-pi/pi-tui";
 import { getConfigRootDir, getTerminalSessionsDir, setAgentDir } from "@oh-my-pi/pi-utils";
 
 import { makeAssistantMessage } from "./helpers";
+import { testLifetime } from "../../../utils/test/helpers/mock-restores";
 
 const JSONL_SUFFIX = ".jsonl";
 
@@ -47,9 +48,11 @@ describe("SessionManager subagent breadcrumb isolation", () => {
 	const fallbackAgentDir = path.join(getConfigRootDir(), "agent");
 
 	beforeEach(async () => {
+		const life = testLifetime();
 		// Deterministic, non-TTY terminal id so breadcrumb read/write is stable.
 		process.env.TMUX_PANE = "%subagent-breadcrumb-test";
 		testAgentDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-subagent-crumb-"));
+		life.assertLive();
 		setAgentDir(testAgentDir);
 		cwd = path.join(testAgentDir, "project");
 		fs.mkdirSync(cwd, { recursive: true });

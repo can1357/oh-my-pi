@@ -18,11 +18,16 @@ import {
 import { github } from "@oh-my-pi/pi-coding-agent/utils/github";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { $ } from "bun";
+import { installEnvRestores, installMockRestores, testLifetime } from "../../../utils/test/helpers/mock-restores";
+
+// The async afterEach can time out, and Bun then skips the later hooks; these owners still put
+// the variable and the spies back at the next test and when the file ends.
+installEnvRestores(["OMP_GITHUB_CACHE_DB"]);
+installMockRestores();
 
 const REPO = "owner/example";
 const FORK = "contributor/example";
 let cwd: string;
-let originalDb: string | undefined;
 let manager: AsyncJobManager;
 
 function exited(exitCode: number): BashResult {
@@ -71,12 +76,13 @@ async function run(command: string, options: { exitCode?: number; cwd?: string }
 }
 
 beforeEach(async () => {
+	const life = testLifetime();
 	cwd = await fs.mkdtemp(path.join(os.tmpdir(), "gh-cache-push-"));
 	await $`git init -q -b main ${cwd}`.quiet();
 	const repository = vcs.requireGit(cwd);
 	await repository.remoteAdd("origin", "git@github.com:owner/example.git");
 	await repository.remoteAdd("fork", "https://github.com/contributor/example.git");
-	originalDb = process.env.OMP_GITHUB_CACHE_DB;
+	life.assertLive();
 	process.env.OMP_GITHUB_CACHE_DB = path.join(cwd, "cache.db");
 	resetForTests();
 	manager = new AsyncJobManager({});
@@ -86,10 +92,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
 	await manager.dispose();
-	vi.restoreAllMocks();
 	resetForTests();
-	if (originalDb === undefined) delete process.env.OMP_GITHUB_CACHE_DB;
-	else process.env.OMP_GITHUB_CACHE_DB = originalDb;
 	await fs.rm(cwd, { recursive: true, force: true });
 });
 

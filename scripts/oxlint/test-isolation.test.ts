@@ -133,7 +133,7 @@ it("t", async () => {
 });`,
 		expected: [],
 	},
-	"put-back-bracket-with-on-test-finished-backstop": {
+	"put-back-bracket-after-an-await-runs-late-despite-a-backstop": {
 		body: `
 it("t", async () => {
 	const original = Object.getOwnPropertyDescriptor(process, "platform")!;
@@ -142,7 +142,7 @@ it("t", async () => {
 	try { await Promise.resolve(); } finally { Object.defineProperty(process, "platform", original); }
 	await Promise.resolve();
 });`,
-		expected: [],
+		expected: ["put-back-on-test-finished@8"],
 	},
 	"put-back-covered-by-each-hook": {
 		body: `
@@ -150,9 +150,20 @@ const original = process.title;
 afterEach(() => { process.title = original; });
 it("t", async () => {
 	process.title = "x";
-	try { await Promise.resolve(); } finally { process.title = original; }
+	await Promise.resolve();
+	onTestFinished(() => { process.title = original; });
 });`,
 		expected: [],
+	},
+	"put-back-after-an-await-runs-late-despite-an-each-hook": {
+		body: `
+const original = process.title;
+afterEach(() => { process.title = original; });
+it("t", async () => {
+	process.title = "x";
+	try { await Promise.resolve(); } finally { process.title = original; }
+});`,
+		expected: ["put-back-on-test-finished@8"],
 	},
 	"put-back-without-suspension-while-replaced": {
 		body: `
@@ -300,10 +311,277 @@ it("t", async () => {
 	process.env.HOME = "/tmp";
 	await Promise.resolve();
 	onTestFinished(() => {
-		process.env.HOME = "/late";
+		if (saved === undefined) delete process.env.HOME;
+		else process.env.HOME = saved;
 	});
 });`,
 		expected: [],
+	},
+	"after-each-writing-another-value-does-not-put-back": {
+		body: `
+const saved = process.env.HOME;
+afterEach(() => {
+	process.env.HOME = "/late";
+});
+it("t", async () => {
+	process.env.HOME = "/tmp";
+	await Promise.resolve();
+	onTestFinished(() => {
+		if (saved === undefined) delete process.env.HOME;
+		else process.env.HOME = saved;
+	});
+});`,
+		expected: ["put-back-on-test-finished@6", "put-back-on-test-finished@9"],
+	},
+	"finisher-writing-another-value-does-not-put-back": {
+		body: `
+it("t", async () => {
+	onTestFinished(() => {
+		process.env.HOME = "/late";
+	});
+	process.env.HOME = "/tmp";
+	await Promise.resolve();
+});`,
+		expected: ["put-back-on-test-finished@6", "put-back-on-test-finished@8"],
+	},
+	"after-each-restoring-a-let-saved-in-before-each-puts-back": {
+		body: `
+let saved: string | undefined;
+beforeEach(() => {
+	saved = process.env.HOME;
+});
+afterEach(() => {
+	if (saved === undefined) delete process.env.HOME;
+	else process.env.HOME = saved;
+});
+it("t", async () => {
+	process.env.HOME = "/tmp";
+	await Promise.resolve();
+	onTestFinished(() => {
+		if (saved === undefined) delete process.env.HOME;
+		else process.env.HOME = saved;
+	});
+});`,
+		expected: [],
+	},
+	"after-each-restoring-a-let-that-also-holds-a-fresh-value-does-not-put-back": {
+		body: `
+let saved: string | undefined;
+beforeEach(() => {
+	saved = process.env.HOME;
+	saved = "/fallback";
+});
+afterEach(() => {
+	process.env.HOME = saved;
+});
+it("t", async () => {
+	process.env.HOME = "/tmp";
+	await Promise.resolve();
+	onTestFinished(() => {
+		process.env.HOME = "/late";
+	});
+});`,
+		expected: ["put-back-on-test-finished@13", "put-back-on-test-finished@16"],
+	},
+	"late-finisher-installing-a-fresh-value-after-a-covering-hook": {
+		body: `
+const saved = process.env.HOME;
+afterEach(() => {
+	if (saved === undefined) delete process.env.HOME;
+	else {
+		process.env.HOME = saved;
+	}
+});
+it("t", async () => {
+	process.env.HOME = "/tmp";
+	await Promise.resolve();
+	onTestFinished(() => {
+		process.env.HOME = "/late";
+	});
+});`,
+		expected: ["put-back-on-test-finished@15"],
+	},
+	"finisher-restoring-a-property-of-a-saved-object-does-not-put-back": {
+		body: `
+it("t", async () => {
+	const saved = { HOME: process.env.HOME };
+	onTestFinished(() => {
+		process.env.HOME = saved.HOME;
+	});
+	process.env.HOME = "/tmp";
+	await Promise.resolve();
+});`,
+		expected: ["put-back-on-test-finished@9"],
+	},
+	"environment-put-back-also-run-from-finally-after-an-await-runs-late": {
+		body: `
+it("t", async () => {
+	const saved = process.env.HOME;
+	onTestFinished(() => {
+		if (saved === undefined) delete process.env.HOME;
+		else process.env.HOME = saved;
+	});
+	process.env.HOME = "/tmp";
+	try {
+		await Promise.resolve();
+	} finally {
+		if (saved === undefined) delete process.env.HOME;
+		else process.env.HOME = saved;
+	}
+});`,
+		expected: ["put-back-on-test-finished@14"],
+	},
+	"environment-put-back-after-an-await-guarded-by-the-test-lifetime": {
+		body: `
+import { testLifetime } from "./helpers/mock-restores";
+it("t", async () => {
+	const life = testLifetime();
+	const saved = process.env.HOME;
+	onTestFinished(() => {
+		if (saved === undefined) delete process.env.HOME;
+		else process.env.HOME = saved;
+	});
+	process.env.HOME = "/tmp";
+	try {
+		await Promise.resolve();
+	} finally {
+		life.assertLive();
+		if (saved === undefined) delete process.env.HOME;
+		else process.env.HOME = saved;
+	}
+});`,
+		expected: [],
+	},
+	"lifetime-guard-before-the-await-does-not-guard-the-put-back": {
+		body: `
+import { testLifetime } from "./helpers/mock-restores";
+it("t", async () => {
+	const life = testLifetime();
+	const saved = process.env.HOME;
+	onTestFinished(() => {
+		if (saved === undefined) delete process.env.HOME;
+		else process.env.HOME = saved;
+	});
+	process.env.HOME = "/tmp";
+	life.assertLive();
+	await Promise.resolve();
+	process.env.HOME = saved;
+});`,
+		expected: ["put-back-on-test-finished@15"],
+	},
+	"a-look-alike-lifetime-does-not-guard-the-put-back": {
+		body: `
+it("t", async () => {
+	const life = { assertLive() {} };
+	const saved = process.env.HOME;
+	onTestFinished(() => {
+		if (saved === undefined) delete process.env.HOME;
+		else process.env.HOME = saved;
+	});
+	process.env.HOME = "/tmp";
+	await Promise.resolve();
+	life.assertLive();
+	process.env.HOME = saved;
+});`,
+		expected: ["put-back-on-test-finished@14"],
+	},
+	"lifetime-created-after-an-await-does-not-guard-the-put-back": {
+		body: `
+import { testLifetime } from "./helpers/mock-restores";
+it("t", async () => {
+	const saved = process.env.HOME;
+	onTestFinished(() => {
+		if (saved === undefined) delete process.env.HOME;
+		else process.env.HOME = saved;
+	});
+	process.env.HOME = "/tmp";
+	await Promise.resolve();
+	const life = testLifetime();
+	life.assertLive();
+	process.env.HOME = saved;
+});`,
+		expected: ["put-back-on-test-finished@15"],
+	},
+	"lifetime-created-in-a-helper-does-not-guard-its-put-back": {
+		body: `
+import { testLifetime } from "./helpers/mock-restores";
+async function capture(): Promise<void> {
+	const life = testLifetime();
+	const saved = process.env.HOME;
+	onTestFinished(() => {
+		if (saved === undefined) delete process.env.HOME;
+		else process.env.HOME = saved;
+	});
+	process.env.HOME = "/tmp";
+	try {
+		await Promise.resolve();
+	} finally {
+		life.assertLive();
+		process.env.HOME = saved;
+	}
+}
+it("t", async () => {
+	await Promise.resolve();
+	await capture();
+});`,
+		expected: ["put-back-on-test-finished@17"],
+	},
+	"environment-owner-helper-covers-its-variables": {
+		body: `
+import { installEnvRestores } from "./helpers/mock-restores";
+installEnvRestores(["HOME"]);
+it("t", async () => {
+	const saved = process.env.HOME;
+	process.env.HOME = "/tmp";
+	await Promise.resolve();
+	onTestFinished(() => {
+		if (saved === undefined) delete process.env.HOME;
+		else process.env.HOME = saved;
+	});
+});`,
+		expected: [],
+	},
+	"environment-owner-helper-does-not-cover-other-variables": {
+		body: `
+import { installEnvRestores } from "./helpers/mock-restores";
+installEnvRestores(["USERPROFILE"]);
+it("t", async () => {
+	const saved = process.env.HOME;
+	process.env.HOME = "/tmp";
+	await Promise.resolve();
+	onTestFinished(() => {
+		if (saved === undefined) delete process.env.HOME;
+		else process.env.HOME = saved;
+	});
+});`,
+		expected: ["put-back-on-test-finished@8"],
+	},
+	"conditional-environment-owner-helper-does-not-cover": {
+		body: `
+import { installEnvRestores } from "./helpers/mock-restores";
+if (process.env.CI) installEnvRestores(["HOME"]);
+it("t", async () => {
+	const saved = process.env.HOME;
+	process.env.HOME = "/tmp";
+	await Promise.resolve();
+	onTestFinished(() => {
+		if (saved === undefined) delete process.env.HOME;
+		else process.env.HOME = saved;
+	});
+});`,
+		expected: ["put-back-on-test-finished@8"],
+	},
+	"environment-owner-helper-does-not-excuse-a-late-body-put-back": {
+		body: `
+import { installEnvRestores } from "./helpers/mock-restores";
+installEnvRestores(["HOME"]);
+it("t", async () => {
+	const saved = process.env.HOME;
+	process.env.HOME = "/tmp";
+	await Promise.resolve();
+	process.env.HOME = saved;
+});`,
+		expected: ["put-back-on-test-finished@10"],
 	},
 	"put-back-of-global-function-in-finally": {
 		body: `
@@ -793,9 +1071,25 @@ afterEach(() => {
 });
 it("t", async () => {
 	Object.defineProperty(process, "platform", { value: "win32" });
-	try { await Promise.resolve(); } finally { if (saved) Object.defineProperty(process, "platform", saved); }
+	await Promise.resolve();
+	onTestFinished(() => {
+		if (saved) Object.defineProperty(process, "platform", saved);
+	});
 });`,
 		expected: [],
+	},
+	"hook-put-back-also-run-from-finally-after-an-await-runs-late": {
+		body: `
+const saved = Object.getOwnPropertyDescriptor(process, "platform");
+afterEach(() => {
+	if (saved) Object.defineProperty(process, "platform", saved);
+	else Reflect.deleteProperty(process, "platform");
+});
+it("t", async () => {
+	Object.defineProperty(process, "platform", { value: "win32" });
+	try { await Promise.resolve(); } finally { if (saved) Object.defineProperty(process, "platform", saved); }
+});`,
+		expected: ["put-back-on-test-finished@11"],
 	},
 	"registration-on-the-opposite-branch-does-not-cover": {
 		body: `
@@ -869,9 +1163,23 @@ it("t", async () => {
 	};
 	onTestFinished(restore);
 	Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: true });
-	try { await Promise.resolve(); } finally { restore(); }
+	await Promise.resolve();
 });`,
 		expected: [],
+	},
+	"named-finisher-also-called-from-finally-after-an-await-runs-late": {
+		body: `
+it("t", async () => {
+	const saved = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
+	const restore = () => {
+		if (saved) Object.defineProperty(process.stdout, "isTTY", saved);
+		else Reflect.deleteProperty(process.stdout, "isTTY");
+	};
+	onTestFinished(restore);
+	Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: true });
+	try { await Promise.resolve(); } finally { restore(); }
+});`,
+		expected: ["put-back-on-test-finished@7"],
 	},
 	"unknown-key-finisher-does-not-cover-fetch": {
 		body: `
@@ -1006,7 +1314,6 @@ it("t", async () => {
 	});
 	globalThis.fetch = (async () => new Response("")) as unknown as typeof fetch;
 	await Promise.resolve();
-	globalThis.fetch = original;
 });`,
 		expected: [],
 	},

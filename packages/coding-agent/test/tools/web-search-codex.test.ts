@@ -1,11 +1,16 @@
 import { Database } from "bun:sqlite";
-import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { AuthStorage, type FetchImpl, type Model, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import type { SearchParams } from "@oh-my-pi/pi-coding-agent/web/search/providers/base";
 import { hasCodexSearch, searchCodex } from "@oh-my-pi/pi-coding-agent/web/search/providers/codex";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { installEnvRestores } from "../../../utils/test/helpers/mock-restores";
+
+// The async afterEach can time out, and Bun then skips `onTestFinished`; this owner still puts
+// OPENAI_CODEX_OAUTH_TOKEN back at the next test and when the file ends.
+installEnvRestores(["OPENAI_CODEX_OAUTH_TOKEN"]);
 
 type CapturedRequest = {
 	url: string;
@@ -348,11 +353,6 @@ describe("searchCodex model selection", () => {
 		// advertised and then every search failed with "No Codex OAuth credentials".
 		// Nothing is stored here on purpose — that is the setup from the issue.
 		const envAuthStorage = createAuthStorage();
-		const previous = process.env.OPENAI_CODEX_OAUTH_TOKEN;
-		onTestFinished(() => {
-			if (previous === undefined) delete process.env.OPENAI_CODEX_OAUTH_TOKEN;
-			else process.env.OPENAI_CODEX_OAUTH_TOKEN = previous;
-		});
 		process.env.OPENAI_CODEX_OAUTH_TOKEN = "env-bearer-token";
 		const result = await searchCodex({
 			...makeSearchParams("env bearer codex search", mockCodexFetch("gpt-5.6-luna"), selectedCodexModel),

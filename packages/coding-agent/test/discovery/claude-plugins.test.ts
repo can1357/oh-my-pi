@@ -14,6 +14,7 @@ import { loadSkills } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { loadAllExtensions } from "@oh-my-pi/pi-coding-agent/modes/components/extensions/state-manager";
 import { __resetDirsFromEnvForTests, logger, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import "@oh-my-pi/pi-coding-agent/discovery/claude-plugins";
+import { testLifetime } from "../../../utils/test/helpers/mock-restores";
 
 describe("parseClaudePluginsRegistry", () => {
 	test("returns null for invalid JSON", () => {
@@ -56,6 +57,7 @@ describe("listClaudePluginRoots", () => {
 	let originalClaudeConfigDir: string | undefined;
 
 	beforeEach(async () => {
+		const life = testLifetime();
 		clearClaudePluginRootsCache();
 		clearFsCache();
 		originalHome = process.env.HOME;
@@ -66,6 +68,7 @@ describe("listClaudePluginRoots", () => {
 		delete process.env.CLAUDE_CONFIG_DIR;
 		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "claude-plugins-test-"));
 		testAgentDir = await fs.mkdtemp(path.join(os.tmpdir(), "claude-plugins-test-agent-"));
+		life.assertLive();
 		process.env.HOME = tempDir;
 		vi.spyOn(os, "homedir").mockReturnValue(tempDir);
 		// Point the agent dir at a temp dir so user-scope discovery (native MCP

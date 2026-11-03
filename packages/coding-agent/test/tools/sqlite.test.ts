@@ -170,12 +170,13 @@ describe("SQLite tool support", () => {
 	}
 
 	beforeAll(async () => {
+		// The variable goes in before the first await: a timed-out hook cannot install it later.
+		originalEditVariant = Bun.env.PI_EDIT_VARIANT;
+		Bun.env.PI_EDIT_VARIANT = "replace";
 		tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "sqlite-tool-test-"));
 		sqlitePath = path.join(tmpDir, "app.sqlite");
 		sqliteDbPath = path.join(tmpDir, "app.db");
 		invalidDbPath = path.join(tmpDir, "thumbs.db");
-		originalEditVariant = Bun.env.PI_EDIT_VARIANT;
-		Bun.env.PI_EDIT_VARIANT = "replace";
 
 		fixtureBytes = buildFixtureBytes();
 		await fs.writeFile(sqlitePath, fixtureBytes);

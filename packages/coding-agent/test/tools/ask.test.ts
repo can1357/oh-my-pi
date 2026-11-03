@@ -714,9 +714,10 @@ describe("AskTool custom input", () => {
 		expect(abort).not.toHaveBeenCalled();
 	});
 	it("titles the Other editor with the question text alone, free of terminal layout", async () => {
-		const originalColumns = process.stdout.columns;
+		const originalColumns = Object.getOwnPropertyDescriptor(process.stdout, "columns");
 		onTestFinished(() => {
-			Object.defineProperty(process.stdout, "columns", { value: originalColumns, configurable: true });
+			if (originalColumns) Object.defineProperty(process.stdout, "columns", originalColumns);
+			else Reflect.deleteProperty(process.stdout, "columns");
 		});
 		// A narrow terminal must not clip the title: UI surfaces own its layout.
 		Object.defineProperty(process.stdout, "columns", { value: 20, configurable: true });

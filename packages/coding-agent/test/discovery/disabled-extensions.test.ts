@@ -8,6 +8,7 @@ import { initializeWithSettings, loadCapability } from "@oh-my-pi/pi-coding-agen
 import { isShadowedExtension } from "@oh-my-pi/pi-tui/overlays/extensions/types";
 import { loadAllExtensions } from "@oh-my-pi/pi-coding-agent/modes/components/extensions/state-manager";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
+import { testLifetime } from "../../../utils/test/helpers/mock-restores";
 
 function restoreEnvValue(key: string, value: string | undefined): void {
 	if (value === undefined) {
@@ -30,6 +31,7 @@ describe("disabledExtensions runtime filtering", () => {
 	let originalClaudeConfigDir: string | undefined;
 
 	beforeEach(async () => {
+		const life = testLifetime();
 		resetSettingsForTest();
 		originalClaudeConfigDir = process.env.CLAUDE_CONFIG_DIR;
 		delete process.env.CLAUDE_CONFIG_DIR;
@@ -40,6 +42,7 @@ describe("disabledExtensions runtime filtering", () => {
 		originalHome = process.env.HOME;
 		originalUserProfile = process.env.USERPROFILE;
 		tempHomeDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-disabled-ext-home-"));
+		life.assertLive();
 		process.env.HOME = tempHomeDir;
 		process.env.USERPROFILE = tempHomeDir;
 		vi.spyOn(os, "homedir").mockReturnValue(tempHomeDir);

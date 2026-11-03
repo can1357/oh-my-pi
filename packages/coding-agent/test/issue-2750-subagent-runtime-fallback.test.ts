@@ -25,6 +25,7 @@ import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 import { createSessionDefaults } from "./helpers/session-defaults";
 
 import { cfgRetryFallbackChains } from "@oh-my-pi/pi-coding-agent/session/settings";
+import { installEnvRestores, installMockRestores, testLifetime } from "../../utils/test/helpers/mock-restores";
 
 function model(provider: string, id: string): Model<Api> {
 	return buildModel({
@@ -725,9 +726,14 @@ describe("subagent runtime model resolution", () => {
 
 describe("subagent runtime fallback on a real provider error", () => {
 	const MOCK_API_SOURCE = "test/issue-2750-subagent-runtime-fallback";
-	const ENV_KEYS = ["HOME", "PI_CODING_AGENT_DIR", "OMP_PROFILE", "PI_PROFILE"] as const;
+	// Bun skips `onTestFinished` and the later hooks when the async afterEach times out; these owners
+	// still put the variables and the spies back at the next test and when the scope ends.
+	// `setAgentDir()` writes PI_CODING_AGENT_DIR and clears the profile variables.
+	installEnvRestores(["HOME", "PI_CODING_AGENT_DIR", "OMP_PROFILE", "PI_PROFILE"], {
+		afterPutBack: __resetDirsFromEnvForTests,
+	});
+	installMockRestores();
 	const OVERLOADED = "overloaded_error: provider returned error 503";
-	let savedEnv: Record<string, string | undefined> = {};
 	let root: string;
 
 	function restoreEnvValue(key: string, value: string | undefined): void {
@@ -741,11 +747,12 @@ describe("subagent runtime fallback on a real provider error", () => {
 	}
 
 	beforeEach(async () => {
-		savedEnv = Object.fromEntries(ENV_KEYS.map(key => [key, process.env[key]]));
+		const life = testLifetime();
 		root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-empty-fallback-chain-"));
 		// Project discovery walks up from cwd to os.homedir(); keep both inside the fake HOME.
 		const home = path.join(root, "home");
 		await fs.mkdir(path.join(home, "work"), { recursive: true });
+		life.assertLive();
 		restoreEnvValue("HOME", home);
 		vi.spyOn(os, "homedir").mockReturnValue(home);
 		setAgentDir(path.join(home, ".omp", "agent"));
@@ -759,9 +766,6 @@ describe("subagent runtime fallback on a real provider error", () => {
 		AgentLifecycleManager.resetGlobalForTests();
 		AgentRegistry.resetGlobalForTests();
 		unregisterCustomApis(MOCK_API_SOURCE);
-		vi.restoreAllMocks();
-		for (const key of ENV_KEYS) restoreEnvValue(key, savedEnv[key]);
-		__resetDirsFromEnvForTests();
 		// The child opened agent.db and models.db under root; Windows cannot delete open files.
 		AgentStorage.close();
 		closeModelCache();

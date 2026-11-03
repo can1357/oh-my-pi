@@ -43,6 +43,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import * as piUtils from "@oh-my-pi/pi-utils";
+import { installEnvRestores } from "../../utils/test/helpers/mock-restores";
 
 const { isRecord } = piUtils;
 const TEST_INSTALLATION_ID = "00000000-0000-4000-8000-000000000001";
@@ -3613,18 +3614,11 @@ describe("Amazon Bedrock OpenAI routes", () => {
 		"AWS_SHARED_CREDENTIALS_FILE",
 		"AWS_EC2_METADATA_DISABLED",
 	] as const;
+	// Puts the AWS variables back at the end of each test, at the next test, and when the scope ends.
+	installEnvRestores(AWS_ENV_KEYS, { afterPutBack: clearAwsCredentialCache });
 
+	/** Set exactly `env` among the AWS variables for the rest of the test; the scope's owner puts them back. */
 	async function withAwsEnv<T>(env: Partial<Record<(typeof AWS_ENV_KEYS)[number], string>>, run: () => Promise<T>) {
-		const previous: Record<string, string> = {};
-		for (const key of AWS_ENV_KEYS) {
-			const value = Bun.env[key];
-			if (value !== undefined) previous[key] = value;
-		}
-		onTestFinished(() => {
-			for (const key of AWS_ENV_KEYS) delete Bun.env[key];
-			Object.assign(Bun.env, previous);
-			clearAwsCredentialCache();
-		});
 		for (const key of AWS_ENV_KEYS) {
 			const value = env[key];
 			if (value === undefined) delete Bun.env[key];

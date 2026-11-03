@@ -19,6 +19,7 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { VibeSessionRegistry } from "@oh-my-pi/pi-coding-agent/vibe/runtime";
 import { getSessionsDir, removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { getActiveProfile, getConfigRootDir, setProfile } from "@oh-my-pi/pi-utils/dirs";
+import { installEnvRestores } from "../../utils/test/helpers/mock-restores";
 
 function createTtsrRule(name: string): Rule {
 	return {
@@ -38,17 +39,19 @@ function createTtsrRule(name: string): Rule {
 
 const SECRET_ENV_PATTERNS = /(?:KEY|SECRET|TOKEN|PASSWORD|PASS|AUTH|CREDENTIAL|PRIVATE|OAUTH)(?:_|$)/i;
 
+/** The environment variables that look like real secrets: a credential-like name and a long value. */
+function secretEnvNames(): string[] {
+	return Object.entries(process.env)
+		.filter(([name, value]) => value !== undefined && value.length >= 8 && SECRET_ENV_PATTERNS.test(name))
+		.map(([name]) => name);
+}
+
+// Puts the secrets back at the end of each test, at the next test, and when the file ends.
+installEnvRestores(secretEnvNames());
+
+/** Run with the developer's secrets removed for the rest of the test; the file's owner puts them back. */
 async function withClearedSecretEnv<T>(run: () => Promise<T>): Promise<T> {
-	const removed: Record<string, string> = {};
-	onTestFinished(() => {
-		Object.assign(process.env, removed);
-	});
-	for (const [name, value] of Object.entries(process.env)) {
-		if (!value || value.length < 8) continue;
-		if (!SECRET_ENV_PATTERNS.test(name)) continue;
-		removed[name] = value;
-		delete process.env[name];
-	}
+	for (const name of secretEnvNames()) delete process.env[name];
 	return await run();
 }
 

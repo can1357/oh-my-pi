@@ -31,7 +31,7 @@ function createCtx(): SuspendCtx {
 	return { ctx, ui, showStatus, showError };
 }
 
-const originalPlatform = process.platform;
+const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform");
 let sigcontListener: (() => void) | undefined;
 
 function setPlatform(value: NodeJS.Platform): void {
@@ -45,7 +45,8 @@ function spyOnProcessOnce(): Mock<(event: NodeJS.Signals | string, listener: () 
 }
 
 afterEach(() => {
-	Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true, writable: true });
+	if (originalPlatform) Object.defineProperty(process, "platform", originalPlatform);
+	else Reflect.deleteProperty(process, "platform");
 	if (sigcontListener) process.removeListener("SIGCONT", sigcontListener);
 	sigcontListener = undefined;
 	vi.restoreAllMocks();

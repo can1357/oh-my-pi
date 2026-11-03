@@ -7,6 +7,7 @@ import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config
 import { initializeWithSettings, loadCapability, resetCapabilityForTests } from "@oh-my-pi/pi-coding-agent/discovery";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { __resetDirsFromEnvForTests, getProjectAgentDir, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
+import { testLifetime } from "../../../utils/test/helpers/mock-restores";
 
 function restoreEnv(key: string, value: string | undefined): void {
 	if (value === undefined) {
@@ -40,6 +41,7 @@ describe("contextFiles.extra", () => {
 	const dirs: string[] = [];
 
 	beforeEach(async () => {
+		const life = testLifetime();
 		resetSettingsForTest();
 		resetCapabilityForTests();
 		originalHome = process.env.HOME;
@@ -47,6 +49,7 @@ describe("contextFiles.extra", () => {
 		originalAgentDir = process.env.PI_CODING_AGENT_DIR;
 		tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "omp-extra-ctx-home-"));
 		dirs.push(tempHome);
+		life.assertLive();
 		process.env.HOME = tempHome;
 		process.env.USERPROFILE = tempHome;
 		vi.spyOn(os, "homedir").mockReturnValue(tempHome);

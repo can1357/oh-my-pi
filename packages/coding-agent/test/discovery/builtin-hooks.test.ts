@@ -9,6 +9,7 @@ import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config
 import { initializeWithSettings, loadCapability } from "@oh-my-pi/pi-coding-agent/discovery";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { restoreEnvValue } from "../helpers/settings-test-state";
+import { testLifetime } from "../../../utils/test/helpers/mock-restores";
 
 const HOOK_SOURCE = `export default function(pi) {
 	pi.on("tool_call", async () => ({ block: true, reason: "blocked by hook" }));
@@ -49,6 +50,7 @@ describe("native hook discovery", () => {
 	let originalPiProfileEnv: string | undefined;
 
 	beforeEach(async () => {
+		const life = testLifetime();
 		resetSettingsForTest();
 		clearFsCache();
 		originalHome = process.env.HOME;
@@ -60,6 +62,7 @@ describe("native hook discovery", () => {
 		project = path.join(root, "project");
 		projectPre = path.join(project, ".omp", "hooks", "pre");
 		sharedHooks = path.join(root, "shared-hooks");
+		life.assertLive();
 		process.env.HOME = home;
 		vi.spyOn(os, "homedir").mockReturnValue(home);
 		setAgentDir(path.join(home, ".omp", "agent"));

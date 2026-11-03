@@ -18,17 +18,11 @@ import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { __resetDirsFromEnvForTests, getProjectAgentDir, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 
-function restoreEnv(key: string, value: string | undefined): void {
-	if (value === undefined) {
-		delete process.env[key];
-	} else {
-		process.env[key] = value;
-	}
-}
 import * as advisorModule from "../src/advisor";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 import { cfgAdvisorEnabled, cfgAdvisorMaxNotesPerUpdate } from "@oh-my-pi/pi-coding-agent/advisor/settings";
+import { installEnvRestores, testLifetime } from "../../utils/test/helpers/mock-restores";
 import { cfgCompactionKeepRecentTokens } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 
 afterEach(() => {
@@ -36,14 +30,16 @@ afterEach(() => {
 });
 
 describe("AgentSession advisor toggle", () => {
+	// The async afterEach can time out, and Bun then skips the later hooks; this owner still puts
+	// the variables back at the next test and when the scope ends.
+	// `setAgentDir()` writes PI_CODING_AGENT_DIR and clears the profile variables.
+	installEnvRestores(["PI_CODING_AGENT_DIR", "PI_PROFILE", "OMP_PROFILE"], {
+		afterPutBack: __resetDirsFromEnvForTests,
+	});
 	let authStorage: AuthStorage;
 	let modelRegistry: ModelRegistry;
 	let model: Model;
 	let replacementModel: Model;
-
-	const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
-	const originalPiProfile = process.env.PI_PROFILE;
-	const originalOmpProfile = process.env.OMP_PROFILE;
 
 	beforeAll(() => {
 		authStorage = createInMemoryAuthStorage();
@@ -61,10 +57,6 @@ describe("AgentSession advisor toggle", () => {
 
 	afterAll(() => {
 		authStorage.close();
-		restoreEnv("PI_CODING_AGENT_DIR", originalAgentDir);
-		restoreEnv("PI_PROFILE", originalPiProfile);
-		restoreEnv("OMP_PROFILE", originalOmpProfile);
-		__resetDirsFromEnvForTests();
 	});
 
 	let tempDir: TempDir;
@@ -72,9 +64,11 @@ describe("AgentSession advisor toggle", () => {
 	let sessionManager: SessionManager;
 
 	beforeEach(async () => {
+		const life = testLifetime();
 		tempDir = TempDir.createSync("@pi-advisor-toggle-");
 		const testAgentDir = path.join(tempDir.path(), "agent");
 		await fs.mkdir(testAgentDir, { recursive: true });
+		life.assertLive();
 		setAgentDir(testAgentDir);
 		sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
 		const agent = new Agent({
@@ -99,10 +93,6 @@ describe("AgentSession advisor toggle", () => {
 		try {
 			await session?.dispose();
 		} finally {
-			restoreEnv("PI_CODING_AGENT_DIR", originalAgentDir);
-			restoreEnv("PI_PROFILE", originalPiProfile);
-			restoreEnv("OMP_PROFILE", originalOmpProfile);
-			__resetDirsFromEnvForTests();
 			try {
 				await tempDir?.remove();
 			} catch {}

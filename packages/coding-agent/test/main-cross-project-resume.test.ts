@@ -30,25 +30,20 @@ import {
 	setAgentDir,
 	setProjectDir,
 } from "@oh-my-pi/pi-utils";
-import { installMockRestores } from "../../utils/test/helpers/mock-restores";
+import { installEnvRestores, installMockRestores, testLifetime } from "../../utils/test/helpers/mock-restores";
 
 installMockRestores();
+// The scopes' async afterEach hooks can time out, and Bun then skips the later hooks (this file's
+// afterEach too); this owner still puts the variables back at the next test and when the file ends.
+// `setAgentDir()` writes PI_CODING_AGENT_DIR and clears the profile variables.
+installEnvRestores(["PI_CODING_AGENT_DIR", "PI_PROFILE", "OMP_PROFILE"], { afterPutBack: __resetDirsFromEnvForTests });
 
-const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
-const originalPiProfile = process.env.PI_PROFILE;
-const originalOmpProfile = process.env.OMP_PROFILE;
 let agentDirRoot: string | undefined;
 
-function restoreEnv(key: string, value: string | undefined): void {
-	if (value === undefined) {
-		delete process.env[key];
-	} else {
-		process.env[key] = value;
-	}
-}
-
 beforeEach(async () => {
+	const life = testLifetime();
 	agentDirRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-xproj-agent-dir-"));
+	life.assertLive();
 	setAgentDir(path.join(agentDirRoot, "agent"));
 });
 
@@ -56,10 +51,6 @@ afterEach(async () => {
 	vi.restoreAllMocks();
 	// `runRootCommand` registers the CLI's extension roots (`--no-extensions` → explicit-only) process-wide.
 	clearOmpExtensionCliRoots();
-	restoreEnv("PI_CODING_AGENT_DIR", originalAgentDir);
-	restoreEnv("PI_PROFILE", originalPiProfile);
-	restoreEnv("OMP_PROFILE", originalOmpProfile);
-	__resetDirsFromEnvForTests();
 	if (agentDirRoot) {
 		await fsp.rm(agentDirRoot, { recursive: true, force: true });
 	}
@@ -474,9 +465,10 @@ describe("createSessionManager — cross-project --resume relocation (moved work
 	});
 
 	it("throws the move-specific error when unavailable in non-interactive mode", async () => {
-		const originalIsTTY = process.stdin.isTTY;
+		const originalIsTTY = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
 		onTestFinished(() => {
-			Object.defineProperty(process.stdin, "isTTY", { value: originalIsTTY, configurable: true });
+			if (originalIsTTY) Object.defineProperty(process.stdin, "isTTY", originalIsTTY);
+			else Reflect.deleteProperty(process.stdin, "isTTY");
 		});
 		Object.defineProperty(process.stdin, "isTTY", { value: false, configurable: true });
 		vi.spyOn(sessionListingModule, "resolveResumableSession").mockResolvedValue(buildGlobalMatch(missingProject));

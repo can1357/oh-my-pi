@@ -10,13 +10,16 @@ import type { ForeignSessionInfo } from "../src/session/foreign-session-store";
 import { buildSessionContext } from "../src/session/session-context";
 import { SessionManager } from "../src/session/session-manager";
 import { FileSessionStorage } from "../src/session/session-storage";
+import { testLifetime } from "../../utils/test/helpers/mock-restores";
 
 let tempRoot: string;
 let originalClaudeConfigDir: string | undefined;
 
 beforeEach(async () => {
+	const life = testLifetime();
 	tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-foreign-sessions-"));
 	originalClaudeConfigDir = process.env.CLAUDE_CONFIG_DIR;
+	life.assertLive();
 	delete process.env.CLAUDE_CONFIG_DIR;
 });
 

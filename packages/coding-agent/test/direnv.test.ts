@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, onTestFinished } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { applyDirenvPreflight, executeBash } from "@oh-my-pi/pi-coding-agent/exec/bash-executor";
@@ -10,7 +10,7 @@ import {
 	parseDirenvExport,
 } from "@oh-my-pi/pi-coding-agent/exec/direnv";
 import { $which, TempDir } from "@oh-my-pi/pi-utils";
-import { testLifetime } from "../../utils/test/helpers/mock-restores";
+import { installEnvRestores, testLifetime } from "../../utils/test/helpers/mock-restores";
 
 /** Real-direnv cases need the binary on PATH; skip cleanly when it's absent so
  *  the graceful-degradation code path (returns `null`) isn't asserted against. */
@@ -22,6 +22,21 @@ function tmp(): string {
 	tmpDirs.push(dir);
 	return dir.path();
 }
+
+// The async afterEach below can time out, and Bun then skips the later hooks and `onTestFinished`;
+// this owner still puts the variables the tests set back at the next test and when the file ends.
+// (HOME and the XDG dirs are put back by each real-direnv scope's synchronous afterEach, which runs
+// before this file's async one.)
+installEnvRestores([
+	"PI_DIRENV_UNSET_TEST",
+	"PI_DIRENV_PARENT_TEST",
+	"PI_CACHE_RESTORED",
+	"PI_CACHE_REMOVED",
+	"PI_DIRENV_UNSET_E2E",
+	"PI_PF_UNSET_A",
+	"PI_PF_UNSET_B",
+	"PI_PF_ORDER",
+]);
 
 afterEach(async () => {
 	for (const dir of tmpDirs.splice(0)) await dir.remove();
@@ -71,8 +86,10 @@ describe("findEnvrc", () => {
 });
 
 describe("cleanSpawnEnv versioning", () => {
+	const marker = `OMP_DIRENV_TEST_${process.pid}`;
+	installEnvRestores([marker]);
+
 	it("picks up Bun.env mutations after the first cached call", () => {
-		const marker = `OMP_DIRENV_TEST_${process.pid}`;
 		delete Bun.env[marker];
 		clearDirenvCachesForTests();
 		expect(cleanSpawnEnvForTests()[marker]).toBeUndefined();
@@ -80,9 +97,6 @@ describe("cleanSpawnEnv versioning", () => {
 		// EXA_API_KEY after the session is usable); a permanently cached
 		// baseline would spawn direnv with stale values forever.
 		Bun.env[marker] = "v1";
-		onTestFinished(() => {
-			delete Bun.env[marker];
-		});
 		try {
 			expect(cleanSpawnEnvForTests()[marker]).toBe("v1");
 		} finally {
@@ -148,9 +162,6 @@ describe.skipIf(!hasDirenv)("loadDirenvEnv (real direnv, allow-list honored)", (
 
 	it("reports variables a .envrc unsets", async () => {
 		const life = testLifetime();
-		onTestFinished(() => {
-			delete Bun.env.PI_DIRENV_UNSET_TEST;
-		});
 		const root = tmp();
 		await Bun.write(path.join(root, ".envrc"), "unset PI_DIRENV_UNSET_TEST\n");
 		await allowEnvrc(root);
@@ -188,11 +199,6 @@ describe.skipIf(!hasDirenv)("loadDirenvEnv (real direnv, allow-list honored)", (
 
 	it("restarts from a clean baseline when the OMP process environment changes", async () => {
 		const life = testLifetime();
-		const saved = Bun.env.PI_DIRENV_PARENT_TEST;
-		onTestFinished(() => {
-			if (saved === undefined) delete Bun.env.PI_DIRENV_PARENT_TEST;
-			else Bun.env.PI_DIRENV_PARENT_TEST = saved;
-		});
 		const root = tmp();
 		await Bun.write(path.join(root, ".envrc"), "export PI_DIRENV_CHILD_TEST=$PI_DIRENV_PARENT_TEST\n");
 		await allowEnvrc(root);
@@ -282,14 +288,6 @@ describe.skipIf(!hasDirenv)("loadDirenvEnv (real direnv, allow-list honored)", (
 	it("recomputes refreshed overrides and unsets relative to the original baseline", async () => {
 		const root = tmp();
 		const mode = path.join(root, "mode");
-		const restored = Bun.env.PI_CACHE_RESTORED;
-		const removed = Bun.env.PI_CACHE_REMOVED;
-		onTestFinished(() => {
-			if (restored === undefined) delete Bun.env.PI_CACHE_RESTORED;
-			else Bun.env.PI_CACHE_RESTORED = restored;
-			if (removed === undefined) delete Bun.env.PI_CACHE_REMOVED;
-			else Bun.env.PI_CACHE_REMOVED = removed;
-		});
 		Bun.env.PI_CACHE_RESTORED = "baseline";
 		Bun.env.PI_CACHE_REMOVED = "baseline";
 		await Bun.write(mode, "first\n");
@@ -342,9 +340,6 @@ describe.skipIf(!hasDirenv)("bash executor direnv wiring (end-to-end)", () => {
 
 	it("removes variables the .envrc unsets from the command environment", async () => {
 		const life = testLifetime();
-		onTestFinished(() => {
-			delete Bun.env.PI_DIRENV_UNSET_E2E;
-		});
 		const root = tmp();
 		await Bun.write(path.join(root, ".envrc"), "unset PI_DIRENV_UNSET_E2E\n");
 		await allowEnvrc(root);
@@ -403,10 +398,6 @@ describe.skipIf(!hasDirenv)("applyDirenvPreflight (shared all-backends preflight
 
 	it("prepends a regex-gated `unset -v` for vars the .envrc removes, skipping caller-resupplied names", async () => {
 		const life = testLifetime();
-		onTestFinished(() => {
-			delete Bun.env.PI_PF_UNSET_A;
-			delete Bun.env.PI_PF_UNSET_B;
-		});
 		const root = tmp();
 		await Bun.write(path.join(root, ".envrc"), "unset PI_PF_UNSET_A\nunset PI_PF_UNSET_B\n");
 		await allowEnvrc(root);
@@ -425,9 +416,6 @@ describe.skipIf(!hasDirenv)("applyDirenvPreflight (shared all-backends preflight
 
 	it("applies the shell commandPrefix after the unset prefix", async () => {
 		const life = testLifetime();
-		onTestFinished(() => {
-			delete Bun.env.PI_PF_ORDER;
-		});
 		const root = tmp();
 		await Bun.write(path.join(root, ".envrc"), "unset PI_PF_ORDER\n");
 		await allowEnvrc(root);

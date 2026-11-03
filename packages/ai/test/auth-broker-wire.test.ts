@@ -18,9 +18,9 @@ import {
 import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
 import { logger } from "@oh-my-pi/pi-utils";
 import { removeWithRetries } from "../../utils/src/temp";
+import { installEnvRestores, installMockRestores } from "../../utils/test/helpers/mock-restores";
 
 const ANTHROPIC_ENV = ["ANTHROPIC_API_KEY", "ANTHROPIC_OAUTH_TOKEN"] as const;
-const savedEnv: Partial<Record<(typeof ANTHROPIC_ENV)[number], string | undefined>> = {};
 
 function mintOAuthCredential(suffix: string, expires: number) {
 	return {
@@ -65,6 +65,10 @@ function readRawCodexCredentialBlocks(
 }
 
 describe("auth-broker wire surface", () => {
+	// The async afterEach can time out, and Bun then skips `onTestFinished` and the later hooks;
+	// these owners still put the variables and the spies back at the next test and when the scope ends.
+	installEnvRestores(["ANTHROPIC_API_KEY", "ANTHROPIC_OAUTH_TOKEN"]);
+	installMockRestores();
 	let tempDir = "";
 	let store: SqliteAuthCredentialStore | undefined;
 	let storage: AuthStorage | undefined;
@@ -106,24 +110,16 @@ describe("auth-broker wire surface", () => {
 	}
 
 	beforeEach(async () => {
-		for (const key of ANTHROPIC_ENV) {
-			savedEnv[key] = process.env[key];
-			delete process.env[key];
-		}
+		for (const key of ANTHROPIC_ENV) delete process.env[key];
 		token = "test-bearer";
 		await startFixture(new SqliteAuthCredentialStore(new Database(":memory:")));
 	});
 
 	afterEach(async () => {
-		vi.restoreAllMocks();
 		await closeFixture();
 		if (tempDir) {
 			await removeWithRetries(tempDir);
 			tempDir = "";
-		}
-		for (const key of ANTHROPIC_ENV) {
-			if (savedEnv[key] === undefined) delete process.env[key];
-			else process.env[key] = savedEnv[key];
 		}
 	});
 

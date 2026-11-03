@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createBrowserPrelude } from "@oh-my-pi/pi-coding-agent/tools/browser";
 import { findFreeCdpPort, relayTargets } from "@oh-my-pi/pi-coding-agent/tools/browser/attach";
@@ -10,6 +10,7 @@ import { type RelayServer, startRelayServer } from "@oh-my-pi/pi-coding-agent/to
 import { releaseTab } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 import { isRecord } from "@oh-my-pi/pi-utils";
+import { installEnvRestores } from "../../../utils/test/helpers/mock-restores";
 import { type FakeAnswer, type FakeDaemon, startFakeDaemon } from "./tern-fake-daemon";
 
 const PANE = 3;
@@ -21,16 +22,14 @@ const BLOCKS = [
 ];
 
 const ENV_KEYS = ["TERN_PANE_SOCKET", "TERN_PANE", "PI_BROWSER_TERN", "PI_BROWSER_RELAY"] as const;
-let savedEnv: Map<string, string | undefined>;
+// The async afterEach can time out, and Bun then skips the later hooks; this owner still puts
+// the variables back at the next test and when the file ends.
+installEnvRestores(["TERN_PANE_SOCKET", "TERN_PANE", "PI_BROWSER_TERN", "PI_BROWSER_RELAY"]);
 
 let daemon: FakeDaemon | undefined;
 let relay: RelayServer | undefined;
 let extension: WebSocket | undefined;
 const opened: string[] = [];
-
-beforeEach(() => {
-	savedEnv = new Map(ENV_KEYS.map(key => [key, process.env[key]]));
-});
 
 afterEach(async () => {
 	for (const name of opened.splice(0)) await releaseTab(name, { kill: false }).catch(() => undefined);
@@ -40,10 +39,6 @@ afterEach(async () => {
 	extension = undefined;
 	relay?.stop();
 	relay = undefined;
-	for (const [key, value] of savedEnv) {
-		if (value === undefined) delete process.env[key];
-		else process.env[key] = value;
-	}
 });
 
 /** A Tern window listing `blocks`, able to host an adoption of any of them. */

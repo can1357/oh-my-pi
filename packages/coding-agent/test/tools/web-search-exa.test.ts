@@ -14,6 +14,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/web/search/providers/exa";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
+import { testLifetime } from "../../../utils/test/helpers/mock-restores";
 
 type PostedMcpRequest = Record<string, unknown> & { id: string | number };
 
@@ -203,10 +204,12 @@ describe("searchExa", () => {
 	let capturedRequestBody: Record<string, unknown> | null = null;
 
 	beforeEach(async () => {
+		const life = testLifetime();
 		resetSettingsForTest();
 		resetExaSearchThrottleForTest();
 		await Settings.init({ inMemory: true, overrides: { "exa.searchDelayMs": 0 } });
 		capturedRequestBody = null;
+		life.assertLive();
 		process.env.EXA_API_KEY = "test-key-123";
 	});
 

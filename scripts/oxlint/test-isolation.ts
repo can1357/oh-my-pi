@@ -9,13 +9,19 @@
  * exceeded`). If the body resumes later, its cleanup runs in the middle of another test.
  *
  * Cleanup that survives a timeout is cleanup a timeout cannot interrupt: the shared, synchronous
- * `installMockRestores()` helper for spies, a synchronous `afterEach` that restores or puts back as
- * a direct statement, or `onTestFinished(<synchronous callback>)` registered before the test can
- * suspend. A callback passed by name counts only through a function declaration or `const` the file
- * never reassigns, and `x.mockRestore()` restores a known spy only when the file writes `x` once:
- * a callback runs what a binding holds when it is called, not what it held when registered. The
- * rules credit only those shapes. They are an enforcement aid for new code, not a proof: a shape
- * they credit is safe by construction, and everything else is reported.
+ * `installMockRestores()` helper for spies and `installEnvRestores([...])` for environment variables,
+ * a synchronous `afterEach` that restores or puts back as a direct statement, or
+ * `onTestFinished(<synchronous callback>)` registered before the test can suspend. A put-back is
+ * credited only when it restores a value saved from the same place (`x.y = saved` with
+ * `const saved = x.y`, `Object.defineProperty` with the saved descriptor), deletes it, or splits
+ * those across both branches of an `if/else`. A callback passed by name counts only through a
+ * function declaration or `const` the file never reassigns, and `x.mockRestore()` restores a known
+ * spy only when the file writes `x` once: a callback runs what a binding holds when it is called,
+ * not what it held when registered. A put-back an async body can still run after an `await` is
+ * reported even when cleanup covers it, unless `testLifetime().assertLive()` guards it: an abandoned
+ * body runs it during a later test. The rules
+ * credit only those shapes. They are an enforcement aid for new code, not a proof: a shape they
+ * credit is safe by construction, and everything else is reported.
  *
  * The rules judge only what one file shows: writes and restores reached from a test body directly
  * or through a function declared in the same file, and hooks declared in the same file.
@@ -46,9 +52,13 @@ const TEST_NAMES = new Set(["it", "test"]);
 const DESCRIBE_NAMES = new Set(["describe"]);
 const HOOK_NAMES = new Set(["afterEach", "beforeEach", "afterAll", "beforeAll"]);
 const TEST_MODULES = new Set(["bun:test", "vitest"]);
-/** The shared synchronous restore helper every package's tests import. */
+/** The shared synchronous restore helpers every package's tests import. */
 const RESTORE_HELPER_NAME = "installMockRestores";
+const ENV_RESTORE_HELPER_NAME = "installEnvRestores";
+const LIFETIME_HELPER_NAME = "testLifetime";
 const RESTORE_HELPER_MODULE = /(^|\/)helpers\/mock-restores(\.ts)?$/;
+/** An environment variable a write names: `process.env.HOME`, `Bun.env.HOME`. */
+const ENV_PATH = /^(?:process|Bun)\.env\.(.+)$/;
 /** Objects shared by every test in the process; a replaced property on them outlives the test. */
 const SHARED_GLOBALS = new Set([
 	"globalThis",
@@ -566,16 +576,69 @@ function coveringScopes(facts: FileFacts, test: Node): (Node | undefined)[] {
 	return scopes;
 }
 
+/** Is `id` bound to `name` imported from the shared `helpers/mock-restores` module? */
+function isRestoreHelper(facts: FileFacts, id: Node | undefined, name: string): boolean {
+	if (identName(id) !== name) return false;
+	const def = variableOf(facts.context, id!)?.defs[0];
+	if (def?.type !== "ImportBinding") return false;
+	const source = node((def.parent ?? def.node.parent)?.source);
+	return typeof source?.value === "string" && RESTORE_HELPER_MODULE.test(source.value);
+}
+
 /** Does `scope` call the shared synchronous restore helper unconditionally at its top level? */
 function callsRestoreHelper(facts: FileFacts, scope: Node | undefined): boolean {
+	return facts.calls.some(
+		call =>
+			isRestoreHelper(facts, unwrap(node(call.callee)), RESTORE_HELPER_NAME) &&
+			enclosingFunction(call) === scope &&
+			isTopLevelStatement(facts, call, scope),
+	);
+}
+
+/**
+ * Does a covering scope of `test` own the environment variable `path` names through
+ * `installEnvRestores(["NAME", ...])`, called unconditionally at its top level with a literal list?
+ */
+function envOwnerPutsBack(facts: FileFacts, test: Node, path: string): boolean {
+	const name = ENV_PATH.exec(path)?.[1];
+	if (name === undefined) return false;
+	return coveringScopes(facts, test).some(scope =>
+		facts.calls.some(call => {
+			if (!isRestoreHelper(facts, unwrap(node(call.callee)), ENV_RESTORE_HELPER_NAME)) return false;
+			if (enclosingFunction(call) !== scope || !isTopLevelStatement(facts, call, scope)) return false;
+			const list = unwrap(nodes(call.arguments)[0]);
+			return list?.type === "ArrayExpression" && nodes(list.elements).some(e => stringValue(e) === name);
+		}),
+	);
+}
+
+/**
+ * Is `write` guarded by `life.assertLive()`, with `const life = testLifetime()` from the shared
+ * helper module: a direct statement before it in a block that contains it, in the same function,
+ * with no `await` between them? A body that resumes after its test ended throws there instead.
+ * That function must be the test or hook callback itself, and it must create the lifetime before
+ * its first `await`: a lifetime created later by a body that already outlived its test belongs to
+ * the test running then, and a helper cannot tell how late its caller called it.
+ */
+function guardedByLifetime(facts: FileFacts, write: Node): boolean {
+	const fn = enclosingFunction(write);
+	const host = fn?.parent;
+	if (!fn || host?.type !== "CallExpression" || testApi(facts.context, node(host.callee)) === undefined) return false;
 	return facts.calls.some(call => {
 		const callee = unwrap(node(call.callee));
-		if (identName(callee) !== RESTORE_HELPER_NAME) return false;
-		const def = variableOf(facts.context, callee!)?.defs[0];
-		if (def?.type !== "ImportBinding") return false;
-		const source = node((def.parent ?? def.node.parent)?.source);
-		if (typeof source?.value !== "string" || !RESTORE_HELPER_MODULE.test(source.value)) return false;
-		return enclosingFunction(call) === scope && isTopLevelStatement(facts, call, scope);
+		if (callee?.type !== "MemberExpression" || propertyName(callee) !== "assertLive") return false;
+		const receiver = unwrap(node(callee.object));
+		if (receiver?.type !== "Identifier") return false;
+		const init = declaredInit(facts.context, receiver, true);
+		if (init?.type !== "CallExpression" || !isRestoreHelper(facts, unwrap(node(init.callee)), LIFETIME_HELPER_NAME))
+			return false;
+		if (enclosingFunction(init) !== fn || awaitsIn(facts, fn, fn.range[0], init.range[0])) return false;
+		const statement = directCallStatement(call);
+		const list = statement?.parent;
+		if (!statement || !list || enclosingFunction(call) !== fn) return false;
+		if (statement.range[1] > write.range[0] || list.range[0] > write.range[0] || write.range[1] > list.range[1])
+			return false;
+		return !awaitsIn(facts, fn, statement.range[1], write.range[0]);
 	});
 }
 
@@ -694,8 +757,29 @@ function spiesCovered(facts: FileFacts, test: Node): boolean {
 	);
 }
 
+/**
+ * Does `expression` put `path` back: restore a value saved from that same place ({@link restoresSaved}),
+ * or `delete` / `Reflect.deleteProperty` it? Writing any other value is not a put-back.
+ */
+function putsBackSaved(facts: FileFacts, expression: Node, path: string): boolean {
+	if (!sharedTargets(facts, expression).includes(path)) return false;
+	if (expression.type === "UnaryExpression" && expression.operator === "delete") return true;
+	if (expression.type === "CallExpression") {
+		const builtin = builtinMethod(facts, node(expression.callee));
+		if (builtin?.object === "Reflect" && builtin.method === "deleteProperty") return true;
+	}
+	return restoresSaved(facts, expression, path);
+}
+
 /** Does a synchronous top-level `afterEach` of a covering scope put `path` back? */
 function hookPutsBack(facts: FileFacts, test: Node, path: string): boolean {
+	return coveringScopes(facts, test).some(scope =>
+		afterEachDoes(facts, scope, expression => putsBackSaved(facts, expression, path), true),
+	);
+}
+
+/** Does a synchronous top-level `afterEach` of a covering scope write `path` at all (any value)? */
+function hookWrites(facts: FileFacts, test: Node, path: string): boolean {
 	return coveringScopes(facts, test).some(scope =>
 		afterEachDoes(facts, scope, expression => sharedTargets(facts, expression).includes(path), true),
 	);
@@ -889,8 +973,17 @@ function spyRegisteredPromptly(facts: FileFacts, install: Node): boolean {
 	});
 }
 
-/** Does a synchronous `onTestFinished` registered before `write` put `path` back? */
+/** Does a synchronous `onTestFinished` registered before `write` put `path` back ({@link putsBackSaved})? */
 function putBackRegisteredPromptly(facts: FileFacts, path: string, write: Node): boolean {
+	return facts.finishers.some(
+		finisher =>
+			registeredBefore(facts, finisher, write) &&
+			promptCallback(facts, finisher, expression => putsBackSaved(facts, expression, path), true),
+	);
+}
+
+/** Does a synchronous `onTestFinished` registered before `write` write `path` at all (any value)? */
+function writeRegisteredPromptly(facts: FileFacts, path: string, write: Node): boolean {
 	return facts.finishers.some(
 		finisher =>
 			registeredBefore(facts, finisher, write) &&
@@ -1092,28 +1185,71 @@ function sharedTargets(facts: FileFacts, n: Node): string[] {
 }
 
 /**
- * Does `write` put back a value saved from the same place: `const original = x.y; ... x.y = original`,
- * or `Object.defineProperty(o, "k", saved)` with `saved = Object.getOwnPropertyDescriptor(o, "k")`?
+ * The values the file stores in a `let`/`var` binding: its initializer and the right side of each
+ * plain `x = value`. Undefined when a store is anything else (`+=`, `++`, a destructuring or loop
+ * target) or the binding is not a single variable declaration.
+ */
+function storedValues(facts: FileFacts, variable: Variable): Node[] | undefined {
+	if (variable.defs.length !== 1 || variable.defs[0]!.type !== "Variable") return undefined;
+	const def = variable.defs[0]!;
+	const values: Node[] = [];
+	const init = unwrapAwait(node(def.node.init));
+	if (init) values.push(init);
+	for (const write of facts.assignments) {
+		const target =
+			write.type === "AssignmentExpression" || write.type === "ForOfStatement" || write.type === "ForInStatement"
+				? node(write.left)
+				: write.type === "UpdateExpression"
+					? node(write.argument)
+					: undefined;
+		const ids = patternIdentifiers(target).filter(id => variableOf(facts.context, id) === variable);
+		if (ids.length === 0) continue;
+		const left = unwrap(target);
+		if (write.type !== "AssignmentExpression" || write.operator !== "=" || left?.type !== "Identifier")
+			return undefined;
+		const value = unwrapAwait(node(write.right));
+		if (!value) return undefined;
+		values.push(value);
+	}
+	return values;
+}
+
+/**
+ * Does `write` put back a value saved from the same place: `const original = x.y; ... x.y = original`
+ * (also `Reflect.set(x, "y", original)`), or `Object.defineProperty(o, "k", saved)` with
+ * `saved = Object.getOwnPropertyDescriptor(o, "k")`? A `let` counts when every value the file stores
+ * in it is such a read of that place (`let original; beforeEach(() => { original = x.y; })`).
  */
 function restoresSaved(facts: FileFacts, write: Node, path: string): boolean {
 	let value: Node | undefined;
-	if (write.type === "AssignmentExpression") value = unwrap(node(write.right));
-	else if (write.type === "CallExpression" && builtinMethod(facts, node(write.callee))?.method === "defineProperty")
-		value = unwrap(nodes(write.arguments)[2]);
-	if (value?.type !== "Identifier") return false;
-	const saved = declaredInit(facts.context, value, true);
-	if (!saved) return false;
-	let read = memberPath(facts.context, saved);
-	if (
-		saved.type === "CallExpression" &&
-		builtinMethod(facts, node(saved.callee))?.method === "getOwnPropertyDescriptor"
-	) {
-		const [owner, key] = nodes(saved.arguments);
-		const ownerPath = memberPath(facts.context, owner);
-		const name = constantKey(facts.context, key);
-		read = ownerPath && { root: ownerPath.root, path: `${ownerPath.path}${name === undefined ? "[]" : `.${name}`}` };
+	if (write.type === "AssignmentExpression" && write.operator === "=") value = unwrap(node(write.right));
+	else if (write.type === "CallExpression") {
+		const builtin = builtinMethod(facts, node(write.callee));
+		if (builtin?.method === "defineProperty" || (builtin?.object === "Reflect" && builtin.method === "set"))
+			value = unwrap(nodes(write.arguments)[2]);
 	}
-	return read !== undefined && resolvePlaces(facts, read).some(place => sharedTarget(facts, place) === path);
+	if (value?.type !== "Identifier") return false;
+	const readsPath = (saved: Node): boolean => {
+		let read = memberPath(facts.context, saved);
+		if (
+			saved.type === "CallExpression" &&
+			builtinMethod(facts, node(saved.callee))?.method === "getOwnPropertyDescriptor"
+		) {
+			const [owner, key] = nodes(saved.arguments);
+			const ownerPath = memberPath(facts.context, owner);
+			const name = constantKey(facts.context, key);
+			read = ownerPath && {
+				root: ownerPath.root,
+				path: `${ownerPath.path}${name === undefined ? "[]" : `.${name}`}`,
+			};
+		}
+		return read !== undefined && resolvePlaces(facts, read).some(place => sharedTarget(facts, place) === path);
+	};
+	const saved = declaredInit(facts.context, value, true);
+	if (saved) return readsPath(saved);
+	const variable = variableOf(facts.context, value);
+	const values = variable && storedValues(facts, variable);
+	return values !== undefined && values.length > 0 && values.every(v => readsPath(unwrap(v) ?? v));
 }
 
 function judgePutBacks(facts: FileFacts): void {
@@ -1151,19 +1287,92 @@ function judgePutBacks(facts: FileFacts): void {
 			if (!isAsyncTest(facts, flow)) continue;
 			const key = `${flow.test.range[0]}|${write.path}`;
 			if (reported.has(key)) break;
-			if (hookPutsBack(facts, flow.test, write.path)) continue;
 			const replaces = write.putsBack ? (replacement.get(key) ?? write.node) : write.node;
-			if (putBackRegisteredPromptly(facts, write.path, replaces)) continue;
+			const covered =
+				hookPutsBack(facts, flow.test, write.path) ||
+				envOwnerPutsBack(facts, flow.test, write.path) ||
+				putBackRegisteredPromptly(facts, write.path, replaces);
 			let messageId: string | undefined;
 			if (write.putsBack) {
-				if (suspendsBefore(facts, flow, write.node, write.replaced)) messageId = "putBackSkippedByTimeout";
-			} else if (putBackRegisteredAnywhere(facts, flow.test, write.path)) messageId = "putBackRegisteredLate";
+				// Covered or not, a put-back the body reaches only after an `await` is a hazard: if the
+				// test times out, the abandoned body runs it during a later test and overwrites that
+				// test's value. Uncovered, the timeout also skips it.
+				if (suspendsBefore(facts, flow, write.node, write.replaced)) {
+					if (!covered) messageId = "putBackSkippedByTimeout";
+					else if (guardedByLifetime(facts, write.node)) messageId = undefined;
+					// A later write of another value is a second install, not a put-back.
+					else if (restoresSaved(facts, write.node, write.path) || putsBackSaved(facts, write.node, write.path))
+						messageId = "putBackRunsLate";
+					else messageId = "writeRunsLate";
+				}
+			} else if (!covered) {
+				if (hookWrites(facts, flow.test, write.path) || writeRegisteredPromptly(facts, write.path, replaces))
+					messageId = "putBackWritesUnsavedValue";
+				else if (putBackRegisteredAnywhere(facts, flow.test, write.path)) messageId = "putBackRegisteredLate";
+			}
 			if (!messageId) continue;
 			facts.context.report({ node: write.node, messageId, data: { target: write.path } });
 			reported.add(key);
 			reported.add(`node|${write.node.range[0]}`);
 			break;
 		}
+	}
+	judgeCleanupWrites(facts, writes, reported);
+}
+
+/**
+ * Does `write` store a value that evidently was not saved from anywhere: a literal, a template, an
+ * object, array or function expression, or `undefined`? A value of unknown origin (a parameter, a
+ * member of another object) is not reported here; it still earns no put-back credit.
+ */
+function writesFreshValue(facts: FileFacts, write: Node): boolean {
+	let value: Node | undefined;
+	if (write.type === "AssignmentExpression") value = unwrap(node(write.right));
+	else if (write.type === "CallExpression") {
+		const builtin = builtinMethod(facts, node(write.callee));
+		if (builtin?.method === "defineProperty" || (builtin?.object === "Reflect" && builtin.method === "set"))
+			value = unwrap(nodes(write.arguments)[2]);
+	}
+	if (!value) return false;
+	if (value.type === "Identifier") return value.name === "undefined";
+	return (
+		value.type === "Literal" ||
+		value.type === "TemplateLiteral" ||
+		value.type === "ObjectExpression" ||
+		value.type === "ArrayExpression" ||
+		isFunction(value)
+	);
+}
+
+/**
+ * A write in an `onTestFinished` callback or an `afterEach` hook that stores a fresh value
+ * ({@link writesFreshValue}) in a place the test body writes installs that value instead of putting
+ * the original back. It runs after the put-backs registered before it, so the value outlives the test.
+ */
+function judgeCleanupWrites(facts: FileFacts, writes: { node: Node; path: string }[], reported: Set<string>): void {
+	const written = new Map<Node, Set<string>>();
+	for (const write of writes)
+		for (const flow of flows(facts, write.node))
+			written.set(flow.test, (written.get(flow.test) ?? new Set()).add(write.path));
+	const judge = (callback: Node, tests: Node[]): void => {
+		const paths = new Set(tests.flatMap(test => [...(written.get(test) ?? [])]));
+		walk(facts.context, callback, n => {
+			if (reported.has(`node|${n.range[0]}`) || !writesFreshValue(facts, n)) return;
+			const path = sharedTargets(facts, n).find(target => paths.has(target));
+			if (!path) return;
+			facts.context.report({ node: n, messageId: "cleanupWritesUnsavedValue", data: { target: path } });
+			reported.add(`node|${n.range[0]}`);
+		});
+	};
+	for (const finisher of facts.finishers) {
+		const tests = flows(facts, finisher).map(flow => flow.test);
+		if (tests.length > 0) for (const callback of registered(facts, finisher)) judge(callback, tests);
+	}
+	for (const call of facts.calls) {
+		if (testApi(facts.context, node(call.callee)) !== "afterEach") continue;
+		const scope = enclosingFunction(call);
+		const tests = [...written.keys()].filter(test => coveringScopes(facts, test).includes(scope));
+		if (tests.length > 0) for (const callback of registered(facts, call)) judge(callback, tests);
 	}
 }
 
@@ -1204,6 +1413,14 @@ export default {
 					"A test that times out never reaches this put-back of `{{target}}`, so the replacement leaks into later tests. Register it with `onTestFinished(() => ...)` before the write, or put it back in a synchronous `afterEach`.",
 				putBackRegisteredLate:
 					"The test can time out after this write to `{{target}}` but before it registers the `onTestFinished` that puts it back, so the replacement leaks into later tests. Register the put-back before the write.",
+				putBackRunsLate:
+					"This put-back of `{{target}}` runs after an `await`. If the test times out, the abandoned body runs it during a later test and overwrites that test's value. Leave the put-back to the `onTestFinished`, `afterEach` or `installEnvRestores()` that already covers `{{target}}`, or create `const life = testLifetime()` before the test's first `await` and call `life.assertLive()` right before it.",
+				writeRunsLate:
+					"This write to `{{target}}` runs after an `await`. If the test times out, the abandoned body runs it during a later test and replaces that test's value. Create `const life = testLifetime()` before the test's first `await` and call `life.assertLive()` right before this write.",
+				putBackWritesUnsavedValue:
+					"The cleanup registered for this write to `{{target}}` writes a value that was not saved from `{{target}}`, so it does not put the original back. Save it first (`const saved = {{target}}`) and restore that, or `delete` it.",
+				cleanupWritesUnsavedValue:
+					"This cleanup writes `{{target}}` with a value that was not saved from `{{target}}`, so it installs that value after the put-backs that ran before it, and it outlives the test. Restore a saved value (`const saved = {{target}}`) or `delete` it.",
 			},
 			judgePutBacks,
 		),

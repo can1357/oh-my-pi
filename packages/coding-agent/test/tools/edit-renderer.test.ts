@@ -769,16 +769,11 @@ describe("editToolRenderer diff line wrapping", () => {
 			chalk.level = previousLevel;
 		});
 		chalk.level = 3;
-		let rows: readonly string[];
-		try {
-			rows = await renderSingleLineReplacement(
-				"    stanza recounts venerable chronicle passages spanning bygone dynasties whose archivists engraved ledgers onto vellum scrolls",
-				"    stanza celebrates luminous festival processions winding through lantern boulevards while drummers herald jubilant choruses beneath cascading ribbons and fireworks",
-				100,
-			);
-		} finally {
-			chalk.level = previousLevel;
-		}
+		const rows = await renderSingleLineReplacement(
+			"    stanza recounts venerable chronicle passages spanning bygone dynasties whose archivists engraved ledgers onto vellum scrolls",
+			"    stanza celebrates luminous festival processions winding through lantern boulevards while drummers herald jubilant choruses beneath cascading ribbons and fireworks",
+			100,
+		);
 
 		// Precondition: some continuation row's content reopens with inverse right
 		// after its gutter, proving a highlighted span crossed a wrap boundary. If

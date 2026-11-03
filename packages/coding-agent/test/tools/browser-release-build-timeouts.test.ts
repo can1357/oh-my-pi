@@ -7,6 +7,7 @@ import { navigateMainFrame } from "@oh-my-pi/pi-coding-agent/tools/browser/navig
 import { getTab, releaseAllTabs } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 import { type Page, TimeoutError } from "puppeteer-core";
+import { testLifetime } from "../../../utils/test/helpers/mock-restores";
 import { chromiumAvailable } from "./chromium-probe";
 
 // Release builds minify class names, and Puppeteer names each error after its class, so its
@@ -80,6 +81,7 @@ test("raises a main-frame wait past its timeout as Puppeteer's timeout, still na
 
 describe.skipIf(!CHROMIUM_AVAILABLE)("browser timeouts with release-build class names", () => {
 	test("tab.goto stops a navigation that never commits", async () => {
+		const life = testLifetime();
 		// The tab worker must share this process's renamed class: worker threads failing to start
 		// puts a tab on the inline worker. bun runs a file's tests one at a time, so no other browser
 		// call is in flight while `Worker` or the class name is replaced.
@@ -97,6 +99,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser timeouts with release-build class 
 		try {
 			await invoke({ action: "open", name: "minified-timeout", url: `${baseUrl}/start` });
 		} finally {
+			life.assertLive();
 			Object.defineProperty(globalThis, "Worker", workerDescriptor);
 		}
 		expect(getTab("minified-timeout")).toMatchObject({ worker: { mode: "inline" } });
@@ -104,6 +107,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser timeouts with release-build class 
 		onTestFinished(() => {
 			Object.defineProperty(TimeoutError, "name", nameDescriptor);
 		});
+		life.assertLive();
 		Object.defineProperty(TimeoutError, "name", { ...nameDescriptor, value: "Og" });
 		try {
 			const error = await invoke({
@@ -114,6 +118,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser timeouts with release-build class 
 			}).catch(err => err);
 			expect((error as Error).message).toMatch(/^tab\.goto\(.*\) timed out after \d+ms; pending navigation stopped/);
 		} finally {
+			life.assertLive();
 			Object.defineProperty(TimeoutError, "name", nameDescriptor);
 		}
 		// The stopped navigation no longer holds the page, so the next call answers on the old document.

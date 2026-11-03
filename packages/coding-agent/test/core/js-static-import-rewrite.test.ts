@@ -2,6 +2,7 @@ import { describe, expect, it, onTestFinished } from "bun:test";
 
 import { rewriteImports, wrapCode } from "@oh-my-pi/pi-coding-agent/eval/js/context-manager";
 import { indirectEval } from "@oh-my-pi/pi-coding-agent/eval/js/shared/indirect-eval";
+import { testLifetime } from "../../../utils/test/helpers/mock-restores";
 
 // Test fixtures embed user-supplied `import(...)` syntax that the rewriter must
 // transform. The strings are split so static-analysis heuristics don't read them
@@ -89,6 +90,7 @@ describe("rewriteImports", () => {
 	});
 
 	it("routes dynamic import through the helper when present and native import when serialized into a foreign realm", async () => {
+		const life = testLifetime();
 		const out = await rewriteImports(`const load = async () => await ${dyn('("node:path")')}; load;`);
 		const globals = globalThis as Record<string, unknown>;
 		const hasOriginal = "__omp_import__" in globals;
@@ -105,6 +107,7 @@ describe("rewriteImports", () => {
 
 		// Worker realm: helper global exists, call must route through it.
 		const seen: string[] = [];
+		life.assertLive();
 		globals.__omp_import__ = async (source: string) => {
 			seen.push(source);
 			return { stubbed: true };
@@ -116,6 +119,7 @@ describe("rewriteImports", () => {
 		// Page realm: puppeteer ships `load.toString()` to a realm without the helper —
 		// the shim must fall back to native dynamic import instead of throwing.
 		const serialized = indirectEval(`(${load.toString()})`) as () => Promise<typeof import("node:path")>;
+		life.assertLive();
 		delete globals.__omp_import__;
 		const mod = await serialized();
 		expect(typeof mod.join).toBe("function");

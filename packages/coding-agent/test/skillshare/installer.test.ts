@@ -25,6 +25,7 @@ import { writeTar } from "@oh-my-pi/pi-coding-agent/skillshare/tar";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { getAgentDir, setAgentDir } from "@oh-my-pi/pi-utils/dirs";
 import type { SkillPackument, SkillVersionManifest, SkillVersionSummary } from "@oh-my-pi/pi-wire/skillshare";
+import { testLifetime } from "../../../utils/test/helpers/mock-restores";
 
 const SCOPE = "alice";
 const NAME = "pdf-tools";
@@ -176,11 +177,13 @@ describe("installer", () => {
 	};
 
 	beforeEach(async () => {
+		const life = testLifetime();
 		originalAgentDir = getAgentDir();
 		tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "omp-skillshare-install-"));
 		project = path.join(tempHome, "work", "proj");
 		await fs.mkdir(path.join(project, ".git"), { recursive: true });
 		vi.spyOn(os, "homedir").mockReturnValue(tempHome);
+		life.assertLive();
 		setAgentDir(path.join(tempHome, ".omp", "agent"));
 		client = await SkillshareClient.create({ registryUrl: "https://skills.test" });
 		registry = { pk: packument([], {}), tarballs: {}, files: [] };

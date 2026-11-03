@@ -27,6 +27,7 @@ import {
 import { ToolAbortError, throwIfAborted } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { github } from "@oh-my-pi/pi-coding-agent/utils/github";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { testLifetime } from "../../../utils/test/helpers/mock-restores";
 
 const TEST_REPO = "owner/example";
 const TEST_AUTH_KEY = "test-auth";
@@ -35,8 +36,10 @@ let tempDir: string;
 let originalEnv: string | undefined;
 
 beforeEach(async () => {
+	const life = testLifetime();
 	tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "gh-cache-"));
 	originalEnv = process.env.OMP_GITHUB_CACHE_DB;
+	life.assertLive();
 	process.env.OMP_GITHUB_CACHE_DB = path.join(tempDir, "github-cache.db");
 	resetCacheForTests();
 });

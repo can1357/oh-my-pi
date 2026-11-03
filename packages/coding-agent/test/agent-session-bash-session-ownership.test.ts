@@ -13,6 +13,7 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { installEnvRestores } from "../../utils/test/helpers/mock-restores";
 import { createAssistantMessage, createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 import { cfgShellPath } from "@oh-my-pi/pi-coding-agent/exec/settings";
@@ -29,6 +30,9 @@ const bashResult = {
 };
 
 describe("AgentSession bash session ownership", () => {
+	// The async afterEach can time out, and Bun then skips `onTestFinished`; this owner still puts
+	// the variable back at the next test and when the scope ends.
+	installEnvRestores(["OMP_USER_SHELL_MIRROR"]);
 	let tempDir: TempDir;
 	let authStorage: AuthStorage;
 	let session: AgentSession;
@@ -171,11 +175,6 @@ describe("AgentSession bash session ownership", () => {
 			args: process.platform === "win32" ? ["/c"] : ["-c"],
 			env: { PATH: Bun.env.PATH ?? "", HOME: tempDir.path(), SHELL: shell },
 			prefix: undefined,
-		});
-		const previousMirror = process.env.OMP_USER_SHELL_MIRROR;
-		onTestFinished(() => {
-			if (previousMirror === undefined) delete process.env.OMP_USER_SHELL_MIRROR;
-			else process.env.OMP_USER_SHELL_MIRROR = previousMirror;
 		});
 		process.env.OMP_USER_SHELL_MIRROR = "mirrored-value";
 		const spawnHook = vi.fn(spawn => ({

@@ -6,6 +6,7 @@ import { sharedSpinnerFrame } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { SPINNER_ADVANCE_MS } from "@oh-my-pi/pi-tui/components/loader";
 import { getThemeByName } from "@oh-my-pi/pi-tui/theme";
 import { getConfigRootDir, getCustomThemesDir, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
+import { testLifetime } from "../../utils/test/helpers/mock-restores";
 
 // Path of the built-in dark theme JSON, used as a known-valid base we can
 // extend with custom `symbols.spinnerFrames` shapes.
@@ -31,7 +32,9 @@ async function writeCustomTheme(name: string, extraSymbols: Record<string, unkno
 
 describe("theme symbols.spinnerFrames", () => {
 	beforeEach(async () => {
+		const life = testLifetime();
 		tmpAgentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-spinner-frames-"));
+		life.assertLive();
 		setAgentDir(tmpAgentDir);
 	});
 

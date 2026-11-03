@@ -21,6 +21,7 @@ import {
 	cfgTuiMaxInlineImageColumns,
 	cfgTuiMaxInlineImageRows,
 } from "@oh-my-pi/pi-coding-agent/modes/settings";
+import { testLifetime } from "../../../utils/test/helpers/mock-restores";
 
 function extractAnyTerminatorLinkUri(text: string): string | undefined {
 	return text.match(/\x1b\]8;[^;]*;([^\x1b\x07]+)(?:\x1b\\|\x07)/)?.[1];
@@ -71,6 +72,7 @@ describe("InternalUrlRouter.locateSync", () => {
 
 describe("renderer settings propagation", () => {
 	it("updates renderer preferences when runtime overrides are applied and cleared", async () => {
+		const life = testLifetime();
 		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
 		const restoreRows = () => {
 			Reflect.deleteProperty(process.stdout, "rows");
@@ -105,6 +107,7 @@ describe("renderer settings propagation", () => {
 			expect(isFeedModelBadgeEnabled()).toBe(true);
 			expect(isHyperlinkEnabled()).toBe(true);
 		} finally {
+			life.assertLive();
 			Reflect.deleteProperty(process.stdout, "rows");
 			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
 			resetSettingsForTest();

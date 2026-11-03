@@ -241,12 +241,8 @@ describe("--warn-cost / --max-cost", () => {
 			captured.push(typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk));
 			return true;
 		});
-		try {
-			await runCli(["--warn-cost", "abc", "--print", "hello"]);
-			observedExitCode = process.exitCode;
-		} finally {
-			process.exitCode = previousExitCode ?? 0;
-		}
+		await runCli(["--warn-cost", "abc", "--print", "hello"]);
+		observedExitCode = process.exitCode;
 		expect(observedExitCode).toBe(2);
 		expect(captured.join("")).toContain("Invalid --warn-cost value");
 	});

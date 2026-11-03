@@ -42,6 +42,7 @@ import { formatSessionHistoryMarkdown } from "@oh-my-pi/pi-coding-agent/session/
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { setAgentDir } from "@oh-my-pi/pi-utils";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
+import { testLifetime } from "../../utils/test/helpers/mock-restores";
 
 const TINY_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/pLvAAAAAElFTkSuQmCC";
 
@@ -104,10 +105,12 @@ describe("path-pasted image source path (#12244)", () => {
 	});
 
 	beforeEach(async () => {
+		const life = testLifetime();
 		settingsState = beginSettingsTest();
 		await Settings.init({ inMemory: true });
 		tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-image-paste-"));
 		// Keep blob materialization for clipboard payloads inside the temp dir.
+		life.assertLive();
 		setAgentDir(tmpDir);
 		authStorage = await AuthStorage.create(":memory:");
 		authStorage.keys.setRuntime("anthropic", "test-key");

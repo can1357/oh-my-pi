@@ -6,33 +6,29 @@ import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import { AuthBrokerRefresher } from "@oh-my-pi/pi-ai/auth-broker";
 import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
 import { removeWithRetries } from "../../utils/src/temp";
+import { installEnvRestores, installMockRestores } from "../../utils/test/helpers/mock-restores";
 
 const ANTHROPIC_ENV = ["ANTHROPIC_API_KEY", "ANTHROPIC_OAUTH_TOKEN"] as const;
-const savedEnv: Partial<Record<(typeof ANTHROPIC_ENV)[number], string | undefined>> = {};
 
 describe("AuthBrokerRefresher", () => {
+	// The async afterEach can time out, and Bun then skips `onTestFinished` and the later hooks;
+	// these owners still put the variables and the spies back at the next test and when the scope ends.
+	installEnvRestores(["ANTHROPIC_API_KEY", "ANTHROPIC_OAUTH_TOKEN"]);
+	installMockRestores();
 	let tempDir = "";
 	let store: SqliteAuthCredentialStore | undefined;
 	let storage: AuthStorage | undefined;
 
 	beforeEach(async () => {
-		for (const key of ANTHROPIC_ENV) {
-			savedEnv[key] = process.env[key];
-			delete process.env[key];
-		}
+		for (const key of ANTHROPIC_ENV) delete process.env[key];
 		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "auth-broker-refresher-"));
 		store = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
 	});
 
 	afterEach(async () => {
-		vi.restoreAllMocks();
 		storage?.close();
 		store?.close();
 		await removeWithRetries(tempDir);
-		for (const key of ANTHROPIC_ENV) {
-			if (savedEnv[key] === undefined) delete process.env[key];
-			else process.env[key] = savedEnv[key];
-		}
 	});
 
 	test("refreshes credentials inside the skew window", async () => {

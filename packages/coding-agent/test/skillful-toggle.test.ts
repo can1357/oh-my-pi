@@ -13,6 +13,7 @@ import { BUILTIN_MODE_SLASH_COMMANDS } from "@oh-my-pi/pi-coding-agent/slash-com
 import type { SlashCommandRuntime } from "@oh-my-pi/pi-coding-agent/slash-commands/types";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
+import { installEnvRestores } from "../../utils/test/helpers/mock-restores";
 import { cleanupTempHome } from "./helpers/temp-home-cleanup";
 
 import { cfgSkillful } from "@oh-my-pi/pi-coding-agent/session/settings";
@@ -34,10 +35,11 @@ function createIsolatedSkillsSettings(overrides: Record<string, unknown> = {}): 
 }
 
 describe("skillful setting and /skillful session toggle", () => {
+	// The session's async afterEach can time out, and Bun then skips `onTestFinished`; this owner
+	// still puts HOME back at the next test and when the scope ends.
+	installEnvRestores(["HOME"]);
 	let tempDir: string;
 	let tempHomeDir = "";
-	// Captured once, so a put-back skipped by a timed-out afterEach cannot become the next test's baseline.
-	const originalHome = process.env.HOME;
 	let sharedDir: string;
 	let sharedAuthStorage: AuthStorage;
 	let sharedModelRegistry: ModelRegistry;
@@ -56,8 +58,8 @@ describe("skillful setting and /skillful session toggle", () => {
 
 	beforeEach(() => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-skillful-"));
-		// Runs after afterEach has disposed the session, which still sees the temp home.
-		onTestFinished(cleanupTempHome(() => ({ tempDir, tempHomeDir, originalHome })));
+		// Runs after afterEach has disposed the session, which still sees the temp dirs.
+		onTestFinished(cleanupTempHome(() => ({ tempDir, tempHomeDir })));
 		tempHomeDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-skillful-home-"));
 		process.env.HOME = tempHomeDir;
 		fs.mkdirSync(path.join(tempDir, ".omp", "skills", "test-skill"), { recursive: true });

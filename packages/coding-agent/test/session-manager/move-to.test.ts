@@ -12,7 +12,7 @@ import { stripOuterDoubleQuotes } from "@oh-my-pi/pi-coding-agent/tools/path-uti
 import { getConfigRootDir, setAgentDir } from "@oh-my-pi/pi-utils";
 
 // -- helpers ----------------------------------------------------------------
-
+import { testLifetime } from "../../../utils/test/helpers/mock-restores";
 import { makeAssistantMessage } from "./helpers";
 
 afterEach(() => {
@@ -70,7 +70,9 @@ describe("SessionManager.moveTo", () => {
 	const fallbackAgentDir = path.join(getConfigRootDir(), "agent");
 
 	beforeEach(async () => {
+		const life = testLifetime();
 		testAgentDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-move-test-"));
+		life.assertLive();
 		setAgentDir(testAgentDir);
 		cwdA = path.join(testAgentDir, "cwd-a");
 		cwdB = path.join(testAgentDir, "cwd-b");

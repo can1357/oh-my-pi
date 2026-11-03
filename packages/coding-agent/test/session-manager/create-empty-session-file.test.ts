@@ -7,6 +7,7 @@ import type { SessionHeader } from "@oh-my-pi/pi-coding-agent/session/session-en
 import { loadEntriesFromFile } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { getConfigRootDir, setAgentDir } from "@oh-my-pi/pi-utils";
+import { testLifetime } from "../../../utils/test/helpers/mock-restores";
 
 describe("SessionManager.createEmptySessionFile", () => {
 	let testAgentDir: string;
@@ -15,7 +16,9 @@ describe("SessionManager.createEmptySessionFile", () => {
 	const fallbackAgentDir = path.join(getConfigRootDir(), "agent");
 
 	beforeEach(async () => {
+		const life = testLifetime();
 		testAgentDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-empty-session-"));
+		life.assertLive();
 		setAgentDir(testAgentDir);
 		cwd = path.join(testAgentDir, "project");
 		fs.mkdirSync(cwd, { recursive: true });

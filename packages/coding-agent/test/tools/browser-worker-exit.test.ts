@@ -13,6 +13,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import type { WorkerInbound } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-protocol";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
+import { testLifetime } from "../../../utils/test/helpers/mock-restores";
 import { rejectionOf } from "../helpers/rejection";
 import { chromiumAvailable } from "./chromium-probe";
 
@@ -162,6 +163,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser tab worker exit", () => {
 	}, 30_000);
 
 	it("does not name an earlier message error as the cause of a later exit", async () => {
+		const life = testLifetime();
 		const name = "worker-exit-stale-cause";
 		// Capture the tab's Bun worker to raise a `messageerror` on it, which leaves the worker running.
 		const RealWorker = globalThis.Worker;
@@ -178,6 +180,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser tab worker exit", () => {
 		try {
 			await open(name, "alive");
 		} finally {
+			life.assertLive();
 			globalThis.Worker = RealWorker;
 		}
 		if (!spawned) throw new Error("expected the tab's worker");
