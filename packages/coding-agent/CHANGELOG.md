@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- Pinned sessions show a pin beside their title in the status line and the band composer's title, and `/unpin [session id]` unpins a session ([#17848](https://github.com/can1357/oh-my-pi/pull/17848) by [@SuperUserA](https://github.com/SuperUserA))
+- Added a fullscreen extension link browser for picking links already in terminal scrollback: press Alt+O again (or Page Up) while link tags are shown, or Alt+O with no extension link on screen ([#16476](https://github.com/can1357/oh-my-pi/pull/16476) by [@materemias](https://github.com/materemias))
+
 ### Fixed
 
 - The bash tool no longer drops aliases from your shell snapshot whose values hold `(`, `|`, `;`, `&`, `<`, `>` or backquotes, such as Fedora's default `which` alias: they now run as they do in Bash ([#17877](https://github.com/can1357/oh-my-pi/pull/17877) by [@sjawhar](https://github.com/sjawhar), issue [#3234](https://github.com/can1357/oh-my-pi/issues/3234))
@@ -49,6 +54,10 @@
 - `models.yml` accepts `tokenizer: cl100k` on a custom model or override ([#17607](https://github.com/can1357/oh-my-pi/pull/17607) by [@will-bogusz](https://github.com/will-bogusz))
 - Claude no longer receives the reasoning kept in a snapcompact archive whose summary an extension wrote without the reasoning legend, with or without image input, and reads that summary's own words instead of a generic one ([#17745](https://github.com/can1357/oh-my-pi/pull/17745) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed `~/.omp/agent/agent.db` getting corrupted (wiping stored logins) on Linux when grep, `read`, the bash tool, extensions or eval read it while omp has it open; `write` and `tts` now refuse to overwrite a database omp holds open ([#15586](https://github.com/can1357/oh-my-pi/issues/15586))
+
+### Fixed
+
+- Fixed composer prediction ghost text being dropped or never shown when a silent advisor card lands after the turn
 
 ## [18.15.0] - 2026-11-01
 
