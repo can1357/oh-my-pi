@@ -29,6 +29,36 @@ pub struct AtSpiWindow {
 	pub position_known: bool,
 }
 
+/// Leaves `focused` set on at most one window. Shell surfaces report the
+/// Active state at all times: the compositor's own frames (gnome-shell's "Main
+/// stage") and untitled frames (plasma-keyboard's). One of them therefore
+/// counts as focused only while no application window is active, as in the
+/// GNOME overview. Two active application windows leave none focused, rather
+/// than naming one at random.
+pub fn resolve_focus(windows: &mut [AtSpiWindow], compositor_pid: Option<u32>) {
+	let is_shell = |window: &DesktopWindow| {
+		window.title.trim().is_empty() || (compositor_pid.is_some() && window.pid == compositor_pid)
+	};
+	let active: Vec<usize> = (0..windows.len())
+		.filter(|&index| windows[index].window.focused)
+		.collect();
+	if active.len() < 2 {
+		return;
+	}
+	let apps: Vec<usize> = active
+		.iter()
+		.copied()
+		.filter(|&index| !is_shell(&windows[index].window))
+		.collect();
+	let focused = match apps.as_slice() {
+		[only] => Some(*only),
+		_ => None,
+	};
+	for index in active {
+		windows[index].window.focused = Some(index) == focused;
+	}
+}
+
 impl AtSpiAx {
 	pub(crate) fn new() -> CoreResult<Self> {
 		let rt = Builder::new_current_thread()
@@ -795,6 +825,52 @@ mod tests {
 		assert!(native_window_for_frame(&windows, 30, "Document").is_err());
 		windows.push(window("3", 20));
 		assert!(native_window_for_frame(&windows, 20, "Document").is_err());
+	}
+
+	#[test]
+	fn shell_frames_yield_focus_to_the_active_application_window() {
+		let frame = |title: &str, pid: u32, focused: bool| AtSpiWindow {
+			window:         DesktopWindow {
+				id: format!("{title}-{pid}"),
+				pid: Some(pid),
+				title: title.into(),
+				app: "app".into(),
+				x: 0,
+				y: 0,
+				width: 100,
+				height: 100,
+				focused,
+			},
+			position_known: false,
+		};
+		let focused = |windows: &[AtSpiWindow]| -> Vec<String> {
+			windows
+				.iter()
+				.filter(|w| w.window.focused)
+				.map(|w| w.window.title.clone())
+				.collect()
+		};
+
+		// GNOME: gnome-shell (the compositor, pid 1) keeps its "Main stage"
+		// active.
+		let mut gnome = vec![frame("Main stage", 1, true), frame("notes.txt - gedit", 7, true)];
+		resolve_focus(&mut gnome, Some(1));
+		assert_eq!(focused(&gnome), ["notes.txt - gedit"]);
+
+		// KDE: plasma-keyboard's untitled frame stays active.
+		let mut kde = vec![frame("", 5, true), frame("notes.txt — Kate", 8, true)];
+		resolve_focus(&mut kde, None);
+		assert_eq!(focused(&kde), ["notes.txt — Kate"]);
+
+		// The GNOME overview: only the shell is active, and it keeps focus.
+		let mut overview = vec![frame("Main stage", 1, true), frame("notes.txt - gedit", 7, false)];
+		resolve_focus(&mut overview, Some(1));
+		assert_eq!(focused(&overview), ["Main stage"]);
+
+		// Two active application windows: none is named.
+		let mut two = vec![frame("Main stage", 1, true), frame("A", 7, true), frame("B", 9, true)];
+		resolve_focus(&mut two, Some(1));
+		assert!(focused(&two).is_empty());
 	}
 
 	#[test]
