@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Removed the blanket re-login warning from SQLite corruption recovery; credential recovery reports its own outcome ([#15519](https://github.com/can1357/oh-my-pi/pull/15519) by [@shtse8](https://github.com/shtse8))
+
 ### Added
 
 - Added `logger.setLogForwarder(forwarder)` (`LogForwarder { emit, flush }`), which routes a thread's records — `withContext` fields merged, context reduced to clone-safe JSON — to another thread instead of its own file and sinks, and `logger.emitForeign(event)`, which writes such a record with its original timestamp and runs the sinks without the caller's `withContext` fields

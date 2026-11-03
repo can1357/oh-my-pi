@@ -306,7 +306,6 @@ function recoverCorruptDatabase(dbPath: string, error: unknown, options: SqliteO
 	logger.warn("SQLite database corrupt; preserved damaged store before recreating it", {
 		path: dbPath,
 		backupPath,
-		warning: "Stored credentials from this database may require re-login.",
 	});
 	options.onCorruptionPreserved?.(backupPath, failure.original);
 }

@@ -24,6 +24,29 @@ async function corruptDatabase(dbPath: string): Promise<Uint8Array<ArrayBuffer>>
 	return damaged;
 }
 
+/**
+ * Damages one b-tree page the store reads while opening, leaving everything else
+ * readable. Modeled on the field reports: a cache or bookkeeping page is what
+ * gets hurt, while the credential rows themselves survive in the preserved copy.
+ */
+async function corruptStorePage(dbPath: string, table: string): Promise<Uint8Array<ArrayBuffer>> {
+	const db = new Database(dbPath);
+	db.run("PRAGMA wal_checkpoint(TRUNCATE)");
+	const root = db
+		.query<{ rootpage: number }, [string]>("SELECT rootpage FROM sqlite_master WHERE name = ?")
+		.get(table);
+	db.close();
+	if (!root) throw new Error(`no table root page named ${table} in ${dbPath}`);
+
+	const damaged = await Bun.file(dbPath).bytes();
+	const pageSize = (damaged[16]! << 8) | damaged[17]!;
+	// An invalid page type makes every read that reaches this page fail, while the
+	// file still opens and the other tables' pages stay intact.
+	damaged[(root.rootpage - 1) * pageSize] = 0xff;
+	await Bun.write(dbPath, damaged);
+	return damaged;
+}
+
 async function expectQuarantinedDamage(dbPath: string, damaged: Uint8Array<ArrayBuffer>): Promise<void> {
 	const prefix = `${path.basename(dbPath)}.corrupt-`;
 	const backupNames = (await fs.readdir(path.dirname(dbPath))).filter(
@@ -104,6 +127,8 @@ test("auth startup quarantines corruption and persists new credentials", async (
 
 	const storage = await SqliteAuthCredentialStore.open(dbPath);
 	try {
+		// The damaged page is the schema page itself, so the preserved copy cannot be
+		// read back at all: best-effort credential recovery has nothing to restore.
 		expect(storage.listProviders()).toEqual([]);
 		expect(storage.getApiKey("damaged-provider")).toBeNull();
 		await storage.saveApiKey("recovered-provider", "recovered-secret");
@@ -144,6 +169,86 @@ test("concurrent agent and auth startup share one private recovered database", a
 		}
 	} finally {
 		auth?.close();
+		AgentStorage.close();
+	}
+	await expectQuarantinedDamage(dbPath, damaged);
+});
+
+test("auth corruption that spares the credential table restores the preserved credentials", async () => {
+	await using tempDir = await TempDir.create("@omp-storage-errors-");
+	const dbPath = tempDir.join("auth.db");
+
+	const original = await SqliteAuthCredentialStore.open(dbPath);
+	await original.saveApiKey("preserved-provider", "preserved-secret");
+	await original.saveApiKey("second-provider", "second-secret");
+	original.close();
+	// The replacement starts empty, so only a preserved copy whose credential rows
+	// survive the damage can bring these logins back.
+	const damaged = await corruptStorePage(dbPath, "auth_schema_version");
+
+	const storage = await SqliteAuthCredentialStore.open(dbPath);
+	try {
+		expect(storage.listProviders().sort()).toEqual(["preserved-provider", "second-provider"]);
+		expect(storage.getApiKey("preserved-provider")).toBe("preserved-secret");
+		expect(storage.getApiKey("second-provider")).toBe("second-secret");
+	} finally {
+		storage.close();
+	}
+	await expectQuarantinedDamage(dbPath, damaged);
+});
+
+test("agent.db corruption restores the credentials its preserved copy still holds", async () => {
+	await using tempDir = await TempDir.create("@omp-storage-errors-");
+	const dbPath = tempDir.join("agent.db");
+
+	const seeded = await SqliteAuthCredentialStore.open(dbPath);
+	await seeded.saveApiKey("preserved-provider", "preserved-secret");
+	seeded.close();
+	const damaged = await corruptStorePage(dbPath, "auth_schema_version");
+
+	AgentStorage.close();
+	const storage = await AgentStorage.open(dbPath);
+	try {
+		// The damaged cache tables come back empty…
+		expect(storage.getModelUsageOrder()).toEqual([]);
+		// …while the login only the preserved copy still had comes back with them.
+		expect(storage.listAuthCredentials("preserved-provider")).toMatchObject([
+			{ credential: { type: "api_key", key: "preserved-secret" } },
+		]);
+		expect(storage.hasAuthCredentials()).toBe(true);
+	} finally {
+		AgentStorage.close();
+	}
+	await expectQuarantinedDamage(dbPath, damaged);
+});
+
+test("every concurrent agent opener sees restored credentials before using the shared store", async () => {
+	await using tempDir = await TempDir.create("@omp-storage-errors-");
+	const dbPath = tempDir.join("agent.db");
+	const seeded = await SqliteAuthCredentialStore.open(dbPath);
+	// Different providers avoid login-time replacement entirely, isolating the
+	// publication window from the mixed-provider salvage regression.
+	const expected = Array.from({ length: 32 }, (_, index) => ({
+		provider: `provider-${index}`,
+		credential: { type: "api_key" as const, key: `preserved-key-${index}` },
+	}));
+	for (const { provider, credential } of expected) await seeded.saveApiKey(provider, credential.key);
+	seeded.close();
+	const damaged = await corruptStorePage(dbPath, "auth_schema_version");
+
+	AgentStorage.close();
+	try {
+		const first = AgentStorage.open(dbPath);
+		// Cover callers arriving across the initializer's microtask boundaries, not
+		// only callers that await the initiating open before reading credentials.
+		const observers = Array.from({ length: 16 }, async (_, delay) => {
+			for (let tick = 0; tick < delay; tick++) await Promise.resolve();
+			const storage = await AgentStorage.open(dbPath);
+			return storage.listAuthCredentials().map(({ provider, credential }) => ({ provider, credential }));
+		});
+		await first;
+		for (const credentials of await Promise.all(observers)) expect(credentials).toEqual(expected);
+	} finally {
 		AgentStorage.close();
 	}
 	await expectQuarantinedDamage(dbPath, damaged);
