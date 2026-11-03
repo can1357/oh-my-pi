@@ -343,7 +343,7 @@ const FIELD_RULES: Record<string, Rule> = {
 		"errorClassificationMessage",
 		"upstreamError",
 	]),
-	...fields("tool", ["toolName", "tools", "declared", "deferred", "active"]),
+	...fields("tool", ["toolName", "tools", "mountedTools", "declared", "deferred", "active"]),
 	name: "name",
 	customType: "customType",
 	inputTransformations: "transforms",

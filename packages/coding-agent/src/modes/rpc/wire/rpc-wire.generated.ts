@@ -536,6 +536,7 @@ export interface BashResult {
 	artifactId?: string;
 	artifactElidedBytes?: number;
 	artifactError?: Record<string, unknown>;
+	minimized?: Record<string, unknown>;
 	workingDir?: string;
 	images?: ImageContent[];
 }

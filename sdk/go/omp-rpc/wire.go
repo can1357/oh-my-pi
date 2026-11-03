@@ -2598,6 +2598,7 @@ type BashResult struct {
 	ArtifactID          *string                    `json:"artifactId,omitempty"`
 	ArtifactElidedBytes *int64                     `json:"artifactElidedBytes,omitempty"`
 	ArtifactError       map[string]json.RawMessage `json:"artifactError,omitempty"`
+	Minimized           map[string]json.RawMessage `json:"minimized,omitempty"`
 	WorkingDir          *string                    `json:"workingDir,omitempty"`
 	Images              []ImageContent             `json:"images,omitempty"`
 }
@@ -2621,6 +2622,7 @@ func (v *BashResult) decodeFrom(raw map[string]json.RawMessage) error {
 	d.optional("artifactId", &out.ArtifactID)
 	d.optional("artifactElidedBytes", &out.ArtifactElidedBytes)
 	d.optional("artifactError", &out.ArtifactError)
+	d.optional("minimized", &out.Minimized)
 	d.optional("workingDir", &out.WorkingDir)
 	d.optional("images", &out.Images)
 	if d.err != nil {

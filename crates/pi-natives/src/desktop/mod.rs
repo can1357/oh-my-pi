@@ -4,6 +4,7 @@ mod backend;
 mod control;
 mod error;
 mod frame;
+mod front_app;
 mod keys;
 #[cfg(target_os = "linux")]
 mod linux;
