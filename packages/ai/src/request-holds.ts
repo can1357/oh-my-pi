@@ -43,22 +43,42 @@ export interface RequestHolds {
 
 /** How long something lasts: a request that carries views, or an exemption. */
 interface Lifetime {
-	open: boolean;
-	/** Settles when it ends, waking a check still waiting on what it carried. */
-	readonly ended: Promise<void>;
+	readonly open: boolean;
+	/**
+	 * Calls `listener` once when it ends, waking a check still waiting on what
+	 * it carried; the returned function removes it first. A listener, not a
+	 * promise: a wait that is over leaves nothing behind on a lifetime that
+	 * outlasts it.
+	 */
+	onEnd(listener: () => void): () => void;
 }
 
 function startLifetime(): { lifetime: Lifetime; end(): void } {
-	const ended = Promise.withResolvers<void>();
-	const lifetime: Lifetime = { open: true, ended: ended.promise };
+	const listeners = new Set<() => void>();
+	let open = true;
+	const lifetime: Lifetime = {
+		get open() {
+			return open;
+		},
+		onEnd(listener) {
+			listeners.add(listener);
+			return () => listeners.delete(listener);
+		},
+	};
 	return {
 		lifetime,
 		end() {
-			lifetime.open = false;
-			ended.resolve();
+			if (!open) return;
+			open = false;
+			const ending = [...listeners];
+			listeners.clear();
+			for (const listener of ending) listener();
 		},
 	};
 }
+
+/** `Promise.prototype.then` as the runtime defines it, to tell a native promise's own `then` from one a subclass or accessor put in its place. */
+const nativeThen = Promise.prototype.then;
 
 /**
  * Ends `end` once `fn`'s result settles: when it returns, throws, or — for a
@@ -91,9 +111,10 @@ function endWhenSettled<T>(fn: () => T, end: () => void): T {
 	}
 	const followed = then;
 	try {
-		if (result instanceof Promise) {
+		if (result instanceof Promise && followed === nativeThen) {
 			// A native promise has already adopted whatever it was resolved with; its
-			// `then`, as read above, ends the exemption in the turn its awaiters resume.
+			// own `then`, as read above, ends the exemption in the turn its awaiters
+			// resume. A subclass's or an accessor's `then` is followed as any thenable's.
 			followed.call(result, end, end);
 			return result;
 		}
@@ -122,10 +143,6 @@ const scopes = new AsyncLocalStorage<Scope>();
 
 function live(lifetimes: readonly Lifetime[]): boolean {
 	return lifetimes.every(lifetime => lifetime.open);
-}
-
-function firstEnd(lifetimes: readonly Lifetime[]): Promise<void> | undefined {
-	return lifetimes.length === 0 ? undefined : Promise.race(lifetimes.map(lifetime => lifetime.ended));
 }
 
 /** Whether a scope of the chain names `holds`. An exemption does not: once it ends, its holds must still be named to apply. */
@@ -439,65 +456,70 @@ export function openRequestHolds(own?: { holds: RequestHolds; view: RequestHoldV
 			if (!openedNow) return active;
 		}
 	};
-	/** The wait the last check returned, while it lasts; the watched promises forward to it. */
-	let currentWake: PromiseWithResolvers<void> | undefined;
-	/** Removes the last wait's rebind listeners. */
-	let stopWaking = () => {};
-	/** What the current wait waits on; a watched promise settling wakes it only if it is this one. */
-	let currentHeld: Promise<void> | undefined;
+	/**
+	 * The wait the last check returned, until it ends or the next check or
+	 * `release` supersedes it. Only it is woken: a wait that is over hears
+	 * nothing more, from its hold, an alias or a lifetime.
+	 */
+	let currentWait: { held: Promise<void>; wake(): void; fail(error: unknown): void; stop(): void } | undefined;
+	/**
+	 * The holds' promises this request reacts to, one reaction each however
+	 * many waits return them; each forwards to the current wait only if that
+	 * wait is waiting on it, and is gone once the promise settles.
+	 */
 	const watchedHelds = new Set<Promise<void>>();
-	const watchedEnds = new Set<Promise<void>>();
+	const watchHeld = (held: Promise<void>) => {
+		if (watchedHelds.has(held)) return;
+		watchedHelds.add(held);
+		held.then(
+			() => {
+				watchedHelds.delete(held);
+				if (currentWait?.held === held) currentWait.wake();
+			},
+			error => {
+				watchedHelds.delete(held);
+				// A hold that fails fails the wait on it, as an `await` of it would.
+				if (currentWait?.held === held) currentWait.fail(error);
+			},
+		);
+	};
 	return {
 		check() {
-			// A check supersedes the wait the previous one returned: that wait's
-			// rebind listeners go now, whether it settled, was abandoned or aborted.
-			stopWaking();
+			// A check supersedes the wait the previous one returned, whether that wait
+			// ended, was abandoned or aborted: its listeners go now.
+			currentWait?.stop();
 			for (const entry of refresh()) {
 				const held = entry.view?.check();
 				if (!held) continue;
 				// The wait also ends when its answer may change: a carried view's
 				// request ends, or an alias is rebound. The check then runs again.
 				const lifetimes = entry.carried ? entry.scope.lifetimes : [];
-				if (aliases.length === 0) {
-					const ended = firstEnd(lifetimes);
-					return ended ? Promise.race([held, ended]) : held;
-				}
-				const wake = Promise.withResolvers<void>();
-				currentWake = wake;
-				const removals = aliases.map(alias => alias.onRebind(wake.resolve));
-				stopWaking = () => {
-					for (const remove of removals) remove();
-					stopWaking = () => {};
-					if (currentWake === wake) currentWake = undefined;
+				if (aliases.length === 0 && lifetimes.length === 0) return held;
+				// A lifetime that ended while the views were asked: ask again.
+				if (!live(lifetimes)) return Promise.resolve();
+				const { promise, resolve, reject } = Promise.withResolvers<void>();
+				const removals: Array<() => void> = [];
+				const wait = {
+					held,
+					wake() {
+						wait.stop();
+						resolve();
+					},
+					fail(error: unknown) {
+						wait.stop();
+						reject(error);
+					},
+					stop() {
+						if (currentWait !== wait) return;
+						currentWait = undefined;
+						for (const remove of removals.splice(0)) remove();
+					},
 				};
-				// One reaction per distinct promise, forwarding to whichever wait is
-				// current, so waits woken again and again by rebinding add none. A hold
-				// that fails fails the wait, as it would without an alias.
-				currentHeld = held;
-				if (!watchedHelds.has(held)) {
-					watchedHelds.add(held);
-					const watched = held;
-					watched.then(
-						() => {
-							watchedHelds.delete(watched);
-							if (currentHeld === watched) currentWake?.resolve();
-						},
-						error => {
-							watchedHelds.delete(watched);
-							if (currentHeld === watched) currentWake?.reject(error);
-						},
-					);
-				}
-				for (const lifetime of lifetimes) {
-					if (watchedEnds.has(lifetime.ended)) continue;
-					watchedEnds.add(lifetime.ended);
-					void lifetime.ended.then(() => currentWake?.resolve());
-				}
-				void wake.promise.then(
-					() => stopWaking(),
-					() => stopWaking(),
-				);
-				return wake.promise;
+				currentWait = wait;
+				for (const alias of aliases) removals.push(alias.onRebind(wait.wake));
+				for (const lifetime of lifetimes) removals.push(lifetime.onEnd(wait.wake));
+				watchHeld(held);
+				return promise;
 			}
 			return undefined;
 		},
@@ -524,7 +546,7 @@ export function openRequestHolds(own?: { holds: RequestHolds; view: RequestHoldV
 			}
 		},
 		release() {
-			stopWaking();
+			currentWait?.stop();
 			const views = opened.splice(0);
 			for (const view of views) view.release();
 		},
