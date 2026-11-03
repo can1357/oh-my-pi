@@ -20,12 +20,13 @@
  * reported with the reason, never dropped silently.
  */
 import * as path from "node:path";
+import * as fs from "node:fs";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { logger } from "@oh-my-pi/pi-utils";
 import { AsyncJobError } from "../async";
 import type { AsyncJobManagerApi } from "../async/job-manager";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
-import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
+import { type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { ensurePersistedRoster, sessionFileBelongsToRoot } from "../registry/persisted-agents";
 import type { AgentSession } from "../session/agent-session";
 import { type AgentSessionHandle, isLocalAgentSession } from "../session/agent-session-handle";
@@ -41,6 +42,9 @@ import { cfgTaskMaxRuntimeMs } from "./settings";
 
 export const RESTART_SUBAGENTS_CUSTOM_TYPE = "restart_subagents";
 export const RESTART_SUBAGENTS_RESUMED_CUSTOM_TYPE = "restart_subagents_resumed";
+
+/** Longest a parent is kept from parking while its resumed child's result is delivered. */
+const PARENT_DELIVERY_HOLD_MS = 5 * 60_000;
 
 /** A tool call the restart stopped, as the note names it. */
 export interface RestartInterruptedToolCall {
@@ -64,13 +68,40 @@ export interface RestartSubagent {
 	unreadResults: { id: string; text: string }[];
 }
 
-/** The `restart_subagents` entry. */
+/** What `/restart` recorded: its subagents, kept whole in the record's file. */
 export interface RestartSubagentsData {
 	restartId: string;
 	/** The session that recorded it; a fork copies the entry under another id. */
 	sessionId: string;
 	recordedAt: string;
 	subagents: RestartSubagent[];
+}
+
+/**
+ * The `restart_subagents` session entry. Session entries are truncated for size, so
+ * the subagents (whose queued messages and unread results the note must carry whole)
+ * live in `file`, beside the subagent transcripts; the entry names them by id so an
+ * unreadable file still reports each one.
+ */
+export interface RestartSubagentsEntry {
+	restartId: string;
+	sessionId: string;
+	recordedAt: string;
+	/** File name in the session's artifacts directory. */
+	file: string;
+	subagentIds: string[];
+}
+
+/**
+ * Subagents a resume in this process gave a job whose turn has not finished: until it
+ * finishes, another `/restart` records them again with what this one carried (one
+ * still reviving has no session, so the registry alone would miss it).
+ */
+const resumesInFlight = new Map<string, RestartSubagent>();
+
+function mergeUnique<T>(earlier: readonly T[], later: readonly T[]): T[] {
+	const seen = new Set(later.map(item => JSON.stringify(item)));
+	return [...earlier.filter(item => !seen.has(JSON.stringify(item))), ...later];
 }
 
 function contentText(content: unknown): string {
@@ -161,9 +192,21 @@ export function recordRestartSubagents(session: AgentSession): RestartSubagentsD
 	const manager = session.asyncJobManager;
 	const subagents: RestartSubagent[] = [];
 	for (const ref of AgentRegistry.global().list()) {
-		if (ref.kind !== "sub" || ref.status !== "running" || !ref.session || !ref.sessionFile) continue;
-		if (!sessionFileBelongsToRoot(ref.sessionFile, rootFile)) continue;
-		subagents.push(describeRunningSubagent(ref, ref.session, manager));
+		if (ref.kind !== "sub" || !ref.sessionFile || !sessionFileBelongsToRoot(ref.sessionFile, rootFile)) continue;
+		const carried = resumesInFlight.get(ref.id);
+		const running = ref.status === "running" && ref.session;
+		if (!running && !carried) continue;
+		const live = running ? describeRunningSubagent(ref, ref.session!, manager) : undefined;
+		if (!carried) subagents.push(live!);
+		else if (!live) subagents.push(carried);
+		else
+			subagents.push({
+				...live,
+				interruptedToolCalls: mergeUnique(carried.interruptedToolCalls, live.interruptedToolCalls),
+				lostJobs: mergeUnique(carried.lostJobs, live.lostJobs),
+				pendingMessages: mergeUnique(carried.pendingMessages, live.pendingMessages),
+				unreadResults: mergeUnique(carried.unreadResults, live.unreadResults),
+			});
 	}
 	if (subagents.length === 0) return undefined;
 	const data: RestartSubagentsData = {
@@ -172,26 +215,44 @@ export function recordRestartSubagents(session: AgentSession): RestartSubagentsD
 		recordedAt: new Date().toISOString(),
 		subagents,
 	};
-	sessionManager.appendCustomEntry(RESTART_SUBAGENTS_CUSTOM_TYPE, data);
+	const file = `restart-subagents-${data.restartId}.json`;
+	const dir = rootFile.slice(0, -".jsonl".length);
+	fs.mkdirSync(dir, { recursive: true });
+	const fd = fs.openSync(path.join(dir, file), "w");
+	try {
+		fs.writeFileSync(fd, JSON.stringify(data));
+		fs.fsyncSync(fd);
+	} finally {
+		fs.closeSync(fd);
+	}
+	const entry: RestartSubagentsEntry = {
+		restartId: data.restartId,
+		sessionId: data.sessionId,
+		recordedAt: data.recordedAt,
+		file,
+		subagentIds: subagents.map(sub => sub.id),
+	};
+	sessionManager.appendCustomEntry(RESTART_SUBAGENTS_CUSTOM_TYPE, entry);
 	sessionManager.flushSync();
-	logger.info("Recorded running subagents for restart", { ids: subagents.map(sub => sub.id) });
+	logger.info("Recorded running subagents for restart", { ids: entry.subagentIds });
 	return data;
 }
 
-function readRestartData(entry: SessionEntry): RestartSubagentsData | undefined {
+function readRestartEntry(entry: SessionEntry): RestartSubagentsEntry | undefined {
 	if (entry.type !== "custom" || entry.customType !== RESTART_SUBAGENTS_CUSTOM_TYPE) return undefined;
-	const data = entry.data as Partial<RestartSubagentsData> | undefined;
-	if (!data || typeof data.restartId !== "string" || !Array.isArray(data.subagents)) return undefined;
-	return data as RestartSubagentsData;
+	const data = entry.data as Partial<RestartSubagentsEntry> | undefined;
+	if (!data || typeof data.restartId !== "string" || typeof data.file !== "string") return undefined;
+	if (!Array.isArray(data.subagentIds)) return undefined;
+	return data as RestartSubagentsEntry;
 }
 
 /**
  * Every `restart_subagents` entry on the branch that no later entry consumed, oldest
  * first: a startup that stopped before consuming one leaves it for the next.
  */
-export function pendingRestartSubagents(entries: readonly SessionEntry[]): RestartSubagentsData[] {
+export function pendingRestartSubagents(entries: readonly SessionEntry[]): RestartSubagentsEntry[] {
 	const consumed = new Set<string>();
-	const pending: RestartSubagentsData[] = [];
+	const pending: RestartSubagentsEntry[] = [];
 	for (let index = entries.length - 1; index >= 0; index--) {
 		const entry = entries[index]!;
 		if (entry.type !== "custom") continue;
@@ -200,7 +261,7 @@ export function pendingRestartSubagents(entries: readonly SessionEntry[]): Resta
 			if (typeof restartId === "string") consumed.add(restartId);
 			continue;
 		}
-		const data = readRestartData(entry);
+		const data = readRestartEntry(entry);
 		if (data && !consumed.has(data.restartId)) pending.unshift(data);
 	}
 	return pending;
@@ -340,8 +401,29 @@ export async function resumeRestartedSubagents(
 	for (const record of records) {
 		session.sessionManager.appendCustomEntry(RESTART_SUBAGENTS_RESUMED_CUSTOM_TYPE, { restartId: record.restartId });
 	}
-	// A later record describes a subagent's later stop.
-	const byId = new Map(records.flatMap(record => record.subagents).map(sub => [sub.id, sub]));
+	// A later record describes a subagent's later stop. A record whose file cannot be
+	// read still names its subagents.
+	const byId = new Map<string, RestartSubagent>();
+	for (const record of records) {
+		let recorded: RestartSubagent[] | undefined;
+		try {
+			const data = JSON.parse(
+				fs.readFileSync(path.join(sessionFile.slice(0, -".jsonl".length), record.file), "utf8"),
+			) as Partial<RestartSubagentsData>;
+			if (data.restartId === record.restartId && Array.isArray(data.subagents)) recorded = data.subagents;
+		} catch (error) {
+			logger.warn("Restart record file unreadable", { file: record.file, error: String(error) });
+		}
+		if (!recorded) {
+			for (const id of record.subagentIds) {
+				byId.delete(id);
+				outcome.notResumed.push({ id, reason: `the restart's record file ${record.file} could not be read` });
+			}
+			continue;
+		}
+		for (const sub of recorded) byId.set(sub.id, sub);
+		outcome.notResumed = outcome.notResumed.filter(entry => !byId.has(entry.id));
+	}
 	const subagents = [...byId.values()];
 	const manager = session.asyncJobManager;
 	const order = [...subagents].sort((a, b) => depthOf(a.id, byId) - depthOf(b.id, byId));
@@ -392,61 +474,99 @@ export async function resumeRestartedSubagents(
 				"task",
 				sub.id,
 				async ({ signal }) => {
-					const live = await AgentLifecycleManager.global().ensureLive(sub.id);
-					// A revived subagent is homed on this thread; a remote handle exposes no tool list.
-					const available = isLocalAgentSession(live)
-						? new Set([...live.getAllToolNames(), ...live.getMountedXdevToolNames()])
-						: undefined;
-					const missingTools = available ? init.tools.filter(name => !available.has(name)) : [];
-					const children = subagents.filter(child => child.parentId === sub.id);
-					const result = await runSubagentFollowUpTurn({
-						id: sub.id,
-						agent: persistedAgentDefinition(ref.displayName, init),
-						message: buildRestartNote({
-							subagent: sub,
-							resumedChildren: children
-								.filter(child => outcome.resumed.includes(child.id))
-								.map(child => child.id),
-							notResumedChildren: outcome.notResumed.filter(entry =>
-								children.some(child => child.id === entry.id),
-							),
-							missingTools,
-						}),
-						structured,
-						workPoolYieldItems: init.workPoolYieldItems,
-						outputSchema: init.outputSchema,
-						outputSchemaMode: init.outputSchemaMode,
-						signal,
-						eventBus: options.eventBus,
-						subagentEventBus: options.subagentEventBus,
-						artifactsDir: path.dirname(sessionFileOfRef),
-						maxRuntimeMs: cfgTaskMaxRuntimeMs.get(session.settings),
-					});
-					// The result is delivered to the parent's session, which must be live and
-					// fully revived by then: a parent subagent that finished before the restart
-					// is parked, and one being resumed may still be reviving. `ensureLive`
-					// revives the first and joins the second's revival.
-					const parent = ref.parentId ? AgentRegistry.global().get(ref.parentId) : undefined;
-					if (parent?.kind === "sub") {
-						try {
-							await AgentLifecycleManager.global().ensureLive(parent.id);
-						} catch (error) {
-							logger.warn("Could not revive the parent of a resumed subagent; its result waits in the job", {
-								id: sub.id,
-								parentId: parent.id,
-								error: error instanceof Error ? error.message : String(error),
-							});
+					try {
+						const live = await AgentLifecycleManager.global().ensureLive(sub.id);
+						// A revived subagent is homed on this thread; a remote handle exposes no tool list.
+						const available = isLocalAgentSession(live)
+							? new Set([...live.getAllToolNames(), ...live.getMountedXdevToolNames()])
+							: undefined;
+						const missingTools = available ? init.tools.filter(name => !available.has(name)) : [];
+						const children = subagents.filter(child => child.parentId === sub.id);
+						const result = await runSubagentFollowUpTurn({
+							id: sub.id,
+							agent: persistedAgentDefinition(ref.displayName, init),
+							message: buildRestartNote({
+								subagent: sub,
+								resumedChildren: children
+									.filter(child => outcome.resumed.includes(child.id))
+									.map(child => child.id),
+								notResumedChildren: outcome.notResumed.filter(entry =>
+									children.some(child => child.id === entry.id),
+								),
+								missingTools,
+							}),
+							structured,
+							workPoolYieldItems: init.workPoolYieldItems,
+							outputSchema: init.outputSchema,
+							outputSchemaMode: init.outputSchemaMode,
+							signal,
+							eventBus: options.eventBus,
+							subagentEventBus: options.subagentEventBus,
+							artifactsDir: path.dirname(sessionFileOfRef),
+							maxRuntimeMs: cfgTaskMaxRuntimeMs.get(session.settings),
+						});
+						// The result is delivered to the parent's session, which must be live and
+						// fully revived by then and stay live until the delivery lands: a parent
+						// subagent that finished before the restart is parked, one being resumed
+						// may still be reviving (`ensureLive` revives the first and joins the
+						// second), and an idle parent's TTL would park it mid-delivery (a held
+						// session is not parked).
+						const rootId = session.getAgentId?.() ?? MAIN_AGENT_ID;
+						const parentId = ref.parentId && ref.parentId !== rootId ? ref.parentId : undefined;
+						let parentLost: string | undefined;
+						if (parentId) {
+							try {
+								const parentSession = await AgentLifecycleManager.global().ensureLive(parentId);
+								if (isLocalAgentSession(parentSession)) {
+									const release = parentSession.holdIrcWakes();
+									void Promise.resolve(manager.getJob(sub.id)?.promise)
+										.then(() =>
+											manager.drainDeliveries({
+												filter: { ownerId: parentId },
+												timeoutMs: PARENT_DELIVERY_HOLD_MS,
+											}),
+										)
+										.catch(error =>
+											logger.warn("Waiting for a resumed subagent's delivery failed", {
+												error: String(error),
+											}),
+										)
+										.finally(release);
+								}
+							} catch (error) {
+								parentLost = error instanceof Error ? error.message : String(error);
+								logger.warn("Could not revive the parent of a resumed subagent; its result goes to the root", {
+									id: sub.id,
+									parentId,
+									error: parentLost,
+								});
+							}
 						}
+						const text = formatTaskResultSummary(result, { totalDurationMs: result.durationMs });
+						if (parentId && parentLost !== undefined) {
+							// Its own delivery has no recipient; the root gets the result instead.
+							manager.publishCompleted(
+								"task",
+								`${sub.id} (parent ${parentId} not revived)`,
+								{
+									text: `The restart resumed ${sub.id}, but its parent ${parentId} could not be revived (${parentLost}), so its result is delivered here:\n\n${text}`,
+									...(result.structuredOutput ? { structured: result.structuredOutput } : {}),
+								},
+								{ ownerId: rootId, agentId: sub.id },
+							);
+						}
+						const structuredOutput = result.structuredOutput;
+						if (result.aborted || result.exitCode !== 0 || result.error !== undefined) {
+							throw new AsyncJobError(text, structuredOutput);
+						}
+						return structuredOutput ? { text, structured: structuredOutput } : text;
+					} finally {
+						resumesInFlight.delete(sub.id);
 					}
-					const text = formatTaskResultSummary(result, { totalDurationMs: result.durationMs });
-					const structuredOutput = result.structuredOutput;
-					if (result.aborted || result.exitCode !== 0 || result.error !== undefined) {
-						throw new AsyncJobError(text, structuredOutput);
-					}
-					return structuredOutput ? { text, structured: structuredOutput } : text;
 				},
 				{ id: sub.id, agentId: sub.id, ownerId: ref.parentId },
 			);
+			resumesInFlight.set(sub.id, sub);
 			outcome.resumed.push(sub.id);
 		} catch (error) {
 			// The background job limit, for one: the transcript stays revivable by a message.

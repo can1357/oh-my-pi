@@ -535,12 +535,16 @@ an in-memory or never-materialized session restarts fresh.
 `/restart` keeps the session's subagents (`task/restart-resume.ts`). A subagent
 runs inside the omp process, so the teardown stops every one that is mid-task;
 idle and parked ones are revived on demand from their transcripts either way.
-Before the teardown, `/restart` writes one `restart_subagents` entry into the
-session file: each running subagent, its parent, the tool calls it is in, its own
-background jobs other than subagents (they end with the process), and the queued
-messages and job results it had not read. When the entry cannot be written the
-restart is cancelled. The teardown then stops the subagents as a shutdown does:
-their transcripts stay, nothing is tombstoned.
+Before the teardown, `/restart` writes a record of each running subagent: its
+parent, the tool calls it is in, its own background jobs other than subagents
+(they end with the process), and the queued messages and job results it had not
+read. The record goes to `restart-subagents-<id>.json` beside the subagent
+transcripts, kept whole (a session entry would cut long text), and one
+`restart_subagents` entry in the session file names it and the subagents. When
+either cannot be written the restart is cancelled. A subagent the previous
+restart's resume has not finished is recorded again with what it still carries,
+even while it is reviving. The teardown then stops the subagents as a shutdown
+does: their transcripts stay, nothing is tombstoned.
 
 Once the relaunched process has resumed the session, it consumes the entry
 (`restart_subagents_resumed`) and gives every recorded subagent one more
@@ -555,12 +559,14 @@ defined in the parent's eval kernel or by a closure). Its result reaches its
 parent as the job's ordinary `async-result`, so a lane receives its arms' results
 and the root receives the lanes'. A parent subagent that finished before the
 restart, or is still reviving, is made live before its child's result is
-delivered. Queued messages and unread results are carried whole. A record is
-resumed only by the session that wrote it (a fork copies the entry and ignores
-it), and a record a startup did not consume is resumed by the next one. The TUI
-names the subagents that go on and the ones that do not, with the reason: an
-isolated run (never revived), a subagent that finished before the teardown
-stopped it, one whose transcript is missing, or one whose job could not start.
+delivered and is kept from idle parking until the delivery lands; when the
+parent cannot be revived, the root receives the result instead, with the reason.
+A record is resumed only by the session that wrote it (a fork copies the entry
+and ignores it), and a record a startup did not consume is resumed by the next
+one. The TUI names the subagents that go on and the ones that do not, with the
+reason: an isolated run (never revived), a subagent that finished before the
+teardown stopped it, one whose transcript or record file is missing, or one
+whose job could not start.
 
 `/exit` and a crash are not covered: `/exit` records nothing, and a crash leaves
 transcripts that `omp --restore` already resumes.

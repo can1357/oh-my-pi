@@ -41,7 +41,8 @@ const NAMES = ["Alpha", "Beta", "Lane", "Arm"] as const;
 const WORKERS = ["Alpha", "Beta", "Arm"] as const;
 const ALL = ["Alpha", "Beta", "Lane", "Lane.Arm"] as const;
 const nameOf = (id: string): string => id.split(".").at(-1)!;
-const LONG_MESSAGE = `Queued for Alpha: ${"keep every word of this. ".repeat(220)}END-OF-QUEUED-MESSAGE`;
+/** Larger than the 500,000 characters a session entry keeps. */
+const LONG_MESSAGE = `Queued for Alpha: ${"keep every word of this. ".repeat(24_000)}END-OF-QUEUED-MESSAGE`;
 
 let savedEnv: Record<string, string | undefined> = {};
 let root: string;
@@ -292,7 +293,12 @@ it("names every recorded subagent whose transcript is gone instead of resuming n
 	const { cwd, authStorage, open } = await harness();
 	try {
 		const mainFile = await runUntilRestart(open, cwd, true);
-		await fs.rm(mainFile.slice(0, -".jsonl".length), { recursive: true, force: true });
+		// Remove the transcripts and keep the restart's record file.
+		const artifacts = mainFile.slice(0, -".jsonl".length);
+		for (const name of await fs.readdir(artifacts)) {
+			if (!name.startsWith("restart-subagents-"))
+				await fs.rm(path.join(artifacts, name), { recursive: true, force: true });
+		}
 		const second = await open(await SessionManager.open(mainFile));
 		try {
 			const outcome = await resumeRestartedSubagents(second);
@@ -366,8 +372,8 @@ it("resumes every running subagent, nested ones under their lane, after the rest
 			// One note each, naming the bash call the restart stopped.
 			for (const name of WORKERS) expect(notesSeen.get(name)).toContain(`echo partial-${name}; sleep 30`);
 			expect(notesSeen.get("Lane")).toContain("Your subagents Lane.Arm were stopped too");
-			// The message queued for Alpha reaches it whole (it is longer than 5,000 characters).
-			expect(LONG_MESSAGE.length).toBeGreaterThan(5_000);
+			// The message queued for Alpha reaches it whole, though a session entry would cut it.
+			expect(LONG_MESSAGE.length).toBeGreaterThan(500_000);
 			expect(notesSeen.get("Alpha")).toContain(LONG_MESSAGE);
 
 			// The record is consumed: a second startup resumes nothing.
@@ -390,6 +396,66 @@ it("resumes every running subagent, nested ones under their lane, after the rest
 			await second.dispose();
 		}
 	} finally {
+		authStorage.close();
+	}
+}, 60_000);
+
+it("records again the subagents a resume is still reviving when the next restart comes", async () => {
+	notesSeen.clear();
+	const { cwd, authStorage, open } = await harness();
+	try {
+		const mainFile = await runUntilRestart(open, cwd, true);
+		// Second process: the resume registers its jobs, and the next restart comes before any revival finished.
+		const second = await open(await SessionManager.open(mainFile));
+		expect((await resumeRestartedSubagents(second)).resumed.length).toBe(ALL.length);
+		expect(notesSeen.size).toBe(0);
+		expect(
+			recordRestartSubagents(second)
+				?.subagents.map(sub => sub.id)
+				.sort(),
+		).toEqual([...ALL].sort());
+		await second.dispose();
+		resetProcessGlobals();
+		// Third process: every one goes on, with what the first restart stopped.
+		const third = await open(await SessionManager.open(mainFile));
+		try {
+			const outcome = await resumeRestartedSubagents(third);
+			expect([...outcome.resumed].sort()).toEqual([...ALL].sort());
+			await Promise.all(ALL.map(id => third.asyncJobManager!.getJob(id)!.promise));
+			for (const name of WORKERS) expect(notesSeen.get(name)).toContain(`echo partial-${name}; sleep 30`);
+		} finally {
+			await third.dispose();
+		}
+	} finally {
+		authStorage.close();
+	}
+}, 90_000);
+
+it("delivers a resumed arm's result to the root when its lane cannot be revived", async () => {
+	notesSeen.clear();
+	laneFinishesEarly = true;
+	const { cwd, authStorage, open } = await harness();
+	try {
+		const mainFile = await runUntilRestart(open, cwd, true, ["Alpha", "Beta", "Lane.Arm"]);
+		// Keep only the lane transcript's header: the reviver refuses a transcript with no messages.
+		const laneFile = path.join(mainFile.slice(0, -".jsonl".length), "Lane.jsonl");
+		await Bun.write(laneFile, `${(await Bun.file(laneFile).text()).split("\n")[0]}\n`);
+		const second = await open(await SessionManager.open(mainFile));
+		try {
+			const outcome = await resumeRestartedSubagents(second);
+			expect(outcome.resumed).toContain("Lane.Arm");
+			const manager = second.asyncJobManager!;
+			await manager.getJob("Lane.Arm")!.promise;
+			const forwarded = manager
+				.getAllJobs({ ownerId: MAIN_AGENT_ID })
+				.find(job => job.agentId === "Lane.Arm" && job.id !== "Lane.Arm");
+			expect(forwarded?.resultText).toContain("could not be revived");
+			expect(forwarded?.resultText).toContain("Arm resumed");
+		} finally {
+			await second.dispose();
+		}
+	} finally {
+		laneFinishesEarly = false;
 		authStorage.close();
 	}
 }, 60_000);
