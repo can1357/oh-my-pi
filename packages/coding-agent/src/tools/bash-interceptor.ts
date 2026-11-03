@@ -14,19 +14,33 @@ import { type BashInterceptorRule, DEFAULT_BASH_INTERCEPTOR_RULES } from "../exe
 
 /** An internal URL (`local://…`), whose filesystem only the embedded shell reaches. */
 const URL_PATH = /^[a-z][a-z0-9+.-]*:\/\//iu;
+/** Kernel and device trees: reads and writes there reach an interface, not a file. */
+const SPECIAL_ROOT = /^\/(?:dev|proc|sys)(?:\/|$)/u;
 
 /**
  * What `target` names, resolved as the shell resolves it: relative to `cwd`, with `..` taken
- * after following symlinks (the path is joined, never normalized), and following a final symlink.
+ * after following symlinks (the path is joined, never normalized). `follow` follows a final
+ * symlink (read and grep read through it); otherwise a symlink is `other`, because `sed -i` and
+ * a shell write treat it differently from the edit and write tools. A path whose real location
+ * is under /dev, /proc or /sys is `other`. `realpathSync.native` resolves `..` physically;
+ * the JavaScript one normalizes it first.
  */
-function pathKindIn(cwd: string, target: string): PathKind {
+function pathKindIn(cwd: string, target: string, follow: boolean): PathKind {
 	if (URL_PATH.test(cwd) || URL_PATH.test(target)) return "unknown";
+	const joined = path.isAbsolute(target) ? target : `${cwd}/${target}`;
 	try {
-		const stat = fs.statSync(path.isAbsolute(target) ? target : `${cwd}/${target}`);
+		const stat = follow ? fs.statSync(joined) : fs.lstatSync(joined);
+		if (SPECIAL_ROOT.test(fs.realpathSync.native(joined))) return "other";
 		return stat.isFile() ? "file" : stat.isDirectory() ? "directory" : "other";
 	} catch (error) {
 		const code = (error as NodeJS.ErrnoException).code;
-		return code === "ENOENT" || code === "ENOTDIR" ? "missing" : "unknown";
+		if (code !== "ENOENT" && code !== "ENOTDIR") return "unknown";
+		try {
+			// A missing name is created where its directory really is.
+			return SPECIAL_ROOT.test(fs.realpathSync.native(path.dirname(joined))) ? "other" : "missing";
+		} catch {
+			return "missing";
+		}
 	}
 }
 
@@ -120,6 +134,8 @@ function withoutLeadingEnvironmentAssignments(command: string): string | null {
 interface Candidate {
 	text: string;
 	step: string;
+	/** The step starts the command, so the command's directory and files are as the caller saw them. */
+	leading: boolean;
 }
 
 /**
@@ -138,7 +154,7 @@ const LEADING_STEP_TOOLS: Record<string, true> = { read: true, grep: true, glob:
 function interceptionCandidates(command: string, leadingOnly: boolean): Candidate[] {
 	const segments = extractFlatShellCommandSegments(command);
 	const candidates: Candidate[] = [];
-	if (!leadingOnly || segments.length === 0) candidates.push({ text: command.trim(), step: command });
+	if (!leadingOnly || segments.length === 0) candidates.push({ text: command.trim(), step: command, leading: true });
 	for (let i = 0; i < segments.length; i++) {
 		const segment = segments[i];
 		// A segment that consumes the previous stage's stdout via `|` reads piped
@@ -149,9 +165,9 @@ function interceptionCandidates(command: string, leadingOnly: boolean): Candidat
 		const stages = [segment.text];
 		for (let next = i + 1; segments[next]?.pipedStdin; next++) stages.push(segments[next].text);
 		const step = stages.join(" | ");
-		candidates.push({ text: segment.text, step });
+		candidates.push({ text: segment.text, step, leading: i === 0 });
 		const withoutAssignments = withoutLeadingEnvironmentAssignments(segment.text);
-		if (withoutAssignments) candidates.push({ text: withoutAssignments, step });
+		if (withoutAssignments) candidates.push({ text: withoutAssignments, step, leading: i === 0 });
 		if (leadingOnly) break;
 	}
 	return candidates;
@@ -163,7 +179,9 @@ function interceptionCandidates(command: string, leadingOnly: boolean): Candidat
  * @param command The bash command to check
  * @param availableTools Set of tool names that are available
  * @param cwd The directory the command runs in (a host path or an internal URL); when given, an
- *   operand or target that is a FIFO, a device or cannot be inspected is never sent to a tool
+ *   operand or target that is a FIFO, a device, a symlink an edit or write would replace, or that
+ *   cannot be inspected is never sent to a tool. A later step's paths cannot be inspected: an
+ *   earlier step may change the directory or the files.
  * @returns InterceptionResult indicating if the command should be blocked
  */
 export function checkBashInterception(
@@ -173,7 +191,9 @@ export function checkBashInterception(
 	originalCommand = command,
 	cwd?: string,
 ): InterceptionResult {
-	const pathKind = cwd === undefined ? undefined : (target: string) => pathKindIn(cwd, target);
+	const pathKind =
+		cwd === undefined ? undefined : (target: string, follow: boolean) => pathKindIn(cwd, target, follow);
+	const unknown = (): PathKind => "unknown";
 	const compiled = compileRules(rules);
 	const everyStep = interceptionCandidates(command, false);
 	const leadingStep = interceptionCandidates(command, true);
@@ -189,7 +209,12 @@ export function checkBashInterception(
 			regex.lastIndex = 0;
 			if (
 				regex.test(candidate.text) &&
-				dedicatedToolCanPerformStep(rule.tool, candidate.step, availableTools, pathKind)
+				dedicatedToolCanPerformStep(
+					rule.tool,
+					candidate.step,
+					availableTools,
+					pathKind && (candidate.leading ? pathKind : unknown),
+				)
 			) {
 				return {
 					block: true,

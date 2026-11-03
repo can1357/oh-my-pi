@@ -264,11 +264,13 @@ describe("default echo/printf redirect rule", () => {
 
 	it("keeps separators inside a substitution out of the boundary scan", () => {
 		const tools = ["write", "read", "edit"];
-		for (const command of ["echo $(( (1 + 2) * 3 )) > out.txt", "echo a\\;b > out.txt"]) {
+		for (const command of ["echo a\\;b > out.txt"]) {
 			expect(checkBashInterception(command, tools, DEFAULT_BASH_INTERCEPTOR_RULES).suggestedTool).toBe("write");
 		}
-		// The same scan with an operator expansion: the shell computes the text, so write cannot.
+		// The same scan with an expansion: the shell computes the text (arithmetic can even fail), so write cannot.
 		for (const command of [
+			"echo $(( (1 + 2) * 3 )) > out.txt",
+			"echo $((1/0)) > out.txt",
 			"echo a\\;b ${HOME} > out.txt",
 			"echo ${x:-a;b} > out.txt",
 			"echo ${a:-${b}} > out.txt",
@@ -497,8 +499,9 @@ describe("dedicated tool capability", () => {
 		["head -n 20 f | cut -c1-80", "read"],
 		["tail -n +20 f", "read"],
 		["tail -f log", "bash"],
-		["tail -F log", "bash"],
-		["tail -n 5 -f log", "bash"],
+		// Main's service rule names only `tail -f`; the read tool cannot follow, so these run.
+		["tail -F log", undefined],
+		["tail -n 5 -f log", undefined],
 	])("routes %s to %s", (command, tool) => {
 		expect(decide(command)).toBe(tool);
 	});
@@ -517,6 +520,13 @@ describe("dedicated tool capability", () => {
 		"grep x",
 		"grep x f > /dev/null && echo found",
 		"grep -l x src | xargs sed -n 1p",
+		// The grep tool shows matching lines; it has no quiet or file-list mode.
+		"grep -q x f",
+		"grep -l x f",
+		"rg -l x",
+		"rg -tv -l x .",
+		"grep -rIl --include='_CoqProject*' -e 'Proof Using' .",
+		"cat f | grep -q x",
 		"grep x f | while read l; do echo $l; done",
 		"rg --files",
 		"rg -c x",
@@ -529,9 +539,9 @@ describe("dedicated tool capability", () => {
 		"grep -rn x .",
 		"grep -n x f | head",
 		"grep -nE 'a|b' -e x f",
-		"grep -rIl --include='_CoqProject*' -e 'Proof Using' .",
-		"rg -l x",
-		"rg -tv -l x .",
+		"grep -rI --include='_CoqProject*' -e 'Proof Using' .",
+		"rg x",
+		"rg -tv x .",
 		"grep x < f",
 	])("refuses %s as a grep", command => {
 		expect(decide(command)).toBe("grep");
@@ -748,16 +758,22 @@ describe("dedicated tool capability", () => {
 				"grep a < fifo",
 				"echo hi 3<fifo >out",
 				"sed -i 's/a/b/' fifo",
+				// Round 5: an edit's operand after `--` is checked too.
+				"sed -i 's/a/b/' -- -fifo",
+				"perl -pi -e 's/a/b/' -- -fifo",
 				"cat /dev/null",
 			]) {
 				expect(at(command)).toBeUndefined();
 			}
 			// A URL directory cannot be inspected, so nothing there is sent to a tool.
 			expect(at("cat plain", "local://work")).toBeUndefined();
-			expect(at("echo hi > plain")).toBe("write");
+			expect(at("echo hi > plain")).toBeUndefined();
 			expect(at("echo hi > new-file")).toBe("write");
 			expect(at("cat plain")).toBe("read");
 			expect(at("grep a plain")).toBe("grep");
+			expect(at("sed -i 's/a/b/' plain")).toBe("edit");
+			// The script is not a path: a directory named like it does not change the decision.
+			await fs.mkdir(path.join(dir, "s", "a", "b"), { recursive: true });
 			expect(at("sed -i 's/a/b/' plain")).toBe("edit");
 		} finally {
 			await fs.rm(dir, { recursive: true, force: true });
@@ -790,6 +806,58 @@ describe("dedicated tool capability", () => {
 		["cat plain | sort --", "read"],
 	])("refuses %s as %s", (command, tool) => {
 		expect(decide(command)).toBe(tool);
+	});
+
+	it.each([
+		// Round 5: a precision can cut a character's bytes; non-integers make printf fail after writing.
+		"printf '%.1s' 'é' > precision",
+		"printf '%d' not-a-number > numeric",
+		"printf '%i' 08 > numeric",
+		"printf '%s=%d\\n' a 1 b x > numeric",
+		// The write tool makes a `#!` file executable.
+		"printf '#!/bin/sh\\n' > shebang",
+		"echo '#!/bin/sh' > shebang",
+		"cat > shebang <<'EOF'\n#!/bin/sh\nEOF",
+	])("does not refuse %s (round 5)", command => {
+		expect(decide(command)).toBeUndefined();
+	});
+
+	it("rejects a long excluded printf format in linear time", () => {
+		const start = performance.now();
+		expect(decide(`printf '%${"0".repeat(32_000)}q' x > out`)).toBeUndefined();
+		expect(performance.now() - start).toBeLessThan(250);
+	});
+
+	it("inspects only the leading step's paths, without following an edited symlink or a /proc alias", async () => {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "bash-interceptor-round5-")));
+		try {
+			await fs.mkdir(path.join(dir, "nested"));
+			await fs.symlink("/dev/null", path.join(dir, "nested", "sink"));
+			await Bun.write(path.join(dir, "target"), "a\n");
+			await fs.symlink(path.join(dir, "target"), path.join(dir, "link"));
+			await fs.symlink("/proc", path.join(dir, "kernel"));
+			await Bun.write(path.join(dir, "existing"), "\ufeffold\r\n");
+			const at = (command: string, cwd = dir) =>
+				checkBashInterception(command, tools, DEFAULT_BASH_INTERCEPTOR_RULES, command, cwd).suggestedTool;
+			for (const command of [
+				// A later step may run after a `cd`: its paths cannot be inspected.
+				"true && cd nested && echo hi > sink",
+				// `sed -i` replaces a symlink with a file; the edit tool edits the target.
+				"sed -i 's/a/b/' link",
+				// Kernel paths reached through a symlink or a relative path.
+				"cat kernel/self/comm",
+				// The write tool keeps an existing file's byte-order mark and line endings.
+				"echo hi > existing",
+			]) {
+				expect(at(command)).toBeUndefined();
+			}
+			expect(at("cat self/comm", "/proc")).toBeUndefined();
+			expect(at("echo hi > fresh")).toBe("write");
+			expect(at("sed -i 's/a/b/' target")).toBe("edit");
+			expect(at("cat link")).toBe("read");
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
 	});
 
 	it("parses a long perl substitution in linear time", () => {
