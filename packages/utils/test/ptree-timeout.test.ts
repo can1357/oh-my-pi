@@ -531,33 +531,39 @@ describe.skipIf(process.platform === "win32")("ptree group keeper", () => {
 		expect(result.exitCode).toBe(3);
 	});
 
-	it("kills the run's group on abort after the command died from a signal", async () => {
-		// The command starts a SIGTERM-ignoring child on its stdout, then kills
-		// itself with SIGKILL: the child is orphaned but stays in the group.
-		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-utils-group-keeper-"));
-		const pidFile = path.join(dir, "pid");
-		let orphanPid: number | undefined;
-		try {
-			const controller = new AbortController();
-			const child = spawn(["/bin/sh", "-c", `trap "" TERM; sleep 30 & echo $! > '${pidFile}'; kill -KILL $$`], {
-				groupKeeper: true,
-			});
-			const outcome = child.wait().then(
-				() => new Error("run finished without the abort"),
-				(error: unknown) => error,
-			);
-			child.attachSignal(controller.signal);
-			orphanPid = await readPid(pidFile);
+	for (const [stop, gracefulMs] of [
+		["a graceful abort", undefined],
+		["a hard kill", -1],
+	] as const) {
+		it(`kills the run's group on ${stop} after the command died from a signal`, async () => {
+			// The command starts a SIGTERM-ignoring child on its stdout, then kills
+			// itself with SIGKILL: the child is orphaned but stays in the group.
+			// The child would outlive any test budget, so only the kill ends it.
+			const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-utils-group-keeper-"));
+			const pidFile = path.join(dir, "pid");
+			let orphanPid: number | undefined;
+			try {
+				const child = spawn(["/bin/sh", "-c", `trap "" TERM; sleep 3600 & echo $! > '${pidFile}'; kill -KILL $$`], {
+					groupKeeper: true,
+				});
+				const outcome = child.wait().then(
+					() => new Error("run finished without the kill"),
+					(error: unknown) => error,
+				);
+				orphanPid = await readPid(pidFile);
+				const stoppedAt = Date.now();
 
-			controller.abort(new Error("user abort"));
+				child.kill(new AbortError(new Error("user abort"), ""), gracefulMs);
 
-			expect(await outcome).toBeInstanceOf(AbortError);
-			expect(await runningAfter(orphanPid, 2_000)).toBe(false);
-		} finally {
-			if (orphanPid) Process.fromPid(orphanPid)?.killTree(9);
-			await fs.rm(dir, { recursive: true, force: true });
-		}
-	});
+				expect(await outcome).toBeInstanceOf(AbortError);
+				expect(await runningAfter(orphanPid, 2_000)).toBe(false);
+				expect(Date.now() - stoppedAt).toBeLessThan(10_000);
+			} finally {
+				if (orphanPid) Process.fromPid(orphanPid)?.killTree(9);
+				await fs.rm(dir, { recursive: true, force: true });
+			}
+		}, 30_000);
+	}
 
 	it("signals nothing once the keeper has exited, even with members left in its group", async () => {
 		// A member that closed its output does not keep the keeper alive; after

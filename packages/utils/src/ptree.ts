@@ -103,8 +103,15 @@ const LINUX_SUBREAPER_SCRIPT = createLinuxSubreaperScript();
  * group kill can only reach processes of this run (also ones whose launcher
  * died). Once it exits, nothing left of the run holds output, and ptree never
  * signals that group id again.
+ *
+ * It survives the polite phase of a group termination (SIGTERM, also SIGINT and
+ * SIGHUP): if it died there, a member that ignores SIGTERM would be left in a
+ * group nobody anchors and the SIGKILL that follows would be skipped. It exits
+ * once the members are gone, or dies with them on SIGKILL. Exec resets caught
+ * signals, so the command keeps default signal dispositions.
  */
 const GROUP_KEEPER_SCRIPT = `
+for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) process.on(signal, () => {});
 const commandJson = Bun.env.${LINUX_SUBREAPER_COMMAND_ENV};
 if (!commandJson) throw new Error("missing supervised command");
 const callerBunBeBun = Bun.env.${LINUX_SUBREAPER_BUN_BE_BUN_ENV};
