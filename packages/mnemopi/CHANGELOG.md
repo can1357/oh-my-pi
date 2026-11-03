@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed opening a memory bank taking its write lock on every open (two FTS triggers were dropped and recreated each time), which failed opens with `database is locked` while another process wrote the bank
+- Fixed opening a memory bank taking its write lock on every open (two FTS triggers were dropped and recreated each time), which failed opens with `database is locked` while another process wrote the bank ([#17968](https://github.com/can1357/oh-my-pi/pull/17968))
 
 ## [18.14.2] - 2026-10-31
 

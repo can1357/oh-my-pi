@@ -4,11 +4,11 @@
 
 ### Added
 
-- Added `initializeSqliteSchema(db, apply)`, which runs an idempotent schema initializer read-only first and writes, under `BEGIN IMMEDIATE`, only when the schema needs a change
+- Added `initializeSqliteSchema(db, apply)`, which runs an idempotent schema initializer read-only first and writes, under `BEGIN IMMEDIATE`, only when the schema needs a change ([#17968](https://github.com/can1357/oh-my-pi/pull/17968))
 
 ### Changed
 
-- `openSqliteDatabase` and `openSqliteDatabaseSync` keep retrying a store another process holds locked for up to 60 s with jittered exponential backoff (was four attempts within about 5 s, and none for the synchronous opener), and the final error says how long they waited
+- `openSqliteDatabase` and `openSqliteDatabaseSync` keep retrying a store another process holds locked for up to 60 s with jittered exponential backoff (was four attempts within about 5 s, and none for the synchronous opener), and the final error says how long they waited ([#17968](https://github.com/can1357/oh-my-pi/pull/17968))
 
 ## [18.16.0] - 2026-11-02
 
