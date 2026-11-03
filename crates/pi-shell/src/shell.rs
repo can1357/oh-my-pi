@@ -6589,6 +6589,38 @@ mod tests {
 				"a[0]=x; echo \"S=$? a=<${a[0]}>\"",
 				"S=0 a=<x>\n",
 			),
+			(
+				"a later assignment changes an earlier one",
+				"a=1 b=$((a+=1)) /bin/sh -c 'printf \"a=%s b=%s\\n\" \"$a\" \"$b\"'",
+				"a=2 b=2\n",
+			),
+			(
+				"a later assignment sets an earlier empty one",
+				"a= b=${a:=filled} /bin/sh -c 'printf \"a=%s b=%s\\n\" \"$a\" \"$b\"'",
+				"a=filled b=filled\n",
+			),
+			(
+				"+= appends to the value the command would see",
+				"x=hello; x+=world /bin/sh -c 'echo \"x=<$x>\"'; echo \"after=<$x>\"",
+				"x=<helloworld>\nafter=<hello>\n",
+			),
+			(
+				"+= inside an enclosing command assignment",
+				"g() { a+=b /bin/sh -c 'echo \"$a\"'; echo \"in=<$a>\"; }; a=a g; echo \"after=<$a>\"",
+				"ab\nin=<a>\nafter=<>\n",
+			),
+			("+= on an unset variable", "unset x; x+=new /bin/sh -c 'echo \"x=<$x>\"'", "x=<new>\n"),
+			("+= twice", "x=a; x+=b x+=c /bin/sh -c 'echo \"x=<$x>\"'", "x=<abc>\n"),
+			(
+				"+= and a later assignment reading it",
+				"x=a; x+=b y=$x /bin/sh -c 'echo \"y=<$y>\"'",
+				"y=<ab>\n",
+			),
+			(
+				"an earlier assignment read by a later one",
+				"a=1 b=$a /bin/sh -c 'echo \"b=<$b>\"'",
+				"b=<1>\n",
+			),
 		];
 		let mut failures = Vec::new();
 		for &(name, script, bash) in rows {
