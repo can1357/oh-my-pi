@@ -38,6 +38,10 @@
 - On macOS, starting a bash tool session no longer briefly sets pi's umask to 022, which could give files created at that moment the wrong permissions
 - In the bash tool, an executable script without a `#!` line started in the background with its input from a FIFO (`./script < fifo &`) runs as a bash script instead of failing with `Exec format error`
 
+### Changed
+
+- `async.maxJobs` now sets the cap on background jobs running at once in a session and its subagents without the fixed 100 ceiling, and `0` means no limit; the default stays 100 ([#17965](https://github.com/can1357/oh-my-pi/pull/17965) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.16.0] - 2026-11-02
 
 ### Added

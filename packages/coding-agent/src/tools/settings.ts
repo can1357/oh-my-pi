@@ -973,11 +973,19 @@ export const cfgAsyncEnabled = register({
 	},
 });
 
+// No UI options: the settings panel hides the number; `omp config` shows the description.
 export const cfgAsyncMaxJobs = register({
 	id: "async.maxJobs",
 	protocolDefault: ["rpc"],
 	type: "number",
 	default: 100,
+	ui: {
+		tab: "tools",
+		group: "Execution",
+		label: "Max Background Jobs",
+		description:
+			"Maximum background jobs running at once in a session and all its subagents (0 or less = no limit). Counts running async tasks (not tasks still waiting for a task.maxConcurrency slot), async bash, eval agent() handles and workpool() batches, and blocking bash and eval calls that can auto-background, from their start; at the cap such a call runs untracked in the foreground instead",
+	},
 });
 
 // Print mode is single-shot by default: it disposes after the last prompt, cancelling the

@@ -185,7 +185,10 @@ export interface AsyncJobManagerOptions {
 	 * would leak one agent's result into another session.
 	 */
 	onJobComplete?: AsyncJobDeliverySink;
-	/** Running-job cap; a function is re-read on every capacity check so a live setting resizes the cap. */
+	/**
+	 * Running-job cap; `0` or less means no limit. A function is re-read on every capacity check so a
+	 * live setting resizes the cap.
+	 */
 	maxRunningJobs?: number | (() => number);
 	retentionMs?: number;
 	/**
@@ -441,11 +444,14 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 		);
 	}
 
-	/** Effective running-job cap (at least 1), resolved at check time. */
+	/**
+	 * Effective running-job cap, resolved at check time: `Infinity` when the configured cap is `0` or
+	 * less, else the cap floored to at least 1.
+	 */
 	get #maxRunningJobs(): number {
 		const option = this.#maxRunningJobsOption;
-		const value = typeof option === "function" ? option() : option;
-		return Math.max(1, Math.floor(value ?? DEFAULT_MAX_RUNNING_JOBS));
+		const value = (typeof option === "function" ? option() : option) ?? DEFAULT_MAX_RUNNING_JOBS;
+		return value > 0 ? Math.max(1, Math.floor(value)) : Number.POSITIVE_INFINITY;
 	}
 
 	/** True when the running-job count has reached the configured cap. */
