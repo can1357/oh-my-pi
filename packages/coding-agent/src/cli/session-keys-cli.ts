@@ -5,6 +5,8 @@
  * {@link rollbackSessionRowKeys}). They open the database from the same
  * connection-string file as the configured storage, but never through
  * `SqlSessionStorage.create`, which refuses a table holding legacy keys.
+ * Every database error they print has the connection string's secrets
+ * redacted ({@link sessionDatabaseErrorDetail}).
  */
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { Settings } from "../config/settings";
@@ -13,6 +15,7 @@ import {
 	type SessionSqlConnection,
 	SessionStorageConfigError,
 	sessionDatabaseError,
+	sessionDatabaseErrorDetail,
 } from "../session/session-storage-config";
 import {
 	migrateSessionRowKeys,
@@ -69,11 +72,48 @@ function formatResult(args: SessionKeysCommandArgs, table: string, result: Sessi
 	return `${lines.join("\n")}\n`;
 }
 
+/** Print `message` as the command's error line. */
+function printError(message: string): void {
+	process.stderr.write(`${chalk.red(`error: ${message}`)}\n`);
+}
+
+/** Check the connection, run the key change, and print its plan and outcome; the exit code. */
+async function changeKeys(
+	connection: SessionSqlConnection,
+	args: SessionKeysCommandArgs,
+	table: string,
+): Promise<number> {
+	const { client } = connection;
+	try {
+		await client.unsafe("SELECT 1");
+	} catch (err) {
+		printError(sessionDatabaseError(connection, err).message);
+		return 1;
+	}
+	let result: SessionKeyChangeResult;
+	try {
+		result =
+			args.direction === "migrate"
+				? await migrateSessionRowKeys({ client, table, roots: args.roots, dryRun: args.dryRun })
+				: await rollbackSessionRowKeys({ client, table, restoreRoot: args.roots[0] ?? "", dryRun: args.dryRun });
+	} catch (err) {
+		// Every statement ran in one transaction, which a thrown error rolls back.
+		printError(`the key change failed and was rolled back: ${sessionDatabaseErrorDetail(connection, err)}`);
+		return 1;
+	}
+	process.stdout.write(formatResult(args, table, result));
+	if (result.plan.refusals.length === 0) return 0;
+	printError("the key change was refused; nothing changed");
+	return 1;
+}
+
 /**
  * Run one key change against the configured database and print its plan
  * and outcome. Returns the exit code: 1 on a refusal, a configuration that
  * names no usable database, or a failed change (which the transaction rolled
- * back); 0 otherwise.
+ * back); 0 otherwise. No error of the database client leaves this function:
+ * each is printed redacted, because the fatal handler would print its text
+ * whole.
  */
 export async function runSessionKeysCommand(args: SessionKeysCommandArgs): Promise<number> {
 	const table = sessionTableName(args.table);
@@ -85,35 +125,20 @@ export async function runSessionKeysCommand(args: SessionKeysCommandArgs): Promi
 		});
 	} catch (err) {
 		if (!(err instanceof SessionStorageConfigError)) throw err;
-		process.stderr.write(`${chalk.red(`error: ${err.message}`)}\n`);
+		printError(err.message);
 		return 1;
 	}
-	const { client } = connection;
+	let exitCode = 1;
 	try {
-		try {
-			await client.unsafe("SELECT 1");
-		} catch (err) {
-			process.stderr.write(`${chalk.red(`error: ${sessionDatabaseError(connection, err).message}`)}\n`);
-			return 1;
-		}
-		let result: SessionKeyChangeResult;
-		try {
-			result =
-				args.direction === "migrate"
-					? await migrateSessionRowKeys({ client, table, roots: args.roots, dryRun: args.dryRun })
-					: await rollbackSessionRowKeys({ client, table, restoreRoot: args.roots[0] ?? "", dryRun: args.dryRun });
-		} catch (err) {
-			// Every statement ran in one transaction, which a thrown error rolls back.
-			process.stderr.write(
-				`${chalk.red(`error: the key change failed and was rolled back: ${err instanceof Error ? err.message : String(err)}`)}\n`,
-			);
-			return 1;
-		}
-		process.stdout.write(formatResult(args, table, result));
-		if (result.plan.refusals.length === 0) return 0;
-		process.stderr.write(`${chalk.red("error: the key change was refused; nothing changed")}\n`);
-		return 1;
-	} finally {
-		await client.end();
+		exitCode = await changeKeys(connection, args, table);
+	} catch (err) {
+		printError(sessionDatabaseErrorDetail(connection, err));
 	}
+	try {
+		await connection.client.end();
+	} catch (err) {
+		printError(`closing the session database failed: ${sessionDatabaseErrorDetail(connection, err)}`);
+		exitCode = 1;
+	}
+	return exitCode;
 }

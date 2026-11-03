@@ -158,20 +158,25 @@ class Db implements AsyncDisposable {
 		return client;
 	}
 
-	/** Make every UPDATE of `table` fail, as a lock wait timeout or a full disk would. */
-	async refuseUpdates(table: string): Promise<void> {
+	/**
+	 * Make every UPDATE of `table` fail with `message`, as a lock wait timeout
+	 * or a full disk would, or as a database error that quotes any text does.
+	 */
+	async refuseUpdates(table: string, message = "refused"): Promise<void> {
 		const trigger = `${table}_refuse`;
+		const literal = `'${message.replaceAll("'", "''")}'`;
 		if (this.adapter === "sqlite") {
 			await this.sql(
-				`CREATE TRIGGER ${trigger} BEFORE UPDATE ON ${table} BEGIN SELECT RAISE(ABORT, 'refused'); END`,
+				`CREATE TRIGGER ${trigger} BEFORE UPDATE ON ${table} BEGIN SELECT RAISE(ABORT, ${literal}); END`,
 			);
 		} else if (this.adapter === "mysql") {
 			await this.sql(
-				`CREATE TRIGGER ${trigger} BEFORE UPDATE ON ${table} FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'refused'`,
+				`CREATE TRIGGER ${trigger} BEFORE UPDATE ON ${table} FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = ${literal}`,
 			);
 		} else {
+			// `USING MESSAGE`: a `%` in the message is not a format placeholder there.
 			await this.sql(
-				`CREATE FUNCTION ${trigger}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'refused'; END $$`,
+				`CREATE FUNCTION ${trigger}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION USING MESSAGE = ${literal}; END $$`,
 			);
 			await this.sql(
 				`CREATE TRIGGER ${trigger} BEFORE UPDATE ON ${table} FOR EACH ROW EXECUTE FUNCTION ${trigger}()`,
@@ -994,6 +999,34 @@ for (const { adapter, url } of BACKENDS) {
 						expect(result.stdout).toContain(`    ${JSON.stringify(key)}\n`);
 					}
 					expect(result.stderr).toContain("the key change was refused; nothing changed");
+					expect(await db.snapshot()).toEqual(before);
+				} finally {
+					dir.removeSync();
+				}
+			},
+			TIMEOUT_MS,
+		);
+
+		it(
+			"prints a failed change's database error without the connection string or its password, changing nothing",
+			async () => {
+				await using db = await connectCommandDb();
+				const dir = await configure(db);
+				try {
+					const password = new URL(db.url).password;
+					// The database's own error quotes the connection string and the password.
+					const leak = `connect to ${db.url}${password ? ` as ${password}` : ""}`;
+					await db.insertSession(`${ROOT}/a.jsonl`, ["a\n"]);
+					await db.refuseUpdates(db.table, leak);
+					const before = await db.snapshot();
+
+					const result = await run(db, "migrate-keys", [ROOT]);
+
+					expect(result.exitCode).toBe(1);
+					const printed = result.stdout + result.stderr;
+					expect(printed).toContain("the key change failed and was rolled back: connect to <redacted>");
+					expect(printed).not.toContain(db.url);
+					if (password) expect(printed).not.toContain(password);
 					expect(await db.snapshot()).toEqual(before);
 				} finally {
 					dir.removeSync();

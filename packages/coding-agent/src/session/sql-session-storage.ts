@@ -1,4 +1,5 @@
 import * as path from "node:path";
+import { SQL } from "bun";
 import { getSessionsDir } from "@oh-my-pi/pi-utils/dirs";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import {
@@ -127,6 +128,59 @@ export interface SqlSessionStorageOptions {
 	 * file as `abs:<absolute path>`. Default: this process's `getSessionsDir()`.
 	 */
 	sessionsRoot?: string;
+	/**
+	 * Rewrite the text of every database error that leaves the store, for
+	 * example to remove the connection string: a database error can quote any
+	 * text, and the session layer prints the errors of its storage. A driver
+	 * error (`SQL.SQLError`) then leaves as a {@link SqlSessionStorageDatabaseError},
+	 * and an `AggregateError` with its errors rewritten; every error the store
+	 * raises on purpose (a write conflict, `ENOENT`, `EEXIST`, a refusal)
+	 * leaves as it is. Default: errors leave as the driver raised them.
+	 */
+	redactError?: (text: string) => string;
+}
+
+/**
+ * A database driver error as it leaves a store given `redactError`: the
+ * driver's `name`, `code`, `errno`, `sqlState` and `severity` as they were, its
+ * message and its `detail`, `hint` and `where` redacted, and no cause.
+ */
+export class SqlSessionStorageDatabaseError extends Error {
+	readonly code: unknown;
+	readonly errno: unknown;
+	readonly sqlState: unknown;
+	readonly severity: unknown;
+	readonly detail: string | undefined;
+	readonly hint: string | undefined;
+	readonly where: string | undefined;
+
+	constructor(source: Error, redact: (text: string) => string) {
+		super(redact(source.message));
+		this.name = source.name;
+		const field = (name: string): unknown => (name in source ? Reflect.get(source, name) : undefined);
+		const text = (name: string): string | undefined => {
+			const value = field(name);
+			return typeof value === "string" ? redact(value) : undefined;
+		};
+		this.code = field("code");
+		this.errno = field("errno");
+		this.sqlState = field("sqlState");
+		this.severity = field("severity");
+		this.detail = text("detail");
+		this.hint = text("hint");
+		this.where = text("where");
+	}
+}
+
+/** `err` with its database errors' text rewritten by `redact` (see {@link SqlSessionStorageOptions.redactError}). */
+function redactDatabaseError(err: unknown, redact: (text: string) => string): unknown {
+	if (err instanceof AggregateError) {
+		return new AggregateError(
+			err.errors.map(inner => redactDatabaseError(inner, redact)),
+			redact(err.message),
+		);
+	}
+	return err instanceof SQL.SQLError ? new SqlSessionStorageDatabaseError(err, redact) : err;
 }
 
 /** A dialect-rendered statement and the names of the values it binds, in binding order. */
@@ -751,6 +805,7 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 	/** The shared call queue for this client's SQLite database; unset on other dialects. */
 	readonly #sqliteQueue: SqliteQueue | undefined;
 	readonly #sessionsRoot: string;
+	readonly #redactError: ((text: string) => string) | undefined;
 
 	constructor(options: SqlSessionStorageOptions) {
 		this.#client = options.client;
@@ -760,6 +815,16 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 		this.#createTable = options.createTable !== false;
 		this.#sqliteQueue = this.#adapter === "sqlite" ? sqliteQueue(options.client) : undefined;
 		this.#sessionsRoot = path.resolve(options.sessionsRoot ?? getSessionsDir());
+		this.#redactError = options.redactError;
+	}
+
+	/**
+	 * `err` as it leaves this store. Every driver call runs inside
+	 * {@link #exclusive} or {@link #retryDeadlocks}, and each passes the error
+	 * it throws through here, so no method lets an unredacted one out.
+	 */
+	#outward(err: unknown): unknown {
+		return this.#redactError ? redactDatabaseError(err, this.#redactError) : err;
 	}
 
 	get sessionsRoot(): string {
@@ -840,7 +905,9 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 	 * connections and need no queue.
 	 */
 	#exclusive<T>(task: () => Promise<T>): Promise<T> {
-		return runExclusive(this.#sqliteQueue, task);
+		return runExclusive(this.#sqliteQueue, task).catch((err: unknown) => {
+			throw this.#outward(err);
+		});
 	}
 
 	/**
@@ -861,7 +928,7 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 				await write();
 				return;
 			} catch (err) {
-				if (attempt >= WRITE_ATTEMPTS || !isDeadlockError(err)) throw err;
+				if (attempt >= WRITE_ATTEMPTS || !isDeadlockError(err)) throw this.#outward(err);
 				await Bun.sleep(Math.random() * 20 * attempt);
 			}
 		}

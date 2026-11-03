@@ -67,7 +67,8 @@ export async function resolveSessionStorage({ settings, env }: ResolveSessionSto
 
 	const connection = await openSessionSqlClient({ settings, env });
 	try {
-		return await SqlSessionStorage.create({ client: connection.client });
+		// The store's later database errors reach notices and logs; none may quote the connection string.
+		return await SqlSessionStorage.create({ client: connection.client, redactError: connection.redact });
 	} catch (err) {
 		void connection.client.end().catch(() => undefined);
 		throw sessionDatabaseError(connection, err);
@@ -81,6 +82,69 @@ export interface SessionSqlConnection {
 	source: string;
 	/** The connection-string file. */
 	dsnFile: string;
+	/**
+	 * `text` with the connection string's secrets replaced by `<redacted>`
+	 * (see {@link connectionStringRedactor}). Every message built from an
+	 * error of `client` goes through it, because a database error can quote
+	 * any text, the connection string included.
+	 */
+	redact: (text: string) => string;
+}
+
+const REDACTED = "<redacted>";
+/** A password shorter than this would match ordinary words, so it is replaced only as `user:password`. */
+const MIN_BARE_PASSWORD_LENGTH = 4;
+
+/** `text` as written and, when that differs and is valid, percent-decoded (`+` read as a space when `plus`). */
+function spellings(text: string, plus = false): string[] {
+	try {
+		const decoded = decodeURIComponent(plus ? text.replaceAll("+", " ") : text);
+		return decoded === text ? [text] : [text, decoded];
+	} catch {
+		return [text];
+	}
+}
+
+/**
+ * Replace, in one pass over a message, every spelling of the secrets in the
+ * connection string `dsn`: the string itself, and when it parses as a URL,
+ * its normalized form, its password and any `…pass…` query parameter, each
+ * as written and percent-decoded, and `user:password` in each spelling. The
+ * longest secret wins, so one inside another goes whole, and the marker a
+ * replacement writes is never searched again. A password shorter than
+ * {@link MIN_BARE_PASSWORD_LENGTH} is replaced only as `user:password`.
+ */
+function connectionStringRedactor(dsn: string): (text: string) => string {
+	const secrets = new Set<string>([dsn]);
+	let url: URL | undefined;
+	try {
+		url = new URL(dsn);
+	} catch {
+		url = undefined;
+	}
+	if (url) {
+		secrets.add(url.href);
+		const passwords = url.password ? spellings(url.password) : [];
+		for (const parameter of url.search.slice(1).split("&")) {
+			const separator = parameter.indexOf("=");
+			if (separator < 0) continue;
+			const name = spellings(parameter.slice(0, separator), true).at(-1) ?? "";
+			if (/pass/i.test(name)) passwords.push(...spellings(parameter.slice(separator + 1), true));
+		}
+		for (const password of passwords) {
+			if (password.length >= MIN_BARE_PASSWORD_LENGTH) secrets.add(password);
+			for (const user of spellings(url.username)) secrets.add(`${user}:${password}`);
+		}
+	}
+	const pattern = new RegExp(
+		[...secrets]
+			.filter(secret => secret.length > 0)
+			.sort((a, b) => b.length - a.length)
+			.map(secret => secret.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+			.join("|"),
+		"g",
+	);
+	return text => text.replace(pattern, REDACTED);
 }
 
 /**
@@ -120,7 +184,7 @@ export async function openSessionSqlClient({
 
 	try {
 		const client = new SQL(dsn, { max: SESSION_SQL_POOL_MAX, idleTimeout: SESSION_SQL_POOL_IDLE_TIMEOUT_SECONDS });
-		return { client, source, dsnFile };
+		return { client, source, dsnFile, redact: connectionStringRedactor(dsn) };
 	} catch {
 		throw new SessionStorageConfigError(
 			`${source} names ${dsnFile}, but its contents are not a connection URL the database driver accepts`,
@@ -129,17 +193,31 @@ export async function openSessionSqlClient({
 }
 
 /**
+ * The description of `err`, a failure of `connection`'s client, to print:
+ * its message, the errors an `AggregateError` gathers, and its code, with the
+ * connection string's secrets redacted ({@link SessionSqlConnection.redact}).
+ */
+export function sessionDatabaseErrorDetail(connection: SessionSqlConnection, err: unknown): string {
+	const error = toError(err);
+	let detail = error.message;
+	if (error instanceof AggregateError) {
+		detail += `: ${error.errors.map(inner => toError(inner).message).join("; ")}`;
+	}
+	const code = "code" in error ? error.code : undefined;
+	if (typeof code === "string" && code.length > 0) detail += ` (${code})`;
+	return connection.redact(detail);
+}
+
+/**
  * `err`, a failure to open the database `connection` names, as the refusal
  * the start-up prints: the file and its source with the driver's error,
- * never the connection string.
+ * never the connection string. The driver's error is not attached as the
+ * cause: the fatal handler prints causes, and its text is not redacted.
  */
 export function sessionDatabaseError(connection: SessionSqlConnection, err: unknown): SessionStorageConfigError {
-	const error = toError(err);
-	const code = "code" in error ? error.code : undefined;
-	const detail = typeof code === "string" && code.length > 0 ? `${error.message} (${code})` : error.message;
 	return new SessionStorageConfigError(
-		`${connection.source} names ${connection.dsnFile}, but the session database could not be opened: ${detail}`,
-		{ cause: error },
+		`${connection.source} names ${connection.dsnFile}, but the session database could not be opened: ` +
+			sessionDatabaseErrorDetail(connection, err),
 	);
 }
 
