@@ -268,6 +268,40 @@ describe("task live progress rendering", () => {
 		}
 	});
 
+	it.each([
+		["schema-bearing prose", "Everything verified; writing the report now."],
+		["empty output", ""],
+	])("shows a failed missing-yield warning once (%s)", (_label, prose) => {
+		const warning = "SYSTEM WARNING: Subagent exited without calling yield tool after 3 reminders.";
+		const details: TaskToolDetails = {
+			projectAgentsDir: null,
+			results: [
+				makeSingleResult(0, {
+					exitCode: 1,
+					output: `${warning}\n\n${prose}`,
+					stderr: warning,
+					error: warning,
+					missingYield: "initial",
+				}),
+			],
+			totalDurationMs: 1,
+		};
+
+		const legacy = renderResultText(details, true, uiTheme);
+		const native = JSON.stringify(
+			taskToolRenderer.describeResult(
+				{ content: [{ type: "text", text: "" }], details },
+				{ expanded: true, isPartial: false },
+			),
+		);
+
+		for (const rendered of [legacy, native]) {
+			expect(rendered).toContain("failed");
+			expect(rendered.split(warning).length - 1).toBe(1);
+			if (prose) expect(rendered).toContain(prose);
+		}
+	});
+
 	it("does not infer missing-yield status from report text", () => {
 		const warning = "SYSTEM WARNING: Subagent exited without calling yield tool after 3 reminders.";
 		const details: TaskToolDetails = {

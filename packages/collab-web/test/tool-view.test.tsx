@@ -219,6 +219,24 @@ describe("ToolView task missing-yield provenance", () => {
 		expect(html).not.toContain("after 3 reminders");
 	});
 
+	it.each([
+		["schema-bearing prose", "Everything verified; writing the report now."],
+		["empty output", ""],
+	])("shows a failed missing-yield warning once (%s)", (_label, prose) => {
+		const html = renderTask({
+			id: "failed",
+			agent: "task",
+			exitCode: 1,
+			output: `${initialWarning}\n\n${prose}`,
+			stderr: initialWarning,
+			error: initialWarning,
+			missingYield: "initial",
+		});
+		expect(html).toContain("1 failed");
+		expect(html.split(initialWarning).length - 1).toBe(1);
+		if (prose) expect(html).toContain(prose);
+	});
+
 	it("leaves warning-looking report text alone without provenance", () => {
 		const html = renderTask({
 			id: "yielded",

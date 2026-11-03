@@ -1274,8 +1274,13 @@ function renderAgentResult(
 		}
 	}
 
-	// Error message
-	if (result.error && (!success || mergeFailed) && (!aborted || result.error !== result.abortReason)) {
+	// Error message; a failed missing-yield result's error is the warning already shown above.
+	if (
+		result.error &&
+		(!success || mergeFailed) &&
+		(!aborted || result.error !== result.abortReason) &&
+		result.error.trim() !== missingCompleteWarning
+	) {
 		lines.push(
 			`${continuePrefix}${theme.fg(mergeFailed ? "warning" : "error", clipCollapsed(flattenLine(sanitizeText(result.error)), 70, expanded))}`,
 		);
@@ -2005,7 +2010,7 @@ function describeResultAgent(result: SingleResult, state: AgentDescribeState, de
 			result.resolvedModelRoute ? noteText(result.resolvedModelRoute, "dim") : undefined,
 			aborted && result.abortReason ? errorLine(result.abortReason) : undefined,
 			warning ? errorLine(warning, "warning") : undefined,
-			result.error ? errorLine(result.error) : undefined,
+			result.error && result.error.trim() !== warning ? errorLine(result.error) : undefined,
 			result.retryFailure ? errorLine(`auto-retry gave up: ${result.retryFailure.errorMessage}`) : undefined,
 			// The structured result is the agent's answer: its containers open one level, as in the fallback tree.
 			structured !== undefined
@@ -2013,7 +2018,9 @@ function describeResultAgent(result: SingleResult, state: AgentDescribeState, de
 				: output
 					? md(output, { role: "omp.task.output" })
 					: undefined,
-			result.stderr.trim() && !success ? node("ansi", { text: result.stderr, preview: { lines: 6 } }) : undefined,
+			result.stderr.trim() && result.stderr.trim() !== warning && !success
+				? node("ansi", { text: result.stderr, preview: { lines: 6 } })
+				: undefined,
 			kv([
 				[
 					"Patch",

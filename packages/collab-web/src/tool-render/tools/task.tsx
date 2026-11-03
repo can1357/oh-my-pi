@@ -104,7 +104,9 @@ function AgentResult({ res, host }: { res: Record<string, unknown>; host?: ToolR
 		warning = (end < 0 ? output : output.slice(0, end)).trim() || null;
 		if (warning) output = end < 0 ? "" : output.slice(end + 2);
 	}
-	const error = str(res.error);
+	// A failed missing-yield result's error is the warning the callout already shows.
+	const rawError = str(res.error);
+	const error = rawError && rawError.trim() !== warning ? rawError : null;
 	const aborted = res.aborted === true;
 	const abortReason = str(res.abortReason);
 	const patchPath = str(res.patchPath);
