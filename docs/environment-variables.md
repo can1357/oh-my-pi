@@ -190,6 +190,12 @@ Request bodies of 1 KiB or more are compressed when sent to a provider's own end
 | -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `PI_ANTHROPIC_API_VERSION` | `anthropic-version` sent to the official Anthropic API (`api.anthropic.com`): `2023-06-01` (default) or `2026-10-21`. Under `2026-10-21`, `temperature`/`top_p`/`top_k` are omitted because that version rejects them. Other hosts (Bedrock, Foundry, Copilot, gateways, Anthropic-compatible providers) stay on `2023-06-01`; unknown values log a warning and use `2023-06-01` |
 
+### Anthropic message threads
+
+| Variable                       | Behavior                                                                                                                                                                                                                                                       |
+| ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PI_ANTHROPIC_MESSAGE_THREADS` | Overrides the message-threads default (`message-threads-2026-08-12`: later turns send only new messages): on by default for Claude 4.5+ against `api.anthropic.com`, off elsewhere. `0` turns it off; `1` also enables it on other endpoints (Foundry, gateways) |
+
 ### Anthropic Foundry Gateway (Azure / enterprise proxy)
 
 When `CLAUDE_CODE_USE_FOUNDRY` is enabled, Anthropic requests switch to Foundry mode:
