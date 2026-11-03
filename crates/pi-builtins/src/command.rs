@@ -67,8 +67,9 @@ impl builtins::Command for CommandCommand {
 						FoundCommand::Alias { value, .. } => {
 							writeln!(context.stdout(), "{command_name} is aliased to `{value}'")?;
 						},
-						FoundCommand::Function(_) => {
+						FoundCommand::Function { definition, .. } => {
 							writeln!(context.stdout(), "{command_name} is a function")?;
+							writeln!(context.stdout(), "{definition}")?;
 						},
 						FoundCommand::Keyword(_) => {
 							writeln!(context.stdout(), "{command_name} is a shell keyword")?;
@@ -98,12 +99,13 @@ impl builtins::Command for CommandCommand {
 	}
 }
 
-/// What `command -v` and `command -V` find for a name: an alias (while the
-/// shell expands them), a function, a reserved word, a builtin, or a program.
+/// What `command -v` and `command -V` find for a name, in Bash's order: an
+/// alias (while the shell expands them), a reserved word, a function, a
+/// builtin, or a program.
 enum FoundCommand {
 	Alias { name: String, value: String },
-	Function(String),
 	Keyword(String),
+	Function { name: String, definition: String },
 	Builtin(String),
 	External(String),
 }
@@ -116,7 +118,7 @@ impl Display for FoundCommand {
 				"alias {name}={}",
 				brush_core::escape::force_quote(value, brush_core::escape::QuoteMode::SingleQuote)
 			),
-			Self::Function(name) | Self::Keyword(name) | Self::Builtin(name) => write!(f, "{name}"),
+			Self::Function { name, .. } | Self::Keyword(name) | Self::Builtin(name) => write!(f, "{name}"),
 			Self::External(path) => write!(f, "{path}"),
 		}
 	}
@@ -143,11 +145,14 @@ impl CommandCommand {
 					value: value.to_owned(),
 				});
 			}
-			if shell.funcs().get(command_name).is_some() {
-				return Some(FoundCommand::Function(command_name.to_owned()));
-			}
 			if shell.is_keyword(command_name) {
 				return Some(FoundCommand::Keyword(command_name.to_owned()));
+			}
+			if let Some(registration) = shell.funcs().get(command_name) {
+				return Some(FoundCommand::Function {
+					name:       command_name.to_owned(),
+					definition: registration.definition().to_string(),
+				});
 			}
 			if let Some(builtin_cmd) = shell.builtins().get(command_name)
 				&& !builtin_cmd.disabled

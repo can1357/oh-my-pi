@@ -2117,34 +2117,13 @@ async fn apply_assignment(
 	}
 
 	// While BASH_ALIASES is the view of the alias table, assigning to it defines
-	// aliases, as in Bash: an element assignment defines that alias, and a list
-	// assignment (`=(...)` or `+=(...)`) defines each keyed element without
-	// removing the others. The variable stays the view.
+	// aliases (see `Shell::assign_to_alias_table`). The variable stays the view.
 	if variable_name == "BASH_ALIASES" && shell.bash_aliases_is_alias_table() {
-		let append = |name: &str, value: String| {
-			if assignment.append {
-				let mut existing = shell.aliases().get(name).cloned().unwrap_or_default();
-				existing.push_str(&value);
-				existing
-			} else {
-				value
-			}
-		};
-		let definitions = match (array_index, new_value) {
-			(Some(name), ShellValueLiteral::Scalar(value)) => {
-				let value = append(&name, value);
-				vec![(name, value)]
-			},
-			(Some(_), ShellValueLiteral::Array(_)) => {
-				return Err(error::ErrorKind::AssigningListToArrayMember.into());
-			},
-			(None, ShellValueLiteral::Scalar(value)) => vec![("0".to_owned(), append("0", value))],
-			(None, ShellValueLiteral::Array(ArrayLiteral(elements))) => elements
-				.into_iter()
-				.filter_map(|(name, value)| name.map(|name| (name, value)))
-				.collect(),
-		};
-		shell.aliases_mut().extend(definitions);
+		let skipped = shell.assign_to_alias_table(array_index, new_value, assignment.append)?;
+		for error in &skipped {
+			let mut stderr = params.stderr(shell);
+			let _ = shell.display_error(&mut stderr, error).await;
+		}
 		return Ok(());
 	}
 

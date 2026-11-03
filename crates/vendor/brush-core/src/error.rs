@@ -33,6 +33,14 @@ pub enum ErrorKind {
 	#[error("must use subscript when assigning associative array")]
 	AssociativeArrayMissingSubscript,
 
+	/// An array element was given an empty subscript where none is allowed.
+	#[error("{0}: bad array subscript")]
+	BadArraySubscript(String),
+
+	/// An alias was given a name Bash rejects.
+	#[error("`{0}': invalid alias name")]
+	InvalidAliasName(String),
+
 	/// An attempt was made to convert an associative array to an indexed array.
 	#[error("cannot convert associative array to indexed array")]
 	ConvertingAssociativeArrayToIndexedArray,

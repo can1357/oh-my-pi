@@ -57,7 +57,7 @@ pub mod parser {
 
 pub use commands::{CommandArg, ExecutionContext};
 pub use error::{BuiltinError, Error, ErrorKind};
-pub use alias_expansion::AliasesAtRead;
+pub use alias_expansion::{AliasesAtRead, is_legal_alias_name};
 pub use extensions::ShellExtensions;
 pub use interp::{
 	ExecutionParameters, ExternalCommandInfo, ExternalCommandOutputMarker,

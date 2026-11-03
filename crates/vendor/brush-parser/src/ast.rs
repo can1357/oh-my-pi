@@ -12,6 +12,38 @@ thread_local! {
     /// being written, waiting for its end; `None` outside such a line.
     static DEFERRED_HERE_DOCUMENTS: std::cell::RefCell<Option<Vec<String>>> =
         const { std::cell::RefCell::new(None) };
+
+    /// Whether a here-document's body is being written: its lines are not
+    /// indented (see `write_indented`).
+    static WRITING_HERE_DOCUMENT_BODY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Writes `item` one level deeper: each line it writes is indented, except the
+/// lines of here-document bodies. The shell reads a body, and the delimiter
+/// that ends it, as written, so an indented copy would not end where it began.
+fn write_indented(f: &mut std::fmt::Formatter<'_>, item: &dyn Display) -> std::fmt::Result {
+    write!(
+        indenter::indented(f).with_format(indenter::Format::Custom {
+            inserter: &mut indent_line,
+        }),
+        "{item}"
+    )
+}
+
+fn indent_line(_line: usize, f: &mut dyn std::fmt::Write) -> std::fmt::Result {
+    if WRITING_HERE_DOCUMENT_BODY.get() {
+        Ok(())
+    } else {
+        f.write_str(DISPLAY_INDENT)
+    }
+}
+
+/// Writes a here-document's body and closing delimiter, unindented.
+fn write_here_document_body(f: &mut std::fmt::Formatter<'_>, body: &str) -> std::fmt::Result {
+    let outer = WRITING_HERE_DOCUMENT_BODY.replace(true);
+    let written = f.write_str(body);
+    WRITING_HERE_DOCUMENT_BODY.set(outer);
+    written
 }
 
 /// Writes one line of commands with `line`, then the bodies of the
@@ -30,7 +62,7 @@ fn write_line_then_here_documents(
     written?;
     for body in bodies {
         writeln!(f)?;
-        write!(f, "{body}")?;
+        write_here_document_body(f, &body)?;
     }
     Ok(())
 }
@@ -773,7 +805,7 @@ impl Display for CaseClauseCommand {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "case {} in", self.value)?;
         for case in &self.cases {
-            write!(indenter::indented(f).with_str(DISPLAY_INDENT), "{case}")?;
+            write_indented(f, case)?;
         }
         writeln!(f)?;
         write!(f, "esac")
@@ -887,11 +919,7 @@ impl SourceLocation for IfClauseCommand {
 impl Display for IfClauseCommand {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "if {}; then", self.condition)?;
-        write!(
-            indenter::indented(f).with_str(DISPLAY_INDENT),
-            "{}",
-            self.then
-        )?;
+        write_indented(f, &self.then)?;
         if let Some(elses) = &self.elses {
             for else_clause in elses {
                 write!(f, "{else_clause}")?;
@@ -932,11 +960,7 @@ impl Display for ElseClause {
             writeln!(f, "else")?;
         }
 
-        write!(
-            indenter::indented(f).with_str(DISPLAY_INDENT),
-            "{}",
-            self.body
-        )
+        write_indented(f, &self.body)
     }
 }
 
@@ -1018,7 +1042,7 @@ impl Display for CaseItem {
         writeln!(f, ")")?;
 
         if let Some(cmd) = &self.cmd {
-            write!(indenter::indented(f).with_str(DISPLAY_INDENT), "{cmd}")?;
+            write_indented(f, cmd)?;
         }
         writeln!(f)?;
         write!(f, "{}", self.post_action)
@@ -1179,11 +1203,7 @@ impl SourceLocation for BraceGroupCommand {
 impl Display for BraceGroupCommand {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "{{ ")?;
-        write!(
-            indenter::indented(f).with_str(DISPLAY_INDENT),
-            "{}",
-            self.list
-        )?;
+        write_indented(f, &self.list)?;
         writeln!(f)?;
         write!(f, "}}")?;
 
@@ -1208,11 +1228,7 @@ pub struct DoGroupCommand {
 impl Display for DoGroupCommand {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "do")?;
-        write!(
-            indenter::indented(f).with_str(DISPLAY_INDENT),
-            "{}",
-            self.list
-        )?;
+        write_indented(f, &self.list)?;
         writeln!(f)?;
         write!(f, "done")
     }
@@ -1774,7 +1790,8 @@ impl Display for IoHereDocument {
             write!(f, "{}", self.here_end)
         } else {
             writeln!(f, "{}", self.here_end)?;
-            writeln!(f, "{body}")
+            write_here_document_body(f, &body)?;
+            writeln!(f)
         }
     }
 }

@@ -797,20 +797,35 @@ impl ShellValue {
 		existing_values: &mut BTreeMap<String, String>,
 		literal_values: ArrayLiteral,
 	) -> Result<(), error::Error> {
+		Self::for_each_associative_pair(literal_values, |key, value| {
+			existing_values.insert(key, value);
+		})
+	}
+
+	/// Calls `pair` with each key and value an associative array list
+	/// assignment gives, in order. When the first element has a subscript
+	/// (`[key]=value`), every element needs one; the first element without one
+	/// ends the list with an error, after the pairs before it. Otherwise the
+	/// elements alternate keys and values, an element written `[key]=value` is
+	/// that text, and a last key without a value gets the empty string.
+	pub(crate) fn for_each_associative_pair(
+		literal_values: ArrayLiteral,
+		mut pair: impl FnMut(String, String),
+	) -> Result<(), error::Error> {
 		let mut literal_values = literal_values.0.into_iter();
 		let Some((first_key, first_value)) = literal_values.next() else {
 			return Ok(());
 		};
 
 		if let Some(first_key) = first_key {
-			existing_values.insert(first_key, first_value);
+			pair(first_key, first_value);
 
 			for (key, value) in literal_values {
 				let Some(key) = key else {
 					return Err(error::ErrorKind::AssociativeArrayMissingSubscript.into());
 				};
 
-				existing_values.insert(key, value);
+				pair(key, value);
 			}
 		} else {
 			let mut current_key = Some(first_value);
@@ -827,14 +842,14 @@ impl ShellValue {
 				};
 
 				if let Some(key) = current_key.take() {
-					existing_values.insert(key, value);
+					pair(key, value);
 				} else {
 					current_key = Some(value);
 				}
 			}
 
 			if let Some(current_key) = current_key {
-				existing_values.insert(current_key, String::new());
+				pair(current_key, String::new());
 			}
 		}
 

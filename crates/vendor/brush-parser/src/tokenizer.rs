@@ -750,14 +750,14 @@ impl<I: Iterator<Item = std::io::Result<char>>> Tokenizer<I> {
     }
 
     /// Whether the commands read so far end outside any construct, so that the
-    /// newline just read can end a complete command.
+    /// newline just read can end a complete command. That newline can come from
+    /// an alias's value: as in Bash, the command before it then runs before the
+    /// rest of the value is read.
     pub fn reading_at_top_level(&self) -> bool {
-        self.pushed.is_empty()
-            && self
-                .cross_state
-                .reading
-                .as_ref()
-                .is_none_or(AliasReading::at_top_level)
+        self.cross_state
+            .reading
+            .as_ref()
+            .is_none_or(AliasReading::at_top_level)
     }
 
     #[expect(clippy::unnecessary_wraps)]
@@ -802,27 +802,36 @@ impl<I: Iterator<Item = std::io::Result<char>>> Tokenizer<I> {
 
     fn next_char(&mut self) -> Result<Option<char>, TokenizerError> {
         self.pop_finished_aliases();
-        let c = if let Some(top) = self.pushed.last_mut() {
+        let (c, from_alias) = if let Some(top) = self.pushed.last_mut() {
             if let Some(&c) = top.chars.get(top.position) {
                 top.position += 1;
-                Some(c)
+                (Some(c), true)
             } else {
                 top.end_blank = false;
-                Some(' ')
+                (Some(' '), true)
             }
         } else {
-            self.char_reader
+            let c = self
+                .char_reader
                 .next()
                 .transpose()
-                .map_err(TokenizerError::ReadError)?
+                .map_err(TokenizerError::ReadError)?;
+            (c, false)
         };
 
         if let Some(ch) = c {
-            if ch == '\n' {
-                self.cross_state.cursor.line += 1;
-                self.cross_state.cursor.column = 1;
-            } else {
-                self.cross_state.cursor.column += 1;
+            // Text read from an alias's value stands where the alias's name
+            // was, so it moves no line or column: as in Bash, a newline in a
+            // value does not change the line errors report. It still counts
+            // in the index, which tells adjacent tokens (`2>`) from separate
+            // ones (`2 >`).
+            if !from_alias {
+                if ch == '\n' {
+                    self.cross_state.cursor.line += 1;
+                    self.cross_state.cursor.column = 1;
+                } else {
+                    self.cross_state.cursor.column += 1;
+                }
             }
             self.cross_state.cursor.index += 1;
         }

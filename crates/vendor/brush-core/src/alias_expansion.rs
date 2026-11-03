@@ -7,9 +7,14 @@
 //! complete command at a time ([`brush_parser::CommandReader`]) and gives the
 //! reader the aliases as they are at that moment.
 
+use std::collections::HashMap;
+
 use brush_parser::{AliasTable, TokenizerOptions, ast};
 
-use crate::{Shell, extensions};
+use crate::{
+	Shell, error, extensions,
+	variables::{ShellValue, ShellValueLiteral},
+};
 
 /// The aliases an input line was read with: the alias table as it was when the
 /// line began, or none while `expand_aliases` was off.
@@ -36,6 +41,84 @@ impl AliasesAtRead {
 /// Is `word`, as written, quoted? Bash never reads a quoted word as an alias.
 pub(crate) fn is_quoted(word: &str, options: &TokenizerOptions) -> bool {
 	brush_parser::word::is_quoted_for_alias(word, options)
+}
+
+/// Is `name` a name Bash accepts for an alias? Bash rejects a name that holds
+/// a character with a meaning in shell syntax; other printable punctuation,
+/// such as `-`, `.`, `{`, `[`, `*`, `~`, `#` and `!`, is valid.
+pub fn is_legal_alias_name(name: &str) -> bool {
+	!name.is_empty()
+		&& !name.contains([
+			'/', '$', '\'', '"', '\\', '`', ' ', '\t', '\n', ';', '|', '&', '(', ')', '<', '>',
+		])
+}
+
+impl<SE: extensions::ShellExtensions> Shell<SE> {
+	/// Assigns to `BASH_ALIASES` while it is the view of the alias table, as
+	/// Bash does: an element assignment (`index`) defines that alias, a list
+	/// defines each alias it gives without removing the others, and a scalar
+	/// defines the alias `0`. With `append`, a value is added to the one the
+	/// alias has.
+	///
+	/// An element whose name Bash rejects, or whose name is empty, is skipped;
+	/// its error is returned for the caller to report, and the assignment goes
+	/// on. A readonly `BASH_ALIASES`, an empty name given to an element
+	/// assignment and a list given to one element fail the assignment.
+	pub fn assign_to_alias_table(
+		&mut self,
+		index: Option<String>,
+		value: ShellValueLiteral,
+		append: bool,
+	) -> Result<Vec<error::Error>, error::Error> {
+		if self.env().get("BASH_ALIASES").is_some_and(|(_, var)| var.is_readonly()) {
+			return Err(error::ErrorKind::ReadonlyVariable.into());
+		}
+
+		let mut skipped = vec![];
+		match (index, value) {
+			(Some(name), ShellValueLiteral::Scalar(value)) => {
+				if name.is_empty() {
+					return Err(error::ErrorKind::BadArraySubscript("BASH_ALIASES[]".to_owned()).into());
+				}
+				define_alias(self.aliases_mut(), name, value, append, &mut skipped);
+			},
+			(Some(_), ShellValueLiteral::Array(_)) => {
+				return Err(error::ErrorKind::AssigningListToArrayMember.into());
+			},
+			(None, ShellValueLiteral::Scalar(value)) => {
+				define_alias(self.aliases_mut(), "0".to_owned(), value, append, &mut skipped);
+			},
+			(None, ShellValueLiteral::Array(literals)) => {
+				let aliases = self.aliases_mut();
+				ShellValue::for_each_associative_pair(literals, |name, value| {
+					if name.is_empty() {
+						skipped.push(error::ErrorKind::BadArraySubscript(format!("[]={value}")).into());
+					} else {
+						define_alias(aliases, name, value, append, &mut skipped);
+					}
+				})?;
+			},
+		}
+		Ok(skipped)
+	}
+}
+
+/// Defines the alias `name`, or adds `value` to it with `append`, unless Bash
+/// rejects the name; then the error goes to `skipped`.
+fn define_alias(
+	aliases: &mut HashMap<String, String>,
+	name: String,
+	value: String,
+	append: bool,
+	skipped: &mut Vec<error::Error>,
+) {
+	if !is_legal_alias_name(&name) {
+		skipped.push(error::ErrorKind::InvalidAliasName(name).into());
+	} else if append {
+		aliases.entry(name).or_default().push_str(&value);
+	} else {
+		aliases.insert(name, value);
+	}
 }
 
 /// Splits a process substitution's commands into the lines Bash reads one at

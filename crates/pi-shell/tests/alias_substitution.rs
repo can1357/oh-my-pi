@@ -35,6 +35,15 @@ async fn with_aliases(aliases: &str, body: &str) -> String {
 	run(&format!("shopt -s expand_aliases\nalias {aliases}\n{body}")).await
 }
 
+/// `out` without the lines the host adds to report a command that failed with
+/// an error; it reports them whatever standard error is redirected to.
+fn without_error_reports(out: &str) -> String {
+	out.lines()
+		.filter(|line| !line.starts_with("error: "))
+		.map(|line| format!("{line}\n"))
+		.collect()
+}
+
 // --- alias values that are shell syntax ---
 
 /// B01, B02, B07, B18, B31: lists and pipelines in a value.
@@ -230,12 +239,229 @@ async fn command_v_reports_aliases_functions_and_reserved_words() {
 		"alias q='echo aliased'\nq is aliased to `echo aliased'\n"
 	);
 	assert_eq!(
-		run("f() { :; }; command -v f; command -V f | head -1").await,
-		"f\nf is a function\n"
+		run("f() { echo hi; }; command -v f; command -V f").await,
+		"f\nf is a function\nf () \n{ \n    echo hi\n}\n"
 	);
 	assert_eq!(
 		run("command -v if; command -V if; command -v '[['").await,
 		"if\nif is a shell keyword\n[[\n"
 	);
 	assert_eq!(run("alias q='echo x'; command -v q; echo \"st=$?\"").await, "st=1\n");
+}
+
+/// G01: a reserved word comes before a function of the same name, as in Bash.
+#[tokio::test]
+async fn command_v_reports_a_reserved_word_before_a_function() {
+	assert_eq!(
+		run("function if { echo hi; }; command -V if; command -v if").await,
+		"if is a shell keyword\nif\n"
+	);
+}
+
+// --- a newline inside an alias's value ---
+
+/// G02, G03, G04, G05, G06: a newline in a value ends a complete command,
+/// which runs before the rest of the value is read, so the rest is read with
+/// the aliases and the option that command left.
+#[tokio::test]
+async fn newline_in_a_value_runs_the_command_before_it() {
+	assert_eq!(with_aliases("q=$'alias r=\"echo NEW\"\\nr'", "q").await, "NEW\n");
+	assert_eq!(
+		run("shopt -s expand_aliases\nalias r='echo OLD'\nalias q=$'alias r=\"echo NEW\"\\nr'\nq")
+			.await,
+		"NEW\n"
+	);
+	assert_eq!(
+		run(
+			"shopt -s expand_aliases\nalias r='echo R'\nalias q=$'shopt -u expand_aliases\\nr'\nq \
+			 2>/dev/null; echo \"st=$?\""
+		)
+		.await,
+		"st=127\n"
+	);
+	assert_eq!(
+		run("shopt -s expand_aliases\nalias q=$'alias r=\"echo NEW\"\\nif true; then'\nq r; fi")
+			.await,
+		"NEW\n"
+	);
+	assert_eq!(
+		with_aliases("q=$'echo one\\nq'", "q 2>/dev/null; echo \"st=$?\"").await,
+		"one\nst=127\n"
+	);
+}
+
+/// G07: a newline in a value does not move the line an error reports.
+#[tokio::test]
+async fn newline_in_a_value_keeps_error_lines() {
+	let out = run("shopt -s expand_aliases\nalias q=$'echo one\\necho two'\nq\n)\necho BAD").await;
+	assert!(out.starts_with("one\ntwo\n"), "{out}");
+	assert!(out.contains("line 4"), "{out}");
+	assert!(!out.contains("BAD"), "{out}");
+}
+
+// --- reading long input ---
+
+/// G08: a command continued over many lines (`&&`, `||`, `|` at a line's end)
+/// is read in time that grows with its length, not with its square.
+#[tokio::test]
+async fn long_continued_command_reads_in_linear_time() {
+	let mut script = ": &&\n".repeat(6000);
+	script.push_str("echo and\n");
+	script.push_str(&"false ||\n".repeat(6000));
+	script.push_str("echo or\n");
+	script.push_str(&"echo piped |\n".repeat(3));
+	script.push_str("cat\n");
+	let started = std::time::Instant::now();
+	let out = run(&script).await;
+	let elapsed = started.elapsed();
+	assert_eq!(out, "and\nor\npiped\n");
+	assert!(elapsed < std::time::Duration::from_secs(20), "took {elapsed:?}");
+}
+
+// --- process substitutions read again with aliases ---
+
+/// G09, G10, G11, G12, G13: a here-document inside a compound command or a
+/// function in a process substitution still ends at its delimiter when the
+/// substitution is read again with aliases.
+#[tokio::test]
+async fn process_substitution_here_documents_survive_reading_again() {
+	let unused = "shopt -s expand_aliases\nalias unused=:\n";
+	assert_eq!(
+		run(&format!("{unused}cat <(if true; then cat <<EOF\nbody\nEOF\nfi)")).await,
+		"body\n"
+	);
+	assert_eq!(
+		run(&format!("{unused}cat <(f() {{\ncat <<EOF\nfbody\nEOF\n}}\nf)")).await,
+		"fbody\n"
+	);
+	assert_eq!(
+		run(&format!("{unused}cat <(while true; do cat <<-EOF\n\twbody\n\tEOF\nbreak; done)")).await,
+		"wbody\n"
+	);
+	// `)` on its own line: brush ends a substitution at the `)` of a `case`
+	// pattern line that also holds `esac)`, with or without aliases.
+	assert_eq!(
+		run(&format!("{unused}cat <(case x in x) cat <<EOF\ncbody\nEOF\n;; esac\n)")).await,
+		"cbody\n"
+	);
+	assert_eq!(
+		run(
+			"shopt -s expand_aliases\nalias say='echo said'\ncat <(if true; then cat <<EOF\nbody \
+			 $((1+1))\nEOF\nfi\nsay)"
+		)
+		.await,
+		"body 2\nsaid\n"
+	);
+}
+
+/// G14: `declare -f` writes a here-document so that reading it back works.
+#[tokio::test]
+async fn declare_f_here_document_reads_back() {
+	assert_eq!(
+		run("f() {\nif true; then\ncat <<EOF\nbody\nEOF\nfi\n}\neval \"$(declare -f f)\"\nf").await,
+		"body\n"
+	);
+}
+
+// --- BASH_ALIASES assignment ---
+
+/// G15, G16, G17: a list without subscripts alternates names and values; a
+/// last name without a value gets the empty value.
+#[tokio::test]
+async fn bash_aliases_list_of_names_and_values() {
+	assert_eq!(
+		run("shopt -s expand_aliases\nBASH_ALIASES=(q 'echo one' r 'echo two')\nq; r; alias").await,
+		"one\ntwo\nalias q='echo one'\nalias r='echo two'\n"
+	);
+	assert_eq!(
+		run("alias q='echo old'; BASH_ALIASES+=(r 'echo two' s 'echo three'); alias").await,
+		"alias q='echo old'\nalias r='echo two'\nalias s='echo three'\n"
+	);
+	assert_eq!(
+		run("BASH_ALIASES=(q 'echo one' r); alias").await,
+		"alias q='echo one'\nalias r=''\n"
+	);
+}
+
+/// G18, G19, G20, G21, G22: `BASH_ALIASES` rejects the names `alias` rejects
+/// and empty names, and still defines the other elements of a list.
+#[tokio::test]
+async fn bash_aliases_rejects_invalid_names() {
+	assert_eq!(
+		run(
+			"shopt -s expand_aliases\n{ BASH_ALIASES['/bin/echo']='echo BAD'; } 2>/dev/null; echo \
+			 \"st=$?\"\n/bin/echo expected; alias"
+		)
+		.await,
+		"st=0\nexpected\n"
+	);
+	assert!(
+		run("{ BASH_ALIASES['a/b']=x; } 2>&1")
+			.await
+			.contains("`a/b': invalid alias name"),
+		"diagnostic"
+	);
+	assert_eq!(
+		run("{ BASH_ALIASES=([a/b]=x [ok]=y [c\\;d]=z); } 2>/dev/null; echo \"st=$?\"; alias").await,
+		"st=0\nalias ok='y'\n"
+	);
+	assert_eq!(
+		run("{ BASH_ALIASES=(a/b x ok y); } 2>/dev/null; echo \"st=$?\"; alias").await,
+		"st=0\nalias ok='y'\n"
+	);
+	// Bash drops the rest of a line after an assignment error, so the status
+	// is read on the next line.
+	assert_eq!(
+		without_error_reports(
+			&run("exec 2>/dev/null\nBASH_ALIASES[\"\"]=x\necho \"st=$?\"; alias").await
+		),
+		"st=1\n"
+	);
+	assert_eq!(
+		run("{ BASH_ALIASES=([\"\"]=x [ok]=y); } 2>/dev/null; echo \"st=$?\"; alias").await,
+		"st=0\nalias ok='y'\n"
+	);
+}
+
+/// G23: a readonly `BASH_ALIASES` cannot be assigned; `alias` still works.
+#[tokio::test]
+async fn readonly_bash_aliases_is_not_assigned() {
+	assert_eq!(
+		without_error_reports(
+			&run(
+				"exec 2>/dev/null\nreadonly BASH_ALIASES\nBASH_ALIASES[q]='echo BAD'\necho \
+				 \"st=$?\"\nBASH_ALIASES=([q]=x)\necho \"st=$?\"\nBASH_ALIASES=x\necho \
+				 \"st=$?\"\nalias; alias q=x; alias"
+			)
+			.await
+		),
+		"st=1\nst=1\nst=1\nalias q='x'\n"
+	);
+}
+
+/// G24, G25: `declare` assigns to `BASH_ALIASES` as an assignment does;
+/// `local` makes a new variable.
+#[tokio::test]
+async fn declare_assigns_bash_aliases() {
+	assert_eq!(
+		run(
+			"shopt -s expand_aliases\ndeclare -A BASH_ALIASES=([q]='echo one')\ndeclare \
+			 BASH_ALIASES=([r]='echo two')\ndeclare -A BASH_ALIASES=(s 'echo three')\nq; r; s; alias"
+		)
+		.await,
+		"one\ntwo\nthree\nalias q='echo one'\nalias r='echo two'\nalias s='echo three'\n"
+	);
+	assert_eq!(
+		run("f() { local BASH_ALIASES=([q]=x); alias; }; f; alias; echo \"st=$?\"").await,
+		"st=0\n"
+	);
+}
+
+/// G26: `alias -p` lists the aliases, then handles its operands.
+#[tokio::test]
+async fn alias_p_lists_then_defines() {
+	assert_eq!(
+		run("alias a=1; alias -p x=new; echo \"st=$?\"; alias").await,
+		"alias a='1'\nst=0\nalias a='1'\nalias x='new'\n"
+	);
 }

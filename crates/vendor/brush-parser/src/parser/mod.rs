@@ -243,6 +243,12 @@ pub fn parse_tokens(
 pub struct CommandReader {
     tokenizer: Tokenizer<OwnedChars>,
     pending: Vec<Token>,
+    /// Whether the last token read other than a newline is an operator that
+    /// needs a command after it (`&&`, `||`, `|`, `|&`): a newline after it
+    /// cannot end the command, so the reader does not try to parse there.
+    /// Trying would parse the whole unfinished command again at every line
+    /// of a long chain.
+    continued: bool,
     finished: bool,
 }
 
@@ -252,6 +258,7 @@ impl CommandReader {
         Self {
             tokenizer: Tokenizer::reading_commands(input, &options.tokenizer_options()),
             pending: vec![],
+            continued: false,
             finished: false,
         }
     }
@@ -284,9 +291,19 @@ impl CommandReader {
             let at_end = matches!(result.reason, TokenEndReason::EndOfInput);
 
             if let Some(token) = result.token {
-                let newline = matches!(&token, Token::Operator(op, _) if op == "\n");
+                let newline = match &token {
+                    Token::Operator(op, _) if op == "\n" => true,
+                    Token::Operator(op, _) => {
+                        self.continued = matches!(op.as_str(), "&&" | "||" | "|" | "|&");
+                        false
+                    }
+                    Token::Word(..) => {
+                        self.continued = false;
+                        false
+                    }
+                };
                 self.pending.push(token);
-                if newline && !at_end && self.tokenizer.reading_at_top_level() {
+                if newline && !at_end && !self.continued && self.tokenizer.reading_at_top_level() {
                     match parse_tokens(&self.pending, options) {
                         Ok(program) => {
                             self.pending.clear();
