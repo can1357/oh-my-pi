@@ -7,6 +7,7 @@
 - `/btw` answers can show a steering prompt as a block behind a pink rail (a toned card in Tern) that `Alt+I` (`app.btw.inject`, remappable) sends to the main session; once sent it turns green with `➤` on each line, without moving ([#17618](https://github.com/can1357/oh-my-pi/pull/17618) by [@apullin](https://github.com/apullin))
 - Added `singleLine` and `finiteWidth` to `utils` for row-confined text and cell widths
 - `Editor.onPredictionAccepted` and `Editor.onPredictionShown` report when Tab or Right inserts the rest of the composer prediction and when a frame paints it (at least one cell in the terminal, or the ghost on a native editor node) ([#17739](https://github.com/can1357/oh-my-pi/pull/17739) by [@wolfiesch](https://github.com/wolfiesch))
+- Added `isUserCollabPrompt()` to `chat/messages` to identify user-attributed Collab prompts ([#17870](https://github.com/can1357/oh-my-pi/pull/17870) by [@andrewleech](https://github.com/andrewleech))
 
 ## [18.15.0] - 2026-11-01
 

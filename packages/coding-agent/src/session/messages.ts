@@ -14,6 +14,7 @@ import {
 	type HookMessage,
 	type FileMentionMessage,
 	isUserInvokedSkillPrompt,
+	isUserCollabPrompt,
 	isUserTurnInitiator,
 } from "@oh-my-pi/pi-tui/chat/messages";
 export {
@@ -44,6 +45,7 @@ export {
 	type HookMessage,
 	type FileMentionMessage,
 	isUserInvokedSkillPrompt,
+	isUserCollabPrompt,
 	isUserTurnInitiator,
 } from "@oh-my-pi/pi-tui/chat/messages";
 import {
@@ -719,9 +721,7 @@ type SteeringUserMessage =
 
 function isSteeringUserMessage(message: AgentMessage | undefined): message is SteeringUserMessage {
 	if (message?.role === "user") return message.steering === true;
-	return (
-		message?.role === "custom" && message.customType === COLLAB_PROMPT_MESSAGE_TYPE && message.attribution === "user"
-	);
+	return message?.role === "custom" && isUserCollabPrompt(message);
 }
 
 function userMessageWithoutSteering(message: UserMessage): UserMessage {

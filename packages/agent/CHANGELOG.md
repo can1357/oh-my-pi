@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `QueuedMessagePreparation.onDelivered(signal?, batch?)` to apply staged effects after the original queued messages are appended to agent state and before listeners are notified. `Agent.appendMessage(message, signal?, deliveryBatch?)` passes the optional abort signal and batch token to the callback. The internal `hasPendingQueuedDeliveryCallbacks` loop configuration enables input delivery acknowledgement before the next model call when callbacks are pending, unless aborted ([#17870](https://github.com/can1357/oh-my-pi/pull/17870) by [@andrewleech](https://github.com/andrewleech)).
+
 ### Changed
 
 - Deprecated `createFileOps`, `computeFileLists`, `formatFileOperations`, `upsertFileOperations`, `isUrlSchemePath` and `FileOperations` in `@oh-my-pi/pi-agent-core/compaction`; they now re-export `@oh-my-pi/snapcompact`, which callers should import directly
