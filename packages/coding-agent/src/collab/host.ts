@@ -10,7 +10,6 @@
  */
 
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import * as fs from "node:fs/promises";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import type {
@@ -27,6 +26,7 @@ import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
 import type { AgentSessionEvent } from "../session/agent-session";
 import { stripImagesFromMessage, USER_INTERRUPT_LABEL } from "../session/messages";
 import type { SessionEntry as StoredSessionEntry } from "../session/session-entries";
+import { readSessionTextFrom } from "../session/session-storage";
 import { TASK_SUBAGENT_LIFECYCLE_CHANNEL, TASK_SUBAGENT_PROGRESS_CHANNEL } from "../task/types";
 import { generateRoomKey, generateWriteToken, importRoomKey } from "./crypto";
 import { collabDisplayName } from "./display-name";
@@ -1232,34 +1232,27 @@ export class CollabHost {
 			reply("", fromByte, "no transcript available");
 			return;
 		}
-		const file = ref.sessionFile;
 		try {
-			const stat = await fs.stat(file);
-			if (stat.size <= fromByte) {
-				reply("", stat.size);
+			// Through the session's storage, which holds its subagent tree: under
+			// `session.storage: sql` the transcript is a row, not a file.
+			const { text, size } = await readSessionTextFrom(
+				this.#ctx.sessionManager.getStorage(),
+				ref.sessionFile,
+				fromByte,
+				TRANSCRIPT_READ_CAP,
+			);
+			if (fromByte + TRANSCRIPT_READ_CAP >= size) {
+				reply(text, size);
 				return;
 			}
-			const want = Math.min(stat.size - fromByte, TRANSCRIPT_READ_CAP);
-			const handle = await fs.open(file, "r");
-			let bytesRead: number;
-			const buf = Buffer.allocUnsafe(want);
-			try {
-				({ bytesRead } = await handle.read(buf, 0, want, fromByte));
-			} finally {
-				await handle.close();
+			// A capped read can end inside a line or a character: serve whole lines only.
+			const lastNewline = text.lastIndexOf("\n");
+			if (lastNewline < 0) {
+				reply("", fromByte, TRANSCRIPT_ENTRY_TOO_LARGE_ERROR);
+				return;
 			}
-			let slice = buf.subarray(0, bytesRead);
-			const reachedEof = fromByte + bytesRead >= stat.size;
-			if (!reachedEof) {
-				// Trim to the last complete JSONL line so no line or UTF-8 char is split.
-				const lastNewline = slice.lastIndexOf(0x0a);
-				if (lastNewline < 0) {
-					reply("", fromByte, TRANSCRIPT_ENTRY_TOO_LARGE_ERROR);
-					return;
-				}
-				slice = slice.subarray(0, lastNewline + 1);
-			}
-			reply(slice.toString("utf-8"), reachedEof ? stat.size : fromByte + slice.byteLength);
+			const complete = text.slice(0, lastNewline + 1);
+			reply(complete, fromByte + Buffer.byteLength(complete, "utf-8"));
 		} catch (err) {
 			logger.debug("collab transcript read failed", { agentId, error: String(err) });
 			reply("", fromByte, String(err));

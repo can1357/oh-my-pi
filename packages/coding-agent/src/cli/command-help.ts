@@ -132,7 +132,7 @@ export const searchHelp = { description: "Test web search providers" } satisfies
 
 export const sessionHelp = {
 	description:
-		"Hand a session to another machine (pack, unpack, moved) or check which sessions a running omp owns (lease)",
+		"Hand a session to another machine (pack, unpack, moved), check which sessions a running omp owns (lease), or migrate the SQL session database's row keys (migrate-keys, rollback-keys)",
 } satisfies CommandMetadata;
 
 export const shareHelp = {

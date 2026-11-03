@@ -1,7 +1,11 @@
 import { activityOneLine, compareActivityRows } from "@oh-my-pi/pi-tui/overlays/agent-activity";
-import type { Stats } from "node:fs";
-import * as fs from "node:fs/promises";
 import type { AgentActivityRow, AgentActivityQuery } from "@oh-my-pi/pi-tui/overlays/agent-activity";
+import {
+	defaultSessionStorage,
+	readSessionTextFrom,
+	type SessionStorage,
+	type SessionStorageStat,
+} from "../session/session-storage";
 export type {
 	AgentActivityRow,
 	AgentActivityQuery,
@@ -210,14 +214,21 @@ export class AgentActivityIndex {
 	#liveRows = new Map<string, AgentActivityRow[]>();
 	#listeners = new Set<() => void>();
 	#remote: AgentActivityRemote | undefined;
+	/** Storage local transcripts are read from; `undefined` reads the default session storage. */
+	#storage: SessionStorage | undefined;
 	/** Bumped on every change; keys the merged-row and query caches. */
 	#revision = 0;
 	#mergedRevision = -1;
 	#merged = new Map<string, AgentActivityRow[]>();
 	#queryCache: QueryCacheEntry | undefined;
 
-	constructor(options?: { remote?: AgentActivityRemote }) {
+	/**
+	 * @param options.storage Storage holding the session tree's transcripts (the
+	 *   session's own); omitted, the default session storage at read time.
+	 */
+	constructor(options?: { remote?: AgentActivityRemote; storage?: SessionStorage }) {
 		this.#remote = options?.remote;
+		this.#storage = options?.storage;
 	}
 
 	onChange(listener: () => void): () => void {
@@ -328,9 +339,11 @@ export class AgentActivityIndex {
 	}
 
 	async #syncLocal(agentId: string, sessionFile: string): Promise<void> {
-		let stat: Stats;
+		// Through the session storage: under `session.storage: sql` the transcript is a row, not a file.
+		const storage = this.#storage ?? defaultSessionStorage();
+		let stat: SessionStorageStat;
 		try {
-			stat = await fs.stat(sessionFile);
+			stat = storage.statSync(sessionFile);
 		} catch {
 			return;
 		}
@@ -358,7 +371,8 @@ export class AgentActivityIndex {
 		const start = state.offset;
 		let text: string;
 		try {
-			text = await Bun.file(sessionFile).slice(start, stat.size).text();
+			// The bytes the stat saw, so the offset and mtime below describe what was read.
+			({ text } = await readSessionTextFrom(storage, sessionFile, start, stat.size - start));
 		} catch {
 			return;
 		}

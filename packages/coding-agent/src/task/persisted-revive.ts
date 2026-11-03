@@ -28,6 +28,7 @@ import {
 	type PersistedSessionInit,
 	SessionManager,
 } from "../session/session-manager";
+import { defaultSessionStorage, type SessionStorage } from "../session/session-storage";
 import type { EventBus } from "../utils/event-bus";
 import {
 	attachIrcWakeTurnMonitor,
@@ -73,6 +74,12 @@ export interface PersistedSubagentReviveContext {
 	eventBus?: EventBus;
 	/** Root-scoped observability bus the revived run's frames also publish to. */
 	subagentEventBus?: EventBus;
+	/**
+	 * Storage the top-level session's subagent tree lives in (its session
+	 * manager's); revived transcripts are read and reopened there. Omitted: the
+	 * default session storage.
+	 */
+	storage?: SessionStorage;
 }
 
 /**
@@ -112,7 +119,8 @@ export function createPersistedSubagentReviverFactory(
 	return async ref => {
 		const sessionFile = ref.sessionFile;
 		if (!sessionFile) return undefined;
-		const peek = await SessionManager.peekSessionInit(sessionFile);
+		const storage = ctx.storage ?? defaultSessionStorage();
+		const peek = await SessionManager.peekSessionInit(sessionFile, storage);
 		// No persisted contract (pre-session_init file) or the recorded workspace
 		// is gone (isolated/merged worktree, moved dir): leave it transcript-only
 		// (history://) rather than resurrect a wrong or broken session.
@@ -161,7 +169,7 @@ export function createPersistedSubagentReviverFactory(
 		return async expectedRef => {
 			// Re-open fresh on every revive: park closes the writer, so this takes
 			// the single-writer lock cleanly and restores the full message history.
-			const reopened = await SessionManager.open(sessionFile, undefined, undefined, {
+			const reopened = await SessionManager.open(sessionFile, undefined, storage, {
 				suppressBreadcrumb: true,
 				throwIfMissing: true,
 			});

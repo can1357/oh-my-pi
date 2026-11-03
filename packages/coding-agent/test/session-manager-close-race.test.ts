@@ -93,6 +93,9 @@ class CloseHoldingStorage implements SessionStorage {
 	listFilesSync(dir: string, pattern: string): string[] {
 		return this.#inner.listFilesSync(dir, pattern);
 	}
+	listDirsSync(dir: string): string[] {
+		return this.#inner.listDirsSync(dir);
+	}
 	exists(p: string): Promise<boolean> {
 		return this.#inner.exists(p);
 	}

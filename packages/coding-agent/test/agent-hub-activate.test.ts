@@ -22,6 +22,7 @@ import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { visitEntriesFromFileStream } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { defaultSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { getBundledAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -627,7 +628,7 @@ describe("Agent hub Enter activation", () => {
 				focusResolved.resolve();
 			},
 			session: { getToolByName: () => undefined, extensionRunner: undefined },
-			sessionManager: { getCwd: () => TEST_CWD, getSessionFile: () => null },
+			sessionManager: { getCwd: () => TEST_CWD, getSessionFile: () => null, getStorage: defaultSessionStorage },
 			hideThinkingBlock: false,
 		};
 		const controller = new SelectorController(ctx as unknown as InteractiveModeContext);
@@ -684,7 +685,11 @@ describe("Agent hub double-← gating", () => {
 			collabGuest: { agentRegistry: agents, hubRemote: undefined },
 			focusAgentSession: async () => {},
 			session: { getToolByName: () => undefined, extensionRunner: undefined },
-			sessionManager: { getCwd: () => TEST_CWD, getSessionFile: () => sessionFile },
+			sessionManager: {
+				getCwd: () => TEST_CWD,
+				getSessionFile: () => sessionFile,
+				getStorage: defaultSessionStorage,
+			},
 			hideThinkingBlock: false,
 		};
 		const controller = new SelectorController(ctx as unknown as InteractiveModeContext);

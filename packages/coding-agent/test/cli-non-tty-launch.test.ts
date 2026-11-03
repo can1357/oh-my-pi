@@ -1,7 +1,9 @@
 import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { SqlSessionStorage } from "@oh-my-pi/pi-coding-agent/session/sql-session-storage";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { SQL } from "bun";
 
 // Launch-mode selection without a terminal on stdin (scripts, CI, `</dev/null`).
 // Before: a bare or prompt-carrying launch chose interactive mode, booted the TUI
@@ -22,7 +24,11 @@ interface LaunchRun {
 async function launchWithoutTerminal(
 	tempDir: TempDir,
 	args: string[],
-	{ extensionDiscovery = false }: { extensionDiscovery?: boolean } = {},
+	{
+		extensionDiscovery = false,
+		persistSession = false,
+		env: extraEnv = {},
+	}: { extensionDiscovery?: boolean; persistSession?: boolean; env?: Record<string, string> } = {},
 ): Promise<LaunchRun> {
 	const home = tempDir.join("home");
 	fs.mkdirSync(home, { recursive: true });
@@ -41,8 +47,11 @@ async function launchWithoutTerminal(
 		// CI can run on EC2 even when no credential variables are inherited.
 		AWS_EC2_METADATA_DISABLED: "true",
 	};
+	Object.assign(env, extraEnv);
 	const discoveryArgs = extensionDiscovery ? [] : ["--no-extensions"];
-	const proc = Bun.spawn([process.execPath, cliEntry, "--no-session", ...discoveryArgs, ...MODEL_ARGS, ...args], {
+	// `--resume` needs the session layer; every other case keeps it off.
+	const sessionArgs = persistSession ? [] : ["--no-session"];
+	const proc = Bun.spawn([process.execPath, cliEntry, ...sessionArgs, ...discoveryArgs, ...MODEL_ARGS, ...args], {
 		cwd: tempDir.path(),
 		env,
 		stdin: "ignore",
@@ -238,5 +247,96 @@ describe("--export flag validation", () => {
 		expect(run.exitCode, run.stderr).toBe(2);
 		expect(run.stderr).toContain('Error: Invalid --thinking value: "bogus"');
 		expect(run.stdout).not.toContain("Exported to:");
+	}, 30_000);
+});
+
+describe("--export under session.storage: sql", () => {
+	it("exports a session the configured SQL storage holds", async () => {
+		using tempDir = TempDir.createSync("@omp-export-sql-");
+		// What `session.storage: sql` reads: the database named by the connection-string file.
+		const database = `sqlite://${tempDir.join("sessions.db")}`;
+		const dsnFile = tempDir.join("dsn");
+		await Bun.write(dsnFile, `${database}\n`);
+		const sessionFile = tempDir.join("sessions/--project--/2026-10-04T00-00-00-000Z_sql-export.jsonl");
+		const client = new SQL(database);
+		const storage = await SqlSessionStorage.create({ client });
+		await storage.writeText(
+			sessionFile,
+			`${[
+				{
+					type: "session",
+					version: 3,
+					id: "sql-export",
+					timestamp: "2026-10-04T00:00:00.000Z",
+					cwd: tempDir.path(),
+				},
+				{
+					type: "message",
+					id: "u1",
+					parentId: null,
+					timestamp: "2026-10-04T00:00:01.000Z",
+					message: { role: "user", content: "only in the table", timestamp: 1 },
+				},
+			]
+				.map(entry => JSON.stringify(entry))
+				.join("\n")}\n`,
+		);
+		await client.end();
+		const outputPath = tempDir.join("export.html");
+
+		const run = await launchWithoutTerminal(tempDir, ["--export", sessionFile, outputPath], {
+			env: { OMP_SESSION_STORAGE: "sql", OMP_SESSION_SQL_DSN_FILE: dsnFile },
+		});
+
+		expect(run.exitCode, run.stderr).toBe(0);
+		const html = await Bun.file(outputPath).text();
+		const encoded = html.match(/<script id="session-data" type="application\/json">([^<]+)<\/script>/)?.[1] ?? "";
+		const data = JSON.parse(Buffer.from(encoded, "base64").toString("utf8")) as {
+			header: { id: string };
+			entries: { id: string }[];
+		};
+		expect([data.header.id, data.entries.map(entry => entry.id)]).toEqual(["sql-export", ["u1"]]);
+	}, 30_000);
+});
+
+describe("--resume under session.storage: sql", () => {
+	it("resumes a session the configured SQL storage holds by its id prefix", async () => {
+		using tempDir = TempDir.createSync("@omp-resume-sql-");
+		const database = `sqlite://${tempDir.join("sessions.db")}`;
+		const dsnFile = tempDir.join("dsn");
+		await Bun.write(dsnFile, `${database}\n`);
+		const sessionDir = tempDir.join("sessions");
+		const id = "01a1880d-aaaa-7000-9000-000000000001";
+		const sessionFile = path.join(sessionDir, `2026-10-29T00-00-00-000Z_${id}.jsonl`);
+		const client = new SQL(database);
+		const storage = await SqlSessionStorage.create({ client });
+		await storage.writeText(
+			sessionFile,
+			`${[
+				{ type: "session", version: 3, id, timestamp: "2026-10-29T00:00:00.000Z", cwd: tempDir.path() },
+				{
+					type: "message",
+					id: "u1",
+					parentId: null,
+					timestamp: "2026-10-29T00:00:01.000Z",
+					message: { role: "user", content: "only in the table", timestamp: 1 },
+				},
+			]
+				.map(entry => JSON.stringify(entry))
+				.join("\n")}\n`,
+		);
+		await client.end();
+
+		const run = await launchWithoutTerminal(
+			tempDir,
+			["--session-dir", sessionDir, "--resume", id.slice(0, 8), "say ok"],
+			{ persistSession: true, env: { OMP_SESSION_STORAGE: "sql", OMP_SESSION_SQL_DSN_FILE: dsnFile } },
+		);
+
+		// The stored session was found, opened, and carried into the turn: its
+		// full id can only come from the row the prefix resolved to.
+		expect(run.stderr).not.toContain(`Session "${id.slice(0, 8)}" not found.`);
+		expect(run.stderr).toContain(id);
+		expect(run.stderr).toContain(NO_API_KEY);
 	}, 30_000);
 });

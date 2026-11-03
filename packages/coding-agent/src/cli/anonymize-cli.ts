@@ -8,6 +8,7 @@ import { getProjectDir, isEnoent, pathIsWithin } from "@oh-my-pi/pi-utils";
 import { ANONYMIZED_REVIEW_NOTE, anonymizeSessionTranscripts } from "../session/session-anonymizer";
 import type { SessionEntry, SessionHeader } from "../session/session-entries";
 import { loadSessionFile } from "../session/session-loader";
+import { defaultSessionStorage, FileSessionStorage } from "../session/session-storage";
 import { resolveSessionFileArg } from "./session-arg";
 import { CliUsageError } from "./usage-error";
 
@@ -27,9 +28,17 @@ export async function runAnonymizeCommand(args: AnonymizeCommandArgs): Promise<v
 		throw new CliUsageError(err instanceof Error ? err.message : String(err));
 	}
 	const outDir = path.resolve(args.out ?? `${path.basename(sourcePath, ".jsonl")}.anon`);
-	// Subagent transcripts sit next to the real file, not next to a symlink pointing at it.
-	const sourceReal = await fs.realpath(sourcePath);
-	if (!(await fs.stat(sourceReal)).isFile()) throw new CliUsageError(`${sourcePath} is not a session file`);
+	const storage = defaultSessionStorage();
+	// Subagent transcripts sit next to the real file, not next to a symlink
+	// pointing at it. A key-indexed store (`session.storage: sql`) has no
+	// symlinks and no local file to stat: its key is the path.
+	let sourceReal = sourcePath;
+	if (storage instanceof FileSessionStorage) {
+		sourceReal = await fs.realpath(sourcePath);
+		if (!(await fs.stat(sourceReal)).isFile()) throw new CliUsageError(`${sourcePath} is not a session file`);
+	} else if (!(await storage.exists(sourceReal))) {
+		throw new CliUsageError(`${sourcePath} is not a session file`);
+	}
 	const { entries: records, malformedRecords } = await loadSessionFile(sourceReal);
 	// The loader returns [] for a file without a valid session header.
 	const header = records.find((record): record is SessionHeader => record.type === "session");

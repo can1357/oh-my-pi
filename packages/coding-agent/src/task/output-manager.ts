@@ -11,7 +11,9 @@
  * collisions across repeated or nested task invocations.
  */
 import * as fs from "node:fs/promises";
+import * as path from "node:path";
 import { ADVISOR_TRANSCRIPT_STEM } from "../advisor/transcript-recorder";
+import { defaultSessionStorage, type SessionStorage } from "../session/session-storage";
 /** HUD expander click target reserved by the allocator so it cannot name a subagent. */
 export const PINNED_HUD_TOGGLE_ID = "@omp:toggle-pinned-hud";
 
@@ -29,10 +31,16 @@ export class AgentOutputManager {
 	readonly #taken = new Set<string>();
 	readonly #getArtifactsDir: () => string | null;
 	readonly #parentPrefix: string | undefined;
+	readonly #storage: SessionStorage | undefined;
 
-	constructor(getArtifactsDir: () => string | null, options?: { parentPrefix?: string }) {
+	/**
+	 * @param options.storage Storage the session's child transcripts are written
+	 *   to (the owning session's); omitted, the default session storage at scan time.
+	 */
+	constructor(getArtifactsDir: () => string | null, options?: { parentPrefix?: string; storage?: SessionStorage }) {
 		this.#getArtifactsDir = getArtifactsDir;
 		this.#parentPrefix = options?.parentPrefix;
+		this.#storage = options?.storage;
 		// Reserve the advisor transcript stem: a subagent allocated this id would
 		// write `<id>.jsonl`, clobbering the advisor's `__advisor.jsonl` in the same
 		// artifacts dir. Reserving bumps such a request to `__advisor-2`.
@@ -43,17 +51,22 @@ export class AgentOutputManager {
 	}
 
 	/**
-	 * Seed the taken-id set from output files already on disk so a resumed
-	 * session never reuses a name that would clobber a prior subagent's output.
+	 * Seed the taken-id set from prior output so a resumed session never
+	 * reuses a name that would clobber a prior subagent's output.
 	 */
 	async #ensureInitialized(): Promise<void> {
 		if (this.#initialized) return;
-		this.#initializing ??= this.#seedFromDisk();
+		this.#initializing ??= this.#seedFromPriorOutput();
 		await this.#initializing;
 		this.#initialized = true;
 	}
 
-	async #seedFromDisk(): Promise<void> {
+	/**
+	 * Result markdowns are local files. Child transcripts (`<id>.jsonl`) are
+	 * written by the task executor through the owning session's storage, which
+	 * keeps them as rows, not files, under `session.storage: sql`.
+	 */
+	async #seedFromPriorOutput(): Promise<void> {
 		const dir = this.#getArtifactsDir();
 		if (!dir) return;
 
@@ -61,8 +74,11 @@ export class AgentOutputManager {
 		try {
 			files = await fs.readdir(dir);
 		} catch {
-			return; // Directory doesn't exist yet
+			files = []; // Directory doesn't exist yet
 		}
+		const storage = this.#storage ?? defaultSessionStorage();
+		await storage.refresh?.();
+		for (const transcript of storage.listFilesSync(dir, "*.jsonl")) files.push(path.basename(transcript));
 
 		const prefix = this.#parentPrefix ? `${this.#parentPrefix}.` : "";
 		for (const file of files) {

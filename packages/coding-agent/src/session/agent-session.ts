@@ -11607,7 +11607,11 @@ export class AgentSession implements SettingsScope {
 			// under a fresh id, so the work already produced is still this session's.
 			this.#recovery.reanchorServedAttribution(previousSessionId);
 
-			await copySessionArtifacts(forkResult.oldSessionFile, forkResult.newSessionFile);
+			await copySessionArtifacts(
+				forkResult.oldSessionFile,
+				forkResult.newSessionFile,
+				this.sessionManager.getStorage(),
+			);
 
 			// Update agent session ID
 			this.#freshProviderSessionId = undefined;
@@ -13395,7 +13399,10 @@ export class AgentSession implements SettingsScope {
 			// of restarting at zero.
 			if (switchingToDifferentSession) {
 				const providersBySlug = new Map<string, Set<string>>();
-				const costs = await loadAdvisorTranscriptCosts(this.sessionFile, { providersBySlug });
+				const costs = await loadAdvisorTranscriptCosts(this.sessionFile, {
+					providersBySlug,
+					storage: this.sessionManager.getStorage(),
+				});
 				this.#advisors.restoreCost(costs, providersBySlug);
 			}
 			this.#bash.finishSessionTransition(bashTransition, true);
@@ -15373,6 +15380,7 @@ export class AgentSession implements SettingsScope {
 			beforeSnapshot: snapshot.ready,
 			onSnapshot: snapshot.release,
 			shouldContinue: () => !stale && !this.isDisposed,
+			storage: this.sessionManager.getStorage(),
 			providersBySlug,
 		})
 			.then(costs => {

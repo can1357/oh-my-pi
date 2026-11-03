@@ -81,6 +81,10 @@ class BackgroundFailureStorage implements SessionStorage {
 		return [];
 	}
 
+	listDirsSync(): string[] {
+		return [];
+	}
+
 	async exists(path: string): Promise<boolean> {
 		return this.existsSync(path);
 	}

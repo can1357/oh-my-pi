@@ -35,6 +35,7 @@ import vibeTurnResultTemplate from "../prompts/tools/vibe-turn-result.md" with {
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { SessionManager, SessionPersistenceIndeterminateError } from "../session/session-manager";
+import { defaultSessionStorage, type SessionStorage, sessionTreeStorage } from "../session/session-storage";
 import { getBundledAgent } from "../task/agents";
 import { type ExecutorOptions, runSubagentFollowUpTurn, runSubprocess } from "../task/executor";
 import { generateTaskName, sanitizeAgentId } from "../task/name-generator";
@@ -140,6 +141,8 @@ interface VibeRecord {
 	parentSessionId: string;
 	parentSessionFile: string | null;
 	childSessionFile?: string;
+	/** Storage {@link childSessionFile} lives in: the parent session's (see {@link sessionTreeStorage}). */
+	childStorage: SessionStorage;
 	agent: AgentDefinition;
 	modelOverride?: string | string[];
 	/** Pre-expansion role alias behind {@link modelOverride}, when the worker agent named one. */
@@ -292,6 +295,7 @@ export class VibeSessionRegistry {
 			ownerId: record.ownerId,
 			parentSessionId: scope.parentSessionId,
 			parentSessionFile: scope.parentSessionFile,
+			childStorage: defaultSessionStorage(),
 			agent: getBundledAgent("sonic")!,
 			state: record.state ?? "running",
 			createdAt: now,
@@ -590,6 +594,7 @@ export class VibeSessionRegistry {
 	async #resolvePersistedChild(
 		parentSessionFile: string,
 		spawn: VibeSpawnLifecycleEvent,
+		storage: SessionStorage,
 		options?: { requireAgentMatch?: boolean },
 	): Promise<string | undefined> {
 		if (options?.requireAgentMatch !== false && spawn.agent !== VIBE_CLI_AGENT[spawn.cli]) return undefined;
@@ -601,7 +606,7 @@ export class VibeSessionRegistry {
 			return undefined;
 		}
 		try {
-			const persisted = await SessionManager.peekSessionInit(childSessionFile);
+			const persisted = await SessionManager.peekSessionInit(childSessionFile, storage);
 			return persisted?.init ? childSessionFile : undefined;
 		} catch {
 			return undefined;
@@ -691,6 +696,7 @@ export class VibeSessionRegistry {
 		const sessionManager = session.sessionManager;
 		if (!sessionFile || !sessionManager) return 0;
 		const scope = this.ownerScope(session);
+		const childStorage = sessionTreeStorage(session);
 		const allSpawns = new Map<string, VibeSpawnLifecycleEvent>();
 		const terminalIntents = new Map<string, VibeTombstoneReason>();
 		for (const entry of sessionManager.getEntries()) {
@@ -738,7 +744,9 @@ export class VibeSessionRegistry {
 		for (const id of terminalIntents.keys()) {
 			const spawn = allSpawns.get(id);
 			if (!spawn) continue;
-			const childSessionFile = await this.#resolvePersistedChild(sessionFile, spawn, { requireAgentMatch: false });
+			const childSessionFile = await this.#resolvePersistedChild(sessionFile, spawn, childStorage, {
+				requireAgentMatch: false,
+			});
 			if (!childSessionFile) continue;
 			await this.#markTerminalRef(id, scope.ownerId, childSessionFile);
 			this.#records.delete(scopeKey(scope, id));
@@ -748,7 +756,7 @@ export class VibeSessionRegistry {
 		for (const candidate of candidates.values()) {
 			const { spawn } = candidate;
 			if (candidate.tombstoneReason || terminalIntents.has(spawn.id) || candidate.turnCount < 1) continue;
-			const childSessionFile = await this.#resolvePersistedChild(sessionFile, spawn);
+			const childSessionFile = await this.#resolvePersistedChild(sessionFile, spawn, childStorage);
 			if (!childSessionFile) continue;
 			const key = scopeKey(scope, spawn.id);
 			if (this.#records.has(key)) continue;
@@ -778,6 +786,7 @@ export class VibeSessionRegistry {
 				parentSessionId: scope.parentSessionId,
 				parentSessionFile: scope.parentSessionFile,
 				childSessionFile,
+				childStorage,
 				agent,
 				modelOverride,
 				modelRole,
@@ -817,7 +826,9 @@ export class VibeSessionRegistry {
 		const manager = this.#manager(session);
 		const { agent, modelOverride, modelRole } = this.#resolveWorker(session, args.cli);
 		if (!session.agentOutputManager) {
-			session.agentOutputManager = new AgentOutputManager(session.getArtifactsDir ?? (() => null));
+			session.agentOutputManager = new AgentOutputManager(session.getArtifactsDir ?? (() => null), {
+				storage: sessionTreeStorage(session),
+			});
 		}
 		const reservedIds = this.#persistedIds(session, scope);
 		for (const ref of AgentRegistry.global().list()) reservedIds.add(ref.id);
@@ -836,6 +847,7 @@ export class VibeSessionRegistry {
 			parentSessionId: scope.parentSessionId,
 			parentSessionFile,
 			childSessionFile,
+			childStorage: sessionTreeStorage(session),
 			agent,
 			modelOverride,
 			modelRole,
@@ -1239,7 +1251,7 @@ export class VibeSessionRegistry {
 	): Promise<void> {
 		if (!record.childSessionFile) return;
 		try {
-			const persisted = await SessionManager.peekSessionInit(record.childSessionFile);
+			const persisted = await SessionManager.peekSessionInit(record.childSessionFile, record.childStorage);
 			if (persisted?.init) {
 				await this.#markTerminalRef(record.id, record.ownerId, record.childSessionFile, expected, teardownDeadline);
 			}
@@ -1299,6 +1311,7 @@ export class VibeSessionRegistry {
 			parentActiveModelPattern: session.getActiveModelString?.(),
 			thinkingLevel: record.agent.thinkingLevel,
 			sessionFile,
+			sessionStorage: record.childStorage,
 			persistArtifacts: Boolean(sessionFile),
 			artifactsDir,
 			enableLsp: (session.enableLsp ?? true) && cfgTaskEnableLsp.get(session.settings),

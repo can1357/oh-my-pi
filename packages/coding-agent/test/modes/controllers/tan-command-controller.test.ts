@@ -13,6 +13,7 @@ import { AgentRegistry, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry
 import type { CreateAgentSessionOptions, CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { defaultSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 interface CapturedJobRunContext {
@@ -151,6 +152,7 @@ function createContext(overrides?: {
 	const getSessionId = vi.fn(() => "parent-local-session");
 	const sessionManager = {
 		getHeader: vi.fn(() => undefined),
+		getStorage: vi.fn(() => defaultSessionStorage()),
 		getSessionFile: vi.fn(() => parentFile),
 		getCwd: vi.fn(() => tempDir.path()),
 		getSessionDir: vi.fn(() => tempDir.path()),
@@ -238,7 +240,7 @@ describe("TanCommandController", () => {
 			harness.parentFile,
 			harness.tempDir.path(),
 			harness.parentFile.slice(0, -6),
-			undefined,
+			defaultSessionStorage(),
 			{
 				copyArtifacts: false,
 				suppressBreadcrumb: true,

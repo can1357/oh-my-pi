@@ -1,4 +1,3 @@
-import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { prompt } from "@oh-my-pi/pi-utils";
@@ -10,7 +9,7 @@ import { buildSessionContext, getRestorableSessionModels } from "../session/sess
 import { listSessionsReadOnly } from "../session/session-listing";
 import { sessionDirForCwd } from "../session/session-paths";
 import { resolveSessionLeafId, type SessionEntry } from "../session/session-entries";
-import { FileSessionStorage, type SessionStorage } from "../session/session-storage";
+import { defaultSessionStorage, type SessionStorage } from "../session/session-storage";
 import { SessionManager, type PersistedSessionInit } from "../session/session-manager";
 import { loadSessionFile } from "../session/session-loader";
 import type { ModelRegistry } from "../config/model-registry";
@@ -119,14 +118,10 @@ export async function resolveSeanceSource(
 ): Promise<ResolvedSeanceSource> {
 	const source = selector.trim();
 	if (!source) throw new Error("A source session is required.");
-	const storage = options.storage ?? new FileSessionStorage();
+	const storage = options.storage ?? defaultSessionStorage();
 	if (source.includes("/") || source.includes("\\") || source.endsWith(".jsonl")) {
 		const file = resolveToCwd(source, options.cwd);
-		try {
-			const stat = await fs.stat(file);
-			if (!stat.isFile()) throw new Error("The selected path is not a session file.");
-		} catch (error) {
-			if (error instanceof Error && error.message === "The selected path is not a session file.") throw error;
+		if (!(await storage.exists(file))) {
 			throw new Error("The selected session file was not found or could not be accessed.");
 		}
 		return validateSourceFile(file, storage);
@@ -138,6 +133,7 @@ export async function resolveSeanceSource(
 		const files = await sessionFilesFromDisk(options.artifactsDirHint, {
 			onlyPreferred: true,
 			preserveDuplicates: true,
+			storage,
 		});
 		const matches = [...files].flatMap(([id, candidates]) => {
 			const direct = candidates.filter(file => path.resolve(path.dirname(file)) === preferredDir);
@@ -223,6 +219,8 @@ export function validateSeanceParams(context: {
 
 export async function prepareSeance(context: {
 	session: ToolSession;
+	/** Storage the consult fork is written to; the source is resolved and read there too. */
+	storage: SessionStorage;
 	invocationKind: "task" | "eval";
 	agent: AgentDefinition;
 	sourceSession?: string;
@@ -244,6 +242,7 @@ export async function prepareSeance(context: {
 		cwd: context.session.cwd,
 		sessionDirHint: sessionFile ? path.dirname(sessionFile) : undefined,
 		artifactsDirHint: context.session.getArtifactsDir?.() ?? undefined,
+		storage: context.storage,
 	});
 	const modelRegistry = context.session.modelRegistry;
 	if (!modelRegistry) throw new Error("Seance cannot resolve a model in this session.");

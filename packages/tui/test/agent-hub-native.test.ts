@@ -1,5 +1,4 @@
 import { afterEach, beforeAll, expect, spyOn, test, vi } from "bun:test";
-import * as fs from "node:fs";
 import type { TspKind, TspPickerProps } from "@oh-my-pi/pi-wire";
 import type { DescribeContext, NativeChild, NativeNode } from "../src/native/node";
 import { AgentHubOverlayComponent } from "../src/overlays/agent-hub";
@@ -54,7 +53,13 @@ function createHub(
 ): AgentHubOverlayComponent {
 	return new AgentHubOverlayComponent({
 		observers,
-		transcript: { fs, parseEntries: () => [] },
+		transcript: {
+			stat: () => {
+				throw new Error("no transcripts in this test");
+			},
+			readFrom: () => Promise.reject(new Error("no transcripts in this test")),
+			parseEntries: () => [],
+		},
 		loadPersisted: async () => {},
 		hubKeys: [],
 		onDone: () => {},

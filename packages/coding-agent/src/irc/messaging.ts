@@ -5,6 +5,7 @@ import type { Settings } from "../config/settings";
 import { IrcBus } from "./bus";
 import { type AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { ensurePersistedRoster } from "../registry/persisted-agents";
+import type { SessionStorage } from "../session/session-storage";
 import { canSpawnAtDepth } from "../task/types";
 
 import { cfgTaskMaxRecursionDepth } from "../task/settings";
@@ -42,12 +43,16 @@ export function messageResult(senderId: string, waited: IrcMessage): AgentToolRe
 	};
 }
 
-/** Send a direct message or broadcast; delivery never waits for a reply. */
+/**
+ * Send a direct message or broadcast; delivery never waits for a reply.
+ * `deps.storage` is the sender's session tree storage, where a parked
+ * recipient's transcript is found; omitted, the default session storage.
+ */
 export async function executeSend(
-	deps: { registry: AgentRegistry; senderId: string; sessionFileHint?: string | null },
+	deps: { registry: AgentRegistry; senderId: string; sessionFileHint?: string | null; storage?: SessionStorage },
 	params: { to: string; message: string; progress?: boolean },
 ): Promise<AgentToolResult<CoordinationDetails>> {
-	const { registry, senderId, sessionFileHint } = deps;
+	const { registry, senderId, sessionFileHint, storage } = deps;
 	const to = params.to.trim();
 	const message = params.message;
 	if (!to) return coordinationErrorResult("A recipient is required.", { op: "send", from: senderId });
@@ -59,7 +64,7 @@ export async function executeSend(
 	// Restore parked recipients only when needed; never delay delivery to a live peer.
 	if (!isBroadcast && sessionFileHint) {
 		const recipient = registry.get(to);
-		if (!recipient || recipient.status === "parked") await ensurePersistedRoster(registry, sessionFileHint);
+		if (!recipient || recipient.status === "parked") await ensurePersistedRoster(registry, sessionFileHint, storage);
 	}
 
 	const targets = isBroadcast ? registry.listVisibleTo(senderId).map(ref => ref.id) : [to];

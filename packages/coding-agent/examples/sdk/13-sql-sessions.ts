@@ -1,8 +1,9 @@
 /**
  * SQL-Backed Sessions (PostgreSQL / MySQL / SQLite)
  *
- * Store session JSONL in a SQL database via `bun:sql`. One table, one row
- * per session file — works against PostgreSQL, MySQL/MariaDB, and SQLite
+ * Store session JSONL in a SQL database via `bun:sql`. One row per session
+ * file plus a `<table>_parts` table holding its content, so an append writes
+ * only the new entry — works against PostgreSQL, MySQL/MariaDB, and SQLite
  * with the dialect picked automatically from the connection URL.
  *
  * Useful when:
@@ -29,12 +30,13 @@ import { SQL } from "bun";
 //   sqlite::memory:                                // ephemeral
 const client = new SQL(process.env.SESSIONS_DB_URL ?? "sqlite::memory:");
 
-// `create()` runs `CREATE TABLE IF NOT EXISTS` (with the right DDL for the
-// dialect) and warms the in-memory mirror with every existing row.
+// `create()` creates both tables (with the right DDL for the dialect),
+// migrates a table an older Oh My Pi created, and warms the in-memory mirror
+// with every existing row.
 const storage = await SqlSessionStorage.create({
 	client,
-	table: "omp_session_files", // optional, this is the default
-	// createTable: false,       // set if migrations are owned elsewhere
+	table: "omp_session_files", // optional, this is the default; parts go to `omp_session_files_parts`
+	// createTable: false,       // set if migrations are owned elsewhere; DDL in docs/session.md
 });
 
 const sessionDir = "/sessions/my-project";

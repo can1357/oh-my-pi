@@ -7,6 +7,7 @@ import { APP_NAME, isCompiledBinary, isEnoent, VERSION } from "@oh-my-pi/pi-util
 import { getResolvedThemeColors, getThemeExportColors } from "@oh-my-pi/pi-tui/theme";
 import type { SessionEntry, SessionHeader } from "../../session/session-entries";
 import { SessionManager } from "../../session/session-manager";
+import type { SessionStorage } from "../../session/session-storage";
 import { collectSubSessions, type SubSession } from "../../session/sub-sessions";
 import type { ExportThemeNames } from "./args";
 import { writeBase64Json } from "./payload";
@@ -202,8 +203,15 @@ export function buildSessionData(sm: SessionManager, state?: AgentState): Sessio
 }
 
 /** All trace transcripts next to `sessionFile`, with export-only header fields stripped. */
-async function collectExportSubSessions(sessionFile: string): Promise<Record<string, SubSession>> {
-	const subSessions = await collectSubSessions(sessionFile, { includeAdvisors: true, includeCompressed: true });
+async function collectExportSubSessions(
+	sessionFile: string,
+	storage: SessionStorage,
+): Promise<Record<string, SubSession>> {
+	const subSessions = await collectSubSessions(sessionFile, {
+		includeAdvisors: true,
+		includeCompressed: true,
+		storage,
+	});
 	for (const sub of Object.values(subSessions)) sub.header = sessionHeaderForExport(sub.header);
 	return subSessions;
 }
@@ -237,9 +245,14 @@ async function writeExportHtml(sessionData: SessionData, outputPath: string, opt
 }
 
 /** Attach sub-sessions and the trace, then write the export; returns the output path. */
-async function exportSessionData(sessionData: SessionData, sessionFile: string, opts: ExportOptions): Promise<string> {
+async function exportSessionData(
+	sessionData: SessionData,
+	sessionFile: string,
+	storage: SessionStorage,
+	opts: ExportOptions,
+): Promise<string> {
 	if (opts.includeSubSessions !== false) {
-		const subSessions = await collectExportSubSessions(sessionFile);
+		const subSessions = await collectExportSubSessions(sessionFile, storage);
 		if (Object.keys(subSessions).length > 0) sessionData.subSessions = subSessions;
 	}
 	sessionData.trace = buildSessionTraceFromSnapshots(sessionData, sessionData.subSessions);
@@ -260,7 +273,7 @@ export async function exportSessionToHtml(
 	const sessionFile = sm.getSessionFile();
 	if (!sessionFile) throw new Error("Cannot export in-memory session to HTML");
 
-	return exportSessionData(buildSessionData(sm, state), sessionFile, opts);
+	return exportSessionData(buildSessionData(sm, state), sessionFile, sm.getStorage(), opts);
 }
 
 /** Export session file to HTML (standalone). */
@@ -278,5 +291,5 @@ export async function exportFromFile(inputPath: string, options?: ExportOptions 
 		throw err;
 	}
 
-	return exportSessionData(buildSessionData(sm), inputPath, opts);
+	return exportSessionData(buildSessionData(sm), inputPath, sm.getStorage(), opts);
 }
