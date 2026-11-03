@@ -26,7 +26,7 @@ import { postmortem, prompt } from "@oh-my-pi/pi-utils";
 import isolationErrorTemplate from "../prompts/tools/isolation-error.md" with { type: "text" };
 import isolationSummaryTemplate from "../prompts/tools/isolation-summary.md" with { type: "text" };
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
-import { AgentRegistry } from "../registry/agent-registry";
+import { AgentRegistry, type AgentRegistryApi } from "../registry/agent-registry";
 import { readSnapshot } from "../commit/selective/journal";
 import type { FileChangeReport, ToolSession } from "../tools";
 import { generateCommitMessage } from "../utils/commit-message-generator";
@@ -87,7 +87,7 @@ export function renderIsolationSummary(context: IsolationSummaryContext): string
 }
 
 /** Record artifact locations for `agent://` and mark the result as an isolated run. */
-function rememberAgentArtifacts(registry: AgentRegistry, result: SingleResult): SingleResult {
+function rememberAgentArtifacts(registry: AgentRegistryApi, result: SingleResult): SingleResult {
 	registry.setHistory(result.id, {
 		outputPath: result.outputPath,
 		patchPath: result.patchPath,

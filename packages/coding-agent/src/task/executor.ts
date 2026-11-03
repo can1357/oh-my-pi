@@ -1311,7 +1311,7 @@ interface RunMonitorArgs {
 	index: number;
 	id: string;
 	/** Registry this subagent's status/activity + IRC roster are keyed to. */
-	registry: AgentRegistry;
+	registry: AgentRegistryApi;
 	agent: AgentDefinition;
 	task: string;
 	assignment?: string;
@@ -3229,7 +3229,7 @@ export interface IrcWakeTurnMonitorOptions {
 	/** Registry id of the kept-alive subagent whose undriven turns are monitored. */
 	id: string;
 	/** Registry the subagent belongs to; defaults to the process-global one. */
-	registry?: AgentRegistry;
+	registry?: AgentRegistryApi;
 	index?: number;
 	agent: AgentDefinition;
 	description?: string;
@@ -3304,7 +3304,7 @@ async function relayWakeTurnOutput(args: {
 	yielded: boolean;
 	result: SingleResult | undefined;
 	turnText: string;
-	registry: AgentRegistry;
+	registry: AgentRegistryApi;
 	/** Short, attributed peer-visible error text (no stack) when the turn died on an error. */
 	error: string | undefined;
 	/** Whether the turn was aborted (runtime limit, cancellation, hard abort). */
@@ -3370,7 +3370,7 @@ export function buildWakeRelayBody(args: {
 	yielded: boolean;
 	result: SingleResult | undefined;
 	turnText: string;
-	registry: AgentRegistry;
+	registry: AgentRegistryApi;
 	error: string | undefined;
 	aborted: boolean;
 	abortReason: string | undefined;
@@ -3759,7 +3759,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
  */
 export async function finalizeSubagentLifecycle(args: {
 	id: string;
-	registry: AgentRegistry;
+	registry: AgentRegistryApi;
 	session: AgentSession;
 	aborted: boolean;
 	/** Which watchdog (if any) requested the abort; `shutdown` releases instead of adopting. */
@@ -3883,7 +3883,7 @@ export interface FollowUpTurnOptions {
 	/** Registry id of the (live or parked) subagent to continue. */
 	id: string;
 	/** Registry the subagent belongs to; defaults to the process-global one. */
-	registry?: AgentRegistry;
+	registry?: AgentRegistryApi;
 	/** Agent definition the session was originally spawned with (drives progress labels + finalize). */
 	agent: AgentDefinition;
 	/** The follow-up message; sent as the turn's user prompt (with {@link restore}, only the run's label). */
@@ -4170,7 +4170,7 @@ interface SubagentPromptInputs {
 	id: string;
 	model?: string;
 	/** Registry this subagent's roster, status and revival are keyed to (its paired IrcBus + lifecycle). */
-	registry: AgentRegistry;
+	registry: AgentRegistryApi;
 	agentSystemPrompt: string;
 	context: string;
 	planReference: string;
@@ -4272,7 +4272,9 @@ function buildSubagentSessionOptions(
 				// would pin its whole graph past park. A revive builds while the registry session is
 				// null, so it renders the cleared set rather than the launch-time pooled instructions.
 				workPoolYieldItems:
-					ownAttachedSession(inputs.id, inputs.registry)?.getWorkPoolYieldItems?.() ?? launch?.workPoolYieldItems ?? [],
+					ownAttachedSession(inputs.id, inputs.registry)?.getWorkPoolYieldItems?.() ??
+					launch?.workPoolYieldItems ??
+					[],
 				ircPeers: ircRoster?.peers ?? [],
 				ircParkedCount: ircRoster?.parkedCount ?? 0,
 				ircOmittedCount: ircRoster?.omittedCount ?? 0,

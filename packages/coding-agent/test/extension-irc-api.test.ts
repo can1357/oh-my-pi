@@ -14,10 +14,10 @@ import type {
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { IrcBus, type RemoteTransport } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
-import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import { AgentRegistry, type AgentRegistryApi } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 
-async function captureIrc(registry?: AgentRegistry): Promise<IrcApi> {
+async function captureIrc(registry?: AgentRegistryApi): Promise<IrcApi> {
 	let irc: IrcApi | undefined;
 	await loadExtensionFromFactory(
 		pi => {
@@ -58,7 +58,7 @@ function subAgent(id: string, parentId: string): ExtensionAgentIdentity {
 async function loadBridge(opts: {
 	name?: string;
 	agent?: ExtensionAgentIdentity;
-	registry?: AgentRegistry;
+	registry?: AgentRegistryApi;
 }): Promise<{ irc: IrcApi; extension: Extension }> {
 	let irc: IrcApi | undefined;
 	const extension = await loadExtensionFromFactory(
@@ -97,11 +97,11 @@ describe("pi.irc (ExtensionAPI inbound surface)", () => {
 		expect(typeof id).toBe("string");
 	});
 
-	it("resolves a recipient on the global registry (proves it uses IrcBus.global(), not a fresh bus)", async () => {
+	it("resolves a recipient on the global registry (proves it uses IrcBus.localForRegistry(), not a fresh bus)", async () => {
 		AgentRegistry.global().register({ id: "Main", displayName: "Main", kind: "main", session: null, status: "idle" });
 		const irc = await captureIrc();
 		irc.setRemoteTransport?.("cluster", injectingTransport());
-		IrcBus.global().wait("Main", { from: "@cluster/peer" }, 1000);
+		IrcBus.localForRegistry().wait("Main", { from: "@cluster/peer" }, 1000);
 		const { receipt } = await irc.deliverInbound({ from: "@cluster/peer", to: "Main", body: "hi" });
 		expect(receipt.outcome).not.toBe("failed");
 	});
@@ -111,7 +111,7 @@ describe("pi.irc (ExtensionAPI inbound surface)", () => {
 		const irc = await captureIrc();
 		irc.setRemoteTransport?.("cluster-a", injectingTransport());
 		// In-namespace sender is delivered (a waiter consumes it)...
-		IrcBus.global().wait("Main", { from: "@cluster-a/alice" }, 1000);
+		IrcBus.localForRegistry().wait("Main", { from: "@cluster-a/alice" }, 1000);
 		const ok = await irc.deliverInbound({ from: "@cluster-a/alice", to: "Main", body: "hi" });
 		expect(ok.receipt.outcome).not.toBe("failed");
 		// ...but a forged sender in a DIFFERENT namespace is rejected before it reaches the bus.
@@ -134,7 +134,7 @@ describe("pi.irc (ExtensionAPI inbound surface)", () => {
 		);
 		const id = irc.registerRemotePeer?.({ name: "beatrice", displayName: "beatrice" });
 		expect(id).toBe("@cluster-a/beatrice");
-		const receipt = await IrcBus.global().send({ from: "Main", to: "@cluster-a/beatrice", body: "hi" });
+		const receipt = await IrcBus.localForRegistry().send({ from: "Main", to: "@cluster-a/beatrice", body: "hi" });
 		expect(receipt.outcome).toBe("injected");
 		expect(seen).toBe("@cluster-a/beatrice");
 		expect(seenToName).toBe("beatrice");
@@ -280,7 +280,7 @@ describe("pi.irc (ExtensionAPI inbound surface)", () => {
 				subAgent("0-Scout", "Main"),
 			),
 		).rejects.toThrow(/top-level session may claim/);
-		expect(IrcBus.global().hasClaimedNamespace()).toBe(false);
+		expect(IrcBus.localForRegistry().hasClaimedNamespace()).toBe(false);
 	});
 
 	it("a subagent sharing the root's claim does not take over its remote peers (#7401)", async () => {
@@ -337,7 +337,7 @@ describe("pi.irc (ExtensionAPI inbound surface)", () => {
 		expect(registry.get("@cluster-a/han")?.kind).toBe("remote");
 
 		// Each root's sends — and its subagents' — leave through that root's bridge.
-		const bus = IrcBus.forRegistry(registry);
+		const bus = IrcBus.localForRegistry(registry);
 		expect((await bus.send({ from: "root-a", to: "@cluster-a/leia", body: "from a" })).outcome).toBe("injected");
 		expect((await bus.send({ from: "root-b", to: "@cluster-a/leia", body: "from b" })).outcome).toBe("injected");
 		expect((await bus.send({ from: "0-Scout", to: "@cluster-a/han", body: "from b's scout" })).outcome).toBe(

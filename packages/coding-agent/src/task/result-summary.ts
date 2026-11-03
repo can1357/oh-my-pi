@@ -7,7 +7,7 @@
  */
 import { prompt } from "@oh-my-pi/pi-utils";
 import taskSummaryTemplate from "../prompts/tools/task-summary.md" with { type: "text" };
-import { type AgentRegistry, isResumable } from "../registry/agent-registry";
+import { type AgentRegistryApi, isResumable } from "../registry/agent-registry";
 import { ASYNC_INLINE_RESULT_MAX_CHARS } from "../session/async-job-delivery";
 import { escapeHarnessTags } from "../session/harness-tags";
 import { formatBytes, formatDuration } from "@oh-my-pi/pi-tui/render/render-utils";
@@ -55,7 +55,7 @@ function previewHead(output: string): string {
  */
 export function formatTaskResultSummary(
 	result: SingleResult,
-	options: { totalDurationMs: number; mergeSummary?: string; registry: AgentRegistry },
+	options: { totalDurationMs: number; mergeSummary?: string; registry: AgentRegistryApi },
 ): string {
 	const status = result.aborted
 		? "cancelled"
