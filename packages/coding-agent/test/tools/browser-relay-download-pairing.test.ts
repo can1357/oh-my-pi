@@ -1,5 +1,9 @@
 import { expect, it } from "bun:test";
-import { DOWNLOAD_PAIRING_MS, DownloadPairing } from "../../../browser-relay/extension/download-pairing";
+import {
+	DOWNLOAD_LOOKUP_MS,
+	DOWNLOAD_PAIRING_MS,
+	DownloadPairing,
+} from "../../../browser-relay/extension/download-pairing";
 
 const URL = "https://example.com/r.csv";
 
@@ -24,4 +28,21 @@ it("lets a report Chrome never made an item for expire instead of taking a later
 	pairing.created(7, URL);
 	expect(pairing.idFor("retry")).toBe(7);
 	expect(pairing.idFor("refused")).toBeUndefined();
+});
+
+it("keeps every running download's pair however many run, and drops a pair once nobody will look it up", () => {
+	let now = 0;
+	const pairing = new DownloadPairing(() => now);
+	for (let id = 0; id < 300; id++) {
+		pairing.report(`g${id}`, `${URL}?${id}`);
+		pairing.created(id, `${URL}?${id}`);
+	}
+	expect(pairing.idFor("g0")).toBe(0);
+	pairing.finished(1, "interrupted");
+	expect(pairing.idFor("g1")).toBeUndefined();
+	pairing.finished(2, "complete");
+	now += DOWNLOAD_LOOKUP_MS + 1;
+	expect(pairing.idFor("g2")).toBe(2);
+	pairing.finished(3, "complete");
+	expect([pairing.idFor("g2"), pairing.idFor("g3"), pairing.idFor("g0")]).toEqual([undefined, 3, 0]);
 });

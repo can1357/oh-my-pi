@@ -4,10 +4,13 @@
  * download's.
  */
 export const DOWNLOAD_PAIRING_MS = 5_000;
+/**
+ * How long a pair outlives its completed download. omp looks the file up as soon as the page reports the completion, so
+ * a pair still here after this belongs to a tab that went away first.
+ */
+export const DOWNLOAD_LOOKUP_MS = 60_000;
 /** Unpaired reports kept at most. */
 const MAX_REPORTS = 32;
-/** Paired downloads kept at most; one nobody looks up (canceled, say) is dropped in time. */
-const MAX_PAIRED = 256;
 
 /**
  * Pairs a driven page's download reports (`Page.downloadWillBegin`, named by guid) with Chrome's download items
@@ -18,7 +21,8 @@ const MAX_PAIRED = 256;
  */
 export class DownloadPairing {
 	readonly #now: () => number;
-	readonly #ids = new Map<string, number>();
+	/** Chrome's item for each paired report, with when the download completed. */
+	readonly #pairs = new Map<string, { id: number; completedAt?: number }>();
 	/** Reports waiting for Chrome's item, oldest first. */
 	readonly #reports: Array<{ guid: string; url: string; at: number }> = [];
 
@@ -27,7 +31,7 @@ export class DownloadPairing {
 	}
 
 	report(guid: string, url: string): void {
-		if (this.#ids.has(guid) || this.#reports.some(report => report.guid === guid)) return;
+		if (this.#pairs.has(guid) || this.#reports.some(report => report.guid === guid)) return;
 		this.#reports.push({ guid, url, at: this.#now() });
 		if (this.#reports.length > MAX_REPORTS) this.#reports.shift();
 	}
@@ -37,18 +41,33 @@ export class DownloadPairing {
 		while (this.#reports.length > 0 && this.#reports[0]!.at < oldest) this.#reports.shift();
 		const index = this.#reports.findIndex(report => report.url === url);
 		if (index < 0) return;
-		this.#ids.set(this.#reports[index]!.guid, id);
+		this.#pairs.set(this.#reports[index]!.guid, { id });
 		this.#reports.splice(index, 1);
-		if (this.#ids.size > MAX_PAIRED) this.#ids.delete(this.#ids.keys().next().value!);
+	}
+
+	/**
+	 * Chrome's item `id` stopped running. A canceled or failed download is never looked up, so its pair goes now; a
+	 * completed one stays for the lookup, and pairs completed longer than {@link DOWNLOAD_LOOKUP_MS} ago go.
+	 */
+	finished(id: number, state: "interrupted" | "complete"): void {
+		const now = this.#now();
+		for (const [guid, pair] of this.#pairs) {
+			if (pair.id === id) {
+				if (state === "interrupted") this.#pairs.delete(guid);
+				else pair.completedAt = now;
+			} else if (pair.completedAt !== undefined && pair.completedAt < now - DOWNLOAD_LOOKUP_MS) {
+				this.#pairs.delete(guid);
+			}
+		}
 	}
 
 	/** Chrome's download id for the report `guid`, if an item paired with it. */
 	idFor(guid: string): number | undefined {
-		return this.#ids.get(guid);
+		return this.#pairs.get(guid)?.id;
 	}
 
 	/** Drop the pair once its download is over and looked up. */
 	forget(guid: string): void {
-		this.#ids.delete(guid);
+		this.#pairs.delete(guid);
 	}
 }
