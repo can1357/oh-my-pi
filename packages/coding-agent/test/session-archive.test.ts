@@ -1,3 +1,4 @@
+import { dlopen, FFIType, ptr } from "bun:ffi";
 import { afterEach, beforeEach, expect, mock, spyOn, test } from "bun:test";
 
 import { randomBytes } from "node:crypto";
@@ -49,6 +50,7 @@ import {
 import { withGcLock } from "@oh-my-pi/pi-coding-agent/session/gc-lock";
 import * as libcModule from "@oh-my-pi/pi-coding-agent/session/libc";
 import * as holders from "@oh-my-pi/pi-coding-agent/session/open-file-holders";
+import * as regularFile from "@oh-my-pi/pi-coding-agent/session/regular-file";
 import { makeHeldDirectory } from "@oh-my-pi/pi-coding-agent/session/regular-file";
 import * as sessionArchive from "@oh-my-pi/pi-coding-agent/session/session-archive";
 import { resolveResumableSession, resolveResumeTarget } from "@oh-my-pi/pi-coding-agent/session/session-listing";
@@ -10427,42 +10429,142 @@ test("a reclaim keeps an archived copy another process holds open, and that proc
 	}
 }, 120_000);
 
-test("a reclaim writes a freed copy back when the original is truncated in the call before the copy's unlink", async () => {
-	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
-	await Bun.write(path.join(liveArtifacts, "a.log"), "ORIGINAL");
-	expect((await archiveOnly()).archive).toMatchObject({ archived: 1, errors: [] });
-	const copyDir = archiveFile.slice(0, -".jsonl.gz".length);
-	const copy = path.join(copyDir, "a.log");
-	const original = path.join(reclaimedNames().artifacts, "a.log");
-	let truncator: Bun.Subprocess | undefined;
-	const realUnlink = fs.unlink;
-	spyOn(fs, "unlink").mockImplementation(async file => {
-		const name = String(file);
-		if (!truncator && path.dirname(name) === copyDir && path.basename(name).startsWith(".a.log.")) {
-			// The truncation an opener asks for blocks on the original's lease
-			// until this run lets go, and shows as that lease breaking; the
-			// unlink then goes ahead, as the one system call it is. Polled: the
-			// kernel gives no event for an opener blocked on a lease, only its
-			// `BREAKER` line in /proc/locks; without a lease (before this fix)
-			// the truncation simply finishes, which ends the wait too.
-			truncator = Bun.spawn(["/usr/bin/python3", "-c", "import sys; open(sys.argv[1],'wb').close()", original]);
-			for (let tries = 0; tries < 400; tries++) {
-				const locks = await Bun.file("/proc/locks").text();
-				if (locks.includes(`BREAKER   WRITE ${truncator.pid} `) || truncator.exitCode !== null) break;
-				await Bun.sleep(25);
-			}
-		}
-		return await realUnlink(file);
+/** `getrlimit`/`setrlimit` for `RLIMIT_FSIZE`, which makes the kernel cut a write short at the limit and refuse one past it (`EFBIG`). */
+const fileSizeLimit = (() => {
+	const lib = dlopen(process.platform === "linux" ? "libc.so.6" : "libc.dylib", {
+		getrlimit: { args: [FFIType.i32, FFIType.ptr], returns: FFIType.i32 },
+		setrlimit: { args: [FFIType.i32, FFIType.ptr], returns: FFIType.i32 },
 	});
-	const result = await runGcCommand({ flags: reclaimApply() });
-	mock.restore();
-	await truncator?.exited;
+	const RLIMIT_FSIZE = 1;
+	return {
+		get(): BigUint64Array {
+			const now = new BigUint64Array(2);
+			if (lib.symbols.getrlimit(RLIMIT_FSIZE, ptr(now)) !== 0) throw new Error("getrlimit failed");
+			return now;
+		},
+		set(limit: BigUint64Array): void {
+			if (lib.symbols.setrlimit(RLIMIT_FSIZE, ptr(limit)) !== 0) throw new Error("setrlimit failed");
+		},
+	};
+})();
 
-	expect(truncator).toBeDefined();
-	expect(result.reclaim?.reclaimed).toBe(1);
-	expect(result.reclaim?.keptCopies?.join("\n")).toContain("written back");
-	expect(await Bun.file(copy).text()).toBe("ORIGINAL");
-}, 120_000);
+// The write-back writes a copy's bytes to a new file; `write(2)` may write
+// less than it is given, and a review's real reclaim, under a file size limit
+// that cut every write in half, left half the copy and reported it written
+// back. Each write here runs under a limit the kernel enforces, set just
+// before it and put back after: half of what it is given, or a fixed limit
+// the write-back cannot get past.
+for (const writes of ["whole", "cut short by the kernel each time", "stopped by the kernel part-way"] as const) {
+	test(`a reclaim writes a freed copy back when the original is truncated in the call before the copy's unlink, writes ${writes}`, async () => {
+		const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+		const bytes = writes === "whole" ? Buffer.from("ORIGINAL") : Buffer.alloc(1024 * 1024, 65);
+		await Bun.write(path.join(liveArtifacts, "a.log"), bytes);
+		expect((await archiveOnly()).archive).toMatchObject({ archived: 1, errors: [] });
+		const copyDir = archiveFile.slice(0, -".jsonl.gz".length);
+		const copy = path.join(copyDir, "a.log");
+		const original = path.join(reclaimedNames().artifacts, "a.log");
+		let truncator: Bun.Subprocess | undefined;
+		let cutShort = 0;
+		const realUnlink = fs.unlink;
+		spyOn(fs, "unlink").mockImplementation(async file => {
+			const name = String(file);
+			if (!truncator && path.dirname(name) === copyDir && path.basename(name).startsWith(".a.log.")) {
+				// The truncation an opener asks for blocks on the original's lease
+				// until this run lets go, and shows as that lease breaking; the
+				// unlink then goes ahead, as the one system call it is. Polled: the
+				// kernel gives no event for an opener blocked on a lease, only its
+				// `BREAKER` line in /proc/locks; without a lease (before this fix)
+				// the truncation simply finishes, which ends the wait too.
+				truncator = Bun.spawn(["/usr/bin/python3", "-c", "import sys; open(sys.argv[1],'wb').close()", original]);
+				for (let tries = 0; tries < 400; tries++) {
+					const locks = await Bun.file("/proc/locks").text();
+					if (locks.includes(`BREAKER   WRITE ${truncator.pid} `) || truncator.exitCode !== null) break;
+					await Bun.sleep(25);
+				}
+			}
+			return await realUnlink(file);
+		});
+		if (writes !== "whole") {
+			const realCreate = regularFile.createExclusive;
+			spyOn(regularFile, "createExclusive").mockImplementation(async (file, mode, readable) => {
+				const handle = await realCreate(file, mode, readable);
+				if (file !== copy) return handle;
+				const realWrite = handle.write.bind(handle) as (...args: unknown[]) => Promise<{ bytesWritten: number }>;
+				let end = 0;
+				spyOn(handle, "write").mockImplementation((async (...args: unknown[]) => {
+					const length = args[2] as number;
+					const before = fileSizeLimit.get();
+					const limit =
+						writes === "stopped by the kernel part-way" ? bytes.length / 2 : end + Math.ceil(length / 2);
+					fileSizeLimit.set(new BigUint64Array([BigInt(limit), before[1]]));
+					try {
+						const put = await realWrite(...args);
+						if (put.bytesWritten < length) cutShort++;
+						end = Math.max(end, (args[3] as number) + put.bytesWritten);
+						return put;
+					} finally {
+						fileSizeLimit.set(before);
+					}
+				}) as typeof handle.write);
+				return handle;
+			});
+		}
+		const result = await runGcCommand({ flags: reclaimApply() });
+		mock.restore();
+		await truncator?.exited;
+
+		expect(truncator).toBeDefined();
+		expect(result.reclaim?.reclaimed).toBe(1);
+		const kept = result.reclaim?.keptCopies?.join("\n") ?? "";
+		if (writes === "stopped by the kernel part-way") {
+			expect(kept).not.toContain("were written back");
+			expect(kept).toContain("the rest was lost");
+			expect((await fs.stat(copy)).size).toBe(bytes.length / 2);
+		} else {
+			if (writes !== "whole") expect(cutShort).toBeGreaterThan(0);
+			expect(kept).toContain("written back");
+			expect(await fs.readFile(copy)).toEqual(bytes);
+		}
+	}, 120_000);
+}
+
+// Every write gc makes through a descriptor — a staged copy, an inflated
+// transcript, a written-back copy, a restore record, a lock — goes through
+// `writeAllAt`: a write the kernel cuts short is carried on, and one it
+// refuses throws, never returning as if all of it were written.
+test("writeAllAt writes every byte through writes the kernel cuts short, and throws when the kernel refuses one", async () => {
+	const file = path.join(root, "short-writes");
+	const bytes = Buffer.alloc(300_000, 66);
+	const before = fileSizeLimit.get();
+	const handle = await fs.open(file, "wx");
+	let calls = 0;
+	const realWrite = handle.write.bind(handle) as (...args: unknown[]) => Promise<{ bytesWritten: number }>;
+	try {
+		let end = 0;
+		spyOn(handle, "write").mockImplementation((async (...args: unknown[]) => {
+			calls++;
+			fileSizeLimit.set(new BigUint64Array([BigInt(end + 1000), before[1]]));
+			try {
+				const put = await realWrite(...args);
+				end += put.bytesWritten;
+				return put;
+			} finally {
+				fileSizeLimit.set(before);
+			}
+		}) as typeof handle.write);
+		await regularFile.writeAllAt(handle, bytes, 0);
+		mock.restore();
+		expect(calls).toBe(300);
+		expect(await fs.readFile(file)).toEqual(bytes);
+
+		fileSizeLimit.set(new BigUint64Array([BigInt(bytes.length + 10), before[1]]));
+		await expect(regularFile.writeAllAt(handle, Buffer.alloc(100, 67), bytes.length)).rejects.toThrow("EFBIG");
+	} finally {
+		fileSizeLimit.set(before);
+		mock.restore();
+		await handle.close();
+	}
+});
 
 for (const shape of ["plain", "compressed", "compressed, moved aside twice"] as const) {
 	test(`the blob sweep keeps a blob only a killed run's ${shape} .leaving transcript references`, async () => {

@@ -189,9 +189,27 @@ export class TranscriptBrowser implements Component {
 		this.#syncFollowBottom();
 	}
 
+	/** Whether the view shows the first body row. */
+	get atTop(): boolean {
+		return this.#scrollView.getScrollOffset() === 0;
+	}
+
+	/** One past the last logical body row in view. */
+	get visibleEnd(): number {
+		return this.#scrollView.getVisibleRange().end;
+	}
+
 	/** Whether an anchor identity has successfully been applied to the viewport. */
 	hasAnchored(id: string): boolean {
 		return this.#scrollView.hasRevealedRange(id);
+	}
+
+	/**
+	 * What to add to a body row of the last frame to get its logical body row, as
+	 * {@link toContentPoint} maps it; it follows the scroll, so a content row keeps its sum.
+	 */
+	get frameRowOffset(): number {
+		return this.#scrollView.getVisibleRange().start - (this.#layout?.bodyTop ?? 0);
 	}
 
 	/**
