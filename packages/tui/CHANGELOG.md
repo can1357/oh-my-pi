@@ -4,7 +4,7 @@
 
 ### Added
 
-- `ModelHubCallbacks.onProviderRefreshed(providerId)` is called after the model hub re-fetches a provider's catalog, so the host can re-resolve state derived from the registry
+- `ModelHubCallbacks.onCatalogRefreshed(providerId?)` is called after the model hub re-fetches a catalog; the `--models` scope it returns replaces the hub's ([#17981](https://github.com/can1357/oh-my-pi/pull/17981) by [@breakwaterlabs](https://github.com/breakwaterlabs))
 
 ## [18.16.0] - 2026-11-02
 

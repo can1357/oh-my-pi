@@ -121,10 +121,9 @@ export async function listLogoutAccounts(
 }
 
 /**
- * Removes one stored credential, refreshes the provider's models and re-resolves
- * the session's model scope. `removed: false` means the credential was already
- * gone; `remainingSource` names the auth source that still authenticates the
- * provider, if any.
+ * Removes one stored credential and refreshes the provider's models.
+ * `removed: false` means the credential was already gone; `remainingSource`
+ * names the auth source that still authenticates the provider, if any.
  */
 export async function logoutCredential(
 	session: Pick<AgentSession, "modelRegistry" | "sessionId" | "refreshScopedModels">,

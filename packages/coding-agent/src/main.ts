@@ -2730,7 +2730,6 @@ export async function runRootCommand(
 					);
 				}
 			};
-			// Sign-in, sign-out and provider refreshes re-resolve the scope the same way startup did.
 			session.setScopedModelsRefresher(async () => {
 				await rebuildScopedModels(session, parsedArgs, modelRegistry, settingsInstance);
 			});
