@@ -379,7 +379,10 @@ export class EditTool implements AgentTool<TInput> {
 	}
 
 	get mode(): EditMode {
-		return this.#editMode ?? resolveEditMode(this.session);
+		if (this.#editMode) return this.#editMode;
+		const mode = resolveEditMode(this.session);
+		// `edit.mode: none` unregisters this tool on the next built-in reconcile; until then keep a valid schema.
+		return mode === "none" ? "replace" : mode;
 	}
 
 	get description(): string {

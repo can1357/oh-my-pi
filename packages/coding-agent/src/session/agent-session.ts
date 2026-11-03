@@ -279,7 +279,7 @@ import type { AgentDefinition } from "../task/types";
 import type { ModelMention } from "@oh-my-pi/pi-tui/prompt/model-mention-syntax";
 import { ModelMentionRegistry, type ResolvedModelMention } from "./model-mentions";
 import { parseCommandArgs } from "../utils/command-args";
-import type { EditMode } from "@oh-my-pi/pi-tui/tools/edit";
+import type { EditModeSetting } from "../edit/settings";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
 import { extractFileMentions, generateFileMentionMessages } from "../utils/file-mentions";
 import { normalizeModelContextImages } from "../utils/image-loading";
@@ -7348,7 +7348,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.#tools.removeVibeToolsPreservingActive();
 	}
 
-	#resolveActiveEditMode(): EditMode {
+	#resolveActiveEditMode(): EditModeSetting {
 		return this.#tools.resolveActiveEditMode();
 	}
 
