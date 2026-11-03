@@ -700,9 +700,9 @@ fn alias_elements(aliases: &HashMap<String, String>) -> BTreeMap<String, String>
 
 /// Refreshes the stored copy of `var` from the alias table when it carries the
 /// alias table's hook, as Bash does whenever it looks `BASH_ALIASES` up.
-fn refresh_if_hooked(aliases: &HashMap<String, String>, var: &ShellVariable) {
+fn refresh_if_hooked(aliases: &brush_parser::AliasTable, var: &ShellVariable) {
 	if var.assignment_hook() == Some(AssignmentHook::AliasTable) {
-		var.refresh_stored_copy(alias_elements(aliases));
+		var.refresh_stored_copy(aliases);
 	}
 }
 

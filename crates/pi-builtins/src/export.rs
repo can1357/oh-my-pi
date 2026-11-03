@@ -53,6 +53,7 @@ impl builtins::Command for ExportCommand {
 		let mut result = ExecutionResult::success();
 		for decl in &self.declarations {
 			let current_result = self.process_decl(&mut context, decl)?;
+			crate::report_rejected_alias_names(&mut context, decl).await;
 			if !current_result.is_success() {
 				result = current_result;
 			}
@@ -130,6 +131,9 @@ impl ExportCommand {
 					EnvironmentLookup::Anywhere,
 					EnvironmentScope::Global,
 				)?;
+				// Bash looks the variable up again once it is exported, which
+				// refreshes a hooked variable's stored copy.
+				let _ = context.shell.env().get(name);
 			},
 		}
 

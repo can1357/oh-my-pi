@@ -464,3 +464,95 @@ async fn utility_environment_keeps_the_aliases() {
 		"alias q='x'\nstatus:0\nalias q='x'\n"
 	);
 }
+
+// --- declaration builtins and polls (oracle-hook3.sh) ---
+
+/// M1, M2, M3, E1, E2: `local` and `export` look the variable up before they
+/// assign and again after, as `declare` does, so the stored copy holds the
+/// aliases then.
+#[tokio::test]
+async fn local_and_export_refresh_the_stored_copy() {
+	let cases = [
+		"alias 0=old\nf() { local -I BASH_ALIASES=(); alias 0=other; BASH_ALIASES+=Z; alias 0; }\nf",
+		"alias 0=old\nf() { local BASH_ALIASES; }\nf\nBASH_ALIASES+=Z; alias 0",
+		"alias 0=old\nf() { local -I BASH_ALIASES; BASH_ALIASES+=Z; alias 0; }\nf",
+		"alias 0=old; export BASH_ALIASES=([q]=new); alias 0=other; BASH_ALIASES+=Z; alias 0",
+		"alias 0=old; export BASH_ALIASES=(); alias 0=other; BASH_ALIASES+=Z; alias 0",
+	];
+	for command in cases {
+		assert_eq!(run(command).await, "alias 0='oldZ'\n", "{command}");
+	}
+}
+
+/// E3, E4: `export` reports a rejected name from a list operand before its
+/// redirections and before later operands' messages.
+#[tokio::test]
+async fn export_reports_like_declare() {
+	let out = run("export BASH_ALIASES=([a/b]=x) 2>err; echo marker; echo file:; cat err").await;
+	let message = out
+		.find("`a/b': invalid alias name")
+		.unwrap_or_else(|| panic!("{out}"));
+	let marker = out.find("marker").unwrap_or_else(|| panic!("{out}"));
+	assert!(message < marker, "{out}");
+	let out = run("readonly z; export BASH_ALIASES=([a/b]=x) z=y 2>&1; echo done").await;
+	let message = out
+		.find("`a/b': invalid alias name")
+		.unwrap_or_else(|| panic!("{out}"));
+	let readonly = out.find("readonly").unwrap_or_else(|| panic!("{out}"));
+	assert!(message < readonly, "{out}");
+}
+
+/// A1 to A5: `readonly` and `export` keep one value assigned to the name as it
+/// is; `local -I` and `typeset` apply the variable's attributes, as `declare`
+/// does.
+#[tokio::test]
+async fn declaration_builtins_apply_attributes_as_bash() {
+	let cases = [
+		("declare -u BASH_ALIASES; readonly BASH_ALIASES=mixed; alias 0", "alias 0='mixed'\n"),
+		("declare -i BASH_ALIASES; readonly BASH_ALIASES=mixed; alias 0", "alias 0='mixed'\n"),
+		("declare -u BASH_ALIASES; export BASH_ALIASES=mixed; alias 0", "alias 0='mixed'\n"),
+		(
+			"declare -u BASH_ALIASES\nf() { local -I BASH_ALIASES=mixed; alias 0; }\nf",
+			"alias 0='MIXED'\n",
+		),
+		("declare -u BASH_ALIASES; typeset BASH_ALIASES=mixed; alias 0", "alias 0='MIXED'\n"),
+		("declare -u BASH_ALIASES; export BASH_ALIASES=([k]=mixed); alias k", "alias k='MIXED'\n"),
+	];
+	for (command, expected) in cases {
+		assert_eq!(run(command).await, expected, "{command}");
+	}
+}
+
+/// R1 to R5: a `read -t 0` poll assigns nothing, ready or not, to
+/// `BASH_ALIASES` or to any other variable.
+#[tokio::test]
+async fn read_poll_assigns_nothing() {
+	let cases = [
+		(
+			"alias 0=old; printf ready > input; read -t 0 BASH_ALIASES < input; echo \"st=$?\"; \
+			 alias 0",
+			"st=0\nalias 0='old'\n",
+		),
+		(
+			"BASH_ALIASES=old; alias 0=other; printf ready > input; read -t 0 -a BASH_ALIASES < \
+			 input; BASH_ALIASES+=Z; alias 0",
+			"alias 0='oldZ'\n",
+		),
+		(
+			"v=keep; printf ready > input; read -t 0 v < input; echo \"st=$? v=[$v]\"",
+			"st=0 v=[keep]\n",
+		),
+		(
+			"declare -A a=([k]=keep); printf ready > input; read -t 0 -a a < input; echo \"st=$?\"; \
+			 declare -p a",
+			"st=0\ndeclare -A a=([k]=\"keep\" )\n",
+		),
+		(
+			"alias 0=old; sleep 1 | { read -t 0 BASH_ALIASES; echo \"st=$?\"; alias 0; }",
+			"st=1\nalias 0='old'\n",
+		),
+	];
+	for (command, expected) in cases {
+		assert_eq!(run(command).await, expected, "{command}");
+	}
+}

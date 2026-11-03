@@ -58,9 +58,20 @@ pub enum AssignmentHook {
 struct HookedVariable {
 	hook:     AssignmentHook,
 	/// The stored copy. A read refreshes it through a shared reference.
-	stored:   Mutex<BTreeMap<String, String>>,
+	stored:   Mutex<StoredCopy>,
 	/// The elements assigned since the shell last took them, in order.
 	assigned: Vec<(String, String)>,
+}
+
+/// A hooked variable's stored copy.
+#[derive(Clone, Debug, Default)]
+struct StoredCopy {
+	elements: BTreeMap<String, String>,
+	/// The alias table the elements were last refreshed from, while nothing
+	/// assigned to them since. The table is copied on write; changing it moves
+	/// it away from this weak reference (`Arc::make_mut`), so the reference
+	/// still reaching the table means the elements match it.
+	source:   Option<std::sync::Weak<std::collections::HashMap<String, String>>>,
 }
 
 impl Clone for HookedVariable {
@@ -74,8 +85,12 @@ impl Clone for HookedVariable {
 }
 
 impl HookedVariable {
+	/// The stored copy's elements, to be changed: they no longer match the
+	/// table they were refreshed from.
 	fn stored_mut(&mut self) -> &mut BTreeMap<String, String> {
-		self.stored.get_mut().unwrap_or_else(PoisonError::into_inner)
+		let stored = self.stored.get_mut().unwrap_or_else(PoisonError::into_inner);
+		stored.source = None;
+		&mut stored.elements
 	}
 
 	/// Assigns `value` to the element `key` of the stored copy, or appends it
@@ -94,8 +109,9 @@ impl HookedVariable {
 	/// Assigns the elements of a list to the stored copy, replacing it unless
 	/// `append`, and records each element for the shell.
 	fn assign_list(&mut self, literals: ArrayLiteral, append: bool) -> Result<(), error::Error> {
-		let Self { stored, assigned, .. } = self;
-		let stored = stored.get_mut().unwrap_or_else(PoisonError::into_inner);
+		let stored = self.stored.get_mut().unwrap_or_else(PoisonError::into_inner);
+		stored.source = None;
+		let (stored, assigned) = (&mut stored.elements, &mut self.assigned);
 		if !append {
 			stored.clear();
 		}
@@ -312,11 +328,25 @@ impl ShellVariable {
 			.unwrap_or_default()
 	}
 
-	/// Replaces a hooked variable's stored copy with `elements`. Bash does so
-	/// whenever it looks the variable up.
-	pub(crate) fn refresh_stored_copy(&self, elements: BTreeMap<String, String>) {
+	/// Refreshes a hooked variable's stored copy from `aliases`, as Bash does
+	/// whenever it looks the variable up. A copy already refreshed from the
+	/// same, unchanged table is kept.
+	pub(crate) fn refresh_stored_copy(&self, aliases: &brush_parser::AliasTable) {
 		if let Some(hooked) = &self.hook {
-			*hooked.stored.lock().unwrap_or_else(PoisonError::into_inner) = elements;
+			let mut stored = hooked.stored.lock().unwrap_or_else(PoisonError::into_inner);
+			if stored
+				.source
+				.as_ref()
+				.and_then(std::sync::Weak::upgrade)
+				.is_some_and(|source| std::sync::Arc::ptr_eq(&source, aliases))
+			{
+				return;
+			}
+			stored.elements = aliases
+				.iter()
+				.map(|(name, value)| (name.clone(), value.clone()))
+				.collect();
+			stored.source = Some(std::sync::Arc::downgrade(aliases));
 		}
 	}
 

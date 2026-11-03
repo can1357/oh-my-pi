@@ -389,3 +389,27 @@ macro_rules! minus_or_plus_flag_arg {
         }
     };
 }
+
+/// Reports the names that a declaration builtin's operand `declaration`
+/// assigned to `BASH_ALIASES` and Bash rejects as alias names (see
+/// `ShellEnvironment::define_assigned_aliases`), right after the operand, as
+/// Bash does: a list operand is assigned while the command is expanded, so its
+/// message goes where standard error was before the command's redirections;
+/// an element operand's goes to the builtin's standard error.
+#[allow(dead_code, reason = "used only by builtins that may be disabled")]
+pub(crate) async fn report_rejected_alias_names(
+	context: &mut brush_core::ExecutionContext<'_, impl brush_core::ShellExtensions>,
+	declaration: &brush_core::CommandArg,
+) {
+	let is_list = matches!(
+		declaration,
+		brush_core::CommandArg::Assignment(assignment)
+			if matches!(assignment.value, brush_core::parser::ast::AssignmentValue::Array(_))
+	);
+	let mut stderr = if is_list {
+		context.params.list_assignment_stderr(context.shell)
+	} else {
+		context.params.stderr(context.shell)
+	};
+	context.shell.report_rejected_alias_names(&mut stderr).await;
+}
