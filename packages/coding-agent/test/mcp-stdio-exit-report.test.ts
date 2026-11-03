@@ -309,6 +309,53 @@ describe.skipIf(process.platform === "win32" || !PYTHON)("StdioTransport exit re
 		);
 	}
 
+	// Round 11: a cut-off hint between complete ones (`H + "F" + H`) survived
+	// the report's pass and took the reason's room; the error then removed it.
+	for (const [name, between] of [
+		["F", "F"],
+		["For", "For"],
+		["F on its own line", "\nF\n"],
+		["a 30-character piece", "\nFor more information, pass `ver\n"],
+	] as const) {
+		it(
+			`keeps the reason before a hint, ${name} and a hint`,
+			async () => {
+				const advice = "For more information, pass `verbose: true` in the second argument to fetch()";
+				const reason = `REFUSED: ${"word ".repeat(175)}FINAL_REASON_CANARY`;
+				const args = server(`${stderrWrites([`${reason}\n${advice}${between}${advice}`])}\nsys.exit(77)`);
+				const error = await withTransport({ command: python, args }, transport =>
+					transportRejection(transport.request("tools/call")),
+				);
+
+				expect(error.code).toBe(77);
+				expect(error.message).toEndWith("FINAL_REASON_CANARY");
+			},
+			TEST_TIMEOUT_MS,
+		);
+	}
+
+	// Round 11: 1 MiB of "ff " on stderr cost a healthy server's request about
+	// 3 s of this process's CPU (each word searched for a hint), past a 1 s deadline.
+	for (const word of ["noise", "ff", "ffff)"]) {
+		it(
+			`spends little CPU on a MiB of stderr words like ${JSON.stringify(word)}`,
+			async () => {
+				const chunk = `${word} `.repeat(Math.floor(8192 / (word.length + 1)));
+				const count = Math.ceil((1024 * 1024) / chunk.length);
+				const args = server(`for _ in range(${count}): os.write(2,${JSON.stringify(chunk)}.encode())
+print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':{'ok':True}}),flush=True)`);
+				await withTransport({ command: python, args }, async transport => {
+					const started = process.cpuUsage();
+					const result = await transport.request<{ ok: boolean }>("logs");
+					expect(result).toEqual({ ok: true });
+					const used = process.cpuUsage(started);
+					expect((used.user + used.system) / 1000).toBeLessThan(1_500);
+				});
+			},
+			TEST_TIMEOUT_MS,
+		);
+	}
+
 	it(
 		"keeps text that only looks like the start of a hint",
 		async () => {

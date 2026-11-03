@@ -26,9 +26,10 @@ import {
 	MCPTransportError,
 	nonRetryableMCPTransportError,
 	normalizeMCPTransportError,
+	redactCredentials,
 	redactDiagnosticText,
 	stripTrailingFetchAdvice,
-	trailingFetchAdviceStarts,
+	trailingFetchAdvice,
 } from "../errors";
 import { RequestIdAllocator } from "../request-id";
 import { routeProgressNotification, withProgressToken } from "../progress";
@@ -519,7 +520,7 @@ function lastLines(text: string, maxChars: number): string {
 /**
  * The end of a subprocess's stderr, kept in bounded memory for its exit report.
  *
- * Stderr can hold credentials, and {@link redactDiagnosticText} finds a value
+ * Stderr can hold credentials, and {@link redactCredentials} finds a value
  * from its label (`api_key=`, `Bearer`), so nothing may be cut before
  * redaction has seen the label that precedes it. The tail therefore redacts
  * stderr as it arrives, one whole word at a time, and keeps only redacted
@@ -600,8 +601,9 @@ class StderrTail {
 			return `${separator}[${this.#wordLength}-character word omitted]`;
 		}
 		const context = this.#context.join("");
-		const before = redactDiagnosticText(context);
-		const after = redactDiagnosticText(`${context}${separator}${this.#word}`);
+		// Credentials only: the fetch hints go at report time, from the whole text.
+		const before = redactCredentials(context);
+		const after = redactCredentials(`${context}${separator}${this.#word}`);
 		// The redactor rewrites only from a label onward and keeps the label, so
 		// the context's own redaction is a prefix; anything else is redacted whole.
 		return after.startsWith(before) ? after.slice(before.length) : `${separator}[redacted]`;
@@ -616,15 +618,17 @@ class StderrTail {
 	 */
 	#trim(): void {
 		const text = this.#redacted;
-		const starts = trailingFetchAdviceStarts(text);
-		if (starts.length === 0) {
+		const advice = trailingFetchAdvice(text);
+		if (advice.start === text.length) {
 			this.#redacted = text.slice(-STDERR_TAIL_CHARS);
 			return;
 		}
-		const firstHint = starts[starts.length - 1]!;
 		const before = stripTrailingFetchAdvice(text);
-		const keepFrom = starts.find(start => text.length - start >= STDERR_HINT_KEEP_CHARS) ?? firstHint;
-		const separator = keepFrom === firstHint ? text.slice(before.length, firstHint) : before.length > 0 ? "\n" : "";
+		// Keep from the start of a complete hint: what follows it is then a run
+		// of hints again, which the report removes whole.
+		const keepFrom = advice.hints.find(start => text.length - start >= STDERR_HINT_KEEP_CHARS) ?? advice.start;
+		const separator =
+			keepFrom === advice.start ? text.slice(before.length, advice.start) : before.length > 0 ? "\n" : "";
 		this.#redacted = before.slice(-STDERR_TAIL_CHARS) + separator + text.slice(keepFrom);
 	}
 

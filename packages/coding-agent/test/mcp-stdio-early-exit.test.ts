@@ -82,4 +82,24 @@ describe("MCP stdio server that exits before responding", () => {
 		expect((await Bun.file(launches).text()).trim().split("\n")).toEqual(["launch"]);
 		// Each server spawns a Bun child; on a loaded host their startup alone can take seconds.
 	}, 60_000);
+
+	// PR #17799 review, round 11: Bun's fetch hint, a cut-off one, then another
+	// after a long reason left the failure event with the exit code alone.
+	it("keeps the reason in the failure event when fetch hints follow it", async () => {
+		const advice = "For more information, pass `verbose: true` in the second argument to fetch()";
+		const reason = `${REFUSAL} ${"word ".repeat(150)}FINAL_REASON_CANARY`;
+		const script = `process.stderr.write(${JSON.stringify(`${reason}\n${advice}F${advice}`)}, () => process.exit(77));`;
+		const failed = Promise.withResolvers<string>();
+		manager = new MCPManager(root);
+		await manager.connectServers(
+			{ refused: { type: "stdio", command: process.execPath, args: ["-e", script] } },
+			{},
+			event => {
+				if (event.type === "failed") failed.resolve(event.error);
+			},
+		);
+		const error = await failed.promise;
+		expect(error).toContain("77");
+		expect(error).toContain("FINAL_REASON_CANARY");
+	}, 60_000);
 });

@@ -5,7 +5,11 @@
  * it must stay linear on large error text (PR #17799 review, rounds 6 and 7).
  */
 import { describe, expect, it } from "bun:test";
-import { redactDiagnosticText, stripTrailingFetchAdvice } from "@oh-my-pi/pi-coding-agent/mcp/errors";
+import {
+	redactCredentials,
+	redactDiagnosticText,
+	stripTrailingFetchAdvice,
+} from "@oh-my-pi/pi-coding-agent/mcp/errors";
 
 const HINT = "For more information, pass `verbose: true` in the second argument to fetch().";
 
@@ -37,15 +41,54 @@ describe("stripTrailingFetchAdvice", () => {
 		expect(once).not.toContain("verbose: true");
 	});
 
-	// Round 10: the stderr tail redacts every word with its context, so ordinary
-	// stderr pays this per word. 1 MiB of "noise " cost about 4 s of CPU before.
-	it("costs little per ordinary stderr word", () => {
-		const context = "noise noise noise noise noise noise noise noise noise noise ";
-		const started = process.cpuUsage();
-		for (let i = 0; i < 175_000; i++) {
-			redactDiagnosticText(context);
-			redactDiagnosticText(`${context}noise`);
+	// Round 11: `H + "F" + H` lost its last hint to one pass and the rest to a
+	// second, so an error built from once-redacted text dropped the reason the
+	// report had budgeted for. Every short mix of hints, cut-off hints and
+	// separators must reach its end in one pass.
+	it("is idempotent for every short mix of hints and cut-off hints", () => {
+		const complete = HINT.slice(0, -1);
+		const pieces = [complete, HINT, HINT.toUpperCase(), "F", "f", "For", complete.slice(0, 30), "fetch()", "x", ""];
+		const separators = ["", " ", "\n", "."];
+		let checked = 0;
+		for (const a of pieces) {
+			for (const b of pieces) {
+				for (const c of pieces) {
+					for (const s of separators) {
+						for (const t of separators) {
+							const value = `REASON ${a}${s}${b}${t}${c}`;
+							const once = redactDiagnosticText(value);
+							expect(redactDiagnosticText(once), JSON.stringify(value)).toBe(once);
+							expect(once.startsWith("REASON"), JSON.stringify(value)).toBe(true);
+							checked++;
+						}
+					}
+				}
+			}
 		}
+		expect(checked).toBe(16_000);
+		expect(stripTrailingFetchAdvice(`REASON ${complete}F${complete}`)).toBe("REASON");
+		expect(stripTrailingFetchAdvice(`REASON ${complete}\nF\n${complete}`)).toBe("REASON");
+	});
+
+	// Round 10: the stderr tail redacts every word with its context, so stderr
+	// pays this per word. 1 MiB of "noise " cost about 4 s of CPU before; round
+	// 11: 1 MiB of "ff " still did, because each word also searched for a hint.
+	for (const word of ["noise", "ff", "ffff)", "fF".repeat(32)]) {
+		it(`costs little per stderr word like ${JSON.stringify(word.slice(0, 8))}`, () => {
+			const context = `${word} `.repeat(10);
+			const started = process.cpuUsage();
+			for (let i = 0; i < 175_000; i++) {
+				redactCredentials(context);
+				redactCredentials(`${context}${word}`);
+			}
+			const used = process.cpuUsage(started);
+			expect((used.user + used.system) / 1000).toBeLessThan(1_500);
+		});
+	}
+
+	it("costs little to strip from text full of f", () => {
+		const started = process.cpuUsage();
+		for (let i = 0; i < 100_000; i++) stripTrailingFetchAdvice(`${"ff ".repeat(30)}ff`);
 		const used = process.cpuUsage(started);
 		expect((used.user + used.system) / 1000).toBeLessThan(1_500);
 	});
