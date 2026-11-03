@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed Windows background drags and scrolls on Tk windows (Python's tkinter, IDLE) reporting success while nothing happened: Tk never sees a posted drag's button press and ignores posted wheel input, so both now take the `computer.backgroundFallback` route instead
+- Fixed Windows background drags in Tk apps (Python's tkinter, IDLE) reporting success while nothing happened; they now follow `computer.backgroundFallback`
 
 ## [18.16.0] - 2026-11-02
 

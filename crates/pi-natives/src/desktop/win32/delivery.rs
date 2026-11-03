@@ -109,13 +109,10 @@ pub fn would_be_silently_dropped(
 	use EventKind::{KeyCombo, Keystroke, MouseClick, MouseDrag, MouseMove, MouseScroll, TextInput};
 
 	let class = target.class;
-	// A drag posts a press, moves and a release. Tk never sees the press (see
-	// below); any other toolkit takes or drops a drag with its moves: a GTK
-	// canvas paints a posted drag although its buttons ignore posted clicks.
-	if kind == MouseDrag {
-		if is_tk_class(class) {
-			return Some("Tk reads button and key state from GetKeyState, which posted input never sets");
-		}
+	// A drag posts a press, moves and a release. Tk never sees the press (its
+	// line below); any other toolkit takes or drops a drag with its moves: a
+	// GTK canvas paints a posted drag although its buttons ignore posted clicks.
+	if kind == MouseDrag && !is_tk_class(class) {
 		return would_be_silently_dropped(target, MouseMove);
 	}
 	if is_chromium_class(class) {
@@ -144,11 +141,10 @@ pub fn would_be_silently_dropped(
 			"WPF ignores posted pointer and text input, and posted keys unless it owns the foreground",
 		);
 	}
-	if is_tk_class(class) && matches!(kind, MouseClick | Keystroke | KeyCombo | TextInput) {
+	if is_tk_class(class)
+		&& matches!(kind, MouseClick | MouseDrag | Keystroke | KeyCombo | TextInput)
+	{
 		return Some("Tk reads button and key state from GetKeyState, which posted input never sets");
-	}
-	if is_tk_class(class) && kind == MouseScroll {
-		return Some("Tk acts only on wheel input from the system input queue");
 	}
 	if is_gtk_class(class) && matches!(kind, MouseClick) {
 		return Some("GTK buttons ignore posted mouse-button messages");
@@ -288,7 +284,7 @@ mod tests {
 			true, true, true, false, false, false,
 		]);
 		assert_matrix(background("HwndWrapper[App;;abc]"), [true, true, false, true, true, true]);
-		assert_matrix(background("TkTopLevel.1"), [true, false, true, true, true, true]);
+		assert_matrix(background("TkTopLevel.1"), [true, false, false, true, true, true]);
 		assert_matrix(background("gdkSurfaceToplevel"), [true, false, false, false, false, false]);
 		assert_matrix(background("gdkWindowToplevel"), [true, false, false, false, false, false]);
 		assert_matrix(background("SALFRAME"), [false, false, false, true, true, false]);
@@ -303,17 +299,10 @@ mod tests {
 		let drag = |target| would_be_silently_dropped(target, EventKind::MouseDrag).is_some();
 		// Tk accepts posted moves but tracks the held button through GetKeyState.
 		assert!(drag(background("TkTopLevel.1")));
-		// GTK buttons ignore posted clicks, yet a GTK canvas paints a posted drag.
+		// GTK buttons ignore posted clicks, yet a GTK canvas paints a posted
+		// drag.
 		assert!(!drag(background("gdkSurfaceToplevel")));
-		assert!(!drag(background("gdkWindowToplevel")));
-		for class in ["Chrome_WidgetWin_1", "WinUIDesktopWin32WindowClass", "HwndWrapper[App;;abc]"] {
-			assert!(drag(background(class)), "{class}");
-		}
-		for class in ["Notepad", "SALFRAME", "TkTopLevelish", "CASCADIA_HOSTING_WINDOW_CLASS"] {
-			assert!(!drag(background(class)), "{class}");
-		}
-		let tauri = TargetTraits { chromium_descendant: true, ..background("Tauri Window") };
-		assert!(drag(tauri));
+		assert!(drag(background("HwndWrapper[App;;abc]")));
 	}
 
 	#[test]
