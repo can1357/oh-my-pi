@@ -131,6 +131,9 @@ function createHarness(questions: AskQuestion[]): Harness {
 		showStatus() {},
 		syncComposerShape() {},
 		syncExtensionLinks() {},
+		closeLinkBrowser() {},
+		rerenderInLinkBrowser() {},
+		rebuildTranscriptScrollback() {},
 		statusLine: {
 			setCollabStatus() {},
 			invalidate() {},
