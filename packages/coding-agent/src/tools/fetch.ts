@@ -1200,8 +1200,8 @@ async function renderUrl(
 		// The challenge page is not the content: only a reader fetching from elsewhere can still get it.
 		const wall = `bot protection (${response.blockedBy}, HTTP ${response.status})`;
 		const remote = await renderHtmlToText(
-			url,
-			"",
+			response.finalUrl,
+			response.content,
 			timeout,
 			settings,
 			signal,
@@ -1212,7 +1212,7 @@ async function renderUrl(
 		if (remote.ok && !isLowQualityOutput(remote.content, remote.method)) {
 			return {
 				url,
-				finalUrl: url,
+				finalUrl: response.finalUrl,
 				contentType: normalizeMime(response.contentType),
 				method: remote.method,
 				content: finalizeOutput(remote.content),

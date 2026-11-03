@@ -52,15 +52,26 @@ const USER_AGENTS = [
  */
 const BLOCKED_STATUSES = new Set([403, 429, 503, 999]);
 
+/** True when the parsed page holds a `js_challenge` form input, not text quoting one. */
+async function hasChallengeForm(content: string): Promise<boolean> {
+	if (!content.includes("js_challenge")) return false;
+	// Lazy import keeps the DOM parser off the startup graph; only a page naming the form parses.
+	const { parseHTML } = await import("@oh-my-pi/pi-utils/dom");
+	// The parser reads a <textarea>'s text as markup, so an input inside one is quoted source.
+	return Array.from(parseHTML(content).document.querySelectorAll('input[name="js_challenge"]')).some(
+		input => !input.closest("textarea"),
+	);
+}
+
 /**
  * Name the bot protection whose challenge or block page an HTML response is. A 2xx page counts
  * only from Cloudflare's header or a live challenge form, since an article can quote any marker
  * as text; vendor markers in the body count on an error status.
  */
-function botWallOf(response: Response, contentType: string, content: string): string | undefined {
+async function botWallOf(response: Response, contentType: string, content: string): Promise<string | undefined> {
 	if (!contentType.includes("html")) return undefined;
 	if (response.headers.get("cf-mitigated") === "challenge") return "Cloudflare";
-	if (/<input[^>]*\bname="js_challenge"/.test(content)) return "JavaScript challenge";
+	if (await hasChallengeForm(content)) return "JavaScript challenge";
 	if (response.ok) return undefined;
 	if (content.includes("_cf_chl_opt")) return "Cloudflare";
 	if (content.includes("captcha-delivery.com")) return "DataDome";
@@ -203,7 +214,7 @@ export async function loadPage(url: string, options: LoadPageOptions = {}): Prom
 			}
 
 			const content = decodeBody(responseBody.bytes, rawContentType);
-			const blockedBy = botWallOf(response, contentType, content);
+			const blockedBy = await botWallOf(response, contentType, content);
 
 			if (!response.ok) {
 				return {
