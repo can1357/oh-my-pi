@@ -31,8 +31,16 @@ describe("Agent Hub session scope", () => {
 		if (dir) await fs.rm(dir, { recursive: true, force: true });
 	});
 
-	/** Render a hub opened on the new session while the registry still holds the old one's tree. */
-	async function renderHub(options: { remote?: AgentHubRemote; copied?: boolean } = {}): Promise<string> {
+	/** Session-header JSONL line; a fork copy keeps it, a separately created transcript gets its own. */
+	const header = (id: string) =>
+		`${JSON.stringify({ type: "session", version: 3, id, timestamp: "2026-11-03T00:00:00.000Z", cwd: "/" })}\n`;
+
+	/**
+	 * Render a hub opened on the new session while the registry still holds the old one's tree.
+	 * `copied`: idle/aborted refs' transcripts were forked into the new root. `collision`: the new
+	 * root holds separately created transcripts under the same agent ids.
+	 */
+	async function renderHub(options: { remote?: AgentHubRemote; old?: "copied" | "collision" } = {}): Promise<string> {
 		dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-hub-scope-"));
 		const oldRoot = path.join(dir, "old.jsonl");
 		const newRoot = path.join(dir, "new.jsonl");
@@ -64,7 +72,7 @@ describe("Agent Hub session scope", () => {
 			sessionFile: path.join(dir, "new", "NewLive.jsonl"),
 		});
 		registry.register({ id: "Memory", displayName: "Memory", kind: "sub", session: {} as AgentSession });
-		if (options.copied) {
+		if (options.old) {
 			registry.register({
 				id: "OldIdle",
 				displayName: "OldIdle",
@@ -82,10 +90,10 @@ describe("Agent Hub session scope", () => {
 				status: "aborted",
 				sessionFile: path.join(dir, "old", "OldAborted.jsonl"),
 			});
-			for (const file of ["OldParked.jsonl", "OldParked/OldIdle.jsonl", "OldAborted.jsonl"]) {
-				await Bun.write(path.join(dir, "old", file), "");
-			}
-			await copySessionArtifacts(oldRoot, newRoot);
+			const files = ["OldParked.jsonl", "OldParked/OldIdle.jsonl", "OldAborted.jsonl"];
+			for (const file of files) await Bun.write(path.join(dir, "old", file), header(`old-${file}`));
+			if (options.old === "copied") await copySessionArtifacts(oldRoot, newRoot);
+			else for (const file of files) await Bun.write(path.join(dir, "new", file), header(`new-${file}`));
 		}
 		const hub = new AgentHubOverlayComponent({
 			...createAgentHubRuntime({
@@ -127,10 +135,16 @@ describe("Agent Hub session scope", () => {
 	});
 
 	it("keeps idle and aborted refs when a fork copied their nested and direct transcripts", async () => {
-		const text = await renderHub({ copied: true });
+		const text = await renderHub({ old: "copied" });
 		expect(text).toContain("OldIdle");
 		expect(text).toContain("OldAborted");
 		expect(text).toContain("OldParked");
 		expect(text).not.toContain("OldNested");
+	});
+
+	it("hides idle and aborted refs whose id merely collides with the current session's transcripts", async () => {
+		const text = await renderHub({ old: "collision" });
+		expect(text).not.toContain("OldIdle");
+		expect(text).not.toContain("OldAborted");
 	});
 });
