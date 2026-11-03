@@ -6,6 +6,7 @@ import type { Model } from "@oh-my-pi/pi-catalog/types";
 import { factoryModel } from "../../ai/test/helpers/factory-droid";
 import {
 	CacheWarmer,
+	type CacheRefreshOutcome,
 	type CacheWarmerDeps,
 	type CacheWarmingRefreshEnd,
 	type CacheWarmingRefreshStart,
@@ -13,6 +14,7 @@ import {
 	getCacheWarmingDelayMs,
 	getPromptCacheTtlMs,
 	isReplayable,
+	type PromptCacheChange,
 } from "../src/session/cache-warmer";
 
 const SHORT_DELAY_MS = 4.5 * 60_000; // 90% of the 300s short tier
@@ -163,8 +165,13 @@ async function drain(): Promise<void> {
 	for (let i = 0; i < 100; i++) await Promise.resolve();
 }
 
+/** The conversation change the warmer sees once a test marks its context stale. */
+function change(h: Harness): PromptCacheChange | undefined {
+	return h.current ? undefined : { kind: "history" };
+}
+
 function start(h: Harness, options: SimpleStreamOptions = {}): void {
-	h.warmer.start({ model: makeModel(), context: { messages: [] }, options }, () => h.current);
+	h.warmer.start({ model: makeModel(), context: { messages: [] }, options }, () => change(h));
 }
 
 async function advance(ms: number): Promise<void> {
@@ -461,11 +468,11 @@ describe("cache warmer lifecycle", () => {
 			model: model.id,
 		});
 		const h = harness();
-		h.warmer.start({ model, context: { messages: [] }, options: {} }, () => h.current);
+		h.warmer.start({ model, context: { messages: [] }, options: {} }, () => change(h));
 		expect(h.warmer.status.nextWarmAt).toBe(Date.now() + SHORT_DELAY_MS);
 
 		// Long retention on an upstream that writes 5m entries keeps the 5m schedule.
-		h.warmer.start({ model, context: { messages: [] }, options: { cacheRetention: "long" } }, () => h.current);
+		h.warmer.start({ model, context: { messages: [] }, options: { cacheRetention: "long" } }, () => change(h));
 		expect(h.warmer.status.nextWarmAt).toBe(Date.now() + SHORT_DELAY_MS);
 		h.warmer.onResponse(reply({ ephemeral5m: 500 }));
 		expect(h.warmer.status.nextWarmAt).toBe(Date.now() + SHORT_DELAY_MS);
@@ -479,7 +486,7 @@ describe("cache warmer lifecycle", () => {
 		const model = factoryModel("claude-opus-4-6", ["anthropic"]);
 		model.promptCache = { short: 300 };
 		const h = harness();
-		h.warmer.start({ model, context: { messages: [] }, options: { cacheRetention: "long" } }, () => h.current);
+		h.warmer.start({ model, context: { messages: [] }, options: { cacheRetention: "long" } }, () => change(h));
 		expect(h.warmer.status.nextWarmAt).toBe(Date.now() + SHORT_DELAY_MS);
 		h.warmer.onResponse({
 			...makeMessage(makeUsage({ cacheWrite: 500, cttl: { ephemeral1h: 500 } })),
@@ -498,13 +505,13 @@ describe("cache warmer lifecycle", () => {
 			model: model.id,
 		});
 		const h = harness();
-		h.warmer.start({ model, context: { messages: [] }, options: { cacheRetention: "long" } }, () => h.current);
+		h.warmer.start({ model, context: { messages: [] }, options: { cacheRetention: "long" } }, () => change(h));
 		expect(h.warmer.status.nextWarmAt).toBe(Date.now() + LONG_DELAY_MS);
 		h.warmer.onResponse(reply({ ephemeral1h: 500 }));
 		expect(h.warmer.status.nextWarmAt).toBe(Date.now() + LONG_DELAY_MS);
 
 		// An upstream that wrote a 5m entry has no declared lifetime: stop.
-		h.warmer.start({ model, context: { messages: [] }, options: { cacheRetention: "long" } }, () => h.current);
+		h.warmer.start({ model, context: { messages: [] }, options: { cacheRetention: "long" } }, () => change(h));
 		h.warmer.onResponse(reply({ ephemeral5m: 500 }));
 		expect(h.warmer.status).toMatchObject({ state: "inactive", reason: "cache lifetime unavailable" });
 	});
@@ -512,7 +519,7 @@ describe("cache warmer lifecycle", () => {
 	test("adopts the tier a Factory Droid server-side fallback response reports", () => {
 		const model = factoryModel("claude-fable-5", ["anthropic"]);
 		const h = harness();
-		h.warmer.start({ model, context: { messages: [] }, options: { cacheRetention: "long" } }, () => h.current);
+		h.warmer.start({ model, context: { messages: [] }, options: { cacheRetention: "long" } }, () => change(h));
 		expect(h.warmer.status.nextWarmAt).toBe(Date.now() + SHORT_DELAY_MS);
 		// The refused request retried on claude-opus-5; the response carries the served id.
 		h.warmer.onResponse({
@@ -578,7 +585,7 @@ describe("cache warmer lifecycle", () => {
 		expect(kept.warmer.cacheEntry).toEqual({ touchedAt: confirmedAt, tier: "short", ttlMs: 300_000 });
 	});
 
-	test("a refresh that hits the cache confirms and extends the entry; a miss does not", async () => {
+	test("a refresh that hits the cache confirms and extends the entry; a rewrite extends it and stops; a miss does not", async () => {
 		const h = harness();
 		start(h);
 		const firstTouch = Date.now();
@@ -586,14 +593,54 @@ describe("cache warmer lifecycle", () => {
 		await advance(SHORT_DELAY_MS);
 		expect(h.warmer.cacheEntry).toEqual({ touchedAt: firstTouch + SHORT_DELAY_MS, tier: "short", ttlMs: 300_000 });
 
+		// A replay that had to write the prefix again left it cached from its send, but warming stops.
+		const rewritten = harness();
+		rewritten.script = { kind: "generate", usage: makeUsage({ cacheWrite: PROMPT_TOKENS }) };
+		start(rewritten);
+		const rewrittenAt = Date.now() + SHORT_DELAY_MS;
+		rewritten.warmer.onResponse(makeMessage(makeUsage({ cacheWrite: 500 })));
+		await advance(SHORT_DELAY_MS);
+		expect(rewritten.warmer.status.reason).toBe("refresh missed the cache");
+		expect(rewritten.warmer.cacheEntry?.touchedAt).toBe(rewrittenAt);
+
+		// One that read nothing and wrote nothing no longer reaches the entry.
 		const missed = harness();
-		missed.script = { kind: "generate", usage: makeUsage({ cacheWrite: PROMPT_TOKENS }) };
+		missed.script = { kind: "generate", usage: makeUsage({}) };
 		start(missed);
 		const missedTouch = Date.now();
 		missed.warmer.onResponse(makeMessage(makeUsage({ cacheWrite: 500 })));
 		await advance(SHORT_DELAY_MS);
 		expect(missed.warmer.status.reason).toBe("refresh missed the cache");
 		expect(missed.warmer.cacheEntry?.touchedAt).toBe(missedTouch);
+	});
+
+	test("counts a refresh from when the provider sent it, past a wait for an in-flight slot", async () => {
+		const slot = Promise.withResolvers<void>();
+		const h = harness({
+			stream: async (model, _context, options) => {
+				await slot.promise;
+				await options?.onPayload?.({}, model);
+				return scriptedStream(
+					{ kind: "generate", usage: makeUsage({ cacheRead: PROMPT_TOKENS }) },
+					{ options, consumed: [], cutOff: false },
+				);
+			},
+		});
+		const refreshes: Array<CacheRefreshOutcome | undefined> = [];
+		h.warmer.onWarmed = (_message, _extensionOverride, refresh) => refreshes.push(refresh);
+		const payloads: unknown[] = [];
+		start(h, { onPayload: payload => void payloads.push(payload) });
+		h.warmer.onResponse(makeMessage(makeUsage({ cacheWrite: 500 })));
+		await advance(SHORT_DELAY_MS);
+		await advance(20_000);
+		const sentAt = Date.now();
+		slot.resolve();
+		await drain();
+
+		expect(refreshes).toEqual([{ sentAt, hit: true }]);
+		expect(h.warmer.cacheEntry?.touchedAt).toBe(sentAt);
+		// The request's own payload hook still runs.
+		expect(payloads).toEqual([{}]);
 	});
 
 	test("extensions can stop a refresh and force one past the threshold", async () => {

@@ -1249,32 +1249,26 @@ exit 64
 		expect(result.output.trim()).toBe("snapshot_ok");
 	});
 
-	it("survives compound aliases from the user's shell snapshot (issue #3234)", async () => {
+	it("runs compound aliases from the user's shell snapshot (issue #3234)", async () => {
 		if (process.platform === "win32") return;
 		const bashPath = Bun.env.SHELL?.includes("bash") ? Bun.env.SHELL : "/bin/bash";
 		if (!fs.existsSync(bashPath)) return;
 
-		// Pre-seed a snapshot that mirrors Fedora's default `which` alias.
-		// Without the brush-compat scrub, brush's whitespace-only alias
-		// expander turns `(alias;` into the command name and `which` fails
-		// with `command not found: (alias;`. With the scrub, the broken
-		// alias is dropped and brush falls through to `$PATH`.
+		// Pre-seed a snapshot with an alias whose body needs real shell parsing
+		// (subshell, separator, pipe, `&&`), shaped like Fedora's default `which`
+		// alias. Alias expansion re-reads the body as shell input, so the whole
+		// compound command runs instead of `(echo` becoming the command name.
 		const snapshotPath = path.join(tempDir, "snapshot.sh");
 		fs.writeFileSync(
 			snapshotPath,
 			[
 				"unalias -a 2>/dev/null || true",
-				"alias -- which='(alias; declare -f) | /usr/bin/which --tty-only --read-alias --show-dot --show-tilde'",
+				"shopt -s expand_aliases",
+				"alias -- shout='(echo one; echo two) | tr a-z A-Z && echo done'",
 				"alias -- ll='ls -l'",
 				"",
 			].join("\n"),
 		);
-		const rawSnapshot = fs.readFileSync(snapshotPath, "utf8");
-		const { content: scrubbed, dropped } = shellSnapshot.sanitizeSnapshotForBrush(rawSnapshot);
-		fs.writeFileSync(snapshotPath, scrubbed);
-		expect(dropped).toEqual(["which"]);
-		// Compatible aliases must still be installed in brush.
-		expect(scrubbed).toContain("alias -- ll='ls -l'");
 
 		vi.spyOn(Settings.prototype, "getShellConfig").mockReturnValue({
 			shell: bashPath,
@@ -1284,16 +1278,16 @@ exit 64
 		});
 		vi.spyOn(shellSnapshot, "getOrCreateSnapshot").mockResolvedValue(snapshotPath);
 
-		const result = await executeBash("which sh", {
+		const result = await executeBash("shout", {
 			cwd: tempDir,
 			timeout: 5000,
-			sessionKey: "brush-compound-alias-which",
+			sessionKey: "compound-alias-snapshot",
 		});
 
 		expect(result.cancelled).toBe(false);
 		expect(result.exitCode).toBe(0);
 		expect(result.output).not.toContain("command not found");
-		expect(result.output.trim()).toMatch(/\/sh$/);
+		expect(result.output.trim().split("\n")).toEqual(["ONE", "TWO", "done"]);
 	});
 
 	it("does not allow exec to replace the host", async () => {
@@ -1515,12 +1509,12 @@ describe("executeBash :async: background retention", () => {
 			if (!sleepBin) throw new Error("sleep executable not found");
 			let pid: number | undefined;
 			try {
-				// `nohup cmd &` is a transparent background wrapper: brush unwraps it and
-				// double-forks the operand so it reparents to init and survives teardown
-				// independently of the retain map. The shell only ever tracked the
-				// short-lived intermediate fork, so `$!` is NOT the surviving process —
-				// the operand writes its own pid before `exec`ing the long sleep, and
-				// that pid (unchanged across exec) is the one we assert stays alive.
+				// pi's `nohup` tool (crates/pi-shell/src/tools/nohup.rs) runs the operand
+				// in a detached tree that session cancel and teardown leave running,
+				// independently of the retain map. `$!` names the background job, not
+				// the external that survives — the operand writes its own pid before
+				// `exec`ing the long sleep, and that pid (unchanged across exec) is the
+				// one we assert stays alive.
 				const operand = `echo $$ > ${shellQuote(pidFile)}; exec ${shellQuote(sleepBin)} 30`;
 				const res = await executeBash(`nohup sh -c ${shellQuote(operand)} >/dev/null 2>&1 &`, {
 					sessionKey: "reparent-probe:async:job1",

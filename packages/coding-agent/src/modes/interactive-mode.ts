@@ -47,7 +47,7 @@ import {
 	jobWidgetSummary,
 	latestJobWidget,
 } from "@oh-my-pi/pi-tui/tools/job-widget";
-import type { AsyncJobManager } from "../async/job-manager";
+import type { AsyncJobManagerApi } from "../async/job-manager";
 import type { JobWidgetRegistry } from "../job-widgets/types";
 import { sameItems } from "@oh-my-pi/pi-tui/native/memo";
 import { describeSegmentTrack, renderSegmentTrack, type TrackSegment } from "@oh-my-pi/pi-tui/chrome/segment-track";
@@ -147,6 +147,7 @@ import {
 	type ResolvedRoleModel,
 	SHUTDOWN_CONSOLIDATE_BUDGET_MS,
 } from "../session/agent-session";
+import type { AgentViewSession } from "../session/agent-session-handle";
 import type { CompactMode } from "../session/compact-modes";
 import type { ForeignSessionSource } from "../session/foreign-session-store";
 import { HistoryStorage } from "../session/history-storage";
@@ -250,6 +251,7 @@ import {
 	setSessionTerminalTitle,
 	setTerminalSessionSource,
 	setTerminalTitlePullRequest,
+	setTerminalTitleSpinnerInterval,
 	setTerminalTitleSpinnerStyle,
 	setTerminalTitleStateEnabled,
 } from "../utils/title-generator";
@@ -283,6 +285,9 @@ import { PlanSaveOverlay, type PlanSaveOverlayResult } from "@oh-my-pi/pi-tui/ov
 import { ServedModelTracker } from "@oh-my-pi/pi-tui/chat/served-model-marker";
 import { SessionInfoOverlay } from "@oh-my-pi/pi-tui/overlays/session-info-overlay";
 import { JobsSheet } from "@oh-my-pi/pi-tui/overlays/jobs-panel";
+import { hasSpotlightOriginal, SpotlightSheet } from "@oh-my-pi/pi-tui/overlays/spotlight-sheet";
+import type { SpotlightDetails } from "@oh-my-pi/pi-tui/chat/spotlight";
+import { readArtifactText } from "../spotlight/sink";
 import { SkillMessageComponent } from "@oh-my-pi/pi-tui/chat/skill-message";
 import { StatusLineComponent } from "@oh-my-pi/pi-tui/status-line";
 import { statusLineHost } from "./status-line-host";
@@ -425,6 +430,7 @@ import {
 	cfgTuiTextSizing,
 	cfgTuiTight,
 	cfgTuiTitleSpinner,
+	cfgMotionResolved,
 	cfgTuiTitleState,
 	cfgTuiVimMode,
 	cfgTuiVimModeDisplay,
@@ -500,6 +506,7 @@ const cfgLiveUiSettings = combine({
 	"tui.hyperlinks": cfgTuiHyperlinks,
 	"tui.titleState": cfgTuiTitleState,
 	"tui.titleSpinner": cfgTuiTitleSpinner,
+	motion: cfgMotionResolved,
 	"statusLine.preset": cfgStatusLinePreset,
 	"statusLine.leftSegments": cfgStatusLineLeftSegments,
 	"statusLine.rightSegments": cfgStatusLineRightSegments,
@@ -1443,10 +1450,10 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * which flips to the destination before `reloadTodos` refreshes during
 	 * focus attach.
 	 */
-	#todoPhasesOwner?: AgentSession;
+	#todoPhasesOwner?: AgentViewSession;
 	#todoHudHidden = false;
 	hideThinkingBlock = false;
-	#sessionsWithDisplayableThinkingContent = new WeakSet<AgentSession>();
+	#sessionsWithDisplayableThinkingContent = new WeakSet<AgentViewSession>();
 	/** Whether the visible session has produced thinking content the user can reveal. */
 	get hasDisplayableThinkingContent(): boolean {
 		return this.#sessionsWithDisplayableThinkingContent.has(this.viewSession);
@@ -1557,7 +1564,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	/** The job widget registry this mode repaints on, and how to stop listening to it. */
 	#jobWidgetsListener: { registry: JobWidgetRegistry; unsubscribe: () => void } | undefined;
 	/** The job manager whose settled jobs repaint the running counts, and how to stop listening to it. */
-	#jobSettleListener: { manager: AsyncJobManager; unsubscribe: () => void } | undefined;
+	#jobSettleListener: { manager: AsyncJobManagerApi; unsubscribe: () => void } | undefined;
 	/**
 	 * Repaint whenever a shown job widget changes (the HUD jobs segment, the
 	 * status line's glance), following the root job manager's current registry.
@@ -1787,6 +1794,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	#planReviewOverlayHandle: OverlayHandle | undefined;
 	#sessionInfoOverlayHandle: OverlayHandle | undefined;
 	#jobsSheetHandle: OverlayHandle | undefined;
+	#spotlightSheetHandle: OverlayHandle | undefined;
 	/** Re-renders the open jobs sheet so output tails and pids stay live. */
 	#jobsSheetTimer: NodeJS.Timeout | undefined;
 	#planReviewOwner: object | undefined;
@@ -1839,14 +1847,14 @@ export class InteractiveMode implements InteractiveModeContext {
 	readonly #focusController: SessionFocusController;
 	/** Sessions retain this small activity record, not the terminal and its transcript, after the view leaves. */
 	readonly #idleMaintenanceActivity: {
-		target: AgentSession | undefined;
+		target: AgentViewSession | undefined;
 		ready: boolean;
 		isComposing: boolean;
-		scheduledTurn: ((target: AgentSession) => boolean) | undefined;
+		scheduledTurn: ((target: AgentViewSession) => boolean) | undefined;
 		presentRecap: ((recap: string) => void) | undefined;
 	} = { target: undefined, ready: false, isComposing: false, scheduledTurn: undefined, presentRecap: undefined };
 
-	syncIdleMaintenanceView(target: AgentSession | null = this.viewSession): void {
+	syncIdleMaintenanceView(target: AgentViewSession | null = this.viewSession): void {
 		const activity = this.#idleMaintenanceActivity;
 		const previous = activity.target;
 		if (target === null) {
@@ -1870,7 +1878,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (previous !== target) previous?.refreshIdleMaintenance();
 		target.refreshIdleMaintenance();
 	}
-	get viewSession(): AgentSession {
+	get viewSession(): AgentViewSession {
 		return this.#focusController.target ?? this.session;
 	}
 	get assistantImagesVisible(): boolean {
@@ -2246,6 +2254,11 @@ export class InteractiveMode implements InteractiveModeContext {
 				case "status.cost":
 					void this.handleUsageCommand();
 					return;
+				// Only the main session has a cache warmer, so a focused subagent's bar shows no
+				// cache marker: this click always comes from the main session's marker.
+				case "status.cache":
+					void this.handleSessionCommand();
+					return;
 				case "status.path":
 					openPath(this.sessionManager.getCwd());
 					return;
@@ -2603,6 +2616,9 @@ export class InteractiveMode implements InteractiveModeContext {
 						(error: unknown) =>
 							this.showWarning(`Copy failed: ${error instanceof Error ? error.message : String(error)}`),
 					);
+					return;
+				case "spotlight":
+					void this.#showSpotlightSheet(action.spotlight, action.reduced);
 			}
 		});
 
@@ -2650,6 +2666,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		initTerminalTitleState();
 		setTerminalTitleStateEnabled(cfgTuiTitleState.get(this.settings));
 		setTerminalTitleSpinnerStyle(cfgTuiTitleSpinner.get(this.settings));
+		setTerminalTitleSpinnerInterval(cfgMotionResolved.get(this.settings).spinnerInterval);
 		initProgramStatus();
 		setProgramStatusEnabled(cfgTerminalProgramStatus.get(this.settings));
 		// OSC 133;A starts a shell prompt and invalidates working/blocked records.
@@ -4322,6 +4339,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (any("tui.titleState")) setTerminalTitleStateEnabled(cfgTuiTitleState.get(this.settings));
 		if (any("tui.titleSpinner")) setTerminalTitleSpinnerStyle(cfgTuiTitleSpinner.get(this.settings));
 		if (any("terminal.programStatus")) setProgramStatusEnabled(cfgTerminalProgramStatus.get(this.settings));
+		if (any("motion")) setTerminalTitleSpinnerInterval(next.motion.spinnerInterval);
 
 		if (
 			any(
@@ -5024,7 +5042,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 	}
 
-	#syncTodoHudState(owner: AgentSession): void {
+	#syncTodoHudState(owner: AgentViewSession): void {
 		this.#cancelTodoAutoClearTimer();
 		const phases = this.todoPhases;
 		const persisted = getTodoHudVisibility(owner.sessionManager.getBranch(), phases);
@@ -5432,7 +5450,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		return [...leadingLines, combinedLine];
 	}
 
-	async #loadTodoList(source: AgentSession = this.session): Promise<void> {
+	async #loadTodoList(source: AgentViewSession = this.session): Promise<void> {
 		this.todoPhases = source.getTodoPhases();
 		this.#todoPhasesOwner = source;
 		this.#syncTodoHudState(source);
@@ -8524,6 +8542,44 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.ui.requestRender();
 	}
 
+	/**
+	 * The Spotlight sheet of a shaped tool result (its notice's click): the original, loaded from the session
+	 * artifact its trace names, beside the text the model saw; for a held-out or gated result, beside the would-be text
+	 * its `shapedUrl` names. One at a time; Esc closes it.
+	 */
+	async #showSpotlightSheet(spotlight: SpotlightDetails, reduced: string): Promise<void> {
+		if (this.#spotlightSheetHandle || !hasSpotlightOriginal(spotlight)) return;
+		const sessionManager = this.viewSession.sessionManager;
+		const original = await readArtifactText(sessionManager, spotlight.original.url);
+		if (original === null) {
+			this.showWarning(`The original of this result is gone (${spotlight.original.url}).`);
+			return;
+		}
+		if (spotlight.holdout || spotlight.gated) {
+			const shapedUrl = spotlight.original.shapedUrl;
+			const shaped = shapedUrl ? await readArtifactText(sessionManager, shapedUrl) : null;
+			if (shaped === null) {
+				this.showWarning(`The would-be text of this held-out result is gone (${shapedUrl ?? "never saved"}).`);
+				return;
+			}
+			reduced = shaped;
+		}
+		if (this.#spotlightSheetHandle) return;
+		const sheet = new SpotlightSheet({ spotlight, original, reduced, close: () => this.#hideSpotlightSheet() });
+		this.#spotlightSheetHandle = this.ui.showOverlay(sheet, { anchor: "center", width: "100%", maxHeight: "100%" });
+		this.ui.setFocus(sheet);
+		this.ui.requestRender();
+	}
+
+	#hideSpotlightSheet(): void {
+		const handle = this.#spotlightSheetHandle;
+		this.#spotlightSheetHandle = undefined;
+		if (!handle) return;
+		handle.hide();
+		this.#selectorController.focusActiveEditorArea();
+		this.ui.requestRender();
+	}
+
 	#hideJobsSheet(): void {
 		const handle = this.#jobsSheetHandle;
 		this.#jobsSheetHandle = undefined;
@@ -9659,7 +9715,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.ui.requestRender();
 	}
 
-	async reloadTodos(source: AgentSession = this.session): Promise<void> {
+	async reloadTodos(source: AgentViewSession = this.session): Promise<void> {
 		await this.#loadTodoList(source);
 		this.ui.requestRender();
 	}

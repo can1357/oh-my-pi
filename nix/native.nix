@@ -101,7 +101,7 @@ let
   # registry crates depend on their real APIs (e.g. nix -> cfg_aliases). A
   # vendored crate that depends on an OMP crate, directly or through another
   # vendored crate, would compile against a dummy there, so it stays a dummy
-  # and builds with the OMP crates instead (brush-core -> pi-vfs today).
+  # and builds with the OMP crates instead (none does today).
   vendoredCrates =
     let
       vendorDir = source + "/crates/vendor";
