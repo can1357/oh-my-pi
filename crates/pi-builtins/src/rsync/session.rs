@@ -353,6 +353,10 @@ struct HostIo {
 	tz: jiff::tz::TimeZone,
 	env: Arc<HashMap<String, String>>,
 	argv0: OsString,
+	/// A `--server` run's stdio when both are descriptors, for the
+	/// connection's readiness probes ([`transport::stdio_probes`]).
+	#[cfg(unix)]
+	server_stdio: Option<transport::ServerStdio>,
 }
 
 impl HostIo {
@@ -387,6 +391,8 @@ impl HostIo {
 			tz: crate::time_zone::shell_time_zone(host),
 			env,
 			argv0,
+			#[cfg(unix)]
+			server_stdio: None,
 		}
 	}
 
@@ -506,15 +512,29 @@ fn report(logger: &Logger, err: &RsyncError) {
 // ---------------------------------------------------------------------------
 // Entry point
 
+/// The shell's stdin and stdout, duplicated, when both are descriptors (see
+/// [`transport::ServerStdio`]).
+#[cfg(unix)]
+fn server_stdio(host: &Host) -> Option<transport::ServerStdio> {
+	let stdin = host.stdin.file().try_borrow_as_fd().ok()?.try_clone_to_owned().ok()?;
+	let stdout = host.stdout.try_borrow_as_fd().ok()?.try_clone_to_owned().ok()?;
+	Some(Arc::new((stdin, stdout)))
+}
+
 /// Entry point used by the Utility impl. `argv[0]` is the program name.
 pub(crate) fn run(host: &mut Host, argv: Vec<OsString>) -> i32 {
 	let env: Arc<HashMap<String, String>> =
 		Arc::new(host.env().map(|(k, v)| (k.to_string(), v.to_string())).collect());
 	let argv0 = argv.first().cloned().unwrap_or_else(|| OsString::from("rsync"));
-	let io = HostIo::new(host, env, argv0);
+	#[cfg_attr(not(unix), allow(unused_mut, reason = "server stdio probes are unix-only"))]
+	let mut io = HostIo::new(host, env, argv0);
 	let args = argv.get(1..).unwrap_or(&[]);
-	let getenv = |k: &str| io.getenv(k);
 	let server_like = args.iter().any(|a| a == "--server");
+	#[cfg(unix)]
+	if server_like {
+		io.server_stdio = server_stdio(host);
+	}
+	let getenv = |k: &str| io.getenv(k);
 	let code = match options::parse(args, &getenv) {
 		Ok(Parsed::Help) => {
 			io.print(&usage::help_text());
@@ -1912,6 +1932,23 @@ struct LocalServer {
 	filters: Filters,
 }
 
+/// A connection's reader and writer, and its probes for input and for room.
+type StdioConn = (Box<dyn Read + Send>, Box<dyn Write + Send>, Option<ReadProbe>, Option<WriteProbe>);
+
+/// The connection of a `--server` run, the shell's stdin and stdout, with
+/// readiness probes when both are descriptors, as a socket has them; then a
+/// write goes out when its probe reports room. Elsewhere it has none, and a
+/// stats flush there can mark a write that then waits for room (see
+/// [`MuxWriter::flush_for_stats`]).
+fn stdio_conn(io: &HostIo) -> StdioConn {
+	#[cfg(unix)]
+	if let Some(stdio) = &io.server_stdio {
+		let (probe, writable) = transport::stdio_probes(stdio);
+		return (Box::new(io.stdin.clone()), Box::new(transport::RoomWrites(io.stdout_raw.clone())), Some(probe), Some(writable));
+	}
+	(Box::new(io.stdin.clone()), Box::new(io.stdout_raw.clone()), None, None)
+}
+
 fn server_main(io: &HostIo, opts: Options, local: Option<LocalServer>) -> i32 {
 	let startup = startup_logger(io, true);
 	if opts.am_daemon {
@@ -1929,7 +1966,10 @@ fn server_main(io: &HostIo, opts: Options, local: Option<LocalServer>) -> i32 {
 	let (conn_reader, conn_writer, probe, writable, client_info, local_filters): (Box<dyn Read + Send>, Box<dyn Write + Send>, Option<ReadProbe>, Option<WriteProbe>, Vec<u8>, Option<Filters>) =
 		match local {
 			Some(LocalServer { conn, client_info, filters }) => (conn.reader, conn.writer, conn.probe, conn.writable, client_info, Some(filters)),
-			None => (Box::new(io.stdin.clone()), Box::new(io.stdout_raw.clone()), None, None, Vec::new(), None),
+			None => {
+				let (reader, writer, probe, writable) = stdio_conn(io);
+				(reader, writer, probe, writable, Vec::new(), None)
+			},
 		};
 	let mut streams = make_streams(conn_reader, conn_writer, probe, writable, &abort, &opts);
 	let mut opts = opts;

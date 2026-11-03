@@ -366,15 +366,7 @@ impl Sock {
 	/// as "not yet".
 	#[cfg(unix)]
 	fn ready(&self, write: bool, timeout: Duration) -> io::Result<bool> {
-		use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
-		let flags = if write { PollFlags::POLLOUT } else { PollFlags::POLLIN };
-		let mut fds = [PollFd::new(self.fd(), flags)];
-		let ms = u16::try_from(timeout.as_millis()).unwrap_or(u16::MAX);
-		match poll(&mut fds, PollTimeout::from(ms)) {
-			Ok(n) => Ok(n > 0),
-			Err(nix::errno::Errno::EINTR) => Ok(false),
-			Err(err) => Err(io::Error::from(err)),
-		}
+		poll_ready(self.fd(), write, timeout)
 	}
 
 	#[cfg(windows)]
@@ -559,6 +551,63 @@ fn sock_halves(
 	});
 	let writer = SockWriter { sock, cancel: Arc::clone(cancel), ctl: ctl.clone() };
 	(Box::new(reader), Box::new(writer), probe, writable)
+}
+
+/// Waits up to `timeout` for `fd` to be readable (or writable); EINTR
+/// counts as "not yet".
+#[cfg(unix)]
+fn poll_ready(fd: std::os::fd::BorrowedFd<'_>, write: bool, timeout: Duration) -> io::Result<bool> {
+	use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
+	let flags = if write { PollFlags::POLLOUT } else { PollFlags::POLLIN };
+	let mut fds = [PollFd::new(fd, flags)];
+	let ms = u16::try_from(timeout.as_millis()).unwrap_or(u16::MAX);
+	match poll(&mut fds, PollTimeout::from(ms)) {
+		Ok(n) => Ok(n > 0),
+		Err(nix::errno::Errno::EINTR) => Ok(false),
+		Err(err) => Err(io::Error::from(err)),
+	}
+}
+
+/// A `--server` run's stdin and stdout, duplicated, when both are
+/// descriptors (upstream's client hands its server a remote shell's pipes or
+/// a socketpair).
+#[cfg(unix)]
+pub(crate) type ServerStdio = Arc<(std::os::fd::OwnedFd, std::os::fd::OwnedFd)>;
+
+/// Readiness probes for a server's stdio, as [`sock_halves`] gives a
+/// socket's: a poll for input on stdin and for room on stdout. Weak, as
+/// there: a probe keeps no descriptor open.
+#[cfg(unix)]
+pub(crate) fn stdio_probes(stdio: &ServerStdio) -> (ReadProbe, WriteProbe) {
+	use std::os::fd::AsFd;
+	let polled = Arc::downgrade(stdio);
+	let probe: ReadProbe = Arc::new(move || {
+		polled.upgrade().is_none_or(|fds| poll_ready(fds.0.as_fd(), false, Duration::ZERO).unwrap_or(true))
+	});
+	let polled = Arc::downgrade(stdio);
+	let writable: WriteProbe = Arc::new(move |wait| {
+		polled.upgrade().is_none_or(|fds| poll_ready(fds.1.as_fd(), true, wait).unwrap_or(true))
+	});
+	(probe, writable)
+}
+
+/// A server's stdout once its probe reported room: each write takes at most
+/// `PIPE_BUF` bytes, which a pipe reporting room (a free page) or a socket
+/// reporting room takes at once even when the descriptor blocks, so the
+/// write goes out when the probe said it would instead of waiting inside the
+/// call.
+#[cfg(unix)]
+pub(crate) struct RoomWrites<W>(pub(crate) W);
+
+#[cfg(unix)]
+impl<W: Write> Write for RoomWrites<W> {
+	fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+		self.0.write(&buf[..buf.len().min(libc::PIPE_BUF)])
+	}
+
+	fn flush(&mut self) -> io::Result<()> {
+		self.0.flush()
+	}
 }
 
 /// One direction of the in-process duplex.
@@ -1412,6 +1461,45 @@ mod tests {
 			while theirs.read(&mut buf).is_ok() {}
 			assert!(room(Duration::from_millis(100)));
 		}
+	}
+
+	/// A `--server` run's stdio probes answer as a socket's, over real pipes:
+	/// input waiting on stdin, room on stdout until it is full and again once
+	/// a page is read. A write once room is reported takes `PIPE_BUF` bytes and
+	/// returns at once, though stdout blocks; a whole buffer waited inside the
+	/// call for the reader, after the `--stats` mark.
+	#[cfg(unix)]
+	#[test]
+	fn server_stdio_probes_report_input_and_room() {
+		use std::os::fd::{AsFd, OwnedFd};
+
+		use nix::fcntl::{FcntlArg, OFlag, fcntl};
+		let (in_r, mut in_w) = std::io::pipe().unwrap();
+		let (mut out_r, out_w) = std::io::pipe().unwrap();
+		let stdio: ServerStdio = Arc::new((OwnedFd::from(in_r), OwnedFd::from(out_w.try_clone().unwrap())));
+		let (probe, room) = stdio_probes(&stdio);
+		assert!(!probe());
+		in_w.write_all(b"x").unwrap();
+		assert!(probe());
+		assert!(room(Duration::ZERO));
+		fcntl(out_w.as_fd(), FcntlArg::F_SETFL(OFlag::O_NONBLOCK)).unwrap();
+		let mut filler = std::fs::File::from(OwnedFd::from(out_w));
+		while filler.write(&[0u8; 4096]).is_ok() {}
+		assert!(!room(Duration::from_millis(20)));
+		out_r.read_exact(&mut [0u8; 4096]).unwrap();
+		assert!(room(Duration::ZERO));
+		fcntl(filler.as_fd(), FcntlArg::F_SETFL(OFlag::empty())).unwrap();
+		let (done, wrote) = std::sync::mpsc::channel();
+		let writer = std::thread::spawn(move || {
+			let _ = done.send(RoomWrites(&mut filler).write(&vec![0u8; 1 << 16]).unwrap());
+		});
+		let written = wrote.recv_timeout(Duration::from_secs(5));
+		// A write that waits finishes once the pipe is drained, and the pipe
+		// ends once both write ends are gone.
+		drop(stdio);
+		out_r.read_to_end(&mut Vec::new()).unwrap();
+		writer.join().unwrap();
+		assert_eq!(written, Ok(libc::PIPE_BUF));
 	}
 
 	#[test]

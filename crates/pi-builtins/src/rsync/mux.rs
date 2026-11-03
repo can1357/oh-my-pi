@@ -334,6 +334,15 @@ struct OutState {
 	writing: bool,
 	/// Write calls that wrote something.
 	moved: u64,
+	/// The stats flush is running ([`MuxWriter::flush_for_stats`]): a write
+	/// that has found room waits for the role thread to read the input
+	/// waiting then, before it takes the mark.
+	stats: bool,
+	/// The output thread has found room during the stats flush and waits for
+	/// that read.
+	poised: bool,
+	/// The role thread has read the input waiting since `poised` was raised.
+	cleared: bool,
 }
 
 /// What [`MuxWriter::settle`] waits for.
@@ -396,6 +405,24 @@ impl Drop for OutputGrant {
 	}
 }
 
+/// The stats flush's passes ([`OutState::stats`]), ended however the flush
+/// ends, so a write waiting for the role thread's read goes on alone.
+struct StatsPasses<'a>(&'a OutPipe);
+
+impl<'a> StatsPasses<'a> {
+	fn start(out: &'a OutPipe) -> Self {
+		lock(&out.state).stats = true;
+		Self(out)
+	}
+}
+
+impl Drop for StatsPasses<'_> {
+	fn drop(&mut self) {
+		lock(&self.0.state).stats = false;
+		self.0.cond.notify_all();
+	}
+}
+
 fn write_out(
 	pipe: &OutPipe,
 	inner: &mut dyn Write,
@@ -423,6 +450,25 @@ fn write_out(
 		let max = bw.as_ref().map_or(bytes.len(), |b| b.writemax.min(bytes.len()));
 		{
 			let mut o = lock(&pipe.state);
+			if o.stats {
+				// Upstream's select reports the room together with the input
+				// waiting, and its pass reads that input before it writes: the
+				// role thread reads it before the mark is taken (see
+				// `MuxWriter::settle_timed`). Input that came during the probe's
+				// wait was left out otherwise.
+				o.poised = true;
+				o.cleared = false;
+				pipe.cond.notify_all();
+				while o.stats && !o.cleared && o.may_write() {
+					o = pipe.cond.wait(o).unwrap_or_else(PoisonError::into_inner);
+				}
+				o.poised = false;
+				o.cleared = false;
+				if !o.may_write() {
+					// The pass ended first: the next one asks again.
+					continue;
+				}
+			}
 			o.writing = true;
 			counters.mark_write();
 		}
@@ -702,6 +748,9 @@ impl MuxWriter {
 				pass_limit: None,
 				writing: false,
 				moved: 0,
+				stats: false,
+				poised: false,
+				cleared: false,
 			}),
 			cond: Condvar::new(),
 		});
@@ -852,6 +901,16 @@ impl MuxWriter {
 					if o.failed.is_some() {
 						drop(o);
 						return self.state().check_failed(sh);
+					}
+					if o.poised && !o.cleared {
+						// The output thread has found room in the stats flush: the
+						// input waiting now is read before its write takes the mark.
+						drop(o);
+						self.serve_peer(usize::MAX)?;
+						o = lock(&sh.out.state);
+						o.cleared = true;
+						sh.out.cond.notify_all();
+						continue;
 					}
 					let drained = o.queue.is_empty() && !o.busy;
 					if !o.writing {
@@ -1075,12 +1134,15 @@ impl MuxWriter {
 	/// that is waiting before each write, and the snapshot follows the last
 	/// write at once, so nothing the peer sends in answer to that write is
 	/// counted. Here the flush goes the same way, one write call a pass, each
-	/// pass reading the waiting input first, and returns the bytes read when
-	/// the last write call began, with a read of waiting input already under
-	/// way then (all of them if the flush wrote nothing). Read whenever they
+	/// pass reading the waiting input first and again once the connection has
+	/// room (as upstream's select reports the room and the input together and
+	/// its pass reads before it writes), and returns the bytes read when the
+	/// last write call began, with a read of waiting input already under way
+	/// then (all of them if the flush wrote nothing). Read whenever they
 	/// arrived, the peer's answer (the generator's final `NDX_DONE`, a 5-byte
 	/// frame) was sometimes counted. A connection without a write probe
-	/// ([`WriteConfig::writable`], a Windows remote shell's stdin) can take
+	/// ([`WriteConfig::writable`]: on Windows a remote shell's stdin and a
+	/// server's stdio, and a server's stdio that is no descriptor) can take
 	/// the mark before a write that then waits for room, and leaves out what
 	/// is read during that wait.
 	pub(crate) fn flush_for_stats(&mut self) -> io::Result<u64> {
@@ -1102,6 +1164,7 @@ impl MuxWriter {
 		// One `--timeout` clock for the whole flush, as upstream's perform_io
 		// keeps checking it while the last bytes do not go out.
 		let mut next_check = None;
+		let _passes = StatsPasses::start(&sh.out);
 		loop {
 			self.serve_peer(usize::MAX)?;
 			let (before, drained) = {
@@ -2841,6 +2904,54 @@ mod tests {
 		w.write_all(&[0]).unwrap();
 		let total = w.flush_for_stats().unwrap();
 		let _tx = feeder.join().unwrap();
+		assert_eq!(total, before + info_len);
+	}
+
+	/// Input and room that come during the same wait of the probe: upstream's
+	/// select reports both, and its pass reads the input before it writes, so
+	/// that input counts. The output thread took the mark as soon as it found
+	/// the room, before the role thread had read the input (5 where rsync
+	/// 3.5.1 counts 14 in review, 299 of 300 runs over real full sockets and
+	/// the in-process pipe).
+	#[test]
+	fn input_that_comes_with_the_room_is_read_before_the_mark() {
+		let counters = IoCounters::default();
+		let cancel = Arc::new(AtomicBool::new(false));
+		let armed = Arc::new(AtomicBool::new(false));
+		let peer: Arc<Mutex<Option<flume::Sender<Vec<u8>>>>> = Arc::default();
+		let info = frame(MSG_INFO, b"note\n");
+		let info_len = info.len() as u64;
+		let probe: WriteProbe = {
+			let (armed, peer) = (Arc::clone(&armed), Arc::clone(&peer));
+			let pending = Mutex::new(Some(info));
+			Arc::new(move |wait| {
+				if !armed.load(Ordering::Relaxed) {
+					thread::sleep(wait);
+					return false;
+				}
+				// The peer's input arrives during this wait, and so does the room.
+				if let Some(info) = lock(&pending).take() {
+					lock(&peer).as_ref().unwrap().send(info).unwrap();
+				}
+				true
+			})
+		};
+		let cfg = WriteConfig { writable: Some(probe), ..WriteConfig::default() };
+		let mut w = MuxWriter::new(Box::new(io::sink()), counters.clone(), cfg);
+		w.start_multiplex().unwrap();
+		let (_r, tx, _) = linked_reader(&counters, &w, &cancel);
+		*lock(&peer) = Some(tx);
+		let before = counters.total_read();
+		w.write_all(&[0]).unwrap();
+		let arm = {
+			let armed = Arc::clone(&armed);
+			thread::spawn(move || {
+				thread::sleep(Duration::from_millis(50));
+				armed.store(true, Ordering::Relaxed);
+			})
+		};
+		let total = w.flush_for_stats().unwrap();
+		arm.join().unwrap();
 		assert_eq!(total, before + info_len);
 	}
 
