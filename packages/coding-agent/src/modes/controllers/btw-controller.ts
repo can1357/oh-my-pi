@@ -19,6 +19,7 @@ import { BtwPanelComponent } from "@oh-my-pi/pi-tui/overlays/btw-panel";
 import type { BtwInjectState } from "@oh-my-pi/pi-tui/overlays/btw-inject";
 import { sanitizeErrorLine } from "@oh-my-pi/pi-tui/chrome/error-block";
 import { appKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
+import type { AgentViewSession, AgentViewSessionManager } from "../../session/agent-session-handle";
 import type { DroppedPrompt } from "../../session/agent-session-types";
 import { cfgBtwInject } from "../settings";
 import type { InteractiveModeContext } from "../types";
@@ -30,9 +31,9 @@ interface BtwRequest {
 	images?: ImageContent[];
 	leafId: string | null;
 	sessionId: string;
-	session: InteractiveModeContext["session"];
+	session: AgentViewSession;
 	/** Manager of the view that asked; the request outlives focus changes. */
-	sessionManager: InteractiveModeContext["sessionManager"];
+	sessionManager: AgentViewSessionManager;
 	store: BtwHistoryStore;
 	record: BtwHistoryRecord;
 	history?: readonly BtwHistoryTurn[];
@@ -115,7 +116,7 @@ export class BtwController {
 	constructor(private readonly ctx: InteractiveModeContext) {}
 
 	/** /btw asks about the transcript on screen: the focused agent's session, else main. */
-	get #sessionManager(): InteractiveModeContext["sessionManager"] {
+	get #sessionManager(): AgentViewSessionManager {
 		return this.ctx.focusedAgentId ? this.ctx.viewSession.sessionManager : this.ctx.sessionManager;
 	}
 
