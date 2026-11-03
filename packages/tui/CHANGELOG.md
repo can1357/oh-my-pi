@@ -19,7 +19,7 @@
 
 ### Changed
 
-- In `UsageDashboardComponent` (`/usage`), Tab toggles between Overview and Details views bidirectionally, and Esc or `q` immediately dismisses the dashboard from either view without requiring a double-Esc sequence ([#17962](https://github.com/can1357/oh-my-pi/pull/17962) by [@SuperUserA](https://github.com/SuperUserA))
+- In `UsageDashboardComponent` (`/usage`), Tab toggles between Overview and Details views bidirectionally ([#17962](https://github.com/can1357/oh-my-pi/pull/17962) by [@SuperUserA](https://github.com/SuperUserA))
 
 ## [18.16.0] - 2026-11-02
 

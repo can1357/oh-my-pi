@@ -1057,7 +1057,7 @@ export class UsageDashboardComponent implements Component {
 		const tabKey = formatKeyHint("tab");
 		const hint =
 			this.#view === "detail"
-				? `${scrollHint}${refreshHint}${tabKey} overview · ${cancel} close`
+				? `${scrollHint}${refreshHint}${tabKey} overview · ${cancel} back`
 				: `${scrollHint}${refreshHint}${tabKey} details · ${cancel} close`;
 		this.#panel.title = title;
 		this.#header.setLines([checkedText ? theme.fg("dim", checkedText) : ""]);
@@ -1087,7 +1087,8 @@ export class UsageDashboardComponent implements Component {
 			return cache.node;
 		}
 		const body = this.#view === "detail" ? this.#describeDetail() : this.#describeOverview(meter, chart);
-		const close = actionButton("Close", "close", { keys: "escape" });
+		// Esc leaves Details for Overview first, so only Overview's Close wears its keycap.
+		const close = actionButton("Close", "close", this.#view === "overview" ? { keys: "escape" } : {});
 		const root = col(
 			[
 				this.#describeHead(),
@@ -1790,7 +1791,11 @@ export class UsageDashboardComponent implements Component {
 		) {
 			return;
 		}
-		if (matchesSelectCancel(data) || matchesKey(data, "escape") || matchesKey(data, "q")) {
+		if (matchesSelectCancel(data) || matchesKey(data, "q")) {
+			if (this.#view === "detail") {
+				this.#setView("overview");
+				return;
+			}
 			this.#close();
 			return;
 		}

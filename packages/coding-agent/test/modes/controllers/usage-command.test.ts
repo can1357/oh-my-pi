@@ -496,7 +496,7 @@ describe("interactive /usage account visibility", () => {
 			expect(details).not.toContain("%");
 			expect(details).not.toContain("Infinity");
 
-			mounted?.handleInput("\t");
+			mounted?.handleInput("\x1b");
 			expect(display()).toContain("2 accts");
 			mounted?.handleInput("\x1b");
 			expect(mounted).toBeUndefined();

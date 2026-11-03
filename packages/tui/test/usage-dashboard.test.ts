@@ -570,60 +570,37 @@ describe("UsageDashboardComponent", () => {
 	it("toggles bidirectionally between overview and detail views on tab", () => {
 		const component = dashboard([]);
 		try {
-			expect(component.render(80).join("\n")).toContain("Usage");
-			expect(component.render(80).join("\n")).not.toContain("Usage · Details");
+			expect(component.render(80).join("\n")).not.toContain("detail-content");
 
 			component.handleInput("\t");
-			expect(component.render(80).join("\n")).toContain("Usage · Details");
 			expect(component.render(80).join("\n")).toContain("detail-content");
 
 			component.handleInput("\t");
-			expect(component.render(80).join("\n")).not.toContain("Usage · Details");
+			expect(component.render(80).join("\n")).not.toContain("detail-content");
 		} finally {
 			component.dispose();
 		}
 	});
 
-	it("closes immediately on escape or q from both overview and detail views", () => {
+	it("returns to overview on escape or q from detail, and closes on escape or q from overview", () => {
 		for (const key of ["\x1b", "q"]) {
-			let overviewClosed = 0;
-			const overviewComponent = dashboard([], [], () => {
-				overviewClosed++;
+			let closed = 0;
+			const component = dashboard([], [], () => {
+				closed++;
 			});
 			try {
-				overviewComponent.handleInput(key);
-				expect(overviewClosed).toBe(1);
-			} finally {
-				overviewComponent.dispose();
-			}
+				component.handleInput("\t");
+				expect(component.render(80).join("\n")).toContain("detail-content");
 
-			let detailClosed = 0;
-			const detailComponent = dashboard([], [], () => {
-				detailClosed++;
-			});
-			try {
-				detailComponent.handleInput("\t");
-				detailComponent.handleInput(key);
-				expect(detailClosed).toBe(1);
-			} finally {
-				detailComponent.dispose();
-			}
-		}
-	});
-	it("displays tab and cancel close shortcuts in both overview and detail footer hints", () => {
-		const component = dashboard([]);
-		try {
-			const overview = component.render(80).join("\n");
-			expect(overview).toContain("details");
-			expect(overview).toContain("close");
+				component.handleInput(key);
+				expect(closed).toBe(0);
+				expect(component.render(80).join("\n")).not.toContain("detail-content");
 
-			component.handleInput("\t");
-			const detail = component.render(80).join("\n");
-			expect(detail).toContain("overview");
-			expect(detail).toContain("close");
-			expect(detail).not.toContain("back");
-		} finally {
-			component.dispose();
+				component.handleInput(key);
+				expect(closed).toBe(1);
+			} finally {
+				component.dispose();
+			}
 		}
 	});
 });
