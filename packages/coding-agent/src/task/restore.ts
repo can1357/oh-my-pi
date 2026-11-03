@@ -22,15 +22,10 @@ import { hasRestorableTurn } from "../session/exit-diagnostics";
 import { extractSessionInit } from "../session/session-manager";
 import { collectSubSessions } from "../session/sub-sessions";
 import type { EventBus } from "../utils/event-bus";
-import { resolveSoftRequestBudget, runSubagentFollowUpTurn } from "./executor";
+import { runSubagentFollowUpTurn, softRequestBudgetFor } from "./executor";
 import { persistedAgentDefinition } from "./persisted-revive";
 import { formatTaskResultSummary } from "./result-summary";
-import {
-	cfgTaskAgentSoftRequestBudget,
-	cfgTaskMaxRuntimeMs,
-	cfgTaskSoftRequestBudget,
-	cfgTaskSoftRequestBudgetNotice,
-} from "./settings";
+import { cfgTaskMaxRuntimeMs } from "./settings";
 
 /** Where restored subagents' lifecycle and progress frames go, as a live run's do. */
 export interface RestoreOptions {
@@ -105,12 +100,7 @@ async function restoreSubagents(session: AgentSession, options: RestoreOptions):
 					subagentEventBus: options.subagentEventBus,
 					artifactsDir: path.dirname(sessionFileOfRef),
 					maxRuntimeMs: cfgTaskMaxRuntimeMs.get(session.settings),
-					softRequestBudget: resolveSoftRequestBudget(
-						ref.displayName,
-						Math.max(0, Math.trunc(Number(cfgTaskSoftRequestBudget.get(session.settings)) || 0)),
-						cfgTaskAgentSoftRequestBudget.get(session.settings),
-					),
-					softRequestBudgetNotice: cfgTaskSoftRequestBudgetNotice.get(session.settings),
+					...softRequestBudgetFor(ref.displayName, session.settings),
 				});
 				const text = formatTaskResultSummary(result, { totalDurationMs: result.durationMs });
 				const structuredOutput = result.structuredOutput;

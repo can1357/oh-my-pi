@@ -43,7 +43,7 @@ import {
 	createSubagentSettings,
 	followMCPTools,
 	replayRevivedAgentStart,
-	resolveSoftRequestBudget,
+	softRequestBudgetFor,
 	subagentRetryFallbackRole,
 } from "./executor";
 import { isCompletionProbeEnabled } from "./completion-probe";
@@ -57,10 +57,7 @@ import {
 } from "./model-approval";
 import {
 	cfgTaskAgentAccountPools,
-	cfgTaskAgentSoftRequestBudget,
 	cfgTaskMaxEffort,
-	cfgTaskSoftRequestBudget,
-	cfgTaskSoftRequestBudgetNotice,
 } from "./settings";
 import { type RestoredSeanceSession, restoreSeanceSession } from "./seance";
 import { seanceIsolationOptions } from "./seance-policy";
@@ -556,12 +553,7 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 		id: ref.id,
 		agent: persistedAgentDefinition(ref.displayName, init),
 		completionProbe: isCompletionProbeEnabled(spec.settings, taskDepth - 1),
-		softRequestBudget: resolveSoftRequestBudget(
-			ref.displayName,
-			Math.max(0, Math.trunc(Number(cfgTaskSoftRequestBudget.get(spec.settings)) || 0)),
-			cfgTaskAgentSoftRequestBudget.get(spec.settings),
-		),
-		softRequestBudgetNotice: cfgTaskSoftRequestBudgetNotice.get(spec.settings),
+		...softRequestBudgetFor(ref.displayName, spec.settings),
 		eventBus: spec.eventBus,
 		subagentEventBus: spec.subagentEventBus,
 		sessionFile,

@@ -218,6 +218,21 @@ export function resolveSoftRequestBudget(
 	return Math.min(normalized, SOFT_REQUEST_BUDGET[agentName] ?? normalized);
 }
 
+/** `agentName`'s soft request budget and notice switch from `settings`: every run, wake, revival and workpool turn. */
+export function softRequestBudgetFor(
+	agentName: string,
+	settings: Settings,
+): { softRequestBudget: number; softRequestBudgetNotice: boolean } {
+	return {
+		softRequestBudget: resolveSoftRequestBudget(
+			agentName,
+			Number(cfgTaskSoftRequestBudget.get(settings)) || 0,
+			cfgTaskAgentSoftRequestBudget.get(settings),
+		),
+		softRequestBudgetNotice: cfgTaskSoftRequestBudgetNotice.get(settings),
+	};
+}
+
 /** Extra requests allowed after a budget stop for the forced yield to land before the run is hard-aborted. */
 export const BUDGET_STOP_GRACE_REQUESTS = 5;
 
@@ -4449,13 +4464,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 	// TTL before an adopted idle subagent is parked by the lifecycle manager.
 	// <= 0 disables parking (the session stays live until process teardown).
 	const agentIdleTtlMs = Math.trunc(Number(cfgTaskAgentIdleTtlMs.get(settings)) || 0);
-	const configuredDefaultBudget = Math.max(0, Math.trunc(Number(cfgTaskSoftRequestBudget.get(settings)) || 0));
-	const softRequestBudget = resolveSoftRequestBudget(
-		agent.name,
-		configuredDefaultBudget,
-		cfgTaskAgentSoftRequestBudget.get(settings),
-	);
-	const softRequestBudgetNotice = cfgTaskSoftRequestBudgetNotice.get(settings);
+	const { softRequestBudget, softRequestBudgetNotice } = softRequestBudgetFor(agent.name, settings);
 	const parentDepth = options.taskDepth ?? 0;
 	const childDepth = parentDepth + 1;
 	const restrictToolNames = options.restrictToolNames === true || preparedSession !== undefined;
