@@ -277,7 +277,8 @@ export class PrintHold {
 		if (event.type === "BackForwardCacheRestore") void this.#setInFrames();
 	};
 
-	readonly #onPopup = (popup: Page): void => {
+	readonly #onPopup = (popup: Page | null): void => {
+		if (!popup) return;
 		this.#popups.add(popup);
 		void this.#setInFrames();
 	};
