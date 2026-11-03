@@ -495,7 +495,14 @@ export class PrintHold {
 				source: this.#source(this.#remaining(), Date.now() + this.#clockOffset),
 			});
 			this.#scriptId = identifier;
-			if (previous) await this.#session.send("Page.removeScriptToEvaluateOnNewDocument", { identifier: previous });
+			// Chrome may no longer have the previous script (a relay tab answered `Script not found` between two calls).
+			// It numbers a new script one past the highest it holds, so the new one can then carry the previous one's
+			// identifier, which must stay; a previous one that is gone needs no removal.
+			if (previous && previous !== identifier) {
+				await this.#session
+					.send("Page.removeScriptToEvaluateOnNewDocument", { identifier: previous })
+					.catch(() => undefined);
+			}
 			await this.#setInFrames();
 		});
 		this.#applying = applied.catch(() => undefined);
