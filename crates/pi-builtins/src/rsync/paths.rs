@@ -1808,7 +1808,7 @@ mod tests {
 
 		use crate::rsync::exit::RERR_SIGNAL;
 
-		let helpers = || {
+		fn helpers() -> usize {
 			fs::read_dir("/proc/self/task")
 				.unwrap()
 				.filter(|task| {
@@ -1816,7 +1816,7 @@ mod tests {
 						.is_ok_and(|name| name.trim_end() == "rsync-fifo-open")
 				})
 				.count()
-		};
+		}
 		let (_guard, base) = canonical_tempdir();
 		let vfs = BlockingFs::native();
 		for removed in [false, true] {
@@ -1828,7 +1828,13 @@ mod tests {
 					let cancel = Arc::new(AtomicBool::new(false));
 					let (flag, path) = (Arc::clone(&cancel), fifo.clone());
 					let mover = std::thread::spawn(move || {
-						std::thread::sleep(Duration::from_millis(150));
+						// Once the open waits in its helper (the FIFO already
+						// reached), the FIFO moves away.
+						let deadline = Instant::now() + Duration::from_secs(10);
+						while helpers() == 0 && Instant::now() < deadline {
+							std::thread::sleep(Duration::from_millis(5));
+						}
+						std::thread::sleep(Duration::from_millis(50));
 						if removed {
 							fs::remove_file(&path).unwrap();
 						} else {
