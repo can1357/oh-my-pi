@@ -14,6 +14,7 @@ import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/ex
 import type { Tool, ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool, type BashToolInput } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { checkBashInterception } from "@oh-my-pi/pi-coding-agent/tools/bash-interceptor";
+import { dedicatedToolCanPerformStep } from "@oh-my-pi/pi-coding-agent/tools/bash-step";
 
 function createBashTool(rules: BashInterceptorRule[]): BashTool {
 	const session = {
@@ -456,7 +457,8 @@ describe("leading-step matching for read, grep and glob rules", () => {
 		expect(
 			decide("grep -n 'YK06\\|YM05' ExvB_NumE.v 2>/dev/null | head -5; grep -c 'alloc_ceiling' ExvB_NumE.v"),
 		).toBe("grep");
-		expect(decide("LC_ALL=C grep -n x f")).toBe("grep");
+		// An assignment changes what the command does (`LC_ALL=C` its matching), so it runs.
+		expect(decide("LC_ALL=C grep -n x f")).toBeUndefined();
 	});
 
 	it("keeps matching write, edit and service rules on every step", () => {
@@ -824,8 +826,45 @@ describe("dedicated tool capability", () => {
 		"printf '#!/bin/sh\\n' > shebang",
 		"echo '#!/bin/sh' > shebang",
 		"cat > shebang <<'EOF'\n#!/bin/sh\nEOF",
+		// Round 6: a `#!` line split across printf's words, or behind tabs `<<-` strips.
+		"printf '#%s\\n' '!/bin/sh' > shebang",
+		"printf '%s%s\\n' '#' '!/bin/sh' > shebang",
+		"cat > shebang <<-'EOF'\n\t#!/bin/sh\n\tEOF",
+		"printf '#%s/bin/sh\\n' '!' > shebang",
+		"printf '%s%s/bin/sh\\n' $'#\\0discard' '!' > shebang",
+		// Round 6: a literal assignment still changes what the command does.
+		"PERL5OPT=-MReview PERL5LIB=. perl -pi -e 's/a/b/' f",
 	])("does not refuse %s (round 5)", command => {
 		expect(decide(command)).toBeUndefined();
+	});
+
+	it.each(["echo $'\\uZ' > out", "echo $'\\Uwat' > out", "echo $'\\u' > out"])(
+		"decides %s without throwing",
+		command => {
+			expect(() => decide(command)).not.toThrow();
+		},
+	);
+
+	it("classifies many here-strings in linear time", () => {
+		const time = (count: number) => {
+			const command = `cat ${"<<<'a' ".repeat(count)}>out`;
+			const samples = [0, 1, 2].map(() => {
+				const start = performance.now();
+				dedicatedToolCanPerformStep("write", command, tools);
+				return performance.now() - start;
+			});
+			return samples.sort((a, b) => a - b)[1];
+		};
+		time(1_000);
+		// Eight times the input: linear work takes about 8 times as long, quadratic work 64 times.
+		expect(time(128_000)).toBeLessThan(24 * time(16_000) + 50);
+	});
+
+	it.each([
+		["printf '# heading\\n' > notes.md", "write"],
+		["cat > notes.md <<-'EOF'\n\t# heading\n\tEOF", "write"],
+	])("still refuses %s as %s", (command, tool) => {
+		expect(decide(command)).toBe(tool);
 	});
 
 	it("rejects a long excluded printf format in linear time", () => {
@@ -860,6 +899,19 @@ describe("dedicated tool capability", () => {
 			expect(at("cat self/comm", "/proc")).toBeUndefined();
 			expect(at("echo hi > fresh")).toBe("write");
 			expect(at("sed -i 's/a/b/' target")).toBe("edit");
+			// Round 6: the edit tool refuses non-UTF-8 and keeps a BOM and CRLF, so those edits run.
+			await Bun.write(path.join(dir, "binary"), new Uint8Array([0x61, 0x0a, 0xff, 0x0a]));
+			await Bun.write(path.join(dir, "bom"), "\ufeffa\nb\n");
+			await Bun.write(path.join(dir, "crlf"), "a\r\n");
+			for (const command of ["sed -i 's/a/b/' binary", "sed -i '1d' bom", "sed -i 's/a/b/' crlf"]) {
+				expect(at(command)).toBeUndefined();
+			}
+			// A multiline search reads only the first 4 MB of a large file.
+			await Bun.write(path.join(dir, "large"), `${"x\n".repeat(2_200_000)}UNIQUE_MARKER\nEND_MARKER\n`);
+			expect(at("rg -U 'UNIQUE_MARKER\\nEND_MARKER' large")).toBeUndefined();
+			expect(at("rg UNIQUE_MARKER large")).toBe("grep");
+			// The shell cannot create a file in a missing directory; the write tool would create both.
+			expect(at("echo hi > missing/out")).toBeUndefined();
 			expect(at("cat link")).toBe("read");
 		} finally {
 			await fs.rm(dir, { recursive: true, force: true });

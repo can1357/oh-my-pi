@@ -8,7 +8,7 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { dedicatedToolCanPerformStep, type PathKind } from "./bash-step";
+import { dedicatedToolCanPerformStep, type FileFacts, type PathKind, type StepFilesystem } from "./bash-step";
 import { extractFlatShellCommandSegments } from "./shell-tokenize";
 import { type BashInterceptorRule, DEFAULT_BASH_INTERCEPTOR_RULES } from "../exec/settings";
 
@@ -27,7 +27,7 @@ const SPECIAL_ROOT = /^\/(?:dev|proc|sys)(?:\/|$)/u;
  */
 function pathKindIn(cwd: string, target: string, follow: boolean): PathKind {
 	if (URL_PATH.test(cwd) || URL_PATH.test(target)) return "unknown";
-	const joined = path.isAbsolute(target) ? target : `${cwd}/${target}`;
+	const joined = joinPhysically(cwd, target);
 	try {
 		const stat = follow ? fs.statSync(joined) : fs.lstatSync(joined);
 		if (SPECIAL_ROOT.test(fs.realpathSync.native(joined))) return "other";
@@ -36,13 +36,50 @@ function pathKindIn(cwd: string, target: string, follow: boolean): PathKind {
 		const code = (error as NodeJS.ErrnoException).code;
 		if (code !== "ENOENT" && code !== "ENOTDIR") return "unknown";
 		try {
-			// A missing name is created where its directory really is.
-			return SPECIAL_ROOT.test(fs.realpathSync.native(path.dirname(joined))) ? "other" : "missing";
+			// A missing name is created where its directory really is; with no directory there the
+			// shell fails, while the write tool would create one.
+			const parent = fs.realpathSync.native(path.dirname(joined));
+			if (!fs.statSync(parent).isDirectory()) return "unknown";
+			return SPECIAL_ROOT.test(parent) ? "other" : "missing";
 		} catch {
-			return "missing";
+			return "unknown";
 		}
 	}
 }
+
+/** `target` joined to `cwd` without normalizing, so the kernel resolves `..` after symlinks. */
+function joinPhysically(cwd: string, target: string): string {
+	return path.isAbsolute(target) ? target : `${cwd}/${target}`;
+}
+
+/** Largest file the edit tool's byte-for-byte check reads. */
+const PLAIN_TEXT_LIMIT = 4 * 1024 * 1024;
+
+/** A regular file's size, and whether it is at most 4 MB of valid UTF-8 with no BOM and no CR. */
+function fileFactsIn(cwd: string, target: string): FileFacts | undefined {
+	if (URL_PATH.test(cwd) || URL_PATH.test(target)) return undefined;
+	const joined = joinPhysically(cwd, target);
+	try {
+		const { size } = fs.statSync(joined);
+		if (size > PLAIN_TEXT_LIMIT) return { size, plainText: false };
+		const bytes = fs.readFileSync(joined);
+		const bom = bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf;
+		let plainText = !bom && !bytes.includes(0x0d);
+		if (plainText) {
+			try {
+				new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+			} catch {
+				plainText = false;
+			}
+		}
+		return { size, plainText };
+	} catch {
+		return undefined;
+	}
+}
+
+/** A filesystem that cannot be inspected: a later step may run after a `cd` or after files change. */
+const UNINSPECTABLE: StepFilesystem = { kind: () => "unknown", facts: () => undefined };
 
 export interface InterceptionResult {
 	/** If true, the bash command should be blocked */
@@ -191,9 +228,10 @@ export function checkBashInterception(
 	originalCommand = command,
 	cwd?: string,
 ): InterceptionResult {
-	const pathKind =
-		cwd === undefined ? undefined : (target: string, follow: boolean) => pathKindIn(cwd, target, follow);
-	const unknown = (): PathKind => "unknown";
+	const filesystem: StepFilesystem | undefined =
+		cwd === undefined
+			? undefined
+			: { kind: (target, follow) => pathKindIn(cwd, target, follow), facts: target => fileFactsIn(cwd, target) };
 	const compiled = compileRules(rules);
 	const everyStep = interceptionCandidates(command, false);
 	const leadingStep = interceptionCandidates(command, true);
@@ -213,7 +251,7 @@ export function checkBashInterception(
 					rule.tool,
 					candidate.step,
 					availableTools,
-					pathKind && (candidate.leading ? pathKind : unknown),
+					filesystem && (candidate.leading ? filesystem : UNINSPECTABLE),
 				)
 			) {
 				return {

@@ -127,7 +127,7 @@ function decodeAnsiC(body: string): { text: string; bytes: boolean } {
 	const text = body.replace(
 		/\\(x[0-9A-Fa-f]{1,2}|u[0-9A-Fa-f]{1,4}|U[0-9A-Fa-f]{1,8}|c.|[0-7]{1,3}|.)/gsu,
 		(_, esc: string) => {
-			if (esc[0] === "u" || esc[0] === "U") {
+			if ((esc[0] === "u" || esc[0] === "U") && esc.length > 1) {
 				const code = Number.parseInt(esc.slice(1), 16);
 				// A surrogate or a code point past U+10FFFF is not valid UTF-8 text; bash emits its bytes anyway.
 				if (code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) {
@@ -138,7 +138,8 @@ function decodeAnsiC(body: string): { text: string; bytes: boolean } {
 			}
 			if (esc[0] === "x" || /^[0-7]/u.test(esc)) {
 				const code = esc[0] === "x" ? Number.parseInt(esc.slice(1), 16) : Number.parseInt(esc, 8) & 0xff;
-				if (code >= 0x80) bytes = true;
+				// A NUL ends the word when bash passes it to a command.
+				if (code >= 0x80 || code === 0) bytes = true;
 				return String.fromCharCode(code);
 			}
 			if (esc[0] === "c") return esc[1] === "?" ? "\x7f" : String.fromCharCode(esc.charCodeAt(1) & 0x1f);
@@ -374,7 +375,9 @@ function heredocBodies(
 		while (end < lines.length && (op === "<<-" ? lines[end].replace(/^\t+/u, "") : lines[end]) !== target.value)
 			end++;
 		if (end >= lines.length) return undefined;
-		bodies.push({ body: lines.slice(next, end).join("\n"), expands: !target.quoted });
+		// `<<-` strips each body line's leading tabs as well as the delimiter's.
+		const body = lines.slice(next, end).map(line => (op === "<<-" ? line.replace(/^\t+/u, "") : line));
+		bodies.push({ body: body.join("\n"), expands: !target.quoted });
 		next = end + 1;
 	}
 	return bodies;
@@ -1187,6 +1190,9 @@ function printfIsText(args: Word[]): boolean {
 		);
 }
 
+/** The prefix of a large file the grep tool's multiline search reads. */
+const NATIVE_GREP_WINDOW_BYTES = 4 * 1024 * 1024;
+
 /** Paths whose writes reach a device or kernel interface, not a file the write tool creates. */
 const SPECIAL_PATH = /^\/(?:dev|proc|sys)\//u;
 
@@ -1205,7 +1211,7 @@ function writeCanPerform(
 	name: string,
 	step: ParsedStep,
 	availableTools: readonly string[],
-	pathKind: PathKindLookup | undefined,
+	filesystem: StepFilesystem | undefined,
 ): boolean {
 	if (name !== "echo" && name !== "printf" && name !== "cat") return true;
 	if (step.pipeline.length > 1) return false;
@@ -1213,7 +1219,8 @@ function writeCanPerform(
 	const stdinDocuments = command.redirects.filter(
 		({ fd, op }) => (op === "<<" || op === "<<-" || op === "<<<") && (fdNumber(fd) ?? "0") === "0" && fd !== "&",
 	);
-	const others = command.redirects.filter(redirect => !stdinDocuments.includes(redirect));
+	const documents = new Set(stdinDocuments);
+	const others = command.redirects.filter(redirect => !documents.has(redirect));
 	if (others.length !== 1 || (name !== "cat" && stdinDocuments.length > 0)) return false;
 	const [output] = others;
 	if ((fdNumber(output.fd) ?? "1") !== "1" || output.fd === "&") return false;
@@ -1221,7 +1228,7 @@ function writeCanPerform(
 		return false;
 	const target = output.target;
 	if (!target || target.computed || target.glob || SPECIAL_PATH.test(target.value)) return false;
-	if (pathKind && pathKind(target.value, false) !== "missing") return false;
+	if (filesystem && filesystem.kind(target.value, false) !== "missing") return false;
 	const args = command.words.slice(1);
 	if (args.some(word => word.computed || word.glob)) return false;
 	if (name === "echo") {
@@ -1232,7 +1239,15 @@ function writeCanPerform(
 			!text.some(word => word.value.startsWith("#!"))
 		);
 	}
-	if (name === "printf") return printfIsText(args) && !args.some(word => word.value.startsWith("#!"));
+	if (name === "printf") {
+		// The output starts with the format's text, or with an argument when the format starts with a
+		// conversion; either may begin a `#!` line split across words (`'#%s' '!/bin/sh'`).
+		const format = args[0]?.value ?? "";
+		const mayStartShebang =
+			/^#(?:!|%)/u.test(format) ||
+			(format.startsWith("%") && args.slice(1).some(word => word.value.startsWith("#")));
+		return printfIsText(args) && !mayStartShebang;
+	}
 	// cat writes only its stdin document; any operand or option makes it more than that.
 	if (args.length > 0 || stdinDocuments.length !== 1) return false;
 	const [document] = stdinDocuments;
@@ -1452,7 +1467,8 @@ function stepIsLiteral(pipeline: SimpleCommand[], allowStdinDocuments: boolean):
 	return pipeline.every(
 		stage =>
 			!stage.words[0]?.computed &&
-			!stage.assignments.some(word => word.computed) &&
+			// An assignment, even a literal one (`PERL5OPT=-Mx`), changes what the command does.
+			stage.assignments.length === 0 &&
 			stage.redirects.every(({ fd, op, target }) => {
 				if (!target) return false;
 				if (op === "<<" || op === "<<-" || op === "<<<") {
@@ -1469,34 +1485,52 @@ function stepIsLiteral(pipeline: SimpleCommand[], allowStdinDocuments: boolean):
  */
 export type PathKind = "file" | "directory" | "other" | "missing" | "unknown";
 
-/** What a path names; `follow` follows a final symlink, otherwise a symlink is `other`. */
-export type PathKindLookup = (path: string, follow: boolean) => PathKind;
+/** The size of a regular file and whether the edit tool rewrites it byte for byte. */
+export interface FileFacts {
+	size: number;
+	/** At most 4 MB of valid UTF-8 with no byte-order mark and no carriage return: the edit tool
+	 * keeps a byte-order mark and CRLF line endings and refuses other encodings, which `sed -i`
+	 * does not. */
+	plainText: boolean;
+}
+
+/** The filesystem a step runs against, as far as the caller can inspect it. */
+export interface StepFilesystem {
+	/** What a path names; `follow` follows a final symlink, otherwise a symlink is `other`. A
+	 * missing name whose directory does not exist is `unknown`: the shell fails to create it. */
+	kind(path: string, follow: boolean): PathKind;
+	/** Facts about a regular file; undefined when it cannot be read. */
+	facts(path: string): FileFacts | undefined;
+}
 
 /** Whether `words` all name paths of the `allowed` kinds; true when the caller gave no filesystem. */
 function pathsAre(
 	words: Word[],
 	allowed: readonly PathKind[],
 	follow: boolean,
-	pathKind: PathKindLookup | undefined,
+	filesystem: StepFilesystem | undefined,
 ): boolean {
 	return words.every(
-		word => !SPECIAL_PATH.test(word.value) && (!pathKind || allowed.includes(pathKind(word.value, follow))),
+		word => !SPECIAL_PATH.test(word.value) && (!filesystem || allowed.includes(filesystem.kind(word.value, follow))),
 	);
 }
+
+/** Options with which rg and ag match across lines. */
+const MULTILINE_OPTION = /^(?:-[^-]*U|--multiline(?:-dotall)?$)/u;
 
 /**
  * Whether the dedicated `tool` can perform the step `text` starts with. `true` for a tool or
  * command this module does not know: the rule's own match decides. `false` for a step of a
- * built-in tool's command that it cannot parse: nothing shows the tool can do it. `pathKind`,
+ * built-in tool's command that it cannot parse: nothing shows the tool can do it. `filesystem`,
  * when given, reports what each operand or target names; a FIFO, device or path it cannot
  * inspect is never sent to read, grep, write or edit, which take regular files (and directories
- * for read and grep).
+ * for read and grep), and an edit's files must be plain text the edit tool rewrites byte for byte.
  */
 export function dedicatedToolCanPerformStep(
 	tool: string,
 	text: string,
 	availableTools: readonly string[],
-	pathKind?: PathKindLookup,
+	filesystem?: StepFilesystem,
 ): boolean {
 	if (!own(BUILT_IN_TOOLS, tool)) return true;
 	const step = parseLeadingPipeline(text);
@@ -1510,23 +1544,37 @@ export function dedicatedToolCanPerformStep(
 			const spec = own(READ_SPECS, name);
 			if (!spec) return true;
 			const paths = outputReachesAgent(pipeline) ? readPaths(spec, command) : undefined;
-			return !!paths && pathsAre(paths, ["file", "directory", "missing"], true, pathKind);
+			return !!paths && pathsAre(paths, ["file", "directory", "missing"], true, filesystem);
 		}
 		case "grep": {
 			const spec = own(GREP_SPECS, name);
 			if (!spec) return true;
 			const paths = outputReachesAgent(pipeline) ? grepPaths(spec, command) : undefined;
-			return !!paths && pathsAre(paths, ["file", "directory", "missing"], true, pathKind);
+			if (!paths || !pathsAre(paths, ["file", "directory", "missing"], true, filesystem)) return false;
+			// A multiline search reads only a file's first 4 MB.
+			if (!filesystem || !command.words.slice(1).some(word => MULTILINE_OPTION.test(word.value))) return true;
+			return paths.every(
+				word =>
+					filesystem.kind(word.value, true) !== "file" ||
+					(filesystem.facts(word.value)?.size ?? Number.POSITIVE_INFINITY) <= NATIVE_GREP_WINDOW_BYTES,
+			);
 		}
 		case "glob":
 			if (name === "locate") return false;
 			if (name !== "find" && name !== "fd") return true;
 			return outputReachesAgent(pipeline) && (name === "find" ? findCanPerform(command) : fdCanPerform(command));
 		case "write":
-			return writeCanPerform(name, step, availableTools, pathKind);
+			return writeCanPerform(name, step, availableTools, filesystem);
 		default: {
 			const files = editCanPerform(name, pipeline);
-			return !!files && pathsAre(files, ["file", "missing"], false, pathKind);
+			if (!files || !pathsAre(files, ["file", "missing"], false, filesystem)) return false;
+			return (
+				!filesystem ||
+				files.every(
+					word =>
+						filesystem.kind(word.value, false) !== "file" || filesystem.facts(word.value)?.plainText === true,
+				)
+			);
 		}
 	}
 }

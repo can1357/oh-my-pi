@@ -13,7 +13,7 @@
 
 - `/resume` and `omp --resume` open at once on your titled sessions (read from `~/.omp/agent/history.db`), then fill in prompts, status, and untitled sessions when the full scan finishes; the first scan saves older sessions' titles too, so later opens list them right away
 - With `bashInterceptor.enabled`, rules that send a command to `read`, `grep` or `glob` now refuse only the command's first step, so `ls dir && cat dir/file` runs while `cat dir/file && ls dir` is still refused
-- The bash interceptor now refuses a step only when the tool it names can perform it: `cat a b > merged`, `head -c 300 f`, `grep -o`/`-c`/`-v`/`-A5`, `find -type`/`-size`/`-iname`/`-mindepth`, `locate`, `echo "$(date)" >> log`, `cat f 2>err.log`, `printf '\377' > f`, `echo "$PWD" > f`, `cat fifo`, `echo hi > fifo`, `echo hi > existing.txt`, `grep -q`/`-l`, `sed -i.bak …`, `awk -i inplace`, `perl x.pl -input` and output piped to a file, `tee` or `xargs` now run instead of being refused
+- The bash interceptor now refuses a step only when the tool it names can perform it: `cat a b > merged`, `head -c 300 f`, `grep -o`/`-c`/`-v`/`-A5`, `find -type`/`-size`/`-iname`/`-mindepth`, `locate`, `echo "$(date)" >> log`, `cat f 2>err.log`, `printf '\377' > f`, `echo "$PWD" > f`, `cat fifo`, `echo hi > fifo`, `echo hi > existing.txt`, `LC_ALL=C grep …`, `sed -i` on a CRLF or non-UTF-8 file, `grep -q`/`-l`, `sed -i.bak …`, `awk -i inplace`, `perl x.pl -input` and output piped to a file, `tee` or `xargs` now run instead of being refused
 
 ### Fixed
 
