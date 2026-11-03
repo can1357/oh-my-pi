@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as vm from "node:vm";
 import { type } from "@oh-my-pi/omptype";
@@ -457,6 +458,14 @@ await Promise.all([disposeAllKernelSessions(), disposeAllVmContexts()]);
 process.exit(0);
 `;
 
+/** Runs {@link CONSTRUCTOR_PROMISE_HOST}, written to `HOST_FILE`, on a worker thread, where postmortem installs no handlers. */
+const WORKER_LAUNCHER = `
+const worker = new Worker(process.env.HOST_FILE);
+worker.addEventListener("error", event => console.log("WORKER_ERROR " + event.message));
+await new Promise(resolve => worker.addEventListener("close", resolve));
+process.exit(0);
+`;
+
 /**
  * What a Python exception's own code can raise while the kernel describes the
  * exception. Uncaught, each leaves by its own path: a `RuntimeError` or a
@@ -855,34 +864,69 @@ describe("eval output consumer failure", () => {
 			);
 		}
 
+		for (const thread of ["main thread", "worker thread"] as const) {
+			it.skipIf(skipped(language))(
+				`${language}: a consumer that returns a rejected native promise whose constructor getter throws is reported, and a host on its ${thread} goes on`,
+				async () => {
+					const packageDir = path.resolve(import.meta.dir, "../..");
+					// A worker needs a module file; this one lives beside the test so its imports resolve.
+					const hostFile = path.join(import.meta.dir, `.constructor-promise-host-${crypto.randomUUID()}.ts`);
+					await Bun.write(hostFile, CONSTRUCTOR_PROMISE_HOST);
+					try {
+						const script = thread === "main thread" ? CONSTRUCTOR_PROMISE_HOST : WORKER_LAUNCHER;
+						const child = Bun.spawn([process.execPath, "-e", script], {
+							cwd: packageDir,
+							env: { ...Bun.env, HOST_LANGUAGE: language, HOST_FILE: hostFile },
+							stdout: "pipe",
+							stderr: "pipe",
+						});
+						const [stdout, stderr, exitCode] = await Promise.all([
+							new Response(child.stdout).text(),
+							new Response(child.stderr).text(),
+							child.exited,
+						]);
+						const context = `stdout:\n${stdout}\nstderr:\n${stderr}`;
+						expect(exitCode, context).toBe(0);
+						expect(stdout + stderr, context).not.toContain("Unhandled Rejection");
+						expect(stdout, context).not.toContain("WORKER_ERROR");
+						const line = stdout.split("\n").find(entry => entry.startsWith("RESULT "));
+						expect(line, context).toBeDefined();
+						const result = JSON.parse(line!.slice("RESULT ".length)) as {
+							exitCode: number;
+							cancelled: boolean;
+							output: string;
+						};
+						expect(result.cancelled, context).toBe(false);
+						expect(result.exitCode, context).toBe(0);
+						expect(printsLine(result.output, "two"), context).toBe(true);
+						expect(result.output, context).toContain("The stream output consumer failed:");
+					} finally {
+						await fs.rm(hostFile, { force: true });
+					}
+				},
+				120_000,
+			);
+		}
+
 		it.skipIf(skipped(language))(
-			`${language}: a consumer that returns a rejected native promise whose constructor getter throws is reported, and a host with the CLI's handlers goes on`,
+			`${language}: a consumer that throws an error whose message getter returns a rejected promise is reported, and nothing is left unhandled`,
 			async () => {
-				const child = Bun.spawn([process.execPath, "-e", CONSTRUCTOR_PROMISE_HOST], {
-					cwd: path.resolve(import.meta.dir, "../.."),
-					env: { ...Bun.env, HOST_LANGUAGE: language },
-					stdout: "pipe",
-					stderr: "pipe",
+				const session = makeSession(`consumer-getter-promise-${language}-${crypto.randomUUID()}`);
+				const cell = await run(session, language, TWO_LINES[language], {
+					onChunk: chunk => {
+						if (!printsLine(chunk, "one")) return;
+						const error = new Error("unused");
+						Object.defineProperty(error, "message", {
+							get: () => Promise.reject(new Error("the message getter's promise rejected")),
+						});
+						throw error;
+					},
 				});
-				const [stdout, stderr, exitCode] = await Promise.all([
-					new Response(child.stdout).text(),
-					new Response(child.stderr).text(),
-					child.exited,
-				]);
-				const context = `stdout:\n${stdout}\nstderr:\n${stderr}`;
-				expect(exitCode, context).toBe(0);
-				expect(stderr, context).not.toContain("Unhandled Rejection");
-				const line = stdout.split("\n").find(entry => entry.startsWith("RESULT "));
-				expect(line, context).toBeDefined();
-				const result = JSON.parse(line!.slice("RESULT ".length)) as {
-					exitCode: number;
-					cancelled: boolean;
-					output: string;
-				};
-				expect(result.cancelled, context).toBe(false);
-				expect(result.exitCode, context).toBe(0);
-				expect(printsLine(result.output, "two"), context).toBe(true);
-				expect(result.output, context).toContain("The stream output consumer failed:");
+				// An unhandled rejection surfaces after a turn; give it one before the test ends.
+				await Bun.sleep(50);
+				expect(cell.exitCode).toBe(0);
+				expect(printsLine(cell.output, "two")).toBe(true);
+				expect(cell.output).toContain("The stream output consumer failed:");
 			},
 			120_000,
 		);
@@ -1670,5 +1714,25 @@ describe("cancellation checks and descriptions read a thrown value or abort reas
 		});
 		expect(describeError(proxy).message).toBe("[object Object]");
 		expect(reads).toBe(0);
+	});
+
+	it("leaves no rejection unhandled when an error's fields are rejected promises", async () => {
+		const unhandled: unknown[] = [];
+		const onUnhandled = (reason: unknown): void => {
+			unhandled.push(reason);
+		};
+		process.on("unhandledRejection", onUnhandled);
+		try {
+			const error = new Error("unused");
+			for (const key of ["message", "name", "stack", "code", "syscall"]) {
+				Object.defineProperty(error, key, { get: () => Promise.reject(new Error(`${key} rejected`)) });
+			}
+			expect(describeError(error).message).toBe("[object Error]");
+			// Unhandled rejections are reported after the microtask queue drains.
+			await Bun.sleep(50);
+			expect(unhandled).toEqual([]);
+		} finally {
+			process.off("unhandledRejection", onUnhandled);
+		}
 	});
 });

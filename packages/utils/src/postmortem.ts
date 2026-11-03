@@ -605,14 +605,23 @@ let embeddedRejectionListener: ((reason: unknown, promise: Promise<unknown>) => 
  * it surfaces as unhandled.
  */
 const adoptedRejections = new WeakMap<object, (reason: unknown) => void>();
+/** Adopted promises whose rejection was delivered, so every listener that sees it treats it as consumed. */
+const deliveredRejections = new WeakSet<object>();
 let rejectionsAdopted = false;
+let adoptionListenerInstalled = false;
 
-/** Hands an adopted promise's rejection to its callback; true when `promise` was adopted. Never throws. */
+/**
+ * Hands an adopted promise's rejection to its callback, once; true when
+ * `promise` was adopted, also for each later listener that sees the same
+ * event. Never throws.
+ */
 function deliverAdoptedRejection(promise: unknown, reason: unknown): boolean {
 	if (promise === null || typeof promise !== "object") return false;
+	if (deliveredRejections.has(promise)) return true;
 	const onRejected = adoptedRejections.get(promise);
 	if (!onRejected) return false;
 	adoptedRejections.delete(promise);
+	deliveredRejections.add(promise);
 	try {
 		onRejected(reason);
 	} catch {
@@ -625,11 +634,20 @@ function deliverAdoptedRejection(promise: unknown, reason: unknown): boolean {
  * Takes over the rejection of a native `promise` that no handler can be
  * attached to: when it surfaces as unhandled, `onRejected` receives the reason
  * and the process goes on. A promise that never rejects is dropped with it.
+ * Works in any thread: a worker thread gets its own listener, since
+ * {@link installProcessHandlers} installs none there.
  */
 export function adoptRejection(promise: Promise<unknown>, onRejected: (reason: unknown) => void): void {
 	adoptedRejections.set(promise, onRejected);
 	rejectionsAdopted = true;
-	ensureEmbeddedRejectionListener();
+	if (adoptionListenerInstalled) return;
+	adoptionListenerInstalled = true;
+	process.on("unhandledRejection", (reason: unknown, rejected: Promise<unknown>) => {
+		if (deliverAdoptedRejection(rejected, reason)) return;
+		// Not ours: leave it to the other listeners, or to the default when there are none.
+		if (process.listenerCount("unhandledRejection") > 1) return;
+		throw reason;
+	});
 }
 
 function ensureEmbeddedRejectionListener(): void {

@@ -1,3 +1,7 @@
+import { types } from "node:util";
+
+const isPromise = types.isPromise;
+
 /**
  * The one place a thrown or rejected value becomes text.
  *
@@ -24,6 +28,7 @@ const reflectGetPrototypeOf = Reflect.getPrototypeOf;
 const isArray = Array.isArray;
 const toText = String;
 const stringSlice = String.prototype.slice;
+const promiseThen = Promise.prototype.then;
 // `Error.isError` reads an internal slot: it recognises an error of any realm and runs none of its code.
 const errorIsErrorBuiltin: unknown = reflectGet(Error, "isError");
 const errorIsError =
@@ -159,10 +164,38 @@ function bounded(text: string, limit: number): string {
 	return `${head}… [${text.length - 2 * half} characters omitted] …${tail}`;
 }
 
+/**
+ * `object[key]`, read once. A read that yields a native promise has it observed
+ * ({@link observeQuietly}), so a getter that returns a rejected promise cannot
+ * leave a rejection unhandled because it was described.
+ */
+function readField(object: object, key: string): unknown {
+	const field: unknown = reflectGet(object, key);
+	observeQuietly(field);
+	return field;
+}
+
+/**
+ * Marks a native promise's rejection as handled, through the built-in `then`
+ * captured at load. A promise whose `constructor` or species refuses even that
+ * stays as it was: that is code the value runs after it is observed, outside
+ * what a description can bound. Never throws.
+ */
+function observeQuietly(value: unknown): void {
+	if (!isPromise(value)) return;
+	try {
+		reflectApply(promiseThen, value, [undefined, ignoreRejection]);
+	} catch {
+		// The promise's `constructor` getter or species constructor threw.
+	}
+}
+
+function ignoreRejection(): void {}
+
 /** `object[key]` when it is text, read once; `undefined` when it is not text or reading it throws. */
 function textProperty(object: object, key: string, limit: number): string | undefined {
 	try {
-		const field: unknown = reflectGet(object, key);
+		const field = readField(object, key);
 		return typeof field === "string" ? bounded(field, limit) : undefined;
 	} catch {
 		return undefined;
@@ -220,7 +253,7 @@ export function describeError(value: unknown): DescribedError {
 	if (errorClass !== undefined) {
 		const error = value as object;
 		try {
-			const field: unknown = reflectGet(error, "message");
+			const field = readField(error, "message");
 			message = typeof field === "string" ? bounded(field, DESCRIBED_TEXT_LIMIT) : primitiveText(field);
 		} catch {
 			// The message getter or a Proxy trap threw.
