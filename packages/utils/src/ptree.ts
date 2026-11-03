@@ -9,6 +9,7 @@
 
 import { Process, type ProcessTerminateOptions } from "@oh-my-pi/pi-natives";
 import type { Spawn, Subprocess } from "bun";
+import { isPidAlive } from "./pid";
 
 type InMask = "pipe" | "ignore" | Buffer | Uint8Array | null;
 
@@ -19,6 +20,21 @@ const LINUX_SUBREAPER_COMMAND_ENV = "OMP_PTREE_SUBREAPER_COMMAND";
 const LINUX_SUBREAPER_BUN_BE_BUN_ENV = "OMP_PTREE_SUBREAPER_BUN_BE_BUN";
 const SUBREAPER_KILL_WINDOW_MS = 100;
 const SUBREAPER_KILL_POLL_MS = 5;
+/** Upper bound on waiting for a SIGKILLed process group to empty (members go via their reaper). */
+const GROUP_EXIT_WAIT_MS = 1_000;
+
+/** Resolve once no process is left in group `pgid` (signal 0 only), or after {@link GROUP_EXIT_WAIT_MS}. */
+async function waitForGroupExit(pgid: number): Promise<void> {
+	const deadline = Date.now() + GROUP_EXIT_WAIT_MS;
+	while (Date.now() < deadline) {
+		try {
+			process.kill(-pgid, 0);
+		} catch {
+			return;
+		}
+		await Bun.sleep(SUBREAPER_KILL_POLL_MS);
+	}
+}
 
 /**
  * Build the Linux child-subreaper entrypoint.
@@ -358,19 +374,27 @@ export class ChildProcess<In extends InMask = InMask> {
 				return;
 			}
 		}
-		if (
-			this.proc.exitCode !== null &&
-			this.#terminateGroup &&
-			this.#openPipeReaders > 0 &&
-			process.platform !== "win32"
-		) {
+		// The leader is reaped once Bun reports how it ended: by exit code, or by
+		// signal (exitCode stays null when a signal killed it).
+		const leaderReaped = this.proc.exitCode !== null || this.proc.signalCode !== null;
+		if (leaderReaped && this.#terminateGroup && this.#openPipeReaders > 0 && process.platform !== "win32") {
 			// Bun detached children are POSIX session/process-group leaders. If
 			// the leader has exited, the native Process handle cannot rediscover
-			// its PGID, but a pipe-holding descendant keeps that exact group alive.
-			try {
-				process.kill(-this.proc.pid, "SIGKILL");
-			} catch {}
-			this.#terminating = Promise.resolve();
+			// its PGID, but a pipe-holding descendant may keep that group alive.
+			// A pipe holder can also have left the group, so the pipe alone does
+			// not prove the id is still ours. Linux and macOS never hand out a pid
+			// while it is a live group's id, so the id can only have been reused
+			// by a process that now owns the leader's pid: signal the group only
+			// while no process holds that pid.
+			let signalled = false;
+			if (!isPidAlive(this.proc.pid)) {
+				try {
+					process.kill(-this.proc.pid, "SIGKILL");
+					signalled = true;
+				} catch {}
+			}
+			// Report only once the killed group is gone, as the native termination does.
+			this.#terminating = signalled ? waitForGroupExit(this.proc.pid) : Promise.resolve();
 			return;
 		}
 		if (this.proc.exitCode !== null && this.#windowsRootProcess && this.#openPipeReaders > 0) {

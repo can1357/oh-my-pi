@@ -8,7 +8,11 @@
 ### Added
 
 - Added `isPidAlive` (signal-0 liveness probe) and `asStrictBytes` (a `Uint8Array` narrowed to its own `ArrayBuffer` for WebCrypto)
-- Added `followDanglingLinks` to `resolveEquivalentPath` (with `throughMissing`): a symlink whose target does not exist yet resolves to that target instead of the link's own directory
+- Added `followDanglingLinks` to `resolveEquivalentPath` (with `throughMissing`): the path is walked like a writer that creates missing parents would reach it, following every symlink (dangling ones too) and applying `..` to the physical directory
+
+### Fixed
+
+- `ptree` kills of a detached command whose leader already ended now also cover a leader killed by a signal, never signal a process group whose id another process may have taken (only while no process holds the leader's pid), and report only once the killed group is gone
 
 ## [18.15.0] - 2026-11-01
 

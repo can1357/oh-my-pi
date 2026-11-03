@@ -352,6 +352,36 @@ ${createLinuxSubreaperScript()}
 		},
 	);
 
+	it.skipIf(process.platform === "win32")(
+		"terminates a detached group whose leader was killed by a signal while a child holds stdout",
+		async () => {
+			// The root kills itself with SIGKILL after starting a child that
+			// inherits stdout, so Bun reports a signalCode and no exitCode. The
+			// group still holds the pipe; the deadline must still end it.
+			let orphanPid: number | undefined;
+			try {
+				const result = await exec(["/bin/sh", "-c", "sleep 30 & echo $!; kill -KILL $$"], {
+					detached: true,
+					timeout: 250,
+					allowNonZero: true,
+					allowAbort: true,
+				});
+				orphanPid = Number.parseInt(result.stdout.trim(), 10);
+
+				expect(result.exitError).toBeInstanceOf(TimeoutError);
+				const deadline = Date.now() + 500;
+				let status = Process.fromPid(orphanPid)?.status();
+				while (status === ProcessStatus.Running && Date.now() < deadline) {
+					await Bun.sleep(10);
+					status = Process.fromPid(orphanPid)?.status();
+				}
+				expect(status).not.toBe(ProcessStatus.Running);
+			} finally {
+				if (orphanPid) Process.fromPid(orphanPid)?.killTree(9);
+			}
+		},
+	);
+
 	it.skipIf(process.platform !== "win32")(
 		"terminates a pipe-holding descendant after the Windows root exits",
 		async () => {
