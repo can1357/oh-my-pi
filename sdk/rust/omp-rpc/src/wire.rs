@@ -3133,6 +3133,24 @@ pub struct BashResult {
 	pub artifact_id: Option<String>,
 	#[serde(rename = "artifactElidedBytes", default, skip_serializing_if = "Option::is_none")]
 	pub artifact_elided_bytes: Option<i64>,
+	/// Bytes dropped from the middle of `output`, which keeps the head and tail.
+	#[serde(rename = "elidedBytes", default, skip_serializing_if = "Option::is_none")]
+	pub elided_bytes: Option<i64>,
+	/// Lines dropped from the middle of `output`.
+	#[serde(rename = "elidedLines", default, skip_serializing_if = "Option::is_none")]
+	pub elided_lines: Option<i64>,
+	/// Bytes the per-line column cap cut from `output`, across all lines.
+	#[serde(rename = "columnDroppedBytes", default, skip_serializing_if = "Option::is_none")]
+	pub column_dropped_bytes: Option<i64>,
+	/// Lines of `output` the per-line column cap cut; the artifact holds them whole.
+	#[serde(rename = "columnTruncatedLines", default, skip_serializing_if = "Option::is_none")]
+	pub column_truncated_lines: Option<i64>,
+	/// First and last lines the column cap cut, numbered as in the artifact; absent when the numbering cannot match it.
+	#[serde(rename = "columnTruncatedRange", default, skip_serializing_if = "Option::is_none")]
+	pub column_truncated_range: Option<LineRange>,
+	/// The per-line column cap in UTF-8 bytes, set when it cut a line.
+	#[serde(rename = "columnMax", default, skip_serializing_if = "Option::is_none")]
+	pub column_max: Option<i64>,
 	#[serde(rename = "artifactError", default, skip_serializing_if = "Option::is_none")]
 	pub artifact_error: Option<Map<String, Value>>,
 	#[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3141,6 +3159,12 @@ pub struct BashResult {
 	pub working_dir: Option<String>,
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub images: Option<Vec<ImageContent>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LineRange {
+	pub first: i64,
+	pub last: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

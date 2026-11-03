@@ -1,7 +1,13 @@
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
-import { AgentLifecycleManager } from "../../registry/agent-lifecycle";
-import { AgentRegistry, MAIN_AGENT_ID, type AgentRef, type RegistryEvent } from "../../registry/agent-registry";
-import type { AgentSession } from "../../session/agent-session";
+import { type AgentLifecycleApi, AgentLifecycleManager } from "../../registry/agent-lifecycle";
+import {
+	AgentRegistry,
+	type AgentRegistryApi,
+	MAIN_AGENT_ID,
+	type AgentRef,
+	type RegistryEvent,
+} from "../../registry/agent-registry";
+import { type AgentViewSession, isAgentViewSession, isLocalAgentSession } from "../../session/agent-session-handle";
 import { setRunStatus } from "../../utils/run-status";
 import type { InteractiveModeContext } from "../types";
 
@@ -40,7 +46,7 @@ export function pickRecentFocusableAgentId(refs: readonly AgentRef[], currentId?
 export class SessionFocusController {
 	#focusedAgentId: string | undefined;
 	/** Session currently attached while focused; undefined when unfocused. */
-	#attachedSession: AgentSession | undefined;
+	#attachedSession: AgentViewSession | undefined;
 	#focusAttachment: Promise<void> | undefined;
 	#registryUnsubscribe: (() => void) | undefined;
 	#attachGeneration = 0;
@@ -49,8 +55,8 @@ export class SessionFocusController {
 
 	constructor(
 		private ctx: InteractiveModeContext,
-		private registry: AgentRegistry = AgentRegistry.global(),
-		private lifecycle: () => AgentLifecycleManager = () => AgentLifecycleManager.global(),
+		private registry: AgentRegistryApi = AgentRegistry.global(),
+		private lifecycle: () => AgentLifecycleApi = () => AgentLifecycleManager.global(),
 	) {}
 
 	get focusedAgentId(): string | undefined {
@@ -58,7 +64,7 @@ export class SessionFocusController {
 	}
 
 	/** Focused live session, undefined when unfocused. */
-	get target(): AgentSession | undefined {
+	get target(): AgentViewSession | undefined {
 		return this.#attachedSession;
 	}
 	/** Focus the main view on an agent's live session. Throws an Error with a user-displayable message. */
@@ -66,9 +72,15 @@ export class SessionFocusController {
 		if (this.ctx.collabGuest) throw new Error("Viewing agents is unavailable in a collab session.");
 		if (id === MAIN_AGENT_ID) return this.unfocus();
 		const request = ++this.#focusRequestSeq;
-		let session: AgentSession;
+		let session: AgentViewSession;
 		try {
-			session = await this.lifecycle().ensureLive(id);
+			const live = await this.lifecycle().ensureLive(id);
+			// Main-thread handles are local sessions or mirrors of worker-homed ones, both viewable; only a
+			// worker's peer handle (a session homed on another thread, seen from a worker) is not.
+			if (!isAgentViewSession(live)) {
+				throw new Error(`Agent ${id} is homed on another thread and can only be viewed from the main thread.`);
+			}
+			session = live;
 		} catch (error) {
 			// A newer request owns the view now: a stale revive failure must
 			// not surface after the winner already focused.
@@ -167,15 +179,18 @@ export class SessionFocusController {
 	 * Retarget core, both directions: swap subscription, transcript, and status line onto `target`.
 	 * `leaving` is the session being replaced, whose record of calls still owed an answer is kept
 	 * for its own return rather than dropped — a host that drives its own approval UI raises no
-	 * dialog to replay on the way back.
+	 * dialog to replay on the way back. Only a session homed on this thread keeps that record and
+	 * replays an open dialog wait: a session homed on a worker exposes neither the run of a call
+	 * nor its open wait here, so it is attached as before.
 	 */
-	async #attach(target: AgentSession, leaving?: AgentSession): Promise<void> {
+	async #attach(target: AgentViewSession, leaving?: AgentViewSession): Promise<void> {
 		const generation = ++this.#attachGeneration;
 		this.ctx.syncIdleMaintenanceView(target);
 		try {
 			this.ctx.unsubscribe?.();
 			this.ctx.clearTransientSessionUi({ viewOnly: true });
-			this.ctx.eventController.resetTranscriptAnchors(leaving, id => leaving?.toolCallRun(id));
+			const leavingLocal = leaving && isLocalAgentSession(leaving) ? leaving : undefined;
+			this.ctx.eventController.resetTranscriptAnchors(leavingLocal, id => leavingLocal?.toolCallRun(id));
 			let assistantStreamSynced = false;
 			const restoreAssistant = async (message: AssistantMessage): Promise<void> => {
 				if (generation !== this.#attachGeneration) return;
@@ -235,11 +250,12 @@ export class SessionFocusController {
 			// What this session was owed before the view looked away, minus whatever its own run
 			// of that call did while the view was gone: ended, aborted, disposed, or replaced by
 			// another run of the same id — the view saw none of it.
-			this.ctx.eventController.adoptApprovalRecords(target, id => target.toolCallRun(id));
+			const targetLocal = isLocalAgentSession(target) ? target : undefined;
+			if (targetLocal) this.ctx.eventController.adoptApprovalRecords(targetLocal, id => targetLocal.toolCallRun(id));
 			// `user_wait_start` was published when the dialog opened, which may be
 			// before this attach subscribed: replay it so a session still owing a
 			// person an answer reports blocked rather than working or idle.
-			const openWait = target.activeUserWait();
+			const openWait = targetLocal?.activeUserWait();
 			if (openWait) {
 				await this.ctx.eventController.handleEvent(openWait);
 				if (generation !== this.#attachGeneration) return;
