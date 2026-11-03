@@ -83,6 +83,7 @@ export const fastModeBeta = "fast-mode-2026-02-01";
 export const taskBudgetBeta = "task-budgets-2026-03-13";
 export const effortBeta = "effort-2025-11-24";
 export const serverSideFallbackBeta = "server-side-fallback-2026-06-01";
+export const messageThreadsBeta = "message-threads-2026-08-12";
 
 export function buildClaudeCodeBetas({
 	agentRequest,

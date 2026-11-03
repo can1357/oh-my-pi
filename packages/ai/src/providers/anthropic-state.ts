@@ -30,6 +30,26 @@ export function resolveDirectAnthropicBaseUrl(model: Model<Api>): string {
 }
 
 /**
+ * Whether `baseUrl` is a deployment Anthropic itself serves: the Claude API, Claude in Microsoft Foundry
+ * (`*.services.ai.azure.com/anthropic`), or Claude Platform on AWS (`aws-external-anthropic.<region>.api.aws`).
+ * Vertex AI and Bedrock are cloud-operated and excluded.
+ */
+export function isAnthropicOperatedUrl(baseUrl: string | undefined): boolean {
+	if (isOfficialAnthropicApiUrl(baseUrl)) return true;
+	if (!baseUrl) return false;
+	try {
+		const { hostname, pathname } = new URL(baseUrl);
+		return (
+			(hostname.endsWith(".services.ai.azure.com") &&
+				(pathname === "/" || pathname === "/anthropic" || pathname.startsWith("/anthropic/"))) ||
+			/^aws-external-anthropic\.[a-z0-9-]+\.api\.aws$/.test(hostname)
+		);
+	} catch {
+		return false;
+	}
+}
+
+/**
  * Whether a request to `model` reaches the official endpoint its compat was built for. `compat.officialEndpoint`
  * classifies the configured `baseUrl`, but a first-party Anthropic model is rerouted at request time by
  * `ANTHROPIC_BASE_URL` or Foundry's `FOUNDRY_BASE_URL` without rebuilding compat.
@@ -72,6 +92,18 @@ export function clearAnthropicFastModeFallback(
 	const anchor = providerSessionState.get(ANTHROPIC_OPAQUE_CLIENT_ANCHOR_KEY);
 	if (anchor && "fastModeRearmGeneration" in anchor && typeof anchor.fastModeRearmGeneration === "number") {
 		anchor.fastModeRearmGeneration++;
+	}
+}
+
+/**
+ * Forget every Anthropic message thread across materialized session-state entries. A thread stays with the
+ * credential that created it, so a credential switch must start new threads.
+ */
+export function clearAnthropicMessageThreads(providerSessionState: Map<string, ProviderSessionState>): void {
+	const prefix = `${ANTHROPIC_PROVIDER_SESSION_STATE_KEY}:`;
+	for (const [key, value] of providerSessionState) {
+		if (key !== ANTHROPIC_PROVIDER_SESSION_STATE_KEY && !key.startsWith(prefix)) continue;
+		if ("messageThreads" in value && value.messageThreads instanceof Map) value.messageThreads.clear();
 	}
 }
 

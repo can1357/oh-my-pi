@@ -190,6 +190,12 @@ Request bodies of 1 KiB or more are compressed when sent to a provider's own end
 | -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `PI_ANTHROPIC_API_VERSION` | `anthropic-version` sent to the official Anthropic API (`api.anthropic.com`): `2023-06-01` (default) or `2026-10-21`. Under `2026-10-21`, `temperature`/`top_p`/`top_k` are omitted because that version rejects them. Other hosts (Bedrock, Foundry, Copilot, gateways, Anthropic-compatible providers) stay on `2023-06-01`; unknown values log a warning and use `2023-06-01` |
 
+### Anthropic message threads
+
+| Variable                       | Behavior                                                                                                                                                                                                                                                                                                                                                 |
+| ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PI_ANTHROPIC_MESSAGE_THREADS` | Overrides the message-threads default (`message-threads-2026-08-12`: later turns send only the messages after the previous response). On by default for provider `anthropic` on the Claude API, Claude in Microsoft Foundry and Claude Platform on AWS; off elsewhere. A call's `statefulResponses` option takes precedence. Needs a session id |
+
 ### Anthropic Foundry Gateway (Azure / enterprise proxy)
 
 When `CLAUDE_CODE_USE_FOUNDRY` is enabled, Anthropic requests switch to Foundry mode:

@@ -593,9 +593,10 @@ export interface StreamOptions {
 	 */
 	promptCache?: OpenAIPromptCacheOptions;
 	/**
-	 * Disable OpenAI Responses server-side turn chaining for this request.
-	 * Diagnostic callers that compare independent requests can set this to
-	 * `false` so `previous_response_id` cannot explain a result.
+	 * Server-side turn chaining for this request: OpenAI Responses
+	 * `previous_response_id` and Anthropic message threads. Unset keeps each
+	 * provider's default. Diagnostic callers that compare independent requests
+	 * can set this to `false` so a stored conversation cannot explain a result.
 	 */
 	statefulResponses?: boolean;
 	/**

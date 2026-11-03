@@ -14,9 +14,10 @@
  *
  * - **Anthropic** — `fastModeDisabled` is account-scoped: the rejection reads
  *   "this model does not support fast mode for your account", i.e. a plan
- *   entitlement, so a switch to an entitled sibling must re-probe. Its
- *   siblings are endpoint-scoped and stay: `strictToolsDisabled`
- *   (grammar-too-large 400 for the model's tool schema),
+ *   entitlement, so a switch to an entitled sibling must re-probe. Message
+ *   threads are account-scoped too: a thread belongs to the key and workspace
+ *   that created it. Their siblings are endpoint-scoped and stay:
+ *   `strictToolsDisabled` (grammar-too-large 400 for the model's tool schema),
  *   `replayUnsignedThinkingDisabled` / `thinkingReplayDisabled` (the endpoint
  *   is a signing proxy), `prefixDroppedThinkingBlocks` (blocks a rejected
  *   replay made the client strip).
@@ -38,7 +39,7 @@
  *   very turn that rotated; it stays on its existing session-close path.
  */
 
-import { clearAnthropicFastModeFallback } from "./providers/anthropic-state";
+import { clearAnthropicFastModeFallback, clearAnthropicMessageThreads } from "./providers/anthropic-state";
 import { resetOpenAIResponsesAccountScopedState } from "./providers/openai-responses-state";
 import type { ProviderSessionState } from "./types";
 
@@ -49,8 +50,9 @@ import type { ProviderSessionState } from "./types";
  */
 export function resetAccountScopedProviderSessionState(states: Map<string, ProviderSessionState>): void {
 	if (states.size === 0) return;
-	// Fast mode is the account-scoped half of the Anthropic record; the helper
-	// the `/fast on` re-arm path already uses clears exactly that flag.
+	// Fast mode and message threads are the account-scoped half of the
+	// Anthropic record; the `/fast on` re-arm helper clears exactly that flag.
 	clearAnthropicFastModeFallback(states);
+	clearAnthropicMessageThreads(states);
 	resetOpenAIResponsesAccountScopedState(states);
 }

@@ -2,7 +2,7 @@ import { isBedrockAnthropicRoute, isOfficialAnthropicApiUrl } from "@oh-my-pi/pi
 import { isBedrockRouteUrl } from "@oh-my-pi/pi-catalog/hosts";
 import type { Model } from "../types";
 import type { AnthropicMessagesClientLike } from "./anthropic-client";
-import { normalizeAnthropicBaseUrl, resolveDirectAnthropicBaseUrl } from "./anthropic-state";
+import { isAnthropicOperatedUrl, normalizeAnthropicBaseUrl, resolveDirectAnthropicBaseUrl } from "./anthropic-state";
 
 function isCompactionCapableModel(model: Model<"anthropic-messages">): boolean {
 	return model.compat.supportsServerCompaction === true && model.remoteCompaction?.enabled !== false;
@@ -10,16 +10,10 @@ function isCompactionCapableModel(model: Model<"anthropic-messages">): boolean {
 
 /** Supported Anthropic Messages deployments; gateways require an explicit opt-in. */
 function isSupportedCompactionEndpoint(baseUrl: string | undefined): boolean {
-	if (isOfficialAnthropicApiUrl(baseUrl)) return true;
+	if (isAnthropicOperatedUrl(baseUrl)) return true;
 	if (!baseUrl) return false;
 	try {
-		const { hostname, pathname } = new URL(baseUrl);
-		return (
-			/^(?:[a-z0-9-]+[-.])?aiplatform\.googleapis\.com$/.test(hostname) ||
-			(hostname.endsWith(".services.ai.azure.com") &&
-				(pathname === "/" || pathname === "/anthropic" || pathname.startsWith("/anthropic/"))) ||
-			/^aws-external-anthropic\.[a-z0-9-]+\.api\.aws$/.test(hostname)
-		);
+		return /^(?:[a-z0-9-]+[-.])?aiplatform\.googleapis\.com$/.test(new URL(baseUrl).hostname);
 	} catch {
 		return false;
 	}

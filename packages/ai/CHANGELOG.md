@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Claude sessions on the Claude API, Microsoft Foundry and Claude Platform on AWS use Anthropic message threads: after the first turn, each request sends only the new messages, which lowers time to first token in long conversations. Edited history, an expired thread or a rejected continuation falls back to the full conversation; `PI_ANTHROPIC_MESSAGE_THREADS=0` or `statefulResponses: false` turns it off
+
 ## [18.16.0] - 2026-11-02
 
 ### Added
