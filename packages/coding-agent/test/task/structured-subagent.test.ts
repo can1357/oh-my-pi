@@ -1091,6 +1091,45 @@ describe("structured subagent primitive", () => {
 		await fs.rm(restrictedRun.artifactsDir, { recursive: true, force: true });
 	});
 
+	it("forwards the extension-roots provider without pinning the spawning session", async () => {
+		// A parked child keeps this provider in its revive capture for as long as it can be revived.
+		// Bound to the spawning session, it kept that whole session alive: in a lead whose lanes
+		// spawn reviewers, every finished lane stayed in memory.
+		mockDiscovery();
+		const roots = { explicit: [], mode: "merge" as const, configured: [], configuredLevel: "user" as const };
+		const extensionRoots = () => roots;
+		const kept: Array<(() => unknown) | undefined> = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async executorOptions => {
+			kept.push(executorOptions.extensionRoots);
+			return result();
+		});
+		const spawners: WeakRef<ToolSession>[] = [];
+		const spawn = async (): Promise<void> => {
+			const parent = session();
+			Object.assign(parent, { effectiveExtensionRoots: extensionRoots, payload: "x".repeat(1 << 20) });
+			spawners.push(new WeakRef(parent));
+			const run = await runStructuredSubagent(request({ session: parent, retainArtifacts: true }));
+			await fs.rm(run.artifactsDir, { recursive: true, force: true });
+		};
+		for (let i = 0; i < 8; i++) await spawn();
+		// Keep only the providers: the spy's call log also holds each run's own callbacks.
+		vi.restoreAllMocks();
+		// A WeakRef target read in a job stays alive until that job ends: yield, collect, then read.
+		const alive = () => spawners.filter(ref => ref.deref() !== undefined).length;
+		let remaining = alive();
+		for (let i = 0; i < 10 && remaining > 0; i++) {
+			const turn = Promise.withResolvers<void>();
+			setImmediate(turn.resolve);
+			await turn.promise;
+			Bun.gc(true);
+			remaining = alive();
+		}
+
+		expect(kept).toHaveLength(8);
+		for (const provider of kept) expect(provider?.()).toBe(roots);
+		expect(remaining).toBe(0);
+	});
+
 	it("unregisters and removes a temporary lease when output ID allocation fails", async () => {
 		mockDiscovery();
 		const failingSession = session();
