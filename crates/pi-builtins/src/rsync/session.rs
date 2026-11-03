@@ -50,7 +50,7 @@ use crate::rsync::handshake::{self, Negotiated, Roles, Setup};
 use crate::rsync::iconv;
 use crate::rsync::log::{self, Info, LogCode, LogConfig, Logger, OutLevels, Role, Stats};
 use crate::rsync::meta::MetaOpts;
-use crate::rsync::mux::{IoCounters, Msg, MuxReader, MuxWriter, ReadConfig, ReadProbe, WriteConfig};
+use crate::rsync::mux::{IoCounters, Msg, MuxReader, MuxWriter, ReadConfig, ReadProbe, WriteConfig, WriteProbe};
 use crate::rsync::operands::{self, OperandConfig, Operands, Remote};
 use crate::rsync::options::{self, FilesFromFd, Options, Parsed};
 use crate::rsync::paths::{self, bytes_os_lossy};
@@ -1091,6 +1091,7 @@ fn make_streams(
 	conn_reader: Box<dyn Read + Send>,
 	conn_writer: Box<dyn Write + Send>,
 	probe: Option<ReadProbe>,
+	writable: Option<WriteProbe>,
 	abort: &Arc<AtomicBool>,
 	opts: &Options,
 ) -> Streams {
@@ -1100,6 +1101,7 @@ fn make_streams(
 		bwlimit: (opts.bwlimit > 0).then(|| opts.bwlimit as u64),
 		timeout,
 		cancel: Some(Arc::clone(abort)),
+		writable,
 	};
 	let writer = MuxWriter::new(conn_writer, counters.clone(), wcfg);
 	let mut reader = MuxReader::new(conn_reader, counters.clone(), Arc::clone(abort), ReadConfig { timeout });
@@ -1337,13 +1339,13 @@ fn client_start(
 	let mut batch_gen: Option<Box<dyn Read + Send>> = None;
 	let mut batch_flags = None;
 	let mut batch_writer = None;
-	let (conn_reader, conn_writer, probe, peer): (Box<dyn Read + Send>, Box<dyn Write + Send>, Option<ReadProbe>, PeerKind) =
+	let (conn_reader, conn_writer, probe, writable, peer): (Box<dyn Read + Send>, Box<dyn Write + Send>, Option<ReadProbe>, Option<WriteProbe>, PeerKind) =
 		match (&ops.remote, batch) {
 			(None, Some(BatchFiles::Read { data, flags })) => {
 				batch_flags = Some(flags);
 				let (gen_out, gen_in) = transport::local_pair(Arc::clone(&abort));
 				batch_gen = Some(gen_in.reader);
-				(data, gen_out.writer, None, PeerKind::None)
+				(data, gen_out.writer, None, gen_out.writable, PeerKind::None)
 			}
 			(None, other) => {
 				if let Some(BatchFiles::Write { data, script }) = other {
@@ -1369,7 +1371,7 @@ fn client_start(
 					.name("rsync-local-server".into())
 					.spawn(move || server_main(&sio, sopts, Some(LocalServer { conn: server, client_info: info, filters: sfilters })))
 					.map_err(|e| RsyncError::new(crate::rsync::exit::RERR_IPC, syserr_text(Role::Client, &e, "fork")).at("pipe.c", 112))?;
-				(client.reader, client.writer, client.probe, PeerKind::Local { handle: Some(handle), kill: Arc::clone(&kill) })
+				(client.reader, client.writer, client.probe, client.writable, PeerKind::Local { handle: Some(handle), kill: Arc::clone(&kill) })
 			}
 			(Some(remote), other) => {
 				if let Some(BatchFiles::Write { data, script }) = other {
@@ -1387,11 +1389,12 @@ fn client_start(
 				let reader = std::mem::replace(&mut conn.reader, Box::new(io::empty()));
 				let writer = std::mem::replace(&mut conn.writer, Box::new(io::sink()));
 				let probe = conn.probe.take();
+				let writable = conn.writable.take();
 				let peer = if conn.child.is_some() { PeerKind::Child(Some(conn)) } else { PeerKind::None };
-				(reader, writer, probe, peer)
+				(reader, writer, probe, writable, peer)
 			}
 		};
-	let streams = make_streams(conn_reader, conn_writer, probe, &abort, &opts);
+	let streams = make_streams(conn_reader, conn_writer, probe, writable, &abort, &opts);
 	let end = ClientRun {
 		io,
 		opts,
@@ -1923,12 +1926,12 @@ fn server_main(io: &HostIo, opts: Options, local: Option<LocalServer>) -> i32 {
 		Arc::clone(&shared_slot),
 	);
 	let local_server = local.is_some();
-	let (conn_reader, conn_writer, probe, client_info, local_filters): (Box<dyn Read + Send>, Box<dyn Write + Send>, Option<ReadProbe>, Vec<u8>, Option<Filters>) =
+	let (conn_reader, conn_writer, probe, writable, client_info, local_filters): (Box<dyn Read + Send>, Box<dyn Write + Send>, Option<ReadProbe>, Option<WriteProbe>, Vec<u8>, Option<Filters>) =
 		match local {
-			Some(LocalServer { conn, client_info, filters }) => (conn.reader, conn.writer, conn.probe, client_info, Some(filters)),
-			None => (Box::new(io.stdin.clone()), Box::new(io.stdout_raw.clone()), None, Vec::new(), None),
+			Some(LocalServer { conn, client_info, filters }) => (conn.reader, conn.writer, conn.probe, conn.writable, client_info, Some(filters)),
+			None => (Box::new(io.stdin.clone()), Box::new(io.stdout_raw.clone()), None, None, Vec::new(), None),
 		};
-	let mut streams = make_streams(conn_reader, conn_writer, probe, &abort, &opts);
+	let mut streams = make_streams(conn_reader, conn_writer, probe, writable, &abort, &opts);
 	let mut opts = opts;
 	if opts.secluded_pending() {
 		let argv = match handshake::read_secluded_args(&mut streams.reader, &io.fs, &io.cwd, opts.max_alloc) {
