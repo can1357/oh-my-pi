@@ -139,14 +139,7 @@ function normalizeStoredIdentityKey(identityKey: string | null | undefined): str
 
 export function serializeCredential(provider: string, credential: AuthCredential): SerializedCredentialRecord | null {
 	if (credential.type === "api_key") {
-		// `apiEndpoint` is part of the credential's identity for providers whose
-		// key resolves to a region-specific endpoint (Kiro), so it must survive
-		// persistence; dropping it would restore the wrong model-cache namespace.
-		const data = {
-			key: credential.key,
-			...(credential.source === "login" ? { source: "login" as const } : {}),
-			...(credential.apiEndpoint !== undefined ? { apiEndpoint: credential.apiEndpoint } : {}),
-		};
+		const data = credential.source === "login" ? { key: credential.key, source: "login" } : { key: credential.key };
 		return {
 			credentialType: "api_key",
 			data: JSON.stringify(data),
@@ -178,13 +171,7 @@ function deserializeCredential(row: AuthRow): AuthCredential | null {
 		const data = parsed as Record<string, unknown>;
 		if (typeof data.key === "string") {
 			const source = data.source === "login" ? "login" : undefined;
-			const apiEndpoint = typeof data.apiEndpoint === "string" ? data.apiEndpoint : undefined;
-			return {
-				type: "api_key",
-				key: data.key,
-				...(source ? { source } : {}),
-				...(apiEndpoint ? { apiEndpoint } : {}),
-			};
+			return source ? { type: "api_key", key: data.key, source } : { type: "api_key", key: data.key };
 		}
 	}
 	if (row.credential_type === "oauth") {

@@ -84,9 +84,7 @@ export function credentialDisabledEvent(
 export function authCredentialEquals(left: AuthCredential, right: AuthCredential): boolean {
 	if (left.type !== right.type) return false;
 	if (left.type === "api_key") {
-		// Kiro resolves a runtime endpoint per login; the same key bytes against a
-		// different endpoint are a different credential.
-		return right.type === "api_key" && left.key === right.key && left.apiEndpoint === right.apiEndpoint;
+		return right.type === "api_key" && left.key === right.key;
 	}
 	if (right.type !== "oauth") return false;
 	return (
