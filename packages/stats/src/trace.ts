@@ -14,7 +14,13 @@ import * as path from "node:path";
 import { pricingPeerFor } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { getBundledModel, type GeneratedProvider } from "@oh-my-pi/pi-catalog/models";
 import { getSessionsDir, isEnoent } from "@oh-my-pi/pi-utils";
-import { initDb, isScheduledCatalogModel, type RecordedRequest, repriceWithdrawnRateRequests } from "./db";
+import {
+	initDb,
+	isScheduledCatalogModel,
+	type RecordedRequest,
+	recordedRequestCost,
+	repriceWithdrawnRateRequests,
+} from "./db";
 import { extractFolderFromPath, finiteTokenCount, parseAllSessionEntries, resolveUsageTotal } from "./parser";
 import { getSessionRollups } from "./rollup";
 import type {
@@ -99,6 +105,7 @@ interface MessageView {
 	} | null;
 	model?: string;
 	provider?: string;
+	api?: string;
 	stopReason?: string;
 	errorMessage?: string;
 }
@@ -277,19 +284,20 @@ function argsPreview(args: unknown): string | undefined {
 /**
  * The totals stats.db stores for this transcript's requests that a withdrawn
  * rate card priced ({@link repriceWithdrawnRateRequests}), by entry id. Reads
- * every assistant entry of the file, as stats.db keeps one row per entry, not
- * only the active branch.
+ * what stats.db reads: every assistant entry of the file (not only the active
+ * branch), its recorded cost only ({@link recordedRequestCost}; an estimated
+ * cost is not evidence), and its conversation token buckets.
  */
 function withdrawnRateTotals(views: readonly EntryView[]): Map<string, number> {
 	const groups = new Map<string, { provider: string; model: string; ids: string[]; requests: RecordedRequest[] }>();
 	for (const entry of views) {
 		const msg = entry.message;
 		if (entry.type !== "message" || typeof entry.id !== "string" || msg?.role !== "assistant") continue;
-		if (typeof msg.provider !== "string" || typeof msg.model !== "string") continue;
+		if (typeof msg.provider !== "string" || typeof msg.model !== "string" || typeof msg.api !== "string") continue;
 		const usage = msg.usage;
-		const cost = usage?.cost;
-		if (!usage || typeof cost?.total !== "number" || !Number.isFinite(cost.total)) continue;
-		const orchestration = usage.orchestration;
+		if (!usage || typeof usage !== "object") continue;
+		const cost = recordedRequestCost(msg.provider, msg.model, usage.cost);
+		if (!cost) continue;
 		const key = `${msg.provider}\u0000${msg.model}`;
 		let group = groups.get(key);
 		if (!group) {
@@ -303,22 +311,8 @@ function withdrawnRateTotals(views: readonly EntryView[]): Map<string, number> {
 				output: finiteTokenCount(usage.output),
 				cacheRead: finiteTokenCount(usage.cacheRead),
 				cacheWrite: finiteTokenCount(usage.cacheWrite),
-				...(orchestration &&
-					typeof orchestration === "object" && {
-						orchestration: {
-							input: finiteTokenCount(orchestration.input),
-							output: finiteTokenCount(orchestration.output),
-							cacheRead: finiteTokenCount(orchestration.cacheRead),
-						},
-					}),
 			},
-			cost: {
-				input: finiteTokenCount(cost.input),
-				output: finiteTokenCount(cost.output),
-				cacheRead: finiteTokenCount(cost.cacheRead),
-				cacheWrite: finiteTokenCount(cost.cacheWrite),
-				total: cost.total,
-			},
+			cost,
 			// The request timestamp stats.db stores: the message's, else the entry's.
 			timestamp:
 				typeof msg.timestamp === "number" && Number.isFinite(msg.timestamp) && msg.timestamp > 0

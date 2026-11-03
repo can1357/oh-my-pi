@@ -138,6 +138,72 @@ function rawRows(database: Database): RawRow[] {
 	return database.query("SELECT * FROM messages ORDER BY entry_id").all() as RawRow[];
 }
 
+// Card C, { input 9, output 9, cache-read 9 }, for STANDARD tokens: a price no catalog produced.
+const OTHER_CARD_STANDARD = { input: 1.8, output: 0.18, cacheRead: 7.2, cacheWrite: 0, total: 9.18 };
+
+/** An assistant entry as the coding agent writes it; `cost` undefined omits `usage.cost`. */
+function assistantEntry(id: string, parentId: string | null, timestamp: number, cost: Cost | undefined) {
+	return {
+		type: "message",
+		id,
+		parentId,
+		timestamp: new Date(timestamp + 1000).toISOString(),
+		message: {
+			role: "assistant",
+			content: [{ type: "text", text: "ok" }],
+			api: "openai-completions",
+			provider: "deepseek",
+			model: "deepseek-v4-pro",
+			usage: { ...STANDARD, totalTokens: 1_020_000, orchestration: null, ...(cost && { cost }) },
+			stopReason: "stop",
+			timestamp,
+			duration: 1000,
+			ttft: 100,
+		},
+	};
+}
+
+async function writeTranscript(name: string, entries: unknown[]): Promise<string> {
+	const projectDir = path.join(getSessionsDir(), "--tmp--withdrawn-rate");
+	await fs.mkdir(projectDir, { recursive: true });
+	const file = path.join(projectDir, `1789459800000_${name}.jsonl`);
+	const header = {
+		type: "session",
+		version: 3,
+		id: name,
+		timestamp: new Date(PEAK).toISOString(),
+		cwd: "/tmp/project",
+	};
+	await Bun.write(file, `${[header, ...entries].map(entry => JSON.stringify(entry)).join("\n")}\n`);
+	return file;
+}
+
+const round12 = (value: number) => Math.round(value * 1e12) / 1e12;
+
+/** Stored totals by entry id. */
+function storedCosts(): Record<string, number> {
+	return Object.fromEntries(getRecentRequests(100).map(row => [row.entryId, round12(row.usage.cost.total)]));
+}
+
+/** The trace's model-span totals by entry id, for spans that show a cost. */
+async function tracedCosts(file: string): Promise<Record<string, number>> {
+	const trace = await buildSessionTrace(file);
+	const costs: Record<string, number> = {};
+	for (const track of trace.tracks) {
+		for (const span of track.spans) {
+			if (span.kind === "model" && span.entryId !== undefined && span.cost !== undefined) {
+				costs[span.entryId] = round12(span.cost);
+			}
+		}
+	}
+	return costs;
+}
+
+async function clearMeta(key: string): Promise<void> {
+	(await initDb()).query("DELETE FROM meta WHERE key = ?").run(key);
+	closeDb();
+}
+
 describe("stats costs from a withdrawn rate card", () => {
 	it("re-prices a transcript whose costs follow the withdrawn card's tariff, and keeps every other recorded cost", async () => {
 		const database = await initDb();
@@ -163,93 +229,117 @@ describe("stats costs from a withdrawn rate card", () => {
 		);
 	});
 
-	it("repairs rows an affected release stored, and a second pass changes nothing", async () => {
+	it("re-prices a synced catalog transcript in both tariff periods, and its trace agrees", async () => {
+		const file = await writeTranscript("catalog", [
+			assistantEntry("c1", null, PEAK, RELEASED_PEAK),
+			assistantEntry("c2", "c1", OFF_PEAK, RELEASED_OFF_PEAK),
+		]);
+		const transcript = await Bun.file(file).text();
+		const repaired = { c1: 0.3784, c2: 0.1892 };
+
+		await syncAllSessions({ workers: 1 });
+		expect(storedCosts()).toEqual(repaired);
+		expect(await tracedCosts(file)).toEqual(repaired);
+
+		await clearMeta("messages_cost_reingest_v1");
+		await syncAllSessions({ workers: 1 });
+		expect(storedCosts()).toEqual(repaired);
+		expect(await Bun.file(file).text()).toBe(transcript);
+	});
+
+	it("keeps a models.yml price equal to the withdrawn card when the other request is at the current catalog", async () => {
+		// Card A at peak, then the override removed: the current catalog at peak.
+		const file = await writeTranscript("override-removed", [
+			assistantEntry("o1", null, PEAK, CARD_A_STANDARD),
+			assistantEntry("o2", "o1", PEAK + 60_000, PRO_PEAK),
+		]);
+		const recorded = { o1: 0.0888, o2: 0.3784 };
+		await syncAllSessions({ workers: 1 });
+		expect(storedCosts()).toEqual(recorded);
+		expect(await tracedCosts(file)).toEqual(recorded);
+	});
+
+	it("never counts an estimated cost as evidence", async () => {
+		// A legacy request with no recorded cost: stats estimates it at the current catalog.
+		const file = await writeTranscript("estimated", [
+			assistantEntry("e1", null, PEAK, CARD_A_STANDARD),
+			assistantEntry("e2", "e1", OFF_PEAK, undefined),
+		]);
+		await syncAllSessions({ workers: 1 });
+		expect(storedCosts()).toEqual({ e1: 0.0888, e2: 0.1892 });
+		expect(await tracedCosts(file)).toEqual({ e1: 0.0888 });
+	});
+
+	it("withdraws a repair when an appended request contradicts it, and every later sync agrees", async () => {
+		const file = await writeTranscript("appended", [
+			assistantEntry("a1", null, PEAK, RELEASED_PEAK),
+			assistantEntry("a2", "a1", OFF_PEAK, RELEASED_OFF_PEAK),
+		]);
+		await syncAllSessions({ workers: 1 });
+		expect(storedCosts()).toEqual({ a1: 0.3784, a2: 0.1892 });
+
+		// A third price in the transcript: no request in it can be attributed any more.
+		await fs.appendFile(
+			file,
+			`${JSON.stringify(assistantEntry("a3", "a2", OFF_PEAK + 60_000, OTHER_CARD_STANDARD))}\n`,
+		);
+		const recorded = { a1: 0.0888, a2: 0.0444, a3: 9.18 };
+		await syncAllSessions({ workers: 1 });
+		expect(storedCosts()).toEqual(recorded);
+		expect(await tracedCosts(file)).toEqual(recorded);
+
+		await clearMeta("withdrawn_rate_repair");
+		await syncAllSessions({ workers: 1 });
+		expect(storedCosts()).toEqual(recorded);
+
+		await clearMeta("messages_cost_reingest_v1");
+		await syncAllSessions({ workers: 1 });
+		expect(storedCosts()).toEqual(recorded);
+	});
+
+	it("repairs a database an affected release wrote, and a second sync changes nothing", async () => {
+		await writeTranscript("upgrade-catalog", [
+			assistantEntry("u1", null, PEAK, RELEASED_PEAK),
+			assistantEntry("u2", "u1", OFF_PEAK, RELEASED_OFF_PEAK),
+		]);
+		await writeTranscript("upgrade-card-a", [
+			assistantEntry("u3", null, PEAK, CARD_A_STANDARD),
+			assistantEntry("u4", "u3", OFF_PEAK, CARD_A_STANDARD),
+		]);
+		await syncAllSessions({ workers: 1 });
+		// The schema and rows an affected release left: no recorded-cost column,
+		// Flash-rate costs, and cache savings measured against the Flash input rate.
 		const database = await initDb();
-		insertMessageStats(requests());
-		// A database written by an affected release: Flash-rate costs, and
-		// cache savings measured against the Flash input rate.
 		const age = database.query(
 			"UPDATE messages SET cost_input = ?, cost_output = ?, cost_cache_read = ?, cost_cache_write = ?, cost_total = ?, cost_no_cache_input = ? WHERE entry_id = ?",
 		);
 		for (const [entryId, cost, noCacheInput] of [
-			["released-peak", RELEASED_PEAK, 0.3],
-			["released-off-peak", RELEASED_OFF_PEAK, 0.15],
+			["u1", RELEASED_PEAK, 0.3],
+			["u2", RELEASED_OFF_PEAK, 0.15],
 		] as const) {
 			age.run(cost.input, cost.output, cost.cacheRead, cost.cacheWrite, cost.total, noCacheInput, entryId);
 		}
-		const aged = (row: RawRow) => row.entry_id === "released-peak" || row.entry_id === "released-off-peak";
-		const controls = rawRows(database).filter(row => !aged(row));
+		database.run("ALTER TABLE messages DROP COLUMN recorded_cost");
 		database.run("DELETE FROM meta WHERE key = 'withdrawn_rate_repair'");
 		closeDb();
 
-		const reopened = await initDb();
-		expectCosts(REPAIRED);
+		await syncAllSessions({ workers: 1 });
+		expect(storedCosts()).toEqual({ u1: 0.3784, u2: 0.1892, u3: 0.0888, u4: 0.0888 });
+		const upgraded = await initDb();
 		const noCacheInput = Object.fromEntries(
 			(
-				reopened
-					.query(
-						"SELECT entry_id, cost_no_cache_input FROM messages WHERE entry_id IN ('released-peak', 'released-off-peak')",
-					)
+				upgraded
+					.query("SELECT entry_id, cost_no_cache_input FROM messages WHERE entry_id IN ('u1', 'u2')")
 					.all() as { entry_id: string; cost_no_cache_input: number }[]
 			).map(row => [row.entry_id, row.cost_no_cache_input]),
 		);
-		expect(noCacheInput["released-peak"]).toBeCloseTo(1.32, 12);
-		expect(noCacheInput["released-off-peak"]).toBeCloseTo(0.66, 12);
-		expect(rawRows(reopened).filter(row => !aged(row))).toEqual(controls);
+		expect(noCacheInput.u1).toBeCloseTo(1.32, 12);
+		expect(noCacheInput.u2).toBeCloseTo(0.66, 12);
 
-		const repaired = rawRows(reopened);
-		reopened.run("DELETE FROM meta WHERE key = 'withdrawn_rate_repair'");
-		closeDb();
-		const again = await initDb();
-		expect(rawRows(again)).toEqual(repaired);
-		insertMessageStats(requests());
-		expect(rawRows(again)).toEqual(repaired);
-	});
-
-	it("re-prices a synced transcript and its trace, and leaves the transcript as written", async () => {
-		const projectDir = path.join(getSessionsDir(), "--tmp--withdrawn-rate");
-		await fs.mkdir(projectDir, { recursive: true });
-		const file = path.join(projectDir, "1789459800000_withdrawn.jsonl");
-		const assistant = (id: string, parentId: string | null, timestamp: number, cost: Cost) => ({
-			type: "message",
-			id,
-			parentId,
-			timestamp: new Date(timestamp + 1000).toISOString(),
-			message: {
-				role: "assistant",
-				content: [{ type: "text", text: "ok" }],
-				api: "openai-completions",
-				provider: "deepseek",
-				model: "deepseek-v4-pro",
-				usage: { ...STANDARD, totalTokens: 1_020_000, orchestration: null, cost },
-				stopReason: "stop",
-				timestamp,
-				duration: 1000,
-				ttft: 100,
-			},
-		});
-		const entries = [
-			{ type: "session", version: 3, id: "s", timestamp: new Date(PEAK).toISOString(), cwd: "/tmp/project" },
-			assistant("a1", null, PEAK, RELEASED_PEAK),
-			assistant("a2", "a1", OFF_PEAK, RELEASED_OFF_PEAK),
-		];
-		const transcript = `${entries.map(entry => JSON.stringify(entry)).join("\n")}\n`;
-		await Bun.write(file, transcript);
-		const total = () => getRecentRequests(2).reduce((sum, row) => sum + row.usage.cost.total, 0);
-
-		await syncAllSessions({ workers: 1 });
-		expect(total()).toBeCloseTo(0.5676, 12);
-
-		// A full re-parse of the same transcript keeps the Pro price.
-		const database = await initDb();
-		database.run("DELETE FROM meta WHERE key = 'messages_cost_reingest_v1'");
+		const rows = rawRows(upgraded);
 		closeDb();
 		await syncAllSessions({ workers: 1 });
-		expect(total()).toBeCloseTo(0.5676, 12);
-
-		const { summary } = await buildSessionTrace(file);
-		expect(summary.costTotal).toBeCloseTo(0.5676, 12);
-		expect(await Bun.file(file).text()).toBe(transcript);
+		expect(rawRows(await initDb())).toEqual(rows);
 	});
 
 	it("traces a transcript whose usage carries a null orchestration", async () => {
