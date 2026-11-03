@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import type { ApiKeyResolution, ApiKeyResolveContext } from "@oh-my-pi/pi-ai";
 import { registerCustomApi, resolveApiKeyOnce, seedApiKeyResolver, unregisterCustomApis } from "@oh-my-pi/pi-ai";
-import { OAuthError, ProviderHttpError } from "@oh-my-pi/pi-ai/error";
+import { ConfigurationError, OAuthError, ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import { classify } from "@oh-my-pi/pi-ai/error/flags";
 import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { Api, AssistantMessage, Context, Model, SimpleStreamOptions, Usage } from "@oh-my-pi/pi-ai/types";
@@ -137,6 +137,34 @@ describe("streamSimple resolver auth retry", () => {
 		]);
 		expect(contexts[1]).toBeDefined();
 		expect((contexts[1]!.error as { status?: number }).status).toBe(401);
+	});
+
+	it("ends the stream with a ConfigurationError the refresh step throws, instead of hanging", async () => {
+		const keys: unknown[] = [];
+		registerCustomApi(
+			API,
+			(_model: Model<Api>, _context: Context, options?: SimpleStreamOptions) => {
+				pushKey(keys, options);
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => stream.fail(authError()));
+				return stream;
+			},
+			SOURCE_ID,
+		);
+		const refreshFailure = new ConfigurationError("Config value file /run/key could not be read (ENOENT).");
+		const stream = streamSimple(model(), context, {
+			apiKey: async ctx => {
+				if (ctx.error === undefined) return "old-key";
+				throw refreshFailure;
+			},
+		});
+		const drained = (async () => {
+			for await (const _event of stream) {
+				// drain
+			}
+		})();
+		await expect(drained).rejects.toBe(refreshFailure);
+		expect(keys).toEqual(["old-key"]);
 	});
 
 	it("stamps the serving sibling after a 401 rotates away from the signed-in credential", async () => {

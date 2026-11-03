@@ -1,5 +1,6 @@
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { combine, effect, register, type SettingValueOf } from "../config/registry";
+import { configureCommandTimeoutMs, DEFAULT_COMMAND_TIMEOUT_MS } from "../config/resolve-config-value";
 import {
 	SERVICE_TIER_ANTHROPIC_OPTIONS,
 	SERVICE_TIER_ANTHROPIC_VALUES,
@@ -1315,6 +1316,26 @@ export const cfgProvidersStreamIdleTimeoutSeconds = register({
 		],
 	},
 });
+
+export const cfgProvidersCommandTimeoutSeconds = register({
+	id: "providers.commandTimeoutSeconds",
+	type: "number",
+	default: DEFAULT_COMMAND_TIMEOUT_MS / 1_000,
+	ui: {
+		tab: "providers",
+		group: "Timeouts",
+		label: "Config Command Timeout",
+		description:
+			"Seconds a `!command` config value (provider apiKey or headers, MCP env or headers) may run before the run counts as failed",
+		options: [
+			{ value: "10", label: "10 seconds" },
+			{ value: "30", label: "30 seconds" },
+			{ value: "60", label: "1 minute" },
+			{ value: "120", label: "2 minutes" },
+		],
+	},
+});
+effect(cfgProvidersCommandTimeoutSeconds, seconds => configureCommandTimeoutMs(seconds * 1_000));
 
 export const cfgProvidersOpenrouterVariant = register({
 	id: "providers.openrouterVariant",

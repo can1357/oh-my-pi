@@ -7,6 +7,12 @@
 - Pinned sessions show a pin beside their title in the status line and the band composer's title, and `/unpin [session id]` unpins a session ([#17848](https://github.com/can1357/oh-my-pi/pull/17848) by [@SuperUserA](https://github.com/SuperUserA))
 - Added a fullscreen extension link browser for picking links already in terminal scrollback: press Alt+O again (or Page Up) while link tags are shown, or Alt+O with no extension link on screen ([#16476](https://github.com/can1357/oh-my-pi/pull/16476) by [@materemias](https://github.com/materemias))
 - Added a `:level` suffix to `^` model tags, such as `^openai-codex/gpt-6-astra:high`, that sets the tagged subagent's initial effort. Typing `:` after a mention lists the model's supported levels. The task tool's `effort` hint and `task.maxEffort` do not override the tagged level, and a per-call `model` for that agent fails as a conflict ([#17574](https://github.com/can1357/oh-my-pi/pull/17574) by [@a-glapinski](https://github.com/a-glapinski))
+- `models.yml` provider `apiKey` and provider/model `headers` values accept `{ file: <path> }` (absolute or `~/…`): omp reads the file in-process instead of starting a process, caches the trimmed content, and re-reads it when the file changes or after a 401. A missing, unreadable or empty file is a configuration error that names the path; the turn ends with it instead of being retried or sent to a fallback model
+- Added `providers.commandTimeoutSeconds` (default `10`): the time limit of each `!command` config value run, which was fixed at 10 s
+
+### Changed
+
+- A `!command` apiKey or header that succeeded once keeps serving its last good output when a later run fails or times out, until a 401 rejects it: omp logs a warning with the failure reason and elapsed time (never the command) and re-runs the command in the background after the 30 s backoff, so a slow helper no longer drops a healthy provider. A command that never succeeded still leaves its value missing
 
 ## [18.16.0] - 2026-11-02
 

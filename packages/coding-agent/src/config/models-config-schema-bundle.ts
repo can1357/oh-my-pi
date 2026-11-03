@@ -1,6 +1,7 @@
 import { type NarrowContext, type } from "@oh-my-pi/omptype";
 import { MODEL_KINDS, RUNNER_API_KINDS } from "@oh-my-pi/pi-catalog/types";
 import { once } from "@oh-my-pi/pi-utils";
+import { fileConfigValue, normalizeFileConfigPath } from "./resolve-config-value";
 
 function validateMaxContextWindow(
 	value: { maxContextWindow?: number; contextWindow?: number },
@@ -211,6 +212,22 @@ export const getModelsConfigSchemaBundle = once(() => {
 		return true;
 	});
 
+	/**
+	 * An apiKey or header value: a string (literal, environment variable name or
+	 * `!command`) or `{ file: <path> }`, read in-process. The file form becomes the
+	 * internal string from `fileConfigValue`, so consumers keep handling strings.
+	 */
+	const ConfigValueSchema = type("string").or(
+		type({ file: "string", "+": "reject" })
+			.narrow(
+				(value, ctx) =>
+					normalizeFileConfigPath(value.file) !== undefined ||
+					ctx.mustBe("a { file } value whose path is absolute or starts with ~/"),
+			)
+			.pipe(value => fileConfigValue(normalizeFileConfigPath(value.file)!)),
+	);
+	const ConfigHeadersSchema = type({ "[string]": ConfigValueSchema });
+
 	const ModelDefinitionSchema = type({
 		id: "string",
 		"name?": "string",
@@ -240,7 +257,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"maxTokens?": "number",
 		"omitMaxOutputTokens?": "boolean",
 		"preferWebsockets?": "boolean",
-		"headers?": { "[string]": "string" },
+		"headers?": ConfigHeadersSchema,
 		"compat?": ApiCompatSchema,
 		"contextPromotionTarget?": "string",
 		"compactionModel?": "string",
@@ -300,7 +317,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"maxTokens?": "number",
 		"omitMaxOutputTokens?": "boolean",
 		"preferWebsockets?": "boolean",
-		"headers?": { "[string]": "string" },
+		"headers?": ConfigHeadersSchema,
 		"compat?": ApiCompatSchema,
 		"contextPromotionTarget?": "string",
 		"compactionModel?": "string",
@@ -375,9 +392,9 @@ export const getModelsConfigSchemaBundle = once(() => {
 
 	const ProviderConfigSchema = type({
 		"baseUrl?": "string",
-		"apiKey?": "string",
+		"apiKey?": ConfigValueSchema,
 		"api?": ApiSchema,
-		"headers?": { "[string]": "string" },
+		"headers?": ConfigHeadersSchema,
 		"compat?": ApiCompatSchema,
 		"remoteCompaction?": RemoteCompactionSchema,
 		"authHeader?": "boolean",

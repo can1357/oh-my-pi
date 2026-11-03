@@ -6,8 +6,11 @@ import { streamSimple } from "@oh-my-pi/pi-ai";
 import { withAuth } from "@oh-my-pi/pi-ai/auth-retry";
 import type { Api, Context, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { invalidateAllCommandConfigs, resolveConfigValue } from "@oh-my-pi/pi-coding-agent/config/resolve-config-value";
+import { invalidateAllConfigValues, resolveConfigValue } from "@oh-my-pi/pi-coding-agent/config/resolve-config-value";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { bindEffects } from "@oh-my-pi/pi-coding-agent/config/registry";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import "@oh-my-pi/pi-coding-agent/session/settings";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import * as piUtils from "@oh-my-pi/pi-utils";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
@@ -483,7 +486,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		]);
 	});
 
-	test("invalidateAllCommandConfigs drops cached stdout so the next resolve re-runs", async () => {
+	test("invalidateAllConfigValues drops cached stdout so the next resolve re-runs", async () => {
 		const tokenFile = path.join(tempDir, "token.txt");
 		fs.writeFileSync(tokenFile, "initial");
 		const config = `!${stdoutFileCommand(tokenFile)}`;
@@ -492,7 +495,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		fs.writeFileSync(tokenFile, "rotated");
 		expect(await resolveConfigValue(config)).toBe("initial");
 
-		invalidateAllCommandConfigs();
+		invalidateAllConfigValues("refresh");
 		expect(await resolveConfigValue(config)).toBe("rotated");
 	});
 
@@ -821,5 +824,104 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 			{ auth: "Bearer stale-bearer", tenant: "stale-tenant" },
 			{ auth: "Bearer fresh-bearer", tenant: "fresh-tenant" },
 		]);
+	});
+
+	test("a failed re-run serves the last good key, warns, and retries in the background", async () => {
+		const tokenFile = path.join(tempDir, "token.txt");
+		const counterFile = path.join(tempDir, "counter.txt");
+		fs.writeFileSync(tokenFile, "good-key");
+		fs.writeFileSync(counterFile, "");
+		const command = trackedTokenCommand(tokenFile, counterFile);
+		fs.writeFileSync(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					"custom-proxy": {
+						baseUrl: "https://custom-proxy.example.com/v1",
+						api: "openai-completions",
+						apiKey: `!${command}`,
+						models: [{ id: "custom-model", name: "Custom Model" }],
+					},
+				},
+			}),
+		);
+		const registry = new ModelRegistry(authStorage, modelsPath);
+		const model = registry.find("custom-proxy", "custom-model");
+		if (!model) throw new Error("Expected custom model");
+		expect(await registry.getApiKey(model)).toBe("good-key");
+
+		// An explicit refresh re-runs the helper, which now fails (as a timeout under load does).
+		fs.writeFileSync(tokenFile, "FAIL");
+		const warn = spyOn(piUtils.logger, "warn");
+		const realNow = Date.now;
+		let clockOffsetMs = 0;
+		const clock = spyOn(Date, "now").mockImplementation(() => realNow() + clockOffsetMs);
+		try {
+			await registry.refresh("online", { refreshCommandCredentials: true });
+			expect(await registry.getApiKey(model)).toBe("good-key");
+			expect(fs.readFileSync(counterFile, "utf8")).toBe("11");
+			const failures = warn.mock.calls.filter(([message]) => message === "config: !command value resolution failed");
+			expect(failures).toHaveLength(1);
+			expect(failures[0]?.[1]).toMatchObject({ reason: "exit", servingLastGoodValue: true });
+			expect(JSON.stringify(failures[0])).not.toContain(tokenFile);
+
+			// Within the failure backoff the last good key serves without re-running the helper.
+			expect(await registry.getApiKey(model)).toBe("good-key");
+			expect(fs.readFileSync(counterFile, "utf8")).toBe("11");
+
+			// After the backoff, resolution answers at once from the last good key and
+			// re-runs the helper in the background; its next success replaces the key.
+			fs.writeFileSync(tokenFile, "rotated-key");
+			clockOffsetMs = 31_000;
+			expect(await registry.getApiKey(model)).toBe("good-key");
+			// The background retry is a real helper process and resolution exposes no
+			// promise for it, so wait on its observable effect with a bounded poll.
+			const deadline = realNow() + 10_000;
+			let key = await registry.getApiKey(model);
+			while (key !== "rotated-key" && realNow() < deadline) {
+				await Bun.sleep(20);
+				key = await registry.getApiKey(model);
+			}
+			expect(key).toBe("rotated-key");
+			expect(fs.readFileSync(counterFile, "utf8")).toBe("111");
+		} finally {
+			clock.mockRestore();
+			warn.mockRestore();
+		}
+	});
+
+	test("a command that never succeeded still resolves to no key", async () => {
+		const counterFile = path.join(tempDir, "counter.txt");
+		fs.writeFileSync(counterFile, "");
+		const config = `!${failedTrackingCommand(counterFile)}`;
+		expect(await resolveConfigValue(config)).toBeUndefined();
+		expect(await resolveConfigValue(config)).toBeUndefined();
+		expect(fs.readFileSync(counterFile, "utf8")).toBe("1");
+	});
+
+	test.skipIf(process.platform === "win32")("providers.commandTimeoutSeconds bounds each command run", async () => {
+		const warn = spyOn(piUtils.logger, "warn");
+		const unbind = bindEffects(Settings.isolated({ "providers.commandTimeoutSeconds": 0.5 }));
+		try {
+			const marker = path.join(tempDir, "slow");
+			const started = performance.now();
+			expect(await resolveConfigValue(`!sleep 3; printf %s ${shellQuote(marker)}`)).toBeUndefined();
+			expect(performance.now() - started).toBeLessThan(2_500);
+			const failure = warn.mock.calls.find(([message]) => message === "config: !command value resolution failed");
+			expect(failure?.[1]).toMatchObject({ reason: "timeout", timeoutMs: 500 });
+		} finally {
+			unbind();
+			warn.mockRestore();
+		}
+		// A longer limit lets the same kind of slow helper finish.
+		const unbindLong = bindEffects(Settings.isolated({ "providers.commandTimeoutSeconds": 30 }));
+		try {
+			const marker = path.join(tempDir, "finishes");
+			expect(await resolveConfigValue(`!sleep 1; printf %s ${shellQuote(marker)}`)).toBe(marker);
+		} finally {
+			unbindLong();
+			// Re-apply the default (10 s) to the process-wide limit.
+			bindEffects(Settings.isolated({}))();
+		}
 	});
 });
