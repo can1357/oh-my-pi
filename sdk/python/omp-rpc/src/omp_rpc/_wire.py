@@ -315,6 +315,8 @@ class AssistantMessage(TypedDict):
     """The failure's own text: what the provider sent, or omp's text for a failure it detected itself. Retry and classification decisions read this."""
     errorDisplayMessage: NotRequired[str]
     """`errorMessage` as omp shows it, when that differs: with the rejected request's dump path, a provider-specific explanation or the response's retry hint added. Display only; it can name local paths."""
+    errorRetryAfterMs: NotRequired[float]
+    """The delay, in milliseconds, the failed response's headers asked for before a retry. Retry decisions read this with `errorMessage`."""
     errorStatus: NotRequired[int]
     errorId: NotRequired[float]
     providerPayload: NotRequired[JsonObject]

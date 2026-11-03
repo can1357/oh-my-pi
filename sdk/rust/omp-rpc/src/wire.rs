@@ -939,6 +939,8 @@ pub struct AssistantMessage {
 	pub error_message: Option<String>,
 	/// `errorMessage` as omp shows it, when that differs: with the rejected request's dump path, a provider-specific explanation or the response's retry hint added. Display only; it can name local paths.
 	pub error_display_message: Option<String>,
+	/// The delay, in milliseconds, the failed response's headers asked for before a retry. Retry decisions read this with `errorMessage`.
+	pub error_retry_after_ms: Option<f64>,
 	pub error_status: Option<i64>,
 	pub error_id: Option<f64>,
 	pub provider_payload: Option<Map<String, Value>>,
@@ -991,6 +993,9 @@ impl Serialize for AssistantMessage {
 		if let Some(value) = &self.error_display_message {
 			map.serialize_entry("errorDisplayMessage", value)?;
 		}
+		if let Some(value) = &self.error_retry_after_ms {
+			map.serialize_entry("errorRetryAfterMs", value)?;
+		}
 		if let Some(value) = &self.error_status {
 			map.serialize_entry("errorStatus", value)?;
 		}
@@ -1024,6 +1029,7 @@ impl Serialize for AssistantMessage {
 				"upstreamModel" if self.upstream_model.is_some() => continue,
 				"errorMessage" if self.error_message.is_some() => continue,
 				"errorDisplayMessage" if self.error_display_message.is_some() => continue,
+				"errorRetryAfterMs" if self.error_retry_after_ms.is_some() => continue,
 				"errorStatus" if self.error_status.is_some() => continue,
 				"errorId" if self.error_id.is_some() => continue,
 				"providerPayload" if self.provider_payload.is_some() => continue,
@@ -1055,6 +1061,7 @@ impl<'de> Deserialize<'de> for AssistantMessage {
 			upstream_model: take(&mut extra, "upstreamModel"),
 			error_message: take(&mut extra, "errorMessage"),
 			error_display_message: take(&mut extra, "errorDisplayMessage"),
+			error_retry_after_ms: take(&mut extra, "errorRetryAfterMs"),
 			error_status: take(&mut extra, "errorStatus"),
 			error_id: take(&mut extra, "errorId"),
 			provider_payload: take(&mut extra, "providerPayload"),

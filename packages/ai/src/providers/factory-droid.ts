@@ -812,16 +812,17 @@ export const streamFactoryDroid: StreamFunction<"factory-droid-agent"> = (
 				if (event.type === "error") {
 					const regionMessage = asRegionUnavailableError(model, event.error.errorMessage);
 					if (regionMessage != null) {
-						stream.push({ ...event, error: { ...event.error, errorMessage: regionMessage } });
+						stream.push({ ...event, error: { ...event.error, errorDisplayMessage: regionMessage } });
 						continue;
 					}
 				}
 				stream.push(event);
 			}
 		} catch (error) {
-			const message = createProviderErrorMessage(model, error);
+			const message: AssistantMessage = createProviderErrorMessage(model, error);
 			const regionMessage = asRegionUnavailableError(model, message.errorMessage);
-			if (regionMessage != null) message.errorMessage = regionMessage;
+			// omp's explanation is display text; `errorMessage` keeps the provider's rejection.
+			if (regionMessage != null) message.errorDisplayMessage = regionMessage;
 			stream.push({ type: "error", reason: "error", error: message });
 			stream.end();
 		}

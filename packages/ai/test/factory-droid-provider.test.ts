@@ -1,4 +1,5 @@
 import { describe, expect, it, mock } from "bun:test";
+import { errorDisplayText } from "@oh-my-pi/pi-ai/error";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { buildFactoryDroidModel } from "@oh-my-pi/pi-catalog/discovery";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
@@ -363,7 +364,7 @@ describe("Factory Droid completions wire (Droid Core)", () => {
 });
 
 describe("Factory Droid error handling", () => {
-	it("names the model when the proxy rejects the route regionally", async () => {
+	it("names the model in the shown text when the proxy rejects the route regionally", async () => {
 		const result = await streamFactoryDroid(
 			kimiK3(),
 			{ messages: [{ role: "user", content: "hi", timestamp: 1 }] },
@@ -375,6 +376,9 @@ describe("Factory Droid error handling", () => {
 		).result();
 		expect(result.stopReason).toBe("error");
 		expect(result.errorStatus).toBe(400);
-		expect(result.errorMessage).toMatch(/kimi-k3.*region/);
+		expect(errorDisplayText(result)).toBe("kimi-k3 is not served from your network's region. Choose another model.");
+		// Decisions read `errorMessage`: the provider's rejection, never omp's text naming the local model id.
+		expect(result.errorMessage).toContain("Provider not available in this region");
+		expect(result.errorMessage).not.toContain("kimi-k3");
 	});
 });

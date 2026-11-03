@@ -1,4 +1,6 @@
 import { describe, expect, it } from "bun:test";
+import { errorDisplayText } from "@oh-my-pi/pi-ai/error";
+import { extractProviderRetryHint } from "@oh-my-pi/pi-ai/utils/retry-after";
 import {
 	buildRequest,
 	parseGeminiCliCredentials,
@@ -669,7 +671,7 @@ describe("Google Gemini CLI alignment", () => {
 		expect(events.filter(e => e.type === "toolcall_start")).toHaveLength(1);
 	});
 
-	it("surfaces account verification failures from model requests", async () => {
+	it("shows account verification failures from model requests without putting local text in errorMessage", async () => {
 		const fetchMock: FetchImpl = async () => new Response(validationRequiredBody, { status: 403 });
 		const model = createModel("google-antigravity");
 
@@ -681,9 +683,26 @@ describe("Google Gemini CLI alignment", () => {
 		const result = await stream.result();
 		expect(result.stopReason).toBe("error");
 		expect(result.errorStatus).toBe(403);
-		expect(result.errorMessage).toBe(
+		expect(result.errorMessage).toBe(`Cloud Code Assist API error (403): ${validationRequiredBody}`);
+		expect(errorDisplayText(result)).toContain(
 			`Cloud Code Assist API error (403): Account verification required for dev@example.com. Visit ${VALIDATION_URL} to continue, then retry your request.`,
 		);
+	});
+
+	it("keeps a decision phrase in the stored account email out of the error decisions read", async () => {
+		const fetchMock: FetchImpl = async () => new Response(validationRequiredBody, { status: 403 });
+		const model = createModel("google-antigravity");
+		const email = "retry-after-ms=3600000@example.test";
+
+		const stream = streamGoogleGeminiCli(model, createContext(), {
+			apiKey: JSON.stringify({ token: "token", projectId: "proj-123", email }),
+			fetch: fetchMock,
+		});
+
+		const result = await stream.result();
+		expect(result.errorMessage).not.toContain(email);
+		expect(extractProviderRetryHint(result.provider, result.errorMessage, result.errorRetryAfterMs)).toBeUndefined();
+		expect(errorDisplayText(result)).toContain(email);
 	});
 
 	describe("retry guardrails", () => {

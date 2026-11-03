@@ -129,6 +129,8 @@ export interface AssistantMessage {
 	errorMessage?: string;
 	/** `errorMessage` as omp shows it, when that differs: with the rejected request's dump path, a provider-specific explanation or the response's retry hint added. Display only; it can name local paths. */
 	errorDisplayMessage?: string;
+	/** The delay, in milliseconds, the failed response's headers asked for before a retry. Retry decisions read this with `errorMessage`. */
+	errorRetryAfterMs?: number;
 	errorStatus?: number;
 	errorId?: number;
 	providerPayload?: Record<string, unknown>;

@@ -513,6 +513,9 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 			timestamp: Date.now(),
 		};
 		let rawRequestDump: RawHttpRequestDump | undefined;
+		// omp's account-verification explanation for a rejection: display text only,
+		// so the stored email never reaches `errorMessage`, which decisions read.
+		let validationDisplay: { error: unknown; providerText: string; explanation: string } | undefined;
 
 		try {
 			const apiKeyRaw = options?.apiKey;
@@ -987,18 +990,23 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 						}
 						const errorText = await response.text();
 						const validationUrl = extractGoogleValidationUrl(errorText);
-						const errorMessage = validationUrl
-							? formatGoogleValidationRequiredMessage(
-									validationUrl,
-									"retry your request",
-									parsedCredentials.email,
-								)
-							: errorText;
-						throw new AIError.GeminiCliApiError(
-							`Cloud Code Assist API error (${response.status}): ${errorMessage}`,
+						const apiError = new AIError.GeminiCliApiError(
+							`Cloud Code Assist API error (${response.status}): ${errorText}`,
 							response.status,
 							{ headers: response.headers },
 						);
+						if (validationUrl) {
+							validationDisplay = {
+								error: apiError,
+								providerText: errorText,
+								explanation: formatGoogleValidationRequiredMessage(
+									validationUrl,
+									"retry your request",
+									parsedCredentials.email,
+								),
+							};
+						}
+						throw apiError;
 					}
 
 					const requestUrl = response.url;
@@ -1139,6 +1147,13 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 		} catch (error) {
 			const result = await AIError.finalize(error, { api: model.api, signal: options?.signal, rawRequestDump });
 			AIError.applyFinalizeResult(output, result);
+			if (validationDisplay !== undefined && validationDisplay.error === error) {
+				const { providerText, explanation } = validationDisplay;
+				const shown = AIError.errorDisplayText(output) ?? "";
+				output.errorDisplayMessage = shown.includes(providerText)
+					? shown.replace(providerText, () => explanation)
+					: `${shown}\n${explanation}`;
+			}
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({ type: "error", reason: result.stopReason, error: output });

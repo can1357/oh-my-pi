@@ -4,7 +4,7 @@
 
 ### Breaking Changes
 
-- Assistant messages in session events, RPC frames and the Go, Python and Rust SDKs now carry the provider's error text in `errorMessage` and omp's shown text (with the request-dump path, the retry hint or a provider explanation) in the new `errorDisplayMessage`, documented in the RPC wire schema. Clients that display an error should show `errorDisplayMessage` when present; `auto_retry_start.errorMessage` and `auto_retry_end.finalError` carry the provider's text ([#17656](https://github.com/can1357/oh-my-pi/pull/17656) by [@sjawhar](https://github.com/sjawhar))
+- Assistant messages in session events, RPC frames and the Go, Python and Rust SDKs now carry the provider's error text in `errorMessage`, omp's shown text (with the request-dump path, the retry hint or a provider explanation) in the new `errorDisplayMessage`, and the delay the failed response's headers asked for in the new `errorRetryAfterMs`, documented in the RPC wire schema. Clients that display an error should show `errorDisplayMessage` when present; `auto_retry_start.errorMessage` and `auto_retry_end.finalError` carry the provider's text ([#17656](https://github.com/can1357/oh-my-pi/pull/17656) by [@sjawhar](https://github.com/sjawhar))
 
 ### Added
 

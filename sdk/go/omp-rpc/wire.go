@@ -631,13 +631,15 @@ type AssistantMessage struct {
 	// The failure's own text: what the provider sent, or omp's text for a failure it detected itself. Retry and classification decisions read this.
 	ErrorMessage *string `json:"errorMessage,omitempty"`
 	// `errorMessage` as omp shows it, when that differs: with the rejected request's dump path, a provider-specific explanation or the response's retry hint added. Display only; it can name local paths.
-	ErrorDisplayMessage *string                    `json:"errorDisplayMessage,omitempty"`
-	ErrorStatus         *int64                     `json:"errorStatus,omitempty"`
-	ErrorID             *float64                   `json:"errorId,omitempty"`
-	ProviderPayload     map[string]json.RawMessage `json:"providerPayload,omitempty"`
-	Duration            *float64                   `json:"duration,omitempty"`
-	Ttft                *float64                   `json:"ttft,omitempty"`
-	CompletedAt         *float64                   `json:"completedAt,omitempty"`
+	ErrorDisplayMessage *string `json:"errorDisplayMessage,omitempty"`
+	// The delay, in milliseconds, the failed response's headers asked for before a retry. Retry decisions read this with `errorMessage`.
+	ErrorRetryAfterMs *float64                   `json:"errorRetryAfterMs,omitempty"`
+	ErrorStatus       *int64                     `json:"errorStatus,omitempty"`
+	ErrorID           *float64                   `json:"errorId,omitempty"`
+	ProviderPayload   map[string]json.RawMessage `json:"providerPayload,omitempty"`
+	Duration          *float64                   `json:"duration,omitempty"`
+	Ttft              *float64                   `json:"ttft,omitempty"`
+	CompletedAt       *float64                   `json:"completedAt,omitempty"`
 	// Extra holds undeclared keys and declared keys whose value did not decode (that field stays zero).
 	// Encoding writes them back, over a declared field with the same key.
 	Extra map[string]json.RawMessage `json:"-"`
@@ -663,6 +665,7 @@ func (v *AssistantMessage) decodeFrom(raw map[string]json.RawMessage) error {
 	d.optional("upstreamModel", &out.UpstreamModel)
 	d.optional("errorMessage", &out.ErrorMessage)
 	d.optional("errorDisplayMessage", &out.ErrorDisplayMessage)
+	d.optional("errorRetryAfterMs", &out.ErrorRetryAfterMs)
 	d.optional("errorStatus", &out.ErrorStatus)
 	d.optional("errorId", &out.ErrorID)
 	d.optional("providerPayload", &out.ProviderPayload)
