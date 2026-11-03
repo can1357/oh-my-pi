@@ -186,17 +186,23 @@ function readField(object: object, key: string): unknown {
  * value, so observing a fulfilled promise forwards nothing into a child, and a
  * rejection whose reason is itself a rejected promise has that reason observed
  * too. A promise whose `constructor` or species refuses even that stays
- * unobserved; such a promise is outside what a description can handle. Never
- * throws.
+ * unobserved; such a promise is outside what a description can handle. Each
+ * promise is observed once: a rejection whose reason leads back to a promise
+ * already observed (a promise rejected with itself, or a cycle of them) stops
+ * there instead of queuing callbacks forever. Never throws.
  */
 export function observeRejection(value: unknown): void {
-	if (!isPromise(value)) return;
+	if (!isPromise(value) || observedPromises.has(value)) return;
+	observedPromises.add(value);
 	try {
 		reflectApply(promiseThen, value, [ignoreFulfilment, observeRejection]);
 	} catch {
 		// The promise's `constructor` getter or species constructor threw.
 	}
 }
+
+/** Promises already handed to {@link observeRejection}; weak, so it holds none of them alive. */
+const observedPromises = new WeakSet<object>();
 
 function ignoreFulfilment(): void {}
 

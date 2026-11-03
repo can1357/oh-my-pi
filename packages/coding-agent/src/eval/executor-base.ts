@@ -250,8 +250,11 @@ export function isTimedOutCancellation(
 ): boolean {
 	if (inheritsFrom(error, cancelledErrorClass.prototype)) {
 		try {
-			return Reflect.get(error as object, "timedOut") === true;
-		} catch {
+			const timedOut: unknown = Reflect.get(error as object, "timedOut");
+			observeRejection(timedOut);
+			return timedOut === true;
+		} catch (thrown) {
+			observeRejection(thrown);
 			return false;
 		}
 	}

@@ -11,7 +11,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/eval/js/context-manager";
 import { isCancellationError, isTimedOutCancellation } from "@oh-my-pi/pi-coding-agent/eval/executor-base";
 import { executeJs } from "@oh-my-pi/pi-coding-agent/eval/js/executor";
-import type { KernelExecuteResult } from "@oh-my-pi/pi-coding-agent/eval/kernel-base";
+import { type KernelExecuteResult, throwIfAborted } from "@oh-my-pi/pi-coding-agent/eval/kernel-base";
 import { disposeAllKernelSessions, executePython } from "@oh-my-pi/pi-coding-agent/eval/py/executor";
 import { PythonKernel } from "@oh-my-pi/pi-coding-agent/eval/py/kernel";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -1774,4 +1774,54 @@ describe("cancellation checks and descriptions read a thrown value or abort reas
 			process.off("unhandledRejection", onUnhandled);
 		}
 	});
+
+	it("observes a promise rejected with itself, and a cycle of two, once each, and the event loop goes on", async () => {
+		const unhandled: unknown[] = [];
+		const onUnhandled = (reason: unknown): void => {
+			unhandled.push(reason);
+		};
+		process.on("unhandledRejection", onUnhandled);
+		try {
+			const self = Promise.withResolvers<never>();
+			self.reject(self.promise);
+			describeError(self.promise);
+			const first = Promise.withResolvers<never>();
+			const second = Promise.withResolvers<never>();
+			first.reject(second.promise);
+			second.reject(first.promise);
+			describeError(first.promise);
+			// A timer fires only if observation stopped queuing callbacks.
+			await Bun.sleep(50);
+			expect(unhandled).toEqual([]);
+		} finally {
+			process.off("unhandledRejection", onUnhandled);
+		}
+	});
+
+	it("observes a rejected promise passed as an abort reason when the context manager or the kernel replaces it", async () => {
+		const session = makeSession(`abort-promise-reason-${crypto.randomUUID()}`);
+		const sessionId = session.getEvalSessionId?.() ?? "missing";
+		const interrupt = new AbortController();
+		const runState: VmRunState = {
+			signal: interrupt.signal,
+			onText: text => {
+				if (printsLine(text, "started")) interrupt.abort(Promise.reject(new Error("abort reason rejection")));
+			},
+		};
+		const unhandled = await unhandledRejectionsDuring(async () => {
+			// The direct context-manager path: its own reasonToError() replaces the reason.
+			await executeInVmContext({
+				sessionKey: sessionId,
+				sessionId,
+				cwd: session.cwd,
+				session,
+				code: "print('started');\nawait new Promise(resolve => setTimeout(resolve, 30_000));\nprint('after');",
+				filename: "abort-promise-reason.js",
+				timeoutMs: 60_000,
+				runState,
+			}).catch(() => {});
+			expect(() => throwIfAborted(aborted(Promise.reject(new Error("kernel reason rejection"))), "x")).toThrow();
+		});
+		expect(unhandled).toEqual([]);
+	}, 120_000);
 });

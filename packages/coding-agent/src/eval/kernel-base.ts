@@ -221,6 +221,8 @@ export function throwIfAborted(signal: AbortSignal | undefined, fallbackReason: 
 	if (!signal?.aborted) return;
 	const reason = signal.reason;
 	if (isErrorValue(reason)) throw reason;
+	// Replaced by an AbortError: a rejected promise passed as the reason must still be observed.
+	observeRejection(reason);
 	throw createAbortError("AbortError", typeof reason === "string" ? reason : fallbackReason);
 }
 

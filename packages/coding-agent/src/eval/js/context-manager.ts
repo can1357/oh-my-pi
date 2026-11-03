@@ -991,6 +991,8 @@ function safeSend(session: JsSession, msg: WorkerInbound): void {
 function reasonToError(reason: unknown, fallback: string): Error {
 	if (isErrorValue(reason)) return reason;
 	if (typeof reason === "string") return new ToolAbortError(reason);
+	// Replaced by a fallback error: a rejected promise passed as the reason must still be observed.
+	observeRejection(reason);
 	return new ToolAbortError(fallback);
 }
 
