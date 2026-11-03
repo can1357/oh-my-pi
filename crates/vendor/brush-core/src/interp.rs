@@ -17,6 +17,7 @@ use crate::{
 	env::{EnvironmentLookup, EnvironmentScope, valid_variable_name},
 	error, expansion, extendedtests, extensions, ioutils, jobs, openfiles,
 	openfiles::{OpenFile, OpenFiles},
+	outputrelay::OutputDecoding,
 	pipetap::{self, PipeTap},
 	results::{ExecutionExitCode, ExecutionResult, ExecutionSpawnResult, ExecutionWaitResult},
 	shell::Shell,
@@ -109,6 +110,11 @@ pub struct ExecutionParameters {
 	spawn_observer:           Option<Arc<dyn SpawnObserver>>,
 	/// Optional hook mirroring the bytes that cross pipeline pipes.
 	pipe_tap:                 Option<Arc<dyn PipeTap>>,
+	/// Optional hook decoding external commands' output into shell text.
+	output_decoding:          Option<Arc<dyn OutputDecoding>>,
+	/// Pipes whose reader takes their bytes as shell text; see
+	/// [`crate::outputrelay`].
+	text_sinks:               Vec<OpenFile>,
 	/// Optional flag a command raises when it reports an error yet goes on,
 	/// so its exit status does not show the failure.
 	reported_error:           Option<Arc<AtomicBool>>,
@@ -276,6 +282,30 @@ impl ExecutionParameters {
 	/// Returns the active pipe-tap hook, if any.
 	pub fn pipe_tap(&self) -> Option<&Arc<dyn PipeTap>> {
 		self.pipe_tap.as_ref()
+	}
+
+	/// Assigns the hook decoding external commands' output into shell text.
+	/// It applies to output written into a text sink; see
+	/// [`ExecutionParameters::add_text_sink`].
+	pub fn set_output_decoding(&mut self, decoding: Arc<dyn OutputDecoding>) {
+		self.output_decoding = Some(decoding);
+	}
+
+	/// Returns the active output-decoding hook, if any.
+	pub fn output_decoding(&self) -> Option<&Arc<dyn OutputDecoding>> {
+		self.output_decoding.as_ref()
+	}
+
+	/// Marks `file` (and every clone or `>&` duplicate of it) as a pipe whose
+	/// reader takes its bytes as shell text, so external commands writing
+	/// into it are decoded by the output-decoding hook.
+	pub fn add_text_sink(&mut self, file: OpenFile) {
+		self.text_sinks.push(file);
+	}
+
+	/// Returns the registered text sinks.
+	pub(crate) fn text_sinks(&self) -> &[OpenFile] {
+		&self.text_sinks
 	}
 
 	/// Assigns the flag commands raise when they report an error yet go on.

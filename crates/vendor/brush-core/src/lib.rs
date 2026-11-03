@@ -26,6 +26,7 @@ mod keywords;
 pub mod namedoptions;
 pub mod openfiles;
 pub mod options;
+mod outputrelay;
 pub mod pathcache;
 pub mod pathsearch;
 pub mod patterns;
@@ -62,6 +63,7 @@ pub use interp::{
 	ExternalCommandOutputMarkers, ProcessGroupPolicy, SpawnObserver,
 };
 pub use parser::{SourcePosition, SourcePositionOffset, SourceSpan};
+pub use outputrelay::{ByteDecoder, OutputDecoding};
 pub use pipetap::{PipeMirror, PipeTap};
 pub use results::{ExecutionControlFlow, ExecutionExitCode, ExecutionResult, ExecutionSpawnResult};
 pub use shell::{

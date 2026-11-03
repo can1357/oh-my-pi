@@ -19,6 +19,13 @@ struct CompletionMarker {
 	end_marker_suffix: String,
 }
 
+impl CompletionMarker {
+	fn write(mut self, exit_code: i32) {
+		let _ = write!(self.output, "{}{}{}", self.end_marker_prefix, exit_code, self.end_marker_suffix);
+		let _ = self.output.flush();
+	}
+}
+
 /// A waitable future that will yield the results of a child process's
 /// execution.
 pub(crate) type WaitableChildProcess = std::pin::Pin<
@@ -42,6 +49,12 @@ pub struct ChildProcess {
 	#[cfg(windows)]
 	kill_handle: Option<OwnedHandle>,
 	completion_marker: Option<CompletionMarker>,
+	/// Relays carrying this process's output into shell text; see
+	/// [`crate::outputrelay`].
+	output_relays: Vec<crate::outputrelay::RelayHandle>,
+	/// The exit [`Self::poll`] reaped while the relays still forwarded the
+	/// process's output; reported once they have.
+	exited: Option<std::process::Output>,
 }
 
 impl ChildProcess {
@@ -63,6 +76,8 @@ impl ChildProcess {
 			#[cfg(windows)]
 			kill_handle,
 			completion_marker: None,
+			output_relays: Vec::new(),
+			exited: None,
 		}
 	}
 
@@ -98,6 +113,13 @@ impl ChildProcess {
 			Some(CompletionMarker { output, end_marker_prefix, end_marker_suffix });
 	}
 
+	/// Has [`Self::wait`] report the process finished only once `relays` have
+	/// forwarded its output, so that output precedes whatever the shell writes
+	/// into the same sink next.
+	pub(crate) fn set_output_relays(&mut self, relays: Vec<crate::outputrelay::RelayHandle>) {
+		self.output_relays = relays;
+	}
+
 	/// Checks whether this process, or a stage in its pipeline, stopped.
 	fn poll_for_stop(&self) -> Result<bool, error::Error> {
 		let Some(pid) = self.pid else {
@@ -117,6 +139,10 @@ impl ChildProcess {
 		&mut self,
 		cancel_token: Option<CancellationToken>,
 	) -> Result<ProcessWaitResult, error::Error> {
+		if let Some(output) = self.exited.take() {
+			return Ok(self.complete(output, cancel_token.as_ref()).await);
+		}
+
 		#[allow(unused_mut, reason = "only mutated on some platforms")]
 		let mut sigtstp = sys::signal::tstp_signal_listener()?;
 		#[allow(unused_mut, reason = "only mutated on some platforms")]
@@ -143,11 +169,8 @@ impl ChildProcess {
 		loop {
 			tokio::select! {
 				output = &mut self.exec_future => {
-					let output = output?;
-					let marker_exit_code = completion_exit_code(&output.status);
 					self.reaped = true;
-					self.write_completion_marker(marker_exit_code);
-					break Ok(ProcessWaitResult::Completed(output))
+					break Ok(self.complete(output?, cancel_token.as_ref()).await)
 				},
 				_ = &mut cancelled => {
 					// The embedding host terminates the process group/tree. Allow
@@ -163,7 +186,9 @@ impl ChildProcess {
 						}
 					}
 					self.kill();
-					self.write_completion_marker(130);
+					let relays = std::mem::take(&mut self.output_relays);
+					let drain = (!relays.is_empty()).then(|| Box::pin(crate::outputrelay::drain(relays)));
+					self.write_completion_marker_after(drain, 130);
 					break Ok(ProcessWaitResult::Cancelled)
 				},
 				_ = sigtstp.recv() => {
@@ -211,28 +236,74 @@ impl ChildProcess {
 		}
 	}
 
+	/// Reports the exited process once its relays have forwarded its output.
+	/// The exit status is known by then, so a cancellation only stops the
+	/// waiting; the completion marker still follows the output.
+	async fn complete(
+		&mut self,
+		output: std::process::Output,
+		cancel_token: Option<&CancellationToken>,
+	) -> ProcessWaitResult {
+		let exit_code = completion_exit_code(&output.status);
+		let mut drain = Box::pin(crate::outputrelay::drain(std::mem::take(&mut self.output_relays)));
+		let cancelled = async {
+			match cancel_token {
+				Some(token) => token.cancelled().await,
+				None => std::future::pending().await,
+			}
+		};
+		tokio::select! {
+			() = &mut drain => self.write_completion_marker(exit_code),
+			() = cancelled => self.write_completion_marker_after(Some(drain), exit_code),
+		}
+		ProcessWaitResult::Completed(output)
+	}
+
 	fn write_completion_marker(&mut self, exit_code: i32) {
-		if let Some(mut marker) = self.completion_marker.take() {
-			let _ = write!(
-				marker.output,
-				"{}{}{}",
-				marker.end_marker_prefix, exit_code, marker.end_marker_suffix
-			);
-			let _ = marker.output.flush();
+		if let Some(marker) = self.completion_marker.take() {
+			marker.write(exit_code);
 		}
 	}
 
+	/// Writes the completion marker once `drain` has forwarded the process's
+	/// output through its relays, without waiting for that here; at once when
+	/// there is nothing to drain.
+	fn write_completion_marker_after(
+		&mut self,
+		drain: Option<std::pin::Pin<Box<impl Future<Output = ()> + Send + 'static>>>,
+		exit_code: i32,
+	) {
+		let Some(drain) = drain else {
+			self.write_completion_marker(exit_code);
+			return;
+		};
+		if let Some(marker) = self.completion_marker.take() {
+			tokio::spawn(async move {
+				drain.await;
+				marker.write(exit_code);
+			});
+		}
+	}
+
+	/// Reports the exit without waiting, once the process exited and its
+	/// relays have forwarded its output, as [`Self::wait`] does; until then
+	/// it reports nothing.
 	pub(crate) fn poll(&mut self) -> Option<Result<std::process::Output, error::Error>> {
-		let result = self.exec_future.as_mut().now_or_never()?;
-		Some(match result {
-			Ok(output) => {
-				let marker_exit_code = completion_exit_code(&output.status);
-				self.reaped = true;
-				self.write_completion_marker(marker_exit_code);
-				Ok(output)
-			},
-			Err(err) => Err(err.into()),
-		})
+		if self.exited.is_none() {
+			match self.exec_future.as_mut().now_or_never()? {
+				Ok(output) => {
+					self.reaped = true;
+					self.exited = Some(output);
+				},
+				Err(err) => return Some(Err(err.into())),
+			}
+		}
+		if !crate::outputrelay::drained_now(&mut self.output_relays) {
+			return None;
+		}
+		let output = self.exited.take()?;
+		self.write_completion_marker(completion_exit_code(&output.status));
+		Some(Ok(output))
 	}
 }
 
@@ -374,6 +445,8 @@ mod tests {
 			pgid: None,
 			stop_pids: None,
 			completion_marker: None,
+			output_relays: Vec::new(),
+			exited: None,
 		};
 		child.set_completion_marker(
 			OpenFile::from(marker.try_clone().expect("marker writer")),
@@ -387,5 +460,133 @@ mod tests {
 		let mut output = String::new();
 		marker.read_to_string(&mut output).expect("read marker");
 		assert_eq!(output, "<exit>130</exit>");
+	}
+}
+
+#[cfg(test)]
+mod relay_tests {
+	use super::*;
+	use crate::outputrelay::TestRelay;
+
+	/// A process that exited with status 7, its output still forwarding
+	/// through a relay until the returned feed finishes.
+	fn exited_with_forwarding_relay() -> (TestRelay, ChildProcess) {
+		#[cfg(windows)]
+		let output = std::process::Command::new("cmd").args(["/C", "exit 7"]).output();
+		#[cfg(not(windows))]
+		let output = std::process::Command::new("sh").args(["-c", "exit 7"]).output();
+		let output = output.expect("run child");
+		let (forwarding, relay) = TestRelay::new(true);
+		let child = ChildProcess {
+			exec_future: Box::pin(async move { Ok(output) }),
+			reaped: false,
+			pid: None,
+			pgid: None,
+			stop_pids: None,
+			#[cfg(windows)]
+			kill_handle: None,
+			completion_marker: None,
+			output_relays: vec![relay],
+			exited: None,
+		};
+		(forwarding, child)
+	}
+
+	/// Attaches a `<exit>N</exit>` completion marker to `child`, returning the
+	/// file it is written to.
+	fn mark(child: &mut ChildProcess) -> std::fs::File {
+		let marker = tempfile::tempfile().expect("marker file");
+		child.set_completion_marker(
+			OpenFile::from(marker.try_clone().expect("marker writer")),
+			"<exit>".into(),
+			"</exit>".into(),
+		);
+		marker
+	}
+
+	fn read_marker(marker: &mut std::fs::File) -> String {
+		use std::io::{Read, Seek, SeekFrom};
+		let mut text = String::new();
+		marker.seek(SeekFrom::Start(0)).expect("rewind marker");
+		marker.read_to_string(&mut text).expect("read marker");
+		text
+	}
+
+	/// Asserts the marker is not written while `forwarding` still forwards
+	/// the output, and reads `expected` once it finishes.
+	async fn assert_marker_follows_output(
+		forwarding: TestRelay,
+		marker: &mut std::fs::File,
+		expected: &str,
+	) {
+		assert_eq!(read_marker(marker), "", "marker written ahead of the output");
+		forwarding.finish();
+		tokio::time::timeout(std::time::Duration::from_secs(5), async {
+			while read_marker(marker).is_empty() {
+				tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.expect("marker written once the output drained");
+		assert_eq!(read_marker(marker), expected);
+	}
+
+	fn cancel_soon() -> CancellationToken {
+		let cancel = CancellationToken::new();
+		let trigger = cancel.clone();
+		tokio::spawn(async move {
+			tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+			trigger.cancel();
+		});
+		cancel
+	}
+
+	/// Cancelling while an exited command's output still drains keeps the
+	/// status the command exited with, and its completion marker still waits
+	/// for that output.
+	#[tokio::test]
+	async fn cancellation_while_output_drains_keeps_the_exit_status() {
+		let (forwarding, mut child) = exited_with_forwarding_relay();
+		let mut marker = mark(&mut child);
+		let Ok(ProcessWaitResult::Completed(output)) = child.wait(Some(cancel_soon())).await else {
+			panic!("an exited command reported as cancelled");
+		};
+		assert_eq!(output.status.code(), Some(7));
+		assert_marker_follows_output(forwarding, &mut marker, "<exit>7</exit>").await;
+	}
+
+	/// Cancelling a command before it exits writes its `130` marker only after
+	/// the output its relays still carry.
+	#[tokio::test]
+	async fn cancellation_before_exit_writes_the_marker_after_the_output() {
+		let (forwarding, mut child) = exited_with_forwarding_relay();
+		child.exec_future = Box::pin(std::future::pending());
+		let mut marker = mark(&mut child);
+		assert!(matches!(child.wait(Some(cancel_soon())).await, Ok(ProcessWaitResult::Cancelled)));
+		assert_marker_follows_output(forwarding, &mut marker, "<exit>130</exit>").await;
+	}
+
+	/// The background reaper's poll reports an exited job only once its
+	/// output is forwarded, and a wait after such a poll still completes.
+	#[tokio::test]
+	async fn poll_reports_exit_only_after_relays_drain() {
+		let (forwarding, mut child) = exited_with_forwarding_relay();
+		assert!(child.poll().is_none(), "reported while its output still forwards");
+		forwarding.finish();
+		let Some(Ok(output)) = child.poll() else {
+			panic!("drained exit not reported");
+		};
+		assert_eq!(output.status.code(), Some(7));
+
+		let (forwarding, mut child) = exited_with_forwarding_relay();
+		assert!(child.poll().is_none());
+		tokio::spawn(async move {
+			tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+			forwarding.finish();
+		});
+		let Ok(ProcessWaitResult::Completed(output)) = child.wait(None).await else {
+			panic!("a polled exit not completed by wait");
+		};
+		assert_eq!(output.status.code(), Some(7));
 	}
 }
