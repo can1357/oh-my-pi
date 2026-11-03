@@ -96,8 +96,13 @@ pub(super) fn input_unavailable_reason() -> Option<String> {
 	if std::env::var_os("LIBEI_SOCKET").is_some() {
 		return None;
 	}
-	let runtime = portal_runtime().ok()?;
-	let probe = runtime.block_on(tokio::time::timeout(INPUT_PROBE_TIMEOUT, RemoteDesktop::new()));
+	remote_desktop_missing(portal_runtime().ok()?)
+}
+
+fn remote_desktop_missing(runtime: &Runtime) -> Option<String> {
+	// The timeout is built inside the runtime: its timer needs the reactor.
+	let probe = runtime
+		.block_on(async { tokio::time::timeout(INPUT_PROBE_TIMEOUT, RemoteDesktop::new()).await });
 	probe.ok()?.err().as_ref().and_then(missing_remote_desktop)
 }
 
@@ -151,5 +156,18 @@ mod tests {
 		let reason = missing_remote_desktop(&missing).expect("a missing portal is reported");
 		assert!(reason.contains("RemoteDesktop"), "{reason}");
 		assert_eq!(missing_remote_desktop(&ashpd::Error::NoResponse), None);
+	}
+
+	/// The probe runs from the desktop session thread, outside any runtime; a
+	/// timer built there panics with "no reactor running". Whatever the test
+	/// host's D-Bus offers, the probe must answer within its timeout.
+	#[test]
+	fn the_input_probe_runs_on_the_portal_runtime_from_a_plain_thread() {
+		let runtime = portal_runtime().expect("portal runtime builds");
+		let started = std::time::Instant::now();
+		let _ = std::thread::spawn(move || remote_desktop_missing(runtime))
+			.join()
+			.expect("the input probe must not panic");
+		assert!(started.elapsed() < INPUT_PROBE_TIMEOUT + Duration::from_secs(1));
 	}
 }
