@@ -13,6 +13,8 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
+import type { ExpectedReplies } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/expected-replies";
+import type { ExtensionAPI, ExtensionFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
@@ -20,6 +22,7 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { RewindTool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { createAssistantMessage } from "./helpers/agent-session-setup";
 
 const checkpointSchema = type({ goal: type("string") });
 const rewindSchema = type({ report: type("string") });
@@ -115,8 +118,9 @@ async function createHarness(
 	options?: {
 		onAgentEnd?: (willContinue: boolean | undefined) => void;
 		resolveFallbackTool?: (name: string) => AgentTool | undefined;
+		extension?: ExtensionFactory;
 	},
-): Promise<Harness & { mock: MockModel }> {
+): Promise<Harness & { mock: MockModel; expectedReplies: ExpectedReplies | undefined }> {
 	const tempDir = TempDir.createSync("@pi-checkpoint-rewind-branch-");
 	const authStorage = await AuthStorage.create(":memory:");
 	authStorage.keys.setRuntime("mock", "test-key");
@@ -147,11 +151,14 @@ async function createHarness(
 
 	const sessionManager = SessionManager.inMemory(tempDir.path());
 	let extensionRunner: ExtensionRunner | undefined;
-	if (options?.onAgentEnd) {
+	let expectedReplies: ExpectedReplies | undefined;
+	if (options?.onAgentEnd || options?.extension) {
 		const runtime = new ExtensionRuntime();
+		expectedReplies = runtime.expectedReplies;
 		const extension = await loadExtensionFromFactory(
 			pi => {
-				pi.on("agent_end", event => options.onAgentEnd?.(event.willContinue));
+				if (options.onAgentEnd) pi.on("agent_end", event => options.onAgentEnd?.(event.willContinue));
+				options.extension?.(pi);
 			},
 			tempDir.path(),
 			new EventBus(),
@@ -168,10 +175,11 @@ async function createHarness(
 		modelRegistry,
 		toolRegistry,
 		extensionRunner,
+		expectedReplies,
 	});
 	const harness = { session, authStorage, tempDir, extraSessions: [] };
 	activeHarnesses.push(harness);
-	return { ...harness, mock };
+	return { ...harness, mock, expectedReplies };
 }
 
 function messageText(message: Message): string {
@@ -1056,5 +1064,126 @@ describe("AgentSession checkpoint rewind branch context", () => {
 				report: "post-resume findings",
 			}),
 		).resolves.toMatchObject({ details: { report: "post-resume findings", rewound: true } });
+	});
+
+	it("keeps the replies a resumed tool batch expects when that batch rewinds", async () => {
+		let bridge: ExtensionAPI | undefined;
+		const releases = new Map<string, () => boolean>();
+		const askSchema = type({ peer: type("string") });
+		const askTool: AgentTool<typeof askSchema, unknown> = {
+			name: "ask_peer",
+			label: "Ask peer",
+			description: "Ask a peer in another process",
+			parameters: askSchema,
+			async execute(_toolCallId, { peer }) {
+				if (!bridge) throw new Error("expected the bridge extension");
+				releases.set(peer, bridge.replies.expect(peer, { promised: true }));
+				return { content: [{ type: "text" as const, text: `asked ${peer}` }], details: {} };
+			},
+		};
+		const { session } = await createHarness(
+			[{ content: ["DONE"], stopReason: "stop" }],
+			[askTool as AgentTool, checkpointTool as AgentTool, rewindTool as AgentTool],
+			{
+				extension: pi => {
+					bridge = pi;
+				},
+			},
+		);
+		// A restored session: an active checkpoint, and an assistant batch that never got its results.
+		session.setCheckpointState({
+			checkpointMessageCount: 1,
+			checkpointEntryId: null,
+			startedAt: "2026-01-01T00:00:00.000Z",
+		});
+		releases.set("@mesh/han", bridge?.replies.expect("@mesh/han", { promised: true }) ?? (() => false));
+		session.agent.replaceMessages([
+			{ role: "user", content: [{ type: "text", text: "explore, then rewind" }], timestamp: Date.now() },
+			{
+				...createAssistantMessage(""),
+				content: [
+					{ type: "toolCall", id: "ask_resumed", name: "ask_peer", arguments: { peer: "@mesh/lando" } },
+					{ type: "toolCall", id: "rewind_resumed", name: "rewind", arguments: { report: "explored" } },
+				],
+				stopReason: "toolUse",
+			},
+		]);
+
+		// Resuming runs that batch with no assistant `message_end` before it.
+		await session.agent.continue();
+
+		expect(releases.get("@mesh/lando")?.()).toBe(true);
+		expect(releases.get("@mesh/han")?.()).toBe(false);
+	});
+
+	it("ends an unpromised expected reply with the run it was recorded in, keeping a promised one", async () => {
+		let bridge: ExtensionAPI | undefined;
+		const { session, expectedReplies } = await createHarness([{ content: ["DONE"], stopReason: "stop" }], [], {
+			extension: pi => {
+				bridge = pi;
+			},
+		});
+		bridge?.replies.expect("@mesh/leia");
+		bridge?.replies.expect("@mesh/han", { promised: true });
+		expect(expectedReplies?.pending()).toEqual(["@mesh/leia", "@mesh/han"]);
+
+		await session.prompt("a run of its own");
+
+		// Leia was asked before this run started; han promised an answer that outlives runs.
+		expect(expectedReplies?.pending()).toEqual(["@mesh/han"]);
+	});
+
+	it("drops the replies an extension came to expect on the branch a rewind cuts away, keeping its own batch's", async () => {
+		let bridge: ExtensionAPI | undefined;
+		const releases = new Map<string, () => boolean>();
+		const askSchema = type({ peer: type("string") });
+		const askTool: AgentTool<typeof askSchema, unknown> = {
+			name: "ask_peer",
+			label: "Ask peer",
+			description: "Ask a peer in another process",
+			parameters: askSchema,
+			async execute(_toolCallId, { peer }) {
+				if (!bridge) throw new Error("expected the bridge extension");
+				releases.set(peer, bridge.replies.expect(peer, { promised: true }));
+				return { content: [{ type: "text" as const, text: `asked ${peer}` }], details: {} };
+			},
+		};
+		const ask = (id: string, peer: string) => ({
+			content: [{ type: "toolCall" as const, id, name: "ask_peer", arguments: { peer } }],
+			stopReason: "toolUse" as const,
+		});
+		const { session } = await createHarness(
+			[
+				ask("ask_before", "@mesh/leia"),
+				{
+					content: [{ type: "toolCall", id: "checkpoint", name: "checkpoint", arguments: { goal: "explore" } }],
+					stopReason: "toolUse",
+				},
+				ask("ask_during", "@mesh/han"),
+				// Lando is asked in the rewind's own batch: that call and its result stay in the conversation.
+				{
+					content: [
+						{ type: "toolCall", id: "ask_with_rewind", name: "ask_peer", arguments: { peer: "@mesh/lando" } },
+						{ type: "toolCall", id: "rewind", name: "rewind", arguments: { report: "explored" } },
+					],
+					stopReason: "toolUse",
+				},
+				{ content: ["DONE"], stopReason: "stop" },
+			],
+			// The stub checkpoint stamps a fixed past `startedAt`: the cut must not depend on clocks.
+			[askTool as AgentTool, checkpointTool as AgentTool, rewindTool as AgentTool],
+			{
+				extension: pi => {
+					bridge = pi;
+				},
+			},
+		);
+
+		await session.prompt("ask leia, then explore and ask han, then rewind");
+
+		// Han was asked on the cut-away exploration; leia's and lando's questions are still in the conversation.
+		expect(releases.get("@mesh/han")?.()).toBe(false);
+		expect(releases.get("@mesh/leia")?.()).toBe(true);
+		expect(releases.get("@mesh/lando")?.()).toBe(true);
 	});
 });
