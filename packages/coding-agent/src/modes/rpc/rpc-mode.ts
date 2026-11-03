@@ -50,6 +50,7 @@ import {
 } from "@oh-my-pi/pi-tui/prompt/word-completion";
 import { requestTextPrediction, textPredictionBackend } from "../../predict/client";
 import { type AgentSession, type NavigateTreeResult, SessionBusyError } from "../../session/agent-session";
+import type { AgentSessionHandle } from "../../session/agent-session-handle";
 import type { MCPManager } from "../../mcp/manager";
 import { reconnectMcpManagerServer } from "../../mcp/oauth-reauth";
 import type { RestoredQueuedMessage } from "../../session/agent-session-types";
@@ -842,7 +843,7 @@ export async function handleRpcSteerSubagent(
 	const notRunning = `Subagent not running: ${subagentId}`;
 	const owned = resolveOwnedLiveSubagent(subagentRegistry, subagentId);
 	if (!owned) return notRunning;
-	let session: AgentSession;
+	let session: AgentSessionHandle;
 	try {
 		session = await AgentLifecycleManager.global().ensureLive(subagentId);
 	} catch {

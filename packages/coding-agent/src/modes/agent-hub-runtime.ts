@@ -6,9 +6,9 @@ import type { ObservableSession, SessionObserverRegistry } from "@oh-my-pi/pi-tu
 import { AgentActivityIndex } from "../activity";
 import { getRoleInfo } from "../config/model-roles";
 import type { Settings } from "../config/settings";
-import { IrcBus } from "../irc/bus";
-import { AgentLifecycleManager } from "../registry/agent-lifecycle";
-import { type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { IrcBus, type IrcBusApi } from "../irc/bus";
+import { type AgentLifecycleApi, AgentLifecycleManager } from "../registry/agent-lifecycle";
+import { type AgentRef, AgentRegistry, type AgentRegistryApi, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { registerPersistedSubagents, sessionFileBelongsToRoot } from "../registry/persisted-agents";
 import { normalizeAssistantUsage, parseSessionEntries } from "../session/session-loader";
 
@@ -29,9 +29,9 @@ export const agentTranscriptSource: AgentTranscriptSource = {
 /** Host services used by the roster, without exposing runtime implementation to tui. */
 export function createAgentHubRuntime(
 	options: {
-		registry?: AgentRegistry;
-		lifecycle?: AgentLifecycleManager;
-		irc?: IrcBus;
+		registry?: AgentRegistryApi;
+		lifecycle?: AgentLifecycleApi;
+		irc?: IrcBusApi;
 		activity?: AgentActivityIndex;
 		remote?: AgentHubRemote;
 		settings?: Settings;

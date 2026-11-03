@@ -56,7 +56,6 @@ import {
 	resolveApproval,
 	sessionApprovalScope,
 } from "../../tools/approval";
-import { getApprovalGrants } from "../../tools/approval-cache";
 import { recoverAskQuestions } from "../../tools/ask";
 import { previewLine, PREVIEW_LIMITS, TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui/render/render-utils";
 import { PROPOSE_DEVICE_NAME } from "@oh-my-pi/pi-tui/tools/resolve";
@@ -2058,9 +2057,11 @@ export class EventController {
 	 * waits on `uiContext.select(...)` after emitting `tool_execution_start`, so
 	 * an approval-mode / per-tool `prompt` policy is user-blocking — the run
 	 * reads `blocked`, not `working`. Mirrors the wrapper's `resolveApproval`
-	 * inputs (approvalMode + tools.approval) and prompt text; uses
-	 * `resolveApproval` rather than `requiresApproval` so a `deny` policy does not
-	 * throw in the render path.
+	 * inputs (approvalMode + tools.approval, grants, restrictions) and prompt
+	 * text, all read from the viewed session — a focused subagent runs under its
+	 * own settings, conversation, and session approvals; uses `resolveApproval`
+	 * rather than `requiresApproval` so a `deny` policy does not throw in the
+	 * render path.
 	 */
 	#blockingPrompt(toolName: string, args: unknown): RunStatus | undefined {
 		if (toolName === "ask") {
@@ -2070,24 +2071,22 @@ export class EventController {
 		const session = this.ctx.viewSession;
 		const tool = session.getToolByName(toolName);
 		if (!tool) return undefined;
-		const mode = cfgToolsApprovalMode.get(settings);
-		const userPolicies: Record<string, unknown> = cfgToolsApproval.get(settings);
-		const grants =
-			mode === "always-ask-cached"
-				? getApprovalGrants(settings.getAgentDir(), this.ctx.sessionManager.getSessionId())
-				: undefined;
+		const sessionSettings = session.settings;
+		const mode = cfgToolsApprovalMode.get(sessionSettings);
+		const userPolicies: Record<string, unknown> = cfgToolsApproval.get(sessionSettings);
+		const grants = mode === "always-ask-cached" ? session.getApprovalGrants() : undefined;
 		const approval = resolveApproval(
 			tool,
 			args,
 			mode,
 			userPolicies,
 			grants,
-			approvalRestrictions(settings, this.ctx.sessionManager.getCwd()),
+			approvalRestrictions(sessionSettings, session.sessionManager.getCwd()),
 		);
 		if (approval.policy !== "prompt") return undefined;
 		// Approved for this session: the wrapper runs it without asking.
 		const scope = sessionApprovalScope(approval, tool.name);
-		if (scope && session.extensionRunner?.hasSessionApproval(scope.key)) return undefined;
+		if (scope && session.hasSessionApproval(scope.key)) return undefined;
 		return { state: "blocked", kind: "permission", msg: formatApprovalPrompt(tool, args, approval.reason) };
 	}
 
