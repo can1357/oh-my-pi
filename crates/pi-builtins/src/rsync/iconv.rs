@@ -90,6 +90,7 @@ pub(crate) fn locale_charset(
 					"cannot read the locale \"{value}\" the way a command started from this shell would: {why}"
 				)),
 			},
+			Codeset::Cancelled => LocaleCharset { charset: codeset_named(&value), printable: C_PRINTABLE, warning: None },
 		};
 	}
 	#[cfg(not(unix))]
@@ -168,13 +169,13 @@ impl MsgCharset {
 	/// The check a locale charset ([`locale_charset`]) calls for, given which
 	/// bytes the locale prints. `Err` says why the charset's conversion could
 	/// not be opened at all (see [`crate::locale::libc_locale_load`]); the
-	/// caller reports it and escapes by printability, as for a charset iconv
-	/// refuses.
+	/// caller reports it, unless it is the command's cancellation, and escapes
+	/// by printability, as for a charset iconv refuses.
 	pub(crate) fn for_locale(
 		charset: &str,
 		printable: &crate::locale::Printable,
 		cancel: &std::sync::atomic::AtomicBool,
-	) -> Result<Self, String> {
+	) -> Result<Self, crate::locale::NoAnswer> {
 		let is = |name: &str| charset.eq_ignore_ascii_case(name);
 		if charset.is_empty() || is(ascii_codeset()) || is("US-ASCII") || is("ASCII") {
 			return Ok(Self::Ascii);
@@ -199,7 +200,10 @@ pub(crate) struct MsgCheck {
 impl MsgCheck {
 	/// `Ok(None)` when `iconv_open` refuses the charset (or the platform has
 	/// no iconv); `Err` when it could not be asked.
-	fn open(charset: &str, cancel: &std::sync::atomic::AtomicBool) -> Result<Option<Self>, String> {
+	fn open(
+		charset: &str,
+		cancel: &std::sync::atomic::AtomicBool,
+	) -> Result<Option<Self>, crate::locale::NoAnswer> {
 		#[cfg(unix)]
 		return Ok(sys::Converter::open(charset, charset, cancel)?.ok().map(|conv| Self { conv }));
 		#[cfg(not(unix))]
@@ -264,12 +268,13 @@ impl Iconv {
 	#[cfg(unix)]
 	fn open(charset: String, cancel: &std::sync::atomic::AtomicBool) -> Result<Self, RsyncError> {
 		// Upstream's message for a refused charset; one libc could not be
-		// asked about also says why.
+		// asked about also says why. A cancelled open ends as the run does.
 		let open = |to: &str, from: &str, line: u32| match sys::Converter::open(to, from, cancel) {
 			Ok(Ok(conv)) => Ok(conv),
 			Ok(Err(_)) => Err(RsyncError::new(RERR_UNSUPPORTED, format!("iconv_open(\"{to}\", \"{from}\") failed"))
 				.at("rsync.c", line)),
-			Err(why) => Err(RsyncError::new(
+			Err(crate::locale::NoAnswer::Cancelled) => Err(RsyncError::cancelled()),
+			Err(crate::locale::NoAnswer::Unasked(why)) => Err(RsyncError::new(
 				RERR_UNSUPPORTED,
 				format!("iconv_open(\"{to}\", \"{from}\") failed: {why}"),
 			)
@@ -432,8 +437,9 @@ mod sys {
 		/// whole process, so it runs through
 		/// [`crate::locale::libc_locale_load`]: configuration that never
 		/// arrives holds up neither this command's cancellation nor another
-		/// command. The outer `Err` says why libc could not be asked; the inner
-		/// one is `iconv_open`'s refusal.
+		/// command. The outer `Err` says why libc could not be asked, or that
+		/// the command was cancelled first; the inner one is `iconv_open`'s
+		/// refusal.
 		///
 		/// One case is out of reach: glibc `dlopen`s a conversion module while
 		/// holding the loader lock `pthread_create` takes
@@ -441,7 +447,11 @@ mod sys {
 		/// that blocks while loading stops every thread start in the process,
 		/// and nothing in the builtin can prevent it. It takes whoever starts
 		/// omp to configure such a module.
-		pub(super) fn open(to: &str, from: &str, cancel: &AtomicBool) -> Result<io::Result<Self>, String> {
+		pub(super) fn open(
+			to: &str,
+			from: &str,
+			cancel: &AtomicBool,
+		) -> Result<io::Result<Self>, crate::locale::NoAnswer> {
 			let (Ok(to), Ok(from)) = (CString::new(to), CString::new(from)) else {
 				return Ok(Err(io::Error::from_raw_os_error(libc::EINVAL)));
 			};

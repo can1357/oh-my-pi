@@ -357,7 +357,8 @@ fn a_locale_missing_a_category_leaves_the_utilities_in_c() {
 /// libc keeps one lock for every locale load in the process while a load
 /// waits, so before this a cancelled command stayed blocked in `openat`
 /// and a fresh shell's `LC_ALL=C.UTF-8` hung behind it until the FIFO was
-/// opened. Now the cancelled command returns at once; the other answers
+/// opened. Now the cancelled command returns at once and, as the reference
+/// ends on its signal, prints nothing about its locale; the other answers
 /// without libc once the stuck load has run for a second, and says why;
 /// and when the data arrives, libc answers again.
 ///
@@ -384,13 +385,23 @@ fn locale_data_that_never_arrives_holds_up_neither_its_command_nor_another() {
 			});
 			answer
 		};
-		// The command whose locale is the FIFO is cancelled 200 ms in.
+		// The command whose locale is the FIFO is cancelled 200 ms in. Its run
+		// reads the locale charset as the name spells it and has no warning
+		// to print: its standard error ends with the signal trailer alone.
 		let cancel = Arc::new(AtomicBool::new(false));
-		let blocked = lookup("fifo.UTF-8", Arc::clone(&cancel));
+		let (answered, blocked) = mpsc::channel();
+		let flag = Arc::clone(&cancel);
+		std::thread::spawn(move || {
+			let started = Instant::now();
+			let env = |key: &str| if key == "LC_ALL" { Some("fifo.UTF-8".to_owned()) } else { std::env::var(key).ok() };
+			let locale = crate::rsync::iconv::locale_charset(&env, &flag);
+			let _ = answered.send((locale.charset, locale.warning, started.elapsed()));
+		});
 		std::thread::sleep(Duration::from_millis(200));
 		cancel.store(true, Ordering::Relaxed);
-		let (codeset, took) = blocked.recv_timeout(Duration::from_secs(5)).expect("the cancelled lookup returns");
-		assert!(codeset.contains("cancelled") && took < Duration::from_secs(2), "{codeset} after {took:?}");
+		let (charset, warning, took) = blocked.recv_timeout(Duration::from_secs(5)).expect("the cancelled lookup returns");
+		assert_eq!((charset.as_str(), warning), ("UTF-8", None), "after {took:?}");
+		assert!(took < Duration::from_secs(2), "{took:?}");
 		// Another command's lookup of a locale that loads is held up at most
 		// until the stuck load has run for a second, and says why.
 		let other = lookup("C.UTF-8", Arc::new(AtomicBool::new(false)));
@@ -473,7 +484,7 @@ fn conversion_data_that_never_arrives_holds_up_neither_its_command_nor_another()
 		std::thread::sleep(Duration::from_millis(200));
 		cancel.store(true, Ordering::Relaxed);
 		let (why, took) = answer.recv_timeout(Duration::from_secs(5)).expect("the cancelled open returns");
-		assert!(why.as_deref().is_some_and(|why| why.contains("cancelled")) && took < Duration::from_secs(2), "{why:?} after {took:?}");
+		assert!(matches!(why, Some(crate::locale::NoAnswer::Cancelled)) && took < Duration::from_secs(2), "{why:?} after {took:?}");
 		// Another command's `--iconv` open is held up at most until the stuck
 		// open has run for a second, and says why.
 		let started = Instant::now();
@@ -512,6 +523,20 @@ fn conversion_data_that_never_arrives_holds_up_neither_its_command_nor_another()
 		"{stdout}{}",
 		String::from_utf8_lossy(&output.stderr)
 	);
+}
+
+/// A command already cancelled starts no locale load: nothing would use the
+/// answer, and its cancellation is all its run reports.
+#[test]
+fn a_cancelled_command_starts_no_locale_load() {
+	use std::sync::Arc;
+	use std::sync::atomic::{AtomicBool, Ordering};
+
+	let ran = Arc::new(AtomicBool::new(false));
+	let flag = Arc::clone(&ran);
+	let answer = crate::locale::libc_locale_load(&AtomicBool::new(true), move || flag.store(true, Ordering::Relaxed));
+	assert!(matches!(answer, Err(crate::locale::NoAnswer::Cancelled)), "{answer:?}");
+	assert!(!ran.load(Ordering::Relaxed), "the load ran");
 }
 
 /// Captured from rsync 3.5.1: `rsync --protocol=19 -a src/ d/` on a local copy.
@@ -633,9 +658,19 @@ fn a_refused_conversion_fails_before_the_protocol_exchange() {
 /// `plain` and exits 23; with `sub/é2` in an incremental list the empty name
 /// is outside `sub`, which aborts the transfer (exit 4) as the receiver,
 /// once.
+///
+/// Not on musl: its iconv writes `*` for a character the charset lacks
+/// instead of refusing it ([`crate::rsync::iconv`]'s
+/// `invalid_sequence_is_reported`), as for rsync built against musl, so a
+/// local copy has no name to refuse.
+#[cfg(not(target_env = "musl"))]
 #[test]
 fn a_received_name_the_conversion_refuses_creates_nothing() {
 	let eilseq = crate::rsync::log::strerror(&std::io::Error::from_raw_os_error(libc::EILSEQ));
+	let run = |argv: &[&str], cwd: &Path| {
+		let (code, cap) = run_util_env::<Rsync>(argv, "", cwd, &[("LC_ALL", "C")]);
+		(code, cap.out(), cap.err())
+	};
 	let dir = tempfile::tempdir().unwrap();
 	let src = dir.path().join("src");
 	fs::create_dir_all(&src).unwrap();
@@ -660,6 +695,7 @@ fn a_received_name_the_conversion_refuses_creates_nothing() {
 }
 
 /// Every path below `root`, relative to it.
+#[cfg(not(target_env = "musl"))]
 fn walkdir_names(root: &Path) -> Vec<String> {
 	let mut names = Vec::new();
 	let mut stack = vec![root.to_path_buf()];

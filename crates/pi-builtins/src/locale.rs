@@ -92,8 +92,9 @@ pub(crate) enum ShellLocale {
 	/// utility stays in the C locale, whatever the names spell.
 	C,
 	/// libc could not be asked. Already reported to the caller's standard
-	/// error; the caller falls back to reading the names, never to claiming
-	/// the C locale.
+	/// error, unless the command was cancelled, which reports only that; the
+	/// caller falls back to reading the names, never to claiming the C
+	/// locale.
 	Unasked,
 }
 
@@ -134,6 +135,7 @@ pub(crate) fn shell_locale_initialises(host: &Host) -> ShellLocale {
 				));
 				return ShellLocale::Unasked;
 			},
+			Loadable::Cancelled => return ShellLocale::Unasked,
 		}
 	}
 	ShellLocale::Set
@@ -168,6 +170,7 @@ pub(crate) fn ctype_is_utf8(host: &Host) -> bool {
 				host.warn(format!("warning: cannot read the locale \"{name}\": {why}"));
 				name_reads_as_utf8(name)
 			},
+			Codeset::Cancelled => name_reads_as_utf8(name),
 		};
 	}
 	#[cfg(not(unix))]
@@ -249,21 +252,24 @@ impl Drop for LoadInProgress {
 pub(crate) fn libc_locale_load<T: Send + 'static>(
 	cancel: &AtomicBool,
 	load: impl FnOnce() -> T + Send + 'static,
-) -> Result<T, String> {
-	let cancelled = || "the command was cancelled before its locale data was read".to_owned();
+) -> Result<T, NoAnswer> {
+	// A cancelled command starts no load: nothing will use its answer.
+	if cancel.load(Ordering::Relaxed) {
+		return Err(NoAnswer::Cancelled);
+	}
 	let mut started = LOAD_STARTED.lock().unwrap_or_else(PoisonError::into_inner);
 	loop {
 		let Some(since) = *started else { break };
 		if since.elapsed() >= LOAD_WEDGED_AFTER {
-			return Err(format!(
+			return Err(NoAnswer::Unasked(format!(
 				"a locale load another command started {} s ago has not finished, and libc lets no other \
 				 load run until it does (is a file on the locale search path a FIFO, or on an unresponsive \
 				 mount?)",
 				since.elapsed().as_secs()
-			));
+			)));
 		}
 		if cancel.load(Ordering::Relaxed) {
-			return Err(cancelled());
+			return Err(NoAnswer::Cancelled);
 		}
 		started = LOAD_FINISHED.wait_timeout(started, LOAD_POLL).unwrap_or_else(PoisonError::into_inner).0;
 	}
@@ -276,18 +282,30 @@ pub(crate) fn libc_locale_load<T: Send + 'static>(
 	});
 	if let Err(error) = spawned {
 		drop(LoadInProgress);
-		return Err(format!("no thread could be started to read the locale data: {error}"));
+		return Err(NoAnswer::Unasked(format!("no thread could be started to read the locale data: {error}")));
 	}
 	loop {
 		match answer.recv_timeout(LOAD_POLL) {
 			Ok(answer) => return Ok(answer),
-			Err(mpsc::RecvTimeoutError::Timeout) if cancel.load(Ordering::Relaxed) => return Err(cancelled()),
+			Err(mpsc::RecvTimeoutError::Timeout) if cancel.load(Ordering::Relaxed) => return Err(NoAnswer::Cancelled),
 			Err(mpsc::RecvTimeoutError::Timeout) => {},
 			Err(mpsc::RecvTimeoutError::Disconnected) => {
-				return Err("reading the locale data ended without an answer".to_owned());
+				return Err(NoAnswer::Unasked("reading the locale data ended without an answer".to_owned()));
 			},
 		}
 	}
+}
+
+/// Why [`libc_locale_load`] gave no answer.
+#[derive(Debug)]
+pub(crate) enum NoAnswer {
+	/// The command was cancelled first. It ends reporting that, as the
+	/// reference ends on its signal, and prints nothing about its locale:
+	/// callers fall back as for [`NoAnswer::Unasked`] but stay silent.
+	Cancelled,
+	/// libc could not be asked, for the reason given, which the caller
+	/// reports as a warning.
+	Unasked(String),
 }
 
 /// Whether the system can load `locale` for the categories in `mask`, in
@@ -322,7 +340,8 @@ fn loadable(locale: &str, mask: libc::c_int, cancel: &AtomicBool) -> Loadable {
 	match libc_locale_load(cancel, load) {
 		Ok(true) => Loadable::Yes,
 		Ok(false) => Loadable::No,
-		Err(why) => Loadable::Unasked(why),
+		Err(NoAnswer::Cancelled) => Loadable::Cancelled,
+		Err(NoAnswer::Unasked(why)) => Loadable::Unasked(why),
 	}
 }
 
@@ -336,6 +355,8 @@ pub(crate) enum Loadable {
 	/// libc could not be asked, for the reason given. Not a no: reading it
 	/// as one puts the caller in the C locale on no evidence.
 	Unasked(String),
+	/// The command was cancelled before libc answered ([`NoAnswer::Cancelled`]).
+	Cancelled,
 }
 
 /// Whether the system can load `locale` for the categories in `mask` as a
@@ -460,6 +481,9 @@ pub(crate) enum Codeset {
 	/// reason given. This is not an answer: reading it as the C locale would
 	/// silently escape names the reference prints, so the caller reports it.
 	Unasked(String),
+	/// The command was cancelled before libc answered ([`NoAnswer::Cancelled`]):
+	/// read as [`Codeset::Unasked`], without a report.
+	Cancelled,
 }
 
 /// Whether glibc's `newlocale` would read `name` as a *composite* —
@@ -525,7 +549,11 @@ pub(crate) fn loaded_codeset(locale: &str, env: &dyn Fn(&str) -> Option<String>,
 		libc::freelocale(handle);
 		answer
 	};
-	libc_locale_load(cancel, load).unwrap_or_else(Codeset::Unasked)
+	match libc_locale_load(cancel, load) {
+		Ok(codeset) => codeset,
+		Err(NoAnswer::Cancelled) => Codeset::Cancelled,
+		Err(NoAnswer::Unasked(why)) => Codeset::Unasked(why),
+	}
 }
 
 /// What GNU `sort -M` matches month names with after `setlocale(LC_ALL, "")`
@@ -653,8 +681,8 @@ pub(crate) fn shell_month_names(host: &Host, cancel: &AtomicBool) -> Option<std:
 			}
 			Some(names)
 		},
-		Ok(None) => None,
-		Err(why) => {
+		Ok(None) | Err(NoAnswer::Cancelled) => None,
+		Err(NoAnswer::Unasked(why)) => {
 			host.warn(format!("warning: cannot read the month names of the locale \"{time}\": {why}"));
 			None
 		},
@@ -903,8 +931,8 @@ pub(crate) fn shell_sort_ctype(host: &Host, cancel: &AtomicBool) -> std::sync::A
 			read.push((name.to_owned(), std::sync::Arc::clone(&ctype)));
 			ctype
 		},
-		Ok(None) => c_sort_ctype_shared(),
-		Err(why) => {
+		Ok(None) | Err(NoAnswer::Cancelled) => c_sort_ctype_shared(),
+		Err(NoAnswer::Unasked(why)) => {
 			host.warn(format!("warning: cannot read the character classes of the locale \"{name}\": {why}"));
 			c_sort_ctype_shared()
 		},
@@ -1007,8 +1035,8 @@ pub(crate) fn libc_collator(host: &Host, name: &str, cancel: &AtomicBool) -> Opt
 			read.push((name.to_owned(), std::sync::Arc::clone(&collator)));
 			Some(collator)
 		},
-		Ok(None) => None,
-		Err(why) => {
+		Ok(None) | Err(NoAnswer::Cancelled) => None,
+		Err(NoAnswer::Unasked(why)) => {
 			host.warn(format!("warning: cannot read the collation of the locale \"{name}\": {why}"));
 			None
 		},

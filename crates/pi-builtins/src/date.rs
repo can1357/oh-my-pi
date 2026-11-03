@@ -1336,7 +1336,8 @@ fn default_format(host: &Host) -> String {
 	let name = locale.clone();
 	let format = match crate::locale::libc_locale_load(&host.cancel_flag(), move || locale_default_format(&name)) {
 		Ok(format) => format,
-		Err(why) => {
+		Err(crate::locale::NoAnswer::Cancelled) => None,
+		Err(crate::locale::NoAnswer::Unasked(why)) => {
 			host.warn(format!("warning: cannot read the locale \"{locale}\": {why}"));
 			None
 		},

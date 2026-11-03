@@ -431,16 +431,19 @@ impl HostIo {
 
 	/// [`MsgCharset::for_locale`] for the run's locale charset, opened once
 	/// per run. A check whose conversion could not be opened at all is
-	/// reported once, and messages are escaped by printability, as for a
-	/// charset iconv refuses.
+	/// reported once, unless the run was cancelled first, and messages are
+	/// escaped by printability, as for a charset iconv refuses.
 	fn locale_check(&self) -> MsgCharset {
 		self.locale_check
 			.get_or_init(|| {
 				let charset = self.locale_charset();
-				MsgCharset::for_locale(charset, self.locale_printable(), &self.cancel).unwrap_or_else(|why| {
-					let warning =
-						format!("rsync: warning: cannot open the conversion for the locale charset \"{charset}\": {why}\n");
-					let _ = self.err.clone().write_all(warning.as_bytes());
+				MsgCharset::for_locale(charset, self.locale_printable(), &self.cancel).unwrap_or_else(|no_answer| {
+					if let crate::locale::NoAnswer::Unasked(why) = no_answer {
+						let warning = format!(
+							"rsync: warning: cannot open the conversion for the locale charset \"{charset}\": {why}\n"
+						);
+						let _ = self.err.clone().write_all(warning.as_bytes());
+					}
 					MsgCharset::Bytes(Arc::new(*self.locale_printable()))
 				})
 			})
