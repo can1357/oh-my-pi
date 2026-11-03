@@ -21,6 +21,7 @@ import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-
 import { AgentRegistry, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { runSubagentFollowUpTurn, runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
@@ -640,6 +641,70 @@ describe("a message delivered before the task's turn starts", () => {
 			expect(harness.requests.filter(request => request.bodyAt >= 0)).toEqual([]);
 			expect(session.messages.filter(message => messageText(message).includes(BODY))).toHaveLength(0);
 		} finally {
+			harness.authStorage.close();
+		}
+	}, 30_000);
+
+	it("keeps a held hidden message when a session switch refused during the dropped prompt rolls back", async () => {
+		const harness = await createHarness();
+		const pause = { armed: false, entered: Promise.withResolvers<void>(), release: Promise.withResolvers<void>() };
+		const pauser: ExtensionFactory = pi => {
+			pi.on("before_agent_start", async () => {
+				if (!pause.armed) return;
+				pause.armed = false;
+				pause.entered.resolve();
+				await pause.release.promise;
+			});
+		};
+		const cwdAsked = Promise.withResolvers<void>();
+		const refuse = Promise.withResolvers<void>();
+		let endHold: (() => void) | undefined;
+		let prompting: Promise<unknown> | undefined;
+		let switching: Promise<boolean> | undefined;
+		try {
+			const session = await spawnIdle(harness, [pauser]);
+			harness.beginPhase(FOLLOW_UP);
+			endHold = session.holdForAssignment();
+			await session.sendCustomMessage(
+				{ customType: "test-plugin", content: BODY, display: false },
+				{ deliverAs: "nextTurn" },
+			);
+			pause.armed = true;
+			prompting = session.prompt("a task the switch drops", { assignment: true });
+			await pause.entered.promise;
+			// A switch to another directory, refused by its owner only after the prompt finished.
+			const targetCwd = path.join(root, "other-cwd");
+			await fs.mkdir(targetCwd, { recursive: true });
+			const target = SessionManager.create(targetCwd, path.join(root, "other-sessions"));
+			target.appendMessage({ role: "user", content: "another session", timestamp: Date.now() });
+			await target.ensureOnDisk();
+			switching = session.switchSession(target.getSessionFile()!, {
+				onCwdChange: async () => {
+					cwdAsked.resolve();
+					await refuse.promise;
+					return false;
+				},
+			});
+			await cwdAsked.promise;
+			pause.release.resolve();
+			await prompting;
+			expect(harness.requests).toEqual([]);
+			refuse.resolve();
+			expect(await switching).toBe(false);
+			endHold();
+			endHold = undefined;
+
+			// The original transcript is still live, so the next task carries the message, once.
+			await session.prompt(FOLLOW_UP);
+			await session.waitForIdle();
+			expect(harness.requests[0]?.taskAt).toBeGreaterThanOrEqual(0);
+			expect(harness.requests[0]?.bodyAt).toBeGreaterThan(harness.requests[0]?.taskAt ?? Infinity);
+			expect(session.messages.filter(message => messageText(message).includes(BODY))).toHaveLength(1);
+		} finally {
+			pause.release.resolve();
+			refuse.resolve();
+			endHold?.();
+			await Promise.allSettled([prompting, switching]);
 			harness.authStorage.close();
 		}
 	}, 30_000);

@@ -9142,9 +9142,7 @@ export class AgentSession implements SettingsScope {
 			}
 			return true;
 		} finally {
-			if (!handedToAgent && takenNextTurnMessages.length > 0 && this.#sessionGeneration === takenGeneration) {
-				this.#pendingNextTurnMessages = [...takenNextTurnMessages, ...this.#pendingNextTurnMessages];
-			}
+			if (!handedToAgent) this.#putBackNextTurnMessages(takenNextTurnMessages, takenGeneration);
 			// The per-turn before_agent_start override lives only for this turn.
 			this.#tools.clearTurnSystemPromptOverride();
 			this.#usagePreflightReadyForNextModelCall = false;
@@ -10003,10 +10001,26 @@ export class AgentSession implements SettingsScope {
 		} finally {
 			// A prompt dropped before dispatch (an abort, a preflight refusal) or one that threw
 			// before it sent none of these: keep them for the next turn of the same transcript.
-			if (!handedToAgent && this.#sessionGeneration === sessionGeneration) {
-				this.#pendingNextTurnMessages = [...queuedMessages, ...this.#pendingNextTurnMessages];
-			}
+			if (!handedToAgent) this.#putBackNextTurnMessages(queuedMessages, sessionGeneration);
 		}
+	}
+
+	/**
+	 * Puts hidden next-turn messages a prompt took but never sent back at the head of the queue,
+	 * while the transcript they were sent to is still live. A transition still in progress decides
+	 * it: a commit drops them with the transcript it replaced, and a rollback (a refused switch)
+	 * restores that transcript, and these with it.
+	 */
+	#putBackNextTurnMessages(messages: CustomMessage[], sessionGeneration: number): void {
+		if (messages.length === 0) return;
+		if (this.#sessionGeneration === sessionGeneration) {
+			this.#pendingNextTurnMessages = [...messages, ...this.#pendingNextTurnMessages];
+			return;
+		}
+		void this.#sessionGenerationChanged(sessionGeneration).then(changed => {
+			if (changed || this.#isDisposed) return;
+			this.#pendingNextTurnMessages = [...messages, ...this.#pendingNextTurnMessages];
+		});
 	}
 
 	#getCustomMessageTextContent(message: Pick<CustomMessage, "content">): string {
