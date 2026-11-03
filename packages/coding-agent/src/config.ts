@@ -1,10 +1,9 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { CONFIG_DIR_NAME, getConfigAgentDirName, getProjectDir } from "@oh-my-pi/pi-utils";
+import { CONFIG_DIR_NAME, expandTilde, getConfigAgentDirName, getProjectDir } from "@oh-my-pi/pi-utils";
 import { isUserSourceEnabled } from "./capability";
 import { resolveClaudePaths } from "./config/claude-paths";
-import { expandTilde } from "./tools/path-utils";
 
 export * from "./config/config-file";
 

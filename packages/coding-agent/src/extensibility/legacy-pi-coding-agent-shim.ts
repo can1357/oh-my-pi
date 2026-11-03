@@ -34,6 +34,7 @@ import { piEscapeRegexLiteral, piJoinPath } from "@oh-my-pi/pi-ai/providers/curs
 import { getKeybindings, type Keybinding, Text } from "@oh-my-pi/pi-tui";
 import {
 	escapeXmlText,
+	expandTilde,
 	getAgentDbPath,
 	getAgentDir,
 	getProjectDir,
@@ -71,7 +72,7 @@ import { GrepTool } from "../tools/grep";
 import { ReadTool } from "../tools/read";
 import { formatBytes } from "@oh-my-pi/pi-tui/render/render-utils";
 import { WriteTool } from "../tools/write";
-import { expandTilde, resolveToCwd } from "../tools/path-utils";
+import { resolveToCwd } from "../tools/path-utils";
 import { EventBus } from "../utils/event-bus";
 import { convertImageToPng } from "@oh-my-pi/pi-tui/chat/image-loading";
 import { discoverExtensionPaths, loadExtensionFromFactory, loadExtensions } from "./extensions";

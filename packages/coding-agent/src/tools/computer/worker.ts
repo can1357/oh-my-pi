@@ -29,6 +29,7 @@ import type {
 	PointerOptions,
 } from "@oh-my-pi/pi-natives";
 import { isEnoent } from "@oh-my-pi/pi-utils/fs-error";
+import { expandTilde } from "@oh-my-pi/pi-utils/path";
 import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
 import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
 import { JsRuntime, type RuntimeHooks } from "../../eval/js/shared/runtime";
@@ -394,16 +395,14 @@ const URL_SCHEME = /^[A-Za-z][A-Za-z0-9+.-]+:/;
 /**
  * `apps.open`'s target or `app` selector, against the session's folder
  * `cwd` when it names a path there: one written as a relative path (`./a`,
- * `a/b`), even if missing, or a bare name of an existing entry. `~` and a
- * leading `~/` name the user's home. An exact application ID or native path
- * (`listed`) keeps precedence over a same-named entry; absolute paths, URLs
- * and other names pass through to native
- * resolution.
+ * `a/b`), even if missing, or a bare name of an existing entry. A leading `~`
+ * is the user's home, as `expandTilde` reads it for every other tool path. An
+ * exact application ID or native path (`listed`) keeps precedence over a
+ * same-named entry; absolute paths, URLs and other names pass through to
+ * native resolution.
  */
 async function sessionPath(value: string, cwd: string, listed: (value: string) => Promise<boolean>): Promise<string> {
-	if (value === "~" || value.startsWith("~/") || value.startsWith(`~${path.sep}`)) {
-		return path.join(os.homedir(), value.slice(1));
-	}
+	if (value.startsWith("~")) return expandTilde(value);
 	if (path.isAbsolute(value) || URL_SCHEME.test(value)) return value;
 	const local = path.resolve(cwd, value);
 	const written = value.startsWith(".") || value.includes("/") || value.includes(path.sep);

@@ -1,9 +1,8 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { getProjectAgentDir } from "@oh-my-pi/pi-utils";
+import { expandTilde, getProjectAgentDir } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
 
-import { expandTilde } from "../tools/path-utils";
 import { cfgPlanAutosave, cfgPlanAutosaveDir } from "./settings";
 
 const PLAN_SAVE_STEM_MAX_LENGTH = 32;
