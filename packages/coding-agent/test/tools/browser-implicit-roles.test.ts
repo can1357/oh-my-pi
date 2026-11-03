@@ -122,6 +122,29 @@ describe.skipIf(!available)("browser implicit role selectors", () => {
 		}
 	}, 120_000);
 
+	it("bounds cyclic native-label references in named role queries", async () => {
+		registerSemanticQueryHandlers(puppeteer);
+		const browser = await puppeteer.launch({ executablePath: await ensureChromiumExecutable(), headless: true });
+		try {
+			const page = await browser.newPage();
+			await page.setContent(`
+				<table id="table"><caption aria-labelledby="table">Results</caption><tr><td>Value</td></tr></table>
+				<fieldset id="fieldset"><legend aria-labelledby="fieldset">Settings</legend></fieldset>`);
+			await page.evaluate(`(function () {\n${TERN_KIT_SOURCE}\n})()`);
+			for (const query of ['table[name="Results" exact]', 'group[name="Settings" exact]']) {
+				expect(await page.$$eval(`role/${query}`, elements => elements.length)).toBe(1);
+				expect(
+					await page.evaluate(query => {
+						const globals = globalThis as unknown as { __ompTernKit: { count(selector: unknown): number } };
+						return globals.__ompTernKit.count({ engine: "role", query });
+					}, query),
+				).toBe(1);
+			}
+		} finally {
+			await browser.close();
+		}
+	});
+
 	it("refuses a role selector with text after its name filter instead of matching the outer role", async () => {
 		registerSemanticQueryHandlers(puppeteer);
 		const browser = await puppeteer.launch({ executablePath: await ensureChromiumExecutable(), headless: true });

@@ -251,6 +251,7 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 		skip: Element | null,
 		visibility: unknown,
 		followRefs = true,
+		visited = new Set<Element>(),
 	): string => {
 		let text = "";
 		const walk = (element: Pick<Element, "childNodes">, visibility: unknown): void => {
@@ -269,7 +270,7 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 				const gap = style.display === "inline" || style.display === "contents" ? "" : " ";
 				const shown = visibility === "any" || style.visibility === "visible";
 				const label = normalizeSpace(childElement.getAttribute("aria-label") ?? "");
-				const labelledBy = followRefs ? idrefText(childElement) : "";
+				const labelledBy = followRefs ? idrefText(childElement, visited) : "";
 				// Form controls expose `type`, `value` and `selectedOptions`, which the element type here does not declare.
 				const control = childElement as unknown as {
 					type?: string;
@@ -317,7 +318,7 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 		return text;
 	};
 	/** The host-language name of an element its descendants do not name: an optgroup's label, a fieldset's legend, a table's caption. */
-	const nativeName = (element: Element): string => {
+	const nativeName = (element: Element, visited = new Set<Element>()): string => {
 		const tag = element.tagName.toLocaleLowerCase();
 		if (tag === "optgroup") return normalizeSpace(element.getAttribute("label") ?? "");
 		if (tag !== "fieldset" && tag !== "table") return "";
@@ -327,9 +328,9 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 		if (!caption) return "";
 		// The caption or legend is named as an element in its own right: its references, then its label, then its text.
 		return (
-			idrefText(caption) ||
+			idrefText(caption, visited) ||
 			normalizeSpace(caption.getAttribute("aria-label") ?? "") ||
-			normalizeSpace(contentText(caption, null, "visible"))
+			normalizeSpace(contentText(caption, null, "visible", true, visited))
 		);
 	};
 	/**
@@ -337,32 +338,45 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 	 * references. Each target is read as a node embedded in a label, so a control target gives its value and an image its
 	 * alt, as its descendants would.
 	 */
-	const idrefText = (element: Element): string => {
+	const idrefText = (element: Element, visited = new Set<Element>()): string => {
 		const labelledBy = element.getAttribute("aria-labelledby");
-		if (!labelledBy) return "";
-		return normalizeSpace(
-			labelledBy
-				.split(/\s+/)
-				.map(id => {
-					const target = element.ownerDocument?.getElementById(id);
-					if (!target) return "";
-					// Hidden by visibility, `display: none`, or a `hidden`/`aria-hidden` ancestor: read the whole subtree.
-					const targetStyle = getComputedStyle(target);
-					const hidden =
-						targetStyle.visibility !== "visible" ||
-						targetStyle.display === "none" ||
-						target.closest("[hidden], [aria-hidden='true']") !== null;
-					// A table, fieldset or optgroup target is named by its caption, legend or label, not its contents.
-					const native = normalizeSpace(target.getAttribute("aria-label") ?? "") ? "" : nativeName(target);
-					if (native) return native;
-					const text = normalizeSpace(
-						contentText({ childNodes: [target] } as unknown as Element, null, hidden ? "any" : "visible", false),
-					);
-					// A target that yields no text is named by its tooltip, as the root of its own name computation.
-					return text || normalizeSpace(target.getAttribute("title") ?? "");
-				})
-				.join(" "),
-		);
+		if (!labelledBy || visited.has(element)) return "";
+		visited.add(element);
+		try {
+			return normalizeSpace(
+				labelledBy
+					.split(/\s+/)
+					.map(id => {
+						const target = element.ownerDocument?.getElementById(id);
+						if (!target) return "";
+						// Hidden by visibility, `display: none`, or a `hidden`/`aria-hidden` ancestor: read the whole subtree.
+						const targetStyle = getComputedStyle(target);
+						const hidden =
+							targetStyle.visibility !== "visible" ||
+							targetStyle.display === "none" ||
+							target.closest("[hidden], [aria-hidden='true']") !== null;
+						// A table, fieldset or optgroup target is named by its caption, legend or label, not its contents.
+						const native = normalizeSpace(target.getAttribute("aria-label") ?? "")
+							? ""
+							: nativeName(target, visited);
+						if (native) return native;
+						const text = normalizeSpace(
+							contentText(
+								{ childNodes: [target] } as unknown as Element,
+								null,
+								hidden ? "any" : "visible",
+								false,
+								visited,
+							),
+						);
+						// A target that yields no text is named by its tooltip, as the root of its own name computation.
+						return text || normalizeSpace(target.getAttribute("title") ?? "");
+					})
+					.join(" "),
+			);
+		} finally {
+			visited.delete(element);
+		}
 	};
 	const accessibleName = (element: Element): string => {
 		const labelledBy = idrefText(element);
