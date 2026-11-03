@@ -6463,7 +6463,6 @@ dependencies = [
  "pi-vfs",
  "pi-voice",
  "pi-walker",
- "pipewire",
  "png",
  "portable-pty",
  "rand_core 0.6.4",
