@@ -18,10 +18,10 @@ interface FixtureRun {
 
 /**
  * Write `files` (name → source; `HELPER` in a source stands for this helper's path) into a fresh
- * directory and run them in one `bun test` process, as a test suite runs them. Outcomes come from
- * the run's JUnit report.
+ * directory and run them in one `bun test` process with `flags`, as a test suite runs them.
+ * Outcomes come from the run's JUnit report.
  */
-async function runFixtures(files: Record<string, string>): Promise<FixtureRun> {
+async function runFixtures(files: Record<string, string>, flags: string[] = []): Promise<FixtureRun> {
 	using dir = TempDir.createSync("@pi-test-lifetime-");
 	for (const [name, source] of Object.entries(files)) {
 		await Bun.write(path.join(dir.path(), name), source.replaceAll("HELPER", JSON.stringify(HELPER)));
@@ -29,7 +29,7 @@ async function runFixtures(files: Record<string, string>): Promise<FixtureRun> {
 	const names = Object.keys(files)
 		.filter(name => name.endsWith(".test.ts"))
 		.sort();
-	const result = await $`${process.execPath} test --reporter=junit --reporter-outfile=report.xml ${names}`
+	const result = await $`${process.execPath} test ${flags} --reporter=junit --reporter-outfile=report.xml ${names}`
 		.cwd(dir.path())
 		.nothrow()
 		.quiet();
@@ -166,6 +166,54 @@ describe("trackTestLifetime", () => {
 
 		expect(run.outcome("in the second file")).toBe("fail");
 		expect(run.output).toContain(refusal("times out in the first file"));
+	}, 60_000);
+
+	test("refuses a later file's test after an earlier file's afterAll timed out and settled during that file's setup", async () => {
+		const run = await runFixtures({
+			"1-first.test.ts": `
+				import { trackTestLifetime } from HELPER;
+				const { test, afterAll } = trackTestLifetime();
+				const shared = globalThis as { lateHook?: string };
+				shared.lateHook = "initial";
+				afterAll(async () => {
+					await Bun.sleep(400);
+					shared.lateHook = "stale";
+				}, 100);
+				test("first body", () => {});
+			`,
+			// Module setup outlasts the timed-out hook, so no tracked test or hook starts while it is pending.
+			"2-second.test.ts": `
+				import { expect } from "bun:test";
+				import { trackTestLifetime } from HELPER;
+				await Bun.sleep(800);
+				const { test } = trackTestLifetime();
+				test("passes only on the late afterAll write", () => {
+					expect((globalThis as { lateHook?: string }).lateHook).toBe("stale");
+				});
+			`,
+		});
+
+		expect(run.outcome("passes only on the late afterAll write")).toBe("fail");
+		expect(run.output).toContain(refusal("an afterAll hook"));
+	}, 60_000);
+
+	test("takes the default deadline from bun test --timeout, so a slow healthy test is not refused", async () => {
+		const run = await runFixtures(
+			{
+				"slow.test.ts": `
+					import { trackTestLifetime } from HELPER;
+					const { test } = trackTestLifetime();
+					// Past Bun's built-in 5000 ms, inside the run's --timeout.
+					test("runs for six seconds", () => Bun.sleep(6000));
+					test("healthy after it", () => {});
+				`,
+			},
+			["--timeout", "20000"],
+		);
+
+		expect(run.outcome("runs for six seconds")).toBe("pass");
+		expect(run.outcome("healthy after it")).toBe("pass");
+		expect(run.exitCode).toBe(0);
 	}, 60_000);
 
 	test("lets every test run when nothing times out", async () => {

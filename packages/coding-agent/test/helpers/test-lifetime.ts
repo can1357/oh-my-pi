@@ -7,6 +7,7 @@ import {
 	test as bunTest,
 	type Test,
 } from "bun:test";
+import * as fs from "node:fs";
 import { types } from "node:util";
 
 /**
@@ -60,12 +61,54 @@ function refuseAfterTimeout(): void {
 }
 
 /**
+ * The default timeout of tests and hooks in this process: `bun test --timeout <ms>` (read from the
+ * process's own command line, since Bun leaves its test flags out of `Bun.argv`), else Bun's 5000.
+ * Undefined where the command line cannot be read.
+ */
+const defaultTimeoutMs: number | undefined = (() => {
+	let argv: string[];
+	try {
+		argv = fs.readFileSync("/proc/self/cmdline", "utf8").split("\0");
+	} catch {
+		return undefined;
+	}
+	for (const [index, arg] of argv.entries()) {
+		const value = arg === "--timeout" ? argv[index + 1] : arg.startsWith("--timeout=") ? arg.slice(10) : undefined;
+		if (value !== undefined) return Number(value);
+	}
+	return 5000;
+})();
+
+/** The timeout Bun applies to a test or hook declared with `options`. */
+function timeoutOf(options: unknown): number | undefined {
+	if (typeof options === "number") return options;
+	if (typeof options === "object" && options !== null && "timeout" in options && typeof options.timeout === "number") {
+		return options.timeout;
+	}
+	return defaultTimeoutMs;
+}
+
+/**
  * Run a test or hook body, and keep the promise it returns in {@link running}. Any native promise
  * counts, also one from another realm (`node:vm`), which Bun awaits too.
+ *
+ * A body still pending at its deadline has timed out, whatever runs next: Bun gives up on it then,
+ * and it may settle before any later tracked test or hook starts (during the next file's module
+ * setup, say), where a pending check would no longer see it. `Bun.sleep` keeps the deadline on real
+ * time when a test installs fake timers.
  */
-function runTracked<T>(name: string, fn: (...args: unknown[]) => T, args: unknown[]): T {
+function runTracked<T>(name: string, fn: (...args: unknown[]) => T, args: unknown[], timeoutMs?: number): T {
 	const result = fn(...args);
-	if (types.isPromise(result)) running.set(result as Promise<unknown>, name);
+	if (types.isPromise(result)) {
+		const promise = result as Promise<unknown>;
+		running.set(promise, name);
+		if (timeoutMs !== undefined && Number.isFinite(timeoutMs) && timeoutMs > 0) {
+			// Just past Bun's own timer for the same deadline.
+			void Bun.sleep(timeoutMs + 1).then(() => {
+				if (timedOut === undefined && Bun.peek.status(promise) === "pending") timedOut = name;
+			});
+		}
+	}
 	return result;
 }
 
@@ -104,7 +147,7 @@ function trackTest(base: AnyTest, rows?: readonly unknown[]): AnyTest {
 		if (fn.length > params) {
 			throw new Error("trackTestLifetime: a tracked test takes no `done` callback; return a promise instead");
 		}
-		return base(label, (...args: unknown[]) => runTracked(label, fn, args), options);
+		return base(label, (...args: unknown[]) => runTracked(label, fn, args, timeoutOf(options)), options);
 	}) as unknown as AnyTest;
 	for (const variant of SERIAL_VARIANTS) {
 		Object.defineProperty(tracked, variant, { get: () => trackTest(base[variant], rows) });
@@ -194,14 +237,14 @@ export function trackTestLifetime(): TestLifetime {
 			refuseDoneCallback(name.replace(/^an? /, ""), fn as (...args: never[]) => unknown);
 			return register(() => {
 				atStart();
-				return runTracked(name, fn as () => unknown, []);
+				return runTracked(name, fn as () => unknown, [], timeoutOf(options));
 			}, options);
 		};
 	const onTestFinished: typeof bunOnTestFinished = (fn, options) => {
 		refuseDoneCallback("onTestFinished callback", fn as (...args: never[]) => unknown);
 		return bunOnTestFinished(() => {
 			noteTeardown();
-			return runTracked("an onTestFinished callback", fn as () => unknown, []);
+			return runTracked("an onTestFinished callback", fn as () => unknown, [], timeoutOf(options));
 		}, options);
 	};
 	return {
