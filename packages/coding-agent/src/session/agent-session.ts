@@ -9996,6 +9996,9 @@ export class AgentSession implements SettingsScope {
 		options?: { acceptTerminalEmptyStop?: boolean },
 	): Promise<boolean> {
 		const inFlightEpoch = this.#beginInFlight();
+		const sessionGeneration = this.#sessionGeneration;
+		const setupAbort = new AbortController();
+		this.#promptSetupAbortController = setupAbort;
 		try {
 			if (!(await this.#runUsageAwarePreflightForNextModelCall())) return false;
 			const acceptTerminalEmptyStop = options?.acceptTerminalEmptyStop === true;
@@ -10003,23 +10006,9 @@ export class AgentSession implements SettingsScope {
 				this.#resetPromptMaintenanceState();
 			}
 			this.#recovery.setAcceptTerminalEmptyStop(acceptTerminalEmptyStop);
-			// A triggered custom message starts a turn like a prompt does, so it gets the same
-			// before_agent_start preparation (extension system prompt and context messages).
-			const promptText =
-				typeof message.content === "string"
-					? message.content
-					: message.content.flatMap(part => (part.type === "text" ? [part.text] : [])).join("");
-			const preparation = await this.#prepareAgentStart(
-				message,
-				promptText,
-				undefined,
-				this.#promptGeneration,
-				undefined,
-				"direct",
-			);
-			const preparedMessages = preparation.commit();
-			if (!preparedMessages) return false;
-			const run = this.agent.prompt(preparedMessages.length > 0 ? [message, ...preparedMessages] : message);
+			const prepared = await this.#prepareUserAuthoredWake(message, setupAbort.signal, sessionGeneration);
+			if (!prepared) return false;
+			const run = this.agent.prompt(prepared.length > 1 ? prepared : message);
 			// No dispatch-live wake here: an agent-initiated turn has no
 			// client promptTurn, so steers parked on a dispatching CLIENT
 			// prompt must keep parking through it — waking on this claim
@@ -10033,7 +10022,46 @@ export class AgentSession implements SettingsScope {
 			this.#usagePreflightReadyForNextModelCall = false;
 			this.#recovery.setAcceptTerminalEmptyStop(false);
 			this.#endInFlight(inFlightEpoch);
+			if (this.#promptSetupAbortController === setupAbort) this.#promptSetupAbortController = undefined;
 		}
+	}
+
+	/**
+	 * A user-authored message starts user work, so it gets the same before_agent_start preparation as a
+	 * prompt; agent-attributed wakes go out unprepared, matching queued delivery. Returns the messages
+	 * to send, or undefined when preparation was cancelled: the message is then kept in the transcript
+	 * without a turn (dropped only when the session it belonged to is gone).
+	 */
+	async #prepareUserAuthoredWake(
+		message: CustomMessage,
+		signal: AbortSignal,
+		sessionGeneration: number,
+	): Promise<AgentMessage[] | undefined> {
+		if (!isUserAuthoredQueuedMessage(message)) return [message];
+		const images =
+			typeof message.content === "string"
+				? []
+				: message.content.filter((part): part is ImageContent => part.type === "image");
+		let preparedMessages: readonly AgentMessage[] | undefined;
+		try {
+			const preparation = await this.#prepareAgentStart(
+				message,
+				this.#getCustomMessageTextContent(message),
+				images.length > 0 ? images : undefined,
+				this.#promptGeneration,
+				signal,
+				"direct",
+			);
+			preparedMessages = preparation.commit();
+		} catch (error) {
+			if (!(await this.#sessionGenerationChanged(sessionGeneration))) this.#recordWithoutTurn([message]);
+			throw error;
+		}
+		if (!preparedMessages) {
+			if (!(await this.#sessionGenerationChanged(sessionGeneration))) this.#recordWithoutTurn([message]);
+			return undefined;
+		}
+		return [message, ...preparedMessages];
 	}
 
 	/** Queue a custom message without starting a turn, matching steer/follow-up/aside delivery. */

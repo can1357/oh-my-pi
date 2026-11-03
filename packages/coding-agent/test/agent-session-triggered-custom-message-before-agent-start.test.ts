@@ -37,9 +37,10 @@ describe("AgentSession turn started by a triggered custom message", () => {
 		session = undefined;
 	});
 
-	it("applies the before_agent_start system prompt, then drops it after the turn", async () => {
+	function createSession(beforeAgentStart: () => Promise<{ systemPrompt: string[] }>) {
 		const mock = createMockModel({ responses: [{ content: ["Done"] }] });
 		const systemPrompts: string[][] = [];
+		let hookCalls = 0;
 		const agent = new Agent({
 			getApiKey: () => "test-key",
 			initialState: { model: createModel(), systemPrompt: ["base"], tools: [], messages: [] },
@@ -55,17 +56,66 @@ describe("AgentSession turn started by a triggered custom message", () => {
 			settings: Settings.isolated({ "compaction.enabled": false, "todo.enabled": false }),
 			modelRegistry: { getApiKey: async () => "test-key" } as never,
 			extensionRunner: {
-				emitBeforeAgentStart: async () => ({ systemPrompt: [OVERRIDE] }),
+				emitBeforeAgentStart: async () => {
+					hookCalls++;
+					return beforeAgentStart();
+				},
 				emit: async () => undefined,
 			} as unknown as ExtensionRunner,
 			rebuildSystemPrompt: async () => ({ systemPrompt: ["base"] }),
 		});
+		return { session, systemPrompts, hookCalls: () => hookCalls };
+	}
 
-		await session.sendCustomMessage({ customType: "wake", content: "hello", display: true }, { triggerTurn: true });
+	it("applies the before_agent_start system prompt to a user-attributed message, then drops it", async () => {
+		const { session, systemPrompts } = createSession(async () => ({ systemPrompt: [OVERRIDE] }));
+
+		await session.sendCustomMessage(
+			{ customType: "relayed-user", content: "hello", display: true, attribution: "user" },
+			{ triggerTurn: true },
+		);
 		await session.waitForIdle();
 
 		expect(systemPrompts).toEqual([[OVERRIDE]]);
 		await session.refreshBaseSystemPrompt();
 		expect(session.systemPrompt).toEqual(["base"]);
+	});
+
+	it("leaves an agent-attributed wake unprepared", async () => {
+		const { session, systemPrompts, hookCalls } = createSession(async () => ({ systemPrompt: [OVERRIDE] }));
+
+		await session.sendCustomMessage(
+			{ customType: "wake", content: "job done", display: true },
+			{ triggerTurn: true },
+		);
+		await session.waitForIdle();
+
+		expect(hookCalls()).toBe(0);
+		expect(systemPrompts).toEqual([["base"]]);
+	});
+
+	it("keeps the message without a turn when abort cancels its preparation", async () => {
+		let entered!: () => void;
+		const hookEntered = new Promise<void>(resolve => {
+			entered = resolve;
+		});
+		const { session, systemPrompts } = createSession(async () => {
+			entered();
+			await Bun.sleep(50);
+			return { systemPrompt: [OVERRIDE] };
+		});
+
+		const sent = session.sendCustomMessage(
+			{ customType: "relayed-user", content: "kept", display: true, attribution: "user" },
+			{ triggerTurn: true },
+		);
+		await hookEntered;
+		await session.abort();
+		await sent;
+		await session.waitForIdle();
+
+		expect(systemPrompts).toEqual([]);
+		const kept = session.messages.filter(m => m.role === "custom" && m.customType === "relayed-user");
+		expect(kept.map(m => (m as { content: unknown }).content)).toEqual(["kept"]);
 	});
 });
