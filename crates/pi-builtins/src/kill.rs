@@ -198,21 +198,15 @@ impl builtins::Command for KillCommand {
 				}
 				#[cfg(unix)]
 				{
-					let mut targets: Vec<i32> = job
-						.process_ids()
-						.filter_map(|pid| {
-							// SAFETY: getpgid reads process-group metadata for a managed child.
-							let pgid = unsafe { libc::getpgid(pid) };
-							(pgid > 0).then_some(-pgid)
-						})
-						.collect();
+					// Bash signals the job's process group with job control,
+					// which reaches the children an ended stage left in it, and
+					// each live process without (`kill_pid`).
+					let mut targets = job.signal_targets(job_control);
 					if targets.is_empty()
 						&& let Some(pgid) = job.process_group_id()
 					{
 						targets.push(-pgid);
 					}
-					targets.sort_unstable();
-					targets.dedup();
 					if targets.iter().copied().any(&blocks) {
 						writeln!(
 							context.stderr(),

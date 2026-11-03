@@ -38,6 +38,9 @@ pub struct ChildProcess {
 	pgid:        Option<sys::process::ProcessId>,
 	/// Every external process in this pipeline.
 	stop_pids:   Option<Arc<[sys::process::ProcessId]>>,
+	/// What a job-control signal to the job reaches of this process,
+	/// recorded as it started (see [`sys::signal::signal_target`]).
+	signal_target: Option<sys::process::ProcessId>,
 	/// The stops the last wait consumed: each process of the stop scope that
 	/// stopped, with its `WSTOPSIG`.
 	reported_stops: Vec<(sys::process::ProcessId, u8)>,
@@ -62,6 +65,7 @@ impl ChildProcess {
 			pid,
 			pgid,
 			stop_pids: None,
+			signal_target: pid.map(sys::signal::signal_target),
 			reported_stops: Vec::new(),
 			reaped: false,
 			#[cfg(windows)]
@@ -78,6 +82,12 @@ impl ChildProcess {
 	/// Returns the process's group ID.
 	pub const fn pgid(&self) -> Option<sys::process::ProcessId> {
 		self.pgid
+	}
+
+	/// What a job-control signal to the job reaches of this process: its
+	/// process group (negative) or the process, as it was when it started.
+	pub const fn signal_target(&self) -> Option<sys::process::ProcessId> {
+		self.signal_target
 	}
 
 	/// Sets the external process IDs that form this pipeline's stop scope.
@@ -411,6 +421,7 @@ mod tests {
 			pid: None,
 			pgid: None,
 			stop_pids: None,
+			signal_target: None,
 			reported_stops: Vec::new(),
 			completion_marker: None,
 		};

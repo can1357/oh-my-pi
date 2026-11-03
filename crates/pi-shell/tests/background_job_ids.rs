@@ -6,9 +6,13 @@
 //! bash 5.2.21 prints for the same script.
 #![cfg(unix)]
 
-use std::sync::Arc;
-
 use pi_shell::{Shell, ShellRunOptions, cancel::CancelToken};
+
+/// The scripts that run at once in the whole test process. `cargo test` runs
+/// every test of this file in one process, as many at once as the host has
+/// CPUs; with eight scripts each, 57 tests passed the default limit of 1024
+/// open files, though a shell holds none once its script has run.
+static SCRIPT_RUNS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(8);
 
 /// Runs `command` in `shell`, returning its exit status and output. The
 /// bound is for a script that hangs: a loaded host takes seconds for a row
@@ -26,15 +30,15 @@ async fn run_in(shell: &Shell, command: &str) -> (Option<i32>, String) {
 	(result.exit_code, rx.drain().collect())
 }
 
-/// Runs each script in a fresh shell, eight at a time, and asserts Bash's
-/// output and exit status 0, reporting every row that differs.
+/// Runs each script in a fresh shell, eight at a time across the process
+/// (see [`SCRIPT_RUNS`]), and asserts Bash's output and exit status 0,
+/// reporting every row that differs.
 async fn assert_bash_outputs(rows: &[(&str, &str)]) {
-	let limit = Arc::new(tokio::sync::Semaphore::new(8));
 	let mut runs = tokio::task::JoinSet::new();
 	for (index, &(script, _)) in rows.iter().enumerate() {
-		let (script, limit) = (script.to_owned(), Arc::clone(&limit));
+		let script = script.to_owned();
 		runs.spawn(async move {
-			let _permit = limit.acquire_owned().await.expect("run limit");
+			let _permit = SCRIPT_RUNS.acquire().await.expect("run limit");
 			(index, run_in(&Shell::new(None), &script).await)
 		});
 	}
@@ -2078,19 +2082,78 @@ async fn wait_p_names_the_last_process_of_a_pipeline() {
 	.await;
 }
 
-/// `bg` continues every process group the job had when it started, as
-/// Bash's `killpg` on the job's group does, also the group of a stage that
-/// has exited, which still holds that stage's stopped child. Only the
-/// groups of the stages still tracked got SIGCONT, so the child stayed
-/// stopped.
+/// `fg`, `bg` and `kill -CONT %1` continue every process group the job's
+/// stages had when they started, as Bash's `killpg` on the job's group
+/// does, also the group of a stage that has exited, which still holds that
+/// stage's stopped child, and for a pipeline that stopped in the
+/// foreground as for one started in the background. Only `bg` and `fg` on
+/// a background job reached that group: a foreground pipeline became a job
+/// after its ended stage was reaped, so the job never knew the group, and
+/// `kill -CONT` signalled the groups of the stages still tracked.
 #[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread")]
-async fn bg_continues_the_group_of_a_stage_that_exited() {
-	assert_bash_outputs(&[(
-		r#"d=$(mktemp -d); cd "$d"; set -m; /bin/sh -c '/usr/bin/python3 -c '"'"'import os,signal,pathlib;pathlib.Path("childpid").write_text(str(os.getpid()));os.kill(os.getpid(),signal.SIGSTOP);pathlib.Path("resumed").write_text("yes")'"'"' & exit 0' | /bin/sh -c 'echo $$ >stagepid; kill -STOP $$; exit 7' & until [ -s childpid ] && [ -s stagepid ]; do /bin/sleep .01; done; read c <childpid; /bin/sleep .2; jobs >/dev/null; bg %1 >/dev/null; wait %1; echo s=$?; i=0; until [ -s resumed ] || [ $i -ge 500 ]; do /bin/sleep .01; i=$((i+1)); done; if [ -s resumed ]; then echo child=resumed; else echo child=still-stopped; fi; kill -CONT "$c" 2>/dev/null; /bin/sleep .1; cd /; rm -rf "$d""#,
-		"s=7\nchild=resumed\n",
-	)])
-	.await;
+async fn continuing_a_job_reaches_the_group_of_a_stage_that_exited() {
+	const CHILD: &str = r#"/usr/bin/python3 -c '"'"'import os,signal,pathlib;pathlib.Path("childpid").write_text(str(os.getpid()));os.kill(os.getpid(),signal.SIGSTOP);pathlib.Path("resumed").write_text("yes")'"'"'"#;
+	const STAGE: &str = r"/bin/sh -c 'echo $$ >stagepid; until [ -s childpid ]; do /bin/sleep .01; done; /bin/sleep .2; kill -STOP $$; exit 7'";
+	const STOPPED: &str = r#"until [ -s stagepid ]; do /bin/sleep .01; done; read s <stagepid; until read -r _ _ st _ <"/proc/$s/stat" && [ "$st" = T ]; do /bin/sleep .01; done; jobs >/dev/null; "#;
+	const AFTER: &str = r#"i=0; until [ -s resumed ] || [ $i -ge 500 ]; do /bin/sleep .01; i=$((i+1)); done; if [ -s resumed ]; then echo child=resumed; else echo child=still-stopped; fi; read c <childpid; kill -CONT "$c" 2>/dev/null; /bin/sleep .1; cd /; rm -rf "$d""#;
+	let mut rows = Vec::new();
+	for background in [true, false] {
+		for resume in [
+			"bg %1 >/dev/null; wait %1; echo s=$?; ",
+			"fg %1 >/dev/null; echo s=$?; ",
+			"kill -CONT %1; wait %1; echo s=$?; ",
+		] {
+			let mut script = String::from(r#"d=$(mktemp -d); cd "$d"; set -m; /bin/sh -c '"#);
+			script.push_str(CHILD);
+			script.push_str(" & exit 0' | ");
+			script.push_str(STAGE);
+			script.push_str(if background { " & " } else { "; " });
+			if background {
+				script.push_str(STOPPED);
+			}
+			script.push_str(resume);
+			script.push_str(AFTER);
+			rows.push(script);
+		}
+	}
+	let rows: Vec<(&str, &str)> = rows
+		.iter()
+		.map(|script| (script.as_str(), "s=7\nchild=resumed\n"))
+		.collect();
+	assert_bash_outputs(&rows).await;
+}
+
+/// A foreground pipeline whose stage still runs when another stops counts
+/// as stopped here after a short grace (Bash waits for the stage instead),
+/// and the job then stays stopped, as a stopped Bash job does while one of
+/// its processes is stopped (`set_job_status_and_cleanup`), until `bg`,
+/// `fg` or `kill -CONT` continues it and the wait gets the last stage's
+/// status. The job ran again as soon as it was looked at, since a stage
+/// still ran, so `bg` reported it already in the background and `fg`
+/// returned the stopped status.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pipeline_stopped_while_a_stage_ran_resumes_as_bash_does() {
+	const GRACE: &str =
+		"set -m; /bin/sh -c 'sleep 1; exit 33' | /bin/sh -c 'kill -STOP $$; exit 7'; ";
+	let rows: Vec<(String, &str)> = [
+		(r#"bg %1 >/dev/null; echo "resume=$?"; wait %1; echo "final=$?""#, "resume=0\nfinal=7\n"),
+		(r#"fg %1 >/dev/null; echo "fg=$?""#, "fg=7\n"),
+		(r#"kill -CONT %1; echo "resume=$?"; wait %1; echo "final=$?""#, "resume=0\nfinal=7\n"),
+		(
+			r#"jobs -s >/dev/null; jobs -r; echo "running=$?"; kill -CONT %1; wait %1; echo "final=$?""#,
+			"running=0\nfinal=7\n",
+		),
+	]
+	.into_iter()
+	.map(|(tail, output)| (format!("{GRACE}{tail}"), output))
+	.collect();
+	let rows: Vec<(&str, &str)> = rows
+		.iter()
+		.map(|(script, output)| (script.as_str(), *output))
+		.collect();
+	assert_bash_outputs(&rows).await;
 }
 
 /// In a double-quoted `${x:-word}` Bash's parser translates a `$'...'` of

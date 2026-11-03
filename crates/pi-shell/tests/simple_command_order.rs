@@ -4,12 +4,15 @@
 //! `command` and `builtin`), redirections that work and that fail, with
 //! and without an expansion in their target, one that reads the prefix
 //! variables, before and after the command word, process substitutions,
-//! `set -u`, expansion errors, readonly variables and POSIX mode. Every
-//! expansion appends a distinct tag to a file, so each row records what
-//! ran, how many times and in what order, with the final variable values,
-//! the exit status and the files made. Bash 5.2.21 reading each script on
-//! standard input printed every expected output in
-//! `fixtures/simple_command_order.tsv`.
+//! `set -u`, expansion errors, readonly variables and POSIX mode; prefix
+//! assignments that build on the variable (`+=` on a string, an integer, an
+//! upper-case, an unset and a local variable, and on a value an earlier
+//! prefix assignment set); and a command name that expands to nothing.
+//! Every expansion appends a distinct tag to
+//! a file, so each row records what ran, how many times and in what order,
+//! with the final variable values, the exit status and the files made. Bash
+//! 5.2.21 reading each script on standard input printed every expected
+//! output in `fixtures/simple_command_order.tsv`.
 //!
 //! Bash expands the command words first, then each prefix assignment in
 //! turn, expanding and assigning it once, into the command's temporary
@@ -19,7 +22,11 @@
 //! word is an assignment argument only after a declaration builtin named
 //! as written, past `command` words in POSIX mode (`fix_assignment_words`).
 //! In POSIX mode the assignments before a special builtin stay, and its
-//! failed redirection ends the shell.
+//! failed redirection ends the shell; an assignment to a readonly variable
+//! there ends the shell before a special builtin and abandons the command
+//! before any other. A `+=` prefix assignment gives the command the
+//! variable's value with the word appended as an assignment to the variable
+//! appends it (`assign_in_env`, `make_variable_value`).
 #![cfg(unix)]
 
 use std::sync::Arc;
@@ -52,7 +59,7 @@ async fn simple_commands_expand_assign_and_redirect_in_bash_order() {
 			(id.to_owned(), script.to_owned(), output.replace("\\n", "\n"))
 		})
 		.collect();
-	assert_eq!(rows.len(), 1232);
+	assert_eq!(rows.len(), 1364);
 	let limit = Arc::new(tokio::sync::Semaphore::new(8));
 	let mut runs = tokio::task::JoinSet::new();
 	for (index, (_, script, _)) in rows.iter().enumerate() {
