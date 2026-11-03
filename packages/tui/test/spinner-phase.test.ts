@@ -8,8 +8,39 @@ import {
 	sharedSpinnerFrame,
 	spinnerTickDelay,
 } from "@oh-my-pi/pi-tui/spinner-clock";
+import { StatusLineComponent } from "@oh-my-pi/pi-tui/status-line/component";
+import type { StatusLineHost, StatusLineSession } from "@oh-my-pi/pi-tui/status-line/host";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { VirtualTerminal } from "./virtual-terminal";
+
+/** A status line with an open turn window and nothing else to draw. */
+function createStatusLine(): StatusLineComponent {
+	const session = {
+		sessionFile: undefined,
+		isStreaming: false,
+		state: { model: undefined, messages: [] },
+		isFastModeActive: () => false,
+		getAsyncJobSnapshot: () => ({ running: [] }),
+	} as unknown as StatusLineSession;
+	const host = {
+		getSettings: () => ({}),
+		gitEnabled: () => false,
+		codexResetFireworksEnabled: () => false,
+		getSettingsRevision: () => 0,
+		getSessionSettingsIdentity: () => null,
+		getSessionSettingsRevision: () => 0,
+		goalStatusInFooter: () => false,
+		activeAccount: () => undefined,
+		canFetchUsageReports: () => false,
+		fetchUsageReports: () => Promise.resolve(null),
+		calculateTokensPerSecond: () => null,
+		limitMatchesActiveAccount: () => false,
+		computeCompactionBoundaries: () => null,
+		lookupPullRequest: () => Promise.resolve({ stdout: "", exitCode: 0 }),
+		resolveActiveRepo: () => null,
+	} as unknown as StatusLineHost<StatusLineSession>;
+	return new StatusLineComponent(session, host);
+}
 
 /** The default scheduler on fake timers: `setImmediate` is not faked, a zero timeout is. */
 const scheduler: RenderScheduler = {
@@ -71,6 +102,42 @@ describe("spinner owners share one clock", () => {
 			row.stop();
 			tui.stop();
 		}
+	});
+
+	it("the status line's turn-window ticker rides the working row's ticks instead of adding its own", () => {
+		// The status line repaints on its own timer while a turn is open (a safety net for paths
+		// that stop the loader mid-turn). Armed from its own start, it was a second out-of-phase
+		// 250 ms owner under `--motion reduced` — 8 frames/s again — and under the default 80 ms
+		// cadence it added four paints a second between the row's own.
+		vi.useFakeTimers();
+		const countPaintsPerFourSeconds = (spinnerMs: number): number => {
+			setSpinnerInterval(spinnerMs);
+			const term = new VirtualTerminal(80, 12);
+			let paints = 0;
+			const tui = new TUI(term, undefined, { onPaint: () => paints++, renderScheduler: scheduler });
+			const identity = (t: string) => t;
+			const row = new Loader(tui, identity, identity, "Working");
+			const statusLine = createStatusLine();
+			statusLine.watchBranch(() => tui.requestRender());
+			tui.addChild(row);
+			tui.start();
+			vi.advanceTimersByTime(120);
+			statusLine.markActivityStart();
+			try {
+				vi.advanceTimersByTime(380);
+				paints = 0;
+				vi.advanceTimersByTime(4_000);
+				return paints;
+			} finally {
+				statusLine.dispose();
+				row.stop();
+				tui.stop();
+			}
+		};
+		// `reduced`: one frame per 250 ms period, not two.
+		expect(countPaintsPerFourSeconds(250)).toBe(16);
+		// Default: the row's 50 frames and nothing on top.
+		expect(countPaintsPerFourSeconds(DEFAULT_SPINNER_INTERVAL_MS)).toBe(50);
 	});
 
 	it("spinnerTickDelay lands every owner on the same boundary and never fires early", () => {

@@ -16,10 +16,12 @@ import {
 	padding,
 	motionEffectsEnabled,
 	onMotionEffectsChange,
+	minFrameIntervalMs,
 	onSpinnerIntervalChange,
 	spinnerAnimated,
-	spinnerInterval,
 	spinnerClockTick,
+	spinnerInterval,
+	spinnerTickDelay,
 	truncateToWidth,
 	visibleWidth,
 } from "../index";
@@ -163,9 +165,10 @@ const WATCHER_FAILURE_POLL_TTL_MS = 5000;
 const BRAND_FADE_MS = 450;
 /** Repaint cadence while the brand fade is in flight (rust omp's `FADE_FRAME`). */
 const BRAND_FADE_FRAME_MS = 40;
-/** Repaint cadence while a turn's active-processing window is open: keeps the
+/** Shortest repaint cadence while a turn's active-processing window is open: keeps the
  * status bar's clock-driven readouts (pi spinner, turn timer) animating when
- * no other component is requesting renders. A slower spinner sets the pace instead. */
+ * no other component is requesting renders. The armed period is this rounded up to a
+ * whole number of spinner frames, so the ticker lands on the working row's own ticks. */
 const ACTIVE_WINDOW_REPAINT_MS = 250;
 /** Turn-window repaint cadence under a static spinner: only the one-second timers still move. */
 const STATIC_SPINNER_REPAINT_MS = 1_000;
@@ -721,8 +724,6 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	#brandFadeTimer: NodeJS.Timeout | undefined;
 	/** Repaint ticker while a turn's active-processing window is open (see #syncActiveWindowRepaint). */
 	#activeWindowRepaintTimer: NodeJS.Timeout | undefined;
-	/** Period the armed turn-window ticker runs at; re-armed when the spinner clock changes it. */
-	#activeWindowRepaintMs = 0;
 	/** Drops the decorative-motion subscription on dispose. */
 	readonly #unsubscribeMotionEffects: () => void;
 	/** Drops the spinner-clock subscription that re-paces the turn-window ticker. */
@@ -1469,7 +1470,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	 * Keep the status bar repainting while a turn's active-processing window
 	 * is open. The `pi` segment's spinner and turn timer are painted from the
 	 * wall clock at render time, so they only animate when frames flow; during
-	 * a quiet turn the working-row loader's 80 ms tick is normally the sole
+	 * a quiet turn the working-row loader's tick is normally the sole
 	 * repaint source, and paths that stop or bypass that loader mid-turn (an
 	 * error banner, a stale retry/compaction loader reference) froze the
 	 * spinner until the next keystroke. The status line owns the active
@@ -1477,35 +1478,42 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	 * own spinner and needs none.
 	 */
 	#syncActiveWindowRepaint(): void {
-		if (this.#disposed || isNativeRendering() || this.getTurnElapsedMs() === null) {
-			this.#stopActiveWindowRepaint();
-			return;
-		}
-		// Waking faster than the brand spinner can change only costs frames: the 250 ms safety net
-		// while spinners animate at least that fast, the spinner period when it is slower, and a 1 s
-		// tick for the turn timer when spinners are static (`tui.spinnerInterval: 0`, `tui.motion: none`).
-		const periodMs = spinnerAnimated()
-			? Math.max(ACTIVE_WINDOW_REPAINT_MS, spinnerInterval())
-			: STATIC_SPINNER_REPAINT_MS;
-		if (this.#activeWindowRepaintTimer) {
-			if (this.#activeWindowRepaintMs === periodMs) return;
-			this.#stopActiveWindowRepaint();
-		}
-		const timer = setInterval(() => {
-			if (this.#disposed || isNativeRendering() || this.getTurnElapsedMs() === null) {
-				this.#stopActiveWindowRepaint();
-				return;
-			}
+		this.#stopActiveWindowRepaint();
+		if (this.#disposed || isNativeRendering() || this.getTurnElapsedMs() === null) return;
+		this.#armActiveWindowRepaint();
+	}
+
+	/**
+	 * Ticker period: a whole number of spinner frames no shorter than the 250 ms safety net (the
+	 * spinner period itself when that is slower), or a 1 s tick for the turn timer when spinners
+	 * are static (`tui.spinnerInterval: 0`, `tui.motion: none`). A multiple of the working row's
+	 * cadence, armed on the shared clock's boundaries, makes every tick coincide with one of the
+	 * row's own, so the two owners cost one frame per period rather than one each.
+	 */
+	#activeWindowRepaintPeriodMs(): number {
+		if (!spinnerAnimated()) return STATIC_SPINNER_REPAINT_MS;
+		const frameMs = Math.max(spinnerInterval(), minFrameIntervalMs());
+		return Math.ceil(ACTIVE_WINDOW_REPAINT_MS / frameMs - 1e-6) * frameMs;
+	}
+
+	/** One tick on the shared clock's next boundary (see {@link spinnerTickDelay}); re-arms itself. */
+	#armActiveWindowRepaint(): void {
+		const periodMs = this.#activeWindowRepaintPeriodMs();
+		const timer = setTimeout(() => {
+			if (this.#activeWindowRepaintTimer !== timer) return;
+			this.#activeWindowRepaintTimer = undefined;
+			if (this.#disposed || isNativeRendering() || this.getTurnElapsedMs() === null) return;
 			this.#onBranchChange?.();
-		}, periodMs);
+			// Re-derive the period: a ceiling change mid-turn moves the next tick, not just the next turn.
+			this.#armActiveWindowRepaint();
+		}, spinnerTickDelay(periodMs));
 		timer.unref?.();
 		this.#activeWindowRepaintTimer = timer;
-		this.#activeWindowRepaintMs = periodMs;
 	}
 
 	#stopActiveWindowRepaint(): void {
 		if (!this.#activeWindowRepaintTimer) return;
-		clearInterval(this.#activeWindowRepaintTimer);
+		clearTimeout(this.#activeWindowRepaintTimer);
 		this.#activeWindowRepaintTimer = undefined;
 	}
 

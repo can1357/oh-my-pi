@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { setNativeRendering } from "../src/native/state";
 import { DEFAULT_SPINNER_INTERVAL_MS, SPINNER_INTERVAL_STATIC, setSpinnerInterval } from "../src/spinner-clock";
 import { StatusLineComponent } from "../src/status-line/component";
@@ -51,6 +51,12 @@ function createComponent(settings?: StatusLineSettings) {
  * loader reference) froze the animation until the next keystroke.
  */
 describe("status line active-window repaint ticker", () => {
+	beforeEach(() => {
+		// Ticks land on the shared spinner clock's boundaries, a whole number of spinner frames
+		// apart. A 250 ms spinner makes the period the safety net itself, so the lifecycle
+		// tests below count in plain 250 ms steps; the cadence contract has its own tests.
+		setSpinnerInterval(250);
+	});
 	afterEach(() => {
 		vi.useRealTimers();
 		setNativeRendering(false);
@@ -164,15 +170,42 @@ describe("status line active-window repaint ticker", () => {
 		vi.advanceTimersByTime(2001);
 		expect(repaint.mock.calls.length).toBe(3);
 
-		// Back to the default cadence: the 250 ms safety net returns mid-turn.
+		// Back to the default cadence mid-turn: four 80 ms frames per tick (320 ms), on the clock's
+		// boundaries — from t=4000 those are 4160, 4480 and 4800.
 		setSpinnerInterval(DEFAULT_SPINNER_INTERVAL_MS);
 		repaint.mockClear();
 		vi.advanceTimersByTime(1000);
-		expect(repaint.mock.calls.length).toBe(4);
+		expect(repaint.mock.calls.length).toBe(3);
 
 		component.dispose();
 		setSpinnerInterval(SPINNER_INTERVAL_STATIC);
 		vi.advanceTimersByTime(2000);
+		expect(repaint.mock.calls.length).toBe(3);
+	});
+
+	it("ticks a whole number of spinner frames apart, on the clock's boundaries, whenever the turn started", () => {
+		vi.useFakeTimers();
+		const { component, repaint } = createComponent();
+
+		// Default 80 ms spinner: the safety net rounds up to 320 ms. A turn opened at t=120 ticks at
+		// 320, 640, 960 and 1280 — never at 370, 620, … from its own start.
+		setSpinnerInterval(DEFAULT_SPINNER_INTERVAL_MS);
+		vi.advanceTimersByTime(120);
+		component.markActivityStart();
+		vi.advanceTimersByTime(199);
+		expect(repaint.mock.calls.length).toBe(0);
+		vi.advanceTimersByTime(1);
+		expect(repaint.mock.calls.length).toBe(1);
+		vi.advanceTimersByTime(960);
 		expect(repaint.mock.calls.length).toBe(4);
+
+		// A 100 ms spinner: three frames per tick (300 ms), realigned live — from t=1280 the next
+		// boundaries are 1500, 1800 and 2100.
+		setSpinnerInterval(100);
+		repaint.mockClear();
+		vi.advanceTimersByTime(1000);
+		expect(repaint.mock.calls.length).toBe(3);
+
+		component.dispose();
 	});
 });
