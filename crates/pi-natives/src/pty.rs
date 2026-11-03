@@ -9,7 +9,7 @@ use std::{
 	io::Write,
 	sync::{
 		Arc,
-		atomic::{AtomicU64, Ordering},
+		atomic::{AtomicBool, AtomicU64, Ordering},
 	},
 	time::{Duration, Instant},
 };
@@ -500,6 +500,8 @@ fn run_pty_sync(
 					forwarding = text.is_empty() || progress.hand(&reader_tx, text);
 				}
 				progress.handed.fetch_add(n as u64, Ordering::AcqRel);
+				#[cfg(unix)]
+				progress.answer(|| pty_unread_bytes(&reader));
 			}
 			if !forwarding {
 				return;
@@ -714,6 +716,10 @@ struct ReaderProgress {
 	handed_text:    AtomicU64,
 	/// Text the pump has delivered to `on_chunk`.
 	forwarded_text: AtomicU64,
+	/// Set by the drain to ask the reader what it is owed (see `answer`).
+	asked:          AtomicBool,
+	/// One more than the reader's answer; `0` until it answers.
+	answered:       AtomicU64,
 }
 
 impl ReaderProgress {
@@ -725,6 +731,20 @@ impl ReaderProgress {
 			self.handed_text.fetch_add(len, Ordering::AcqRel);
 		}
 		sent
+	}
+
+	/// Between two reads, answers the drain if it asked: what has been read,
+	/// plus what the terminal holds. The reader is the only one taking output,
+	/// so the two agree however long counting the second takes; a reader that
+	/// keeps reading would otherwise change the first while the drain counts.
+	#[cfg(unix)]
+	fn answer(&self, unread: impl FnOnce() -> u64) {
+		if self.asked.swap(false, Ordering::AcqRel) {
+			let owed = self.read.load(Ordering::Acquire).saturating_add(unread());
+			self
+				.answered
+				.store(owed.saturating_add(1), Ordering::Release);
+		}
 	}
 }
 
@@ -842,8 +862,15 @@ fn await_pty_output_drain(
 
 	// What the reader owes: what it has read, and what the terminal holds. A
 	// read in progress has taken output that `read` does not count yet, so the
-	// count is taken between reads.
+	// count has to be taken between reads. A reader waiting for output, or for
+	// room in the queue, reads nothing, and the count is taken here; a reader
+	// that keeps reading answers the question itself between two reads.
+	progress.asked.store(true, Ordering::Release);
 	let owed = loop {
+		let answered = progress.answered.load(Ordering::Acquire);
+		if answered != 0 {
+			break answered - 1;
+		}
 		let reads = progress.reads.load(Ordering::Acquire);
 		if reads.is_multiple_of(2) {
 			let owed = progress
@@ -853,7 +880,6 @@ fn await_pty_output_drain(
 			if progress.reads.load(Ordering::Acquire) == reads {
 				break owed;
 			}
-			continue;
 		}
 		if reader_thread.is_finished() {
 			break 0;
@@ -1146,6 +1172,63 @@ mod reader_queue_tests {
 			stopped_at >= late + Duration::from_millis(100),
 			"cut the reader off at {stopped_at:?}, before its read in progress handed its bytes over",
 		);
+	}
+
+	/// A reader that never stops reading (a daemon writing every few
+	/// milliseconds), with a count of unread output that takes 50 ms: every
+	/// count the drain took spanned a read, so it retried for ever. The reader
+	/// answers between two reads instead, and the drain must finish.
+	#[cfg(unix)]
+	#[test]
+	fn drain_takes_the_count_from_a_reader_that_never_stops_reading() {
+		let (_pump_tx, pump_rx) = flume::bounded::<PumpEnd>(1);
+		let (queued, _) = flume::bounded::<ReaderEvent>(BRIDGE_QUEUE_CHUNKS);
+		let progress = Arc::new(ReaderProgress::default());
+		let done = Arc::new(AtomicBool::new(false));
+		let reader = std::thread::spawn({
+			let progress = Arc::clone(&progress);
+			let done = Arc::clone(&done);
+			move || {
+				while !done.load(Ordering::Acquire) {
+					progress.reads.fetch_add(1, Ordering::AcqRel);
+					progress.read.fetch_add(100, Ordering::AcqRel);
+					progress.reads.fetch_add(1, Ordering::AcqRel);
+					progress.handed.fetch_add(100, Ordering::AcqRel);
+					progress.answer(|| 100);
+					std::thread::sleep(Duration::from_millis(1));
+				}
+			}
+		});
+		let (done_tx, done_rx) = flume::bounded(1);
+		let stopped = Arc::new(AtomicBool::new(false));
+		std::thread::spawn({
+			let progress = Arc::clone(&progress);
+			let stopped = Arc::clone(&stopped);
+			move || {
+				let decoder = Mutex::new(OutputDecoder::new());
+				let slow_count = || {
+					std::thread::sleep(Duration::from_millis(50));
+					100
+				};
+				await_pty_output_drain(
+					pump_rx,
+					reader,
+					queued,
+					&progress,
+					&decoder,
+					slow_count,
+					false,
+					|| {
+						stopped.store(true, Ordering::Release);
+					},
+				);
+				let _ = done_tx.send(());
+			}
+		});
+		let ended = done_rx.recv_timeout(STUCK_SLAVE_IDLE + Duration::from_secs(20));
+		done.store(true, Ordering::Release);
+		assert!(ended.is_ok(), "the drain kept counting what a busy reader owed");
+		assert!(stopped.load(Ordering::Acquire), "the open slave must stop the pump");
 	}
 
 	/// A daemon that holds the slave open and writes without end, into a
