@@ -12,6 +12,7 @@
 - RPC `bash` results now say when the output was cut: `elidedBytes`/`elidedLines` for a dropped middle, and `columnTruncatedLines`, `columnTruncatedRange`, `columnDroppedBytes` and `columnMax` for lines cut to the column cap. The Go, Python and Rust SDKs decode them ([#17957](https://github.com/can1357/oh-my-pi/pull/17957) by [@H4vC](https://github.com/H4vC))
 
 ### Fixed
+- Fixed saved sessions losing or replaying stale content when a message carries an accessor-shaped image block, a signature or reasoning item the session cannot read, an array payload, a compaction archive, or a serializer hook, and when an entry's own metadata or payload is changed in place, or a value that changes on every read is stored a revision ahead of the write ([#15222](https://github.com/can1357/oh-my-pi/pull/15222) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 - Long bash output cut in the middle no longer splits a line at the `[…N ln elided…]` marker, and its "Showing lines …" notice now names the lines actually shown, ending at the output's real last line ([#17957](https://github.com/can1357/oh-my-pi/pull/17957) by [@H4vC](https://github.com/H4vC))
 - A bash command that prints nothing and succeeds now returns `(no output, exit code 0)` instead of a bare `(no output)`, so an empty diff or search no longer reads like a failed command ([#17957](https://github.com/can1357/oh-my-pi/pull/17957) by [@H4vC](https://github.com/H4vC))
