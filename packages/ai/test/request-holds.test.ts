@@ -446,6 +446,55 @@ describe("what the last check covers", () => {
 		});
 	}
 
+	it("keeps an exemption while pending work a thenable resolved with is pending, as `await` adopts it", async () => {
+		const holds = new TestHolds();
+		const done = Promise.withResolvers<void>();
+		const started = Promise.withResolvers<SentRequest>();
+		runWithRequestHolds(holds, () =>
+			runOutsideRequestHolds(holds, () => {
+				setImmediate(() => started.resolve(request()));
+				// Resolves at once, with work that is still pending.
+				return {
+					// oxlint-disable-next-line unicorn/no-thenable
+					then: (onFulfilled: (value: unknown) => void) => onFulfilled(done.promise),
+				};
+			}),
+		);
+		const during = await started.promise;
+		await during.result;
+		expect(during.sent).toBe(true);
+		done.resolve();
+	});
+
+	it("keeps nothing on a long-lived alias for waits that are over", async () => {
+		const holds = new TestHolds();
+		holds.armed = false;
+		let registered = 0;
+		class CountingAlias extends RequestHoldsAlias {
+			override onRebind(listener: () => void): () => void {
+				registered++;
+				const remove = super.onRebind(listener);
+				return () => {
+					registered--;
+					remove();
+				};
+			}
+		}
+		const alias = new CountingAlias();
+		alias.bind(runWithRequestHolds(holds, captureRequestHolds));
+		const blocker = new TestHolds();
+		// Each send waits once on `blocker` while the alias applies, then goes.
+		const sends = Array.from({ length: 50 }, () =>
+			runWithRequestHolds(blocker, () => runWithRequestHolds(alias, () => request())),
+		);
+		await turns();
+		expect(registered).toBeGreaterThan(0);
+		blocker.let();
+		await Promise.all(sends.map(sent => sent.result));
+		await turns();
+		expect(registered).toBe(0);
+	});
+
 	it("ends an exemption at once when the thenable the exempt work returns cannot be followed", async () => {
 		const holds = new TestHolds();
 		const started = Promise.withResolvers<SentRequest>();
