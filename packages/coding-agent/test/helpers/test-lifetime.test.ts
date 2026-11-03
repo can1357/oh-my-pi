@@ -216,6 +216,103 @@ describe("trackTestLifetime", () => {
 		expect(run.exitCode).toBe(0);
 	}, 60_000);
 
+	test("times bodies by the file's setDefaultTimeout from the point Bun applies it, both ways", async () => {
+		const [raised, lowered] = await Promise.all([
+			runFixtures({
+				"raised.test.ts": `
+					import { trackTestLifetime } from HELPER;
+					const { test, setDefaultTimeout } = trackTestLifetime();
+					setDefaultTimeout(20_000);
+					test("runs for six seconds", () => Bun.sleep(6000));
+					test("healthy after it", () => {});
+				`,
+			}),
+			runFixtures(
+				{
+					"1-first.test.ts": `
+						import { trackTestLifetime } from HELPER;
+						const { test, afterAll, setDefaultTimeout } = trackTestLifetime();
+						const shared = globalThis as { lateHook?: string };
+						shared.lateHook = "initial";
+						setDefaultTimeout(100);
+						afterAll(async () => {
+							await Bun.sleep(400);
+							shared.lateHook = "stale";
+						});
+						test("first body", () => {});
+					`,
+					"2-second.test.ts": `
+						import { expect } from "bun:test";
+						import { trackTestLifetime } from HELPER;
+						await Bun.sleep(800);
+						const { test } = trackTestLifetime();
+						test("passes only on the late afterAll write", () => {
+							expect((globalThis as { lateHook?: string }).lateHook).toBe("stale");
+						});
+					`,
+				},
+				["--timeout", "60000"],
+			),
+		]);
+
+		expect(raised.outcome("runs for six seconds")).toBe("pass");
+		expect(raised.outcome("healthy after it")).toBe("pass");
+		expect(lowered.outcome("passes only on the late afterAll write")).toBe("fail");
+		expect(lowered.output).toContain(refusal("an afterAll hook"));
+	}, 60_000);
+
+	test("keeps deadlines on real time when a healthy test drives fake timers past them", async () => {
+		const run = await runFixtures({
+			"fake-clock.test.ts": `
+				import { vi } from "bun:test";
+				import { trackTestLifetime } from HELPER;
+				const { test } = trackTestLifetime();
+				test("advances fake time past its own timeout", async () => {
+					vi.useFakeTimers();
+					await Promise.resolve();
+					vi.advanceTimersByTime(20_001);
+					await Promise.resolve();
+					vi.useRealTimers();
+				}, 20_000);
+				test("healthy after it", () => {});
+			`,
+		});
+
+		expect(run.outcome("advances fake time past its own timeout")).toBe("pass");
+		expect(run.outcome("healthy after it")).toBe("pass");
+		expect(run.exitCode).toBe(0);
+	}, 60_000);
+
+	test("counts a body's synchronous work before its first await toward its deadline", async () => {
+		const run = await runFixtures({
+			"1-first.test.ts": `
+				import { trackTestLifetime } from HELPER;
+				const { test, afterAll } = trackTestLifetime();
+				const shared = globalThis as { lateHook?: string };
+				shared.lateHook = "initial";
+				afterAll(async () => {
+					const end = Bun.nanoseconds() + 400e6;
+					while (Bun.nanoseconds() < end) {}
+					await Bun.sleep(300);
+					shared.lateHook = "stale";
+				}, 500);
+				test("first body", () => {});
+			`,
+			"2-second.test.ts": `
+				import { expect } from "bun:test";
+				import { trackTestLifetime } from HELPER;
+				await Bun.sleep(1500);
+				const { test } = trackTestLifetime();
+				test("passes only on the late afterAll write", () => {
+					expect((globalThis as { lateHook?: string }).lateHook).toBe("stale");
+				});
+			`,
+		});
+
+		expect(run.outcome("passes only on the late afterAll write")).toBe("fail");
+		expect(run.output).toContain(refusal("an afterAll hook"));
+	}, 60_000);
+
 	test("lets every test run when nothing times out", async () => {
 		const run = await runFixtures({
 			"settled.test.ts": `

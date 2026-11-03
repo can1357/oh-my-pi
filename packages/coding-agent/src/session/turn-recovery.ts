@@ -2940,11 +2940,6 @@ export class TurnRecovery {
 			siblingAvailabilityWaitMs !== undefined &&
 			effectiveUsageLimitWaitMs !== undefined &&
 			effectiveUsageLimitWaitMs <= retrySettings.maxDelayMs;
-		// A request whose `!command` apiKey produced no key sent nothing to the provider, and the
-		// same model serves once the command prints a key again. Like a wait for a sibling
-		// credential, it retries the same model while its budget lasts (the key-command cap
-		// included), then walks the chain.
-		const waitForKeyToComeBack = isApiKeyCommandFailure(message) && !retryBudgetExhausted;
 		const longUsageLimitFallback =
 			currentModel !== undefined &&
 			resolveModelPolicy(currentModel).catalog.longUsageLimitFallback === true &&
@@ -2982,6 +2977,15 @@ export class TurnRecovery {
 				waitMs <= effectiveUsageLimitWaitMs;
 			return maxDelayMs > 0 && waitMs > maxDelayMs && !waitForUsageReset;
 		};
+		// A request whose `!command` apiKey produced no key sent nothing to the provider, and the
+		// same model serves once the command prints a key again. Like a wait for a sibling
+		// credential, it retries the same model, but only when that retry will run: while the
+		// budget lasts (the key-command cap included) and the wait (the command's failure backoff,
+		// carried as `retry-after-ms`) fits under `retry.maxDelayMs`. Otherwise it walks the chain.
+		const waitForKeyToComeBack =
+			isApiKeyCommandFailure(message) &&
+			!retryBudgetExhausted &&
+			!exceedsDelayCap(parsedRetryAfterMs && parsedRetryAfterMs > delayMs ? parsedRetryAfterMs : delayMs);
 
 		if (!staleOpenAIResponsesReplayError && !switchedCredential && currentSelector) {
 			// The retry budget bounds same-model retries against a failing provider. A
