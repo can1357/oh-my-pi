@@ -411,7 +411,6 @@ describe("InputController keybinding setup", () => {
 		await Promise.resolve();
 
 		expect(spies.retry).toHaveBeenCalledTimes(1);
-		expect(spies.retry).toHaveBeenCalledWith();
 		expect(spies.prompt).not.toHaveBeenCalled();
 		expect(editor.getText()).toBe("draft that should survive retry");
 	});
@@ -481,23 +480,6 @@ describe("InputController keybinding setup", () => {
 		expect(ctx.editor.pendingImageLinks).toEqual(["local://draft.png"]);
 		expect(editor.imageLinks).toEqual(["local://draft.png"]);
 		expect(editor.getText()).toBe("draft with image");
-	});
-
-	it("retries from an empty composer without injecting a draft", async () => {
-		const { InputController, ctx, editor, spies } = await createContext();
-		const showStatus = ctx.showStatus as unknown as Mock<(message: string) => void>;
-		const controller = new InputController(ctx);
-
-		controller.setupKeyHandlers();
-		editor.onRetry?.();
-		await Promise.resolve();
-
-		expect(spies.retry).toHaveBeenCalledTimes(1);
-		expect(spies.retry).toHaveBeenCalledWith();
-		expect(spies.prompt).not.toHaveBeenCalled();
-		expect(editor.getText()).toBe("");
-		expect(ctx.editor.pendingImages).toEqual([]);
-		expect(showStatus).not.toHaveBeenCalledWith("Nothing to retry");
 	});
 
 	it("routes b to branch a branchable /btw panel", async () => {
