@@ -58,8 +58,6 @@ function coldReasonText(reason: PromptCacheColdReason, nowMs?: number): string {
 			return "system prompt changed";
 		case "retention":
 			return "cache retention setting changed";
-		case "cache-key":
-			return "provider cache session changed";
 		case "compaction":
 			return "context was compacted";
 	}
@@ -83,7 +81,7 @@ function warmingText(warming: PromptCacheWarming, nowMs: number): string {
 
 /**
  * What the next message re-sends uncached. A lapsed entry, a missed refresh, another
- * model, another tool set (the first cached block) or another cache key leaves nothing to read. Any
+ * model or another tool set (the first cached block) leaves nothing to read. Any
  * other change keeps the cached blocks ahead of it (tools, then the system prompt),
  * whose share omp cannot see, so the whole prompt is only the most it re-sends.
  */
@@ -94,7 +92,6 @@ function resendText(status: PromptCacheStatus): string {
 		case "refresh-missed":
 		case "model":
 		case "tools":
-		case "cache-key":
 			return `re-sends ${tokens}`;
 		default:
 			return `re-sends up to ${tokens}`;

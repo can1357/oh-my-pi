@@ -86,7 +86,6 @@ import { type Effort, serviceTierFamily, streamSimple } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { prewarmModelConnection } from "@oh-my-pi/pi-ai/providers/connection-prewarm";
 import { resetOpenAICodexHistoryAfterCompaction } from "@oh-my-pi/pi-ai/providers/openai-codex-state";
-import { sendsPromptCacheKey } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import { withCredentialRedaction } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { markPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
@@ -753,15 +752,7 @@ interface PromptCacheShape {
 	tools: string;
 	systemPrompt: number | bigint;
 	retention: string;
-	/** OpenAI `prompt_cache_key` the request routes by; undefined for a provider that sends none. */
-	cacheKey: string | undefined;
 }
-
-/**
- * Custom entry `/fresh` records when it rotates the provider session: replies after it went out under a
- * prompt-cache key only that process held. `/clear` records the same with its reset boundary.
- */
-const PROVIDER_SESSION_ROTATED_CUSTOM_TYPE = "provider-session-rotated";
 
 /** What a branch says about the prompt cache its newest cached reply left. */
 interface BranchPromptCacheObservation {
@@ -774,8 +765,6 @@ interface BranchPromptCacheObservation {
 	compacted: boolean;
 	/** Digest of the base prompt the reply was produced under; undefined when none is recorded. */
 	promptDigest: string | undefined;
-	/** A provider-session rotation (`/fresh`, `/clear`) precedes the reply. */
-	afterRotation: boolean;
 }
 
 /**
@@ -788,8 +777,6 @@ interface BranchPromptCacheScan {
 	scanned: number;
 	/** Newest system prompt digest recorded in the scanned entries. */
 	digest: string | undefined;
-	/** A provider-session rotation is recorded in the scanned entries. */
-	rotated: boolean;
 	observation: BranchPromptCacheObservation | undefined;
 }
 
@@ -811,11 +798,6 @@ function scanBranchPromptCache(scan: BranchPromptCacheScan): void {
 		// `/clear` starts a new transcript: nothing before the boundary is a prefix of the next request.
 		if (entry.type === "reset_boundary") {
 			scan.observation = undefined;
-			scan.rotated = true;
-			continue;
-		}
-		if (entry.type === "custom" && entry.customType === PROVIDER_SESSION_ROTATED_CUSTOM_TYPE) {
-			scan.rotated = true;
 			continue;
 		}
 		// Failed, replaced and outdated refreshes carry no outcome: they say nothing about this entry.
@@ -831,14 +813,7 @@ function scanBranchPromptCache(scan: BranchPromptCacheScan): void {
 		if (entry.type !== "message" || entry.message.role !== "assistant") continue;
 		const reply = entry.message;
 		if (reply.stopReason === "error" || reply.usage.cacheRead + reply.usage.cacheWrite <= 0) continue;
-		scan.observation = {
-			reply,
-			warmedAt: 0,
-			refreshMissed: false,
-			compacted: false,
-			promptDigest: scan.digest,
-			afterRotation: scan.rotated,
-		};
+		scan.observation = { reply, warmedAt: 0, refreshMissed: false, compacted: false, promptDigest: scan.digest };
 	}
 	scan.scanned = branch.length;
 }
@@ -1246,8 +1221,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#scoutAllowedBySpawnPolicy = true;
 	#providerSessionId: string | undefined;
 	#freshProviderSessionId: string | undefined;
-	/** When {@link #freshProviderSessionId} was last rotated; replies before it went out under another prompt-cache key. */
-	#freshProviderSessionAt = 0;
 	/** OAuth account pools enforced on this session's key lookups; lifted on dispose. */
 	#accountPoolScope: SessionAccountPoolScope | undefined;
 	#inheritedProviderPromptCacheKey: string | undefined;
@@ -6059,7 +6032,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		if (next.tools !== arm.tools) return { kind: "tools" };
 		if (next.systemPrompt !== arm.systemPrompt) return { kind: "system-prompt" };
 		if (next.retention !== arm.retention) return { kind: "retention" };
-		if (next.cacheKey !== arm.cacheKey) return { kind: "cache-key" };
 		// The armed request must still be a prefix of the live messages by
 		// entry identity: appends are fine (tool results mid-run), but a
 		// rewrite, shallow array copy with new objects, compaction, branch,
@@ -6077,10 +6049,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const { tools, systemPrompt } = this.agent.state;
 		const thinkingLevel = this.thinkingLevel;
 		const retention = cfgProvidersCacheRetention.get(this.settings);
-		const cacheKey =
-			model !== undefined && sendsPromptCacheKey(model)
-				? (this.getPromptCacheKeyForModel(model) ?? this.agent.sessionId)
-				: undefined;
 		const intentTracing = this.agent.intentTracing;
 		const intentDescription = this.agent.intentDescription;
 		const pruneToolDescriptions = this.agent.prunesToolDescriptions(model);
@@ -6094,8 +6062,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			memo.intentDescription === intentDescription &&
 			memo.pruneToolDescriptions === pruneToolDescriptions &&
 			memo.shape.thinkingLevel === thinkingLevel &&
-			memo.shape.retention === retention &&
-			memo.shape.cacheKey === cacheKey
+			memo.shape.retention === retention
 		) {
 			return memo.shape;
 		}
@@ -6107,7 +6074,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			tools: wireToolsFingerprint(tools, { intentTracing, intentDescription, pruneToolDescriptions }),
 			systemPrompt: Bun.hash(JSON.stringify(systemPrompt)),
 			retention,
-			cacheKey,
 		};
 		this.#promptCacheShapeMemo = {
 			model,
@@ -6168,17 +6134,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			fallback?.type === "fallback" ? fallback.from.model : reply.model,
 		);
 		if (!model) return undefined;
-		// A reply after `/fresh` or `/clear` went out under a provider session only that process held. Once it is
-		// gone (a restart, a session switch), the next request keys by the session again, whose entry nothing here
-		// dates: infer nothing rather than "likely cached".
-		if (
-			observed.afterRotation &&
-			this.#freshProviderSessionId === undefined &&
-			sendsPromptCacheKey(model) &&
-			this.getPromptCacheKeyForModel(model) === undefined
-		) {
-			return undefined;
-		}
 		const retention = cfgProvidersCacheRetention.get(this.settings);
 		const isOAuth = model.api === "anthropic-messages" && this.#modelRegistry.isUsingOAuth(model);
 		const requestedTier = resolvePromptCacheTier(
@@ -6199,14 +6154,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		} else if (requestedTier !== tier) {
 			// The next request asks for another tier, or for no caching at all.
 			change = { kind: "retention" };
-		} else if (
-			sendsPromptCacheKey(model) &&
-			this.#freshProviderSessionId !== undefined &&
-			this.getPromptCacheKeyForModel(model) === undefined &&
-			reply.timestamp < this.#freshProviderSessionAt
-		) {
-			// `/fresh` rotated the provider session the reply's prompt-cache key fell back to.
-			change = { kind: "cache-key" };
 		} else if (observed.compacted) {
 			change = { kind: "compaction" };
 		} else if (observed.promptDigest !== undefined && observed.promptDigest !== this.#tools.currentPromptDigest()) {
@@ -6233,7 +6180,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const branch = this.sessionManager.getBranchView();
 		let scan = this.#branchPromptCacheScan;
 		if (scan?.branch !== branch) {
-			scan = { branch, scanned: 0, digest: undefined, rotated: false, observation: undefined };
+			scan = { branch, scanned: 0, digest: undefined, observation: undefined };
 			this.#branchPromptCacheScan = scan;
 		}
 		if (scan.scanned < branch.length) scanBranchPromptCache(scan);
@@ -6855,9 +6802,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const closedProviderSessions = this.#providerSessionState.size;
 		this.#closeAllProviderSessions("fresh session");
 		this.#freshProviderSessionId = Bun.randomUUIDv7();
-		this.#freshProviderSessionAt = Date.now();
-		// A reopened session reads which replies went out under the rotated prompt-cache key from this.
-		this.sessionManager.appendCustomEntry(PROVIDER_SESSION_ROTATED_CUSTOM_TYPE);
 		this.#syncAgentSessionId();
 		this.#memory.rekeyForCurrentSessionId();
 		this.agent.appendOnlyContext?.invalidateForModelChange();
@@ -6941,7 +6885,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// context we just dropped (mirrors freshSession()).
 		this.#closeAllProviderSessions("reset context");
 		this.#freshProviderSessionId = Bun.randomUUIDv7();
-		this.#freshProviderSessionAt = Date.now();
 		this.#syncAgentSessionId();
 		this.#memory.rekeyForCurrentSessionId();
 		this.agent.appendOnlyContext?.invalidateForModelChange();

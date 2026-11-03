@@ -330,7 +330,6 @@ export type PromptCacheChange =
 	| { kind: "tools" }
 	| { kind: "system-prompt" }
 	| { kind: "retention" }
-	| { kind: "cache-key" }
 	| { kind: "history" };
 
 /** What a warm refresh of the current conversation found: when it was sent and whether it read the cache. */

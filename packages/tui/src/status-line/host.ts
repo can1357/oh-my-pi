@@ -30,8 +30,6 @@ export type PromptCacheColdReason =
 	| { kind: "tools" }
 	| { kind: "system-prompt" }
 	| { kind: "retention" }
-	/** The OpenAI prompt-cache key the request routes by changed (`/fresh` rotated the provider session). */
-	| { kind: "cache-key" }
 	| { kind: "compaction" };
 
 /** omp's cache warmer as it concerns the entry. */

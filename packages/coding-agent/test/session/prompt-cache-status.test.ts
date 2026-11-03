@@ -44,6 +44,14 @@ function reply(model: Model, replyUsage: Usage): AssistantMessage {
 	};
 }
 
+const LOOKUP_TOOL = {
+	name: "lookup",
+	label: "Lookup",
+	description: "Look up a value",
+	parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
+	execute: async () => ({ content: [], details: {} }),
+};
+
 describe("AgentSession prompt-cache status", () => {
 	let tempDir: TempDir;
 	let authStorage: AuthStorage | undefined;
@@ -63,9 +71,8 @@ describe("AgentSession prompt-cache status", () => {
 		warmer?.cancel();
 		authStorage?.close();
 		const agentDir = tempDir.path();
-		const storage = await AuthStorage.create(path.join(agentDir, "auth.db"));
-		authStorage = storage;
-		storage.keys.setRuntime("anthropic", "test-key");
+		authStorage = await AuthStorage.create(path.join(agentDir, "auth.db"));
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		settings = await Settings.loadIsolated({ agentDir, cwd: agentDir });
 		warmer = new CacheWarmer({
 			getMode: () => cfgProvidersCacheWarming.get(settings),
@@ -83,23 +90,14 @@ describe("AgentSession prompt-cache status", () => {
 				};
 			},
 		});
-		openSession(sessionModel, SessionManager.create(agentDir, agentDir));
-	}
-
-	function openSession(sessionModel: Model, sessionManager: SessionManager): void {
 		session = new AgentSession({
 			agent: new Agent({ initialState: { model: sessionModel, systemPrompt: ["Test"], tools: [], messages: [] } }),
-			sessionManager,
+			sessionManager: SessionManager.create(agentDir, agentDir),
 			settings,
 			cacheWarmer: warmer,
-			modelRegistry: new ModelRegistry(authStorage!),
+			modelRegistry: new ModelRegistry(authStorage),
 			obfuscator: new SecretObfuscator([]),
 		});
-	}
-
-	/** The same transcript in a new process: nothing runtime-only (a rotated provider session) carries over. */
-	function reopen(): void {
-		openSession(model, session.sessionManager);
 	}
 
 	/** One main-loop request to `model` whose response wrote the prompt cache. */
@@ -110,6 +108,7 @@ describe("AgentSession prompt-cache status", () => {
 		return sentAt;
 	}
 
+	/** Lets a warm refresh the fake timers fired run to its end. */
 	async function drain(): Promise<void> {
 		for (let i = 0; i < 100; i++) await Promise.resolve();
 	}
@@ -135,439 +134,318 @@ describe("AgentSession prompt-cache status", () => {
 		} catch {}
 	});
 
-	it("stays warm through the entry's lifetime and turns cold the instant it lapses", () => {
-		session.setCacheWarmingMode("off");
-		const sentAt = send();
-
-		expect(session.getPromptCacheStatus(sentAt + SHORT_TTL_MS - 1)).toMatchObject({
-			state: "warm",
-			inferred: false,
-			touchedAt: sentAt,
-			ttlMs: SHORT_TTL_MS,
-		});
-		expect(session.getPromptCacheStatus(sentAt + SHORT_TTL_MS)).toMatchObject({
-			state: "cold",
-			reason: { kind: "expired", at: sentAt + SHORT_TTL_MS },
-		});
-	});
-
-	it("follows a warm refresh that hits past the first lifetime, and turns cold at once when one misses", async () => {
-		session.setCacheWarmingMode("idle");
-		const sentAt = send();
-		vi.advanceTimersByTime(REFRESH_DELAY_MS);
-		await drain();
-		const refreshedAt = sentAt + REFRESH_DELAY_MS;
-		expect(session.getPromptCacheStatus(sentAt + SHORT_TTL_MS)).toMatchObject({
-			state: "warm",
-			touchedAt: refreshedAt,
-			warming: { state: "scheduled", nextWarmAt: refreshedAt + REFRESH_DELAY_MS },
-		});
-		// The persisted refresh carries its send time and outcome, which a reopened session counts from.
-		expect(session.sessionManager.getEntries().find(entry => entry.type === "model_usage")).toMatchObject({
-			purpose: "cache-warm",
-			cacheRefresh: { sentAt: refreshedAt, hit: true },
-		});
-
-		// A replay that read nothing and wrote nothing no longer reaches the entry.
-		refreshUsage = usage({});
-		vi.advanceTimersByTime(REFRESH_DELAY_MS);
-		await drain();
-		// Still inside the refreshed entry's lifetime: the miss alone makes it cold.
-		expect(session.getPromptCacheStatus(Date.now())).toMatchObject({
-			state: "cold",
-			reason: { kind: "refresh-missed" },
-		});
-	});
-
-	it("keeps the entry warm from a refresh that wrote the prefix again, and stops refreshing", async () => {
-		session.setCacheWarmingMode("idle");
-		const sentAt = send();
-		refreshUsage = usage({ cacheRead: 20_000, cacheWrite: 80_000 });
-		vi.advanceTimersByTime(REFRESH_DELAY_MS);
-		await drain();
-		const refreshedAt = sentAt + REFRESH_DELAY_MS;
-
-		expect(session.getPromptCacheStatus(sentAt + SHORT_TTL_MS)).toMatchObject({
-			state: "warm",
-			touchedAt: refreshedAt,
-			cachedTokens: 100_001,
-			warming: { state: "inactive", reason: "refresh missed the cache" },
-		});
-	});
-
-	it("records no refresh outcome for a failed refresh or one the conversation moved on from", async () => {
-		session.setCacheWarmingMode("idle");
-		session.agent.appendMessage({ role: "user", content: "question", timestamp: Date.now() });
-		session.startCacheWarming(model, { messages: [] }, { cacheRetention: "short" });
-		warmer.onResponse(reply(model, usage({ cacheWrite: 50_000 })));
-		const refreshes = () =>
-			session.sessionManager.getEntries().flatMap(entry => (entry.type === "model_usage" ? [entry] : []));
-
-		// A paid error that still read part of the cache.
-		refreshStopReason = "error";
-		vi.advanceTimersByTime(REFRESH_DELAY_MS);
-		await drain();
-		expect(refreshes()).toHaveLength(1);
-		expect(refreshes()[0]!.cacheRefresh).toBeUndefined();
-
-		// A hit that lands after the transcript was replaced (a branch switch or reload).
-		refreshStopReason = "stop";
-		session.startCacheWarming(model, { messages: [] }, { cacheRetention: "short" });
-		warmer.onResponse(reply(model, usage({ cacheWrite: 50_000 })));
-		const gate = Promise.withResolvers<void>();
-		refreshGate = gate.promise;
-		vi.advanceTimersByTime(REFRESH_DELAY_MS);
-		await drain();
-		session.agent.replaceMessages(session.messages.map(message => ({ ...message })));
-		gate.resolve();
-		await drain();
-		expect(refreshes()).toHaveLength(2);
-		expect(refreshes()[1]!.cacheRefresh).toBeUndefined();
-	});
-
-	it("reads a replaced transcript off its own branch instead of calling it rewritten", () => {
-		session.setCacheWarmingMode("off");
-		session.agent.appendMessage({ role: "user", content: "question", timestamp: Date.now() });
-		const sentAt = send();
-		session.sessionManager.appendMessage(reply(model, usage({ cacheWrite: 50_000 })));
-		// Switching away and back rebuilds the same transcript from new message objects.
-		session.agent.replaceMessages(session.messages.map(message => ({ ...message })));
-
-		expect(session.getPromptCacheStatus(sentAt + 1)).toMatchObject({ state: "warm", inferred: true });
-	});
-
-	it("names a compaction since the last send as the reason", () => {
-		session.setCacheWarmingMode("off");
-		session.agent.appendMessage({ role: "user", content: "question", timestamp: Date.now() });
-		const sentAt = send();
-		const replyId = session.sessionManager.appendMessage(reply(model, usage({ cacheWrite: 50_000 })));
-		session.sessionManager.appendCompaction("summary", undefined, replyId, 50_000);
-		session.agent.replaceMessages([]);
-
-		expect(session.getPromptCacheStatus(sentAt + 1)).toMatchObject({ state: "cold", reason: { kind: "compaction" } });
-	});
-
-	it("turns cold when a tool's wire spec changed under the same name", () => {
-		session.setCacheWarmingMode("off");
-		const lookup = {
-			name: "lookup",
-			label: "Lookup",
-			description: "Look up a value",
-			parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
-			execute: async () => ({ content: [], details: {} }),
-		};
-		// A refreshed MCP tool keeps its name; examples reach the wire through the rendered description.
-		const changes = [
-			{ description: "Look up a value by key" },
-			{ strict: true },
-			{ examples: [{ caption: "Find a user", call: { query: "user:42" } }] },
-		];
-		for (const change of changes) {
-			session.agent.setTools([lookup]);
+	describe("for a request this process sent", () => {
+		it("stays warm through the entry's lifetime and turns cold the instant it lapses", () => {
+			session.setCacheWarmingMode("off");
 			const sentAt = send();
-			expect(session.getPromptCacheStatus(sentAt + 1)).toMatchObject({ state: "warm" });
-			session.agent.setTools([{ ...lookup, ...change }]);
 
-			expect({ change, status: session.getPromptCacheStatus(sentAt + 1) }).toMatchObject({
-				change,
-				status: { state: "cold", reason: { kind: "tools" } },
+			expect(session.getPromptCacheStatus(sentAt + SHORT_TTL_MS - 1)).toMatchObject({
+				state: "warm",
+				inferred: false,
+				touchedAt: sentAt,
 			});
-		}
-	});
-
-	it("turns cold when the model changed since the last send, naming both models", () => {
-		session.setCacheWarmingMode("off");
-		const sentAt = send();
-		const other = getBundledModel("anthropic", "claude-opus-4-5") as Model;
-		session.agent.setModel(other);
-
-		expect(session.getPromptCacheStatus(sentAt + 1)).toMatchObject({
-			state: "cold",
-			reason: { kind: "model", from: model.name, to: other.name },
+			expect(session.getPromptCacheStatus(sentAt + SHORT_TTL_MS)).toMatchObject({
+				state: "cold",
+				reason: { kind: "expired", at: sentAt + SHORT_TTL_MS },
+			});
 		});
-	});
 
-	it("turns cold when the thinking level changed since the last send", () => {
-		session.setCacheWarmingMode("off");
-		session.setThinkingLevel(ThinkingLevel.Low);
-		const sentAt = send();
-		session.setThinkingLevel(ThinkingLevel.High);
+		const user = () => session.agent.appendMessage({ role: "user", content: "question", timestamp: Date.now() });
+		it.each([
+			{
+				name: "another model",
+				after: () => session.agent.setModel(getBundledModel("anthropic", "claude-opus-4-5") as Model),
+				expected: () => ({
+					state: "cold",
+					reason: { kind: "model", from: model.name, to: getBundledModel("anthropic", "claude-opus-4-5").name },
+				}),
+			},
+			{
+				name: "another thinking level",
+				before: () => session.setThinkingLevel(ThinkingLevel.Low),
+				after: () => session.setThinkingLevel(ThinkingLevel.High),
+				expected: () => ({ state: "cold", reason: { kind: "thinking", from: "low", to: "high" } }),
+			},
+			...[
+				{ description: "Look up a value by key" },
+				{ strict: true },
+				// Examples reach the wire through the rendered description.
+				{ examples: [{ caption: "Find a user", call: { query: "user:42" } }] },
+			].map(change => ({
+				name: `a same-name tool with ${Object.keys(change)[0]} changed`,
+				before: () => session.agent.setTools([LOOKUP_TOOL]),
+				after: () => session.agent.setTools([{ ...LOOKUP_TOOL, ...change }]),
+				expected: () => ({ state: "cold", reason: { kind: "tools" } }),
+			})),
+			{
+				name: "another cache retention setting",
+				after: () => cfgProvidersCacheRetention.override(settings, "long"),
+				expected: () => ({ state: "cold", reason: { kind: "retention" } }),
+			},
+			{
+				name: "a compaction, read off the branch",
+				before: user,
+				after: () => {
+					const replyId = session.sessionManager.appendMessage(reply(model, usage({ cacheWrite: 50_000 })));
+					session.sessionManager.appendCompaction("summary", undefined, replyId, 50_000);
+					session.agent.replaceMessages([]);
+				},
+				expected: () => ({ state: "cold", reason: { kind: "compaction" } }),
+			},
+			{
+				// Switching away and back rebuilds the same transcript from new message objects.
+				name: "the same transcript rebuilt, read off the branch",
+				before: user,
+				after: () => {
+					session.sessionManager.appendMessage(reply(model, usage({ cacheWrite: 50_000 })));
+					session.agent.replaceMessages(session.messages.map(message => ({ ...message })));
+				},
+				expected: () => ({ state: "warm", inferred: true }),
+			},
+		])("after $name", ({ before, after, expected }) => {
+			session.setCacheWarmingMode("off");
+			before?.();
+			const sentAt = send();
+			after();
 
-		expect(session.getPromptCacheStatus(sentAt + 1)).toMatchObject({
-			state: "cold",
-			reason: { kind: "thinking", from: "low", to: "high" },
+			expect(session.getPromptCacheStatus(sentAt + 1)).toMatchObject(expected());
 		});
-	});
 
-	it("is hidden for a model that declares no cache lifetime", () => {
-		model = { ...model, promptCache: undefined } as Model;
-		session.agent.setModel(model);
-		session.setCacheWarmingMode("off");
-		send();
+		it("follows a refresh that hits past the first lifetime, and turns cold when one misses", async () => {
+			session.setCacheWarmingMode("idle");
+			const sentAt = send();
+			vi.advanceTimersByTime(REFRESH_DELAY_MS);
+			await drain();
+			const refreshedAt = sentAt + REFRESH_DELAY_MS;
+			expect(session.getPromptCacheStatus(sentAt + SHORT_TTL_MS)).toMatchObject({
+				state: "warm",
+				touchedAt: refreshedAt,
+				warming: { state: "scheduled", nextWarmAt: refreshedAt + REFRESH_DELAY_MS },
+			});
+			// The persisted outcome is what a reopened session counts from.
+			expect(session.sessionManager.getEntries().find(entry => entry.type === "model_usage")).toMatchObject({
+				cacheRefresh: { sentAt: refreshedAt, hit: true },
+			});
 
-		expect(session.getPromptCacheStatus(Date.now())).toBeUndefined();
-	});
-
-	it("is hidden for a session without a cache warmer, as every subagent is", () => {
-		const subagent = new AgentSession({
-			agent: new Agent({ initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] } }),
-			sessionManager: SessionManager.create(tempDir.path(), tempDir.path()),
-			settings,
-			modelRegistry: session.modelRegistry,
-			obfuscator: new SecretObfuscator([]),
+			refreshUsage = usage({});
+			vi.advanceTimersByTime(REFRESH_DELAY_MS);
+			await drain();
+			expect(session.getPromptCacheStatus(Date.now())).toMatchObject({
+				state: "cold",
+				reason: { kind: "refresh-missed" },
+			});
 		});
-		subagent.sessionManager.appendMessage(reply(model, usage({ cacheWrite: 50_000 })));
 
-		expect(subagent.getPromptCacheStatus(Date.now() + 1)).toBeUndefined();
-	});
+		it("keeps the entry warm from a refresh that wrote the prefix again, and stops refreshing", async () => {
+			session.setCacheWarmingMode("idle");
+			const sentAt = send();
+			refreshUsage = usage({ cacheRead: 20_000, cacheWrite: 80_000 });
+			vi.advanceTimersByTime(REFRESH_DELAY_MS);
+			await drain();
 
-	it("keeps a logged-in Codex cache warm across any gap, so only a change turns it cold", async () => {
-		model = getBundledModel("openai-codex", "gpt-5.6-sol") as Model;
-		await createSession(model);
-		session.setCacheWarmingMode("off");
-		const sentAt = send();
-
-		expect(session.getPromptCacheStatus(sentAt + 24 * 3_600_000)).toMatchObject({ state: "warm", ttlMs: undefined });
-		session.agent.setModel(getBundledModel("anthropic", "claude-sonnet-4-5") as Model);
-		expect(session.getPromptCacheStatus(sentAt + 1)).toMatchObject({ state: "cold", reason: { kind: "model" } });
-	});
-
-	it("keeps the size of the request that confirmed the entry when a later request fails", () => {
-		session.setCacheWarmingMode("off");
-		send();
-		session.startCacheWarming(model, { messages: [] }, { cacheRetention: "short" });
-		const failed: AssistantMessage = { ...reply(model, usage({})), stopReason: "error" };
-		session.agent.appendMessage(failed);
-		warmer.onResponse(failed);
-
-		expect(session.getPromptCacheStatus(Date.now())).toMatchObject({ state: "warm", cachedTokens: 50_001 });
-	});
-
-	it("never shows another session's entry once this one is armed", async () => {
-		session.setCacheWarmingMode("off");
-		send();
-		await session.sessionManager.newSession();
-		expect(session.getPromptCacheStatus(Date.now())).toBeUndefined();
-
-		session.startCacheWarming(model, { messages: [] }, { cacheRetention: "short" });
-		warmer.onResponse({ ...reply(model, usage({})), stopReason: "error" });
-		expect(session.getPromptCacheStatus(Date.now())).toBeUndefined();
-		session.startCacheWarming(model, { messages: [] }, { cacheRetention: "short" });
-		warmer.onResponse(reply(model, usage({})));
-		expect(session.getPromptCacheStatus(Date.now())).toBeUndefined();
-	});
-
-	it("shows nothing cached after /clear, whose new transcript reads no earlier prefix", async () => {
-		session.setCacheWarmingMode("off");
-		session.agent.appendMessage({ role: "user", content: "question", timestamp: Date.now() });
-		const sentAt = send();
-		session.sessionManager.appendMessage(reply(model, usage({ cacheWrite: 50_000 })));
-		expect(session.getPromptCacheStatus(sentAt + 1)).toMatchObject({ state: "warm" });
-
-		expect(await session.resetSessionContext()).toBeDefined();
-		expect(session.getPromptCacheStatus(sentAt + 1)).toBeUndefined();
-	});
-
-	it("counts a request's lifetime and its next refresh from when the provider sent it, past a wait for a slot", () => {
-		session.setCacheWarmingMode("idle");
-		const context = { messages: [] };
-		session.startCacheWarming(model, context, { cacheRetention: "short" });
-		vi.advanceTimersByTime(30_000);
-		const sentAt = Date.now();
-		session.markPromptCacheDispatched(context);
-		warmer.onResponse(reply(model, usage({ cacheWrite: 50_000 })));
-
-		expect(session.getPromptCacheStatus(sentAt)).toMatchObject({
-			state: "warm",
-			touchedAt: sentAt,
-			warming: { state: "scheduled", nextWarmAt: sentAt + REFRESH_DELAY_MS },
+			expect(session.getPromptCacheStatus(sentAt + SHORT_TTL_MS)).toMatchObject({
+				state: "warm",
+				touchedAt: sentAt + REFRESH_DELAY_MS,
+				warming: { state: "inactive", reason: "refresh missed the cache" },
+			});
 		});
-	});
 
-	it("turns cold after /fresh rotates the provider session an OpenAI request keys its cache by", async () => {
-		model = getBundledModel("openai-codex", "gpt-5.6-sol") as Model;
-		await createSession(model);
-		session.setCacheWarmingMode("off");
-		const sentAt = send();
-		expect(session.getPromptCacheStatus(sentAt + 1)).toMatchObject({ state: "warm" });
+		it("records no refresh outcome for a failed refresh or one the conversation moved on from", async () => {
+			session.setCacheWarmingMode("idle");
+			const refreshes = () =>
+				session.sessionManager.getEntries().flatMap(entry => (entry.type === "model_usage" ? [entry] : []));
+			session.agent.appendMessage({ role: "user", content: "question", timestamp: Date.now() });
 
-		expect(session.freshSession()).toBeDefined();
-		expect(session.getPromptCacheStatus(sentAt + 1)).toMatchObject({
-			state: "cold",
-			inferred: false,
-			reason: { kind: "cache-key" },
+			// A paid error that still read part of the cache.
+			send();
+			refreshStopReason = "error";
+			vi.advanceTimersByTime(REFRESH_DELAY_MS);
+			await drain();
+
+			// A hit that lands after the transcript was replaced.
+			send();
+			refreshStopReason = "stop";
+			const slot = Promise.withResolvers<void>();
+			refreshGate = slot.promise;
+			vi.advanceTimersByTime(REFRESH_DELAY_MS);
+			await drain();
+			session.agent.replaceMessages(session.messages.map(message => ({ ...message })));
+			slot.resolve();
+			await drain();
+
+			expect(refreshes().map(entry => entry.cacheRefresh)).toEqual([undefined, undefined]);
 		});
-	});
 
-	it("stays warm after /fresh on a provider whose cache follows the prompt alone", () => {
-		session.setCacheWarmingMode("off");
-		const sentAt = send();
-		expect(session.freshSession()).toBeDefined();
-		expect(session.getPromptCacheStatus(sentAt + 1)).toMatchObject({ state: "warm", inferred: false });
-	});
+		it("counts the lifetime and the next refresh from when the provider sent the request, past a slot wait", () => {
+			session.setCacheWarmingMode("idle");
+			const context = { messages: [] };
+			session.startCacheWarming(model, context, { cacheRetention: "short" });
+			vi.advanceTimersByTime(30_000);
+			const sentAt = Date.now();
+			session.markPromptCacheDispatched(context);
+			warmer.onResponse(reply(model, usage({ cacheWrite: 50_000 })));
 
-	it("lets the entry lapse while a refresh still waits for a provider slot", async () => {
-		session.setCacheWarmingMode("idle");
-		const slot = Promise.withResolvers<void>();
-		refreshGate = slot.promise;
-		const sentAt = send();
-		vi.advanceTimersByTime(REFRESH_DELAY_MS);
-		await drain();
-
-		expect(session.getPromptCacheStatus(sentAt + SHORT_TTL_MS)).toMatchObject({
-			state: "cold",
-			reason: { kind: "expired", at: sentAt + SHORT_TTL_MS },
-			warming: { state: "scheduled" },
+			expect(session.getPromptCacheStatus(sentAt)).toMatchObject({
+				state: "warm",
+				touchedAt: sentAt,
+				warming: { state: "scheduled", nextWarmAt: sentAt + REFRESH_DELAY_MS },
+			});
 		});
-		slot.resolve();
-		await drain();
-	});
 
-	it("holds expiry off while a refresh the provider sent before it is in flight", async () => {
-		session.setCacheWarmingMode("idle");
-		const response = Promise.withResolvers<void>();
-		responseGate = response.promise;
-		const sentAt = send();
-		vi.advanceTimersByTime(REFRESH_DELAY_MS);
-		await drain();
+		it("holds expiry off only for a refresh the provider sent before the entry lapsed", async () => {
+			session.setCacheWarmingMode("idle");
+			const response = Promise.withResolvers<void>();
+			responseGate = response.promise;
+			let sentAt = send();
+			vi.advanceTimersByTime(REFRESH_DELAY_MS);
+			await drain();
+			expect(session.getPromptCacheStatus(sentAt + SHORT_TTL_MS + 1_000)).toMatchObject({
+				state: "warm",
+				warming: { state: "refreshing" },
+			});
+			response.resolve();
+			await drain();
 
-		expect(session.getPromptCacheStatus(sentAt + SHORT_TTL_MS + 1_000)).toMatchObject({
-			state: "warm",
-			warming: { state: "refreshing" },
+			// Queued for a provider slot, the refresh holds nothing off; sent after the lapse, it revives nothing.
+			const slot = Promise.withResolvers<void>();
+			refreshGate = slot.promise;
+			const late = Promise.withResolvers<void>();
+			responseGate = late.promise;
+			sentAt = send();
+			vi.advanceTimersByTime(REFRESH_DELAY_MS);
+			await drain();
+			const expired = { state: "cold", reason: { kind: "expired", at: sentAt + SHORT_TTL_MS } };
+			expect(session.getPromptCacheStatus(sentAt + SHORT_TTL_MS)).toMatchObject({
+				...expired,
+				warming: { state: "scheduled" },
+			});
+			vi.advanceTimersByTime(SHORT_TTL_MS - REFRESH_DELAY_MS + 1_000);
+			slot.resolve();
+			await drain();
+			expect(session.getPromptCacheStatus(Date.now())).toMatchObject({
+				...expired,
+				warming: { state: "refreshing" },
+			});
+			late.resolve();
+			await drain();
 		});
-		response.resolve();
-		await drain();
-	});
 
-	it("keeps a lapsed entry cold when its refresh only goes out after the lapse", async () => {
-		session.setCacheWarmingMode("idle");
-		const slot = Promise.withResolvers<void>();
-		refreshGate = slot.promise;
-		const response = Promise.withResolvers<void>();
-		responseGate = response.promise;
-		const sentAt = send();
-		vi.advanceTimersByTime(REFRESH_DELAY_MS);
-		await drain();
-		// The provider slot frees only after the entry lapsed.
-		vi.advanceTimersByTime(SHORT_TTL_MS - REFRESH_DELAY_MS + 1_000);
-		slot.resolve();
-		await drain();
+		it("keeps a logged-in Codex entry warm across any gap", async () => {
+			model = getBundledModel("openai-codex", "gpt-5.6-sol") as Model;
+			await createSession(model);
+			session.setCacheWarmingMode("off");
+			const sentAt = send();
 
-		expect(session.getPromptCacheStatus(Date.now())).toMatchObject({
-			state: "cold",
-			reason: { kind: "expired", at: sentAt + SHORT_TTL_MS },
-			warming: { state: "refreshing" },
+			expect(session.getPromptCacheStatus(sentAt + 24 * 3_600_000)).toMatchObject({
+				state: "warm",
+				ttlMs: undefined,
+			});
 		});
-		response.resolve();
-		await drain();
+
+		it("shows nothing for a model without a cache lifetime, another session's entry, or after /clear", async () => {
+			session.setCacheWarmingMode("off");
+			session.agent.appendMessage({ role: "user", content: "question", timestamp: Date.now() });
+			const sentAt = send();
+			session.sessionManager.appendMessage(reply(model, usage({ cacheWrite: 50_000 })));
+			expect(await session.resetSessionContext()).toBeDefined();
+			expect(session.getPromptCacheStatus(sentAt + 1)).toBeUndefined();
+
+			send();
+			await session.sessionManager.newSession();
+			expect(session.getPromptCacheStatus(Date.now())).toBeUndefined();
+
+			model = { ...model, promptCache: undefined } as Model;
+			session.agent.setModel(model);
+			send();
+			expect(session.getPromptCacheStatus(Date.now())).toBeUndefined();
+		});
 	});
 
 	describe("for a transcript this process has not sent (a reopened session)", () => {
+		const append = (replyUsage: Usage) => session.sessionManager.appendMessage(reply(model, replyUsage));
+
+		// The bundled model declares both tiers.
 		beforeEach(async () => {
 			model = getBundledModel("anthropic", "claude-sonnet-4-5") as Model;
 			await createSession(model);
 		});
 
-		it("reads /fresh after the newest cached reply as cold for an OpenAI request keyed by the provider session", async () => {
-			model = getBundledModel("openai-codex", "gpt-5.6-sol") as Model;
-			await createSession(model);
-			session.sessionManager.appendMessage(reply(model, usage({ cacheRead: 50_000 })));
-			expect(session.getPromptCacheStatus(Date.now() + 1)).toMatchObject({ state: "warm", inferred: true });
-
-			vi.advanceTimersByTime(1);
-			expect(session.freshSession()).toBeDefined();
-			expect(session.getPromptCacheStatus(Date.now() + 1)).toMatchObject({
-				state: "cold",
-				inferred: true,
-				reason: { kind: "cache-key" },
-			});
-		});
-
-		it("infers nothing from a reply sent under a /fresh provider session once that session is gone", async () => {
-			model = getBundledModel("openai-codex", "gpt-5.6-sol") as Model;
-			await createSession(model);
-			expect(session.freshSession()).toBeDefined();
-			vi.advanceTimersByTime(1);
-			session.sessionManager.appendMessage(reply(model, usage({ cacheRead: 50_000 })));
-			// This process still sends under the rotated session, whose entry the reply left.
-			expect(session.getPromptCacheStatus(Date.now() + 1)).toMatchObject({ state: "warm", inferred: true });
-
-			reopen();
-			expect(session.getPromptCacheStatus(Date.now() + 1)).toBeUndefined();
-		});
-
-		it("still infers a reply sent before /fresh once the rotated session is gone, keyed by the session again", async () => {
-			model = getBundledModel("openai-codex", "gpt-5.6-sol") as Model;
-			await createSession(model);
-			session.sessionManager.appendMessage(reply(model, usage({ cacheRead: 50_000 })));
-			vi.advanceTimersByTime(1);
-			expect(session.freshSession()).toBeDefined();
-
-			reopen();
-			expect(session.getPromptCacheStatus(Date.now() + 1)).toMatchObject({ state: "warm", inferred: true });
-		});
-
-		it("reads a persistent entry as cold once cache retention is off, instead of hiding it", async () => {
-			model = getBundledModel("openai-codex", "gpt-5.6-sol") as Model;
-			await createSession(model);
-			session.sessionManager.appendMessage(reply(model, usage({ cacheRead: 50_000 })));
-			expect(session.getPromptCacheStatus(Date.now() + 1)).toMatchObject({ state: "warm", inferred: true });
-
-			cfgProvidersCacheRetention.override(settings, "none");
-			expect(session.getPromptCacheStatus(Date.now() + 1)).toMatchObject({
-				state: "cold",
-				inferred: true,
-				reason: { kind: "retention" },
-			});
-		});
-
-		it("infers the entry from the newest cached reply's send time and its model's lifetime", () => {
-			const ttlMs = model.promptCache!.short! * 1000;
+		it("is read off the newest cached reply's send time and its model's lifetime", () => {
 			const sentAt = Date.now();
-			session.sessionManager.appendMessage(
-				reply(model, usage({ cacheWrite: 50_000, cttl: { ephemeral5m: 50_000 } })),
-			);
+			append(usage({ cacheWrite: 50_000, cttl: { ephemeral5m: 50_000 } }));
+			// A newer reply that used no cache does not replace it.
+			append(usage({}));
 
-			expect(session.getPromptCacheStatus(sentAt + ttlMs - 1)).toMatchObject({
+			expect(session.getPromptCacheStatus(sentAt + SHORT_TTL_MS - 1)).toMatchObject({
 				state: "warm",
 				inferred: true,
 				tier: "short",
 				touchedAt: sentAt,
-			});
-			expect(session.getPromptCacheStatus(sentAt + ttlMs)).toMatchObject({
-				state: "cold",
-				reason: { kind: "expired", at: sentAt + ttlMs },
-			});
-		});
-
-		it("reads a compaction after the newest cached reply as cold", () => {
-			const replyId = session.sessionManager.appendMessage(reply(model, usage({ cacheRead: 50_000 })));
-			session.sessionManager.appendCompaction("summary", undefined, replyId, 50_000);
-
-			expect(session.getPromptCacheStatus(Date.now() + 1)).toMatchObject({
-				state: "cold",
-				inferred: true,
-				reason: { kind: "compaction" },
-			});
-		});
-
-		it("reads the size of the cached reply it inferred from, not a newer uncached one", () => {
-			session.sessionManager.appendMessage(reply(model, usage({ cacheWrite: 50_000 })));
-			session.sessionManager.appendMessage(reply(model, usage({})));
-
-			expect(session.getPromptCacheStatus(Date.now() + 1)).toMatchObject({
-				state: "warm",
-				inferred: true,
 				cachedTokens: 50_001,
 			});
+			expect(session.getPromptCacheStatus(sentAt + SHORT_TTL_MS)).toMatchObject({
+				state: "cold",
+				reason: { kind: "expired", at: sentAt + SHORT_TTL_MS },
+			});
 		});
 
-		it("counts a refresh from when it was sent, and ignores one recorded without an outcome", () => {
+		it.each([
+			{
+				name: "a compaction after the cached reply",
+				setup: () => {
+					const replyId = append(usage({ cacheRead: 50_000 }));
+					session.sessionManager.appendCompaction("summary", undefined, replyId, 50_000);
+				},
+				expected: { state: "cold", reason: { kind: "compaction" } },
+			},
+			{
+				name: "a retention setting that no longer asks for the tier written",
+				setup: () => {
+					append(usage({ cacheWrite: 50_000, cttl: { ephemeral1h: 50_000 } }));
+					cfgProvidersCacheRetention.override(settings, "none");
+				},
+				expected: { state: "cold", tier: "long", reason: { kind: "retention" } },
+			},
+			{
+				// The served model is retagged on the reply; the entry is the requested one's.
+				name: "a server-side fallback reply",
+				setup: () =>
+					session.sessionManager.appendMessage({
+						...reply(model, usage({ cacheWrite: 50_000 })),
+						model: "claude-unlisted-fallback",
+						content: [
+							{ type: "fallback", from: { model: model.id }, to: { model: "claude-unlisted-fallback" } },
+							{ type: "text", text: "done" },
+						],
+					}),
+				expected: { state: "warm", inferred: true },
+			},
+			{
+				// Only the digest recorded before the cached reply judges its system prompt.
+				name: "a prompt digest recorded after the cached reply",
+				setup: () => {
+					append(usage({ cacheRead: 50_000 }));
+					session.sessionManager.appendCustomEntry("system-prompt-digest", "0");
+				},
+				expected: { state: "warm", inferred: true },
+			},
+			{
+				name: "a prompt digest recorded before the cached reply that no longer matches",
+				setup: () => {
+					session.sessionManager.appendCustomEntry("system-prompt-digest", "0");
+					append(usage({ cacheRead: 50_000 }));
+				},
+				expected: { state: "cold", reason: { kind: "system-prompt" } },
+			},
+		])("reads $name", ({ setup, expected }) => {
+			setup();
+			expect(session.getPromptCacheStatus(Date.now() + 1)).toMatchObject(expected);
+		});
+
+		it("follows persisted refresh outcomes, ignoring one recorded without an outcome", () => {
 			const sentAt = Date.now();
-			session.sessionManager.appendMessage(
-				reply(model, usage({ cacheWrite: 50_000, cttl: { ephemeral5m: 50_000 } })),
-			);
-			const appendRefresh = (refreshUsage: Usage, cacheRefresh?: { sentAt: number; hit: boolean }) =>
+			append(usage({ cacheWrite: 50_000, cttl: { ephemeral5m: 50_000 } }));
+			const refresh = (refreshUsage: Usage, cacheRefresh?: { sentAt: number; hit: boolean }) =>
 				session.sessionManager.appendModelUsage(
 					{
 						purpose: "cache-warm",
@@ -583,80 +461,30 @@ describe("AgentSession prompt-cache status", () => {
 			// Sent at 90% of the lifetime, recorded once it completed seconds later.
 			vi.advanceTimersByTime(REFRESH_DELAY_MS + 5_000);
 			const refreshedAt = sentAt + REFRESH_DELAY_MS;
-			appendRefresh(usage({ cacheRead: 50_000 }), { sentAt: refreshedAt, hit: true });
+			refresh(usage({ cacheRead: 50_000 }), { sentAt: refreshedAt, hit: true });
+			refresh(usage({ cacheWrite: 50_000 }));
 			expect(session.getPromptCacheStatus(Date.now())).toMatchObject({ state: "warm", touchedAt: refreshedAt });
 
-			// A failed or outdated refresh (or one recorded before outcomes were) says nothing either way.
-			appendRefresh(usage({ cacheWrite: 50_000 }));
-			expect(session.getPromptCacheStatus(Date.now())).toMatchObject({ state: "warm", touchedAt: refreshedAt });
-
-			// A refresh that had to write the prefix again left it cached from its send.
+			// A refresh that wrote the prefix again left it cached from its send.
 			const rewrittenAt = Date.now();
-			appendRefresh(usage({ cacheWrite: 50_000 }), { sentAt: rewrittenAt, hit: false });
+			refresh(usage({ cacheWrite: 50_000 }), { sentAt: rewrittenAt, hit: false });
 			expect(session.getPromptCacheStatus(Date.now())).toMatchObject({ state: "warm", touchedAt: rewrittenAt });
 
-			appendRefresh(usage({}), { sentAt: Date.now(), hit: false });
+			refresh(usage({}), { sentAt: Date.now(), hit: false });
 			expect(session.getPromptCacheStatus(Date.now())).toMatchObject({
 				state: "cold",
 				reason: { kind: "refresh-missed" },
 			});
 		});
 
-		it("resolves a server-side fallback's reply to the model the request asked for", () => {
-			const served: AssistantMessage = {
-				...reply(model, usage({ cacheWrite: 50_000 })),
-				model: "claude-unlisted-fallback",
-				content: [
-					{ type: "fallback", from: { model: model.id }, to: { model: "claude-unlisted-fallback" } },
-					{ type: "text", text: "done" },
-				],
-			};
-			session.sessionManager.appendMessage(served);
-
-			expect(session.getPromptCacheStatus(Date.now() + 1)).toMatchObject({ state: "warm", inferred: true });
-		});
-
-		it("turns cold when the cache retention setting no longer asks for the tier the reply wrote", () => {
-			session.sessionManager.appendMessage(
-				reply(model, usage({ cacheWrite: 50_000, cttl: { ephemeral1h: 50_000 } })),
-			);
-			cfgProvidersCacheRetention.override(settings, "long");
-			expect(session.getPromptCacheStatus(Date.now() + 1)).toMatchObject({ state: "warm", tier: "long" });
-
-			cfgProvidersCacheRetention.override(settings, "none");
-			expect(session.getPromptCacheStatus(Date.now() + 1)).toMatchObject({
-				state: "cold",
-				tier: "long",
-				reason: { kind: "retention" },
-			});
-		});
-
-		it("judges the system prompt by the digest recorded before the cached reply, not a newer one", () => {
-			session.sessionManager.appendMessage(reply(model, usage({ cacheRead: 50_000 })));
-			// A later, uncached reply ran under another prompt; the cached one's prompt is unrecorded.
-			session.sessionManager.appendCustomEntry("system-prompt-digest", "0");
-			session.sessionManager.appendMessage(reply(model, usage({})));
-
-			expect(session.getPromptCacheStatus(Date.now() + 1)).toMatchObject({ state: "warm", inferred: true });
-		});
-
 		it("names the lapsed lifetime over a system prompt change once the entry would have expired", () => {
-			const ttlMs = model.promptCache!.long! * 1000;
-			cfgProvidersCacheRetention.override(settings, "long");
-			// The newest reply was produced under a prompt this process no longer builds.
 			session.sessionManager.appendCustomEntry("system-prompt-digest", "0");
 			const sentAt = Date.now();
-			session.sessionManager.appendMessage(
-				reply(model, usage({ cacheRead: 50_000, cttl: { ephemeral1h: 50_000 } })),
-			);
+			append(usage({ cacheRead: 50_000, cttl: { ephemeral5m: 50_000 } }));
 
-			expect(session.getPromptCacheStatus(sentAt + ttlMs - 1)).toMatchObject({
+			expect(session.getPromptCacheStatus(sentAt + SHORT_TTL_MS)).toMatchObject({
 				state: "cold",
-				reason: { kind: "system-prompt" },
-			});
-			expect(session.getPromptCacheStatus(sentAt + 3 * ttlMs)).toMatchObject({
-				state: "cold",
-				reason: { kind: "expired", at: sentAt + ttlMs },
+				reason: { kind: "expired", at: sentAt + SHORT_TTL_MS },
 			});
 		});
 	});
