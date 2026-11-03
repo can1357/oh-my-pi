@@ -448,7 +448,11 @@ fn walk_raw(
 	state.visited += 1;
 	let (props, child_handles) = match backend.walk_node(&handle, state.bounds) {
 		Ok(node) => node,
-		Err(error) if depth > 0 => {
+		// An app that stops answering would make every node left wait it out,
+		// and every read after a cancel fails the same way.
+		Err(error)
+			if depth > 0 && !matches!(error.code, ErrorCode::Timeout | ErrorCode::Cancelled) =>
+		{
 			state.skipped = state.skipped.saturating_add(1);
 			if error.code == ErrorCode::StaleRef {
 				state.vanished = state.vanished.saturating_add(1);
@@ -1456,6 +1460,10 @@ mod tests {
 		gone:           HashSet<u64>,
 		/// Nodes the app destroyed: every read of them is a stale ref.
 		destroyed:      HashSet<u64>,
+		/// Nodes in an app that has stopped answering.
+		unanswering:    HashSet<u64>,
+		/// Nodes whose read the host cancelled.
+		cancelled:      HashSet<u64>,
 		/// Bounds read by tree walks.
 		bounds_reads:   u32,
 		/// The window element, when not node 1.
@@ -1501,6 +1509,12 @@ mod tests {
 			let id = node(h);
 			if self.destroyed.contains(&id) {
 				return Err(DesktopError::stale_ref(format!("test node {id} was destroyed")));
+			}
+			if self.unanswering.contains(&id) {
+				return Err(DesktopError::timeout(format!("test node {id} did not answer")));
+			}
+			if self.cancelled.contains(&id) {
+				return Err(DesktopError::cancelled(format!("test node {id} read was cancelled")));
 			}
 			self
 				.props
@@ -2728,6 +2742,25 @@ mod tests {
 		.unwrap();
 		assert_eq!(nodes.len(), 1);
 		assert_eq!(nodes[0].title.as_deref(), Some("Ready"));
+	}
+	#[test]
+	fn an_app_that_stops_answering_fails_the_read_instead_of_skipping_each_node() {
+		let mut m = Mock {
+			props: [(1, p("window", Some("Title"))), (3, p("button", Some("Ready")))].into(),
+			children: [(1, vec![2, 3])].into(),
+			unanswering: [2].into(),
+			..Default::default()
+		};
+		let error =
+			snapshot(&mut m, &mut AxRegistry::default(), &window(), &AxSnapshotOptions::default())
+				.unwrap_err();
+		assert_eq!(error.code, ErrorCode::Timeout);
+		m.unanswering.clear();
+		m.cancelled.insert(2);
+		let error =
+			snapshot(&mut m, &mut AxRegistry::default(), &window(), &AxSnapshotOptions::default())
+				.unwrap_err();
+		assert_eq!(error.code, ErrorCode::Cancelled);
 	}
 	#[test]
 	fn bounds_center_hit_test_is_global_and_frameless() {

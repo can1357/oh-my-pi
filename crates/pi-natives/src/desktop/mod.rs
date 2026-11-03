@@ -774,17 +774,24 @@ impl Worker {
 	}
 
 	fn window(&mut self, target: &Target) -> CoreResult<DesktopWindow> {
-		let windows = self.backend()?.windows()?;
-		match target {
-			Target::Window(id) => windows
-				.into_iter()
-				.find(|window| window.id == *id)
-				.ok_or_else(|| DesktopError::window_not_found(format!("window '{id}' was not found"))),
-			Target::Desktop | Target::Display(_) => windows
-				.into_iter()
-				.find(|window| window.focused)
-				.ok_or_else(|| DesktopError::window_not_found("no focused window was found")),
-		}
+		let backend = self.backend()?;
+		let windows = backend.windows()?;
+		let found = match target {
+			Target::Window(id) => windows.into_iter().find(|window| window.id == *id),
+			Target::Desktop | Target::Display(_) => windows.into_iter().find(|window| window.focused),
+		};
+		found.ok_or_else(|| {
+			backend
+				.missing_window(target)
+				.unwrap_or_else(|| match target {
+					Target::Window(id) => {
+						DesktopError::window_not_found(format!("window '{id}' was not found"))
+					},
+					Target::Desktop | Target::Display(_) => {
+						DesktopError::window_not_found("no focused window was found")
+					},
+				})
+		})
 	}
 
 	fn frame(&self, target: &Target) -> CoreResult<FrameGeometry> {
