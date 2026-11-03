@@ -42,6 +42,10 @@
 - Fixed subagents hanging forever in an async Python `@tool` call that waits on a kernel-global `asyncio.Lock` (or other asyncio primitive) another subagent's call held; concurrent async tool calls now share one event loop
 - Interrupting or cancelling a subagent mid-call now cancels an async Python `@tool` coroutine, releasing any locks it holds, and the subagent sees `Python tool request was cancelled` instead of `Python tool call returned an invalid response`
 
+### Fixed
+
+- A subagent that spawned subagents of its own stayed in memory after it parked, whole transcript included, for as long as the session ran: each child's revive record held the parent through its extension-root provider (bound to the parent) and through any eval-defined tools the parent handed it. A lead that runs lanes with reviewers no longer grows by every finished lane; a child calling a parent's eval-defined tool after that parent has gone gets a tool error ([#17916](https://github.com/can1357/oh-my-pi/pull/17916) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.16.0] - 2026-11-02
 
 ### Added

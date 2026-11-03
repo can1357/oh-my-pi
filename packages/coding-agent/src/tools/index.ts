@@ -292,8 +292,10 @@ export interface ToolSession {
 	 * stored value) so it is materialized live per discovery call — a runtime
 	 * override or settings reload is reflected, never a construction-time
 	 * snapshot. Keeps the task surface byte-identical to the scoped load.
+	 * A standalone function, never a `this`-bound method: subagents forward it
+	 * as is, and a parked subagent keeps it for revival after its parent is gone.
 	 */
-	effectiveExtensionRoots?(): EffectiveExtensionRoots;
+	effectiveExtensionRoots?: () => EffectiveExtensionRoots;
 	/**
 	 * Pre-discovered custom-tool source paths from `.omp/tools/`, `.claude/tools/`,
 	 * plugins, etc. Forwarded to subagents so they skip the FS scan but still

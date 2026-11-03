@@ -1168,6 +1168,73 @@ describe("structured subagent primitive", () => {
 		await fs.rm(restrictedRun.artifactsDir, { recursive: true, force: true });
 	});
 
+	it("keeps nothing of the spawning session alive in what a parked child retains", async () => {
+		// A parked child keeps its spawn options (its revive capture) for as long as it can be
+		// revived. Nothing in them may hold the session that spawned it: a lead whose lanes spawn
+		// reviewers would otherwise keep every finished lane in memory.
+		mockDiscovery();
+		const roots = { explicit: [], mode: "merge" as const, configured: [], configuredLevel: "user" as const };
+		const extensionRoots = () => roots;
+		// createAgentSession gives every tool session its own protocol options; the fallback
+		// built from a bare test session would close over that session.
+		const localProtocolOptions = { getArtifactsDir: () => null, getSessionId: () => null };
+		const descriptor = {
+			name: "review_echo",
+			description: "Echo a review note.",
+			parameters: { type: "object", properties: {} },
+			language: "python" as const,
+		};
+		// What the executor carries past the run; these four end with it.
+		const runScoped = new Set(["onProgress", "onToolResult", "onCleanupDeferred", "signal"]);
+		const kept: Array<Partial<executorModule.ExecutorOptions>> = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async executorOptions => {
+			kept.push(Object.fromEntries(Object.entries(executorOptions).filter(([key]) => !runScoped.has(key))));
+			return result();
+		});
+		const spawners: WeakRef<ToolSession>[] = [];
+		const spawn = async (): Promise<void> => {
+			const parent = session();
+			Object.assign(parent, {
+				effectiveExtensionRoots: extensionRoots,
+				localProtocolOptions,
+				payload: "x".repeat(1 << 20),
+			});
+			spawners.push(new WeakRef(parent));
+			const customTools = createEvalCustomTools(parent, [descriptor]);
+			const run = await runStructuredSubagent(request({ session: parent, customTools, retainArtifacts: true }));
+			await fs.rm(run.artifactsDir, { recursive: true, force: true });
+		};
+		for (let i = 0; i < 8; i++) await spawn();
+		// The spy's call log holds each run's whole options; keep only `kept`.
+		vi.restoreAllMocks();
+		// A WeakRef target read in a job stays alive until that job ends: yield, collect, then read.
+		const alive = () => spawners.filter(ref => ref.deref() !== undefined).length;
+		let remaining = alive();
+		for (let i = 0; i < 10 && remaining > 0; i++) {
+			const turn = Promise.withResolvers<void>();
+			setImmediate(turn.resolve);
+			await turn.promise;
+			Bun.gc(true);
+			remaining = alive();
+		}
+
+		expect(kept).toHaveLength(8);
+		for (const options of kept) {
+			expect(options.extensionRoots?.()).toBe(roots);
+			expect(options.customTools?.map(tool => tool.name)).toEqual(["review_echo"]);
+		}
+		expect(remaining).toBe(0);
+		// With its spawner gone, the child's kernel-defined tool reports itself unavailable.
+		const tool = kept[0]!.customTools![0]!;
+		const outcome = await tool.execute("call-1", {}, undefined, undefined as never, undefined);
+		expect(outcome.content).toEqual([
+			{
+				type: "text",
+				text: expect.stringContaining('The session whose python kernel defined "review_echo" has ended.'),
+			},
+		]);
+	});
+
 	it("unregisters and removes a temporary lease when output ID allocation fails", async () => {
 		mockDiscovery();
 		const failingSession = session();
