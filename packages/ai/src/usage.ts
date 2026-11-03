@@ -56,6 +56,12 @@ export interface UsageScope {
 	shared?: boolean;
 	/** Stable identity shared by routing-specific copies of one upstream quota. */
 	sharedGroup?: string;
+	/**
+	 * The upstream refuses requests once this window is exhausted, so compact
+	 * surfaces may treat it as the session's quota even for a monthly window.
+	 * Unset for informational side-counters (overage meters, billing summaries).
+	 */
+	enforced?: boolean;
 }
 
 /** Normalized limit entry for a single window or quota bucket. */
@@ -315,6 +321,7 @@ export const usageScopeSchema = type({
 	"windowId?": "string",
 	"shared?": "boolean",
 	"sharedGroup?": "string",
+	"enforced?": "boolean",
 });
 
 export const usageLimitSchema = type({

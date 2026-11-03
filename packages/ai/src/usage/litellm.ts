@@ -266,6 +266,8 @@ function buildLimit(
 		scope: {
 			provider,
 			shared: true,
+			// The gateway refuses requests at the cap; a cap-less counter gates nothing.
+			...(counters.cap !== undefined ? { enforced: true } : {}),
 			...(counters.window ? { windowId: counters.window.id } : {}),
 			...(accountId ? { accountId } : {}),
 		},
