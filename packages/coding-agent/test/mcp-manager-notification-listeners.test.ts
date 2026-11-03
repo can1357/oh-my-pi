@@ -4,10 +4,12 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import type { MCPServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
-import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
+import { isRecord, removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 import { CUSTOM_NOTIFICATION_METHOD, CUSTOM_NOTIFICATION_PAYLOAD } from "./fixtures/notifications-mcp";
 
 const FIXTURE_PATH = path.join(import.meta.dir, "fixtures", "notifications-mcp.ts");
+/** Marks the post-connect frame the ordering test injects, apart from the fixture's own. */
+const INJECTED_PROBE = "post-connect";
 const BUN_EXEC = process.execPath;
 
 type CapturedFrame = { server: string; method: string; params: unknown };
@@ -335,8 +337,10 @@ describe("MCPManager notification listeners", () => {
 			events.push("cb:end");
 		});
 
-		manager.addNotificationListener((_server, method) => {
-			if (method === "notifications/tools/list_changed") {
+		// Only the frame this test injects counts: the fixture sends its own
+		// tools/list_changed during startup, which must not satisfy this wait.
+		manager.addNotificationListener((_server, method, params) => {
+			if (method === "notifications/tools/list_changed" && isRecord(params) && params.probe === INJECTED_PROBE) {
 				events.push("listener:fire");
 				listenerFired.resolve();
 			}
@@ -359,7 +363,7 @@ describe("MCPManager notification listeners", () => {
 			// (where refresh actually runs and the callback is awaited).
 			const conn = manager.getConnection("alpha");
 			if (!conn?.transport.onNotification) throw new Error("expected transport onNotification to be wired");
-			void conn.transport.onNotification("notifications/tools/list_changed", {});
+			void conn.transport.onNotification("notifications/tools/list_changed", { probe: INJECTED_PROBE });
 
 			await callbackStarted.promise;
 			expect(events).toContain("cb:start");
