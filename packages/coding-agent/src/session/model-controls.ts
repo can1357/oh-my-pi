@@ -73,6 +73,8 @@ export interface ModelControlsHost {
 	model(): Model | undefined;
 	sessionId(): string;
 	promptGeneration(): number;
+	/** Disposal began: a switch still in flight changes no model and records nothing. */
+	isDisposed(): boolean;
 	resolveActiveEditMode(): EditMode;
 	syncAfterModelChange(previousEditMode: EditMode): Promise<void>;
 	setModelWithProviderSessionReset(model: Model, selection?: "explicit" | "automatic"): Promise<void>;
@@ -251,10 +253,12 @@ export class ModelControls {
 		}
 
 		const targetModel = await this.#host.modelRegistry.refreshSelectedModelMetadata(model);
+		if (this.#host.isDisposed()) return { switched: false };
 
 		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(targetModel));
 		this.#host.clearActiveRetryFallback();
 		await this.#host.setModelWithProviderSessionReset(targetModel);
+		if (this.#host.isDisposed()) return { switched: false };
 		this.#host.sessionManager.appendModelChange(`${targetModel.provider}/${targetModel.id}`, role);
 		if (options?.persist) {
 			this.#host.settings.setModelRole(
@@ -297,10 +301,13 @@ export class ModelControls {
 		}
 
 		const targetModel = await this.#host.modelRegistry.refreshSelectedModelMetadata(model);
+		// Prewalk restores and other automatic switches resume here on their own schedule.
+		if (this.#host.isDisposed()) return;
 
 		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(targetModel));
 		this.#host.clearActiveRetryFallback();
 		await this.#host.setModelWithProviderSessionReset(targetModel, selection);
+		if (this.#host.isDisposed()) return;
 		this.#host.sessionManager.appendModelChange(
 			`${targetModel.provider}/${targetModel.id}`,
 			options?.prewalk ? PREWALK_MODEL_CHANGE_ROLE : options?.ephemeral ? EPHEMERAL_MODEL_CHANGE_ROLE : "temporary",
@@ -395,10 +402,17 @@ export class ModelControls {
 	 * settings. Shared with role cycling and the plan-approval model slider.
 	 */
 	async applyRoleModel(entry: ResolvedRoleModel): Promise<void> {
-		await this.setModel(entry.model, entry.role);
+		await this.#applyRoleModel(entry);
+	}
+
+	/** @returns false when disposal began during the switch: no model change or thinking level is recorded. */
+	async #applyRoleModel(entry: ResolvedRoleModel): Promise<boolean> {
+		const { switched } = await this.setModel(entry.model, entry.role);
+		if (!switched || this.#host.isDisposed()) return false;
 		if (entry.explicitThinkingLevel && entry.thinkingLevel !== undefined) {
 			this.setThinkingLevel(entry.thinkingLevel);
 		}
+		return true;
 	}
 
 	/**
@@ -417,7 +431,7 @@ export class ModelControls {
 		const step = direction === "backward" ? -1 : 1;
 		const next = cycle.models[(cycle.currentIndex + step + cycle.models.length) % cycle.models.length];
 
-		await this.applyRoleModel(next);
+		if (!(await this.#applyRoleModel(next))) return undefined;
 
 		return { model: next.model, thinkingLevel: this.thinkingLevel, role: next.role };
 	}
@@ -447,7 +461,7 @@ export class ModelControls {
 	async #cycleScopedModel(direction: "forward" | "backward"): Promise<ModelCycleResult | undefined> {
 		const previousEditMode = this.#host.resolveActiveEditMode();
 		const scopedModels = await this.#getScopedModelsWithApiKey();
-		if (scopedModels.length <= 1) return undefined;
+		if (scopedModels.length <= 1 || this.#host.isDisposed()) return undefined;
 
 		const currentModel = this.#model;
 		let currentIndex = scopedModels.findIndex(sm => modelsAreEqual(sm.model, currentModel));
@@ -461,6 +475,7 @@ export class ModelControls {
 		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(next.model));
 		this.#host.clearActiveRetryFallback();
 		await this.#host.setModelWithProviderSessionReset(next.model);
+		if (this.#host.isDisposed()) return undefined;
 		this.#host.sessionManager.appendModelChange(`${next.model.provider}/${next.model.id}`);
 		this.#host.settings.getStorage()?.recordModelUsage(`${next.model.provider}/${next.model.id}`);
 
@@ -485,6 +500,7 @@ export class ModelControls {
 		const nextModel = availableModels[nextIndex];
 
 		const apiKey = await this.#host.modelRegistry.getApiKey(nextModel, this.#host.sessionId());
+		if (this.#host.isDisposed()) return undefined;
 		if (!apiKey) {
 			throw new Error(`No API key for ${nextModel.provider}/${nextModel.id}`);
 		}
@@ -492,6 +508,7 @@ export class ModelControls {
 		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(nextModel));
 		this.#host.clearActiveRetryFallback();
 		await this.#host.setModelWithProviderSessionReset(nextModel);
+		if (this.#host.isDisposed()) return undefined;
 		this.#host.sessionManager.appendModelChange(`${nextModel.provider}/${nextModel.id}`);
 		this.#host.settings.getStorage()?.recordModelUsage(`${nextModel.provider}/${nextModel.id}`);
 		// Re-apply the current thinking level (or auto) for the newly selected model
@@ -633,9 +650,18 @@ export class ModelControls {
 	 * only); when non-blank it is classified instead of `promptText`.
 	 * Bounded by a timeout + abort; on failure it preserves the last classified
 	 * level, or uses the provisional concrete level before the first resolution.
+	 * `signal` is the prompt's setup signal: once it aborts, no classifier request
+	 * starts and a running one is cancelled; once disposal begins, no usage or
+	 * level is recorded.
 	 * Never throws into the turn, and never clears `#autoThinking`.
 	 */
-	async applyAutoThinkingLevel(promptText: string, generation: number, solutionSpace?: string): Promise<void> {
+	async applyAutoThinkingLevel(
+		promptText: string,
+		generation: number,
+		signal: AbortSignal,
+		solutionSpace?: string,
+	): Promise<void> {
+		if (signal.aborted) return;
 		const model = this.#model;
 		if (!model?.reasoning || model.thinking?.unverified) return;
 		// Models with reasoning but no controllable effort surface (devin-agent
@@ -664,9 +690,11 @@ export class ModelControls {
 						registry: this.#host.modelRegistry,
 						model,
 						sessionId: this.#host.sessionId(),
-						signal: controller.signal,
+						signal: AbortSignal.any([signal, controller.signal]),
 						metadataResolver: provider => this.#host.agent.metadataForProvider(provider),
 						onUsage: usage => {
+							// The request was billed, but a disposing session appends no entries.
+							if (this.#host.isDisposed()) return;
 							const entryId = this.#host.sessionManager.appendModelUsage(usage, usageOwner);
 							if (entryId) usageOwner.parentId = entryId;
 						},
@@ -682,8 +710,8 @@ export class ModelControls {
 			}
 		}
 
-		// Drop the result if the turn was aborted/superseded while classifying.
-		if (this.#host.promptGeneration() !== generation || !this.#autoThinking) return;
+		// Drop the result if the turn was aborted/superseded, or the session began disposing, while classifying.
+		if (this.#host.promptGeneration() !== generation || !this.#autoThinking || this.#host.isDisposed()) return;
 
 		const effort = clampThinkingLevelToCeiling(
 			model,
