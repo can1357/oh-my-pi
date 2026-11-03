@@ -37,6 +37,19 @@ describe("stripTrailingFetchAdvice", () => {
 		expect(once).not.toContain("verbose: true");
 	});
 
+	// Round 10: the stderr tail redacts every word with its context, so ordinary
+	// stderr pays this per word. 1 MiB of "noise " cost about 4 s of CPU before.
+	it("costs little per ordinary stderr word", () => {
+		const context = "noise noise noise noise noise noise noise noise noise noise ";
+		const started = process.cpuUsage();
+		for (let i = 0; i < 175_000; i++) {
+			redactDiagnosticText(context);
+			redactDiagnosticText(`${context}noise`);
+		}
+		const used = process.cpuUsage(started);
+		expect((used.user + used.system) / 1000).toBeLessThan(1_500);
+	});
+
 	it("stays linear on megabytes of near-miss hints", () => {
 		const nearMiss = `${HINT}\n`.repeat(40_000) + "!";
 		const started = performance.now();

@@ -68,7 +68,10 @@ function completeFetchAdviceStarts(value: string, end: number): number[] {
 		while (cut > 0 && /\s/.test(value[cut - 1]!)) cut--;
 		if (cut > 0 && value[cut - 1] === ".") cut--;
 		const start = cut - FETCH_VERBOSE_ADVICE.length;
-		if (start < 0 || value.slice(start, cut).toLowerCase() !== FETCH_VERBOSE_ADVICE) return starts;
+		// A complete hint ends in ")": check that before building the slice.
+		if (start < 0 || value[cut - 1] !== ")" || value.slice(start, cut).toLowerCase() !== FETCH_VERBOSE_ADVICE) {
+			return starts;
+		}
 		starts.push(start);
 		end = start;
 	}
@@ -76,8 +79,13 @@ function completeFetchAdviceStarts(value: string, end: number): number[] {
 
 /** Length of the longest end of `value` that is the start of a fetch hint (case-insensitive). */
 function fetchAdvicePrefixLength(value: string): number {
-	for (let length = Math.min(value.length, FETCH_VERBOSE_ADVICE.length); length > 0; length--) {
-		if (FETCH_VERBOSE_ADVICE.startsWith(value.slice(-length).toLowerCase())) return length;
+	// The hint starts with "f": only a tail starting at an "f" can be its start, so
+	// ordinary text (most stderr) costs one scan of at most the hint's length.
+	const from = Math.max(0, value.length - FETCH_VERBOSE_ADVICE.length);
+	for (let start = from; start < value.length; start++) {
+		const char = value[start];
+		if (char !== "f" && char !== "F") continue;
+		if (FETCH_VERBOSE_ADVICE.startsWith(value.slice(start).toLowerCase())) return value.length - start;
 	}
 	return 0;
 }
