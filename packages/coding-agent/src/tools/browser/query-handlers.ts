@@ -107,7 +107,6 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 	const exact = nameMatch?.[4]?.toLocaleLowerCase() === "exact";
 	const roles: Record<string, string> = {
 		article: "article",
-		aside: "complementary",
 		dialog: "dialog",
 		fieldset: "group",
 		details: "group",
@@ -126,7 +125,6 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 		dfn: "term",
 		dd: "definition",
 		dl: "descriptionlist",
-		datalist: "generic",
 		figure: "figure",
 		blockquote: "blockquote",
 		p: "paragraph",
@@ -141,6 +139,30 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 		time: "time",
 		mark: "mark",
 	};
+	const hasLandmarkName = (element: Element): boolean =>
+		Boolean(
+			idrefText(element) ||
+			normalizeSpace(element.getAttribute("aria-label") ?? "") ||
+			normalizeSpace(element.getAttribute("title") ?? ""),
+		);
+	const isScoped = (element: Element, includeMain: boolean): boolean => {
+		for (let parent = element.parentElement; parent; parent = parent.parentElement) {
+			const explicit = parent.getAttribute("role")?.trim().split(/\s+/)[0]?.toLocaleLowerCase();
+			if (!explicit && parent.tagName.toLocaleLowerCase() === "section") return true;
+			// Browser ancestors have the same element interface as the queried node.
+			const ancestor = parent as Element;
+			const role = explicit || implicitRole(ancestor);
+			if (
+				role === "article" ||
+				role === "complementary" ||
+				role === "navigation" ||
+				(includeMain && role === "main")
+			) {
+				return true;
+			}
+		}
+		return false;
+	};
 	const implicitRole = (element: Element): string | null => {
 		const tag = element.tagName.toLocaleLowerCase();
 		if ((tag === "a" || tag === "area") && element.hasAttribute("href")) return "link";
@@ -154,8 +176,7 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 		if (tag === "img") {
 			return element.getAttribute("alt") === "" &&
 				!element.hasAttribute("tabindex") &&
-				!normalizeSpace(element.getAttribute("aria-label") ?? "") &&
-				!idrefText(element) &&
+				!Array.from(element.attributes).some(attribute => attribute.name.startsWith("aria-")) &&
 				!normalizeSpace(element.getAttribute("title") ?? "")
 				? "none"
 				: "img";
@@ -165,15 +186,10 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 		if (tag === "nav") return "navigation";
 		if (tag === "main") return "main";
 		if (tag === "form") return "form";
-		if (tag === "section") {
-			return idrefText(element) ||
-				normalizeSpace(element.getAttribute("aria-label") ?? "") ||
-				normalizeSpace(element.getAttribute("title") ?? "")
-				? "region"
-				: "generic";
-		}
+		if (tag === "section") return hasLandmarkName(element) ? "region" : "generic";
+		if (tag === "aside") return hasLandmarkName(element) || !isScoped(element, false) ? "complementary" : "generic";
 		if (tag === "header" || tag === "footer") {
-			const scoped = element.parentElement?.closest("article, aside, main, nav, section");
+			const scoped = isScoped(element, true);
 			return tag === "header" ? (scoped ? "sectionheader" : "banner") : scoped ? "sectionfooter" : "contentinfo";
 		}
 		if (Object.hasOwn(roles, tag)) return roles[tag];
