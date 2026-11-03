@@ -475,57 +475,135 @@ function getWithdrawnRates(provider: string, modelId: string): readonly Effectiv
 }
 
 /**
- * Relative tolerance for a recorded cost leg to count as a withdrawn card's
- * price. The recomputation repeats the released arithmetic on the same token
- * counts, so a real match is exact; the bound admits only rounding noise (a
- * few double operations, about 1e-15 relative). Any other price, such as a
- * user's own card or a provider-reported cost, differs by far more on a leg.
+ * Relative tolerance for a recorded cost leg to equal a computed price. The
+ * recomputation repeats the released arithmetic on the same token counts, so
+ * a real match is exact; the bound admits only rounding noise (a few double
+ * operations, about 1e-15 relative).
  */
 const WITHDRAWN_PRICE_TOLERANCE = 1e-9;
 
-function isSamePrice(recorded: number, withdrawn: number): boolean {
+function isSamePrice(recorded: number, computed: number): boolean {
+	return Math.abs(recorded - computed) <= WITHDRAWN_PRICE_TOLERANCE * Math.max(Math.abs(recorded), Math.abs(computed));
+}
+
+function isSameCost(recorded: UsageCost, computed: UsageCost): boolean {
 	return (
-		Math.abs(recorded - withdrawn) <= WITHDRAWN_PRICE_TOLERANCE * Math.max(Math.abs(recorded), Math.abs(withdrawn))
+		isSamePrice(recorded.input, computed.input) &&
+		isSamePrice(recorded.output, computed.output) &&
+		isSamePrice(recorded.cacheRead, computed.cacheRead) &&
+		isSamePrice(recorded.cacheWrite, computed.cacheWrite) &&
+		isSamePrice(recorded.total, computed.total)
 	);
 }
 
+/** One request of one model in one transcript, with the cost it recorded. */
+export interface RecordedRequest {
+	tokens: CostTokens;
+	cost: UsageCost;
+	timestamp: number;
+}
+
+const BILLED_LEGS = ["input", "output", "cacheRead", "cacheWrite"] as const;
+
+/** Tokens a cost leg bills: the conversation bucket plus its orchestration share. */
+function billedTokens(tokens: CostTokens, leg: (typeof BILLED_LEGS)[number]): number {
+	const orchestration = tokens.orchestration;
+	if (leg === "cacheWrite" || !orchestration) return tokens[leg];
+	return tokens[leg] + (orchestration[leg] ?? 0);
+}
+
 /**
- * The catalog's price for a request whose recorded cost is what a withdrawn
- * rate card (`withdrawn-rates`) charged it, or null when the recorded cost
- * stands. Every leg must match the card's price for these tokens at this
- * time: a cost that agrees only on its total (a provider-reported total), a
- * request before the card started, or one with no request timestamp keeps
- * its recorded cost. The re-price is idempotent: the catalog's price is not
- * the withdrawn card's, so a repaired row never matches again.
+ * A running proof, over the requests of one model in one transcript, that a
+ * withdrawn rate card (`withdrawn-rates`) priced them.
+ *
+ * Equal amounts do not show which price produced them: a `models.yml` card
+ * with the withdrawn card's rates records the same costs. A user's price is
+ * flat, though (an explicit `cost` drops the catalog schedule), so it charges
+ * one rate per billed leg on every request. The catalog schedule changes the
+ * rate with the tariff period and with its dated cards. So the transcript
+ * proves the catalog priced it only when:
+ *
+ * - every priced request from the card's start matches either a withdrawn
+ *   card's price or the current catalog price for its tokens and time (one
+ *   other recorded cost means another price was in use: nothing changes), and
+ * - two of those requests recorded different per-token rates on one billed leg.
+ *
+ * A transcript that never changed rate (one tariff period only) is not
+ * proven: it cannot be told from a flat card with the same rates.
  */
-export function repriceWithdrawnRateCost(
-	provider: string,
-	modelId: string,
-	tokens: CostTokens,
-	recorded: Partial<UsageCost>,
-	timestamp: number,
-): UsageCost | null {
-	if (!(typeof recorded.total === "number" && recorded.total > 0) || !hasRequestTimestamp(timestamp)) return null;
+class WithdrawnRateProof {
+	readonly #cost: ModelCost;
+	readonly #cards: readonly EffectiveTokenCost[];
+	readonly #rates: Partial<Record<(typeof BILLED_LEGS)[number], number>> = {};
+	#rateChanged = false;
+	#contradicted = false;
+	#withdrawnSeen = false;
+
+	constructor(cost: ModelCost, cards: readonly EffectiveTokenCost[]) {
+		this.#cost = cost;
+		this.#cards = cards;
+	}
+
+	/** Whether every request added so far is consistent with the catalog and the rate changed. */
+	get proven(): boolean {
+		return this.#rateChanged && !this.#contradicted;
+	}
+
+	/** Whether the transcript is proven and a request in it is at a withdrawn card's price. */
+	get repricesAny(): boolean {
+		return this.proven && this.#withdrawnSeen;
+	}
+
+	/** Adds one request; returns the catalog price when it is at a withdrawn card's price, else null. */
+	add(request: RecordedRequest): UsageCost | null {
+		if (this.#contradicted || !hasRequestTimestamp(request.timestamp)) return null;
+		if (request.timestamp < this.#cards[0]!.effectiveFrom) return null;
+		const usage = pricingUsage(request.tokens);
+		if (usage.totalTokens === 0) return null;
+		const current = calculateUsageCost(this.#cost, usage, request.timestamp);
+		const withdrawn = this.#cards.some(card => {
+			const charged = calculateWithdrawnRateCost(this.#cost, card, usage, request.timestamp);
+			return charged !== undefined && isSameCost(request.cost, charged);
+		});
+		if (!withdrawn && !isSameCost(request.cost, current)) {
+			this.#contradicted = true;
+			return null;
+		}
+		for (const leg of BILLED_LEGS) {
+			const count = billedTokens(request.tokens, leg);
+			if (count <= 0 || request.cost[leg] <= 0) continue;
+			const rate = request.cost[leg] / count;
+			const seen = this.#rates[leg];
+			if (seen === undefined) this.#rates[leg] = rate;
+			else if (!isSamePrice(rate, seen)) this.#rateChanged = true;
+		}
+		this.#withdrawnSeen ||= withdrawn;
+		return withdrawn ? current : null;
+	}
+}
+
+/** A fresh proof for one transcript's requests of this model; null when no withdrawn card covers it. */
+function withdrawnRateProof(provider: string, modelId: string): WithdrawnRateProof | null {
 	const cards = getWithdrawnRates(provider, modelId);
 	if (cards.length === 0) return null;
 	const cost = getCatalogCost(provider, modelId);
-	if (!cost) return null;
-	const charged = normalizeUsageCost(recorded);
-	const usage = pricingUsage(tokens);
-	for (const card of cards) {
-		const withdrawn = calculateWithdrawnRateCost(cost, card, usage, timestamp);
-		if (
-			withdrawn &&
-			isSamePrice(charged.input, withdrawn.input) &&
-			isSamePrice(charged.output, withdrawn.output) &&
-			isSamePrice(charged.cacheRead, withdrawn.cacheRead) &&
-			isSamePrice(charged.cacheWrite, withdrawn.cacheWrite) &&
-			isSamePrice(charged.total, withdrawn.total)
-		) {
-			return calculateUsageCost(cost, usage, timestamp);
-		}
-	}
-	return null;
+	return cost ? new WithdrawnRateProof(cost, cards) : null;
+}
+
+/**
+ * The catalog price for each request of one transcript that a withdrawn rate
+ * card priced, or null where the recorded cost stands: all null unless the
+ * transcript proves the catalog priced it ({@link WithdrawnRateProof}). All
+ * requests must share one provider and model.
+ */
+export function repriceWithdrawnRateRequests(
+	provider: string,
+	modelId: string,
+	requests: readonly RecordedRequest[],
+): (UsageCost | null)[] {
+	const proof = withdrawnRateProof(provider, modelId);
+	const prices = requests.map(request => proof?.add(request) ?? null);
+	return proof?.proven ? prices : requests.map(() => null);
 }
 
 function normalizeUsageCost(cost: Partial<UsageCost>): UsageCost {
@@ -570,10 +648,7 @@ function resolveStoredCost(stats: MessageStatsInput): ResolvedCost {
 	// dated rate cards reprice it at the card for the request's timestamp.
 	const recurring = catalogCost?.timeBased !== undefined && hasRecurringTariff(catalogCost.timeBased);
 	if (storedCost && Number.isFinite(storedCost.total) && (storedCost.total !== 0 || recurring)) {
-		// A cost recorded at a withdrawn rate card was the catalog's error, not
-		// the request's price; a re-ingest of its transcript must not restore it.
-		const repriced = repriceWithdrawnRateCost(stats.provider, stats.model, stats.usage, storedCost, stats.timestamp);
-		return { cost: repriced ?? storedCost, unpriced: false };
+		return { cost: storedCost, unpriced: false };
 	}
 
 	// Without a request timestamp a scheduled card has no tariff to select, and
@@ -667,6 +742,7 @@ function backfillMissingCatalogCosts(database: Database): void {
 
 interface WithdrawnRateRepairRow {
 	id: number;
+	session_file: string;
 	timestamp: number;
 	input_tokens: number;
 	output_tokens: number;
@@ -679,30 +755,51 @@ interface WithdrawnRateRepairRow {
 	cost_total: number;
 }
 
+/** A model whose stored rows a withdrawn-card repair reads, and the transcripts to read; all when absent. */
+interface WithdrawnRateRepairScope {
+	provider: string;
+	model: string;
+	sessionFiles?: ReadonlySet<string>;
+}
+
+const WITHDRAWN_RATE_ROW_COLUMNS = `id, session_file, timestamp, input_tokens, output_tokens, cache_read_tokens,
+	cache_write_tokens, cost_input, cost_output, cost_cache_read, cost_cache_write, cost_total`;
+
+function recordedRequest(row: WithdrawnRateRepairRow): RecordedRequest {
+	return {
+		tokens: {
+			input: row.input_tokens,
+			output: row.output_tokens,
+			cacheRead: row.cache_read_tokens,
+			cacheWrite: row.cache_write_tokens,
+		},
+		cost: {
+			input: row.cost_input,
+			output: row.cost_output,
+			cacheRead: row.cost_cache_read,
+			cacheWrite: row.cost_cache_write,
+			total: row.cost_total,
+		},
+		timestamp: row.timestamp,
+	};
+}
+
 /**
- * Reprice stored rows whose cost is a withdrawn rate card's price
- * (`withdrawn-rates`). Ingest reprices such costs as they arrive
- * ({@link resolveStoredCost}), but rows stored by a release that carried the
- * card keep its price until this pass, and a deleted transcript is never
- * re-ingested. Only rows whose every cost leg matches the card's price for
- * their tokens change, together with their no-cache input cost, which the
- * same card priced.
+ * Re-price the stored rows of each transcript that proves a withdrawn rate card
+ * priced them ({@link WithdrawnRateProof}), with their no-cache input cost,
+ * which the same card priced. Rows of the card's models before its start are
+ * left alone. Two streaming passes per model hold no rows: the first proves
+ * transcripts, the second re-prices the proven ones. The caller holds the
+ * transaction. Idempotent: a repaired row is at the current catalog price, so
+ * a second pass finds nothing at a withdrawn card's price.
  */
-function repairWithdrawnRateCosts(database: Database): void {
-	const ran = database.query("SELECT value FROM meta WHERE key = ?").get(WITHDRAWN_RATE_REPAIR_KEY) as
-		| { value: string }
-		| undefined;
-	if (ran?.value === VERSION) return;
-	const markRan = database.query("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)");
-	const models = database.query("SELECT DISTINCT provider, model FROM messages").all() as {
-		provider: string;
-		model: string;
-	}[];
-	const select = database.query(`
-		SELECT id, timestamp, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
-			cost_input, cost_output, cost_cache_read, cost_cache_write, cost_total
-		FROM messages
-		WHERE provider = ? AND model = ? AND timestamp >= ? AND cost_total > 0
+function repriceStoredWithdrawnRateRows(database: Database, scopes: Iterable<WithdrawnRateRepairScope>): void {
+	const byModel = database.query(`
+		SELECT ${WITHDRAWN_RATE_ROW_COLUMNS} FROM messages WHERE model = ? AND provider = ? AND timestamp >= ?
+	`);
+	const bySession = database.query(`
+		SELECT ${WITHDRAWN_RATE_ROW_COLUMNS} FROM messages
+		WHERE session_file = ? AND model = ? AND provider = ? AND timestamp >= ?
 	`);
 	const update = database.query(`
 		UPDATE messages
@@ -710,35 +807,60 @@ function repairWithdrawnRateCosts(database: Database): void {
 			cost_no_cache_input = ?
 		WHERE id = ?
 	`);
-
-	const applyRepair = database.transaction(() => {
-		for (const { provider, model } of models) {
-			const earliest = getWithdrawnRates(provider, model)[0];
-			if (!earliest) continue;
-			for (const row of select.all(provider, model, earliest.effectiveFrom) as WithdrawnRateRepairRow[]) {
-				const tokens: CostTokens = {
-					input: row.input_tokens,
-					output: row.output_tokens,
-					cacheRead: row.cache_read_tokens,
-					cacheWrite: row.cache_write_tokens,
-				};
-				const recorded: UsageCost = {
-					input: row.cost_input,
-					output: row.cost_output,
-					cacheRead: row.cost_cache_read,
-					cacheWrite: row.cost_cache_write,
-					total: row.cost_total,
-				};
-				const cost = repriceWithdrawnRateCost(provider, model, tokens, recorded, row.timestamp);
+	for (const { provider, model, sessionFiles } of scopes) {
+		const start = getWithdrawnRates(provider, model)[0]?.effectiveFrom;
+		if (start === undefined || !withdrawnRateProof(provider, model)) continue;
+		const rows = (sessionFile: string) =>
+			bySession.iterate(sessionFile, model, provider, start) as IterableIterator<WithdrawnRateRepairRow>;
+		// One proof per transcript; a proof holds a few numbers, never rows.
+		const proofs = new Map<string, WithdrawnRateProof>();
+		const prove = (row: WithdrawnRateRepairRow) => {
+			let proof = proofs.get(row.session_file);
+			if (!proof) {
+				proof = withdrawnRateProof(provider, model)!;
+				proofs.set(row.session_file, proof);
+			}
+			proof.add(recordedRequest(row));
+		};
+		if (sessionFiles) {
+			for (const sessionFile of sessionFiles) for (const row of rows(sessionFile)) prove(row);
+		} else {
+			for (const row of byModel.iterate(model, provider, start) as IterableIterator<WithdrawnRateRepairRow>) {
+				prove(row);
+			}
+		}
+		for (const [sessionFile, proved] of proofs) {
+			if (!proved.repricesAny) continue;
+			const proof = withdrawnRateProof(provider, model)!;
+			for (const row of rows(sessionFile)) {
+				const request = recordedRequest(row);
+				const cost = proof.add(request);
 				if (!cost) continue;
-				const noCacheInputCost = calculateNoCacheInputCost(provider, model, tokens, row.timestamp) ?? 0;
+				const noCacheInputCost = calculateNoCacheInputCost(provider, model, request.tokens, request.timestamp) ?? 0;
 				update.run(cost.input, cost.output, cost.cacheRead, cost.cacheWrite, cost.total, noCacheInputCost, row.id);
 			}
 		}
-		markRan.run(WITHDRAWN_RATE_REPAIR_KEY, VERSION);
-	});
+	}
+}
 
-	applyRepair();
+/**
+ * Once per release, re-price stored rows a withdrawn rate card priced
+ * (`withdrawn-rates`). Ingest re-prices a transcript's rows as they arrive
+ * ({@link insertMessageStats}), but rows stored by a release that carried the
+ * card keep its price until this pass, and a deleted transcript is never
+ * re-ingested.
+ */
+function repairWithdrawnRateCosts(database: Database): void {
+	const ran = database.query("SELECT value FROM meta WHERE key = ?").get(WITHDRAWN_RATE_REPAIR_KEY) as
+		| { value: string }
+		| undefined;
+	if (ran?.value === VERSION) return;
+	const markRan = database.query("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)");
+	const models = database.query("SELECT DISTINCT provider, model FROM messages").all() as WithdrawnRateRepairScope[];
+	database.transaction(() => {
+		repriceStoredWithdrawnRateRows(database, models);
+		markRan.run(WITHDRAWN_RATE_REPAIR_KEY, VERSION);
+	})();
 }
 
 function backfillNoCacheInputCosts(database: Database): void {
@@ -1108,8 +1230,22 @@ export function insertMessageStats(stats: Iterable<MessageStatsInput>): number {
 			cost_unpriced = excluded.cost_unpriced,
 			service_tier = excluded.service_tier`,
 	});
-	return atomically(db, () => {
+	// Transcripts whose rows a withdrawn rate card may have priced: re-priced
+	// with the batch, so a re-ingest of a transcript cannot restore the card's price.
+	const withdrawn = new Map<string, (WithdrawnRateRepairScope & { sessionFiles: Set<string> }) | null>();
+	const database = db;
+	return atomically(database, () => {
 		for (const s of stats) {
+			const key = `${s.provider}\u0000${s.model}`;
+			let scope = withdrawn.get(key);
+			if (scope === undefined) {
+				scope =
+					getWithdrawnRates(s.provider, s.model).length > 0
+						? { provider: s.provider, model: s.model, sessionFiles: new Set() }
+						: null;
+				withdrawn.set(key, scope);
+			}
+			scope?.sessionFiles.add(s.sessionFile);
 			const { cost, unpriced } = resolveStoredCost(s);
 			const noCacheInputCost = calculateNoCacheInputCost(s.provider, s.model, s.usage, s.timestamp) ?? 0;
 			writer.add(
@@ -1145,7 +1281,12 @@ export function insertMessageStats(stats: Iterable<MessageStatsInput>): number {
 				],
 			);
 		}
-		return writer.finish();
+		const written = writer.finish();
+		repriceStoredWithdrawnRateRows(
+			database,
+			[...withdrawn.values()].filter(scope => scope !== null),
+		);
+		return written;
 	});
 }
 
