@@ -2537,6 +2537,14 @@ export class ForkSourceNotFoundError extends Error {
  * A trailing atomic rewrite still rewrites the header cwd after the path is
  * repointed.
  */
+/**
+ * How a fenced atomic rewrite ended: it published the transcript; it did not
+ * run (released, no file); the disk epoch moved past it but its own body is
+ * the current file ("kept"); or the epoch moved past it and whether its change
+ * is saved is settled off the disk chain, with `superseded` as the error if not.
+ */
+type FencedRewriteOutcome = "published" | "skipped" | "kept" | { readonly superseded: unknown };
+
 export class SessionManager {
 	#cwd: string;
 	/** Additional workspace directories beyond cwd (multi-root). Normalized absolute, deduped, excludes cwd. */
@@ -2583,17 +2591,21 @@ export class SessionManager {
 	 */
 	#deferredPublishGen = 0;
 	/**
-	 * The highest body revision (see {@link #bodyRevision}) known durable: some
-	 * full body serialized at that revision or later reached storage, so every
-	 * in-place change made before it is saved.
+	 * Publishes under way outside the disk chain, which waiting for the chain
+	 * does not cover: deferred synchronous publishes awaiting their store's
+	 * confirmation, and authoritative repairs (which reset the chain). A
+	 * superseded rewrite waits for them before it decides (see
+	 * {@link #settleSuperseded}).
 	 */
-	#durableRevision = 0;
+	readonly #publishesOffChain = new Set<Promise<void>>();
 	/**
-	 * Full-body publishes under way (atomic rewrites running, deferred
-	 * synchronous publishes awaiting confirmation): a superseded rewrite waits
-	 * for them before it decides (see {@link #settleSuperseded}).
+	 * The file and body revision (see {@link #bodyRevision}) of the newest full
+	 * body known durable: written, or confirmed by a store that defers its
+	 * publishes. A superseded rewrite is kept only once it covers the revision
+	 * the rewrite was asked to save, in the session's current file (see
+	 * {@link #settleSuperseded}).
 	 */
-	readonly #fullPublishesUnderWay = new Set<Promise<void>>();
+	#durableBody: { file: string; revision: number } | undefined;
 	/** Lazy gate crossed (ensureOnDisk / loaded file): every entry must persist from now on. */
 	#forceFileCreation = false;
 	/**
@@ -3394,6 +3406,8 @@ export class SessionManager {
 			return;
 		}
 		if (!this.#persist || !this.#sessionFile) return;
+		const repair = Promise.withResolvers<void>();
+		this.#publishesOffChain.add(repair.promise);
 		const previousDiskTail = this.#diskTail;
 		const writer = this.#writer;
 		this.#diskEpoch++;
@@ -3457,6 +3471,8 @@ export class SessionManager {
 			throw this.#latchIndeterminate(operationError, [toError(error)]);
 		} finally {
 			if (this.#atomicRewriteFenceEpoch === epoch) this.#atomicRewriteFenceEpoch = null;
+			this.#publishesOffChain.delete(repair.promise);
+			repair.resolve();
 		}
 	}
 
@@ -3555,13 +3571,18 @@ export class SessionManager {
 	 */
 	#recordFullRewrite(target: string, body: SessionFileBody): void {
 		this.#expectedDiskSize = body.bytes;
-		this.#recordDurableRevision(body.stamp.revision);
+		this.#recordDurableBody(target, body);
 		this.#recordMoveWritten(target);
 	}
 
-	/** A full body serialized at `revision` reached storage. */
-	#recordDurableRevision(revision: number): void {
-		if (revision > this.#durableRevision) this.#durableRevision = revision;
+	/**
+	 * A full body serialized at `body.stamp.revision` reached storage at
+	 * `target`: every in-place change made before it is saved there.
+	 */
+	#recordDurableBody(target: string, body: SessionFileBody): void {
+		const durable = this.#durableBody;
+		if (durable?.file === target && durable.revision >= body.stamp.revision) return;
+		this.#durableBody = { file: target, revision: body.stamp.revision };
 	}
 
 	/**
@@ -3826,9 +3847,9 @@ export class SessionManager {
 				const publishedPath = targetPath;
 				const queued = Promise.withResolvers<void>();
 				confirmation = queued;
-				this.#fullPublishesUnderWay.add(queued.promise);
+				this.#publishesOffChain.add(queued.promise);
 				const settleConfirmation = () => {
-					this.#fullPublishesUnderWay.delete(queued.promise);
+					this.#publishesOffChain.delete(queued.promise);
 					queued.resolve();
 				};
 				const confirming = this.#confirmDeferredPublish(
@@ -3865,7 +3886,7 @@ export class SessionManager {
 			}
 		} catch (err) {
 			if (confirmation) {
-				this.#fullPublishesUnderWay.delete(confirmation.promise);
+				this.#publishesOffChain.delete(confirmation.promise);
 				confirmation.resolve();
 			}
 			this.#noteDiskFailure(err);
@@ -3879,7 +3900,7 @@ export class SessionManager {
 		// whatever was queued since — to another moved file or this one —
 		// and every in-place change it carries is durable.
 		this.#recordMoveWritten(publishedPath);
-		this.#recordDurableRevision(stamp.revision);
+		this.#recordDurableBody(publishedPath, body);
 		// A newer deferred publish owns the durability record now;
 		// this body may no longer be the backend's latest, so record no size.
 		if (generation !== this.#deferredPublishGen) return;
@@ -3912,51 +3933,66 @@ export class SessionManager {
 	}
 
 	/**
-	 * Settles an atomic rewrite that a newer write superseded. It counts as kept
-	 * once the body revision it carried is durable — its own body, read back
-	 * from the session's current file, or any later full body (each body
-	 * carries every in-place change made before it was serialized). Its own
-	 * publish is over, so it first leaves the publishes under way (two
-	 * superseded rewrites must not wait for each other), then waits for the
-	 * ones still under way. When none is left and the change is still not
-	 * durable, it writes the transcript as it is now itself, once, as an append
-	 * would: the change is then saved, or that write's failure — else `error` —
-	 * reaches the caller, so a caller that changed entries in place restores
-	 * them knowing no write of this rewrite is left to land.
+	 * The outcome of an atomic rewrite the disk epoch moved past, decided on the
+	 * disk chain where it was found: its own body, read back, is what the
+	 * session's current file holds — its change is saved ("kept"); or it is not,
+	 * and `error` stands until {@link #settleSuperseded} asks the manager's own
+	 * durability state. A body that landed in a file the session has since moved
+	 * off settles that move's file, but does not save the change.
 	 */
-	async #settleSuperseded(
-		revision: number,
-		own: PromiseWithResolvers<void>,
+	async #supersededOutcome(
 		error: unknown,
 		landed?: { sessionFile: string; body: SessionFileBody },
-	): Promise<false> {
-		this.#fullPublishesUnderWay.delete(own.promise);
-		own.resolve();
+	): Promise<FencedRewriteOutcome> {
 		if (landed) {
 			try {
 				if (textMatchesLines(await this.#storage.readText(landed.sessionFile), landed.body.lines)) {
-					// Landed in the session's current file: what it carried is saved. Landed
-					// in a file the session has since moved off: that move's file is written,
-					// but the current file does not hold the change.
-					if (landed.sessionFile === this.#sessionFile) this.#recordFullRewrite(landed.sessionFile, landed.body);
-					else this.#recordMoveWritten(landed.sessionFile);
+					if (landed.sessionFile === this.#sessionFile) {
+						// Its body is the current file: its change is saved. Writes made after it
+						// was serialized are not, so the file is no longer current.
+						this.#recordFullRewrite(landed.sessionFile, landed.body);
+						this.#fileIsCurrent = false;
+						this.#rewriteRequired = true;
+						return "kept";
+					}
+					this.#recordMoveWritten(landed.sessionFile);
 				}
 			} catch {
-				// Unreadable: whether the change is durable is decided by the other publishes.
+				// Unreadable: the manager's own state decides.
 			}
 		}
-		let wrote = false;
-		for (;;) {
-			if (this.#durableRevision >= revision) return false;
-			const underWay = [...this.#fullPublishesUnderWay];
-			if (underWay.length > 0) {
-				await Promise.race(underWay);
-				continue;
-			}
-			if (wrote || this.#released) throw this.#diskFailure ?? error;
-			wrote = true;
-			this.#rewriteSynchronously();
+		return { superseded: error };
+	}
+
+	/**
+	 * Settles an atomic rewrite that a newer write superseded — or that never
+	 * got its turn on the disk chain — from outside the chain, by what storage
+	 * holds rather than by reasoning about which write came next. Once every
+	 * write already under way has settled (the disk chain, the store's own
+	 * queue, a deferred publish awaiting its confirmation), it is kept when a
+	 * full body serialized at `revision` or later is durable in the session's
+	 * current file: every in-place change made before the rewrite was asked for
+	 * is saved there. It writes nothing itself: a write of its own would also
+	 * save in-place changes other callers are about to restore.
+	 *
+	 * Otherwise `error`, or the latched persistence failure, reaches the caller,
+	 * which restores its change in memory. The manager then treats its file as
+	 * not current, so its next write replaces the file with the transcript as
+	 * memory holds it — the restored state — even if a write that ran after
+	 * this verdict saved the change in the meantime.
+	 */
+	async #settleSuperseded(revision: number, error: unknown): Promise<void> {
+		try {
+			await this.flushEntries();
+		} catch {
+			// A latched failure is reported below if the change is not saved.
 		}
+		while (this.#publishesOffChain.size > 0) await Promise.race(this.#publishesOffChain);
+		const durable = this.#durableBody;
+		if (durable && durable.file === this.#sessionFile && durable.revision >= revision) return;
+		this.#fileIsCurrent = false;
+		this.#rewriteRequired = true;
+		throw this.#diskFailure ?? error;
 	}
 
 	/**
@@ -3967,17 +4003,21 @@ export class SessionManager {
 	 * cannot open a fresh writer that the pending replacement would then detach
 	 * from the current JSONL path. A `commitGuard` also prevents a superseding
 	 * synchronous rewrite from being overwritten by the stale body serialized
-	 * before it ran.
+	 * before it ran. A rewrite the disk epoch moved past is settled once its
+	 * turn on the chain is over (see {@link #settleSuperseded}).
 	 */
 	async #rewriteAtomically(): Promise<void> {
 		if (!this.#persist || !this.#sessionFile) return;
 		if (this.#released) return;
 
 		const startEpoch = this.#diskEpoch;
-		const revision = this.#bodyRevision;
+		// Every change made before this rewrite is carried by bodies serialized at this revision or later.
+		const revision = ++this.#bodyRevision;
+		let outcome: FencedRewriteOutcome | undefined;
 		await this.#scheduleDiskWork(
 			async () => {
-				if (await this.#runFencedAtomicRewrite(startEpoch, revision)) {
+				outcome = await this.#runFencedAtomicRewrite(startEpoch);
+				if (outcome === "published") {
 					this.#fileIsCurrent = true;
 					this.#materializeBreadcrumb();
 					this.#rewriteRequired = false;
@@ -3986,6 +4026,12 @@ export class SessionManager {
 			},
 			{ epoch: startEpoch },
 		);
+		// A task the epoch moved past before it started never ran; it is settled like a superseded one.
+		if (outcome === undefined) {
+			await this.#settleSuperseded(revision, new Error("Session rewrite superseded before it started"));
+		} else if (typeof outcome === "object") {
+			await this.#settleSuperseded(revision, outcome.superseded);
+		}
 	}
 
 	/**
@@ -3993,27 +4039,23 @@ export class SessionManager {
 	 * `#persistTitleChangeEntry` fallback. Holds `#atomicRewriteActive` across
 	 * the writer close and the full-file replace, and loops on
 	 * `#atomicRewriteDirty` so any fenced append that lands during the rewrite
-	 * is captured before the task resolves. Returns `false` when the disk epoch
-	 * moved so callers skip current-marking updates — once the body revision it
-	 * was asked to save, `revision`, is durable; else it throws (see
-	 * {@link #settleSuperseded}).
+	 * is captured before the task resolves. A rewrite the disk epoch moved past
+	 * returns what {@link #supersededOutcome} found; its caller settles it off
+	 * the chain.
 	 */
-	async #runFencedAtomicRewrite(epoch: number, revision: number): Promise<boolean> {
-		if (this.#released) return false;
+	async #runFencedAtomicRewrite(epoch: number): Promise<FencedRewriteOutcome> {
+		if (this.#released) return "skipped";
 		this.#atomicRewriteFenceEpoch = epoch;
 		let recoveries = 0;
-		const run = Promise.withResolvers<void>();
-		this.#fullPublishesUnderWay.add(run.promise);
-		const superseded = () =>
-			this.#diskFailure ?? new Error("Session rewrite superseded by a write that did not persist it");
+		const superseded = () => new Error("Session rewrite superseded by a write that did not persist it");
 		try {
 			do {
 				this.#atomicRewriteDirty = false;
 				await this.#closeWriterHandle();
 				if (this.#sessionOwnedElsewhere()) this.#moveOffSessionFile("open-elsewhere");
 				const sessionFile = this.#sessionFile;
-				if (!sessionFile) return false;
-				if (this.#diskEpoch !== epoch) return await this.#settleSuperseded(revision, run, superseded());
+				if (!sessionFile) return "skipped";
+				if (this.#diskEpoch !== epoch) return { superseded: superseded() };
 				const body = this.#serializeBody();
 				const options = {
 					expectedSize: this.#expectedDiskSize,
@@ -4026,19 +4068,16 @@ export class SessionManager {
 							? this.#storage.writeLinesAtomic(sessionFile, body.lines, options)
 							: this.#storage.writeTextAtomic(sessionFile, body.lines.join(""), options));
 					} catch (error) {
-						// A write that ran while this one was on its way and carried the
-						// transcript as it is now, wherever it lives now, superseded this
-						// publish: it is kept once what it carried is durable. A
-						// successor that failed (or a repair, or the release) published
-						// nothing for it, so this one's failure still stands.
-						const moved = this.#diskEpoch !== epoch;
-						if (!moved && (await this.#recoverFromWriteConflict(error, recoveries))) {
+						// A write that ran while this one was on its way superseded it:
+						// conflict recovery is for the session's current file, which this
+						// may no longer be, and the outcome is settled off the chain.
+						if (this.#diskEpoch !== epoch) return await this.#supersededOutcome(error, { sessionFile, body });
+						if (await this.#recoverFromWriteConflict(error, recoveries)) {
 							recoveries++;
 							// Publish the whole transcript against what the recovery found on the next pass.
 							this.#atomicRewriteDirty = true;
 							continue;
 						}
-						if (moved) return await this.#settleSuperseded(revision, run, error, { sessionFile, body });
 						try {
 							if (textMatchesLines(await this.#storage.readText(sessionFile), body.lines)) {
 								this.#recordFullRewrite(sessionFile, body);
@@ -4051,14 +4090,14 @@ export class SessionManager {
 					if (this.#diskEpoch !== epoch) {
 						// The store returned, but a commit guard may have refused to
 						// publish once the epoch moved: that proves nothing landed.
-						return await this.#settleSuperseded(revision, run, superseded(), { sessionFile, body });
+						return await this.#supersededOutcome(superseded(), { sessionFile, body });
 					}
 					this.#recordFullRewrite(sessionFile, body);
 				} finally {
 					this.#endPublish(sessionFile);
 				}
 			} while (this.#atomicRewriteDirty);
-			return true;
+			return "published";
 		} finally {
 			// Only relinquish the fence if we still own it. A superseding
 			// synchronous rewrite (`flushSync` → `#rewriteSynchronously`) may
@@ -4067,8 +4106,6 @@ export class SessionManager {
 			// this stale rewrite was still awaiting storage. Clearing it here
 			// unconditionally would strand appends during the newer publish.
 			if (this.#atomicRewriteFenceEpoch === epoch) this.#atomicRewriteFenceEpoch = null;
-			this.#fullPublishesUnderWay.delete(run.promise);
-			run.resolve();
 		}
 	}
 
@@ -4218,6 +4255,8 @@ export class SessionManager {
 
 		const epoch = this.#diskEpoch;
 		const line = this.#lineFor(entry);
+		// A fallback rewrite the disk epoch moved past is settled off the chain, as any is.
+		let superseded: { revision: number; error: unknown } | undefined;
 		await this.#scheduleDiskWork(
 			async () => {
 				if (this.#released) return;
@@ -4229,8 +4268,10 @@ export class SessionManager {
 					await this.#storage.updateSessionTitle(sessionFile, update);
 					if (this.#diskEpoch === epoch) this.#fileIsCurrent = true;
 				} catch {
-					// The title fallback carries no in-place change: nothing beyond what is durable to wait for.
-					if (!(await this.#runFencedAtomicRewrite(epoch, 0))) return;
+					const revision = ++this.#bodyRevision;
+					const outcome = await this.#runFencedAtomicRewrite(epoch);
+					if (typeof outcome === "object") superseded = { revision, error: outcome.superseded };
+					if (outcome !== "published") return;
 					this.#clearDiskError();
 					this.#fileIsCurrent = true;
 					this.#rewriteRequired = false;
@@ -4239,6 +4280,7 @@ export class SessionManager {
 			},
 			{ epoch },
 		);
+		if (superseded) await this.#settleSuperseded(superseded.revision, superseded.error);
 	}
 
 	#notifyEntryAppended(entry: SessionEntry): void {

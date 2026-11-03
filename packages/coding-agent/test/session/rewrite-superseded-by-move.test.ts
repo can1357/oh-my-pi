@@ -162,12 +162,15 @@ for (const [successor, moves, ends] of [
 	});
 }
 
-// What the caller is told matches what storage holds, whichever write saved it.
-for (const [what, before] of [
-	["its successor failed but storage recovered before it settled, so its own write saved it", "recovered"],
-	["a durable successor saved it, though the session was then sealed", "sealed"],
+// What the caller is told matches what storage holds, whichever write saved
+// it; and after a rejection the next write replaces the file with what memory
+// holds once the caller restored its change.
+for (const [what, mode, expected] of [
+	["its successor failed, even though storage recovered before it settled", "recovered", "failed"],
+	["a durable successor saved it, though the session was then sealed", "sealed", "kept"],
+	["the session was sealed before any write saved it", "sealed-first", "failed"],
 ] as const) {
-	it(`keeps a superseded rewrite when ${what}`, async () => {
+	it(`reports a superseded rewrite ${expected} when ${what}`, async () => {
 		using tempDir = TempDir.createSync("@omp-rewrite-superseded-kept-");
 		const storage = new StorageTakenOverMidRewrite();
 		const manager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"), storage);
@@ -190,14 +193,31 @@ for (const [what, before] of [
 			);
 			await held.reached.promise;
 
-			if (before === "recovered") storage.failSyncWrites = true;
-			manager.appendCustomEntry("concurrent", {});
-			if (before === "recovered") storage.failSyncWrites = false;
-			else manager.seal();
+			if (mode === "recovered") {
+				storage.failSyncWrites = true;
+				manager.appendCustomEntry("concurrent", {});
+				storage.failSyncWrites = false;
+			} else if (mode === "sealed") {
+				manager.appendCustomEntry("concurrent", {});
+				manager.seal();
+			} else {
+				manager.seal();
+			}
 			held.go.resolve();
 
-			expect(await rewrite).toBe("kept");
-			expect(fs.readFileSync(original, "utf8")).toContain('"state":"after"');
+			expect(await rewrite).toBe(expected);
+			const onDisk = fs.readFileSync(original, "utf8");
+			expect(onDisk.includes('"state":"after"')).toBe(expected === "kept");
+			if (mode === "recovered") {
+				// The caller restores its change; the next write saves memory as it now is.
+				marker.data = { state: "before" };
+				manager.appendCustomEntry("after-restore", {});
+				await manager.flush().catch(() => {});
+				const healed = fs.readFileSync(manager.getSessionFile() ?? original, "utf8");
+				expect(healed).toContain('"state":"before"');
+				expect(healed).not.toContain('"state":"after"');
+				expect(healed).toContain('"customType":"after-restore"');
+			}
 		} finally {
 			storage.failSyncWrites = false;
 			manager.seal();
@@ -205,6 +225,68 @@ for (const [what, before] of [
 		}
 	});
 }
+
+it("reports a header change's rewrite failed when its successor failed, though an earlier body is durable", async () => {
+	using tempDir = TempDir.createSync("@omp-rewrite-superseded-header-");
+	const storage = new StorageTakenOverMidRewrite();
+	const manager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"), storage);
+	manager.onPersistenceError(() => {});
+	try {
+		manager.appendMessage({ role: "user", content: "a turn worth saving", timestamp: Date.now() });
+		await manager.ensureOnDisk();
+		await manager.flush();
+		const original = manager.getSessionFile();
+		if (!original) throw new Error("Expected a persisted session");
+		const held = { file: original, reached: Promise.withResolvers<void>(), go: Promise.withResolvers<void>() };
+		storage.held = held;
+		const change = manager.setTaskPromptCacheKey("UNSAVED-KEY").then(
+			() => "kept",
+			() => "failed",
+		);
+		await held.reached.promise;
+		storage.failSyncWrites = true;
+		manager.appendCustomEntry("concurrent", {});
+		storage.failSyncWrites = false;
+		held.go.resolve();
+
+		expect(await change).toBe("failed");
+		expect(fs.readFileSync(original, "utf8")).not.toContain("UNSAVED-KEY");
+	} finally {
+		storage.failSyncWrites = false;
+		manager.seal();
+		await manager.close().catch(() => {});
+	}
+});
+
+it("reports a rewrite failed when the session is sealed before its turn on the disk chain", async () => {
+	using tempDir = TempDir.createSync("@omp-rewrite-superseded-queued-");
+	const manager = SessionManager.create(
+		tempDir.path(),
+		path.join(tempDir.path(), "sessions"),
+		new FileSessionStorage(),
+	);
+	try {
+		manager.appendMessage({ role: "user", content: "a turn worth saving", timestamp: Date.now() });
+		manager.appendCustomEntry("marker", { state: "before" });
+		await manager.ensureOnDisk();
+		await manager.flush();
+		const file = manager.getSessionFile();
+		if (!file) throw new Error("Expected a persisted session");
+		const marker = manager.getEntries().find(entry => entry.type === "custom" && entry.customType === "marker");
+		if (marker?.type !== "custom") throw new Error("Expected the marker entry");
+		marker.data = { state: "after" };
+		const rewrite = manager.rewriteEntries().then(
+			() => "kept",
+			() => "failed",
+		);
+		manager.seal();
+		expect(await rewrite).toBe("failed");
+		expect(fs.readFileSync(file, "utf8")).toContain('"state":"before"');
+	} finally {
+		manager.seal();
+		await manager.close().catch(() => {});
+	}
+});
 
 /** SQLite client whose next content update waits for `held.go`, then fails. */
 class HeldSqlClient implements SqlSessionStorageClient {
