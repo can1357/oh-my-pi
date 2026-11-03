@@ -93,7 +93,6 @@ describe("resolvePluginSource", () => {
 		expect((await resolve("./plugins/hello-plugin", "./plugins")).dir).toBe(expected);
 		const legacy = await resolve("./hello-plugin", "plugins");
 		expect(legacy.dir).toBe(expected);
-		expect(legacy.tempCloneRoot).toBeUndefined();
 	});
 
 	it("prefers a ./ source that exists from the marketplace root over the same path under pluginRoot", async () => {
@@ -118,7 +117,7 @@ describe("resolvePluginSource", () => {
 		expect(resolved).toBe(path.join(root, "plugins", "team", "plugin"));
 	});
 
-	it("rejects a failed primary probe instead of returning an unverified source", async () => {
+	it("does not fall back to pluginRoot when the primary probe fails with a filesystem error", async () => {
 		const root = path.join(tmpDir, "marketplace");
 		fs.mkdirSync(path.join(root, "plugins", "loop"), { recursive: true });
 		fs.symlinkSync("loop", path.join(root, "loop"), "dir");

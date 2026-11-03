@@ -5,7 +5,6 @@
 ### Fixed
 
 - A marketplace with `metadata.pluginRoot` installs `./` sources from the marketplace root and resolves bare-name sources under `pluginRoot`, as in Claude Code; a `./` source missing from the root is still tried under `pluginRoot` ([#17982](https://github.com/can1357/oh-my-pi/pull/17982) by [@breakwaterlabs](https://github.com/breakwaterlabs))
-- Marketplace source validation reports filesystem errors immediately instead of returning an unverified source path ([#17982](https://github.com/can1357/oh-my-pi/pull/17982) by [@breakwaterlabs](https://github.com/breakwaterlabs))
 
 ## [18.16.0] - 2026-11-02
 

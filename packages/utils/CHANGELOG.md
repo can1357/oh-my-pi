@@ -5,7 +5,7 @@
 ### Added
 
 - `pathIsWithin()` takes `EquivalentPathOptions` for the candidate, so `{ throughMissing: true }` checks a path that does not exist yet against a symlinked root ([#17982](https://github.com/can1357/oh-my-pi/pull/17982) by [@breakwaterlabs](https://github.com/breakwaterlabs))
-- `directoryExists()` supports strict probes that propagate filesystem errors instead of accepting an unverified directory ([#17982](https://github.com/can1357/oh-my-pi/pull/17982) by [@breakwaterlabs](https://github.com/breakwaterlabs))
+- `directoryExists()` and `directoryIsMissing()` accept `{ strict: true }` to propagate filesystem errors other than absent or non-directory paths ([#17982](https://github.com/can1357/oh-my-pi/pull/17982) by [@breakwaterlabs](https://github.com/breakwaterlabs))
 
 ## [18.16.0] - 2026-11-02
 

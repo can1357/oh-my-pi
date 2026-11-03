@@ -14,7 +14,7 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { directoryExists, pathIsWithin } from "@oh-my-pi/pi-utils";
+import { directoryExists, directoryIsMissing, pathIsWithin } from "@oh-my-pi/pi-utils";
 
 import {
 	isBarePluginSourceName,
@@ -45,7 +45,7 @@ export async function resolvePluginSource(
 	const { source } = entry;
 
 	if (typeof source === "string") {
-		return resolveRelativeSource(source, context);
+		return { dir: await resolveRelativeSourceDir(source, context) };
 	}
 
 	return resolveObjectSource(source, context);
@@ -92,7 +92,7 @@ export async function validatePluginSource(
 	}
 }
 
-// ── Relative string source ("./plugins/foo") ────────────────────────
+// ── String sources ─────────────────────────────────────────────────
 
 function resolveRelativeSourcePath(
 	source: string,
@@ -146,13 +146,6 @@ async function resolveRelativeSourceDir(
 	throw new Error(`Plugin source directory does not exist: "${resolved}"`);
 }
 
-async function resolveRelativeSource(
-	source: string,
-	context: ResolveContext,
-): Promise<{ dir: string; tempCloneRoot?: string }> {
-	return { dir: await resolveRelativeSourceDir(source, context) };
-}
-
 // ── Object source variants ──────────────────────────────────────────
 
 async function resolveObjectSource(
@@ -203,7 +196,9 @@ async function resolveObjectSource(
 				throw new Error(`git-subdir path "${source.path}" escapes the cloned repository`);
 			}
 			try {
-				await verifyDirExists(subdirPath, `git-subdir path "${source.path}" does not exist in cloned repository`);
+				if (await directoryIsMissing(subdirPath, { strict: true })) {
+					throw new Error(`git-subdir path "${source.path}" does not exist in cloned repository`);
+				}
 			} catch (err) {
 				await fs.rm(cloneDir, { recursive: true, force: true });
 				throw err;
@@ -217,10 +212,4 @@ async function resolveObjectSource(
 		default:
 			throw new Error(`Unknown plugin source type: "${(source as { source: string }).source}"`);
 	}
-}
-
-// ── Helpers ─────────────────────────────────────────────────────────
-
-async function verifyDirExists(dirPath: string, errorMessage: string): Promise<void> {
-	if (!(await directoryExists(dirPath, { strict: true }))) throw new Error(errorMessage);
 }
