@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { BiomeClient } from "@oh-my-pi/pi-coding-agent/lsp/clients/biome-client";
 import { runLinterCli } from "@oh-my-pi/pi-coding-agent/lsp/clients/cli-process";
-import { filterLintersForFile, getConfig } from "@oh-my-pi/pi-coding-agent/lsp/config";
+import { filterLintersForFile, getConfig, loadConfig } from "@oh-my-pi/pi-coding-agent/lsp/config";
 import { DeferredDiagnostics } from "@oh-my-pi/pi-coding-agent/lsp/deferred-diagnostics";
 import { formatContent, getDiagnosticsForFile } from "@oh-my-pi/pi-coding-agent/lsp/diagnostics";
 import type { ServerConfig } from "@oh-my-pi/pi-coding-agent/lsp/types";
@@ -370,6 +370,18 @@ process.stdout.write(JSON.stringify({ diagnostics: [] }));
 		const run = { self: "B", cwd: otherRepo, argv: ["lint", "--reporter=json", target] };
 		expect(readLog(log)).toEqual([run, run]);
 	}, 20_000);
+
+	it("resolves a session's relative server command against the session cwd, not the process cwd", () => {
+		const session = path.join(root, "repo-b");
+		write(path.join(session, "biome.json"), "{}\n");
+		write(path.join(session, "lsp.json"), JSON.stringify({ servers: { biome: { command: "./tools/biome" } } }));
+		fs.mkdirSync(path.join(session, "tools"), { recursive: true });
+		const intended = writeFakeExecutable(path.join(session, "tools"), "biome", "process.exit(0);\n");
+
+		const resolved = loadConfig(session).servers.biome?.resolvedCommand;
+
+		expect(resolved && fs.realpathSync(resolved)).toBe(fs.realpathSync(intended));
+	});
 
 	it("follows links that a `..` reaches back to after a directory still to be created", async () => {
 		const log = path.join(root, "runs.log");

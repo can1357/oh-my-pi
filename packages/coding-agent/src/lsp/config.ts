@@ -337,8 +337,23 @@ export interface ResolveCommandOptions extends Pick<WhichOptions, "cache" | "PAT
 }
 
 /**
+ * `$which` for a lookup made from `dir`: a relative command (`./tools/biome`) or
+ * relative PATH entry resolves against `dir`, an empty PATH entry included (a
+ * shell reads it as the current directory), never against the process's
+ * working directory.
+ */
+function whichFrom(command: string, dir: string, options?: Pick<WhichOptions, "cache" | "PATH">): string | null {
+	const searchPath = (options?.PATH ?? process.env.PATH)
+		?.split(path.delimiter)
+		.map(entry => (entry === "" ? "." : entry))
+		.join(path.delimiter);
+	return $which(command, { cache: options?.cache, PATH: searchPath, cwd: dir });
+}
+
+/**
  * Resolve a command to an executable path.
- * Checks project-local bin directories first, then falls back to $PATH.
+ * Checks project-local bin directories first, then falls back to $PATH, both
+ * from `cwd` (see {@link whichFrom}).
  *
  * @param command - The command name (e.g., "typescript-language-server")
  * @param cwd - Working directory to search from
@@ -349,19 +364,15 @@ export function resolveCommand(command: string, cwd: string, options?: ResolveCo
 		const resolved = resolveCommandFromLocalRoot(command, root, true);
 		if (resolved) return resolved;
 	}
-
-	if (!options) return $which(command);
-	return $which(command, { cache: options.cache, PATH: options.PATH });
+	return whichFrom(command, cwd, options);
 }
 
 /**
  * Resolve a linter's executable for the project rooted at `root`: the local bin
  * directories of `root` and then of each ancestor (the lookup Node itself does
- * for a package at `root`, which needs no `package.json`), then PATH. A
- * relative command (`./tools/biome`) or relative PATH entry resolves against
- * `root`, an empty PATH entry included (a shell reads it as the current
- * directory). The session cwd plays no part, so a file of another repository
- * never runs the cwd repository's binary.
+ * for a package at `root`, which needs no `package.json`), then PATH from
+ * `root` (see {@link whichFrom}). The session cwd plays no part, so a file of
+ * another repository never runs the cwd repository's binary.
  */
 export function resolveCommandForRoot(command: string, root: string): string | null {
 	for (let dir = root; ;) {
@@ -371,10 +382,7 @@ export function resolveCommandForRoot(command: string, root: string): string | n
 		if (parent === dir) break;
 		dir = parent;
 	}
-	const searchPath = process.env.PATH?.split(path.delimiter)
-		.map(entry => (entry === "" ? "." : entry))
-		.join(path.delimiter);
-	return $which(command, { cwd: root, PATH: searchPath });
+	return whichFrom(command, root);
 }
 
 // =============================================================================
