@@ -11495,54 +11495,70 @@ export class AgentSession implements SettingsScope {
 		const releaseInterruptedInFlight = this.#takeInterruptedInFlight();
 		const unwind = Promise.withResolvers<void>();
 		this.#abortUnwinds.add(unwind.promise);
-		// A failing step (a computer-control revocation that throws, say) must not skip the cleanup
-		// after it: the first failure is kept and rethrown once the interrupt has fully unwound.
+		// A failing step (a computer-control revocation or a requeue callback that throws, say) must
+		// not skip the cleanup after it: every step runs, and the first failure is kept and rethrown
+		// once the interrupt has fully unwound.
 		let failure: { error: unknown } | undefined;
 		const keepFailure = (error: unknown): void => {
 			failure ??= { error };
 		};
+		const step = (run: () => void): void => {
+			try {
+				run();
+			} catch (error) {
+				keepFailure(error);
+			}
+		};
+		// The goal this interrupt stops (null: none); a goal created while it unwinds is later work.
+		const interruptedGoalId = this.#goalModeState?.goal?.id ?? null;
 		let cleaning = true;
 		const endStateCleanup = (): void => {
 			if (!cleaning) return;
 			cleaning = false;
 			this.#abortsInProgress--;
 			this.#notifyInterruptChange();
-			this.#drainStrandedQueuedMessages();
+			step(() => this.#drainStrandedQueuedMessages());
 		};
 		try {
-			this.#titleGenerationAbortController.abort();
-			if (!this.#isDisposed) this.#titleGenerationAbortController = new AbortController();
-			this.#abortAutolearnCapture();
-			for (const controller of this.#usagePreflightAbortControllers) controller.abort();
-			for (const controller of this.#imageDescriptionAbortControllers) controller.abort(options?.reason);
-			this.abortRetry();
+			step(() => {
+				this.#titleGenerationAbortController.abort();
+				if (!this.#isDisposed) this.#titleGenerationAbortController = new AbortController();
+			});
+			step(() => this.#abortAutolearnCapture());
+			for (const controller of this.#usagePreflightAbortControllers) step(() => controller.abort());
+			for (const controller of this.#imageDescriptionAbortControllers) {
+				step(() => controller.abort(options?.reason));
+			}
+			step(() => this.abortRetry());
 			this.#promptGeneration++;
 			// Cancel any awaited pre-dispatch setup (e.g. Hindsight auto-recall) so the
 			// admitted submission unwinds now instead of at the recall timeout (#12668).
-			this.#promptSetupAbortController?.abort(options?.reason);
+			step(() => this.#promptSetupAbortController?.abort(options?.reason));
 			this.#scheduledHiddenNextTurnGeneration = undefined;
 			// Abort the handoff first so generic compaction cancellation cannot replace
 			// the harness reason with an unreasoned "Handoff cancelled".
-			this.#handoff.abortHandoff(new Error(options?.reason ?? "Handoff aborted by session"));
+			step(() => this.#handoff.abortHandoff(new Error(options?.reason ?? "Handoff aborted by session")));
 			let manualCompactionCleanup: Promise<void> | undefined;
-			if (options?.preserveCompaction) {
-				// Manual `/compact` installed its own #compactionAbortController before
-				// this internal abort and must keep it alive (that marker is what makes
-				// isCompacting report true during startup). Any in-flight
-				// auto-compaction MUST still be cancelled, though: otherwise a
-				// background maintenance pass races the manual run and both
-				// appendCompaction/replaceMessages, double-rewriting session history.
-				this.#maintenance.abortAutomaticCompaction();
-			} else {
-				manualCompactionCleanup = this.#maintenance.abortCompaction(options?.reason);
-			}
-			this.abortBash();
-			this.abortEval();
+			step(() => {
+				if (options?.preserveCompaction) {
+					// Manual `/compact` installed its own #compactionAbortController before
+					// this internal abort and must keep it alive (that marker is what makes
+					// isCompacting report true during startup). Any in-flight
+					// auto-compaction MUST still be cancelled, though: otherwise a
+					// background maintenance pass races the manual run and both
+					// appendCompaction/replaceMessages, double-rewriting session history.
+					this.#maintenance.abortAutomaticCompaction();
+				} else {
+					manualCompactionCleanup = this.#maintenance.abortCompaction(options?.reason);
+				}
+			});
+			step(() => this.abortBash());
+			step(() => this.abortEval());
 			const computerControlRevocation = Promise.try(() =>
 				revokeComputerControlForOwner(this.#eval.getKernelOwnerId()),
 			).catch(keepFailure);
 			const postPromptCancel = this.#beginCancelPostPromptTasks();
-			this.agent.abort(options?.reason);
+			step(() => this.agent.abort(options?.reason));
 			// From here, post-prompt work that comes from the stopped run (its agent_end
 			// maintenance) belongs to this interrupt; so does the rule interruption pending now.
 			const aftermath = {
@@ -11570,9 +11586,9 @@ export class AgentSession implements SettingsScope {
 			}
 			// The interrupted run's aborted reply is handled by now, so the rule interruption whose
 			// continuation this abort cancelled can be dropped without unmarking that reply.
-			if (ttsrInterruption !== undefined) this.#ttsr.cancelPendingAbort(ttsrInterruption);
-			this.abortRetry();
-			aftermath.controller.abort();
+			if (ttsrInterruption !== undefined) step(() => this.#ttsr.cancelPendingAbort(ttsrInterruption));
+			step(() => this.abortRetry());
+			step(() => aftermath.controller.abort());
 			if (this.#interruptAftermath === aftermath) this.#interruptAftermath = undefined;
 			await Promise.allSettled(aftermath.tasks);
 			// `/compact` disconnects the agent subscription until its finally block.
@@ -11582,17 +11598,17 @@ export class AgentSession implements SettingsScope {
 			// waitForIdle resolves when the agent loop's finally block runs, but the stopped
 			// prompt's setup/finalizers may still be unwinding: drop the brackets this
 			// interrupt took over, so a subsequent prompt() does not observe the session as busy.
-			releaseInterruptedInFlight();
-			this.#resetSessionStopContinuationState();
-			this.#clearPendingSessionStopContinuations();
+			step(releaseInterruptedInFlight);
+			step(() => this.#resetSessionStopContinuationState());
+			step(() => this.#clearPendingSessionStopContinuations());
 			// Safety net: if the agent loop aborted without producing an assistant
 			// message (e.g. failed before the first stream), the in-flight yield was
 			// never resolved or rejected by the normal message_end path. Reject it now
 			// so any requeue callback still fires and the queue stays consistent. No
 			// later run can hold a directive yet: runs wait for this cleanup.
-			if (this.#toolChoiceQueue.hasInFlight) {
-				this.#toolChoiceQueue.reject("aborted");
-			}
+			step(() => {
+				if (this.#toolChoiceQueue.hasInFlight) this.#toolChoiceQueue.reject("aborted");
+			});
 			// Record the queued messages the interrupt took out of the queues as persisted
 			// transcript entries without triggering a turn, plus any advisor cards that
 			// arrived via AdviseTool routing mid-abort and were parked hidden in
@@ -11605,19 +11621,35 @@ export class AgentSession implements SettingsScope {
 				this.#pendingNextTurnMessages = this.#pendingNextTurnMessages.filter(m => !isAdvisorCard(m));
 			}
 			for (const message of [...strandedMessages, ...parkedAdvisorCards]) {
-				if (isAdvisorCard(message)) this.#preserveAdvisorCard(message);
-				else if (this.agent.state.isStreaming) {
-					// Requeued as ordinary work: a later abort must not take it out again.
-					this.#interruptWithdrawnMessages.delete(message);
-					this.agent.followUp(message);
-				} else this.#recordWithoutTurn([message]);
+				step(() => {
+					if (isAdvisorCard(message)) this.#preserveAdvisorCard(message);
+					else if (this.agent.state.isStreaming) {
+						// Requeued as ordinary work: a later abort must not take it out again.
+						this.#interruptWithdrawnMessages.delete(message);
+						this.agent.followUp(message);
+					} else this.#recordWithoutTurn([message]);
+				});
+			}
+			// Goal accounting and the pause belong to the stopped turn, so they are committed before
+			// later work may start, and only the goal that was active when this interrupt began is
+			// paused. Their `goal_updated` notifications run extension handlers: they are sent once
+			// the cleanup is done, like the other outside work below.
+			let sendGoalNotifications: () => Promise<void> = async () => {};
+			try {
+				sendGoalNotifications = await this.#goalRuntime.onTaskAborted({
+					reason: options?.goalReason ?? "interrupted",
+					goalId: interruptedGoalId,
+					holdNotifications: true,
+				});
+			} catch (error) {
+				keepFailure(error);
 			}
 			// The session state is clean: later work may run. The remaining steps only wait on
-			// outside work (revocation acks, autolearn capture, goal hooks) and touch none of it.
+			// outside work (revocation acks, goal notifications, autolearn capture) and touch none of it.
 			endStateCleanup();
 			await Promise.all([computerControlRevocation, postPromptCancel.settled]);
+			await sendGoalNotifications().catch(keepFailure);
 			await this.#drainAutolearnCapture().catch(keepFailure);
-			await this.#goalRuntime.onTaskAborted({ reason: options?.goalReason ?? "interrupted" }).catch(keepFailure);
 		} finally {
 			endStateCleanup();
 			this.#abortUnwinds.delete(unwind.promise);

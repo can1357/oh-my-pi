@@ -482,10 +482,12 @@ it("throwing controller revocation does not leave a stale rule abort", async () 
 
 it("work queued while the stopped run's agent_end is still running starts only after the interrupt, once", async () => {
 	const order: string[] = [];
+	const newRun = Promise.withResolvers<void>();
 	const h = await setup([
 		{ content: [] },
 		async () => {
 			order.push("new run");
+			newRun.resolve();
 			return { content: ["new result"] };
 		},
 		{ content: ["unexpected old restart"] },
@@ -520,6 +522,8 @@ it("work queued while the stopped run's agent_end is still running starts only a
 		end.release();
 		await stopping;
 		await old;
+		// The queued work starts once the interrupt is done; waitForIdle alone can return before it claims.
+		await newRun.promise;
 		await h.session.waitForIdle();
 
 		expect(startedDuringCleanup).toBe(false);
@@ -596,3 +600,51 @@ it("a normal 503 outside interrupt cleanup retries", async () => {
 
 	expect(h.mock.calls).toHaveLength(2);
 });
+
+it("an interrupt cannot pause a goal created while it waits for a revocation ack", async () => {
+	const h = await setup([{ content: ["old done"] }]);
+	const control = await revocation(h);
+	try {
+		const stopping = h.session.abort({ reason: USER_INTERRUPT_LABEL });
+		await control.ack.entered;
+		await h.session.goalRuntime.createGoal({ objective: "new goal after interrupt" });
+		control.ack.release();
+		await stopping;
+
+		const after = h.session.getGoalModeState();
+		expect(after?.goal.status).toBe("active");
+		expect(after?.enabled).toBe(true);
+	} finally {
+		control.close();
+	}
+});
+
+for (const throws of [false, true]) {
+	it(`a withdrawn message survives an interrupt whose directive rejection ${throws ? "throws" : "succeeds"}`, async () => {
+		const h = await setup([{ content: ["seed done"] }, { content: ["next done"] }]);
+		await h.session.prompt("seed transcript before queue interruption");
+		h.session.toolChoiceQueue.pushOnce("none", {
+			label: "application directive",
+			onRejected: () => {
+				if (throws) throw new Error("application rejection callback failed");
+				return "drop";
+			},
+		});
+		h.session.toolChoiceQueue.nextToolChoice();
+		h.agent.followUp({
+			role: "custom",
+			customType: "must-preserve",
+			content: "IMPORTANT_WITHDRAWN_MESSAGE",
+			display: true,
+			timestamp: Date.now(),
+		});
+		h.session.clearQueue({ forInterrupt: true });
+		const stopping = h.session.abort({ reason: USER_INTERRUPT_LABEL });
+		if (throws) await expect(stopping).rejects.toThrow("application rejection callback failed");
+		else await stopping;
+		expect(JSON.stringify(await h.saved())).toContain("IMPORTANT_WITHDRAWN_MESSAGE");
+
+		await h.session.prompt("next user request");
+		expect(JSON.stringify(h.mock.calls.at(-1)?.context.messages)).toContain("IMPORTANT_WITHDRAWN_MESSAGE");
+	});
+}
