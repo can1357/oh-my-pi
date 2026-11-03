@@ -896,6 +896,77 @@ describe("a message delivered before the task's turn starts", () => {
 		},
 		30_000,
 	);
+
+	it("finishes a delivery a switch's reconciler waits on once a nested switch restores its generation", async () => {
+		const harness = await createHarness();
+		const normalizing = Promise.withResolvers<void>();
+		const normalized = Promise.withResolvers<void>();
+		// Lets the reconciler return during cleanup if the delivery never settles; the code under test never waits on it.
+		const escape = Promise.withResolvers<void>();
+		let session: AgentSession | undefined;
+		let endHold: (() => void) | undefined;
+		let outer: Promise<boolean> | undefined;
+		let inner: RefusedSwitch | undefined;
+		let delivery: Promise<unknown> | undefined;
+		let deliverySettled = false;
+		try {
+			session = await spawnIdle(harness);
+			const held = session;
+			harness.beginPhase(FOLLOW_UP);
+			endHold = held.holdForAssignment();
+			// The outer switch stays in this directory, so it needs no answer from its owner.
+			const target = SessionManager.create(held.sessionManager.getCwd(), path.join(root, "outer-sessions"));
+			target.appendMessage({ role: "user", content: "outer session", timestamp: Date.now() });
+			await target.ensureOnDisk();
+			vi.spyOn(imageLoading, "normalizeModelContextImages").mockImplementationOnce(async images => {
+				normalizing.resolve();
+				await normalized.promise;
+				return images;
+			});
+			let reconciled = false;
+			held.setSessionSwitchReconciler(async () => {
+				if (reconciled) return;
+				reconciled = true;
+				// After its generation change, the outer switch waits for a delivery its reconciler sends.
+				delivery = held
+					.sendCustomMessage(
+						{
+							customType: "test-plugin",
+							content: [
+								{ type: "text", text: BODY },
+								{ type: "image", data: PIXEL_PNG, mimeType: "image/png" },
+							],
+							display: false,
+						},
+						{ deliverAs: "aside" },
+					)
+					.finally(() => {
+						deliverySettled = true;
+					});
+				await Promise.race([delivery, escape.promise]);
+			});
+			outer = held.switchSession(target.getSessionFile()!);
+			await normalizing.promise;
+			// A nested switch changes the generation again; its refusal restores the delivery's generation.
+			inner = await startRefusedSwitch(held, "inner");
+			normalized.resolve();
+			// The delivery now waits for a pending switch to settle (its own steps take microtasks, not this long).
+			await Bun.sleep(500);
+			expect(deliverySettled).toBe(false);
+			expect(await inner.refuse()).toBe(false);
+			await Promise.race([delivery, Bun.sleep(5_000)]);
+			expect(deliverySettled).toBe(true);
+			expect(await outer).toBe(true);
+			expect(held.sessionManager.getSessionId()).toBe(target.getSessionId());
+		} finally {
+			normalized.resolve();
+			escape.resolve();
+			session?.setSessionSwitchReconciler(null);
+			await Promise.allSettled([inner?.refuse(), outer, delivery]);
+			endHold?.();
+			harness.authStorage.close();
+		}
+	}, 30_000);
 });
 
 /** Spawns the subagent, lets its first run finish, and returns its kept-alive idle session. */

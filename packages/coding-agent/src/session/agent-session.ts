@@ -1554,13 +1554,15 @@ export class AgentSession implements SettingsScope {
 
 	/** Re-validates a #sessionGeneration snapshot captured before an aside/SDK call's await.
 	 *  A mismatch alone does not mean the record's source session is gone —
-	 *  switchSession() restores the exact prior generation on rollback — so wait out every
-	 *  generation change still pending (#pendingGenerationChanges), in whatever order they settle,
-	 *  and recheck rather than discarding immediately. Returns true when the caller should drop
-	 *  its record (the generation still differs once none is pending); false once it matches again. */
+	 *  switchSession() restores the exact prior generation on rollback — so recheck each time a
+	 *  generation change still pending (#pendingGenerationChanges) settles, in whatever order they
+	 *  settle. It must not wait for all of them: a switch can itself wait on this record (its
+	 *  reconciler sends it) after a nested switch has restored the record's generation. Returns
+	 *  true when the caller should drop its record (the generation still differs once none is
+	 *  pending); false once it matches again. */
 	async #sessionGenerationChanged(sessionGeneration: number): Promise<boolean> {
 		while (this.#sessionGeneration !== sessionGeneration && this.#pendingGenerationChanges.size > 0) {
-			await Promise.all(this.#pendingGenerationChanges);
+			await Promise.race(this.#pendingGenerationChanges);
 		}
 		return this.#sessionGeneration !== sessionGeneration;
 	}
