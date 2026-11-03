@@ -545,6 +545,20 @@ function mayHoldArchive(message: CompactionSummaryMessage): boolean {
 }
 
 /** Owns compaction, pruning, shake, promotion, and automatic context maintenance. */
+/**
+ * `fn`, run at most once: a restore handed to `SessionManager.rewriteEntries`,
+ * which runs it at the verdict, and called again by the caller when the
+ * rewrite rejects, in case the manager did not.
+ */
+function once(fn: () => void): () => void {
+	let done = false;
+	return () => {
+		if (done) return;
+		done = true;
+		fn();
+	};
+}
+
 export class SessionMaintenance {
 	#compactionAbortController: AbortController | undefined;
 	/** Resolves after an active manual compaction has reconnected the agent subscription. */
@@ -744,10 +758,11 @@ export class SessionMaintenance {
 	 * (advisor prefix, todo phases, provider sessions) was built from.
 	 */
 	async #persistPrune(result: PruneResult): Promise<void> {
+		const restore = once(() => result.undo());
 		try {
-			await this.#host.sessionManager.rewriteEntries();
+			await this.#host.sessionManager.rewriteEntries({ restore });
 		} catch (error) {
-			result.undo();
+			restore();
 			throw error;
 		}
 	}
@@ -1090,11 +1105,14 @@ export class SessionMaintenance {
 		if (anchorEntry && !entrySnapshots.has(anchorEntry))
 			entrySnapshots.set(anchorEntry, structuredClone(anchorEntry));
 		applyShakeRegions(items);
+		const restoreSnapshots = once(() => {
+			for (const [entry, snapshot] of entrySnapshots) Object.assign(entry, snapshot);
+		});
 		try {
 			this.#host.recordAnchoredHistoryRewrite(anchoredTokensRemoved);
-			await this.#host.sessionManager.rewriteEntries();
+			await this.#host.sessionManager.rewriteEntries({ restore: restoreSnapshots });
 		} catch (error) {
-			for (const [entry, snapshot] of entrySnapshots) Object.assign(entry, snapshot);
+			restoreSnapshots();
 			const sessionContext = this.#host.buildDisplaySessionContext();
 			this.#host.agent.replaceMessages(sessionContext.messages);
 			throw error;
@@ -5032,10 +5050,13 @@ export class SessionMaintenance {
 			...preserveData,
 			[snapcompact.PRESERVE_KEY]: { ...(isRecord(slot) ? slot : {}), withoutThinking: view },
 		};
-		try {
-			await this.#host.sessionManager.rewriteEntries();
-		} catch (error) {
+		const restore = once(() => {
 			entry.preserveData = preserveData;
+		});
+		try {
+			await this.#host.sessionManager.rewriteEntries({ restore });
+		} catch (error) {
+			restore();
 			logger.warn("Persisting the snapcompact archive without reasoning failed", {
 				error: error instanceof Error ? error.message : String(error),
 			});

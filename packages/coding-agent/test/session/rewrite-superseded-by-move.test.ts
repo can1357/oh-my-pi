@@ -107,9 +107,9 @@ it("keeps a rewrite that a write moving the session superseded, instead of repor
 });
 
 // The successor that superseded the rewrite must itself have published the
-// transcript: one that failed published nothing. The rewrite then writes the
-// transcript once itself; when that fails too, the failure reaches its caller
-// (prune, snapshot restore and the like restore their change on it).
+// transcript: one that failed published nothing, and the rewrite writes
+// nothing of its own, so the failure reaches its caller (prune, snapshot
+// restore and the like restore their change on it).
 for (const [successor, moves, ends] of [
 	["a synchronous rewrite of the same file that fails", false, "conflict"],
 	["a synchronous rewrite that moves the session and fails to write the new file", true, "conflict"],
@@ -257,6 +257,66 @@ it("reports a header change's rewrite failed when its successor failed, though a
 		await manager.close().catch(() => {});
 	}
 });
+
+// A write that runs after the verdict but before the caller could restore must
+// not save the unsaved change: the restore runs inside the verdict.
+for (const depth of [0, 1, 2, 4, 8, 16]) {
+	it(`restores an unsaved change before any write can run, with an append ${depth} microtasks after the verdict`, async () => {
+		using tempDir = TempDir.createSync("@omp-rewrite-superseded-restore-");
+		const storage = new StorageTakenOverMidRewrite();
+		const manager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"), storage);
+		manager.onPersistenceError(() => {});
+		try {
+			manager.appendMessage({ role: "user", content: "a turn worth saving", timestamp: Date.now() });
+			manager.appendCustomEntry("marker", { state: "before" });
+			await manager.ensureOnDisk();
+			await manager.flush();
+			const original = manager.getSessionFile();
+			if (!original) throw new Error("Expected a persisted session");
+			const marker = manager.getEntries().find(entry => entry.type === "custom" && entry.customType === "marker");
+			if (marker?.type !== "custom") throw new Error("Expected the marker entry");
+			marker.data = { state: "after" };
+			const held = { file: original, reached: Promise.withResolvers<void>(), go: Promise.withResolvers<void>() };
+			storage.held = held;
+			let restored = false;
+			const rewrite = manager
+				.rewriteEntries({
+					restore: () => {
+						marker.data = { state: "before" };
+						restored = true;
+						// Storage recovers at the verdict, and an append racing the caller lands
+						// `depth` microtasks after it: that append's write succeeds.
+						storage.failSyncWrites = false;
+						let racing = Promise.resolve();
+						for (let step = 0; step < depth; step++) racing = racing.then(() => {});
+						void racing.then(() => manager.appendCustomEntry("racing", {}));
+					},
+				})
+				.then(
+					() => "kept",
+					() => "failed",
+				);
+			await held.reached.promise;
+			// The successor fails, and storage stays failing until the verdict is in.
+			storage.failSyncWrites = true;
+			manager.appendCustomEntry("concurrent", {});
+			held.go.resolve();
+
+			expect(await rewrite).toBe("failed");
+			expect(restored).toBe(true);
+			manager.appendCustomEntry("after-verdict", {});
+			await manager.flush().catch(() => {});
+			const onDisk = fs.readFileSync(manager.getSessionFile() ?? original, "utf8");
+			expect(onDisk).not.toContain('"state":"after"');
+			expect(onDisk).toContain('"customType":"racing"');
+			expect(onDisk).toContain('"customType":"after-verdict"');
+		} finally {
+			storage.failSyncWrites = false;
+			manager.seal();
+			await manager.close().catch(() => {});
+		}
+	});
+}
 
 it("reports a rewrite failed when the session is sealed before its turn on the disk chain", async () => {
 	using tempDir = TempDir.createSync("@omp-rewrite-superseded-queued-");

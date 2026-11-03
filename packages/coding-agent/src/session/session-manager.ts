@@ -2543,6 +2543,18 @@ export class ForkSourceNotFoundError extends Error {
  * the current file ("kept"); or the epoch moved past it and whether its change
  * is saved is settled off the disk chain, with `superseded` as the error if not.
  */
+/** Options of {@link SessionManager.rewriteEntries}. */
+export interface RewriteEntriesOptions {
+	/**
+	 * Puts the caller's in-place change back in memory when the rewrite did not
+	 * save it. It runs in the same turn as that verdict, before the rewrite
+	 * rejects, so no other write can save the change between them; the next
+	 * write then saves memory as restored. A caller that restores in its own
+	 * `catch` instead leaves that window open.
+	 */
+	restore?: () => void;
+}
+
 type FencedRewriteOutcome = "published" | "skipped" | "kept" | { readonly superseded: unknown };
 
 export class SessionManager {
@@ -3965,6 +3977,23 @@ export class SessionManager {
 	}
 
 	/**
+	 * A rewrite did not save its change: `restore` puts the caller's in-place
+	 * change back in memory, here, in the same turn as the verdict, so no write
+	 * can run between them and save the change again. The file then counts as
+	 * not current, so the next write replaces it with the transcript as memory
+	 * now holds it.
+	 */
+	#restoreUnsaved(restore: (() => void) | undefined): void {
+		try {
+			restore?.();
+		} finally {
+			this.#bodyRevision++;
+			this.#fileIsCurrent = false;
+			this.#rewriteRequired = true;
+		}
+	}
+
+	/**
 	 * Settles an atomic rewrite that a newer write superseded — or that never
 	 * got its turn on the disk chain — from outside the chain, by what storage
 	 * holds rather than by reasoning about which write came next. Once every
@@ -3981,7 +4010,7 @@ export class SessionManager {
 	 * memory holds it — the restored state — even if a write that ran after
 	 * this verdict saved the change in the meantime.
 	 */
-	async #settleSuperseded(revision: number, error: unknown): Promise<void> {
+	async #settleSuperseded(revision: number, error: unknown, restore?: () => void): Promise<void> {
 		try {
 			await this.flushEntries();
 		} catch {
@@ -3990,8 +4019,7 @@ export class SessionManager {
 		while (this.#publishesOffChain.size > 0) await Promise.race(this.#publishesOffChain);
 		const durable = this.#durableBody;
 		if (durable && durable.file === this.#sessionFile && durable.revision >= revision) return;
-		this.#fileIsCurrent = false;
-		this.#rewriteRequired = true;
+		this.#restoreUnsaved(restore);
 		throw this.#diskFailure ?? error;
 	}
 
@@ -4006,7 +4034,7 @@ export class SessionManager {
 	 * before it ran. A rewrite the disk epoch moved past is settled once its
 	 * turn on the chain is over (see {@link #settleSuperseded}).
 	 */
-	async #rewriteAtomically(): Promise<void> {
+	async #rewriteAtomically(restore?: () => void): Promise<void> {
 		if (!this.#persist || !this.#sessionFile) return;
 		if (this.#released) return;
 
@@ -4014,23 +4042,42 @@ export class SessionManager {
 		// Every change made before this rewrite is carried by bodies serialized at this revision or later.
 		const revision = ++this.#bodyRevision;
 		let outcome: FencedRewriteOutcome | undefined;
-		await this.#scheduleDiskWork(
-			async () => {
-				outcome = await this.#runFencedAtomicRewrite(startEpoch);
-				if (outcome === "published") {
-					this.#fileIsCurrent = true;
-					this.#materializeBreadcrumb();
-					this.#rewriteRequired = false;
-					this.#hasTitleSlot = true;
-				}
-			},
-			{ epoch: startEpoch },
-		);
+		let restored = false;
+		const restoreUnsaved = () => {
+			if (restored) return;
+			restored = true;
+			this.#restoreUnsaved(restore);
+		};
+		try {
+			await this.#scheduleDiskWork(
+				async () => {
+					try {
+						outcome = await this.#runFencedAtomicRewrite(startEpoch);
+					} catch (error) {
+						// In the turn the write failed in, before anything else runs.
+						restoreUnsaved();
+						throw error;
+					}
+					if (outcome === "published") {
+						this.#fileIsCurrent = true;
+						this.#materializeBreadcrumb();
+						this.#rewriteRequired = false;
+						this.#hasTitleSlot = true;
+					}
+				},
+				{ epoch: startEpoch },
+			);
+		} catch (error) {
+			// A failure latched before its turn refused it: nothing saved it. Nothing
+			// writes while a failure is latched, so restoring here is still in time.
+			restoreUnsaved();
+			throw error;
+		}
 		// A task the epoch moved past before it started never ran; it is settled like a superseded one.
 		if (outcome === undefined) {
-			await this.#settleSuperseded(revision, new Error("Session rewrite superseded before it started"));
+			await this.#settleSuperseded(revision, new Error("Session rewrite superseded before it started"), restore);
 		} else if (typeof outcome === "object") {
-			await this.#settleSuperseded(revision, outcome.superseded);
+			await this.#settleSuperseded(revision, outcome.superseded, restore);
 		}
 	}
 
@@ -6166,12 +6213,13 @@ export class SessionManager {
 
 	/**
 	 * Rewrite the session file after in-place entry updates (e.g. pruning old tool
-	 * outputs). Use sparingly.
+	 * outputs). Use sparingly. When it fails, `options.restore` runs before it
+	 * rejects, in the same turn as the verdict (see {@link RewriteEntriesOptions}).
 	 */
-	async rewriteEntries(): Promise<void> {
+	async rewriteEntries(options?: RewriteEntriesOptions): Promise<void> {
 		this.#bodyRevision++;
 		if (!this.#persist || !this.#sessionFile) return;
-		await this.#rewriteAtomically();
+		await this.#rewriteAtomically(options?.restore);
 	}
 
 	/**
