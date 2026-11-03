@@ -114,6 +114,19 @@ export class IrcBus implements IrcBusApi {
 		return bus;
 	}
 
+	/**
+	 * The main-thread bus serving `registry`, where the cross-process seams live (inbound delivery,
+	 * outbound transports, namespace claims). Throws on a worker thread, whose global bus is a proxy
+	 * of main's: extension bridges claim and deliver from the main thread only.
+	 */
+	static localForRegistry(registry: AgentRegistryApi = AgentRegistry.global()): IrcBus {
+		const bus = IrcBus.forRegistry(registry);
+		if (!(bus instanceof IrcBus)) {
+			throw new Error("Cross-process IRC is served by the main thread's bus; this thread only has a proxy of it.");
+		}
+		return bus;
+	}
+
 	/** Install the process-global bus. Worker bootstrap only. */
 	static installGlobal(api: IrcBusApi): void {
 		IrcBus.#global = api;
@@ -774,12 +787,21 @@ export class IrcBus implements IrcBusApi {
 	 * sender) so the relay still surfaces instead of being dropped.
 	 */
 	#rootMainFor(id: string): AgentRef | undefined {
-		let ref = this.#registry.get(id);
-		const seen = new Set<string>();
-		while (ref && ref.kind !== "main" && ref.parentId && !seen.has(ref.id)) {
-			seen.add(ref.id);
-			ref = this.#registry.get(ref.parentId);
-		}
-		return ref?.kind === "main" ? ref : this.#registry.list().find(candidate => candidate.kind === "main");
+		return rootMainRef(this.#registry, id);
 	}
+}
+
+/**
+ * The top-level `main` ref of `id`'s tree in `registry`: walk the parent chain to a `main`, falling
+ * back to the registry's first `main` (a custom/ACP root is not necessarily "Main"). Works over a
+ * worker's registry proxy too, so a worker-homed sender resolves its root like a main-thread one.
+ */
+export function rootMainRef(registry: AgentRegistryApi, id: string): AgentRef | undefined {
+	let ref = registry.get(id);
+	const seen = new Set<string>();
+	while (ref && ref.kind !== "main" && ref.parentId && !seen.has(ref.id)) {
+		seen.add(ref.id);
+		ref = registry.get(ref.parentId);
+	}
+	return ref?.kind === "main" ? ref : registry.list().find(candidate => candidate.kind === "main");
 }

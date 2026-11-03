@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { AsyncJobManager } from "../../src/async";
 import { Settings } from "../../src/config/settings";
-import { AgentRegistry } from "../../src/registry/agent-registry";
+import { AgentRegistry, type AgentRegistryApi } from "../../src/registry/agent-registry";
 import { AgentLifecycleManager } from "../../src/registry/agent-lifecycle";
 import type { AgentSession } from "../../src/session/agent-session";
 import { WaitTool } from "../../src/tools/wait";
@@ -43,7 +43,7 @@ function makeSession(
 	concurrency = 2,
 	freshAgents = false,
 	deliveries?: Array<{ id: string; text: string }>,
-	registry: AgentRegistry = AgentRegistry.global(),
+	registry: AgentRegistryApi = AgentRegistry.global(),
 ): ToolSession {
 	const manager = new AsyncJobManager({ retentionMs: 0 });
 	if (deliveries) {
@@ -106,7 +106,7 @@ function execution(id: string, output?: string): StructuredSubagentResult {
 	};
 }
 
-function markIdle(id: string, registry: AgentRegistry = AgentRegistry.global()): void {
+function markIdle(id: string, registry: AgentRegistryApi = AgentRegistry.global()): void {
 	registry.register({
 		id,
 		displayName: id,

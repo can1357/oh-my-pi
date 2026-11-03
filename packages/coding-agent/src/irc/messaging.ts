@@ -3,7 +3,7 @@ import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import type { CoordinationDetails } from "@oh-my-pi/pi-tui/tools/wait";
 import { sanitizeInline } from "@oh-my-pi/pi-tui/render/render-utils";
 import type { Settings } from "../config/settings";
-import { IrcBus } from "./bus";
+import { IrcBus, rootMainRef } from "./bus";
 import { type AgentRegistryApi, BROADCAST_ID } from "../registry/agent-registry";
 import { ensurePersistedRoster } from "../registry/persisted-agents";
 import { canSpawnAtDepth } from "../task/types";
@@ -75,7 +75,7 @@ export async function executeSend(
 	// own incoming card); relaying the sibling legs to that root's UI would then duplicate the
 	// body once per other recipient. Resolve the sender's ACTUAL root — an ACP/custom-root
 	// registry's root is not "Main" — so the dedup fires for every root, not just the default.
-	const rootId = bus.rootIdFor(senderId);
+	const rootId = rootMainRef(registry, senderId)?.id;
 	const suppressRelay = isBroadcast && rootId !== undefined && targets.includes(rootId);
 	const receipts = await Promise.all(
 		targets.map(target =>

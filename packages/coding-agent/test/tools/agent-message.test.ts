@@ -193,7 +193,7 @@ describe("write agent:// messaging", () => {
 		// A leaf root (cannot spawn) has only the bridge's remote peers; the write gate must still open.
 		const settings = Settings.isolated({ "task.maxRecursionDepth": 0 });
 		const seen: Array<{ to: string; toName: string | undefined }> = [];
-		IrcBus.global().setRemoteTransport(
+		IrcBus.localForRegistry().setRemoteTransport(
 			"cluster-a",
 			{
 				async send(message, opts) {

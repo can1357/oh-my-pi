@@ -914,7 +914,7 @@ describe("IRC", () => {
 describe("isIrcEnabled", () => {
 	it("returns true for a leaf top-level session once a remote transport is installed (murmur-q00p)", () => {
 		const settings = Settings.isolated({ "task.maxRecursionDepth": 0 }); // cannot spawn — no LOCAL peers
-		const bus = IrcBus.global();
+		const bus = IrcBus.localForRegistry();
 		try {
 			expect(isIrcEnabled(settings, 0)).toBe(false);
 			// The murmur bridge installs a transport + seeds remote proxies: a leaf root now has peers.

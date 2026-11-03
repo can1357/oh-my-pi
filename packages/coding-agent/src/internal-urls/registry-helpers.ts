@@ -7,7 +7,7 @@ import type { Dirent } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
-import { AgentRegistry, isLocalSession } from "../registry/agent-registry";
+import { AgentRegistry, type AgentRegistryApi, isLocalSession } from "../registry/agent-registry";
 
 const extraArtifactsDirs = new Set<string>();
 /** Deepest nesting `sessionFilesFromDisk` descends below an artifacts dir. */
@@ -176,7 +176,7 @@ async function readDirEntries(dir: string): Promise<Dirent[] | null> {
  */
 export async function hasResolvableTranscript(
 	agentId: string,
-	registry: AgentRegistry = AgentRegistry.global(),
+	registry: AgentRegistryApi = AgentRegistry.global(),
 ): Promise<boolean> {
 	try {
 		const lower = agentId.toLowerCase();

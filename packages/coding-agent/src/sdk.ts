@@ -4642,7 +4642,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		if (agentKind === "main") {
 			// Track this top-level session as a root of its registry's lifecycle manager: a shared
 			// (custom) registry only fully tears the manager down when its LAST root session disposes.
-			AgentLifecycleManager.forRegistry(agentRegistry).retainRoot(resolvedAgentId);
+			AgentLifecycleManager.local(agentRegistry).retainRoot(resolvedAgentId);
 		}
 		// A reused parked ref remains parked until the new AgentSession is fully
 		// constructed and attached. Startup failure therefore leaves it revivable.
@@ -5630,7 +5630,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 							getActiveModelString,
 						};
 						await vibeRegistry.suspendScope(vibeRegistry.ownerScope(vibeParentSession), scopedAsyncJobManager);
-						await AgentLifecycleManager.forRegistry(agentRegistry).releaseRoot(resolvedAgentId);
+						await AgentLifecycleManager.local(agentRegistry).releaseRoot(resolvedAgentId);
 					}
 					await originalDispose(disposeOptions);
 				} finally {
@@ -6040,7 +6040,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				// session leaves no stale peers or namespace claim (#7401 review).
 				await emitSessionShutdownEvent(credentialDisabledTarget);
 				if (agentKind === "main" && registeredAgentRef) {
-					await AgentLifecycleManager.forRegistry(agentRegistry).releaseRoot(resolvedAgentId);
+					await AgentLifecycleManager.local(agentRegistry).releaseRoot(resolvedAgentId);
 				}
 				if (hasRegistered) unregisterUnlessParked();
 				if (asyncJobManager) {
