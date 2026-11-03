@@ -186,7 +186,9 @@ impl ChildProcess {
 						}
 					}
 					self.kill();
-					self.write_completion_marker(130);
+					let relays = std::mem::take(&mut self.output_relays);
+					let drain = (!relays.is_empty()).then(|| Box::pin(crate::outputrelay::drain(relays)));
+					self.write_completion_marker_after(drain, 130);
 					break Ok(ProcessWaitResult::Cancelled)
 				},
 				_ = sigtstp.recv() => {
@@ -236,8 +238,7 @@ impl ChildProcess {
 
 	/// Reports the exited process once its relays have forwarded its output.
 	/// The exit status is known by then, so a cancellation only stops the
-	/// waiting; the completion marker still follows the output, written once
-	/// the drain the cancellation left behind finishes.
+	/// waiting; the completion marker still follows the output.
 	async fn complete(
 		&mut self,
 		output: std::process::Output,
@@ -253,14 +254,7 @@ impl ChildProcess {
 		};
 		tokio::select! {
 			() = &mut drain => self.write_completion_marker(exit_code),
-			() = cancelled => {
-				if let Some(marker) = self.completion_marker.take() {
-					tokio::spawn(async move {
-						drain.await;
-						marker.write(exit_code);
-					});
-				}
-			},
+			() = cancelled => self.write_completion_marker_after(Some(drain), exit_code),
 		}
 		ProcessWaitResult::Completed(output)
 	}
@@ -268,6 +262,26 @@ impl ChildProcess {
 	fn write_completion_marker(&mut self, exit_code: i32) {
 		if let Some(marker) = self.completion_marker.take() {
 			marker.write(exit_code);
+		}
+	}
+
+	/// Writes the completion marker once `drain` has forwarded the process's
+	/// output through its relays, without waiting for that here; at once when
+	/// there is nothing to drain.
+	fn write_completion_marker_after(
+		&mut self,
+		drain: Option<std::pin::Pin<Box<impl Future<Output = ()> + Send + 'static>>>,
+		exit_code: i32,
+	) {
+		let Some(drain) = drain else {
+			self.write_completion_marker(exit_code);
+			return;
+		};
+		if let Some(marker) = self.completion_marker.take() {
+			tokio::spawn(async move {
+				drain.await;
+				marker.write(exit_code);
+			});
 		}
 	}
 
@@ -478,47 +492,78 @@ mod relay_tests {
 		(forwarding, child)
 	}
 
-	/// Cancelling while an exited command's output still drains keeps the
-	/// status the command exited with, and its completion marker still waits
-	/// for that output.
-	#[tokio::test]
-	async fn cancellation_while_output_drains_keeps_the_exit_status() {
-		use std::io::{Read, Seek, SeekFrom};
-
-		let (forwarding, mut child) = exited_with_forwarding_relay();
-		let mut marker = tempfile::tempfile().expect("marker file");
+	/// Attaches a `<exit>N</exit>` completion marker to `child`, returning the
+	/// file it is written to.
+	fn mark(child: &mut ChildProcess) -> std::fs::File {
+		let marker = tempfile::tempfile().expect("marker file");
 		child.set_completion_marker(
 			OpenFile::from(marker.try_clone().expect("marker writer")),
 			"<exit>".into(),
 			"</exit>".into(),
 		);
-		let read_marker = |marker: &mut std::fs::File| {
-			let mut text = String::new();
-			marker.seek(SeekFrom::Start(0)).expect("rewind marker");
-			marker.read_to_string(&mut text).expect("read marker");
-			text
-		};
+		marker
+	}
+
+	fn read_marker(marker: &mut std::fs::File) -> String {
+		use std::io::{Read, Seek, SeekFrom};
+		let mut text = String::new();
+		marker.seek(SeekFrom::Start(0)).expect("rewind marker");
+		marker.read_to_string(&mut text).expect("read marker");
+		text
+	}
+
+	/// Asserts the marker is not written while `forwarding` still forwards
+	/// the output, and reads `expected` once it finishes.
+	async fn assert_marker_follows_output(
+		forwarding: TestRelay,
+		marker: &mut std::fs::File,
+		expected: &str,
+	) {
+		assert_eq!(read_marker(marker), "", "marker written ahead of the output");
+		forwarding.finish();
+		tokio::time::timeout(std::time::Duration::from_secs(5), async {
+			while read_marker(marker).is_empty() {
+				tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.expect("marker written once the output drained");
+		assert_eq!(read_marker(marker), expected);
+	}
+
+	fn cancel_soon() -> CancellationToken {
 		let cancel = CancellationToken::new();
 		let trigger = cancel.clone();
 		tokio::spawn(async move {
 			tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 			trigger.cancel();
 		});
-		let Ok(ProcessWaitResult::Completed(output)) = child.wait(Some(cancel)).await else {
+		cancel
+	}
+
+	/// Cancelling while an exited command's output still drains keeps the
+	/// status the command exited with, and its completion marker still waits
+	/// for that output.
+	#[tokio::test]
+	async fn cancellation_while_output_drains_keeps_the_exit_status() {
+		let (forwarding, mut child) = exited_with_forwarding_relay();
+		let mut marker = mark(&mut child);
+		let Ok(ProcessWaitResult::Completed(output)) = child.wait(Some(cancel_soon())).await else {
 			panic!("an exited command reported as cancelled");
 		};
 		assert_eq!(output.status.code(), Some(7));
-		assert_eq!(read_marker(&mut marker), "", "marker written ahead of the output");
+		assert_marker_follows_output(forwarding, &mut marker, "<exit>7</exit>").await;
+	}
 
-		forwarding.finish();
-		tokio::time::timeout(std::time::Duration::from_secs(5), async {
-			while read_marker(&mut marker).is_empty() {
-				tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-			}
-		})
-		.await
-		.expect("marker written once the output drained");
-		assert_eq!(read_marker(&mut marker), "<exit>7</exit>");
+	/// Cancelling a command before it exits writes its `130` marker only after
+	/// the output its relays still carry.
+	#[tokio::test]
+	async fn cancellation_before_exit_writes_the_marker_after_the_output() {
+		let (forwarding, mut child) = exited_with_forwarding_relay();
+		child.exec_future = Box::pin(std::future::pending());
+		let mut marker = mark(&mut child);
+		assert!(matches!(child.wait(Some(cancel_soon())).await, Ok(ProcessWaitResult::Cancelled)));
+		assert_marker_follows_output(forwarding, &mut marker, "<exit>130</exit>").await;
 	}
 
 	/// The background reaper's poll reports an exited job only once its
