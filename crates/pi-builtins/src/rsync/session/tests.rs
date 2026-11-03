@@ -714,6 +714,44 @@ fn a_cancelled_client_lets_its_remote_shell_report_sigusr1() {
 	);
 }
 
+/// Cancelling a local copy whose server half's `--log-file` FIFO is full and
+/// nobody drains it ends promptly, not held by the half's blocked log write:
+/// the half drops its trailer (as rsync 3.5.1 drops a log line it cannot
+/// write at once) and the client's line prints alone. rsync 3.5.1 under a
+/// process-group SIGTERM with the FIFO nearly full printed this line alone
+/// (6 of 10, the half's `io.c(604)` line with it in 4); the builtin prints
+/// the more frequent one. Before, the client's wait for the half never
+/// returned, so the run hung past its cancellation.
+#[cfg(unix)]
+#[test]
+fn a_cancelled_copy_with_a_full_log_fifo_does_not_hang() {
+	use std::io::Write as _;
+	use std::os::unix::fs::OpenOptionsExt;
+
+	use clap::Parser as _;
+	let dir = tempfile::tempdir().unwrap();
+	make_tree(&dir.path().join("src"));
+	let fifo = dir.path().join("slog");
+	assert!(Command::new("mkfifo").arg(&fifo).status().unwrap().success());
+	// A reader keeps the FIFO open; a writer fills it so every log write blocks.
+	let _reader = fs::OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK).open(&fifo).unwrap();
+	let mut filler = fs::OpenOptions::new().write(true).custom_flags(libc::O_NONBLOCK).open(&fifo).unwrap();
+	while filler.write(&[b'x'; 4096]).is_ok() {}
+	let (mut host, cap) = crate::host::Host::for_test_owning("rsync", Vec::new(), dir.path());
+	let cancel = host.cancel_flag_for_test();
+	let canceller = std::thread::spawn(move || {
+		std::thread::sleep(Duration::from_millis(300));
+		cancel.store(true, Ordering::Relaxed);
+	});
+	let parsed = Rsync::try_parse_from(["rsync", "--", "-a", "-M--log-file=slog", "src/", "dst/"]).unwrap();
+	let started = Instant::now();
+	let code = crate::host::run_caught::<Rsync>(parsed, &mut host);
+	canceller.join().unwrap();
+	assert!(started.elapsed() < Duration::from_secs(10), "the run hung on the full log FIFO: {:?}", started.elapsed());
+	assert_eq!(code, RERR_SIGNAL, "{}", cap.err());
+	assert_eq!(cap.err(), "rsync error: received SIGINT, SIGTERM, or SIGHUP (code 20) at rsync.c(874) [sender=3.5.1]\n");
+}
+
 /// A daemon reached over a remote shell (`rsync -e RSH src/ h::mod/`),
 /// cancelled during the daemon handshake: the client reports first, after
 /// its 400 ms, then stops the remote shell, whose SIGUSR1 line follows, as

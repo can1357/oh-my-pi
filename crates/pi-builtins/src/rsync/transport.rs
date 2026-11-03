@@ -163,15 +163,26 @@ impl Connection {
 	/// Closes both directions, then waits for the remote-shell child (if any)
 	/// and maps its status like upstream: a non-zero exit code becomes the run's
 	/// exit code verbatim (127 = RERR_CMD_NOTFOUND, 255 = "unexplained error",
-	/// …), a signal RERR_TERMINATED, a core dump RERR_CRASHED.
-	pub(crate) fn finish(self) -> Result<(), RsyncError> {
+	/// …), a signal RERR_TERMINATED, a core dump RERR_CRASHED. A cancellation
+	/// ends the wait with the child still running ([`Reaped::Cancelled`]), to
+	/// be stopped after the client has reported, so the child's `received
+	/// SIGUSR1` trailer follows the client's, as upstream's exit cleanup
+	/// orders it.
+	pub(crate) fn finish(self) -> Reaped {
 		let Self { reader, writer, child, .. } = self;
 		drop(writer);
 		drop(reader);
 		match child {
 			Some(child) => child.wait(),
-			None => Ok(()),
+			None => Reaped::Code(0),
 		}
+	}
+
+	/// A connection carrying only a remote-shell child, stopped on drop; the
+	/// reader and writer are already gone. For a child kept past a cancelled
+	/// [`Self::finish`].
+	pub(crate) fn from_child(child: ChildGuard) -> Self {
+		Self { reader: Box::new(io::empty()), writer: Box::new(io::sink()), probe: None, child: Some(child), ctl: ConnCtl::default() }
 	}
 
 	/// The child's exit code if it has already exited (signals count as 0),
@@ -180,6 +191,15 @@ impl Connection {
 	pub(crate) fn child_exit_code(&self) -> Option<i32> {
 		self.child.as_ref().and_then(ChildGuard::exit_code_now)
 	}
+}
+
+/// The result of waiting for a remote-shell child ([`Connection::finish`]).
+pub(crate) enum Reaped {
+	/// The child exited; this is its contribution to the run's exit code.
+	Code(i32),
+	/// The wait was cancelled; the child still runs and is returned so its
+	/// caller stops it after the client has reported.
+	Cancelled(ChildGuard),
 }
 
 /// How long a child signalled with SIGUSR1 ([`ChildGuard::stop`]) has to
@@ -260,12 +280,13 @@ impl ChildGuard {
 		Some(status.code().unwrap_or(0))
 	}
 
-	/// Waits for the child, observing cancellation, then maps its status.
-	fn wait(mut self) -> Result<(), RsyncError> {
+	/// Waits for the child, observing cancellation, then maps its status. A
+	/// cancellation returns the still-running child ([`Reaped::Cancelled`]),
+	/// not stopped: its caller stops it after the client has reported.
+	fn wait(mut self) -> Reaped {
 		let status = loop {
 			if self.cancel.load(Ordering::Relaxed) {
-				self.stop();
-				return Err(RsyncError::cancelled());
+				return Reaped::Cancelled(self);
 			}
 			match lock(&self.child).try_wait() {
 				Ok(Some(status)) => break Ok(status),
@@ -278,9 +299,12 @@ impl ChildGuard {
 		self.stop_watchdog();
 		self.drain_stderr();
 		match status {
-			Ok(status) if self.report => map_status(status),
-			Ok(_) => Ok(()),
-			Err(err) => Err(RsyncError::new(RERR_WAITCHILD, syserr_text(self.role, &err, "waitpid"))),
+			Ok(status) if self.report => match map_status(status) {
+				Ok(()) => Reaped::Code(0),
+				Err(err) => Reaped::Code(err.code),
+			},
+			Ok(_) => Reaped::Code(0),
+			Err(err) => Reaped::Code(RsyncError::new(RERR_WAITCHILD, syserr_text(self.role, &err, "waitpid")).code),
 		}
 	}
 
@@ -1462,7 +1486,7 @@ mod tests {
 			drop(writer);
 			let mut out = Vec::new();
 			conn.reader.read_to_end(&mut out).unwrap();
-			conn.finish().unwrap();
+			let _ = conn.finish();
 			let split = out.windows(4).position(|w| w == b"\n--\n").expect("marker");
 			let argv = out[..split].split(|&b| b == 0).filter(|a| !a.is_empty()).map(<[u8]>::to_vec);
 			(argv.collect(), out[split + 4..].to_vec())
@@ -1556,7 +1580,11 @@ mod tests {
 				let rsh = script(dir.path(), "status-rsh", body);
 				let cancel = Arc::new(AtomicBool::new(false));
 				let conn = spawn_shell(&child_env(dir.path()), &base_cfg(&rsh, &logger), cancel).unwrap();
-				let got = conn.finish().err().map(|e| e.code);
+				let got = match conn.finish() {
+					Reaped::Code(0) => None,
+					Reaped::Code(code) => Some(code),
+					Reaped::Cancelled(_) => panic!("{body}: unexpected cancellation"),
+				};
 				assert_eq!(got, code, "{body}");
 			}
 		}
@@ -1597,7 +1625,8 @@ mod tests {
 			let mut buf = [0u8; 1];
 			let err = conn.reader.read(&mut buf).unwrap_err();
 			assert_eq!(RsyncError::from_io(&err, 12).code, RERR_SIGNAL);
-			assert_eq!(conn.finish().unwrap_err().code, RERR_SIGNAL);
+			// The cancellation returns the still-running child (stopped on drop).
+			assert!(matches!(conn.finish(), Reaped::Cancelled(_)));
 			assert!(started.elapsed() < Duration::from_secs(10));
 		}
 	}

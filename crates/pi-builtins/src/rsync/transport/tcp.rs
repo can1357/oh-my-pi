@@ -822,7 +822,7 @@ mod tests {
 		let mut got = [0u8; 22];
 		conn.reader.read_exact(&mut got).unwrap();
 		assert_eq!(&got, b"host=example.org\nping\n");
-		conn.finish().unwrap();
+		let _ = conn.finish();
 	}
 
 	#[test]

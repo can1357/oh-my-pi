@@ -1251,15 +1251,34 @@ enum PeerKind {
 impl PeerKind {
 	/// The peer's exit status as upstream folds it in: after a clean run it is
 	/// waited for (wait_process_with_flush); after a failure only a remote
-	/// child that already exited counts (cleanup_child_pid, WNOHANG).
-	fn status(&mut self, failed: bool) -> i32 {
+	/// child that already exited counts (cleanup_child_pid, WNOHANG). A
+	/// cancellation during the wait ends it with no status, as upstream's
+	/// client stops waiting and runs its exit cleanup; the local half is left
+	/// running (its kill is raised by [`Self::signal_exit`] after), and a
+	/// remote child is kept to be stopped after the client has reported.
+	fn status(&mut self, failed: bool, host_cancel: &AtomicBool) -> i32 {
 		match self {
 			Self::Local { handle, .. } if !failed => {
-				handle.take().map_or(0, |h| h.join().unwrap_or(crate::rsync::exit::RERR_CRASHED))
+				let Some(h) = handle.take() else { return 0 };
+				while !h.is_finished() {
+					if host_cancel.load(Ordering::Relaxed) {
+						*handle = Some(h);
+						return 0;
+					}
+					thread::sleep(Duration::from_millis(5));
+				}
+				h.join().unwrap_or(crate::rsync::exit::RERR_CRASHED)
 			}
-			Self::Child(conn) if !failed => {
-				conn.take().map_or(0, |c| c.finish().map_or_else(|e| e.code, |()| 0))
-			}
+			Self::Child(conn) if !failed => match conn.take() {
+				None => 0,
+				Some(c) => match c.finish() {
+					transport::Reaped::Code(code) => code,
+					transport::Reaped::Cancelled(child) => {
+						*conn = Some(Connection::from_child(child));
+						0
+					},
+				},
+			},
 			Self::Child(Some(conn)) => conn.child_exit_code().unwrap_or(0),
 			_ => 0,
 		}
@@ -1665,7 +1684,7 @@ fn setup_failed(logger: &Logger, err: &RsyncError, streams: Streams, mut peer: P
 	}
 	drop(streams);
 	report(logger, err);
-	let code = err.code.max(peer.status(true));
+	let code = err.code.max(peer.status(true, &AtomicBool::new(false)));
 	logger.finish(code, err.site, &Stats::default(), false);
 	peer.stop();
 	code
@@ -1842,13 +1861,17 @@ impl ClientRun<'_> {
 		let cancelled = self.io.host_cancel.load(Ordering::Relaxed);
 		let failed = failure.is_some() || cancelled;
 		// The peer's status (wait_process_with_flush / cleanup_child_pid).
-		let status = peer.status(failed);
+		let status = peer.status(failed, &self.io.host_cancel);
+		// The wait above can end at a cancellation that came while it ran; from
+		// here the run ends as a cancelled one (upstream's client, interrupted
+		// in its wait, runs its signal exit cleanup).
+		let cancelled = cancelled || self.io.host_cancel.load(Ordering::Relaxed);
 		let mut stats = lock(&outcome.ctx.stats).clone();
 		if let Some(totals) = outcome.totals {
 			stats.total_read = totals.0;
 			stats.total_written = totals.1;
 		}
-		if !failed && outcome.summary {
+		if !failed && !cancelled && outcome.summary {
 			let elapsed = outcome.end.map(|end| end.saturating_duration_since(start));
 			logger.with_role(outcome.role).output_summary(&stats, neg.proto.version, elapsed, opts.dry_run, opts.write_batch < 0);
 		}

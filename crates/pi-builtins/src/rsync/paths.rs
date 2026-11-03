@@ -924,8 +924,8 @@ pub(crate) fn open_operator_file_with(
 	path: &Path,
 	opts: &OperatorOpts<'_>,
 ) -> io::Result<OperatorInput> {
-	let (file, first) = operator_open(fs, path, OpenKind::Read, opts)?;
-	Ok(OperatorInput::new(file, opts.cancel, first))
+	let file = operator_open(fs, path, OpenKind::Read, opts)?;
+	Ok(OperatorInput::new(file, opts.cancel))
 }
 
 /// An operator file opened for reading ([`open_operator_file`]). A read
@@ -939,17 +939,15 @@ pub(crate) struct OperatorInput {
 	/// Whether a read can block ([`pi_vfs::fd_reads_can_block`]). A provider
 	/// file's reads observe the facade's own cancellation instead.
 	poll:   bool,
-	/// The byte the FIFO's open read to see its writer ([`FifoEnd`]).
-	first:  Option<u8>,
 }
 
 impl OperatorInput {
-	fn new(file: pi_vfs::File, cancel: &Arc<AtomicBool>, first: Option<u8>) -> Self {
+	fn new(file: pi_vfs::File, cancel: &Arc<AtomicBool>) -> Self {
 		#[cfg(unix)]
 		let poll = file.native().is_some_and(|native| pi_vfs::fd_reads_can_block(native.as_fd()));
 		#[cfg(not(unix))]
 		let poll = false;
-		Self { file, cancel: Arc::clone(cancel), poll, first }
+		Self { file, cancel: Arc::clone(cancel), poll }
 	}
 
 	/// The opened file, for its metadata.
@@ -971,10 +969,6 @@ impl io::Read for OperatorInput {
 	fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
 		if self.cancelled() {
 			return Err(RsyncError::cancelled_io());
-		}
-		if let Some(byte) = self.first.take_if(|_| !buf.is_empty()) {
-			buf[0] = byte;
-			return Ok(1);
 		}
 		#[cfg(unix)]
 		if self.poll
@@ -1064,7 +1058,7 @@ pub(crate) fn create_operator_file_with(
 	mode: u32,
 	opts: &OperatorOpts<'_>,
 ) -> io::Result<OperatorOutput> {
-	let (file, _) = operator_open(fs, path, OpenKind::Create { append, mode }, opts)?;
+	let file = operator_open(fs, path, OpenKind::Create { append, mode }, opts)?;
 	OperatorOutput::new(file, opts.cancel)
 }
 
@@ -1074,8 +1068,8 @@ pub(crate) fn create_operator_file_with(
 /// hold up a cancelled command: a write the cancellation finds waiting
 /// fails with [`RsyncError::cancelled_io`], as rsync 3.5.1's signal handler
 /// ends a process blocked in it. A write that starts after the cancellation
-/// fails the same way, unless [`Self::waiting_after_cancel`] lets it wait
-/// like any other.
+/// fails the same way, unless [`Self::dropping_after_cancel`] makes it write
+/// what fits and drop the rest instead.
 pub(crate) struct OperatorOutput {
 	file:         pi_vfs::File,
 	cancel:       Arc<AtomicBool>,
@@ -1100,11 +1094,13 @@ impl OperatorOutput {
 		Ok(Self { file, cancel: Arc::clone(cancel), fifo, after_cancel: false })
 	}
 
-	/// Writes that start after the cancellation wait for room and report
-	/// their own failures, as the `--log-file` writes of rsync 3.5.1's exit
-	/// path do: its signal handler logs the exit line before it prints it,
-	/// and that write waits until the log takes it.
-	pub(crate) const fn waiting_after_cancel(mut self) -> Self {
+	/// A write that starts after the cancellation (an exit trailer) is dropped
+	/// if it would block, as rsync 3.5.1's signal exit drops a log line it
+	/// cannot write at once (`rwrite`'s `in_block`): the line that fits in the
+	/// log's remaining room is written, one that does not is discarded, and
+	/// the run ends either way. Without this a full `--log-file` FIFO held the
+	/// run open past its cancellation.
+	pub(crate) const fn dropping_after_cancel(mut self) -> Self {
 		self.after_cancel = true;
 		self
 	}
@@ -1122,30 +1118,33 @@ impl io::Write for OperatorOutput {
 		if !cuttable && !self.after_cancel {
 			return Err(RsyncError::cancelled_io());
 		}
-		let flag = &self.cancel;
-		let mapped = |err: io::Error| {
-			if cuttable && flag.load(Ordering::Relaxed) { RsyncError::cancelled_io() } else { err }
+		let cancel = &self.cancel;
+		let map_cancel = |err: io::Error| -> io::Error {
+			if cuttable && cancel.load(Ordering::Relaxed) { RsyncError::cancelled_io() } else { err }
 		};
 		#[cfg(unix)]
 		if self.fifo
 			&& let Some(mut native) = self.file.native()
 		{
-			let never = AtomicBool::new(false);
-			let cancel: &AtomicBool = if cuttable { &self.cancel } else { &never };
 			// Write first, as rsync's blocking write does: a pipe reports
 			// POLLOUT only with a whole page free, while a short write still
-			// fits in the room left in its last page. Wait for room only when
-			// the write would block.
+			// fits in the room left in its last page.
 			loop {
 				match io::Write::write(&mut native, buf) {
 					Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
-						wait_writable(native.as_fd(), cancel).map_err(mapped)?;
+						if !cuttable {
+							// After the cancellation: drop the line, as rsync does.
+							return Ok(buf.len());
+						}
+						// A per-line write still in progress: wait for room,
+						// stopping at the cancellation.
+						wait_writable(native.as_fd(), cancel).map_err(&map_cancel)?;
 					},
-					written => return written.map_err(mapped),
+					written => return written.map_err(&map_cancel),
 				}
 			}
 		}
-		io::Write::write(&mut self.file, buf).map_err(mapped)
+		io::Write::write(&mut self.file, buf).map_err(&map_cancel)
 	}
 
 	fn flush(&mut self) -> io::Result<()> {
@@ -1200,7 +1199,7 @@ pub(crate) fn batch_input_ok(file: &pi_vfs::File) -> io::Result<bool> {
 	Ok(kind.is_file() || kind.is_fifo())
 }
 
-fn operator_open(fs: &BlockingFs, path: &Path, kind: OpenKind, opts: &OperatorOpts<'_>) -> io::Result<Opened> {
+fn operator_open(fs: &BlockingFs, path: &Path, kind: OpenKind, opts: &OperatorOpts<'_>) -> io::Result<pi_vfs::File> {
 	match open_unchecked(fs, path, kind, opts) {
 		// A cancelled open (a FIFO's wait, or the facade's own) ends as the
 		// command does.
@@ -1209,16 +1208,13 @@ fn operator_open(fs: &BlockingFs, path: &Path, kind: OpenKind, opts: &OperatorOp
 	}
 }
 
-/// The opened file, and the first byte of a FIFO read ([`FifoEnd`]).
-type Opened = (pi_vfs::File, Option<u8>);
-
-fn open_unchecked(fs: &BlockingFs, path: &Path, kind: OpenKind, opts: &OperatorOpts<'_>) -> io::Result<Opened> {
+fn open_unchecked(fs: &BlockingFs, path: &Path, kind: OpenKind, opts: &OperatorOpts<'_>) -> io::Result<pi_vfs::File> {
 	#[cfg(unix)]
 	if fs.is_native_local(path) && is_fifo(path) {
-		let (fd, first) = open_fifo(path, kind, opts)?;
-		return Ok((pi_vfs::File::from(std::fs::File::from(fd)), first));
+		let fd = open_fifo(path, kind, opts)?;
+		return Ok(pi_vfs::File::from(std::fs::File::from(fd)));
 	}
-	open_unchecked_file(fs, path, kind, opts).map(|file| (file, None))
+	open_unchecked_file(fs, path, kind, opts)
 }
 
 fn open_unchecked_file(
@@ -1256,159 +1252,81 @@ fn is_fifo(path: &Path) -> bool {
 	std::fs::metadata(path).is_ok_and(|meta| meta.file_type().is_fifo())
 }
 
-/// Whether `/proc/self/fd` reopens a descriptor's file, as Linux's does.
-#[cfg(target_os = "linux")]
-static PROC_FD: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| Path::new("/proc/self/fd").is_dir());
-
-/// Opens the FIFO at `path` for `kind` so that the wait for the other end
-/// observes `opts.cancel` and gives the other end nothing it did not get
-/// from rsync. The FIFO is opened non-blocking, by the same walk (on Linux
-/// once as an `O_PATH` handle, then reopened through `/proc/self/fd`, so a
-/// FIFO renamed or removed meanwhile is the one waited on), and the wait is
-/// [`wait_fifo_partner`]'s; the descriptor is then made blocking.
+/// Opens the FIFO at `path` for `kind`, reading nothing of it so another
+/// reader of the same FIFO and an `--early-input` send both get every byte.
 ///
-/// Off Linux a read waits in a blocking `open` on a helper thread instead
-/// ([`open_fifo_reader`]), as `poll` on a FIFO with no writer yet is not
-/// specified to wait there.
+/// A read opens `O_RDONLY | O_NONBLOCK`, which returns at once even with no
+/// writer (POSIX), then clears `O_NONBLOCK`: the [`OperatorInput`] read then
+/// polls for data or end of input and observes the cancellation, so a FIFO
+/// nobody writes to does not hold up the command, and a writer present but
+/// idle is waited on for its data, as rsync's blocking open plus first read
+/// does. A write opens `O_WRONLY | O_NONBLOCK`, which fails with `ENXIO`
+/// until a reader exists and is retried each poll slice, as rsync's blocking
+/// open waits for a reader; a cancelled wait opens nothing, releasing no
+/// other process waiting on the FIFO. On Linux that wait reaches the FIFO
+/// once by the walk as an `O_PATH` handle and retries through
+/// `/proc/self/fd`, so a FIFO renamed or removed during the wait is still
+/// the one opened.
 #[cfg(unix)]
-fn open_fifo(path: &Path, kind: OpenKind, opts: &OperatorOpts<'_>) -> io::Result<FifoEnd> {
+fn open_fifo(path: &Path, kind: OpenKind, opts: &OperatorOpts<'_>) -> io::Result<OwnedFd> {
+	use std::os::fd::AsFd;
 	let (flags, mode) = kind.flags();
-	#[cfg(target_os = "linux")]
-	if *PROC_FD {
-		use std::os::fd::AsRawFd;
-		let handle = if opts.insecure {
-			open_flags(path, libc::O_PATH, 0)?
-		} else {
-			let walk = OwnerWalk { confine: opts.confine, trusted: &trusted_owner };
-			owner_walk_open(path.as_os_str().as_bytes(), libc::O_PATH, 0, &walk)?
-		};
-		let link = PathBuf::from(format!("/proc/self/fd/{}", handle.as_raw_fd()));
-		return wait_fifo_partner(kind, opts.cancel, || open_flags(&link, flags | libc::O_NONBLOCK, mode));
-	}
-	#[cfg(not(target_os = "linux"))]
-	if matches!(kind, OpenKind::Read) {
-		return open_fifo_reader(path, flags, opts).map(|fd| (fd, None));
-	}
-	wait_fifo_partner(kind, opts.cancel, || {
+	let open = || -> io::Result<OwnedFd> {
 		if opts.insecure {
 			open_flags(path, flags | libc::O_NONBLOCK, mode)
 		} else {
 			let walk = OwnerWalk { confine: opts.confine, trusted: &trusted_owner };
 			owner_walk_open(path.as_os_str().as_bytes(), flags | libc::O_NONBLOCK, mode, &walk)
 		}
-	})
-}
-
-/// A FIFO's read open off Linux: a blocking `open` on a helper thread, whose
-/// wait observes `opts.cancel`. A cancelled wait leaves the helper in `open`
-/// until a writer comes, which then finds its reader gone; nothing opens
-/// the other end to release it, so no other process waiting on the FIFO is
-/// let through.
-#[cfg(all(unix, not(target_os = "linux")))]
-fn open_fifo_reader(path: &Path, flags: libc::c_int, opts: &OperatorOpts<'_>) -> io::Result<OwnedFd> {
-	use std::sync::mpsc::{self, RecvTimeoutError};
+	};
+	let blocking = |fd: OwnedFd| -> io::Result<OwnedFd> {
+		let cur = nix::fcntl::OFlag::from_bits_truncate(nix::fcntl::fcntl(fd.as_fd(), nix::fcntl::FcntlArg::F_GETFL)?);
+		nix::fcntl::fcntl(fd.as_fd(), nix::fcntl::FcntlArg::F_SETFL(cur - nix::fcntl::OFlag::O_NONBLOCK))?;
+		Ok(fd)
+	};
 	if opts.cancel.load(Ordering::Relaxed) {
 		return Err(RsyncError::cancelled_io());
 	}
-	let (insecure, owned, confine) = (opts.insecure, path.as_os_str().as_bytes().to_vec(), opts.confine.map(Path::to_path_buf));
-	let (sender, opened) = mpsc::sync_channel(1);
-	std::thread::Builder::new().name("rsync-fifo-open".into()).spawn(move || {
-		let result = if insecure {
-			open_flags(Path::new(OsStr::from_bytes(&owned)), flags, 0)
-		} else {
-			let walk = OwnerWalk { confine: confine.as_deref(), trusted: &trusted_owner };
-			owner_walk_open(&owned, flags, 0, &walk)
-		};
-		// After a cancellation nobody receives, and the descriptor closes here.
-		let _ = sender.send(result);
-	})?;
-	loop {
-		match opened.recv_timeout(pi_vfs::POLL_SLICE) {
-			Ok(result) => return result,
-			Err(RecvTimeoutError::Timeout) if opts.cancel.load(Ordering::Relaxed) => return Err(RsyncError::cancelled_io()),
-			Err(RecvTimeoutError::Timeout) => {},
-			Err(RecvTimeoutError::Disconnected) => return Err(io::Error::other("the FIFO open thread exited")),
-		}
+	match kind {
+		OpenKind::Read => blocking(open()?),
+		OpenKind::Create { .. } => {
+			#[cfg(target_os = "linux")]
+			if *PROC_FD {
+				use std::os::fd::AsRawFd;
+				let handle = if opts.insecure {
+					open_flags(path, libc::O_PATH, 0)?
+				} else {
+					let walk = OwnerWalk { confine: opts.confine, trusted: &trusted_owner };
+					owner_walk_open(path.as_os_str().as_bytes(), libc::O_PATH, 0, &walk)?
+				};
+				let link = PathBuf::from(format!("/proc/self/fd/{}", handle.as_raw_fd()));
+				return retry_write_fifo(opts.cancel, || open_flags(&link, flags | libc::O_NONBLOCK, mode)).and_then(blocking);
+			}
+			retry_write_fifo(opts.cancel, open).and_then(blocking)
+		},
 	}
 }
 
-/// An opened FIFO, and for a read the byte [`wait_fifo_partner`] took from
-/// it to see that a writer was there, which the reader gets first.
-#[cfg(unix)]
-type FifoEnd = (OwnedFd, Option<u8>);
+/// Whether `/proc/self/fd` reopens a descriptor's file, as Linux's does.
+#[cfg(target_os = "linux")]
+static PROC_FD: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| Path::new("/proc/self/fd").is_dir());
 
-/// Waits for a FIFO's other end without a blocking `open`, so a cancelled
-/// wait leaves nothing behind, and opens nothing another process could take
-/// for a partner. rsync 3.5.1 waits in a blocking `open`, which its signal
-/// interrupts; the other end never sees it.
-///
-/// For writing, the non-blocking open fails with `ENXIO` until a reader
-/// exists and is tried again each poll slice. For reading, the open returns
-/// at once, and a one-byte read tells whether a writer is there: `EAGAIN`
-/// when one is and has written nothing, the byte when it has written, and
-/// end of file while there is none, unless one came and went (`POLLHUP`),
-/// whose end of file a blocking open would also have reached. The wait
-/// polls in slices that wake for data or that close. Either way the
-/// descriptor is then made blocking, as a blocking open leaves it.
+/// Retries a non-blocking `O_WRONLY` FIFO open until a reader exists (it
+/// fails with `ENXIO` until then), one poll slice apart, stopping at the
+/// cancellation.
 #[cfg(unix)]
-fn wait_fifo_partner(
-	kind: OpenKind,
-	cancel: &AtomicBool,
-	open_nonblocking: impl Fn() -> io::Result<OwnedFd>,
-) -> io::Result<FifoEnd> {
-	use std::os::fd::{AsFd, AsRawFd};
-	let blocking = |fd: OwnedFd| -> io::Result<OwnedFd> {
-		let flags = nix::fcntl::OFlag::from_bits_truncate(nix::fcntl::fcntl(fd.as_fd(), nix::fcntl::FcntlArg::F_GETFL)?);
-		nix::fcntl::fcntl(fd.as_fd(), nix::fcntl::FcntlArg::F_SETFL(flags - nix::fcntl::OFlag::O_NONBLOCK))?;
-		Ok(fd)
-	};
-	let slice_ms = i32::try_from(pi_vfs::POLL_SLICE.as_millis()).unwrap_or(i32::MAX);
-	if cancel.load(Ordering::Relaxed) {
-		return Err(RsyncError::cancelled_io());
-	}
-	match kind {
-		OpenKind::Read => {
-			let fd = open_nonblocking()?;
-			loop {
-				let mut byte = [0u8; 1];
-				// SAFETY: a one-byte read into a live buffer from an owned descriptor.
-				let n = unsafe { libc::read(fd.as_raw_fd(), byte.as_mut_ptr().cast(), 1) };
-				match n {
-					1 => return Ok((blocking(fd)?, Some(byte[0]))),
-					0 => {
-						let mut pfd = libc::pollfd { fd: fd.as_raw_fd(), events: libc::POLLIN, revents: 0 };
-						// SAFETY: one pollfd for an owned descriptor.
-						let ready = unsafe { libc::poll(&raw mut pfd, 1, 0) };
-						if ready > 0 && pfd.revents & libc::POLLHUP != 0 {
-							return Ok((blocking(fd)?, None));
-						}
-					},
-					_ => match io::Error::last_os_error() {
-						err if err.raw_os_error() == Some(libc::EAGAIN) => return Ok((blocking(fd)?, None)),
-						err if err.raw_os_error() == Some(libc::EINTR) => continue,
-						err => return Err(err),
-					},
-				}
+fn retry_write_fifo(cancel: &AtomicBool, open: impl Fn() -> io::Result<OwnedFd>) -> io::Result<OwnedFd> {
+	loop {
+		match open() {
+			Ok(fd) => return Ok(fd),
+			Err(err) if err.raw_os_error() == Some(libc::ENXIO) => {
 				if cancel.load(Ordering::Relaxed) {
 					return Err(RsyncError::cancelled_io());
 				}
-				let mut pfd = libc::pollfd { fd: fd.as_raw_fd(), events: libc::POLLIN, revents: 0 };
-				// SAFETY: one pollfd for an owned descriptor; wakes for data or a writer's close.
-				unsafe { libc::poll(&raw mut pfd, 1, slice_ms) };
-			}
-		},
-		OpenKind::Create { .. } => loop {
-			match open_nonblocking() {
-				Ok(fd) => return Ok((blocking(fd)?, None)),
-				Err(err) if err.raw_os_error() == Some(libc::ENXIO) => {
-					if cancel.load(Ordering::Relaxed) {
-						return Err(RsyncError::cancelled_io());
-					}
-					std::thread::sleep(pi_vfs::POLL_SLICE);
-				},
-				Err(err) => return Err(err),
-			}
-		},
+				std::thread::sleep(pi_vfs::POLL_SLICE);
+			},
+			Err(err) => return Err(err),
+		}
 	}
 }
 
@@ -1779,11 +1697,12 @@ mod tests {
 
 	/// An operator FIFO holds up nothing past the command's cancellation,
 	/// through the trusted-owner walk and with `--insecure-links` alike: an
-	/// open waiting for a writer (`--read-batch`, `--files-from`, a filter
-	/// file), an open waiting for a reader (`--log-file`, `--write-batch`),
-	/// and a read of a FIFO whose writer sends nothing each end with the
-	/// cancellation (exit 20) within a few poll slices of it. Data and the
-	/// writer's end still arrive as from a plain read.
+	/// open waiting for a reader (`--log-file`, `--write-batch`), and a read
+	/// of a FIFO whose writer sends nothing or has no writer each end with the
+	/// cancellation (exit 20) within a few poll slices of it. A read open
+	/// returns at once (as a non-blocking `O_RDONLY` does), reading nothing;
+	/// the read then waits. Data and the writer's end still arrive as from a
+	/// plain read.
 	#[test]
 	fn operator_fifos_stop_at_cancellation() {
 		use std::{
@@ -1810,27 +1729,34 @@ mod tests {
 		};
 		let is_cancellation = |err: &io::Error| RsyncError::from_io(err, 0).code == RERR_SIGNAL;
 		for insecure in [false, true] {
-			// Nobody opens the other end.
-			let started = Instant::now();
-			let Err(err) = open_operator_file(&vfs, &fifo, insecure, &cancel_soon()) else {
-				panic!("insecure={insecure}: the open of a FIFO nobody writes to returned");
-			};
-			assert!(is_cancellation(&err), "insecure={insecure}: {err}");
-			assert!(started.elapsed() < Duration::from_secs(2), "insecure={insecure}: {:?}", started.elapsed());
+			// A read of a FIFO whose writer is present but idle: the open
+			// returns at once, the read waits for data and ends with the
+			// cancellation.
+			{
+				let writer = std::fs::OpenOptions::new().read(true).write(true).custom_flags(libc::O_NONBLOCK).open(&fifo).unwrap();
+				let mut input = open_operator_file(&vfs, &fifo, insecure, &cancel_soon()).unwrap();
+				let started = Instant::now();
+				let err = input.read(&mut [0; 16]).unwrap_err();
+				assert!(is_cancellation(&err), "insecure={insecure} idle writer: {err}");
+				assert!(started.elapsed() < Duration::from_secs(2), "insecure={insecure}: {:?}", started.elapsed());
+				drop((input, writer));
+			}
+			// A read of a FIFO with no writer at all: the open returns at once,
+			// the read waits and ends with the cancellation.
+			{
+				let mut input = open_operator_file(&vfs, &fifo, insecure, &cancel_soon()).unwrap();
+				let started = Instant::now();
+				let err = input.read(&mut [0; 16]).unwrap_err();
+				assert!(is_cancellation(&err), "insecure={insecure} no writer: {err}");
+				assert!(started.elapsed() < Duration::from_secs(2), "insecure={insecure}: {:?}", started.elapsed());
+			}
+			// An open waiting for a reader (a write to a FIFO nobody reads).
 			let started = Instant::now();
 			let Err(err) = create_operator_file(&vfs, &fifo, true, insecure, &cancel_soon()) else {
 				panic!("insecure={insecure}: the open of a FIFO nobody reads returned");
 			};
 			assert!(is_cancellation(&err), "insecure={insecure}: {err}");
 			assert!(started.elapsed() < Duration::from_secs(2), "insecure={insecure}: {:?}", started.elapsed());
-			// A writer that sends nothing (this end, opened without waiting).
-			let writer = std::fs::OpenOptions::new().read(true).write(true).custom_flags(libc::O_NONBLOCK).open(&fifo).unwrap();
-			let mut input = open_operator_file(&vfs, &fifo, insecure, &cancel_soon()).unwrap();
-			let started = Instant::now();
-			let err = input.read(&mut [0; 16]).unwrap_err();
-			assert!(is_cancellation(&err), "insecure={insecure}: {err}");
-			assert!(started.elapsed() < Duration::from_secs(2), "insecure={insecure}: {:?}", started.elapsed());
-			drop((input, writer));
 			// Data, then the writer's end.
 			let never = Arc::new(AtomicBool::new(false));
 			let path = fifo.clone();
@@ -1846,10 +1772,11 @@ mod tests {
 		}
 	}
 
-	/// A FIFO renamed or removed while an open of it waits is still the one
-	/// waited on, and the wait ends with the cancellation (exit 20) within a
-	/// few poll slices: the FIFO is reached once and reopened through
-	/// `/proc/self/fd`, not by its old path.
+	/// A FIFO renamed or removed while a write open of it waits for a reader
+	/// is still the one opened, and the wait ends with the cancellation (exit
+	/// 20) within a few poll slices: the FIFO is reached once as an `O_PATH`
+	/// handle and retried through `/proc/self/fd`, not by its old path. (A
+	/// read open returns at once, so nothing waits for it to rename.)
 	#[cfg(target_os = "linux")]
 	#[test]
 	fn a_fifo_moved_during_its_open_still_ends_with_the_cancellation() {
@@ -1861,7 +1788,7 @@ mod tests {
 		let vfs = BlockingFs::native();
 		for removed in [false, true] {
 			for insecure in [false, true] {
-				for write in [false, true] {
+				for write in [true] {
 					let case = format!("removed={removed} insecure={insecure} write={write}");
 					let fifo = base.join(format!("fifo-{removed}-{insecure}-{write}"));
 					nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap();
@@ -1893,12 +1820,14 @@ mod tests {
 		}
 	}
 
-	/// A cancelled open of a FIFO gives another process waiting on the same
-	/// FIFO no partner, as rsync 3.5.1's interrupted `open` gives none: a
-	/// reader waiting for a writer, or a writer waiting for a reader, still
-	/// waits, and gets the data or reader that comes later. Before, the
-	/// cancelled open was released by opening the other end, which let that
-	/// process through to an empty input or a closed pipe.
+	/// A cancelled operator-FIFO wait gives another process waiting on the
+	/// same FIFO no partner, as rsync 3.5.1's interrupted `open` gives none: a
+	/// reader (whose open returns at once but whose read then waits), or a
+	/// writer waiting for a reader, holds no fd another process could take for
+	/// its partner once cancelled, so that process still waits and gets the
+	/// data or reader that comes later. Before, a one-byte read, or a release
+	/// by opening the other end, let that process through to a missing byte or
+	/// a closed pipe.
 	#[cfg(unix)]
 	#[test]
 	fn a_cancelled_fifo_open_gives_another_waiter_no_partner() {
@@ -1936,13 +1865,17 @@ mod tests {
 					std::thread::sleep(Duration::from_millis(200));
 					flag.store(true, Ordering::Relaxed);
 				});
-				let opened = if builtin_writes {
-					create_operator_file(&vfs, &fifo, true, insecure, &cancel).map(drop)
+				let errored = if builtin_writes {
+					create_operator_file(&vfs, &fifo, true, insecure, &cancel).map(drop).is_err()
 				} else {
-					open_operator_file(&vfs, &fifo, insecure, &cancel).map(drop)
+					// The read open returns at once; the read then waits and is cancelled.
+					match open_operator_file(&vfs, &fifo, insecure, &cancel) {
+						Ok(mut input) => input.read(&mut [0u8; 8]).is_err(),
+						Err(_) => true,
+					}
 				};
 				canceller.join().unwrap();
-				assert!(opened.is_err(), "{case}: the builtin's open returned");
+				assert!(errored, "{case}: the builtin's wait was not cancelled");
 				assert!(
 					matches!(finished.recv_timeout(Duration::from_millis(500)), Err(mpsc::RecvTimeoutError::Timeout)),
 					"{case}: the other process got through the cancelled open"
@@ -1964,6 +1897,54 @@ mod tests {
 					assert_eq!(result, Ok(b"ours".to_vec()), "{case}");
 				}
 			}
+		}
+	}
+
+	/// Opening an operator FIFO reads none of its bytes: all of them stay for
+	/// whatever reads the file. A plain `OperatorInput` read gets every byte,
+	/// and another process reading the same FIFO after the builtin opened it
+	/// gets every byte too. Before, the open read one byte to tell a writer
+	/// was there, which an `--early-input` send (whose FIFO has no metadata
+	/// length, so it reads nothing) then left behind for the other reader.
+	#[cfg(unix)]
+	#[test]
+	fn opening_a_fifo_reads_none_of_its_bytes() {
+		use std::io::Read;
+		use std::time::Duration;
+
+		let (_guard, base) = canonical_tempdir();
+		let vfs = BlockingFs::native();
+		for insecure in [false, true] {
+			// A plain read gets every byte.
+			let fifo = base.join(format!("earlyish-{insecure}"));
+			nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap();
+			let never = Arc::new(AtomicBool::new(false));
+			let mut input = open_operator_file(&vfs, &fifo, insecure, &never).unwrap();
+			let path = fifo.clone();
+			let writer = std::thread::spawn(move || {
+				std::thread::sleep(Duration::from_millis(50));
+				std::io::Write::write_all(&mut fs::OpenOptions::new().write(true).open(&path).unwrap(), b"ABCDEFG\n").unwrap();
+			});
+			let mut got = Vec::new();
+			input.read_to_end(&mut got).unwrap();
+			writer.join().unwrap();
+			assert_eq!(got, b"ABCDEFG\n", "insecure={insecure}: a byte was lost");
+
+			// The builtin opens the FIFO (as `--early-input` does, reading
+			// nothing from a FIFO), and another reader gets every byte.
+			let shared = base.join(format!("shared-early-{insecure}"));
+			nix::unistd::mkfifo(&shared, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap();
+			let held = open_operator_file(&vfs, &shared, insecure, &never).unwrap();
+			let path = shared.clone();
+			let writer = std::thread::spawn(move || {
+				std::thread::sleep(Duration::from_millis(50));
+				std::io::Write::write_all(&mut fs::OpenOptions::new().write(true).open(&path).unwrap(), b"ABCDEFG\n").unwrap();
+			});
+			let mut other = Vec::new();
+			fs::File::open(&shared).unwrap().read_to_end(&mut other).unwrap();
+			writer.join().unwrap();
+			assert_eq!(other, b"ABCDEFG\n", "insecure={insecure}: the other reader lost a byte");
+			drop(held);
 		}
 	}
 
@@ -2026,24 +2007,34 @@ mod tests {
 			drop(out);
 			assert!(drainer.join().unwrap() == data, "insecure={insecure}: the data arrived changed");
 		}
-		// Asked to, as the log file is, a write that starts after the
-		// cancellation waits for room like any other, and then succeeds.
+		// A write that starts after the cancellation is dropped if it would
+		// block, as rsync drops an exit line it cannot write at once; a write
+		// that fits goes out.
 		let late = base.join("late");
 		nix::unistd::mkfifo(&late, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap();
 		let mut reader = fs::OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK).open(&late).unwrap();
+		let cancel = Arc::new(AtomicBool::new(false));
+		// Fits: the FIFO is empty, so the line is written and read back. The
+		// log file is opened before the cancellation (a reader is present).
 		{
+			let mut out = create_operator_file(&vfs, &late, true, false, &cancel).unwrap().dropping_after_cancel();
+			cancel.store(true, Ordering::Relaxed);
+			out.write_all(b"exit line\n").unwrap();
+			let mut buf = vec![0u8; 64];
+			let n = reader.read(&mut buf).unwrap();
+			assert_eq!(&buf[..n], b"exit line\n");
+			cancel.store(false, Ordering::Relaxed);
+		}
+		// Full: the write is dropped at once, the run is not held.
+		{
+			let mut out = create_operator_file(&vfs, &late, true, false, &cancel).unwrap().dropping_after_cancel();
 			let mut filler = fs::OpenOptions::new().write(true).custom_flags(libc::O_NONBLOCK).open(&late).unwrap();
 			while filler.write(&[b'x'; 4096]).is_ok() {}
+			cancel.store(true, Ordering::Relaxed);
+			let started = Instant::now();
+			out.write_all(b"exit line\n").unwrap();
+			assert!(started.elapsed() < Duration::from_secs(1), "a full-FIFO write after the cancellation waited");
 		}
-		let cancel = Arc::new(AtomicBool::new(false));
-		let mut out = create_operator_file(&vfs, &late, true, false, &cancel).unwrap().waiting_after_cancel();
-		cancel.store(true, Ordering::Relaxed);
-		let writer = std::thread::spawn(move || out.write_all(b"exit line\n"));
-		std::thread::sleep(Duration::from_millis(300));
-		assert!(!writer.is_finished(), "a write after the cancellation gave up");
-		let mut buf = vec![0u8; 1 << 16];
-		while reader.read(&mut buf).is_ok_and(|n| n > 0) {}
-		writer.join().unwrap().unwrap();
 	}
 
 	/// A short write goes into the room the last page of a FIFO has, even

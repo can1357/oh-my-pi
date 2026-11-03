@@ -473,7 +473,7 @@ impl Logger {
 	/// rsync's does.
 	fn open_deferred(&self, log: &DeferredLog) -> io::Result<Box<dyn Write + Send>> {
 		let file = crate::rsync::paths::create_operator_file(&log.fs, &log.path, true, log.insecure, &log.cancel)?;
-		Ok(Box::new(file.waiting_after_cancel()))
+		Ok(Box::new(file.dropping_after_cancel()))
 	}
 
 	/// logfile_open's failure: upstream's two messages, then syslog.
