@@ -41,7 +41,7 @@ The SDK registers this write-approved custom tool when `speechgen.enabled=true` 
 3. For MP3, reorder only non-explicit candidates so cloud models precede local models. Explicit primary/fallback slots retain their positions. WAV preserves the resolved chain order.
 4. Try candidates sequentially:
    - `local-inference` calls the local worker with the selected model id, `tts.localVoice`, and `tts.localSpeed`, encodes PCM16 WAV, and writes it. Per-call voice, language, sample rate, and bit rate are ignored.
-   - `xai-tts` calls the selected model's `<baseUrl>/tts` through the model-registry credential resolver. It sends text, voice, and language (default `en`), and an explicit `output_format` only when WAV or non-default sample/MP3 bit rates require it.
+   - `xai-tts` calls the selected model's `<baseUrl>/tts` through the model-registry credential resolver. It sends text, voice, and language, and an explicit `output_format` only when WAV or non-default sample/MP3 bit rates require it. Callers without a language, such as the auth gateway, send `auto`.
    - `openai-speech` calls the selected model's `<baseUrl>/audio/speech` with `{ model, input, response_format, voice? }`; voice is sent only when explicitly supplied. This includes compatible providers such as DeepInfra, not just OpenAI.
 5. Missing API keys and provider HTTP errors advance to the next candidate. A local `null` response returns its error immediately; other failures do not trigger fallback.
 

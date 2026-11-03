@@ -4,7 +4,7 @@ import { postSpeechRequest } from "./transport";
 import type { SpeechOptions, SpeechRequest, SpeechResult } from "./types";
 
 export const DEFAULT_XAI_VOICE_ID = "eve";
-export const DEFAULT_XAI_LANGUAGE = "en";
+export const DEFAULT_XAI_LANGUAGE = "auto";
 export const DEFAULT_XAI_SAMPLE_RATE = 24_000;
 export const DEFAULT_XAI_BIT_RATE = 128_000;
 export const XAI_MAX_TEXT_LENGTH = 15_000;
