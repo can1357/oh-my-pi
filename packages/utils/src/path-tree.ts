@@ -67,7 +67,8 @@ function addFile(node: PathTreeNode, name: string, key: string): void {
 export function buildPathTree(entries: Iterable<PathTreeInput>): PathTreeNode {
 	const root = createNode();
 	for (const { path: rawPath, isDir, key } of entries) {
-		const normalized = rawPath.replace(/\\/g, "/");
+		// Only Windows separates with `\`; elsewhere it is part of a file name (`a\b.txt`).
+		const normalized = process.platform === "win32" ? rawPath.replace(/\\/g, "/") : rawPath;
 		const fileKey = key ?? rawPath;
 		if (isUrlLikePath(normalized)) {
 			addFile(root, normalized, fileKey);

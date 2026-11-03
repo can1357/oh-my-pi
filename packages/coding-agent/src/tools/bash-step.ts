@@ -1263,7 +1263,7 @@ function fdAsGlob(command: SimpleCommand, filesystem: StepFilesystem | undefined
 	const roots = rootWords.length > 0 ? rootWords.map(word => word.value) : ["."];
 	if (!roots.every(isPlainRoot) || !rootsDisjoint(roots)) return undefined;
 	if (filesystem && roots.some(root => filesystem.kind(root, true) !== "directory")) return undefined;
-	const depthValue = given.get("--max-depth") ?? given.get("-d");
+	const depthValue = given.get("depth");
 	const name = pattern === "" ? "*" : globMode ? pattern : `*${pattern}*`;
 	return {
 		path: roots.map(root => globPathUnder(root, name)).join(";"),
@@ -1277,10 +1277,15 @@ function fdAsGlob(command: SimpleCommand, filesystem: StepFilesystem | undefined
 /**
  * The options an `fd` command line gives, read as fd reads them: short flags may cluster, a valued
  * option (`-c`, `-d`, `-j`) takes the rest of its word or the next word, and `--` ends options.
- * Each maps to its value, or "" for a flag.
+ * Each maps to its value, or "" for a flag; `depth` holds the last of `-d` and `--max-depth`,
+ * which fd takes whichever spelling comes later.
  */
 function fdOptions(words: Word[]): Map<string, string> {
 	const given = new Map<string, string>();
+	const set = (option: string, value: string): void => {
+		given.set(option, value);
+		if (option === "-d" || option === "--max-depth") given.set("depth", value);
+	};
 	for (let i = 0; i < words.length; i++) {
 		const text = words[i].value;
 		if (text === "--") break;
@@ -1289,16 +1294,16 @@ function fdOptions(words: Word[]): Map<string, string> {
 			const eq = text.indexOf("=");
 			const name = text.slice(0, eq < 0 ? undefined : eq);
 			const valued = typeof own(FD.long, name.slice(2)) === "function";
-			given.set(name, eq >= 0 ? text.slice(eq + 1) : valued ? (words[++i]?.value ?? "") : "");
+			set(name, eq >= 0 ? text.slice(eq + 1) : valued ? (words[++i]?.value ?? "") : "");
 			continue;
 		}
 		for (let j = 1; j < text.length; j++) {
 			const letter = text[j];
 			if (own(FD.valued, letter)) {
-				given.set(`-${letter}`, j + 1 < text.length ? text.slice(j + 1) : (words[++i]?.value ?? ""));
+				set(`-${letter}`, j + 1 < text.length ? text.slice(j + 1) : (words[++i]?.value ?? ""));
 				break;
 			}
-			given.set(`-${letter}`, "");
+			set(`-${letter}`, "");
 		}
 	}
 	return given;

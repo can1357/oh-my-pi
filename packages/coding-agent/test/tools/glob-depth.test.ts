@@ -110,6 +110,42 @@ describe("glob depth", () => {
 		await expect(fs.stat(path.join(dir, listed![0]))).resolves.toBeDefined();
 	});
 
+	it.skipIf(path.sep === "\\")(
+		"renders names holding a backslash, Unicode spaces or a colon as they are on disk",
+		async () => {
+			for (const rel of ["r/a\\b.txt", "r/a/b.txt", "r/no\u00a0break.txt", "r/local:/dune"]) {
+				await Bun.write(path.join(dir, rel), "x\n");
+			}
+			const result = await new GlobTool(session).execute("glob-names", { path: "r/**/*", gitignore: false });
+			const listed = (result.details?.files ?? []).filter(file => !file.endsWith("/")).toSorted();
+			expect(listed).toEqual(["r/a/b.txt", "r/a\\b.txt", "r/local:/dune", "r/no\u00a0break.txt"]);
+			for (const file of listed) await expect(fs.stat(path.join(dir, file))).resolves.toBeDefined();
+			const text = result.content.find(c => c.type === "text")?.text ?? "";
+			expect(text).toContain("a\\b.txt");
+			expect(text).toContain("no\u00a0break.txt");
+		},
+	);
+
+	it.skipIf(path.sep === "\\")("keeps a custom backend's direct child holding a backslash at depth 1", async () => {
+		const tool = new GlobTool(session, { operations: { exists: () => true, glob: () => ["a\\z"] } });
+		const result = await tool.execute("glob-depth-backslash", { path: "proofs/*", depth: 1 });
+		expect(result.details?.files).toEqual(["proofs/a\\z"]);
+	});
+
+	it("does not report absence when a backend's limit cut its results before the depth filter", async () => {
+		const tool = new GlobTool(session, {
+			operations: {
+				exists: () => true,
+				glob: (_pattern, _cwd, options) => ["a/b/deep", "keep"].slice(0, options.limit),
+			},
+		});
+		const result = await tool.execute("glob-depth-cut", { path: "r/**/*", depth: 1, limit: 1 });
+		const text = result.content.find(c => c.type === "text")?.text ?? "";
+		expect(result.details?.truncated).toBe(true);
+		expect(text).not.toContain("No files found");
+		expect(text).toContain("more matches may exist");
+	});
+
 	it("bounds a custom backend's URL-rooted results by depth", async () => {
 		const tool = new GlobTool(session, {
 			operations: {

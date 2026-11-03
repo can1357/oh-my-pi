@@ -45,4 +45,8 @@ describe("formatGroupedPaths", () => {
 	it("keeps matched directories (trailing slash) as headings", () => {
 		expect(formatGroupedPaths(["alpha/tests/", "beta/tests/"])).toBe(["# alpha/tests/", "# beta/tests/"].join("\n"));
 	});
+
+	it.skipIf(process.platform === "win32")("keeps a backslash as part of a name outside Windows", () => {
+		expect(formatGroupedPaths(["r/a\\b.txt", "r/a/b.txt"])).toBe(["# r/", "a\\b.txt", "## a/", "b.txt"].join("\n"));
+	});
 });

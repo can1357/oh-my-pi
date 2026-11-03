@@ -520,7 +520,9 @@ export function formatPathRelativeToCwd(
 	if (isInternalUrlPath(normalized)) {
 		return options.trailingSlash && !normalized.endsWith("/") ? `${normalized}/` : normalized;
 	}
-	const expanded = expandPath(normalized);
+	// A POSIX absolute path names an entry as it is on disk (a search result, a resolved target):
+	// expanding it would rewrite real names (Unicode spaces become ASCII spaces).
+	const expanded = path.sep === "/" && normalized.startsWith("/") ? normalized : expandPath(normalized);
 	const resolvedPath = path.isAbsolute(expanded) ? path.resolve(expanded) : path.resolve(cwd, expanded);
 	const relative = path.relative(resolvedCwd, resolvedPath);
 	const isWithinCwd = relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
@@ -560,15 +562,18 @@ export function resolveSearchBase(basePath: string, cwd: string): string {
 export function resolveSearchResultPath(base: string, rel: string): string {
 	if (rel === "") return base;
 	const router = InternalUrlRouter.instance();
-	if (router.canHandle(rel) || path.isAbsolute(rel)) return rel;
-	return router.canHandle(base) ? joinUrlPath(base, rel) : path.resolve(base, rel);
+	if (router.canHandle(base)) return router.canHandle(rel) || path.isAbsolute(rel) ? rel : joinUrlPath(base, rel);
+	// Below a host directory a result is a file name, even one shaped like a URL (`local:/dune`).
+	return path.resolve(base, rel);
 }
 
 /** `target` relative to the host directory `base` with `/` separators; `target` itself when either is an internal URL. */
 export function relativeSearchResultPath(base: string, target: string): string {
 	const router = InternalUrlRouter.instance();
 	if (router.canHandle(base) || router.canHandle(target)) return target;
-	return path.relative(base, target).replace(/\\/g, "/");
+	const relative = path.relative(base, target);
+	// Only Windows separates with `\`; elsewhere it is part of a file name.
+	return path.sep === "\\" ? relative.replace(/\\/g, "/") : relative;
 }
 function normalizePathSeparators(input: string): string {
 	if (isInternalUrlPath(input)) return input;
@@ -1044,7 +1049,7 @@ function toScopeDisplay(items: string[], cwd: string): string {
 	return items
 		.map(item =>
 			formatPathRelativeToCwd(item, cwd, {
-				trailingSlash: item.endsWith("/") || item.endsWith("\\"),
+				trailingSlash: item.endsWith("/") || (path.sep === "\\" && item.endsWith("\\")),
 			}),
 		)
 		.join(", ");

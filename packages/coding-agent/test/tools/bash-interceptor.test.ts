@@ -1025,6 +1025,15 @@ describe("dedicated tool capability", () => {
 			{ path: "r/**/A;r/**/B", hidden: true, gitignore: false, git: true },
 		],
 		["fd -Id2 --glob 'A*' r", { path: "r/**/A*", hidden: false, gitignore: false, git: false, depth: 2 }],
+		// fd takes the later of `--max-depth` and `-d`.
+		[
+			"fd -I --glob -s --max-depth 1 -d 2 '*.txt' r",
+			{ path: "r/**/*.txt", hidden: false, gitignore: false, git: false, depth: 2 },
+		],
+		[
+			"fd -I --glob -s -d 2 --max-depth 1 '*.txt' r",
+			{ path: "r/**/*.txt", hidden: false, gitignore: false, git: false, depth: 1 },
+		],
 		["fd -Hd2 -I --glob 'A*' r", { path: "r/**/A*", hidden: true, gitignore: false, git: true, depth: 2 }],
 	])("names the glob call for %s", (command, args) => {
 		const result = checkBashInterception(command, tools, DEFAULT_BASH_INTERCEPTOR_RULES);

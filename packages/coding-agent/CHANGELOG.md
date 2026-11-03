@@ -17,7 +17,7 @@
 
 ### Fixed
 
-- On Linux and macOS, tool output lists a file name holding a backslash (`a\z`) as it is, instead of as a path with a slash (`a/z`) that does not exist.
+- On Linux and macOS, glob and grep list a file name holding a backslash (`a\z`), a Unicode space or a colon (`local:/dune`) as it is on disk, instead of as another path that does not exist (`a/z`, an ASCII space, `local://dune`).
 - `pr://<n>`, `issue://<n>`, and repo-less `github` tool calls in a checkout whose `upstream` remote is not the fork parent of `origin` now resolve to `origin` instead of the upstream project; `gh repo set-default` still wins
 - `omp -p` text mode now prints each automatic retry with its error (for example "Couldn't reach api.anthropic.com … check your network") instead of showing only `Working...` while a turn retries ([#17529](https://github.com/can1357/oh-my-pi/pull/17529) by [@Mannan-Goyal](https://github.com/Mannan-Goyal))
 

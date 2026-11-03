@@ -346,7 +346,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 					// A timed-out empty result is an incomplete scan, not a verified
 					// absence — never emit the definitive "No files found" claim next
 					// to a timeout notice (the two statements contradict each other).
-					const parts = opts?.timedOut ? [] : ["No files found matching pattern"];
+					const parts = opts?.timedOut || forceTruncated ? [] : ["No files found matching pattern"];
 					if (notice) parts.push(notice);
 					if (missingPathsNote) parts.push(missingPathsNote);
 					// Zero results is useless regardless of notices: the follow-up
@@ -467,6 +467,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 						combinedSignal.removeEventListener("abort", onAbort);
 					}
 				};
+				let depthCut = false;
 				const perTarget = await Promise.all(
 					targets.map(async target => {
 						const exists = await runCustom(Promise.resolve(customOps.exists(target.searchPath)));
@@ -513,6 +514,8 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 							return relative.replace(/\/+$/, "").split("/").length <= walkDepth;
 						};
 						const inDepth = results.value.filter(withinDepth);
+						// A backend that stopped at `limit` before the depth filter may hold more matches.
+						if (results.value.length >= window && inDepth.length < results.value.length) depthCut = true;
 						return inDepth.map(matchPath => formatMatchPath(matchPath, target.searchPath, fileType));
 					}),
 				);
@@ -532,6 +535,12 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 						notice: globTimeoutNotice(merged.length, timeoutMs),
 						forceTruncated: true,
 						timedOut: true,
+					});
+				}
+				if (depthCut) {
+					return buildResult(merged, {
+						notice: `The backend stopped at ${window} entries before entries deeper than depth ${walkDepth} were removed; more matches may exist.`,
+						forceTruncated: true,
 					});
 				}
 				return buildResult(merged);
