@@ -8842,7 +8842,13 @@ export class AgentSession implements SettingsScope {
 		generation: number,
 		signal: AbortSignal | undefined,
 		origin: "direct" | "queued",
-	): Promise<QueuedMessagePreparation & { baseXdevCatalogDelivered: boolean }> {
+	): Promise<
+		QueuedMessagePreparation & {
+			baseXdevCatalogDelivered: boolean;
+			/** The messages `commit` publishes, for sizing before the claim; undefined when setup was superseded. */
+			staged: readonly AgentMessage[] | undefined;
+		}
+	> {
 		const sessionGeneration = this.#sessionGeneration;
 		const alreadyDisposing = this.#isDisposed && origin === "direct";
 		const isCurrent = () =>
@@ -8850,7 +8856,7 @@ export class AgentSession implements SettingsScope {
 			this.#sessionGeneration === sessionGeneration &&
 			(!this.#isDisposed || alreadyDisposing) &&
 			!signal?.aborted;
-		const cancelled = { baseXdevCatalogDelivered: false, commit: () => undefined };
+		const cancelled = { baseXdevCatalogDelivered: false, staged: undefined, commit: () => undefined };
 		if (this.hasPendingDeferredExtensions) await this.loadDeferredExtensions();
 		const pendingMCPDiscovery = this.#pendingMCPDiscovery;
 		if (pendingMCPDiscovery) {
@@ -8923,6 +8929,7 @@ export class AgentSession implements SettingsScope {
 			if (!overrideIsCurrent()) continue;
 			return {
 				baseXdevCatalogDelivered: result?.systemPrompt === undefined,
+				staged: messages,
 				commit: () => {
 					// No await may separate ownership validation from publishing memory and policy.
 					if (!isCurrent() || !overrideIsCurrent()) return undefined;
@@ -9100,9 +9107,11 @@ export class AgentSession implements SettingsScope {
 			const preparation = await logger.time("prompt:prepareAgentStart", () =>
 				this.#prepareAgentStart(message, expandedText, options?.images, generation, setupAbort.signal, "direct"),
 			);
-			const preparedMessages = preparation.commit();
-			if (!preparedMessages) return false;
-			messages.push(...preparedMessages);
+			// Memory and policy are published at the claim (`commitDelivery`), so a prompt cancelled while it
+			// waits behind another run publishes nothing; until then the staged messages only count toward
+			// context maintenance, in the place they are delivered.
+			if (!preparation.staged) return false;
+			messages.push(...preparation.staged);
 			const baseXdevCatalogDelivered = preparation.baseXdevCatalogDelivered;
 
 			// Auto thinking: classify this real user turn and set the effective level
@@ -9145,10 +9154,16 @@ export class AgentSession implements SettingsScope {
 			}
 			const agentPromptOptions = options?.toolChoice ? { toolChoice: options.toolChoice } : undefined;
 			// Everything this prompt delivers with its request is committed here, at the claim: the
-			// prewalk arm and its plan nudge, the consumed notices, and the plan-reference flag. It
-			// runs only once the agent is free to take the prompt, synchronously before the claim,
-			// so a prompt that waits behind another run and is then cancelled commits none of it.
-			const commitDelivery = (): AgentMessage[] => {
+			// staged memory and system-prompt policy, the prewalk arm and its plan nudge, the consumed
+			// notices, and the plan-reference flag. It runs only once the agent is free to take the
+			// prompt, synchronously before the claim, so a prompt that waits behind another run and is
+			// then cancelled commits none of it. Undefined means the preparation was superseded.
+			const commitDelivery = (): AgentMessage[] | undefined => {
+				if (!preparation.commit()) return undefined;
+				// Another run may have delivered the approved plan while this prompt waited.
+				if (planReferenceMessage && this.#planReferenceSent) {
+					messages.splice(messages.indexOf(planReferenceMessage), 1);
+				}
 				if (prewalkDecision !== undefined) {
 					const planMessage = this.#prewalk.applyAuto(prewalkDecision);
 					if (planMessage) {
@@ -9212,7 +9227,7 @@ export class AgentSession implements SettingsScope {
 				// nothing delivered, so the retry skipped re-injection and the executor
 				// lost the approved plan (issue #4094). The compaction-success resets
 				// (issue #1246) still clear it for re-injection on the next turn.
-				if (planReferenceMessage) {
+				if (planReferenceMessage && messages.includes(planReferenceMessage)) {
 					this.#planReferenceSent = true;
 				}
 				return messages;

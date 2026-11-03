@@ -867,7 +867,7 @@ export class TurnRecovery {
 	 *  caller mark the exact moment its own run went live. `admit` runs before every claim and
 	 *  may wait; `false` means the prompt was superseded and must not claim the agent. */
 	promptAgentWithIdleRetry(
-		messages: AgentMessage[] | (() => AgentMessage[]),
+		messages: AgentMessage[] | (() => AgentMessage[] | undefined),
 		options?: { toolChoice?: ToolChoice },
 		onClaimed?: () => void,
 		admit?: () => Promise<boolean>,
@@ -3313,10 +3313,11 @@ export class TurnRecovery {
 	 * before a claim, that the prompt was superseded while it waited.
 	 * `messages` may be a commit function: it runs once, only when the agent is
 	 * free, synchronously before the claim, so a prompt cancelled while it waits
-	 * commits nothing it would have delivered.
+	 * commits nothing it would have delivered. It returns undefined when the
+	 * prompt was superseded, and nothing is claimed.
 	 */
 	async #promptAgentWithIdleRetry(
-		messages: AgentMessage[] | (() => AgentMessage[]),
+		messages: AgentMessage[] | (() => AgentMessage[] | undefined),
 		options?: { toolChoice?: ToolChoice },
 		onClaimed?: () => void,
 		admit?: () => Promise<boolean>,
@@ -3336,7 +3337,10 @@ export class TurnRecovery {
 				await waitForIdle();
 				continue;
 			}
-			batch ??= (messages as () => AgentMessage[])();
+			if (batch === undefined) {
+				batch = (messages as () => AgentMessage[] | undefined)();
+				if (batch === undefined) return false;
+			}
 			// A claim whose synchronous prefix throws (busy agent, missing
 			// model) returns an already-rejected promise. Probe for that
 			// before firing `onClaimed`: a busy-retry parked behind an
