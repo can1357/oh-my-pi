@@ -17,6 +17,7 @@
    - `packages/coding-agent/src/task/seance.ts` and `seance-policy.ts` — seance source/model resolution, cold-revival contract, and session isolation options.
    - `packages/coding-agent/src/slash-commands/seance.ts` — `/seance` command and session-picker adapter.
    - `packages/coding-agent/src/task/executor.ts` — create child sessions, run subagents, collect output, hand finished sessions to the lifecycle manager.
+   - `packages/coding-agent/src/thread/` — subagent worker threads: worker pool (`subagent-worker.ts`), main↔worker RPC (`rpc.ts`), run routing (`executor-routing.ts`), main-side mirrors of worker-homed sessions (`remote-agent-session.ts`), and one bridge per shared main-thread service (`services/`).
    - `packages/coding-agent/src/registry/agent-lifecycle.ts` — idle-TTL parking and revival of finished subagents.
    - `packages/coding-agent/src/registry/agent-registry.ts` — process-global agent directory (`running | idle | parked | aborted`).
    - `packages/coding-agent/src/async/job-manager.ts` — background job registration, progress, and result delivery.
@@ -148,6 +149,12 @@ Artifacts and side channels:
 - Execution mode
    - Background job — `async.enabled=true`; non-blocking spawns go through `AsyncJobManager`.
    - Sync inline — `async.enabled=false`, no job manager, or the item's agent declares `blocking: true` (per item: a mixed call runs both modes).
+- Thread (`task.workerThreads`, default `1`; omp CLI and compiled binary only)
+   - Worker — a spawn from the main thread runs its whole `runSubprocess(...)` (child session, tools, monitor, lifecycle finalization) in the least-loaded pooled worker thread; spawns made inside a subagent stay in that subagent's worker. Follow-up turns and revivals run on the agent's home worker; a cold revival after its worker exited picks a pooled worker.
+   - On demand — no worker runs until a subagent is about to spawn: one boots when the main session's model starts streaming a `task` call (or an `eval` call whose code calls `agent(`/`workpool(`), or on a direct spawn that finds none. A worker lives while it runs a subagent or holds a live (idle, kept-alive) subagent session, and exits 60 s after it has neither, releasing its memory.
+   - Main — `task.workerThreads: 0`, SDK embedding, and `bun test` run subagents on the main thread.
+   - Shared state stays single-owned on the main thread and reaches workers by RPC: agent registry, lifecycle, IRC bus, async jobs, cost gate, event buses, artifact ids, agent storage, auth storage (pins, account pools, OAuth refresh), MCP connections, Hindsight/Mnemopi state, telemetry spans, and logs. Workers get live mirrors of the parent settings and build their own model catalog over main's auth storage. The main thread sees a worker-homed subagent as a mirrored session that the Agent Hub, focus view, `agent://`, `history://`, `proc://`, and RPC mode use like a local one.
+   - A worker that exits mid-run fails that run with an error naming the worker; its agents are detached as `parked` (with a transcript) or `aborted` and revive in a live worker.
 - Batch mode (`task.batch`, default on)
    - on — `{ context, tasks[] }`: one independent spawn per item, required `context` shared across the call's spawns, with `agent`, `outputSchema`, and `schemaMode` per item. `effort` appears only when its setting enables it; `isolated` also requires plan mode to be disabled. Lifecycle, revival, and concurrency semantics match N parallel single calls.
    - off — single spawn per call; `tasks`/`context` are rejected and removed from the schema, with the same conditional `effort`/`isolated` fields.
@@ -190,6 +197,7 @@ Artifacts and side channels:
 - Concurrency: `task.maxConcurrency` defaults to `32`; `0` means unlimited. One session-scoped `Semaphore` is resized from the live setting before every acquire/release and bounds every `SpawnRun` across task calls, including sync and speculative runs.
 - Isolation baseline: each repository's uncommitted snapshot is capped at `1 GiB` (`ISOLATION_BASELINE_MAX_CONTENT_BYTES` in `task/worktree.ts`). Oversized snapshots fail before spawning rather than buffering unbounded content.
 - Idle TTL: `task.agentIdleTtlMs`, default `420_000` ms (7 min); `<= 0` disables parking and keeps idle sessions live until exit.
+- Worker threads: `task.workerThreads`, default `1`; `0` keeps subagents on the main thread. Workers start on demand; a worker with no running subagent and no open session exits after 60 s idle, the last one included.
 - Per-subagent output truncation: `MAX_OUTPUT_BYTES = 500_000` and `MAX_OUTPUT_LINES = 5000` in `packages/coding-agent/src/task/types.ts` (overridable via `PI_TASK_MAX_OUTPUT_BYTES` / `PI_TASK_MAX_OUTPUT_LINES`). Full raw output is still written to `<id>.md`.
 - Progress coalescing: `PROGRESS_COALESCE_MS = 150`; recent-output tail: `RECENT_OUTPUT_TAIL_BYTES = 8 * 1024` (last 8 non-empty lines).
 - Missing-`yield` reminder retries: `MAX_YIELD_RETRIES = 3` in `packages/coding-agent/src/task/executor.ts`.

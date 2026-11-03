@@ -1,9 +1,11 @@
 //! `pidwait` process-waiting builtin, moved from `pi-shell`.
 
-use brush_core::builtins;
 use clap::Parser;
 
-use crate::proc_match;
+use crate::{
+	host::{ProcContext, Process},
+	proc_match,
+};
 
 /// Waits for processes selected by process attributes or a name pattern.
 #[derive(Parser)]
@@ -13,14 +15,11 @@ pub(crate) struct PidwaitCommand {
 	argv: Vec<String>,
 }
 
-impl builtins::Command for PidwaitCommand {
-	type Error = brush_core::Error;
+impl Process for PidwaitCommand {
+	const USES_PATHS: bool = true;
 
-	async fn execute<SE: brush_core::ShellExtensions>(
-		&self,
-		context: brush_core::ExecutionContext<'_, SE>,
-	) -> Result<brush_core::ExecutionResult, Self::Error> {
-		proc_match::run(proc_match::ProcMatchMode::Wait, self.argv.clone(), context).await
+	fn run(&self, context: &ProcContext) -> impl Future<Output = std::io::Result<i32>> + Send {
+		proc_match::run(proc_match::ProcMatchMode::Wait, &self.argv, context)
 	}
 }
 
@@ -28,30 +27,20 @@ impl builtins::Command for PidwaitCommand {
 mod tests {
 	use std::{process::Command as ProcessCommand, time::Duration};
 
-	use brush_core::builtins::Command as _;
-
 	use super::PidwaitCommand;
+	use crate::host::run_proc;
 
-	async fn execute_bounded(argv: Vec<String>) -> anyhow::Result<brush_core::ExecutionResult> {
-		let mut shell = brush_core::Shell::builder().build().await?;
-		let params = shell.default_exec_params();
-		let command = PidwaitCommand { argv };
-		let context = brush_core::ExecutionContext {
-			shell: &mut shell,
-			command_name: "pidwait".to_string(),
-			params,
-		};
-		Ok(tokio::time::timeout(Duration::from_secs(2), command.execute(context))
+	async fn execute_bounded(argv: &[&str]) -> i32 {
+		let argv: Vec<&str> = std::iter::once("pidwait").chain(argv.iter().copied()).collect();
+		tokio::time::timeout(Duration::from_secs(2), run_proc::<PidwaitCommand>(&argv, None))
 			.await
-			.expect("pidwait exceeded its two-second test bound")?)
+			.expect("pidwait exceeded its two-second test bound")
+			.0
 	}
 
 	#[tokio::test]
-	async fn exits_one_when_nothing_matches() -> anyhow::Result<()> {
-		let result = execute_bounded(vec!["-p".to_string(), i32::MAX.to_string()]).await?;
-
-		assert_eq!(u8::from(&result.exit_code), 1);
-		Ok(())
+	async fn exits_one_when_nothing_matches() {
+		assert_eq!(execute_bounded(&["-p", &i32::MAX.to_string()]).await, 1);
 	}
 
 	#[tokio::test]
@@ -65,12 +54,11 @@ mod tests {
 		// Leave the child unreaped so it remains visible in the process snapshot,
 		// while giving the trivial command enough time to reach its exited state.
 		tokio::time::sleep(Duration::from_millis(100)).await;
-		let outcome = execute_bounded(vec!["-p".to_string(), pid.to_string()]).await;
+		let code = execute_bounded(&["-p", &pid.to_string()]).await;
 		let _ = child.kill();
 		let _ = child.wait();
 
-		let result = outcome?;
-		assert!(result.is_success() || u8::from(&result.exit_code) == 1);
+		assert!(code == 0 || code == 1, "status {code}");
 		Ok(())
 	}
 
@@ -91,22 +79,16 @@ mod tests {
 				.args(["-n", "30", "127.0.0.1"])
 				.stdout(std::process::Stdio::null())
 				.spawn()?;
-			let mut shell = brush_core::Shell::builder().build().await?;
-			let params = shell.default_exec_params();
-			let command = PidwaitCommand { argv: vec!["-p".to_string(), child.id().to_string()] };
-			let context = brush_core::ExecutionContext {
-				shell: &mut shell,
-				command_name: "pidwait".to_string(),
-				params,
-			};
+			let pid = child.id().to_string();
 			let probe = async {
 				// Give pidwait time to select the process and start waiting.
 				tokio::time::sleep(Duration::from_millis(200)).await;
 				tokio::time::timeout(Duration::from_secs(5), tokio::task::spawn_blocking(|| {})).await
 			};
+			let argv = ["pidwait", "-p", &pid];
 			// `None`: pidwait returned while its process was still running.
 			let probed = tokio::select! {
-				_ = command.execute(context) => None,
+				_ = run_proc::<PidwaitCommand>(&argv, None) => None,
 				probed = probe => Some(probed),
 			};
 			let _ = child.kill();

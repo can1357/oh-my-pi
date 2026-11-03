@@ -107,9 +107,9 @@ async fn end_sentinels_close_put_bodies_but_stay_literal_in_find() {
 		// file nor swallows the operations after it.
 		(
 			"one\ntwo\nthree\nfour\n",
-			"*** Edit File: a.txt\n*** Find\none\n*** Replace\nONE\n*** End Patch\n*** Find\ntwo\n*** \
-			 Replace\nTWO\n*** End\n*** Find\nthree\n*** Insert After\n3.5\n*** End\n*** \
-			 Find\nfour\n*** Replace\nFOUR\n*** End\n",
+			"*** Edit File: a.txt\n*** Find\none\n*** Replace\nONE\n*** End Patch\n*** \
+			 Find\ntwo\n*** Replace\nTWO\n*** End\n*** Find\nthree\n*** Insert After\n3.5\n*** \
+			 End\n*** Find\nfour\n*** Replace\nFOUR\n*** End\n",
 			"ONE\nTWO\nthree\n3.5\nFOUR\n",
 		),
 		// A Find body is matched as written, so a literal sentinel line can be removed.

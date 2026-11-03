@@ -12,6 +12,13 @@
 
 - Fixed Windows bash output on non-UTF-8 code pages (Korean, Chinese, Japanese, …) turning into mojibake for the rest of a command after a builtin wrote one invalid byte (`printf '\xeb'`, `cut -c` through a CJK character); the stray byte now becomes `�` on its own line, and native programs' ANSI output still decodes, including through `| head` or from `cat` of a legacy file ([#17947](https://github.com/can1357/oh-my-pi/pull/17947) by [@H4vC](https://github.com/H4vC))
 - Fixed Hindsight silently dropping the last mental model (often `User Preferences`) from the prompt once models outgrew their share of the render budget ([#17548](https://github.com/can1357/oh-my-pi/issues/17548), [#17955](https://github.com/can1357/oh-my-pi/pull/17955) by [@harshaygadekar](https://github.com/harshaygadekar))
+- In the bash tool, `exec >file`, `exec 2>/dev/null` or `exec <file` no longer redirects every later command of the session; each command starts with its own stdin, stdout and stderr
+- In the bash tool, an `EXIT` trap fires once, at the end of the command that set it, instead of again after every later command
+- In the bash tool, output a background job (`(sleep 1; echo late) &`) writes after its command ended no longer shows up in a later command's output
+- In the bash tool, `env -i` no longer passes inherited variables whose names are not shell names (`A-B=1`) to the program, and `X=v env -i`/`X=v env -u X` no longer pass an exported outer `X`
+- In the bash tool, `xargs` reports a command killed by a signal as GNU xargs does: `xargs: CMD: terminated by signal N`, no further commands, status 125
+- On macOS, starting a bash tool session no longer briefly sets pi's umask to 022, which could give files created at that moment the wrong permissions
+- In the bash tool, an executable script without a `#!` line started in the background with its input from a FIFO (`./script < fifo &`) runs as a bash script instead of failing with `Exec format error`
 
 ## [18.16.0] - 2026-11-02
 
@@ -28,6 +35,7 @@
 
 ### Changed
 
+- The bash tool's embedded shell is now pi's own bash engine with bash 5.3 semantics; aliases from your shell rc whose bodies use pipes, subshells or `;` (such as Fedora's default `which`) now run instead of being dropped from the snapshot ([#3234](https://github.com/can1357/oh-my-pi/issues/3234))
 - `/resume` and `omp --resume` open at once on your titled sessions (read from `~/.omp/agent/history.db`), then fill in prompts, status, and untitled sessions when the full scan finishes; the first scan saves older sessions' titles too, so later opens list them right away
 - With `symbolPreset: ascii`, status glyphs are three columns wide (`[+]`, `[-]`, `[#]`, `[ ]`) and status spinners animate as `[|] [/] [-] [\]` ([#17732](https://github.com/can1357/oh-my-pi/pull/17732) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - The subagent HUD marks each running agent with the running status glyph instead of a dot ([#17732](https://github.com/can1357/oh-my-pi/pull/17732) by [@JustasMasiulis](https://github.com/JustasMasiulis))
