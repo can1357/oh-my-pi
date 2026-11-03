@@ -9,7 +9,7 @@ import {
 	agentLoop,
 	type CommittableAsideMessage,
 } from "@oh-my-pi/pi-agent-core";
-import type { Message } from "@oh-my-pi/pi-ai";
+import type { Context, Message } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { type AsideProvenanceCarrier, kAsideProvenance } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
@@ -788,5 +788,87 @@ describe("YieldQueue claimAtRequest through the production converter and caches"
 		expect(sent).toContain("BB is taking longer");
 		expect(sent).not.toContain("Aa is taking longer");
 		expect(n.ended()).toBe("delivered");
+	});
+
+	/** A claimed notice that goes stale on demand. */
+	function staleable() {
+		let ended = "pending";
+		let stale = false;
+		const queue = new YieldQueue({ isStreaming: () => true, injectIdle: async () => {}, scheduleIdleFlush() {} });
+		queue.register<string>("notice", { claimAtRequest: true, isStale: () => stale, build: () => noticeLike(2) });
+		const receipt = queue.enqueueWithReceipt<string>("notice", "x").then(
+			() => void (ended = "delivered"),
+			() => void (ended = "discarded"),
+		);
+		return {
+			message: queue.drainLazy()[0]!()!,
+			receipt,
+			ended: () => ended,
+			makeStale: () => {
+				stale = true;
+			},
+		};
+	}
+	const carriedBy = (mock: Awaited<ReturnType<typeof loopWith>>) =>
+		mock.calls.some(call => JSON.stringify(call.context.messages).includes(TEXT));
+
+	for (const where of ["transformContext", "transformProviderContext"] as const) {
+		test(`a ${where} cache cannot send a notice withdrawn at the previous hand-off`, async () => {
+			const n = staleable();
+			let cachedMessages: AgentMessage[] | undefined;
+			let cachedContext: Context | undefined;
+			let transforms = 0;
+			const mock = await loopWith([user, n.message], {
+				// Made stale while the first request is prepared; the rebuilt request then
+				// gets the host's cached copy, which still descends from the notice.
+				beforeModelCall: () => n.makeStale(),
+				...(where === "transformContext"
+					? {
+							transformContext: async messages => {
+								if (++transforms > 5) throw new Error("withdrawal loop");
+								cachedMessages ??= messages.map(message => ({ ...message }));
+								return cachedMessages;
+							},
+						}
+					: {
+							transformProviderContext: context => {
+								if (++transforms > 5) throw new Error("withdrawal loop");
+								cachedContext ??= { ...context, messages: context.messages.map(message => ({ ...message })) };
+								return cachedContext;
+							},
+						}),
+			});
+			await n.receipt;
+			expect(n.ended()).toBe("discarded");
+			expect(mock.calls).toHaveLength(1);
+			expect(carriedBy(mock)).toBe(false);
+		});
+	}
+
+	test("a later run cannot send a descendant of a notice that ended unsent", async () => {
+		const n = staleable();
+		n.makeStale();
+		const first = await loopWith([user, n.message], {});
+		await n.receipt;
+		expect(n.ended()).toBe("discarded");
+		expect(carriedBy(first)).toBe(false);
+		// A host that kept a spread of the notice puts it into the next run's context.
+		const later = await loopWith([{ ...user, content: "next turn" }], {
+			transformContext: async messages => [...messages, { ...n.message }],
+		});
+		expect(later.calls).toHaveLength(1);
+		expect(carriedBy(later)).toBe(false);
+	});
+
+	test("a delivered notice stays sendable in later requests", async () => {
+		const n = staleable();
+		const first = await loopWith([user, n.message], {});
+		await n.receipt;
+		expect(n.ended()).toBe("delivered");
+		expect(carriedBy(first)).toBe(true);
+		const later = await loopWith([{ ...user, content: "next turn" }], {
+			transformContext: async messages => [user, n.message, ...messages],
+		});
+		expect(carriedBy(later)).toBe(true);
 	});
 });

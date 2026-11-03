@@ -2489,6 +2489,10 @@ describe("subagent due-by", () => {
 				await owner.session.waitForIdle();
 				expect(owner.saw(OWNER_NOTICE)).toBe(false);
 				expect(endsOf("Removed", "owner", [owner], owner.notices)).toBe(1);
+				// The warning names the cause: the conversation is still there, no request carried it.
+				const warning = owner.notices.find(notice => notice.message.includes(LOST_NOTICE))!.message;
+				expect(warning).toContain("no request that carried the notice was sent");
+				expect(warning).not.toContain("the conversation that dispatched it is gone");
 			} finally {
 				removeGate();
 				child.resolve(childResult("Removed", "task"));
@@ -2516,6 +2520,8 @@ describe("subagent due-by", () => {
 				await owner.session.waitForIdle();
 				expect(owner.saw(OWNER_NOTICE)).toBe(false);
 				expect(endsOf("Blocked", "owner", [owner], owner.notices)).toBe(1);
+				const warning = owner.notices.find(notice => notice.message.includes(LOST_NOTICE))!.message;
+				expect(warning).toContain("no request carrying the notice reached a model within");
 			} finally {
 				removeGate();
 				child.resolve(childResult("Blocked", "task"));

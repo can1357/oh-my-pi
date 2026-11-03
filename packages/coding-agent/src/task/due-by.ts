@@ -283,6 +283,14 @@ async function settlesWithin(session: AgentSession, ms: number): Promise<boolean
 type NoticeEnd = "delivered" | "lost" | "settled";
 
 /**
+ * Why a notice reached nobody, as the person is told: the conversation that
+ * dispatched the work is gone; no request carrying it reached a model within
+ * the bound; or no request carrying it was sent at all (a callback or a
+ * transform took it out, or the turn stopped or failed first).
+ */
+type LossCause = "gone" | "stuck" | "unsent";
+
+/**
  * One notice's life from its deadline to its single end: due, then addressed
  * to a conversation, then queued for it, then delivered, lost, or overtaken by
  * the child settling. One bound covers every phase after "due", the queued
@@ -294,8 +302,8 @@ class PendingNotice {
 	readonly #deadlineAt = performance.now() + NOTICE_DEADLINE_MS;
 	readonly #timer: NodeJS.Timeout;
 
-	constructor(private readonly settle: (end: NoticeEnd, stuck: boolean) => void) {
-		this.#timer = setTimeout(() => this.end("lost", true), NOTICE_DEADLINE_MS);
+	constructor(private readonly settle: (end: NoticeEnd, cause: LossCause) => void) {
+		this.#timer = setTimeout(() => this.end("lost", "stuck"), NOTICE_DEADLINE_MS);
 		this.#timer.unref();
 	}
 
@@ -310,11 +318,11 @@ class PendingNotice {
 	}
 
 	/** End this notice. The first end wins; later ones are the same end reported twice. */
-	end(end: NoticeEnd, stuck = false): void {
+	end(end: NoticeEnd, cause: LossCause = "gone"): void {
 		if (this.#end !== undefined) return;
 		this.#end = end;
 		clearTimeout(this.#timer);
-		this.settle(end, stuck);
+		this.settle(end, cause);
 	}
 }
 
@@ -429,9 +437,9 @@ export class SubagentDueClock {
 		};
 		const isSettled = () => done;
 		const track = (stage: "owner" | "escalation"): PendingNotice => {
-			const notice: PendingNotice = new PendingNotice((end, stuck) => {
+			const notice: PendingNotice = new PendingNotice((end, cause) => {
 				live.delete(notice);
-				if (end === "lost") this.#surfaceLoss(dispatch, stage, stuck);
+				if (end === "lost") this.#surfaceLoss(dispatch, stage, cause);
 			});
 			live.add(notice);
 			return notice;
@@ -442,12 +450,12 @@ export class SubagentDueClock {
 				queued => {
 					if (queued) ownerQueued = true;
 				},
-				() => notice.end("lost"),
+				() => notice.end("lost", "unsent"),
 			);
 		});
 		at(2 * dispatch.dueMs, () => {
 			const notice = track("escalation");
-			void this.#escalate(dispatch, notice, () => ownerQueued, isSettled).catch(() => notice.end("lost"));
+			void this.#escalate(dispatch, notice, () => ownerQueued, isSettled).catch(() => notice.end("lost", "unsent"));
 		});
 	}
 
@@ -599,7 +607,11 @@ export class SubagentDueClock {
 		});
 		void Promise.resolve(receipt).then(
 			() => notice.end("delivered"),
-			() => notice.end(isSettled() ? "settled" : "lost", notice.msLeft <= 0),
+			() => {
+				if (isSettled()) return notice.end("settled");
+				if (notice.msLeft <= 0) return notice.end("lost", "stuck");
+				notice.end("lost", this.#reachSync(anchor) === session ? "unsent" : "gone");
+			},
 		);
 	}
 
@@ -627,12 +639,13 @@ export class SubagentDueClock {
 	 * owner's; with none of them there is no one to tell, and the loss is
 	 * logged.
 	 */
-	#surfaceLoss(dispatch: SubagentDispatch, stage: "owner" | "escalation", stuck: boolean): void {
+	#surfaceLoss(dispatch: SubagentDispatch, stage: "owner" | "escalation", cause: LossCause): void {
 		const host = this.#registry.get(MAIN_AGENT_ID)?.session ?? this.#registry.get(dispatch.owner.id)?.session;
 		const text = prompt.render(lostTemplate, {
 			...this.#childView(dispatch, Date.now()),
 			escalation: stage === "escalation",
-			stuck,
+			stuck: cause === "stuck",
+			unsent: cause === "unsent",
 			settleWait: NOTICE_DEADLINE_LABEL,
 		});
 		if (
@@ -644,7 +657,7 @@ export class SubagentDueClock {
 			childId: dispatch.childId,
 			ownerId: dispatch.owner.id,
 			stage,
-			stuck,
+			cause,
 		});
 	}
 
@@ -726,7 +739,7 @@ export class SubagentDueClock {
 
 	/** Escalate to the person through the one person channel; `host` stands in for a window that is absent. */
 	#tellPerson(dispatch: SubagentDispatch, notice: PendingNotice, ownerQueued: boolean, host: AgentSession): void {
-		if (notice.msLeft <= 0) return notice.end("lost", true);
+		if (notice.msLeft <= 0) return notice.end("lost", "stuck");
 		const message = this.#escalationText(dispatch, ownerQueued);
 		const told = this.#registry.notifyPerson(
 			{ level: "warning", message, source: SUBAGENT_OVERDUE_MESSAGE_TYPE },
