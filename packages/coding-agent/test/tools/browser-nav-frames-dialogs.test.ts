@@ -248,22 +248,23 @@ afterAll(async () => {
 	server.stop(true);
 });
 
+/** `page` with its browser's `target()` replaced, for the hold to attach the page's windows through. */
+function withBrowserTarget(page: Page, target: () => unknown): Page {
+	const bound = (object: object, key: string | symbol): unknown => {
+		const value: unknown = Reflect.get(object, key);
+		return typeof value === "function" ? value.bind(object) : value;
+	};
+	const browser = new Proxy(page.browser(), {
+		get: (object, key) => (key === "target" ? target : bound(object, key)),
+	});
+	return new Proxy(page, { get: (object, key) => (key === "browser" ? () => browser : bound(object, key)) });
+}
+
 /** `page` as the relay hands it over: its browser has no target omp could attach the page's windows through. */
 function withoutBrowserTarget(page: Page): Page {
-	const browser = page.browser();
-	const bound = (target: object, key: string | symbol): unknown => {
-		const value: unknown = Reflect.get(target, key);
-		return typeof value === "function" ? value.bind(target) : value;
-	};
-	const relayBrowser = new Proxy(browser, {
-		get: (target, key) =>
-			key === "target"
-				? () => {
-						throw new Error("Browser target is not found");
-					}
-				: bound(target, key),
+	return withBrowserTarget(page, () => {
+		throw new Error("Browser target is not found");
 	});
-	return new Proxy(page, { get: (target, key) => (key === "browser" ? () => relayBrowser : bound(target, key)) });
 }
 
 function fakePage(frame: { _lifecycleEvents: Set<string>; detached?: boolean }, closed = () => false): Page {
@@ -985,6 +986,71 @@ return await tab.evaluate(() => {
 			}
 		});
 	});
+
+	test("holds print() in a window its tab opens while another tab's hold lets that window go", async () => {
+		await withUserBrowser(async cdpUrl => {
+			const user = await puppeteer.connect({ browserURL: cdpUrl, defaultViewport: null });
+			try {
+				// The other tab's hold attaches every new window first and lets go of this tab's at once.
+				const other = await user.newPage();
+				const otherHold = await PrintHold.install(other, "calls");
+				const page = await user.newPage();
+				await page.goto(`${baseUrl}/print`);
+				const hold = await PrintHold.install(page, "calls");
+				try {
+					await hold.beginCall(30_000);
+					const popupTarget = user.waitForTarget(target => target.opener() === page.target());
+					await page.mainFrame().mainRealm().evaluate('document.querySelector("#noopener-print").click()');
+					const popup = await (await popupTarget).page();
+					if (!popup) throw new Error("Expected the receipt popup");
+					try {
+						await popup
+							.mainFrame()
+							.mainRealm()
+							.waitForFunction('globalThis.log?.includes("print returned")', { timeout: 0, polling: 50 });
+						expect(await popup.mainFrame().mainRealm().evaluate("globalThis.log")).toEqual([
+							"afterprint",
+							"print returned",
+						]);
+					} finally {
+						await popup.close();
+					}
+				} finally {
+					await hold.dispose();
+					await otherHold.dispose();
+				}
+			} finally {
+				await user.disconnect();
+			}
+		});
+	}, 30_000);
+
+	test("arms the loaded page before attaching the windows it may open", async () => {
+		await withUserBrowser(async cdpUrl => {
+			const user = await puppeteer.connect({ browserURL: cdpUrl, defaultViewport: null });
+			try {
+				const page = await user.newPage();
+				await page.goto(`${baseUrl}/print`);
+				// Attaching windows stays in flight until the page shows a held print.
+				const attaching = Promise.withResolvers<never>();
+				const installing = PrintHold.install(
+					withBrowserTarget(page, () => ({ createCDPSession: () => attaching.promise })),
+					"calls",
+				);
+				await page
+					.mainFrame()
+					.mainRealm()
+					.waitForFunction(
+						'log.length = 0, document.querySelector("#print").click(), log.includes("afterprint")',
+						{ timeout: 0, polling: 50 },
+					);
+				attaching.reject(new Error("Browser target is not found"));
+				await (await installing).dispose();
+			} finally {
+				await user.disconnect();
+			}
+		});
+	}, 30_000);
 
 	test("leaves alone a window another tab in the browser opens", async () => {
 		await withUserBrowser(async cdpUrl => {
