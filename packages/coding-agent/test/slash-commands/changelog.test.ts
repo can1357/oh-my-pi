@@ -79,4 +79,57 @@ describe("/changelog", () => {
 		expect(handleChangelogCommand).toHaveBeenCalledWith("last 3");
 		expect(setText).toHaveBeenCalledWith("");
 	});
+
+	it("asks the model to review the recent default releases for bare summary", async () => {
+		const all = await parseChangelog(getChangelogPath());
+		const h = acpRuntime();
+		const result = await executeAcpBuiltinSlashCommand("/changelog summary", h.runtime);
+		if (!result || !("prompt" in result) || typeof result.prompt !== "string") {
+			throw new Error("expected a prompt result");
+		}
+		const markdown: string = result.prompt;
+		expect(markdown).toContain("the 3 most recent releases");
+		expect(versionHeadings(markdown)).toEqual(
+			all
+				.slice(0, RECENT_CHANGELOG_ENTRY_LIMIT)
+				.map(entry => `## [${entry.major}.${entry.minor}.${entry.patch}]`)
+				.reverse(),
+		);
+		expect(h.chunks).toEqual([]); // nothing echoed: the prompt goes to the model
+	});
+
+	it("scopes the review to one release for summary last 1", async () => {
+		const all = await parseChangelog(getChangelogPath());
+		const h = acpRuntime();
+		const result = await executeAcpBuiltinSlashCommand("/changelog summary last 1", h.runtime);
+		if (!result || !("prompt" in result) || typeof result.prompt !== "string") {
+			throw new Error("expected a prompt result");
+		}
+		const markdown: string = result.prompt;
+		expect(markdown).toContain("the latest release");
+		expect(versionHeadings(markdown)).toEqual([`## [${all[0]!.major}.${all[0]!.minor}.${all[0]!.patch}]`]);
+	});
+
+	it("rejects an unknown summary range", async () => {
+		const h = acpRuntime();
+		await executeAcpBuiltinSlashCommand("/changelog summary bogus", h.runtime);
+		expect(h.chunks.join("\n")).toContain(CHANGELOG_COMMAND_USAGE);
+	});
+
+	it("submits the summary as the next user prompt in the TUI", async () => {
+		const all = await parseChangelog(getChangelogPath());
+		const setText = vi.fn();
+		const runtime = {
+			ctx: {
+				editor: { setText } as unknown as InteractiveModeContext["editor"],
+				showWarning: vi.fn(),
+				showStatus: vi.fn(),
+				handleChangelogCommand: vi.fn(async () => {}),
+			} as unknown as InteractiveModeContext,
+		};
+		const result = await executeBuiltinSlashCommand("/changelog summary last 1", runtime);
+		if (typeof result !== "string") throw new Error("expected the summary prompt to be submitted");
+		expect(result).toContain(`## [${all[0]!.major}.${all[0]!.minor}.${all[0]!.patch}]`);
+		expect(setText).toHaveBeenCalledWith("");
+	});
 });
