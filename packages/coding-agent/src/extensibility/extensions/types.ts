@@ -1144,8 +1144,9 @@ export type ModelSelectSource = "set" | "cycle" | "restore";
 /**
  * Fired when the active model actually changes (pi-compatible `model_select`).
  * Notification-only and dispatched detached from the switch, so handlers never
- * delay a model change. Same-model rebinds (extended-context toggle, discovery
- * metadata refresh) do not fire it.
+ * delay a model change. Re-pinning an aggregator's upstream route counts as a
+ * change (`openrouter/foo@a` → `@b` fires it); same-model rebinds
+ * (extended-context toggle, discovery metadata refresh) do not.
  */
 export interface ModelSelectEvent {
 	type: "model_select";

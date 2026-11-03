@@ -1,9 +1,11 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { type Api, Effort, type Model } from "@oh-my-pi/pi-ai";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { applyModelPreset, saveModelPreset } from "@oh-my-pi/pi-coding-agent/config/model-presets";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { applyUpstreamRouting, formatModelStringWithRouting } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { cfgDefaultThinkingLevel } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
@@ -16,7 +18,9 @@ import {
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import type {
 	ExtensionAPI,
+	ExtensionContext,
 	ExtensionError,
+	ExtensionUIContext,
 	ModelSelectEvent,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -32,7 +36,7 @@ type GateGlobal = typeof globalThis & {
 	/** Throw from the next delivery (handler-error isolation test). */
 	__ompModelSelectThrowOnce?: boolean;
 	/** Per-test action run inside the handler before the event is recorded. */
-	__ompModelSelectAction?: (api: ExtensionAPI, event: ModelSelectEvent) => void | Promise<void>;
+	__ompModelSelectAction?: (api: ExtensionAPI, event: ModelSelectEvent, ctx: ExtensionContext) => void | Promise<void>;
 };
 /**
  * Deterministic delivery signals: one resolver per expected event, resolved
@@ -73,6 +77,7 @@ describe("AgentSession model_select extension event", () => {
 		tempDir = TempDir.createSync("@pi-model-select-event-");
 		authStorage = await AuthStorage.create(":memory:");
 		authStorage.keys.setRuntime("anthropic", "test-key");
+		authStorage.keys.setRuntime("openrouter", "test-key");
 		modelRegistry = new ModelRegistry(authStorage);
 	});
 
@@ -80,14 +85,14 @@ describe("AgentSession model_select extension event", () => {
 		const runtime = new ExtensionRuntime();
 		const extension = await loadExtensionFromFactory(
 			pi => {
-				pi.on("model_select", async event => {
+				pi.on("model_select", async (event, ctx) => {
 					const gateGlobal = globalThis as GateGlobal;
 					if (gateGlobal.__ompModelSelectThrowOnce) {
 						gateGlobal.__ompModelSelectThrowOnce = false;
 						throw new Error("model_select handler exploded");
 					}
 					const action = gateGlobal.__ompModelSelectAction;
-					if (action) await action(pi, event);
+					if (action) await action(pi, event, ctx);
 					// Park on the optional gate — either unconditionally (detached
 					// test) or only for a chosen model id (FIFO test) — proving
 					// switches never wait on handlers.
@@ -511,6 +516,155 @@ describe("AgentSession model_select extension event", () => {
 		expect({ outcome, stderr }).toEqual({ outcome: { exitCode: 0 }, stderr: "" });
 	}, 15_000);
 
+	it("cancels the in-flight delivery when the shutdown drain expires", async () => {
+		testSetSessionShutdownHandlerTimeoutMs(50);
+		try {
+			const handlerStarted = Promise.withResolvers<void>();
+			const dialogCancelled = Promise.withResolvers<void>();
+			// A real signal surface a parked handler sits behind: `ctx.ui.confirm`
+			// receives the handler's cancellation signal on its dialog options.
+			const confirm: ExtensionUIContext["confirm"] = (_title, _message, dialogOptions) =>
+				new Promise<boolean>(resolve => {
+					const signal = dialogOptions?.signal;
+					if (!signal) throw new Error("expected the handler's cancellation signal on the dialog options");
+					const settle = () => {
+						dialogCancelled.resolve();
+						resolve(false);
+					};
+					if (signal.aborted) settle();
+					else signal.addEventListener("abort", settle, { once: true });
+				});
+			runner.initialize(
+				{
+					sendMessage: () => {},
+					sendUserMessage: () => {},
+					appendEntry: () => {},
+					setLabel: () => {},
+					getActiveTools: () => [],
+					getAllTools: () => [],
+					setActiveTools: async () => {},
+					getCommands: () => [],
+					setModel: async () => false,
+					getThinkingLevel: () => session.thinkingLevel,
+					setThinkingLevel: level => session.setThinkingLevel(level),
+					getSessionName: () => undefined,
+					setSessionName: async () => {},
+				},
+				{
+					getModel: () => session.model,
+					isIdle: () => !session.isStreaming,
+					abort: () => {},
+					hasPendingMessages: () => false,
+					shutdown: () => {},
+					getContextUsage: () => undefined,
+					compact: async () => {},
+					getSystemPrompt: () => [],
+				},
+				undefined,
+				// Two prototype layers: overrides must NOT be own properties of the
+				// proxy target (`createHandlerUIContext` returns different wrapped
+				// functions, which a frozen own prop would turn into a TypeError).
+				Object.create(Object.create(runner.getUIContext(), { confirm: { value: confirm } })),
+			);
+			(globalThis as GateGlobal).__ompModelSelectAction = async (_pi, _event, ctx) => {
+				handlerStarted.resolve();
+				// Park exactly like a real extension would: inside a dialog wired
+				// to the handler's cancellation signal. Only the drain's cancel
+				// (not its 30s per-handler budget) can end this wait inside the
+				// 50ms shutdown bound.
+				await ctx.ui.confirm("park", "parked until the drain cancels the pass");
+			};
+			await session.setModel(bundledAnthropicModel("claude-sonnet-4-6"));
+			await handlerStarted.promise; // the delivery is REALLY in flight
+
+			// Dispose's drain expires at the 50ms bound and must cancel the
+			// in-flight pass — aborting the parked dialog — not just log it.
+			await session.dispose();
+
+			await dialogCancelled.promise;
+			expect(order).toContain("session_shutdown");
+		} finally {
+			testSetSessionShutdownHandlerTimeoutMs(SESSION_SHUTDOWN_HANDLER_TIMEOUT_MS);
+		}
+	});
+
+	it("cancelling an in-flight delivery does not keep the process alive", async () => {
+		const probe = `
+			import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+			import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
+			import { ExtensionRunner, testSetExtensionHandlerTimeoutMs } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
+			import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+			import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+			import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
+			import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+			const auth = await AuthStorage.create(":memory:");
+			const registry = new ModelRegistry(auth);
+			const runtime = new ExtensionRuntime();
+			const extension = await loadExtensionFromFactory(pi => {
+				// Ignores every cancellation surface and parks forever — a
+				// misbehaving handler. Its armed per-handler timeout timer must
+				// be cleared by the drain's cancel, or this child stays alive
+				// for the full 60s budget.
+				pi.on("model_select", () => new Promise(() => {}));
+			}, process.cwd(), new EventBus(), runtime, "model-select-cancel-probe");
+			const runner = new ExtensionRunner([extension], runtime, process.cwd(), SessionManager.inMemory(), registry);
+			testSetExtensionHandlerTimeoutMs(60_000);
+			const slot = runner.reserveModelSelect();
+			slot?.commit({
+				model: getBundledModel("anthropic", "claude-sonnet-4-5"),
+				previousModel: undefined,
+				source: "set",
+			});
+			await Bun.sleep(20); // let the chain head reach the parked handler
+			runner.beginShutdown();
+			await runner.drainModelSelect(100);
+			auth.close();
+		`;
+		const child = Bun.spawn([process.execPath, "--eval", probe], {
+			cwd: process.cwd(),
+			stdout: "ignore",
+			stderr: "pipe",
+		});
+		const outcome = await Promise.race([
+			child.exited.then(exitCode => ({ exitCode })),
+			Bun.sleep(10_000).then(() => ({ timedOut: true })),
+		]);
+		if ("timedOut" in outcome) child.kill();
+		await child.exited;
+		const stderr = await new Response(child.stderr).text();
+
+		expect({ outcome, stderr }).toEqual({ outcome: { exitCode: 0 }, stderr: "" });
+	}, 15_000);
+
+	it("treats an @upstream re-pin as a real switch", async () => {
+		armDelivery(2);
+		const base = openRouterHostedModel("claude-sonnet-4-6");
+		const routeA = applyUpstreamRouting(base, "vendor-a");
+		const routeB = applyUpstreamRouting(base, "vendor-b");
+
+		await session.setModel(routeA);
+		await session.setModel(routeB);
+		await waitForDeliveries();
+
+		expect(events).toHaveLength(2);
+		expect(formatModelStringWithRouting(events[0]!.model)).toBe("openrouter/claude-sonnet-4-6@vendor-a");
+		expect(formatModelStringWithRouting(events[1]!.model)).toBe("openrouter/claude-sonnet-4-6@vendor-b");
+		expect(formatModelStringWithRouting(events[1]!.previousModel!)).toBe("openrouter/claude-sonnet-4-6@vendor-a");
+		expect(modelChangedCount).toBe(2);
+	});
+
+	it("does not fire when the same @upstream route is re-selected", async () => {
+		const routeA = applyUpstreamRouting(openRouterHostedModel("claude-sonnet-4-6"), "vendor-a");
+
+		await session.setModel(routeA);
+		await waitForDeliveries();
+		await session.setModel(routeA);
+		await drainMicrotasks();
+
+		expect(events).toHaveLength(1);
+		expect(modelChangedCount).toBe(1);
+	});
+
 	it("labels a session-switch model restore as restore", async () => {
 		const target = bundledAnthropicModel("claude-sonnet-4-6");
 		const { switcher, restoreEvents, delivered, targetFile } = await buildSwitchPair(target);
@@ -639,4 +793,19 @@ function bundledAnthropicModel(id: string): Model<Api> {
 	const model = getBundledModel("anthropic", id);
 	if (!model) throw new Error(`Expected anthropic model ${id} to exist`);
 	return model;
+}
+
+/**
+ * A bundled row re-hosted on OpenRouter as an `openai-completions` aggregator
+ * row, so `applyUpstreamRouting` pins the `@upstream` route exactly as real
+ * selector resolution does (`buildModel` only preserves the routing compat
+ * block for that api; `modelMatchesHost` matches by provider).
+ */
+function openRouterHostedModel(id: string): Model<Api> {
+	return buildModel({
+		...bundledAnthropicModel(id),
+		api: "openai-completions",
+		provider: "openrouter",
+		baseUrl: "https://openrouter.ai/api/v1",
+	});
 }

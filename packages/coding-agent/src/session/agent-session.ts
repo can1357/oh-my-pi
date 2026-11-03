@@ -126,9 +126,11 @@ import type { SessionAccountPoolScope } from "../config/account-pools";
 import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mode";
 import type { ModelRegistry } from "../config/model-registry";
 import {
+	carryUpstreamRouting,
 	disabledProviderIds,
 	getModelMatchPreferences,
 	type ResolvedModelRoleValue,
+	modelsAreEqualWithRouting,
 	resolveCliModel,
 	resolveSessionModelSelector,
 	sessionModelDiscoveryProviders,
@@ -12309,9 +12311,10 @@ export class AgentSession implements SettingsScope {
 	/**
 	 * Rebuild the model catalog after an `extendedContext` toggle or a
 	 * `compaction.modelThresholds` edit and rebind the active model when its
-	 * effective context window changed. Same-model rebinds skip provider-session
-	 * resets (`modelsAreEqual` sees no change), so this only refreshes metadata
-	 * consumers (compaction thresholds, context display).
+	 * effective context window changed. Same-model rebinds (route included —
+	 * the pin is carried onto the refitted row) skip provider-session resets,
+	 * so this only refreshes metadata consumers (compaction thresholds,
+	 * context display).
 	 */
 	async #reapplyContextWindowPolicy(): Promise<void> {
 		// Refit the bound row right away (the agent's model resolver applies this
@@ -12325,14 +12328,20 @@ export class AgentSession implements SettingsScope {
 			if (!currentModel || this.#isDisposed) return;
 			const found = this.#modelRegistry.find(currentModel.provider, currentModel.id);
 			const updated = found && this.#modelRegistry.fitContextWindow(found, this.settings);
+			// The fresh catalog row is unrouted (`find` returns the base row);
+			// carry the session's `@upstream` pin over so a window refit
+			// neither silently drops the pin nor — with the route-aware switch
+			// comparison in `#setModelWithProviderSessionReset` — reports a
+			// phantom model change for what is a metadata refresh.
+			const pinned = updated ? carryUpstreamRouting(currentModel, updated) : undefined;
 			// Compare against the window bound before the refit so dependent state
 			// still reconciles once even though the refit already moved the row.
 			const baseline = previousModel && modelsAreEqual(previousModel, currentModel) ? previousModel : currentModel;
-			if (updated && updated.contextWindow !== baseline.contextWindow) {
-				// Same model, so no slot was reserved and `commit` is a no-op; the
-				// call exists purely for the provider reset — but keep the
-				// "every result is committed" invariant.
-				(await this.#setModelWithProviderSessionReset(updated)).commit("set");
+			if (pinned && pinned.contextWindow !== baseline.contextWindow) {
+				// Same model (same route), so no slot was reserved and `commit`
+				// is a no-op; the call exists purely for the provider reset —
+				// but keep the "every result is committed" invariant.
+				(await this.#setModelWithProviderSessionReset(pinned)).commit("set");
 			}
 		} catch (error) {
 			logger.warn("context-window policy reapply failed", { error: String(error) });
@@ -12341,7 +12350,13 @@ export class AgentSession implements SettingsScope {
 
 	async #setModelWithProviderSessionReset(model: Model): Promise<ModelSwitchResult> {
 		const currentModel = this.model;
-		const isChanging = !currentModel || !modelsAreEqual(currentModel, model);
+		// Route-aware: `modelsAreEqual` compares provider/id only, so re-pinning
+		// an aggregator's upstream (`openrouter/foo@a` → `@b`) would read as a
+		// no-op even though `agent.setModel` installed a different request
+		// target. Quota-sensitive consumers observe the route — the same
+		// identity `formatModelStringWithRouting` renders — so a routed
+		// re-pin is a real change and notifies like one.
+		const isChanging = !currentModel || !modelsAreEqualWithRouting(currentModel, model);
 		if (currentModel) {
 			this.#closeProviderSessionsForModelSwitch(currentModel, model);
 			if (isChanging) {

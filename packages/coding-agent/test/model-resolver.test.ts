@@ -6,10 +6,13 @@ import { DEFAULT_MODEL_PER_PROVIDER } from "@oh-my-pi/pi-catalog/provider-models
 import { logger } from "@oh-my-pi/pi-utils";
 import { parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import {
+	applyUpstreamRouting,
+	carryUpstreamRouting,
 	expandRoleAlias,
 	extractExplicitThinkingSelector,
 	filterAvailableModelsByEnabledPatterns,
 	formatModelStringWithRouting,
+	modelsAreEqualWithRouting,
 	parseModelPattern,
 	pickDefaultAvailableModel,
 	resolveAgentAdvisorRolePattern,
@@ -1538,6 +1541,37 @@ describe("resolveExactModelIdentity", () => {
 		expect(
 			resolveExactModelIdentity("openrouter/z-ai/glm-4.7@cerebras:high", { getAvailable: () => allModels }),
 		).toBeUndefined();
+	});
+});
+
+describe("route-aware model identity", () => {
+	test("modelsAreEqualWithRouting distinguishes @upstream pins", () => {
+		const base = mockOpenRouterModels.find(m => m.id === "z-ai/glm-4.7");
+		if (!base) throw new Error("Expected mock openrouter model z-ai/glm-4.7");
+		const routeA = applyUpstreamRouting(base, "vendor-a");
+		const routeB = applyUpstreamRouting(base, "vendor-b");
+
+		expect(modelsAreEqualWithRouting(routeA, routeB)).toBe(false);
+		expect(modelsAreEqualWithRouting(routeA, applyUpstreamRouting(base, "vendor-a"))).toBe(true);
+		// Pin vs no pin is a real difference; same row re-bound is not.
+		expect(modelsAreEqualWithRouting(base, routeA)).toBe(false);
+		expect(modelsAreEqualWithRouting(base, { ...base })).toBe(true);
+		expect(modelsAreEqualWithRouting(undefined, base)).toBe(false);
+		expect(modelsAreEqualWithRouting(mockModels[0], mockModels[1])).toBe(false);
+	});
+
+	test("carryUpstreamRouting re-pins a fresh catalog row", () => {
+		const base = mockOpenRouterModels.find(m => m.id === "z-ai/glm-4.7");
+		if (!base) throw new Error("Expected mock openrouter model z-ai/glm-4.7");
+		const pinned = applyUpstreamRouting(base, "vendor-a");
+		const fresh = { ...base, contextWindow: 123_456 };
+
+		const carried = carryUpstreamRouting(fresh, pinned);
+		expect(formatModelStringWithRouting(carried)).toBe("openrouter/z-ai/glm-4.7@vendor-a");
+		expect(carried.contextWindow).toBe(123_456);
+
+		// An unpinned source leaves the target row untouched.
+		expect(carryUpstreamRouting(fresh, base)).toBe(fresh);
 	});
 });
 describe("resolveCliModel", () => {
