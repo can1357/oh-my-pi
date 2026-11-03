@@ -492,6 +492,8 @@ export async function resolveEffectiveSubagentPolicy(
 	await request.session.settings.reloadFromDisk({
 		includeParents: request.perCallModel !== undefined || request.seanceModel !== undefined,
 	});
+	// The subagent resolves its model from this (shared) registry, so a models.yml edit must land first.
+	await request.session.modelRegistry?.reloadIfConfigChanged();
 	const spawnPolicy = resolveSpawnPolicy(request.session.getSessionSpawns());
 	const agentName = request.agent?.trim() || spawnPolicy.defaultAgent;
 	const planMode = request.session.getPlanModeState?.()?.enabled === true;

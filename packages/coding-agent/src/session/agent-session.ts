@@ -904,6 +904,22 @@ function todoRetryMatches(failed: Record<string, unknown>, retry: Record<string,
 	return true;
 }
 
+/**
+ * The parts of a model that come from configuration (models.yml, the catalog),
+ * compared to tell whether an on-disk edit changed this model: every field
+ * except the context window and output cap, which a session fits to its
+ * settings and may probe at runtime, and functions, which each catalog build
+ * recreates.
+ */
+function modelConfigShape(model: Model): Record<string, unknown> {
+	const shape: Record<string, unknown> = {};
+	for (const [key, value] of Object.entries(model)) {
+		if (key === "contextWindow" || key === "maxTokens" || typeof value === "function") continue;
+		shape[key] = value;
+	}
+	return shape;
+}
+
 export class AgentSession implements SettingsScope {
 	readonly agent: Agent;
 	readonly sessionManager: SessionManager;
@@ -1160,6 +1176,9 @@ export class AgentSession implements SettingsScope {
 
 	// Model registry for API key resolution
 	#modelRegistry: ModelRegistry;
+	/** Registry catalog generation and model object last checked against it (see {@link syncModelConfig}). */
+	#modelConfigGeneration: number | undefined;
+	#modelConfigCheckedModel: Model | undefined;
 	/** Creation-time permission for switchSession to keep the current model when a target's saved model is unrestorable. */
 	readonly #allowSessionModelFallback: boolean;
 	readonly #disableModelFallback: boolean;
@@ -2266,7 +2285,12 @@ export class AgentSession implements SettingsScope {
 		this.#titleSystemPrompt = config.titleSystemPrompt;
 		this.#autoTitle = config.autoTitle === true;
 		this.#transformContext = config.transformContext ?? (messages => messages);
-		this.#sideStreamFn = config.sideStreamFn ?? streamSimple;
+		const sideStreamFn = config.sideStreamFn ?? streamSimple;
+		// Side requests (/btw, /omfg, advisors, maintenance, handoff) see a models.yml edit at their next request too.
+		this.#sideStreamFn = async (model, context, options) => {
+			await this.syncModelConfig();
+			return sideStreamFn(this.#currentConfigFor(model), context, options);
+		};
 		this.#onPayload = config.onPayload;
 		this.rawSseDebugBuffer = config.rawSseDebugBuffer ?? new RawSseDebugBuffer();
 		// Avoid wrapping in an `async` closure when no user callback is configured: the
@@ -6754,6 +6778,39 @@ export class AgentSession implements SettingsScope {
 				error,
 			});
 		}
+	}
+
+	/**
+	 * Before each model request: re-read models.yml when it changed on disk and
+	 * re-bind this session's model to the rebuilt catalog entry, so an edit
+	 * (a compat flag, a provider setting) reaches a running session at its next
+	 * request. The check runs once per registry generation and per model object,
+	 * so a model handed in from an older catalog is caught at the first request.
+	 */
+	async syncModelConfig(): Promise<void> {
+		await this.#modelRegistry.reloadIfConfigChanged();
+		const generation = this.#modelRegistry.configGeneration;
+		const current = this.model;
+		if (generation === this.#modelConfigGeneration && current === this.#modelConfigCheckedModel) return;
+		this.#modelConfigGeneration = generation;
+		const fresh = current ? this.#currentConfigFor(current) : current;
+		if (fresh !== current && fresh) this.agent.setModel(fresh);
+		this.#modelConfigCheckedModel = this.model;
+	}
+
+	/**
+	 * `model` as the current catalog configures it: the registry entry for the
+	 * same provider and id when its configuration differs, else `model` itself.
+	 * Only configuration counts, so an edit to another provider leaves the
+	 * object (and a context window probed at runtime) alone; a lazily probed
+	 * window survives a re-bind too.
+	 */
+	#currentConfigFor(model: Model): Model {
+		const entry = this.#modelRegistry.find(model.provider, model.id);
+		if (!entry || Bun.deepEquals(modelConfigShape(entry), modelConfigShape(model))) return model;
+		const fitted = this.#modelRegistry.fitContextWindow(entry, this.settings);
+		if (!this.#lazyContextRefreshed.has(`${model.provider}/${model.id}`)) return fitted;
+		return { ...fitted, contextWindow: model.contextWindow, maxTokens: model.maxTokens };
 	}
 
 	/**

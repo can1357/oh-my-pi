@@ -232,6 +232,13 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 
 	/**
+	 * Runs before each provider request is prepared, ahead of reading the model.
+	 * A host uses it to fold an on-disk change (models.yml) into the model this
+	 * request is sent with.
+	 */
+	beforeProviderCall?: (signal?: AbortSignal) => Promise<void>;
+
+	/**
 	 * Optional transform applied to the context before `convertToLlm`.
 	 *
 	 * Use this for operations that work at the AgentMessage level:

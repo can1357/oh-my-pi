@@ -4838,6 +4838,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			promptCacheKey: providerPromptCacheKey,
 			deadline: options.deadline,
 			transformContext,
+			// A models.yml edit reaches this running session at its next request.
+			beforeProviderCall: () => session.syncModelConfig(),
 			transformProviderContext,
 			steeringMode: cfgSteeringMode.get(settings),
 			followUpMode: cfgFollowUpMode.get(settings),

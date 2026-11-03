@@ -346,6 +346,51 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(await registry.refreshIfStale()).toBe(false);
 	});
 
+	test("reloadIfConfigChanged folds a models config edit into a running registry and keeps the last good one when an edit does not load", async () => {
+		const gateway = (compat?: Record<string, unknown>) => ({
+			gateway: {
+				baseUrl: "http://127.0.0.1:9991",
+				apiKey: "TEST_KEY",
+				api: "anthropic-messages",
+				...(compat ? { compat } : {}),
+				models: [{ id: "claude-gateway", reasoning: false, input: ["text"] }],
+			},
+		});
+		const touch = () => {
+			const next = new Date(fs.statSync(modelsJsonPath).mtimeMs + 1_000);
+			fs.utimesSync(modelsJsonPath, next, next);
+		};
+		const longRetention = () =>
+			(registry.find("gateway", "claude-gateway")?.compat as { supportsLongCacheRetention?: boolean } | undefined)
+				?.supportsLongCacheRetention;
+		writeRawModelsJson(gateway());
+		const registry = new ModelRegistry(authStorage, modelsJsonPath);
+		const startGeneration = registry.configGeneration;
+		expect(longRetention()).toBe(false);
+		expect(await registry.reloadIfConfigChanged()).toBe(false);
+
+		writeRawModelsJson(gateway({ supportsLongCacheRetention: true }));
+		touch();
+		expect(await registry.reloadIfConfigChanged()).toBe(true);
+		expect(longRetention()).toBe(true);
+		expect(registry.configGeneration).toBeGreaterThan(startGeneration);
+		const goodGeneration = registry.configGeneration;
+
+		// A half-written edit: the provider and its flag stay as last loaded.
+		fs.writeFileSync(modelsJsonPath, "providers:\n  gateway: [unterminated\n");
+		touch();
+		expect(await registry.reloadIfConfigChanged()).toBe(false);
+		expect(longRetention()).toBe(true);
+		expect(registry.configGeneration).toBe(goodGeneration);
+		expect(await registry.reloadIfConfigChanged()).toBe(false);
+
+		// The next good edit loads again.
+		writeRawModelsJson(gateway());
+		touch();
+		expect(await registry.reloadIfConfigChanged()).toBe(true);
+		expect(longRetention()).toBe(false);
+	});
+
 	test("refreshProvider online refreshes expired anthropic OAuth before model discovery", async () => {
 		const { refreshCalls } = await useAuthStorageWithRefreshTracker();
 		await authStorage.credentials.set("anthropic", {

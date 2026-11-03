@@ -365,6 +365,12 @@ export class ModelRegistry {
 	#configWarnings: string[] = [];
 	#modelsConfigFile: ConfigFile<ModelsConfig>;
 	#lastStaticLoadMtime: number | null = null;
+	/** File version (see `ConfigFile.getStamp`) the static catalog was last built from. */
+	#loadedConfigStamp: string | null = null;
+	/** A models.yml version that failed to load; skipped until the file changes again. */
+	#rejectedConfigStamp: string | null = null;
+	#configReload?: Promise<boolean>;
+	#configGeneration = 0;
 	#registeredProviderSources: Set<string> = new Set();
 	#providerDiscoveryStates: Map<string, ProviderDiscoveryState> = new Map();
 	#cacheDbPath?: string;
@@ -703,6 +709,63 @@ export class ModelRegistry {
 	}
 
 	/**
+	 * Fold an on-disk models.yml edit into a running process before its next
+	 * model request or subagent spawn, as settings are re-read at the same
+	 * points. One `stat` when nothing changed (about 5 µs). The file version is
+	 * its mtime, ctime, size and inode, so an edit that keeps the mtime still
+	 * counts. The rebuild uses the exact parse it validated, so a writer that
+	 * truncates the file after the check cannot strip the catalog; an edit that
+	 * does not load keeps the last good catalog and is reported once per file
+	 * version. Concurrent callers share one rebuild. Resolves whether the
+	 * catalog was rebuilt; a session compares {@link configGeneration} to learn
+	 * that another caller did.
+	 */
+	reloadIfConfigChanged(): Promise<boolean> {
+		if (this.#configReload) return this.#configReload;
+		if (this.#ignoreLocalModelConfig) return Promise.resolve(false);
+		const stamp = this.#modelsConfigFile.getStamp();
+		if (stamp === this.#loadedConfigStamp || (stamp !== null && stamp === this.#rejectedConfigStamp)) {
+			return Promise.resolve(false);
+		}
+		this.#modelsConfigFile.invalidate();
+		const probe = this.#modelsConfigFile.tryLoad();
+		if (probe.status === "error") {
+			this.#rejectedConfigStamp = stamp;
+			logger.warn("models.yml changed on disk but does not load; keeping the last good model catalog", {
+				error: probe.error?.message,
+			});
+			return Promise.resolve(false);
+		}
+		this.#rejectedConfigStamp = null;
+		const reload = this.#rebuildFromLoadedConfig(stamp).then(
+			() => true,
+			error => {
+				logger.warn("models.yml reload failed; keeping the catalog built so far", {
+					error: error instanceof Error ? error.message : String(error),
+				});
+				return false;
+			},
+		);
+		this.#configReload = reload.finally(() => {
+			this.#configReload = undefined;
+		});
+		return this.#configReload;
+	}
+
+	/** Offline rebuild from the config parse already cached in {@link ModelsConfigFile}, recorded as `stamp`. */
+	async #rebuildFromLoadedConfig(stamp: string | null): Promise<void> {
+		this.#reloadStaticModels({ force: true, configLoaded: true });
+		this.#loadedConfigStamp = stamp;
+		this.#suppressedSelectors.clear();
+		await this.#refreshRuntimeDiscoveries("offline");
+	}
+
+	/** Increments on every rebuild of the static catalog (models.yml load). */
+	get configGeneration(): number {
+		return this.#configGeneration;
+	}
+
+	/**
 	 * Resolve once the initial background discovery has settled, arming a waiter
 	 * even when the refresh has not started yet. In the CLI path
 	 * {@link refreshInBackground} runs after the session is constructed
@@ -915,7 +978,11 @@ export class ModelRegistry {
 		await this.#refreshRuntimeDiscoveries(strategy, new Set(this.#runtimeModelManagers.keys()));
 	}
 
-	#reloadStaticModels(options?: { force?: boolean; preserveRuntimeDiscovery?: boolean }): void {
+	#reloadStaticModels(options?: {
+		force?: boolean;
+		preserveRuntimeDiscovery?: boolean;
+		configLoaded?: boolean;
+	}): void {
 		const currentMtime = this.#modelsConfigFile.getMtimeMs();
 		const staticConfigUnchanged = currentMtime === this.#lastStaticLoadMtime;
 		if (!options?.force && currentMtime !== null && staticConfigUnchanged) {
@@ -946,7 +1013,8 @@ export class ModelRegistry {
 				keylessProviders: new Set(this.#keylessProviders),
 			};
 		}
-		this.#modelsConfigFile.invalidate();
+		// A live reload already parsed and validated the file; re-reading it could pick up a half-written edit.
+		if (!options?.configLoaded) this.#modelsConfigFile.invalidate();
 		this.#customProviderApiKeys.clear();
 		this.#keylessProviders.clear();
 		this.#discoverableProviders = [];
@@ -1028,6 +1096,8 @@ export class ModelRegistry {
 	}
 
 	#loadModels() {
+		// Taken before the read, so an edit landing during it reads as a change at the next check.
+		const configStamp = this.#modelsConfigFile.getStamp();
 		this.#resetStaticComposition();
 		// Load custom config first (to know which providers to override).
 		const {
@@ -1058,6 +1128,8 @@ export class ModelRegistry {
 			this.#applyHardcodedModelPolicies(this.#loadCachedDiscoverableModels()),
 		);
 		this.#lastStaticLoadMtime = this.#modelsConfigFile.getMtimeMs();
+		this.#loadedConfigStamp = configStamp;
+		this.#configGeneration++;
 	}
 
 	#resetStaticComposition(): void {

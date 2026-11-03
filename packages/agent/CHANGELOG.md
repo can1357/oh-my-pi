@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `beforeProviderCall` agent option: an async hook that runs before each provider request is prepared, ahead of reading the model, so a host can fold an on-disk configuration change into that request's model ([#17987](https://github.com/can1357/oh-my-pi/pull/17987) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.16.0] - 2026-11-02
 
 ### Changed
