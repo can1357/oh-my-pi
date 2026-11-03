@@ -70,7 +70,7 @@ use crate::{
 	bash::{
 		Budget, CallId, Cx, Engine, EngineConfig, EventMask, Fs, MemStore, PipeTap, RunId, Script,
 		Shell, ShellError, ShellInit, Signal, Step, ToolCall, VprocSel,
-		store::{Key, MiscKey, Record},
+		store::{Key, MiscKey, Record, StateStore, Table},
 	},
 	host::{PiHost, SpawnObserver, TERM_GRACE},
 	sys::OutputDecoding,
@@ -357,6 +357,30 @@ impl Session {
 			.map_err(|_| SessionError::Closed)
 	}
 
+	/// Whether simple commands whose first words are `names` may run code
+	/// their text does not show: one of `names` is an alias or a function, a
+	/// trap with an action is set (it runs between commands, when a run ends
+	/// or on a signal), or `command_not_found_handle` is defined (it runs for
+	/// a command not found). The output minimizer asks before it runs a chain
+	/// one command per run, which such code (an `exec >file` in a function
+	/// body) could tell apart from one run.
+	///
+	/// # Errors
+	///
+	/// [`SessionError::Closed`] when the session is closed.
+	pub async fn may_run_hidden_code(&self, names: Vec<BString>) -> Result<bool, SessionError> {
+		let jobs = self.jobs.as_ref().ok_or(SessionError::Closed)?;
+		let (reply_tx, reply_rx) = flume::bounded(1);
+		jobs
+			.send(Request::HiddenCode(names, reply_tx))
+			.map_err(|_| SessionError::Closed)?;
+		self.waker.wake_by_ref();
+		reply_rx
+			.recv_async()
+			.await
+			.map_err(|_| SessionError::Closed)
+	}
+
 	/// Run `command` with `stdio`; see [`Session::run_with`].
 	///
 	/// # Errors
@@ -503,6 +527,8 @@ enum Request {
 	Run(Job),
 	/// Count the background jobs running an external.
 	LiveJobs(flume::Sender<usize>),
+	/// Answer [`Session::may_run_hidden_code`] for these first words.
+	HiddenCode(Vec<BString>, flume::Sender<bool>),
 }
 
 /// One command for the driver.
@@ -535,6 +561,9 @@ impl Driver {
 				Ok(Request::LiveJobs(reply)) => {
 					let _ = reply.send(self.shell.live_external_jobs());
 				},
+				Ok(Request::HiddenCode(names, reply)) => {
+					let _ = reply.send(self.may_run_hidden_code(&names));
+				},
 				Err(flume::TryRecvError::Disconnected) => break,
 				Err(flume::TryRecvError::Empty) => self.idle_turn().await,
 			}
@@ -553,6 +582,27 @@ impl Driver {
 			Step::Idle => self.idle().await,
 			Step::SuspendReady => {},
 		}
+	}
+
+	/// See [`Session::may_run_hidden_code`]. Every command runs on the root,
+	/// whose functions, aliases and traps are the store's own records. A
+	/// store that cannot be read counts as one that may.
+	fn may_run_hidden_code(&mut self, names: &[BString]) -> bool {
+		let store = &self.store;
+		if store
+			.record(Key::Func(b"command_not_found_handle".as_bstr()))
+			.is_some()
+			|| names.iter().any(|name| {
+				store.record(Key::Alias(name.as_bstr())).is_some()
+					|| store.record(Key::Func(name.as_bstr())).is_some()
+			}) {
+			return true;
+		}
+		let mut trapped = false;
+		let scanned = self.store.scan(Table::Trap, &mut |_, record| {
+			trapped |= matches!(record, Record::Trap { action, .. } if !action.is_empty());
+		});
+		trapped || scanned.is_err()
 	}
 
 	/// Run one job to completion and send its outcome.
