@@ -189,6 +189,35 @@ function parseKeyCounters(info: Record<string, unknown>, now: number): BudgetCou
 	return { spend, cap, window };
 }
 
+interface KeyWindowCounters extends BudgetCounters {
+	window: UsageWindow;
+}
+
+/**
+ * Concurrent key budget windows (`budget_limits[]`). Their rolling spend is
+ * only readable when the proxy reports it under `budget_limits_usage`, keyed
+ * by the window's `budget_duration`; windows without a reported spend are
+ * skipped rather than shown as unspent. Each is enforced independently of the
+ * key's primary cap, so each becomes its own row.
+ */
+function parseKeyWindowCounters(info: Record<string, unknown>): KeyWindowCounters[] {
+	const usage = isRecord(info.budget_limits_usage) ? info.budget_limits_usage : undefined;
+	if (!usage || !Array.isArray(info.budget_limits)) return [];
+	const windows: KeyWindowCounters[] = [];
+	const seen = new Set<string>();
+	for (const entry of info.budget_limits) {
+		if (!isRecord(entry) || typeof entry.budget_duration !== "string") continue;
+		const window = buildWindow(entry.budget_duration, entry.reset_at);
+		if (!window || seen.has(window.id)) continue;
+		const windowUsage = usage[entry.budget_duration];
+		const spend = isRecord(windowUsage) ? finiteNumber(windowUsage.current_spend) : undefined;
+		if (spend === undefined || spend < 0) continue;
+		seen.add(window.id);
+		windows.push({ spend, cap: readCap(entry.max_budget).cap, window });
+	}
+	return windows;
+}
+
 function parseUserCounters(user: Record<string, unknown>): (BudgetCounters & { userId: string }) | undefined {
 	const spend = finiteNumber(user.spend);
 	if (spend === undefined || spend < 0) return undefined;
@@ -259,31 +288,41 @@ async function fetchLiteLLMUsage(params: UsageFetchParams, ctx: UsageFetchContex
 	if (!apiKey || !baseUrl) return null;
 	const fetchedAt = Date.now();
 
-	let keyInfo: Record<string, unknown> | undefined;
-	if (apiKey.startsWith(MANAGEMENT_KEY_PREFIX)) {
-		const body = await getJson(`${baseUrl}${KEY_INFO_PATH}`, apiKey, ctx, params.signal);
-		keyInfo = body && isRecord(body.info) ? body.info : undefined;
-	}
-	const user = await getJson(`${baseUrl}${SELF_USER_INFO_PATH}`, apiKey, ctx, params.signal);
+	// The two scopes are independent; fetch them together so a slow gateway
+	// pays one round trip inside the usage timeout.
+	const [keyBody, user] = await Promise.all([
+		apiKey.startsWith(MANAGEMENT_KEY_PREFIX)
+			? getJson(`${baseUrl}${KEY_INFO_PATH}`, apiKey, ctx, params.signal)
+			: undefined,
+		getJson(`${baseUrl}${SELF_USER_INFO_PATH}`, apiKey, ctx, params.signal),
+	]);
+	const keyInfo = keyBody && isRecord(keyBody.info) ? keyBody.info : undefined;
 
 	const keyCounters = keyInfo ? parseKeyCounters(keyInfo, fetchedAt) : undefined;
+	const keyWindows = keyInfo ? parseKeyWindowCounters(keyInfo) : [];
 	const userCounters = user ? parseUserCounters(user) : undefined;
-	if (!keyCounters && !userCounters) return null;
+	if (!keyCounters && keyWindows.length === 0 && !userCounters) return null;
 
 	const accountId = userCounters?.userId ?? nonEmptyString(keyInfo?.user_id);
 	const email = nonEmptyString(user?.user_email);
+	const keyLimitPrefix = `${params.provider}:key:${Bun.hash(apiKey).toString(16)}`;
 	const limits: UsageLimit[] = [];
 	if (keyCounters) {
-		const limit = buildLimit(
-			`${params.provider}:key:${Bun.hash(apiKey).toString(16)}:budget`,
-			"Key budget",
-			params.provider,
-			accountId,
-			keyCounters,
-		);
+		const limit = buildLimit(`${keyLimitPrefix}:budget`, "Key budget", params.provider, accountId, keyCounters);
 		const throttles = isRecord(keyInfo?.metadata) && keyInfo.metadata.throttle_on_budget_exceeded === true;
 		if (limit.status === "exhausted" && throttles) limit.notes = [...(limit.notes ?? []), THROTTLE_NOTE];
 		limits.push(limit);
+	}
+	for (const counters of keyWindows) {
+		limits.push(
+			buildLimit(
+				`${keyLimitPrefix}:window:${counters.window.id}`,
+				"Key budget",
+				params.provider,
+				accountId,
+				counters,
+			),
+		);
 	}
 	if (userCounters) {
 		limits.push(

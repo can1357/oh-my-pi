@@ -181,7 +181,7 @@ describe("LiteLLM usage provider: management endpoints", () => {
 		expectWireValid(report);
 	});
 
-	it("reads a management key's own record before the self-user record with the trimmed bearer", async () => {
+	it("reads a management key's own record and the self-user record with the trimmed bearer", async () => {
 		const { report, requests } = await probe({
 			// Command- and file-sourced keys often carry surrounding whitespace.
 			apiKey: `  ${MANAGEMENT_KEY}\n`,
@@ -215,6 +215,29 @@ describe("LiteLLM usage provider: management endpoints", () => {
 			status: "ok",
 		});
 		expect(report?.notes).toEqual([REPORT_NOTE, USER_SCOPE_NOTE]);
+	});
+
+	it("issues both management requests before either response arrives", async () => {
+		const started: string[] = [];
+		// The key response is released only once the self-user request has been
+		// issued: a sequential adapter could never finish this probe.
+		const userRequested = Promise.withResolvers<void>();
+		const fetch: FetchImpl = async input => {
+			const url = String(input);
+			started.push(url);
+			if (url.endsWith("/key/info")) {
+				await userRequested.promise;
+				return Response.json({ key: MANAGEMENT_KEY, info: { user_id: "u1", spend: 10, max_budget: 40 } });
+			}
+			userRequested.resolve();
+			return Response.json({ user_id: "u1", spend: 25, max_budget: 100 });
+		};
+		const report = await litellmUsageProvider.fetchUsage(
+			{ provider: ALIAS, baseUrl: ALIAS_BASE_URL, credential: { type: "api_key", apiKey: MANAGEMENT_KEY } },
+			{ fetch },
+		);
+		expect(started).toEqual([KEY_INFO_URL, USER_INFO_URL]);
+		expect(report?.limits.map(limit => limit.id)).toEqual([KEY_LIMIT_ID, USER_LIMIT_ID]);
 	});
 
 	it("keeps every non-401 failure local to its own scope", async () => {
@@ -604,6 +627,91 @@ describe("LiteLLM usage provider: budget counters", () => {
 
 		expect(report?.limits.map(limit => limit.id)).toEqual([KEY_LIMIT_ID]);
 		expect(requireLimit(report, KEY_LIMIT_ID).amount).toMatchObject({ used: 40, limit: 100, remaining: 60 });
+	});
+
+	it("reports each concurrent key budget window whose spend the gateway exposes", async () => {
+		const windowId = (duration: string) => `${ALIAS}:key:${Bun.hash(MANAGEMENT_KEY).toString(16)}:window:${duration}`;
+		const { report } = await probe({
+			apiKey: MANAGEMENT_KEY,
+			keyInfo: reply({
+				key: MANAGEMENT_KEY,
+				info: {
+					user_id: "u1",
+					spend: 10,
+					max_budget: 40,
+					metadata: { throttle_on_budget_exceeded: true },
+					budget_limits: [
+						{ budget_duration: "1d", max_budget: 10, reset_at: "2030-01-02T00:00:00Z" },
+						{ budget_duration: "7d", max_budget: 50, reset_at: "2030-01-06 00:00:00" },
+						// Same window twice: the gateway keys usage by duration, so only one row can exist.
+						{ budget_duration: "7d", max_budget: 500, reset_at: null },
+						// A window the gateway reports no spend for is unreadable, not unspent.
+						{ budget_duration: "30d", max_budget: 200, reset_at: "2030-02-01T00:00:00Z" },
+						// Reported spend without a cap is still spend.
+						{ budget_duration: "1h", max_budget: null },
+						// Unusable spend values drop the window rather than guessing zero.
+						{ budget_duration: "1mo", max_budget: 5 },
+						{ budget_duration: "", max_budget: 5 },
+					],
+					budget_limits_usage: {
+						"1d": { current_spend: 2.5 },
+						"7d": { current_spend: 50 },
+						"1h": { current_spend: 0.25 },
+						"1mo": { current_spend: "3" },
+						"": { current_spend: 1 },
+					},
+				},
+			}),
+			userInfo: VALID_USER_INFO,
+		});
+
+		expect(report?.limits.map(limit => limit.id)).toEqual([
+			KEY_LIMIT_ID,
+			windowId("1d"),
+			windowId("7d"),
+			windowId("1h"),
+			USER_LIMIT_ID,
+		]);
+		expect(requireLimit(report, windowId("1d"))).toEqual({
+			id: windowId("1d"),
+			label: "Key budget",
+			scope: { provider: ALIAS, shared: true, windowId: "1d", accountId: "u1" },
+			window: { id: "1d", label: "1d", resetsAt: Date.UTC(2030, 0, 2) },
+			amount: { used: 2.5, limit: 10, remaining: 7.5, usedFraction: 0.25, remainingFraction: 0.75, unit: "usd" },
+			status: "ok",
+		});
+		const weekly = requireLimit(report, windowId("7d"));
+		expect(weekly.amount).toMatchObject({ used: 50, limit: 50, remaining: 0, usedFraction: 1 });
+		expect(weekly.window).toEqual({ id: "7d", label: "7d", resetsAt: Date.UTC(2030, 0, 6) });
+		expect(weekly.status).toBe("exhausted");
+		// Only the key's primary cap can be throttled; window checks block outright.
+		expect(weekly.notes).toBeUndefined();
+		const hourly = requireLimit(report, windowId("1h"));
+		expect(hourly.amount).toEqual({ used: 0.25, unit: "usd" });
+		expect(hourly.status).toBe("unknown");
+		expect(hourly.notes).toEqual([NO_LIMIT_NOTE]);
+		expectWireValid(report);
+	});
+
+	it("reports budget windows even when the key's primary counter is unusable", async () => {
+		const { report } = await probe({
+			apiKey: MANAGEMENT_KEY,
+			keyInfo: reply({
+				key: MANAGEMENT_KEY,
+				info: {
+					spend: "10",
+					budget_limits: [{ budget_duration: "1d", max_budget: 10, reset_at: "2030-01-02T00:00:00Z" }],
+					budget_limits_usage: { "1d": { current_spend: 4 } },
+				},
+			}),
+			userInfo: reply({}, 404),
+		});
+
+		expect(report?.limits.map(limit => limit.id)).toEqual([
+			`${ALIAS}:key:${Bun.hash(MANAGEMENT_KEY).toString(16)}:window:1d`,
+		]);
+		expect(report?.limits[0]?.amount).toMatchObject({ used: 4, limit: 10 });
+		expect(report?.notes).toEqual([REPORT_NOTE]);
 	});
 
 	it("adds the throttling caveat only to an exhausted key that opted in", async () => {
