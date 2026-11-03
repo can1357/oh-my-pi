@@ -6643,6 +6643,121 @@ mod tests {
 				format!("{lost}S=0 PWD=</gone/.> n=2\n"),
 				false,
 			),
+			(
+				"a removed directory, a name with a component",
+				"mkdir gone; cd gone; rmdir \"$top/gone\"; cd -P missing/../../d; echo \"S=$? \
+				 PWD=<${PWD#$top}> OLDPWD=<${OLDPWD#$top}>\""
+					.into(),
+				"cd: missing/../../d: No such file or directory\nS=1 PWD=</gone> OLDPWD=<>\n".into(),
+				false,
+			),
+			(
+				"a removed directory, a name through a file",
+				"mkdir gone; cd gone; rmdir \"$top/gone\"; cd \"$top/file/../d\" 2>\"$top/err\"; \
+				 s=$?; case \"$(cat \"$top/err\")\" in *\"cd: $top/file/../d: Not a directory\") echo \
+				 NAMED;; esac; echo \"S=$s PWD=<${PWD#$top}> OLDPWD=<${OLDPWD#$top}>\""
+					.into(),
+				"NAMED\nS=1 PWD=</gone> OLDPWD=<>\n".into(),
+				false,
+			),
+			(
+				"a removed directory, a missing name",
+				"mkdir gone; cd gone; rmdir \"$top/gone\"; cd nosuch; echo \"S=$? PWD=<${PWD#$top}> \
+				 OLDPWD=<${OLDPWD#$top}>\""
+					.into(),
+				"cd: nosuch: No such file or directory\nS=1 PWD=</gone> OLDPWD=<>\n".into(),
+				false,
+			),
+			(
+				"a removed directory, . twice",
+				"mkdir gone; cd gone; rmdir \"$top/gone\"; cd .; cd .; echo \"PWD=<${PWD#$top}> \
+				 OLDPWD=<${OLDPWD#$top}>\"; pwd | sed \"s#$top##\""
+					.into(),
+				"cd: error retrieving current directory: getcwd: cannot access parent directories: No \
+				 such file or directory\ncd: error retrieving current directory: getcwd: cannot \
+				 access parent directories: No such file or directory\nPWD=</gone/./.> \
+				 OLDPWD=</gone/.>\n/gone/./.\n"
+					.into(),
+				false,
+			),
+			(
+				"a removed directory, . then a name",
+				"mkdir gone; cd gone; rmdir \"$top/gone\"; cd .; cd d; echo \"S=$? PWD=<${PWD#$top}> \
+				 OLDPWD=<${OLDPWD#$top}>\""
+					.into(),
+				"cd: error retrieving current directory: getcwd: cannot access parent directories: No \
+				 such file or directory\ncd: d: No such file or directory\nS=1 PWD=</gone/.> \
+				 OLDPWD=</gone>\n"
+					.into(),
+				false,
+			),
+			(
+				"a removed directory, . then ..",
+				"mkdir gone; cd gone; rmdir \"$top/gone\"; cd .; cd ..; echo \"S=$? \
+				 PWD=<${PWD#$top}>\""
+					.into(),
+				"cd: error retrieving current directory: getcwd: cannot access parent directories: No \
+				 such file or directory\nS=0 PWD=<>\n"
+					.into(),
+				false,
+			),
+			(
+				"a removed directory, ../.. from below",
+				"mkdir -p gone/in; cd gone/in; rm -r \"$top/gone\"; cd ../..; echo \"S=$? \
+				 PWD=<${PWD#$top}>\""
+					.into(),
+				"S=0 PWD=<>\n".into(),
+				false,
+			),
+			(
+				"an empty CDPATH entry with an empty directory",
+				"mkdir -p c; CDPATH=:c; cd \"\" >\"$top/out\"; echo \"S=$? out=<$(cat \
+				 \"$top/out\")>\"; [ \"$PWD\" = \"$top\" ] && echo STAYED"
+					.into(),
+				"S=0 out=<>\nSTAYED\n".into(),
+				false,
+			),
+			(
+				"a CDPATH of one empty entry",
+				"CDPATH=:; cd \"\"; echo \"S=$?\"; [ \"$PWD\" = \"$top\" ] && echo STAYED".into(),
+				"S=0\nSTAYED\n".into(),
+				false,
+			),
+			(
+				"a CDPATH entry with an empty directory",
+				"CDPATH=$top/d; cd \"\" >\"$top/out\"; echo \"S=$?\"; [ \"$(cat \"$top/out\")\" = \
+				 \"$top/d\" ] && echo PRINTED; [ \"$PWD\" = \"$top/d\" ] && echo IN"
+					.into(),
+				"S=0\nPRINTED\nIN\n".into(),
+				false,
+			),
+			(
+				"cdable_vars with an empty value",
+				"unset OLDPWD; shopt -s cdable_vars; aa=; cd aa; echo \"S=$?\"; [ \"$PWD\" = \"$top\" \
+				 ] && echo STAYED; [ \"$OLDPWD\" = \"$top\" ] && echo OLDPWD-SET"
+					.into(),
+				"\nS=0\nSTAYED\nOLDPWD-SET\n".into(),
+				false,
+			),
+			(
+				"cdable_vars printing its value",
+				"shopt -s cdable_vars; aa=d; cd aa >\"$top/out\"; echo \"S=$?\"; cat \"$top/out\""
+					.into(),
+				"S=0\nd\n".into(),
+				false,
+			),
+			(
+				"cdable_vars with a missing directory",
+				"shopt -s cdable_vars; aa=nosuch; cd aa; echo \"S=$?\"".into(),
+				"cd: aa: No such file or directory\nS=1\n".into(),
+				false,
+			),
+			(
+				"cdable_vars naming a file",
+				"shopt -s cdable_vars; aa=file; cd aa; echo \"S=$?\"".into(),
+				"cd: aa: Not a directory\nS=1\n".into(),
+				false,
+			),
 		];
 		// SAFETY: `geteuid` has no preconditions.
 		let root = unsafe { libc::geteuid() } == 0;
