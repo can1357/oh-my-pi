@@ -62,10 +62,12 @@ function startLifetime(): { lifetime: Lifetime; end(): void } {
 
 /**
  * Ends `end` once `fn`'s result settles: when it returns, throws, or — for a
- * thenable result — when it settles. A result is assimilated as `await` would:
- * its `then` read once, and called with the settle callbacks, so a promise
- * from another realm or library, or a callable thenable, lasts as long as a
- * native one. A `then` that cannot be read or called ends it at once.
+ * thenable result — when it settles. A result is followed as `await` follows
+ * it: its `then` read once and called with a native promise's resolve and
+ * reject, so a value it resolves with that is itself pending work is adopted
+ * and followed too, and a promise from another realm or library, or a
+ * callable thenable, lasts as long as a native one. A `then` that cannot be
+ * read ends it at once; one that throws ends it as a rejection would.
  */
 function endWhenSettled<T>(fn: () => T, end: () => void): T {
 	let result: T;
@@ -75,25 +77,28 @@ function endWhenSettled<T>(fn: () => T, end: () => void): T {
 		end();
 		throw error;
 	}
-	let settling = false;
+	let then: unknown;
 	try {
 		if (result !== null && (typeof result === "object" || typeof result === "function")) {
-			const then = (result as { then?: unknown }).then;
-			if (typeof then === "function") {
-				let settled = false;
-				const settle = () => {
-					if (settled) return;
-					settled = true;
-					end();
-				};
-				then.call(result, settle, settle);
-				settling = true;
-			}
+			then = (result as { then?: unknown }).then;
 		}
 	} catch {
-		// The thenable cannot be followed: the work counts as settled.
+		// The thenable cannot be read: the work counts as settled.
 	}
-	if (!settling) end();
+	if (typeof then !== "function") {
+		end();
+		return result;
+	}
+	if (result instanceof Promise) {
+		// A native promise has already adopted whatever it was resolved with, and
+		// ends the exemption in the same turn its awaiters resume.
+		void result.then(end, end);
+		return result;
+	}
+	const followed = then;
+	new Promise<unknown>((resolve, reject) => {
+		followed.call(result, resolve, reject);
+	}).then(end, end);
 	return result;
 }
 
@@ -181,19 +186,20 @@ export function runOutsideRequestHolds<T>(holds: RequestHolds, fn: () => T): T {
  */
 export class RequestHoldsAlias implements RequestHolds {
 	#target: RequestHoldContext | undefined;
-	#changed = Promise.withResolvers<void>();
+	readonly #listeners = new Set<() => void>();
 
 	/** From now on, these holds stand for `context`'s. A send waiting on the holds this alias stood for asks again. */
 	bind(context: RequestHoldContext): void {
 		this.#target = context;
-		const changed = this.#changed;
-		this.#changed = Promise.withResolvers<void>();
-		changed.resolve();
+		const listeners = [...this.#listeners];
+		this.#listeners.clear();
+		for (const listener of listeners) listener();
 	}
 
-	/** Settles at the next {@link bind}. */
-	get changed(): Promise<void> {
-		return this.#changed.promise;
+	/** Calls `listener` at the next {@link bind}; the returned function removes it first. */
+	onRebind(listener: () => void): () => void {
+		this.#listeners.add(listener);
+		return () => this.#listeners.delete(listener);
 	}
 
 	/** The holds bound with {@link bind}, or none. */
@@ -373,7 +379,9 @@ export function openRequestHolds(own?: { holds: RequestHolds; view: RequestHoldV
 	 * The entries that apply now, each with its view, every view opened before
 	 * any is checked. Opening runs host code, which can change which holds apply
 	 * (bind an alias, say), so it asks again after opening until the answer
-	 * stops changing; each pass opens at least one view, so it ends.
+	 * stops changing. Each pass opens at least one new view, so it ends once
+	 * opening stops bringing in holds not yet opened; a host whose `open()` adds a
+	 * fresh holds every time would keep it opening, and is a host bug.
 	 */
 	const refresh = (): HoldEntry[] => {
 		for (;;) {
@@ -433,10 +441,18 @@ export function openRequestHolds(own?: { holds: RequestHolds; view: RequestHoldV
 				if (!held) continue;
 				// The wait also ends when its answer may change: a carried view's
 				// request ends, or an alias is rebound. The check then runs again.
-				const wakes: Promise<void>[] = [held, ...aliases.map(alias => alias.changed)];
+				// The rebind listeners are removed once the wait ends, so a long-lived
+				// alias keeps nothing of waits that are over.
 				const ended = entry.carried ? firstEnd(entry.scope.lifetimes) : undefined;
-				if (ended) wakes.push(ended);
-				return wakes.length === 1 ? held : Promise.race(wakes);
+				if (aliases.length === 0) return ended ? Promise.race([held, ended]) : held;
+				const wake = Promise.withResolvers<void>();
+				const removals = aliases.map(alias => alias.onRebind(wake.resolve));
+				void held.then(wake.resolve, wake.resolve);
+				if (ended) void ended.then(wake.resolve);
+				void wake.promise.then(() => {
+					for (const remove of removals) remove();
+				});
+				return wake.promise;
 			}
 			return undefined;
 		},
