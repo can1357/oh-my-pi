@@ -114,6 +114,7 @@
 - Exported `unwrapHashlineHeaderPath` from `@oh-my-pi/pi-coding-agent` to turn a `[path#TAG]` target into its plain path ([#17961](https://github.com/can1357/oh-my-pi/pull/17961) by [@materemias](https://github.com/materemias))
 - `devin-cli` login imports Devin CLI credentials, so the `devin` provider no longer requires `DEVIN_API_KEY` ([#13637](https://github.com/can1357/oh-my-pi/pull/13637) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
 - `devin-windsurf` login authenticates the `devin` provider with an existing Windsurf Enterprise account ([#13288](https://github.com/can1357/oh-my-pi/pull/13288) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
+- Fixed a key or two you type in another app on macOS being lost while omp's relay tab opens a new tab or popup; they now reach your app when omp has the Accessibility permission the `computer` tool uses, and `PI_BROWSER_RELAY_KEEP_FRONT=0` turns this off with the hand-back ([#17894](https://github.com/can1357/oh-my-pi/pull/17894) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Changed
 
@@ -205,10 +206,6 @@
 - Out-of-credit provider errors now fail immediately instead of retrying for long periods; Retry works promptly once the account is funded.
 - DeepSeek-style `*** End` and `*** End Patch` markers are no longer written into files or truncate later edits
 - Composer prediction ghost text no longer vanishes when advisor messages arrive
-
-### Fixed
-
-- Fixed a key or two you type in another app on macOS being lost while omp's relay tab opens a new tab or popup; they now reach your app when omp has the Accessibility permission the `computer` tool uses, and `PI_BROWSER_RELAY_KEEP_FRONT=0` turns this off with the hand-back
 
 ## [18.16.0] - 2026-11-02
 
