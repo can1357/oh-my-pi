@@ -87,6 +87,7 @@ function hasChallengeForm(content: string): boolean {
 			open >= 0 &&
 			lower.startsWith("<input", open) &&
 			/[\s/>]/.test(lower.charAt(open + 6)) &&
+			/\s/.test(lower.charAt(at - 1)) &&
 			lower.indexOf(">", open) > at;
 		const inComment = lower.lastIndexOf("<!--", open) > lower.lastIndexOf("-->", open);
 		const inRawText = RAW_TEXT_TAGS.some(

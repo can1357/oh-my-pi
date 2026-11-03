@@ -124,8 +124,9 @@ describe("read URL answered by a bot wall", () => {
 			note: "JavaScript challenge, HTTP 200",
 		},
 		{
-			reader: "a JavaScript gate",
-			body: "Title: Just a moment...\n\nMarkdown Content:\nJust a moment...\n\nEnable JavaScript and cookies to continue\n\nwww.reddit.com needs to review the security of your connection before proceeding.",
+			// Over the 1024 characters the generic JavaScript-gate check looks at.
+			reader: "a long JavaScript gate",
+			body: `Title: Just a moment...\n\nMarkdown Content:\nJust a moment...\n\nEnable JavaScript and cookies to continue\n\n${"www.reddit.com needs to review the security of your connection before proceeding. ".repeat(14)}`,
 			method: "blocked",
 			note: "JavaScript challenge, HTTP 200",
 		},
@@ -177,6 +178,7 @@ describe("read URL answered by a bot wall", () => {
 <textarea><input type="hidden" name="js_challenge"></textarea>
 <xmp><input type="hidden" name="js_challenge"></xmp>
 <input-example name="js_challenge"></input-example>
+<input type="hidden" data-name="js_challenge">
 </article></body></html>`;
 		const result = await read(
 			() => new Response(article, { headers: { "content-type": "text/html" } }),

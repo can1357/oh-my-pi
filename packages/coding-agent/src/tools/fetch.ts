@@ -627,9 +627,9 @@ const FETCH_PROVIDER_ORDER: readonly FetchProvider[] = [
 
 /** Reader backends that fetch the URL from their own servers, so a wall refusing this host may let them in. */
 const REMOTE_FETCH_PROVIDERS: readonly FetchProvider[] = ["parallel", "firecrawl", "jina"];
-/** Block-page wording a remote reader may be served too; a short rendering holding one is the wall. */
+/** Block or JavaScript-gate wording a remote reader may be served; a short rendering holding one is that page. */
 const BLOCK_PAGE_RE =
-	/blocked by network security|verify you are human|are you a robot|access to this page has been denied/i;
+	/blocked by network security|verify you are human|are you a robot|access to this page has been denied|enable javascript|javascript required/i;
 const BLOCK_PAGE_MAX_CHARS = 2048;
 
 /**
@@ -747,6 +747,13 @@ export async function renderHtmlToText(
 			if (!rendered) continue;
 			const content = stripDataUriImages(rendered);
 			if (content.trim().length <= MIN_RENDERED_CHARS) continue;
+			// A remote reader's copy of a block page is no rendering at all, so later readers still run.
+			if (
+				REMOTE_FETCH_PROVIDERS.includes(method) &&
+				content.length <= BLOCK_PAGE_MAX_CHARS &&
+				BLOCK_PAGE_RE.test(content)
+			)
+				continue;
 			if (!isLowQualityOutput(content, method)) {
 				return { content, ok: true, method };
 			}
@@ -1213,8 +1220,7 @@ async function renderUrl(
 			fetchOverride,
 			REMOTE_FETCH_PROVIDERS,
 		);
-		const remoteBlocked = remote.content.length <= BLOCK_PAGE_MAX_CHARS && BLOCK_PAGE_RE.test(remote.content);
-		if (remote.ok && !remoteBlocked && !isLowQualityOutput(remote.content, remote.method)) {
+		if (remote.ok && !isLowQualityOutput(remote.content, remote.method)) {
 			return {
 				url,
 				finalUrl: response.finalUrl,
