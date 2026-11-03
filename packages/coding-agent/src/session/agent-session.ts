@@ -1122,7 +1122,7 @@ export class AgentSession implements SettingsScope {
 	#assignmentHoldClaimed = false;
 	/** Settles when the current hold ends (see {@link whenAssignmentStarts}). */
 	#assignmentHoldEnded: PromiseWithResolvers<void> | undefined;
-	/** A hidden next-turn trigger the hold put off; the hold's end, or the assignment's turn, schedules it. */
+	/** A hidden next-turn trigger that found no turn could start (#hiddenNextTurnTriggerBlocked); #resumeHeldHiddenTrigger schedules it again. */
 	#hiddenNextTurnTriggerHeld = false;
 	/** Continuations scheduled under the hold: the owner's release reschedules them; the assignment supersedes them. */
 	#heldContinuations: ScheduledAgentContinueOptions[] = [];
@@ -1315,6 +1315,7 @@ export class AgentSession implements SettingsScope {
 			resolve?.();
 			// Deliveries held while the transcript was swapped go to whichever session it settled on.
 			this.yieldQueue.requestIdleFlush();
+			this.#resumeHeldHiddenTrigger();
 		},
 	};
 	#promptSequence = 0;
@@ -1387,11 +1388,8 @@ export class AgentSession implements SettingsScope {
 		if (epoch === this.#inFlightEpoch) this.#promptInFlightCount = Math.max(0, this.#promptInFlightCount - 1);
 		if (this.#promptInFlightCount !== 0) return;
 		this.yieldQueue.requestIdleFlush();
-		// A hidden next-turn trigger the assignment hold put off runs once the assignment's turn is over.
-		if (this.#hiddenNextTurnTriggerHeld && !this.#awaitingAssignment) {
-			this.#hiddenNextTurnTriggerHeld = false;
-			this.#scheduleHiddenNextTurn();
-		}
+		// A hidden next-turn trigger this prompt's turn put off runs now that it is over.
+		this.#resumeHeldHiddenTrigger();
 		this.#releasePowerAssertion();
 		this.#endComputerTurn();
 		this.#flushPendingAgentEnd();
@@ -1564,6 +1562,9 @@ export class AgentSession implements SettingsScope {
 			const settled = this.#sessionGenerationSettled;
 			if (!settled) return true;
 			await settled;
+			// Transitions that settle out of order can leave an already-settled promise current:
+			// once awaiting it changes nothing, no pending transition can restore the generation.
+			if (this.#sessionGenerationSettled === settled) return this.#sessionGeneration !== sessionGeneration;
 		}
 		return false;
 	}
@@ -8169,6 +8170,10 @@ export class AgentSession implements SettingsScope {
 	 * {@link PromptDroppedError} instead.
 	 */
 	async prompt(text: string, options?: PromptOptions): Promise<boolean> {
+		// An assignment starts its turn on a settled transcript: a session switch still in progress
+		// may roll back and restore deliveries held for it, which its turn then carries. The hold
+		// keeps every other delivery from starting a turn meanwhile.
+		if (options?.assignment) await this.waitForSessionTransition();
 		return this.#admitSubmission(() => this.#prompt(text, options));
 	}
 
@@ -8859,8 +8864,12 @@ export class AgentSession implements SettingsScope {
 			prependMessages?: AgentMessage[];
 			skipPostPromptRecoveryWait?: boolean;
 			acceptTerminalEmptyStop?: boolean;
-			/** Called once the turn is handed to the agent; a prompt that returns or throws before it sent nothing. */
-			onHandedToAgent?: () => void;
+			/**
+			 * Queued hidden next-turn messages this prompt carries as its message and `prependMessages`
+			 * (the hidden drain). They leave the queue when the run is handed to the agent; if any
+			 * has left it by then, the prompt is dropped.
+			 */
+			carriedNextTurnMessages?: CustomMessage[];
 		},
 	): Promise<boolean> {
 		// Returns false when the prompt was dropped before reaching the agent —
@@ -8876,11 +8885,9 @@ export class AgentSession implements SettingsScope {
 		this.#promptSequence++;
 		const setupAbort = new AbortController();
 		this.#promptSetupAbortController = setupAbort;
-		// Hidden next-turn messages this prompt took; a prompt that never reaches the agent puts them back,
-		// unless the transcript they were sent to was replaced meanwhile (/new, a switch, a reset).
-		let takenNextTurnMessages: CustomMessage[] = [];
-		let takenGeneration = this.#sessionGeneration;
-		let handedToAgent = false;
+		// Queued hidden next-turn messages this prompt carries besides `carriedNextTurnMessages`. They stay
+		// queued until the run is handed to the agent, so a prompt dropped before then leaves them in place.
+		let nextTurnMessages: CustomMessage[] = [];
 		try {
 			options?.onPromptAdmitted?.();
 			await this.#recovery.maybeRestoreRetryFallbackPrimary();
@@ -8977,11 +8984,10 @@ export class AgentSession implements SettingsScope {
 			// it subsumes, avoiding a contradictory materialized notice.
 			const xdevMountNoticeIndex = messages.length;
 			messages.push(message);
-			// Inject any pending "nextTurn" messages as context alongside the user message
-			takenNextTurnMessages = this.#pendingNextTurnMessages;
-			takenGeneration = this.#sessionGeneration;
-			messages.push(...takenNextTurnMessages);
-			this.#pendingNextTurnMessages = [];
+			// Pending "nextTurn" messages ride along as context alongside the user message.
+			const carried = new Set<AgentMessage>(options?.carriedNextTurnMessages);
+			nextTurnMessages = this.#pendingNextTurnMessages.filter(queued => !carried.has(queued));
+			messages.push(...nextTurnMessages);
 
 			// Auto-read @filepath mentions
 			const fileMentions = extractFileMentions(expandedText);
@@ -9093,6 +9099,20 @@ export class AgentSession implements SettingsScope {
 				);
 			}
 
+			// The hidden next-turn messages leave the queue only now, as the run is handed to the agent.
+			// One that left it meanwhile (a session change cleared it, another run sent it) is not sent;
+			// a drain whose own messages left has nothing to send. Nothing below awaits before the run.
+			const stillQueued = new Set<AgentMessage>(this.#pendingNextTurnMessages);
+			const carriedNextTurnMessages = options?.carriedNextTurnMessages ?? [];
+			if (carriedNextTurnMessages.some(carriedMessage => !stillQueued.has(carriedMessage))) return false;
+			for (const nextTurnMessage of nextTurnMessages) {
+				if (stillQueued.has(nextTurnMessage)) continue;
+				const index = messages.indexOf(nextTurnMessage);
+				if (index >= 0) messages.splice(index, 1);
+			}
+			const sent = new Set<AgentMessage>([...carriedNextTurnMessages, ...nextTurnMessages]);
+			this.#pendingNextTurnMessages = this.#pendingNextTurnMessages.filter(queued => !sent.has(queued));
+
 			const agentPromptOptions = options?.toolChoice ? { toolChoice: options.toolChoice } : undefined;
 			const nonMessageTokens = computeNonMessageTokens(this, this.agent.tokenizer, this.settings.revision);
 			const contextWindow = this.model?.contextWindow ?? 0;
@@ -9123,8 +9143,6 @@ export class AgentSession implements SettingsScope {
 				// between releasing the assignment hold and its turn: later deliveries queue
 				// behind the run as behind any other.
 				if (options?.assignment && this.#awaitingAssignment) this.#endAssignmentHold("prompt");
-				handedToAgent = true;
-				options?.onHandedToAgent?.();
 				const run = this.#recovery.promptAgentWithIdleRetry(messages, agentPromptOptions, () => {
 					// `agent.prompt` claims streaming synchronously before its
 					// first await: this callback fires exactly when THIS
@@ -9142,7 +9160,6 @@ export class AgentSession implements SettingsScope {
 			}
 			return true;
 		} finally {
-			if (!handedToAgent) this.#putBackNextTurnMessages(takenNextTurnMessages, takenGeneration);
 			// The per-turn before_agent_start override lives only for this turn.
 			this.#tools.clearTurnSystemPromptOverride();
 			this.#usagePreflightReadyForNextModelCall = false;
@@ -9951,9 +9968,10 @@ export class AgentSession implements SettingsScope {
 					this.#scheduledHiddenNextTurnGeneration = undefined;
 				}
 				if (this.#pendingNextTurnMessages.length === 0) return;
-				// Before the assignment starts, these ride its turn (#promptWithMessage); the
-				// hold's end schedules the trigger again for any it did not take.
-				if (this.#awaitingAssignment) {
+				// No turn can start now: an assignment still to be prompted takes these with its
+				// turn, a prompt in flight may carry them, and a session transition may roll back.
+				// Whatever ends the block resumes the trigger for any left (#resumeHeldHiddenTrigger).
+				if (this.#hiddenNextTurnTriggerBlocked()) {
 					this.#hiddenNextTurnTriggerHeld = true;
 					return;
 				}
@@ -9974,52 +9992,28 @@ export class AgentSession implements SettingsScope {
 		);
 	}
 
-	async #promptQueuedHiddenNextTurnMessages(): Promise<void> {
-		if (this.#pendingNextTurnMessages.length === 0) {
-			return;
-		}
-
-		const queuedMessages = [...this.#pendingNextTurnMessages];
-		this.#pendingNextTurnMessages = [];
-		const message = queuedMessages[queuedMessages.length - 1];
-		if (!message) {
-			return;
-		}
-
-		const prependMessages = queuedMessages.slice(0, -1);
-		const textContent = this.#getCustomMessageTextContent(message);
-		const sessionGeneration = this.#sessionGeneration;
-		let handedToAgent = false;
-		try {
-			await this.#promptWithMessage(message, textContent, {
-				prependMessages,
-				skipPostPromptRecoveryWait: true,
-				onHandedToAgent: () => {
-					handedToAgent = true;
-				},
-			});
-		} finally {
-			// A prompt dropped before dispatch (an abort, a preflight refusal) or one that threw
-			// before it sent none of these: keep them for the next turn of the same transcript.
-			if (!handedToAgent) this.#putBackNextTurnMessages(queuedMessages, sessionGeneration);
-		}
+	/** Whether a hidden next-turn trigger must wait: see the trigger in {@link #scheduleHiddenNextTurn}. */
+	#hiddenNextTurnTriggerBlocked(): boolean {
+		return this.#awaitingAssignment || this.#promptInFlightCount > 0 || this.isSessionTransitioning;
 	}
 
-	/**
-	 * Puts hidden next-turn messages a prompt took but never sent back at the head of the queue,
-	 * while the transcript they were sent to is still live. A transition still in progress decides
-	 * it: a commit drops them with the transcript it replaced, and a rollback (a refused switch)
-	 * restores that transcript, and these with it.
-	 */
-	#putBackNextTurnMessages(messages: CustomMessage[], sessionGeneration: number): void {
-		if (messages.length === 0) return;
-		if (this.#sessionGeneration === sessionGeneration) {
-			this.#pendingNextTurnMessages = [...messages, ...this.#pendingNextTurnMessages];
-			return;
-		}
-		void this.#sessionGenerationChanged(sessionGeneration).then(changed => {
-			if (changed || this.#isDisposed) return;
-			this.#pendingNextTurnMessages = [...messages, ...this.#pendingNextTurnMessages];
+	/** Schedules the hidden next-turn trigger a blocked turn put off, once nothing blocks it. */
+	#resumeHeldHiddenTrigger(): void {
+		if (!this.#hiddenNextTurnTriggerHeld || this.#isDisposed || this.#hiddenNextTurnTriggerBlocked()) return;
+		this.#hiddenNextTurnTriggerHeld = false;
+		this.#scheduleHiddenNextTurn();
+	}
+
+	async #promptQueuedHiddenNextTurnMessages(): Promise<void> {
+		// The messages stay queued until the run is handed to the agent (#promptWithMessage), so a
+		// prompt dropped before then (an abort, a preflight refusal) leaves them for the next turn.
+		const queuedMessages = [...this.#pendingNextTurnMessages];
+		const message = queuedMessages.at(-1);
+		if (!message) return;
+		await this.#promptWithMessage(message, this.#getCustomMessageTextContent(message), {
+			prependMessages: queuedMessages.slice(0, -1),
+			skipPostPromptRecoveryWait: true,
+			carriedNextTurnMessages: queuedMessages,
 		});
 	}
 
@@ -12874,10 +12868,7 @@ export class AgentSession implements SettingsScope {
 			return;
 		}
 		for (const continuation of continuations) this.#scheduleAgentContinue(continuation);
-		if (this.#hiddenNextTurnTriggerHeld) {
-			this.#hiddenNextTurnTriggerHeld = false;
-			this.#scheduleHiddenNextTurn();
-		}
+		this.#resumeHeldHiddenTrigger();
 		this.#scheduleQueuedMessageDrain();
 		this.#resumeStrandedIrcAsides();
 		this.yieldQueue.requestIdleFlush();

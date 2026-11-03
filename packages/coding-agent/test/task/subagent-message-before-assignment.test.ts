@@ -37,6 +37,8 @@ const SECOND_FOLLOW_UP = "Then gate src/flag.ts the same way.";
 const TASKS = [ASSIGNMENT, FOLLOW_UP, SECOND_FOLLOW_UP];
 const MOCK_API_SOURCE = "test/subagent-message-before-assignment";
 const BACKGROUND_KIND = "test-background-delivery";
+/** A 1x1 PNG, so a message carries an image whose normalization a test can hold. */
+const PIXEL_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
 const AGENT: AgentDefinition = { name: "task", description: "test", systemPrompt: "test", source: "bundled" };
 const ENV_KEYS = ["HOME", "PI_CODING_AGENT_DIR", "OMP_PROFILE", "PI_PROFILE"] as const;
 let savedEnv: Record<string, string | undefined> = {};
@@ -647,50 +649,27 @@ describe("a message delivered before the task's turn starts", () => {
 
 	it("keeps a held hidden message when a session switch refused during the dropped prompt rolls back", async () => {
 		const harness = await createHarness();
-		const pause = { armed: false, entered: Promise.withResolvers<void>(), release: Promise.withResolvers<void>() };
-		const pauser: ExtensionFactory = pi => {
-			pi.on("before_agent_start", async () => {
-				if (!pause.armed) return;
-				pause.armed = false;
-				pause.entered.resolve();
-				await pause.release.promise;
-			});
-		};
-		const cwdAsked = Promise.withResolvers<void>();
-		const refuse = Promise.withResolvers<void>();
+		const pause = pauseBeforeAgentStart();
 		let endHold: (() => void) | undefined;
 		let prompting: Promise<unknown> | undefined;
-		let switching: Promise<boolean> | undefined;
+		let switching: RefusedSwitch | undefined;
 		try {
-			const session = await spawnIdle(harness, [pauser]);
+			const session = await spawnIdle(harness, [pause.extension]);
 			harness.beginPhase(FOLLOW_UP);
 			endHold = session.holdForAssignment();
 			await session.sendCustomMessage(
 				{ customType: "test-plugin", content: BODY, display: false },
 				{ deliverAs: "nextTurn" },
 			);
-			pause.armed = true;
+			pause.arm();
 			prompting = session.prompt("a task the switch drops", { assignment: true });
-			await pause.entered.promise;
+			await pause.entered;
 			// A switch to another directory, refused by its owner only after the prompt finished.
-			const targetCwd = path.join(root, "other-cwd");
-			await fs.mkdir(targetCwd, { recursive: true });
-			const target = SessionManager.create(targetCwd, path.join(root, "other-sessions"));
-			target.appendMessage({ role: "user", content: "another session", timestamp: Date.now() });
-			await target.ensureOnDisk();
-			switching = session.switchSession(target.getSessionFile()!, {
-				onCwdChange: async () => {
-					cwdAsked.resolve();
-					await refuse.promise;
-					return false;
-				},
-			});
-			await cwdAsked.promise;
-			pause.release.resolve();
+			switching = await startRefusedSwitch(session, "other");
+			pause.release();
 			await prompting;
 			expect(harness.requests).toEqual([]);
-			refuse.resolve();
-			expect(await switching).toBe(false);
+			expect(await switching.refuse()).toBe(false);
 			endHold();
 			endHold = undefined;
 
@@ -701,10 +680,132 @@ describe("a message delivered before the task's turn starts", () => {
 			expect(harness.requests[0]?.bodyAt).toBeGreaterThan(harness.requests[0]?.taskAt ?? Infinity);
 			expect(session.messages.filter(message => messageText(message).includes(BODY))).toHaveLength(1);
 		} finally {
-			pause.release.resolve();
-			refuse.resolve();
+			pause.release();
 			endHold?.();
-			await Promise.allSettled([prompting, switching]);
+			await Promise.allSettled([prompting, switching?.refuse()]);
+			harness.authStorage.close();
+		}
+	}, 30_000);
+
+	it("runs a follow-up whose prompt a pending session switch dropped once the switch is refused, with its held message", async () => {
+		const harness = await createHarness();
+		const pause = pauseBeforeAgentStart();
+		let followUp: ReturnType<typeof startHeldFollowUp> | undefined;
+		let switching: RefusedSwitch | undefined;
+		try {
+			const session = await spawnIdle(harness, [pause.extension]);
+			followUp = startHeldFollowUp(harness, session, FOLLOW_UP);
+			await followUp.installEntered;
+			await session.sendCustomMessage(
+				{ customType: "test-plugin", content: BODY, display: false },
+				{ deliverAs: "nextTurn" },
+			);
+			pause.arm();
+			followUp.release();
+			await pause.entered;
+			// The switch's abort drops the follow-up's prompt; the executor sends it again while
+			// the switch still waits for its owner. That retry must wait for the switch to settle.
+			switching = await startRefusedSwitch(session, "other");
+			pause.release();
+			await Bun.sleep(1_000);
+			expect(harness.requests).toEqual([]);
+			expect(await switching.refuse()).toBe(false);
+
+			const result = await followUp.running;
+			expect(result.error).toBeUndefined();
+			expect(result.exitCode).toBe(0);
+			await expectDelivered(harness, session, "task");
+		} finally {
+			pause.release();
+			followUp?.release();
+			await Promise.allSettled([followUp?.running, switching?.refuse()]);
+			harness.authStorage.close();
+		}
+	}, 30_000);
+
+	it("delivers a held hidden trigger its owner released during a session switch once the switch is refused", async () => {
+		const harness = await createHarness();
+		const pause = pauseBeforeAgentStart();
+		let endHold: (() => void) | undefined;
+		let prompting: Promise<unknown> | undefined;
+		let switching: RefusedSwitch | undefined;
+		try {
+			const session = await spawnIdle(harness, [pause.extension]);
+			harness.beginPhase(FOLLOW_UP);
+			endHold = session.holdForAssignment();
+			await session.sendCustomMessage(
+				{ customType: "test-plugin", content: BODY, display: false },
+				{ deliverAs: "nextTurn", triggerTurn: true },
+			);
+			await session.waitForIdle();
+			pause.arm();
+			prompting = session.prompt("a task the switch drops", { assignment: true });
+			await pause.entered;
+			switching = await startRefusedSwitch(session, "other");
+			pause.release();
+			await prompting;
+			// The owner gives up on its task while the switch is still pending.
+			endHold();
+			endHold = undefined;
+			await session.waitForIdle();
+			expect(harness.requests).toEqual([]);
+			expect(await switching.refuse()).toBe(false);
+			// The trigger runs its own turn once the switch settles; a lost trigger never sends the message.
+			await Promise.race([harness.bodySeen(), Bun.sleep(5_000)]);
+			await session.waitForIdle();
+			expect(harness.requests.filter(request => request.bodyAt >= 0)).toHaveLength(1);
+			expect(session.messages.filter(message => messageText(message).includes(BODY))).toHaveLength(1);
+
+			// Delivered into the transcript, so it survives parking.
+			await AgentLifecycleManager.global().park(AGENT_ID);
+			const revived = await AgentLifecycleManager.global().ensureLive(AGENT_ID);
+			expect(revived.messages.filter(message => messageText(message).includes(BODY))).toHaveLength(1);
+		} finally {
+			pause.release();
+			endHold?.();
+			await Promise.allSettled([prompting, switching?.refuse()]);
+			harness.authStorage.close();
+		}
+	}, 30_000);
+
+	it("settles a delivery that waits on the session generation when overlapping switches roll back out of order", async () => {
+		const harness = await createHarness();
+		let endHold: (() => void) | undefined;
+		const switches: RefusedSwitch[] = [];
+		const normalized = Promise.withResolvers<void>();
+		try {
+			const session = await spawnIdle(harness);
+			// Under the hold, an aside joins the coming turn after checking that its transcript is still live.
+			endHold = session.holdForAssignment();
+			switches.push(await startRefusedSwitch(session, "first"));
+			switches.push(await startRefusedSwitch(session, "second"));
+			const normalizing = Promise.withResolvers<void>();
+			vi.spyOn(imageLoading, "normalizeModelContextImages").mockImplementationOnce(async images => {
+				normalizing.resolve();
+				await normalized.promise;
+				return images;
+			});
+			const aside = session.sendCustomMessage(
+				{
+					customType: "test-plugin",
+					content: [
+						{ type: "text", text: BODY },
+						{ type: "image", data: PIXEL_PNG, mimeType: "image/png" },
+					],
+					display: false,
+				},
+				{ deliverAs: "aside" },
+			);
+			await normalizing.promise;
+			// The first switch settles first: the second then restores its already-settled generation promise.
+			expect(await switches[0]!.refuse()).toBe(false);
+			expect(await switches[1]!.refuse()).toBe(false);
+			normalized.resolve();
+			await aside;
+		} finally {
+			normalized.resolve();
+			endHold?.();
+			await Promise.allSettled(switches.map(pending => pending.refuse()));
 			harness.authStorage.close();
 		}
 	}, 30_000);
@@ -742,4 +843,57 @@ function startHeldFollowUp(
 	harness.beginPhase(message);
 	const running = runSubagentFollowUpTurn({ id: AGENT_ID, agent: AGENT, message, artifactsDir: harness.artifactsDir });
 	return { running, installEntered: entered.promise, release: () => released.resolve() };
+}
+
+/** Pauses the next armed turn in `before_agent_start`, after its prompt has taken its context. */
+function pauseBeforeAgentStart() {
+	let armed = false;
+	const entered = Promise.withResolvers<void>();
+	const released = Promise.withResolvers<void>();
+	const extension: ExtensionFactory = pi => {
+		pi.on("before_agent_start", async () => {
+			if (!armed) return;
+			armed = false;
+			entered.resolve();
+			await released.promise;
+		});
+	};
+	return {
+		extension,
+		entered: entered.promise,
+		arm: () => {
+			armed = true;
+		},
+		release: () => released.resolve(),
+	};
+}
+
+interface RefusedSwitch {
+	/** Lets the owner refuse the switch; resolves with the switch's outcome. */
+	refuse(): Promise<boolean>;
+}
+
+/** Starts a switch to a session in another directory and holds it until its owner refuses the move. */
+async function startRefusedSwitch(session: AgentSession, name: string): Promise<RefusedSwitch> {
+	const targetCwd = path.join(root, `${name}-cwd`);
+	await fs.mkdir(targetCwd, { recursive: true });
+	const target = SessionManager.create(targetCwd, path.join(root, `${name}-sessions`));
+	target.appendMessage({ role: "user", content: `${name} session`, timestamp: Date.now() });
+	await target.ensureOnDisk();
+	const asked = Promise.withResolvers<void>();
+	const refused = Promise.withResolvers<void>();
+	const switching = session.switchSession(target.getSessionFile()!, {
+		onCwdChange: async () => {
+			asked.resolve();
+			await refused.promise;
+			return false;
+		},
+	});
+	await asked.promise;
+	return {
+		refuse: () => {
+			refused.resolve();
+			return switching;
+		},
+	};
 }
