@@ -720,7 +720,7 @@ describe("work a session left running, or started before it existed, waits for i
 				let calls = 0;
 				options.extensionRoots = () => {
 					if (calls++ === 0) schedule();
-					return { explicit: [], mode: "explicit-only" };
+					return { explicit: [], mode: "explicit-only", configured: [], configuredLevel: "user" };
 				};
 			}
 			const { session } = await createAgentSession(options);
