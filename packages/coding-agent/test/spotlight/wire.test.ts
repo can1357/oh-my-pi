@@ -785,9 +785,8 @@ describe("spotlight shaping of any tool", () => {
 		expect(text.length).toBeLessThan(OUTPUT.length / 4);
 		expect(sources).toContain(callSummary("grep", ARGS));
 		// Every hidden run reads back from the saved copy the last line names.
-		const footer = /\[cut: … \[A-B\] are lines A-B of (artifact:\/\/(\d+)) \(read artifact:\/\/\d+:A-B\)\]$/.exec(
-			text,
-		);
+		const footer =
+			/\[cut: A-B in a … marker are lines A-B of (artifact:\/\/(\d+)) \(read artifact:\/\/\d+:A-B\)\]$/.exec(text);
 		if (!footer) throw new Error("a cut names where its hidden lines are");
 		const saved = run.manager.getArtifactContent(footer[2]) ?? "";
 		expect(saved).toBe(OUTPUT);
@@ -904,7 +903,7 @@ describe("spotlight shaping of any tool", () => {
 				"board: 10 open, 2 done",
 				"… [10 lines as shown before: 2-11]",
 				"- [done] add the edit gate setting",
-				"[cut: … [A-B] are lines A-B of artifact://0 (read artifact://0:A-B)]",
+				"[cut: A-B in a … marker are lines A-B of artifact://0 (read artifact://0:A-B)]",
 			].join("\n"),
 		);
 		const entry = entries(run.manager, SPOTLIGHT_ENTRY.shape)[1];

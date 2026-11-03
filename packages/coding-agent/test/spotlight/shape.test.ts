@@ -54,7 +54,7 @@ function migrations(n: number): string[] {
 
 /** A valve cut's gaps `… [A-B]` and the saved copy its footer says they number lines of. */
 function cutGaps(text: string): { url: string; gaps: { from: number; to: number }[] } {
-	const url = /^\[cut: … \[A-B\] are lines A-B of (\S+) \(read /m.exec(text)?.[1];
+	const url = /^\[cut: A-B in a … marker are lines A-B of (\S+) \(read /m.exec(text)?.[1];
 	if (!url) throw new Error("a cut names where its hidden lines are");
 	const gaps = [...text.matchAll(/^\s*… \[(\d+)-(\d+)\]$/gm)].map(m => ({ from: Number(m[1]), to: Number(m[2]) }));
 	return { url, gaps };
@@ -164,7 +164,7 @@ describe("spotlight shaping", () => {
 		expect(out.steps).toEqual(["outline", "window"]);
 		expect(store.saved.size).toBe(0);
 		const body = out.text.split("\n");
-		expect(body.at(-1)).toBe("[cut: … [A-B] are lines A-B of src/big.ts (read src/big.ts:A-B)]");
+		expect(body.at(-1)).toBe("[cut: A-B in a … marker are lines A-B of src/big.ts (read src/big.ts:A-B)]");
 		// Shown lines, folds and cuts together cover the file's lines 1…n exactly once, in order.
 		let next = 1;
 		let cuts = 0;
@@ -406,18 +406,26 @@ describe("spotlight shaping", () => {
 		const first = migrations(5);
 		await shapeResult(bash("bin/migrate --dry-run", first.join("\n")), context(), scorer(null), state, sink());
 		const input = bash("bin/migrate", ["Applying migrations to staging", ...first, "Done: 5 applied"].join("\n"));
-		const collapsed = ["Applying migrations to staging", "… [5 lines as shown before]", "Done: 5 applied"].join("\n");
+		const collapsed = [
+			"Applying migrations to staging",
+			"… [5 lines as shown before: 2-6]",
+			"Done: 5 applied",
+			"[cut: A-B in a … marker are lines A-B of artifact://1 (read artifact://1:A-B)]",
+		].join("\n");
 		// The collapse would save tokens, just not enough.
 		expect(countTokens(collapsed)).toBeLessThan(countTokens(input.text));
 		expect(countTokens(input.text) - countTokens(collapsed)).toBeLessThan(MIN_SAVED_TOKENS);
 
-		const out = await shapeResult(input, context(), scorer(null), state, sink());
+		const store = sink();
+		const out = await shapeResult(input, context(), scorer(null), state, store);
 
 		expect(out.text).toBe(input.text);
 		expect(out.steps).toEqual(["none"]);
 		expect(out.stats.reverted).toBe(1);
 		expect(out.outTokens).toBe(out.inTokens);
 		expect(out.lines).toBeUndefined();
+		// Nothing names a saved copy in the text the agent gets, so none is written.
+		expect(store.saved.size).toBe(0);
 	});
 
 	it("shapes a read with no file window (a fetched page) as text, but leaves page-backs and skills whole", async () => {
@@ -461,7 +469,7 @@ describe("spotlight shaping", () => {
 
 	it("collapses a run of lines the agent has already seen into one marker", async () => {
 		const state = newShapeState();
-		const first = migrations(12);
+		const first = migrations(14);
 		await shapeResult(
 			bash("bin/migrate --dry-run", first.join("\n")),
 			context(),
@@ -469,7 +477,7 @@ describe("spotlight shaping", () => {
 			state,
 			sink(),
 		);
-		const again = ["Applying migrations to staging", ...first, "Done: 12 applied, 0 failed"];
+		const again = ["Applying migrations to staging", ...first, "Done: 14 applied, 0 failed"];
 		const out = await shapeResult(
 			bash("bin/migrate", again.join("\n")),
 			context(),
@@ -481,15 +489,15 @@ describe("spotlight shaping", () => {
 		expect(out.text).toBe(
 			[
 				"Applying migrations to staging",
-				"… [12 lines as shown before: 2-13]",
-				"Done: 12 applied, 0 failed",
-				"[cut: … [A-B] are lines A-B of artifact://1 (read artifact://1:A-B)]",
+				"… [14 lines as shown before: 2-15]",
+				"Done: 14 applied, 0 failed",
+				"[cut: A-B in a … marker are lines A-B of artifact://1 (read artifact://1:A-B)]",
 			].join("\n"),
 		);
-		// The twelve lines are hidden as seen before, under the marker; nothing decided on the two around them.
+		// The fourteen lines are hidden as seen before, under the marker; nothing decided on the two around them.
 		const trace = traceOf(out, again);
-		expect(trace.why.join("")).toBe(`-${"r".repeat(12)}-`);
-		expect(trace.map).toEqual([1, [2, 13], 14, null]);
+		expect(trace.why.join("")).toBe(`-${"r".repeat(14)}-`);
+		expect(trace.map).toEqual([1, [2, 15], 16, null]);
 		expect(trace.rank).toBeUndefined();
 	});
 

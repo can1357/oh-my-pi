@@ -243,13 +243,20 @@ async function base(run: Run, subject: Subject): Promise<Base> {
 /**
  * Where the hidden runs of a view point: the file, for a read whose lines map to file lines (raw or outlined: a run
  * spans from its first hidden line's file line to its last's, folded bodies included), else a saved copy (command
- * output, compacted data).
+ * output, compacted data). The copy is written only once the shaped text clears the savings gate ({@link shapeResult});
+ * until then {@link PENDING_COPY} stands for its URL.
  */
-async function cutTarget(run: Run, view: View): Promise<{ url: string; spans: Span[] | null }> {
+function cutTarget(run: Run, view: View): { url: string; spans: Span[] | null } {
 	const read = run.input.read;
 	if (read && view.spans) return { url: read.path, spans: view.spans };
-	return { url: await run.sink.save(view.lines.join("\n"), run.input.tool), spans: null };
+	run.copy = view.lines.join("\n");
+	return { url: PENDING_COPY, spans: null };
 }
+
+/** Stands in the shaped text for the saved copy's URL until the copy is written; no tool output holds it. */
+const PENDING_COPY = "\u0000spotlight-copy\u0000";
+/** What the savings gate counts {@link PENDING_COPY} as: a session artifact's URL, the size the footer ships with. */
+const COUNTED_COPY = "artifact://100";
 
 /**
  * Lines of no file (notes of earlier shaping) can't be named by file lines, so a file-addressed cut keeps them, as
@@ -275,7 +282,7 @@ function runLines(spans: readonly Span[] | null, i: number, j: number): [number,
 const seenMarker = (count: number, [a, z]: [number, number]) => `… [${count} lines as shown before: ${a}-${z}]`;
 
 /** The footer of a result with hidden lines: where its numbered gaps are. */
-const cutFooter = (url: string) => `[cut: … [A-B] are lines A-B of ${url} (read ${url}:A-B)]`;
+const cutFooter = (url: string) => `[cut: A-B in a … marker are lines A-B of ${url} (read ${url}:A-B)]`;
 
 /**
  * Lines no seen-collapse hides: a line holding a word of the call's intent that few lines hold (the agent asked for
@@ -338,7 +345,7 @@ async function collapseSeen(run: Run, view: View, steps: string[]): Promise<View
 		viewOrigin(run, view) ?? alignedTo(run, view.lines),
 		mask.map(m => (m ? "r" : undefined)),
 	);
-	const target = await cutTarget(run, view);
+	const target = cutTarget(run, view);
 	const lines: string[] = [];
 	const spans: Span[] = [];
 	let omitted = 0;
@@ -453,7 +460,7 @@ async function shapeSubject(run: Run, subject: Subject): Promise<{ view: View; s
 
 	if (cut && lines[0]?.startsWith("[display only:")) lines[0] = lines[0].replace(VERBATIM, "]");
 	// Every line hidden past here gets an address, seen ones included: a marker the agent cannot follow costs a rerun.
-	const target = await cutTarget(run, { lines, spans });
+	const target = cutTarget(run, { lines, spans });
 	keepUnaddressed(why, target.spans, witnessed);
 	noteWhy(run, origin, why);
 	if (frame) {
@@ -593,7 +600,7 @@ export async function shapeResult(
 		steps = shaped.steps;
 		if (steps.length) text = subject.before + shaped.view.lines.join("\n") + subject.after;
 	} else if (input.read) bump(run, "unlocated");
-	let outTokens = text === input.text ? inTokens : countTokens(text);
+	let outTokens = text === input.text ? inTokens : countTokens(text.replaceAll(PENDING_COPY, COUNTED_COPY));
 	let capped = false;
 	if (inTokens - outTokens >= MIN_SAVED_TOKENS) {
 		capped =
@@ -610,6 +617,11 @@ export async function shapeResult(
 		text = input.text;
 		steps = [];
 		outTokens = inTokens;
+	}
+	// A kept text names its saved copy: written now, so a reverted or capped result leaves no artifact behind.
+	if (run.copy !== undefined && text !== input.text && !capped) {
+		text = text.replaceAll(PENDING_COPY, await sink.save(run.copy, input.tool));
+		outTokens = countTokens(text);
 	}
 	const applied = text !== input.text && !holdout && !capped;
 	noteShown(state, applied ? text : (plain?.text ?? input.text), input.toolCallId);

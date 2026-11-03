@@ -29,6 +29,8 @@ export interface Run {
 	hid: Set<string>;
 	/** Code spans this call folded, per absolute path; they join {@link ShapeState.folded} only if the text is kept. */
 	folds: Map<string, [number, number][]>;
+	/** A cut's saved copy, as its footer names it; written only if the shaped text is kept. */
+	copy?: string;
 	/** {@link base} indexed by line text, built on first use. */
 	baseIndex?: Map<string, number[]>;
 }
