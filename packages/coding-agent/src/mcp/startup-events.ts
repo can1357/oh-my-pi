@@ -92,6 +92,23 @@ export function formatMCPConnectionStatusMessage(snapshot: McpConnectionStatusSn
 	return "";
 }
 
+/**
+ * What the model reads when it asks for an MCP tool that is not mounted while
+ * some configured servers are not connected: which servers, the error that
+ * ended each one's last connect, and how a person brings them back. Without
+ * it a server that failed at startup (an OAuth server with no stored login
+ * answers HTTP 401) leaves no trace in the session: its tools are simply
+ * absent, and "No such tool" reads like a typo.
+ */
+export function formatMCPUnavailableServersNote(failures: readonly McpConnectionFailure[]): string {
+	const list = failures.map(formatFailedServer).join("; ");
+	return [
+		`MCP ${formatServerCount(failures.length)} configured but not connected, so ${failures.length === 1 ? "its" : "their"} tools are not mounted: ${list}.`,
+		"A person can sign an OAuth server in with `/mcp reauth <server>` or retry any server with `/mcp reconnect <server>`.",
+		"When a login for one of them was stored after it failed (for example by `/mcp reauth` in another session), omp reconnects it now; its tools appear once it connects.",
+	].join(" ");
+}
+
 const McpConnectionStatusEventShape = type({ type: "'connecting'", serverNames: "string[]" })
 	.or({ type: "'reconnecting' | 'connected'", serverName: "string" })
 	.or({ type: "'failed'", serverName: "string", error: "string", "sourcePath?": "string | undefined" });

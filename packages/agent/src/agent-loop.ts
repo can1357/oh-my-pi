@@ -2966,11 +2966,14 @@ function formatToolNotFoundMessage(
 	name: string,
 	tools: ReadonlyArray<Pick<AgentTool, "name" | "customWireName">> | undefined,
 	fallbackNames?: Iterable<string>,
+	explainMissingTool?: (name: string) => string | undefined,
 ): string {
 	const suggestions = suggestToolNames(name, tools, fallbackNames);
-	if (suggestions.length === 0) return `Tool ${name} not found`;
-	if (suggestions.length === 1) return `Tool ${name} not found. Did you mean ${suggestions[0]}?`;
-	return `Tool ${name} not found. Closest available: ${suggestions.slice(0, MAX_TOOL_NAME_SUGGESTIONS).join(", ")}`;
+	const why = explainMissingTool?.(name);
+	const tail = why ? `\n${why}` : "";
+	if (suggestions.length === 0) return `Tool ${name} not found${tail}`;
+	if (suggestions.length === 1) return `Tool ${name} not found. Did you mean ${suggestions[0]}?${tail}`;
+	return `Tool ${name} not found. Closest available: ${suggestions.slice(0, MAX_TOOL_NAME_SUGGESTIONS).join(", ")}${tail}`;
 }
 
 /**
@@ -3084,7 +3087,7 @@ async function prepareToolCallDispatch(
 	config: AgentLoopConfig,
 	signal: AbortSignal | undefined,
 ): Promise<Map<string, PreparedToolCall>> {
-	const { resolveFallbackTool, suggestFallbackToolNames, intentTracing, beforeToolCall } = config;
+	const { resolveFallbackTool, suggestFallbackToolNames, explainMissingTool, intentTracing, beforeToolCall } = config;
 	// Unique, non-empty ids first: everything below and every consumer of this
 	// message keys per-call state on `toolCall.id`.
 	ensureUniqueToolCallIds(assistantMessage, toolCallIdsDispatchedUnder(context));
@@ -3126,7 +3129,14 @@ async function prepareToolCallDispatch(
 		const validate = (args: Record<string, unknown>): Record<string, unknown> | undefined => {
 			try {
 				if (!tool) {
-					throw new Error(formatToolNotFoundMessage(toolCall.name, context.tools, suggestFallbackToolNames?.()));
+					throw new Error(
+						formatToolNotFoundMessage(
+							toolCall.name,
+							context.tools,
+							suggestFallbackToolNames?.(),
+							explainMissingTool,
+						),
+					);
 				}
 				return validateAgentToolArguments(tool, { ...toolCall, arguments: args });
 			} catch (validationError) {
@@ -3277,6 +3287,7 @@ async function executeToolCalls(
 		transformToolCallArguments,
 		resolveFallbackTool,
 		suggestFallbackToolNames,
+		explainMissingTool,
 		afterToolCall,
 	} = config;
 	type ToolCallContent = Extract<AssistantMessage["content"][number], { type: "toolCall" }>;
@@ -3598,7 +3609,9 @@ async function executeToolCalls(
 		await runInActiveSpan(toolSpan, async () => {
 			try {
 				if (!tool) {
-					throw new Error(formatToolNotFoundMessage(toolCall.name, tools, suggestFallbackToolNames?.()));
+					throw new Error(
+						formatToolNotFoundMessage(toolCall.name, tools, suggestFallbackToolNames?.(), explainMissingTool),
+					);
 				}
 				if (abortBeforeToolExecution()) return;
 

@@ -40,10 +40,10 @@ import {
 	refreshStoredManagedMcpOAuthCredential,
 } from "./oauth-credentials";
 import type { MCPStoredOAuthCredential } from "./oauth-flow";
-import type { McpConnectionStatusEvent } from "./startup-events";
+import { formatMCPUnavailableServersNote, type McpConnectionStatusEvent } from "./startup-events";
 import { resolveMCPStartupTimeoutMs } from "./timeout";
 
-import type { MCPToolDetails } from "@oh-my-pi/pi-tui/tools/mcp";
+import { MCP_TOOL_NAME_PREFIX, type MCPToolDetails } from "@oh-my-pi/pi-tui/tools/mcp";
 import { DeferredMCPTool, MCPTool } from "./tool-bridge";
 import type { MCPToolCache } from "./tool-cache";
 import { setGeneratedHeader } from "./transports/header-policy";
@@ -268,6 +268,12 @@ export interface MCPManagerApi {
 	getServerInstructions(): Map<string, string>;
 	/** Apply the browser-MCP filter after the built-in browser capability toggled. */
 	reconcileBrowserFilter(enabled: boolean): Promise<void>;
+	/**
+	 * Why an `mcp__…` tool the model asked for is not mounted, when configured
+	 * servers are not connected; `undefined` otherwise. Also reconnects a
+	 * server that failed with no stored login once a login for it exists.
+	 */
+	explainMissingTool(toolName: string): string | undefined;
 }
 
 /** Process-global MCP manager accessors a subagent worker installs in place of its own (empty) slot. */
@@ -351,6 +357,15 @@ export class MCPManager implements MCPManagerApi {
 	#startupUpdates = new Map<string, Promise<void>>();
 	#startupServers = new Set<string>();
 	#startupFailures = new Map<string, string>();
+	/**
+	 * Remote servers whose last connect failed while no OAuth login for them
+	 * was stored. A login another session stores later (the shared
+	 * `agent.db`) is picked up by {@link explainMissingTool}, so a session
+	 * that started before the login does not need a restart.
+	 */
+	#failedWithoutLogin = new Set<string>();
+	/** Servers {@link #reconnectWithStoredLogin} is checking right now. */
+	#loginChecks = new Set<string>();
 	#sources = new Map<string, SourceMeta>();
 	#authStorage: AuthStorage | null = null;
 	#authHandler?: MCPAuthHandler;
@@ -426,8 +441,18 @@ export class MCPManager implements MCPManagerApi {
 	#emitConnectionStatus(event: McpConnectionStatusEvent): void {
 		if (event.type === "failed" && this.#startupServers.has(event.serverName)) {
 			this.#startupFailures.set(event.serverName, event.error);
+			const config = this.#serverConfigs.get(event.serverName);
+			if (
+				(config?.type === "http" || config?.type === "sse") &&
+				!lookupMcpOAuthCredential(this.#authStorage, config)
+			) {
+				this.#failedWithoutLogin.add(event.serverName);
+			} else {
+				this.#failedWithoutLogin.delete(event.serverName);
+			}
 		} else if (event.type === "connected") {
 			this.#startupFailures.delete(event.serverName);
+			this.#failedWithoutLogin.delete(event.serverName);
 		}
 		for (const listener of this.#connectionStatusListeners) {
 			try {
@@ -1295,6 +1320,52 @@ export class MCPManager implements MCPManagerApi {
 	}
 
 	/**
+	 * Why the `mcp__…` tool `toolName` is not mounted: the configured servers
+	 * whose last connect failed and that are not connecting again, with the
+	 * error of each. `undefined` for any other name, or when no server is down.
+	 *
+	 * The model calls this path only when it wants a tool of a server that is
+	 * down, so it is also where a remote server that failed for want of a
+	 * login is brought back once another session stored one: that check runs
+	 * in the background and never delays the answer.
+	 */
+	explainMissingTool(toolName: string): string | undefined {
+		if (!toolName.startsWith(MCP_TOOL_NAME_PREFIX)) return undefined;
+		const failures: Array<{ serverName: string; error: string; sourcePath?: string }> = [];
+		for (const [serverName, error] of this.#startupFailures) {
+			if (this.getConnectionStatus(serverName) !== "disconnected") continue;
+			failures.push({ serverName, error, sourcePath: this.#sources.get(serverName)?.path });
+			if (this.#failedWithoutLogin.has(serverName)) void this.#reconnectWithStoredLogin(serverName);
+		}
+		return failures.length > 0 ? formatMCPUnavailableServersNote(failures) : undefined;
+	}
+
+	/**
+	 * Reconnect `name`, which failed while no OAuth login for it was stored,
+	 * if one is stored now. The login usually comes from another process
+	 * sharing this `agent.db` (`/mcp reauth` in another session), which this
+	 * process's in-memory credential pool has not seen yet, so the pool polls
+	 * the store first.
+	 */
+	async #reconnectWithStoredLogin(name: string): Promise<void> {
+		if (this.#loginChecks.has(name)) return;
+		this.#loginChecks.add(name);
+		try {
+			await this.#authStorage?.credentials.poll();
+			const config = this.#serverConfigs.get(name);
+			if (!config || !this.#failedWithoutLogin.has(name) || this.getConnectionStatus(name) !== "disconnected")
+				return;
+			if (!lookupMcpOAuthCredential(this.#authStorage, config)) return;
+			logger.debug("MCP login stored since the server failed; reconnecting", { path: `mcp:${name}` });
+			await this.reconnectServer(name);
+		} catch (error) {
+			logger.debug("MCP reconnect with a stored login failed", { path: `mcp:${name}`, error: String(error) });
+		} finally {
+			this.#loginChecks.delete(name);
+		}
+	}
+
+	/**
 	 * Get the source metadata for a server.
 	 */
 	getSource(name: string): SourceMeta | undefined {
@@ -1438,6 +1509,7 @@ export class MCPManager implements MCPManagerApi {
 	async disconnectServer(name: string): Promise<void> {
 		this.#startupServers.delete(name);
 		this.#startupFailures.delete(name);
+		this.#failedWithoutLogin.delete(name);
 		this.#startupUpdates.delete(name);
 		this.#pendingConnections.delete(name);
 		this.#pendingToolLoads.delete(name);
@@ -1494,6 +1566,7 @@ export class MCPManager implements MCPManagerApi {
 		this.#startupUpdates.clear();
 		this.#startupServers.clear();
 		this.#startupFailures.clear();
+		this.#failedWithoutLogin.clear();
 		this.#pendingReconnections.clear();
 		this.#pendingResourceRefresh.clear();
 		this.#sources.clear();

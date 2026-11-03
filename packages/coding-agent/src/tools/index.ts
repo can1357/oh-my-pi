@@ -851,6 +851,7 @@ export function createXdevState(
 		// Card rendering reads the same predicate as execution: mounted devices
 		// plus active top-level tools, which the `write` transport also accepts.
 		resolve: name => resolveXdevTool(state, name),
+		explainMissing: name => session.mcpManager?.explainMissingTool(name),
 	};
 	return state;
 }

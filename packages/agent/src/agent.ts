@@ -277,6 +277,8 @@ export interface AgentOptions {
 	 * call misses.
 	 */
 	suggestFallbackToolNames?: () => Iterable<string>;
+	/** Why a tool name the model called is missing (e.g. its MCP server did not connect); appended to the miss error. */
+	explainMissingTool?: (name: string) => string | undefined;
 
 	/** Enable intent tracing schema injection/stripping in the harness. */
 	intentTracing?: boolean;
@@ -495,6 +497,7 @@ export class Agent {
 	#speculativeToolExecution?: SpeculativeToolExecutionConfig;
 	#resolveFallbackTool?: (name: string, advertised: readonly AgentTool<any>[]) => AgentTool<any> | undefined;
 	#suggestFallbackToolNames?: () => Iterable<string>;
+	#explainMissingTool?: (name: string) => string | undefined;
 	#intentTracing: boolean;
 	#intentDescription?: string;
 	#pruneToolDescriptions: boolean;
@@ -611,6 +614,7 @@ export class Agent {
 		this.#speculativeToolExecution = opts.speculativeToolExecution;
 		this.#resolveFallbackTool = opts.resolveFallbackTool;
 		this.#suggestFallbackToolNames = opts.suggestFallbackToolNames;
+		this.#explainMissingTool = opts.explainMissingTool;
 		this.#intentTracing = opts.intentTracing === true;
 		this.#intentDescription = opts.intentDescription;
 		this.#pruneToolDescriptions = opts.pruneToolDescriptions === true;
@@ -2048,6 +2052,7 @@ export class Agent {
 			speculativeToolExecution: this.#speculativeToolExecution,
 			resolveFallbackTool: this.#resolveFallbackTool,
 			suggestFallbackToolNames: this.#suggestFallbackToolNames,
+			explainMissingTool: this.#explainMissingTool,
 			intentTracing: this.#intentTracing,
 			intentDescription: this.#intentDescription,
 			pruneToolDescriptions: this.#pruneToolDescriptions,

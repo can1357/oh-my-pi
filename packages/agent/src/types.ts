@@ -466,6 +466,12 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * recoverable; never a dispatch source.
 	 */
 	suggestFallbackToolNames?: () => Iterable<string>;
+	/**
+	 * Why a tool name the model called resolves to no tool, such as an MCP
+	 * server that did not connect. Appended to the "not found" error so the
+	 * model can report the cause instead of guessing at a typo.
+	 */
+	explainMissingTool?: (name: string) => string | undefined;
 
 	/**
 	 * Enable intent tracing for tool calls.
