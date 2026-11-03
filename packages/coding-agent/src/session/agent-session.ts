@@ -87,7 +87,7 @@ import * as AIError from "@oh-my-pi/pi-ai/error";
 import { prewarmModelConnection } from "@oh-my-pi/pi-ai/providers/connection-prewarm";
 import { resetOpenAICodexHistoryAfterCompaction } from "@oh-my-pi/pi-ai/providers/openai-codex-state";
 import { withCredentialRedaction } from "@oh-my-pi/pi-ai/providers/transform-messages";
-import { markPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
+import { markPerCallContextMessage, withholdUndeliveredAsides } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import { supportsOutputTokenLimit } from "@oh-my-pi/pi-catalog/compat/output-limits";
@@ -2268,7 +2268,12 @@ export class AgentSession implements SettingsScope {
 		this.#titleSystemPrompt = config.titleSystemPrompt;
 		this.#autoTitle = config.autoTitle === true;
 		this.#transformContext = config.transformContext ?? (messages => messages);
-		this.#sideStreamFn = config.sideStreamFn ?? streamSimple;
+		// Side requests (`/btw`, handoff, summaries) never pass the agent loop's
+		// hand-off; a host's side stream function may not pass pi-ai's entry points
+		// either. Either way none may send a descendant of an aside that ended unsent.
+		const sideStreamFn = config.sideStreamFn ?? streamSimple;
+		this.#sideStreamFn = (model, context, options) =>
+			sideStreamFn(model, withholdUndeliveredAsides(context), options);
 		this.#onPayload = config.onPayload;
 		this.rawSseDebugBuffer = config.rawSseDebugBuffer ?? new RawSseDebugBuffer();
 		// Avoid wrapping in an `async` closure when no user callback is configured: the

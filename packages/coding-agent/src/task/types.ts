@@ -46,8 +46,14 @@ export interface SubagentEventPayload {
 const outputSchemaInputSchema = type("object | boolean | string | null");
 // Coarse per-spawn thinking effort; must stay in sync with TASK_EFFORTS in ../thinking.
 const effortRule = '"lo" | "med" | "hi"' as const;
+/**
+ * The largest due-by, in minutes, a dispatch may name (about 190 years). Twice
+ * it from now is still a date the clock can show; a larger number is not a
+ * due-by anyone means, and past JavaScript's date range it cannot be shown.
+ */
+export const MAX_DUE_MINUTES = 100_000_000;
 // Per-spawn due-by: minutes after dispatch by which the dispatcher expects the result.
-const dueMinutesRule = "number > 0" as const;
+const dueMinutesRule = "0 < number <= 100000000" as const;
 
 // Per-spawn fields the seance schema adds or widens. Typed against
 // SeanceTaskSchemaFields so a field added there fails to compile until it is

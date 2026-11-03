@@ -224,6 +224,46 @@ export function copyAsideProvenance(target: AsideProvenanceCarrier, source: Asid
 }
 
 /**
+ * Identities of claimable asides that a sent request carried. Any later
+ * request may carry them again (they are history now); nothing else that
+ * carries an aside identity may be sent, by any request path.
+ */
+const deliveredAsides = new WeakSet<object>();
+
+/** Record that a sent request carried `message`, a claimable aside. */
+export function markAsideDelivered(message: AsideProvenanceCarrier): void {
+	const provenance = message[kAsideProvenance];
+	if (provenance !== undefined) deliveredAsides.add(provenance);
+}
+
+/**
+ * `context` without every message that carries an aside identity which is
+ * neither delivered nor in `claiming` (the asides the request is claiming at
+ * this hand-off): a descendant of an aside that was withdrawn, replaced or
+ * handed back unsent, which a host cache, a context extension or a transform
+ * returned again. Its producer has already settled it, so sending it would
+ * deliver a notice that ended unread. Every provider entry point applies this,
+ * so a side request, a handoff or a summary cannot send one either. Returns
+ * `context` itself when nothing is withheld.
+ */
+export function withholdUndeliveredAsides<T extends { messages: readonly object[] }>(
+	context: T,
+	claiming: readonly AsideProvenanceCarrier[] = [],
+): T {
+	let live: Set<object> | undefined;
+	for (const message of claiming) {
+		const provenance = message[kAsideProvenance];
+		if (provenance !== undefined) (live ??= new Set()).add(provenance);
+	}
+	const sendable = (message: object): boolean => {
+		const provenance = (message as AsideProvenanceCarrier)[kAsideProvenance];
+		return provenance === undefined || deliveredAsides.has(provenance) || live?.has(provenance) === true;
+	};
+	if (context.messages.every(sendable)) return context;
+	return { ...context, messages: context.messages.filter(sendable) };
+}
+
+/**
  * Original history position carried by a context message clone.
  *
  * Object-spread transforms retain this symbol, allowing the extension runner

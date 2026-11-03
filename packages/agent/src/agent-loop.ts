@@ -40,8 +40,10 @@ import {
 	copyCursorExecResolved,
 	getStreamingPartialJson,
 	kAsideProvenance,
-	markAsideProvenance,
 	kCursorExecResolved,
+	markAsideDelivered,
+	markAsideProvenance,
+	withholdUndeliveredAsides,
 } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { schemaDefinesProperty } from "@oh-my-pi/pi-ai/utils/schema/json-schema-validator";
 import { stamp } from "@oh-my-pi/pi-ai/utils/schema/stamps";
@@ -1231,34 +1233,6 @@ function carries(sent: Context, message: AgentMessage): boolean {
 }
 
 /**
- * Identities of claimable asides that a sent request carried. Any later
- * request may carry them again (they are history now); nothing else that
- * carries an aside identity may be sent.
- */
-const deliveredAsides = new WeakSet<object>();
-
-/**
- * Take out of `sent`, the provider-bound context about to go out, every
- * message that carries an aside identity which is neither delivered nor being
- * claimed by this request (`claiming`): a descendant of an aside that was
- * withdrawn, replaced or handed back unsent, which a host cache, a context
- * extension or a transform returned again. Such an aside's producer has
- * already settled it, so sending it would deliver a notice that ended unread.
- */
-function withholdUndelivered(sent: Context, claiming: readonly AgentMessage[]): void {
-	const live = new Set<object>();
-	for (const message of claiming) {
-		const provenance = (message as AgentMessage & AsideProvenanceCarrier)[kAsideProvenance];
-		if (provenance) live.add(provenance);
-	}
-	const kept = sent.messages.filter(message => {
-		const provenance = (message as AsideProvenanceCarrier)[kAsideProvenance];
-		return provenance === undefined || live.has(provenance) || deliveredAsides.has(provenance);
-	});
-	if (kept.length !== sent.messages.length) sent.messages = kept;
-}
-
-/**
  * Raised at the request hand-off when a claimable aside answered that it went
  * stale: the loop has taken it out of the live context and rebuilds the
  * request without it, or asks nothing when it was the turn's only reason.
@@ -1345,7 +1319,10 @@ async function runLoopBody(
 	 * rebuilt without it.
 	 */
 	const claimUnclaimed = (inputs: AgentMessage[], sent: Context): void => {
-		withholdUndelivered(sent, unclaimed);
+		// The provider entry points withhold such messages too; this covers a host
+		// `streamFn` that does not go through them.
+		const sendable = withholdUndeliveredAsides(sent, unclaimed);
+		if (sendable !== sent) sent.messages = sendable.messages;
 		if (unclaimed.length === 0) return;
 		const asked = unclaimed;
 		const answers = asked.map(message => {
@@ -1369,8 +1346,7 @@ async function runLoopBody(
 		if (answers.every((answer, index) => answer === asked[index])) {
 			unclaimed = [];
 			for (const message of asked) {
-				const provenance = (message as AgentMessage & AsideProvenanceCarrier)[kAsideProvenance];
-				if (provenance) deliveredAsides.add(provenance);
+				markAsideDelivered(message as AgentMessage & AsideProvenanceCarrier);
 				(message as CommittableAsideMessage)[ASIDE_MESSAGE_COMMIT]?.();
 			}
 			return;

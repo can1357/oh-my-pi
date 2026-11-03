@@ -2550,4 +2550,12 @@ describe("subagent due-by", () => {
 		expect(window.notices().map(notice => notice.message)).toEqual(["WINDOW_OPEN"]);
 		expect(main.notices.map(notice => notice.message)).toEqual(["WINDOW_GONE"]);
 	});
+
+	it("refuses a due-by too far away to show, before any child starts", async () => {
+		const owner = await agent({ id: "Main", kind: "main" });
+		const result = await owner.task.execute("huge-task", dispatch("task", "Huge", 1e12));
+		const text = JSON.stringify(result.content);
+		expect(text).toContain("invalid `dueMinutes`");
+		expect(manager.getJob("Huge")).toBeUndefined();
+	});
 });

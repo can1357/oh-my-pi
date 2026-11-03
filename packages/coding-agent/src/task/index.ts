@@ -49,6 +49,7 @@ import {
 	type AgentDefinition,
 	canSpawnAtDepth,
 	getTaskSchema,
+	MAX_DUE_MINUTES,
 	MAX_TASK_FILE_BYTES,
 	type TaskToolSchemaInstance,
 } from "./types";
@@ -277,10 +278,12 @@ function validateEffort(effort: TaskEffort | undefined, label: string): string |
 	return `${label} has an invalid \`effort\` value ${JSON.stringify(effort)}. Use "lo", "med", or "hi".`;
 }
 
-/** Reject a non-positive or non-numeric `dueMinutes` on calls that bypass the wire schema. */
+/** Reject a non-positive, non-numeric or unshowable `dueMinutes` on calls that bypass the wire schema. */
 function validateDueMinutes(dueMinutes: number | undefined, label: string): string | undefined {
-	if (dueMinutes === undefined || (Number.isFinite(dueMinutes) && dueMinutes > 0)) return undefined;
-	return `${label} has an invalid \`dueMinutes\` value ${JSON.stringify(dueMinutes)}. Use a positive number of minutes.`;
+	if (dueMinutes === undefined || (Number.isFinite(dueMinutes) && dueMinutes > 0 && dueMinutes <= MAX_DUE_MINUTES)) {
+		return undefined;
+	}
+	return `${label} has an invalid \`dueMinutes\` value ${JSON.stringify(dueMinutes)}. Use a positive number of minutes, at most ${MAX_DUE_MINUTES}.`;
 }
 
 function validateTaskInput(item: TaskItem | undefined, label: string, fileEnabled: boolean): string | undefined {
@@ -1054,7 +1057,11 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			// The registry this session's agents live in: an SDK host may give a session its own.
 			const registry = this.session.agentRegistry ?? AgentRegistry.global();
 			const ownerId = this.session.getAgentId?.() ?? MAIN_AGENT_ID;
-			const minutes = spawn.params.dueMinutes ?? cfgTaskDueMinutes.get(this.session.settings);
+			// A `task.dueMinutes` setting past the largest due-by counts as that due-by.
+			const minutes = Math.min(
+				spawn.params.dueMinutes ?? cfgTaskDueMinutes.get(this.session.settings),
+				MAX_DUE_MINUTES,
+			);
 			registry.dueBy.arm(
 				{
 					childId: spawn.agentId,
