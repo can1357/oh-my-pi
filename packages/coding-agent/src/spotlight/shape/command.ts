@@ -109,18 +109,6 @@ export function runsAgent(command: string): boolean {
 	return segments(command).some(s => AGENT_SEGMENT.test(s));
 }
 
-/** A pipeline stage that keeps only the lines it was told to (`grep`, `rg`, `sed -n 10,40p`, `awk '/x/'`). */
-const FILTER_STAGE = /^(?:\w+=\S*\s+)*(?:grep|egrep|rg|ag|sed\s+-n|awk)\b/;
-
-/**
- * The command's output is lines the agent already picked: its last segment searches or selects (`grep -n f x.c`,
- * `git show m:x.c | grep -A12 y`, `sed -n '99,130p' doc.md`).
- */
-export function narrowsOutput(command: string): boolean {
-	const last = segments(command).filter(Boolean).at(-1) ?? "";
-	return last.split("|").some(stage => FILTER_STAGE.test(stage.trim()));
-}
-
 /** The command or read path reads text a shaped result saved (`artifact://N`): the agent paging hidden lines back in. */
 export function isPageBack(command: string): boolean {
 	return command.includes("artifact://");

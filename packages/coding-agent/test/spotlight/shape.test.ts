@@ -670,7 +670,7 @@ describe("spotlight shaping", () => {
 		expect((await shape(bash(agentRun, report(200)))).text).not.toBe(report(200));
 	});
 
-	it("keeps lines the agent already picked and a diff whole up to 12k characters, and cuts them past it", async () => {
+	it("keeps a diff whole up to 12k characters and cuts it past it, while a search that size is cut", async () => {
 		const matches = (n: number) =>
 			Array.from(
 				{ length: n },
@@ -697,18 +697,8 @@ describe("spotlight shaping", () => {
 				sink(),
 			);
 
-		// ~10k chars: whole when the command picked the lines (a `;` inside quotes separates nothing), cut when it did not.
 		expect(matches(160).length).toBeGreaterThan(9_000);
-		for (const command of [
-			'rg -n "ti_tz_find_id\\(" temporal',
-			"git show m:x.c | grep -n ti_tz_find_id",
-			'grep -nE "^(static )?[a-z_]+\\(" x.c | grep -v ";$"',
-			"cd /c/repo && sed -n '99,130p;228,256p' notes.md",
-		]) {
-			expect((await shape(command, matches(160))).text).toBe(matches(160));
-		}
-		expect((await shape("./list-calls.sh", matches(160))).text).not.toBe(matches(160));
-		expect((await shape('rg -n "ti_tz_find_id\\(" temporal', matches(250))).text).not.toBe(matches(250));
+		expect((await shape('rg -n "ti_tz_find_id\\(" temporal', matches(160))).text).not.toBe(matches(160));
 
 		expect(diff(260).length).toBeGreaterThan(8_000);
 		expect((await shape("git diff master -- quickjs.c", diff(260))).text).toBe(diff(260));
@@ -823,38 +813,31 @@ describe("spotlight shaping", () => {
 		expect(store.saved.size).toBe(0);
 	});
 
-	it("shows a seen line the call's intent names, and still collapses lines a generic intent word names", async () => {
+	it("collapses seen lines the call's intent names: they are in the agent's context already", async () => {
 		const first = migrations(30);
 		const again = ["Applying migrations to staging", ...first, "Done: 30 applied, 0 failed"];
-		const shape = async (intent: string) => {
-			const state = newShapeState();
-			await shapeResult(
-				bash("bin/migrate --dry-run", first.join("\n")),
-				context(),
-				scorer(() => 0.5),
-				state,
-				sink(),
-			);
-			return shapeResult(
-				bash("bin/migrate", again.join("\n")),
-				context({ intent }),
-				scorer(() => 0.5),
-				state,
-				sink(),
-			);
-		};
+		const state = newShapeState();
+		await shapeResult(
+			bash("bin/migrate --dry-run", first.join("\n")),
+			context(),
+			scorer(() => 0.5),
+			state,
+			sink(),
+		);
 
-		const named = await shape("which migration added ledger_5_amount");
-		const generic = await shape("did every migration apply");
+		const out = await shapeResult(
+			bash("bin/migrate", again.join("\n")),
+			context({ intent: "which migration added ledger_5_amount" }),
+			scorer(() => 0.5),
+			state,
+			sink(),
+		);
 
-		expect(named.text.split("\n").slice(0, 4)).toEqual([
+		expect(out.text.split("\n")).toEqual([
 			"Applying migrations to staging",
-			// "migration" names every line, so only its first keeps clear of the collapse.
-			first[0],
-			"… [4 lines as shown before: read artifact://1:3-6]",
-			first[5],
+			"… [30 lines as shown before: read artifact://1:2-31]",
+			"Done: 30 applied, 0 failed",
 		]);
-		expect(generic.text).not.toContain(first[5]);
 	});
 
 	it("numbers the short rows a cut hid as a gap, never as shown before, when nothing was shown yet", async () => {

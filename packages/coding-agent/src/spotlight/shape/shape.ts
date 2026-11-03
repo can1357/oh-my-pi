@@ -30,16 +30,7 @@ import {
 } from "../types";
 import { lineIndex, matchLine } from "./align";
 import { EDIT_TOOLS } from "../edit-gate";
-import {
-	isPageBack,
-	isTestRun,
-	namesSource,
-	narrowsOutput,
-	printsFiles,
-	runsAgent,
-	runsProgram,
-	SOURCE_PATH,
-} from "./command";
+import { isPageBack, isTestRun, namesSource, printsFiles, runsAgent, runsProgram, SOURCE_PATH } from "./command";
 import { foldBashDocs, foldReadDoc } from "./docs";
 import { shapeDumpOutput, shapeDumpRead } from "./dumps";
 import { AGAIN_CHARS, indentOfFirst, MARKER, norm, words } from "./lines";
@@ -95,8 +86,8 @@ const SEEN_RUN = 4;
 const SHORT_SEEN_RUN = 3;
 const SEEN_MARGIN = 80;
 /**
- * A word of the call's intent names a line for keeping when it is in at most this many of the result's lines: a word
- * in more says nothing about which line the agent wants.
+ * A word of the call's intent names a line for a cut to choose first when it is in at most this many of the result's
+ * lines: a word in more says nothing about which line the agent wants.
  */
 const INTENT_LINES = 6;
 /** The valve's budget: a cut result shows about this many characters. */
@@ -325,40 +316,48 @@ const seenMarker = (count: number, url: string, [a, z]: [number, number], note =
 const cutFooter = (url: string) => `[cut: ${url}]`;
 
 /**
- * Lines no seen-collapse hides: a line holding a word of the call's intent that few lines hold (the agent asked for
- * that line now, beside this result), and for command output its last line, which says how the run ended. An output
- * matching an earlier one but cut short otherwise collapses whole and reads as the earlier run.
+ * Lines the call's intent names, which a cut chooses first: those holding a word of the intent that few lines hold
+ * (the agent asked for that line now, beside this result) and, for a word too common to name one, its first and last
+ * lines. A seen-collapse still hides them: the agent has them in its context already, and re-showing seen lines an
+ * intent named cost more than the reads it spared.
+ */
+function intentLines(run: Run, lines: readonly string[]): boolean[] {
+	const named = Array.from<boolean>({ length: lines.length }).fill(false);
+	const asked = words(run.ctx.intent);
+	if (!asked.size) return named;
+	const hits = new Map<string, number[]>();
+	lines.forEach((line, i) => {
+		if (MARKER.test(line)) return;
+		for (const w of words(line)) {
+			if (!asked.has(w)) continue;
+			const at = hits.get(w);
+			if (at) at.push(i);
+			else hits.set(w, [i]);
+		}
+	});
+	for (const at of hits.values()) {
+		if (at.length > INTENT_LINES) {
+			// Too common to name one line, but newest-first and newest-last output put the latest at an end.
+			named[at[0]] = true;
+			named[at[at.length - 1]] = true;
+			continue;
+		}
+		for (const i of at) named[i] = true;
+	}
+	return named;
+}
+
+/**
+ * Lines no seen-collapse hides: for command output, its last line, which says how the run ended. An output matching
+ * an earlier one but cut short otherwise collapses whole and reads as the earlier run.
  */
 function seenKeeps(run: Run, lines: readonly string[]): boolean[] {
 	const keep = Array.from<boolean>({ length: lines.length }).fill(false);
-	const asked = words(run.ctx.intent);
-	if (asked.size) {
-		const hits = new Map<string, number[]>();
-		lines.forEach((line, i) => {
-			if (MARKER.test(line)) return;
-			for (const w of words(line)) {
-				if (!asked.has(w)) continue;
-				const at = hits.get(w);
-				if (at) at.push(i);
-				else hits.set(w, [i]);
-			}
-		});
-		for (const at of hits.values()) {
-			if (at.length > INTENT_LINES) {
-				// Too common to name one line, but newest-first and newest-last output put the latest at an end.
-				keep[at[0]] = true;
-				keep[at[at.length - 1]] = true;
-				continue;
-			}
-			for (const i of at) keep[i] = true;
-		}
-	}
-	if (!run.input.read) {
-		for (let i = lines.length - 1; i >= 0; i--) {
-			if (!lines[i].trim() || MARKER.test(lines[i])) continue;
-			keep[i] = true;
-			break;
-		}
+	if (run.input.read) return keep;
+	for (let i = lines.length - 1; i >= 0; i--) {
+		if (!lines[i].trim() || MARKER.test(lines[i])) continue;
+		keep[i] = true;
+		break;
 	}
 	return keep;
 }
@@ -484,16 +483,11 @@ async function shapeSubject(run: Run, subject: Subject): Promise<{ view: View; s
 		input.tool === "wait" ||
 		Object.hasOwn(EDIT_TOOLS, input.tool) ||
 		(input.tool === "bash" && runsAgent(command));
-	// A diff is reviewed whole: each cut one a review needed its hidden lines (4 of 4).
+	// A diff is reviewed whole: each cut one a review needed its hidden lines (4 of 4). Searches and filtered commands
+	// get no such pass: cut, 2% of `grep` results and 11% of filtered commands were read back, costing a fraction of
+	// what showing them whole up to 12k added.
 	const diff = isDiff(input.read?.lines ?? lines);
-	// Lines the agent already picked (a search, a filtered command): a cut one needed its hidden lines 6 of 8 times
-	// and maybe the other 2, so a cut pays only past ~15k chars.
-	const narrowed =
-		input.tool === "grep" ||
-		input.tool === "find" ||
-		input.tool === "glob" ||
-		(input.tool === "bash" && narrowsOutput(command));
-	const exempt = ((folded || sourceRead || report || diff || narrowed) && shown <= EXEMPT_MAX) || isGrid(lines);
+	const exempt = ((folded || sourceRead || report || diff) && shown <= EXEMPT_MAX) || isGrid(lines);
 	const cut = !again && !exempt && shown > VALVE_OVER * scale * (program ? PROGRAM_SCALE : 1);
 	// Scalars unwrapped above no longer equal their base lines; the view's own lines still do.
 	const origin = viewOrigin(run, b.view) ?? alignedTo(run, b.view.lines);
@@ -506,9 +500,14 @@ async function shapeSubject(run: Run, subject: Subject): Promise<{ view: View; s
 		const spot = await lineScores(run, lines, origin);
 		const density = densityScores(lines, spot);
 		uniform = input.read ? undefined : uniformShape(lines, witnessed);
+		// The lines the call asks for: those its intent names and command output's last line.
+		const asked = intentLines(run, lines).map((named, i) => named || keep[i]);
 		const forced = lines.map(
 			(l, i) =>
-				(MARKER.test(l) && l.length < 200) || keep[i] || uniform?.differs[i] === true || uniform?.edges[i] === true,
+				(MARKER.test(l) && l.length < 200) ||
+				asked[i] ||
+				uniform?.differs[i] === true ||
+				uniform?.edges[i] === true,
 		);
 		// Chosen first: lines the intent names and the bodies the outline opened because the conversation names them
 		// (what the agent asked for) and, in uniform output, the lines that differ (the news); then earlier shaping's
@@ -520,15 +519,15 @@ async function shapeSubject(run: Run, subject: Subject): Promise<{ view: View; s
 		};
 		// Within a tier Spotlight's rank decides, so position alone never picks among equals.
 		const scores = density.map((s, i) =>
-			keep[i] || uniform?.differs[i] ? 30 + s : namedBody(i) ? 20 + s : forced[i] ? 10 + s : s,
+			asked[i] || uniform?.differs[i] ? 30 + s : namedBody(i) ? 20 + s : forced[i] ? 10 + s : s,
 		);
 		// A body the conversation names is what the agent came for: the window grows to hold it, up to the size a
 		// source read is shown whole at.
-		let named = 0;
+		let bodies = 0;
 		lines.forEach((_, i) => {
-			if (namedBody(i)) named += width[i] + 1;
+			if (namedBody(i)) bodies += width[i] + 1;
 		});
-		budget = Math.min(Math.max(EXEMPT_MAX, WINDOW_BUDGET * scale), WINDOW_BUDGET * scale + named);
+		budget = Math.min(Math.max(EXEMPT_MAX, WINDOW_BUDGET * scale), WINDOW_BUDGET * scale + bodies);
 		const chosen = frameLines(width, lines, witnessed, scores, {
 			budget,
 			// Neighbours of a line that differs in uniform output are routine lines themselves.
