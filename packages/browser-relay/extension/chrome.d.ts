@@ -56,6 +56,7 @@ interface ChromePageElement {
 	readonly tagName: string;
 	getAttribute(name: string): string | null;
 	setAttribute(name: string, value: string): void;
+	readonly style: { setProperty(name: string, value: string, priority?: string): void };
 }
 
 /** A document or shadow root, walked by an injected function. */

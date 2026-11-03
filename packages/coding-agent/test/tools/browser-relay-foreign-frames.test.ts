@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import { ensureChromiumExecutable } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
+import puppeteer from "puppeteer-core";
 import { pastForeignFrames } from "../../../browser-relay/extension/foreign-frames";
 import { rejectionOf } from "../helpers/rejection";
+import { chromiumAvailable } from "./chromium-probe";
+
+const CHROMIUM_AVAILABLE = await chromiumAvailable();
 
 const REFUSAL = new Error("Cannot access a chrome-extension:// URL of different extension");
 
@@ -70,4 +75,51 @@ describe("pastForeignFrames", () => {
 		expect(await rejectionOf(pastForeignFrames(1, () => Promise.reject(other)))).toBe(other);
 		expect(sweeps).toEqual([]);
 	});
+
+	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"hides the emptied menu frame, so the button under it takes the click",
+		async () => {
+			const browser = await puppeteer.launch({
+				executablePath: await ensureChromiumExecutable(),
+				headless: true,
+				args: ["--no-first-run"],
+			});
+			try {
+				const page = await browser.newPage();
+				// A password manager's inline menu, drawn below the field over the page's Next button.
+				await page.setContent(`<input type="password"><br><button>Next</button>
+<iframe src="chrome-extension://otherextensionid/menu.html"
+  style="position: absolute; left: 0; top: 0; width: 300px; height: 200px; z-index: 2147483647"></iframe>`);
+				// The injected function runs in the page, as `chrome.scripting.executeScript` runs it.
+				Reflect.set(globalThis, "chrome", {
+					runtime: { id: "selfextensionid" },
+					scripting: {
+						executeScript: async (injection: { func: (...args: never[]) => unknown; args?: unknown[] }) => [
+							{
+								frameId: 0,
+								result: await page.evaluate(`(() => {
+								globalThis.chrome = { dom: { openOrClosedShadowRoot: element => element.shadowRoot } };
+								return (${String(injection.func)})(...${JSON.stringify(injection.args ?? [])});
+							})()`),
+							},
+						],
+					},
+				});
+				let attempts = 0;
+				await pastForeignFrames(1, async () => {
+					if (attempts++ === 0) throw REFUSAL;
+				});
+				expect(
+					await page.$eval("button", button => {
+						const box = button.getBoundingClientRect();
+						return document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2) === button;
+					}),
+				).toBeTrue();
+				expect(await page.$eval("iframe", frame => frame.hasAttribute("srcdoc"))).toBeTrue();
+			} finally {
+				await browser.close();
+			}
+		},
+		30_000,
+	);
 });

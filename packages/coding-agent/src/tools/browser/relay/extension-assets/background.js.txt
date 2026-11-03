@@ -60,6 +60,7 @@ async function neutralizeForeignFrames(tabId) {
                   element.setAttribute("srcdoc", "");
                 else
                   element.setAttribute("src", "about:blank");
+                element.style.setProperty("display", "none", "important");
                 changed++;
               }
             }

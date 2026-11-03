@@ -4,8 +4,9 @@
  * extension's debugger there: `attach` and every `sendCommand` fail with "Cannot access a chrome-extension:// URL
  * of different extension". Password managers draw their inline autofill menus as such frames on a focused field.
  * Chrome checks before running the request, so a refused one is retried once every such frame is pointed at an
- * empty document (`srcdoc` outranks `src`, so a vendor that re-points the same frame later loads nothing). The
- * relay asks for this only in a tab omp drives, so the user's other tabs keep their menus.
+ * empty document (`srcdoc` outranks `src`, so a vendor that re-points the same frame later loads nothing) and
+ * hidden: an inline menu sits over the controls below its field, and emptied it would cover them as a blank box.
+ * The relay asks for this only in a tab omp drives, so the user's other tabs keep their menus.
  */
 
 const FOREIGN_FRAME_REFUSAL = /chrome-extension:\/\/ URL of different extension/i;
@@ -68,6 +69,7 @@ async function neutralizeForeignFrames(tabId: number): Promise<number> {
 								// `srcdoc` outranks `src`; a `<frame>` has no `srcdoc`.
 								if (tag === "IFRAME") element.setAttribute("srcdoc", "");
 								else element.setAttribute("src", "about:blank");
+								element.style.setProperty("display", "none", "important");
 								changed++;
 							}
 						}
