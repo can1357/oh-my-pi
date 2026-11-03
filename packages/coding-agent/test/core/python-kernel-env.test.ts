@@ -46,7 +46,18 @@ describe("Python gateway environment filtering", () => {
 		expect(env.OPENAI_API_KEY).toBe("secret");
 	});
 
-	it("removes every denied API credential", () => {
+	it("preserves variables outside the fixed credential denylist, including custom secrets and loader configuration", () => {
+		const env = {
+			UNSAFE_TOKEN: "caller-value",
+			PYTHONHOME: "/custom/python",
+			LD_PRELOAD: "/custom/library.so",
+			DYLD_INSERT_LIBRARIES: "/custom/library.dylib",
+			AWS_REGION: "example-region",
+		};
+		expect(filterEnv(env)).toEqual(env);
+	});
+
+	it("removes every denied credential and password-manager session prefix", () => {
 		const env = Object.fromEntries(
 			[
 				"OPENAI_API_KEY",
@@ -59,6 +70,16 @@ describe("Python gateway environment filtering", () => {
 				"EXA_API_KEY",
 				"AZURE_OPENAI_API_KEY",
 				"MISTRAL_API_KEY",
+				"GROQ_API_KEY",
+				"XAI_API_KEY",
+				"DEEPSEEK_API_KEY",
+				"GH_TOKEN",
+				"GITHUB_TOKEN",
+				"AWS_SECRET_ACCESS_KEY",
+				"AWS_SESSION_TOKEN",
+				"OP_SERVICE_ACCOUNT_TOKEN",
+				"OP_SESSION_example",
+				"OP_SESSION_other",
 			].map(key => [key, "secret"]),
 		);
 
@@ -68,7 +89,15 @@ describe("Python gateway environment filtering", () => {
 	it("normalizes Windows PATH and credential names without renaming caller variables", () => {
 		if (process.platform !== "win32") return;
 
-		expect(filterEnv({ Path: "C:\\Windows", openai_api_key: "secret", Agent_Custom: "kept" })).toEqual({
+		expect(
+			filterEnv({
+				Path: "C:\\Windows",
+				openai_api_key: "secret",
+				gh_token: "secret",
+				op_session_example: "secret",
+				Agent_Custom: "kept",
+			}),
+		).toEqual({
 			PATH: "C:\\Windows",
 			Agent_Custom: "kept",
 		});
@@ -109,6 +138,7 @@ describe("enumeratePythonRuntimes", () => {
 
 		const runtimes = enumeratePythonRuntimes(path.join(path.sep, "work"), {
 			PATH: path.join(path.sep, "usr", "bin"),
+			PYTHONHOME: path.join(path.sep, "stale", "python"),
 		});
 
 		expect(runtimes.map(r => r.pythonPath)).toEqual([managedPy, systemPy]);
@@ -117,11 +147,13 @@ describe("enumeratePythonRuntimes", () => {
 		expect(managed.venvPath).toBe(managedDir);
 		expect(managed.env.VIRTUAL_ENV).toBe(managedDir);
 		expect(managed.env.PATH).toBe(`${managedBin}${path.delimiter}${path.join(path.sep, "usr", "bin")}`);
+		expect(Object.hasOwn(managed.env, "PYTHONHOME")).toBe(false);
 
 		// The system candidate must not inherit the managed env's VIRTUAL_ENV/PATH mutation.
 		expect(system.venvPath).toBeUndefined();
 		expect(system.env.VIRTUAL_ENV).toBeUndefined();
 		expect(system.env.PATH).toBe(path.join(path.sep, "usr", "bin"));
+		expect(system.env.PYTHONHOME).toBe(path.join(path.sep, "stale", "python"));
 	});
 
 	it("falls back to the system interpreter when no managed env or venv exists", () => {

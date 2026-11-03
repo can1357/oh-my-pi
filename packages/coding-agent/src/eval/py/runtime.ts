@@ -20,6 +20,14 @@ const DEFAULT_ENV_DENYLIST = new Set([
 	"EXA_API_KEY",
 	"AZURE_OPENAI_API_KEY",
 	"MISTRAL_API_KEY",
+	"GROQ_API_KEY",
+	"XAI_API_KEY",
+	"DEEPSEEK_API_KEY",
+	"GH_TOKEN",
+	"GITHUB_TOKEN",
+	"AWS_SECRET_ACCESS_KEY",
+	"AWS_SESSION_TOKEN",
+	"OP_SERVICE_ACCOUNT_TOKEN",
 ]);
 
 const CASE_INSENSITIVE_ENV = process.platform === "win32";
@@ -58,7 +66,8 @@ export interface PythonRuntime {
 }
 
 /**
- * Preserve the caller's shell environment, except for sensitive API keys.
+ * Preserve the caller's shell environment except for a fixed credential denylist.
+ * This is not a general secret filter; unrecognized credential names still pass.
  * Callers obtain the base environment from Settings.getShellConfig(), which
  * already applies the same child-shell filtering used by the bash tool.
  */
@@ -67,7 +76,7 @@ export function filterEnv(env: Record<string, string | undefined>): Record<strin
 	for (const [key, value] of Object.entries(env)) {
 		if (value === undefined) continue;
 		const normalizedKey = normalizeEnvKey(key);
-		if (NORMALIZED_DENYLIST.has(normalizedKey)) continue;
+		if (NORMALIZED_DENYLIST.has(normalizedKey) || normalizedKey.startsWith("OP_SESSION_")) continue;
 		const destKey = normalizedKey === "PATH" ? "PATH" : key;
 		filtered[destKey] = value;
 	}
@@ -99,6 +108,10 @@ function applyVenvEnv(
 	binDir: string,
 ): Record<string, string | undefined> {
 	const env = { ...baseEnv };
+	// Like venv activation, clear PYTHONHOME so it cannot override the selected venv.
+	for (const key in env) {
+		if (normalizeEnvKey(key) === "PYTHONHOME") delete env[key];
+	}
 	env.VIRTUAL_ENV = venvPath;
 	const pathKey = resolvePathKey(env);
 	const currentPath = env[pathKey];

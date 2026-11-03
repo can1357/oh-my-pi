@@ -9,7 +9,7 @@
 
 ### Fixed
 
-- Fixed Python eval dropping caller identity and CLI configuration environment variables that are available to the bash tool; the existing API credential denylist still applies.
+- Fixed Python eval dropping caller identity and CLI configuration environment variables that are available to the bash tool; a fixed credential denylist blocks common provider, GitHub, AWS, and password-manager credentials, and venv activation clears stale `PYTHONHOME` values.
 
 ## [18.16.0] - 2026-11-02
 
