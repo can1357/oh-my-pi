@@ -359,7 +359,9 @@ impl HostIo {
 	fn new(host: &mut Host, env: Arc<HashMap<String, String>>, argv0: OsString) -> Self {
 		let out: Box<dyn Write + Send> = Box::new(host.stdout_writer());
 		let err: Box<dyn Write + Send> = match &host.stderr {
-			StreamWriter::Shared(shared) => Box::new(StreamWriter::Shared(Arc::clone(shared))),
+			StreamWriter::Shared(shared, stream, sigpipe) => {
+				Box::new(StreamWriter::Shared(Arc::clone(shared), *stream, Arc::clone(sigpipe)))
+			},
 			_ => Box::new(StreamWriter::line(host.stderr_clone())),
 		};
 		let stdin: Box<dyn Read + Send> = match host.stdin.try_clone() {
@@ -547,6 +549,9 @@ pub(crate) fn run(host: &mut Host, argv: Vec<OsString>) -> i32 {
 			err.code
 		}
 		Ok(Parsed::Run(opts)) => {
+			// Upstream ignores SIGPIPE only now, after parse_arguments: its
+			// help, version and option errors before this die of it.
+			host.ignore_sigpipe();
 			if opts.am_server {
 				server_main(&io, *opts, None)
 			} else {
@@ -667,7 +672,12 @@ impl Shared {
 	/// Records a failure (the first one wins), prints its diagnostic, and stops
 	/// the side's other threads. The peer learns the exit code from the exit
 	/// tail ([`exit_tail`]), after the trailer, as upstream's exit_cleanup does.
+	///
+	/// A diagnostic the logger could not write stopped the run before any
+	/// failure it caused (see `Logger::abort_on_fatal`): its RERR_MESSAGEIO is
+	/// the run's failure.
 	fn fail(&self, err: RsyncError, role: Role) {
+		let err = self.logger.take_fatal().unwrap_or(err);
 		let code = err.code;
 		let mut first = lock(&self.first);
 		if first.is_none() {
@@ -1318,6 +1328,7 @@ fn client_start(
 	});
 
 	let abort = Arc::new(AtomicBool::new(false));
+	logger.abort_on_fatal(Arc::clone(&abort));
 	// Stops the in-process server half of a local copy.
 	let kill = Arc::new(AtomicBool::new(false));
 	let shared_slot: Arc<Mutex<Option<Arc<Shared>>>> = Arc::default();
@@ -1983,6 +1994,7 @@ fn server_main(io: &HostIo, opts: Options, local: Option<LocalServer>) -> i32 {
 		base_logger.rprintf(LogCode::Info, format!("{notice}\n").as_bytes());
 	}
 	let logger = base_logger;
+	logger.abort_on_fatal(Arc::clone(&abort));
 
 	let am_sender = opts.am_sender;
 	let roles = Roles { am_server: true, am_sender, local_server, read_batch: false, write_batch: false };

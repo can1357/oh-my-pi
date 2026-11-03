@@ -35,7 +35,7 @@ impl Compressor {
 		stdin: impl Into<Stdio>,
 		stdout: impl Into<Stdio>,
 		decompress: bool,
-	) -> SortResult<(Child, thread::JoinHandle<()>)> {
+	) -> SortResult<(Child, Option<thread::JoinHandle<()>>)> {
 		let mut command = self.env.command(&self.prog)
 			.map_err(|error| SortError::CompressProgExecutionFailed {
 				prog: self.prog.clone(),
@@ -51,9 +51,9 @@ impl Compressor {
 				prog:  self.prog.clone(),
 				error: err,
 			})?;
-		// Piped by `ChildEnv::command`, so this is always present.
-		let stderr = child.stderr.take().expect("compressor stderr is piped");
-		let forwarder = self.env.forward_stderr(stderr);
+		// Piped by `ChildEnv::command` only when the command's standard error
+		// is not a descriptor the child can write itself.
+		let forwarder = self.env.forward_stderr(&mut child);
 		Ok((child, forwarder))
 	}
 }
@@ -2157,6 +2157,8 @@ use compare::Compare;
 use flume::{Receiver, Sender};
 use pi_vfs::{BlockingFs, File};
 
+use crate::host::ChildPipe;
+
 use super::{
 	AtomicOrdering, Compressor, GlobalSettings, Output, SortError, SortResult,
 	chunks::{self, Chunk, RecycledChunk},
@@ -2573,9 +2575,11 @@ impl Compare<MergeableFile> for FileComparator<'_> {
 	}
 }
 
-/// Wait for the child to exit and check its exit code.
+/// Wait for the child to exit and check its exit code: GNU sort's `reap`
+/// reports a compressor that a signal killed, or that exited non-zero, as
+/// terminated abnormally.
 fn check_child_success(mut child: Child, program: &str) -> SortResult<()> {
-	matches!(child.wait().map(|e| e.code()), Ok(Some(0) | None) | Err(_))
+	matches!(child.wait().map(|e| e.code()), Ok(Some(0)) | Err(_))
 		.ok_or_else(|| SortError::CompressProgTerminatedAbnormally { prog: program.to_owned() }.into())
 }
 
@@ -2704,10 +2708,10 @@ pub struct WriteableCompressedTmpFile {
 	fs:          BlockingFs,
 	compress:    Compressor,
 	child:       Child,
-	child_stdin: BufWriter<ChildStdin>,
+	child_stdin: BufWriter<ChildPipe<ChildStdin>>,
 	/// Drains the compressor's stderr onto the command's; joined once the child
 	/// has exited so its diagnostics land before we report a result.
-	forwarder:   thread::JoinHandle<()>,
+	forwarder:   Option<thread::JoinHandle<()>>,
 	/// Copies compressor output into a temporary file without a host
 	/// descriptor; `None` when the compressor writes the file directly.
 	pump:        Option<Pump>,
@@ -2723,14 +2727,14 @@ pub struct CompressedTmpMergeInput {
 	compress:     Compressor,
 	child:        Child,
 	child_stdout: ChildStdout,
-	forwarder:    thread::JoinHandle<()>,
+	forwarder:    Option<thread::JoinHandle<()>>,
 	/// Feeds a temporary file without a host descriptor to the decompressor;
 	/// `None` when the decompressor reads the file directly.
 	pump:         Option<Pump>,
 }
 impl WriteableTmpFile for WriteableCompressedTmpFile {
 	type Closed = ClosedCompressedTmpFile;
-	type InnerWrite = BufWriter<ChildStdin>;
+	type InnerWrite = BufWriter<ChildPipe<ChildStdin>>;
 
 	fn create(TmpFile { file, path, fs }: TmpFile, compress: Option<&Compressor>) -> SortResult<Self> {
 		let compress = compress
@@ -2751,7 +2755,9 @@ impl WriteableTmpFile for WriteableCompressedTmpFile {
 				(child, forwarder, Some(pump))
 			},
 		};
-		let child_stdin = child.stdin.take().expect("compressor stdin is piped");
+		// sort writes the compressor's input itself: a write that finds it gone
+		// raises SIGPIPE in sort, as GNU sort's write does.
+		let child_stdin = compress.env.pipe_writer(child.stdin.take().expect("compressor stdin is piped"));
 		Ok(Self {
 			path,
 			fs,
@@ -2764,10 +2770,16 @@ impl WriteableTmpFile for WriteableCompressedTmpFile {
 	}
 
 	fn finished_writing(self) -> SortResult<Self::Closed> {
-		drop(self.child_stdin);
+		// The rest of the compressor's input is sort's own write: one that
+		// fails (the compressor exited without reading it) fails sort, as GNU
+		// sort's write does; closing the pipe lets the compressor finish.
+		let flushed = self.child_stdin.into_inner().map(drop).map_err(io::IntoInnerError::into_error);
 		let result = check_child_success(self.child, &self.compress.prog);
-		let _ = self.forwarder.join();
+		if let Some(forwarder) = self.forwarder {
+			let _ = forwarder.join();
+		}
 		let copied = self.pump.map_or(Ok(()), Pump::join);
+		flushed.map_err(|error| SortError::WriteFailed { path: self.path.clone().into_os_string(), error })?;
 		result?;
 		copied.map_err(|error| SortError::WriteFailed {
 			path: self.path.clone().into_os_string(),
@@ -2833,7 +2845,9 @@ impl MergeInput for CompressedTmpMergeInput {
 		#[allow(clippy::drop_non_drop)]
 		drop(self.child_stdout);
 		let result = check_child_success(self.child, &self.compress.prog);
-		let _ = self.forwarder.join();
+		if let Some(forwarder) = self.forwarder {
+			let _ = forwarder.join();
+		}
 		let copied = self.pump.map_or(Ok(()), Pump::join);
 		result?;
 		copied.map_err(|error| SortError::ReadFailed { path: self.path.clone(), error })?;

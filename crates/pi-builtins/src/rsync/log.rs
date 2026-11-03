@@ -219,6 +219,9 @@ struct Inner {
 	protocol: AtomicU32,
 	checksums: Mutex<(CsumType, CsumType)>,
 	fatal: Mutex<Option<RsyncError>>,
+	/// The session's abort flag, set with [`Inner::fatal`]: upstream exits
+	/// at once (`exit_cleanup`), so the transfer stops.
+	abort: Mutex<Option<Arc<AtomicBool>>>,
 }
 
 /// Where messages go: local stdout/stderr (client) or the peer (server role).
@@ -298,6 +301,7 @@ impl Logger {
 			protocol: AtomicU32::new(33),
 			checksums: Mutex::new((CsumType::Md5, CsumType::Md5)),
 			fatal: Mutex::new(None),
+			abort: Mutex::new(None),
 			cfg,
 		};
 		Self { inner: Arc::new(inner), role }
@@ -368,6 +372,12 @@ impl Logger {
 	/// A fatal logging condition upstream exits on (RERR_MESSAGEIO), taken once.
 	pub(crate) fn take_fatal(&self) -> Option<RsyncError> {
 		lock(&self.inner.fatal).take()
+	}
+
+	/// Stops the session through `abort` when a fatal logging condition
+	/// arises, as upstream's `exit_cleanup` ends the run at once.
+	pub(crate) fn abort_on_fatal(&self, abort: Arc<AtomicBool>) {
+		*lock(&self.inner.abort) = Some(abort);
 	}
 
 	/// Installs an already-opened `--log-file` (append mode, opened by the caller).
@@ -770,9 +780,21 @@ impl Logger {
 		let use_err = to_stderr || outputs.out.is_none();
 		let writer = if use_err { outputs.err.as_mut() } else { outputs.out.as_mut() };
 		if let Some(writer) = writer {
-			let _ = writer.write_all(&line);
-			if trailing.is_some() {
-				let _ = writer.flush();
+			let written = writer
+				.write_all(&line)
+				.and_then(|()| if trailing.is_some() { writer.flush() } else { Ok(()) });
+			// A diagnostic rsync cannot write ends the run at once (rwrite's
+			// exit_cleanup(RERR_MESSAGEIO)); its standard output's errors
+			// are ignored.
+			if use_err && written.is_err() {
+				let mut fatal = lock(&inner.fatal);
+				if fatal.is_none() {
+					*fatal = Some(RsyncError::bare(exit::RERR_MESSAGEIO).at("log.c", 0));
+				}
+				drop(fatal);
+				if let Some(abort) = lock(&inner.abort).as_ref() {
+					abort.store(true, Ordering::Relaxed);
+				}
 			}
 		}
 	}

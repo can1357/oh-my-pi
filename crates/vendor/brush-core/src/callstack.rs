@@ -608,6 +608,11 @@ impl CallStack {
 		self.active_trap_signals.contains(&signal)
 	}
 
+	/// Returns whether any trap handler is currently running.
+	pub fn is_any_trap_active(&self) -> bool {
+		!self.active_trap_signals.is_empty()
+	}
+
 	/// Clears the set of active trap signals. This should be called when
 	/// creating subshells so they start with fresh trap execution state
 	/// independent of the parent shell's currently-executing traps.

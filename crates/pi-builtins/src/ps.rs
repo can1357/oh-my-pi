@@ -363,81 +363,91 @@ impl builtins::Command for PsCommand {
 		let argv = self.argv.clone();
 		let paths = ShellPaths::new(&context);
 		async move {
-			let options = match parse_ps_args(&argv, &paths) {
-				Ok(ParsePsResult::Options(options)) => *options,
-				Ok(ParsePsResult::Help) => {
-					write_ps_help(context.stdout())?;
-					return Ok(ExecutionResult::success());
-				},
-				Ok(ParsePsResult::Version) => {
-					writeln!(context.stdout(), "ps {}", env!("CARGO_PKG_VERSION"))?;
-					return Ok(ExecutionResult::success());
-				},
-				Err((code, message)) => {
-					writeln!(context.stderr(), "ps: {message}")?;
-					return Ok(ExecutionResult::new(code));
-				},
-			};
-			if context.is_cancelled() {
-				return Ok(ExecutionExitCode::Interrupted.into());
+			// procps `ps` catches SIGPIPE and exits 0 at once when a write (its
+			// help, version, a diagnostic, the table) finds a pipe with no
+			// reader, whatever the shell's disposition (measured against
+			// procps-ng under Bash 5.2.21).
+			match run_ps(&argv, &paths, &context) {
+				Err(error) if error.is_broken_pipe() => Ok(ExecutionResult::success()),
+				result => result,
 			}
-
-			let mut processes = ProcInfo::all();
-			let current_pid = i32::try_from(std::process::id()).ok();
-			let current =
-				current_pid.and_then(|pid| processes.iter().find(|process| process.pid() == pid));
-			let current_user = current.and_then(|process| {
-				process
-					.effective_user_id()
-					.or_else(|| process.real_user_id())
-			});
-			let current_terminal = current.and_then(ProcInfo::terminal_id);
-			let current_session = current.and_then(ProcInfo::session_id);
-			processes.retain(|process| {
-				ps_process_selected(
-					process,
-					&options,
-					current_pid,
-					current_user,
-					current_terminal,
-					current_session,
-				)
-			});
-
-			let mut threads = if options.threads {
-				crate::proc_snapshot::threads_by_pid(&processes)
-			} else {
-				HashMap::new()
-			};
-			let now = SystemTime::now();
-			let mut rows: Vec<_> = processes
-				.into_iter()
-				.map(|process| {
-					let threads = threads.remove(&process.pid()).unwrap_or_default();
-					PsProcessRow::from_process(process, threads, now, options.command_only)
-				})
-				.collect();
-			// Filtered on the row's own read: a second read of a live state can
-			// disagree with the STAT column it prints.
-			if options.running_only {
-				rows.retain(|row| row.state == 'R');
-			}
-			sort_ps_rows(&mut rows, &options.sort);
-			let columns = ps_columns(&options);
-			let output = render_ps_table(&rows, &columns, options.no_headers);
-			if let Err(err) = write!(context.stdout(), "{output}") {
-				if err.kind() == io::ErrorKind::BrokenPipe {
-					return Ok(ExecutionResult::new(crate::host::SIGPIPE_EXIT_CODE as u8));
-				}
-				return Err(err.into());
-			}
-			Ok(if rows.is_empty() {
-				ExecutionResult::new(1)
-			} else {
-				ExecutionResult::success()
-			})
 		}
 	}
+}
+
+/// Runs `ps` with `argv`, writing to `context`'s streams.
+fn run_ps<SE: brush_core::ShellExtensions>(
+	argv: &[String],
+	paths: &ShellPaths,
+	context: &ExecutionContext<'_, SE>,
+) -> std::result::Result<ExecutionResult, brush_core::Error> {
+	let options = match parse_ps_args(argv, paths) {
+		Ok(ParsePsResult::Options(options)) => *options,
+		Ok(ParsePsResult::Help) => {
+			write_ps_help(context.stdout())?;
+			return Ok(ExecutionResult::success());
+		},
+		Ok(ParsePsResult::Version) => {
+			writeln!(context.stdout(), "ps {}", env!("CARGO_PKG_VERSION"))?;
+			return Ok(ExecutionResult::success());
+		},
+		Err((code, message)) => {
+			writeln!(context.stderr(), "ps: {message}")?;
+			return Ok(ExecutionResult::new(code));
+		},
+	};
+	if context.is_cancelled() {
+		return Ok(ExecutionExitCode::Interrupted.into());
+	}
+
+	let mut processes = ProcInfo::all();
+	let current_pid = i32::try_from(std::process::id()).ok();
+	let current = current_pid.and_then(|pid| processes.iter().find(|process| process.pid() == pid));
+	let current_user = current.and_then(|process| {
+		process
+			.effective_user_id()
+			.or_else(|| process.real_user_id())
+	});
+	let current_terminal = current.and_then(ProcInfo::terminal_id);
+	let current_session = current.and_then(ProcInfo::session_id);
+	processes.retain(|process| {
+		ps_process_selected(
+			process,
+			&options,
+			current_pid,
+			current_user,
+			current_terminal,
+			current_session,
+		)
+	});
+
+	let mut threads = if options.threads {
+		crate::proc_snapshot::threads_by_pid(&processes)
+	} else {
+		HashMap::new()
+	};
+	let now = SystemTime::now();
+	let mut rows: Vec<_> = processes
+		.into_iter()
+		.map(|process| {
+			let threads = threads.remove(&process.pid()).unwrap_or_default();
+			PsProcessRow::from_process(process, threads, now, options.command_only)
+		})
+		.collect();
+	// Filtered on the row's own read: a second read of a live state can
+	// disagree with the STAT column it prints.
+	if options.running_only {
+		rows.retain(|row| row.state == 'R');
+	}
+	sort_ps_rows(&mut rows, &options.sort);
+	let columns = ps_columns(&options);
+	let output = render_ps_table(&rows, &columns, options.no_headers);
+	write!(context.stdout(), "{output}")?;
+	Ok(if rows.is_empty() {
+		ExecutionResult::new(1)
+	} else {
+		ExecutionResult::success()
+	})
 }
 
 fn parse_ps_args(argv: &[String], paths: &ShellPaths) -> std::result::Result<ParsePsResult, (u8, String)> {

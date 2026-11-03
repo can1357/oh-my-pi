@@ -187,7 +187,8 @@ pub fn default_builtins<SE: brush_core::ShellExtensions>(
 ///
 /// These are kept out of [`default_builtins`] because they shadow real system
 /// binaries: the embedding shell decides whether to install them (and may
-/// withhold the destructive ones — `rm`, `mv`, `cp`, `ln`).
+/// withhold the destructive ones — `rm`, `mv`, `cp`, `ln`). Each stands in for
+/// its program, so a broken pipe ends only the utility, not the shell.
 #[allow(clippy::too_many_lines, reason = "one line per utility")]
 pub fn utility_builtins<SE: brush_core::ShellExtensions>()
 -> Vec<(&'static str, builtins::Registration<SE>)> {
@@ -343,7 +344,7 @@ pub fn utility_builtins<SE: brush_core::ShellExtensions>()
 	#[cfg(feature = "util.yes")]
 	m.push(("yes", yes::yes_builtin::<SE>()));
 
-	m
+	m.into_iter().map(|(name, registration)| (name, registration.program())).collect()
 }
 
 /// Returns the process-inspection and process-control builtins:
@@ -352,7 +353,8 @@ pub fn utility_builtins<SE: brush_core::ShellExtensions>()
 /// Kept separate from [`default_builtins`] because they shadow real system
 /// binaries, and separate from [`utility_builtins`] because the embedding shell
 /// installs them unconditionally — they exist so a long-lived embedded shell can
-/// inspect and control its own children without forking.
+/// inspect and control its own children without forking. Each stands in for
+/// its program, so a broken pipe ends only the command, not the shell.
 pub fn process_builtins<SE: brush_core::ShellExtensions>()
 -> Vec<(&'static str, builtins::Registration<SE>)> {
 	#[allow(unused_mut, reason = "empty when no process features are enabled")]
@@ -381,5 +383,5 @@ pub fn process_builtins<SE: brush_core::ShellExtensions>()
 	#[cfg(feature = "util.top")]
 	m.push(("top", builtin::<top::TopCommand, SE>()));
 
-	m
+	m.into_iter().map(|(name, registration)| (name, registration.program())).collect()
 }

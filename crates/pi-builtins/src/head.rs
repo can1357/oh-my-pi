@@ -1453,7 +1453,7 @@ impl Utility for Head {
 				// A dead pipe ends the whole invocation; any other I/O error
 				// only fails this operand, and GNU keeps going.
 				if err.kind() == io::ErrorKind::BrokenPipe {
-					return crate::host::SIGPIPE_EXIT_CODE;
+					return crate::host::BROKEN_WRITE;
 				}
 				host.error(HeadError::Io { name, err }, 1);
 			}

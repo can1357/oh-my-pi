@@ -1,7 +1,7 @@
 //! `timeout` builtin, moved from `pi-shell`.
 
 use std::{
-	io::Write,
+	io::{self, Write},
 	sync::{Arc, Mutex},
 	time::Duration,
 };
@@ -14,7 +14,7 @@ use clap::Parser;
 use tokio::time;
 use tokio_util::sync::CancellationToken;
 
-use crate::host::{parse_duration, quote_arg};
+use crate::host::{ended_by_message, parse_duration, quote_arg};
 
 /// GNU timeout's exit status for its own usage/internal errors.
 const EXIT_TIMEOUT_FAILURE: u8 = 125;
@@ -153,7 +153,7 @@ impl builtins::Command for TimeoutCommand {
 
 	async fn execute<SE: brush_core::ShellExtensions>(
 		&self,
-		context: ExecutionContext<'_, SE>,
+		mut context: ExecutionContext<'_, SE>,
 	) -> std::result::Result<ExecutionResult, brush_core::Error> {
 		if context.is_cancelled() {
 			return Ok(ExecutionExitCode::Interrupted.into());
@@ -162,30 +162,29 @@ impl builtins::Command for TimeoutCommand {
 			Ok(args) => args,
 			Err(err) => {
 				// clap reports `--help` as an error; that belongs on stdout
-				// with a success status, real usage errors exit 125.
+				// with a success status, real usage errors exit 125. A message
+				// that finds a pipe with no reader ends `timeout` as SIGPIPE
+				// ends the program (see `host::ended_by_message`).
 				let rendered = err.to_string();
-				if err.use_stderr() {
-					let _ = write!(context.stderr(), "{rendered}");
-					return Ok(ExecutionResult::new(EXIT_TIMEOUT_FAILURE));
-				}
-				let _ = write!(context.stdout(), "{rendered}");
-				return Ok(ExecutionResult::success());
+				let (written, status) = if err.use_stderr() {
+					(write!(context.stderr(), "{rendered}"), ExecutionResult::new(EXIT_TIMEOUT_FAILURE))
+				} else {
+					(write!(context.stdout(), "{rendered}"), ExecutionResult::success())
+				};
+				return ended_by_message(&mut context, "timeout", EXIT_TIMEOUT_FAILURE, written, status);
 			},
 		};
 		let Some(limit) = parse_duration(&args.duration) else {
-			let _ = writeln!(
-				context.stderr(),
-				"timeout: invalid time interval '{}'",
-				args.duration
-			);
+			let written = writeln!(context.stderr(), "timeout: invalid time interval '{}'", args.duration);
+			context.keep_broken_pipe(written)?;
 			return Ok(ExecutionResult::new(EXIT_TIMEOUT_FAILURE));
 		};
 		let kill_after = match &args.kill_after {
 			Some(spec) => match parse_duration(spec) {
 				Some(duration) => Some(duration),
 				None => {
-					let _ =
-						writeln!(context.stderr(), "timeout: invalid time interval '{spec}'");
+					let written = writeln!(context.stderr(), "timeout: invalid time interval '{spec}'");
+					context.keep_broken_pipe(written)?;
 					return Ok(ExecutionResult::new(EXIT_TIMEOUT_FAILURE));
 				},
 			},
@@ -195,7 +194,8 @@ impl builtins::Command for TimeoutCommand {
 			Some(spec) => match parse_signal(spec) {
 				Some(signal) => signal,
 				None => {
-					let _ = writeln!(context.stderr(), "timeout: '{spec}': invalid signal");
+					let written = writeln!(context.stderr(), "timeout: '{spec}': invalid signal");
+					context.keep_broken_pipe(written)?;
 					return Ok(ExecutionResult::new(EXIT_TIMEOUT_FAILURE));
 				},
 			},
@@ -230,6 +230,12 @@ impl builtins::Command for TimeoutCommand {
 		// Grab an owned stderr handle up front: `run_future` below holds the
 		// shell mutably, so `context.stderr()` is unavailable once it exists.
 		let mut stderr = context.stderr();
+		// Whether a verbose note that finds a pipe with no reader is a failed
+		// write (SIGPIPE ignored) rather than the death of `timeout`.
+		let sigpipe_ignored = context.shell.ignores_sigpipe();
+		// A failed note, with SIGPIPE ignored: GNU timeout goes on, and fails
+		// with 125 at exit when it finds its standard error unwritable.
+		let mut note_failed = false;
 		let outer_cancel = context.cancel_token();
 		let source_info = SourceInfo::from("pi-natives:timeout");
 		let run_future = context.shell.run_string(command_line, &source_info, &params);
@@ -262,14 +268,31 @@ impl builtins::Command for TimeoutCommand {
 			() = &mut deadline => {},
 		}
 
-		// The limit expired: deliver the configured signal like GNU timeout.
-		if args.verbose {
-			let _ = writeln!(
+		// The limit expired: deliver the configured signal like GNU timeout. A
+		// verbose note that finds a pipe with no reader kills GNU timeout with
+		// SIGPIPE before it sends the signal, and its command runs on. A
+		// command running in this shell cannot outlive the builtin that runs
+		// it, so this one waits, unsignalled, for the command to end on its
+		// own, then reports SIGPIPE's status.
+		if args.verbose
+			&& writeln!(
 				stderr,
 				"timeout: sending signal {} to command '{}'",
 				signal_display(signal),
 				args.command[0]
-			);
+			)
+			.is_err_and(|error| error.kind() == io::ErrorKind::BrokenPipe)
+		{
+			if !sigpipe_ignored {
+				tokio::select! {
+					_ = &mut run_future => return Ok(ExecutionExitCode::BrokenPipe.into()),
+					() = &mut outer_cancelled => {
+						child_cancel.cancel();
+						return Ok(ExecutionExitCode::Interrupted.into());
+					},
+				}
+			}
+			note_failed = true;
 		}
 		let signalled = spawns.signal(signal, !args.foreground);
 		if !signalled {
@@ -308,12 +331,19 @@ impl builtins::Command for TimeoutCommand {
 				return Ok(ExecutionExitCode::Interrupted.into());
 			},
 			() = &mut kill_deadline => {
-				if args.verbose {
-					let _ = writeln!(
-						stderr,
-						"timeout: sending signal KILL to command '{}'",
-						args.command[0]
-					);
+				// As above: a KILL note that finds a pipe with no reader kills
+				// GNU timeout before it sends KILL.
+				if args.verbose
+					&& writeln!(stderr, "timeout: sending signal KILL to command '{}'", args.command[0])
+						.is_err_and(|error| error.kind() == io::ErrorKind::BrokenPipe)
+				{
+					if !sigpipe_ignored {
+						tokio::select! {
+							_ = &mut run_future => return Ok(ExecutionExitCode::BrokenPipe.into()),
+							() = &mut outer_cancelled => return Ok(ExecutionExitCode::Interrupted.into()),
+						}
+					}
+					note_failed = true;
 				}
 				killed = true;
 				let kill = TrapSignal::try_from("KILL").expect("SIGKILL must be a known signal");
@@ -328,6 +358,9 @@ impl builtins::Command for TimeoutCommand {
 			},
 		};
 
+		if note_failed {
+			return Ok(ExecutionResult::new(EXIT_TIMEOUT_FAILURE));
+		}
 		// Exit status per GNU: the command's own status under
 		// `--preserve-status`; 137 when it died from SIGKILL; else 124.
 		if args.preserve_status {

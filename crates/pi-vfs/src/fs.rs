@@ -238,13 +238,14 @@ fn plan_scoped_open(scope: &Scope, path: &Path, options: &OpenOptions) -> Scoped
 fn native_open_scoped(scope: &Scope, path: &Path, options: &OpenOptions) -> io::Result<File> {
 	match plan_scoped_open(scope, path, options) {
 		#[cfg(unix)]
-		ScopedOpen::Typed { token, poll } => {
-			Ok(native_open(scope, path, options)?.bind_host(token, poll))
-		},
+		ScopedOpen::Typed { token, poll } => Ok(native_open(scope, path, options)?
+			.bind_host(token, poll)
+			.bind_writes(scope)),
 		#[cfg(unix)]
 		ScopedOpen::Fifo { token, end } => Ok(FifoOpening::start(scope, path, options, end, &token)?
 			.wait(&token)?
-			.bind_host(token, true)),
+			.bind_host(token, true)
+			.bind_writes(scope)),
 		ScopedOpen::Plain => Ok(native_open(scope, path, options)?.bind(scope)),
 	}
 }
@@ -263,14 +264,15 @@ async fn native_open_scoped_async(
 ) -> io::Result<File> {
 	match plan_scoped_open(scope, path, options) {
 		#[cfg(unix)]
-		ScopedOpen::Typed { token, poll } => {
-			Ok(native_open(scope, path, options)?.bind_host(token, poll))
-		},
+		ScopedOpen::Typed { token, poll } => Ok(native_open(scope, path, options)?
+			.bind_host(token, poll)
+			.bind_writes(scope)),
 		#[cfg(unix)]
 		ScopedOpen::Fifo { token, end } => Ok(FifoOpening::start(scope, path, options, end, &token)?
 			.wait_async(&token)
 			.await?
-			.bind_host(token, true)),
+			.bind_host(token, true)
+			.bind_writes(scope)),
 		ScopedOpen::Plain => Ok(native_open(scope, path, options)?.bind(scope)),
 	}
 }
@@ -716,6 +718,7 @@ impl Fs {
 				cancel:        None,
 				closes:        Some(Arc::new(CloseTracker::default())),
 				creation_mask: None,
+				write_errors:  None,
 			},
 		}
 	}
@@ -764,6 +767,16 @@ impl Fs {
 	pub fn with_cancellation(&self, token: CancellationToken) -> Self {
 		let mut fs = self.clone();
 		fs.scope.cancel = Some(token);
+		fs
+	}
+
+	/// A view that tells `write_errors` of every error a write to a file
+	/// opened through it returns, before the writer sees it, so a caller can
+	/// act on a failed write wherever the file goes (a shell builtin raising
+	/// SIGPIPE at a pipe with no reader). Other operations are unaffected.
+	pub fn with_write_errors(&self, write_errors: crate::WriteErrors) -> Self {
+		let mut fs = self.clone();
+		fs.scope.write_errors = Some(write_errors);
 		fs
 	}
 
@@ -892,7 +905,9 @@ impl Fs {
 				.guard(provider.open(path, options))
 				.await?
 				.bind(&self.scope)),
-			Route::Mounted(file) => mount_open_async(file, options).await,
+			Route::Mounted(file) => Ok(mount_open_async(file, options)
+				.await?
+				.bind_writes(&self.scope)),
 		}
 	}
 
@@ -969,11 +984,14 @@ impl Fs {
 	pub async fn write(&self, path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> io::Result<()> {
 		let (path, contents) = (path.as_ref(), contents.as_ref());
 		match self.route(path)? {
-			Route::Native => std::fs::write(path, contents),
-			Route::Provider(provider) => self.guard(provider.write(path, contents)).await,
+			Route::Native => self.scope.wrote(std::fs::write(path, contents)),
+			Route::Provider(provider) => self
+				.scope
+				.wrote(self.guard(provider.write(path, contents)).await),
 			Route::Mounted(file) => {
 				mount_open_async(file, &create_options())
 					.await?
+					.bind_writes(&self.scope)
 					.write_all_async(contents)
 					.await
 			},
@@ -1133,7 +1151,7 @@ impl Fs {
 	pub async fn copy(&self, from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<u64> {
 		let (from, to) = (from.as_ref(), to.as_ref());
 		match (self.route(from)?, self.route(to)?) {
-			(Route::Native, Route::Native) => std::fs::copy(from, to),
+			(Route::Native, Route::Native) => self.scope.wrote(std::fs::copy(from, to)),
 			(Route::Mounted(_), _) | (_, Route::Mounted(_)) => {
 				let source = self.open(from).await?;
 				let target = self.create(to).await?;
@@ -1474,6 +1492,11 @@ impl BlockingFs {
 		Self { fs: self.fs.with_cancellation(token), runtime: self.runtime.clone() }
 	}
 
+	/// See [`Fs::with_write_errors`].
+	pub fn with_write_errors(&self, write_errors: crate::WriteErrors) -> Self {
+		Self { fs: self.fs.with_write_errors(write_errors), runtime: self.runtime.clone() }
+	}
+
 	/// See [`Fs::creation_mask`].
 	pub const fn creation_mask(&self) -> Option<u32> {
 		self.fs.scope.creation_mask
@@ -1517,7 +1540,7 @@ impl BlockingFs {
 			Route::Provider(provider) => {
 				Ok(self.run(provider.open(path, options))?.bind(&self.fs.scope))
 			},
-			Route::Mounted(file) => mount_open(file, options),
+			Route::Mounted(file) => Ok(mount_open(file, options)?.bind_writes(&self.fs.scope)),
 		}
 	}
 
@@ -1592,11 +1615,15 @@ impl BlockingFs {
 	pub fn write(&self, path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> io::Result<()> {
 		let (path, contents) = (path.as_ref(), contents.as_ref());
 		match self.fs.route(path)? {
-			Route::Native => std::fs::write(path, contents),
-			Route::Provider(provider) => self.run(provider.write(path, contents)),
-			Route::Mounted(file) => {
-				io::Write::write_all(&mut mount_open(file, &create_options())?, contents)
-			},
+			Route::Native => self.fs.scope.wrote(std::fs::write(path, contents)),
+			Route::Provider(provider) => self
+				.fs
+				.scope
+				.wrote(self.run(provider.write(path, contents))),
+			Route::Mounted(file) => io::Write::write_all(
+				&mut mount_open(file, &create_options())?.bind_writes(&self.fs.scope),
+				contents,
+			),
 		}
 	}
 
@@ -1742,7 +1769,7 @@ impl BlockingFs {
 	pub fn copy(&self, from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<u64> {
 		let (from, to) = (from.as_ref(), to.as_ref());
 		match (self.fs.route(from)?, self.fs.route(to)?) {
-			(Route::Native, Route::Native) => std::fs::copy(from, to),
+			(Route::Native, Route::Native) => self.fs.scope.wrote(std::fs::copy(from, to)),
 			(Route::Mounted(_), _) | (_, Route::Mounted(_)) => {
 				let source = self.open(from)?;
 				let target = self.create(to)?;

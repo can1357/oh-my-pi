@@ -1428,6 +1428,10 @@ impl Utility for Jq {
 		let stdout_is_terminal = host.stdout.is_terminal();
 		let color = !cli.in_place && cli.color_if(|| stdout_is_terminal);
 
+		// `jq --unbuffered` flushes each output: a broken pipe kills it there.
+		if cli.unbuffered {
+			host.unbuffer_stdout();
+		}
 		let mut stdout = host.stdout_writer();
 		match real_main(&cli, host, &mut stdout, color) {
 			Ok(exit) => exit,

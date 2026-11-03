@@ -158,6 +158,19 @@ pub(crate) struct TopCommand {
 	/// Columns to display, in order (comma-separated, macOS `-stats` style).
 	#[arg(long = "stats", value_enum, value_delimiter = ',', ignore_case = true)]
 	stats: Vec<TopStat>,
+
+	/// Help, version or an option error to report instead of running (see
+	/// [`TopCommand::new`]).
+	#[arg(skip)]
+	usage: Option<TopUsage>,
+}
+
+/// What `top` reports instead of running, as procps `top` does: its help or
+/// version on standard output with status 0, an option error on standard
+/// error with status 1.
+struct TopUsage {
+	text:  String,
+	error: bool,
 }
 
 #[derive(Clone)]
@@ -211,7 +224,22 @@ impl builtins::Command for TopCommand {
 	where
 		I: IntoIterator<Item = String>,
 	{
-		Self::try_parse_from(args.into_iter().map(normalize_top_flag))
+		match Self::try_parse_from(args.into_iter().map(normalize_top_flag)) {
+			Err(error) => {
+				let mut command = Self::try_parse_from(["top"])?;
+				let mut text = error.to_string();
+				if !text.ends_with('\n') {
+					text.push('\n');
+				}
+				let error = !matches!(
+					error.kind(),
+					clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+				);
+				command.usage = Some(TopUsage { text, error });
+				Ok(command)
+			},
+			parsed => parsed,
+		}
 	}
 
 	fn execute<SE: brush_core::ShellExtensions>(
@@ -226,23 +254,35 @@ impl builtins::Command for TopCommand {
 		let sort = self.sort;
 		let full_command = self.full_command;
 		let _ = self.batch;
+		let usage = self.usage.as_ref().map(|usage| (usage.text.clone(), usage.error));
 		let stats = if self.stats.is_empty() {
 			DEFAULT_TOP_STATS.to_vec()
 		} else {
 			self.stats.clone()
 		};
+		// procps `top` catches SIGPIPE and goes on to its usual status, so a
+		// write that finds a pipe with no reader changes nothing but ends its
+		// output (measured against procps-ng under Bash 5.2.21).
 		async move {
+			if let Some((text, error)) = usage {
+				if error {
+					let _ = write!(context.stderr(), "{text}");
+					return Ok(ExecutionResult::new(1));
+				}
+				let _ = write!(context.stdout(), "{text}");
+				return Ok(ExecutionResult::success());
+			}
 			if !delay.is_finite() || delay < 0.0 || delay > Duration::MAX.as_secs_f64() {
-				writeln!(context.stderr(), "top: invalid delay '{delay}'")?;
+				let _ = writeln!(context.stderr(), "top: invalid delay '{delay}'");
 				return Ok(ExecutionResult::new(1));
 			}
 			if row_limit == Some(0) {
-				writeln!(context.stderr(), "top: row count must be greater than zero")?;
+				let _ = writeln!(context.stderr(), "top: row count must be greater than zero");
 				return Ok(ExecutionResult::new(1));
 			}
 			#[cfg(target_os = "windows")]
 			if user.is_some() {
-				writeln!(context.stderr(), "top: user filtering is unavailable on Windows")?;
+				let _ = writeln!(context.stderr(), "top: user filtering is unavailable on Windows");
 				return Ok(ExecutionResult::new(2));
 			}
 
@@ -321,11 +361,9 @@ impl builtins::Command for TopCommand {
 
 				sort_top_rows(&mut rows, sort);
 				let output = render_top_snapshot(&rows, row_limit, sample + 1, &stats);
-				if let Err(err) = write!(context.stdout(), "{output}") {
-					if err.kind() == io::ErrorKind::BrokenPipe {
-						return Ok(ExecutionResult::new(crate::host::SIGPIPE_EXIT_CODE as u8));
-					}
-					return Err(err.into());
+				match write!(context.stdout(), "{output}") {
+					Err(err) if err.kind() == io::ErrorKind::BrokenPipe => return Ok(ExecutionResult::success()),
+					written => written?,
 				}
 
 				sample += 1;

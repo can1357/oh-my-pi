@@ -282,6 +282,10 @@ impl<SE: extensions::ShellExtensions> Default for Shell<SE> {
 			history: None,
 			resource_limits: crate::rlimits::ResourceLimits::default(),
 			umask: None,
+			wrote_to_broken_pipe: false,
+			sigpipe_trap_pending: false,
+			trap_return_depth: 0,
+			function_trap_saves: Vec::new(),
 		}
 	}
 }

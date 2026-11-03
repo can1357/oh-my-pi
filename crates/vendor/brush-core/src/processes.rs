@@ -208,6 +208,18 @@ impl ChildProcess {
 		}
 	}
 
+	/// Lets the process run on without this handle, as a process the shell no
+	/// longer waits for (a pipeline whose DEBUG trap exited the shell before a
+	/// later command started): a background task waits for it and reaps it,
+	/// and nothing kills it.
+	pub(crate) fn detach(mut self) {
+		self.reaped = true;
+		let exec_future = std::mem::replace(&mut self.exec_future, Box::pin(std::future::pending()));
+		tokio::spawn(async move {
+			let _ = exec_future.await;
+		});
+	}
+
 	/// Sends a kill signal if the process has not already been reaped.
 	fn kill(&mut self) {
 		if self.reaped {

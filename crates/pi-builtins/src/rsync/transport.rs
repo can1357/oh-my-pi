@@ -207,7 +207,7 @@ impl ChildGuard {
 		report: bool,
 		role: Role,
 	) -> Self {
-		let stderr = child.stderr.take().map(|err| env.forward_stderr(err));
+		let stderr = env.forward_stderr(&mut child);
 		let child = Arc::new(Mutex::new(child));
 		let (stop, stopped) = flume::bounded::<()>(1);
 		let watchdog = {

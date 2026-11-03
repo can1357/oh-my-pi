@@ -1478,6 +1478,9 @@ async fn run_shell_command_once(
 	});
 	ensure_trailing_newline_for_heredoc(&mut command);
 	let source_info = SourceInfo::from("pi-natives:command");
+	// Each command starts in a live shell, whatever a broken pipe ended the
+	// last one with.
+	session.shell.forget_broken_pipe_write();
 	let mut result = session
 		.shell
 		.run_string(command, &source_info, &params)
@@ -1629,6 +1632,7 @@ async fn run_shell_command_streams_in_filesystem(
 	let mut command = options.command.clone();
 	ensure_trailing_newline_for_heredoc(&mut command);
 	let source_info = SourceInfo::from("pi-shell:streams");
+	session.shell.forget_broken_pipe_write();
 	let mut result = session
 		.shell
 		.run_string(command, &source_info, &params)

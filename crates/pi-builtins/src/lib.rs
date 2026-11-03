@@ -118,6 +118,7 @@ mod file_backup;
 mod fsmeta;
 mod host;
 mod stdio;
+mod stdio_buffer;
 /// The shell's locale categories, shared by the locale-aware utilities.
 #[cfg(any(
 	feature = "util.date",

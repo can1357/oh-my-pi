@@ -3001,7 +3001,15 @@ fn copy_data(
 					options.debug && !options.attributes_only,
 					source,
 					dest,
-				)?;
+				)
+				// The kernel copy writes the destination's host file directly;
+				// its failure is the destination's write failure (a pipe with
+				// no reader raises SIGPIPE), as through `dest_file`.
+				.inspect_err(|error| {
+					if let CpError::IoErr(error) | CpError::IoErrContext(error, _) = error {
+						dest_file.report_write_error(error);
+					}
+				})?;
 				Some(CopyDebug { reflink: reflink_debug, ..copy_debug })
 			},
 			_ => None,

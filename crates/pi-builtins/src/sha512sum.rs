@@ -21,6 +21,8 @@ matches_parser!(Sha512sum, app);
 impl Utility for Sha512sum {
 	const NAME: &'static str = "sha512sum";
 	const USAGE_ERROR: u8 = 2;
+	/// GNU's `exit_failure`.
+	const OUTPUT_ERROR: u8 = 1;
 
 	fn run(self, host: &mut Host) -> i32 {
 		cksum::run(host, AlgoKind::Sha512, self.matches, None)

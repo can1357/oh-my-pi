@@ -1566,7 +1566,7 @@ async fn execute_search<M: Matcher + Clone + Send + Sync + 'static>(
 				Ok(matched) => any_match |= matched,
 				// Abort remaining work; the host maps the BrokenPipe status.
 				Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {
-					return crate::host::SIGPIPE_EXIT_CODE;
+					return crate::host::BROKEN_WRITE;
 				},
 				Err(error) => {
 					had_error = true;
@@ -1603,7 +1603,7 @@ async fn execute_search<M: Matcher + Clone + Send + Sync + 'static>(
 						.await
 						{
 							Ok(matched) => any_match |= matched,
-							Err(_) => return crate::host::SIGPIPE_EXIT_CODE,
+							Err(_) => return crate::host::BROKEN_WRITE,
 						}
 					}
 				},
@@ -1649,16 +1649,16 @@ async fn execute_search<M: Matcher + Clone + Send + Sync + 'static>(
 					.write_all(&found.out)
 					.and_then(|()| if opts.line_buffered { out.flush() } else { Ok(()) });
 				if written.is_err() {
-					return crate::host::SIGPIPE_EXIT_CODE;
+					return crate::host::BROKEN_WRITE;
 				}
 				let _ = host.stderr.write_all(&found.err);
 				if host.flush_output().await.is_err() {
-					return crate::host::SIGPIPE_EXIT_CODE;
+					return crate::host::BROKEN_WRITE;
 				}
 				had_error |= found.had_error;
 				match found.matched {
 					Ok(matched) => any_match |= matched,
-					Err(_) => return crate::host::SIGPIPE_EXIT_CODE,
+					Err(_) => return crate::host::BROKEN_WRITE,
 				}
 			},
 			Err(error) => {
@@ -1673,11 +1673,11 @@ async fn execute_search<M: Matcher + Clone + Send + Sync + 'static>(
 
 	if let Err(error) = out.flush() {
 		if error.kind() == io::ErrorKind::BrokenPipe {
-			return crate::host::SIGPIPE_EXIT_CODE;
+			return crate::host::BROKEN_WRITE;
 		}
 	}
 	if host.flush_output().await.is_err() {
-		return crate::host::SIGPIPE_EXIT_CODE;
+		return crate::host::BROKEN_WRITE;
 	}
 	exit_status(opts.quiet, any_match, had_error)
 }
@@ -1772,6 +1772,10 @@ impl AsyncUtility for Grep {
 		binary_files: resolve_binary_files(&cli, &matches),
 	};
 	let follow_links = resolve_follow_links(&cli, &matches);
+	// GNU grep flushes each line it writes: a broken pipe kills it there.
+	if opts.line_buffered {
+		host.unbuffer_stdout();
+	}
 
 	match matcher {
 		Engine::Rust(matcher) => execute_search(

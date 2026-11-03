@@ -544,7 +544,7 @@ impl Run<'_> {
 		if let Ok(stdin) = self.host.stdin.file().try_clone() {
 			command = command.stdin(stdin);
 		}
-		match self.host.run_command(command) {
+		match self.host.exec_command(command) {
 			Ok(status) => Ok(status.code()),
 			Err(error) => {
 				let (code, text) = match error.kind() {

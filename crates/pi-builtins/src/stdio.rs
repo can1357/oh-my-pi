@@ -24,11 +24,14 @@
 #![allow(dead_code, reason = "consumed by the feature-gated utility modules")]
 
 #[cfg(unix)]
-use std::os::fd::{AsFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::{
 	io::{self, Read, Write},
 	path::Path,
-	sync::Arc,
+	sync::{
+		Arc,
+		atomic::{AtomicBool, Ordering},
+	},
 };
 
 use brush_core::openfiles::OpenFile;
@@ -54,10 +57,17 @@ const READ_CHUNK: usize = 64 * 1024;
 /// destination (`2>&1`) keep write order. The emulated-SIGPIPE and
 /// cancellation rules of the descriptor-backed writers hold: once the command
 /// is cancelled, writes and pending bytes are dropped; once a drain hit a
-/// closed reader, stderr output is discarded and stdout writes fail.
+/// closed reader, stderr output is discarded, and stdout output is dropped
+/// until the utility's output buffer would be written, then fails (see
+/// `OutputGate::record`). A standard-error handle (see
+/// [`AsyncOut::as_stderr`]) also dies at once at a write to a pipe whose
+/// reader has gone.
 #[derive(Clone)]
 pub(crate) struct AsyncOut {
 	shared: Arc<Shared>,
+	/// Whether this handle is a process's standard error, which a process
+	/// writes unbuffered.
+	unbuffered: bool,
 }
 
 struct Shared {
@@ -68,6 +78,14 @@ struct Shared {
 	handle:       OpenFile,
 	regular_file: bool,
 	gate:         OutputGate,
+	/// Bytes the program would already have written are pending (see
+	/// [`AsyncOut::owes_delivery`]).
+	owed:         AtomicBool,
+	/// The owed bytes are a write the program made at once (an unbuffered
+	/// standard-error write, or its explicit flush: see
+	/// [`AsyncOut::flush_now`]): delivering them to a pipe with no reader
+	/// kills the utility at once, or, SIGPIPE ignored, fails at once.
+	at_once:      AtomicBool,
 }
 
 enum Sink {
@@ -165,8 +183,26 @@ impl AsyncOut {
 
 	fn new(sink: Sink, handle: OpenFile, regular_file: bool, gate: OutputGate) -> Self {
 		Self {
-			shared: Arc::new(Shared { pending: Mutex::default(), sink, handle, regular_file, gate }),
+			shared:     Arc::new(Shared {
+				pending: Mutex::default(),
+				sink,
+				handle,
+				regular_file,
+				gate,
+				owed: AtomicBool::new(false),
+				at_once: AtomicBool::new(false),
+			}),
+			unbuffered: false,
 		}
+	}
+
+	/// This buffer as a process's standard error, which a process writes
+	/// unbuffered: a write when the destination is a pipe whose reader has
+	/// gone raises SIGPIPE at once (see [`OutputGate::die_of_closed_reader`]),
+	/// so the utility goes on to nothing more, as a process dies at that
+	/// write. The bytes themselves are still delivered at the next drain.
+	pub fn as_stderr(&self) -> Self {
+		Self { shared: Arc::clone(&self.shared), unbuffered: true }
 	}
 
 	/// Whether `self` and `other` are handles onto one buffer.
@@ -185,14 +221,32 @@ impl AsyncOut {
 		self.shared.handle.is_terminal()
 	}
 
+	/// Whether bytes are pending that the program would already have written:
+	/// a standard-error write, which is unbuffered (on a native descriptor; a
+	/// provider file written from a thread that must not block, or while
+	/// another drain held the order lock), a standard-output write that filled
+	/// the program's buffer, or an explicit flush. The utility's body must not
+	/// run on until they are delivered (see `host::run_caught_async` and
+	/// `Host::deliver_owed_output`), as a process does nothing after such a
+	/// write before the write is done; a delivery that finds no reader kills
+	/// it at once (see `OutputGate::record_unbuffered`).
+	pub fn owes_delivery(&self) -> bool {
+		self.shared.owed.load(Ordering::Acquire)
+	}
+
 	/// Delivers the pending bytes: all of them when `full` or when the
 	/// destination is not a regular file, else only once 64 KiB are pending.
 	/// Returns at once when nothing is due.
 	///
-	/// A closed reader surfaces as [`io::ErrorKind::BrokenPipe`] and flips the
-	/// SIGPIPE state; a cancelled command drops the bytes silently.
+	/// A closed reader flips the SIGPIPE state and surfaces as
+	/// [`io::ErrorKind::BrokenPipe`], unless the death it raises is deferred
+	/// (see `Shared::delivered`); a cancelled command drops the bytes silently.
 	pub async fn drain(&self, full: bool) -> io::Result<()> {
 		if !self.shared.due(full) {
+			// Nothing pending: nothing is owed either.
+			if full {
+				self.shared.owed.store(false, Ordering::Release);
+			}
 			return Ok(());
 		}
 		match &self.shared.sink {
@@ -208,7 +262,16 @@ impl Shared {
 		pending > 0 && (full || !self.regular_file || pending >= FILE_DRAIN_THRESHOLD)
 	}
 
-	fn append(&self, buf: &[u8]) -> io::Result<()> {
+	/// Appends the bytes of a write; one the utility made to standard output
+	/// is `counted` toward its output buffer (see `OutputGate::wrote`). A
+	/// counted write that overflows the program's buffer is the program's own
+	/// write to the descriptor, owed at once (see
+	/// [`AsyncOut::owes_delivery`]).
+	fn append(&self, buf: &[u8], counted: bool) -> io::Result<()> {
+		if counted && self.gate.wrote(buf.len()) {
+			self.at_once.store(true, Ordering::Release);
+			self.owed.store(true, Ordering::Release);
+		}
 		if self.gate.discards() {
 			return Ok(());
 		}
@@ -217,6 +280,50 @@ impl Shared {
 		}
 		self.pending.lock().extend_from_slice(buf);
 		Ok(())
+	}
+
+	/// Makes a standard-error write act as an unbuffered one would, at once.
+	/// A native descriptor is checked without writing, raising SIGPIPE when
+	/// it is a pipe whose reader has gone, and its bytes are owed (see
+	/// [`AsyncOut::owes_delivery`]): the runtime's thread must not block on a
+	/// descriptor. A provider file, which has no such check, gets the pending
+	/// bytes written now through its synchronous API where the runtime allows
+	/// a blocking call (see [`sync_io_allowed`]); else they are owed.
+	fn deliver_unbuffered(&self) {
+		match &self.sink {
+			Sink::Native(_) => {
+				self.owed.store(true, Ordering::Release);
+				self.at_once.store(true, Ordering::Release);
+				#[cfg(unix)]
+				if !self.regular_file
+					&& let Ok(fd) = self.handle.try_borrow_as_fd()
+					&& reader_gone(fd)
+				{
+					self.gate.die_of_closed_reader();
+				}
+			},
+			Sink::Provider(order) => {
+				// Another drain may already have taken its batch: these bytes are
+				// owed until the next one.
+				let order = if sync_io_allowed() { order.try_lock().ok() } else { None };
+				let (Some(_order), Some(file)) = (order, self.handle.as_vfs()) else {
+					self.owed.store(true, Ordering::Release);
+					self.at_once.store(true, Ordering::Release);
+					return;
+				};
+				let bytes = std::mem::take(&mut *self.pending.lock());
+				if bytes.is_empty() || self.gate.discards() {
+					self.recycle(bytes);
+					return;
+				}
+				let mut writer = file;
+				let result = writer.write_all(&bytes).and_then(|()| writer.flush());
+				self.recycle(bytes);
+				if let Err(error) = &result {
+					self.gate.record_unbuffered(error);
+				}
+			},
+		}
 	}
 
 	/// Hands a delivered batch's allocation back for the next one.
@@ -231,8 +338,32 @@ impl Shared {
 		}
 	}
 
+	/// Notes how a delivery ended, returning its result as the utility sees
+	/// it. One the program made `at_once` (an unbuffered standard-error write,
+	/// an overflowing standard-output buffer, an explicit flush) failed at
+	/// once, killing the utility even on a destination its other stream
+	/// shares (`2>&1`). Any other standard-output delivery only marks the
+	/// pipe broken: SIGPIPE's death waits for the program's next write to the
+	/// descriptor, and the delivery succeeds, as the program's write into its
+	/// buffer does.
+	fn delivered(&self, result: io::Result<()>, at_once: bool) -> io::Result<()> {
+		if let Err(error) = &result {
+			if at_once {
+				self.gate.record_unbuffered(error);
+			} else {
+				self.gate.record(error);
+			}
+			if self.gate.discards() {
+				return Ok(());
+			}
+		}
+		result
+	}
+
 	async fn drain_provider(&self, order: &tokio::sync::Mutex<()>) -> io::Result<()> {
 		let _order = order.lock().await;
+		self.owed.store(false, Ordering::Release);
+		let at_once = self.at_once.swap(false, Ordering::AcqRel);
 		let bytes = std::mem::take(&mut *self.pending.lock());
 		let Some(file) = self.handle.as_vfs() else {
 			return Ok(());
@@ -246,15 +377,14 @@ impl Shared {
 			file.flush_async().await
 		}
 		.await;
-		if let Err(error) = &result {
-			self.gate.record(error);
-		}
 		self.recycle(bytes);
-		result
+		self.delivered(result, at_once)
 	}
 
 	async fn drain_native(&self, native: &tokio::sync::Mutex<Native>) -> io::Result<()> {
 		let mut native = native.lock().await;
+		self.owed.store(false, Ordering::Release);
+		let at_once = self.at_once.swap(false, Ordering::AcqRel);
 		let bytes = std::mem::take(&mut *self.pending.lock());
 		if bytes.is_empty() {
 			return Ok(());
@@ -267,27 +397,90 @@ impl Shared {
 			*native = Native::open(&self.handle, self.regular_file);
 		}
 		let (bytes, result) = native.write_all(bytes).await;
-		if let Err(error) = &result {
-			self.gate.record(error);
-		}
 		self.recycle(bytes);
-		result
+		self.delivered(result, at_once)
 	}
 }
 
 impl Write for AsyncOut {
 	fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-		self.shared.append(buf)?;
+		self.write_all(buf)?;
 		Ok(buf.len())
 	}
 
 	fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
-		self.shared.append(buf)
-	}
-
-	fn flush(&mut self) -> io::Result<()> {
+		self.shared.append(buf, !self.unbuffered)?;
+		// A write of no bytes writes nothing, and raises nothing.
+		if self.unbuffered && !buf.is_empty() {
+			self.shared.deliver_unbuffered();
+		}
 		Ok(())
 	}
+
+	/// A flush the port makes to deliver its output: the pending bytes are
+	/// owed (see [`AsyncOut::owes_delivery`]), as buffered writes. A flush the
+	/// program it stands in for makes is [`AsyncOut::flush_now`].
+	fn flush(&mut self) -> io::Result<()> {
+		if !self.shared.pending.lock().is_empty() {
+			self.shared.owed.store(true, Ordering::Release);
+		}
+		Ok(())
+	}
+}
+
+impl AsyncOut {
+	/// The program's explicit flush (`find -printf '\c'`, fd's final flush):
+	/// its buffer is written to the descriptor now and starts empty again, so
+	/// once its output finds the pipe's reader gone, SIGPIPE kills the
+	/// utility there, or, SIGPIPE ignored, the flush and every later write
+	/// fail (see [`AsyncOut::fails`]). Pending bytes are delivered at once.
+	pub(crate) fn flush_now(&self) {
+		self.shared.gate.flushed();
+		if !self.shared.pending.lock().is_empty() {
+			self.shared.at_once.store(true, Ordering::Release);
+			self.shared.owed.store(true, Ordering::Release);
+		}
+	}
+
+	/// Applies the program's standard-output stdio `calls` (see
+	/// `Host::account_stdout_by_calls`), made after their bytes were written
+	/// here: a call that writes to the descriptor makes the pending bytes
+	/// owed at once, so a pipe with no reader kills the utility before it
+	/// goes on to its next action.
+	pub(crate) fn stdio_calls(&self, calls: &[crate::stdio_buffer::StdioCall]) {
+		let mut writes = false;
+		for &call in calls {
+			writes |= self.shared.gate.stdio_call(call);
+		}
+		if writes && !self.shared.pending.lock().is_empty() {
+			self.shared.at_once.store(true, Ordering::Release);
+			self.shared.owed.store(true, Ordering::Release);
+		}
+	}
+
+	/// Whether writes to this stream fail (see `OutputGate::fails`).
+	pub(crate) fn fails(&self) -> bool {
+		self.shared.gate.fails()
+	}
+}
+
+/// Whether the current thread may make a blocking call that drives a
+/// provider future (see `pi_vfs`'s synchronous `File` I/O): anywhere but on a
+/// current-thread runtime's own thread.
+fn sync_io_allowed() -> bool {
+	tokio::runtime::Handle::try_current()
+		.map_or(true, |handle| handle.runtime_flavor() != tokio::runtime::RuntimeFlavor::CurrentThread)
+}
+
+/// Whether `fd` is a pipe whose reader has gone (`poll` reports `POLLERR`
+/// for the write end), checked without waiting.
+#[cfg(unix)]
+fn reader_gone(fd: BorrowedFd<'_>) -> bool {
+	let mut pollfd = libc::pollfd { fd: fd.as_raw_fd(), events: libc::POLLOUT, revents: 0 };
+	// SAFETY: one `pollfd` valid for the call; `fd` is borrowed from a live
+	// descriptor for the whole call.
+	let ready = unsafe { libc::poll(&raw mut pollfd, 1, 0) };
+	ready > 0 && pollfd.revents & libc::POLLERR != 0
 }
 
 /// An input read without blocking the runtime: a provider file, a native descriptor (readiness-driven), a regular file (inline reads), or an in-process stream.

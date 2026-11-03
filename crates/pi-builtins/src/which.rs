@@ -34,6 +34,9 @@ pub(crate) struct WhichCli {
 impl Utility for WhichCli {
 	const NAME: &'static str = "which";
 	const USAGE_ERROR: u8 = 2;
+	/// debianutils `which`, a shell script, ends with 1 when its `printf`
+	/// fails.
+	const OUTPUT_ERROR: u8 = 1;
 
 	fn run(self, host: &mut Host) -> i32 {
 		// BSD and GNU which both treat a bare `which` as a usage error (exit 1).

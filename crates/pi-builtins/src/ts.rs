@@ -43,12 +43,14 @@ matches_parser!(Ts, command);
 impl Utility for Ts {
 	const NAME: &'static str = "ts";
 	const USAGE_ERROR: u8 = 2;
+	/// moreutils `ts` flushes each line it writes (`$| = 1`).
+	const STDOUT_BUFFER: usize = 0;
 
 	fn run(self, host: &mut Host) -> i32 {
 		match timestamp_lines(&self.matches, host) {
 			Ok(code) => code,
 			// Stop pumping once the reader is gone.
-			Err(err) if err.kind() == io::ErrorKind::BrokenPipe => crate::host::SIGPIPE_EXIT_CODE,
+			Err(err) if err.kind() == io::ErrorKind::BrokenPipe => crate::host::BROKEN_WRITE,
 			Err(err) => {
 				host.error(err, 1);
 				1

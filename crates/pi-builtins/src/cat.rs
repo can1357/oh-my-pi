@@ -174,6 +174,8 @@ matches_parser!(Cat, app);
 
 impl Utility for Cat {
 	const NAME: &'static str = "cat";
+	/// GNU `cat` writes each block it reads at once.
+	const STDOUT_BUFFER: usize = 0;
 
 	fn run(self, host: &mut Host) -> i32 {
 		let number_mode = if self.matches.get_flag(options::NUMBER_NONBLANK) {
@@ -363,7 +365,7 @@ where
 		match cat_path(path, options, &mut state, host, stdout) {
 			Ok(()) => {},
 			Err(CatError::Io(error)) if error.kind() == ErrorKind::BrokenPipe => {
-				return crate::host::SIGPIPE_EXIT_CODE;
+				return crate::host::BROKEN_WRITE;
 			},
 			Err(error) => host.error(format!("{}: {error}", path.maybe_quote()), 1),
 		}

@@ -51,6 +51,18 @@ impl ExecutionResult {
 		}
 	}
 
+	/// Returns the result of a shell that wrote to a pipe with no reader.
+	///
+	/// Bash runs with SIGPIPE's default action, so that write kills the shell
+	/// process, with status 141 (128 + SIGPIPE), and nothing after it runs. A
+	/// shell inside this process cannot be killed: it exits with that status.
+	pub const fn broken_pipe_exit() -> Self {
+		Self {
+			next_control_flow: ExecutionControlFlow::ExitShell,
+			exit_code:         ExecutionExitCode::BrokenPipe,
+		}
+	}
+
 	/// Returns whether the command was successful.
 	pub const fn is_success(&self) -> bool {
 		self.exit_code.is_success()
@@ -108,6 +120,9 @@ impl From<std::process::Output> for ExecutionResult {
 
 		#[cfg(unix)]
 		if let Some(signal) = output.status.signal() {
+			if signal == nix::sys::signal::Signal::SIGPIPE as i32 {
+				return ExecutionExitCode::BrokenPipe.into();
+			}
 			#[expect(clippy::cast_sign_loss)]
 			return Self::new((signal & 0xff) as u8 + 128);
 		}
@@ -133,7 +148,10 @@ pub enum ExecutionExitCode {
 	NotFound,
 	/// Indicates execution was interrupted.
 	Interrupted,
-	/// Indicates a broken pipe (SIGPIPE) was encountered.
+	/// SIGPIPE killed the command (a process, or a shell or builtin that
+	/// stands in for one): status 141. A command that exits with status 141
+	/// has [`ExecutionExitCode::Custom`] instead, so whoever waits for it can
+	/// tell a signal from an exit, as `waitpid` does.
 	BrokenPipe,
 	/// Indicates unimplemented functionality was encountered.
 	Unimplemented,
@@ -145,6 +163,11 @@ impl ExecutionExitCode {
 	/// Returns whether the exit code indicates success.
 	pub const fn is_success(&self) -> bool {
 		matches!(self, Self::Success)
+	}
+
+	/// Returns whether the exit code is that of a process killed by SIGPIPE.
+	pub const fn is_broken_pipe(&self) -> bool {
+		matches!(self, Self::BrokenPipe)
 	}
 }
 
@@ -158,7 +181,6 @@ impl From<u8> for ExecutionExitCode {
 			126 => Self::CannotExecute,
 			127 => Self::NotFound,
 			130 => Self::Interrupted,
-			141 => Self::BrokenPipe,
 			code => Self::Custom(code),
 		}
 	}

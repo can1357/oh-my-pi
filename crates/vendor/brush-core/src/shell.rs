@@ -50,6 +50,7 @@ mod traps;
 pub use builder::{CreateOptions, ShellBuilder, ShellBuilderState};
 pub use initscripts::{ProfileLoadBehavior, RcLoadBehavior};
 pub use state::ShellState;
+pub(crate) use io::DiagnosticWriter;
 
 /// Represents an instance of a shell.
 ///
@@ -168,13 +169,38 @@ pub struct Shell<SE: extensions::ShellExtensions = extensions::DefaultShellExten
 	/// through the shell's filesystem (see [`Shell::set_umask`]).
 	#[cfg_attr(feature = "serde", serde(skip))]
 	umask: Option<u32>,
+
+	/// Whether this shell wrote to a pipe with no reader. Bash runs with
+	/// SIGPIPE's default action, so that write kills the shell process. This
+	/// shell runs nothing more: each pipeline it starts or finishes ends it
+	/// with [`crate::ExecutionResult::broken_pipe_exit`].
+	#[cfg_attr(feature = "serde", serde(skip))]
+	wrote_to_broken_pipe: bool,
+
+	/// Whether a write raised a SIGPIPE this shell catches, whose handler runs
+	/// when the pipeline ends (see `Shell::run_pending_sigpipe_trap`).
+	#[cfg_attr(feature = "serde", serde(skip))]
+	sigpipe_trap_pending: bool,
+
+	/// Number of active trap handlers that started while a function or sourced
+	/// script was active. `return` in one is valid even if the handler itself
+	/// sits above that frame on the call stack.
+	#[cfg_attr(feature = "serde", serde(skip))]
+	trap_return_depth: usize,
+
+	/// For each active function call, the ERR and DEBUG handlers set outside
+	/// it that it runs without (unless `set -E`/`set -T`), put back when it
+	/// returns without setting its own, as Bash does.
+	#[cfg_attr(feature = "serde", serde(skip))]
+	function_trap_saves: Vec<Vec<(crate::traps::TrapSignal, (crate::traps::TrapHandler, bool))>>,
 }
 
 impl<SE: extensions::ShellExtensions> Clone for Shell<SE> {
 	fn clone(&self) -> Self {
 		Self {
 			error_formatter: self.error_formatter.clone(),
-			traps: self.traps.clone(),
+			// A subshell resets caught signals to their default action.
+			traps: self.traps.for_subshell(),
 			open_files: self.open_files.clone(),
 			working_dir: self.working_dir.clone(),
 			filesystem: self.filesystem.clone(),
@@ -210,6 +236,12 @@ impl<SE: extensions::ShellExtensions> Clone for Shell<SE> {
 			history: self.history.clone(),
 			resource_limits: self.resource_limits.clone(),
 			umask: self.umask,
+			// A subshell is a new process, alive until its own write fails.
+			wrote_to_broken_pipe: false,
+			sigpipe_trap_pending: false,
+
+			trap_return_depth: 0,
+			function_trap_saves: self.function_trap_saves.clone(),
 			depth: self.depth + 1,
 		}
 	}
@@ -643,6 +675,12 @@ impl<SE: extensions::ShellExtensions> Shell<SE> {
 		let mut lease = self.clone();
 		lease.depth = self.depth;
 		lease.call_stack = self.call_stack.clone();
+		// The same process: its traps and SIGPIPE state are its own, not
+		// those a subshell starts with.
+		lease.traps = self.traps.clone();
+		lease.wrote_to_broken_pipe = self.wrote_to_broken_pipe;
+		lease.sigpipe_trap_pending = self.sigpipe_trap_pending;
+		lease.trap_return_depth = self.trap_return_depth;
 		lease
 	}
 

@@ -601,7 +601,8 @@ async fn virtual_follow_observes_append_same_size_rotation_and_truncation() {
 
 /// A provider path has no kernel watcher, so `tail -f` polls it; that idle
 /// loop must still stop once the reader of its stdout pipe exits, as in
-/// `tail -f virtual://log | grep -m1 line`.
+/// `tail -f virtual://log | grep -m1 line`, killed by the SIGPIPE it raises,
+/// as GNU `tail -f` is (status 141, measured against Bash 5.2.21).
 #[cfg(unix)]
 #[tokio::test]
 async fn virtual_follow_stops_once_stdout_reader_is_gone() {
@@ -641,7 +642,7 @@ async fn virtual_follow_stops_once_stdout_reader_is_gone() {
 		.expect("tail -f kept following after its reader exited")
 		.expect("tail worker")
 		.expect("tail command");
-	assert_eq!(u8::from(result.exit_code), 0, "{}", captured_text(&error));
+	assert_eq!(u8::from(result.exit_code), 141, "{}", captured_text(&error));
 }
 
 #[cfg(unix)]

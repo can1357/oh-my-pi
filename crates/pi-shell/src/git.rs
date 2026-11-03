@@ -77,14 +77,16 @@ pub struct GitLayers {
 }
 
 /// Creates the `git` builtin registration for `layers`, or `None` when no
-/// layer is on and `git` stays the plain binary.
+/// layer is on and `git` stays the plain binary. It stands in for the git
+/// program, so a broken pipe ends only the command, not the shell.
 pub fn git_builtin<SE: ShellExtensions>(layers: GitLayers) -> Option<Registration<SE>> {
-	Some(match (layers.smart_worktree, layers.guard) {
+	let registration = match (layers.smart_worktree, layers.guard) {
 		(false, false) => return None,
 		(true, false) => builtins::builtin::<GitCommand<true, false>, SE>(),
 		(false, true) => builtins::builtin::<GitCommand<false, true>, SE>(),
 		(true, true) => builtins::builtin::<GitCommand<true, true>, SE>(),
-	})
+	};
+	Some(registration.program())
 }
 
 /// Runs git through the enabled [`GitLayers`]: the guard first, then
@@ -112,18 +114,22 @@ impl<const SMART_WORKTREE: bool, const GUARD: bool> builtins::Command
 
 	fn execute<SE: ShellExtensions>(
 		&self,
-		context: ExecutionContext<'_, SE>,
+		mut context: ExecutionContext<'_, SE>,
 	) -> impl Future<Output = Result<ExecutionResult, Error>> + Send {
 		let args = self.args.clone();
 		async move {
+			// A message that finds a pipe with no reader ends `git` as SIGPIPE
+			// ends the program (see `ExecutionContext::keep_broken_pipe`).
 			if GUARD {
 				match guard::Review::of(context.shell, &args).decide().await? {
 					guard::Decision::Run => {},
 					guard::Decision::RunNoted(note) => {
-						let _ = context.stderr().write_all(note.as_bytes());
+						let written = context.stderr().write_all(note.as_bytes());
+						context.keep_broken_pipe(written)?;
 					},
 					guard::Decision::Refuse(refusal) => {
-						let _ = context.stderr().write_all(refusal.as_bytes());
+						let written = context.stderr().write_all(refusal.as_bytes());
+						context.keep_broken_pipe(written)?;
 						return Ok(ExecutionResult::new(guard::REFUSED_EXIT));
 					},
 				}
@@ -143,7 +149,8 @@ impl<const SMART_WORKTREE: bool, const GUARD: bool> builtins::Command
 				match outcome {
 					Outcome::External => {},
 					Outcome::Failed(message) => {
-						let _ = writeln!(context.stderr(), "fatal: {message}");
+						let written = writeln!(context.stderr(), "fatal: {message}");
+						context.keep_broken_pipe(written)?;
 						return Ok(ExecutionResult::new(FATAL_EXIT));
 					},
 					Outcome::Created(created) => return created.report(context).await,
@@ -549,7 +556,7 @@ impl Created {
 	/// becoming the command's.
 	async fn report<SE: ShellExtensions>(
 		self,
-		context: ExecutionContext<'_, SE>,
+		mut context: ExecutionContext<'_, SE>,
 	) -> Result<ExecutionResult, Error> {
 		if !self.quiet {
 			let detail = match &self.preparing {
@@ -562,8 +569,12 @@ impl Created {
 					format!("detached HEAD {}", self.oneline.split(' ').next().unwrap_or_default())
 				},
 			};
-			let _ = writeln!(context.stderr(), "Preparing worktree ({detail})");
-			let _ = writeln!(context.stdout(), "HEAD is now at {}", self.oneline);
+			// Before the hook runs: git dies of SIGPIPE writing these to a pipe
+			// with no reader, so its hook never runs.
+			let written = writeln!(context.stderr(), "Preparing worktree ({detail})");
+			context.keep_broken_pipe(written)?;
+			let written = writeln!(context.stdout(), "HEAD is now at {}", self.oneline);
+			context.keep_broken_pipe(written)?;
 		}
 		if self.hook.is_none() {
 			return Ok(ExecutionResult::success());
@@ -923,6 +934,24 @@ mod tests {
 			.expect("post-checkout ran");
 		assert_eq!(hook_log.trim(), format!("{} {head} 1 {}", "0".repeat(head.len()), wt.display()));
 		assert_cloned(&wt);
+	}
+
+	/// The worktree message `git worktree add` writes to a pipe with no reader
+	/// ends it as SIGPIPE ends git (measured against git under Bash 5.2.21):
+	/// status 141 for the command alone, and no post-checkout hook.
+	/// Regression: the builtin dropped the write error, ran the hook and
+	/// reported success.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn worktree_add_ends_at_a_broken_pipe_before_its_hook() {
+		let (_temp, repo) = fixture();
+		let (code, output) = run(
+			&repo,
+			r#"{ seq 1 100000; git worktree add --detach ../wt HEAD 2>&1 >/dev/null; echo "git=$?" >&2; } | true"#,
+		)
+		.await;
+		assert_eq!((code, output.as_str()), (Some(0), "git=141\n"));
+		assert!(!repo.parent().expect("parent").join("hook.log").exists(), "the hook ran");
 	}
 
 	/// Detaching at a tag, checking out an existing branch, resetting one with

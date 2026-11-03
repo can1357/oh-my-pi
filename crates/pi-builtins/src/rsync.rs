@@ -102,10 +102,18 @@ impl Utility for Rsync {
 	}
 
 	fn run(self, host: &mut Host) -> i32 {
+		// rsync never checks its streams at exit, and ignores SIGPIPE once it
+		// parsed its options (see `session::run`): until then a write to a
+		// pipe with no reader kills it. A diagnostic it cannot write ends the
+		// run at once with RERR_MESSAGEIO (rwrite's exit_cleanup; see
+		// `Logger::emit`), while a failed standard-output write leaves the
+		// run alone (measured against rsync 3.5.1 under Bash 5.2.21).
+		host.checks_own_output();
 		let mut argv = Vec::with_capacity(self.args.len() + 1);
 		argv.push(OsString::from(Self::NAME));
 		argv.extend(self.args);
-		session::run(host, argv)
+		let code = session::run(host, argv);
+		if host.stderr_write_failed() { crate::rsync::exit::RERR_MESSAGEIO } else { code }
 	}
 }
 

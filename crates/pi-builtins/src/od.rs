@@ -245,7 +245,7 @@ impl Utility for Od {
 		};
 		if let Err(err) = out.flush() {
 			if err.kind() == io::ErrorKind::BrokenPipe {
-				return crate::host::SIGPIPE_EXIT_CODE;
+				return crate::host::BROKEN_WRITE;
 			}
 			host.error(format!("write error: {}", strip_errno(&err)), 1);
 			return 1;
@@ -1097,7 +1097,7 @@ fn emit(host: &mut Host, out: &mut impl Write, line: &mut Vec<u8>) -> Result<(),
 	line.clear();
 	match result {
 		Ok(()) => Ok(()),
-		Err(err) if err.kind() == io::ErrorKind::BrokenPipe => Err(crate::host::SIGPIPE_EXIT_CODE),
+		Err(err) if err.kind() == io::ErrorKind::BrokenPipe => Err(crate::host::BROKEN_WRITE),
 		Err(err) => {
 			host.error(format!("write error: {}", strip_errno(&err)), 1);
 			Err(1)

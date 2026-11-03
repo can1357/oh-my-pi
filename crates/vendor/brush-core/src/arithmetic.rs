@@ -49,6 +49,11 @@ pub enum EvalError {
 	/// Expression recursion level exceeded.
 	#[error("expression recursion level exceeded")]
 	RecursionLimitExceeded,
+
+	/// The expression's `set -x` line found a pipe with no reader, and
+	/// SIGPIPE killed the shell writing it.
+	#[error("{0}")]
+	BrokenPipe(std::io::Error),
 }
 
 /// Trait implemented by arithmetic expressions that can be evaluated.
@@ -102,11 +107,14 @@ pub(crate) async fn expand_and_eval(
 	let expr = brush_parser::arithmetic::parse(&expanded_self)
 		.map_err(|_e| EvalError::ParseError(expanded_self))?;
 
-	// Trace if applicable.
-	if trace_if_needed && shell.options().print_commands_and_arguments {
-		shell
-			.trace_command(params, std::format!("(( {expr} ))"))
-			.await;
+	// Trace if applicable. A trace line that SIGPIPE killed the shell writing
+	// ends the evaluation unrun and unwinds every construct around it (an
+	// arithmetic `for` runs no further clause).
+	if trace_if_needed
+		&& shell.options().print_commands_and_arguments
+		&& shell.trace_command(params, std::format!("(( {expr} ))")).await.is_err()
+	{
+		return Err(EvalError::BrokenPipe(std::io::ErrorKind::BrokenPipe.into()));
 	}
 
 	// Now evaluate.

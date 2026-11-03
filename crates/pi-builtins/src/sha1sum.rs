@@ -21,6 +21,8 @@ matches_parser!(Sha1sum, app);
 impl Utility for Sha1sum {
 	const NAME: &'static str = "sha1sum";
 	const USAGE_ERROR: u8 = 2;
+	/// GNU's `exit_failure`.
+	const OUTPUT_ERROR: u8 = 1;
 
 	fn run(self, host: &mut Host) -> i32 {
 		cksum::run(host, AlgoKind::Sha1, self.matches, None)

@@ -305,6 +305,8 @@ enum CommandExecutionError {
 	Killed { signal: i32 },
 	CannotRun(io::Error),
 	NotFound,
+	/// Writing the `-t` trace or `-p` prompt failed; xargs runs nothing more.
+	Write(io::Error),
 }
 
 impl Display for CommandExecutionError {
@@ -316,6 +318,7 @@ impl Display for CommandExecutionError {
 			},
 			Self::CannotRun(err) => write!(f, "Command could not be run: {err}"),
 			Self::NotFound => write!(f, "Command not found"),
+			Self::Write(err) => write!(f, "write error: {err}"),
 		}
 	}
 }
@@ -463,9 +466,13 @@ impl CommandBuilder<'_> {
 			line.push(' ');
 			line.push_str(&arg.to_string_lossy());
 		}
+		// GNU xargs checks the `-p` prompt and the `-t` trace it writes on
+		// stderr: a failed write (SIGPIPE ignored; else SIGPIPE kills it at the
+		// write) stops it with status 1 before it runs the command.
 		if self.options.interactive {
-			let _ = write!(host.stderr, "{line} ?...");
-			let _ = host.stderr.flush();
+			write!(host.stderr, "{line} ?...")
+				.and_then(|()| host.stderr.flush())
+				.map_err(CommandExecutionError::Write)?;
 			let mut response = Vec::new();
 			let mut byte = [0_u8; 1];
 			while host.stdin.read(&mut byte).unwrap_or(0) == 1 {
@@ -479,28 +486,14 @@ impl CommandBuilder<'_> {
 			}
 		} else if self.options.verbose {
 			// GNU-style `-t`: echo the command line about to run on stderr.
-			let _ = writeln!(host.stderr, "{line}");
+			writeln!(host.stderr, "{line}").map_err(CommandExecutionError::Write)?;
 		}
 
-		match &self.options.action {
-			ExecAction::Command(_) => {
-				let argv = std::iter::once(entry_point.to_owned()).chain(final_args).collect();
-				jobs.spawn(host, argv)
-			},
-			ExecAction::Echo => {
-				let _ = writeln!(
-					host.stdout,
-					"{}",
-					self
-						.extra_args
-						.iter()
-						.map(|arg| arg.to_string_lossy())
-						.collect::<Vec<_>>()
-						.join(" ")
-				);
-				Ok(())
-			},
-		}
+		// With no command GNU xargs runs `echo` as a command of its own, so a
+		// write that SIGPIPE kills ends that command alone, and xargs reports
+		// the signal (status 125).
+		let argv = std::iter::once(entry_point.to_owned()).chain(final_args).collect();
+		jobs.spawn(host, argv)
 	}
 }
 
@@ -1127,6 +1120,7 @@ impl Utility for Xargs {
 						CommandExecutionError::Killed { .. } => 125,
 						CommandExecutionError::CannotRun(_) => 126,
 						CommandExecutionError::NotFound => 127,
+						CommandExecutionError::Write(_) => 1,
 					}
 				} else {
 					1

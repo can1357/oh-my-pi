@@ -172,6 +172,12 @@ pub struct Registration<SE: extensions::ShellExtensions> {
 	/// The builtin performs all descriptor I/O asynchronously; it runs as a
 	/// task, never on a blocking worker.
 	pub async_io: bool,
+
+	/// The builtin stands in for a separate program, a command Bash runs in a
+	/// child process of its own. A write to a pipe with no reader ends only
+	/// this command, as SIGPIPE ends that program's process; it does not end
+	/// the shell the builtin runs in.
+	pub program: bool,
 }
 
 impl<SE: extensions::ShellExtensions> Registration<SE> {
@@ -194,6 +200,13 @@ impl<SE: extensions::ShellExtensions> Registration<SE> {
 	#[must_use]
 	pub const fn async_io(self) -> Self {
 		Self { async_io: true, ..self }
+	}
+
+	/// Marks this builtin as standing in for a separate program; see
+	/// [`Self::program`].
+	#[must_use]
+	pub const fn program(self) -> Self {
+		Self { program: true, ..self }
 	}
 }
 
@@ -535,6 +548,7 @@ pub fn simple_builtin<B: SimpleCommand + Send + Sync, SE: extensions::ShellExten
 		declaration_builtin: false,
 		transparent_background_wrapper: false,
 		async_io:            false,
+		program:             false,
 	}
 }
 
@@ -549,6 +563,7 @@ pub fn builtin<B: Command + Send + Sync, SE: extensions::ShellExtensions>() -> R
 		declaration_builtin: false,
 		transparent_background_wrapper: false,
 		async_io:            false,
+		program:             false,
 	}
 }
 
@@ -565,6 +580,7 @@ pub fn decl_builtin<B: DeclarationCommand + Send + Sync, SE: extensions::ShellEx
 		declaration_builtin: true,
 		transparent_background_wrapper: false,
 		async_io:            false,
+		program:             false,
 	}
 }
 
@@ -587,6 +603,7 @@ pub fn raw_arg_builtin<
 		declaration_builtin: true,
 		transparent_background_wrapper: false,
 		async_io:            false,
+		program:             false,
 	}
 }
 
@@ -629,7 +646,7 @@ fn exec_builtin<T: Command + Send + Sync, SE: extensions::ShellExtensions>(
 }
 
 async fn exec_builtin_impl<T: Command + Send + Sync, SE: extensions::ShellExtensions>(
-	context: commands::ExecutionContext<'_, SE>,
+	mut context: commands::ExecutionContext<'_, SE>,
 	args: Vec<CommandArg>,
 ) -> Result<results::ExecutionResult, error::Error> {
 	let plain_args = args.into_iter().map(|arg| match arg {
@@ -641,7 +658,8 @@ async fn exec_builtin_impl<T: Command + Send + Sync, SE: extensions::ShellExtens
 	let command = match result {
 		Ok(command) => command,
 		Err(e) => {
-			let _ = writeln!(context.stderr(), "{e}");
+			let written = writeln!(context.stderr(), "{e}");
+			context.keep_broken_pipe(written)?;
 			return Ok(results::ExecutionExitCode::InvalidUsage.into());
 		},
 	};
@@ -663,7 +681,7 @@ async fn exec_declaration_builtin_impl<
 	T: DeclarationCommand + Send + Sync,
 	SE: extensions::ShellExtensions,
 >(
-	context: commands::ExecutionContext<'_, SE>,
+	mut context: commands::ExecutionContext<'_, SE>,
 	args: Vec<CommandArg>,
 ) -> Result<results::ExecutionResult, error::Error> {
 	let mut options = vec![];
@@ -684,7 +702,8 @@ async fn exec_declaration_builtin_impl<
 	let mut command = match result {
 		Ok(command) => command,
 		Err(e) => {
-			let _ = writeln!(context.stderr(), "{e}");
+			let written = writeln!(context.stderr(), "{e}");
+			context.keep_broken_pipe(written)?;
 			return Ok(results::ExecutionExitCode::InvalidUsage.into());
 		},
 	};

@@ -23,7 +23,7 @@ impl builtins::Command for SleepCommand {
 
 	fn execute<SE: brush_core::ShellExtensions>(
 		&self,
-		context: ExecutionContext<'_, SE>,
+		mut context: ExecutionContext<'_, SE>,
 	) -> impl Future<Output = std::result::Result<ExecutionResult, brush_core::Error>> + Send {
 		let durations = self.durations.clone();
 		async move {
@@ -33,7 +33,10 @@ impl builtins::Command for SleepCommand {
 			let mut total = Duration::ZERO;
 			for duration in &durations {
 				let Some(parsed) = parse_duration(duration) else {
-					let _ = writeln!(context.stderr(), "sleep: invalid time interval '{duration}'");
+					// A diagnostic that finds a pipe with no reader ends `sleep` as
+					// SIGPIPE ends the program (see `ExecutionContext::keep_broken_pipe`).
+					let written = writeln!(context.stderr(), "sleep: invalid time interval '{duration}'");
+					context.keep_broken_pipe(written)?;
 					return Ok(ExecutionResult::new(1));
 				};
 				// `infinity` parses as `Duration::MAX`; keep the sum saturating.
