@@ -221,9 +221,9 @@ it("completes a RunSSE turn after delivering a burst of blob replies in append o
 
 /**
  * Serves RunSSE (one stream per request id) and answers the n-th BidiAppend
- * attempt with the HTTP status `failure(n)` returns, if any; otherwise it completes the turn.
+ * attempt with the failure response `failure(n)` describes, if any; otherwise it completes the turn.
  */
-function startFlakyAppendServer(failure: (attempt: number) => number | undefined) {
+function startFlakyAppendServer(failure: (attempt: number) => ResponseInit | undefined) {
 	const streams = new Map<string, PromiseWithResolvers<ReadableStreamDefaultController<Uint8Array>>>();
 	const streamFor = (requestId: string) => {
 		let entry = streams.get(requestId);
@@ -256,8 +256,8 @@ function startFlakyAppendServer(failure: (attempt: number) => number | undefined
 				const append = fromBinary(BidiAppendRequestSchema, body);
 				const requestId = append.requestId?.requestId ?? "";
 				attempts.push({ requestId, seqno: append.appendSeqno });
-				const status = failure(attempts.length);
-				if (status !== undefined) return new Response(null, { status });
+				const failed = failure(attempts.length);
+				if (failed !== undefined) return new Response(null, failed);
 				const controller = await streamFor(requestId).promise;
 				controller.enqueue(textDeltaFrame("retried ok"));
 				controller.enqueue(turnEndedFrame());
@@ -273,13 +273,17 @@ function startFlakyAppendServer(failure: (attempt: number) => number | undefined
 		get runSseOpens() {
 			return runSseOpens;
 		},
+		/** End a run's RunSSE body, as an EOF from the server. */
+		async endRun(requestId: string) {
+			(await streamFor(requestId).promise).close();
+		},
 	};
 }
 
 it(
 	"resends a BidiAppend that hits a gateway error on the open stream, with the same request id and seqno",
 	async () => {
-		const flaky = startFlakyAppendServer(attempt => (attempt === 1 ? 503 : undefined));
+		const flaky = startFlakyAppendServer(attempt => (attempt === 1 ? { status: 503 } : undefined));
 		try {
 			const response = streamCursor(makeModel(flaky.server.url.toString()), context, {
 				apiKey: "test-token",
@@ -299,6 +303,68 @@ it(
 	},
 	SETTLE_TIMEOUT_MS,
 );
+
+it(
+	"drops an append whose RunSSE ended during the backoff instead of resending it",
+	async () => {
+		const flaky = startFlakyAppendServer(attempt => (attempt === 1 ? { status: 503 } : undefined));
+		let waits = 0;
+		try {
+			const response = streamCursor(makeModel(flaky.server.url.toString()), context, {
+				apiKey: "test-token",
+				transport: "http1",
+				// The first wait is the append's backoff: end its RunSSE, and return once
+				// stream recovery has opened the next run.
+				providerRetryWait: async () => {
+					if (waits++ > 0) return;
+					await flaky.endRun(flaky.attempts[0].requestId);
+					while (flaky.runSseOpens < 2) await Bun.sleep(5);
+				},
+			});
+			const { terminalEvents } = await drain(response);
+			// A stale resend would follow the backoff; give it time to reach the server.
+			await Bun.sleep(50);
+
+			expect(terminalEvents).toEqual(["done"]);
+			const firstRun = flaky.attempts.filter(append => append.requestId === flaky.attempts[0].requestId);
+			expect(firstRun).toHaveLength(1);
+		} finally {
+			flaky.server.stop(true);
+		}
+	},
+	SETTLE_TIMEOUT_MS,
+);
+
+for (const { hint, maxRetryDelayMs } of [
+	{ hint: "30", maxRetryDelayMs: undefined },
+	{ hint: "2", maxRetryDelayMs: 1_000 },
+]) {
+	it(
+		`fails an append over to a new run, without resending, on a Retry-After of ${hint}s (maxRetryDelayMs ${maxRetryDelayMs})`,
+		async () => {
+			const flaky = startFlakyAppendServer(attempt =>
+				attempt === 1 ? { status: 503, headers: { "retry-after": hint } } : undefined,
+			);
+			try {
+				const response = streamCursor(makeModel(flaky.server.url.toString()), context, {
+					apiKey: "test-token",
+					transport: "http1",
+					maxRetryDelayMs,
+					providerRetryWait: async () => {},
+				});
+				const { terminalEvents } = await drain(response);
+
+				expect(terminalEvents).toEqual(["done"]);
+				const firstRun = flaky.attempts.filter(append => append.requestId === flaky.attempts[0].requestId);
+				expect(firstRun).toHaveLength(1);
+				expect(flaky.runSseOpens).toBe(2);
+			} finally {
+				flaky.server.stop(true);
+			}
+		},
+		SETTLE_TIMEOUT_MS,
+	);
+}
 
 it(
 	"settles a turn with the error an end-stream frame carries",

@@ -850,6 +850,8 @@ interface CursorHttp1RunTransportOptions {
 	signal?: AbortSignal;
 	/** Sleep between BidiAppend retries (`StreamOptions.providerRetryWait`). */
 	retryWait?: RetryWaitHook;
+	/** `StreamOptions.maxRetryDelayMs`: a smaller ceiling on the `retry-after` an append waits out. */
+	maxRetryDelayMs?: number;
 }
 
 interface CursorPendingAppend {
@@ -867,7 +869,10 @@ const CURSOR_HTTP1_APPEND_BYTES_PER_SECOND = 128 * 1024;
 const CURSOR_HTTP1_APPEND_RETRY_STATUSES = new Set([502, 503, 504]);
 /** Delay before each resend; its length is the resend count (three attempts in all). */
 const CURSOR_HTTP1_APPEND_RETRY_BACKOFF_MS = [250, 1_000];
-/** Upper bound on a `retry-after` the transport waits out before a resend. */
+/**
+ * Longest `retry-after` an append waits out while its RunSSE stays open. A longer hint is not
+ * shortened: the append fails, and the stream-level retry takes over.
+ */
 const CURSOR_HTTP1_APPEND_RETRY_AFTER_MAX_MS = 5_000;
 
 function readConnectFrameMessage(frame: Uint8Array): Uint8Array {
@@ -889,6 +894,11 @@ function createHttp1RunTransport(options: CursorHttp1RunTransportOptions): Curso
 	const abortController = new AbortController();
 	const signal = options.signal ? AbortSignal.any([options.signal, abortController.signal]) : abortController.signal;
 	const fetchImpl = wrapFetchForProxy(globalThis.fetch, "cursor");
+	const maxRetryDelayMs = options.maxRetryDelayMs ?? 60_000;
+	const retryAfterCeilingMs =
+		maxRetryDelayMs > 0
+			? Math.min(CURSOR_HTTP1_APPEND_RETRY_AFTER_MAX_MS, maxRetryDelayMs)
+			: CURSOR_HTTP1_APPEND_RETRY_AFTER_MAX_MS;
 	const requestId = create(BidiRequestIdSchema, { requestId: options.requestId });
 	const pendingAppends: CursorPendingAppend[] = [];
 	let appendSeqno = 0n;
@@ -925,6 +935,9 @@ function createHttp1RunTransport(options: CursorHttp1RunTransportOptions): Curso
 		// server applies the append once. A failed append ends the run: the turn
 		// restarts on a new RunSSE, or fails if it made progress it cannot replay.
 		for (let attempt = 0; ; attempt++) {
+			// A run that ended while this append waited (EOF closes without aborting) has a dead
+			// request id; stream recovery may already be on a new one, so nothing is resent.
+			if (closed) return;
 			const response = await fetchImpl(new URL(CURSOR_BIDI_APPEND_PATH, options.baseUrl), {
 				method: "POST",
 				headers: { ...options.headers, "content-type": "application/proto" },
@@ -936,20 +949,23 @@ function createHttp1RunTransport(options: CursorHttp1RunTransportOptions): Curso
 				return;
 			}
 			const backoffMs = CURSOR_HTTP1_APPEND_RETRY_BACKOFF_MS[attempt];
-			if (backoffMs !== undefined && CURSOR_HTTP1_APPEND_RETRY_STATUSES.has(response.status)) {
+			const retryAfterMs = getRetryAfterMsFromHeaders(response.headers);
+			const hintMs = retryAfterMs !== undefined && retryAfterMs > 0 ? retryAfterMs : undefined;
+			if (
+				backoffMs !== undefined &&
+				CURSOR_HTTP1_APPEND_RETRY_STATUSES.has(response.status) &&
+				(hintMs === undefined || hintMs <= retryAfterCeilingMs)
+			) {
 				await response.body?.cancel();
-				const retryAfterMs = getRetryAfterMsFromHeaders(response.headers);
-				const delayMs =
-					retryAfterMs !== undefined && retryAfterMs > 0
-						? Math.min(retryAfterMs, CURSOR_HTTP1_APPEND_RETRY_AFTER_MAX_MS)
-						: backoffMs;
-				await waitForRetry(options.retryWait, delayMs, signal);
+				await waitForRetry(options.retryWait, hintMs ?? backoffMs, signal);
 				continue;
 			}
 			const error = await response.json().catch(() => undefined);
 			throw isRecord(error)
 				? classifyConnectError(error)
-				: new AIError.ProviderHttpError(`Cursor BidiAppend failed with HTTP ${response.status}`, response.status);
+				: new AIError.ProviderHttpError(`Cursor BidiAppend failed with HTTP ${response.status}`, response.status, {
+						headers: response.headers,
+					});
 		}
 	};
 
@@ -1535,6 +1551,7 @@ function streamCursorWithWireMode(
 					requestId,
 					signal: options?.signal,
 					retryWait: options?.providerRetryWait,
+					maxRetryDelayMs: options?.maxRetryDelayMs,
 				});
 			}
 
