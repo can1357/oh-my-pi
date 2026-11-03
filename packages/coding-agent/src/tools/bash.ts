@@ -714,7 +714,9 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 
 	#formatResultOutput(result: BashResult | BashInteractiveResult): string {
 		const outputText = normalizeResultOutput(result);
-		return outputText || "(no output)";
+		// A failed exit gets its own notice; a clean one says so, or an empty diff reads like a broken command.
+		if (!outputText) return result.exitCode === 0 ? "(no output, exit code 0)" : "(no output)";
+		return outputText;
 	}
 
 	/**

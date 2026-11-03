@@ -146,6 +146,54 @@ describe("spotlight shaping", () => {
 		expect(text.at(-1)).toBe("[folded: read src/retry.ts:A-B prints a shown range]");
 	});
 
+	it("keeps the body of a method the intent names, behind a multi-line signature, through an outline's cut", async () => {
+		// 120 methods whose signatures span lines: the body block's own header is `): void {`, which names nothing.
+		const lines = ["export class Router {"];
+		for (let k = 0; k < 120; k++) {
+			lines.push(`\thandleRequestNumber${k}(`, "\t\trequest: Request,", "\t\tresponse: Response,", "\t): void {");
+			for (let j = 0; j < 6; j++) lines.push(`\t\tconst field${j} = request.body.items[${j}].value * ${k};`);
+			lines.push("\t}", "");
+		}
+		lines.push("}");
+		const shown = lines.map((l, i) => `${i + 1}|${l}`);
+
+		const out = await shapeResult(
+			{
+				tool: "read",
+				text: `[src/router.ts#ab12]\n${shown.join("\n")}`,
+				read: { path: "src/router.ts", lines, shown, firstLine: 1, selected: false },
+				cwd: "/nonexistent",
+			},
+			context({ intent: "how handleRequestNumber42 builds its fields" }),
+			scorer(() => 0.2),
+			newShapeState(),
+			sink(),
+		);
+
+		expect(out.steps).toEqual(["outline", "window"]);
+		for (let j = 0; j < 6; j++) expect(out.text).toContain(`const field${j} = request.body.items[${j}].value * 42;`);
+	});
+
+	it("says which words of the intent no line of a cut result holds, in any spelling, within the tool's limit", async () => {
+		const files = Array.from(
+			{ length: 300 },
+			(_, i) => `test/${["spotlight", "browser", "coverage", "tools"][i % 4]}/case${i}.test.ts`,
+		);
+
+		const out = await shapeResult(
+			bash("ls test", [...files, "[300 results limit reached]"].join("\n")),
+			context({ intent: "which test files cover spotlight or truncation" }),
+			scorer(() => 0.2),
+			newShapeState(),
+			sink(),
+		);
+
+		// "truncation" is in no spelling; "cover" is, inside "coverage", so the line must not claim it missing.
+		expect(out.text).toMatch(
+			/^\[intent: .*no line contains "truncat…" \(of those the tool returned before its limit\)\]$/m,
+		);
+	});
+
 	it("cuts a long outlined read in file line numbers only, recovering from the file", async () => {
 		// 100 functions of 6 body lines: the outline stays over 12k characters, so the valve cuts it.
 		const lines: string[] = [];

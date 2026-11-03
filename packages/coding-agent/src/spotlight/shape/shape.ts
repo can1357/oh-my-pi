@@ -309,12 +309,16 @@ const cutFooter = (url: string) => `[cut: … [A-B] are lines A-B of ${url} (rea
  * Lines no seen-collapse hides: a line holding a word of the call's intent that few lines hold (the agent asked for
  * that line now, beside this result), and for command output its last line, which says how the run ended. An output
  * matching an earlier one but cut short otherwise collapses whole and reads as the earlier run. `named` lists the
- * lines holding such an intent word, and `terms` the words.
+ * lines holding such an intent word, `terms` the words, and `missing` the intent's words no line holds.
  */
-function seenKeeps(run: Run, lines: readonly string[]): { keep: boolean[]; named: number[]; terms: string[] } {
+function seenKeeps(
+	run: Run,
+	lines: readonly string[],
+): { keep: boolean[]; named: number[]; terms: string[]; missing: string[] } {
 	const keep = Array.from<boolean>({ length: lines.length }).fill(false);
 	const named: number[] = [];
 	const terms: string[] = [];
+	const missing: string[] = [];
 	const asked = words(run.ctx.intent);
 	if (asked.size) {
 		const hits = new Map<string, number[]>();
@@ -340,6 +344,19 @@ function seenKeeps(run: Run, lines: readonly string[]): { keep: boolean[]; named
 				keep[i] = true;
 			}
 		}
+		// A word counts as present when any line holds its stem anywhere (`shape` in `#shapeOutput`, `truncat` in
+		// `truncated`): a claim that no line holds it must be true of every spelling a reader would accept.
+		const text = lines.join("\n").toLowerCase();
+		const stems = new Map<string, string>();
+		for (const term of asked) {
+			if (hits.has(term)) continue;
+			const stem = term.slice(0, Math.max(5, term.length - 3));
+			if (!text.includes(stem)) stems.set(stem, stem.length < term.length ? `${stem}…` : term);
+		}
+		// `truncate` and `truncation` miss as `trunc…` and `truncat…`: the shorter stem says both.
+		for (const [stem, shown] of stems) {
+			if (![...stems.keys()].some(other => other !== stem && stem.startsWith(other))) missing.push(shown);
+		}
 	}
 	if (!run.input.read) {
 		for (let i = lines.length - 1; i >= 0; i--) {
@@ -348,7 +365,7 @@ function seenKeeps(run: Run, lines: readonly string[]): { keep: boolean[]; named
 			break;
 		}
 	}
-	return { keep, named, terms };
+	return { keep, named, terms, missing };
 }
 
 /** `mask` without the runs whose text (newlines included) is shorter than their marker plus {@link SEEN_MARGIN}. */
@@ -451,7 +468,7 @@ async function shapeSubject(run: Run, subject: Subject): Promise<{ view: View; s
 	}
 	if (again) bump(run, "reasks");
 
-	const { keep, named, terms } = seenKeeps(run, lines);
+	const { keep, named, terms, missing } = seenKeeps(run, lines);
 	const witnessed = witnessedMask(lines, state.seen, again ? Math.min(SEEN_RUN, 2) : SEEN_RUN, keep);
 	const width = lines.map(l => (!again && l.length > MAX_LINE ? LINE_KEEP + 36 : l.length));
 	let shown = 0;
@@ -471,6 +488,7 @@ async function shapeSubject(run: Run, subject: Subject): Promise<{ view: View; s
 	// Why the valve shows or hides each line; undefined: shown, as the base layers decided.
 	let why: (SpotlightReason | undefined)[] = witnessed.map(w => (w ? "r" : undefined));
 	let frame: { chosen: Window; density: number[] } | undefined;
+	let budget = WINDOW_BUDGET * scale;
 	let uniform: { shapes: string[]; differs: boolean[]; edges: boolean[] } | undefined;
 	if (cut) {
 		const spot = await lineScores(run, lines, origin);
@@ -480,11 +498,27 @@ async function shapeSubject(run: Run, subject: Subject): Promise<{ view: View; s
 			(l, i) =>
 				(MARKER.test(l) && l.length < 200) || keep[i] || uniform?.differs[i] === true || uniform?.edges[i] === true,
 		);
-		// Earlier shaping's markers are cheap and say what is where, lines the intent names are what the agent asked
-		// for, and in uniform output the lines that differ are the news: chosen first.
-		const scores = density.map((s, i) => (forced[i] ? 10 : s));
+		// Chosen first: lines the intent names and the bodies the outline opened because the conversation names them
+		// (what the agent asked for) and, in uniform output, the lines that differ (the news); then earlier shaping's
+		// markers, cheap and saying what is where. A long outline holds dozens of fold markers: at one rank with them,
+		// the asked-for lines lost to the markers above them.
+		const namedBody = (i: number) => {
+			const at = origin(i);
+			return at !== null && run.why[at] === "n";
+		};
+		// Within a tier Spotlight's rank decides, so position alone never picks among equals.
+		const scores = density.map((s, i) =>
+			keep[i] || uniform?.differs[i] ? 30 + s : namedBody(i) ? 20 + s : forced[i] ? 10 + s : s,
+		);
+		// A body the conversation names is what the agent came for: the window grows to hold it, up to the size a
+		// source read is shown whole at.
+		let named = 0;
+		lines.forEach((_, i) => {
+			if (namedBody(i)) named += width[i] + 1;
+		});
+		budget = Math.min(Math.max(EXEMPT_MAX, WINDOW_BUDGET * scale), WINDOW_BUDGET * scale + named);
 		const chosen = frameLines(width, lines, witnessed, scores, {
-			budget: WINDOW_BUDGET * scale,
+			budget,
 			ctx: 1,
 			head: 3,
 			tail: 4,
@@ -520,7 +554,7 @@ async function shapeSubject(run: Run, subject: Subject): Promise<{ view: View; s
 			values: [frame.density],
 			why,
 			floor: DENSITY_MAX,
-			budget: WINDOW_BUDGET * scale,
+			budget,
 			used: frame.chosen.used,
 			last: frame.chosen.last,
 		});
@@ -598,10 +632,27 @@ async function shapeSubject(run: Run, subject: Subject): Promise<{ view: View; s
 		}
 	}
 	// Every line naming a rare word of the intent is shown: saying so spares the agent a read to check the gaps.
-	if (hidden && terms.length && named.every(i => show(i))) {
-		const quoted = terms.slice(0, 4).map(t => `"${t}"`);
-		out.push(`[intent: every line naming ${quoted.join(", ")}${terms.length > 4 ? ", …" : ""} is shown]`);
-		outSpans.push(null);
+	// What a cut means for the intent's words: every line naming a rare one is shown, and none holds the missing ones.
+	// Saying so spares the agent a read to check the gaps.
+	if (hidden) {
+		const quoted = (ws: readonly string[]) =>
+			`${ws
+				.slice(0, 4)
+				.map(w => `"${w}"`)
+				.join(", ")}${ws.length > 4 ? ", …" : ""}`;
+		const said: string[] = [];
+		if (terms.length && named.every(i => show(i))) said.push(`every line naming ${quoted(terms)} is shown`);
+		if (missing.length) {
+			// A tool that stopped at its own result limit returned only part of what exists.
+			const limited = lines.some(l => /\blimit reached\]?$/i.test(l.trim()));
+			said.push(
+				`no line contains ${quoted(missing)}${limited ? " (of those the tool returned before its limit)" : ""}`,
+			);
+		}
+		if (said.length) {
+			out.push(`[intent: ${said.join("; ")}]`);
+			outSpans.push(null);
+		}
 	}
 	if (bare || shortened) {
 		out.push(cutFooter(target.url));
