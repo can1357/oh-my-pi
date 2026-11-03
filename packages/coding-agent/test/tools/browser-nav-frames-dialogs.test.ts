@@ -866,7 +866,7 @@ return await tab.evaluate(() => {
 		});
 	});
 
-	test("holds print() in the page a window the page opens to a URL loads", async () => {
+	test("holds print() in a popup's first and later same-origin documents", async () => {
 		await withUserBrowser(async cdpUrl => {
 			const user = await puppeteer.connect({ browserURL: cdpUrl, defaultViewport: null });
 			try {
@@ -876,6 +876,7 @@ return await tab.evaluate(() => {
 				try {
 					await hold.beginCall(30_000);
 					// Chrome loads the receipt into the same window object the open() wrapper reached; it prints as it loads.
+					const popupTarget = user.waitForTarget(target => target.opener() === page.target());
 					await page.mainFrame().mainRealm().evaluate('document.querySelector("#popup-url-print").click()');
 					await page
 						.mainFrame()
@@ -885,6 +886,17 @@ return await tab.evaluate(() => {
 						"receipt afterprint",
 						"receipt print returned",
 					]);
+					const popup = await (await popupTarget).page();
+					if (!popup) throw new Error("Expected the receipt popup");
+					try {
+						await popup.goto(`${baseUrl}/print-on-load`);
+						expect(await popup.mainFrame().mainRealm().evaluate("globalThis.log")).toEqual([
+							"afterprint",
+							"load print returned",
+						]);
+					} finally {
+						await popup.close();
+					}
 				} finally {
 					await hold.dispose();
 				}

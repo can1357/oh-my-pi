@@ -168,7 +168,7 @@ export class PrintHold {
 	/** A hold change the page has not had yet; made once the dialog closes. */
 	#stale = false;
 	/** Popup documents keep their hold reachable here after their opener changes origin. */
-	readonly #popups = new Map<Page, CDPSession>();
+	readonly #popups = new Map<Page, { session: CDPSession; script: Promise<string | undefined> }>();
 
 	private constructor(page: Page, session: CDPSession, scope: PrintHoldScope) {
 		this.#page = page;
@@ -247,8 +247,14 @@ export class PrintHold {
 		this.#session.off("Runtime.bindingCalled", this.#onBindingCalled);
 		this.#session.off("Page.javascriptDialogOpening", this.#onDialogOpening);
 		await this.#session.detach();
-		for (const session of this.#popups.values()) {
+		for (const { session, script } of this.#popups.values()) {
 			session.off("Runtime.bindingCalled", this.#onBindingCalled);
+			session.off("Page.frameNavigated", this.#onPopupFrameNavigated);
+			void script.then(identifier => {
+				if (identifier) {
+					return session.send("Page.removeScriptToEvaluateOnNewDocument", { identifier }).catch(() => undefined);
+				}
+			});
 			void session.send("Runtime.removeBinding", { name: this.#binding }).catch(() => undefined);
 		}
 		this.#popups.clear();
@@ -286,9 +292,21 @@ export class PrintHold {
 	readonly #onPopup = (popup: Page | null): void => {
 		if (!popup) return;
 		const session = popup.mainFrame().client;
-		this.#popups.set(popup, session);
+		const args = [this.#binding, this.#holdKey, this.#scope === "tab" ? null : USER_DRIVEN_RELEASE_MS, null];
+		const script = session
+			.send("Page.addScriptToEvaluateOnNewDocument", {
+				source: `(${holdPrintInPage})(${args.map(arg => JSON.stringify(arg)).join(", ")}, ${USER_DRIVEN_RELEASE_MS});`,
+			})
+			.then(result => result.identifier)
+			.catch(() => undefined);
+		this.#popups.set(popup, { session, script });
 		session.on("Runtime.bindingCalled", this.#onBindingCalled);
+		session.on("Page.frameNavigated", this.#onPopupFrameNavigated);
 		void session.send("Runtime.addBinding", { name: this.#binding }).catch(() => undefined);
+		void this.#setInFrames();
+	};
+
+	readonly #onPopupFrameNavigated = (): void => {
 		void this.#setInFrames();
 	};
 
@@ -355,9 +373,10 @@ export class PrintHold {
 	async #setInFrames(): Promise<void> {
 		const mainFrame = this.#page.mainFrame();
 		const remaining = this.#remaining();
-		for (const [popup, session] of this.#popups) {
+		for (const [popup, { session }] of this.#popups) {
 			if (popup.isClosed()) {
 				session.off("Runtime.bindingCalled", this.#onBindingCalled);
+				session.off("Page.frameNavigated", this.#onPopupFrameNavigated);
 				this.#popups.delete(popup);
 				continue;
 			}
@@ -366,17 +385,7 @@ export class PrintHold {
 			void popup
 				.mainFrame()
 				.mainRealm()
-				.evaluate(
-					(holdKey, remaining) => {
-						const hold: unknown = Reflect.get(globalThis, Symbol.for(`${holdKey}.until`));
-						if (typeof hold !== "object" || hold === null) return;
-						const clock: Function = Reflect.get(globalThis, Symbol.for("omp.printHold.clock"));
-						const now = Number(Reflect.apply(clock, undefined, []));
-						Reflect.set(hold, "until", remaining === null ? Number.POSITIVE_INFINITY : now + remaining);
-					},
-					this.#holdKey,
-					remaining,
-				)
+				.evaluate(holdPrintInPage, this.#binding, this.#holdKey, remaining, undefined, USER_DRIVEN_RELEASE_MS)
 				.catch(() => undefined);
 		}
 		await Promise.all(
