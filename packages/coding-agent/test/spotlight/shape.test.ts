@@ -54,10 +54,10 @@ function migrations(n: number): string[] {
 
 /**
  * A valve cut's gaps and the saved copy they number lines of: bare `… [A-B]` under the footer, or a compacted view's
- * `… [N lines; read URL:A-B]`, which names the copy itself.
+ * `… [N lines: read URL:A-B]`, which names the copy itself.
  */
 function cutGaps(text: string): { url: string; gaps: { from: number; to: number }[] } {
-	const addressed = [...text.matchAll(/^\s*… \[\d+ lines; read (\S+):(\d+)-(\d+)\]$/gm)];
+	const addressed = [...text.matchAll(/^\s*… \[\d+ lines: read (\S+):(\d+)-(\d+)\]$/gm)];
 	const url = /^\[cut: … \[A-B\] are lines A-B of (\S+) \(read /m.exec(text)?.[1] ?? addressed[0]?.[1];
 	if (!url) throw new Error("a cut names where its hidden lines are");
 	const bare = [...text.matchAll(/^\s*… \[(\d+)-(\d+)\](?: \(\d+ commits?: [^)]*\))?$/gm)].map(m => ({
@@ -143,7 +143,7 @@ describe("spotlight shaping", () => {
 		// Every other body folds to its exact file lines: function k's body is lines 42 + 23k … 61 + 23k.
 		for (const k of [0, 1, 3, 9]) expect(text).toContain(`  … [lines ${42 + 23 * k}-${61 + 23 * k}]`);
 		expect(text[0]).toBe("[src/retry.ts#ab12]");
-		expect(text.at(-1)).toBe("[folded: read src/retry.ts:A-B prints a shown range]");
+		expect(text.at(-1)).toBe("[folded: … [lines A-B] are lines A-B of src/retry.ts (read src/retry.ts:A-B)]");
 	});
 
 	it("keeps the body of a method the intent names, behind a multi-line signature, through an outline's cut", async () => {
@@ -190,7 +190,7 @@ describe("spotlight shaping", () => {
 
 		// "truncation" is in no spelling; "cover" is, inside "coverage", so the line must not claim it missing.
 		expect(out.text).toMatch(
-			/^\[intent: .*no line contains "truncat…" \(of those the tool returned before its limit\)\]$/m,
+			/^\[intent: .*no line contains any spelling of "truncation" \(of those the tool returned before its limit\)\]$/m,
 		);
 	});
 
@@ -307,7 +307,7 @@ describe("spotlight shaping", () => {
 		const lines = Array.from({ length: 200 }, (_, i) =>
 			i === 120
 				? "ERROR worker 7: NEEDLE connection reset by peer"
-				: `INFO request ${i} served in ${i % 17} ms by node-${i % 5}`,
+				: `INFO request ${i} ${["served in", "queued for", "parsed in", "routed in", "cached for"][i % 5]} ${i % 17} ms by node-${i % 5}`,
 		);
 		const out = await shapeResult(
 			bash("cat logs/worker.log", lines.join("\n")),
@@ -481,7 +481,7 @@ describe("spotlight shaping", () => {
 		const input = bash("bin/migrate", ["Applying migrations to staging", ...first, "Done: 5 applied"].join("\n"));
 		const collapsed = [
 			"Applying migrations to staging",
-			"… [5 lines as shown before; read artifact://1:2-6]",
+			"… [5 lines as shown before: read artifact://1:2-6]",
 			"Done: 5 applied",
 		].join("\n");
 		// The collapse would save tokens, just not enough.
@@ -561,7 +561,7 @@ describe("spotlight shaping", () => {
 		expect(out.text).toBe(
 			[
 				"Applying migrations to staging",
-				"… [14 lines as shown before; read artifact://1:2-15]",
+				"… [14 lines as shown before: read artifact://1:2-15]",
 				"Done: 14 applied, 0 failed",
 			].join("\n"),
 		);
@@ -593,7 +593,7 @@ describe("spotlight shaping", () => {
 		);
 
 		const lines = out.text.split("\n");
-		expect(lines[0]).toBe("… [24 lines as shown before; read artifact://1:1-24]");
+		expect(lines[0]).toBe("… [24 lines as shown before: read artifact://1:1-24]");
 		expect(lines[1]).toBe(first[24]);
 		expect(store.saved.get("artifact://1")?.split("\n").slice(0, 24)).toEqual(first.slice(0, 24));
 	});
@@ -618,6 +618,56 @@ describe("spotlight shaping", () => {
 		);
 		expect(out.text).toContain('[intent: every line naming "connection", "refused" is shown]');
 		expect(out.text.length).toBeLessThan(1_000);
+	});
+
+	it("keeps a line an intent names by a compound of short parts, such as a gen:rpc script", async () => {
+		// Six runners, so the script lines are no few repeated shapes and only the intent can keep gen:rpc.
+		const runners = ["bun", "node", "tsc --build", "oxlint", "bunx vitest", "deno run"];
+		const scripts = Array.from(
+			{ length: 120 },
+			(_, i) => `    "task-${i}": "${runners[i % 6]} scripts/task-${i}.ts",`,
+		);
+		// In the middle, away from the head and tail every cut keeps.
+		const text = [
+			"{",
+			'  "scripts": {',
+			...scripts.slice(0, 60),
+			'    "gen:rpc": "bun scripts/gen-rpc/index.ts",',
+			...scripts.slice(60),
+			"  }",
+			"}",
+		].join("\n");
+
+		const out = await shapeResult(
+			bash("cat scripts.txt", text),
+			context({ intent: "the gen:rpc script" }),
+			scorer(() => 0.2),
+			newShapeState(),
+			sink(),
+		);
+
+		expect(out.text).toContain('"gen:rpc": "bun scripts/gen-rpc/index.ts"');
+	});
+
+	it("counts the lines that differ in uniform output by their own shapes", async () => {
+		const lines = Array.from({ length: 1500 }, (_, k) => {
+			const i = k + 1;
+			if (i % 97 === 0) return `WARN cache ${i} evicted early`;
+			if (i % 311 === 0) return `ERROR shard ${i % 7} unreachable`;
+			return `INFO req ${i} ok in ${i % 40}ms`;
+		});
+
+		const out = await shapeResult(
+			bash("./serve.sh", lines.join("\n")),
+			context(),
+			scorer(() => 0.2),
+			newShapeState(),
+			sink(),
+		);
+
+		expect(out.text).toContain(
+			'19 lines differ (15 like "WARN cache N evicted early", 4 like "ERROR shard N unreachable"), all shown]',
+		);
 	});
 
 	it("leads a changed command output with its exit status, and leaves an unchanged one as it is", async () => {
@@ -695,7 +745,7 @@ describe("spotlight shaping", () => {
 			store,
 		);
 
-		expect(out.text.split("\n")[1]).toBe("… [30 lines as shown before; read artifact://42:2-31]");
+		expect(out.text.split("\n")[1]).toBe("… [30 lines as shown before: read artifact://42:2-31]");
 		expect(store.saved.size).toBe(0);
 	});
 
@@ -727,7 +777,7 @@ describe("spotlight shaping", () => {
 			"Applying migrations to staging",
 			// "migration" names every line, so only its first keeps clear of the collapse.
 			first[0],
-			"… [4 lines as shown before; read artifact://1:3-6]",
+			"… [4 lines as shown before: read artifact://1:3-6]",
 			first[5],
 		]);
 		expect(generic.text).not.toContain(first[5]);

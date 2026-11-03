@@ -897,7 +897,7 @@ describe("spotlight shaping of any tool", () => {
 		expect(resultText(again)).toBe(
 			[
 				"board: 10 open, 2 done",
-				"… [10 lines as shown before; read artifact://0:2-11]",
+				"… [10 lines as shown before: read artifact://0:2-11]",
 				"- [done] add the edit gate setting",
 			].join("\n"),
 		);
@@ -947,7 +947,7 @@ describe("spotlight shaping of any tool", () => {
 		const next = fakeTool("board", NEXT_BOARD);
 		context.push(shown("t1", await agentCall(board, run, "t1")), call("t2"));
 		expect(resultText(await agentCall(next, run, "t2"))).toMatch(
-			/… \[10 lines as shown before; read artifact:\/\/\d+:2-11\]/,
+			/… \[10 lines as shown before: read artifact:\/\/\d+:2-11\]/,
 		);
 
 		// A compaction leaves its summary and the new turn: the boards are gone from the context.
@@ -965,7 +965,7 @@ describe("spotlight shaping of any tool", () => {
 		await agentCall(fakeTool("board", BOARD.join("\n")), run, "t1");
 		const sibling = await agentCall(fakeTool("board", NEXT_BOARD), run, "t2");
 
-		expect(resultText(sibling)).toMatch(/… \[10 lines as shown before; read artifact:\/\/\d+:2-11\]/);
+		expect(resultText(sibling)).toMatch(/… \[10 lines as shown before: read artifact:\/\/\d+:2-11\]/);
 	});
 
 	it("shapes and journals only the tools spotlight.experiment.tools names", async () => {

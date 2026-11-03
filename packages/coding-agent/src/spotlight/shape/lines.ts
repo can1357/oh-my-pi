@@ -20,15 +20,20 @@ export function norm(line: string): string {
 
 /** Words too generic in intents to say anything about a line. */
 const STOP = new Set(
-	"find check read inspect whether where what which with from that this into have does show lines line file files code output the and for are see used uses use need needs most least recent latest first last many much each every about some other only when been will would could should there their them they than then also just like more less decide decides contain contains name names cover covers mention mentions touch touches happen happens cause causes make makes work works mean means".split(
+	"find check read inspect whether where what which with from that this into have does show lines line file files code output the and for are see used uses use need needs most least recent latest first last many much each every about some other only when been will would could should there their them they than then also just like more less decide decides contain contains name names cover covers mention mentions touch touches happen happens cause causes make makes work works mean means added adding exact exactly introduced introduce count counts number".split(
 		" ",
 	),
 );
 
-/** Lowercase words of `text` (`[a-z_][a-z0-9_]{3,}`) without the stop words. */
+/**
+ * Lowercase words of `text` (`[a-z_][a-z0-9_]{3,}`) without the stop words, and its compound tokens (`gen:rpc`,
+ * `index.ts`, `shard-3`) of at least 4 characters: a name made of short parts is still a name.
+ */
 export function words(text: string): Set<string> {
 	const out = new Set<string>();
-	for (const w of text.toLowerCase().match(/[a-z_][a-z0-9_]{3,}/g) ?? []) if (!STOP.has(w)) out.add(w);
+	const lower = text.toLowerCase();
+	for (const w of lower.match(/[a-z_][a-z0-9_]{3,}/g) ?? []) if (!STOP.has(w)) out.add(w);
+	for (const w of lower.match(/[a-z0-9_]+(?:[:./-][a-z0-9_]+)+/g) ?? []) if (w.length >= 4) out.add(w);
 	return out;
 }
 

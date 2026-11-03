@@ -178,8 +178,10 @@ function withNote(view: View, note: string): View {
 	return { lines: [...view.lines, note], spans: view.spans && [...view.spans, null] };
 }
 
-const foldedNote = (paths: string[]) =>
-	`[folded: read ${paths.length === 1 ? paths[0] : "FILE"}:A-B prints a shown range]`;
+const foldedNote = (paths: string[]) => {
+	const file = paths.length === 1 ? paths[0] : "FILE";
+	return `[folded: … [lines A-B] are lines A-B of ${file} (read ${file}:A-B)]`;
+};
 const docsNote = (paths: string[]) =>
 	`[sections folded: read ${paths.length === 1 ? paths[0] : "FILE"}:A-B prints one]`;
 
@@ -288,19 +290,33 @@ function runLines(spans: readonly Span[] | null, i: number, j: number): [number,
 }
 
 /**
- * What a hidden run of `git log` output holds of whole commits, by hash prefix (` (2 commits: 3102b08, 9b72b7e)`, at
- * most twelve named), or "" when it holds no commit line: a marker naming them says no commit vanished without trace.
+ * What a hidden run of `git log` output holds of whole commits, or "" when it holds no commit line: a marker naming
+ * them says no commit vanished without trace. Up to four are named by hash prefix and subject
+ * (` (2 commits: 3102b08 "fix(task): …", 9b72b7e "…")`), more by hash prefix alone (at most twelve named).
  */
 function commitNote(hidden: readonly string[]): string {
-	const commits = hidden.flatMap(l => (COMMIT.test(l) ? [l.slice(7, 14)] : []));
+	const commits: { hash: string; subject?: string }[] = [];
+	hidden.forEach((line, i) => {
+		if (!COMMIT.test(line)) return;
+		let k = i + 1;
+		while (k < hidden.length && (!hidden[k].trim() || /^[A-Z][A-Za-z]*:/.test(hidden[k]))) k++;
+		const subject = k < hidden.length && !COMMIT.test(hidden[k]) ? hidden[k].trim() : undefined;
+		commits.push({ hash: line.slice(7, 14), subject });
+	});
 	if (!commits.length) return "";
-	const listed = commits.length > 12 ? `${commits.slice(0, 12).join(", ")}, …` : commits.join(", ");
+	const named =
+		commits.length <= 4
+			? commits.map(c =>
+					c.subject ? `${c.hash} "${c.subject.length > 50 ? `${c.subject.slice(0, 50)}…` : c.subject}"` : c.hash,
+				)
+			: commits.map(c => c.hash);
+	const listed = named.length > 12 ? `${named.slice(0, 12).join(", ")}, …` : named.join(", ");
 	return ` (${commits.length === 1 ? "1 commit" : `${commits.length} commits`}: ${listed})`;
 }
 
 /** A collapsed run of already-seen lines and the read that brings them back, so the agent never reruns the call. */
 const seenMarker = (count: number, url: string, [a, z]: [number, number], note = "") =>
-	`… [${count} ${count === 1 ? "line" : "lines"} as shown before${note}; read ${url}:${a}-${z}]`;
+	`… [${count} ${count === 1 ? "line" : "lines"} as shown before${note}: read ${url}:${a}-${z}]`;
 
 /** The footer of a result with numbered gaps (`… [A-B]`) or capped lines: where those numbers are. */
 const cutFooter = (url: string) => `[cut: … [A-B] are lines A-B of ${url} (read ${url}:A-B)]`;
@@ -351,7 +367,7 @@ function seenKeeps(
 		for (const term of asked) {
 			if (hits.has(term)) continue;
 			const stem = term.slice(0, Math.max(5, term.length - 3));
-			if (!text.includes(stem)) stems.set(stem, stem.length < term.length ? `${stem}…` : term);
+			if (!text.includes(stem)) stems.set(stem, term);
 		}
 		// `truncate` and `truncation` miss as `trunc…` and `truncat…`: the shorter stem says both.
 		for (const [stem, shown] of stems) {
@@ -519,7 +535,8 @@ async function shapeSubject(run: Run, subject: Subject): Promise<{ view: View; s
 		budget = Math.min(Math.max(EXEMPT_MAX, WINDOW_BUDGET * scale), WINDOW_BUDGET * scale + named);
 		const chosen = frameLines(width, lines, witnessed, scores, {
 			budget,
-			ctx: 1,
+			// Neighbours of a line that differs in uniform output are routine lines themselves.
+			ctx: uniform ? 0 : 1,
 			head: 3,
 			tail: 4,
 			// In uniform output only the lines that say something new are picked; the rest are routine samples.
@@ -594,7 +611,7 @@ async function shapeSubject(run: Run, subject: Subject): Promise<{ view: View; s
 		// A read's markers sit at the code's depth; in command output an indented marker reads as part of the text.
 		const indent = input.read ? indentOfFirst(lines.slice(i, j)) : "";
 		if (fresh) {
-			if (addressGaps) out.push(`${indent}… [${j - i} lines; read ${target.url}:${a}-${z}]`);
+			if (addressGaps) out.push(`${indent}… [${j - i} lines: read ${target.url}:${a}-${z}]`);
 			else {
 				out.push(`${indent}… [${a}-${z}]${commitNote(lines.slice(i, j))}`);
 				bare++;
@@ -624,14 +641,22 @@ async function shapeSubject(run: Run, subject: Subject): Promise<{ view: View; s
 			.filter(([, n]) => n > 0)
 			.map(([s, n]) => `${n.toLocaleString("en-US")} match "${s.length > 200 ? `${s.slice(0, 200)}…` : s}"`);
 		if (listed.length) {
+			// Lines that differ are named by number when few, else counted by their own shapes when those are few.
+			const kinds = new Map<string, number>();
+			for (const i of differAt) kinds.set(lineShape(lines[i]), (kinds.get(lineShape(lines[i])) ?? 0) + 1);
+			const which =
+				differ <= 3
+					? ` (${differ === 1 ? "line" : "lines"} ${differAt.map(i => runLines(target.spans, i, i + 1)[0]).join(", ")})`
+					: kinds.size <= 3
+						? ` (${[...kinds].map(([s, n]) => `${n.toLocaleString("en-US")} like "${s.length > 80 ? `${s.slice(0, 80)}…` : s}"`).join(", ")})`
+						: "";
 			const differs = !differ
 				? "none differ"
-				: `${differ.toLocaleString("en-US")} ${differ === 1 ? "line differs" : "lines differ"}${differ <= 3 ? ` (${differ === 1 ? "line" : "lines"} ${differAt.map(i => runLines(target.spans, i, i + 1)[0]).join(", ")})` : ""}, ${differHidden ? `${differHidden.toLocaleString("en-US")} of them hidden` : differ === 1 ? "shown" : "all shown"}`;
+				: `${differ.toLocaleString("en-US")} ${differ === 1 ? "line differs" : "lines differ"}${which}, ${differHidden ? `${differHidden.toLocaleString("en-US")} of them hidden` : differ === 1 ? "shown" : "all shown"}`;
 			out.push(`[uniform: hidden lines: ${listed.join(", ")} (N: any number); ${differs}]`);
 			outSpans.push(null);
 		}
 	}
-	// Every line naming a rare word of the intent is shown: saying so spares the agent a read to check the gaps.
 	// What a cut means for the intent's words: every line naming a rare one is shown, and none holds the missing ones.
 	// Saying so spares the agent a read to check the gaps.
 	if (hidden) {
@@ -646,7 +671,7 @@ async function shapeSubject(run: Run, subject: Subject): Promise<{ view: View; s
 			// A tool that stopped at its own result limit returned only part of what exists.
 			const limited = lines.some(l => /\blimit reached\]?$/i.test(l.trim()));
 			said.push(
-				`no line contains ${quoted(missing)}${limited ? " (of those the tool returned before its limit)" : ""}`,
+				`no line contains any spelling of ${quoted(missing)}${limited ? " (of those the tool returned before its limit)" : ""}`,
 			);
 		}
 		if (said.length) {
