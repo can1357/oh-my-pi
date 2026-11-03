@@ -426,10 +426,13 @@ fn cancel_mid_connection_exits_20_with_trailer() {
 	assert_eq!(cap.err(), "rsync error: received SIGINT, SIGTERM, or SIGHUP (code 20) at rsync.c(874) [sender=3.5.1]\n");
 }
 
-/// Cancelling a local copy mid-transfer: the client reports the signal, then
-/// stops its server half, whose generator reports SIGUSR1. Captured from
-/// rsync 3.5.1 (`rsync -a bigsrc/ dst/`, SIGTERM to the client), three runs:
-/// exactly these two lines, exit 20.
+/// Cancelling a local copy mid-transfer. A cancellation of the command
+/// reaches the server half as well as the client, as a signal to the process
+/// group does: the half ends at its next I/O step with its own code-20 line,
+/// and the client follows after its 400 ms. rsync 3.5.1 (`rsync -a
+/// --bwlimit=500 bigsrc/ dst/`, SIGTERM to the process group, 10 runs)
+/// printed these two lines in 6; the client's line first then the half's in
+/// 2; the client's then the half's SIGUSR1 line in 2.
 #[test]
 fn cancel_local_copy_reports_like_upstream() {
 	use clap::Parser as _;
@@ -451,18 +454,20 @@ fn cancel_local_copy_reports_like_upstream() {
 	assert!(started.elapsed() < Duration::from_secs(10), "cancellation was not prompt");
 	assert_eq!(
 		cap.err(),
-		"rsync error: received SIGINT, SIGTERM, or SIGHUP (code 20) at rsync.c(874) [sender=3.5.1]\n\
-		 rsync error: received SIGUSR1 (code 19) at main.c(1687) [generator=3.5.1]\n"
+		"rsync error: received SIGINT, SIGTERM, or SIGHUP (code 20) at io.c(604) [generator=3.5.1]\n\
+		 rsync error: received SIGINT, SIGTERM, or SIGHUP (code 20) at rsync.c(874) [sender=3.5.1]\n"
 	);
 }
 
 /// Cancelling a local copy while its server half is still setting up (here
 /// blocked opening a FIFO given as its log file, which nobody opens): the
-/// client reports the signal first, then stops its server half, whose
-/// SIGUSR1 trailer comes after. rsync 3.5.1 (`rsync -a -M--log-file=FIFO
-/// src/ d/`, SIGTERM, SIGINT or SIGHUP to the client) prints exactly these
-/// two lines. The half's wait for a reader ends at its stop; before, the
-/// client waited for the half until someone opened the FIFO.
+/// half, which got the signal too but has no I/O step to end at, ends at
+/// its client's stop, after the client's line. rsync 3.5.1 (`rsync -a
+/// -M--log-file=FIFO src/ d/`, SIGTERM to the process group, 10 runs)
+/// printed these two lines in 5; the half's SIGUSR1 line second in 3; the
+/// half's code-20 line first in 2. The half's wait for a reader ends at its
+/// stop; before, the client waited for the half until someone opened the
+/// FIFO.
 #[cfg(unix)]
 #[test]
 fn cancelling_a_local_copy_in_setup_reports_before_the_server_half() {
@@ -490,7 +495,7 @@ fn cancelling_a_local_copy_in_setup_reports_before_the_server_half() {
 	assert_eq!(
 		cap.err(),
 		"rsync error: received SIGINT, SIGTERM, or SIGHUP (code 20) at rsync.c(874) [sender=3.5.1]\n\
-		 rsync error: received SIGUSR1 (code 19) at main.c(1687) [Receiver=3.5.1]\n"
+		 rsync error: received SIGINT, SIGTERM, or SIGHUP (code 20) at rsync.c(874) [Receiver=3.5.1]\n"
 	);
 }
 
@@ -558,11 +563,11 @@ fn both_logs_cancelled(server_log_at: Duration) -> (i32, String) {
 
 /// [`both_logs_cancelled`] with the half's log opened 300 ms after the
 /// cancellation, within the client's 400 ms: the half gets past its log and
-/// reports as the generator when the client signals it, before the client,
-/// whose exit line waits on its log. rsync 3.5.1 printed exactly these two
-/// lines in 29 of 29 runs (SIGTERM, SIGINT and SIGHUP; one-file and this
-/// tree). Ended at the cancellation itself, the half's log open dropped the
-/// half's line (round 5 of this pull request).
+/// ends at its next I/O step with its own line, before the client, whose
+/// exit line waits on its log. rsync 3.5.1, SIGTERM to the process group, 10
+/// runs: these two lines in 7, the client's alone in 3. (With the signal to
+/// the client alone, which no cancellation of the builtin gives, rsync
+/// printed the half's SIGUSR1 line instead, before or after the client's.)
 #[cfg(unix)]
 #[test]
 fn a_half_past_its_log_reports_before_a_client_waiting_on_its_own() {
@@ -570,16 +575,17 @@ fn a_half_past_its_log_reports_before_a_client_waiting_on_its_own() {
 	assert_eq!(code, RERR_SIGNAL, "{err}");
 	assert_eq!(
 		err,
-		"rsync error: received SIGUSR1 (code 19) at main.c(1687) [generator=3.5.1]\n\
+		"rsync error: received SIGINT, SIGTERM, or SIGHUP (code 20) at io.c(604) [Receiver=3.5.1]\n\
 		 rsync error: received SIGINT, SIGTERM, or SIGHUP (code 20) at rsync.c(874) [sender=3.5.1]\n"
 	);
 }
 
 /// [`both_logs_cancelled`] with the half's log opened 900 ms after the
 /// cancellation, past the client's 400 ms: the half is still opening its
-/// log, inside its first log write, when the client signals it, so its line
+/// log, inside its first log write, when the client stops it, so its line
 /// is lost (`rwrite`'s `in_block`) and the client's prints alone. rsync
-/// 3.5.1 printed exactly this line in 5 of 5 runs.
+/// 3.5.1, SIGTERM to the process group, 10 runs: this line alone in 7, the
+/// half's code-20 line first in 3; to the client alone, this line in 15 of 15.
 #[cfg(unix)]
 #[test]
 fn a_half_stopped_opening_its_log_prints_nothing_when_the_client_logs() {
@@ -708,13 +714,85 @@ fn a_cancelled_client_lets_its_remote_shell_report_sigusr1() {
 	);
 }
 
+/// A daemon reached over a remote shell (`rsync -e RSH src/ h::mod/`),
+/// cancelled during the daemon handshake: the client reports first, after
+/// its 400 ms, then stops the remote shell, whose SIGUSR1 line follows, as
+/// rsync 3.5.1's exit cleanup orders it (the client's line, then the remote
+/// daemon's `received SIGUSR1`, in 6 of 6 runs in review, password-file and
+/// early-input FIFOs). Before, the cancelled handshake dropped the
+/// connection, which stopped the remote shell first. A shell stands in for
+/// the remote daemon: it greets, then waits.
+#[cfg(unix)]
+#[test]
+fn a_cancelled_daemon_handshake_reports_before_its_remote_shell() {
+	use std::os::unix::fs::PermissionsExt;
+
+	use clap::Parser as _;
+	let dir = tempfile::tempdir().unwrap();
+	make_tree(&dir.path().join("src"));
+	let rsh = dir.path().join("daemonrsh");
+	fs::write(
+		&rsh,
+		"#!/bin/sh\ntrap 'echo \"rsync error: received SIGUSR1 (code 19) at main.c(1687) [Receiver=3.5.1]\" >&2; exit 19' USR1\nprintf '@RSYNCD: 31.0\\n'\nwhile :; do sleep 0.05; done\n",
+	)
+	.unwrap();
+	fs::set_permissions(&rsh, fs::Permissions::from_mode(0o755)).unwrap();
+	let (mut host, cap) = crate::host::Host::for_test_owning("rsync", Vec::new(), dir.path());
+	let cancel = host.cancel_flag_for_test();
+	let canceller = std::thread::spawn(move || {
+		std::thread::sleep(Duration::from_millis(300));
+		cancel.store(true, Ordering::Relaxed);
+	});
+	let rsh_arg = rsh.to_str().unwrap().to_string();
+	let parsed = Rsync::try_parse_from(["rsync", "--", "-a", "-e", &rsh_arg, "src/", "h::mod/"]).unwrap();
+	let started = Instant::now();
+	let code = crate::host::run_caught::<Rsync>(parsed, &mut host);
+	canceller.join().unwrap();
+	assert_eq!(code, RERR_SIGNAL, "{}", cap.err());
+	assert!(started.elapsed() < Duration::from_secs(10), "cancellation was not prompt");
+	assert_eq!(
+		cap.err(),
+		"rsync error: received SIGINT, SIGTERM, or SIGHUP (code 20) at rsync.c(874) [sender=3.5.1]\n\
+		 rsync error: received SIGUSR1 (code 19) at main.c(1687) [Receiver=3.5.1]\n"
+	);
+}
+
+/// A client cancelled while it opens its own `--log-file` FIFO, which nobody
+/// reads, ends there, before any server half starts: the code-20 line alone
+/// (rsync 3.5.1 opens that log before its signal handlers exist and dies
+/// with no output; the pull request states this one difference). Before, it
+/// went on, started its local half, and that half printed a protocol error.
+#[cfg(unix)]
+#[test]
+fn a_client_cancelled_opening_its_log_starts_no_half() {
+	use clap::Parser as _;
+	let dir = tempfile::tempdir().unwrap();
+	make_tree(&dir.path().join("src"));
+	let fifo = dir.path().join("logfifo");
+	assert!(Command::new("mkfifo").arg(&fifo).status().unwrap().success());
+	let (mut host, cap) = crate::host::Host::for_test_owning("rsync", Vec::new(), dir.path());
+	let cancel = host.cancel_flag_for_test();
+	let canceller = std::thread::spawn(move || {
+		std::thread::sleep(Duration::from_millis(600));
+		cancel.store(true, Ordering::Relaxed);
+	});
+	let parsed = Rsync::try_parse_from(["rsync", "--", "-a", "--log-file=logfifo", "src/", "dst/"]).unwrap();
+	let code = crate::host::run_caught::<Rsync>(parsed, &mut host);
+	canceller.join().unwrap();
+	assert_eq!(code, RERR_SIGNAL, "{}", cap.err());
+	assert_eq!(cap.err(), "rsync error: received SIGINT, SIGTERM, or SIGHUP (code 20) at rsync.c(874) [sender=3.5.1]\n");
+	assert!(!dir.path().join("dst").exists());
+}
+
 /// Cancelling a copy whose `--log-file`, `--write-batch` file or batch
 /// script is a FIFO a reader holds but empties nothing from (filled before
-/// the start) ends as rsync 3.5.1 does. Captured from rsync 3.5.1 under
-/// `LC_ALL=C`, SIGTERM 0.6 s in, three runs of each, always the same: exit
-/// 20 and exactly these lines. A trailer due while the client's log write is
-/// blocked is lost, as `rwrite` drops it, so only the server half's shows.
-/// Before, each write stayed blocked until someone read the FIFO.
+/// the start) ends as rsync 3.5.1 does. rsync 3.5.1 under `LC_ALL=C`,
+/// SIGTERM to the process group 0.6 s in, 10 runs of each: the log-file
+/// line in 6 (the half's SIGUSR1 line alone in 4), the batch-file line in 10,
+/// the batch-script lines in 6 (the client's line, then the half's SIGUSR1
+/// line, in 4). A trailer due while the client's log write is blocked is
+/// lost, as `rwrite` drops it, so only the server half's shows. Before, each
+/// write stayed blocked until someone read the FIFO.
 #[cfg(unix)]
 #[test]
 fn cancelling_a_write_to_a_full_fifo_ends_as_rsync_does() {
@@ -726,7 +804,7 @@ fn cancelling_a_write_to_a_full_fifo_ends_as_rsync_does() {
 			"log file",
 			"logfifo",
 			&["-a", "--log-file=logfifo", "src/", "dst/"],
-			"rsync error: received SIGUSR1 (code 19) at main.c(1687) [Receiver=3.5.1]\n",
+			"rsync error: received SIGINT, SIGTERM, or SIGHUP (code 20) at io.c(604) [Receiver=3.5.1]\n",
 		),
 		(
 			"batch file",
@@ -738,8 +816,8 @@ fn cancelling_a_write_to_a_full_fifo_ends_as_rsync_does() {
 			"batch script",
 			"b.sh",
 			&["-a", "--write-batch=b", "src/", "dst/"],
-			"rsync error: received SIGINT, SIGTERM, or SIGHUP (code 20) at rsync.c(874) [sender=3.5.1]\n\
-			 rsync error: received SIGUSR1 (code 19) at main.c(1687) [Receiver=3.5.1]\n",
+			"rsync error: received SIGINT, SIGTERM, or SIGHUP (code 20) at io.c(604) [Receiver=3.5.1]\n\
+			 rsync error: received SIGINT, SIGTERM, or SIGHUP (code 20) at rsync.c(874) [sender=3.5.1]\n",
 		),
 	];
 	for (case, fifo_name, args, expected) in cases {

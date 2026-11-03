@@ -203,11 +203,10 @@ struct DeferredLog {
 	cancel:   Arc<AtomicBool>,
 }
 
-/// Holds a local server half's last report until its client has reported, or
-/// until the client's report waits on its own `--log-file`. Upstream's client
-/// signals its child (`kill_all`) just before it prints its exit line, which
-/// then comes first unless that line's log write blocks; the child's comes
-/// first then.
+/// Holds a local server half's last report until its client has reported
+/// and stopped it: a half that ends at that stop (one the cancellation found
+/// in setup, or one its client stopped for its own failure) reports after
+/// its client, as upstream's child does after `kill_all`.
 #[derive(Default)]
 pub(crate) struct ReportGate {
 	open:   Mutex<bool>,
@@ -265,9 +264,6 @@ struct Inner {
 	protocol: AtomicU32,
 	checksums: Mutex<(CsumType, CsumType)>,
 	fatal: Mutex<Option<RsyncError>>,
-	/// Opened when this logger's `--log-file` write would block, before it
-	/// waits for room ([`Logger::release_on_log_stall`]).
-	log_stall: Arc<Mutex<Option<Arc<ReportGate>>>>,
 }
 
 /// Where messages go: local stdout/stderr (client) or the peer (server role).
@@ -347,7 +343,6 @@ impl Logger {
 			protocol: AtomicU32::new(33),
 			checksums: Mutex::new((CsumType::Md5, CsumType::Md5)),
 			fatal: Mutex::new(None),
-			log_stall: Arc::default(),
 			cfg,
 		};
 		Self { inner: Arc::new(inner), role }
@@ -427,27 +422,28 @@ impl Logger {
 
 	/// log_init: opens `config().log_file` for appending through the operator-file walk.
 	/// On failure prints upstream's two messages and falls back to syslog. An
-	/// open that `cancel` ends (a FIFO nobody reads) prints nothing: the run
-	/// ends with its cancellation.
+	/// open that `cancel` ends (a FIFO nobody reads) prints nothing and
+	/// returns true: the run ends with its cancellation.
 	pub(crate) fn open_log_file(
 		&self,
 		fs: &pi_vfs::BlockingFs,
 		insecure: bool,
 		cancel: &std::sync::Arc<std::sync::atomic::AtomicBool>,
-	) {
+	) -> bool {
 		let Some(path) = self.inner.cfg.log_file.clone() else {
-			return;
+			return false;
 		};
 		if path.is_empty() {
 			lock(&self.inner.outputs).log = LogTarget::Syslog;
-			return;
+			return false;
 		}
 		let deferred = DeferredLog { path, fs: fs.clone(), insecure, cancel: Arc::clone(cancel) };
 		match self.open_deferred(&deferred) {
 			Ok(file) => self.set_log_file(file),
-			Err(err) if RsyncError::is_cancellation(&err) => {},
+			Err(err) if RsyncError::is_cancellation(&err) => return true,
 			Err(err) => self.log_open_failed(&deferred.path, &err),
 		}
+		false
 	}
 
 	/// A local server half's `--log-file` when its client logs too: upstream's
@@ -474,16 +470,10 @@ impl Logger {
 	/// Opens a `--log-file` for appending. A line the cancellation finds
 	/// waiting is lost with the rest of the run's output (see `Outputs::cut`);
 	/// one logged after it, such as the exit line, waits for the log as
-	/// rsync's does, and opens [`Logger::release_on_log_stall`]'s gate first.
+	/// rsync's does.
 	fn open_deferred(&self, log: &DeferredLog) -> io::Result<Box<dyn Write + Send>> {
 		let file = crate::rsync::paths::create_operator_file(&log.fs, &log.path, true, log.insecure, &log.cancel)?;
-		let stall = Arc::clone(&self.inner.log_stall);
-		let file = file.waiting_after_cancel().on_stall(Arc::new(move || {
-			if let Some(gate) = lock(&stall).as_ref() {
-				gate.open();
-			}
-		}));
-		Ok(Box::new(file))
+		Ok(Box::new(file.waiting_after_cancel()))
 	}
 
 	/// logfile_open's failure: upstream's two messages, then syslog.
@@ -493,12 +483,6 @@ impl Logger {
 		text.extend_from_slice(&crate::host::os_bytes_lossy(path.as_os_str()));
 		self.rsyserr(LogCode::Error, err, &text);
 		self.rprintf(LogCode::Info, b"Ignoring \"log file\" setting.\n");
-	}
-
-	/// Opens `gate` when this logger's `--log-file` write would block (a FIFO
-	/// with no room), before the write waits; `None` stops that.
-	pub(crate) fn release_on_log_stall(&self, gate: Option<Arc<ReportGate>>) {
-		*lock(&self.inner.log_stall) = gate;
 	}
 
 	/// rprintf: `text` carries its own trailing newline like upstream's format strings.

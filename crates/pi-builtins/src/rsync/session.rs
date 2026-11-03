@@ -1169,8 +1169,14 @@ fn client_main(io: &HostIo, mut opts: Options, argv: &[OsString]) -> i32 {
 	let role = if inputs.ops.remote_is_sender { Role::PreReceiver } else { Role::Sender };
 	let logger = Logger::local(Box::new(io.out.clone()), Box::new(io.err.clone()), log_config(io, &opts, false, local))
 		.with_role(role);
-	if opts.logfile_name.is_some() {
-		logger.open_log_file(&io.fs, opts.insecure_links, &io.cancel);
+	// Upstream opens its own log while it parses its options, before its
+	// signal handlers exist: a cancellation there ends the run before any
+	// peer starts (here with the signal trailer; see the pull request's one
+	// difference).
+	if opts.logfile_name.is_some() && logger.open_log_file(&io.fs, opts.insecure_links, &io.cancel) {
+		let err = RsyncError::cancelled();
+		logger.finish(err.code, err.site, &Stats::default(), false);
+		return err.code;
 	}
 	for notice in &opts.notices {
 		logger.rprintf(LogCode::Info, format!("{notice}\n").as_bytes());
@@ -1291,24 +1297,22 @@ impl PeerKind {
 	/// The client's signal exit, as upstream's `sig_int` and `exit_cleanup`
 	/// run it: [`SIGNAL_GRACE`], then the local half is signalled
 	/// (`kill_all`), then the client reports (`log_exit`), and the peer is
-	/// stopped. The half's own report waits for the client's, unless the
-	/// client's waits on its full `--log-file`: then the half's comes first.
-	fn signal_exit(&mut self, logger: &Logger, report: impl FnOnce()) {
+	/// stopped. A local half that the command's cancellation found in its
+	/// protocol loop has reported already; one still in setup reports after
+	/// the client ([`ReportGate`]).
+	fn signal_exit(&mut self, report: impl FnOnce()) {
 		thread::sleep(SIGNAL_GRACE);
-		if let Self::Local { kill, report: gate, .. } = self {
+		if let Self::Local { kill, .. } = self {
 			kill.store(true, Ordering::Relaxed);
-			logger.release_on_log_stall(Some(Arc::clone(gate)));
 		}
 		report();
-		logger.release_on_log_stall(None);
 		self.stop();
 	}
 }
 
 /// Upstream `sig_int` sleeps this long (`msleep(400)`) before its exit
 /// cleanup signals the local child and reports; the child runs on meanwhile
-/// (a half waiting on its log FIFO may get past it, and report as the
-/// generator).
+/// (a half waiting on its log FIFO may get past it).
 const SIGNAL_GRACE: Duration = Duration::from_millis(400);
 
 impl Drop for PeerKind {
@@ -1416,12 +1420,20 @@ fn client_start(
 				if let Some(BatchFiles::Write { data, script }) = other {
 					batch_writer = Some((data, script));
 				}
-				let (mut conn, protocol) = connect_remote(io, &mut opts, &ops, remote, logger)?;
-				let protocol = protocol.unwrap_or(0);
-				if protocol < 0 {
+				let (mut conn, protocol) = match connect_remote(io, &mut opts, &ops, remote, logger)? {
+					Connected::Ready(conn, protocol) => (conn, protocol),
 					// The daemon ended the session (module listing).
-					return Ok(0);
-				}
+					Connected::Ended => return Ok(0),
+					Connected::Cancelled(conn) => {
+						// Held until the client has reported, as upstream's exit
+						// cleanup stops its remote shell after its own line.
+						let err = RsyncError::cancelled();
+						let (mut peer, _socket) =
+							if conn.child.is_some() { (PeerKind::Child(Some(conn)), None) } else { (PeerKind::None, Some(conn)) };
+						peer.signal_exit(|| logger.finish(err.code, err.site, &Stats::default(), false));
+						return Ok(err.code);
+					},
+				};
 				if protocol > 0 {
 					remote_protocol = Some(protocol as u32);
 				}
@@ -1456,15 +1468,26 @@ fn client_start(
 	Ok(end)
 }
 
-/// Connects to a remote shell or daemon. The second value is the daemon's
-/// protocol (0 for a remote shell, -1 when the daemon ended the session).
+/// What [`connect_remote`] reached.
+enum Connected {
+	/// A connection ready for the transfer, with the remote protocol (0 for a
+	/// remote shell).
+	Ready(Connection, i32),
+	/// The daemon ended the session (module listing).
+	Ended,
+	/// The run was cancelled during the daemon handshake; the connection is
+	/// still open, so its remote shell is stopped after the client reports.
+	Cancelled(Connection),
+}
+
+/// Connects to a remote shell or daemon.
 fn connect_remote(
 	io: &HostIo,
 	opts: &mut Options,
 	ops: &Operands,
 	remote: &Remote,
 	logger: &Logger,
-) -> Result<(Connection, Option<i32>), RsyncError> {
+) -> Result<Connected, RsyncError> {
 	let remote_args = ops.remote_args();
 	let getenv = |k: &str| io.getenv(k);
 	let rsh = opts
@@ -1501,7 +1524,7 @@ fn connect_remote(
 				env: &[],
 				logger,
 			};
-			Ok((transport::spawn_shell(&io.child, &cfg, Arc::clone(&io.cancel))?, None))
+			Ok(Connected::Ready(transport::spawn_shell(&io.child, &cfg, Arc::clone(&io.cancel))?, 0))
 		}
 		Remote::Daemon { user, host, .. } => {
 			if remote_args.first().is_some_and(|a| os_bytes_lossy(a).first() == Some(&b'/')) && !ops.daemon_over_shell {
@@ -1588,12 +1611,16 @@ fn connect_remote(
 				connect_deadline: deadline,
 				io_timeout: (opts.io_timeout > 0).then(|| Duration::from_secs(opts.io_timeout as u64)),
 			};
-			let session = daemon::daemon_handshake(&mut conn, &dcfg, logger)?;
+			let session = match daemon::daemon_handshake(&mut conn, &dcfg, logger) {
+				Ok(session) => session,
+				Err(_) if io.host_cancel.load(Ordering::Relaxed) => return Ok(Connected::Cancelled(conn)),
+				Err(err) => return Err(err),
+			};
 			if session.exited {
-				return Ok((conn, Some(-1)));
+				return Ok(Connected::Ended);
 			}
 			opts.protocol_version = session.protocol as i32;
-			Ok((conn, Some(session.remote_protocol as i32)))
+			Ok(Connected::Ready(conn, session.remote_protocol as i32))
 		}
 	}
 }
@@ -1632,7 +1659,7 @@ struct ClientRun<'a> {
 fn setup_failed(logger: &Logger, err: &RsyncError, streams: Streams, mut peer: PeerKind, cancelled: bool) -> i32 {
 	if cancelled {
 		let err = RsyncError::cancelled();
-		peer.signal_exit(logger, || logger.finish(err.code, err.site, &Stats::default(), false));
+		peer.signal_exit(|| logger.finish(err.code, err.site, &Stats::default(), false));
 		drop(streams);
 		return err.code;
 	}
@@ -1831,7 +1858,7 @@ impl ClientRun<'_> {
 		let (code, role) = if cancelled {
 			let err = RsyncError::cancelled();
 			let role = failure.as_ref().map_or(outcome.role, |f| f.role);
-			peer.signal_exit(&logger, || logger.with_role(role).finish(err.code, err.site, &stats, false));
+			peer.signal_exit(|| logger.with_role(role).finish(err.code, err.site, &stats, false));
 			(err.code, role)
 		} else {
 			let base = failure.as_ref().map_or(0, |f| f.err.code).max(status);
@@ -1974,6 +2001,12 @@ fn server_main(io: &HostIo, opts: Options, local: Option<LocalServer>) -> i32 {
 		Arc::clone(&shared_slot),
 	);
 	let local_server = local.is_some();
+	// A cancellation of the command reaches a local half too, as a signal to
+	// the process group reaches rsync's child; it ends at its next I/O step
+	// (see the end of this function). A remote server gets its signals from
+	// the system.
+	let _host_watch =
+		local_server.then(|| Watch::start(Arc::clone(&io.host_cancel), vec![Arc::clone(&abort)], 0, Arc::default()));
 	let client_logs = local.as_ref().is_some_and(|local| local.client_logs);
 	let report_gate = local.as_ref().map(|local| Arc::clone(&local.report));
 	let (conn_reader, conn_writer, probe, client_info, local_filters): (Box<dyn Read + Send>, Box<dyn Write + Send>, Option<ReadProbe>, Vec<u8>, Option<Filters>) =
@@ -2066,7 +2099,10 @@ fn server_main(io: &HostIo, opts: Options, local: Option<LocalServer>) -> i32 {
 	};
 	let neg = match neg {
 		Ok(neg) => neg,
-		Err(err) if local_server && (err.code == RERR_PROTOCOL || io.cancel.load(Ordering::Relaxed)) => {
+		Err(err)
+			if local_server
+				&& (err.code == RERR_PROTOCOL || io.cancel.load(Ordering::Relaxed) || io.host_cancel.load(Ordering::Relaxed)) =>
+		{
 			// The client fails the same protocol check, reports it, and stops
 			// this half (upstream: SIGUSR1 to the local child). The stop can
 			// land before this half has finished its own side of the
@@ -2079,7 +2115,8 @@ fn server_main(io: &HostIo, opts: Options, local: Option<LocalServer>) -> i32 {
 			while !io.cancel.load(Ordering::Relaxed) {
 				thread::sleep(Duration::from_millis(10));
 			}
-			return killed_exit(&logger, logger.role(), &Stats::default(), report_gate.as_deref());
+			let how = if io.host_cancel.load(Ordering::Relaxed) { HalfStop::InSetup } else { HalfStop::ByClient };
+			return half_stopped(&logger, logger.role(), &Stats::default(), report_gate.as_deref(), how);
 		}
 		Err(err) => {
 			report(&logger, &err);
@@ -2238,20 +2275,18 @@ fn server_main(io: &HostIo, opts: Options, local: Option<LocalServer>) -> i32 {
 	};
 	let end_role = failure.as_ref().map_or_else(|| outcome.as_ref().map_or(role, |o| o.role), |f| f.role);
 	let writer = lock(&shared.writer).take();
-	// A cancelled local copy: the client prints its signal trailer first, then
-	// stops this half (upstream's parent SIGUSR1s its child, whose generator
-	// reports `received SIGUSR1`). Wait for that stop so the order is upstream's.
-	if local_server && io.host_cancel.load(Ordering::Relaxed) {
-		let deadline = Instant::now() + Duration::from_secs(10);
-		while !io.cancel.load(Ordering::Relaxed) && Instant::now() < deadline {
-			thread::sleep(Duration::from_millis(5));
-		}
-	}
-	let code = if local_server && io.cancel.load(Ordering::Relaxed) {
+	let code = if local_server && io.host_cancel.load(Ordering::Relaxed) {
+		// A cancellation of the command reaches this half as well as its
+		// client, as a signal to the process group reaches rsync's child:
+		// upstream's child defers it to its next I/O step (`got_kill_signal`)
+		// and ends there, before its client, which sleeps 400 ms first.
+		*lock(&sink_writer) = None;
+		half_stopped(&logger, outcome.as_ref().map_or(role, |o| o.role), &stats, None, HalfStop::AtIo)
+	} else if local_server && io.cancel.load(Ordering::Relaxed) {
 		*lock(&sink_writer) = None;
 		// The process upstream signals is the half's generator (its "Receiver"
 		// before the split); the receiver child exits quietly.
-		killed_exit(&logger, outcome.as_ref().map_or(role, |o| o.role), &stats, report_gate.as_deref())
+		half_stopped(&logger, outcome.as_ref().map_or(role, |o| o.role), &stats, report_gate.as_deref(), HalfStop::ByClient)
 	} else if io.host_cancel.load(Ordering::Relaxed) {
 		let err = RsyncError::cancelled();
 		logger.with_role(end_role).finish(err.code, err.site, &stats, false);
@@ -2292,14 +2327,32 @@ fn live_totals(mut stats: Stats, counters: &IoCounters) -> Stats {
 	stats
 }
 
-/// The local server half after its client stopped it (upstream's SIGUSR1 to
-/// the local child): `rsync error: received SIGUSR1 (code 19) at main.c(1687)`.
-/// The connection is gone, so the trailer goes to stderr.
-fn killed_exit(logger: &Logger, role: Role, stats: &Stats, report_gate: Option<&ReportGate>) -> i32 {
+/// How a local server half ended at a stop or a signal.
+#[derive(Clone, Copy)]
+enum HalfStop {
+	/// Its client stopped it (upstream's SIGUSR1 to the local child), with
+	/// no signal of its own: `received SIGUSR1 (code 19) at main.c(1687)`.
+	ByClient,
+	/// The command's cancellation found it in setup, before its protocol
+	/// loop: it ends at its client's stop with upstream's
+	/// `received SIGINT, SIGTERM, or SIGHUP (code 20) at rsync.c(874)`.
+	InSetup,
+	/// The command's cancellation found it in its protocol loop:
+	/// `… (code 20) at io.c(604)`, from `handle_kill_signal`.
+	AtIo,
+}
+
+/// The local server half's last report. The connection is gone, so it goes
+/// to stderr; with `report_gate`, after its client's own (see [`ReportGate`]).
+fn half_stopped(logger: &Logger, role: Role, stats: &Stats, report_gate: Option<&ReportGate>, how: HalfStop) -> i32 {
 	if let Some(gate) = report_gate {
 		gate.wait(Duration::from_secs(10));
 	}
-	let err = RsyncError::bare(RERR_SIGNAL1).at("main.c", 1687);
+	let err = match how {
+		HalfStop::ByClient => RsyncError::bare(RERR_SIGNAL1).at("main.c", 1687),
+		HalfStop::InSetup => RsyncError::cancelled(),
+		HalfStop::AtIo => RsyncError::bare(RERR_SIGNAL).at("io.c", 604),
+	};
 	logger.with_role(role).finish(err.code, err.site, stats, false);
 	err.code
 }
