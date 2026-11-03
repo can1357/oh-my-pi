@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed the bash tool's shell dying on a `printf` field 65536 columns or wider: `printf '%70000s' x` panicked inside the conversion and took the whole run down with it ("Shell execution task failed"); a width or precision past what Rust's formatting holds is now written by the builtin itself, so `printf '%200000d'`, `'%.200000f'` and the rest write what Bash writes
+- Fixed the bash tool's shell dying on a `printf` field 65536 columns or wider: `printf '%70000s' x` panicked inside the conversion and took the whole run down with it ("Shell execution task failed"); a width or precision past what Rust's formatting holds is now written by the builtin itself, so `printf '%200000d'`, `'%.200000f'` and the rest write what Bash writes ([#17926](https://github.com/can1357/oh-my-pi/pull/17926) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.16.0] - 2026-11-02
 
