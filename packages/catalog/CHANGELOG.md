@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the bundled `web/youdotcom` search engine model for You.com's Web Search API ([#17765](https://github.com/can1357/oh-my-pi/pull/17765) by [@shunfan](https://github.com/shunfan))
+
 ## [18.16.0] - 2026-11-02
 
 ### Added

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `getEnvApiKey("youdotcom")` reads `YDC_API_KEY` for the You.com web search engine ([#17765](https://github.com/can1357/oh-my-pi/pull/17765) by [@shunfan](https://github.com/shunfan))
+
 ## [18.16.0] - 2026-11-02
 
 ### Added

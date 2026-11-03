@@ -59,6 +59,7 @@ export function getExtraHelpText(): string {
   TAVILY_API_KEY             - Tavily web search
   TINYFISH_API_KEY           - TinyFish web search
   FIRECRAWL_API_KEY          - Firecrawl web search + fetch reader backend
+  YDC_API_KEY                - You.com web search
   ANTHROPIC_SEARCH_API_KEY   - Anthropic web search (override; isolates search from main ANTHROPIC_API_KEY)
   ANTHROPIC_SEARCH_BASE_URL  - Anthropic web search base URL (override; pairs with ANTHROPIC_SEARCH_API_KEY)
   TYPESAFE_API_KEY           - TypeSafe System One judgments (auto thinking, unexpected-stop, AI staging, eval judge())
