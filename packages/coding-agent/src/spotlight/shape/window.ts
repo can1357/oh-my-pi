@@ -51,6 +51,8 @@ export interface WindowKnobs {
 	/** First and last lines always shown. */
 	head: number;
 	tail: number;
+	/** Lines that may be chosen on their score (default: every open line); the frame and neighbours still show. */
+	pick?: readonly boolean[];
 }
 
 /**
@@ -114,7 +116,9 @@ export function frameLines(
 	};
 	for (const i of open.slice(0, k.head)) take(i, "s");
 	for (const i of open.slice(-k.tail)) take(i, "s");
-	const order = open.filter(i => !show[i] && lines[i].trim()).sort((a, b) => scores[b] - scores[a] || a - b);
+	const order = open
+		.filter(i => !show[i] && lines[i].trim() && k.pick?.[i] !== false)
+		.sort((a, b) => scores[b] - scores[a] || a - b);
 	for (const i of order) {
 		if (show[i]) continue;
 		const span: number[] = [];
@@ -137,13 +141,32 @@ export function frameLines(
 		last = { item: i, chars: add + FRAME_MARKER };
 		if (used >= k.budget) break;
 	}
-	for (let i = 1; i < n - 1; i++) {
-		if (!show[i] && !skip[i] && show[i - 1] && show[i + 1]) {
-			show[i] = true;
-			why[i] = "c";
-		}
-	}
+	fillSmallGaps(width, why);
 	return { why, used, last };
+}
+
+/**
+ * Shows each hidden run of one line, or of two lines with at most two markers' worth of text, between shown lines
+ * (`c`): such a run costs about what its marker does. A gap and an already-seen fragment are runs of their own; runs
+ * again after later steps (commit headers) split runs into fragments.
+ */
+export function fillSmallGaps(width: readonly number[], why: (SpotlightReason | undefined)[]): void {
+	const shows = (i: number) => {
+		const reason = why[i];
+		return reason === undefined || reasonShows(reason);
+	};
+	const n = why.length;
+	for (let i = 1; i < n - 1; i++) {
+		if (shows(i) || !shows(i - 1)) continue;
+		const seen = why[i] === "r";
+		let j = i;
+		while (j < n && j - i < 2 && !shows(j) && (why[j] === "r") === seen) j++;
+		if (j >= n || !shows(j)) continue;
+		let chars = 0;
+		for (let g = i; g < j; g++) chars += width[g] + 1;
+		if (j - i > 1 && chars > FRAME_MARKER * 2) continue;
+		for (let g = i; g < j; g++) why[g] = "c";
+	}
 }
 
 /** A Markdown-style heading line (`# dir/`, `## file.ts`, `### Section`) and its level. */
@@ -173,6 +196,100 @@ export function keepHeadings(lines: readonly string[], why: (SpotlightReason | u
 		}
 		if (heading) open.push({ line: i, level: heading[1].length });
 	}
+}
+
+/** A `git log` commit's first line, the header lines under it, and its `--stat` total. */
+export const COMMIT = /^commit [0-9a-f]{7,40}\b/;
+const COMMIT_HEADER = /^(?:Merge|Author|AuthorDate|Commit|CommitDate|Date):/;
+const STAT_TOTAL = /^ \d+ files? changed\b/;
+
+/**
+ * Shows, as structure (`s`), the record of the commit every shown line of `git log` output sits under: its header
+ * (`commit`, `Merge:`, `Author:`, `Date:` lines), subject, and `--stat` total. A stat line, message or lone `Date:`
+ * shown without them names no commit. Lines hidden by rank or budget (`b`) and as already seen (`r`) are shown: a
+ * header an earlier result showed is far from the lines it names here. Output without commit lines is left as it is.
+ */
+export function keepCommitHeaders(lines: readonly string[], why: (SpotlightReason | undefined)[]): void {
+	const shows = (i: number) => {
+		const reason = why[i];
+		return reason === undefined || reasonShows(reason);
+	};
+	const open = (i: number) => {
+		if (why[i] === "b" || why[i] === "r") why[i] = "s";
+	};
+	let header = -1;
+	let pulled = -1;
+	for (let i = 0; i < lines.length; i++) {
+		if (COMMIT.test(lines[i])) {
+			header = i;
+			continue;
+		}
+		if (header < 0 || header === pulled || !lines[i].trim() || !shows(i)) continue;
+		let h = header;
+		for (; h === header || COMMIT_HEADER.test(lines[h] ?? ""); h++) open(h);
+		while (h < lines.length && !lines[h].trim()) h++;
+		if (h < lines.length && !COMMIT.test(lines[h])) open(h);
+		for (let end = h + 1; end < lines.length && !COMMIT.test(lines[end]); end++) {
+			if (!STAT_TOTAL.test(lines[end])) continue;
+			open(end);
+			break;
+		}
+		pulled = header;
+	}
+}
+
+/** A line with its numbers blanked: lines of one shape say the same thing with other counts. */
+export function lineShape(line: string): string {
+	return line.replace(/\d+/g, "N");
+}
+
+/**
+ * Fewest open lines; the share of them the uniform shapes must cover together; the most shapes, each holding at least
+ * its share of the lines, for output to read as uniform.
+ */
+const UNIFORM_LINES = 50;
+const UNIFORM_SHARE = 0.95;
+const UNIFORM_SHAPES = 3;
+const UNIFORM_SHAPE_SHARE = 0.05;
+
+/**
+ * Output that repeats one to {@link UNIFORM_SHAPES} line shapes (`sync batch N: wrote N rows … ok`; table rows
+ * whose status is `ok`, `shipped` or `packed`): the shapes, most common first; which open lines inside the run (from
+ * the first line of a shape to the last) have none of them; and which open lines lie outside it (a table's header, a
+ * closing summary). Undefined unless at least {@link UNIFORM_LINES} non-blank open lines exist and the shapes cover
+ * {@link UNIFORM_SHARE} of them; blank lines and markers neither count nor differ.
+ */
+export function uniformShape(
+	lines: readonly string[],
+	skip: readonly boolean[],
+): { shapes: string[]; differs: boolean[]; edges: boolean[] } | undefined {
+	const counted = (i: number) => !skip[i] && lines[i].trim() !== "" && !MARKER.test(lines[i]);
+	const count = new Map<string, number>();
+	let open = 0;
+	for (let i = 0; i < lines.length; i++) {
+		if (!counted(i)) continue;
+		open++;
+		const shape = lineShape(lines[i]);
+		count.set(shape, (count.get(shape) ?? 0) + 1);
+	}
+	if (open < UNIFORM_LINES) return undefined;
+	const shapes: string[] = [];
+	let covered = 0;
+	for (const [shape, n] of [...count].sort((a, b) => b[1] - a[1])) {
+		if (covered >= open * UNIFORM_SHARE || shapes.length === UNIFORM_SHAPES || n < open * UNIFORM_SHAPE_SHARE) break;
+		shapes.push(shape);
+		covered += n;
+	}
+	if (covered < open * UNIFORM_SHARE) return undefined;
+	const kept = new Set(shapes);
+	const shaped = lines.map((l, i) => counted(i) && kept.has(lineShape(l)));
+	const from = shaped.indexOf(true);
+	const to = shaped.lastIndexOf(true);
+	return {
+		shapes,
+		differs: lines.map((_, i) => counted(i) && !shaped[i] && i > from && i < to),
+		edges: lines.map((_, i) => counted(i) && (i < from || i > to)),
+	};
 }
 
 /**

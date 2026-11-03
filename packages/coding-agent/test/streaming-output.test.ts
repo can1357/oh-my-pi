@@ -834,6 +834,25 @@ describe("OutputSink head-retain mode", () => {
 		expect(dumped.totalBytes).toBe(byteLength(lines));
 	});
 
+	test("middle elision keeps whole lines, and its notice names the lines shown", async () => {
+		const sink = new OutputSink({ headBytes: 20 * 1024 });
+		const text = `${Array.from({ length: 5200 }, (_, i) => `sync batch ${i + 1}: wrote ${(i * 37) % 1000} rows ok`).join("\n")}\n`;
+		// Chunk sizes that land the head window's end and the tail window's start mid-line.
+		for (let at = 0; at < text.length; at += 4093) sink.push(text.slice(at, at + 4093));
+
+		const dumped = await sink.dump();
+		const shown = dumped.output.split("\n");
+		const marker = shown.findIndex(line => line.startsWith("[…"));
+		const head = shown[marker - 1];
+		const tail = shown[marker + 1];
+		const batch = (line: string) => Number(/^sync batch (\d+): wrote \d+ rows ok$/.exec(line)?.[1]);
+		expect(batch(head)).toBeGreaterThan(0);
+		expect(batch(tail)).toBeGreaterThan(batch(head));
+		expect(formatOutputNotice(outputMeta().truncationFromSummary(dumped, { direction: "tail" }).get())).toContain(
+			`Showing lines 1-${batch(head)} and ${batch(tail)}-5200 of 5200`,
+		);
+	});
+
 	test("head fills cleanly across chunks without elision when total fits", async () => {
 		const sink = new OutputSink({ spillThreshold: 50, headBytes: 4 });
 		await sink.push("abcdefgh");

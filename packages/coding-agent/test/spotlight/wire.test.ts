@@ -534,27 +534,25 @@ describe("spotlight plain baseline", () => {
 		expect(entry).toMatchObject({ plainChars: trace.plainChars, plainTokens: trace.plainTokens });
 	});
 
-	it("gives the model plain's text when a cut of a spilled output would be longer than it", async () => {
+	it("cuts a rerun of a spilled output like the first run, rather than showing it whole as a re-ask", async () => {
 		const client = spotlightClient(fakeSpotlight({ score: item => (item.includes("ERROR") ? 1 : 0.1) }));
 		const { session, manager } = await experimentSession(client);
 		await spill(manager);
 		const bash = new BashTool(session);
 		await bash.execute("b1", { command: "./ingest.sh" });
 
-		// Asking again: shaping shows a re-ask whole, collapsing only the lines it showed before, which is the whole
-		// artifact less a few lines and far past the 300 lines plain shows.
+		// The rerun brings back every line the first cut hid; it is not the agent asking for them.
 		const again = await bash.execute("b2", { command: "./ingest.sh" });
 
-		const plain = await plainText();
-		expect(resultText(again) + formatOutputNotice(again.details?.meta)).toBe(plain);
 		const trace = again.details?.spotlight;
-		expect(trace?.steps).toContain("plain-cap");
-		expect(trace).toMatchObject({ savedTokens: 0, outChars: plain.length, outTokens: countTokens(plain) });
-		expect(trace?.cappedTokens).toBeGreaterThan(countTokens(plain) * 4);
-		expect(trace?.original).toBeUndefined();
-		const entry = entries(manager, SPOTLIGHT_ENTRY.shape)[1];
-		expect(entry).toMatchObject({ toolCallId: "b2", outTokens: trace?.outTokens, cappedTokens: trace?.cappedTokens });
-		expect(entry.holdout).toBeUndefined();
+		expect(trace?.steps).not.toContain("plain-cap");
+		expect(trace?.original).toBeDefined();
+		expect(resultText(again).length).toBeLessThan((await plainText()).length / 4);
+		const [, entry] = entries(manager, SPOTLIGHT_ENTRY.shape);
+		expect(entry).toMatchObject({
+			toolCallId: "b2",
+			stats: expect.not.objectContaining({ reasks: expect.anything() }),
+		});
 	});
 });
 
@@ -562,7 +560,8 @@ describe("spotlight column-capped output", () => {
 	const ITEMS = Array.from({ length: 400 }, (_, i) => ({
 		id: i,
 		name: `item${i}`,
-		flag: i === 317 ? "on_hold" : "ok",
+		// Five statuses, so the rows repeat no few shapes and the cut keeps a full window.
+		flag: i === 317 ? "on_hold" : ["ok", "shipped", "packed", "returned", "billed"][i % 5],
 	}));
 	const FULL = JSON.stringify({ items: ITEMS });
 
@@ -767,9 +766,6 @@ describe("spotlight shaping of any tool", () => {
 				onSource,
 			}),
 		);
-	/** Artifact ids differ between sessions. */
-	const anyArtifact = (text: string) => text.replace(/artifact:\/\/\d+/g, "artifact://N");
-
 	it("cuts a long grep output to the ranked lines under their file headings, recoverable from its artifact", async () => {
 		const sources: string[] = [];
 		const run = await experimentSession(ranked(source => sources.push(source)));
@@ -870,7 +866,7 @@ describe("spotlight shaping of any tool", () => {
 		expect(entry.steps).not.toEqual(["none"]);
 	});
 
-	it("gives the model the wrapper's text when a re-asked spilled output's cut would be longer", async () => {
+	it("cuts a rerun of a spilled grep output instead of showing it whole as a re-ask", async () => {
 		const big = grepOutput(40);
 		const plain = await plainSession(SMALL_SPILL);
 		const plainText = resultText(await agentCall(fakeTool("grep", big), plain, "g1", ARGS));
@@ -879,12 +875,9 @@ describe("spotlight shaping of any tool", () => {
 
 		const again = await agentCall(fakeTool("grep", big), run, "g2", ARGS);
 
-		expect(anyArtifact(resultText(again))).toBe(anyArtifact(plainText));
-		const trace = spotlightDetails(again.details);
-		expect(trace?.steps).toContain("plain-cap");
-		expect(trace).toMatchObject({ savedTokens: 0, outTokens: countTokens(plainText) });
-		expect(trace?.cappedTokens).toBeGreaterThan(countTokens(plainText));
-		expect(again.details?.meta?.truncation?.artifactId).toBeDefined();
+		expect(spotlightDetails(again.details)?.steps).toContain("window");
+		expect(spotlightDetails(again.details)?.steps).not.toContain("plain-cap");
+		expect(resultText(again).length).toBeLessThan(plainText.length);
 	});
 
 	/** A short board: its ten open items repeat in the next board, and save enough tokens to collapse. */

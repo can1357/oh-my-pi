@@ -52,12 +52,19 @@ function migrations(n: number): string[] {
 	return Array.from({ length: n }, (_, i) => `migration ${i}: added column ledger_${i}_amount`);
 }
 
-/** A valve cut's gaps `… [A-B]` and the saved copy its footer says they number lines of. */
+/**
+ * A valve cut's gaps and the saved copy they number lines of: bare `… [A-B]` under the footer, or a compacted view's
+ * `… [N lines; read URL:A-B]`, which names the copy itself.
+ */
 function cutGaps(text: string): { url: string; gaps: { from: number; to: number }[] } {
-	const url = /^\[cut: … \[A-B\] are lines A-B of (\S+) \(read /m.exec(text)?.[1];
+	const addressed = [...text.matchAll(/^\s*… \[\d+ lines; read (\S+):(\d+)-(\d+)\]$/gm)];
+	const url = /^\[cut: … \[A-B\] are lines A-B of (\S+) \(read /m.exec(text)?.[1] ?? addressed[0]?.[1];
 	if (!url) throw new Error("a cut names where its hidden lines are");
-	const gaps = [...text.matchAll(/^\s*… \[(\d+)-(\d+)\]$/gm)].map(m => ({ from: Number(m[1]), to: Number(m[2]) }));
-	return { url, gaps };
+	const bare = [...text.matchAll(/^\s*… \[(\d+)-(\d+)\](?: \(\d+ commits?: [^)]*\))?$/gm)].map(m => ({
+		from: Number(m[1]),
+		to: Number(m[2]),
+	}));
+	return { url, gaps: [...bare, ...addressed.map(m => ({ from: Number(m[2]), to: Number(m[3]) }))] };
 }
 
 /** Runs `[first, last]` (1-based) of the lines a trace says the shaped text hides. */
@@ -298,7 +305,7 @@ describe("spotlight shaping", () => {
 				? "ERROR worker 7: NEEDLE connection reset by peer"
 				: i === 60 || i === 119
 					? warn
-					: `INFO request ${i} served in ${i % 17} ms by node-${i % 5}`,
+					: `INFO request ${i} ${["served in", "queued for", "parsed in", "routed in", "cached for"][i % 5]} ${i % 17} ms by node-${i % 5}`,
 		);
 		const out = await shapeResult(
 			bash("cat logs/worker.log", lines.join("\n")),
@@ -543,6 +550,82 @@ describe("spotlight shaping", () => {
 		expect(store.saved.get("artifact://1")?.split("\n").slice(0, 24)).toEqual(first.slice(0, 24));
 	});
 
+	it("cuts output repeating one line shape to the lines that differ and its ends, naming the shape it hid", async () => {
+		const lines = Array.from({ length: 2000 }, (_, i) =>
+			i === 1233 ? "ERROR: db connection refused at step 1234 (ECONNREFUSED)" : `info: step ${i + 1} ok`,
+		);
+
+		const out = await shapeResult(
+			bash("./steps.sh", lines.join("\n")),
+			context({ intent: "why was the db connection refused" }),
+			scorer(() => 0.5),
+			newShapeState(),
+			sink(),
+		);
+
+		expect(out.text).toContain(lines[1233]);
+		expect(out.text).toContain(lines[1999]);
+		expect(out.text).toMatch(
+			/^\[uniform: hidden lines: 1,9\d\d match "info: step N ok" \(N: any number\); 1 line differs \(line 1234\), shown\]$/m,
+		);
+		expect(out.text).toContain('[intent: every line naming "connection", "refused" is shown]');
+		expect(out.text.length).toBeLessThan(1_000);
+	});
+
+	it("leads a changed command output with its exit status, and leaves an unchanged one as it is", async () => {
+		const lines = Array.from({ length: 2000 }, (_, i) => `info: step ${i + 1} ok`);
+
+		const cut = await shapeResult(
+			{ ...bash("./steps.sh", lines.join("\n")), exitCode: 3 },
+			context(),
+			scorer(() => 0.5),
+			newShapeState(),
+			sink(),
+		);
+		const short = await shapeResult(
+			{ ...bash("./steps.sh", "done"), exitCode: 3 },
+			context(),
+			scorer(() => 0.5),
+			newShapeState(),
+			sink(),
+		);
+
+		expect(cut.text.split("\n")[0]).toBe("[exit code 3]");
+		expect(short.text).toBe("done");
+	});
+
+	it("shows the commit header of a git log line the cut keeps", async () => {
+		const commits = Array.from({ length: 15 }, (_, c) => [
+			`commit ${String(c).padStart(2, "0")}${"a".repeat(38)}`,
+			`Author: dev${c} <dev${c}@example.com>`,
+			`Date:   Mon Nov ${c + 1} 10:00:00 2026 +0100`,
+			"",
+			`    change ${c}`,
+			"",
+			...Array.from({ length: 12 }, (_, f) => ` src/area${c}/file${f}.ts | ${f + 3} ++--`),
+			` 12 files changed, ${c * 7} insertions(+), ${c} deletions(-)`,
+			"",
+		]);
+		const text = commits.flat().join("\n");
+
+		const out = await shapeResult(
+			bash("git log --stat -n 15", text),
+			context({ intent: "which commit changed src/area7/file4.ts" }),
+			scorer(item => (item.includes("area7/file4.ts") ? 1 : 0.01)),
+			newShapeState(),
+			sink(),
+		);
+
+		const shown = out.text.split("\n");
+		expect(shown).toContain(" src/area7/file4.ts | 7 ++--");
+		expect(shown).toContain(commits[7][0]);
+		expect(shown).toContain(commits[7][1]);
+		expect(shown).toContain(commits[7][4]);
+		expect(shown).toContain(commits[7][18]);
+		// A gap hiding whole commits says how many and which.
+		expect(out.text).toMatch(/^… \[\d+-\d+\] \(\d+ commits: \d\da{5}(?:, \d\da{5})*(?:, …)?\)$/m);
+	});
+
 	it("points a collapse at the run's own artifact when it numbers the same lines, saving no copy", async () => {
 		const state = newShapeState();
 		const first = migrations(30);
@@ -594,9 +677,10 @@ describe("spotlight shaping", () => {
 
 		expect(named.text.split("\n").slice(0, 4)).toEqual([
 			"Applying migrations to staging",
-			"… [5 lines as shown before; read artifact://1:2-6]",
+			// "migration" names every line, so only its first keeps clear of the collapse.
+			first[0],
+			"… [4 lines as shown before; read artifact://1:3-6]",
 			first[5],
-			"… [24 lines as shown before; read artifact://1:8-31]",
 		]);
 		expect(generic.text).not.toContain(first[5]);
 	});
@@ -653,7 +737,8 @@ describe("spotlight shaping", () => {
 		const state = newShapeState();
 		const lines = Array.from(
 			{ length: 300 },
-			(_, i) => `2026-10-29T10:${String(i % 60).padStart(2, "0")} job-${i} finished status=ok`,
+			(_, i) =>
+				`2026-10-29T10:${String(i % 60).padStart(2, "0")} job-${i} finished status=${["ok", "retried", "skipped", "deferred", "merged"][i % 5]}`,
 		);
 		const first = await shapeResult(
 			bash("cat logs/jobs.log", lines.join("\n")),
@@ -734,6 +819,10 @@ describe("spotlight shaping", () => {
 		const header = saved.indexOf("(400 rows) id|sku|status|qty");
 		expect(saved.slice(header + 1, header + 401)).toEqual(records.map(r => `${r.id}|${r.sku}|${r.status}|${r.qty}`));
 		expect(gaps.length).toBeGreaterThan(0);
+		// Rows begin with ids: every gap names its read, so none reads as a number in the data.
+		expect(out.text).not.toMatch(/^\s*… \[\d+-\d+\]$/m);
+		// The table's header sits outside the run of rows: it is not one of the lines that differ.
+		expect(out.text).toMatch(/1 line differs \(line \d+\), shown\]/);
 		const shown = out.text.split("\n");
 		for (const gap of gaps) for (const row of saved.slice(gap.from - 1, gap.to)) expect(shown).not.toContain(row);
 	});

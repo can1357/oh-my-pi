@@ -4,7 +4,8 @@
  */
 
 /** A line of earlier shaping (fold, gap, dump marker, note): cheap and says what is where, so never hidden or collapsed. */
-export const MARKER = /^\s*(?:… \[|…\[|\[(?:display only|folded|sections folded|exit code|outline|cut)|\(\d+ rows\))/;
+export const MARKER =
+	/^\s*(?:… \[|…\[|\[(?:display only|folded|sections folded|exit code|outline|cut|uniform|intent)|\(\d+ rows\))/;
 
 /** Lines shorter than this (normalised) are too generic to count as already seen, or as hidden by a cut. */
 export const WITNESS_CHARS = 12;
@@ -19,7 +20,7 @@ export function norm(line: string): string {
 
 /** Words too generic in intents to say anything about a line. */
 const STOP = new Set(
-	"find check read inspect whether where what which with from that this into have does show lines line file files code output the and for are see used uses use need needs".split(
+	"find check read inspect whether where what which with from that this into have does show lines line file files code output the and for are see used uses use need needs most least recent latest first last many much each every about some other only when been will would could should there their them they than then also just like more less".split(
 		" ",
 	),
 );
