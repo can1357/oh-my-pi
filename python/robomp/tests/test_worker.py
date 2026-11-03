@@ -160,6 +160,7 @@ def _make_inputs(
         delivery_id="d-test",
         attempts=0,
         slot_uid=slot_uid,
+        status_tracker=pr_status.StatusTracker(),
     )
     bindings = SimpleNamespace(
         workspace=workspace,
@@ -177,16 +178,9 @@ def _reset_fake() -> None:
     _FakeRpcClient.instances.clear()
 
 
-@pytest.fixture(autouse=True)
-def _reset_pr_status_guard() -> None:
-    # `pr_status` keeps a module-level ladder + asyncio.Lock; swap in a fresh
-    # unbound lock so the cross-thread publish in these tests uses the test loop.
-    pr_status._last_rank.clear()
-    pr_status._locks.clear()
-    pr_status._guard = asyncio.Lock()
-    yield
-    pr_status._last_rank.clear()
-    pr_status._locks.clear()
+# Per-test `StatusTracker` instances are supplied through
+# `_make_inputs` (see `inputs.status_tracker`), so no module-level
+# pr_status state is touched here.
 
 
 @pytest.fixture(autouse=True)
@@ -1119,13 +1113,15 @@ def test_release_prompt_routes_fresh_and_resumed_sessions(
 
 def _capture_threadsafe(monkeypatch: pytest.MonkeyPatch) -> list:
     """Replace `asyncio.run_coroutine_threadsafe` with a scheduler that records
-    the coroutine instead of running it on (a soon-closed) side loop. Tests
-    then `await` the captured coroutines on the real test loop, which also
-    keeps `pr_status`'s loop-bound lock happy."""
-    scheduled: list = []
+    the coroutine AND the loop it was scheduled onto. Tests then `await` the
+    captured coroutines on the real test loop (which also keeps the tracker's
+    loop-bound locks happy) and assert the loop is the one the worker was
+    given — scheduling onto a different/closed loop used to pass unnoticed
+    because the discarded argument was never checked."""
+    scheduled: list[tuple[object, asyncio.AbstractEventLoop | None]] = []
 
     def _fake_run(coro, loop=None, context=None):
-        scheduled.append(coro)
+        scheduled.append((coro, loop))
 
         class _Pending:
             def done(self):
@@ -1146,6 +1142,10 @@ async def test_on_tool_start_publishes_publishing_only_for_review_submit(
 ) -> None:
     inputs, bindings = _make_inputs(tmp_path, settings, session_has_jsonl=False)
     inputs.pr_head_sha = "deadbeef"
+    # Fresh tracker so this test's ladder is not latched by a sibling test
+    # posting a terminal phase on the same (repo, sha) via the shared default.
+    inputs.status_tracker = pr_status.StatusTracker()
+    monkeypatch.setattr(settings, "pr_review_status_enabled", True)
     calls: list[tuple] = []
 
     async def _record(repo, sha, *, state, context, description="", target_url=None):
@@ -1155,31 +1155,33 @@ async def test_on_tool_start_publishes_publishing_only_for_review_submit(
     bindings.github = inputs.github
 
     scheduled = _capture_threadsafe(monkeypatch)
-    loop = asyncio.new_event_loop()
-    try:
-        worker._run_rpc_blocking(
-            inputs,
-            task_kind="review_pr",
-            prompt="kickoff",
-            loop=loop,
-            bindings=bindings,  # type: ignore[arg-type]
-        )
-    finally:
-        loop.close()
+    # The driver must schedule onto the loop it was GIVEN (the worker loop
+    # the status posts must run on), not a fresh side loop.
+    worker_loop = asyncio.get_running_loop()
+    worker._run_rpc_blocking(
+        inputs,
+        task_kind="review_pr",
+        prompt="kickoff",
+        loop=worker_loop,
+        bindings=bindings,  # type: ignore[arg-type]
+    )
 
     fake = _FakeRpcClient.instances[0]
     assert len(fake._tool_start_callbacks) == 1
     on_start = fake._tool_start_callbacks[0]
 
-    # The `reviewing` phase is scheduled before the turn starts.
+    # The `reviewing` phase is scheduled before the turn starts — on the
+    # worker loop, and it is the only scheduler target in these tests.
     assert len(scheduled) == 1
-    await scheduled[0]
+    assert scheduled[0][1] is worker_loop
+    await scheduled[0][0]
     assert calls == [("acme/widgets", "deadbeef", "pending", "Reviewing the changed code")]
 
     # The submit tool's start marks `publishing` — with `inputs.pr_head_sha`.
     on_start(ToolExecutionStartEvent(tool_call_id="1", tool_name="submit_pr_review", args={}))
     assert len(scheduled) == 2
-    await scheduled[1]
+    assert scheduled[1][1] is worker_loop
+    await scheduled[1][0]
     assert calls[1] == ("acme/widgets", "deadbeef", "pending", "Publishing review findings")
 
     # Any other tool schedules nothing.
@@ -1191,20 +1193,73 @@ async def test_on_tool_start_publishes_publishing_only_for_review_submit(
     second_root = tmp_path / "second"
     second_root.mkdir()
     inputs2, bindings2 = _make_inputs(second_root, settings, session_has_jsonl=True)
-    loop2 = asyncio.new_event_loop()
-    try:
-        worker._run_rpc_blocking(
-            inputs2,
-            task_kind="triage_issue",
-            prompt="kickoff",
-            loop=loop2,
-            bindings=bindings2,  # type: ignore[arg-type]
-        )
-    finally:
-        loop2.close()
+    worker._run_rpc_blocking(
+        inputs2,
+        task_kind="triage_issue",
+        prompt="kickoff",
+        loop=worker_loop,
+        bindings=bindings2,  # type: ignore[arg-type]
+    )
     on_start2 = _FakeRpcClient.instances[1]._tool_start_callbacks[0]
     on_start2(ToolExecutionStartEvent(tool_call_id="3", tool_name="submit_pr_review", args={}))
     assert scheduled == []
+
+
+@pytest.mark.asyncio
+async def test_on_tool_start_sees_submit_through_xdev_write_transport(
+    tmp_path: Path, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Default `tools.xdev=true`: the agent invokes the host tool as
+    `write xd://submit_pr_review`, and omp_rpc does not rename start events
+    (the `host_tool_call` frame arrives after `tool_execution_start`), so the
+    hook must recognize the transport shape by device path."""
+    inputs, bindings = _make_inputs(tmp_path, settings, session_has_jsonl=False)
+    inputs.pr_head_sha = "deadbeef"
+    # Fresh tracker so this test's ladder is not latched by a sibling test
+    # posting a terminal phase on the same (repo, sha) via the shared default.
+    inputs.status_tracker = pr_status.StatusTracker()
+    monkeypatch.setattr(settings, "pr_review_status_enabled", True)
+    calls: list[tuple] = []
+
+    async def _record(repo, sha, *, state, context, description="", target_url=None):
+        calls.append((repo, sha, state, description))
+
+    inputs.github.create_commit_status = _record
+    bindings.github = inputs.github
+
+    scheduled = _capture_threadsafe(monkeypatch)
+    worker_loop = asyncio.get_running_loop()
+    worker._run_rpc_blocking(
+        inputs,
+        task_kind="review_pr",
+        prompt="kickoff",
+        loop=worker_loop,
+        bindings=bindings,  # type: ignore[arg-type]
+    )
+    on_start = _FakeRpcClient.instances[0]._tool_start_callbacks[0]
+
+    # `reviewing` consumed one schedule; the wire shape of the xdev dispatch:
+    # transport tool `write` with the device URL in `path`.
+    assert len(scheduled) == 1
+    assert scheduled[0][1] is worker_loop
+    await scheduled[0][0]
+    assert calls == [("acme/widgets", "deadbeef", "pending", "Reviewing the changed code")]
+    on_start(
+        ToolExecutionStartEvent(
+            tool_call_id="1",
+            tool_name="write",
+            args={"path": "xd://submit_pr_review", "content": '{"body": "findings"}'},
+        )
+    )
+    assert len(scheduled) == 2, "xdev write transport did not trigger `publishing`"
+    assert scheduled[1][1] is worker_loop
+    await scheduled[1][0]
+    assert calls[1] == ("acme/widgets", "deadbeef", "pending", "Publishing review findings")
+
+    # A `write` to any other device (or file) must NOT mark publishing.
+    on_start(ToolExecutionStartEvent(tool_call_id="2", tool_name="write", args={"path": "xd://gh_post_comment"}))
+    on_start(ToolExecutionStartEvent(tool_call_id="3", tool_name="write", args={"path": "src/app.py"}))
+    assert len(scheduled) == 2
 
 
 @pytest.mark.asyncio

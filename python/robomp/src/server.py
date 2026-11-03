@@ -323,6 +323,9 @@ def _build_state(settings: Settings, pool_factory: _PoolFactory) -> dict[str, An
         "sandbox": sandbox,
         "natives_cache": natives_cache,
         "pool": pool,
+        # The webhook and the dispatcher share ONE tracker: one ladder and
+        # one set of per-key POST locks per app instance.
+        "status_tracker": pool.status_tracker,
         "issue_browse_cache": _IssueBrowseCache(),
         "autoclose": autoclose,
         "issue_index_sync": index_sync,
@@ -532,17 +535,25 @@ def create_app(settings: Settings | None = None, *, pool_factory: _PoolFactory =
         if inserted:
             pool: _AppPool = bag["pool"]
             if decision.task == "review_pr":
-                # Await the status BEFORE waking the dispatcher so a fast worker
-                # cannot publish `preparing` first and then be overwritten by
-                # this `queued` post. `reset=True` restarts the ladder for a new
-                # delivery aimed at a SHA whose previous review already ended.
-                await pr_status.publish_pr_status(
-                    bag["github"],
-                    settings=cfg,
-                    repo=decision.repo or "",
-                    sha=pr_status.head_sha_from_payload(payload),
-                    phase="queued",
-                    reset=True,
+                # Publish in the background AFTER the ack: a status POST with
+                # retries can run for minutes and must never hold a delivery
+                # open. The per-key lock inside the tracker keeps phase order
+                # on GitHub even when the worker's `preparing` lands first.
+                # `reset=None` restarts the ladder only when no review is
+                # currently active for this head — a distinct delivery for the
+                # same SHA mid-review must not post `queued` over `reviewing`.
+                head_sha = pr_status.head_sha_from_payload(payload)
+                asyncio.create_task(
+                    pr_status.publish_pr_status(
+                        bag["github"],
+                        settings=cfg,
+                        repo=decision.repo or "",
+                        sha=head_sha,
+                        phase="queued",
+                        reset=None,
+                        tracker=bag["status_tracker"],
+                    ),
+                    name=f"pr-status-queued-{x_github_delivery[:8]}",
                 )
             pool.wake()
             log.info(
