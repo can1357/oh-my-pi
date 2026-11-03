@@ -568,22 +568,30 @@ describe("wait", () => {
 			await manager.dispose({ timeoutMs: 1000 });
 		});
 
-		test("bounds the whole call, a slow service refresh included", async () => {
-			// The deadline is the caller's: a broker that answers slowly must not
-			// stretch a 1 s wait to its own 30 s request timeout. Real time here:
-			// the refresh's deadline is an AbortSignal.timeout, which fake timers
-			// do not drive.
-			registerMain();
-			vi.spyOn(servicesModule, "listServicesTolerant").mockImplementation(async (_session, signal) => {
-				const { promise, reject } = Promise.withResolvers<never>();
-				if (signal?.aborted) reject(signal.reason);
-				else signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
-				return promise;
+		for (const cooperative of [true, false]) {
+			test(`bounds the whole call, a slow service refresh included (${cooperative ? "observes" : "ignores"} abort)`, async () => {
+				// The deadline is the caller's: a broker that answers slowly must
+				// not stretch a 1 s wait to its own request timeout, whether or not
+				// the slow step (client creation, connection setup) observes the
+				// signal. Real time here: the refresh's deadline is an
+				// AbortSignal.timeout, which fake timers do not drive.
+				registerMain();
+				const release = Promise.withResolvers<never>();
+				vi.spyOn(servicesModule, "listServicesTolerant").mockImplementation(async (_session, signal) => {
+					if (cooperative) {
+						if (signal?.aborted) release.reject(signal.reason);
+						else signal?.addEventListener("abort", () => release.reject(signal.reason), { once: true });
+					}
+					return release.promise;
+				});
+				const started = Date.now();
+				const result = await new WaitTool(session(undefined, "Main", true)).execute("slow-refresh", {
+					timeout: 1,
+				});
+				expect(Date.now() - started).toBeLessThan(10_000);
+				expect(result.content[0]).toMatchObject({ text: expect.stringContaining("Deadline reached") });
+				release.reject(new Error("broker gave up"));
 			});
-			const started = Date.now();
-			const result = await new WaitTool(session(undefined, "Main", true)).execute("slow-refresh", { timeout: 1 });
-			expect(Date.now() - started).toBeLessThan(10_000);
-			expect(result.content[0]).toMatchObject({ text: expect.stringContaining("Deadline reached") });
-		});
+		}
 	});
 });

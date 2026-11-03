@@ -143,17 +143,33 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 			const refreshDeadline = deadline === undefined ? undefined : AbortSignal.timeout(remainingMs()!);
 			const refreshSignal =
 				refreshDeadline && signal ? AbortSignal.any([signal, refreshDeadline]) : (refreshDeadline ?? signal);
+			// The refresh is raced, not trusted: client creation and connection
+			// setup do not all observe the signal, so the wait stops waiting on
+			// the refresh at the deadline or an abort and lets it finish on its
+			// own (it only updates service tracking).
+			const refresh = listServicesTolerant(this.session, refreshSignal).then(
+				() => undefined,
+				(error: unknown) => ({ error }),
+			);
+			const stopped = Promise.withResolvers<undefined>();
+			const onStop = () => stopped.resolve(undefined);
+			if (refreshSignal?.aborted) onStop();
+			else refreshSignal?.addEventListener("abort", onStop, { once: true });
+			let failure: { error: unknown } | undefined;
 			try {
-				await listServicesTolerant(this.session, refreshSignal);
-			} catch (error) {
-				// An interrupt landing during the refresh (most often the notice
-				// of the job this wait is for) ends the wait as one landing just
-				// after it does: the checks below and the aborted wake path. A
-				// deadline passing during it does too: the block below finds no
-				// budget left and returns at once with what tracking it has.
-				const deadlinePassed = refreshDeadline?.aborted === true && signal?.aborted !== true;
-				if (!deadlinePassed && signal?.reason !== TOOL_INTERRUPT_ABORT_REASON) throw error;
+				failure = await Promise.race([refresh, stopped.promise]);
+			} finally {
+				refreshSignal?.removeEventListener("abort", onStop);
 			}
+			// An interrupt landing during the refresh (most often the notice
+			// of the job this wait is for) ends the wait as one landing just
+			// after it does: the checks below and the aborted wake path. A
+			// deadline passing during it does too: the block below finds no
+			// budget left and returns at once with what tracking it has. Any
+			// other failure is the caller's to see.
+			if (failure && !refreshSignal?.aborted) throw failure.error;
+			// A cancellation that is not a wake still cancels the call.
+			if (signal?.aborted && signal.reason !== TOOL_INTERRUPT_ABORT_REASON) throwIfAborted(signal);
 			const queued = takeQueuedMessage(messaging);
 			if (queued && messaging) return messageResult(messaging.senderId, queued);
 		}
@@ -172,12 +188,14 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 				// An idle poll, not a failure: flagged so the loop guard keeps counting
 				// across it, unless an interrupt (news for the model) landed meanwhile
 				// or the text names an agent asked that can no longer answer.
-				const news = signal?.aborted || replies.blocked.length > 0 || replies.stopped.length > 0;
+				const replyNews = replies.blocked.length > 0 || replies.stopped.length > 0;
+				const news = signal?.aborted || replyNews;
 				// Nothing owed and a deadline given: idle until a message, steer,
 				// job result or service exit arrives, or the deadline passes,
 				// instead of the dummy timer job a caller would otherwise start to
-				// hold the wait open.
-				if (capMs !== undefined && !news) {
+				// hold the wait open. An interrupt that already landed ends that
+				// block at once with the interrupt's own result.
+				if (capMs !== undefined && !replyNews) {
 					return this.#blockUntilWake({
 						jobs,
 						manager,
