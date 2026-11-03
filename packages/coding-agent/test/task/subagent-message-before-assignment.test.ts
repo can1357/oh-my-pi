@@ -19,7 +19,7 @@ import type { ExtensionFactory } from "@oh-my-pi/pi-coding-agent/extensibility/e
 import { handleRpcSteerSubagent } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
-import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { type AgentSession, PromptDroppedError } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -809,6 +809,93 @@ describe("a message delivered before the task's turn starts", () => {
 			harness.authStorage.close();
 		}
 	}, 30_000);
+
+	it("keeps a delivery that waits on the session generation until every overlapping switch has settled", async () => {
+		const harness = await createHarness();
+		let endHold: (() => void) | undefined;
+		const switches: RefusedSwitch[] = [];
+		const normalized = Promise.withResolvers<void>();
+		try {
+			const session = await spawnIdle(harness);
+			harness.beginPhase(FOLLOW_UP);
+			endHold = session.holdForAssignment();
+			const normalizing = Promise.withResolvers<void>();
+			vi.spyOn(imageLoading, "normalizeModelContextImages").mockImplementationOnce(async images => {
+				normalizing.resolve();
+				await normalized.promise;
+				return images;
+			});
+			const aside = session.sendCustomMessage(
+				{
+					customType: "test-plugin",
+					content: [
+						{ type: "text", text: BODY },
+						{ type: "image", data: PIXEL_PNG, mimeType: "image/png" },
+					],
+					display: false,
+				},
+				{ deliverAs: "aside" },
+			);
+			await normalizing.promise;
+			for (const name of ["outer", "middle", "inner"]) switches.push(await startRefusedSwitch(session, name));
+			// The middle and inner switches settle first; the outer one, still pending, will restore this session.
+			expect(await switches[1]!.refuse()).toBe(false);
+			expect(await switches[2]!.refuse()).toBe(false);
+			// The aside finishes its setup while the outer switch is pending: it must wait for that switch
+			// rather than judge its session gone. (Its own steps take microtasks, not this long.)
+			let asideSettled = false;
+			void aside.finally(() => {
+				asideSettled = true;
+			});
+			normalized.resolve();
+			await Bun.sleep(500);
+			expect(asideSettled).toBe(false);
+			expect(await switches[0]!.refuse()).toBe(false);
+			await aside;
+
+			// The held subagent's task takes the aside with its turn.
+			await session.prompt(FOLLOW_UP, { assignment: true });
+			await session.waitForIdle();
+			expect(harness.requests.some(request => request.bodyAt >= 0)).toBe(true);
+			expect(session.messages.filter(message => messageText(message).includes(BODY))).toHaveLength(1);
+		} finally {
+			normalized.resolve();
+			endHold?.();
+			await Promise.allSettled(switches.map(pending => pending.refuse()));
+			harness.authStorage.close();
+		}
+	}, 30_000);
+
+	it.each(["abort", "dispose"] as const)(
+		"never starts an assignment cancelled by %s while it waits for a session switch",
+		async cancel => {
+			const harness = await createHarness();
+			let endHold: (() => void) | undefined;
+			let switching: RefusedSwitch | undefined;
+			try {
+				const session = await spawnIdle(harness);
+				harness.beginPhase(FOLLOW_UP);
+				endHold = session.holdForAssignment();
+				await session.sendCustomMessage(
+					{ customType: "test-plugin", content: BODY, display: false },
+					{ deliverAs: "nextTurn" },
+				);
+				switching = await startRefusedSwitch(session, "other");
+				const prompting = session.prompt(FOLLOW_UP, { assignment: true, throwOnDrop: true });
+				const cancelling = cancel === "abort" ? session.abort() : session.dispose();
+				await Promise.allSettled([switching.refuse()]);
+				await Promise.allSettled([cancelling]);
+				await expect(prompting).rejects.toBeInstanceOf(PromptDroppedError);
+				await Bun.sleep(500);
+				expect(harness.requests).toEqual([]);
+			} finally {
+				endHold?.();
+				await Promise.allSettled([switching?.refuse()]);
+				harness.authStorage.close();
+			}
+		},
+		30_000,
+	);
 });
 
 /** Spawns the subagent, lets its first run finish, and returns its kept-alive idle session. */
