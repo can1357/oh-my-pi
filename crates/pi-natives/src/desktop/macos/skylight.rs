@@ -1554,6 +1554,11 @@ pub(in super::super) fn front_app(browser: Option<pid_t>) -> Option<FrontApp> {
 					Some((psn_pid(&picks.front?)?, (read_at, picks)))
 				},
 				|user| rearm(browser, user, Instant::now()),
+				|user, armed| match armed {
+					Rearm::Keep(armed) => armed.covers_now(user, browser),
+					Rearm::Replace(Some(reroute)) => reroute.armed().covers_now(user, browser),
+					Rearm::Replace(None) => true,
+				},
 			)?;
 			(read_at, picks, rearm)
 		} else {
@@ -1566,17 +1571,18 @@ pub(in super::super) fn front_app(browser: Option<pid_t>) -> Option<FrontApp> {
 	}
 }
 
-/// Tap setup may block while the user switches apps. Only publish a snapshot
-/// whose app the completed setup serves; a changed app gets its own setup.
+/// Tap setup may block while the user switches apps or clicks in the same
+/// app. Publish only a snapshot the completed setup still covers.
 fn rearm_for_front<T>(
 	mut read: impl FnMut() -> Option<(pid_t, T)>,
 	mut arm: impl FnMut(pid_t) -> Rearm,
+	mut covers: impl FnMut(pid_t, &Rearm) -> bool,
 ) -> Option<(T, Rearm)> {
 	let (mut user, _) = read()?;
 	loop {
 		let armed = arm(user);
 		let (after, snapshot) = read()?;
-		if after == user {
+		if after == user && covers(after, &armed) {
 			return Some((snapshot, armed));
 		}
 		user = after;
@@ -4539,10 +4545,28 @@ mod tests {
 				armed.push(user);
 				Rearm::Replace(None)
 			},
+			|_, _| true,
 		)
 		.unwrap();
 		assert_eq!(armed, [100, 101, 102]);
 		assert_eq!(snapshot, 3, "the published snapshot follows setup for its app");
+	}
+
+	#[test]
+	fn a_front_read_rearms_after_a_same_app_click_during_tap_setup() {
+		let mut reads = [(100, 0), (100, 1), (100, 2)].into_iter();
+		let setups = Cell::new(0);
+		let (snapshot, _) = rearm_for_front(
+			|| reads.next(),
+			|_| {
+				setups.set(setups.get() + 1);
+				Rearm::Replace(None)
+			},
+			|_, _| setups.get() > 1,
+		)
+		.unwrap();
+		assert_eq!(setups.get(), 2, "a same-app click invalidates the first setup's mouse counters");
+		assert_eq!(snapshot, 2, "the returned read follows the replacement setup");
 	}
 
 	#[test]
