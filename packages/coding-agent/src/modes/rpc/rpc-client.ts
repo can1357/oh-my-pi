@@ -57,6 +57,7 @@ import type {
 	RpcSubagentSnapshot,
 	RpcSubagentSubscriptionLevel,
 } from "./rpc-types";
+import { mcpPolicyEnv } from "../../mcp/policy";
 
 /** Distributive Omit that works with union types */
 type DistributiveOmit<T, K extends keyof T> = T extends unknown ? Omit<T, K> : never;
@@ -411,6 +412,12 @@ export class RpcClient {
 		if (this.options.args) {
 			args.push(...this.options.args);
 		}
+		// An explicit `env` can never turn MCP back on for the child while this
+		// process has it off (`--no-mcp`, `PI_NO_MCP=1`); an undefined value unsets.
+		const env: Record<string, string> = {};
+		for (const [name, value] of Object.entries({ ...Bun.env, ...this.options.env })) {
+			if (value !== undefined) env[name] = value;
+		}
 		const child = this.options.spawn
 			? await this.options.spawn(args)
 			: ptree.spawn(
@@ -419,7 +426,7 @@ export class RpcClient {
 						: [...(this.options.command ?? ["bun", cliPath]), ...args],
 					{
 						cwd: this.options.cwd,
-						env: { ...Bun.env, ...this.options.env },
+						env: mcpPolicyEnv(env),
 						stdin: "pipe",
 					},
 				);

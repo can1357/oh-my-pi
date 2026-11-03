@@ -9,6 +9,12 @@
  * values). Discovery and bulk startup check {@link isMCPDisabled} to skip
  * quietly.
  * Every process omp starts inherits the choice through `PI_NO_MCP=1`.
+ *
+ * The choice is made once, at startup: `PI_NO_MCP=1` in the launch environment,
+ * or `--no-mcp`, which the CLI applies ({@link disableMCP}) before it starts
+ * anything. It is not a switch for a running process: a shell, worker,
+ * connection or cached environment that already exists keeps the choice it was
+ * made with.
  */
 import { $flag, setInheritedEnv } from "@oh-my-pi/pi-utils";
 
@@ -28,7 +34,10 @@ export function isMCPDisabled(): boolean {
 	return true;
 }
 
-/** Apply `--no-mcp`: turn MCP off for this process and every process it starts. */
+/**
+ * Apply `--no-mcp`: turn MCP off for this process and every process it starts.
+ * Call it at startup, before anything is started (see the module comment).
+ */
 export function disableMCP(): void {
 	setInheritedEnv(NO_MCP_ENV, "1");
 }

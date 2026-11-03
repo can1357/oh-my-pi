@@ -12,6 +12,7 @@ import * as path from "node:path";
 import { Process } from "@oh-my-pi/pi-natives";
 import { isRecord, ptree, readJsonl, readLines, removeWithRetries } from "@oh-my-pi/pi-utils";
 import { RpcClient } from "../src/modes/rpc/rpc-client";
+import { setNoMcpEnvForTest } from "./helpers/no-mcp-env";
 
 const cli = path.join(import.meta.dir, "../src/cli.ts");
 const peer = path.join(import.meta.dir, "fixtures/rpc-mcp-server.ts");
@@ -231,6 +232,33 @@ describe("spawned omp and the user's MCP servers", () => {
 					env: user.env,
 					args: RPC_ARGS,
 					noMcp: true,
+				});
+				try {
+					await client.start();
+					await client.getState();
+					expect(await spawnedPids(user.audit)).toHaveLength(0);
+				} finally {
+					await client.stop();
+				}
+			});
+		} finally {
+			await stopStartedServers(user.audit);
+			await removeWithRetries(user.root);
+		}
+	}, 240_000);
+
+	// Round-5 review: an `env` the host passes (here a snapshot with
+	// `PI_NO_MCP=""`) turned MCP back on for the child while the host had it off.
+	test('an RpcClient whose env says PI_NO_MCP="" starts none of them while its host has MCP off', async () => {
+		const user = await standInUser("");
+		setNoMcpEnvForTest("1");
+		try {
+			await withFakeModel(user, async () => {
+				const client = new RpcClient({
+					command: [process.execPath, cli],
+					cwd: user.project,
+					env: user.env,
+					args: RPC_ARGS,
 				});
 				try {
 					await client.start();
