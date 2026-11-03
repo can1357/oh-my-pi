@@ -41,7 +41,7 @@
 ### Changed
 
 - `async.maxJobs` now sets the cap on background jobs running at once in a session and its subagents without the fixed 100 ceiling, and `0` means no limit; the default stays 100 ([#17965](https://github.com/can1357/oh-my-pi/pull/17965) by [@sjawhar](https://github.com/sjawhar))
-- A background job started while running jobs fill `async.maxJobs` (async `bash`, async `task` spawns, eval `agent()`, `workpool()` batches, `judge_batch()`) is now queued instead of refused with `Background job limit reached`: the call returns its job id at once and says the job is queued, `read proc://`, `wait` and `/jobs` show it as `queued`, it counts toward nothing, and queued jobs start in arrival order as running jobs end; cancelling a queued job drops it without running its work
+- A background job started while running jobs fill `async.maxJobs` (async `bash`, async `task` spawns, eval `agent()`, `workpool()` batches, `judge_batch()`) is now queued instead of refused with `Background job limit reached`: the call returns its job id at once and says the job is queued, `read proc://`, `wait` and `/jobs` show it as `queued`, it counts toward nothing, and queued jobs start in arrival order as running jobs end; cancelling a queued job drops it without running its work ([#18006](https://github.com/can1357/oh-my-pi/pull/18006) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.16.0] - 2026-11-02
 
