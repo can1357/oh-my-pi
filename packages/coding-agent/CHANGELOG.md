@@ -11,6 +11,7 @@
 - Added a `:level` suffix to `^` model tags, such as `^openai-codex/gpt-6-astra:high`, that sets the tagged subagent's initial effort. Typing `:` after a mention lists the model's supported levels. The task tool's `effort` hint and `task.maxEffort` do not override the tagged level, and a per-call `model` for that agent fails as a conflict ([#17574](https://github.com/can1357/oh-my-pi/pull/17574) by [@a-glapinski](https://github.com/a-glapinski))
 - RPC `bash` results now say when the output was cut: `elidedBytes`/`elidedLines` for a dropped middle, and `columnTruncatedLines`, `columnTruncatedRange`, `columnDroppedBytes` and `columnMax` for lines cut to the column cap. The Go, Python and Rust SDKs decode them ([#17957](https://github.com/can1357/oh-my-pi/pull/17957) by [@H4vC](https://github.com/H4vC))
 - Extensions can register a todo backend with `pi.registerTodoBackend()`. Pick it with the `todo.backend` setting (`/settings` → Tools → "Todo Backend"); the main session then sends every todo write to it, and falls back to native todos with one notice when the backend isn't available
+- Extensions can register a todo backend with `pi.registerTodoBackend()`. Pick it with the `todo.backend` setting (`/settings` → Tools → "Todo Backend"); the main session then sends every todo write to it, and falls back to native todos with one notice when the backend isn't available ([#17990](https://github.com/can1357/oh-my-pi/pull/17990) by [@Dangerboi](https://github.com/Dangerboi))
 
 ### Changed
 

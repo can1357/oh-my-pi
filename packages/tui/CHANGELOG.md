@@ -7,6 +7,7 @@
 - Replaced `CustomEditor.modelMentionLabel` with `resolveModelMention`, which returns the chip label and the canonical selector the chip expands to; `collapseModelMentions` takes the same `{ label, selector }` callback, and `getModelMentionSuggestions` returns a `ModelMentionCompletion` (`unhandled`, `no-match`, or `matched` with the suggestions) instead of suggestions or `null` ([#17574](https://github.com/can1357/oh-my-pi/pull/17574) by [@a-glapinski](https://github.com/a-glapinski))
 - Removed `SPINNER_ADVANCE_MS`; spinners follow the shared spinner clock (`spinnerInterval()`). `sharedSpinnerFrame` moved from `chat/tool-execution` to `spinner-clock` and reads `Date.now()` by default ([#14240](https://github.com/can1357/oh-my-pi/pull/14240) by [@mccraigmccraig](https://github.com/mccraigmccraig))
 - `SettingsSelectorComponent` gets runtime submenu choices from `runtimeOptions` (a map from setting path to a `RuntimeSettingOptionsProvider`) instead of the `availableThemes` and `availableThinkingLevels` context fields; a runtime setting with no provider shows its declared options
+- `SettingsSelectorComponent` gets runtime submenu choices from `runtimeOptions` (a map from setting path to a `RuntimeSettingOptionsProvider`) instead of the `availableThemes` and `availableThinkingLevels` context fields; a runtime setting with no provider shows its declared options ([#17990](https://github.com/can1357/oh-my-pi/pull/17990) by [@Dangerboi](https://github.com/Dangerboi))
 
 ### Added
 
