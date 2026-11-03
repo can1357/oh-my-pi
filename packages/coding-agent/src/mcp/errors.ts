@@ -42,25 +42,47 @@ const MAX_DATA_ENTRIES = 30;
 const FETCH_VERBOSE_ADVICE = "for more information, pass `verbose: true` in the second argument to fetch()";
 
 /**
- * `value` without Bun's fetch hint at its end, once or repeated (a stderr tail
- * can hold several), with the whitespace around it: all of it goes in one pass,
- * so redaction is idempotent and a caller that budgets text after redacting it
- * never loses room to a hint the error later drops. Linear: it compares fixed
- * suffixes only, so a long error with near-miss hints costs no backtracking.
+ * Where each of Bun's fetch hints at the end of `value` starts, last hint
+ * first: the hint once or repeated, with or without whitespace or a final
+ * period between copies. Linear: it compares fixed suffixes only, so a long
+ * error with near-miss hints costs no backtracking.
  */
-export function stripTrailingFetchAdvice(value: string): string {
+export function trailingFetchAdviceStarts(value: string): number[] {
+	const starts: number[] = [];
 	let end = value.length;
-	let stripped = false;
 	for (;;) {
 		let cut = end;
 		while (cut > 0 && /\s/.test(value[cut - 1]!)) cut--;
 		if (cut > 0 && value[cut - 1] === ".") cut--;
 		const start = cut - FETCH_VERBOSE_ADVICE.length;
-		if (start < 0 || value.slice(start, cut).toLowerCase() !== FETCH_VERBOSE_ADVICE) break;
+		if (start < 0 || value.slice(start, cut).toLowerCase() !== FETCH_VERBOSE_ADVICE) return starts;
+		starts.push(start);
 		end = start;
-		stripped = true;
 	}
-	if (!stripped) return value;
+}
+
+/**
+ * Length of the longest end of `value` that is the start of a fetch hint still
+ * being written (case-insensitive), so a caller cutting text can tell a hint
+ * in progress from other text.
+ */
+export function fetchAdvicePrefixLength(value: string): number {
+	for (let length = Math.min(value.length, FETCH_VERBOSE_ADVICE.length); length > 0; length--) {
+		if (FETCH_VERBOSE_ADVICE.startsWith(value.slice(-length).toLowerCase())) return length;
+	}
+	return 0;
+}
+
+/**
+ * `value` without Bun's fetch hint at its end, once or repeated (a stderr tail
+ * can hold several), with the whitespace around it: all of it goes in one pass,
+ * so redaction is idempotent and a caller that budgets text after redacting it
+ * never loses room to a hint the error later drops.
+ */
+export function stripTrailingFetchAdvice(value: string): string {
+	const starts = trailingFetchAdviceStarts(value);
+	if (starts.length === 0) return value;
+	let end = starts[starts.length - 1]!;
 	while (end > 0 && /\s/.test(value[end - 1]!)) end--;
 	return value.slice(0, end);
 }

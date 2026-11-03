@@ -256,6 +256,39 @@ describe.skipIf(process.platform === "win32" || !PYTHON)("StdioTransport exit re
 		);
 	}
 
+	// Round 8: dropping each hint as it completed also dropped hints that more
+	// text followed, and hints joined without whitespace slipped past it.
+	it(
+		"keeps text that follows a fetch hint",
+		async () => {
+			const advice = "For more information, pass `verbose: true` in the second argument to fetch().";
+			const args = server(`${stderrWrites([`${advice} THIS_IS_NOT_TRAILING_ADVICE\n`])}\nsys.exit(77)`);
+			const error = await withTransport({ command: python, args }, transport =>
+				transportRejection(transport.request("tools/call")),
+			);
+
+			expect(error.message).toContain(`${advice} THIS_IS_NOT_TRAILING_ADVICE`);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	for (const joiner of ["", "."]) {
+		it(
+			`keeps the reason before 1000 fetch hints joined by ${joiner ? "periods" : "nothing"}`,
+			async () => {
+				const advice = "For more information, pass `verbose: true` in the second argument to fetch()";
+				const hints = `${advice}${joiner}`.repeat(1_000);
+				const args = server(`${stderrWrites([`REFUSAL_REASON_CANARY\n${hints}\n`])}\nsys.exit(77)`);
+				const error = await withTransport({ command: python, args }, transport =>
+					transportRejection(transport.request("tools/call")),
+				);
+
+				expect(error.message).toEndWith("REFUSAL_REASON_CANARY");
+			},
+			TEST_TIMEOUT_MS,
+		);
+	}
+
 	it(
 		"keeps the final refusal after many carriage-return-only lines",
 		async () => {

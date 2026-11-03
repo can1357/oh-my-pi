@@ -27,7 +27,9 @@ import {
 	nonRetryableMCPTransportError,
 	normalizeMCPTransportError,
 	redactDiagnosticText,
+	fetchAdvicePrefixLength,
 	stripTrailingFetchAdvice,
+	trailingFetchAdviceStarts,
 } from "../errors";
 import { RequestIdAllocator } from "../request-id";
 import { routeProgressNotification, withProgressToken } from "../progress";
@@ -442,6 +444,8 @@ const CLOSE_DEADLINE_MS = TERM_GRACE_MS + KILL_GRACE_MS;
 const STDERR_WORD_MAX_CHARS = 256;
 /** Characters of redacted stderr kept for the exit report. */
 const STDERR_TAIL_CHARS = 16 * 1024;
+/** Characters of trailing fetch hints kept when the buffer is cut: more than a report shows. */
+const STDERR_HINT_KEEP_CHARS = 4 * 1024;
 /** Words before the current one that redaction sees, enough for `Authorization: Bearer` and `api_key =`. */
 const STDERR_CONTEXT_WORDS = 6;
 /** End of each context word redaction sees: a label ends the word before its value. */
@@ -604,13 +608,34 @@ class StderrTail {
 		return after.startsWith(before) ? after.slice(before.length) : `${separator}[redacted]`;
 	}
 
+	/**
+	 * Cut the kept text back to about {@link STDERR_TAIL_CHARS}. Fetch hints at
+	 * its end are kept apart from the text before them: the error drops trailing
+	 * hints, so they must not push that text out of the buffer, and only the last
+	 * {@link STDERR_HINT_KEEP_CHARS} of them are kept, whole, in case more text
+	 * follows them.
+	 */
+	#trim(): void {
+		const text = this.#redacted;
+		// A hint still being written (its first words) stays at the end, after the
+		// complete hints before it.
+		const head = text.slice(0, text.length - fetchAdvicePrefixLength(text));
+		const starts = trailingFetchAdviceStarts(head);
+		if (starts.length === 0) {
+			this.#redacted = text.slice(-STDERR_TAIL_CHARS);
+			return;
+		}
+		const firstHint = starts[starts.length - 1]!;
+		const before = stripTrailingFetchAdvice(head);
+		const keepFrom = starts.find(start => head.length - start >= STDERR_HINT_KEEP_CHARS) ?? firstHint;
+		const separator = keepFrom === firstHint ? head.slice(before.length, firstHint) : before.length > 0 ? "\n" : "";
+		this.#redacted = before.slice(-STDERR_TAIL_CHARS) + separator + text.slice(keepFrom);
+	}
+
 	#finishWord(): void {
 		if (this.#wordLength === 0) return;
-		// Drop a fetch hint as soon as it is complete: the error removes it anyway,
-		// and hints kept until the report could fill the buffer and push the
-		// reason out of it.
-		this.#redacted = stripTrailingFetchAdvice(this.#redacted + this.#redactWord());
-		if (this.#redacted.length > 2 * STDERR_TAIL_CHARS) this.#redacted = this.#redacted.slice(-STDERR_TAIL_CHARS);
+		this.#redacted += this.#redactWord();
+		if (this.#redacted.length > 2 * STDERR_TAIL_CHARS) this.#trim();
 		const separator = this.#context.length === 0 ? "" : this.#separator;
 		this.#context.push(`${separator}${this.#word.slice(-STDERR_CONTEXT_WORD_CHARS)}`);
 		if (this.#context.length > STDERR_CONTEXT_WORDS) {
