@@ -120,7 +120,7 @@ export class SessionAccountPoolScope {
 	/**
 	 * `registry` with its key lookups (`getApiKey`, `getApiKeyForProvider`,
 	 * `getApiKeyWithCredentialForProvider`, `getApiKeyAndHeaders`, `resolver`,
-	 * `turnResolver`) routed through this scope. Every other member is the
+	 * `turnResolver`, `missingKeyMayRecover`) routed through this scope. Every other member is the
 	 * unscoped registry's, so model state, discovery, and caches stay shared. A
 	 * registry another scope returned is unwrapped first: a nested agent with its
 	 * own pools uses them, not its parent's.
@@ -154,6 +154,8 @@ export class SessionAccountPoolScope {
 			getApiKeyWithCredentialForProvider,
 			getApiKeyForProvider: (provider, sessionId, options) =>
 				target.getApiKeyForProvider(provider, this.#sessionIdFor(provider, sessionId), options),
+			missingKeyMayRecover: (provider, sessionId, signal) =>
+				target.missingKeyMayRecover(provider, this.#sessionIdFor(provider, sessionId), signal),
 			getApiKeyAndHeaders: async model => {
 				try {
 					const apiKey = await getApiKey(model);
@@ -166,7 +168,12 @@ export class SessionAccountPoolScope {
 				}
 			},
 			resolver,
-			turnResolver: (model, sessionId) => target.failCommandKeyRetryably(model.provider, resolver(model, sessionId)),
+			turnResolver: (model, sessionId) =>
+				target.failCommandKeyRetryably(
+					model.provider,
+					resolver(model, sessionId),
+					this.#sessionIdFor(model.provider, sessionId),
+				),
 		};
 		// ModelRegistry keeps its state in #private fields, so every other member
 		// runs against the target itself; bound methods are cached per name.

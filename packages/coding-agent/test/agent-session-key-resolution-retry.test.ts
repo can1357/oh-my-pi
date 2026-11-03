@@ -11,6 +11,7 @@ import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock
 import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
 import * as aiStream from "@oh-my-pi/pi-ai/stream";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { SessionAccountPoolScope } from "@oh-my-pi/pi-coding-agent/config/account-pools";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -143,10 +144,15 @@ describe("AgentSession: a provider key that cannot be resolved for a moment", ()
 				let lift: (() => void) | undefined;
 				outage = {
 					start: async () => {
-						const lease = authStorage.sessions.restrict("anthropic", PROVIDER_SESSION_ID, ["account:acc-gone"]);
+						const identity = resolveCredentialIdentityKey("anthropic", oauthLogin("acc-live"))!;
+						const lease = authStorage.sessions.restrict("anthropic", PROVIDER_SESSION_ID, [identity]);
+						for (const account of authStorage.oauth.accounts("anthropic")) {
+							await authStorage.credentials.disable(account.credentialId, "oauth refresh failed: invalid_grant");
+						}
 						lift = () => authStorage.sessions.unrestrict("anthropic", PROVIDER_SESSION_ID, lease);
 					},
 					end: async () => {
+						await authStorage.credentials.set("anthropic", [oauthLogin("acc-live")]);
 						lift?.();
 						lift = undefined;
 					},
@@ -474,6 +480,113 @@ describe("AgentSession: a provider key that cannot be resolved for a moment", ()
 		}
 	}
 
+	for (const siblingDisabled of [false, true]) {
+		it(`keeps implicit and side-session recovery in the configured pool with an ${siblingDisabled ? "disabled" : "active"} outside login`, async () => {
+			const ctx = await setUp();
+			const a = oauthLogin("acc-a");
+			await ctx.authStorage.credentials.set("anthropic", [a, oauthLogin("acc-b")]);
+			const [rowA, rowB] = ctx.authStorage.oauth.accounts("anthropic");
+			const scope = new SessionAccountPoolScope(
+				ctx.authStorage,
+				{ anthropic: [resolveCredentialIdentityKey("anthropic", a)!] },
+				PROVIDER_SESSION_ID,
+			);
+			ctx.owner.release(() => scope.release());
+			const registry = scope.registry(ctx.modelRegistry);
+			if (siblingDisabled)
+				await ctx.authStorage.credentials.disable(rowB!.credentialId, "oauth refresh failed: invalid_grant");
+			await ctx.authStorage.credentials.removeById("anthropic", rowA!.credentialId);
+			const model = getBundledModel(ANTHROPIC_MODEL.provider, ANTHROPIC_MODEL.id)!;
+			for (const sessionId of [undefined, "side-session"]) {
+				expect(await registry.missingKeyMayRecover("anthropic", sessionId)).toBe(false);
+				const error = await resolveApiKeyOnce(registry.turnResolver(model, sessionId)).catch(
+					(failure: unknown) => failure,
+				);
+				expect(error).toBeInstanceOf(AIError.AccountPoolUnavailableError);
+				expect(AIError.retriable(AIError.classify(error))).toBe(false);
+			}
+		});
+	}
+
+	for (const siblingDisabled of [false, true]) {
+		for (const removal of ["remove", "removeById", "broker logout"] as const) {
+			it(`does not retry or resume a removed pool account with an ${siblingDisabled ? "failure-disabled" : "active"} outside account (${removal})`, async () => {
+				const ctx = await setUp();
+				const { authStorage } = ctx;
+				const a = oauthLogin("acc-a");
+				await authStorage.credentials.set("anthropic", [a, oauthLogin("acc-b")]);
+				const [rowA, rowB] = authStorage.oauth.accounts("anthropic");
+				authStorage.sessions.restrict("anthropic", PROVIDER_SESSION_ID, [
+					resolveCredentialIdentityKey("anthropic", a)!,
+				]);
+				if (siblingDisabled)
+					await authStorage.credentials.disable(rowB!.credentialId, "oauth refresh failed: invalid_grant");
+				const keys: KeyOutage = {
+					start: async () => {
+						if (removal === "remove") await authStorage.credentials.remove("anthropic");
+						else if (removal === "removeById")
+							await authStorage.credentials.removeById("anthropic", rowA!.credentialId);
+						else await authStorage.credentials.disable(rowA!.credentialId, "logged out by user");
+					},
+					end: async () => {},
+				};
+				const { session, mock, retryStarts } = await openSession(ctx, {
+					maxRetries: 2,
+					sessionManager: SessionManager.inMemory(),
+					outage: { keys, startOn: "probe", resolvesWhileDown: Number.POSITIVE_INFINITY },
+				});
+				mockSchedulerWaitWithClock();
+				await session.prompt("run the probe");
+				await session.waitForIdle();
+				const failed = lastAssistant(session);
+				expect(failed.stopReason).toBe("error");
+				expect(AIError.is(failed.errorId, AIError.Flag.CredentialUnavailable)).toBe(false);
+				expect(retryStarts).toEqual([]);
+				expect(mock.calls).toHaveLength(1);
+				await expect(session.prompt("again")).rejects.toThrow("No API key found for anthropic");
+				await expect(session.restoreInterruptedTurn()).resolves.toBe(false);
+			});
+		}
+	}
+
+	for (const sharedWorkspace of [false, true]) {
+		it(`recovers a failure-disabled account after removing ${sharedWorkspace ? "another member of the same workspace" : "the same email in a different organization"}`, async () => {
+			const ctx = await setUp();
+			const a = {
+				...oauthLogin("a"),
+				accountId: sharedWorkspace ? "workspace" : undefined,
+				email: "a@example.com",
+				orgId: sharedWorkspace ? "workspace" : "org-a",
+			};
+			const b = {
+				...oauthLogin("b"),
+				accountId: sharedWorkspace ? "workspace" : undefined,
+				email: sharedWorkspace ? "b@example.com" : "a@example.com",
+				orgId: sharedWorkspace ? "workspace" : "org-b",
+			};
+			await ctx.authStorage.credentials.set("anthropic", [a, b]);
+			const [rowA, rowB] = ctx.authStorage.oauth.accounts("anthropic");
+			const keys: KeyOutage = {
+				start: async () => {
+					await ctx.authStorage.credentials.disable(rowA!.credentialId, "oauth refresh failed: invalid_grant");
+					await ctx.authStorage.credentials.removeById("anthropic", rowB!.credentialId);
+				},
+				end: () => ctx.authStorage.credentials.set("anthropic", [a]),
+			};
+			const { session, retryStarts } = await openSession(ctx, {
+				maxRetries: 2,
+				sessionManager: SessionManager.inMemory(),
+				outage: { keys, startOn: "probe", resolvesWhileDown: 1 },
+			});
+			mockSchedulerWaitWithClock();
+			await session.prompt("run the probe");
+			await session.waitForIdle();
+			expect(lastAssistant(session).stopReason).toBe("stop");
+			expect(lastAssistant(session).content).toContainEqual({ type: "text", text: FINAL_ANSWER });
+			expect(retryStarts.map(event => event.attempt)).toEqual([1]);
+		});
+	}
+
 	it("keeps another account's failure recoverable when the user removes one account", async () => {
 		const ctx = await setUp();
 		const { authStorage, modelRegistry } = ctx;
@@ -497,7 +610,9 @@ describe("AgentSession: a provider key that cannot be resolved for a moment", ()
 		const ctx = await setUp();
 		const model = getBundledModel(ANTHROPIC_MODEL.provider, ANTHROPIC_MODEL.id);
 		if (!model) throw new Error("Expected bundled anthropic test model");
-		ctx.authStorage.sessions.restrict("anthropic", PROVIDER_SESSION_ID, ["account:acc-live"]);
+		ctx.authStorage.sessions.restrict("anthropic", PROVIDER_SESSION_ID, [
+			resolveCredentialIdentityKey("anthropic", oauthLogin("acc-live"))!,
+		]);
 		ctx.authStorage.keys.setConfig("anthropic", "config-key");
 
 		const error = await resolveApiKeyOnce(ctx.modelRegistry.turnResolver(model, PROVIDER_SESSION_ID)).catch(

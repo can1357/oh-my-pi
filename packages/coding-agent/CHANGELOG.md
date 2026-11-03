@@ -5,9 +5,11 @@
 ### Fixed
 
 - A provider `apiKey: "!command"` that fails, times out, or prints nothing is now retried by turn auto-retry, which runs the command again up to 3 times, each after its 30-second failure backoff, instead of ending the turn (or subagent) with "No API key" ([#14031](https://github.com/can1357/oh-my-pi/pull/14031) by [@sjawhar](https://github.com/sjawhar)).
-- A turn whose provider key cannot be resolved for a while (the stored OAuth login was disabled by a failed refresh, the session's OAuth account pool has no account that can serve, or an OAuth refresh failed on a network error) is now retried by turn auto-retry instead of ending at once (a provider the user removed or logged out of still fails at once), and a prompt sent meanwhile starts instead of failing with "No API key found" ([#17764](https://github.com/can1357/oh-my-pi/pull/17764) by [@sjawhar](https://github.com/sjawhar))
+- A turn whose permitted provider credentials cannot serve for a while is now retried, and prompts sent meanwhile start instead of failing with "No API key found". A removed or logged-out account fails at once, even when accounts outside the session's pool remain; removing another organization or workspace member does not cancel recovery of a failed login ([#17764](https://github.com/can1357/oh-my-pi/pull/17764) by [@sjawhar](https://github.com/sjawhar))
 - `omp --restore` now resumes a turn, or a subagent's turn, that ended because its provider key could not be resolved even after its retries, also when its process exited normally afterwards, but not one the user cleared with `/clear` ([#17764](https://github.com/can1357/oh-my-pi/pull/17764) by [@sjawhar](https://github.com/sjawhar))
 - A stored GitHub Copilot credential is no longer removed when a turn failed because its key lookup produced no key ([#17764](https://github.com/can1357/oh-my-pi/pull/17764) by [@sjawhar](https://github.com/sjawhar))
+- `/logout` and RPC logout account listings now offer failure-disabled logins as disabled accounts; removing one also ends its recoverability. `omp usage` keeps a failed subscription visible when the same email is active in another organization ([#17764](https://github.com/can1357/oh-my-pi/pull/17764) by [@sjawhar](https://github.com/sjawhar))
+
 ### Added
 
 - Pinned sessions show a pin beside their title in the status line and the band composer's title, and `/unpin [session id]` unpins a session ([#17848](https://github.com/can1357/oh-my-pi/pull/17848) by [@SuperUserA](https://github.com/SuperUserA))

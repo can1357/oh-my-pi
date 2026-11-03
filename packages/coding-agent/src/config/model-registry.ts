@@ -5,7 +5,7 @@ import {
 	type AuthApiKeyOptions,
 	type AuthPeekOptions,
 	type DisabledCredentialSummary,
-	isAutoDisabledCredential,
+	isRecoverableDisabledCredential,
 	oauthAccountKey,
 } from "@oh-my-pi/pi-ai/auth-storage";
 import { registerCustomApi, unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
@@ -278,17 +278,6 @@ function compactionPointReaches(points: unknown, model: Model<Api>, window: numb
 
 function contextWindowKey(model: { provider: string; id: string }): string {
 	return `${model.provider}\u0000${model.id}`;
-}
-
-/**
- * Whether two credential tombstones are of the same account: the same account id when both carry
- * one, else the same email when both carry one. When either cannot tell, they count as the same,
- * so a removal without an identity still ends the retry for its provider.
- */
-function sameStoredAccount(a: DisabledCredentialSummary, b: DisabledCredentialSummary): boolean {
-	if (a.accountId && b.accountId) return a.accountId === b.accountId && a.orgId === b.orgId;
-	if (a.email && b.email) return a.email === b.email;
-	return true;
 }
 
 /** The context window a model runs with by default, and the larger one extended context opts it into. */
@@ -3266,26 +3255,35 @@ export class ModelRegistry {
 	 * can serve now ({@link #storedCredentialsUnavailable}). A turn's request
 	 * reports such a key retryably ({@link turnResolver}).
 	 */
-	async missingKeyMayRecover(provider: string, signal?: AbortSignal): Promise<boolean> {
-		return this.retriesFailedCommandKey(provider) || (await this.#storedCredentialsUnavailable(provider, signal));
+	async missingKeyMayRecover(provider: string, sessionId?: string, signal?: AbortSignal): Promise<boolean> {
+		return (
+			this.retriesFailedCommandKey(provider) ||
+			(await this.#storedCredentialsUnavailable(provider, sessionId, signal))
+		);
 	}
 
 	/**
 	 * Whether the provider has stored credentials that exist but could not serve
 	 * a request: an active row that resolved no key, or an OAuth credential a
-	 * failure disabled ({@link isAutoDisabledCredential}) that the user has not
+	 * failure disabled ({@link isRecoverableDisabledCredential}) that the user has not
 	 * since removed or replaced. A new login, here or in another session sharing
 	 * the store, brings such a credential back; an account whose latest teardown
 	 * was the user's own (a logout), or a provider that never had a credential,
 	 * does not count. A user's removal covers the same account only: removing one
-	 * account of a provider leaves another account's failure recoverable. A
-	 * tombstone lookup that fails counts, since the store could not tell; one the
+	 * account of a provider leaves another account's failure recoverable.
+	 * Only active credentials and failure identities the session's pool permits count.
+	 * A tombstone lookup that fails counts, since the store could not tell; one the
 	 * caller aborted does not. False for a disabled provider and for one whose
 	 * catalog dispatches without a key.
 	 */
-	async #storedCredentialsUnavailable(provider: string, signal?: AbortSignal): Promise<boolean> {
+	async #storedCredentialsUnavailable(provider: string, sessionId?: string, signal?: AbortSignal): Promise<boolean> {
 		if (this.#isProviderDisabled(provider) || getProviderDefinition(provider)?.allowsMissingApiKey) return false;
-		if (this.authStorage.credentials.has(provider)) return true;
+		if (
+			this.authStorage.credentials
+				.list(provider)
+				.some(row => sessionId === undefined || this.authStorage.sessions.permits(provider, sessionId, row.id))
+		)
+			return true;
 		let tombstones: DisabledCredentialSummary[];
 		try {
 			tombstones = await this.authStorage.credentials.listDisabled(provider, signal);
@@ -3297,16 +3295,10 @@ export class ModelRegistry {
 			});
 			return true;
 		}
-		// A removal or replacement of the same account at or after the failure decides it; an
-		// unknown time sorts first, so a tie goes to the user's removal.
-		const removals = tombstones.filter(tombstone => !isAutoDisabledCredential(tombstone));
 		return tombstones.some(
 			failure =>
-				isAutoDisabledCredential(failure) &&
-				!removals.some(
-					removal =>
-						sameStoredAccount(failure, removal) && (removal.disabledAtMs ?? 0) >= (failure.disabledAtMs ?? 0),
-				),
+				this.authStorage.sessions.permitsIdentity(provider, sessionId, failure.identityKey) &&
+				isRecoverableDisabledCredential(failure, tombstones),
 		);
 	}
 
@@ -3572,7 +3564,7 @@ export class ModelRegistry {
 	 * {@link resolver}, where such a request fails at once as a missing key.
 	 */
 	turnResolver(model: ApiKeyResolverModel, sessionId?: string): ApiKeyResolver {
-		return this.failCommandKeyRetryably(model.provider, this.resolver(model, sessionId));
+		return this.failCommandKeyRetryably(model.provider, this.resolver(model, sessionId), sessionId);
 	}
 
 	/**
@@ -3586,7 +3578,7 @@ export class ModelRegistry {
 	 *   kept as `cause`). A pool whose credentials the user removed fails for good.
 	 * A registry view that builds its own resolvers wraps them with this.
 	 */
-	failCommandKeyRetryably(provider: string, resolve: ApiKeyResolver): ApiKeyResolver {
+	failCommandKeyRetryably(provider: string, resolve: ApiKeyResolver, sessionId?: string): ApiKeyResolver {
 		return async ctx => {
 			let resolved: ApiKeyResolution;
 			try {
@@ -3595,7 +3587,7 @@ export class ModelRegistry {
 				if (
 					ctx.error === undefined &&
 					error instanceof AccountPoolUnavailableError &&
-					(await this.#storedCredentialsUnavailable(provider, ctx.signal))
+					(await this.#storedCredentialsUnavailable(provider, sessionId, ctx.signal))
 				) {
 					throw new CredentialUnavailableError(error.message, { cause: error });
 				}
@@ -3608,7 +3600,7 @@ export class ModelRegistry {
 					commandFailureRetryAfterMs(this.#customProviderApiKeys.get(provider)),
 				);
 			}
-			if (await this.#storedCredentialsUnavailable(provider, ctx.signal)) {
+			if (await this.#storedCredentialsUnavailable(provider, sessionId, ctx.signal)) {
 				throw new CredentialUnavailableError(
 					`No API key for provider: ${provider} (its stored credentials are disabled or cannot serve now)`,
 				);

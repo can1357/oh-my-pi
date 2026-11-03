@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { isRecord, readJsonl, TempDir } from "@oh-my-pi/pi-utils";
+import { AuthStorage, isAutoDisabledCredential } from "@oh-my-pi/pi-ai";
 import type { ExtensionAskDialogQuestion } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import {
 	type PendingExtensionRequest,
@@ -578,6 +579,103 @@ export default function(pi) {
 			},
 		});
 	}, 30_000);
+
+	it("lists and removes a failure-disabled login over RPC without leaving a recoverable tombstone", async () => {
+		await using temp = await TempDir.create("@rpc-logout-disabled-");
+		const fixturePath = temp.join("runtime.ts");
+		const sourceDir = path.resolve(import.meta.dir, "../src");
+		const dbPath = temp.join("auth.db");
+		await Bun.write(
+			fixturePath,
+			`
+import { createAgentSession, Settings } from ${JSON.stringify(path.join(sourceDir, "sdk.ts"))};
+import { AuthStorage } from ${JSON.stringify(path.join(sourceDir, "session/auth-storage.ts"))};
+import { runRpcMode } from ${JSON.stringify(path.join(sourceDir, "modes/rpc/rpc-mode.ts"))};
+globalThis.fetch = async () => { throw new Error("Offline logout fixture refuses network"); };
+const authStorage = await AuthStorage.create(${JSON.stringify(dbPath)});
+await authStorage.credentials.set("anthropic", [{ type: "oauth", access: "access", refresh: "refresh", expires: Date.now() + 60000, email: "disabled@example.test" }]);
+await authStorage.credentials.disable(authStorage.credentials.list("anthropic")[0].id, "oauth refresh failed: invalid_grant");
+const { session } = await createAgentSession({ cwd: process.cwd(), authStorage, toolNames: [], enableMCP: false, enableLsp: false, disableExtensionDiscovery: true, settings: Settings.isolated({ "compaction.enabled": false }) });
+await runRpcMode(session);
+`,
+		);
+		const child = Bun.spawn([process.execPath, fixturePath], {
+			cwd: temp.path(),
+			env: {
+				PATH: Bun.env.PATH,
+				HOME: temp.join("home"),
+				PI_CODING_AGENT_DIR: temp.join("agent"),
+				XDG_CONFIG_HOME: temp.join("config"),
+				XDG_DATA_HOME: temp.join("data"),
+				XDG_CACHE_HOME: temp.join("cache"),
+				CI: "true",
+				PI_NO_TITLE: "1",
+			},
+			stdin: "pipe",
+			stdout: "pipe",
+			stderr: "pipe",
+			timeout: 20_000,
+		});
+		const stderr = new Response(child.stderr).text();
+		const send = async (frame: object) => {
+			child.stdin.write(`${JSON.stringify(frame)}\n`);
+			await child.stdin.flush();
+		};
+		let finished = false;
+		let errorOutput = "";
+		try {
+			await send({ type: "get_logout_accounts", providerId: "anthropic", id: "accounts" });
+			for await (const frame of readJsonl<unknown>(child.stdout)) {
+				if (!isRecord(frame) || frame.type !== "response") continue;
+				if (frame.id === "accounts") {
+					const accounts = isRecord(frame.data) && Array.isArray(frame.data.accounts) ? frame.data.accounts : [];
+					expect(accounts).toHaveLength(1);
+					const account = accounts[0];
+					if (!isRecord(account)) throw new Error("RPC did not offer the disabled login");
+					const credentialId = account.credentialId;
+					expect(credentialId).toEqual(expect.any(Number));
+					expect(account.label).toContain("(disabled)");
+					expect(frame).toMatchObject({
+						success: true,
+						data: {
+							accounts: [
+								expect.objectContaining({
+									label: expect.stringContaining("disabled@example.test"),
+									detail: expect.stringContaining("disabled"),
+									active: false,
+								}),
+							],
+						},
+					});
+					await send({
+						type: "logout",
+						providerId: "anthropic",
+						credentialId,
+						id: "logout",
+					});
+				} else if (frame.id === "logout") {
+					expect(frame).toMatchObject({ success: true });
+					await send({ type: "get_logout_accounts", providerId: "anthropic", id: "after" });
+				} else if (frame.id === "after") {
+					expect(frame).toMatchObject({ success: true, data: { accounts: [] } });
+					finished = true;
+					break;
+				}
+			}
+		} finally {
+			child.stdin.end();
+			child.kill();
+			await child.exited;
+			errorOutput = await stderr;
+		}
+		if (!finished) throw new Error(`RPC logout fixture did not finish: ${errorOutput}`);
+		const authStorage = await AuthStorage.create(dbPath);
+		try {
+			expect((await authStorage.credentials.listDisabled("anthropic")).some(isAutoDisabledCredential)).toBe(false);
+		} finally {
+			authStorage.close();
+		}
+	}, 60_000);
 });
 
 describe("RPC ask dialog", () => {

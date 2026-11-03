@@ -6,6 +6,7 @@
 
 - Added `CredentialUnavailableError`, a transient error for a configured credential source that produced no key; unlike `MissingApiKeyError`, a retry may succeed. It carries `Flag.CredentialUnavailable` and accepts a `cause`, and `OAuthRefreshUnavailableError` is a `CredentialUnavailableError` ([#14031](https://github.com/can1357/oh-my-pi/pull/14031) and [#17764](https://github.com/can1357/oh-my-pi/pull/17764) by [@sjawhar](https://github.com/sjawhar)).
 - Added `AccountPoolUnavailableError` (a `MissingApiKeyError`) for a session restricted to an OAuth account pool none of whose accounts can serve now, `Flag.CredentialUnavailable` for a request whose credential lookup produced no key, `isAutoDisabledCredential` for tombstones of OAuth credentials a failure disabled, and `isUserRemovalCause` with the `DELETED_BY_USER` and `LOGGED_OUT_BY_USER` causes; a user's removal or logout now also marks the provider's logins a failure had already disabled ([#17764](https://github.com/can1357/oh-my-pi/pull/17764) by [@sjawhar](https://github.com/sjawhar))
+- Disabled-credential summaries now include the store's account `identityKey`, locally and through the auth broker; `sessions.permitsIdentity` and `isRecoverableDisabledCredential` let clients distinguish pool membership and later removals without conflating organizations or workspace members ([#17764](https://github.com/can1357/oh-my-pi/pull/17764) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.16.0] - 2026-11-02
 

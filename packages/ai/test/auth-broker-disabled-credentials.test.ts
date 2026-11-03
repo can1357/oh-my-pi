@@ -53,7 +53,7 @@ describe("disabled credential tombstones", () => {
 	});
 
 	test("sqlite store lists identity + cause + disabledAtMs and never token material", async () => {
-		await store!.saveOAuth("anthropic", mintOAuth("dead@example.test"));
+		await store!.saveOAuth("anthropic", { ...mintOAuth("dead@example.test"), orgId: "org-dead" });
 		await store!.saveOAuth("openai-codex", mintOAuth("alive@example.test"));
 		const row = store!.listAuthCredentials("anthropic")[0];
 		await store!.deleteAuthCredential(row.id, DISABLE_CAUSE);
@@ -67,6 +67,7 @@ describe("disabled credential tombstones", () => {
 			type: "oauth",
 			email: "dead@example.test",
 			accountId: "account-dead@example.test",
+			identityKey: "email:dead@example.test|org:org-dead",
 			cause: DISABLE_CAUSE,
 		});
 		expect(typeof summary.disabledAtMs).toBe("number");
@@ -180,7 +181,7 @@ describe("broker /v1/credentials/disabled round-trip", () => {
 	});
 
 	test("a row disabled on the broker surfaces to remote clients as a tombstone", async () => {
-		await serverStore!.saveOAuth("anthropic", mintOAuth("gone@example.test"));
+		await serverStore!.saveOAuth("anthropic", { ...mintOAuth("gone@example.test"), orgId: "org-gone" });
 		const row = serverStore!.listAuthCredentials("anthropic")[0];
 		await serverStore!.deleteAuthCredential(row.id, DISABLE_CAUSE);
 
@@ -191,6 +192,7 @@ describe("broker /v1/credentials/disabled round-trip", () => {
 			provider: "anthropic",
 			type: "oauth",
 			email: "gone@example.test",
+			identityKey: "email:gone@example.test|org:org-gone",
 			cause: DISABLE_CAUSE,
 		});
 		expect(JSON.stringify(disabled[0])).not.toContain("refresh-gone");

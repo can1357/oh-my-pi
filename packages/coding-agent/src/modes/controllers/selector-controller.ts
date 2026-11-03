@@ -73,7 +73,7 @@ import { findSessionContinuation, readSessionInfo, type SessionInfo } from "../.
 import { SessionManager } from "../../session/session-manager";
 import { loadPinnedSessionIds, setSessionPinned } from "../../session/session-pins";
 import { FileSessionStorage } from "../../session/session-storage";
-import { listLogoutAccounts, logoutCredential } from "../../slash-commands/helpers/logout";
+import { listLogoutAccounts, listLogoutProviders, logoutCredential } from "../../slash-commands/helpers/logout";
 import type { LogoutAccount } from "@oh-my-pi/pi-tui/overlays/logout-account-selector";
 import { describeRedeemOutcome, toResetUsageAccounts } from "../../slash-commands/helpers/reset-usage";
 import { toSessionPinAccounts } from "../../slash-commands/helpers/session-pin";
@@ -2314,13 +2314,14 @@ export class SelectorController {
 		}
 
 		const { getOAuthProviders, OAuthSelectorComponent } = await loadProviderAuthUi();
+		let logoutProviders: ReadonlySet<string> | undefined;
 		if (mode === "logout") {
 			await this.#refreshOAuthProviderAuthState();
-			const oauthProviders = getOAuthProviders();
-			const loggedInProviders = oauthProviders.filter(provider =>
-				this.ctx.session.modelRegistry.authStorage.credentials.has(provider.id),
-			);
-			if (loggedInProviders.length === 0) {
+			const removableProviders = await listLogoutProviders(this.ctx.session.modelRegistry.authStorage);
+			logoutProviders = removableProviders;
+			if (
+				!getOAuthProviders().some(provider => removableProviders.has(provider.storeCredentialsAs ?? provider.id))
+			) {
 				this.ctx.showStatus("No stored provider credentials to log out. Remove env or config auth at its source.");
 				return;
 			}
@@ -2346,6 +2347,7 @@ export class SelectorController {
 				},
 				{
 					disabledProviders: cfgDisabledProviders.get(settings),
+					logoutProviders,
 					validateAuth: async (selectedProviderId: string) => {
 						const apiKey = await this.ctx.session.modelRegistry.getApiKeyForProvider(
 							selectedProviderId,

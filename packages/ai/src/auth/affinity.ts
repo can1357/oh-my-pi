@@ -119,6 +119,12 @@ export class SessionAffinity implements SessionsApi {
 		return entry !== undefined && this.allows(provider, sessionId, entry.credential);
 	}
 
+	/** Test a tombstone or snapshot identity against the session's allowed account keys. */
+	permitsIdentity(provider: string, sessionId: string | undefined, identityKey: string | undefined): boolean {
+		const allowed = sessionId === undefined ? undefined : this.#restrictions.get(provider)?.get(sessionId)?.allowed;
+		return allowed === undefined || (identityKey !== undefined && allowed.has(identityKey));
+	}
+
 	/** Bounded per-provider session map, created on first use. */
 	static #sessionsFor<V>(maps: Map<string, LRUCache<string, V>>, provider: string): LRUCache<string, V> {
 		let sessions = maps.get(provider);

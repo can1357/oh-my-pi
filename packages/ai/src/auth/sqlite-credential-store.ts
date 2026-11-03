@@ -1331,6 +1331,8 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				cause: row.disabled_cause ?? "disabled",
 			};
 			if (credential?.type === "oauth") {
+				const identityKey = resolveCredentialIdentityKey(row.provider, credential);
+				if (identityKey !== null) summary.identityKey = identityKey;
 				if (credential.email) summary.email = credential.email;
 				if (credential.accountId) summary.accountId = credential.accountId;
 				if (credential.orgId) summary.orgId = credential.orgId;

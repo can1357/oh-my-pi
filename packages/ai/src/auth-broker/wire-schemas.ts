@@ -375,6 +375,7 @@ export const disabledCredentialSummarySchema: FluentType<DisabledCredentialSumma
 	id: "number.integer",
 	provider: type("string").atLeastLength(1),
 	type: "'oauth' | 'api_key'",
+	"identityKey?": "string",
 	"email?": "string",
 	"accountId?": "string",
 	"orgId?": "string",

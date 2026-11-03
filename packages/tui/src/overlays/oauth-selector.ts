@@ -1,5 +1,5 @@
 import type { CredentialsApi, KeysApi } from "@oh-my-pi/pi-ai";
-import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
+import { getOAuthCredentialProvider, getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthProviderInfo } from "@oh-my-pi/pi-ai/oauth/types";
 import {
 	Container,
@@ -79,6 +79,7 @@ export class OAuthSelectorComponent extends OverlayPanel {
 	#maxVisible = OAUTH_SELECTOR_MAX_VISIBLE;
 	#mode: "login" | "logout";
 	#authStorage: OAuthSelectorAuthSource;
+	#logoutProviders: ReadonlySet<string> | undefined;
 	#onSelectCallback: (providerId: string) => void;
 	#onCancelCallback: () => void;
 	#statusMessage: string | undefined;
@@ -106,12 +107,15 @@ export class OAuthSelectorComponent extends OverlayPanel {
 			validateAuth?: (providerId: string) => Promise<boolean>;
 			requestRender?: () => void;
 			sheet?: OAuthSelectorSheet;
+			/** Providers with removable logins, including failure-disabled accounts. */
+			logoutProviders?: ReadonlySet<string>;
 		},
 	) {
 		super(mode === "login" ? "Select provider to login" : "Select provider to logout", "omp.overlay.oauth");
 		this.#mode = mode;
 		this.#authStorage = authStorage;
 		this.#onSelectCallback = onSelect;
+		this.#logoutProviders = options?.logoutProviders;
 		this.#onCancelCallback = onCancel;
 		this.#validateAuthCallback = options?.validateAuth;
 		this.#requestRenderCallback = options?.requestRender;
@@ -168,7 +172,8 @@ export class OAuthSelectorComponent extends OverlayPanel {
 	}
 	#hasSelectableAuth(providerId: string): boolean {
 		return this.#mode === "logout"
-			? this.#authStorage.credentials.has(providerId)
+			? (this.#logoutProviders?.has(getOAuthCredentialProvider(providerId)) ??
+					this.#authStorage.credentials.has(getOAuthCredentialProvider(providerId)))
 			: this.#authStorage.keys.source(providerId) !== undefined;
 	}
 

@@ -122,6 +122,8 @@ export interface DisabledCredentialSummary {
 	id: number;
 	provider: string;
 	type: AuthCredential["type"];
+	/** Store-defined account identity, identical to the key used by snapshots and session account pools. */
+	identityKey?: string;
 	email?: string;
 	accountId?: string;
 	/** Organization/workspace the credential was scoped to (Anthropic/ChatGPT multi-subscription). */
@@ -154,6 +156,27 @@ export function isAutoDisabledCredential(summary: DisabledCredentialSummary): bo
 		summary.type === "oauth" &&
 		!isUserRemovalCause(summary.cause) &&
 		!/^(replaced by|deduplicated)/i.test(summary.cause)
+	);
+}
+
+/**
+ * A failure-disabled login remains recoverable until a later removal or
+ * replacement of the same store identity. Missing identities match the whole
+ * provider conservatively; unknown timestamps sort first and removal wins ties.
+ */
+export function isRecoverableDisabledCredential(
+	failure: DisabledCredentialSummary,
+	tombstones: readonly DisabledCredentialSummary[],
+): boolean {
+	return (
+		isAutoDisabledCredential(failure) &&
+		!tombstones.some(
+			removal =>
+				removal.provider === failure.provider &&
+				!isAutoDisabledCredential(removal) &&
+				(!failure.identityKey || !removal.identityKey || failure.identityKey === removal.identityKey) &&
+				(removal.disabledAtMs ?? 0) >= (failure.disabledAtMs ?? 0),
+		)
 	);
 }
 
@@ -1261,6 +1284,12 @@ export interface SessionsApi {
 	 * {@link restrict} list names.
 	 */
 	permits(provider: string, sessionId: string, credentialId: number): boolean;
+	/**
+	 * Whether a stored identity (including a disabled tombstone) belongs to the
+	 * session's account pool. Unrestricted sessions allow every identity; a
+	 * restricted session rejects missing identities and keys outside its list.
+	 */
+	permitsIdentity(provider: string, sessionId: string | undefined, identityKey: string | undefined): boolean;
 	/**
 	 * Release a session's sticky credential so its next {@link getApiKey} call
 	 * re-runs native pool ranking. This never blocks or penalizes the released

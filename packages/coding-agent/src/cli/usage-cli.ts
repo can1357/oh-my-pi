@@ -210,6 +210,7 @@ function collectIdentityStrings(
 		add(account.enterpriseUrl);
 	}
 	for (const summary of disabled) {
+		add(summary.identityKey);
 		add(summary.email);
 		add(summary.accountId);
 		add(summary.orgId);
@@ -602,6 +603,19 @@ function isActionableDisable(summary: DisabledCredentialSummary, activeAccounts:
 
 	const matchesActive = activeAccounts.some(account => {
 		if (account.provider !== summary.provider) return false;
+		if (summary.identityKey) {
+			return (
+				account.type === "oauth" &&
+				summary.identityKey ===
+					resolveCredentialIdentityKey(account.provider, {
+						...account,
+						type: "oauth",
+						access: "",
+						refresh: "",
+						expires: 0,
+					})
+			);
+		}
 
 		const accountEmail = account.email?.toLowerCase();
 		const accountAccountId = account.accountId?.toLowerCase();
@@ -1707,6 +1721,7 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 			if (redaction) {
 				disabledForJson = disabledForJson.map(summary => ({
 					...summary,
+					identityKey: maskIdentity(redaction, summary.identityKey),
 					email: maskIdentity(redaction, summary.email),
 					accountId: maskIdentity(redaction, summary.accountId),
 					orgId: maskIdentity(redaction, summary.orgId),

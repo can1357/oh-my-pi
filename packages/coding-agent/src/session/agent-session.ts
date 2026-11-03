@@ -8892,7 +8892,7 @@ export class AgentSession implements SettingsScope {
 			}
 			if (
 				!apiKey &&
-				!(await this.#modelRegistry.missingKeyMayRecover(model.provider, setupAbort.signal)) &&
+				!(await this.#modelRegistry.missingKeyMayRecover(model.provider, this.sessionId, setupAbort.signal)) &&
 				!(await this.#recovery.applyMissingCredentialFallback(setupAbort.signal))
 			) {
 				if (setupAbort.signal.aborted) return false;
