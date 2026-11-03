@@ -105,40 +105,6 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 	const nameText = nameMatch?.[1] ?? nameMatch?.[2] ?? nameMatch?.[3];
 	const wantedName = nameText === undefined ? undefined : normalizeSpace(nameText).toLocaleLowerCase();
 	const exact = nameMatch?.[4]?.toLocaleLowerCase() === "exact";
-	const roles: Record<string, string> = {
-		article: "article",
-		dialog: "dialog",
-		fieldset: "group",
-		details: "group",
-		optgroup: "group",
-		address: "group",
-		hgroup: "group",
-		hr: "separator",
-		progress: "progressbar",
-		meter: "meter",
-		output: "status",
-		search: "search",
-		thead: "rowgroup",
-		tbody: "rowgroup",
-		tfoot: "rowgroup",
-		dt: "term",
-		dfn: "term",
-		dd: "definition",
-		dl: "descriptionlist",
-		figure: "figure",
-		blockquote: "blockquote",
-		p: "paragraph",
-		code: "code",
-		em: "emphasis",
-		strong: "strong",
-		del: "deletion",
-		s: "deletion",
-		ins: "insertion",
-		sub: "subscript",
-		sup: "superscript",
-		time: "time",
-		mark: "mark",
-	};
 	const hasLandmarkName = (element: Element): boolean =>
 		Boolean(
 			idrefText(element) ||
@@ -192,7 +158,55 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 			const scoped = isScoped(element, true);
 			return tag === "header" ? (scoped ? "sectionheader" : "banner") : scoped ? "sectionfooter" : "contentinfo";
 		}
-		if (Object.hasOwn(roles, tag)) return roles[tag];
+		switch (tag) {
+			case "article":
+			case "dialog":
+			case "meter":
+			case "search":
+			case "figure":
+			case "blockquote":
+			case "code":
+			case "strong":
+			case "time":
+			case "mark":
+				return tag;
+			case "fieldset":
+			case "details":
+			case "optgroup":
+			case "address":
+			case "hgroup":
+				return "group";
+			case "hr":
+				return "separator";
+			case "progress":
+				return "progressbar";
+			case "output":
+				return "status";
+			case "thead":
+			case "tbody":
+			case "tfoot":
+				return "rowgroup";
+			case "dt":
+			case "dfn":
+				return "term";
+			case "dd":
+				return "definition";
+			case "dl":
+				return "descriptionlist";
+			case "p":
+				return "paragraph";
+			case "em":
+				return "emphasis";
+			case "del":
+			case "s":
+				return "deletion";
+			case "ins":
+				return "insertion";
+			case "sub":
+				return "subscript";
+			case "sup":
+				return "superscript";
+		}
 		if (/^h[1-6]$/.test(tag)) return "heading";
 		if (tag === "table") return "table";
 		if (tag === "tr") return "row";
@@ -213,7 +227,7 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 	};
 	// Roles named by their content, so `title` names them only when the content is empty.
 	const namedByContent =
-		/^(?:button|cell|checkbox|columnheader|gridcell|heading|link|menuitem|menuitemcheckbox|menuitemradio|option|radio|row|rowheader|switch|tab|tooltip|treeitem)$/.test(
+		/^(?:button|cell|checkbox|columnheader|gridcell|heading|link|menuitem|menuitemcheckbox|menuitemradio|option|radio|row|rowheader|switch|tab|term|tooltip|treeitem)$/.test(
 			wantedRole,
 		);
 	// Text as the accessibility tree reads it (as the Tern kit's `contentText`): hidden subtrees and
@@ -297,6 +311,10 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 				.map(id => {
 					const target = element.ownerDocument?.getElementById(id);
 					if (!target) return "";
+					const label = normalizeSpace(target.getAttribute("aria-label") ?? "");
+					if (label) return label;
+					const tag = target.tagName.toLocaleLowerCase();
+					if (tag === "img" || tag === "area") return normalizeSpace(target.getAttribute("alt") ?? "");
 					// Hidden by visibility, `display: none`, or a `hidden`/`aria-hidden` ancestor: read the whole subtree.
 					const targetStyle = getComputedStyle(target);
 					const hidden =
@@ -309,10 +327,10 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 		);
 	};
 	const accessibleName = (element: Element): string => {
-		const ariaLabel = normalizeSpace(element.getAttribute("aria-label") ?? "");
-		if (ariaLabel) return ariaLabel;
 		const labelledBy = idrefText(element);
 		if (labelledBy) return labelledBy;
+		const ariaLabel = normalizeSpace(element.getAttribute("aria-label") ?? "");
+		if (ariaLabel) return ariaLabel;
 		if (element.id) {
 			for (const label of element.ownerDocument?.querySelectorAll("label") ?? []) {
 				if (label.getAttribute("for") === element.id) {
@@ -326,7 +344,10 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 		if (tag === "optgroup") return normalizeSpace(element.getAttribute("label") ?? "");
 		if (tag === "fieldset") {
 			const caption = element.querySelector(":scope > legend");
-			if (caption) return normalizeSpace(contentText(caption, null, "visible"));
+			if (caption) {
+				const name = normalizeSpace(contentText(caption, null, "visible"));
+				if (name) return name;
+			}
 		}
 		// An `<input>`'s type and value decide its name; other elements have neither.
 		const input = tag === "input" ? (element as unknown as { type: string; value: string }) : null;
@@ -345,7 +366,7 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 			element.getAttribute("title") ||
 				element.getAttribute("placeholder") ||
 				element.getAttribute("aria-placeholder") ||
-				content,
+				"",
 		);
 	};
 	return Array.from(root.querySelectorAll("*")).filter(element => {

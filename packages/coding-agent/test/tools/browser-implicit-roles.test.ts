@@ -48,6 +48,10 @@ describe.skipIf(!available)("browser implicit role selectors", () => {
 				<section id="unnamed-section">Content alone is not a name</section>
 				<section id="title-section" title="Title section"></section>
 				<section id="empty-section" aria-labelledby="missing" aria-label=" ">Content</section>
+				<section id="primary-section" aria-label="Fallback" aria-labelledby="primary-heading"></section><h2 id="primary-heading">Primary</h2>
+				<section id="aria-name-section" aria-labelledby="aria-name-heading"></section><h2 id="aria-name-heading" aria-label="Billing"></h2>
+				<article><aside id="aria-name-aside" aria-labelledby="aria-name-heading"></aside></article>
+				<section id="alt-name-section" aria-labelledby="alt-name-image"></section><img id="alt-name-image" alt="Logo" src="data:,">
 				<form id="form" aria-label="Named form"></form><form id="unnamed-form">Content</form>
 				<header id="header" aria-label="Header"></header><footer id="footer" aria-label="Footer"></footer>
 				${["article", "aside", "main", "nav", "section"].map(tag => `<${tag}><header id="${tag}-header" aria-label="${tag} header"></header><footer id="${tag}-footer" aria-label="${tag} footer"></footer></${tag}>`).join("")}
@@ -55,7 +59,8 @@ describe.skipIf(!available)("browser implicit role selectors", () => {
 				<section role="none"><header id="none-header" aria-label="None header"></header><footer id="none-footer" aria-label="None footer"></footer></section>
 				${["article", "aside", "main", "nav", "section"].map(tag => `<${tag}><aside id="${tag}-aside">Nested aside</aside><aside id="${tag}-named-aside" aria-label="${tag} sidebar"></aside></${tag}>`).join("")}
 				<fieldset id="legend-fieldset"><legend>Legend name</legend></fieldset>
-				<figure id="caption-figure"><figcaption>Caption name</figcaption></figure>
+				<fieldset id="unnamed-fieldset">Unrelated text</fieldset>
+				<figure id="caption-figure"><img alt="Photo" src="data:,"><figcaption>Caption name</figcaption></figure>
 				<select><optgroup id="optgroup" label="Options"><option>One</option></optgroup></select>
 				<table><thead id="thead" aria-label="Head"><tr><th>H</th></tr></thead><tbody id="tbody" aria-label="Body"><tr><td>B</td></tr></tbody><tfoot id="tfoot" aria-label="Foot"><tr><td>F</td></tr></tfoot></table>
 				<dl><dt id="dt">Term</dt><dd id="dd" aria-label="Definition">Definition</dd></dl>
@@ -81,9 +86,9 @@ describe.skipIf(!available)("browser implicit role selectors", () => {
 			}
 			const mismatches = [];
 			for (const { role, name } of computed) {
-				const query = name ? `${role}[name="${name}" exact]` : role;
+				const query = `${role}[name="${name}" exact]`;
 				const expected = computed
-					.filter(entry => entry.role === role && (!name || entry.name === name))
+					.filter(entry => entry.role === role && entry.name === name)
 					.map(entry => entry.id)
 					.sort();
 				const ids = await page.$$eval(`role/${query}`, elements => elements.map(element => element.id));
