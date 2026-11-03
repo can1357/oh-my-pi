@@ -28,6 +28,7 @@ import {
 	formatFeedModelBadge,
 	formatMoreItems,
 	formatNumber,
+	formatStatusIcon,
 	isFeedModelBadgeEnabled,
 	pluralize,
 	previewLine,
@@ -351,7 +352,7 @@ function renderOutputSection(
 	if (warning) {
 		lines.push(`${continuePrefix}${theme.fg("dim", "Output")}`);
 		lines.push(
-			`${continuePrefix}  ${theme.fg("warning", theme.status.warning)} ${theme.fg(
+			`${continuePrefix}  ${formatStatusIcon("warning", theme)} ${theme.fg(
 				"dim",
 				clipCollapsed(sanitizeText(warning), 80, expanded),
 			)}`,
@@ -958,9 +959,7 @@ function renderReviewResult(
 	// Verdict line
 	const verdictColor = summary.overall_correctness === "correct" ? "success" : "error";
 	const isCorrect = summary.overall_correctness === "correct";
-	const verdictIcon = isCorrect
-		? theme.styledSymbol("status.done", "accent")
-		: theme.fg(verdictColor, theme.status.error);
+	const verdictIcon = formatStatusIcon(isCorrect ? "success" : "error", theme);
 	lines.push(
 		`${continuePrefix} Patch is ${theme.fg(verdictColor, summary.overall_correctness)} ${verdictIcon} ${theme.fg(
 			"dim",
@@ -1059,13 +1058,15 @@ function renderAgentResult(
 	const mergeFailed = !aborted && result.exitCode === 0 && !!result.error;
 	const success = !aborted && result.exitCode === 0 && !result.error;
 	const needsWarning = Boolean(missingCompleteWarning) && success;
-	const icon = aborted
-		? theme.status.aborted
-		: needsWarning
-			? theme.status.warning
+	// A merge failure is a warning: the agent's work succeeded, only folding it back did not.
+	const iconStatus: ToolUIStatus = aborted
+		? "aborted"
+		: needsWarning || mergeFailed
+			? "warning"
 			: success
-				? theme.styledSymbol("status.done", "text")
-				: theme.status.error;
+				? "success"
+				: "error";
+	const icon = formatStatusIcon(iconStatus, theme);
 	const iconColor = needsWarning ? "warning" : success ? "success" : mergeFailed ? "warning" : "error";
 	const statusText = aborted
 		? "aborted"
@@ -1109,7 +1110,7 @@ function renderAgentResult(
 			? fullDescription
 			: undefined;
 	const titlePart = description ? `${theme.bold(displayId)}: ${description}` : displayId;
-	let statusLine = `${indent}${theme.fg(iconColor, icon)} ${modelLead}${theme.fg(
+	let statusLine = `${indent}${icon} ${modelLead}${theme.fg(
 		success && !needsWarning ? "text" : "accent",
 		titlePart,
 	)}${badges}`;
@@ -1138,7 +1139,7 @@ function renderAgentResult(
 
 	if (aborted && result.abortReason) {
 		lines.push(
-			`${continuePrefix}${theme.fg("error", theme.status.aborted)} ${theme.fg(
+			`${continuePrefix}${formatStatusIcon("aborted", theme)} ${theme.fg(
 				"dim",
 				clipCollapsed(flattenLine(sanitizeText(result.abortReason)), 80, expanded),
 			)}`,
@@ -1230,7 +1231,7 @@ function renderAgentResult(
 
 	if (hasCustomRendering && missingCompleteWarning) {
 		lines.push(
-			`${continuePrefix}${theme.fg("warning", theme.status.warning)} ${theme.fg(
+			`${continuePrefix}${formatStatusIcon("warning", theme)} ${theme.fg(
 				"dim",
 				clipCollapsed(sanitizeText(missingCompleteWarning), 80, expanded),
 			)}`,
@@ -1370,16 +1371,10 @@ export function renderResult(
 	if (!details) {
 		const text = result.content.find(c => c.type === "text")?.text || "";
 		const errored = result.isError === true;
-		const header = errored
-			? renderStatusLine({ icon: "error", title: "Task", description: agentLabel }, theme)
-			: renderStatusLine(
-					{
-						iconOverride: theme.styledSymbol("status.done", "accent"),
-						title: "Task",
-						description: agentLabel,
-					},
-					theme,
-				);
+		const header = renderStatusLine(
+			{ icon: errored ? "error" : "success", title: "Task", description: agentLabel },
+			theme,
+		);
 		return framedToolCard(theme, ({ width }) => ({
 			header,
 			sections: [
@@ -1424,16 +1419,11 @@ export function renderResult(
 	const metaLabel = countLabel ?? agentLabel;
 	const header = renderStatusLine(
 		{
-			icon: icon === "success" || icon === "running" ? undefined : icon,
 			// While agents are in flight the header shows the dispatch glyph, not a
 			// spinner: async spawns return immediately, so "running" means
 			// "delegated to peers", not "this call is blocking the turn".
-			iconOverride:
-				icon === "running"
-					? theme.styledSymbol("tool.task", "accent")
-					: icon === "success"
-						? theme.styledSymbol("status.done", "accent")
-						: undefined,
+			icon: icon === "running" ? undefined : icon,
+			iconOverride: icon === "running" ? theme.styledSymbol("tool.task", "accent") : undefined,
 			title: "Task",
 			meta: metaLabel ? [metaLabel] : undefined,
 		},
