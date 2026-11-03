@@ -87,6 +87,15 @@ pub trait CommandSessionExt {
 
 impl CommandSessionExt for std::process::Command {
 	fn detach_session(&mut self) {
+		#[cfg(not(brush_nightly_setsid))]
+		{
+			// Stable toolchains lack `Command::setsid` (unstable `process_setsid`):
+			// call `setsid()` in a pre_exec closure instead (loses the posix_spawn fast path).
+			// SAFETY: `setsid` is async-signal-safe.
+			unsafe {
+				self.pre_exec(|| nix::unistd::setsid().map(|_| ()).map_err(std::io::Error::from));
+			}
+		}
 		// Unlike a `pre_exec` closure, this keeps std's `posix_spawn` path
 		// (`POSIX_SPAWN_SETSID`, vfork-style) available on linux-gnu, so spawn cost
 		// does not scale with the host's address space. Elsewhere std calls
@@ -98,6 +107,7 @@ impl CommandSessionExt for std::process::Command {
 		// reaches it here on glibc 2.29+: `compose_std_command` always sets a
 		// working directory, and std takes `posix_spawn` with one only when
 		// `posix_spawn_file_actions_addchdir_np` (glibc 2.29) exists.
+		#[cfg(brush_nightly_setsid)]
 		self.setsid(true);
 	}
 
