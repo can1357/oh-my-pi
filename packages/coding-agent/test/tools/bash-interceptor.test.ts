@@ -1063,10 +1063,38 @@ describe("dedicated tool capability", () => {
 		expect(decide(command)).toBe("glob");
 		expect(performance.now() - start).toBeLessThan(250);
 		expect(decide(`find ${root} -name '${"*a".repeat(15)}'`)).toBeUndefined();
-		expect(decide("find abc -name 'a?c'")).toBeUndefined();
 		expect(decide("find abc -name '*b*'")).toBeUndefined();
-		expect(decide("find abc -name 'a?d'")).toBe("glob");
 		expect(decide("find abc -name 'b*'")).toBe("glob");
+		// Round 15: a long near-matching suffix and repeated root/test pairs stay linear.
+		const long = "b".repeat(240);
+		const near = `*${"b".repeat(239)}c`;
+		const many = `find ${Array.from({ length: 640 }, () => long).join(" ")} -name NEVER -a ${Array.from({ length: 640 }, () => `-name '${near}'`).join(" -a ")}`;
+		const manyStart = performance.now();
+		expect(decide(many)).toBe("glob");
+		expect(performance.now() - manyStart).toBeLessThan(250);
+	});
+
+	it.each([
+		// Round 15: find prints its root when the expression accepts it or reaches `-print` on it.
+		"find . -name '*.ts' -o -print",
+		"find . -print -name '*.ts'",
+		"find src \\( -name '*.ts' -o -print \\)",
+		"find my-name",
+		"find src",
+		// glob reads `?`, brackets and backslashes differently from find.
+		"find abc -name 'a?d'",
+		"find src -name '[ab]*'",
+	])("does not refuse %s, whose listing glob cannot reproduce", command => {
+		expect(decide(command)).toBeUndefined();
+	});
+
+	it.each([
+		"find . -name '*.ts' -print",
+		"find src -name '*.ts' -o -name '*.js'",
+		"find . -path './node_modules' -prune -o -name '*.ts' -print",
+		"find . -name .git -prune -o -name '*.ts' -print",
+	])("still refuses %s as glob", command => {
+		expect(decide(command)).toBe("glob");
 	});
 
 	it("refuses a find over a symlinked root only when -H follows it", async () => {

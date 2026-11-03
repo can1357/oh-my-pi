@@ -1058,12 +1058,6 @@ function grepPaths(spec: OptionSpec, command: SimpleCommand): { paths: Word[]; s
 
 // ── glob: find, fd ───────────────────────────────────────────────────────────
 
-/**
- * `find` primaries the glob tool expresses through its path patterns, each with its argument
- * count. `-type` is not among them: glob lists symlinks to files as files and cannot leave out
- * directories or symlinks, so `-type f`/`-type d` are not expressible.
- */
-const FIND_PRIMARIES: Record<string, number> = { "-name": 1, "-path": 1, "-wholename": 1, "-print": 0 };
 const FIND_OPERATORS: Record<string, true> = {
 	"(": true,
 	")": true,
@@ -1078,87 +1072,182 @@ const PRUNED_BY_GLOB = /^(?:\.\/|\*\/)?(?:\.git|node_modules)(?:\/\*?)?$|^\*\/(?
 /**
  * The glob tool matches path patterns under one or more roots and lists files, directories and
  * symlinks alike. It never descends into `.git`, and into `node_modules` only for a pattern
- * that names it. It has no depth limit, type, case-insensitive, size, time or permission test,
- * negation or pruning of other paths, or action (`-exec`, `-delete`, `-printf`).
+ * that names it. It has no depth limit, type (`-type f`: it lists symlinks to files as files),
+ * case-insensitive, size, time or permission test, negation or pruning of other paths, or action
+ * (`-exec`, `-delete`, `-printf`).
  */
 function findCanPerform(command: SimpleCommand, filesystem: StepFilesystem | undefined): boolean {
-	const words = command.words.slice(1);
+	const words = command.words.slice(1).map(word => word.value);
 	let i = 0;
 	let followRoots = false;
-	for (; i < words.length && (words[i].value === "-P" || words[i].value === "-H"); i++) {
-		followRoots = words[i].value === "-H";
-	}
-	const roots: string[] = [];
+	for (; i < words.length && (words[i] === "-P" || words[i] === "-H"); i++) followRoots = words[i] === "-H";
+	const rootList: string[] = [];
 	for (; i < words.length; i++) {
-		const value = words[i].value;
+		const value = words[i];
 		if (value.startsWith("-") || value === "!" || own(FIND_OPERATORS, value)) break;
-		roots.push(value);
+		rootList.push(value);
 	}
-	if (roots.length === 0) roots.push(".");
-	if (!roots.every(toolsTakeLiterally)) return false;
+	if (rootList.length === 0) rootList.push(".");
+	if (!rootList.every(toolsTakeLiterally)) return false;
 	// find does not descend a symlinked root without `-H`; glob always does.
-	if (filesystem && roots.some(root => filesystem.kind(root, followRoots) !== "directory")) return false;
-	const tests: Array<{ test: string; pattern: string }> = [];
-	let negated = false;
-	let prunedTest = false;
-	for (; i < words.length; i++) {
-		const value = words[i].value;
-		if (value === "!" || value === "-not") {
-			negated = true;
-			continue;
-		}
-		if (own(FIND_OPERATORS, value)) continue;
-		if (value === "-prune") {
-			// `-path ./node_modules -prune` restates the glob tool's own pruning.
-			if (!prunedTest) return false;
-			prunedTest = false;
-			continue;
-		}
-		const arity = own(FIND_PRIMARIES, value);
-		if (arity === undefined) return false;
-		const arg = arity === 1 ? words[++i] : undefined;
-		if (arity === 1 && !arg) return false;
-		if (arg) tests.push({ test: value, pattern: arg.value });
-		prunedTest = value !== "-print" && PRUNED_BY_GLOB.test(arg?.value ?? "");
-		if (negated && !prunedTest) return false;
-		// The glob tool never lists `.git`, so a search for it is not expressible unless it is pruned.
-		if (!negated && prunedTest && arg?.value.includes(".git") && words[i + 1]?.value !== "-prune") return false;
-		negated = false;
-	}
-	// find tests its roots too and lists one a test matches (`find . -name .`); glob never lists its roots.
-	return roots.every(root => {
-		const name = root.replace(/\/+$/u, "").split("/").pop() || root;
-		return !tests.some(({ test, pattern }) => mayMatchName(pattern, test === "-name" ? name : root));
-	});
+	if (filesystem && rootList.some(root => filesystem.kind(root, followRoots) !== "directory")) return false;
+	const expression = parseFindExpression(words.slice(i));
+	if (!expression) return false;
+	// find tests its roots too and lists one the expression prints (`find . -name .`,
+	// `find . -print -name x`, `find src`); glob never lists its roots. Each distinct root is
+	// checked against each test, so a step with more pairs than FIND_ROOT_CHECKS runs unchecked.
+	const roots = [...new Set(rootList)];
+	if (roots.length * Math.max(expression.tests, 1) > FIND_ROOT_CHECKS) return false;
+	return roots.every(root => !findMayPrintRoot(expression, root));
+}
+
+/** The most root × test pairs a find step is checked over before it runs unchecked. */
+const FIND_ROOT_CHECKS = 4096;
+
+type FindNode =
+	| { kind: "test"; test: string; pattern: string }
+	| { kind: "print" }
+	| { kind: "prune" }
+	| { kind: "not"; operand: FindNode }
+	| { kind: "and" | "or"; left: FindNode; right: FindNode };
+
+interface FindExpression {
+	/** Undefined for an empty expression, which prints everything. */
+	root: FindNode | undefined;
+	/** An explicit `-print` replaces find's default print of whatever the expression accepts. */
+	prints: boolean;
+	tests: number;
 }
 
 /**
- * Whether the shell-style `pattern` may match `name`, as `find -name` (fnmatch without FNM_PERIOD)
- * matches it. `*` and `?` are matched exactly, in time linear in the two lengths; a bracket
- * expression or a backslash (POSIX classes, escapes) is not modelled, so such a pattern may match.
+ * Parses a `find` expression the glob tool can express: `-name`, `-path` and `-wholename` with a
+ * pattern of literal text and `*` (glob reads `?`, brackets and backslashes differently),
+ * `-print`, `-o`/`-a`/implicit and, parentheses, and negation or `-prune` only of what glob
+ * already leaves out (`.git`, `node_modules`). Undefined for anything else.
+ */
+function parseFindExpression(tokens: string[]): FindExpression | undefined {
+	let pos = 0;
+	let prints = false;
+	let tests = 0;
+	const isOr = (token: string | undefined): boolean => token === "-o" || token === "-or";
+	const parseOr = (): FindNode | undefined => {
+		let left = parseAnd();
+		while (left && isOr(tokens[pos])) {
+			pos++;
+			const right = parseAnd();
+			left = right && { kind: "or", left, right };
+		}
+		return left;
+	};
+	const parseAnd = (): FindNode | undefined => {
+		let left = parseUnary(false);
+		while (left && pos < tokens.length && tokens[pos] !== ")" && !isOr(tokens[pos])) {
+			if (tokens[pos] === "-a" || tokens[pos] === "-and") pos++;
+			const right = parseUnary(false);
+			left = right && { kind: "and", left, right };
+		}
+		return left;
+	};
+	const parseUnary = (negated: boolean): FindNode | undefined => {
+		const token = tokens[pos++];
+		if (token === undefined) return undefined;
+		if (token === "!" || token === "-not") {
+			const operand = parseUnary(true);
+			return operand && { kind: "not", operand };
+		}
+		if (negated && token !== "-name" && token !== "-path" && token !== "-wholename") return undefined;
+		if (token === "(") {
+			const inner = parseOr();
+			if (!inner || tokens[pos++] !== ")") return undefined;
+			return inner;
+		}
+		if (token === "-print") {
+			prints = true;
+			return { kind: "print" };
+		}
+		if (token !== "-name" && token !== "-path" && token !== "-wholename") return undefined;
+		const pattern = tokens[pos++];
+		if (pattern === undefined || /[?[\\]/u.test(pattern)) return undefined;
+		tests++;
+		const test: FindNode = { kind: "test", test: token, pattern };
+		const pruned = PRUNED_BY_GLOB.test(pattern);
+		// Negating anything but what glob already leaves out is not expressible.
+		if (negated) return pruned ? test : undefined;
+		if (tokens[pos] === "-prune") {
+			// `-path ./node_modules -prune` restates the glob tool's own pruning; nothing else does.
+			if (!pruned) return undefined;
+			pos++;
+			return { kind: "and", left: test, right: { kind: "prune" } };
+		}
+		// The glob tool never lists `.git`, so a search for it is expressible only when pruned.
+		if (pruned && pattern.includes(".git")) return undefined;
+		return test;
+	};
+	if (tokens.length === 0) return { root: undefined, prints: false, tests: 0 };
+	const root = parseOr();
+	if (!root || pos !== tokens.length) return undefined;
+	return { root, prints, tests };
+}
+
+/** Three-valued truth: false, true, or either. */
+type Truth = "F" | "T" | "U";
+
+/** Whether find may print `root` itself: the expression evaluated on it, with find's short circuits. */
+function findMayPrintRoot(expression: FindExpression, root: string): boolean {
+	if (!expression.root) return true;
+	const name = root.replace(/\/+$/u, "").split("/").pop() || root;
+	let printed = false;
+	const evaluate = (node: FindNode): Truth => {
+		switch (node.kind) {
+			case "test":
+				return mayMatchName(node.pattern, node.test === "-name" ? name : root) ? "U" : "F";
+			case "print":
+				printed = true;
+				return "T";
+			case "prune":
+				return "T";
+			case "not": {
+				const value = evaluate(node.operand);
+				return value === "U" ? "U" : value === "T" ? "F" : "T";
+			}
+			case "and": {
+				const left = evaluate(node.left);
+				if (left === "F") return "F";
+				const right = evaluate(node.right);
+				return left === "T" || right === "F" ? right : "U";
+			}
+			case "or": {
+				const left = evaluate(node.left);
+				if (left === "T") return "T";
+				const right = evaluate(node.right);
+				return left === "F" || right === "T" ? right : "U";
+			}
+		}
+	};
+	const value = evaluate(expression.root);
+	return expression.prints ? printed : value !== "F";
+}
+
+/**
+ * Whether a pattern of literal text and `*` matches `name` as `find -name` (fnmatch) does: the
+ * first and last pieces anchor the ends and each middle piece is found leftmost, in order. Each
+ * piece is one `indexOf` from where the last one ended, so the work is linear in the lengths.
  */
 function mayMatchName(pattern: string, name: string): boolean {
-	if (/[[\\]/u.test(pattern)) return true;
-	const p = Array.from(pattern);
-	const n = Array.from(name);
-	let i = 0;
-	let j = 0;
-	let star = -1;
-	let resume = 0;
-	while (j < n.length) {
-		if (i < p.length && (p[i] === "?" || (p[i] !== "*" && p[i] === n[j]))) {
-			i++;
-			j++;
-		} else if (i < p.length && p[i] === "*") {
-			star = i++;
-			resume = j;
-		} else if (star >= 0) {
-			i = star + 1;
-			j = ++resume;
-		} else return false;
+	const pieces = pattern.split("*");
+	if (pieces.length === 1) return pattern === name;
+	const first = pieces[0];
+	const last = pieces[pieces.length - 1];
+	if (name.length < first.length + last.length || !name.startsWith(first) || !name.endsWith(last)) return false;
+	let from = first.length;
+	const end = name.length - last.length;
+	for (const piece of pieces.slice(1, -1)) {
+		if (piece === "") continue;
+		const at = name.indexOf(piece, from);
+		if (at < 0 || at + piece.length > end) return false;
+		from = at + piece.length;
 	}
-	while (i < p.length && p[i] === "*") i++;
-	return i === p.length;
+	return true;
 }
 
 const FD: OptionSpec = {
