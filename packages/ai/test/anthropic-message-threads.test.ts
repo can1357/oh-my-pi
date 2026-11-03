@@ -11,7 +11,14 @@ import { afterEach, describe, expect, it, setSystemTime } from "bun:test";
 import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
 import type { MessageCreateParams } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
 import type { AnthropicOptions } from "@oh-my-pi/pi-ai/providers/anthropic";
-import type { AssistantMessage, Context, FetchImpl, Message, ProviderSessionState } from "@oh-my-pi/pi-ai/types";
+import type {
+	AssistantMessage,
+	Context,
+	FetchImpl,
+	Message,
+	ProviderSessionState,
+	TextContent,
+} from "@oh-my-pi/pi-ai/types";
 import { markPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { requestBodyText } from "@oh-my-pi/pi-ai/utils/request-body";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -47,17 +54,30 @@ interface SentRequest {
 
 type Reply = Response | ((body: MessageCreateParams) => Response);
 
-function textResponse(id: string, text: string): Response {
+function sseResponse(id: string, blocks: Array<Record<string, unknown>>, stopReason: string): Response {
 	const events: Array<Record<string, unknown>> = [
 		{ type: "message_start", message: { id, usage: { input_tokens: 10, output_tokens: 0 } } },
-		{ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
-		{ type: "content_block_delta", index: 0, delta: { type: "text_delta", text } },
-		{ type: "content_block_stop", index: 0 },
-		{ type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { input_tokens: 10, output_tokens: 1 } },
-		{ type: "message_stop" },
 	];
+	blocks.forEach((block, index) => {
+		if (block.type === "text") {
+			events.push({ type: "content_block_start", index, content_block: { type: "text", text: "" } });
+			events.push({ type: "content_block_delta", index, delta: { type: "text_delta", text: block.text } });
+		} else {
+			events.push({ type: "content_block_start", index, content_block: { ...block, input: {} } });
+			events.push({ type: "content_block_delta", index, delta: { type: "input_json_delta", partial_json: "{}" } });
+		}
+		events.push({ type: "content_block_stop", index });
+	});
+	events.push(
+		{ type: "message_delta", delta: { stop_reason: stopReason }, usage: { input_tokens: 10, output_tokens: 1 } },
+		{ type: "message_stop" },
+	);
 	const body = `${events.map(event => `event: ${String(event.type)}\ndata: ${JSON.stringify(event)}`).join("\n\n")}\n\n`;
 	return new Response(body, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+}
+
+function textResponse(id: string, text: string): Response {
+	return sseResponse(id, [{ type: "text", text }], "end_turn");
 }
 
 function errorResponse(status: number, message: string, errorCode?: string): Response {
@@ -103,8 +123,8 @@ function session(fetch: FetchImpl, overrides: Partial<AnthropicOptions> = {}) {
 		setTools(next: Context["tools"]) {
 			tools = next;
 		},
-		async turn(text: string, extra: Message[] = []): Promise<AssistantMessage> {
-			messages.push({ role: "user", content: text, timestamp: ++timestamp });
+		async turn(content: string | TextContent[], extra: Message[] = []): Promise<AssistantMessage> {
+			messages.push({ role: "user", content, timestamp: ++timestamp });
 			const reply = await streamAnthropic(
 				MODEL,
 				{ systemPrompt, messages: [...messages, ...extra], tools },
@@ -152,6 +172,52 @@ describe("anthropic message threads", () => {
 		expect(next.betas).toContain(THREADS_BETA);
 		// Betas are a fixed field: the continue carries the create's set.
 		expect([...next.betas].sort()).toEqual([...create.betas].sort());
+	});
+
+	it("marks a continue's first and newest appended blocks within the thread's breakpoint limit", async () => {
+		// Twelve parallel calls: the stored response plus the results run past the
+		// ~20-block lookback of the newest block's breakpoint.
+		const calls = Array.from({ length: 12 }, (_, n) => ({ type: "tool_use", id: `toolu_${n}`, name: "lookup" }));
+		const { fetch, sent } = endpoint([textResponse("msg_1", "one"), sseResponse("msg_2", calls, "tool_use")]);
+		const chat = session(fetch);
+
+		await chat.turn("first");
+		await chat.turn("fan out");
+		for (const call of calls) {
+			chat.messages.push({
+				role: "toolResult",
+				toolCallId: call.id,
+				toolName: call.name,
+				content: [{ type: "text", text: `result ${call.id}` }],
+				isError: false,
+				timestamp: 9,
+			});
+		}
+		await chat.turn("third");
+
+		const marked = (body: MessageCreateParams): number[] =>
+			body.messages
+				.flatMap(message => (typeof message.content === "string" ? [] : message.content))
+				.flatMap((block, index) => ("cache_control" in block && block.cache_control ? [index] : []));
+		const breakpoints = (value: unknown): number =>
+			(JSON.stringify(value ?? null).match(/"cache_control":\{/g) ?? []).length;
+		const [create, short, long] = sent.map(request => request.body);
+		expect([short.thread?.type, long.thread?.type]).toEqual(["continue", "continue"]);
+		const appended = long.messages.reduce(
+			(count, message) => count + (typeof message.content === "string" ? 1 : message.content.length),
+			0,
+		);
+		// Continue breakpoints act on their own request only: the first appended block
+		// reads up to the previous request, the newest one writes this turn.
+		expect(appended).toBeGreaterThan(12);
+		expect(marked(long)).toEqual([0, appended - 1]);
+		expect(marked(short)).toEqual([0]);
+		// The create's system and tools breakpoints count again on every continue; a fifth is a 400.
+		for (const body of [long, short]) {
+			expect(
+				breakpoints(create.system) + breakpoints(create.tools) + breakpoints(body.messages),
+			).toBeLessThanOrEqual(4);
+		}
 	});
 
 	it("keeps system and tools on continues for Claude Code OAuth traffic", async () => {

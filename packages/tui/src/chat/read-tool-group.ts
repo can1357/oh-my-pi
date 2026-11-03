@@ -21,7 +21,7 @@ import {
 	PREVIEW_LIMITS,
 	shortenPath,
 } from "../render/render-utils";
-import { fileHyperlink, renderCodeCell, renderMarkdownCell } from "../render";
+import { fileHyperlink, renderCodeCell, renderMarkdownCell, urlHyperlinkAlways } from "../render";
 import { wrapTreeLine } from "../render/hanging-wrap";
 import { wrapTextWithAnsi } from "../utils";
 import { canonicalizeMessage } from "./thinking-display";
@@ -1194,6 +1194,10 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		if (filePath && options.linkPath) {
 			const linkOptions = options.line !== undefined ? { line: options.line } : undefined;
 			pathDisplay = fileHyperlink(options.linkPath, pathDisplay, linkOptions);
+		} else if (filePath && isUrlLikePath(target.path)) {
+			// Text mode needs the same URL fallback as the native head, or a
+			// transcript without native rendering keeps the URL unclickable.
+			pathDisplay = urlHyperlinkAlways(urlHref(target.path) ?? target.path, pathDisplay);
 		}
 		if (selectors) pathDisplay += theme.fg(paint.selectors, selectors);
 		if (options.correctedFrom) {

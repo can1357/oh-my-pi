@@ -47,7 +47,7 @@ import {
 	jobWidgetSummary,
 	latestJobWidget,
 } from "@oh-my-pi/pi-tui/tools/job-widget";
-import type { AsyncJobManager } from "../async/job-manager";
+import type { AsyncJobManagerApi } from "../async/job-manager";
 import type { JobWidgetRegistry } from "../job-widgets/types";
 import { sameItems } from "@oh-my-pi/pi-tui/native/memo";
 import { describeSegmentTrack, renderSegmentTrack, type TrackSegment } from "@oh-my-pi/pi-tui/chrome/segment-track";
@@ -147,6 +147,7 @@ import {
 	type ResolvedRoleModel,
 	SHUTDOWN_CONSOLIDATE_BUDGET_MS,
 } from "../session/agent-session";
+import type { AgentViewSession } from "../session/agent-session-handle";
 import type { CompactMode } from "../session/compact-modes";
 import type { ForeignSessionSource } from "../session/foreign-session-store";
 import { HistoryStorage } from "../session/history-storage";
@@ -205,7 +206,6 @@ import {
 	getTodoHudVisibility,
 	nextActionableTask,
 	TODO_HUD_STATE_CUSTOM_TYPE,
-	USER_TODO_EDIT_CUSTOM_TYPE,
 	type TodoHudStateEntryData,
 } from "../tools/todo";
 import {
@@ -250,6 +250,7 @@ import {
 	setSessionTerminalTitle,
 	setTerminalSessionSource,
 	setTerminalTitlePullRequest,
+	setTerminalTitleSpinnerInterval,
 	setTerminalTitleSpinnerStyle,
 	setTerminalTitleStateEnabled,
 } from "../utils/title-generator";
@@ -428,6 +429,7 @@ import {
 	cfgTuiTextSizing,
 	cfgTuiTight,
 	cfgTuiTitleSpinner,
+	cfgMotionResolved,
 	cfgTuiTitleState,
 	cfgTuiVimMode,
 	cfgTuiVimModeDisplay,
@@ -503,6 +505,7 @@ const cfgLiveUiSettings = combine({
 	"tui.hyperlinks": cfgTuiHyperlinks,
 	"tui.titleState": cfgTuiTitleState,
 	"tui.titleSpinner": cfgTuiTitleSpinner,
+	motion: cfgMotionResolved,
 	"statusLine.preset": cfgStatusLinePreset,
 	"statusLine.leftSegments": cfgStatusLineLeftSegments,
 	"statusLine.rightSegments": cfgStatusLineRightSegments,
@@ -1446,10 +1449,10 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * which flips to the destination before `reloadTodos` refreshes during
 	 * focus attach.
 	 */
-	#todoPhasesOwner?: AgentSession;
+	#todoPhasesOwner?: AgentViewSession;
 	#todoHudHidden = false;
 	hideThinkingBlock = false;
-	#sessionsWithDisplayableThinkingContent = new WeakSet<AgentSession>();
+	#sessionsWithDisplayableThinkingContent = new WeakSet<AgentViewSession>();
 	/** Whether the visible session has produced thinking content the user can reveal. */
 	get hasDisplayableThinkingContent(): boolean {
 		return this.#sessionsWithDisplayableThinkingContent.has(this.viewSession);
@@ -1560,7 +1563,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	/** The job widget registry this mode repaints on, and how to stop listening to it. */
 	#jobWidgetsListener: { registry: JobWidgetRegistry; unsubscribe: () => void } | undefined;
 	/** The job manager whose settled jobs repaint the running counts, and how to stop listening to it. */
-	#jobSettleListener: { manager: AsyncJobManager; unsubscribe: () => void } | undefined;
+	#jobSettleListener: { manager: AsyncJobManagerApi; unsubscribe: () => void } | undefined;
 	/**
 	 * Repaint whenever a shown job widget changes (the HUD jobs segment, the
 	 * status line's glance), following the root job manager's current registry.
@@ -1843,14 +1846,14 @@ export class InteractiveMode implements InteractiveModeContext {
 	readonly #focusController: SessionFocusController;
 	/** Sessions retain this small activity record, not the terminal and its transcript, after the view leaves. */
 	readonly #idleMaintenanceActivity: {
-		target: AgentSession | undefined;
+		target: AgentViewSession | undefined;
 		ready: boolean;
 		isComposing: boolean;
-		scheduledTurn: ((target: AgentSession) => boolean) | undefined;
+		scheduledTurn: ((target: AgentViewSession) => boolean) | undefined;
 		presentRecap: ((recap: string) => void) | undefined;
 	} = { target: undefined, ready: false, isComposing: false, scheduledTurn: undefined, presentRecap: undefined };
 
-	syncIdleMaintenanceView(target: AgentSession | null = this.viewSession): void {
+	syncIdleMaintenanceView(target: AgentViewSession | null = this.viewSession): void {
 		const activity = this.#idleMaintenanceActivity;
 		const previous = activity.target;
 		if (target === null) {
@@ -1874,7 +1877,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (previous !== target) previous?.refreshIdleMaintenance();
 		target.refreshIdleMaintenance();
 	}
-	get viewSession(): AgentSession {
+	get viewSession(): AgentViewSession {
 		return this.#focusController.target ?? this.session;
 	}
 	get assistantImagesVisible(): boolean {
@@ -2249,6 +2252,11 @@ export class InteractiveMode implements InteractiveModeContext {
 					return;
 				case "status.cost":
 					void this.handleUsageCommand();
+					return;
+				// Only the main session has a cache warmer, so a focused subagent's bar shows no
+				// cache marker: this click always comes from the main session's marker.
+				case "status.cache":
+					void this.handleSessionCommand();
 					return;
 				case "status.path":
 					openPath(this.sessionManager.getCwd());
@@ -2657,6 +2665,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		initTerminalTitleState();
 		setTerminalTitleStateEnabled(cfgTuiTitleState.get(this.settings));
 		setTerminalTitleSpinnerStyle(cfgTuiTitleSpinner.get(this.settings));
+		setTerminalTitleSpinnerInterval(cfgMotionResolved.get(this.settings).spinnerInterval);
 		initProgramStatus();
 		setProgramStatusEnabled(cfgTerminalProgramStatus.get(this.settings));
 		// OSC 133;A starts a shell prompt and invalidates working/blocked records.
@@ -4329,6 +4338,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (any("tui.titleState")) setTerminalTitleStateEnabled(cfgTuiTitleState.get(this.settings));
 		if (any("tui.titleSpinner")) setTerminalTitleSpinnerStyle(cfgTuiTitleSpinner.get(this.settings));
 		if (any("terminal.programStatus")) setProgramStatusEnabled(cfgTerminalProgramStatus.get(this.settings));
+		if (any("motion")) setTerminalTitleSpinnerInterval(next.motion.spinnerInterval);
 
 		if (
 			any(
@@ -5013,10 +5023,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// bound (rather than routing through `setTodos`, which rebinds it to
 		// `viewSession`) keeps a follow-up reconcile in the same window correct.
 		const owner = this.#todoPhasesOwner ?? this.session;
-		owner.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, {
-			phases: next,
-		});
-		owner.setTodoPhases(next);
+		owner.commitTodoPhases(next);
 		this.todoPhases = next;
 		this.#syncTodoHudState(owner);
 		this.#renderTodoList();
@@ -5031,7 +5038,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 	}
 
-	#syncTodoHudState(owner: AgentSession): void {
+	#syncTodoHudState(owner: AgentViewSession): void {
 		this.#cancelTodoAutoClearTimer();
 		const phases = this.todoPhases;
 		const persisted = getTodoHudVisibility(owner.sessionManager.getBranch(), phases);
@@ -5439,7 +5446,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		return [...leadingLines, combinedLine];
 	}
 
-	async #loadTodoList(source: AgentSession = this.session): Promise<void> {
+	async #loadTodoList(source: AgentViewSession = this.session): Promise<void> {
 		this.todoPhases = source.getTodoPhases();
 		this.#todoPhasesOwner = source;
 		this.#syncTodoHudState(source);
@@ -9704,7 +9711,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.ui.requestRender();
 	}
 
-	async reloadTodos(source: AgentSession = this.session): Promise<void> {
+	async reloadTodos(source: AgentViewSession = this.session): Promise<void> {
 		await this.#loadTodoList(source);
 		this.ui.requestRender();
 	}
