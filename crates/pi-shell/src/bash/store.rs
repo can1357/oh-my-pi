@@ -34,8 +34,11 @@
 //! drops what it derived from the store (option bits, the locale, the
 //! root's working directory) when it changed.
 
+use std::{hash::BuildHasher, ops::Deref};
+
 use bstr::{BStr, BString};
-use serde::{Deserialize, Serialize};
+use hashbrown::{DefaultHashBuilder, HashTable};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::bash::{
 	ids::{JobId, ModeId, UnitId, Vpid},
@@ -56,6 +59,24 @@ pub trait StateStore {
 	/// # Errors
 	/// [`StoreError`] when the backend fails or a record cannot be decoded.
 	fn get(&mut self, key: Key<'_>) -> Result<Option<&Record>, StoreError>;
+	/// Install a scalar default whose host lookup can wait until observation.
+	///
+	/// Return `true` only when the store accepted the initializer. Reads,
+	/// scans and snapshots must observe its memoized result as an ordinary
+	/// variable; replacement or deletion must discard it. Stores that do
+	/// not support deferred defaults return `false`, and the caller writes
+	/// the value eagerly instead.
+	///
+	/// # Errors
+	/// [`StoreError`] when the backend fails.
+	fn defer_scalar(
+		&mut self,
+		_name: &[u8],
+		_attrs: Attrs,
+		_initializer: fn() -> Option<BString>,
+	) -> Result<bool, StoreError> {
+		Ok(false)
+	}
 	/// Visit every record of a table in no particular order (`set`,
 	/// `declare -p`, environment build, restore).
 	///
@@ -541,7 +562,148 @@ pub enum VarValue {
 	/// Indexed array, sorted by index, sparse.
 	Indexed(Vec<(i64, BString)>),
 	/// Associative array in bash iteration order.
-	Assoc(Vec<(BString, BString)>),
+	Assoc(AssocArray),
+}
+
+/// Ordered associative entries with a hash index over their keys.
+///
+/// Only the ordered entries are serialized, so snapshots retain the same
+/// representation and rebuilding the index never changes iteration order.
+#[derive(Clone, Debug, Default)]
+pub struct AssocArray(Box<AssocData>);
+
+#[derive(Clone, Debug, Default)]
+struct AssocData {
+	entries: Vec<(BString, BString)>,
+	index:   HashTable<usize>,
+	hasher:  DefaultHashBuilder,
+}
+
+impl AssocArray {
+	fn position(&self, key: &[u8]) -> Option<usize> {
+		let hash = self.0.hasher.hash_one(key);
+		self
+			.0
+			.index
+			.find(hash, |&i| self.0.entries[i].0.as_slice() == key)
+			.copied()
+	}
+
+	/// The value belonging to `key`.
+	pub fn get(&self, key: &[u8]) -> Option<&BString> {
+		self.position(key).map(|i| &self.0.entries[i].1)
+	}
+
+	/// The mutable value belonging to `key`, without exposing mutable keys.
+	pub fn get_mut(&mut self, key: &[u8]) -> Option<&mut BString> {
+		let i = self.position(key)?;
+		Some(&mut self.0.entries[i].1)
+	}
+
+	/// The mutable value at `key`, inserting an empty value when absent.
+	pub fn value_mut(&mut self, key: &[u8]) -> &mut BString {
+		let data = &mut *self.0;
+		let hash = data.hasher.hash_one(key);
+		let i = if let Some(&i) = data
+			.index
+			.find(hash, |&i| data.entries[i].0.as_slice() == key)
+		{
+			i
+		} else {
+			let i = data.entries.len();
+			data.entries.push((BString::from(key), BString::default()));
+			data
+				.index
+				.insert_unique(hash, i, |&i| data.hasher.hash_one(data.entries[i].0.as_slice()));
+			i
+		};
+		&mut data.entries[i].1
+	}
+
+	/// Insert a value, retaining the position of an existing key.
+	pub fn insert(&mut self, key: BString, value: BString) {
+		if let Some(dst) = self.get_mut(&key) {
+			*dst = value;
+		} else {
+			let data = &mut *self.0;
+			let hash = data.hasher.hash_one(key.as_slice());
+			let i = data.entries.len();
+			data.entries.push((key, value));
+			data
+				.index
+				.insert_unique(hash, i, |&i| data.hasher.hash_one(data.entries[i].0.as_slice()));
+		}
+	}
+
+	/// Remove one key without changing the relative order of other entries.
+	pub fn remove(&mut self, key: &[u8]) {
+		if let Some(i) = self.position(key) {
+			self.0.entries.remove(i);
+			self.reindex();
+		}
+	}
+
+	fn reindex(&mut self) {
+		let data = &mut *self.0;
+		data.index.clear();
+		data
+			.index
+			.reserve(data.entries.len(), |&i| data.hasher.hash_one(data.entries[i].0.as_slice()));
+		for (i, (key, _)) in data.entries.iter().enumerate() {
+			let hash = data.hasher.hash_one(key.as_slice());
+			if data
+				.index
+				.find(hash, |&i| data.entries[i].0 == *key)
+				.is_none()
+			{
+				data
+					.index
+					.insert_unique(hash, i, |&i| data.hasher.hash_one(data.entries[i].0.as_slice()));
+			}
+		}
+	}
+}
+
+impl Deref for AssocArray {
+	type Target = [(BString, BString)];
+
+	fn deref(&self) -> &Self::Target {
+		&self.0.entries
+	}
+}
+
+impl PartialEq for AssocArray {
+	fn eq(&self, other: &Self) -> bool {
+		self.0.entries == other.0.entries
+	}
+}
+
+impl Eq for AssocArray {}
+
+impl From<Vec<(BString, BString)>> for AssocArray {
+	fn from(entries: Vec<(BString, BString)>) -> Self {
+		let mut result = Self(Box::new(AssocData { entries, ..AssocData::default() }));
+		result.reindex();
+		result
+	}
+}
+
+impl FromIterator<(BString, BString)> for AssocArray {
+	fn from_iter<T: IntoIterator<Item = (BString, BString)>>(iter: T) -> Self {
+		iter.into_iter().collect::<Vec<_>>().into()
+	}
+}
+
+impl Serialize for AssocArray {
+	fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+		self.0.entries.serialize(serializer)
+	}
+}
+
+impl<'de> Deserialize<'de> for AssocArray {
+	fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+		Vec::deserialize(deserializer).map(Self::from)
+	}
 }
 
 /// `declare`/`typeset` attributes, bash's and zsh's.
@@ -843,9 +1005,12 @@ pub enum MiscKey {
 
 crate::bash::packed_names::packed_names!(MiscKey);
 
-/// One write-through operation ([`StateStore::apply`]). The fine-grained
-/// variants exist so a loop counter or an array append costs O(1), not a
-/// rewrite of the whole record.
+/// One write-through operation ([`StateStore::apply`]).
+///
+/// The fine-grained variants exist so scalar appends and keyed array writes
+/// cost the changed bytes, not a rewrite of the whole record. Stores must
+/// apply append deltas directly to their authoritative value, without
+/// joining a copy first.
 #[derive(Debug)]
 pub enum Change<'a> {
 	/// Insert or replace a record (moved in). The key's table must match
@@ -865,11 +1030,18 @@ pub enum Change<'a> {
 	/// Replace the value of an existing scalar variable (a [`Record::Var`]
 	/// holding [`VarValue::Str`]), keeping its attributes.
 	SetScalar(Key<'a>, &'a BStr),
+	/// Append bytes to an existing scalar variable, keeping its attributes
+	/// and reusing its value buffer.
+	AppendScalar(Key<'a>, &'a BStr),
 	/// Set one element of an existing array variable, keeping its
 	/// attributes: [`Elem::Index`] of a [`VarValue::Indexed`] (kept sorted
 	/// by index), [`Elem::Key`] of a [`VarValue::Assoc`] (a new key goes
 	/// last, an existing one keeps its place).
 	SetElem(Key<'a>, Elem<'a>, &'a BStr),
+	/// Append bytes to an existing array element, or insert the bytes as a
+	/// new element when absent. Shape, ordering and attributes follow
+	/// [`Change::SetElem`]; existing value buffers are reused.
+	AppendElem(Key<'a>, Elem<'a>, &'a BStr),
 	/// Remove one element of an existing array variable (absent: no
 	/// effect); the others keep their order.
 	DelElem(Key<'a>, Elem<'a>),
@@ -908,6 +1080,7 @@ pub enum BlobSlot {
 	Deserialize,
 	strum::EnumString,
 	strum::VariantNames,
+	strum::VariantArray,
 	strum::EnumIter,
 )]
 #[strum(serialize_all = "snake_case")]
@@ -1094,13 +1267,51 @@ impl OptId {
 mod tests {
 	use std::hash::BuildHasher;
 
-	use bstr::BStr;
+	use bstr::{BStr, BString};
 
-	use super::{Attrs, Key, KeyBuf, MiscKey, OptId, TrapKey};
+	use super::{AssocArray, Attrs, Key, KeyBuf, MiscKey, OptId, TrapKey};
 	use crate::bash::{
 		ids::{JobId, Vpid},
 		zshopt::ZshOpt,
 	};
+
+	#[test]
+	fn assoc_index_preserves_order_clone_and_snapshot_representation() {
+		let entries: Vec<_> = (0..256)
+			.map(|i| (BString::from(format!("k{i}")), BString::from(format!("v{i}"))))
+			.collect();
+		let mut array = AssocArray::from(entries.clone());
+		assert_eq!(&*array, entries.as_slice());
+		let encoded = postcard::to_allocvec(&array).unwrap();
+		assert_eq!(encoded, postcard::to_allocvec(&entries).unwrap());
+		let restored: AssocArray = postcard::from_bytes(&encoded).unwrap();
+		for (k, v) in &entries {
+			assert_eq!(restored.get(k), Some(v));
+		}
+		let copy = array.clone();
+		array.insert("k5".into(), "changed".into());
+		assert_eq!(array[5].0, BString::from("k5"));
+		array.remove(b"k3");
+		array.insert("k3".into(), "last".into());
+		assert_eq!(array.last().unwrap().0, BString::from("k3"));
+		for (k, v) in array.iter() {
+			assert_eq!(array.get(k), Some(v));
+		}
+		assert_eq!(&*copy, entries.as_slice());
+		assert_eq!(array.get(b"missing"), None);
+		array.value_mut(b"k5").extend_from_slice(b"+");
+		array.value_mut(b"new").extend_from_slice(b"new");
+		assert_eq!(array.get(b"k5"), Some(&BString::from("changed+")));
+		assert_eq!(array.last().unwrap().0, BString::from("new"));
+		let duplicates = vec![
+			(BString::from("k"), BString::from("first")),
+			(BString::from("k"), BString::from("second")),
+		];
+		let mut duplicates = AssocArray::from(duplicates);
+		assert_eq!(duplicates.get(b"k"), Some(&BString::from("first")));
+		duplicates.remove(b"k");
+		assert_eq!(duplicates.get(b"k"), Some(&BString::from("second")));
+	}
 
 	/// A borrowed key must hash like its owned form, or cache lookups by
 	/// `Key` miss entries inserted as `KeyBuf` and load stale store records.
