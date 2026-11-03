@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `wireToolsFingerprint()`, a hash of the tool specs a request sends ([#17496](https://github.com/can1357/oh-my-pi/pull/17496) by [@will-bogusz](https://github.com/will-bogusz))
+- Added `Agent.queuedMessageGate`, a synchronous `QueuedMessageGate` consulted before every queued-message delivery batch (it can drop candidates) and told when claimed messages go back undelivered
+### Fixed
+
+- Fixed steering and follow-up queue notifications observing a batch before its preparation claim was installed and missing the transition to delivery, leaving pending-message snapshots stale after asynchronous preparation.
+
+## [18.16.0] - 2026-11-02
+
 ### Changed
 
 - Deprecated `createFileOps`, `computeFileLists`, `formatFileOperations`, `upsertFileOperations`, `isUrlSchemePath` and `FileOperations` in `@oh-my-pi/pi-agent-core/compaction`; they now re-export `@oh-my-pi/snapcompact`, which callers should import directly

@@ -4,27 +4,65 @@
 
 ### Breaking Changes
 
+- Replaced `CustomEditor.modelMentionLabel` with `resolveModelMention`, which returns the chip label and the canonical selector the chip expands to; `collapseModelMentions` takes the same `{ label, selector }` callback, and `getModelMentionSuggestions` returns a `ModelMentionCompletion` (`unhandled`, `no-match`, or `matched` with the suggestions) instead of suggestions or `null` ([#17574](https://github.com/can1357/oh-my-pi/pull/17574) by [@a-glapinski](https://github.com/a-glapinski))
+- Removed `SPINNER_ADVANCE_MS`; spinners follow the shared spinner clock (`spinnerInterval()`). `sharedSpinnerFrame` moved from `chat/tool-execution` to `spinner-clock` and reads `Date.now()` by default ([#14240](https://github.com/can1357/oh-my-pi/pull/14240) by [@mccraigmccraig](https://github.com/mccraigmccraig))
+
+### Added
+
+- `StatusLineComponent.setSessionPinned()` / `setPinnedSessionIds()` / `isSessionPinned()` track pinned sessions; `session_name` prefixes the theme's pin icon for a pinned session ([#17848](https://github.com/can1357/oh-my-pi/pull/17848) by [@SuperUserA](https://github.com/SuperUserA))
+- `LinkBrowserComponent` (`overlays/link-browser`) replays a transcript fullscreen with extension link hint tags that each link keeps while it stays in view; `LinkHints` / `viewportLinkTargets()` (`render/link-hints`) share tag assignment (preferring the letters a label starts with) and painting with `Composer`; `ChatTranscriptBuilder` accepts `textRenderers` ([#16476](https://github.com/can1357/oh-my-pi/pull/16476) by [@materemias](https://github.com/materemias))
+- Added the `cache` status-line segment, `StatusLineSession.getPromptCacheStatus`, the `icon.cacheWarm` / `icon.cacheCold` symbols, the composer's `omp.composer.cache` fact and the `promptCacheBrief` / `promptCacheDetails` text helpers ([#12677](https://github.com/can1357/oh-my-pi/issues/12677)) ([#17496](https://github.com/can1357/oh-my-pi/pull/17496) by [@will-bogusz](https://github.com/will-bogusz))
+- Added effort-level rows to `^` model mention autocomplete: after `:`, it lists the supported levels of the top three matching models below any model ids that contain the typed text, and typing `:` reopens a closed mention popup ([#17574](https://github.com/can1357/oh-my-pi/pull/17574) by [@a-glapinski](https://github.com/a-glapinski))
+- Added optional `AutocompleteProvider.trySyncModelMentionCompletion`, which returns a `ModelMentionCompletion`; the editor uses it to refresh a shown mention popup as you type, so Tab accepts a row for the current text ([#17574](https://github.com/can1357/oh-my-pi/pull/17574) by [@a-glapinski](https://github.com/a-glapinski))
+- Added a shared spinner clock (`spinner-clock`: `setSpinnerInterval`, `sharedSpinnerFrame`, `spinnerTickDelay`) that every spinner and the thinking pulse follow, ticking on common boundaries so N spinners cost one frame per period; `0` pins them static with no timers ([#14240](https://github.com/can1357/oh-my-pi/pull/14240) by [@mccraigmccraig](https://github.com/mccraigmccraig))
+- Added a frame-rate ceiling (`frame-rate`: `setMaxFps`, `minFrameIntervalMs`) honoured by the render scheduler and animation timers; frames a keystroke waits on keep 30 fps ([#14240](https://github.com/can1357/oh-my-pi/pull/14240) by [@mccraigmccraig](https://github.com/mccraigmccraig))
+- Added a decorative-motion switch (`motion-effects`: `setMotionEffects`) gating the status-line blink and brand fade, the editor's magic-keyword sweep, and native `fx` spans; a static spinner clock also stills native `spinner` nodes ([#14240](https://github.com/can1357/oh-my-pi/pull/14240) by [@mccraigmccraig](https://github.com/mccraigmccraig))
+
+### Fixed
+- Ask notes added on successive single-select questions now start with an empty editor and stay with their respective answers ([#17979](https://github.com/can1357/oh-my-pi/issues/17979))
+
+- Closing an overlay that others were opened over no longer leaves them returning focus to it once they close ([#16476](https://github.com/can1357/oh-my-pi/pull/16476))
+
+### Changed
+
+- Tab in the `/usage` Details view now switches back to Overview ([#17962](https://github.com/can1357/oh-my-pi/pull/17962) by [@SuperUserA](https://github.com/SuperUserA))
+
+## [18.16.0] - 2026-11-02
+
+### Breaking Changes
+
+- `buildExecutionFrame` sets its loader into the new `bottomBorder` itself, so callers no longer add it as a row and must dispose it; `buildStatusFooter` no longer takes `status` or `exitCode`, and `executionStatusLabel` returns a settled run's `exit N` / `cancelled` marker for that border ([#17732](https://github.com/can1357/oh-my-pi/pull/17732) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - `SessionSelectorOptions.loadAllSessions` and `SessionPickerHost.loadAllSessions` resolve to a `SessionListing`, and `allSessions` takes one, so the all-projects scope can show preliminary rows before its complete listing
 - `Editor.prediction` is replaced by `Editor.predictions`, which returns every prediction for the next prompt, most likely first, and `Editor.onPredictionAccepted` receives the inserted prediction's index in that list ([#17796](https://github.com/can1357/oh-my-pi/pull/17796) by [@wolfiesch](https://github.com/wolfiesch))
+- `GradientHighlightSpec.lightness` maps the gradient position to a lightness, like `hue`, instead of taking one fixed percentage
 
 ### Added
 
 - `SessionSelectorOptions.completeSessions` (and `SessionPickerOptions.completeSessions`) replaces the picker's preliminary rows with the complete listing once it settles, keeping the query, the selected session, and deletes/renames made meanwhile
-
 - `/btw` answers can show a steering prompt as a block behind a pink rail (a toned card in Tern) that `Alt+I` (`app.btw.inject`, remappable) sends to the main session; once sent it turns green with `➤` on each line, without moving ([#17618](https://github.com/can1357/oh-my-pi/pull/17618) by [@apullin](https://github.com/apullin))
 - Added `singleLine` and `finiteWidth` to `utils` for row-confined text and cell widths
+- `Loader.inlineText()` returns the current spinner frame and message as one styled line, and `DynamicBorder.setLabel()` sets a label (or a function re-read every render) into the rule ([#17732](https://github.com/can1357/oh-my-pi/pull/17732) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+
+### Changed
+
+- The ASCII symbol preset's status glyphs are all three columns wide: success is `[+]`, error `[-]`, aborted `[#]` and pending `[ ]` (alongside `[~]` running, `[!]` warning and `[i]` info), and status spinners animate as `[|] [/] [-] [\]` ([#17732](https://github.com/can1357/oh-my-pi/pull/17732) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+- Built-in renderers no longer use `status.done`, `theme.status.done` or the `done` value of `ToolUIStatus`; they remain as aliases of `status.success` / `success` (an explicit `symbols.overrides["status.done"]` still applies to `theme.status.done`) ([#17732](https://github.com/can1357/oh-my-pi/pull/17732) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+- Every finished state shows the success glyph (`✔`, ASCII `[+]`). Task rows, verdicts and headers, background-job, launch and supervised-process rows, Eval cells, Vibe, Wait and process job rows, Yield and the generic tool card showed a separate `•` done dot, and a finished Read showed `●` (ASCII `[x]`). Live Task agent rows show the pending or running glyph, and a Task whose merge failed shows the warning glyph ([#17732](https://github.com/can1357/oh-my-pi/pull/17732) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+- Edit and Write animate their streaming spinner in the card header, as Eval does, and show their `preview` / `streaming` label in the card's bottom border instead of on a row below the content; `streaming` ends once the content has fully arrived ([#17732](https://github.com/can1357/oh-my-pi/pull/17732) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+- `!` shell and `$` Python runs show their spinner, and then `exit N` or `cancelled`, in the frame's bottom border instead of on rows of their own; the spinner is the status spinner tool headers use ([#17732](https://github.com/can1357/oh-my-pi/pull/17732) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+- GitHub run-watch job rows use the shared status glyphs: a running job shows the running glyph instead of a warning-colored dot, a queued job the pending glyph instead of a hollow circle (a job in a state omp does not recognize keeps the circle), and a passed job's glyph is green like other success glyphs. Ask's multi-line custom answer lines up under its first line in every symbol preset ([#17732](https://github.com/can1357/oh-my-pi/pull/17732) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+
+### Fixed
+
+- An LSP result other than diagnostics, such as a raw `request` response, that contains the error glyph (`✘`, ASCII `[-]`) is shown as a response instead of as diagnostics reading "No issues" with the rest of its lines dropped ([#17732](https://github.com/can1357/oh-my-pi/pull/17732) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+- `MagicKeywordSpec.lightness` sweeps lightness across a keyword's gradient alongside its hue
 - `Editor.onPredictionAccepted` and `Editor.onPredictionShown` report when Tab or Right inserts the rest of the composer prediction and when a frame paints it (at least one cell in the terminal, or the ghost on a native editor node) ([#17739](https://github.com/can1357/oh-my-pi/pull/17739) by [@wolfiesch](https://github.com/wolfiesch))
 - Added `OutputMeta.minimized` (bash minimizer filter, raw and minimized byte counts, raw-output artifact), shown as a `Minimized` fact on bash result cards ([#16586](https://github.com/can1357/oh-my-pi/pull/16586) by [@will-bogusz](https://github.com/will-bogusz))
 - Added `isColumnTruncationNotice` and `hasColumnTruncationClause` to `tools/output-meta`, matching the `[Some lines truncated to …]` clause that `formatOutputNotice` emits alone or inside a longer notice, and `LimitsMeta.columnTruncated.rawByteCap`, which makes that notice name the byte cap a `:raw` read of the first cut line stops at ([#16595](https://github.com/can1357/oh-my-pi/pull/16595) by [@will-bogusz](https://github.com/will-bogusz))
-
-### Fixed
-
 - Fixed the model browser showing Factory Droid's undiscounted credit rate during a Factory promotion (2× instead of 1.6× for GPT-5.6 Sol); rows now show the rate in force and the model details show the next rate and its date ([#16309](https://github.com/can1357/oh-my-pi/pull/16309) by [@will-bogusz](https://github.com/will-bogusz))
 - With two or more `Editor.predictions`, the ghost text follows the first one the draft is a prefix of; a typed draft that equals a shorter one keeps the ghost of a longer one. Once the buffer equals one of them with no ghost (always right after Tab, Right, or the list inserts one), a dim `⇥ N more` hint appears; press Tab to list them all, then Enter, Tab or Right to swap the whole line (never submitting) or Esc to keep it ([#17796](https://github.com/can1357/oh-my-pi/pull/17796) by [@wolfiesch](https://github.com/wolfiesch))
-
-### Fixed
-
 - F2 now opens the rename dialog in the resume picker in Ghostty, kitty and other terminals using the kitty keyboard protocol; F1 and F4 shortcuts work there too ([#17812](https://github.com/can1357/oh-my-pi/issues/17812)).
+- Added `Component.nativeTrailers()`, which lets a transcript block add native blocks of its own directly after it. Trailing blocks stay visible while the block is collapsed.
 
 ## [18.15.0] - 2026-11-01
 
@@ -71,7 +109,6 @@
 
 ### Fixed
 
-- Added `Component.nativeTrailers()`, which lets a transcript block add native blocks of its own directly after it. Trailing blocks stay visible while the block is collapsed.
 - Fixed table charts plotting a ratio column against the timings it divides (`ratio` 0.997 beside `C++ (ms)` drew as "719× less"): `analyzeTable` reads a column equal to the quotient of two others as restating them, written bare or as `×`
 - Fixed IRC coordination cards remaining visible when Hide Tool Activity is enabled, including incoming messages, automatic replies, relays, and workpool messages in live and replayed transcripts ([#17498](https://github.com/can1357/oh-my-pi/pull/17498) by [@dannyboy-ai](https://github.com/dannyboy-ai)).
 - Fixed text after a nested color losing the outer color, such as the rest of the `/mcp` and `/ssh` hints after the highlighted command (`Run /mcp list to see all configured servers.`) falling back to the default text color instead of staying muted ([#17521](https://github.com/can1357/oh-my-pi/pull/17521) by [@JustasMasiulis](https://github.com/JustasMasiulis))
@@ -2514,21 +2551,4 @@
 - Fixed hiding overlays during ED3-risk foreground streaming on unknown-viewport terminals leaving the overlay's transient rows in native scrollback. Overlay visibility reductions now bypass the streaming deferral path and rebuild once, so hidden dialog/notification sentinels are scrubbed immediately.
 - Fixed ED3-risk / unknown-viewport terminals (including WSL fronted by Windows Terminal) keeping the foreground-stream eager-rebuild mode active after the stream had already settled. A later scrolled content shrink or resize-with-append could then bypass the anti-yank deferral and repaint from stale geometry, jumping the viewport or replaying the wrong rows. The eager opt-in now drops immediately when no teardown render is pending, and the one-frame post-checkpoint suffix-suppression path no longer overrides geometry reflow handling.
 
-## [15.9.2] - 2026-06-05
-
-### Changed
-
-- Changed foreground-stream rendering on ED3-risk terminals (Ghostty/kitty/Alacritty/VTE/iTerm2 on POSIX) to defer native-scrollback commits for unpinned transient frames: while a turn streams, generic frames repaint only the viewport and suppress `\r\n` scroll growth, so transient output (spinner ticks, partial lines, status rows) never pollutes terminal history. Components that report a `NativeScrollbackLiveRegion` still commit newly sealed prefix rows while keeping the active suffix dirty for checkpoint replay. Native scrollback is reconciled in a single ED3 (`CSI 3 J`) + re-emit at the next checkpoint (prompt submit) or on an explicit user-input/IME opt-in; an erase is never emitted mid-stream under a possibly-scrolled reader. Non-ED3-risk terminals keep their eager live rebuild. ([#1895](https://github.com/can1357/oh-my-pi/pull/1895))
-
-### Fixed
-
-- Fixed ED3-risk foreground streaming dropping sealed transcript rows above the live block until the next prompt-submit checkpoint, which made scrollback beyond the viewport appear duplicated or out of order. The renderer restores native-scrollback live-region pinning so newly sealed rows are appended once while active live rows remain deferred.
-- Fixed inline images (added in 15.9) rendering as a wall of empty PUA box glyphs and producing laggy scrolling on Kitty-protocol terminals that do not implement Unicode placeholders — most notably WezTerm (per upstream wezterm/wezterm#986, placeholder support is still unchecked) and the tmux/screen `getFallbackImageProtocol` path that forces Kitty mode even on non-supporting outer terminals (Terminal.app, etc.). `unicodePlaceholders` now defaults on only for `kitty` and `ghostty`; everything else falls back to direct `a=p,i=…,p=…` placement, which those paths already render correctly. `PI_NO_KITTY_PLACEHOLDERS=1` is still honored as a hard opt-out, and a new `PI_KITTY_PLACEHOLDERS=1` opts in on otherwise-unsupported terminals (e.g. a wezterm nightly that has merged placeholder support) ([#1877](https://github.com/can1357/oh-my-pi/issues/1877)).
-
-## [15.9.1] - 2026-06-04
-
-### Fixed
-
-- Fixed the OSC 11 appearance poll re-querying every 2s forever on terminals that support Mode 2031 but never change theme, whose repeated OSC 11/DA1 writes cleared the user's active text selection (breaking copy every 2 seconds). The poll now stops as soon as DECRQM confirms Mode 2031 support, since push notifications make polling redundant.
-
-Older entries are archived in [packages/tui/CHANGELOG.md@6b354a56a890](https://github.com/can1357/oh-my-pi/blob/6b354a56a890b69b6bc9503c16c510be33675b5a/packages/tui/CHANGELOG.md).
+Older entries are archived in [packages/tui/CHANGELOG.md@9f40fb535f35](https://github.com/can1357/oh-my-pi/blob/9f40fb535f35f2b38336a4e694ff4c0dc91d4868/packages/tui/CHANGELOG.md).

@@ -406,12 +406,13 @@ describe("InputController keybinding setup", () => {
 		expect(spies.setActionKeys).toHaveBeenCalledWith("app.retry", ["alt+r"]);
 		expect(editor.onRetry).toBeDefined();
 
-		editor.setText("draft that should clear after retry");
+		editor.setText("draft that should survive retry");
 		editor.onRetry?.();
 		await Promise.resolve();
 
 		expect(spies.retry).toHaveBeenCalledTimes(1);
-		expect(editor.getText()).toBe("");
+		expect(spies.prompt).not.toHaveBeenCalled();
+		expect(editor.getText()).toBe("draft that should survive retry");
 	});
 
 	it("retries the focused view session instead of the main session", async () => {
@@ -461,8 +462,8 @@ describe("InputController keybinding setup", () => {
 		expect(editor.getText()).toBe("draft that should survive");
 	});
 
-	it("clears retry draft attachments only after retry starts", async () => {
-		const { InputController, ctx, editor } = await createContext();
+	it("keeps retry draft attachments after retry starts", async () => {
+		const { InputController, ctx, editor, spies } = await createContext();
 		const image: ImageContent = { type: "image", mimeType: "image/png", data: "abc" };
 		const controller = new InputController(ctx);
 
@@ -474,10 +475,11 @@ describe("InputController keybinding setup", () => {
 		editor.onRetry?.();
 		await Promise.resolve();
 
-		expect(ctx.editor.pendingImages).toEqual([]);
-		expect(ctx.editor.pendingImageLinks).toEqual([]);
-		expect(editor.imageLinks).toBeUndefined();
-		expect(editor.getText()).toBe("");
+		expect(spies.retry).toHaveBeenCalledTimes(1);
+		expect(ctx.editor.pendingImages).toEqual([image]);
+		expect(ctx.editor.pendingImageLinks).toEqual(["local://draft.png"]);
+		expect(editor.imageLinks).toEqual(["local://draft.png"]);
+		expect(editor.getText()).toBe("draft with image");
 	});
 
 	it("routes b to branch a branchable /btw panel", async () => {

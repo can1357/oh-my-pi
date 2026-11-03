@@ -7,12 +7,11 @@ use std::{
 	io::Write,
 };
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use platform_info::{PlatformInfo, PlatformInfoAPI, UNameAPI};
 use uucore::display::Quotable;
 
-use crate::host::{Host, Utility, format_usage, matches_parser, os_bytes, util};
+use crate::host::{Host, Utility, format_usage, matches_parser, os_bytes};
 
 mod options {
 	pub(super) const ALL: &str = "all";
@@ -238,11 +237,6 @@ fn uu_app() -> Command {
 				.action(ArgAction::SetTrue)
 				.hide(true),
 		)
-}
-
-/// Creates the `uname` builtin registration.
-pub(crate) fn uname_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Uname, SE>()
 }
 
 #[cfg(test)]

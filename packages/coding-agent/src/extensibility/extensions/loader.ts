@@ -462,7 +462,8 @@ async function runExtensionFactory(
 	}
 }
 
-async function importExtensionModule(extensionPath: string, cwd: string): Promise<PreparedExtension> {
+/** Import one extension module and resolve its factory without binding it to a session. */
+export async function importExtensionModule(extensionPath: string, cwd: string): Promise<PreparedExtension> {
 	const resolvedPath = resolvePath(extensionPath, cwd);
 	try {
 		const module = (await withHostGuard(() => loadLegacyPiModule(resolvedPath))) as LoadedExtensionModule;
