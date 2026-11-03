@@ -1634,10 +1634,21 @@ async function planWritableDirectory(dir: string, plan: RestorePlan, what: strin
 			throw new Error(`${dir} is not a directory, so ${what} could not be restored into it`);
 		try {
 			await fs.access(dir, fsConstants.W_OK | fsConstants.X_OK);
-		} catch {
+		} catch (error) {
+			// Only a refusal is a permission to fix; any other failure of the
+			// probe is said as it came, without a remedy it does not support.
+			const code = codeOf(error);
+			if (code === "EACCES" || code === "EPERM") {
+				throw new Error(
+					`${dir} is not writable (${code}), so ${what} could not be restored into it: make it writable with ` +
+						`\`chmod u+w\` and run the same command again`,
+				);
+			}
+			if (code === "EROFS") {
+				throw new Error(`${dir} is on a read-only filesystem (EROFS), so ${what} could not be restored into it`);
+			}
 			throw new Error(
-				`${dir} is not writable, so ${what} could not be restored into it: make it writable with \`chmod u+w\` ` +
-					`and run the same command again`,
+				`whether ${dir} can be written could not be checked (${errorText(error)}), so ${what} was not restored into it`,
 			);
 		}
 		return;
@@ -2924,7 +2935,7 @@ async function reclaimedOriginals(
 function crossFilesystemHome(move: ReclaimedMove, restoreCommand: string): string {
 	return (
 		`${move.from} cannot be moved home to ${move.to}: they are on different filesystems now, and a rename cannot ` +
-		`cross filesystems. A copy cannot stand in for the original, so nothing was moved; put the archive back on the ` +
+		`cross filesystems. A copy cannot stand in for the original, so it was not moved; put the archive back on the ` +
 		`sessions tree's filesystem and run \`${restoreCommand}\` again`
 	);
 }
@@ -2967,7 +2978,7 @@ async function moveReclaimedHome(move: ReclaimedMove, restoreCommand: string): P
 		throw new Error(
 			codeOf(error) === "EXDEV"
 				? crossFilesystemHome(move, restoreCommand)
-				: `${move.from} could not be moved home to ${move.to} (${errorText(error)}); nothing was moved`,
+				: `${move.from} could not be moved home to ${move.to} (${errorText(error)}), so it was not moved`,
 			{ cause: error },
 		);
 	}
@@ -2979,7 +2990,7 @@ async function moveReclaimedHome(move: ReclaimedMove, restoreCommand: string): P
 			: moved.outcome === "absent"
 				? `${move.from} was no longer there while this restore ran, so it was not moved home`
 				: `${move.from} could not be moved home to ${move.to}: ${moved.why}, and a rename that may replace what ` +
-					`has that name could remove another file there; nothing was moved`,
+					`has that name could remove another file there; it was not moved`,
 	);
 }
 /**
@@ -3148,9 +3159,19 @@ export async function restoreArchivedSessionLocked(
 		// that put an empty directory there, with its own owner, mode and
 		// attributes, and an empty directory costs nothing. A later reclaim of
 		// the session moves into it again.
+		// Each refusal says what this run already moved home: a review saw a
+		// tree's refusal say "nothing was moved" after the transcript had.
 		for (const move of reclaimed) {
-			if (plan) await planMoveHome(move, plan, restoreCommand);
-			else await moveReclaimedHome(move, restoreCommand);
+			try {
+				if (plan) await planMoveHome(move, plan, restoreCommand);
+				else await moveReclaimedHome(move, restoreCommand);
+			} catch (error) {
+				if (plan || movedHome.length === 0) throw error;
+				throw new Error(
+					`${errorText(error)}. Already moved home by this restore, and left there: ${movedHome.join(", ")}`,
+					{ cause: error },
+				);
+			}
 			movedHome.push(move.to);
 		}
 		const transcriptReclaimed = reclaimed.find(move => move.to === sessionPath);

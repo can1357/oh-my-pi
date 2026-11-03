@@ -132,14 +132,25 @@ function unproved(call: string, code: number): SoleOpenLease {
 		return { outcome: "unproved", evidence, meaning: "the kernel had no room to record a lease", retry: true };
 	}
 	if (isErrno(code, "EACCES", "EPERM")) {
+		// What the error says, not whose file it is: a lease goes only to the
+		// file's owner or a process with `CAP_LEASE`, but a security module can
+		// refuse it too, and a review saw "this user does not own it" said of a
+		// file this user owned.
 		return {
 			outcome: "unproved",
 			evidence,
-			meaning: "the kernel grants a lease only to the file's owner, and this user does not own it",
+			meaning:
+				"the kernel refused this run a lease with a permission error: a lease goes only to the file's owner or a " +
+				"process with `CAP_LEASE`, and a security module can refuse one",
 			retry: false,
 		};
 	}
-	return { outcome: "unproved", evidence, meaning: "the kernel refused to say", retry: true };
+	return {
+		outcome: "unproved",
+		evidence,
+		meaning: "the kernel refused the lease, for a reason not known here",
+		retry: true,
+	};
 }
 
 /**

@@ -2352,7 +2352,9 @@ test("reclaiming refuses while a process owns a subagent session below it", asyn
 	// The owner was there before this ran; nothing about it is the disclosed
 	// window, and its file is still where it left it.
 	expect(result.reclaim?.reclaimed).toBe(0);
-	expect(result.reclaim?.errors.join("\n")).toContain("subagent sessions");
+	expect(result.reclaim?.errors.join("\n")).toContain(
+		`a running process owns ${path.join(liveArtifacts, "child.log")}`,
+	);
 	expect(await Bun.file(path.join(liveArtifacts, "child.log")).text()).toContain("UNIQUE CHILD TURN");
 	expect(await Bun.file(sessionFile).exists()).toBe(true);
 });
@@ -8718,4 +8720,103 @@ test("a restore that cannot read the archive to compare it says so, not that the
 	const said = result.restore?.errors.join("\n") ?? "";
 	expect(said).toContain("EIO: injected archive read");
 	expect(said).not.toContain("different session file");
+}, 60_000);
+
+// Round 52's OpenAI arm: more failed checks said as events. Each of these
+// asserts the error is named and no event or remedy it did not see is.
+test("a reclaim of a transcript it cannot read says so, not that it is no session file", async () => {
+	expect((await archiveOnly()).archive).toMatchObject({ archived: 1, errors: [] });
+	await fs.chmod(sessionFile, 0o000);
+	try {
+		for (const apply of [false, true]) {
+			const result = await runGcCommand({ flags: { ...reclaimApply(), apply } });
+			const said = result.reclaim?.errors.join("\n") ?? "";
+			expect(said).toContain(sessionFile);
+			expect(said).toContain("EACCES");
+			expect(said).not.toContain("is not a session file");
+			// Said as a failed check — "whether … could not be checked" — never as an owner seen.
+			expect(said).not.toMatch(/^a running process owns/m);
+		}
+	} finally {
+		await fs.chmod(sessionFile, 0o600);
+	}
+}, 60_000);
+
+test("an archive run that cannot read a subagent transcript to find its owner says so, not that it is active", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	const child = path.join(liveArtifacts, "child.jsonl");
+	await Bun.write(
+		child,
+		`${JSON.stringify({ type: "session", version: 3, id: sessionId("c0ffee000001"), timestamp: "2026-01-01T00:00:00.000Z", cwd: "/" })}\n`,
+	);
+	await fs.chmod(child, 0o000);
+	try {
+		const result = await archiveOnly();
+		const said = result.archive?.errors.join("\n") ?? "";
+		expect(result.archive?.skippedActive).toBe(0);
+		expect(said).toContain(`whether a running process owns ${child} could not be checked`);
+		expect(said).toContain("EACCES");
+	} finally {
+		await fs.chmod(child, 0o600);
+	}
+}, 60_000);
+
+test("a reclaim that cannot read the archive to compare it says so, not that it is no copy", async () => {
+	expect((await archiveOnly()).archive).toMatchObject({ archived: 1, errors: [] });
+	await fs.chmod(archiveFile, 0o000);
+	try {
+		const result = await runGcCommand({ flags: reclaimApply() });
+		const said = result.reclaim?.errors.join("\n") ?? "";
+		expect(result.reclaim?.reclaimed).toBe(0);
+		expect(said).toContain("EACCES");
+		expect(said).not.toContain("is not a copy of");
+		expect(await Bun.file(sessionFile).exists()).toBe(true);
+	} finally {
+		await fs.chmod(archiveFile, 0o600);
+	}
+}, 60_000);
+
+test("a restore preview whose permission probe fails with EIO says so, without a chmod it does not need", async () => {
+	await archiveEverything();
+	const bucket = path.dirname(sessionFile);
+	const realAccess = fs.access;
+	let hit = false;
+	spyOn(fs, "access").mockImplementation((async (...args: Parameters<typeof fs.access>) => {
+		if (String(args[0]) === bucket) {
+			hit = true;
+			throw Object.assign(new Error("EIO: injected access"), { code: "EIO" });
+		}
+		return await Reflect.apply(realAccess, fs, args);
+	}) as typeof fs.access);
+	const result = await runGcCommand({ flags: restoreApply(false) });
+	mock.restore();
+
+	expect(hit).toBe(true);
+	const said = result.restore?.errors.join("\n") ?? "";
+	expect(said).toContain("EIO: injected access");
+	expect(said).not.toContain("chmod u+w");
+}, 60_000);
+
+test("a restore whose tree cannot follow the transcript home says the transcript was moved, never that nothing was", async () => {
+	const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+	await Bun.write(path.join(liveArtifacts, "a.log"), "ORIGINAL");
+	expect((await archiveOnly()).archive).toMatchObject({ archived: 1, errors: [] });
+	expect((await runGcCommand({ flags: reclaimApply() })).reclaim).toMatchObject({ reclaimed: 1, errors: [] });
+	const before = await fs.stat(reclaimedNames().transcript);
+	const realMove = libcModule.renameNoReplace;
+	spyOn(libcModule, "renameNoReplace").mockImplementation(async (from, to) => {
+		if (from === reclaimedNames().artifacts) {
+			throw Object.assign(new Error("EACCES: injected tree move"), { code: "EACCES" });
+		}
+		return await realMove(from, to);
+	});
+	const result = await runGcCommand({ flags: restoreApply() });
+	mock.restore();
+
+	const said = result.restore?.errors.join("\n") ?? "";
+	expect(said).toContain("EACCES: injected tree move");
+	expect(said).toContain(`Already moved home by this restore, and left there: ${sessionFile}`);
+	expect(said).not.toContain("nothing was moved");
+	expect((await fs.stat(sessionFile)).ino).toBe(before.ino);
+	expect(await Bun.file(path.join(reclaimedNames().artifacts, "a.log")).text()).toBe("ORIGINAL");
 }, 60_000);

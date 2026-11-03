@@ -968,14 +968,26 @@ export async function renameRefusal(from: string, toParent: string): Promise<str
 	const entry = await fs.lstat(from);
 	const leaves = path.dirname(from);
 	const leavesStat = await fs.stat(leaves);
-	const writable = async (dir: string, why: string): Promise<string | undefined> => {
+	// Each probe says what it was told: a refusal (`EACCES`, `EPERM`, `EROFS`)
+	// is a refusal; any other failure is a probe that could not tell, said
+	// as one, since the preview refuses on either rather than promise.
+	const probe = async (target: string, mode: number, refused: string, what: string): Promise<string | undefined> => {
 		try {
-			await fs.access(dir, fsConstants.W_OK | fsConstants.X_OK);
+			await fs.access(target, mode);
 			return undefined;
 		} catch (error) {
-			return `${dir} does not let this process ${why} (${(error as NodeJS.ErrnoException).code ?? errorText(error)})`;
+			const code = (error as NodeJS.ErrnoException).code;
+			if (code === "EACCES" || code === "EPERM" || code === "EROFS") return `${refused} (${code})`;
+			return `whether this process can ${what} could not be checked (${errorText(error)})`;
 		}
 	};
+	const writable = async (dir: string, why: string): Promise<string | undefined> =>
+		await probe(
+			dir,
+			fsConstants.W_OK | fsConstants.X_OK,
+			`${dir} does not let this process ${why}`,
+			`${why}: ${dir}`,
+		);
 	const out = await writable(leaves, `move ${from} out of it`);
 	if (out) return out;
 	let into = toParent;
@@ -988,14 +1000,13 @@ export async function renameRefusal(from: string, toParent: string): Promise<str
 		return `${leaves} has the sticky bit, so only the owner of ${from} (user ${entry.uid}) or of ${leaves} can move it`;
 	}
 	if (entry.isDirectory() && path.resolve(toParent) !== path.resolve(leaves)) {
-		try {
-			await fs.access(from, fsConstants.W_OK);
-		} catch (error) {
-			return (
-				`${from} is a directory this process cannot write, and moving it into another directory changes its ` +
-				`\`..\` (${(error as NodeJS.ErrnoException).code ?? errorText(error)})`
-			);
-		}
+		const own = await probe(
+			from,
+			fsConstants.W_OK,
+			`${from} is a directory this process cannot write, and moving it into another directory changes its \`..\``,
+			`write ${from}, which moving it into another directory needs`,
+		);
+		if (own) return own;
 	}
 	for (const [name, directory] of [
 		[from, entry.isDirectory()],

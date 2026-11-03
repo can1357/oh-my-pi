@@ -341,6 +341,33 @@ test.skipIf(process.platform !== "linux")(
 	},
 );
 
+// A lease refused with a permission error says what the error says: a
+// review saw "this user does not own it" said of a file this user owned.
+test.skipIf(!leasesGranted)("a lease refused with EACCES never claims another user owns the file", async () => {
+	const real = libcModule.libc();
+	let refused = false;
+	spyOn(libcModule, "libc").mockReturnValue({
+		...real,
+		fcntl: (fd, cmd, arg) => {
+			if (cmd === 1024 && arg !== 2) {
+				refused = true;
+				return -1;
+			}
+			return real.fcntl?.(fd, cmd, arg) ?? -1;
+		},
+		errno: () => (refused ? os.constants.errno.EACCES : real.errno()),
+	});
+	const result = await reclaim(true);
+	mock.restore();
+
+	const said = result.reclaim?.errors.join("\n") ?? "";
+	expect(refused).toBe(true);
+	expect(result.reclaim?.reclaimed).toBe(0);
+	expect(said).toContain("EACCES");
+	expect(said).not.toContain("does not own");
+	expect((await fs.stat(sessionFile)).uid).toBe(process.getuid?.() ?? -1);
+});
+
 /** Whether this user may run a command as root without a password: setting a `security.*` attribute needs root. */
 const sudoWorks = Bun.spawnSync(["sudo", "-n", "true"], { stdout: "ignore", stderr: "ignore" }).exitCode === 0;
 

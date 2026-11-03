@@ -1418,17 +1418,30 @@ interface ArchiveCopyState {
  * live file it points at, and the moment that tree goes the archive holds a
  * dangling name and the artifact exists nowhere. The entry must be a file in
  * its own right, resolving outside the tree this run is about to delete.
+ *
+ * Says what was seen — undefined when it is — or that a look failed, with
+ * its error: a failed look is not an entry seen to be a link.
  */
-async function survivesSourceRemoval(destination: string, sourceRoot: string): Promise<boolean> {
-	const entry = await fs.lstat(destination).catch(() => undefined);
-	if (!entry?.isFile()) return false;
-	const [real, root] = await Promise.all([
-		fs.realpath(destination).catch(() => undefined),
-		fs.realpath(sourceRoot).catch(() => sourceRoot),
-	]);
-	if (real === undefined) return false;
+async function survivesSourceRemoval(
+	destination: string,
+	sourceRoot: string,
+): Promise<{ seen: string } | { unchecked: string } | undefined> {
+	let entry: Stats | undefined;
+	let real: string;
+	let root: string;
+	try {
+		entry = await lstatIfPresent(destination);
+		if (!entry) return { seen: `nothing stands at ${destination}` };
+		if (!entry.isFile()) return { seen: `${destination} is not a regular file` };
+		[real, root] = await Promise.all([fs.realpath(destination), fs.realpath(sourceRoot)]);
+	} catch (error) {
+		return {
+			unchecked: `whether ${destination} is a file of its own outside ${sourceRoot} could not be checked (${errorMessage(error)})`,
+		};
+	}
 	const relative = path.relative(root, real);
-	return relative !== "" && (relative.startsWith("..") || path.isAbsolute(relative));
+	if (relative !== "" && (relative.startsWith("..") || path.isAbsolute(relative))) return undefined;
+	return { seen: `${destination} resolves inside ${sourceRoot}, the live tree` };
 }
 
 /**
@@ -1623,7 +1636,12 @@ async function publishArtifactIntoArchive(
 						`archiving it would write the archive over its own file`,
 				);
 			}
-			if (!verified.isFile() || !(await survivesSourceRemoval(destination, sourceRoot))) throw conflict();
+			if (!verified.isFile()) throw conflict();
+			const independent = await survivesSourceRemoval(destination, sourceRoot);
+			if (independent && "unchecked" in independent) {
+				throw new Error(`${independent.unchecked}, so ${source} was not archived; run \`omp gc --archive\` again`);
+			}
+			if (independent) throw conflict();
 			const archivedBytes = await digestOfHandle(archived);
 			// Same length settles it either way: the archive already holds
 			// exactly these bytes, or it holds different ones and nothing
@@ -2614,9 +2632,10 @@ async function proveLiveTreeIsArchived(
 	try {
 		liveStat = await live.stat();
 		if (!liveStat.isFile()) throw new Error(`${source} is not a file the archive can hold`);
-		if (!(await survivesSourceRemoval(destination, sourceRoot))) {
-			throw new Error(`${destination} is not an independent archived copy of ${source}`);
-		}
+		const independent = await survivesSourceRemoval(destination, sourceRoot);
+		if (independent && "unchecked" in independent) throw new Error(independent.unchecked);
+		if (independent)
+			throw new Error(`${destination} is not an independent archived copy of ${source}: ${independent.seen}`);
 		if (!(await archivedHandleIsHeldBy(live, liveStat, destination))) {
 			throw new Error(`${source} holds what ${destination} does not`);
 		}
@@ -2812,17 +2831,21 @@ async function copyArtifactsTree(
  * somewhere else — at the live transcript, say — reads byte for byte as the
  * transcript while holding none of it, and once `--reclaim` gives the live
  * copy up the archive names nothing.
+ *
+ * Nothing at either name, or no regular file there, is "no"; a read that
+ * fails throws, as it came — a failed read is not a different archive.
  */
 async function archiveAlreadyHolds(source: string, destination: string): Promise<boolean> {
+	if (!(await lstatIfPresent(destination))?.isFile()) return false;
 	try {
-		if (!(await fs.lstat(destination).catch(() => undefined))?.isFile()) return false;
 		// Through the regular-file check: a FIFO at the live name is not waited
 		// on, and is no transcript the archive could hold.
 		const live = await digestStream(bytesOfRegularFile(source));
 		const stored = await digestArchivedSessionFile(destination);
 		return live.hash === stored.hash;
-	} catch {
-		return false;
+	} catch (error) {
+		if (error instanceof NotARegularFile || codeOf(error) === "ENOENT") return false;
+		throw error;
 	}
 }
 
@@ -3020,11 +3043,18 @@ async function runArchiveGc(options: ResolvedGcOptions, archiveRoot: string): Pr
 		// `--apply` would really take.
 		let tree: { leases: FileLockHandle[]; transcripts: Set<string> } | null = null;
 		try {
-			tree = await tryAcquireSessionTreeLeases(candidate.session, await collectSessionFiles(candidate.session));
-			if (tree === null) {
-				result.skippedActive += 1;
+			const leased = await tryAcquireSessionTreeLeases(
+				candidate.session,
+				await collectSessionFiles(candidate.session),
+			);
+			if ("file" in leased) {
+				// A live owner is skipped as active; an owner that could not be
+				// probed is kept too, but said as a failed check, with why.
+				if (leased.unprobed === undefined) result.skippedActive += 1;
+				else result.errors.push(treeLeaseRefusalText(leased, `${candidate.session.path} was not archived`));
 				continue;
 			}
+			tree = leased;
 			result.wouldArchive += 1;
 			if (!options.apply) continue;
 			const { brokenLinks, notes } = await copySessionIntoArchive(candidate);
@@ -3110,11 +3140,16 @@ interface SessionTreeLeases {
  * any file a process can open with `--session`. Each session id is leased
  * once, so a copied transcript that shares an id does not read as live.
  *
- * Returns the first file whose owner is live or cannot be probed (an
- * unknown owner counts as live), with every lease taken so far left in
- * `tree`; undefined once each one is held.
+ * Returns the first file whose owner is live, or whose owner could not be
+ * probed — with why, then: an unknown owner keeps the session as a live one
+ * does, but is reported as a failed check, never as a running process —
+ * with every lease taken so far left in `tree`; undefined once each one is
+ * held.
  */
-async function leaseTranscripts(tree: SessionTreeLeases, files: readonly string[]): Promise<string | undefined> {
+async function leaseTranscripts(
+	tree: SessionTreeLeases,
+	files: readonly string[],
+): Promise<TreeLeaseRefusal | undefined> {
 	for (const file of files) {
 		let lease: FileLockHandle | null;
 		try {
@@ -3126,24 +3161,41 @@ async function leaseTranscripts(tree: SessionTreeLeases, files: readonly string[
 			if (lease) tree.leasedIds.add(sessionId);
 		} catch (error) {
 			if (codeOf(error) === "ENOENT") continue;
-			lease = null;
+			return { file, unprobed: errorMessage(error) };
 		}
-		if (lease === null) return file;
+		if (lease === null) return { file };
 		tree.leases.push(lease);
 	}
 	return undefined;
 }
 
+/** A transcript of a session tree that could not be leased: owned by a live process, or its owner not known, and why. */
+interface TreeLeaseRefusal {
+	file: string;
+	unprobed?: string;
+}
+
+/** The refusal for `refused`, in words for what was seen: a live owner, or an owner check that failed. */
+function treeLeaseRefusalText(refused: TreeLeaseRefusal, tail: string): string {
+	return refused.unprobed === undefined
+		? `a running process owns ${refused.file}; ${tail}`
+		: `whether a running process owns ${refused.file} could not be checked (${refused.unprobed}); ${tail}`;
+}
+
 /**
  * Leases of every transcript in a session: its own and those nested in its
- * artifact tree — see {@link leaseTranscripts}. Null, with every lease taken
- * so far released, when any of them is live or cannot be probed.
+ * artifact tree — see {@link leaseTranscripts}. The refusal, with every
+ * lease taken so far released, when any of them is live or cannot be probed.
  */
-async function tryAcquireSessionTreeLeases(session: SessionInfo, files: string[]): Promise<SessionTreeLeases | null> {
+async function tryAcquireSessionTreeLeases(
+	session: SessionInfo,
+	files: string[],
+): Promise<SessionTreeLeases | TreeLeaseRefusal> {
 	const tree: SessionTreeLeases = { leases: [], leasedIds: new Set(), transcripts: new Set([session.path]) };
-	if ((await leaseTranscripts(tree, files)) === undefined) return tree;
+	const refused = await leaseTranscripts(tree, files);
+	if (refused === undefined) return tree;
 	for (const held of tree.leases) held.release();
-	return null;
+	return refused;
 }
 
 /**
@@ -3219,11 +3271,13 @@ async function runCompressGc(options: ResolvedGcOptions, archiveRoot: string): P
 		if (candidates.length === 0) continue;
 		let tree: { leases: FileLockHandle[]; transcripts: Set<string> } | null = null;
 		try {
-			tree = await tryAcquireSessionTreeLeases(session, files);
-			if (tree === null) {
-				result.skippedLive += 1;
+			const leased = await tryAcquireSessionTreeLeases(session, files);
+			if ("file" in leased) {
+				if (leased.unprobed === undefined) result.skippedLive += 1;
+				else result.errors.push(treeLeaseRefusalText(leased, `${session.path} was not compressed`));
 				continue;
 			}
+			tree = leased;
 			result.sessions += 1;
 			result.wouldCompress += candidates.length;
 			for (const candidate of candidates) {
@@ -3666,10 +3720,22 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 	result.sessionPath = sessionPath;
 	const liveArtifacts = sessionPath.slice(0, -".jsonl".length);
 	const archiveArtifacts = archiveFile.slice(0, -".jsonl.gz".length);
-	const holdsLive = async (): Promise<boolean> => await archiveAlreadyHolds(sessionPath, archiveFile);
 	const notACopy = (): string =>
 		`${archiveFile} is not a copy of ${sessionPath} as it stands; archive it again with ` +
 		`\`omp gc --archive --apply${recovery}\` and reclaim after that`;
+	// Why the archive is not a copy of the live transcript as it stands, or
+	// undefined when it is; a comparison that cannot read says so, with its
+	// error, never that the two differ.
+	const notHeldLive = async (): Promise<string | undefined> => {
+		try {
+			return (await archiveAlreadyHolds(sessionPath, archiveFile)) ? undefined : notACopy();
+		} catch (error) {
+			return (
+				`whether ${archiveFile} is a copy of ${sessionPath} could not be checked (${errorMessage(error)}); ` +
+				`nothing was moved`
+			);
+		}
+	};
 	// A refusal names the live tree it left behind, on every path that can
 	// reach one. Reporting it only sometimes is how a reader learns to stop
 	// trusting it.
@@ -3734,6 +3800,19 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 			return { failure: `${sessionPath} and its subagent sessions could not be listed: ${errorMessage(error)}` };
 		}
 	};
+	// What the transcript holds, or why that could not be told: a transcript
+	// that cannot be read is not "not a session file", and a review saw the
+	// one said for the other.
+	const readSession = async (): Promise<{ session?: SessionInfo; why?: string }> => {
+		try {
+			const session = await readRegularSessionInfo(sessionPath);
+			return session ? { session } : { why: `${sessionPath} is not a session file` };
+		} catch (error) {
+			return { why: `${sessionPath} could not be read to find its session (${errorMessage(error)})` };
+		}
+	};
+	const treeRefusal = (refused: TreeLeaseRefusal): string =>
+		treeLeaseRefusalText(refused, "nothing was moved; reclaim again once it is closed or can be read");
 	// A session a live process owns is reported and kept, whenever it joined.
 	// The transcripts are among the files the walk compared. The leases taken
 	// go into `tree`; the reason to keep the session, if any, comes back.
@@ -3741,36 +3820,31 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 		tree: SessionTreeLeases,
 		proved: { files: ProvenEntry[] },
 	): Promise<string | undefined> => {
-		const owner = await leaseTranscripts(
+		const refused = await leaseTranscripts(
 			tree,
 			proved.files.map(entry => entry.path),
 		);
-		if (owner === undefined) return undefined;
+		if (refused === undefined) return undefined;
 		await keepTree();
-		return (
-			`a running process owns ${owner}, or its owner could not be probed; it was found after this run ` +
-			`took its leases, and nothing was moved — close it and reclaim again`
-		);
+		return `${treeRefusal(refused)} (found after this run took its leases)`;
 	};
 	if (!options.apply) {
 		// A preview that reports nothing is a preview nobody can act on, and
 		// its exit status is how a script learns the difference. Everything
 		// applying would refuse for is checked here too, short of taking the
 		// leases: the owner is probed and released, and the tree is proved.
-		const session = await readRegularSessionInfo(sessionPath).catch(() => undefined);
+		const { session, why } = await readSession();
 		const listed = session ? await sessionTree(session) : undefined;
-		const probe = listed?.files ? await tryAcquireSessionTreeLeases(session!, listed.files) : null;
-		if (probe) for (const held of probe.leases) held.release();
+		const probe = session && listed?.files ? await tryAcquireSessionTreeLeases(session, listed.files) : undefined;
+		if (probe && !("file" in probe)) for (const held of probe.leases) held.release();
 		if (!session) {
-			result.errors.push(`${sessionPath} is not a session file`);
+			result.errors.push(why ?? `${sessionPath} is not a session file`);
 			await keepTree();
 		} else if (listed?.failure) {
 			result.errors.push(listed.failure);
 			await keepTree();
-		} else if (!probe) {
-			result.errors.push(
-				`a running process owns ${sessionPath} or one of its subagent sessions; close it and reclaim again`,
-			);
+		} else if (probe && "file" in probe) {
+			result.errors.push(treeRefusal(probe));
 			await keepTree();
 		}
 		const transcriptStat = await fs.stat(sessionPath);
@@ -3780,9 +3854,10 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 			await keepTree();
 			result.errors.push(transcriptCopy);
 		}
-		if (!(await holdsLive())) {
+		const notHeld = await notHeldLive();
+		if (notHeld) {
 			await keepTree();
-			result.errors.push(notACopy());
+			result.errors.push(notHeld);
 			return result;
 		}
 		const transcriptTarget = (await lookAt(sessionPath))?.target;
@@ -3853,10 +3928,10 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 	// between the proof and the lease, and the move then runs against a
 	// reading that is already stale. And a parent's lease says nothing about
 	// the subagent sessions below it, whose files this moves too.
-	const session = await readRegularSessionInfo(sessionPath).catch(() => undefined);
+	const { session, why } = await readSession();
 	if (!session) {
 		await keepTree();
-		result.errors.push(`${sessionPath} is not a session file`);
+		result.errors.push(why ?? `${sessionPath} is not a session file`);
 		return result;
 	}
 	const listed = await sessionTree(session);
@@ -3865,14 +3940,13 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 		result.errors.push(listed.failure);
 		return result;
 	}
-	const tree = await tryAcquireSessionTreeLeases(session, listed.files ?? []);
-	if (!tree) {
+	const leasedTree = await tryAcquireSessionTreeLeases(session, listed.files ?? []);
+	if ("file" in leasedTree) {
 		await keepTree();
-		result.errors.push(
-			`a running process owns ${sessionPath} or one of its subagent sessions; close it and reclaim again`,
-		);
+		result.errors.push(treeRefusal(leasedTree));
 		return result;
 	}
+	const tree = leasedTree;
 	// Every directory the proof below holds, closed once the run is done —
 	// never before, so no other directory can take an inode number this run
 	// still decides by — and every file leased before the moves.
@@ -3891,9 +3965,10 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 			result.errors.push(transcriptCopy);
 			return result;
 		}
-		if (!(await holdsLive())) {
+		const notHeld = await notHeldLive();
+		if (notHeld) {
 			await keepTree();
-			result.errors.push(notACopy());
+			result.errors.push(notHeld);
 			return result;
 		}
 		// The root is taken as the entry proved here and checked again as it

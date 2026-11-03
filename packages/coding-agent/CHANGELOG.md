@@ -46,6 +46,7 @@
 - The subagent HUD marks each running agent with the running status glyph instead of a dot ([#17732](https://github.com/can1357/oh-my-pi/pull/17732) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 
 ### Fixed
+- `omp gc` reports only what it saw. A failed look — a transcript it cannot read, an owner it cannot probe, a comparison or a permission probe that fails, a lease the kernel refuses with a permission error — is reported as a failed check, with its error, never as "not a session file", "a running process owns", "not a copy", "not writable", or "this user does not own it"; and a restore that moved a transcript home before its tree could not follow says so, never "nothing was moved" ([#17488](https://github.com/can1357/oh-my-pi/pull/17488) by [@sjawhar](https://github.com/sjawhar))
 - A gc lock left by a run that is no longer running, which gc cannot remove, is reported as that, with why, instead of "GC already running"; and a run that cannot remove its own gc lock says so in its result (`lockNotReleased`, and among the errors), since the lock it leaves names its process and every later run while that process lives would refuse ([#17488](https://github.com/can1357/oh-my-pi/pull/17488) by [@sjawhar](https://github.com/sjawhar))
 
 - A session archived by `omp gc --archive` resumes and exports again: `omp --resume <id>` finds it and brings it back, and `omp --export=<file>.jsonl.gz` reads it ([#17488](https://github.com/can1357/oh-my-pi/pull/17488) by [@sjawhar](https://github.com/sjawhar))
