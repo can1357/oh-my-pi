@@ -33,6 +33,7 @@ export interface Args {
 	provider?: string;
 	model?: string;
 	config?: string[];
+	modelsConfig?: string;
 	smol?: string;
 	slow?: string;
 	plan?: string;
