@@ -406,12 +406,6 @@ const CANCEL_READER_GRACE: Duration = Duration::from_millis(2000);
 #[cfg(not(windows))]
 const CANCEL_READER_GRACE: Duration = Duration::from_millis(1250);
 
-/// The longest a cancelled run waits for its termination to finish before it
-/// closes output or drops process handles anyway. The termination itself
-/// takes at most a few seconds (spawns in flight, the TERM grace, the KILL
-/// waves); this only bounds a run whose termination task never ran.
-const TERMINATION_WAIT_LIMIT: Duration = Duration::from_secs(10);
-
 /// Poll only the persistent session's background children, never process-wide
 /// waitpid: foreground runs and other shells own their own child handles.
 /// Finished jobs keep their statuses so `wait` can consume them on a later run.
@@ -468,10 +462,12 @@ async fn run_shell_session(
 	let spawn_registry = Arc::new(process::SpawnRegistry::new());
 	let process_cancel_bridge = tokio::spawn({
 		let tokio_cancel = tokio_cancel.clone();
-		let spawn_registry = spawn_registry.clone();
+		// The bridge owns the termination mark from now on, so the run's
+		// termination is recorded finished even if the bridge never runs.
+		let mark = spawn_registry.termination_mark();
 		async move {
 			tokio_cancel.cancelled().await;
-			terminate_run(&spawn_registry).await;
+			terminate_run(mark.registry()).await;
 		}
 	});
 
@@ -516,7 +512,7 @@ async fn run_shell_session(
 			// The bridge owns TERM, its grace and KILL. Aborting the run task or
 			// clearing the session drops process handles, and each drop kills its
 			// process, so neither happens before the bridge has finished.
-			spawn_registry.wait_terminated(TERMINATION_WAIT_LIMIT).await;
+			spawn_registry.wait_terminated().await;
 			let graceful = time::timeout(CANCEL_RUN_GRACE, &mut run_task).await;
 			if graceful.is_err() {
 				run_task.abort();
@@ -571,10 +567,10 @@ async fn run_shell_oneshot(
 	let spawn_registry = Arc::new(process::SpawnRegistry::new());
 	let process_cancel_bridge = tokio::spawn({
 		let tokio_cancel = tokio_cancel.clone();
-		let spawn_registry = spawn_registry.clone();
+		let mark = spawn_registry.termination_mark();
 		async move {
 			tokio_cancel.cancelled().await;
-			terminate_run(&spawn_registry).await;
+			terminate_run(mark.registry()).await;
 		}
 	});
 
@@ -597,7 +593,7 @@ async fn run_shell_oneshot(
 		reason = ct.wait() => {
 			tokio_cancel.cancel();
 			// See `run_shell_session`: the bridge finishes before handles drop.
-			spawn_registry.wait_terminated(TERMINATION_WAIT_LIMIT).await;
+			spawn_registry.wait_terminated().await;
 			let graceful = time::timeout(CANCEL_RUN_GRACE, &mut task).await;
 			if graceful.is_err() {
 				task.abort();
@@ -638,10 +634,10 @@ async fn run_shell_oneshot_streams(
 	let spawn_registry = Arc::new(process::SpawnRegistry::new());
 	let process_cancel_bridge = tokio::spawn({
 		let tokio_cancel = tokio_cancel.clone();
-		let spawn_registry = spawn_registry.clone();
+		let mark = spawn_registry.termination_mark();
 		async move {
 			tokio_cancel.cancelled().await;
-			terminate_run(&spawn_registry).await;
+			terminate_run(mark.registry()).await;
 		}
 	});
 
@@ -665,7 +661,7 @@ async fn run_shell_oneshot_streams(
 		reason = ct.wait() => {
 			tokio_cancel.cancel();
 			// See `run_shell_session`: the bridge finishes before handles drop.
-			spawn_registry.wait_terminated(TERMINATION_WAIT_LIMIT).await;
+			spawn_registry.wait_terminated().await;
 			let graceful = time::timeout(CANCEL_RUN_GRACE, &mut task).await;
 			if graceful.is_err() {
 				task.abort();
@@ -1498,7 +1494,7 @@ async fn run_shell_command_once(
 		let spawn_registry = spawn_registry.clone();
 		async move {
 			cancel_token.cancelled().await;
-			spawn_registry.wait_terminated(TERMINATION_WAIT_LIMIT).await;
+			spawn_registry.wait_terminated().await;
 			time::sleep(CANCEL_READER_GRACE).await;
 			reader_cancel.cancel();
 		}
@@ -1650,7 +1646,7 @@ async fn run_shell_command_streams_in_filesystem(
 		let spawn_registry = spawn_registry.clone();
 		async move {
 			cancel_token.cancelled().await;
-			spawn_registry.wait_terminated(TERMINATION_WAIT_LIMIT).await;
+			spawn_registry.wait_terminated().await;
 			time::sleep(CANCEL_READER_GRACE).await;
 			reader_cancel.cancel();
 		}
@@ -1933,7 +1929,7 @@ async fn terminate_background_jobs(shell: &mut BrushShell, registry: &process::S
 	// hard-kills children while their TERM traps are still running; a grace
 	// of our own, counted from now, can end before the bridge's TERM has even
 	// been sent.
-	registry.wait_terminated(TERMINATION_WAIT_LIMIT).await;
+	registry.wait_terminated().await;
 	for job in &mut shell.jobs_mut().jobs {
 		job.abort_internal_tasks();
 	}
@@ -7809,6 +7805,14 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 			// The cancel lands while brush waits for an earlier stage. (A bare
 			// `sleep` is a builtin and spawns nothing, so `sh -c` runs it.)
 			("sh -c 'sleep 0.3' | sh -c 'sleep 0.6; : > done'", 2, Duration::from_millis(100)),
+			// The cancel ends a later stage while it expands its words: the
+			// command substitution observes the cancel, and the next word's
+			// check returns the interruption.
+			(
+				"sh -c 'sleep 0.3; : > done' | cat \"$(while :; do :; done)\" suffix",
+				1,
+				Duration::from_millis(100),
+			),
 		];
 		let mut killed = Vec::new();
 		for (command, after, delay) in cases {
@@ -7963,10 +7967,15 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 	}
 
 	/// Cancels a `run_shell_command` once its command has created `ready`,
-	/// and plays a host whose termination starts 700 ms later (it waits for
-	/// spawns in flight first). Returns the streamed output.
+	/// and plays a host whose termination starts `delay` later (it waits for
+	/// spawns in flight first; a loaded host can take longer). Returns the
+	/// streamed output.
 	#[cfg(unix)]
-	async fn run_with_late_termination(root: &std::path::Path, command: &str) -> String {
+	async fn run_with_late_termination(
+		root: &std::path::Path,
+		command: &str,
+		delay: Duration,
+	) -> String {
 		let config = ShellConfig {
 			session_env:   None,
 			snapshot_path: None,
@@ -7994,7 +8003,7 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 					time::sleep(Duration::from_millis(5)).await;
 				}
 				cancel.cancel();
-				time::sleep(Duration::from_millis(700)).await;
+				time::sleep(delay).await;
 				terminate_run(&registry).await;
 			}
 		});
@@ -8008,48 +8017,55 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 		output
 	}
 
-	/// The output stays open until the run's termination has finished. It
-	/// used to close a fixed 1,250 ms after the cancel, so a trap that wrote
-	/// output after a host TERM that came 700 ms after the cancel died of
-	/// EPIPE before it finished its cleanup.
+	/// The output stays open until the run's termination has finished,
+	/// however late it is. It used to close a fixed 1,250 ms after the cancel,
+	/// and then 1,250 ms after a wait capped at 10 s, so a trap that wrote
+	/// output after a late host TERM died of EPIPE before it finished its
+	/// cleanup.
 	#[cfg(unix)]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn output_stays_open_until_a_late_termination_ends() {
 		let _guard = shell_test_lock().lock().await;
-		let root = tempfile::tempdir().expect("marker directory");
-		let output = run_with_late_termination(
-			root.path(),
-			"sh -c \"trap 'sleep 0.65; echo flushing; : > done; exit 0' TERM; : > ready; while :; do \
-			 :; done\"",
-		)
-		.await;
-		assert!(
-			root.path().join("done").exists(),
-			"the trap died before it finished; output: {output:?}"
-		);
-		assert!(output.contains("flushing"), "the trap's output was lost: {output:?}");
+		for delay in [Duration::from_millis(700), Duration::from_secs(11)] {
+			let root = tempfile::tempdir().expect("marker directory");
+			let output = run_with_late_termination(
+				root.path(),
+				"sh -c \"trap 'sleep 0.65; echo flushing; : > done; exit 0' TERM; : > ready; while :; \
+				 do :; done\"",
+				delay,
+			)
+			.await;
+			assert!(
+				root.path().join("done").exists(),
+				"{delay:?}: the trap died before it finished; output: {output:?}"
+			);
+			assert!(output.contains("flushing"), "{delay:?}: the trap's output was lost: {output:?}");
+		}
 	}
 
 	/// Background jobs are torn down only after the run's termination has
-	/// finished. The teardown used to wait a grace of its own, counted from
-	/// when brush returned, and then abort the in-shell job, which dropped its
-	/// child's handle and killed the child's trap during a host TERM grace
-	/// that started later.
+	/// finished, however late it is. The teardown used to wait a grace of its
+	/// own, counted from when brush returned, and then a wait capped at 10 s,
+	/// and then abort the in-shell job, which dropped its child's handle and
+	/// killed the child's trap during a host TERM grace that started later.
 	#[cfg(unix)]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn background_teardown_waits_for_a_late_termination() {
 		let _guard = shell_test_lock().lock().await;
-		let root = tempfile::tempdir().expect("marker directory");
-		let _ = run_with_late_termination(
-			root.path(),
-			"{ sh -c \"trap 'sleep 0.65; : > done; exit 0' TERM; : > ready; while :; do :; done\"; } \
-			 & sleep 30",
-		)
-		.await;
-		assert!(
-			root.path().join("done").exists(),
-			"the background trap was killed before it finished"
-		);
+		for delay in [Duration::from_millis(700), Duration::from_secs(11)] {
+			let root = tempfile::tempdir().expect("marker directory");
+			let _ = run_with_late_termination(
+				root.path(),
+				"{ sh -c \"trap 'sleep 0.65; : > done; exit 0' TERM; : > ready; while :; do :; \
+				 done\"; } & sleep 30",
+				delay,
+			)
+			.await;
+			assert!(
+				root.path().join("done").exists(),
+				"{delay:?}: the background trap was killed before it finished"
+			);
+		}
 	}
 
 	#[tokio::test(flavor = "multi_thread")]

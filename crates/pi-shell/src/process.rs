@@ -2,7 +2,10 @@
 
 use std::{
 	collections::{HashMap, HashSet},
-	sync::atomic::{AtomicUsize, Ordering},
+	sync::{
+		Arc,
+		atomic::{AtomicUsize, Ordering},
+	},
 	time::Duration,
 };
 
@@ -1465,13 +1468,22 @@ impl SpawnRegistry {
 		self.terminated.clone()
 	}
 
-	/// Waits until the run's termination has finished, or for at most
-	/// `limit` (a caller that runs without the termination task must not wait
-	/// forever). Anything that would end a process sooner (closing its output,
-	/// dropping its handle) waits for this, so the termination's TERM grace is
-	/// the only one.
-	pub async fn wait_terminated(&self, limit: Duration) {
-		let _ = tokio::time::timeout(limit, self.terminated.cancelled()).await;
+	/// A mark that records the run's termination finished when it is dropped.
+	/// The run's termination task owns it from the moment the task is created,
+	/// so the record is made when the termination finishes, panics or is
+	/// aborted, and also when the task is dropped before it ever ran.
+	#[must_use]
+	pub fn termination_mark(self: &Arc<Self>) -> TerminationMark {
+		TerminationMark(Arc::clone(self))
+	}
+
+	/// Waits until the run's termination has finished. Anything that would
+	/// end a process sooner (closing its output, dropping its handle) waits for
+	/// this, so the termination's TERM grace is the only one. The termination
+	/// itself is bounded (spawns in flight, the TERM grace, the KILL waves),
+	/// and its [`TerminationMark`] makes the record even if it never runs.
+	pub async fn wait_terminated(&self) {
+		self.terminated.cancelled().await;
 	}
 
 	/// Record a freshly spawned child. Called from the spawn-observer hook.
@@ -1560,6 +1572,24 @@ impl SpawnRegistry {
 			}
 		}
 		targets
+	}
+}
+
+/// Records a run's termination finished when dropped; see
+/// [`SpawnRegistry::termination_mark`].
+pub struct TerminationMark(Arc<SpawnRegistry>);
+
+impl TerminationMark {
+	/// The registry whose termination this marks.
+	#[must_use]
+	pub fn registry(&self) -> &SpawnRegistry {
+		&self.0
+	}
+}
+
+impl Drop for TerminationMark {
+	fn drop(&mut self) {
+		self.0.mark_terminated();
 	}
 }
 

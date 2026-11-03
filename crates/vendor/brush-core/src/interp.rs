@@ -1052,9 +1052,17 @@ async fn spawn_pipeline_processes(
 			}
 		};
 
-		let spawn_result = command
-			.execute_in_pipeline(pipeline_context, cmd_params)
-			.await?;
+		let spawn_result = match command.execute_in_pipeline(pipeline_context, cmd_params).await {
+			Ok(spawn_result) => spawn_result,
+			// A cancellation can end a later stage while it expands its words
+			// (a command substitution observes it); the stages already started
+			// still get their grace instead of the SIGKILL their dropped handles
+			// would send.
+			Err(_) if params.is_cancelled() => {
+				return Err(interrupted_after_waiting(spawn_results, params).await);
+			},
+			Err(err) => return Err(err),
+		};
 
 		// Update the process group ID if something was spawned.
 		if let ExecutionSpawnResult::StartedProcess(child) = &spawn_result {
