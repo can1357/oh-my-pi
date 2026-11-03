@@ -128,7 +128,7 @@ Hook events are strongly typed in `types.ts`.
 
 ### Agent/context events
 
-- `context` → can return `{ messages?: Message[] }`
+- `context` → can return `{ messages?: AgentMessage[] }`
 - `before_agent_start` → can return `{ message?: { customType; content; display; details; attribution } }`
 - `agent_start`
 - `agent_end`
