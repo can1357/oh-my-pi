@@ -13,6 +13,7 @@
 - `omp -p` text mode now prints each automatic retry with its error (for example "Couldn't reach api.anthropic.com … check your network") instead of showing only `Working...` while a turn retries ([#17529](https://github.com/can1357/oh-my-pi/pull/17529) by [@Mannan-Goyal](https://github.com/Mannan-Goyal))
 - Extension examples and the extensions README now give `registerTool`'s `execute` arguments in the order omp passes them, `(toolCallId, params, signal, onUpdate, ctx)`, and `params` is typed from an inline `parameters: z.object(...)` instead of `unknown` ([#17803](https://github.com/can1357/oh-my-pi/pull/17803) by [@sjawhar](https://github.com/sjawhar))
 - Fixed the pirate extension example (it returned a `before_agent_start` field omp no longer reads) and the SDK examples and READMEs that used removed model APIs or iterated an unawaited Promise; coding-agent's type check now covers its examples ([#17803](https://github.com/can1357/oh-my-pi/pull/17803) by [@sjawhar](https://github.com/sjawhar))
+- The extension docs' quick start, tool template and `tool_call` guards, and the extensions and hooks example READMEs, now type-check: `tool_call` handlers read `event.input.command` after checking the tool name and convert it with `String(...)`, and the template's `renderCall`/`renderResult` return a component. A test keeps type-checked copies of these snippets identical to the docs ([#17803](https://github.com/can1357/oh-my-pi/pull/17803) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.15.0] - 2026-11-01
 

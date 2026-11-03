@@ -81,8 +81,10 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("tool_call", async event => {
-		const command = event.input.command;
-		if (event.toolName === "bash" && typeof command === "string" && command.includes("rm -rf")) {
+		if (event.toolName !== "bash") return;
+		// Custom tools share this event, so `input` is not narrowed by the name; read fields defensively.
+		const command = String(event.input.command ?? "");
+		if (command.includes("rm -rf")) {
 			return { block: true, reason: "Blocked by extension policy" };
 		}
 	});
@@ -740,6 +742,8 @@ are already approved as, and delegation depth is guarded against accidental self
 Template:
 
 ```ts
+import { Text } from "@oh-my-pi/pi-tui";
+
 const z = pi.zod;
 
 pi.registerTool({
@@ -760,11 +764,13 @@ pi.registerTool({
 	onSession(event, ctx) {
 		// reason: start|switch|branch|tree|shutdown
 	},
-	renderCall(args, options, theme) {
-		// optional TUI render
+	// Optional TUI renderers; each returns a component.
+	renderCall(_args, _options, theme) {
+		return new Text(theme.fg("toolTitle", "my_tool"), 0, 0);
 	},
-	renderResult(result, options, theme, args) {
-		// optional TUI render
+	renderResult(result, _options, theme) {
+		const text = result.content.find(block => block.type === "text")?.text ?? "";
+		return new Text(theme.fg("muted", text), 0, 0);
 	},
 });
 ```

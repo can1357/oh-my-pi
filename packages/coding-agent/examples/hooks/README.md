@@ -38,7 +38,7 @@ import type { HookAPI } from "@oh-my-pi/pi-coding-agent/extensibility/hooks";
 export default function (pi: HookAPI) {
 	// Subscribe to events
 	pi.on("tool_call", async (event, ctx) => {
-		if (event.toolName === "bash" && event.input.command?.includes("rm -rf")) {
+		if (event.toolName === "bash" && String(event.input.command ?? "").includes("rm -rf")) {
 			const ok = await ctx.ui.confirm("Dangerous!", "Allow rm -rf?");
 			if (!ok) return { block: true, reason: "Blocked by user" };
 		}
