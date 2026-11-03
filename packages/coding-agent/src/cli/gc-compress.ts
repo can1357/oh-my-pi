@@ -409,14 +409,18 @@ interface LeasedFile {
 /**
  * Lease the file open at `handle`, which `file` names, and read under the
  * lease what it holds and carries: the {@link LeasedFile}, or the clause
- * saying why it is not this run's to vouch for — another process holds it
- * open, or the kernel gives no lease here. The caller closes `handle`.
+ * saying why it is not this run's to vouch for — the file is open through
+ * another descriptor, or the kernel gives no lease here. A refused lease
+ * says only that some other open of the file exists; it can be this
+ * process's own, so the clause names no process. The caller closes `handle`.
  */
 async function leaseFile(file: string, handle: fs.FileHandle): Promise<LeasedFile | string> {
 	const lease = takeSoleOpenLease(handle.fd);
-	if (lease.outcome === "open-elsewhere") return `${file} is open in another process (${lease.evidence})`;
+	if (lease.outcome === "open-elsewhere") {
+		return `${file} is open through another descriptor, in this process or another (${lease.evidence})`;
+	}
 	if (lease.outcome === "unproved") {
-		return `${file} cannot be shown to be open in no other process: ${lease.meaning} (${lease.evidence})`;
+		return `${file} cannot be shown to be open through no other descriptor: ${lease.meaning} (${lease.evidence})`;
 	}
 	const { dev, ino } = await handle.stat();
 	return { handle, dev, ino, proof: await digestOfHandle(handle), metadata: await carriedMetadata(handle) };
@@ -896,8 +900,12 @@ async function settleExchange(
 	return await exchangeBack(file, copyPath, copy, giveBack);
 }
 
-/** How an open reached a leased file, as a phrase: the lease shows an open's attempt, made or refused, not which. */
-const OPENED = "was opened, or an open of it was tried, by another process";
+/**
+ * How an open reached a leased file, as a phrase. A broken lease shows that
+ * an open was made or tried, not which, and not by whom: it can be through
+ * another descriptor of this very process.
+ */
+const OPENED = "was opened, or an open of it was tried, through another descriptor";
 
 /**
  * Why `original`, exchanged to the scratch name, is no longer what was

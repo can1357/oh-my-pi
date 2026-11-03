@@ -2253,7 +2253,9 @@ describe("runGcCommand session compression", () => {
 				expect(state.nlink).toBe(1);
 				expect((await fs.readFile(copy!)).subarray(-17).toString()).toBe("ONLY WRITER BYTES");
 				expect(result.compressed).toBe(0);
-				expect(result.errors.join("\n")).toContain(`${copy} cannot be shown to be open in no other process`);
+				expect(result.errors.join("\n")).toContain(
+					`${copy} cannot be shown to be open through no other descriptor`,
+				);
 			});
 
 			// Round 3's review: a process that opened the scratch copy after its
@@ -2279,7 +2281,7 @@ describe("runGcCommand session compression", () => {
 				expect(state.nlink).toBe(1);
 				expect((await fs.readFile(copy!)).subarray(-17).toString()).toBe("ONLY WRITER BYTES");
 				expect(result.errors.join("\n")).toContain(
-					`${copy} was opened, or an open of it was tried, by another process after this run proved it`,
+					`${copy} was opened, or an open of it was tried, through another descriptor after this run proved it`,
 				);
 			});
 
@@ -2305,7 +2307,31 @@ describe("runGcCommand session compression", () => {
 				const state = await writer!.append();
 
 				expect(state.nlink).toBe(1);
-				expect(String(failure)).toContain(`${probe} is open in another process`);
+				expect(String(failure)).toContain(
+					`${probe} is open through another descriptor, in this process or another`,
+				);
+			});
+
+			// Round 13's review: an original this very process held open was
+			// reported as open in another process. A refused lease says only that
+			// another open exists, so the report names no process, and a write
+			// through that descriptor stays in the session.
+			test("an original this process holds open keeps its place, and the report names no other process", async () => {
+				await metadataDitto(true);
+				const { file, candidate } = await privateZeros();
+				const before = await fs.stat(file);
+				const held = await fs.open(file, "r+");
+				onTestFinished(() => held.close().catch(() => undefined));
+
+				const result = await gcCompress.compressFilesInPlace([candidate], "apfs", new Set([file]));
+				await held.write(Buffer.from("ONLY OWN WRITER BYTES"), 0, 21, 1024 * 1024);
+
+				expect((await fs.stat(file)).ino).toBe(before.ino);
+				expect((await fs.readFile(file)).subarray(-21).toString()).toBe("ONLY OWN WRITER BYTES");
+				expect(result.compressed).toBe(0);
+				const said = result.errors.join("\n");
+				expect(said).toContain(`${file} is open through another descriptor, in this process or another`);
+				expect(said).not.toContain("another process");
 			});
 
 			// Round 3's review: a write to the original through a descriptor
@@ -2323,7 +2349,9 @@ describe("runGcCommand session compression", () => {
 				expect((await fs.stat(file)).ino).toBe(before.ino);
 				expect((await fs.readFile(file)).subarray(-26).toString()).toBe("ONLY ORIGINAL WRITER BYTES");
 				expect(result.compressed).toBe(0);
-				expect(result.errors.join("\n")).toContain(`${file} is open in another process`);
+				expect(result.errors.join("\n")).toContain(
+					`${file} is open through another descriptor, in this process or another`,
+				);
 			});
 
 			// Round 3's review: a write to the original by its name between gc's
@@ -2348,7 +2376,7 @@ describe("runGcCommand session compression", () => {
 				expect(bytes.subarray(0, 1024 * 1024)).toEqual(Buffer.alloc(1024 * 1024));
 				expect(bytes.subarray(1024 * 1024).toString()).toBe("ONLY ORIGINAL WRITER BYTES");
 				expect(result.errors.join("\n")).toContain(
-					`${file} was opened, or an open of it was tried, by another process as it was compressed`,
+					`${file} was opened, or an open of it was tried, through another descriptor as it was compressed`,
 				);
 			});
 
@@ -2768,7 +2796,7 @@ describe("runGcCommand session compression", () => {
 						const deadline = Date.now() + 10_000;
 						while (openFileHolders.soleOpenLeaseStands(fdOf(file)) && Date.now() < deadline) await Bun.sleep(20);
 					},
-					said: "the compressed copy was opened, or an open of it was tried, by another process as it was given back",
+					said: "the compressed copy was opened, or an open of it was tried, through another descriptor as it was given back",
 					kept: async (): Promise<boolean> => {
 						expect(await blockingWriter!.exited).toBe(0);
 						return (await filesUnder(root)).some(
