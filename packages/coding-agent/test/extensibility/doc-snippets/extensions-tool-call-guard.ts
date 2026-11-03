@@ -1,4 +1,4 @@
-// Type-checked copy of a snippet in docs/extensions.md; test/extensibility/doc-snippets.test.ts keeps the two identical.
+// Type-checked copy of block 1 under "### Adding passive context after a tool call" in docs/extensions.md; test/extensibility/doc-snippets.test.ts keeps the two identical.
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 
 declare const pi: ExtensionAPI;

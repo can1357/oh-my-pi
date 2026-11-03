@@ -1,4 +1,4 @@
-// Type-checked copy of a snippet in docs/extensions.md; test/extensibility/doc-snippets.test.ts keeps the two identical.
+// Type-checked copy of block 2 under "### Delegating to a native built-in (`ctx.invokeTool`)" in docs/extensions.md; test/extensibility/doc-snippets.test.ts keeps the two identical.
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 
 declare const pi: ExtensionAPI;

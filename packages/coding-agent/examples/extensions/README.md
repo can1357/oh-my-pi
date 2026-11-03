@@ -122,17 +122,21 @@ parameters: z.object({
 
 **State persistence via details:**
 
+In the tool's `execute`, store state in the result's `details` for proper branching support:
+
 ```typescript
-// Store state in tool result details for proper branching support
 return {
 	content: [{ type: "text", text: "Done" }],
 	details: { todos: [...todos], nextId }, // Persisted in session
 };
+```
 
-// Reconstruct on session events
+Reconstruct it on session events:
+
+```typescript
 pi.on("session_start", async (_event, ctx) => {
 	for (const entry of ctx.sessionManager.getBranch()) {
-		if (entry.type === "message" && entry.message.toolName === "my_tool") {
+		if (entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolName === "my_tool") {
 			const details = entry.message.details;
 			// Reconstruct state from details
 		}

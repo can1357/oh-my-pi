@@ -1,4 +1,4 @@
-// Type-checked copy of a snippet in packages/coding-agent/examples/extensions/README.md; test/extensibility/doc-snippets.test.ts keeps the two identical.
+// Type-checked copy of block 1 under "## Writing Extensions" in packages/coding-agent/examples/extensions/README.md; test/extensibility/doc-snippets.test.ts keeps the two identical.
 // ---- documented snippet below, verbatim ----
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 

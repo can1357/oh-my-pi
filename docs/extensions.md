@@ -237,7 +237,7 @@ names are reserved), and `streamSimple` returns the canonical
 `AssistantMessageEventStream`; it does not need to be an HTTP endpoint:
 
 ```ts
-import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai";
+import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 
 export default function (pi: ExtensionAPI) {

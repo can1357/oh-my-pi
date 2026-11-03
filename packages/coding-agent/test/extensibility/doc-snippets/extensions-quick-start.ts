@@ -1,4 +1,4 @@
-// Type-checked copy of a snippet in docs/extensions.md; test/extensibility/doc-snippets.test.ts keeps the two identical.
+// Type-checked copy of block 1 under "## Quick start" in docs/extensions.md; test/extensibility/doc-snippets.test.ts keeps the two identical.
 // ---- documented snippet below, verbatim ----
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 
