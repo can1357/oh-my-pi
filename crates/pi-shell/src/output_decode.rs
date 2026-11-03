@@ -248,10 +248,8 @@ pub struct CaptureDecoder {
 enum CaptureMode {
 	/// No ANSI fallback: UTF-8, invalid sequences as U+FFFD.
 	Utf8(OutputDecoder),
-	/// The current line from its first non-ASCII byte on, held until the line
-	/// ends; ASCII before it reads the same in every code page.
 	#[cfg(windows)]
-	Lines { codepage: u32, held: Vec<u8> },
+	Lines(LineDecoder),
 }
 
 impl Default for CaptureDecoder {
@@ -277,8 +275,8 @@ impl CaptureDecoder {
 	/// Judges lines against `codepage`. Used by tests so code-page fixtures
 	/// run on any Windows host.
 	#[cfg(windows)]
-	const fn with_codepage(codepage: u32) -> Self {
-		Self { mode: CaptureMode::Lines { codepage, held: Vec::new() } }
+	fn with_codepage(codepage: u32) -> Self {
+		Self { mode: CaptureMode::Lines(LineDecoder::new(codepage)) }
 	}
 
 	/// Push the next pipe read. Returns text that is safe to emit now.
@@ -286,7 +284,7 @@ impl CaptureDecoder {
 		match &mut self.mode {
 			CaptureMode::Utf8(decoder) => decoder.push(bytes),
 			#[cfg(windows)]
-			CaptureMode::Lines { codepage, held } => push_lines(*codepage, held, bytes),
+			CaptureMode::Lines(lines) => lines.push(bytes),
 		}
 	}
 
@@ -296,20 +294,17 @@ impl CaptureDecoder {
 		match &self.mode {
 			CaptureMode::Utf8(_) => false,
 			#[cfg(windows)]
-			CaptureMode::Lines { held, .. } => !held.is_empty(),
+			CaptureMode::Lines(lines) => lines.holds_undecided(),
 		}
 	}
 
-	/// Judges the held part of the line as if it ended here.
+	/// Judges the held part of the line as if it ended here, except for an
+	/// incomplete UTF-8 character at its end, which waits for its next bytes.
 	pub fn flush_line(&mut self) -> String {
 		match &mut self.mode {
 			CaptureMode::Utf8(_) => String::new(),
 			#[cfg(windows)]
-			CaptureMode::Lines { codepage, held } => {
-				let text = judge_line(*codepage, held);
-				held.clear();
-				text
-			},
+			CaptureMode::Lines(lines) => lines.flush_complete(),
 		}
 	}
 
@@ -318,65 +313,134 @@ impl CaptureDecoder {
 		match &mut self.mode {
 			CaptureMode::Utf8(decoder) => decoder.finish(),
 			#[cfg(windows)]
-			CaptureMode::Lines { .. } => self.flush_line(),
+			CaptureMode::Lines(lines) => lines.finish(),
 		}
 	}
 }
 
-/// Emits ASCII as it comes and each line holding other bytes once it ends.
+/// Judges the capture line by line against an ANSI code page.
 #[cfg(windows)]
-fn push_lines(codepage: u32, held: &mut Vec<u8>, mut bytes: &[u8]) -> String {
-	let mut out = String::with_capacity(bytes.len());
-	loop {
-		if held.is_empty() {
-			let ascii = bytes
-				.iter()
-				.position(|byte| !byte.is_ascii())
-				.unwrap_or(bytes.len());
-			// SAFETY: ASCII is valid UTF-8.
-			out.push_str(unsafe { str::from_utf8_unchecked(&bytes[..ascii]) });
-			bytes = &bytes[ascii..];
-			if bytes.is_empty() {
+struct LineDecoder {
+	codepage:  u32,
+	/// Whether the code page has multibyte characters, so that a UTF-8
+	/// character cut short can also read as one (CP949 `EA B0` is 媛). In a
+	/// single-byte page a lone `E9` at a line's end is `é`, not a cut.
+	multibyte: bool,
+	/// The current line from its first non-ASCII byte on, held until the line
+	/// ends; ASCII before it reads the same in every code page.
+	held:      Vec<u8>,
+	/// Whether `held` is only an incomplete UTF-8 character that a flush kept
+	/// for its next bytes, so there is nothing to judge until they come.
+	tail_kept: bool,
+}
+
+#[cfg(windows)]
+impl LineDecoder {
+	fn new(codepage: u32) -> Self {
+		Self { codepage, multibyte: max_char_size(codepage) > 1, held: Vec::new(), tail_kept: false }
+	}
+
+	/// Emits ASCII as it comes and each line holding other bytes once it ends.
+	fn push(&mut self, mut bytes: &[u8]) -> String {
+		self.tail_kept = false;
+		let mut out = String::with_capacity(bytes.len());
+		loop {
+			if self.held.is_empty() {
+				let ascii = bytes
+					.iter()
+					.position(|byte| !byte.is_ascii())
+					.unwrap_or(bytes.len());
+				// SAFETY: ASCII is valid UTF-8.
+				out.push_str(unsafe { str::from_utf8_unchecked(&bytes[..ascii]) });
+				bytes = &bytes[ascii..];
+				if bytes.is_empty() {
+					return out;
+				}
+			}
+			let Some(end) = bytes.iter().position(|&byte| byte == b'\n') else {
+				self.held.extend_from_slice(bytes);
+				if self.held.len() >= MAX_HELD_LINE {
+					out.push_str(&self.flush_complete());
+				}
 				return out;
-			}
+			};
+			self.held.extend_from_slice(&bytes[..end]);
+			out.push_str(&self.judge(&self.held));
+			self.held.clear();
+			out.push('\n');
+			bytes = &bytes[end + 1..];
 		}
-		let Some(end) = bytes.iter().position(|&byte| byte == b'\n') else {
-			held.extend_from_slice(bytes);
-			if held.len() >= MAX_HELD_LINE {
-				out.push_str(&judge_line(codepage, held));
-				held.clear();
-			}
-			return out;
-		};
-		held.extend_from_slice(&bytes[..end]);
-		out.push_str(&judge_line(codepage, held));
-		held.clear();
-		out.push('\n');
-		bytes = &bytes[end + 1..];
+	}
+
+	const fn holds_undecided(&self) -> bool {
+		!self.held.is_empty() && !self.tail_kept
+	}
+
+	/// Judges the held bytes as if the line ended here, keeping an incomplete
+	/// UTF-8 character at their end for its next bytes.
+	fn flush_complete(&mut self) -> String {
+		let end = self.held.len() - incomplete_utf8_tail(&self.held);
+		let text = self.judge(&self.held[..end]);
+		self.held.drain(..end);
+		self.tail_kept = !self.held.is_empty();
+		text
+	}
+
+	fn finish(&mut self) -> String {
+		let text = self.judge(&self.held);
+		self.held.clear();
+		self.tail_kept = false;
+		text
+	}
+
+	/// Decodes one line, or the part of it from its first non-ASCII byte.
+	/// Valid UTF-8 is UTF-8. Otherwise it is ANSI text when it strict-decodes
+	/// in the code page and reads worse as UTF-8 — fewer valid multibyte
+	/// characters than invalid sequences — unless, in a multibyte page, its
+	/// only flaw is a character cut short at its end, as `cut -c` and
+	/// `head -c` leave. Anything else is UTF-8 with U+FFFD, so `ok\xeb` loses
+	/// one byte, not the lines after it.
+	fn judge(&self, bytes: &[u8]) -> String {
+		if let Ok(text) = str::from_utf8(bytes) {
+			return text.to_owned();
+		}
+		let shape = Utf8Shape::of(bytes);
+		let cut_short_only = self.multibyte && shape.invalid == 0 && shape.cut_tail;
+		if !cut_short_only
+			&& shape.multibyte < shape.invalid + usize::from(shape.cut_tail)
+			&& let Some(text) = decode_codepage(
+				self.codepage,
+				bytes,
+				windows_sys::Win32::Globalization::MB_ERR_INVALID_CHARS,
+			) {
+			return text;
+		}
+		String::from_utf8_lossy(bytes).into_owned()
 	}
 }
 
-/// Decodes one line, or the part of it from its first non-ASCII byte. Valid
-/// UTF-8 is UTF-8. Otherwise it is ANSI text when it strict-decodes in the
-/// code page and reads worse as UTF-8 — fewer valid multibyte characters
-/// than invalid sequences — unless its only flaw is a character cut short at
-/// its end, as `cut -c` and `head -c` leave. Anything else is UTF-8 with
-/// U+FFFD, so `ok\xeb` loses one byte, not the lines after it.
+/// Length of the incomplete UTF-8 character `bytes` end in, or 0.
 #[cfg(windows)]
-fn judge_line(codepage: u32, bytes: &[u8]) -> String {
-	if let Ok(text) = str::from_utf8(bytes) {
-		return text.to_owned();
-	}
-	let shape = Utf8Shape::of(bytes);
-	let cut_short_only = shape.invalid == 0 && shape.cut_tail;
-	if !cut_short_only
-		&& shape.multibyte < shape.invalid + usize::from(shape.cut_tail)
-		&& let Some(text) =
-			decode_codepage(codepage, bytes, windows_sys::Win32::Globalization::MB_ERR_INVALID_CHARS)
-	{
-		return text;
-	}
-	String::from_utf8_lossy(bytes).into_owned()
+fn incomplete_utf8_tail(bytes: &[u8]) -> usize {
+	(1..=bytes.len().min(3))
+		.find(|&len| {
+			str::from_utf8(&bytes[bytes.len() - len..])
+				.is_err_and(|err| err.valid_up_to() == 0 && err.error_len().is_none())
+		})
+		.unwrap_or(0)
+}
+
+/// The longest character of `codepage`, in bytes.
+#[cfg(windows)]
+fn max_char_size(codepage: u32) -> u32 {
+	let mut info = windows_sys::Win32::Globalization::CPINFO {
+		MaxCharSize: 0,
+		DefaultChar: [0; 2],
+		LeadByte:    [0; 12],
+	};
+	// SAFETY: `info` is a valid `CPINFO` for the call to fill.
+	let ok = unsafe { windows_sys::Win32::Globalization::GetCPInfo(codepage, &raw mut info) };
+	if ok == 0 { 1 } else { info.MaxCharSize }
 }
 
 /// How bytes read as UTF-8.
@@ -645,21 +709,21 @@ mod tests {
 	#[cfg(windows)]
 	#[test]
 	fn capture_stray_byte_spoils_only_its_line() {
-		for codepage in [949, 936, 932, 1252] {
-			assert_capture(codepage, b"ok\n\xeb\n\xed\x95\x9c\xea\xb8\x80\n", "ok\n\u{FFFD}\n한글\n");
-		}
-		// `FF` is no character in these pages (in CP1252 it is `ÿ`).
 		for codepage in [949, 936, 932] {
+			assert_capture(codepage, b"ok\n\xeb\n\xed\x95\x9c\xea\xb8\x80\n", "ok\n\u{FFFD}\n한글\n");
 			assert_capture(codepage, b"\xff\n\xed\x95\x9c\n", "\u{FFFD}\n한\n");
 		}
+		// In a single-byte page every such byte is a letter: `EB` is `ë`.
+		assert_capture(1252, b"ok\n\xeb\n\xed\x95\x9c\xea\xb8\x80\n", "ok\n\u{eb}\n한글\n");
 	}
 
-	/// `cut -c` and `head -c` cut UTF-8 characters short; the remnant is never
-	/// read as an ANSI character, though `EA B0` is one in CP949 and GBK.
+	/// `cut -c` and `head -c` cut UTF-8 characters short; in a multibyte page
+	/// the remnant is never read as an ANSI character, though `EA B0` is one
+	/// in CP949 and GBK.
 	#[cfg(windows)]
 	#[test]
 	fn capture_cut_characters_stay_utf8() {
-		for codepage in [949, 936, 1252] {
+		for codepage in [949, 936] {
 			assert_capture(
 				codepage,
 				b"\xea\xb0\x80\xeb\n\xed\x95\x9c\xea\n",
@@ -670,8 +734,39 @@ mod tests {
 				b"\xea\xb0\n\xeb\x8b\xa4\xec\x9d\x8c \xec\xa4\x84\n",
 				"\u{FFFD}\n다음 줄\n",
 			);
-			assert_capture(codepage, b"caf\xc3\n", "caf\u{FFFD}\n");
 		}
+	}
+
+	/// A single-byte page cannot tell a cut UTF-8 character from a letter, and
+	/// a legacy line ending in one (`cat` of CP1252 `caf\xe9`) keeps it.
+	#[cfg(windows)]
+	#[test]
+	fn capture_single_byte_page_keeps_a_letter_at_line_end() {
+		assert_capture(1252, b"caf\xe9\n", "café\n");
+		assert_capture(1252, b"caf\xe9", "café");
+	}
+
+	/// A character a builtin writes in two parts survives the idle flush
+	/// between them and the cap on a held line.
+	#[cfg(windows)]
+	#[test]
+	fn capture_flushes_keep_a_split_character() {
+		let mut decoder = CaptureDecoder::with_codepage(936);
+		assert_eq!(decoder.push(b"\xe4"), "");
+		assert_eq!(decoder.flush_line(), "");
+		assert!(!decoder.holds_line(), "a kept partial character must not re-arm the idle flush");
+		assert_eq!(decoder.push(b"\xb8\xad\n"), "中\n");
+
+		let mut line = "é".as_bytes().to_vec();
+		line.resize(MAX_HELD_LINE - 1, b'a');
+		line.push(0xe4);
+		let mut decoder = CaptureDecoder::with_codepage(936);
+		let mut out = decoder.push(&line);
+		out.push_str(&decoder.push(b"\xb8\xad\n"));
+		out.push_str(&decoder.finish());
+		let mut expected = String::from_utf8(line[..line.len() - 1].to_vec()).expect("prefix");
+		expected.push_str("中\n");
+		assert_eq!(out, expected);
 	}
 
 	/// Legacy ANSI output passed along by a builtin (`dir | head`, `cat` of a

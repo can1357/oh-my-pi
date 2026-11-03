@@ -16,11 +16,14 @@
 //! stays intact.
 //!
 //! A command's relays are drained before its exit is reported, so its output
-//! reaches the sink ahead of whatever the next command writes there.
+//! reaches the sink ahead of whatever the next command writes there. The
+//! drain waits until each relay has forwarded every byte the command left in
+//! its pipe, however long that takes; it stops early only for a relay that
+//! sits idle in a read, which a process the command left running holds open.
 
 use std::{
 	io::{self, PipeReader, Read, Write},
-	sync::Arc,
+	sync::{Arc, Weak},
 	time::Duration,
 };
 
@@ -44,30 +47,34 @@ pub trait ByteDecoder: Send {
 
 /// Bytes the relay moves per read.
 const RELAY_CHUNK: usize = 64 * 1024;
-/// How long a drain waits for a relay sitting in a read. The command has
-/// exited, so its output is already in the pipe; a relay that still finds
-/// nothing to read is held open by a process the command left running.
+/// How long a drain waits for a relay sitting in a read before taking its
+/// pipe as empty: when the pipe size cannot be read, or while a process the
+/// command left running holds the pipe open without writing.
 const DRAIN_IDLE: Duration = Duration::from_millis(100);
-/// Upper bound on a drain, for a left-running process that keeps writing or
-/// a sink that stopped taking text.
-const DRAIN_MAX: Duration = Duration::from_secs(2);
 
-/// What a relay thread is doing, as a drain sees it.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RelayState {
-	/// Waiting for the command's next bytes.
-	Reading,
-	/// Decoding or writing bytes it read.
-	Forwarding,
+/// What a relay thread has done, as a drain sees it.
+#[derive(Clone, Copy)]
+struct RelayProgress {
+	/// Whether it waits for the command's next bytes, rather than decoding
+	/// or writing bytes it read.
+	reading:  bool,
+	/// Bytes read from the command so far.
+	consumed: u64,
 }
 
-/// Observes one relay; closed once the relay finished.
-pub(crate) type RelayWatch = watch::Receiver<RelayState>;
+/// One relay as its command's drain sees it.
+pub(crate) struct RelayHandle {
+	/// Closed once the relay finished.
+	progress: watch::Receiver<RelayProgress>,
+	/// The relay's read end, to size what the command left in it; the relay
+	/// thread owns it, so it closes when the relay ends.
+	pipe:     Weak<PipeReader>,
+}
 
 struct Relay {
 	sink:   OpenFile,
 	writer: OpenFile,
-	state:  RelayWatch,
+	handle: RelayHandle,
 }
 
 /// The relays started for one external command.
@@ -94,46 +101,51 @@ impl OutputRelays {
 			return Ok(Some(relay.writer.clone()));
 		}
 		let (reader, writer) = ioutils::pipe("output relay")?;
-		let (state_tx, state) = watch::channel(RelayState::Forwarding);
+		let from = Arc::new(reader);
+		let pipe = Arc::downgrade(&from);
+		let (progress_tx, progress) =
+			watch::channel(RelayProgress { reading: false, consumed: 0 });
 		let decoder = decoding.decoder();
 		let to = target.clone();
 		std::thread::Builder::new()
 			.name("brush-output-relay".into())
-			.spawn(move || relay(reader, decoder, to, &state_tx))?;
+			.spawn(move || relay(&from, decoder, to, &progress_tx))?;
 		let writer = OpenFile::from(writer);
-		self.relays.push(Relay { sink: target.clone(), writer: writer.clone(), state });
+		self.relays.push(Relay {
+			sink: target.clone(),
+			writer: writer.clone(),
+			handle: RelayHandle { progress, pipe },
+		});
 		Ok(Some(writer))
 	}
 
-	/// Releases this side's handles to the relays and returns what a drain
-	/// waits on, or `None` when nothing was relayed.
-	pub(crate) fn into_drain(self) -> Option<Vec<RelayWatch>> {
-		if self.relays.is_empty() {
-			return None;
-		}
-		Some(self.relays.into_iter().map(|relay| relay.state).collect())
+	/// Releases this side's write ends and returns what a drain waits on.
+	pub(crate) fn into_handles(self) -> Vec<RelayHandle> {
+		self.relays.into_iter().map(|relay| relay.handle).collect()
 	}
 }
 
 /// Decodes `from` into `to` until every writer of `from` is closed or `to`
-/// stops accepting text, reporting each read and forward on `state`.
-/// Dropping `state` on return reports the relay finished.
+/// stops accepting text, reporting each read and forward on `progress`.
+/// Dropping `progress` on return reports the relay finished.
 fn relay(
-	mut from: PipeReader,
+	mut from: &PipeReader,
 	mut decoder: Box<dyn ByteDecoder>,
 	mut to: OpenFile,
-	state: &watch::Sender<RelayState>,
+	progress: &watch::Sender<RelayProgress>,
 ) {
 	let mut buf = vec![0; RELAY_CHUNK];
+	let mut consumed = 0u64;
 	loop {
-		state.send_replace(RelayState::Reading);
+		progress.send_replace(RelayProgress { reading: true, consumed });
 		let read = match from.read(&mut buf) {
 			Ok(0) => break,
 			Ok(read) => read,
 			Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
 			Err(_) => break,
 		};
-		state.send_replace(RelayState::Forwarding);
+		consumed += read as u64;
+		progress.send_replace(RelayProgress { reading: false, consumed });
 		let text = decoder.push(&buf[..read]);
 		if !text.is_empty() && to.write_all(text.as_bytes()).is_err() {
 			return;
@@ -145,26 +157,117 @@ fn relay(
 	}
 }
 
-/// Waits until every relay has forwarded its command's output: each one
-/// finished, or sat in a read for [`DRAIN_IDLE`], or [`DRAIN_MAX`] passed. A
-/// relay still running afterwards forwards later output as it comes, as a
-/// process writing straight into the sink would.
-pub(crate) async fn drain(mut relays: Vec<RelayWatch>) {
-	let deadline = tokio::time::Instant::now() + DRAIN_MAX;
-	for state in &mut relays {
+/// Waits until every relay has forwarded what its exited command wrote. A
+/// relay still running afterwards forwards later output, from processes the
+/// command left running, as it comes, as they would writing straight into the
+/// sink.
+pub(crate) async fn drain(relays: Vec<RelayHandle>) {
+	for relay in relays {
+		relay.drain().await;
+	}
+}
+
+impl RelayHandle {
+	async fn drain(mut self) {
+		// The command has exited: what it wrote is what the relay consumed
+		// plus what is still in the pipe. Sizing the pipe first can only
+		// overcount (by bytes the relay reads in between), which the idle
+		// check below then settles.
+		let pending = self.pipe.upgrade().and_then(|pipe| pipe_bytes_available(&pipe));
+		let target =
+			pending.map_or(u64::MAX, |pending| self.progress.borrow().consumed.saturating_add(pending));
 		loop {
-			let wake = deadline.min(tokio::time::Instant::now() + DRAIN_IDLE);
-			match tokio::time::timeout_at(wake, state.changed()).await {
+			let progress = *self.progress.borrow_and_update();
+			if progress.reading && progress.consumed >= target {
+				return;
+			}
+			match tokio::time::timeout(DRAIN_IDLE, self.progress.changed()).await {
 				Ok(Ok(())) => {},
-				Ok(Err(_)) => break,
-				Err(_) => {
-					if *state.borrow() == RelayState::Reading
-						|| tokio::time::Instant::now() >= deadline
-					{
-						return;
-					}
-				},
+				// The relay finished: every writer is gone and all is forwarded.
+				Ok(Err(_)) => return,
+				// A relay idle in a read has forwarded all there was; one that
+				// is still forwarding (a slow sink) is waited for.
+				Err(_) if self.progress.borrow().reading => return,
+				Err(_) => {},
 			}
 		}
+	}
+}
+
+/// A relay without a thread, for tests: it stays as created until it
+/// finishes.
+#[cfg(test)]
+pub(crate) struct TestRelay(watch::Sender<RelayProgress>);
+
+#[cfg(test)]
+impl TestRelay {
+	/// A relay idle in a read (`reading`) or forwarding bytes it read.
+	pub(crate) fn new(reading: bool) -> (Self, RelayHandle) {
+		let (progress_tx, progress) = watch::channel(RelayProgress { reading, consumed: 0 });
+		(Self(progress_tx), RelayHandle { progress, pipe: Weak::new() })
+	}
+
+	/// Reports the relay finished.
+	pub(crate) fn finish(self) {
+		drop(self.0);
+	}
+}
+
+/// Bytes waiting in `pipe`, where the platform reports it.
+fn pipe_bytes_available(pipe: &PipeReader) -> Option<u64> {
+	#[cfg(windows)]
+	{
+		use std::os::windows::io::AsRawHandle;
+		let mut available = 0u32;
+		// SAFETY: `pipe` owns a valid pipe handle for the call; the null
+		// buffer with size 0 only queries the byte count.
+		let ok = unsafe {
+			windows_sys::Win32::System::Pipes::PeekNamedPipe(
+				pipe.as_raw_handle(),
+				std::ptr::null_mut(),
+				0,
+				std::ptr::null_mut(),
+				&raw mut available,
+				std::ptr::null_mut(),
+			)
+		};
+		(ok != 0).then_some(u64::from(available))
+	}
+	#[cfg(unix)]
+	{
+		use std::os::fd::AsRawFd;
+		let mut available: libc::c_int = 0;
+		// SAFETY: `pipe` owns a valid descriptor for the call and FIONREAD
+		// writes one `c_int`.
+		let ok = unsafe { libc::ioctl(pipe.as_raw_fd(), libc::FIONREAD, &raw mut available) };
+		(ok == 0).then(|| u64::try_from(available).unwrap_or(0))
+	}
+	#[cfg(not(any(windows, unix)))]
+	{
+		let _ = pipe;
+		None
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// An idle relay (held open by a process left running) neither ends the
+	/// drain of the others nor lets it give up on one still forwarding, for
+	/// longer than any deadline.
+	#[tokio::test]
+	async fn drain_waits_for_every_relay_that_still_forwards() {
+		const FORWARDING: Duration = Duration::from_millis(2_200);
+		let (_idle_feed, idle) = TestRelay::new(true);
+		let (busy_feed, busy) = TestRelay::new(false);
+		let finish = tokio::spawn(async move {
+			tokio::time::sleep(FORWARDING).await;
+			busy_feed.finish();
+		});
+		let started = tokio::time::Instant::now();
+		drain(vec![idle, busy]).await;
+		assert!(started.elapsed() >= FORWARDING, "drained after {:?}", started.elapsed());
+		finish.await.expect("finish relay");
 	}
 }

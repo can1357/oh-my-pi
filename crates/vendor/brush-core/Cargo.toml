@@ -205,6 +205,7 @@ features = [
     "Win32_Storage_FileSystem",
     "Win32_System_Console",
     "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Pipes",
     "Win32_System_Threading",
     "Win32_UI_WindowsAndMessaging",
 ]

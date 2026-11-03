@@ -1004,9 +1004,7 @@ pub(crate) async fn execute_external_command(
 			}
 
 			let mut child_process = processes::ChildProcess::new(child, pid, actual_pgid);
-			if let Some(relays) = output_relays.into_drain() {
-				child_process.drain_output_relays_on_exit(relays);
-			}
+			child_process.set_output_relays(output_relays.into_handles());
 			if let Some((output, markers)) = marker_output.take() {
 				child_process.set_completion_marker(
 					output,

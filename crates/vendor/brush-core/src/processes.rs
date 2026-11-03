@@ -42,6 +42,9 @@ pub struct ChildProcess {
 	#[cfg(windows)]
 	kill_handle: Option<OwnedHandle>,
 	completion_marker: Option<CompletionMarker>,
+	/// Relays carrying this process's output into shell text; see
+	/// [`crate::outputrelay`].
+	output_relays: Vec<crate::outputrelay::RelayHandle>,
 }
 
 impl ChildProcess {
@@ -63,6 +66,7 @@ impl ChildProcess {
 			#[cfg(windows)]
 			kill_handle,
 			completion_marker: None,
+			output_relays: Vec::new(),
 		}
 	}
 
@@ -98,16 +102,11 @@ impl ChildProcess {
 			Some(CompletionMarker { output, end_marker_prefix, end_marker_suffix });
 	}
 
-	/// Reports the process finished only once `relays` have forwarded its
-	/// output (see [`crate::outputrelay::drain`]), so that output precedes
-	/// whatever the shell writes into the same sink next.
-	pub(crate) fn drain_output_relays_on_exit(&mut self, relays: Vec<crate::outputrelay::RelayWatch>) {
-		let exec = std::mem::replace(&mut self.exec_future, Box::pin(std::future::pending()));
-		self.exec_future = Box::pin(async move {
-			let output = exec.await;
-			crate::outputrelay::drain(relays).await;
-			output
-		});
+	/// Has [`Self::wait`] report the process finished only once `relays` have
+	/// forwarded its output, so that output precedes whatever the shell writes
+	/// into the same sink next.
+	pub(crate) fn set_output_relays(&mut self, relays: Vec<crate::outputrelay::RelayHandle>) {
+		self.output_relays = relays;
 	}
 
 	/// Checks whether this process, or a stage in its pipeline, stopped.
@@ -158,6 +157,13 @@ impl ChildProcess {
 					let output = output?;
 					let marker_exit_code = completion_exit_code(&output.status);
 					self.reaped = true;
+					// The exit status is known from here on: a cancellation
+					// while the output drains only stops waiting for it.
+					let relays = std::mem::take(&mut self.output_relays);
+					tokio::select! {
+						() = crate::outputrelay::drain(relays) => {},
+						() = &mut cancelled => {},
+					}
 					self.write_completion_marker(marker_exit_code);
 					break Ok(ProcessWaitResult::Completed(output))
 				},
@@ -386,6 +392,7 @@ mod tests {
 			pgid: None,
 			stop_pids: None,
 			completion_marker: None,
+			output_relays: Vec::new(),
 		};
 		child.set_completion_marker(
 			OpenFile::from(marker.try_clone().expect("marker writer")),
@@ -399,5 +406,44 @@ mod tests {
 		let mut output = String::new();
 		marker.read_to_string(&mut output).expect("read marker");
 		assert_eq!(output, "<exit>130</exit>");
+	}
+}
+
+#[cfg(test)]
+mod relay_tests {
+	use super::*;
+	use crate::outputrelay::TestRelay;
+
+	/// Cancelling while an exited command's output still drains keeps the
+	/// status the command exited with.
+	#[tokio::test]
+	async fn cancellation_while_output_drains_keeps_the_exit_status() {
+		#[cfg(windows)]
+		let output = std::process::Command::new("cmd").args(["/C", "exit 7"]).output();
+		#[cfg(not(windows))]
+		let output = std::process::Command::new("sh").args(["-c", "exit 7"]).output();
+		let output = output.expect("run child");
+		let (_forwarding, relay) = TestRelay::new(false);
+		let mut child = ChildProcess {
+			exec_future: Box::pin(async move { Ok(output) }),
+			reaped: false,
+			pid: None,
+			pgid: None,
+			stop_pids: None,
+			#[cfg(windows)]
+			kill_handle: None,
+			completion_marker: None,
+			output_relays: vec![relay],
+		};
+		let cancel = CancellationToken::new();
+		let trigger = cancel.clone();
+		tokio::spawn(async move {
+			tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+			trigger.cancel();
+		});
+		let Ok(ProcessWaitResult::Completed(output)) = child.wait(Some(cancel)).await else {
+			panic!("an exited command reported as cancelled");
+		};
+		assert_eq!(output.status.code(), Some(7));
 	}
 }
