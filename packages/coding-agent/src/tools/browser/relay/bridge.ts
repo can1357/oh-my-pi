@@ -160,7 +160,7 @@ interface ExtInstance {
 	goneSince: number | null;
 	/** Settles at its next hello; created by the first caller that waits for one. */
 	reconnected: PromiseWithResolvers<void> | null;
-	/** Browser lookup for this connection; popup-capable input waits for it before reading the front app. */
+	/** Browser lookup for this connection; tab commands await it in forwarding order. */
 	browserLookup?: Promise<number | null>;
 }
 
@@ -1232,13 +1232,14 @@ export class RelayBridge {
 			await this.#handleBrowserCommand(conn, msg, tab);
 			return true;
 		}
+		const socket = inst.socket;
+		// Every forwarded command joins the same lookup, even after it settles, so a key release cannot overtake its press.
+		const browserPid = inst.browserLookup ? await inst.browserLookup : null;
+		if (inst.socket !== socket || this.#tabs.get(tabKey) !== tab) {
+			this.#replyError(conn, msg, "relay extension connection changed before input");
+			return false;
+		}
 		if (this.#readFrontApp && canOpenWindow(msg.method, msg.params)) {
-			const socket = inst.socket;
-			const browserPid = inst.browserLookup ? await inst.browserLookup : null;
-			if (inst.socket !== socket || this.#tabs.get(tabKey) !== tab) {
-				this.#replyError(conn, msg, "relay extension connection changed before input");
-				return false;
-			}
 			// Chrome can activate for a window this input opens before the relay hears of it: the browser's keyboard is
 			// watched from the input on.
 			tab.frontAtInput =

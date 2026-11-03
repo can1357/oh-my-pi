@@ -2728,7 +2728,7 @@ describe("RelayBridge front app on a window omp's input opens", () => {
 		{ outcome: "found", browserPid: 222 },
 		{ outcome: "failed", browserPid: null },
 	])(
-		"waits for a pending browser lookup before reading or forwarding input when it $outcome",
+		"preserves keyDown/keyUp forwarding order through a pending browser lookup when it $outcome",
 		async ({ outcome, browserPid }) => {
 			const { readBrowsers, browsers, frontApp } = frontAppRecorder();
 			const lookup = Promise.withResolvers<number | null>();
@@ -2740,15 +2740,17 @@ describe("RelayBridge front app on a window omp's input opens", () => {
 			const connId = bridge.cdpConnected(cdp);
 			const sessionId = await attachPage(bridge, ext, cdp, connId, 1);
 			const sent = ext.rpcs("send").length;
-			bridge.cdpMessage(
-				connId,
-				JSON.stringify({
-					id: ++msgSeq,
-					sessionId,
-					method: "Input.dispatchKeyEvent",
-					params: { type: "keyDown", key: "Enter" },
-				}),
-			);
+			for (const type of ["keyDown", "keyUp"]) {
+				bridge.cdpMessage(
+					connId,
+					JSON.stringify({
+						id: ++msgSeq,
+						sessionId,
+						method: "Input.dispatchKeyEvent",
+						params: { type, key: "Enter" },
+					}),
+				);
+			}
 			await flush();
 			expect(readBrowsers).toEqual([]);
 			expect(ext.rpcs("send")).toHaveLength(sent);
@@ -2760,8 +2762,11 @@ describe("RelayBridge front app on a window omp's input opens", () => {
 				ext
 					.rpcs("send")
 					.slice(sent)
-					.map(rpc => rpc.method),
-			).toEqual(["Input.dispatchKeyEvent"]);
+					.map(rpc => ({ method: rpc.method, type: rpc.params?.type })),
+			).toEqual([
+				{ method: "Input.dispatchKeyEvent", type: "keyDown" },
+				{ method: "Input.dispatchKeyEvent", type: "keyUp" },
+			]);
 			ack(bridge, ext, "send");
 			windowOpen(bridge, ext, 1);
 			await flush();
@@ -2781,16 +2786,20 @@ describe("RelayBridge front app on a window omp's input opens", () => {
 		const cdp = new FakeCdpSocket();
 		const connId = bridge.cdpConnected(cdp);
 		const oldPage = await attachPage(bridge, old, cdp, connId, 1);
-		const inputId = ++msgSeq;
-		bridge.cdpMessage(
-			connId,
-			JSON.stringify({
-				id: inputId,
-				sessionId: oldPage,
-				method: "Input.dispatchKeyEvent",
-				params: { type: "keyDown", key: "Enter" },
-			}),
-		);
+		const inputIds: number[] = [];
+		for (const type of ["keyDown", "keyUp"]) {
+			const inputId = ++msgSeq;
+			inputIds.push(inputId);
+			bridge.cdpMessage(
+				connId,
+				JSON.stringify({
+					id: inputId,
+					sessionId: oldPage,
+					method: "Input.dispatchKeyEvent",
+					params: { type, key: "Enter" },
+				}),
+			);
+		}
 		await flush();
 		// The service worker restarts while the first socket's lookup runs; that lookup ends after.
 		connect(bridge, restarted, [tab({ tabId: 1 })], [], () => restartedLookup.promise);
@@ -2800,7 +2809,7 @@ describe("RelayBridge front app on a window omp's input opens", () => {
 		expect(readBrowsers).toEqual([]);
 		expect(old.rpcs("send").filter(rpc => rpc.method === "Input.dispatchKeyEvent")).toEqual([]);
 		expect(restarted.rpcs("send").filter(rpc => rpc.method === "Input.dispatchKeyEvent")).toEqual([]);
-		expect(cdp.messages.find(msg => msg.id === inputId)?.error).toBeDefined();
+		for (const inputId of inputIds) expect(cdp.messages.find(msg => msg.id === inputId)?.error).toBeDefined();
 		const page = await attachPage(bridge, restarted, cdp, connId, 1);
 		await sendInput(bridge, restarted, connId, page);
 		windowOpen(bridge, restarted, 1);

@@ -1816,10 +1816,9 @@ fn rearm(browser: pid_t, user: pid_t, now: Instant) -> Rearm {
 /// Whether a reroute stays given what the log `seen` since it was set up. A
 /// ⌘/⌃ or a launcher's or Spotlight's panel seen since would make it take
 /// the browser coming forward for the user's choice for good, so a new one
-/// replaces it. A break in the watch shows no pick: the reroute stays, as its
-/// own taps watch for picks.
+/// replaces it. A break in the watch cannot rule out that choice either.
 fn keeps_reroute(seen: Option<PickEvidence>) -> bool {
-	seen.is_none_or(|seen| seen.chord.is_none() && seen.panels.iter().all(Option::is_none))
+	seen.is_some_and(|seen| seen.chord.is_none() && seen.panels.iter().all(Option::is_none))
 }
 
 /// Orders read and operation reroutes without owning cross-process input
@@ -4332,10 +4331,9 @@ mod tests {
 	}
 
 	#[test]
-	fn a_reroute_outlives_a_break_in_the_watch_but_not_a_pick_seen_since() {
-		// A stall the sampler missed shows no pick: a second reroute on the
-		// browser for the same click would only race the first.
-		assert!(keeps_reroute(None));
+	fn a_reroute_stays_only_while_the_watch_rules_out_a_pick_since() {
+		// A gap can hide a panel that permanently disarmed the reroute.
+		assert!(!keeps_reroute(None));
 		assert!(keeps_reroute(Some(PickEvidence::default())));
 		let chord = PickEvidence { chord: Some(Instant::now()), ..PickEvidence::default() };
 		let panel = PickEvidence { panels: [Some(HOLD_THIRD), None], ..PickEvidence::default() };
