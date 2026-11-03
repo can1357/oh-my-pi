@@ -535,6 +535,12 @@ pub trait ExtProc: Send {
 	fn core_dumped(&self) -> bool {
 		false
 	}
+	/// Whether the process has exited, without reaping it or reporting the
+	/// exit (a peek: [`ExtProc::poll_wait`] still reports it). `false` where
+	/// the host cannot tell before `poll_wait` does.
+	fn exited(&self) -> bool {
+		false
+	}
 }
 
 /// Opens a [`PipeMirror`] per pipeline pipe ([`Host::pipe_tap`]).

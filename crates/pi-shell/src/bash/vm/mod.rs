@@ -58,7 +58,7 @@ use crate::bash::{
 	diag::{Diag, DiagSite, render},
 	engine::Engine,
 	error::{RestoreError, ShellError},
-	event::{AssignScope, Event, EventData, EventMask, Origin, OriginChain, OriginLink},
+	event::{AssignScope, Event, EventData, EventMask, Origin, OriginChain, OriginLink, WaitKey},
 	fd::{FdOrigin, FdRef, FdTable},
 	fs::File,
 	host::{EnvView, Host, StdFd, Verdict},
@@ -435,6 +435,9 @@ pub struct Kernel {
 	/// would have `exec`'d, dying by one): taken when the vproc exits and
 	/// written into its `Record::Proc`, where its parent reads it.
 	pub deaths:          HashMap<Vpid, Death>,
+	/// The vproc whose [`WaitKey::Settle`] park the scheduler just ended:
+	/// the op that parked takes it ([`Kernel::settled_for`]) and goes on.
+	pub settle_done:     Option<Vpid>,
 	/// Background jobs whose pid is still to be settled
 	/// ([`proc::Bang`]): imaged (a restored job still decides).
 	pub bangs:           Vec<proc::Bang>,
@@ -506,6 +509,7 @@ impl Kernel {
 			exited: None,
 			exec_signals: HashMap::new(),
 			deaths: HashMap::new(),
+			settle_done: None,
 			reported_signal: None,
 			bangs: Vec::new(),
 			settled: Vec::new(),
@@ -627,6 +631,17 @@ impl Kernel {
 	) {
 		let rec = Record::Proc { parent, status: Some(status), death };
 		self.root.write(store, Change::Put(Key::Proc(vpid), rec));
+	}
+
+	/// Whether `vp` must park on [`WaitKey::Settle`] before it reads its job
+	/// table: it has a running job, and its last settle was not just
+	/// granted (which this takes).
+	pub fn needs_settle(&mut self, vp: &Vproc) -> bool {
+		if self.settle_done == Some(vp.vpid) {
+			self.settle_done = None;
+			return false;
+		}
+		vp.jobs.iter().any(|j| !j.inherited && j.state == proc::JobState::Running)
 	}
 
 	/// The signal that ended finished child vproc `vpid`, if one did; read
@@ -844,6 +859,23 @@ impl Kernel {
 			_ => self.argv0.as_slice(),
 		};
 		render(diag, DiagSite { shell_name, origin, line, utf8 })
+	}
+
+	/// bash's `NAME: line N: ` before a job's report line in a shell that is
+	/// not interactive (`notify_of_job_status`; line 0 prints as 1).
+	pub fn line_prefix(&self, vp: &Vproc, line: u32) -> Vec<u8> {
+		let shell_name = match vp
+			.overlay
+			.as_ref()
+			.and_then(|o| o.records.get(&KeyBuf::Misc(MiscKey::Argv0)))
+		{
+			Some(Some(Record::Misc(name))) => name.as_slice(),
+			_ => self.argv0.as_slice(),
+		};
+		let mut out = Vec::with_capacity(shell_name.len() + 16);
+		out.extend_from_slice(shell_name);
+		out.extend_from_slice(format!(": line {}: ", line.max(1)).as_bytes());
+		out
 	}
 
 	/// The `Diag` event of a diagnostic `vp` prints.
@@ -1748,7 +1780,19 @@ impl Shell {
 
 	/// Next vproc to run, round-robin: has work, not stopped, not parked at
 	/// the current wake count.
-	fn pick(&self, wakes: u64) -> Option<usize> {
+	fn pick(&mut self, wakes: u64) -> Option<usize> {
+		// A vproc parked to settle goes first once no child has an end
+		// left to take note of.
+		if let Some(i) = self.procs.iter().position(settling)
+			&& !self.settle_pending(wakes)
+		{
+			self.k.settle_done = Some(self.procs[i].vpid);
+			if let Some(b) = self.procs[i].blocked.as_mut() {
+				// Runnable now: `runnable` sees a stale wake count.
+				b.at = wakes.wrapping_sub(1);
+			}
+			return Some(i);
+		}
 		let n = self.procs.len();
 		(0..n)
 			.map(|off| (self.rr + off) % n)
@@ -1756,10 +1800,30 @@ impl Shell {
 	}
 
 	/// Vproc `i` has work and is neither stopped nor waiting for a wake that
-	/// has not come.
+	/// has not come, nor parked to settle ([`Self::pick`] ends that park).
 	fn runnable(&self, i: usize, wakes: u64) -> bool {
 		let p = &self.procs[i];
-		p.has_work() && !p.stopped && p.blocked.as_ref().is_none_or(|b| b.at != wakes)
+		p.has_work()
+			&& !p.stopped
+			&& p.blocked.as_ref().is_none_or(|b| b.at != wakes && b.key != WaitKey::Settle)
+	}
+
+	/// Whether a vproc still has to take note of a child's end before a
+	/// settle ends: one parked on an external that has exited, or on a
+	/// program, task or child vproc and woken since (it re-checks when it
+	/// runs, and parks again if nothing ended). A vproc busy running is no
+	/// such one: bash's `SIGCHLD` handler does not wait for it either.
+	fn settle_pending(&self, wakes: u64) -> bool {
+		self.procs.iter().any(|p| {
+			let Some(b) = p.blocked.as_ref() else {
+				return false;
+			};
+			match b.key {
+				WaitKey::Ext { .. } => b.at != wakes || ext_exited(p),
+				WaitKey::Task(_) | WaitKey::Proc(_) => b.at != wakes,
+				_ => false,
+			}
+		})
 	}
 
 	/// A finished script or an outgoing callout, if any.
@@ -2360,6 +2424,19 @@ fn transparent(p: &Vproc, children: bool) -> Option<bool> {
 		},
 		_ => None,
 	}
+}
+
+/// `p` is parked to settle ([`WaitKey::Settle`]).
+fn settling(p: &Box<Vproc>) -> bool {
+	p.blocked.as_ref().is_some_and(|b| b.key == WaitKey::Settle)
+}
+
+/// The external `p` waits for has exited (a peek: the vproc still has to
+/// take note of it).
+fn ext_exited(p: &Vproc) -> bool {
+	p.frames.iter().any(|f| {
+		matches!(f.scratch.as_ref().map(|sc| &sc.live), Some(Live::Ext(ext)) if ext.exited())
+	})
 }
 
 fn set_stopped(p: &mut Vproc, on: bool) {

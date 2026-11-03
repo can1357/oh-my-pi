@@ -742,6 +742,10 @@ impl ExtProc for Observed {
 	fn core_dumped(&self) -> bool {
 		self.child.core_dumped()
 	}
+
+	fn exited(&self) -> bool {
+		self.child.exited()
+	}
 }
 
 impl Drop for Observed {

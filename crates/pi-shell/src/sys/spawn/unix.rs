@@ -1325,6 +1325,20 @@ impl ExtProc for UnixProc {
 	fn core_dumped(&self) -> bool {
 		self.tracker.core()
 	}
+
+	fn exited(&self) -> bool {
+		if self.tracker.lock().has_exited() {
+			return true;
+		}
+		#[cfg(target_os = "linux")]
+		{
+			exit_now(self.pid).is_some()
+		}
+		#[cfg(not(target_os = "linux"))]
+		{
+			false
+		}
+	}
 }
 
 impl Drop for UnixProc {

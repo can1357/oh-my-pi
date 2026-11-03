@@ -3049,7 +3049,7 @@ fn await_(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) ->
 					last = s;
 					// bash `wait_for`: the job it waited for is reported, then
 					// forgotten (`wait_for_job` marks it notified).
-					report_waited(k, vp, cx, v);
+					report_waited(k, vp, cx, v, line);
 					forget_job(vp, v);
 					exec::reap_coproc(k, vp, cx, v);
 				} else if let (false, Some(JobState::Stopped(sig))) =
@@ -3074,7 +3074,7 @@ fn await_(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) ->
 					exec::reap_coproc(k, vp, cx, v);
 					// bash `wait_for_background_pids` waits for each running
 					// job in turn: its `wait_for` reports the job and forgets it.
-					report_waited(k, vp, cx, v);
+					report_waited(k, vp, cx, v, line);
 					forget_job(vp, v);
 				} else if !matches!(vp.jobs.by_vpid(v).map(|j| j.state), Some(JobState::Stopped(_))) {
 					// A job stopped meanwhile is skipped (job control).
@@ -3121,7 +3121,7 @@ fn await_(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) ->
 			k.proc_collect(cx.store, v);
 			// bash `wait_for_any_job`: `notify_of_job_status` for the job,
 			// then `delete_job`.
-			report_waited(k, vp, cx, v);
+			report_waited(k, vp, cx, v, line);
 			forget_job(vp, v);
 			st(vp).wait_for.clear();
 			exec::reap_coproc(k, vp, cx, v);
@@ -3185,7 +3185,7 @@ fn await_(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) ->
 			if let Some(death) = died
 				&& !replacing
 			{
-				program_died(k, vp, cx, op, pid, death);
+				program_died(k, vp, cx, op, pid, death, line);
 			}
 			status
 		},
@@ -3209,11 +3209,17 @@ fn await_(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) ->
 
 /// Report the job led by `v`, which `wait` collected, if a signal ended it
 /// (bash `wait_for` → `notify_and_cleanup (job)`; the caller forgets it).
-fn report_waited(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, v: crate::bash::ids::Vpid) {
+fn report_waited(
+	k: &mut Kernel,
+	vp: &mut Vproc,
+	cx: &mut Cx<'_>,
+	v: crate::bash::ids::Vpid,
+	line: u32,
+) {
 	let Some(number) = vp.jobs.by_vpid(v).map(|j| j.number) else {
 		return;
 	};
-	let out = notify::mark(k, cx, vp, Some(number));
+	let out = notify::mark(k, cx, vp, Some(number), line);
 	if !out.is_empty() {
 		vp.out
 			.push_back(PendingWrite { fd: 2, bytes: BString::from(out), off: 0 });
@@ -3227,7 +3233,15 @@ fn report_waited(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, v: crate::bash
 /// its parent reports it. Otherwise bash forked it and its wait for it
 /// reports it here (`notify_and_cleanup (job)` in `wait_for`), unless it
 /// was the last command of a `bash -c` string, which bash `exec`s too.
-fn program_died(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, pid: u32, death: Death) {
+fn program_died(
+	k: &mut Kernel,
+	vp: &mut Vproc,
+	cx: &mut Cx<'_>,
+	op: Op,
+	pid: u32,
+	death: Death,
+	line: u32,
+) {
 	if stands_for_vproc(k, cx, vp, op) {
 		k.deaths.insert(vp.vpid, death);
 		return;
@@ -3240,7 +3254,7 @@ fn program_died(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, pid: u3
 	};
 	let text = exec::job_text(k, cx, vp, &unit, op.node);
 	let procs = [notify::ProcLine { pid, text: &text, status: notify::ProcStatus::Signaled(death) }];
-	notify::report_foreground(k, cx, vp, &procs, Some(death));
+	notify::report_foreground(k, cx, vp, &procs, Some(death), line);
 }
 
 /// Whether `vp` has a trap with an action for a signal, or an `EXIT` or

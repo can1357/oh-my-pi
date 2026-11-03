@@ -19,7 +19,7 @@ use crate::bash::{
 		exec::push_script,
 		notify,
 		expand::Stop,
-		proc::{Job, JobLookup, JobState, LastBg, ScriptKind},
+		proc::{JobLookup, JobState, LastBg, ScriptKind},
 		quote,
 	},
 };
@@ -68,31 +68,6 @@ pub fn spec(ctx: &mut Ctx<'_, '_>, word: &[u8]) -> Result<u32, Bad> {
 /// `NAME: WORD: no such job` (bash `sh_badjob`).
 pub fn no_such_job(ctx: &mut Ctx<'_, '_>, word: &[u8]) {
 	ctx.usage(format!("{}: no such job", word.as_bstr()));
-}
-
-/// The signal that killed a job whose status is `status` (128 + n).
-pub fn signaled(status: i32, platform: Platform) -> Option<Signal> {
-	status
-		.checked_sub(128)
-		.and_then(|n| u8::try_from(n).ok())
-		.and_then(|n| Signal::from_number(n, platform))
-}
-
-/// bash `printable_job_status`; `long` is `jobs -l`, where a stopped job
-/// shows the stop signal's description.
-fn status_text(job: &Job, long: bool, posix: bool, platform: Platform) -> String {
-	match job.state {
-		JobState::Running => String::from("Running"),
-		JobState::Stopped(sig) if long => sig.description(platform),
-		JobState::Stopped(sig) if posix => format!("Stopped(SIG{sig})"),
-		JobState::Stopped(_) => String::from("Stopped"),
-		JobState::Done(0) => String::from("Done"),
-		JobState::Done(status) => match signaled(status, platform) {
-			Some(sig) => sig.description(platform),
-			None if posix => format!("Done({status})"),
-			None => format!("Exit {status}"),
-		},
-	}
 }
 
 /// How `jobs` prints (bash `JLIST_*`).
@@ -170,6 +145,10 @@ fn cleanup(ctx: &mut Ctx<'_, '_>) {
 /// `jobs [-lnprs] [jobspec …]`, `jobs -x command [args]`: list jobs as
 /// `[N]±  Status  command`; finished jobs are listed once, then forgotten.
 pub fn jobs(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
+	// bash knows of each child's end (`SIGCHLD`) when `jobs` looks.
+	if ctx.k.needs_settle(ctx.vp) {
+		return Err(Need::Sub(Stop::Wait(WaitKey::Settle)));
+	}
 	let o = match opts(ctx, args, b"lpnxrs", b"", false) {
 		Ok(o) => o,
 		Err(st) => return done(st),
@@ -257,7 +236,7 @@ pub fn jobs(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 	}
 	// bash `jobs` with operands ends with `notify_and_cleanup`: a job a
 	// signal ended that was not listed is reported now.
-	let report = notify::mark(ctx.k, ctx.cx, ctx.vp, None);
+	let report = notify::mark(ctx.k, ctx.cx, ctx.vp, None, ctx.line);
 	ctx.out_fd(2, &report);
 	cleanup(ctx);
 	done(status)

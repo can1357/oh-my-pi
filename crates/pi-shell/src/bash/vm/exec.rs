@@ -748,7 +748,16 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 		_ => false,
 	};
 	if line_read {
-		super::notify::notify(k, cx, vp, None);
+		// The children that ended must have taken note of it first (bash's
+		// `SIGCHLD` handler has run by the time it reads a line).
+		if k.needs_settle(vp) {
+			return Some(WaitKey::Settle);
+		}
+		let line = match vp.frames.last().map(|f| &f.kind) {
+			Some(FrameKind::Script { pos, .. }) => pos.1,
+			_ => 0,
+		};
+		super::notify::notify(k, cx, vp, None, line);
 	}
 	// zsh `parse_string`: a string (`eval`, a trap, `-c`) parses whole
 	// before it runs; its first command takes the snapshot the rest reuse.
@@ -3226,7 +3235,8 @@ fn report_children(
 			status: death.map_or(notify::ProcStatus::Exited(status), notify::ProcStatus::Signaled),
 		})
 		.collect();
-	notify::report_foreground(k, cx, vp, &procs, Some(death));
+	let line = line_of(vp, op.node);
+	notify::report_foreground(k, cx, vp, &procs, Some(death), line);
 }
 
 /// Stage `i`'s command as bash prints it (`make_command_string`).

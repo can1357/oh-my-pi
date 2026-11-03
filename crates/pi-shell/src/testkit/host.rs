@@ -251,6 +251,10 @@ impl ExtProc for CountedExt {
 	fn core_dumped(&self) -> bool {
 		self.ext.core_dumped()
 	}
+
+	fn exited(&self) -> bool {
+		self.ext.exited()
+	}
 }
 
 impl Drop for CountedExt {

@@ -510,6 +510,12 @@ pub fn zsh_exit(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> Outcome {
 /// the first of them to finish; `-p var` gets the waited pid. With job
 /// control a job that stops ends the wait unless `-f`.
 pub fn wait(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
+	// bash knows of each child's end (`SIGCHLD`) when `wait` looks.
+	if ctx.k.needs_settle(ctx.vp) {
+		return Err(super::Need::Sub(crate::bash::vm::expand::Stop::Wait(
+			crate::bash::event::WaitKey::Settle,
+		)));
+	}
 	let o = match opts(ctx, args, b"fn", b"p", false) {
 		Ok(o) => o,
 		Err(st) => return done(st),
@@ -570,12 +576,17 @@ pub fn wait(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 				break;
 			};
 			let child = ctx.vp.vpid_of(pid);
-			if is_child(ctx, child) {
+			let own_job = ctx.vp.jobs.by_vpid(child).is_some_and(|j| !j.inherited);
+			if own_job {
 				list.push(child);
 			} else if let Some(saved) = ctx.vp.jobs.saved_status(pid) {
-				// bash `wait_for_single_pid`: the status of a background job
-				// it forgot (`bgp_search`), at once.
+				// bash `wait_for_single_pid`: a background job it forgot
+				// (reported, waited for, disowned) has its status kept
+				// (`bgp_search`), returned at once: 0 for one that ran when
+				// it was forgotten.
 				status = saved;
+			} else if is_child(ctx, child) {
+				list.push(child);
 			} else {
 				ctx.usage(format!("pid {pid} is not a child of this shell"));
 				status = 127;

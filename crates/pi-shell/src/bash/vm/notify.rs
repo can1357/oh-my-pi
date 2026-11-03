@@ -9,10 +9,9 @@
 //! - a foreground command, when the shell's wait for it ends
 //!   ([`report_foreground`]).
 //!
-//! The line is bash's own (`PID Killed                     cmd`) without the
-//! `NAME: line N: ` prefix bash puts before it: this shell prints that prefix
-//! before no diagnostic of the session API, so the line keeps the text a
-//! reader of bash output knows. `SIGINT`, `SIGTERM`, `SIGPIPE` (bash's
+//! The lines are bash's own: `NAME: line N: ` (as before every diagnostic)
+//! then the job's processes as `jobs -l` lists them, without the `[N]+`.
+//! `SIGINT`, `SIGTERM`, `SIGPIPE` (bash's
 //! `DONT_REPORT_SIGTERM` and `DONT_REPORT_SIGPIPE` builds) and a signal the
 //! shell traps are reported by no line: a background job they ended stays
 //! in the table for `wait` and `jobs` (bash 5.3); a foreground one ended by
@@ -277,12 +276,12 @@ fn job_lines(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc, job: &Job, format: For
 /// (`only`: just job `%only`, as `wait` and the end of a foreground wait
 /// do), mark it reported, then forget the reported jobs that ended
 /// (`cleanup_dead_jobs`, keeping their statuses for `wait PID`).
-pub fn notify(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, only: Option<u32>) {
+pub fn notify(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, only: Option<u32>, line: u32) {
 	let pending = vp.jobs.iter().any(|j| {
 		!j.notified && matches!(j.state, JobState::Done(_)) && only.is_none_or(|n| j.number == n)
 	});
 	if pending {
-		let out = mark(k, cx, vp, only);
+		let out = mark(k, cx, vp, only, line);
 		write_stderr(vp, out);
 	}
 	cleanup(vp);
@@ -290,8 +289,14 @@ pub fn notify(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, only: Option<u32>
 
 /// The marking half of [`notify`] (bash `notify_of_job_status`): returns
 /// the report lines for standard error, for the caller to write in order
-/// with its own output.
-pub fn mark(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, only: Option<u32>) -> Vec<u8> {
+/// with its own output; `line` is the script line bash's prefix names.
+pub fn mark(
+	k: &mut Kernel,
+	cx: &mut Cx<'_>,
+	vp: &mut Vproc,
+	only: Option<u32>,
+	line: u32,
+) -> Vec<u8> {
 	let last = vp.last_bg;
 	let numbers: Vec<u32> = vp
 		.jobs
@@ -328,6 +333,7 @@ pub fn mark(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc, only: Option<u32>) 
 		};
 		match report_kind(k, cx, vp, death, false) {
 			Report::Full => {
+				out.extend(k.line_prefix(vp, line));
 				out.extend(job_lines(k, cx, vp, &job, Format::Long));
 				if let Some(j) = vp.jobs.get_mut(number) {
 					j.notified = true;
@@ -350,14 +356,15 @@ pub fn cleanup(vp: &mut Vproc) {
 /// job (a command the shell forked: an external, a subshell, a pipeline):
 /// `procs` are its processes in pipeline order and `death` is the signal
 /// that ended the process its status comes from (the last one; with
-/// `pipefail` the last that failed), if one did. `wd` is the directory it
-/// started in (`(wd: DIR)` when the shell is elsewhere now).
+/// `pipefail` the last that failed), if one did; `line` is the script line
+/// of the command.
 pub fn report_foreground(
 	k: &mut Kernel,
 	cx: &mut Cx<'_>,
 	vp: &mut Vproc,
 	procs: &[ProcLine<'_>],
 	death: Option<Death>,
+	line: u32,
 ) {
 	let Some(death) = death else {
 		return;
@@ -379,7 +386,7 @@ pub fn report_foreground(
 		platform: k.engine.config().platform,
 		wd: None,
 	};
-	let mut out = Vec::new();
+	let mut out = if format == Format::Long { k.line_prefix(vp, line) } else { Vec::new() };
 	print_pipeline(&mut out, procs, format, &look);
 	write_stderr(vp, out);
 }
