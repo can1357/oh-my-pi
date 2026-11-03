@@ -87,7 +87,7 @@ export const DEFAULT_BASH_INTERCEPTOR_RULES: BashInterceptorRule[] = [
 	},
 	{
 		pattern:
-			"^\\s*(?:(?:bun|npm|pnpm|yarn)\\s+(?:run\\s+)?(?:dev|start)(?:\\s|$)|(?:vite|next\\s+dev|nuxt\\s+dev|nodemon|lldb|gdb|tail(?:\\s+(?!--(?:\\s|$))(?!-[A-Za-z0-9]*[fF]|--follow)[^\\s;&|]+)*\\s+(?:-[A-Za-z0-9]*[fF][A-Za-z0-9]*|--follow(?:=\\S*)?))(?:\\s|$)|docker\\s+compose\\s+up(?!.*(?:\\s-d(?:\\s|$)|--detach))(?:\\s|$))",
+			"^\\s*(?:(?:bun|npm|pnpm|yarn)\\s+(?:run\\s+)?(?:dev|start)(?:\\s|$)|(?:vite|next\\s+dev|nuxt\\s+dev|nodemon|lldb|gdb|tail\\s+-f)(?:\\s|$)|docker\\s+compose\\s+up(?!.*(?:\\s-d(?:\\s|$)|--detach))(?:\\s|$))",
 		tool: "bash",
 		message: "Use `bash` with `name` for services, watchers, and debuggers; inspect with `read proc://<name>`.",
 	},
