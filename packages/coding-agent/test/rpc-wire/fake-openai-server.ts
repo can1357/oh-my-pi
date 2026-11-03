@@ -18,7 +18,11 @@
  * - a user message containing `write_uri <url>` → a `write` call storing
  *   `written by model` at `<url>` (or the JSON value after `<url>`, if supplied)
  * - anything else → text `pong`
+ *
+ * With `FAKE_OPENAI_TOOLS_LOG=<file>`, each request appends one JSON line: the
+ * names of the tools it offered the model.
  */
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 
@@ -124,6 +128,10 @@ const server = Bun.serve({
 		}
 		if (!url.pathname.endsWith("/chat/completions")) return new Response("not found", { status: 404 });
 		const body = chatRequestSchema.assert(await request.json());
+		const toolsLog = process.env.FAKE_OPENAI_TOOLS_LOG;
+		if (toolsLog) {
+			fs.appendFileSync(toolsLog, `${JSON.stringify((body.tools ?? []).map(tool => tool.function?.name))}\n`);
+		}
 		const reply = scriptedReply(body);
 		if (!body.stream) return Response.json(completionBody(reply));
 		const events = completionChunks(reply).map(chunk => `data: ${JSON.stringify(chunk)}\n\n`);

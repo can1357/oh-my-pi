@@ -198,6 +198,7 @@ import {
 	cfgSessionWarnCost,
 	cfgSessionWorktreeScope,
 } from "./session/settings";
+import { ToolAllowList } from "./tools/tool-allowlist";
 import { cfgDisabledProviders, cfgEnabledModels } from "./config/model-settings";
 import { cfgTaskAgentIdleTtlMs } from "./task/settings";
 import { cfgSkillsIncludeSkills } from "./extensibility/settings";
@@ -1738,10 +1739,14 @@ export async function buildSessionOptions(
 	}
 
 	// Tools
+	// `--tools` is an allow-list for everything the model can invoke, not only
+	// the initial built-ins: see ToolAllowList.
+	const toolAllowList = parsed.tools ? ToolAllowList.parse(parsed.tools) : undefined;
+	if (toolAllowList) options.toolAllowList = toolAllowList;
 	if (parsed.noTools) {
-		options.toolNames = parsed.tools && parsed.tools.length > 0 ? parsed.tools : [];
-	} else if (parsed.tools) {
-		options.toolNames = parsed.tools;
+		options.toolNames = toolAllowList && toolAllowList.toolNames.length > 0 ? toolAllowList.toolNames : [];
+	} else if (toolAllowList) {
+		options.toolNames = toolAllowList.toolNames;
 	}
 
 	if (parsed.noLsp) {

@@ -301,6 +301,7 @@ import {
 	warmupLspServers,
 	xdevEntries,
 } from "./tools";
+import type { ToolAllowList } from "./tools/tool-allowlist";
 import { resolveYieldReportText } from "./tools/yield";
 import {
 	createModelJobCaptionWriter,
@@ -836,6 +837,13 @@ export interface CreateAgentSessionOptions {
 	skipPythonPreflight?: boolean;
 	/** Tool names explicitly requested (enables disabled-by-default tools) */
 	toolNames?: string[];
+	/**
+	 * Allow-list for everything the model can invoke (CLI `--tools`): built-in,
+	 * extension and custom tools, `xd://` devices and MCP tools. A tool it does
+	 * not allow is neither offered nor mounted, and with no MCP entry no MCP
+	 * server starts. See {@link ToolAllowList}.
+	 */
+	toolAllowList?: ToolAllowList;
 	/** Names from `toolNames` that a fork inherits as `xd://` devices rather than explicit top-level tools. */
 	mountedToolNames?: string[];
 	/** Limit the session to explicitly supplied tool names, without discovered extras. */
@@ -2801,7 +2809,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		});
 
 		// Restricted sessions cannot inherit or discover MCP capabilities.
-		const enableMCP = !restrictToolNames && (options.enableMCP ?? true);
+		// An allow-list with no MCP entry can reach no MCP tool: start no server.
+		const enableMCP = !restrictToolNames && (options.enableMCP ?? true) && (options.toolAllowList?.allowsMCP ?? true);
 		let mcpManager: MCPManager | undefined = enableMCP ? options.mcpManager : undefined;
 		toolSession.mcpManager = mcpManager;
 		toolSession.enableMCP = enableMCP;
@@ -4494,6 +4503,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				initialToolNames.push(name);
 			}
 		}
+		const toolAllowList = options.toolAllowList;
+		if (toolAllowList) {
+			initialToolNames = initialToolNames.filter(name => toolAllowList.allows(name, toolRegistry.get(name)));
+		}
 
 		// Pre-register in the global agent registry BEFORE building the system prompt,
 		// so that subagents launched in the same parallel batch can see each other in
@@ -5128,6 +5141,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getXdevToolEntries: () => (toolSession.xdev ? xdevEntries(toolSession.xdev) : []),
 			xdev: toolSession.xdev,
 			presentationPinnedToolNames,
+			toolAllowList: options.toolAllowList,
 			setActiveToolNames: setSessionActiveToolNames,
 			ensureWriteRegistered,
 			isDeviceOnlyWrite: () => toolSession.deviceOnlyWrite === true,

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `--tools <list>` is now an allow-list for everything the model can invoke, not only the initial built-ins: extension, custom, plugin and MCP tools and `xd://` devices are offered or mounted only when the list names them (`mcp:<server>` selects a server's tools, `xd:*` every non-built-in tool as a device), and a list with no MCP entry starts no MCP server. Before, `--tools read,grep,glob` still mounted every extension and MCP tool behind `write xd://`.
+
 ### Added
 
 - Pinned sessions show a pin beside their title in the status line and the band composer's title, and `/unpin [session id]` unpins a session ([#17848](https://github.com/can1357/oh-my-pi/pull/17848) by [@SuperUserA](https://github.com/SuperUserA))

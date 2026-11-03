@@ -2460,6 +2460,7 @@ export class AgentSession implements SettingsScope {
 			builtInToolNames: config.builtInToolNames,
 			mcpManagerToolNames: config.mcpManagerToolNames,
 			presentationPinnedToolNames: config.presentationPinnedToolNames,
+			toolAllowList: config.toolAllowList,
 			ensureWriteRegistered: config.ensureWriteRegistered,
 			isDeviceOnlyWrite: config.isDeviceOnlyWrite,
 			setDeviceOnlyWrite: config.setDeviceOnlyWrite,
