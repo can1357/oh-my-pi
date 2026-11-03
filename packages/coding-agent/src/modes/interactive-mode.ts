@@ -138,6 +138,7 @@ import planModeCompactInstructionsPrompt from "../prompts/system/plan-mode-compa
 import type { AgentHubRegistry } from "@oh-my-pi/pi-tui/overlays/agent-hub-types";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { registerPersistedSubagents } from "../registry/persisted-agents";
+import { recordRestartSubagents } from "../task/restart-resume";
 import type { AgentCostSnapshot } from "@oh-my-pi/pi-tui/overlays/agent-hub-projection";
 import { sumSubagentTreeCost } from "./agent-hub-runtime";
 import {
@@ -8184,7 +8185,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	/**
 	 * Tear down like {@link shutdown}, then relaunch the CLI with the original
 	 * launch argv (session-source flags and positional prompts stripped, see
-	 * {@link restartArgv}), resuming this session when it exists on disk.
+	 * {@link restartArgv}), resuming this session when it exists on disk. The
+	 * subagents running now are recorded in the session file first
+	 * ({@link recordRestartSubagents}); the relaunch resumes them.
 	 *
 	 * On POSIX the relaunch is a true `execvp(3)` image replacement: same PID,
 	 * same terminal, no lingering parent. Postmortem cleanups and stdout are
@@ -8194,6 +8197,17 @@ export class InteractiveMode implements InteractiveModeContext {
 	 */
 	async restart(): Promise<void> {
 		if (this.#isShuttingDown) return;
+		// A subagent lives in this process: record what runs before the teardown
+		// stops it, or the relaunch cannot resume it. No record, no restart.
+		try {
+			const recorded = recordRestartSubagents(this.session);
+			if (recorded) logger.debug("Restart recorded running subagents", { count: recorded.subagents.length });
+		} catch (error) {
+			this.showError(
+				`Restart cancelled: could not record the running subagents, so the relaunch could not resume them: ${error instanceof Error ? error.message : String(error)}`,
+			);
+			return;
+		}
 		this.#beginClose();
 		try {
 			await this.#teardown();

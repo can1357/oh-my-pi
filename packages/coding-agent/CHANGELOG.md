@@ -47,6 +47,7 @@
 
 ### Fixed
 
+- `/restart` no longer loses the subagents that are running: it records them in the session file before its teardown stops them, and the relaunched process gives each one more turn as a background job of its parent (a lane's arms under the lane), with one note naming the tool calls the restart stopped, the background jobs that ended, and any spawn tools the new process does not have. Their results reach their parents as usual, and the TUI names any subagent that could not be resumed and why
 - Browser: `browser.close({ all: true })` from a subagent no longer closes its parent's tabs; it releases only the calling agent's tabs. Tabs now belong to the agent that opened them rather than its conversation id, so after `/new`, `/resume`, fork, or branch they are still frozen, idle-closed, released by close-all, and closed when the session ends instead of leaking ([#15975](https://github.com/can1357/oh-my-pi/issues/15975), [#16133](https://github.com/can1357/oh-my-pi/pull/16133) by [@harshaygadekar](https://github.com/harshaygadekar))
 - `edit` payloads that close each Replace or Insert body with `*** End` or `*** End Patch` (a DeepSeek habit) no longer write the marker line into the file, and no longer drop every operation after the first `*** End Patch`.
 - `lsp request` now sends `payload: "null"` as JSON null instead of substituting auto-built document params ([#17715](https://github.com/can1357/oh-my-pi/issues/17715)).

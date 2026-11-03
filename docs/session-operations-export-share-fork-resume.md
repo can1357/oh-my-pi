@@ -36,7 +36,7 @@ This document describes operator-visible behavior for session export, sharing, c
 | `/resume [id\|@claude\|@codex]`           | Interactive slash command    | Yes (active in-memory state replaced)         | Switches to a selected/matched session, or imports a selected foreign session                                                                                                | None                                                                                |
 | `--resume`                                | CLI startup picker           | Yes after session creation                    | Opens selected existing session file (picker opens in current-folder scope; the global list is preloaded only for the empty-everything early exit and instant Tab switching) | None                                                                                |
 | `--resume <id\|path>`                     | CLI startup                  | Yes after session creation                    | Opens existing session; a missing recorded cwd may be re-rooted into the current directory                                                                                   | None                                                                                |
-| `/restart`                                | Interactive slash command    | Yes (process relaunches)                      | Keeps configuration flags; resumes a materialized session, otherwise starts fresh                                                                                            | None                                                                                |
+| `/restart`                                | Interactive slash command    | Yes (process relaunches)                      | Keeps configuration flags; resumes a materialized session, otherwise starts fresh; running subagents go on after the relaunch                                                 | None                                                                                |
 | `--continue`                              | CLI startup                  | Yes after session creation                    | Opens terminal breadcrumb or most-recent session; creates new one if none exists                                                                                             | None                                                                                |
 
 ## Export and dump
@@ -531,6 +531,34 @@ flags but strips original prompts/`@file` positionals and one-shot session
 selectors (`--session`, `--resume`, `--continue`, `--fork`, and foreign imports).
 It adds `--resume <current-id>` only when the session actually exists on disk;
 an in-memory or never-materialized session restarts fresh.
+
+`/restart` keeps the session's subagents (`task/restart-resume.ts`). A subagent
+runs inside the omp process, so the teardown stops every one that is mid-task;
+idle and parked ones are revived on demand from their transcripts either way.
+Before the teardown, `/restart` writes one `restart_subagents` entry into the
+session file: each running subagent, its parent, the tool calls it is in, its own
+background jobs other than subagents (they end with the process), and the queued
+messages and job results it had not read. When the entry cannot be written the
+restart is cancelled. The teardown then stops the subagents as a shutdown does:
+their transcripts stay, nothing is tombstoned.
+
+Once the relaunched process has resumed the session, it consumes the entry
+(`restart_subagents_resumed`) and gives every recorded subagent one more
+monitored turn as a background job of its parent, under the subagent's id,
+parents before their children. The lifecycle reviver rebuilds the subagent from
+its transcript, so the transcript stays one contiguous file. The subagent gets one
+note: the process restarted, the tool calls that were stopped (their results hold
+the output they produced before they stopped), the background jobs that ended,
+the subagents of its own that go on or could not, the messages and results it had
+not read, and the tools of its spawn that the new process does not have (a tool
+defined in the parent's eval kernel or by a closure). Its result reaches its
+parent as the job's ordinary `async-result`, so a lane receives its arms' results
+and the root receives the lanes'. The TUI names the subagents that go on and the
+ones that do not, with the reason: an isolated run (never revived), a subagent
+that finished before the teardown stopped it, or one whose transcript is missing.
+
+`/exit` and a crash are not covered: `/exit` records nothing, and a crash leaves
+transcripts that `omp --restore` already resumes.
 
 POSIX uses process-image replacement when available. Windows or a failed exec
 falls back to spawning the replacement with inherited terminal streams.
