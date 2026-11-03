@@ -9,6 +9,11 @@
 - Fixed `find()` missing elements more than 24 levels down, such as VS Code's editor; it now searches 64 levels deep ([#18221](https://github.com/can1357/oh-my-pi/pull/18221) by [@will-bogusz](https://github.com/will-bogusz))
 - `glob`, `grep`, `fuzzyFind`, `ast_grep` and `ast_edit` now run their directory traversal on a filesystem runtime of their own, so a search over a large or cold tree can no longer take the worker threads that the embedded shell and every other native call are scheduled on. Those threads are named `pi-fs-worker`, so a stall in a search is tellable apart from a stall elsewhere.
 - Fixed a workspace tree whose native addon does not match its checkout failing with `undefined is not a constructor` at the callsite: a class the addon lacks now throws a message naming the addon file, both releases and `bun run build:native` — from its constructor and from any static entrypoint — and the loader reports that mismatch once as it loads ([#18230](https://github.com/can1357/oh-my-pi/pull/18230) by [@sjawhar](https://github.com/sjawhar))
+- Fixed Wayland screenshots, and the clicks, drags and scrolls that need them, failing in released Linux builds; without PipeWire installed, `capabilities()` reports `capture: false` and the capture error says why
+
+### Removed
+
+- Removed the `wayland-pipewire` Cargo feature and `OMP_NATIVE_FEATURES`, which only existed to pass it
 
 ## [18.17.0] - 2026-11-06
 

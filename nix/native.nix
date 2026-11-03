@@ -3,13 +3,11 @@
   craneLib,
   lib,
   ninja,
-  pipewire,
   pkg-config,
   rustPlatform,
   source,
   stdenv,
   writeText,
-  withWaylandScreencast ? false,
   withFatLto ? true,
 }:
 let
@@ -62,14 +60,13 @@ let
     };
 
     cargoVendorDir = craneLib.vendorCargoDeps { cargoLockContents = lockText; };
-    cargoExtraArgs = "--locked -p pi-natives ${lib.optionalString withWaylandScreencast "--features wayland-pipewire"}";
+    cargoExtraArgs = "--locked -p pi-natives";
     nativeBuildInputs = [
       cmake
       ninja
       pkg-config
       rustPlatform.bindgenHook
     ];
-    buildInputs = lib.optionals withWaylandScreencast [ pipewire ];
     strictDeps = true;
     doCheck = false;
     # Stamping, patching, and signing belong to the downstream package.
