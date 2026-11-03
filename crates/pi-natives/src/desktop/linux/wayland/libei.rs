@@ -21,10 +21,16 @@ use crate::desktop::{
 	control,
 	error::{CoreResult, DesktopError},
 	keys::KeyName,
+	linux::pace_clicks,
 };
 
 const DEVICE_DISCOVERY_DRAIN_TIMEOUT: Duration = Duration::from_millis(500);
 const DRAG_STEP_DELAY: Duration = Duration::from_millis(8);
+/// How long before the run's end an unanswered permission prompt is given up:
+/// the bounded portal-session close (`CLOSE_TIMEOUT`) plus time to answer the
+/// caller, so the dialog's own error still beats the run's timeout.
+const CONSENT_MARGIN: Duration =
+	crate::desktop::CLOSE_TIMEOUT.saturating_add(Duration::from_millis(500));
 
 #[derive(Clone, Copy)]
 struct DiscoveryTargets {
@@ -115,6 +121,26 @@ pub(super) async fn cancellable<T>(future: impl Future<Output = T>) -> CoreResul
 	}
 }
 
+/// Bounds a wait on the `RemoteDesktop` permission dialog by the current
+/// operation's deadline (the run's end or the caller's reply timeout). GNOME
+/// can open the dialog behind other windows; unbounded, only the run's own
+/// timeout ends the wait, and the run fails without saying why.
+async fn until_deadline<T>(future: impl Future<Output = T>) -> CoreResult<T> {
+	let Some(deadline) = control::current_token().and_then(|token| token.deadline()) else {
+		return Ok(future.await);
+	};
+	let give_up = deadline.checked_sub(CONSENT_MARGIN).unwrap_or(deadline);
+	tokio::time::timeout_at(give_up.into(), future)
+		.await
+		.map_err(|_| {
+			DesktopError::timeout(
+				"the RemoteDesktop permission dialog was not answered before the call's deadline, so \
+				 nothing was sent and its portal session is being closed; the dialog can open behind \
+				 other windows. Retry and ask the user to answer the new dialog",
+			)
+		})
+}
+
 fn pace_drag(
 	path: &[(f64, f64)],
 	mut send_motion: impl FnMut(f64, f64) -> CoreResult<()>,
@@ -199,13 +225,20 @@ impl Libei {
 						PersistMode::DoNot,
 					)
 					.await
-					.map_err(|err| format!("RemoteDesktop SelectDevices: {err}"))?;
-				let response = portal
-					.start(&session, None)
-					.await
-					.map_err(|err| format!("RemoteDesktop Start: {err}"))?
+					.map_err(|err| {
+						DesktopError::permission_denied(format!("RemoteDesktop SelectDevices: {err}"))
+					})?;
+				// Only `Start` waits on the user; the steps around it are not
+				// the dialog and keep `main`'s cancel-only bound.
+				let response = until_deadline(portal.start(&session, None))
+					.await?
+					.map_err(|err| {
+						DesktopError::permission_denied(format!("RemoteDesktop Start: {err}"))
+					})?
 					.response()
-					.map_err(|err| format!("RemoteDesktop permission: {err}"))?;
+					.map_err(|err| {
+						DesktopError::permission_denied(format!("RemoteDesktop permission: {err}"))
+					})?;
 				let devices = response.devices();
 				let targets = DiscoveryTargets {
 					pointer:  devices.contains(DeviceType::Pointer),
@@ -215,10 +248,12 @@ impl Libei {
 					.connect_to_eis(&session)
 					.await
 					.map(|fd| (fd, targets))
-					.map_err(|err| format!("RemoteDesktop ConnectToEIS: {err}"))
+					.map_err(|err| {
+						DesktopError::permission_denied(format!("RemoteDesktop ConnectToEIS: {err}"))
+					})
 			})
 			.await
-			.and_then(|result| result.map_err(DesktopError::permission_denied));
+			.and_then(|result| result);
 			match fd {
 				Ok((fd, targets)) => Ok((fd, session, targets)),
 				Err(err) => {
@@ -600,21 +635,27 @@ impl Libei {
 				PointerEvent::Click { x, y, count, .. } => {
 					move_to(x, y, &mut time)?;
 					if let (Some(code), Some(interface)) = (button, &button_interface) {
-						for _ in 0..count.max(1) {
-							control::check()?;
-							button_held = true;
-							interface.button(code, ei::button::ButtonState::Press);
+						pace_clicks(count, |pressed| {
+							time = Self::timestamp()?.max(time);
+							if pressed {
+								button_held = true;
+							}
+							interface.button(
+								code,
+								if pressed {
+									ei::button::ButtonState::Press
+								} else {
+									ei::button::ButtonState::Released
+								},
+							);
 							device.device.device().frame(serial, time);
 							time = time.saturating_add(1);
 							self.flush()?;
-							// A press is always released: a cancel stops the
-							// next press.
-							interface.button(code, ei::button::ButtonState::Released);
-							device.device.device().frame(serial, time);
-							time = time.saturating_add(1);
-							self.flush()?;
-							button_held = false;
-						}
+							if !pressed {
+								button_held = false;
+							}
+							Ok(())
+						})?;
 					}
 				},
 				PointerEvent::Hold { x, y, duration, .. } => {
@@ -991,6 +1032,8 @@ fn evdev_char(character: char) -> Option<(u32, bool)> {
 
 #[cfg(test)]
 mod tests {
+	use futures::FutureExt;
+
 	use super::*;
 
 	#[test]
@@ -1030,6 +1073,37 @@ mod tests {
 		});
 		assert!(result.is_err());
 		assert_eq!(starts, 1);
+	}
+
+	#[test]
+	fn an_unanswered_permission_dialog_is_given_up_before_the_run_ends() {
+		let runtime = tokio::runtime::Builder::new_current_thread()
+			.enable_time()
+			.build()
+			.unwrap();
+		// The run leaves only the session-close budget, so the dialog wait must
+		// give up on its first poll; an unbounded wait would still be pending,
+		// and a margin shorter than the close would wait for the run to end.
+		let ending = control::CancellationSource::default();
+		ending.set_deadline(Some(std::time::Instant::now() + crate::desktop::CLOSE_TIMEOUT));
+		let error = control::with_token_for_test(&ending.token(), || {
+			runtime.block_on(async { until_deadline(std::future::pending::<()>()).now_or_never() })
+		})
+		.expect("the wait must end at once")
+		.unwrap_err();
+		assert_eq!(error.code.as_str(), "Timeout");
+		assert!(error.message.contains("RemoteDesktop permission dialog"), "{}", error.message);
+
+		// A run with time left lets a dialog answered later through.
+		let running = control::CancellationSource::default();
+		running.set_deadline(Some(std::time::Instant::now() + Duration::from_secs(3600)));
+		let answered = control::with_token_for_test(&running.token(), || {
+			runtime.block_on(until_deadline(async {
+				tokio::task::yield_now().await;
+				7
+			}))
+		});
+		assert_eq!(answered.unwrap(), 7);
 	}
 
 	#[test]

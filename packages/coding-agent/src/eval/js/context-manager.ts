@@ -22,6 +22,7 @@ import { catchRejection, safeSend as safeSendIpc } from "../../utils/ipc";
 import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP } from "../bridge-timeout";
 import { getEnabledEvalPreludes } from "../preludes";
 import {
+	abortReasonError,
 	attachSessionOwner,
 	EvalKernelNotRunningError,
 	formatKernelRestartNotice,
@@ -276,7 +277,7 @@ export async function invokeJsTool(
 		if (pending.settled) return;
 		pending.aborted = true;
 		pending.settled = true;
-		const error = reasonToError(options.signal?.reason, "Tool invocation aborted");
+		const error = abortReasonError(options.signal?.reason, "Tool invocation aborted");
 		for (const controller of pending.toolCalls.values()) controller.abort(error);
 		reject(error);
 	};
@@ -554,7 +555,7 @@ async function runOnce(
 
 	const onAbort = (): void => {
 		const reason = options.runState.signal?.reason;
-		const abortError = reasonToError(reason, "Execution aborted");
+		const abortError = abortReasonError(reason, "Execution aborted");
 		// Stop delegated work at once — this is what kills spawned subagents —
 		// and refuse further bridge calls so the drain below stays bounded to
 		// phases that had already started.
@@ -989,15 +990,6 @@ function safeSend(session: JsSession, msg: WorkerInbound): void {
 		// Serializing the message runs the getters of any value a tool returned, so the failure can be anything.
 		logger.debug("js worker send failed", { error: describeError(err).message });
 	}
-}
-
-/** The caller's abort reason as an error; it can be a Proxy whose traps throw, so only isErrorValue() inspects it. */
-function reasonToError(reason: unknown, fallback: string): Error {
-	// A rejected promise passed as the reason (even one made to look like an error) must be observed.
-	observeRejection(reason);
-	if (isErrorValue(reason)) return reason;
-	if (typeof reason === "string") return new ToolAbortError(reason);
-	return new ToolAbortError(fallback);
 }
 
 function errorFromPayload(payload: RunErrorPayload): Error {

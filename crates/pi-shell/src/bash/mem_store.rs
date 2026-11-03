@@ -9,30 +9,38 @@
 //! Its image ([`MemStore::to_bytes`]) stands in for a heap snapshot: the
 //! fault injector serializes it, drops the shell, and restores into a fresh
 //! store built from the bytes, as a new process would.
+//! Deferred host scalar defaults are memoized on observation. Scans and
+//! images force them into ordinary variable records, so snapshots contain
+//! values rather than process-local initializer functions.
+
+use std::sync::{Arc, OnceLock};
 
 use bstr::{BStr, BString};
-use hashbrown::HashMap;
+use hashbrown::{HashMap, hash_map::EntryRef};
 use serde::{Deserialize, Serialize};
 
 use crate::bash::store::{
-	BlobSlot, Change, Elem, Key, KeyBuf, Record, StateStore, StoreError, Table, VarValue,
+	Attrs, BlobSlot, Change, Elem, Key, KeyBuf, Record, StateStore, StoreError, Table, Var, VarValue,
 };
 
 /// One root scope: its [`Record::Scope`] and its locals by name.
 type ScopeEntry = (Record, HashMap<BString, Record>);
 
 /// In-memory [`StateStore`].
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default)]
 pub struct MemStore {
 	/// Global variables ([`Key::Var`]).
-	vars:    HashMap<BString, Record>,
+	vars:     HashMap<BString, Record>,
+	/// Host defaults not yet observed. Resolved records use the ordinary
+	/// representation, including in images and scans.
+	deferred: HashMap<BString, Arc<DeferredScalar>>,
 	/// The root shell's scopes, outermost first ([`Key::Scope`],
 	/// [`Key::Local`]).
-	scopes:  Vec<ScopeEntry>,
+	scopes:   Vec<ScopeEntry>,
 	/// Every other record.
-	records: HashMap<KeyBuf, Record>,
-	blobs:   HashMap<BlobSlot, Vec<u8>>,
-	epoch:   u64,
+	records:  HashMap<KeyBuf, Record>,
+	blobs:    HashMap<BlobSlot, Vec<u8>>,
+	epoch:    u64,
 }
 
 /// The serialized form of a [`MemStore`]: records sorted by key (scopes
@@ -48,6 +56,48 @@ struct Image {
 const fn shape(key: Key<'_>) -> StoreError {
 	StoreError::Shape { table: key.table() }
 }
+
+#[derive(Debug)]
+struct DeferredScalar {
+	initializer: fn() -> Option<BString>,
+	attrs:       Attrs,
+	record:      OnceLock<Option<Record>>,
+}
+
+impl DeferredScalar {
+	fn record(&self) -> Option<&Record> {
+		self
+			.record
+			.get_or_init(|| {
+				(self.initializer)()
+					.map(|value| Record::Var(Var { attrs: self.attrs, value: VarValue::Str(value) }))
+			})
+			.as_ref()
+	}
+}
+
+impl PartialEq for MemStore {
+	fn eq(&self, other: &Self) -> bool {
+		if self.scopes != other.scopes
+			|| self.records != other.records
+			|| self.blobs != other.blobs
+			|| self.epoch != other.epoch
+			|| self.len() != other.len()
+		{
+			return false;
+		}
+		self
+			.vars
+			.iter()
+			.all(|(name, record)| other.record(Key::Var(BStr::new(name))) == Some(record))
+			&& self
+				.deferred
+				.iter()
+				.all(|(name, value)| other.record(Key::Var(BStr::new(name))) == value.record())
+	}
+}
+
+impl Eq for MemStore {}
 
 impl MemStore {
 	/// Empty store.
@@ -111,7 +161,12 @@ impl MemStore {
 	#[inline]
 	pub fn record(&self, key: Key<'_>) -> Option<&Record> {
 		match key {
-			Key::Var(name) => self.vars.get(bytes(name)),
+			Key::Var(name) => self.vars.get(bytes(name)).or_else(|| {
+				self
+					.deferred
+					.get(bytes(name))
+					.and_then(|value| value.record())
+			}),
 			Key::Scope(depth) => self.scopes.get(depth as usize).map(|(r, _)| r),
 			Key::Local { depth, name } => self
 				.scopes
@@ -124,6 +179,11 @@ impl MemStore {
 	/// Number of records.
 	pub fn len(&self) -> usize {
 		self.vars.len()
+			+ self
+				.deferred
+				.values()
+				.filter(|value| value.record().is_some())
+				.count()
 			+ self.records.len()
 			+ self
 				.scopes
@@ -142,6 +202,7 @@ impl MemStore {
 		for (name, r) in &self.vars {
 			f(Key::Var(BStr::new(name)), r);
 		}
+		self.each_deferred(f);
 		for (depth, (scope, vars)) in (0_u32..).zip(&self.scopes) {
 			f(Key::Scope(depth), scope);
 			for (name, r) in vars {
@@ -150,6 +211,14 @@ impl MemStore {
 		}
 		for (k, r) in &self.records {
 			f(k.as_key(), r);
+		}
+	}
+
+	fn each_deferred(&self, f: &mut dyn FnMut(Key<'_>, &Record)) {
+		for (name, value) in &self.deferred {
+			if let Some(record) = value.record() {
+				f(Key::Var(BStr::new(name)), record);
+			}
 		}
 	}
 
@@ -170,6 +239,7 @@ impl MemStore {
 		match key {
 			Key::Var(name) => {
 				let name: &[u8] = name;
+				self.deferred.remove(name);
 				match self.vars.get_mut(name) {
 					Some(slot) => *slot = record,
 					None => {
@@ -214,6 +284,7 @@ impl MemStore {
 		match key {
 			Key::Var(name) => {
 				self.vars.remove(bytes(name));
+				self.deferred.remove(bytes(name));
 			},
 			Key::Scope(depth) => self.scopes.truncate(depth as usize),
 			Key::Local { depth, name } => {
@@ -232,7 +303,13 @@ impl MemStore {
 	#[inline]
 	fn var_mut(&mut self, key: Key<'_>) -> Option<&mut VarValue> {
 		let record = match key {
-			Key::Var(name) => self.vars.get_mut(bytes(name)),
+			Key::Var(name) => match self.vars.entry_ref(name) {
+				EntryRef::Occupied(slot) => Some(slot.into_mut()),
+				EntryRef::Vacant(slot) => {
+					let record = self.deferred.remove(bytes(name))?.record()?.clone();
+					Some(slot.insert(record))
+				},
+			},
 			Key::Local { depth, name } => self
 				.scopes
 				.get_mut(depth as usize)
@@ -258,6 +335,20 @@ fn assign(dst: &mut BString, src: &[u8]) {
 }
 
 impl StateStore for MemStore {
+	fn defer_scalar(
+		&mut self,
+		name: &[u8],
+		attrs: Attrs,
+		initializer: fn() -> Option<BString>,
+	) -> Result<bool, StoreError> {
+		self.vars.remove(name);
+		self.deferred.insert(
+			BString::from(name),
+			Arc::new(DeferredScalar { initializer, attrs, record: OnceLock::new() }),
+		);
+		Ok(true)
+	}
+
 	fn get(&mut self, key: Key<'_>) -> Result<Option<&Record>, StoreError> {
 		Ok(self.record(key))
 	}
@@ -268,6 +359,7 @@ impl StateStore for MemStore {
 				for (name, r) in &self.vars {
 					f(Key::Var(BStr::new(name)), r);
 				}
+				self.each_deferred(f);
 			},
 			Table::Scope => {
 				for (depth, (scope, _)) in (0_u32..).zip(&self.scopes) {
@@ -302,29 +394,40 @@ impl StateStore for MemStore {
 				Some(VarValue::Str(s)) => assign(s, value),
 				_ => return Err(shape(key)),
 			},
-			Change::SetElem(key, elem, value) => match (self.var_mut(key), elem) {
-				// An append (`a+=(x)`) goes past the last index: no search.
-				(Some(VarValue::Indexed(items)), Elem::Index(i))
-					if items.last().is_none_or(|(last, _)| *last < i) =>
-				{
-					items.push((i, BString::from(value)));
-				},
-				(Some(VarValue::Indexed(items)), Elem::Index(i)) => {
-					match items.binary_search_by_key(&i, |(k, _)| *k) {
-						Ok(p) => assign(&mut items[p].1, value),
-						Err(p) => items.insert(p, (i, BString::from(value))),
-					}
-				},
-				(Some(VarValue::Assoc(items)), Elem::Key(k)) => {
-					match items
-						.iter_mut()
-						.find(|(have, _)| have.as_slice() == bytes(k))
-					{
-						Some((_, v)) => assign(v, value),
-						None => items.push((BString::from(k), BString::from(value))),
-					}
-				},
+			Change::AppendScalar(key, value) => match self.var_mut(key) {
+				Some(VarValue::Str(s)) => s.extend_from_slice(value),
 				_ => return Err(shape(key)),
+			},
+			change @ (Change::SetElem(key, elem, value) | Change::AppendElem(key, elem, value)) => {
+				let append = matches!(change, Change::AppendElem(..));
+				match (self.var_mut(key), elem) {
+					// An append (`a+=(x)`) goes past the last index: no search.
+					(Some(VarValue::Indexed(items)), Elem::Index(i))
+						if items.last().is_none_or(|(last, _)| *last < i) =>
+					{
+						items.push((i, BString::from(value)));
+					},
+					(Some(VarValue::Indexed(items)), Elem::Index(i)) => {
+						match items.binary_search_by_key(&i, |(k, _)| *k) {
+							Ok(p) => {
+								let dst = &mut items[p].1;
+								if !append {
+									dst.clear();
+								}
+								dst.extend_from_slice(value);
+							},
+							Err(p) => items.insert(p, (i, BString::from(value))),
+						}
+					},
+					(Some(VarValue::Assoc(items)), Elem::Key(k)) => {
+						let dst = items.value_mut(bytes(k));
+						if !append {
+							dst.clear();
+						}
+						dst.extend_from_slice(value);
+					},
+					_ => return Err(shape(key)),
+				}
 			},
 			Change::DelElem(key, elem) => match (self.var_mut(key), elem) {
 				(Some(VarValue::Indexed(items)), Elem::Index(i)) => {
@@ -333,12 +436,7 @@ impl StateStore for MemStore {
 					}
 				},
 				(Some(VarValue::Assoc(items)), Elem::Key(k)) => {
-					if let Some(p) = items
-						.iter()
-						.position(|(have, _)| have.as_slice() == bytes(k))
-					{
-						items.remove(p);
-					}
+					items.remove(bytes(k));
 				},
 				_ => return Err(shape(key)),
 			},
@@ -362,5 +460,84 @@ impl StateStore for MemStore {
 
 	fn epoch(&self) -> u64 {
 		self.epoch
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use std::sync::atomic::{AtomicUsize, Ordering};
+
+	use super::*;
+
+	#[test]
+	fn deferred_scalars_observe_and_snapshot_as_ordinary_records() {
+		static CALLS: AtomicUsize = AtomicUsize::new(0);
+		let initialize: fn() -> Option<BString> = || {
+			CALLS.fetch_add(1, Ordering::Relaxed);
+			Some(BString::from("value"))
+		};
+		let key = Key::Var(BStr::new(b"DEFAULT"));
+		let mut store = MemStore::new();
+		store
+			.defer_scalar(b"DEFAULT", Attrs::EXPORT, initialize)
+			.unwrap();
+		assert_eq!(CALLS.load(Ordering::Relaxed), 0);
+		let clone = store.clone();
+		let record = Record::Var(Var { attrs: Attrs::EXPORT, value: VarValue::Str("value".into()) });
+		assert_eq!(store.get(key).unwrap(), Some(&record));
+		assert_eq!(clone.record(key), Some(&record));
+		assert_eq!(CALLS.load(Ordering::Relaxed), 1);
+		let mut scanned = Vec::new();
+		store
+			.scan(Table::Var, &mut |_, value| scanned.push(value.clone()))
+			.unwrap();
+		assert_eq!(scanned, [record]);
+		let restored = MemStore::from_bytes(&store.to_bytes()).unwrap();
+		assert_eq!(store, restored);
+		store
+			.apply(Change::SetScalar(key, BStr::new(b"changed")))
+			.unwrap();
+		assert_eq!(
+			store.get(key).unwrap(),
+			Some(&Record::Var(Var { attrs: Attrs::EXPORT, value: VarValue::Str("changed".into()) }))
+		);
+		assert_eq!(CALLS.load(Ordering::Relaxed), 1);
+
+		store
+			.defer_scalar(b"DEFAULT", Attrs::NONE, initialize)
+			.unwrap();
+		store.apply(Change::Del(key)).unwrap();
+		assert!(store.get(key).unwrap().is_none());
+		store
+			.defer_scalar(b"DEFAULT", Attrs::NONE, initialize)
+			.unwrap();
+		store
+			.apply(Change::Put(
+				key,
+				Record::Var(Var { attrs: Attrs::NONE, value: VarValue::Str("replacement".into()) }),
+			))
+			.unwrap();
+		assert_eq!(CALLS.load(Ordering::Relaxed), 1);
+
+		store
+			.defer_scalar(b"DEFAULT", Attrs::NONE, || None)
+			.unwrap();
+		assert!(store.get(key).unwrap().is_none());
+		assert_eq!(store.len(), 0);
+		let restored = MemStore::from_bytes(&store.to_bytes()).unwrap();
+		assert_eq!(store, restored);
+	}
+
+	#[test]
+	fn deferred_scalar_image_forces_unobserved_defaults() {
+		let mut store = MemStore::new();
+		store
+			.defer_scalar(b"DEFAULT", Attrs::READONLY, || Some("saved".into()))
+			.unwrap();
+		let restored = MemStore::from_bytes(&store.to_bytes()).unwrap();
+		assert_eq!(
+			restored.record(Key::Var(BStr::new(b"DEFAULT"))),
+			Some(&Record::Var(Var { attrs: Attrs::READONLY, value: VarValue::Str("saved".into()) }))
+		);
 	}
 }

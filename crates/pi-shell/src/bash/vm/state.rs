@@ -9,7 +9,7 @@
 //! the store ([`Root`]), kept exact by its own writes and dropped when the
 //! store's epoch says another writer changed it.
 
-use std::{borrow::Cow, collections::HashMap, sync::LazyLock};
+use std::collections::HashMap;
 
 use bstr::{BStr, BString};
 use hashbrown::DefaultHashBuilder;
@@ -201,10 +201,7 @@ impl Var {
 				.map(|p| items[p].1.as_slice()),
 			VarValue::Assoc(items) => {
 				let key = i.to_string();
-				items
-					.iter()
-					.find(|(k, _)| k.as_slice() == key.as_bytes())
-					.map(|(_, v)| v.as_slice())
+				items.get(key.as_bytes()).map(|v| v.as_slice())
 			},
 		}
 	}
@@ -212,10 +209,7 @@ impl Var {
 	/// Element with key `key` of an associative array.
 	pub fn key(&self, key: &[u8]) -> Option<&[u8]> {
 		match &self.value {
-			VarValue::Assoc(items) => items
-				.iter()
-				.find(|(k, _)| k.as_slice() == key)
-				.map(|(_, v)| v.as_slice()),
+			VarValue::Assoc(items) => items.get(key).map(|v| v.as_slice()),
 			_ => None,
 		}
 	}
@@ -245,10 +239,7 @@ impl Var {
 	/// Set element `key` of an associative array (insertion order kept).
 	pub fn set_key(&mut self, key: BString, v: BString) {
 		if let VarValue::Assoc(items) = &mut self.value {
-			match items.iter_mut().find(|(k, _)| *k == key) {
-				Some(slot) => slot.1 = v,
-				None => items.push((key, v)),
-			}
+			items.insert(key, v);
 		}
 	}
 }
@@ -1136,20 +1127,11 @@ pub enum VarEdit<'e> {
 		/// The number as text.
 		value: &'e [u8],
 	},
+	/// Remove an array element, retaining the variable's attributes.
+	Remove(Elem<'e>),
 	/// Append unkeyed elements after the highest index of an indexed array
 	/// (`a+=(x y)`); clears [`Attrs::INVISIBLE`].
 	Push(Vec<BString>),
-}
-
-/// `old` with `value` appended (`append`), or `value` alone.
-fn joined<'v>(old: Option<&[u8]>, value: &'v [u8], append: bool) -> Cow<'v, [u8]> {
-	if append {
-		let mut s = old.unwrap_or_default().to_vec();
-		s.extend_from_slice(value);
-		Cow::Owned(s)
-	} else {
-		Cow::Borrowed(value)
-	}
 }
 
 impl VarEdit<'_> {
@@ -1158,6 +1140,15 @@ impl VarEdit<'_> {
 	fn apply(self, var: &mut Var) {
 		match self {
 			Self::Replace(v) => *var = v,
+			Self::Remove(elem) => match (&mut var.value, elem) {
+				(VarValue::Indexed(items), Elem::Index(i)) => {
+					if let Ok(p) = items.binary_search_by_key(&i, |(k, _)| *k) {
+						items.remove(p);
+					}
+				},
+				(VarValue::Assoc(items), Elem::Key(k)) => items.remove(k),
+				_ => {},
+			},
 			Self::AddAttrs(a) => var.attrs = var.attrs.with(a),
 			Self::Set { elem, value, append } => {
 				if matches!(elem, Some(Elem::Index(_)))
@@ -1188,37 +1179,54 @@ impl VarEdit<'_> {
 /// Assign `value` to element `elem` of `var` in memory (see
 /// [`VarEdit::Set`]).
 fn set_elem(var: &mut Var, elem: Option<Elem<'_>>, value: &[u8], append: bool) {
-	match elem {
-		None => {
-			if let VarValue::Str(s) = &mut var.value {
-				if !append {
-					s.clear();
-				}
-				s.extend_from_slice(value);
-			} else {
-				let v = joined(var.index(0), value, append).into_owned();
-				var.set_index(0, BString::from(v));
+	let elem = match (&mut var.value, elem) {
+		(VarValue::Str(s), None) => {
+			if !append {
+				s.clear();
+			}
+			s.extend_from_slice(value);
+			return;
+		},
+		(_, None) => Elem::Index(0),
+		(_, Some(elem)) => elem,
+	};
+	if let (VarValue::Str(s), Elem::Index(_)) = (&var.value, elem) {
+		var.value = VarValue::Indexed(vec![(0, s.clone())]);
+	}
+	match (&mut var.value, elem) {
+		(VarValue::Indexed(items), Elem::Index(i)) => {
+			match items.binary_search_by_key(&i, |(k, _)| *k) {
+				Ok(p) => {
+					let dst = &mut items[p].1;
+					if !append {
+						dst.clear();
+					}
+					dst.extend_from_slice(value);
+				},
+				Err(p) => items.insert(p, (i, BString::from(value))),
 			}
 		},
-		Some(Elem::Index(i)) => {
-			let v = joined(var.index(i), value, append).into_owned();
-			var.set_index(i, BString::from(v));
+		(VarValue::Assoc(items), Elem::Key(k)) => {
+			let dst = items.value_mut(k);
+			if !append {
+				dst.clear();
+			}
+			dst.extend_from_slice(value);
 		},
-		Some(Elem::Key(k)) => {
-			let v = joined(var.key(k), value, append).into_owned();
-			var.set_key(BString::from(k), BString::from(v));
-		},
+		_ => {},
 	}
 }
 
 /// A store change [`store_edit`] can make without rewriting the variable.
 enum Fast<'e> {
-	/// [`Change::SetScalar`].
-	Scalar(Cow<'e, [u8]>),
-	/// [`Change::SetElem`].
-	Elem(Elem<'e>, Cow<'e, [u8]>),
+	/// [`Change::SetScalar`] or [`Change::AppendScalar`].
+	Scalar(&'e [u8], bool),
+	/// [`Change::SetElem`] or [`Change::AppendElem`].
+	Elem(Elem<'e>, &'e [u8], bool),
 	/// [`Change::SetElem`] of each pushed element from this index.
 	Push(i64),
+	/// [`Change::DelElem`].
+	Remove(Elem<'e>),
 	/// The change leaves the variable as it is.
 	Nothing,
 }
@@ -1230,6 +1238,14 @@ fn fast_edit<'e>(edit: &VarEdit<'e>, cur: &Var) -> Option<Fast<'e>> {
 		return None;
 	}
 	let (elem, value, append) = match *edit {
+		VarEdit::Remove(elem) => {
+			return Some(match (&cur.value, elem) {
+				(VarValue::Indexed(_), Elem::Index(_)) | (VarValue::Assoc(_), Elem::Key(_)) => {
+					Fast::Remove(elem)
+				},
+				_ => Fast::Nothing,
+			});
+		},
 		VarEdit::Set { elem, value, append } => (elem, value, append),
 		VarEdit::Number { elem, value } => (elem, value, false),
 		VarEdit::Push(_) => {
@@ -1241,16 +1257,10 @@ fn fast_edit<'e>(edit: &VarEdit<'e>, cur: &Var) -> Option<Fast<'e>> {
 		VarEdit::Replace(_) | VarEdit::AddAttrs(_) => return None,
 	};
 	Some(match (&cur.value, elem) {
-		(VarValue::Str(s), None) => Fast::Scalar(joined(Some(s.as_slice()), value, append)),
-		(VarValue::Indexed(_), None) => {
-			Fast::Elem(Elem::Index(0), joined(cur.index(0), value, append))
-		},
-		(VarValue::Indexed(_), Some(Elem::Index(i))) => {
-			Fast::Elem(Elem::Index(i), joined(cur.index(i), value, append))
-		},
-		(VarValue::Assoc(_), Some(Elem::Key(k))) => {
-			Fast::Elem(Elem::Key(k), joined(cur.key(k), value, append))
-		},
+		(VarValue::Str(_), None) => Fast::Scalar(value, append),
+		(VarValue::Indexed(_), None) => Fast::Elem(Elem::Index(0), value, append),
+		(VarValue::Indexed(_), Some(Elem::Index(i))) => Fast::Elem(Elem::Index(i), value, append),
+		(VarValue::Assoc(_), Some(Elem::Key(k))) => Fast::Elem(Elem::Key(k), value, append),
 		// `set_index`/`set_key` leave an associative array (indexed) or a
 		// non-associative one (keyed) as it is.
 		(VarValue::Assoc(_), None | Some(Elem::Index(_)))
@@ -1270,6 +1280,8 @@ fn fast_edit<'e>(edit: &VarEdit<'e>, cur: &Var) -> Option<Fast<'e>> {
 pub enum Seen {
 	/// A scalar.
 	Scalar,
+	/// An associative array.
+	Assoc,
 	/// An indexed array.
 	Indexed {
 		/// Its highest index + 1 ([`Var::next_index`]).
@@ -1279,7 +1291,7 @@ pub enum Seen {
 
 impl Seen {
 	/// What `var` shows an edit; `None` when the edit cannot rely on it
-	/// (declared but unset, which an edit rewrites, or associative).
+	/// (declared but unset, which an edit rewrites).
 	pub fn of(var: &Var) -> Option<Self> {
 		if var.attrs.contains(Attrs::INVISIBLE) {
 			return None;
@@ -1287,32 +1299,39 @@ impl Seen {
 		match &var.value {
 			VarValue::Str(_) => Some(Self::Scalar),
 			VarValue::Indexed(_) => Some(Self::Indexed { next: var.next_index() }),
-			VarValue::Assoc(_) => None,
+			VarValue::Assoc(_) => Some(Self::Assoc),
 		}
 	}
 }
 
 /// The store change for `edit` of a variable showing `seen`, when it needs
-/// none of the old value (as [`fast_edit`] decides; `+=` reads it).
+/// none of the old value (as [`fast_edit`] decides).
 const fn seen_edit<'e>(edit: &VarEdit<'e>, seen: Seen) -> Option<Fast<'e>> {
-	let (elem, value) = match *edit {
-		VarEdit::Set { elem, value, append: false } | VarEdit::Number { elem, value } => {
-			(elem, value)
+	let (elem, value, append) = match *edit {
+		VarEdit::Remove(elem) => {
+			return match (seen, elem) {
+				(Seen::Indexed { .. }, Elem::Index(_)) | (Seen::Assoc, Elem::Key(_)) => {
+					Some(Fast::Remove(elem))
+				},
+				_ => None,
+			};
 		},
+		VarEdit::Set { elem, value, append } => (elem, value, append),
+		VarEdit::Number { elem, value } => (elem, value, false),
 		VarEdit::Push(_) => {
 			return match seen {
 				Seen::Indexed { next } => Some(Fast::Push(next)),
-				Seen::Scalar => None,
+				Seen::Scalar | Seen::Assoc => None,
 			};
 		},
-		VarEdit::Set { append: true, .. } | VarEdit::Replace(_) | VarEdit::AddAttrs(_) => {
-			return None;
-		},
+		VarEdit::Replace(_) | VarEdit::AddAttrs(_) => return None,
 	};
 	match (seen, elem) {
-		(Seen::Scalar, None) => Some(Fast::Scalar(Cow::Borrowed(value))),
+		(Seen::Scalar, None) => Some(Fast::Scalar(value, append)),
+		(Seen::Assoc, Some(Elem::Key(k))) => Some(Fast::Elem(Elem::Key(k), value, append)),
+		(Seen::Indexed { .. }, None) => Some(Fast::Elem(Elem::Index(0), value, append)),
 		(Seen::Indexed { .. }, Some(Elem::Index(i))) => {
-			Some(Fast::Elem(Elem::Index(i), Cow::Borrowed(value)))
+			Some(Fast::Elem(Elem::Index(i), value, append))
 		},
 		_ => None,
 	}
@@ -1341,8 +1360,12 @@ fn store_edit(
 		},
 	};
 	match plan {
-		Ok(Fast::Scalar(v)) => root.write(store, Change::SetScalar(key, BStr::new(&*v))),
-		Ok(Fast::Elem(elem, v)) => root.write(store, Change::SetElem(key, elem, BStr::new(&*v))),
+		Ok(Fast::Scalar(v, false)) => root.write(store, Change::SetScalar(key, BStr::new(v))),
+		Ok(Fast::Scalar(v, true)) => root.write(store, Change::AppendScalar(key, BStr::new(v))),
+		Ok(Fast::Elem(elem, v, false)) => root.write(store, Change::SetElem(key, elem, BStr::new(v))),
+		Ok(Fast::Elem(elem, v, true)) => {
+			root.write(store, Change::AppendElem(key, elem, BStr::new(v)));
+		},
 		Ok(Fast::Push(first)) => {
 			if let VarEdit::Push(elems) = &edit {
 				for (i, v) in (first..).zip(elems) {
@@ -1350,6 +1373,7 @@ fn store_edit(
 				}
 			}
 		},
+		Ok(Fast::Remove(elem)) => root.write(store, Change::DelElem(key, elem)),
 		Ok(Fast::Nothing) => {},
 		Err(mut var) => {
 			edit.apply(&mut var);
@@ -1515,7 +1539,7 @@ pub fn unset_var(
 				let value = match v.value {
 					VarValue::Str(_) => VarValue::Str(BString::default()),
 					VarValue::Indexed(_) => VarValue::Indexed(Vec::new()),
-					VarValue::Assoc(_) => VarValue::Assoc(Vec::new()),
+					VarValue::Assoc(_) => VarValue::Assoc(Default::default()),
 				};
 				Var { attrs: v.attrs.with(Attrs::INVISIBLE), value }
 			});
@@ -1743,15 +1767,36 @@ pub fn init_option_vars(root: &mut Root, store: &mut dyn StateStore) -> Result<(
 	Ok(())
 }
 
-/// Every option sorted by name, the listing order of `set -o`, `shopt`,
-/// `SHELLOPTS` and `BASHOPTS`; sorted once rather than per option sync
-/// (the sort was half of a `$( )`'s cost).
-static OPTS_BY_NAME: LazyLock<Box<[OptId]>> = LazyLock::new(|| {
-	use strum::IntoEnumIterator;
-	let mut names: Vec<OptId> = OptId::iter().collect();
-	names.sort_unstable_by_key(|o| <&'static str>::from(*o));
-	names.into_boxed_slice()
-});
+/// Every option in bash's listing order. Sorting the generated variant
+/// names at compile time avoids allocating and sorting on every shell start.
+const OPTS_BY_NAME: [OptId; <OptId as strum::VariantArray>::VARIANTS.len()] = {
+	const fn before(a: &str, b: &str) -> bool {
+		let (a, b) = (a.as_bytes(), b.as_bytes());
+		let mut i = 0;
+		while i < a.len() && i < b.len() {
+			if a[i] != b[i] {
+				return a[i] < b[i];
+			}
+			i += 1;
+		}
+		a.len() < b.len()
+	}
+	let variants = <OptId as strum::VariantArray>::VARIANTS;
+	let names = <OptId as strum::VariantNames>::VARIANTS;
+	let mut sorted = [OptId::Allexport; <OptId as strum::VariantArray>::VARIANTS.len()];
+	let mut i = 0;
+	while i < variants.len() {
+		let next = variants[i];
+		let mut at = i;
+		while at > 0 && before(names[next as usize], names[sorted[at - 1] as usize]) {
+			sorted[at] = sorted[at - 1];
+			at -= 1;
+		}
+		sorted[at] = next;
+		i += 1;
+	}
+	sorted
+};
 
 /// The `set -o` and `shopt` options that are on, as `a:b:c` lists in
 /// listing order.
@@ -1759,7 +1804,7 @@ fn option_lists(
 	mut on: impl FnMut(OptId) -> Result<bool, StoreError>,
 ) -> Result<(BString, BString), StoreError> {
 	let (mut set, mut shopt) = (BString::default(), BString::default());
-	for &opt in OPTS_BY_NAME.iter() {
+	for &opt in &OPTS_BY_NAME {
 		if !on(opt)? {
 			continue;
 		}
@@ -1977,10 +2022,7 @@ fn value_scalar(value: &VarValue) -> Option<&[u8]> {
 			.iter()
 			.find(|(i, _)| *i == 0)
 			.map(|(_, v)| v.as_slice()),
-		VarValue::Assoc(items) => items
-			.iter()
-			.find(|(k, _)| k.as_slice() == b"0")
-			.map(|(_, v)| v.as_slice()),
+		VarValue::Assoc(items) => items.get(b"0").map(|v| v.as_slice()),
 	}
 }
 
@@ -3498,7 +3540,7 @@ mod tests {
 			Var { attrs: Attrs::INDEXED, value: VarValue::Indexed(Vec::new()) },
 			Var {
 				attrs: Attrs::ASSOC,
-				value: VarValue::Assoc(vec![(s("k"), s("v")), (s("0"), s("z"))]),
+				value: VarValue::Assoc(vec![(s("k"), s("v")), (s("0"), s("z"))].into()),
 			},
 			Var { attrs: Attrs::INVISIBLE.with(Attrs::INDEXED), value: VarValue::Indexed(Vec::new()) },
 		];
@@ -3509,12 +3551,18 @@ mod tests {
 				VarEdit::Set { elem: None, value: b"new", append: false },
 				VarEdit::Set { elem: None, value: b"+", append: true },
 				VarEdit::Set { elem: Some(Elem::Index(5)), value: b"q", append: false },
+				VarEdit::Set { elem: Some(Elem::Index(5)), value: b"+", append: true },
+				VarEdit::Set { elem: Some(Elem::Index(5)), value: b"", append: true },
 				VarEdit::Set { elem: Some(Elem::Index(3)), value: b"q", append: true },
 				VarEdit::Set { elem: Some(Elem::Key(k)), value: b"w", append: true },
 				VarEdit::Set { elem: Some(Elem::Key(n)), value: b"w", append: false },
 				VarEdit::Number { elem: None, value: b"42" },
 				VarEdit::Number { elem: Some(Elem::Index(2)), value: b"1" },
 				VarEdit::Number { elem: Some(Elem::Key(k)), value: b"9" },
+				VarEdit::Remove(Elem::Index(5)),
+				VarEdit::Remove(Elem::Index(3)),
+				VarEdit::Remove(Elem::Key(k)),
+				VarEdit::Remove(Elem::Key(n)),
 				VarEdit::Push(vec![s("p"), s("q")]),
 				VarEdit::AddAttrs(Attrs::EXPORT),
 				VarEdit::Replace(Var::scalar("r", Attrs::READONLY)),

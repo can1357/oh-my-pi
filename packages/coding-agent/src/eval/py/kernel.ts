@@ -229,10 +229,15 @@ export class PythonKernel extends BaseKernel<PythonKernelExecuteOptions> {
 		});
 	}
 
-	/** Describe or invoke a tool defined in this retained Python kernel. */
+	/** Describe or invoke a tool defined in this retained Python kernel; cancelling it cancels an async tool's coroutine. */
 	async invokeTool(request: PythonToolRequest, options?: KernelExecuteOptions): Promise<KernelExecuteResult> {
 		const id = options?.id ?? Snowflake.next();
-		return await this.submitRequest(id, JSON.stringify({ type: "tool", id, ...request }), options);
+		return await this.submitRequest(
+			id,
+			JSON.stringify({ type: "tool", id, ...request }),
+			options,
+			JSON.stringify({ type: "tool_cancel", id }),
+		);
 	}
 
 	/** Synchronize enabled capability snippets before the next user cell. */

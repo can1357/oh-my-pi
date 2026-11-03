@@ -45,6 +45,7 @@ use crate::bash::{
 	ids::{CallId, ModeId, RunId, UnitId, Vpid},
 	ir::{
 		AssignVal, CondIr, IR_VERSION, Op, OpIr, Opcode, Part, RedirTargetIr, SpawnKind, SubIr, Unit,
+		materialize,
 	},
 	mem::{Capture, MemEnd, MemImage, MemObj},
 	signal::{SigSet, Signal},
@@ -1116,6 +1117,13 @@ pub fn load_unit(
 	if unit.id != id || !valid(&unit) {
 		return Err(RestoreError::InvalidUnit { unit: id });
 	}
+	let unit = if unit.deferred.is_some() {
+		materialize(&unit)
+			.filter(valid)
+			.ok_or(RestoreError::InvalidUnit { unit: id })?
+	} else {
+		unit
+	};
 	Ok(engine.intern(unit))
 }
 
@@ -1123,6 +1131,9 @@ pub fn load_unit(
 /// at an existing entry, so a decoded unit cannot make the VM index out of
 /// bounds.
 fn valid(u: &Unit) -> bool {
+	if let Some(tree) = &u.deferred {
+		return u.root.is_some() && (!tree.is_empty() || !u.source.is_empty()) && u.ops.is_empty();
+	}
 	let n = u.ops.len() as u32;
 	let w_ok = |w: u32| (w as usize) < u.words.len();
 	// Brace alternatives are plain words, so expansion cannot recurse.

@@ -1,9 +1,10 @@
-import { describeError, inheritsFrom, logger, observeRejection, toError } from "@oh-my-pi/pi-utils";
+import { describeError, inheritsFrom, isErrorValue, logger, observeRejection, toError } from "@oh-my-pi/pi-utils";
 import { Settings } from "../config/settings";
 import { type OutputArtifactError, OutputSink } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { statusEventKey } from "@oh-my-pi/pi-tui/tools/eval";
 import type { ToolSession } from "../tools";
 import { catchRejection } from "../utils/ipc";
+import { ToolAbortError } from "../tools/tool-errors";
 import {
 	resolveOutputMaxColumns,
 	resolveOutputSinkArtifactMaxBytes,
@@ -30,6 +31,19 @@ export class EvalKernelNotRunningError extends Error {
 		);
 		this.name = "EvalKernelNotRunningError";
 	}
+}
+
+/**
+ * The error an aborted kernel call reports: the signal's own reason (`Interrupted by user`, …) or `fallback`.
+ * The reason is whatever the caller passed to `abort()`: it is observed first (a rejected promise passed as
+ * the reason, even one given Error.prototype, must not go unhandled) and classified only through
+ * isErrorValue(), which never throws, because a Proxy reason can make `instanceof` throw.
+ */
+export function abortReasonError(reason: unknown, fallback: string): Error {
+	observeRejection(reason);
+	if (isErrorValue(reason)) return reason;
+	if (typeof reason === "string") return new ToolAbortError(reason);
+	return new ToolAbortError(fallback);
 }
 
 /**

@@ -149,6 +149,14 @@ pub trait Host {
 	fn login_shell(&self) -> Option<BString> {
 		None
 	}
+	/// A host-independent initializer for the same value as
+	/// [`Host::login_shell`]. A supporting store can memoize it on first
+	/// observation instead of querying the password database at startup.
+	/// It must remain valid after this host is dropped. Other hosts keep
+	/// the eager lookup by returning `None`.
+	fn login_shell_initializer(&self) -> Option<fn() -> Option<BString>> {
+		None
+	}
 	/// The file-creation mask the shell starts with (bash takes the
 	/// process's): [`Shell::create`](crate::bash::Shell::create) records it as
 	/// the shell's `umask`, which externals and created files get. A host

@@ -534,27 +534,87 @@ describe("spotlight plain baseline", () => {
 		expect(entry).toMatchObject({ plainChars: trace.plainChars, plainTokens: trace.plainTokens });
 	});
 
-	it("gives the model plain's text when a cut of a spilled output would be longer than it", async () => {
+	it("cuts a rerun of a spilled output like the first run, rather than showing it whole as a re-ask", async () => {
 		const client = spotlightClient(fakeSpotlight({ score: item => (item.includes("ERROR") ? 1 : 0.1) }));
 		const { session, manager } = await experimentSession(client);
 		await spill(manager);
 		const bash = new BashTool(session);
 		await bash.execute("b1", { command: "./ingest.sh" });
 
-		// Asking again: shaping shows a re-ask whole, collapsing only the lines it showed before, which is the whole
-		// artifact less a few lines and far past the 300 lines plain shows.
+		// The rerun brings back every line the first cut hid; it is not the agent asking for them.
 		const again = await bash.execute("b2", { command: "./ingest.sh" });
 
-		const plain = await plainText();
-		expect(resultText(again) + formatOutputNotice(again.details?.meta)).toBe(plain);
 		const trace = again.details?.spotlight;
-		expect(trace?.steps).toContain("plain-cap");
-		expect(trace).toMatchObject({ savedTokens: 0, outChars: plain.length, outTokens: countTokens(plain) });
-		expect(trace?.cappedTokens).toBeGreaterThan(countTokens(plain) * 4);
-		expect(trace?.original).toBeUndefined();
-		const entry = entries(manager, SPOTLIGHT_ENTRY.shape)[1];
-		expect(entry).toMatchObject({ toolCallId: "b2", outTokens: trace?.outTokens, cappedTokens: trace?.cappedTokens });
-		expect(entry.holdout).toBeUndefined();
+		expect(trace?.steps).not.toContain("plain-cap");
+		expect(trace?.original).toBeDefined();
+		expect(resultText(again).length).toBeLessThan((await plainText()).length / 4);
+		const [, entry] = entries(manager, SPOTLIGHT_ENTRY.shape);
+		expect(entry).toMatchObject({
+			toolCallId: "b2",
+			stats: expect.not.objectContaining({ reasks: expect.anything() }),
+		});
+	});
+});
+
+describe("spotlight column-capped output", () => {
+	const ITEMS = Array.from({ length: 400 }, (_, i) => ({
+		id: i,
+		name: `item${i}`,
+		// Five statuses, so the rows repeat no few shapes and the cut keeps a full window.
+		flag: i === 317 ? "on_hold" : ["ok", "shipped", "packed", "returned", "billed"][i % 5],
+	}));
+	const FULL = JSON.stringify({ items: ITEMS });
+
+	it("gives a short cut of the whole artifact over the column cap's preview, counting what it costs", async () => {
+		const client = spotlightClient(fakeSpotlight({ score: item => (item.includes("on_hold") ? 1 : 0.05) }));
+		const { session, manager } = await experimentSession(client);
+		const artifactId = await manager.saveArtifact(FULL, "bash");
+		if (artifactId === undefined) throw new Error("the in-memory session keeps artifacts");
+		const preview = `${FULL.slice(0, 768)}…`;
+		const capped: bashExecutor.BashResult = {
+			...bashOutput(preview),
+			artifactId,
+			totalBytes: FULL.length,
+			columnMax: 768,
+			columnTruncatedLines: 1,
+			columnTruncatedRange: { first: 1, last: 1 },
+		};
+		vi.spyOn(bashExecutor, "executeBash").mockResolvedValue(capped);
+
+		const result = await new BashTool(session).execute("b1", { command: "./orders.sh" });
+
+		const trace = result.details?.spotlight;
+		expect(trace?.inChars).toBe(FULL.length);
+		expect(resultText(result)).toContain("317|item317|on_hold");
+		expect(trace?.steps).not.toContain("plain-cap");
+		expect(trace?.savedTokens).toBe((trace?.plainTokens ?? 0) - (trace?.outTokens ?? 0));
+		expect(trace?.savedTokens).toBeLessThan(0);
+	});
+
+	it("still says a timed-out command timed out when its cut comes from the artifact", async () => {
+		const client = spotlightClient(fakeSpotlight({ score: item => (item.includes("on_hold") ? 1 : 0.05) }));
+		const { session, manager } = await experimentSession(client);
+		const artifactId = await manager.saveArtifact(FULL, "bash");
+		if (artifactId === undefined) throw new Error("the in-memory session keeps artifacts");
+		// The sink puts its timeout notice above the preview; the artifact holds only what the command printed.
+		const preview = `[Command timed out after 1 seconds]\n${FULL.slice(0, 768)}…`;
+		const timedOut: bashExecutor.BashResult = {
+			...bashOutput(preview),
+			exitCode: undefined,
+			timedOut: true,
+			artifactId,
+			totalBytes: FULL.length,
+			columnMax: 768,
+			columnTruncatedLines: 1,
+			columnTruncatedRange: { first: 1, last: 1 },
+		};
+		vi.spyOn(bashExecutor, "executeBash").mockResolvedValue(timedOut);
+
+		const result = await new BashTool(session).execute("b1", { command: "./orders.sh", timeout: 1 });
+
+		expect(result.details?.spotlight?.inChars).toBe(FULL.length);
+		expect(result.isError).toBe(true);
+		expect(resultText(result).match(/\[Command timed out after 1 seconds\]/g)).toHaveLength(1);
 	});
 });
 
@@ -732,9 +792,6 @@ describe("spotlight shaping of any tool", () => {
 				onSource,
 			}),
 		);
-	/** Artifact ids differ between sessions. */
-	const anyArtifact = (text: string) => text.replace(/artifact:\/\/\d+/g, "artifact://N");
-
 	it("cuts a long grep output to the ranked lines under their file headings, recoverable from its artifact", async () => {
 		const sources: string[] = [];
 		const run = await experimentSession(ranked(source => sources.push(source)));
@@ -756,6 +813,8 @@ describe("spotlight shaping of any tool", () => {
 		if (!footer) throw new Error("a cut names where its hidden lines are");
 		const saved = run.manager.getArtifactContent(footer[2]) ?? "";
 		expect(saved).toBe(OUTPUT);
+		// The trace's original is that same copy, not a second one.
+		expect(result.details?.spotlight?.original?.url).toBe(footer[1]);
 		const markers = [...text.matchAll(/… \[(\d+)-(\d+)\]/g)];
 		expect(markers.length).toBeGreaterThan(0);
 		for (const [, from, to] of markers) {
@@ -833,7 +892,7 @@ describe("spotlight shaping of any tool", () => {
 		expect(entry.steps).not.toEqual(["none"]);
 	});
 
-	it("gives the model the wrapper's text when a re-asked spilled output's cut would be longer", async () => {
+	it("cuts a rerun of a spilled grep output instead of showing it whole as a re-ask", async () => {
 		const big = grepOutput(40);
 		const plain = await plainSession(SMALL_SPILL);
 		const plainText = resultText(await agentCall(fakeTool("grep", big), plain, "g1", ARGS));
@@ -842,12 +901,9 @@ describe("spotlight shaping of any tool", () => {
 
 		const again = await agentCall(fakeTool("grep", big), run, "g2", ARGS);
 
-		expect(anyArtifact(resultText(again))).toBe(anyArtifact(plainText));
-		const trace = spotlightDetails(again.details);
-		expect(trace?.steps).toContain("plain-cap");
-		expect(trace).toMatchObject({ savedTokens: 0, outTokens: countTokens(plainText) });
-		expect(trace?.cappedTokens).toBeGreaterThan(countTokens(plainText));
-		expect(again.details?.meta?.truncation?.artifactId).toBeDefined();
+		expect(spotlightDetails(again.details)?.steps).toContain("window");
+		expect(spotlightDetails(again.details)?.steps).not.toContain("plain-cap");
+		expect(resultText(again).length).toBeLessThan(plainText.length);
 	});
 
 	/** A short board: its ten open items repeat in the next board, and save enough tokens to collapse. */
@@ -865,7 +921,11 @@ describe("spotlight shaping of any tool", () => {
 		const again = await agentCall(fakeTool("board", NEXT_BOARD), run, "t2");
 
 		expect(resultText(again)).toBe(
-			["board: 10 open, 2 done", "… [10 lines as shown before]", "- [done] add the edit gate setting"].join("\n"),
+			[
+				"board: 10 open, 2 done",
+				"… [10 lines as shown before: read artifact://0:2-11]",
+				"- [done] add the edit gate setting",
+			].join("\n"),
 		);
 		const entry = entries(run.manager, SPOTLIGHT_ENTRY.shape)[1];
 		expect(entry).toMatchObject({ toolCallId: "t2", steps: ["seen"], stats: { short: 1, seenLines: 10 } });
@@ -912,7 +972,9 @@ describe("spotlight shaping of any tool", () => {
 		const board = fakeTool("board", BOARD.join("\n"));
 		const next = fakeTool("board", NEXT_BOARD);
 		context.push(shown("t1", await agentCall(board, run, "t1")), call("t2"));
-		expect(resultText(await agentCall(next, run, "t2"))).toContain("… [10 lines as shown before]");
+		expect(resultText(await agentCall(next, run, "t2"))).toMatch(
+			/… \[10 lines as shown before: read artifact:\/\/\d+:2-11\]/,
+		);
 
 		// A compaction leaves its summary and the new turn: the boards are gone from the context.
 		context = [{ role: "user", content: "Summary: the board was triaged.", timestamp: 0 }, call("t3")];
@@ -929,7 +991,7 @@ describe("spotlight shaping of any tool", () => {
 		await agentCall(fakeTool("board", BOARD.join("\n")), run, "t1");
 		const sibling = await agentCall(fakeTool("board", NEXT_BOARD), run, "t2");
 
-		expect(resultText(sibling)).toContain("… [10 lines as shown before]");
+		expect(resultText(sibling)).toMatch(/… \[10 lines as shown before: read artifact:\/\/\d+:2-11\]/);
 	});
 
 	it("shapes and journals only the tools spotlight.experiment.tools names", async () => {
