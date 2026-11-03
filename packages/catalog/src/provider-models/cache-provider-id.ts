@@ -242,3 +242,29 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			return providerId;
 	}
 }
+
+/**
+ * Scope a provider's cache namespace to the endpoint its operator configured
+ * (a models.yml provider `baseUrl` or a runtime provider override).
+ *
+ * Discovered rows carry the endpoint they were fetched from as their
+ * `baseUrl`. A roster discovered through a configured gateway must therefore
+ * never be served once that configuration is gone: with a shared namespace,
+ * removing the gateway `baseUrl` from the built-in `anthropic` provider kept
+ * sending the gateway-listed models to the gateway, with the stored login as
+ * the bearer, until the next discovery rewrote the row. No configured
+ * endpoint means the built-in one, and that namespace only ever holds rows
+ * discovered from it.
+ *
+ * Applied on top of {@link resolveModelCacheProviderId}, including its
+ * endpoint-aware namespaces: the read and the write paths both wrap, so they
+ * always agree.
+ */
+export function scopeModelCacheProviderIdToEndpoint(
+	cacheProviderId: string,
+	configuredBaseUrl: string | undefined,
+): string {
+	const endpoint = configuredBaseUrl?.trim().replace(/\/+$/, "");
+	if (!endpoint) return cacheProviderId;
+	return `${cacheProviderId}:endpoint-v1:${Bun.hash(endpoint).toString(36)}`;
+}

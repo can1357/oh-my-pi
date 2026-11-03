@@ -44,6 +44,7 @@ import {
 	PROVIDER_DESCRIPTORS,
 	resolveModelCacheProviderId,
 	resolveOllamaModelCacheProviderId,
+	scopeModelCacheProviderIdToEndpoint,
 } from "@oh-my-pi/pi-catalog/provider-models";
 import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-references";
 import { apiServesKind, modelKind, type ModelKind } from "@oh-my-pi/pi-catalog/types";
@@ -1632,10 +1633,16 @@ export class ModelRegistry {
 		});
 	}
 
+	/** The endpoint the operator configured for a provider: a runtime override, then models.yml. */
+	#configuredBaseUrl(providerId: string): string | undefined {
+		return (
+			this.#runtimeProviderOverrides.get(providerId)?.baseUrl ?? this.#providerOverrides.get(providerId)?.baseUrl
+		);
+	}
+
 	#descriptorBaseUrl(providerId: string): string | undefined {
 		return (
-			this.#runtimeProviderOverrides.get(providerId)?.baseUrl ??
-			this.#providerOverrides.get(providerId)?.baseUrl ??
+			this.#configuredBaseUrl(providerId) ??
 			(this.#hasFullSnapshot ? this.getProviderBaseUrl(providerId) : undefined)
 		);
 	}
@@ -1646,11 +1653,10 @@ export class ModelRegistry {
 	 * credential in; those load only through their model manager.
 	 */
 	#resolveStartupModelCacheProviderId(providerId: string): string {
-		const baseUrl =
-			this.#runtimeProviderOverrides.get(providerId)?.baseUrl ??
-			this.#providerOverrides.get(providerId)?.baseUrl ??
-			(this.#hasFullSnapshot ? this.getProviderBaseUrl(providerId) : undefined);
-		return resolveModelCacheProviderId(providerId, { baseUrl });
+		return scopeModelCacheProviderIdToEndpoint(
+			resolveModelCacheProviderId(providerId, { baseUrl: this.#descriptorBaseUrl(providerId) }),
+			this.#configuredBaseUrl(providerId),
+		);
 	}
 
 	#loadCachedStandardProviderModels(providerIds: readonly string[]): {
@@ -2856,6 +2862,21 @@ export class ModelRegistry {
 				}),
 				modelsDev,
 			});
+		}
+
+		// Every built-in manager reads and writes a namespace scoped to the
+		// configured endpoint, as `#resolveStartupModelCacheProviderId` reads, so
+		// a roster discovered through one endpoint is never served for another
+		// (`scopeModelCacheProviderIdToEndpoint`).
+		for (let i = 0; i < options.length; i++) {
+			const { providerId, cacheProviderId } = options[i];
+			options[i] = {
+				...options[i],
+				cacheProviderId: scopeModelCacheProviderIdToEndpoint(
+					cacheProviderId ?? providerId,
+					this.#configuredBaseUrl(providerId),
+				),
+			};
 		}
 
 		// Append runtime model managers registered by extensions via fetchDynamicModels.
