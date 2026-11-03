@@ -466,6 +466,7 @@ export function mapStopReason(reason: FinishReason): StopReason {
 		case "OTHER":
 		case "LANGUAGE":
 		case "MALFORMED_FUNCTION_CALL":
+		case "MALFORMED_RESPONSE":
 		case "UNEXPECTED_TOOL_CALL":
 		case "NO_IMAGE":
 			return "error";
@@ -797,6 +798,7 @@ export async function consumeGoogleStream<T extends GoogleApiType>(args: {
 	const textBlocks = new GoogleTextBlocks(output, stream, "healed");
 	let firstTokenSeen = false;
 	let sawFinishReason = false;
+	let finishErrorId: number | undefined;
 
 	for await (const chunk of googleStream) {
 		if (chunk.error) throw googleStreamChunkError(chunk.error, model.provider);
@@ -849,6 +851,9 @@ export async function consumeGoogleStream<T extends GoogleApiType>(args: {
 				output.stopReason = mapped;
 				if (mapped === "error") {
 					output.errorMessage = `Generation failed with finish reason: ${candidate.finishReason}`;
+					// A backend fault, not a verdict on the request: the same request can succeed.
+					finishErrorId =
+						candidate.finishReason === "MALFORMED_RESPONSE" ? AIError.create(AIError.Flag.Transient) : undefined;
 				}
 			}
 		}
@@ -873,10 +878,11 @@ export async function consumeGoogleStream<T extends GoogleApiType>(args: {
 	}
 
 	if (output.stopReason === "aborted" || output.stopReason === "error") {
-		throw new AIError.ProviderResponseError(output.errorMessage ?? "An unknown error occurred", {
+		const error = new AIError.ProviderResponseError(output.errorMessage ?? "An unknown error occurred", {
 			provider: model.provider,
 			kind: "output",
 		});
+		throw finishErrorId === undefined ? error : AIError.attach(error, finishErrorId);
 	}
 }
 

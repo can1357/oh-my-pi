@@ -47,7 +47,9 @@ function replyStream(text: string): AssistantMessageEventStream {
 	return Object.assign(iterator, { result: async () => message }) as unknown as AssistantMessageEventStream;
 }
 function errorStream(errorMessage: string, errorDisplayMessage?: string): AssistantMessageEventStream {
-	const events = [{ type: "error", error: { errorMessage, errorDisplayMessage } }] as unknown as AssistantMessageEvent[];
+	const events = [
+		{ type: "error", error: { errorMessage, errorDisplayMessage } },
+	] as unknown as AssistantMessageEvent[];
 	const iterator = (async function* () {
 		for (const event of events) yield event;
 	})();

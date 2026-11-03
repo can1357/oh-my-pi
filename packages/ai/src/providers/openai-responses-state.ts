@@ -14,7 +14,7 @@ export const OPENAI_RESPONSES_PROVIDER_SESSION_STATE_PREFIX = "openai-responses:
  * is cold, rebuilding turns from message content, from the first request on a
  * connection-bound host (`compat.connectionBoundNativeHistory`, GitHub Copilot)
  * and after `close()` on any host, until a response succeeds. Without session
- * state every request replays.
+ * state every request replays. Transport selection does not change this rule.
  */
 export function openAIResponsesReplaysNativeHistory(
 	model: Pick<Model, "api" | "provider" | "compat"> | null | undefined,

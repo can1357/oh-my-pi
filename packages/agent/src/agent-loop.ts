@@ -943,7 +943,7 @@ export function normalizeMessagesForProvider(
 	});
 }
 
-/** Schema description of the injected `i` field; `PI_INTENT_DESC` replaces it. */
+/** Schema description of the injected `i` field when neither `PI_INTENT_DESC` nor the caller sets one. */
 const DEFAULT_INTENT_FIELD_DESCRIPTION = "concise intent";
 const INTENT_SCHEMA_UNION_KEYS = ["anyOf", "oneOf"] as const;
 
@@ -954,26 +954,30 @@ const INTENT_SCHEMA_UNION_KEYS = ["anyOf", "oneOf"] as const;
 // the whole catalog per request). The injected object is shared across
 // requests — the same profile as the intent-off path, where parameters IS the
 // shared memoized wire schema (see schema-immutability.test.ts). One stamp
-// key per (mode, describeIntent) variant; index 0 = bare, 1 = described.
-const INTENT_STAMPS = {
-	require: [Symbol("intent:require"), Symbol("intent:require:described")],
-	optional: [Symbol("intent:optional"), Symbol("intent:optional:described")],
-} as const;
+// key per (mode, description) variant, "" keying the bare one: agents in one
+// process may describe `i` differently over the same shared tool schemas.
+const INTENT_STAMPS = { require: new Map<string, symbol>(), optional: new Map<string, symbol>() } as const;
 
 function memoizedInjectIntentIntoSchema(
 	schema: Record<string, unknown>,
 	mode: "require" | "optional",
-	describeIntent: boolean,
+	description: string | undefined,
 ): unknown {
-	return stamp(schema, INTENT_STAMPS[mode][describeIntent ? 1 : 0], host =>
-		injectIntentIntoSchema(host, mode, describeIntent),
-	);
+	const stamps = INTENT_STAMPS[mode];
+	const variant = description ?? "";
+	let key = stamps.get(variant);
+	if (!key) {
+		key = Symbol(`intent:${mode}`);
+		stamps.set(variant, key);
+	}
+	return stamp(schema, key, host => injectIntentIntoSchema(host, mode, description));
 }
 
+/** `schema` with the `i` field first (and required in `require` mode); `description` unset injects it bare. */
 function injectIntentIntoSchema(
 	schema: unknown,
-	mode: "require" | "optional" = "require",
-	describeIntent = true,
+	mode: "require" | "optional",
+	description: string | undefined,
 ): unknown {
 	if (!schema || typeof schema !== "object" || Array.isArray(schema)) return schema;
 	const schemaRecord = schema as Record<string, unknown>;
@@ -996,7 +1000,7 @@ function injectIntentIntoSchema(
 			if (!Array.isArray(variants)) continue;
 			return {
 				...schemaRecord,
-				[key]: variants.map(variant => injectIntentIntoSchema(variant, mode, describeIntent)),
+				[key]: variants.map(variant => injectIntentIntoSchema(variant, mode, description)),
 			};
 		}
 	}
@@ -1020,9 +1024,7 @@ function injectIntentIntoSchema(
 	return {
 		...schemaRecord,
 		properties: {
-			[INTENT_FIELD]: describeIntent
-				? { type: "string", description: Bun.env.PI_INTENT_DESC || DEFAULT_INTENT_FIELD_DESCRIPTION }
-				: { type: "string" },
+			[INTENT_FIELD]: description === undefined ? { type: "string" } : { type: "string", description },
 			...properties,
 		},
 		...(mode === "require" ? { required: [...required, INTENT_FIELD] } : {}),
@@ -1032,6 +1034,8 @@ function injectIntentIntoSchema(
 export interface NormalizeToolsOptions {
 	/** Inject the `i` intent field into tool schemas (subject to `PI_NO_INTENT`). */
 	injectIntent: boolean;
+	/** Schema description of the injected `i` field; `PI_INTENT_DESC` overrides it. Default `concise intent`. */
+	intentDescription?: string;
 	/** Strip descriptions from the wire specs when the catalog rides in the system prompt. */
 	pruneDescriptions?: boolean;
 }
@@ -1039,6 +1043,7 @@ export interface NormalizeToolsOptions {
 export function normalizeTools(tools: AgentContext["tools"], options: NormalizeToolsOptions): Context["tools"] {
 	const pruneDescriptions = options.pruneDescriptions === true;
 	const injectIntent = options.injectIntent && Bun.env.PI_NO_INTENT !== "1";
+	const intentDescription = Bun.env.PI_INTENT_DESC || options.intentDescription || DEFAULT_INTENT_FIELD_DESCRIPTION;
 	return tools?.map(t => {
 		const intentMode = resolveIntentMode(t.intent);
 		const doInjectIntent =
@@ -1047,17 +1052,19 @@ export function normalizeTools(tools: AgentContext["tools"], options: NormalizeT
 		// specs without their descriptions (top-level + nested schema annotations)
 		// so they are not duplicated on the wire. Strip the STABLE wire schema (the
 		// memoized `stripSchemaDescriptions` result is reused across requests), then
-		// re-inject `i` (without its hint, which `describeIntent: false` omits) so
+		// re-inject `i` (without its hint, which an unset description omits) so
 		// intent tracing keeps the field while no descriptions ride the wire.
 		if (pruneDescriptions) {
 			const stripped = stripSchemaDescriptions(toolWireSchema(t));
 			const parameters = (
-				doInjectIntent ? memoizedInjectIntentIntoSchema(stripped, intentMode, false) : stripped
+				doInjectIntent ? memoizedInjectIntentIntoSchema(stripped, intentMode, undefined) : stripped
 			) as TSchema;
 			return { ...t, parameters, description: "" };
 		}
 		const wire = toolWireSchema(t);
-		const parameters = (doInjectIntent ? memoizedInjectIntentIntoSchema(wire, intentMode, true) : wire) as TSchema;
+		const parameters = (
+			doInjectIntent ? memoizedInjectIntentIntoSchema(wire, intentMode, intentDescription) : wire
+		) as TSchema;
 		const description = t.description ?? "";
 		const examplesBlock = renderToolExamples({ ...t, parameters }, doInjectIntent ? INTENT_FIELD : undefined);
 		const finalDescription = examplesBlock ? `${description}\n\n${examplesBlock}` : description;
@@ -1958,6 +1965,7 @@ async function prepareProviderCall(
 		config.appendOnlyContext.syncMessages(normalizedMessages);
 		llmContext = config.appendOnlyContext.build(context, {
 			intentTracing: !!config.intentTracing,
+			intentDescription: config.intentDescription,
 			pruneToolDescriptions,
 		});
 	} else {
@@ -1966,6 +1974,7 @@ async function prepareProviderCall(
 			messages: normalizedMessages,
 			tools: normalizeTools(context.tools, {
 				injectIntent: !!config.intentTracing,
+				intentDescription: config.intentDescription,
 				pruneDescriptions: pruneToolDescriptions,
 			}),
 		};

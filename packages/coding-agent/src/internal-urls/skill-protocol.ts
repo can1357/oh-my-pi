@@ -22,7 +22,7 @@ import {
 	type Skill,
 	type SkillRediscoveryHost,
 } from "../extensibility/skills";
-import { MCPManager } from "../mcp/manager";
+import { MCPManager, type MCPManagerApi } from "../mcp/manager";
 import skillDoc from "../prompts/internal-urls/skill.md" with { type: "text" };
 import {
 	buildDirectoryResource,
@@ -293,7 +293,7 @@ export class SkillProtocolHandler implements ProtocolHandler {
 			// Most such names are not MCP resources at all, so one budget caps deferred startup (which
 			// never returns while a handshake hangs and the startup window is 0) plus the catalog wait.
 			const deadline = Date.now() + UNKNOWN_SKILL_MCP_WAIT_MS;
-			let mcpManager: MCPManager | undefined;
+			let mcpManager: MCPManagerApi | undefined;
 			try {
 				mcpManager = await withTimeout(
 					MCPManager.load(),

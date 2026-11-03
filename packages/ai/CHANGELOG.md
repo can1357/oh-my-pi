@@ -9,11 +9,24 @@
 
 ### Added
 
+- Added opt-in standard Responses WebSockets for catalog-supported models, with incremental turns and session-scoped HTTP/SSE fallback; OMP enables them through settings ([#17354](https://github.com/can1357/oh-my-pi/pull/17354) by [@TatsukiMeng](https://github.com/TatsukiMeng))
+- `AuthStorage` can be constructed over an `AuthStorageBackend` (its namespaces plus `setAccountPolicies`/`replaceStore`/`close`) instead of a credential store, so another thread's instance can serve every call
+- Anthropic sessions on the official API now use message threads (`message-threads-2026-08-12`, as Claude Code does): after the first turn each request sends only the new messages, cutting time to first token in long conversations; a refused or expired thread replays the full conversation automatically. `statefulResponses: false` or `PI_ANTHROPIC_MESSAGE_THREADS=0` turns it off, `PI_ANTHROPIC_MESSAGE_THREADS=1` opts other endpoints in
 - Added `isCreditBalanceTooLow` and `calculateCreditBalanceBackoffMs` for Anthropic's empty-prepaid-balance rejection, and `parseHttpErrorBody` and `httpErrorReason` for reading a provider's `<status> <JSON body>` error ([#17656](https://github.com/can1357/oh-my-pi/pull/17656) by [@sjawhar](https://github.com/sjawhar))
 - Added `errorDisplayText`, `editErrorText`, `clearErrorText` and `errorRetryHeaders` for the split error fields, an optional header retry delay on `extractProviderRetryHint`, `parseRateLimitReason`, `matchesUsageLimitText`, `isUsageLimitOutcome`, `is402BillingCapBody` and `isConcurrencyCapExclusion`, and `retryAfterMs` on `RotateCredentialOptions` ([#17656](https://github.com/can1357/oh-my-pi/pull/17656) by [@sjawhar](https://github.com/sjawhar))
 
+### Changed
+
+- Switching into or out of the Codex `ultrafast` service tier now opens a fresh WebSocket routed to the new tier instead of reusing the old one ([#17809](https://github.com/can1357/oh-my-pi/pull/17809) by [@xiangnan0811](https://github.com/xiangnan0811)).
+
 ### Fixed
 
+- Fixed xAI speech requests failing with `422 missing field language`: `xai-tts` now sends `language`, which xAI's `/v1/tts` requires, defaulting to `auto` (automatic detection) when the caller passes none, as the auth gateway's `/v1/audio/speech` does ([#17992](https://github.com/can1357/oh-my-pi/pull/17992) by [@Mirceone](https://github.com/Mirceone))
+- Fixed Codex WebSocket turns sending a delta `input` after a pooled socket reconnected (closed, idle eviction, token refresh, or prewarm routing-hint change) or when `onPayload` deleted `previous_response_id` (including when it also rewrote the input), and skipped late prewarm while a socket is busy or holding accepted steering ([#17809](https://github.com/can1357/oh-my-pi/pull/17809) by [@xiangnan0811](https://github.com/xiangnan0811)).
+- Fixed Gemini and Vertex `MALFORMED_RESPONSE` finishes showing as "Unhandled stop reason" and dropping that turn's token usage; RPC prompt errors now report them as retryable
+- Fixed `rerank()` rejecting Cohere-style answers that carry no `model` field; the result then reports the requested model id ([#17975](https://github.com/can1357/oh-my-pi/pull/17975) by [@breakwaterlabs](https://github.com/breakwaterlabs))
+- Fixed `rerank()` requests leaving out the model's configured headers, including `models.yml` `headers`, so a rerank endpoint that needs its own header or `Authorization` rejected every call ([#17974](https://github.com/can1357/oh-my-pi/pull/17974) by [@breakwaterlabs](https://github.com/breakwaterlabs))
+- The OpenAI-wire transport and provider-level retry loops (OpenAI Responses, Anthropic) no longer replay a response marked `x-should-retry: false`, so a retrying gateway's terminal 5xx is no longer multiplied by in-provider retries ([#17920](https://github.com/can1357/oh-my-pi/issues/17920))
 - Fixed local text deciding how a provider error is handled: a HOME or logs directory whose name holds a phrase such as `retry-after-ms=3600000`, `prompt is too long` or `usage_limit_reached` reached classification, retry timing and credential rotation through omp's request-dump line. Decisions now read only the provider's text and the response's header delay ([#17656](https://github.com/can1357/oh-my-pi/pull/17656) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.16.0] - 2026-11-02

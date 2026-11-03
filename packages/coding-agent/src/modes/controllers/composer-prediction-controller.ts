@@ -3,7 +3,7 @@ import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import type { MeterProvider } from "@opentelemetry/api";
 import { logger, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
 import composerPredictionPrompt from "../../prompts/system/composer-prediction-user.md" with { type: "text" };
-import type { AgentSession } from "../../session/agent-session";
+import type { AgentViewSession } from "../../session/agent-session-handle";
 import { isAdvisorCard } from "../../session/queued-messages";
 import { cfgComposerPredictionAlternatives, cfgComposerPredictions } from "../settings";
 import type { InteractiveModeContext } from "../types";
@@ -42,7 +42,7 @@ const NON_WORD = /[^\p{L}\p{N}]+/gu;
  * The message a prediction is keyed on: the last one that is not an advisor card. Silent advisor
  * notes land after the turn without changing what the user would reply to.
  */
-function predictionAnchor(session: AgentSession): AgentMessage | undefined {
+function predictionAnchor(session: AgentViewSession): AgentMessage | undefined {
 	const messages = session.messages;
 	for (let i = messages.length - 1; i >= 0; i--) {
 		if (!isAdvisorCard(messages[i])) return messages[i];
@@ -52,7 +52,7 @@ function predictionAnchor(session: AgentSession): AgentMessage | undefined {
 
 /** The conversation point a prediction was made for: a new message or session invalidates it. */
 interface PredictionSource {
-	session: AgentSession;
+	session: AgentViewSession;
 	lastMessage: AgentMessage | undefined;
 	/** Session file and entry the request branched from; its usage is recorded there. */
 	sessionId: string;

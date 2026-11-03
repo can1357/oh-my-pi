@@ -34,7 +34,7 @@
 
 There is no `env` input. Every command and named service also gets `PI_SESSION_ID`, `PI_SESSION_FILE` (the transcript's absolute path, empty when the session is not persisted), and `PI_TOOL_CALL_ID` (the id of the running `bash` call), read when the call starts; see [environment variables](../environment-variables.md#set-by-the-bash-tool). Named services otherwise inherit the configured shell environment; put command-specific assignments in `command`.
 
-Without `name`, `pty`, or a client terminal, commands run in the embedded POSIX-compatible brush shell, even when `shellPath` points to PowerShell or another external shell. `shellPath` selects the external shell for named services, supported terminal routes, and interactive `!` commands; a bash path may still supply environment and rc snapshots to the embedded session. To use PowerShell syntax in a plain tool call, invoke `pwsh -Command '...'` explicitly, quoting so brush preserves PowerShell's `$` variables.
+Without `name`, `pty`, or a client terminal, commands run in the embedded bash engine (bash 5.3 semantics), even when `shellPath` points to PowerShell or another external shell. `shellPath` selects the external shell for named services, supported terminal routes, and interactive `!` commands; a bash path may still supply environment and rc snapshots to the embedded session. To use PowerShell syntax in a plain tool call, invoke `pwsh -Command '...'` explicitly, quoting so the embedded shell preserves PowerShell's `$` variables.
 
 Named service example:
 
