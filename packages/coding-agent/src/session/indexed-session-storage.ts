@@ -12,7 +12,7 @@ import {
 	type WriteTextAtomicOptions,
 } from "./session-storage";
 import { isAssistantMessageLine, SESSION_TITLE_SLOT_BYTES } from "./session-entries";
-import { enoent } from "./session-storage-errors";
+import { eexist, enoent } from "./session-storage-errors";
 import {
 	overlayTitleSlotContent,
 	overlayTitleSlotPrefix,
@@ -67,8 +67,18 @@ export interface SessionStorageBackend {
 	append(path: string, line: string, mtimeMs: number): Promise<void>;
 	updateSessionTitle(path: string, title: SessionTitleUpdate, mtimeMs: number): Promise<void>;
 	truncate(path: string, mtimeMs: number): Promise<void>;
-	remove(paths: string[]): Promise<void>;
-	move(src: string, dst: string, mtimeMs: number): Promise<void>;
+	/**
+	 * Remove `paths`, and with `dir` (a directory ending in `/`) every row
+	 * under it that the shared store holds when the removal runs, including
+	 * ones another client committed after this store last refreshed.
+	 */
+	remove(paths: string[], dir?: string): Promise<void>;
+	/**
+	 * Move `src` to `dst`, replacing `dst`. With `noReplace` a `dst` the shared
+	 * store holds, including one another client commits while the move runs,
+	 * makes it reject with `EEXIST` naming `dst` and change neither path.
+	 */
+	move(src: string, dst: string, mtimeMs: number, noReplace?: boolean): Promise<void>;
 }
 
 interface IndexEntry {
@@ -501,7 +511,20 @@ export class IndexedSessionStorage implements SessionStorage {
 		}
 	}
 
-	async rename(srcFile: string, dstFile: string): Promise<void> {
+	rename(srcFile: string, dstFile: string): Promise<void> {
+		return this.#rename(srcFile, dstFile, false);
+	}
+
+	/**
+	 * {@link rename} that never replaces: a `dst` in this store's view, or one
+	 * another client committed to the shared store, makes it reject with
+	 * `EEXIST` naming `dst`, and neither path changes.
+	 */
+	renameNoReplace(srcFile: string, dstFile: string): Promise<void> {
+		return this.#rename(srcFile, dstFile, true);
+	}
+
+	async #rename(srcFile: string, dstFile: string, noReplace: boolean): Promise<void> {
 		const src = this.#normalize(srcFile);
 		const dst = this.#normalize(dstFile);
 		await this.#awaitPath(src);
@@ -513,12 +536,15 @@ export class IndexedSessionStorage implements SessionStorage {
 			return;
 		}
 		const dstPrevious = this.#index.get(dst);
+		if (noReplace && dstPrevious) throw eexist(dstFile);
 		this.#index.delete(src);
 		this.#index.set(dst, { ...entry });
 		this.#pushFrame(src, { mtimeMs: entry.mtimeMs, previous: entry, removal: true });
 		this.#pushFrame(dst, { mtimeMs: entry.mtimeMs, previous: dstPrevious });
 		try {
-			await this.#enqueuePaths([src, dst], () => this.#backend.move(src, dst, entry.mtimeMs), { trackDrain: false });
+			await this.#enqueuePaths([src, dst], () => this.#backend.move(src, dst, entry.mtimeMs, noReplace), {
+				trackDrain: false,
+			});
 			this.#dropFrame(src, entry.mtimeMs);
 			this.#dropFrame(dst, entry.mtimeMs);
 		} catch (err) {
@@ -546,8 +572,11 @@ export class IndexedSessionStorage implements SessionStorage {
 
 	async deleteSessionWithArtifacts(sessionFile: string): Promise<void> {
 		const sessionPath = this.#normalize(sessionFile);
-		// Rows another client committed under the artifacts directory since this
-		// store loaded its view (a subagent transcript, a draft) go too.
+		// Rows another client committed under the artifacts directory (a
+		// subagent transcript, a draft) go too: the refresh brings the ones
+		// committed so far into this view, and the backend removes every key
+		// under the directory it holds when the removal runs, so one committed
+		// after the refresh goes as well.
 		await this.refresh();
 		await this.#awaitPath(sessionPath);
 		const sessionEntry = this.#index.get(sessionPath);
@@ -573,7 +602,7 @@ export class IndexedSessionStorage implements SessionStorage {
 		}
 
 		try {
-			await this.#enqueuePaths(paths, () => this.#backend.remove(paths), { trackDrain: false });
+			await this.#enqueuePaths(paths, () => this.#backend.remove(paths, prefix), { trackDrain: false });
 			for (const [path] of previous) this.#dropFrame(path, sessionEntry.mtimeMs);
 		} catch (err) {
 			for (const [path] of previous) this.#failFrame(path, sessionEntry.mtimeMs);

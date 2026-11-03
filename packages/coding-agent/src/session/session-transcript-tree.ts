@@ -72,13 +72,18 @@ export async function copyTranscriptTree(
 
 /**
  * Move every file the storage holds under `fromDir` whose name matches
- * `pattern` to the same relative path under `toDir`, leaving one whose
- * destination is taken where it is. A key-indexed storage passes `*`: it keeps
- * the session's unsent prompt draft (`draft.txt`) beside the subagent
- * transcripts, and no directory move carries its rows. Returns the files it
- * moved, so a later failed step can move them back with
+ * `pattern` to the same relative path under `toDir`. A key-indexed storage
+ * passes `*`: it keeps the session's unsent prompt draft (`draft.txt`) beside
+ * the subagent transcripts, and no directory move carries its rows. Returns
+ * the files it moved, so a later failed step can move them back with
  * {@link restoreTranscripts}. All or nothing: when one move fails, the ones
- * before it are moved back before the error is thrown.
+ * before it are moved back before the error is thrown. A storage with a
+ * refusing rename never replaces nor skips a taken destination, whether it
+ * was taken before the move or another client takes it while the move runs:
+ * that move fails with `EEXIST` naming it, so the session's tree never ends
+ * up split or holding another session's child. Under file storage the
+ * directory move already placed what it could, and a transcript whose
+ * destination is taken stays where it is.
  */
 export async function moveTranscriptTree(
 	storage: SessionStorage,
@@ -91,10 +96,10 @@ export async function moveTranscriptTree(
 	try {
 		for (const from of listTranscriptTree(storage, fromDir, pattern)) {
 			const to = path.join(toDir, path.relative(fromDir, from));
-			if (await storage.exists(to)) continue;
+			if (!storage.renameNoReplace && (await storage.exists(to))) continue;
 			storage.ensureDirSync(path.dirname(to));
 			try {
-				await storage.rename(from, to);
+				await (storage.renameNoReplace ? storage.renameNoReplace(from, to) : storage.rename(from, to));
 			} catch (err) {
 				if (isEnoent(err)) continue;
 				throw err;
@@ -102,16 +107,31 @@ export async function moveTranscriptTree(
 			moved.push({ from, to });
 		}
 	} catch (err) {
-		await restoreTranscripts(storage, moved);
+		try {
+			await restoreTranscripts(storage, moved);
+		} catch (rollbackErr) {
+			// Not the move's own error: some transcripts stay at their new paths.
+			throw new Error(
+				`Failed to move subagent transcripts and rollback: ${rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr)}`,
+				{ cause: rollbackErr },
+			);
+		}
 		throw err;
 	}
 	return moved;
 }
 
-/** Move transcripts {@link moveTranscriptTree} moved back to where they were, newest move first. */
+/**
+ * Move transcripts {@link moveTranscriptTree} moved back to where they were,
+ * newest move first. With a refusing rename, a key another client wrote at an
+ * old path since is kept: the restore fails with `EEXIST` there, leaving that
+ * transcript at its new path.
+ */
 export async function restoreTranscripts(
 	storage: SessionStorage,
 	moved: readonly TranscriptPlacement[],
 ): Promise<void> {
-	for (const { from, to } of [...moved].reverse()) await storage.rename(to, from);
+	for (const { from, to } of [...moved].reverse()) {
+		await (storage.renameNoReplace ? storage.renameNoReplace(to, from) : storage.rename(to, from));
+	}
 }

@@ -7,7 +7,7 @@ import {
 	type SessionStorageIndexEntry,
 } from "./indexed-session-storage";
 import { SessionWriteConflictError } from "./session-storage";
-import { enoent } from "./session-storage-errors";
+import { eexist, enoent } from "./session-storage-errors";
 import type { SessionTitleUpdate } from "./session-title-slot";
 
 /** Key prefix of a file under the sessions root: `sessions/` and its root-relative path. */
@@ -168,6 +168,14 @@ interface DialectQueries {
 	/** Whether `path` has any parts, read without locking. */
 	hasParts: Statement;
 	deleteParts: Statement;
+	/**
+	 * Every session row, and every part, whose path starts with `@dir`: its
+	 * first `@len` characters equal it. A character comparison, not `LIKE`,
+	 * so `%` and `_` in a path stay literal and SQLite's ASCII-insensitive
+	 * `LIKE` cannot match another case.
+	 */
+	deleteRowsUnder: Statement;
+	deletePartsUnder: Statement;
 	insertPart: Statement;
 	renameRow: Statement;
 	renameParts: Statement;
@@ -545,6 +553,8 @@ function buildQueries(adapter: SqlSessionStorageAdapter, table: string): Dialect
 		deleteRow: sql(`DELETE FROM ${table} WHERE path = @path`),
 		hasParts: sql(`SELECT 1 AS found FROM ${parts} WHERE path = @path LIMIT 1`),
 		deleteParts: sql(`DELETE FROM ${parts} WHERE path = @path`),
+		deleteRowsUnder: sql(`DELETE FROM ${table} WHERE substr(path, 1, @len) = @dir`),
+		deletePartsUnder: sql(`DELETE FROM ${parts} WHERE substr(path, 1, @len) = @dir`),
 		insertPart: sql(`INSERT INTO ${parts} (path, start_offset, content) VALUES (@path, @offset, @content)`),
 		renameRow: sql(
 			`UPDATE ${table} SET path = @dst, mtime_ms = @mtime WHERE path = @src${mysql ? "" : " RETURNING path"}`,
@@ -621,6 +631,17 @@ function isDeadlockError(error: unknown): boolean {
 	const errno = "errno" in error ? error.errno : undefined;
 	const sqlState = "sqlState" in error ? error.sqlState : undefined;
 	return errno === 1213 || errno === "40P01" || errno === "40001" || sqlState === "40001";
+}
+/**
+ * A primary-key collision, as each dialect reports it: PostgreSQL
+ * `unique_violation` (SQLSTATE 23505), MySQL `ER_DUP_ENTRY` (errno 1062,
+ * SQLSTATE 23000), SQLite `SQLITE_CONSTRAINT_PRIMARYKEY` (extended code 1555).
+ */
+function isPrimaryKeyViolation(error: unknown): boolean {
+	if (!(error instanceof Error)) return false;
+	const errno = "errno" in error ? error.errno : undefined;
+	const code = "code" in error ? error.code : undefined;
+	return errno === "23505" || errno === 1062 || code === "SQLITE_CONSTRAINT_PRIMARYKEY";
 }
 
 /** Concatenate a window's pieces in byte-offset order; the session row's own bytes come first. */
@@ -1062,16 +1083,22 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 		await this.writeFull(file, "", mtimeMs);
 	}
 
-	async remove(files: string[]): Promise<void> {
+	async remove(files: string[], dirFile?: string): Promise<void> {
 		const paths = files.map(file => this.#key(file));
+		// The rows under the local directory `dirFile` are keyed under its key:
+		// `sessions/<dir under the root>/` or `abs:<dir>/`.
+		const dir = dirFile === undefined ? undefined : `${this.#key(dirFile)}/`;
+		const under = dir === undefined ? undefined : { dir, len: [...dir].length };
 		await this.#transaction(async transaction => {
 			// Every row first: their locks must all be held before the first parts look (see #deleteParts).
 			for (const path of paths) await run(transaction, this.#q.deleteRow, { path });
+			if (under) await run(transaction, this.#q.deleteRowsUnder, under);
 			for (const path of paths) await this.#deleteParts(transaction, path);
+			if (under) await run(transaction, this.#q.deletePartsUnder, under);
 		});
 	}
 
-	async move(srcFile: string, dstFile: string, mtimeMs: number): Promise<void> {
+	async move(srcFile: string, dstFile: string, mtimeMs: number, noReplace = false): Promise<void> {
 		const src = this.#key(srcFile);
 		const dst = this.#key(dstFile);
 		if (src === dst) {
@@ -1080,11 +1107,23 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 			return;
 		}
 		await this.#transaction(async transaction => {
-			await run(transaction, this.#q.deleteRow, { path: dst });
-			await this.#deleteParts(transaction, dst);
-			const result = await run(transaction, this.#q.renameRow, { src, dst, mtime: mtimeMs });
+			if (!noReplace) await run(transaction, this.#q.deleteRow, { path: dst });
+			// One statement renames the row, so the primary key refuses a `dst`
+			// row that exists, or that another client inserts concurrently (the
+			// UPDATE waits on its uncommitted key); the thrown error rolls the
+			// transaction back with both paths untouched.
+			let result: SqlSessionStorageResult;
+			try {
+				result = await run(transaction, this.#q.renameRow, { src, dst, mtime: mtimeMs });
+			} catch (err) {
+				if (noReplace && isPrimaryKeyViolation(err)) throw eexist(dstFile);
+				throw err;
+			}
 			const moved = this.#adapter === "mysql" ? result.affectedRows === 1 : result.length === 1;
 			if (!moved) throw enoent(srcFile);
+			// Both rows are locked now, before the parts look (see #deleteParts):
+			// parts orphaned under `dst` go, then `src`'s follow its row.
+			await this.#deleteParts(transaction, dst);
 			await run(transaction, this.#q.renameParts, { src, dst });
 		});
 	}

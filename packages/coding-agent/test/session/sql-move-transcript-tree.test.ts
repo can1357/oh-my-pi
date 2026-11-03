@@ -95,10 +95,10 @@ describe("moving a SQL-stored session", () => {
 	test("leaves every child where it was when one child's move fails", async () => {
 		const { storage, manager, artifactsDir, to } = await seed();
 		const source = manager.getSessionFile()!;
-		const rename = storage.rename.bind(storage);
-		vi.spyOn(storage, "rename").mockImplementation(async (from: string, dest: string) => {
+		const renameNoReplace = storage.renameNoReplace.bind(storage);
+		vi.spyOn(storage, "renameNoReplace").mockImplementation(async (from: string, dest: string) => {
 			if (path.basename(from) === "B.jsonl") throw new Error("database rejected child B");
-			return rename(from, dest);
+			return renameNoReplace(from, dest);
 		});
 
 		await expect(manager.moveTo(to)).rejects.toThrow("database rejected child B");

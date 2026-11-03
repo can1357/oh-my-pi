@@ -8,9 +8,10 @@
  * when `OMP_TEST_SQL_POSTGRES_URL` / `OMP_TEST_SQL_MYSQL_URL` name a throwaway
  * database; every test makes its own tables and drops them.
  */
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { resolveResumableSession } from "@oh-my-pi/pi-coding-agent/session/session-listing";
+import { moveTranscriptTree } from "@oh-my-pi/pi-coding-agent/session/session-transcript-tree";
 import {
 	SqlSessionStorage,
 	type SqlSessionStorageAdapter,
@@ -18,6 +19,10 @@ import {
 import { SQL } from "bun";
 
 type SqlClient = InstanceType<typeof SQL>;
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 const BACKENDS: ReadonlyArray<{ adapter: SqlSessionStorageAdapter; url: string | undefined }> = [
 	{ adapter: "sqlite", url: "sqlite::memory:" },
@@ -246,6 +251,53 @@ for (const { adapter, url } of BACKENDS) {
 			expect(storage.listFilesSync(dir, "*.jsonl")).toEqual([]);
 			// The refusal names the path as the caller spelled it, not the resolved path or the row key.
 			await expect(storage.readText(dotted)).rejects.toMatchObject({ code: "ENOENT", path: dotted });
+		});
+
+		it("deletes, by key, the artifact rows another home's client committed after this client refreshed", async () => {
+			await using db = connect();
+			const storage = await db.open(ROOT_A);
+			const other = await db.open(ROOT_B);
+			const session = path.join(ROOT_A, "-p", "s.jsonl");
+			await storage.writeText(session, "main\n");
+			await storage.writeText(path.join(ROOT_A, "-p", "s", "A.jsonl"), "child\n");
+			// A sibling directory sharing the artifacts directory's name as a prefix stays.
+			await storage.writeText(path.join(ROOT_A, "-p", "s2", "keep.jsonl"), "sibling\n");
+			await storage.drain();
+			const refresh = storage.refresh.bind(storage);
+			vi.spyOn(storage, "refresh").mockImplementation(async () => {
+				await refresh();
+				// Committed from another home after the delete's refresh: only its key places it under the directory.
+				await other.writeText(path.join(ROOT_B, "-p", "s", "Late.jsonl"), "late\n");
+				await other.drain();
+			});
+
+			await storage.deleteSessionWithArtifacts(session);
+
+			expect(await db.keys()).toEqual(["sessions/-p/s2/keep.jsonl"]);
+			expect(await db.keys(`${db.table}_parts`)).toEqual(["sessions/-p/s2/keep.jsonl"]);
+		});
+
+		it("refuses to move a transcript onto a key another home's client holds, naming the local path", async () => {
+			await using db = connect();
+			const storage = await db.open(ROOT_A);
+			const other = await db.open(ROOT_B);
+			const from = path.join(ROOT_A, "-p", "s");
+			const to = path.join(ROOT_A, "-q", "t");
+			await storage.writeText(path.join(from, "A.jsonl"), "ours\n");
+			await storage.drain();
+			// Written from another home after this client loaded its view: only the key says it is the same file.
+			await other.writeText(path.join(ROOT_B, "-q", "t", "A.jsonl"), "theirs\n");
+			await other.drain();
+
+			const error = await moveTranscriptTree(storage, from, to, "*").then(
+				() => undefined,
+				(err: unknown) => err,
+			);
+
+			expect(error).toMatchObject({ code: "EEXIST", path: path.join(to, "A.jsonl") });
+			expect(await db.keys()).toEqual(["sessions/-p/s/A.jsonl", "sessions/-q/t/A.jsonl"]);
+			expect(await storage.readText(path.join(from, "A.jsonl"))).toBe("ours\n");
+			expect(await other.readText(path.join(ROOT_B, "-q", "t", "A.jsonl"))).toBe("theirs\n");
 		});
 	});
 }

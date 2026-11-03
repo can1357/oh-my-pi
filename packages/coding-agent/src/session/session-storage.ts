@@ -274,6 +274,13 @@ export interface SessionStorage {
 	/** Streaming {@link writeTextAtomic}, optional on the same terms as {@link writeLinesSync}. */
 	writeLinesAtomic?(path: string, lines: readonly string[], options?: WriteTextAtomicOptions): Promise<void>;
 	rename(path: string, nextPath: string): Promise<void>;
+	/**
+	 * {@link rename} that never replaces: when `nextPath` is taken, including
+	 * by another client of a shared store while the rename runs, it rejects
+	 * with `EEXIST` naming `nextPath` and changes neither path. Optional: only
+	 * key-indexed backends (`session.storage: sql`) implement it.
+	 */
+	renameNoReplace?(path: string, nextPath: string): Promise<void>;
 	unlink(path: string): Promise<void>;
 	deleteSessionWithArtifacts(sessionPath: string): Promise<void>;
 	/**

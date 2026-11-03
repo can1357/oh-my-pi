@@ -105,6 +105,23 @@ function createFakeRedis(): FakeRedis {
 				getHash(titleKey).set(filePath, title);
 				return 1;
 			}
+			if (script.includes("OMP_MOVE")) {
+				// As the script runs on a Redis 7 server: 0 when a no-replace destination exists.
+				checkFailure("rename");
+				const [srcKey, dstKey, metaKey, titleKey] = keys;
+				const [src, dst, mtimeMs, noReplace] = argv;
+				if (noReplace === "1" && strings.has(dstKey)) return 0;
+				if (!strings.has(srcKey)) throw new Error("ERR no such key");
+				strings.set(dstKey, strings.get(srcKey) as string);
+				if (srcKey !== dstKey) strings.delete(srcKey);
+				getHash(metaKey).delete(src);
+				getHash(metaKey).set(dst, mtimeMs);
+				const title = getHash(titleKey).get(src);
+				getHash(titleKey).delete(src);
+				if (title !== undefined) getHash(titleKey).set(dst, title);
+				else getHash(titleKey).delete(dst);
+				return 1;
+			}
 			throw new Error("Unsupported Redis script");
 		},
 		async get(key) {
@@ -150,16 +167,6 @@ function createFakeRedis(): FakeRedis {
 			}
 			return deleted;
 		},
-		async rename(src, dst) {
-			record("rename", [src, dst]);
-			checkFailure("rename");
-			if (!strings.has(src)) {
-				throw new Error("ERR no such key");
-			}
-			strings.set(dst, strings.get(src) as string);
-			strings.delete(src);
-			return "OK";
-		},
 		async scan(cursor, ...rest) {
 			record("scan", [cursor, ...rest]);
 			checkFailure("scan");
@@ -172,12 +179,6 @@ function createFakeRedis(): FakeRedis {
 			const regex = new RegExp(`^${pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*")}$`);
 			const matches = Array.from(strings.keys()).filter(k => regex.test(k));
 			return ["0", matches];
-		},
-		async hset(key, field, value) {
-			record("hset", [key, field, value]);
-			checkFailure("hset");
-			getHash(key).set(field, value);
-			return 1;
 		},
 		async hgetall(key) {
 			record("hgetall", [key]);
@@ -397,6 +398,71 @@ describe("RedisSessionStorage", () => {
 
 		expect(storage.existsSync("/sessions/p/a.jsonl")).toBe(true);
 		expect(storage.existsSync("/sessions/p/b.jsonl")).toBe(false);
+	});
+
+	it("renameNoReplace refuses a destination key another client set, leaving both keys", async () => {
+		const storage = await RedisSessionStorage.create({ client: redis });
+		await storage.writeText("/sessions/p/a.jsonl", "ours\n");
+		// Another process sets the destination after this store loaded its index.
+		redis.strings.set("omp:sessions:file:/sessions/p/b.jsonl", "theirs\n");
+
+		const error = await storage.renameNoReplace("/sessions/p/a.jsonl", "/sessions/p/b.jsonl").then(
+			() => undefined,
+			(err: unknown) => err,
+		);
+
+		expect(error).toMatchObject({ code: "EEXIST", path: "/sessions/p/b.jsonl" });
+		expect(redis.strings.get("omp:sessions:file:/sessions/p/a.jsonl")).toBe("ours\n");
+		expect(redis.strings.get("omp:sessions:file:/sessions/p/b.jsonl")).toBe("theirs\n");
+		expect(await storage.readText("/sessions/p/a.jsonl")).toBe("ours\n");
+	});
+
+	it("renameNoReplace moves to a free key", async () => {
+		const storage = await RedisSessionStorage.create({ client: redis });
+		await storage.writeText("/sessions/p/a.jsonl", "ours\n");
+
+		await storage.renameNoReplace("/sessions/p/a.jsonl", "/sessions/p/c.jsonl");
+
+		expect(redis.strings.has("omp:sessions:file:/sessions/p/a.jsonl")).toBe(false);
+		expect(await storage.readText("/sessions/p/c.jsonl")).toBe("ours\n");
+	});
+
+	it("moves a key with its mtime and title in one script, dropping a stale title at the destination", async () => {
+		const storage = await RedisSessionStorage.create({ client: redis });
+		await storage.writeText("/sessions/p/a.jsonl", "ours\n");
+		const titles = redis.hashes.get("omp:sessions:title") ?? new Map<string, string>();
+		redis.hashes.set("omp:sessions:title", titles);
+		titles.set("/sessions/p/a.jsonl", JSON.stringify({ title: "Ours", updatedAt: "t1" }));
+		titles.set("/sessions/p/b.jsonl", JSON.stringify({ title: "Stale", updatedAt: "t0" }));
+		redis.calls.length = 0;
+
+		await storage.renameNoReplace("/sessions/p/a.jsonl", "/sessions/p/b.jsonl");
+
+		// Nothing runs after the script, so no other client's write can land between the parts.
+		expect(redis.calls.map(call => call.method)).toEqual(["send"]);
+		expect(titles.get("/sessions/p/b.jsonl")).toBe(JSON.stringify({ title: "Ours", updatedAt: "t1" }));
+		expect(titles.has("/sessions/p/a.jsonl")).toBe(false);
+		expect(redis.hashes.get("omp:sessions:meta")?.has("/sessions/p/a.jsonl")).toBe(false);
+		expect(redis.hashes.get("omp:sessions:meta")?.has("/sessions/p/b.jsonl")).toBe(true);
+	});
+
+	it("deleteSessionWithArtifacts removes a child key another client set after the refresh", async () => {
+		const storage = await RedisSessionStorage.create({ client: redis });
+		await storage.writeText("/sessions/p/s1.jsonl", "session\n");
+		const refresh = storage.refresh.bind(storage);
+		let injected = false;
+		storage.refresh = async () => {
+			await refresh();
+			// Another process commits a subagent transcript once this view is loaded.
+			redis.strings.set("omp:sessions:file:/sessions/p/s1/Late.jsonl", "late\n");
+			injected = true;
+		};
+
+		await storage.deleteSessionWithArtifacts("/sessions/p/s1.jsonl");
+
+		expect(injected).toBe(true);
+		expect(redis.strings.has("omp:sessions:file:/sessions/p/s1.jsonl")).toBe(false);
+		expect(redis.strings.has("omp:sessions:file:/sessions/p/s1/Late.jsonl")).toBe(false);
 	});
 
 	it("refresh() reloads the metadata index from Redis after out-of-band writes", async () => {
