@@ -12,6 +12,137 @@ import {
 import { SqlSessionStorage, type SqlSessionStorageClient } from "@oh-my-pi/pi-coding-agent/session/sql-session-storage";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
+/** File storage whose next atomic write fails once; `onReadAfterFailure` runs before the first read after it. */
+class StorageFailingOneAtomicWrite extends FileSessionStorage {
+	armed = false;
+	failed = false;
+	onReadAfterFailure: (() => Promise<void>) | undefined;
+
+	override async writeTextAtomic(file: string, body: string, options?: WriteTextAtomicOptions): Promise<void> {
+		if (this.armed && !this.failed) {
+			this.failed = true;
+			throw new Error("atomic write denied");
+		}
+		return super.writeTextAtomic(file, body, options);
+	}
+
+	override async readText(file: string): Promise<string> {
+		const run = this.failed ? this.onReadAfterFailure : undefined;
+		if (run) {
+			this.onReadAfterFailure = undefined;
+			await run();
+		}
+		return super.readText(file);
+	}
+}
+
+// A rewrite whose own write failed is settled like a superseded one: a write
+// that ran meanwhile and saved its change keeps it, and nothing is restored.
+it("keeps a rewrite whose own write failed when a write that ran meanwhile saved its change", async () => {
+	using tempDir = TempDir.createSync("@omp-rewrite-own-failure-");
+	const storage = new StorageFailingOneAtomicWrite();
+	const manager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"), storage);
+	manager.onPersistenceError(() => {});
+	try {
+		manager.appendMessage({ role: "user", content: "a turn worth saving", timestamp: Date.now() });
+		manager.appendCustomEntry("marker", { state: "before" });
+		await manager.ensureOnDisk();
+		await manager.flush();
+		const marker = manager.getEntries().find(entry => entry.type === "custom" && entry.customType === "marker");
+		if (marker?.type !== "custom") throw new Error("Expected the marker entry");
+		marker.data = { state: "after" };
+		let raced = false;
+		storage.onReadAfterFailure = async () => {
+			raced = true;
+			manager.appendCustomEntry("successor", {});
+			await manager.flush().catch(() => {});
+		};
+		storage.armed = true;
+		let restored = false;
+		const outcome = await manager
+			.rewriteEntries({
+				restore: () => {
+					marker.data = { state: "before" };
+					restored = true;
+				},
+			})
+			.then(
+				() => "kept",
+				() => "failed",
+			);
+
+		expect(storage.failed).toBe(true);
+		expect(raced).toBe(true);
+		expect(outcome).toBe("kept");
+		expect(restored).toBe(false);
+		const file = manager.getSessionFile();
+		if (!file) throw new Error("Expected a persisted session");
+		const onDisk = fs.readFileSync(file, "utf8");
+		expect(onDisk).toContain('"state":"after"');
+		expect(onDisk).toContain('"customType":"successor"');
+	} finally {
+		manager.seal();
+		await manager.close().catch(() => {});
+	}
+});
+
+// A rewrite a latched failure refused before its turn is settled the same way:
+// an append retrying the full write saves the change before the verdict.
+for (const depth of [0, 1, 2, 3, 4, 5]) {
+	it(`keeps a rewrite a latched failure refused when an append ${depth} microtasks later saved its change`, async () => {
+		using tempDir = TempDir.createSync("@omp-rewrite-latched-");
+		const storage = new StorageFailingOneAtomicWrite();
+		const manager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"), storage);
+		manager.onPersistenceError(() => {});
+		try {
+			manager.appendMessage({ role: "user", content: "a turn worth saving", timestamp: Date.now() });
+			manager.appendCustomEntry("marker", { state: "before" });
+			await manager.ensureOnDisk();
+			await manager.flush();
+			// Latch a write failure.
+			storage.armed = true;
+			await manager.rewriteEntries().catch(() => {});
+			expect(storage.failed).toBe(true);
+			const marker = manager.getEntries().find(entry => entry.type === "custom" && entry.customType === "marker");
+			if (marker?.type !== "custom") throw new Error("Expected the marker entry");
+			marker.data = { state: "after" };
+			let restored = false;
+			const rewrite = manager
+				.rewriteEntries({
+					restore: () => {
+						marker.data = { state: "before" };
+						restored = true;
+					},
+				})
+				.then(
+					() => "kept",
+					() => "failed",
+				);
+			let racing = Promise.resolve();
+			for (let step = 0; step < depth; step++) racing = racing.then(() => {});
+			const appended = racing.then(() => manager.appendCustomEntry("successor", {}));
+			const outcome = await rewrite;
+			await appended;
+			await manager.flush().catch(() => {});
+			const file = manager.getSessionFile();
+			if (!file) throw new Error("Expected a persisted session");
+			const onDisk = fs.readFileSync(file, "utf8");
+			// What the caller is told matches what storage holds.
+			if (outcome === "kept") {
+				expect(restored).toBe(false);
+				expect(onDisk).toContain('"state":"after"');
+			} else {
+				expect(restored).toBe(true);
+				expect(onDisk).not.toContain('"state":"after"');
+			}
+			expect(onDisk).toContain('"customType":"successor"');
+		} finally {
+			manager.seal();
+			await manager.close().catch(() => {});
+		}
+	});
+}
+
 /**
  * File storage over which another writer takes the session's file while a
  * full rewrite of it is on its way. The asynchronous rewrite of `held.file`
