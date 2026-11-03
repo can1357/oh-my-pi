@@ -486,11 +486,16 @@ describe("AsyncJobManager", () => {
 		const register = (label: string): string => {
 			const release = Promise.withResolvers<void>();
 			releases.set(label, release);
-			return manager.register("bash", label, async () => {
-				started.push(label);
-				await release.promise;
-				return `${label} done`;
-			});
+			return manager.register(
+				"bash",
+				label,
+				async () => {
+					started.push(label);
+					await release.promise;
+					return `${label} done`;
+				},
+				{ id: label },
+			);
 		};
 		try {
 			register("held-1");
@@ -661,9 +666,9 @@ describe("AsyncJobManager", () => {
 			expect(manager.getJob(gatedId)).toMatchObject({ queued: true, waitingForSlot: true });
 			hold.resolve();
 			await waitForCondition(() => bodyCalled);
-			// Started, but still behind its caller's gate: queued, holding no slot.
+			// Started, but still behind its caller's gate: shown queued, keeping the slot the queue gave it.
 			expect(manager.getJob(gatedId)).toMatchObject({ queued: true, waitingForSlot: false });
-			expect(manager.atCapacity).toBe(false);
+			expect(manager.atCapacity).toBe(true);
 			gate.resolve();
 			await manager.getJob(gatedId)!.promise;
 			expect(manager.getJob(gatedId)?.status).toBe("completed");
@@ -673,6 +678,60 @@ describe("AsyncJobManager", () => {
 			await manager.waitForAll();
 			await manager.dispose();
 		}
+	});
+
+	test("caller-gated jobs started from the queue never run more jobs than the cap", async () => {
+		// Task spawns wait on their semaphore after the manager starts them, then
+		// call markRunning(). Each one the queue starts holds the slot it was given,
+		// so ending one holder starts exactly one of them, not all of them.
+		const manager = new AsyncJobManager({ maxRunningJobs: 2, onJobComplete: async () => {} });
+		const hold = Promise.withResolvers<void>();
+		const holders = [hold, Promise.withResolvers<void>()];
+		for (const [index, release] of holders.entries()) {
+			manager.register("bash", `holder ${index}`, async () => {
+				await release.promise;
+				return "held";
+			});
+		}
+		// The spawn semaphore: every started body waits here until the test opens it.
+		const permits = Promise.withResolvers<void>();
+		const entered: string[] = [];
+		const running: string[] = [];
+		let peak = 0;
+		const gatedIds = ["s1", "s2", "s3", "s4"].map(label =>
+			manager.register(
+				"task",
+				label,
+				async ({ markRunning }) => {
+					entered.push(label);
+					await permits.promise;
+					markRunning();
+					running.push(label);
+					peak = Math.max(peak, manager.getRunningJobs().filter(job => !job.queued).length);
+					await hold.promise;
+					return label;
+				},
+				{ id: label, queued: true },
+			),
+		);
+		try {
+			expect(gatedIds.map(id => manager.getJob(id)?.waitingForSlot)).toEqual([true, true, true, true]);
+			holders[1]!.resolve();
+			await waitForCondition(() => entered.length > 0);
+			expect(entered).toEqual(["s1"]);
+			expect(manager.getJob("s2")?.waitingForSlot).toBe(true);
+			expect(manager.atCapacity).toBe(true);
+			permits.resolve();
+			await waitForCondition(() => running.length === 1);
+			expect(peak).toBe(2);
+		} finally {
+			permits.resolve();
+			for (const release of holders) release.resolve();
+			await manager.waitForAll();
+			await manager.dispose();
+		}
+		expect(running).toEqual(["s1", "s2", "s3", "s4"]);
+		expect(peak).toBe(2);
 	});
 
 	test("startImmediately runs a job at once even at the cap", async () => {
