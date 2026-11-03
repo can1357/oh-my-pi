@@ -748,11 +748,13 @@ fn from_extension(path: &Path) -> Option<SupportLang> {
 	if ext == "C" || ext == "H" {
 		return Some(SupportLang::Cpp);
 	}
-	// Otherwise tables list lowercase extensions; `analysis.R` and `MAIN.PY` are the same languages.
-	SupportLang::all_langs()
-		.iter()
-		.copied()
-		.find(|&l| extensions(l).iter().any(|known| known.eq_ignore_ascii_case(ext)))
+	// Otherwise tables list lowercase extensions; `analysis.R` and `MAIN.PY` are
+	// the same languages.
+	SupportLang::all_langs().iter().copied().find(|&l| {
+		extensions(l)
+			.iter()
+			.any(|known| known.eq_ignore_ascii_case(ext))
+	})
 }
 
 static LANG_ALIASES: phf::Map<&'static str, SupportLang> = phf_map! {
