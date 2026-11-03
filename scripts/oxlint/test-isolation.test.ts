@@ -205,6 +205,106 @@ it("t", async () => {
 });`,
 		expected: [],
 	},
+	"environment-variable-put-back-in-if-without-else": {
+		body: `
+it("t", async () => {
+	const saved = process.env.HOME;
+	onTestFinished(() => {
+		if (saved !== undefined) process.env.HOME = saved;
+	});
+	process.env.HOME = "/tmp";
+	await Promise.resolve();
+});`,
+		expected: ["put-back-on-test-finished@9"],
+	},
+	"environment-variable-put-back-with-a-branch-writing-another-variable": {
+		body: `
+it("t", async () => {
+	const saved = process.env.HOME;
+	onTestFinished(() => {
+		if (saved === undefined) delete process.env.HOME;
+		else process.env.USERPROFILE = saved;
+	});
+	process.env.HOME = "/tmp";
+	await Promise.resolve();
+});`,
+		expected: ["put-back-on-test-finished@10"],
+	},
+	"environment-variable-put-back-nested-one-level-deeper-in-a-branch": {
+		body: `
+it("t", async () => {
+	const saved = process.env.HOME;
+	onTestFinished(() => {
+		if (saved === undefined) {
+			if (process.env.HOME !== undefined) delete process.env.HOME;
+		} else process.env.HOME = saved;
+	});
+	process.env.HOME = "/tmp";
+	await Promise.resolve();
+});`,
+		expected: ["put-back-on-test-finished@11"],
+	},
+	"environment-variable-put-back-in-else-if": {
+		body: `
+it("t", async () => {
+	const saved = process.env.HOME;
+	onTestFinished(() => {
+		if (saved === undefined) delete process.env.HOME;
+		else if (saved !== "") process.env.HOME = saved;
+	});
+	process.env.HOME = "/tmp";
+	await Promise.resolve();
+});`,
+		expected: ["put-back-on-test-finished@10"],
+	},
+	"environment-variable-put-back-after-a-return": {
+		body: `
+it("t", async () => {
+	const saved = process.env.HOME;
+	onTestFinished(() => {
+		if (saved === "keep") return;
+		if (saved === undefined) delete process.env.HOME;
+		else process.env.HOME = saved;
+	});
+	process.env.HOME = "/tmp";
+	await Promise.resolve();
+});`,
+		expected: ["put-back-on-test-finished@11"],
+	},
+	"environment-variable-put-back-in-if-else-blocks": {
+		body: `
+it("t", async () => {
+	const saved = Bun.env.OMP_FLAG;
+	onTestFinished(() => {
+		if (saved === undefined) {
+			delete Bun.env.OMP_FLAG;
+		} else {
+			Reflect.set(Bun.env, "OMP_FLAG", saved);
+		}
+	});
+	Bun.env.OMP_FLAG = "1";
+	await Promise.resolve();
+});`,
+		expected: [],
+	},
+	"environment-variable-put-back-in-if-else-of-a-synchronous-after-each": {
+		body: `
+const saved = process.env.HOME;
+afterEach(() => {
+	if (saved === undefined) delete process.env.HOME;
+	else {
+		process.env.HOME = saved;
+	}
+});
+it("t", async () => {
+	process.env.HOME = "/tmp";
+	await Promise.resolve();
+	onTestFinished(() => {
+		process.env.HOME = "/late";
+	});
+});`,
+		expected: [],
+	},
 	"put-back-of-global-function-in-finally": {
 		body: `
 it("t", async () => {
@@ -684,7 +784,7 @@ it("t", async () => {
 });`,
 		expected: ["restore-mocks-in-hooks@7"],
 	},
-	"hook-put-back-split-across-branches-does-not-cover": {
+	"hook-put-back-split-across-both-branches-covers": {
 		body: `
 const saved = Object.getOwnPropertyDescriptor(process, "platform");
 afterEach(() => {
@@ -695,7 +795,7 @@ it("t", async () => {
 	Object.defineProperty(process, "platform", { value: "win32" });
 	try { await Promise.resolve(); } finally { if (saved) Object.defineProperty(process, "platform", saved); }
 });`,
-		expected: ["put-back-on-test-finished@11"],
+		expected: [],
 	},
 	"registration-on-the-opposite-branch-does-not-cover": {
 		body: `
@@ -759,7 +859,7 @@ it("t", async () => {
 });`,
 		expected: ["put-back-on-test-finished@5"],
 	},
-	"named-finisher-split-across-branches-does-not-cover": {
+	"named-finisher-split-across-both-branches-covers": {
 		body: `
 it("t", async () => {
 	const saved = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
@@ -771,7 +871,7 @@ it("t", async () => {
 	Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: true });
 	try { await Promise.resolve(); } finally { restore(); }
 });`,
-		expected: ["put-back-on-test-finished@7"],
+		expected: [],
 	},
 	"unknown-key-finisher-does-not-cover-fetch": {
 		body: `

@@ -511,8 +511,41 @@ function callsRestoreHelper(facts: FileFacts, scope: Node | undefined): boolean 
 	});
 }
 
-/** Does a synchronous top-level `afterEach` of `scope` do `work` as a direct statement before any exit? */
-function afterEachDoes(facts: FileFacts, scope: Node | undefined, work: (expression: Node) => boolean): boolean {
+/**
+ * Does `statement`, a direct statement of `fn`'s body, do `work` with no exit before it? With
+ * `branches`, an `if` with an `else` also counts when each branch (a block or a single statement)
+ * does `work` as its own direct statement: `if (saved === undefined) delete x.y; else x.y = saved;`.
+ * A missing `else`, an `else if`, a write nested deeper in a branch, or an exit before it gives nothing.
+ */
+function statementDoes(
+	facts: FileFacts,
+	fn: Node,
+	statement: Node,
+	work: (expression: Node) => boolean,
+	branches: boolean,
+): boolean {
+	const direct = (s: Node): boolean => {
+		const expression = s.type === "ExpressionStatement" ? node(s.expression) : undefined;
+		return expression !== undefined && work(expression) && !exitsBefore(facts, fn, s);
+	};
+	if (direct(statement)) return true;
+	if (!branches || statement.type !== "IfStatement") return false;
+	return [node(statement.consequent), node(statement.alternate)].every(branch => {
+		if (!branch) return false;
+		return (branch.type === "BlockStatement" ? nodes(branch.body) : [branch]).some(direct);
+	});
+}
+
+/**
+ * Does a synchronous top-level `afterEach` of `scope` do `work` as a direct statement before any
+ * exit? `branches` also credits an exhaustive `if/else` ({@link statementDoes}).
+ */
+function afterEachDoes(
+	facts: FileFacts,
+	scope: Node | undefined,
+	work: (expression: Node) => boolean,
+	branches = false,
+): boolean {
 	for (const call of facts.calls) {
 		if (testApi(facts.context, node(call.callee)) !== "afterEach") continue;
 		if (enclosingFunction(call) !== scope || !isTopLevelStatement(facts, call, scope)) continue;
@@ -525,10 +558,7 @@ function afterEachDoes(facts: FileFacts, scope: Node | undefined, work: (express
 				if (work(body)) return true;
 				continue;
 			}
-			for (const statement of nodes(body.body)) {
-				const expression = statement.type === "ExpressionStatement" ? node(statement.expression) : undefined;
-				if (expression && work(expression) && !exitsBefore(facts, hook, expression)) return true;
-			}
+			if (nodes(body.body).some(statement => statementDoes(facts, hook, statement, work, branches))) return true;
 		}
 	}
 	return false;
@@ -599,7 +629,7 @@ function spiesCovered(facts: FileFacts, test: Node): boolean {
 /** Does a synchronous top-level `afterEach` of a covering scope put `path` back? */
 function hookPutsBack(facts: FileFacts, test: Node, path: string): boolean {
 	return coveringScopes(facts, test).some(scope =>
-		afterEachDoes(facts, scope, expression => sharedTargets(facts, expression).includes(path)),
+		afterEachDoes(facts, scope, expression => sharedTargets(facts, expression).includes(path), true),
 	);
 }
 
@@ -690,19 +720,22 @@ function registeredRestores(facts: FileFacts, finisher: Node): Node[] {
 	return found;
 }
 
-/** A synchronous callback whose direct statement does `done` with no exit before it. */
-function promptCallback(facts: FileFacts, finisher: Node, done: (expression: Node) => boolean): boolean {
+/**
+ * A synchronous callback whose direct statement does `done` with no exit before it. `branches`
+ * also credits an exhaustive `if/else` ({@link statementDoes}).
+ */
+function promptCallback(
+	facts: FileFacts,
+	finisher: Node,
+	done: (expression: Node) => boolean,
+	branches = false,
+): boolean {
 	return registered(facts, finisher).some(callback => {
 		if (callback.async === true) return false;
 		const body = node(callback.body);
 		if (!body) return false;
 		if (body.type !== "BlockStatement") return done(body);
-		return nodes(body.body).some(
-			statement =>
-				statement.type === "ExpressionStatement" &&
-				done(node(statement.expression)!) &&
-				!exitsBefore(facts, callback, statement),
-		);
+		return nodes(body.body).some(statement => statementDoes(facts, callback, statement, done, branches));
 	});
 }
 
@@ -764,7 +797,7 @@ function putBackRegisteredPromptly(facts: FileFacts, path: string, write: Node):
 	return facts.finishers.some(
 		finisher =>
 			registeredBefore(facts, finisher, write) &&
-			promptCallback(facts, finisher, expression => sharedTargets(facts, expression).includes(path)),
+			promptCallback(facts, finisher, expression => sharedTargets(facts, expression).includes(path), true),
 	);
 }
 
