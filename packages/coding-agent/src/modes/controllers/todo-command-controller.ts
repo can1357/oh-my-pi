@@ -10,6 +10,7 @@ import { type TodoItem, type TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { copyToClipboard } from "../../utils/clipboard";
 import { getEditorCommand, openInEditor } from "../../utils/external-editor";
 import type { InteractiveModeContext } from "../types";
+import { commitTodoEdit } from "../../session/todo-writes";
 
 const USAGE = [
 	"Usage: /todo <verb> [args]",
@@ -444,41 +445,23 @@ export class TodoCommandController {
 	}
 
 	/**
-	 * Runs `compute` inside the session's queued updater so it sees the list as committed at that moment
-	 * (a `todo` tool write queued earlier is never overwritten), then reports the outcome. Everything after the
-	 * await uses the session/agent/sessionManager captured before it: the user may switch sessions mid-commit.
+	 * Runs `compute` inside the session's queued commit (see {@link commitTodoEdit}), then reports the
+	 * outcome. Everything after the await uses the session/agent/sessionManager captured before it:
+	 * the user may switch sessions mid-commit.
 	 */
 	async #edit(compute: (current: TodoPhase[]) => TodoPlan): Promise<void> {
 		const { session, agent, sessionManager } = this.ctx;
-		const planned: { plan?: TodoPlan } = {};
-		let committed: TodoPhase[] | undefined;
-		let failure: unknown;
-		try {
-			// Commit first so HUD visibility binds to the new canonical source.
-			committed = await session.commitTodoPhases(current => {
-				planned.plan = compute(current);
-				return "phases" in planned.plan ? planned.plan.phases : undefined;
-			});
-		} catch (error) {
-			failure = error;
-		}
+		// Commit first so HUD visibility binds to the new canonical source.
+		const outcome = await commitTodoEdit(session, compute);
 		if (this.ctx.session !== session) {
 			this.ctx.showStatus("The session changed before the todo edit finished; the edit was not shown here.");
 			return;
 		}
-		if (failure !== undefined) {
-			this.ctx.showError(failure instanceof Error ? failure.message : String(failure));
+		if ("error" in outcome) {
+			this.ctx.showError(outcome.error);
 			return;
 		}
-		const plan = planned.plan;
-		if (plan && "error" in plan) {
-			this.ctx.showError(plan.error);
-			return;
-		}
-		if (!plan || !committed) {
-			this.ctx.showError("The todo edit was not applied.");
-			return;
-		}
+		const { plan, committed } = outcome;
 		this.ctx.setTodos(committed);
 
 		// Inject system reminder so the agent learns about the change next turn.

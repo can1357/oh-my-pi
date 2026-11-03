@@ -225,3 +225,29 @@ export class TodoWrites {
 		}
 	}
 }
+
+/**
+ * Plan an edit inside a queued commit, so `plan` sees the list as committed at that moment and a
+ * `todo` tool write queued earlier is never overwritten. Resolves with the plan and the committed
+ * list, or `{ error }` for the plan's own error, a rejected commit, or a commit that did not apply.
+ */
+export async function commitTodoEdit<T extends { phases: TodoPhase[] }>(
+	session: { commitTodoPhases(update: TodoPhasesUpdate): Promise<TodoPhase[] | undefined> },
+	plan: (current: TodoPhase[]) => T | { error: string },
+): Promise<{ plan: T; committed: TodoPhase[] } | { error: string }> {
+	const planned: { result?: T | { error: string } } = {};
+	let committed: TodoPhase[] | undefined;
+	try {
+		committed = await session.commitTodoPhases(current => {
+			const result = plan(current);
+			planned.result = result;
+			return "phases" in result ? result.phases : undefined;
+		});
+	} catch (error) {
+		return { error: error instanceof Error ? error.message : String(error) };
+	}
+	const result = planned.result;
+	if (result && "error" in result) return { error: result.error };
+	if (!result || !committed) return { error: "The todo edit was not applied." };
+	return { plan: result, committed };
+}

@@ -6,6 +6,7 @@ import {
 	phasesToMarkdown,
 	resolveTodoMarkdownPath,
 } from "../../tools/todo";
+import { commitTodoEdit } from "../../session/todo-writes";
 import type { ParsedSlashCommand, SlashCommandResult, SlashCommandRuntime } from "../types";
 import { commandConsumed, errorMessage, parseSubcommand, usage } from "./parse";
 
@@ -94,40 +95,17 @@ function currentPhases(runtime: SlashCommandRuntime): TodoPhase[] {
 	return fromEntries.length > 0 ? fromEntries : runtime.session.getTodoPhases();
 }
 
-/** Commits an absolute list through the session; a backend refusal comes back as the failed result the caller returns. */
-async function commitTodos(runtime: SlashCommandRuntime, phases: TodoPhase[]): Promise<SlashCommandResult | undefined> {
-	try {
-		await runtime.session.commitTodoPhases(phases);
-		return undefined;
-	} catch (err) {
-		return await usage(errorMessage(err), runtime);
-	}
-}
-
 type TodoEdit = { phases: TodoPhase[]; message: string } | { error: string };
 
-/**
- * Computes the edit inside the session's queued updater so it runs against the list as committed at that
- * moment (a `todo` tool write queued earlier is never overwritten), then reports the outcome.
- */
+/** Runs `compute` inside the session's queued commit (see {@link commitTodoEdit}), then reports the outcome. */
 async function editTodos(
 	runtime: SlashCommandRuntime,
 	compute: (current: TodoPhase[]) => TodoEdit,
 ): Promise<SlashCommandResult> {
-	const planned: { edit?: TodoEdit } = {};
-	try {
-		const committed = await runtime.session.commitTodoPhases(current => {
-			planned.edit = compute(current);
-			return "phases" in planned.edit ? planned.edit.phases : undefined;
-		});
-		const edit = planned.edit;
-		if (edit && "error" in edit) return await usage(edit.error, runtime);
-		if (!edit || !committed) return await usage("The todo edit was not applied.", runtime);
-		await runtime.output(edit.message);
-		return commandConsumed();
-	} catch (err) {
-		return await usage(errorMessage(err), runtime);
-	}
+	const outcome = await commitTodoEdit(runtime.session, compute);
+	if ("error" in outcome) return usage(outcome.error, runtime);
+	await runtime.output(outcome.plan.message);
+	return commandConsumed();
 }
 
 const TODO_HELP_TEXT = [
@@ -181,11 +159,11 @@ async function handleTodoImportCommand(restArgs: string, runtime: SlashCommandRu
 	}
 	const { phases, errors } = markdownToPhases(content);
 	if (errors.length > 0) return usage(`Could not parse ${target}:\n  ${errors.join("\n  ")}`, runtime);
-	const failed = await commitTodos(runtime, phases);
-	if (failed) return failed;
 	const taskCount = phases.reduce((sum, phase) => sum + phase.tasks.length, 0);
-	await runtime.output(`Imported ${phases.length} phase(s), ${taskCount} task(s) from ${target}.`);
-	return commandConsumed();
+	return editTodos(runtime, () => ({
+		phases,
+		message: `Imported ${phases.length} phase(s), ${taskCount} task(s) from ${target}.`,
+	}));
 }
 
 async function handleTodoAppendCommand(restArgs: string, runtime: SlashCommandRuntime): Promise<SlashCommandResult> {
