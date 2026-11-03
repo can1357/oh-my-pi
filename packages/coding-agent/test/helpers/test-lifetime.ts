@@ -21,11 +21,9 @@ let timedOut: string | undefined;
 /**
  * Note a timeout: a tracked test or hook still running as another one starts has outlived its
  * timeout. Teardown counts: a body still running as its test's first `afterEach` starts timed out,
- * even if it settles before the next test does. A helper module that registers its own hook in
- * tracked files calls this first in that hook, since Bun runs a file's hooks in the order they were
- * registered, and a helper's run before the file's own.
+ * even if it settles before the next test does.
  */
-export function noteTimeout(): void {
+function noteTimeout(): void {
 	if (timedOut !== undefined) return;
 	for (const name of unsettled.values()) {
 		timedOut = name;
@@ -87,22 +85,35 @@ type Hook = typeof bunBeforeEach;
 const SERIAL_VARIANTS = ["only", "skip", "todo", "failing", "serial"] as const;
 const SERIAL_CONDITIONS = ["if", "skipIf", "todoIf", "failingIf", "serialIf"] as const;
 
-function trackTest(base: AnyTest, rowArgs = false): AnyTest {
-	const tracked = ((label: string, fn: TestBody, options?: number) => {
-		// A `.each` body takes its row as arguments.
-		if (!rowArgs) refuseDoneCallback("test", fn);
+/**
+ * The arguments a `.each` body receives per row: an array row is spread, any other row is one
+ * argument. A body declaring more takes a `done` callback.
+ */
+function rowArity(row: unknown): number {
+	return Array.isArray(row) ? row.length : 1;
+}
+
+/** `rows` is the table of a `.each`, whose body takes its row as arguments; undefined for a plain test. */
+function trackTest(base: AnyTest, rows?: readonly unknown[]): AnyTest {
+	const tracked = ((label: string, fn: TestBody | undefined, options?: number) => {
+		// A bodyless `.todo` or `.skip` declares a test that never runs.
+		if (typeof fn !== "function") return base(label, fn as never, options);
+		const params = rows === undefined ? 0 : Math.min(...rows.map(rowArity));
+		if (fn.length > params) {
+			throw new Error("trackTestLifetime: a tracked test takes no `done` callback; return a promise instead");
+		}
 		return base(label, (...args: unknown[]) => runTracked(label, fn, args), options);
 	}) as unknown as AnyTest;
 	for (const variant of SERIAL_VARIANTS) {
-		Object.defineProperty(tracked, variant, { get: () => trackTest(base[variant], rowArgs) });
+		Object.defineProperty(tracked, variant, { get: () => trackTest(base[variant], rows) });
 	}
 	for (const condition of SERIAL_CONDITIONS) {
 		Object.defineProperty(tracked, condition, {
-			value: (when: boolean) => trackTest(base[condition](when), rowArgs),
+			value: (when: boolean) => trackTest(base[condition](when), rows),
 		});
 	}
 	Object.defineProperty(tracked, "each", {
-		value: (table: readonly unknown[]) => trackTest(base.each(table as unknown[][]) as AnyTest, true),
+		value: (table: readonly unknown[]) => trackTest(base.each(table as unknown[][]) as AnyTest, table),
 	});
 	for (const concurrent of ["concurrent", "concurrentIf"]) {
 		Object.defineProperty(tracked, concurrent, {
@@ -112,6 +123,40 @@ function trackTest(base: AnyTest, rowArgs = false): AnyTest {
 		});
 	}
 	return tracked;
+}
+
+/**
+ * Whether the test that started last has reached its teardown. Bun runs a file's tests one at a
+ * time unless told otherwise, and always starts a test's teardown before the next test starts.
+ */
+let lastTestTornDown = true;
+
+/**
+ * Start of a tracked test: refuse it when an earlier one timed out, and refuse it plainly when Bun
+ * runs tests concurrently (`describe.concurrent`, `--concurrent`), where a body still running as
+ * another test starts says nothing about a timeout.
+ */
+function startTest(): void {
+	if (!lastTestTornDown) {
+		throw new Error(
+			"trackTestLifetime: a tracked test started before the previous one reached its teardown; tracked files run their tests one at a time (no describe.concurrent, test.concurrent or --concurrent)",
+		);
+	}
+	lastTestTornDown = false;
+	// Runs after the test's teardown even when an `afterEach` timed out and Bun skipped the rest.
+	bunOnTestFinished(noteTeardown);
+	refuseAfterTimeout();
+}
+
+/**
+ * The start of a test's teardown: note a body still running then as timed out. Every tracked
+ * `afterEach` and `onTestFinished` callback calls this first. A helper module that registers its
+ * own `afterEach` in tracked files calls it first in that hook too: Bun runs a file's hooks in the
+ * order they were registered, so a helper's runs before the file's own.
+ */
+export function noteTeardown(): void {
+	lastTestTornDown = true;
+	noteTimeout();
 }
 
 /** The test API of a tracked file. */
@@ -141,8 +186,8 @@ export interface TestLifetime {
  * registers, and at the start of every tracked hook and callback.
  */
 export function trackTestLifetime(): TestLifetime {
-	bunBeforeEach(refuseAfterTimeout);
-	bunAfterEach(noteTimeout);
+	bunBeforeEach(startTest);
+	bunAfterEach(noteTeardown);
 	const test = trackTest(bunTest as AnyTest) as unknown as Test<[]>;
 	const hook =
 		(register: Hook, name: string, atStart: () => void): Hook =>
@@ -156,7 +201,7 @@ export function trackTestLifetime(): TestLifetime {
 	const onTestFinished: typeof bunOnTestFinished = (fn, options) => {
 		refuseDoneCallback("onTestFinished callback", fn as (...args: never[]) => unknown);
 		return bunOnTestFinished(() => {
-			noteTimeout();
+			noteTeardown();
 			return runTracked("an onTestFinished callback", fn as () => unknown, []);
 		}, options);
 	};
@@ -164,7 +209,7 @@ export function trackTestLifetime(): TestLifetime {
 		test,
 		it: test,
 		beforeEach: hook(bunBeforeEach, "a beforeEach hook", noteTimeout),
-		afterEach: hook(bunAfterEach, "an afterEach hook", noteTimeout),
+		afterEach: hook(bunAfterEach, "an afterEach hook", noteTeardown),
 		beforeAll: hook(bunBeforeAll, "a beforeAll hook", refuseAfterTimeout),
 		afterAll: hook(bunAfterAll, "an afterAll hook", noteTimeout),
 		onTestFinished,
