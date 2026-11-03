@@ -138,13 +138,14 @@ function decodeAnsiC(body: string): { text: string; bytes: boolean } {
 				}
 				return String.fromCodePoint(code);
 			}
-			if (esc[0] === "x" || /^[0-7]/u.test(esc)) {
+			// Without digits (`\x`, `\u`, `\U`) bash keeps the escape as written, falling through below.
+			if ((esc[0] === "x" && esc.length > 1) || /^[0-7]/u.test(esc)) {
 				const code = esc[0] === "x" ? Number.parseInt(esc.slice(1), 16) : Number.parseInt(esc, 8) & 0xff;
 				// A NUL ends the word when bash passes it to a command.
 				if (code >= 0x80 || code === 0) bytes = true;
 				return String.fromCharCode(code);
 			}
-			if (esc[0] === "c") {
+			if (esc[0] === "c" && esc.length > 1) {
 				if (esc[1] === "?") return "\x7f";
 				const code = esc.charCodeAt(1) & 0x1f;
 				if (code === 0) bytes = true;
@@ -1283,7 +1284,8 @@ function writeCanPerform(
 	if (output.op !== ">" && output.op !== ">|" && !(output.op === ">>" && availableTools.includes("edit")))
 		return false;
 	const target = output.target;
-	if (!target || !namesOneFile(target) || SPECIAL_PATH.test(target.value)) return false;
+	if (!target || !namesOneFile(target) || !toolsTakeLiterally(target.value)) return false;
+	if (SPECIAL_PATH.test(target.value) || NOTEBOOK.test(target.value)) return false;
 	if (filesystem && filesystem.kind(target.value, false) !== "missing") return false;
 	const args = command.words.slice(1);
 	const text = writeStepText(name, step, args, stdinDocuments);
@@ -1502,9 +1504,27 @@ function pathsAre(
 	filesystem: StepFilesystem | undefined,
 ): boolean {
 	return words.every(
-		word => !SPECIAL_PATH.test(word.value) && (!filesystem || allowed.includes(filesystem.kind(word.value, follow))),
+		word =>
+			toolsTakeLiterally(word.value) &&
+			!SPECIAL_PATH.test(word.value) &&
+			(!filesystem || allowed.includes(filesystem.kind(word.value, follow))),
 	);
 }
+
+/**
+ * Whether the read, grep, edit and write tools take `path` as the file the shell names: letters,
+ * digits, `.`, `_`, `-`, `+`, `=`, `@` and `/`, not starting with `@` or `~`. The tools' path
+ * handling reads other characters differently: `:` (a URL scheme, a read selector, an archive
+ * member or database table, a Windows drive, a stray leading colon), `,`, `;` and spaces (grep's
+ * path lists), `!` (a grep exclude), `[…]` and `#` (a hashline header), quotes (stripped), `\`
+ * (a separator), `%` (decoded in URLs), a leading `@` or `~` (shorthands for paths).
+ */
+function toolsTakeLiterally(path: string): boolean {
+	return /^(?![@~])[A-Za-z0-9._+=@/-]+$/u.test(path);
+}
+
+/** A Jupyter notebook: the edit tool edits its cells, not its JSON text. */
+const NOTEBOOK = /\.ipynb$/iu;
 
 /** Whether `facts` describe a file with one link whose text the edit tool rewrites byte for byte. */
 function isPlainSingleFile(facts: FileFacts | undefined): boolean {
@@ -1582,6 +1602,7 @@ export function dedicatedToolCanPerformStep(
 		default: {
 			const files = editCanPerform(name, pipeline);
 			if (!files || !pathsAre(files, ["file", "missing"], false, filesystem)) return false;
+			if (files.some(word => NOTEBOOK.test(word.value))) return false;
 			return (
 				!filesystem ||
 				files.every(
