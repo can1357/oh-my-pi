@@ -2,6 +2,7 @@ import { beforeAll, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import {
+	EXIT_CONTEXT_IO_TIMEOUT_MS,
 	type ExitContextSources,
 	readExitContext,
 	startExitContextReader,
@@ -350,4 +351,57 @@ describe("session_exit entry", () => {
 		if (oomKills === undefined) expect(data).not.toHaveProperty("oomKills");
 		else expect(data.oomKills).toBe(oomKills);
 	}, 60_000);
+});
+
+const SLOW_FUSE = path.join(import.meta.dir, "../fixtures/slow-fuse.py");
+const fuseAvailable =
+	process.platform === "linux" &&
+	fs.existsSync("/dev/fuse") &&
+	Bun.which("fusermount3") !== null &&
+	Bun.which("python3") !== null;
+
+// Last in the file: it replaces the module's reader thread.
+describe.skipIf(!fuseAvailable)("on a filesystem that does not answer", () => {
+	it("bounds the wait, skips the reads while the reader is stuck, and starts a new reader after it dies", async () => {
+		using tempDir = TempDir.createSync("@omp-exit-context-fuse-");
+		const mount = tempDir.join("mount");
+		const server = Bun.spawn(["python3", SLOW_FUSE, mount, "30"], { stdout: "pipe", stderr: "pipe" });
+		try {
+			const reader = server.stdout.getReader();
+			const { value } = await reader.read();
+			reader.releaseLock();
+			expect(new TextDecoder().decode(value)).toContain("MOUNT_READY");
+
+			// The reader's lookup of <mount>/<pid> waits 30 s in the kernel; the exit does not.
+			const hung = fakeSources(tempDir, { intentDir: mount });
+			const started = performance.now();
+			expect(readExitContext(hung)).toEqual({ pid: hung.pid, pane: "%7" });
+			const waited = performance.now() - started;
+			expect(waited).toBeGreaterThanOrEqual(EXIT_CONTEXT_IO_TIMEOUT_MS - 50);
+			expect(waited).toBeLessThan(EXIT_CONTEXT_IO_TIMEOUT_MS + 1_500);
+
+			// While the reader is stuck, another exit records what needs no I/O without waiting.
+			const local = fakeSources(tempDir);
+			writeExitIntent(local.pid, "move", local.intentDir);
+			const again = performance.now();
+			expect(readExitContext(local)).toEqual({ pid: local.pid, pane: "%7" });
+			expect(performance.now() - again).toBeLessThan(200);
+
+			// The stuck reader dies (here: terminated, then its request aborted with the server).
+			const stuck = startExitContextReader();
+			if (!stuck) throw new Error("expected a reader thread");
+			const closed = Promise.withResolvers<void>();
+			stuck.addEventListener("close", () => closed.resolve());
+			stuck.terminate();
+			server.kill("SIGKILL");
+			await closed.promise;
+
+			// The next exit starts a new reader and reads again.
+			expect(readExitContext(local)).toEqual({ pid: local.pid, pane: "%7", oomKills: 3, intent: "move" });
+		} finally {
+			server.kill("SIGKILL");
+			await server.exited;
+			Bun.spawnSync(["fusermount3", "-u", "-z", mount]);
+		}
+	}, 120_000);
 });

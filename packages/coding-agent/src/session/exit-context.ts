@@ -77,8 +77,12 @@ const consumedIntents = new Map<string, string>();
 /** The reader thread, idle between requests; `undefined` before the first start or after it died. */
 let reader: Worker | undefined;
 
-/** A request that missed its deadline: the reader is still on it, and a later exit takes its answer once it has one. */
-let lateRead: { intentPath: string; state: SharedArrayBuffer } | undefined;
+/**
+ * A request that missed its deadline: its reader is still on it, and a later
+ * exit takes its answer once it has one. It exists only while that reader
+ * lives; a reader that dies drops it, so the next exit starts a new one.
+ */
+let lateRead: { worker: Worker; intentPath: string; state: SharedArrayBuffer } | undefined;
 
 /**
  * Start the reader thread if it is not running, so a later exit only waits for
@@ -95,6 +99,11 @@ export function startExitContextReader(): Worker | undefined {
 		worker.unref();
 		worker.addEventListener("close", () => {
 			if (reader === worker) reader = undefined;
+			if (lateRead?.worker === worker) {
+				// A late answer written before the thread died still counts.
+				rememberIntent(lateRead.intentPath, takeAnswer(lateRead.state)?.intent);
+				lateRead = undefined;
+			}
 		});
 		reader = worker;
 	} catch {
@@ -165,7 +174,7 @@ export function readExitContext(
 			Atomics.wait(new Int32Array(state, 0, 2), 0, 0, timeoutMs);
 			const result = takeAnswer(state);
 			if (result === undefined) {
-				lateRead = { intentPath, state };
+				lateRead = { worker, intentPath, state };
 			} else {
 				if (result.oomKills !== undefined) context.oomKills = result.oomKills;
 				rememberIntent(intentPath, result.intent);
