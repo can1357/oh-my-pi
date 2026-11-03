@@ -53,6 +53,8 @@ describe.skipIf(!available)("browser implicit role selectors", () => {
 				<article><aside id="aria-name-aside" aria-labelledby="aria-name-heading"></aside></article>
 				<section id="alt-name-section" aria-labelledby="alt-name-image"></section><img id="alt-name-image" alt="Logo" src="data:,">
 				<section id="input-button-section" aria-labelledby="input-button-label"></section><input id="input-button-label" type="button" value="Billing input">
+				<section id="image-input-section" aria-labelledby="image-input-label"></section><input id="image-input-label" type="image" alt="Image input" src="data:,">
+				<section id="title-target-section" aria-labelledby="title-target"></section><span id="title-target" role="note" title="Titled target"></span>
 				<section id="text-input-section" aria-labelledby="text-input-label"></section><input id="text-input-label" value="Typed name">
 				<section id="area-name-section" aria-labelledby="area"></section>
 				<form id="form" aria-label="Named form"></form><form id="unnamed-form">Content</form>
