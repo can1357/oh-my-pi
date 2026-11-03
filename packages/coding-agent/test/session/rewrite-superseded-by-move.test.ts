@@ -455,6 +455,141 @@ for (const depth of [0, 1, 2, 4, 8, 16]) {
 	});
 }
 
+// A rewrite whose own write failed is reported failed; a write that then
+// saves the restored transcript recovers storage, and the failure is not
+// latched over that recovery.
+for (const depth of [-1, 0, 1, 2, 3]) {
+	const when = depth < 0 ? "inside" : `${depth} microtasks after`;
+	it(`leaves no stale failure when an append ${when} a failed rewrite's restore saves`, async () => {
+		using tempDir = TempDir.createSync("@omp-rewrite-own-failure-recovered-");
+		const storage = new StorageFailingOneAtomicWrite();
+		const manager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"), storage);
+		manager.onPersistenceError(() => {});
+		try {
+			manager.appendMessage({ role: "user", content: "a turn worth saving", timestamp: Date.now() });
+			manager.appendCustomEntry("marker", { state: "before" });
+			await manager.ensureOnDisk();
+			await manager.flush();
+			const marker = manager.getEntries().find(entry => entry.type === "custom" && entry.customType === "marker");
+			if (marker?.type !== "custom") throw new Error("Expected the marker entry");
+			marker.data = { state: "after" };
+			storage.armed = true;
+			let appended: Promise<unknown> | undefined;
+			const error = await manager
+				.rewriteEntries({
+					restore: () => {
+						marker.data = { state: "before" };
+						if (depth < 0) {
+							manager.appendCustomEntry("recovering", {});
+							return;
+						}
+						let racing = Promise.resolve();
+						for (let step = 0; step < depth; step++) racing = racing.then(() => {});
+						appended = racing.then(() => manager.appendCustomEntry("recovering", {}));
+					},
+				})
+				.then(
+					() => undefined,
+					(failure: unknown) => failure,
+				);
+			await appended;
+			expect((error as Error).message).toBe("atomic write denied");
+			const file = manager.getSessionFile();
+			if (!file) throw new Error("Expected a persisted session");
+			await manager.flush();
+			const onDisk = fs.readFileSync(file, "utf8");
+			expect(onDisk).toContain('"customType":"recovering"');
+			expect(onDisk).not.toContain('"state":"after"');
+		} finally {
+			manager.seal();
+			await manager.close().catch(() => {});
+		}
+	});
+}
+
+// A seal moves the disk epoch but writes nothing: a rewrite whose write fails
+// as the session is sealed reports, restores and latches its own failure.
+for (const committed of [false, true]) {
+	it(`reports a rewrite's own failure when only a seal ran (storage ${committed ? "committed" : "refused"} it)`, async () => {
+		using tempDir = TempDir.createSync("@omp-rewrite-own-failure-seal-");
+		const storage = new FileSessionStorage();
+		const manager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"), storage);
+		manager.onPersistenceError(() => {});
+		try {
+			manager.appendMessage({ role: "user", content: "a turn worth saving", timestamp: Date.now() });
+			manager.appendCustomEntry("marker", { state: "before" });
+			await manager.ensureOnDisk();
+			await manager.flush();
+			const marker = manager.getEntries().find(entry => entry.type === "custom" && entry.customType === "marker");
+			if (marker?.type !== "custom") throw new Error("Expected the marker entry");
+			const write = storage.writeTextAtomic.bind(storage);
+			const failure = new Error("write failed as the session was sealed");
+			storage.writeTextAtomic = async (file, body, options) => {
+				if (committed) await write(file, body, options);
+				manager.seal();
+				throw failure;
+			};
+			marker.data = { state: "after" };
+			let restores = 0;
+			const error = await manager
+				.rewriteEntries({
+					restore: () => {
+						restores++;
+						marker.data = { state: "before" };
+					},
+				})
+				.then(
+					() => undefined,
+					(rejection: unknown) => rejection,
+				);
+			expect(error).toBe(failure);
+			expect(restores).toBe(1);
+			const flushed = await manager.flushEntries().then(
+				() => undefined,
+				(rejection: unknown) => rejection,
+			);
+			expect(flushed).toBe(failure);
+		} finally {
+			manager.seal();
+			await manager.close().catch(() => {});
+		}
+	});
+}
+
+it("reports a rewrite's own write failure, not its caller's throwing restore, when no other write ran", async () => {
+	using tempDir = TempDir.createSync("@omp-rewrite-own-failure-restore-throws-");
+	const storage = new StorageFailingOneAtomicWrite();
+	const manager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"), storage);
+	manager.onPersistenceError(() => {});
+	try {
+		manager.appendMessage({ role: "user", content: "a turn worth saving", timestamp: Date.now() });
+		await manager.ensureOnDisk();
+		await manager.flush();
+		storage.armed = true;
+		const error = await manager
+			.rewriteEntries({
+				restore: () => {
+					throw new Error("restore broke");
+				},
+			})
+			.then(
+				() => undefined,
+				(failure: unknown) => failure,
+			);
+		expect(storage.failed).toBe(true);
+		expect((error as Error).message).toBe("atomic write denied");
+		// The failure latched is the write's too.
+		const latched = await manager.flush().then(
+			() => undefined,
+			(failure: unknown) => failure,
+		);
+		expect((latched as Error | undefined)?.message).not.toBe("restore broke");
+	} finally {
+		manager.seal();
+		await manager.close().catch(() => {});
+	}
+});
+
 it("reports why a rewrite failed when its caller's restore throws", async () => {
 	using tempDir = TempDir.createSync("@omp-rewrite-superseded-restore-throws-");
 	const storage = new StorageTakenOverMidRewrite();

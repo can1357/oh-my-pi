@@ -2693,12 +2693,16 @@ export class SessionManager {
 	#diskTail: Promise<void> = Promise.resolve();
 	#diskFailure: Error | undefined;
 	#diskFailureLogged = false;
+	/** Counts {@link #clearDiskError}: a disk task's failure does not latch over a recovery made after the task started. */
+	#diskClears = 0;
 	/** FIFO reservation for atomic batches and authoritative recovery. */
 	#atomicPersistenceTail: Promise<void> = Promise.resolve();
 	/** Observer notifications withheld until their entries are proven durable. */
 	#pendingDurabilityNotifications: SessionEntry[] = [];
 	/** Bumped on every sync rewrite / chain reset so stale queued tasks become no-ops. */
 	#diskEpoch = 0;
+	/** Counts full writes made off the disk chain (a synchronous rewrite, an authoritative repair); a seal does not count. */
+	#fullWrites = 0;
 	/**
 	 * Epoch of the in-flight atomic rewrite, or `null` when no rewrite is running.
 	 * The fence in {@link #appendToSessionFile} only applies while this matches
@@ -2835,6 +2839,7 @@ export class SessionManager {
 	#clearDiskError(): void {
 		this.#diskFailure = undefined;
 		this.#diskFailureLogged = false;
+		this.#diskClears++;
 	}
 
 	/**
@@ -3371,15 +3376,21 @@ export class SessionManager {
 
 	#scheduleDiskWork(work: () => Promise<void>, options: DiskQueueOptions = {}): Promise<void> {
 		const epoch = options.epoch ?? this.#diskEpoch;
+		let clearsAtStart: number | undefined;
 		const scheduled = this.#diskTail
 			.catch(() => undefined)
 			.then(async () => {
+				clearsAtStart = this.#diskClears;
 				if (!options.ignoreEpoch && epoch !== this.#diskEpoch) return;
 				if (this.#diskFailure && !options.ignorePriorError) throw this.#diskFailure;
 				await work();
 			});
 
 		const reported = scheduled.catch(err => {
+			// A write that recovered storage after this task started has settled the
+			// state this failure would describe: it is reported to the task's caller
+			// but not latched over that recovery.
+			if (clearsAtStart !== undefined && clearsAtStart !== this.#diskClears) throw toError(err);
 			throw this.#noteDiskFailure(err);
 		});
 		this.#diskTail = reported.catch(() => undefined);
@@ -3468,6 +3479,7 @@ export class SessionManager {
 		const previousDiskTail = this.#diskTail;
 		const writer = this.#writer;
 		this.#diskEpoch++;
+		this.#fullWrites++;
 		const epoch = this.#diskEpoch;
 		this.#writer = undefined;
 		this.#diskTail = Promise.resolve();
@@ -3875,6 +3887,7 @@ export class SessionManager {
 			if (this.#sessionOwnedElsewhere()) targetPath = this.#moveOffSessionFile("open-elsewhere");
 			let body = this.#serializeBody();
 			this.#diskEpoch++;
+			this.#fullWrites++;
 			this.#diskTail = Promise.resolve();
 			this.#closeWriterEventually();
 			for (let recoveries = 0; ; recoveries++) {
@@ -4032,8 +4045,15 @@ export class SessionManager {
 	 * now holds it.
 	 */
 	#restoreUnsaved(restore: (() => void) | undefined): void {
+		// Marked before the restore runs, so a write the restore itself starts
+		// replaces the file rather than appending to it.
+		this.#fileIsCurrent = false;
+		this.#rewriteRequired = true;
 		try {
 			restore?.();
+		} catch (restoreError) {
+			// A restore that throws does not hide why the change was not saved.
+			logger.warn("Restoring an unsaved session change failed", { error: String(restoreError) });
 		} finally {
 			this.#bodyRevision++;
 			this.#fileIsCurrent = false;
@@ -4067,12 +4087,7 @@ export class SessionManager {
 		while (this.#publishesOffChain.size > 0) await Promise.race(this.#publishesOffChain);
 		const durable = this.#durableBody;
 		if (durable && durable.file === this.#sessionFile && durable.revision >= revision) return;
-		try {
-			this.#restoreUnsaved(restore);
-		} catch (restoreError) {
-			// A restore that throws does not hide why the change was not saved.
-			logger.warn("Restoring an unsaved session change failed", { error: String(restoreError) });
-		}
+		this.#restoreUnsaved(restore);
 		throw this.#diskFailure ?? error;
 	}
 
@@ -4099,10 +4114,11 @@ export class SessionManager {
 		try {
 			await this.#scheduleDiskWork(
 				async () => {
+					const writesAtStart = this.#fullWrites;
 					try {
 						outcome = await this.#runFencedAtomicRewrite(startEpoch);
 					} catch (error) {
-						if (this.#diskEpoch === startEpoch) {
+						if (this.#fullWrites === writesAtStart) {
 							// No other write ran while it failed, so the failure is the rewrite's own
 							// and is what the caller is told: the change is restored in the turn the
 							// write failed in, and the failure latches on the chain as any disk failure does.
@@ -4110,7 +4126,7 @@ export class SessionManager {
 							this.#restoreUnsaved(restore);
 							throw error;
 						}
-						// A write that ran meanwhile moved the epoch on. That write owns the
+						// A full write that ran meanwhile owns the
 						// session's disk state, its failure or its recovery included, so this
 						// failure does not latch over it; whether it saved the change is settled
 						// off the chain, like a superseded rewrite.
@@ -4151,6 +4167,7 @@ export class SessionManager {
 	async #runFencedAtomicRewrite(epoch: number): Promise<FencedRewriteOutcome> {
 		if (this.#released) return "skipped";
 		this.#atomicRewriteFenceEpoch = epoch;
+		const writesAtStart = this.#fullWrites;
 		let recoveries = 0;
 		const superseded = () => new Error("Session rewrite superseded by a write that did not persist it");
 		try {
@@ -4176,7 +4193,11 @@ export class SessionManager {
 						// A write that ran while this one was on its way superseded it:
 						// conflict recovery is for the session's current file, which this
 						// may no longer be, and the outcome is settled off the chain.
-						if (this.#diskEpoch !== epoch) return await this.#supersededOutcome(error, { sessionFile, body });
+						// A seal moves the epoch too, but writes nothing: the failure stays
+						// this rewrite's own.
+						if (this.#diskEpoch !== epoch && this.#fullWrites !== writesAtStart) {
+							return await this.#supersededOutcome(error, { sessionFile, body });
+						}
 						if (await this.#recoverFromWriteConflict(error, recoveries)) {
 							recoveries++;
 							// Publish the whole transcript against what the recovery found on the next pass.
