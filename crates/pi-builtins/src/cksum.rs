@@ -10,7 +10,6 @@ use std::{
 	io::{self, BufReader, Read, Write},
 };
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command, ValueHint, builder::ValueParser};
 use os_display::Quotable;
 use uucore::{
@@ -26,7 +25,7 @@ use uucore::{
 	sum::{self, Blake2b, Blake3, DigestOutput},
 };
 
-use crate::host::{Host, Utility, matches_parser, os_bytes, util};
+use crate::host::{Host, Utility, matches_parser, os_bytes};
 
 #[derive(Debug, Clone)]
 struct Failure(String);
@@ -457,11 +456,6 @@ fn cksum_app() -> Command {
 	.with_binary()
 	.with_zero()
 	.with_debug()
-}
-
-/// Creates the `cksum` builtin registration.
-pub(crate) fn cksum_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Cksum, SE>()
 }
 
 /// Sanitizes `--length` against `--algorithm`, mirroring GNU `cksum`.

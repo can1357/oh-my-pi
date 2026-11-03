@@ -5,6 +5,8 @@
 ### Added
 
 - Added `ASIDE_MESSAGE_CLAIM`: an aside that carries it is committed only when a model request carrying it is handed to the provider while it is still live, and is taken out of the request unsent otherwise ([#17630](https://github.com/can1357/oh-my-pi/pull/17630) by [@sjawhar](https://github.com/sjawhar))
+- Added `Agent.queuedMessageGate`, a synchronous `QueuedMessageGate` consulted before every queued-message delivery batch (it can drop candidates) and told when claimed messages go back undelivered
+
 ## [18.16.0] - 2026-11-02
 
 ### Changed

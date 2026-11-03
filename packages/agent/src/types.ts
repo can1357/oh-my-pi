@@ -49,6 +49,22 @@ export type PrepareQueuedMessages = (
 ) => QueuedMessagePreparation | undefined | Promise<QueuedMessagePreparation | undefined>;
 
 /**
+ * Synchronous arbiter over queued messages leaving a queue for delivery, for a
+ * queue whose messages someone else may withdraw concurrently (a session homed
+ * on another thread whose view pops them).
+ */
+export interface QueuedMessageGate {
+	/**
+	 * Called with the batch about to be removed from `queue` for delivery; returns
+	 * the candidates that must be dropped from the queue instead. The others are
+	 * claimed for delivery.
+	 */
+	claim(queue: QueuedMessageQueue, candidates: readonly AgentMessage[]): readonly AgentMessage[];
+	/** Called with claimed messages that left delivery undelivered (requeued, withdrawn, or cancelled). */
+	release(messages: readonly AgentMessage[]): void;
+}
+
+/**
  * Called once an aside has been inserted into the agent's live context; for an
  * aside that carries {@link ASIDE_MESSAGE_CLAIM}, once the model request that
  * carries it is handed to the provider.

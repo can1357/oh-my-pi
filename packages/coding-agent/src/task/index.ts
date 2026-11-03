@@ -27,6 +27,7 @@ import type {
 import type { Usage } from "@oh-my-pi/pi-ai";
 import { $env, formatDuration, isRecord, logger, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "..";
+import { isLocalAgentSession } from "../session/agent-session-handle";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { Settings } from "../config/settings";
 import type { Theme } from "@oh-my-pi/pi-tui/theme";
@@ -54,7 +55,7 @@ import {
 	type TaskToolSchemaInstance,
 } from "./types";
 import type { AgentProgress, SingleResult, TaskItem, TaskParams, TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
-import { AsyncJobError, type AsyncJobManager } from "../async";
+import { AsyncJobError, type AsyncJobManagerApi } from "../async";
 import { hasResolvableTranscript } from "../internal-urls/registry-helpers";
 import { sessionResolveContext } from "../internal-urls/context";
 import { InternalUrlRouter } from "../internal-urls/router";
@@ -153,6 +154,9 @@ export {
 	TASK_SUBAGENT_PROGRESS_CHANNEL,
 	taskSchema,
 } from "./types";
+
+/** A run's end, without its value: what the due-by clock is told of a settled run. */
+function settledRun(): void {}
 
 interface TaskDescriptionOptions {
 	agents: AgentDefinition[];
@@ -1062,18 +1066,25 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				spawn.params.dueMinutes ?? cfgTaskDueMinutes.get(this.session.settings),
 				MAX_DUE_MINUTES,
 			);
+			// The dispatcher's own address, decided here on its home thread: the
+			// clock runs on the main thread and never reads a transcript itself.
+			const ownerSession = registry.get(ownerId)?.session;
+			const ownerAddress =
+				ownerSession && isLocalAgentSession(ownerSession)
+					? ownerSession.dueByDispatchAddress(spawn.toolCallId, spawn.speculative === true)
+					: { entryId: null, toolCallId: spawn.toolCallId };
 			registry.dueBy.arm(
 				{
 					childId: spawn.agentId,
 					ownerId,
-					toolCallId: spawn.toolCallId,
+					ownerAddress,
 					agent: spawn.params.agent ?? "task",
 					dispatchedAt: Date.now(),
 					dueMs: minutes * 60_000,
 					stated: spawn.params.dueMinutes !== undefined,
-					speculative: spawn.speculative === true,
 				},
-				{ settled: spawnRun.result, signal: spawnRun.signal },
+				// Settle and cancel only: the run's result never crosses to the clock.
+				{ settled: spawnRun.result.then(settledRun, settledRun), signal: spawnRun.signal },
 			);
 		}
 		return spawnRun;
@@ -1592,7 +1603,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	 * feeds the caller's aggregate counters.
 	 */
 	#registerSpawnJob(options: {
-		manager: AsyncJobManager;
+		manager: AsyncJobManagerApi;
 		toolCallId: string;
 		spawnParams: SpawnParams;
 		agentId: string;

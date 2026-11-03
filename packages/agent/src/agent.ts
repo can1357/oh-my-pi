@@ -62,6 +62,7 @@ import type {
 	AsideBoundary,
 	AsideMessage,
 	PrepareQueuedMessages,
+	QueuedMessageGate,
 	QueuedMessageQueue,
 	SpeculativeToolExecutionConfig,
 	StreamFn,
@@ -528,6 +529,12 @@ export class Agent {
 	getApiKey?: (model: Model) => Promise<ApiKey | undefined> | ApiKey | undefined;
 	/** Prepare actual queue deliveries after dequeue gates; commit runs only while ownership remains valid. */
 	prepareQueuedMessages?: PrepareQueuedMessages;
+	/**
+	 * Consulted synchronously whenever queued messages are removed for delivery and
+	 * told about claimed messages that went back undelivered (see {@link QueuedMessageGate}).
+	 * Unset, batches are taken as they are.
+	 */
+	queuedMessageGate?: QueuedMessageGate;
 	/**
 	 * Hook invoked after tool arguments are validated and before execution.
 	 * Reassign at any time to swap the implementation (e.g. on extension reload).
@@ -1096,6 +1103,7 @@ export class Agent {
 		const claim = this.#queuedMessageClaims[queue];
 		if (!claim) return;
 		delete this.#queuedMessageClaims[queue];
+		this.queuedMessageGate?.release(claim.messages);
 		if (restore) {
 			if (queue === "steering") {
 				this.#steeringQueue = [...claim.messages, ...this.#steeringQueue];
@@ -1124,12 +1132,14 @@ export class Agent {
 				restored[delivery.queue].push(delivery.messages[i]);
 			}
 		}
+		if (restored.steering.length === 0 && restored.followUp.length === 0) return;
+		this.queuedMessageGate?.release([...restored.steering, ...restored.followUp]);
 		if (restored.steering.length > 0) {
 			this.#steeringQueue = [...restored.steering, ...this.#steeringQueue];
 			this.#notifySteeringWaiters();
 		}
 		if (restored.followUp.length > 0) this.#followUpQueue = [...restored.followUp, ...this.#followUpQueue];
-		if (restored.steering.length > 0 || restored.followUp.length > 0) this.#emitQueueChanged();
+		this.#emitQueueChanged();
 	}
 
 	/** Move steering live steering took out of the queue-delivery records into {@link #liveSteered}. */
@@ -1187,6 +1197,9 @@ export class Agent {
 			for (const message of [...pending, ...delivery.additional]) suppress(message, delivery.controller);
 		}
 		this.#queuedMessageDeliveries.clear();
+		if (withdrawn.steering.length > 0 || withdrawn.followUp.length > 0) {
+			this.queuedMessageGate?.release([...withdrawn.steering, ...withdrawn.followUp]);
+		}
 		if (hadLiveSteered) this.#emitQueueChanged();
 		return withdrawn;
 	}
@@ -1563,15 +1576,50 @@ export class Agent {
 		return queue.slice(0, count);
 	}
 
+	/**
+	 * The next delivery batch of `queue`. With a {@link queuedMessageGate}, the
+	 * gate sees each candidate batch first; what it vetoes leaves the queue and
+	 * the batch is recomputed, and candidates it claimed that the final batch no
+	 * longer holds are released again.
+	 */
+	#nextDeliveryBatch(queue: QueuedMessageQueue): AgentMessage[] {
+		const mode = queue === "steering" ? this.#steeringMode : this.#followUpMode;
+		let batch = this.#dequeueMessages(queue === "steering" ? this.#steeringQueue : this.#followUpQueue, mode);
+		const gate = this.queuedMessageGate;
+		if (!gate || batch.length === 0) return batch;
+		let claimedEarlier: AgentMessage[] | undefined;
+		let dropped = false;
+		while (batch.length > 0) {
+			const veto = gate.claim(queue, batch);
+			if (veto.length === 0) break;
+			const drop = new Set(veto);
+			const pending = queue === "steering" ? this.#steeringQueue : this.#followUpQueue;
+			const kept = pending.filter(message => !drop.has(message));
+			if (kept.length === pending.length) break;
+			for (const message of batch) if (!drop.has(message)) (claimedEarlier ??= []).push(message);
+			if (queue === "steering") this.#steeringQueue = kept;
+			else this.#followUpQueue = kept;
+			dropped = true;
+			batch = this.#dequeueMessages(kept, mode);
+		}
+		if (claimedEarlier) {
+			const final = new Set(batch);
+			const stale = claimedEarlier.filter(message => !final.has(message));
+			if (stale.length > 0) gate.release(stale);
+		}
+		if (dropped && batch.length === 0) this.#emitQueueChanged();
+		return batch;
+	}
+
 	#dequeueSteeringMessages(): AgentMessage[] {
-		const messages = this.#dequeueMessages(this.#steeringQueue, this.#steeringMode);
+		const messages = this.#nextDeliveryBatch("steering");
 		this.#steeringQueue = this.#steeringQueue.slice(messages.length);
 		if (messages.length > 0) this.#emitQueueChanged();
 		return messages;
 	}
 
 	#dequeueFollowUpMessages(): AgentMessage[] {
-		const messages = this.#dequeueMessages(this.#followUpQueue, this.#followUpMode);
+		const messages = this.#nextDeliveryBatch("followUp");
 		this.#followUpQueue = this.#followUpQueue.slice(messages.length);
 		if (messages.length > 0) this.#emitQueueChanged();
 		return messages;

@@ -666,3 +666,83 @@ describe("queued message preparation", () => {
 		expect(ends[1]).toContain(first);
 	});
 });
+
+describe("queued message gate", () => {
+	it("drops the candidates it vetoes and delivers the recomputed batch", async () => {
+		const mock = createMockModel({ handler: { content: ["done"] } });
+		const agent = new Agent({ streamFn: mock.stream, initialState: { model: mock.model } });
+		agent.replaceMessages([createAssistantMessage([{ type: "text", text: "ready" }])]);
+		const first = createUserMessage("first");
+		const second = createUserMessage("second");
+		const candidates: AgentMessage[][] = [];
+		const released: AgentMessage[] = [];
+		agent.queuedMessageGate = {
+			claim: (queue, batch) => {
+				expect(queue).toBe("followUp");
+				candidates.push([...batch]);
+				return batch.filter(message => message === first);
+			},
+			release: messages => released.push(...messages),
+		};
+		agent.followUp(first);
+		agent.followUp(second);
+
+		await agent.continue();
+
+		expect(candidates).toEqual([[first], [second]]);
+		expect(released).toEqual([]);
+		expect(mock.calls.map(call => userTexts(call.context.messages))).toEqual([["second"]]);
+		expect(agent.hasQueuedMessages()).toBe(false);
+	});
+
+	it("releases what it claimed when the final batch no longer holds it", async () => {
+		const mock = createMockModel({ handler: { content: ["done"] } });
+		const agent = new Agent({ streamFn: mock.stream, initialState: { model: mock.model } });
+		agent.replaceMessages([createAssistantMessage([{ type: "text", text: "ready" }])]);
+		const lead = createUserMessage("lead");
+		const vetoed = createUserMessage("vetoed");
+		const tail = createUserMessage("tail");
+		// One delivery unit while `vetoed` sits between the others; `lead` and `tail` alone are separate units.
+		agent.setQueuedMessageGrouping((previous, next) => (previous === lead && next === vetoed) || previous === vetoed);
+		const released: AgentMessage[] = [];
+		agent.queuedMessageGate = {
+			claim: (_queue, batch) => batch.filter(message => message === vetoed),
+			release: messages => released.push(...messages),
+		};
+		agent.followUp(lead);
+		agent.followUp(vetoed);
+		agent.followUp(tail);
+
+		await agent.continue();
+
+		expect(released).toEqual([tail]);
+		expect(mock.calls.map(call => userTexts(call.context.messages))).toEqual([["lead"], ["lead", "tail"]]);
+	});
+
+	it("releases a claimed batch that goes back to its queue undelivered", async () => {
+		const mock = createMockModel({ handler: { content: ["done"] } });
+		const agent = new Agent({ streamFn: mock.stream, initialState: { model: mock.model } });
+		agent.replaceMessages([createAssistantMessage([{ type: "text", text: "ready" }])]);
+		const first = createUserMessage("first");
+		const released: AgentMessage[][] = [];
+		const preparing = Promise.withResolvers<void>();
+		agent.queuedMessageGate = { claim: () => [], release: messages => released.push([...messages]) };
+		agent.prepareQueuedMessages = async (_messages, signal) => {
+			preparing.resolve();
+			const { promise, resolve } = Promise.withResolvers<void>();
+			signal.addEventListener("abort", () => resolve(), { once: true });
+			await promise;
+			return undefined;
+		};
+		agent.followUp(first);
+		const running = agent.continue();
+		await preparing.promise;
+
+		expect(agent.popLastFollowUp()).toBe(first);
+		// Nothing is left to continue with once the only follow-up is taken back.
+		await expect(running).rejects.toThrow("Cannot continue");
+
+		expect(released).toEqual([[first]]);
+		expect(mock.calls).toHaveLength(0);
+	});
+});

@@ -1320,7 +1320,7 @@ describe("subagent due-by", () => {
 			await childStarted.promise;
 			await lifecycle.park("Boss");
 			const live = await lifecycle.ensureLive("Boss");
-			expect(await live.fork()).toBe(true);
+			expect(await (live as AgentSession).fork()).toBe(true);
 
 			const got = await Promise.race([
 				revived!.seen(ESCALATION).then(() => "boss model"),
@@ -1622,12 +1622,11 @@ describe("subagent due-by", () => {
 				{
 					childId: "Sibling",
 					ownerId: id,
-					toolCallId: `${id}-task`,
+					ownerAddress: worker.session.dueByDispatchAddress(`${id}-task`, false),
 					agent: "task",
 					dispatchedAt: Date.now(),
 					dueMs: REVIVAL_DUE_MS,
 					stated: true,
-					speculative: false,
 				},
 				{ settled: sibling.promise, signal: new AbortController().signal },
 			);
@@ -1705,12 +1704,11 @@ describe("subagent due-by", () => {
 				{
 					childId: "Sibling",
 					ownerId: "Boss",
-					toolCallId: "Boss-task",
+					ownerAddress: boss.session.dueByDispatchAddress("Boss-task", false),
 					agent: "task",
 					dispatchedAt: Date.now(),
 					dueMs: REVIVAL_DUE_MS,
 					stated: true,
-					speculative: false,
 				},
 				{ settled: sibling.promise, signal: new AbortController().signal },
 			);
