@@ -18,6 +18,7 @@ import { BUILTIN_LIFECYCLE_SLASH_COMMANDS } from "./builtin-lifecycle";
 import { BUILTIN_MARKETPLACE_SLASH_COMMANDS, reloadTuiPluginState } from "./builtin-marketplace";
 import { BUILTIN_MODE_SLASH_COMMANDS } from "./builtin-modes";
 import { BUILTIN_SESSION_SLASH_COMMANDS } from "./builtin-session";
+import { runAsSessionWork } from "../session/session-work";
 import { BUILTIN_SKILLS_SLASH_COMMANDS } from "./builtin-skills";
 import { parseSlashCommand } from "./helpers/parse";
 import type {
@@ -170,7 +171,7 @@ export async function executeBuiltinSlashCommand(
 	// the session's holds.
 	const { handleTui, handle } = command;
 	if (handleTui) {
-		const result = await runtime.ctx.session.runInRequestContext(() => handleTui(parsed, runtime));
+		const result = await runAsSessionWork(runtime.ctx.session, () => handleTui(parsed, runtime));
 		if (result && typeof result === "object" && "prompt" in result) return result.prompt;
 		return true;
 	}
@@ -193,7 +194,7 @@ export async function executeBuiltinSlashCommand(
 			refreshCommands: () => ctx.refreshSlashCommandState(),
 			reloadPlugins: () => reloadTuiPluginState(ctx),
 		};
-		const result = await ctx.session.runInRequestContext(() => handle(parsed, adapted));
+		const result = await runAsSessionWork(ctx.session, () => handle(parsed, adapted));
 		clearSubmittedText(runtime);
 		if (result && typeof result === "object" && "prompt" in result) return result.prompt;
 		return true;

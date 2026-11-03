@@ -489,6 +489,7 @@ import { buildSessionMetadata } from "./session-metadata";
 import { SessionProviderBoundary, type SessionProviderBoundaryHost } from "./session-provider-boundary";
 import { SessionStatsTracker, type SessionStatsTrackerHost } from "./session-stats";
 import { SessionTools, type SessionToolsHost } from "./session-tools";
+import { registerSessionWork } from "./session-work";
 import {
 	artifactsMissingNotice,
 	noteResumedSessionFork,
@@ -2294,6 +2295,7 @@ export class AgentSession implements SettingsScope {
 			this.#extensionRunner.requestContextOwner = this;
 			this.#extensionRunner.runInRequestContext = fn => this.#inLogContext(fn);
 		}
+		registerSessionWork(this, fn => this.#inLogContext(fn));
 		// A move-off changes this session's id without anyone asking. Until it was
 		// announced, the only trace an extension could see was the id differing
 		// from the one it last read, with nothing to say the predecessor is still
