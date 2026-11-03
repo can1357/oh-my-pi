@@ -780,8 +780,12 @@ function deliverRunOutput(
 	deliver: () => unknown,
 ): void {
 	const record = (err: unknown): void => {
-		// Only the first failure is reported; a later one can still be a rejected promise.
-		if (runState.consumerFailure) return observeRejection(err);
+		// Only the first failure is reported, but every one is described: describing observes the
+		// value and each field it reads, which may be or hold a rejected promise.
+		if (runState.consumerFailure) {
+			describeError(err);
+			return;
+		}
 		runState.consumerFailure = outputConsumerFailure(callback, err);
 		logger.warn("JS eval output callback failed", { callback, error: runState.consumerFailure.message });
 	};

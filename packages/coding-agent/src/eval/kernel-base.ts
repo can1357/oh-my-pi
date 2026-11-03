@@ -668,8 +668,12 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 		deliver: () => Promise<void> | void,
 	): Promise<void> {
 		const record = (err: unknown): void => {
-			// Only the first failure is reported; a later one can still be a rejected promise.
-			if (pending.consumerFailure) return observeRejection(err);
+			// Only the first failure is reported, but every one is described: describing observes the
+			// value and each field it reads, which may be or hold a rejected promise.
+			if (pending.consumerFailure) {
+				describeError(err);
+				return;
+			}
 			pending.consumerFailure = outputConsumerFailure(callback, err);
 			logger.warn(`${this.#options.languageName} execution output callback failed`, {
 				kernelId: this.id,

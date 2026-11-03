@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import * as vm from "node:vm";
 import { type } from "@oh-my-pi/omptype";
@@ -17,7 +17,20 @@ import { PythonKernel } from "@oh-my-pi/pi-coding-agent/eval/py/kernel";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import type { JsStatusEvent } from "@oh-my-pi/pi-coding-agent/eval/js/shared/types";
 import { catchRejection, settled } from "@oh-my-pi/pi-coding-agent/utils/ipc";
-import { describeError, logger, postmortem, TempDir } from "@oh-my-pi/pi-utils";
+import { describeError, getAgentDir, logger, postmortem, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
+
+// A private agent directory: the shared one's agent.db is busy under other agents' load (SQLITE_BUSY).
+let agentTemp: TempDir;
+let previousAgentDir: string;
+beforeAll(() => {
+	previousAgentDir = getAgentDir();
+	agentTemp = TempDir.createSync("@eval-consumer-failure-");
+	setAgentDir(path.join(agentTemp.path(), "agent"));
+});
+afterAll(() => {
+	setAgentDir(previousAgentDir);
+	agentTemp.removeSync();
+});
 
 type Language = "py" | "js";
 const LANGUAGES = ["py", "js"] as const;
@@ -430,6 +443,17 @@ const NATIVE_PROMISE_SHAPES: ReadonlyArray<{ label: string; make: () => Promise<
 /** Thrown values that carry a rejected native promise one plain read reaches: describing each must observe it. */
 const PROMISE_CARRYING_THROWS: ReadonlyArray<{ label: string; make: () => unknown }> = [
 	{ label: "a rejected promise", make: () => Promise.reject(new Error("the thrown promise rejected")) },
+	{
+		// Made before anything reads it: nothing but a description of the error observes it.
+		label: "an error whose message holds a rejected promise",
+		make: () => {
+			const error = new Error("unused");
+			Object.defineProperty(error, "message", {
+				value: Promise.reject(new Error("the held message promise rejected")),
+			});
+			return error;
+		},
+	},
 	{
 		label: "an error whose message getter returns a rejected promise",
 		make: () => {
@@ -852,34 +876,36 @@ describe("eval output consumer failure", () => {
 			);
 		}
 
-		it.skipIf(skipped(language))(
-			`${language}: a consumer that fails once, then throws rejected promises, leaves nothing unhandled`,
-			async () => {
-				const unhandled: unknown[] = [];
-				const onUnhandled = (reason: unknown): void => {
-					unhandled.push(reason);
-				};
-				process.on("unhandledRejection", onUnhandled);
-				try {
-					const session = makeSession(`consumer-later-promise-${language}-${crypto.randomUUID()}`);
-					const cell = await run(session, language, TWO_LINES[language], {
-						onChunk: chunk => {
-							if (printsLine(chunk, "one")) throw new Error("the first failure");
-							throw Promise.reject(new Error("a later failure's promise rejected"));
-						},
-					});
-					// Unhandled rejections are reported after the microtask queue drains.
-					await Bun.sleep(50);
-					expect(cell.exitCode).toBe(0);
-					expect(printsLine(cell.output, "two")).toBe(true);
-					expectConsumerFailure(cell, "stream", "the first failure");
-					expect(unhandled).toEqual([]);
-				} finally {
-					process.off("unhandledRejection", onUnhandled);
-				}
-			},
-			120_000,
-		);
+		for (const later of PROMISE_CARRYING_THROWS) {
+			it.skipIf(skipped(language))(
+				`${language}: a consumer that fails once, then throws ${later.label}, leaves nothing unhandled`,
+				async () => {
+					const unhandled: unknown[] = [];
+					const onUnhandled = (reason: unknown): void => {
+						unhandled.push(reason);
+					};
+					process.on("unhandledRejection", onUnhandled);
+					try {
+						const session = makeSession(`consumer-later-promise-${language}-${crypto.randomUUID()}`);
+						const cell = await run(session, language, TWO_LINES[language], {
+							onChunk: chunk => {
+								if (printsLine(chunk, "one")) throw new Error("the first failure");
+								throw later.make();
+							},
+						});
+						// Unhandled rejections are reported after the microtask queue drains.
+						await Bun.sleep(50);
+						expect(cell.exitCode).toBe(0);
+						expect(printsLine(cell.output, "two")).toBe(true);
+						expectConsumerFailure(cell, "stream", "the first failure");
+						expect(unhandled).toEqual([]);
+					} finally {
+						process.off("unhandledRejection", onUnhandled);
+					}
+				},
+				120_000,
+			);
+		}
 
 		for (const shape of PROMISE_CARRYING_THROWS) {
 			it.skipIf(skipped(language))(

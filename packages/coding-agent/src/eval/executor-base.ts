@@ -151,8 +151,12 @@ export class OutputConsumerGuard {
 	): ((value: T) => void) | undefined {
 		if (!consumer) return undefined;
 		const record = (err: unknown): void => {
-			// Only the first failure is reported; a later one can still be a rejected promise.
-			if (this.#failure) return observeRejection(err);
+			// Only the first failure is reported, but every one is described: describing observes the
+			// value and each field it reads, which may be or hold a rejected promise.
+			if (this.#failure) {
+				describeError(err);
+				return;
+			}
 			this.#failure = outputConsumerFailure(callback, err);
 			logger.warn(`${this.languageLabel} eval output consumer failed`, { callback, error: this.#failure.message });
 		};

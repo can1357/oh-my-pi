@@ -17,12 +17,27 @@
  *
  * A failing row names its seed and case; `HOSTILE_SEED=<n>` reruns one seed.
  */
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
+import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { disposeAllVmContexts } from "@oh-my-pi/pi-coding-agent/eval/js/context-manager";
 import { executeJs } from "@oh-my-pi/pi-coding-agent/eval/js/executor";
 import { disposeAllKernelSessions, executePython } from "@oh-my-pi/pi-coding-agent/eval/py/executor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { getAgentDir, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
+
+// A private agent directory: the shared one's agent.db is busy under other agents' load (SQLITE_BUSY).
+let agentTemp: TempDir;
+let previousAgentDir: string;
+beforeAll(() => {
+	previousAgentDir = getAgentDir();
+	agentTemp = TempDir.createSync("@eval-hostile-values-");
+	setAgentDir(path.join(agentTemp.path(), "agent"));
+});
+afterAll(() => {
+	setAgentDir(previousAgentDir);
+	agentTemp.removeSync();
+});
 
 const PYTHON_INTEGRATION = Bun.env.PI_PYTHON_INTEGRATION === "1";
 const SEEDS = Bun.env.HOSTILE_SEED ? [Number(Bun.env.HOSTILE_SEED)] : [1, 2, 3];
