@@ -105,7 +105,7 @@ or `--fork`.
 | `--smol <id>`                | Smol/fast model for lightweight tasks (or `PI_SMOL_MODEL`).                                                                |
 | `--slow <id>`                | Slow/reasoning model for thorough analysis (or `PI_SLOW_MODEL`).                                                           |
 | `--plan <id>`                | Plan model for architectural planning (or `PI_PLAN_MODEL`).                                                                |
-| `--model <id-or-role>` | Model or configured role to use (role: `slow` or `@slow`; fuzzy model match: `opus`, `gpt-5.2`; with a provider the id must be exact: `openai/gpt-5.2`). |
+| `--models <a,b,c>`           | Comma-separated model patterns for `Ctrl+P` cycling.                                                                       |
 | `--provider <name>`          | Provider to use (legacy; prefer `--model`).                                                                                |
 | `--api-key <key>`            | API key (defaults to env vars).                                                                                            |
 | `--provider-session-id <id>` | Reuse a specific provider-side session id for continuity and cache scoping.                                                |
