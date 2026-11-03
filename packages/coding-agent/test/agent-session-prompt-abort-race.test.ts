@@ -203,7 +203,8 @@ describe("AgentSession prompt admission racing abort", () => {
 			},
 			() => ({ content: ["steered"] }),
 		]);
-		// Hold abort() at its last await, after the turn it interrupts is idle but before it resets the bracket.
+		// Hold abort() at its goal notifications: after its state cleanup (so new work may start) but
+		// before abort() returns.
 		const atAbortEnd = Promise.withResolvers<void>();
 		const releaseAbort = Promise.withResolvers<void>();
 		restores.push(() => {
@@ -212,9 +213,12 @@ describe("AgentSession prompt admission racing abort", () => {
 		});
 		const onTaskAborted = session.goalRuntime.onTaskAborted.bind(session.goalRuntime);
 		session.goalRuntime.onTaskAborted = async (...args) => {
-			await onTaskAborted(...args);
-			atAbortEnd.resolve();
-			await releaseAbort.promise;
+			const sendNotifications = await onTaskAborted(...args);
+			return async () => {
+				atAbortEnd.resolve();
+				await releaseAbort.promise;
+				await sendNotifications();
+			};
 		};
 		// A steer that lands as the turn ends, after the agent loop's last look at its queue.
 		const steered = Promise.withResolvers<void>();
