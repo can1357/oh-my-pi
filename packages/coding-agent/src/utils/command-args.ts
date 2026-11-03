@@ -2,9 +2,9 @@
  * Split command arguments on spaces/tabs.
  *
  * Default mode treats prose apostrophes literally: a `'`/`"` only delimits when it starts an
- * argument and a matching quote ends one (`rename "foo bar" now` → `rename`, `foo bar`, `now`;
- * `don't stop` → `don't`, `stop`). `strict` applies shell-style quoting and escapes instead and
- * throws on an unterminated quote or trailing backslash.
+ * argument or follows an option `=`, and a matching quote ends one (`--model="model selector"`
+ * stays one argument; `don't stop` splits into `don't`, `stop`). `strict` applies shell-style
+ * quoting and escapes instead and throws on an unterminated quote or trailing backslash.
  */
 export function parseCommandArgs(argsString: string, options?: { strict?: boolean }): string[] {
 	const args: string[] = [];
@@ -33,7 +33,7 @@ export function parseCommandArgs(argsString: string, options?: { strict?: boolea
 		} else if ((char === '"' || char === "'") && options?.strict) {
 			inQuote = char;
 			started = true;
-		} else if ((char === '"' || char === "'") && !started) {
+		} else if ((char === '"' || char === "'") && (!started || current.endsWith("="))) {
 			const close = findClosingQuote(argsString, i);
 			current += close === -1 ? char : argsString.slice(i + 1, close);
 			started = true;

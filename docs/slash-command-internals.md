@@ -240,7 +240,7 @@ This is why built-ins reserve their names before file commands are considered, s
 
 The parser is simple quote-aware splitting:
 
-- supports `'single'` and `"double"` quoting to keep spaces; a quote delimits only when it starts an argument and a matching quote ends one (followed by a space, tab, or end of input)
+- supports `'single'` and `"double"` quoting to keep spaces; a quote delimits when it starts an argument or follows an option `=`, and a matching quote ends one (followed by a space, tab, or end of input)
 - strips quote delimiters; other quote characters, such as apostrophes in `user's` or `don't`, stay literal
 - does not implement backslash escaping rules
 - a leading quote with no matching closing quote is literal, not an error

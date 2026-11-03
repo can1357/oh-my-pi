@@ -159,6 +159,18 @@ describe("parseCommandArgs", () => {
 		expect(parseCommandArgs("don't break it")).toEqual(["don't", "break", "it"]);
 	});
 
+	test("should preserve quoted option values without merging prose apostrophes", () => {
+		expect(parseCommandArgs('demo -- tool --config="path with spaces"')).toEqual([
+			"demo",
+			"--",
+			"tool",
+			"--config=path with spaces",
+		]);
+		expect(parseCommandArgs('--model="model selector"')).toEqual(["--model=model selector"]);
+		expect(parseCommandArgs("--config='path with spaces'")).toEqual(["--config=path with spaces"]);
+		expect(parseCommandArgs("the user's login bug")).toEqual(["the", "user's", "login", "bug"]);
+	});
+
 	test("should keep a leading quote literal when no matching quote ends an argument", () => {
 		expect(parseCommandArgs("'tis the season")).toEqual(["'tis", "the", "season"]);
 		expect(parseCommandArgs('say "hi there')).toEqual(["say", '"hi', "there"]);
