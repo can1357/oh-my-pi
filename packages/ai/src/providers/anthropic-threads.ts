@@ -46,6 +46,13 @@ const THREAD_REUSE_WINDOW_MS = 270_000;
 const MAX_REFUSED_CONTINUES = 2;
 
 /**
+ * Chains kept per endpoint and model, least recently used evicted first. Side
+ * requests mint one-shot session ids (speculative compaction, side questions)
+ * that are never released, and each chain pins a whole conversation.
+ */
+const MAX_THREAD_CHAINS = 16;
+
+/**
  * Error text of thread 400s that carry no `error_code` (a continue without
  * `previous_message_id`, one that resends `system` or `tools`).
  */
@@ -125,13 +132,17 @@ export function wantsAnthropicThreads(
 	);
 }
 
-/** The chain for `sessionId`, created on first use. */
+/** The chain for `sessionId`, created on first use and marked most recently used. */
 export function anthropicThreadChain(chains: AnthropicThreadChains, sessionId: string): AnthropicThreadChain {
 	let chain = chains.get(sessionId);
-	if (!chain) {
+	if (chain) {
+		chains.delete(sessionId);
+	} else {
 		chain = { refusedContinues: 0, disabled: false };
-		chains.set(sessionId, chain);
+		const oldest = chains.size >= MAX_THREAD_CHAINS ? chains.keys().next() : undefined;
+		if (oldest && !oldest.done) chains.delete(oldest.value);
 	}
+	chains.set(sessionId, chain);
 	return chain;
 }
 
