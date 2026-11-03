@@ -169,6 +169,7 @@ describe("read URL answered by a bot wall", () => {
 <!-- <input type="hidden" name="js_challenge"> -->
 <script>const sample = '<input type="hidden" name="js_challenge">';</script>
 <textarea><input type="hidden" name="js_challenge"></textarea>
+<xmp><input type="hidden" name="js_challenge"></xmp>
 </article></body></html>`;
 		const result = await read(
 			() => new Response(article, { headers: { "content-type": "text/html" } }),
