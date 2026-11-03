@@ -405,6 +405,12 @@ models. A materialization-policy stamp includes the application version, builder
 compiled-rule hash; incompatible rows are invalidated. Request-header values are never persisted
 and must be restored from trusted local metadata or configuration.
 
+Discovered rows keep the endpoint they were fetched from as their `baseUrl`, so a built-in
+provider's cache namespace is scoped to its configured endpoint (a runtime provider override, then
+a models.yml `baseUrl`). A roster discovered through one endpoint is never served for another:
+removing or changing a provider's `baseUrl` reads a different namespace, and its requests go to
+the newly configured endpoint (with no `baseUrl`, the built-in one) at once.
+
 `static_fingerprint` hashes the current static slice and merge policy. It is recomputed from the
 array's current contents, not stored on the array. When a fresh authoritative cache matches and no
 headers remain unresolved, `resolveProviderModels` can skip the full merge. Additive shared-catalog
