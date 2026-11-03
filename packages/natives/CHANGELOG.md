@@ -380,6 +380,7 @@
 - An unanswered Wayland RemoteDesktop permission dialog now fails input with `Timeout` before the run deadline, sending nothing ([#17932](https://github.com/can1357/oh-my-pi/pull/17932) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed X11 takeover input stopping with `Cancelled` after you typed locally; Escape now stops computer use for the rest of the turn ([#17912](https://github.com/can1357/oh-my-pi/pull/17912) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed X11 background `el.type`/`el.press` raising the window and taking your keyboard; elements without GTK 3 focus now use takeover ([#17921](https://github.com/can1357/oh-my-pi/pull/17921) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed `bun run` failing with `EBADF: Bad file descriptor` in embedded-shell and PTY tool calls ([#15632](https://github.com/can1357/oh-my-pi/pull/15632) by [@Komzpa](https://github.com/Komzpa))
 
 ## [18.16.0] - 2026-11-02
 
@@ -708,7 +709,6 @@
 ### Fixed
 
 - Fixed `pwsh` code blocks rendering without PowerShell syntax colors ([#15008](https://github.com/can1357/oh-my-pi/issues/15008)).
-- Fixed `bun run` failing with `EBADF: Bad file descriptor` in embedded-shell and PTY tool calls ([#15632](https://github.com/can1357/oh-my-pi/pull/15632) by [@Komzpa](https://github.com/Komzpa))
 
 ## [18.10.2] - 2026-10-12
 
