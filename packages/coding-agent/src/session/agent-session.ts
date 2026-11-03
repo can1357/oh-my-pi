@@ -1085,6 +1085,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * command.
 	 */
 	readonly #queuedMessageRawText = new WeakMap<AgentMessage, string>();
+	/** Request batches in which delivered user input selected ultrathink. */
+	readonly #ultrathinkDeliveryBatches = new WeakSet<object>();
 
 	// Event subscription state
 	#unsubscribeAgent?: () => void;
@@ -9303,11 +9305,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const first = userMessages[0];
 		if (!first) return undefined;
 		const text: string[] = [];
+		const thinkingText: string[] = [];
 		const images: ImageContent[] = [];
 		for (const message of userMessages) {
 			if (!("content" in message)) continue;
+			const isThinkingTurn =
+				message.role === "user" ? !message.synthetic : message.role === "custom" && isUserTurnInitiator(message);
 			if (typeof message.content === "string") {
 				text.push(message.content);
+				if (isThinkingTurn) thinkingText.push(message.content);
 				continue;
 			}
 			const parts: string[] = [];
@@ -9315,29 +9321,49 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				if (part.type === "text") parts.push(part.text);
 				else if (part.type === "image") images.push(part);
 			}
-			text.push(parts.join(""));
+			const messageText = parts.join("");
+			text.push(messageText);
+			if (isThinkingTurn) thinkingText.push(messageText);
 		}
 		const promptText = text.join("\n\n");
 		const preparationImages = images.length > 0 ? images : undefined;
+		const generation = this.#promptGeneration;
 		// Steering amends the running task; only a follow-up starts a new one worth routing.
 		const preparation =
 			queue === "followUp" && userMessages.some(message => this.#isUserTask(message))
 				? this.#prepareQueuedUserTask(first, promptText, preparationImages, signal)
-				: this.#prepareAgentStart(first, promptText, preparationImages, this.#promptGeneration, signal, "queued");
-		return this.#relaxOnDelivery(preparation, promptText);
+				: this.#prepareAgentStart(first, promptText, preparationImages, generation, signal, "queued");
+		return this.#prepareQueuedAutoThinking(preparation, promptText, thinkingText.join("\n\n"), generation, signal, queue);
 	};
 
-	/** Apply `chillax` when the batch is delivered, so a steer relaxes the running turn from its next request. */
-	async #relaxOnDelivery(
-		pending: Promise<QueuedMessagePreparation>,
+	/** Stage queued thinking after policy and any prewalk model handoff, then commit on delivery. */
+	async #prepareQueuedAutoThinking(
+		preparation: Promise<QueuedMessagePreparation>,
 		promptText: string,
+		thinkingText: string,
+		generation: number,
+		signal: AbortSignal,
+		queue: QueuedMessageQueue,
 	): Promise<QueuedMessagePreparation> {
-		const preparation = await pending;
+		const prepared = await preparation;
+		// Steering keeps the active task's effort unless it explicitly requests ultrathink.
+		const forceUltrathink = this.#magicKeywordEnabled("ultrathink") && containsMagicKeyword(thinkingText, "ultrathink");
+		const commitThinking = thinkingText
+			? await this.#models.prepareAutoThinkingLevel(
+					thinkingText,
+					generation,
+					undefined,
+					signal,
+					queue === "steering" ? "ultrathink-only" : "classify",
+				)
+			: undefined;
 		return {
-			commit: () => {
-				const additional = preparation.commit();
-				if (additional !== undefined) this.#models.applyChillax(promptText);
-				return additional;
+			commit: () => prepared.commit(),
+			onDelivered: (deliverySignal, batch) => {
+				prepared.onDelivered?.(deliverySignal, batch);
+				if (this.#models.applyChillax(promptText) || !commitThinking) return;
+				if (!forceUltrathink && batch && this.#ultrathinkDeliveryBatches.has(batch)) return;
+				if (commitThinking(deliverySignal) && forceUltrathink && batch) this.#ultrathinkDeliveryBatches.add(batch);
 			},
 		};
 	}
@@ -9665,7 +9691,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// `chillax` settles the turn's effort itself, so classification is skipped.
 			const relaxed = isUserTurn && this.#models.applyChillax(expandedText);
 			if (this.isAutoThinking && isUserTurn && !relaxed) {
-				await this.#models.applyAutoThinkingLevel(expandedText, generation, options?.solutionSpace);
+				await this.#models.applyAutoThinkingLevel(
+					expandedText,
+					generation,
+					options?.solutionSpace,
+					setupAbort.signal,
+				);
 				if (this.#promptGeneration !== generation) {
 					return false;
 				}

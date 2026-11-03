@@ -176,6 +176,8 @@ export class ModelControls {
 	readonly #thinkingLevelCeiling: Effort | undefined;
 	#autoThinking = false;
 	#autoResolvedLevel: Effort | undefined;
+	/** Invalidates pending classifications when the configured selection is changed or restored. */
+	#thinkingSelectionVersion = 0;
 	#serviceTierByFamily: ServiceTierByFamily;
 
 	constructor(
@@ -262,6 +264,7 @@ export class ModelControls {
 
 	/** Restores thinking state from a transcript without persisting a new entry. */
 	restoreThinkingLevel(level: ConfiguredThinkingLevel | undefined): void {
+		this.#thinkingSelectionVersion++;
 		this.#autoThinking = level === AUTO_THINKING;
 		this.#autoResolvedLevel = undefined;
 		this.#thinkingLevel =
@@ -280,6 +283,7 @@ export class ModelControls {
 
 	/** Restores an exact thinking snapshot after a failed session switch. */
 	restoreThinkingSnapshot(level: ThinkingLevel | undefined, auto: boolean, resolved: Effort | undefined): void {
+		this.#thinkingSelectionVersion++;
 		this.#thinkingLevel = level;
 		this.#autoThinking = auto;
 		this.#autoResolvedLevel = resolved;
@@ -557,6 +561,7 @@ export class ModelControls {
 	 * user turn. Later classifications persist only changed concrete resolutions.
 	 */
 	setThinkingLevel(level: ConfiguredThinkingLevel | undefined, persist: boolean = false): void {
+		this.#thinkingSelectionVersion++;
 		if (level === AUTO_THINKING) {
 			const provisional = clampThinkingLevelToCeiling(
 				this.#model,
@@ -656,15 +661,34 @@ export class ModelControls {
 	/** Timeout (ms) for per-turn auto-thinking classification before falling back. */
 	static readonly #AUTO_THINKING_TIMEOUT_MS = 4000;
 
+	/** Resolve and apply automatic thinking for a direct user turn. */
+	async applyAutoThinkingLevel(
+		promptText: string,
+		generation: number,
+		solutionSpace?: string,
+		signal?: AbortSignal,
+	): Promise<void> {
+		const commit = await this.prepareAutoThinkingLevel(promptText, generation, solutionSpace, signal);
+		commit?.(signal);
+	}
+
 	/**
-	 * Classify the current user turn and set the effective thinking level for it.
-	 * `solutionSpace` is a delegator's open-endedness description (task-spawned turns
-	 * only); when non-blank it is classified instead of `promptText`.
-	 * Bounded by a timeout + abort; on failure it preserves the last classified
-	 * level, or uses the provisional concrete level before the first resolution.
-	 * Never throws into the turn, and never clears `#autoThinking`.
+	 * Resolve automatic thinking without changing the active effort. The returned
+	 * synchronous commit applies it only while the selection, model and turn remain current.
+	 * Failed classification falls back to the last resolution or provisional level.
+	 * Ultrathink-only preparation leaves ordinary steering at its current effort.
+	 * The preparation signal cancels classification; the commit checks the delivery signal.
+	 * The commit returns false when the resolution is stale or no effort is available.
 	 */
-	async applyAutoThinkingLevel(promptText: string, generation: number, solutionSpace?: string): Promise<void> {
+	async prepareAutoThinkingLevel(
+		promptText: string,
+		generation: number,
+		solutionSpace?: string,
+		signal?: AbortSignal,
+		mode: "classify" | "ultrathink-only" = "classify",
+	): Promise<((deliverySignal?: AbortSignal) => boolean) | undefined> {
+		if (!this.#autoThinking || this.#host.promptGeneration() !== generation || signal?.aborted) return undefined;
+		const selectionVersion = this.#thinkingSelectionVersion;
 		const model = this.#model;
 		if (!model?.reasoning || model.thinking?.unverified) return;
 		// Models with reasoning but no controllable effort surface (devin-agent
@@ -672,8 +696,11 @@ export class ModelControls {
 		// nothing to pick — skip classification rather than discard its result.
 		if (getSupportedEfforts(model).length === 0) return;
 
+		const forceUltrathink =
+			this.#host.magicKeywordEnabled("ultrathink") && containsMagicKeyword(promptText, "ultrathink");
+		if (!forceUltrathink && mode === "ultrathink-only") return;
 		let resolved: Effort | undefined;
-		if (this.#host.magicKeywordEnabled("ultrathink") && containsMagicKeyword(promptText, "ultrathink")) {
+		if (forceUltrathink) {
 			// The user explicitly asked for maximum thinking; bypass the classifier
 			// (and the `providers.autoThinkingMaxEffort` ceiling) and jump straight
 			// to the highest supported level for this model.
@@ -693,7 +720,7 @@ export class ModelControls {
 						registry: this.#host.modelRegistry,
 						model,
 						sessionId: this.#host.sessionId(),
-						signal: controller.signal,
+						signal: signal ? AbortSignal.any([signal, controller.signal]) : controller.signal,
 						metadataResolver: provider => this.#host.agent.metadataForProvider(provider),
 						onUsage: usage => {
 							const entryId = this.#host.sessionManager.appendModelUsage(usage, usageOwner);
@@ -711,16 +738,26 @@ export class ModelControls {
 			}
 		}
 
-		// Drop the result if the turn was aborted/superseded while classifying.
-		if (this.#host.promptGeneration() !== generation || !this.#autoThinking) return;
+		return deliverySignal => {
+			if (
+				deliverySignal?.aborted ||
+				this.#host.promptGeneration() !== generation ||
+				!this.#autoThinking ||
+				this.#thinkingSelectionVersion !== selectionVersion ||
+				this.#model !== model
+			) {
+				return false;
+			}
 
-		const effort = clampThinkingLevelToCeiling(
-			model,
-			resolved ?? this.#autoResolvedLevel ?? resolveProvisionalAutoLevel(model),
-			this.#thinkingLevelCeiling,
-		);
-		if (effort === undefined) return;
-		this.#resolveAutoThinkingLevel(effort);
+			const effort = clampThinkingLevelToCeiling(
+				model,
+				resolved ?? this.#autoResolvedLevel ?? resolveProvisionalAutoLevel(model),
+				this.#thinkingLevelCeiling,
+			);
+			if (effort === undefined) return false;
+			this.#resolveAutoThinkingLevel(effort);
+			return true;
+		};
 	}
 
 	/**

@@ -1,6 +1,9 @@
 import { describe, expect, it } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, AgentBusyError, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
+import { agentLoop, INPUT_DELIVERY_ACK, type InputDeliveryAck } from "@oh-my-pi/pi-agent-core/agent-loop";
+import type { AgentContext, AgentEvent, AgentLoopConfig } from "@oh-my-pi/pi-agent-core/types";
+import type { Message } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { createAssistantMessage, createUserMessage } from "./helpers";
 
@@ -35,7 +38,163 @@ function trackQueueViews(agent: Agent): { views: QueueView[]; latest: () => Queu
 	return { views, latest: () => views.at(-1) };
 }
 
+function createDeliveryBarrierFixture(options?: {
+	signal?: AbortSignal;
+	deadline?: number;
+	additionalPrompt?: AgentMessage;
+}) {
+	const mock = createMockModel({ handler: { content: ["done"] } });
+	const prompt = createUserMessage("queued input");
+	const context: AgentContext = { systemPrompt: ["Test"], messages: [], tools: [] };
+	const config: AgentLoopConfig = {
+		model: mock.model,
+		convertToLlm: messages =>
+			messages.filter(
+				message => message.role === "user" || message.role === "assistant" || message.role === "toolResult",
+			) as Message[],
+		hasPendingQueuedDeliveryCallbacks: messages => messages.includes(prompt),
+		deadline: options?.deadline,
+	};
+	const prompts = options?.additionalPrompt ? [prompt, options.additionalPrompt] : [prompt];
+	return { mock, prompt, stream: agentLoop(prompts, context, config, options?.signal, mock.stream) };
+}
+
 describe("queued message preparation", () => {
+	it("waits for queued input delivery before making a normal model request", async () => {
+		const { mock, prompt, stream } = createDeliveryBarrierFixture();
+		let acknowledged = false;
+		const events: AgentEvent[] = [];
+		for await (const event of stream) {
+			events.push(event);
+			if (event.type !== "message_end" || event.message !== prompt) continue;
+			const ack = (event as AgentEvent & { [INPUT_DELIVERY_ACK]?: InputDeliveryAck })[INPUT_DELIVERY_ACK];
+			expect(ack).toBeDefined();
+			try {
+				const tick = Promise.withResolvers<void>();
+				setImmediate(tick.resolve);
+				await tick.promise;
+				expect(mock.calls).toHaveLength(0);
+			} finally {
+				ack!.done();
+			}
+			acknowledged = true;
+		}
+
+		const messages = await stream.result();
+		expect(acknowledged).toBe(true);
+		expect(mock.calls).toHaveLength(1);
+		expect(messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
+		expect(events.some(event => event.type === "agent_end")).toBe(true);
+	});
+
+	it("waits for both queued input acknowledgments before making a model request", async () => {
+		const second = createUserMessage("second queued input");
+		const { mock, prompt, stream } = createDeliveryBarrierFixture({ additionalPrompt: second });
+		let firstAcknowledged = false;
+		let secondAcknowledged = false;
+		for await (const event of stream) {
+			if (event.type !== "message_end" || (event.message !== prompt && event.message !== second)) continue;
+			const ack = (event as AgentEvent & { [INPUT_DELIVERY_ACK]?: InputDeliveryAck })[INPUT_DELIVERY_ACK];
+			expect(ack).toBeDefined();
+			if (event.message === prompt) {
+				ack!.done();
+				firstAcknowledged = true;
+				continue;
+			}
+			try {
+				expect(firstAcknowledged).toBe(true);
+				const tick = Promise.withResolvers<void>();
+				setImmediate(tick.resolve);
+				await tick.promise;
+				expect(mock.calls).toHaveLength(0);
+			} finally {
+				ack!.done();
+			}
+			secondAcknowledged = true;
+		}
+
+		const messages = await stream.result();
+		expect(firstAcknowledged).toBe(true);
+		expect(secondAcknowledged).toBe(true);
+		expect(mock.calls).toHaveLength(1);
+		expect(userTexts(mock.calls[0].context.messages)).toEqual(["queued input", "second queued input"]);
+		expect(messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
+	});
+
+	it.each(["abort", "deadline"] as const)(
+		"uses normal aborted response handling when %s interrupts input delivery",
+		async kind => {
+			const controller = new AbortController();
+			const { prompt, stream } = createDeliveryBarrierFixture({
+				signal: controller.signal,
+				deadline: kind === "deadline" ? Date.now() + 1_000 : undefined,
+			});
+			const events: AgentEvent[] = [];
+			let deliverySignal: AbortSignal | undefined;
+			let barrierReached = false;
+			for await (const event of stream) {
+				events.push(event);
+				if (event.type !== "message_end" || event.message !== prompt) continue;
+				const ack = (event as AgentEvent & { [INPUT_DELIVERY_ACK]?: InputDeliveryAck })[INPUT_DELIVERY_ACK];
+				expect(ack).toBeDefined();
+				deliverySignal = ack!.signal;
+				barrierReached = true;
+				if (kind === "abort") controller.abort(new DOMException("interrupted", "AbortError"));
+			}
+
+			const messages = await stream.result();
+			expect(barrierReached).toBe(true);
+			if (!deliverySignal) throw new Error("Expected delivery signal");
+			expect(deliverySignal.aborted).toBe(true);
+			expect((deliverySignal.reason as DOMException).name).toBe(kind === "abort" ? "AbortError" : "TimeoutError");
+			expect(messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "aborted" });
+			expect(
+				events.some(
+					event =>
+						event.type === "turn_end" &&
+						event.message.role === "assistant" &&
+						event.message.stopReason === "aborted",
+				),
+			).toBe(true);
+			expect(events.some(event => event.type === "agent_end")).toBe(true);
+			expect(
+				events.some(
+					event =>
+						event.type === "message_end" &&
+						event.message.role === "assistant" &&
+						event.message.stopReason === "error",
+				),
+			).toBe(false);
+		},
+	);
+
+	it("propagates a queued input-delivery callback failure", async () => {
+		const { mock, prompt, stream } = createDeliveryBarrierFixture();
+		const failure = new Error("delivery callback failed");
+		let barrierReached = false;
+		const result = stream.result().then(
+			() => undefined,
+			error => error,
+		);
+		const consume = (async () => {
+			for await (const event of stream) {
+				if (event.type !== "message_end" || event.message !== prompt) continue;
+				const ack = (event as AgentEvent & { [INPUT_DELIVERY_ACK]?: InputDeliveryAck })[INPUT_DELIVERY_ACK];
+				expect(ack).toBeDefined();
+				barrierReached = true;
+				ack!.fail(failure);
+			}
+		})().then(
+			() => undefined,
+			error => error,
+		);
+
+		expect(await consume).toBe(failure);
+		expect(await result).toBe(failure);
+		expect(barrierReached).toBe(true);
+		expect(mock.calls).toHaveLength(0);
+	});
+
 	it("prepares a fresh opening steering batch after independent gates and appends context exactly once", async () => {
 		const mock = createMockModel({ handler: { content: ["done"] } });
 		const agent = new Agent({ streamFn: mock.stream, initialState: { model: mock.model }, steeringMode: "all" });

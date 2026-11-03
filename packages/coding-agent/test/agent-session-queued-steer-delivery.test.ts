@@ -11,14 +11,17 @@
  *     post-prompt recovery, but the loop is already done) must be drained when
  *     the session settles.
  */
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
+import { Effort } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockHandler, type MockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import * as autoPrewalkClassifier from "@oh-my-pi/pi-coding-agent/auto-prewalk/classifier";
+import * as autoThinkingClassifier from "@oh-my-pi/pi-coding-agent/auto-thinking/classifier";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import type { PromptTemplate } from "@oh-my-pi/pi-coding-agent/config/prompt-templates";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -29,7 +32,9 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm, type CustomMessage, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { cfgPrewalkAuto } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { tagImageAttachmentSource } from "@oh-my-pi/pi-tui/prompt/image-source";
+import { AUTO_THINKING, resolveProvisionalAutoLevel } from "@oh-my-pi/pi-tui/thinking";
 import { removeSyncWithRetries, Snowflake, withTimeout } from "@oh-my-pi/pi-utils";
 import manualContinuePrompt from "../src/prompts/system/manual-continue.md" with { type: "text" };
 import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
@@ -74,6 +79,7 @@ describe("AgentSession queued steer delivery", () => {
 	});
 
 	afterEach(async () => {
+		vi.restoreAllMocks();
 		await session?.dispose();
 		removeSyncWithRetries(tempDir);
 	});
@@ -86,8 +92,10 @@ describe("AgentSession queued steer delivery", () => {
 	async function createSession(
 		responses: MockHandler[],
 		promptTemplates: PromptTemplate[] = [],
+		modelId = "claude-sonnet-4-5",
+		thinkingLevelCeiling?: Effort,
 	): Promise<SteerHarness> {
-		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const model = getBundledModel("anthropic", modelId)!;
 		const mock = createMockModel({ responses });
 		const agent = new Agent({
 			getApiKey: () => "test-key",
@@ -98,21 +106,115 @@ describe("AgentSession queued steer delivery", () => {
 		const sessionManager = SessionManager.inMemory();
 		const settings = Settings.isolated({ "compaction.enabled": false });
 
-		session = new AgentSession({ agent, sessionManager, settings, modelRegistry, promptTemplates });
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings,
+			modelRegistry,
+			promptTemplates,
+			thinkingLevelCeiling,
+		});
 		return { session, sessionManager, mock };
 	}
 
-	function steerCollabPrompt(target: AgentSession, text: string): Promise<boolean> {
+	function queueCollabPrompt(
+		target: AgentSession,
+		text: string,
+		streamingBehavior: "steer" | "followUp" = "steer",
+		attribution: "user" | "agent" = "user",
+	): Promise<boolean> {
 		return target.promptCustomMessage(
 			{
 				customType: COLLAB_PROMPT_TYPE,
 				content: text,
 				display: true,
 				details: { from: "guest" },
-				attribution: "user",
+				attribution,
 			},
-			{ streamingBehavior: "steer" },
+			{ streamingBehavior },
 		);
+	}
+
+	function pauseCollabPreparation(target: AgentSession, text: string) {
+		const prepare = target.agent.prepareQueuedMessages;
+		if (!prepare) throw new Error("Expected queued message preparation");
+		const staged = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		let paused = false;
+		target.agent.prepareQueuedMessages = async (messages, signal, queue) => {
+			const preparation = await prepare(messages, signal, queue);
+			if (
+				!paused &&
+				messages.some(
+					message =>
+						message.role === "custom" && message.customType === COLLAB_PROMPT_TYPE && message.content === text,
+				)
+			) {
+				paused = true;
+				staged.resolve();
+				await release.promise;
+			}
+			return preparation;
+		};
+		return { staged: staged.promise, release: release.resolve };
+	}
+
+	function controlLiveSteering(target: AgentSession, mock: MockModel) {
+		const started = Promise.withResolvers<void>();
+		const claimed = Promise.withResolvers<void>();
+		const accepted = Promise.withResolvers<void>();
+		const allowAccept = Promise.withResolvers<void>();
+		const finish = Promise.withResolvers<void>();
+		let firstEffort: Effort | undefined;
+		let claimedMessages = "";
+		let calls = 0;
+		target.agent.streamFn = async (model, context, options) => {
+			if (calls++ > 0) return mock.stream(model, context, options);
+			const live = options?.liveSteering;
+			const signal = options?.signal;
+			if (!live || !signal) throw new Error("Expected live steering");
+			firstEffort = options?.reasoning;
+			started.resolve();
+			await live.wait(signal);
+			const claim = await live.claim(signal);
+			if (!claim) throw new Error("Expected a live steering claim");
+			claimedMessages = JSON.stringify(claim.messages);
+			claimed.resolve();
+			await allowAccept.promise;
+			claim.accept();
+			accepted.resolve();
+			await finish.promise;
+			return mock.stream(model, context, options);
+		};
+		return {
+			started: started.promise,
+			claimed: claimed.promise,
+			accepted: accepted.promise,
+			accept: allowAccept.resolve,
+			finish: finish.resolve,
+			get firstEffort() {
+				return firstEffort;
+			},
+			get claimedMessages() {
+				return claimedMessages;
+			},
+		};
+	}
+
+	async function queueLiveUltrathink(target: AgentSession, origin: "typed" | "Collab", text: string): Promise<void> {
+		if (origin === "typed") {
+			await target.steer(text);
+			return;
+		}
+		target.agent.steer({
+			role: "custom",
+			customType: COLLAB_PROMPT_TYPE,
+			content: text,
+			display: true,
+			details: { from: "guest" },
+			attribution: "user",
+			timestamp: Date.now(),
+		});
 	}
 
 	function nextUserMessage(target: AgentSession, expected: string): Promise<void> {
@@ -159,7 +261,7 @@ describe("AgentSession queued steer delivery", () => {
 			injected = true;
 			// The session is still mid-prompt here, so this takes the steer path.
 			streamingAtInject = session.isStreaming;
-			await steerCollabPrompt(session, "guest steer at yield");
+			await queueCollabPrompt(session, "guest steer at yield");
 		});
 
 		await session.prompt("hello");
@@ -168,6 +270,918 @@ describe("AgentSession queued steer delivery", () => {
 		expect(await entryAppended).toBe("guest steer at yield");
 		expect(mock.calls.length).toBe(2);
 		expect(session.agent.hasQueuedMessages()).toBe(false);
+	});
+
+	describe("queued Collab auto thinking", () => {
+		for (const { modelId, expected } of [
+			{ modelId: "claude-sonnet-4-5", expected: Effort.XHigh },
+			{ modelId: "claude-opus-4-7", expected: Effort.Max },
+		]) {
+			for (const streamingBehavior of ["steer", "followUp"] as const) {
+				it(`sends queued Collab ${streamingBehavior} ultrathink at ${expected} on ${modelId} under auto`, async () => {
+					const { session, mock } = await createSession(
+						[{ content: ["initial"] }, { content: ["guest response"] }],
+						[],
+						modelId,
+					);
+					cfgMagicKeywordsEnabled.set(session.settings, true);
+					cfgMagicKeyword.ultrathink.set(session.settings, true);
+					const classifier = vi.spyOn(autoThinkingClassifier, "classifyDifficulty").mockResolvedValue(Effort.Low);
+					session.setThinkingLevel(AUTO_THINKING);
+					session.setSteeringMode("one-at-a-time");
+					session.agent.setFollowUpMode("one-at-a-time");
+
+					const text = "guest asks to ultrathink about the problem";
+					let levelWhenQueued: string | undefined;
+					let injected = false;
+					session.agent.setOnBeforeYield(async () => {
+						if (injected) return;
+						injected = true;
+						await queueCollabPrompt(session, text, streamingBehavior);
+						levelWhenQueued = session.thinkingLevel;
+					});
+
+					await session.prompt("initial request");
+					await session.waitForIdle();
+
+					expect(levelWhenQueued).toBe(Effort.Low);
+					expect(mock.calls).toHaveLength(2);
+					expect(mock.calls[0].options?.reasoning).toBe(Effort.Low);
+					expect(JSON.stringify(mock.calls[1].context.messages)).toContain(text);
+					expect(mock.calls[1].options?.reasoning).toBe(expected);
+					expect(session.configuredThinkingLevel()).toBe(AUTO_THINKING);
+					expect(session.autoResolvedThinkingLevel()).toBe(expected);
+					expect(classifier).toHaveBeenCalledTimes(1);
+				});
+			}
+		}
+
+		for (const origin of ["typed", "Collab"] as const) {
+			it(`applies an accepted live ${origin} ultrathink to the next model request`, async () => {
+				const { session, mock } = await createSession([{ content: ["initial"] }, { content: ["steered"] }]);
+				cfgMagicKeywordsEnabled.set(session.settings, true);
+				cfgMagicKeyword.ultrathink.set(session.settings, true);
+				const classifier = vi.spyOn(autoThinkingClassifier, "classifyDifficulty").mockResolvedValue(Effort.Low);
+				session.setThinkingLevel(AUTO_THINKING);
+				const live = controlLiveSteering(session, mock);
+				const text = "live ultrathink request";
+				const run = session.prompt("initial request");
+				try {
+					await withTimeout(live.started, 2_000, "first model request did not start");
+					expect(live.firstEffort).toBe(Effort.Low);
+					await queueLiveUltrathink(session, origin, text);
+					await withTimeout(live.claimed, 2_000, "provider did not claim the steer");
+					expect(live.claimedMessages).toContain(text);
+					expect(session.getQueuedMessages().liveSteered).toBe(1);
+					expect(session.agent.state.thinkingLevel).toBe(Effort.Low);
+					live.accept();
+					await withTimeout(live.accepted, 2_000, "provider did not accept the steer");
+					expect(live.firstEffort).toBe(Effort.Low);
+					live.finish();
+					await run;
+					await session.waitForIdle();
+
+					expect(mock.calls).toHaveLength(2);
+					expect(mock.calls[0].options?.reasoning).toBe(Effort.Low);
+					expect(mock.calls[1].options?.reasoning).toBe(Effort.XHigh);
+					expect(JSON.stringify(mock.calls[1].context.messages)).toContain(text);
+					expect(classifier).toHaveBeenCalledTimes(1);
+				} finally {
+					live.accept();
+					live.finish();
+					if (session.agent.state.isStreaming) await session.abort({ reason: USER_INTERRUPT_LABEL });
+					await run;
+				}
+			});
+
+			it(`does not retain auto effort after an aborted live ${origin} ultrathink is restored and removed`, async () => {
+				const { session, mock } = await createSession([{ content: ["initial"] }, { content: ["ordinary"] }]);
+				cfgMagicKeywordsEnabled.set(session.settings, true);
+				cfgMagicKeyword.ultrathink.set(session.settings, true);
+				const classifier = vi.spyOn(autoThinkingClassifier, "classifyDifficulty").mockResolvedValue(Effort.Low);
+				session.setThinkingLevel(AUTO_THINKING);
+				const live = controlLiveSteering(session, mock);
+				const text = "live ultrathink to remove";
+				const run = session.prompt("initial request");
+				let restored = false;
+				let removed = false;
+				let unsubscribe: (() => void) | undefined;
+				let interrupt: Promise<void> | undefined;
+				try {
+					await withTimeout(live.started, 2_000, "first model request did not start");
+					await queueLiveUltrathink(session, origin, text);
+					await withTimeout(live.claimed, 2_000, "provider did not claim the steer");
+					expect(live.firstEffort).toBe(Effort.Low);
+					expect(session.agent.state.thinkingLevel).toBe(Effort.Low);
+					live.accept();
+					await withTimeout(live.accepted, 2_000, "provider did not accept the steer");
+					unsubscribe = session.agent.onQueueChange(() => {
+						const queued = session.getQueuedMessages();
+						if (restored || queued.liveSteered !== 0 || !queued.steering.includes(text)) return;
+						restored = true;
+						removed = session.removeQueuedMessage(text, "steering");
+					});
+					interrupt = session.abort({ reason: USER_INTERRUPT_LABEL });
+					live.finish();
+					await interrupt;
+					await run;
+					await session.waitForIdle();
+
+					expect(restored).toBe(true);
+					expect(removed).toBe(true);
+					expect(session.agent.hasQueuedMessages()).toBe(false);
+					expect(session.autoResolvedThinkingLevel()).toBe(Effort.Low);
+					expect(session.agent.state.thinkingLevel).toBe(Effort.Low);
+					await session.prompt("ordinary request");
+					expect(mock.calls).toHaveLength(2);
+					expect(mock.calls[0].options?.reasoning).toBe(Effort.Low);
+					expect(mock.calls[1].options?.reasoning).toBe(Effort.Low);
+					expect(JSON.stringify(mock.calls[1].context.messages)).not.toContain(text);
+					expect(classifier).toHaveBeenCalledTimes(2);
+				} finally {
+					live.accept();
+					live.finish();
+					if (!interrupt && session.agent.state.isStreaming) {
+						interrupt = session.abort({ reason: USER_INTERRUPT_LABEL });
+					}
+					if (interrupt) await interrupt;
+					await run;
+					unsubscribe?.();
+				}
+			});
+		}
+
+		it("raises auto effort for a Collab ultrathink delivered at a tool boundary", async () => {
+			const { session, mock } = await createSession([
+				{ content: [{ type: "toolCall", id: "call-1", name: "pause", arguments: { value: "work" } }] },
+				{ content: ["steered"] },
+			]);
+			cfgMagicKeywordsEnabled.set(session.settings, true);
+			cfgMagicKeyword.ultrathink.set(session.settings, true);
+			const classifier = vi.spyOn(autoThinkingClassifier, "classifyDifficulty").mockResolvedValue(Effort.Low);
+			session.setThinkingLevel(AUTO_THINKING);
+			session.setInterruptMode("wait");
+			const started = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			const schema = type({ value: "string" });
+			const tool: AgentTool<typeof schema> = {
+				name: "pause",
+				label: "Pause",
+				description: "Wait for the queued steer",
+				parameters: schema,
+				concurrency: "exclusive",
+				interruptible: false,
+				async execute(_id, params) {
+					started.resolve();
+					await release.promise;
+					return { content: [{ type: "text", text: params.value }], details: {} };
+				},
+			};
+			session.agent.setTools([tool]);
+			const text = "guest asks to ultrathink at the tool boundary";
+			const run = session.prompt("initial request");
+			try {
+				await withTimeout(started.promise, 2_000, "tool did not start");
+				expect(mock.calls[0].options?.reasoning).toBe(Effort.Low);
+				await queueCollabPrompt(session, text);
+				expect(session.agent.state.thinkingLevel).toBe(Effort.Low);
+			} finally {
+				release.resolve();
+				await run;
+			}
+			await session.waitForIdle();
+
+			expect(mock.calls).toHaveLength(2);
+			expect(mock.calls[1].options?.reasoning).toBe(Effort.XHigh);
+			expect(JSON.stringify(mock.calls[1].context.messages)).toContain(text);
+			expect(classifier).toHaveBeenCalledTimes(1);
+		});
+
+		for (const streamingBehavior of ["steer", "followUp"] as const) {
+			it(`uses maximum auto effort for a typed queued ${streamingBehavior} ultrathink`, async () => {
+				const { session, mock } = await createSession([{ content: ["initial"] }, { content: ["typed response"] }]);
+				cfgMagicKeywordsEnabled.set(session.settings, true);
+				cfgMagicKeyword.ultrathink.set(session.settings, true);
+				const classifier = vi.spyOn(autoThinkingClassifier, "classifyDifficulty").mockResolvedValue(Effort.Low);
+				session.setThinkingLevel(AUTO_THINKING);
+				session.setSteeringMode("one-at-a-time");
+				session.agent.setFollowUpMode("one-at-a-time");
+				let injected = false;
+				session.agent.setOnBeforeYield(async () => {
+					if (injected) return;
+					injected = true;
+					await session.prompt("typed ultrathink request", { streamingBehavior });
+				});
+
+				await session.prompt("initial request");
+				await session.waitForIdle();
+
+				expect(mock.calls).toHaveLength(2);
+				expect(JSON.stringify(mock.calls[1].context.messages)).toContain("typed ultrathink request");
+				expect(mock.calls[0].options?.reasoning).toBe(Effort.Low);
+				expect(mock.calls[1].options?.reasoning).toBe(Effort.XHigh);
+				expect(classifier).toHaveBeenCalledTimes(1);
+			});
+		}
+
+		for (const origin of ["typed", "Collab"] as const) {
+			it(`keeps the current auto effort without classifying an ordinary ${origin} steer`, async () => {
+				const { session, mock } = await createSession([{ content: ["initial"] }, { content: ["steered"] }]);
+				const classifier = vi
+					.spyOn(autoThinkingClassifier, "classifyDifficulty")
+					.mockResolvedValueOnce(Effort.High)
+					.mockResolvedValue(Effort.Low);
+				session.setThinkingLevel(AUTO_THINKING);
+				let injected = false;
+				session.agent.setOnBeforeYield(async () => {
+					if (injected) return;
+					injected = true;
+					if (origin === "typed") {
+						await session.prompt("ordinary correction", { streamingBehavior: "steer" });
+					} else {
+						await queueCollabPrompt(session, "ordinary correction");
+					}
+				});
+
+				await session.prompt("initial request");
+				await session.waitForIdle();
+
+				expect(mock.calls).toHaveLength(2);
+				expect(JSON.stringify(mock.calls[1].context.messages)).toContain("ordinary correction");
+				expect(mock.calls[0].options?.reasoning).toBe(Effort.High);
+				expect(mock.calls[1].options?.reasoning).toBe(Effort.High);
+				expect(session.autoResolvedThinkingLevel()).toBe(Effort.High);
+				expect(classifier).toHaveBeenCalledTimes(1);
+			});
+		}
+
+		for (const origin of ["synthetic user", "visible non-turn custom"] as const) {
+			for (const streamingBehavior of ["steer", "followUp"] as const) {
+				it(`ignores ${origin} ultrathink in a mixed queued ${streamingBehavior} batch`, async () => {
+					const { session, mock } = await createSession([
+						{ content: ["initial"] },
+						{ content: ["queued response"] },
+					]);
+					cfgMagicKeywordsEnabled.set(session.settings, true);
+					cfgMagicKeyword.ultrathink.set(session.settings, true);
+					const classifier = vi
+						.spyOn(autoThinkingClassifier, "classifyDifficulty")
+						.mockResolvedValueOnce(Effort.High)
+						.mockResolvedValue(Effort.Low);
+					session.setThinkingLevel(AUTO_THINKING);
+					session.setSteeringMode("all");
+					session.agent.setFollowUpMode("all");
+					const ignoredText = "injected ultrathink context";
+					let injected = false;
+					session.agent.setOnBeforeYield(async () => {
+						if (injected) return;
+						injected = true;
+						if (origin === "synthetic user") {
+							const message: AgentMessage = {
+								role: "user",
+								content: ignoredText,
+								synthetic: true,
+								attribution: "user",
+								timestamp: Date.now(),
+							};
+							if (streamingBehavior === "steer") session.agent.steer(message);
+							else session.agent.followUp(message);
+						} else {
+							await session.promptCustomMessage(
+								{
+									customType: "visible-non-turn",
+									content: ignoredText,
+									display: true,
+									attribution: "user",
+								},
+								{ streamingBehavior },
+							);
+						}
+						await queueCollabPrompt(session, "ordinary guest request", streamingBehavior);
+					});
+
+					await session.prompt("initial request");
+					await session.waitForIdle();
+
+					expect(mock.calls).toHaveLength(2);
+					const delivered = JSON.stringify(mock.calls[1].context.messages);
+					expect(delivered).toContain(ignoredText);
+					expect(delivered).toContain("ordinary guest request");
+					expect(mock.calls[1].options?.reasoning).toBe(streamingBehavior === "steer" ? Effort.High : Effort.Low);
+					expect(classifier).toHaveBeenCalledTimes(streamingBehavior === "steer" ? 1 : 2);
+				});
+			}
+		}
+
+		it("uses maximum auto effort for ultrathink split across queued Collab text parts", async () => {
+			const { session, mock } = await createSession([{ content: ["initial"] }, { content: ["guest response"] }]);
+			cfgMagicKeywordsEnabled.set(session.settings, true);
+			cfgMagicKeyword.ultrathink.set(session.settings, true);
+			const classifier = vi.spyOn(autoThinkingClassifier, "classifyDifficulty").mockResolvedValue(Effort.Low);
+			session.setThinkingLevel(AUTO_THINKING);
+			let injected = false;
+			session.agent.setOnBeforeYield(async () => {
+				if (injected) return;
+				injected = true;
+				await session.promptCustomMessage(
+					{
+						customType: COLLAB_PROMPT_TYPE,
+						content: [
+							{ type: "text", text: "guest requests ultra" },
+							{ type: "text", text: "think about the fix" },
+						],
+						display: true,
+						details: { from: "guest" },
+						attribution: "user",
+					},
+					{ streamingBehavior: "steer" },
+				);
+			});
+
+			await session.prompt("initial request");
+			await session.waitForIdle();
+
+			expect(mock.calls).toHaveLength(2);
+			const delivered = JSON.stringify(mock.calls[1].context.messages);
+			expect(delivered).toContain("guest requests ultra");
+			expect(delivered).toContain("think about the fix");
+			expect(mock.calls[1].options?.reasoning).toBe(Effort.XHigh);
+			expect(classifier).toHaveBeenCalledTimes(1);
+		});
+
+		it("respects the session effort ceiling for queued Collab ultrathink", async () => {
+			const { session, mock } = await createSession(
+				[{ content: ["initial"] }, { content: ["guest response"] }],
+				[],
+				"claude-opus-4-7",
+				Effort.Medium,
+			);
+			cfgMagicKeywordsEnabled.set(session.settings, true);
+			cfgMagicKeyword.ultrathink.set(session.settings, true);
+			const classifier = vi.spyOn(autoThinkingClassifier, "classifyDifficulty").mockResolvedValue(Effort.Low);
+			session.setThinkingLevel(AUTO_THINKING);
+			let injected = false;
+			session.agent.setOnBeforeYield(async () => {
+				if (injected) return;
+				injected = true;
+				await queueCollabPrompt(session, "guest ultrathink request");
+			});
+
+			await session.prompt("initial request");
+			await session.waitForIdle();
+
+			expect(mock.calls).toHaveLength(2);
+			expect(JSON.stringify(mock.calls[1].context.messages)).toContain("guest ultrathink request");
+			expect(mock.calls[1].options?.reasoning).toBe(Effort.Medium);
+			expect(session.autoResolvedThinkingLevel()).toBe(Effort.Medium);
+			expect(classifier).toHaveBeenCalledTimes(1);
+		});
+
+		for (const level of [Effort.Low, "off"] as const) {
+			it(`keeps ${level} when queued Collab ultrathink is delivered with auto disabled`, async () => {
+				const { session, mock } = await createSession([{ content: ["initial"] }, { content: ["guest response"] }]);
+				cfgMagicKeywordsEnabled.set(session.settings, true);
+				cfgMagicKeyword.ultrathink.set(session.settings, true);
+				const classifier = vi.spyOn(autoThinkingClassifier, "classifyDifficulty").mockResolvedValue(Effort.High);
+				session.setThinkingLevel(level);
+				let injected = false;
+				session.agent.setOnBeforeYield(async () => {
+					if (injected) return;
+					injected = true;
+					await queueCollabPrompt(session, "guest ultrathink request");
+				});
+
+				await session.prompt("initial request");
+				await session.waitForIdle();
+
+				expect(mock.calls).toHaveLength(2);
+				expect(JSON.stringify(mock.calls[1].context.messages)).toContain("guest ultrathink request");
+				expect(mock.calls[1].options?.reasoning).toBe(level === "off" ? undefined : level);
+				if (level === "off") expect(mock.calls[1].options?.disableReasoning).toBe(true);
+				expect(session.configuredThinkingLevel()).toBe(level);
+				expect(classifier).not.toHaveBeenCalled();
+			});
+		}
+
+		it("does not raise auto effort for an agent-attributed Collab ultrathink", async () => {
+			const { session, mock } = await createSession([{ content: ["initial"] }, { content: ["guest response"] }]);
+			cfgMagicKeywordsEnabled.set(session.settings, true);
+			cfgMagicKeyword.ultrathink.set(session.settings, true);
+			const classifier = vi.spyOn(autoThinkingClassifier, "classifyDifficulty").mockResolvedValue(Effort.Low);
+			session.setThinkingLevel(AUTO_THINKING);
+			let injected = false;
+			session.agent.setOnBeforeYield(async () => {
+				if (injected) return;
+				injected = true;
+				await queueCollabPrompt(session, "agent ultrathink request", "steer", "agent");
+			});
+
+			await session.prompt("initial request");
+			await session.waitForIdle();
+
+			expect(mock.calls).toHaveLength(2);
+			expect(JSON.stringify(mock.calls[1].context.messages)).toContain("agent ultrathink request");
+			expect(mock.calls[1].options?.reasoning).toBe(Effort.Low);
+			expect(session.autoResolvedThinkingLevel()).toBe(Effort.Low);
+			expect(classifier).toHaveBeenCalledTimes(1);
+		});
+
+		it("ignores agent-attributed ultrathink in a mixed queued Collab batch", async () => {
+			const { session, mock } = await createSession([{ content: ["initial"] }, { content: ["guest response"] }]);
+			cfgMagicKeywordsEnabled.set(session.settings, true);
+			cfgMagicKeyword.ultrathink.set(session.settings, true);
+			const classifier = vi.spyOn(autoThinkingClassifier, "classifyDifficulty").mockResolvedValue(Effort.Low);
+			session.setThinkingLevel(AUTO_THINKING);
+			session.setSteeringMode("all");
+			let injected = false;
+			session.agent.setOnBeforeYield(async () => {
+				if (injected) return;
+				injected = true;
+				await queueCollabPrompt(session, "agent ultrathink request", "steer", "agent");
+				await queueCollabPrompt(session, "ordinary guest request");
+			});
+
+			await session.prompt("initial request");
+			await session.waitForIdle();
+
+			expect(mock.calls).toHaveLength(2);
+			const delivered = JSON.stringify(mock.calls[1].context.messages);
+			expect(delivered).toContain("agent ultrathink request");
+			expect(delivered).toContain("ordinary guest request");
+			expect(mock.calls[1].options?.reasoning).toBe(Effort.Low);
+			expect(classifier).toHaveBeenCalledTimes(1);
+		});
+
+		it("classifies queued Collab ultrathink normally when the keyword is disabled", async () => {
+			const { session, mock } = await createSession([{ content: ["initial"] }, { content: ["guest response"] }]);
+			cfgMagicKeywordsEnabled.set(session.settings, true);
+			cfgMagicKeyword.ultrathink.set(session.settings, false);
+			const classifier = vi.spyOn(autoThinkingClassifier, "classifyDifficulty").mockResolvedValue(Effort.Low);
+			session.setThinkingLevel(AUTO_THINKING);
+			let injected = false;
+			session.agent.setOnBeforeYield(async () => {
+				if (injected) return;
+				injected = true;
+				await queueCollabPrompt(session, "guest ultrathink request", "followUp");
+			});
+
+			await session.prompt("initial request");
+			await session.waitForIdle();
+
+			expect(mock.calls).toHaveLength(2);
+			expect(JSON.stringify(mock.calls[1].context.messages)).toContain("guest ultrathink request");
+			expect(mock.calls[1].options?.reasoning).toBe(Effort.Low);
+			expect(classifier).toHaveBeenCalledTimes(2);
+		});
+
+		it("does not classify a Collab ultrathink steer when the keyword is disabled", async () => {
+			const { session, mock } = await createSession([{ content: ["initial"] }, { content: ["steered"] }]);
+			cfgMagicKeywordsEnabled.set(session.settings, true);
+			cfgMagicKeyword.ultrathink.set(session.settings, false);
+			const classifier = vi
+				.spyOn(autoThinkingClassifier, "classifyDifficulty")
+				.mockResolvedValueOnce(Effort.High)
+				.mockResolvedValue(Effort.Low);
+			session.setThinkingLevel(AUTO_THINKING);
+			let injected = false;
+			session.agent.setOnBeforeYield(async () => {
+				if (injected) return;
+				injected = true;
+				await queueCollabPrompt(session, "guest ultrathink request");
+			});
+
+			await session.prompt("initial request");
+			await session.waitForIdle();
+
+			expect(mock.calls).toHaveLength(2);
+			expect(JSON.stringify(mock.calls[1].context.messages)).toContain("guest ultrathink request");
+			expect(mock.calls[1].options?.reasoning).toBe(Effort.High);
+			expect(classifier).toHaveBeenCalledTimes(1);
+		});
+
+		it("reclassifies the next queued Collab follow-up after ultrathink", async () => {
+			const { session, mock } = await createSession([
+				{ content: ["initial"] },
+				{ content: ["ultrathink response"] },
+				{ content: ["ordinary response"] },
+			]);
+			cfgMagicKeywordsEnabled.set(session.settings, true);
+			cfgMagicKeyword.ultrathink.set(session.settings, true);
+			const classifier = vi
+				.spyOn(autoThinkingClassifier, "classifyDifficulty")
+				.mockResolvedValueOnce(Effort.Low)
+				.mockResolvedValueOnce(Effort.Medium);
+			session.setThinkingLevel(AUTO_THINKING);
+			session.agent.setFollowUpMode("one-at-a-time");
+			let injected = false;
+			session.agent.setOnBeforeYield(async () => {
+				if (injected) return;
+				injected = true;
+				await queueCollabPrompt(session, "first guest asks ultrathink", "followUp");
+				await queueCollabPrompt(session, "second guest asks a routine question", "followUp");
+			});
+
+			await session.prompt("initial request");
+			await session.waitForIdle();
+
+			expect(mock.calls).toHaveLength(3);
+			expect(mock.calls[0].options?.reasoning).toBe(Effort.Low);
+			expect(mock.calls[1].options?.reasoning).toBe(Effort.XHigh);
+			expect(mock.calls[2].options?.reasoning).toBe(Effort.Medium);
+			expect(JSON.stringify(mock.calls[1].context.messages)).toContain("first guest asks ultrathink");
+			expect(JSON.stringify(mock.calls[2].context.messages)).toContain("second guest asks a routine question");
+			expect(classifier).toHaveBeenCalledTimes(2);
+		});
+
+		for (const origin of ["typed", "Collab"] as const) {
+			for (const order of ["steer first", "follow-up first"] as const) {
+				it(`keeps ${origin} ultrathink over a combined ordinary follow-up when queued ${order}`, async () => {
+					const { session, mock } = await createSession([
+						{ content: ["initial"] },
+						{ content: ["combined"] },
+						{ content: ["later"] },
+					]);
+					cfgMagicKeywordsEnabled.set(session.settings, true);
+					cfgMagicKeyword.ultrathink.set(session.settings, true);
+					const classifier = vi
+						.spyOn(autoThinkingClassifier, "classifyDifficulty")
+						.mockResolvedValueOnce(Effort.Low)
+						.mockResolvedValueOnce(Effort.Low)
+						.mockResolvedValueOnce(Effort.Medium);
+					session.setThinkingLevel(AUTO_THINKING);
+					session.setSteeringMode("one-at-a-time");
+					session.agent.setFollowUpMode("one-at-a-time");
+					const steerText = "ultrathink about the combined request";
+					const firstFollowUp = "first ordinary follow-up";
+					const laterFollowUp = "later ordinary follow-up";
+					let yields = 0;
+					session.agent.setOnBeforeYield(async () => {
+						yields++;
+						if (yields === 1) {
+							const operations: Array<"steer" | "followUp"> =
+								order === "steer first" ? ["steer", "followUp"] : ["followUp", "steer"];
+							for (const operation of operations) {
+								if (operation === "followUp") {
+									await session.prompt(firstFollowUp, { streamingBehavior: "followUp" });
+								} else if (origin === "typed") {
+									await session.prompt(steerText, { streamingBehavior: "steer" });
+								} else {
+									await queueCollabPrompt(session, steerText);
+								}
+							}
+						} else if (yields === 2) {
+							await session.prompt(laterFollowUp, { streamingBehavior: "followUp" });
+						}
+					});
+
+					await session.prompt("initial request");
+					await session.waitForIdle();
+
+					expect(mock.calls).toHaveLength(3);
+					expect(mock.calls[0].options?.reasoning).toBe(Effort.Low);
+					expect(mock.calls[1].options?.reasoning).toBe(Effort.XHigh);
+					expect(mock.calls[2].options?.reasoning).toBe(Effort.Medium);
+					const combined = JSON.stringify(mock.calls[1].context.messages);
+					expect(combined).toContain(steerText);
+					expect(combined).toContain(firstFollowUp);
+					expect(combined).not.toContain(laterFollowUp);
+					expect(JSON.stringify(mock.calls[2].context.messages)).toContain(laterFollowUp);
+					expect(classifier).toHaveBeenCalledTimes(3);
+					expect(classifier.mock.calls[1][0].request).toBe(firstFollowUp);
+					expect(classifier.mock.calls[2][0].request).toBe(laterFollowUp);
+				});
+			}
+		}
+
+		for (const origin of ["typed", "Collab"] as const) {
+			it(`retains ${origin} ultrathink across a gate-stopped combined request and resume`, async () => {
+				const { session, mock } = await createSession([{ content: ["initial"] }, { content: ["resumed"] }]);
+				cfgMagicKeywordsEnabled.set(session.settings, true);
+				cfgMagicKeyword.ultrathink.set(session.settings, true);
+				const classifier = vi.spyOn(autoThinkingClassifier, "classifyDifficulty").mockResolvedValue(Effort.Low);
+				session.setThinkingLevel(AUTO_THINKING);
+				let gateCalls = 0;
+				session.agent.setBeforeModelCall(() => {
+					if (++gateCalls === 2) return { stop: true, reason: "test gate" };
+				});
+				const steerText = "ultrathink about the gated request";
+				const followUpText = "ordinary follow-up";
+				let injected = false;
+				session.agent.setOnBeforeYield(async () => {
+					if (injected) return;
+					injected = true;
+					if (origin === "typed") {
+						await session.prompt(steerText, { streamingBehavior: "steer" });
+					} else {
+						await queueCollabPrompt(session, steerText);
+					}
+					await session.prompt(followUpText, { streamingBehavior: "followUp" });
+				});
+
+				await session.prompt("initial request");
+				await session.waitForIdle();
+
+				expect(gateCalls).toBe(2);
+				expect(mock.calls).toHaveLength(1);
+				const recorded = JSON.stringify(session.messages);
+				expect(recorded).toContain(steerText);
+				expect(recorded).toContain(followUpText);
+				expect(session.autoResolvedThinkingLevel()).toBe(Effort.XHigh);
+
+				await session.resume();
+				await session.waitForIdle();
+
+				expect(mock.calls).toHaveLength(2);
+				expect(mock.calls[1].options?.reasoning).toBe(Effort.XHigh);
+				const resumed = JSON.stringify(mock.calls[1].context.messages);
+				expect(resumed).toContain(steerText);
+				expect(resumed).toContain(followUpText);
+				expect(classifier).toHaveBeenCalledTimes(2);
+				expect(classifier.mock.calls[1][0].request).toBe(followUpText);
+			});
+		}
+
+		it("classifies a combined ordinary follow-up when Collab ultrathink is disabled", async () => {
+			const { session, mock } = await createSession([{ content: ["initial"] }, { content: ["combined"] }]);
+			cfgMagicKeywordsEnabled.set(session.settings, true);
+			cfgMagicKeyword.ultrathink.set(session.settings, false);
+			const classifier = vi
+				.spyOn(autoThinkingClassifier, "classifyDifficulty")
+				.mockResolvedValueOnce(Effort.High)
+				.mockResolvedValueOnce(Effort.Low);
+			session.setThinkingLevel(AUTO_THINKING);
+			let injected = false;
+			session.agent.setOnBeforeYield(async () => {
+				if (injected) return;
+				injected = true;
+				await queueCollabPrompt(session, "guest asks to ultrathink");
+				await session.prompt("ordinary follow-up", { streamingBehavior: "followUp" });
+			});
+
+			await session.prompt("initial request");
+			await session.waitForIdle();
+
+			expect(mock.calls).toHaveLength(2);
+			expect(mock.calls[0].options?.reasoning).toBe(Effort.High);
+			expect(mock.calls[1].options?.reasoning).toBe(Effort.Low);
+			const combined = JSON.stringify(mock.calls[1].context.messages);
+			expect(combined).toContain("guest asks to ultrathink");
+			expect(combined).toContain("ordinary follow-up");
+			expect(classifier).toHaveBeenCalledTimes(2);
+		});
+
+		it("uses maximum Collab effort for a mixed follow-up prepared with auto prewalk", async () => {
+			const { session, mock } = await createSession([{ content: ["initial"] }, { content: ["follow-up response"] }]);
+			cfgMagicKeywordsEnabled.set(session.settings, true);
+			cfgMagicKeyword.ultrathink.set(session.settings, true);
+			cfgPrewalkAuto.set(session.settings, "suggest");
+			const prewalk = vi.spyOn(autoPrewalkClassifier, "classifyAutoPrewalk").mockResolvedValue(undefined);
+			const classifier = vi.spyOn(autoThinkingClassifier, "classifyDifficulty").mockResolvedValue(Effort.Low);
+			session.setThinkingLevel(AUTO_THINKING);
+			session.agent.setFollowUpMode("all");
+			let injected = false;
+			session.agent.setOnBeforeYield(async () => {
+				if (injected) return;
+				injected = true;
+				await queueCollabPrompt(session, "guest asks to ultrathink", "followUp");
+				await session.prompt("ordinary typed follow-up", { streamingBehavior: "followUp" });
+			});
+
+			await session.prompt("initial request");
+			await session.waitForIdle();
+
+			expect(mock.calls).toHaveLength(2);
+			const delivered = JSON.stringify(mock.calls[1].context.messages);
+			expect(delivered).toContain("guest asks to ultrathink");
+			expect(delivered).toContain("ordinary typed follow-up");
+			expect(mock.calls[1].options?.reasoning).toBe(Effort.XHigh);
+			expect(prewalk).toHaveBeenCalledTimes(2);
+			expect(prewalk.mock.calls[1][0].request).toContain("ordinary typed follow-up");
+			expect(classifier).toHaveBeenCalledTimes(1);
+		});
+
+		for (const streamingBehavior of ["steer", "followUp"] as const) {
+			it(`does not commit auto effort for a cancelled claimed Collab ${streamingBehavior} ultrathink`, async () => {
+				const { session, sessionManager, mock } = await createSession([
+					{ content: ["initial"] },
+					{ content: ["ordinary response"] },
+				]);
+				cfgMagicKeywordsEnabled.set(session.settings, true);
+				cfgMagicKeyword.ultrathink.set(session.settings, true);
+				const classifier = vi.spyOn(autoThinkingClassifier, "classifyDifficulty").mockResolvedValue(Effort.Low);
+				let thinkingEventCount = 0;
+				session.subscribe(event => {
+					if (event.type === "thinking_level_changed") thinkingEventCount++;
+				});
+				session.setThinkingLevel(AUTO_THINKING);
+				const text = "cancel guest ultrathink request";
+				const pause = pauseCollabPreparation(session, text);
+				let priorThinkingEvents = -1;
+				let priorThinkingEntries = -1;
+				let injected = false;
+				session.agent.setOnBeforeYield(async () => {
+					if (injected) return;
+					injected = true;
+					priorThinkingEvents = thinkingEventCount;
+					priorThinkingEntries = sessionManager
+						.getEntries()
+						.filter(entry => entry.type === "thinking_level_change").length;
+					await queueCollabPrompt(session, text, streamingBehavior);
+				});
+
+				const run = session.prompt("initial request");
+				try {
+					await withTimeout(pause.staged, 2_000, "queued Collab preparation did not finish");
+					expect(session.autoResolvedThinkingLevel()).toBe(Effort.Low);
+					expect(session.agent.state.thinkingLevel).toBe(Effort.Low);
+					expect(session.removeQueuedMessage(text, streamingBehavior === "steer" ? "steering" : "followUp")).toBe(
+						true,
+					);
+				} finally {
+					pause.release();
+					await run;
+				}
+				await session.waitForIdle();
+				expect(mock.calls).toHaveLength(1);
+				expect(session.autoResolvedThinkingLevel()).toBe(Effort.Low);
+				expect(priorThinkingEvents).toBeGreaterThan(0);
+				expect(priorThinkingEntries).toBeGreaterThan(0);
+				expect(thinkingEventCount).toBe(priorThinkingEvents);
+				expect(sessionManager.getEntries().filter(entry => entry.type === "thinking_level_change")).toHaveLength(
+					priorThinkingEntries,
+				);
+
+				await session.prompt("ordinary request");
+				expect(mock.calls).toHaveLength(2);
+				expect(mock.calls[1].options?.reasoning).toBe(Effort.Low);
+				expect(JSON.stringify(mock.calls[1].context.messages)).not.toContain(text);
+				expect(classifier).toHaveBeenCalledTimes(2);
+			});
+		}
+
+		it("cancels a queued Collab classification without applying its late result", async () => {
+			const { session, mock } = await createSession([{ content: ["initial"] }, { content: ["ordinary response"] }]);
+			const started = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			const text = "cancel the ordinary guest request";
+			let classifierSignal: AbortSignal | undefined;
+			const classifier = vi
+				.spyOn(autoThinkingClassifier, "classifyDifficulty")
+				.mockImplementation(async (input, deps) => {
+					if (input.request === text) {
+						classifierSignal = deps.signal;
+						started.resolve();
+						await release.promise;
+						return Effort.XHigh;
+					}
+					return Effort.Low;
+				});
+			session.setThinkingLevel(AUTO_THINKING);
+			let injected = false;
+			session.agent.setOnBeforeYield(async () => {
+				if (injected) return;
+				injected = true;
+				await queueCollabPrompt(session, text, "followUp");
+			});
+
+			const run = session.prompt("initial request");
+			try {
+				await withTimeout(started.promise, 2_000, "queued Collab classification did not start");
+				expect(session.removeQueuedMessage(text, "followUp")).toBe(true);
+				expect(classifierSignal?.aborted).toBe(true);
+			} finally {
+				release.resolve();
+				await run;
+			}
+			await session.waitForIdle();
+			expect(mock.calls).toHaveLength(1);
+			expect(session.autoResolvedThinkingLevel()).toBe(Effort.Low);
+
+			await session.prompt("ordinary request");
+			expect(mock.calls).toHaveLength(2);
+			expect(mock.calls[1].options?.reasoning).toBe(Effort.Low);
+			expect(JSON.stringify(mock.calls[1].context.messages)).not.toContain(text);
+			expect(classifier).toHaveBeenCalledTimes(3);
+		});
+
+		it("keeps a pinned effort when auto is disabled during claimed Collab preparation", async () => {
+			const { session, mock } = await createSession([{ content: ["initial"] }, { content: ["guest response"] }]);
+			cfgMagicKeywordsEnabled.set(session.settings, true);
+			cfgMagicKeyword.ultrathink.set(session.settings, true);
+			const classifier = vi.spyOn(autoThinkingClassifier, "classifyDifficulty").mockResolvedValue(Effort.Low);
+			session.setThinkingLevel(AUTO_THINKING);
+			const text = "guest ultrathink request";
+			const pause = pauseCollabPreparation(session, text);
+			let injected = false;
+			session.agent.setOnBeforeYield(async () => {
+				if (injected) return;
+				injected = true;
+				await queueCollabPrompt(session, text);
+			});
+
+			const run = session.prompt("initial request");
+			try {
+				await withTimeout(pause.staged, 2_000, "queued Collab preparation did not finish");
+				expect(session.autoResolvedThinkingLevel()).toBe(Effort.Low);
+				session.setThinkingLevel(Effort.Low);
+			} finally {
+				pause.release();
+				await run;
+			}
+			await session.waitForIdle();
+
+			expect(mock.calls).toHaveLength(2);
+			expect(JSON.stringify(mock.calls[1].context.messages)).toContain(text);
+			expect(mock.calls[1].options?.reasoning).toBe(Effort.Low);
+			expect(session.configuredThinkingLevel()).toBe(Effort.Low);
+			expect(session.autoResolvedThinkingLevel()).toBeUndefined();
+			expect(classifier).toHaveBeenCalledTimes(1);
+		});
+
+		it("does not apply a stale Collab effort after auto is disabled and re-enabled during preparation", async () => {
+			const { session, mock } = await createSession(
+				[{ content: ["initial"] }, { content: ["guest response"] }],
+				[],
+				"claude-opus-4-7",
+			);
+			cfgMagicKeywordsEnabled.set(session.settings, true);
+			cfgMagicKeyword.ultrathink.set(session.settings, true);
+			const classifier = vi.spyOn(autoThinkingClassifier, "classifyDifficulty").mockResolvedValue(Effort.Low);
+			session.setThinkingLevel(AUTO_THINKING);
+			const text = "guest ultrathink request";
+			const pause = pauseCollabPreparation(session, text);
+			const expected = resolveProvisionalAutoLevel(session.model);
+			expect(expected).toBeDefined();
+			expect(expected).not.toBe(Effort.Max);
+			let injected = false;
+			session.agent.setOnBeforeYield(async () => {
+				if (injected) return;
+				injected = true;
+				await queueCollabPrompt(session, text);
+			});
+
+			const run = session.prompt("initial request");
+			try {
+				await withTimeout(pause.staged, 2_000, "queued Collab preparation did not finish");
+				expect(session.autoResolvedThinkingLevel()).toBe(Effort.Low);
+				session.setThinkingLevel(Effort.Low);
+				session.setThinkingLevel(AUTO_THINKING);
+				expect(session.agent.state.thinkingLevel).toBe(expected);
+			} finally {
+				pause.release();
+				await run;
+			}
+			await session.waitForIdle();
+
+			expect(mock.calls).toHaveLength(2);
+			expect(JSON.stringify(mock.calls[1].context.messages)).toContain(text);
+			expect(mock.calls[1].options?.reasoning).toBe(expected);
+			expect(session.configuredThinkingLevel()).toBe(AUTO_THINKING);
+			expect(session.autoResolvedThinkingLevel()).toBeUndefined();
+			expect(classifier).toHaveBeenCalledTimes(1);
+		});
+
+		it("does not apply a stale model effort to a claimed Collab ultrathink", async () => {
+			const { session, mock } = await createSession(
+				[{ content: ["initial"] }, { content: ["guest response"] }],
+				[],
+				"claude-opus-4-7",
+			);
+			cfgMagicKeywordsEnabled.set(session.settings, true);
+			cfgMagicKeyword.ultrathink.set(session.settings, true);
+			const classifier = vi.spyOn(autoThinkingClassifier, "classifyDifficulty").mockResolvedValue(Effort.Low);
+			session.setThinkingLevel(AUTO_THINKING);
+			const text = "guest ultrathink request";
+			const pause = pauseCollabPreparation(session, text);
+			const replacement = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+			const expected = resolveProvisionalAutoLevel(replacement);
+			expect(expected).toBeDefined();
+			expect(expected).not.toBe(Effort.Max);
+			let injected = false;
+			session.agent.setOnBeforeYield(async () => {
+				if (injected) return;
+				injected = true;
+				await queueCollabPrompt(session, text);
+			});
+
+			const run = session.prompt("initial request");
+			try {
+				await withTimeout(pause.staged, 2_000, "queued Collab preparation did not finish");
+				await session.setModelTemporary(replacement, AUTO_THINKING);
+				expect(session.agent.state.thinkingLevel).toBe(expected);
+			} finally {
+				pause.release();
+				await run;
+			}
+			await session.waitForIdle();
+
+			expect(mock.calls).toHaveLength(2);
+			expect(JSON.stringify(mock.calls[1].context.messages)).toContain(text);
+			expect(session.model?.id).toBe(replacement.id);
+			expect(mock.calls[1].options?.reasoning).toBe(expected);
+			expect(session.autoResolvedThinkingLevel()).toBeUndefined();
+			expect(classifier).toHaveBeenCalledTimes(1);
+		});
 	});
 
 	// `.`/`c` on a running turn interrupts it and continues. A host driving the

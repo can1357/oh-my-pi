@@ -1171,10 +1171,37 @@ function endAgentStream(
 	stream.push(buildAgentEndEvent(newMessages, telemetry, stepCount));
 	stream.end(newMessages);
 }
-function emitInputMessages(stream: EventStream<AgentEvent, AgentMessage[]>, messages: readonly AgentMessage[]): void {
+/** Internal acknowledgment that input events reached the owning Agent. */
+export const INPUT_DELIVERY_ACK = Symbol("input-delivery-ack");
+export interface InputDeliveryAck {
+	signal?: AbortSignal;
+	done(): void;
+	fail(error: unknown): void;
+}
+
+function emitInputMessages(
+	stream: EventStream<AgentEvent, AgentMessage[]>,
+	messages: readonly AgentMessage[],
+	ack?: InputDeliveryAck,
+): void {
 	for (const message of messages) {
 		stream.push({ type: "message_start", message });
-		stream.push({ type: "message_end", message });
+		const event: AgentEvent = { type: "message_end", message };
+		if (ack) Object.defineProperty(event, INPUT_DELIVERY_ACK, { value: ack });
+		stream.push(event);
+	}
+}
+
+async function waitForInputDelivery(delivery: Promise<void>, signal?: AbortSignal): Promise<void> {
+	if (!signal) return delivery;
+	const { promise: aborted, resolve } = Promise.withResolvers<void>();
+	const onAbort = () => resolve();
+	signal.addEventListener("abort", onAbort, { once: true });
+	try {
+		if (signal.aborted) onAbort();
+		await Promise.race([delivery, aborted]);
+	} finally {
+		signal.removeEventListener("abort", onAbort);
 	}
 }
 
@@ -1502,6 +1529,20 @@ async function runLoopBody(
 				let message: AssistantMessage;
 				let inputsEmitted = false;
 				try {
+					if (turnMessages.length > 0 && config.hasPendingQueuedDeliveryCallbacks?.(turnMessages)) {
+						const { promise, resolve, reject } = Promise.withResolvers<void>();
+						let remaining = turnMessages.length;
+						const ack: InputDeliveryAck = {
+							signal,
+							done: () => {
+								if (--remaining === 0) resolve();
+							},
+							fail: reject,
+						};
+						emitInputMessages(stream, turnMessages, ack);
+						inputsEmitted = true;
+						await waitForInputDelivery(promise, signal);
+					}
 					if (agentPauseGate.paused) await waitForProcessPause(config, signal);
 					message = await streamAssistantResponse(
 						currentContext,
@@ -1518,8 +1559,10 @@ async function runLoopBody(
 						preparedProviderCall,
 						() => {
 							if (config.isUndeliveredQueuedMessage) signal?.throwIfAborted();
-							emitTurnInputs();
-							inputsEmitted = true;
+							if (!inputsEmitted) {
+								emitTurnInputs();
+								inputsEmitted = true;
+							}
 						},
 						message => {
 							const finalToolCalls = message.content.filter(

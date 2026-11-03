@@ -36,6 +36,8 @@ export type StreamFn = (
 export interface QueuedMessagePreparation {
 	/** Append context after the originals; undefined stops this attempt, retaining originals unless explicitly removed. */
 	commit(): readonly AgentMessage[] | undefined;
+	/** Apply staged effects after the originals are recorded. The batch token is shared by inputs for one model call. */
+	onDelivered?(signal?: AbortSignal, batch?: object): void;
 }
 
 /** Which agent queue a batch came from: steering amends the running task, follow-ups start the next one. */
@@ -334,6 +336,9 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * unrecorded for the host to requeue.
 	 */
 	onLiveSteeringTaken?: (messages: AgentMessage[]) => void;
+
+	/** Internal to Agent: whether input delivery events must settle before the next model call. */
+	hasPendingQueuedDeliveryCallbacks?: (messages: readonly AgentMessage[]) => boolean;
 
 	/**
 	 * Peeks whether IRC messages should interrupt an interruptible waiting tool.
