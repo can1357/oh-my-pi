@@ -8,6 +8,11 @@
 - Added a fullscreen extension link browser for picking links already in terminal scrollback: press Alt+O again (or Page Up) while link tags are shown, or Alt+O with no extension link on screen ([#16476](https://github.com/can1357/oh-my-pi/pull/16476) by [@materemias](https://github.com/materemias))
 - Added a `:level` suffix to `^` model tags, such as `^openai-codex/gpt-6-astra:high`, that sets the tagged subagent's initial effort. Typing `:` after a mention lists the model's supported levels. The task tool's `effort` hint and `task.maxEffort` do not override the tagged level, and a per-call `model` for that agent fails as a conflict ([#17574](https://github.com/can1357/oh-my-pi/pull/17574) by [@a-glapinski](https://github.com/a-glapinski))
 
+### Fixed
+
+- `omp plugin upgrade`, reinstall and `uninstall` no longer delete or change a plugin copy that a running omp session still uses. Each process leases the cache directories it reads from the plugin registries (`~/.omp/plugins/cache/plugin-leases/`), and a leased directory is kept until its last holder exits; later installs, upgrades, uninstalls and session startups delete it then. A reinstall of a version already in the cache copies into a fresh directory instead of replacing the files in place. Before, a running session lost or saw changed skill scripts, commands, agents, hooks and MCP server files until it restarted
+- An upgrade keeps the plugin's place in `installed_plugins.json`. Moving it to the end gave a same-named skill of another plugin the bare name in running sessions, so `skill://<plugin>/<name>` failed with `Unknown skill` and the bare name read the other plugin's skill
+
 ## [18.16.0] - 2026-11-02
 
 ### Added

@@ -1,17 +1,15 @@
-import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
 	cachePlugin,
-	cleanOrphanedCache,
 	getCachedPluginPath,
 	isCached,
 	isValidVersionForCache,
-	removeCachedPlugin,
 } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/marketplace";
-import { isEnoent, removeSyncWithRetries } from "@oh-my-pi/pi-utils";
+import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -77,9 +75,9 @@ describe("getCachedPluginPath", () => {
 	});
 });
 
-// ── cachePlugin / isCached / removeCachedPlugin ──────────────────────────────
+// ── cachePlugin / isCached ───────────────────────────────────────────────────
 
-describe("cachePlugin, isCached, removeCachedPlugin", () => {
+describe("cachePlugin, isCached", () => {
 	let tmpDir: string;
 	let cacheDir: string;
 	let sourceDir: string;
@@ -115,107 +113,30 @@ describe("cachePlugin, isCached, removeCachedPlugin", () => {
 		expect(isCached(cacheDir, "my-market", "my-plugin", "1.0.0")).toBe(true);
 	});
 
-	it("cachePlugin is idempotent — re-caches over existing entry", async () => {
+	it("re-caching a version whose directory exists writes a fresh sibling and leaves the old copy untouched", async () => {
 		const sourcePath = await mkSourcePlugin(sourceDir, "my-plugin");
-
-		// First cache
-		await cachePlugin(sourcePath, cacheDir, "my-market", "my-plugin", "1.0.0");
-		// Add a stale file to simulate a dirty cache entry
-		const staleFile = path.join(cacheDir, "my-market___my-plugin___1.0.0", "stale.txt");
-		await fsp.writeFile(staleFile, "stale");
-
-		// Re-cache must remove the stale file
-		await cachePlugin(sourcePath, cacheDir, "my-market", "my-plugin", "1.0.0");
-		expect(fs.existsSync(staleFile)).toBe(false);
-		expect(fs.existsSync(path.join(cacheDir, "my-market___my-plugin___1.0.0", "plugin.json"))).toBe(true);
-	});
-
-	it("re-caching the same version deletes the old copy only after the new one is at the cache path", async () => {
-		const sourcePath = await mkSourcePlugin(sourceDir, "my-plugin");
-		const cached = await cachePlugin(sourcePath, cacheDir, "my-market", "my-plugin", "1.0.0");
+		const first = await cachePlugin(sourcePath, cacheDir, "my-market", "my-plugin", "1.0.0");
+		const original = await Bun.file(path.join(first, "plugin.json")).text();
 		await fsp.writeFile(path.join(sourcePath, "plugin.json"), "rebuilt");
-		// A running session reads the cached plugin at any moment of a same-version reinstall.
-		const readAfterRemoval: string[] = [];
-		const rm = fsp.rm;
-		const rmSpy = spyOn(fsp, "rm").mockImplementation(async (target, options) => {
-			await rm(target, options);
-			try {
-				readAfterRemoval.push(await Bun.file(path.join(cached, "plugin.json")).text());
-			} catch (err) {
-				if (!isEnoent(err)) throw err;
-				readAfterRemoval.push("missing");
-			}
-		});
-		try {
-			await cachePlugin(sourcePath, cacheDir, "my-market", "my-plugin", "1.0.0");
-		} finally {
-			rmSpy.mockRestore();
-		}
 
-		expect(readAfterRemoval).toEqual(["rebuilt"]);
-		expect(fs.readdirSync(cacheDir)).toEqual(["my-market___my-plugin___1.0.0"]);
+		// A running session keeps reading the copy it loaded.
+		const second = await cachePlugin(sourcePath, cacheDir, "my-market", "my-plugin", "1.0.0");
+		const third = await cachePlugin(sourcePath, cacheDir, "my-market", "my-plugin", "1.0.0");
+
+		expect(second).toBe(`${first}___2`);
+		expect(third).toBe(`${first}___3`);
+		expect(await Bun.file(path.join(first, "plugin.json")).text()).toBe(original);
+		expect(await Bun.file(path.join(second, "plugin.json")).text()).toBe("rebuilt");
 	});
 
-	it("removeCachedPlugin deletes the directory", async () => {
-		const sourcePath = await mkSourcePlugin(sourceDir, "my-plugin");
-		await cachePlugin(sourcePath, cacheDir, "my-market", "my-plugin", "1.0.0");
-
-		await removeCachedPlugin(cacheDir, "my-market", "my-plugin", "1.0.0");
-		expect(isCached(cacheDir, "my-market", "my-plugin", "1.0.0")).toBe(false);
-	});
-
-	it("removeCachedPlugin is a no-op when entry does not exist", async () => {
-		// Should not throw
-		await expect(removeCachedPlugin(cacheDir, "my-market", "my-plugin", "1.0.0")).resolves.toBeUndefined();
-	});
-});
-
-// ── cleanOrphanedCache ───────────────────────────────────────────────────────
-
-describe("cleanOrphanedCache", () => {
-	let tmpDir: string;
-	let cacheDir: string;
-	let sourceDir: string;
-
-	beforeEach(async () => {
-		tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-orphan-test-"));
-		cacheDir = path.join(tmpDir, "cache");
-		sourceDir = path.join(tmpDir, "sources");
-		await fsp.mkdir(sourceDir, { recursive: true });
-	});
-
-	afterEach(() => {
-		removeSyncWithRetries(tmpDir);
-	});
-
-	it("returns { removed: 0 } when cacheDir does not exist", async () => {
-		const result = await cleanOrphanedCache(cacheDir, new Set());
-		expect(result).toEqual({ removed: 0 });
-	});
-
-	it("removes entries not in installedPaths", async () => {
-		const srcA = await mkSourcePlugin(sourceDir, "plugin-a");
-		const srcB = await mkSourcePlugin(sourceDir, "plugin-b");
-
-		const pathA = await cachePlugin(srcA, cacheDir, "mkt", "plugin-a", "1.0.0");
-		await cachePlugin(srcB, cacheDir, "mkt", "plugin-b", "1.0.0");
-
-		// Only keep plugin-a; plugin-b is orphaned
-		const result = await cleanOrphanedCache(cacheDir, new Set([pathA]));
-		expect(result).toEqual({ removed: 1 });
-		expect(fs.existsSync(pathA)).toBe(true);
-		expect(isCached(cacheDir, "mkt", "plugin-b", "1.0.0")).toBe(false);
-	});
-
-	it("removes all entries when installedPaths is empty", async () => {
-		const srcA = await mkSourcePlugin(sourceDir, "plugin-a");
-		const srcB = await mkSourcePlugin(sourceDir, "plugin-b");
-
-		await cachePlugin(srcA, cacheDir, "mkt", "plugin-a", "1.0.0");
-		await cachePlugin(srcB, cacheDir, "mkt", "plugin-b", "2.0.0");
-
-		const result = await cleanOrphanedCache(cacheDir, new Set());
-		expect(result).toEqual({ removed: 2 });
-		expect(fs.readdirSync(cacheDir)).toHaveLength(0);
+	it("a failed copy leaves no directory at the target and runs beforeCopy with the target first", async () => {
+		const targets: string[] = [];
+		await expect(
+			cachePlugin(path.join(sourceDir, "missing"), cacheDir, "my-market", "my-plugin", "1.0.0", async target => {
+				targets.push(target);
+			}),
+		).rejects.toThrow();
+		expect(targets).toEqual([path.join(cacheDir, "my-market___my-plugin___1.0.0")]);
+		expect(fs.readdirSync(cacheDir)).toEqual([]);
 	});
 });

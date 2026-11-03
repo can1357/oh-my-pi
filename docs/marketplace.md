@@ -221,7 +221,9 @@ Invalid catalog JSON or invalid required top-level fields reject the catalog. An
 - `/marketplace update [name]` refreshes catalogs only; it does not reinstall plugins.
 - `omp plugin upgrade name@marketplace` reinstalls every installed scope when `--scope` is omitted. `/marketplace upgrade name@marketplace`, uninstall, and enable/disable require `--scope user|project` when the plugin exists in both scopes.
 - Upgrading all plugins compares only catalog entries that declare `version`. Semver versions must be newer; non-semver versions are treated as changed when unequal. Each installed scope is checked independently. Per-plugin failures are skipped, so an all-plugin upgrade can partially succeed. CLI `--scope` is ignored when upgrading all plugins.
-- Reinstall/upgrade preserves disabled state, feature selection, and settings. User and project installs share version-keyed cache directories, so forcing a reinstall of the same version replaces content used by both scopes. Runtime package-name and cache-path collisions with other plugins are rejected.
+- Reinstall/upgrade preserves disabled state, feature selection, and settings. A reinstall of a version whose cache directory already exists copies into a fresh sibling directory (`<marketplace>___<plugin>___<version>___<n>`) and points the registry at it; the old copy is not changed, and another scope that still names it keeps it. Runtime package-name and cache-path collisions with other plugins are rejected.
+- An upgrade, reinstall or uninstall does not delete a cache directory that a running omp process still uses. Every process that reads the plugin registries leases each cache directory they name, with an empty file `cache/plugin-leases/<directory>/<pid>-<start>`, removed when the process exits; an installer leases the directory it is about to create. A lease whose process died (or whose pid now belongs to a later process) is ignored and pruned. Taking a lease and deciding a removal run under one OS lock per directory, and a removal that cannot write in the lease directory keeps the directory. A leased directory is kept and marked retired, so the process keeps reading its skills, scripts, commands, agents, hooks and MCP servers there. Retired directories are deleted once no live process leases them and no registry names them again: at the next install, upgrade or uninstall, and in the background when a session starts.
+- An upgrade keeps the plugin's place in `installed_plugins.json`. Discovery lists plugins in registry order, so a plugin moved behind another plugin with a same-named skill would lose that skill's bare name to the other plugin in running sessions.
 - `marketplace.autoUpdate` controls startup checks: `off`, `notify` (default), or `auto`. Catalogs older than 24 hours are refreshed best-effort before version checks. Despite its name, current `notify` mode writes update availability only to the debug log; it does not show a user-facing notification.
 - Removing a marketplace removes its registry entry and catalog cache; it does not uninstall plugins already cached and registered.
 
@@ -237,6 +239,7 @@ Invalid catalog JSON or invalid required top-level fields reject the catalog. An
     cache/
       marketplaces/<name>/       # Cached marketplace clone/catalog
       plugins/<marketplace>___<plugin>___<version>/  # Cached plugin directories
+      plugin-leases/<marketplace>___<plugin>___<version>/  # Running processes' leases; `retired` marks a replaced version
 
 <project>/.omp/
   plugins/

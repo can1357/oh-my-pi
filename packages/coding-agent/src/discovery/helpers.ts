@@ -30,6 +30,8 @@ import {
 import type { Skill, SkillFrontmatter } from "../capability/skill";
 import type { LoadContext, LoadResult, SourceMeta } from "../capability/types";
 import { resolveClaudePaths } from "../config/claude-paths";
+import { leaseCacheEntry } from "../extensibility/plugins/marketplace/cache-lease";
+import { getPluginsCacheDir } from "../extensibility/plugins/marketplace/registry";
 import type { MCPRequestIdFormat } from "../mcp/types";
 import { type ConfiguredThinkingLevel, parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import { normalizeToolNames } from "../tools/builtin-names";
@@ -1345,13 +1347,23 @@ async function readPluginRoots(home: string, cwd: string | undefined, revalidate
 	// Cache the in-flight promise so concurrent callers share one computation.
 	const result = (async () => {
 		await signatures;
-		const loaded = await loadClaudePluginRoots({
-			claudeConfigDir,
-			ompRegistryPath,
-			resolvedProjectPath,
-			activeClaudeProjectPath,
-			enabledOverrides,
-		});
+		const pluginsCacheDir = getPluginsCacheDir(path.dirname(ompRegistryPath));
+		const load = () =>
+			loadClaudePluginRoots({
+				claudeConfigDir,
+				ompRegistryPath,
+				resolvedProjectPath,
+				activeClaudeProjectPath,
+				enabledOverrides,
+			});
+		let loaded = await load();
+		if (!(await leaseCachedPluginRoots(loaded.roots, pluginsCacheDir))) {
+			// An upgrade or uninstall removed a version after the registries named it here. It rewrote
+			// the registries first, so they now name what is installed.
+			for (const file of files) invalidateFsCache(file);
+			loaded = await load();
+			await leaseCachedPluginRoots(loaded.roots, pluginsCacheDir);
+		}
 		await recordRegisteredPluginRoots(loaded.roots);
 		return loaded;
 	})();
@@ -1363,6 +1375,18 @@ async function readPluginRoots(home: string, cwd: string | undefined, revalidate
 		if (pluginRootsCache.get(cacheKey) === entry) pluginRootsCache.delete(cacheKey);
 		throw error;
 	}
+}
+
+/**
+ * Lease, for this process, each root that is a copy in the omp plugin cache (`cache-lease.ts`), so
+ * that no upgrade, reinstall or uninstall deletes a copy this process uses. False when a root is
+ * missing: removed after the registries were read.
+ */
+async function leaseCachedPluginRoots(roots: readonly ClaudePluginRoot[], pluginsCacheDir: string): Promise<boolean> {
+	const present = await Promise.all(
+		roots.filter(root => path.dirname(root.path) === pluginsCacheDir).map(root => leaseCacheEntry(root.path)),
+	);
+	return present.every(Boolean);
 }
 
 async function loadClaudePluginRoots({
