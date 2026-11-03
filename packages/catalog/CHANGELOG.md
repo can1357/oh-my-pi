@@ -6,6 +6,7 @@
 
 - Added the `supports-message-threads` compat axis (`supportsMessageThreads`), enabled for Claude 4.5 and newer on the first-party Anthropic provider
 - Added a standard Responses WebSocket capability rule for explicit opt-in through OMP settings or SDK preferences, disabled by default ([#17354](https://github.com/can1357/oh-my-pi/pull/17354) by [@TatsukiMeng](https://github.com/TatsukiMeng))
+- Added Kiro to the model catalog with automatic discovery of every model available to the signed-in Kiro account ([#14215](https://github.com/can1357/oh-my-pi/pull/14215) by [@ajdiyassin](https://github.com/ajdiyassin))
 
 ## [18.16.0] - 2026-11-02
 

@@ -27,6 +27,27 @@ async function defaultConfigValueResolver(config: string): Promise<string | unde
 	const envValue = $envExact(config);
 	return envValue || config;
 }
+/**
+ * Project a Kiro credential for discovery/transport: the token plus its runtime
+ * endpoint and, for OAuth logins, the profile ARN (stored as `orgId`) that
+ * `ListAvailableModels` and `SendMessage` both require.
+ */
+function projectKiroApiKey(
+	token: string | undefined,
+	metadata?: { apiEndpoint?: string; profileArn?: string; loginId?: string },
+): string | undefined {
+	if (!token) return token;
+	const apiEndpoint = metadata?.apiEndpoint;
+	const profileArn = metadata?.profileArn;
+	const loginId = metadata?.loginId;
+	if (!apiEndpoint && !profileArn && !loginId) return token;
+	return JSON.stringify({
+		token,
+		...(profileArn ? { profileArn } : {}),
+		...(apiEndpoint ? { apiEndpoint } : {}),
+		...(loginId ? { loginId } : {}),
+	});
+}
 
 /** Runtime (--api-key) and config (models.yml) key overrides plus the config-value resolver. */
 export class KeyOverrides {
@@ -289,6 +310,15 @@ export class KeyCascade implements KeysApi {
 					apiEndpoint: oauthSelection.credential.apiEndpoint,
 				});
 			}
+			// Kiro: discovery needs the profile ARN (`orgId`) alongside the bearer;
+			// mirror the structured projection `getOAuthApiKey` builds for refreshes.
+			if (provider === "kiro") {
+				return projectKiroApiKey(oauthSelection.credential.access, {
+					apiEndpoint: oauthSelection.credential.apiEndpoint,
+					profileArn: oauthSelection.credential.orgId,
+					loginId: oauthSelection.credential.kiroLoginId,
+				});
+			}
 			return oauthSelection.credential.access;
 		}
 
@@ -302,7 +332,11 @@ export class KeyCascade implements KeysApi {
 				!this.isKeylessFallback(provider, credential),
 		);
 		if (loginApiKeySelection) {
-			return this.#deps.overrides.resolve(loginApiKeySelection.credential.key);
+			const key = await this.#deps.overrides.resolve(loginApiKeySelection.credential.key);
+			if (provider === "kiro") {
+				return projectKiroApiKey(key, { apiEndpoint: loginApiKeySelection.credential.apiEndpoint });
+			}
+			return key;
 		}
 
 		const fallbackKey = this.#deps.overrides.fallbackKey(provider);
@@ -313,7 +347,11 @@ export class KeyCascade implements KeysApi {
 
 		const apiKeySelection = this.#deps.selector.selectByType(provider, "api_key");
 		if (apiKeySelection) {
-			return this.#deps.overrides.resolve(apiKeySelection.credential.key);
+			const key = await this.#deps.overrides.resolve(apiKeySelection.credential.key);
+			if (provider === "kiro") {
+				return projectKiroApiKey(key, { apiEndpoint: apiKeySelection.credential.apiEndpoint });
+			}
+			return key;
 		}
 		return undefined;
 	}

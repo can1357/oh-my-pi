@@ -265,6 +265,13 @@ export const streamGoogleVertex = createLazyProviderStream(
 	mod => mod.streamGoogleVertex,
 );
 
+/** Stream Kiro with provider-owned timeout handling. */
+export const streamKiro = createLazyProviderStream(
+	() => import("./kiro/index"),
+	(mod): ProviderStream<"kiro-api"> => mod.streamKiro,
+	PROVIDER_HANDLED_STREAM_TIMEOUTS,
+);
+
 /** Stream Codex with provider-owned timeout handling. */
 export const streamOpenAICodexResponses = createLazyProviderStream(
 	() => import("./openai-codex-responses"),

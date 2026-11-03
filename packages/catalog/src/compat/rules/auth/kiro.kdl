@@ -1,0 +1,14 @@
+auth "kiro" {
+    name "Kiro"
+    env "KIRO_API_KEY"
+    // Three-way login (AWS IAM Identity Center device flow, Builder ID device
+    // flow, ksk_ API key) is not expressible declaratively; see
+    // `loginKiroHook` in `@oh-my-pi/pi-ai/src/registry/oauth/kiro.ts`.
+    login "custom" hook="kiro-login"
+    refresh hook="kiro-refresh"
+    api-key-format "structured"
+    // A re-login names exactly one account or key, so it replaces every stored
+    // Kiro credential instead of accumulating rows (device grants carry no
+    // email/account claim to dedupe on).
+    login-replaces-credentials #true
+}
