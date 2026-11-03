@@ -68,7 +68,8 @@ import type { AgentSession, AgentSessionEvent } from "../../session/agent-sessio
 import { BlobStore, resolveImageDataSync } from "../../session/blob-store";
 import { isSilentAbort, SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
 import type { UsageStatistics } from "../../session/session-entries";
-import type { SessionInfo as StoredSessionInfo } from "../../session/session-listing";
+import { readSessionInfo, type SessionInfo as StoredSessionInfo } from "../../session/session-listing";
+import { locateSessions } from "../../session/session-locator";
 import { SessionManager } from "../../session/session-manager";
 import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
 import { buildAvailableSlashCommands, toAcpAvailableCommands } from "../../slash-commands/available-commands";
@@ -2746,14 +2747,19 @@ export class AcpAgent implements Agent {
 		// The cwd-derived directory only covers sessions stored under the current
 		// naming scheme. Sessions written under a legacy/hashed project directory
 		// (the 17.2.5+ scheme reverted in #7656) live elsewhere, so fall back to a
-		// global by-id scan: the session id is globally unique, and
+		// global by-id lookup: the session id is globally unique, and
 		// #openStoredSession reopens the file with the request cwd. See #7779.
 		return this.#findStoredSessionById(sessionId);
 	}
 
+	/** The newest live copy of session `sessionId`, through the session index (never a walk of the sessions tree). */
 	async #findStoredSessionById(sessionId: string): Promise<StoredSessionInfo | undefined> {
-		const sessions = await this.#listStoredSessions();
-		return sessions.find(session => session.id === sessionId);
+		for (const hit of await locateSessions(sessionId)) {
+			if (hit.archived || hit.id !== sessionId) continue;
+			const session = await readSessionInfo(hit.path);
+			if (session?.id === sessionId) return session;
+		}
+		return undefined;
 	}
 
 	#parseCursor(cursor: string | undefined): number {

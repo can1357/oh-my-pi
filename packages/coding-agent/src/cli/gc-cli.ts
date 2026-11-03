@@ -31,6 +31,7 @@ import { BLOB_HASH_RE, BLOB_STAGING_RE, blobStagingPath } from "../session/blob-
 import { listSessionsReadOnly, type SessionInfo, type SessionStatus } from "../session/session-listing";
 import { parseTerminalBreadcrumb } from "../session/session-paths";
 import { readSessionHeaderId } from "../session/session-loader";
+import { archiveRootFor, recordSessionTree } from "../session/session-locator";
 import { FileSessionStorage, SESSION_STAGING_RE, tryAcquireSessionLease } from "../session/session-storage";
 import {
 	type CompressCandidate,
@@ -340,7 +341,7 @@ export function collectGcErrors(result: GcResult): string[] {
 }
 
 function getArchivedSessionsDir(agentDir: string): string {
-	return path.join(path.dirname(getSessionsDir(agentDir)), "archive", "sessions");
+	return archiveRootFor(getSessionsDir(agentDir));
 }
 
 function errorMessage(error: unknown): string {
@@ -1867,6 +1868,9 @@ async function runArchiveGc(
 	for (const candidate of candidates) {
 		try {
 			await moveSessionWithArtifacts(candidate);
+			// The archive keeps its own index, so a lookup by id (or a rebuilt
+			// sessions-root index) still finds the session and its subagents.
+			await recordSessionTree(candidate.destinationPath, [sessionsRoot, archiveRoot]);
 			result.archived += 1;
 			archivedSessionIds.push(candidate.session.id);
 			archivedSessions.push(candidate.session);

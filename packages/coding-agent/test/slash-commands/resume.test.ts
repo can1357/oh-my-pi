@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { listAllSessions, resolveResumableSession } from "@oh-my-pi/pi-coding-agent/session/session-listing";
+import { recordSessionLocation } from "@oh-my-pi/pi-coding-agent/session/session-locator";
 import { computeDefaultSessionDir } from "@oh-my-pi/pi-coding-agent/session/session-paths";
 import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
@@ -39,6 +40,8 @@ async function writeSession(
 		sessionPath,
 		`${JSON.stringify({ type: "session", id, timestamp: "2026-01-01T00:00:00.000Z", cwd })}\n`,
 	);
+	// What `SessionManager` does on a session's first write: lookups by id read the index.
+	recordSessionLocation(id, sessionPath);
 	return sessionPath;
 }
 
@@ -60,6 +63,7 @@ async function writeContinuation(parentId: string, id: string, sessionDir: strin
 		message: { role: "user", content: "after the move-off", timestamp: 1 },
 	};
 	await Bun.write(sessionPath, `${JSON.stringify(header)}\n${JSON.stringify(turn)}\n`);
+	recordSessionLocation(id, sessionPath);
 	return sessionPath;
 }
 

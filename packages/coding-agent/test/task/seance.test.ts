@@ -6,6 +6,7 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { CURRENT_SESSION_VERSION } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { sessionDirForCwd } from "@oh-my-pi/pi-coding-agent/session/session-paths";
+import { recordSessionLocation } from "@oh-my-pi/pi-coding-agent/session/session-locator";
 import { resolveSeanceSource, restoreSeanceSession } from "@oh-my-pi/pi-coding-agent/task/seance";
 import { getAgentDir, getSessionsDir, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 
@@ -208,6 +209,8 @@ describe("seance source resolution", () => {
 			const otherCwd = path.join(tempDir.path(), "other-project");
 			const foreignFile = path.join(sessionDirForCwd(otherCwd), "foreign.jsonl");
 			await writeSession(foreignFile, "foreign-project-id", otherCwd);
+			// What `SessionManager` records on a session's first write: lookups by id read the index.
+			recordSessionLocation("foreign-project-id", foreignFile);
 
 			await expect(resolveSeanceSource("foreign-project-id", { cwd })).rejects.toThrow(
 				'Session "foreign-project-id" was not found.',

@@ -41,6 +41,7 @@ import { BLOB_HASH_RE, BlobStore } from "./blob-store";
 import type { FileEntry, SessionEntry, SessionHeader } from "./session-entries";
 import { findSessionFiles } from "./session-listing";
 import { loadEntriesFromFile, parseSessionContent, readSessionHeaderId } from "./session-loader";
+import { recordSessionTree } from "./session-locator";
 import { SessionManager } from "./session-manager";
 import { FileSessionStorage } from "./session-storage";
 
@@ -459,7 +460,7 @@ function isTranscriptPrefix(local: readonly SessionEntry[], incoming: readonly S
 	return true;
 }
 
-/** Top-level session files holding session `id`: every project bucket, plus `sessionDir` when it lies elsewhere. */
+/** Top-level session files holding session `id`: every copy the session index records, plus `sessionDir`'s own. */
 async function findLocalCopies(id: string, sessionDir: string): Promise<string[]> {
 	const candidates = new Set((await findSessionFiles(id)).map(file => path.resolve(file)));
 	try {
@@ -553,6 +554,8 @@ async function placeSession(
 			await manager.close();
 		}
 		if (!placed) throw new SessionTransferError("Unpacked session has no session file.");
+		// The archive's subagent transcripts landed as plain files: index them with the session.
+		await recordSessionTree(placed);
 		return { sessionFile: placed, id };
 	} catch (error) {
 		if (placed) await removeSessionFiles(placed);

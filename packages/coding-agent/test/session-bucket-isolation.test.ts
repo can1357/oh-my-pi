@@ -9,6 +9,7 @@ import {
 	listRecentProjects,
 	listRecentSessions,
 } from "@oh-my-pi/pi-coding-agent/session/session-listing";
+import { rebuildSessionLocator } from "@oh-my-pi/pi-coding-agent/session/session-locator";
 
 const SESSION_ID = "0198aaaa-0000-7000-8000-000000000001";
 const SESSION_NAME = `2026-10-15T00-00-00-000Z_${SESSION_ID}.jsonl`;
@@ -53,13 +54,21 @@ describe("cross-project session bucket isolation", () => {
 		if (sessionsRoot) await fs.promises.rm(sessionsRoot, { recursive: true, force: true });
 	});
 
+	/** The id lookup after `omp session reindex` walked the root: the one walk the index needs. */
+	async function reindexedLookup(root = sessionsRoot): Promise<string[]> {
+		await rebuildSessionLocator(root);
+		return findSessionFiles(SESSION_ID, [root]);
+	}
+
 	it.skipIf(modeBitsUnavailable)("keeps an exact session match when an unrelated bucket is unreadable", async () => {
-		expect(await findSessionFiles(SESSION_ID, sessionsRoot)).toEqual([sessionFile]);
+		expect(await reindexedLookup()).toEqual([sessionFile]);
 		await fs.promises.chmod(blockedBucket, 0o000);
 		restoreModes.push(blockedBucket);
 		await expect(fs.promises.readdir(blockedBucket)).rejects.toMatchObject({ code: "EACCES" });
 
-		expect(await findSessionFiles(SESSION_ID, sessionsRoot)).toEqual([sessionFile]);
+		const rebuilt = await rebuildSessionLocator(sessionsRoot);
+		expect(rebuilt.unreadable.map(entry => entry.bucket)).toEqual([blockedBucket]);
+		expect(await findSessionFiles(SESSION_ID, [sessionsRoot])).toEqual([sessionFile]);
 		expect((await listAllSessions(undefined, sessionsRoot)).map(session => session.id)).toEqual([SESSION_ID]);
 		expect((await listRecentSessions({ limit: 10, sessionsRoot })).map(session => session.id)).toEqual([SESSION_ID]);
 		expect((await listRecentProjects(10, sessionsRoot)).map(project => project.latest.id)).toEqual([SESSION_ID]);
@@ -76,34 +85,35 @@ describe("cross-project session bucket isolation", () => {
 			yield* scan.call(this, options);
 		});
 
-		expect(await findSessionFiles(SESSION_ID, sessionsRoot)).toEqual([sessionFile]);
+		expect(await reindexedLookup()).toEqual([sessionFile]);
 	});
 
-	it("surfaces an unexpected bucket enumeration failure during exact-id lookup", async () => {
+	it("surfaces an unexpected bucket enumeration failure during reindex", async () => {
 		const failure = Object.assign(new Error("bucket I/O failure"), { code: "EIO" });
 		vi.spyOn(Bun.Glob.prototype, "scan").mockImplementationOnce(async function* () {
 			yield SESSION_NAME;
 			throw failure;
 		});
 
-		await expect(findSessionFiles(SESSION_ID, sessionsRoot)).rejects.toBe(failure);
+		await expect(rebuildSessionLocator(sessionsRoot)).rejects.toBe(failure);
 	});
 
-	it("surfaces an unexpected root enumeration failure during exact-id lookup", async () => {
+	it("surfaces an unexpected root enumeration failure during reindex", async () => {
 		const failure = Object.assign(new Error("root I/O failure"), { code: "EIO" });
 		vi.spyOn(fs.promises, "readdir").mockRejectedValueOnce(failure);
 
-		await expect(findSessionFiles(SESSION_ID, sessionsRoot)).rejects.toBe(failure);
+		await expect(rebuildSessionLocator(sessionsRoot)).rejects.toBe(failure);
 	});
 
 	it.skipIf(modeBitsUnavailable)("surfaces an unreadable sessions root instead of claiming it is empty", async () => {
 		await fs.promises.chmod(sessionsRoot, 0o000);
 		restoreModes.push(sessionsRoot);
-		await expect(findSessionFiles(SESSION_ID, sessionsRoot)).rejects.toMatchObject({ code: "EACCES" });
+		await expect(rebuildSessionLocator(sessionsRoot)).rejects.toMatchObject({ code: "EACCES" });
 	});
 
 	it("keeps missing or non-directory sessions roots empty", async () => {
-		expect(await findSessionFiles(SESSION_ID, path.join(sessionsRoot, "missing"))).toEqual([]);
-		expect(await findSessionFiles(SESSION_ID, sessionFile)).toEqual([]);
+		expect(await reindexedLookup(path.join(sessionsRoot, "missing"))).toEqual([]);
+		expect(await reindexedLookup(sessionFile)).toEqual([]);
+		expect(fs.existsSync(path.join(sessionsRoot, "missing"))).toBe(false);
 	});
 });

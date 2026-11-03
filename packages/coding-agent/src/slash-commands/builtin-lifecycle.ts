@@ -11,7 +11,13 @@ import { continuesConversation } from "../modes/utils/conversation-position";
 import type { FreshSessionResult, HandoffResult } from "../session/agent-session";
 import { COMPACT_MODES, parseCompactArgs } from "../session/compact-modes";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
-import { resolveResumableSession, resolveResumeTarget } from "../session/session-listing";
+import {
+	ArchivedSessionError,
+	type ResolvedSessionMatch,
+	type ResumeTarget,
+	resolveResumableSession,
+	resolveResumeTarget,
+} from "../session/session-listing";
 import { toggleSessionPin, unpinSession } from "../session/session-pins";
 import {
 	cleanSourceCheckoutIfConfigured,
@@ -141,9 +147,15 @@ async function resolvePinTarget(
 ): Promise<string | SlashCommandResult> {
 	const sessionArg = command.args.trim();
 	if (sessionArg) {
-		const match = await resolveResumableSession(sessionArg, runtime.cwd, runtime.sessionManager.getSessionDir(), {
-			allowGlobalFallback: true,
-		});
+		let match: ResolvedSessionMatch | undefined;
+		try {
+			match = await resolveResumableSession(sessionArg, runtime.cwd, runtime.sessionManager.getSessionDir(), {
+				allowGlobalFallback: true,
+			});
+		} catch (error) {
+			if (error instanceof ArchivedSessionError) return usage(error.message, runtime);
+			throw error;
+		}
 		return match ? match.session.id : usage(`Session "${sessionArg}" not found.`, runtime);
 	}
 	return runtime.sessionManager.getSessionId() || usage(`No active session to ${verb}.`, runtime);
@@ -439,12 +451,19 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 				runtime.ctx.showSessionSelector();
 				return;
 			}
-			const target = await resolveResumeTarget(
-				sessionArg,
-				runtime.ctx.sessionManager.getCwd(),
-				runtime.ctx.sessionManager.getSessionDir(),
-				{ allowGlobalFallback: true },
-			);
+			let target: ResumeTarget | undefined;
+			try {
+				target = await resolveResumeTarget(
+					sessionArg,
+					runtime.ctx.sessionManager.getCwd(),
+					runtime.ctx.sessionManager.getSessionDir(),
+					{ allowGlobalFallback: true },
+				);
+			} catch (error) {
+				if (!(error instanceof ArchivedSessionError)) throw error;
+				runtime.ctx.showError(error.message);
+				return;
+			}
 			if (!target) {
 				runtime.ctx.showError(`Session "${sessionArg}" not found`);
 				return;

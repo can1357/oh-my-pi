@@ -13,6 +13,7 @@ import { createArchivePrelude } from "@oh-my-pi/pi-coding-agent/archive/prelude-
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { HistoryStorage } from "@oh-my-pi/pi-coding-agent/session/history-storage";
 import { recordSessionRecap, closeSessionIndex } from "@oh-my-pi/pi-coding-agent/session/session-index";
+import { recordSessionLocation } from "@oh-my-pi/pi-coding-agent/session/session-locator";
 import { sessionDirForCwd } from "@oh-my-pi/pi-coding-agent/session/session-paths";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { getConfigRootDir, removeSyncWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
@@ -49,6 +50,8 @@ function writeSession(
 	const file = path.join(dir, `${time.getTime()}_${id}.jsonl`);
 	fs.writeFileSync(file, `${entries.map(entry => JSON.stringify(entry)).join("\n")}\n`);
 	fs.utimesSync(file, time, time);
+	// What `SessionManager` records on a session's first write: lookups by id read the index.
+	recordSessionLocation(id, file);
 	return id;
 }
 
