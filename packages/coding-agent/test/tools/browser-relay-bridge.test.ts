@@ -2727,42 +2727,47 @@ describe("RelayBridge front app on a window omp's input opens", () => {
 	it.each([
 		{ outcome: "found", browserPid: 222 },
 		{ outcome: "failed", browserPid: null },
-	])("waits for a pending browser lookup before reading or forwarding input when it $outcome", async ({
-		outcome,
-		browserPid,
-	}) => {
-		const { readBrowsers, browsers, frontApp } = frontAppRecorder();
-		const lookup = Promise.withResolvers<number | null>();
-		const bridge = new RelayBridge();
-		bridge.keepFrontAppWith(frontApp);
-		const ext = new FakeExtSocket();
-		connect(bridge, ext, [tab({ tabId: 1 })], [], () => lookup.promise);
-		const cdp = new FakeCdpSocket();
-		const connId = bridge.cdpConnected(cdp);
-		const sessionId = await attachPage(bridge, ext, cdp, connId, 1);
-		const sent = ext.rpcs("send").length;
-		bridge.cdpMessage(
-			connId,
-			JSON.stringify({
-				id: ++msgSeq,
-				sessionId,
-				method: "Input.dispatchKeyEvent",
-				params: { type: "keyDown", key: "Enter" },
-			}),
-		);
-		await flush();
-		expect(readBrowsers).toEqual([]);
-		expect(ext.rpcs("send")).toHaveLength(sent);
-		if (outcome === "failed") lookup.reject(new Error("browser lookup unavailable"));
-		else lookup.resolve(browserPid);
-		await flush();
-		expect(readBrowsers).toEqual([browserPid]);
-		expect(ext.rpcs("send").slice(sent).map(rpc => rpc.method)).toEqual(["Input.dispatchKeyEvent"]);
-		ack(bridge, ext, "send");
-		windowOpen(bridge, ext, 1);
-		await flush();
-		expect(browsers).toEqual([browserPid]);
-	});
+	])(
+		"waits for a pending browser lookup before reading or forwarding input when it $outcome",
+		async ({ outcome, browserPid }) => {
+			const { readBrowsers, browsers, frontApp } = frontAppRecorder();
+			const lookup = Promise.withResolvers<number | null>();
+			const bridge = new RelayBridge();
+			bridge.keepFrontAppWith(frontApp);
+			const ext = new FakeExtSocket();
+			connect(bridge, ext, [tab({ tabId: 1 })], [], () => lookup.promise);
+			const cdp = new FakeCdpSocket();
+			const connId = bridge.cdpConnected(cdp);
+			const sessionId = await attachPage(bridge, ext, cdp, connId, 1);
+			const sent = ext.rpcs("send").length;
+			bridge.cdpMessage(
+				connId,
+				JSON.stringify({
+					id: ++msgSeq,
+					sessionId,
+					method: "Input.dispatchKeyEvent",
+					params: { type: "keyDown", key: "Enter" },
+				}),
+			);
+			await flush();
+			expect(readBrowsers).toEqual([]);
+			expect(ext.rpcs("send")).toHaveLength(sent);
+			if (outcome === "failed") lookup.reject(new Error("browser lookup unavailable"));
+			else lookup.resolve(browserPid);
+			await flush();
+			expect(readBrowsers).toEqual([browserPid]);
+			expect(
+				ext
+					.rpcs("send")
+					.slice(sent)
+					.map(rpc => rpc.method),
+			).toEqual(["Input.dispatchKeyEvent"]);
+			ack(bridge, ext, "send");
+			windowOpen(bridge, ext, 1);
+			await flush();
+			expect(browsers).toEqual([browserPid]);
+		},
+	);
 
 	it("does not take the user's keys back from a browser found for a socket since replaced", async () => {
 		const { readBrowsers, browsers, frontApp } = frontAppRecorder();
