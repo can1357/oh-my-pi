@@ -3,8 +3,10 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { findFreeCdpPort } from "@oh-my-pi/pi-coding-agent/tools/browser/attach";
 import {
 	chromiumExecutableProbeForTest,
+	launchHeadlessBrowser,
 	loadPuppeteer,
 	removeUserDataDir,
 	resolveSharedBrowserLaunchSpec,
@@ -90,31 +92,57 @@ describe("shared browser launch", () => {
 	});
 });
 
-// SIGKILL and process groups are POSIX semantics; Windows never detached Chromium.
-describe.skipIf(!CHROMIUM_AVAILABLE || process.platform === "win32")("process-local headless launch", () => {
-	it("exits with the process that launched it, even when that process is SIGKILLed", async () => {
-		const owner = Bun.spawn([process.execPath, HEADLESS_OWNER], { stdin: "pipe", stdout: "pipe", stderr: "inherit" });
-		let output = "";
-		const decoder = new TextDecoder();
-		for await (const chunk of owner.stdout) {
-			output += decoder.decode(chunk, { stream: true });
-			if (output.includes("\n")) break;
-		}
-		const { wsEndpoint, userDataDir }: { wsEndpoint: string; userDataDir: string } = JSON.parse(output);
+describe.skipIf(!CHROMIUM_AVAILABLE)("process-local headless launch", () => {
+	// SIGKILL and process groups are POSIX semantics; Windows never detached Chromium.
+	it.skipIf(process.platform === "win32")(
+		"exits with the process that launched it, even when that process is SIGKILLed",
+		async () => {
+			const owner = Bun.spawn([process.execPath, HEADLESS_OWNER], {
+				stdin: "pipe",
+				stdout: "pipe",
+				stderr: "inherit",
+			});
+			let output = "";
+			const decoder = new TextDecoder();
+			for await (const chunk of owner.stdout) {
+				output += decoder.decode(chunk, { stream: true });
+				if (output.includes("\n")) break;
+			}
+			const { wsEndpoint, userDataDir }: { wsEndpoint: string; userDataDir: string } = JSON.parse(output);
+			try {
+				const puppeteer = await loadPuppeteer();
+				const observer = await puppeteer.connect({ browserWSEndpoint: wsEndpoint });
+				const disconnected = Promise.withResolvers<void>();
+				observer.once("disconnected", () => disconnected.resolve());
+				owner.stdin.write("kill\n");
+				await owner.stdin.flush();
+				await owner.exited;
+				expect(owner.signalCode).toBe("SIGKILL");
+				// Chromium closing its DevTools socket is it exiting; a survivor keeps this pending.
+				await disconnected.promise;
+				expect(observer.connected).toBe(false);
+			} finally {
+				await removeUserDataDir(userDataDir);
+			}
+		},
+		30_000,
+	);
+
+	it("serves the tab-worker endpoint on a debugging port the caller picked", async () => {
+		const port = await findFreeCdpPort();
+		const { browser, wsEndpoint, userDataDir } = await launchHeadlessBrowser({
+			headless: true,
+			args: [`--remote-debugging-port=${port}`],
+		});
 		try {
+			expect(new URL(wsEndpoint).port).toBe(String(port));
 			const puppeteer = await loadPuppeteer();
-			const observer = await puppeteer.connect({ browserWSEndpoint: wsEndpoint });
-			const disconnected = Promise.withResolvers<void>();
-			observer.once("disconnected", () => disconnected.resolve());
-			owner.stdin.write("kill\n");
-			await owner.stdin.flush();
-			await owner.exited;
-			expect(owner.signalCode).toBe("SIGKILL");
-			// Chromium closing its DevTools socket is it exiting; a survivor keeps this pending.
-			await disconnected.promise;
-			expect(observer.connected).toBe(false);
+			const worker = await puppeteer.connect({ browserWSEndpoint: wsEndpoint });
+			expect(await worker.version()).toBe(await browser.version());
+			worker.disconnect();
 		} finally {
-			await removeUserDataDir(userDataDir);
+			await browser.close();
+			if (userDataDir) await removeUserDataDir(userDataDir);
 		}
 	}, 30_000);
 });

@@ -102,8 +102,8 @@ const STEALTH_ACCEPT_LANGUAGE = "en-US,en";
 
 const USER_AGENT_TARGET_TIMEOUT_MS = 5_000;
 const USER_AGENT_TARGET_TYPES = new Set(["page", "webview", "background_page"]);
-/** How long a pipe-launched Chromium may take to publish its DevTools port after launch. */
-const DEVTOOLS_ACTIVE_PORT_TIMEOUT_MS = 10_000;
+/** How long a pipe-launched Chromium may take to serve its DevTools endpoint after launch. */
+const DEVTOOLS_ENDPOINT_TIMEOUT_MS = 10_000;
 
 /**
  * Lazy-import puppeteer while hiding the user's cwd from cosmiconfig. The
@@ -677,8 +677,13 @@ export async function launchHeadlessBrowser(opts: LaunchHeadlessOptions): Promis
 	// Puppeteer picks the pipe transport from `--remote-debugging-pipe`. Chromium
 	// exits when the pipe closes, so it dies with this process even on SIGKILL;
 	// over a WebSocket it runs detached in its own process group and outlives
-	// it. The port serves the WebSocket that tab workers attach through.
-	launchArgs.push("--remote-debugging-pipe", "--remote-debugging-port=0");
+	// it. The port, a free one unless the caller picked it, serves the WebSocket
+	// that tab workers attach through.
+	launchArgs.push("--remote-debugging-pipe");
+	const debuggingPort = Number(
+		launchArgs.find(arg => arg.startsWith("--remote-debugging-port="))?.slice("--remote-debugging-port=".length) ?? 0,
+	);
+	if (!debuggingPort) launchArgs.push("--remote-debugging-port=0");
 	try {
 		if (userDataDir) await seedOwnedProfilePreferences(userDataDir);
 		const executablePath = await ensureChromiumExecutable();
@@ -693,7 +698,7 @@ export async function launchHeadlessBrowser(opts: LaunchHeadlessOptions): Promis
 			protocolTimeout: BROWSER_PROTOCOL_TIMEOUT_MS,
 		});
 		try {
-			return { browser, wsEndpoint: await readDevToolsEndpoint(profileDir), userDataDir };
+			return { browser, wsEndpoint: await launchedEndpoint(profileDir, debuggingPort), userDataDir };
 		} catch (error) {
 			await browser.close();
 			throw error;
@@ -705,22 +710,30 @@ export async function launchHeadlessBrowser(opts: LaunchHeadlessOptions): Promis
 }
 
 /**
- * The browser WebSocket endpoint a Chromium started with `--remote-debugging-port`
- * publishes in `<profileDir>/DevToolsActivePort` (port, then browser target path)
- * once that server listens.
+ * The browser WebSocket endpoint a just-launched Chromium serves on its debugging
+ * port: a port the caller picked answers `/json/version`; for port 0 Chromium
+ * publishes the one it bound in `<profileDir>/DevToolsActivePort` (port, then
+ * browser target path).
  */
-async function readDevToolsEndpoint(profileDir: string): Promise<string> {
-	const file = path.join(profileDir, "DevToolsActivePort");
-	const deadline = Date.now() + DEVTOOLS_ACTIVE_PORT_TIMEOUT_MS;
+async function launchedEndpoint(profileDir: string, debuggingPort: number): Promise<string> {
+	const deadline = Date.now() + DEVTOOLS_ENDPOINT_TIMEOUT_MS;
 	for (;;) {
-		try {
-			const [port, browserPath] = (await Bun.file(file).text()).split("\n");
-			if (port && browserPath) return `ws://127.0.0.1:${port}${browserPath}`;
-		} catch (error) {
-			if (!isEnoent(error)) throw error;
-		}
-		if (Date.now() >= deadline) throw new Error(`Chromium did not publish its DevTools port in ${file}`);
+		const endpoint = debuggingPort
+			? await debuggerEndpointOf(`http://127.0.0.1:${debuggingPort}`)
+			: await activePortEndpoint(profileDir);
+		if (endpoint) return endpoint;
+		if (Date.now() >= deadline) throw new Error("Chromium did not serve its DevTools endpoint after launch");
 		await Bun.sleep(50);
+	}
+}
+
+async function activePortEndpoint(profileDir: string): Promise<string | undefined> {
+	try {
+		const [port, browserPath] = (await Bun.file(path.join(profileDir, "DevToolsActivePort")).text()).split("\n");
+		return port && browserPath ? `ws://127.0.0.1:${port}${browserPath}` : undefined;
+	} catch (error) {
+		if (isEnoent(error)) return undefined;
+		throw error;
 	}
 }
 
