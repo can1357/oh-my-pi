@@ -4042,21 +4042,18 @@ export class SessionManager {
 		// Every change made before this rewrite is carried by bodies serialized at this revision or later.
 		const revision = ++this.#bodyRevision;
 		let outcome: FencedRewriteOutcome | undefined;
-		let restored = false;
-		const restoreUnsaved = () => {
-			if (restored) return;
-			restored = true;
-			this.#restoreUnsaved(restore);
-		};
 		try {
 			await this.#scheduleDiskWork(
 				async () => {
 					try {
 						outcome = await this.#runFencedAtomicRewrite(startEpoch);
 					} catch (error) {
-						// In the turn the write failed in, before anything else runs.
-						restoreUnsaved();
-						throw error;
+						// Its write failed. The failure latches as any disk failure does, and
+						// whether the change is saved anyway — by a write that ran meanwhile — is
+						// settled off the chain, like a superseded rewrite.
+						this.#noteDiskFailure(error);
+						outcome = { superseded: error };
+						return;
 					}
 					if (outcome === "published") {
 						this.#fileIsCurrent = true;
@@ -4068,10 +4065,8 @@ export class SessionManager {
 				{ epoch: startEpoch },
 			);
 		} catch (error) {
-			// A failure latched before its turn refused it: nothing saved it. Nothing
-			// writes while a failure is latched, so restoring here is still in time.
-			restoreUnsaved();
-			throw error;
+			// A failure latched before its turn refused it.
+			outcome = { superseded: error };
 		}
 		// A task the epoch moved past before it started never ran; it is settled like a superseded one.
 		if (outcome === undefined) {
