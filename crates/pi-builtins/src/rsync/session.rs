@@ -573,7 +573,8 @@ fn log_config(io: &HostIo, opts: &Options, am_server: bool, local_server: bool) 
 	LogConfig {
 		levels: opts.levels.clone(),
 		out_format: opts.stdout_format.clone(),
-		log_file: opts.logfile_name.as_deref().map(|p| io.resolve(p)),
+		// An empty name means syslog (upstream log_init), not the directory.
+		log_file: opts.logfile_name.as_deref().map(|p| if p.is_empty() { PathBuf::new() } else { io.resolve(p) }),
 		log_file_format: opts.logfile_format.clone(),
 		human_readable: u8::try_from(opts.human_readable).unwrap_or(u8::MAX),
 		eight_bit_output: opts.allow_8bit_chars,
@@ -1158,8 +1159,10 @@ fn client_main(io: &HostIo, mut opts: Options, argv: &[OsString]) -> i32 {
 	let role = if inputs.ops.remote_is_sender { Role::PreReceiver } else { Role::Sender };
 	let logger = Logger::local(Box::new(io.out.clone()), Box::new(io.err.clone()), log_config(io, &opts, false, local))
 		.with_role(role);
+	// Upstream's client opens its log while it parses its options, still
+	// starting up, so a failure there names it `[client]` (who_am_i).
 	if opts.logfile_name.is_some() {
-		logger.open_log_file(&io.fs, opts.insecure_links);
+		logger.with_role(Role::Client).open_log_file(&io.fs, opts.insecure_links);
 	}
 	for notice in &opts.notices {
 		logger.rprintf(LogCode::Info, format!("{notice}\n").as_bytes());
@@ -1976,8 +1979,11 @@ fn server_main(io: &HostIo, opts: Options, local: Option<LocalServer>) -> i32 {
 		});
 		base_logger.set_deleted_sink(Some(deleted));
 	}
+	// A remote server opens its log while it parses its options, still
+	// starting up (`[server]`); a local half's opens later, as the receiver.
 	if opts.logfile_name.is_some() {
-		base_logger.open_log_file(&io.fs, opts.insecure_links);
+		let opener = if local_server { base_logger.clone() } else { base_logger.with_role(Role::Server) };
+		opener.open_log_file(&io.fs, opts.insecure_links);
 	}
 	for notice in &opts.notices {
 		base_logger.rprintf(LogCode::Info, format!("{notice}\n").as_bytes());

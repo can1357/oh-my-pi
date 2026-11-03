@@ -1,11 +1,11 @@
 import { isRecord } from "@oh-my-pi/pi-utils";
-import type { AsyncJob, AsyncJobManager } from "../async";
+import type { AsyncJob, AsyncJobManagerApi } from "../async";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { ToolSession } from "../tools";
 import { ToolAbortError } from "../tools/tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { withBridgeTimeoutPause } from "./bridge-timeout";
-import { getCompletionHandle, type CompletionHandleEntry } from "./completion-bridge";
+import { type CompletionAttempt, getCompletionHandle, type CompletionHandleEntry } from "./completion-bridge";
 import type { JsStatusEvent } from "./js/shared/types";
 
 /** Synthetic bridge name reserved for waiting on eval handles. */
@@ -30,6 +30,8 @@ export interface EvalHandleSnapshot extends EvalHandleRef {
 	text?: string;
 	data?: unknown;
 	error?: string;
+	/** Completion fallback attempts; only on `__status__` snapshots. */
+	attempts?: CompletionAttempt[];
 }
 
 interface EvalHandleBridgeOptions {
@@ -39,7 +41,7 @@ interface EvalHandleBridgeOptions {
 }
 
 type ResolvedHandle =
-	| { ref: EvalHandleRef; job: AsyncJob; manager: AsyncJobManager }
+	| { ref: EvalHandleRef; job: AsyncJob; manager: AsyncJobManagerApi }
 	| { ref: EvalHandleRef; completion: CompletionHandleEntry };
 
 function parseRef(value: unknown): EvalHandleRef {
@@ -262,7 +264,10 @@ export async function runEvalWait(
 
 /** Return one handle's current state without waiting or consuming it. */
 export function runEvalStatus(args: unknown, options: EvalHandleBridgeOptions): EvalHandleSnapshot {
-	return snapshot(resolveHandle(parseSingleRef(args), options));
+	const resolved = resolveHandle(parseSingleRef(args), options);
+	const result = snapshot(resolved);
+	if ("completion" in resolved) result.attempts = resolved.completion.attempts.map(attempt => ({ ...attempt }));
+	return result;
 }
 
 /** Cancel one running eval handle owned by this session. */

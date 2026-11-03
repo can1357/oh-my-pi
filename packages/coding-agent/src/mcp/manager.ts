@@ -240,17 +240,66 @@ function isAbortedHandshake(signal: AbortSignal, error: unknown): boolean {
 }
 
 /**
+ * Surface of an {@link MCPManager} that sessions reusing a manager (subagents, `mcp://` and
+ * `skill://` handlers) use. Subagent worker threads receive a remote implementation whose calls
+ * run on the main thread's manager, so connections and server processes stay single-owner.
+ */
+export interface MCPManagerApi {
+	/** Live tool snapshot (MCP tool wrappers). */
+	getTools(): CustomTool<TSchema, MCPToolDetails>[];
+	/** Subscribe to tool-set changes; returns an unsubscribe fn. */
+	addToolsChangedListener(listener: () => void): () => void;
+	/** Subscribe to every server notification frame; returns an unsubscribe fn. */
+	addNotificationListener(listener: (serverName: string, method: string, params: unknown) => void): () => void;
+	/** Names of currently connected servers. */
+	getConnectedServers(): string[];
+	/** Cached resources/templates of one server. */
+	getServerResources(name: string): { resources: MCPResource[]; templates: MCPResourceTemplate[] } | undefined;
+	/** Wait until one server's resource catalog is loaded. */
+	ensureServerResources(name: string): Promise<void>;
+	/** Wait for in-flight connection attempts. */
+	waitForPendingConnections(): Promise<void>;
+	/** Read one resource from a server. */
+	readServerResource(
+		name: string,
+		uri: string,
+		options?: MCPRequestOptions,
+	): Promise<MCPResourceReadResult | undefined>;
+	/** Server-provided instructions by server name. */
+	getServerInstructions(): Map<string, string>;
+	/** Apply the browser-MCP filter after the built-in browser capability toggled. */
+	reconcileBrowserFilter(enabled: boolean): Promise<void>;
+}
+
+/** Process-global MCP manager accessors a subagent worker installs in place of its own (empty) slot. */
+export interface MCPManagerGlobal {
+	instance(): MCPManagerApi | undefined;
+	load(): Promise<MCPManagerApi | undefined>;
+	available(): boolean;
+}
+
+/**
  * MCP Server Manager.
  *
  * Manages connections to MCP servers and provides tools to the agent.
  */
-export class MCPManager {
+export class MCPManager implements MCPManagerApi {
 	static #instance: MCPManager | undefined;
 	static #deferred: (() => Promise<MCPManager>) | undefined;
 	static #deferredLoad: Promise<MCPManager> | undefined;
+	static #global: MCPManagerGlobal | undefined;
+
+	/**
+	 * Route {@link instance}/{@link load}/{@link available} to another thread's manager.
+	 * Subagent worker bootstrap only: a worker never owns MCP connections.
+	 */
+	static installGlobal(global: MCPManagerGlobal): void {
+		MCPManager.#global = global;
+	}
 
 	/** Process-global instance shared by internal URL protocol handlers and tools. */
-	static instance(): MCPManager | undefined {
+	static instance(): MCPManagerApi | undefined {
+		if (MCPManager.#global) return MCPManager.#global.instance();
 		return MCPManager.#instance;
 	}
 
@@ -270,11 +319,13 @@ export class MCPManager {
 
 	/** Whether {@link load} can yield an instance: one is installed or a deferred loader is set. */
 	static available(): boolean {
+		if (MCPManager.#global) return MCPManager.#global.available();
 		return MCPManager.#instance !== undefined || MCPManager.#deferred !== undefined;
 	}
 
 	/** The process-global instance, running the deferred loader once if none is installed yet. */
-	static async load(): Promise<MCPManager | undefined> {
+	static async load(): Promise<MCPManagerApi | undefined> {
+		if (MCPManager.#global) return MCPManager.#global.load();
 		if (MCPManager.#instance) return MCPManager.#instance;
 		if (!MCPManager.#deferred) return undefined;
 		if (!MCPManager.#deferredLoad) {
