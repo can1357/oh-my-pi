@@ -905,22 +905,30 @@ fn plan_typing(
 	Ok(TypingPlan::Keys(strokes))
 }
 
-/// Splits `text` at character boundaries into `ei_text.utf8` payloads. Control
-/// characters are refused: committed text is no key press, so a line break
+/// Packs whole graphemes into `ei_text.utf8` payloads, splitting a grapheme at
+/// character boundaries only when it exceeds the per-request limit.
+/// Control characters are refused: committed text is no key press, so a line break
 /// never submits and a tab never moves focus, and Kate dropped a commit that
 /// began with a line break.
 fn text_runs(text: &str) -> CoreResult<Vec<String>> {
 	let mut runs: Vec<String> = Vec::new();
-	for character in text.chars() {
-		if character.is_control() {
+	let mut append = |part: &str| match runs.last_mut() {
+		Some(run) if run.len() + part.len() <= EI_TEXT_UTF8_MAX => run.push_str(part),
+		_ => runs.push(part.to_owned()),
+	};
+	for grapheme in graphemes_str(text) {
+		if let Some(character) = grapheme.chars().find(|character| character.is_control()) {
 			return Err(DesktopError::input_failed(format!(
 				"libei sends text the keyboard layout cannot type as ei_text, which cannot carry \
 				 {character:?}; press Enter or Tab between type() calls instead"
 			)));
 		}
-		match runs.last_mut() {
-			Some(run) if run.len() + character.len_utf8() <= EI_TEXT_UTF8_MAX => run.push(character),
-			_ => runs.push(character.to_string()),
+		if grapheme.len() <= EI_TEXT_UTF8_MAX {
+			append(grapheme);
+		} else {
+			for (offset, character) in grapheme.char_indices() {
+				append(&grapheme[offset..offset + character.len_utf8()]);
+			}
 		}
 	}
 	Ok(runs)
@@ -1268,6 +1276,17 @@ mod tests {
 			device: 0,
 			runs:   vec!["日".repeat(84), "日".repeat(16)],
 		});
+		for grapheme in ["e\u{301}", "👩‍💻", "🇫🇷"] {
+			let prefix = "a".repeat(EI_TEXT_UTF8_MAX - 1);
+			assert_eq!(
+				text_runs(&format!("{prefix}{grapheme}")).unwrap(),
+				vec![prefix, grapheme.to_owned()]
+			);
+		}
+		let oversized = format!("e{}", "\u{301}".repeat(EI_TEXT_UTF8_MAX));
+		let runs = text_runs(&oversized).unwrap();
+		assert_eq!(runs.concat(), oversized);
+		assert!(runs.iter().all(|run| run.len() <= EI_TEXT_UTF8_MAX));
 	}
 
 	#[test]
