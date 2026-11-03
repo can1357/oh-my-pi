@@ -1122,10 +1122,16 @@ async fn run_shell_command_in_filesystem(
 
 	let env_scope_pushed = apply_command_env(&mut session.shell, options.env.as_ref())?;
 
-	let minimizer_mode = if let Some(config) = options.minimizer.as_ref() {
-		minimizer::engine::mode_for(&options.command, config)
-	} else {
-		minimizer::engine::MinimizerMode::None
+	let minimizer_mode = match options.minimizer.as_ref() {
+		Some(config) => match minimizer::engine::mode_for(&options.command, config) {
+			minimizer::engine::MinimizerMode::SegmentedChain
+				if !chain_runs_segment_by_segment(&session.shell, &options.command) =>
+			{
+				minimizer::engine::MinimizerMode::None
+			},
+			mode => mode,
+		},
+		None => minimizer::engine::MinimizerMode::None,
 	};
 
 	let result = match minimizer_mode {
@@ -1158,6 +1164,40 @@ async fn run_shell_command_in_filesystem(
 		let working_dir = Some(session.shell.working_dir().to_string_lossy().into_owned());
 		(exec, minimized, working_dir)
 	})
+}
+
+/// Whether `shell`, the live shell, can run `command`, a chain the minimizer
+/// would run a segment at a time, that way. Each segment runs with streams
+/// of its own, so an `exec` in one would not reach the next as it does in
+/// one run; a segment that may change the shell's state for those after it
+/// keeps the chain whole. Its spelling shows a builtin that does
+/// (`plan::ChainSegment::mutates_shell`); only the live shell shows a word
+/// that names a function or an alias, which may (an `exec` in its body,
+/// however deep), so each such word keeps the chain whole. So does any trap
+/// handler, which can run between commands, and `command_not_found_handle`,
+/// which runs for a command not found.
+fn chain_runs_segment_by_segment(shell: &BrushShell, command: &str) -> bool {
+	let minimizer::plan::CommandPlan::Chain { segments } = minimizer::plan::analyze(command) else {
+		return false;
+	};
+	if segments.iter().any(|segment| segment.mutates_shell)
+		|| shell
+			.traps()
+			.iter_handlers()
+			.any(|(_, handler)| !handler.command.is_empty())
+		|| shell.funcs().get("command_not_found_handle").is_some()
+	{
+		return false;
+	}
+	segments
+		.iter()
+		.flat_map(|segment| &segment.command_words)
+		.all(|word| match word.lookup {
+			minimizer::plan::WordLookup::Command => {
+				!shell.aliases().contains_key(&word.name) && shell.funcs().get(&word.name).is_none()
+			},
+			minimizer::plan::WordLookup::NoFunction | minimizer::plan::WordLookup::Builtin => true,
+		})
 }
 
 /// The session's execution parameters for one run's command, carrying the

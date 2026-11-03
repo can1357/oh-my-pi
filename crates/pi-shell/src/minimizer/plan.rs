@@ -46,9 +46,38 @@ pub struct ChainSegment {
 	/// repeat when the segments run one at a time.
 	pub starts_line:               bool,
 	/// Whether the segment can change the shell's own state for the
-	/// segments after it; see [`simple_command_mutates_shell`]. Such a chain
-	/// is not run segment by segment.
+	/// segments after it, from its spelling alone; see [`command_words`].
+	/// Such a chain is not run segment by segment.
 	pub mutates_shell:             bool,
+	/// The words of the segment's commands that name a command, each with
+	/// how the shell looks it up. Only the live shell knows whether one is a
+	/// function or an alias, which may change the shell's state (an `exec`
+	/// in a function body), so the runner checks them against it before it
+	/// runs the chain segment by segment.
+	pub command_words:             Vec<CommandWord>,
+}
+
+/// A word that names a command, which only the live shell can resolve to an
+/// alias, a function, a builtin or a file (see
+/// [`ChainSegment::command_words`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandWord {
+	/// The word after quote removal.
+	pub name:   String,
+	/// How the shell looks the word up.
+	pub lookup: WordLookup,
+}
+
+/// How the shell looks up a [`CommandWord`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WordLookup {
+	/// A simple command's first word: an alias, a function, a builtin or a
+	/// file.
+	Command,
+	/// A word after `command`, which skips functions: a builtin or a file.
+	NoFunction,
+	/// A word after `builtin`: a builtin only.
+	Builtin,
 }
 
 /// Outcome of analyzing a raw command string.
@@ -167,7 +196,7 @@ fn classify_chain(program: &Program) -> Option<CommandPlan> {
 		let mut starts_line = item_starts_line;
 
 		loop {
-			let (command, program, mutates_shell) = simple_segment(pipeline)?;
+			let (command, program, words) = simple_segment(pipeline)?;
 
 			let suppress_errexit = additional
 				.peek()
@@ -178,7 +207,8 @@ fn classify_chain(program: &Program) -> Option<CommandPlan> {
 				run_if_previous_succeeded,
 				suppress_errexit,
 				starts_line,
-				mutates_shell,
+				mutates_shell: words.is_none(),
+				command_words: words.unwrap_or_default(),
 			});
 			starts_line = false;
 
@@ -269,7 +299,11 @@ fn simple_command_is_safe(simple: &SimpleCommand) -> bool {
 	true
 }
 
-fn simple_segment(pipeline: &Pipeline) -> Option<(String, String, bool)> {
+/// A pipeline that can be one segment of a chain: its reconstructed text,
+/// its first program word, and the words that name its commands (`None` when
+/// its spelling alone shows it can change the shell's state; see
+/// [`command_words`]).
+fn simple_segment(pipeline: &Pipeline) -> Option<(String, String, Option<Vec<CommandWord>>)> {
 	if pipeline.timed.is_some() || pipeline.bang || pipeline.seq.is_empty() {
 		return None;
 	}
@@ -313,25 +347,38 @@ fn simple_segment(pipeline: &Pipeline) -> Option<(String, String, bool)> {
 		return None;
 	}
 	let options = ParserOptions::default();
-	let mutates_shell = pipeline.seq.iter().any(|command| {
-		matches!(command, Command::Simple(simple) if simple_command_mutates_shell(simple, &options))
-	});
-	Some((command, program, mutates_shell))
+	let mut words = Some(Vec::new());
+	for command in &pipeline.seq {
+		if let (Command::Simple(simple), Some(all)) = (command, words.as_mut()) {
+			match command_words(simple, &options) {
+				Some(named) => all.extend(named),
+				None => words = None,
+			}
+		}
+	}
+	Some((command, program, words))
 }
 
 /// The builtins whose effect on the shell outlives the command: `exec`
 /// changes the shell's file descriptors, `eval`, `source` and `.` can do
-/// anything, and `alias`/`unalias` change how later text is read.
-const SHELL_STATE_BUILTINS: [&str; 6] = ["exec", "eval", "source", ".", "alias", "unalias"];
+/// anything, `trap` sets commands that run between later ones, `fc`
+/// re-runs earlier commands, `mapfile` and `readarray` can run a callback,
+/// and `alias`/`unalias` change how later text is read.
+const SHELL_STATE_BUILTINS: [&str; 10] =
+	["exec", "eval", "source", ".", "trap", "fc", "mapfile", "readarray", "alias", "unalias"];
 
-/// Whether `simple` can change the shell's own state for the commands after
-/// it (see [`SHELL_STATE_BUILTINS`]). The command is resolved as the shell
-/// resolves it: by its words after quote removal (`'exec'`, `"exec"` and
-/// `\exec` are `exec`), and through `command` and `builtin` with their
-/// options. A word the shell would expand (`$cmd`, `$(...)`, `~`, `$'...'`,
-/// an unquoted `{` that brace expansion may take, as `{exec,}` is `exec`)
-/// cannot be resolved here, so such a command counts as one that can.
-fn simple_command_mutates_shell(simple: &SimpleCommand, options: &ParserOptions) -> bool {
+/// The words of `simple` that name the command it runs, each with how the
+/// shell looks it up: the first word, and through `command` and `builtin`
+/// with their options each word after them; or `None` when its spelling
+/// alone shows it can change the shell's own state for the commands after
+/// it (see [`SHELL_STATE_BUILTINS`]). Words are read as the shell reads
+/// them, after quote removal (`'exec'`, `"exec"` and `\exec` are `exec`). A
+/// word the shell would expand (`$cmd`, `$(...)`, `~`, `$'...'`, an unquoted
+/// `{` that brace expansion may take, as `{exec,}` is `exec`) cannot be
+/// resolved here, so such a command counts as one that can. Whether a named
+/// word is a function or an alias, which can too, only the live shell knows
+/// ([`ChainSegment::command_words`]).
+fn command_words(simple: &SimpleCommand, options: &ParserOptions) -> Option<Vec<CommandWord>> {
 	let suffix_words = simple
 		.suffix
 		.iter()
@@ -341,30 +388,34 @@ fn simple_command_mutates_shell(simple: &SimpleCommand, options: &ParserOptions)
 			_ => None,
 		});
 	let mut words = simple.word_or_name.iter().chain(suffix_words);
-	let mut wrapper: Option<&str> = None;
+	let mut named = Vec::new();
+	let mut lookup = WordLookup::Command;
 	loop {
 		let Some(word) = words.next() else {
-			return false;
+			return Some(named);
 		};
-		let Some(name) = static_word_text(&word.value, options) else {
-			return true;
-		};
+		let name = static_word_text(&word.value, options)?;
 		// `command -p name` and `builtin -- name`: the options come before
 		// the command they run.
-		if wrapper.is_some() && name.starts_with('-') && name.len() > 1 {
-			if wrapper == Some("command") && name.contains(['v', 'V']) {
+		if lookup != WordLookup::Command && name.starts_with('-') && name.len() > 1 {
+			if lookup == WordLookup::NoFunction && name.contains(['v', 'V']) {
 				// `command -v`/`-V` only describes the command.
-				return false;
+				return Some(named);
 			}
 			continue;
 		}
 		if SHELL_STATE_BUILTINS.contains(&name.as_str()) {
-			return true;
+			return None;
 		}
-		match name.as_str() {
-			"command" => wrapper = Some("command"),
-			"builtin" => wrapper = Some("builtin"),
-			_ => return false,
+		let next = match name.as_str() {
+			"command" => Some(WordLookup::NoFunction),
+			"builtin" => Some(WordLookup::Builtin),
+			_ => None,
+		};
+		named.push(CommandWord { name, lookup });
+		match next {
+			Some(next) => lookup = next,
+			None => return Some(named),
 		}
 	}
 }
@@ -473,6 +524,11 @@ mod tests {
 		}
 	}
 
+	/// The first word of a simple command, looked up as a command.
+	fn named(name: &str) -> Vec<CommandWord> {
+		vec![CommandWord { name: name.to_owned(), lookup: WordLookup::Command }]
+	}
+
 	fn assert_not_chain(command: &str) {
 		assert!(
 			!matches!(analyze(command), CommandPlan::Chain { .. }),
@@ -506,6 +562,7 @@ mod tests {
 					suppress_errexit:          true,
 					starts_line:               true,
 					mutates_shell:             false,
+					command_words:             named("git"),
 				},
 				ChainSegment {
 					command:                   "git diff --name-only".to_string(),
@@ -514,6 +571,7 @@ mod tests {
 					suppress_errexit:          false,
 					starts_line:               false,
 					mutates_shell:             false,
+					command_words:             named("git"),
 				},
 			])
 		);
@@ -532,6 +590,7 @@ mod tests {
 					suppress_errexit:          false,
 					starts_line:               true,
 					mutates_shell:             false,
+					command_words:             named("git"),
 				},
 				ChainSegment {
 					command:                   "bun test".to_string(),
@@ -540,6 +599,7 @@ mod tests {
 					suppress_errexit:          false,
 					starts_line:               false,
 					mutates_shell:             false,
+					command_words:             named("bun"),
 				},
 			])
 		);
@@ -558,6 +618,7 @@ mod tests {
 					suppress_errexit:          true,
 					starts_line:               true,
 					mutates_shell:             false,
+					command_words:             named("false"),
 				},
 				ChainSegment {
 					command:                   "echo no".to_string(),
@@ -566,6 +627,7 @@ mod tests {
 					suppress_errexit:          false,
 					starts_line:               false,
 					mutates_shell:             false,
+					command_words:             named("echo"),
 				},
 				ChainSegment {
 					command:                   "echo yes".to_string(),
@@ -574,6 +636,7 @@ mod tests {
 					suppress_errexit:          false,
 					starts_line:               false,
 					mutates_shell:             false,
+					command_words:             named("echo"),
 				},
 			])
 		);
@@ -610,6 +673,10 @@ mod tests {
 			"\"$cmd\" 2>/dev/null",
 			"{exec,} 2>/dev/null",
 			"command {exec,} 2>/dev/null",
+			"trap 'exec >out' ERR",
+			"command trap - ERR",
+			"mapfile -C cb lines",
+			"fc -s",
 		] {
 			assert!(mutates(command), "{command}");
 		}
@@ -618,6 +685,48 @@ mod tests {
 		{
 			assert!(!mutates(command), "{command}");
 		}
+	}
+
+	/// Each word that names a command is kept with how the shell looks it
+	/// up, through `command` and `builtin` and their options, for every stage
+	/// of a segment's pipeline: only the live shell can tell a function or an
+	/// alias.
+	#[test]
+	fn each_command_word_is_kept_with_its_lookup() {
+		let words = |command: &str| -> Vec<(String, WordLookup)> {
+			chain_of(analyze(&format!("{command} ; echo O")))
+				.expect("expected Chain")
+				.remove(0)
+				.command_words
+				.into_iter()
+				.map(|word| (word.name, word.lookup))
+				.collect()
+		};
+		let lookups = |pairs: &[(&str, WordLookup)]| -> Vec<(String, WordLookup)> {
+			pairs
+				.iter()
+				.map(|&(name, lookup)| (name.to_owned(), lookup))
+				.collect()
+		};
+		assert_eq!(words("quiet"), lookups(&[("quiet", WordLookup::Command)]));
+		assert_eq!(words("'quiet' arg"), lookups(&[("quiet", WordLookup::Command)]));
+		assert_eq!(
+			words("command -p -- quiet"),
+			lookups(&[("command", WordLookup::Command), ("quiet", WordLookup::NoFunction)])
+		);
+		assert_eq!(
+			words("builtin command echo"),
+			lookups(&[
+				("builtin", WordLookup::Command),
+				("command", WordLookup::Builtin),
+				("echo", WordLookup::NoFunction),
+			])
+		);
+		assert_eq!(
+			words("cat file | quiet"),
+			lookups(&[("cat", WordLookup::Command), ("quiet", WordLookup::Command)])
+		);
+		assert_eq!(words("command -v quiet"), lookups(&[("command", WordLookup::Command)]));
 	}
 
 	/// Each line of a chain that spans lines begins with a segment that starts

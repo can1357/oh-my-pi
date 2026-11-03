@@ -177,15 +177,17 @@ fn chain_has_eligible_segment(segments: &[plan::ChainSegment], config: &Minimize
 	})
 }
 
-/// True when any segment can change the shell's own state for the segments
-/// after it (see `plan::ChainSegment::mutates_shell`). The segmented chain
-/// runner executes each segment in a fresh capture context with its own
-/// stdout/stderr pipe, so a descriptor `exec >out` or `exec 2>err` changed in
-/// one segment would not reach the segments that follow: output the user
-/// redirected to a file would instead be captured and returned to the
-/// caller. `eval`, `source`, `.`, `alias` and `unalias` likewise change what
-/// later text means. Such a chain stays opaque (passthrough), keeping the
-/// shell's semantics.
+/// True when any segment's spelling shows it can change the shell's own
+/// state for the segments after it (see `plan::ChainSegment::mutates_shell`).
+/// The segmented chain runner executes each segment in a fresh capture
+/// context with its own stdout/stderr pipe, so a descriptor `exec >out` or
+/// `exec 2>err` changed in one segment would not reach the segments that
+/// follow: output the user redirected to a file would instead be captured
+/// and returned to the caller. `eval`, `source`, `.`, `alias` and `unalias`
+/// likewise change what later text means. Such a chain stays opaque
+/// (passthrough), keeping the shell's semantics. A word that names a
+/// function or an alias, which may do the same, only the live shell can
+/// see; the runner checks that before it runs a chain a segment at a time.
 fn chain_mutates_shell_fds(segments: &[plan::ChainSegment]) -> bool {
 	segments.iter().any(|segment| segment.mutates_shell)
 }
