@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed `rerank()` requests leaving out the model's configured headers, including `models.yml` `headers`, so a rerank endpoint that needs its own header rejected every call
+- Fixed `rerank()` requests leaving out the model's configured headers, including `models.yml` `headers`, so a rerank endpoint that needs its own header or `Authorization` rejected every call ([#17974](https://github.com/can1357/oh-my-pi/pull/17974) by [@breakwaterlabs](https://github.com/breakwaterlabs))
 
 ## [18.16.0] - 2026-11-02
 
