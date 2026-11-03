@@ -6220,242 +6220,2198 @@ mod tests {
 		let rows: Vec<(&str, &str, &str)> = vec![
 			(
 				"a width of 200000 for an integer",
-				"printf '%0200000d' 7 >\"$top/out\" 2>\"$top/err\"; s=$?; echo \"S=$s n=$(wc -c \
-				 <\"$top/out\") head=<$(head -c 12 \"$top/out\")> tail=<$(tail -c 12 \"$top/out\")> \
-				 err=<$(sed \"s/^.*printf: //\" \"$top/err\" | head -1)>\"",
+				"out=$(printf '%0200000d' 7 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
 				"S=0 n=200000 head=<000000000000> tail=<000000000007> err=<>\n",
 			),
 			(
 				"a precision of 200000 for an integer",
-				"printf '%.200000d' 7 >\"$top/out\" 2>\"$top/err\"; s=$?; echo \"S=$s n=$(wc -c \
-				 <\"$top/out\") head=<$(head -c 12 \"$top/out\")> tail=<$(tail -c 12 \"$top/out\")> \
-				 err=<$(sed \"s/^.*printf: //\" \"$top/err\" | head -1)>\"",
+				"out=$(printf '%.200000d' 7 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
 				"S=0 n=200000 head=<000000000000> tail=<000000000007> err=<>\n",
 			),
 			(
 				"a width argument of 200000",
-				"printf '%*d' 200000 7 >\"$top/out\" 2>\"$top/err\"; s=$?; echo \"S=$s n=$(wc -c \
-				 <\"$top/out\") head=<$(head -c 12 \"$top/out\")> tail=<$(tail -c 12 \"$top/out\")> \
-				 err=<$(sed \"s/^.*printf: //\" \"$top/err\" | head -1)>\"",
+				"out=$(printf '%*d' 200000 7 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
 				"S=0 n=200000 head=<            > tail=<           7> err=<>\n",
 			),
 			(
 				"a negative width argument",
-				"printf '%*d' -200000 7 >\"$top/out\" 2>\"$top/err\"; s=$?; echo \"S=$s n=$(wc -c \
-				 <\"$top/out\") head=<$(head -c 12 \"$top/out\")> tail=<$(tail -c 12 \"$top/out\")> \
-				 err=<$(sed \"s/^.*printf: //\" \"$top/err\" | head -1)>\"",
+				"out=$(printf '%*d' -200000 7 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
 				"S=0 n=200000 head=<7           > tail=<            > err=<>\n",
 			),
 			(
 				"a width of 200000 for a negative integer",
-				"printf '%0200000d' -7 >\"$top/out\" 2>\"$top/err\"; s=$?; echo \"S=$s n=$(wc -c \
-				 <\"$top/out\") head=<$(head -c 12 \"$top/out\")> tail=<$(tail -c 12 \"$top/out\")> \
-				 err=<$(sed \"s/^.*printf: //\" \"$top/err\" | head -1)>\"",
+				"out=$(printf '%0200000d' -7 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
 				"S=0 n=200000 head=<-00000000000> tail=<000000000007> err=<>\n",
 			),
 			(
 				"a width past an int for an integer",
-				"printf '%2147483648d' 7 >\"$top/out\" 2>\"$top/err\"; s=$?; echo \"S=$s n=$(wc -c \
-				 <\"$top/out\") head=<$(head -c 12 \"$top/out\")> tail=<$(tail -c 12 \"$top/out\")> \
-				 err=<$(sed \"s/^.*printf: //\" \"$top/err\" | head -1)>\"",
+				"out=$(printf '%2147483648d' 7 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
 				"S=0 n=0 head=<> tail=<> err=<>\n",
 			),
 			(
 				"a width past a long for an integer",
-				"printf '%99999999999999999999d' 7 >\"$top/out\" 2>\"$top/err\"; s=$?; echo \"S=$s \
-				 n=$(wc -c <\"$top/out\") head=<$(head -c 12 \"$top/out\")> tail=<$(tail -c 12 \
-				 \"$top/out\")> err=<$(sed \"s/^.*printf: //\" \"$top/err\" | head -1)>\"",
+				"out=$(printf '%99999999999999999999d' 7 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
 				"S=0 n=0 head=<> tail=<> err=<>\n",
 			),
 			(
 				"a width of 200000 for a string",
-				"printf '%200000s' ab >\"$top/out\" 2>\"$top/err\"; s=$?; echo \"S=$s n=$(wc -c \
-				 <\"$top/out\") head=<$(head -c 12 \"$top/out\")> tail=<$(tail -c 12 \"$top/out\")> \
-				 err=<$(sed \"s/^.*printf: //\" \"$top/err\" | head -1)>\"",
+				"out=$(printf '%200000s' ab 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
 				"S=0 n=200000 head=<            > tail=<          ab> err=<>\n",
 			),
 			(
 				"a left-justified width of 200000 for a string",
-				"printf '%-200000s' ab >\"$top/out\" 2>\"$top/err\"; s=$?; echo \"S=$s n=$(wc -c \
-				 <\"$top/out\") head=<$(head -c 12 \"$top/out\")> tail=<$(tail -c 12 \"$top/out\")> \
-				 err=<$(sed \"s/^.*printf: //\" \"$top/err\" | head -1)>\"",
+				"out=$(printf '%-200000s' ab 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
 				"S=0 n=200000 head=<ab          > tail=<            > err=<>\n",
 			),
 			(
 				"a precision of 70000 for a string",
-				"printf '%.70000s' abc >\"$top/out\" 2>\"$top/err\"; s=$?; echo \"S=$s n=$(wc -c \
-				 <\"$top/out\") head=<$(head -c 12 \"$top/out\")> tail=<$(tail -c 12 \"$top/out\")> \
-				 err=<$(sed \"s/^.*printf: //\" \"$top/err\" | head -1)>\"",
-				"S=0 n=3 head=<abc> tail=<abc> err=<>\n",
+				"out=$(printf '%.70000s' abc 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=3 head=<abc> tail=<> err=<>\n",
 			),
 			(
 				"a width and precision of 200000 for a string",
-				"printf '%200000.70000s' abc >\"$top/out\" 2>\"$top/err\"; s=$?; echo \"S=$s n=$(wc \
-				 -c <\"$top/out\") head=<$(head -c 12 \"$top/out\")> tail=<$(tail -c 12 \
-				 \"$top/out\")> err=<$(sed \"s/^.*printf: //\" \"$top/err\" | head -1)>\"",
+				"out=$(printf '%200000.70000s' abc 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
 				"S=0 n=200000 head=<            > tail=<         abc> err=<>\n",
 			),
 			(
 				"a width of 200000 for an escaped string",
-				"printf '%200000b' 'a\\tb' >\"$top/out\" 2>\"$top/err\"; s=$?; echo \"S=$s n=$(wc -c \
-				 <\"$top/out\") head=<$(head -c 12 \"$top/out\")> tail=<$(tail -c 12 \"$top/out\")> \
-				 err=<$(sed \"s/^.*printf: //\" \"$top/err\" | head -1)>\"",
+				"out=$(printf '%200000b' 'a\\tb' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
 				"S=0 n=200000 head=<            > tail=<         a\tb> err=<>\n",
 			),
 			(
 				"a width of 200000 for a character",
-				"printf '%200000c' z >\"$top/out\" 2>\"$top/err\"; s=$?; echo \"S=$s n=$(wc -c \
-				 <\"$top/out\") head=<$(head -c 12 \"$top/out\")> tail=<$(tail -c 12 \"$top/out\")> \
-				 err=<$(sed \"s/^.*printf: //\" \"$top/err\" | head -1)>\"",
+				"out=$(printf '%200000c' z 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
 				"S=0 n=200000 head=<            > tail=<           z> err=<>\n",
 			),
 			(
 				"a width of 200000 for hexadecimal",
-				"printf '%#200000x' 255 >\"$top/out\" 2>\"$top/err\"; s=$?; echo \"S=$s n=$(wc -c \
-				 <\"$top/out\") head=<$(head -c 12 \"$top/out\")> tail=<$(tail -c 12 \"$top/out\")> \
-				 err=<$(sed \"s/^.*printf: //\" \"$top/err\" | head -1)>\"",
+				"out=$(printf '%#200000x' 255 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
 				"S=0 n=200000 head=<            > tail=<        0xff> err=<>\n",
 			),
 			(
 				"a precision of 200000 for hexadecimal",
-				"printf '%.200000x' 255 >\"$top/out\" 2>\"$top/err\"; s=$?; echo \"S=$s n=$(wc -c \
-				 <\"$top/out\") head=<$(head -c 12 \"$top/out\")> tail=<$(tail -c 12 \"$top/out\")> \
-				 err=<$(sed \"s/^.*printf: //\" \"$top/err\" | head -1)>\"",
+				"out=$(printf '%.200000x' 255 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
 				"S=0 n=200000 head=<000000000000> tail=<0000000000ff> err=<>\n",
 			),
 			(
 				"a width of 200000 for octal",
-				"printf '%#200000o' 8 >\"$top/out\" 2>\"$top/err\"; s=$?; echo \"S=$s n=$(wc -c \
-				 <\"$top/out\") head=<$(head -c 12 \"$top/out\")> tail=<$(tail -c 12 \"$top/out\")> \
-				 err=<$(sed \"s/^.*printf: //\" \"$top/err\" | head -1)>\"",
+				"out=$(printf '%#200000o' 8 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
 				"S=0 n=200000 head=<            > tail=<         010> err=<>\n",
 			),
 			(
 				"a width of 200000 for a float",
-				"printf '%200000f' 1.5 >\"$top/out\" 2>\"$top/err\"; s=$?; echo \"S=$s n=$(wc -c \
-				 <\"$top/out\") head=<$(head -c 12 \"$top/out\")> tail=<$(tail -c 12 \"$top/out\")> \
-				 err=<$(sed \"s/^.*printf: //\" \"$top/err\" | head -1)>\"",
+				"out=$(printf '%200000f' 1.5 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
 				"S=0 n=200000 head=<            > tail=<    1.500000> err=<>\n",
 			),
 			(
 				"a precision of 200000 for a float",
-				"printf '%.200000f' 1.5 >\"$top/out\" 2>\"$top/err\"; s=$?; echo \"S=$s n=$(wc -c \
-				 <\"$top/out\") head=<$(head -c 12 \"$top/out\")> tail=<$(tail -c 12 \"$top/out\")> \
-				 err=<$(sed \"s/^.*printf: //\" \"$top/err\" | head -1)>\"",
+				"out=$(printf '%.200000f' 1.5 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
 				"S=0 n=200002 head=<1.5000000000> tail=<000000000000> err=<>\n",
 			),
 			(
 				"a width and precision of 200000 for a float",
-				"printf '%200000.200000f' 1.5 >\"$top/out\" 2>\"$top/err\"; s=$?; echo \"S=$s n=$(wc \
-				 -c <\"$top/out\") head=<$(head -c 12 \"$top/out\")> tail=<$(tail -c 12 \
-				 \"$top/out\")> err=<$(sed \"s/^.*printf: //\" \"$top/err\" | head -1)>\"",
+				"out=$(printf '%200000.200000f' 1.5 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
 				"S=0 n=200002 head=<1.5000000000> tail=<000000000000> err=<>\n",
 			),
 			(
 				"a precision of 200000 for a float in exponent form",
-				"printf '%.200000e' 1.5 >\"$top/out\" 2>\"$top/err\"; s=$?; echo \"S=$s n=$(wc -c \
-				 <\"$top/out\") head=<$(head -c 12 \"$top/out\")> tail=<$(tail -c 12 \"$top/out\")> \
-				 err=<$(sed \"s/^.*printf: //\" \"$top/err\" | head -1)>\"",
+				"out=$(printf '%.200000e' 1.5 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
 				"S=0 n=200006 head=<1.5000000000> tail=<00000000e+00> err=<>\n",
 			),
 			(
 				"a precision of 200000 for a float in shortest form",
-				"printf '%.200000g' 1.5 >\"$top/out\" 2>\"$top/err\"; s=$?; echo \"S=$s n=$(wc -c \
-				 <\"$top/out\") head=<$(head -c 12 \"$top/out\")> tail=<$(tail -c 12 \"$top/out\")> \
-				 err=<$(sed \"s/^.*printf: //\" \"$top/err\" | head -1)>\"",
-				"S=0 n=3 head=<1.5> tail=<1.5> err=<>\n",
+				"out=$(printf '%.200000g' 1.5 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=3 head=<1.5> tail=<> err=<>\n",
 			),
 			(
 				"a precision of 200000 for a float in hexadecimal",
-				"printf '%.200000a' 1.5 >\"$top/out\" 2>\"$top/err\"; s=$?; echo \"S=$s n=$(wc -c \
-				 <\"$top/out\") head=<$(head -c 12 \"$top/out\")> tail=<$(tail -c 12 \"$top/out\")> \
-				 err=<$(sed \"s/^.*printf: //\" \"$top/err\" | head -1)>\"",
+				"out=$(printf '%.200000a' 1.5 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
 				"S=0 n=200007 head=<0xc.00000000> tail=<000000000p-3> err=<>\n",
 			),
 			(
 				"a precision of 200000 for a float of zero",
-				"printf '%.200000f' 0 >\"$top/out\" 2>\"$top/err\"; s=$?; echo \"S=$s n=$(wc -c \
-				 <\"$top/out\") head=<$(head -c 12 \"$top/out\")> tail=<$(tail -c 12 \"$top/out\")> \
-				 err=<$(sed \"s/^.*printf: //\" \"$top/err\" | head -1)>\"",
+				"out=$(printf '%.200000f' 0 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
 				"S=0 n=200002 head=<0.0000000000> tail=<000000000000> err=<>\n",
 			),
 			(
 				"a precision of 200000 for an infinite float",
-				"printf '%.200000f' inf >\"$top/out\" 2>\"$top/err\"; s=$?; echo \"S=$s n=$(wc -c \
-				 <\"$top/out\") head=<$(head -c 12 \"$top/out\")> tail=<$(tail -c 12 \"$top/out\")> \
-				 err=<$(sed \"s/^.*printf: //\" \"$top/err\" | head -1)>\"",
-				"S=0 n=3 head=<inf> tail=<inf> err=<>\n",
+				"out=$(printf '%.200000f' inf 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=3 head=<inf> tail=<> err=<>\n",
 			),
 			(
 				"a width of 200000 for a float in exponent form",
-				"printf '%200000e' 1.5 >\"$top/out\" 2>\"$top/err\"; s=$?; echo \"S=$s n=$(wc -c \
-				 <\"$top/out\") head=<$(head -c 12 \"$top/out\")> tail=<$(tail -c 12 \"$top/out\")> \
-				 err=<$(sed \"s/^.*printf: //\" \"$top/err\" | head -1)>\"",
+				"out=$(printf '%200000e' 1.5 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
 				"S=0 n=200000 head=<            > tail=<1.500000e+00> err=<>\n",
 			),
 			(
 				"a width argument of 200000 for a float",
-				"printf '%*.*f' 200000 200000 1.5 >\"$top/out\" 2>\"$top/err\"; s=$?; echo \"S=$s \
-				 n=$(wc -c <\"$top/out\") head=<$(head -c 12 \"$top/out\")> tail=<$(tail -c 12 \
-				 \"$top/out\")> err=<$(sed \"s/^.*printf: //\" \"$top/err\" | head -1)>\"",
+				"out=$(printf '%*.*f' 200000 200000 1.5 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
 				"S=0 n=200002 head=<1.5000000000> tail=<000000000000> err=<>\n",
 			),
 			(
 				"a plus sign with a width of 200000",
-				"printf '%+200000d' 7 >\"$top/out\" 2>\"$top/err\"; s=$?; echo \"S=$s n=$(wc -c \
-				 <\"$top/out\") head=<$(head -c 12 \"$top/out\")> tail=<$(tail -c 12 \"$top/out\")> \
-				 err=<$(sed \"s/^.*printf: //\" \"$top/err\" | head -1)>\"",
+				"out=$(printf '%+200000d' 7 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
 				"S=0 n=200000 head=<            > tail=<          +7> err=<>\n",
 			),
 			(
 				"a space flag with a width of 200000",
-				"printf '% 200000d' 7 >\"$top/out\" 2>\"$top/err\"; s=$?; echo \"S=$s n=$(wc -c \
-				 <\"$top/out\") head=<$(head -c 12 \"$top/out\")> tail=<$(tail -c 12 \"$top/out\")> \
-				 err=<$(sed \"s/^.*printf: //\" \"$top/err\" | head -1)>\"",
+				"out=$(printf '% 200000d' 7 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
 				"S=0 n=200000 head=<            > tail=<           7> err=<>\n",
 			),
 			(
 				"a left-justified width of 200000",
-				"printf '%-200000d' 7 >\"$top/out\" 2>\"$top/err\"; s=$?; echo \"S=$s n=$(wc -c \
-				 <\"$top/out\") head=<$(head -c 12 \"$top/out\")> tail=<$(tail -c 12 \"$top/out\")> \
-				 err=<$(sed \"s/^.*printf: //\" \"$top/err\" | head -1)>\"",
+				"out=$(printf '%-200000d' 7 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
 				"S=0 n=200000 head=<7           > tail=<            > err=<>\n",
 			),
 			(
 				"a width of 200000 reused by two arguments",
-				"printf '%200000d' 7 8 >\"$top/out\" 2>\"$top/err\"; s=$?; echo \"S=$s n=$(wc -c \
-				 <\"$top/out\") head=<$(head -c 12 \"$top/out\")> tail=<$(tail -c 12 \"$top/out\")> \
-				 err=<$(sed \"s/^.*printf: //\" \"$top/err\" | head -1)>\"",
+				"out=$(printf '%200000d' 7 8 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
 				"S=0 n=400000 head=<            > tail=<           8> err=<>\n",
 			),
 			(
 				"a width of 65535 for a string",
-				"printf '%65535s' ab >\"$top/out\" 2>\"$top/err\"; s=$?; echo \"S=$s n=$(wc -c \
-				 <\"$top/out\") head=<$(head -c 12 \"$top/out\")> tail=<$(tail -c 12 \"$top/out\")> \
-				 err=<$(sed \"s/^.*printf: //\" \"$top/err\" | head -1)>\"",
+				"out=$(printf '%65535s' ab 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
 				"S=0 n=65535 head=<            > tail=<          ab> err=<>\n",
 			),
 			(
 				"a width of 65536 for a string",
-				"printf '%65536s' ab >\"$top/out\" 2>\"$top/err\"; s=$?; echo \"S=$s n=$(wc -c \
-				 <\"$top/out\") head=<$(head -c 12 \"$top/out\")> tail=<$(tail -c 12 \"$top/out\")> \
-				 err=<$(sed \"s/^.*printf: //\" \"$top/err\" | head -1)>\"",
+				"out=$(printf '%65536s' ab 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
 				"S=0 n=65536 head=<            > tail=<          ab> err=<>\n",
 			),
 			(
 				"a width of 65536 for an integer",
-				"printf '%65536d' 7 >\"$top/out\" 2>\"$top/err\"; s=$?; echo \"S=$s n=$(wc -c \
-				 <\"$top/out\") head=<$(head -c 12 \"$top/out\")> tail=<$(tail -c 12 \"$top/out\")> \
-				 err=<$(sed \"s/^.*printf: //\" \"$top/err\" | head -1)>\"",
+				"out=$(printf '%65536d' 7 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
 				"S=0 n=65536 head=<            > tail=<           7> err=<>\n",
 			),
 			(
 				"a precision of 65536 for a float",
-				"printf '%.65536f' 1.5 >\"$top/out\" 2>\"$top/err\"; s=$?; echo \"S=$s n=$(wc -c \
-				 <\"$top/out\") head=<$(head -c 12 \"$top/out\")> tail=<$(tail -c 12 \"$top/out\")> \
-				 err=<$(sed \"s/^.*printf: //\" \"$top/err\" | head -1)>\"",
+				"out=$(printf '%.65536f' 1.5 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
 				"S=0 n=65538 head=<1.5000000000> tail=<000000000000> err=<>\n",
 			),
+			(
+				"a width named by position",
+				"out=$(printf '%70000s%*2$d' x 10 7 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=1 n=70000 head=<            > tail=<           x> err=<`2': invalid format \
+				 character>\n",
+			),
+			(
+				"a width from a character constant",
+				"out=$(printf '[%*d]' \"'A\" 7 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=67 head=<[           > tail=<          7]> err=<>\n",
+			),
+			(
+				"a precision argument past a long",
+				"out=$(printf '%.*s' 9223372036854775808 xy 2>\"$top/err\"); s=$?; \
+				 e=$(<\"$top/err\"); e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} \
+				 head=<${out:0:12}> tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=2 head=<xy> tail=<> err=<warning: xy: Numerical result out of range>\n",
+			),
+			(
+				"a negative precision argument",
+				"out=$(printf '[%.*f]' -5 1.5 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=10 head=<[1.500000]> tail=<> err=<>\n",
+			),
+			(
+				"a directive after a wide one",
+				"out=$(printf '[%70000d|%s]' 7 a 8 b 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=140008 head=<[           > tail=<        8|b]> err=<>\n",
+			),
+			(
+				"a width and a precision for an integer",
+				"out=$(printf '%65000.70000d' 7 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=70000 head=<000000000000> tail=<000000000007> err=<>\n",
+			),
+			(
+				"a width and a precision for a float",
+				"out=$(printf '%65000.70000f' 1.5 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=70002 head=<1.5000000000> tail=<000000000000> err=<>\n",
+			),
+			(
+				"the zero flag with a precision",
+				"out=$(printf '%070000.3d' 7 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=70000 head=<            > tail=<         007> err=<>\n",
+			),
+			(
+				"the shortest form kept whole",
+				"out=$(printf '%#.70000g' 1.5 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=70001 head=<1.5000000000> tail=<000000000000> err=<>\n",
+			),
+			(
+				"an escaped string that stops",
+				"out=$(printf '%70000b|%70000s' 'a\\c' shown 2>\"$top/err\"); s=$?; \
+				 e=$(<\"$top/err\"); e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} \
+				 head=<${out:0:12}> tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=70000 head=<            > tail=<           a> err=<>\n",
+			),
+			(
+				"a backslash c in the format",
+				"out=$(printf 'begin\\c%70000s' not-shown 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=70007 head=<begin\\c     > tail=<   not-shown> err=<>\n",
+			),
+			(
+				"a wide quoted string",
+				"out=$(printf '%70000q' 'a b' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=70000 head=<            > tail=<        a\\ b> err=<>\n",
+			),
+			(
+				"the alternate flag for a wide integer",
+				"out=$(printf '%#70000d' -7 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=70000 head=<            > tail=<          -7> err=<>\n",
+			),
+			(
+				"a wide precision in upper hexadecimal",
+				"out=$(printf '%.70000A' -0 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=70008 head=<-0X0.0000000> tail=<000000000P+0> err=<>\n",
+			),
+			(
+				"%f of 1.5",
+				"out=$(printf '%f' '1.5' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=8 head=<1.500000> tail=<> err=<>\n",
+			),
+			(
+				"%.0f of 1.5",
+				"out=$(printf '%.0f' '1.5' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=1 head=<2> tail=<> err=<>\n",
+			),
+			(
+				"%#.0f of 1.5",
+				"out=$(printf '%#.0f' '1.5' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=2 head=<2.> tail=<> err=<>\n",
+			),
+			(
+				"%12.3f of 1.5",
+				"out=$(printf '%12.3f' '1.5' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=12 head=<       1.500> tail=<       1.500> err=<>\n",
+			),
+			(
+				"%-12.3f of 1.5",
+				"out=$(printf '%-12.3f' '1.5' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=12 head=<1.500       > tail=<1.500       > err=<>\n",
+			),
+			(
+				"%+f of 1.5",
+				"out=$(printf '%+f' '1.5' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=9 head=<+1.500000> tail=<> err=<>\n",
+			),
+			(
+				"% f of 1.5",
+				"out=$(printf '% f' '1.5' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=9 head=< 1.500000> tail=<> err=<>\n",
+			),
+			(
+				"%012.3f of 1.5",
+				"out=$(printf '%012.3f' '1.5' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=12 head=<00000001.500> tail=<00000001.500> err=<>\n",
+			),
+			(
+				"%e of 1.5",
+				"out=$(printf '%e' '1.5' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=12 head=<1.500000e+00> tail=<1.500000e+00> err=<>\n",
+			),
+			(
+				"%E of 1.5",
+				"out=$(printf '%E' '1.5' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=12 head=<1.500000E+00> tail=<1.500000E+00> err=<>\n",
+			),
+			(
+				"%.0e of 1.5",
+				"out=$(printf '%.0e' '1.5' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=5 head=<2e+00> tail=<> err=<>\n",
+			),
+			(
+				"%#.0e of 1.5",
+				"out=$(printf '%#.0e' '1.5' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=6 head=<2.e+00> tail=<> err=<>\n",
+			),
+			(
+				"%g of 1.5",
+				"out=$(printf '%g' '1.5' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=3 head=<1.5> tail=<> err=<>\n",
+			),
+			(
+				"%G of 1.5",
+				"out=$(printf '%G' '1.5' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=3 head=<1.5> tail=<> err=<>\n",
+			),
+			(
+				"%#g of 1.5",
+				"out=$(printf '%#g' '1.5' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=7 head=<1.50000> tail=<> err=<>\n",
+			),
+			(
+				"%.3g of 1.5",
+				"out=$(printf '%.3g' '1.5' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=3 head=<1.5> tail=<> err=<>\n",
+			),
+			(
+				"%.0g of 1.5",
+				"out=$(printf '%.0g' '1.5' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=1 head=<2> tail=<> err=<>\n",
+			),
+			(
+				"%a of 1.5",
+				"out=$(printf '%a' '1.5' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=6 head=<0xcp-3> tail=<> err=<>\n",
+			),
+			(
+				"%A of 1.5",
+				"out=$(printf '%A' '1.5' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=6 head=<0XCP-3> tail=<> err=<>\n",
+			),
+			(
+				"%f of -2.5",
+				"out=$(printf '%f' '-2.5' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=9 head=<-2.500000> tail=<> err=<>\n",
+			),
+			(
+				"%.0f of -2.5",
+				"out=$(printf '%.0f' '-2.5' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=2 head=<-2> tail=<> err=<>\n",
+			),
+			(
+				"%#.0f of -2.5",
+				"out=$(printf '%#.0f' '-2.5' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=3 head=<-2.> tail=<> err=<>\n",
+			),
+			(
+				"%12.3f of -2.5",
+				"out=$(printf '%12.3f' '-2.5' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=12 head=<      -2.500> tail=<      -2.500> err=<>\n",
+			),
+			(
+				"%-12.3f of -2.5",
+				"out=$(printf '%-12.3f' '-2.5' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=12 head=<-2.500      > tail=<-2.500      > err=<>\n",
+			),
+			(
+				"%+f of -2.5",
+				"out=$(printf '%+f' '-2.5' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=9 head=<-2.500000> tail=<> err=<>\n",
+			),
+			(
+				"% f of -2.5",
+				"out=$(printf '% f' '-2.5' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=9 head=<-2.500000> tail=<> err=<>\n",
+			),
+			(
+				"%012.3f of -2.5",
+				"out=$(printf '%012.3f' '-2.5' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=12 head=<-0000002.500> tail=<-0000002.500> err=<>\n",
+			),
+			(
+				"%e of -2.5",
+				"out=$(printf '%e' '-2.5' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=13 head=<-2.500000e+0> tail=<2.500000e+00> err=<>\n",
+			),
+			(
+				"%E of -2.5",
+				"out=$(printf '%E' '-2.5' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=13 head=<-2.500000E+0> tail=<2.500000E+00> err=<>\n",
+			),
+			(
+				"%.0e of -2.5",
+				"out=$(printf '%.0e' '-2.5' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=6 head=<-2e+00> tail=<> err=<>\n",
+			),
+			(
+				"%#.0e of -2.5",
+				"out=$(printf '%#.0e' '-2.5' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=7 head=<-2.e+00> tail=<> err=<>\n",
+			),
+			(
+				"%g of -2.5",
+				"out=$(printf '%g' '-2.5' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=4 head=<-2.5> tail=<> err=<>\n",
+			),
+			(
+				"%G of -2.5",
+				"out=$(printf '%G' '-2.5' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=4 head=<-2.5> tail=<> err=<>\n",
+			),
+			(
+				"%#g of -2.5",
+				"out=$(printf '%#g' '-2.5' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=8 head=<-2.50000> tail=<> err=<>\n",
+			),
+			(
+				"%.3g of -2.5",
+				"out=$(printf '%.3g' '-2.5' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=4 head=<-2.5> tail=<> err=<>\n",
+			),
+			(
+				"%.0g of -2.5",
+				"out=$(printf '%.0g' '-2.5' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=2 head=<-2> tail=<> err=<>\n",
+			),
+			(
+				"%a of -2.5",
+				"out=$(printf '%a' '-2.5' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=7 head=<-0xap-2> tail=<> err=<>\n",
+			),
+			(
+				"%A of -2.5",
+				"out=$(printf '%A' '-2.5' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=7 head=<-0XAP-2> tail=<> err=<>\n",
+			),
+			(
+				"%f of 0",
+				"out=$(printf '%f' '0' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: }; \
+				 e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=8 head=<0.000000> tail=<> err=<>\n",
+			),
+			(
+				"%.0f of 0",
+				"out=$(printf '%.0f' '0' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=1 head=<0> tail=<> err=<>\n",
+			),
+			(
+				"%#.0f of 0",
+				"out=$(printf '%#.0f' '0' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=2 head=<0.> tail=<> err=<>\n",
+			),
+			(
+				"%12.3f of 0",
+				"out=$(printf '%12.3f' '0' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=12 head=<       0.000> tail=<       0.000> err=<>\n",
+			),
+			(
+				"%-12.3f of 0",
+				"out=$(printf '%-12.3f' '0' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=12 head=<0.000       > tail=<0.000       > err=<>\n",
+			),
+			(
+				"%+f of 0",
+				"out=$(printf '%+f' '0' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: }; \
+				 e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=9 head=<+0.000000> tail=<> err=<>\n",
+			),
+			(
+				"% f of 0",
+				"out=$(printf '% f' '0' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: }; \
+				 e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=9 head=< 0.000000> tail=<> err=<>\n",
+			),
+			(
+				"%012.3f of 0",
+				"out=$(printf '%012.3f' '0' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=12 head=<00000000.000> tail=<00000000.000> err=<>\n",
+			),
+			(
+				"%e of 0",
+				"out=$(printf '%e' '0' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: }; \
+				 e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=12 head=<0.000000e+00> tail=<0.000000e+00> err=<>\n",
+			),
+			(
+				"%E of 0",
+				"out=$(printf '%E' '0' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: }; \
+				 e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=12 head=<0.000000E+00> tail=<0.000000E+00> err=<>\n",
+			),
+			(
+				"%.0e of 0",
+				"out=$(printf '%.0e' '0' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=5 head=<0e+00> tail=<> err=<>\n",
+			),
+			(
+				"%#.0e of 0",
+				"out=$(printf '%#.0e' '0' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=6 head=<0.e+00> tail=<> err=<>\n",
+			),
+			(
+				"%g of 0",
+				"out=$(printf '%g' '0' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: }; \
+				 e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=1 head=<0> tail=<> err=<>\n",
+			),
+			(
+				"%G of 0",
+				"out=$(printf '%G' '0' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: }; \
+				 e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=1 head=<0> tail=<> err=<>\n",
+			),
+			(
+				"%#g of 0",
+				"out=$(printf '%#g' '0' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: }; \
+				 e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=7 head=<0.00000> tail=<> err=<>\n",
+			),
+			(
+				"%.3g of 0",
+				"out=$(printf '%.3g' '0' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=1 head=<0> tail=<> err=<>\n",
+			),
+			(
+				"%.0g of 0",
+				"out=$(printf '%.0g' '0' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=1 head=<0> tail=<> err=<>\n",
+			),
+			(
+				"%a of 0",
+				"out=$(printf '%a' '0' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: }; \
+				 e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=6 head=<0x0p+0> tail=<> err=<>\n",
+			),
+			(
+				"%A of 0",
+				"out=$(printf '%A' '0' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: }; \
+				 e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=6 head=<0X0P+0> tail=<> err=<>\n",
+			),
+			(
+				"%f of -0",
+				"out=$(printf '%f' '-0' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: }; \
+				 e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=9 head=<-0.000000> tail=<> err=<>\n",
+			),
+			(
+				"%.0f of -0",
+				"out=$(printf '%.0f' '-0' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=2 head=<-0> tail=<> err=<>\n",
+			),
+			(
+				"%#.0f of -0",
+				"out=$(printf '%#.0f' '-0' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=3 head=<-0.> tail=<> err=<>\n",
+			),
+			(
+				"%12.3f of -0",
+				"out=$(printf '%12.3f' '-0' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=12 head=<      -0.000> tail=<      -0.000> err=<>\n",
+			),
+			(
+				"%-12.3f of -0",
+				"out=$(printf '%-12.3f' '-0' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=12 head=<-0.000      > tail=<-0.000      > err=<>\n",
+			),
+			(
+				"%+f of -0",
+				"out=$(printf '%+f' '-0' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=9 head=<-0.000000> tail=<> err=<>\n",
+			),
+			(
+				"% f of -0",
+				"out=$(printf '% f' '-0' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=9 head=<-0.000000> tail=<> err=<>\n",
+			),
+			(
+				"%012.3f of -0",
+				"out=$(printf '%012.3f' '-0' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=12 head=<-0000000.000> tail=<-0000000.000> err=<>\n",
+			),
+			(
+				"%e of -0",
+				"out=$(printf '%e' '-0' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: }; \
+				 e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=13 head=<-0.000000e+0> tail=<0.000000e+00> err=<>\n",
+			),
+			(
+				"%E of -0",
+				"out=$(printf '%E' '-0' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: }; \
+				 e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=13 head=<-0.000000E+0> tail=<0.000000E+00> err=<>\n",
+			),
+			(
+				"%.0e of -0",
+				"out=$(printf '%.0e' '-0' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=6 head=<-0e+00> tail=<> err=<>\n",
+			),
+			(
+				"%#.0e of -0",
+				"out=$(printf '%#.0e' '-0' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=7 head=<-0.e+00> tail=<> err=<>\n",
+			),
+			(
+				"%g of -0",
+				"out=$(printf '%g' '-0' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: }; \
+				 e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=2 head=<-0> tail=<> err=<>\n",
+			),
+			(
+				"%G of -0",
+				"out=$(printf '%G' '-0' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: }; \
+				 e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=2 head=<-0> tail=<> err=<>\n",
+			),
+			(
+				"%#g of -0",
+				"out=$(printf '%#g' '-0' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=8 head=<-0.00000> tail=<> err=<>\n",
+			),
+			(
+				"%.3g of -0",
+				"out=$(printf '%.3g' '-0' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=2 head=<-0> tail=<> err=<>\n",
+			),
+			(
+				"%.0g of -0",
+				"out=$(printf '%.0g' '-0' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=2 head=<-0> tail=<> err=<>\n",
+			),
+			(
+				"%a of -0",
+				"out=$(printf '%a' '-0' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: }; \
+				 e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=7 head=<-0x0p+0> tail=<> err=<>\n",
+			),
+			(
+				"%A of -0",
+				"out=$(printf '%A' '-0' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: }; \
+				 e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=7 head=<-0X0P+0> tail=<> err=<>\n",
+			),
+			(
+				"%f of inf",
+				"out=$(printf '%f' 'inf' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=3 head=<inf> tail=<> err=<>\n",
+			),
+			(
+				"%.0f of inf",
+				"out=$(printf '%.0f' 'inf' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=3 head=<inf> tail=<> err=<>\n",
+			),
+			(
+				"%#.0f of inf",
+				"out=$(printf '%#.0f' 'inf' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=3 head=<inf> tail=<> err=<>\n",
+			),
+			(
+				"%12.3f of inf",
+				"out=$(printf '%12.3f' 'inf' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=12 head=<         inf> tail=<         inf> err=<>\n",
+			),
+			(
+				"%-12.3f of inf",
+				"out=$(printf '%-12.3f' 'inf' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=12 head=<inf         > tail=<inf         > err=<>\n",
+			),
+			(
+				"%+f of inf",
+				"out=$(printf '%+f' 'inf' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=4 head=<+inf> tail=<> err=<>\n",
+			),
+			(
+				"% f of inf",
+				"out=$(printf '% f' 'inf' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=4 head=< inf> tail=<> err=<>\n",
+			),
+			(
+				"%012.3f of inf",
+				"out=$(printf '%012.3f' 'inf' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=12 head=<         inf> tail=<         inf> err=<>\n",
+			),
+			(
+				"%e of inf",
+				"out=$(printf '%e' 'inf' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=3 head=<inf> tail=<> err=<>\n",
+			),
+			(
+				"%E of inf",
+				"out=$(printf '%E' 'inf' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=3 head=<INF> tail=<> err=<>\n",
+			),
+			(
+				"%.0e of inf",
+				"out=$(printf '%.0e' 'inf' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=3 head=<inf> tail=<> err=<>\n",
+			),
+			(
+				"%#.0e of inf",
+				"out=$(printf '%#.0e' 'inf' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=3 head=<inf> tail=<> err=<>\n",
+			),
+			(
+				"%g of inf",
+				"out=$(printf '%g' 'inf' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=3 head=<inf> tail=<> err=<>\n",
+			),
+			(
+				"%G of inf",
+				"out=$(printf '%G' 'inf' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=3 head=<INF> tail=<> err=<>\n",
+			),
+			(
+				"%#g of inf",
+				"out=$(printf '%#g' 'inf' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=3 head=<inf> tail=<> err=<>\n",
+			),
+			(
+				"%.3g of inf",
+				"out=$(printf '%.3g' 'inf' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=3 head=<inf> tail=<> err=<>\n",
+			),
+			(
+				"%.0g of inf",
+				"out=$(printf '%.0g' 'inf' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=3 head=<inf> tail=<> err=<>\n",
+			),
+			(
+				"%a of inf",
+				"out=$(printf '%a' 'inf' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=3 head=<inf> tail=<> err=<>\n",
+			),
+			(
+				"%A of inf",
+				"out=$(printf '%A' 'inf' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=3 head=<INF> tail=<> err=<>\n",
+			),
+			(
+				"%f of nan",
+				"out=$(printf '%f' 'nan' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=3 head=<nan> tail=<> err=<>\n",
+			),
+			(
+				"%.0f of nan",
+				"out=$(printf '%.0f' 'nan' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=3 head=<nan> tail=<> err=<>\n",
+			),
+			(
+				"%#.0f of nan",
+				"out=$(printf '%#.0f' 'nan' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=3 head=<nan> tail=<> err=<>\n",
+			),
+			(
+				"%12.3f of nan",
+				"out=$(printf '%12.3f' 'nan' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=12 head=<         nan> tail=<         nan> err=<>\n",
+			),
+			(
+				"%-12.3f of nan",
+				"out=$(printf '%-12.3f' 'nan' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=12 head=<nan         > tail=<nan         > err=<>\n",
+			),
+			(
+				"%+f of nan",
+				"out=$(printf '%+f' 'nan' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=4 head=<+nan> tail=<> err=<>\n",
+			),
+			(
+				"% f of nan",
+				"out=$(printf '% f' 'nan' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=4 head=< nan> tail=<> err=<>\n",
+			),
+			(
+				"%012.3f of nan",
+				"out=$(printf '%012.3f' 'nan' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=12 head=<         nan> tail=<         nan> err=<>\n",
+			),
+			(
+				"%e of nan",
+				"out=$(printf '%e' 'nan' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=3 head=<nan> tail=<> err=<>\n",
+			),
+			(
+				"%E of nan",
+				"out=$(printf '%E' 'nan' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=3 head=<NAN> tail=<> err=<>\n",
+			),
+			(
+				"%.0e of nan",
+				"out=$(printf '%.0e' 'nan' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=3 head=<nan> tail=<> err=<>\n",
+			),
+			(
+				"%#.0e of nan",
+				"out=$(printf '%#.0e' 'nan' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=3 head=<nan> tail=<> err=<>\n",
+			),
+			(
+				"%g of nan",
+				"out=$(printf '%g' 'nan' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=3 head=<nan> tail=<> err=<>\n",
+			),
+			(
+				"%G of nan",
+				"out=$(printf '%G' 'nan' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=3 head=<NAN> tail=<> err=<>\n",
+			),
+			(
+				"%#g of nan",
+				"out=$(printf '%#g' 'nan' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=3 head=<nan> tail=<> err=<>\n",
+			),
+			(
+				"%.3g of nan",
+				"out=$(printf '%.3g' 'nan' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=3 head=<nan> tail=<> err=<>\n",
+			),
+			(
+				"%.0g of nan",
+				"out=$(printf '%.0g' 'nan' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=3 head=<nan> tail=<> err=<>\n",
+			),
+			(
+				"%a of nan",
+				"out=$(printf '%a' 'nan' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=3 head=<nan> tail=<> err=<>\n",
+			),
+			(
+				"%A of nan",
+				"out=$(printf '%A' 'nan' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=3 head=<NAN> tail=<> err=<>\n",
+			),
+			(
+				"%f of 42",
+				"out=$(printf '%f' '42' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: }; \
+				 e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=9 head=<42.000000> tail=<> err=<>\n",
+			),
+			(
+				"%.0f of 42",
+				"out=$(printf '%.0f' '42' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=2 head=<42> tail=<> err=<>\n",
+			),
+			(
+				"%#.0f of 42",
+				"out=$(printf '%#.0f' '42' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=3 head=<42.> tail=<> err=<>\n",
+			),
+			(
+				"%12.3f of 42",
+				"out=$(printf '%12.3f' '42' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=12 head=<      42.000> tail=<      42.000> err=<>\n",
+			),
+			(
+				"%-12.3f of 42",
+				"out=$(printf '%-12.3f' '42' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=12 head=<42.000      > tail=<42.000      > err=<>\n",
+			),
+			(
+				"%+f of 42",
+				"out=$(printf '%+f' '42' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=10 head=<+42.000000> tail=<> err=<>\n",
+			),
+			(
+				"% f of 42",
+				"out=$(printf '% f' '42' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=10 head=< 42.000000> tail=<> err=<>\n",
+			),
+			(
+				"%012.3f of 42",
+				"out=$(printf '%012.3f' '42' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=12 head=<00000042.000> tail=<00000042.000> err=<>\n",
+			),
+			(
+				"%e of 42",
+				"out=$(printf '%e' '42' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: }; \
+				 e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=12 head=<4.200000e+01> tail=<4.200000e+01> err=<>\n",
+			),
+			(
+				"%E of 42",
+				"out=$(printf '%E' '42' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: }; \
+				 e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=12 head=<4.200000E+01> tail=<4.200000E+01> err=<>\n",
+			),
+			(
+				"%.0e of 42",
+				"out=$(printf '%.0e' '42' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=5 head=<4e+01> tail=<> err=<>\n",
+			),
+			(
+				"%#.0e of 42",
+				"out=$(printf '%#.0e' '42' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=6 head=<4.e+01> tail=<> err=<>\n",
+			),
+			(
+				"%g of 42",
+				"out=$(printf '%g' '42' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: }; \
+				 e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=2 head=<42> tail=<> err=<>\n",
+			),
+			(
+				"%G of 42",
+				"out=$(printf '%G' '42' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: }; \
+				 e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=2 head=<42> tail=<> err=<>\n",
+			),
+			(
+				"%#g of 42",
+				"out=$(printf '%#g' '42' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=7 head=<42.0000> tail=<> err=<>\n",
+			),
+			(
+				"%.3g of 42",
+				"out=$(printf '%.3g' '42' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=2 head=<42> tail=<> err=<>\n",
+			),
+			(
+				"%.0g of 42",
+				"out=$(printf '%.0g' '42' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=5 head=<4e+01> tail=<> err=<>\n",
+			),
+			(
+				"%a of 42",
+				"out=$(printf '%a' '42' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: }; \
+				 e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=8 head=<0xa.8p+2> tail=<> err=<>\n",
+			),
+			(
+				"%A of 42",
+				"out=$(printf '%A' '42' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: }; \
+				 e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=8 head=<0XA.8P+2> tail=<> err=<>\n",
+			),
+			(
+				"%f of -42",
+				"out=$(printf '%f' '-42' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=10 head=<-42.000000> tail=<> err=<>\n",
+			),
+			(
+				"%.0f of -42",
+				"out=$(printf '%.0f' '-42' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=3 head=<-42> tail=<> err=<>\n",
+			),
+			(
+				"%#.0f of -42",
+				"out=$(printf '%#.0f' '-42' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=4 head=<-42.> tail=<> err=<>\n",
+			),
+			(
+				"%12.3f of -42",
+				"out=$(printf '%12.3f' '-42' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=12 head=<     -42.000> tail=<     -42.000> err=<>\n",
+			),
+			(
+				"%-12.3f of -42",
+				"out=$(printf '%-12.3f' '-42' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=12 head=<-42.000     > tail=<-42.000     > err=<>\n",
+			),
+			(
+				"%+f of -42",
+				"out=$(printf '%+f' '-42' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=10 head=<-42.000000> tail=<> err=<>\n",
+			),
+			(
+				"% f of -42",
+				"out=$(printf '% f' '-42' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=10 head=<-42.000000> tail=<> err=<>\n",
+			),
+			(
+				"%012.3f of -42",
+				"out=$(printf '%012.3f' '-42' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=12 head=<-0000042.000> tail=<-0000042.000> err=<>\n",
+			),
+			(
+				"%e of -42",
+				"out=$(printf '%e' '-42' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=13 head=<-4.200000e+0> tail=<4.200000e+01> err=<>\n",
+			),
+			(
+				"%E of -42",
+				"out=$(printf '%E' '-42' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=13 head=<-4.200000E+0> tail=<4.200000E+01> err=<>\n",
+			),
+			(
+				"%.0e of -42",
+				"out=$(printf '%.0e' '-42' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=6 head=<-4e+01> tail=<> err=<>\n",
+			),
+			(
+				"%#.0e of -42",
+				"out=$(printf '%#.0e' '-42' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=7 head=<-4.e+01> tail=<> err=<>\n",
+			),
+			(
+				"%g of -42",
+				"out=$(printf '%g' '-42' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=3 head=<-42> tail=<> err=<>\n",
+			),
+			(
+				"%G of -42",
+				"out=$(printf '%G' '-42' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=3 head=<-42> tail=<> err=<>\n",
+			),
+			(
+				"%#g of -42",
+				"out=$(printf '%#g' '-42' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=8 head=<-42.0000> tail=<> err=<>\n",
+			),
+			(
+				"%.3g of -42",
+				"out=$(printf '%.3g' '-42' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=3 head=<-42> tail=<> err=<>\n",
+			),
+			(
+				"%.0g of -42",
+				"out=$(printf '%.0g' '-42' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=6 head=<-4e+01> tail=<> err=<>\n",
+			),
+			(
+				"%a of -42",
+				"out=$(printf '%a' '-42' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=9 head=<-0xa.8p+2> tail=<> err=<>\n",
+			),
+			(
+				"%A of -42",
+				"out=$(printf '%A' '-42' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=9 head=<-0XA.8P+2> tail=<> err=<>\n",
+			),
+			(
+				"%s of <abc>",
+				"out=$(printf '%s' 'abc' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=3 head=<abc> tail=<> err=<>\n",
+			),
+			(
+				"%12s of <abc>",
+				"out=$(printf '%12s' 'abc' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=12 head=<         abc> tail=<         abc> err=<>\n",
+			),
+			(
+				"%-12s of <abc>",
+				"out=$(printf '%-12s' 'abc' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=12 head=<abc         > tail=<abc         > err=<>\n",
+			),
+			(
+				"%.2s of <abc>",
+				"out=$(printf '%.2s' 'abc' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=2 head=<ab> tail=<> err=<>\n",
+			),
+			(
+				"%q of <abc>",
+				"out=$(printf '%q' 'abc' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=3 head=<abc> tail=<> err=<>\n",
+			),
+			(
+				"%c of <abc>",
+				"out=$(printf '%c' 'abc' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=1 head=<a> tail=<> err=<>\n",
+			),
+			(
+				"%5c of <abc>",
+				"out=$(printf '%5c' 'abc' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=5 head=<    a> tail=<> err=<>\n",
+			),
+			(
+				"%b of <abc>",
+				"out=$(printf '%b' 'abc' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=3 head=<abc> tail=<> err=<>\n",
+			),
+			(
+				"%s of <a b>",
+				"out=$(printf '%s' 'a b' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=3 head=<a b> tail=<> err=<>\n",
+			),
+			(
+				"%12s of <a b>",
+				"out=$(printf '%12s' 'a b' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=12 head=<         a b> tail=<         a b> err=<>\n",
+			),
+			(
+				"%-12s of <a b>",
+				"out=$(printf '%-12s' 'a b' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=12 head=<a b         > tail=<a b         > err=<>\n",
+			),
+			(
+				"%.2s of <a b>",
+				"out=$(printf '%.2s' 'a b' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=2 head=<a > tail=<> err=<>\n",
+			),
+			(
+				"%q of <a b>",
+				"out=$(printf '%q' 'a b' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=4 head=<a\\ b> tail=<> err=<>\n",
+			),
+			(
+				"%c of <a b>",
+				"out=$(printf '%c' 'a b' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=1 head=<a> tail=<> err=<>\n",
+			),
+			(
+				"%5c of <a b>",
+				"out=$(printf '%5c' 'a b' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=5 head=<    a> tail=<> err=<>\n",
+			),
+			(
+				"%b of <a b>",
+				"out=$(printf '%b' 'a b' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=3 head=<a b> tail=<> err=<>\n",
+			),
+			(
+				"%s of <>",
+				"out=$(printf '%s' '' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: }; \
+				 e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=0 head=<> tail=<> err=<>\n",
+			),
+			(
+				"%12s of <>",
+				"out=$(printf '%12s' '' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: }; \
+				 e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=12 head=<            > tail=<            > err=<>\n",
+			),
+			(
+				"%-12s of <>",
+				"out=$(printf '%-12s' '' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=12 head=<            > tail=<            > err=<>\n",
+			),
+			(
+				"%.2s of <>",
+				"out=$(printf '%.2s' '' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: }; \
+				 e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=0 head=<> tail=<> err=<>\n",
+			),
+			(
+				"%q of <>",
+				"out=$(printf '%q' '' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: }; \
+				 e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=2 head=<''> tail=<> err=<>\n",
+			),
+			(
+				"%b of <>",
+				"out=$(printf '%b' '' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: }; \
+				 e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=0 head=<> tail=<> err=<>\n",
+			),
+			(
+				"%s of <-42>",
+				"out=$(printf '%s' '-42' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=3 head=<-42> tail=<> err=<>\n",
+			),
+			(
+				"%12s of <-42>",
+				"out=$(printf '%12s' '-42' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=12 head=<         -42> tail=<         -42> err=<>\n",
+			),
+			(
+				"%-12s of <-42>",
+				"out=$(printf '%-12s' '-42' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=12 head=<-42         > tail=<-42         > err=<>\n",
+			),
+			(
+				"%.2s of <-42>",
+				"out=$(printf '%.2s' '-42' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=2 head=<-4> tail=<> err=<>\n",
+			),
+			(
+				"%q of <-42>",
+				"out=$(printf '%q' '-42' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=3 head=<-42> tail=<> err=<>\n",
+			),
+			(
+				"%c of <-42>",
+				"out=$(printf '%c' '-42' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=1 head=<-> tail=<> err=<>\n",
+			),
+			(
+				"%5c of <-42>",
+				"out=$(printf '%5c' '-42' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=5 head=<    -> tail=<> err=<>\n",
+			),
+			(
+				"%b of <-42>",
+				"out=$(printf '%b' '-42' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=3 head=<-42> tail=<> err=<>\n",
+			),
+			(
+				"%s of <1.5>",
+				"out=$(printf '%s' '1.5' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=3 head=<1.5> tail=<> err=<>\n",
+			),
+			(
+				"%12s of <1.5>",
+				"out=$(printf '%12s' '1.5' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=12 head=<         1.5> tail=<         1.5> err=<>\n",
+			),
+			(
+				"%-12s of <1.5>",
+				"out=$(printf '%-12s' '1.5' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=12 head=<1.5         > tail=<1.5         > err=<>\n",
+			),
+			(
+				"%.2s of <1.5>",
+				"out=$(printf '%.2s' '1.5' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=2 head=<1.> tail=<> err=<>\n",
+			),
+			(
+				"%q of <1.5>",
+				"out=$(printf '%q' '1.5' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=3 head=<1.5> tail=<> err=<>\n",
+			),
+			(
+				"%c of <1.5>",
+				"out=$(printf '%c' '1.5' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=1 head=<1> tail=<> err=<>\n",
+			),
+			(
+				"%5c of <1.5>",
+				"out=$(printf '%5c' '1.5' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=5 head=<    1> tail=<> err=<>\n",
+			),
+			(
+				"%b of <1.5>",
+				"out=$(printf '%b' '1.5' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=3 head=<1.5> tail=<> err=<>\n",
+			),
+			(
+				"%d of 42",
+				"out=$(printf \"%d\" \"42\" 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=2 head=<42> tail=<> err=<>\n",
+			),
+			(
+				"%5d of 42",
+				"out=$(printf \"%5d\" \"42\" 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=5 head=<   42> tail=<> err=<>\n",
+			),
+			(
+				"%-5d of 42",
+				"out=$(printf \"%-5d\" \"42\" 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=5 head=<42   > tail=<> err=<>\n",
+			),
+			(
+				"%05d of 42",
+				"out=$(printf \"%05d\" \"42\" 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=5 head=<00042> tail=<> err=<>\n",
+			),
+			(
+				"%+d of 42",
+				"out=$(printf \"%+d\" \"42\" 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=3 head=<+42> tail=<> err=<>\n",
+			),
+			(
+				"%.3d of 42",
+				"out=$(printf \"%.3d\" \"42\" 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=3 head=<042> tail=<> err=<>\n",
+			),
+			(
+				"%05.3d of 42",
+				"out=$(printf \"%05.3d\" \"42\" 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=5 head=<  042> tail=<> err=<>\n",
+			),
+			(
+				"%#x of 42",
+				"out=$(printf \"%#x\" \"42\" 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=4 head=<0x2a> tail=<> err=<>\n",
+			),
+			(
+				"%#o of 42",
+				"out=$(printf \"%#o\" \"42\" 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=3 head=<052> tail=<> err=<>\n",
+			),
+			(
+				"%#d of 42",
+				"out=$(printf \"%#d\" \"42\" 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=2 head=<42> tail=<> err=<>\n",
+			),
+			(
+				"%x of 42",
+				"out=$(printf \"%x\" \"42\" 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=2 head=<2a> tail=<> err=<>\n",
+			),
+			(
+				"%o of 42",
+				"out=$(printf \"%o\" \"42\" 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=2 head=<52> tail=<> err=<>\n",
+			),
+			(
+				"%u of 42",
+				"out=$(printf \"%u\" \"42\" 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=2 head=<42> tail=<> err=<>\n",
+			),
+			(
+				"%d of -42",
+				"out=$(printf \"%d\" \"-42\" 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=3 head=<-42> tail=<> err=<>\n",
+			),
+			(
+				"%5d of -42",
+				"out=$(printf \"%5d\" \"-42\" 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=5 head=<  -42> tail=<> err=<>\n",
+			),
+			(
+				"%-5d of -42",
+				"out=$(printf \"%-5d\" \"-42\" 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=5 head=<-42  > tail=<> err=<>\n",
+			),
+			(
+				"%05d of -42",
+				"out=$(printf \"%05d\" \"-42\" 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=5 head=<-0042> tail=<> err=<>\n",
+			),
+			(
+				"%+d of -42",
+				"out=$(printf \"%+d\" \"-42\" 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=3 head=<-42> tail=<> err=<>\n",
+			),
+			(
+				"%.3d of -42",
+				"out=$(printf \"%.3d\" \"-42\" 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=4 head=<-042> tail=<> err=<>\n",
+			),
+			(
+				"%05.3d of -42",
+				"out=$(printf \"%05.3d\" \"-42\" 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=5 head=< -042> tail=<> err=<>\n",
+			),
+			(
+				"%#x of -42",
+				"out=$(printf \"%#x\" \"-42\" 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=18 head=<0xffffffffff> tail=<ffffffffffd6> err=<>\n",
+			),
+			(
+				"%#o of -42",
+				"out=$(printf \"%#o\" \"-42\" 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=23 head=<017777777777> tail=<777777777726> err=<>\n",
+			),
+			(
+				"%#d of -42",
+				"out=$(printf \"%#d\" \"-42\" 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=3 head=<-42> tail=<> err=<>\n",
+			),
+			(
+				"%x of -42",
+				"out=$(printf \"%x\" \"-42\" 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=16 head=<ffffffffffff> tail=<ffffffffffd6> err=<>\n",
+			),
+			(
+				"%o of -42",
+				"out=$(printf \"%o\" \"-42\" 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=22 head=<177777777777> tail=<777777777726> err=<>\n",
+			),
+			(
+				"%u of -42",
+				"out=$(printf \"%u\" \"-42\" 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=20 head=<184467440737> tail=<073709551574> err=<>\n",
+			),
+			(
+				"%d of 0",
+				"out=$(printf \"%d\" \"0\" 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=1 head=<0> tail=<> err=<>\n",
+			),
+			(
+				"%5d of 0",
+				"out=$(printf \"%5d\" \"0\" 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=5 head=<    0> tail=<> err=<>\n",
+			),
+			(
+				"%-5d of 0",
+				"out=$(printf \"%-5d\" \"0\" 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=5 head=<0    > tail=<> err=<>\n",
+			),
+			(
+				"%05d of 0",
+				"out=$(printf \"%05d\" \"0\" 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=5 head=<00000> tail=<> err=<>\n",
+			),
+			(
+				"%+d of 0",
+				"out=$(printf \"%+d\" \"0\" 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=2 head=<+0> tail=<> err=<>\n",
+			),
+			(
+				"%.3d of 0",
+				"out=$(printf \"%.3d\" \"0\" 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=3 head=<000> tail=<> err=<>\n",
+			),
+			(
+				"%05.3d of 0",
+				"out=$(printf \"%05.3d\" \"0\" 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=5 head=<  000> tail=<> err=<>\n",
+			),
+			(
+				"%#x of 0",
+				"out=$(printf \"%#x\" \"0\" 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=1 head=<0> tail=<> err=<>\n",
+			),
+			(
+				"%#o of 0",
+				"out=$(printf \"%#o\" \"0\" 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=1 head=<0> tail=<> err=<>\n",
+			),
+			(
+				"%#d of 0",
+				"out=$(printf \"%#d\" \"0\" 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=1 head=<0> tail=<> err=<>\n",
+			),
+			(
+				"%x of 0",
+				"out=$(printf \"%x\" \"0\" 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=1 head=<0> tail=<> err=<>\n",
+			),
+			(
+				"%o of 0",
+				"out=$(printf \"%o\" \"0\" 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=1 head=<0> tail=<> err=<>\n",
+			),
+			(
+				"%u of 0",
+				"out=$(printf \"%u\" \"0\" 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=1 head=<0> tail=<> err=<>\n",
+			),
+			(
+				"%d of 0x1f",
+				"out=$(printf \"%d\" \"0x1f\" 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=2 head=<31> tail=<> err=<>\n",
+			),
+			(
+				"%5d of 0x1f",
+				"out=$(printf \"%5d\" \"0x1f\" 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=5 head=<   31> tail=<> err=<>\n",
+			),
+			(
+				"%-5d of 0x1f",
+				"out=$(printf \"%-5d\" \"0x1f\" 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=5 head=<31   > tail=<> err=<>\n",
+			),
+			(
+				"%05d of 0x1f",
+				"out=$(printf \"%05d\" \"0x1f\" 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=5 head=<00031> tail=<> err=<>\n",
+			),
+			(
+				"%+d of 0x1f",
+				"out=$(printf \"%+d\" \"0x1f\" 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=3 head=<+31> tail=<> err=<>\n",
+			),
+			(
+				"%.3d of 0x1f",
+				"out=$(printf \"%.3d\" \"0x1f\" 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=3 head=<031> tail=<> err=<>\n",
+			),
+			(
+				"%05.3d of 0x1f",
+				"out=$(printf \"%05.3d\" \"0x1f\" 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=5 head=<  031> tail=<> err=<>\n",
+			),
+			(
+				"%#x of 0x1f",
+				"out=$(printf \"%#x\" \"0x1f\" 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=4 head=<0x1f> tail=<> err=<>\n",
+			),
+			(
+				"%#o of 0x1f",
+				"out=$(printf \"%#o\" \"0x1f\" 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=3 head=<037> tail=<> err=<>\n",
+			),
+			(
+				"%#d of 0x1f",
+				"out=$(printf \"%#d\" \"0x1f\" 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=2 head=<31> tail=<> err=<>\n",
+			),
+			(
+				"%x of 0x1f",
+				"out=$(printf \"%x\" \"0x1f\" 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=2 head=<1f> tail=<> err=<>\n",
+			),
+			(
+				"%o of 0x1f",
+				"out=$(printf \"%o\" \"0x1f\" 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=2 head=<37> tail=<> err=<>\n",
+			),
+			(
+				"%u of 0x1f",
+				"out=$(printf \"%u\" \"0x1f\" 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=2 head=<31> tail=<> err=<>\n",
+			),
+			(
+				"%d of 'A",
+				"out=$(printf \"%d\" \"'A\" 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=2 head=<65> tail=<> err=<>\n",
+			),
+			(
+				"%5d of 'A",
+				"out=$(printf \"%5d\" \"'A\" 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=5 head=<   65> tail=<> err=<>\n",
+			),
+			(
+				"%-5d of 'A",
+				"out=$(printf \"%-5d\" \"'A\" 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=5 head=<65   > tail=<> err=<>\n",
+			),
+			(
+				"%05d of 'A",
+				"out=$(printf \"%05d\" \"'A\" 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=5 head=<00065> tail=<> err=<>\n",
+			),
+			(
+				"%+d of 'A",
+				"out=$(printf \"%+d\" \"'A\" 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=3 head=<+65> tail=<> err=<>\n",
+			),
+			(
+				"%.3d of 'A",
+				"out=$(printf \"%.3d\" \"'A\" 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=3 head=<065> tail=<> err=<>\n",
+			),
+			(
+				"%05.3d of 'A",
+				"out=$(printf \"%05.3d\" \"'A\" 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=5 head=<  065> tail=<> err=<>\n",
+			),
+			(
+				"%#x of 'A",
+				"out=$(printf \"%#x\" \"'A\" 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=4 head=<0x41> tail=<> err=<>\n",
+			),
+			(
+				"%#o of 'A",
+				"out=$(printf \"%#o\" \"'A\" 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=4 head=<0101> tail=<> err=<>\n",
+			),
+			(
+				"%#d of 'A",
+				"out=$(printf \"%#d\" \"'A\" 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=2 head=<65> tail=<> err=<>\n",
+			),
+			(
+				"%x of 'A",
+				"out=$(printf \"%x\" \"'A\" 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=2 head=<41> tail=<> err=<>\n",
+			),
+			(
+				"%o of 'A",
+				"out=$(printf \"%o\" \"'A\" 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=3 head=<101> tail=<> err=<>\n",
+			),
+			(
+				"%u of 'A",
+				"out=$(printf \"%u\" \"'A\" 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=2 head=<65> tail=<> err=<>\n",
+			),
+			(
+				"no argument for a float",
+				"out=$(printf '%f' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: }; \
+				 e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=8 head=<0.000000> tail=<> err=<>\n",
+			),
+			(
+				"no argument for a string",
+				"out=$(printf '[%s]' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: }; \
+				 e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=2 head=<[]> tail=<> err=<>\n",
+			),
+			(
+				"more arguments than directives",
+				"out=$(printf '[%s]' a b c 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=9 head=<[a][b][c]> tail=<> err=<>\n",
+			),
+			(
+				"a percent on its own",
+				"out=$(printf '%%%s%%' x 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=3 head=<%x%> tail=<> err=<>\n",
+			),
+			(
+				"a tab and a newline in the format",
+				"out=$(printf 'a\\tb\\nc%s' z 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=6 head=<a\tb\ncz> tail=<> err=<>\n",
+			),
+			(
+				"a hexadecimal escape in the format",
+				"out=$(printf 'a\\x41b%s' z 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=4 head=<aAbz> tail=<> err=<>\n",
+			),
+			(
+				"a backslash in the format",
+				"out=$(printf 'a\\\\b%s' z 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: \
+				 }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=4 head=<a\\bz> tail=<> err=<>\n",
+			),
+			(
+				"an octal escape in the format",
+				"out=$(printf 'a\\0101b%s' z 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=5 head=<a1bz> tail=<> err=<>\n",
+			),
+			(
+				"an octal escape in an escaped string",
+				"out=$(printf '%b' 'a\\101\\0102b' 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); \
+				 e=${e##*printf: }; e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> \
+				 tail=<${out: -12}> err=<$e>\"",
+				"S=0 n=4 head=<aABb> tail=<> err=<>\n",
+			),
+			(
+				"a format with no directive reused",
+				"out=$(printf 'ab' x y 2>\"$top/err\"); s=$?; e=$(<\"$top/err\"); e=${e##*printf: }; \
+				 e=${e%%$'\\n'*}; echo \"S=$s n=${#out} head=<${out:0:12}> tail=<${out: -12}> \
+				 err=<$e>\"",
+				"S=0 n=2 head=<ab> tail=<> err=<>\n",
+			),
+			("a string into a variable", "printf -v v '%70000s' x; echo \"${#v}\"", "70000\n"),
+			("a float into a variable", "printf -v v '%.70000f' 1.5; echo \"${#v}\"", "70002\n"),
 		];
 		let mut failures = Vec::new();
 		for (name, script, bash) in rows {
