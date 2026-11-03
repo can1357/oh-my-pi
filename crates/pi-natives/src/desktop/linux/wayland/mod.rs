@@ -147,7 +147,7 @@ pub struct WaylandBackend {
 	/// The PID that listens on the Wayland socket: gnome-shell on GNOME, whose
 	/// own AT-SPI frames never count as the focused application window. On
 	/// Plasma it is `kwin_wayland_wrapper`, which owns no frames.
-	compositor_pid: Option<u32>,
+	compositor_pid:    Option<u32>,
 }
 
 /// Reads the compositor's PID from the peer credentials of its Wayland socket.

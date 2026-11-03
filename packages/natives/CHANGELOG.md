@@ -9,6 +9,7 @@
 ### Fixed
 
 - Fixed associative arrays slowing down quadratically as they grow: 100,000 inserts and lookups took about 90 seconds and now take about a tenth of a second
+- Fixed `capabilities()` on Wayland desktops whose xdg-desktop-portal has no RemoteDesktop backend, such as sway, reporting `input: true`: it now reports `input: false` and `inputPermission: "unavailable"`, and typing and key presses fail at once naming the missing portal
 ### Fixed
 
 - Fixed `el.type` and `el.press(keys)` on Wayland moving focus inside the element's app (GNOME showed "… is ready") before refusing the call: they are now refused before anything reaches the app ([#17915](https://github.com/can1357/oh-my-pi/pull/17915) by [@will-bogusz](https://github.com/will-bogusz))
@@ -46,10 +47,6 @@
 ### Fixed
 
 - Fixed X11 background `el.type` and `el.press` bringing the element's window to the front and taking your keyboard; an element that does not already hold a GTK 3 window's focus now runs in takeover instead ([#17921](https://github.com/can1357/oh-my-pi/pull/17921) by [@will-bogusz](https://github.com/will-bogusz))
-
-### Fixed
-
-- Fixed `capabilities()` on Wayland desktops without a RemoteDesktop portal, such as sway, reporting `input: true`: it now reports `input: false` and `inputPermission: "unavailable"`, and input calls fail at once naming the missing portal
 
 ## [18.16.0] - 2026-11-02
 
