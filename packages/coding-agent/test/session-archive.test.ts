@@ -8323,6 +8323,7 @@ for (const writes of ["whole", "cut short by the kernel each time", "stopped by 
 		const original = path.join(reclaimedNames().artifacts, "a.log");
 		let truncator: Bun.Subprocess | undefined;
 		let cutShort = 0;
+		const stoppedAt = 77_881;
 		const realUnlink = fs.unlink;
 		spyOn(fs, "unlink").mockImplementation(async file => {
 			const name = String(file);
@@ -8352,8 +8353,9 @@ for (const writes of ["whole", "cut short by the kernel each time", "stopped by 
 				spyOn(handle, "write").mockImplementation((async (...args: unknown[]) => {
 					const length = args[2] as number;
 					const before = fileSizeLimit.get();
-					const limit =
-						writes === "stopped by the kernel part-way" ? bytes.length / 2 : end + Math.ceil(length / 2);
+					// Stopped part-way through a 64 KiB window, so the file holds
+					// more than the windows written whole.
+					const limit = writes === "stopped by the kernel part-way" ? stoppedAt : end + Math.ceil(length / 2);
 					fileSizeLimit.set(new BigUint64Array([BigInt(limit), before[1]]));
 					try {
 						const put = await realWrite(...args);
@@ -8374,12 +8376,16 @@ for (const writes of ["whole", "cut short by the kernel each time", "stopped by 
 		expect(truncator).toBeDefined();
 		expect(result.reclaim?.reclaimed).toBe(1);
 		const kept = result.reclaim?.keptCopies?.join("\n") ?? "";
+		const lost = result.reclaim?.lostCopies?.join("\n") ?? "";
+		expect(result.reclaim?.errors.join("\n")).not.toContain("original is safe");
 		if (writes === "stopped by the kernel part-way") {
-			expect(kept).not.toContain("were written back");
-			expect(kept).toContain("the rest was lost");
-			expect((await fs.stat(copy)).size).toBe(bytes.length / 2);
+			expect(kept).toBe("");
+			expect(lost).not.toContain("were written back");
+			expect(lost).toContain(`holds ${stoppedAt} of its ${bytes.length} bytes, and the rest was lost`);
+			expect((await fs.stat(copy)).size).toBe(stoppedAt);
 		} else {
 			if (writes !== "whole") expect(cutShort).toBeGreaterThan(0);
+			expect(lost).toBe("");
 			expect(kept).toContain("written back");
 			expect(await fs.readFile(copy)).toEqual(bytes);
 		}

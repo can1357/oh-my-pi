@@ -549,9 +549,12 @@ export type OthersMayWriteRemoval =
 	/**
 	 * What the name held was kept; `note` says why and where it is, for the
 	 * command to print, and `cause` is the error that stopped the move aside,
-	 * when one did.
+	 * when one did. `lost` marks the one way it was not kept whole: it was
+	 * unlinked, the check after that failed — see
+	 * {@link OthersMayWriteRule.confirm} — and its bytes could not all be
+	 * written back; `note` then says how many the written-back file holds.
 	 */
-	| { outcome: "kept"; note: string; cause?: unknown };
+	| { outcome: "kept"; note: string; cause?: unknown; lost?: true };
 
 /** Private names tried before moving a file aside gives up. */
 const ASIDE_ATTEMPTS = 8;
@@ -656,7 +659,7 @@ export async function removeFileOthersMayWrite(file: string, rule: OthersMayWrit
 				const late =
 					handle && rule.confirm ? await rule.confirm(handle).catch(error => errorText(error)) : undefined;
 				if (late === undefined || !handle) return { outcome: "removed" };
-				return { outcome: "kept", note: await writeBack(file, aside, handle, standing, late) };
+				return { outcome: "kept", ...(await writeBack(file, aside, handle, standing, late)) };
 			}
 			if (removal !== "failed") {
 				why =
@@ -702,22 +705,33 @@ export async function writeAllAt(handle: fs.FileHandle, bytes: Uint8Array, posit
  * where they are, or where they could not be put, after `why`. Only a file
  * that holds every byte is reported written back: a write the kernel cuts
  * short is carried on, and one that cannot finish leaves what it wrote at
- * the name and says the rest was lost, since the kernel lets no process give
- * an unlinked file a name again.
+ * the name — counted from the written file itself, which a write cut short
+ * part-way through a window has grown past the last whole window — and
+ * says the rest was lost, marking it `lost`, since the kernel lets no
+ * process give an unlinked file a name again.
  */
-async function writeBack(file: string, aside: string, handle: fs.FileHandle, was: Stats, why: string): Promise<string> {
+async function writeBack(
+	file: string,
+	aside: string,
+	handle: fs.FileHandle,
+	was: Stats,
+	why: string,
+): Promise<{ note: string; lost?: true }> {
+	const total = (await handle.stat()).size;
 	for (const target of [file, aside]) {
 		let written: fs.FileHandle;
 		try {
 			written = await createExclusive(target, was.mode & 0o7777);
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code === "EEXIST") continue;
-			return `${why}; its bytes could not be written back to ${target} (${errorText(error)}), and were lost with the unlinked file`;
+			return {
+				note: `${why}; none of its ${total} bytes could be written back to ${target} (${errorText(error)}), and they were lost with the unlinked file`,
+				lost: true,
+			};
 		}
-		let at = 0;
 		try {
 			const window = Buffer.allocUnsafe(64 * 1024);
-			for (;;) {
+			for (let at = 0; ;) {
 				const { bytesRead } = await handle.read(window, 0, window.length, at);
 				if (bytesRead === 0) break;
 				await writeAllAt(written, window.subarray(0, bytesRead), at);
@@ -726,16 +740,29 @@ async function writeBack(file: string, aside: string, handle: fs.FileHandle, was
 			await written.chmod(was.mode & 0o7777);
 			await written.sync();
 		} catch (error) {
-			return (
-				`${why}; writing its bytes back to ${target} stopped after ${at} bytes (${errorText(error)}): ${target} ` +
-				`holds only those, and the rest was lost with the unlinked file`
-			);
+			const holds = await written
+				.stat()
+				.then(stat => stat.size)
+				.catch(() => undefined);
+			if (holds === total) {
+				return { note: `${why}, so its bytes were written back to ${target}, though ${errorText(error)}` };
+			}
+			return {
+				note:
+					`${why}; writing its bytes back to ${target} stopped (${errorText(error)}): ${target} holds ` +
+					`${holds === undefined ? "an unknown number" : holds} of its ${total} bytes, and the rest was lost ` +
+					`with the unlinked file`,
+				lost: true,
+			};
 		} finally {
 			await written.close().catch(() => undefined);
 		}
-		return `${why}, so its bytes were written back to ${target}`;
+		return { note: `${why}, so its bytes were written back to ${target}` };
 	}
-	return `${why}; ${file} and ${aside} are both taken, so its bytes could not be written back`;
+	return {
+		note: `${why}; ${file} and ${aside} are both taken, so its ${total} bytes could not be written back and were lost with the unlinked file`,
+		lost: true,
+	};
 }
 
 /** What {@link unlinkStillMoved} did: removed it; found nothing; found another file there and kept it; or the `unlink` failed. */

@@ -227,6 +227,13 @@ export interface ReclaimGcResult {
 	freedCopies?: string[];
 	/** Archived copies this run kept beside a moved original, each with why and where; also in `errors`. */
 	keptCopies?: string[];
+	/**
+	 * Archived copies this run unlinked and then could not write back whole —
+	 * the original changed in the call before the unlink, and the disk or a
+	 * file size limit stopped the write-back — each saying how many bytes the
+	 * written-back file holds; also in `errors`.
+	 */
+	lostCopies?: string[];
 	/** The live artifact tree a refused reclaim left where it was, with the reason in `errors`. */
 	keptArtifactTree?: string;
 	errors: string[];
@@ -2567,17 +2574,19 @@ async function proveLiveTreeIsArchived(
  * unlinked file. Such a process ignores this run's lease on a name that is
  * this run's alone; it is outside what this guards.
  *
- * Returns what went and, for each copy kept, why and where it is: a copy kept
- * costs space, never an original.
+ * Returns what went; for each copy kept, why and where it is — a copy kept
+ * costs space, never an original — and, apart, each copy unlinked whose
+ * write-back could not finish, with how much of it is left.
  */
 async function freeArchivedCopies(
 	proven: ProvenTree,
 	liveArtifacts: string,
 	reclaimedTree: string,
 	leased: readonly LeasedFile[],
-): Promise<{ freed: string[]; kept: string[] }> {
+): Promise<{ freed: string[]; kept: string[]; lost: string[] }> {
 	const freed: string[] = [];
 	const kept: string[] = [];
+	const lost: string[] = [];
 	const held: { path: string; held: HeldFile }[] = [];
 	try {
 		for (const directory of proven.directories) {
@@ -2623,7 +2632,7 @@ async function freeArchivedCopies(
 				},
 			});
 			if (removal.outcome === "removed") freed.push(copy);
-			else if (removal.outcome === "kept") kept.push(removal.note);
+			else if (removal.outcome === "kept") (removal.lost ? lost : kept).push(removal.note);
 		}
 		for (const directory of held) {
 			let removal: HeldDirectoryRemoval;
@@ -2640,7 +2649,7 @@ async function freeArchivedCopies(
 	} finally {
 		for (const directory of held) await directory.held.handle.close().catch(() => undefined);
 	}
-	return { freed, kept };
+	return { freed, kept, lost };
 }
 
 /**
@@ -3271,6 +3280,9 @@ export function renderText(result: GcResult): string {
 			if (freed > 0)
 				lines.push(`reclaim freed ${freed} archived ${freed === 1 ? "copy" : "copies"} the originals hold`);
 			for (const note of reclaim.keptCopies ?? []) lines.push(`reclaim kept an archived copy: ${note}`);
+			for (const note of reclaim.lostCopies ?? []) {
+				lines.push(`reclaim could not write back all of an archived copy: ${note}`);
+			}
 		} else if (moved.length > 0) {
 			// Neither "moved nothing" nor "kept the tree" is true once an
 			// original is at a reclaimed name: one line, saying where.
@@ -3941,9 +3953,14 @@ async function runReclaimGc(options: ResolvedGcOptions, query: string): Promise<
 			if (freed.kept.length > 0) {
 				result.keptCopies = freed.kept;
 				// Said as errors, as the archive phase says what it left: space
-				// not given back is worth a look, though every original is safe.
+				// not given back is worth a look, though the original is not
+				// touched by keeping a copy.
+				result.errors.push(...freed.kept.map(note => `an archived copy was kept: ${note}`));
+			}
+			if (freed.lost.length > 0) {
+				result.lostCopies = freed.lost;
 				result.errors.push(
-					...freed.kept.map(note => `an archived copy was kept, and its original is safe: ${note}`),
+					...freed.lost.map(note => `an archived copy could not be written back whole after it went: ${note}`),
 				);
 			}
 		}
