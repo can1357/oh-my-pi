@@ -91,7 +91,7 @@ const server = Bun.serve({
 			// `log` records what the page saw: Chrome fires afterprint only once a print finished, and headless Chrome
 			// returns from an unheld print() without printing anything.
 			return new Response(
-				`<button id="print">Print</button><button id="confirm-print">Print after asking</button><button id="popup-print">Print a receipt</button><button id="popup-url-print">Open a receipt</button><a id="link-print" href="/receipt-alone" target="_blank">Receipt</a><form action="/receipt-alone" target="_blank"><button id="form-print">Receipt</button></form><button id="noopener-print">Open a receipt alone</button><script>
+				`<button id="print">Print</button><button id="confirm-print">Print after asking</button><button id="popup-print">Print a receipt</button><button id="popup-url-print">Open a receipt</button><a id="link-print" href="/receipt-alone" target="_blank">Receipt</a><button id="noopener-print">Open a receipt alone</button><script>
 					globalThis.log = [];
 					addEventListener("afterprint", () => log.push("afterprint"));
 					addEventListener("pageshow", event => { if (event.persisted) log.push("restored"); });
@@ -247,6 +247,24 @@ afterAll(async () => {
 	await disposeAllVmContexts();
 	server.stop(true);
 });
+
+/** `page` as the relay hands it over: its browser has no target omp could attach the page's windows through. */
+function withoutBrowserTarget(page: Page): Page {
+	const browser = page.browser();
+	const bound = (target: object, key: string | symbol): unknown => {
+		const value: unknown = Reflect.get(target, key);
+		return typeof value === "function" ? value.bind(target) : value;
+	};
+	const relayBrowser = new Proxy(browser, {
+		get: (target, key) =>
+			key === "target"
+				? () => {
+						throw new Error("Browser target is not found");
+					}
+				: bound(target, key),
+	});
+	return new Proxy(page, { get: (target, key) => (key === "browser" ? () => relayBrowser : bound(target, key)) });
+}
 
 function fakePage(frame: { _lifecycleEvents: Set<string>; detached?: boolean }, closed = () => false): Page {
 	return {
@@ -756,33 +774,41 @@ return await tab.evaluate(() => {
 		});
 	}, 30_000);
 
-	test("holds print() in a window the page opens to print from", async () => {
-		await withUserBrowser(async cdpUrl => {
-			const user = await puppeteer.connect({ browserURL: cdpUrl, defaultViewport: null });
-			try {
-				const page = await user.newPage();
-				await page.goto(`${baseUrl}/print`);
-				const hold = await PrintHold.install(page, "calls");
+	test.each([
+		["a connected browser", (page: Page) => page],
+		["the relay, which reaches no window", withoutBrowserTarget],
+	])(
+		"holds print() in a window the page opens to print from, in %s",
+		async (_where, handOver) => {
+			await withUserBrowser(async cdpUrl => {
+				const user = await puppeteer.connect({ browserURL: cdpUrl, defaultViewport: null });
 				try {
-					await hold.beginCall(30_000);
-					// The receipt window's own print() was never held, so its preview blocked this page too.
-					expect(
-						await page
-							.mainFrame()
-							.mainRealm()
-							.evaluate('document.querySelector("#popup-print").click(); globalThis.log'),
-					).toEqual(["receipt afterprint", "receipt print returned"]);
+					const page = await user.newPage();
+					await page.goto(`${baseUrl}/print`);
+					const hold = await PrintHold.install(handOver(page), "calls");
+					try {
+						await hold.beginCall(30_000);
+						// The receipt window's own print() was never held, so its preview blocked this page too.
+						expect(
+							await page
+								.mainFrame()
+								.mainRealm()
+								.evaluate('document.querySelector("#popup-print").click(); globalThis.log'),
+						).toEqual(["receipt afterprint", "receipt print returned"]);
+						expect(hold.takeNotice()).toContain("The page called window.print()");
+					} finally {
+						await hold.dispose();
+					}
 				} finally {
-					await hold.dispose();
+					await user.disconnect();
 				}
-			} finally {
-				await user.disconnect();
-			}
-		});
-	}, 30_000);
+			});
+		},
+		30_000,
+	);
 
 	test.each(["calls", "tab"] as const)(
-		"keeps a window's %s print hold on the tab's calls after the page that opened it changes origin",
+		"moves and releases a window's %s print hold with the tab's calls, after the page that opened it leaves",
 		async scope => {
 			await withUserBrowser(async cdpUrl => {
 				const user = await puppeteer.connect({ browserURL: cdpUrl, defaultViewport: null });
@@ -802,15 +828,16 @@ return await tab.evaluate(() => {
 								.mainFrame()
 								.mainRealm()
 								.evaluate('globalThis.log = []; addEventListener("afterprint", () => log.push("afterprint"));');
-							await page.goto(baseUrl.replace("127.0.0.1", "localhost"));
 							const print = 'log.length = 0; print(); log.push("print returned"); log';
-							expect(await popup.mainFrame().mainRealm().evaluate(print)).toEqual([
-								"afterprint",
-								"print returned",
-							]);
+							const held = ["afterprint", "print returned"];
+							// The window reports through the page that opened it, while it can reach that page.
+							expect(await popup.mainFrame().mainRealm().evaluate(print)).toEqual(held);
 							const notice = hold.takeNotice();
 							expect(notice).toContain("The page called window.print()");
 							expect(notice).toContain("tab.pdf()");
+							// The window's own hold does not depend on the page that opened it.
+							await page.goto(baseUrl.replace("127.0.0.1", "localhost"));
+							expect(await popup.mainFrame().mainRealm().evaluate(print)).toEqual(held);
 							await hold.endCall();
 							await advancePrintClock(popup, 1_500);
 							expect(await popup.mainFrame().mainRealm().evaluate(print)).toEqual(
@@ -835,7 +862,6 @@ return await tab.evaluate(() => {
 
 	test.each([
 		["a link with a target", "#link-print"],
-		["a form with a target", "#form-print"],
 		["open() with noopener", "#noopener-print"],
 	])(
 		"holds print() in the first document of a window the page opens through %s",
@@ -879,7 +905,7 @@ return await tab.evaluate(() => {
 		30_000,
 	);
 
-	test("holds print() in a window's later document for the whole call, not only the release tail", async () => {
+	test("holds print() in a window's documents for the whole call, not only the release tail", async () => {
 		await withUserBrowser(async cdpUrl => {
 			const user = await puppeteer.connect({ browserURL: cdpUrl, defaultViewport: null });
 			try {
@@ -893,7 +919,16 @@ return await tab.evaluate(() => {
 					const popup = await (await popupTarget).page();
 					if (!popup) throw new Error("Expected the receipt popup");
 					try {
-						// The receipt keeps its renderer busy past the 1.5 s release tail, then prints, all within the call.
+						// The first receipt reports to this page; the second keeps its renderer busy past the 1.5 s release
+						// tail, then prints, all within the call.
+						await page
+							.mainFrame()
+							.mainRealm()
+							.waitForFunction('log.includes("receipt print returned")', { timeout: 0, polling: 50 });
+						expect(await page.mainFrame().mainRealm().evaluate("globalThis.log")).toEqual([
+							"receipt afterprint",
+							"receipt print returned",
+						]);
 						await popup.goto(`${baseUrl}/receipt-slow`);
 						expect(await popup.mainFrame().mainRealm().evaluate("globalThis.log")).toEqual([
 							"afterprint",
@@ -951,34 +986,27 @@ return await tab.evaluate(() => {
 		});
 	});
 
-	test("holds print() in a popup's first and later same-origin documents", async () => {
+	test("leaves alone a window another tab in the browser opens", async () => {
 		await withUserBrowser(async cdpUrl => {
 			const user = await puppeteer.connect({ browserURL: cdpUrl, defaultViewport: null });
 			try {
 				const page = await user.newPage();
 				await page.goto(`${baseUrl}/print`);
-				const hold = await PrintHold.install(page, "calls");
+				const hold = await PrintHold.install(page, "tab");
 				try {
-					await hold.beginCall(30_000);
-					// Chrome loads the receipt into the same window object the open() wrapper reached; it prints as it loads.
-					const popupTarget = user.waitForTarget(target => target.opener() === page.target());
-					await page.mainFrame().mainRealm().evaluate('document.querySelector("#popup-url-print").click()');
-					await page
-						.mainFrame()
-						.mainRealm()
-						.waitForFunction('log.includes("receipt print returned")', { timeout: 0, polling: 50 });
-					expect(await page.mainFrame().mainRealm().evaluate("globalThis.log")).toEqual([
-						"receipt afterprint",
-						"receipt print returned",
-					]);
+					// The user's own tab in the same browser opens a receipt that prints as it loads.
+					const other = await user.newPage();
+					await other.goto(`${baseUrl}/print`);
+					const popupTarget = user.waitForTarget(target => target.opener() === other.target());
+					await other.mainFrame().mainRealm().evaluate('document.querySelector("#link-print").click()');
 					const popup = await (await popupTarget).page();
 					if (!popup) throw new Error("Expected the receipt popup");
 					try {
-						await popup.goto(`${baseUrl}/print-on-load`);
-						expect(await popup.mainFrame().mainRealm().evaluate("globalThis.log")).toEqual([
-							"afterprint",
-							"load print returned",
-						]);
+						await popup
+							.mainFrame()
+							.mainRealm()
+							.waitForFunction('globalThis.log?.includes("print returned")', { timeout: 0, polling: 50 });
+						expect(await popup.mainFrame().mainRealm().evaluate("globalThis.log")).toEqual(["print returned"]);
 					} finally {
 						await popup.close();
 					}

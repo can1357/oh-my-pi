@@ -15,11 +15,11 @@ export type PrintHoldScope = "tab" | "calls";
 
 /**
  * Wraps `window.print` once per document for one attachment and holds it for `holdMs` from `from` (the page's own
- * epoch ms; default now), or for the document's life when `holdMs` is `null`. A held call reports through `binding`,
- * fires `beforeprint` and `afterprint` as a finished print does, and returns at once; otherwise it calls the `print`
- * it wrapped, which may be another attachment's wrapper. A dialog that opened while held keeps it held `resyncMs`
- * after it returns. Returns the page's time, for the worker to place deadlines in it. Runs in the page, so it stays
- * self-contained.
+ * epoch ms; default now), or for the document's life when `holdMs` is `null`. A held call reports through `binding`
+ * (the opener's, in a window omp added no binding to), fires `beforeprint` and `afterprint` as a finished print does,
+ * and returns at once; otherwise it calls the `print` it wrapped, which may be another attachment's wrapper. A dialog
+ * that opened while held keeps it held `resyncMs` after it returns. Returns the page's time, for the worker to place
+ * deadlines in it. Runs in the page, so it stays self-contained.
  */
 function holdPrintInPage(
 	binding: string,
@@ -52,18 +52,50 @@ function holdPrintInPage(
 		},
 		true,
 	]);
-	// A proxy keeps the native function's name and length, and its source still reads `[native code]`.
-	const heldPrint = new Proxy(print, {
-		apply(target, thisArg, args) {
-			const heldUntil: unknown = Reflect.get(globalThis, deadline);
-			if (typeof heldUntil !== "number" || now() >= heldUntil) return Reflect.apply(target, thisArg, args);
-			const report: unknown = Reflect.get(globalThis, binding);
-			if (typeof report === "function") report("");
-			Reflect.apply(EventTarget.prototype.dispatchEvent, globalThis, [new Event("beforeprint")]);
-			Reflect.apply(EventTarget.prototype.dispatchEvent, globalThis, [new Event("afterprint")]);
-		},
-	});
-	Reflect.set(globalThis, "print", heldPrint);
+	// A proxy keeps the native function's name and length, and its source still reads `[native code]`. A held call
+	// fires the print events on the window it printed. Once this document is gone to another origin its deadline is
+	// out of reach, and a window it opened prints on.
+	const holdPrintOf = (view: object, print: Function): Function =>
+		new Proxy(print, {
+			apply(target, thisArg, args) {
+				let held = false;
+				try {
+					const heldUntil: unknown = Reflect.get(globalThis, deadline);
+					held = typeof heldUntil === "number" && now() < heldUntil;
+				} catch {}
+				if (!held) return Reflect.apply(target, thisArg, args);
+				try {
+					const local: unknown = Reflect.get(globalThis, binding);
+					const opener: unknown = typeof local === "function" ? undefined : Reflect.get(globalThis, "opener");
+					const report: unknown =
+						typeof local === "function" ? local : opener && Reflect.get(Object(opener), binding);
+					if (typeof report === "function") Reflect.apply(report, undefined, [""]);
+				} catch {}
+				Reflect.apply(EventTarget.prototype.dispatchEvent, view, [new Event("beforeprint")]);
+				Reflect.apply(EventTarget.prototype.dispatchEvent, view, [new Event("afterprint")]);
+			},
+		});
+	Reflect.set(globalThis, "print", holdPrintOf(globalThis, print));
+	// A page that prints through a window it opens (`open("")`, write, `print()`) calls that window's `print()` as soon
+	// as `open()` returns. omp's own hold may not be in the window yet: one sharing this renderer runs on once any
+	// debugger client lets it go, and the relay never reaches it. Until then it holds on this document's deadline; the
+	// window's own hold, once in, wraps this one.
+	const open: unknown = Reflect.get(globalThis, "open");
+	if (typeof open === "function") {
+		const heldOpen = new Proxy(open, {
+			apply(target, thisArg, args) {
+				const opened: unknown = Reflect.apply(target, thisArg, args);
+				try {
+					const openedPrint: unknown = opened === null ? undefined : Reflect.get(Object(opened), "print");
+					if (typeof openedPrint === "function") {
+						Reflect.set(Object(opened), "print", holdPrintOf(Object(opened), openedPrint));
+					}
+				} catch {}
+				return opened;
+			},
+		});
+		Reflect.set(globalThis, "open", heldOpen);
+	}
 	// A dialog the page opens while `print()` is held returns into code that may print at once (`if (confirm(…))
 	// print()`), before omp can set a deadline in a page the dialog stopped: that print is held for `resyncMs` too.
 	// One that opened while released stays so: Chrome runs no command in a page a dialog stopped, and the page runs on
@@ -100,11 +132,12 @@ interface Popup {
  * Holds the page's `window.print()`. Chrome's print preview blocks the page's script until someone closes it, so a
  * click on a Print button timed out the call, wedged the calls after it, and raised the preview window over the
  * user's screen; held, the page goes on as after a finished print and the call's output says what happened.
- * Only the tab's own renderer is touched: cross-site iframes run in other processes and print as before, so a stuck
- * one never holds up a call. The page itself keeps the deadline on its own clock, so a hold ends on time even if
+ * In the tab, only its own renderer is touched: cross-site iframes run in other processes and print as before, so a
+ * stuck one never holds up a call. The page itself keeps the deadline on its own clock, so a hold ends on time even if
  * omp goes away. Each attachment keeps its own wrapper and deadline, so `print()` is held while any of them holds it.
- * A window the page opens is held on the same deadline: omp attaches it from the browser before its first document
- * runs, except in the relay, whose debugger reaches only the tab it was attached to.
+ * A window the page opens is held on the same deadline through a session omp attaches from the browser before the
+ * window runs; the relay's debugger reaches only the tab, so there only a window `open()` hands back is held, on the
+ * deadline of the document that opened it.
  */
 export class PrintHold {
 	readonly #page: Page;
@@ -220,9 +253,10 @@ export class PrintHold {
 
 	/**
 	 * Attaches, from the browser, every window the tab opens before it runs: by `open()` or by a link or form with a
-	 * target, with or without an opener. Chrome keeps a new window paused until omp lets it go, and the tab with it when
-	 * they share a renderer, so the hold is in the window before its first document runs. Where omp reaches no browser
-	 * target (the relay's debugger reaches only the tab it was attached to), a window the tab opens prints as before.
+	 * target, with or without an opener. A window in a renderer of its own waits until omp lets it go, so the hold is
+	 * in its first document; one sharing the tab's renderer runs on once any debugger client lets it go, which the
+	 * page-side `open()` wrapper covers. Where omp reaches no browser target (the relay's debugger reaches only the tab
+	 * it was attached to), only that wrapper holds a window.
 	 */
 	async #attachWindows(): Promise<void> {
 		let windows: CDPSession;
@@ -251,7 +285,8 @@ export class PrintHold {
 
 	/**
 	 * Releases the windows the tab opened, then lets go of them. A window stopped in a dialog takes the release once the
-	 * dialog closes; omp detaches only after that, since detaching drops the commands the window has not run yet.
+	 * dialog closes, and omp detaches only after that, since detaching drops the commands a window has not run yet;
+	 * should omp's connection close first, the window keeps its last deadline, as the tab's own documents do.
 	 */
 	#releaseWindows(): void {
 		const windows = this.#windows;
@@ -307,16 +342,14 @@ export class PrintHold {
 		const popup: Popup = { session, targetId, script: Promise.resolve(undefined) };
 		this.#popups.set(event.sessionId, popup);
 		this.#openers.add(targetId);
-		session.on("Runtime.bindingCalled", this.#onBindingCalled);
 		session.on("Page.frameNavigated", (navigated: Protocol.Page.FrameNavigatedEvent) => {
 			if (navigated.type === "BackForwardCacheRestore") this.#updatePopup(popup, this.#remaining());
 		});
 		// Sent in this order before the window runs, these reach its first document. Without `Page.enable` first, a
-		// window that starts in a renderer of its own loads that document without the script; without
-		// `Runtime.enable`, a held print's report never arrives.
+		// window that starts in a renderer of its own loads that document without the script. No `Runtime.enable`, the
+		// automation tell omp's puppeteer patch keeps off: a held print reports through the opener's binding, when the
+		// window can reach its opener.
 		void session.send("Page.enable").catch(() => undefined);
-		void session.send("Runtime.enable").catch(() => undefined);
-		void session.send("Runtime.addBinding", { name: this.#binding }).catch(() => undefined);
 		this.#updatePopup(popup, this.#remaining());
 		void session.send("Runtime.runIfWaitingForDebugger").catch(() => undefined);
 	};
