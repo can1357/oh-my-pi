@@ -110,4 +110,33 @@ describe.skipIf(!available)("browser implicit role selectors", () => {
 			await browser.close();
 		}
 	}, 120_000);
+
+	it("refuses a role selector with text after its name filter instead of matching the outer role", async () => {
+		registerSemanticQueryHandlers(puppeteer);
+		const browser = await puppeteer.launch({ executablePath: await ensureChromiumExecutable(), headless: true });
+		try {
+			const page = await browser.newPage();
+			await page.setContent(
+				`<section id="billing" aria-labelledby="h"><h2 id="h">billing-worker</h2><label>REGION<select><option>x</option></select></label></section>`,
+			);
+			await page.evaluate(`(function () {\n${TERN_KIT_SOURCE}\n})()`);
+			for (const query of [
+				'region[name="billing-worker" exact] >> role/combobox[name="REGION" exact]',
+				'region[name="billing-worker"][level=2]',
+			]) {
+				const puppeteerError = await page.$$eval(`role/${query}`, elements => elements.length).catch(String);
+				expect(String(puppeteerError)).toContain("role/ selectors do not chain");
+				const ternError = await page
+					.evaluate(query => {
+						const globals = globalThis as unknown as { __ompTernKit: { count(selector: unknown): number } };
+						return globals.__ompTernKit.count({ engine: "role", query });
+					}, query)
+					.catch(String);
+				expect(String(ternError)).toContain("role/ selectors do not chain");
+			}
+			expect(await page.$$eval('role/region [name="billing-worker" exact] ', elements => elements.length)).toBe(1);
+		} finally {
+			await browser.close();
+		}
+	}, 60_000);
 });
