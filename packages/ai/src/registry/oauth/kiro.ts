@@ -242,6 +242,17 @@ function normalizeApiKey(input: string): string {
 	return token;
 }
 
+/**
+ * Reject a key whose first `ListAvailableModels` page offers no usable model
+ * and no further page: such a key would sign in and then list nothing.
+ */
+function assertKiroKeyCatalog(payload: unknown): void {
+	const catalog = sanitizeKiroModelCatalog(payload);
+	if (catalog.models.length === 0 && catalog.nextToken === undefined) {
+		throw new Error("ListAvailableModels returned no usable models");
+	}
+}
+
 export async function validateKiroApiKey(
 	apiKey: string,
 	options: KiroRequestOptions = {},
@@ -266,7 +277,7 @@ export async function validateKiroApiKey(
 				timeoutMs: options.timeoutMs,
 			});
 			throwIfCancelled(options.signal);
-			sanitizeKiroModelCatalog(payload);
+			assertKiroKeyCatalog(payload);
 			return { type: "api_key", key: token, apiEndpoint: kiroRuntimeBaseUrl(explicitRegion) };
 		} catch (cause) {
 			throwIfCancelled(options.signal);
@@ -297,7 +308,7 @@ export async function validateKiroApiKey(
 		);
 	}
 	try {
-		sanitizeKiroModelCatalog(result.payload);
+		assertKiroKeyCatalog(result.payload);
 	} catch (cause) {
 		throw new AIError.OAuthError("Kiro returned an invalid model catalog while validating the API key", {
 			kind: "discovery",

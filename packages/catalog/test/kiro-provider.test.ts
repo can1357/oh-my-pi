@@ -215,7 +215,7 @@ describe("Kiro provider discovery", () => {
 
 	test("falls back to text-only input when supportedInputTypes is missing or invalid", () => {
 		vi.spyOn(logger, "debug").mockImplementation(() => {});
-		const invalidInputTypes: unknown[] = [null, "TEXT", [], ["VIDEO"], [1], ["TEXT", "TEXT"]];
+		const invalidInputTypes: unknown[] = [null, "TEXT", [], ["VIDEO"], [1], ["TEXT", "TEXT"], ["IMAGE"]];
 		for (const inputTypes of invalidInputTypes) {
 			const catalog = sanitizeKiroModelCatalog(catalogResponse(["invalid-input-model"], { inputTypes }));
 			expect(catalog.models.map(model => model.supportedInputTypes)).toEqual([["TEXT"]]);

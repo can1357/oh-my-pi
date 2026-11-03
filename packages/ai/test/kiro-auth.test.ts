@@ -129,6 +129,12 @@ describe("Kiro authentication", () => {
 		expect(called).toBe(false);
 	});
 
+	it("rejects a key whose catalog offers no usable model", async () => {
+		await expect(
+			validateKiroApiKey("ksk_empty-key", { apiRegion: "us-east-1", fetch: async () => json({ models: [] }) }),
+		).rejects.toMatchObject({ kind: "discovery" });
+	});
+
 	it("rejects an invalid KIRO_API_REGION pin before making a network request", async () => {
 		let called = false;
 		await expect(

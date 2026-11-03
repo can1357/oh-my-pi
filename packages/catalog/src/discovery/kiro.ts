@@ -119,6 +119,13 @@ function boundedString(value: unknown, code: string, maxLength = 256): string {
 	return value;
 }
 
+/** The continuation token of a paged listing, or `undefined` on the last page. */
+function pageToken(value: Record<string, unknown>, fail: () => never): string | undefined {
+	if (value.nextToken === undefined || value.nextToken === null) return undefined;
+	if (typeof value.nextToken !== "string" || value.nextToken.length === 0 || value.nextToken.length > 4096) fail();
+	return value.nextToken;
+}
+
 function safeId(value: unknown, code: string): string {
 	const id = boundedString(value, code, 128);
 	if (!SAFE_ID.test(id)) failSanitize(code);
@@ -211,7 +218,8 @@ function sanitizeInputTypes(value: unknown): Array<"TEXT" | "IMAGE"> {
 		if (input !== "TEXT" && input !== "IMAGE") failSanitize("model.input-type");
 		inputs.add(input);
 	}
-	if (inputs.size === 0 || inputs.size !== value.length) failSanitize("model.input-types");
+	// Every Kiro chat model takes text; a list without it is malformed.
+	if (!inputs.has("TEXT") || inputs.size !== value.length) failSanitize("model.input-types");
 	return [...inputs];
 }
 
@@ -267,10 +275,7 @@ function sanitizeModel(value: unknown): SanitizedKiroModel {
 export function sanitizeKiroModelCatalog(value: unknown): SanitizedKiroModelCatalog {
 	const raw = record(value, "top-level.object");
 	if (!Array.isArray(raw.models) || raw.models.length > MAX_MODELS) failSanitize("models.count");
-	const nextToken =
-		raw.nextToken === undefined || raw.nextToken === null
-			? undefined
-			: boundedString(raw.nextToken, "next-token", 4096);
+	const nextToken = pageToken(raw, () => failSanitize("next-token"));
 	const models: SanitizedKiroModel[] = [];
 	const seen = new Set<string>();
 	for (const entry of raw.models) {
@@ -627,14 +632,6 @@ export interface KiroProfileSummary {
 	profileName?: string;
 }
 
-function pageToken(value: Record<string, unknown>, target: string): string | undefined {
-	if (value.nextToken === undefined || value.nextToken === null) return undefined;
-	if (typeof value.nextToken !== "string" || value.nextToken.length === 0 || value.nextToken.length > 4096) {
-		throw new Error(`${target}: invalid nextToken`);
-	}
-	return value.nextToken;
-}
-
 /**
  * ListAvailableProfiles against one validated management region, following
  * `nextToken` until it is absent, capped at {@link MAX_PROFILES} profiles.
@@ -674,7 +671,9 @@ export async function listKiroAvailableProfiles(options: {
 			}
 			profiles.push(profile);
 		}
-		nextToken = pageToken(value, "ListAvailableProfiles");
+		nextToken = pageToken(value, () => {
+			throw new Error("ListAvailableProfiles: invalid nextToken");
+		});
 		if (!nextToken || seenTokens.has(nextToken)) return profiles;
 		seenTokens.add(nextToken);
 	}
