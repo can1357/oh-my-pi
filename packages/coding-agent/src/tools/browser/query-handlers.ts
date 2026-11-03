@@ -94,17 +94,26 @@ export function queryByTitle(node: QueryNode, selector: string): Element[] {
 
 /**
  * `role/` handler: `role[name="…" exact]` — explicit or implicit ARIA role, optionally filtered by
- * accessible name.
+ * accessible name. Anything else in the selector (a chained `>> role/…`, another attribute) is refused
+ * rather than ignored, since ignoring it would match the outer element.
  */
 export function queryByRole(node: QueryNode, selector: string): Element[] {
 	const root = node as unknown as QueryRoot;
-	const roleMatch = /^\s*([^\s[]+)/.exec(selector);
-	const wantedRole = (roleMatch?.[1] ?? "").toLocaleLowerCase();
-	const nameMatch = /\[\s*name\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\]\s]+))(?:\s+(exact))?\s*\]/i.exec(selector);
+	const parsed =
+		/^\s*([^\s[\]]+)\s*(?:\[\s*name\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\]\s]+))(?:\s+(exact))?\s*\])?\s*$/i.exec(
+			selector,
+		);
+	if (!parsed) {
+		throw new Error(
+			`role/ selector ${JSON.stringify(selector)} is not one role with an optional [name="…"] or [name="…" exact] filter. ` +
+				"role/ selectors do not chain; to act inside a section, pass the section's selector to observe({ selector }) or ariaSnapshot(selector) and use the id or ref it returns.",
+		);
+	}
+	const wantedRole = parsed[1]!.toLocaleLowerCase();
 	const normalizeSpace = (value: string): string => value.replace(/\s+/g, " ").trim();
-	const nameText = nameMatch?.[1] ?? nameMatch?.[2] ?? nameMatch?.[3];
+	const nameText = parsed[2] ?? parsed[3] ?? parsed[4];
 	const wantedName = nameText === undefined ? undefined : normalizeSpace(nameText).toLocaleLowerCase();
-	const exact = nameMatch?.[4]?.toLocaleLowerCase() === "exact";
+	const exact = parsed[5]?.toLocaleLowerCase() === "exact";
 	const hasLandmarkName = (element: Element): boolean =>
 		Boolean(
 			idrefText(element) ||

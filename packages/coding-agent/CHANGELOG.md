@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Browser `role/` selectors now find named sections and other implicit landmark and structural roles in Chrome and Tern, so scoped snapshots and observations can target them; a `role/` selector with anything after its name filter, such as a chained `>> role/combobox`, is refused instead of matching the outer role ([#17895](https://github.com/can1357/oh-my-pi/pull/17895) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.18.1] - 2026-11-08
 
 ### Breaking Changes
@@ -193,10 +197,6 @@
 - Out-of-credit provider errors now fail immediately instead of retrying for long periods; Retry works promptly once the account is funded.
 - DeepSeek-style `*** End` and `*** End Patch` markers are no longer written into files or truncate later edits
 - Composer prediction ghost text no longer vanishes when advisor messages arrive
-
-### Fixed
-
-- Browser `role/` selectors now find named sections and other implicit landmark and structural roles in Chrome and Tern, so scoped snapshots and observations can target them ([#17895](https://github.com/can1357/oh-my-pi/pull/17895) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.16.0] - 2026-11-02
 
