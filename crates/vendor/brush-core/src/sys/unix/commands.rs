@@ -30,11 +30,23 @@ impl CommandFdInjectionExt for std::process::Command {
 		// a duplicate per descriptor doubled what this process holds while it
 		// starts a child, so a command that this process gives hundreds of
 		// descriptors to reached the open-file limit the command itself is
-		// given. The child takes each at its number by `dup2` alone.
+		// given. The child takes each at its number by `dup2` alone. A file at
+		// 0, 1 or 2 is the one exception: the child's standard streams are put
+		// there before the descriptors are, so it is duplicated here, at most
+		// three of them.
 		let mut held = Vec::new();
+		let mut standard = Vec::new();
 		let mut mappings = Vec::new();
 		for (child_fd, open_file) in open_files {
-			let parent_fd = open_file.try_borrow_as_fd()?.as_raw_fd();
+			let borrowed = open_file.try_borrow_as_fd()?;
+			let parent_fd = if borrowed.as_raw_fd() <= 2 {
+				let owned = borrowed.try_clone_to_owned()?;
+				let raw = owned.as_raw_fd();
+				standard.push(owned);
+				raw
+			} else {
+				borrowed.as_raw_fd()
+			};
 			if mappings.iter().any(|&(_, child)| child == child_fd) {
 				return Err(error::ErrorKind::ChildCreationFailure.into());
 			}
@@ -49,12 +61,13 @@ impl CommandFdInjectionExt for std::process::Command {
 		}
 
 		let mut done = vec![false; mappings.len()];
+		let mut scratch = vec![false; mappings.len()];
 		// SAFETY: the closure only makes system calls on the descriptors it
 		// was given and on numbers they name, and allocates nothing.
 		unsafe {
 			self.pre_exec(move || {
-				let _ = &held;
-				place_fds(&mut mappings, &mut done)
+				let _ = (&held, &standard);
+				place_fds(&mut mappings, &mut done, &mut scratch)
 			});
 		}
 
@@ -68,8 +81,9 @@ impl CommandFdInjectionExt for std::process::Command {
 /// other mapping still to be made reads the number it writes; when every one
 /// left does, one source is moved to the lowest free number, which no
 /// mapping writes (every number one writes is open as a source), and the
-/// ring opens.
-fn place_fds(mappings: &mut [(i32, ShellFd)], done: &mut [bool]) -> std::io::Result<()> {
+/// ring opens; that number is closed once the last mapping reading it is
+/// made. `scratch` marks the mappings that read a moved source.
+fn place_fds(mappings: &mut [(i32, ShellFd)], done: &mut [bool], scratch: &mut [bool]) -> std::io::Result<()> {
 	let mut left = mappings.len();
 	for index in 0..mappings.len() {
 		let (parent, child) = mappings[index];
@@ -100,6 +114,11 @@ fn place_fds(mappings: &mut [(i32, ShellFd)], done: &mut [bool]) -> std::io::Res
 			done[index] = true;
 			left -= 1;
 			progressed = true;
+			if scratch[index] && !(0..mappings.len()).any(|other| !done[other] && mappings[other].0 == parent) {
+				// SAFETY: `parent` is the moved copy this function made, which
+				// nothing reads any more.
+				unsafe { libc::close(parent) };
+			}
 		}
 		if !progressed && let Some(index) = (0..mappings.len()).find(|&index| !done[index]) {
 			// SAFETY: plain descriptor call on an open source descriptor.
@@ -108,10 +127,17 @@ fn place_fds(mappings: &mut [(i32, ShellFd)], done: &mut [bool]) -> std::io::Res
 				return Err(std::io::Error::last_os_error());
 			}
 			let source = mappings[index].0;
+			let was_scratch = scratch[index];
 			for (other, mapping) in mappings.iter_mut().enumerate() {
 				if !done[other] && mapping.0 == source {
 					mapping.0 = moved;
+					scratch[other] = true;
 				}
+			}
+			if was_scratch {
+				// SAFETY: `source` is a moved copy this function made, and
+				// every mapping that read it reads `moved` now.
+				unsafe { libc::close(source) };
 			}
 		}
 	}
@@ -239,4 +265,65 @@ fn pre_exec_detach_session_reparent() -> Result<(), std::io::Error> {
 		unsafe { libc::_exit(0) };
 	}
 	Ok(())
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+	use std::os::{fd::AsRawFd as _, unix::fs::MetadataExt as _};
+
+	use super::*;
+
+	fn open_count() -> usize {
+		std::fs::read_dir("/proc/self/fd").expect("descriptor list").count()
+	}
+
+	fn inode(fd: i32) -> u64 {
+		std::fs::metadata(format!("/proc/self/fd/{fd}")).expect("descriptor").ino()
+	}
+
+	/// Three rings of two, each closed with a moved copy of one source: every
+	/// target ends with the other's file, and no copy is left open, so a
+	/// command given many rings needs one spare descriptor, not one per ring.
+	#[test]
+	fn rings_are_placed_and_leave_no_copy_open() {
+		let dir = tempfile::tempdir().expect("scratch directory");
+		let mut fds = Vec::new();
+		for name in 0..6 {
+			let file = std::fs::File::create(dir.path().join(name.to_string())).expect("file");
+			// SAFETY: plain descriptor call on a file this test owns.
+			let fd = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 900 + name) };
+			assert!(fd >= 900, "a high descriptor");
+			fds.push(fd);
+		}
+		let inodes: Vec<u64> = fds.iter().map(|&fd| inode(fd)).collect();
+		let mut mappings: Vec<(i32, ShellFd)> = (0..6).map(|i| (fds[i], fds[i ^ 1])).collect();
+		let mut done = vec![false; 6];
+		let mut scratch = vec![false; 6];
+		let before = open_count();
+		place_fds(&mut mappings, &mut done, &mut scratch).expect("placed");
+		assert_eq!(open_count(), before, "a moved copy was left open");
+		for i in 0..6 {
+			assert_eq!(inode(fds[i ^ 1]), inodes[i], "descriptor {} holds file {i}", fds[i ^ 1]);
+		}
+		for fd in fds {
+			// SAFETY: the test's own descriptors.
+			unsafe { libc::close(fd) };
+		}
+	}
+
+	/// A file this process holds at 1 is given to the child as it was, not
+	/// as the child's redirected standard output put there before it.
+	#[test]
+	fn a_standard_stream_is_given_as_it_was() {
+		let dir = tempfile::tempdir().expect("scratch directory");
+		let redirected = dir.path().join("redirected");
+		let mut command = std::process::Command::new("/bin/sh");
+		command.args(["-c", "printf SAVED >&3"]);
+		command.stdout(std::fs::File::create(&redirected).expect("file"));
+		command
+			.inject_fds(std::iter::once((3, openfiles::OpenFile::from(std::io::stdout()))))
+			.expect("injected");
+		assert!(command.status().expect("ran").success());
+		assert_eq!(std::fs::read_to_string(&redirected).expect("read"), "");
+	}
 }
