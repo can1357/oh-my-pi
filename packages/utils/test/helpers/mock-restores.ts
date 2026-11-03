@@ -47,6 +47,12 @@ export interface TestLifetime {
  * Tracks whether the current test is still the running one. Call `assertLive()` after an
  * `await` and before installing shared state: a body that resumes after its test timed out
  * then stops before it installs state that its finished cleanup cannot undo.
+ *
+ * The lifetime ends in `onTestFinished`, after the `afterEach` hooks. State the body installs
+ * while those hooks run is still undone by cleanup registered with `onTestFinished` (and by
+ * `installMockRestores()`). A body that awaits again after such an install and then calls code
+ * that ends the process needs a guard that ends when `afterEach` starts instead, such as
+ * coding-agent's `test/helpers/teardown-fence.ts`.
  */
 export function testLifetime(): TestLifetime {
 	const generation = testGeneration;

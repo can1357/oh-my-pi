@@ -122,11 +122,12 @@ interface ShutdownHarness {
 }
 
 async function createHarness(): Promise<ShutdownHarness> {
-	// Every async step below settles only while this test runs (see `fence`).
+	// Every await below goes through `step`, so a body abandoned on timeout parks before it
+	// installs mocks (here and in the test body) or reaches `postmortem.quit` (see `fence`).
 	const step = fence.forThisTest();
 	const dir = TempDir.createSync("@pi-headless-shutdown-");
 	tempDirs.push(dir);
-	const authStorage = await AuthStorage.create(":memory:");
+	const authStorage = await step(() => AuthStorage.create(":memory:"));
 	const settings = Settings.isolated({ "marketplace.autoUpdate": "off" });
 	const manager = SessionManager.create(dir.path(), `${dir.path()}/sessions`);
 	const latchedBeforeRun: Error[] = [];
