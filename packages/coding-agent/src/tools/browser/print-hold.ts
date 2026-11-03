@@ -59,6 +59,8 @@ function holdPrintInPage(
 	// fires the print events on the window it printed.
 	const holdPrintOf = (view: object, print: Function): Function => {
 		const clock: Function = Reflect.get(globalThis, clockKey);
+		const PrintEvent = Event;
+		const dispatchEvent = EventTarget.prototype.dispatchEvent;
 		return new Proxy(print, {
 			apply(target, thisArg, args) {
 				// The popup retains the deadline object and clock even if its opener changes origin. Losing access
@@ -76,8 +78,8 @@ function holdPrintInPage(
 					const report: unknown = Reflect.get(globalThis, binding);
 					if (typeof report === "function") report("");
 				} catch {}
-				Reflect.apply(EventTarget.prototype.dispatchEvent, view, [new Event("beforeprint")]);
-				Reflect.apply(EventTarget.prototype.dispatchEvent, view, [new Event("afterprint")]);
+				Reflect.apply(dispatchEvent, view, [new PrintEvent("beforeprint")]);
+				Reflect.apply(dispatchEvent, view, [new PrintEvent("afterprint")]);
 			},
 		});
 	};
