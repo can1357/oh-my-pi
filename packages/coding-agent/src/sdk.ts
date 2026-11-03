@@ -248,7 +248,7 @@ import {
 } from "./session/session-tools";
 import { anthropicSlowModeHasNoSiblingHeadroom } from "./session/anthropic-slow-mode";
 import { CacheWarmer } from "./session/cache-warmer";
-import { createSettingsAwareStreamFn, resolveOpenAIWebsocketPreference } from "./session/settings-stream-fn";
+import { createSettingsAwareStreamFn } from "./session/settings-stream-fn";
 import { SnapcompactInlineTransformer } from "./session/snapcompact-inline";
 import { createSnapcompactSavingsRecorder } from "./session/snapcompact-savings-journal";
 import { createSpeculativeToolExecutionConfig } from "./speculation/host";
@@ -4797,7 +4797,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				...streamOptions,
 				thinkingBudgets: streamOptions?.thinkingBudgets ?? cfgThinkingBudgets.get(settings),
 				kimiApiFormat: streamOptions?.kimiApiFormat ?? (kimiApiFormat === "auto" ? undefined : kimiApiFormat),
-				preferWebsockets: streamOptions?.preferWebsockets ?? resolveOpenAIWebsocketPreference(settings),
 			});
 		};
 		// Prompt-cache warmer for the main agent loop only: replays the last
@@ -4890,9 +4889,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					promptCacheKey: streamOptions?.promptCacheKey ?? session?.getPromptCacheKeyForModel(streamModel),
 					forceReasoningOff: externalThinking || streamOptions?.forceReasoningOff,
 				};
+				// The provider calls `onPayload` as it sends, past any wait for an in-flight
+				// slot: the prompt cache entry's lifetime starts there, not here.
+				const onPayload = merged.onPayload;
 				const stream = primaryStreamFn(streamModel, context, {
 					...merged,
 					...(fallbackCreditRedemption !== undefined ? { fallbackCreditRedemption } : {}),
+					onPayload: (payload, payloadModel, signal) => {
+						session.markPromptCacheDispatched(context);
+						return onPayload?.(payload, payloadModel, signal);
+					},
 				});
 				// A request that waited for a provider slot is checked again when it goes out.
 				if (stream instanceof Promise) {

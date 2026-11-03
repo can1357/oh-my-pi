@@ -110,6 +110,7 @@ impl<'s> ZshParser<'s> {
 					line: cx.ev_line,
 					list,
 					node_count,
+					source_replay: false,
 					aliases: core::mem::take(&mut cx.alias_uses),
 					warnings: Vec::new(),
 				}));

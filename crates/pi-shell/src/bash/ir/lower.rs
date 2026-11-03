@@ -38,6 +38,26 @@ pub fn lower(
 	mode: ModeId,
 	features: syn::Features,
 ) -> Result<Unit, &'static str> {
+	lower_command(cc, src, mode, features, false)
+}
+
+/// Lower a command while retaining parsed function bodies for their first call.
+pub(crate) fn lower_deferred(
+	cc: &syn::CompleteCommand,
+	src: &[u8],
+	mode: ModeId,
+	features: syn::Features,
+) -> Result<Unit, &'static str> {
+	lower_command(cc, src, mode, features, true)
+}
+
+fn lower_command(
+	cc: &syn::CompleteCommand,
+	src: &[u8],
+	mode: ModeId,
+	features: syn::Features,
+	deferred: bool,
+) -> Result<Unit, &'static str> {
 	let bytes = cc.span.slice(src);
 	let mut unit = Unit::empty(bytes, mode, features.bits());
 	unit.line = cc.line;
@@ -46,18 +66,22 @@ pub fn lower(
 		.iter()
 		.map(|a| (a.name.as_slice().into(), a.value.as_slice().into()))
 		.collect();
-	unit.nodes = vec![
-		NodeInfo { kind: NodeKind::Word, lo: 0, hi: 0, line: 0, col: 1 };
-		cc.node_count as usize
-	];
+	if !deferred {
+		unit.nodes = vec![
+			NodeInfo { kind: NodeKind::Word, lo: 0, hi: 0, line: 0, col: 1 };
+			cc.node_count as usize
+		];
+	}
 	let mut l = Lower::new(unit, cc.span.lo, features);
+	l.deferred = deferred;
+	l.source_replay = cc.source_replay;
 	for w in &cc.warnings {
 		let idx = l.str(&w.bash_msg);
 		l.emit(Opcode::Warn, idx, w.line, w.line);
 	}
 	l.list(&cc.list)?;
 	l.emit(Opcode::End, 0, 0, 0);
-	l.unit.seal();
+	l.unit.seal_from(l.source_hash);
 	Ok(l.unit)
 }
 
@@ -78,7 +102,7 @@ pub fn lower_text(
 	// Substitution bodies are blocks skipped by a jump to the code after
 	// them: give that jump a target, or a restored unit fails validation.
 	l.emit(Opcode::End, 0, 0, 0);
-	l.unit.seal();
+	l.unit.seal_from(l.source_hash);
 	Ok(l.unit)
 }
 
@@ -134,7 +158,7 @@ pub fn lower_compound(
 	l.unit
 		.words
 		.push(Word { parts, parks, node: 0, kind: WordKind::Plain, ..Word::default() });
-	l.unit.seal();
+	l.unit.seal_from(l.source_hash);
 	Ok(l.unit)
 }
 
@@ -241,19 +265,64 @@ pub fn function_from_source(src: &[u8], mode: ModeId, features: syn::Features) -
 	}
 }
 
+/// Lower an already-parsed function without changing its persistent identity.
+pub(crate) fn materialize(unit: &Unit) -> Option<Unit> {
+	let bytes = unit.deferred.as_ref()?;
+	if bytes.is_empty() {
+		let features = syn::Features::from_bits(unit.features);
+		let mut parser = syn::Parser::new(&unit.source, features, syn::NO_ALIASES)
+			.with_pos(syn::Pos { offset: 0, line: unit.line });
+		let cc = parser.next_command()?.ok()?;
+		let compiled = lower(&cc, &unit.source, unit.mode, features).ok()?;
+		let mut body = take_body(compiled, unit.root?)?;
+		body.id = unit.id;
+		return Some(body);
+	}
+	let (base, cmd): (u32, syn::Command) = postcard::from_bytes(bytes).ok()?;
+	let mut body = unit.clone();
+	body.deferred = None;
+	let features = syn::Features::from_bits(body.features);
+	let root = body.root?;
+	let mut lower = Lower::new(body, base, features);
+	lower.deferred = true;
+	lower.command(&cmd).ok()?;
+	lower.emit(Opcode::End, 0, 0, root);
+	for word in &mut lower.unit.words {
+		word.classify();
+	}
+	Some(lower.unit)
+}
+
+fn take_body(unit: Unit, root: u32) -> Option<Unit> {
+	if unit.root == Some(root) {
+		return Some(unit);
+	}
+	for function in unit.funcs {
+		if let Some(body) = take_body(*function.body, root) {
+			return Some(body);
+		}
+	}
+	None
+}
+
 struct Lower {
-	unit:        Unit,
+	unit:          Unit,
+	source_hash:   blake3::Hasher,
+	/// Retain function syntax instead of lowering uncalled bodies.
+	deferred:      bool,
+	/// The defining command can be reconstructed from its source alone.
+	source_replay: bool,
 	/// Absolute offset of the unit's first byte.
-	base:        u32,
+	base:          u32,
 	/// Unit-relative offsets of line starts.
-	line_starts: Vec<u32>,
+	line_starts:   Vec<u32>,
 	/// Depth of condition contexts.
-	cond:        u32,
-	features:    syn::Features,
+	cond:          u32,
+	features:      syn::Features,
 	/// Lowering run-time parsed text (`lower_text`) outside any command
 	/// substitution body: its words are [`WordKind::Text`] (no tilde
 	/// expansion).
-	text:        bool,
+	text:          bool,
 }
 
 type R = Result<(), &'static str>;
@@ -270,7 +339,18 @@ impl Lower {
 				.filter(|&(_, &c)| c == b'\n')
 				.map(|(i, _)| i as u32 + 1),
 		);
-		Self { unit, base, line_starts, cond: 0, features, text: false }
+		let source_hash = unit.source_hasher();
+		Self {
+			unit,
+			source_hash,
+			deferred: false,
+			source_replay: false,
+			base,
+			line_starts,
+			cond: 0,
+			features,
+			text: false,
+		}
 	}
 
 	const fn here(&self) -> u32 {
@@ -307,9 +387,17 @@ impl Lower {
 			.partition_point(|&s| s <= span.lo)
 			.saturating_sub(1);
 		let col = span.lo - self.line_starts[line] + 1;
-		if let Some(slot) = self.unit.nodes.get_mut(id.0 as usize) {
-			*slot = NodeInfo { kind, lo: span.lo, hi: span.hi, line: line as u32, col };
+		if self.unit.nodes.len() <= id.0 as usize {
+			self.unit.nodes.resize(id.0 as usize + 1, NodeInfo {
+				kind: NodeKind::Word,
+				lo:   0,
+				hi:   0,
+				line: 0,
+				col:  1,
+			});
 		}
+		self.unit.nodes[id.0 as usize] =
+			NodeInfo { kind, lo: span.lo, hi: span.hi, line: line as u32, col };
 	}
 
 	fn list(&mut self, list: &syn::List) -> R {
@@ -744,13 +832,27 @@ impl Lower {
 		body.nodes.clone_from(&self.unit.nodes);
 		body.root = Some(root);
 		body.line = self.unit.line;
+		if self.deferred {
+			body.deferred = Some(if self.source_replay {
+				BString::default()
+			} else {
+				postcard::to_stdvec(&(self.base, cmd))
+					.expect("parsed function body serializes")
+					.into()
+			});
+			body.seal_from(self.source_hash.clone());
+			return Ok(body);
+		}
 		let mut sub = Self {
-			unit:        body,
-			base:        self.base,
-			line_starts: self.line_starts.clone(),
-			cond:        0,
-			features:    self.features,
-			text:        false,
+			unit:          body,
+			source_hash:   self.source_hash.clone(),
+			deferred:      false,
+			source_replay: false,
+			base:          self.base,
+			line_starts:   self.line_starts.clone(),
+			cond:          0,
+			features:      self.features,
+			text:          false,
 		};
 		sub.command(cmd)?;
 		sub.emit(Opcode::End, 0, 0, root);
@@ -761,7 +863,7 @@ impl Lower {
 				self.unit.nodes[i] = *n;
 			}
 		}
-		body.seal();
+		body.seal_from(self.source_hash.clone());
 		Ok(body)
 	}
 
@@ -1510,8 +1612,40 @@ pub fn ansi_c_with(raw: &[u8], code_point: &mut dyn FnMut(u32, &mut Vec<u8>)) ->
 
 #[cfg(test)]
 mod tests {
-	use super::{ansi_c, assignment_like};
-	use crate::bash::syntax as syn;
+	use super::{ansi_c, assignment_like, lower, lower_deferred, materialize};
+	use crate::bash::{ids::ModeId, syntax as syn};
+
+	#[test]
+	fn deferred_bodies_survive_serialization_with_original_aliases_and_nodes() {
+		struct Aliases;
+		impl syn::AliasLookup for Aliases {
+			fn alias(&self, name: &[u8]) -> Option<&[u8]> {
+				(name == b"emit").then_some(b"echo frozen")
+			}
+		}
+		for src in [
+			b"f() { local x=${1:-default}; echo \"$x\"; }\n".as_slice(),
+			b"f() { emit \"${1:-default}\"; }\n".as_slice(),
+			b"f() { echo \"${x+'$(echo x'}\"; }\n".as_slice(),
+		] {
+			let mut parser = syn::Parser::new(src, syn::Features::NONE, &Aliases)
+				.with_pos(syn::Pos { offset: 0, line: 17 });
+			let cc = parser.next_command().unwrap().unwrap();
+			let eager = lower(&cc, src, ModeId::Bash, syn::Features::NONE).unwrap();
+			let lazy = lower_deferred(&cc, src, ModeId::Bash, syn::Features::NONE).unwrap();
+			let body = &lazy.funcs[0].body;
+			assert!(body.ops.is_empty());
+			assert_eq!(body.deferred.as_ref().unwrap().is_empty(), cc.aliases.is_empty());
+			let bytes = postcard::to_stdvec(body).unwrap();
+			let saved = postcard::from_bytes(&bytes).unwrap();
+			let compiled = materialize(&saved).unwrap();
+			assert_eq!(compiled.id, body.id);
+			assert_eq!(compiled.ops, eager.funcs[0].body.ops);
+			assert_eq!(compiled.words, eager.funcs[0].body.words);
+			assert_eq!(compiled.source, eager.funcs[0].body.source);
+			assert_eq!(compiled.root, eager.funcs[0].body.root);
+		}
+	}
 
 	// Goldens: bash 5.3 `printf '%q' $'…'` and upstream nquote3/nquote4.
 	#[test]

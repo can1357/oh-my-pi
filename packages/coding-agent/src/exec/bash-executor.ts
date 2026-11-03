@@ -17,7 +17,7 @@ import { $env } from "@oh-my-pi/pi-utils/env";
 import { isCmdShell, isExecutable, type ShellConfig } from "@oh-my-pi/pi-utils/procmgr";
 import { Settings } from "../config/settings";
 import type { MinimizedMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
-import { type OutputArtifactError, OutputSink, type OutputSummary } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import { OutputSink, type OutputSummary } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import {
 	resolveOutputMaxColumns,
 	resolveOutputSinkArtifactMaxBytes,
@@ -125,21 +125,12 @@ export interface BashPtyOptions {
 	onStdin?: (write: (data: string) => void) => void;
 }
 
-export interface BashResult {
-	output: string;
+/** A command's captured output (the sink's summary, column-cap and middle-elision fields included) and how it ended. */
+export interface BashResult extends OutputSummary {
 	exitCode: number | undefined;
 	cancelled: boolean;
 	/** True when the command was killed by its timeout deadline (not a user abort). */
 	timedOut?: boolean;
-	truncated: boolean;
-	totalLines: number;
-	totalBytes: number;
-	outputLines: number;
-	outputBytes: number;
-	artifactId?: string;
-	/** Bytes the artifact cap dropped from the saved file's middle (the artifact is a head/tail sample). */
-	artifactElidedBytes?: number;
-	artifactError?: OutputArtifactError;
 	/** The native minimizer's rewrite, set when its output replaced the raw stream. */
 	minimized?: MinimizedMeta;
 	workingDir?: string;

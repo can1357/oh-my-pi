@@ -425,7 +425,7 @@ mod tests {
 		Session::new(SessionConfig {
 			env,
 			cwd: BString::from(cwd.as_os_str().as_bytes()),
-			fs: Box::new(StdFs),
+			fs: Box::new(StdFs::default()),
 			vfs: None,
 			runtime: tokio::runtime::Handle::current(),
 			output_decoding,

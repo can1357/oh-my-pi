@@ -509,7 +509,7 @@ fn set_value_plain(
 					return Err(Diag::BadSubscript { shown: element_text(name, idx) });
 				}
 				if matches!(var.value, VarValue::Str(_)) {
-					var.value = VarValue::Assoc(Vec::new());
+					var.value = VarValue::Assoc(Default::default());
 				}
 				let old = lhs
 					.append
@@ -536,7 +536,7 @@ fn set_value_plain(
 			if assoc || attrs.contains(Attrs::ASSOC) {
 				let mut items = match (&var.value, lhs.append) {
 					(VarValue::Assoc(items), true) => items.clone(),
-					_ => Vec::new(),
+					_ => Default::default(),
 				};
 				let mut tmp = Var { attrs, value: VarValue::Assoc(std::mem::take(&mut items)) };
 				let mut pending_key: Option<BString> = None;
@@ -798,7 +798,6 @@ fn assign_in_place(
 		.with(Attrs::LOWER)
 		.with(Attrs::CAPITALIZE)
 		.with(Attrs::NAMEREF)
-		.with(Attrs::ASSOC)
 		.with(Attrs::ZSH_ONLY);
 	let name = lhs.name;
 	if name == b"BASH_ARGV0" || name == b"BASH_XTRACEFD" || is_posix_var(name) {
@@ -813,12 +812,13 @@ fn assign_in_place(
 		},
 	}
 	// What the general path would decide on, read without copying.
-	let (next, indexed, seen) = match state::binding(&k.root, cx.store, vp, name, level) {
+	let (next, indexed, assoc, seen) = match state::binding(&k.root, cx.store, vp, name, level) {
 		// Any one of the special attributes sends it to the general path.
 		Ok(Some(v)) if v.attrs.bits() & SPECIAL.bits() == 0 => match &v.value {
-			VarValue::Str(_) => (1, false, state::Seen::of(v)),
-			VarValue::Indexed(_) => (v.next_index(), true, state::Seen::of(v)),
-			VarValue::Assoc(_) => return Ok(Some(value)),
+			VarValue::Str(_) if v.attrs.contains(Attrs::ASSOC) => return Ok(Some(value)),
+			VarValue::Str(_) => (1, false, false, state::Seen::of(v)),
+			VarValue::Indexed(_) => (v.next_index(), true, false, state::Seen::of(v)),
+			VarValue::Assoc(_) => (0, false, true, state::Seen::of(v)),
 		},
 		Ok(_) => return Ok(Some(value)),
 		Err(e) => {
@@ -826,9 +826,16 @@ fn assign_in_place(
 			return Err(Diag::StoreFailed);
 		},
 	};
-	let index = match (&value, lhs.index) {
+	let elem = match (&value, lhs.index) {
+		(AssignValue::Scalar(_), index) if assoc => {
+			let key = index.unwrap_or(b"0");
+			if key.is_empty() {
+				return Err(Diag::BadSubscript { shown: element_text(name, key) });
+			}
+			Some(Elem::Key(BStr::new(key)))
+		},
 		(AssignValue::Scalar(_), Some(idx)) => {
-			Some(index_of(k, cx, vp, next, idx, &|| element_text(name, idx))?)
+			Some(Elem::Index(index_of(k, cx, vp, next, idx, &|| element_text(name, idx))?))
 		},
 		(AssignValue::Scalar(_), None) => None,
 		(AssignValue::Array(elems), _)
@@ -844,12 +851,12 @@ fn assign_in_place(
 	};
 	// A subscript ran arithmetic since the binding was read (`a[i++]=x`,
 	// `a[(a=1)]=x`): what it showed may be stale.
-	let seen = seen.filter(|_| lhs.index.is_none());
+	let seen = seen.filter(|_| assoc || lhs.index.is_none());
 	// `VarEdit::Set` also gives a declared-but-unset scalar no element 0
 	// (`local z; z[3]=1`) and clears `INVISIBLE`.
 	let edited = match value {
 		AssignValue::Scalar(v) => {
-			let edit = VarEdit::Set { elem: index.map(Elem::Index), value: &v, append: lhs.append };
+			let edit = VarEdit::Set { elem, value: &v, append: lhs.append };
 			state::edit_seen(&mut k.root, cx.store, vp, name, level, edit, seen)
 				.map(|bound| (!bound).then_some(AssignValue::Scalar(v)))
 		},
@@ -1026,10 +1033,19 @@ pub fn define_function(
 		vp.status = 1;
 		return Flow::Next;
 	}
-	let unit = k.engine.intern((*f.body).clone());
-	k.persist_unit(cx.store, &unit);
-	// Announced now, before any event names a node of the body.
-	exec::announce(k, cx, vp.vpid, vp.runs.front(), &unit, unit.line);
+	// Uncalled bodies need only their persistent descriptor, not a second
+	// copy in the executable-unit cache.
+	let compiled = f
+		.body
+		.deferred
+		.is_none()
+		.then(|| k.engine.intern((*f.body).clone()));
+	let unit = compiled.as_deref().unwrap_or(&f.body);
+	k.persist_unit(cx.store, unit);
+	// Deferred bodies are announced after lowering, before their first op.
+	if compiled.is_some() {
+		exec::announce(k, cx, vp.vpid, vp.runs.front(), unit, unit.line);
+	}
 	let mode = exec::mode_of(vp);
 	let attrs = match state::record(cx.store, vp, Key::Func(BStr::new(&f.name))) {
 		Ok(Some(Record::Func { attrs, .. })) => *attrs,
@@ -1888,7 +1904,7 @@ pub fn declare(ctx: &mut Ctx<'_, '_>, args: &[BString], kind: DeclareKind) -> R 
 		let exists = cur.is_some();
 		let mut var = cur.unwrap_or_else(|| {
 			let value = if on.contains(Attrs::ASSOC) {
-				VarValue::Assoc(Vec::new())
+				VarValue::Assoc(Default::default())
 			} else if on.contains(Attrs::INDEXED) {
 				VarValue::Indexed(Vec::new())
 			} else {
@@ -1941,7 +1957,7 @@ pub fn declare(ctx: &mut Ctx<'_, '_>, args: &[BString], kind: DeclareKind) -> R 
 			} else {
 				Vec::new()
 			};
-			var.value = VarValue::Assoc(items);
+			var.value = VarValue::Assoc(items.into());
 			// bash's `convert_var_to_assoc` makes a default-size table.
 			if exists {
 				var.attrs = var.attrs.with(Attrs::SMALL_HASH);
@@ -2660,21 +2676,28 @@ pub fn unset(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 				state::Deref::Plain | state::Deref::Circular => (name, index),
 			}
 		};
-		let var = declared(ctx, name)?;
+		let var = state::lookup_declared(&ctx.k.root, ctx.cx.store, ctx.vp, name)?.map(|v| {
+			(
+				v.attrs,
+				matches!(v.value, VarValue::Assoc(_)),
+				matches!(v.value, VarValue::Str(_)),
+				v.next_index(),
+			)
+		});
 		if var.is_none() && !o.has(b'v') && !o.has(b'n') && index.is_none() {
 			status |= unset_function(ctx, name)?;
 			continue;
 		}
-		let Some(mut var) = var else {
+		let Some((attrs, assoc, scalar, next)) = var else {
 			continue;
 		};
 		// `unset -n` acts on a name reference only (bash
 		// `find_variable_last_nameref`, `unbind_nameref`): any other
 		// variable stays.
-		if o.has(b'n') && !var.attrs.contains(Attrs::NAMEREF) {
+		if o.has(b'n') && !attrs.contains(Attrs::NAMEREF) {
 			continue;
 		}
-		if var.attrs.contains(Attrs::READONLY) {
+		if attrs.contains(Attrs::READONLY) {
 			ctx.err(Diag::Usage {
 				msg: format!("{}: cannot unset: readonly variable", name.as_bstr()).into(),
 			});
@@ -2704,7 +2727,6 @@ pub fn unset(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 				// and an index's expansions before evaluating it
 				// (`unset 'b[$(echo 1)]'`; a substitution may park).
 				let expanded;
-				let assoc = matches!(var.value, VarValue::Assoc(_));
 				let again = if assoc {
 					!noexpand
 				} else {
@@ -2732,71 +2754,75 @@ pub fn unset(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 				} else {
 					idx
 				};
-				match &mut var.value {
-					VarValue::Assoc(items) => items.retain(|(k, _)| k.as_slice() != idx),
-					VarValue::Indexed(_) | VarValue::Str(_) => {
-						let scalar = matches!(var.value, VarValue::Str(_));
-						if matches!(idx, b"@" | b"*") && !scalar {
-							// bash 5.3 empties the array (attributes kept);
-							// `BASH_COMPAT` 5.1 and before unset it.
-							let compat = ctx.var(b"BASH_COMPAT")?.and_then(|v| {
-								let s = v.as_scalar()?;
-								let digits: Vec<u8> = s.iter().copied().filter(|&c| c != b'.').collect();
-								std::str::from_utf8(&digits).ok()?.parse::<u32>().ok()
-							});
-							if compat.is_some_and(|c| c <= 51) {
-								ctx.set_var(name, None, Level::Dynamic);
-								continue;
-							}
+				let elem = if assoc {
+					Elem::Key(BStr::new(idx))
+				} else {
+					if matches!(idx, b"@" | b"*") && !scalar {
+						// bash 5.3 empties the array (attributes kept);
+						// `BASH_COMPAT` 5.1 and before unset it.
+						let compat = ctx.var(b"BASH_COMPAT")?.and_then(|v| {
+							let s = v.as_scalar()?;
+							let digits: Vec<u8> = s.iter().copied().filter(|&c| c != b'.').collect();
+							std::str::from_utf8(&digits).ok()?.parse::<u32>().ok()
+						});
+						if compat.is_some_and(|c| c <= 51) {
+							ctx.set_var(name, None, Level::Dynamic);
+							continue;
+						}
+						if let Some(mut var) = declared(ctx, name)? {
 							if let VarValue::Indexed(items) = &mut var.value {
 								items.clear();
 							}
 							ctx.set_var(name, Some(var), Level::Dynamic);
-							continue;
 						}
-						let i = match subscript_value(ctx.k, ctx.cx, ctx.vp, idx) {
-							// Through a reference bash ignores it silently.
-							Ok(i) if via_ref && scalar && i != 0 => continue,
-							Ok(i) if scalar && (i != 0 || matches!(idx, b"@" | b"*")) => {
-								ctx.err(Diag::Usage {
-									msg: format!("{}: not an array variable", name.as_bstr()).into(),
-								});
-								status = 1;
-								continue;
-							},
-							Ok(i) => i,
-							Err(_) if scalar && matches!(idx, b"@" | b"*") => {
-								ctx.err(Diag::Usage {
-									msg: format!("{}: not an array variable", name.as_bstr()).into(),
-								});
-								status = 1;
-								continue;
-							},
-							Err(d) => {
-								ctx.err(d);
-								status = 1;
-								continue;
-							},
-						};
-						let i = if i < 0 { var.next_index() + i } else { i };
-						if i < 0 {
+						continue;
+					}
+					let i = match subscript_value(ctx.k, ctx.cx, ctx.vp, idx) {
+						// Through a reference bash ignores it silently.
+						Ok(i) if via_ref && scalar && i != 0 => continue,
+						Ok(i) if scalar && (i != 0 || matches!(idx, b"@" | b"*")) => {
 							ctx.err(Diag::Usage {
-								msg: format!("[{}]: bad array subscript", idx.as_bstr()).into(),
+								msg: format!("{}: not an array variable", name.as_bstr()).into(),
 							});
 							status = 1;
 							continue;
-						}
-						match &mut var.value {
-							VarValue::Indexed(items) => items.retain(|(k, _)| *k != i),
-							VarValue::Str(_) if i == 0 => {
-								ctx.set_var(name, None, Level::Dynamic);
-								continue;
-							},
-							_ => {},
-						}
-					},
-				}
-				ctx.set_var(name, Some(var), Level::Dynamic);
+						},
+						Ok(i) => i,
+						Err(_) if scalar && matches!(idx, b"@" | b"*") => {
+							ctx.err(Diag::Usage {
+								msg: format!("{}: not an array variable", name.as_bstr()).into(),
+							});
+							status = 1;
+							continue;
+						},
+						Err(d) => {
+							ctx.err(d);
+							status = 1;
+							continue;
+						},
+					};
+					let i = if i < 0 { next + i } else { i };
+					if i < 0 {
+						ctx.err(Diag::Usage {
+							msg: format!("[{}]: bad array subscript", idx.as_bstr()).into(),
+						});
+						status = 1;
+						continue;
+					}
+					if scalar && i == 0 {
+						ctx.set_var(name, None, Level::Dynamic);
+						continue;
+					}
+					Elem::Index(i)
+				};
+				state::edit_var(
+					&mut ctx.k.root,
+					ctx.cx.store,
+					ctx.vp,
+					name,
+					Level::Dynamic,
+					VarEdit::Remove(elem),
+				)?;
 			},
 		}
 	}
@@ -3162,7 +3188,8 @@ mod tests {
 		out.clear();
 		declare_line(b"uu", Some(&uu), &mut out);
 		assert_eq!(out, b"declare -a uu=([0]=\"\" [1]=\"kghfjk\" [3]=$'i\\n')");
-		let m = Var { attrs: Attrs::NONE, value: VarValue::Assoc(vec![("k".into(), "v".into())]) };
+		let m =
+			Var { attrs: Attrs::NONE, value: VarValue::Assoc(vec![("k".into(), "v".into())].into()) };
 		out.clear();
 		declare_line(b"m", Some(&m), &mut out);
 		assert_eq!(out, b"declare -A m=([k]=\"v\" )");

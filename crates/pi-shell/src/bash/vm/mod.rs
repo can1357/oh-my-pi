@@ -978,10 +978,18 @@ fn host_stdio(host: &mut dyn Host, cache: &mut [Option<FdRef>; 3]) -> FdTable {
 fn startup_vars(k: &mut Kernel, cx: &mut Cx<'_>, init: &ShellInit) -> Result<(), StoreError> {
 	let ppid = cx.host.ppid();
 	let need_shell = state::global(cx.store, b"SHELL")?.is_none();
+	let deferred_shell = if need_shell && init.mode.dialect() != crate::bash::ids::Dialect::Zsh {
+		match cx.host.login_shell_initializer() {
+			Some(initializer) => cx.store.defer_scalar(b"SHELL", Attrs::NONE, initializer)?,
+			None => false,
+		}
+	} else {
+		false
+	};
 	let values = if init.mode.dialect() == crate::bash::ids::Dialect::Zsh {
 		zsh_startup_values(cx)
 	} else {
-		startup_values(cx, &init.argv0, ppid, need_shell)
+		startup_values(cx, &init.argv0, ppid, need_shell && !deferred_shell)
 	};
 	for (name, var, forced) in values {
 		if forced || state::global(cx.store, name)?.is_none() {

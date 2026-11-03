@@ -4347,7 +4347,7 @@ export interface ProviderConfigInput {
 		contextWindow: number;
 		maxTokens: number;
 		promptCache?: Model<Api>["promptCache"];
-		/** Whether Codex requests should prefer WebSocket transport. */
+		/** WebSocket preference within catalog policy; explicit false disables transport selection. */
 		preferWebsockets?: boolean;
 		headers?: Record<string, string>;
 		compat?: ModelSpec<Api>["compat"];
