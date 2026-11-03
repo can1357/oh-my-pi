@@ -68,6 +68,11 @@ export class IrcBridge {
 		return this.#interrupts.length > 0 || this.#asides.length > 0 || this.#deferredWakes.length > 0;
 	}
 
+	/** Every undelivered IRC record (interrupts, asides, parked wakes), without taking them. */
+	peekPending(): AgentMessage[] {
+		return [...this.#interrupts, ...this.#asides, ...this.#deferredWakes];
+	}
+
 	/** Whether an IRC message from `from` is still queued for a turn yet to run. */
 	hasQueuedFrom(from: string): boolean {
 		return [this.#interrupts, this.#asides, this.#deferredWakes].some(queue =>

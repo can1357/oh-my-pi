@@ -19,6 +19,7 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
@@ -266,6 +267,8 @@ async function runUntilRestart(
 	cwd: string,
 	record: boolean,
 	running: readonly string[] = ALL,
+	beforeRecord?: () => Promise<void>,
+	recorded: readonly string[] = running,
 ): Promise<string> {
 	const first = await open(SessionManager.create(cwd, path.join(root, "sessions")));
 	await first.prompt("Fan out.");
@@ -276,13 +279,14 @@ async function runUntilRestart(
 	const mainFile = first.sessionManager.getSessionFile()!;
 	// A long message queued for Alpha that its stopped turn never reads; the note must carry all of it.
 	await AgentRegistry.global().get("Alpha")!.session!.steer(LONG_MESSAGE);
+	await beforeRecord?.();
 	// What `/restart` does: record (the fix), then the teardown.
 	if (record)
 		expect(
 			recordRestartSubagents(first)
 				?.subagents.map(sub => sub.id)
 				.sort(),
-		).toEqual([...running].sort());
+		).toEqual([...recorded].sort());
 	await first.dispose();
 	resetProcessGlobals();
 	return mainFile;
@@ -377,7 +381,7 @@ it("resumes every running subagent, nested ones under their lane, after the rest
 			expect(notesSeen.get("Alpha")).toContain(LONG_MESSAGE);
 
 			// The record is consumed: a second startup resumes nothing.
-			expect(await resumeRestartedSubagents(second)).toEqual({ resumed: [], notResumed: [] });
+			expect(await resumeRestartedSubagents(second)).toEqual({ resumed: [], notResumed: [], unreadRecords: [] });
 
 			// Each transcript is one contiguous file: the first run's partial bash output, the note, the yield.
 			for (const id of ["Alpha", "Beta", "Lane.Arm"]) {
@@ -451,6 +455,12 @@ it("delivers a resumed arm's result to the root when its lane cannot be revived"
 				.find(job => job.agentId === "Lane.Arm" && job.id !== "Lane.Arm");
 			expect(forwarded?.resultText).toContain("could not be revived");
 			expect(forwarded?.resultText).toContain("Arm resumed");
+			// The root got it, so the original result is not owed to the lane any more: a later restart must not deliver it again.
+			await until(() => manager.isJobResultConsumed("Lane.Arm"), "the arm's original result to be marked read");
+			const next = recordRestartSubagents(second);
+			expect(next?.subagents.some(sub => sub.unreadResults.some(result => result.id === "Lane.Arm")) ?? false).toBe(
+				false,
+			);
 		} finally {
 			await second.dispose();
 		}
@@ -518,6 +528,74 @@ it("records an idle lane whose arm's result has not reached it when the next res
 	}
 }, 90_000);
 
+it("records an idle lane's IRC message that no turn has taken, and the relaunched lane reads it", async () => {
+	notesSeen.clear();
+	laneFinishesEarly = true;
+	const { cwd, authStorage, open } = await harness();
+	try {
+		const mainFile = await runUntilRestart(
+			open,
+			cwd,
+			true,
+			["Alpha", "Beta", "Lane.Arm"],
+			async () => {
+				// A hold (as a running delivery takes) parks the message instead of waking a turn.
+				const lane = AgentRegistry.global().get("Lane")!.session as AgentSession;
+				lane.holdIrcWakes();
+				await IrcBus.global().send({ from: MAIN_AGENT_ID, to: "Lane", body: "PEER-NOTE for Lane" });
+				expect(lane.peekPendingIrcMessages().length).toBe(1);
+			},
+			["Alpha", "Beta", "Lane", "Lane.Arm"],
+		);
+		const second = await open(await SessionManager.open(mainFile));
+		try {
+			expect((await resumeRestartedSubagents(second)).resumed).toContain("Lane");
+			await second.asyncJobManager!.getJob("Lane")!.promise;
+			expect(notesSeen.get("Lane")).toContain("PEER-NOTE for Lane");
+		} finally {
+			await second.dispose();
+		}
+	} finally {
+		laneFinishesEarly = false;
+		authStorage.close();
+	}
+}, 60_000);
+
+it("keeps a record whose file cannot be read for the next start instead of consuming it", async () => {
+	notesSeen.clear();
+	const { cwd, authStorage, open } = await harness();
+	try {
+		const mainFile = await runUntilRestart(open, cwd, true);
+		const artifacts = mainFile.slice(0, -".jsonl".length);
+		const recordFile = path.join(
+			artifacts,
+			(await fs.readdir(artifacts)).find(name => name.startsWith("restart-subagents-"))!,
+		);
+		await fs.chmod(recordFile, 0o000);
+		const second = await open(await SessionManager.open(mainFile));
+		try {
+			const outcome = await resumeRestartedSubagents(second);
+			expect(outcome.resumed).toEqual([]);
+			expect(outcome.unreadRecords.map(entry => entry.file)).toEqual([path.basename(recordFile)]);
+			expect(outcome.notResumed.map(entry => entry.id).sort()).toEqual([...ALL].sort());
+		} finally {
+			await fs.chmod(recordFile, 0o600);
+			await second.dispose();
+			resetProcessGlobals();
+		}
+		const third = await open(await SessionManager.open(mainFile));
+		try {
+			const outcome = await resumeRestartedSubagents(third);
+			expect([...outcome.resumed].sort()).toEqual([...ALL].sort());
+			expect(outcome.unreadRecords).toEqual([]);
+		} finally {
+			await third.dispose();
+		}
+	} finally {
+		authStorage.close();
+	}
+}, 90_000);
+
 it("without the restart record, no subagent continues after the relaunch (what `/restart` did before)", async () => {
 	notesSeen.clear();
 	const { cwd, authStorage, open } = await harness();
@@ -527,7 +605,7 @@ it("without the restart record, no subagent continues after the relaunch (what `
 		expect(entries).toBe(false);
 		const second = await open(await SessionManager.open(mainFile));
 		try {
-			expect(await resumeRestartedSubagents(second)).toEqual({ resumed: [], notResumed: [] });
+			expect(await resumeRestartedSubagents(second)).toEqual({ resumed: [], notResumed: [], unreadRecords: [] });
 			for (const id of ALL) expect(second.asyncJobManager!.getJob(id)).toBeUndefined();
 			expect(notesSeen.size).toBe(0);
 		} finally {

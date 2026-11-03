@@ -828,7 +828,10 @@ async function runInteractiveMode(
 	// each goes on with its task as a background job of its parent.
 	if (resuming) {
 		try {
-			const { resumed, notResumed } = await resumeRestartedSubagents(session, { eventBus, subagentEventBus });
+			const { resumed, notResumed, unreadRecords } = await resumeRestartedSubagents(session, {
+				eventBus,
+				subagentEventBus,
+			});
 			if (resumed.length > 0) {
 				const agents = resumed.length === 1 ? "1 subagent" : `${resumed.length} subagents`;
 				mode.showStatus(`Restarted: ${agents} going on with their tasks (${resumed.join(", ")}).`);
@@ -836,6 +839,11 @@ async function runInteractiveMode(
 			if (notResumed.length > 0) {
 				mode.showWarning(
 					`Not resumed after the restart: ${notResumed.map(entry => `${entry.id} (${entry.reason})`).join("; ")}. Their transcripts stay at history://<id>.`,
+				);
+			}
+			if (unreadRecords.length > 0) {
+				mode.showWarning(
+					`Could not read the restart's record ${unreadRecords.map(entry => `${entry.file} (${entry.reason})`).join("; ")}; it is kept and read again at the next start.`,
 				);
 			}
 		} catch (error: unknown) {

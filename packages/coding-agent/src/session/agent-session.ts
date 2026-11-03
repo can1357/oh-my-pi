@@ -13044,6 +13044,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.#ircWakeHolds > 0 || this.#ircWakesAwaitingCompaction > 0 || this.#irc.hasPending();
 	}
 
+	/** IRC messages delivered to this session that no turn has taken yet, oldest first; nothing is consumed. */
+	peekPendingIrcMessages(): AgentMessage[] {
+		return this.#irc.peekPending();
+	}
+
 	/** Emits an IRC relay observation for UI rendering without persisting it. */
 	emitIrcRelayObservation(record: CustomMessage): void {
 		this.#irc.emitRelayObservation(record);

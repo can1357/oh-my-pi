@@ -136,6 +136,22 @@ function queuedMessageText(message: AgentMessage): string {
 	return "";
 }
 
+/**
+ * Messages delivered to a subagent that no turn has taken yet: queued steering and
+ * follow-ups, and IRC messages waiting for a turn. Readable only on a session homed
+ * on this thread, which every in-process subagent is.
+ */
+function pendingInputOf(session: AgentSessionHandle): string[] {
+	if (!isLocalAgentSession(session)) return [];
+	return [
+		...session.agent.peekSteeringQueue(),
+		...session.agent.peekFollowUpQueue(),
+		...session.peekPendingIrcMessages(),
+	]
+		.map(queuedMessageText)
+		.filter(Boolean);
+}
+
 function describeRunningSubagent(
 	ref: AgentRef,
 	session: AgentSessionHandle,
@@ -169,12 +185,7 @@ function describeRunningSubagent(
 			const text = job.resultText ?? job.errorText;
 			return text ? [{ id: job.id, text }] : [];
 		});
-	// The queues are readable only on a session homed on this thread, which every in-process subagent is.
-	const pendingMessages = isLocalAgentSession(session)
-		? [...session.agent.peekSteeringQueue(), ...session.agent.peekFollowUpQueue()]
-				.map(queuedMessageText)
-				.filter(Boolean)
-		: [];
+	const pendingMessages = pendingInputOf(session);
 	return {
 		id: ref.id,
 		...(ref.parentId ? { parentId: ref.parentId } : {}),
@@ -200,11 +211,26 @@ export function recordRestartSubagents(session: AgentSession): RestartSubagentsD
 	const registry = AgentRegistry.global();
 	const rootId = session.getAgentId?.() ?? MAIN_AGENT_ID;
 	const subagents: RestartSubagent[] = [];
+	const idleSubagent = (ref: AgentRef, pendingMessages: string[]): RestartSubagent => ({
+		id: ref.id,
+		...(ref.parentId ? { parentId: ref.parentId } : {}),
+		...(ref.sessionFile ? { sessionFile: ref.sessionFile } : {}),
+		idle: true,
+		interruptedToolCalls: [],
+		lostJobs: [],
+		pendingMessages,
+		unreadResults: [],
+	});
 	for (const ref of registry.list()) {
 		if (ref.kind !== "sub" || !ref.sessionFile || !sessionFileBelongsToRoot(ref.sessionFile, rootFile)) continue;
 		const carried = resumesInFlight.get(ref.id);
 		const running = ref.status === "running" && ref.session;
-		if (!running && !carried) continue;
+		if (!running && !carried) {
+			// An idle subagent holding messages no turn has taken yet would lose them.
+			const pending = ref.session ? pendingInputOf(ref.session) : [];
+			if (pending.length > 0) subagents.push(idleSubagent(ref, pending));
+			continue;
+		}
 		const live = running ? describeRunningSubagent(ref, ref.session!, manager) : undefined;
 		if (!carried) subagents.push(live!);
 		else if (!live) subagents.push(carried);
@@ -239,16 +265,8 @@ export function recordRestartSubagents(session: AgentSession): RestartSubagentsD
 				existing.unreadResults.push({ id: job.id, text });
 			continue;
 		}
-		const idle: RestartSubagent = {
-			id: owner.id,
-			...(owner.parentId ? { parentId: owner.parentId } : {}),
-			sessionFile: owner.sessionFile,
-			idle: true,
-			interruptedToolCalls: [],
-			lostJobs: [],
-			pendingMessages: [],
-			unreadResults: [{ id: job.id, text }],
-		};
+		const idle = idleSubagent(owner, []);
+		idle.unreadResults.push({ id: job.id, text });
 		recorded.set(owner.id, idle);
 		subagents.push(idle);
 	}
@@ -408,6 +426,8 @@ export interface RestartResumeOutcome {
 	resumed: string[];
 	/** Ids that are not resumed, with the reason. */
 	notResumed: { id: string; reason: string }[];
+	/** Record files that could not be read; they stay unconsumed for a later start. */
+	unreadRecords: { file: string; reason: string }[];
 }
 
 function depthOf(id: string, byId: ReadonlyMap<string, RestartSubagent>): number {
@@ -430,7 +450,7 @@ export async function resumeRestartedSubagents(
 	session: AgentSession,
 	options: RestartResumeOptions = {},
 ): Promise<RestartResumeOutcome> {
-	const outcome: RestartResumeOutcome = { resumed: [], notResumed: [] };
+	const outcome: RestartResumeOutcome = { resumed: [], notResumed: [], unreadRecords: [] };
 	const sessionFile = session.sessionManager.getSessionFile();
 	if (!sessionFile) return outcome;
 	// A fork copies the entries under a new session id; its subagents belong to the source.
@@ -453,8 +473,11 @@ export async function resumeRestartedSubagents(
 	// Every read below happens before the records are consumed, and a read that fails
 	// is reported for its subagent alone: one unreadable file must not cost the others
 	// their resume, nor leave the records half used.
+	// A record whose file cannot be read is left for a later startup and reported:
+	// consuming it would lose what it carries (its subagents, the root's results).
+	const readable: RestartSubagentsEntry[] = [];
 	const consume = (): void => {
-		for (const record of records) {
+		for (const record of readable) {
 			session.sessionManager.appendCustomEntry(RESTART_SUBAGENTS_RESUMED_CUSTOM_TYPE, {
 				restartId: record.restartId,
 			});
@@ -466,6 +489,7 @@ export async function resumeRestartedSubagents(
 	const rootUnreadResults: { id: string; text: string }[] = [];
 	for (const record of records) {
 		let recorded: RestartSubagent[] | undefined;
+		let failure = "its contents do not match the session entry";
 		try {
 			const data = JSON.parse(
 				fs.readFileSync(path.join(sessionFile.slice(0, -".jsonl".length), record.file), "utf8"),
@@ -475,15 +499,21 @@ export async function resumeRestartedSubagents(
 				if (Array.isArray(data.rootUnreadResults)) rootUnreadResults.push(...data.rootUnreadResults);
 			}
 		} catch (error) {
-			logger.warn("Restart record file unreadable", { file: record.file, error: String(error) });
+			failure = error instanceof Error ? error.message : String(error);
+			logger.warn("Restart record file unreadable", { file: record.file, error: failure });
 		}
 		if (!recorded) {
+			outcome.unreadRecords.push({ file: record.file, reason: failure });
 			for (const id of record.subagentIds) {
 				byId.delete(id);
-				outcome.notResumed.push({ id, reason: `the restart's record file ${record.file} could not be read` });
+				outcome.notResumed.push({
+					id,
+					reason: `the restart's record file ${record.file} could not be read; it is kept for the next start`,
+				});
 			}
 			continue;
 		}
+		readable.push(record);
 		for (const sub of recorded) byId.set(sub.id, sub);
 		outcome.notResumed = outcome.notResumed.filter(entry => !byId.has(entry.id));
 	}
@@ -662,6 +692,10 @@ export async function resumeRestartedSubagents(
 								},
 								{ ownerId: rootId, agentId: sub.id },
 							);
+							// The root received it: the original job's result is not owed to anyone
+							// any more, so a later restart must not deliver it again.
+							const original = manager.getJob(sub.id);
+							void original?.promise.then(() => manager.consumeJobResults([sub.id]));
 						}
 						const structuredOutput = result.structuredOutput;
 						if (result.aborted || result.exitCode !== 0 || result.error !== undefined) {
