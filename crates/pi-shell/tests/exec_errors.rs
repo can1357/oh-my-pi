@@ -41,11 +41,15 @@ async fn run(cwd: &Path, script: &str) -> (String, String) {
 /// with coreutils 9.4 `env` and findutils `xargs`). `d` holds a script `foo`
 /// that may not be executed, a directory `dirfoo`, a symbolic link `loop` to
 /// itself, and `ok/foo` that may be executed; `long` is a name longer than
-/// the file system allows (`NAME_MAX`).
+/// the file system allows (`NAME_MAX`). An argument list of 30 copies of a
+/// 100,000-byte value is past what the OS accepts (`E2BIG`), and the `exec`
+/// that fails on it is reported by `env`, not by the shell.
 #[tokio::test]
 async fn a_command_that_cannot_run_reports_execvp_s_error() {
 	let long = "x".repeat(300);
-	let rows: [(&str, String, String, String); 9] = [
+	let big = format!("export P={}; ", "x".repeat(100_000));
+	let refs = "${P} ".repeat(30);
+	let rows: [(&str, String, String, String); 11] = [
 		(
 			"name over NAME_MAX, searched",
 			format!("env {long}; echo st:$?"),
@@ -99,6 +103,18 @@ async fn a_command_that_cannot_run_reports_execvp_s_error() {
 			"echo a | env PATH=$PWD/d:/usr/bin:/bin xargs dirfoo; echo st:$?".into(),
 			"st:126\n".into(),
 			"xargs: dirfoo: Permission denied\n".into(),
+		),
+		(
+			"an argument list too long, program named by path",
+			format!("{big}env -S './d/ok/foo {refs}'; echo st:$?"),
+			"st:126\n".into(),
+			"env: './d/ok/foo': Argument list too long\n".into(),
+		),
+		(
+			"an argument list too long, program found in PATH",
+			format!("{big}export PATH=\"$PWD/d/ok:$PATH\"; env -S 'foo {refs}'; echo st:$?"),
+			"st:126\n".into(),
+			"env: 'foo': Argument list too long\n".into(),
 		),
 	];
 	let mut wrong = Vec::new();

@@ -717,6 +717,8 @@ pub struct Run {
 	pub env:               Vec<(BString, BString)>,
 	pub started:           bool,
 	pub exit_trap_started: bool,
+	/// [`Script::report_exec_error`](super::Script::report_exec_error).
+	pub report_exec_error: bool,
 }
 
 /// What kind of activation a frame is.

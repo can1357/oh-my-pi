@@ -286,12 +286,18 @@ impl Tool {
 
 	/// `run` (one of the tool's subshells) ended; `false` when it is not
 	/// the tool's.
-	fn on_done(&mut self, run: RunId, status: i32, signal: Option<i32>) -> bool {
+	fn on_done(
+		&mut self,
+		run: RunId,
+		status: i32,
+		signal: Option<i32>,
+		exec_error: Option<i32>,
+	) -> bool {
 		let child = match self {
 			Self::Timeout(t) => &mut t.child,
 			Self::Nohup(t) => &mut t.child,
 			Self::Git(t) => &mut t.child,
-			Self::Extra(t) => return t.on_done(run, status, signal),
+			Self::Extra(t) => return t.on_done(run, status, signal, exec_error),
 		};
 		child.on_done(run, status)
 	}
@@ -448,12 +454,20 @@ impl ToolCalls {
 
 	/// A run that is not the session's own ended; `true` when it belonged
 	/// to a tool (the driver ignores it then). `signal` is the actual
-	/// signal death of a command replacing the run, not an exit code.
-	pub fn on_done(&mut self, run: RunId, status: i32, signal: Option<i32>) -> bool {
+	/// signal death of a command replacing the run, not an exit code;
+	/// `exec_error` the OS error of a run's own `exec` it reports to its
+	/// caller ([`crate::bash::Script::report_exec_error`]).
+	pub fn on_done(
+		&mut self,
+		run: RunId,
+		status: i32,
+		signal: Option<i32>,
+		exec_error: Option<i32>,
+	) -> bool {
 		if self
 			.active
 			.iter_mut()
-			.any(|(_, tool)| tool.on_done(run, status, signal))
+			.any(|(_, tool)| tool.on_done(run, status, signal, exec_error))
 		{
 			return true;
 		}

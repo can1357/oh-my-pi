@@ -1616,6 +1616,10 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) 
 				Ok(ProbeResult::Stat(Some(st))) => st.kind == StatKind::Dir,
 				Ok(_) => false,
 			};
+			let code = if dir { EACCES } else { ENOENT };
+			if exec_error_to_caller(k, cx, vp, code, if dir { 126 } else { 127 }) {
+				return None;
+			}
 			let (msg, status) = if dir {
 				(format!("{name}: cannot execute: Is a directory"), 126)
 			} else {
@@ -3435,6 +3439,41 @@ pub fn command_probe(
 	answer
 }
 
+/// The OS's "no such file or directory" (`ERROR_FILE_NOT_FOUND` on Windows).
+const ENOENT: i32 = 2;
+/// The OS's "permission denied" (`ERROR_ACCESS_DENIED` on Windows).
+const EACCES: i32 = if cfg!(windows) { 5 } else { 13 };
+
+/// When `vp`'s run reports its own `exec` errors to its caller
+/// ([`super::Script::report_exec_error`]) and this failure is an `exec`'s:
+/// records `code` for the caller and ends that `exec` with `status`, printing
+/// nothing. `false` otherwise.
+fn exec_error_to_caller(
+	k: &mut Kernel,
+	cx: &mut Cx<'_>,
+	vp: &mut Vproc,
+	code: i32,
+	status: i32,
+) -> bool {
+	if st(vp).exec_as.is_none() {
+		return false;
+	}
+	let Some(run) = vp
+		.runs
+		.front()
+		.filter(|run| run.report_exec_error)
+		.map(|run| run.id)
+	else {
+		return false;
+	};
+	k.exec_errors.insert(run, code);
+	let s = st(vp);
+	s.status = status;
+	s.stage = Stage::Output;
+	exec_failed(k, cx, vp);
+	true
+}
+
 /// After a failed `exec command`: the shell exits with the failure status
 /// (`Transfer::Exec`), unless it is not a subshell and `execfail` is set or
 /// it is interactive (bash's `no_exit_on_failed_exec`). Then it goes on, and
@@ -3552,6 +3591,9 @@ fn refused(
 	};
 	let enoent = err.kind() == ErrorKind::NotFound;
 	let mut status = if enoent { 127 } else { 126 };
+	if exec_error_to_caller(k, cx, vp, code, status) {
+		return None;
+	}
 	let stat = match command_probe(k, cx, vp, &Probe::Stat { path: path.clone(), follow: true }) {
 		Err(key) => return Some(Flow::Block(key)),
 		Ok(ProbeResult::Stat(stat)) => stat,

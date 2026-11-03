@@ -302,6 +302,9 @@ struct RunImage {
 	env:               Vec<(BString, BString)>,
 	started:           bool,
 	exit_trap_started: bool,
+	/// Absent in images written before it existed.
+	#[serde(default)]
+	report_exec_error: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -851,6 +854,7 @@ impl Shell {
 					env:               r.env,
 					started:           r.started,
 					exit_trap_started: r.exit_trap_started,
+					report_exec_error: r.report_exec_error,
 				});
 			}
 			report.runs += vp.runs.len() as u32;
@@ -1072,6 +1076,7 @@ fn run_image(r: &Run) -> RunImage {
 		env:               r.env.clone(),
 		started:           r.started,
 		exit_trap_started: r.exit_trap_started,
+		report_exec_error: r.report_exec_error,
 	}
 }
 

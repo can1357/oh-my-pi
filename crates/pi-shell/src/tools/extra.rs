@@ -4,13 +4,17 @@
 //! driver, which runs it in a subshell of the caller.
 //!
 //! As in pi, a command is looked up before it runs, so the utility reports
-//! a missing or unexecutable command in its own words (`xargs: nope: No such
-//! file or directory`, status 127): a builtin (an engine intrinsic, a tool or
+//! a missing or unexecutable command in its own words, with the error glibc's
+//! `execvp` would give (`xargs: nope: No such file or directory`, status
+//! 127): a builtin (an engine intrinsic, a tool or
 //! an extra) runs through `command`, so shell functions never run, as in
 //! pi's earlier shell; any other name is searched on the
 //! command's own `PATH` (with environment changes applied; the C library's
 //! default path without one) and runs by absolute path through `exec -a`, so
-//! the program sees the name it was asked for. Environment changes (`env -i`,
+//! the program sees the name it was asked for. An `exec` the OS refuses
+//! (`E2BIG`) comes back to the utility as that error too
+//! ([`Script::report_exec_error`]), which reports it as GNU's do after
+//! `execvp`. Environment changes (`env -i`,
 //! `-u`, `NAME=VALUE`) apply in the subshell before the command, in order.
 //!
 //! The subshell's stdin is what the utility asks for (the null device by
@@ -147,16 +151,25 @@ impl Extra {
 	}
 
 	/// `run` ended with `status`; `false` when it is not one of this call's
-	/// commands.
-	pub(super) fn on_done(&mut self, run: RunId, status: i32, signal: Option<i32>) -> bool {
+	/// commands. `exec_error` is the OS error of its program's `exec`.
+	pub(super) fn on_done(
+		&mut self,
+		run: RunId,
+		status: i32,
+		signal: Option<i32>,
+		exec_error: Option<i32>,
+	) -> bool {
 		let Some(at) = self.runs.iter().position(|(r, _)| *r == run) else {
 			return false;
 		};
 		let (_, reply) = self.runs.swap_remove(at);
 		let code = u8::try_from(status.rem_euclid(256)).unwrap_or(u8::MAX);
+		let outcome = match exec_error {
+			Some(error) => Err(io::Error::from_raw_os_error(error)),
+			None => Ok(signal.map_or(CommandStatus::Exited(code), CommandStatus::Signaled)),
+		};
 		// The utility may have stopped waiting (cancelled).
-		let outcome = signal.map_or(CommandStatus::Exited(code), CommandStatus::Signaled);
-		let _ = reply.send(Ok(outcome));
+		let _ = reply.send(outcome);
 		true
 	}
 
@@ -249,6 +262,7 @@ fn script(mut command: ShellCommand, program: &Program, env_names: &[BString]) -
 	script.foreign_env = foreign_env;
 	script.unexport_env = unexport_env;
 	script.args = Some(args);
+	script.report_exec_error = matches!(program, Program::Path(_));
 	// The working directory is logical, as after `cd`: `-execdir` hands over
 	// `<root>/./sub`, and the command's `$PWD` is `<root>/sub`.
 	script.cwd = command
