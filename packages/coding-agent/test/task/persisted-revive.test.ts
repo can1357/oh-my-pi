@@ -333,9 +333,10 @@ describe("persisted subagent revival", () => {
 		expect(emit).toHaveBeenCalledWith({ type: "session_start" });
 	});
 
-	// This revival runs the real createAgentSession with a real model registry and two loaded
-	// extensions: context, skill, rule and command discovery, extension loading and the system
-	// prompt. On a loaded machine that alone took 2.2 to 4.6 s, so bun's 5 s default fails it.
+	// This revival and the restricted one below run the real createAgentSession with a real model
+	// registry and loaded extensions: context, skill, rule and command discovery, extension loading
+	// and the system prompt. The work itself took 1.0 to 4.6 s here, so bun's 5 s default fails it;
+	// on a machine running a hundred agents the same revival has taken 49.9 s, so both carry 60 s.
 	it("loads only extensions allowed by the live owner's root policy", async () => {
 		const cwd = makeTempDir("@pi-revive-owner-roots-");
 		const sessionFile = await createPersistedSession(cwd, false, "default");
@@ -392,7 +393,7 @@ describe("persisted subagent revival", () => {
 			await revived?.dispose();
 			authStorage.close();
 		}
-	}, 30_000);
+	}, 60_000);
 
 	it("rebinds owner policy hooks for restricted revival without widening its tools", async () => {
 		const cwd = makeTempDir("@pi-revive-restricted-policy-");
@@ -452,7 +453,7 @@ describe("persisted subagent revival", () => {
 			await revived?.dispose();
 			authStorage.close();
 		}
-	});
+	}, 60_000);
 
 	it("anchors wake-turn artifacts to the revived ref's own dir, not the root session's (#11563)", async () => {
 		AgentRegistry.resetGlobalForTests();
