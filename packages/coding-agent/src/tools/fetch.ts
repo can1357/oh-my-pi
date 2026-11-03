@@ -516,10 +516,13 @@ async function parseFeedToMarkdown(content: string, maxItems = 10): Promise<stri
 const REMOTE_READER_MAX_MS = 10_000;
 const JINA_MARKDOWN_MARKER = "Markdown Content:";
 const JINA_READER_MAX_BYTES = 2 * 1024 * 1024;
+/** Jina's header warning that its own fetch got an error status, so the body is the error page. */
+const JINA_TARGET_FAILED_RE = /^Warning: Target URL returned error/m;
 
 function parseJinaReaderContent(responseBody: string): string | null {
 	const markerStart = responseBody.indexOf(JINA_MARKDOWN_MARKER);
 	if (markerStart < 0) return null;
+	if (JINA_TARGET_FAILED_RE.test(responseBody.slice(0, markerStart))) return null;
 
 	const content = responseBody.slice(markerStart + JINA_MARKDOWN_MARKER.length).trim();
 	if (content.length < 100 || content.startsWith("Loading...") || content.startsWith("Please enable JavaScript")) {
@@ -622,6 +625,9 @@ const FETCH_PROVIDER_ORDER: readonly FetchProvider[] = [
 	"jina",
 ];
 
+/** Reader backends that fetch the URL from their own servers, so a wall refusing this host may let them in. */
+const REMOTE_FETCH_PROVIDERS: readonly FetchProvider[] = ["parallel", "firecrawl", "jina"];
+
 /**
  * Render HTML to markdown by trying reader backends in priority order: native
  * (in-process), trafilatura, lynx, Parallel, Firecrawl, then Jina. The
@@ -629,7 +635,8 @@ const FETCH_PROVIDER_ORDER: readonly FetchProvider[] = [
  * specific backend is tried first, then the remaining backends as fallbacks.
  * Every backend's output must clear the same length and JavaScript-gate checks,
  * and a lynx dump the navigation check too ({@link isLowQualityOutput}), before
- * it is accepted, otherwise the next backend is tried.
+ * it is accepted, otherwise the next backend is tried. `providers` limits the
+ * chain to those backends, in the same order.
  *
  * The overall `timeout` budget bounds the whole call; remote backends (Parallel,
  * Firecrawl, Jina) are additionally capped at `REMOTE_READER_MAX_MS` so a hung
@@ -645,6 +652,7 @@ export async function renderHtmlToText(
 	userSignal: AbortSignal | undefined,
 	storage: AgentStorageApi | null,
 	fetchOverride?: FetchImpl,
+	providers: readonly FetchProvider[] = FETCH_PROVIDER_ORDER,
 ): Promise<{ content: string; ok: boolean; method: string }> {
 	const overallSignal = ptree.combineSignals(userSignal, timeout * 1000);
 	const execOptions = {
@@ -716,9 +724,9 @@ export async function renderHtmlToText(
 
 	const preference = cfgProvidersFetch.get(settings);
 	const order: readonly FetchProvider[] =
-		preference === "auto"
-			? FETCH_PROVIDER_ORDER
-			: [preference, ...FETCH_PROVIDER_ORDER.filter(method => method !== preference)];
+		preference === "auto" || !providers.includes(preference)
+			? providers
+			: [preference, ...providers.filter(method => method !== preference)];
 
 	// Highest-priority output that is substantial but fails the low-quality gate.
 	// Surfaced (ok: true) only when no backend clears the gate, so the caller's
@@ -1188,6 +1196,45 @@ async function renderUrl(
 	if (signal?.aborted) {
 		throw new ToolAbortError();
 	}
+	if (response.ok && response.blockedBy && !raw) {
+		// The challenge page is not the content: only a reader fetching from elsewhere can still get it.
+		const wall = `bot protection (${response.blockedBy}, HTTP ${response.status})`;
+		const remote = await renderHtmlToText(
+			url,
+			"",
+			timeout,
+			settings,
+			signal,
+			storage,
+			fetchOverride,
+			REMOTE_FETCH_PROVIDERS,
+		);
+		if (remote.ok && !isLowQualityOutput(remote.content, remote.method)) {
+			return {
+				url,
+				finalUrl: url,
+				contentType: normalizeMime(response.contentType),
+				method: remote.method,
+				content: finalizeOutput(remote.content),
+				fetchedAt,
+				truncated: false,
+				notes: [`Direct fetch was stopped by ${wall}; read through ${remote.method}`],
+			};
+		}
+		return {
+			url,
+			finalUrl: response.finalUrl,
+			contentType: normalizeMime(response.contentType),
+			method: "blocked",
+			content: "",
+			fetchedAt,
+			truncated: false,
+			// A challenge served with 200 is passed by running its script, which a browser does.
+			notes: [
+				`Blocked by ${wall}: the site served a challenge instead of the page, and no reader backend got past it; the browser tool runs the page's JavaScript like Chrome and may get through`,
+			],
+		};
+	}
 	if (!response.ok) {
 		return {
 			url,
@@ -1199,6 +1246,7 @@ async function renderUrl(
 			truncated: false,
 			notes: [
 				response.status ? `Failed to fetch URL (HTTP ${response.status})` : "Failed to fetch URL",
+				...(response.blockedBy ? [`Blocked by bot protection (${response.blockedBy})`] : []),
 				...(response.error ? [`Cause: ${response.error}`] : []),
 			],
 		};

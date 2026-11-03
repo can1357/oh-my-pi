@@ -294,7 +294,7 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
 - URL render pipeline in `renderUrl()`:
    1. normalize scheme (`https://` added for bare `www.`)
    2. try special handlers for known sites unless raw
-   3. fetch with `loadPage()`
+   3. fetch with `loadPage()`, which names the bot protection when the response is its challenge or block page: on any status Cloudflare's `cf-mitigated: challenge` header or a live `js_challenge` form input, and on an error status also `_cf_chl_opt` (Cloudflare), `captcha-delivery.com` (DataDome), `px-captcha` (PerimeterX) or "blocked by network security". A 2xx challenge page is not rendered: the URL goes to the remote readers (Parallel, Firecrawl, Jina) only, skipping the alternates, content negotiation, local renderers, `llms.txt` and raw-HTML fallbacks, and if none returns more than a JavaScript gate the read ends with `method: "blocked"` and a note naming the protection and status and pointing to the `browser` tool, which runs the challenge script. A walled error status stays `method: "failed"`, with the protection named in its notes
    4. if content is image/PDF/DOCX/etc., try binary fetch + markit/image handling
    5. handle JSON directly, feeds via feed parser, plain text directly
    6. for HTML and non-raw mode, try declared markdown alternates, content negotiation, feed alternates, HTML-to-text renderers, extracted linked documents, then `llms.txt`
@@ -316,7 +316,8 @@ Notes: ...
    - profile (`/<handle>`, `/with_replies`, `/media`) → `x_user_search` plus a `from:<handle>` `x_keyword_search` (Latest, 10 posts), with `allowed_x_handles` pinned to the handle;
    - search (`/search?q=`; `f=live` → Latest, `f=media` → `filter:media`, `f=user` → `x_user_search`) and hashtag (`/hashtag/<tag>`) → `x_keyword_search`.
    - Models are tried in `xaiModelChain()` order (`web` role xAI candidates plus the provider default's `webSearchModel`, ranked by provider priority so `xai-oauth` runs before `xai` unless `modelProviderOrder` says otherwise) with `max_turns: 2` and low reasoning effort; the call bills the xAI account per post and profile fetched. The answer is the model's rendering of the tool output, which the API does not expose raw; the `Notes:` header names the model and fetch counts. Without xAI credentials, for other X pages (home, explore, followers, lists), or when every model fails, the result is a `text/plain` explanation with method `x-unavailable`.
-- `method` records the winning path (`json`, `feed`, `text`, `alternate-markdown`, `content-negotiation`, `image`, `markit`, `llms.txt`, `raw`, `raw-html`, etc.).
+- `method` records the winning path (`json`, `feed`, `text`, `alternate-markdown`, `content-negotiation`, `image`, `markit`, `llms.txt`, `raw`, `raw-html`, `blocked`, etc.).
+- A Jina rendering whose header warns `Target URL returned error`, or a Firecrawl scrape whose `metadata.statusCode` is 400 or more, is rejected like an empty one: the reader's own fetch got the target's error or block page.
 - URL reads may return an inline image block when the fetched resource is a supported image and survives resizing.
 
 ## Side Effects
