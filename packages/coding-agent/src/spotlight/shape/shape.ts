@@ -29,7 +29,8 @@ import {
 	shapesItself,
 } from "../types";
 import { lineIndex, matchLine } from "./align";
-import { isPageBack, isTestRun, namesSource, printsFiles, runsProgram, SOURCE_PATH } from "./command";
+import { EDIT_TOOLS } from "../edit-gate";
+import { isPageBack, isTestRun, namesSource, printsFiles, runsAgent, runsProgram, SOURCE_PATH } from "./command";
 import { foldBashDocs, foldReadDoc } from "./docs";
 import { shapeDumpOutput, shapeDumpRead } from "./dumps";
 import { AGAIN_CHARS, indentOfFirst, MARKER, norm, words } from "./lines";
@@ -96,7 +97,7 @@ const REASK_LINES = 3;
 const VALVE_OVER = 3_900;
 /** Output of the agent's own programs triggers the valve only past twice the size. */
 const PROGRAM_SCALE = 2;
-/** Results shaped earlier or reading source are left whole up to this size. */
+/** Results shaped earlier, source reads, and sub-agent reports and edit results are left whole up to this size. */
 const EXEMPT_MAX = 12_000;
 /**
  * A result of a tool without steps of its own this short, in characters and lines, passes whole (under every size
@@ -461,8 +462,9 @@ function viewOrigin(run: Run, view: View): Origin | undefined {
 
 /**
  * The base layers, then the valve: already-seen runs collapse, lines over 400 characters keep 280, and a result over
- * 3.9k (the agent's own program output past 7.8k) is cut to ~3k, except outlines and source reads up to 12k and
- * pictures. Output repeating one line shape is cut to the lines that differ, its ends, and a line naming the shape.
+ * 3.9k (the agent's own program output past 7.8k) is cut to ~3k, except outlines, source reads, sub-agent reports
+ * (`task`, `wait`, `omp -p`) and edit results up to 12k, and pictures. Output repeating one line shape is cut to the
+ * lines that differ, its ends, and a line naming the shape.
  * Re-asks (results up to 12k bringing back lines a cut hid) and reads of folded code come back whole.
  */
 async function shapeSubject(run: Run, subject: Subject): Promise<{ view: View; steps: string[] }> {
@@ -497,7 +499,14 @@ async function shapeSubject(run: Run, subject: Subject): Promise<{ view: View; s
 	const sourceRead = input.read
 		? SOURCE_PATH.test(input.read.path)
 		: input.tool === "bash" && printsFiles(command) && namesSource(command) && !program;
-	const exempt = ((folded || sourceRead) && shown <= EXEMPT_MAX) || isGrid(lines);
+	// A sub-agent's report and an edit's result are read in full: cut, they came back as reads of the cut's copy
+	// (8 of 9 reports, 5 of 13 edit results), each costing more than the cut saved.
+	const report =
+		input.tool === "task" ||
+		input.tool === "wait" ||
+		Object.hasOwn(EDIT_TOOLS, input.tool) ||
+		(input.tool === "bash" && runsAgent(command));
+	const exempt = ((folded || sourceRead || report) && shown <= EXEMPT_MAX) || isGrid(lines);
 	const cut = !again && !exempt && shown > VALVE_OVER * scale * (program ? PROGRAM_SCALE : 1);
 	// Scalars unwrapped above no longer equal their base lines; the view's own lines still do.
 	const origin = viewOrigin(run, b.view) ?? alignedTo(run, b.view.lines);

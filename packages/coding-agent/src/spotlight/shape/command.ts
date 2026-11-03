@@ -22,6 +22,10 @@ const READ_SEGMENT = /^(?:cat|sed\s+-n|head|tail|nl|less|more|bat)\b(?!\s*(?:>|<
 /** The agent's own program: a heredoc or an interpreter run, whose output it shaped itself. */
 const PROGRAM = /<<-?\s*['"]?\w+|(?:^|[;&|\n]\s*)(?:python3?|node|perl|Rscript|ruby|julia)\b/;
 
+/** A segment that runs a coding agent non-interactively (`omp -p`, `claude -p`, `codex exec`, `bun src/cli.ts -p`). */
+const AGENT_SEGMENT =
+	/^(?:\w+=\S*\s+)*(?:(?:omp|claude)\b[^|]*\s(?:-p|--print)\b|codex\s+exec\b|bun\s+(?:run\s+)?\S*cli\.ts\b[^|]*\s(?:-p|--print)\b)/;
+
 /** A segment that runs tests or lint: the runner is the command word (after env vars / npx / uv run / python -m …). */
 const TEST_SEGMENT =
 	/^(?:\w+=\S*\s+)*(?:(?:npx|bunx|pnpm(?:\s+exec)?|yarn|uv\s+run(?:\s+--?[\w-]+(?:[=\s][\w.@/-]+)?)*|poetry\s+run|python3?\s+-m|(?:\S*\/)?\.bin\/|\S*\/bin\/)\s*)*(?:pytest|py\.test|vitest|jest|mocha|tox|nox|eslint|ruff|mypy|tsc|biome|playwright\s+test|python3?\s+\S*runtests\.py|(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:test|lint|typecheck|typescript|test[:-][\w:-]+)|cargo\s+(?:test|clippy)|go\s+test|make\s+(?:test|lint|check))\b/;
@@ -76,6 +80,11 @@ export function isTestRun(command: string): boolean {
 /** The command runs a program of the agent's own (heredoc, interpreter). */
 export function runsProgram(command: string): boolean {
 	return PROGRAM.test(command);
+}
+
+/** The command runs a coding agent whose printed report is its whole answer. */
+export function runsAgent(command: string): boolean {
+	return segments(command).some(s => AGENT_SEGMENT.test(s));
 }
 
 /** The command or read path reads text a shaped result saved (`artifact://N`): the agent paging hidden lines back in. */

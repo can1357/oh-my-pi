@@ -670,6 +670,33 @@ describe("spotlight shaping", () => {
 		);
 	});
 
+	it("shows a sub-agent's report and an edit's result whole up to 12k characters, and cuts them past it", async () => {
+		const report = (n: number) =>
+			Array.from(
+				{ length: n },
+				(_, i) => `- Step ${i + 1}: the marker at line ${i * 7} named its read, and the follow-up returned it.`,
+			).join("\n");
+		const shape = (input: ShapeInput) =>
+			shapeResult(
+				input,
+				context(),
+				scorer(() => 0.2),
+				newShapeState(),
+				sink(),
+			);
+		const agentRun = 'PI_X=1 bun src/cli.ts -p "$(cat probe.md)"';
+
+		for (const input of [
+			{ tool: "wait", command: "wait", text: report(80), cwd: "/nonexistent" },
+			{ tool: "edit", command: "edit", text: report(80), cwd: "/nonexistent" },
+			bash(agentRun, report(80)),
+		]) {
+			expect((await shape(input)).text).toBe(input.text);
+		}
+		expect((await shape(bash("./report.sh", report(80)))).text).not.toBe(report(80));
+		expect((await shape(bash(agentRun, report(200)))).text).not.toBe(report(200));
+	});
+
 	it("leads a changed command output with its exit status, and leaves an unchanged one as it is", async () => {
 		const lines = Array.from({ length: 2000 }, (_, i) => `info: step ${i + 1} ok`);
 
