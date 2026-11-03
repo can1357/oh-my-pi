@@ -212,6 +212,24 @@ export function formatModelStringWithRouting(model: Model<Api>): string {
 	return upstream ? `${selector}@${upstream}` : selector;
 }
 
+/**
+ * Route-aware model equality: `provider/id` plus the aggregator `@upstream`
+ * pin — exactly the identity {@link formatModelStringWithRouting} renders.
+ * `openrouter/foo@a` and `openrouter/foo@b` compare unequal (they are
+ * different request targets, and quota accounting observes the route), while
+ * re-binding the same possibly-pinned row still compares equal.
+ */
+export function modelsAreEqualWithRouting(a: Model<Api> | null | undefined, b: Model<Api> | null | undefined): boolean {
+	if (!a || !b) return false;
+	return formatModelStringWithRouting(a) === formatModelStringWithRouting(b);
+}
+
+/** Copy `source`'s single `@upstream` routing pin onto a fresh row of the same base model; `target` itself when `source` is unpinned. */
+export function carryUpstreamRouting(target: Model<Api>, source: Model<Api>): Model<Api> {
+	const upstream = getSingleUpstreamRoute(source);
+	return upstream ? applyUpstreamRouting(target, upstream) : target;
+}
+
 /** Restore a canonical model identity without interpreting any part of its id as a thinking selector. */
 export function resolveExactModelIdentity(
 	identity: string,
@@ -342,7 +360,7 @@ function supportsUpstreamRouting(model: Model<Api>): boolean {
 }
 
 /** Pin a resolved aggregator model to a single upstream provider via its compat routing block. */
-function applyUpstreamRouting(model: Model<Api>, upstream: string): Model<Api> {
+export function applyUpstreamRouting(model: Model<Api>, upstream: string): Model<Api> {
 	const aggregatorModel = model as Model<"openai-completions">;
 	const routing = { only: [upstream] };
 	return buildModel({

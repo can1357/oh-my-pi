@@ -371,14 +371,15 @@ async function applyModelPresetLocked(
 	const live = resolveLiveDefault(settings, session, candidates, preset);
 	if (typeof live === "string") return { kind: "failed", reason: live, shadowed };
 	try {
-		await session.setModel(live.model, "default", { persist: false });
+		await session.setModel(live.model, "default", {
+			persist: false,
+			applyThinkingLevel:
+				live.thinkingLevel !== undefined && live.thinkingLevel !== ThinkingLevel.Inherit
+					? live.thinkingLevel
+					: undefined,
+		});
 	} catch (error) {
 		return { kind: "failed", reason: errorMessage(error), shadowed };
-	}
-	// setModel re-applies the model's default or keeps the current level; the preset decides instead.
-	// `:inherit` means "no explicit level": leave what setModel applied rather than clearing the session level.
-	if (live.thinkingLevel !== undefined && live.thinkingLevel !== ThinkingLevel.Inherit) {
-		session.setThinkingLevel(live.thinkingLevel);
 	}
 	return {
 		kind: "switched",

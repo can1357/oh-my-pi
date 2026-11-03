@@ -126,9 +126,11 @@ import type { SessionAccountPoolScope } from "../config/account-pools";
 import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mode";
 import type { ModelRegistry } from "../config/model-registry";
 import {
+	carryUpstreamRouting,
 	disabledProviderIds,
 	getModelMatchPreferences,
 	type ResolvedModelRoleValue,
+	modelsAreEqualWithRouting,
 	resolveCliModel,
 	resolveSessionModelSelector,
 	sessionModelDiscoveryProviders,
@@ -306,6 +308,7 @@ import type {
 	FreshSessionResult,
 	HandoffResult,
 	ModelCycleResult,
+	ModelSwitchResult,
 	Prewalk,
 	PromptOptions,
 	ResetSessionContextResult,
@@ -2116,9 +2119,10 @@ export class AgentSession implements SettingsScope {
 			resolveActiveEditMode: () => this.#tools.resolveActiveEditMode(),
 			syncAfterModelChange: previousEditMode => this.#tools.syncAfterModelChange(previousEditMode),
 			setModelWithProviderSessionReset: async (model, selection = "explicit") => {
-				await this.#setModelWithProviderSessionReset(model);
+				const result = await this.#setModelWithProviderSessionReset(model);
 				// Only a completed explicit selection, including same-model reselection, takes ownership.
 				if (selection === "explicit") this.#prewalk.releaseHandoff();
+				return result;
 			},
 			clearActiveRetryFallback: () => this.#recovery.clearActiveRetryFallback(),
 			clearInheritedProviderPromptCacheKey: () => this.#clearInheritedProviderPromptCacheKey(),
@@ -11704,6 +11708,9 @@ export class AgentSession implements SettingsScope {
 			selector?: string;
 			thinkingLevel?: ThinkingLevel;
 			persist?: boolean;
+			/** Apply this level inside the switch transaction (before the
+			 * `model_select` commit); see {@link ModelControls.setModel}. */
+			applyThinkingLevel?: ConfiguredThinkingLevel;
 		},
 	): Promise<{ switched: boolean }> {
 		return this.#models.setModel(model, role, options);
@@ -12304,9 +12311,10 @@ export class AgentSession implements SettingsScope {
 	/**
 	 * Rebuild the model catalog after an `extendedContext` toggle or a
 	 * `compaction.modelThresholds` edit and rebind the active model when its
-	 * effective context window changed. Same-model rebinds skip provider-session
-	 * resets (`modelsAreEqual` sees no change), so this only refreshes metadata
-	 * consumers (compaction thresholds, context display).
+	 * effective context window changed. Same-model rebinds (route included —
+	 * the pin is carried onto the refitted row) skip provider-session resets,
+	 * so this only refreshes metadata consumers (compaction thresholds,
+	 * context display).
 	 */
 	async #reapplyContextWindowPolicy(): Promise<void> {
 		// Refit the bound row right away (the agent's model resolver applies this
@@ -12320,20 +12328,35 @@ export class AgentSession implements SettingsScope {
 			if (!currentModel || this.#isDisposed) return;
 			const found = this.#modelRegistry.find(currentModel.provider, currentModel.id);
 			const updated = found && this.#modelRegistry.fitContextWindow(found, this.settings);
+			// The fresh catalog row is unrouted (`find` returns the base row);
+			// carry the session's `@upstream` pin over so a window refit
+			// neither silently drops the pin nor — with the route-aware switch
+			// comparison in `#setModelWithProviderSessionReset` — reports a
+			// phantom model change for what is a metadata refresh.
+			const pinned = updated ? carryUpstreamRouting(currentModel, updated) : undefined;
 			// Compare against the window bound before the refit so dependent state
 			// still reconciles once even though the refit already moved the row.
 			const baseline = previousModel && modelsAreEqual(previousModel, currentModel) ? previousModel : currentModel;
-			if (updated && updated.contextWindow !== baseline.contextWindow) {
-				await this.#setModelWithProviderSessionReset(updated);
+			if (pinned && pinned.contextWindow !== baseline.contextWindow) {
+				// Same model (same route), so no slot was reserved and `commit`
+				// is a no-op; the call exists purely for the provider reset —
+				// but keep the "every result is committed" invariant.
+				(await this.#setModelWithProviderSessionReset(pinned)).commit("set");
 			}
 		} catch (error) {
 			logger.warn("context-window policy reapply failed", { error: String(error) });
 		}
 	}
 
-	async #setModelWithProviderSessionReset(model: Model): Promise<void> {
+	async #setModelWithProviderSessionReset(model: Model): Promise<ModelSwitchResult> {
 		const currentModel = this.model;
-		const isChanging = !currentModel || !modelsAreEqual(currentModel, model);
+		// Route-aware: `modelsAreEqual` compares provider/id only, so re-pinning
+		// an aggregator's upstream (`openrouter/foo@a` → `@b`) would read as a
+		// no-op even though `agent.setModel` installed a different request
+		// target. Quota-sensitive consumers observe the route — the same
+		// identity `formatModelStringWithRouting` renders — so a routed
+		// re-pin is a real change and notifies like one.
+		const isChanging = !currentModel || !modelsAreEqualWithRouting(currentModel, model);
 		if (currentModel) {
 			this.#closeProviderSessionsForModelSwitch(currentModel, model);
 			if (isChanging) {
@@ -12353,12 +12376,29 @@ export class AgentSession implements SettingsScope {
 		// `model_changed` has no extension-facing hook (`#emitExtensionEvent`
 		// never maps it), so routing it through `#emitSessionEvent` would only
 		// add an extension-delivery await inside every model switch — including
-		// retry-fallback on the error path.
+		// retry-fallback on the error path. The pi-compatible `model_select`
+		// notification keeps that contract: its FIFO slot is reserved below at
+		// reset time, but the handler pass only runs once the caller commits
+		// the slot as the LAST step of its switch transaction, so handlers
+		// observe the committed switch (`model_changed` above still fires
+		// synchronously here).
 		if (isChanging) {
 			this.#emit({ type: "model_changed" });
 		}
+		// Reserve the `model_select` FIFO slot at reset time — right next to
+		// `model_changed` — so slot order == switch order even when two
+		// overlapping switch transactions finish in reverse order. Delivery
+		// still waits for the caller's `commit(source)` as the LAST step of
+		// its transaction, so handlers observe the committed switch (see
+		// `ModelSwitchResult`).
+		const slot = isChanging ? this.#extensionRunner?.reserveModelSelect() : undefined;
 
 		await this.#reconcileModelDependentState(model);
+		return {
+			changed: isChanging,
+			previousModel: currentModel,
+			commit: source => slot?.commit({ model, previousModel: currentModel, source }),
+		};
 	}
 
 	async #reconcileModelDependentState(model: Model): Promise<void> {
@@ -13195,6 +13235,9 @@ export class AgentSession implements SettingsScope {
 		this.#usagePreflightReadyModel = undefined;
 
 		let cwdChangeTarget: string | undefined;
+		// The attempted model restore's result must outlive the try block: the
+		// catch commits its slot when the switch fails mid-tail.
+		let restoreResult: ModelSwitchResult | undefined;
 		try {
 			if (switchingToDifferentSession) {
 				// Stop and settle in-flight advisors while the old-session feeds can
@@ -13305,7 +13348,10 @@ export class AgentSession implements SettingsScope {
 							currentModel.id !== targetModel.id ||
 							currentModel.api !== targetModel.api));
 				if (shouldResetProviderState) {
-					await this.#setModelWithProviderSessionReset(targetModel);
+					// Same-session reloads rebind the same model (`changed` false →
+					// `commit` is a no-op); a real restore reserves its slot here and
+					// commits it at the end of the switch (success tail or catch).
+					restoreResult = await this.#setModelWithProviderSessionReset(targetModel);
 				} else {
 					this.agent.setModel(targetModel);
 				}
@@ -13412,8 +13458,20 @@ export class AgentSession implements SettingsScope {
 				if (options?.onModelFallback) options.onModelFallback(modelFallbackWarning);
 				else this.emitNotice("warning", modelFallbackWarning);
 			}
+			// The switch is fully committed: every step that could still throw
+			// into the rollback below has run. A failed switch instead commits
+			// the attempted restore in the catch block and follows it with the
+			// rollback restore — one event per actual change, in switch order.
+			restoreResult?.commit("restore");
 			return true;
 		} catch (error) {
+			// The model already changed, so the attempted restore's slot must
+			// release even though the switch failed (see ModelSwitchResult) —
+			// one `model_select` per actual change, in switch order. The
+			// rollback below reserves its own later slot, so delivery order is
+			// attempted restore, then rollback restore, regardless of when the
+			// commits happen relative to each other.
+			restoreResult?.commit("restore");
 			this.sessionManager.restoreState(previousSessionState);
 			this.#freshProviderSessionId = previousFreshProviderSessionId;
 			this.#syncAgentSessionId(previousSessionState.sessionId, false);
@@ -13454,15 +13512,21 @@ export class AgentSession implements SettingsScope {
 			// would push a { previousModel, target-session-thinking } config that
 			// was never a real session state.
 			let modelRolledBack = false;
+			let rolledBackModel: Model | undefined;
 			if (previousModel) {
-				const rolledBackModel = this.model;
+				rolledBackModel = this.model;
 				this.agent.setModel(previousModel);
 				modelRolledBack = !modelsAreEqual(rolledBackModel, previousModel);
 			}
 			this.#models.restoreThinkingSnapshot(previousThinkingLevel, previousAutoThinking, previousAutoResolvedLevel);
 			this.#models.restoreServiceTiers(previousServiceTierByFamily);
-			if (modelRolledBack) {
+			if (modelRolledBack && previousModel) {
 				this.#emit({ type: "model_changed" });
+				this.#extensionRunner?.emitModelSelect({
+					model: previousModel,
+					previousModel: rolledBackModel,
+					source: "restore",
+				});
 			}
 			this.#todo.syncFromBranch();
 			this.#modelMentions.syncFromBranch();
