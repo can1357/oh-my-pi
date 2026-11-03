@@ -71,7 +71,7 @@ describe("session selector picker", () => {
 					opts.deleted?.push(s.id);
 					return true;
 				},
-				loadAllSessions: async () => [today, todayToo, others, old],
+				loadAllSessions: async () => ({ sessions: [today, todayToo, others, old] }),
 				currentSessionPath: todayToo.path,
 				standalone: opts.standalone,
 			},
@@ -220,6 +220,13 @@ describe("session selector rename", () => {
 		expect(opened).toBeDefined();
 		expect(opened!.field.getValue()).toBe(beta.title ?? "");
 	});
+	it("opens the rename dialog on a Kitty F2 press instead of forwarding it to search", () => {
+		const { selector, beta } = makeRename({ calls: [] });
+		selector.handleInput("\x1b[Q");
+		const opened = renameDialogOf(selector);
+		expect(opened?.field.getValue()).toBe(beta.title);
+	});
+
 	it("commits on Enter via onRename and updates the row in place", async () => {
 		const renamed = { calls: [] as RenameCall[] };
 		const { selector, beta } = makeRename(renamed);

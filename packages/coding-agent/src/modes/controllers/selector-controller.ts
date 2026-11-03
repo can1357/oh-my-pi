@@ -1832,7 +1832,7 @@ export class SelectorController {
 				showCwd: true,
 			};
 		} else {
-			const [loadedSessions, pinnedIds] = await Promise.all([
+			const [listing, pinnedIds] = await Promise.all([
 				SessionManager.listForPicker(
 					this.ctx.sessionManager.getCwd(),
 					this.ctx.sessionManager.getSessionDir(),
@@ -1841,7 +1841,7 @@ export class SelectorController {
 				),
 				loadPinnedSessionIds(),
 			]);
-			sessions = loadedSessions;
+			sessions = listing.sessions;
 			const historyStorage = this.ctx.historyStorage;
 			const historyMatcher = historyStorage
 				? (query: string) => historyStorage.matchingSessionIds(query)
@@ -1898,7 +1898,10 @@ export class SelectorController {
 								}
 								return renamed;
 							},
-							onSetPinned: (session: SessionInfo, pinned: boolean) => setSessionPinned(session.id, pinned),
+							onSetPinned: async (session: SessionInfo, pinned: boolean) => {
+								await setSessionPinned(session.id, pinned);
+								this.ctx.applySessionPin(session.id, pinned);
+							},
 						}
 					: {
 							title: "Select a Session to Consult",
@@ -1907,6 +1910,7 @@ export class SelectorController {
 							showCwd: true,
 						}),
 				historyMatcher,
+				completeSessions: listing.complete,
 				loadAllSessions: () => SessionManager.listAllForPicker(),
 				pinnedIds,
 				// Live getter so detach/newSession stays accurate; tolerant of partial
