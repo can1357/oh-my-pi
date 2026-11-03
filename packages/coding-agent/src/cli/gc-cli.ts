@@ -51,8 +51,7 @@ import {
 	archivedPathsWithoutLiveCopies,
 	holdsCopied,
 	mintStagingGround,
-	checkPublished,
-	notStagedMessage,
+	publishedIsStaged,
 	surveyRecordedStagingGrounds,
 	removeStagingGround,
 	stagingLedgerDir,
@@ -1273,7 +1272,7 @@ async function digestArchivedSessionFile(file: string): Promise<{ hash: string; 
 }
 
 /**
- * A `holds` for {@link checkPublished}: the published archive inflates to
+ * A `holds` for {@link publishedIsStaged}: the published archive inflates to
  * exactly `expected`, the digest of the transcript it was compressed from.
  *
  * Read positionally, not through a read stream: a stream over a `FileHandle`
@@ -1354,7 +1353,7 @@ async function compared(comparison: Promise<boolean>, one: string, other: string
  * archive that turns out not to be what was compressed costs a retry and
  * nothing else. A run that reports success must not be holding an archive
  * that is somebody else's file, which is what the read-back is for — see
- * {@link checkPublished}.
+ * {@link publishedIsStaged}.
  *
  * A transcript can be a symlink, as `FileSessionStorage.listFilesSync`
  * already treats one as a transcript like any other. The compressed archive
@@ -1394,7 +1393,8 @@ async function gzipSessionFile(
 		await ground.handle.chmod((await live.stat()).mode & 0o7777);
 		expected = await digestStream(bytesOfHandle(live));
 		await pipeline(bytesOfHandle(live), createGzip({ level: 9 }), ground.handle.createWriteStream());
-		const stagedNow = await fs.lstat(ground.file).catch(absentOnly);
+		// A failed look throws as it came: only a look that sees another file is a replacement.
+		const stagedNow = await lstatIfPresent(ground.file);
 		if (stagedNow?.dev !== ground.created.dev || stagedNow.ino !== ground.created.ino) {
 			throw new Error(
 				`${ground.file} was replaced while the archive was being written; run \`omp gc --archive\` again`,
@@ -1459,11 +1459,11 @@ async function gzipSessionFile(
 			await fs.link(ground.file, destination);
 			linked = true;
 		}
-		const check = await checkPublished(destination, ground.created, inflatesTo(expected));
-		if (!check.staged) {
+		const unconfirmed = await publishedIsStaged(destination, ground.created, inflatesTo(expected));
+		if (unconfirmed) {
 			throw new Error(
-				`${notStagedMessage(destination, `the archive this run wrote for ${source}`, check)}, so ${source} was ` +
-					`not archived; run \`omp gc --archive\` again`,
+				`${destination} is not confirmed as the archive this run wrote for ${source} (${unconfirmed}), so ` +
+					`${source} was not archived; run \`omp gc --archive\` again`,
 			);
 		}
 		// The mode once more, from the descriptor the bytes were read through,
@@ -1577,7 +1577,7 @@ async function survivesSourceRemoval(destination: string, sourceRoot: string): P
  * copy is not gone: this run has held it open throughout, and an unlinked
  * inode is still readable through a descriptor. It goes back the way
  * everything else is written here — a stage of this run's own, digested as
- * it is copied, published, and read back by {@link checkPublished} — and
+ * it is copied, published, and read back by {@link publishedIsStaged} — and
  * what this run published there, a name any process of this user can write,
  * goes by {@link removeFileOthersMayWrite}. Anything else at the name is left as it is.
  */
@@ -1610,11 +1610,11 @@ async function putArchivedCopyBack(
 		if (replaced.outcome === "absent") await fs.link(ground.file, destination);
 		if (replaced.outcome === "kept") throw new Error(`${destination} could not be put back: ${replaced.note}`);
 		if (replaced.outcome === "removed" && replaced.note) notes.push(replaced.note);
-		const check = await checkPublished(destination, ground.created, holdsCopied(written));
-		if (!check.staged) {
+		const unconfirmed = await publishedIsStaged(destination, ground.created, holdsCopied(written));
+		if (unconfirmed) {
 			throw new Error(
-				`${destination} could not be put back: ` +
-					`${notStagedMessage("what stands at that name", "the copy this run wrote back", check)}, so it was left as it is`,
+				`${destination} could not be put back: what stands at that name is not confirmed as the copy this run ` +
+					`wrote back (${unconfirmed}), so it was left as it is`,
 			);
 		}
 	} finally {
@@ -1711,14 +1711,15 @@ async function publishArtifactIntoArchive(
 		// has been moved to a private name and judged there — see
 		// {@link removeFileOthersMayWrite} — so neither writes over a file somebody put at the
 		// name. What the publication left at the name is read back — see
-		// {@link checkPublished} for each step and what it rules out — since
+		// {@link publishedIsStaged} for each step and what it rules out — since
 		// a process that can write the destination's directory can still
 		// rebind the name after the link, which no check run here prevents
 		// and the read-back reports. An ordinary writer rewriting the live
 		// source is a different thing and is handled — what was copied is
 		// what is published.
 		const stagedIsStillOurs = async (): Promise<boolean> => {
-			const standing = await fs.lstat(tempPath).catch(absentOnly);
+			// A failed look throws as it came, not as a file somebody put there.
+			const standing = await lstatIfPresent(tempPath);
 			return standing?.dev === held.dev && standing.ino === held.ino;
 		};
 		const rebound = (): Error =>
@@ -1726,9 +1727,9 @@ async function publishArtifactIntoArchive(
 				`${tempPath} is no longer the file this run staged there, so it was left alone and ${source} was ` +
 					`not archived; run \`omp gc --archive\` again`,
 			);
-		const notPublished = (check: { unverified?: string }): Error =>
+		const notPublished = (why: string): Error =>
 			new Error(
-				`${notStagedMessage(destination, `the copy of ${source} this run wrote`, check)}, so ${source} was not ` +
+				`${destination} is not confirmed as the copy of ${source} this run wrote (${why}), so ${source} was not ` +
 					`archived; run \`omp gc --archive\` again`,
 			);
 		const archived = await openRegularFile(destination).catch(error => {
@@ -1740,11 +1741,11 @@ async function publishArtifactIntoArchive(
 		if (!archived) {
 			if (!(await stagedIsStillOurs())) throw rebound();
 			await fs.link(tempPath, destination);
-			const linkedCheck = await checkPublished(destination, held, holdsCopied(copied));
-			if (!linkedCheck.staged) {
+			const unconfirmed = await publishedIsStaged(destination, held, holdsCopied(copied));
+			if (unconfirmed) {
 				const note = await withdrawLinkedPublication(destination, ground, holdsCopied(copied));
 				if (note) state.notes.push(note);
-				throw notPublished(linkedCheck);
+				throw notPublished(unconfirmed);
 			}
 			state.created.push({ path: destination, held: ground.held, directory: false, written: copied });
 			published = true;
@@ -1808,8 +1809,8 @@ async function publishArtifactIntoArchive(
 				throw new Error(`${replaced.note}; ${source} was not archived; run \`omp gc --archive\` again`);
 			}
 			if (replaced.note) state.notes.push(replaced.note);
-			const check = await checkPublished(destination, held, holdsCopied(copied));
-			if (!check.staged) {
+			const unconfirmed = await publishedIsStaged(destination, held, holdsCopied(copied));
+			if (unconfirmed) {
 				// The shorter archived copy is gone from that name — and it is
 				// still here, in the descriptor this run has held open
 				// throughout. It goes back in place of what this run put there
@@ -1827,11 +1828,11 @@ async function publishArtifactIntoArchive(
 					);
 				} catch (error) {
 					throw new Error(
-						`${notPublished(check).message}; ${errorMessage(error)}. ${source}, which began with the bytes of the ` +
+						`${notPublished(unconfirmed).message}; ${errorMessage(error)}. ${source}, which began with the bytes of the ` +
 							`shorter copy the archive held when this run copied it, is kept`,
 					);
 				}
-				throw notPublished(check);
+				throw notPublished(unconfirmed);
 			}
 			await ground.handle.chmod(await liveMode());
 		} finally {
@@ -2066,6 +2067,9 @@ function sameIdentity(a: EntryIdentity, b: EntryIdentity): boolean {
 	);
 }
 
+/** An entry seen to change while it was being looked at — told apart from a look that failed. */
+class EntryChanged extends Error {}
+
 /**
  * One look at what `entry` names, or undefined when nothing does.
  *
@@ -2073,7 +2077,8 @@ function sameIdentity(a: EntryIdentity, b: EntryIdentity): boolean {
  * `readlink`, `lstat` again, and the two must describe the same inode with
  * the same change time, or the target may belong to a replacement — inode
  * numbers come back, so the number alone does not say the entry is the one
- * first seen. Throws when the entry changed while it was being looked at.
+ * first seen. Throws {@link EntryChanged} when the entry changed while it was
+ * being looked at, and any failed look as it came.
  */
 async function lookAt(entry: string): Promise<EntryIdentity | undefined> {
 	const first = await fs.lstat(entry).catch(error => {
@@ -2086,19 +2091,25 @@ async function lookAt(entry: string): Promise<EntryIdentity | undefined> {
 	const target = await fs.readlink(entry);
 	const again = await fs.lstat(entry);
 	if (!sameIdentity(seen, identityFrom(again))) {
-		throw new Error(`${entry} changed while this run was looking at it; it was kept`);
+		throw new EntryChanged(`${entry} changed while this run was looking at it; it was kept`);
 	}
 	return { ...seen, target };
 }
 
 /**
  * Whether `entry` still names exactly what `proved` describes, taken in one
- * look — see {@link lookAt}. Absence is reported as `undefined`. A look that
- * fails, or an entry that changed while being looked at, throws: neither is
- * an entry that is no longer the one proved.
+ * look — see {@link lookAt}. Absence is reported as `undefined`, and an
+ * entry seen to change while being looked at as `false`; a look that fails
+ * throws, since a failed look says nothing about what stands there.
  */
 async function standsAsProved(entry: string, proved: EntryIdentity): Promise<boolean | undefined> {
-	const now = await lookAt(entry);
+	let now: EntryIdentity | undefined;
+	try {
+		now = await lookAt(entry);
+	} catch (error) {
+		if (error instanceof EntryChanged) return false;
+		throw error;
+	}
 	return now === undefined ? undefined : sameIdentity(now, proved);
 }
 
@@ -2221,17 +2232,17 @@ function leaseRefusal(
 			: "no process this run can list holds it";
 	if (lease.outcome === "open-elsewhere") {
 		return (
-			`${file} is open elsewhere: the kernel refused this run a lease on it (${lease.evidence}), which it does ` +
-			`only while another open of the file exists or it is mapped, and ${list}` +
-			`${ownOthers === 0 ? ", nor does this process through another descriptor" : ""} — so the holder is one a ` +
-			`process list does not show: a child that inherited the ` +
-			`descriptor, a process it was handed to, one that maps the file, or another user's or another container's. ` +
-			`It is using the session, so nothing was moved. Find it with \`fuser -v ${shellQuote(file)}\` or ` +
+			`${file} is open or mapped elsewhere: the kernel refused this run a lease on it (${lease.evidence}), which ` +
+			`it does only while another open of the file exists or it is mapped, and ${list}` +
+			`${ownOthers === 0 ? ", nor does this process through another descriptor" : ""} — so the holder is one ` +
+			`this run cannot see: a child that inherited the descriptor, a process it was handed to, a mapping (this ` +
+			`process's own not excluded), or another user's or another container's process. It may be using the ` +
+			`session, so nothing was moved. Find it with \`fuser -v ${shellQuote(file)}\` or ` +
 			`\`lsof ${shellQuote(file)}\` (as root for another user's), let it finish or close it, and reclaim again`
 		);
 	}
 	return (
-		`whether another process holds ${file} open could not be proved: ${lease.meaning} (${lease.evidence}). A ` +
+		`whether anything else holds ${file} open could not be proved: ${lease.meaning} (${lease.evidence}). A ` +
 		`process list does not show a descriptor a process inherited or was handed, so without the kernel's lease ` +
 		`nothing proves the file unheld, and nothing was moved; ${list}. ` +
 		(lease.retry
@@ -2291,16 +2302,31 @@ async function leaseLiveFiles(
 }
 
 /**
- * Why a leased file shows the session in use now that the moves are made —
- * another process opened it meanwhile — or undefined. Throws when a lease
- * cannot be asked about: that is a failure to check, not an open.
+ * What a broken lease shows, for a report: the kernel breaks a lease when an
+ * open of the file is made or tried, or the file is truncated, by any
+ * process, this one included, and a refused non-blocking open breaks it as
+ * surely as a finished one. It does not say who, nor whether the open
+ * succeeded; a review saw a refused open, and this process's own open,
+ * reported as "another process opened it".
+ */
+function leaseBrokenBecause(file: string): string {
+	return (
+		`the kernel broke this run's lease on ${file}: an open of it was made or tried, or it was truncated, by ` +
+		`some process — which one the kernel does not say, and this one is not excluded`
+	);
+}
+
+/**
+ * Why a leased file shows the session may be in use now that the moves are
+ * made — its lease broke meanwhile — or undefined. Throws when a lease cannot
+ * be asked about: that is a failure to check, not an open.
  */
 function brokenLease(leased: readonly LeasedFile[]): string | undefined {
 	const opened = leased.find(file => !soleOpenLeaseStands(file.handle.fd));
 	if (!opened) return undefined;
 	return (
-		`${opened.path} was opened by another process while this run moved it into the archive — the kernel broke ` +
-		`this run's lease on it — so that process is using the session; reclaim again once it is done`
+		`${leaseBrokenBecause(opened.path)}, while this run moved it into the archive, so the session may be in ` +
+		`use; reclaim again once nothing uses it`
 	);
 }
 
@@ -2308,19 +2334,28 @@ function brokenLease(leased: readonly LeasedFile[]): string | undefined {
  * Why the live tree no longer stands as proved, asked the step before it
  * moves: a file's name no longer holds the file proved there, or a
  * directory's name no longer holds the directory held open since its proof.
- * Undefined while everything stands.
+ * Undefined while everything stands; a look that fails is said as one.
  */
 async function treeChangedSinceProof(
 	files: readonly LeasedFile[],
 	directories: readonly ProvenDirectory[],
 ): Promise<string | undefined> {
 	for (const file of files) {
-		if ((await standsAsProved(file.path, file.proved)) !== true) {
-			return `${file.path} is no longer the file this run proved`;
+		let stands: boolean | undefined;
+		try {
+			stands = await standsAsProved(file.path, file.proved);
+		} catch (error) {
+			return `whether ${file.path} is still the file this run proved could not be checked (${errorMessage(error)})`;
 		}
+		if (stands !== true) return `${file.path} is no longer the file this run proved`;
 	}
 	for (const directory of directories) {
-		const named = await lstatIfPresent(directory.path);
+		let named: Stats | undefined;
+		try {
+			named = await lstatIfPresent(directory.path);
+		} catch (error) {
+			return `whether ${directory.path} is still the directory this run proved could not be checked (${errorMessage(error)})`;
+		}
 		if (!named?.isDirectory() || named.dev !== directory.held.dev || named.ino !== directory.held.ino) {
 			return `${directory.path} is no longer the directory this run proved`;
 		}
@@ -2507,11 +2542,29 @@ async function carryLiveModeToArchive(live: string, archived: string): Promise<v
 		const archivedHandle = await openRegularFile(archived).catch(notRegularAsAbsent);
 		if (!archivedHandle) throw changed();
 		try {
+			// A look that fails is said as one: only a look that sees something
+			// else is reported as a change.
+			const unchecked = (what: string, error: unknown): Error =>
+				new Error(
+					`${what} of ${archived} could not be checked (${errorMessage(error)}), so its mode was not set; ` +
+						`run \`omp gc --archive\` again`,
+				);
 			const held = await archivedHandle.stat();
-			const named = await fs.lstat(archived).catch(absentOnly);
+			let named: Stats | undefined;
+			try {
+				named = await lstatIfPresent(archived);
+			} catch (error) {
+				throw unchecked("what stands at the name", error);
+			}
 			if (!named?.isFile() || named.dev !== held.dev || named.ino !== held.ino) throw changed();
 			const expected = await digestStream(bytesOfHandle(liveHandle));
-			if (!(await compared(inflatesTo(expected)(archivedHandle), archived, live))) throw changed();
+			let inflates: boolean;
+			try {
+				inflates = await inflatesTo(expected)(archivedHandle);
+			} catch (error) {
+				throw unchecked("what inflates out", error);
+			}
+			if (!inflates) throw changed();
 			const mode = (await liveHandle.stat()).mode & 0o7777;
 			if ((held.mode & 0o7777) !== mode) await archivedHandle.chmod(mode);
 		} finally {
@@ -2780,7 +2833,7 @@ async function freeArchivedCopies(
 			const redundant = async (handle: fs.FileHandle): Promise<string | undefined> => {
 				if (!originalLease) return `${original} is not one this run leased, so what it holds was not checked`;
 				if (!soleOpenLeaseStands(originalLease.handle.fd)) {
-					return `${original} was opened or truncated by another process after it moved, so it may no longer hold what ${copy} holds`;
+					return `${leaseBrokenBecause(original)}, after it moved, so it may no longer hold what ${copy} holds`;
 				}
 				if (await handleBeginsWith(originalLease.handle, handle)) return undefined;
 				return `${copy} holds bytes the original beside it, ${original}, does not`;
@@ -2793,17 +2846,18 @@ async function freeArchivedCopies(
 					if (!handle) return `${copy} could not be read where it was moved`;
 					const lease = takeSoleOpenLease(handle.fd);
 					if (lease.outcome === "open-elsewhere") {
-						// The kernel refuses for any other open, this process's own
-						// included, so another process is not named unless shown.
+						// The kernel refuses for any other open or a mapping, this
+						// process's own included; a descriptor count cannot see a
+						// mapping, so only a holder that is seen is named.
 						const own = await ownDescriptorCount(moved).catch(() => undefined);
 						return own !== undefined && own > 1
 							? `this omp process (${process.pid}) itself holds ${copy} open through ${own - 1} other ` +
 									`${own === 2 ? "descriptor" : "descriptors"} (${lease.evidence}), and could write to it after it went`
-							: `another open of ${copy} exists (${lease.evidence})${own === 1 ? ", not in this process" : ""}, ` +
-									`and whoever holds it could write to it after it went`;
+							: `${copy} is open or mapped elsewhere (${lease.evidence}), by a process the kernel does not ` +
+									`name, this one not excluded, and whoever holds it could write to it after it went`;
 					}
 					if (lease.outcome === "unproved") {
-						return `whether another process holds ${copy} open could not be told (${lease.evidence}: ${lease.meaning})`;
+						return `whether anything else holds ${copy} open could not be told (${lease.evidence}: ${lease.meaning})`;
 					}
 					return await redundant(handle);
 				},
@@ -2812,7 +2866,7 @@ async function freeArchivedCopies(
 				// of either file blocks on its lease and shows here — writes the
 				// copy's bytes back rather than losing them.
 				confirm: async handle => {
-					if (!soleOpenLeaseStands(handle.fd)) return `another process opened ${copy} as it went`;
+					if (!soleOpenLeaseStands(handle.fd)) return `${leaseBrokenBecause(copy)}, as it went`;
 					return await redundant(handle);
 				},
 			});

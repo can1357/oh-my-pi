@@ -5060,7 +5060,8 @@ for (const code of ["EACCES", "EIO", "ESTALE"] as const) {
 		const told = String(failure);
 		expect(told).not.toContain("is not the transcript");
 		expect(told).not.toContain("damaged");
-		expect(told).toContain(`whether ${sessionFile} is the transcript this restore wrote could not be checked`);
+		expect(told).toContain(`${sessionFile} is not confirmed as the transcript this restore wrote`);
+		expect(told).toContain(`${sessionFile} could not be opened to be checked`);
 		expect(told).toContain(`${code}: injected`);
 		// What it published is the transcript, whole: only the look failed.
 		expect(await Bun.file(sessionFile).text()).toBe(original);
@@ -5082,8 +5083,8 @@ test("a restore that cannot read back an artifact it published says so, not that
 	}
 
 	expect(told).not.toContain("is not the copy of");
-	expect(told).toContain(`whether ${live} is the copy of`);
-	expect(told).toContain("could not be checked");
+	expect(told).toContain(`${live} is not confirmed as the copy of`);
+	expect(told).toContain(`${live} could not be opened to be checked`);
 	expect(told).toContain("EIO: injected");
 	expect(await Bun.file(live).text()).toBe("HELLO");
 });
@@ -5099,9 +5100,8 @@ test("an archive run that cannot read back the archive it published says so, not
 
 	const told = result.archive?.errors.join("\n") ?? "";
 	expect(told).not.toContain("is not the archive this run wrote");
-	expect(told).toContain(
-		`whether ${archiveFile} is the archive this run wrote for ${sessionFile} could not be checked`,
-	);
+	expect(told).toContain(`${archiveFile} is not confirmed as the archive this run wrote for ${sessionFile}`);
+	expect(told).toContain(`${archiveFile} could not be opened to be checked`);
 	expect(told).toContain("EIO: injected");
 	expect(await Bun.file(sessionFile).exists()).toBe(true);
 });
@@ -5120,7 +5120,8 @@ test("an archive run that cannot read back an artifact it published says so, not
 
 	const told = result.archive?.errors.join("\n") ?? "";
 	expect(told).not.toContain("is not the copy of");
-	expect(told).toContain(`whether ${destination} is the copy of ${live} this run wrote could not be checked`);
+	expect(told).toContain(`${destination} is not confirmed as the copy of ${live} this run wrote`);
+	expect(told).toContain(`${destination} could not be opened to be checked`);
 	expect(told).toContain("EIO: injected");
 	expect(await Bun.file(live).text()).toBe("HELLO");
 });
@@ -5145,8 +5146,9 @@ test("an archive run that cannot read back a superseding copy, nor the shorter o
 	const told = result.archive?.errors.join("\n") ?? "";
 	expect(told).not.toContain("is not the copy of");
 	expect(told).not.toContain("is not the copy this run wrote back");
-	expect(told).toContain(`whether ${destination} is the copy of ${live} this run wrote could not be checked`);
-	expect(told).toContain("whether what stands at that name is the copy this run wrote back could not be checked");
+	expect(told).toContain(`${destination} is not confirmed as the copy of ${live} this run wrote`);
+	expect(told).toContain("what stands at that name is not confirmed as the copy this run wrote back");
+	expect(told).toContain(`${destination} could not be opened to be checked`);
 	expect(told).toContain("EIO: injected");
 	// The recovery is unchanged: the shorter copy went back over this run's.
 	expect(await Bun.file(destination).text()).toBe("FIRST");
@@ -5454,7 +5456,8 @@ test("an archive run that cannot look at its stage when taking back a publicatio
 	// report is the read-back that could not be made, never a foreign name.
 	const told = result.archive?.errors.join("\n") ?? "";
 	expect(told).not.toContain("is not what this run published there");
-	expect(told).toContain("could not be checked");
+	expect(told).toContain(`${destination} is not confirmed as the copy of`);
+	expect(told).toContain(`${destination} could not be opened to be checked`);
 	expect(told).toContain("EIO: injected");
 	expect(await fs.lstat(destination).catch(() => undefined)).toBeUndefined();
 });
@@ -9434,7 +9437,7 @@ test("a reclaim keeps a file only a forked child holds open, and what the child 
 	expect(result.reclaim?.reclaimed).toBe(0);
 	expect(result.reclaim?.moved).toBeUndefined();
 	const said = result.reclaim?.errors.join("\n") ?? "";
-	expect(said).toContain(`${artifact} is open elsewhere`);
+	expect(said).toContain(`${artifact} is open or mapped elsewhere`);
 	expect(said).toContain("nor does this process through another descriptor");
 	expect(said).toContain("EAGAIN");
 	expect(said).toContain("fuser -v");
@@ -9493,8 +9496,9 @@ test("a reclaim moves back a file another process opens while it is moving it, a
 	expect(result.reclaim?.reclaimed).toBe(0);
 	expect(result.reclaim?.moved).toBeUndefined();
 	expect(result.reclaim?.errors.join("\n")).toContain(
-		`${artifact} was opened by another process while this run moved it`,
+		`the kernel broke this run's lease on ${artifact}: an open of it was made or tried, or it was truncated`,
 	);
+	expect(result.reclaim?.errors.join("\n")).not.toContain("was opened by another process");
 	// Well short of the kernel's 45-second break time: the reclaim let go.
 	expect(waited).toBeLessThan(30);
 	expect(await Bun.file(artifact).text()).toBe("FIRST OPENER BYTES");
@@ -10458,6 +10462,7 @@ const fileSizeLimit = (() => {
 for (const writes of [
 	"whole",
 	"whole, though the unlinked copy's size cannot be read",
+	"whole, though the read that would find its end fails",
 	"cut short by the kernel each time",
 	"stopped by the kernel part-way",
 ] as const) {
@@ -10496,16 +10501,28 @@ for (const writes of [
 		});
 		// A review made `fstat` fail on the unlinked copy, and the write-back
 		// threw before it wrote anything back; its size is for the report only.
-		if (writes === "whole, though the unlinked copy's size cannot be read") {
+		// Another failed the read that would have found the end, after every
+		// byte was written back, and saw the whole copy reported lost.
+		if (writes.startsWith("whole, though")) {
 			const realOpen = regularFile.openRegularFile;
 			spyOn(regularFile, "openRegularFile").mockImplementation(async (file, options) => {
 				const handle = await realOpen(file, options);
 				if (!handle || path.dirname(file) !== copyDir || !path.basename(file).startsWith(".a.log.")) return handle;
-				const realStat = handle.stat.bind(handle);
-				spyOn(handle, "stat").mockImplementation((async (...args: unknown[]) => {
-					if (copyUnlinked) throw Object.assign(new Error("EIO: i/o error, fstat"), { code: "EIO" });
-					return await (realStat as (...a: unknown[]) => Promise<Stats>)(...args);
-				}) as typeof handle.stat);
+				if (writes === "whole, though the unlinked copy's size cannot be read") {
+					const realStat = handle.stat.bind(handle);
+					spyOn(handle, "stat").mockImplementation((async (...args: unknown[]) => {
+						if (copyUnlinked) throw Object.assign(new Error("EIO: i/o error, fstat"), { code: "EIO" });
+						return await (realStat as (...a: unknown[]) => Promise<Stats>)(...args);
+					}) as typeof handle.stat);
+				} else {
+					const realRead = handle.read.bind(handle) as (...args: unknown[]) => Promise<{ bytesRead: number }>;
+					spyOn(handle, "read").mockImplementation((async (...args: unknown[]) => {
+						if (copyUnlinked && (args[3] as number) >= bytes.length) {
+							throw Object.assign(new Error("EIO: i/o error, read"), { code: "EIO" });
+						}
+						return await realRead(...args);
+					}) as typeof handle.read);
+				}
 				return handle;
 			});
 		}
@@ -10759,3 +10776,91 @@ test.skipIf(!sudoForSticky)(
 	},
 	60_000,
 );
+
+// A failed look is reported as a failed look, never as an event nobody saw.
+// A review failed one owner read, or the last lookup of a restored directory,
+// with `EIO`, and the restore said a running process owned the session, or
+// that something had moved the directory.
+for (const phase of [
+	"before the artifacts' lease refresh",
+	"after the artifacts' lease refresh",
+	"at the restored directory's last lookup",
+] as const) {
+	test(`a restore reports a failed look ${phase} as a failed look`, async () => {
+		const liveArtifacts = sessionFile.slice(0, -".jsonl".length);
+		await Bun.write(path.join(liveArtifacts, "a.log"), "RESTORED UNIQUE BYTES\n");
+		await archiveEverything();
+		const live = path.join(liveArtifacts, "a.log");
+		let transcriptPublished = false;
+		let artifactPublished = false;
+		let hit = false;
+		const realLink = fs.link;
+		const realLstat = fs.lstat;
+		spyOn(fs, "link").mockImplementation(async (from, to) => {
+			await realLink(from, to);
+			if (String(to) === sessionFile) transcriptPublished = true;
+			if (String(to) === live) artifactPublished = true;
+		});
+		const eio = (): Error => Object.assign(new Error(`EIO: injected ${phase}`), { code: "EIO" });
+		if (phase === "at the restored directory's last lookup") {
+			spyOn(fs, "lstat").mockImplementation((async (...args: Parameters<typeof fs.lstat>) => {
+				if (!hit && artifactPublished && String(args[0]) === liveArtifacts) {
+					hit = true;
+					throw eio();
+				}
+				return await Reflect.apply(realLstat, fs, args);
+			}) as typeof fs.lstat);
+		} else {
+			// The refresh reads the archived transcript's header for its owner.
+			const realOpen = regularFile.openRegularFile;
+			spyOn(regularFile, "openRegularFile").mockImplementation(async (file, options) => {
+				const due =
+					phase === "before the artifacts' lease refresh"
+						? transcriptPublished && !artifactPublished
+						: artifactPublished;
+				if (!hit && due && file === archiveFile) {
+					hit = true;
+					throw eio();
+				}
+				return await realOpen(file, options);
+			});
+		}
+		const result = await runGcCommand({ flags: restoreApply() });
+		mock.restore();
+
+		expect(hit).toBe(true);
+		const said = result.restore?.errors.join("\n") ?? "";
+		expect(said).toContain(`EIO: injected ${phase}`);
+		expect(said).not.toContain("a running process owns this session");
+		expect(said).not.toContain("something moved it");
+		expect(said).not.toContain("another entry stands at its name");
+		expect(said).not.toContain("nothing stands at its name");
+		expect(await new FileSessionStorage().readText(sessionFile)).toBe(await Bun.file(sessionFile).text());
+		if (artifactPublished) expect(await Bun.file(live).text()).toBe("RESTORED UNIQUE BYTES\n");
+	}, 120_000);
+}
+
+// A comparison that cannot read is said as one: a failed read of an archived
+// transcript was reported as the live session being "a different session
+// file".
+test("a restore that cannot read the archive to compare it says so, not that the live file is another session", async () => {
+	await archiveOnly();
+	const realOpen = regularFile.openRegularFile;
+	let hit = false;
+	spyOn(regularFile, "openRegularFile").mockImplementation(async (file, options) => {
+		const handle = await realOpen(file, options);
+		if (!handle || file !== archiveFile) return handle;
+		spyOn(handle, "read").mockImplementation((async () => {
+			hit = true;
+			throw Object.assign(new Error("EIO: injected archive read"), { code: "EIO" });
+		}) as typeof handle.read);
+		return handle;
+	});
+	const result = await runGcCommand({ flags: restoreApply() });
+	mock.restore();
+
+	expect(hit).toBe(true);
+	const said = result.restore?.errors.join("\n") ?? "";
+	expect(said).toContain("EIO: injected archive read");
+	expect(said).not.toContain("different session file");
+}, 60_000);

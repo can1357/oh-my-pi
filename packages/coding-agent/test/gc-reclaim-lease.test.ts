@@ -150,7 +150,7 @@ for (const [code, advice] of [
 		mock.restore();
 
 		for (const said of [preview.reclaim?.errors.join("\n") ?? "", result.reclaim?.errors.join("\n") ?? ""]) {
-			expect(said).toContain(`whether another process holds ${sessionFile} open could not be proved`);
+			expect(said).toContain(`whether anything else holds ${sessionFile} open could not be proved`);
 			expect(said).toMatch(/fcntl\(F_SETLEASE, F_WRLCK\) failed with E[A-Z]+/);
 			expect(said).toContain(advice);
 		}
@@ -272,6 +272,74 @@ for (const held of ["the live artifact", "its archived copy"] as const) {
 		},
 	);
 }
+
+// A descriptor count cannot see a mapping, and a lookup that fails leaves
+// it incomplete. A review mapped the archived copy in the omp process, and
+// in turn failed one `/proc/self/fd` lookup with `EIO` while it held the copy
+// open, and each report said the other open was "not in this process".
+for (const how of ["mapped by this process", "held by this process, one descriptor lookup failing"] as const) {
+	test.skipIf(!leasesGranted || process.platform !== "linux")(
+		`a reclaim never says an archived copy ${how} is held only outside this process`,
+		async () => {
+			const copy = path.join(archiveFile.slice(0, -".jsonl.gz".length), "a.log");
+			// Held to the end of the reclaim, so the mapping stands while it runs.
+			const mapping = how === "mapped by this process" ? Bun.mmap(copy, { shared: true }) : undefined;
+			let own: fs.FileHandle | undefined;
+			const realStat = fs.stat;
+			let failed = false;
+			if (how !== "mapped by this process") {
+				own = await fs.open(copy, "r");
+				const fd = own.fd;
+				spyOn(fs, "stat").mockImplementation((async (...args: Parameters<typeof fs.stat>) => {
+					if (String(args[0]) === `/proc/self/fd/${fd}`) {
+						failed = true;
+						throw Object.assign(new Error("EIO: injected descriptor lookup"), { code: "EIO" });
+					}
+					return await Reflect.apply(realStat, fs, args);
+				}) as typeof fs.stat);
+			}
+			try {
+				const result = await reclaim(true);
+				mock.restore();
+				const said = result.reclaim?.errors.join("\n") ?? "";
+
+				if (own) expect(failed).toBe(true);
+				expect(result.reclaim?.reclaimed).toBe(1);
+				expect(result.reclaim?.keptCopies?.join("\n")).toContain(copy);
+				expect(said).toContain(`${copy} is open or mapped elsewhere`);
+				expect(said).toContain("this one not excluded");
+				expect(said).not.toContain("not in this process");
+				expect(await Bun.file(copy).text()).toBe("FIRST");
+				if (mapping) expect(Buffer.from(mapping).toString()).toBe("FIRST");
+			} finally {
+				mock.restore();
+				await own?.close();
+			}
+		},
+	);
+}
+
+test.skipIf(process.platform !== "linux")(
+	"ownDescriptorCount is unknown, not smaller, when a descriptor lookup fails",
+	async () => {
+		const held = await fs.open(artifact, "r");
+		const realStat = fs.stat;
+		try {
+			const identity = await held.stat();
+			expect(await holders.ownDescriptorCount(identity)).toBe(1);
+			spyOn(fs, "stat").mockImplementation((async (...args: Parameters<typeof fs.stat>) => {
+				if (String(args[0]) === `/proc/self/fd/${held.fd}`) {
+					throw Object.assign(new Error("EIO: injected"), { code: "EIO" });
+				}
+				return await Reflect.apply(realStat, fs, args);
+			}) as typeof fs.stat);
+			expect(await holders.ownDescriptorCount(identity)).toBeUndefined();
+		} finally {
+			mock.restore();
+			await held.close();
+		}
+	},
+);
 
 /** Whether this user may run a command as root without a password: setting a `security.*` attribute needs root. */
 const sudoWorks = Bun.spawnSync(["sudo", "-n", "true"], { stdout: "ignore", stderr: "ignore" }).exitCode === 0;
