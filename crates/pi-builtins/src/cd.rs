@@ -3,11 +3,7 @@ use std::{
 	path::{Component, Path, PathBuf},
 };
 
-use brush_core::{
-	ErrorKind, ExecutionContext, ExecutionResult, ShellExtensions, builtins,
-	env::{EnvironmentLookup, EnvironmentScope},
-	variables::ShellValueLiteral,
-};
+use brush_core::{ErrorKind, ExecutionContext, ExecutionResult, ShellExtensions, builtins};
 use clap::Parser;
 
 /// `cd`'s usage line, as Bash prints it.
@@ -144,7 +140,6 @@ impl builtins::Command for CdCommand {
 				ExecutionResult::success()
 			}
 		};
-
 		// A relative directory is looked for in each `CDPATH` entry first; an
 		// empty entry is the working directory. Found through a non-empty one,
 		// its name is printed: as the entry spells it under `-P`, else the
@@ -155,12 +150,17 @@ impl builtins::Command for CdCommand {
 			&& searches_cdpath(&operand)
 		{
 			for entry in cdpath_entries(&cdpath) {
-				let candidate =
-					if entry.is_empty() { PathBuf::from(&operand) } else { Path::new(entry).join(&operand) };
-				if let Ok(entered) = enter_directory(&mut context, &candidate, physical).await {
+				let candidate = if entry.is_empty() {
+					operand.clone()
+				} else if operand.is_empty() {
+					entry.to_owned()
+				} else {
+					format!("{entry}/{operand}")
+				};
+				if let Ok(entered) = enter_named(&mut context, &candidate, physical).await {
 					if !entry.is_empty() {
 						if physical {
-							let separator = if entry.ends_with('/') { "" } else { "/" };
+							let separator = if entry.ends_with('/') || operand.is_empty() { "" } else { "/" };
 							writeln!(context.stdout(), "{entry}{separator}{operand}")?;
 						} else {
 							writeln!(context.stdout(), "{}", context.shell.working_dir().display())?;
@@ -171,13 +171,7 @@ impl builtins::Command for CdCommand {
 			}
 		}
 
-		// An empty directory is the working directory as it is spelled: the
-		// shell enters it again, so `OLDPWD` becomes it, and a working
-		// directory that has been removed fails. Bash's physical mode resolves
-		// the empty name itself, which always fails.
-		let target =
-			if operand.is_empty() && !physical { context.shell.working_dir().to_path_buf() } else { PathBuf::from(&operand) };
-		let reason = match enter_directory(&mut context, &target, physical).await {
+		let reason = match enter_named(&mut context, &operand, physical).await {
 			Ok(entered) => {
 				if print {
 					writeln!(context.stdout(), "{operand}")?;
@@ -191,7 +185,7 @@ impl builtins::Command for CdCommand {
 		// The reason reported otherwise is the last attempt's, as in Bash.
 		let reason = if written && context.shell.options().cdable_vars {
 			match context.shell.env_str(&operand).map(|value| value.to_string()) {
-				Some(value) => match enter_directory(&mut context, Path::new(&value), physical).await {
+				Some(value) => match enter_named(&mut context, &value, physical).await {
 					Ok(entered) => {
 						writeln!(context.stdout(), "{value}")?;
 						return Ok(status(entered));
@@ -266,55 +260,67 @@ pub(crate) enum Entered {
 /// A working directory that has been removed is still reached by a name made
 /// of `.` components, as `chdir(".")` reaches it: as in Bash, `PWD` becomes
 /// that name spelled after it, `OLDPWD` the old `PWD`, and `getcwd`'s failure
-/// is reported.
+/// is reported. A renamed one is not: Bash's process holds that directory and
+/// `getcwd` names it again, where this shell holds only the name.
 pub(crate) async fn enter_directory<SE: ShellExtensions>(
 	context: &mut ExecutionContext<'_, SE>,
 	target: &Path,
 	physical: bool,
 ) -> Result<Entered, String> {
-	let reason = match change_directory(context, target, physical).await {
+	enter_named(context, &target.to_string_lossy(), physical).await
+}
+
+/// [`enter_directory`] for a directory named as it was written, which an
+/// empty name and a removed working directory are read against.
+async fn enter_named<SE: ShellExtensions>(
+	context: &mut ExecutionContext<'_, SE>,
+	target: &str,
+	physical: bool,
+) -> Result<Entered, String> {
+	// An empty name is the working directory as it is spelled: the shell
+	// enters it again, so `OLDPWD` becomes it, and a working directory that
+	// has been removed fails. Bash's physical mode resolves the empty name
+	// itself, which always fails.
+	let spelled = if target.is_empty() && !physical {
+		context.shell.working_dir().to_path_buf()
+	} else {
+		PathBuf::from(target)
+	};
+	let reason = match change_directory(context, &spelled, physical).await {
 		Ok(()) => return Ok(Entered::Changed),
 		Err(reason) => reason,
 	};
+	// A name of only `.` and `..` components is the one case the kernel still
+	// answers from a working directory that has been removed, because it
+	// holds that directory: `chdir(".")` stays there, and `chdir("..")`
+	// reaches its parent. A name with a component of its own is not reached,
+	// as Bash reports. Nothing else here invents a directory.
 	let current = context.shell.working_dir().to_path_buf();
-	let lost = context.shell.filesystem().is_native_local(&current)
-		&& std::fs::metadata(&current).is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
-	if !lost {
-		return Err(reason);
-	}
-	// The working directory has been removed, and nothing reaches it by name.
-	// Bash's `chdir` still resolves a relative directory from it, because the
-	// kernel keeps the directory it holds: a name that leads out of it is
-	// taken lexically, which is what `chdir` arrives at.
-	let lexical = pi_vfs::normalize_lexically(&context.shell.absolute_path(target));
-	if lexical != current && change_directory(context, &lexical, physical).await.is_ok() {
-		return Ok(Entered::Changed);
-	}
-	// A name of its own components (`.`) still reaches it, as `chdir(".")`
-	// does, and `getcwd` then fails, as Bash reports.
-	if !(!target.as_os_str().is_empty()
-		&& target.components().all(|component| component == Component::CurDir))
+	let dots = !spelled.as_os_str().is_empty()
+		&& spelled
+			.components()
+			.all(|component| matches!(component, Component::CurDir | Component::ParentDir));
+	if !(dots
+		&& context.shell.filesystem().is_native_local(&current)
+		&& std::fs::metadata(&current).is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound))
 	{
 		return Err(reason);
 	}
-	let old = context
-		.shell
-		.env_str("PWD")
-		.map_or_else(|| current.display().to_string(), |pwd| pwd.to_string());
-	let new = format!("{}/{}", current.display(), target.display());
-	for (name, value) in [("OLDPWD", old), ("PWD", new)] {
-		context
-			.shell
-			.env_mut()
-			.update_or_add(
-				name,
-				ShellValueLiteral::Scalar(value),
-				|_| Ok(()),
-				EnvironmentLookup::Anywhere,
-				EnvironmentScope::Global,
-			)
-			.map_err(|error| error.to_string())?;
+	// `..` leads out of it, to where the name says lexically, which is where
+	// `chdir` arrives.
+	if spelled.components().any(|component| component == Component::ParentDir) {
+		let lexical = pi_vfs::normalize_lexically(&context.shell.absolute_path(&spelled));
+		return match change_directory(context, &lexical, physical).await {
+			Ok(()) => Ok(Entered::Changed),
+			Err(_) => Err(reason),
+		};
 	}
+	// `.` stays there, under the name spelled after it, and `getcwd` then
+	// fails, as Bash reports. The shell records that name as its working
+	// directory, so that `pwd` and `$PWD` agree and every name read against
+	// it fails, as they do in Bash.
+	let lost = current.join(&spelled);
+	context.shell.set_unreachable_working_dir(lost).map_err(|error| error.to_string())?;
 	let _ = writeln!(
 		context.stderr(),
 		"cd: error retrieving current directory: getcwd: cannot access parent directories: No such \

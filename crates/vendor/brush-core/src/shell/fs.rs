@@ -67,6 +67,36 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 		Ok(())
 	}
 
+	/// Records `target_dir` as the shell's working directory without looking
+	/// for it, and sets `PWD` and `OLDPWD` as a change to it does.
+	///
+	/// This is for a working directory that has been removed, which a name of
+	/// its own components (`.`) still reaches, as `chdir(".")` reaches it: no
+	/// name finds it, and the shell keeps the one the change spelled, as Bash
+	/// does.
+	///
+	/// # Arguments
+	///
+	/// * `target_dir` - The path to record as the working directory.
+	pub fn set_unreachable_working_dir(&mut self, target_dir: PathBuf) -> Result<(), error::Error> {
+		let pwd = target_dir.to_string_lossy().to_string();
+		self.env.update_or_add(
+			"PWD",
+			variables::ShellValueLiteral::Scalar(pwd),
+			|_| Ok(()),
+			EnvironmentLookup::Anywhere,
+			EnvironmentScope::Global,
+		)?;
+		let oldpwd = std::mem::replace(self.working_dir_mut(), target_dir);
+		self.env.update_or_add(
+			"OLDPWD",
+			variables::ShellValueLiteral::Scalar(oldpwd.to_string_lossy().to_string()),
+			|_| Ok(()),
+			EnvironmentLookup::Anywhere,
+			EnvironmentScope::Global,
+		)
+	}
+
 	/// Tilde-shortens the given string, replacing the user's home directory with
 	/// a tilde.
 	///
