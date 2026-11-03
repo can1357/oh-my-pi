@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Made the bash tool's shell faster on string appends (`s+=x`), sourcing files full of function definitions (each body compiles on first call), quoted `"$var"`/`"$1"` arguments and file redirections
+
+### Fixed
+
+- Fixed associative arrays slowing down quadratically as they grow: 100,000 inserts and lookups took about 90 seconds and now take about a tenth of a second
+
 ## [18.16.0] - 2026-11-02
 
 ### Added

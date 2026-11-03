@@ -37,6 +37,8 @@
 - In the bash tool, `xargs` reports a command killed by a signal as GNU xargs does: `xargs: CMD: terminated by signal N`, no further commands, status 125
 - On macOS, starting a bash tool session no longer briefly sets pi's umask to 022, which could give files created at that moment the wrong permissions
 - In the bash tool, an executable script without a `#!` line started in the background with its input from a FIFO (`./script < fifo &`) runs as a bash script instead of failing with `Exec format error`
+- Fixed subagents hanging forever in an async Python `@tool` call that waits on a kernel-global `asyncio.Lock` (or other asyncio primitive) another subagent's call held; concurrent async tool calls now share one event loop
+- Interrupting or cancelling a subagent mid-call now cancels an async Python `@tool` coroutine, releasing any locks it holds, and the subagent sees `Python tool request was cancelled` instead of `Python tool call returned an invalid response`
 
 ## [18.16.0] - 2026-11-02
 
