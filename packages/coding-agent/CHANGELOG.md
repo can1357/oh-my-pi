@@ -5,7 +5,7 @@
 ### Added
 
 - Added a fullscreen extension link browser for picking links already in terminal scrollback: press Alt+O again (or Page Up) while link tags are shown, or Alt+O with no extension link on screen ([#16476](https://github.com/can1357/oh-my-pi/pull/16476) by [@materemias](https://github.com/materemias))
-- `wait` takes an optional `timeout` (seconds): with nothing owed it idles until a message, a steer or a job result arrives, or the deadline passes, instead of returning "Nothing to wait for" at once, so waiting for another session's message no longer needs a `sleep` job to hold the wait open
+- `wait` takes an optional `timeout` (seconds): with nothing owed it idles until a message, a steer or a job result arrives, or the deadline passes, instead of returning "Nothing to wait for" at once, so waiting for another session's message no longer needs a `sleep` job to hold the wait open ([#17889](https://github.com/can1357/oh-my-pi/pull/17889) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.16.0] - 2026-11-02
 
