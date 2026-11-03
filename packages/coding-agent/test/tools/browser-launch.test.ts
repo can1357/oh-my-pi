@@ -106,21 +106,22 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("process-local headless launch", () => {
 				stdout: "pipe",
 				stderr: "inherit",
 			});
-			let observer: Browser | undefined;
-			let launched: OwnerReport | undefined;
+			const started: { observer?: Browser; report?: OwnerReport } = {};
 			// Runs when the case times out too: a Chrome that survived its owner is the failure under test.
 			onTestFinished(async () => {
 				owner.kill("SIGKILL");
 				await owner.exited;
-				observer?.disconnect();
-				if (launched?.pid !== undefined) await gracefulKillTreeOnce(launched.pid);
-				if (launched) await removeUserDataDir(launched.userDataDir);
+				started.observer?.disconnect();
+				if (started.report?.pid !== undefined) await gracefulKillTreeOnce(started.report.pid);
+				if (started.report) await removeUserDataDir(started.report.userDataDir);
 			});
 			const first = await readJsonl<OwnerReport>(owner.stdout).next();
 			if (first.done) throw new Error("The owner exited before reporting its browser");
-			launched = first.value;
+			const launched = first.value;
+			started.report = launched;
 			const puppeteer = await loadPuppeteer();
-			observer = await puppeteer.connect({ browserWSEndpoint: launched.wsEndpoint });
+			const observer = await puppeteer.connect({ browserWSEndpoint: launched.wsEndpoint });
+			started.observer = observer;
 			const disconnected = Promise.withResolvers<void>();
 			observer.once("disconnected", () => disconnected.resolve());
 			owner.stdin.write("kill\n");
