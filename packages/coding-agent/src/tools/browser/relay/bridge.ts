@@ -236,7 +236,7 @@ class TabState {
 	/** User pulled the tab out of the omp group — never re-group it. */
 	groupOptOut = false;
 	/** The app in front of the user when omp's input last reached this tab, and when; a window the tab opens uses it once. */
-	frontAtInput: { app: FrontApp; at: number; browserPid: number | null } | null = null;
+	frontAtInput: { app: FrontApp; at: number } | null = null;
 	/**
 	 * Real Chrome sessions (OOPIF/worker children) under this tab's attachment: the child session
 	 * that reported each (none for the root) and its `Target.attachedToTarget` params.
@@ -333,10 +333,9 @@ function canOpenWindow(method: string, params: Record<string, unknown> | undefin
 export interface FrontApp {
 	/**
 	 * Puts the app back in front each time the app that took the front takes it again within `durationMs`, until the
-	 * user picks an app; keys the user types while `browserPid` holds the keyboard go to the app. Resolves how many
-	 * times.
+	 * user picks an app. Resolves how many times.
 	 */
-	keepInFront(durationMs: number, browserPid?: number | null): Promise<number>;
+	keepInFront(durationMs: number): Promise<number>;
 }
 
 /**
@@ -1283,10 +1282,10 @@ export class RelayBridge {
 	#readFrontAtInput(
 		read: (browserPid: number | null) => FrontApp | null,
 		browserPid: number | null,
-	): { app: FrontApp; at: number; browserPid: number | null } | null {
+	): { app: FrontApp; at: number } | null {
 		try {
 			const app = read(browserPid);
-			return app && { app, at: Date.now(), browserPid };
+			return app && { app, at: Date.now() };
 		} catch (err) {
 			this.#readFrontApp = undefined;
 			this.#log("could not read the app in front; not holding it in front", {
@@ -1306,7 +1305,7 @@ export class RelayBridge {
 		if (!front || Date.now() < this.#keepingFrontUntil || Date.now() - front.at > POPUP_AFTER_INPUT_MS) return;
 		const until = Date.now() + KEEP_FRONT_MS;
 		this.#keepingFrontUntil = until;
-		front.app.keepInFront(KEEP_FRONT_MS, front.browserPid).then(
+		front.app.keepInFront(KEEP_FRONT_MS).then(
 			times => {
 				if (times > 0) this.#log("put the user's app back in front", { times });
 				if (this.#keepingFrontUntil === until) this.#keepingFrontUntil = 0;

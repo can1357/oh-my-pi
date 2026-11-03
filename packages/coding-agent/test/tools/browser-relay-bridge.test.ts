@@ -2582,29 +2582,25 @@ describe("RelayBridge auto-attach gating", () => {
 describe("RelayBridge front app on a window omp's input opens", () => {
 	/**
 	 * A relay reading the front app as `n` (the read count), recording the browser each read takes the user's keys
-	 * back from, each app it holds in front and for how long, and the browser the hold takes them back from.
+	 * back from, and each app it holds in front and for how long.
 	 */
 	function frontAppRecorder(): {
 		holds: Array<{ app: number; ms: number }>;
 		readBrowsers: Array<number | null>;
-		browsers: Array<number | null>;
 		frontApp: (browserPid: number | null) => FrontApp;
 	} {
 		const holds: Array<{ app: number; ms: number }> = [];
 		const readBrowsers: Array<number | null> = [];
-		const browsers: Array<number | null> = [];
 		let reads = 0;
 		return {
 			holds,
 			readBrowsers,
-			browsers,
 			frontApp: browserPid => {
 				const app = ++reads;
 				readBrowsers.push(browserPid);
 				return {
-					keepInFront: async (ms, browserPid) => {
+					keepInFront: async ms => {
 						holds.push({ app, ms });
-						browsers.push(browserPid ?? null);
 						return 1;
 					},
 				};
@@ -2675,7 +2671,7 @@ describe("RelayBridge front app on a window omp's input opens", () => {
 	});
 
 	it("takes the user's keys back from each browser using plain sockets without transport data", async () => {
-		const { readBrowsers, browsers, frontApp } = frontAppRecorder();
+		const { holds, readBrowsers, frontApp } = frontAppRecorder();
 		const bridge = new RelayBridge();
 		const chrome: RelaySocket = { send() {}, close() {} };
 		const edge: RelaySocket = {
@@ -2719,9 +2715,9 @@ describe("RelayBridge front app on a window omp's input opens", () => {
 		await flush();
 		windowOpen(bridge, edge, 1);
 		await flush();
-		// From omp's input on (Chrome can activate before the relay hears of the window), and through the hold.
+		// From omp's input on (Chrome can activate before the relay hears of the window).
 		expect(readBrowsers).toEqual([222]);
-		expect(browsers).toEqual([222]);
+		expect(holds).toEqual([{ app: 1, ms: 500 }]);
 	});
 
 	it.each([
@@ -2730,7 +2726,7 @@ describe("RelayBridge front app on a window omp's input opens", () => {
 	])(
 		"preserves keyDown/keyUp forwarding order through a pending browser lookup when it $outcome",
 		async ({ outcome, browserPid }) => {
-			const { readBrowsers, browsers, frontApp } = frontAppRecorder();
+			const { holds, readBrowsers, frontApp } = frontAppRecorder();
 			const lookup = Promise.withResolvers<number | null>();
 			const bridge = new RelayBridge();
 			bridge.keepFrontAppWith(frontApp);
@@ -2770,12 +2766,12 @@ describe("RelayBridge front app on a window omp's input opens", () => {
 			ack(bridge, ext, "send");
 			windowOpen(bridge, ext, 1);
 			await flush();
-			expect(browsers).toEqual([browserPid]);
+			expect(holds).toEqual([{ app: 1, ms: 500 }]);
 		},
 	);
 
 	it("does not take the user's keys back from a browser found for a socket since replaced", async () => {
-		const { readBrowsers, browsers, frontApp } = frontAppRecorder();
+		const { holds, readBrowsers, frontApp } = frontAppRecorder();
 		const bridge = new RelayBridge();
 		const old = new FakeExtSocket();
 		const restarted = new FakeExtSocket();
@@ -2815,7 +2811,7 @@ describe("RelayBridge front app on a window omp's input opens", () => {
 		windowOpen(bridge, restarted, 1);
 		await flush();
 		expect(readBrowsers).toEqual([222, 222]);
-		expect(browsers).toEqual([222]);
+		expect(holds).toEqual([{ app: 2, ms: 500 }]);
 	});
 
 	it.each([

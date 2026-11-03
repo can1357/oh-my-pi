@@ -1539,24 +1539,45 @@ pub(in super::super) struct FrontApp {
 /// Starts the [`PickLog`] watching what the user does from now on. With
 /// `browser`, the app omp's input is about to reach, the keys the user types
 /// while that app holds the keyboard uninvited go to the app in front until
-/// the watch ends, or through the hold that takes it over
+/// the watch ends, including any hold that extends it
 /// ([`FrontApp::keep_in_front`]): the browser can activate before the relay
 /// hears of the window it opens. The reroute is set up before the read, as
 /// setting up its taps can stall the sampler past what the watch tolerates.
 pub(in super::super) fn front_app(browser: Option<pid_t>) -> Option<FrontApp> {
 	let spi = FOREGROUND.as_ref()?;
-	let rerouted = browser.and_then(|browser| {
-		let user = front_process(spi.get_front).and_then(|front| psn_pid(&front.psn))?;
-		Some((user, rearm(browser, user, Instant::now())))
-	});
-	let read_at = Instant::now();
-	let picks = Picks::read(spi);
+	let (read_at, picks, rearm) = if let Some(browser) = browser {
+		let ((read_at, picks), rearm) = rearm_for_front(
+			|| {
+				let read_at = Instant::now();
+				let picks = Picks::read(spi);
+				Some((psn_pid(&picks.front?)?, (read_at, picks)))
+			},
+			|user| rearm(browser, user, Instant::now()),
+		)?;
+		(read_at, picks, rearm)
+	} else {
+		(Instant::now(), Picks::read(spi), Rearm::Replace(None))
+	};
 	let psn = picks.front?;
-	let rearm = rerouted
-		.filter(|(user, _)| psn_pid(&psn) == Some(*user))
-		.map_or(Rearm::Replace(None), |(_, rearm)| rearm);
 	watch_picks(spi, picks, read_at, rearm);
 	Some(FrontApp { psn, read_at })
+}
+
+/// Tap setup may block while the user switches apps. Only publish a snapshot
+/// whose app the completed setup serves; a changed app gets its own setup.
+fn rearm_for_front<T>(
+	mut read: impl FnMut() -> Option<(pid_t, T)>,
+	mut arm: impl FnMut(pid_t) -> Rearm,
+) -> Option<(T, Rearm)> {
+	let (mut user, _) = read()?;
+	loop {
+		let armed = arm(user);
+		let (after, snapshot) = read()?;
+		if after == user {
+			return Some((snapshot, armed));
+		}
+		user = after;
+	}
 }
 
 impl FrontApp {
@@ -1576,34 +1597,27 @@ impl FrontApp {
 	/// control only while it asks for the front back, and is busy then if
 	/// another operation owns it.
 	///
-	/// `browser` is the app expected to take the front. The keys
-	/// `WindowServer` sends it before each hand-back, which it drops while it
-	/// activates, go to this app instead ([`KeyReroute`]) through the reroute
-	/// this app's read set up, while it still serves them. None is set up
-	/// here: the hold relies on the watch that setting up taps can break.
-	pub(in super::super) fn keep_in_front(
-		&self,
-		deadline: Instant,
-		browser: Option<pid_t>,
-	) -> CoreResult<u32> {
+	/// The read's watch owns its key reroute, and is extended through this
+	/// hold before the worker is queued. A hold never takes that shared slot:
+	/// another read may already have replaced it with a newer app's reroute.
+	pub(in super::super) fn keep_in_front(&self, deadline: Instant) -> CoreResult<u32> {
 		let spi = FOREGROUND.as_ref().ok_or_else(|| {
 			DesktopError::background_unavailable("the front-process SPI is unavailable")
 		})?;
-		let (before, armed) = {
-			let mut log = PICK_LOG.lock();
-			let Some(before) = log.since(self.read_at, Instant::now()) else {
-				return Ok(0);
-			};
-			(before, log.reroute.take())
-		};
-		let _reroute = browser.zip(psn_pid(&self.psn)).and_then(|(browser, user)| {
-			armed
-				.map(|(_, reroute)| reroute)
-				.filter(|reroute| reroute.serves(user, browser))
-		});
-		let mut hold = FrontHold::new(self.psn, before);
 		let desktop = WindowServerHold { spi, user: self.psn, read_at: self.read_at, deadline };
-		hold_front(&mut hold, &desktop)
+		self.hold_from_watch(&PICK_LOG, Instant::now(), &desktop)
+	}
+
+	fn hold_from_watch(
+		&self,
+		log: &Mutex<PickLog>,
+		now: Instant,
+		desktop: &impl HoldDesktop,
+	) -> CoreResult<u32> {
+		let Some(before) = log.lock().since(self.read_at, now) else {
+			return Ok(0);
+		};
+		hold_front(&mut FrontHold::new(self.psn, before), desktop)
 	}
 }
 
@@ -1662,8 +1676,8 @@ struct PickLog {
 	/// [`Picks::panel`]), latest first.
 	panels:      [Option<(ProcessSerialNumber, Instant)>; 2],
 	/// The reroute the latest reads set up, and the read's time ([`rearm`]):
-	/// only while the sampler runs, dropped with it, replaced by a read it
-	/// does not cover, or taken over by a hold.
+	/// only while the sampler runs, dropped with it, or replaced by a read it
+	/// does not cover. Holds extend its watch but never consume it.
 	reroute:     Option<(Instant, KeyReroute)>,
 }
 
@@ -1753,7 +1767,10 @@ impl PickLog {
 fn watch_picks(spi: &'static ForegroundSpi, picks: Picks, now: Instant, rearm: Rearm) {
 	let mut log = PICK_LOG.lock();
 	log.record(picks, now);
-	log.watch_until = Some(now + PICK_WATCH);
+	log.watch_until = Some(
+		log.watch_until
+			.map_or(now + PICK_WATCH, |until| until.max(now + PICK_WATCH)),
+	);
 	if let Rearm::Replace(reroute) = rearm {
 		log.reroute = reroute.map(|reroute| (now, reroute));
 	}
@@ -4528,5 +4545,38 @@ mod tests {
 		let desktop = FakeHold { over_at: Some(1), ..FakeHold::new(&[]) };
 		assert_eq!(hold_front(&mut hold(), &desktop).unwrap(), 0);
 		assert!(desktop.front.get() == HOLD_BROWSER);
+	}
+
+	#[test]
+	fn a_front_read_rearms_for_the_app_picked_during_tap_setup() {
+		let mut reads = [(100, 0), (101, 1), (102, 2), (102, 3)].into_iter();
+		let mut armed = Vec::new();
+		let (snapshot, _) = rearm_for_front(
+			|| reads.next(),
+			|user| {
+				armed.push(user);
+				Rearm::Replace(None)
+			},
+		)
+		.unwrap();
+		assert_eq!(armed, [100, 101, 102]);
+		assert_eq!(snapshot, 3, "the published snapshot follows setup for its app");
+	}
+
+	#[test]
+	fn an_older_hold_leaves_the_watch_owning_the_newer_reroute() {
+		let _serial = control::OWNERSHIP_TEST.lock();
+		let now = Instant::now();
+		let read_at = now.checked_sub(SWITCH_SAMPLE).unwrap();
+		let log = Mutex::new(pick_log(Some((read_at, now))));
+		let (reroute, ended) = KeyReroute::unwatched_for_test();
+		log.lock().reroute = Some((now, reroute));
+		let older = FrontApp { psn: HOLD_THIRD, read_at };
+		let desktop = FakeHold { over_at: Some(0), ..FakeHold::new(&[]) };
+		assert_eq!(older.hold_from_watch(&log, now, &desktop).unwrap(), 0);
+		assert!(log.lock().reroute.is_some(), "the hold never consumes another read's reroute");
+		assert!(!ended.load(Ordering::Acquire));
+		log.lock().lose_sampler();
+		assert!(ended.load(Ordering::Acquire), "only the watch ends the retained reroute");
 	}
 }

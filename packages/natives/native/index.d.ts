@@ -444,15 +444,16 @@ export declare class MacOSFrontApp {
    * after the app was read, the app came from a launcher or Spotlight panel,
    * or a different app comes forward: that is the user picking an app.
    * Typing does not end it, and a hand-back macOS refuses for a key typed
-   * meanwhile is asked again. With `browserPid`, the app expected to take
-   * the front, the keys the user types while it holds the keyboard go to
-   * this app instead (when omp may tap keys: Accessibility). Holds nothing
+   * meanwhile is asked again. Extends the read's key reroute watch through
+   * the hold: with `browserPid` passed to `macOSFrontApp()`, the keys the user
+   * types while that browser holds the keyboard go to this app instead
+   * (when omp may tap keys: Accessibility). Holds nothing
    * when called over a second after the latest read, as picks made since
    * then went unwatched. Owns desktop input/focus control only for each
    * hand-back, and rejects if another operation owns it then. Resolves how
    * many times it put the app back.
    */
-  keepInFront(durationMs: number, browserPid?: number | undefined | null): Promise<number>
+  keepInFront(durationMs: number): Promise<number>
 }
 export type MacosFrontApp = MacOSFrontApp
 
