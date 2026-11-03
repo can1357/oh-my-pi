@@ -6,7 +6,7 @@
  * recorded directory no longer exists, `--resume <id>` offers to *move*
  * (re-root) the session rather than opening against a missing directory.
  */
-import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
@@ -448,6 +448,14 @@ describe("runRootCommand — cross-project --resume", () => {
 describe("createSessionManager — cross-project --resume relocation (moved worktree)", () => {
 	let missingRoot: string;
 	let missingProject: string;
+	const stdinIsTTY = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
+
+	// Registered before the async teardown below: if that hook times out, Bun skips every later
+	// `afterEach` hook and `onTestFinished` callback of the test.
+	afterEach(() => {
+		Reflect.deleteProperty(process.stdin, "isTTY");
+		if (stdinIsTTY) Object.defineProperty(process.stdin, "isTTY", stdinIsTTY);
+	});
 
 	beforeEach(async () => {
 		missingRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-moved-xproj-"));
@@ -474,10 +482,6 @@ describe("createSessionManager — cross-project --resume relocation (moved work
 	});
 
 	it("throws the move-specific error when unavailable in non-interactive mode", async () => {
-		const originalIsTTY = process.stdin.isTTY;
-		onTestFinished(() => {
-			Object.defineProperty(process.stdin, "isTTY", { value: originalIsTTY, configurable: true });
-		});
 		Object.defineProperty(process.stdin, "isTTY", { value: false, configurable: true });
 		vi.spyOn(sessionListingModule, "resolveResumableSession").mockResolvedValue(buildGlobalMatch(missingProject));
 

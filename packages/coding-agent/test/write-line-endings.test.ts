@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -9,11 +9,10 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
+import { installMockRestores } from "../../utils/test/helpers/mock-restores";
 import { rejectionOf } from "./helpers/rejection";
 
-afterEach(() => {
-	vi.restoreAllMocks();
-});
+installMockRestores();
 
 function createSession(cwd: string, bridge?: ClientBridge): ToolSession {
 	return {

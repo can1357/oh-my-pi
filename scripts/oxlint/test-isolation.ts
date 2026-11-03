@@ -17,12 +17,20 @@
  * `x.mockRestore()` restores a known spy only when one write stores it in `x` and that write runs
  * once per test (not in a loop, an array-iteration callback, a helper called more than once, or a
  * function that can reach itself again by name, `arguments` or an export): a callback runs what a
- * binding holds when it is called, not what it held when registered. The rules credit only those
- * shapes. They are an enforcement aid for new code, not a proof: a shape they credit is safe by
+ * binding holds when it is called, not what it held when registered.
+ *
+ * A hook or `onTestFinished` cleanup also has to run at all. Bun 1.4.4 runs a test's `afterEach`
+ * hooks innermost scope first, each scope in registration order, then its `onTestFinished`
+ * callbacks in registration order, and once one of them times out it skips every later one. So a
+ * cleanup counts only when no hook or callback that can suspend (`async`, a `done` parameter, or a
+ * returned promise) runs before it; `installMockRestores()` still counts, because its next
+ * `beforeEach` and its `afterAll` restore whatever Bun skipped. The rules credit only those shapes.
+ * They are an enforcement aid for new code, not a proof: a shape they credit is safe by
  * construction, and everything else is reported.
  *
  * The rules judge only what one file shows: writes and restores reached from a test body directly
- * or through a function declared in the same file, and hooks declared in the same file.
+ * or through a function declared in the same file, and hooks declared in the same file. A hook
+ * another file's helper registers is not seen.
  */
 
 interface Node {
@@ -703,6 +711,119 @@ function coveringScopes(facts: FileFacts, test: Node): (Node | undefined)[] {
 	return scopes;
 }
 
+/** The scope an `afterEach` or `beforeEach` call registers into: the file, a `describe` callback, or `"unknown"`. */
+function hookScope(facts: FileFacts, call: Node): Node | undefined | "unknown" {
+	const fn = enclosingFunction(call);
+	if (!fn) return undefined;
+	return facts.registrations.get(fn)?.kind === "describe" ? fn : "unknown";
+}
+
+/** Is the scope `inner` nested in the scope `outer` (the file when `undefined`)? */
+function scopeInside(inner: Node | undefined, outer: Node | undefined): boolean {
+	if (inner === undefined || inner === outer) return false;
+	return outer === undefined || (outer.range[0] <= inner.range[0] && inner.range[1] <= outer.range[1]);
+}
+
+/** An expression a callback can return that is certainly not a promise Bun would wait for. */
+function returnsNoPromise(facts: FileFacts, expression: Node | undefined): boolean {
+	const value = unwrap(expression);
+	if (!value) return true;
+	if (value.type === "UnaryExpression" && value.operator === "void") return true;
+	if (value.type === "Literal") return true;
+	if (value.type === "Identifier" && value.name === "undefined") return true;
+	return value.type === "CallExpression" && realRestoreKind(facts, value) !== undefined;
+}
+
+/**
+ * Can the callback a hook or `onTestFinished` call registers keep Bun waiting past its budget? Bun
+ * 1.4.4 waits for an `async` callback, one that takes a `done` parameter, and one that returns a
+ * promise; when such a callback times out, Bun skips every later `afterEach` hook and every
+ * `onTestFinished` callback of the test (measured). A generator's body never runs, so it cannot. A
+ * callback the file cannot resolve to one function counts as one that can.
+ */
+function callbackCanSuspend(facts: FileFacts, call: Node): boolean {
+	const arg = nodes(call.arguments)[0];
+	const id = unwrap(arg);
+	const fn = isFunction(arg) ? arg : id?.type === "Identifier" ? creditedFunctionOf(facts, id) : undefined;
+	if (!fn) return true;
+	if (fn.generator === true) return false;
+	if (fn.async === true || nodes(fn.params).length > 0) return true;
+	const body = node(fn.body);
+	if (!body) return false;
+	if (body.type !== "BlockStatement") return !returnsNoPromise(facts, body);
+	let returns = false;
+	walk(facts.context, body, n => {
+		if (
+			!returns &&
+			n.type === "ReturnStatement" &&
+			enclosingFunction(n) === fn &&
+			!returnsNoPromise(facts, node(n.argument))
+		)
+			returns = true;
+	});
+	return returns;
+}
+
+/** Is `onTestFinished` call `finisher` one of `test`'s: registered by its body, or by a `beforeEach`/`afterEach` hook that applies to it? */
+function finisherApplies(facts: FileFacts, finisher: Node, test: Node): boolean {
+	if (flows(facts, finisher).some(flow => flow.test === test)) return true;
+	const fn = enclosingFunction(finisher);
+	const hook = fn && facts.registrations.get(fn);
+	if (hook?.kind !== "hook" || (hook.name !== "beforeEach" && hook.name !== "afterEach")) return false;
+	const scope = hookScope(facts, hook.call);
+	return scope === "unknown" || coveringScopes(facts, test).includes(scope);
+}
+
+/**
+ * A hook or `onTestFinished` callback that Bun runs before `cleanup` for `test` and that can suspend
+ * ({@link callbackCanSuspend}), or undefined. `cleanup` is the `afterEach` call whose hook does the
+ * cleanup, or the `onTestFinished` call that registers it. Bun 1.4.4 runs a test's `afterEach` hooks
+ * innermost scope first, each scope in registration order, then its `onTestFinished` callbacks in
+ * registration order. A hook the file registers anywhere but in a scope's body (a helper, another
+ * hook) counts as running before every cleanup.
+ */
+function suspendingHookBefore(facts: FileFacts, test: Node, cleanup: Node): Node | undefined {
+	const scopes = coveringScopes(facts, test);
+	const finisher = facts.finishers.includes(cleanup);
+	const own = finisher ? undefined : hookScope(facts, cleanup);
+	for (const call of facts.calls) {
+		if (call === cleanup || testApi(facts.context, node(call.callee)) !== "afterEach") continue;
+		const scope = hookScope(facts, call);
+		if (scope !== "unknown") {
+			if (!scopes.includes(scope)) continue;
+			// For a hook cleanup, an outer scope's hooks and its own scope's later hooks run after it.
+			if (
+				!finisher &&
+				own !== "unknown" &&
+				(scope === own ? call.range[0] > cleanup.range[0] : !scopeInside(scope, own))
+			)
+				continue;
+		}
+		if (callbackCanSuspend(facts, call)) return call;
+	}
+	if (!finisher) return undefined;
+	const fn = enclosingFunction(cleanup);
+	for (const other of facts.finishers) {
+		if (other === cleanup || !finisherApplies(facts, other, test)) continue;
+		// Registered after `cleanup` in the same function: Bun runs it after `cleanup`'s callback.
+		if (enclosingFunction(other) === fn && other.range[0] > cleanup.range[1]) continue;
+		if (callbackCanSuspend(facts, other)) return other;
+	}
+	return undefined;
+}
+
+/** Where a credited cleanup would have counted but a hook that can suspend runs before it. */
+interface HookBlock {
+	hook?: Node;
+}
+
+function hookText(facts: FileFacts, hook: Node): string {
+	const callee = unwrap(node(hook.callee));
+	const name = (callee?.type === "MemberExpression" ? propertyName(callee) : identName(callee)) ?? "hook";
+	const line = facts.context.sourceCode.text.slice(0, hook.range[0]).split("\n").length;
+	return `${name}(...) at line ${line}`;
+}
+
 /** Does `scope` call the shared synchronous restore helper unconditionally at its top level? */
 function callsRestoreHelper(facts: FileFacts, scope: Node | undefined): boolean {
 	return facts.calls.some(call => {
@@ -716,24 +837,35 @@ function callsRestoreHelper(facts: FileFacts, scope: Node | undefined): boolean 
 	});
 }
 
-/** Does a synchronous top-level `afterEach` of `scope` do `work` as a direct statement before any exit? */
-function afterEachDoes(facts: FileFacts, scope: Node | undefined, work: (expression: Node) => boolean): boolean {
+/**
+ * Does a synchronous top-level `afterEach` of `scope` do `work` as a direct statement before any exit,
+ * with no hook that can suspend running before it for `test` ({@link suspendingHookBefore})? A hook
+ * that would count but has one before it is recorded in `block`.
+ */
+function afterEachDoes(
+	facts: FileFacts,
+	test: Node,
+	scope: Node | undefined,
+	work: (expression: Node) => boolean,
+	block: HookBlock,
+): boolean {
 	for (const call of facts.calls) {
 		if (testApi(facts.context, node(call.callee)) !== "afterEach") continue;
 		if (enclosingFunction(call) !== scope || !isTopLevelStatement(facts, call, scope)) continue;
-		for (const hook of creditedCallbacks(facts, call)) {
+		const does = creditedCallbacks(facts, call).some(hook => {
 			const body = node(hook.body);
-			if (!body) continue;
+			if (!body) return false;
 			// `afterEach(() => vi.restoreAllMocks())`: the expression body is the whole hook.
-			if (body.type !== "BlockStatement") {
-				if (work(body)) return true;
-				continue;
-			}
-			for (const statement of nodes(body.body)) {
+			if (body.type !== "BlockStatement") return work(body);
+			return nodes(body.body).some(statement => {
 				const expression = statement.type === "ExpressionStatement" ? node(statement.expression) : undefined;
-				if (expression && work(expression) && !exitsBefore(facts, hook, expression)) return true;
-			}
-		}
+				return expression !== undefined && work(expression) && !exitsBefore(facts, hook, expression);
+			});
+		});
+		if (!does) continue;
+		const before = suspendingHookBefore(facts, test, call);
+		if (!before) return true;
+		block.hook ??= before;
 	}
 	return false;
 }
@@ -786,24 +918,31 @@ function realRestoreKind(facts: FileFacts, call: Node): "restoreAll" | "mockRest
 }
 
 /**
- * Is every spy this test installs restored by cleanup a timeout cannot skip: the shared helper, or a
- * synchronous top-level `afterEach` that calls the real restore API?
+ * Is every spy this test installs restored by cleanup a timeout cannot skip: the shared helper (its
+ * next `beforeEach` and its `afterAll` restore even when Bun skips the rest), or a synchronous
+ * top-level `afterEach` that calls the real restore API before any hook that can suspend runs?
  */
-function spiesCovered(facts: FileFacts, test: Node): boolean {
+function spiesCovered(facts: FileFacts, test: Node, block: HookBlock = {}): boolean {
 	return coveringScopes(facts, test).some(
 		scope =>
 			callsRestoreHelper(facts, scope) ||
-			afterEachDoes(facts, scope, expression => {
-				const call = unwrap(expression);
-				return call?.type === "CallExpression" && realRestoreKind(facts, call) === "restoreAll";
-			}),
+			afterEachDoes(
+				facts,
+				test,
+				scope,
+				expression => {
+					const call = unwrap(expression);
+					return call?.type === "CallExpression" && realRestoreKind(facts, call) === "restoreAll";
+				},
+				block,
+			),
 	);
 }
 
-/** Does a synchronous top-level `afterEach` of a covering scope put `path` back? */
-function hookPutsBack(facts: FileFacts, test: Node, path: string): boolean {
+/** Does a synchronous top-level `afterEach` of a covering scope put `path` back before any hook that can suspend? */
+function hookPutsBack(facts: FileFacts, test: Node, path: string, block: HookBlock = {}): boolean {
 	return coveringScopes(facts, test).some(scope =>
-		afterEachDoes(facts, scope, expression => sharedTargets(facts, expression).includes(path)),
+		afterEachDoes(facts, test, scope, expression => sharedTargets(facts, expression).includes(path), block),
 	);
 }
 
@@ -989,27 +1128,46 @@ function registeredNextTo(facts: FileFacts, finisher: Node, install: Node): bool
 	return statements.indexOf(registration) === statements.indexOf(statement) + 1;
 }
 
-/** Does a synchronous `onTestFinished` registered before the test can suspend restore `install`? */
-function spyRegisteredPromptly(facts: FileFacts, install: Node): boolean {
+/**
+ * Does a synchronous `onTestFinished` registered before the test can suspend restore `install` for
+ * `test`, with no hook or earlier callback that can suspend running before it ({@link suspendingHookBefore})?
+ * A registration that would count but has one before it is recorded in `block`.
+ */
+function spyRegisteredPromptly(facts: FileFacts, install: Node, test: Node, block: HookBlock = {}): boolean {
 	return facts.finishers.some(finisher => {
 		if (!registeredBefore(facts, finisher, install) && !registeredNextTo(facts, finisher, install)) return false;
-		return promptCallback(facts, finisher, expression => {
+		const restores = promptCallback(facts, finisher, expression => {
 			const call = unwrap(expression);
 			if (call?.type !== "CallExpression") return false;
 			const kind = realRestoreKind(facts, call);
 			if (kind === "restoreAll") return true;
 			return kind === "mockRestore" && creditedSpyInstall(facts, call) === install;
 		});
+		return restores && unblocked(facts, test, finisher, block);
 	});
 }
 
-/** Does a synchronous `onTestFinished` registered before `write` put `path` back? */
-function putBackRegisteredPromptly(facts: FileFacts, path: string, write: Node): boolean {
+/** Does a synchronous `onTestFinished` registered before `write` put `path` back, with no hook that can suspend before it? */
+function putBackRegisteredPromptly(
+	facts: FileFacts,
+	path: string,
+	write: Node,
+	test: Node,
+	block: HookBlock = {},
+): boolean {
 	return facts.finishers.some(
 		finisher =>
 			registeredBefore(facts, finisher, write) &&
-			promptCallback(facts, finisher, expression => sharedTargets(facts, expression).includes(path)),
+			promptCallback(facts, finisher, expression => sharedTargets(facts, expression).includes(path)) &&
+			unblocked(facts, test, finisher, block),
 	);
+}
+
+/** Does no hook that can suspend run before `cleanup` for `test`? Records the first one in `block`. */
+function unblocked(facts: FileFacts, test: Node, cleanup: Node, block: HookBlock): boolean {
+	const before = suspendingHookBefore(facts, test, cleanup);
+	if (before) block.hook ??= before;
+	return before === undefined;
 }
 
 /**
@@ -1045,20 +1203,25 @@ function judgeRestores(facts: FileFacts): void {
 		const installs = kind === "mockRestore" ? spyInstalls(facts, call) : [];
 		for (const flow of flows(facts, call)) {
 			let messageId: string | undefined;
+			const block: HookBlock = {};
 			if (isAsyncTest(facts, flow)) {
 				if (!suspendsBefore(facts, flow, call, installs[0])) continue;
 				// `restoreAllMocks()` in an async body also removes a later test's mocks when the
 				// abandoned body resumes, so a covering hook does not make it safe.
 				if (kind === "restoreAll") messageId = "restoreAllInAsyncBody";
 				else if (
-					!spiesCovered(facts, flow.test) &&
-					!installs.some(install => spyRegisteredPromptly(facts, install))
+					!spiesCovered(facts, flow.test, block) &&
+					!installs.some(install => spyRegisteredPromptly(facts, install, flow.test, block))
 				)
-					messageId = "restoreSkippedByTimeout";
+					messageId = block.hook ? "restoreSkippedByHook" : "restoreSkippedByTimeout";
 			} else if (!spiesCovered(facts, flow.test) && !inFinally(call, flow.via[0] ?? flow.test))
 				messageId = "restoreSkippedByThrow";
 			if (messageId) {
-				facts.context.report({ node: call, messageId, data: { call: callText(facts, call) } });
+				facts.context.report({
+					node: call,
+					messageId,
+					data: { call: callText(facts, call), hook: block.hook ? hookText(facts, block.hook) : "" },
+				});
 				break;
 			}
 		}
@@ -1066,10 +1229,20 @@ function judgeRestores(facts: FileFacts): void {
 	judgeLateRestores(facts);
 }
 
+/** Is there a restore of `install` in `test`'s own flow (not in a registered callback)? {@link judgeRestores} judges those. */
+function restoredInBody(facts: FileFacts, install: Node, test: Node): boolean {
+	return facts.calls.some(call => {
+		const kind = restoreKind(call);
+		if (!kind || (kind === "mockRestore" && !spyInstalls(facts, call).includes(install))) return false;
+		return flows(facts, call).some(flow => flow.test === test);
+	});
+}
+
 /**
  * Spies whose restore is not certain to undo them: registered where a timeout can skip the
- * registration, registered only in a generator callback (which never runs), or registered in time
- * but through a variable that also holds another spy when the callback runs.
+ * registration, registered only in a generator callback (which never runs), registered in time but
+ * through a variable that also holds another spy when the callback runs, or registered where a hook
+ * or earlier callback that can suspend runs first (Bun then skips the callback).
  */
 function judgeLateRestores(facts: FileFacts): void {
 	const reported = new Set<Node>();
@@ -1079,23 +1252,44 @@ function judgeLateRestores(facts: FileFacts): void {
 			const installs = individual ? spyInstalls(facts, restore) : facts.calls.filter(call => isSpyOn(facts, call));
 			for (const install of installs) {
 				if (reported.has(install)) continue;
-				if (spyRegisteredPromptly(facts, install)) continue;
 				for (const flow of flows(facts, install)) {
-					if (!isAsyncTest(facts, flow) || spiesCovered(facts, flow.test)) continue;
 					if (!flows(facts, finisher).some(f => f.test === flow.test)) continue;
-					const inTime = registeredBefore(facts, finisher, install) || registeredNextTo(facts, finisher, install);
-					const rewritten =
-						individual &&
-						inTime &&
-						runsBodyWhenCalled(callback) &&
-						creditedSpyInstall(facts, restore) !== install;
-					const messageId =
-						callback.generator === true
-							? "restoreInGenerator"
-							: rewritten
-								? "restoreBindingRewritten"
-								: "restoreRegisteredLate";
-					facts.context.report({ node: install, messageId, data: { call: callText(facts, restore) } });
+					const block: HookBlock = {};
+					if (spiesCovered(facts, flow.test, block)) continue;
+					let messageId: string | undefined;
+					if (isAsyncTest(facts, flow)) {
+						const prompt: HookBlock = {};
+						if (spyRegisteredPromptly(facts, install, flow.test, prompt)) continue;
+						const inTime =
+							registeredBefore(facts, finisher, install) || registeredNextTo(facts, finisher, install);
+						const rewritten =
+							individual &&
+							inTime &&
+							runsBodyWhenCalled(callback) &&
+							creditedSpyInstall(facts, restore) !== install;
+						messageId =
+							callback.generator === true
+								? "restoreInGenerator"
+								: prompt.hook
+									? "restoreSkippedByHook"
+									: rewritten
+										? "restoreBindingRewritten"
+										: "restoreRegisteredLate";
+						block.hook = prompt.hook;
+					} else {
+						// A synchronous body cannot time out before it registers the restore; only a hook or
+						// earlier callback that can suspend can strand it.
+						if (callback.generator === true || restoredInBody(facts, install, flow.test)) continue;
+						const hooked: HookBlock = {};
+						if (unblocked(facts, flow.test, finisher, hooked)) continue;
+						messageId = "restoreSkippedByHook";
+						block.hook = hooked.hook;
+					}
+					facts.context.report({
+						node: install,
+						messageId,
+						data: { call: callText(facts, restore), hook: block.hook ? hookText(facts, block.hook) : "" },
+					});
 					reported.add(install);
 					break;
 				}
@@ -1281,27 +1475,56 @@ function judgePutBacks(facts: FileFacts): void {
 	for (const write of writes) {
 		if (!enclosingFunction(write.node) || reported.has(`node|${write.node.range[0]}`)) continue;
 		for (const flow of flows(facts, write.node)) {
-			if (!isAsyncTest(facts, flow)) continue;
 			const key = `${flow.test.range[0]}|${write.path}`;
 			if (reported.has(key)) break;
-			if (hookPutsBack(facts, flow.test, write.path)) continue;
-			const replaces = write.putsBack ? (replacement.get(key) ?? write.node) : write.node;
-			if (putBackRegisteredPromptly(facts, write.path, replaces)) continue;
+			const block: HookBlock = {};
+			if (hookPutsBack(facts, flow.test, write.path, block)) continue;
 			let messageId: string | undefined;
-			if (write.putsBack) {
-				if (suspendsBefore(facts, flow, write.node, write.replaced)) messageId = "putBackSkippedByTimeout";
+			if (isAsyncTest(facts, flow)) {
+				const replaces = write.putsBack ? (replacement.get(key) ?? write.node) : write.node;
+				if (putBackRegisteredPromptly(facts, write.path, replaces, flow.test, block)) continue;
+				if (write.putsBack) {
+					if (suspendsBefore(facts, flow, write.node, write.replaced))
+						messageId = block.hook ? "putBackSkippedByHook" : "putBackSkippedByTimeout";
+				} else if (block.hook) messageId = "putBackSkippedByHook";
+				else {
+					const registeredAs = putBackRegisteredAnywhere(facts, flow.test, write.path);
+					if (registeredAs === "registered") messageId = "putBackRegisteredLate";
+					else if (registeredAs === "generator") messageId = "putBackInGenerator";
+				}
 			} else {
-				const registeredAs = putBackRegisteredAnywhere(facts, flow.test, write.path);
-				if (registeredAs === "registered") messageId = "putBackRegisteredLate";
-				else if (registeredAs === "generator") messageId = "putBackInGenerator";
+				// A synchronous body cannot time out, so it reaches its own put-back and its registrations;
+				// only a hook or earlier callback that can suspend can strand a registered put-back.
+				const inBody = writes.some(
+					other =>
+						other.path === write.path &&
+						other.putsBack &&
+						flows(facts, other.node).some(f => f.test === flow.test),
+				);
+				if (write.putsBack || inBody || finisherPutsBack(facts, flow.test, write.path, block)) continue;
+				if (block.hook) messageId = "putBackSkippedByHook";
 			}
 			if (!messageId) continue;
-			facts.context.report({ node: write.node, messageId, data: { target: write.path } });
+			facts.context.report({
+				node: write.node,
+				messageId,
+				data: { target: write.path, hook: block.hook ? hookText(facts, block.hook) : "" },
+			});
 			reported.add(key);
 			reported.add(`node|${write.node.range[0]}`);
 			break;
 		}
 	}
+}
+
+/** Does a synchronous `onTestFinished` of `test` put `path` back, with no hook that can suspend before it? */
+function finisherPutsBack(facts: FileFacts, test: Node, path: string, block: HookBlock): boolean {
+	return facts.finishers.some(
+		finisher =>
+			finisherApplies(facts, finisher, test) &&
+			promptCallback(facts, finisher, expression => sharedTargets(facts, expression).includes(path)) &&
+			unblocked(facts, test, finisher, block),
+	);
 }
 
 function rule(description: string, messages: Record<string, string>, judge: (facts: FileFacts) => void) {
@@ -1335,6 +1558,8 @@ export default {
 					"This spy's restore `{{call}}` is in a generator callback. Bun calls it but never iterates the generator it returns, so the restore never runs and the spy leaks into later tests. Use a plain function, or call `installMockRestores()` at the top of this file or `describe`.",
 				restoreBindingRewritten:
 					"`{{call}}` restores whatever its variable holds when the callback runs, and this file can store another spy in that variable first (a second write, or one in a loop or in a function that can run again), so this spy may never be restored. Give each spy its own `const`, or call `installMockRestores()` at the top of this file or `describe`.",
+				restoreSkippedByHook:
+					"This mock is restored (`{{call}}`) only by cleanup that runs after `{{hook}}`, which can suspend. If that hook times out, Bun skips every later `afterEach` hook and every `onTestFinished` callback of the test, so the mock leaks into later tests. Call `installMockRestores()` at the top of this file or `describe`, or restore in a synchronous `afterEach` that runs before every hook that can suspend.",
 			},
 			judgeRestores,
 		),
@@ -1347,6 +1572,8 @@ export default {
 					"The test can time out after this write to `{{target}}` but before it registers the `onTestFinished` that puts it back, so the replacement leaks into later tests. Register the put-back before the write.",
 				putBackInGenerator:
 					"The put-back of `{{target}}` is in a generator callback. Bun calls it but never iterates the generator it returns, so the put-back never runs and the replacement leaks into later tests. Use a plain function.",
+				putBackSkippedByHook:
+					"The put-back of `{{target}}` runs after `{{hook}}`, which can suspend. If that hook times out, Bun skips every later `afterEach` hook and every `onTestFinished` callback of the test, so the replacement leaks into later tests. Put it back in a synchronous `afterEach` that runs before every hook that can suspend: in the innermost scope, registered before the scope's other hooks.",
 			},
 			judgePutBacks,
 		),

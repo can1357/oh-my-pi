@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, onTestFinished, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -123,6 +123,9 @@ describe("runSkillsCommand", () => {
 });
 
 describe("handleSkillList", () => {
+	const realStdoutWrite = process.stdout.write;
+	const realStderrWrite = process.stderr.write;
+
 	// `handleSkillList` reads the inspected directory's config through
 	// `Settings.init({ cwd })`, which returns an already-initialized singleton
 	// unchanged; start from none so the fixture's `.omp/config.yml` is read.
@@ -131,6 +134,10 @@ describe("handleSkillList", () => {
 	});
 
 	afterEach(() => {
+		// First, and synchronous: this hook runs before the file's async teardown, and if that
+		// teardown times out Bun skips every later hook and `onTestFinished` callback.
+		process.stdout.write = realStdoutWrite;
+		process.stderr.write = realStderrWrite;
 		resetSettingsForTest();
 		// `Settings.init()` opens `<agentDir>/agent.db`; release it so the temp
 		// home can be removed (Windows refuses to delete open files).
@@ -155,10 +162,6 @@ describe("handleSkillList", () => {
 		let stderr = "";
 		const originalStdoutWrite = process.stdout.write;
 		const originalStderrWrite = process.stderr.write;
-		onTestFinished(() => {
-			process.stdout.write = originalStdoutWrite;
-			process.stderr.write = originalStderrWrite;
-		});
 		process.stdout.write = ((chunk: string | Uint8Array) => {
 			stdout += chunk.toString();
 			return true;

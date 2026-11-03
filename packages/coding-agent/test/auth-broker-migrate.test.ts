@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, onTestFinished, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -11,9 +11,6 @@ const TEAM_ORG = "org-team-1111";
 
 async function runMigrateCapturingStdout(): Promise<string> {
 	const originalWrite = process.stdout.write.bind(process.stdout);
-	onTestFinished(() => {
-		process.stdout.write = originalWrite;
-	});
 	let captured = "";
 	process.stdout.write = ((chunk: string | Uint8Array): boolean => {
 		captured += typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk);
@@ -38,6 +35,13 @@ describe("auth-broker migrate", () => {
 	let handle: AuthBrokerServerHandle | undefined;
 	const token = "broker-migrate-bearer";
 	const savedEnv: Record<string, string | undefined> = {};
+	const realStdoutWrite = process.stdout.write;
+
+	// Registered before the async teardown below: if that hook times out, Bun skips every later
+	// `afterEach` hook and `onTestFinished` callback of the test (the stdout capture below).
+	afterEach(() => {
+		process.stdout.write = realStdoutWrite;
+	});
 
 	beforeEach(async () => {
 		savedEnv.OMP_AUTH_BROKER_URL = process.env.OMP_AUTH_BROKER_URL;

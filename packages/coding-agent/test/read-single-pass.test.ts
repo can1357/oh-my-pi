@@ -6,7 +6,7 @@
  * snapshot tag is hashed from, exact on-disk byte counts, the raw terminal
  * newline sentinel, and the absence of a second whole-file read.
  */
-import { afterEach, beforeEach, describe, expect, it, onTestFinished } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -46,6 +46,13 @@ function createSession(cwd: string): ToolSession {
 
 describe("read tool single-pass file access", () => {
 	let tmpDir: string;
+	const realBunFile = Bun.file;
+
+	// Registered before the async teardown below: if that hook times out, Bun skips every later
+	// `afterEach` hook and `onTestFinished` callback of the test.
+	afterEach(() => {
+		(Bun as unknown as { file: typeof Bun.file }).file = realBunFile;
+	});
 
 	beforeEach(async () => {
 		tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "read-single-pass-"));
@@ -131,9 +138,6 @@ describe("read tool single-pass file access", () => {
 		type FileFactory = typeof Bun.file;
 		const originalFile: FileFactory = Bun.file;
 		const bunNamespace = Bun as unknown as { file: FileFactory };
-		onTestFinished(() => {
-			bunNamespace.file = originalFile;
-		});
 		let wholeFileReads = 0;
 		bunNamespace.file = ((target: Parameters<FileFactory>[0], ...rest: unknown[]) => {
 			const factory = originalFile as unknown as (t: unknown, ...r: unknown[]) => Bun.BunFile;

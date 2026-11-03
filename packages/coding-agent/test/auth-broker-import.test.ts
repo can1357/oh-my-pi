@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, onTestFinished, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -205,6 +205,13 @@ describe("auth-broker import (broker-routed)", () => {
 	let handle: AuthBrokerServerHandle | undefined;
 	const token = "broker-import-bearer";
 	const savedEnv: Record<string, string | undefined> = {};
+	const realStdoutWrite = process.stdout.write;
+
+	// Registered before the async teardown below: if that hook times out, Bun skips every later
+	// `afterEach` hook and `onTestFinished` callback of the test.
+	afterEach(() => {
+		process.stdout.write = realStdoutWrite;
+	});
 
 	beforeEach(async () => {
 		savedEnv.OMP_AUTH_BROKER_URL = process.env.OMP_AUTH_BROKER_URL;
@@ -253,9 +260,6 @@ describe("auth-broker import (broker-routed)", () => {
 		);
 
 		const ORIGINAL_STDOUT = process.stdout.write.bind(process.stdout);
-		onTestFinished(() => {
-			process.stdout.write = ORIGINAL_STDOUT;
-		});
 		let captured = "";
 		process.stdout.write = ((chunk: string | Uint8Array): boolean => {
 			captured += typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk);
@@ -301,9 +305,6 @@ describe("auth-broker import (broker-routed)", () => {
 		);
 
 		const ORIGINAL_STDOUT = process.stdout.write.bind(process.stdout);
-		onTestFinished(() => {
-			process.stdout.write = ORIGINAL_STDOUT;
-		});
 		process.stdout.write = (() => true) as typeof process.stdout.write;
 		try {
 			await runAuthBrokerCommand({
