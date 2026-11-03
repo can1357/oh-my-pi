@@ -97,6 +97,9 @@ impl Parser<'_> {
 		// `${…}` operator state: whether single quotes quote (`#`, `%`, `/`…).
 		let mut dolbrace_quote = false;
 		let mut dolbrace_op = false;
+		// Arithmetic counts a parameter word's parentheses as header text,
+		// but its semicolons do not separate the three `for` clauses.
+		let mut arith_braces = 0u32;
 		loop {
 			let Some(ch) = self.peek() else {
 				let close_str: &'static str = match close {
@@ -145,10 +148,18 @@ impl Parser<'_> {
 				out.pop();
 				return Ok(());
 			}
+			if flags.has(Flags::ARITH) {
+				if wasdol && ch == b'{' && !self.funsub_next() {
+					arith_braces += 1;
+				} else if ch == b'}' {
+					arith_braces = arith_braces.saturating_sub(1);
+				}
+			}
 			// `for ((…))` splits at the `;`s of its own text (bash
 			// `skip_to_delim`), not those of nested quotes or substitutions.
 			if ch == b';'
 				&& self.raw_depth == 1
+				&& arith_braces == 0
 				&& let Some(semis) = &mut self.arith_semis
 			{
 				semis.push(out.len() - 1);

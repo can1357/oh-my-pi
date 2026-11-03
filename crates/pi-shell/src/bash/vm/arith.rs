@@ -800,6 +800,9 @@ impl Compiler<'_> {
 			let Some(lv) = self.lvalue() else {
 				return self.fail("identifier expected after pre-increment or pre-decrement");
 			};
+			if let Some(fail) = self.invalid_lookahead() {
+				return fail;
+			}
 			let node = Node::PreInc(Box::new(lv), delta);
 			// `--x++`: the incremented value is no lvalue.
 			self.skip_ws();
@@ -841,6 +844,9 @@ impl Compiler<'_> {
 			return self.primary();
 		};
 		self.last = start;
+		if let Some(fail) = self.invalid_lookahead() {
+			return fail;
+		}
 		self.skip_ws();
 		let rest = &self.src[self.pos..];
 		if rest.starts_with(b"++") || rest.starts_with(b"--") {
@@ -887,6 +893,19 @@ impl Compiler<'_> {
 		self.fail("arithmetic syntax error: operand expected")
 	}
 
+	/// Bash reads the next token before returning a number or variable.
+	/// A lexical error therefore prevents its enclosing assignment or prefix
+	/// increment, without undoing earlier comma operands or postfix increments.
+	fn invalid_lookahead(&mut self) -> Option<Node> {
+		self.skip_ws();
+		let &ch = self.src.get(self.pos)?;
+		if ch.is_ascii_alphanumeric() || ch == b'_' || b"+-*/%<>=!&|^~?:,()".contains(&ch) {
+			return None;
+		}
+		self.last = self.pos;
+		Some(self.fail("arithmetic syntax error: invalid arithmetic operator"))
+	}
+
 	/// A numeric constant (bash's `strlong`): `0` octal, `0x` hex,
 	/// `BASE#DIGITS`. bash's lexer cuts the expression at the end of the
 	/// constant while converting it, so its errors show the text only up to
@@ -900,7 +919,7 @@ impl Compiler<'_> {
 		let end = start + n;
 		self.pos = end;
 		match strlong(&self.src[start..end]) {
-			Ok(v) => Node::Num(v),
+			Ok(v) => self.invalid_lookahead().unwrap_or(Node::Num(v)),
 			Err(msg) => {
 				self.failed = true;
 				Node::Fail(Box::new(SyntaxError {

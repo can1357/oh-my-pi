@@ -3,7 +3,8 @@
 ## [Unreleased]
 ### Fixed
 
-- Fixed the bash tool looping on newline-only arithmetic `for` conditions and ignoring invalid whitespace in arithmetic expressions ([#17817](https://github.com/can1357/oh-my-pi/pull/17817) by [@sjawhar](https://github.com/sjawhar)).
+- Fixed the bash tool's arithmetic `for` loops running newline-only conditions, splitting semicolons inside parameter words, rejecting continued opening parentheses, and discarding later commands after an evaluation error ([#17817](https://github.com/can1357/oh-my-pi/pull/17817) by [@sjawhar](https://github.com/sjawhar)).
+- Fixed the bash tool's arithmetic accepting invalid whitespace and updating unfinished assignments before reporting an invalid token ([#17817](https://github.com/can1357/oh-my-pi/pull/17817) by [@sjawhar](https://github.com/sjawhar)).
 
 ### Changed
 

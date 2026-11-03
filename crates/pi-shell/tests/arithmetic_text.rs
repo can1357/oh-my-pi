@@ -81,3 +81,63 @@ async fn non_bash_whitespace_is_not_ignored_by_arithmetic_evaluation() {
 		run(&script, "empty=1\nnumber=1\noperator=1\nvariable=1\n", true, 0).await;
 	}
 }
+
+#[tokio::test]
+async fn continued_opening_parentheses_still_start_arithmetic() {
+	run(
+		"for (\\\n(i=0;;i++)); do echo for=$i; break; done\n(\\\n(x=2))\necho x=$x\n",
+		"for=0\nx=2\n",
+		false,
+		0,
+	)
+	.await;
+}
+
+#[tokio::test]
+async fn parameter_word_semicolons_do_not_split_arithmetic_for_clauses() {
+	run(
+		concat!(
+			"v=0\nfor ((i=${v:-;};0;)); do :; done\necho unused=$?\nunset v\n",
+			"for ((i=${v:-0;0};0;)); do echo never; break; done\necho init=$?\n",
+			"for ((i=0;${v:-0;1};)); do echo never; break; done\necho cond=$?\n",
+			"for ((i=0;0;${v:-;})); do :; done\necho unused_step=$?\n",
+		),
+		"unused=0\ninit=1\ncond=1\nunused_step=0\n",
+		true,
+		0,
+	)
+	.await;
+}
+
+#[tokio::test]
+async fn invalid_arithmetic_lookahead_prevents_unfinished_assignments() {
+	run(
+		concat!(
+			"unset x\n((x=1 #c\n)); echo \"hash=${x-unset}:$?\"\n",
+			"((x=1;2)); echo \"semi=${x-unset}:$?\"\n",
+			"((x=1 @)); echo \"at=${x-unset}:$?\"\n",
+			"x=0; ((x++ #c)); echo \"post=$x:$?\"\n",
+			"x=0; ((++x #c)); echo \"pre=$x:$?\"\n",
+			"x=0; ((x++ + 1 #c)); echo \"prior=$x:$?\"\n",
+			"x=0; ((x=1, x=2 #c)); echo \"comma=$x:$?\"\n",
+		),
+		"hash=unset:1\nsemi=unset:1\nat=unset:1\npost=1:1\npre=0:1\nprior=1:1\ncomma=1:1\n",
+		true,
+		0,
+	)
+	.await;
+}
+
+#[tokio::test]
+async fn arithmetic_for_errors_end_the_loop_not_the_command_list() {
+	run(
+		concat!(
+			"echo \"$(for ((i=0; #c\n;i++)); do echo never; done; echo rc=$?)\"\n",
+			"echo before; for (((i=0;j=1);)); do break; done; echo \"after=$?\"\n",
+		),
+		"rc=1\nbefore\nafter=1\n",
+		true,
+		0,
+	)
+	.await;
+}

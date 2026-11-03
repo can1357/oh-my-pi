@@ -2199,14 +2199,26 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, o
 					};
 					k.diag(cx, vp, line, d);
 					vp.status = 1;
-					// `((…))` continues; an arith-for header error leaves the
-					// loop (approximated by discarding the command).
-					if unit
-						.nodes
-						.get(op.node as usize)
-						.is_some_and(|n| n.kind == NodeKind::ArithFor)
-					{
-						Flow::Discard(1)
+					// Evaluation failure ends this loop, not the rest of the line.
+					if arith_for {
+						let exit = unit
+							.ops
+							.iter()
+							.enumerate()
+							.skip(top_frame(vp).pc as usize)
+							.find(|(_, next)| next.node == op.node && next.code == Opcode::LoopExit)
+							.map(|(pc, _)| pc as u32)
+							.expect("arithmetic loop exit");
+						if let Some(rec) = top_frame(vp)
+							.loops
+							.last_mut()
+							.filter(|rec| rec.exit == exit)
+						{
+							rec.status = 1;
+							Flow::Jump(exit)
+						} else {
+							Flow::Jump(exit + 1)
+						}
 					} else {
 						Flow::Next
 					}

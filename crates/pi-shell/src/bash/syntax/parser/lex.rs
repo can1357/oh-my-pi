@@ -562,6 +562,14 @@ impl<'s> Parser<'s> {
 		self.lx.cmdbltin = false;
 		let m = self.mark();
 		self.bump();
+		// `shell_getc` removes continuations before the lookahead that
+		// distinguishes `((` from a subshell, but not real intervening blanks.
+		if c == b'(' {
+			while self.peek() == Some(b'\\') && self.peek_at(1) == Some(b'\n') {
+				self.bump();
+				self.bump();
+			}
+		}
 		let p = self.peek();
 		let kind = if p == Some(c) {
 			match c {
