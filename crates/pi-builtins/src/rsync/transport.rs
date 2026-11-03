@@ -666,30 +666,6 @@ impl Drop for PipeWriter {
 	}
 }
 
-/// [`WriteProbe`] for a writer into `pipe`: room to write, or a reader gone
-/// (the write then fails at once).
-fn room_probe(pipe: &Arc<Pipe>) -> WriteProbe {
-	let room = Arc::clone(pipe);
-	Arc::new(move |wait| {
-		let until = Instant::now() + wait;
-		let mut state = lock(&room.state);
-		loop {
-			if state.reader_closed || state.buf.len() < pipe_capacity() {
-				return true;
-			}
-			let now = Instant::now();
-			if now >= until {
-				return false;
-			}
-			state = room.changed.wait_timeout(state, until - now).unwrap_or_else(std::sync::PoisonError::into_inner).0;
-		}
-	})
-}
-
-fn new_pipe() -> Arc<Pipe> {
-	Arc::new(Pipe { state: Mutex::new(PipeState::default()), changed: Condvar::new() })
-}
-
 /// In-process duplex pair for local transfers (client half, server half).
 ///
 /// Each direction is a bounded in-memory pipe: dropping a writer is EOF for
@@ -707,62 +683,38 @@ pub(crate) fn local_pair(cancel: Arc<AtomicBool>) -> (Connection, Connection) {
 			let state = lock(&probed.state);
 			!state.buf.is_empty() || state.writer_closed
 		});
+		// Room to write, or a reader gone (the write then fails at once).
+		let room = Arc::clone(outbound);
+		let writable: WriteProbe = Arc::new(move |wait| {
+			let until = Instant::now() + wait;
+			let mut state = lock(&room.state);
+			loop {
+				if state.reader_closed || state.buf.len() < pipe_capacity() {
+					return true;
+				}
+				let now = Instant::now();
+				if now >= until {
+					return false;
+				}
+				state = room.changed.wait_timeout(state, until - now).unwrap_or_else(std::sync::PoisonError::into_inner).0;
+			}
+		});
 		Connection {
 			reader: Box::new(reader),
 			writer: Box::new(writer),
 			probe:  Some(probe),
-			writable: Some(room_probe(outbound)),
+			writable: Some(writable),
 			child:  None,
 			ctl:    ctl.clone(),
 		}
 	};
+	let new_pipe =
+		|| Arc::new(Pipe { state: Mutex::new(PipeState::default()), changed: Condvar::new() });
 	let to_server = new_pipe();
 	let to_client = new_pipe();
 	let client = half(&cancel, &ConnCtl::default(), &to_client, &to_server);
 	let server = half(&cancel, &ConnCtl::default(), &to_server, &to_client);
 	(client, server)
-}
-
-/// A writer into `sink`, which can block in `write`, that never blocks
-/// itself, and its [`WriteProbe`]: what is written goes into a buffer the
-/// size of a socketpair's ([`pipe_capacity`]), whose room is the probe, and
-/// a feed thread moves it into `sink`. Windows uses it for a child's stdin,
-/// which cannot be polled, so the stats snapshot is taken when bytes go out
-/// there as through a socket. A failed write to `sink` closes the buffer's
-/// reading end, so the next write fails as on a closed socket; dropping the
-/// writer lets the feed finish what is buffered and then drops `sink`.
-#[cfg(any(windows, test))]
-pub(crate) fn fed_writer<W: Write + Send + 'static>(
-	mut sink: W,
-	cancel: &Arc<AtomicBool>,
-	ctl: &ConnCtl,
-) -> io::Result<(Box<dyn Write + Send>, WriteProbe)> {
-	let pipe = new_pipe();
-	let feed = Arc::clone(&pipe);
-	std::thread::Builder::new().name("rsync-pipe-feed".into()).spawn(move || {
-		let mut chunk = Vec::new();
-		loop {
-			{
-				let mut state = lock(&feed.state);
-				while state.buf.is_empty() && !state.writer_closed {
-					state = feed.changed.wait(state).unwrap_or_else(std::sync::PoisonError::into_inner);
-				}
-				if state.buf.is_empty() {
-					return;
-				}
-				chunk.clear();
-				chunk.extend(state.buf.drain(..));
-				feed.changed.notify_all();
-			}
-			if sink.write_all(&chunk).and_then(|()| sink.flush()).is_err() {
-				lock(&feed.state).reader_closed = true;
-				feed.changed.notify_all();
-				return;
-			}
-		}
-	})?;
-	let writer = PipeWriter { pipe: Arc::clone(&pipe), cancel: Arc::clone(cancel), ctl: ctl.clone() };
-	Ok((Box::new(writer), room_probe(&pipe)))
 }
 
 /// Reader over a child's stdout pipe on Windows, where anonymous pipes cannot
@@ -832,6 +784,30 @@ impl Read for PumpReader {
 		buf[..n].copy_from_slice(&self.pending[self.pos..self.pos + n]);
 		self.pos += n;
 		Ok(n)
+	}
+}
+
+/// Writer over a child's stdin pipe on Windows; cancellation kills the child
+/// (watchdog), which breaks a blocked write.
+#[cfg(windows)]
+struct ChildWriter {
+	pipe:   std::process::ChildStdin,
+	cancel: Arc<AtomicBool>,
+}
+
+#[cfg(windows)]
+impl Write for ChildWriter {
+	fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+		if self.cancel.load(Ordering::Relaxed) {
+			return Err(RsyncError::cancelled_io());
+		}
+		self.pipe.write(buf).map_err(|err| {
+			if self.cancel.load(Ordering::Relaxed) { RsyncError::cancelled_io() } else { err }
+		})
+	}
+
+	fn flush(&mut self) -> io::Result<()> {
+		self.pipe.flush()
 	}
 }
 
@@ -1242,19 +1218,18 @@ fn spawn_piped(
 		let reader = PumpReader::new(stdout, Arc::clone(cancel), ctl.clone());
 		let pumped = reader.rx.clone();
 		let probe: ReadProbe = Arc::new(move || !pumped.is_empty() || pumped.is_disconnected());
-		let (writer, writable) = match fed_writer(stdin, cancel, ctl) {
-			Ok(fed) => fed,
-			Err(err) => {
-				let _ = child.kill();
-				let _ = child.wait();
-				return Err(err);
-			},
-		};
+		let writer = ChildWriter { pipe: stdin, cancel: Arc::clone(cancel) };
+		// No write probe: an anonymous pipe has no writability poll on
+		// Windows. A write into the child's full stdin therefore waits inside
+		// the call, after the output thread took the `--stats` mark, so input
+		// read during that wait is left out of the sender's "received" count
+		// (`MuxWriter::flush_for_stats`); upstream's select never writes into
+		// a full pipe. rsync 3.5.1 has no native Windows build to compare with.
 		Ok(Connection {
 			reader: Box::new(reader),
-			writer,
+			writer: Box::new(writer),
 			probe:  Some(probe),
-			writable: Some(writable),
+			writable: None,
 			child:  Some(ChildGuard::new(env, child, Arc::clone(cancel), report, role)),
 			ctl:    ctl.clone(),
 		})
@@ -1437,86 +1412,6 @@ mod tests {
 			while theirs.read(&mut buf).is_ok() {}
 			assert!(room(Duration::from_millis(100)));
 		}
-	}
-
-	/// [`fed_writer`] never blocks its caller: while its sink takes nothing it
-	/// holds at most one buffer in the feed and one in the buffer, and its
-	/// probe then reports no room; once the sink takes data the room comes
-	/// back, every byte arrives in order, and dropping the writer ends the
-	/// sink. A sink that fails closes the writer as a closed socket does.
-	#[test]
-	fn a_fed_writer_holds_what_its_sink_does_not_take() {
-		struct Gate {
-			open:  Arc<AtomicBool>,
-			got:   Arc<Mutex<Vec<u8>>>,
-			ended: Arc<AtomicBool>,
-		}
-		impl Write for Gate {
-			fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-				while !self.open.load(Ordering::Relaxed) {
-					std::thread::sleep(Duration::from_millis(5));
-				}
-				lock(&self.got).extend_from_slice(buf);
-				Ok(buf.len())
-			}
-
-			fn flush(&mut self) -> io::Result<()> {
-				Ok(())
-			}
-		}
-		impl Drop for Gate {
-			fn drop(&mut self) {
-				self.ended.store(true, Ordering::Relaxed);
-			}
-		}
-		let cancel = Arc::new(AtomicBool::new(false));
-		let (open, got, ended) = (Arc::new(AtomicBool::new(false)), Arc::default(), Arc::new(AtomicBool::new(false)));
-		let gate = Gate { open: Arc::clone(&open), got: Arc::clone(&got), ended: Arc::clone(&ended) };
-		let (mut writer, room) = fed_writer(gate, &cancel, &ConnCtl::default()).unwrap();
-		let mut sent = Vec::new();
-		let started = Instant::now();
-		let mut n = 0u8;
-		while room(Duration::from_millis(50)) {
-			let chunk = [n; 4096];
-			let took = writer.write(&chunk).unwrap();
-			sent.extend_from_slice(&chunk[..took]);
-			n = n.wrapping_add(1);
-		}
-		assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
-		assert!(sent.len() > pipe_capacity() && sent.len() <= 2 * pipe_capacity(), "{} bytes held", sent.len());
-		assert!(!room(Duration::from_millis(20)));
-		open.store(true, Ordering::Relaxed);
-		assert!(room(Duration::from_secs(2)));
-		drop(writer);
-		let deadline = Instant::now() + Duration::from_secs(2);
-		while !ended.load(Ordering::Relaxed) && Instant::now() < deadline {
-			std::thread::sleep(Duration::from_millis(5));
-		}
-		assert!(ended.load(Ordering::Relaxed), "the sink was not dropped");
-		assert!(*lock(&got) == sent, "the bytes arrived changed");
-
-		struct Broken;
-		impl Write for Broken {
-			fn write(&mut self, _: &[u8]) -> io::Result<usize> {
-				Err(io::ErrorKind::BrokenPipe.into())
-			}
-
-			fn flush(&mut self) -> io::Result<()> {
-				Ok(())
-			}
-		}
-		let (mut writer, room) = fed_writer(Broken, &cancel, &ConnCtl::default()).unwrap();
-		writer.write_all(b"x").unwrap();
-		let deadline = Instant::now() + Duration::from_secs(2);
-		let failed = loop {
-			assert!(room(Duration::from_millis(50)), "a failed sink reports room, so the write fails at once");
-			match writer.write(b"y") {
-				Err(err) => break err,
-				Ok(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(5)),
-				Ok(_) => panic!("writes kept succeeding after the sink failed"),
-			}
-		};
-		assert_eq!(failed.kind(), io::ErrorKind::BrokenPipe);
 	}
 
 	#[test]

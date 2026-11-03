@@ -1079,7 +1079,10 @@ impl MuxWriter {
 	/// the last write call began, with a read of waiting input already under
 	/// way then (all of them if the flush wrote nothing). Read whenever they
 	/// arrived, the peer's answer (the generator's final `NDX_DONE`, a 5-byte
-	/// frame) was sometimes counted.
+	/// frame) was sometimes counted. A connection without a write probe
+	/// ([`WriteConfig::writable`], a Windows remote shell's stdin) can take
+	/// the mark before a write that then waits for room, and leaves out what
+	/// is read during that wait.
 	pub(crate) fn flush_for_stats(&mut self) -> io::Result<u64> {
 		let sh = &*self.shared;
 		let moved = lock(&sh.out.state).moved;
@@ -2828,49 +2831,6 @@ mod tests {
 			thread::sleep(Duration::from_millis(100));
 			tx.send(info).unwrap();
 			// The connection takes data only once that input has been read.
-			let deadline = Instant::now() + Duration::from_secs(10);
-			while read.total_read() < before + info_len && Instant::now() < deadline {
-				thread::sleep(Duration::from_millis(5));
-			}
-			open.store(true, Ordering::Relaxed);
-			tx
-		});
-		w.write_all(&[0]).unwrap();
-		let total = w.flush_for_stats().unwrap();
-		let _tx = feeder.join().unwrap();
-		assert_eq!(total, before + info_len);
-	}
-
-	/// The same through the writer Windows gives a remote shell's stdin,
-	/// which cannot be polled ([`crate::rsync::transport::fed_writer`], here
-	/// over a sink that takes nothing until released): its buffer full, the
-	/// message read meanwhile counts. When that writer blocked in `write`
-	/// with no probe, the mark came first (5 where 14 was due, in review).
-	#[test]
-	fn stats_read_total_counts_input_read_while_a_fed_pipe_is_full() {
-		let counters = IoCounters::default();
-		let cancel = Arc::new(AtomicBool::new(false));
-		let open = Arc::new(AtomicBool::new(false));
-		let sink = GatedSink { open: Arc::clone(&open) };
-		let (mut inner, writable) =
-			crate::rsync::transport::fed_writer(sink, &cancel, &crate::rsync::transport::ConnCtl::default()).unwrap();
-		// The feed takes what it can and waits in the sink; the buffer fills.
-		// One write per pass: it takes what fits, as a socket's does.
-		while writable(Duration::from_millis(50)) {
-			let taken = inner.write(&[0u8; 4096]).unwrap();
-			assert!(taken > 0, "the probe reported room the writer did not take");
-		}
-		let cfg = WriteConfig { writable: Some(writable), ..WriteConfig::default() };
-		let mut w = MuxWriter::new(inner, counters.clone(), cfg);
-		w.start_multiplex().unwrap();
-		let (_r, tx, _) = linked_reader(&counters, &w, &cancel);
-		let before = counters.total_read();
-		let info = frame(MSG_INFO, b"note\n");
-		let info_len = info.len() as u64;
-		let read = counters.clone();
-		let feeder = thread::spawn(move || {
-			thread::sleep(Duration::from_millis(100));
-			tx.send(info).unwrap();
 			let deadline = Instant::now() + Duration::from_secs(10);
 			while read.total_read() < before + info_len && Instant::now() < deadline {
 				thread::sleep(Duration::from_millis(5));
