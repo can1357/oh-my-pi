@@ -2305,7 +2305,11 @@ export interface GrepOptions {
   maxCountPerFile?: number
   /** Abort signal for cancelling the operation. */
   signal?: unknown
-  /** Timeout in milliseconds for the operation. */
+  /**
+   * Search for at most this many milliseconds, then resolve with the
+   * matches found so far and `timedOut` set. A search that cannot stop
+   * within 5 s more rejects with `Aborted: Timeout`.
+   */
   timeoutMs?: number
   /**
    * Filesystem every path is stat'ed, walked, and read through (native when
@@ -2352,6 +2356,16 @@ export interface GrepResult {
   limitReached?: boolean
   /** Number of files skipped because they exceed the size limit. */
   skippedOversized?: number
+  /**
+   * `timeoutMs` passed first: the results cover only the files searched
+   * by then.
+   */
+  timedOut?: boolean
+  /**
+   * Files searched only in part (multiline search of a file over 4 MB, or a
+   * line too long to stream): matches past that point are missing.
+   */
+  partialFiles?: Array<string>
 }
 
 /**

@@ -201,6 +201,10 @@ pub struct GrepOptions {
 	/// one file) instead of returning them; a full channel pauses the search.
 	/// Incompatible with `offset` and `max_count`.
 	pub sink:               Option<tokio::sync::mpsc::Sender<Vec<Match>>>,
+	/// Stop at this instant and return what was found by then, with
+	/// [`GrepResult::timed_out`] set: the files searched so far, in path
+	/// order. `None` searches to the end.
+	pub deadline:           Option<tokio::time::Instant>,
 }
 
 impl GrepOptions {
@@ -223,6 +227,7 @@ impl GrepOptions {
 			max_count_per_file: None,
 			walk: walk::Options { hidden: true, gitignore: true, ..walk::Options::default() },
 			sink: None,
+			deadline: None,
 		}
 	}
 }
@@ -243,6 +248,13 @@ pub struct GrepResult {
 	pub limit_reached:      bool,
 	/// Files over [`MAX_FILE_BYTES`] that could not be read.
 	pub skipped_oversized:  u64,
+	/// The [`GrepOptions::deadline`] passed before the search finished: the
+	/// results cover only the files searched by then.
+	pub timed_out:          bool,
+	/// Files searched only in part, in path order: in a directory search,
+	/// files over [`MAX_FILE_BYTES`] in multiline mode (searched over their
+	/// first [`MAX_FILE_BYTES`]) and files with a line too long to stream.
+	pub partial_files:      Vec<String>,
 }
 
 /// Why a [`grep`] failed.

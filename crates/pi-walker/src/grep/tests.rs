@@ -842,7 +842,7 @@ async fn large_budget_stops_before_scanning_the_tree() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn oversized_files_are_searched_over_their_prefix_after_all_others() {
+async fn oversized_files_are_searched_after_all_others() {
 	let dir = TempDir::new();
 	write_oversized(&dir, "000_big.txt", "needle big 0\n");
 	write_oversized(&dir, "001_big.txt", "needle big 1\n");
@@ -1130,4 +1130,108 @@ async fn unlistable_root_fails_the_search() {
 			result.map(|r| r.files_searched)
 		);
 	}
+}
+
+/// A search the deadline stops returns what it matched before then, marked
+/// as timed out, on every search path: budgeted (`max_count`), unbounded,
+/// streamed, and a single file root.
+#[tokio::test(flavor = "multi_thread")]
+async fn deadline_returns_partial_results() {
+	let (mem, vfs) = crate::testing::MemFs::with_files(&[("mem://root/a.txt", "needle one\n")]);
+	// A read that never completes, in its own directory so the first one's
+	// results are delivered without it.
+	mem.add_stalled_file("mem://root/z/stuck.txt", b"needle two\n");
+	let root = Path::new("mem://root");
+	let fs = Fs::new(&vfs, root);
+	let engine = needle();
+	let soon = || Some(tokio::time::Instant::now() + Duration::from_millis(300));
+
+	for max_count in [Some(10), None] {
+		let opts = GrepOptions { max_count, deadline: soon(), ..options(&engine) };
+		let result = tokio::time::timeout(Duration::from_secs(10), grep(&fs, root, opts))
+			.await
+			.expect("the deadline ends the search")
+			.expect("a timed-out search still succeeds");
+		assert!(result.timed_out, "max_count {max_count:?}");
+		let paths: Vec<_> = result.matches.iter().map(|m| m.path.as_str()).collect();
+		assert_eq!(paths, ["a.txt"], "max_count {max_count:?}");
+	}
+
+	let (tx, mut rx) = mpsc::channel(4);
+	let opts = GrepOptions { deadline: soon(), sink: Some(tx), ..options(&engine) };
+	let drain = async {
+		let mut paths = Vec::new();
+		while let Some(batch) = rx.recv().await {
+			paths.extend(batch.into_iter().map(|m| m.path));
+		}
+		paths
+	};
+	let (result, streamed) = tokio::time::timeout(Duration::from_secs(10), async {
+		tokio::join!(grep(&fs, root, opts), drain)
+	})
+	.await
+	.expect("the deadline ends the streamed search");
+	assert!(result.expect("a timed-out stream still succeeds").timed_out);
+	assert_eq!(streamed, ["a.txt"]);
+
+	// A file root that never finishes reading reports the deadline too.
+	let stuck = Path::new("mem://root/z/stuck.txt");
+	let opts = GrepOptions { deadline: soon(), ..options(&engine) };
+	let result = tokio::time::timeout(Duration::from_secs(10), grep(&fs, stuck, opts))
+		.await
+		.expect("the deadline ends the file search")
+		.expect("a timed-out file search still succeeds");
+	assert!(result.timed_out);
+
+	// Without a deadline, or with one that does not pass, nothing is marked.
+	let dir = TempDir::new();
+	dir.write("a.txt", "needle\n");
+	let done = run(dir.path(), &GrepOptions {
+		deadline: Some(tokio::time::Instant::now() + Duration::from_secs(60)),
+		..options(&engine)
+	})
+	.await;
+	assert!(!done.timed_out);
+	assert_eq!(done.matches.len(), 1);
+}
+
+/// A directory search reads a large file to its end, as a named file root
+/// does; multiline mode, which holds the file in memory, searches its first
+/// [`MAX_FILE_BYTES`] and names it in `partial_files`.
+#[tokio::test(flavor = "multi_thread")]
+async fn directory_search_reads_large_files_whole_or_names_them_partial() {
+	let dir = TempDir::new();
+	let mut content = String::from("needle head\n");
+	while content.len() as u64 <= MAX_FILE_BYTES + 1024 {
+		content.push_str("filler line of haystack text\n");
+	}
+	content.push_str("needle tail\n");
+	dir.write("big.txt", &content);
+	dir.write("small.txt", "needle small\n");
+	let engine = needle();
+	for max_count in [None, Some(1_000)] {
+		let res = run(dir.path(), &GrepOptions { max_count, ..options(&engine) }).await;
+		let lines: Vec<_> = res
+			.matches
+			.iter()
+			.map(|m| (m.path.as_str(), m.text.as_str()))
+			.collect();
+		assert_eq!(
+			lines,
+			[("small.txt", "needle small"), ("big.txt", "needle head"), ("big.txt", "needle tail")],
+			"max_count {max_count:?}"
+		);
+		assert!(res.partial_files.is_empty(), "max_count {max_count:?}");
+	}
+
+	let multi = Arc::new(Engine::compile("needle", false, true).expect("compile"));
+	for max_count in [None, Some(1_000)] {
+		let res =
+			run(dir.path(), &GrepOptions { multiline: true, max_count, ..options(&multi) }).await;
+		assert_eq!(res.partial_files, ["big.txt"], "max_count {max_count:?}");
+		assert_eq!(res.total_matches, 2, "the window holds the head only, max_count {max_count:?}");
+	}
+	let root =
+		run(&dir.path().join("big.txt"), &GrepOptions { multiline: true, ..options(&multi) }).await;
+	assert_eq!(root.partial_files.len(), 1);
 }

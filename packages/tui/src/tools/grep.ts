@@ -49,6 +49,8 @@ export interface GrepToolDetails {
 	files?: string[];
 	fileMatches?: Array<{ path: string; count: number }>;
 	truncated?: boolean;
+	/** The search hit its time budget; the matches are those found before it. */
+	timedOut?: boolean;
 	error?: string;
 	/** Pre-formatted text for the user-visible TUI render. Mirrors the model-facing
 	 * `result.text` lines but uses a `│` gutter and `*` to mark match lines (vs space for

@@ -8,6 +8,11 @@
 - Added a fullscreen extension link browser for picking links already in terminal scrollback: press Alt+O again (or Page Up) while link tags are shown, or Alt+O with no extension link on screen ([#16476](https://github.com/can1357/oh-my-pi/pull/16476) by [@materemias](https://github.com/materemias))
 - Added a `:level` suffix to `^` model tags, such as `^openai-codex/gpt-6-astra:high`, that sets the tagged subagent's initial effort. Typing `:` after a mention lists the model's supported levels. The task tool's `effort` hint and `task.maxEffort` do not override the tagged level, and a per-call `model` for that agent fails as a conflict ([#17574](https://github.com/can1357/oh-my-pi/pull/17574) by [@a-glapinski](https://github.com/a-glapinski))
 
+### Fixed
+
+- `grep` searches files over 4 MB to their end in directory searches (it read only their first 4 MB and dropped later matches without saying so), and names the files a multiline search read only in part
+- `grep` returns the matches it found when a search hits its 30 s budget, with a notice that the results are partial, instead of failing with nothing; a multi-path search keeps the earlier paths' matches, and `jfind` reports a cut-short lexical scan as partial coverage
+
 ## [18.16.0] - 2026-11-02
 
 ### Added

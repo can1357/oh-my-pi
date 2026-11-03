@@ -153,8 +153,8 @@ The tool returns a single text block in `content[0].text` plus structured `detai
 - Context defaults: `grep.contextBefore = 1`, `grep.contextAfter = 3` in `packages/coding-agent/src/tools/settings.ts`.
 - Pagination: `skip` is a file-page offset for multi-file scopes. The result text says `Use skip=<N> for the next page` when more files remain.
 - Native directory-scan cache: disabled natively for this tool — `GrepOptions` has no `cache` field; `build_grep_walk_request` hard-codes `.cache(false)` in `crates/pi-natives/src/grep.rs`.
-- Native grep wall-clock budget: `30_000ms` per invocation (`SEARCH_GREP_TIMEOUT_MS` in `packages/coding-agent/src/tools/grep.ts`); hitting it raises `Grep timed out after 30s; ...`.
-- Native per-file search window: `4 * 1024 * 1024` bytes (`MAX_FILE_BYTES` in `crates/pi-natives/src/grep.rs`, mirrored as `NATIVE_GREP_MAX_FILE_BYTES` in `grep.ts`). Oversized host and internal-URL files are searched only over their leading window; directory scans defer them until normal-sized files have been searched and may omit that pass once the match budget is satisfied. Explicit oversized file scopes receive a partial-coverage note; oversized files whose prefix cannot be read contribute a skipped-file count.
+- Native grep wall-clock budget: `30_000ms` per invocation (`SEARCH_GREP_TIMEOUT_MS` in `packages/coding-agent/src/tools/grep.ts`). At the budget native grep stops and resolves with the matches found so far and `timedOut: true`; the tool shows them with the notice ``Grep timed out after 30s; results are partial (only matches found before the timeout are shown). Narrow paths or pattern, or scope with `glob` first.``, sets `details.timedOut` and `details.truncated`, and leaves the remaining targets of a multi-path call unsearched. A search that cannot stop within native's 5 s grace rejects with `Aborted: Timeout`; the tool still answers with what earlier targets found and the same notice.
+- Native per-file search window: `4 * 1024 * 1024` bytes (`MAX_FILE_BYTES` in `crates/pi-walker/src/grep`, mirrored as `NATIVE_GREP_MAX_FILE_BYTES` in `grep.ts`). Larger files are read to their end, line by line, in directory scans as for named files; directory scans search them after normal-sized files and may omit them once the match budget is satisfied. A multiline search holds a file in memory, so it searches a larger file's first 4 MB, and a line too long to stream ends that file's search; native lists every such file in `partialFiles` and the tool names them in a `Searched only part of these files …` note. Large files that cannot be read contribute a skipped-file count.
 
 ## Errors
 
@@ -169,7 +169,6 @@ The tool returns a single text block in `content[0].text` plus structured `detai
 - `Path not found: ...` when a filesystem-backed resolved base path is missing (multi-path calls append the hint `(\`path\` list entries must each exist relative to cwd)`), or `Path not found: ...; list each target in the semicolon-delimited \`path\`` when every multi-path filesystem entry is missing (with an archive hint when unreadable archive members contributed).
 - Native search normally falls back from Rust regex to PCRE2 and finally to a literal pattern rather than rejecting regex syntax; a residual native regex error surfaces as `Invalid regex: ...`.
 - Multi-file native scans skip per-file open/search failures inside `grep.rs`; the scan continues with surviving files.
-- ``Grep timed out after 30s; narrow paths or pattern, or scope with `glob` first`` when native grep hits `SEARCH_GREP_TIMEOUT_MS`.
 
 ## Notes
 
