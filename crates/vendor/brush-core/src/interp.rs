@@ -2119,38 +2119,46 @@ async fn apply_assignment(
 	// Read option before taking mutable borrow on env.
 	let export_variables_on_modification = shell.options().export_variables_on_modification;
 
+	// Bash looks a variable up before it assigns to an element of it or assigns
+	// a list to it, which refreshes a hooked variable's stored copy; an
+	// assignment of one value to the name does not (see
+	// `ShellEnvironment::refresh_hooked_variable`).
+	if array_index.is_some() || matches!(new_value, ShellValueLiteral::Array(_)) {
+		shell.env().refresh_hooked_variable(variable_name);
+	}
+
 	// See if we can find an existing value associated with the variable.
 	if let Some((existing_value_scope, existing_value)) =
 		shell.env_mut().get_mut(variable_name.as_str())
+		&& (required_scope.is_none() || Some(existing_value_scope) == required_scope)
 	{
-		if required_scope.is_none() || Some(existing_value_scope) == required_scope {
-			if let Some(array_index) = array_index {
-				match new_value {
-					ShellValueLiteral::Scalar(s) => {
-						existing_value.assign_at_index(array_index, s, assignment.append)?;
-					},
-					ShellValueLiteral::Array(_) => {
-						return Err(error::ErrorKind::AssigningListToArrayMember.into());
-					},
-				}
-			} else {
-				if !export
-					&& export_variables_on_modification
-					&& !matches!(new_value, ShellValueLiteral::Array(_))
-				{
-					export = true;
-				}
-
-				existing_value.assign(new_value, assignment.append)?;
+		let assigned = if let Some(array_index) = array_index {
+			match new_value {
+				ShellValueLiteral::Scalar(s) => {
+					existing_value.assign_at_index(array_index, s, assignment.append)
+				},
+				ShellValueLiteral::Array(_) => Err(error::ErrorKind::AssigningListToArrayMember.into()),
+			}
+		} else {
+			if !export
+				&& export_variables_on_modification
+				&& !matches!(new_value, ShellValueLiteral::Array(_))
+			{
+				export = true;
 			}
 
-			if export {
-				existing_value.export();
-			}
+			existing_value.assign(new_value, assignment.append)
+		};
 
-			// That's it!
-			return Ok(());
+		if assigned.is_ok() && export {
+			existing_value.export();
 		}
+
+		// An assignment to `BASH_ALIASES` defines aliases (see
+		// `ShellEnvironment::run_assignment_hooks`).
+		shell.env_mut().run_assignment_hooks();
+		shell.report_rejected_alias_names(params).await;
+		return assigned;
 	}
 
 	// If we fell down here, then we need to add it.

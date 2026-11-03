@@ -261,7 +261,6 @@ impl<SE: extensions::ShellExtensions> Default for Shell<SE> {
 			options: options::RuntimeOptions::default(),
 			jobs: jobs::JobManager::default(),
 			last_background_pid: None,
-			aliases: brush_parser::AliasTable::default(),
 			last_exit_status: 0,
 			last_exit_status_change_count: 0,
 			last_pipeline_statuses: vec![0],

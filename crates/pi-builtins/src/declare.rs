@@ -158,6 +158,10 @@ impl builtins::Command for DeclareCommand {
 			}
 		}
 
+		// An operand that assigns to `BASH_ALIASES` with a name Bash rejects is
+		// reported here (see `ShellEnvironment::run_assignment_hooks`).
+		context.shell.report_rejected_alias_names(&context.params).await;
+
 		Ok(result)
 	}
 }
@@ -266,27 +270,36 @@ impl DeclareCommand {
 			EnvironmentLookup::Anywhere
 		};
 
-		// Look up the variable.
+		// Look up the variable, as Bash does, which refreshes a hooked
+		// variable's stored copy (see `ShellEnvironment::refresh_hooked_variable`).
+		context.shell.env().refresh_hooked_variable(name.as_str());
 		if let Some(var) = context
 			.shell
 			.env_mut()
 			.get_mut_using_policy(name.as_str(), lookup)
 		{
-			if self.make_associative_array.is_some() {
-				var.convert_to_associative_array()?;
-			}
-			if self.make_indexed_array.is_some() {
-				var.convert_to_indexed_array()?;
-			}
+			let declared = (|| {
+				if self.make_associative_array.is_some() {
+					var.convert_to_associative_array()?;
+				}
+				if self.make_indexed_array.is_some() {
+					var.convert_to_indexed_array()?;
+				}
 
-			self.apply_attributes_before_update(var)?;
+				self.apply_attributes_before_update(var)?;
 
-			if let Some(initial_value) = initial_value {
-				// We append if the declaration included an explicit index.
-				var.assign(initial_value, assigned_index.is_some())?;
-			}
+				if let Some(initial_value) = initial_value {
+					// We append if the declaration included an explicit index.
+					var.assign(initial_value, assigned_index.is_some())?;
+				}
 
-			self.apply_attributes_after_update(var, verb)?;
+				self.apply_attributes_after_update(var, verb)
+			})();
+
+			// An assignment to `BASH_ALIASES` defines aliases (see
+			// `ShellEnvironment::run_assignment_hooks`).
+			context.shell.env_mut().run_assignment_hooks();
+			declared?;
 		} else {
 			let unset_type = if self.make_indexed_array.is_some() {
 				ShellValueUnsetType::IndexedArray

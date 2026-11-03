@@ -73,11 +73,7 @@ impl builtins::Command for MapFileCommand {
 			if var.is_readonly() {
 				return Err(ErrorKind::ReadonlyVariable.into());
 			}
-			if matches!(
-				var.value(),
-				variables::ShellValue::AssociativeArray(_)
-					| variables::ShellValue::Unset(variables::ShellValueUnsetType::AssociativeArray)
-			) {
+			if var.is_associative_array() {
 				writeln!(
 					context.stderr(),
 					"{}: {}: not an indexed array",

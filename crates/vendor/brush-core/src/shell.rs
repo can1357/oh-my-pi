@@ -10,9 +10,9 @@ use std::{
 use tokio::sync::Mutex;
 
 use crate::{
-	ExecutionControlFlow, ExecutionResult, builtins, env::ShellEnvironment, error, extensions,
-	functions, interfaces, jobs, keywords, openfiles, options::RuntimeOptions, pathcache, sys,
-	wellknownvars,
+	ExecutionControlFlow, ExecutionParameters, ExecutionResult, builtins, env::ShellEnvironment,
+	error, extensions, functions, interfaces, jobs, keywords, openfiles, options::RuntimeOptions,
+	pathcache, sys, wellknownvars,
 };
 
 /// Type for storing a key bindings helper.
@@ -97,10 +97,6 @@ pub struct Shell<SE: extensions::ShellExtensions = extensions::DefaultShellExten
 	/// Cloned into subshells without transferring ownership of the job.
 	last_background_pid: Option<sys::process::ProcessId>,
 
-	/// Shell aliases, shared with the readers that read input with them until
-	/// the shell changes them.
-	aliases: brush_parser::AliasTable,
-
 	/// The status of the last completed command.
 	last_exit_status: u8,
 
@@ -184,7 +180,6 @@ impl<SE: extensions::ShellExtensions> Clone for Shell<SE> {
 			options: self.options.clone(),
 			jobs: jobs::JobManager::new(),
 			last_background_pid: self.last_background_pid,
-			aliases: self.aliases.clone(),
 			last_exit_status: self.last_exit_status,
 			last_exit_status_change_count: self.last_exit_status_change_count,
 			last_pipeline_statuses: self.last_pipeline_statuses.clone(),
@@ -418,22 +413,24 @@ impl<SE: extensions::ShellExtensions> Shell<SE> {
 		{
 			return None;
 		}
-		self.aliases.get(word).map(String::as_str)
-	}
-
-	/// Whether `BASH_ALIASES` is still the view of the alias table, whose
-	/// elements are read by alias name. Unsetting the variable ends that, as
-	/// in Bash.
-	pub(crate) fn bash_aliases_is_alias_table(&self) -> bool {
-		self.env
-			.get("BASH_ALIASES")
-			.is_some_and(|(_, var)| matches!(var.value(), crate::ShellValue::Dynamic { .. }))
+		self.env.aliases().get(word).map(String::as_str)
 	}
 
 	/// The aliases the shell substitutes in input it reads now: its alias
 	/// table, or none while `expand_aliases` is off.
 	pub fn aliases_for_reading(&self) -> Option<brush_parser::AliasTable> {
-		self.options.expand_aliases.then(|| self.aliases.clone())
+		self.options.expand_aliases.then(|| self.env.alias_table())
+	}
+
+	/// Reports the names that assignments to `BASH_ALIASES` gave and Bash
+	/// rejects as alias names (see [`ShellEnvironment::run_assignment_hooks`]),
+	/// on the standard error of `params`.
+	pub async fn report_rejected_alias_names(&mut self, params: &ExecutionParameters) {
+		for name in self.env.take_rejected_alias_names() {
+			let mut stderr = params.stderr(self);
+			let error = error::ErrorKind::InvalidAliasName(name).into();
+			let _ = self.display_error(&mut stderr, &error).await;
+		}
 	}
 
 	pub(crate) const fn last_exit_status_change_count(&self) -> usize {
@@ -492,12 +489,12 @@ impl<SE: extensions::ShellExtensions> ShellState for Shell<SE> {
 
 	/// Returns the shell's aliases.
 	pub fn aliases(&self) -> &HashMap<String, String> {
-		&self.aliases
+		self.env.aliases()
 	}
 
 	/// Returns a mutable reference to the shell's aliases.
 	pub fn aliases_mut(&mut self) -> &mut HashMap<String, String> {
-		std::sync::Arc::make_mut(&mut self.aliases)
+		self.env.aliases_mut()
 	}
 
 	/// Returns the shell's job manager.

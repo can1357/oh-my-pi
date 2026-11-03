@@ -41,6 +41,11 @@ pub enum ErrorKind {
 	#[error("cannot convert indexed array to associative array")]
 	ConvertingIndexedArrayToAssociativeArray,
 
+	/// An assignment to `BASH_ALIASES` gave a name Bash rejects as an alias
+	/// name.
+	#[error("`{0}': invalid alias name")]
+	InvalidAliasName(String),
+
 	/// An error occurred while sourcing the indicated script file.
 	#[error("failed to source file: {0}")]
 	FailedSourcingFile(PathBuf, #[source] std::io::Error),

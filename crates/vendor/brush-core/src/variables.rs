@@ -5,6 +5,7 @@ use std::{
 	collections::BTreeMap,
 	ffi::OsString,
 	fmt::{Display, Write},
+	sync::{Mutex, PoisonError},
 };
 
 use crate::{
@@ -33,6 +34,89 @@ pub struct ShellVariable {
 	treat_as_integer:    bool,
 	/// Whether or not the variable should be treated as a name reference.
 	treat_as_nameref:    bool,
+	/// For a variable whose assignments the shell acts on, as Bash's
+	/// `BASH_ALIASES`: its stored copy and the elements assigned to it.
+	#[cfg_attr(feature = "serde", serde(skip))]
+	hook:                Option<Box<HookedVariable>>,
+}
+
+/// What the shell does with each element assigned to a variable, as Bash's
+/// assignment function for the variable does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AssignmentHook {
+	/// Defines an alias named by the element's key, with the element's value
+	/// (`BASH_ALIASES`).
+	AliasTable,
+}
+
+/// The state of a variable with an [`AssignmentHook`]. Reads of the variable
+/// come from the shell. As in Bash, the variable also keeps a stored copy of
+/// its value, an associative array: a lookup of the variable refreshes it, and
+/// an append reads it. Each element assigned to the variable waits in
+/// `assigned` until the shell acts on it.
+#[derive(Debug)]
+struct HookedVariable {
+	hook:     AssignmentHook,
+	/// The stored copy. A read refreshes it through a shared reference.
+	stored:   Mutex<BTreeMap<String, String>>,
+	/// The elements assigned since the shell last took them, in order.
+	assigned: Vec<(String, String)>,
+}
+
+impl Clone for HookedVariable {
+	fn clone(&self) -> Self {
+		Self {
+			hook:     self.hook,
+			stored:   Mutex::new(self.stored.lock().unwrap_or_else(PoisonError::into_inner).clone()),
+			assigned: self.assigned.clone(),
+		}
+	}
+}
+
+impl HookedVariable {
+	fn stored_mut(&mut self) -> &mut BTreeMap<String, String> {
+		self.stored.get_mut().unwrap_or_else(PoisonError::into_inner)
+	}
+
+	/// Assigns `value` to the element `key` of the stored copy, or appends it
+	/// to the element's value there, and records the element for the shell.
+	fn assign_element(&mut self, key: String, value: String, append: bool, treat_as_int: bool) {
+		let stored = self.stored_mut();
+		let value = if append {
+			appended(stored.get(&key).map_or("", String::as_str), &value, treat_as_int)
+		} else {
+			value
+		};
+		stored.insert(key.clone(), value.clone());
+		self.assigned.push((key, value));
+	}
+
+	/// Assigns the elements of a list to the stored copy, replacing it unless
+	/// `append`, and records each element for the shell.
+	fn assign_list(&mut self, literals: ArrayLiteral, append: bool) -> Result<(), error::Error> {
+		let Self { stored, assigned, .. } = self;
+		let stored = stored.get_mut().unwrap_or_else(PoisonError::into_inner);
+		if !append {
+			stored.clear();
+		}
+		ShellValue::for_each_associative_pair(literals, |key, value| {
+			stored.insert(key.clone(), value.clone());
+			assigned.push((key, value));
+		})
+	}
+}
+
+/// `existing` with `suffix` appended, or their sum when the variable is
+/// treated as an integer.
+fn appended(existing: &str, suffix: &str, treat_as_int: bool) -> String {
+	if treat_as_int {
+		(existing.parse::<i64>().unwrap_or(0) + suffix.parse::<i64>().unwrap_or(0)).to_string()
+	} else {
+		let mut value = String::with_capacity(existing.len() + suffix.len());
+		value.push_str(existing);
+		value.push_str(suffix);
+		value
+	}
 }
 
 /// Kind of transformation to apply to a variable's value when it is updated.
@@ -60,6 +144,7 @@ impl Default for ShellVariable {
 			trace:               false,
 			treat_as_integer:    false,
 			treat_as_nameref:    false,
+			hook:                None,
 		}
 	}
 }
@@ -191,8 +276,55 @@ impl ShellVariable {
 		self
 	}
 
+	/// Gives the variable an assignment hook: the shell acts on each element
+	/// assigned to it (see [`AssignmentHook`]).
+	pub fn set_assignment_hook(&mut self, hook: AssignmentHook) -> &mut Self {
+		self.hook = Some(Box::new(HookedVariable {
+			hook,
+			stored: Mutex::default(),
+			assigned: vec![],
+		}));
+		self
+	}
+
+	/// The variable's assignment hook, if it has one.
+	pub fn assignment_hook(&self) -> Option<AssignmentHook> {
+		self.hook.as_ref().map(|hooked| hooked.hook)
+	}
+
+	/// Whether the variable is an associative array, set or declared, or has
+	/// an assignment hook, whose stored copy is one.
+	pub fn is_associative_array(&self) -> bool {
+		self.hook.is_some()
+			|| matches!(
+				self.value,
+				ShellValue::AssociativeArray(_) | ShellValue::Unset(ShellValueUnsetType::AssociativeArray)
+			)
+	}
+
+	/// Takes the elements assigned to a hooked variable since the last call,
+	/// in order, each with its final value.
+	pub(crate) fn take_hooked_assignments(&mut self) -> Vec<(String, String)> {
+		self.hook
+			.as_mut()
+			.map(|hooked| std::mem::take(&mut hooked.assigned))
+			.unwrap_or_default()
+	}
+
+	/// Replaces a hooked variable's stored copy with `elements`. Bash does so
+	/// whenever it looks the variable up, and after the shell acts on an
+	/// element assigned to it.
+	pub(crate) fn refresh_stored_copy(&self, elements: BTreeMap<String, String>) {
+		if let Some(hooked) = &self.hook {
+			*hooked.stored.lock().unwrap_or_else(PoisonError::into_inner) = elements;
+		}
+	}
+
 	/// Converts the variable to an indexed array.
 	pub fn convert_to_indexed_array(&mut self) -> Result<(), error::Error> {
+		if self.hook.is_some() {
+			return Err(error::ErrorKind::ConvertingAssociativeArrayToIndexedArray.into());
+		}
 		match self.value() {
 			ShellValue::IndexedArray(_) => Ok(()),
 			ShellValue::AssociativeArray(_) => {
@@ -209,6 +341,9 @@ impl ShellVariable {
 
 	/// Converts the variable to an associative array.
 	pub fn convert_to_associative_array(&mut self) -> Result<(), error::Error> {
+		if self.hook.is_some() {
+			return Ok(());
+		}
 		match self.value() {
 			ShellValue::AssociativeArray(_) => Ok(()),
 			ShellValue::IndexedArray(_) => {
@@ -239,6 +374,19 @@ impl ShellVariable {
 		}
 
 		let value = self.convert_value_literal_for_assignment(value);
+
+		// A hooked variable takes the assignment in its stored copy, as an
+		// associative array (see `HookedVariable`).
+		let treat_as_int = self.is_treated_as_integer();
+		if let Some(hooked) = self.hook.as_deref_mut() {
+			return match value {
+				ShellValueLiteral::Scalar(value) => {
+					hooked.assign_element(String::from("0"), value, append, treat_as_int);
+					Ok(())
+				},
+				ShellValueLiteral::Array(literals) => hooked.assign_list(literals, append),
+			};
+		}
 
 		if append {
 			match (&self.value, &value) {
@@ -377,6 +525,20 @@ impl ShellVariable {
 		value: String,
 		append: bool,
 	) -> Result<(), error::Error> {
+		// A hooked variable takes the element in its stored copy, as an
+		// associative array (see `HookedVariable`).
+		if self.hook.is_some() {
+			if self.is_readonly() {
+				return Err(error::ErrorKind::ReadonlyVariable.into());
+			}
+			let treat_as_int = self.is_treated_as_integer();
+			let value = self.convert_value_str_for_assignment(value);
+			if let Some(hooked) = self.hook.as_deref_mut() {
+				hooked.assign_element(array_index, value, append, treat_as_int);
+			}
+			return Ok(());
+		}
+
 		match &self.value {
 			ShellValue::Unset(_) => {
 				self.assign(ShellValueLiteral::Array(ArrayLiteral(vec![])), false)?;
@@ -393,47 +555,21 @@ impl ShellVariable {
 		match &mut self.value {
 			ShellValue::IndexedArray(arr) => {
 				let key = get_key_for_indexed_array(arr, array_index.as_str())?;
-
-				if append {
-					let existing_value = arr.get(&key).map_or_else(|| "", |v| v.as_str());
-
-					let mut new_value;
-					if treat_as_int {
-						new_value = (existing_value.parse::<i64>().unwrap_or(0)
-							+ value.parse::<i64>().unwrap_or(0))
-						.to_string();
-					} else {
-						new_value = existing_value.to_owned();
-						new_value.push_str(value.as_str());
-					}
-
-					arr.insert(key, new_value);
+				let value = if append {
+					appended(arr.get(&key).map_or("", String::as_str), &value, treat_as_int)
 				} else {
-					arr.insert(key, value);
-				}
-
+					value
+				};
+				arr.insert(key, value);
 				Ok(())
 			},
 			ShellValue::AssociativeArray(arr) => {
-				if append {
-					let existing_value = arr
-						.get(array_index.as_str())
-						.map_or_else(|| "", |v| v.as_str());
-
-					let mut new_value;
-					if treat_as_int {
-						new_value = (existing_value.parse::<i64>().unwrap_or(0)
-							+ value.parse::<i64>().unwrap_or(0))
-						.to_string();
-					} else {
-						new_value = existing_value.to_owned();
-						new_value.push_str(value.as_str());
-					}
-
-					arr.insert(array_index, new_value.clone());
+				let value = if append {
+					appended(arr.get(&array_index).map_or("", String::as_str), &value, treat_as_int)
 				} else {
-					arr.insert(array_index, value);
-				}
+					value
+				};
+				arr.insert(array_index, value);
 				Ok(())
 			},
 			ShellValue::Dynamic { .. } => Ok(()),
@@ -496,6 +632,11 @@ impl ShellVariable {
 	///
 	/// * `index` - The index at which to unset the value.
 	pub fn unset_index(&mut self, index: &str) -> Result<bool, error::Error> {
+		// As in Bash, unsetting an element of a hooked variable removes it from
+		// the stored copy only: the shell does not act on it.
+		if let Some(hooked) = self.hook.as_deref_mut() {
+			return Ok(hooked.stored_mut().remove(index).is_some());
+		}
 		match &mut self.value {
 			ShellValue::Unset(ty) => match ty {
 				ShellValueUnsetType::Untyped => Err(error::ErrorKind::NotArray.into()),
@@ -797,20 +938,35 @@ impl ShellValue {
 		existing_values: &mut BTreeMap<String, String>,
 		literal_values: ArrayLiteral,
 	) -> Result<(), error::Error> {
+		Self::for_each_associative_pair(literal_values, |key, value| {
+			existing_values.insert(key, value);
+		})
+	}
+
+	/// Calls `pair` with each key and value an associative array list
+	/// assignment gives, in order. When the first element has a subscript
+	/// (`[key]=value`), every element needs one; the first element without one
+	/// ends the list with an error, after the pairs before it. Otherwise the
+	/// elements alternate keys and values, an element written `[key]=value` is
+	/// that text, and a last key without a value gets the empty string.
+	pub(crate) fn for_each_associative_pair(
+		literal_values: ArrayLiteral,
+		mut pair: impl FnMut(String, String),
+	) -> Result<(), error::Error> {
 		let mut literal_values = literal_values.0.into_iter();
 		let Some((first_key, first_value)) = literal_values.next() else {
 			return Ok(());
 		};
 
 		if let Some(first_key) = first_key {
-			existing_values.insert(first_key, first_value);
+			pair(first_key, first_value);
 
 			for (key, value) in literal_values {
 				let Some(key) = key else {
 					return Err(error::ErrorKind::AssociativeArrayMissingSubscript.into());
 				};
 
-				existing_values.insert(key, value);
+				pair(key, value);
 			}
 		} else {
 			let mut current_key = Some(first_value);
@@ -827,14 +983,14 @@ impl ShellValue {
 				};
 
 				if let Some(key) = current_key.take() {
-					existing_values.insert(key, value);
+					pair(key, value);
 				} else {
 					current_key = Some(value);
 				}
 			}
 
 			if let Some(current_key) = current_key {
-				existing_values.insert(current_key, String::new());
+				pair(current_key, String::new());
 			}
 		}
 

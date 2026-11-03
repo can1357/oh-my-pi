@@ -143,6 +143,18 @@ impl builtins::Command for ReadCommand {
 			ReadResult::InputReady => (None, brush_core::ExecutionResult::success()),
 		};
 
+		// As in Bash, `-a` refuses an associative array once the input is read.
+		if let Some(array_variable) = &self.array_variable
+			&& context
+				.shell
+				.env()
+				.get(array_variable)
+				.is_some_and(|(_, var)| var.is_associative_array())
+		{
+			writeln!(context.stderr(), "{}: {array_variable}: not an indexed array", context.command_name)?;
+			return Ok(brush_core::ExecutionResult::general_error());
+		}
+
 		// Assign input to variables based on options.
 		assign_input_to_variables(
 			context.shell,

@@ -87,25 +87,14 @@ pub(crate) fn init_well_known_vars(
 		shell.env_mut().set_global("BASHPID", bashpid_var)?;
 	}
 
-	// BASH_ALIASES
-	shell.env_mut().set_global(
-		"BASH_ALIASES",
-		ShellVariable::new(ShellValue::Dynamic {
-			getter: |shell| {
-				let values = variables::ArrayLiteral(
-					shell
-						.aliases()
-						.iter()
-						.map(|(k, v)| (Some(k.to_owned()), v.to_owned()))
-						.collect::<Vec<_>>(),
-				);
-
-				ShellValue::associative_array_from_literals(values)
-					.unwrap_or_else(|_error| ShellValue::AssociativeArray(BTreeMap::new()))
-			},
-			setter: |_| (),
-		}),
-	)?;
+	// BASH_ALIASES: reads come from the alias table, and each element assigned
+	// defines an alias, as in Bash (see `AssignmentHook`).
+	let mut bash_aliases_var = ShellVariable::new(ShellValue::Dynamic {
+		getter: |shell| shell.env().alias_table_view(),
+		setter: |_| (),
+	});
+	bash_aliases_var.set_assignment_hook(variables::AssignmentHook::AliasTable);
+	shell.env_mut().set_global("BASH_ALIASES", bash_aliases_var)?;
 
 	// BASH_ARGC
 	shell.env_mut().set_global(

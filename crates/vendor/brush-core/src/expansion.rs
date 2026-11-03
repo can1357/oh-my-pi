@@ -11,7 +11,7 @@ use crate::{
 	braceexpansion, commands, env, error, escape, extensions, patterns, prompt,
 	shell::Shell,
 	sys, trace_categories,
-	variables::{self, ShellValue, ShellValueUnsetType, ShellVariable},
+	variables::{self, ShellValue, ShellVariable},
 };
 
 /// Options to customize the behavior of the word expander.
@@ -1534,16 +1534,11 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 		let (variable_name, index) = match parameter {
 			brush_parser::word::Parameter::Named(name) => (name, None),
 			brush_parser::word::Parameter::NamedWithIndex { name, index } => {
-				let is_set_assoc_array = (name == "BASH_ALIASES" && self.shell.bash_aliases_is_alias_table())
-					|| if let Some((_, var)) = self.shell.env().get(name) {
-						matches!(
-							var.value(),
-							ShellValue::AssociativeArray(_)
-								| ShellValue::Unset(ShellValueUnsetType::AssociativeArray)
-						)
-					} else {
-						false
-					};
+				let is_set_assoc_array = self
+					.shell
+					.env()
+					.get(name)
+					.is_some_and(|(_, var)| var.is_associative_array());
 
 				let index_to_use = self
 					.expand_array_index(index.as_str(), is_set_assoc_array)
@@ -1557,7 +1552,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 			},
 		};
 
-		if let Some(index) = index {
+		let assigned = if let Some(index) = index {
 			self.shell.env_mut().update_or_add_array_element(
 				variable_name,
 				index,
@@ -1574,7 +1569,11 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 				env::EnvironmentLookup::Anywhere,
 				env::EnvironmentScope::Global,
 			)
-		}
+		};
+		// An element assigned to `BASH_ALIASES` with a name Bash rejects is
+		// reported here (see `ShellEnvironment::run_assignment_hooks`).
+		self.shell.report_rejected_alias_names(self.params).await;
+		assigned
 	}
 
 	async fn try_resolve_parameter_to_variable(
@@ -1708,16 +1707,11 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 			},
 			brush_parser::word::Parameter::NamedWithIndex { name, index } => {
 				// First check to see if it's an associative array.
-				let is_set_assoc_array = (name == "BASH_ALIASES" && self.shell.bash_aliases_is_alias_table())
-					|| if let Some((_, var)) = self.shell.env().get(name) {
-						matches!(
-							var.value(),
-							ShellValue::AssociativeArray(_)
-								| ShellValue::Unset(ShellValueUnsetType::AssociativeArray)
-						)
-					} else {
-						false
-					};
+				let is_set_assoc_array = self
+					.shell
+					.env()
+					.get(name)
+					.is_some_and(|(_, var)| var.is_associative_array());
 
 				// Figure out which index to use.
 				let index_to_use = self
