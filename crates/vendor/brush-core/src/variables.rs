@@ -303,8 +303,9 @@ impl ShellVariable {
 	}
 
 	/// Takes the elements assigned to a hooked variable since the last call,
-	/// in order, each with its final value.
-	pub(crate) fn take_hooked_assignments(&mut self) -> Vec<(String, String)> {
+	/// in order, each with its final value. The caller defines what they give
+	/// (see `ShellEnvironment::define_assigned_aliases`).
+	pub fn take_hooked_assignments(&mut self) -> Vec<(String, String)> {
 		self.hook
 			.as_mut()
 			.map(|hooked| std::mem::take(&mut hooked.assigned))
@@ -312,8 +313,7 @@ impl ShellVariable {
 	}
 
 	/// Replaces a hooked variable's stored copy with `elements`. Bash does so
-	/// whenever it looks the variable up, and after the shell acts on an
-	/// element assigned to it.
+	/// whenever it looks the variable up.
 	pub(crate) fn refresh_stored_copy(&self, elements: BTreeMap<String, String>) {
 		if let Some(hooked) = &self.hook {
 			*hooked.stored.lock().unwrap_or_else(PoisonError::into_inner) = elements;
@@ -369,24 +369,58 @@ impl ShellVariable {
 	/// * `value` - The value to assign to the variable.
 	/// * `append` - Whether or not to append the value to the preexisting value.
 	pub fn assign(&mut self, value: ShellValueLiteral, append: bool) -> Result<(), error::Error> {
+		self.assign_as(value, append, false)
+	}
+
+	/// [`Self::assign`] as `declare` assigns. They differ for a variable with
+	/// an [`AssignmentHook`] only: as in Bash, one value assigned to its name
+	/// keeps its text unless `declare` assigns it or it is appended, while
+	/// elements and lists take the variable's attributes (`-i`, `-u`, `-l`)
+	/// either way.
+	pub fn assign_declared(
+		&mut self,
+		value: ShellValueLiteral,
+		append: bool,
+	) -> Result<(), error::Error> {
+		self.assign_as(value, append, true)
+	}
+
+	fn assign_as(
+		&mut self,
+		value: ShellValueLiteral,
+		append: bool,
+		declared: bool,
+	) -> Result<(), error::Error> {
 		if self.is_readonly() {
 			return Err(error::ErrorKind::ReadonlyVariable.into());
 		}
 
-		let value = self.convert_value_literal_for_assignment(value);
-
 		// A hooked variable takes the assignment in its stored copy, as an
 		// associative array (see `HookedVariable`).
-		let treat_as_int = self.is_treated_as_integer();
-		if let Some(hooked) = self.hook.as_deref_mut() {
-			return match value {
+		if let Some(mut hooked) = self.hook.take() {
+			let value = match value {
+				ShellValueLiteral::Scalar(value) if !append && !declared => {
+					ShellValueLiteral::Scalar(value)
+				},
+				value => self.convert_value_literal_for_assignment(value),
+			};
+			let assigned = match value {
 				ShellValueLiteral::Scalar(value) => {
-					hooked.assign_element(String::from("0"), value, append, treat_as_int);
+					hooked.assign_element(
+						String::from("0"),
+						value,
+						append,
+						self.is_treated_as_integer(),
+					);
 					Ok(())
 				},
 				ShellValueLiteral::Array(literals) => hooked.assign_list(literals, append),
 			};
+			self.hook = Some(hooked);
+			return assigned;
 		}
+
+		let value = self.convert_value_literal_for_assignment(value);
 
 		if append {
 			match (&self.value, &value) {

@@ -142,6 +142,7 @@ impl builtins::Command for DeclareCommand {
 					if !self.process_declaration(&mut context, declaration, verb)? {
 						result = ExecutionResult::general_error();
 					}
+					report_rejected_alias_names(&mut context, declaration).await;
 				}
 			}
 		} else {
@@ -158,12 +159,31 @@ impl builtins::Command for DeclareCommand {
 			}
 		}
 
-		// An operand that assigns to `BASH_ALIASES` with a name Bash rejects is
-		// reported here (see `ShellEnvironment::run_assignment_hooks`).
-		context.shell.report_rejected_alias_names(&context.params).await;
-
 		Ok(result)
 	}
+}
+
+/// Reports the names that `declaration` assigned to `BASH_ALIASES` and Bash
+/// rejects as alias names (see `ShellEnvironment::define_assigned_aliases`),
+/// right after the operand, as Bash does: a list operand is assigned while the
+/// command is expanded, so its message goes where standard error was before
+/// the command's redirections; an element operand's goes to the builtin's
+/// standard error.
+async fn report_rejected_alias_names(
+	context: &mut brush_core::ExecutionContext<'_, impl brush_core::ShellExtensions>,
+	declaration: &brush_core::CommandArg,
+) {
+	let is_list = matches!(
+		declaration,
+		brush_core::CommandArg::Assignment(assignment)
+			if matches!(assignment.value, ast::AssignmentValue::Array(_))
+	);
+	let mut stderr = if is_list {
+		context.params.list_assignment_stderr(context.shell)
+	} else {
+		context.params.stderr(context.shell)
+	};
+	context.shell.report_rejected_alias_names(&mut stderr).await;
 }
 
 impl DeclareCommand {
@@ -270,9 +290,8 @@ impl DeclareCommand {
 			EnvironmentLookup::Anywhere
 		};
 
-		// Look up the variable, as Bash does, which refreshes a hooked
-		// variable's stored copy (see `ShellEnvironment::refresh_hooked_variable`).
-		context.shell.env().refresh_hooked_variable(name.as_str());
+		// Look up the variable. As in Bash, the lookup refreshes a hooked
+		// variable's stored copy.
 		if let Some(var) = context
 			.shell
 			.env_mut()
@@ -290,16 +309,20 @@ impl DeclareCommand {
 
 				if let Some(initial_value) = initial_value {
 					// We append if the declaration included an explicit index.
-					var.assign(initial_value, assigned_index.is_some())?;
+					var.assign_declared(initial_value, assigned_index.is_some())?;
 				}
 
 				self.apply_attributes_after_update(var, verb)
 			})();
 
 			// An assignment to `BASH_ALIASES` defines aliases (see
-			// `ShellEnvironment::run_assignment_hooks`).
-			context.shell.env_mut().run_assignment_hooks();
+			// `ShellEnvironment::define_assigned_aliases`).
+			let hooked = var.take_hooked_assignments();
+			context.shell.env_mut().define_assigned_aliases(hooked);
 			declared?;
+			// Bash looks the variable up again once it is declared, which
+			// refreshes a hooked variable's stored copy.
+			let _ = context.shell.env().get_using_policy(name.as_str(), lookup);
 		} else {
 			let unset_type = if self.make_indexed_array.is_some() {
 				ShellValueUnsetType::IndexedArray
@@ -323,6 +346,8 @@ impl DeclareCommand {
 					return Err(ErrorKind::ReadonlyVariable.into());
 				}
 
+				// As in Bash, a local copy of `BASH_ALIASES` keeps its assignment
+				// function: what is assigned to it defines aliases.
 				let mut var = prev_var.clone();
 				var.unset_treat_as_nameref();
 				var
@@ -333,7 +358,7 @@ impl DeclareCommand {
 			self.apply_attributes_before_update(&mut var)?;
 
 			if let Some(initial_value) = initial_value {
-				var.assign(initial_value, false)?;
+				var.assign_declared(initial_value, false)?;
 			}
 
 			if context.shell.options().export_variables_on_modification && !var.value().is_array() {
@@ -348,6 +373,10 @@ impl DeclareCommand {
 				EnvironmentScope::Global
 			};
 
+			// A local copy of `BASH_ALIASES` (`local -I`) defines what is assigned
+			// to it (see `ShellEnvironment::define_assigned_aliases`).
+			let hooked = var.take_hooked_assignments();
+			context.shell.env_mut().define_assigned_aliases(hooked);
 			context.shell.env_mut().add(name, var, scope)?;
 		}
 

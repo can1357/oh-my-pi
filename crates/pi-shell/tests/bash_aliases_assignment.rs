@@ -310,3 +310,157 @@ async fn reads_follow_the_alias_table() {
 		"2\na b \n"
 	);
 }
+
+// --- the stored copy after each kind of write and lookup (oracle-hook2.sh) ---
+
+/// L1, L2, L3, L6, K1, K2, K8, U1: a list assignment leaves the stored copy
+/// holding the list; a list append, `declare`, `export`, an assignment before
+/// a command and `unset` of an element look the variable up first, which
+/// refreshes the stored copy from the alias table.
+#[tokio::test]
+async fn stored_copy_after_writes_and_lookups() {
+	let cases = [
+		("alias 0=old; BASH_ALIASES=([q]=new); BASH_ALIASES+=Z; alias 0", "alias 0='Z'\n"),
+		(
+			"alias 0=old; { BASH_ALIASES=([a/b]=x); } 2>/dev/null; BASH_ALIASES+=Z; alias 0",
+			"alias 0='Z'\n",
+		),
+		("alias 0=old; BASH_ALIASES+=([q]=new); BASH_ALIASES+=Z; alias 0", "alias 0='oldZ'\n"),
+		("alias 0=old; declare BASH_ALIASES=([q]=new); BASH_ALIASES+=Z; alias 0", "alias 0='oldZ'\n"),
+		("alias 0=old; export BASH_ALIASES; BASH_ALIASES+=Z; alias 0", "alias 0='oldZ'\n"),
+		("alias 0=old; BASH_ALIASES=x true; BASH_ALIASES+=Z; alias 0", "alias 0='oldZ'\n"),
+		("alias 0=old; unset 'BASH_ALIASES[zz]'; BASH_ALIASES+=Z; alias 0", "alias 0='oldZ'\n"),
+		(
+			"alias 0=old q=keep; unset 'BASH_ALIASES[q]'; BASH_ALIASES+=Z; alias",
+			"alias 0='oldZ'\nalias q='keep'\n",
+		),
+	];
+	for (command, expected) in cases {
+		assert_eq!(run(command).await, expected, "{command}");
+	}
+}
+
+/// I1, I2, I3: a local copy made with `local -I` or `localvar_inherit` keeps
+/// the assignment function, so what is assigned to it defines aliases.
+#[tokio::test]
+async fn inherited_local_copy_defines_aliases() {
+	let cases = [
+		(
+			"alias q=old\nf() { local -I BASH_ALIASES; BASH_ALIASES[q]=new; alias q; }\nf\nalias q",
+			"alias q='new'\nalias q='new'\n",
+		),
+		(
+			"alias 0=old\nf() { local -I BASH_ALIASES; BASH_ALIASES=x; alias 0; }\nf\nalias 0",
+			"alias 0='x'\nalias 0='x'\n",
+		),
+		(
+			"shopt -s localvar_inherit\nalias q=old\nf() { local BASH_ALIASES; BASH_ALIASES[q]=new; \
+			 alias q; }\nf\nalias q",
+			"alias q='new'\nalias q='new'\n",
+		),
+	];
+	for (command, expected) in cases {
+		assert_eq!(run(command).await, expected, "{command}");
+	}
+}
+
+/// C1 to C9, C11, C12: one value assigned to the name keeps its text unless it
+/// is appended or `declare` assigns it; elements and lists take the variable's
+/// attributes. (C10, `-i` with an element `1+1`, stores `0` for every
+/// associative array at main; Bash evaluates it.)
+#[tokio::test]
+async fn attributes_apply_where_bash_applies_them() {
+	let cases = [
+		("declare -u BASH_ALIASES; printf -v BASH_ALIASES mixed; alias 0", "alias 0='mixed'\n"),
+		("declare -u BASH_ALIASES; BASH_ALIASES=mixed; alias 0", "alias 0='mixed'\n"),
+		("declare -u BASH_ALIASES; BASH_ALIASES+=mixed; alias 0", "alias 0='MIXED'\n"),
+		("declare -u BASH_ALIASES=mixed; alias 0", "alias 0='MIXED'\n"),
+		(
+			"declare -u BASH_ALIASES; for BASH_ALIASES in mixed; do :; done; alias 0",
+			"alias 0='mixed'\n",
+		),
+		("declare -u BASH_ALIASES; read BASH_ALIASES <<< mixed; alias 0", "alias 0='mixed'\n"),
+		("declare -u BASH_ALIASES; BASH_ALIASES[k]=mixed; alias k", "alias k='MIXED'\n"),
+		("declare -u BASH_ALIASES; printf -v 'BASH_ALIASES[k]' mixed; alias k", "alias k='MIXED'\n"),
+		("declare -i BASH_ALIASES; BASH_ALIASES=1+1; alias 0", "alias 0='1+1'\n"),
+		("declare -u BASH_ALIASES; BASH_ALIASES=([k]=mixed); alias k", "alias k='MIXED'\n"),
+		("declare -u BASH_ALIASES; : \"${BASH_ALIASES:=mixed}\"; alias 0", "alias 0='mixed'\n"),
+	];
+	for (command, expected) in cases {
+		assert_eq!(run(command).await, expected, "{command}");
+	}
+}
+
+/// R1, R2: a `read -t 0 -a` poll reads nothing, so it does not refuse an
+/// associative array.
+#[tokio::test]
+async fn read_poll_accepts_an_associative_array() {
+	for array in ["a", "BASH_ALIASES"] {
+		let command = format!(
+			"declare -A a\nprintf 'ready\\n' > input\n{{ read -t 0 -a {array}; echo poll:$?; read -r \
+			 v; echo value:$v; }} < input"
+		);
+		assert_eq!(run(&command).await, "poll:0\nvalue:ready\n", "{array}");
+	}
+}
+
+/// D1, D2, D3, D4, D5, D8: a rejected name from a list assignment, or from an
+/// assignment-only command, is reported before the command's own
+/// redirections; one from a builtin's element operand, from `printf -v`, or
+/// inside a redirected group, on the redirected standard error.
+#[tokio::test]
+async fn rejected_names_are_reported_where_bash_reports_them() {
+	let tail = "; echo marker; echo file:; cat err";
+	let cases = [
+		("declare BASH_ALIASES=([a/b]=x) 2>err", true),
+		("declare BASH_ALIASES[a/b]=x 2>err", false),
+		("BASH_ALIASES=([a/b]=x) 2>err", true),
+		("BASH_ALIASES['a/b']=x 2>err", true),
+		("printf -v 'BASH_ALIASES[a/b]' x 2>err", false),
+		("{ declare BASH_ALIASES=([a/b]=x); } 2>err", false),
+	];
+	for (command, before_redirection) in cases {
+		let out = run(&format!("{command}{tail}")).await;
+		let message = out
+			.find("`a/b': invalid alias name")
+			.unwrap_or_else(|| panic!("{command}: {out}"));
+		let marker = out
+			.find("marker")
+			.unwrap_or_else(|| panic!("{command}: {out}"));
+		let file = out
+			.find("file:")
+			.unwrap_or_else(|| panic!("{command}: {out}"));
+		if before_redirection {
+			assert!(message < marker, "{command}: {out}");
+		} else {
+			assert!(message > file, "{command}: {out}");
+		}
+	}
+}
+
+/// D6, D11: `declare` reports a rejected name right after its operand, before
+/// what later operands report.
+#[tokio::test]
+async fn declare_reports_each_operand_in_order() {
+	let out = run("readonly z; declare BASH_ALIASES=([a/b]=x) z=y 2>&1; echo done").await;
+	let message = out
+		.find("`a/b': invalid alias name")
+		.unwrap_or_else(|| panic!("{out}"));
+	let readonly = out.find("readonly").unwrap_or_else(|| panic!("{out}"));
+	let done = out.find("done").unwrap_or_else(|| panic!("{out}"));
+	assert!(message < readonly && readonly < done, "{out}");
+	let out = run("declare BASH_ALIASES=([a/b]=x) BASH_ALIASES[e/f]=y 2>&1; echo done").await;
+	let first = out.find("`a/b'").unwrap_or_else(|| panic!("{out}"));
+	let second = out.find("`e/f'").unwrap_or_else(|| panic!("{out}"));
+	assert!(first < second, "{out}");
+}
+
+/// A utility the host runs with a changed environment (`env Z=1 alias`) keeps
+/// the shell's aliases.
+#[tokio::test]
+async fn utility_environment_keeps_the_aliases() {
+	assert_eq!(
+		run("alias q=x; env Z=1 alias; echo status:$?; alias").await,
+		"alias q='x'\nstatus:0\nalias q='x'\n"
+	);
+}

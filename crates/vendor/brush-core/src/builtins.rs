@@ -721,11 +721,25 @@ async fn call_builtin(
 	command: impl Command,
 	context: commands::ExecutionContext<'_, impl extensions::ShellExtensions>,
 ) -> Result<results::ExecutionResult, error::Error> {
-	let builtin_name = context.command_name.clone();
+	let commands::ExecutionContext {
+		shell,
+		command_name,
+		params,
+	} = context;
+	let builtin_name = command_name.clone();
+	let mut stderr = params.stderr(shell);
 	let result = command
-		.execute(context)
-		.await
-		.map_err(|e| error::ErrorKind::BuiltinError(Box::new(e), builtin_name))?;
+		.execute(commands::ExecutionContext {
+			shell: &mut *shell,
+			command_name,
+			params,
+		})
+		.await;
 
-	Ok(result)
+	// A name the builtin assigned to `BASH_ALIASES` (`printf -v`, `read`,
+	// `getopts`) that Bash rejects is reported on the builtin's standard error,
+	// as in Bash (see `ShellEnvironment::define_assigned_aliases`).
+	shell.report_rejected_alias_names(&mut stderr).await;
+
+	result.map_err(|e| error::ErrorKind::BuiltinError(Box::new(e), builtin_name).into())
 }

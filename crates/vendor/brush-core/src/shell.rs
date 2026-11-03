@@ -10,9 +10,9 @@ use std::{
 use tokio::sync::Mutex;
 
 use crate::{
-	ExecutionControlFlow, ExecutionParameters, ExecutionResult, builtins, env::ShellEnvironment,
-	error, extensions, functions, interfaces, jobs, keywords, openfiles, options::RuntimeOptions,
-	pathcache, sys, wellknownvars,
+	ExecutionControlFlow, ExecutionResult, builtins, env::ShellEnvironment, error, extensions,
+	functions, interfaces, jobs, keywords, openfiles, options::RuntimeOptions, pathcache, sys,
+	wellknownvars,
 };
 
 /// Type for storing a key bindings helper.
@@ -422,14 +422,13 @@ impl<SE: extensions::ShellExtensions> Shell<SE> {
 		self.options.expand_aliases.then(|| self.env.alias_table())
 	}
 
-	/// Reports the names that assignments to `BASH_ALIASES` gave and Bash
-	/// rejects as alias names (see [`ShellEnvironment::run_assignment_hooks`]),
-	/// on the standard error of `params`.
-	pub async fn report_rejected_alias_names(&mut self, params: &ExecutionParameters) {
+	/// Reports on `stderr` the names that assignments to `BASH_ALIASES` gave
+	/// and Bash rejects as alias names (see
+	/// [`ShellEnvironment::define_assigned_aliases`]).
+	pub async fn report_rejected_alias_names(&mut self, stderr: &mut crate::openfiles::OpenFile) {
 		for name in self.env.take_rejected_alias_names() {
-			let mut stderr = params.stderr(self);
 			let error = error::ErrorKind::InvalidAliasName(name).into();
-			let _ = self.display_error(&mut stderr, &error).await;
+			let _ = self.display_error(stderr, &error).await;
 		}
 	}
 

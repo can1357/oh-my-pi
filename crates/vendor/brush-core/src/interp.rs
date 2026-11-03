@@ -124,6 +124,10 @@ pub struct ExecutionParameters {
 	/// The aliases the program run with these parameters was read with, when
 	/// its caller read it; see [`ExecutionParameters::set_aliases_at_read`].
 	aliases_at_read:          Option<alias_expansion::AliasesAtRead>,
+	/// The standard error in effect before the running simple command's own
+	/// redirections, for an assignment-only command or a declaration builtin;
+	/// see [`ExecutionParameters::list_assignment_stderr`].
+	pre_redirect_stderr:      Option<openfiles::OpenFile>,
 }
 
 /// A redirection a background external command's child makes itself, after
@@ -232,6 +236,20 @@ impl ExecutionParameters {
 	/// they cover the program read with these parameters, not what it runs.
 	pub(crate) fn take_aliases_at_read(&mut self) -> Option<alias_expansion::AliasesAtRead> {
 		self.aliases_at_read.take()
+	}
+
+	/// Where a name that a list assignment to `BASH_ALIASES` gave, or an
+	/// assignment-only command gave, is reported when Bash rejects it. Bash
+	/// performs those assignments while it expands the command, before the
+	/// command's own redirections, so it reports there; otherwise, on this
+	/// context's standard error.
+	pub fn list_assignment_stderr(
+		&self,
+		shell: &Shell<impl extensions::ShellExtensions>,
+	) -> openfiles::OpenFile {
+		self.pre_redirect_stderr
+			.clone()
+			.unwrap_or_else(|| self.stderr(shell))
 	}
 
 	/// Whether an error that ends a command in this context is printed: not
@@ -1751,6 +1769,36 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 		mut params: ExecutionParameters,
 	) -> Result<ExecutionSpawnResult, error::Error> {
 		ensure_not_cancelled(&params)?;
+
+		// Bash performs an assignment-only command's assignments, and a
+		// declaration builtin's list assignments, while it expands the command,
+		// before the command's own redirections; a name they give that
+		// `BASH_ALIASES` rejects is reported there (see
+		// `ExecutionParameters::list_assignment_stderr`). Without redirections,
+		// that is the context's standard error anyway.
+		let (mut has_assignment_words, mut has_redirects) = (false, false);
+		for item in self
+			.prefix
+			.iter()
+			.flat_map(|prefix| prefix.0.iter())
+			.chain(self.suffix.iter().flat_map(|suffix| suffix.0.iter()))
+		{
+			match item {
+				CommandPrefixOrSuffixItem::AssignmentWord(..) => has_assignment_words = true,
+				CommandPrefixOrSuffixItem::IoRedirect(_) => has_redirects = true,
+				_ => (),
+			}
+		}
+		let assigns_early = has_assignment_words
+			&& has_redirects
+			&& self.word_or_name.as_ref().is_none_or(|word| {
+				context
+					.shell
+					.builtins()
+					.get(&word.value)
+					.is_some_and(|registration| !registration.disabled && registration.declaration_builtin)
+			});
+		params.pre_redirect_stderr = assigns_early.then(|| params.stderr(&context.shell));
 		let prefix_iter = self.prefix.as_ref().map(|s| s.0.iter()).unwrap_or_default();
 		let suffix_iter = self.suffix.as_ref().map(|s| s.0.iter()).unwrap_or_default();
 		let cmd_name_items = self
@@ -1878,7 +1926,7 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 			for assignment in assignments {
 				// Apply the assignment. Don't mark as fatal - let errors be handled
 				// at the program level so multiple complete_commands can execute independently.
-				apply_assignment(
+				let applied = apply_assignment(
 					assignment,
 					&mut context.shell,
 					&params,
@@ -1886,7 +1934,10 @@ impl<SE: extensions::ShellExtensions> ExecuteInPipeline<SE> for ast::SimpleComma
 					None,
 					EnvironmentScope::Global,
 				)
-				.await?;
+				.await;
+				let mut stderr = params.list_assignment_stderr(&context.shell);
+				context.shell.report_rejected_alias_names(&mut stderr).await;
+				applied?;
 			}
 
 			// Assignment-only statements clear $_ (set to empty string).
@@ -2119,17 +2170,21 @@ async fn apply_assignment(
 	// Read option before taking mutable borrow on env.
 	let export_variables_on_modification = shell.options().export_variables_on_modification;
 
-	// Bash looks a variable up before it assigns to an element of it or assigns
-	// a list to it, which refreshes a hooked variable's stored copy; an
-	// assignment of one value to the name does not (see
-	// `ShellEnvironment::refresh_hooked_variable`).
-	if array_index.is_some() || matches!(new_value, ShellValueLiteral::Array(_)) {
-		shell.env().refresh_hooked_variable(variable_name);
-	}
-
-	// See if we can find an existing value associated with the variable.
-	if let Some((existing_value_scope, existing_value)) =
+	// See if we can find an existing value associated with the variable. As in
+	// Bash, the lookup refreshes a hooked variable's stored copy, except for an
+	// assignment statement of one value to the name, so `BASH_ALIASES+=v`
+	// appends to the stored copy as it was.
+	let scalar_statement = required_scope.is_none()
+		&& array_index.is_none()
+		&& matches!(new_value, ShellValueLiteral::Scalar(_));
+	let existing = if scalar_statement {
+		shell
+			.env_mut()
+			.get_mut_for_scalar_assignment(variable_name.as_str())
+	} else {
 		shell.env_mut().get_mut(variable_name.as_str())
+	};
+	if let Some((existing_value_scope, existing_value)) = existing
 		&& (required_scope.is_none() || Some(existing_value_scope) == required_scope)
 	{
 		let assigned = if let Some(array_index) = array_index {
@@ -2155,9 +2210,9 @@ async fn apply_assignment(
 		}
 
 		// An assignment to `BASH_ALIASES` defines aliases (see
-		// `ShellEnvironment::run_assignment_hooks`).
-		shell.env_mut().run_assignment_hooks();
-		shell.report_rejected_alias_names(params).await;
+		// `ShellEnvironment::define_assigned_aliases`).
+		let hooked = existing_value.take_hooked_assignments();
+		shell.env_mut().define_assigned_aliases(hooked);
 		return assigned;
 	}
 

@@ -1304,6 +1304,8 @@ fn changed_env(
 		}
 	}
 	let mut changed = brush_core::env::ShellEnvironment::new();
+	// The aliases live with the variables; the command keeps the shell's.
+	changed.set_alias_table(env.alias_table());
 	for (name, var) in vars {
 		changed.set_global(name, var)?;
 	}

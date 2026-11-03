@@ -1571,8 +1571,9 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 			)
 		};
 		// An element assigned to `BASH_ALIASES` with a name Bash rejects is
-		// reported here (see `ShellEnvironment::run_assignment_hooks`).
-		self.shell.report_rejected_alias_names(self.params).await;
+		// reported here (see `ShellEnvironment::define_assigned_aliases`).
+		let mut stderr = self.params.stderr(self.shell);
+		self.shell.report_rejected_alias_names(&mut stderr).await;
 		assigned
 	}
 

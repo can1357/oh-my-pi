@@ -289,8 +289,9 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 				Err(err) => return Ok(self.report_error(err, &params).await),
 			};
 			// Names rejected by assignments to `BASH_ALIASES` that no command
-			// reported (see `ShellEnvironment::run_assignment_hooks`).
-			self.report_rejected_alias_names(&params).await;
+			// reported (see `ShellEnvironment::define_assigned_aliases`).
+			let mut stderr = params.stderr(self);
+			self.report_rejected_alias_names(&mut stderr).await;
 			if !result.is_normal_flow() {
 				break;
 			}

@@ -99,7 +99,7 @@ pub struct ShellEnvironment {
 	/// The shell's aliases, shared with the readers that read input with them
 	/// until the shell changes them. They live with the variables because an
 	/// assignment to `BASH_ALIASES` defines aliases (see
-	/// [`ShellEnvironment::run_assignment_hooks`]).
+	/// [`ShellEnvironment::define_assigned_aliases`]).
 	aliases: brush_parser::AliasTable,
 	/// Names that assignments to `BASH_ALIASES` gave and Bash rejects as alias
 	/// names, kept for the shell to report.
@@ -174,64 +174,24 @@ impl ShellEnvironment {
 		Arc::clone(&self.aliases)
 	}
 
-	fn alias_elements(&self) -> BTreeMap<String, String> {
-		self.aliases
-			.iter()
-			.map(|(name, value)| (name.clone(), value.clone()))
-			.collect()
+	/// Replaces the alias table, as when an environment is rebuilt from
+	/// another's variables.
+	pub fn set_alias_table(&mut self, aliases: brush_parser::AliasTable) {
+		self.aliases = aliases;
 	}
 
 	/// The value `BASH_ALIASES` reads while it is the view of the alias table:
-	/// an associative array of the aliases. As in Bash, reading it refreshes
-	/// the variable's stored copy (see [`AssignmentHook`]).
+	/// an associative array of the aliases.
 	pub fn alias_table_view(&self) -> ShellValue {
-		let elements = self.alias_elements();
-		if let Some(var) = self.hooked_variable(AssignmentHook::AliasTable) {
-			var.refresh_stored_copy(elements.clone());
-		}
-		ShellValue::AssociativeArray(elements)
+		ShellValue::AssociativeArray(alias_elements(&self.aliases))
 	}
 
-	/// The global variable that carries `hook`, while it does.
-	fn hooked_variable(&self, hook: AssignmentHook) -> Option<&ShellVariable> {
-		let name = match hook {
-			AssignmentHook::AliasTable => "BASH_ALIASES",
-		};
-		self.get_using_policy(name, EnvironmentLookup::OnlyInGlobal)
-			.filter(|var| var.assignment_hook() == Some(hook))
-	}
-
-	fn hooked_variable_mut(&mut self, hook: AssignmentHook) -> Option<&mut ShellVariable> {
-		let name = match hook {
-			AssignmentHook::AliasTable => "BASH_ALIASES",
-		};
-		self.get_mut_using_policy(name, EnvironmentLookup::OnlyInGlobal)
-			.filter(|var| var.assignment_hook() == Some(hook))
-	}
-
-	/// Looks `name` up as Bash does before it assigns to an element of a
-	/// variable, assigns a list to it or declares it: a hooked variable's
-	/// stored copy is refreshed first, so an append reads the current aliases.
-	/// (An assignment of a single value to the variable's name does not look it
-	/// up this way, so its append reads the stored copy as it was.)
-	pub fn refresh_hooked_variable(&self, name: &str) {
-		if let Some((_, var)) = self.get(name)
-			&& var.assignment_hook() == Some(AssignmentHook::AliasTable)
-		{
-			var.refresh_stored_copy(self.alias_elements());
-		}
-	}
-
-	/// Acts on the elements assigned to hooked variables, as Bash's assignment
-	/// functions do: each element assigned to `BASH_ALIASES` defines an alias
-	/// named by its key. A key Bash rejects as an alias name defines none; it
-	/// is kept for the shell to report ([`Self::take_rejected_alias_names`]).
-	/// The variable's stored copy then becomes the alias table, as in Bash.
-	pub fn run_assignment_hooks(&mut self) {
-		let Some(var) = self.hooked_variable_mut(AssignmentHook::AliasTable) else {
-			return;
-		};
-		let assigned = var.take_hooked_assignments();
+	/// Defines the aliases that elements assigned to `BASH_ALIASES` give
+	/// (`ShellVariable::take_hooked_assignments`), as Bash's assignment
+	/// function for it does: each element names an alias by its key. A key
+	/// Bash rejects as an alias name defines none; it is kept for the shell to
+	/// report ([`Self::take_rejected_alias_names`]).
+	pub fn define_assigned_aliases(&mut self, assigned: Vec<(String, String)>) {
 		if assigned.is_empty() {
 			return;
 		}
@@ -243,14 +203,10 @@ impl ShellEnvironment {
 				self.rejected_alias_names.push(name);
 			}
 		}
-		let elements = self.alias_elements();
-		if let Some(var) = self.hooked_variable(AssignmentHook::AliasTable) {
-			var.refresh_stored_copy(elements);
-		}
 	}
 
 	/// Takes the names that assignments to `BASH_ALIASES` gave and Bash rejects
-	/// as alias names (see [`Self::run_assignment_hooks`]).
+	/// as alias names (see [`Self::define_assigned_aliases`]).
 	pub fn take_rejected_alias_names(&mut self) -> Vec<String> {
 		std::mem::take(&mut self.rejected_alias_names)
 	}
@@ -341,7 +297,8 @@ impl ShellEnvironment {
 	}
 
 	/// Tries to retrieve an immutable reference to the variable with the given
-	/// name in the environment.
+	/// name in the environment. As in Bash, looking a variable up refreshes the
+	/// stored copy of a variable with an [`AssignmentHook`].
 	///
 	/// # Arguments
 	///
@@ -350,6 +307,7 @@ impl ShellEnvironment {
 		// Look through scopes, from the top of the stack on down.
 		for (scope_type, map) in self.scopes.iter().rev() {
 			if let Some(var) = map.get(name.as_ref()) {
+				refresh_if_hooked(&self.aliases, var);
 				return Some((*scope_type, var));
 			}
 		}
@@ -358,7 +316,8 @@ impl ShellEnvironment {
 	}
 
 	/// Tries to retrieve a mutable reference to the variable with the given name
-	/// in the environment.
+	/// in the environment. As in Bash, looking a variable up refreshes the
+	/// stored copy of a variable with an [`AssignmentHook`].
 	///
 	/// # Arguments
 	///
@@ -367,9 +326,30 @@ impl ShellEnvironment {
 		&mut self,
 		name: S,
 	) -> Option<(EnvironmentScope, &mut ShellVariable)> {
+		self.get_mut_refreshing(name.as_ref(), true)
+	}
+
+	/// [`Self::get_mut`] without the refresh: Bash looks a variable up that way
+	/// only to assign one value to its name, so `BASH_ALIASES+=v` appends to
+	/// the stored copy as it was.
+	pub fn get_mut_for_scalar_assignment<S: AsRef<str>>(
+		&mut self,
+		name: S,
+	) -> Option<(EnvironmentScope, &mut ShellVariable)> {
+		self.get_mut_refreshing(name.as_ref(), false)
+	}
+
+	fn get_mut_refreshing(
+		&mut self,
+		name: &str,
+		refresh: bool,
+	) -> Option<(EnvironmentScope, &mut ShellVariable)> {
 		// Look through scopes, from the top of the stack on down.
 		for (scope_type, map) in self.scopes.iter_mut().rev() {
-			if let Some(var) = map.get_mut(name.as_ref()) {
+			if let Some(var) = map.get_mut(name) {
+				if refresh {
+					refresh_if_hooked(&self.aliases, var);
+				}
 				return Some((*scope_type, var));
 			}
 		}
@@ -452,9 +432,8 @@ impl ShellEnvironment {
 	/// * `name` - The name of the array variable to unset an element from.
 	/// * `index` - The index of the element to unset.
 	pub fn unset_index(&mut self, name: &str, index: &str) -> Result<bool, error::Error> {
-		// Bash looks the variable up first, which refreshes a hooked variable's
-		// stored copy; the element then leaves that copy only.
-		self.refresh_hooked_variable(name);
+		// The lookup refreshes a hooked variable's stored copy, as in Bash; the
+		// element then leaves that copy only.
 		if let Some((_, var)) = self.get_mut(name) {
 			var.unset_index(index)
 		} else {
@@ -511,6 +490,7 @@ impl ShellEnvironment {
 			}
 
 			if let Some(var) = var_map.get(name.as_ref()) {
+				refresh_if_hooked(&self.aliases, var);
 				return Some(var);
 			}
 
@@ -562,6 +542,7 @@ impl ShellEnvironment {
 			}
 
 			if let Some(var) = var_map.get_mut(name.as_ref()) {
+				refresh_if_hooked(&self.aliases, var);
 				return Some(var);
 			}
 
@@ -604,7 +585,8 @@ impl ShellEnvironment {
 				var.export();
 			}
 			let updated = assigned.and_then(|()| updater(var));
-			self.run_assignment_hooks();
+			let hooked = var.take_hooked_assignments();
+			self.define_assigned_aliases(hooked);
 			updated
 		} else {
 			let mut var = ShellVariable::new(ShellValue::Unset(ShellValueUnsetType::Untyped));
@@ -644,7 +626,8 @@ impl ShellEnvironment {
 
 		if let Some(var) = self.get_mut_using_policy(&name, lookup_policy) {
 			let updated = var.assign_at_index(index, value, false).and_then(|()| updater(var));
-			self.run_assignment_hooks();
+			let hooked = var.take_hooked_assignments();
+			self.define_assigned_aliases(hooked);
 			updated
 		} else {
 			let mut var = ShellVariable::new(ShellValue::Unset(ShellValueUnsetType::Untyped));
@@ -704,6 +687,22 @@ impl ShellEnvironment {
 		var: ShellVariable,
 	) -> Result<(), error::Error> {
 		self.add(name, var, EnvironmentScope::Global)
+	}
+}
+
+/// The aliases, as the elements of an associative array.
+fn alias_elements(aliases: &HashMap<String, String>) -> BTreeMap<String, String> {
+	aliases
+		.iter()
+		.map(|(name, value)| (name.clone(), value.clone()))
+		.collect()
+}
+
+/// Refreshes the stored copy of `var` from the alias table when it carries the
+/// alias table's hook, as Bash does whenever it looks `BASH_ALIASES` up.
+fn refresh_if_hooked(aliases: &HashMap<String, String>, var: &ShellVariable) {
+	if var.assignment_hook() == Some(AssignmentHook::AliasTable) {
+		var.refresh_stored_copy(alias_elements(aliases));
 	}
 }
 

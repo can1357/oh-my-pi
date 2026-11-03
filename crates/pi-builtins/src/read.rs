@@ -143,8 +143,10 @@ impl builtins::Command for ReadCommand {
 			ReadResult::InputReady => (None, brush_core::ExecutionResult::success()),
 		};
 
-		// As in Bash, `-a` refuses an associative array once the input is read.
-		if let Some(array_variable) = &self.array_variable
+		// As in Bash, `-a` refuses an associative array once input was read; a
+		// `-t 0` poll reads none, so it reports only whether input is ready.
+		if !matches!(read_result, ReadResult::InputReady | ReadResult::InputNotReady)
+			&& let Some(array_variable) = &self.array_variable
 			&& context
 				.shell
 				.env()

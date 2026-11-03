@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 
-use brush_core::{ExecutionResult, Shell, ShellValue, builtins, variables::ShellValueUnsetType};
+use brush_core::{ExecutionResult, Shell, builtins};
 use clap::Parser;
 
 /// Unset a variable.
@@ -120,14 +120,10 @@ fn unset_array_index(
 	index: &str,
 ) -> Result<bool, brush_core::Error> {
 	// First check to see if it's an associative array.
-	let is_assoc_array = if let Some((_, var)) = shell.env().get(name) {
-		matches!(
-			var.value(),
-			ShellValue::AssociativeArray(_) | ShellValue::Unset(ShellValueUnsetType::AssociativeArray)
-		)
-	} else {
-		false
-	};
+	let is_assoc_array = shell
+		.env()
+		.get(name)
+		.is_some_and(|(_, var)| var.is_associative_array());
 
 	// Compute which index we should actually use. For indexed arrays, we need to
 	// evaluate the index string as an arithmetic expression first.
