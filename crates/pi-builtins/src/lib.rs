@@ -354,14 +354,16 @@ pub use proc_snapshot::{ProcInfo, ProcessStatus};
 pub use proc_snapshot::sys as proc_sys;
 /// Identity-pinned process references, which signal a process, or the group
 /// it leads, through its identity and never by number; the signal wave that
-/// delivers one signal to each of them at most once; and the ledger of the
-/// processes a run spawned. `pi-shell`'s process references wrap them.
+/// delivers one signal to each of them at most once; the ledger of the
+/// processes a run spawned; and the descendant walk that spares the harness.
+/// `pi-shell`'s process references wrap them.
 #[cfg(all(
 	feature = "util.procs",
 	any(target_os = "linux", target_os = "macos", target_os = "windows")
 ))]
 pub use pinned_process::{
-	GroupProof, LedgerWave, PinnedProcess, SignalWave, SpawnEntry, SpawnLedger, kernel_group_runs,
+	GroupProof, LedgerWave, PinnedProcess, SignalWave, SpawnEntry, SpawnLedger, host_protected_pids,
+	kernel_group_runs, pid_in_protected_subtree, signalable_descendants,
 };
 
 /// Macro to define a struct that represents a shell built-in flag argument that

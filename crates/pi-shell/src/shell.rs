@@ -8061,6 +8061,32 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 		assert_eq!(result.exit_code, Some(124), "the outer limit should expire first");
 	}
 
+	/// Under `timeout`, a command's group leader exits and is reaped; the
+	/// member it left behind, pinned before the reap, forks a child afterwards
+	/// into the same group. Linux 5.3 to 6.8 cannot signal that group through
+	/// its reaped leader, so `timeout`'s deadline must reach the child as a
+	/// descendant of the pinned member.
+	#[cfg(target_os = "linux")]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn a_timeout_deadline_stops_a_child_forked_after_its_leader_was_reaped_before_linux_6_9() {
+		if !crate::test_support::without_kernel_group_signal(
+			module_path!(),
+			"a_timeout_deadline_stops_a_child_forked_after_its_leader_was_reaped_before_linux_6_9",
+		) {
+			return;
+		}
+		let _guard = shell_test_lock().lock().await;
+		let ([sleep_pid], result) = run_reporting_pids(
+			"f() { /bin/sh -c '( /bin/sleep 1; /bin/sleep 600 & echo \"$!\"; wait ) &'; /bin/sh -c \
+			 'exec /bin/sleep 60'; }; timeout 3 f",
+			false,
+		)
+		.await;
+		let stopped = stopped_within_grace(sleep_pid).await;
+		assert!(stopped.is_ok(), "sleep {sleep_pid} survived the deadline: {stopped:?}");
+		assert_eq!(result.exit_code, Some(124), "the timeout should expire");
+	}
+
 	/// `timeout --foreground` leaves its operand in the shell's process group,
 	/// but with stdin not a terminal the operand is still detached into a
 	/// session and group of its own. The run's registry must record that

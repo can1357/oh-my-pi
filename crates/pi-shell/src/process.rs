@@ -1,9 +1,6 @@
 //! Cross-platform process tree management.
 
-use std::{
-	collections::{HashMap, HashSet},
-	time::Duration,
-};
+use std::{collections::HashSet, time::Duration};
 
 use anyhow::Result;
 use parking_lot::Mutex;
@@ -13,7 +10,10 @@ use parking_lot::Mutex;
 /// builtins read, and re-exported here so this module — and `pi-natives`
 /// through it — keeps one status type for both concerns.
 pub use pi_builtins::ProcessStatus;
-use pi_builtins::{GroupProof, PinnedProcess, SignalWave, SpawnLedger, kernel_group_runs};
+use pi_builtins::{
+	GroupProof, PinnedProcess, SignalWave, SpawnLedger, host_protected_pids, kernel_group_runs,
+	signalable_descendants,
+};
 
 use crate::cancel::CancelToken;
 
@@ -145,18 +145,6 @@ impl Process {
 		Self { inner, leader: None }
 	}
 
-	/// Walk the live descendant tree from scratch. Cheap and idempotent — call
-	/// it again before each signal wave so grandchildren spawned during a grace
-	/// period are not missed.
-	fn live_descendants(&self) -> Vec<Self> {
-		self
-			.inner
-			.descendants()
-			.into_iter()
-			.map(Self::from_inner)
-			.collect()
-	}
-
 	fn signal_tree(&self, signal: i32) -> u32 {
 		self.signal_tree_excluding(signal, &host_protected_pids())
 	}
@@ -197,24 +185,12 @@ impl Process {
 		(self.group_id() == Some(group)).then_some(leader)
 	}
 
-	/// Live descendants with every protected subtree pruned, not just the exact
-	/// protected pids.
-	///
-	/// The flattened descendant list can contain a protected node (the harness,
-	/// on a Windows PID-reuse false-descendant) *together with* that node's real
-	/// children, which were collected by recursing through it. Skipping only the
-	/// exact protected pid would still terminate those unrelated worker/tool
-	/// subprocesses, so drop every node whose recorded parent chain — within the
-	/// enumerated set — passes through a protected pid (#7452 review).
+	/// Live descendants with every protected subtree pruned (see
+	/// [`signalable_descendants`]).
 	fn signalable_descendants(&self, protected: &HashSet<i32>) -> Vec<Self> {
-		let descendants = self.live_descendants();
-		let parents: HashMap<i32, i32> = descendants
-			.iter()
-			.filter_map(|descendant| descendant.ppid().map(|parent| (descendant.pid(), parent)))
-			.collect();
-		descendants
+		signalable_descendants(&self.inner, protected)
 			.into_iter()
-			.filter(|descendant| !pid_in_protected_subtree(descendant.pid(), protected, &parents))
+			.map(Self::from_inner)
 			.collect()
 	}
 
@@ -341,50 +317,6 @@ impl Reached {
 			.all(|process| process.status() != ProcessStatus::Running)
 			&& !self.kernel.iter().any(kernel_group_runs)
 	}
-}
-
-/// The harness pid — the one process a run-cancellation sweep must never
-/// signal.
-///
-/// On Unix the descendant walk is identity-pinned (pidfd / start-time), so the
-/// host can never appear as a false descendant and this set is a harmless
-/// no-op safety net. On Windows the descendant tree is derived from raw
-/// `th32ParentProcessID` values that survive their recorded parent's death: a
-/// freshly spawned child whose recycled pid matches the harness's stale parent
-/// pid makes the harness enumerate as a false descendant, so cancelling a
-/// timed-out bash run would `TerminateProcess` the host with no cleanup and no
-/// `session_exit` record (#7452, related #4605).
-///
-/// Do not walk the host's numeric parent chain here. On Windows the host's
-/// recorded parent pid can itself have been recycled onto the cancellation
-/// target; treating that raw pid as protected would spare the hung command and
-/// prune all of its descendants from cleanup.
-fn host_protected_pids() -> HashSet<i32> {
-	i32::try_from(std::process::id()).into_iter().collect()
-}
-
-/// True when `pid` is itself protected or descends — within the enumerated
-/// `parents` map (pid -> recorded parent pid) — from a protected pid. Used to
-/// prune a whole protected subtree from a cancellation sweep so a false
-/// descendant of the harness cannot drag the harness's real children into the
-/// kill set (#7452).
-fn pid_in_protected_subtree(
-	pid: i32,
-	protected: &HashSet<i32>,
-	parents: &HashMap<i32, i32>,
-) -> bool {
-	let mut current = pid;
-	// Bound the walk against a corrupted or cyclic parent chain.
-	for _ in 0..256 {
-		if protected.contains(&current) {
-			return true;
-		}
-		match parents.get(&current) {
-			Some(&parent) if parent != current => current = parent,
-			_ => return false,
-		}
-	}
-	false
 }
 
 /// Waits until `root` and everything `reached` covers are gone, optionally
@@ -638,22 +570,9 @@ impl SpawnRegistry {
 	/// signals its group by number. Re-read on every wave, so a child spawned
 	/// during a grace window is still reached.
 	pub fn signal(&self, signal: i32) {
-		let protected = host_protected_pids();
 		let mut ledger = self.ledger.lock();
 		ledger.prune();
-		let descendants: Vec<PinnedProcess> = ledger
-			.entries()
-			.iter()
-			.flat_map(|entry| {
-				Process::from_inner(entry.process.clone()).signalable_descendants(&protected)
-			})
-			.map(|descendant| descendant.inner)
-			.collect();
-		let mut wave = ledger.plan_wave(signal, true);
-		for descendant in &descendants {
-			wave.process(descendant);
-		}
-		let delivered = wave.deliver();
+		let delivered = ledger.plan_wave(signal, true).deliver();
 		ledger.record_reached(&delivered);
 	}
 }
@@ -661,20 +580,6 @@ impl SpawnRegistry {
 #[cfg(test)]
 mod tests {
 	use super::*;
-
-	/// The harness pid must be the only protected pid. Including its recorded
-	/// parent would be unsafe on Windows: that stale numeric pid can have been
-	/// recycled onto the timed-out command, causing cancellation to spare the
-	/// hung target and its whole subtree.
-	#[test]
-	fn host_protected_pids_includes_self() {
-		let self_pid = i32::try_from(std::process::id()).expect("self pid fits in i32");
-		assert_eq!(
-			host_protected_pids(),
-			HashSet::from([self_pid]),
-			"only the harness pid may be protected from cancellation sweeps",
-		);
-	}
 
 	/// Regression test for #7452: a cancellation sweep must never signal the
 	/// protected host pid, even when it is enumerated as the sweep root. On
@@ -973,36 +878,6 @@ while True:
 		);
 	}
 
-	/// Regression test for the #7453 review: pruning a protected node must drop
-	/// its whole subtree, not just the exact protected pid. A Windows PID-reuse
-	/// false-descendant collects the harness together with the harness's real
-	/// children (LSP servers, worker/tool subprocesses); skipping only the host
-	/// pid would still terminate those. `pid_in_protected_subtree` walks the
-	/// enumerated parent map so any node under a protected pid is excluded.
-	#[test]
-	fn protected_subtree_is_pruned_not_just_the_pid() {
-		// root(1) -> host(2, protected) -> worker(3); root(1) -> real_child(4).
-		let parents: HashMap<i32, i32> = HashMap::from([(2, 1), (3, 2), (4, 1)]);
-		let protected: HashSet<i32> = HashSet::from([2]);
-
-		assert!(
-			pid_in_protected_subtree(2, &protected, &parents),
-			"the protected node itself must be excluded",
-		);
-		assert!(
-			pid_in_protected_subtree(3, &protected, &parents),
-			"a child collected through the protected node must be excluded too",
-		);
-		assert!(
-			!pid_in_protected_subtree(4, &protected, &parents),
-			"a real child of the sweep root must still be signalled",
-		);
-		assert!(
-			!pid_in_protected_subtree(1, &protected, &parents),
-			"the sweep root must not be pruned",
-		);
-	}
-
 	/// Regression test for the macOS `proc_listchildpids` brokenness: on
 	/// darwin 25.4+ the kernel returns no entries when a process queries its
 	/// own children via that API, so `Process::descendants` produced an empty
@@ -1029,7 +904,8 @@ while True:
 		let mut found = false;
 		for _ in 0..40 {
 			if harness
-				.live_descendants()
+				.inner
+				.descendants()
 				.iter()
 				.any(|descendant| descendant.pid() == child_pid)
 			{
@@ -1044,9 +920,9 @@ while True:
 
 		assert!(
 			found,
-			"freshly spawned child pid {child_pid} must appear in `live_descendants` so the \
-			 cancellation cleanup can reach it; this regressed on macOS when the walk relied on the \
-			 broken `proc_listchildpids`",
+			"freshly spawned child pid {child_pid} must appear in `descendants` so the cancellation \
+			 cleanup can reach it; this regressed on macOS when the walk relied on the broken \
+			 `proc_listchildpids`",
 		);
 	}
 
