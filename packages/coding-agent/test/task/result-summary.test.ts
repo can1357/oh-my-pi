@@ -139,16 +139,29 @@ describe("formatTaskResultSummary", () => {
 		// A failed structured run carries the warning as its error and as the
 		// head of its output (alone when the run was empty); the parent must
 		// read it once, in the output preview the summary uses for failures.
-		const warning = "SYSTEM WARNING: Structured subagent replied without calling yield.";
+		const warning = "SYSTEM WARNING: Subagent exited without calling yield tool after 3 reminders.";
 		const output = prose ? `${warning}\n\n${prose}` : warning;
 		const summary = formatTaskResultSummary(
-			{ ...settledResult(output), exitCode: 1, stderr: warning, error: warning, missingYield: "wake" },
+			{ ...settledResult(output), exitCode: 1, stderr: warning, error: warning, missingYield: "initial" },
 			{ totalDurationMs: 5 },
 		);
 		expect(summary).toContain('status="failed (exit 1)"');
 		expect(summary).toContain(`<output>\n${output}\n</output>`);
 		expect(summary).not.toContain("<error>");
 		expect(summary.split(warning).length - 1).toBe(1);
+	});
+
+	it("keeps the error of a failed run whose report only starts with the same words", () => {
+		const summary = formatTaskResultSummary(
+			{
+				...settledResult("Timeout handling in lock.ts looks fine; still checking retry.ts"),
+				exitCode: 1,
+				stderr: "Timeout",
+				error: "Timeout",
+			},
+			{ totalDurationMs: 5 },
+		);
+		expect(summary).toContain("<error>Timeout</error>");
 	});
 
 	it("keeps a subagent's output from forging a harness <system-notice> or parent <irc> block", () => {
