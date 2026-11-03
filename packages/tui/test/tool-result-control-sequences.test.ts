@@ -253,4 +253,17 @@ describe("tool result details with raw control sequences", () => {
 		if (view.k !== "tool") throw new Error("Expected read tool node");
 		expect(view.p?.href).toBe(url);
 	});
+
+	it("links a read of a URL in text mode", () => {
+		applyHyperlinkSetting("always");
+		const url = "https://example.com/a";
+		const group = new ReadToolGroupComponent();
+		group.updateArgs({ path: url }, "u");
+		group.updateResult(
+			{ content: [{ type: "text", text: "needle" }], details: { displayContent: { text: LINE, startLine: 1 } } },
+			false,
+			"u",
+		);
+		expect(group.render(120).join("\n")).toContain(`;${url}\x07`);
+	});
 });
