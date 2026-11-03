@@ -9,7 +9,6 @@
 
 import { Process, type ProcessTerminateOptions } from "@oh-my-pi/pi-natives";
 import type { Spawn, Subprocess } from "bun";
-import { isPidAlive } from "./pid";
 
 type InMask = "pipe" | "ignore" | Buffer | Uint8Array | null;
 
@@ -20,21 +19,6 @@ const LINUX_SUBREAPER_COMMAND_ENV = "OMP_PTREE_SUBREAPER_COMMAND";
 const LINUX_SUBREAPER_BUN_BE_BUN_ENV = "OMP_PTREE_SUBREAPER_BUN_BE_BUN";
 const SUBREAPER_KILL_WINDOW_MS = 100;
 const SUBREAPER_KILL_POLL_MS = 5;
-/** Upper bound on waiting for a SIGKILLed process group to empty (members go via their reaper). */
-const GROUP_EXIT_WAIT_MS = 1_000;
-
-/** Resolve once no process is left in group `pgid` (signal 0 only), or after {@link GROUP_EXIT_WAIT_MS}. */
-async function waitForGroupExit(pgid: number): Promise<void> {
-	const deadline = Date.now() + GROUP_EXIT_WAIT_MS;
-	while (Date.now() < deadline) {
-		try {
-			process.kill(-pgid, 0);
-		} catch {
-			return;
-		}
-		await Bun.sleep(SUBREAPER_KILL_POLL_MS);
-	}
-}
 
 /**
  * Build the Linux child-subreaper entrypoint.
@@ -109,6 +93,45 @@ process.exit(exitCode ?? 1);
 }
 
 const LINUX_SUBREAPER_SCRIPT = createLinuxSubreaperScript();
+
+/**
+ * Group-keeper entrypoint (POSIX without a child subreaper, such as macOS).
+ *
+ * It runs detached, so it leads the command's process group, and stays alive
+ * until the command has exited and every holder of the command's output has
+ * closed it. While it lives, the group id stays reserved for this run, so a
+ * group kill can only reach processes of this run (also ones whose launcher
+ * died). Once it exits, nothing left of the run holds output, and ptree never
+ * signals that group id again.
+ */
+const GROUP_KEEPER_SCRIPT = `
+const commandJson = Bun.env.${LINUX_SUBREAPER_COMMAND_ENV};
+if (!commandJson) throw new Error("missing supervised command");
+const callerBunBeBun = Bun.env.${LINUX_SUBREAPER_BUN_BE_BUN_ENV};
+delete Bun.env.${LINUX_SUBREAPER_COMMAND_ENV};
+delete Bun.env.${LINUX_SUBREAPER_BUN_BE_BUN_ENV};
+if (callerBunBeBun === undefined) delete Bun.env.BUN_BE_BUN;
+else Bun.env.BUN_BE_BUN = callerBunBeBun;
+const child = Bun.spawn(JSON.parse(commandJson), {
+	stdin: "inherit",
+	stdout: "pipe",
+	stderr: "pipe",
+	env: Bun.env,
+});
+
+async function relay(stream, destination) {
+	const writer = destination.writer();
+	for await (const chunk of stream) writer.write(chunk);
+	await writer.flush();
+}
+
+const [exitCode] = await Promise.all([
+	child.exited,
+	relay(child.stdout, Bun.stdout),
+	relay(child.stderr, Bun.stderr),
+]);
+process.exit(exitCode ?? 1);
+`;
 
 // ── Exceptions ───────────────────────────────────────────────────────────────
 
@@ -213,6 +236,9 @@ export class ChildProcess<In extends InMask = InMask> {
 	#hardKillSweep?: Promise<void>;
 	#terminateGroup: boolean;
 	#hardKillTree: boolean;
+	// The root is a group keeper: once it has exited, nothing of the run holds
+	// output and its group id is no longer reserved, so nothing is signalled.
+	#groupKeeper: boolean;
 	// Windows has no process groups. Retaining the root's native handle pins
 	// its PID after exit so killTree() can still enumerate its original children.
 	#windowsRootProcess?: Process;
@@ -222,9 +248,11 @@ export class ChildProcess<In extends InMask = InMask> {
 		retainFullStderr = exposeStderr,
 		terminateGroup = false,
 		hardKillTree = false,
+		groupKeeper = false,
 	) {
 		this.#terminateGroup = terminateGroup;
 		this.#hardKillTree = hardKillTree;
+		this.#groupKeeper = groupKeeper;
 		this.#windowsRootProcess = process.platform === "win32" ? (Process.fromPid(proc.pid) ?? undefined) : undefined;
 		if (retainFullStderr) this.#stderrChunks = [];
 		// Eagerly drain stderr into a truncated tail, retaining raw chunks only for explicit full capture.
@@ -359,6 +387,12 @@ export class ChildProcess<In extends InMask = InMask> {
 		// started. Do not replace that sweep with a normal root termination: the
 		// root must stay alive until adopted descendants have been collected.
 		if (this.#hardKillSweep) return;
+		if (this.#groupKeeper && (this.proc.exitCode !== null || this.proc.signalCode !== null)) {
+			// The keeper led the group and outlived every output holder; its
+			// group id may already belong to another process. Signal nothing.
+			this.#terminating = Promise.resolve();
+			return;
+		}
 		if (gracefulMs !== undefined && gracefulMs < 0 && this.#hardKillTree && this.proc.exitCode === null) {
 			// Keep the subreaper alive while descendants are killed. A single
 			// killTree() snapshot can miss a worker whose parent exits during the
@@ -374,27 +408,19 @@ export class ChildProcess<In extends InMask = InMask> {
 				return;
 			}
 		}
-		// The leader is reaped once Bun reports how it ended: by exit code, or by
-		// signal (exitCode stays null when a signal killed it).
-		const leaderReaped = this.proc.exitCode !== null || this.proc.signalCode !== null;
-		if (leaderReaped && this.#terminateGroup && this.#openPipeReaders > 0 && process.platform !== "win32") {
+		if (
+			this.proc.exitCode !== null &&
+			this.#terminateGroup &&
+			this.#openPipeReaders > 0 &&
+			process.platform !== "win32"
+		) {
 			// Bun detached children are POSIX session/process-group leaders. If
 			// the leader has exited, the native Process handle cannot rediscover
-			// its PGID, but a pipe-holding descendant may keep that group alive.
-			// A pipe holder can also have left the group, so the pipe alone does
-			// not prove the id is still ours. Linux and macOS never hand out a pid
-			// while it is a live group's id, so the id can only have been reused
-			// by a process that now owns the leader's pid: signal the group only
-			// while no process holds that pid.
-			let signalled = false;
-			if (!isPidAlive(this.proc.pid)) {
-				try {
-					process.kill(-this.proc.pid, "SIGKILL");
-					signalled = true;
-				} catch {}
-			}
-			// Report only once the killed group is gone, as the native termination does.
-			this.#terminating = signalled ? waitForGroupExit(this.proc.pid) : Promise.resolve();
+			// its PGID, but a pipe-holding descendant keeps that exact group alive.
+			try {
+				process.kill(-this.proc.pid, "SIGKILL");
+			} catch {}
+			this.#terminating = Promise.resolve();
 			return;
 		}
 		if (this.proc.exitCode !== null && this.#windowsRootProcess && this.#openPipeReaders > 0) {
@@ -673,6 +699,15 @@ type ChildSpawnOptions<In extends InMask = InMask> = Omit<
 	 * descendant that creates a new session and reparents to launchd.
 	 */
 	subreaper?: boolean;
+	/**
+	 * On POSIX, run the command under a group keeper: a supervisor that leads a
+	 * new process group (implies `detached`) and lives until the command has
+	 * exited and its output is closed. Kills reach the whole group, also after
+	 * the command's launcher died, and never signal a group id after the keeper
+	 * exited. Ignored on Windows and when `subreaper` applies (Linux). A
+	 * descendant that leaves the group stays out of reach.
+	 */
+	groupKeeper?: boolean;
 	/** Expose and retain complete stderr for a later `wait({ stderr: "full" })`. */
 	stderr?: "full" | null;
 };
@@ -682,17 +717,20 @@ function spawnInternal<In extends InMask = InMask>(
 	opts: ChildSpawnOptions<In> | undefined,
 	retainFullStderr: boolean,
 ): ChildProcess<In> {
-	const { timeout = -1, signal, stderr, detached, subreaper = false, ...rest } = opts ?? {};
+	const { timeout = -1, signal, stderr, detached, subreaper = false, groupKeeper = false, ...rest } = opts ?? {};
 	const useSubreaper = subreaper && process.platform === "linux";
+	const useGroupKeeper = groupKeeper && !useSubreaper && process.platform !== "win32";
+	const supervisorScript = useSubreaper ? LINUX_SUBREAPER_SCRIPT : useGroupKeeper ? GROUP_KEEPER_SCRIPT : undefined;
+	const leadsGroup = useGroupKeeper || detached === true;
 	const commandEnv = rest.env ?? Bun.env;
-	const child = Bun.spawn(useSubreaper ? [process.execPath, "-e", LINUX_SUBREAPER_SCRIPT] : cmd, {
+	const child = Bun.spawn(supervisorScript ? [process.execPath, "-e", supervisorScript] : cmd, {
 		stdin: "ignore",
 		stdout: "pipe",
 		stderr: "pipe",
 		windowsHide: true,
-		detached,
 		...rest,
-		env: useSubreaper
+		detached: leadsGroup,
+		env: supervisorScript
 			? {
 					...commandEnv,
 					BUN_BE_BUN: "1",
@@ -701,7 +739,7 @@ function spawnInternal<In extends InMask = InMask>(
 				}
 			: rest.env,
 	});
-	const cp = new ChildProcess(child, stderr === "full", retainFullStderr, detached === true, useSubreaper);
+	const cp = new ChildProcess(child, stderr === "full", retainFullStderr, leadsGroup, useSubreaper, useGroupKeeper);
 	if (signal) cp.attachSignal(signal);
 	if (timeout > 0) cp.attachTimeout(timeout);
 	return cp;

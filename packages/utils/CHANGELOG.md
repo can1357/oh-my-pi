@@ -9,10 +9,7 @@
 
 - Added `isPidAlive` (signal-0 liveness probe) and `asStrictBytes` (a `Uint8Array` narrowed to its own `ArrayBuffer` for WebCrypto)
 - Added `followDanglingLinks` to `resolveEquivalentPath` (with `throughMissing`): the path is walked like a writer that creates missing parents would reach it, following every symlink (dangling ones too) and applying `..` to the physical directory
-
-### Fixed
-
-- `ptree` kills of a detached command whose leader already ended now also cover a leader killed by a signal, never signal a process group whose id another process may have taken (only while no process holds the leader's pid), and report only once the killed group is gone
+- Added the `groupKeeper` option to `ptree.spawn`/`exec` (POSIX without a child subreaper, such as macOS): the command runs under a supervisor that leads its process group until the command's output closes, so kills reach the group after the command's launcher died and never signal a group id after the supervisor exited
 
 ## [18.15.0] - 2026-11-01
 
