@@ -1,7 +1,11 @@
+// Kiro's model roster is credential-scoped: `ListAvailableModels` answers per
+// signed-in account (IAM Identity Center profile ARN, Builder ID login, or API
+// key), so there is no `discovery` node. Enrolling Kiro in catalog generation
+// would freeze whichever account ran the regen into `models.json`; the runtime
+// model manager (`kiroModelManagerOptions`) discovers the roster per credential
+// instead.
 provider "kiro" {
     default-model "auto"
     env "KIRO_API_KEY"
     dynamic-models-authoritative #true
-    skip-cross-provider-reference-fills #true
-    discovery label="Kiro" oauth-provider="kiro"
 }

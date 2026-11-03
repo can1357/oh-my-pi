@@ -132,23 +132,16 @@ describe("Kiro provider discovery", () => {
 		vi.restoreAllMocks();
 	});
 
-	test("is authoritative with a fallback default and Kiro discovery wiring", () => {
+	test("is authoritative with a fallback default and stays out of catalog generation", () => {
 		const descriptor = PROVIDER_DESCRIPTORS.find(item => item.providerId === "kiro");
 
 		expect(descriptor).toBeDefined();
 		expect(descriptor?.defaultModel).toBe("auto");
 		expect(descriptor?.dynamicModelsAuthoritative).toBe(true);
 		expect(DEFAULT_MODEL_PER_PROVIDER["kiro"]).toBe("auto");
-		expect(descriptor?.catalogDiscovery).toEqual({ label: "Kiro", envVars: ["KIRO_API_KEY"], oauthProvider: "kiro" });
-	});
-
-	test("opts out of cross-provider same-id reference fills for authoritative discovery", () => {
-		const descriptor = PROVIDER_DESCRIPTORS.find(item => item.providerId === "kiro");
-
-		// The same-id overlay would overwrite Kiro's deployment-specific tokenizer
-		// and context values with another host's rows (Kiro serves claude/gpt ids
-		// that collide with upstream seed rows).
-		expect(descriptor?.skipCrossProviderReferenceFills).toBe(true);
+		// The roster is credential-scoped: a catalog discovery entry would let
+		// `generate-models.ts` freeze one account's models into models.json.
+		expect(descriptor?.catalogDiscovery).toBeUndefined();
 	});
 
 	test("ignores missing, malformed, unknown, and known defaultModel metadata", () => {
