@@ -27,17 +27,21 @@ pub fn cached<'s>(sc: &'s Scratch, p: &Probe) -> Option<&'s ProbeResult> {
 	sc.probes().iter().find(|(q, _)| q == p).map(|(_, r)| r)
 }
 
-/// `/dev/fd/N`, `/dev/stdin`, `/dev/stdout`, `/dev/stderr`: the fd number.
+/// `/dev/fd/N`, `/proc/self/fd/N`, `/proc/thread-self/fd/N`, `/dev/stdin`,
+/// `/dev/stdout`, `/dev/stderr`: the fd number. The engine runs inside the
+/// host process, so opening these through the host would reach the host's
+/// descriptors instead of the shell's.
 pub fn dev_fd(path: &[u8]) -> Option<i32> {
-	match path {
-		b"/dev/stdin" => Some(0),
-		b"/dev/stdout" => Some(1),
-		b"/dev/stderr" => Some(2),
-		_ => std::str::from_utf8(path.strip_prefix(b"/dev/fd/")?)
-			.ok()?
-			.parse()
-			.ok(),
-	}
+	let n = match path {
+		b"/dev/stdin" => return Some(0),
+		b"/dev/stdout" => return Some(1),
+		b"/dev/stderr" => return Some(2),
+		_ => path
+			.strip_prefix(b"/dev/fd/")
+			.or_else(|| path.strip_prefix(b"/proc/self/fd/"))
+			.or_else(|| path.strip_prefix(b"/proc/thread-self/fd/"))?,
+	};
+	std::str::from_utf8(n).ok()?.parse().ok()
 }
 
 /// A synthesized `stat` of an engine fd.
@@ -565,6 +569,9 @@ mod tests {
 	fn dev_fd_names() {
 		assert_eq!(dev_fd(b"/dev/fd/3"), Some(3));
 		assert_eq!(dev_fd(b"/dev/stderr"), Some(2));
+		assert_eq!(dev_fd(b"/proc/self/fd/4"), Some(4));
+		assert_eq!(dev_fd(b"/proc/thread-self/fd/5"), Some(5));
 		assert_eq!(dev_fd(b"/dev/fdx"), None);
+		assert_eq!(dev_fd(b"/proc/1/fd/3"), None);
 	}
 }

@@ -230,7 +230,8 @@ impl PipeStreams {
 	}
 }
 
-/// Options for executing a shell command via the embedded bash engine (pi-shell).
+/// Options for executing a shell command via the embedded bash engine
+/// (pi-shell).
 #[napi(object, object_to_js = false)]
 pub struct ShellExecuteOptions<'env> {
 	/// Command string to execute in the shell.
