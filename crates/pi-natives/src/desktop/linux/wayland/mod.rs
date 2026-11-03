@@ -195,7 +195,12 @@ impl WaylandBackend {
 		}
 	}
 
+	/// Read on every call: a `LIBEI_SOCKET` set later in the session reaches
+	/// EIS directly, whatever the cached portal probe found.
 	fn input_unavailable(&self) -> Option<&str> {
+		if std::env::var_os("LIBEI_SOCKET").is_some() {
+			return None;
+		}
 		self
 			.input_unavailable
 			.get_or_init(portal::input_unavailable_reason)
@@ -591,6 +596,23 @@ mod tests {
 			);
 		});
 		assert!(connected, "desktop input did not connect to libei");
+	}
+
+	/// A probe that already found no portal must not hide an EIS socket set
+	/// later in the session.
+	#[test]
+	fn a_socket_set_after_the_portal_probe_still_reaches_libei() {
+		let connected = with_fake_libei(|backend| {
+			backend.input_unavailable = OnceCell::from(Some("no RemoteDesktop portal".to_owned()));
+			assert!(backend.capabilities().input);
+			let _ = backend.type_text(
+				&Target::Desktop,
+				"hello",
+				DeliveryMode::Foreground,
+				&control::CancellationSource::default().token(),
+			);
+		});
+		assert!(connected, "a cached portal absence blocked the LIBEI_SOCKET route");
 	}
 
 	#[test]
