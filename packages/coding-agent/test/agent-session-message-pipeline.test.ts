@@ -2175,6 +2175,7 @@ describe("AgentSession message pipeline", () => {
 				type: "toolcall_delta",
 				contentIndex: 0,
 				delta: "rep",
+				partial: assistantMessage,
 			},
 		} as never);
 
