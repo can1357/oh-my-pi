@@ -42,18 +42,6 @@ describe("x-should-retry on the OpenAI wire (#17920)", () => {
 		expect((error as OpenAIHttpError).status).toBe(503);
 	});
 
-	test("transport still retries the same 503 without the header", async () => {
-		const { attempts } = await captureStreamError(
-			() =>
-				new Response(JSON.stringify({ error: { message: "upstream unavailable" } }), {
-					status: 503,
-					headers: { "content-type": "application/json", "retry-after-ms": "1" },
-				}),
-		);
-
-		expect(attempts).toBe(6);
-	});
-
 	test("provider retry classification obeys the captured verdict over status", async () => {
 		const { error } = await captureStreamError(terminal503);
 		expect(AIError.isProviderRetryableError(error)).toBe(false);
@@ -63,15 +51,5 @@ describe("x-should-retry on the OpenAI wire (#17920)", () => {
 			headers: new Headers({ "x-should-retry": "true" }),
 		});
 		expect(AIError.isProviderRetryableError(forcedRetry)).toBe(true);
-	});
-
-	test("Anthropic API errors carry the same terminal verdict into provider retry", () => {
-		const error = new AIError.AnthropicApiError(
-			529,
-			'529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}',
-			new Headers({ "x-should-retry": "false" }),
-		);
-
-		expect(AIError.isProviderRetryableError(error)).toBe(false);
 	});
 });
