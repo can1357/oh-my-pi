@@ -11,6 +11,7 @@ import {
 } from "@oh-my-pi/pi-agent-core";
 import type { Message } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { type AsideProvenanceCarrier, kAsideProvenance } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { YieldQueue } from "@oh-my-pi/pi-coding-agent/session/yield-queue";
 import { type Tracer, trace } from "@opentelemetry/api";
@@ -718,5 +719,74 @@ describe("YieldQueue claimAtRequest through the production converter and caches"
 		const result = await p.run();
 		expect(result.ended).toBe("discarded");
 		expect(result.carried).toBe(false);
+	});
+
+	/** One claimed notice with `content`, built by its own queue; `ended()` reads how its receipt settled. */
+	function claimed(content: string) {
+		let ended = "pending";
+		const queue = new YieldQueue({ isStreaming: () => true, injectIdle: async () => {}, scheduleIdleFlush() {} });
+		queue.register<string>("notice", {
+			claimAtRequest: true,
+			build: () => ({ ...noticeLike(2), content }) as AgentMessage,
+		});
+		const receipt = queue.enqueueWithReceipt<string>("notice", "x").then(
+			() => void (ended = "delivered"),
+			() => void (ended = "discarded"),
+		);
+		return { message: queue.drainLazy()[0]!()!, receipt, ended: () => ended };
+	}
+	async function loopWith(prompts: AgentMessage[], extra: Partial<AgentLoopConfig>) {
+		const mock = createMockModel({ responses: [{ content: ["ok"] }] });
+		const config: AgentLoopConfig = { model: mock.model, convertToLlm, ...extra };
+		for await (const _ of agentLoop(
+			prompts,
+			{ systemPrompt: ["test"], messages: [], tools: [] },
+			config,
+			undefined,
+			mock.stream,
+		)) {
+			// drain
+		}
+		return mock;
+	}
+
+	test("reordering two identical notices through the append-only log delivers both", async () => {
+		const a = claimed(TEXT);
+		const b = claimed(TEXT);
+		const appendOnly = new AppendOnlyContextManager();
+		appendOnly.syncMessages(convertToLlm([a.message, b.message]));
+		const mock = await loopWith([a.message, b.message], {
+			appendOnlyContext: appendOnly,
+			transformContext: async messages => messages.toReversed(),
+		});
+		await Promise.all([a.receipt, b.receipt]);
+		expect({ first: a.ended(), second: b.ended() }).toEqual({ first: "delivered", second: "delivered" });
+		expect(mock.calls[0]!.context.messages.filter(message => JSON.stringify(message).includes(TEXT))).toHaveLength(2);
+	});
+
+	test("syncing the append-only log never changes the identity of a converted message", () => {
+		const a = claimed(TEXT);
+		const b = claimed(TEXT);
+		const previous = convertToLlm([a.message, b.message]);
+		const identities = previous.map(message => (message as AsideProvenanceCarrier)[kAsideProvenance]);
+		const appendOnly = new AppendOnlyContextManager();
+		appendOnly.syncMessages(previous);
+		appendOnly.syncMessages([previous[1]!, previous[0]!]);
+		expect(previous.map(message => (message as AsideProvenanceCarrier)[kAsideProvenance])).toEqual(identities);
+		expect(identities[0]).not.toBe(identities[1]);
+	});
+
+	test("a kept append-only entry that only hashes like the notice is not counted as carrying it", async () => {
+		// "Aa" and "BB" share the log's 32-bit digest; the provider must get the notice, not the old entry.
+		const old = { ...noticeLike(2), content: "Aa is taking longer than you said" } as AgentMessage;
+		const n = claimed("BB is taking longer than you said");
+		const appendOnly = new AppendOnlyContextManager();
+		appendOnly.syncMessages(convertToLlm([old]));
+		const mock = await loopWith([n.message], { appendOnlyContext: appendOnly });
+		await n.receipt;
+		const sent = JSON.stringify(mock.calls[0]?.context.messages);
+		expect(sent).toContain("BB is taking longer");
+		expect(sent).not.toContain("Aa is taking longer");
+		expect(n.ended()).toBe("delivered");
 	});
 });

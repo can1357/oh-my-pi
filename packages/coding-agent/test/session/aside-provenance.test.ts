@@ -142,36 +142,78 @@ describe("claimable aside identity through the provider pipeline", () => {
 		expect(carriers(messages, token)).toHaveLength(0);
 	});
 
-	for (const handler of [
+	/** Run `[user, ...asides]` through the production `ExtensionRunner` with one context handler. */
+	async function throughExtension(handler: string, asides: AgentMessage[]): Promise<AgentMessage[]> {
+		const tempDir = TempDir.createSync("@pi-aside-provenance-");
+		const authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
+		try {
+			const extension = path.join(tempDir.path(), "context.ts");
+			await Bun.write(extension, `export default function (pi) { pi.on("context", ${handler}); }`);
+			const loaded = await loadExtensions([extension], tempDir.path());
+			expect(loaded.errors).toHaveLength(0);
+			const runner = new ExtensionRunner(
+				loaded.extensions,
+				loaded.runtime,
+				tempDir.path(),
+				SessionManager.inMemory(tempDir.path()),
+				new ModelRegistry(authStorage),
+			);
+			return await runner.emitContext([user, ...asides]);
+		} finally {
+			authStorage.close();
+			tempDir.removeSync();
+		}
+	}
+	const holding = (messages: readonly AgentMessage[], token: object) =>
+		messages.filter(message => (message as AsideProvenanceCarrier)[kAsideProvenance] === token).length;
+
+	for (const [what, handler] of [
 		["changes nothing", "() => {}"],
-		["returns an equal copy of every message", "event => ({ messages: event.messages.map(m => ({ ...m })) })"],
-		["rebuilds every message from its JSON", "event => ({ messages: JSON.parse(JSON.stringify(event.messages)) })"],
+		["returns a spread of every message", "event => ({ messages: event.messages.map(m => ({ ...m })) })"],
+		["drops earlier history and keeps the messages it was given", "event => ({ messages: event.messages.slice(1) })"],
 	] as const) {
-		it(`survives an extension's context handler that ${handler[0]}`, async () => {
-			const tempDir = TempDir.createSync("@pi-aside-provenance-");
-			const authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
-			try {
-				const extension = path.join(tempDir.path(), "context.ts");
-				await Bun.write(extension, `export default function (pi) { pi.on("context", ${handler[1]}); }`);
-				const loaded = await loadExtensions([extension], tempDir.path());
-				expect(loaded.errors).toHaveLength(0);
-				const runner = new ExtensionRunner(
-					loaded.extensions,
-					loaded.runtime,
-					tempDir.path(),
-					SessionManager.inMemory(tempDir.path()),
-					new ModelRegistry(authStorage),
-				);
-				const { aside, token } = markedNotice();
-				const out = await runner.emitContext([user, aside]);
-				// The structured clone drops symbols; the runner gives each clone back its original's identity.
-				expect(out.filter(message => (message as AsideProvenanceCarrier)[kAsideProvenance] === token)).toHaveLength(
-					1,
-				);
-			} finally {
-				authStorage.close();
-				tempDir.removeSync();
-			}
+		it(`survives an extension's context handler that ${what}`, async () => {
+			const { aside, token } = markedNotice();
+			// The runner's own structured clone drops symbols; it gives each clone its original's identity.
+			expect(holding(await throughExtension(handler, [aside]), token)).toBe(1);
 		});
 	}
+
+	for (const [what, handler] of [
+		["rebuilds every message from its JSON", "event => ({ messages: JSON.parse(JSON.stringify(event.messages)) })"],
+		["structured-clones what it keeps", "event => ({ messages: structuredClone(event.messages) })"],
+	] as const) {
+		it(`is lost, not guessed, when a context handler ${what}`, async () => {
+			const { aside, token } = markedNotice();
+			// Equal bytes at an equal position are not the aside: the notice counts as lost.
+			expect(holding(await throughExtension(handler, [aside]), token)).toBe(0);
+		});
+	}
+
+	it("never moves one notice's identity to an identical notice a handler kept", async () => {
+		const first = markedNotice();
+		const second = markedNotice();
+		const kept = await throughExtension("event => ({ messages: [event.messages[0], event.messages.at(-1)] })", [
+			first.aside,
+			second.aside,
+		]);
+		expect(holding(kept, first.token)).toBe(0);
+		expect(holding(kept, second.token)).toBe(1);
+		const cloned = await throughExtension(
+			"event => ({ messages: structuredClone([event.messages[0], event.messages.at(-1)]) })",
+			[first.aside, second.aside],
+		);
+		expect(holding(cloned, first.token)).toBe(0);
+		expect(holding(cloned, second.token)).toBe(0);
+	});
+
+	it("never gives a notice's identity to a message a handler built in its place", async () => {
+		const { aside, token } = markedNotice(undefined, "user");
+		const text = JSON.stringify((aside as { content: string }).content);
+		const out = await throughExtension(
+			`event => ({ messages: event.messages.map(m => m.role === "custom" ? { role: "user", content: ${text}, timestamp: 2 } : m) })`,
+			[aside],
+		);
+		expect(holding(out, token)).toBe(0);
+	});
 });

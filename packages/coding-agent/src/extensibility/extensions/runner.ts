@@ -2251,8 +2251,11 @@ export class ExtensionRunner {
 			const message = currentMessages[index];
 			if (!message) continue;
 			setContextHistoryIndex(message, index);
-			// `structuredClone` drops symbol-keyed properties: the clone stands for
-			// its original, so it carries the original's aside identity.
+			// `structuredClone` drops symbol-keyed properties: the runner's own clone
+			// of a message stands for that message, so it carries its aside identity.
+			// That is the only lineage the runner asserts; handler output keeps an
+			// identity only by carrying the object (or a spread of it) it was given,
+			// never by matching its bytes or position.
 			const original = messages[index];
 			if (original) copyAsideProvenance(message, original);
 		}
@@ -2283,14 +2286,7 @@ export class ExtensionRunner {
 						const historyIndex = getContextHistoryIndex(previousMessage);
 						if (historyIndex === undefined) continue;
 						setContextHistoryIndex(message, historyIndex);
-						// Compared with the symbols it would inherit, so an equal copy (one
-						// rebuilt from JSON, which drops symbols) still traces to its entry
-						// and keeps its aside identity; an unequal one keeps neither.
-						copyAsideProvenance(message, previousMessage);
-						if (!Bun.deepEquals(message, previousMessage)) {
-							clearContextHistoryIndex(message);
-							copyAsideProvenance(message, {});
-						}
+						if (!Bun.deepEquals(message, previousMessage)) clearContextHistoryIndex(message);
 					}
 					currentMessages = nextMessages;
 				}
@@ -2301,9 +2297,6 @@ export class ExtensionRunner {
 			const historyIndex = getContextHistoryIndex(message);
 			const historyMessage = historyIndex === undefined ? undefined : messages[historyIndex];
 			if (historyMessage && historyIndex !== undefined) setContextHistoryIndex(historyMessage, historyIndex);
-			// A message still traced to its history entry (the clone, or a copy the
-			// handlers returned that is equal to it) stands for that entry.
-			if (historyMessage) copyAsideProvenance(message, historyMessage);
 			const unchanged = historyMessage !== undefined && Bun.deepEquals(message, historyMessage);
 			clearContextHistoryIndex(message);
 			if (historyMessage) clearContextHistoryIndex(historyMessage);

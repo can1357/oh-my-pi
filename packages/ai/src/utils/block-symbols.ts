@@ -195,11 +195,12 @@ export function isPerCallContextMessage(message: PerCallContextMessageCarrier | 
  * carried onto every message converted or projected from it, so the loop can
  * tell at the request hand-off whether the provider-bound context still holds
  * that very aside rather than only text like it. An own enumerable
- * symbol-keyed property: object-spread transforms keep it, a conversion,
- * clone or cache that hands out another object for the same message copies it
- * ({@link copyAsideProvenance}), and it never persists or reaches the provider
- * wire. The producer gives the aside its identity when it builds it
- * ({@link markAsideProvenance}), before anything can convert it.
+ * symbol-keyed property: object-spread transforms keep it, and a conversion or
+ * clone made from the aside itself copies it ({@link copyAsideProvenance}).
+ * It is never inferred from equal bytes or an equal position: an object that
+ * does not descend from the aside does not carry it. It never persists or
+ * reaches the provider wire. The producer gives the aside its identity when
+ * it builds it ({@link markAsideProvenance}), before anything can convert it.
  */
 export const kAsideProvenance = Symbol("agent.message.asideProvenance");
 
@@ -213,9 +214,8 @@ export function markAsideProvenance<T extends AsideProvenanceCarrier>(message: T
 }
 
 /**
- * Make `target` carry exactly `source`'s identity, or none: for an object that
- * stands for `source` in a request (its conversion, its clone, a cached object
- * with the same bytes).
+ * Make `target` carry exactly `source`'s identity, or none: only for an object
+ * made from `source` itself (its conversion, its clone).
  */
 export function copyAsideProvenance(target: AsideProvenanceCarrier, source: AsideProvenanceCarrier): void {
 	const provenance = source[kAsideProvenance];

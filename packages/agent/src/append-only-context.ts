@@ -17,7 +17,7 @@
 import type { AgentTool } from "./types";
 import type { Context, Message, Tool } from "@oh-my-pi/pi-ai";
 import { toolWireSchema } from "@oh-my-pi/pi-ai";
-import { copyAsideProvenance } from "@oh-my-pi/pi-ai/utils/block-symbols";
+import { type AsideProvenanceCarrier, kAsideProvenance } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { normalizeTools } from "./agent-loop";
 import { messageEstimateVersion } from "./compaction/message-cache";
 import type { AgentContext, AgentMessage } from "./types";
@@ -376,12 +376,6 @@ export class AppendOnlyContextManager {
 				this.#messageDigests.length = stableCount;
 			}
 		}
-		// A kept entry stands in for the new message with the same bytes: it takes
-		// that message's aside identity (or none), which the bytes do not hold.
-		const kept = this.log.entries();
-		for (let i = 0; i < this.#lastSyncCount && i < kept.length; i++)
-			copyAsideProvenance(kept[i]!, normalizedMessages[i]);
-
 		// Append the diverged tail (or the full delta on a normal turn).
 		for (let i = this.#lastSyncCount; i < normalizedMessages.length; i++) {
 			const msg = normalizedMessages[i];
@@ -428,13 +422,18 @@ export class AppendOnlyContextManager {
 
 	/** Index of the first message whose serialized bytes differ from the
 	 * previously-synced log; equals `min(lastSyncCount, normalizedMessages.length)`
-	 * when nothing diverged. */
+	 * when nothing diverged. A message that carries a claimable aside's identity
+	 * (`kAsideProvenance`) also diverges from a kept entry that carries another
+	 * identity or none, whatever their bytes: equal bytes are not the same aside,
+	 * and the kept entry, not the new message, is what the provider receives. */
 	#longestStablePrefix(normalizedMessages: readonly unknown[]): number {
 		const bound = Math.min(this.#lastSyncCount, normalizedMessages.length);
+		const kept = this.log.entries();
 		for (let i = 0; i < bound; i++) {
-			if (this.#messageDigest(normalizedMessages[i]) !== this.#messageDigests[i]) {
-				return i;
-			}
+			if (this.#messageDigest(normalizedMessages[i]) !== this.#messageDigests[i]) return i;
+			const next = normalizedMessages[i] as AsideProvenanceCarrier | undefined;
+			const previous = kept[i] as AsideProvenanceCarrier | undefined;
+			if (next?.[kAsideProvenance] !== previous?.[kAsideProvenance]) return i;
 		}
 		return bound;
 	}
