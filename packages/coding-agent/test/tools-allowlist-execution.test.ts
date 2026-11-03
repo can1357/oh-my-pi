@@ -197,7 +197,14 @@ describe("other paths that run tools", () => {
 		let frame: unknown;
 		session.agent.streamFn = async (streamModel, context, options) => {
 			const handlers = options?.cursorExecHandlers;
-			frame = await handlers?.mcp?.({ toolName: "probe_send", name: "probe_send", toolCallId: "frame-1", args: {} });
+			frame = await handlers?.mcp?.({
+				toolName: "probe_send",
+				name: "probe_send",
+				providerIdentifier: "omp",
+				toolCallId: "frame-1",
+				args: {},
+				rawArgs: {},
+			});
 			return mock.stream(streamModel, context, options);
 		};
 		await session.agent.prompt("deliver a server exec frame");
