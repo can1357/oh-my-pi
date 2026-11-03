@@ -867,7 +867,7 @@ export class TurnRecovery {
 	 *  caller mark the exact moment its own run went live. `admit` runs before every claim and
 	 *  may wait; `false` means the prompt was superseded and must not claim the agent. */
 	promptAgentWithIdleRetry(
-		messages: AgentMessage[],
+		messages: AgentMessage[] | (() => AgentMessage[]),
 		options?: { toolChoice?: ToolChoice },
 		onClaimed?: () => void,
 		admit?: () => Promise<boolean>,
@@ -3311,16 +3311,32 @@ export class TurnRecovery {
 	 * Prompts the agent, waiting behind a run that already holds it. Resolves
 	 * `true` once this prompt's run finishes, or `false` when `admit` reports,
 	 * before a claim, that the prompt was superseded while it waited.
+	 * `messages` may be a commit function: it runs once, only when the agent is
+	 * free, synchronously before the claim, so a prompt cancelled while it waits
+	 * commits nothing it would have delivered.
 	 */
 	async #promptAgentWithIdleRetry(
-		messages: AgentMessage[],
+		messages: AgentMessage[] | (() => AgentMessage[]),
 		options?: { toolChoice?: ToolChoice },
 		onClaimed?: () => void,
 		admit?: () => Promise<boolean>,
 	): Promise<boolean> {
 		const deadline = Date.now() + 30_000;
+		let batch = typeof messages === "function" ? undefined : messages;
+		const waitForIdle = async (): Promise<void> => {
+			if (Date.now() >= deadline) {
+				throw new Error("Timed out waiting for prior agent run to finish before prompting.");
+			}
+			await this.#host.agent.waitForIdle();
+		};
 		for (;;) {
 			if (admit && !(await admit())) return false;
+			// The agent refuses a claim exactly while it streams; wait before committing.
+			if (batch === undefined && this.#host.agent.state.isStreaming) {
+				await waitForIdle();
+				continue;
+			}
+			batch ??= (messages as () => AgentMessage[])();
 			// A claim whose synchronous prefix throws (busy agent, missing
 			// model) returns an already-rejected promise. Probe for that
 			// before firing `onClaimed`: a busy-retry parked behind an
@@ -3329,7 +3345,7 @@ export class TurnRecovery {
 			// still surfaces at the await below.
 			let claimFailed = false;
 			try {
-				const claim = this.#host.agent.prompt(messages, options).then(undefined, error => {
+				const claim = this.#host.agent.prompt(batch, options).then(undefined, error => {
 					claimFailed = true;
 					throw error;
 				});
@@ -3344,10 +3360,7 @@ export class TurnRecovery {
 				if (!(err instanceof AgentBusyError)) {
 					throw err;
 				}
-				if (Date.now() >= deadline) {
-					throw new Error("Timed out waiting for prior agent run to finish before prompting.");
-				}
-				await this.#host.agent.waitForIdle();
+				await waitForIdle();
 			}
 		}
 	}

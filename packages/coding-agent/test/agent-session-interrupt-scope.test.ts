@@ -11,6 +11,7 @@ import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { TtsrManager } from "@oh-my-pi/pi-coding-agent/export/ttsr";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -671,6 +672,57 @@ describe("interrupt scope: races with the stopped run", () => {
 				unregister();
 				server.stop(true);
 			}
+		});
+	}
+
+	// A prompt waiting behind another run commits what it delivers only at its claim: cancelled
+	// while it waits, it leaves the approved plan to be delivered by the next prompt.
+	for (const stop of [false, true]) {
+		it(`a prompt ${stop ? "cancelled" : "dispatched"} after waiting behind another run delivers the approved plan once`, async () => {
+			const started = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			const h = await setup([
+				async () => {
+					started.resolve();
+					await release.promise;
+					return { content: ["autonomous done"] };
+				},
+			]);
+			const planUrl = "local://approved-plan.md";
+			const planPath = resolveLocalUrlToPath(planUrl, {
+				getArtifactsDir: () => h.manager.getArtifactsDir(),
+				getSessionId: () => h.manager.getSessionId(),
+			});
+			await Bun.write(planPath, "# Approved plan\n\nAPPROVED-PLAN-CONTENT\n");
+			h.session.setPlanReferencePath(planUrl);
+			const hook = h.holdHook();
+			const dropped: string[] = [];
+			h.session.setPromptDropped(prompt => dropped.push(prompt.text));
+			const waitingClient = h.session.prompt("execute the approved plan");
+			await hook.entered;
+			const autonomous = h.agent.prompt("older autonomous task");
+			await started.promise;
+			const waiting = Promise.withResolvers<void>();
+			const waitForIdle = h.agent.waitForIdle.bind(h.agent);
+			h.agent.waitForIdle = () => {
+				waiting.resolve();
+				return waitForIdle();
+			};
+			hook.release();
+			await waiting.promise;
+			const stopping = stop ? h.session.abort({ reason: USER_INTERRUPT_LABEL }) : Promise.resolve();
+			release.resolve();
+			await Promise.all([autonomous, waitingClient, stopping]);
+			await h.session.waitForIdle();
+			expect(dropped).toEqual(stop ? ["execute the approved plan"] : []);
+
+			await h.session.prompt("continue executing the approved plan");
+			await h.session.waitForIdle();
+			const planReferences = h.session.messages.filter(
+				message => message.role === "custom" && message.customType === "plan-mode-reference",
+			);
+			expect(planReferences).toHaveLength(1);
+			expect(JSON.stringify(h.mock.calls.at(-1)!.context.messages)).toContain("APPROVED-PLAN-CONTENT");
 		});
 	}
 });
