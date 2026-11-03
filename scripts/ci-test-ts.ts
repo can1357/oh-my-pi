@@ -3,7 +3,7 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { collectTestsUnder, testFilesWithoutBucket } from "./test-file-discovery";
+import { collectTestsUnder, testFilesWithoutBucket, workspacePackageDirs } from "./test-file-discovery";
 
 type Mode =
 	| "all"
@@ -245,27 +245,18 @@ async function scriptsTestCommand(extraArgs: string[] = []): Promise<TestCommand
 	};
 }
 
-async function workspacePackageDirs(): Promise<string[]> {
-	const manifest = (await Bun.file(path.join(repoRoot, "package.json")).json()) as {
-		workspaces: { packages: string[] };
-	};
-	const dirs: string[] = [];
-	for (const pattern of manifest.workspaces.packages) {
-		for await (const manifestPath of new Bun.Glob(`${pattern}/package.json`).scan({ cwd: repoRoot })) {
-			dirs.push(path.dirname(manifestPath).split(path.sep).join("/"));
-		}
-	}
-	return dirs.sort();
-}
-
 // Test files under a workspace package or `.omp/tests` that no command above
 // runs. The modes CI and `bun run test` use refuse to start while any exists, so
 // a package added without a bucket fails CI instead of going untested.
 async function uncoveredTestFiles(): Promise<string[]> {
-	return testFilesWithoutBucket(repoRoot, [...(await workspacePackageDirs()), path.dirname(projectToolTestFile)], {
-		files: [projectToolTestFile],
-		dirs: [...fastWorkspacePackages, ...nativeAndIntegrationPackages, codingAgentDir],
-	});
+	return testFilesWithoutBucket(
+		repoRoot,
+		[...(await workspacePackageDirs(repoRoot)), path.dirname(projectToolTestFile)],
+		{
+			files: [projectToolTestFile],
+			dirs: [...fastWorkspacePackages, ...nativeAndIntegrationPackages, codingAgentDir, "scripts"],
+		},
+	);
 }
 
 function hasAnyMarker(content: string, markers: string[]): boolean {

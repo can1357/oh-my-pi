@@ -45,6 +45,26 @@ export async function collectTestsUnder(root: string, baseDir: string, seen = ne
 	return files;
 }
 
+/**
+ * The workspace package directories the root `package.json` declares, relative to `repoRoot`. Links
+ * are followed, as `bun` follows them when it resolves workspaces, so a linked package is listed too.
+ */
+export async function workspacePackageDirs(repoRoot: string): Promise<string[]> {
+	const manifest = (await Bun.file(path.join(repoRoot, "package.json")).json()) as {
+		workspaces: { packages: string[] };
+	};
+	const dirs: string[] = [];
+	for (const pattern of manifest.workspaces.packages) {
+		for await (const manifestPath of new Bun.Glob(`${pattern}/package.json`).scan({
+			cwd: repoRoot,
+			followSymlinks: true,
+		})) {
+			dirs.push(path.dirname(manifestPath).split(path.sep).join("/"));
+		}
+	}
+	return dirs.sort();
+}
+
 /** What CI runs: test files it names, and directories in which it runs every test `bun test` finds. */
 export interface Buckets {
 	files: string[];
@@ -53,20 +73,23 @@ export interface Buckets {
 
 /**
  * The test files below `roots` (paths relative to `repoRoot`) that no bucket runs. A file is run when
- * a bucket names it or it lies below a bucketed directory, by its own spelling or by its real path: a
- * link to a test CI runs is the same test.
+ * a bucket names it or it lies below a bucketed directory by its own spelling, or when its real path
+ * is the real path of a file a bucket runs: a link to a test CI runs is the same test. A link to a
+ * file a bucketed directory holds but `bun test` there would not run (not a test name, or in
+ * `node_modules` or a dot-directory) is not covered.
  */
 export async function testFilesWithoutBucket(repoRoot: string, roots: string[], buckets: Buckets): Promise<string[]> {
 	const real = (file: string) => fs.realpath(path.join(repoRoot, file)).catch(() => undefined);
-	const realFiles = new Set(await Promise.all(buckets.files.map(real)));
-	const realDirs = (await Promise.all(buckets.dirs.map(real))).filter(dir => dir !== undefined);
+	const run = new Set<string | undefined>(await Promise.all(buckets.files.map(real)));
+	for (const dir of buckets.dirs) {
+		const files = await collectTestsUnder(path.join(repoRoot, dir), repoRoot).catch(() => []);
+		for (const file of await Promise.all(files.map(real))) run.add(file);
+	}
 	const missing: string[] = [];
 	for (const root of roots) {
 		for (const file of await collectTestsUnder(path.join(repoRoot, root), repoRoot)) {
 			if (buckets.files.includes(file) || buckets.dirs.some(dir => file.startsWith(`${dir}/`))) continue;
-			const realFile = await real(file);
-			if (realFile && (realFiles.has(realFile) || realDirs.some(dir => realFile.startsWith(`${dir}${path.sep}`))))
-				continue;
+			if (run.has(await real(file))) continue;
 			missing.push(file);
 		}
 	}

@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { collectTestsUnder, testFilesWithoutBucket } from "./test-file-discovery";
+import { collectTestsUnder, testFilesWithoutBucket, workspacePackageDirs } from "./test-file-discovery";
 
 // CI runs the files `collectTestsUnder` returns and nothing else, and its guard reports a test file
 // no bucket runs. A name `bun test` discovers that the collector misses is a test CI never runs.
@@ -79,25 +79,60 @@ describe("collectTestsUnder", () => {
 });
 
 describe("testFilesWithoutBucket", () => {
-	it("reports tests no bucket runs, and not links to tests a bucket runs", async () => {
+	it("reports exactly the tests no bucket command runs, through links in both directions", async () => {
 		const repo = await fs.mkdtemp(path.join(os.tmpdir(), "test-file-guard-"));
 		try {
 			const test = 'import { test } from "bun:test";\ntest("t", () => {});\n';
 			await Bun.write(path.join(repo, "packages/run/a.test.ts"), test);
+			await Bun.write(path.join(repo, "packages/run/helper.ts"), test);
+			await Bun.write(path.join(repo, "packages/run/.hidden/h.test.ts"), test);
+			await Bun.write(path.join(repo, "packages/run/node_modules/dep/d.test.ts"), test);
 			await Bun.write(path.join(repo, "packages/new/b.test.ts"), test);
+			await Bun.write(path.join(repo, "packages/new/reached.test.ts"), test);
+			await Bun.write(path.join(repo, "scripts/s.test.ts"), test);
 			await Bun.write(path.join(repo, ".omp/tests/tui.test.ts"), test);
 			await Bun.write(path.join(repo, ".omp/tests/zzz-new.test.ts"), test);
 			// Links sort before their targets, so the collector reports the link's spelling.
 			await fs.symlink("tui.test.ts", path.join(repo, ".omp/tests/aaa-alias.test.ts"));
+			await fs.symlink("../../scripts/s.test.ts", path.join(repo, ".omp/tests/aab-script.test.ts"));
 			await fs.symlink("../run/a.test.ts", path.join(repo, "packages/new/a-alias.test.ts"));
+			// `bun test` in packages/run runs reached.test.ts through this link.
+			await fs.symlink("../new/reached.test.ts", path.join(repo, "packages/run/outward.test.ts"));
+			// Targets packages/run holds but `bun test` there does not run.
+			await fs.symlink("../run/helper.ts", path.join(repo, "packages/new/c-helper.test.ts"));
+			await fs.symlink("../run/.hidden/h.test.ts", path.join(repo, "packages/new/d-hidden.test.ts"));
+			await fs.symlink("../run/node_modules/dep/d.test.ts", path.join(repo, "packages/new/e-dep.test.ts"));
 
 			const missing = await testFilesWithoutBucket(repo, ["packages/run", "packages/new", ".omp/tests"], {
 				files: [".omp/tests/tui.test.ts"],
-				dirs: ["packages/run"],
+				dirs: ["packages/run", "scripts"],
 			});
-			expect(missing.sort()).toEqual([".omp/tests/zzz-new.test.ts", "packages/new/b.test.ts"]);
+			expect(missing.sort()).toEqual([
+				".omp/tests/zzz-new.test.ts",
+				"packages/new/b.test.ts",
+				"packages/new/c-helper.test.ts",
+				"packages/new/d-hidden.test.ts",
+				"packages/new/e-dep.test.ts",
+			]);
 		} finally {
 			await fs.rm(repo, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("workspacePackageDirs", () => {
+	it("lists a workspace package reached through a link, as bun resolves it", async () => {
+		const base = await fs.mkdtemp(path.join(os.tmpdir(), "test-file-workspaces-"));
+		try {
+			const repo = path.join(base, "repo");
+			await Bun.write(path.join(repo, "package.json"), JSON.stringify({ workspaces: { packages: ["packages/*"] } }));
+			await Bun.write(path.join(repo, "packages/real/package.json"), "{}");
+			await Bun.write(path.join(base, "outside/package.json"), "{}");
+			await fs.symlink(path.join(base, "outside"), path.join(repo, "packages/linked"));
+
+			expect(await workspacePackageDirs(repo)).toEqual(["packages/linked", "packages/real"]);
+		} finally {
+			await fs.rm(base, { recursive: true, force: true });
 		}
 	});
 });
