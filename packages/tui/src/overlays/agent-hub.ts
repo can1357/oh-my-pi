@@ -298,6 +298,12 @@ export interface AgentHubDeps<TRecord extends AgentRecordLike = AgentRecordLike>
 	requestRender: () => void;
 	/** Registry supplying the roster. */
 	registry: AgentHubRegistry<TRecord>;
+	/**
+	 * Whether a registry ref belongs to the open session's tree. The host registry
+	 * outlives `/new` and session switches, so earlier sessions' agents stay
+	 * registered; absent, every ref is listed.
+	 */
+	inSession?: (ref: AgentRecordLike) => boolean;
 	/** Resolve lifecycle actions lazily when a local action needs them. */
 	lifecycle: () => AgentLifecycleLike<TRecord>;
 	/** Host message bus supplying unread counts. */
@@ -338,6 +344,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 	implements SelectListMouseTarget
 {
 	#registry: AgentHubRegistry<TRecord>;
+	#inSession: ((ref: AgentRecordLike) => boolean) | undefined;
 	#observers: SessionObserverRegistry;
 	#getRoleInfo: ((role: string) => AgentRoleDisplay) | undefined;
 	#transcript: AgentTranscriptSource;
@@ -488,6 +495,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		this.#activity = deps.activity;
 		this.#manageActivityLive = deps.manageActivityLive ?? true;
 		this.#registry = deps.registry;
+		this.#inSession = deps.inSession;
 		this.#observers = deps.observers;
 		this.#getRoleInfo = deps.getRoleInfo;
 		this.#transcript = deps.transcript;
@@ -928,7 +936,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 			columns: AGENT_COLUMNS,
 			items: this.#rows.map(ref => this.#pickerAgentItem(ref)),
 			selected: selected?.id ?? null,
-			total: this.#registry.list().length - (this.#registry.get(MAIN_AGENT_ID) ? 1 : 0),
+			total: this.#sessionRefs().length,
 			state: this.#rows.length === 0 && this.#loadingPersistedSubagents ? "loading" : "ready",
 			empty: "No agents in this session. Finished, parked and killed subagents stay with the session that created them.",
 			actions,
@@ -1556,9 +1564,14 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		);
 	}
 
+	/** Registry refs shown in this session's roster, excluding the main agent. */
+	#sessionRefs(): TRecord[] {
+		return this.#registry.list().filter(ref => ref.id !== MAIN_AGENT_ID && (this.#inSession?.(ref) ?? true));
+	}
+
 	#refreshRows(): void {
 		const selectedId = this.#rows[this.#selectedRow]?.id;
-		const refs = this.#registry.list().filter(ref => ref.id !== MAIN_AGENT_ID);
+		const refs = this.#sessionRefs();
 		this.#observedById = new Map();
 		for (const session of this.#observers.getSessions()) this.#observedById.set(session.id, session);
 		const live = new Set(refs);

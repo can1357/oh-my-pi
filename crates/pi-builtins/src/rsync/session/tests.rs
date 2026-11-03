@@ -837,3 +837,65 @@ fn files_from_forwarding_collapses_lines() {
 	assert_eq!(&*lock(&buf), b"a\0b/c\0last\0\0");
 	assert_eq!(lock(&implied).check(b"b/c", false), crate::rsync::filter::Verdict::Include);
 }
+
+/// A `--log-file` that cannot be opened is reported as rsync 3.5.1 reports
+/// it, and the copy goes on. Measured with rsync 3.5.1 under `LC_ALL=C`: a
+/// missing directory, a directory, and (not as root) a directory it may not
+/// write give the client `rsync: [client] failed to open log-file …` on
+/// stderr and `Ignoring "log file" setting.` on stdout, and a local copy's
+/// server half (`-M--log-file=`) both lines on stderr as `[Receiver]`; an
+/// empty name means syslog and prints nothing on either side. Before, the
+/// client named itself `[sender]`, and an empty name opened the current
+/// directory and failed with `Is a directory (21)`.
+#[cfg(unix)]
+#[test]
+fn a_log_file_that_cannot_be_opened_is_reported_as_rsync_does() {
+	use std::os::unix::fs::PermissionsExt;
+	let dir = tempfile::tempdir().unwrap();
+	make_tree(&dir.path().join("src"));
+	fs::create_dir_all(dir.path().join("adir")).unwrap();
+	fs::create_dir_all(dir.path().join("ro")).unwrap();
+	fs::set_permissions(dir.path().join("ro"), fs::Permissions::from_mode(0o555)).unwrap();
+	let d = dir.path().display().to_string();
+	let mut cases = vec![
+		("missing", format!("{d}/nope/x.log"), Some(format!("{d}/nope/x.log: No such file or directory (2)"))),
+		("dir", format!("{d}/adir"), Some(format!("{d}/adir: Is a directory (21)"))),
+		("empty", String::new(), None),
+	];
+	if !nix::unistd::geteuid().is_root() {
+		cases.push(("unwritable", format!("{d}/ro/x.log"), Some(format!("{d}/ro/x.log: Permission denied (13)"))));
+	}
+	for (case, path, failure) in cases {
+		for server in [false, true] {
+			let _ = fs::remove_dir_all(dir.path().join("dst"));
+			let arg = if server { format!("-M--log-file={path}") } else { format!("--log-file={path}") };
+			let (code, out, err) = run(&["-a", &arg, "src/", "dst/"], dir.path());
+			let (want_out, want_err) = match (&failure, server) {
+				(None, _) => (String::new(), String::new()),
+				(Some(why), false) => {
+					("Ignoring \"log file\" setting.\n".to_string(), format!("rsync: [client] failed to open log-file {why}\n"))
+				},
+				(Some(why), true) => (
+					String::new(),
+					format!("rsync: [Receiver] failed to open log-file {why}\nIgnoring \"log file\" setting.\n"),
+				),
+			};
+			assert_eq!((code, out, err), (0, want_out, want_err), "{case} server={server}");
+			assert_eq!(fs::read(dir.path().join("dst/sub/b")).unwrap(), b"x\n", "{case} server={server}");
+		}
+	}
+}
+
+/// The builtin run as a remote server (`--server`, as a client's remote
+/// shell starts it) names itself `[server]` when its `--log-file` cannot be
+/// opened, as rsync 3.5.1's remote server does while it is starting up.
+#[cfg(unix)]
+#[test]
+fn a_remote_server_names_itself_server_when_its_log_cannot_be_opened() {
+	let dir = tempfile::tempdir().unwrap();
+	let log = dir.path().join("nope/x.log");
+	let arg = format!("--log-file={}", log.display());
+	let (_, _, err) = run(&["--server", "-logDtpre.iLsfxCIvu", &arg, ".", "dst/"], dir.path());
+	let first = err.lines().next().unwrap_or_default();
+	assert_eq!(first, format!("rsync: [server] failed to open log-file {}: No such file or directory (2)", log.display()), "{err}");
+}
