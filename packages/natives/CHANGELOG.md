@@ -20,6 +20,29 @@
 - Fixed the bash tool's shell expanding a background command's first word twice, so a command substitution there ran twice and `${v:=…}` or `n++` in it changed the calling shell; the word is now expanded once, in the job, as bash does ([#17802](https://github.com/can1357/oh-my-pi/pull/17802) by [@sjawhar](https://github.com/sjawhar))
 - Fixed the bash tool's shell giving no process to a background builtin, function, subshell, group or list: `$!` was empty, so `wait "$!"` failed and `kill "$!"` reached nothing; on Linux and macOS each background job now starts as a process of its own at `&`, which `$!`, `wait`, `kill`, `jobs -p` and `$BASHPID` reach, and which `exec cmd &` makes the command, as in Bash ([#17802](https://github.com/can1357/oh-my-pi/pull/17802) by [@sjawhar](https://github.com/sjawhar))
 - Fixed the bash tool's shell expanding a background external command's words and opening its redirections' files before the job started: a substitution that waited for the shell's next command hung the shell, and after a redirection that failed, a later redirection's substitution still ran; the words now expand in the job after `$!` is set, and each redirection's word only once the ones before it are made, as in Bash ([#17802](https://github.com/can1357/oh-my-pi/pull/17802) by [@sjawhar](https://github.com/sjawhar))
+### Changed
+
+- Made the bash tool's shell faster on string appends (`s+=x`), sourcing files full of function definitions (each body compiles on first call), quoted `"$var"`/`"$1"` arguments and file redirections
+
+### Fixed
+
+- Fixed associative arrays slowing down quadratically as they grow: 100,000 inserts and lookups took about 90 seconds and now take about a tenth of a second
+
+## [18.16.0] - 2026-11-02
+
+### Added
+
+- Added `macOSFrontApp()`, which reads the app macOS has in front and can put it back in front for a while (`keepInFront`) without stopping for the user's typing ([#16284](https://github.com/can1357/oh-my-pi/pull/16284) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Changed
+
+- Replaced the embedded shell interpreter behind `Shell` and `executeShell` with pi's own bash engine, now part of `pi-shell`: bash 5.3 semantics, including alias bodies with pipes, subshells and separators
+
+### Fixed
+
+- Fixed iPhone Mirroring clicks, scrolls and keys reporting success while the mirror showed a connection screen such as "iPhone in Use" instead of the phone; they now fail and quote that screen ([#17755](https://github.com/can1357/oh-my-pi/pull/17755) by [@will-bogusz](https://github.com/will-bogusz))
+- `parseKey`/`matchesKey` now recognize the parameterless `CSI P`/`CSI Q`/`CSI S` (and `CSI 1 <letter>`) forms that kitty-protocol terminals such as Ghostty send for unmodified F1/F2/F4, and modified F2–F9 no longer match other keys (e.g. Ctrl+PageDown as Ctrl+F8) ([#17812](https://github.com/can1357/oh-my-pi/issues/17812)).
+- Added `installSqliteLockShim()` (Linux), which moves Bun's SQLite record locks onto open-file-description locks that no other close of the file releases, and `heldFileKind(path)`, which reports a file this process holds open and locked. Both are also on `@oh-my-pi/pi-natives/sqlite-locks`, which loads the addon on first call ([#15586](https://github.com/can1357/oh-my-pi/issues/15586))
 
 ## [18.15.0] - 2026-11-01
 
