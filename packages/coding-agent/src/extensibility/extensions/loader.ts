@@ -42,6 +42,7 @@ import { resolvePath, withHostGuard } from "../utils";
 import { type ComposerShape, isBuiltinComposerShape } from "../../ui/styles/composer/shapes";
 import { sanitizeDisplayLine } from "../inventory/display-text";
 import { notifyTranscriptPresentersChanged } from "../../session/transcript/transcript-presentation";
+import { ExtensionRegistrations } from "./registrations";
 import type {
 	AssistantTextRenderer,
 	AssistantThinkingRenderer,
@@ -246,6 +247,10 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		const list = this.extension.handlers.get(event) ?? [];
 		list.push(handler);
 		this.extension.handlers.set(event, list);
+	}
+
+	onSuspensionChange(listener: (suspended: boolean) => void): () => void {
+		return this.extension.registrations?.onSuspensionChange(listener) ?? (() => {});
 	}
 
 	registerTool<TParams extends TSchema = TSchema, TDetails = unknown>(tool: ToolDefinition<TParams, TDetails>): void {
@@ -501,6 +506,7 @@ function createExtension(extensionPath: string, resolvedPath: string): Extension
 		commands: new Map(),
 		flags: new Map(),
 		shortcuts: new Map(),
+		registrations: new ExtensionRegistrations(),
 	};
 }
 
@@ -513,6 +519,7 @@ async function runExtensionFactory(
 	factory: ExtensionFactory,
 	api: ExtensionAPI,
 	runtime: IExtensionRuntime,
+	extension: Extension,
 ): Promise<void> {
 	const providerRegistrationCheckpoint = [...runtime.pendingProviderRegistrations];
 
@@ -524,6 +531,8 @@ async function runExtensionFactory(
 			runtime.pendingProviderRegistrations.length,
 			...providerRegistrationCheckpoint,
 		);
+		// The failed load never joins a runner, so nothing else would release what it registered.
+		extension.registrations?.release();
 		throw error;
 	}
 }
@@ -565,7 +574,7 @@ async function bindExtension(
 	try {
 		const extension = createExtension(extensionPath, imported.resolvedPath);
 		const api = new ConcreteExtensionAPI(extension, runtime, cwd, eventBus);
-		await withHostGuard(() => runExtensionFactory(factory, api, runtime));
+		await withHostGuard(() => runExtensionFactory(factory, api, runtime, extension));
 
 		return { extension, error: null };
 	} catch (err) {
@@ -586,7 +595,7 @@ export async function loadExtensionFromFactory(
 ): Promise<Extension> {
 	const extension = createExtension(name, name);
 	const api = new ConcreteExtensionAPI(extension, runtime, cwd, eventBus);
-	await runExtensionFactory(factory, api, runtime);
+	await runExtensionFactory(factory, api, runtime, extension);
 	return extension;
 }
 
