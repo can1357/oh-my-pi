@@ -299,7 +299,45 @@ describe("trackTestLifetime", () => {
 			`,
 		});
 
-		expect(run.output).toContain("tracked files run their tests one at a time");
-		expect(run.output).not.toContain("timed out and may still be running");
+		// The thrown error, not Bun's excerpt of the helper's source around it.
+		expect(run.output).toContain("error: trackTestLifetime: tracked files run their tests one at a time");
+		expect(run.outcome("b")).toBe("fail");
+		expect(run.output).not.toMatch(/error: "[^"]+" timed out/);
+	}, 60_000);
+
+	test("reads a body's settlement through the native then, not one the promise carries", async () => {
+		const [escape, resolved] = await Promise.all([
+			runFixtures({
+				// A pending promise whose own then reports settlement at once.
+				"pending.test.ts": lateWriteAfter(`
+					test("returns a promise with its own then", () => {
+						const pending = Bun.sleep(400).then(() => {
+							shared.key = "stale";
+						});
+						Object.defineProperty(pending, "then", { value: (onSettled: () => void) => onSettled() });
+						return pending;
+					}, 100);
+				`),
+			}),
+			runFixtures({
+				// A settled promise whose own then never calls back.
+				"resolved.test.ts": `
+					import { trackTestLifetime } from HELPER;
+					const { test } = trackTestLifetime();
+					test("returns a settled promise with a silent then", () => {
+						const settled = Promise.resolve();
+						Object.defineProperty(settled, "then", { value: () => settled });
+						return settled;
+					});
+					test("healthy after it", () => {});
+				`,
+			}),
+		]);
+
+		expect(escape.outcome("passes only on the late write")).toBe("fail");
+		expect(escape.output).toContain(refusal("returns a promise with its own then"));
+		expect(resolved.outcome("returns a settled promise with a silent then")).toBe("pass");
+		expect(resolved.outcome("healthy after it")).toBe("pass");
+		expect(resolved.exitCode).toBe(0);
 	}, 60_000);
 });

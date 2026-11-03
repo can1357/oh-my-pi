@@ -50,9 +50,14 @@ function refuseAfterTimeout(): void {
 	}
 }
 
+/** The native `then`, taken before any test runs: a promise's own `then` may be replaced. */
+const nativeThen = Promise.prototype.then;
+
 /**
  * Run a test or hook body, and keep it in {@link unsettled} until the promise it returns settles.
- * Any native promise counts, also one from another realm (`node:vm`), which Bun awaits too.
+ * Any native promise counts, also one from another realm (`node:vm`), which Bun awaits too, and its
+ * settlement is read through the native `then`, as Bun reads it, not through a `then` the promise
+ * may carry of its own.
  */
 function runTracked<T>(name: string, fn: (...args: unknown[]) => T, args: unknown[]): T {
 	const result = fn(...args);
@@ -62,7 +67,7 @@ function runTracked<T>(name: string, fn: (...args: unknown[]) => T, args: unknow
 		const settle = (): void => {
 			unsettled.delete(entry);
 		};
-		(result as Promise<unknown>).then(settle, settle);
+		Reflect.apply(nativeThen, result, [settle, settle]);
 	}
 	return result;
 }
@@ -137,16 +142,13 @@ let lastTestTornDown = true;
  * another test starts says nothing about a timeout.
  */
 function startTest(): void {
-	if (!lastTestTornDown) {
-		throw new Error(
-			"trackTestLifetime: a tracked test started before the previous one reached its teardown; tracked files run their tests one at a time (no describe.concurrent, test.concurrent or --concurrent)",
-		);
-	}
+	if (!lastTestTornDown) throw new Error(ONE_AT_A_TIME);
 	lastTestTornDown = false;
-	// Runs after the test's teardown even when an `afterEach` timed out and Bun skipped the rest.
-	bunOnTestFinished(noteTeardown);
 	refuseAfterTimeout();
 }
+
+const ONE_AT_A_TIME =
+	"trackTestLifetime: tracked files run their tests one at a time (no describe.concurrent, test.concurrent or --concurrent)";
 
 /**
  * The start of a test's teardown: note a body still running then as timed out. Every tracked
