@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- The extension asks for Chrome's `downloads` permission to tell omp where Chrome saved a download a relay tab started ([#17893](https://github.com/can1357/oh-my-pi/pull/17893) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.18.1] - 2026-11-08
 
 ### Changed
@@ -11,10 +15,6 @@
 ### Fixed
 
 - Fixed a password manager's inline autofill menu locking omp out of a tab it drives: the extension empties and hides such frames in that tab and retries the attach or command Chrome refused ([#16908](https://github.com/can1357/oh-my-pi/pull/16908) by [@will-bogusz](https://github.com/will-bogusz))
-
-### Added
-
-- The extension asks for Chrome's `downloads` permission to tell omp where Chrome saved a download a relay tab started
 
 ## [18.13.3] - 2026-10-28
 

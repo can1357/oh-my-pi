@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Browser relay tabs report their downloads: `tab.waitForDownload()` and `tab.downloads()` return each file where Chrome saved it instead of failing with "Browser target is not found", and an open with `downloads` says the relay cannot choose Chrome's folder ([#17893](https://github.com/can1357/oh-my-pi/pull/17893) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.18.1] - 2026-11-08
 
 ### Breaking Changes
@@ -193,10 +197,6 @@
 - Out-of-credit provider errors now fail immediately instead of retrying for long periods; Retry works promptly once the account is funded.
 - DeepSeek-style `*** End` and `*** End Patch` markers are no longer written into files or truncate later edits
 - Composer prediction ghost text no longer vanishes when advisor messages arrive
-
-### Fixed
-
-- Browser relay tabs report their downloads: `tab.waitForDownload()` and `tab.downloads()` return each file where Chrome saved it instead of failing with "Browser target is not found", and an open with `downloads` says the relay cannot choose Chrome's folder
 
 ## [18.16.0] - 2026-11-02
 
