@@ -6406,11 +6406,16 @@ mod tests {
 	/// shell (a builtin, a function, a subshell, a group or a list) had no
 	/// process: `$!` was empty, so `wait $!` failed and `kill $!` reached
 	/// nothing. `exec cmd &` is that process becoming `cmd`, found in `PATH`
-	/// and never a function, after its redirections.
+	/// and never a function, after its redirections. The command word's first
+	/// field names the command however many fields it has, and a word that
+	/// expands to none leaves the next word to: such a job ran in the shell,
+	/// apart from `$!`. A file in `PATH` that is not executable fails with
+	/// status 126, as in Bash, not "not found".
 	#[cfg(unix)]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn a_background_job_is_a_process_of_its_own() {
 		let same = "[ \"$(cat pidf)\" = \"$p\" ] && echo SAME || echo DIFF";
+		let noexec = "mkdir bin; printf ':\\n' >bin/prog; chmod 600 bin/prog; ";
 		let mismatches = rows_unlike_bash(&[
 			("subshell status", "(exit 42) & wait $!; echo \"S=$?\"", "S=42\n"),
 			("builtin status", "false & wait $!; echo \"S=$?\"", "S=1\n"),
@@ -6468,6 +6473,60 @@ mod tests {
 				"exec /bin/echo hi >out & wait $!; echo \"S=$? out=$(cat out)\"",
 				"S=0 out=hi\n",
 			),
+			(
+				"a command word of two fields",
+				&format!("cmd='/bin/sh -c'; $cmd 'echo $$ >pidf' & p=$!; wait \"$p\"; {same}"),
+				"SAME\n",
+			),
+			(
+				"an array command word",
+				&format!(
+					"cmd=(/bin/sh -c 'echo $$ >pidf'); \"${{cmd[@]}}\" & p=$!; wait \"$p\"; {same}"
+				),
+				"SAME\n",
+			),
+			(
+				"an empty first word",
+				&format!("e=; $e /bin/sh -c 'echo $$ >pidf' & p=$!; wait \"$p\"; {same}"),
+				"SAME\n",
+			),
+			(
+				"an empty first word before a redirection",
+				&format!("e=; $e >f /bin/sh -c 'echo $$ >pidf' & p=$!; wait \"$p\"; {same}; ls"),
+				"SAME\nf\npidf\n",
+			),
+			(
+				"a command word of two fields, killed",
+				"cmd='/bin/sleep 30'; $cmd & p=$!; kill \"$p\"; wait \"$p\"; echo \"S=$?\"",
+				"S=143\n",
+			),
+			(
+				"exec of a file without execute permission",
+				&format!("{noexec}PATH=\"$PWD/bin\" exec prog 2>/dev/null & wait $!; echo \"S=$?\""),
+				"S=126\n",
+			),
+			(
+				"a command without execute permission",
+				&format!("{noexec}PATH=\"$PWD/bin\" prog 2>/dev/null & wait $!; echo \"S=$?\""),
+				"S=126\n",
+			),
+			(
+				"a command without execute permission, in the foreground",
+				&format!("{noexec}PATH=\"$PWD/bin\" prog 2>/dev/null; echo \"S=$?\""),
+				"S=126\n",
+			),
+			(
+				"an executable later in PATH wins",
+				"mkdir b1 b2; printf ':\\n' >b1/prog; chmod 600 b1/prog; printf '#!/bin/sh\\necho \
+				 second\\n' >b2/prog; chmod 755 b2/prog; PATH=\"$PWD/b1:$PWD/b2\" prog & wait $!; \
+				 echo \"S=$?\"",
+				"second\nS=0\n",
+			),
+			(
+				"exec of a directory",
+				"mkdir -p bin/prog; PATH=\"$PWD/bin\" exec prog 2>/dev/null & wait $!; echo \"S=$?\"",
+				"S=127\n",
+			),
 		])
 		.await;
 		assert!(mismatches.is_empty(), "{mismatches:#?}");
@@ -6476,10 +6535,13 @@ mod tests {
 	/// A background external command's words are expanded in the job, after
 	/// `$!` is set and this shell has gone on, and each redirection's word
 	/// only once the redirections before it are made, as in the child Bash
-	/// forks. The shell expanded them all before it started the job: a
-	/// substitution that reads a FIFO the next command writes waited for ever,
-	/// and under `ulimit -n 9` a later redirection's substitution ran although
-	/// `12>g` had failed.
+	/// forks, with the descriptors they set: a later word's substitution
+	/// writes to the standard error and reads the standard input they leave.
+	/// The shell expanded them all before it started the job: a substitution
+	/// that reads a FIFO the next command writes waited for ever, and under
+	/// `ulimit -n 9` a later redirection's substitution ran although `12>g` had
+	/// failed. A process substitution's pipe lands below `ulimit -n`, as in
+	/// Bash.
 	#[cfg(unix)]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn a_background_command_expands_its_words_in_the_job() {
@@ -6523,6 +6585,55 @@ mod tests {
 				"S=0\nmade\n",
 			),
 			("an assignment alone", "x=1 & wait $!; echo \"S=$? X=<$x>\"", "S=0 X=<>\n"),
+			(
+				"a later word sees the standard error before it",
+				"/bin/echo ok 2>err >\"$(echo BAD >&2; echo out)\" & wait $!; echo \"ERR=$(cat \
+				 err)\"; echo \"OUT=$(cat out)\"",
+				"ERR=BAD\nOUT=ok\n",
+			),
+			(
+				"a later word reads the standard input before it",
+				"echo input >in; /bin/echo hi <in >\"$(read line; echo \"$line\")\" & wait $!; echo \
+				 \"S=$?\"; test -e input && echo made || echo none",
+				"S=0\nmade\n",
+			),
+			(
+				"a later word sees a closed standard error",
+				"/bin/echo ok 2>&- >\"$(echo BAD >&2; echo out)\" & wait $!; echo \"OUT=$(cat out)\"",
+				"OUT=ok\n",
+			),
+			(
+				"a later word sees descriptor 3",
+				"/bin/echo ok 3>three >\"$(echo T >&3; echo out)\" & wait $!; echo \"THREE=$(cat \
+				 three)\"",
+				"THREE=T\n",
+			),
+			(
+				"a later word reads a here-string",
+				"/bin/echo ok <<<\"from-here\" >\"$(read l; echo \"$l\")\" & wait $!; ls",
+				"from-here\n",
+			),
+			(
+				"a later word sees 2>&1",
+				"/bin/echo ok >log 2>&1 >\"$(echo E >&2; echo out)\" & wait $!; echo \"LOG=$(cat \
+				 log)\"",
+				"LOG=E\n",
+			),
+			(
+				"a process substitution under ulimit -n 16",
+				"ulimit -n 16; /bin/cat < <(echo hi) & wait $!; echo \"S=$?\"",
+				"hi\nS=0\n",
+			),
+			(
+				"an argument process substitution under ulimit -n 16",
+				"ulimit -n 16; /bin/cat <(echo hi) & wait $!; echo \"S=$?\"",
+				"hi\nS=0\n",
+			),
+			(
+				"an output process substitution under ulimit -n 16",
+				"ulimit -n 16; /bin/echo hi > >(cat) & wait $!; sleep 0.2; echo \"S=$?\"",
+				"hi\nS=0\n",
+			),
 		])
 		.await;
 		assert!(mismatches.is_empty(), "{mismatches:#?}");
