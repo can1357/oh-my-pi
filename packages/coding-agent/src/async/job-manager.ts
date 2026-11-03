@@ -7,7 +7,7 @@ import type { OutputMeta } from "../tools/output-meta-format";
 import type { ShellTrace } from "@oh-my-pi/pi-wire";
 import { IrcBus } from "../irc/bus";
 import { yieldQueueStaleMessage } from "../session/yield-queue";
-import type { AgentRegistry } from "../registry/agent-registry";
+import type { AgentRegistryApi } from "../registry/agent-registry";
 import type { JobWidgetInputs, JobWidgetRegistry } from "../job-widgets/types";
 
 const DELIVERY_RETRY_BASE_MS = 500;
@@ -290,7 +290,7 @@ export interface AsyncJobManagerOptions {
 	 * subagent job records its reply on that registry's IRC bus. Defaults to
 	 * the process-global registry.
 	 */
-	agentRegistry?: AgentRegistry;
+	agentRegistry?: AgentRegistryApi;
 }
 
 interface AsyncJobDelivery {
@@ -504,7 +504,7 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 	readonly #retainedArtifactsCleanupGraceMs: number;
 	readonly #retainedArtifactsCleanupMaxWaitMs: number;
 	readonly #consumedResultEvictionMs: number;
-	readonly #agentRegistry: AgentRegistry | undefined;
+	readonly #agentRegistry: AgentRegistryApi | undefined;
 	#deliveryLoop: Promise<void> | undefined;
 	#deliveryQueueChanged = Promise.withResolvers<void>();
 	#disposed = false;

@@ -24,7 +24,7 @@ function setup() {
 		session: null,
 		status: "running",
 	});
-	const bus = IrcBus.forRegistry(registry);
+	const bus = IrcBus.localForRegistry(registry);
 	const outbound: IrcMessage[] = [];
 	const transport: RemoteTransport = {
 		async send(message) {

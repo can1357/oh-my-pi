@@ -112,7 +112,7 @@ describe("createAgentSession + extension IRC (murmur bridge)", () => {
 		).rejects.toThrow("runtime discovery failed");
 
 		expect(claimed).toBe(true);
-		expect(IrcBus.forRegistry(agentRegistry).hasRemoteTransport()).toBe(false);
+		expect(IrcBus.localForRegistry(agentRegistry).hasRemoteTransport()).toBe(false);
 		expect(agentRegistry.get("@cluster-abort/alice")).toBeUndefined();
 	});
 
@@ -154,7 +154,7 @@ describe("createAgentSession + extension IRC (murmur bridge)", () => {
 		).rejects.toThrow("second inline factory failed");
 
 		expect(firstClaimed).toBe(true);
-		expect(IrcBus.forRegistry(agentRegistry).hasRemoteTransport()).toBe(false);
+		expect(IrcBus.localForRegistry(agentRegistry).hasRemoteTransport()).toBe(false);
 		expect(agentRegistry.get("@cluster-inline/alice")).toBeUndefined();
 	});
 
@@ -189,7 +189,7 @@ describe("createAgentSession + extension IRC (murmur bridge)", () => {
 			agentRegistry,
 		});
 		try {
-			expect(IrcBus.forRegistry(agentRegistry).hasRemoteTransport()).toBe(true);
+			expect(IrcBus.localForRegistry(agentRegistry).hasRemoteTransport()).toBe(true);
 			// The bridge is a leaf root (no `task`), yet `wait` is active because a transport
 			// was claimed during load — matching the prompt block that advertises the peers.
 			const activeTools = session.getActiveToolNames();
@@ -236,7 +236,7 @@ describe("createAgentSession + extension IRC (murmur bridge)", () => {
 			agentRegistry,
 		});
 		try {
-			const bus = IrcBus.forRegistry(agentRegistry);
+			const bus = IrcBus.localForRegistry(agentRegistry);
 			// Disconnected right now, but the claim persists — the durable "bridged" signal.
 			expect(bus.hasRemoteTransport()).toBe(false);
 			expect(bus.hasClaimedNamespace()).toBe(true);
