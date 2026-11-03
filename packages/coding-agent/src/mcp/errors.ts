@@ -38,8 +38,14 @@ const MAX_TRACE_ID_CHARS = 128;
 const MAX_DATA_STRING_CHARS = 256;
 const MAX_DATA_DEPTH = 5;
 const MAX_DATA_ENTRIES = 30;
+/**
+ * Bun's fetch hint at the end of an error, once or repeated (a stderr tail can
+ * hold several): all of it goes in one pass, so redaction is idempotent and a
+ * caller that budgets text after redacting it never loses room to a hint the
+ * error later drops.
+ */
 const FETCH_VERBOSE_ADVICE =
-	/\s*For more information, pass `verbose: true` in the second argument to fetch\(\)\.?\s*$/i;
+	/(?:\s*For more information, pass `verbose: true` in the second argument to fetch\(\)\.?)+\s*$/i;
 // Substring match, not exact: compound names (`client_secret`, `clientSecret`,
 // `private_key`, `signingSecret`, `access_token`) must classify as secrets so
 // their values never reach the exposed `data:` diagnostic.
