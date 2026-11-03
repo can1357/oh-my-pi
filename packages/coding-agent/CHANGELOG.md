@@ -7,6 +7,11 @@
 - Pinned sessions show a pin beside their title in the status line and the band composer's title, and `/unpin [session id]` unpins a session ([#17848](https://github.com/can1357/oh-my-pi/pull/17848) by [@SuperUserA](https://github.com/SuperUserA))
 - Added a fullscreen extension link browser for picking links already in terminal scrollback: press Alt+O again (or Page Up) while link tags are shown, or Alt+O with no extension link on screen ([#16476](https://github.com/can1357/oh-my-pi/pull/16476) by [@materemias](https://github.com/materemias))
 
+### Fixed
+
+- `grep` searches files over 4 MB to their end in directory searches (it read only their first 4 MB and dropped later matches without saying so), and names the files a multiline search read only in part
+- `grep` returns the matches it found when a search hits its 30 s budget, with a notice that the results are partial, instead of failing with nothing; a multi-path search keeps the earlier paths' matches, and `jfind` reports a cut-short lexical scan as partial coverage
+
 ## [18.16.0] - 2026-11-02
 
 ### Added

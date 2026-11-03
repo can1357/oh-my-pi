@@ -13,6 +13,8 @@ export interface GrepIndex {
 	perFileKw: Map<string, number[]>;
 	/** Files the walk offered for scanning, including oversized ones. */
 	filesScanned: number;
+	/** The scan hit `timeoutMs`; the counts cover only the files scanned by then. */
+	timedOut: boolean;
 }
 
 /** Regex-escape a literal keyword for the native grep alternation. */
@@ -42,7 +44,7 @@ export async function grepIndex(
 	options: GrepIndexOptions,
 ): Promise<GrepIndex> {
 	const keywords = rawKeywords.map(keyword => keyword.toLowerCase()).filter(keyword => keyword.length > 0);
-	const index: GrepIndex = { keywords, perFileKw: new Map(), filesScanned: 0 };
+	const index: GrepIndex = { keywords, perFileKw: new Map(), filesScanned: 0, timedOut: false };
 	if (keywords.length === 0) return index;
 	const { perFileKw } = index;
 	const result = await natives.grep({
@@ -70,6 +72,7 @@ export async function grepIndex(
 		},
 	});
 	index.filesScanned = result.filesSearched + (result.skippedOversized ?? 0);
+	index.timedOut = Boolean(result.timedOut);
 	return index;
 }
 

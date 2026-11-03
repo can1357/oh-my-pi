@@ -62,7 +62,7 @@ Terminology follows `docs/natives-architecture.md`:
 
 1. Callers invoke generated native exports directly; there is no package-local TS wrapper that renames `search` to `searchContent`.
 2. Rust option structs in `grep.rs` deserialize camelCase fields including `ignoreCase`, `maxCount`, `maxCountPerFile`, `contextBefore`, `contextAfter`, `maxColumns`, and `timeoutMs`.
-3. `grep` creates `CancelToken` from `timeoutMs` + `AbortSignal` and runs inside `task::filesystem_future(...)`, an async task on Tokio. The pattern compiles once with `pi_walker::grep::Engine::compile`, and the search runs in `pi_walker::grep::grep`. Filesystem grep does not expose or use the shared listing cache. `filesystem?: ShellFilesystem` supplies host-injected stat/walk/read operations, including absolute `scheme://` paths.
+3. `grep` turns `timeoutMs` into a deadline for `pi_walker::grep::grep` (`GrepOptions::deadline`): when it passes, the walk stops and the result holds the files searched so far with `timedOut: true`. It creates `CancelToken` from `timeoutMs` plus a 5 s grace and the `AbortSignal`, and runs inside `task::filesystem_future(...)`, an async task on Tokio. The pattern compiles once with `pi_walker::grep::Engine::compile`, and the search runs in `pi_walker::grep::grep`. Filesystem grep does not expose or use the shared listing cache. `filesystem?: ShellFilesystem` supplies host-injected stat/walk/read operations, including absolute `scheme://` paths.
 4. `search` and `hasMatch` operate on provided string/`Uint8Array` content and do not scan the filesystem.
 
 ### Execution branches
@@ -72,7 +72,7 @@ Terminology follows `docs/natives-architecture.md`:
    - `hasMatch` compiles/checks pattern against provided content and returns a boolean.
    - No filesystem scan or listing cache.
 - **Single-file branch**
-   - `grep` resolves the path through the selected filesystem, checks metadata, and searches a file directly. Oversized files are searched over their leading 4 MiB in a second pass; native oversized file roots are streamed through grep-searcher's reader inline, provider files are read async.
+   - `grep` resolves the path through the selected filesystem, checks metadata, and searches a file directly. Oversized files are searched after the others, streamed to their end (multiline mode: over their leading 4 MiB, listed in `partialFiles`); native oversized file roots are streamed through grep-searcher's reader inline, provider files are read async.
 - **Directory branch**
    - `pi_walker::grep::grep` walks with `walk::Options::cache` left `false`: directory searches never read or populate the shared listing cache.
    - The glob compiles to a `pi_walker::glob::Selector::scope` (files it matches plus every file under a directory it matches) that also prunes the walk; `exclude` patterns compile to `Selector::exclude`.
@@ -107,7 +107,7 @@ Batches flow through a bounded `tokio::sync::mpsc::Sender<Vec<Match>>` (each bat
 
 - Rust `SearchResult`/`GrepResult` fields map to TS interfaces via N-API object conversion.
 - Counters are clamped before crossing N-API where needed.
-- `GrepResult.limitReached` is optional and emitted when true; `skippedOversized` counts oversized files that could not be searched even via the trailing bounded prefix pass.
+- `GrepResult.limitReached` is optional and emitted when true; `skippedOversized` counts oversized files that could not be read; `partialFiles` names files searched only in part (multiline over 4 MiB, or a line too long to stream); `timedOut` marks a search `timeoutMs` stopped.
 - `onMatches` receives shaped batches during scanning; the positional directory `onMatch` callback receives one shaped entry after aggregation.
 
 ### Failure behavior
@@ -115,7 +115,7 @@ Batches flow through a bounded `tokio::sync::mpsc::Sender<Vec<Match>>` (each bat
 - `search` returns `SearchResult.error` for regex/search failures instead of throwing.
 - `grep` rejects on hard errors such as invalid path or cancellation timeout/abort. Patterns rejected by both regex engines fall back to a literal search rather than producing a regex error.
 - `hasMatch` returns a boolean on success; matcher construction uses the same tolerant fallback.
-- Unreadable/non-regular files are skipped. Successfully searched oversized prefixes are not counted as skipped; `skippedOversized` reports oversized files that could not be searched through the prefix pass.
+- Unreadable/non-regular files are skipped. Searched oversized files are not counted as skipped; `skippedOversized` reports oversized files that could not be read.
 
 ### Malformed regex handling
 

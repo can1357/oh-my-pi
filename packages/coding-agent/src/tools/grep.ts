@@ -36,7 +36,6 @@ import { formatMatchLine } from "@oh-my-pi/pi-tui/tools/match-line-format";
 import { isFindEnabled } from "./jfind";
 import {
 	expandDelimitedPathEntries,
-	formatPathRelativeToCwd,
 	hasGlobPathChars,
 	isLineInRanges,
 	normalizePathLikeInput,
@@ -93,16 +92,27 @@ export const SINGLE_FILE_MATCHES = 200;
  * (DEFAULT_FILE_LIMIT files × MULTI_FILE_PER_FILE_MATCHES matches) plus
  * pagination headroom so the caller can see total file count. */
 const INTERNAL_TOTAL_CAP = 2000;
-/** Mirrors `MAX_FILE_BYTES` in `crates/pi-natives/src/grep.rs`. Native grep
- * searches only the first `MAX_FILE_BYTES` of a larger file (a leading mmap
- * window) and drops the rest; matches beyond the window are not returned. We
- * surface a partial-coverage note when the caller explicitly targeted such a
- * file so they know matches past the window are not shown. */
+/** Mirrors `MAX_FILE_BYTES` in `crates/pi-walker/src/grep`. Native grep streams
+ * a larger file in full, except in multiline mode, which holds the file in
+ * memory and searches only its first `MAX_FILE_BYTES`; native names such files
+ * in `partialFiles` and the tool lists them. */
 const NATIVE_GREP_MAX_FILE_BYTES = 4 * 1024 * 1024;
 /** Wall-clock budget for a single native grep invocation. Without it, an
  * aborted or runaway search (huge tree, network mount) keeps burning CPU on
- * the native thread pool after the JS promise is abandoned. */
+ * the native thread pool after the JS promise is abandoned. At the budget the
+ * search returns what it matched so far (`timedOut`); native rejects with
+ * `Aborted: Timeout` only when it cannot stop within a grace period after. */
 const SEARCH_GREP_TIMEOUT_MS = 30_000;
+
+/** The notice a timed-out search carries: what it shows is not the whole answer. */
+function grepTimeoutNotice(timeoutMs: number): string {
+	return `Grep timed out after ${Number((timeoutMs / 1000).toFixed(3))}s; results are partial (only matches found before the timeout are shown). Narrow paths or pattern, or scope with \`glob\` first.`;
+}
+
+/** Native grep's rejection when a search could not stop even after its deadline. */
+function isGrepTimeout(err: unknown): boolean {
+	return err instanceof Error && err.message.includes("Aborted: Timeout");
+}
 
 /**
  * Parsed `paths` entry — a path (possibly archive-shaped) plus an optional
@@ -546,6 +556,10 @@ export interface GrepToolOptions {
 	contextAfter?: number;
 	/** Caps total surfaced matches. Applied on top of the built-in per-file and file-window caps, never above them. */
 	totalMatchLimit?: number;
+	/** Native grep binding. Override only in tests. */
+	nativeGrep?: typeof grep;
+	/** Time budget of each native search, in milliseconds. Override only in tests. */
+	timeoutMs?: number;
 }
 
 export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails> {
@@ -632,6 +646,8 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 	readonly #contextBeforeOverride?: number;
 	readonly #contextAfterOverride?: number;
 	readonly #totalMatchLimit?: number;
+	readonly #nativeGrep: typeof grep;
+	readonly #timeoutMs: number;
 	#descriptionKey = -1;
 	#description = "";
 
@@ -645,6 +661,8 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 		this.#contextAfterOverride = after !== undefined ? Math.max(0, Math.floor(after)) : undefined;
 		const total = options?.totalMatchLimit;
 		this.#totalMatchLimit = total !== undefined ? Math.max(1, Math.floor(total)) : undefined;
+		this.#nativeGrep = options?.nativeGrep ?? grep;
+		this.#timeoutMs = options?.timeoutMs ?? SEARCH_GREP_TIMEOUT_MS;
 	}
 
 	async execute(
@@ -816,9 +834,13 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 					limitReached: false,
 				};
 				let skippedOversizedCount = 0;
+				// Files native searched only in part, relative to `searchPath`.
+				const partialFiles: string[] = [];
 				// Native sets `limitReached` for the per-file cap too; only the total cap
 				// stops the walk before every file has been surfaced.
 				let totalCapReached = false;
+				// The search hit its time budget: the results are what it found before then.
+				let timedOut = false;
 				// Only a glob spelled without a directory prefix matches at any depth.
 				// The parsed base alone cannot distinguish `*.ts` from `./*.ts`.
 				try {
@@ -836,30 +858,43 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 								}))
 							: (multiTargets ?? []);
 						for (const target of targets) {
-							const targetResult = await grep(
-								{
-									pattern: normalizedPattern,
-									path: target.basePath,
-									glob: target.glob,
-									recursive: target.bareGlob === true,
-									ignoreCase,
-									multiline: effectiveMultiline,
-									hidden: true,
-									gitignore: useGitignore,
-									maxCount: nativeMaxCount,
-									contextBefore: normalizedContextBefore,
-									contextAfter: normalizedContextAfter,
-									maxColumns: DEFAULT_MAX_COLUMN,
-									mode: effectiveOutputMode,
-									maxCountPerFile: nativeMaxCountPerFile,
-									exclude: exclusionsForRoot(exclusions, this.session.cwd, target.basePath),
-									signal,
-									timeoutMs: SEARCH_GREP_TIMEOUT_MS,
-									filesystem,
-								},
-								undefined,
-							);
+							let targetResult: GrepResult;
+							try {
+								targetResult = await this.#nativeGrep(
+									{
+										pattern: normalizedPattern,
+										path: target.basePath,
+										glob: target.glob,
+										recursive: target.bareGlob === true,
+										ignoreCase,
+										multiline: effectiveMultiline,
+										hidden: true,
+										gitignore: useGitignore,
+										maxCount: nativeMaxCount,
+										contextBefore: normalizedContextBefore,
+										contextAfter: normalizedContextAfter,
+										maxColumns: DEFAULT_MAX_COLUMN,
+										mode: effectiveOutputMode,
+										maxCountPerFile: nativeMaxCountPerFile,
+										exclude: exclusionsForRoot(exclusions, this.session.cwd, target.basePath),
+										signal,
+										timeoutMs: this.#timeoutMs,
+										filesystem,
+									},
+									undefined,
+								);
+							} catch (err) {
+								if (!isGrepTimeout(err)) throw err;
+								// Keep what the earlier targets found.
+								timedOut = true;
+								break;
+							}
 							skippedOversizedCount += targetResult.skippedOversized ?? 0;
+							for (const partialFile of targetResult.partialFiles ?? []) {
+								partialFiles.push(
+									relativeSearchResultPath(searchPath, resolveSearchResultPath(target.basePath, partialFile)),
+								);
+							}
 							limitReached = limitReached || Boolean(targetResult.limitReached);
 							totalCapReached ||= targetResult.matches.length >= nativeMaxCount;
 							totalMatches += targetResult.totalMatches;
@@ -877,6 +912,11 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 								seenMatchKeys.add(matchKey);
 								matches.push({ ...match, path: relativeSearchResultPath(searchPath, absolute) });
 							}
+							// The budget is spent; the remaining targets go unsearched.
+							if (targetResult.timedOut) {
+								timedOut = true;
+								break;
+							}
 						}
 						result = {
 							matches,
@@ -886,7 +926,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 							limitReached,
 						};
 					} else {
-						result = await grep(
+						result = await this.#nativeGrep(
 							{
 								pattern: normalizedPattern,
 								path: searchPath,
@@ -904,24 +944,24 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 								maxCountPerFile: nativeMaxCountPerFile,
 								exclude: exclusionsForRoot(exclusions, this.session.cwd, searchPath),
 								signal,
-								timeoutMs: SEARCH_GREP_TIMEOUT_MS,
+								timeoutMs: this.#timeoutMs,
 								filesystem,
 							},
 							undefined,
 						);
 						skippedOversizedCount = result.skippedOversized ?? 0;
+						partialFiles.push(...(result.partialFiles ?? []));
 						totalCapReached = result.matches.length >= nativeMaxCount;
+						timedOut = Boolean(result.timedOut);
 					}
 				} catch (err) {
 					if (err instanceof Error && /^regex(?: parse)? error/i.test(err.message)) {
 						throw new ToolError(err.message.replace(/^regex(?: parse)? error:?\s*/i, "Invalid regex: "));
 					}
-					if (err instanceof Error && err.message.includes("Aborted: Timeout")) {
-						throw new ToolError(
-							`Grep timed out after ${SEARCH_GREP_TIMEOUT_MS / 1000}s; narrow paths or pattern, or scope with \`glob\` first`,
-						);
-					}
-					throw err;
+					if (!isGrepTimeout(err)) throw err;
+					// The search could not stop to report what it found; say so rather than fail.
+					timedOut = true;
+					result = { matches: [], totalMatches: 0, filesWithMatches: 0, filesSearched: 0 };
 				}
 				if (rangesByAbsPath.size > 0) {
 					const filteredMatches: GrepMatch[] = [];
@@ -1042,36 +1082,14 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 				const { record: recordFile, list: fileList } = createFileRecorder();
 				const fileMatchCounts = new Map<string, number>();
 				const limitMb = Math.floor(NATIVE_GREP_MAX_FILE_BYTES / (1024 * 1024));
-				// Native streams an explicitly named file whole, except in multiline
-				// mode, which holds the file in memory and so reads only its first
-				// NATIVE_GREP_MAX_FILE_BYTES; without this note the caller might miss
-				// that matches beyond the window (or "no matches") reflect partial
-				// coverage, not the whole file.
-				const oversizedNote = await (async (): Promise<string | undefined> => {
-					if (!effectiveMultiline) return undefined;
-					const explicitFileTargets: string[] = [];
-					if (exactFilePaths) {
-						explicitFileTargets.push(...exactFilePaths);
-					} else if (!isDirectory && !multiTargets) {
-						explicitFileTargets.push(searchPath);
-					}
-					if (explicitFileTargets.length === 0) return undefined;
-					const oversized: string[] = [];
-					await Promise.all(
-						explicitFileTargets.map(async target => {
-							try {
-								const st = await urlFilesystem.stat(target);
-								if (st.type === "file" && st.size > NATIVE_GREP_MAX_FILE_BYTES) {
-									oversized.push(formatPathRelativeToCwd(target, this.session.cwd));
-								}
-							} catch {
-								// Stat failures here are surfaced by other code paths.
-							}
-						}),
-					);
-					if (oversized.length === 0) return undefined;
-					return `Multiline search read only the first ${limitMb}MB of large files (matches past the ${limitMb}MB window are not shown; search without a newline in the pattern, or use \`read\`, for the rest): ${oversized.join(", ")}`;
-				})();
+				// Native streams every file whole, except in multiline mode, which holds a
+				// file in memory and so reads only its first NATIVE_GREP_MAX_FILE_BYTES, and
+				// except past a line too long to stream. It names those files; without this
+				// note the caller might take matches (or "no matches") there as the whole file.
+				const oversizedNote =
+					partialFiles.length > 0
+						? `Searched only part of these files (multiline search reads the first ${limitMb}MB of a large file; a line too long to stream ends the search; matches past that point are not shown; search without a newline in the pattern, or use \`read\`, for the rest): ${[...new Set(partialFiles)].map(formatPath).join(", ")}`
+						: undefined;
 				// Directory/multi-target scopes: native counts files it could not map
 				// even a prefix of (rare mmap failures), but cannot name them.
 				const oversizedScanNote =
@@ -1089,7 +1107,13 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 				const missingPathsNote =
 					missingPathsForNote.length > 0 ? `Skipped missing paths: ${missingPathsForNote.join(", ")}` : undefined;
 				const warningNote =
-					[missingPathsNote, archiveNote, oversizedNote, oversizedScanNote]
+					[
+						timedOut ? grepTimeoutNotice(this.#timeoutMs) : undefined,
+						missingPathsNote,
+						archiveNote,
+						oversizedNote,
+						oversizedScanNote,
+					]
 						.filter((s): s is string => Boolean(s))
 						.join("\n") || undefined;
 				if (selectedMatches.length === 0) {
@@ -1100,15 +1124,18 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 						matchCount: 0,
 						fileCount: 0,
 						files: [],
-						truncated: false,
+						truncated: timedOut,
+						timedOut: timedOut || undefined,
 						missingPaths: missingPaths.length > 0 ? missingPaths : undefined,
 					};
 					const skipPastEnd = canPaginate && normalizedSkip > 0 && totalFiles > 0 && skipFiles >= totalFiles;
 					const noMatchText = skipPastEnd
 						? `No more results (${totalFilesLabel} files total; skip=${normalizedSkip} is past the end)`
-						: oversizedNote
-							? `No matches in searched content (multiline search limited large files to their first ${limitMb}MB)`
-							: "No matches found";
+						: timedOut
+							? "No matches found before the timeout"
+							: oversizedNote
+								? `No matches in searched content (multiline search limited large files to their first ${limitMb}MB)`
+								: "No matches found";
 					const text = warningNote ? `${noMatchText}\n${warningNote}` : noMatchText;
 					// Zero matches is useless regardless of warnings: by the time
 					// compaction runs, the follow-up call has already corrected course.
@@ -1270,6 +1297,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 					perFileLimitReached ||
 					totalMatchLimitReached ||
 					result.limitReached ||
+					timedOut ||
 					truncation.truncated ||
 					linesTruncated,
 				);
@@ -1285,6 +1313,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 						count: fileMatchCounts.get(path) ?? 0,
 					})),
 					truncated,
+					timedOut: timedOut || undefined,
 					fileLimitReached: fileLimitReached ? fileWindow : undefined,
 					perFileLimitReached: totalMatchLimitReached
 						? this.#totalMatchLimit

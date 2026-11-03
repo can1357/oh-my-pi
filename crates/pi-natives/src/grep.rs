@@ -119,7 +119,9 @@ pub struct GrepOptions<'env> {
 	pub max_count_per_file: Option<u32>,
 	/// Abort signal for cancelling the operation.
 	pub signal:             Option<Unknown<'env>>,
-	/// Timeout in milliseconds for the operation.
+	/// Search for at most this many milliseconds, then resolve with the
+	/// matches found so far and `timedOut` set. A search that cannot stop
+	/// within 5 s more rejects with `Aborted: Timeout`.
 	pub timeout_ms:         Option<u32>,
 	/// Filesystem every path is stat'ed, walked, and read through (native when
 	/// absent).
@@ -216,6 +218,12 @@ pub struct GrepResult {
 	pub limit_reached:      Option<bool>,
 	/// Number of files skipped because they exceed the size limit.
 	pub skipped_oversized:  Option<u32>,
+	/// `timeoutMs` passed first: the results cover only the files searched
+	/// by then.
+	pub timed_out:          Option<bool>,
+	/// Files searched only in part (multiline search of a file over 4 MB, or a
+	/// line too long to stream): matches past that point are missing.
+	pub partial_files:      Option<Vec<String>>,
 }
 
 const fn to_mode(mode: Option<GrepOutputMode>) -> pi_walker::grep::Mode {
@@ -331,6 +339,8 @@ struct GrepRequest {
 	max_count_per_file: Option<u64>,
 	hidden:             bool,
 	gitignore:          bool,
+	/// When `timeoutMs` ends the search with what it found.
+	deadline:           Option<tokio::time::Instant>,
 }
 
 /// Forward each streamed batch to `onMatches`, awaiting the JS call so the
@@ -358,6 +368,10 @@ async fn forward_matches(
 	}
 	Ok(())
 }
+
+/// How long past `timeoutMs` a search may take to stop and report what it
+/// found before it is abandoned.
+const TIMEOUT_GRACE_MS: u32 = 5_000;
 
 async fn grep_async(
 	filesystem: Fs,
@@ -396,6 +410,7 @@ async fn grep_async(
 			..Default::default()
 		},
 		sink,
+		deadline: request.deadline,
 		..pi_walker::grep::GrepOptions::new(Arc::new(engine))
 	};
 	let search = pi_walker::grep::grep(&fs, &root, opts);
@@ -427,6 +442,8 @@ async fn grep_async(
 		limit_reached: result.limit_reached.then_some(true),
 		skipped_oversized: (result.skipped_oversized > 0)
 			.then(|| clamp_u32(result.skipped_oversized)),
+		timed_out: result.timed_out.then_some(true),
+		partial_files: (!result.partial_files.is_empty()).then_some(result.partial_files),
 	})
 }
 
@@ -574,9 +591,14 @@ pub fn grep<'env>(
 		max_count_per_file: max_count_per_file.map(u64::from),
 		hidden: hidden.unwrap_or(true),
 		gitignore: gitignore.unwrap_or(true),
+		deadline: timeout_ms
+			.map(|ms| tokio::time::Instant::now() + std::time::Duration::from_millis(u64::from(ms))),
 	};
 
-	let ct = task::CancelToken::new(timeout_ms, signal);
+	// The deadline ends the search with partial results; the token abandons
+	// one that cannot stop in time.
+	let ct =
+		task::CancelToken::new(timeout_ms.map(|ms| ms.saturating_add(TIMEOUT_GRACE_MS)), signal);
 	let filesystem = ShellFilesystem::resolve(filesystem);
 	task::filesystem_future(env, "grep", ct, filesystem, move |filesystem| {
 		grep_async(filesystem, request, on_matches, on_match)

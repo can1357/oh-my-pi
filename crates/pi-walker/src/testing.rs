@@ -124,10 +124,12 @@ fn metadata_of(node: &Node) -> Metadata {
 
 /// In-memory `mem://` provider: files, directories, symlinks (absolute URL
 /// targets, followed by `metadata`/`open`), and FIFOs. Paths are stored as
-/// spelled (percent-encoded segments); every operation completes immediately.
+/// spelled (percent-encoded segments); every operation completes immediately,
+/// except reads of a file added with [`MemFs::add_stalled_file`].
 #[derive(Debug, Default)]
 pub struct MemFs {
-	tree: Mutex<Tree>,
+	tree:    Mutex<Tree>,
+	stalled: Mutex<std::collections::BTreeSet<PathBuf>>,
 }
 
 impl MemFs {
@@ -148,6 +150,13 @@ impl MemFs {
 			.tree
 			.lock()
 			.insert(Path::new(path), Kind::File(Arc::new(Mutex::new(contents.to_vec()))));
+	}
+
+	/// Creates the file at `path` whose reads never complete, as a hung
+	/// network mount's would.
+	pub fn add_stalled_file(&self, path: &str, contents: &[u8]) {
+		self.add_file(path, contents);
+		self.stalled.lock().insert(PathBuf::from(path));
 	}
 
 	/// Creates the directory at `path` (and missing ancestors).
@@ -176,11 +185,16 @@ struct MemHandle {
 	pos:   Mutex<u64>,
 	ino:   u64,
 	mtime: u64,
+	/// Reads never complete.
+	stall: bool,
 }
 
 #[async_trait]
 impl FileHandle for MemHandle {
 	async fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
+		if self.stall {
+			std::future::pending::<()>().await;
+		}
 		let data = self.data.lock();
 		let mut pos = self.pos.lock();
 		let start = usize::try_from(*pos).map_or(data.len(), |pos| pos.min(data.len()));
@@ -245,7 +259,9 @@ impl FileSystem for MemFs {
 		if options.is_truncate() {
 			data.lock().clear();
 		}
-		Ok(File::from_handle(MemHandle { data, pos: Mutex::new(0), ino, mtime }))
+		drop(tree);
+		let stall = self.stalled.lock().contains(path);
+		Ok(File::from_handle(MemHandle { data, pos: Mutex::new(0), ino, mtime, stall }))
 	}
 
 	async fn metadata(&self, path: &Path) -> io::Result<Metadata> {
