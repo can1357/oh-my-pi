@@ -277,9 +277,10 @@ impl<SE: extensions::ShellExtensions> Shell<SE> {
 		// Add in any open files provided.
 		shell.open_files.update_from(options.fds.into_iter());
 
-		// The directory the shell starts in, held as a process holds it.
+		// The directory the shell starts in, held as a process holds it; one
+		// it may not search is not held, and names are read as spelled.
 		shell.working_dir_handle =
-			crate::sys::fs::DirHandle::open(&shell.working_dir).map(std::sync::Arc::new);
+			crate::sys::fs::DirHandle::open(&shell.working_dir).ok().flatten().map(std::sync::Arc::new);
 
 		// TODO(patterns): Without this a script that sets extglob will fail because we
 		// parse the entire script with the same settings.

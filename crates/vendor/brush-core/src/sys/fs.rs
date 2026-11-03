@@ -262,22 +262,42 @@ pub struct DirHandle {
 }
 
 impl DirHandle {
-	/// Opens `path` as a handle, if this system gives one.
+	/// Opens `path` as a handle, if this system gives one and `path` can be
+	/// opened; `None` otherwise. A directory it opens that the user may not
+	/// search is an error: `chdir` would refuse it, and the shell enters only
+	/// what the kernel would let it work in. It is asked of the directory
+	/// opened, not of the name, which may reach another one by then.
 	#[cfg(unix)]
-	pub fn open(path: &Path) -> Option<Self> {
+	pub fn open(path: &Path) -> std::io::Result<Option<Self>> {
 		use std::os::fd::{FromRawFd, OwnedFd};
-		let name = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).ok()?;
+		let Ok(name) = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()) else { return Ok(None) };
 		// SAFETY: `name` is a C string that lives across the call, and the
 		// descriptor it answers with is owned by the `OwnedFd` made of it.
 		let fd = unsafe { libc::open(name.as_ptr(), Self::FLAGS) };
-		(fd >= 0).then(|| Self { fd: unsafe { OwnedFd::from_raw_fd(fd) } })
+		if fd < 0 {
+			return Ok(None);
+		}
+		// SAFETY: `open` made `fd`, which nothing else owns.
+		let opened = Self { fd: unsafe { OwnedFd::from_raw_fd(fd) } };
+		opened.searchable()?;
+		Ok(Some(opened))
 	}
 
 	/// Opens `path` as a handle, if this system gives one.
 	#[cfg(not(unix))]
-	pub fn open(path: &Path) -> Option<Self> {
+	pub fn open(path: &Path) -> std::io::Result<Option<Self>> {
 		let _ = path;
-		None
+		Ok(None)
+	}
+
+	/// Whether the user may search this directory, as `chdir` asks.
+	#[cfg(unix)]
+	fn searchable(&self) -> std::io::Result<()> {
+		use std::os::fd::AsRawFd;
+		// SAFETY: this handle is open for the whole call and the name is a C
+		// string literal.
+		let answered = unsafe { libc::faccessat(self.fd.as_raw_fd(), c".".as_ptr(), libc::X_OK, libc::AT_EACCESS) };
+		if answered < 0 { Err(std::io::Error::last_os_error()) } else { Ok(()) }
 	}
 
 	/// Opens `name`, read from this directory, as a handle of its own, as
@@ -298,15 +318,8 @@ impl DirHandle {
 		let opened = Self { fd: unsafe { OwnedFd::from_raw_fd(fd) } };
 		// A directory the user may not search is one `chdir` refuses, which
 		// `O_PATH` does not: the directory opened is asked about once it is
-		// known to be one, so that a file is still not a directory and the
-		// shell enters only what the kernel would let it work in.
-		// SAFETY: `opened` is open for the whole call and the name is a C
-		// string literal.
-		let searchable =
-			unsafe { libc::faccessat(opened.fd.as_raw_fd(), c".".as_ptr(), libc::X_OK, libc::AT_EACCESS) };
-		if searchable < 0 {
-			return Err(std::io::Error::last_os_error());
-		}
+		// known to be one, so that a file is still not a directory.
+		opened.searchable()?;
 		Ok(opened)
 	}
 
@@ -382,6 +395,29 @@ mod tests {
 	use super::*;
 	#[cfg(windows)]
 	use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
+
+	/// A directory the user may not search is refused as `chdir` refuses it,
+	/// whether it is opened by name or read from a directory held, so that
+	/// the shell never holds one it could not work in.
+	#[cfg(unix)]
+	#[test]
+	fn an_unsearchable_directory_is_not_held() {
+		use std::os::unix::fs::PermissionsExt as _;
+		// SAFETY: `geteuid` has no preconditions.
+		if unsafe { libc::geteuid() } == 0 {
+			return;
+		}
+		let dir = tempfile::tempdir().expect("scratch directory");
+		let locked = dir.path().join("locked");
+		std::fs::create_dir(&locked).expect("directory");
+		std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).expect("mode");
+		let by_name = DirHandle::open(&locked).map(|handle| handle.is_some());
+		let parent = DirHandle::open(dir.path()).expect("searchable").expect("held");
+		let read = parent.open_at(Path::new("locked")).map(|_| ());
+		std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).expect("mode");
+		assert_eq!(by_name.map_err(|error| error.kind()), Err(std::io::ErrorKind::PermissionDenied));
+		assert_eq!(read.map_err(|error| error.kind()), Err(std::io::ErrorKind::PermissionDenied));
+	}
 
 	/// A short-spelled path expands back to the long spelling of the same
 	/// directory. Uses a fresh long-named directory so the input really has a

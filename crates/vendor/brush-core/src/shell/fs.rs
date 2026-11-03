@@ -45,7 +45,7 @@ impl<SE: crate::extensions::ShellExtensions> crate::Shell<SE> {
 			checked_path
 		};
 
-		let handle = native.then(|| crate::sys::fs::DirHandle::open(&cleaned_path)).flatten();
+		let handle = if native { crate::sys::fs::DirHandle::open(&cleaned_path)? } else { None };
 		self.enter(cleaned_path, handle)
 	}
 
