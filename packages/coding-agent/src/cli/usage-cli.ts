@@ -1116,7 +1116,9 @@ async function loadUsageSources(
 	settings: Settings,
 	authStorage: AuthStorage,
 ): Promise<ModelRegistry> {
-	const modelRegistry = new ModelRegistry(authStorage);
+	// Settings carry `disabledProviders`; without them a disabled gateway alias
+	// would still be registered for usage and contacted with its configured key.
+	const modelRegistry = new ModelRegistry(authStorage, undefined, { settings });
 	// Extensions contribute usage providers via `registerProvider(name, { usage })`;
 	// without loading them their accounts land in `accountsWithoutUsage`.
 	await loadCliExtensionProviders(modelRegistry, settings, getProjectDir(), {
