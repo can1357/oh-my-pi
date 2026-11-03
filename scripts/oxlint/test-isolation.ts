@@ -11,12 +11,15 @@
  * Cleanup that survives a timeout is cleanup a timeout cannot interrupt: the shared, synchronous
  * `installMockRestores()` helper for spies, a synchronous `afterEach` that restores or puts back as
  * a direct statement, or `onTestFinished(<synchronous callback>)` registered before the test can
- * suspend. A callback passed by name counts only through a function declaration or `const` the file
- * writes once, and `x.mockRestore()` restores a known spy only when one write stores it in `x` and
- * that write runs once per test (not in a loop, an array-iteration callback, or a helper called more
- * than once): a callback runs what a binding holds when it is called, not what it held when
- * registered. The rules credit only those shapes. They are an enforcement aid for new code, not a
- * proof: a shape they credit is safe by construction, and everything else is reported.
+ * suspend. Synchronous means a plain function: an `async` callback stops at its first `await`, and
+ * a generator callback never runs its body, because Bun does not iterate what it returns. A callback
+ * passed by name counts only through a function declaration or `const` the file writes once, and
+ * `x.mockRestore()` restores a known spy only when one write stores it in `x` and that write runs
+ * once per test (not in a loop, an array-iteration callback, a helper called more than once, or a
+ * function that can reach itself again by name, `arguments` or an export): a callback runs what a
+ * binding holds when it is called, not what it held when registered. The rules credit only those
+ * shapes. They are an enforcement aid for new code, not a proof: a shape they credit is safe by
+ * construction, and everything else is reported.
  *
  * The rules judge only what one file shows: writes and restores reached from a test body directly
  * or through a function declared in the same file, and hooks declared in the same file.
@@ -264,33 +267,60 @@ const ITERATION_METHODS = new Set([
 ]);
 
 /**
- * The one call that runs a same-file function: it has exactly one call site, and its name appears
- * nowhere else (passing it to `forEach` or storing it could run it again).
+ * Can `fn` run again through a path the walk cannot see? True when its own name (a declaration, a
+ * named function expression, or the `const` it initialises) is used anywhere except `ownCall`
+ * (recursion, or the body handing itself out to be called later), when `arguments` appears inside
+ * it (`arguments.callee` is the running function), when the file uses `eval` (a direct `eval` can
+ * call any function in scope by a name that appears only inside a string), or when it is exported
+ * for other files to call.
+ */
+function mayRunAgain(facts: FileFacts, fn: Node, ownCall?: Node): boolean {
+	const declarator = fn.parent?.type === "VariableDeclarator" && node(fn.parent.init) === fn ? fn.parent : undefined;
+	const holder = declarator ? declarator.parent?.parent : fn.parent;
+	if (holder?.type === "ExportNamedDeclaration" || holder?.type === "ExportDefaultDeclaration") return true;
+	const ownName = node(fn.id);
+	const declaredName = declarator ? node(declarator.id) : undefined;
+	const names = new Set(
+		[identName(ownName), identName(declaredName)].filter((name): name is string => name !== undefined),
+	);
+	const declaredVariable = declaredName?.type === "Identifier" ? variableOf(facts.context, declaredName) : undefined;
+	for (const id of facts.references) {
+		const name = id.name as string;
+		if (name === "eval") return true;
+		if (name === "arguments") {
+			if (fn.range[0] <= id.range[0] && id.range[1] <= fn.range[1]) return true;
+			continue;
+		}
+		if (!names.has(name) || id === ownName || id === declaredName || id === ownCall) continue;
+		const variable = variableOf(facts.context, id);
+		if (!variable) continue;
+		if (variable === declaredVariable) return true;
+		if (variable.defs.some(def => def.type === "FunctionName" && def.node === fn)) return true;
+	}
+	return false;
+}
+
+/**
+ * The one call that runs a same-file function: it has exactly one call site, by name, and the
+ * function cannot run again any other way ({@link mayRunAgain}: passing it to `forEach`, storing
+ * it, recursion or an export could run it again).
  */
 function soleCaller(facts: FileFacts, fn: Node): Node | undefined {
 	const callers = facts.helpers.get(fn);
 	if (callers?.length !== 1) return undefined;
-	const name =
-		fn.type === "FunctionDeclaration"
-			? node(fn.id)
-			: fn.parent?.type === "VariableDeclarator"
-				? node(fn.parent.id)
-				: undefined;
-	if (name?.type !== "Identifier") return undefined;
-	const variable = variableOf(facts.context, name);
-	const uses = facts.references.filter(
-		id => id !== name && id.name === name.name && variableOf(facts.context, id) === variable,
-	);
 	const caller = callers[0]!;
-	return uses.length === 1 && uses[0] === unwrap(node(caller.callee)) ? caller : undefined;
+	const callee = unwrap(node(caller.callee));
+	if (callee?.type !== "Identifier") return undefined;
+	return mayRunAgain(facts, fn, callee) ? undefined : caller;
 }
 
 /**
  * Does `write` run at most once per test for each instance of the binding created at `scope`?
  * Walking out from the write: a loop body, test or update repeats it (a `for` initializer or a
  * `for-of`/`for-in` iterable does not); an array-iteration callback repeats it; another function
- * runs it only when it is an IIFE, a test or hook callback (once per test), or a same-file function
- * with a sole call site, which is then walked the same way. Anything else counts as repeating.
+ * runs it only when it is an IIFE or a test or hook callback (once per test) that cannot run again
+ * ({@link mayRunAgain}), or a same-file function with a sole call site; the walk then continues
+ * from that call. Anything else counts as repeating.
  */
 function runsOncePerBinding(facts: FileFacts, write: Node, scope: Node, depth = 0): boolean {
 	let child = write;
@@ -306,8 +336,11 @@ function runsOncePerBinding(facts: FileFacts, write: Node, scope: Node, depth = 
 			if (callee && ITERATION_METHODS.has(propertyName(callee) ?? "")) return false;
 		}
 		let caller: Node | undefined;
-		if (parent?.type === "CallExpression" && unwrap(node(parent.callee)) === cur) caller = parent;
-		else caller = facts.registrations.get(cur)?.call ?? (depth < HELPER_DEPTH ? soleCaller(facts, cur) : undefined);
+		if (parent?.type === "CallExpression" && unwrap(node(parent.callee)) === cur)
+			caller = mayRunAgain(facts, cur) ? undefined : parent;
+		else if (facts.registrations.has(cur))
+			caller = mayRunAgain(facts, cur) ? undefined : facts.registrations.get(cur)!.call;
+		else caller = depth < HELPER_DEPTH ? soleCaller(facts, cur) : undefined;
 		return caller !== undefined && runsOncePerBinding(facts, caller, scope, depth + 1);
 	}
 	return false;
@@ -689,7 +722,6 @@ function afterEachDoes(facts: FileFacts, scope: Node | undefined, work: (express
 		if (testApi(facts.context, node(call.callee)) !== "afterEach") continue;
 		if (enclosingFunction(call) !== scope || !isTopLevelStatement(facts, call, scope)) continue;
 		for (const hook of creditedCallbacks(facts, call)) {
-			if (hook.async === true) continue;
 			const body = node(hook.body);
 			if (!body) continue;
 			// `afterEach(() => vi.restoreAllMocks())`: the expression body is the whole hook.
@@ -872,22 +904,33 @@ function registered(facts: FileFacts, call: Node): Node[] {
 	});
 }
 
-/** The functions a hook or `onTestFinished` call is certain to run: inline, or a never-reassigned name. */
+/**
+ * Does calling `fn` run its whole body before returning? Not for `async` functions, which stop at
+ * their first `await`, nor for generators: calling one only creates an iterator, and Bun never
+ * iterates what a hook or `onTestFinished` callback returns, so the body never runs.
+ */
+function runsBodyWhenCalled(fn: Node): boolean {
+	return fn.async !== true && fn.generator !== true;
+}
+
+/**
+ * The functions a hook or `onTestFinished` call is certain to run to the end: inline, or a
+ * never-reassigned name, and neither `async` nor a generator ({@link runsBodyWhenCalled}).
+ */
 function creditedCallbacks(facts: FileFacts, call: Node): Node[] {
 	return nodes(call.arguments).flatMap(arg => {
-		if (isFunction(arg)) return [arg];
 		const id = unwrap(arg);
-		const fn = id?.type === "Identifier" ? creditedFunctionOf(facts, id) : undefined;
-		return fn ? [fn] : [];
+		const fn = isFunction(arg) ? arg : id?.type === "Identifier" ? creditedFunctionOf(facts, id) : undefined;
+		return fn && runsBodyWhenCalled(fn) ? [fn] : [];
 	});
 }
 
-/** The restore calls, recognised by method name, inside the callbacks `finisher` registers. */
-function registeredRestores(facts: FileFacts, finisher: Node): Node[] {
-	const found: Node[] = [];
+/** The restore calls, recognised by method name, inside the callbacks `finisher` registers, with their callback. */
+function registeredRestores(facts: FileFacts, finisher: Node): { restore: Node; callback: Node }[] {
+	const found: { restore: Node; callback: Node }[] = [];
 	for (const callback of registered(facts, finisher))
 		walk(facts.context, callback, n => {
-			if (n.type === "CallExpression" && restoreKind(n)) found.push(n);
+			if (n.type === "CallExpression" && restoreKind(n)) found.push({ restore: n, callback });
 		});
 	return found;
 }
@@ -895,7 +938,6 @@ function registeredRestores(facts: FileFacts, finisher: Node): Node[] {
 /** A synchronous callback whose direct statement does `done` with no exit before it. */
 function promptCallback(facts: FileFacts, finisher: Node, done: (expression: Node) => boolean): boolean {
 	return creditedCallbacks(facts, finisher).some(callback => {
-		if (callback.async === true) return false;
 		const body = node(callback.body);
 		if (!body) return false;
 		if (body.type !== "BlockStatement") return done(body);
@@ -970,18 +1012,25 @@ function putBackRegisteredPromptly(facts: FileFacts, path: string, write: Node):
 	);
 }
 
-/** Is a put-back of `path` registered anywhere in `test`, however late or conditionally? */
-function putBackRegisteredAnywhere(facts: FileFacts, test: Node, path: string): boolean {
-	return facts.finishers.some(finisher => {
-		if (!flows(facts, finisher).some(flow => flow.test === test)) return false;
-		return registered(facts, finisher).some(callback => {
-			let found = false;
+/**
+ * Is a put-back of `path` registered anywhere in `test`, however late or conditionally? `"generator"`
+ * when the only such registrations are generator callbacks, whose bodies never run.
+ */
+function putBackRegisteredAnywhere(facts: FileFacts, test: Node, path: string): "registered" | "generator" | undefined {
+	let found: "registered" | "generator" | undefined;
+	for (const finisher of facts.finishers) {
+		if (!flows(facts, finisher).some(flow => flow.test === test)) continue;
+		for (const callback of registered(facts, finisher)) {
+			let writes = false;
 			walk(facts.context, callback, n => {
-				if (!found && sharedTargets(facts, n).includes(path)) found = true;
+				if (!writes && sharedTargets(facts, n).includes(path)) writes = true;
 			});
-			return found;
-		});
-	});
+			if (!writes) continue;
+			if (callback.generator !== true) return "registered";
+			found = "generator";
+		}
+	}
+	return found;
 }
 
 function callText(facts: FileFacts, call: Node): string {
@@ -1017,26 +1066,36 @@ function judgeRestores(facts: FileFacts): void {
 	judgeLateRestores(facts);
 }
 
-/** Spies whose restore is registered where a timeout can skip the registration itself. */
+/**
+ * Spies whose restore is not certain to undo them: registered where a timeout can skip the
+ * registration, registered only in a generator callback (which never runs), or registered in time
+ * but through a variable that also holds another spy when the callback runs.
+ */
 function judgeLateRestores(facts: FileFacts): void {
 	const reported = new Set<Node>();
 	for (const finisher of facts.finishers) {
-		for (const restore of registeredRestores(facts, finisher)) {
-			const installs =
-				restoreKind(restore) === "mockRestore"
-					? spyInstalls(facts, restore)
-					: facts.calls.filter(call => isSpyOn(facts, call));
+		for (const { restore, callback } of registeredRestores(facts, finisher)) {
+			const individual = restoreKind(restore) === "mockRestore";
+			const installs = individual ? spyInstalls(facts, restore) : facts.calls.filter(call => isSpyOn(facts, call));
 			for (const install of installs) {
 				if (reported.has(install)) continue;
 				if (spyRegisteredPromptly(facts, install)) continue;
 				for (const flow of flows(facts, install)) {
 					if (!isAsyncTest(facts, flow) || spiesCovered(facts, flow.test)) continue;
 					if (!flows(facts, finisher).some(f => f.test === flow.test)) continue;
-					facts.context.report({
-						node: install,
-						messageId: "restoreRegisteredLate",
-						data: { call: callText(facts, restore) },
-					});
+					const inTime = registeredBefore(facts, finisher, install) || registeredNextTo(facts, finisher, install);
+					const rewritten =
+						individual &&
+						inTime &&
+						runsBodyWhenCalled(callback) &&
+						creditedSpyInstall(facts, restore) !== install;
+					const messageId =
+						callback.generator === true
+							? "restoreInGenerator"
+							: rewritten
+								? "restoreBindingRewritten"
+								: "restoreRegisteredLate";
+					facts.context.report({ node: install, messageId, data: { call: callText(facts, restore) } });
 					reported.add(install);
 					break;
 				}
@@ -1231,7 +1290,11 @@ function judgePutBacks(facts: FileFacts): void {
 			let messageId: string | undefined;
 			if (write.putsBack) {
 				if (suspendsBefore(facts, flow, write.node, write.replaced)) messageId = "putBackSkippedByTimeout";
-			} else if (putBackRegisteredAnywhere(facts, flow.test, write.path)) messageId = "putBackRegisteredLate";
+			} else {
+				const registeredAs = putBackRegisteredAnywhere(facts, flow.test, write.path);
+				if (registeredAs === "registered") messageId = "putBackRegisteredLate";
+				else if (registeredAs === "generator") messageId = "putBackInGenerator";
+			}
 			if (!messageId) continue;
 			facts.context.report({ node: write.node, messageId, data: { target: write.path } });
 			reported.add(key);
@@ -1268,6 +1331,10 @@ export default {
 					"A failing assertion before `{{call}}` skips it, so the mock leaks into later tests. Restore in `finally`, or call `installMockRestores()` at the top of this file or `describe`.",
 				restoreRegisteredLate:
 					"The test can time out after installing this spy but before it registers the `onTestFinished` that runs `{{call}}`, so the spy leaks into later tests. Register the restore in the statement right after the spy, or call `installMockRestores()` at the top of this file or `describe`.",
+				restoreInGenerator:
+					"This spy's restore `{{call}}` is in a generator callback. Bun calls it but never iterates the generator it returns, so the restore never runs and the spy leaks into later tests. Use a plain function, or call `installMockRestores()` at the top of this file or `describe`.",
+				restoreBindingRewritten:
+					"`{{call}}` restores whatever its variable holds when the callback runs, and this file can store another spy in that variable first (a second write, or one in a loop or in a function that can run again), so this spy may never be restored. Give each spy its own `const`, or call `installMockRestores()` at the top of this file or `describe`.",
 			},
 			judgeRestores,
 		),
@@ -1278,6 +1345,8 @@ export default {
 					"A test that times out never reaches this put-back of `{{target}}`, so the replacement leaks into later tests. Register it with `onTestFinished(() => ...)` before the write, or put it back in a synchronous `afterEach`.",
 				putBackRegisteredLate:
 					"The test can time out after this write to `{{target}}` but before it registers the `onTestFinished` that puts it back, so the replacement leaks into later tests. Register the put-back before the write.",
+				putBackInGenerator:
+					"The put-back of `{{target}}` is in a generator callback. Bun calls it but never iterates the generator it returns, so the put-back never runs and the replacement leaks into later tests. Use a plain function.",
 			},
 			judgePutBacks,
 		),
