@@ -852,9 +852,12 @@ return await tab.evaluate(() => {
 				}
 				await confirmation;
 				expect(
-					await popup.mainFrame().mainRealm().evaluate(
-						'globalThis.log = []; addEventListener("afterprint", () => log.push("afterprint")); print(); log.push("print returned"); log',
-					),
+					await popup
+						.mainFrame()
+						.mainRealm()
+						.evaluate(
+							'globalThis.log = []; addEventListener("afterprint", () => log.push("afterprint")); print(); log.push("print returned"); log',
+						),
 				).toEqual(["print returned"]);
 				await popup.close();
 			} finally {
