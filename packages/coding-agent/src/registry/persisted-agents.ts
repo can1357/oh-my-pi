@@ -676,6 +676,8 @@ export async function registerPersistedSubagents(
 		 * against, bounded by this root's own transcript tree.
 		 */
 		owned?: Map<string, string>;
+		/** Observe refs already registered from a different root whose transcript is also present in this root. */
+		onCopiedRef?: (ref: AgentRef) => void;
 	} = {},
 ): Promise<void> {
 	if (!sessionFile?.endsWith(".jsonl")) return;
@@ -696,6 +698,7 @@ export async function registerPersistedSubagents(
 		shouldContinue,
 		sessionFile,
 		options.owned,
+		options.onCopiedRef,
 	);
 	if (!hydrateHistory || !shouldContinue()) return;
 	let nextTranscript = 0;
@@ -728,6 +731,7 @@ async function registerPersistedSubagentsFromDir(
 	shouldContinue: () => boolean,
 	rootSessionFile: string,
 	owned?: Map<string, string>,
+	onCopiedRef?: (ref: AgentRef) => void,
 ): Promise<void> {
 	if (!shouldContinue()) return;
 	let entries: fs.Dirent[];
@@ -826,6 +830,15 @@ async function registerPersistedSubagentsFromDir(
 			typeof existing.sessionFile === "string" &&
 			!sessionFileBelongsToRoot(existing.sessionFile, rootSessionFile);
 		if (existing && !replaceable) {
+			// A fork can copy a live idle or killed transcript without detaching its
+			// source ref. Report that copy to the hub; never replace the live owner.
+			if (
+				existing.kind === "sub" &&
+				existing.sessionFile !== sessionFile &&
+				(existing.status === "idle" || existing.status === "aborted")
+			) {
+				onCopiedRef?.(existing);
+			}
 			if (existing.sessionFile === sessionFile) {
 				owned?.set(id, sessionFile);
 				transcripts.push({
@@ -888,6 +901,7 @@ async function registerPersistedSubagentsFromDir(
 				shouldContinue,
 				rootSessionFile,
 				owned,
+				onCopiedRef,
 			);
 		}
 	}

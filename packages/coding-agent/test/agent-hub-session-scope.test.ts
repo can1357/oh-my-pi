@@ -12,6 +12,7 @@ import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { createAgentHubRuntime } from "@oh-my-pi/pi-coding-agent/modes/agent-hub-runtime";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { copySessionArtifacts } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { type AgentHubRemote, AgentHubOverlayComponent } from "@oh-my-pi/pi-tui/overlays/agent-hub";
 import { SessionObserverRegistry } from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
@@ -31,7 +32,7 @@ describe("Agent Hub session scope", () => {
 	});
 
 	/** Render a hub opened on the new session while the registry still holds the old one's tree. */
-	async function renderHub(remote?: AgentHubRemote): Promise<string> {
+	async function renderHub(options: { remote?: AgentHubRemote; copied?: boolean } = {}): Promise<string> {
 		dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-hub-scope-"));
 		const oldRoot = path.join(dir, "old.jsonl");
 		const newRoot = path.join(dir, "new.jsonl");
@@ -63,17 +64,46 @@ describe("Agent Hub session scope", () => {
 			sessionFile: path.join(dir, "new", "NewLive.jsonl"),
 		});
 		registry.register({ id: "Memory", displayName: "Memory", kind: "sub", session: {} as AgentSession });
+		if (options.copied) {
+			registry.register({
+				id: "OldIdle",
+				displayName: "OldIdle",
+				kind: "sub",
+				parentId: "OldParked",
+				session: {} as AgentSession,
+				status: "idle",
+				sessionFile: path.join(dir, "old", "OldParked", "OldIdle.jsonl"),
+			});
+			registry.register({
+				id: "OldAborted",
+				displayName: "OldAborted",
+				kind: "sub",
+				session: null,
+				status: "aborted",
+				sessionFile: path.join(dir, "old", "OldAborted.jsonl"),
+			});
+			for (const file of ["OldParked.jsonl", "OldParked/OldIdle.jsonl", "OldAborted.jsonl"]) {
+				await Bun.write(path.join(dir, "old", file), "");
+			}
+			await copySessionArtifacts(oldRoot, newRoot);
+		}
 		const hub = new AgentHubOverlayComponent({
-			...createAgentHubRuntime({ settings: Settings.isolated(), registry, remote, sessionFile: newRoot }),
+			...createAgentHubRuntime({
+				settings: Settings.isolated(),
+				registry,
+				remote: options.remote,
+				sessionFile: newRoot,
+			}),
 			observers: new SessionObserverRegistry(),
 			hubKeys: [],
 			onDone: () => {},
 			requestRender: () => {},
 			irc: new IrcBus(registry),
-			remote,
+			remote: options.remote,
 			sessionFile: newRoot,
 		});
 		hubs.push(hub);
+		await hub.persistedSubagentsReady;
 		return Bun.stripANSI(hub.render(120).join("\n"));
 	}
 
@@ -92,7 +122,15 @@ describe("Agent Hub session scope", () => {
 			revive: () => {},
 			readTranscript: async () => null,
 		};
-		const text = await renderHub(remote);
+		const text = await renderHub({ remote });
 		for (const id of ["NewLive", "Memory", "OldParked", "OldNested"]) expect(text).toContain(id);
+	});
+
+	it("keeps idle and aborted refs when a fork copied their nested and direct transcripts", async () => {
+		const text = await renderHub({ copied: true });
+		expect(text).toContain("OldIdle");
+		expect(text).toContain("OldAborted");
+		expect(text).toContain("OldParked");
+		expect(text).not.toContain("OldNested");
 	});
 });
