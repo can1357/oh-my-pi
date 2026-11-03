@@ -1341,6 +1341,16 @@ impl Drop for UnixProc {
 				drop(life);
 				reap(self.pid);
 			},
+			Abandon::Orphaned { term, sweep_at } => {
+				// Unreaped (a zombie), so the scope is still ours.
+				if term {
+					let _ = self.scope.signal(Signal::Term);
+				}
+				let _ = self.scope.signal(Signal::Cont);
+				drop(life);
+				reap(self.pid);
+				escalate_at(&self.tracker, self.scope, sweep_at);
+			},
 			Abandon::Escalate { term, kill_at } => {
 				// Under the lock: the waiter cannot record the exit and reap
 				// in between, so the scope is still ours.
@@ -1350,23 +1360,27 @@ impl Drop for UnixProc {
 				// A stopped (paused) group acts on TERM only once continued.
 				let _ = self.scope.signal(Signal::Cont);
 				drop(life);
-				let scope = self.scope;
-				let tracker = Arc::clone(&self.tracker);
-				let started = thread::Builder::new()
-					.name("obash-kill".into())
-					.stack_size(SMALL_STACK)
-					.spawn(move || escalate(&tracker, scope, kill_at));
-				if started.is_err() {
-					// No thread for the grace period: KILL now rather than never.
-					let now = Instant::now();
-					self.tracker.lock().schedule_kill(now);
-					escalate(&self.tracker, scope, now);
-				}
+				escalate_at(&self.tracker, self.scope, kill_at);
 				// Parked: a waiter observes the exit and reaps.
 				#[cfg(target_os = "linux")]
 				self.unpark();
 			},
 		}
+	}
+}
+
+/// [`escalate`] on a thread of its own; at once when no thread can be
+/// started (KILL now rather than never).
+fn escalate_at(tracker: &Arc<Tracker>, scope: Scope, kill_at: Instant) {
+	let waiter = Arc::clone(tracker);
+	let started = thread::Builder::new()
+		.name("obash-kill".into())
+		.stack_size(SMALL_STACK)
+		.spawn(move || escalate(&waiter, scope, kill_at));
+	if started.is_err() {
+		let now = Instant::now();
+		tracker.lock().schedule_kill(now);
+		escalate(tracker, scope, now);
 	}
 }
 

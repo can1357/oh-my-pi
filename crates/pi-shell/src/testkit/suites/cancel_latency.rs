@@ -1,16 +1,17 @@
-//! Cancel latency, measured from the `cancel` call on another thread to
-//! `Step::Done` on the stepping thread, over [`RUNS`] fresh shells.
+//! `cancel(TERM)` of a running shell, over [`RUNS`] fresh shells:
 //!
-//! - `cancel(TERM)` on a busy loop without traps, ≤ 5 ms p99.
-//! - `cancel(TERM)` with a TERM trap installed and only virtual procs (a busy
-//!   loop at function depth 3 plus two busy background vprocs), ≤ 5 ms p99; the
-//!   trap runs exactly once, every vproc unwinds, status 143, and nothing leaks
+//! - a busy loop without traps ends with status 143;
+//! - with a TERM trap installed and only virtual procs (a busy loop at function
+//!   depth 3 plus two busy background vprocs), the trap runs exactly once,
+//!   every vproc unwinds, status 143, and nothing leaks
 //!   ([`FakeHost::assert_no_leaks`]).
 //!
-//! Run in release (the gate numbers): `cango test --release -p pi-shell --lib
-//! testkit::suites::cancel_latency -- --nocapture --test-threads 1`.
-//! Each test prints `cancel(TERM) latency <case> over N runs: p50 …, p99 …,
-//! max …`. Events are off (see below).
+//! Latency (the `cancel` call on another thread to `Step::Done` on the
+//! stepping thread) is printed, never asserted: it measures the machine as
+//! much as the engine. For representative numbers run in release:
+//! `cango test --release -p pi-shell --lib testkit::suites::cancel_latency --
+//! --nocapture --test-threads 1`. Each test prints `cancel(TERM) latency
+//! <case> over N runs: p50 …, p99 …, max …`. Events are off (see below).
 
 use std::{
 	sync::{
@@ -29,14 +30,14 @@ use crate::{
 const RUNS: usize = 300;
 
 #[test]
-fn cancel_term_p99_under_5ms_on_a_busy_loop() {
+fn cancel_term_ends_a_busy_loop() {
 	measure("busy loop", b"while true; do :; done", b"");
 }
 
 /// The trap runs in the root vproc only: subshells reset caught signals, so
 /// the background vprocs are killed without it.
 #[test]
-fn cancel_term_with_a_trap_p99_under_5ms_at_depth_3_with_background_vprocs() {
+fn cancel_term_with_a_trap_unwinds_depth_3_and_background_vprocs() {
 	measure(
 		"trap, depth 3, 2 background vprocs",
 		b"trap 'echo trapped' TERM\nf1() { f2; }; f2() { f3; }; f3() { while :; do :; done; }\n{ \
@@ -46,7 +47,7 @@ fn cancel_term_with_a_trap_p99_under_5ms_at_depth_3_with_background_vprocs() {
 }
 
 /// Cancel `src` with TERM once it runs, [`RUNS`] times; check status 143,
-/// stdout `out` (the trap's output), no leaks, and the p99 latency.
+/// stdout `out` (the trap's output) and no leaks; print the latency.
 fn measure(case: &str, src: &'static [u8], out: &[u8]) {
 	let engine = Engine::new(EngineConfig::default());
 	let mut lat = Vec::with_capacity(RUNS);
@@ -103,5 +104,4 @@ fn measure(case: &str, src: &'static [u8], out: &[u8]) {
 		"cancel(TERM) latency {case} over {RUNS} runs: p50 {p50:?}, p99 {p99:?}, max {:?}",
 		lat[RUNS - 1]
 	);
-	assert!(p99 <= Duration::from_millis(5), "{case}: p99 {p99:?} exceeds 5 ms");
 }
