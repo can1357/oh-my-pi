@@ -101,8 +101,10 @@ export const hashlineFormatNumberedLines = nativeBindings.hashlineFormatNumbered
 export const hashlineIsReadTruncationNotice = nativeBindings.hashlineIsReadTruncationNotice ?? missingNativeExport("hashlineIsReadTruncationNotice");
 export const hashlineStripPrefixes = nativeBindings.hashlineStripPrefixes ?? missingNativeExport("hashlineStripPrefixes");
 export const hasMatch = nativeBindings.hasMatch ?? missingNativeExport("hasMatch");
+export const heldFileKind = nativeBindings.heldFileKind ?? missingNativeExport("heldFileKind");
 export const highlightCode = nativeBindings.highlightCode ?? missingNativeExport("highlightCode");
 export const htmlToMarkdown = nativeBindings.htmlToMarkdown ?? missingNativeExport("htmlToMarkdown");
+export const installSqliteLockShim = nativeBindings.installSqliteLockShim ?? missingNativeExport("installSqliteLockShim");
 export const ipcEndpoint = nativeBindings.ipcEndpoint ?? missingNativeExport("ipcEndpoint");
 export const isoBackend = nativeBindings.isoBackend ?? missingNativeExport("isoBackend");
 export const isoDiff = nativeBindings.isoDiff ?? missingNativeExport("isoDiff");
@@ -199,6 +201,11 @@ export const GrepOutputMode = {
 	Content: "content",
 	Count: "count",
 	FilesWithMatches: "filesWithMatches",
+};
+export const HeldFileKind = {
+	Database: "database",
+	WalIndex: "wal-index",
+	Locked: "locked",
 };
 export const IsoBackendKind = {
 	Apfs: 0,

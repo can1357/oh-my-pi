@@ -94,11 +94,15 @@ function withoutCacheControl(value: unknown): unknown {
 
 describe("AgentSession Anthropic native compaction", () => {
 	const previousProxy = Bun.env.PI_PROXY_ANTHROPIC;
+	const previousThreads = Bun.env.PI_ANTHROPIC_MESSAGE_THREADS;
 
 	beforeEach(() => {
 		// A provider proxy moves first-party requests off the Cowork transport
 		// onto `globalThis.fetch`, where the spy below answers them.
 		Bun.env.PI_PROXY_ANTHROPIC = "http://proxy.example.test:8080";
+		// These compare the compaction request with a live request's full
+		// replay; a message-thread turn sends only its new messages.
+		Bun.env.PI_ANTHROPIC_MESSAGE_THREADS = "0";
 		__resetProxyCache();
 	});
 
@@ -106,6 +110,8 @@ describe("AgentSession Anthropic native compaction", () => {
 		vi.restoreAllMocks();
 		if (previousProxy === undefined) delete Bun.env.PI_PROXY_ANTHROPIC;
 		else Bun.env.PI_PROXY_ANTHROPIC = previousProxy;
+		if (previousThreads === undefined) delete Bun.env.PI_ANTHROPIC_MESSAGE_THREADS;
+		else Bun.env.PI_ANTHROPIC_MESSAGE_THREADS = previousThreads;
 		__resetProxyCache();
 	});
 

@@ -492,7 +492,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("owned tab recovery", () => {
 		if (!("_targetId" in target) || typeof target._targetId !== "string") throw new Error("Missing target ID");
 		const payload: WorkerInitPayload = {
 			mode: "attach",
-			browserWSEndpoint: launched.browser.wsEndpoint(),
+			browserWSEndpoint: launched.wsEndpoint,
 			safeDir: getPuppeteerDir(),
 			uploadDir: "/tmp/omp-uploads-test",
 			page: { kind: "owned", targetId: target._targetId },

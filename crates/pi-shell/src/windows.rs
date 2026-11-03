@@ -1,31 +1,29 @@
+//! Windows host specifics: the `PATH` the shell starts with and 8.3 path
+//! spellings.
+
 use std::{
-	collections::HashSet,
+	collections::{HashMap, HashSet},
 	env,
+	os::windows::ffi::{OsStrExt, OsStringExt},
 	path::{Path, PathBuf},
 	process::Command,
 };
 
-use anyhow::{Error, Result};
-use brush_core::{Shell as BrushShell, ShellValue, ShellVariable};
+use windows_sys::Win32::Storage::FileSystem::{GetLongPathNameW, GetShortPathNameW};
 use winreg::{RegKey, enums::HKEY_LOCAL_MACHINE};
 
-pub fn configure_windows_path(shell: &mut BrushShell) -> Result<()> {
+/// Add Git for Windows' tool directories to the shell's starting `PATH` in
+/// `vars`, translating MSYS2-style entries to Windows paths.
+pub fn configure_windows_path(vars: &mut HashMap<String, String>) {
 	let GitDiscovery { install_roots, paths: git_paths } = discover_git();
 	if install_roots.is_empty() && git_paths.is_empty() {
-		return Ok(());
+		return;
 	}
 
-	let existing_path = shell
-		.env()
-		.get("PATH")
-		.and_then(|(_, var)| match var.value() {
-			ShellValue::String(value) => Some(value.clone()),
-			_ => None,
-		})
-		.unwrap_or_default();
+	let existing_path = vars.get("PATH").cloned().unwrap_or_default();
 
 	// Translate MSYS2-style entries (e.g. /usr/bin, /mingw64/bin, /c/Users/...)
-	// into Windows-native paths so brush-core's std::path-based lookups can
+	// into Windows-native paths so the shell's std::path-based lookups can
 	// resolve executables shipped with Git Bash.
 	let mut segments: Vec<String> = Vec::new();
 	let mut seen_normalized: HashSet<String> = HashSet::new();
@@ -58,18 +56,56 @@ pub fn configure_windows_path(shell: &mut BrushShell) -> Result<()> {
 	}
 
 	let updated_path = segments.join(";");
-	if updated_path == existing_path {
-		return Ok(());
+	if updated_path != existing_path {
+		vars.insert("PATH".to_owned(), updated_path);
 	}
+}
 
-	let mut var = ShellVariable::new(ShellValue::String(updated_path));
-	var.export();
-	shell
-		.env_mut()
-		.set_global("PATH", var)
-		.map_err(|err| Error::msg(format!("Failed to set PATH: {err}")))?;
+/// Expand 8.3 short-name components (e.g. `ADMINI~1`) in `path` to their long
+/// form, leaving the path otherwise unchanged (symlinks and junctions kept).
+pub fn expand_to_long_path(path: &Path) -> PathBuf {
+	query_path_name(path, GetLongPathNameW)
+}
 
-	Ok(())
+/// The existing 8.3 spelling of `path`, without resolving symlinks or
+/// junctions; the input when no short spelling is available.
+pub fn get_short_path(path: &Path) -> PathBuf {
+	query_path_name(path, GetShortPathNameW)
+}
+
+/// Both Win32 name queries preserve symlinks and junctions, unlike
+/// canonicalize. A failed query (a missing path) returns the input.
+fn query_path_name(
+	path: &Path,
+	query: unsafe extern "system" fn(*const u16, *mut u16, u32) -> u32,
+) -> PathBuf {
+	// Encode straight from the wide form: Windows `OsStr` is UTF-16 and may
+	// not round-trip through UTF-8.
+	let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+	// SAFETY: `wide` is NUL-terminated; a null buffer with length 0 asks only
+	// for the required size (including the NUL).
+	let needed = unsafe { query(wide.as_ptr(), std::ptr::null_mut(), 0) };
+	if needed == 0 {
+		return path.to_path_buf();
+	}
+	let mut buf = vec![0u16; needed as usize];
+	loop {
+		let Ok(len) = u32::try_from(buf.len()) else {
+			return path.to_path_buf();
+		};
+		// SAFETY: `wide` is NUL-terminated and `buf` is writable for `len` u16s.
+		let written = unsafe { query(wide.as_ptr(), buf.as_mut_ptr(), len) };
+		if written == 0 {
+			return path.to_path_buf();
+		}
+		// A result longer than the buffer reports the size it needs instead.
+		if written as usize >= buf.len() {
+			buf.resize(written as usize, 0);
+			continue;
+		}
+		buf.truncate(written as usize);
+		return PathBuf::from(std::ffi::OsString::from_wide(&buf));
+	}
 }
 
 fn normalize_path(path: &Path) -> String {
@@ -224,7 +260,7 @@ fn has_git_command(dir: &Path) -> bool {
 
 /// Translate an MSYS2/Git Bash style path entry (e.g. `/usr/bin`,
 /// `/mingw64/bin`, `/c/Users/foo`) into a Windows-native path so that
-/// `std::path` based executable lookups in brush-core can resolve binaries
+/// the shell's `std::path` based executable lookups can resolve binaries
 /// shipped with Git Bash. Returns `None` when the segment is already a
 /// Windows-style path or cannot be translated.
 fn translate_msys_segment(segment: &str, install_roots: &[PathBuf]) -> Option<String> {

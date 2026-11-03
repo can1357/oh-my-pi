@@ -10,7 +10,6 @@ use std::{
 	path::{Path, PathBuf},
 };
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use pi_vfs::{
 	BlockingFs, CanonicalizeOptions, MissingHandling, ResolveMode, SymlinkKind, child_path,
@@ -24,7 +23,7 @@ use uucore::{
 
 use crate::{
 	file_backup::{backup_display, backup_path},
-	host::{Host, Utility, format_usage, matches_parser, strip_errno, util},
+	host::{Host, Utility, format_usage, matches_parser, strip_errno},
 };
 
 struct Settings {
@@ -318,11 +317,6 @@ fn uu_app() -> Command {
 				.required(true)
 				.num_args(1..),
 		)
-}
-
-/// Creates the `ln` builtin registration.
-pub(crate) fn ln_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Ln, SE>()
 }
 
 fn exec(host: &mut Host, files: &[PathBuf], settings: &Settings) -> LnResult<()> {

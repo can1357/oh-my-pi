@@ -6,7 +6,7 @@ import { ptree } from "@oh-my-pi/pi-utils";
 import type TurndownService from "@oh-my-pi/pi-utils/turndown";
 
 import type { ModelRegistry } from "../../config/model-registry";
-import type { AgentStorage } from "../../session/agent-storage";
+import type { AgentStorageApi } from "../../session/agent-storage";
 import { ToolAbortError } from "../../tools/tool-errors";
 import { decodeBody, readBodyCapped } from "../response-body";
 
@@ -32,7 +32,7 @@ export type SpecialHandler = (
 	url: string,
 	timeout: number,
 	signal?: AbortSignal,
-	storage?: AgentStorage | null,
+	storage?: AgentStorageApi | null,
 	modelRegistry?: ModelRegistry,
 ) => Promise<RenderResult | null>;
 
