@@ -61,27 +61,60 @@ function joinPhysically(cwd: string, target: string): string {
 /** Largest file the edit tool's byte-for-byte check reads. */
 const PLAIN_TEXT_LIMIT = 4 * 1024 * 1024;
 
-/** A regular file's size, and whether it is at most 4 MB of valid UTF-8 with no BOM and no CR. */
+/** A regular file's size and links, and (read on first use) whether it is plain text the edit tool keeps. */
 function fileFactsIn(cwd: string, target: string): FileFacts | undefined {
 	if (URL_PATH.test(cwd) || URL_PATH.test(target)) return undefined;
 	const joined = joinPhysically(cwd, target);
+	let stat: fs.Stats;
 	try {
-		const { size } = fs.statSync(joined);
-		if (size > PLAIN_TEXT_LIMIT) return { size, plainText: false };
-		const bytes = fs.readFileSync(joined);
-		const bom = bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf;
-		let plainText = !bom && !bytes.includes(0x0d);
-		if (plainText) {
-			try {
-				new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-			} catch {
-				plainText = false;
-			}
-		}
-		return { size, plainText };
+		stat = fs.statSync(joined);
 	} catch {
 		return undefined;
 	}
+	let plainText: boolean | undefined;
+	return {
+		size: stat.size,
+		links: stat.nlink,
+		plainText: () => {
+			plainText ??= isPlainText(joined, stat.size);
+			return plainText;
+		},
+	};
+}
+
+/** Whether the file is at most 4 MB of valid UTF-8 with no byte-order mark and no carriage return. */
+function isPlainText(file: string, size: number): boolean {
+	if (size > PLAIN_TEXT_LIMIT) return false;
+	try {
+		const bytes = fs.readFileSync(file);
+		if (bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) return false;
+		if (bytes.includes(0x0d)) return false;
+		new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/** `filesystem` answering each question once per decision: candidates and rules repeat operands. */
+function memoized(filesystem: StepFilesystem): StepFilesystem {
+	const kinds = new Map<string, PathKind>();
+	const facts = new Map<string, FileFacts | undefined>();
+	return {
+		kind(target, follow) {
+			const key = `${follow ? 1 : 0}\0${target}`;
+			let kind = kinds.get(key);
+			if (kind === undefined) {
+				kind = filesystem.kind(target, follow);
+				kinds.set(key, kind);
+			}
+			return kind;
+		},
+		facts(target) {
+			if (!facts.has(target)) facts.set(target, filesystem.facts(target));
+			return facts.get(target);
+		},
+	};
 }
 
 /** A filesystem that cannot be inspected: a later step may run after a `cd` or after files change. */
@@ -237,7 +270,10 @@ export function checkBashInterception(
 	const filesystem: StepFilesystem | undefined =
 		cwd === undefined
 			? undefined
-			: { kind: (target, follow) => pathKindIn(cwd, target, follow), facts: target => fileFactsIn(cwd, target) };
+			: memoized({
+					kind: (target, follow) => pathKindIn(cwd, target, follow),
+					facts: target => fileFactsIn(cwd, target),
+				});
 	const compiled = compileRules(rules);
 	const everyStep = interceptionCandidates(command, false);
 	const leadingStep = interceptionCandidates(command, true);

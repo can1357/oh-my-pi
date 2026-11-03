@@ -42,7 +42,7 @@ function joinStrippedLines(lines: string[], text?: string): string | undefined {
  * Includes a fallback for loosely-formed section headers that still carry
  * line-number prefixes (for example legacy or malformed hashline echoes).
  */
-function stripWriteContentWithPotentialLooseHeader(content: string): { text: string; stripped: boolean } {
+export function stripWriteContentWithPotentialLooseHeader(content: string): { text: string; stripped: boolean } {
 	// Lone surrogates still take the native path: its UTF-8 round trip rewrites them.
 	if (PLAIN_FIRST_ROW_RE.test(content) && content.isWellFormed()) {
 		return { text: content, stripped: false };

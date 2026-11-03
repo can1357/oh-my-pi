@@ -624,15 +624,26 @@ describe("dedicated tool capability", () => {
 		"sed -i 'r other' f",
 		"sed -i 's/a/b/w log' f",
 		"sed -n -i 's/a/b/p' f",
+		// Round 7: a regex can match part of a character, an option changes the output, and a
+		// replacement can write a carriage return; only literal-for-literal substitutions are edits.
+		"perl -0777 -i -pe 's/a/b/g' f",
+		"perl -l0377 -pi -e 's/a/b/' f",
+		"perl -pi -e 's/./x/' f",
+		"perl -pi -e 's/a$/b/g' f",
+		"perl -pi -e 's/(\\w+)/[$1]/' f",
+		"sed -i 's/a/\\r/' f",
+		"perl -pi -e 's/a/\\r/' f",
+		"sed -i -E -e 's/^x$/y/g' -e '/drop/d' f.v",
+		"sed -i 's/a/&&/' f",
 	])("does not refuse %s as an edit", command => {
 		expect(decide(command)).toBeUndefined();
 	});
 
 	it.each([
 		"perl -pi -e 's/a/b/' f",
-		"perl -0777 -i -pe 's/a/b/g' f",
+		"perl -pi -e 's/old name/new name/g' f",
 		"sed -i 's/a/b/' f.v",
-		"sed -i -E -e 's/^x$/y/g' -e '/drop/d' f.v",
+		"sed -i -e 's|src/old|src/new|g' f.v",
 	])("refuses %s as an edit", command => {
 		expect(decide(command)).toBe("edit");
 	});
@@ -726,8 +737,7 @@ describe("dedicated tool capability", () => {
 	});
 
 	it.each([
-		["perl -pi -e 's/a$/b/g' f", "edit"],
-		["perl -pi -e 's/(\\w+)/[$1]/' f", "edit"],
+		["perl -pi -e 's/foo-bar/baz_qux/g' f", "edit"],
 		["cat f | sort -n -k2 | uniq -c", "read"],
 		["echo hi, home is ~ > out.txt", "write"],
 	])("still refuses %s as %s", (command, tool) => {
@@ -828,7 +838,12 @@ describe("dedicated tool capability", () => {
 	});
 
 	it.each([
-		["printf '%s: %5d%%\\n' rate 7 > out", "write"],
+		["printf '%s: %d%%\\n' rate 7 > out", "write"],
+		// The exact text decides: `#heading` is no `#!` line, `cat ""` names no file.
+		["printf '#%s\\n' heading > notes.md", "write"],
+		['cat "" f', undefined],
+		// Round 7: padding is counted in bytes, so a width or precision is not a write.
+		["printf '%5d\\n' 7 > out", undefined],
 		["cat plain | cat", "read"],
 		["cat plain | cat -", "read"],
 		["cat plain | sort --", "read"],
@@ -948,6 +963,41 @@ describe("dedicated tool capability", () => {
 			expect(at("find alias -name dune")).toBeUndefined();
 			expect(at("find -H alias -name dune")).toBe("glob");
 			expect(at("find real -name dune")).toBe("glob");
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	it.each([
+		// Round 7: a `#!` prefix built after an empty conversion.
+		"printf '%s#!/bin/sh\\n' > out",
+		"printf '%s#%s/bin/sh\\n' '' '!' > out",
+		"printf '%.0d#!/bin/sh\\n' 0 > out",
+		// The write tool removes read-output prefixes it sees in the text.
+		"echo '1:literal' > out",
+		"printf '[a.ts#1A2B]\\n1:x\\n' > out",
+		// A later stage or a find that opens an input (a FIFO waits for its writer).
+		"cat f | sort 3<gate",
+		"grep a f | sort 3<gate",
+		"find . -name f 3<gate",
+		"find . -name f <gate",
+		// A program named like a filter but found by path may do anything.
+		"cat f | ./sort",
+		"grep a f | /usr/local/bin/sort",
+	])("does not refuse %s (round 7)", command => {
+		expect(decide(command)).toBeUndefined();
+	});
+
+	it("does not send a hard-linked file to edit", async () => {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "bash-interceptor-link-")));
+		try {
+			await Bun.write(path.join(dir, "f"), "a\n");
+			await Bun.write(path.join(dir, "single"), "a\n");
+			await fs.link(path.join(dir, "f"), path.join(dir, "alias"));
+			const at = (command: string) =>
+				checkBashInterception(command, tools, DEFAULT_BASH_INTERCEPTOR_RULES, command, dir).suggestedTool;
+			expect(at("sed -i 's/a/b/' f")).toBeUndefined();
+			expect(at("sed -i 's/a/b/' single")).toBe("edit");
 		} finally {
 			await fs.rm(dir, { recursive: true, force: true });
 		}
