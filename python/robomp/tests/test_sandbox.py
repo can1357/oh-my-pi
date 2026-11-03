@@ -1444,6 +1444,10 @@ def test_run_git_injects_safe_directory_and_subprocess_identity(
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
     monkeypatch.setattr("robomp.git_ops.subprocess.run", fake_run)
+    monkeypatch.delenv("GIT_CONFIG_COUNT", raising=False)
+    for key in list(os.environ):
+        if key.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")):
+            monkeypatch.delenv(key, raising=False)
 
     _run_git(
         ["status"],
