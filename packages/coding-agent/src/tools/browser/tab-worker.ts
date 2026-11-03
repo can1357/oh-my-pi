@@ -1818,7 +1818,7 @@ export class WorkerCore {
 			this.#downloads = new DownloadManager(this.#browser, this.#page, this.#targetId, {
 				perTab: !this.#userDriven,
 			});
-			if (payload.downloadsPath) await this.#downloads.enable(payload.downloadsPath);
+			await this.#downloads.start(payload.downloadsPath);
 			const baseUserAgent = await this.#page.evaluate(() => navigator.userAgent);
 			this.#emulation = new BrowserEmulationController(
 				this.#page,

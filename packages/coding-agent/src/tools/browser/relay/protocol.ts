@@ -33,7 +33,12 @@ export type RelayRpcRequest =
 	/** Add tabs to the per-window omp group (created/reused by title), remembering prior membership. */
 	| { op: "group"; tabIds: number[]; title: string; color: string }
 	/** Return tabs to their pre-omp group (or ungroup); no-op for tabs the relay never grouped. */
-	| { op: "ungroup"; tabIds: number[] };
+	| { op: "ungroup"; tabIds: number[] }
+	/** Where Chrome saved its latest download of `url` (the URL the download was served from), as a {@link FoundDownload}. */
+	| { op: "findDownload"; url: string };
+
+/** The extension's answer to `findDownload`: null when Chrome has no download of that URL. */
+export type FoundDownload = { filename: string; state: "in_progress" | "interrupted" | "complete" } | null;
 
 /**
  * Messages sent relay → extension. `reload` asks the extension to run `chrome.runtime.reload()`, which
@@ -46,6 +51,9 @@ export const DISCARDED_TABS_PROTOCOL_VERSION = 1;
 
 /** Hello capability of an extension that reloads itself on a relay `reload` message. */
 export const EXTENSION_RELOAD_PROTOCOL_VERSION = 1;
+
+/** Hello capability of an extension that answers `findDownload` (it holds Chrome's `downloads` permission). */
+export const DOWNLOADS_PROTOCOL_VERSION = 1;
 
 /**
  * Whether a relay or extension reported a well-formed omp release version.
@@ -109,6 +117,8 @@ export type ExtToRelayMessage =
 			ompVersion?: string;
 			/** {@link EXTENSION_RELOAD_PROTOCOL_VERSION} when the extension reloads itself on `reload`. Absent in older extensions. */
 			reloadProtocol?: number;
+			/** {@link DOWNLOADS_PROTOCOL_VERSION} when the extension answers `findDownload`. Absent in older extensions. */
+			downloadsProtocol?: number;
 	  }
 	| { t: "cdpEvent"; tabId: number; sessionId?: string; method: string; params?: Record<string, unknown> }
 	| { t: "detached"; tabId: number; reason: string; relayInitiated?: boolean }

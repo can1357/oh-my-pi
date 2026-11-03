@@ -1,5 +1,6 @@
 // ../coding-agent/src/tools/browser/relay/protocol.ts
 var EXTENSION_RELOAD_PROTOCOL_VERSION = 1;
+var DOWNLOADS_PROTOCOL_VERSION = 1;
 
 // extension/debugger-ownership.ts
 async function ownedDebuggerTabs(targets, probe) {
@@ -177,6 +178,7 @@ async function buildHello() {
     discardedTabsProtocol: 1,
     ompVersion: typeof OMP_INSTALL_VERSION === "string" ? OMP_INSTALL_VERSION : undefined,
     reloadProtocol: EXTENSION_RELOAD_PROTOCOL_VERSION,
+    downloadsProtocol: DOWNLOADS_PROTOCOL_VERSION,
     tabs: snapshots,
     attachedTabIds
   };
@@ -220,6 +222,11 @@ async function runRpc(msg, origin) {
     case "ungroup":
       await enqueueGroupOp(() => chrome.tabs.ungroup(msg.tabIds).catch(() => {}));
       return {};
+    case "findDownload": {
+      const [item] = await chrome.downloads.search({ finalUrl: msg.url, orderBy: ["-startTime"], limit: 1 });
+      const found = item ? { filename: item.filename, state: item.state } : null;
+      return found;
+    }
   }
 }
 function handleRelayMessage(socket, raw) {

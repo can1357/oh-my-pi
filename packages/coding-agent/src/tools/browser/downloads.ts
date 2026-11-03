@@ -2,7 +2,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { hasFsCode, isEnoent, toError, untilAborted } from "@oh-my-pi/pi-utils";
-import type { Browser, CDPSession, Page } from "puppeteer-core";
+import type { Browser, CDPSession, Frame, Page } from "puppeteer-core";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { replaceFileAcrossDevices, replaceFileAtomically } from "../../utils/atomic-file";
 import { devtoolsFrameId } from "./frames";
@@ -43,15 +43,26 @@ interface DownloadWaiter {
 /** Chromium names an `allowAndName` download after its GUID, a lowercase UUID. */
 const DOWNLOAD_GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/** The omp relay drives Chrome through an extension, which Chrome never lets choose where downloads go. */
+const PAGE_EVENTS_FOLDER_REFUSAL =
+	"The omp browser relay cannot choose where Chrome saves downloads: open the tab without `downloads`, and tab.waitForDownload() and tab.downloads() report where Chrome saved each file.";
+
 /** Owns tab-scoped Chromium download behavior and completion events. */
 export class DownloadManager {
 	readonly #browser: Browser;
 	readonly #page: Page;
 	readonly #defaultDirectory: string;
 	readonly #perTab: boolean;
+	/**
+	 * No browser-level target (the omp relay): downloads are heard as the page's own `Page.download*` events on the
+	 * sessions of its frames, and the relay says where Chrome saved each file.
+	 */
+	readonly #pageEvents: boolean;
 	#directory?: string;
 	#arming?: Promise<void>;
 	#session?: CDPSession;
+	readonly #pageSessions = new Set<CDPSession>();
+	#onFrame?: (frame: Frame) => void;
 	readonly #pending = new Map<string, PendingDownload>();
 	readonly #completed: BrowserDownload[] = [];
 	readonly #unclaimed: BrowserDownload[] = [];
@@ -69,6 +80,16 @@ export class DownloadManager {
 		this.#page = page;
 		this.#defaultDirectory = path.join(os.tmpdir(), `omp-downloads-${tabId}`);
 		this.#perTab = options.perTab;
+		this.#pageEvents = !browser.targets().some(target => target.type() === "browser");
+	}
+
+	/**
+	 * Start a new tab's downloads: point them at `directory` when the tab was opened with one. Where downloads are page
+	 * events, tracking changes no browser setting, so it starts here and a download clicked before any wait is listed.
+	 */
+	async start(directory?: string): Promise<void> {
+		if (directory) await this.enable(directory);
+		else if (this.#pageEvents) await this.enable();
 	}
 
 	/**
@@ -76,6 +97,11 @@ export class DownloadManager {
 	 * so tabs never overwrite each other's, and each tab moves its own into its folder under the suggested name.
 	 */
 	async enable(directory?: string): Promise<void> {
+		if (this.#pageEvents) {
+			if (directory !== undefined) throw new ToolError(PAGE_EVENTS_FOLDER_REFUSAL);
+			this.#hearPage();
+			return;
+		}
 		const resolved = path.resolve(directory ?? this.#defaultDirectory);
 		await fs.mkdir(resolved, { recursive: true });
 		if (!this.#session) await this.#attach();
@@ -134,26 +160,51 @@ export class DownloadManager {
 
 	/** Detach event listeners and reject outstanding waits. */
 	async close(): Promise<void> {
+		if (this.#onFrame) {
+			this.#page.off("frameattached", this.#onFrame);
+			this.#page.off("framenavigated", this.#onFrame);
+			this.#onFrame = undefined;
+			for (const session of this.#pageSessions) this.#unsubscribe(session, "Page");
+			this.#pageSessions.clear();
+		}
 		const session = this.#session;
-		if (!session) return;
-		if (this.#willBegin) session.off("Browser.downloadWillBegin", this.#willBegin);
-		if (this.#progress) session.off("Browser.downloadProgress", this.#progress);
+		if (session) this.#unsubscribe(session, "Browser");
 		for (const waiter of this.#waiters.splice(0)) {
 			if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener("abort", waiter.onAbort);
 			waiter.reject(new ToolError("Tab closed while waiting for a download"));
 		}
+		if (!session) return;
 		this.#session = undefined;
 		await session.detach().catch(() => undefined);
 	}
 
 	async #attach(): Promise<void> {
 		const session = await this.#browser.target().createCDPSession();
-		this.#willBegin = event => {
-			// Every session hears every download in the browser; keep the ones this tab's frames started.
+		this.#subscribe(session, "Browser");
+		this.#session = session;
+	}
+
+	/** Hear the page's download events on the session of each of its frames: a cross-site frame has its own. */
+	#hearPage(): void {
+		if (this.#onFrame) return;
+		this.#onFrame = frame => {
+			if (this.#pageSessions.has(frame.client)) return;
+			this.#pageSessions.add(frame.client);
+			this.#subscribe(frame.client, "Page");
+		};
+		this.#page.on("frameattached", this.#onFrame);
+		// A frame that navigates to another site moves to a new session.
+		this.#page.on("framenavigated", this.#onFrame);
+		for (const frame of this.#page.frames()) this.#onFrame(frame);
+	}
+
+	#subscribe(session: CDPSession, domain: "Browser" | "Page"): void {
+		this.#willBegin ??= event => {
+			// Every browser session hears every download in the browser; keep the ones this tab's frames started.
 			if (!this.#page.frames().some(frame => devtoolsFrameId(frame) === event.frameId)) return;
 			this.#pending.set(event.guid, { ...event, receivedBytes: 0 });
 		};
-		this.#progress = event => {
+		this.#progress ??= event => {
 			const pending = this.#pending.get(event.guid);
 			if (!pending) return;
 			pending.receivedBytes = event.receivedBytes;
@@ -167,14 +218,35 @@ export class DownloadManager {
 				this.#rejectNext(new ToolError(`Download failed: ${pending.url}: ${toError(error).message}`));
 			});
 		};
-		session.on("Browser.downloadWillBegin", this.#willBegin);
-		session.on("Browser.downloadProgress", this.#progress);
-		this.#session = session;
+		session.on(`${domain}.downloadWillBegin`, this.#willBegin);
+		session.on(`${domain}.downloadProgress`, this.#progress);
+	}
+
+	#unsubscribe(session: CDPSession, domain: "Browser" | "Page"): void {
+		if (this.#willBegin) session.off(`${domain}.downloadWillBegin`, this.#willBegin);
+		if (this.#progress) session.off(`${domain}.downloadProgress`, this.#progress);
+	}
+
+	/** Where Chrome saved a download its page reported, which the omp relay looks up in Chrome's download list. */
+	async #savedPath(url: string): Promise<string> {
+		// Puppeteer's protocol map cannot express the relay-private method; the send signature is otherwise identical.
+		const session = this.#page.mainFrame().client as unknown as {
+			send(method: string, params: { url: string }): Promise<unknown>;
+		};
+		const reply = await session.send("OMP.downloadPath", { url });
+		if (reply && typeof reply === "object" && "filePath" in reply && typeof reply.filePath === "string") {
+			return reply.filePath;
+		}
+		throw new Error("the browser did not say where it saved the file");
 	}
 
 	async #complete(pending: PendingDownload, filePath: string | undefined): Promise<void> {
 		const directory = this.#directory ?? this.#defaultDirectory;
-		const source = filePath ?? path.join(directory, this.#perTab ? pending.guid : pending.suggestedFilename);
+		const source =
+			filePath ??
+			(this.#pageEvents
+				? await this.#savedPath(pending.url)
+				: path.join(directory, this.#perTab ? pending.guid : pending.suggestedFilename));
 		for (let attempt = 0; attempt < 100; attempt++) {
 			try {
 				await fs.stat(source);

@@ -46,6 +46,12 @@ interface ChromeDebuggerTargetInfo {
 	url?: string;
 }
 
+interface ChromeDownloadItem {
+	/** Absolute path of the saved file; empty until Chrome has chosen it. */
+	filename: string;
+	state: "in_progress" | "interrupted" | "complete";
+}
+
 declare const chrome: {
 	tabs: {
 		query(queryInfo: { url?: string; groupId?: number }): Promise<ChromeTab[]>;
@@ -78,6 +84,9 @@ declare const chrome: {
 		getTargets(): Promise<ChromeDebuggerTargetInfo[]>;
 		onEvent: ChromeEvent<(source: ChromeDebuggerSession, method: string, params?: Record<string, unknown>) => void>;
 		onDetach: ChromeEvent<(source: ChromeDebuggerSession, reason: string) => void>;
+	};
+	downloads: {
+		search(query: { finalUrl?: string; orderBy?: string[]; limit?: number }): Promise<ChromeDownloadItem[]>;
 	};
 	storage: {
 		local: {

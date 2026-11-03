@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- The extension asks for Chrome's `downloads` permission to tell omp where Chrome saved a download a relay tab started
+
 ## [18.13.3] - 2026-10-28
 
 ### Changed
