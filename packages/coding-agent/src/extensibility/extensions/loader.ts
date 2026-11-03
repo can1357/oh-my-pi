@@ -34,6 +34,7 @@ import { InternalUrlRouter } from "../../internal-urls/router";
 import { EventBus } from "../../utils/event-bus";
 import * as TypeBox from "../legacy-typebox";
 import { resolveExtensionDirectory } from "./directory-resolution";
+import { ExpectedReplies } from "./expected-replies";
 import { installLegacyPiSpecifierShim, loadLegacyPiModule } from "../plugins/legacy-pi-compat";
 import { getAllPluginExtensionPaths } from "../plugins/loader";
 
@@ -48,6 +49,7 @@ import type {
 	ExtensionAPI,
 	ExtensionContext,
 	ExtensionFactory,
+	ExtensionReplies,
 	ExtensionRuntime as IExtensionRuntime,
 	LoadExtensionsResult,
 	MessageRenderer,
@@ -124,6 +126,7 @@ export class ExtensionRuntimeNotInitializedError extends Error {
 export class ExtensionRuntime implements IExtensionRuntime {
 	flagValues = new Map<string, boolean | string>();
 	pendingProviderRegistrations: Array<{ name: string; config: ProviderConfig; sourceId: string }> = [];
+	readonly expectedReplies = new ExpectedReplies();
 
 	registerProvider(name: string, config: ProviderConfig, sourceId: string): void {
 		this.pendingProviderRegistrations.push({ name, config, sourceId });
@@ -215,9 +218,34 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		config: ProviderConfig;
 		sourceId: string;
 	}> = [];
+	/**
+	 * Expectations go to the session's store and follow this load (see `Extension.registrations`):
+	 * they stop counting while it is suspended, and go with it at teardown.
+	 */
+	readonly replies: ExtensionReplies = {
+		expect: (peerId, options) => {
+			const registrations = this.extension.registrations;
+			// A callback the torn-down load left behind records nothing, so no `wait` ever blocks on it.
+			if (registrations?.released) return () => {};
+			const expectation = this.runtime.expectedReplies.expect(peerId, {
+				promised: options?.promised,
+				suspended: registrations?.suspended,
+			});
+			const untrack = registrations?.add(expectation);
+			return () => {
+				// Released by the extension itself: untracked, so a long-lived load does not accumulate them.
+				untrack?.();
+				expectation.release();
+			};
+		},
+	};
 
 	get pi() {
 		return getCodingAgentApi();
+	}
+
+	get expectedReplies(): ExpectedReplies {
+		return this.runtime.expectedReplies;
 	}
 
 	constructor(

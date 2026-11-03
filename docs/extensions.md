@@ -149,6 +149,7 @@ Core methods:
 - `registerProvider`, `unregisterProvider`
 - `registerFileWriteFallback`, `registerFileDeleteFallback`
 - `onSuspensionChange`
+- `replies.expect` (replies `wait` blocks for)
 - `events` (shared event bus)
 
 `ExtensionAPI` methods retain their extension binding when destructured or passed as callbacks.
@@ -376,6 +377,98 @@ Payloads passed to `pi.sendMessage` are normalized before delivery
 re-exported by `session/messages.ts`): non-object payloads are coerced to string
 content under the default custom type, missing `customType`/`attribution` fields
 are defaulted, and invalid content collapses to an empty string.
+
+### Expected replies (`pi.replies`)
+
+`pi.replies.expect(peerId, options?)` records that this session's agent awaits a reply from a peer
+the built-in tools cannot see, such as an agent in another process reached through a bridge.
+`peerId` is an opaque display id (for example `@murmur/leia`); it need not name a registered agent.
+It returns the release function.
+
+- While an expectation is unreleased, `wait` blocks for the reply instead of returning "Nothing to
+  wait for". A message reaching the agent mid-wait, such as the answer injected with
+  `deliverAs: "steer"`, ends the wait as usual; a wait that runs out names the peers still awaited.
+- Expect before you send, since an answer can arrive before the send returns, and release at once
+  if the send fails.
+- Release once the answer has reached the transcript (its `message_start` event), or when the peer
+  is gone. `sendMessage` and `sendUserMessage` only queue the answer; a release right after them
+  would end a blocked `wait` with "no longer owes a reply" before the steer could interrupt it.
+  Releasing the last expectation a blocked `wait` depended on ends it, naming the peer. Release is
+  idempotent, and each `expect` call is its own expectation.
+- An expectation counts only in the agent run it was recorded in, like an unanswered IRC question.
+  `{ promised: true }` marks a peer that promised a later answer (like an IRC progress note): it
+  stays awaited in later runs until released.
+- Expectations belong to this session: another session's `wait` never sees them. They follow the
+  extension load (see [Suspension and teardown](#suspension-and-teardown)): while a live
+  `disabledExtensions` edit suspends it they stop counting, so a `wait` blocked only on them ends,
+  and on resume the unreleased ones count again. Teardown (session shutdown, a factory that throws)
+  releases them, and an `expect` made after it records nothing.
+
+The bridge pattern: expect when the agent asks a remote peer. Each answer that reaches the
+transcript settles one question, the oldest, since each `expect` call is its own expectation. A
+failed send withdraws only its own expectation, and a peer that leaves releases all of its.
+
+```ts
+const PEER_ANSWER = "peer-answer";
+const awaiting = new Map<string, Array<() => void>>();
+/** Record that `peer` owes an answer; the returned function withdraws just this one. */
+const expectAnswer = (peer: string): (() => void) => {
+	const undo = pi.replies.expect(peer);
+	const queue = awaiting.get(peer) ?? [];
+	queue.push(undo);
+	awaiting.set(peer, queue);
+	return () => {
+		const index = queue.indexOf(undo);
+		if (index !== -1) queue.splice(index, 1);
+		undo();
+	};
+};
+/** An answer from `peer` reached the transcript: it settles that peer's oldest question. */
+const answered = (peer: string) => awaiting.get(peer)?.shift()?.();
+/** The peer is gone: nothing it owes can arrive any more. */
+const peerLeft = (peer: string) => {
+	for (const undo of awaiting.get(peer)?.splice(0) ?? []) undo();
+	awaiting.delete(peer);
+};
+
+pi.registerTool({
+	name: "ask_peer",
+	label: "Ask peer",
+	description: "Ask a peer agent in another process",
+	parameters: z.object({ peer: z.string(), question: z.string() }),
+	async execute(_id, { peer, question }) {
+		// Expect first: the answer can arrive before the send resolves.
+		const withdraw = expectAnswer(peer);
+		try {
+			await bridge.send(peer, question);
+		} catch (error) {
+			withdraw();
+			throw error;
+		}
+		return { content: [{ type: "text", text: `Asked ${peer}. Call wait for the answer.` }] };
+	},
+});
+
+bridge.onAnswer((peer, text) => {
+	// Queued only: the steer still has to end a running `wait`, so release on delivery below.
+	pi.sendMessage(
+		{ customType: PEER_ANSWER, content: `${peer} replied: ${text}`, display: true, details: { peer } },
+		{ deliverAs: "steer", triggerTurn: true },
+	);
+});
+
+pi.on("message_start", async event => {
+	const message = event.message;
+	if (message.role !== "custom" || message.customType !== PEER_ANSWER) return;
+	const peer: unknown =
+		typeof message.details === "object" && message.details !== null
+			? Reflect.get(message.details, "peer")
+			: undefined;
+	if (typeof peer === "string") answered(peer);
+});
+
+bridge.onPeerLeft(peerLeft);
+```
 
 ## 2) Handler context (`ExtensionContext`)
 
