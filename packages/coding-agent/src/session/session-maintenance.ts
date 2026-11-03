@@ -43,6 +43,7 @@ import {
 	type ShakeConfig,
 	type ShakeRegion,
 	type SummaryOptions,
+	shakeUnchangedPrefixTokens,
 	shouldCompact,
 	shouldUseProviderNativeCompaction,
 } from "@oh-my-pi/pi-agent-core/compaction";
@@ -112,7 +113,8 @@ import type { BuildSessionContextOptions, SessionContext } from "./session-conte
 import { buildSessionContext, getLatestCompactionEntry, getOpenAiRemoteCompactionPayload } from "./session-context";
 import type { CompactionEntry, SessionEntry } from "./session-entries";
 import type { SessionManager } from "./session-manager";
-import type { ShakeMode, ShakeResult } from "./shake-types";
+import type { ShakeAdmit, ShakeMode, ShakeResult } from "./shake-types";
+import { measurePromptGrowthPerRequest, priceShakeCacheCost } from "./shake-cache-cost";
 import { resolveSpeculationLeadTokens, SPECULATION_LEAD_MIN_TOKENS } from "./speculation-lead";
 import experimentalContextNotesReminderPrompt from "../prompts/system/experimental-context-notes-reminder.md" with { type: "text" };
 import experimentalContextRolloverPrompt from "../prompts/system/experimental-context-rollover.md" with { type: "text" };
@@ -486,7 +488,10 @@ export interface SessionMaintenanceHost {
 		pendingMessages?: AgentMessage[];
 	}): ContextUsageBreakdown | undefined;
 	getContextUsage(options?: { contextWindow?: number }): ContextUsage | undefined;
-	shake(mode: ShakeMode, options?: { config?: ShakeConfig; signal?: AbortSignal }): Promise<ShakeResult>;
+	shake(
+		mode: ShakeMode,
+		options?: { config?: ShakeConfig; signal?: AbortSignal; admit?: ShakeAdmit },
+	): Promise<ShakeResult>;
 	dropImages(): Promise<{ removed: number; tokensFreed: number }>;
 	generateHandoffDocument(
 		customInstructions?: string,
@@ -941,6 +946,8 @@ export class SessionMaintenance {
 			requireArtifact?: boolean;
 			isCurrent?: () => boolean;
 			toolResultsOnly?: boolean;
+			/** Declined → a no-op result; see {@link ShakeAdmit}. */
+			admit?: ShakeAdmit;
 		} = {},
 	): Promise<ShakeResult> {
 		if (mode === "images") {
@@ -1032,6 +1039,20 @@ export class SessionMaintenance {
 		};
 		let { replacements, replacementTokenCounts, savings } = calculateReplacementState(artifactId);
 		if (opts.toolResultsOnly && savings < config.minSavings) {
+			return { mode, toolResultsDropped: 0, blocksDropped: 0, tokensFreed: 0 };
+		}
+		if (
+			opts.admit &&
+			!opts.admit({
+				tokensFreed: savings,
+				unchangedPrefixTokens: shakeUnchangedPrefixTokens(
+					branchEntries,
+					regions,
+					this.#tokenizer,
+					config.keepBoundaryId,
+				),
+			})
+		) {
 			return { mode, toolResultsDropped: 0, blocksDropped: 0, tokensFreed: 0 };
 		}
 		if (reservedArtifact.path && reservedArtifact.id) {
@@ -5201,6 +5222,22 @@ export class SessionMaintenance {
 		// context, resume from the next configured method instead of hardcoding a
 		// context-full summary.
 		if (method === "shake" && !armedSpec) {
+			// A threshold shake may give way to the next method only when one can
+			// run after it; with none, declining would just defer the same shake to
+			// overflow recovery on a larger history.
+			const laterMethodUsable = methods
+				.slice(methodIndex + 1)
+				.some(
+					next =>
+						next !== "shake" &&
+						isCompactionMethodUsable(
+							next,
+							reason,
+							this.#model,
+							compactionSettings,
+							options.excludeMediaMethods === true,
+						),
+				);
 			const outcome = await this.#runAutoShake(
 				reason,
 				willRetry,
@@ -5210,6 +5247,7 @@ export class SessionMaintenance {
 				options.triggerContextTokens,
 				suppressContinuation,
 				options.detachPostCommit === true,
+				reason === "threshold" && laterMethodUsable,
 			);
 			if (outcome !== "fallback") return outcome;
 			return await this.runAutoCompaction(reason, willRetry, {
@@ -6357,6 +6395,64 @@ export class SessionMaintenance {
 	}
 
 	/**
+	 * Price a threshold shake's rewrite against the cache reads it saves.
+	 *
+	 * A shake that leaves the context above the recovery band falls through to
+	 * the next method, whose own history rewrite replaces this one's, so it is
+	 * not charged. Otherwise the next request writes the post-shake prompt from
+	 * the last reusable cached point: with a bounded cache lookback (Anthropic
+	 * looks back a fixed number of blocks from a breakpoint) an edit deep in
+	 * history misses back to the request head, measured as a full rewrite after
+	 * every shake; a provider that caches any prefix keeps the history before
+	 * the first edit.
+	 */
+	#thresholdShakeCacheCost(
+		triggerContextTokens: number,
+		plan: { tokensFreed: number; unchangedPrefixTokens: number },
+	): { pays: boolean; rewriteTokens: number } {
+		const model = this.#model;
+		if (!model) return { pays: true, rewriteTokens: 0 };
+		const postShakeTokens = Math.max(0, triggerContextTokens - plan.tokensFreed);
+		if (model.contextWindow > 0) {
+			const thresholdTokens = resolveThresholdTokens(model.contextWindow, this.#compactionSettings);
+			if (postShakeTokens > Math.floor(thresholdTokens * COMPACTION_RECOVERY_BAND)) {
+				return { pays: true, rewriteTokens: 0 };
+			}
+		}
+		const rewriteTokens =
+			resolvePromptCacheLookback(model) === undefined
+				? Math.max(0, postShakeTokens - plan.unchangedPrefixTokens)
+				: postShakeTokens;
+		const branch = this.#host.sessionManager.getBranch();
+		const latestCompaction = getLatestCompactionEntry(branch);
+		const sinceCompaction = latestCompaction ? branch.slice(branch.lastIndexOf(latestCompaction) + 1) : branch;
+		let cacheTtl: AssistantMessage["usage"]["cttl"];
+		for (let index = sinceCompaction.length - 1; index >= 0; index--) {
+			const entry = sinceCompaction[index];
+			if (entry?.type === "message" && entry.message.role === "assistant") {
+				cacheTtl = entry.message.usage.cttl;
+				break;
+			}
+		}
+		const cost = priceShakeCacheCost({
+			model,
+			tokensFreed: plan.tokensFreed,
+			rewriteTokens,
+			growthPerRequest: measurePromptGrowthPerRequest(sinceCompaction),
+			cacheTtl,
+		});
+		logger.debug("Auto-shake cache cost", {
+			tokensFreed: plan.tokensFreed,
+			rewriteTokens,
+			requestsToRegrow: cost.requestsToRegrow,
+			rewritePremium: cost.rewritePremium,
+			readSavings: cost.readSavings,
+			pays: cost.pays,
+		});
+		return { pays: cost.pays, rewriteTokens };
+	}
+
+	/**
 	 * Run a shake-method auto-maintenance pass. Emits the
 	 * `auto_compaction_start`/`auto_compaction_end` pair with a shake `action`,
 	 * runs {@link shake} inline against the protect-window config, and schedules
@@ -6374,6 +6470,7 @@ export class SessionMaintenance {
 		triggerContextTokens?: number,
 		suppressContinuation = false,
 		detachPostCommit = false,
+		gateOnCacheCost = false,
 	): Promise<CompactionCheckResult | "fallback"> {
 		const action = "shake";
 		this.#autoCompactionAbortController?.abort();
@@ -6382,7 +6479,24 @@ export class SessionMaintenance {
 		const signal = controller.signal;
 		try {
 			await this.#emitLifecycleEvent({ type: "auto_compaction_start", reason, action }, false);
-			const result = await this.#host.shake("elide", { config: DEFAULT_SHAKE_CONFIG, signal });
+			// A threshold shake must not cost more prompt-cache spend than it saves
+			// (`gateOnCacheCost`: threshold, with a later method to take over).
+			// Overflow/incomplete recovery has to shrink the request whatever it
+			// costs; an idle pass is left alone, because after the idle timeout a
+			// short-TTL cache may already have expired, which makes its rewrite free.
+			const decline: { tokensFreed?: number; rewriteTokens?: number } = {};
+			const admit: ShakeAdmit | undefined =
+				gateOnCacheCost && typeof triggerContextTokens === "number" && Number.isFinite(triggerContextTokens)
+					? plan => {
+							const verdict = this.#thresholdShakeCacheCost(triggerContextTokens, plan);
+							if (!verdict.pays) {
+								decline.tokensFreed = plan.tokensFreed;
+								decline.rewriteTokens = verdict.rewriteTokens;
+							}
+							return verdict.pays;
+						}
+					: undefined;
+			const result = await this.#host.shake("elide", { config: DEFAULT_SHAKE_CONFIG, signal, admit });
 			if (signal.aborted) {
 				await this.#emitLifecycleEvent(
 					{
@@ -6433,9 +6547,12 @@ export class SessionMaintenance {
 			}
 			const shouldFallBack = reason !== "idle" && ((reason === "overflow" && !reclaimed) || stillOverThreshold);
 			if (shouldFallBack) {
-				const errorMessage = reclaimed
-					? `Auto-shake reclaimed ~${result.tokensFreed} tokens but context is still above the threshold; trying the next preferred compaction method.`
-					: "Auto-shake found nothing eligible to drop; trying the next preferred compaction method.";
+				const errorMessage =
+					decline.tokensFreed !== undefined
+						? `Auto-shake would free ~${decline.tokensFreed} tokens but make the next request write ~${decline.rewriteTokens} tokens to the prompt cache again, which costs more than the freed tokens save before the context grows back; trying the next preferred compaction method.`
+						: reclaimed
+							? `Auto-shake reclaimed ~${result.tokensFreed} tokens but context is still above the threshold; trying the next preferred compaction method.`
+							: "Auto-shake found nothing eligible to drop; trying the next preferred compaction method.";
 				await this.#emitLifecycleEvent(
 					{
 						type: "auto_compaction_end",

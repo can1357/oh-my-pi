@@ -369,6 +369,35 @@ export function collectShakeRegions(entries: SessionEntry[], tokenizer: Tokenize
 	return regions;
 }
 
+/**
+ * Estimated tokens of the sent entries before the first entry `regions` edit:
+ * the prefix a shake leaves byte-identical, which a provider that caches any
+ * prefix still serves from its cache after the shake. Entries before the
+ * compaction boundary (`keepBoundaryId`) are not sent and do not count.
+ */
+export function shakeUnchangedPrefixTokens(
+	entries: SessionEntry[],
+	regions: readonly ShakeRegion[],
+	tokenizer: Tokenizer,
+	keepBoundaryId?: string,
+): number {
+	const edited = new Set<SessionEntry>(regions.map(region => region.entry));
+	const boundaryIndex =
+		keepBoundaryId === undefined
+			? 0
+			: Math.max(
+					0,
+					entries.findIndex(entry => entry.id === keepBoundaryId),
+				);
+	let tokens = 0;
+	for (let i = boundaryIndex; i < entries.length; i++) {
+		const entry = entries[i];
+		if (edited.has(entry)) break;
+		tokens += entryTokens(entry, tokenizer);
+	}
+	return tokens;
+}
+
 interface TextSlot {
 	read(): string;
 	write(value: string): void;

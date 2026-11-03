@@ -1130,6 +1130,109 @@ describe("AgentSession shake", () => {
 			);
 			expect(fullStart).toBeDefined();
 		});
+
+		describe("prompt-cache cost", () => {
+			const TRIGGER_PROMPT_TOKENS = 101_000;
+
+			function assistantAt(promptTokens: number, content: AssistantMessage["content"]): AssistantMessage {
+				return {
+					role: "assistant",
+					content,
+					...apiInfo,
+					stopReason: content.some(block => block.type === "toolCall") ? "toolUse" : "stop",
+					usage: {
+						input: promptTokens,
+						output: 100,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: promptTokens + 100,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					timestamp: Date.now(),
+				};
+			}
+
+			/**
+			 * An old heavy tool result (~35K tokens), then three turns of recent
+			 * text whose requests grew by `growthPerRequest` tokens each, then a
+			 * turn billed over the 100K threshold. Shaking the old result leaves the
+			 * context inside the recovery band, and on Claude the next request
+			 * writes the whole post-shake prompt to the cache again.
+			 */
+			async function driveThresholdShake(growthPerRequest: number): Promise<ToolResultMessage> {
+				cfgCompactionMethodOrder.set(session.settings, ["shake", "soft"]);
+				cfgCompactionThresholdTokens.set(session.settings, 100_000);
+				cfgContextPromotionEnabled.set(session.settings, false);
+				const promptAt = (turn: number) => TRIGGER_PROMPT_TOKENS - (4 - turn) * growthPerRequest;
+				const toolCallId = "call_heavy";
+				sessionManager.appendMessage({ role: "user", content: [{ type: "text", text: "do it" }], timestamp: 1 });
+				sessionManager.appendMessage(
+					assistantAt(promptAt(0), [
+						{ type: "toolCall", id: toolCallId, name: "bash", arguments: { command: "cat big.log" } },
+					]),
+				);
+				sessionManager.appendMessage({
+					role: "toolResult",
+					toolCallId,
+					toolName: "bash",
+					content: [{ type: "text", text: "lorem ipsum dolor sit amet ".repeat(6_000) }],
+					isError: false,
+					timestamp: 2,
+				});
+				for (let turn = 1; turn <= 3; turn++) {
+					sessionManager.appendMessage({
+						role: "user",
+						content: [{ type: "text", text: recentProtectedTail(`turn ${turn}`) }],
+						timestamp: 2 + turn,
+					});
+					sessionManager.appendMessage(assistantAt(promptAt(turn), [{ type: "text", text: `done ${turn}` }]));
+				}
+				session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+
+				const trigger = assistantAt(promptAt(4), [{ type: "text", text: "trigger" }]);
+				session.agent.emitExternalEvent({ type: "message_end", message: trigger });
+				session.agent.emitExternalEvent({ type: "agent_end", messages: [trigger] });
+				await session.waitForIdle();
+				const heavy = branchToolResults().find(result => result.toolCallId === toolCallId);
+				if (!heavy) throw new Error("heavy tool result missing from the branch");
+				return heavy;
+			}
+
+			function mockSoftCompaction() {
+				return vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
+					summary: "compacted instead of shaking",
+					shortSummary: undefined,
+					firstKeptEntryId: preparation.firstKeptEntryId,
+					tokensBefore: preparation.tokensBefore,
+					details: {},
+				}));
+			}
+
+			it("declines a threshold shake whose cache rewrite costs more than the reads it saves", async () => {
+				const compactSpy = mockSoftCompaction();
+				// 10K tokens a request: the ~35K freed are back within ~4 requests,
+				// far short of what rewriting the ~65K post-shake prompt costs.
+				const heavy = await driveThresholdShake(10_000);
+
+				expect(heavy.prunedAt).toBeUndefined();
+				expect(heavy.content[0]).toMatchObject({ type: "text", text: expect.stringMatching(/^lorem ipsum/) });
+				const shakeEnd = events.find(event => event.type === "auto_compaction_end" && event.action === "shake");
+				expect(shakeEnd).toMatchObject({ skipped: true, errorMessage: expect.stringMatching(/prompt cache/) });
+				expect(compactSpy).toHaveBeenCalledTimes(1);
+			});
+
+			it("keeps a threshold shake whose freed tokens stay out long enough to repay the rewrite", async () => {
+				const compactSpy = mockSoftCompaction();
+				// 100 tokens a request: the freed tokens stay out for ~350 requests.
+				const heavy = await driveThresholdShake(100);
+
+				expect(heavy.prunedAt).toBeGreaterThan(0);
+				const shakeEnd = events.find(event => event.type === "auto_compaction_end" && event.action === "shake");
+				expect(shakeEnd).toMatchObject({ skipped: false });
+				expect(shakeEnd).not.toHaveProperty("errorMessage");
+				expect(compactSpy).not.toHaveBeenCalled();
+			});
+		});
 	});
 
 	it("keeps the in-flight tool call and lowers context usage when shaking mid-turn", async () => {

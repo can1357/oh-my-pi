@@ -8,6 +8,13 @@
 /** Mode selector for `AgentSession.shake`. */
 export type ShakeMode = "elide" | "images" | "thinking";
 
+/**
+ * Decides, once an elide shake knows what it would free and before it edits
+ * anything, whether it runs. `unchangedPrefixTokens` is the sent history
+ * before the shake's first edit.
+ */
+export type ShakeAdmit = (plan: { tokensFreed: number; unchangedPrefixTokens: number }) => boolean;
+
 /** Outcome of an `AgentSession.shake` run. */
 export interface ShakeResult {
 	mode: ShakeMode;
