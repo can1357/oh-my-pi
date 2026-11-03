@@ -342,8 +342,8 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 		if (wrappingLabel) return normalizeSpace(contentText(wrappingLabel, element, "visible"));
 		const tag = element.tagName.toLocaleLowerCase();
 		if (tag === "optgroup") return normalizeSpace(element.getAttribute("label") ?? "");
-		if (tag === "fieldset") {
-			const caption = element.querySelector(":scope > legend");
+		if (tag === "fieldset" || tag === "table") {
+			const caption = element.querySelector(tag === "fieldset" ? ":scope > legend" : ":scope > caption");
 			if (caption) {
 				const name = normalizeSpace(contentText(caption, null, "visible"));
 				if (name) return name;
