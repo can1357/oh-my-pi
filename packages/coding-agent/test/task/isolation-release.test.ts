@@ -82,6 +82,7 @@ async function commitsAcrossRelease(id: string, runEndPatch: string, releasePatc
 		options.deferIrcWakeRelease?.(() => events.push("irc wakes released"));
 		await executorModule.finalizeSubagentLifecycle({
 			id: options.id,
+			registry: AgentRegistry.global(),
 			session,
 			aborted: false,
 			keepAlive: true,

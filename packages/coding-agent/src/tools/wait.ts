@@ -7,6 +7,7 @@ import {
 } from "@oh-my-pi/pi-agent-core";
 import { prompt } from "@oh-my-pi/pi-utils";
 import { IrcBus } from "../irc/bus";
+import { REMOTE_ID_PREFIX } from "../registry/remote-id";
 import waitDescription from "../prompts/tools/wait.md" with { type: "text" };
 import type { ToolSession } from ".";
 import type { AsyncJob, AsyncJobManagerApi } from "../async/job-manager";
@@ -31,7 +32,10 @@ interface WaitMessaging {
 
 function takeQueuedMessage(messaging: WaitMessaging | undefined): IrcMessage | undefined {
 	if (!messaging) return undefined;
-	return drainPendingInbox(messaging.registry, messaging.senderId) ?? IrcBus.global().take(messaging.senderId);
+	return (
+		drainPendingInbox(messaging.registry, messaging.senderId) ??
+		IrcBus.forRegistry(messaging.registry).take(messaging.senderId)
+	);
 }
 
 interface PendingReplies {
@@ -58,7 +62,10 @@ function pendingReplies(messaging: WaitMessaging): PendingReplies {
 	const { registry, senderId } = messaging;
 	const replies: PendingReplies = { from: [], blocked: [], stopped: [] };
 	const since = registry.get(senderId)?.session?.runStartedAt ?? 0;
-	for (const { to, sentAt, promised } of IrcBus.global().unansweredSends(senderId, since)) {
+	for (const { to, sentAt, promised } of IrcBus.forRegistry(registry).unansweredSends(senderId, since)) {
+		// A cross-process peer is nothing the caller started: its turn is not visible here, so it can
+		// neither sustain a reply wait nor be reported as having stopped. Its reply arrives on its own.
+		if (to.startsWith(REMOTE_ID_PREFIX)) continue;
 		const session = registry.get(to)?.session;
 		if (session && registry.awaits.blocksOn(to, senderId, sentAt)) replies.blocked.push(to);
 		else if (session && (promised || session.isStreaming || session.hasQueuedIrcFrom(senderId)))
@@ -181,7 +188,7 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 		const busAbort = new AbortController();
 		// Only `busAbort` can reject this leg, and it fires once the wait has settled.
 		const busLeg = messaging
-			? IrcBus.global()
+			? IrcBus.forRegistry(messaging.registry)
 					.wait(messaging.senderId, {}, 0, busAbort.signal)
 					.catch(() => null)
 			: undefined;

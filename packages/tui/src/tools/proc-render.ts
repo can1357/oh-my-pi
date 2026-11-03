@@ -7,6 +7,7 @@ import {
 	formatErrorDetail,
 	formatStatusIcon,
 	PREVIEW_LIMITS,
+	sanitizeInline,
 	TRUNCATE_LENGTHS,
 	type ToolUIColor,
 } from "../render/render-utils";
@@ -103,7 +104,7 @@ export function renderAgentWrite(
 						maxCollapsed: PREVIEW_LIMITS.COLLAPSED_ITEMS,
 						itemType: "recipient",
 						renderItem: receipt =>
-							`${theme.fg("toolOutput", safe(receipt.to))} ${formatBadge(receipt.outcome, receiptColor(receipt.outcome), theme)}${receipt.error ? ` ${theme.fg("error", `${theme.format.dash} ${safe(receipt.error)}`)}` : ""}`,
+							`${theme.fg("toolOutput", sanitizeInline(receipt.to))} ${formatBadge(receipt.outcome, receiptColor(receipt.outcome), theme)}${receipt.error ? ` ${theme.fg("error", `${theme.format.dash} ${sanitizeInline(receipt.error)}`)}` : ""}`,
 					},
 					theme,
 				),

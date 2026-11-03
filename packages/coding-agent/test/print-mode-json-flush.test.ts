@@ -47,6 +47,7 @@ function createFlushHarness(): FlushHarness {
 			subscriber = listener;
 			return () => {};
 		},
+		getQueuedMessages: () => ({ steering: [], followUp: [] }),
 		prompt: async () => {
 			markPromptStarted();
 			await promptReleased;

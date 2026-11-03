@@ -66,6 +66,7 @@ function sessionWithJobs(
 		prepareForHeadlessAdvisorDrain: () => events.push("advisor-drain"),
 		waitForIdle,
 		setTextOutputCommitted: () => {},
+		getQueuedMessages: () => ({ steering: [], followUp: [] }),
 		waitForAdvisorCatchup: async () => {
 			events.push("advisor-catchup");
 			return true;

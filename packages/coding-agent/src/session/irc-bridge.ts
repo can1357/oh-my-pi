@@ -3,7 +3,7 @@ import { isRecord, prompt } from "@oh-my-pi/pi-utils";
 import { type IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import parentIrcSteerTemplate from "../prompts/steering/parent-irc.md" with { type: "text" };
 import ircIncomingTemplate from "../prompts/system/irc-incoming.md" with { type: "text" };
-import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { AgentRegistry, type AgentRegistryApi } from "../registry/agent-registry";
 import type { AgentSessionEvent } from "./agent-session-events";
 import { escapeHarnessTags } from "./harness-tags";
 import type { CustomMessage } from "./messages";
@@ -13,9 +13,15 @@ import type { SessionManager } from "./session-manager";
 export interface IrcBridgeHost {
 	agent: Agent;
 	sessionManager: SessionManager;
+	agentRegistry?: AgentRegistryApi;
 	isDisposed(): boolean;
 	isStreaming(): boolean;
 	planModeEnabled(): boolean;
+	/**
+	 * Whether an idle wake turn's output is relayed back to the waking peer — true only while the
+	 * task executor's wake-turn monitor is installed (kept-alive subagents), never for a root.
+	 */
+	relaysWakeTurnOutput(): boolean;
 	emitSessionEvent(event: AgentSessionEvent): Promise<void>;
 	wakeForIrc(records: AgentMessage[]): void;
 }
@@ -237,7 +243,7 @@ export class IrcBridge {
 		if (this.#host.isDisposed()) throw new Error("Recipient session is disposed.");
 		const streaming = this.#host.isStreaming();
 		const planModeIdle = !streaming && this.#host.planModeEnabled();
-		const registry = AgentRegistry.global();
+		const registry = this.#host.agentRegistry ?? AgentRegistry.global();
 		const parentId = registry.get(msg.to)?.parentId;
 		const fromParent = parentId === msg.from;
 		// A subagent's result answers its parent, and its run may be waiting on its
@@ -258,13 +264,14 @@ export class IrcBridge {
 			seen.add(id);
 		}
 		const peerMessage = parentId !== undefined && (msg.broadcast === true || (!fromParent && !fromDescendant));
-		// An idle subagent runs a monitored wake turn whose output is relayed
-		// back to the sender (task executor `relayWakeTurnOutput`); the main
-		// agent, mid-turn asides, relays, broadcast legs and progress notes have no such relay.
+		// An idle kept-alive subagent runs a monitored wake turn whose output is relayed back to the
+		// sender (task executor `relayWakeTurnOutput`, installed via setIrcWakeTurnObserver). A root
+		// — `Main` or a custom-id main in an embedder registry — mid-turn asides, relays, broadcast
+		// legs and progress notes have no such relay, so the card must not promise one (#14071 review).
 		const relayOnStop =
 			!streaming &&
 			!planModeIdle &&
-			msg.to !== MAIN_AGENT_ID &&
+			this.#host.relaysWakeTurnOutput() &&
 			msg.wakeRelay !== true &&
 			msg.broadcast !== true &&
 			msg.progress !== true;
