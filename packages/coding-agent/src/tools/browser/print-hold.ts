@@ -345,33 +345,31 @@ export class PrintHold {
 	async #setInFrames(): Promise<void> {
 		const mainFrame = this.#page.mainFrame();
 		const remaining = this.#remaining();
-		const popups: Promise<void>[] = [];
 		for (const popup of this.#popups) {
 			if (popup.isClosed()) {
 				this.#popups.delete(popup);
 				continue;
 			}
-			popups.push(
-				popup
-					.mainFrame()
-					.mainRealm()
-					.evaluate(
-						(holdKey, remaining) => {
-							const hold: unknown = Reflect.get(globalThis, Symbol.for(`${holdKey}.until`));
-							if (typeof hold !== "object" || hold === null) return;
-							const clock: Function = Reflect.get(globalThis, Symbol.for("omp.printHold.clock"));
-							const now = Number(Reflect.apply(clock, undefined, []));
-							Reflect.set(hold, "until", remaining === null ? Number.POSITIVE_INFINITY : now + remaining);
-						},
-						this.#holdKey,
-						remaining,
-					)
-					.catch(() => undefined),
-			);
+			// A popup may be stopped in its own dialog or script loop. Its queued update must not stop the
+			// opener's next call or disposal; CDP keeps updates to this popup in their submission order.
+			void popup
+				.mainFrame()
+				.mainRealm()
+				.evaluate(
+					(holdKey, remaining) => {
+						const hold: unknown = Reflect.get(globalThis, Symbol.for(`${holdKey}.until`));
+						if (typeof hold !== "object" || hold === null) return;
+						const clock: Function = Reflect.get(globalThis, Symbol.for("omp.printHold.clock"));
+						const now = Number(Reflect.apply(clock, undefined, []));
+						Reflect.set(hold, "until", remaining === null ? Number.POSITIVE_INFINITY : now + remaining);
+					},
+					this.#holdKey,
+					remaining,
+				)
+				.catch(() => undefined);
 		}
-		await Promise.all([
-			...popups,
-			...this.#page
+		await Promise.all(
+			this.#page
 				.frames()
 				.filter(frame => frame.client === mainFrame.client)
 				.map(async frame => {
@@ -389,6 +387,6 @@ export class PrintHold {
 						if (frame === mainFrame) this.#clockOffset = pageNow - Date.now();
 					} catch {}
 				}),
-		]);
+		);
 	}
 }

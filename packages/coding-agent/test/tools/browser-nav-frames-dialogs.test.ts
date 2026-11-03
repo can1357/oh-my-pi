@@ -823,6 +823,43 @@ return await tab.evaluate(() => {
 		30_000,
 	);
 
+	test("moves and releases popup print holds without waiting on the popup's dialog", async () => {
+		await withUserBrowser(async cdpUrl => {
+			const user = await puppeteer.connect({ browserURL: cdpUrl, defaultViewport: null });
+			try {
+				const page = await user.newPage();
+				await page.goto(`${baseUrl}/print`);
+				const hold = await PrintHold.install(page, "calls");
+				await hold.beginCall(30_000);
+				const popupTarget = user.waitForTarget(target => target.opener() === page.target());
+				await page.mainFrame().mainRealm().evaluate('open("")');
+				const popup = await (await popupTarget).page();
+				if (!popup) throw new Error("Expected the receipt popup");
+				await page.goto(baseUrl.replace("127.0.0.1", "localhost"));
+				const { promise, resolve } = Promise.withResolvers<Dialog>();
+				popup.once("dialog", resolve);
+				const confirmation = popup.mainFrame().mainRealm().evaluate('confirm("Stay?")');
+				const dialog = await promise;
+				try {
+					await hold.endCall();
+					await hold.beginCall(30_000);
+					await hold.dispose();
+				} finally {
+					await dialog.dismiss();
+				}
+				await confirmation;
+				expect(
+					await popup.mainFrame().mainRealm().evaluate(
+						'globalThis.log = []; addEventListener("afterprint", () => log.push("afterprint")); print(); log.push("print returned"); log',
+					),
+				).toEqual(["print returned"]);
+				await popup.close();
+			} finally {
+				await user.disconnect();
+			}
+		});
+	});
+
 	test("holds print() in the page a window the page opens to a URL loads", async () => {
 		await withUserBrowser(async cdpUrl => {
 			const user = await puppeteer.connect({ browserURL: cdpUrl, defaultViewport: null });
