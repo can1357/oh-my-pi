@@ -3530,12 +3530,16 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 				// Once registered, the wake job carries this turn's outcome to the
 				// parent whatever it is: the yield result, the failure that
 				// superseded it, or a structured parent wake's finalized
-				// missing-yield warning. `agentOutputPublished` tells the
-				// delivery whether this turn wrote `<id>.md`: a turn that neither
-				// yielded nor produced a message result leaves the previous turn's
-				// output there, which `agent://<id>` must not be offered for.
+				// missing-yield warning. A failed or cancelled parent wake that
+				// left no mark takes the relay body below, which carries the
+				// short peer error and the transcript pointer, not the stack.
+				// `agentOutputPublished` tells the delivery whether this turn
+				// wrote `<id>.md`: a turn that neither yielded nor produced a
+				// message result leaves the previous turn's output there, which
+				// `agent://<id>` must not be offered for.
 				const outputPublished = result?.outputPath !== undefined;
-				if (wakeJob && result && (yielded || messageResult || parentStructuredWake)) {
+				const markedWake = parentStructuredWake && result?.missingYield !== undefined;
+				if (wakeJob && result && (yielded || messageResult || markedWake)) {
 					const text = formatTaskResultSummary(result, { totalDurationMs: result.durationMs });
 					const structured = result.structuredOutput;
 					if (result.aborted || result.exitCode !== 0 || result.error !== undefined) {

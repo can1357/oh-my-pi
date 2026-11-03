@@ -797,6 +797,54 @@ describe("runSubprocess result acceptance", () => {
 			await manager.dispose({ timeoutMs: 1000 });
 		}
 	});
+	it("relays a parent-owned structured wake's thrown error without its stack", async () => {
+		const manager = new AsyncJobManager({});
+		const harness = createHarness({ asyncJobManager: manager });
+		AgentRegistry.global().register({
+			id: AGENT_ID,
+			displayName: AGENT_ID,
+			kind: "sub",
+			parentId: "Parent",
+			session: harness.session,
+			status: "idle",
+		});
+		attachIrcWakeTurnMonitor(harness.session, { id: AGENT_ID, agent: baseAgent });
+		const observer = harness.wakeObserver();
+		if (!observer) throw new Error("wake-turn observer was not registered");
+		const parent = {
+			cwd: "/tmp",
+			settings: Settings.isolated({ "launch.enabled": false }),
+			agentRegistry: AgentRegistry.global(),
+			asyncJobManager: manager,
+			getAgentId: () => "Parent",
+		} as unknown as ToolSession;
+		const thrown = new Error("turn exploded");
+		thrown.stack = "Error: turn exploded\n    at secretFrame (/srv/internal/loop.ts:42:7)";
+
+		try {
+			const finish = observer([
+				{
+					role: "custom",
+					customType: "irc:incoming",
+					content: "report your findings",
+					display: false,
+					details: { id: "msg-thrown", from: "Parent", message: "report your findings" },
+					attribution: "agent",
+					timestamp: Date.now(),
+				} as unknown as AgentMessage,
+			]);
+			const waiting = new WaitTool(parent).execute("parent-wait", {});
+			await finish?.(thrown);
+
+			const job = (await waiting).details?.jobs?.[0];
+			expect(job?.status).toBe("failed");
+			expect(job?.errorText).toContain("Wake turn failed: turn exploded.");
+			expect(job?.errorText).toContain(`history://${AGENT_ID}`);
+			expect(job?.errorText).not.toContain("secretFrame");
+		} finally {
+			await manager.dispose({ timeoutMs: 1000 });
+		}
+	});
 	it("marks a parent-owned structured wake that replies without yield", async () => {
 		const manager = new AsyncJobManager({});
 		const harness = createHarness({ asyncJobManager: manager });
