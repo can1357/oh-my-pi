@@ -9,7 +9,7 @@
 
 ### Fixed
 
-- A subagent that spawned subagents of its own stayed in memory after it parked, whole transcript included, for as long as the session ran: each child's revive record held the parent's extension-root provider bound to the parent. A lead that runs lanes with reviewers no longer grows by every finished lane
+- A subagent that spawned subagents of its own stayed in memory after it parked, whole transcript included, for as long as the session ran: each child's revive record held the parent's extension-root provider bound to the parent. A lead that runs lanes with reviewers no longer grows by every finished lane ([#17916](https://github.com/can1357/oh-my-pi/pull/17916) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.16.0] - 2026-11-02
 
