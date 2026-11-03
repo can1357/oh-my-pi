@@ -23,41 +23,47 @@ struct CompletionMarker {
 /// kill that follows it.
 pub const CANCEL_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// How long a wait whose process the host terminates waits for it before
-/// ending the process itself. It is well past the host's own sequence (its
-/// wait for spawns in flight, the TERM grace, the KILL waves), so it only
-/// ends a process the host was never told about.
-pub const HOST_TERMINATION_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
-
 /// What cancels a wait for a child process, and who then ends the process.
 ///
 /// `token` cancels the wait. When `host` is set and is cancelled by the time
 /// the wait notices, the embedding host is terminating every process of the
 /// run (TERM, a grace counted from that TERM, then KILL), so the wait leaves
-/// the process to it. Otherwise the wait ends the process itself: a `kill %N`
-/// or a `timeout` that cancels its own token is not a host termination.
+/// the process to it until the host cancels `host_done`, which it does once
+/// its termination has finished. Otherwise the wait ends the process itself:
+/// a `kill %N` or a `timeout` that cancels its own token is not a host
+/// termination.
 #[derive(Clone, Default)]
 pub struct ChildCancel {
-	token: Option<CancellationToken>,
-	host:  Option<CancellationToken>,
+	token:     Option<CancellationToken>,
+	host:      Option<CancellationToken>,
+	host_done: Option<CancellationToken>,
 }
 
 impl ChildCancel {
 	/// A wait cancelled by `token`, where a cancelled `host` token means the
-	/// host terminates the process.
+	/// host terminates the process and cancels `host_done` when it is
+	/// finished.
 	#[must_use]
-	pub const fn new(token: Option<CancellationToken>, host: Option<CancellationToken>) -> Self {
-		Self { token, host }
+	pub const fn new(
+		token: Option<CancellationToken>,
+		host: Option<CancellationToken>,
+		host_done: Option<CancellationToken>,
+	) -> Self {
+		Self { token, host, host_done }
 	}
 
-	fn host_terminates(&self) -> bool {
-		self.host.as_ref().is_some_and(CancellationToken::is_cancelled)
+	/// The host's `done` token when the host is terminating this run.
+	fn host_termination(&self) -> Option<&CancellationToken> {
+		self.host
+			.as_ref()
+			.filter(|host| host.is_cancelled())
+			.and(self.host_done.as_ref())
 	}
 }
 
 impl From<Option<CancellationToken>> for ChildCancel {
 	fn from(token: Option<CancellationToken>) -> Self {
-		Self { token, host: None }
+		Self { token, host: None, host_done: None }
 	}
 }
 
@@ -157,10 +163,10 @@ impl ChildProcess {
 	/// When `cancel` fires, one party ends the process: the embedding host
 	/// when the cancellation is the host's (see [`ChildCancel`]), which then
 	/// sends TERM, counts the grace from that TERM and kills, so this wait only
-	/// keeps waiting, for at most [`HOST_TERMINATION_LIMIT`]; otherwise (or if
-	/// the host has not ended the process by then) this wait sends TERM
-	/// itself, gives the process [`CANCEL_GRACE`] from that TERM, and then
-	/// kills it.
+	/// keeps waiting until the host reports its termination finished; if the
+	/// process is still running then (the host never knew of it), or for any
+	/// other cancellation, this wait sends TERM itself, gives the process
+	/// [`CANCEL_GRACE`] from that TERM, and then kills it.
 	pub async fn wait(
 		&mut self,
 		cancel: impl Into<ChildCancel>,
@@ -200,13 +206,17 @@ impl ChildProcess {
 				},
 				_ = &mut cancelled => {
 					// The host's waves own TERM, its grace and KILL for this run;
-					// a timer of ours would cut that grace short. The limit only
-					// ends a process the host never knew of.
-					let host_ended = cancel.host_terminates()
-						&& matches!(
-							tokio::time::timeout(HOST_TERMINATION_LIMIT, &mut self.exec_future).await,
-							Ok(Ok(_))
-						);
+					// a timer of ours would cut that grace short, however long
+					// the host takes to start. Only a process still running once
+					// the host is done (one it never knew of) is ended here.
+					let host_ended = match cancel.host_termination() {
+						Some(host_done) => tokio::select! {
+							biased;
+							output = &mut self.exec_future => output.is_ok(),
+							() = host_done.cancelled() => false,
+						},
+						None => false,
+					};
 					if host_ended {
 						self.reaped = true;
 					} else {

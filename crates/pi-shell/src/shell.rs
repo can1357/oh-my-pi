@@ -1008,7 +1008,7 @@ async fn source_snapshot(
 		// The run's `terminate_run` answers this token for every process the
 		// registry records.
 		(Some(cancel_token), Some(spawn_registry)) => {
-			params.set_host_terminated_cancel_token(cancel_token);
+			params.set_host_terminated_cancel_token(cancel_token, spawn_registry.terminated_token());
 			params.set_spawn_observer(spawn_registry);
 		},
 		(cancel_token, spawn_registry) => {
@@ -1458,7 +1458,7 @@ async fn run_shell_command_once(
 	register_background_jobs(&session.shell, &spawn_registry);
 	// `terminate_run` answers this token for every process the registry
 	// records, so brush leaves TERM, its grace and KILL to it.
-	params.set_host_terminated_cancel_token(cancel_token.clone());
+	params.set_host_terminated_cancel_token(cancel_token.clone(), spawn_registry.terminated_token());
 	params.set_spawn_observer(spawn_registry.clone());
 	// Only a buffered capture can be minimized, so only it asks for the report.
 	let reported_error = matches!(capture_mode, CommandCaptureMode::Buffered { .. })
@@ -1625,7 +1625,7 @@ async fn run_shell_command_streams_in_filesystem(
 	params.set_fd(OpenFiles::STDERR_FD, stderr_file);
 	params.process_group_policy = ProcessGroupPolicy::NewProcessGroup;
 	register_background_jobs(&session.shell, &spawn_registry);
-	params.set_host_terminated_cancel_token(cancel_token.clone());
+	params.set_host_terminated_cancel_token(cancel_token.clone(), spawn_registry.terminated_token());
 	params.set_spawn_observer(spawn_registry.clone());
 	let reader_cancel = CancellationToken::new();
 	let (activity_tx, activity_rx) = flume::bounded::<()>(1);
@@ -1830,8 +1830,16 @@ impl SpawnObserver for process::SpawnRegistry {
 // process-global descendant diff) is what keeps a cancel from reaping a
 // concurrent run's children in a shared host process.
 async fn terminate_run(registry: &process::SpawnRegistry) {
+	// Brush's waits leave the run's processes to this termination until it is
+	// marked finished, so it is marked even if this task is aborted or panics.
+	struct MarkTerminated<'a>(&'a process::SpawnRegistry);
+	impl Drop for MarkTerminated<'_> {
+		fn drop(&mut self) {
+			self.0.mark_terminated();
+		}
+	}
+	let _mark = MarkTerminated(registry);
 	terminate_run_waves(registry).await;
-	registry.mark_terminated();
 }
 
 async fn terminate_run_waves(registry: &process::SpawnRegistry) {
@@ -7815,7 +7823,7 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 			// the run's processes; this test plays no host, so nothing sends
 			// TERM and each command finishes on its own.
 			let token = CancellationToken::new();
-			params.set_host_terminated_cancel_token(token.clone());
+			params.set_host_terminated_cancel_token(token.clone(), CancellationToken::new());
 			params.set_spawn_observer(Arc::new(CancelAfterSpawns {
 				spawns: std::sync::atomic::AtomicUsize::new(0),
 				after,
@@ -7865,7 +7873,7 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 			.await
 			.expect("set cwd");
 		let token = CancellationToken::new();
-		params.set_host_terminated_cancel_token(token.clone());
+		params.set_host_terminated_cancel_token(token.clone(), CancellationToken::new());
 		let host = Arc::new(LateTermHost { pids: std::sync::Mutex::new(Vec::new()) });
 		params.set_spawn_observer(host.clone());
 		let ready = root.path().join("ready");
@@ -7897,6 +7905,61 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 			root.path().join("done").exists(),
 			"the trap was killed before the grace counted from the host's TERM ended"
 		);
+	}
+
+	/// Brush leaves a host-terminated process to the host until the host
+	/// reports its termination finished, however late the host's TERM comes.
+	/// Brush used to end the process itself five seconds after the cancel, so
+	/// a host TERM 5.5 s after the cancel ran the trap a second time and the
+	/// trap was killed before it wrote `done`.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn brush_waits_for_a_host_termination_however_late() {
+		let root = tempfile::tempdir().expect("marker directory");
+		let (mut session, mut params) = kill_test_context().await;
+		session
+			.shell
+			.set_working_dir(root.path().to_str().expect("utf8 temp path"))
+			.await
+			.expect("set cwd");
+		let token = CancellationToken::new();
+		let done = CancellationToken::new();
+		params.set_host_terminated_cancel_token(token.clone(), done.clone());
+		let host = Arc::new(LateTermHost { pids: std::sync::Mutex::new(Vec::new()) });
+		params.set_spawn_observer(host.clone());
+		let ready = root.path().join("ready");
+		let terminator = tokio::spawn({
+			let host = host.clone();
+			async move {
+				let deadline = time::Instant::now() + Duration::from_secs(5);
+				while !ready.exists() && time::Instant::now() < deadline {
+					time::sleep(Duration::from_millis(5)).await;
+				}
+				token.cancel();
+				time::sleep(Duration::from_millis(5_500)).await;
+				for &pid in host.pids.lock().unwrap().iter() {
+					// SAFETY: `kill` sends a signal to a pid this test spawned.
+					unsafe { libc::kill(pid, libc::SIGTERM) };
+				}
+			}
+		});
+		let _ = session
+			.shell
+			.run_string(
+				"sh -c \"trap 'printf x >> runs; sleep 0.6; : > done; exit 0' TERM; : > ready; while \
+				 :; do :; done\"",
+				&SourceInfo::from("pi-shell:test"),
+				&params,
+			)
+			.await;
+		terminator.await.expect("terminator task");
+		done.cancel();
+		assert_eq!(
+			fs::read_to_string(root.path().join("runs")).unwrap_or_default(),
+			"x",
+			"the trap ran other than once"
+		);
+		assert!(root.path().join("done").exists(), "the trap was killed before it finished");
 	}
 
 	/// Cancels a `run_shell_command` once its command has created `ready`,

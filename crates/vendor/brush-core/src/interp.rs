@@ -112,8 +112,9 @@ pub struct ExecutionParameters {
 	/// Optional cancellation token shared with callers.
 	cancel_token:             Option<CancellationToken>,
 	/// The run's cancellation that the embedding host answers by terminating
-	/// the run's processes itself (see [`processes::ChildCancel`]).
-	host_cancel_token:        Option<CancellationToken>,
+	/// the run's processes itself, and the token the host cancels once that
+	/// termination has finished (see [`processes::ChildCancel`]).
+	host_cancel_token:        Option<(CancellationToken, CancellationToken)>,
 	/// Optional command-output marker hook.
 	command_output_marker:    Option<Arc<dyn ExternalCommandOutputMarker>>,
 	/// Whether command-output marking was disabled by shell syntax that can
@@ -251,18 +252,20 @@ impl ExecutionParameters {
 	/// Assigns `token` as this execution's cancellation and records that the
 	/// embedding host answers it by terminating every process the run spawns
 	/// (reported through the spawn observer): it sends TERM, counts the grace
-	/// from that TERM and kills. A wait cancelled through it then leaves the
-	/// process to the host instead of sending TERM and starting its own kill
-	/// timer. Tokens derived from it (background jobs, coprocesses) keep the
-	/// record, but cancelling only them is not a host termination.
-	pub fn set_host_terminated_cancel_token(&mut self, token: CancellationToken) {
+	/// from that TERM, kills, and then cancels `done`. A wait cancelled through
+	/// `token` leaves the process to the host until `done`, instead of sending
+	/// TERM and starting its own kill timer. Tokens derived from it
+	/// (background jobs, coprocesses) keep the record, but cancelling only them
+	/// is not a host termination.
+	pub fn set_host_terminated_cancel_token(&mut self, token: CancellationToken, done: CancellationToken) {
 		self.cancel_token = Some(token.clone());
-		self.host_cancel_token = Some(token);
+		self.host_cancel_token = Some((token, done));
 	}
 
 	/// How a wait for a child of this execution reacts to cancellation.
 	pub fn child_cancel(&self) -> processes::ChildCancel {
-		processes::ChildCancel::new(self.cancel_token.clone(), self.host_cancel_token.clone())
+		let (host, done) = self.host_cancel_token.clone().unzip();
+		processes::ChildCancel::new(self.cancel_token.clone(), host, done)
 	}
 
 	/// Returns true when cancellation has been requested.

@@ -1458,6 +1458,13 @@ impl SpawnRegistry {
 		self.terminated.cancel();
 	}
 
+	/// A token cancelled once the run's termination has finished, for brush
+	/// (`ExecutionParameters::set_host_terminated_cancel_token`).
+	#[must_use]
+	pub fn terminated_token(&self) -> tokio_util::sync::CancellationToken {
+		self.terminated.clone()
+	}
+
 	/// Waits until the run's termination has finished, or for at most
 	/// `limit` (a caller that runs without the termination task must not wait
 	/// forever). Anything that would end a process sooner (closing its output,
