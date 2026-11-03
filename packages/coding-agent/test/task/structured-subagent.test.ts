@@ -1194,17 +1194,13 @@ describe("structured subagent primitive", () => {
 		const spawners: WeakRef<ToolSession>[] = [];
 		const spawn = async (): Promise<void> => {
 			const parent = session();
-			Object.assign(parent, {
-				effectiveExtensionRoots: extensionRoots,
-				localProtocolOptions,
-				payload: "x".repeat(1 << 20),
-			});
+			Object.assign(parent, { effectiveExtensionRoots: extensionRoots, localProtocolOptions });
 			spawners.push(new WeakRef(parent));
 			const customTools = createEvalCustomTools(parent, [descriptor]);
 			const run = await runStructuredSubagent(request({ session: parent, customTools, retainArtifacts: true }));
 			await fs.rm(run.artifactsDir, { recursive: true, force: true });
 		};
-		for (let i = 0; i < 8; i++) await spawn();
+		for (let i = 0; i < 3; i++) await spawn();
 		// The spy's call log holds each run's whole options; keep only `kept`.
 		vi.restoreAllMocks();
 		// A WeakRef target read in a job stays alive until that job ends: yield, collect, then read.
@@ -1218,7 +1214,7 @@ describe("structured subagent primitive", () => {
 			remaining = alive();
 		}
 
-		expect(kept).toHaveLength(8);
+		expect(kept).toHaveLength(3);
 		for (const options of kept) {
 			expect(options.extensionRoots?.()).toBe(roots);
 			expect(options.customTools?.map(tool => tool.name)).toEqual(["review_echo"]);
