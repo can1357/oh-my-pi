@@ -30,6 +30,13 @@ it("lets a report Chrome never made an item for expire instead of taking a later
 	expect(pairing.idFor("refused")).toBeUndefined();
 });
 
+it("pairs a burst of reports that come before any of Chrome's items, in order", () => {
+	const pairing = new DownloadPairing(() => 0);
+	for (let i = 0; i < 50; i++) pairing.report(`g${i}`, URL);
+	for (let i = 0; i < 50; i++) pairing.created(i, URL);
+	expect([pairing.idFor("g0"), pairing.idFor("g49")]).toEqual([0, 49]);
+});
+
 it("keeps every running download's pair however many run, and drops a pair once nobody will look it up", () => {
 	let now = 0;
 	const pairing = new DownloadPairing(() => now);
