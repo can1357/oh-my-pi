@@ -267,15 +267,6 @@ describe("native prompt-cache marker", () => {
 		expect(cacheMarker(cacheStatusLine(CACHE_SETTINGS, () => compacted))!.title).toContain("re-sends up to ~320K");
 	});
 
-	it("names a rotated provider cache session as the reason, with the whole prompt re-sent", () => {
-		setNativeRendering(true);
-		const rekeyed: PromptCacheStatus = { ...COLD_MODEL, reason: { kind: "cache-key" } };
-		const marker = cacheMarker(cacheStatusLine(CACHE_SETTINGS, () => rekeyed));
-		expect(marker!.spans).toEqual([{ t: SYMBOL_PRESETS.nerd["icon.cacheCold"], s: "warning" }]);
-		expect(marker!.title).toEndWith("re-sends ~320K");
-		expect(JSON.stringify(marker!.hovercard)).toContain("provider cache session changed");
-	});
-
 	it("has no marker when the session reports no prompt-cache status", () => {
 		setNativeRendering(true);
 		expect(cacheMarker(cacheStatusLine(CACHE_SETTINGS, () => undefined))).toBeUndefined();
@@ -288,13 +279,6 @@ describe("native prompt-cache marker", () => {
 			() => WARM,
 		);
 		expect(cacheMarker(line)).toBeUndefined();
-	});
-
-	it("hands the session the context size the status line already counted", () => {
-		setNativeRendering(true);
-		const cacheStatus = vi.fn((_nowMs: number, _nextTokens?: number) => WARM);
-		cacheMarker(cacheStatusLine(CACHE_SETTINGS, cacheStatus, 320_000));
-		expect(cacheStatus).toHaveBeenCalledWith(expect.any(Number), 320_000);
 	});
 });
 
@@ -338,38 +322,15 @@ describe("prompt-cache expiry wakeup", () => {
 			line.dispose();
 		}
 	});
-
-	it("rebuilds a not-cached card once the local day turns, so its times carry their date", () => {
-		setNativeRendering(true);
-		vi.useFakeTimers();
-		const expiredAt = new Date(2026, 9, 29, 23, 50).getTime();
-		setSystemTime(expiredAt + 60_000);
-		const cold: PromptCacheStatus = { ...WARM, state: "cold", reason: { kind: "expired", at: expiredAt } };
-		const line = cacheStatusLine(CACHE_SETTINGS, () => cold);
-		const repaint = vi.fn();
-		line.watchBranch(repaint);
-		const card = () => JSON.stringify(cacheMarker(line)!.hovercard);
-		try {
-			expect(card()).not.toContain("Oct");
-			vi.advanceTimersByTime(9 * 60_000 - 1);
-			expect(repaint).not.toHaveBeenCalled();
-
-			vi.advanceTimersByTime(1);
-			expect(repaint).toHaveBeenCalledTimes(1);
-			expect(card()).toContain("Oct 29");
-		} finally {
-			line.dispose();
-		}
-	});
 });
 
 describe("prompt-cache text", () => {
-	it("reads times relative to now in /session, absolute on the card", () => {
+	it("reads times relative to now in /session; the card names no time that goes stale unrepainted", () => {
 		const expired: PromptCacheStatus = { ...WARM, state: "cold", reason: { kind: "expired", at: TOUCHED_AT } };
 		const now = TOUCHED_AT + 14 * 60_000;
 		const why = promptCacheDetails(expired, now).find(row => row.label === "Why not cached")!.value;
 		expect(why).toEndWith(" (14 min ago)");
-		expect(promptCacheBrief(expired, now)[0]).toBe(`Not cached — ${why.slice(0, -" (14 min ago)".length)}`);
+		expect(promptCacheBrief(expired, now)[0]).toBe("Not cached — expired");
 
 		const expires = promptCacheDetails(WARM, TOUCHED_AT + 60_000).find(row => row.label === "Expires")!.value;
 		expect(expires).toEndWith(" (in 4 min)");
@@ -389,12 +350,12 @@ describe("prompt-cache text", () => {
 		const now = new Date(2026, 9, 29, 0, 10).getTime();
 		const month = new Date(now).toLocaleString([], { month: "short" });
 		const expiredAt = (at: number) =>
-			promptCacheBrief({ ...WARM, state: "cold", reason: { kind: "expired", at } }, now)[0];
+			promptCacheDetails({ ...WARM, state: "cold", reason: { kind: "expired", at } }, now)[1]!.value;
 		const yesterday = expiredAt(new Date(2026, 9, 28, 23, 50).getTime());
 		expect(yesterday).toContain(month);
 		expect(yesterday).toContain("28");
 		const today = expiredAt(new Date(2026, 9, 29, 0, 5).getTime());
-		expect(today).toStartWith("Not cached — expired at ");
+		expect(today).toStartWith("expired at ");
 		expect(today).not.toContain(month);
 
 		// An expiry past midnight is dated the same way.

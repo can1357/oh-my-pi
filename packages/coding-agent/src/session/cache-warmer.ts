@@ -29,7 +29,6 @@ import {
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { isAnthropicOAuthToken } from "@oh-my-pi/pi-catalog/utils";
 import type { CacheWarmingDecisionEvent, CacheWarmingDecisionEventResult } from "../extensibility/shared-events";
-import type { PromptCacheColdReason } from "@oh-my-pi/pi-tui/status-line/host";
 
 export type { CacheWarmingDecisionEvent, CacheWarmingDecisionEventResult };
 
@@ -322,11 +321,16 @@ export interface ConfirmedPromptCacheEntry {
 }
 
 /**
- * A difference in the next request that its cached prefix cannot serve. `history`: the
- * transcript was rewound, branched or replaced, so the armed request no longer leads it.
+ * What the next request sends differently from the one that wrote the entry, so it cannot read it. `history`:
+ * the transcript was rewound, branched, compacted or replaced, so the armed request no longer leads it.
  */
 export type PromptCacheChange =
-	| Exclude<PromptCacheColdReason, { kind: "expired" | "refresh-missed" }>
+	| { kind: "model"; from: string; to: string }
+	| { kind: "thinking"; from: string; to: string }
+	| { kind: "tools" }
+	| { kind: "system-prompt" }
+	| { kind: "retention" }
+	| { kind: "cache-key" }
 	| { kind: "history" };
 
 /** What a warm refresh of the current conversation found: when it was sent and whether it read the cache. */
@@ -393,10 +397,29 @@ export class CacheWarmer {
 	}
 
 	get status(): CacheWarmingStatus {
+		return this.#statusOf(this.#run?.change);
+	}
+
+	/**
+	 * {@link confirmedEntry} with the warming {@link status}, evaluating what changed in the conversation once
+	 * when the running warm-up keeps that same entry.
+	 */
+	get confirmedView(): { entry: ConfirmedPromptCacheEntry | undefined; warming: CacheWarmingStatus } {
+		const entry = this.#entry;
+		if (!entry) return { entry: undefined, warming: this.status };
+		const change = entry.change();
+		const runChange = this.#run?.change;
+		return {
+			entry: this.#confirmed(entry, change),
+			warming: this.#statusOf(runChange === entry.change ? () => change : runChange),
+		};
+	}
+
+	#statusOf(change: (() => PromptCacheChange | undefined) | undefined): CacheWarmingStatus {
 		if (this.#deps.getMode() === "off") return { state: "inactive", reason: "cache warming disabled" };
 		const run = this.#run;
-		if (!run) return this.#inactive;
-		if (run.change() !== undefined) return { state: "inactive", reason: "conversation context changed" };
+		if (!run || !change) return this.#inactive;
+		if (change() !== undefined) return { state: "inactive", reason: "conversation context changed" };
 		const decision = this.#evaluate(run);
 		const refreshing = run.timer === undefined;
 		if (!decision.economicsAvailable && !refreshing) {
@@ -429,14 +452,17 @@ export class CacheWarmer {
 	/** {@link cacheEntry} whether or not the conversation still matches it; undefined until a response reports cache usage. */
 	get confirmedEntry(): ConfirmedPromptCacheEntry | undefined {
 		const entry = this.#entry;
-		if (!entry) return undefined;
+		return entry && this.#confirmed(entry, entry.change());
+	}
+
+	#confirmed(entry: TrackedCacheEntry, change: PromptCacheChange | undefined): ConfirmedPromptCacheEntry {
 		const seconds = entry.model.promptCache?.[entry.tier];
 		return {
 			model: entry.model,
 			tier: entry.tier,
 			touchedAt: entry.touchedAt,
 			ttlMs: seconds === undefined ? undefined : seconds * 1000,
-			change: entry.change(),
+			change,
 			refreshMissed: entry.refreshMissed === true,
 			promptTokens: entry.promptTokens ?? 0,
 		};
@@ -458,8 +484,15 @@ export class CacheWarmer {
 			request.model.api === "anthropic-messages" && typeof apiKey === "string" && isAnthropicOAuthToken(apiKey);
 		const tier = resolvePromptCacheTier(request.model, request.options, isOAuthToken);
 		const entry = tier === undefined ? undefined : { model: request.model, tier, touchedAt: Date.now(), change };
+		// The entry's lifetime, and so the next refresh, counts from the send, past any wait for a provider slot.
 		const dispatched = () => {
-			if (entry) entry.touchedAt = Date.now();
+			if (!entry) return;
+			entry.touchedAt = Date.now();
+			const run = this.#run;
+			if (run?.entry !== entry || run.timer === undefined) return;
+			clearTimeout(run.timer);
+			run.timer = undefined;
+			this.#schedule(run);
 		};
 		this.#pendingEntry = entry;
 		const mode = this.#deps.getMode();

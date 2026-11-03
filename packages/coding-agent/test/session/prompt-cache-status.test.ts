@@ -236,23 +236,18 @@ describe("AgentSession prompt-cache status", () => {
 		expect(session.getPromptCacheStatus(sentAt + 1)).toMatchObject({ state: "warm", inferred: true });
 	});
 
-	it("turns cold when a tool's definition changed under the same name", () => {
+	it("names a compaction since the last send as the reason", () => {
 		session.setCacheWarmingMode("off");
-		const lookup = (description: string) => ({
-			name: "lookup",
-			label: "Lookup",
-			description,
-			parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
-			execute: async () => ({ content: [], details: {} }),
-		});
-		session.agent.setTools([lookup("Look up a value")]);
+		session.agent.appendMessage({ role: "user", content: "question", timestamp: Date.now() });
 		const sentAt = send();
-		session.agent.setTools([lookup("Look up a value by key")]);
+		const replyId = session.sessionManager.appendMessage(reply(model, usage({ cacheWrite: 50_000 })));
+		session.sessionManager.appendCompaction("summary", undefined, replyId, 50_000);
+		session.agent.replaceMessages([]);
 
-		expect(session.getPromptCacheStatus(sentAt + 1)).toMatchObject({ state: "cold", reason: { kind: "tools" } });
+		expect(session.getPromptCacheStatus(sentAt + 1)).toMatchObject({ state: "cold", reason: { kind: "compaction" } });
 	});
 
-	it("turns cold when a tool keeps its name, description and schema but sends other wire fields", () => {
+	it("turns cold when a tool's wire spec changed under the same name", () => {
 		session.setCacheWarmingMode("off");
 		const lookup = {
 			name: "lookup",
@@ -261,10 +256,10 @@ describe("AgentSession prompt-cache status", () => {
 			parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
 			execute: async () => ({ content: [], details: {} }),
 		};
+		// A refreshed MCP tool keeps its name; examples reach the wire through the rendered description.
 		const changes = [
+			{ description: "Look up a value by key" },
 			{ strict: true },
-			{ customWireName: "lookup_v2" },
-			{ customFormat: { syntax: "regex" as const, definition: "[a-z]+" } },
 			{ examples: [{ caption: "Find a user", call: { query: "user:42" } }] },
 		];
 		for (const change of changes) {
@@ -373,20 +368,8 @@ describe("AgentSession prompt-cache status", () => {
 		expect(session.getPromptCacheStatus(sentAt + 1)).toBeUndefined();
 	});
 
-	it("takes the next request's size from a caller that already counted it", () => {
-		session.setCacheWarmingMode("off");
-		send();
-		const count = vi.spyOn(session, "getContextUsage");
-		try {
-			expect(session.getPromptCacheStatus(Date.now(), 70_000)).toMatchObject({ state: "warm", nextTokens: 70_000 });
-			expect(count).not.toHaveBeenCalled();
-		} finally {
-			count.mockRestore();
-		}
-	});
-
-	it("counts a request's lifetime from when the provider sent it, not from a wait for a provider slot", () => {
-		session.setCacheWarmingMode("off");
+	it("counts a request's lifetime and its next refresh from when the provider sent it, past a wait for a slot", () => {
+		session.setCacheWarmingMode("idle");
 		const context = { messages: [] };
 		session.startCacheWarming(model, context, { cacheRetention: "short" });
 		vi.advanceTimersByTime(30_000);
@@ -394,7 +377,11 @@ describe("AgentSession prompt-cache status", () => {
 		session.markPromptCacheDispatched(context);
 		warmer.onResponse(reply(model, usage({ cacheWrite: 50_000 })));
 
-		expect(session.getPromptCacheStatus(sentAt)).toMatchObject({ state: "warm", touchedAt: sentAt });
+		expect(session.getPromptCacheStatus(sentAt)).toMatchObject({
+			state: "warm",
+			touchedAt: sentAt,
+			warming: { state: "scheduled", nextWarmAt: sentAt + REFRESH_DELAY_MS },
+		});
 	});
 
 	it("turns cold after /fresh rotates the provider session an OpenAI request keys its cache by", async () => {
@@ -651,33 +638,6 @@ describe("AgentSession prompt-cache status", () => {
 			session.sessionManager.appendMessage(reply(model, usage({})));
 
 			expect(session.getPromptCacheStatus(Date.now() + 1)).toMatchObject({ state: "warm", inferred: true });
-		});
-
-		it("folds each branch entry once across repeated reads, then only the appended ones", () => {
-			for (let index = 0; index < 1_000; index++) session.sessionManager.appendCustomEntry("unrelated", index);
-			const branch = session.sessionManager.getBranchView();
-			let reads = 0;
-			const counted = new Proxy(branch, {
-				get(target, key, receiver) {
-					if (typeof key === "string" && /^\d+$/.test(key)) reads++;
-					return Reflect.get(target, key, receiver);
-				},
-			});
-			const view = vi.spyOn(session.sessionManager, "getBranchView").mockReturnValue(counted);
-			// The next request's size estimate walks the branch on its own account.
-			const estimate = vi.spyOn(session, "getContextUsage").mockReturnValue(undefined);
-			try {
-				for (let index = 0; index < 10; index++) expect(session.getPromptCacheStatus(Date.now())).toBeUndefined();
-				expect(reads).toBe(1_000);
-
-				reads = 0;
-				session.sessionManager.appendMessage(reply(model, usage({ cacheWrite: 50_000 })));
-				expect(session.getPromptCacheStatus(Date.now() + 1)).toMatchObject({ state: "warm", inferred: true });
-				expect(reads).toBe(1);
-			} finally {
-				view.mockRestore();
-				estimate.mockRestore();
-			}
 		});
 
 		it("names the lapsed lifetime over a system prompt change once the entry would have expired", () => {

@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `wireToolsFingerprint()`, the tools half of `StablePrefix`'s fingerprint: a hash of the tool specs a request sends, examples, `strict`, `customFormat` and `customWireName` included ([#17496](https://github.com/can1357/oh-my-pi/pull/17496) by [@will-bogusz](https://github.com/will-bogusz))
+- Added `wireToolsFingerprint()`, a hash of the tool specs a request sends ([#17496](https://github.com/can1357/oh-my-pi/pull/17496) by [@will-bogusz](https://github.com/will-bogusz))
 - Added `Agent.queuedMessageGate`, a synchronous `QueuedMessageGate` consulted before every queued-message delivery batch (it can drop candidates) and told when claimed messages go back undelivered
 
 ## [18.16.0] - 2026-11-02

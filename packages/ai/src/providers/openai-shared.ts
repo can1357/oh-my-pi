@@ -558,6 +558,25 @@ export function getOpenAIPromptCacheKey(options: OpenAICacheOptions | undefined)
 	return normalizeOpenAIPromptCacheKey(options?.promptCacheKey ?? options?.sessionId);
 }
 
+/**
+ * Whether requests to `model` carry `prompt_cache_key` ({@link getOpenAIPromptCacheKey}): the key routes them to
+ * their cache entry, so a request under another key reads none of it.
+ */
+export function sendsPromptCacheKey(model: Model<Api>): boolean {
+	switch (model.api) {
+		case "openai-responses":
+		case "openai-codex-responses":
+		case "azure-openai-responses":
+			return true;
+		case "openai-completions": {
+			const { compat } = model as Model<"openai-completions">;
+			return compat.supportsPromptCacheKey === true || compat.supportsPromptCacheBreakpoints === true;
+		}
+		default:
+			return false;
+	}
+}
+
 export function getOpenAIResponsesRoutingSessionId(
 	options: Pick<OpenAICacheOptions, "cacheRetention" | "sessionId"> | undefined,
 ): string | undefined {

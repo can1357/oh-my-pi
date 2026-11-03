@@ -747,7 +747,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	#pricingTimer: NodeJS.Timeout | undefined;
 	#pricingTimerCost: ModelCost | undefined;
 	#pricingTransition: number | undefined;
-	/** One wall-clock wakeup when the warm prompt-cache entry expires or the local day turns, so the marker changes without ticking. */
+	/** One wall-clock wakeup when the warm prompt-cache entry expires, so the marker turns without ticking. */
 	#promptCacheTimer: NodeJS.Timeout | undefined;
 	#promptCacheWakeAt: number | undefined;
 	#hookStatuses: Map<string, string> = new Map();
@@ -1547,22 +1547,15 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	}
 
 	/**
-	 * One wakeup at the next moment what the marker shows can change: the warm
-	 * prompt cache lapsing, or the local day turning, which redates the hover
-	 * card's times. No ticking repaint; a warm refresh moves the expiry and
-	 * re-arms it on the next build.
+	 * One wakeup when the warm prompt cache lapses, so the marker turns without
+	 * ticking; a warm refresh moves the expiry and re-arms it on the next build.
 	 */
 	#syncPromptCacheTimer(status: PromptCacheStatus | undefined, now: number): void {
-		if (this.#disposed || !this.#onBranchChange || status === undefined) {
+		const wakeAt =
+			status?.state === "warm" && status.ttlMs !== undefined ? status.touchedAt + status.ttlMs : undefined;
+		if (this.#disposed || !this.#onBranchChange || wakeAt === undefined || wakeAt <= now) {
 			this.#stopPromptCacheTimer();
 			return;
-		}
-		const midnight = new Date(now);
-		midnight.setHours(24, 0, 0, 0);
-		let wakeAt = midnight.getTime();
-		if (status.state === "warm" && status.ttlMs !== undefined) {
-			const expiry = status.touchedAt + status.ttlMs;
-			if (expiry > now) wakeAt = Math.min(wakeAt, expiry);
 		}
 		if (this.#promptCacheWakeAt === wakeAt) return;
 		this.#stopPromptCacheTimer();
@@ -3880,7 +3873,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	/**
 	 * Wall-clock granularity of the native bar. Spinners, turn timers and the
 	 * brand fade are terminal-clocked, so only wall-clock text (time, loop
-	 * countdowns, the cache card's dates) advances it; VCS refreshes are deadline-driven
+	 * countdowns) advances it; VCS refreshes are deadline-driven
 	 * ({@link #expireStaleVcsRender}).
 	 */
 	#nativeClock(nowMs: number, effectiveSettings: EffectiveStatusLineSettings): number {
@@ -3893,9 +3886,6 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			return Math.floor(nowMs / 1_000);
 		}
 		if (includesTime) return Math.floor(nowMs / 60_000);
-		if (segments.includes("cache")) {
-			return Math.floor((nowMs - new Date(nowMs).getTimezoneOffset() * 60_000) / 86_400_000);
-		}
 		return 0;
 	}
 

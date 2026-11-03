@@ -86,6 +86,7 @@ import { type Effort, serviceTierFamily, streamSimple } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { prewarmModelConnection } from "@oh-my-pi/pi-ai/providers/connection-prewarm";
 import { resetOpenAICodexHistoryAfterCompaction } from "@oh-my-pi/pi-ai/providers/openai-codex-state";
+import { sendsPromptCacheKey } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import { withCredentialRedaction } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { markPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
@@ -754,27 +755,6 @@ interface PromptCacheShape {
 	retention: string;
 	/** OpenAI `prompt_cache_key` the request routes by; undefined for a provider that sends none. */
 	cacheKey: string | undefined;
-}
-
-/**
- * Whether `model`'s requests carry the OpenAI prompt-cache key (the provider session id when no key is
- * pinned), which routes them to their cache: another key reads none of the old entry.
- */
-function sendsPromptCacheKey(model: Model): boolean {
-	switch (model.api) {
-		case "openai-responses":
-		case "openai-codex-responses":
-		case "azure-openai-responses":
-			return true;
-		case "openai-completions":
-			return (
-				model.compat !== undefined &&
-				"supportsPromptCacheKey" in model.compat &&
-				model.compat.supportsPromptCacheKey === true
-			);
-		default:
-			return false;
-	}
 }
 
 /**
@@ -1488,6 +1468,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				tools: unknown;
 				systemPrompt: unknown;
 				intentTracing: boolean;
+				intentDescription: string | undefined;
 				pruneToolDescriptions: boolean;
 				shape: PromptCacheShape;
 		  }
@@ -6038,19 +6019,19 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		if (!warmer) return;
 		// The warmer keeps its confirmed entry across requests until a response
 		// replaces it; another transcript's entry says nothing about this one.
-		if (this.#promptCacheArmSessionId !== this.sessionManager.getSessionId()) warmer.cancel();
+		const sessionId = this.sessionManager.getSessionId();
+		if (this.#promptCacheArmSessionId !== sessionId) warmer.cancel();
+		this.#promptCacheArmSessionId = sessionId;
 		// A copy: `/clear` truncates the live array in place, which an alias would follow.
 		const armMessages = this.messages.slice();
-		const armedAt = Date.now();
 		const retentionSetting = cfgProvidersCacheRetention.get(this.settings);
 		const warmingOptions = {
 			...options,
 			cacheRetention: options.cacheRetention ?? (retentionSetting === "auto" ? undefined : retentionSetting),
 		};
 		const armShape = this.#promptCacheShape(model);
-		this.#promptCacheArmSessionId = this.sessionManager.getSessionId();
 		const dispatched = warmer.start({ model, context, options: warmingOptions }, () =>
-			this.#promptCacheChange(armShape, armMessages, armedAt),
+			this.#promptCacheChange(armShape, armMessages),
 		);
 		this.#promptCacheDispatch.set(context, dispatched);
 	}
@@ -6069,11 +6050,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * `arm` and `armMessages`; undefined while it would read the same prefix.
 	 * Replaying the old shape would keep an entry nobody reads.
 	 */
-	#promptCacheChange(
-		arm: PromptCacheShape,
-		armMessages: readonly AgentMessage[],
-		armedAt: number,
-	): PromptCacheChange | undefined {
+	#promptCacheChange(arm: PromptCacheShape, armMessages: readonly AgentMessage[]): PromptCacheChange | undefined {
 		const next = this.#promptCacheShape(this.model);
 		if (next.model !== arm.model) return { kind: "model", from: arm.modelName, to: next.modelName };
 		if (next.thinkingLevel !== arm.thinkingLevel) {
@@ -6088,21 +6065,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// rewrite, shallow array copy with new objects, compaction, branch,
 		// or session switch invalidates the cache key.
 		const current = this.messages;
-		const kept =
-			current.length >= armMessages.length && armMessages.every((message, index) => current[index] === message);
-		if (kept) return undefined;
-		return { kind: this.#compactedSince(armedAt) ? "compaction" : "history" };
-	}
-
-	/** Whether the branch gained a compaction at or after `sinceMs`. */
-	#compactedSince(sinceMs: number): boolean {
-		const branch = this.sessionManager.getBranchView();
-		for (let index = branch.length - 1; index >= 0; index--) {
-			const entry = branch[index]!;
-			if (Date.parse(entry.timestamp) < sinceMs) return false;
-			if (entry.type === "compaction") return true;
+		if (current.length < armMessages.length) return { kind: "history" };
+		for (let index = 0; index < armMessages.length; index++) {
+			if (current[index] !== armMessages[index]) return { kind: "history" };
 		}
-		return false;
+		return undefined;
 	}
 
 	/** The request inputs outside the transcript that are part of the cache key; rebuilt only when one of them is replaced. */
@@ -6115,6 +6082,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				? (this.getPromptCacheKeyForModel(model) ?? this.agent.sessionId)
 				: undefined;
 		const intentTracing = this.agent.intentTracing;
+		const intentDescription = this.agent.intentDescription;
 		const pruneToolDescriptions = this.agent.prunesToolDescriptions(model);
 		const memo = this.#promptCacheShapeMemo;
 		if (
@@ -6123,6 +6091,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			memo.tools === tools &&
 			memo.systemPrompt === systemPrompt &&
 			memo.intentTracing === intentTracing &&
+			memo.intentDescription === intentDescription &&
 			memo.pruneToolDescriptions === pruneToolDescriptions &&
 			memo.shape.thinkingLevel === thinkingLevel &&
 			memo.shape.retention === retention &&
@@ -6135,12 +6104,20 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			modelName: model?.name ?? "no model",
 			thinkingLevel,
 			// The specs as the wire carries them: a refreshed MCP tool keeps its name.
-			tools: wireToolsFingerprint(tools, { intentTracing, pruneToolDescriptions }),
+			tools: wireToolsFingerprint(tools, { intentTracing, intentDescription, pruneToolDescriptions }),
 			systemPrompt: Bun.hash(JSON.stringify(systemPrompt)),
 			retention,
 			cacheKey,
 		};
-		this.#promptCacheShapeMemo = { model, tools, systemPrompt, intentTracing, pruneToolDescriptions, shape };
+		this.#promptCacheShapeMemo = {
+			model,
+			tools,
+			systemPrompt,
+			intentTracing,
+			intentDescription,
+			pruneToolDescriptions,
+			shape,
+		};
 		return shape;
 	}
 
@@ -6154,10 +6131,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	getPromptCacheStatus(nowMs = Date.now(), nextTokens?: number): PromptCacheStatus | undefined {
 		const warmer = this.#cacheWarmer;
 		if (!warmer) return undefined;
-		const confirmed =
-			this.#promptCacheArmSessionId === this.sessionManager.getSessionId() ? warmer.confirmedEntry : undefined;
+		const view =
+			this.#promptCacheArmSessionId === this.sessionManager.getSessionId() ? warmer.confirmedView : undefined;
+		const confirmed = view?.entry;
 		const change = confirmed?.change;
-		// A replaced transcript (rewind, branch switch, reload) no longer extends the
+		// A replaced transcript (rewind, branch switch, reload, compaction) no longer extends the
 		// armed request; the branch now on screen says what its own replies cached.
 		const live = confirmed !== undefined && change?.kind !== "history";
 		const entry: ObservedPromptCacheEntry | undefined = live
@@ -6166,7 +6144,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		if (!entry) return undefined;
 		return promptCacheStatus(entry, {
 			nowMs,
-			warming: live ? warmer.status : undefined,
+			warming: live ? view?.warming : undefined,
 			nextTokens: nextTokens ?? this.getContextUsage()?.tokens ?? 0,
 		});
 	}
