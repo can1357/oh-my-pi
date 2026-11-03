@@ -3888,7 +3888,14 @@ export class ModelRegistry {
 		// the selector-wide record active.
 		const sessionUntilMs =
 			options.sessionId !== undefined ? record.untilMsBySession?.get(options.sessionId) : undefined;
-		if (sessionUntilMs !== undefined && sessionUntilMs <= Date.now()) return false;
+		if (sessionUntilMs !== undefined && sessionUntilMs <= Date.now()) {
+			// The registry is shared across sessions: session A's quota deadline can
+			// expire while a sibling session's longer non-quota cooldown still owns
+			// the selector. That deadline applies regardless of quota-recovery
+			// evidence, so the session-local expiry must not bypass it.
+			if (record.nonQuotaUntilMs > Date.now()) return true;
+			return false;
+		}
 		const failureTime =
 			(options.sessionId !== undefined
 				? record.usageLimitFailureTimeBySession?.get(options.sessionId)

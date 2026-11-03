@@ -697,6 +697,28 @@ describe("early quota reset recovery", () => {
 		).toBe(true);
 	});
 
+	it("keeps a non-quota cooldown after a session's own quota deadline expires", async () => {
+		env = await createEnv();
+		const { registry } = env;
+		const clock = useMockClock();
+		// Session B records a short quota cooldown; a sibling's longer generic
+		// (non-quota) rate-limit cooldown owns the shared selector.
+		registry.suppressSelector(PRIMARY_SELECTOR, clock.now() + 20 * 60_000);
+		registry.suppressSelector(PRIMARY_SELECTOR, clock.now() + 2 * 60_000, clock.now(), "session-b");
+		scriptedReports.anthropic = { status: "healthy" };
+		clock.advance(3 * 60_000);
+
+		// B's quota deadline passed, but the overlapping non-quota deadline is
+		// still active and must not be bypassed by the session-local expiry.
+		expect(
+			await registry.isSelectorSuppressedWithRecovery(PRIMARY_SELECTOR, {
+				sessionId: "session-b",
+				reserveFraction: 0.1,
+			}),
+		).toBe(true);
+		expect(usageFetches).toEqual([]);
+	});
+
 	it("releases a session whose own cooldown expires while its unhealthy probe is in flight", async () => {
 		env = await createEnv();
 		const { registry } = env;

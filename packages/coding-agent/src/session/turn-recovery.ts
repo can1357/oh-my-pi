@@ -2347,6 +2347,13 @@ export class TurnRecovery {
 				// in-memory leaf is lost on reload, because the loader selects the last
 				// physical journal entry and would resurrect the cancelled selection.
 				await this.#host.sessionManager.discardEntryDurably(appendedModelChangeId);
+				// The durable discard awaited: a manual `setModel()` landing in that
+				// window advances `#fallbackGeneration` and installs the user's model.
+				// The ownership check ran before the await, so recheck the generation
+				// and the active model here; a newer explicit selection owns both the
+				// model and its effort, and reinstating `previousModel` would overwrite
+				// it.
+				if (generation !== this.#fallbackGeneration || this.#host.model() !== candidate) return false;
 				// Restore the model before its thinking level: `setThinkingLevel` clamps
 				// against the active model, so restoring `currentThinkingLevel` while the
 				// candidate is still active silently drops a reasoning-capable primary's
@@ -2748,6 +2755,12 @@ export class TurnRecovery {
 			// (the model restore never reapplies thinking, and the level clamps
 			// against the active model).
 			this.#host.setThinkingLevel(currentThinkingLevel);
+			// The pre-cancellation synchronization may already have committed the
+			// primary's base prompt (edit-mode or inline-descriptor change). The
+			// fallback model restore reconciles archive/think-tool state only, so
+			// rebuild here to put the fallback's prompt surface back; otherwise the
+			// next request keeps the primary's editing/tool instructions.
+			await this.#host.refreshBaseSystemPrompt();
 			return false;
 		}
 		return true;
