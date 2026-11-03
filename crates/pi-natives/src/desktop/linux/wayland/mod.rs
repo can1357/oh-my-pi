@@ -7,7 +7,8 @@ mod xkb;
 use image::RgbaImage;
 
 use crate::desktop::{
-	backend::{AxBackend, Backend, DeliveryMode, PointerEvent},
+	ax::AxHandle,
+	backend::{AxBackend, Backend, DeliveryMode, ElementDelivery, ElementInput, PointerEvent},
 	control::{self, OperationToken},
 	error::{CoreResult, DesktopError},
 	frame::FrameGeometry,
@@ -391,6 +392,26 @@ impl Backend for WaylandBackend {
 		super::menus::select(window, path)
 	}
 
+	/// Refuses before anything reaches the element's app. The default focuses
+	/// the element and then sends through its window's keyboard path, which
+	/// Wayland always refuses, so the refused call still moved focus inside
+	/// that app (GNOME announced "… is ready").
+	fn element_input(
+		&mut self,
+		_element: &AxHandle,
+		_input: &ElementInput,
+		_mode: DeliveryMode,
+		token: &OperationToken,
+	) -> CoreResult<ElementDelivery> {
+		token.check()?;
+		Err(DesktopError::background_unavailable(
+			"wayland-compositor-focus-only: Wayland cannot programmatically activate the element's \
+			 window, so el.type and el.press(keys) are refused before the element is focused; \
+			 nothing was sent. Use setValue, or click the field where a desktop screenshot shows it \
+			 (AX bounds are window-relative here) and then type with desktop input",
+		))
+	}
+
 	fn raise_window(&mut self, id: &str, token: &OperationToken) -> CoreResult<()> {
 		token.check()?;
 		Err(DesktopError::background_unavailable(format!(
@@ -543,6 +564,24 @@ mod tests {
 		let frame = FrameGeometry::for_displays(&backend.displays);
 		let error = backend.validate_frame_layout(&frame).unwrap_err();
 		assert_eq!(error.code.as_str(), "InvalidCoordinateFrame");
+	}
+
+	/// The refusal comes before any AT-SPI call: the default path's first step,
+	/// the window lookup, would fail `AxUnsupported` here instead, and its next
+	/// step focuses the element.
+	#[test]
+	fn element_input_is_refused_before_anything_reaches_the_app() {
+		let mut backend = backend_without_services();
+		let source = control::CancellationSource::default();
+		for input in [ElementInput::Text("zz".into()), ElementInput::Chord(vec![KeyName::Enter])] {
+			let error = backend
+				.element_input(&AxHandle::Test(1), &input, DeliveryMode::Foreground, &source.token())
+				.err()
+				.expect("Wayland element input is refused");
+			assert_eq!(error.code.as_str(), "BackgroundUnavailable");
+			assert!(error.message.contains("nothing was sent"), "{}", error.message);
+		}
+		assert!(backend.input.is_none());
 	}
 
 	#[test]
