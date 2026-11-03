@@ -149,8 +149,8 @@ export interface SpotlightDetails {
 	plainChars?: number;
 	plainTokens?: number;
 	/**
-	 * `max(0, plainTokens - outTokens)` for a changed (or held-out) result, else 0; on older traces
-	 * `inTokens - outTokens`.
+	 * `plainTokens - outTokens` for a changed (or held-out) result, else 0: negative for a column-cap cut longer than
+	 * the preview it replaced. On older traces `inTokens - outTokens`.
 	 */
 	savedTokens: number;
 	/** The score-free coin skipped Spotlight: the result was shaped by the no-score rules. Absent otherwise. */

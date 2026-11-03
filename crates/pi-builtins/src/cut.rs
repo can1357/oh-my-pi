@@ -8,11 +8,10 @@ use std::{
 };
 
 use bstr::io::BufReadExt;
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::ValueParser};
 use uucore::{display::Quotable, line_ending::LineEnding, ranges::Range};
 
-use crate::host::{Host, Utility, format_usage, matches_parser, os_bytes, util};
+use crate::host::{Host, Utility, format_usage, matches_parser, os_bytes};
 
 /// Parsed `cut` invocation.
 pub(crate) struct Cut {
@@ -1032,11 +1031,6 @@ fn app() -> Command {
 				.help("(ignored)")
 				.action(ArgAction::SetTrue),
 		)
-}
-
-/// Creates the `cut` builtin registration.
-pub(crate) fn cut_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Cut, SE>()
 }
 
 #[cfg(test)]

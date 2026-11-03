@@ -39,6 +39,7 @@ import {
 	MNEMOPI_EMBED_SERVER_WORKER_ARG,
 	PARENT_WATCHDOG_WORKER_ARG,
 	STATS_ACTIVITY_WORKER_ARG,
+	SUBAGENT_WORKER_ARG,
 	TERMINAL_OUTPUT_WORKER_ARG,
 	TEXT_PREDICT_WORKER_ARG,
 } from "./cli/worker-selectors";
@@ -156,6 +157,7 @@ async function runSmokeTest(): Promise<void> {
 	const { smokeTestBlobBroker } = await import("./blob-broker/daemon");
 	const { smokeTestTerminalOutputWorker } = await import("./launch/terminal-output-worker-client");
 	const { smokeTestTextPredictDaemon } = await import("./predict/client");
+	const { smokeTestSubagentWorker } = await import("./thread/subagent-worker");
 	await smokeTestSyncWorker();
 	await smokeTestStatsActivityWorker();
 
@@ -184,6 +186,7 @@ async function runSmokeTest(): Promise<void> {
 	await smokeTestBlobBroker();
 	await smokeTestTerminalOutputWorker();
 	await smokeTestTextPredictDaemon();
+	await smokeTestSubagentWorker();
 	process.stdout.write("smoke-test: ok\n");
 }
 
@@ -245,6 +248,12 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 		const parentPort = getWorkerParentPort();
 		if (parentPort) installWorkerInbox(parentPort);
 		await import("./eval/js/worker-entry");
+		return true;
+	}
+	if (arg === SUBAGENT_WORKER_ARG) {
+		const parentPort = getWorkerParentPort();
+		if (parentPort) installWorkerInbox(parentPort);
+		await import("./thread/subagent-worker-entry");
 		return true;
 	}
 	if (arg === JS_EVAL_PROCESS_ARG) {
