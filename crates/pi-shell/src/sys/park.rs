@@ -151,8 +151,12 @@ impl Parker {
 
 	/// Block until the waker is woken, an awaited external exits or a signal
 	/// handler runs (Linux), or `timeout` passes. May return early: the
-	/// caller rechecks what it waits for.
+	/// caller rechecks what it waits for. First advances the output work of
+	/// externals whose `ExtProc` is gone
+	/// ([`NativeSpawner::poll_orphans`](crate::sys::NativeSpawner::poll_orphans)),
+	/// which wakes this parker when it can go on.
 	pub fn park(&mut self, timeout: Duration) {
+		self.poll_orphans();
 		#[cfg(target_os = "linux")]
 		if let Some(fd) = self.bell.fd() {
 			self.park_poll(fd, timeout);
@@ -203,14 +207,18 @@ impl Parker {
 		}
 	}
 
+	/// Advance retained output work of gone `ExtProc`s with this parker's
+	/// waker (no runtime drives it here).
+	fn poll_orphans(&self) {
+		super::pump::orphan::poll(&std::task::Context::from_waker(&self.waker));
+	}
+
 	/// Wake the awaited externals that have exited, without blocking: a
 	/// drive loop calls it between steps, so a background external's exit
 	/// is noticed while the engine thread never parks (a busy foreground).
-	#[cfg_attr(
-		not(target_os = "linux"),
-		expect(clippy::missing_const_for_fn, reason = "the Linux version polls the pidfds")
-	)]
+	/// Also advances the output work of gone `ExtProc`s.
 	pub fn poll_exits(&mut self) {
+		self.poll_orphans();
 		#[cfg(target_os = "linux")]
 		if self.bell.counted() {
 			self.fds.clear();

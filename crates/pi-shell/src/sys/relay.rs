@@ -27,20 +27,24 @@
 //! once the relay has forwarded that much. A process the program left
 //! running may keep the pipe open forever; the drain never waits for the end
 //! of the stream beyond a short grace for a character the program ended
-//! inside. The relay then ends: it closes its end of the pipe (a leftover
-//! writing later fails as on a pipe whose reader is gone), releases what the
-//! decoder holds and flushes the sink.
+//! inside. The relay itself goes on to the end of the stream, as a plain pipe
+//! would carry that process's output: once the `ExtProc` is dropped it runs
+//! as adopted work (`pump::orphan`), and releases what the decoder holds at
+//! the end.
 
 use std::{
-	fs, io,
-	task::{Context, Poll},
+	fs,
+	future::Future,
+	io,
+	pin::Pin,
+	task::{Context, Poll, Waker},
 	time::Duration,
 };
 
 use crate::{
 	bash::{ExitStatus, ExtProc, OsHandle, Signal},
 	sys::pump::{
-		BUF, BURST, End, PollIo,
+		BUF, BURST, End, PollIo, orphan,
 		os::{self, OsPipe, Timer},
 	},
 };
@@ -182,7 +186,7 @@ impl Relay {
 		Poll::Pending
 	}
 
-	/// Stop reading: our end of the pipe closes first, then the decoder
+	/// The stream ended: our end of the pipe closes first, then the decoder
 	/// releases what it holds and the sink is flushed.
 	fn end(&mut self) {
 		self.pipe = None;
@@ -192,36 +196,50 @@ impl Relay {
 	}
 
 	/// After the program's exit: whether everything it wrote has been
-	/// forwarded (the relay is then ended and done).
-	fn drained(&mut self, cx: &mut Context<'_>) -> bool {
-		if self.phase == Phase::Reading {
-			let target = match self.target {
-				Some(target) => Some(target),
-				None => {
-					// Nothing but this relay reads the pipe, and it is polled by
-					// this task: what it read and what the pipe holds now are
-					// one snapshot. A pipe that cannot say is forwarded to its
-					// end.
-					let waiting = self.pipe.as_mut().map_or(Ok(0), OsPipe::available);
-					let target = waiting.ok().map(|n| self.consumed + n as u64);
-					self.target = target;
-					target
-				},
-			};
-			if let Some(target) = target
-				&& self.consumed >= target
-				&& self.sent >= self.text.len()
-				&& (!self.decoder.holds_bytes()
-					|| self
-						.grace
-						.get_or_insert_with(|| Timer::after(HOLD_GRACE))
-						.poll(cx)
-						.is_ready())
-			{
-				self.end();
-			}
+	/// forwarded. The relay itself goes on to the end of the stream, which a
+	/// process the program left running may hold open.
+	fn drained(&mut self, cx: &Context<'_>) -> bool {
+		match self.phase {
+			Phase::Done => return true,
+			// The stream ended: drained once its rest is out and flushed.
+			Phase::Finish | Phase::Flush => return false,
+			Phase::Reading => {},
 		}
-		self.poll(cx).is_ready()
+		if self.target.is_none() {
+			// Nothing but this relay reads the pipe, and this task polls it:
+			// what it read and what the pipe holds now are one snapshot. A
+			// pipe that cannot say is forwarded to its end.
+			let waiting = self.pipe.as_mut().map_or(Ok(0), OsPipe::available);
+			self.target = waiting.ok().map(|n| self.consumed + n as u64);
+		}
+		let Some(target) = self.target else {
+			return false;
+		};
+		self.consumed >= target
+			&& self.sent >= self.text.len()
+			&& (!self.decoder.holds_bytes()
+				|| self
+					.grace
+					.get_or_insert_with(|| Timer::after(HOLD_GRACE))
+					.poll(cx)
+					.is_ready())
+	}
+}
+
+/// Relays that outlived their `Relayed`, forwarding to the ends of their
+/// streams as one piece of adopted work.
+struct Forward(Vec<Relay>);
+
+impl Future for Forward {
+	type Output = ();
+
+	fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+		self.0.retain_mut(|r| r.poll(cx).is_pending());
+		if self.0.is_empty() {
+			Poll::Ready(())
+		} else {
+			Poll::Pending
+		}
 	}
 }
 
@@ -235,19 +253,19 @@ impl Relay {
 pub(crate) struct Relays<'a> {
 	decoding: &'a dyn OutputDecoding,
 	writers:  Vec<fs::File>,
-	relays:   Vec<Relay>,
+	set:      Vec<Relay>,
 }
 
 impl<'a> Relays<'a> {
 	pub(crate) fn new(decoding: &'a dyn OutputDecoding) -> Self {
-		Self { decoding, writers: Vec::new(), relays: Vec::new() }
+		Self { decoding, writers: Vec::new(), set: Vec::new() }
 	}
 
 	/// Set up a relay forwarding decoded text into `sink`; the OS handle the
 	/// program writes to.
 	pub(crate) fn attach(&mut self, sink: End) -> io::Result<OsHandle> {
 		let (pipe, writer) = os::pipe(false)?;
-		self.relays.push(Relay::new(pipe, self.decoding.decoder(), sink));
+		self.set.push(Relay::new(pipe, self.decoding.decoder(), sink));
 		let os = writer_handle(&writer);
 		self.writers.push(writer);
 		Ok(os)
@@ -255,10 +273,10 @@ impl<'a> Relays<'a> {
 
 	/// The spawned `child`, reporting its exit once the relays drained.
 	pub(crate) fn wrap(self, child: Box<dyn ExtProc>) -> Box<dyn ExtProc> {
-		if self.relays.is_empty() {
+		if self.set.is_empty() {
 			return child;
 		}
-		Box::new(Relayed { child, relays: self.relays, status: None })
+		Box::new(Relayed { child, relays: self.set, status: None })
 	}
 }
 
@@ -291,6 +309,7 @@ impl ExtProc for Relayed {
 		for relay in &mut self.relays {
 			drained &= relay.drained(cx);
 		}
+		orphan::poll(cx);
 		if drained { Poll::Ready(status) } else { Poll::Pending }
 	}
 
@@ -304,6 +323,25 @@ impl ExtProc for Relayed {
 
 	fn cont(&mut self) -> io::Result<()> {
 		self.child.cont()
+	}
+}
+
+impl Drop for Relayed {
+	/// Relays still forwarding (the program runs on, or a process it left
+	/// running holds the pipe) go on to the ends of their streams as adopted
+	/// work, as the program's output would through a plain pipe.
+	fn drop(&mut self) {
+		// Usually the stream has ended with the program: its end of file is
+		// already readable and the relay finishes here.
+		let mut now = Context::from_waker(Waker::noop());
+		let open: Vec<Relay> = self
+			.relays
+			.drain(..)
+			.filter_map(|mut r| r.poll(&mut now).is_pending().then_some(r))
+			.collect();
+		if !open.is_empty() {
+			orphan::adopt(Forward(open));
+		}
 	}
 }
 
@@ -509,18 +547,35 @@ mod tests {
 
 	/// A leftover keeps the pipe open while the decoder holds the character
 	/// the program ended inside: the exit is reported after the short hold
-	/// grace (a timer wakes the drain, nothing else would), with the held
-	/// byte released ahead of the next command's output.
+	/// grace (a timer wakes the drain, nothing else would), and the held byte
+	/// is released at the end of the stream, when the leftover is gone, by the
+	/// relay that outlived the program's `ExtProc`.
 	#[tokio::test(flavor = "current_thread")]
-	async fn held_bytes_are_released_after_the_grace_while_a_leftover_holds_the_pipe() {
+	async fn held_bytes_wait_for_the_end_of_a_stream_a_leftover_holds() {
 		let (out, took) = run_timed(
 			&mut session(true),
-			"/bin/sh -c 'printf abc; /bin/sleep 2 &'; printf X",
+			"/bin/sh -c 'printf abc; /bin/sleep 1 &'; printf X",
 			true,
 		)
 		.await;
-		assert_eq!(out, b"abcX");
-		assert!(took < Duration::from_secs(1), "waited for the leftover: {took:?}");
+		assert_eq!(out, b"abXc");
+		assert!(took < Duration::from_millis(800), "waited for the leftover: {took:?}");
+	}
+
+	/// What a process the program left running writes after the program's
+	/// exit was reported (and its `ExtProc` dropped) still reaches the
+	/// capture, through the relay adopted on the session's runtime, as it
+	/// would through a plain pipe.
+	#[tokio::test(flavor = "current_thread")]
+	async fn late_output_of_a_leftover_reaches_the_capture() {
+		let (out, took) = run_timed(
+			&mut session(false),
+			"/bin/sh -c 'echo early; (/bin/sleep 0.5; echo late) &'; echo done",
+			true,
+		)
+		.await;
+		assert_eq!(out, b"early\ndone\nlate\n");
+		assert!(took < Duration::from_millis(400), "waited for the leftover: {took:?}");
 	}
 
 	/// Relays, input feeds and output pumps are polled by their externals'

@@ -367,7 +367,7 @@ fn stat_of(meta: &fs::Metadata) -> Stat {
 fn open(path: &BStr, flags: OpenFlags, mode: u32) -> io::Result<Box<dyn File>> {
 	#[cfg(windows)]
 	if let Some(server) = pipe::take(path, flags) {
-		return Ok(server);
+		return server;
 	}
 	let path = host_path(path)?;
 	Ok(Box::new(StdFile::new(create_with_mode(path, flags, mode)?)))
@@ -644,34 +644,38 @@ fn chdir_check(path: &BStr) -> io::Result<()> {
 /// [`pipe::create`] makes the server end and parks it; the producer side of
 /// the substitution takes it with [`Fs::open`] in its direction (write for
 /// `<( )`, read for `>( )`), the consumer opens the path as a client. The
-/// server connects lazily on first I/O, and reports no OS handle, so an
-/// external producer is fed through a pump that waits for the consumer.
+/// server end is overlapped ([`OsPipe::server`](crate::sys::pump::os::OsPipe)):
+/// it connects on first I/O, which stays `Pending` until the consumer has
+/// opened the path, and its reads and writes never wait either. It reports
+/// no OS handle, so an external producer is fed through a pump.
 #[cfg(windows)]
 mod pipe {
 	use std::{
 		collections::HashMap,
-		fs,
-		io::{self, Read, Write},
-		os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
+		io,
+		os::windows::io::{FromRawHandle, OwnedHandle},
 		ptr,
-		sync::LazyLock,
+		sync::{Arc, LazyLock},
 		task::{Context, Poll},
 	};
 
 	use bstr::{BStr, BString};
 	use parking_lot::Mutex;
 	use windows_sys::Win32::{
-		Foundation::{ERROR_BROKEN_PIPE, ERROR_NO_DATA, ERROR_PIPE_CONNECTED, HANDLE},
 		Storage::FileSystem::{
-			FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_INBOUND, PIPE_ACCESS_OUTBOUND,
+			FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, PIPE_ACCESS_INBOUND,
+			PIPE_ACCESS_OUTBOUND,
 		},
 		System::Pipes::{
-			ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS,
-			PIPE_TYPE_BYTE, PIPE_WAIT,
+			CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE,
+			PIPE_WAIT,
 		},
 	};
 
-	use crate::bash::{File, FileKind, OpenFlags, OsHandle, fs::TempNode};
+	use crate::{
+		bash::{File, FileKind, OpenFlags, OsHandle, fs::TempNode},
+		sys::pump::os::OsPipe,
+	};
 
 	/// Server ends not yet taken, by path; `true` when the server writes.
 	static PENDING: LazyLock<Mutex<HashMap<BString, (OwnedHandle, bool)>>> =
@@ -693,7 +697,7 @@ mod pipe {
 		let h = unsafe {
 			CreateNamedPipeW(
 				wide.as_ptr(),
-				access | FILE_FLAG_FIRST_PIPE_INSTANCE,
+				access | FILE_FLAG_FIRST_PIPE_INSTANCE | FILE_FLAG_OVERLAPPED,
 				PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
 				1,
 				BUF,
@@ -714,58 +718,63 @@ mod pipe {
 
 	/// The parked server end of `path`, when `flags` open it in the server's
 	/// direction; `None` leaves the open to the client path.
-	pub fn take(path: &BStr, flags: OpenFlags) -> Option<Box<dyn File>> {
+	pub fn take(path: &BStr, flags: OpenFlags) -> Option<io::Result<Box<dyn File>>> {
 		let mut pending = PENDING.lock();
 		let &(_, writes) = pending.get(path)?;
 		if flags.contains(OpenFlags::WRITE) != writes {
 			return None;
 		}
 		let (h, _) = pending.remove(path)?;
-		Some(Box::new(Server { file: fs::File::from(h), connected: false }))
+		Some(OsPipe::server(h).map(|pipe| {
+			Box::new(Server(Arc::new(Mutex::new(ServerEnd { pipe, connected: false }))))
+				as Box<dyn File>
+		}))
 	}
 
-	/// Server end of a substitution pipe.
-	struct Server {
-		file:      fs::File,
+	/// Server end of a substitution pipe. Duplicates share it, as the
+	/// duplicates of one open file do.
+	struct Server(Arc<Mutex<ServerEnd>>);
+
+	struct ServerEnd {
+		pipe:      OsPipe,
 		connected: bool,
 	}
 
-	impl Server {
-		/// Wait for the consumer (blocking, like opening a FIFO).
-		fn connect(&mut self) -> io::Result<()> {
-			if self.connected {
-				return Ok(());
+	impl ServerEnd {
+		/// Ready once the consumer has connected (`Pending` until it opens
+		/// the path, like opening a FIFO, without waiting).
+		fn poll_connected(&mut self, cx: &Context<'_>) -> Poll<io::Result<()>> {
+			if !self.connected {
+				std::task::ready!(self.pipe.poll_connect(cx))?;
+				self.connected = true;
 			}
-			// SAFETY: our pipe handle; null overlapped = synchronous.
-			let ok = unsafe { ConnectNamedPipe(self.file.as_raw_handle() as HANDLE, ptr::null_mut()) };
-			if ok == 0 {
-				let e = io::Error::last_os_error();
-				// Connected before we asked, or connected and already gone (the
-				// I/O then reports end of file / a broken pipe).
-				let done = [ERROR_PIPE_CONNECTED, ERROR_NO_DATA].map(|c| Some(c as i32));
-				if !done.contains(&e.raw_os_error()) {
-					return Err(e);
-				}
-			}
-			self.connected = true;
-			Ok(())
+			Poll::Ready(Ok(()))
 		}
 	}
 
 	impl File for Server {
-		fn poll_read(&mut self, _cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<io::Result<usize>> {
-			Poll::Ready(self.connect().and_then(|()| match self.file.read(buf) {
-				Err(e) if e.raw_os_error() == Some(ERROR_BROKEN_PIPE as i32) => Ok(0),
-				r => r,
-			}))
+		fn poll_read(&mut self, cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<io::Result<usize>> {
+			let mut end = self.0.lock();
+			if let Err(e) = std::task::ready!(end.poll_connected(cx)) {
+				return Poll::Ready(Err(e));
+			}
+			end.pipe.poll_read(cx, buf)
 		}
 
-		fn poll_write(&mut self, _cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
-			Poll::Ready(self.connect().and_then(|()| self.file.write(buf)))
+		fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+			let mut end = self.0.lock();
+			if let Err(e) = std::task::ready!(end.poll_connected(cx)) {
+				return Poll::Ready(Err(e));
+			}
+			end.pipe.poll_write(cx, buf)
 		}
 
-		fn poll_flush(&mut self, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-			Poll::Ready(self.file.flush())
+		fn poll_flush(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+			let mut end = self.0.lock();
+			if !end.connected {
+				return Poll::Ready(Ok(()));
+			}
+			end.pipe.poll_flush(cx)
 		}
 
 		fn seek(&mut self, _pos: io::SeekFrom) -> io::Result<u64> {
@@ -782,7 +791,7 @@ mod pipe {
 		}
 
 		fn dup(&self) -> io::Result<Box<dyn File>> {
-			Ok(Box::new(Self { file: self.file.try_clone()?, connected: self.connected }))
+			Ok(Box::new(Self(Arc::clone(&self.0))))
 		}
 	}
 }

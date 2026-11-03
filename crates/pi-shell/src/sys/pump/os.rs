@@ -9,11 +9,15 @@
 //!   `timerfd` (Linux) or a kqueue timer (BSD, macOS), watched the same way.
 //! - **Windows**: anonymous pipes cannot do overlapped I/O, so a pump pipe is
 //!   a private named-pipe instance: our server end is overlapped, the child's
-//!   client end is an ordinary synchronous handle. One read or write is in
-//!   flight at a time, into a buffer this end owns; its completion event is
-//!   watched by a thread-pool wait (`RegisterWaitForSingleObject`), whose
-//!   callback only wakes the stored waker. The timer is such a wait with a
-//!   timeout. No engine future is ever polled outside the task polling it.
+//!   client end is an ordinary synchronous handle. Our end is bound to the
+//!   system thread pool (`CreateThreadpoolIo`); one read, write or connect is
+//!   in flight at a time. Its OVERLAPPED and buffer live in a shared
+//!   allocation the completion callback holds a reference to, so dropping
+//!   the end never waits: it cancels the operation, closes the handle, and
+//!   the completion (which only records the result and wakes the stored
+//!   waker) frees the rest. The timer is a thread-pool timer whose callback
+//!   likewise only wakes, and frees the timer once its owner is gone. No
+//!   engine future is polled outside the task polling it.
 //!
 //! [`ready::watch`]: crate::sys::ready::watch
 
@@ -23,7 +27,7 @@ use std::{
 	time::{Duration, Instant},
 };
 
-pub use self::imp::{OsPipe, Timer};
+pub use self::imp::{OsPipe, Timer, reclaim};
 #[cfg(unix)]
 pub use self::imp::socket_pair;
 
@@ -47,6 +51,10 @@ impl OsPipe {
 	/// Ready once every byte accepted by [`OsPipe::poll_write`] is in the
 	/// pipe (Windows completes writes in the background; Unix writes are
 	/// immediate).
+	#[cfg_attr(
+		unix,
+		allow(clippy::missing_const_for_fn, reason = "Windows waits for its write in flight")
+	)]
 	pub fn poll_flush(&mut self, cx: &Context<'_>) -> Poll<io::Result<()>> {
 		self.0.poll_flush(cx)
 	}
@@ -59,13 +67,6 @@ impl OsPipe {
 	)]
 	pub fn available(&mut self) -> io::Result<usize> {
 		self.0.available()
-	}
-
-	/// Close our end at once; the bytes an unfinished write had accepted but
-	/// not put into the pipe come back (only Windows writes in the
-	/// background; elsewhere this is empty).
-	pub fn close(self) -> Vec<u8> {
-		self.0.close()
 	}
 }
 
@@ -184,10 +185,16 @@ mod imp {
 			Ok(usize::try_from(n).unwrap_or(0))
 		}
 
-		pub fn close(self) -> Vec<u8> {
-			drop(self);
-			Vec::new()
-		}
+	}
+
+	/// What a feed's pipe still holds, read through the child's end `read`
+	/// once our write end `pipe` is closed: the pipe's only writer is gone,
+	/// so the read ends at end of file instead of waiting.
+	pub fn reclaim(pipe: Option<OsPipe>, mut read: &fs::File) -> Vec<u8> {
+		drop(pipe);
+		let mut back = Vec::new();
+		let _ = read.read_to_end(&mut back);
+		back
 	}
 
 	/// Run `op` on the non-blocking `fd`; on `WouldBlock` register the
@@ -351,8 +358,10 @@ mod imp {
 #[cfg(windows)]
 mod imp {
 	use std::{
+		cell::UnsafeCell,
 		ffi::c_void,
-		fs, io,
+		fs,
+		io::{self, Read},
 		os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
 		ptr,
 		sync::{
@@ -366,8 +375,9 @@ mod imp {
 	use parking_lot::Mutex;
 	use windows_sys::Win32::{
 		Foundation::{
-			ERROR_BROKEN_PIPE, ERROR_IO_INCOMPLETE, ERROR_IO_PENDING, ERROR_PIPE_NOT_CONNECTED,
-			GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
+			ERROR_BROKEN_PIPE, ERROR_IO_PENDING, ERROR_NO_DATA, ERROR_PIPE_CONNECTED,
+			ERROR_PIPE_NOT_CONNECTED, FILETIME, GENERIC_READ, GENERIC_WRITE, HANDLE,
+			INVALID_HANDLE_VALUE, STATUS_PENDING,
 		},
 		Storage::FileSystem::{
 			CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, FILE_READ_ATTRIBUTES,
@@ -375,14 +385,15 @@ mod imp {
 			WriteFile,
 		},
 		System::{
-			IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED},
+			IO::{CancelIoEx, OVERLAPPED},
 			Pipes::{
-				CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE,
-				PIPE_WAIT, PeekNamedPipe,
+				ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS,
+				PIPE_TYPE_BYTE, PIPE_WAIT, PeekNamedPipe,
 			},
 			Threading::{
-				CreateEventW, INFINITE, RegisterWaitForSingleObject, UnregisterWaitEx,
-				WT_EXECUTEINWAITTHREAD, WT_EXECUTEONLYONCE,
+				CancelThreadpoolIo, CloseThreadpoolIo, CloseThreadpoolTimer, CreateThreadpoolIo,
+				CreateThreadpoolTimer, PTP_CALLBACK_INSTANCE, PTP_IO, PTP_TIMER, SetThreadpoolTimer,
+				StartThreadpoolIo,
 			},
 		},
 	};
@@ -467,93 +478,100 @@ mod imp {
 		Ok((OsPipe(WinEnd::new(server)?), fs::File::from(client)))
 	}
 
-	/// The waker a thread-pool wait callback wakes.
+	/// What a feed's pipe still holds, read through the child's end `read`
+	/// once our write end `pipe` is closed (at once: its write in flight is
+	/// cancelled, see [`WinEnd::close`]), followed by the part of that write
+	/// the pipe never took. With our end closed the read ends at end of file
+	/// instead of waiting.
+	pub fn reclaim(pipe: Option<OsPipe>, mut read: &fs::File) -> Vec<u8> {
+		let unsent = pipe.map_or_else(Vec::new, |p| p.0.close());
+		let mut back = Vec::new();
+		let _ = read.read_to_end(&mut back);
+		back.extend_from_slice(&unsent);
+		back
+	}
+
+	impl OsPipe {
+		/// Our overlapped server end of a named pipe (a process
+		/// substitution's), not connected yet.
+		pub fn server(handle: OwnedHandle) -> io::Result<Self> {
+			WinEnd::new(handle).map(Self)
+		}
+
+		/// Ready once a client connected (also when it already left: the I/O
+		/// then reports end of file or a broken pipe).
+		pub fn poll_connect(&mut self, cx: &Context<'_>) -> Poll<io::Result<()>> {
+			self.0.poll_connect(cx)
+		}
+	}
+
+	/// The completion side of an end: the OVERLAPPED of the operation in
+	/// flight (first, so the completion's OVERLAPPED pointer is this
+	/// allocation's), its buffer, and what the owner learns. The kernel and
+	/// the owner take turns on `ov` and `buf`: the owner touches them only
+	/// with no operation in flight.
+	#[repr(C)]
+	struct Op {
+		ov:    UnsafeCell<OVERLAPPED>,
+		buf:   UnsafeCell<Box<[u8]>>,
+		state: Mutex<OpState>,
+	}
+
 	#[derive(Default)]
-	struct Slot(Mutex<Option<Waker>>);
+	struct OpState {
+		/// The finished operation: its Win32 error (0: success) and the bytes
+		/// it moved.
+		done:   Option<(u32, usize)>,
+		waker:  Option<Waker>,
+		/// The owner is gone while the operation ran: the completion closes
+		/// the I/O object (the handle is closed already).
+		orphan: Option<PTP_IO>,
+	}
 
-	impl Slot {
-		fn set(&self, waker: &Waker) {
-			let mut slot = self.0.lock();
-			if !slot.as_ref().is_some_and(|w| w.will_wake(waker)) {
-				*slot = Some(waker.clone());
-			}
+	// SAFETY: `ov` and `buf` are used by the kernel during an operation and
+	// by the owner between operations, never both; `state` is locked.
+	unsafe impl Send for Op {}
+	// SAFETY: as above.
+	unsafe impl Sync for Op {}
+
+	/// Thread-pool completion of an operation on an end: record the result,
+	/// wake the owner's task, release the operation's reference (freeing the
+	/// buffer once the owner is gone) and, for a gone owner, the I/O object.
+	/// It never polls anything.
+	unsafe extern "system" fn on_complete(
+		_instance: PTP_CALLBACK_INSTANCE,
+		_context: *mut c_void,
+		overlapped: *mut c_void,
+		result: u32,
+		moved: usize,
+		_io: PTP_IO,
+	) {
+		if overlapped.is_null() {
+			return;
 		}
-
-		fn wake(&self) {
-			let waker = self.0.lock().take();
-			if let Some(w) = waker {
-				w.wake();
-			}
+		// SAFETY: `overlapped` is the `ov` of an `Op`, its first field, whose
+		// reference `WinEnd::start` handed to this completion.
+		let op = unsafe { Arc::from_raw(overlapped.cast::<Op>().cast_const()) };
+		let (waker, orphan) = {
+			let mut st = op.state.lock();
+			st.done = Some((result, moved));
+			(st.waker.take(), st.orphan.take())
+		};
+		if let Some(tp) = orphan {
+			// SAFETY: handed over by the gone owner, its handle closed and
+			// nothing in flight any more; freed once this callback returns.
+			unsafe { CloseThreadpoolIo(tp) };
 		}
-	}
-
-	/// Thread-pool wait callback: wake the slot's waker. Runs on the OS wait
-	/// thread (`WT_EXECUTEINWAITTHREAD`) and does nothing else.
-	unsafe extern "system" fn on_signal(context: *mut c_void, _timed_out: bool) {
-		// SAFETY: `context` is the `Slot` a `Registered` keeps alive until it
-		// has unregistered the wait and every callback has returned.
-		let slot = unsafe { &*context.cast::<Slot>() };
-		slot.wake();
-	}
-
-	/// A registered thread-pool wait on an object, waking a [`Slot`].
-	struct Registered {
-		wait:    HANDLE,
-		context: *const Slot,
-	}
-
-	// SAFETY: the wait handle is a process-wide registration usable from any
-	// thread; `context` points at a `Slot` (`Sync`) this registration owns
-	// a reference count of.
-	unsafe impl Send for Registered {}
-
-	impl Registered {
-		/// Wake `slot` whenever `object` is signaled, or once after `timeout`
-		/// ms with `once`.
-		fn new(object: HANDLE, slot: &Arc<Slot>, timeout: u32, once: bool) -> io::Result<Self> {
-			let context = Arc::into_raw(Arc::clone(slot));
-			let mut flags = WT_EXECUTEINWAITTHREAD;
-			if once {
-				flags |= WT_EXECUTEONLYONCE;
-			}
-			let mut wait: HANDLE = ptr::null_mut();
-			// SAFETY: `object` is open for the registration's lifetime (its
-			// owner drops the registration first); `context` stays valid until
-			// `Drop` unregistered the wait and waited for its callbacks.
-			let ok = unsafe {
-				RegisterWaitForSingleObject(
-					&raw mut wait,
-					object,
-					Some(on_signal),
-					context.cast(),
-					timeout,
-					flags,
-				)
-			};
-			if ok == 0 {
-				let e = io::Error::last_os_error();
-				// SAFETY: from `Arc::into_raw` above; never handed out.
-				drop(unsafe { Arc::from_raw(context) });
-				return Err(e);
-			}
-			Ok(Self { wait, context })
-		}
-	}
-
-	impl Drop for Registered {
-		fn drop(&mut self) {
-			// SAFETY: our registration; INVALID_HANDLE_VALUE returns only once
-			// every running callback has returned.
-			unsafe { UnregisterWaitEx(self.wait, INVALID_HANDLE_VALUE) };
-			// SAFETY: from `Arc::into_raw` in `new`; no callback can use it now.
-			drop(unsafe { Arc::from_raw(self.context) });
+		if let Some(w) = waker {
+			w.wake();
 		}
 	}
 
 	/// The operation in flight on a [`WinEnd`].
 	#[derive(Clone, Copy, PartialEq, Eq)]
-	enum Op {
+	enum Inflight {
 		Idle,
+		Connecting,
 		Reading,
 		/// A write of the first `len` bytes of the buffer.
 		Writing {
@@ -561,140 +579,127 @@ mod imp {
 		},
 	}
 
-	/// What an operation in flight uses, at a stable address (boxed) until
-	/// it completed or was cancelled and waited for.
-	struct Io {
-		ov:    OVERLAPPED,
-		/// Auto-reset completion event: the thread-pool wait consumes each
-		/// signal; results are read with `GetOverlappedResult(.., FALSE)`.
-		event: OwnedHandle,
-		buf:   Box<[u8]>,
+	/// An operation to start.
+	#[derive(Clone, Copy)]
+	enum Kind {
+		Connect,
+		Read,
+		Write(usize),
 	}
 
-	// SAFETY: the OVERLAPPED's raw handle is a process-wide event handle; the
-	// structure is only touched by its owner and the kernel.
-	unsafe impl Send for Io {}
-
 	pub struct WinEnd {
-		/// Declared first: unregistered (waiting out its callback) before the
-		/// event and the pipe close. `Drop` also cancels the I/O in flight.
-		wait:   Option<Registered>,
-		slot:   Arc<Slot>,
-		io:     Box<Io>,
-		op:     Op,
-		/// A finished read's bytes not handed out yet: `io.buf[start..end]`.
-		start:  usize,
-		end:    usize,
-		eof:    bool,
-		handle: OwnedHandle,
+		/// Our end; `None` only while dropping.
+		handle:   Option<OwnedHandle>,
+		/// The thread-pool I/O object our handle is bound to.
+		tp:       PTP_IO,
+		op:       Arc<Op>,
+		inflight: Inflight,
+		/// A finished read's bytes not handed out yet: `buf[start..end]`.
+		start:    usize,
+		end:      usize,
+		eof:      bool,
 	}
 
 	impl WinEnd {
 		fn new(handle: OwnedHandle) -> io::Result<Self> {
-			// SAFETY: auto-reset, initially unsignaled, anonymous event.
-			let event = owned(unsafe { CreateEventW(ptr::null(), 0, 0, ptr::null()) })?;
-			let io = Box::new(Io {
-				ov: OVERLAPPED::default(),
-				event,
-				buf: vec![0; BUF].into_boxed_slice(),
+			// SAFETY: binds our overlapped handle to the default thread pool;
+			// completions come to `on_complete`.
+			let tp = unsafe {
+				CreateThreadpoolIo(raw(&handle), Some(on_complete), ptr::null_mut(), ptr::null())
+			};
+			if tp == 0 {
+				return Err(io::Error::last_os_error());
+			}
+			let op = Arc::new(Op {
+				ov:    UnsafeCell::new(OVERLAPPED::default()),
+				buf:   UnsafeCell::new(vec![0; BUF].into_boxed_slice()),
+				state: Mutex::default(),
 			});
 			Ok(Self {
-				wait: None,
-				slot: Arc::default(),
-				io,
-				op: Op::Idle,
+				handle: Some(handle),
+				tp,
+				op,
+				inflight: Inflight::Idle,
 				start: 0,
 				end: 0,
 				eof: false,
-				handle,
 			})
 		}
 
-		/// A fresh OVERLAPPED for the next operation.
-		fn reset(&mut self) -> *mut OVERLAPPED {
-			self.io.ov = OVERLAPPED { hEvent: raw(&self.io.event), ..OVERLAPPED::default() };
-			&raw mut self.io.ov
+		fn raw(&self) -> HANDLE {
+			self.handle.as_ref().map_or(INVALID_HANDLE_VALUE, raw)
 		}
 
-		/// The result of the operation in flight; `None` while it runs.
-		fn finished(&self) -> Option<io::Result<usize>> {
-			let mut n = 0u32;
-			// SAFETY: the OVERLAPPED of the operation in flight on our handle;
-			// no wait (the event belongs to the thread-pool wait).
-			if unsafe { GetOverlappedResult(raw(&self.handle), &raw const self.io.ov, &raw mut n, 0) }
-				!= 0
-			{
-				return Some(Ok(n as usize));
-			}
-			let e = io::Error::last_os_error();
-			if is_os(&e, ERROR_IO_INCOMPLETE) {
-				None
-			} else {
-				Some(Err(e))
-			}
+		/// The buffer, between operations.
+		fn buf(&mut self) -> &mut [u8] {
+			// SAFETY: no operation is in flight (callers check `inflight`), so
+			// the kernel does not use it.
+			unsafe { &mut *self.op.buf.get() }
 		}
 
-		/// Ready with the result of the operation in flight; else the waker
-		/// is stored for the completion callback.
-		fn poll_op(&mut self, cx: &Context<'_>) -> Poll<io::Result<usize>> {
-			if let Some(r) = self.finished() {
-				return Poll::Ready(r);
-			}
-			if self.wait.is_none() {
-				match Registered::new(raw(&self.io.event), &self.slot, INFINITE, false) {
-					Ok(w) => self.wait = Some(w),
-					Err(e) => return Poll::Ready(Err(e)),
+		/// Start an operation; on `Ok` its completion comes (also for one
+		/// that finished at once: our handle is not set to skip completion
+		/// packets on success).
+		fn start(&mut self, kind: Kind) -> io::Result<()> {
+			self.op.state.lock().done = None;
+			let ov = self.op.ov.get();
+			// SAFETY: no operation is in flight: only we touch `ov`.
+			unsafe { *ov = OVERLAPPED::default() };
+			let reference = Arc::into_raw(Arc::clone(&self.op));
+			let h = self.raw();
+			// SAFETY: announces the operation started below to the thread pool.
+			unsafe { StartThreadpoolIo(self.tp) };
+			// SAFETY: `ov` and the buffer live in `op`, which the completion
+			// keeps alive through `reference`; nothing else touches them
+			// until it came.
+			let ok = unsafe {
+				let buf = &mut *self.op.buf.get();
+				match kind {
+					Kind::Connect => ConnectNamedPipe(h, ov),
+					Kind::Read => ReadFile(h, buf.as_mut_ptr(), buf.len() as u32, ptr::null_mut(), ov),
+					Kind::Write(len) => WriteFile(h, buf.as_ptr(), len as u32, ptr::null_mut(), ov),
+				}
+			};
+			if ok == 0 {
+				let e = io::Error::last_os_error();
+				if !is_os(&e, ERROR_IO_PENDING) {
+					// A call that failed at once queues no completion.
+					// SAFETY: undoes the `StartThreadpoolIo` above.
+					unsafe { CancelThreadpoolIo(self.tp) };
+					// SAFETY: the reference made above, never handed out.
+					drop(unsafe { Arc::from_raw(reference) });
+					return Err(e);
 				}
 			}
-			self.slot.set(cx.waker());
-			// Completed before the waker was stored: its callback found none.
-			match self.finished() {
-				Some(r) => Poll::Ready(r),
-				None => Poll::Pending,
-			}
-		}
-
-		/// Start a read into the buffer: `Some` when it completed at once.
-		fn start_read(&mut self) -> io::Result<Option<usize>> {
-			let ov = self.reset();
-			let cap = self.io.buf.len() as u32;
-			// SAFETY: buffer and OVERLAPPED live in `self.io` (boxed) until the
-			// read completes; `Drop` cancels it and waits for it first.
-			let ok = unsafe {
-				ReadFile(raw(&self.handle), self.io.buf.as_mut_ptr(), cap, ptr::null_mut(), ov)
+			self.inflight = match kind {
+				Kind::Connect => Inflight::Connecting,
+				Kind::Read => Inflight::Reading,
+				Kind::Write(len) => Inflight::Writing { len },
 			};
-			self.started(ok)
+			Ok(())
 		}
 
-		/// Start writing the first `len` bytes of the buffer.
-		fn start_write(&mut self, len: usize) -> io::Result<Option<usize>> {
-			let ov = self.reset();
-			// SAFETY: as in `start_read`.
-			let ok = unsafe {
-				WriteFile(raw(&self.handle), self.io.buf.as_ptr(), len as u32, ptr::null_mut(), ov)
-			};
-			self.started(ok)
-		}
-
-		fn started(&self, ok: windows_sys::core::BOOL) -> io::Result<Option<usize>> {
-			if ok != 0 {
-				// Completed synchronously; the count is in the OVERLAPPED.
-				return match self.finished() {
-					Some(r) => r.map(Some),
-					None => Ok(None),
-				};
+		/// The result of the operation in flight once it completed; else
+		/// `cx`'s task is woken by the completion.
+		fn poll_op(&mut self, cx: &Context<'_>) -> Poll<io::Result<usize>> {
+			let mut st = self.op.state.lock();
+			if let Some((code, moved)) = st.done.take() {
+				drop(st);
+				self.inflight = Inflight::Idle;
+				return Poll::Ready(if code == 0 {
+					Ok(moved)
+				} else {
+					Err(io::Error::from_raw_os_error(code as i32))
+				});
 			}
-			let e = io::Error::last_os_error();
-			if is_os(&e, ERROR_IO_PENDING) {
-				Ok(None)
-			} else {
-				Err(e)
+			if !st.waker.as_ref().is_some_and(|w| w.will_wake(cx.waker())) {
+				st.waker = Some(cx.waker().clone());
 			}
+			Poll::Pending
 		}
 
 		/// Take a finished read's result into `start..end` / `eof`.
 		fn took(&mut self, r: io::Result<usize>) -> io::Result<()> {
-			self.op = Op::Idle;
 			match r {
 				// A zero-byte write on the other end completes a read with
 				// nothing: not the end of the stream.
@@ -711,28 +716,43 @@ mod imp {
 			}
 		}
 
+		fn poll_connect(&mut self, cx: &Context<'_>) -> Poll<io::Result<()>> {
+			let r = match self.inflight {
+				Inflight::Idle => match self.start(Kind::Connect) {
+					Ok(()) => return self.poll_connect(cx),
+					Err(e) => Err(e),
+				},
+				Inflight::Connecting => std::task::ready!(self.poll_op(cx)).map(drop),
+				Inflight::Reading | Inflight::Writing { .. } => Ok(()),
+			};
+			Poll::Ready(match r {
+				// Connected before we asked, or connected and gone already.
+				Err(e) if is_os(&e, ERROR_PIPE_CONNECTED) || is_os(&e, ERROR_NO_DATA) => Ok(()),
+				r => r,
+			})
+		}
+
 		pub fn poll_read(&mut self, cx: &Context<'_>, out: &mut [u8]) -> Poll<io::Result<usize>> {
 			loop {
 				if self.start < self.end {
 					let n = out.len().min(self.end - self.start);
-					out[..n].copy_from_slice(&self.io.buf[self.start..self.start + n]);
-					self.start += n;
+					let (start, end) = (self.start, self.start + n);
+					out[..n].copy_from_slice(&self.buf()[start..end]);
+					self.start = end;
 					return Poll::Ready(Ok(n));
 				}
 				if self.eof || out.is_empty() {
 					return Poll::Ready(Ok(0));
 				}
-				let r = match self.op {
-					Op::Idle => match self.start_read() {
-						Ok(Some(n)) => Ok(n),
-						Ok(None) => {
-							self.op = Op::Reading;
-							continue;
-						},
+				let r = match self.inflight {
+					Inflight::Idle => match self.start(Kind::Read) {
+						Ok(()) => continue,
 						Err(e) => Err(e),
 					},
-					Op::Reading => std::task::ready!(self.poll_op(cx)),
-					Op::Writing { .. } => return Poll::Ready(Err(io::ErrorKind::Unsupported.into())),
+					Inflight::Reading => std::task::ready!(self.poll_op(cx)),
+					Inflight::Connecting | Inflight::Writing { .. } => {
+						return Poll::Ready(Err(io::ErrorKind::Unsupported.into()));
+					},
 				};
 				if let Err(e) = self.took(r) {
 					return Poll::Ready(Err(e));
@@ -743,56 +763,39 @@ mod imp {
 		/// Wait for the write in flight; a partial one is resubmitted.
 		fn poll_settle(&mut self, cx: &Context<'_>) -> Poll<io::Result<()>> {
 			loop {
-				let Op::Writing { len } = self.op else {
+				let Inflight::Writing { len } = self.inflight else {
 					return Poll::Ready(Ok(()));
 				};
-				let r = std::task::ready!(self.poll_op(cx));
-				self.op = Op::Idle;
-				let n = r?;
+				let n = match std::task::ready!(self.poll_op(cx)) {
+					Ok(n) => n,
+					Err(e) => return Poll::Ready(Err(e)),
+				};
 				if n >= len {
 					return Poll::Ready(Ok(()));
 				}
-				self.io.buf.copy_within(n..len, 0);
-				if self.start_write(len - n)?.is_none() {
-					self.op = Op::Writing { len: len - n };
+				self.buf().copy_within(n..len, 0);
+				if let Err(e) = self.start(Kind::Write(len - n)) {
+					return Poll::Ready(Err(e));
 				}
 			}
 		}
 
-		/// Write behind: the bytes are copied and accepted at once, and the
-		/// next write (or flush) waits for them to be in the pipe.
+		/// Write behind: the bytes are copied and accepted once the operation
+		/// is started, and the next write (or flush) waits for them to be in
+		/// the pipe.
 		pub fn poll_write(&mut self, cx: &Context<'_>, data: &[u8]) -> Poll<io::Result<usize>> {
 			if let Err(e) = std::task::ready!(self.poll_settle(cx)) {
 				return Poll::Ready(Err(e));
 			}
-			if self.op == Op::Reading {
+			if self.inflight != Inflight::Idle {
 				return Poll::Ready(Err(io::ErrorKind::Unsupported.into()));
 			}
 			if data.is_empty() {
 				return Poll::Ready(Ok(0));
 			}
-			let n = data.len().min(self.io.buf.len());
-			self.io.buf[..n].copy_from_slice(&data[..n]);
-			Poll::Ready(match self.start_write(n) {
-				Ok(Some(done)) if done < n => {
-					// Short synchronous write: the rest stays in flight.
-					self.io.buf.copy_within(done..n, 0);
-					match self.start_write(n - done) {
-						Ok(None) => {
-							self.op = Op::Writing { len: n - done };
-							Ok(n)
-						},
-						Ok(Some(_)) => Ok(n),
-						Err(e) => Err(e),
-					}
-				},
-				Ok(Some(_)) => Ok(n),
-				Ok(None) => {
-					self.op = Op::Writing { len: n };
-					Ok(n)
-				},
-				Err(e) => Err(e),
-			})
+			let n = data.len().min(BUF);
+			self.buf()[..n].copy_from_slice(&data[..n]);
+			Poll::Ready(self.start(Kind::Write(n)).map(|()| n))
 		}
 
 		pub fn poll_flush(&mut self, cx: &Context<'_>) -> Poll<io::Result<()>> {
@@ -800,17 +803,24 @@ mod imp {
 		}
 
 		pub fn available(&mut self) -> io::Result<usize> {
-			if self.op == Op::Reading
-				&& let Some(r) = self.finished()
-			{
-				self.took(r)?;
+			if self.inflight == Inflight::Reading {
+				let done = self.op.state.lock().done.take();
+				if let Some((code, moved)) = done {
+					self.inflight = Inflight::Idle;
+					let r = if code == 0 {
+						Ok(moved)
+					} else {
+						Err(io::Error::from_raw_os_error(code as i32))
+					};
+					self.took(r)?;
+				}
 			}
 			let mut waiting = 0u32;
 			// SAFETY: a zero-size peek on our open pipe handle takes no buffer
 			// and reports the bytes waiting.
 			let ok = unsafe {
 				PeekNamedPipe(
-					raw(&self.handle),
+					self.raw(),
 					ptr::null_mut(),
 					0,
 					ptr::null_mut(),
@@ -828,80 +838,177 @@ mod imp {
 			Ok(self.end - self.start + waiting as usize)
 		}
 
-		/// Stop the operation in flight and wait for it to end (cancellation
-		/// of pipe I/O completes at once); the bytes it moved.
-		fn cancel(&mut self) -> usize {
-			// No callback may run once we wait on the event ourselves.
-			self.wait = None;
-			// SAFETY: the operation in flight on our handle.
-			unsafe { CancelIoEx(raw(&self.handle), &raw const self.io.ov) };
-			let mut n = 0u32;
-			// SAFETY: waits for that operation; nobody else waits on its event.
-			let ok = unsafe {
-				GetOverlappedResult(raw(&self.handle), &raw const self.io.ov, &raw mut n, 1)
+		/// Close at once (see `Drop`); the part of a write in flight the pipe
+		/// never took, when its cancellation completed at once (the usual
+		/// case for a pipe: the pipe completes a cancelled operation inside
+		/// `CancelIoEx`); else nothing.
+		fn close(self) -> Vec<u8> {
+			let Inflight::Writing { len } = self.inflight else {
+				return Vec::new();
 			};
-			self.op = Op::Idle;
-			if ok == 0 { 0 } else { n as usize }
-		}
-
-		pub fn close(mut self) -> Vec<u8> {
-			match self.op {
-				Op::Writing { len } => {
-					let sent = self.cancel().min(len);
-					self.io.buf[sent..len].to_vec()
-				},
-				Op::Reading | Op::Idle => Vec::new(),
+			let h = self.raw();
+			// SAFETY: the operation in flight on our open handle.
+			unsafe { CancelIoEx(h, self.op.ov.get()) };
+			// SAFETY: reads the status the kernel writes into the OVERLAPPED
+			// at completion (`HasOverlappedIoCompleted`); volatile, as the
+			// kernel may write it concurrently.
+			let ov = unsafe { ptr::read_volatile(self.op.ov.get()) };
+			if ov.Internal == STATUS_PENDING as usize {
+				return Vec::new();
 			}
+			let sent = ov.InternalHigh.min(len);
+			// SAFETY: the operation completed: the kernel is done with the
+			// buffer (the completion callback never touches it).
+			let buf = unsafe { &*self.op.buf.get() };
+			buf[sent..len].to_vec()
 		}
 	}
 
 	impl Drop for WinEnd {
+		/// Never waits. With an operation in flight it is cancelled and our
+		/// handle closed; the completion that still comes owns the buffer
+		/// (through its reference) and closes the I/O object.
 		fn drop(&mut self) {
-			if self.op != Op::Idle {
-				self.cancel();
+			let Some(handle) = self.handle.take() else {
+				return;
+			};
+			let mut st = self.op.state.lock();
+			if self.inflight != Inflight::Idle && st.done.is_none() {
+				// Under the lock: the completion cannot close the I/O object
+				// before the handle is closed, as the thread pool asks.
+				// SAFETY: the operation in flight on our open handle.
+				unsafe { CancelIoEx(raw(&handle), self.op.ov.get()) };
+				drop(handle);
+				st.orphan = Some(self.tp);
+				return;
 			}
+			drop(st);
+			drop(handle);
+			// SAFETY: nothing is in flight on it; a completion callback still
+			// returning keeps it alive until it has.
+			unsafe { CloseThreadpoolIo(self.tp) };
+		}
+	}
+
+	/// What a timer and its thread-pool callback share.
+	struct TimerShared {
+		state: Mutex<TimerState>,
+	}
+
+	struct TimerState {
+		waker:      Option<Waker>,
+		fired:      bool,
+		/// The owner is gone before the callback: it closes the timer.
+		owner_gone: bool,
+		timer:      PTP_TIMER,
+	}
+
+	/// Thread-pool timer callback (runs once): wake the owner's task, or
+	/// close the timer when the owner is gone. It never polls anything.
+	unsafe extern "system" fn on_timer(
+		_instance: PTP_CALLBACK_INSTANCE,
+		context: *mut c_void,
+		_timer: PTP_TIMER,
+	) {
+		// SAFETY: the reference `TimerImp::arm` handed to this one-shot
+		// callback.
+		let shared = unsafe { Arc::from_raw(context.cast::<TimerShared>().cast_const()) };
+		let (waker, close) = {
+			let mut st = shared.state.lock();
+			st.fired = true;
+			(st.waker.take(), st.owner_gone.then_some(st.timer))
+		};
+		if let Some(timer) = close {
+			// SAFETY: its owner is gone; freed once this callback returns.
+			unsafe { CloseThreadpoolTimer(timer) };
+		}
+		if let Some(w) = waker {
+			w.wake();
 		}
 	}
 
 	pub struct TimerImp {
-		/// Declared first: unregistered before the event closes.
-		wait:     Option<Registered>,
-		slot:     Arc<Slot>,
-		/// Never signaled: the registered wait ends by its timeout.
-		event:    Option<OwnedHandle>,
 		deadline: Instant,
+		armed:    Option<Arc<TimerShared>>,
 	}
 
 	impl TimerImp {
-		pub fn new(deadline: Instant) -> Self {
-			Self { wait: None, slot: Arc::default(), event: None, deadline }
+		pub const fn new(deadline: Instant) -> Self {
+			Self { deadline, armed: None }
+		}
+
+		/// A thread-pool timer due at the deadline (rounded up to the next
+		/// 100 ns tick past it).
+		fn arm(&self, waker: &Waker) -> io::Result<Arc<TimerShared>> {
+			let shared = Arc::new(TimerShared {
+				state: Mutex::new(TimerState {
+					waker:      Some(waker.clone()),
+					fired:      false,
+					owner_gone: false,
+					timer:      0,
+				}),
+			});
+			let context = Arc::into_raw(Arc::clone(&shared));
+			// SAFETY: `context` stays valid until the callback, which always
+			// runs once the timer is set, reclaims it.
+			let timer =
+				unsafe { CreateThreadpoolTimer(Some(on_timer), context.cast_mut().cast(), ptr::null()) };
+			if timer == 0 {
+				let e = io::Error::last_os_error();
+				// SAFETY: the reference made above, never handed out.
+				drop(unsafe { Arc::from_raw(context) });
+				return Err(e);
+			}
+			shared.state.lock().timer = timer;
+			let left = self.deadline.saturating_duration_since(Instant::now());
+			// Relative due times are negative, in 100 ns units.
+			let due = -i64::try_from(left.as_nanos() / 100 + 1).unwrap_or(i64::MAX);
+			let due = FILETIME { dwLowDateTime: due as u32, dwHighDateTime: (due >> 32) as u32 };
+			// SAFETY: our timer; a one-shot due time.
+			unsafe { SetThreadpoolTimer(timer, &raw const due, 0, 0) };
+			Ok(shared)
 		}
 
 		pub fn poll(&mut self, cx: &Context<'_>) -> Poll<()> {
-			let now = Instant::now();
-			if now >= self.deadline {
+			if Instant::now() >= self.deadline {
 				return Poll::Ready(());
 			}
-			self.slot.set(cx.waker());
-			if self.wait.is_none() {
-				// SAFETY: manual-reset, unsignaled, anonymous event.
-				let Ok(event) = owned(unsafe { CreateEventW(ptr::null(), 1, 0, ptr::null()) }) else {
-					return Poll::Ready(());
-				};
-				// Rounded up, so the wake never comes before the deadline.
-				let ms = (self.deadline - now).as_millis().saturating_add(1).min(u128::from(INFINITE - 1));
-				match Registered::new(raw(&event), &self.slot, ms as u32, true) {
-					Ok(w) => {
-						self.event = Some(event);
-						self.wait = Some(w);
-					},
+			match &self.armed {
+				Some(shared) => {
+					let mut st = shared.state.lock();
+					if !st.waker.as_ref().is_some_and(|w| w.will_wake(cx.waker())) {
+						st.waker = Some(cx.waker().clone());
+					}
+				},
+				None => match self.arm(cx.waker()) {
+					Ok(shared) => self.armed = Some(shared),
 					Err(_) => return Poll::Ready(()),
-				}
+				},
 			}
 			if Instant::now() >= self.deadline {
 				Poll::Ready(())
 			} else {
 				Poll::Pending
+			}
+		}
+	}
+
+	impl Drop for TimerImp {
+		/// Never waits: a timer that has fired is closed here, one that has
+		/// not is left to its callback, which runs once at the deadline.
+		fn drop(&mut self) {
+			let Some(shared) = self.armed.take() else {
+				return;
+			};
+			let mut st = shared.state.lock();
+			if st.fired {
+				let timer = st.timer;
+				drop(st);
+				// SAFETY: fired, so nothing will start its callback again; a
+				// callback still returning keeps it alive until it has.
+				unsafe { CloseThreadpoolTimer(timer) };
+			} else {
+				st.owner_gone = true;
 			}
 		}
 	}

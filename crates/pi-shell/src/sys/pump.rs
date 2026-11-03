@@ -16,7 +16,9 @@
 //!   `SIGPIPE`, exactly as with a real pipe. Each output half reports its
 //!   drain to the [`Tracker`] once, at end of file, on refusal, or when
 //!   dropped: the command completes only once its output is delivered and
-//!   flushed.
+//!   flushed. An output pump still running when its `ExtProc` is dropped (a
+//!   detached or abandoned external, or a leftover it forked holding the
+//!   pipe) goes on to its end of file as adopted work ([`orphan`]).
 //! - **Input** (engine → child) runs until the engine side reaches end of file
 //!   (then flushed), the child closes its end (`EPIPE`), or the tracker
 //!   cancels it (the child exited, the spawn failed or the `ExtProc` was
@@ -32,11 +34,14 @@
 //! - **Duplex** (Unix, extra fds whose direction the spec does not say): one
 //!   end of a socket pair, pumped both ways.
 
+pub(super) mod orphan;
 pub(super) mod os;
 
 use std::{
 	fs,
-	io::{self, Read},
+	future::Future,
+	io,
+	pin::Pin,
 	sync::Arc,
 	task::{Context, Poll, Wake, Waker},
 };
@@ -247,6 +252,39 @@ impl Task {
 			Self::Duplex(d) => d.poll(cx, cancelled),
 		}
 	}
+
+	/// The output part of a pump whose `ExtProc` is gone; its input part
+	/// ends here.
+	fn into_output(self) -> Option<Self> {
+		match self {
+			Self::In { .. } => None,
+			out @ Self::Out { .. } => Some(out),
+			#[cfg(unix)]
+			Self::Duplex(mut d) => {
+				if d.inbound.take().is_some() {
+					d.sock.shutdown(std::net::Shutdown::Write);
+				}
+				d.outbound.is_some().then_some(Self::Duplex(d))
+			},
+		}
+	}
+}
+
+/// Output pumps that outlived their `ExtProc`, run to their ends as one
+/// piece of adopted work.
+struct Outputs(Vec<Task>);
+
+impl Future for Outputs {
+	type Output = ();
+
+	fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+		self.0.retain_mut(|t| t.poll(cx, true).is_pending());
+		if self.0.is_empty() {
+			Poll::Ready(())
+		} else {
+			Poll::Pending
+		}
+	}
 }
 
 /// Both halves of a duplex pump over one socket pair end and one engine
@@ -324,12 +362,34 @@ impl Pumps {
 
 	/// Move what can move now; every side that cannot go on has registered
 	/// `cx`'s waker. Input pumps are dropped once `tracker` cancelled them.
-	/// Called by `ExtProc::poll_wait` before it polls the tracker.
+	/// Also advances retained [`orphan`] work. Called by
+	/// `ExtProc::poll_wait` before it polls the tracker.
 	pub fn poll(&mut self, cx: &mut Context<'_>, tracker: &Tracker) {
 		let cancelled = tracker.pumps_cancelled(cx.waker());
 		self.tasks.retain_mut(|t| t.poll(cx, cancelled).is_pending());
 		for feed in &self.feeds {
 			feed.poll(cx);
+		}
+		orphan::poll(cx);
+	}
+}
+
+impl Drop for Pumps {
+	/// Input work ends with the `ExtProc`; output still running is adopted
+	/// and delivered to its end of file. The feeds drop after this (fields
+	/// drop after `drop`), giving back what no child read.
+	fn drop(&mut self) {
+		// An output whose stream has ended (a failed spawn, a child gone with
+		// everything it forked) finishes here.
+		let mut now = Context::from_waker(Waker::noop());
+		let outputs: Vec<Task> = self
+			.tasks
+			.drain(..)
+			.filter_map(Task::into_output)
+			.filter_map(|mut t| t.poll(&mut now, true).is_pending().then_some(t))
+			.collect();
+		if !outputs.is_empty() {
+			orphan::adopt(Outputs(outputs));
 		}
 	}
 }
@@ -385,6 +445,11 @@ impl Wakers {
 			wakers.push(waker.clone());
 		}
 	}
+
+	/// Take them all (to wake or drop outside the lock).
+	fn take(&self) -> Vec<Waker> {
+		std::mem::take(&mut *self.0.lock())
+	}
 }
 
 impl Wake for Wakers {
@@ -393,8 +458,7 @@ impl Wake for Wakers {
 	}
 
 	fn wake_by_ref(self: &Arc<Self>) {
-		let wakers = std::mem::take(&mut *self.0.lock());
-		for w in wakers {
+		for w in self.take() {
 			w.wake();
 		}
 	}
@@ -445,13 +509,10 @@ impl Feed {
 impl Drop for Feed {
 	fn drop(&mut self) {
 		let st = self.state.get_mut();
-		// Close our write end first (Windows: the write in flight is
-		// cancelled and its unsent bytes come back), so the drain below ends
-		// at end of file instead of waiting.
-		let unsent = st.pipe.take().map(OsPipe::close).unwrap_or_default();
-		let mut back = Vec::new();
-		let _ = (&self.read).read_to_end(&mut back);
-		back.extend_from_slice(&unsent);
+		// What the pipe holds, read without waiting ([`os::reclaim`]: Unix
+		// closes our write end first, so the read ends at end of file), then
+		// what the pump took but had not written.
+		let mut back = os::reclaim(st.pipe.take(), &self.read);
 		back.extend_from_slice(st.chunk.pending());
 		if !back.is_empty() {
 			// An object that cannot take them back loses them.
@@ -462,6 +523,8 @@ impl Drop for Feed {
 
 #[cfg(all(test, unix))]
 mod tests {
+	use std::io::Read;
+
 	use super::*;
 
 	/// An engine source that never has bytes and counts its live copies.
@@ -497,14 +560,18 @@ mod tests {
 		}
 	}
 
-	/// Every output half reports its drain exactly once, however it ends:
-	/// at end of file, or dropped with its `ExtProc` while still pending.
+	/// Every output half reports its drain exactly once, however it ends: at
+	/// end of file, or, dropped with its `ExtProc` while its child still
+	/// holds the pipe, when the adopted rest reaches its end of file (not
+	/// before: the output is not cut off).
 	#[test]
 	fn each_output_half_reports_its_drain_once() {
-		let tracker = Tracker::new(3);
+		// One drain more than there are halves: a half reporting twice would
+		// reach zero.
+		let tracker = Tracker::new(4);
 		let (out_eof, child_out) = os::pipe(false).unwrap();
-		let (out_open, _child_open) = os::pipe(false).unwrap();
-		let (duplex, _child_duplex) = os::socket_pair().unwrap();
+		let (out_open, child_open) = os::pipe(false).unwrap();
+		let (duplex, child_duplex) = os::socket_pair().unwrap();
 		let sink = || End::Fd(FdRef::from_file(Box::new(Never(Arc::new(())))));
 		let mut pumps = Pumps::new(
 			vec![Pump::Out(out_eof, sink()), Pump::Out(out_open, sink()), Pump::Duplex(sink(), duplex)],
@@ -515,9 +582,19 @@ mod tests {
 		let mut cx = Context::from_waker(Waker::noop());
 		pumps.poll(&mut cx, &tracker);
 		pumps.poll(&mut cx, &tracker);
-		assert_eq!(tracker.lock().draining(), 2, "end of file drained one half, once");
+		assert_eq!(tracker.lock().draining(), 3, "end of file drained one half, once");
 		drop(pumps);
-		assert_eq!(tracker.lock().draining(), 0, "dropped halves report their drain");
+		orphan::poll(&cx);
+		assert_eq!(tracker.lock().draining(), 3, "adopted halves run on");
+		drop((child_open, child_duplex));
+		// Another test of this process may be polling the retained work.
+		let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+		while tracker.lock().draining() > 1 {
+			assert!(std::time::Instant::now() < deadline, "the adopted halves never drained");
+			orphan::poll(&cx);
+			std::thread::yield_now();
+		}
+		assert_eq!(tracker.lock().draining(), 1, "each drained once at its end of file");
 	}
 
 	/// An input pump waiting for engine bytes stops at the cancel: it is
