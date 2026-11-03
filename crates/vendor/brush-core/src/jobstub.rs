@@ -115,19 +115,22 @@ struct Channel {
 
 impl JobStub {
 	/// Makes a control socket: this shell's end, and the stub's at a
-	/// close-on-exec descriptor above `above`, so that no descriptor the
-	/// stub is given before it runs replaces it.
+	/// close-on-exec descriptor above `above` where the open-file limit
+	/// leaves room for one, so that no descriptor the stub is given before
+	/// it runs replaces it. Where it does not, the socket stays where the
+	/// pair put it and moves out of the way of a redirection that names it.
 	pub(crate) fn socket(above: RawFd) -> std::io::Result<(tokio::net::UnixStream, OwnedFd)> {
 		// Both ends are close-on-exec, as std makes every descriptor.
 		let (ours, theirs) = std::os::unix::net::UnixStream::pair()?;
 		// SAFETY: plain descriptor call on a descriptor this function owns.
 		let raised = unsafe { libc::fcntl(theirs.as_raw_fd(), libc::F_DUPFD_CLOEXEC, above.max(2) + 1) };
-		if raised < 0 {
-			return Err(std::io::Error::last_os_error());
-		}
-		drop(theirs);
-		// SAFETY: `fcntl` made `raised`, which nothing else owns.
-		let theirs = unsafe { OwnedFd::from_raw_fd(raised) };
+		let theirs = if raised < 0 {
+			theirs.into()
+		} else {
+			drop(theirs);
+			// SAFETY: `fcntl` made `raised`, which nothing else owns.
+			unsafe { OwnedFd::from_raw_fd(raised) }
+		};
 		ours.set_nonblocking(true)?;
 		Ok((tokio::net::UnixStream::from_std(ours)?, theirs))
 	}

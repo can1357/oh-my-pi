@@ -303,12 +303,13 @@ impl ExecutionParameters {
 	/// order, each once the one before it is made, as the child Bash forks
 	/// makes them. A file this process carries at a spare descriptor is given
 	/// to the stub at the descriptor it is for. Each descriptor the stub sets
-	/// comes back and is put here at the same number (and one it closes is
-	/// closed here), so that the words still to expand see the descriptors the
-	/// command will have, as they do in Bash's child. The error of the first
-	/// one the stub cannot make is returned, and the rest are dropped.
+	/// comes back, and is put here at the same number while `read` says a
+	/// word that can read one is still to expand, so that those words see
+	/// the descriptors the command will have, as they do in Bash's child; a
+	/// descriptor it closes is closed here. The error of the first one the
+	/// stub cannot make is returned, and the rest are dropped.
 	#[cfg(unix)]
-	pub(crate) async fn flush_to_stub(&mut self) -> Result<(), error::Error> {
+	pub(crate) async fn flush_to_stub(&mut self, read: bool) -> Result<(), error::Error> {
 		use std::os::fd::AsRawFd as _;
 
 		use crate::jobstub::StepFailure;
@@ -373,12 +374,12 @@ impl ExecutionParameters {
 			};
 			match (&redirect, descriptor) {
 				(DeferredRedirect::Close { fd }, _) => drop(self.open_files.remove_fd(*fd)),
-				(_, Some(descriptor)) => drop(
+				(_, Some(descriptor)) if read => drop(
 					self
 						.open_files
 						.set_fd(redirect.fd(), OpenFile::from(std::fs::File::from(descriptor))),
 				),
-				(_, None) => {},
+				(_, Some(_) | None) => {},
 			}
 			self.stub_fds.push(redirect.fd());
 		}
@@ -796,14 +797,43 @@ async fn setup_simple_command_redirects(
 ) -> Result<(), error::Error> {
 	let prefix = command.prefix.as_ref().map_or(&[][..], |prefix| prefix.0.as_slice());
 	let suffix = command.suffix.as_ref().map_or(&[][..], |suffix| suffix.0.as_slice());
-	for item in prefix.iter().chain(suffix) {
+	let items: Vec<&CommandPrefixOrSuffixItem> = prefix.iter().chain(suffix).collect();
+	for (index, item) in items.iter().enumerate() {
 		if let CommandPrefixOrSuffixItem::IoRedirect(redirect) = item {
 			setup_redirect(shell, params, redirect).await?;
 			#[cfg(unix)]
-			params.flush_to_stub().await?;
+			{
+				// The descriptors the stub sets are kept here only while a
+				// word that can read one is still to expand: a command may
+				// have hundreds of redirections, and holding every one of
+				// their descriptors would reach the open-file limit the
+				// command itself is given.
+				let read = items[index + 1..].iter().any(|item| expansion_may_read_descriptors(item));
+				params.flush_to_stub(read).await?;
+			}
 		}
 	}
 	Ok(())
+}
+
+/// Whether expanding `item`'s words can read a descriptor the command will
+/// have: only a command substitution or a process substitution runs code
+/// that reads one, and both are spelled.
+fn expansion_may_read_descriptors(item: &CommandPrefixOrSuffixItem) -> bool {
+	let reads = |text: &str| {
+		text.contains("$(") || text.contains('`') || text.contains("<(") || text.contains(">(")
+	};
+	match item {
+		CommandPrefixOrSuffixItem::Word(word) => reads(&word.flatten()),
+		CommandPrefixOrSuffixItem::AssignmentWord(_, word) => reads(&word.flatten()),
+		CommandPrefixOrSuffixItem::IoRedirect(redirect) => match redirect {
+			ast::IoRedirect::File(_, _, ast::IoFileRedirectTarget::Filename(word))
+			| ast::IoRedirect::HereString(_, word) => reads(&word.flatten()),
+			ast::IoRedirect::File(..) | ast::IoRedirect::HereDocument(..) => false,
+			_ => true,
+		},
+		CommandPrefixOrSuffixItem::ProcessSubstitution(..) => true,
+	}
 }
 
 /// Where a simple command reports an error that ends it before its command
@@ -1163,10 +1193,11 @@ async fn background_process_pipeline_for_async_job<SE: extensions::ShellExtensio
 
 	// Where the command word being looked at is: `None` for the command name,
 	// else the index of a wrapper's operand in the suffix. Each turn takes a
-	// word, which wrappers and words that expand to nothing bound.
+	// word, and the command has only so many, so the turns end with them.
 	let mut position = None;
 	let mut wrappers = 0;
-	for _ in 0..64 {
+	let words = 1 + simple_cmd.suffix.as_ref().map_or(0, |suffix| suffix.0.len());
+	for _ in 0..words {
 		let command_name = match expand_command_word_in_place(simple_cmd, position, shell, params).await? {
 			CommandWord::Name(name) => name,
 			CommandWord::Missing => return Ok(None),
