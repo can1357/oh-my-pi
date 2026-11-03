@@ -17,6 +17,7 @@ import { normalizePluginRuntimeConfig, writePluginRuntimeConfig } from "../runti
 import type { PluginRuntimeConfig, PluginRuntimeState } from "../types";
 
 import { cachePlugin, getCachedPluginPath, isValidVersionForCache } from "./cache";
+import { removeCacheEntryUnlessLeased, sweepRetiredCacheEntries } from "./cache-lease";
 import {
 	classifySource,
 	fetchMarketplace,
@@ -36,6 +37,7 @@ import {
 	readProjectRegistriesIndex,
 	removeInstalledPlugin,
 	removeMarketplaceEntry,
+	replaceInstalledPlugin,
 	writeInstalledPluginsRegistry,
 	writeMarketplacesRegistry,
 	writeProjectRegistriesIndex,
@@ -471,11 +473,18 @@ export class MarketplaceManager {
 		};
 
 		// One write replaces the old entries with the new one, so a running session that reads the
-		// registry during the upgrade never finds the plugin missing.
+		// registry during the upgrade never finds the plugin missing. The plugin keeps its place in the
+		// registry: discovery lists plugins in registry order, and a plugin moved behind another with a
+		// same-named skill would lose that skill's bare name to it in every running session that
+		// rediscovers, so a name the session already showed the model would name the other plugin's
+		// skill, or nothing.
 		const currentInstReg = await readInstalledPluginsRegistry(registryPath);
-		const baseInstReg =
-			existing && existing.length > 0 ? removeInstalledPlugin(currentInstReg, pluginId) : currentInstReg;
-		await writeInstalledPluginsRegistry(registryPath, addInstalledPlugin(baseInstReg, pluginId, installedEntry));
+		await writeInstalledPluginsRegistry(
+			registryPath,
+			existing && existing.length > 0
+				? replaceInstalledPlugin(currentInstReg, pluginId, [installedEntry])
+				: addInstalledPlugin(currentInstReg, pluginId, installedEntry),
+		);
 		if (scope === "project") await this.#trackProjectRegistry();
 
 		// Only now clean up old installs — the new one is cached and registered, so the
@@ -1233,7 +1242,10 @@ export class MarketplaceManager {
 	}
 
 	/**
-	 * Deletes the candidate cache dirs that no installed registry still references.
+	 * Deletes the candidate cache dirs that no installed registry still references and no running omp
+	 * process leases, then sweeps the versions kept earlier for processes that have since exited (see
+	 * `cache-lease.ts`). A leased candidate is kept and retired: a running session still reads its
+	 * skills, scripts, hooks and MCP servers there.
 	 *
 	 * Project-scope installs link into the shared user cache, so the user registry, the cwd
 	 * project registry, and every indexed project registry count. Indexed registries that no
@@ -1274,9 +1286,18 @@ export class MarketplaceManager {
 		const referenced = collectReferencedPaths(...registries);
 		for (const candidate of candidates) {
 			if (!referenced.has(candidate)) {
-				await fs.rm(candidate, { recursive: true, force: true });
+				await removeCacheEntryUnlessLeased(candidate);
 			}
 		}
+		await sweepRetiredCacheEntries(this.#opts.pluginsCacheDir, entryPath => referenced.has(entryPath));
+	}
+
+	/**
+	 * Deletes the plugin versions an upgrade or uninstall kept for running omp processes, once none of
+	 * those processes is left and no registry references the versions again. Runs at session startup.
+	 */
+	async sweepRetiredPluginVersions(): Promise<void> {
+		await this.#removeUnreferencedCachePaths([]);
 	}
 
 	async #findInBothRegistries(pluginId: string): Promise<{

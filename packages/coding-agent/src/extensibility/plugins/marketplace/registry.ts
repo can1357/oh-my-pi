@@ -37,8 +37,9 @@ export function getMarketplacesCacheDir(): string {
 	return path.join(getPluginsDir(), "cache", "marketplaces");
 }
 
-export function getPluginsCacheDir(): string {
-	return path.join(getPluginsDir(), "cache", "plugins");
+/** The plugin version cache under `pluginsDir` (default: the user's plugins dir). */
+export function getPluginsCacheDir(pluginsDir = getPluginsDir()): string {
+	return path.join(pluginsDir, "cache", "plugins");
 }
 
 // ── Atomic write ─────────────────────────────────────────────────────
@@ -211,6 +212,18 @@ export function removeInstalledPlugin(reg: InstalledPluginsRegistry, id: string)
 	}
 	const { [id]: _, ...rest } = reg.plugins;
 	return { ...reg, plugins: rest };
+}
+
+/** Replace every entry of plugin `id` with `entries`, keeping the plugin's place in the registry. */
+export function replaceInstalledPlugin(
+	reg: InstalledPluginsRegistry,
+	id: string,
+	entries: InstalledPluginEntry[],
+): InstalledPluginsRegistry {
+	if (!(id in reg.plugins)) {
+		throw new Error(`Plugin "${id}" not found in registry`);
+	}
+	return { ...reg, plugins: { ...reg.plugins, [id]: entries } };
 }
 
 export function getInstalledPlugin(reg: InstalledPluginsRegistry, id: string): InstalledPluginEntry[] | undefined {

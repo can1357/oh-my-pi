@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `processStartToken(pid)`, a boot-stable start-time token that tells a live process from a later one reusing its pid
+
 ## [18.16.0] - 2026-11-02
 
 ### Added

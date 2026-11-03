@@ -1355,21 +1355,22 @@ describe("MarketplaceManager", () => {
 			const first = await ctx.manager.installPlugin("hello-plugin", "test-marketplace");
 			await setPluginJsonVersion("2.0.0");
 			// A running session that reads the registry while the old directory goes must still find the plugin.
+			// The removal starts by renaming the directory aside.
 			const registeredAtRemoval: string[][] = [];
-			const rm = fsp.rm;
-			const rmSpy = spyOn(fsp, "rm").mockImplementation(async (target, options) => {
-				if (target === first.installPath) {
+			const rename = fsp.rename;
+			const renameSpy = spyOn(fsp, "rename").mockImplementation(async (from, to) => {
+				if (from === first.installPath) {
 					const reg = await readInstalledPluginsRegistry(path.join(ctx.tmpDir, "installed_plugins.json"));
 					registeredAtRemoval.push(
 						(reg.plugins["hello-plugin@test-marketplace"] ?? []).map(entry => entry.version),
 					);
 				}
-				return rm(target, options);
+				return rename(from, to);
 			});
 			try {
 				await ctx.manager.upgradePlugin("hello-plugin@test-marketplace");
 			} finally {
-				rmSpy.mockRestore();
+				renameSpy.mockRestore();
 			}
 
 			expect(registeredAtRemoval).toEqual([["2.0.0"]]);
