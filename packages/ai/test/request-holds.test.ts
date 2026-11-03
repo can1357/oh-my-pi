@@ -212,17 +212,26 @@ describe("afterRequestHolds", () => {
 		expect({ opened: holds.opened, released: holds.released }).toEqual({ opened: 2, released: 1 });
 	});
 
-	it("lets work the holds wait for run outside them, other holds still applying", async () => {
+	it("lets work the holds wait for run outside them while it lasts, other holds still applying", async () => {
 		const own = new TestHolds();
 		const parent = new TestHolds();
-		const sent = runWithRequestHolds(parent, () =>
-			runWithRequestHolds(own, () => runOutsideRequestHolds(own, () => request())),
+		const started = Promise.withResolvers<SentRequest>();
+		const step = runWithRequestHolds(parent, () =>
+			runWithRequestHolds(own, () =>
+				runOutsideRequestHolds(own, async () => {
+					// Work that waits for its own request, as a handler does.
+					const sent = request();
+					started.resolve(sent);
+					await sent.result;
+				}),
+			),
 		);
+		const sent = await started.promise;
 		await turns();
 		expect(sent.sent).toBe(false);
 		expect(own.opened).toBe(0);
 		parent.let();
-		await sent.result;
+		await step;
 		expect(sent.sent).toBe(true);
 	});
 
@@ -310,6 +319,78 @@ describe("what the last check covers", () => {
 		holds.let();
 		await sent?.result;
 		expect(sent?.sent).toBe(true);
+	});
+
+	it("asks again which holds apply while a send waits: an exemption that ended, an alias bound meanwhile", async () => {
+		const parent = new TestHolds();
+		const own = new TestHolds();
+		const owner = new TestHolds();
+		const alias = new RequestHoldsAlias();
+		const step = Promise.withResolvers<void>();
+		let exemptSend: SentRequest | undefined;
+		let aliasSend: SentRequest | undefined;
+		// Both sends first wait on `parent`; meanwhile the exemption ends and the alias is bound.
+		const exempt = runWithRequestHolds(parent, () =>
+			runWithRequestHolds(own, () =>
+				runOutsideRequestHolds(own, async () => {
+					exemptSend = request();
+					await step.promise;
+				}),
+			),
+		);
+		runWithRequestHolds(parent, () =>
+			runWithRequestHolds(alias, () => {
+				aliasSend = request();
+			}),
+		);
+		await turns();
+		step.resolve();
+		await exempt;
+		alias.bind(runWithRequestHolds(owner, captureRequestHolds));
+		parent.let();
+		await turns();
+		expect({ exempt: exemptSend?.sent, alias: aliasSend?.sent }).toEqual({ exempt: false, alias: false });
+		own.let();
+		owner.let();
+		await Promise.all([exemptSend?.result, aliasSend?.result]);
+		expect({ exempt: exemptSend?.sent, alias: aliasSend?.sent }).toEqual({ exempt: true, alias: true });
+	});
+
+	it("uses the view a request carries for a holds an alias nearer to the send also stands for", async () => {
+		const owner = new TestHolds();
+		owner.armed = false;
+		const alias = new RequestHoldsAlias();
+		alias.bind(runWithRequestHolds(owner, captureRequestHolds));
+		const carried = owner.open();
+		await runWithRequestHoldView(owner, carried, () =>
+			runWithRequestHolds(alias, () => afterRequestHolds(undefined, () => undefined)),
+		);
+		// The carried view served: the alias opened none.
+		expect(owner.opened).toBe(1);
+		carried.release();
+	});
+
+	it("keeps an exemption for as long as a thenable the exempt work returns", async () => {
+		const holds = new TestHolds();
+		const done = Promise.withResolvers<void>();
+		let during: SentRequest | undefined;
+		// A non-native thenable, the case under test (a library's or another realm's promise).
+		const thenable: PromiseLike<void> = {
+			// oxlint-disable-next-line unicorn/no-thenable
+			then: (onFulfilled, onRejected) => done.promise.then(onFulfilled, onRejected),
+		};
+		runWithRequestHolds(holds, () =>
+			runOutsideRequestHolds(holds, () => {
+				void Promise.resolve().then(() => {
+					during = request();
+				});
+				return thenable;
+			}),
+		);
+		await turns();
+		await during?.result;
+		expect(during?.sent).toBe(true);
+		done.resolve();
 	});
 
 	it("holds work started before its owning context existed by that context's holds, once bound", async () => {

@@ -60,7 +60,7 @@ function startLifetime(): { lifetime: Lifetime; end(): void } {
 	};
 }
 
-/** Ends `end` once `fn`'s result settles: when it returns, or when the promise it returns settles. */
+/** Ends `end` once `fn`'s result settles: when it returns, or when the thenable it returns settles. */
 function endWhenSettled<T>(fn: () => T, end: () => void): T {
 	let result: T;
 	try {
@@ -69,8 +69,9 @@ function endWhenSettled<T>(fn: () => T, end: () => void): T {
 		end();
 		throw error;
 	}
-	if (result instanceof Promise) {
-		void result.then(end, end);
+	// Any thenable: a promise from another realm or library lasts as long as a native one.
+	if (result !== null && typeof result === "object" && "then" in result && typeof result.then === "function") {
+		Promise.resolve(result).then(end, end);
 	} else {
 		end();
 	}
@@ -172,9 +173,19 @@ export class RequestHoldsAlias implements RequestHolds {
 		return this.#target?.holds ?? [];
 	}
 
-	/** A view of every bound holds. The gate expands an alias instead, so it never calls this. */
+	/** A view of every bound holds, an alias bound into itself asked once. The gate expands an alias instead, so it never calls this. */
 	open(): RequestHoldView {
-		const views = this.target.map(holds => holds.open());
+		const views: RequestHoldView[] = [];
+		const seen = new Set<RequestHolds>([this]);
+		const visit = (holds: readonly RequestHolds[]) => {
+			for (const next of holds) {
+				if (seen.has(next)) continue;
+				seen.add(next);
+				if (next instanceof RequestHoldsAlias) visit(next.target);
+				else views.push(next.open());
+			}
+		};
+		visit(this.target);
 		return {
 			check: () => {
 				for (const view of views) {
@@ -191,33 +202,39 @@ export class RequestHoldsAlias implements RequestHolds {
 }
 
 /**
- * The holds that apply in `scope`, each with the nearest scope that names it
- * (whose carried view, if any, the request uses), aliases expanded to the
- * holds they are bound to. A holds any scope of the chain is exempt from, for
- * as long as that exemption lasts, does not apply however near a scope names it.
+ * The holds that apply in `scope`, nearest first, aliases expanded to the
+ * holds they are bound to, each with the scope whose view the request uses:
+ * the nearest one carrying a live view, else the nearest that names it. A
+ * holds any scope of the chain is exempt from, for as long as that exemption
+ * lasts, does not apply however near a scope names it. Asked afresh at every
+ * check: an exemption ends, an alias is bound, a carried view's request ends.
  */
 function applicableScopes(scope: Scope | undefined): { applicable: Scope[]; exempt: RequestHolds[] } {
 	const exempt = new Set<RequestHolds>();
 	for (let next = scope; next; next = next.parent) if (next.exemption?.open) exempt.add(next.holds);
-	const applicable: Scope[] = [];
-	const seen = new Set<RequestHolds>(exempt);
+	const chosen = new Map<RequestHolds, Scope>();
+	const expanded = new Set<RequestHolds>();
+	const carries = (candidate: Scope) => candidate.view !== undefined && live(candidate.lifetimes);
 	const add = (candidate: Scope) => {
-		if (seen.has(candidate.holds)) return;
-		seen.add(candidate.holds);
-		if (!(candidate.holds instanceof RequestHoldsAlias)) {
-			applicable.push(candidate);
+		if (exempt.has(candidate.holds)) return;
+		if (candidate.holds instanceof RequestHoldsAlias) {
+			if (expanded.has(candidate.holds)) return;
+			expanded.add(candidate.holds);
+			for (const holds of candidate.holds.target) {
+				add({ holds, view: undefined, lifetimes: [], exemption: undefined, parent: candidate.parent });
+			}
 			return;
 		}
-		for (const holds of candidate.holds.target) {
-			add({ holds, view: undefined, lifetimes: [], exemption: undefined, parent: candidate.parent });
-		}
+		const current = chosen.get(candidate.holds);
+		if (!current) chosen.set(candidate.holds, candidate);
+		else if (!carries(current) && carries(candidate)) chosen.set(candidate.holds, candidate);
 	};
 	for (let next = scope; next; next = next.parent) {
 		// A scope only names holds while its exemption, if it has one, lasts.
 		if (next.exemption) continue;
 		add(next);
 	}
-	return { applicable, exempt: [...exempt] };
+	return { applicable: [...chosen.values()], exempt: [...exempt] };
 }
 
 /** The holds of a context, taken with {@link captureRequestHolds}. */
@@ -289,55 +306,83 @@ export interface RequestHoldViews extends RequestHoldView {
 	carry<T>(fn: () => Promise<T>): Promise<T>;
 }
 
+/** One holds of a request's context, and the view the request asks it through (see {@link openRequestHolds}). */
+interface HoldEntry {
+	scope: Scope;
+	view: RequestHoldView | undefined;
+	/** The view is the one `scope` carries, which serves only while the scope's lifetimes last. */
+	carried: boolean;
+}
+
 /**
  * One request's views of every hold of the current context, as one
  * {@link RequestHoldView}: each check asks every applicable holds — through
  * `own.view` for `own.holds`, else the view the request carries for it, else a
  * view opened here — and returns what to wait for, or `undefined` when none
  * holds. `own.holds` counts whether or not the context has it, unless the
- * context is exempt from it. Every view is opened before any is checked:
- * opening may run host code, checking only reports. `release` releases the
- * views opened here, not `own.view` or carried ones. For a request that
- * checks the holds at several points, with checks of its own mixed in (an
- * agent loop's process pause); a plain send uses {@link afterRequestHolds}.
+ * context is exempt from it. Which holds apply is asked again at each check
+ * (an exemption ends, an alias is bound, a carried view's request ends); a
+ * holds keeps the view it was given, so its state is spent once. Every view
+ * is opened before any is checked: opening may run host code, checking only
+ * reports. `release` releases the views opened here, not `own.view` or carried
+ * ones. For a request that checks the holds at several points, with checks of
+ * its own mixed in (an agent loop's process pause); a plain send uses
+ * {@link afterRequestHolds}.
  */
 export function openRequestHolds(own?: { holds: RequestHolds; view: RequestHoldView }): RequestHoldViews {
 	const current = scopes.getStore();
-	const { applicable, exempt } = applicableScopes(current);
-	if (own && !exempt.includes(own.holds) && !applicable.some(scope => scope.holds === own.holds)) {
-		applicable.unshift({ holds: own.holds, view: undefined, lifetimes: [], exemption: undefined, parent: current });
-	}
-	const entries = applicable.map(scope => ({
-		scope,
-		view: undefined as RequestHoldView | undefined,
-		/** The view is the one the scope carries, which serves only while the scope's lifetimes last. */
-		carried: false,
-	}));
+	const entries = new Map<RequestHolds, HoldEntry>();
 	const opened: RequestHoldView[] = [];
-	const openAll = () => {
-		for (const entry of entries) {
-			// A carried view serves only while its request is under way; once the
-			// request ends, the check opens a view of its own.
-			if (entry.carried && !live(entry.scope.lifetimes)) {
-				entry.view = undefined;
-				entry.carried = false;
+	const carriedBy = (scope: Scope) => (scope.view && live(scope.lifetimes) ? scope.view : undefined);
+	/** The entries that apply now, each with its view, every view opened before any is checked. */
+	const refresh = (): HoldEntry[] => {
+		const { applicable, exempt } = applicableScopes(current);
+		if (own && !exempt.includes(own.holds) && !applicable.some(scope => scope.holds === own.holds)) {
+			applicable.unshift({
+				holds: own.holds,
+				view: undefined,
+				lifetimes: [],
+				exemption: undefined,
+				parent: current,
+			});
+		}
+		const active: HoldEntry[] = [];
+		for (const scope of applicable) {
+			let entry = entries.get(scope.holds);
+			if (!entry) {
+				entry = { scope, view: undefined, carried: false };
+				entries.set(scope.holds, entry);
 			}
-			if (entry.view) continue;
+			entry.scope = scope;
+			active.push(entry);
+		}
+		for (const entry of active) {
 			if (own && entry.scope.holds === own.holds) {
 				entry.view = own.view;
 				continue;
 			}
-			const carried = entry.scope.view && live(entry.scope.lifetimes) ? entry.scope.view : undefined;
-			const view = carried ?? entry.scope.holds.open();
-			entry.carried = carried !== undefined;
-			if (!carried) opened.push(view);
+			const carried = carriedBy(entry.scope);
+			if (carried) {
+				// The request's own view of these holds serves while its request lasts.
+				entry.view = carried;
+				entry.carried = true;
+				continue;
+			}
+			// A carried view whose request ended no longer serves; a view of its own does.
+			if (entry.carried) {
+				entry.view = undefined;
+				entry.carried = false;
+			}
+			if (entry.view) continue;
+			const view = entry.scope.holds.open();
+			opened.push(view);
 			entry.view = view;
 		}
+		return active;
 	};
 	return {
 		check() {
-			openAll();
-			for (const entry of entries) {
+			for (const entry of refresh()) {
 				const held = entry.view?.check();
 				if (!held) continue;
 				// A wait on a carried view also ends when its request does, so the
@@ -348,10 +393,10 @@ export function openRequestHolds(own?: { holds: RequestHolds; view: RequestHoldV
 			return undefined;
 		},
 		async carry<T>(fn: () => Promise<T>): Promise<T> {
-			openAll();
+			const active = refresh();
 			const { lifetime, end } = startLifetime();
 			let run = fn;
-			for (const entry of entries) {
+			for (const entry of active) {
 				const view = entry.view;
 				if (!view) continue;
 				// A view borrowed from an outer request lasts no longer than that request.
