@@ -194,6 +194,10 @@
 - DeepSeek-style `*** End` and `*** End Patch` markers are no longer written into files or truncate later edits
 - Composer prediction ghost text no longer vanishes when advisor messages arrive
 
+### Fixed
+
+- Browser `role/` selectors now find named sections and other implicit landmark and structural roles in Chrome and Tern, so scoped snapshots and observations can target them.
+
 ## [18.16.0] - 2026-11-02
 
 ### Added

@@ -105,9 +105,45 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 	const nameText = nameMatch?.[1] ?? nameMatch?.[2] ?? nameMatch?.[3];
 	const wantedName = nameText === undefined ? undefined : normalizeSpace(nameText).toLocaleLowerCase();
 	const exact = nameMatch?.[4]?.toLocaleLowerCase() === "exact";
+	const roles: Record<string, string> = {
+		article: "article",
+		aside: "complementary",
+		dialog: "dialog",
+		fieldset: "group",
+		details: "group",
+		optgroup: "group",
+		address: "group",
+		hgroup: "group",
+		hr: "separator",
+		progress: "progressbar",
+		meter: "meter",
+		output: "status",
+		search: "search",
+		thead: "rowgroup",
+		tbody: "rowgroup",
+		tfoot: "rowgroup",
+		dt: "term",
+		dfn: "term",
+		dd: "definition",
+		dl: "descriptionlist",
+		datalist: "generic",
+		figure: "figure",
+		blockquote: "blockquote",
+		p: "paragraph",
+		code: "code",
+		em: "emphasis",
+		strong: "strong",
+		del: "deletion",
+		s: "deletion",
+		ins: "insertion",
+		sub: "subscript",
+		sup: "superscript",
+		time: "time",
+		mark: "mark",
+	};
 	const implicitRole = (element: Element): string | null => {
 		const tag = element.tagName.toLocaleLowerCase();
-		if (tag === "a" && element.hasAttribute("href")) return "link";
+		if ((tag === "a" || tag === "area") && element.hasAttribute("href")) return "link";
 		if (tag === "button") return "button";
 		if (tag === "textarea") return "textbox";
 		if (tag === "select") {
@@ -115,13 +151,32 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 			return select.multiple || select.size > 1 ? "listbox" : "combobox";
 		}
 		if (tag === "option") return "option";
-		if (tag === "img") return "img";
-		if (tag === "ul" || tag === "ol") return "list";
+		if (tag === "img") {
+			return element.getAttribute("alt") === "" &&
+				!element.hasAttribute("tabindex") &&
+				!normalizeSpace(element.getAttribute("aria-label") ?? "") &&
+				!idrefText(element) &&
+				!normalizeSpace(element.getAttribute("title") ?? "")
+				? "none"
+				: "img";
+		}
+		if (tag === "ul" || tag === "ol" || tag === "menu") return "list";
 		if (tag === "li") return "listitem";
 		if (tag === "nav") return "navigation";
 		if (tag === "main") return "main";
 		if (tag === "form") return "form";
-		if (tag === "article") return "article";
+		if (tag === "section") {
+			return idrefText(element) ||
+				normalizeSpace(element.getAttribute("aria-label") ?? "") ||
+				normalizeSpace(element.getAttribute("title") ?? "")
+				? "region"
+				: "generic";
+		}
+		if (tag === "header" || tag === "footer") {
+			const scoped = element.parentElement?.closest("article, aside, main, nav, section");
+			return tag === "header" ? (scoped ? "sectionheader" : "banner") : scoped ? "sectionfooter" : "contentinfo";
+		}
+		if (Object.hasOwn(roles, tag)) return roles[tag];
 		if (/^h[1-6]$/.test(tag)) return "heading";
 		if (tag === "table") return "table";
 		if (tag === "tr") return "row";
@@ -252,6 +307,11 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 		const wrappingLabel = element.closest("label");
 		if (wrappingLabel) return normalizeSpace(contentText(wrappingLabel, element, "visible"));
 		const tag = element.tagName.toLocaleLowerCase();
+		if (tag === "optgroup") return normalizeSpace(element.getAttribute("label") ?? "");
+		if (tag === "fieldset") {
+			const caption = element.querySelector(":scope > legend");
+			if (caption) return normalizeSpace(contentText(caption, null, "visible"));
+		}
 		// An `<input>`'s type and value decide its name; other elements have neither.
 		const input = tag === "input" ? (element as unknown as { type: string; value: string }) : null;
 		const inputType = input?.type.toLocaleLowerCase();
@@ -274,7 +334,7 @@ export function queryByRole(node: QueryNode, selector: string): Element[] {
 	};
 	return Array.from(root.querySelectorAll("*")).filter(element => {
 		const role = (element.getAttribute("role")?.trim().split(/\s+/)[0] ?? implicitRole(element))?.toLocaleLowerCase();
-		if (role !== wantedRole) return false;
+		if (role !== wantedRole && !(role === "img" && wantedRole === "image")) return false;
 		if (wantedName === undefined) return true;
 		const name = accessibleName(element).toLocaleLowerCase();
 		return exact ? name === wantedName : name.includes(wantedName);
