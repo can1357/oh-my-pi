@@ -1,12 +1,15 @@
 /**
- * Retaining a memory writes a bank every omp process shares. Each autocommit statement was its own
- * transaction, and with the default `synchronous=FULL` its own WAL sync: one retain cost four
- * commits. These tests pin one commit per `remember` and `synchronous=NORMAL` on file banks.
+ * Retaining a memory writes a bank every omp process shares. Each annotation was its own autocommit
+ * transaction, and with the default `synchronous=FULL` every commit synced the WAL. These tests pin
+ * the batched annotations and `synchronous=NORMAL`, and that no best-effort step can lose the stored
+ * row, hold the bank's write lock during graph work, or block an annotation store on another connection.
  */
 import type { Database } from "bun:sqlite";
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
+import { AnnotationStore } from "@oh-my-pi/pi-mnemopi/core/annotations";
 import { BeamMemory } from "@oh-my-pi/pi-mnemopi/core/beam";
+import { EpisodicGraph } from "@oh-my-pi/pi-mnemopi/core/episodic-graph";
 import { closeQuietly, openDatabase } from "@oh-my-pi/pi-mnemopi/db";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
@@ -64,25 +67,103 @@ describe("mnemopi bank writes", () => {
 
 	afterEach(async () => {
 		delete process.env.MNEMOPI_NO_EMBEDDINGS;
+		delete process.env.MNEMOPI_PROACTIVE_LINKING;
+		vi.restoreAllMocks();
 		await dir?.remove();
 		dir = undefined;
 	});
 
-	it("stores a memory, its annotations and the working-memory trim in one commit", () => {
-		dir = TempDir.createSync("@mnemopi-remember-commits-");
-		const beam = new BeamMemory({ sessionId: "s1", dbPath: path.join(dir.path(), "mnemopi.db") });
+	function bankPath(prefix: string): string {
+		dir = TempDir.createSync(prefix);
+		return path.join(dir.path(), "mnemopi.db");
+	}
+
+	it("commits the row on its own and both annotations together", () => {
+		const beam = new BeamMemory({ sessionId: "s1", dbPath: bankPath("@mnemopi-remember-commits-") });
 		try {
 			const seen = recordCommits(beam.db);
 			const id = beam.remember("We ship the release on Friday.", { source: "user-note" });
 
-			expect(seen.autocommitWrites).toEqual([]);
-			expect(seen.commits).toBe(1);
+			// Only the row insert autocommits; the two annotation inserts share one transaction.
+			expect(seen.autocommitWrites).toEqual(["INSERT INTO working_memory"]);
 			expect(beam.db.query("SELECT kind FROM annotations WHERE memory_id = ? ORDER BY kind").all(id)).toEqual([
 				{ kind: "has_source" },
 				{ kind: "occurred_on" },
 			]);
 		} finally {
 			beam.close();
+		}
+	});
+
+	it("keeps the memory when an annotation failure makes SQLite end the transaction", () => {
+		const beam = new BeamMemory({ sessionId: "s1", dbPath: bankPath("@mnemopi-remember-rollback-") });
+		try {
+			// RAISE(ROLLBACK) ends the whole transaction, as SQLITE_FULL can.
+			beam.db.run(
+				"CREATE TRIGGER fail_annotation BEFORE INSERT ON annotations BEGIN SELECT RAISE(ROLLBACK, 'disk full'); END",
+			);
+			const id = beam.remember("The bank keeps this row.", { source: "user-note" });
+
+			expect(beam.db.query("SELECT content FROM working_memory WHERE id = ?").get(id)).toEqual({
+				content: "The bank keeps this row.",
+			});
+			expect(beam.db.inTransaction).toBe(false);
+		} finally {
+			beam.close();
+		}
+	});
+
+	it("links the episodic graph outside any transaction", () => {
+		process.env.MNEMOPI_PROACTIVE_LINKING = "1";
+		const beam = new BeamMemory({ sessionId: "s1", dbPath: bankPath("@mnemopi-remember-linking-") });
+		try {
+			const inTransaction: boolean[] = [];
+			const ingest = EpisodicGraph.prototype.ingestMemory;
+			vi.spyOn(EpisodicGraph.prototype, "ingestMemory").mockImplementation(function (
+				this: EpisodicGraph,
+				...args: Parameters<typeof ingest>
+			) {
+				inTransaction.push(beam.db.inTransaction);
+				return ingest.apply(this, args);
+			});
+			beam.remember("Alice reviewed the parser change with Bob.", { source: "user-note" });
+
+			// Graph extraction can take seconds; inside a transaction it would hold the bank's write lock.
+			expect(inTransaction).toEqual([false]);
+		} finally {
+			beam.close();
+		}
+	});
+
+	it("annotates through a store on another connection without waiting on its own transaction", () => {
+		const dbPath = bankPath("@mnemopi-remember-foreign-annotations-");
+		const store = new AnnotationStore(dbPath);
+		const beam = new BeamMemory({
+			sessionId: "s1",
+			dbPath,
+			annotations: {
+				add: (memoryId, kind, value) => store.add(memoryId, kind, value),
+				addMany: (memoryId, kind, values) => store.addMany(memoryId, kind, values),
+				queryByMemory: (memoryId, kind) => store.queryByMemory(memoryId, kind),
+				queryByKind: (kind, value) => store.queryByKind(kind, { value }),
+				getDistinctValues: kind => store.getDistinctValues(kind),
+			},
+		});
+		try {
+			const started = performance.now();
+			const id = beam.remember("Annotated elsewhere.", { source: "user-note" });
+
+			// Its busy timeout is 5 s; a wait on our own write transaction would take that long.
+			expect(performance.now() - started).toBeLessThan(2_000);
+			expect(
+				store
+					.queryByMemory(id)
+					.map(row => row.kind)
+					.sort(),
+			).toEqual(["has_source", "occurred_on"]);
+		} finally {
+			beam.close();
+			store.close();
 		}
 	});
 
