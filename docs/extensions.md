@@ -66,6 +66,26 @@ Important constraint from `loader.ts`:
 - `pi.exec()` is directly available during load; provider registration is queued until session setup
 - child sessions reuse imported factories but bind fresh APIs and extension registrations; module-level variables remain shared across those sessions
 
+### Suspension and teardown
+
+A live `disabledExtensions` edit suspends a loaded extension in place instead of unloading it: it keeps its module state, but stops contributing event handlers, tools, commands, renderers, link schemes and file fallbacks until it is resumed. Its factory and `session_start` do not run again on resume. What an extension registers outside its session state through the extension API (for example URL schemes or expected replies) follows the same rule: it stops acting while the load is suspended and acts again on resume. It is released when the load is torn down: on session shutdown, when the factory throws, or when the session goes away before a startup-deferred extension is bound. Anything registered after teardown is released immediately. When `createAgentSession` fails before its session exists, the loads it created itself are torn down, but loads the caller passed in `preloadedExtensions` are only suspended, since the caller may retry with them (the interactive auto-resume fallback does); the session that adopts them resumes them. Once the session exists, a startup failure disposes it, which ends every load like any session end (`session_shutdown` runs), preloaded ones included: their module state has seen the shutdown, so they are not reused.
+
+A suspended extension receives no events, so it cannot learn about its suspension from `on(...)`. `pi.onSuspensionChange(listener)` calls `listener(true)` when this load is suspended and `listener(false)` when it is resumed. Use it to pause work the extension drives itself, such as a socket or a timer. It returns the unsubscribe, and listeners are dropped when the load is torn down:
+
+```ts
+export default function (pi: ExtensionAPI) {
+	let socket: Socket | undefined;
+	pi.on("session_start", () => {
+		socket = connect();
+	});
+	pi.onSuspensionChange(suspended => {
+		if (suspended) socket?.end();
+		else socket = connect();
+	});
+	pi.on("session_shutdown", () => socket?.end());
+}
+```
+
 ## Quick start
 
 ```ts
@@ -128,6 +148,7 @@ Core methods:
 - `getServiceTiers`, `setServiceTier`
 - `registerProvider`, `unregisterProvider`
 - `registerFileWriteFallback`, `registerFileDeleteFallback`
+- `onSuspensionChange`
 - `events` (shared event bus)
 
 `ExtensionAPI` methods retain their extension binding when destructured or passed as callbacks.

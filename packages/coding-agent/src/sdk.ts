@@ -113,6 +113,7 @@ import {
 	discoverAndLoadExtensions,
 	discoverExtensionPaths,
 	EXTENSION_HANDLER_TIMEOUT_MS,
+	type Extension,
 	type ExtensionAgentIdentity,
 	type ExtensionContext,
 	type ExtensionFactory,
@@ -1933,11 +1934,21 @@ export function createAutoLearnCaptureRunner(
  * ```
  */
 export async function createAgentSession(options: CreateAgentSessionOptions = {}): Promise<CreateAgentSessionResult> {
-	registerLocalInferenceApi();
-	const extensionRoots = options.extensionRoots?.();
-	const explicit = extensionRoots?.explicit ?? options.additionalExtensionPaths ?? [];
-	const mode = extensionRoots?.mode ?? (options.disableExtensionDiscovery ? "explicit-only" : "merge");
-	return await withOmpExtensionRootScope(explicit, mode, () => createAgentSessionScoped(options));
+	try {
+		registerLocalInferenceApi();
+		const extensionRoots = options.extensionRoots?.();
+		const explicit = extensionRoots?.explicit ?? options.additionalExtensionPaths ?? [];
+		const mode = extensionRoots?.mode ?? (options.disableExtensionDiscovery ? "explicit-only" : "merge");
+		return await withOmpExtensionRootScope(explicit, mode, () => createAgentSessionScoped(options));
+	} catch (error) {
+		// Preloaded loads belong to the caller, which may retry with them (interactive auto-resume
+		// does): a failed startup, wherever it fails, only suspends their registrations, and the runner
+		// that adopts them on a retry resumes them. A failure once the session existed disposed it,
+		// which already shut them down (`session_shutdown`) and released them; suspending is then a no-op.
+		for (const extension of options.preloadedExtensions?.extensions ?? [])
+			extension.registrations?.setSuspended(true);
+		throw error;
+	}
 }
 
 async function createAgentSessionScoped(options: CreateAgentSessionOptions): Promise<CreateAgentSessionResult> {
@@ -1969,6 +1980,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	using startupCleanup = new DisposableStack();
 	if (restoreProviderToggles) startupCleanup.defer(restoreProviderToggles);
 	if (unbindSessionEffects) startupCleanup.defer(unbindSessionEffects);
+	// Loads the caller preloaded are its own: a failed startup leaves them to `createAgentSession`,
+	// which suspends them for a retry, instead of releasing them below.
+	const preloadedExtensions: readonly Extension[] = options.preloadedExtensions?.extensions ?? [];
 	// Snapshot this session's effective configured lane onto its invocation scope
 	// so startup sub-discovery sees the same complete policy that post-startup
 	// reloads and recursively spawned children consume.
@@ -2008,6 +2022,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// buffer — so we can't rely on it to catch startup events for the extension runner.
 	const startupCredentialDisabledEvents: CredentialDisabledEvent[] = [];
 	let credentialDisabledTarget: ExtensionRunner | undefined;
+	// The loads a startup failure must release itself when no session (and so no shutdown) follows;
+	// preloaded ones are only suspended (see `createAgentSession`).
+	let startupExtensions: readonly Extension[] = [];
 	// Set once the session exists; the built-in warning covers disables from then on.
 	let credentialNoticeSession: AgentSession | undefined;
 	const unsubscribeCredentialDisabled = authStorage.credentials.onDisabled(event => {
@@ -3034,6 +3051,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				logger.error("Failed to load extension", { path, error });
 			}
 		}
+		startupExtensions = extensionsResult.extensions;
 		// Forward the source-path list (NOT the loaded instances) so subagents
 		// rebuild their own session-scoped extensions.
 		toolSession.extensionPaths = extensionPaths;
@@ -5916,7 +5934,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				for (const message of formatExtensionLoadNotifications(loaded.errors)) {
 					session.emitNotice("warning", message, "extensions");
 				}
-				if (session.isDisposed) return;
+				if (session.isDisposed) {
+					// No runner adopts these loads, so its shutdown will not release what they registered.
+					for (const extension of loaded.extensions) extension.registrations?.release();
+					return;
+				}
 				// Providers queue until the runner is initialized; drain them as session creation does.
 				for (const { name, config, sourceId } of runtime.pendingProviderRegistrations.splice(0)) {
 					modelRegistry.registerProvider(name, config, sourceId);
@@ -5947,6 +5969,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				if (hasRegistered) unregisterUnlessParked();
 			} else {
 				if (hasRegistered) unregisterUnlessParked();
+				for (const extension of startupExtensions) {
+					if (!preloadedExtensions.includes(extension)) extension.registrations?.release();
+				}
 				if (asyncJobManager) {
 					if (AsyncJobManager.instance() === asyncJobManager) {
 						AsyncJobManager.setInstance(undefined);
