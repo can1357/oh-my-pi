@@ -18,6 +18,7 @@ import type {
 	ProviderSessionState,
 } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
+import { errorDisplayText } from "@oh-my-pi/pi-ai/error";
 import type { BenchRuntime, BenchTarget, StreamSimpleFn } from "../cli/bench-runtime";
 import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import { formatModelString } from "../config/model-resolver";
@@ -326,7 +327,12 @@ async function requestTurn(
 		}
 		message ??= await stream.result();
 		if (message.stopReason === "error" || message.errorMessage) {
-			return { message, text: "", error: message.errorMessage ?? "request failed", durationMs: elapsed(message) };
+			return {
+				message,
+				text: "",
+				error: errorDisplayText(message) ?? "request failed",
+				durationMs: elapsed(message),
+			};
 		}
 		const text = assistantText(message).trim();
 		if (text.length === 0) {

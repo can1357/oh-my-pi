@@ -1,4 +1,5 @@
 import { rm } from "node:fs/promises";
+import { errorDisplayText } from "@oh-my-pi/pi-ai/error";
 import * as path from "node:path";
 import { type ApiKeyResolver, completeSimple, retryTransientCompletion } from "@oh-my-pi/pi-ai";
 import { hostMatchesUrl } from "@oh-my-pi/pi-catalog/hosts";
@@ -657,7 +658,7 @@ async function resolveMnemopiProviderOptions(
 												model: model.id,
 												usage: message.usage,
 												stopReason: message.stopReason,
-												errorMessage: message.errorMessage,
+												errorMessage: errorDisplayText(message),
 											}),
 									},
 								),
@@ -669,7 +670,7 @@ async function resolveMnemopiProviderOptions(
 						logger.warn("Mnemopi: memory completion model failed; trying the next configured fallback.", {
 							provider: model.provider,
 							model: model.id,
-							error: message.errorMessage,
+							error: errorDisplayText(message),
 						});
 						continue;
 					}

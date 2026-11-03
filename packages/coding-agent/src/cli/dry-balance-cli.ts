@@ -12,6 +12,7 @@ import type {
 	SimpleStreamOptions,
 } from "@oh-my-pi/pi-ai";
 import { streamSimple } from "@oh-my-pi/pi-ai";
+import { errorDisplayText } from "@oh-my-pi/pi-ai/error";
 import { replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui";
 import { SPINNER_FRAMES } from "@oh-my-pi/pi-tui/theme/symbols";
 import { formatDuration, getProjectDir } from "@oh-my-pi/pi-utils";
@@ -447,7 +448,7 @@ async function runBenchRequest(
 		}
 		message ??= await stream.result();
 		if (message.stopReason === "error" || message.errorMessage) {
-			return { ok: false, account, error: message.errorMessage ?? "request failed" };
+			return { ok: false, account, error: errorDisplayText(message) ?? "request failed" };
 		}
 		const durationMs = normalizeBenchMs(message.duration ?? now() - startedAt);
 		const ttftMs = normalizeBenchMs(

@@ -2,6 +2,7 @@
  * Generate session titles using a smol, fast model.
  */
 import { dlopen, FFIType, ptr } from "bun:ffi";
+import { errorDisplayText } from "@oh-my-pi/pi-ai/error";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as url from "node:url";
@@ -410,7 +411,7 @@ async function generateTitleOnlineWithModels(
 					...modelContext,
 					reason: "provider-response-error",
 					stopReason: response.stopReason,
-					errorMessage: response.errorMessage,
+					errorMessage: errorDisplayText(response),
 				});
 				continue;
 			}

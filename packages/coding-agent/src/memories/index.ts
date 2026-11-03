@@ -916,7 +916,7 @@ async function runStage1Job(options: {
 		);
 
 		if (response.stopReason === "error") {
-			return { kind: "failed", reason: response.errorMessage || "stage1 model error" };
+			return { kind: "failed", reason: errorDisplayText(response) || "stage1 model error" };
 		}
 		const text = response.content
 			.filter((c): c is { type: "text"; text: string } => c.type === "text")
