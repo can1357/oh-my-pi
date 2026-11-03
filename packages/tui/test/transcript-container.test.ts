@@ -202,33 +202,26 @@ describe("TranscriptContainer row split", () => {
 	});
 
 	// An inline image: three reserved rows, then the row that draws it upward over them.
-	const imageBlock = (): Block =>
-		new Block(
-			[
-				"above 1",
-				"above 2",
-				"\x1b[0m",
-				"\x1b[0m",
-				"\x1b[0m",
-				"\x1b7\x1b[3A\x1b]1337;File=inline=1;width=10;height=4:AAAA\x07\x1b8",
-				"below 1",
-				"below 2",
-			],
-			true,
-		);
+	const ItermRow = "\x1b7\x1b[3A\x1b]1337;File=inline=1;width=10;height=4:AAAA\x07\x1b8";
+	const SixelRow = "\x1b7\x1b[3A\x1bPq#0;2;0;0;0#0!8~-\x1b\\\x1b8";
+	const imageBlock = (row = ItermRow): Block =>
+		new Block(["above 1", "above 2", "\x1b[0m", "\x1b[0m", "\x1b[0m", row, "below 1", "below 2"], true);
 
-	for (const [protocol, committed] of [
+	for (const [protocol, committed, row] of [
 		// iTerm2 cannot draw part of an image, so it goes to scrollback whole.
-		[ImageProtocol.Iterm2, 6],
-		// Kitty draws the visible part, so the cut stays where the screen ends.
-		[ImageProtocol.Kitty, 3],
+		[ImageProtocol.Iterm2, 6, ItermRow],
+		// A SIXEL raster paints upward over its reserved rows the same way, and those
+		// reserved rows cannot be repainted once they are in scrollback (#17882).
+		[ImageProtocol.Sixel, 6, SixelRow],
+		// Kitty placeholders are real cells, so the cut stays where the screen ends.
+		[ImageProtocol.Kitty, 3, ItermRow],
 	] as const) {
 		it(`moves a split that would cut an inline image below it only where the terminal cannot draw part of it (${protocol})`, () => {
 			const previous = TERMINAL.imageProtocol;
 			setTerminalImageProtocol(protocol);
 			try {
 				const transcript = new TranscriptContainer();
-				transcript.addChild(imageBlock());
+				transcript.addChild(imageBlock(row));
 				transcript.addChild(new Block(["tail"], true));
 				// Room 7: the tail and its separator leave 5 rows of the block live, a cut after row 3.
 				const batch = transcript.peekFinalizedBatch(40, 7)!;
@@ -238,6 +231,72 @@ describe("TranscriptContainer row split", () => {
 			}
 		});
 	}
+
+	it("commits nothing for a raster taller than the frame, since it can never be written whole", () => {
+		const previous = TERMINAL.imageProtocol;
+		setTerminalImageProtocol(ImageProtocol.Sixel);
+		try {
+			// 12 rows: the history write caps `frameRow` at 9 and would crop the rest,
+			// so every row a split could commit is a blank with nothing to relocate by.
+			const rows = Array.from({ length: 11 }, () => "\x1b[0m");
+			rows.push("\x1b7\x1b[11A\x1bPq#0;2;0;0;0#0!8~-\x1b\\\x1b8");
+			const transcript = new TranscriptContainer();
+			transcript.addChild(new Block(rows, true));
+			transcript.addChild(new Block(["tail"], true));
+			// Room 7 would normally commit the block's head; a 10-row frame cannot hold it.
+			expect(transcript.peekFinalizedBatch(40, 7, 10)).toBeUndefined();
+			expect(transcript.renderViewport(40, 7, frame).some(row => TERMINAL.isImageLine(row))).toBe(true);
+		} finally {
+			setTerminalImageProtocol(previous);
+		}
+	});
+
+	it("archives the text above a raster taller than the frame, never its reserved rows", () => {
+		const previous = TERMINAL.imageProtocol;
+		setTerminalImageProtocol(ImageProtocol.Sixel);
+		try {
+			const lead = ["lead 0", "lead 1", "lead 2"];
+			const rows = [...lead];
+			rows.push(...Array.from({ length: 11 }, () => "\x1b[0m"));
+			rows.push("\x1b7\x1b[11A\x1bPq#0;2;0;0;0#0!8~-\x1b\\\x1b8");
+			const transcript = new TranscriptContainer();
+			transcript.addChild(new Block(rows, true));
+			transcript.addChild(new Block(["tail"], true));
+			// Room 7 puts the cut inside the image; the 10-row frame cannot hold it,
+			// so the lead lines commit and the image keeps painting live.
+			const batch = transcript.peekFinalizedBatch(40, 7, 10)!;
+			expect(batch.rows).toEqual(lead);
+			expect(transcript.renderViewport(40, 7, frame).some(row => TERMINAL.isImageLine(row))).toBe(true);
+		} finally {
+			setTerminalImageProtocol(previous);
+		}
+	});
+
+	it("bounds a short image by the rows it climbs, not by its block index", () => {
+		const previous = TERMINAL.imageProtocol;
+		setTerminalImageProtocol(ImageProtocol.Sixel);
+		try {
+			// 21 text rows push the image to block row 24 of a 24-row frame, but the
+			// raster only lifts over its own 3 reserved rows, so it still fits.
+			const text = Array.from({ length: 21 }, (_, i) => `text ${i}`);
+			const rows = [
+				...text,
+				"\x1b[0m",
+				"\x1b[0m",
+				"\x1b[0m",
+				"\x1b7\x1b[3A\x1bPq#0;2;0;0;0#0!8~-\x1b\\\x1b8",
+				"below",
+			];
+			const transcript = new TranscriptContainer();
+			transcript.addChild(new Block(rows, true));
+			transcript.addChild(new Block(["tail"], true));
+			// Room 5 leaves 3 rows of the block live, a cut inside the image.
+			const batch = transcript.peekFinalizedBatch(40, 5, 24)!;
+			expect(batch.rows.some(row => TERMINAL.isImageLine(row))).toBe(true);
+		} finally {
+			setTerminalImageProtocol(previous);
+		}
+	});
 
 	it("retires a block in full, with its separator, when keeping its last-row image whole reaches the block's end", () => {
 		const previous = TERMINAL.imageProtocol;

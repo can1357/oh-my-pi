@@ -16,6 +16,7 @@
 ### Fixed
 
 - Closing an overlay that others were opened over no longer leaves them returning focus to it once they close ([#16476](https://github.com/can1357/oh-my-pi/pull/16476))
+- Fixed a SIXEL image block whose top scrolled out of the viewport committing its reserved rows to native scrollback without the raster, which left the picture permanently blank in history ([#17882](https://github.com/can1357/oh-my-pi/issues/17882), [#17942](https://github.com/can1357/oh-my-pi/pull/17942) by [@moxi-2534](https://github.com/moxi-2534))
 
 ## [18.16.0] - 2026-11-02
 
