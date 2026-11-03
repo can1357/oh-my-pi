@@ -18,6 +18,7 @@
  * started and runs its handler in it.
  */
 import { AsyncLocalStorage } from "node:async_hooks";
+import { isPromise } from "node:util/types";
 import { untilAborted } from "@oh-my-pi/pi-utils";
 
 /** One request's view of a set of holds, opened once and kept for the rest of the request. */
@@ -41,7 +42,7 @@ export interface RequestHolds {
 	open(): RequestHoldView;
 }
 
-/** How long something lasts: a request that carries views, or an exemption. */
+/** How long a request that carries views lasts. */
 interface Lifetime {
 	readonly open: boolean;
 	/**
@@ -77,65 +78,92 @@ function startLifetime(): { lifetime: Lifetime; end(): void } {
 	};
 }
 
-/** `Promise.prototype.then` as the runtime defines it: what `await` uses on a native promise whose constructor is `Promise`, whatever its `then` property says. */
+/** While an exemption lasts (see {@link runOutsideRequestHolds}). */
+interface Exemption {
+	/** Read at every check, so it is exact in whatever turn the check runs. */
+	readonly open: boolean;
+}
+
+/** `Promise.prototype.then` as the runtime defines it: a real promise whose `then` is this follows its own settlement. */
 const nativeThen = Promise.prototype.then;
 
+function noop(): void {}
+
 /**
- * Ends `end` once `fn`'s result settles: when it returns, throws, or — for a
- * thenable result — when it settles, in the turn an `await` of it resumes. A
- * result is followed as `await` follows it. A native promise whose
- * constructor is `Promise` is awaited without reading its `then`: its own
- * settlement is followed, through the runtime's `then`, so the exemption ends
- * before an awaiter resumes even when a bound or wrapped `then` was put on it.
- * Any other thenable (a subclass, a promise from another realm or library, a
- * callable thenable) has its `then` read once and called with a native
- * promise's resolve and reject, as `await` does, so a value it resolves with
- * that is itself pending work is adopted and followed too. A `then` that
- * cannot be read ends it at once; one that throws ends it as a rejection would.
+ * Runs `fn` in the exemption's scope, which `scope` enters, and makes the
+ * exemption last until `fn`'s result settles, as `await` would see it
+ * settle. The end is not a reaction to the result, which would run after
+ * any awaiter registered before it: the exemption asks the runtime, at each
+ * check, whether the promise it follows is still pending, so work that
+ * resumes once that promise settled is held again however its reaction was
+ * ordered.
+ *
+ * What is followed is what `await` follows. A real promise (of any realm)
+ * whose `constructor` is this realm's `Promise` is followed itself: its
+ * `constructor` is read once and its `then` never. Anything else has its
+ * `then` read once; a real promise whose `then` is the runtime's own (a
+ * subclass that keeps it) is followed itself too. Any other `then` — a
+ * subclass's own, another realm's, a library's, a callable thenable's, a
+ * proxy's — is called once with a native promise's resolve and reject, as
+ * `await` calls it, and that promise is followed, adopting pending work it is
+ * resolved with. Such a `then` tells its own callers of the settlement in
+ * its own order: one that tells a caller registered before the gate first
+ * runs that caller's continuation while the exemption still lasts. A result
+ * that is not thenable, a `constructor` or `then` that cannot be read, and a
+ * throw end it at once; a `then` that throws ends it as a rejection would.
  */
-function endWhenSettled<T>(fn: () => T, end: () => void): T {
-	let result: T;
-	try {
-		result = fn();
-	} catch (error) {
-		end();
-		throw error;
-	}
-	if (result === null || (typeof result !== "object" && typeof result !== "function")) {
-		end();
-		return result;
-	}
-	try {
-		if (result instanceof Promise && result.constructor === Promise) {
-			nativeThen.call(result, end, end);
+function runExempt<T>(scope: (fn: () => T, exemption: Exemption) => T, fn: () => T): T {
+	let follows: Promise<unknown> | undefined;
+	let open = true;
+	const exemption: Exemption = {
+		get open() {
+			return open && (follows === undefined || Bun.peek.status(follows) === "pending");
+		},
+	};
+	return scope(() => {
+		let result: T;
+		try {
+			result = fn();
+		} catch (error) {
+			open = false;
+			throw error;
+		}
+		const real = isPromise(result);
+		try {
+			if (real && (result as Promise<unknown>).constructor === Promise) {
+				follows = result as Promise<unknown>;
+				return result;
+			}
+		} catch {
+			// Its `constructor` cannot be read: `await` would reject, so the work counts as settled.
+			open = false;
 			return result;
 		}
-	} catch {
-		// Not a promise after all, or its constructor cannot be read: `await` would
-		// reject, so the work counts as settled.
-		end();
-		return result;
-	}
-	let then: unknown;
-	try {
-		then = (result as { then?: unknown }).then;
-	} catch {
-		// The thenable cannot be read: the work counts as settled.
-	}
-	if (typeof then !== "function") {
-		end();
-		return result;
-	}
-	const followed = then;
-	try {
-		new Promise<unknown>((resolve, reject) => {
+		let then: unknown;
+		try {
+			if (result !== null && (typeof result === "object" || typeof result === "function")) {
+				then = (result as { then?: unknown }).then;
+			}
+		} catch {
+			// The thenable cannot be read: the work counts as settled.
+		}
+		if (typeof then !== "function") {
+			open = false;
+			return result;
+		}
+		if (real && then === nativeThen) {
+			follows = result as Promise<unknown>;
+			return result;
+		}
+		const followed = then;
+		const adopted = new Promise<unknown>((resolve, reject) => {
 			followed.call(result, resolve, reject);
-		}).then(end, end);
-	} catch {
-		// Its `then` could not be followed: the work counts as settled.
-		end();
-	}
-	return result;
+		});
+		// The exemption only asks whether it settled; a rejection is the work's to report.
+		adopted.catch(noop);
+		follows = adopted;
+		return result;
+	}, exemption);
 }
 
 interface Scope {
@@ -145,7 +173,7 @@ interface Scope {
 	/** The lifetimes the carried view serves within: its request's, and those of any outer request it was borrowed from. */
 	readonly lifetimes: readonly Lifetime[];
 	/** While open, the holds do not apply in this scope (see {@link runOutsideRequestHolds}). */
-	readonly exemption: Lifetime | undefined;
+	readonly exemption: Exemption | undefined;
 	readonly parent: Scope | undefined;
 }
 
@@ -204,9 +232,11 @@ export async function runWithRequestHoldView<T>(
  * is held again. Other holds of the context still apply.
  */
 export function runOutsideRequestHolds<T>(holds: RequestHolds, fn: () => T): T {
-	const { lifetime, end } = startLifetime();
-	const scope: Scope = { holds, view: undefined, lifetimes: [], exemption: lifetime, parent: scopes.getStore() };
-	return scopes.run(scope, () => endWhenSettled(fn, end));
+	const parent = scopes.getStore();
+	return runExempt(
+		(exempt, exemption) => scopes.run({ holds, view: undefined, lifetimes: [], exemption, parent }, exempt),
+		fn,
+	);
 }
 
 /**
@@ -323,7 +353,7 @@ export interface RequestHoldContext {
 
 /** A snapshot of the current context's holds, for work that leaves the async flow (a `Worker` message handler, a queue drained elsewhere). */
 export function captureRequestHolds(): RequestHoldContext {
-	const exemptions: Array<{ holds: RequestHolds; exemption: Lifetime }> = [];
+	const exemptions: Array<{ holds: RequestHolds; exemption: Exemption }> = [];
 	const holds: RequestHolds[] = [];
 	const seen = new Set<RequestHolds>();
 	for (let next = scopes.getStore(); next; next = next.parent) {

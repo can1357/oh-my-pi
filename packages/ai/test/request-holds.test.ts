@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { heapStats } from "bun:jsc";
 import { EventEmitter } from "node:events";
+import { createContext, runInContext } from "node:vm";
 import {
 	afterRequestHolds,
 	captureRequestHolds,
@@ -602,6 +603,77 @@ describe("what the last check covers", () => {
 		expect(woken).toBe(true);
 		views.release();
 		holds.let();
+	});
+
+	// Each shape `await` follows through the promise itself, its `then` not called.
+	class KeepsThen<T> extends Promise<T> {}
+	const ownSettlement: Record<string, (pending: Promise<void>) => PromiseLike<void>> = {
+		"a native promise": pending => pending,
+		"a subclass's promise that keeps the runtime's `then`": pending => KeepsThen.resolve().then(() => pending),
+		"another realm's promise whose constructor is this realm's `Promise`": pending => {
+			const realm = createContext({});
+			const other = runInContext("new Promise(resolve => { globalThis.go = resolve; })", realm) as Promise<void>;
+			Object.defineProperty(other, "constructor", { value: Promise });
+			void pending.then(() => runInContext("go()", realm));
+			return other;
+		},
+	};
+	for (const [shape, make] of Object.entries(ownSettlement)) {
+		for (const order of ["before", "after"] as const) {
+			it(`ends an exemption for ${shape} before a \`then\` registered ${order} the step returned runs`, async () => {
+				const holds = new TestHolds();
+				const done = Promise.withResolvers<void>();
+				let result: PromiseLike<void> | undefined;
+				let after: Promise<SentRequest> | undefined;
+				const register = () => {
+					after = new Promise(resolve => {
+						// Work after the step settled is held again, whenever it subscribed.
+						result?.then(() => resolve(request()));
+					});
+				};
+				runWithRequestHolds(holds, () =>
+					runOutsideRequestHolds(holds, () => {
+						result = make(done.promise);
+						// Either way the subscriber runs in the step's context.
+						if (order === "before") register();
+						else queueMicrotask(register);
+						return result;
+					}),
+				);
+				await turns(1);
+				done.resolve();
+				const sent = await after;
+				await turns();
+				expect(sent?.sent).toBe(false);
+				holds.let();
+				await sent?.result;
+				expect(sent?.sent).toBe(true);
+			});
+		}
+	}
+
+	it("reads a native promise's `constructor` once, as `await` does, and keeps the exemption while it is pending", async () => {
+		const holds = new TestHolds();
+		const done = Promise.withResolvers<void>();
+		const started = Promise.withResolvers<SentRequest>();
+		let reads = 0;
+		Object.defineProperty(done.promise, "constructor", {
+			get() {
+				if (++reads > 1) throw new Error("constructor read twice");
+				return Promise;
+			},
+		});
+		runWithRequestHolds(holds, () =>
+			runOutsideRequestHolds(holds, () => {
+				setImmediate(() => started.resolve(request()));
+				return done.promise;
+			}),
+		);
+		const during = await started.promise;
+		await during.result;
+		expect(during.sent).toBe(true);
+		expect(reads).toBe(1);
+		done.resolve();
 	});
 
 	for (const wrap of ["bound", "wrapped"] as const) {
