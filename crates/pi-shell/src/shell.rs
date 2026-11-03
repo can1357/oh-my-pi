@@ -7013,6 +7013,84 @@ mod tests {
 				"S=0 PWD=</d/sub>\n".into(),
 				false,
 			),
+			(
+				"an unsearchable directory reached through a moved one, cd -P",
+				"mkdir -p old/in old/lk; chmod 000 old/lk; cd old/in; mv \"$top/old\" \"$top/new\"; \
+				 cd -P ../lk; echo \"S=$? PWD=<${PWD#$top}>\"; chmod 755 \"$top/new/lk\""
+					.into(),
+				"cd: ../lk: Permission denied\nS=1 PWD=</old/in>\n".into(),
+				true,
+			),
+			(
+				"an unsearchable directory reached through a moved one, cd -L",
+				"mkdir -p old/in old/lk; chmod 000 old/lk; cd old/in; mv \"$top/old\" \"$top/new\"; \
+				 cd -L ../lk; echo \"S=$? PWD=<${PWD#$top}>\"; chmod 755 \"$top/new/lk\""
+					.into(),
+				"cd: ../lk: No such file or directory\nS=1 PWD=</old/in>\n".into(),
+				true,
+			),
+			(
+				"a directory named with the kernel's removal suffix, cd -P",
+				"mkdir -p old/in \"old/a (deleted)\"; cd old/in; mv \"$top/old\" \"$top/new\"; cd -P \
+				 \"../a (deleted)\"; echo \"S=$? PWD=<${PWD#$top}>\"; : >marker; echo \"W=$?\""
+					.into(),
+				"S=0 PWD=</new/a (deleted)>\nW=0\n".into(),
+				false,
+			),
+			(
+				"a directory named with the kernel's removal suffix, cd -L",
+				"mkdir -p old/in \"old/a (deleted)\"; cd old/in; mv \"$top/old\" \"$top/new\"; cd -L \
+				 \"../a (deleted)\"; echo \"S=$? PWD=<${PWD#$top}>\"; : >marker; echo \"W=$?\""
+					.into(),
+				"S=0 PWD=</new/a (deleted)>\nW=0\n".into(),
+				false,
+			),
+			(
+				"pushd with a readonly PWD",
+				"readonly PWD; pushd d >/dev/null; echo \"S=$?\"; dirs -p | sed \"s|^$top|T|\"".into(),
+				"PWD: readonly variable\nS=1\nT/d\nPWD: readonly variable\n".into(),
+				false,
+			),
+			(
+				"pushd with a readonly OLDPWD",
+				"readonly OLDPWD; pushd d >/dev/null; echo \"S=$?\"; dirs -p | sed \"s|^$top|T|\""
+					.into(),
+				"OLDPWD: readonly variable\nS=1\nT/d\nOLDPWD: readonly variable\n".into(),
+				false,
+			),
+			(
+				"popd with a readonly PWD",
+				"pushd d >/dev/null; readonly PWD; popd >/dev/null; echo \"S=$?\"; dirs -p | sed \
+				 \"s|^$top|T|\""
+					.into(),
+				"PWD: readonly variable\nS=1\nT\nT\nPWD: readonly variable\n".into(),
+				false,
+			),
+			(
+				"popd with a readonly OLDPWD",
+				"pushd d >/dev/null; readonly OLDPWD; popd >/dev/null; echo \"S=$?\"; dirs -p | sed \
+				 \"s|^$top|T|\""
+					.into(),
+				"OLDPWD: readonly variable\nS=1\nT\nT\nOLDPWD: readonly variable\n".into(),
+				false,
+			),
+			(
+				"a removed directory and a readonly PWD, cd .",
+				"mkdir gone; cd gone; rmdir \"$top/gone\"; readonly PWD; cd .; echo \"S=$?\"".into(),
+				"cd: error retrieving current directory: getcwd: cannot access parent directories: No \
+				 such file or directory\nPWD: readonly variable\nS=1\nPWD: readonly variable\n"
+					.into(),
+				false,
+			),
+			(
+				"a removed directory and a readonly OLDPWD, cd -P .",
+				"mkdir gone; cd gone; rmdir \"$top/gone\"; readonly OLDPWD; cd -P .; echo \"S=$?\""
+					.into(),
+				"cd: error retrieving current directory: getcwd: cannot access parent directories: No \
+				 such file or directory\nOLDPWD: readonly variable\nS=1\nOLDPWD: readonly variable\n"
+					.into(),
+				false,
+			),
 		];
 		// SAFETY: `geteuid` has no preconditions.
 		let root = unsafe { libc::geteuid() } == 0;
