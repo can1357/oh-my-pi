@@ -4038,6 +4038,11 @@ export class AgentSession implements SettingsScope {
 	 * timeout, and their post-notification work is fenced by `#promptGeneration`.
 	 */
 	#inFlightAgentEndMaintenance = new Set<Promise<void>>();
+	/**
+	 * For an `agent_end` post-prompt task, the part an interrupt must see settle before later work may
+	 * run: its maintenance, without the computer-control revocation ack it also waits for.
+	 */
+	#postPromptTaskCores = new Map<Promise<unknown>, Promise<void>>();
 
 	/**
 	 * Subscriber entry point. Delegates to {@link #dispatchAgentEvent} and
@@ -4076,7 +4081,7 @@ export class AgentSession implements SettingsScope {
 		}
 	}
 
-	/** Await every in-flight `agent_end` maintenance pass, including ones started while waiting. */
+	/** Await every in-flight `agent_end` maintenance pass (not its revocation ack), including ones started while waiting. */
 	async #drainAgentEndMaintenance(): Promise<void> {
 		while (this.#inFlightAgentEndMaintenance.size > 0) {
 			await Promise.allSettled(this.#inFlightAgentEndMaintenance);
@@ -4131,12 +4136,19 @@ export class AgentSession implements SettingsScope {
 		}
 		const { promise, resolve } = Promise.withResolvers<void>();
 		this.#trackPostPromptTask(promise);
-		this.#inFlightAgentEndMaintenance.add(promise);
+		// The run's end-of-turn maintenance, without the revocation ack: an interrupt waits for this
+		// before it lets later work in, and waits for the ack only after that (see `abort`).
+		const maintenance = Promise.withResolvers<void>();
+		this.#inFlightAgentEndMaintenance.add(maintenance.promise);
+		this.#postPromptTaskCores.set(promise, maintenance.promise);
 		try {
 			// Maintenance starts now, not behind the revocation ack: it classifies this run's end
 			// against live abort state, and a deferred start lets `abort()` settle first, so a
 			// deliberate empty abort reads as a reasonless one and is auto-retried.
-			await Promise.all([workOrigin.run(origin, () => this.#processAgentEvent(event)), computerControlRevocation]);
+			const processing = workOrigin
+				.run(origin, () => this.#processAgentEvent(event))
+				.finally(() => maintenance.resolve());
+			await Promise.all([processing, computerControlRevocation]);
 		} catch (error) {
 			// Post-turn maintenance (compaction, pruning rewrites, hooks) threw before
 			// publishing the settle. Without it the run never reports idle and every
@@ -4146,7 +4158,9 @@ export class AgentSession implements SettingsScope {
 			this.emitNotice("warning", `Post-turn maintenance failed: ${message}`, "agent-end");
 			if (this.#settledAgentEnd !== event) await this.#settleAgentEnd(event, [...this.agent.state.messages]);
 		} finally {
-			this.#inFlightAgentEndMaintenance.delete(promise);
+			maintenance.resolve();
+			this.#inFlightAgentEndMaintenance.delete(maintenance.promise);
+			this.#postPromptTaskCores.delete(promise);
 			resolve();
 		}
 	};
@@ -5673,6 +5687,15 @@ export class AgentSession implements SettingsScope {
 	}
 
 	async #cancelPostPromptTasks(): Promise<void> {
+		await this.#beginCancelPostPromptTasks().settled;
+	}
+
+	/**
+	 * Cancels every post-prompt task and returns two waits: `cores` settles once each task's own work
+	 * is done (an `agent_end` task's maintenance, but not the computer-control revocation ack it also
+	 * waits for), and `settled` once the tasks themselves have settled, acks included.
+	 */
+	#beginCancelPostPromptTasks(): { cores: Promise<void>; settled: Promise<void> } {
 		this.#postPromptTasksAbortController.abort();
 		this.#postPromptTasksAbortController = new AbortController();
 		this.#ttsr.resolveResume();
@@ -5680,13 +5703,15 @@ export class AgentSession implements SettingsScope {
 		const pendingTasks = Array.from(this.#postPromptTasks);
 		if (pendingTasks.length === 0) {
 			this.#resolvePostPromptTasks();
-			return;
+			return { cores: Promise.resolve(), settled: Promise.resolve() };
 		}
-
-		await Promise.allSettled(pendingTasks);
-		if (this.#postPromptTasks.size === 0) {
-			this.#resolvePostPromptTasks();
-		}
+		const cores = Promise.allSettled(pendingTasks.map(task => this.#postPromptTaskCores.get(task) ?? task)).then(
+			() => undefined,
+		);
+		const settled = Promise.allSettled(pendingTasks).then(() => {
+			if (this.#postPromptTasks.size === 0) this.#resolvePostPromptTasks();
+		});
+		return { cores, settled };
 	}
 	/**
 	 * Wait for retry, TTSR resume, and any background continuation to settle.
@@ -11497,7 +11522,7 @@ export class AgentSession implements SettingsScope {
 			const computerControlRevocation = Promise.try(() =>
 				revokeComputerControlForOwner(this.#eval.getKernelOwnerId()),
 			).catch(keepFailure);
-			const postPromptDrain = this.#cancelPostPromptTasks();
+			const postPromptCancel = this.#beginCancelPostPromptTasks();
 			this.agent.abort(options?.reason);
 			// From here, post-prompt work that comes from the stopped run (its agent_end
 			// maintenance) belongs to this interrupt; so does the rule interruption pending now.
@@ -11509,7 +11534,10 @@ export class AgentSession implements SettingsScope {
 			this.#interruptAftermath = aftermath;
 			const ttsrInterruption = this.#ttsr.interruptionToken;
 			try {
-				await Promise.all([postPromptDrain, computerControlRevocation]);
+				// The state cleanup waits for the stopped work itself, never for a computer-control
+				// revocation ack (an outside round trip): later work waiting on this cleanup must
+				// not wait on that. The acks are awaited once the cleanup is done, below.
+				await postPromptCancel.cores;
 				await this.agent.waitForIdle();
 				this.#persistToolResultsEndedWhileDisconnected();
 				// agent_end maintenance can enqueue a retry after the first cancellation.
@@ -11566,8 +11594,9 @@ export class AgentSession implements SettingsScope {
 				} else this.#recordWithoutTurn([message]);
 			}
 			// The session state is clean: later work may run. The remaining steps only wait on
-			// outside work (autolearn capture, goal hooks) and touch none of it.
+			// outside work (revocation acks, autolearn capture, goal hooks) and touch none of it.
 			endStateCleanup();
+			await Promise.all([computerControlRevocation, postPromptCancel.settled]);
 			await this.#drainAutolearnCapture().catch(keepFailure);
 			await this.#goalRuntime.onTaskAborted({ reason: options?.goalReason ?? "interrupted" }).catch(keepFailure);
 		} finally {

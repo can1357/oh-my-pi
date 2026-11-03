@@ -1,8 +1,6 @@
-import { afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, expect, it } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
-import { type } from "@oh-my-pi/omptype";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
-import * as AIError from "@oh-my-pi/pi-ai/error";
 import { createMockModel, type MockModel, type MockResponseSource } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -294,7 +292,6 @@ it("a later retry must survive a still-pending old HTTP revocation", async () =>
 		await control.ack.entered;
 		await h.agent.waitForIdle();
 		const newEnd = Promise.withResolvers<void>();
-		let count = 0;
 		h.agent.subscribe(e => {
 			if (e.type === "agent_end") newEnd.resolve();
 		});
