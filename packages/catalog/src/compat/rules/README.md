@@ -280,7 +280,7 @@ time-based-cost {
         }
     }
     effective-rates {
-        flash-pricing {
+        list-price {
             effective-from "2026-09-14T04:00:00Z"
             input 0.30
             output 1.20
@@ -291,11 +291,11 @@ time-based-cost {
 }
 ```
 
-`morning`, `afternoon`, and `flash-pricing` are arbitrary unique object names, discarded when the payload is normalized into arrays. `weekdays` is a comma-separated string of distinct UTC weekday numbers (`0` = Sunday through `6` = Saturday), without spaces. Each window has integer minutes with `0 <= start-minute < end-minute <= 1440`; its start is inclusive and end exclusive. Split overnight windows across days. Outside the union of peak windows, the nonnegative `off-peak-multiplier` applies to token costs.
+`morning`, `afternoon`, and `list-price` are arbitrary unique object names, discarded when the payload is normalized into arrays. `weekdays` is a comma-separated string of distinct UTC weekday numbers (`0` = Sunday through `6` = Saturday), without spaces. Each window has integer minutes with `0 <= start-minute < end-minute <= 1440`; its start is inclusive and end exclusive. Split overnight windows across days. Outside the union of peak windows, the nonnegative `off-peak-multiplier` applies to token costs.
 
 `effective-rates` is optional. Each entry requires a distinct valid ISO UTC `effective-from` (`YYYY-MM-DDTHH:mm:ssZ` or with three fractional-second digits) and all four nonnegative per-million-token rates. The latest entry at or before the request timestamp replaces the entire base card; before the first entry, the base card applies. An entry may contain a `long-context` object with `input-threshold`, optional `input-threshold-inclusive`, and all four absolute rates. Effective rates do not inherit the base card's long-context tier. Selection order is effective card, context tier, then tariff multiplier.
 
-The recurring schedule and dated DeepSeek transition above come from [DeepSeek's official pricing](https://api-docs.deepseek.com/quick_start/pricing); see `providers/deepseek.kdl` for the complete rules and [the catalog API](../../../README.md#cost-calculation) for timestamp semantics. This is catalog policy metadata, not a supported schedule syntax for the coding agent's `models.yml`.
+The recurring schedule above is [DeepSeek's official pricing](https://api-docs.deepseek.com/quick_start/pricing); the `effective-rates` card only illustrates the syntax. See `providers/deepseek.kdl` for the complete rules and [the catalog API](../../../README.md#cost-calculation) for timestamp semantics. This is catalog policy metadata, not a supported schedule syntax for the coding agent's `models.yml`.
 
 ### Precedence and ambiguity
 

@@ -3,6 +3,12 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import {
+	collectTestsUnder,
+	namedTestFilesUnder,
+	testFilesWithoutBucket,
+	workspacePackageDirs,
+} from "./test-file-discovery";
 
 type Mode =
 	| "all"
@@ -93,6 +99,7 @@ const fastWorkspacePackages = [
 	"packages/snapcompact",
 	"packages/agent",
 	"packages/mnemopi",
+	"python/robomp/web",
 ];
 
 // These suites cover the native package, TUI/browser-ish behavior, local servers,
@@ -103,18 +110,20 @@ const nativeAndIntegrationPackages = [
 	"packages/tui",
 	"packages/collab-web",
 	"packages/typescript-edit-benchmark",
+	"packages/stats",
+	"packages/metaharness",
 ];
+
+const codingAgentDir = "packages/coding-agent";
+
+const projectToolTestFile = ".omp/tests/tui.test.ts";
 
 const projectToolTestCommand: TestCommand = {
 	label: ".omp/tests (project-local TUI debug tool)",
 	cwd: ".",
-	command: ["bun", "test", ...onlyFailuresArgs, "./.omp/tests/tui.test.ts"],
+	command: ["bun", "test", ...onlyFailuresArgs, `./${projectToolTestFile}`],
 	parallel: 1,
 };
-
-// Packages the CI buckets deliberately skip but a local full run should still
-// cover. robomp-web lives under python/robomp and is outside every CI TS bucket.
-const localOnlyWorkspacePackages = ["python/robomp/web"];
 
 const codingAgentNativePathPatterns = [
 	/(^|\/)[^/]*(bash|native|browser|cmux|mnemopi|hindsight|memory)[^/]*\.test\.ts$/i,
@@ -230,21 +239,42 @@ function rustTestCommand(): TestCommand {
 	};
 }
 
-async function collectTestsUnder(root: string, baseDir: string): Promise<string[]> {
-	const entries = await fs.readdir(root, { withFileTypes: true });
-	const files: string[] = [];
-	for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
-		const filePath = path.join(root, entry.name);
-		if (entry.isDirectory()) {
-			files.push(...(await collectTestsUnder(filePath, baseDir)));
-			continue;
-		}
-		if (!entry.isFile() || !entry.name.endsWith(".test.ts")) {
-			continue;
-		}
-		files.push(path.relative(baseDir, filePath).split(path.sep).join("/"));
-	}
-	return files;
+let scriptsTestFilesPromise: Promise<string[]> | null = null;
+
+// The script tests the scripts command names: every test file below `scripts` that `bun test`,
+// run from the repository root, runs when named (root `bunfig.toml` ignores included).
+function scriptsTestFiles(): Promise<string[]> {
+	scriptsTestFilesPromise ??= namedTestFilesUnder(path.join(repoRoot, "scripts"), repoRoot, repoRoot);
+	return scriptsTestFilesPromise;
+}
+
+// The repository's own tooling tests (release, install and CI helper scripts).
+async function scriptsTestCommand(extraArgs: string[] = []): Promise<TestCommand> {
+	const files = await scriptsTestFiles();
+	return {
+		label: "scripts",
+		cwd: ".",
+		command: ["bun", "test", ...extraArgs, ...files.map(file => `./${file}`)],
+		parallel: 4,
+	};
+}
+
+// Test files under a workspace package, `scripts` or `.omp/tests` that no command above
+// runs. The modes CI and `bun run test` use refuse to start while any exists, so
+// a package added without a bucket fails CI instead of going untested.
+async function uncoveredTestFiles(): Promise<string[]> {
+	const inOwnDir = (pkg: string) => ({ path: pkg, cwd: pkg });
+	return testFilesWithoutBucket(
+		repoRoot,
+		[...(await workspacePackageDirs(repoRoot)), "scripts", path.dirname(projectToolTestFile)],
+		{
+			files: [
+				{ path: projectToolTestFile, cwd: "." },
+				...(await scriptsTestFiles()).map(file => ({ path: file, cwd: "." })),
+			],
+			dirs: [...fastWorkspacePackages, ...nativeAndIntegrationPackages, codingAgentDir].map(inOwnDir),
+		},
+	);
 }
 
 function hasAnyMarker(content: string, markers: string[]): boolean {
@@ -288,8 +318,8 @@ function classifyCodingAgentTest(testFile: string, content: string): CodingAgent
 
 async function getCodingAgentTestPartition(): Promise<CodingAgentTestPartition> {
 	codingAgentTestPartitionPromise ??= (async () => {
-		const codingAgentDir = path.join(repoRoot, "packages/coding-agent");
-		const testFiles = (await collectTestsUnder(path.join(codingAgentDir, "test"), codingAgentDir)).sort();
+		const packageDir = path.join(repoRoot, codingAgentDir);
+		const testFiles = (await collectTestsUnder(packageDir, packageDir)).sort();
 		const partition: CodingAgentTestPartition = {
 			singleton: [],
 			ui: [],
@@ -298,7 +328,7 @@ async function getCodingAgentTestPartition(): Promise<CodingAgentTestPartition> 
 		};
 
 		for (const testFile of testFiles) {
-			const content = await Bun.file(path.join(codingAgentDir, testFile)).text();
+			const content = await Bun.file(path.join(packageDir, testFile)).text();
 			partition[classifyCodingAgentTest(testFile, content)].push(testFile);
 		}
 
@@ -321,8 +351,8 @@ async function codingAgentTestCommands(bucket: CodingAgentBucket): Promise<TestC
 		const chunk = testFiles.slice(i, i + chunkSize);
 		const chunkLabel = chunkCount > 1 ? ` chunk ${commands.length + 1}/${chunkCount}` : "";
 		commands.push({
-			label: `packages/coding-agent (${plan.label}; ${testFiles.length} files; parallel=${plan.parallel}${chunkLabel}; ${chunk.length} files)`,
-			cwd: "packages/coding-agent",
+			label: `${codingAgentDir} (${plan.label}; ${testFiles.length} files; parallel=${plan.parallel}${chunkLabel}; ${chunk.length} files)`,
+			cwd: codingAgentDir,
 			command: ["bun", "test", ...onlyFailuresArgs, ...chunk],
 			parallel: plan.parallel,
 		});
@@ -333,7 +363,7 @@ async function codingAgentTestCommands(bucket: CodingAgentBucket): Promise<TestC
 async function commandsForMode(mode: Mode): Promise<TestCommand[]> {
 	switch (mode) {
 		case "workspace":
-			return fastWorkspacePackages.map(pkg => workspaceTestCommand(pkg, 8));
+			return [...fastWorkspacePackages.map(pkg => workspaceTestCommand(pkg, 8)), await scriptsTestCommand()];
 		case "native":
 			return [...nativeAndIntegrationPackages.map(pkg => workspaceTestCommand(pkg, 4)), projectToolTestCommand];
 		case "coding-agent-singleton":
@@ -358,16 +388,14 @@ async function commandsForMode(mode: Mode): Promise<TestCommand[]> {
 				...(await commandsForMode("coding-agent-heavy")),
 			];
 		// `local-ts` is the full local TypeScript run that root `bun run test:ts`
-		// drives: every package the old `--workspaces` fan-out covered (the CI
-		// `all` set plus robomp-web, which CI omits), routed through
-		// this one quiet runner so the whole suite shares one progress stream and
-		// one failure report. Repo script tests remain available via `test:scripts`.
+		// drives: the CI `all` set, routed through this one quiet runner so the
+		// whole suite shares one progress stream and one failure report.
 		case "local-ts":
 			return [
 				...fastWorkspacePackages.map(pkg => workspaceTestCommand(pkg, 8, { extraArgs: onlyFailuresArgs })),
+				await scriptsTestCommand(onlyFailuresArgs),
 				...nativeAndIntegrationPackages.map(pkg => workspaceTestCommand(pkg, 4, { extraArgs: onlyFailuresArgs })),
 				projectToolTestCommand,
-				...localOnlyWorkspacePackages.map(pkg => workspaceTestCommand(pkg, 4, { extraArgs: onlyFailuresArgs })),
 				...(await commandsForMode("coding-agent-heavy")),
 			];
 		// `local` is what root `bun run test` drives: the full TS suite plus the
@@ -1013,6 +1041,20 @@ function selectShard<T>(commands: T[], spec: string | undefined): T[] {
 
 if (!(requestedMode in validModes)) {
 	throw new Error(`Unknown mode ${shellQuote(requestedMode)}. Expected one of: ${Object.keys(validModes).join(", ")}`);
+}
+
+if (
+	requestedMode === "workspace" ||
+	requestedMode === "all" ||
+	requestedMode === "local-ts" ||
+	requestedMode === "local"
+) {
+	const missing = await uncoveredTestFiles();
+	if (missing.length > 0) {
+		throw new Error(
+			`These test files are in no bucket of scripts/ci-test-ts.ts, so CI never runs them:\n${missing.join("\n")}`,
+		);
+	}
 }
 
 const requestedCommands = selectShard(await commandsForMode(requestedMode as Mode), Bun.env.OMP_TEST_SHARD);
